@@ -1,0 +1,12 @@
+[package]
+name = "agentsessions-domain"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+blake3.workspace = true
+thiserror.workspace = true
+serde.workspace = true
