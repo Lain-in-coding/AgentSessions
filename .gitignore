@@ -1,0 +1,37 @@
+# Rust build artifacts (所有层级，含 spikes/*/target)
+target/
+**/*.rs.bk
+
+# Reference source repos (studied for patterns, not part of this project)
+/Github_src
+
+# Local scratch databases + SQLite 侧车文件
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# Secrets / credentials (绝不入库)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials*
+.mcp.json
+
+# 本地 agent / 编辑器配置
+.claude/
+.idea/
+.vscode/
+
+# 内部工作文档（含个人路径，不开源）
+/Plan/
+/AI-Agent历史会话检索-借鉴项目清单.md
+/AI-Agent历史会话检索项目-交接文档-2026-07-21.md
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
