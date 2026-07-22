@@ -1,0 +1,13 @@
+[package]
+name = "agentsessions-provider-codex"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+agentsessions-domain = { path = "../agentsessions-domain" }
+agentsessions-ports = { path = "../agentsessions-ports" }
+serde = { workspace = true }
+serde_json = { workspace = true }
