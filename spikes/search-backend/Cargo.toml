@@ -1,0 +1,19 @@
+# search-backend spike — 可丢弃探针，不进 crates/，R0 Accepted 后归档
+# 目的：给 Selection Gate 提供 FTS5 vs Tantivy 的 go/no-go 证据
+[package]
+name = "search-backend-spike"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# 独立 workspace，避免被父目录意外纳入
+[workspace]
+
+[dependencies]
+anyhow = "1.0"
+rusqlite = { version = "0.40", features = ["bundled"] }
+tantivy = "0.26.1"
+tempfile = "3.27.0"
+
+[profile.release]
+opt-level = 3
