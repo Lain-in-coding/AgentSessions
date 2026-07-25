@@ -19,6 +19,7 @@
 | Evidence ID | Claim or target | Status | Reproducible evidence | Exact caveat |
 |---|---|---|---|---|
 | `CB-WIN-X64-BUILD-001` | Windows x64 release build on `x86_64-pc-windows-msvc` | `locally_verified` | `spikes/cross-platform-packaging/EVIDENCE.md` | The recorded run is a local Windows build. It is not clean-machine installation evidence, a signed artifact, or release certification. |
+| `CB-BENCHMARK-WIN-X64-001` | Full-profile startup, sync, search/show/get, storage-size, artifact-size, and peak-RSS evidence | `locally_verified` | `docs/evidence/core-beta/88d86f4/core-beta-benchmark-full.json`; `scripts/evidence/core_beta_benchmark.py` | The report is a local Windows evidence anchor, not an SLO. Recovery duration remains `not_implemented`. The harness built the measured binary from the pinned workspace using `cargo build --locked --release` and records its SHA-256 and provenance. |
 | `CB-WRITER-LEASE-SPIKE-001` | Cross-process lock contention and forced-holder termination allow reacquisition | `locally_verified` | `spikes/data-root-locking/EVIDENCE.md` | This is feasibility-spike evidence. Production `WriterLease` also has same-process unit coverage; production process evidence is tracked separately. |
 | `CB-WAL-SNAPSHOT-SPIKE-001` | WAL-aware backup and `VACUUM INTO` produce consistent snapshots; copying only the main database is unsafe | `locally_verified` | `spikes/sqlite-snapshot-wal/EVIDENCE.md` | This is feasibility-spike evidence. A production snapshot or bundle API is not implemented. |
 | `CB-SOURCE-SNAPSHOT-SPIKE-001` | Content fingerprint detects equal-length source replacement | `locally_verified` | `spikes/source-snapshot/EVIDENCE.md` | The existing evidence is a Windows feasibility spike; it is not a cross-platform production certification. |
@@ -38,12 +39,13 @@
 
 For each explicit runner/target pair, the workflow is configured to:
 
-1. install the Rust target and build the release CLI with `--locked`;
+1. install Python and the Rust target, then build the release CLI with `--locked`;
 2. invoke the built binary directly for `--version`, `--help`, and robot `config paths` smoke;
-3. run the current SQLite adapter test targets;
-4. run the data-root locking and SQLite WAL snapshot feasibility spikes;
-5. write an environment report containing runner labels, target triple, Rust/Cargo versions, source commit, binary size, and SHA-256;
-6. upload the report, logs, and unsigned binary for seven days.
+3. run the benchmark harness unit tests plus its synthetic `smoke` profile and report validator;
+4. run the current SQLite adapter test targets, including production process evidence;
+5. run the data-root locking and SQLite WAL snapshot feasibility spikes;
+6. write an environment report containing runner labels, target triple, Rust/Cargo versions, source commit, binary size, and SHA-256;
+7. upload the report, logs, and unsigned binary for seven days.
 
 The workflow intentionally performs no publish, signing, notarization, checksum attestation, provenance publication, or release creation. Until a successful run URL and downloaded artifacts are reviewed and linked, every workflow row above remains `ci_configured_only`.
 

@@ -1,0 +1,5 @@
+{"file":".trellis/spec/agentsessions-adapters-sqlite/backend/database-guidelines.md","reason":"Review production-path multiprocess, durable recovery, CAS, and catalog/FTS invariants."}
+{"file":".trellis/spec/agentsessions-adapters-sqlite/backend/error-handling.md","reason":"Review fail-closed behavior, retryable contention classification, and path-safe diagnostics."}
+{"file":".trellis/spec/agentsessions-cli/backend/index.md","reason":"Review that evidence drives the compiled CLI without changing public command contracts."}
+{"file":".trellis/spec/agentsessions-cli/backend/error-handling.md","reason":"Review robot output and exit-code validation in benchmark/platform smoke runs."}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Review consistency among report schema, generated artifacts, CI matrix, and documentation claims."}
