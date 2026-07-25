@@ -487,14 +487,19 @@ impl SqliteStore {
                 .map(|(id, _, _)| id.as_str())
                 .collect();
             if present.len() != source.entries.len() {
-                return Err(PortError::Backend(format!(
-                    "source {} contains duplicate message ids",
-                    source.source_path
-                )));
+                return Err(PortError::Backend(
+                    "source batch contains duplicate message ids".into(),
+                ));
             }
             for (id, payload, text) in &source.entries {
                 incoming_ids.insert(id.as_str());
-                if let Some((_, old_payload, old_text)) = merged.get(id.as_str()) {
+                if let Some((old_id, old_payload, old_text)) = merged.get(id.as_str()) {
+                    if old_id != id {
+                        return Err(PortError::Backend(format!(
+                            "message {} has conflicting identity metadata across sources",
+                            id.as_str()
+                        )));
+                    }
                     if old_payload != payload || old_text != text {
                         return Err(PortError::Backend(format!(
                             "message {} has conflicting projections across sources",
@@ -1676,6 +1681,54 @@ mod tests {
             .commit_source_batches_if_changed(&sources)
             .unwrap_err();
         assert!(matches!(err, PortError::Backend(m) if m.contains("duplicate source paths")));
+    }
+
+    #[test]
+    fn duplicate_message_error_does_not_disclose_source_path() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let id = sid(IdKind::Message, b"duplicate-in-source");
+        let private_path = "C:/private/provider/session.jsonl";
+        let source = SourceBatch {
+            source_path: private_path.into(),
+            entries: vec![
+                (id.clone(), b"p".to_vec(), "text".into()),
+                (id, b"p".to_vec(), "text".into()),
+            ],
+        };
+        let err = store
+            .commit_source_batches_if_changed(std::slice::from_ref(&source))
+            .unwrap_err();
+        let PortError::Backend(message) = err else {
+            panic!("expected backend error");
+        };
+        assert!(message.contains("duplicate message ids"));
+        assert!(!message.contains(private_path));
+    }
+
+    #[test]
+    fn shared_wire_id_with_conflicting_identity_metadata_is_rejected() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let reconstructed = sid(IdKind::Message, b"shared-wire-identity");
+        let unstable = StableId::from_wire(reconstructed.as_str()).unwrap();
+        assert_ne!(reconstructed, unstable);
+        assert_eq!(reconstructed.as_str(), unstable.as_str());
+
+        let sources = [
+            SourceBatch {
+                source_path: "one".into(),
+                entries: vec![(reconstructed, b"p".to_vec(), "same text".into())],
+            },
+            SourceBatch {
+                source_path: "two".into(),
+                entries: vec![(unstable, b"p".to_vec(), "same text".into())],
+            },
+        ];
+        let err = store
+            .commit_source_batches_if_changed(&sources)
+            .unwrap_err();
+        assert!(
+            matches!(err, PortError::Backend(m) if m.contains("conflicting identity metadata"))
+        );
     }
 
     #[test]

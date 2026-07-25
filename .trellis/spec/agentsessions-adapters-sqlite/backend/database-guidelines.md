@@ -105,6 +105,77 @@ if !matches!(file.try_lock_exclusive(), Ok(true)) {
 
 ---
 
+## Scenario: Production process evidence
+
+### 1. Scope / Trigger
+
+Use this contract when proving writer lease, durable-intent recovery, or generation CAS behavior across process boundaries. Evidence must drive production `SqliteStore` APIs; a disposable spike cannot substitute for production-path evidence.
+
+### 2. Signatures
+
+```rust
+pub fn SqliteStore::open_for_write(path: &str) -> PortResult<SqliteStore>;
+pub fn SqliteStore::begin_index_batch(
+    &self,
+    upserts: &[(StableId, Vec<u8>, String)],
+    deletes: &[StableId],
+) -> PortResult<PendingIndexBatch>;
+pub fn SqliteStore::commit_index_batch(
+    &self,
+    pending: &PendingIndexBatch,
+    upserts: &[(StableId, Vec<u8>, String)],
+    deletes: &[StableId],
+) -> PortResult<()>;
+```
+
+The integration helper is non-user-facing and may expose only deterministic test operations such as hold, try-open, begin-intent, recover, and stale-commit.
+
+### 3. Contracts
+
+- Coordinate subprocesses with explicit readiness output, not sleep-only races.
+- A killed holder must release the OS lock without deleting `writer.lock`.
+- An exited process may leave a durable `building` intent, but no catalog/FTS/generation mutation.
+- The next `open_for_write` converts interrupted `building` intents to `aborted`; repeating recovery is idempotent.
+- A stale generation must fail the real transactional CAS before catalog/FTS apply.
+- Process evidence records the exact OS/target; WSL2 evidence is not minimum-glibc or distribution certification.
+
+### 4. Validation & Error Matrix
+
+| Condition | Expected result |
+|---|---|
+| Holder owns lease; contender opens | `WriterBusy`, retryable, no absolute path |
+| Holder is force-killed | Next process acquires without lock-file deletion |
+| Process exits after durable intent | Reopen marks intent `aborted`; generation/catalog unchanged |
+| Recovery runs twice | Same post-state; no new generation |
+| Active generation differs from pending base | Commit fails closed; pending payload is not applied |
+
+### 5. Good / Base / Bad Cases
+
+- Good: child prints `READY`, parent confirms contention, kills child, then confirms immediate production-store reacquisition.
+- Base: child creates a real durable intent and exits normally before apply; parent inspects pre-state and triggers reopen recovery.
+- Bad: testing only `fs4` directly, deleting `writer.lock` to recover, racing via arbitrary sleeps, or claiming a WSL2 pass certifies glibc 2.31/macOS behavior.
+
+### 6. Tests Required
+
+- Cross-process production-store contention with path-free `WriterBusy`.
+- Forced-holder termination and reacquisition without deleting the lock file.
+- Durable-intent exit, automatic recovery, catalog/generation invariants, and idempotent re-recovery.
+- Stale-generation rejection through `commit_index_batch`, asserting the catalog remains unchanged.
+- Run the same integration tests on each platform that is claimed as locally or CI verified.
+
+### 7. Wrong vs Correct
+
+```rust
+// Wrong: a disposable lock probe is presented as production-store evidence.
+Command::new("lock-spike").status()?;
+
+// Correct: the child opens the production adapter and emits a readiness marker.
+let _store = SqliteStore::open_for_write(db)?;
+println!("READY");
+```
+
+---
+
 ## Migrations
 
 - Migrations are keyed on `PRAGMA user_version` and applied in order at open
