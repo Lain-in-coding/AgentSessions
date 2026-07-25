@@ -1,0 +1,4 @@
+{"file":".trellis/spec/agentsessions-adapters-sqlite/backend/index.md","reason":"SQLite adapter invariants and writer lease contract"}
+{"file":".trellis/spec/agentsessions-adapters-sqlite/backend/database-guidelines.md","reason":"Durable outbox, source membership, generation, and lease implementation contracts"}
+{"file":".trellis/spec/agentsessions-adapters-sqlite/backend/error-handling.md","reason":"BUSY/LOCKED classification and privacy-safe PortError mapping"}
+{"file":".trellis/spec/agentsessions-cli/backend/index.md","reason":"WriterBusy protocol retryability and output privacy requirements"}

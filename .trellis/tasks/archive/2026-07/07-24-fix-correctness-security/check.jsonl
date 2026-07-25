@@ -1,0 +1,4 @@
+{"file":".trellis/spec/agentsessions-adapters-sqlite/backend/index.md","reason":"Review core adapter invariants"}
+{"file":".trellis/spec/agentsessions-adapters-sqlite/backend/database-guidelines.md","reason":"Review source reconciliation and writer lease behavior"}
+{"file":".trellis/spec/agentsessions-adapters-sqlite/backend/error-handling.md","reason":"Review retryable SQLite contention and safe diagnostics"}
+{"file":".trellis/spec/agentsessions-cli/backend/index.md","reason":"Review outward WriterBusy mapping and privacy"}
