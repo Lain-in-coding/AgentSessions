@@ -3,7 +3,7 @@
 > 治理记录（Governance Record）
 >
 > - decision_id: SPIKE-search-backend
-> - title: 全文检索引擎 Selection Gate 证据
+> - title: 全文检索引擎 ADR-0001 对照证据
 > - status: **Executed（初步证据已产出，待 approver 审阅）**
 > - owner: （待指派）
 > - approver: 项目最终验收人
@@ -11,10 +11,10 @@
 > - deadline: （R0 timebox 内，见下方 timebox）
 > - evidence_path: `spikes/search-backend/`（探针代码 + `EVIDENCE.md` 测量报告）
 > - approved_at: —
-> - preliminary_finding: 在 20k 合成文档 + backend-neutral analyzer 下，FTS5 与 Tantivy 的 recall@10 完全打平（均 1.000）；Tantivy 在索引体积（3.4MB vs 16.5MB）与查询延迟（max 0.56ms vs 7.1ms）上占优，但 FTS5 绝对延迟为毫秒级、完全可接受。按 Plan §6.1，recall 未被超越即维持 **FTS5 单存储默认**。详见 `EVIDENCE.md`。
-> - caveat: 本 spike 用独特 beacon 词，仅证明 analyzer 公平性与词法等价性，**未测排序质量差异**（需带噪声/竞争文档的分级 qrels）；正式 Selection Gate 仍需在标准语料与全部正式 target 上复测。
+> - preliminary_finding: 在 20k 合成文档 + backend-neutral analyzer 下，FTS5 与 Tantivy 的 recall@10 完全打平（均 1.000）；Tantivy 在索引体积（3.4MB vs 16.5MB）与查询延迟（max 0.56ms vs 7.1ms）上占优，但 FTS5 绝对延迟为毫秒级。该证据支持 **ADR-0001 当前 Proposed 的 FTS5 单存储默认**，但不构成跨平台或最终接受结论。详见 `EVIDENCE.md`。
+> - caveat: 本 spike 用独特 beacon 词，仅证明 analyzer 公平性与词法等价性，**未测排序质量差异**（需带噪声/竞争文档的分级 qrels）；还需按 `docs/product/SLI-AND-BENCHMARK-FORMAT.md` 在标准语料与全部正式 target 上复测。
 >
-> 本 Spike 是可丢弃探针，**不进入 `crates/` 生产源码树**，不形成正式 API/Crate/迁移承诺。R0 Accepted 后归档或删除，正式实现从 `0.1` 干净重写。产出的唯一价值是 Selection Gate 决策证据。
+> 本 Spike 是可丢弃探针，**不进入 `crates/` 生产源码树**，不形成正式 API/Crate/迁移承诺。是否归档由 R0 Architecture Review 决定；当前产出作为 ADR-0001 的证据输入。
 
 ---
 
@@ -27,11 +27,11 @@
 ## 2. Timebox
 
 - 建议 timebox：**5 个工作日**（owner 可在 R0 启动时按可用资源微调，但到期即触发 §7 默认决策，不允许开放式延长）。
-- 到期未完成 → 默认决策：采用 FTS5 单存储（Plan §14 Selection Gate 默认）。
+- 到期未完成 → 默认决策：采用 FTS5 单存储（ADR-0001 的可复审默认）。
 
 ## 3. Fixture / 数据集
 
-- 使用 R0 脱敏规范生成的**合成 corpus**，禁止真实 transcript（Plan §14）。
+- 使用符合 `docs/security/FIXTURE-REDACTION-POLICY.md` 的**合成 corpus**，禁止真实 transcript。
 - 规模分档：
   - Small：1k session / 100k event（快速迭代）；
   - Medium：10k session / 1M event（评分主档）；
@@ -51,7 +51,7 @@
 
 ## 5. Measurements（测量项）
 
-每项按 Plan §2.2 基准报告格式记录（Commit、OS、Target Triple、CPU/RAM/Disk/FS、Dataset Hash、冷/热、样本数、预热、中位数、P95/P99、方差、安全软件状态）。
+每项按 `docs/product/SLI-AND-BENCHMARK-FORMAT.md` 记录（Commit、OS、Target Triple、CPU/RAM/Disk/FS、Dataset Hash、冷/热、样本数、预热、中位数、P95/P99、方差、安全软件状态）。
 
 | 指标 | 说明 |
 |---|---|
@@ -66,11 +66,11 @@
 | 跨平台构建 | Windows/Linux/macOS x64/ARM64 干净构建 |
 | 实现/运维复杂度 | 定性评级 + 双写一致性代码量 |
 
-## 6. Pass/Fail（Selection Gate）
+## 6. Pass/Fail（ADR-0001 复审输入）
 
 **硬门（任一不达标即淘汰，不能用总分补偿）：**
 
-- [ ] 正确性与一致性合同满足（Plan §2.1）；
+- [ ] 正确性与一致性合同满足（以现行 RFC/contract 为准）；
 - [ ] 故障注入后崩溃恢复通过；
 - [ ] 全部正式 target 干净构建（尤其 Windows 与 macOS ARM64）；
 - [ ] 安全构建约束满足（无联网构建依赖、无 protoc/模型下载等）。
@@ -100,4 +100,4 @@
 - `spikes/search-backend/fts5/`、`spikes/search-backend/tantivy/`：两个最小探针；
 - `spikes/search-backend/report.md`：填满 §5 测量表；
 - `spikes/search-backend/selection-gate.md`：硬门勾选 + 评分表 + go/no-go 结论；
-- 结论回填 Plan §6.1 与全文检索 ADR。
+- 将证据链接回 ADR-0001；状态变更由 R0 Architecture Review 记录。

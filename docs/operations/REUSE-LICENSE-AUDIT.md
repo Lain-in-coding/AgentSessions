@@ -7,10 +7,10 @@
 > - owner: （待指派）
 > - approver: 项目最终验收人
 > - due_milestone: R0 Feasibility / Contract Gate
-> - evidence_path: `docs/operations/REUSE-LICENSE-AUDIT.md`、计划 §19
+> - evidence_path: `docs/operations/REUSE-LICENSE-AUDIT.md`
 > - approved_at: —
 >
-> 本报告把计划 §19 的复用矩阵固化为独立审查文档。任何实际复用前，必须由本报告的 approver 逐项复核许可、来源坐标与 attribution 义务；本报告不替代逐次复核。
+> 本报告是复用矩阵与许可判定的规范性审查记录。任何实际复用前，必须由本报告的 approver 逐项复核许可、来源坐标与 attribution 义务；fixture 边界见 `../security/FIXTURE-REDACTION-POLICY.md`，本报告不替代逐次复核。
 
 ---
 
@@ -32,49 +32,49 @@
 
 ## 3. 可复用项判定（经独立复核 CONFIRMED）
 
-| 来源(许可) | 资产 | 判定 | 目标位置 | attribution |
+| 来源(许可) | 资产 | 判定 | 规范目标 | attribution |
 |---|---|---|---|---|
-| ctx (Apache-2.0) | WAL PRAGMA 组 + doctor integrity_check | direct-copy | §9.1/§8.2 | 保留版权头 |
-| ctx | 契约层 + additive-field 保留测试、snake→camel | adapt | §7.2 | — |
-| ctx | 单调 user_version 迁移 + events 去重索引 + sha256 前缀 checkpoint | adapt | §6.4/§9.1 | — |
-| ctx | CJK bigram 分词（scriptgram） | adapt | §6.2 | — |
-| ctx | 只读 SQL 沙箱 raw_sql.rs | idea-only（MCP 不暴露 SQL） | §7.4 | — |
-| agf (MIT) | bounded reader（read_head_tail/char_prefix） | direct-copy | §5.2/§8.2 | 保留 MIT 声明 |
-| agf | shell quoting / PowerShell 包装 | direct-copy | §7.1 | 保留 MIT 声明 |
-| Recall (MIT) | FTS5 external-content + 触发器 | adapt | §6.4/§6.5 [FTS5] | — |
-| Recall | RRF k=60、目录子树过滤、迁移幂等骨架、JSONL roundtrip | adapt | §6.3/§11.1 | — |
-| sessiongrep (Apache-2.0) | 纯函数 find_repo_root/extract_text/highlight/timeline/escape | direct-copy | §5.2/§6.3 | 保留版权头 |
-| sessiongrep | 两段式检索（FTS 召回→Rust 重排） | adapt | §6.3 | — |
-| sessiongrep | 全 crates.io 无 vendored 供应链基线 | idea-only（模板） | §12 | — |
-| hstry (MIT) | 事务化 migration runner、source-scoped purge、peek bundle | adapt | §7.2/§9.1 | — |
-| hstry | version 单调 / outbox / retention 测试 | adapt | §11.1 | — |
-| memex (MIT) | compact 分层去重约束 UNIQUE(session_id, source_offset) | adapt | §4.1 | — |
-| fast-resume (MIT) | 唯一 Tantivy 集成参考（有实测跨平台 bug） | idea-only | §6.1 Selection Gate | — |
-| AgentRecall (MIT, TS) | 迁移 writer 原子协议、capability registry | idea-only | §9.2/§5.1 | — |
-| agent-sessions (MIT, Swift) | FTS5+三触发器、索引期脱敏、语料保全测试 | idea-only | §6/§8.2/§11.1 | — |
-| claude-historian (MIT, TS) | MCP search→at→get_session 渐进披露契约 | idea-only | §7.4 | 署名归属存疑，引用前澄清 |
-| cass (MIT+Rider) | fail-open/staged-publish/robot-freeze 思想 | idea-only（clean-room） | §11/§12.4 | 禁读源码 |
+| ctx (Apache-2.0) | WAL PRAGMA 组 + doctor integrity_check | direct-copy | Catalog 完整性控制；`../security/THREAT-MODEL.md` | 保留版权头 |
+| ctx | 契约层 + additive-field 保留测试、snake→camel | adapt | `../contracts/CONTRACT-cli-robot-mcp-draft.md` | — |
+| ctx | 单调 user_version 迁移 + events 去重索引 + sha256 前缀 checkpoint | adapt | Catalog 迁移与增量索引实现 | — |
+| ctx | CJK bigram 分词（scriptgram） | adapt | `../adr/ADR-0001-fulltext-search-engine.md` | — |
+| ctx | 只读 SQL 沙箱 raw_sql.rs | idea-only（MCP 不暴露 SQL） | `../contracts/CONTRACT-cli-robot-mcp-draft.md` §8 | — |
+| agf (MIT) | bounded reader（read_head_tail/char_prefix） | direct-copy | `../architecture/RFC-0002-provider-adapter-contract.md` §7；`../security/THREAT-MODEL.md` | 保留 MIT 声明 |
+| agf | shell quoting / PowerShell 包装 | direct-copy | CLI 入口实现 | 保留 MIT 声明 |
+| Recall (MIT) | FTS5 external-content + 触发器 | adapt | `../adr/ADR-0001-fulltext-search-engine.md` | — |
+| Recall | RRF k=60、目录子树过滤、迁移幂等骨架、JSONL roundtrip | adapt | Search、Catalog 迁移与 CLI contract 测试 | — |
+| sessiongrep (Apache-2.0) | 纯函数 find_repo_root/extract_text/highlight/timeline/escape | direct-copy | Provider discovery 与 Search 展示实现 | 保留版权头 |
+| sessiongrep | 两段式检索（FTS 召回→Rust 重排） | adapt | `../adr/ADR-0001-fulltext-search-engine.md` | — |
+| sessiongrep | 全 crates.io 无 vendored 供应链基线 | idea-only（模板） | 发布与供应链审计 | — |
+| hstry (MIT) | 事务化 migration runner、source-scoped purge、peek bundle | adapt | Catalog 迁移与 `../contracts/CONTRACT-cli-robot-mcp-draft.md` §7 | — |
+| hstry | version 单调 / outbox / retention 测试 | adapt | Catalog 一致性与 generation retention 测试 | — |
+| memex (MIT) | compact 分层去重约束 UNIQUE(session_id, source_offset) | adapt | `../architecture/RFC-0001-canonical-model-and-stable-id.md` §3 | — |
+| fast-resume (MIT) | 唯一 Tantivy 集成参考（有实测跨平台 bug） | idea-only | `../adr/ADR-0001-fulltext-search-engine.md` | — |
+| AgentRecall (MIT, TS) | 迁移 writer 原子协议、capability registry | idea-only | Catalog migration 与 `../architecture/RFC-0002-provider-adapter-contract.md` §6 | — |
+| agent-sessions (MIT, Swift) | FTS5+三触发器、索引期脱敏、语料保全测试 | idea-only | `../adr/ADR-0001-fulltext-search-engine.md`；`../security/THREAT-MODEL.md`；测试策略 | — |
+| claude-historian (MIT, TS) | MCP search→at→get_session 渐进披露契约 | idea-only | `../contracts/CONTRACT-cli-robot-mcp-draft.md` §8 | 署名归属存疑，引用前澄清 |
+| cass (MIT+Rider) | fail-open/staged-publish/robot-freeze 思想 | idea-only（clean-room） | Provider staging、发布与 Robot contract | 禁读源码 |
 
 ## 4. 反模式登记（作为验收反例，禁止复用）
 
 | 反模式 | 来源坐标 | 已对应守护 |
 |---|---|---|
-| 扫描期写上游（读操作 DELETE 上游 SQLite） | agf codex.rs prune_orphan_threads | 不变量#2、§16.3 上游 checksum、source-snapshot spike |
-| 全局 session_id 主键致跨 Provider 覆盖 | agent-sessions DB.swift | §4.2 身份/定位解耦、RFC-0001 |
-| Provider 写入 SQL CHECK 约束致全表重建 | ctx ddl.rs + migrations.rs | §6.4 |
-| FTS 空命中回退全表扫描 | sessiongrep db.rs | §6.4 |
-| Unix 权限位在 Windows 为 no-op 却宣称已私有化 | ctx object_store.rs | §8.2 Windows ACL |
-| 跨入口排序不一致（bm25 ASC vs CLI DESC） | hstry db.rs vs main.rs | §11.3 排序一致性门 |
-| 硬编码平台路径前缀 /Users | sessiongrep cursor.rs、Recall cline.rs | §5.3 路径可移植性门 |
-| 用户 query 直编正则/有损路径编码 | claude-historian search.ts | §8.2 输入校验 |
-| adapter 子进程无超时/无输出上限致 OOM | hstry runner.rs、claude-historian | §5.2 进程内流式+bounded buffer、RFC-0002 |
-| mtime as i64 纳秒截断、纯 mtime 判增量 | sessiongrep、agf cache.rs | §4.1 mtime caveat、source-snapshot spike |
-| API key 明文入库 | AgentRecall schema.ts | §8 secure by default |
-| 向量检索引入 protoc/联网模型构建依赖 | memex LanceDB、Recall candle | §1.4 排除 vector/embedding、cross-platform-packaging spike 安全构建硬门 |
+| 扫描期写上游（读操作 DELETE 上游 SQLite） | agf codex.rs prune_orphan_threads | 上游只读不变量、扫描前后 checksum、source-snapshot spike |
+| 全局 session_id 主键致跨 Provider 覆盖 | agent-sessions DB.swift | `../architecture/RFC-0001-canonical-model-and-stable-id.md` |
+| Provider 写入 SQL CHECK 约束致全表重建 | ctx ddl.rs + migrations.rs | Catalog schema 不把 Provider 写死为 SQL 枚举 |
+| FTS 空命中回退全表扫描 | sessiongrep db.rs | `../adr/ADR-0001-fulltext-search-engine.md` 的 Search Port 边界 |
+| Unix 权限位在 Windows 为 no-op 却宣称已私有化 | ctx object_store.rs | `../security/THREAT-MODEL.md` §4 Windows ACL |
+| 跨入口排序不一致（bm25 ASC vs CLI DESC） | hstry db.rs vs main.rs | `../contracts/CONTRACT-cli-robot-mcp-draft.md` 的统一 Application ADT |
+| 硬编码平台路径前缀 /Users | sessiongrep cursor.rs、Recall cline.rs | `../architecture/RFC-0002-provider-adapter-contract.md` §7 |
+| 用户 query 直编正则/有损路径编码 | claude-historian search.ts | `../security/THREAT-MODEL.md` 输入校验控制 |
+| adapter 子进程无超时/无输出上限致 OOM | hstry runner.rs、claude-historian | `../architecture/RFC-0002-provider-adapter-contract.md` §7 流式 + bounded buffer |
+| mtime as i64 纳秒截断、纯 mtime 判增量 | sessiongrep、agf cache.rs | `../architecture/RFC-0001-canonical-model-and-stable-id.md` §6；source-snapshot spike |
+| API key 明文入库 | AgentRecall schema.ts | `../security/THREAT-MODEL.md` §5 |
+| 向量检索引入 protoc/联网模型构建依赖 | memex LanceDB、Recall candle | v1.0 不含 vector/embedding；`../adr/ADR-0002-platform-targets.md` 禁止联网构建依赖 |
 
 ## 5. spike 补充的实证结论
 
-- **Tantivy 供应链风险已实证**：`cargo tree` 确认 tantivy 0.26.1 传递引入 `ort-sys`（ONNX Runtime），`cargo deny` 报 unlicensed。这与 §19.2 的先验判断一致，且从供应链维度进一步支持 FTS5 默认（见 `spikes/search-backend/EVIDENCE.md`、`spikes/cross-platform-packaging/EVIDENCE.md`）。
+- **Tantivy 供应链风险已实证**：`cargo tree` 确认 tantivy 0.26.1 传递引入 `ort-sys`（ONNX Runtime），`cargo deny` 报 unlicensed。该证据从供应链维度进一步支持 `../adr/ADR-0001-fulltext-search-engine.md` 的 FTS5 默认选择（另见 `spikes/search-backend/EVIDENCE.md`、`spikes/cross-platform-packaging/EVIDENCE.md`）。
 
 ## 6. 退出条件
 

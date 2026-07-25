@@ -4,8 +4,8 @@ version = "0.0.0"
 edition = "2021"
 publish = false
 
-# 可丢弃探针（不进 crates/）：验证计划审查阻断项 #5——
-# data-root 级独占 writer lease、双进程竞争、CAS activation、stale-lock 处理。
+# 可丢弃探针（不进 crates/）：验证 data-root 级独占 writer lease、
+# 双进程竞争、CAS activation、stale-lock 处理；Plan #5 仅作历史证据来源。
 
 [[bin]]
 name = "data-root-locking-spike"

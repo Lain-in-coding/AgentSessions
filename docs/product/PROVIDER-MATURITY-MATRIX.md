@@ -1,7 +1,7 @@
 # Provider Maturity 与 Capability Matrix
 
-> 对外可见的 Provider 状态清单（计划 §14 0.3 Integration Beta 交付物）。
-> - 术语与晋级证据要求见 `docs/architecture/RFC-0002-provider-adapter-contract.md` §6。
+> 对外可见的 Provider 状态清单，是 `0.3 Integration Beta` 的公开状态记录。
+> - 术语与晋级证据要求见 `../architecture/RFC-0002-provider-adapter-contract.md` §6。
 > - 本文件是**当前实现状态**的事实记录，不是承诺；晋级必须有证据，不由代码存在自动推断。
 > - 最后更新：2026-07-22
 

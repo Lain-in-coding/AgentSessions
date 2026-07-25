@@ -9,9 +9,9 @@
 
 ## 背景
 
-计划 §14 R0 与 §19.2 全局硬约束：所有调研项目的 fixtures provenance 均未核实，
-禁止复制任何真实 transcript；Provider 认证与检索评测都需要 fixture。本规范冻结
-fixture 的来源、脱敏和许可证边界。
+所有调研项目的 fixtures provenance 均未核实，因此禁止复制任何真实 transcript；
+Provider 认证与检索评测都需要 fixture。本规范冻结 fixture 的来源、脱敏和许可证边界，
+复用许可判定见 `../operations/REUSE-LICENSE-AUDIT.md`。
 
 ## 硬约束
 
@@ -22,7 +22,7 @@ fixture 的来源、脱敏和许可证边界。
 ## Provider fixture 要求
 
 - 每个 Provider 的 fixture 覆盖：当前 + 历史 variant、缺字段、损坏记录、Unicode、Tool Event、大字段、多 Session、Branch/Retry/Fork；
-- fixture 带 `fixture_revision`，格式修复必须新增 fixture 而非只改 parser（计划 §5.2）；
+- fixture 带 `fixture_revision`，格式修复必须新增 fixture 而非只改 parser；该要求与 `../architecture/RFC-0002-provider-adapter-contract.md` §7 一致；
 - fixture 目录附 `PROVENANCE.md`：声明合成/脱敏方式、生成脚本、不含真实数据的确认。
 
 ## 检索评测 fixture
@@ -30,7 +30,7 @@ fixture 的来源、脱敏和许可证边界。
 - search 评测语料（qrels）用合成 beacon 方法（见 `spikes/search-backend/`）：beacon 标记词只注入 beacon 文档，不污染随机填充池，保证 recall 有区分度；
 - 语料覆盖中文两/三字术语、中英混合、snake_case、camelCase、`module::symbol`、Windows/POSIX 路径、错误栈。
 
-## 许可证边界（与 §19 复用审查联动）
+## 许可证边界（与复用审查联动）
 
 - 从同类项目**复制任何 fixture 一律禁止**（provenance 未核实）；
 - 复用同类项目**代码**须遵守 `docs/operations/REUSE-LICENSE-AUDIT.md` 的 direct-copy/adapt/idea-only/reject 判定；

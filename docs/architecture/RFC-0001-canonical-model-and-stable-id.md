@@ -14,7 +14,7 @@
 > - approved_at: —
 > - exception_expiry: —
 >
-> 本 RFC 是 Plan §4 的正式化。若本文与 `Plan/项目执行计划.md` 冲突，以经 Accepted 的本 RFC 为准，并回填 Plan。
+> 本 RFC 是 Canonical Model 与 Stable ID 的规范性来源；Provider 边界见 `RFC-0002-provider-adapter-contract.md`，入口 DTO 见 `../contracts/CONTRACT-cli-robot-mcp-draft.md`。在本文状态转为 Accepted 前，开放项仍按 §7 管理。
 
 ---
 
@@ -234,4 +234,4 @@ Message: Provider 原生 Message/Event ID
 - §7 四个开放问题均有裁决或明确降级 ADR；
 - 提供至少一组真实脱敏 fixture 支撑 ContentBlob 三层的 go/no-go；
 - Stable ID 的 relocation、ordinal insertion、alias、stability 分级有对应的 property 测试方案（实现在 `0.1` 之后）；
-- owner 与 approver 签署，回填 Plan §4。
+- owner 与 approver 签署，并在治理记录中填写批准信息。

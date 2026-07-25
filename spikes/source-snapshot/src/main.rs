@@ -1,6 +1,7 @@
 //! source-snapshot spike（可丢弃探针，不进 crates/）。
 //!
-//! 目的：为计划审查高优先级项 #6（ReadOnlySourceSnapshot）与 §5.2 合同提供实测证据。
+//! 目的：为 RFC-0002 的 ReadOnlySourceSnapshot contract 提供实测证据；
+//! Plan 审查 #6 / §5.2 仅作历史 evidence provenance。
 //! 核心命题：Provider 在 parse 期间追加/截断/替换源文件时必须能被检测，
 //! 提交前复核身份/长度/mtime/fingerprint，变化则丢弃 staging 返回
 //! source_changed_during_read，绝不提交混合时点数据。
@@ -193,9 +194,9 @@ fn main() -> Result<()> {
     pr("E 只读性 → 源内容未被本工具改动", e_pass, e_pass);
 
     let all = a_pass && b_pass && c_pass && d_pass && e_pass;
-    println!("\n对计划的意义：");
-    println!("  §5.2 / 审查#6：len+mtime+fingerprint 三元组复核可检出追加/截断/等长替换；");
-    println!("  等长替换必须靠 fingerprint（len/mtime 不足），生产实现的复核必须包含内容指纹；");
+    println!("\nContract / decision evidence：");
+    println!("  RFC-0002：len+mtime+fingerprint 复核可检出追加/截断/等长替换；");
+    println!("  等长替换必须靠 fingerprint（len/mtime 不足），正式复核须包含内容指纹；");
     println!("  检出变化即返回 source_changed_during_read 并丢弃 staging，不提交混合时点数据。");
     println!("\n全部通过 = {all}");
 

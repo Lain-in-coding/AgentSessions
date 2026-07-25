@@ -1,4 +1,4 @@
-//! Backend-neutral analyzer（对应计划 §6.2）。
+//! Backend-neutral analyzer（ADR-0001 的检索对照方法）。
 //! FTS5 与 Tantivy 都索引这里产出的 token 串，隔离"引擎本身"的差异，
 //! 避免把两边 tokenizer 质量差异误算成引擎差异。
 //!

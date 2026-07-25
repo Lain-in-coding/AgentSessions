@@ -7,7 +7,7 @@
 > - due_milestone: R0
 > - evidence_path: docs/contracts/CONTRACT-cli-robot-mcp-draft.md
 >
-> 依据计划 §7。所有入口先映射同一组版本化 Application ADT，不各自定义业务语义。
+> 本合同是 CLI、Robot 与 MCP 入口语义的规范性来源：所有入口先映射同一组版本化 Application ADT，不各自定义业务语义。实体与 Stable ID 见 `../architecture/RFC-0001-canonical-model-and-stable-id.md`。
 
 ## 1. Application ADT（唯一业务语义来源）
 

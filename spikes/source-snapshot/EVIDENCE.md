@@ -1,6 +1,6 @@
 # EVIDENCE：source-snapshot spike
 
-> 可丢弃探针证据。对应计划审查高优项 #6（ReadOnlySourceSnapshot）与 §5.2。
+> 可丢弃探针证据。为 `docs/architecture/RFC-0002-provider-adapter-contract.md` 的 `ReadOnlySourceSnapshot` 提供实测来源；Plan 审查 #6 / §5.2 仅作历史 provenance。
 > 目的：验证 Provider 在 parse 期间追加/截断/等长替换源文件时能被检测，提交前复核，
 > 变化则丢弃 staging 返回 source_changed_during_read，不提交混合时点数据。
 
@@ -27,8 +27,8 @@
    提交前用同一三元组复核；任一不符即返回 `source_changed_during_read`，丢弃该 source 的 staging。
 3. 只读性：全过程不修改源文件内容（断言 E 验证）。
 
-## 回填计划
+## Contract / decision evidence 与正式记录建议
 
-- §5.2 Provider 合同：`ReadOnlySourceSnapshot` 复核三元组必须含 content fingerprint（不能只靠 len+mtime）。
-- §16.3 崩溃恢复 E2E：加入"parse 期间源文件变化"的注入用例。
-- 错误矩阵：`source_changed_during_read` 归入"丢弃 staging"类，不部分提交。
+- `docs/architecture/RFC-0002-provider-adapter-contract.md` 已记录：`ReadOnlySourceSnapshot` 复核包含 content fingerprint，变化返回 `source_changed_during_read` 并丢弃 staging。
+- `docs/security/THREAT-MODEL.md` 已引用本 spike 作为混合时点与只读性缓解证据。
+- 正式 fault-injection E2E 应加入“parse 期间源文件变化”；本 spike 不单独形成 Accepted contract。

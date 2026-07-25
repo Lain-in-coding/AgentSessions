@@ -11,7 +11,7 @@
 > - evidence_path: `docs/architecture/RFC-0002-provider-adapter-contract.md`；相关实测见 `spikes/source-snapshot/EVIDENCE.md`
 > - approved_at: —
 >
-> 本 RFC 定义所有 Provider Adapter 必须遵守的稳定合同。它是 `0.3 Integration Beta` 与 Provider Promotion Train 的地基。对应计划 §5。
+> 本 RFC 定义所有 Provider Adapter 必须遵守的稳定合同，是 `0.3 Integration Beta` 与 Provider Promotion Train 的规范性基础；Canonical 输出模型见 `RFC-0001-canonical-model-and-stable-id.md`，成熟度公开状态见 `../product/PROVIDER-MATURITY-MATRIX.md`。
 
 ---
 
@@ -19,7 +19,7 @@
 
 **目标**：让每个 Provider 的格式差异被隔离在一个 Adapter 内，Adapter 之外的 Application/Storage/Search 只面对统一 Canonical 事件流；让"支持一个 Provider"成为可证据化、可分级晋级的动作，而不是代码存在即宣称支持。
 
-**非目标**：不追求一次支持所有 Provider；不做动态加载第三方本地代码形式的插件（计划 §1.4 明确排除）；不在 Adapter 内做检索、存储或 UI。
+**非目标**：不追求一次支持所有 Provider；v1.0 不提供动态加载第三方本地代码形式的插件；不在 Adapter 内做检索、存储或 UI。
 
 ## 2. Adapter Trait（最低合同）
 
@@ -76,7 +76,7 @@ ProbeResult
 
 ## 5. Source-level staging 与错误矩阵
 
-`parse` 先写入 source-local staging sink，只有完整成功且通过不变量校验后才提交 Catalog。错误分级（对应计划 §5.2）：
+`parse` 先写入 source-local staging sink，只有完整成功且通过不变量校验后才提交 Catalog。错误按下表分级：
 
 | 错误类 | 处理 |
 |---|---|
@@ -97,8 +97,8 @@ ProbeResult
 
 - Adapter 只通过 `ReadOnlySourceFs` 访问已授权 root，绝不修改/移动/删除/锁定源文件；
 - 流式解析，禁止整体加载大型 transcript，使用 bounded buffer；
-- 禁止硬编码平台路径前缀（`/Users`、macOS `Application Support`），跨平台 round-trip 三平台各测（反例见计划 §5.3）；
-- 禁止扫描期写上游（反例：agf `prune_orphan_threads` 扫描期 DELETE 上游 SQLite）——§16.3 用扫描前后 checksum 断言守护；
+- 禁止硬编码平台路径前缀（`/Users`、macOS `Application Support`），跨平台 round-trip 在 Windows、Linux、macOS 各测；
+- 禁止扫描期写上游（反例：agf `prune_orphan_threads` 扫描期 DELETE 上游 SQLite）——以扫描前后 checksum 断言守护；
 - 每条 Canonical 输出带关联具体 SourceMembership 的 SourceSpan；
 - Provider 格式修复必须增加 fixture，不能只改 parser；
 - Adapter 不接触 Storage、Search 或 UI。
