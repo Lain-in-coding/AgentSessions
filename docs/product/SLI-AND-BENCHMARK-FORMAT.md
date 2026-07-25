@@ -62,14 +62,19 @@ sqlite_version   = <sqlite3 version()>
 
 JSON 必须包含：
 
-- `evidence_status`、`profile`、`commit`、生成时间和完整 `environment`；
+- `evidence_status`、`profile`、完整 40 位 `commit`、生成时间和完整 `environment`；
 - 仅由脚本生成的合成数据集元数据、SHA-256 `dataset_hash`，以及
   `contains_real_transcripts: false`；
-- release 二进制 SHA-256、artifact 字节数、store（含现存 sidecar）字节数；
+- release 二进制 SHA-256、artifact 字节数、store（含现存 sidecar）字节数，以及
+  `binary.provenance`。调用者提供的预构建二进制必须明确披露 source-to-binary linkage
+  未被独立证明；harness 自行构建时必须使用 `cargo build --locked --release`；
+- full profile 必须记录实际 store SQLite 运行时版本及其证据来源，不能用 Python
+  `sqlite3` 版本或 `not_recorded` 代替；
 - 每项 metric 的 `raw_samples`、`required_sample_count`、单位、状态，以及按原始
   样本重算的 nearest-rank P50/P95/P99、mean、sample standard deviation；
 - 可用时的 peak RSS 原始样本与统计；不可用时必须为 `null`/空样本并在
-  `limitations` 解释，禁止用别的内存量冒充；
+  `limitations` 解释，禁止用别的内存量冒充；验证器必须从原始 RSS 样本重算每项
+  与 aggregate 汇总；
 - `recovery.status` 与 `recovery_time_ms`。没有 production fault-injection 路径时，
   必须标为 `not_implemented`，不得把干净 open/doctor 时间表述为恢复耗时；
 - 测量方法和限制，明确本地 smoke/full 结果不是正式 SLO 或 release certification。

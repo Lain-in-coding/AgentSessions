@@ -21,6 +21,13 @@ class BenchmarkStatisticsTests(unittest.TestCase):
     def test_single_sample_stddev_is_zero(self) -> None:
         self.assertEqual(BENCHMARK.rounded_summary([12.5])["sample_stddev"], 0.0)
 
+    def test_summary_validation_rejects_tampering(self) -> None:
+        samples = [1.0, 2.0, 3.0]
+        summary = BENCHMARK.rounded_summary(samples)
+        summary["p95"] = 999.0
+        with self.assertRaises(ValueError):
+            BENCHMARK.assert_summary(samples, summary, "peak_rss_mb")
+
     def test_synthetic_dataset_is_byte_deterministic(self) -> None:
         import tempfile
 

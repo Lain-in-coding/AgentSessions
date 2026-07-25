@@ -8,6 +8,7 @@ on:
       - "Cargo.toml"
       - "Cargo.lock"
       - "crates/**"
+      - "scripts/evidence/**"
       - "spikes/data-root-locking/**"
       - "spikes/sqlite-snapshot-wal/**"
   push:
@@ -17,6 +18,7 @@ on:
       - "Cargo.toml"
       - "Cargo.lock"
       - "crates/**"
+      - "scripts/evidence/**"
       - "spikes/data-root-locking/**"
       - "spikes/sqlite-snapshot-wal/**"
 
@@ -64,6 +66,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
       - name: Install Rust toolchain and target
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -88,6 +95,25 @@ jobs:
           & $binary --version 2>&1 | Tee-Object -FilePath 'evidence/ci/version.txt'
           & $binary --help 2>&1 | Tee-Object -FilePath 'evidence/ci/help.txt'
           & $binary --output json config paths 2>&1 | Tee-Object -FilePath 'evidence/ci/config-paths.json'
+
+      - name: Benchmark harness smoke and schema validation
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $binary = Join-Path 'target/${{ matrix.target }}/release' '${{ matrix.binary }}'
+          python -m unittest scripts/evidence/test_core_beta_benchmark.py
+          python scripts/evidence/core_beta_benchmark.py run `
+            --profile smoke `
+            --workspace . `
+            --output-dir 'evidence/ci/benchmark' `
+            --binary $binary `
+            --expected-commit '${{ github.sha }}' `
+            --disk 'GitHub-hosted runner; not release-certified' `
+            --filesystem 'runner default; not release-certified' `
+            --antivirus-state 'runner state not certified'
+          python scripts/evidence/core_beta_benchmark.py validate-report `
+            'evidence/ci/benchmark/core-beta-benchmark-smoke.json'
 
       - name: SQLite adapter evidence tests
         shell: pwsh
@@ -152,7 +178,7 @@ jobs:
             limitations = @(
               'Workflow configuration is not proof that a GitHub-hosted run passed.',
               'Artifacts are unsigned and are not release certification.',
-              'Adapter tests and spikes do not substitute for production multi-process recovery evidence.',
+              'Production process tests exercise SqliteStore APIs but do not constitute release certification or minimum-OS evidence.',
               'The Ubuntu 22.04 runner does not certify the proposed glibc 2.31 floor.',
               'No signing or macOS notarization is performed.'
             )

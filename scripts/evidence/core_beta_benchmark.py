@@ -305,7 +305,9 @@ def environment(workspace: Path, args: argparse.Namespace) -> dict[str, Any]:
         "disk": args.disk,
         "filesystem": args.filesystem,
         "antivirus_state": args.antivirus_state,
-        "sqlite_version": "not_exposed_by_cli",
+        "sqlite_version": args.sqlite_version,
+        "sqlite_version_source": args.sqlite_version_source,
+        "rustc": rustc or "not_recorded",
         "python_version": platform.python_version(),
         "python_sqlite_version_not_store_version": sqlite3.sqlite_version,
     }
@@ -316,7 +318,7 @@ def resolve_binary(workspace: Path, args: argparse.Namespace) -> Path:
         binary = Path(args.binary).expanduser().resolve()
     else:
         subprocess.run(
-            [args.cargo, "build", "--release", "-p", "agentsessions-cli"],
+            [args.cargo, "build", "--locked", "--release", "-p", "agentsessions-cli"],
             cwd=workspace,
             check=True,
         )
@@ -346,7 +348,30 @@ def run_benchmark(args: argparse.Namespace) -> Path:
     output_dir = Path(args.output_dir).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     profile = PROFILES[args.profile]
+    commit = command_text(["git", "rev-parse", "HEAD"], workspace) or "not_recorded"
+    if args.expected_commit and commit != args.expected_commit:
+        raise ValueError(
+            f"workspace commit {commit!r} does not match --expected-commit {args.expected_commit!r}"
+        )
+    if args.profile == "full":
+        if not args.expected_commit:
+            raise ValueError("full evidence requires --expected-commit")
+        required_metadata = {
+            "disk": args.disk,
+            "filesystem": args.filesystem,
+            "antivirus_state": args.antivirus_state,
+            "sqlite_version": args.sqlite_version,
+            "sqlite_version_source": args.sqlite_version_source,
+        }
+        missing = [
+            name
+            for name, value in required_metadata.items()
+            if value in {"not_recorded", "not_exposed_by_cli"}
+        ]
+        if missing:
+            raise ValueError(f"full evidence requires recorded metadata: {', '.join(missing)}")
     binary = resolve_binary(workspace, args)
+    binary_provenance = "caller_supplied_prebuilt" if args.binary else "built_by_harness_from_workspace"
 
     with tempfile.TemporaryDirectory(prefix="agentsessions-evidence-") as temp_name:
         scratch = Path(temp_name)
@@ -413,7 +438,6 @@ def run_benchmark(args: argparse.Namespace) -> Path:
             },
         }
         peak_values = [value for entry in metrics.values() for value in entry["peak_rss_mb_raw_samples"]]
-        commit = command_text(["git", "rev-parse", "HEAD"], workspace) or "not_recorded"
         report: dict[str, Any] = {
             "schema_version": SCHEMA_VERSION,
             "evidence_status": "locally_verified",
@@ -435,6 +459,7 @@ def run_benchmark(args: argparse.Namespace) -> Path:
                 "hash_algorithm": "sha256",
                 "binary_hash": sha256_file(binary),
                 "artifact_size_bytes": binary.stat().st_size,
+                "provenance": binary_provenance,
             },
             "methodology": {
                 "clock": "time.perf_counter_ns",
@@ -475,11 +500,15 @@ def run_benchmark(args: argparse.Namespace) -> Path:
                 "Cold startup uses a fresh copy of the release binary per sample; the harness does not flush OS filesystem caches.",
                 "Startup measures process launch through --version completion, not an interactive readiness signal.",
                 "Peak RSS uses the Windows process peak API where available; Linux /proc and macOS ps are sampled every 100 ms, so short-lived peaks may be missed.",
-                "The CLI does not expose the SQLite runtime version, so python_sqlite_version_not_store_version is diagnostic only.",
+                "The SQLite runtime version is operator-supplied and its evidence source is recorded separately; Python's sqlite3 version is diagnostic only.",
                 "Storage size includes the database and present SQLite sidecars after commands exit; no explicit checkpoint command is available.",
                 "Recovery duration is unavailable without a production fault-injection entry point and is not inferred from a clean open.",
             ],
         }
+        if args.binary:
+            report["limitations"].append(
+                "The measured binary was caller-supplied; its hash is authoritative, but source-to-binary linkage is not independently attested."
+            )
 
     report_path = output_dir / f"core-beta-benchmark-{args.profile}.json"
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -501,15 +530,23 @@ def validate_report(path: Path, expected_profile: str | None = None) -> dict[str
     report = json.loads(path.read_text(encoding="utf-8"))
     if report.get("schema_version") != SCHEMA_VERSION:
         raise ValueError(f"unsupported schema_version: {report.get('schema_version')!r}")
+    if report.get("evidence_status") != "locally_verified":
+        raise ValueError("evidence_status must be locally_verified")
     profile_name = report.get("profile")
     if profile_name not in PROFILES or (expected_profile and profile_name != expected_profile):
         raise ValueError(f"unexpected profile: {profile_name!r}")
+    commit = report.get("commit", "")
+    if not isinstance(commit, str) or len(commit) != 40 or any(char not in "0123456789abcdef" for char in commit):
+        raise ValueError("commit must be a full lowercase Git SHA")
     if report.get("dataset", {}).get("contains_real_transcripts") is not False:
         raise ValueError("dataset.contains_real_transcripts must be false")
     for group, field in (("dataset", "dataset_hash"), ("binary", "binary_hash")):
         value = report.get(group, {}).get(field, "")
         if not isinstance(value, str) or len(value) != 64 or any(char not in "0123456789abcdef" for char in value):
             raise ValueError(f"{group}.{field} must be a lowercase SHA-256 digest")
+    provenance = report.get("binary", {}).get("provenance")
+    if provenance not in {"built_by_harness_from_workspace", "caller_supplied_prebuilt"}:
+        raise ValueError("binary.provenance is not recognized")
     metrics = report.get("metrics")
     if not isinstance(metrics, dict) or not metrics:
         raise ValueError("metrics must be a non-empty object")
@@ -538,22 +575,85 @@ def validate_report(path: Path, expected_profile: str | None = None) -> dict[str
         if not all(isinstance(value, (int, float)) and value >= 0 for value in samples):
             raise ValueError(f"{name}: samples must be non-negative numbers")
         assert_summary([float(value) for value in samples], entry.get("summary", {}), name)
+        peak_samples = entry.get("peak_rss_mb_raw_samples")
+        if not isinstance(peak_samples, list) or not all(
+            isinstance(value, (int, float)) and value >= 0 for value in peak_samples
+        ):
+            raise ValueError(f"{name}: peak RSS samples must be a list of non-negative numbers")
+        peak_summary = entry.get("peak_rss_mb_summary")
+        if peak_samples:
+            assert_summary(
+                [float(value) for value in peak_samples],
+                peak_summary if isinstance(peak_summary, dict) else {},
+                f"{name}.peak_rss_mb",
+            )
+        elif peak_summary is not None:
+            raise ValueError(f"{name}: empty peak RSS samples require a null summary")
+    aggregate_peak = report.get("aggregate_peak_rss_mb", {})
+    expected_peak_samples = [
+        value
+        for entry in metrics.values()
+        for value in entry["peak_rss_mb_raw_samples"]
+    ]
+    if aggregate_peak.get("raw_samples") != expected_peak_samples:
+        raise ValueError("aggregate_peak_rss_mb.raw_samples does not match metric peak samples")
+    aggregate_summary = aggregate_peak.get("summary")
+    if expected_peak_samples:
+        assert_summary(
+            [float(value) for value in expected_peak_samples],
+            aggregate_summary if isinstance(aggregate_summary, dict) else {},
+            "aggregate_peak_rss_mb",
+        )
+    elif aggregate_summary is not None:
+        raise ValueError("empty aggregate peak RSS samples require a null summary")
     sizes = report.get("sizes", {})
     size_fields = ["artifact_size_bytes", "dataset_source_bytes", "initial_store_bytes_including_sidecars", "post_shrink_store_bytes_including_sidecars"]
     if any(not isinstance(sizes.get(field), int) or sizes[field] < 0 for field in size_fields):
         raise ValueError("size fields must be non-negative integers")
+    if sizes["artifact_size_bytes"] != report.get("binary", {}).get("artifact_size_bytes"):
+        raise ValueError("binary and size artifact byte counts differ")
+    dataset = report.get("dataset", {})
+    if dataset.get("file_count") != profile["files"]:
+        raise ValueError("dataset.file_count does not match the profile")
+    if dataset.get("message_count") != profile["files"] * profile["messages_per_file"]:
+        raise ValueError("dataset.message_count does not match the profile")
+    if sizes["dataset_source_bytes"] != dataset.get("source_bytes"):
+        raise ValueError("dataset source byte counts differ")
     initial_size_samples = sizes.get("initial_store_bytes_raw_samples")
-    if not isinstance(initial_size_samples, list) or len(initial_size_samples) < profile["sync"]:
+    if (
+        not isinstance(initial_size_samples, list)
+        or len(initial_size_samples) < profile["sync"]
+        or not all(isinstance(value, int) and value >= 0 for value in initial_size_samples)
+    ):
         raise ValueError("initial_store_bytes_raw_samples does not satisfy the profile")
     recovery = report.get("recovery", {})
     if recovery.get("status") not in {"locally_verified", "not_implemented", "externally_blocked"}:
         raise ValueError("recovery.status is not a recognized evidence status")
     if recovery.get("status") != "locally_verified" and recovery.get("recovery_time_ms") is not None:
         raise ValueError("unverified recovery must not carry a recovery_time_ms result")
-    required_environment = ["os", "target_triple", "cpu", "ram_gb", "disk", "filesystem", "antivirus_state", "sqlite_version"]
-    missing = [field for field in required_environment if field not in report.get("environment", {})]
+    required_environment = [
+        "os", "target_triple", "cpu", "ram_gb", "disk", "filesystem",
+        "antivirus_state", "sqlite_version", "sqlite_version_source", "rustc",
+    ]
+    environment_data = report.get("environment", {})
+    missing = [field for field in required_environment if field not in environment_data]
     if missing:
         raise ValueError(f"missing environment fields: {', '.join(missing)}")
+    if profile_name == "full":
+        placeholders = [
+            field
+            for field in ("disk", "filesystem", "antivirus_state", "sqlite_version", "sqlite_version_source")
+            if environment_data.get(field) in {"not_recorded", "not_exposed_by_cli"}
+        ]
+        if placeholders:
+            raise ValueError(f"full report has unrecorded environment fields: {', '.join(placeholders)}")
+    limitations = report.get("limitations")
+    if not isinstance(limitations, list) or not all(isinstance(item, str) for item in limitations):
+        raise ValueError("limitations must be a list of strings")
+    if provenance == "caller_supplied_prebuilt" and not any(
+        "source-to-binary linkage" in item for item in limitations
+    ):
+        raise ValueError("caller-supplied binary reports must disclose unattested source linkage")
     print(f"valid {SCHEMA_VERSION} report: {path}")
     return report
 
@@ -570,8 +670,10 @@ def render_markdown(report: dict[str, Any]) -> str:
         f"- Profile: `{report['profile']}`",
         f"- Commit: `{report['commit']}`",
         f"- OS/target: `{env['os']}` / `{env['target_triple']}`",
+        f"- SQLite runtime: `{env['sqlite_version']}` ({env['sqlite_version_source']})",
         f"- Dataset: {report['dataset']['message_count']} synthetic messages, SHA-256 `{report['dataset']['dataset_hash']}`",
         f"- Binary SHA-256: `{report['binary']['binary_hash']}`",
+        f"- Binary provenance: `{report['binary']['provenance']}`",
         "",
         "These results are local evidence anchors, not formal SLOs or release certification.",
         "",
@@ -613,9 +715,12 @@ def parser() -> argparse.ArgumentParser:
     run.add_argument("--binary", help="explicit prebuilt release CLI; otherwise cargo build --release is run")
     run.add_argument("--cargo", default="cargo")
     run.add_argument("--rustc", default="rustc")
+    run.add_argument("--expected-commit", help="full Git SHA required for full evidence; run fails if HEAD differs")
     run.add_argument("--disk", default="not_recorded", help="disk media/model for the evidence environment")
     run.add_argument("--filesystem", default="not_recorded", help="filesystem containing the temporary benchmark data")
     run.add_argument("--antivirus-state", default="not_recorded", help="security software state during the run")
+    run.add_argument("--sqlite-version", default="not_recorded", help="SQLite runtime linked into the measured CLI")
+    run.add_argument("--sqlite-version-source", default="not_recorded", help="how the linked SQLite runtime version was established")
     validate = sub.add_parser("validate-report", help="validate hashes, fields, counts, and recomputed statistics")
     validate.add_argument("report")
     return result

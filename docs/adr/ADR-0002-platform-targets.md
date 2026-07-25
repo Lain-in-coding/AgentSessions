@@ -29,7 +29,7 @@ AgentSessions 将 Windows x64、Linux x64、macOS x64/ARM64 作为 v1.0 正式�
 ### 最低 OS / glibc
 
 - Windows：最低 Windows 10 x64；
-- Linux glibc：最低 glibc 2.31（对应 Ubuntu 20.04 / RHEL 8 类基线），在该 glibc 的 CI runner 上构建以避免过高符号版本；musl 构建无 glibc 依赖；
+- Linux glibc：最低 glibc 2.31（对应 Ubuntu 20.04）；在该 glibc 的 CI runner 上构建以避免过高符号版本。RHEL 8 的 glibc 2.28 更旧，不在该 floor 的已声明范围内，若要支持需单独认证；musl 构建无 glibc 依赖；
 - macOS：最低 macOS 12（含 x64 与 ARM64）。
 
 ### 依赖与构建约束（Selection Gate 硬门）
