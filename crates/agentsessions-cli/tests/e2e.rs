@@ -804,17 +804,7 @@ fn perf_baseline_100_messages_index_and_search() {
         "search must return results"
     );
 
-    // 性能软目标（非 CI 硬阻断，仅防止极端回归）：
-    // 100 次写入 < 10 秒（含进程启动开销）；单次查询 < 3 秒。
-    assert!(
-        index_ms < 10_000,
-        "indexing 100 messages took {index_ms}ms, expected < 10s"
-    );
-    assert!(
-        query_ms < 3_000,
-        "search query took {query_ms}ms, expected < 3s"
-    );
-
-    // 输出基线数据供观察（不阻断 CI）
+    // 仅输出历史 smoke 基线供观察。正式性能分布、环境和样本量由
+    // scripts/evidence/core_beta_benchmark.py 负责；普通 CI 机器不以固定墙钟阈值阻断。
     eprintln!("[perf-baseline] index 100 msgs: {index_ms}ms  search: {query_ms}ms");
 }
