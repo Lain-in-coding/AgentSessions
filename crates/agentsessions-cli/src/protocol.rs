@@ -1,11 +1,12 @@
 //! Robot 协议层：统一 JSON envelope、错误目录（Error Catalog）与 Outcome。
 //!
-//! 落实计划 §7.2–§7.5 与 docs/contracts/CONTRACT-cli-robot-mcp-draft.md：所有入口
+//! 遵循 `docs/contracts/CONTRACT-cli-robot-mcp-draft.md`、
+//! `schemas/robot/v1/envelope.schema.json` 与 `schemas/robot/v1/error-catalog.json`：所有入口
 //! 先把结果/错误归一到同一组版本化 DTO，再按同一映射投影到 exit code / JSON，
 //! 不允许各命令各自决定语义。本模块目前是唯一消费者（CLI）；MCP 落地时再抽 crate。
 //!
 //! 约束：
-//! - stdout 只输出协议数据；进程级诊断只走 stderr（见 §7.5 真值表）。
+//! - stdout 只输出协议数据；进程级诊断只走 stderr。
 //! - 错误 envelope 携带稳定 `code` + 安全 `message` + `retryable` + 有界 `details`。
 //! - `schema_version` 走 major.minor；未知 major 由调用方拒绝。
 
@@ -17,7 +18,7 @@ use serde_json::{Value, json};
 /// 当前协议 schema 版本（major.minor）。未知 major 必须拒绝，兼容 minor 按合同处理。
 pub const SCHEMA_VERSION: &str = "1.0";
 
-/// 业务结果层级（计划 §7.2）。与进程错误分离：partial 绝不伪装成 success。
+/// 业务结果层级。与进程错误分离：partial 绝不伪装成 success。
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
@@ -25,7 +26,7 @@ pub enum Outcome {
     Partial,
 }
 
-/// 输出模式（计划 §7.5 真值表）。切片期实现 human/json；jsonl 预留。
+/// 输出模式。切片期实现 human/json；jsonl 预留。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputMode {
     /// 人类可读（默认）。当前退化为紧凑单行 JSON，待人类渲染器落地。
@@ -36,7 +37,7 @@ pub enum OutputMode {
     Jsonl,
 }
 
-/// 错误目录条目（计划 §7.4 Error Catalog Matrix 的子集）。
+/// `schemas/robot/v1/error-catalog.json` 中错误目录的实现子集。
 ///
 /// 每个 canonical code 固定映射到 exit code / retryable / redaction，
 /// 新增错误必须先在此登记，任何入口才能返回。
@@ -49,7 +50,7 @@ pub enum CanonicalCode {
     NotFound,
     /// Source/File I/O 错误 → exit 5。
     SourceIo,
-    /// 源在读取期间被改写（§7.4 source_changed）→ exit 5。
+    /// 源在读取期间被改写（`source_changed`）→ exit 5。
     SourceChanged,
     /// 快照校验阶段无法完成（与已确认 source_changed 区分）。
     #[allow(dead_code)]
@@ -58,7 +59,7 @@ pub enum CanonicalCode {
     CatalogError,
     /// Provider 格式或 Adapter 错误 → exit 7。
     ProviderError,
-    /// writer lease 未取得（§7.4 writer_busy）→ exit 6，可重试。
+    /// writer lease 未取得（`writer_busy`）→ exit 6，可重试。
     WriterBusy,
     /// JSON/协议版本不兼容 → exit 9。
     SchemaIncompatible,
@@ -83,7 +84,7 @@ impl CanonicalCode {
         }
     }
 
-    /// CLI exit code（计划 §7.3）。
+    /// CLI exit code，必须与 Robot v1 error catalog 保持一致。
     pub fn exit_code(self) -> i32 {
         match self {
             CanonicalCode::InvalidRequest => 2,
@@ -196,8 +197,8 @@ fn request_id() -> String {
     format!("cli-{}-{millis}", std::process::id())
 }
 
-/// 统一输出一个成功结果。所有模式当前都发单个 envelope（人类渲染器待落地，
-/// 见 §7.5 真值表——切片期 Human 退化为紧凑 JSON envelope，与既有 Robot-JSON 雏形一致）。
+/// 统一输出一个成功结果。所有模式当前都发单个 envelope（人类渲染器待落地；
+/// Human 在切片期退化为紧凑 JSON envelope，与既有 Robot-JSON 雏形一致）。
 pub fn emit(command: &str, _mode: OutputMode, outcome: Outcome, data: Value, duration_ms: u64) {
     println!("{}", success_envelope(command, outcome, data, duration_ms));
 }
@@ -415,4 +416,3 @@ mod tests {
         assert!(s.contains("\"duration_ms\":0"));
     }
 }
-

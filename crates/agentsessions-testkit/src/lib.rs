@@ -1,5 +1,4 @@
-//! Testkit：跨 crate 复用的测试构件（对应计划 §14 "Testkit、fixture builder、
-//! 只读断言和 fake Provider"）。
+//! Testkit：跨 crate 复用的测试构件，包括 fixture builder、只读断言和 fake Provider。
 //!
 //! 本 crate 只被其他 crate 的 `[dev-dependencies]` 依赖，绝不进入生产依赖图。
 //! 提供四类构件：

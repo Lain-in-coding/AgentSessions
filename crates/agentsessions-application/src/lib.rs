@@ -2,7 +2,7 @@
 //!
 //! 本层不知道任何具体前端或后端——只依赖 domain 的类型与 ports 的抽象。
 //! 所有前端把各自的输入归一为 [`AppRequest`]，把 [`AppResponse`] 渲染成各自的输出格式。
-//! 分层依赖：domain ← ports ← application ← adapters（见计划 §5 crate 结构）。
+//! 分层依赖不变量：domain ← ports ← application ← adapters。
 
 use agentsessions_domain::{DomainError, StableId};
 use agentsessions_ports::{

@@ -1,4 +1,5 @@
-//! 领域错误（对应计划 §7.3 Exit Code 与 §7.2 错误矩阵的领域侧来源）。
+//! 领域错误：CLI exit code 与协议错误映射见 CLI/Robot/MCP contract 和
+//! `schemas/robot/v1/error-catalog.json`。
 //!
 //! Domain 层只定义"发生了什么"，不决定 CLI exit code 或 MCP code——
 //! 那是 protocol 层的映射职责（见 docs/contracts/CONTRACT-cli-robot-mcp-draft.md）。

@@ -1,4 +1,4 @@
-//! CAS activation（计划 §6.5）：`CURRENT == expected_base` 才切换 generation。
+//! CAS activation：仅当 `CURRENT == expected_base` 时切换 generation。
 //!
 //! 证据：`spikes/data-root-locking` assertion C。生产路径应在持有
 //! [`crate::WriterLease`] 下调用，本模块只负责比较-交换语义本身。

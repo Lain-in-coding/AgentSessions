@@ -28,7 +28,7 @@ pub struct Message {
     /// 父消息 ID：threading DAG 的边。根消息为 `None`。
     ///
     /// 由 provider 的 native 父指针（如 Claude Code 的 `parentUuid`）重建；
-    /// 供 `show` / `get_session_context` 定位 Thread/Branch（见计划 §show 要求）。
+    /// 供 `show` / `get_session_context` 定位 Thread/Branch。
     #[serde(default)]
     pub parent: Option<StableId>,
     pub role: Role,

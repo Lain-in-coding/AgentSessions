@@ -17,15 +17,35 @@ use agentsessions_ports::{
     CatalogEntry, CatalogStore, PortError, PortResult, SearchHit, SearchIndex,
 };
 use rusqlite::{Connection, OptionalExtension};
+use std::any::Any;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// 把任意可显示的底层错误归一为端口层的 `PortError::Backend`。
-fn backend<E: std::fmt::Display>(e: E) -> PortError {
-    PortError::Backend(e.to_string())
+/// Translate adapter failures into the stable port error vocabulary.
+///
+/// SQLite BUSY/LOCKED conditions are expected writer contention and therefore
+/// retryable. The diagnostic is intentionally generic so backend paths or raw
+/// SQLite messages cannot escape through the protocol boundary.
+fn backend<E: std::fmt::Display + 'static>(e: E) -> PortError {
+    let any = &e as &dyn Any;
+    if any.downcast_ref::<rusqlite::Error>().is_some_and(|error| {
+        matches!(
+            error,
+            rusqlite::Error::SqliteFailure(sqlite, _)
+                if matches!(
+                    sqlite.code,
+                    rusqlite::ErrorCode::DatabaseBusy
+                        | rusqlite::ErrorCode::DatabaseLocked
+                )
+        )
+    }) {
+        PortError::WriterBusy("SQLite storage is busy or locked by another writer".into())
+    } else {
+        PortError::Backend(e.to_string())
+    }
 }
 
 static NEXT_OPERATION_ID: AtomicU64 = AtomicU64::new(0);
@@ -154,7 +174,7 @@ pub struct PendingIndexBatch {
 ///
 /// `sync`/`ingest` 为每个只读源构造一个 `SourceBatch`，store 据此推导：本次出现的
 /// message id 是 upsert；该源上次成功 scan 有、本次没有的 id 是 tombstone（删除）。
-/// 只有整批全部源都 stage 成功后才提交，满足计划 §16.3“完整成功 scan 后才确认 missing”。
+/// 只有整批全部源都 stage 成功后才提交；missing/tombstone 只能由完整成功 scan 确认。
 pub struct SourceBatch {
     /// 该源的稳定标识（当前用其只读路径字符串）。
     pub source_path: String,
@@ -195,7 +215,7 @@ impl SqliteStore {
     /// 写入路径打开：先在 db 所在目录获取 data-root writer lease，再打开库。
     ///
     /// 若另一进程已持 lease，立即失败（不阻塞）。lease 随本 store 存活，
-    /// Drop 时释放——落实计划 §6.5 / 审查 #5。
+    /// Drop 时释放，以维持每个 data root 单写者不变量。
     pub fn open_for_write(path: &str) -> PortResult<Self> {
         let db_path = Path::new(path);
         let data_root = db_path.parent().unwrap_or_else(|| Path::new("."));
@@ -221,7 +241,7 @@ impl SqliteStore {
         })
     }
 
-    /// 打开并把 schema 迁移到当前版本（migration/rebuild 的地基，计划 §14 0.2）。
+    /// 打开并把 schema 迁移到当前版本，为版本化 migration 与可重建索引奠基。
     fn init(conn: &Connection) -> PortResult<()> {
         conn.execute_batch("PRAGMA journal_mode=WAL;")
             .map_err(backend)?;
@@ -441,7 +461,7 @@ impl SqliteStore {
     /// [`commit_index_batch`](Self::commit_index_batch) 的同一事务内提交。若整批 upsert 与
     /// tombstone 都与当前状态一致（内容级 no-op），返回 `false`，不生成新 generation。
     ///
-    /// 落实计划 §16.3：只有完整成功 scan（所有源都已 stage）才据此确认 missing/tombstone。
+    /// 只有完整成功 scan（所有源都已 stage）才可据此确认 missing/tombstone。
     pub fn commit_source_batches_if_changed(&self, sources: &[SourceBatch]) -> PortResult<bool> {
         // 源路径不得重复，否则 membership 推导有歧义。
         let mut paths: Vec<&str> = sources.iter().map(|s| s.source_path.as_str()).collect();
@@ -454,9 +474,12 @@ impl SqliteStore {
 
         // 汇总所有源的 upsert，先按 wire id 合并跨 source 重叠实体；只有 payload/text
         // 完全相同才允许共享同一实体，避免一次 batch 的重复 id 被拒绝或产生不确定结果。
+        // 必须先收集完整 incoming 集合，再基于旧 membership 推导 tombstone；否则推导结果
+        // 会依赖 source 输入顺序，并把“从旧 source 移到新 source”的实体同时列入删除与 upsert。
+        let scanned_paths: BTreeSet<&str> = paths.into_iter().collect();
         let mut merged: BTreeMap<String, (StableId, Vec<u8>, String)> = BTreeMap::new();
         let mut incoming_ids = BTreeSet::new();
-        let mut deletes: Vec<StableId> = Vec::new();
+        let mut present_by_source: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
         for source in sources {
             let present: BTreeSet<&str> = source
                 .entries
@@ -485,21 +508,31 @@ impl SqliteStore {
                     );
                 }
             }
-            if self.source_was_scanned(&source.source_path)? {
-                for prior in self.source_message_ids(&source.source_path)? {
-                    if !present.contains(prior.as_str())
-                        && !incoming_ids.contains(prior.as_str())
-                        && !self.message_referenced_by_other_source(&prior, &source.source_path)?
-                    {
-                        let id = StableId::from_wire(&prior).ok_or_else(|| {
-                            PortError::Backend(format!("invalid membership id: {prior}"))
-                        })?;
-                        deletes.push(id);
-                    }
+            present_by_source.insert(source.source_path.as_str(), present);
+        }
+
+        let mut deletes = BTreeMap::new();
+        for source in sources {
+            if !self.source_was_scanned(&source.source_path)? {
+                continue;
+            }
+            let present = present_by_source
+                .get(source.source_path.as_str())
+                .ok_or_else(|| PortError::Backend("source membership derivation failed".into()))?;
+            for prior in self.source_message_ids(&source.source_path)? {
+                if !present.contains(prior.as_str())
+                    && !incoming_ids.contains(prior.as_str())
+                    && !self.message_referenced_by_unscanned_source(&prior, &scanned_paths)?
+                {
+                    let id = StableId::from_wire(&prior).ok_or_else(|| {
+                        PortError::Backend(format!("invalid membership id: {prior}"))
+                    })?;
+                    deletes.insert(prior, id);
                 }
             }
         }
         let upserts: Vec<(StableId, Vec<u8>, String)> = merged.into_values().collect();
+        let deletes: Vec<StableId> = deletes.into_values().collect();
 
         // 校验整体变更集合（重复/交叠即拒绝），再判定是否内容级 no-op。
         batch_manifest(&upserts, &deletes)?;
@@ -579,22 +612,24 @@ impl SqliteStore {
         Ok(exists.is_some())
     }
 
-    fn message_referenced_by_other_source(
+    fn message_referenced_by_unscanned_source(
         &self,
         message_id: &str,
-        source_path: &str,
+        scanned_paths: &BTreeSet<&str>,
     ) -> PortResult<bool> {
         let conn = self.conn.borrow();
-        let exists: Option<i64> = conn
-            .query_row(
-                "SELECT 1 FROM source_membership
-                 WHERE message_id = ?1 AND source_path <> ?2 LIMIT 1",
-                rusqlite::params![message_id, source_path],
-                |row| row.get(0),
-            )
-            .optional()
+        let mut stmt = conn
+            .prepare("SELECT source_path FROM source_membership WHERE message_id = ?1")
             .map_err(backend)?;
-        Ok(exists.is_some())
+        let rows = stmt
+            .query_map([message_id], |row| row.get::<_, String>(0))
+            .map_err(backend)?;
+        for row in rows {
+            if !scanned_paths.contains(row.map_err(backend)?.as_str()) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// 读回当前活动 generation（v2 起可用）。
@@ -612,7 +647,7 @@ impl SqliteStore {
 
     /// 阶段一（durable intent）：写入一条 `building` outbox 行并提交。
     ///
-    /// 落实计划 §6.5 Outbox 状态机的第一个 durable point——在任何 catalog/FTS
+    /// Durable outbox 状态机的第一个 durable point——在任何 catalog/FTS
     /// 变更落盘之前，先持久化"应该构建什么"（upsert/delete 集合 + digest）。
     /// 此后崩溃，恢复只会看到一条无副作用的 `building` 行并将其 `aborted`。
     ///
@@ -667,7 +702,7 @@ impl SqliteStore {
     /// 因此不存在"搜索已建但未激活"的中间崩溃窗口。
     ///
     /// CAS 前置：`active_generation == pending.base_generation`。不匹配则拒绝，
-    /// 防止旧基线覆盖更新的同步结果（计划 §6.5）。
+    /// 防止旧基线覆盖更新的同步结果。
     pub fn commit_index_batch(
         &self,
         pending: &PendingIndexBatch,
@@ -844,7 +879,7 @@ impl SqliteStore {
     }
 
     /// 从权威 catalog 全量重投影 FTS 索引，通过 durable outbox + generation 保证
-    /// 重建期崩溃不污染当前活动 generation（计划 §14 0.2 `index rebuild`）。
+    /// 重建期崩溃不污染当前活动 generation。
     ///
     /// catalog 是内容的权威事实源，`fts` 搜索索引是可重建的派生投影（ADR-0001）。本方法：
     /// 1. 以 catalog 为权威实体集，读取全部 `(id, payload)`，用 [`searchable_text`] 投影检索正文；
@@ -964,8 +999,8 @@ impl SqliteStore {
     /// 只读统计停在 `building` 的 outbox 行数——中断恢复的"待收敛"证据。
     ///
     /// 与 [`recover_interrupted`](Self::recover_interrupted) 不同，本方法不改状态：
-    /// 供 doctor 等只读路径观测"有多少无副作用 intent 尚待下次写打开收敛"，
-    /// 落实 0.2 退出条件"中断恢复/generation 一致性有证据"（计划 §14）。
+    /// 供 doctor 等只读路径观测“有多少无副作用 intent 尚待下次写打开收敛”，
+    /// 作为 durable outbox 中断恢复与 generation 一致性的证据。
     pub fn interrupted_batch_count(&self) -> PortResult<u64> {
         let conn = self.conn.borrow();
         let n: i64 = conn
@@ -1139,6 +1174,77 @@ mod tests {
 
     fn sid(kind: IdKind, fact: &[u8]) -> StableId {
         StableId::derive(kind, Stability::Reconstructed, &[fact])
+    }
+
+    fn sqlite_failure(code: i32) -> rusqlite::Error {
+        rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(code), None)
+    }
+
+    #[test]
+    fn sqlite_busy_maps_to_retryable_writer_busy() {
+        let error = backend(sqlite_failure(rusqlite::ffi::SQLITE_BUSY));
+        assert!(matches!(
+            error,
+            PortError::WriterBusy(message)
+                if message == "SQLite storage is busy or locked by another writer"
+        ));
+    }
+
+    #[test]
+    fn sqlite_locked_maps_to_retryable_writer_busy() {
+        let error = backend(sqlite_failure(rusqlite::ffi::SQLITE_LOCKED));
+        assert!(matches!(
+            error,
+            PortError::WriterBusy(message)
+                if message == "SQLite storage is busy or locked by another writer"
+        ));
+    }
+
+    #[test]
+    fn non_contention_sqlite_failure_remains_backend() {
+        let error = backend(sqlite_failure(rusqlite::ffi::SQLITE_CORRUPT));
+        assert!(matches!(error, PortError::Backend(_)));
+    }
+
+    type SourceState = (u64, Vec<(String, Vec<u8>)>, Vec<(String, String)>, String);
+
+    fn source_state(store: &SqliteStore) -> SourceState {
+        let conn = store.conn.borrow();
+        let catalog = {
+            let mut stmt = conn
+                .prepare("SELECT id, payload FROM catalog ORDER BY id")
+                .unwrap();
+            let rows = stmt
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap();
+            rows.map(Result::unwrap).collect()
+        };
+        let membership = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT source_path, message_id FROM source_membership
+                     ORDER BY source_path, message_id",
+                )
+                .unwrap();
+            let rows = stmt
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap();
+            rows.map(Result::unwrap).collect()
+        };
+        let digest = conn
+            .query_row(
+                "SELECT operation_digest FROM index_batches
+                 WHERE state = 'activated' ORDER BY target_generation DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        (
+            store.active_generation().unwrap(),
+            catalog,
+            membership,
+            digest,
+        )
     }
 
     #[test]
@@ -1433,6 +1539,105 @@ mod tests {
     }
 
     #[test]
+    fn moving_message_to_new_source_is_atomic() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let moved = sid(IdKind::Message, b"move-to-new-source");
+        let original = SourceBatch {
+            source_path: "source-a".into(),
+            entries: vec![(moved.clone(), b"p".to_vec(), "moved text".into())],
+        };
+        store
+            .commit_source_batches_if_changed(std::slice::from_ref(&original))
+            .unwrap();
+
+        let moved_batches = [
+            SourceBatch {
+                source_path: "source-a".into(),
+                entries: Vec::new(),
+            },
+            SourceBatch {
+                source_path: "source-b".into(),
+                entries: vec![(moved.clone(), b"p".to_vec(), "moved text".into())],
+            },
+        ];
+        assert!(
+            store
+                .commit_source_batches_if_changed(&moved_batches)
+                .unwrap()
+        );
+        assert_eq!(store.active_generation().unwrap(), 2);
+        assert_eq!(store.get(&moved).unwrap().unwrap(), b"p");
+        assert_eq!(store.query("moved", 10).unwrap().len(), 1);
+        assert_eq!(
+            store.source_message_ids("source-a").unwrap(),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            store.source_message_ids("source-b").unwrap(),
+            vec![moved.as_str().to_string()]
+        );
+    }
+
+    #[test]
+    fn source_batch_permutations_produce_identical_state() {
+        fn run(order: [usize; 3]) -> SourceState {
+            let store = SqliteStore::open_in_memory().unwrap();
+            let moved = sid(IdKind::Message, b"permuted-move");
+            let removed = sid(IdKind::Message, b"permuted-remove");
+            let kept = sid(IdKind::Message, b"permuted-keep");
+            let initial = [
+                SourceBatch {
+                    source_path: "source-a".into(),
+                    entries: vec![
+                        (moved.clone(), b"m".to_vec(), "moved text".into()),
+                        (removed.clone(), b"r".to_vec(), "removed text".into()),
+                    ],
+                },
+                SourceBatch {
+                    source_path: "source-c".into(),
+                    entries: vec![(kept.clone(), b"k".to_vec(), "kept text".into())],
+                },
+            ];
+            store.commit_source_batches_if_changed(&initial).unwrap();
+
+            let mut replacement = [
+                Some(SourceBatch {
+                    source_path: "source-a".into(),
+                    entries: Vec::new(),
+                }),
+                Some(SourceBatch {
+                    source_path: "source-b".into(),
+                    entries: vec![(moved, b"m".to_vec(), "moved text".into())],
+                }),
+                Some(SourceBatch {
+                    source_path: "source-c".into(),
+                    entries: vec![(kept, b"k".to_vec(), "kept text".into())],
+                }),
+            ];
+            let ordered: Vec<SourceBatch> = order
+                .into_iter()
+                .map(|index| replacement[index].take().unwrap())
+                .collect();
+            store.commit_source_batches_if_changed(&ordered).unwrap();
+            assert!(store.get(&removed).unwrap().is_none());
+            source_state(&store)
+        }
+
+        let permutations = [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ];
+        let expected = run(permutations[0]);
+        for permutation in permutations.into_iter().skip(1) {
+            assert_eq!(run(permutation), expected);
+        }
+    }
+
+    #[test]
     fn empty_source_scan_tombstones_prior_membership() {
         let store = SqliteStore::open_in_memory().unwrap();
         let id = sid(IdKind::Message, b"becomes-empty");
@@ -1657,7 +1862,7 @@ mod tests {
 
     #[test]
     fn rebuild_restores_search_after_index_data_wiped() {
-        // 落实 0.2 退出条件“Catalog/Search 可删除重建”与回滚 runbook（计划 §14 行 1382）：
+        // 验证 ADR-0001 的“Catalog 权威、Search 可删除重建”不变量：
         // 直接清空全文索引数据（模拟索引损坏/删除），rebuild 应仅凭权威 catalog 完全恢复搜索。
         let store = SqliteStore::open_in_memory().unwrap();
         let a = sid(IdKind::Message, b"survivor-a");

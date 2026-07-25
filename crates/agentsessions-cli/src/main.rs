@@ -1,7 +1,8 @@
 //! AgentSessions CLI：组合根（composition root）。
 //!
 //! 本 crate 是唯一把抽象端口与具体 adapter 绑定的地方——它 `new` 出 [`SqliteStore`]
-//! 并注入 [`App`]，其余各层对具体后端一无所知（见计划 §5 分层依赖）。
+//! 并注入 [`App`]，其余各层对具体后端一无所知；分层依赖保持
+//! domain ← ports ← application ← adapters。
 //! 首个垂直切片只暴露两个子命令，用于端到端打通 discovery→catalog→search 骨架：
 //!
 //! ```text
@@ -28,7 +29,7 @@ use protocol::{CanonicalCode, ProtocolError};
 /// CLI 顶层错误：所有失败都归一到 [`ProtocolError`]，exit code 由 Error Catalog 决定。
 ///
 /// `Usage` 保留为薄封装，仅表示参数校验失败（映射 `invalid_request` → exit 2），
-/// 使用法错误与业务错误走同一 envelope/退出码路径（见计划 §7.3/§7.4）。
+/// 使用法错误与业务错误遵循 CLI/Robot/MCP contract 的同一 envelope/退出码映射。
 #[derive(Debug)]
 struct CliError(ProtocolError);
 
@@ -276,7 +277,7 @@ fn doctor(args: &[String], mode: protocol::OutputMode) -> Result<(), CliError> {
         Some(path) => {
             let store = SqliteStore::open(path).map_err(ProtocolError::from)?;
             let schema = store.schema_version().map_err(ProtocolError::from)?;
-            // generation 与待收敛 intent 数是中断恢复/一致性的只读证据（计划 §14 0.2 退出条件）。
+            // generation 与待收敛 intent 数是 durable outbox 中断恢复与一致性的只读证据。
             let generation = store.active_generation().map_err(ProtocolError::from)?;
             let interrupted = store
                 .interrupted_batch_count()
@@ -546,7 +547,7 @@ fn ingest_file(store: &SqliteStore, path: &str) -> Result<serde_json::Value, Cli
     // 2) probe-select + stage：从 registry 挑出认领此源的 provider；失败即弃，不写库。
     let (staged, variant) = stage_with_registry(&bytes)?;
 
-    // 3) 提交前复核：源在 stage 期间被改写则拒绝提交（§4）。
+    // 3) 提交前复核：源在 stage 期间被改写则拒绝提交（RFC-0002 §4）。
     verify_snapshot(path_ref, &snap).map_err(ProtocolError::from)?;
 
     // 4) 派生 id + 构造该源的完整 scan 结果，按 source membership 提交。

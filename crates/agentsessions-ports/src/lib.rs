@@ -3,7 +3,7 @@
 //! 这里只定义 trait 和相关 DTO，不含任何具体实现——实现属于 adapter crate。
 //! Application 只依赖本 crate 的抽象，从而与 SQLite / 文件系统 / 具体 provider 解耦。
 //!
-//! 分层依赖：domain ← ports ← application ← adapters（见计划 §5 crate 结构）。
+//! 分层依赖不变量：domain ← ports ← application ← adapters。
 
 use agentsessions_domain::{DomainError, DomainResult, StableId};
 
