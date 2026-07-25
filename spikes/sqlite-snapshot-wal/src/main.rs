@@ -1,8 +1,7 @@
 //! sqlite-snapshot-wal spike（可丢弃探针，不进 crates/）。
 //!
-//! 目的：为计划 §6.5（不可变 Generation Bundle）与 §9.1（WAL 一致快照）
-//! 以及审查第 13 项（"裸复制 .sqlite 会丢失未 checkpoint 的已提交事务"）
-//! 提供 Windows 上的实测证据。
+//! 目的：为不可变 Generation Bundle、WAL 一致快照及历史审查证据 #13
+//! （"裸复制 .sqlite 会丢失未 checkpoint 的已提交事务"）提供 Windows 上的实测证据。
 //!
 //! 验证四个断言：
 //!   A. WAL 模式下裸复制主库文件（不含 -wal）会丢失已提交但未 checkpoint 的事务；
@@ -37,12 +36,16 @@ fn main() -> Result<()> {
     print_result("C VACUUM INTO 一致快照", c.pass, &c.detail);
     print_result("D 旧快照写入期间可只读打开", d.pass, &d.detail);
 
-    println!("\n对计划的意义：");
-    println!("  §9.1 快照方法：Backup API / VACUUM INTO 通过 → 生产 bundle 快照禁止裸 fs::copy 主库；");
-    println!("  §6.5 不可变 bundle：旧快照只读打开成立 → 活动期间可保留旧 generation 供 cursor 分页；");
-    println!("  审查#13：断言 A 若复现，即坐实【裸复制丢事务】风险，必须走受控快照。");
+    println!("\nContract / decision evidence：");
+    println!("  快照实现：Backup API / VACUUM INTO 通过 → 正式 bundle 快照禁止裸 fs::copy 主库；");
+    println!("  不可变 bundle：旧快照只读打开成立 → 可作为 cursor 分页 pinning 的证据输入；");
+    println!("  历史审查#13：断言 A 若复现，即坐实裸复制丢事务风险，正式存储记录应引用本证据。");
 
-    Ok(())
+    if a.pass && b.pass && c.pass && d.pass {
+        Ok(())
+    } else {
+        anyhow::bail!("one or more sqlite-snapshot-wal assertions failed")
+    }
 }
 
 struct Check {

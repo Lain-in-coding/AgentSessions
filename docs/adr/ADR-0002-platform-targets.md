@@ -5,11 +5,13 @@
 > - status: **Proposed**（待 R0 Accepted）
 > - owner: （待指派）  approver: 项目最终验收人
 > - due_milestone: R0
-> - evidence_path: `spikes/cross-platform-packaging/`、`docs/adr/ADR-0002-platform-targets.md`
+> - evidence_path: `spikes/cross-platform-packaging/`、`docs/adr/ADR-0002-platform-targets.md`、`docs/operations/core-beta-evidence-matrix.md`
+>
+> 本 ADR 仍为 **Proposed**。专用 CI 工作流只构成 `ci_configured_only` 证据；在成功 run URL 与产物被审阅前，不得把配置状态写成平台验证或发布认证。
 
 ## 背景
 
-计划 §1.2 把 Windows x64、Linux x64、macOS x64/ARM64 列为正式平台候选，要求 R0
+AgentSessions 将 Windows x64、Linux x64、macOS x64/ARM64 作为 v1.0 正式平台候选；本 ADR 在 R0
 冻结准确 target triple、最低 OS/glibc 和链接策略。Selection Gate 硬门之一是
 "全部正式 target 干净构建"，因此平台集合必须先冻结。
 
@@ -43,8 +45,10 @@
 
 ## 后果
 
-- CI 矩阵按 §11.2：Linux x64 为 PR 必跑核心，其他三个正式 target 为 PR smoke + Nightly 全量。
-- 本机（Windows x64）已实测干净构建（spike）；其余三 target 的干净构建需 CI runner 验证，属 0.2 Cross-platform Beta 退出条件。
+- 普通 PR 质量门继续由 `.github/workflows/ci.yml` 承担；专用证据矩阵由 `.github/workflows/core-beta-evidence.yml` 配置 Windows x64、Ubuntu GNU x64、macOS Intel 与 macOS ARM64 的 release build、直接二进制 smoke、现有 SQLite adapter 测试和存储 feasibility spikes。
+- 本机（Windows x64）已有 release 干净构建 spike 证据；其余平台行以及新工作流中的所有 job 在没有成功 run URL/下载产物前均仅为 `ci_configured_only`，不是已通过结论。
+- Ubuntu 22.04 hosted runner 不认证 glibc 2.31；`MACOSX_DEPLOYMENT_TARGET=12.0` 不认证在 macOS 12 上实际运行；Windows job 的静态 CRT 构建也不替代 Windows 10 clean-machine 测试。
+- Linux musl、glibc 2.31 基线、macOS 12 runtime、Windows 签名、macOS 签名/公证仍需额外基础设施。完整分类与证据 ID 见 `docs/operations/core-beta-evidence-matrix.md`。
 
 ## 备选与否决
 

@@ -13,6 +13,9 @@ target/
 *.sqlite
 *.sqlite3
 
+# Generated local benchmark evidence (reports may contain machine details)
+/evidence-output/
+
 # Secrets / credentials (绝不入库)
 .env
 .env.*
@@ -22,15 +25,17 @@ target/
 credentials*
 .mcp.json
 
-# 本地 agent / 编辑器配置
+# Local agent / editor configuration
 .claude/
 .idea/
 .vscode/
 
-# 内部工作文档（含个人路径，不开源）
-/Plan/
+# Generated language caches
+**/__pycache__/
+**/*.pyc
+
+# Local research material (not part of the shared repository)
 /AI-Agent历史会话检索-借鉴项目清单.md
-/AI-Agent历史会话检索项目-交接文档-2026-07-21.md
 
 # OS / editor cruft
 .DS_Store
