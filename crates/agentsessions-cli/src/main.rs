@@ -17,6 +17,7 @@
 mod human;
 mod mcp;
 mod protocol;
+mod tui;
 
 use agentsessions_adapters_sqlite::{SourceBatch, SqliteStore, capture, verify_snapshot};
 use agentsessions_application::{
@@ -194,6 +195,11 @@ fn run(
     if rest.first().map(String::as_str) == Some("mcp") {
         return mcp::serve(&store);
     }
+    // tui：交互式只读浏览（Preview）。同 mcp 一样接管终端，不走 dispatch/
+    // emit_result；输出模式 flag 对其无意义（task design §0.6）。
+    if rest.first().map(String::as_str) == Some("tui") {
+        return tui::run(&store);
+    }
     // catalog 与 index 是同一个 SqliteStore；App 泛型接受同一实例的两次移动，
     // 故这里克隆一个连接语义上的第二把手不可行——改为让 App 持有单一 store。
     let (command, outcome, data, page, warnings) = dispatch(&store, &rest, mode, request_id)?;
@@ -360,6 +366,7 @@ COMMANDS:
     context <ses-id>       装配会话上下文：分支消息链 + 证据区间
     status                 报告 catalog 实体总数
     mcp                    启动 stdio MCP 服务（JSON-RPC 2.0；stdout 只输出 MCP frame）
+    tui                    交互式只读浏览（Preview；需要交互式终端）
     doctor                 环境自检（可选 --db 校验存储可打开）
     config paths           报告当前平台的 config/data/cache/logs 路径
 
