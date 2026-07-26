@@ -9,6 +9,14 @@ description = "可丢弃探针：验证 SQLite 类 provider 源（ForgeCode/Kiro
 name = "sqlite-source-identity-spike"
 path = "src/main.rs"
 
+[[bin]]
+name = "phase2"
+path = "src/bin/phase2.rs"
+
+[[bin]]
+name = "schema_probe"
+path = "src/bin/schema_probe.rs"
+
 [dependencies]
 # 与其他 spike 对齐；backup feature 用于只读一致快照。
 rusqlite = { version = "0.40", features = ["bundled", "backup"] }

@@ -145,3 +145,36 @@ WAL 模式下只读事务拿到一个一致读点：读事务内多次采样得�
 本 spike 的行级身份方案给出了另一条路：SQLite 源同样可以获得稳定、
 细粒度、内容可验证的身份，从而支持增量与持久索引。这是本项目相对
 CCHV 的技术差异点所在——但代价是每个 provider 的接入成本更高。
+
+## CCHV provider 存储分档（观察快照，非规格）
+
+> 以下是对 CCHV 公开源码的机械分类，**截至 v1.22.0 / 推送 2026-07-23**。
+> 数字会随上游版本变化；不得当作本项目的 provider 支持承诺或验收数字。
+> 判定依据：源文件是否调用 `Connection::open` / `rusqlite`，以及是否构造合成 URL。
+
+`ProviderId` 枚举共 **28** 个用户可见 provider（`src-tauri/src/providers/mod.rs`）。
+按存储形态粗分：
+
+| 档位 | 约数 | 接入本项目的前置条件 | 代表 |
+|---|---|---|---|
+| 文件型（jsonl / 整文件 JSON） | ~17 | 现有文件级 `SourceSnapshot` 即可 | gemini、qwen、aider、kimi、copilot、continue、openhands、pi、vibe、codebuddy、antigravity… |
+| SQLite 型 | ~11 | 需要行级身份 + 运行时列名适配 | zed、cursor、cline、trae、kiro、crush、forgecode、amazon_q、goose、llm、opencode |
+| 混合型 | 1 | 文件级为主，SQLite 为辅 | codex（本仓库已支持） |
+
+实测信号摘要（临时下载 CCHV `providers/*.rs` 后 grep，下载物已删除）：
+
+- 真正 `Connection::open` 的文件：zed、trae、cursor、cline、kiro、crush、forgecode、amazon_q、goose、llm、codex、opencode。
+- 使用 `PRAGMA table_info` 做运行时列适配的只有 **zed** 与 **forgecode**；其余 SQLite provider 为硬编码列序。本项目若做通用适配层，不能指望从 CCHV 抄到现成层。
+- 合成 URL scheme 已观察到：`codex://`、`cursor://`、`cline://`、`kiro://`、`opencode://`、`forgecode://`、`gemini://`、`aider://`、`kimi://`、`vscode://`。合成路径是 CCHV 无法做增量的根因（见上一节引用）。
+
+### 对本项目推进顺序的建议（仍是建议，不是决策）
+
+1. **先完成批次 4 已写明的身份建模**（`07-24-advance-integration-beta` 的 Session/SourceDocument 独立身份）。行级身份作为该建模的一种形态，引用本文件为可行性证据；真正做决定时写 ADR，不在此升级为规格。
+2. **再批量接入文件型 provider**。它们不需要契约变更，但依赖批次 4 的 fixture 规范（可审计、隐私安全、可复现），否则每个 provider 都会欠一笔 fixture 债。
+3. **最后接 SQLite 型**。前置是 ADR 落地 + 通用列名适配层。
+
+### 交接注意
+
+- 本文件与 `src/` 探针代码同属可丢弃 spike；清理 spike 前须先把**耐久结论**写入 ADR，否则链接会断。
+- 不得把本节的"~17 / ~11 / 28"写进 Trellis 验收标准；那些是对手某版本的观察。
+- 生产代码未改：`crates/` 保持原样。
