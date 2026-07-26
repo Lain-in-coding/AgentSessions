@@ -21,6 +21,17 @@ pub enum Role {
     Tool,
 }
 
+/// 指向已验证来源快照的字节区间；`end` 为排他边界。
+///
+/// 不变量：`start <= end`。区间以"已验证快照字节"为坐标系——对文件级来源
+/// 即快照全文，对未来的行级来源即提取出的行负载。由 provider 在解析期上报，
+/// 领域层绝不臆造。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvidenceSpan {
+    pub start: u64,
+    pub end: u64,
+}
+
 /// 一条 Canonical 消息。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Message {
@@ -48,6 +59,12 @@ pub struct Message {
     /// subagent transcript 里的消息为 `true`。供 Thread/Branch 区分主线与旁支。
     #[serde(default)]
     pub is_sidechain: bool,
+    /// 该消息在来源快照中的字节区间证据。
+    ///
+    /// `None` 表示"未记录出处"（legacy 行或 provider 无法归因连续区间），
+    /// 是显式的缺失，绝不臆造。
+    #[serde(default)]
+    pub span: Option<EvidenceSpan>,
 }
 
 /// 一个 Canonical 会话：来自某个来源文档的一段连续对话。
@@ -98,6 +115,44 @@ impl Session {
                     parent.kind()
                 )));
             }
+            // span 若存在，必须满足 start <= end（end 为排他边界）。
+            if let Some(span) = &m.span
+                && span.start > span.end
+            {
+                return Err(DomainError::InvariantViolation(format!(
+                    "message[{i}] span start {} > end {}",
+                    span.start, span.end
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// 一个来源文档实体：某 provider 变体下、已验证快照的内容寻址描述。
+///
+/// 实体本身不存路径——身份与位置分离（RFC-0001）；路径→文档的关联归存储层。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceDocument {
+    pub id: StableId,
+    /// 来源 provider 标识，如 `"claude-code"`。
+    pub provider_id: String,
+    /// provider 格式变体标识，如 `"claude-code/jsonl-v1"`。
+    pub variant_id: String,
+    /// 已验证快照全文的 BLAKE3 十六进制指纹。
+    pub fingerprint: String,
+    /// 快照字节长度——消息 span 索引的坐标系上界。
+    pub len: u64,
+}
+
+impl SourceDocument {
+    /// 校验文档实体的领域不变量：ID 类别必须为 Document。
+    pub fn validate(&self) -> DomainResult<()> {
+        if self.id.kind() != IdKind::Document {
+            return Err(DomainError::InvariantViolation(format!(
+                "document id has wrong kind: {:?}",
+                self.id.kind()
+            )));
         }
         Ok(())
     }
@@ -120,6 +175,7 @@ mod tests {
             seq,
             timestamp: None,
             is_sidechain: false,
+            span: None,
         }
     }
 
@@ -182,5 +238,53 @@ mod tests {
         assert_eq!(clone, m);
         assert!(clone.is_sidechain);
         assert_eq!(clone.timestamp.as_deref(), Some("2026-06-27T13:57:42.685Z"));
+    }
+
+    #[test]
+    fn message_json_without_span_deserializes_to_none() {
+        // legacy JSON（无 span 字段）必须反序列化为 None——显式缺失，不臆造。
+        let m = msg(0);
+        let mut value = serde_json::to_value(&m).unwrap();
+        value.as_object_mut().unwrap().remove("span");
+        let parsed: Message = serde_json::from_value(value).unwrap();
+        assert_eq!(parsed.span, None);
+        assert_eq!(parsed, m);
+    }
+
+    #[test]
+    fn valid_span_passes() {
+        let mut m = msg(0);
+        m.span = Some(EvidenceSpan { start: 10, end: 42 });
+        let s = session_with(vec![m]);
+        assert!(s.validate().is_ok());
+    }
+
+    #[test]
+    fn span_start_greater_than_end_rejected() {
+        let mut m = msg(0);
+        m.span = Some(EvidenceSpan { start: 43, end: 42 });
+        let s = session_with(vec![m]);
+        assert_eq!(s.validate().unwrap_err().code(), "invariant_violation");
+    }
+
+    fn doc(kind: IdKind) -> SourceDocument {
+        SourceDocument {
+            id: StableId::derive(kind, Stability::Reconstructed, &[b"d"]),
+            provider_id: "claude-code".into(),
+            variant_id: "claude-code/jsonl-v1".into(),
+            fingerprint: "deadbeef".into(),
+            len: 128,
+        }
+    }
+
+    #[test]
+    fn valid_source_document_passes() {
+        assert!(doc(IdKind::Document).validate().is_ok());
+    }
+
+    #[test]
+    fn source_document_wrong_id_kind_rejected() {
+        let d = doc(IdKind::Session);
+        assert_eq!(d.validate().unwrap_err().code(), "invariant_violation");
     }
 }
