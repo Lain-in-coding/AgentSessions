@@ -4,13 +4,32 @@
 //! 所有前端把各自的输入归一为 [`AppRequest`]，把 [`AppResponse`] 渲染成各自的输出格式。
 //! 分层依赖不变量：domain ← ports ← application ← adapters。
 
-use agentsessions_domain::{DomainError, StableId};
+use agentsessions_domain::{
+    ContextPolicy, DomainError, EvidenceSpan, Message, Role, StableId, select_full, select_mainline,
+};
 use agentsessions_ports::{
     CanonicalEventSink, CatalogEntry, CatalogStore, Confidence, MessageEvent, PortError,
     PortResult, ProviderAdapter, ProviderError, SearchHit, SearchIndex,
 };
 
-/// Application 边界错误：保留 Domain、Port 与 Provider 的原始分类，供各前端统一映射协议。
+pub mod budget;
+pub mod cursor;
+pub mod evidence;
+
+pub use budget::{ResponseBudget, Truncation};
+pub use evidence::EvidenceSpanDto;
+
+/// 排序方案标识：catalog 列表的钉住排序（wire id 升序，见 sqlite `ORDER BY id ASC`）。
+pub const SORT_WIRE_ID_ASC: &str = "wire_id_asc";
+/// 排序方案标识：检索结果的钉住排序（bm25 降序 + id tiebreak，全序确定）。
+pub const SORT_SCORE_DESC: &str = "score_desc";
+
+/// clamp 前从 `max_response_bytes` 扣除的 envelope 预留（budget.rs 声明预留是调用方义务）。
+/// 预算下限 4096 保证扣除后仍为正。
+const ENVELOPE_RESERVE_BYTES: usize = 1024;
+
+/// Application 边界错误：保留 Domain、Port、Provider、Cursor 与 Budget 的原始分类，
+/// 供各前端统一映射协议（cursor/budget 错误在 protocol 层有专属 canonical code）。
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
     #[error(transparent)]
@@ -19,6 +38,10 @@ pub enum AppError {
     Port(#[from] PortError),
     #[error(transparent)]
     Provider(#[from] ProviderError),
+    #[error(transparent)]
+    Cursor(#[from] cursor::CursorError),
+    #[error(transparent)]
+    Budget(#[from] budget::BudgetError),
 }
 
 /// 应用层请求 ADT：所有前端的统一入口。
@@ -27,18 +50,32 @@ pub enum AppError {
 /// 从而保证 CLI / Robot / MCP / TUI 行为一致（见 CONTRACT-cli-robot-mcp-draft）。
 #[derive(Debug, Clone, PartialEq)]
 pub enum AppRequest {
-    /// 全文检索：按查询串返回命中列表。
+    /// 全文检索：按查询串返回命中列表（分页 + 预算）。
     Search {
         query: String,
-        /// 最多返回条数；0 视为非法请求。
+        /// 最多返回条数；0 视为非法请求。与 `budget.max_items` 取较小者为页大小。
         limit: usize,
+        /// 上一页发出的续读令牌；`None` 表示第一页。
+        cursor: Option<String>,
+        /// 响应预算（CONTRACT §3）；低于下限即校验错误。
+        budget: ResponseBudget,
     },
     /// 按稳定 ID 取回单个实体的原始负载。
     Get { id: StableId },
     /// 按稳定 wire id 展开展示一个实体；当前 Beta 返回规范化 payload。
     Show { id: StableId },
-    /// 按稳定 wire id 顺序列出实体；0 视为非法。
-    List { limit: usize },
+    /// 按稳定 wire id 顺序列出实体（分页 + 预算）；0 视为非法。
+    List {
+        limit: usize,
+        cursor: Option<String>,
+        budget: ResponseBudget,
+    },
+    /// 会话上下文装配：按策略选取分支，返回消息链与证据区间（CONTRACT §1-2）。
+    Context {
+        session_id: StableId,
+        policy: ContextPolicy,
+        budget: ResponseBudget,
+    },
     /// 返回当前 Catalog 统计状态。
     Status,
 }
@@ -46,14 +83,42 @@ pub enum AppRequest {
 /// 应用层结果 ADT：前端据此渲染，不再回到 domain/ports 类型。
 #[derive(Debug, Clone, PartialEq)]
 pub enum AppResponse {
-    /// 检索结果，按相关性降序。
-    Search { hits: Vec<SearchHit> },
+    /// 检索结果，按相关性降序（bm25 + id tiebreak 的钉住全序）。
+    Search {
+        hits: Vec<SearchHit>,
+        /// 还有后续页时的续读令牌；`None` 表示已到末尾。
+        next_cursor: Option<String>,
+        /// 本页对应的活动 generation（cursor 绑定它）。
+        generation: u64,
+        /// 预算截断标记；`truncated` 时前端应报 partial。
+        truncation: Truncation,
+    },
     /// 单个实体的原始负载；`None` 表示未找到。
     Get { payload: Option<Vec<u8>> },
     /// 单个实体的规范化展示；`None` 表示未找到。
     Show { payload: Option<Vec<u8>> },
-    /// 稳定排序后的 Catalog 条目。
-    List { entries: Vec<CatalogEntry> },
+    /// 稳定排序后的 Catalog 条目（wire id 升序）。
+    List {
+        entries: Vec<CatalogEntry>,
+        next_cursor: Option<String>,
+        generation: u64,
+        truncation: Truncation,
+    },
+    /// 会话上下文：选中分支的有序消息链 + 证据区间。
+    Context {
+        /// 会话 wire id。
+        session_id: String,
+        /// 会话 canonical payload（`{document, messages}`）。
+        session: serde_json::Value,
+        /// 选中分支的叶子消息 wire id；会话无消息时为 `None`。
+        branch_leaf: Option<String>,
+        /// root→leaf（mainline）或 seq 升序（full）的 `(wire id, canonical payload)`。
+        messages: Vec<(String, serde_json::Value)>,
+        /// 与 `messages` 对齐装配的证据区间（可能被 `max_evidence_spans` 截短）。
+        evidence: Vec<EvidenceSpanDto>,
+        truncation: Truncation,
+        generation: u64,
+    },
     /// 当前 Catalog 实体总数与活动 generation。
     Status {
         catalog_count: u64,
@@ -201,23 +266,115 @@ impl CanonicalEventSink for StagingSink {
     }
 }
 
+/// 系统时钟（Unix 毫秒）。[`App::new`] 的默认时钟；测试经 [`App::with_clock`] 注入固定值。
+fn system_now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// Context 装配的中间记录：wire id + 已验证 StableId + 解析后 payload + 原始字节。
+///
+/// 字节供 [`evidence::assemble`]（它只信 canonical payload），Value 供响应透传。
+struct MemberRecord {
+    wire: String,
+    id: StableId,
+    payload: serde_json::Value,
+    bytes: Vec<u8>,
+}
+
 /// 用例执行器：绑定所需端口，串起领域校验与端口调用。
 ///
 /// 泛型而非 trait object——前端在构造期决定后端实现，零动态分发开销。
+/// 时钟以 fn 指针注入：cursor 的发行/校验都不读环境时间（可测确定性）。
 pub struct App<C: CatalogStore, S: SearchIndex> {
     catalog: C,
     index: S,
+    clock_ms: fn() -> i64,
 }
 
 impl<C: CatalogStore, S: SearchIndex> App<C, S> {
     pub fn new(catalog: C, index: S) -> Self {
-        Self { catalog, index }
+        Self {
+            catalog,
+            index,
+            clock_ms: system_now_ms,
+        }
     }
 
-    /// 执行一个应用请求。校验错误保持 Domain 分类，端口错误保持 Port 分类。
+    /// 注入固定时钟的构造器（测试用）；生产路径一律 [`App::new`]。
+    pub fn with_clock(catalog: C, index: S, clock_ms: fn() -> i64) -> Self {
+        Self {
+            catalog,
+            index,
+            clock_ms,
+        }
+    }
+
+    /// 解析续读偏移：无令牌即第一页（offset 0）；有令牌则完整校验
+    /// （结构/摘要/过期/generation/查询与排序绑定），失败显式报错，绝不静默回第一页。
+    fn resolve_offset(
+        &self,
+        token: Option<&str>,
+        active_generation: u64,
+        query_digest: &str,
+        sort_digest: &str,
+    ) -> Result<u64, AppError> {
+        match token {
+            None => Ok(0),
+            Some(t) => {
+                let claims = cursor::verify(
+                    t,
+                    &cursor::CursorExpectations {
+                        now_ms: (self.clock_ms)(),
+                        active_generation,
+                        query_digest: query_digest.to_string(),
+                        sort_digest: sort_digest.to_string(),
+                    },
+                )?;
+                Ok(claims.offset)
+            }
+        }
+    }
+
+    /// 还有后续页时发行续读令牌；`offset_next` 是钉住排序内的下一读取位置。
+    fn issue_cursor(
+        &self,
+        has_more: bool,
+        generation: u64,
+        query_digest: &str,
+        sort_digest: &str,
+        offset_next: u64,
+    ) -> Option<String> {
+        if !has_more {
+            return None;
+        }
+        let now = (self.clock_ms)();
+        Some(
+            cursor::issue(&cursor::CursorClaims {
+                contract_major: cursor::SUPPORTED_CONTRACT_MAJOR,
+                generation,
+                issued_at_ms: now,
+                expires_at_ms: now + cursor::DEFAULT_TTL_MS,
+                query_digest: query_digest.to_string(),
+                sort_digest: sort_digest.to_string(),
+                offset: offset_next,
+            })
+            .into_string(),
+        )
+    }
+
+    /// 执行一个应用请求。校验错误保持 Domain 分类，端口错误保持 Port 分类，
+    /// cursor/budget 错误保持各自分类（protocol 层有专属 canonical code）。
     pub fn handle(&self, req: AppRequest) -> Result<AppResponse, AppError> {
         match req {
-            AppRequest::Search { query, limit } => {
+            AppRequest::Search {
+                query,
+                limit,
+                cursor: token,
+                budget,
+            } => {
                 if limit == 0 {
                     return Err(DomainError::InvalidRequest("limit must be > 0".into()).into());
                 }
@@ -226,8 +383,47 @@ impl<C: CatalogStore, S: SearchIndex> App<C, S> {
                         DomainError::InvalidRequest("query must not be empty".into()).into(),
                     );
                 }
-                let hits = self.index.query(&query, limit)?;
-                Ok(AppResponse::Search { hits })
+                budget.validate().map_err(AppError::from)?;
+                let generation = self.catalog.active_generation()?;
+                let query_digest = cursor::digest_query(&query);
+                let offset = self.resolve_offset(
+                    token.as_deref(),
+                    generation,
+                    &query_digest,
+                    SORT_SCORE_DESC,
+                )?;
+
+                // 分页模型：钉住排序（bm25 + id tiebreak 全序）内的 offset 续读。
+                // 端口无 offset 参数——超取 offset+page+1（+1 作 has_more 哨兵）后切片。
+                let page = limit.min(budget.max_items);
+                let fetch = usize::try_from(offset.saturating_add(page as u64).saturating_add(1))
+                    .unwrap_or(usize::MAX);
+                let fetched = self.index.query(&query, fetch)?;
+                let fetched_len = fetched.len() as u64;
+                let slice: Vec<SearchHit> = fetched
+                    .into_iter()
+                    .skip(usize::try_from(offset).unwrap_or(usize::MAX))
+                    .take(page)
+                    .collect();
+                let net_bytes = budget
+                    .max_response_bytes
+                    .saturating_sub(ENVELOPE_RESERVE_BYTES);
+                let (hits, truncation, _) =
+                    budget::clamp_items(slice, page, net_bytes, |hit| hit.id.as_str().len() + 24);
+                let consumed = offset + hits.len() as u64;
+                let next_cursor = self.issue_cursor(
+                    fetched_len > consumed,
+                    generation,
+                    &query_digest,
+                    SORT_SCORE_DESC,
+                    consumed,
+                );
+                Ok(AppResponse::Search {
+                    hits,
+                    next_cursor,
+                    generation,
+                    truncation,
+                })
             }
             AppRequest::Get { id } => {
                 let payload = self.catalog.get(&id)?;
@@ -237,13 +433,62 @@ impl<C: CatalogStore, S: SearchIndex> App<C, S> {
                 let payload = self.catalog.get(&id)?;
                 Ok(AppResponse::Show { payload })
             }
-            AppRequest::List { limit } => {
+            AppRequest::List {
+                limit,
+                cursor: token,
+                budget,
+            } => {
                 if limit == 0 {
                     return Err(DomainError::InvalidRequest("limit must be > 0".into()).into());
                 }
-                let entries = self.catalog.list(limit)?;
-                Ok(AppResponse::List { entries })
+                budget.validate().map_err(AppError::from)?;
+                let generation = self.catalog.active_generation()?;
+                // list 无查询串；令牌以空串摘要 + wire_id_asc 排序标识绑定用例。
+                let query_digest = cursor::digest_query("");
+                let offset = self.resolve_offset(
+                    token.as_deref(),
+                    generation,
+                    &query_digest,
+                    SORT_WIRE_ID_ASC,
+                )?;
+
+                let page = limit.min(budget.max_items);
+                let fetch = usize::try_from(offset.saturating_add(page as u64).saturating_add(1))
+                    .unwrap_or(usize::MAX);
+                let fetched = self.catalog.list(fetch)?;
+                let fetched_len = fetched.len() as u64;
+                let slice: Vec<CatalogEntry> = fetched
+                    .into_iter()
+                    .skip(usize::try_from(offset).unwrap_or(usize::MAX))
+                    .take(page)
+                    .collect();
+                let net_bytes = budget
+                    .max_response_bytes
+                    .saturating_sub(ENVELOPE_RESERVE_BYTES);
+                let (entries, truncation, _) =
+                    budget::clamp_items(slice, page, net_bytes, |entry| {
+                        entry.id.as_str().len() + entry.payload.len() + 24
+                    });
+                let consumed = offset + entries.len() as u64;
+                let next_cursor = self.issue_cursor(
+                    fetched_len > consumed,
+                    generation,
+                    &query_digest,
+                    SORT_WIRE_ID_ASC,
+                    consumed,
+                );
+                Ok(AppResponse::List {
+                    entries,
+                    next_cursor,
+                    generation,
+                    truncation,
+                })
             }
+            AppRequest::Context {
+                session_id,
+                policy,
+                budget,
+            } => self.handle_context(session_id, policy, budget),
             AppRequest::Status => {
                 let catalog_count = self.catalog.count()?;
                 let active_generation = self.catalog.active_generation()?;
@@ -253,6 +498,196 @@ impl<C: CatalogStore, S: SearchIndex> App<C, S> {
                 })
             }
         }
+    }
+
+    /// 会话上下文装配（CONTRACT §1-2）：
+    ///
+    /// 1. 取会话 canonical payload（`{document, messages}`）；缺行 → NotFound，
+    ///    非 canonical 形状 → InvariantViolation（会话行只由 ingest 写入，畸形即 bug）；
+    /// 2. 逐成员取消息 payload，重建领域 [`Message`]（seq = 会话内序号，parent 用
+    ///    payload 里已解析的 `parent` wire id）；
+    /// 3. 按策略选分支（mainline 排除 sidechain 沿 parent 链，full 全量 seq 序）；
+    /// 4. 预算：`max_messages` + 字节闸裁剪消息，`max_evidence_spans` 裁剪证据；
+    ///    任何裁剪都在 [`Truncation`] 里如实报告对应旋钮名。
+    fn handle_context(
+        &self,
+        session_id: StableId,
+        policy: ContextPolicy,
+        budget: ResponseBudget,
+    ) -> Result<AppResponse, AppError> {
+        budget.validate().map_err(AppError::from)?;
+        let generation = self.catalog.active_generation()?;
+        let session_bytes = self.catalog.get(&session_id)?.ok_or_else(|| {
+            DomainError::NotFound(format!("session {} not in catalog", session_id.as_str()))
+        })?;
+        let session: serde_json::Value = serde_json::from_slice(&session_bytes).map_err(|_| {
+            DomainError::InvariantViolation(format!(
+                "session {} payload is not canonical JSON",
+                session_id.as_str()
+            ))
+        })?;
+
+        // 文档 payload 仅用于证据 fingerprint；缺失显式降级为 None，不臆造。
+        let document_wire = session
+            .get("document")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        let document_payload = match &document_wire {
+            Some(wire) => StableId::from_wire(wire)
+                .map(|id| self.catalog.get(&id))
+                .transpose()?
+                .flatten(),
+            None => None,
+        };
+
+        let member_values = session
+            .get("messages")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| {
+                DomainError::InvariantViolation(format!(
+                    "session {} payload lacks a messages array",
+                    session_id.as_str()
+                ))
+            })?;
+        let mut records: Vec<MemberRecord> = Vec::with_capacity(member_values.len());
+        for value in member_values {
+            let wire = value.as_str().ok_or_else(|| {
+                DomainError::InvariantViolation(format!(
+                    "session {} has a non-string message member",
+                    session_id.as_str()
+                ))
+            })?;
+            let id = StableId::from_wire(wire).ok_or_else(|| {
+                DomainError::InvariantViolation(format!(
+                    "session member {wire} is not a valid wire id"
+                ))
+            })?;
+            let bytes = self.catalog.get(&id)?.ok_or_else(|| {
+                DomainError::InvariantViolation(format!(
+                    "session member {wire} is missing from the catalog"
+                ))
+            })?;
+            // 消息 payload 由 ingest 写 canonical JSON；非 JSON（如切片期 index 写入的
+            // 裸文本）按空对象降级——选择仍按 seq 生效，证据端会如实报 Unknown。
+            let payload = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+            records.push(MemberRecord {
+                wire: wire.to_string(),
+                id,
+                payload,
+                bytes,
+            });
+        }
+
+        // 重建领域消息：seq = 会话内序号（成员数组即 seq 序）。Role 仅为构造所需——
+        // 分支选择只读 seq/parent/is_sidechain，未知角色映射 User 不影响任何输出。
+        let domain_messages: Vec<Message> = records
+            .iter()
+            .enumerate()
+            .map(|(i, r)| Message {
+                id: r.id.clone(),
+                parent: r
+                    .payload
+                    .get("parent")
+                    .and_then(|v| v.as_str())
+                    .and_then(StableId::from_wire),
+                role: match r.payload.get("role").and_then(|v| v.as_str()) {
+                    Some("assistant") => Role::Assistant,
+                    Some("system") => Role::System,
+                    Some("tool") => Role::Tool,
+                    _ => Role::User,
+                },
+                text: r
+                    .payload
+                    .get("text")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                seq: i as u32,
+                timestamp: r
+                    .payload
+                    .get("timestamp")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+                is_sidechain: r
+                    .payload
+                    .get("is_sidechain")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+                span: r.payload.get("span").and_then(|s| {
+                    Some(EvidenceSpan {
+                        start: s.get("start")?.as_u64()?,
+                        end: s.get("end")?.as_u64()?,
+                    })
+                }),
+            })
+            .collect();
+
+        let (ordered_seqs, branch_leaf): (Vec<u32>, Option<String>) = match policy {
+            ContextPolicy::Mainline => match select_mainline(&domain_messages) {
+                Some(sel) => (
+                    sel.messages.iter().map(|m| m.seq).collect(),
+                    Some(sel.leaf.id.as_str().to_string()),
+                ),
+                None => (Vec::new(), None),
+            },
+            ContextPolicy::Full => {
+                let all = select_full(&domain_messages);
+                let leaf = all.last().map(|m| m.id.as_str().to_string());
+                (all.iter().map(|m| m.seq).collect(), leaf)
+            }
+        };
+
+        let net_bytes = budget
+            .max_response_bytes
+            .saturating_sub(ENVELOPE_RESERVE_BYTES);
+        let (kept_seqs, mut truncation, _) =
+            budget::clamp_items(ordered_seqs, budget.max_messages, net_bytes, |seq| {
+                records[*seq as usize].bytes.len()
+            });
+        if truncation.reason.as_deref() == Some(budget::TRUNCATION_MAX_ITEMS) {
+            // 消息条数闸对应的预算旋钮是 max_messages；如实报告该旋钮名。
+            truncation.reason = Some(budget::TRUNCATION_MAX_MESSAGES.to_string());
+        }
+
+        let mut evidence: Vec<EvidenceSpanDto> = kept_seqs
+            .iter()
+            .map(|seq| {
+                let r = &records[*seq as usize];
+                evidence::assemble(
+                    &r.wire,
+                    &r.bytes,
+                    document_payload.as_deref(),
+                    document_wire.as_deref(),
+                    generation,
+                    *seq,
+                )
+            })
+            .collect();
+        if evidence.len() > budget.max_evidence_spans {
+            evidence.truncate(budget.max_evidence_spans);
+            truncation.truncated = true;
+            if truncation.reason.is_none() {
+                truncation.reason = Some(budget::TRUNCATION_MAX_EVIDENCE_SPANS.to_string());
+            }
+        }
+
+        let messages: Vec<(String, serde_json::Value)> = kept_seqs
+            .iter()
+            .map(|seq| {
+                let r = &records[*seq as usize];
+                (r.wire.clone(), r.payload.clone())
+            })
+            .collect();
+
+        Ok(AppResponse::Context {
+            session_id: session_id.as_str().to_string(),
+            session,
+            branch_leaf,
+            messages,
+            evidence,
+            truncation,
+            generation,
+        })
     }
 }
 
@@ -318,8 +753,10 @@ mod tests {
         let r = app().handle(AppRequest::Search {
             query: "hello".into(),
             limit: 10,
+            cursor: None,
+            budget: ResponseBudget::default(),
         });
-        assert!(matches!(r, Ok(AppResponse::Search { hits }) if hits.len() == 1));
+        assert!(matches!(r, Ok(AppResponse::Search { hits, .. }) if hits.len() == 1));
     }
 
     #[test]
@@ -327,6 +764,8 @@ mod tests {
         let r = app().handle(AppRequest::Search {
             query: "x".into(),
             limit: 0,
+            cursor: None,
+            budget: ResponseBudget::default(),
         });
         assert!(matches!(
             r.unwrap_err(),
@@ -339,6 +778,8 @@ mod tests {
         let r = app().handle(AppRequest::Search {
             query: "   ".into(),
             limit: 5,
+            cursor: None,
+            budget: ResponseBudget::default(),
         });
         assert!(matches!(
             r.unwrap_err(),
@@ -355,13 +796,23 @@ mod tests {
 
     #[test]
     fn list_returns_stable_entries() {
-        let r = app().handle(AppRequest::List { limit: 10 });
-        assert!(matches!(r, Ok(AppResponse::List { entries }) if entries.len() == 1));
+        let r = app().handle(AppRequest::List {
+            limit: 10,
+            cursor: None,
+            budget: ResponseBudget::default(),
+        });
+        assert!(matches!(r, Ok(AppResponse::List { entries, .. }) if entries.len() == 1));
     }
 
     #[test]
     fn list_rejects_zero_limit() {
-        let err = app().handle(AppRequest::List { limit: 0 }).unwrap_err();
+        let err = app()
+            .handle(AppRequest::List {
+                limit: 0,
+                cursor: None,
+                budget: ResponseBudget::default(),
+            })
+            .unwrap_err();
         assert!(matches!(
             err,
             AppError::Domain(DomainError::InvalidRequest(_))
@@ -378,6 +829,538 @@ mod tests {
                 active_generation: 7
             })
         ));
+    }
+
+    // ---- 分页 + cursor + budget + context（design §6 集成）----
+
+    fn clock_t0() -> i64 {
+        1_000_000
+    }
+
+    fn clock_after_ttl() -> i64 {
+        1_000_000 + cursor::DEFAULT_TTL_MS
+    }
+
+    /// 可分页假索引：n 个确定性命中，按 limit 截取（模拟钉住排序上的超取）。
+    struct PagedIndex {
+        n: usize,
+    }
+    impl SearchIndex for PagedIndex {
+        fn index(&self, _id: &StableId, _text: &str) -> PortResult<()> {
+            Ok(())
+        }
+        fn query(&self, _query: &str, limit: usize) -> PortResult<Vec<SearchHit>> {
+            Ok((0..self.n.min(limit))
+                .map(|i| SearchHit {
+                    id: StableId::derive(
+                        IdKind::Message,
+                        Stability::Reconstructed,
+                        &[format!("hit{i:02}").as_bytes()],
+                    ),
+                    score: -(i as f32),
+                })
+                .collect())
+        }
+    }
+
+    /// 内存 map 目录：BTreeMap 键序即 wire id 升序（与 sqlite list 的钉住排序一致）；
+    /// generation 用 Cell 可变，测 cursor 的 generation 绑定。
+    struct MapCatalog {
+        map: std::collections::BTreeMap<String, Vec<u8>>,
+        generation: std::cell::Cell<u64>,
+    }
+    impl MapCatalog {
+        fn new(generation: u64) -> Self {
+            Self {
+                map: Default::default(),
+                generation: std::cell::Cell::new(generation),
+            }
+        }
+        fn insert(&mut self, id: &StableId, payload: impl Into<Vec<u8>>) {
+            self.map.insert(id.as_str().to_string(), payload.into());
+        }
+    }
+    impl CatalogStore for MapCatalog {
+        fn get(&self, id: &StableId) -> PortResult<Option<Vec<u8>>> {
+            Ok(self.map.get(id.as_str()).cloned())
+        }
+        fn put(&self, _id: &StableId, _payload: &[u8]) -> PortResult<()> {
+            Ok(())
+        }
+        fn list(&self, limit: usize) -> PortResult<Vec<CatalogEntry>> {
+            Ok(self
+                .map
+                .iter()
+                .take(limit)
+                .map(|(k, v)| CatalogEntry {
+                    id: StableId::from_wire(k).expect("map keys are wire ids"),
+                    payload: v.clone(),
+                })
+                .collect())
+        }
+        fn count(&self) -> PortResult<u64> {
+            Ok(self.map.len() as u64)
+        }
+        fn active_generation(&self) -> PortResult<u64> {
+            Ok(self.generation.get())
+        }
+    }
+
+    fn search_req(query: &str, limit: usize, cursor: Option<String>) -> AppRequest {
+        AppRequest::Search {
+            query: query.into(),
+            limit,
+            cursor,
+            budget: ResponseBudget::default(),
+        }
+    }
+
+    fn hits_of(resp: AppResponse) -> (Vec<String>, Option<String>, u64, Truncation) {
+        match resp {
+            AppResponse::Search {
+                hits,
+                next_cursor,
+                generation,
+                truncation,
+            } => (
+                hits.iter().map(|h| h.id.as_str().to_string()).collect(),
+                next_cursor,
+                generation,
+                truncation,
+            ),
+            other => panic!("expected Search response, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn search_pages_partition_the_pinned_ordering() {
+        let app = App::with_clock(FakeCatalog, PagedIndex { n: 5 }, clock_t0);
+        let (unpaged, _, _, _) = hits_of(app.handle(search_req("q", 5, None)).unwrap());
+        assert_eq!(unpaged.len(), 5);
+
+        let mut paged: Vec<String> = Vec::new();
+        let mut token: Option<String> = None;
+        for _ in 0..3 {
+            let (ids, next, generation, truncation) =
+                hits_of(app.handle(search_req("q", 2, token.take())).unwrap());
+            assert_eq!(generation, 7);
+            assert!(!truncation.truncated);
+            paged.extend(ids);
+            token = next;
+            if token.is_none() {
+                break;
+            }
+        }
+        // 三页恰好不重不漏地划分同一钉住排序。
+        assert_eq!(paged, unpaged);
+        assert!(token.is_none());
+    }
+
+    #[test]
+    fn search_cursor_is_bound_to_query() {
+        let app = App::with_clock(FakeCatalog, PagedIndex { n: 5 }, clock_t0);
+        let (_, next, _, _) = hits_of(app.handle(search_req("alpha", 2, None)).unwrap());
+        let err = app
+            .handle(search_req("beta", 2, Some(next.unwrap())))
+            .unwrap_err();
+        assert!(
+            matches!(err, AppError::Cursor(cursor::CursorError::Invalid(_))),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn search_cursor_rejects_generation_bump() {
+        let cat = MapCatalog::new(7);
+        let app = App::with_clock(&cat, PagedIndex { n: 5 }, clock_t0);
+        let (_, next, _, _) = hits_of(app.handle(search_req("q", 2, None)).unwrap());
+        cat.generation.set(8);
+        let err = app.handle(search_req("q", 2, next)).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                AppError::Cursor(cursor::CursorError::GenerationMismatch {
+                    cursor: 7,
+                    active: 8
+                })
+            ),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn search_cursor_expires_after_ttl() {
+        let issued = App::with_clock(FakeCatalog, PagedIndex { n: 5 }, clock_t0);
+        let (_, next, _, _) = hits_of(issued.handle(search_req("q", 2, None)).unwrap());
+        let later = App::with_clock(FakeCatalog, PagedIndex { n: 5 }, clock_after_ttl);
+        let err = later.handle(search_req("q", 2, next)).unwrap_err();
+        assert!(
+            matches!(err, AppError::Cursor(cursor::CursorError::Expired(_))),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn search_byte_gate_truncates_and_cursor_resumes_at_kept_offset() {
+        let app = App::with_clock(FakeCatalog, PagedIndex { n: 100 }, clock_t0);
+        let resp = app
+            .handle(AppRequest::Search {
+                query: "q".into(),
+                limit: 60,
+                cursor: None,
+                budget: ResponseBudget {
+                    max_response_bytes: budget::MIN_RESPONSE_BYTES,
+                    ..Default::default()
+                },
+            })
+            .unwrap();
+        let (ids, next, _, truncation) = hits_of(resp);
+        assert!(!ids.is_empty() && ids.len() < 60, "kept {}", ids.len());
+        assert!(truncation.truncated);
+        assert_eq!(
+            truncation.reason.as_deref(),
+            Some(budget::TRUNCATION_MAX_RESPONSE_BYTES)
+        );
+        // 续读令牌钉在字节闸切断处，而不是页边界。
+        let claims = cursor::verify(
+            &next.expect("byte-cut page must issue a cursor"),
+            &cursor::CursorExpectations {
+                now_ms: clock_t0(),
+                active_generation: 7,
+                query_digest: cursor::digest_query("q"),
+                sort_digest: SORT_SCORE_DESC.into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(claims.offset, ids.len() as u64);
+    }
+
+    #[test]
+    fn search_rejects_budget_below_floor() {
+        let err = app()
+            .handle(AppRequest::Search {
+                query: "q".into(),
+                limit: 5,
+                cursor: None,
+                budget: ResponseBudget {
+                    max_items: 0,
+                    ..Default::default()
+                },
+            })
+            .unwrap_err();
+        assert!(
+            matches!(err, AppError::Budget(budget::BudgetError::TooSmall(_))),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn list_pages_partition_in_wire_id_order() {
+        let mut cat = MapCatalog::new(7);
+        for tag in ["la", "lb", "lc"] {
+            let id = StableId::derive(IdKind::Message, Stability::Reconstructed, &[tag.as_bytes()]);
+            cat.insert(&id, b"x".to_vec());
+        }
+        let app = App::with_clock(&cat, FakeIndex, clock_t0);
+        let page1 = app
+            .handle(AppRequest::List {
+                limit: 2,
+                cursor: None,
+                budget: ResponseBudget::default(),
+            })
+            .unwrap();
+        let AppResponse::List {
+            entries,
+            next_cursor,
+            ..
+        } = page1
+        else {
+            panic!("expected List response");
+        };
+        assert_eq!(entries.len(), 2);
+        let page2 = app
+            .handle(AppRequest::List {
+                limit: 2,
+                cursor: next_cursor,
+                budget: ResponseBudget::default(),
+            })
+            .unwrap();
+        let AppResponse::List {
+            entries: entries2,
+            next_cursor: next2,
+            ..
+        } = page2
+        else {
+            panic!("expected List response");
+        };
+        assert_eq!(entries2.len(), 1);
+        assert!(next2.is_none());
+        let mut all: Vec<String> = entries
+            .iter()
+            .chain(entries2.iter())
+            .map(|e| e.id.as_str().to_string())
+            .collect();
+        let sorted = {
+            let mut s = all.clone();
+            s.sort();
+            s
+        };
+        // 两页拼接即完整 wire id 升序（钉住排序稳定，无重无漏）。
+        assert_eq!(all.len(), 3);
+        assert_eq!(all, sorted);
+        all.dedup();
+        assert_eq!(all.len(), 3);
+    }
+
+    // ---- context 装配 ----
+
+    fn ctx_msg_payload(
+        role: &str,
+        text: &str,
+        parent: Option<&StableId>,
+        sidechain: bool,
+        span: Option<(u64, u64)>,
+        session: &StableId,
+    ) -> Vec<u8> {
+        serde_json::json!({
+            "role": role,
+            "text": text,
+            "parent_native_id": null,
+            "parent": parent.map(|p| p.as_str()),
+            "timestamp": "2026-07-26T00:00:00Z",
+            "is_sidechain": sidechain,
+            "session": session.as_str(),
+            "span": span.map(|(start, end)| serde_json::json!({"start": start, "end": end})),
+        })
+        .to_string()
+        .into_bytes()
+    }
+
+    /// 会话夹具：m1 → m2 → m3 主线，s1 为挂在 m2 下的 sidechain。
+    fn ctx_fixture() -> (MapCatalog, StableId, [StableId; 4], StableId) {
+        let ses = StableId::native(IdKind::Session, "sess-ctx");
+        let doc = StableId::derive(IdKind::Document, Stability::Reconstructed, &[b"ctx-doc"]);
+        let m1 = StableId::native(IdKind::Message, "ctx-m1");
+        let m2 = StableId::native(IdKind::Message, "ctx-m2");
+        let s1 = StableId::native(IdKind::Message, "ctx-s1");
+        let m3 = StableId::native(IdKind::Message, "ctx-m3");
+
+        let mut cat = MapCatalog::new(7);
+        cat.insert(
+            &m1,
+            ctx_msg_payload("user", "root", None, false, Some((0, 10)), &ses),
+        );
+        cat.insert(
+            &m2,
+            ctx_msg_payload("assistant", "reply", Some(&m1), false, Some((11, 25)), &ses),
+        );
+        cat.insert(
+            &s1,
+            ctx_msg_payload("assistant", "side", Some(&m2), true, Some((26, 40)), &ses),
+        );
+        cat.insert(
+            &m3,
+            ctx_msg_payload("user", "tail", Some(&m2), false, Some((41, 60)), &ses),
+        );
+        cat.insert(
+            &ses,
+            serde_json::json!({
+                "document": doc.as_str(),
+                "messages": [m1.as_str(), m2.as_str(), s1.as_str(), m3.as_str()],
+            })
+            .to_string()
+            .into_bytes(),
+        );
+        cat.insert(
+            &doc,
+            serde_json::json!({
+                "provider": "claude-code",
+                "variant": "claude-code/jsonl-v1",
+                "fingerprint": "b3-ctxfp",
+                "len": 99,
+            })
+            .to_string()
+            .into_bytes(),
+        );
+        (cat, ses, [m1, m2, s1, m3], doc)
+    }
+
+    fn ctx_req(ses: &StableId, policy: ContextPolicy, budget: ResponseBudget) -> AppRequest {
+        AppRequest::Context {
+            session_id: ses.clone(),
+            policy,
+            budget,
+        }
+    }
+
+    #[test]
+    fn context_mainline_walks_parent_chain_excluding_sidechain() {
+        let (cat, ses, [m1, m2, _s1, m3], doc) = ctx_fixture();
+        let resp = app_ctx(&cat)
+            .handle(ctx_req(
+                &ses,
+                ContextPolicy::Mainline,
+                ResponseBudget::default(),
+            ))
+            .unwrap();
+        let AppResponse::Context {
+            session_id,
+            branch_leaf,
+            messages,
+            evidence,
+            truncation,
+            generation,
+            ..
+        } = resp
+        else {
+            panic!("expected Context response");
+        };
+        assert_eq!(session_id, ses.as_str());
+        assert_eq!(generation, 7);
+        assert!(!truncation.truncated);
+        assert_eq!(branch_leaf.as_deref(), Some(m3.as_str()));
+        let wires: Vec<&str> = messages.iter().map(|(w, _)| w.as_str()).collect();
+        assert_eq!(wires, vec![m1.as_str(), m2.as_str(), m3.as_str()]);
+        // 证据与消息链对齐：byte 精度 + 文档指纹/身份透传；ordinal 是会话内 seq。
+        assert_eq!(evidence.len(), 3);
+        assert_eq!(evidence[0].precision, evidence::Precision::Byte);
+        assert_eq!(evidence[0].byte_start, Some(0));
+        assert_eq!(evidence[2].byte_end, Some(60));
+        assert_eq!(evidence[2].record_ordinal, Some(3));
+        assert_eq!(evidence[0].source_fingerprint.as_deref(), Some("b3-ctxfp"));
+        assert_eq!(
+            evidence[0].source_document_id.as_deref(),
+            Some(doc.as_str())
+        );
+    }
+
+    #[test]
+    fn context_full_includes_sidechain_in_seq_order() {
+        let (cat, ses, [m1, m2, s1, m3], _) = ctx_fixture();
+        let resp = app_ctx(&cat)
+            .handle(ctx_req(
+                &ses,
+                ContextPolicy::Full,
+                ResponseBudget::default(),
+            ))
+            .unwrap();
+        let AppResponse::Context {
+            messages,
+            branch_leaf,
+            ..
+        } = resp
+        else {
+            panic!("expected Context response");
+        };
+        let wires: Vec<&str> = messages.iter().map(|(w, _)| w.as_str()).collect();
+        assert_eq!(
+            wires,
+            vec![m1.as_str(), m2.as_str(), s1.as_str(), m3.as_str()]
+        );
+        assert_eq!(branch_leaf.as_deref(), Some(m3.as_str()));
+    }
+
+    #[test]
+    fn context_budget_truncates_messages_with_reason() {
+        let (cat, ses, [m1, m2, ..], _) = ctx_fixture();
+        let resp = app_ctx(&cat)
+            .handle(ctx_req(
+                &ses,
+                ContextPolicy::Mainline,
+                ResponseBudget {
+                    max_messages: 2,
+                    ..Default::default()
+                },
+            ))
+            .unwrap();
+        let AppResponse::Context {
+            messages,
+            evidence,
+            truncation,
+            ..
+        } = resp
+        else {
+            panic!("expected Context response");
+        };
+        let wires: Vec<&str> = messages.iter().map(|(w, _)| w.as_str()).collect();
+        // root→leaf 序下截前 2 条：保根部链头。
+        assert_eq!(wires, vec![m1.as_str(), m2.as_str()]);
+        assert_eq!(evidence.len(), 2);
+        assert!(truncation.truncated);
+        assert_eq!(
+            truncation.reason.as_deref(),
+            Some(budget::TRUNCATION_MAX_MESSAGES)
+        );
+    }
+
+    #[test]
+    fn context_evidence_span_budget_reports_reason() {
+        let (cat, ses, ..) = ctx_fixture();
+        let resp = app_ctx(&cat)
+            .handle(ctx_req(
+                &ses,
+                ContextPolicy::Mainline,
+                ResponseBudget {
+                    max_evidence_spans: 1,
+                    ..Default::default()
+                },
+            ))
+            .unwrap();
+        let AppResponse::Context {
+            messages,
+            evidence,
+            truncation,
+            ..
+        } = resp
+        else {
+            panic!("expected Context response");
+        };
+        assert_eq!(messages.len(), 3);
+        assert_eq!(evidence.len(), 1);
+        assert!(truncation.truncated);
+        assert_eq!(
+            truncation.reason.as_deref(),
+            Some(budget::TRUNCATION_MAX_EVIDENCE_SPANS)
+        );
+    }
+
+    #[test]
+    fn context_missing_session_is_not_found() {
+        let (cat, ..) = ctx_fixture();
+        let missing = StableId::native(IdKind::Session, "no-such-session");
+        let err = app_ctx(&cat)
+            .handle(ctx_req(
+                &missing,
+                ContextPolicy::Mainline,
+                ResponseBudget::default(),
+            ))
+            .unwrap_err();
+        assert!(
+            matches!(err, AppError::Domain(DomainError::NotFound(_))),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn context_malformed_session_payload_is_invariant_violation() {
+        let (mut cat, ..) = ctx_fixture();
+        let broken = StableId::native(IdKind::Session, "broken-session");
+        cat.insert(&broken, b"user\tnot canonical json".to_vec());
+        let err = app_ctx(&cat)
+            .handle(ctx_req(
+                &broken,
+                ContextPolicy::Mainline,
+                ResponseBudget::default(),
+            ))
+            .unwrap_err();
+        assert!(
+            matches!(err, AppError::Domain(DomainError::InvariantViolation(_))),
+            "{err}"
+        );
+    }
+
+    fn app_ctx(cat: &MapCatalog) -> App<&MapCatalog, FakeIndex> {
+        App::with_clock(cat, FakeIndex, clock_t0)
     }
 
     // ---- stage（RFC-0002 §5）----

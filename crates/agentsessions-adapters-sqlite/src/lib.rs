@@ -1183,8 +1183,12 @@ impl SearchIndex for SqliteStore {
     fn query(&self, query: &str, limit: usize) -> PortResult<Vec<SearchHit>> {
         let conn = self.conn.borrow();
         // bm25() 越小越相关，ASC 排序即"相关性降序"（契约要求最相关在前）。
+        // 次序键补 id：等分命中获得跨次运行稳定的全序，cursor 分页依赖它（CONTRACT §7）。
         let mut stmt = conn
-            .prepare("SELECT id, bm25(fts) FROM fts WHERE fts MATCH ?1 ORDER BY bm25(fts) LIMIT ?2")
+            .prepare(
+                "SELECT id, bm25(fts) FROM fts WHERE fts MATCH ?1
+                 ORDER BY bm25(fts), id LIMIT ?2",
+            )
             .map_err(backend)?;
         let rows = stmt
             .query_map(rusqlite::params![query, limit as i64], |row| {
