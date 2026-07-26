@@ -248,6 +248,96 @@ fn ingest_preserves_native_uuid_identity_and_threading() {
 }
 
 #[test]
+fn ingest_persists_session_and_document_entities_with_spans() {
+    let (dir, db) = temp_db("canonical-entities");
+    // 覆盖 canonical foundation 验收：消息 → 会话 → 文档 交叉引用 + evidence span。
+    let line_root = r#"{"type":"user","uuid":"33333333-3333-4333-8333-333333333333","sessionId":"abcd1234-5678-4abc-8def-aabbccddeeff","message":{"role":"user","content":"trace the span origin"}}"#;
+    let line_reply = r#"{"type":"assistant","uuid":"44444444-4444-4444-8444-444444444444","sessionId":"abcd1234-5678-4abc-8def-aabbccddeeff","message":{"role":"assistant","content":"span recorded faithfully"}}"#;
+    let fixture = dir.path().join("spans.jsonl");
+    let content = format!("{line_root}\n{line_reply}\n");
+    std::fs::write(&fixture, &content).expect("write fixture");
+    let fixture_path = fixture.to_string_lossy().into_owned();
+
+    let out = run(&db, &["ingest", &fixture_path]);
+    assert!(out.status.success(), "ingest failed: {}", stdout(&out));
+
+    // 消息实体：session 引用 native 会话 id、span 指回源行字节区间。
+    let out = run(
+        &db,
+        &["show", "msg_v1_33333333-3333-4333-8333-333333333333"],
+    );
+    assert!(out.status.success(), "show failed: {}", stdout(&out));
+    let frame = parse_first_line(&out);
+    let entity = &frame["data"]["entity"];
+    let session_wire = "ses_v1_abcd1234-5678-4abc-8def-aabbccddeeff";
+    assert_eq!(
+        entity["session"],
+        session_wire,
+        "消息应引用 native 会话 id: {}",
+        stdout(&out)
+    );
+    // span round-trip：按 show 返回的区间切源文件字节 == 原始行。
+    let start = entity["span"]["start"].as_u64().expect("span.start") as usize;
+    let end = entity["span"]["end"].as_u64().expect("span.end") as usize;
+    assert_eq!(
+        &content.as_bytes()[start..end],
+        line_root.as_bytes(),
+        "span 应精确指回第一条源记录"
+    );
+
+    // 会话实体：引用文档 + 按序成员消息。
+    let out = run(&db, &["show", session_wire]);
+    assert!(
+        out.status.success(),
+        "show session failed: {}",
+        stdout(&out)
+    );
+    let frame = parse_first_line(&out);
+    let entity = &frame["data"]["entity"];
+    let document_wire = entity["document"].as_str().expect("session.document");
+    assert!(
+        document_wire.starts_with("doc_v1_"),
+        "会话应引用文档实体: {}",
+        stdout(&out)
+    );
+    let members = entity["messages"].as_array().expect("session.messages");
+    assert_eq!(members.len(), 2);
+    assert_eq!(
+        members[0], "msg_v1_33333333-3333-4333-8333-333333333333",
+        "成员按 seq 排序"
+    );
+
+    // 文档实体：provider/variant/fingerprint/len 与 ingest 报告一致。
+    let out = run(&db, &["show", document_wire]);
+    assert!(
+        out.status.success(),
+        "show document failed: {}",
+        stdout(&out)
+    );
+    let frame = parse_first_line(&out);
+    let entity = &frame["data"]["entity"];
+    assert_eq!(entity["provider"], "claude-code");
+    assert_eq!(entity["variant"], "claude-code/jsonl-v1");
+    assert_eq!(entity["len"].as_u64(), Some(content.len() as u64));
+    assert!(
+        entity["fingerprint"]
+            .as_str()
+            .is_some_and(|f| !f.is_empty()),
+        "文档应携带快照指纹: {}",
+        stdout(&out)
+    );
+
+    // 容器实体不参与全文搜索：搜索只命中消息。
+    let out = run(&db, &["search", "span"]);
+    let s = stdout(&out);
+    assert!(s.contains("msg_v1_"), "消息应命中: {s}");
+    assert!(
+        !s.contains("ses_v1_") && !s.contains("doc_v1_"),
+        "容器实体不应命中搜索: {s}"
+    );
+}
+
+#[test]
 fn ingest_auto_selects_codex_and_ignores_event_mirror() {
     let (dir, db) = temp_db("codex");
     // 合成的 Codex rollout（非真实 transcript，遵守 R0 脱敏规范）：
@@ -328,6 +418,8 @@ fn index_rebuild_reprojects_and_keeps_search_working() {
     assert!(out.status.success(), "ingest failed: {}", stdout(&out));
 
     // rebuild：从权威 catalog 全量重投影 FTS 索引，推进 generation。
+    // catalog 含 2 条消息 + 1 会话 + 1 文档目录行；rebuild 重投影全部 4 个实体
+    // （容器实体只重建身份边车，不进全文表）。
     let out = run(&db, &["index", "rebuild"]);
     assert!(out.status.success(), "rebuild failed: {}", stdout(&out));
     let frame = parse_first_line(&out);
@@ -335,8 +427,8 @@ fn index_rebuild_reprojects_and_keeps_search_working() {
     assert_eq!(frame["command"], "index.rebuild");
     assert_eq!(
         frame["data"]["reindexed"],
-        2,
-        "应重投影 2 条: {}",
+        4,
+        "应重投影 4 个实体（2 消息 + 会话 + 文档）: {}",
         stdout(&out)
     );
     // generation：ingest 推进到 1，rebuild 再推进到 2。
@@ -603,8 +695,9 @@ fn sync_tombstones_message_removed_from_source() {
     let out = run(&db, &["sync", &path]);
     assert!(out.status.success(), "sync failed: {}", stdout(&out));
     let out = run(&db, &["status"]);
+    // 2 条消息 + 会话 + 文档目录行 = 4 个 catalog 实体。
     assert!(
-        stdout(&out).contains("\"catalog_count\":2"),
+        stdout(&out).contains("\"catalog_count\":4"),
         "{}",
         stdout(&out)
     );
@@ -629,9 +722,11 @@ fn sync_tombstones_message_removed_from_source() {
         stdout(&out)
     );
     let out = run(&db, &["status"]);
+    // 收缩后：1 条消息 + 新会话 + 新文档 = 3。文档 id 内容寻址（fingerprint 变 →
+    // id 变），旧会话/文档行随旧 membership 一起 tombstone，不残留孤儿。
     assert!(
-        stdout(&out).contains("\"catalog_count\":1"),
-        "收缩后应只剩一条: {}",
+        stdout(&out).contains("\"catalog_count\":3"),
+        "收缩后应剩 1 消息 + 会话 + 文档: {}",
         stdout(&out)
     );
     let out = run(&db, &["search", "drop"]);

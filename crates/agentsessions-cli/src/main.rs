@@ -18,7 +18,7 @@ mod protocol;
 
 use agentsessions_adapters_sqlite::{SourceBatch, SqliteStore, capture, verify_snapshot};
 use agentsessions_application::{
-    App, AppError, AppRequest, AppResponse, StagedMessage, select_and_stage,
+    App, AppError, AppRequest, AppResponse, StagedBatch, select_and_stage,
 };
 use agentsessions_domain::{DomainError, IdKind, Stability, StableId};
 use agentsessions_ports::ProviderAdapter;
@@ -475,10 +475,10 @@ fn provider_registry() -> Vec<Box<dyn ProviderAdapter>> {
 
 /// 对一个源字节流 probe-select 并 stage，同时返回选中 adapter 判定的 variant。
 ///
-/// `select_and_stage` 只回 staged 消息，但 ingest/sync 输出要报 variant；这里
-/// 复用同一份 registry 借用为 `&[&dyn ...]` 后交给编排层，选中的 variant 由
-/// 事后对全体 adapter 再 probe 取最高置信度得到（与选择逻辑一致）。
-fn stage_with_registry(bytes: &[u8]) -> Result<(Vec<StagedMessage>, String), CliError> {
+/// `select_and_stage` 回完整 [`StagedBatch`]（消息 + provider 报告的会话 native id），
+/// ingest/sync 输出要报 variant；这里复用同一份 registry 借用为 `&[&dyn ...]` 后交给
+/// 编排层，选中的 variant 由事后对全体 adapter 再 probe 取最高置信度得到（与选择逻辑一致）。
+fn stage_with_registry(bytes: &[u8]) -> Result<(StagedBatch, String), CliError> {
     let registry = provider_registry();
     let refs: Vec<&dyn ProviderAdapter> = registry.iter().map(|a| a.as_ref()).collect();
     let staged = select_and_stage(&refs, bytes)?;
@@ -498,15 +498,51 @@ fn stage_with_registry(bytes: &[u8]) -> Result<(Vec<StagedMessage>, String), Cli
     Ok((staged, variant))
 }
 
-/// 把一个源的 staged 消息转成 (id, payload, index-text) 三元组。
+/// 把一个源的完整 staging 产物转成 (id, payload, index-text) 目录条目。
 ///
-/// 身份优先用 provider-native id（Claude Code 的 `uuid`，tier `Native`），
-/// 使身份跨 data-root 迁移与文件重命名存活；provider 未给 native id 时回退到
-/// path+seq 的 `Reconstructed` 派生。payload 存 canonical JSON（承载 role/text/
-/// parent/timestamp/sidechain），使 threading 元数据穿过存储、供 `show` 展开；
-/// FTS 索引正文仍只喂纯 text。
-fn staged_to_entries(path: &str, staged: &[StagedMessage]) -> Vec<(StableId, Vec<u8>, String)> {
-    staged
+/// 产出三类实体，随同一 [`SourceBatch`] 单事务提交：
+///
+/// - **消息**：身份优先用 provider-native id（Claude Code 的 `uuid`，tier `Native`），
+///   使身份跨 data-root 迁移与文件重命名存活；provider 未给 native id 时回退到
+///   path+seq 的 `Reconstructed` 派生。payload 存 canonical JSON（role/text/parent/
+///   timestamp/sidechain/span/session），供 `show` 展开；FTS 索引正文仍只喂纯 text。
+/// - **会话**：id 优先取 provider 报告的 native 会话 id（`ses_v1_` Native tier），
+///   缺失回退对 document wire id 的 `Reconstructed` 派生。payload 引用 document
+///   与按 seq 排序的成员消息 wire id。
+/// - **文档**：内容寻址 `Reconstructed` 派生（provider/variant/fingerprint），
+///   不含路径——身份不编码位置（RFC-0001）。payload 携 provider/variant/fingerprint/len。
+///
+/// span 单位是"已验证快照字节"（end 排他）；`None` 显式缺失，不臆造。
+fn staged_to_entries(
+    path: &str,
+    staged: &StagedBatch,
+    provider_id: &str,
+    variant: &str,
+    fingerprint: &str,
+    source_len: u64,
+) -> Vec<(StableId, Vec<u8>, String)> {
+    // 文档实体：内容寻址——同字节重 ingest 得到同一 id（幂等）。
+    let document_id = StableId::derive(
+        IdKind::Document,
+        Stability::Reconstructed,
+        &[
+            provider_id.as_bytes(),
+            variant.as_bytes(),
+            fingerprint.as_bytes(),
+        ],
+    );
+    // 会话实体：native id 优先；缺失回退 document 派生（一文档一会话，见 design §9）。
+    let session_id = match staged.session_native_id.as_deref() {
+        Some(sid) if !sid.trim().is_empty() => StableId::native(IdKind::Session, sid),
+        _ => StableId::derive(
+            IdKind::Session,
+            Stability::Reconstructed,
+            &[document_id.as_str().as_bytes()],
+        ),
+    };
+
+    let mut entries: Vec<(StableId, Vec<u8>, String)> = staged
+        .messages
         .iter()
         .map(|message| {
             let id = if message.native_id.is_empty() {
@@ -524,11 +560,35 @@ fn staged_to_entries(path: &str, staged: &[StagedMessage]) -> Vec<(StableId, Vec
                 "parent_native_id": message.parent_native_id,
                 "timestamp": message.timestamp,
                 "is_sidechain": message.is_sidechain,
+                "session": session_id.as_str(),
+                "span": message.span.map(|(start, end)| serde_json::json!({
+                    "start": start,
+                    "end": end,
+                })),
             })
             .to_string();
             (id, payload.into_bytes(), message.text.clone())
         })
-        .collect()
+        .collect();
+
+    // 会话/文档目录行：payload 为结构化 JSON，索引正文为空——容器实体不参与全文命中
+    // （存储层对非 Message kind 也不会写 fts 行，双保险）。
+    let member_ids: Vec<&str> = entries.iter().map(|(id, _, _)| id.as_str()).collect();
+    let session_payload = serde_json::json!({
+        "document": document_id.as_str(),
+        "messages": member_ids,
+    })
+    .to_string();
+    let document_payload = serde_json::json!({
+        "provider": provider_id,
+        "variant": variant,
+        "fingerprint": fingerprint,
+        "len": source_len,
+    })
+    .to_string();
+    entries.push((session_id, session_payload.into_bytes(), String::new()));
+    entries.push((document_id, document_payload.into_bytes(), String::new()));
+    entries
 }
 
 /// 读取原始 .jsonl 文件并 ingest：
@@ -550,11 +610,19 @@ fn ingest_file(store: &SqliteStore, path: &str) -> Result<serde_json::Value, Cli
     // 3) 提交前复核：源在 stage 期间被改写则拒绝提交（RFC-0002 §4）。
     verify_snapshot(path_ref, &snap).map_err(ProtocolError::from)?;
 
-    // 4) 派生 id + 构造该源的完整 scan 结果，按 source membership 提交。
-    //    同文件重 ingest 时，本次消失的 message id 会被推导为 tombstone。
+    // 4) 派生 id + 构造该源的完整 scan 结果（消息 + 会话/文档目录行），按
+    //    source membership 提交。同文件重 ingest 时，本次消失的 id 会被推导为 tombstone。
+    let provider = variant.split('/').next().unwrap_or(&variant).to_string();
     let source = SourceBatch {
         source_path: path.to_string(),
-        entries: staged_to_entries(path, &staged),
+        entries: staged_to_entries(
+            path,
+            &staged,
+            &provider,
+            &variant,
+            &snap.fingerprint,
+            snap.len,
+        ),
     };
     let changed = store
         .commit_source_batches_if_changed(std::slice::from_ref(&source))
@@ -563,8 +631,8 @@ fn ingest_file(store: &SqliteStore, path: &str) -> Result<serde_json::Value, Cli
     let generation = store.active_generation().map_err(ProtocolError::from)?;
     Ok(serde_json::json!({
         "variant": variant,
-        "committed": if changed { staged.len() } else { 0 },
-        "unchanged": if changed { 0 } else { staged.len() },
+        "committed": if changed { staged.messages.len() } else { 0 },
+        "unchanged": if changed { 0 } else { staged.messages.len() },
         "skipped": 0,
         "generation": generation,
         "source_fp": snap.fingerprint,
@@ -584,11 +652,19 @@ fn sync_files(store: &SqliteStore, paths: &[String]) -> Result<serde_json::Value
     for path in paths {
         let path_ref = std::path::Path::new(path);
         let (snap, bytes) = capture(path_ref).map_err(ProtocolError::from)?;
-        let (staged, _variant) = stage_with_registry(&bytes)?;
-        message_count += staged.len();
+        let (staged, variant) = stage_with_registry(&bytes)?;
+        message_count += staged.messages.len();
+        let provider = variant.split('/').next().unwrap_or(&variant).to_string();
         sources.push(SourceBatch {
             source_path: path.clone(),
-            entries: staged_to_entries(path, &staged),
+            entries: staged_to_entries(
+                path,
+                &staged,
+                &provider,
+                &variant,
+                &snap.fingerprint,
+                snap.len,
+            ),
         });
         snapshots.push((path_ref.to_path_buf(), snap));
     }
