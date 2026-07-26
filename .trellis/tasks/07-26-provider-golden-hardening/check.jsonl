@@ -1,0 +1,5 @@
+{"file": ".trellis/tasks/07-26-provider-golden-hardening/prd.md", "reason": "Acceptance criteria to verify"}
+{"file": ".trellis/tasks/07-26-provider-golden-hardening/design.md", "reason": "Design contracts to verify against"}
+{"file": "docs/security/FIXTURE-REDACTION-POLICY.md", "reason": "Provenance/privacy compliance check"}
+{"file": ".trellis/spec/agentsessions-provider-claude/backend/quality-guidelines.md", "reason": "Provider quality checks"}
+{"file": ".trellis/spec/agentsessions-provider-codex/backend/quality-guidelines.md", "reason": "Provider quality checks"}

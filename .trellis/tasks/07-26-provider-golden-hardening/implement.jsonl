@@ -1,0 +1,7 @@
+{"file": ".trellis/tasks/07-26-provider-golden-hardening/prd.md", "reason": "Requirements and acceptance criteria"}
+{"file": ".trellis/tasks/07-26-provider-golden-hardening/design.md", "reason": "Golden layout, expected-output shape, property list, PRNG idiom"}
+{"file": ".trellis/tasks/07-26-provider-golden-hardening/implement.md", "reason": "Phase checklist and validation commands"}
+{"file": "docs/security/FIXTURE-REDACTION-POLICY.md", "reason": "Fixture provenance and privacy rules golden fixtures must satisfy"}
+{"file": ".trellis/spec/agentsessions-provider-claude/backend/index.md", "reason": "Claude provider conventions"}
+{"file": ".trellis/spec/agentsessions-provider-codex/backend/index.md", "reason": "Codex provider conventions"}
+{"file": ".trellis/spec/agentsessions-ports/backend/index.md", "reason": "MessageEvent span contract the tests pin"}
