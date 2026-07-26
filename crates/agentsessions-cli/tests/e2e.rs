@@ -872,6 +872,283 @@ fn human_error_writes_diagnostic_to_stderr_only() {
     );
 }
 
+// ─── 分页 cursor + 预算 + context（shared Application ADT，design §7）───────
+
+/// 从 search envelope 里取命中 id 列表。
+fn hit_ids(frame: &serde_json::Value) -> Vec<String> {
+    frame["data"]["hits"]
+        .as_array()
+        .expect("data.hits must be an array")
+        .iter()
+        .map(|h| h["id"].as_str().expect("hit.id").to_string())
+        .collect()
+}
+
+#[test]
+fn search_cursor_pages_partition_results() {
+    let (_dir, db) = temp_db("cursor-pages");
+    for (fact, text) in [
+        ("c1", "cursor pagination alpha one"),
+        ("c2", "cursor pagination alpha two"),
+        ("c3", "cursor pagination alpha three"),
+    ] {
+        let out = run(&db, &["index", fact, text]);
+        assert!(out.status.success());
+    }
+
+    // 不分页基线：一页拿全。
+    let out = run(&db, &["search", "pagination"]);
+    assert!(out.status.success());
+    let all = hit_ids(&parse_first_line(&out));
+    assert_eq!(all.len(), 3);
+
+    // 第一页：页大小 2，应带续读令牌。
+    let out = run(&db, &["search", "pagination", "--max-items", "2"]);
+    assert!(out.status.success(), "page1 failed: {}", stdout(&out));
+    let frame = parse_first_line(&out);
+    assert_envelope_shape(&frame, true);
+    let page1 = hit_ids(&frame);
+    assert_eq!(page1.len(), 2);
+    assert_eq!(frame["page"]["has_more"], true, "page1={frame}");
+    let token = frame["page"]["next_cursor"]
+        .as_str()
+        .expect("page1 must issue next_cursor")
+        .to_string();
+
+    // 第二页：续读到末尾，不再发令牌。
+    let out = run(
+        &db,
+        &[
+            "search",
+            "pagination",
+            "--max-items",
+            "2",
+            "--cursor",
+            &token,
+        ],
+    );
+    assert!(out.status.success(), "page2 failed: {}", stdout(&out));
+    let frame = parse_first_line(&out);
+    let page2 = hit_ids(&frame);
+    assert_eq!(page2.len(), 1);
+    assert_eq!(frame["page"]["has_more"], false, "page2={frame}");
+    assert!(frame["page"]["next_cursor"].is_null());
+
+    // 两页拼接 == 不分页结果：钉住排序（bm25 + id tiebreak）下不重不漏、同序。
+    let joined: Vec<String> = page1.into_iter().chain(page2).collect();
+    assert_eq!(joined, all);
+}
+
+#[test]
+fn tampered_cursor_is_rejected_with_cursor_invalid() {
+    let (_dir, db) = temp_db("cursor-tamper");
+    for (fact, text) in [("t1", "tamper target one"), ("t2", "tamper target two")] {
+        let out = run(&db, &["index", fact, text]);
+        assert!(out.status.success());
+    }
+    let out = run(&db, &["search", "tamper", "--max-items", "1"]);
+    let token = parse_first_line(&out)["page"]["next_cursor"]
+        .as_str()
+        .expect("next_cursor")
+        .to_string();
+
+    // 翻转 payload 首字符（仍是合法 base64url 字符）→ 完整性摘要不符。
+    let mut chars: Vec<char> = token.chars().collect();
+    chars[0] = if chars[0] == 'A' { 'B' } else { 'A' };
+    let tampered: String = chars.into_iter().collect();
+
+    let out = run(
+        &db,
+        &[
+            "--robot",
+            "search",
+            "tamper",
+            "--max-items",
+            "1",
+            "--cursor",
+            &tampered,
+        ],
+    );
+    assert_eq!(out.status.code(), Some(2), "stdout={}", stdout(&out));
+    let frame = parse_first_line(&out);
+    assert_envelope_shape(&frame, false);
+    assert_eq!(frame["error"]["code"], "cursor_invalid");
+    // 错误消息必须指示重新发起查询（合同禁止静默回第一页）。
+    assert!(
+        frame["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("re-run")),
+        "message={frame}"
+    );
+}
+
+#[test]
+fn generation_bump_invalidates_cursor_with_exit_9() {
+    let (_dir, db) = temp_db("cursor-generation");
+    for (fact, text) in [("g1", "bump probe one"), ("g2", "bump probe two")] {
+        let out = run(&db, &["index", fact, text]);
+        assert!(out.status.success());
+    }
+    let out = run(&db, &["search", "probe", "--max-items", "1"]);
+    let token = parse_first_line(&out)["page"]["next_cursor"]
+        .as_str()
+        .expect("next_cursor")
+        .to_string();
+
+    // 再写一条推进 generation：数据已换代，旧令牌必须显式失效。
+    let out = run(&db, &["index", "g3", "bump probe three"]);
+    assert!(out.status.success());
+
+    let out = run(
+        &db,
+        &[
+            "--robot",
+            "search",
+            "probe",
+            "--max-items",
+            "1",
+            "--cursor",
+            &token,
+        ],
+    );
+    assert_eq!(out.status.code(), Some(9), "stdout={}", stdout(&out));
+    let frame = parse_first_line(&out);
+    assert_envelope_shape(&frame, false);
+    assert_eq!(frame["error"]["code"], "generation_mismatch");
+}
+
+/// 写入 context e2e 用的真实 Claude 格式夹具（合成数据，含 sidechain 与 fork）：
+/// root → reply → { sidechain probe, mainline tail }。返回 (夹具字节, 会话 wire id)。
+fn write_context_fixture(dir: &std::path::Path) -> (String, String, String) {
+    let lines = concat!(
+        r#"{"type":"user","uuid":"c0000000-0000-4000-8000-000000000001","parentUuid":null,"sessionId":"ccdd1234-5678-4abc-8def-001122334455","timestamp":"2026-07-26T01:00:00.000Z","message":{"role":"user","content":"ctx root question"}}"#,
+        "\n",
+        r#"{"type":"assistant","uuid":"c0000000-0000-4000-8000-000000000002","parentUuid":"c0000000-0000-4000-8000-000000000001","sessionId":"ccdd1234-5678-4abc-8def-001122334455","message":{"role":"assistant","content":"ctx first answer"}}"#,
+        "\n",
+        r#"{"type":"user","uuid":"c0000000-0000-4000-8000-000000000003","parentUuid":"c0000000-0000-4000-8000-000000000002","isSidechain":true,"sessionId":"ccdd1234-5678-4abc-8def-001122334455","message":{"role":"user","content":"ctx sidechain probe"}}"#,
+        "\n",
+        r#"{"type":"assistant","uuid":"c0000000-0000-4000-8000-000000000004","parentUuid":"c0000000-0000-4000-8000-000000000002","sessionId":"ccdd1234-5678-4abc-8def-001122334455","message":{"role":"assistant","content":"ctx final answer"}}"#,
+        "\n",
+    );
+    let fixture = dir.join("context.jsonl");
+    std::fs::write(&fixture, lines).expect("write context fixture");
+    (
+        fixture.to_string_lossy().into_owned(),
+        lines.to_string(),
+        "ses_v1_ccdd1234-5678-4abc-8def-001122334455".to_string(),
+    )
+}
+
+#[test]
+fn context_assembles_mainline_branch_with_evidence() {
+    let (dir, db) = temp_db("context-mainline");
+    let (fixture_path, content, session_wire) = write_context_fixture(dir.path());
+    let out = run(&db, &["ingest", &fixture_path]);
+    assert!(out.status.success(), "ingest failed: {}", stdout(&out));
+
+    let out = run(&db, &["context", &session_wire]);
+    assert!(out.status.success(), "context failed: {}", stdout(&out));
+    let frame = parse_first_line(&out);
+    assert_envelope_shape(&frame, true);
+    assert_eq!(frame["command"], "context");
+    assert_eq!(frame["data"]["session_id"], session_wire.as_str());
+    assert_eq!(frame["outcome"], "success");
+
+    // mainline：排除 sidechain，沿 parent 链 root→leaf。
+    let messages = frame["data"]["messages"].as_array().expect("messages");
+    let wires: Vec<&str> = messages
+        .iter()
+        .map(|m| m["id"].as_str().expect("message.id"))
+        .collect();
+    assert_eq!(
+        wires,
+        vec![
+            "msg_v1_c0000000-0000-4000-8000-000000000001",
+            "msg_v1_c0000000-0000-4000-8000-000000000002",
+            "msg_v1_c0000000-0000-4000-8000-000000000004",
+        ],
+        "frame={frame}"
+    );
+    assert_eq!(
+        frame["data"]["branch_leaf"],
+        "msg_v1_c0000000-0000-4000-8000-000000000004"
+    );
+
+    // 证据与链对齐：byte 精度 + 指纹 + 文档身份；span 精确切回源记录。
+    let evidence = frame["data"]["evidence"].as_array().expect("evidence");
+    assert_eq!(evidence.len(), 3);
+    assert_eq!(evidence[0]["precision"], "byte");
+    assert!(
+        evidence[0]["source_document_id"]
+            .as_str()
+            .is_some_and(|d| d.starts_with("doc_v1_")),
+        "frame={frame}"
+    );
+    assert!(
+        evidence[0]["source_fingerprint"]
+            .as_str()
+            .is_some_and(|f| !f.is_empty()),
+        "frame={frame}"
+    );
+    let start = evidence[0]["byte_start"].as_u64().expect("byte_start") as usize;
+    let end = evidence[0]["byte_end"].as_u64().expect("byte_end") as usize;
+    let sliced = &content.as_bytes()[start..end];
+    assert!(
+        sliced.starts_with(br#"{"type":"user","uuid":"c0000000-0000-4000-8000-000000000001""#),
+        "span 应切回 root 源记录"
+    );
+    // 证据 ordinal 是会话内 seq：mainline 第三条是成员序号 3（sidechain 占 2）。
+    assert_eq!(evidence[2]["record_ordinal"], 3, "frame={frame}");
+
+    // full 策略包含 sidechain，按 seq 序。
+    let out = run(&db, &["context", &session_wire, "--policy", "full"]);
+    assert!(out.status.success());
+    let frame = parse_first_line(&out);
+    let full: Vec<&str> = frame["data"]["messages"]
+        .as_array()
+        .expect("messages")
+        .iter()
+        .map(|m| m["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(full.len(), 4);
+    assert_eq!(full[2], "msg_v1_c0000000-0000-4000-8000-000000000003");
+}
+
+#[test]
+fn context_budget_truncation_reports_partial_exit_10() {
+    let (dir, db) = temp_db("context-budget");
+    let (fixture_path, _, session_wire) = write_context_fixture(dir.path());
+    let out = run(&db, &["ingest", &fixture_path]);
+    assert!(out.status.success(), "ingest failed: {}", stdout(&out));
+
+    let out = run(&db, &["context", &session_wire, "--max-messages", "2"]);
+    // 部分成功：结果可用但被预算截断 → outcome partial + exit 10（contract §5）。
+    assert_eq!(out.status.code(), Some(10), "stdout={}", stdout(&out));
+    let frame = parse_first_line(&out);
+    assert_envelope_shape(&frame, true);
+    assert_eq!(frame["outcome"], "partial");
+    assert_eq!(frame["data"]["messages"].as_array().unwrap().len(), 2);
+    assert_eq!(frame["data"]["truncation"]["truncated"], true);
+    assert_eq!(frame["data"]["truncation"]["reason"], "max_messages");
+}
+
+#[test]
+fn context_missing_session_is_not_found() {
+    let (_dir, db) = temp_db("context-missing");
+    let out = run(
+        &db,
+        &[
+            "--robot",
+            "context",
+            "ses_v1_ffffffff-ffff-4fff-8fff-ffffffffffff",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(4), "stdout={}", stdout(&out));
+    let frame = parse_first_line(&out);
+    assert_envelope_shape(&frame, false);
+    assert_eq!(frame["error"]["code"], "not_found");
+}
+
 // ─── 初始性能基线 ───────────────────────────────────────────────────────────
 
 #[test]

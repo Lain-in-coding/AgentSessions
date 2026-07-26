@@ -18,9 +18,10 @@ mod protocol;
 
 use agentsessions_adapters_sqlite::{SourceBatch, SqliteStore, capture, verify_snapshot};
 use agentsessions_application::{
-    App, AppError, AppRequest, AppResponse, StagedBatch, select_and_stage,
+    App, AppError, AppRequest, AppResponse, ResponseBudget, StagedBatch, Truncation,
+    select_and_stage,
 };
-use agentsessions_domain::{DomainError, IdKind, Stability, StableId};
+use agentsessions_domain::{ContextPolicy, DomainError, IdKind, Stability, StableId};
 use agentsessions_ports::ProviderAdapter;
 use agentsessions_provider_claude::ClaudeCodeAdapter;
 use agentsessions_provider_codex::CodexAdapter;
@@ -71,7 +72,9 @@ fn main() {
         }
     };
     match run(&args, mode) {
-        Ok(()) => {}
+        Ok(protocol::Outcome::Success) => {}
+        // 部分成功（预算截断）按 contract §5 exit 10——结果可用但不完整，不伪装 success。
+        Ok(protocol::Outcome::Partial) => std::process::exit(10),
         Err(CliError(err)) => {
             // 错误 envelope 只写 stdout 一个对象；进程级诊断（人类模式）走 stderr。
             match mode {
@@ -89,12 +92,14 @@ fn main() {
 
 /// 从参数里解出子命令名（用于错误 envelope 的 `command` 字段）。
 ///
-/// 跳过带值 flag（`--db <path>` / `--output <mode>`）及其取值，第一个裸参数即命令。
+/// 跳过带值 flag（`--db <path>` / `--output <mode>` / 分页与预算 flag）及其取值，
+/// 第一个裸参数即命令。
 fn command_name(args: &[String]) -> String {
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
-            "--db" | "--output" => {
+            "--db" | "--output" | "--cursor" | "--max-items" | "--max-bytes" | "--max-messages"
+            | "--policy" => {
                 it.next(); // 消费其取值
             }
             s if s.starts_with('-') => {}
@@ -104,17 +109,17 @@ fn command_name(args: &[String]) -> String {
     "unknown".into()
 }
 
-fn run(args: &[String], mode: protocol::OutputMode) -> Result<(), CliError> {
+fn run(args: &[String], mode: protocol::OutputMode) -> Result<protocol::Outcome, CliError> {
     let started = std::time::Instant::now();
     // --help / --version / doctor 在解析 --db 之前拦截——它们不需要数据库。
     // 放在最前面，使 `agentsessions --help`（无 --db）也能正常工作。
     if args.iter().any(|a| a == "--help" || a == "-h") {
         print_help();
-        return Ok(());
+        return Ok(protocol::Outcome::Success);
     }
     if args.iter().any(|a| a == "--version" || a == "-V") {
         println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
-        return Ok(());
+        return Ok(protocol::Outcome::Success);
     }
     if command_name(args) == "doctor" {
         return doctor(args, mode);
@@ -142,16 +147,23 @@ fn run(args: &[String], mode: protocol::OutputMode) -> Result<(), CliError> {
     .map_err(ProtocolError::from)?;
     // catalog 与 index 是同一个 SqliteStore；App 泛型接受同一实例的两次移动，
     // 故这里克隆一个连接语义上的第二把手不可行——改为让 App 持有单一 store。
-    let (command, outcome, data) = dispatch(&store, &rest)?;
+    let (command, outcome, data, page) = dispatch(&store, &rest)?;
     let duration_ms = started.elapsed().as_millis() as u64;
-    protocol::emit(command, mode, outcome, data, duration_ms);
-    Ok(())
+    protocol::emit(command, mode, outcome, data, duration_ms, &page);
+    Ok(outcome)
 }
 
-fn config_paths(mode: protocol::OutputMode) -> Result<(), CliError> {
+fn config_paths(mode: protocol::OutputMode) -> Result<protocol::Outcome, CliError> {
     let paths = platform_paths()?;
-    protocol::emit("config.paths", mode, protocol::Outcome::Success, paths, 0);
-    Ok(())
+    protocol::emit(
+        "config.paths",
+        mode,
+        protocol::Outcome::Success,
+        paths,
+        0,
+        &protocol::Page::default(),
+    );
+    Ok(protocol::Outcome::Success)
 }
 
 fn platform_paths() -> Result<serde_json::Value, CliError> {
@@ -241,27 +253,41 @@ COMMANDS:
     sync <file>...          原子扫描多个 .jsonl 文件；无变化时不生成新 generation
     index <id-fact> <text> 直接写入一条 catalog + 索引（切片期写入入口）
     index rebuild          从权威 catalog 全量重投影 FTS 索引（维护命令）
-    search <query>         全文检索，按相关性降序返回命中
+    search <query>         全文检索，按相关性降序返回命中（支持分页/预算 flag）
     get <wire-id>          按实体 id 取回原始 payload
     show <wire-id>         按实体 id 取回并归一化展示（role/text 结构）
-    list [limit]           稳定排序列出 catalog 实体（默认 20）
+    list [limit]           稳定排序列出 catalog 实体（默认 20；支持分页/预算 flag）
+    context <ses-id>       装配会话上下文：分支消息链 + 证据区间
     status                 报告 catalog 实体总数
     doctor                 环境自检（可选 --db 校验存储可打开）
     config paths           报告当前平台的 config/data/cache/logs 路径
+
+PAGINATION / BUDGET (search, list):
+    --cursor <token>       上一页 envelope `page.next_cursor` 的续读令牌
+    --max-items <n>        页大小上限（同时作为响应条目预算）
+    --max-bytes <n>        响应字节预算（最低 4096）
+
+CONTEXT:
+    --policy mainline|full 分支策略（默认 mainline：排除 sidechain 沿 parent 链）
+    --max-messages <n>     消息条数预算
+    --max-bytes <n>        响应字节预算
 
 GLOBAL:
     --db <path>            SQLite 数据存储路径（除 doctor/help/version 外必需）
     --output human|json|jsonl  输出模式（默认 human；切片期 human 仍为 JSON envelope）
     --robot                等价 --output json，无颜色/进度（stdout 只输出协议）
     -h, --help             打印本帮助
-    -V, --version          打印版本",
+    -V, --version          打印版本
+
+EXIT CODES:
+    0 成功；10 部分成功（预算截断，结果可用但不完整）；其余见 error catalog",
         name = env!("CARGO_PKG_NAME"),
         version = env!("CARGO_PKG_VERSION"),
     );
 }
 
 /// doctor：最小环境自检。报告版本；若给了 --db，尝试打开存储并报告 schema。
-fn doctor(args: &[String], mode: protocol::OutputMode) -> Result<(), CliError> {
+fn doctor(args: &[String], mode: protocol::OutputMode) -> Result<protocol::Outcome, CliError> {
     let started = std::time::Instant::now();
     let db_opt = args
         .iter()
@@ -299,8 +325,9 @@ fn doctor(args: &[String], mode: protocol::OutputMode) -> Result<(), CliError> {
         protocol::Outcome::Success,
         data,
         duration_ms,
+        &protocol::Page::default(),
     );
-    Ok(())
+    Ok(protocol::Outcome::Success)
 }
 
 /// 从 `--db <path>` 抽出数据库路径，返回其余参数。
@@ -332,7 +359,15 @@ fn parse_db_flag(args: &[String]) -> Result<(String, Vec<String>), CliError> {
 fn dispatch(
     store: &SqliteStore,
     rest: &[String],
-) -> Result<(&'static str, protocol::Outcome, serde_json::Value), CliError> {
+) -> Result<
+    (
+        &'static str,
+        protocol::Outcome,
+        serde_json::Value,
+        protocol::Page,
+    ),
+    CliError,
+> {
     let cmd = rest
         .first()
         .ok_or_else(|| CliError::usage("missing subcommand"))?
@@ -352,6 +387,7 @@ fn dispatch(
                         "reindexed": reindexed,
                         "generation": generation,
                     }),
+                    protocol::Page::default(),
                 ))
             } else {
                 let fact = arg(rest, 1, "index <id-fact> <text>")?;
@@ -360,6 +396,7 @@ fn dispatch(
                     "index",
                     protocol::Outcome::Success,
                     index_one(store, fact, text)?,
+                    protocol::Page::default(),
                 ))
             }
         }
@@ -372,6 +409,7 @@ fn dispatch(
                 "ingest",
                 protocol::Outcome::Success,
                 ingest_file(store, path)?,
+                protocol::Page::default(),
             ))
         }
         // sync 对显式列出的多个源执行同一套只读快照 + staging，并在全部成功后
@@ -380,19 +418,30 @@ fn dispatch(
             "sync",
             protocol::Outcome::Success,
             sync_files(store, &rest[1..])?,
+            protocol::Page::default(),
         )),
         "search" => {
-            let query = arg(rest, 1, "search <query>")?;
+            let mut args = rest.to_vec();
+            let cursor = extract_flag(&mut args, "--cursor")?;
+            let max_items = extract_flag(&mut args, "--max-items")?;
+            let max_bytes = extract_flag(&mut args, "--max-bytes")?;
+            let budget = budget_from_flags(max_items.as_deref(), max_bytes.as_deref(), None)?;
+            // 页大小旋钮即 --max-items；未给时保守默认 20（App 内仍与 budget 取小）。
+            let limit = if max_items.is_some() {
+                budget.max_items
+            } else {
+                20
+            };
+            let query = arg(&args, 1, "search <query>")?.to_string();
             let app = App::new(store_ref(store), store_ref(store));
             let response = app.handle(AppRequest::Search {
-                query: query.to_string(),
-                limit: 20,
+                query,
+                limit,
+                cursor,
+                budget,
             })?;
-            Ok((
-                "search",
-                protocol::Outcome::Success,
-                response_data(response),
-            ))
+            let (outcome, data, page) = render(response);
+            Ok(("search", outcome, data, page))
         }
         "get" => {
             let wire = arg(rest, 1, "get <wire-id>")?;
@@ -400,7 +449,8 @@ fn dispatch(
                 .ok_or_else(|| CliError::usage(format!("not a valid entity id: {wire}")))?;
             let app = App::new(store_ref(store), store_ref(store));
             let response = app.handle(AppRequest::Get { id })?;
-            Ok(("get", protocol::Outcome::Success, response_data(response)))
+            let (outcome, data, page) = render(response);
+            Ok(("get", outcome, data, page))
         }
         "show" => {
             let wire = arg(rest, 1, "show <wire-id>")?;
@@ -408,30 +458,107 @@ fn dispatch(
                 .ok_or_else(|| CliError::usage(format!("not a valid entity id: {wire}")))?;
             let app = App::new(store_ref(store), store_ref(store));
             let response = app.handle(AppRequest::Show { id })?;
-            Ok(("show", protocol::Outcome::Success, response_data(response)))
+            let (outcome, data, page) = render(response);
+            Ok(("show", outcome, data, page))
         }
         "list" => {
-            let limit = rest
+            let mut args = rest.to_vec();
+            let cursor = extract_flag(&mut args, "--cursor")?;
+            let max_items = extract_flag(&mut args, "--max-items")?;
+            let max_bytes = extract_flag(&mut args, "--max-bytes")?;
+            let budget = budget_from_flags(max_items.as_deref(), max_bytes.as_deref(), None)?;
+            let limit = args
                 .get(1)
                 .map(|s| s.parse::<usize>())
                 .transpose()
                 .map_err(|_| CliError::usage("list [limit]: limit must be an integer"))?
-                .unwrap_or(20);
+                .unwrap_or(if max_items.is_some() {
+                    budget.max_items
+                } else {
+                    20
+                });
             let app = App::new(store_ref(store), store_ref(store));
-            let response = app.handle(AppRequest::List { limit })?;
-            Ok(("list", protocol::Outcome::Success, response_data(response)))
+            let response = app.handle(AppRequest::List {
+                limit,
+                cursor,
+                budget,
+            })?;
+            let (outcome, data, page) = render(response);
+            Ok(("list", outcome, data, page))
+        }
+        // context：装配一个会话的分支消息链 + 证据区间（CONTRACT §1-2）。
+        "context" => {
+            let mut args = rest.to_vec();
+            let policy = match extract_flag(&mut args, "--policy")?.as_deref() {
+                None | Some("mainline") => ContextPolicy::Mainline,
+                Some("full") => ContextPolicy::Full,
+                Some(other) => {
+                    return Err(CliError::usage(format!(
+                        "--policy must be mainline|full, got {other}"
+                    )));
+                }
+            };
+            let max_messages = extract_flag(&mut args, "--max-messages")?;
+            let max_bytes = extract_flag(&mut args, "--max-bytes")?;
+            let budget = budget_from_flags(None, max_bytes.as_deref(), max_messages.as_deref())?;
+            let wire = arg(&args, 1, "context <session-wire-id>")?;
+            let session_id = StableId::from_wire(wire)
+                .ok_or_else(|| CliError::usage(format!("not a valid entity id: {wire}")))?;
+            let app = App::new(store_ref(store), store_ref(store));
+            let response = app.handle(AppRequest::Context {
+                session_id,
+                policy,
+                budget,
+            })?;
+            let (outcome, data, page) = render(response);
+            Ok(("context", outcome, data, page))
         }
         "status" => {
             let app = App::new(store_ref(store), store_ref(store));
             let response = app.handle(AppRequest::Status)?;
-            Ok((
-                "status",
-                protocol::Outcome::Success,
-                response_data(response),
-            ))
+            let (outcome, data, page) = render(response);
+            Ok(("status", outcome, data, page))
         }
         other => Err(CliError::usage(format!("unknown subcommand: {other}"))),
     }
+}
+
+/// 从参数向量中取走一个带值 flag；不在场返回 `None`，在场缺值是用法错误。
+fn extract_flag(args: &mut Vec<String>, name: &str) -> Result<Option<String>, CliError> {
+    let Some(i) = args.iter().position(|a| a == name) else {
+        return Ok(None);
+    };
+    if i + 1 >= args.len() {
+        return Err(CliError::usage(format!("{name} requires a value")));
+    }
+    let value = args.remove(i + 1);
+    args.remove(i);
+    Ok(Some(value))
+}
+
+/// 用 flag 覆盖默认预算；数值解析失败是用法错误，下限校验由 App 层统一执行。
+fn budget_from_flags(
+    max_items: Option<&str>,
+    max_bytes: Option<&str>,
+    max_messages: Option<&str>,
+) -> Result<ResponseBudget, CliError> {
+    let mut budget = ResponseBudget::default();
+    if let Some(v) = max_items {
+        budget.max_items = v
+            .parse()
+            .map_err(|_| CliError::usage("--max-items must be a non-negative integer"))?;
+    }
+    if let Some(v) = max_bytes {
+        budget.max_response_bytes = v
+            .parse()
+            .map_err(|_| CliError::usage("--max-bytes must be a non-negative integer"))?;
+    }
+    if let Some(v) = max_messages {
+        budget.max_messages = v
+            .parse()
+            .map_err(|_| CliError::usage("--max-messages must be a non-negative integer"))?;
+    }
+    Ok(budget)
 }
 
 /// 用与 CLI `index`/`get` 一致的派生路径，从一个 fact 造出 message id。
@@ -558,6 +685,13 @@ fn staged_to_entries(
                 "role": message.role,
                 "text": message.text,
                 "parent_native_id": message.parent_native_id,
+                // 已解析父边：provider native 父指针按同一 native 派生规则映射为消息
+                // wire id（跨文件父边同样可表示；父不在库中由消费方平滑容忍）。
+                "parent": message
+                    .parent_native_id
+                    .as_deref()
+                    .filter(|p| !p.trim().is_empty())
+                    .map(|p| StableId::native(IdKind::Message, p).as_str().to_string()),
                 "timestamp": message.timestamp,
                 "is_sidechain": message.is_sidechain,
                 "session": session_id.as_str(),
@@ -686,51 +820,137 @@ fn sync_files(store: &SqliteStore, paths: &[String]) -> Result<serde_json::Value
     }))
 }
 
-fn response_data(response: AppResponse) -> serde_json::Value {
+/// 把应用结果投影为 (outcome, data, page)：截断 → partial（exit 10），
+/// 分页令牌 → envelope `page`。前端只做投影，不再解释语义。
+fn render(response: AppResponse) -> (protocol::Outcome, serde_json::Value, protocol::Page) {
     match response {
-        AppResponse::Search { hits } => serde_json::json!({
-            "hits": hits
-                .into_iter()
-                .map(|hit| serde_json::json!({
-                    "id": hit.id.as_str(),
-                    "score": hit.score,
-                }))
-                .collect::<Vec<_>>(),
-        }),
-        AppResponse::Get { payload } => serde_json::json!({
-            "payload": payload.map(|bytes| String::from_utf8_lossy(&bytes).into_owned()),
-        }),
+        AppResponse::Search {
+            hits,
+            next_cursor,
+            generation,
+            truncation,
+        } => {
+            let outcome = outcome_of(&truncation);
+            let page = protocol::Page {
+                has_more: next_cursor.is_some(),
+                next_cursor,
+            };
+            let data = serde_json::json!({
+                "hits": hits
+                    .into_iter()
+                    .map(|hit| serde_json::json!({
+                        "id": hit.id.as_str(),
+                        "score": hit.score,
+                    }))
+                    .collect::<Vec<_>>(),
+                "generation": generation,
+                "truncation": truncation_json(&truncation),
+            });
+            (outcome, data, page)
+        }
+        AppResponse::Get { payload } => (
+            protocol::Outcome::Success,
+            serde_json::json!({
+                "payload": payload.map(|bytes| String::from_utf8_lossy(&bytes).into_owned()),
+            }),
+            protocol::Page::default(),
+        ),
         // show 与 get 的区别：get 回原始 payload 字节，show 把存储的 canonical
         // JSON payload 展开成结构化 entity（含 role/text/parent/timestamp/threading）。
         // 未找到时 entity 为 null；payload 非合法 JSON 时按裸文本兜底。
-        AppResponse::Show { payload } => serde_json::json!({
-            "entity": payload.map(|bytes| {
-                match serde_json::from_slice::<serde_json::Value>(&bytes) {
-                    Ok(value) => value,
-                    Err(_) => serde_json::json!({
-                        "role": null,
-                        "text": String::from_utf8_lossy(&bytes),
-                    }),
-                }
+        AppResponse::Show { payload } => (
+            protocol::Outcome::Success,
+            serde_json::json!({
+                "entity": payload.map(|bytes| {
+                    match serde_json::from_slice::<serde_json::Value>(&bytes) {
+                        Ok(value) => value,
+                        Err(_) => serde_json::json!({
+                            "role": null,
+                            "text": String::from_utf8_lossy(&bytes),
+                        }),
+                    }
+                }),
             }),
-        }),
-        AppResponse::List { entries } => serde_json::json!({
-            "entries": entries
-                .into_iter()
-                .map(|entry| serde_json::json!({
-                    "id": entry.id.as_str(),
-                    "payload": String::from_utf8_lossy(&entry.payload),
-                }))
-                .collect::<Vec<_>>(),
-        }),
+            protocol::Page::default(),
+        ),
+        AppResponse::List {
+            entries,
+            next_cursor,
+            generation,
+            truncation,
+        } => {
+            let outcome = outcome_of(&truncation);
+            let page = protocol::Page {
+                has_more: next_cursor.is_some(),
+                next_cursor,
+            };
+            let data = serde_json::json!({
+                "entries": entries
+                    .into_iter()
+                    .map(|entry| serde_json::json!({
+                        "id": entry.id.as_str(),
+                        "payload": String::from_utf8_lossy(&entry.payload),
+                    }))
+                    .collect::<Vec<_>>(),
+                "generation": generation,
+                "truncation": truncation_json(&truncation),
+            });
+            (outcome, data, page)
+        }
+        AppResponse::Context {
+            session_id,
+            session,
+            branch_leaf,
+            messages,
+            evidence,
+            truncation,
+            generation,
+        } => {
+            let outcome = outcome_of(&truncation);
+            let data = serde_json::json!({
+                "session_id": session_id,
+                "session": session,
+                "branch_leaf": branch_leaf,
+                "messages": messages
+                    .into_iter()
+                    .map(|(id, payload)| serde_json::json!({
+                        "id": id,
+                        "payload": payload,
+                    }))
+                    .collect::<Vec<_>>(),
+                "evidence": evidence,
+                "truncation": truncation_json(&truncation),
+                "generation": generation,
+            });
+            (outcome, data, protocol::Page::default())
+        }
         AppResponse::Status {
             catalog_count,
             active_generation,
-        } => serde_json::json!({
-            "catalog_count": catalog_count,
-            "generation": active_generation,
-        }),
+        } => (
+            protocol::Outcome::Success,
+            serde_json::json!({
+                "catalog_count": catalog_count,
+                "generation": active_generation,
+            }),
+            protocol::Page::default(),
+        ),
     }
+}
+
+fn outcome_of(truncation: &Truncation) -> protocol::Outcome {
+    if truncation.truncated {
+        protocol::Outcome::Partial
+    } else {
+        protocol::Outcome::Success
+    }
+}
+
+fn truncation_json(truncation: &Truncation) -> serde_json::Value {
+    serde_json::json!({
+        "truncated": truncation.truncated,
+        "reason": truncation.reason,
+    })
 }
 
 fn arg<'a>(rest: &'a [String], index: usize, usage: &str) -> Result<&'a str, CliError> {

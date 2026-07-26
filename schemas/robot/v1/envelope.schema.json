@@ -43,6 +43,9 @@
             "provider_error",
             "writer_busy",
             "schema_incompatible",
+            "cursor_invalid",
+            "cursor_expired",
+            "generation_mismatch",
             "internal"
           ]
         },

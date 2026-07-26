@@ -11,6 +11,7 @@
 //! - `schema_version` 走 major.minor；未知 major 由调用方拒绝。
 
 use agentsessions_application::AppError;
+use agentsessions_application::cursor::CursorError;
 use agentsessions_domain::DomainError;
 use agentsessions_ports::{PortError, ProviderError};
 use serde_json::{Value, json};
@@ -63,6 +64,12 @@ pub enum CanonicalCode {
     WriterBusy,
     /// JSON/协议版本不兼容 → exit 9。
     SchemaIncompatible,
+    /// Cursor 令牌无法解析/校验失败（`cursor_invalid`）→ exit 2。
+    CursorInvalid,
+    /// Cursor 超出 TTL（`cursor_expired`）→ exit 2。
+    CursorExpired,
+    /// Cursor 携带的 generation 与活动 generation 不一致 → exit 9。
+    GenerationMismatch,
     /// 未分类内部错误（不变量违反等 bug 信号）→ exit 70。
     Internal,
 }
@@ -80,6 +87,9 @@ impl CanonicalCode {
             CanonicalCode::ProviderError => "provider_error",
             CanonicalCode::WriterBusy => "writer_busy",
             CanonicalCode::SchemaIncompatible => "schema_incompatible",
+            CanonicalCode::CursorInvalid => "cursor_invalid",
+            CanonicalCode::CursorExpired => "cursor_expired",
+            CanonicalCode::GenerationMismatch => "generation_mismatch",
             CanonicalCode::Internal => "internal",
         }
     }
@@ -87,14 +97,16 @@ impl CanonicalCode {
     /// CLI exit code，必须与 Robot v1 error catalog 保持一致。
     pub fn exit_code(self) -> i32 {
         match self {
-            CanonicalCode::InvalidRequest => 2,
+            CanonicalCode::InvalidRequest
+            | CanonicalCode::CursorInvalid
+            | CanonicalCode::CursorExpired => 2,
             CanonicalCode::NotFound => 4,
             CanonicalCode::SourceIo
             | CanonicalCode::SourceChanged
             | CanonicalCode::SnapshotFailed => 5,
             CanonicalCode::CatalogError | CanonicalCode::WriterBusy => 6,
             CanonicalCode::ProviderError => 7,
-            CanonicalCode::SchemaIncompatible => 9,
+            CanonicalCode::SchemaIncompatible | CanonicalCode::GenerationMismatch => 9,
             CanonicalCode::Internal => 70,
         }
     }
@@ -142,6 +154,20 @@ impl From<AppError> for ProtocolError {
             AppError::Domain(error) => error.into(),
             AppError::Port(error) => error.into(),
             AppError::Provider(error) => error.into(),
+            // cursor 错误族有专属 canonical code；contract major 不符归 schema_incompatible。
+            AppError::Cursor(error) => {
+                let code = match &error {
+                    CursorError::Invalid(_) => CanonicalCode::CursorInvalid,
+                    CursorError::Expired(_) => CanonicalCode::CursorExpired,
+                    CursorError::GenerationMismatch { .. } => CanonicalCode::GenerationMismatch,
+                    CursorError::ContractMismatch { .. } => CanonicalCode::SchemaIncompatible,
+                };
+                ProtocolError::new(code, error.to_string())
+            }
+            // 预算过小是请求校验失败（CONTRACT §3）。
+            AppError::Budget(error) => {
+                ProtocolError::new(CanonicalCode::InvalidRequest, error.to_string())
+            }
         }
     }
 }
@@ -197,14 +223,37 @@ fn request_id() -> String {
     format!("cli-{}-{millis}", std::process::id())
 }
 
+/// 分页元数据（envelope `page` 字段）：续读令牌 + 是否还有后续页。
+#[derive(Debug, Clone, Default)]
+pub struct Page {
+    pub next_cursor: Option<String>,
+    pub has_more: bool,
+}
+
 /// 统一输出一个成功结果。所有模式当前都发单个 envelope（人类渲染器待落地；
 /// Human 在切片期退化为紧凑 JSON envelope，与既有 Robot-JSON 雏形一致）。
-pub fn emit(command: &str, _mode: OutputMode, outcome: Outcome, data: Value, duration_ms: u64) {
-    println!("{}", success_envelope(command, outcome, data, duration_ms));
+pub fn emit(
+    command: &str,
+    _mode: OutputMode,
+    outcome: Outcome,
+    data: Value,
+    duration_ms: u64,
+    page: &Page,
+) {
+    println!(
+        "{}",
+        success_envelope(command, outcome, data, duration_ms, page)
+    );
 }
 
 /// 成功 envelope。`data` 是已验证的 JSON Value，不接受未校验字符串片段。
-pub fn success_envelope(command: &str, outcome: Outcome, data: Value, duration_ms: u64) -> String {
+pub fn success_envelope(
+    command: &str,
+    outcome: Outcome,
+    data: Value,
+    duration_ms: u64,
+    page: &Page,
+) -> String {
     let outcome_str = match outcome {
         Outcome::Success => "success",
         Outcome::Partial => "partial",
@@ -220,8 +269,8 @@ pub fn success_envelope(command: &str, outcome: Outcome, data: Value, duration_m
         "data": data,
         "warnings": [],
         "page": {
-            "next_cursor": Value::Null,
-            "has_more": false,
+            "next_cursor": page.next_cursor.as_deref().map_or(Value::Null, |c| json!(c)),
+            "has_more": page.has_more,
         },
         "meta": {
             "duration_ms": duration_ms,
@@ -303,12 +352,45 @@ mod tests {
     }
 
     #[test]
+    fn cursor_and_budget_errors_map_to_dedicated_codes() {
+        let e: ProtocolError = AppError::Cursor(CursorError::Invalid("x".into())).into();
+        assert_eq!(e.code, CanonicalCode::CursorInvalid);
+        assert_eq!(e.code.exit_code(), 2);
+
+        let e: ProtocolError = AppError::Cursor(CursorError::Expired("x".into())).into();
+        assert_eq!(e.code, CanonicalCode::CursorExpired);
+        assert_eq!(e.code.exit_code(), 2);
+
+        let e: ProtocolError = AppError::Cursor(CursorError::GenerationMismatch {
+            cursor: 1,
+            active: 2,
+        })
+        .into();
+        assert_eq!(e.code, CanonicalCode::GenerationMismatch);
+        assert_eq!(e.code.exit_code(), 9);
+
+        let e: ProtocolError = AppError::Cursor(CursorError::ContractMismatch {
+            cursor: 2,
+            supported: 1,
+        })
+        .into();
+        assert_eq!(e.code, CanonicalCode::SchemaIncompatible);
+
+        let e: ProtocolError = AppError::Budget(
+            agentsessions_application::budget::BudgetError::TooSmall("x".into()),
+        )
+        .into();
+        assert_eq!(e.code, CanonicalCode::InvalidRequest);
+    }
+
+    #[test]
     fn success_envelope_is_well_formed() {
         let s = success_envelope(
             "status",
             Outcome::Success,
             json!({ "catalog_count": 3, "generation": 5 }),
             42,
+            &Page::default(),
         );
         assert!(s.contains("\"schema_version\":\"1.0\""));
         assert!(s.contains("\"frame_type\":\"response\""));
@@ -318,6 +400,25 @@ mod tests {
         assert!(s.contains("\"data\":{\"catalog_count\":3"));
         assert!(s.contains("\"duration_ms\":42"));
         assert!(s.contains("\"generation\":5"));
+        assert!(s.contains("\"next_cursor\":null"));
+        assert!(s.contains("\"has_more\":false"));
+    }
+
+    #[test]
+    fn success_envelope_carries_page_cursor() {
+        let s = success_envelope(
+            "search",
+            Outcome::Partial,
+            json!({ "hits": [] }),
+            1,
+            &Page {
+                next_cursor: Some("tok.abc".into()),
+                has_more: true,
+            },
+        );
+        assert!(s.contains("\"outcome\":\"partial\""));
+        assert!(s.contains("\"next_cursor\":\"tok.abc\""));
+        assert!(s.contains("\"has_more\":true"));
     }
 
     #[test]
@@ -340,6 +441,9 @@ mod tests {
             CanonicalCode::ProviderError,
             CanonicalCode::WriterBusy,
             CanonicalCode::SchemaIncompatible,
+            CanonicalCode::CursorInvalid,
+            CanonicalCode::CursorExpired,
+            CanonicalCode::GenerationMismatch,
             CanonicalCode::Internal,
         ];
         assert_eq!(published.len(), runtime.len());
@@ -372,7 +476,7 @@ mod tests {
         let codes = schema["$defs"]["errorBody"]["properties"]["code"]["enum"]
             .as_array()
             .expect("schema must enumerate canonical error codes");
-        assert_eq!(codes.len(), 10);
+        assert_eq!(codes.len(), 13);
         for field in [
             "schema_version",
             "frame_type",
