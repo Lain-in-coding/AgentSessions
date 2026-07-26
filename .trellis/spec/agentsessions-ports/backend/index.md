@@ -41,8 +41,14 @@ Depends only on `agentsessions-domain`. Never depends on any adapter crate,
   `SnapshotChanged`, `WriterBusy`. Each maps to a canonical code downstream.
 - `CanonicalEventSink` + `MessageEvent<'a>` — structured sink for provider
   parse output. `MessageEvent` is a struct (native_id / parent_native_id /
-  role / text / timestamp / is_sidechain) precisely so new fields don't break
-  callers.
+  role / text / timestamp / is_sidechain / span) precisely so new fields don't
+  break callers. `span` is `(start, end)` byte offsets **into the verified
+  snapshot bytes**, end exclusive, newline excluded; the unit is deliberately
+  "snapshot bytes" (not "file bytes") so a future row-level source (SQLite
+  provider) can satisfy the same contract by making the extracted row payload
+  the snapshot. `None` means the provider cannot attribute a contiguous span —
+  never fabricate one. `ParseReport.session_native_id` carries the provider's
+  durable session id (report-level, not per-message); `None` when absent.
 - `ProviderAdapter` — `probe(bytes) -> Probe` + `parse(bytes, sink)`. The
   probe/select contract lives here; the selection *policy* lives in the
   application core.

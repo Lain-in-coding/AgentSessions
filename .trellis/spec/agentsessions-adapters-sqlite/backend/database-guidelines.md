@@ -11,7 +11,8 @@
 - The store is the single source of truth for two derived-but-authoritative
   roles: `catalog` (canonical entity payloads) and `fts` (a rebuildable search
   projection). `fts` can always be reconstructed from `catalog`.
-- Schema version is gated by `PRAGMA user_version`; the current version is 5.
+- Schema version is gated by `PRAGMA user_version`; the current version is 6
+  (v6 added `source_membership.document_id`, nullable; NULL = pre-v6 row).
   Opening a newer schema than the binary understands is an error, not a silent
   downgrade.
 
@@ -39,6 +40,17 @@
   body; `fts_ids` maps the FTS wire id back to the full `StableId` JSON so
   identity survives a rebuild. Rebuild prefers `fts_ids.id_json`; only when it is
   absent does it fall back to `StableId::from_wire` (which yields `Unstable`).
+- **Only Message-kind entities enter `fts`.** Session (`ses_v1_`) and document
+  (`doc_v1_`) rows are catalog-only containers — indexing their text would
+  double-count search hits. The `fts_ids` identity sidecar IS still written for
+  every kind (rebuild depends on it for stability-tier fidelity). `batch_is_current`
+  therefore skips the fts-text comparison for non-message ids.
+- **Container entities ride the same SourceBatch.** The composition root puts
+  the derived session/document rows into the same `entries` as the messages, so
+  they share the transaction, the membership derivation, and the tombstone rules:
+  when a source's scan no longer contains them (e.g. fingerprint changed → new
+  content-addressed document id), the old rows retire unless another source
+  still references them.
 
 ---
 
