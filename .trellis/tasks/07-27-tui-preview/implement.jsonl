@@ -1,0 +1,4 @@
+{"file": ".trellis/tasks/07-27-tui-preview/prd.md", "reason": "Requirements, dependency decision callout, acceptance criteria"}
+{"file": ".trellis/tasks/07-27-tui-preview/design.md", "reason": "FROZEN spec: Elm-style core/glue split, key map, effects, test list, file ownership"}
+{"file": ".trellis/spec/agentsessions-cli/backend/index.md", "reason": "CLI crate guidelines: composition root rules, protocol/stdout discipline"}
+{"file": ".trellis/spec/agentsessions-application/backend/index.md", "reason": "App ADT semantics the TUI consumes: Search/Context/Show, cursor, budget, truncation"}
