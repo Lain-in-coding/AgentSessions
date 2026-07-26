@@ -29,11 +29,23 @@ Before writing code in this crate:
       clap/structopt. New value flags must also be added to `command_name`'s
       skip list so error envelopes label the right command.
 - [ ] Every new subcommand goes through `dispatch()` and returns
-      `(&'static str command, Outcome, serde_json::Value, protocol::Page)`.
+      `(&'static str command, Outcome, serde_json::Value, protocol::Page, Vec<String> warnings)`.
       Errors return `CliError`, never `panic!` / `unwrap` on user input.
       App responses are projected by `render()` — truncated results become
       `Outcome::Partial` (process exit 10, contract §5); pagination tokens fill
-      the envelope `page.next_cursor` / `page.has_more`.
+      the envelope `page.next_cursor` / `page.has_more`; honest degradations
+      (e.g. unknown-precision evidence) become `warnings` entries.
+- [ ] Output truth table (contract §6): `emit_result()` is the single success
+      exit — Human mode renders via `human::render_success` (text lines, no
+      envelope, warnings to stderr); Json/Jsonl emit one envelope. ALL protocol
+      stdout goes through `protocol::write_stdout_line` (EPIPE → silent exit 0,
+      other write errors → stderr + exit 5) — never bare `println!` for frames.
+- [ ] Progress frames (`protocol::progress_frame`) are emitted ONLY under
+      `--output jsonl` (never Json/`--robot`/Human). `diagnostic` frames are
+      schema-defined but v1 emits none.
+- [ ] `--request-id` is validated by `protocol::valid_request_id`
+      (`^[A-Za-z0-9._:-]+$`, 1-128) and echoed verbatim in every frame;
+      invalid values are usage errors, never silently replaced.
 - [ ] Message canonical payloads persist BOTH `parent_native_id` (provider
       fact) and `parent` (resolved `msg_v1_` wire id via the same native
       derivation rule) — context assembly consumes the resolved edge.
