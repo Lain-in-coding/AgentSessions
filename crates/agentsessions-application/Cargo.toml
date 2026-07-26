@@ -11,6 +11,8 @@ agentsessions-domain = { path = "../agentsessions-domain" }
 agentsessions-ports = { path = "../agentsessions-ports" }
 thiserror.workspace = true
 serde.workspace = true
+serde_json.workspace = true
+blake3.workspace = true
 
 [dev-dependencies]
 agentsessions-testkit = { path = "../agentsessions-testkit" }

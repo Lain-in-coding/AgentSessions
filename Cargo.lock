@@ -22,7 +22,9 @@ dependencies = [
  "agentsessions-domain",
  "agentsessions-ports",
  "agentsessions-testkit",
+ "blake3",
  "serde",
+ "serde_json",
  "thiserror",
 ]
 
