@@ -64,6 +64,7 @@ version = "0.1.0"
 dependencies = [
  "agentsessions-domain",
  "agentsessions-ports",
+ "blake3",
  "serde",
  "serde_json",
 ]
@@ -74,6 +75,7 @@ version = "0.1.0"
 dependencies = [
  "agentsessions-domain",
  "agentsessions-ports",
+ "blake3",
  "serde",
  "serde_json",
 ]
