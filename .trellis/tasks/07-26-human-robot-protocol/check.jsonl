@@ -1,0 +1,4 @@
+{"file": ".trellis/tasks/07-26-human-robot-protocol/prd.md", "reason": "Acceptance criteria to verify against"}
+{"file": ".trellis/tasks/07-26-human-robot-protocol/design.md", "reason": "Frozen APIs and output rules the code must match"}
+{"file": "docs/contracts/CONTRACT-cli-robot-mcp-draft.md", "reason": "Contract truth table the modes must satisfy"}
+{"file": ".trellis/spec/agentsessions-cli/backend/index.md", "reason": "CLI quality checklist and exit-code table"}

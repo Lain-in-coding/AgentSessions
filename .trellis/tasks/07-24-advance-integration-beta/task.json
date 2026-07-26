@@ -21,7 +21,8 @@
   "children": [
     "07-26-canonical-source-session-span",
     "07-26-provider-golden-hardening",
-    "07-26-shared-application-adt"
+    "07-26-shared-application-adt",
+    "07-26-human-robot-protocol"
   ],
   "parent": "07-24-remediation-milestone-closure",
   "relatedFiles": [],
