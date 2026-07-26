@@ -14,12 +14,13 @@
 //! 参数解析刻意手写、不引第三方 CLI 框架——切片阶段只需最小可用面。
 //! 输出走 Robot-JSON 雏形（每行一个 JSON 对象），为后续 CONTRACT 对齐留口。
 
+mod human;
 mod protocol;
 
 use agentsessions_adapters_sqlite::{SourceBatch, SqliteStore, capture, verify_snapshot};
 use agentsessions_application::{
     App, AppError, AppRequest, AppResponse, ResponseBudget, StagedBatch, Truncation,
-    select_and_stage,
+    evidence::Precision, select_and_stage,
 };
 use agentsessions_domain::{ContextPolicy, DomainError, IdKind, Stability, StableId};
 use agentsessions_ports::ProviderAdapter;
@@ -67,11 +68,28 @@ fn main() {
         Ok(mode) => mode,
         Err(message) => {
             let err = ProtocolError::new(CanonicalCode::InvalidRequest, message);
-            println!("{}", protocol::error_envelope(&command, &err));
+            protocol::write_stdout_line(&protocol::error_envelope(&command, &err, None));
             std::process::exit(err.code.exit_code());
         }
     };
-    match run(&args, mode) {
+    // --request-id：robot 调用方的关联 id。非法值是用法错误（exit 2），
+    // 不静默替换为生成 id——那会让调用方以为关联成功。
+    let request_id = match extract_request_id(&args) {
+        Ok(id) => id,
+        Err(message) => {
+            let err = ProtocolError::new(CanonicalCode::InvalidRequest, message);
+            match mode {
+                protocol::OutputMode::Human => {
+                    eprintln!("error [{}]: {}", err.code.as_str(), err.message);
+                }
+                protocol::OutputMode::Json | protocol::OutputMode::Jsonl => {
+                    protocol::write_stdout_line(&protocol::error_envelope(&command, &err, None));
+                }
+            }
+            std::process::exit(err.code.exit_code());
+        }
+    };
+    match run(&args, mode, request_id.as_deref()) {
         Ok(protocol::Outcome::Success) => {}
         // 部分成功（预算截断）按 contract §5 exit 10——结果可用但不完整，不伪装 success。
         Ok(protocol::Outcome::Partial) => std::process::exit(10),
@@ -82,12 +100,33 @@ fn main() {
                     eprintln!("error [{}]: {}", err.code.as_str(), err.message);
                 }
                 protocol::OutputMode::Json | protocol::OutputMode::Jsonl => {
-                    println!("{}", protocol::error_envelope(&command, &err));
+                    protocol::write_stdout_line(&protocol::error_envelope(
+                        &command,
+                        &err,
+                        request_id.as_deref(),
+                    ));
                 }
             }
             std::process::exit(err.code.exit_code());
         }
     }
+}
+
+/// 从参数抽出 `--request-id`：缺 flag → None；有 flag 则值必须满足 envelope
+/// 约束（`^[A-Za-z0-9._:-]+$`，1..=128），否则是用法错误。
+fn extract_request_id(args: &[String]) -> Result<Option<String>, String> {
+    let Some(i) = args.iter().position(|a| a == "--request-id") else {
+        return Ok(None);
+    };
+    let Some(value) = args.get(i + 1) else {
+        return Err("--request-id requires a value".into());
+    };
+    if !protocol::valid_request_id(value) {
+        return Err(format!(
+            "--request-id must match ^[A-Za-z0-9._:-]+$ (1..=128 chars), got {value:?}"
+        ));
+    }
+    Ok(Some(value.clone()))
 }
 
 /// 从参数里解出子命令名（用于错误 envelope 的 `command` 字段）。
@@ -99,7 +138,7 @@ fn command_name(args: &[String]) -> String {
     while let Some(a) = it.next() {
         match a.as_str() {
             "--db" | "--output" | "--cursor" | "--max-items" | "--max-bytes" | "--max-messages"
-            | "--policy" => {
+            | "--policy" | "--request-id" => {
                 it.next(); // 消费其取值
             }
             s if s.starts_with('-') => {}
@@ -109,7 +148,11 @@ fn command_name(args: &[String]) -> String {
     "unknown".into()
 }
 
-fn run(args: &[String], mode: protocol::OutputMode) -> Result<protocol::Outcome, CliError> {
+fn run(
+    args: &[String],
+    mode: protocol::OutputMode,
+    request_id: Option<&str>,
+) -> Result<protocol::Outcome, CliError> {
     let started = std::time::Instant::now();
     // --help / --version / doctor 在解析 --db 之前拦截——它们不需要数据库。
     // 放在最前面，使 `agentsessions --help`（无 --db）也能正常工作。
@@ -122,11 +165,11 @@ fn run(args: &[String], mode: protocol::OutputMode) -> Result<protocol::Outcome,
         return Ok(protocol::Outcome::Success);
     }
     if command_name(args) == "doctor" {
-        return doctor(args, mode);
+        return doctor(args, mode, request_id);
     }
     if command_name(args) == "config" {
         if args.iter().any(|arg| arg == "paths") {
-            return config_paths(mode);
+            return config_paths(mode, request_id);
         }
         return Err(CliError::usage(
             "config paths is the only supported config command",
@@ -147,21 +190,72 @@ fn run(args: &[String], mode: protocol::OutputMode) -> Result<protocol::Outcome,
     .map_err(ProtocolError::from)?;
     // catalog 与 index 是同一个 SqliteStore；App 泛型接受同一实例的两次移动，
     // 故这里克隆一个连接语义上的第二把手不可行——改为让 App 持有单一 store。
-    let (command, outcome, data, page) = dispatch(&store, &rest)?;
+    let (command, outcome, data, page, warnings) = dispatch(&store, &rest, mode, request_id)?;
     let duration_ms = started.elapsed().as_millis() as u64;
-    protocol::emit(command, mode, outcome, data, duration_ms, &page);
+    emit_result(
+        command,
+        mode,
+        outcome,
+        data,
+        duration_ms,
+        &page,
+        &warnings,
+        request_id,
+    );
     Ok(outcome)
 }
 
-fn config_paths(mode: protocol::OutputMode) -> Result<protocol::Outcome, CliError> {
+/// 成功结果的统一出口（contract §6 truth table）：
+/// Human → 渲染器文本行走 stdout、warnings 走 stderr（无 envelope）；
+/// Json/Jsonl → 单个 success envelope。所有 stdout 写入都经 pipe-safe 通道。
+#[allow(clippy::too_many_arguments)]
+fn emit_result(
+    command: &str,
+    mode: protocol::OutputMode,
+    outcome: protocol::Outcome,
+    data: serde_json::Value,
+    duration_ms: u64,
+    page: &protocol::Page,
+    warnings: &[String],
+    request_id: Option<&str>,
+) {
+    match mode {
+        protocol::OutputMode::Human => {
+            for warning in warnings {
+                eprintln!("warning: {warning}");
+            }
+            for line in human::render_success(command, outcome, &data, page) {
+                protocol::write_stdout_line(&line);
+            }
+        }
+        protocol::OutputMode::Json | protocol::OutputMode::Jsonl => {
+            protocol::write_stdout_line(&protocol::success_envelope(
+                command,
+                outcome,
+                data,
+                duration_ms,
+                page,
+                warnings,
+                request_id,
+            ));
+        }
+    }
+}
+
+fn config_paths(
+    mode: protocol::OutputMode,
+    request_id: Option<&str>,
+) -> Result<protocol::Outcome, CliError> {
     let paths = platform_paths()?;
-    protocol::emit(
+    emit_result(
         "config.paths",
         mode,
         protocol::Outcome::Success,
         paths,
         0,
         &protocol::Page::default(),
+        &[],
+        request_id,
     );
     Ok(protocol::Outcome::Success)
 }
@@ -274,8 +368,9 @@ CONTEXT:
 
 GLOBAL:
     --db <path>            SQLite 数据存储路径（除 doctor/help/version 外必需）
-    --output human|json|jsonl  输出模式（默认 human；切片期 human 仍为 JSON envelope）
+    --output human|json|jsonl  输出模式（默认 human：人类可读文本；json/jsonl 为协议 envelope）
     --robot                等价 --output json，无颜色/进度（stdout 只输出协议）
+    --request-id <id>      robot 调用方关联 id，原样回显于每个 frame（A-Za-z0-9._:- 计 1-128 字符）
     -h, --help             打印本帮助
     -V, --version          打印版本
 
@@ -287,7 +382,11 @@ EXIT CODES:
 }
 
 /// doctor：最小环境自检。报告版本；若给了 --db，尝试打开存储并报告 schema。
-fn doctor(args: &[String], mode: protocol::OutputMode) -> Result<protocol::Outcome, CliError> {
+fn doctor(
+    args: &[String],
+    mode: protocol::OutputMode,
+    request_id: Option<&str>,
+) -> Result<protocol::Outcome, CliError> {
     let started = std::time::Instant::now();
     let db_opt = args
         .iter()
@@ -319,13 +418,15 @@ fn doctor(args: &[String], mode: protocol::OutputMode) -> Result<protocol::Outco
         }
     };
     let duration_ms = started.elapsed().as_millis() as u64;
-    protocol::emit(
+    emit_result(
         "doctor",
         mode,
         protocol::Outcome::Success,
         data,
         duration_ms,
         &protocol::Page::default(),
+        &[],
+        request_id,
     );
     Ok(protocol::Outcome::Success)
 }
@@ -343,8 +444,8 @@ fn parse_db_flag(args: &[String]) -> Result<(String, Vec<String>), CliError> {
                     .ok_or_else(|| CliError::usage("--db requires a path"))?;
                 db = Some(v.clone());
             }
-            // 输出模式 flag 在 main 里已消费；这里跳过，避免落入 rest 被当子命令。
-            "--output" => {
+            // 输出模式与全局 flag 在 main 里已消费；这里跳过，避免落入 rest 被当子命令。
+            "--output" | "--request-id" => {
                 it.next();
             }
             "--robot" | "--no-color" | "--help" | "-h" | "--version" | "-V" => {}
@@ -356,15 +457,19 @@ fn parse_db_flag(args: &[String]) -> Result<(String, Vec<String>), CliError> {
 }
 
 /// 分发子命令。`store` 同时充当 CatalogStore 与 SearchIndex（同一 SqliteStore）。
+/// `mode`/`request_id` 只喂给需要发协议 frame 的子命令（sync 的 jsonl progress）。
 fn dispatch(
     store: &SqliteStore,
     rest: &[String],
+    mode: protocol::OutputMode,
+    request_id: Option<&str>,
 ) -> Result<
     (
         &'static str,
         protocol::Outcome,
         serde_json::Value,
         protocol::Page,
+        Vec<String>,
     ),
     CliError,
 > {
@@ -388,6 +493,7 @@ fn dispatch(
                         "generation": generation,
                     }),
                     protocol::Page::default(),
+                    Vec::new(),
                 ))
             } else {
                 let fact = arg(rest, 1, "index <id-fact> <text>")?;
@@ -397,6 +503,7 @@ fn dispatch(
                     protocol::Outcome::Success,
                     index_one(store, fact, text)?,
                     protocol::Page::default(),
+                    Vec::new(),
                 ))
             }
         }
@@ -410,15 +517,23 @@ fn dispatch(
                 protocol::Outcome::Success,
                 ingest_file(store, path)?,
                 protocol::Page::default(),
+                Vec::new(),
             ))
         }
         // sync 对显式列出的多个源执行同一套只读快照 + staging，并在全部成功后
         // 通过一次 durable batch 提交，避免部分 source 已写入、后续 source 失败。
+        // jsonl 模式下逐源发 progress frame（contract §4；--robot/Json 禁 progress）。
         "sync" => Ok((
             "sync",
             protocol::Outcome::Success,
-            sync_files(store, &rest[1..])?,
+            sync_files(
+                store,
+                &rest[1..],
+                mode == protocol::OutputMode::Jsonl,
+                request_id,
+            )?,
             protocol::Page::default(),
+            Vec::new(),
         )),
         "search" => {
             let mut args = rest.to_vec();
@@ -440,8 +555,8 @@ fn dispatch(
                 cursor,
                 budget,
             })?;
-            let (outcome, data, page) = render(response);
-            Ok(("search", outcome, data, page))
+            let (outcome, data, page, warnings) = render(response);
+            Ok(("search", outcome, data, page, warnings))
         }
         "get" => {
             let wire = arg(rest, 1, "get <wire-id>")?;
@@ -449,8 +564,8 @@ fn dispatch(
                 .ok_or_else(|| CliError::usage(format!("not a valid entity id: {wire}")))?;
             let app = App::new(store_ref(store), store_ref(store));
             let response = app.handle(AppRequest::Get { id })?;
-            let (outcome, data, page) = render(response);
-            Ok(("get", outcome, data, page))
+            let (outcome, data, page, warnings) = render(response);
+            Ok(("get", outcome, data, page, warnings))
         }
         "show" => {
             let wire = arg(rest, 1, "show <wire-id>")?;
@@ -458,8 +573,8 @@ fn dispatch(
                 .ok_or_else(|| CliError::usage(format!("not a valid entity id: {wire}")))?;
             let app = App::new(store_ref(store), store_ref(store));
             let response = app.handle(AppRequest::Show { id })?;
-            let (outcome, data, page) = render(response);
-            Ok(("show", outcome, data, page))
+            let (outcome, data, page, warnings) = render(response);
+            Ok(("show", outcome, data, page, warnings))
         }
         "list" => {
             let mut args = rest.to_vec();
@@ -483,8 +598,8 @@ fn dispatch(
                 cursor,
                 budget,
             })?;
-            let (outcome, data, page) = render(response);
-            Ok(("list", outcome, data, page))
+            let (outcome, data, page, warnings) = render(response);
+            Ok(("list", outcome, data, page, warnings))
         }
         // context：装配一个会话的分支消息链 + 证据区间（CONTRACT §1-2）。
         "context" => {
@@ -510,14 +625,14 @@ fn dispatch(
                 policy,
                 budget,
             })?;
-            let (outcome, data, page) = render(response);
-            Ok(("context", outcome, data, page))
+            let (outcome, data, page, warnings) = render(response);
+            Ok(("context", outcome, data, page, warnings))
         }
         "status" => {
             let app = App::new(store_ref(store), store_ref(store));
             let response = app.handle(AppRequest::Status)?;
-            let (outcome, data, page) = render(response);
-            Ok(("status", outcome, data, page))
+            let (outcome, data, page, warnings) = render(response);
+            Ok(("status", outcome, data, page, warnings))
         }
         other => Err(CliError::usage(format!("unknown subcommand: {other}"))),
     }
@@ -775,7 +890,14 @@ fn ingest_file(store: &SqliteStore, path: &str) -> Result<serde_json::Value, Cli
 
 /// 同步显式给定的源文件：所有文件先完成 capture + stage + verify，之后才提交
 /// 一个 durable batch。这样任一文件失败都不会留下其它文件的部分更新。
-fn sync_files(store: &SqliteStore, paths: &[String]) -> Result<serde_json::Value, CliError> {
+/// `progress` 为 true（仅 jsonl 模式）时逐源发 progress frame——staging 是
+/// 长任务里唯一逐文件推进的阶段，提交本身是单事务不可分。
+fn sync_files(
+    store: &SqliteStore,
+    paths: &[String],
+    progress: bool,
+    request_id: Option<&str>,
+) -> Result<serde_json::Value, CliError> {
     if paths.is_empty() {
         return Err(CliError::usage("sync <file>... requires at least one file"));
     }
@@ -787,6 +909,13 @@ fn sync_files(store: &SqliteStore, paths: &[String]) -> Result<serde_json::Value
         let path_ref = std::path::Path::new(path);
         let (snap, bytes) = capture(path_ref).map_err(ProtocolError::from)?;
         let (staged, variant) = stage_with_registry(&bytes)?;
+        if progress {
+            protocol::write_stdout_line(&protocol::progress_frame(
+                "sync",
+                &format!("staged {path} ({} messages)", staged.messages.len()),
+                request_id,
+            ));
+        }
         message_count += staged.messages.len();
         let provider = variant.split('/').next().unwrap_or(&variant).to_string();
         sources.push(SourceBatch {
@@ -820,9 +949,17 @@ fn sync_files(store: &SqliteStore, paths: &[String]) -> Result<serde_json::Value
     }))
 }
 
-/// 把应用结果投影为 (outcome, data, page)：截断 → partial（exit 10），
-/// 分页令牌 → envelope `page`。前端只做投影，不再解释语义。
-fn render(response: AppResponse) -> (protocol::Outcome, serde_json::Value, protocol::Page) {
+/// 把应用结果投影为 (outcome, data, page, warnings)：截断 → partial（exit 10），
+/// 分页令牌 → envelope `page`，可核验的降级事实 → warnings。前端只做投影，
+/// 不再解释语义。
+fn render(
+    response: AppResponse,
+) -> (
+    protocol::Outcome,
+    serde_json::Value,
+    protocol::Page,
+    Vec<String>,
+) {
     match response {
         AppResponse::Search {
             hits,
@@ -846,7 +983,7 @@ fn render(response: AppResponse) -> (protocol::Outcome, serde_json::Value, proto
                 "generation": generation,
                 "truncation": truncation_json(&truncation),
             });
-            (outcome, data, page)
+            (outcome, data, page, Vec::new())
         }
         AppResponse::Get { payload } => (
             protocol::Outcome::Success,
@@ -854,6 +991,7 @@ fn render(response: AppResponse) -> (protocol::Outcome, serde_json::Value, proto
                 "payload": payload.map(|bytes| String::from_utf8_lossy(&bytes).into_owned()),
             }),
             protocol::Page::default(),
+            Vec::new(),
         ),
         // show 与 get 的区别：get 回原始 payload 字节，show 把存储的 canonical
         // JSON payload 展开成结构化 entity（含 role/text/parent/timestamp/threading）。
@@ -872,6 +1010,7 @@ fn render(response: AppResponse) -> (protocol::Outcome, serde_json::Value, proto
                 }),
             }),
             protocol::Page::default(),
+            Vec::new(),
         ),
         AppResponse::List {
             entries,
@@ -895,7 +1034,7 @@ fn render(response: AppResponse) -> (protocol::Outcome, serde_json::Value, proto
                 "generation": generation,
                 "truncation": truncation_json(&truncation),
             });
-            (outcome, data, page)
+            (outcome, data, page, Vec::new())
         }
         AppResponse::Context {
             session_id,
@@ -907,6 +1046,21 @@ fn render(response: AppResponse) -> (protocol::Outcome, serde_json::Value, proto
             generation,
         } => {
             let outcome = outcome_of(&truncation);
+            // 降级如实上报：legacy（无 span）行的证据精度是 unknown，调用方应知道
+            // 重新 ingest 可恢复字节级定位（design §0.2）。
+            let unknown = evidence
+                .iter()
+                .filter(|dto| dto.precision == Precision::Unknown)
+                .count();
+            let warnings = if unknown > 0 {
+                vec![format!(
+                    "{unknown} of {} evidence spans have unknown precision \
+                     (legacy rows; re-ingest to restore byte spans)",
+                    evidence.len()
+                )]
+            } else {
+                Vec::new()
+            };
             let data = serde_json::json!({
                 "session_id": session_id,
                 "session": session,
@@ -922,7 +1076,7 @@ fn render(response: AppResponse) -> (protocol::Outcome, serde_json::Value, proto
                 "truncation": truncation_json(&truncation),
                 "generation": generation,
             });
-            (outcome, data, protocol::Page::default())
+            (outcome, data, protocol::Page::default(), warnings)
         }
         AppResponse::Status {
             catalog_count,
@@ -934,6 +1088,7 @@ fn render(response: AppResponse) -> (protocol::Outcome, serde_json::Value, proto
                 "generation": active_generation,
             }),
             protocol::Page::default(),
+            Vec::new(),
         ),
     }
 }
@@ -957,4 +1112,62 @@ fn arg<'a>(rest: &'a [String], index: usize, usage: &str) -> Result<&'a str, Cli
     rest.get(index)
         .map(String::as_str)
         .ok_or_else(|| CliError::usage(format!("missing argument: {usage}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agentsessions_application::EvidenceSpanDto;
+
+    fn dto(precision: Precision) -> EvidenceSpanDto {
+        EvidenceSpanDto {
+            occurrence_id: "occ".into(),
+            message_id: "msg_v1_x".into(),
+            source_document_id: None,
+            generation: 1,
+            source_fingerprint: None,
+            byte_start: None,
+            byte_end: None,
+            line_start: None,
+            line_end: None,
+            record_ordinal: Some(0),
+            snippet_char_start: None,
+            snippet_char_end: None,
+            precision,
+        }
+    }
+
+    fn context_response(evidence: Vec<EvidenceSpanDto>) -> AppResponse {
+        AppResponse::Context {
+            session_id: "ses_v1_s".into(),
+            session: serde_json::json!({}),
+            branch_leaf: None,
+            messages: Vec::new(),
+            evidence,
+            truncation: Truncation {
+                truncated: false,
+                reason: None,
+            },
+            generation: 1,
+        }
+    }
+
+    #[test]
+    fn context_render_warns_on_unknown_precision_evidence() {
+        // 3 条证据中 2 条 unknown → 一条如实计数的 warning（design §0.2）。
+        let (_, _, _, warnings) = render(context_response(vec![
+            dto(Precision::Byte),
+            dto(Precision::Unknown),
+            dto(Precision::Unknown),
+        ]));
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("2 of 3"), "{warnings:?}");
+        assert!(warnings[0].contains("re-ingest"), "{warnings:?}");
+    }
+
+    #[test]
+    fn context_render_stays_silent_on_full_precision() {
+        let (_, _, _, warnings) = render(context_response(vec![dto(Precision::Byte)]));
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
 }

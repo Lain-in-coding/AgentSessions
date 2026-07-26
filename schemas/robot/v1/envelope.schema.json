@@ -5,7 +5,9 @@
   "description": "A complete AgentSessions JSON or JSONL protocol frame.",
   "oneOf": [
     { "$ref": "#/$defs/success" },
-    { "$ref": "#/$defs/error" }
+    { "$ref": "#/$defs/error" },
+    { "$ref": "#/$defs/progress" },
+    { "$ref": "#/$defs/diagnostic" }
   ],
   "$defs": {
     "page": {
@@ -130,6 +132,52 @@
         },
         "page": { "$ref": "#/$defs/page" },
         "meta": { "$ref": "#/$defs/meta" }
+      }
+    },
+    "progress": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "frame_type",
+        "command",
+        "request_id",
+        "message"
+      ],
+      "properties": {
+        "schema_version": { "const": "1.0" },
+        "frame_type": { "const": "progress" },
+        "command": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "request_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9._:-]+$"
+        },
+        "message": { "type": "string", "maxLength": 4096 }
+      }
+    },
+    "diagnostic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "frame_type",
+        "command",
+        "request_id",
+        "message"
+      ],
+      "properties": {
+        "schema_version": { "const": "1.0" },
+        "frame_type": { "const": "diagnostic" },
+        "command": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "request_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9._:-]+$"
+        },
+        "message": { "type": "string", "maxLength": 4096 }
       }
     }
   }

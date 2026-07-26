@@ -15,6 +15,7 @@ use agentsessions_application::cursor::CursorError;
 use agentsessions_domain::DomainError;
 use agentsessions_ports::{PortError, ProviderError};
 use serde_json::{Value, json};
+use std::io::{ErrorKind, Write};
 
 /// 当前协议 schema 版本（major.minor）。未知 major 必须拒绝，兼容 minor 按合同处理。
 pub const SCHEMA_VERSION: &str = "1.0";
@@ -27,10 +28,10 @@ pub enum Outcome {
     Partial,
 }
 
-/// 输出模式。切片期实现 human/json；jsonl 预留。
+/// 输出模式。模式分支（human 渲染 vs envelope/帧）由 main.rs 持有；本层只提供帧构造。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputMode {
-    /// 人类可读（默认）。当前退化为紧凑单行 JSON，待人类渲染器落地。
+    /// 人类可读（默认）。
     Human,
     /// 单个 JSON envelope。
     Json,
@@ -120,11 +121,13 @@ impl CanonicalCode {
     }
 }
 
-/// 归一后的协议错误：稳定 code + 安全 message。
+/// 归一后的协议错误：稳定 code + 安全 message + 有界结构化 details。
 #[derive(Debug, Clone)]
 pub struct ProtocolError {
     pub code: CanonicalCode,
     pub message: String,
+    /// envelope `error.details`：默认 `{}`；只允许目录允诺的有界字段（schema 上限 32 属性）。
+    pub details: Value,
 }
 
 impl ProtocolError {
@@ -132,7 +135,14 @@ impl ProtocolError {
         ProtocolError {
             code,
             message: message.into(),
+            details: json!({}),
         }
+    }
+
+    /// 附加结构化 details；构造方保证对象有界（≤32 属性）且不含敏感内容。
+    pub fn with_details(mut self, details: Value) -> Self {
+        self.details = details;
+        self
     }
 }
 
@@ -155,14 +165,21 @@ impl From<AppError> for ProtocolError {
             AppError::Port(error) => error.into(),
             AppError::Provider(error) => error.into(),
             // cursor 错误族有专属 canonical code；contract major 不符归 schema_incompatible。
+            // mismatch 双方数值投影成有界 details，供 Robot 端无需解析 message 即可自恢复。
             AppError::Cursor(error) => {
-                let code = match &error {
-                    CursorError::Invalid(_) => CanonicalCode::CursorInvalid,
-                    CursorError::Expired(_) => CanonicalCode::CursorExpired,
-                    CursorError::GenerationMismatch { .. } => CanonicalCode::GenerationMismatch,
-                    CursorError::ContractMismatch { .. } => CanonicalCode::SchemaIncompatible,
+                let (code, details) = match &error {
+                    CursorError::Invalid(_) => (CanonicalCode::CursorInvalid, json!({})),
+                    CursorError::Expired(_) => (CanonicalCode::CursorExpired, json!({})),
+                    CursorError::GenerationMismatch { cursor, active } => (
+                        CanonicalCode::GenerationMismatch,
+                        json!({ "cursor_generation": cursor, "active_generation": active }),
+                    ),
+                    CursorError::ContractMismatch { cursor, supported } => (
+                        CanonicalCode::SchemaIncompatible,
+                        json!({ "cursor_contract_major": cursor, "supported": supported }),
+                    ),
                 };
-                ProtocolError::new(code, error.to_string())
+                ProtocolError::new(code, error.to_string()).with_details(details)
             }
             // 预算过小是请求校验失败（CONTRACT §3）。
             AppError::Budget(error) => {
@@ -215,12 +232,25 @@ pub fn parse_output_mode(args: &[String]) -> Result<OutputMode, String> {
     Ok(OutputMode::Human)
 }
 
-fn request_id() -> String {
+/// request_id 语义：调用方提供（`--request-id`）则逐字回显；缺省生成 `cli-<pid>-<millis>`。
+fn resolve_request_id(request_id: Option<&str>) -> String {
+    request_id.map_or_else(generated_request_id, str::to_string)
+}
+
+fn generated_request_id() -> String {
     let millis = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_millis())
         .unwrap_or(0);
     format!("cli-{}-{millis}", std::process::id())
+}
+
+/// envelope 约束 `^[A-Za-z0-9._:-]+$` 且 1..=128 字符。
+/// 允许集为纯 ASCII，任何多字节字符都过不了逐字节校验，故字节长度即字符长度。
+pub fn valid_request_id(s: &str) -> bool {
+    (1..=128).contains(&s.len())
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b':' | b'-'))
 }
 
 /// 分页元数据（envelope `page` 字段）：续读令牌 + 是否还有后续页。
@@ -230,29 +260,16 @@ pub struct Page {
     pub has_more: bool,
 }
 
-/// 统一输出一个成功结果。所有模式当前都发单个 envelope（人类渲染器待落地；
-/// Human 在切片期退化为紧凑 JSON envelope，与既有 Robot-JSON 雏形一致）。
-pub fn emit(
-    command: &str,
-    _mode: OutputMode,
-    outcome: Outcome,
-    data: Value,
-    duration_ms: u64,
-    page: &Page,
-) {
-    println!(
-        "{}",
-        success_envelope(command, outcome, data, duration_ms, page)
-    );
-}
-
 /// 成功 envelope。`data` 是已验证的 JSON Value，不接受未校验字符串片段。
+/// `warnings` 原样序列化进 envelope 数组；模式分支（human vs envelope）由 main.rs 决定。
 pub fn success_envelope(
     command: &str,
     outcome: Outcome,
     data: Value,
     duration_ms: u64,
     page: &Page,
+    warnings: &[String],
+    request_id: Option<&str>,
 ) -> String {
     let outcome_str = match outcome {
         Outcome::Success => "success",
@@ -263,11 +280,11 @@ pub fn success_envelope(
         "schema_version": SCHEMA_VERSION,
         "frame_type": "response",
         "command": command,
-        "request_id": request_id(),
+        "request_id": resolve_request_id(request_id),
         "ok": true,
         "outcome": outcome_str,
         "data": data,
-        "warnings": [],
+        "warnings": warnings,
         "page": {
             "next_cursor": page.next_cursor.as_deref().map_or(Value::Null, |c| json!(c)),
             "has_more": page.has_more,
@@ -280,20 +297,20 @@ pub fn success_envelope(
     .to_string()
 }
 
-/// 错误 envelope。stdout 只有这一个对象；细节安全、有界。
-pub fn error_envelope(command: &str, err: &ProtocolError) -> String {
+/// 错误 envelope。stdout 只有这一个对象；细节安全、有界（`err.details` 由构造方约束）。
+pub fn error_envelope(command: &str, err: &ProtocolError, request_id: Option<&str>) -> String {
     json!({
         "schema_version": SCHEMA_VERSION,
         "frame_type": "error",
         "command": command,
-        "request_id": request_id(),
+        "request_id": resolve_request_id(request_id),
         "ok": false,
         "outcome": "failure",
         "error": {
             "code": err.code.as_str(),
             "message": err.message,
             "retryable": err.code.retryable(),
-            "details": {},
+            "details": err.details,
         },
         "warnings": [],
         "page": {
@@ -306,6 +323,56 @@ pub fn error_envelope(command: &str, err: &ProtocolError) -> String {
         },
     })
     .to_string()
+}
+
+/// progress frame：`{schema_version, frame_type:"progress", command, request_id, message}`。
+/// 只允许在 `--output jsonl` 下发射（`--robot`/Json/Human 禁止）；该约束由调用方执行。
+pub fn progress_frame(command: &str, message: &str, request_id: Option<&str>) -> String {
+    stream_frame("progress", command, message, request_id)
+}
+
+/// diagnostic frame：为契约完备性定义（design §0.4），v1 没有任何发射点。
+#[allow(dead_code)]
+pub fn diagnostic_frame(command: &str, message: &str, request_id: Option<&str>) -> String {
+    stream_frame("diagnostic", command, message, request_id)
+}
+
+fn stream_frame(
+    frame_type: &str,
+    command: &str,
+    message: &str,
+    request_id: Option<&str>,
+) -> String {
+    json!({
+        "schema_version": SCHEMA_VERSION,
+        "frame_type": frame_type,
+        "command": command,
+        "request_id": resolve_request_id(request_id),
+        "message": message,
+    })
+    .to_string()
+}
+
+/// 协议 stdout 的唯一出口（println 替身）：整行写入 + 换行 + flush。
+///
+/// CONTRACT §6：stdout 必须协议干净、退出码受控。下游提前关管道（head/pager）
+/// 触发 EPIPE 属正常消费行为 → 静默 exit 0，不得 panic（exit 101）或污染 stderr；
+/// 其余写失败归 source_io 类 → stderr 一行诊断 + exit 5。
+/// 逐行 flush 是必须的：块缓冲下 EPIPE 只在冲刷时暴露，且 jsonl 进度帧要求实时可见。
+pub fn write_stdout_line(line: &str) {
+    let stdout = std::io::stdout();
+    let mut handle = stdout.lock();
+    let result = handle
+        .write_all(line.as_bytes())
+        .and_then(|()| handle.write_all(b"\n"))
+        .and_then(|()| handle.flush());
+    if let Err(error) = result {
+        if error.kind() == ErrorKind::BrokenPipe {
+            std::process::exit(0);
+        }
+        eprintln!("error [source_io]: cannot write protocol output: {error}");
+        std::process::exit(5);
+    }
 }
 
 #[cfg(test)]
@@ -391,6 +458,8 @@ mod tests {
             json!({ "catalog_count": 3, "generation": 5 }),
             42,
             &Page::default(),
+            &[],
+            None,
         );
         assert!(s.contains("\"schema_version\":\"1.0\""));
         assert!(s.contains("\"frame_type\":\"response\""));
@@ -402,6 +471,7 @@ mod tests {
         assert!(s.contains("\"generation\":5"));
         assert!(s.contains("\"next_cursor\":null"));
         assert!(s.contains("\"has_more\":false"));
+        assert!(s.contains("\"warnings\":[]"));
     }
 
     #[test]
@@ -415,10 +485,149 @@ mod tests {
                 next_cursor: Some("tok.abc".into()),
                 has_more: true,
             },
+            &[],
+            None,
         );
         assert!(s.contains("\"outcome\":\"partial\""));
         assert!(s.contains("\"next_cursor\":\"tok.abc\""));
         assert!(s.contains("\"has_more\":true"));
+    }
+
+    #[test]
+    fn success_envelope_carries_warnings_array() {
+        let warnings = vec!["w1".to_string(), "w2".to_string()];
+        let s = success_envelope(
+            "context",
+            Outcome::Success,
+            json!({}),
+            0,
+            &Page::default(),
+            &warnings,
+            None,
+        );
+        let v: Value = serde_json::from_str(&s).expect("envelope must be valid JSON");
+        assert_eq!(v["warnings"], json!(["w1", "w2"]));
+    }
+
+    #[test]
+    fn valid_request_id_accepts_envelope_pattern() {
+        assert!(valid_request_id("a"));
+        assert!(valid_request_id(&"x".repeat(128)));
+        assert!(valid_request_id("Az09._:-"));
+    }
+
+    #[test]
+    fn valid_request_id_rejects_out_of_contract_input() {
+        assert!(!valid_request_id(""));
+        assert!(!valid_request_id(&"x".repeat(129)));
+        assert!(!valid_request_id("has space"));
+        assert!(!valid_request_id("请求-1"));
+    }
+
+    #[test]
+    fn frames_echo_caller_request_id_verbatim() {
+        let s = success_envelope(
+            "status",
+            Outcome::Success,
+            json!({}),
+            0,
+            &Page::default(),
+            &[],
+            Some("abc.123"),
+        );
+        assert!(s.contains("\"request_id\":\"abc.123\""));
+
+        let err = ProtocolError::new(CanonicalCode::NotFound, "missing");
+        let s = error_envelope("get", &err, Some("abc.123"));
+        assert!(s.contains("\"request_id\":\"abc.123\""));
+
+        let s = progress_frame("sync", "staged", Some("abc.123"));
+        assert!(s.contains("\"request_id\":\"abc.123\""));
+    }
+
+    #[test]
+    fn frames_generate_request_id_when_absent() {
+        let s = success_envelope(
+            "status",
+            Outcome::Success,
+            json!({}),
+            0,
+            &Page::default(),
+            &[],
+            None,
+        );
+        assert!(s.contains("\"request_id\":\"cli-"));
+        let s = progress_frame("sync", "staged", None);
+        assert!(s.contains("\"request_id\":\"cli-"));
+    }
+
+    #[test]
+    fn progress_frame_has_exact_contract_shape() {
+        let s = progress_frame("sync", "staged source 1/2", Some("req-1"));
+        let v: Value = serde_json::from_str(&s).expect("frame must be valid JSON");
+        let object = v.as_object().expect("frame must be an object");
+        assert_eq!(object.len(), 5);
+        assert_eq!(v["schema_version"], SCHEMA_VERSION);
+        assert_eq!(v["frame_type"], "progress");
+        assert_eq!(v["command"], "sync");
+        assert_eq!(v["request_id"], "req-1");
+        assert_eq!(v["message"], "staged source 1/2");
+    }
+
+    #[test]
+    fn diagnostic_frame_has_exact_contract_shape() {
+        let s = diagnostic_frame("sync", "note", None);
+        let v: Value = serde_json::from_str(&s).expect("frame must be valid JSON");
+        assert_eq!(v.as_object().expect("frame must be an object").len(), 5);
+        assert_eq!(v["frame_type"], "diagnostic");
+    }
+
+    #[test]
+    fn cursor_mismatch_errors_populate_bounded_details() {
+        let e: ProtocolError = AppError::Cursor(CursorError::GenerationMismatch {
+            cursor: 1,
+            active: 2,
+        })
+        .into();
+        assert_eq!(
+            e.details,
+            json!({ "cursor_generation": 1, "active_generation": 2 })
+        );
+
+        let e: ProtocolError = AppError::Cursor(CursorError::ContractMismatch {
+            cursor: 2,
+            supported: 1,
+        })
+        .into();
+        assert_eq!(
+            e.details,
+            json!({ "cursor_contract_major": 2, "supported": 1 })
+        );
+    }
+
+    #[test]
+    fn non_mismatch_errors_keep_empty_details() {
+        let e: ProtocolError = AppError::Cursor(CursorError::Invalid("x".into())).into();
+        assert_eq!(e.details, json!({}));
+        let e: ProtocolError = PortError::WriterBusy("held".into()).into();
+        assert_eq!(e.details, json!({}));
+        let e: ProtocolError = DomainError::NotFound("x".into()).into();
+        assert_eq!(e.details, json!({}));
+    }
+
+    #[test]
+    fn error_envelope_emits_details_field() {
+        let err: ProtocolError = AppError::Cursor(CursorError::GenerationMismatch {
+            cursor: 1,
+            active: 2,
+        })
+        .into();
+        let s = error_envelope("search", &err, None);
+        let v: Value = serde_json::from_str(&s).expect("envelope must be valid JSON");
+        assert_eq!(
+            v["error"]["details"],
+            json!({ "cursor_generation": 1, "active_generation": 2 })
+        );
     }
 
     #[test]
@@ -496,6 +705,32 @@ mod tests {
                 "missing {field}"
             );
         }
+        // frame 词汇表：response/error/progress/diagnostic 四种，全部挂在顶层 oneOf。
+        let one_of = schema["oneOf"]
+            .as_array()
+            .expect("schema oneOf must be an array");
+        assert_eq!(one_of.len(), 4);
+        for kind in ["progress", "diagnostic"] {
+            let def = &schema["$defs"][kind];
+            assert_eq!(def["properties"]["frame_type"]["const"], kind);
+            assert_eq!(def["properties"]["schema_version"]["const"], SCHEMA_VERSION);
+            assert_eq!(def["additionalProperties"], false);
+            let required = def["required"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{kind} required must be an array"));
+            for field in [
+                "schema_version",
+                "frame_type",
+                "command",
+                "request_id",
+                "message",
+            ] {
+                assert!(
+                    required.iter().any(|value| value == field),
+                    "missing {field} in {kind}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -511,12 +746,13 @@ mod tests {
     #[test]
     fn error_envelope_carries_code_and_retryable() {
         let err = ProtocolError::new(CanonicalCode::WriterBusy, "another writer holds the lease");
-        let s = error_envelope("sync", &err);
+        let s = error_envelope("sync", &err, None);
         assert!(s.contains("\"frame_type\":\"error\""));
         assert!(s.contains("\"ok\":false"));
         assert!(s.contains("\"outcome\":\"failure\""));
         assert!(s.contains("\"code\":\"writer_busy\""));
         assert!(s.contains("\"retryable\":true"));
         assert!(s.contains("\"duration_ms\":0"));
+        assert!(s.contains("\"details\":{}"));
     }
 }

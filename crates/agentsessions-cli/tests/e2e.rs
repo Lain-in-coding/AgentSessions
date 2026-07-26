@@ -9,8 +9,20 @@ use std::process::{Command, Output};
 /// 刚构建出的 `agentsessions` 二进制的绝对路径（由 Cargo 在编译期注入）。
 const BIN: &str = env!("CARGO_BIN_EXE_agentsessions");
 
-/// 在给定 db 上跑一次 CLI，返回完整输出。
+/// 在给定 db 上以 robot 协议模式跑一次 CLI，返回完整输出。
+/// 功能性测试统一断言稳定 JSON envelope；human 版式走 [`run_human`]。
 fn run(db: &str, args: &[&str]) -> Output {
+    Command::new(BIN)
+        .arg("--db")
+        .arg(db)
+        .arg("--robot")
+        .args(args)
+        .output()
+        .expect("failed to spawn agentsessions binary")
+}
+
+/// 在给定 db 上以默认 human 模式跑一次 CLI（无 --robot）：验证人类渲染器输出。
+fn run_human(db: &str, args: &[&str]) -> Output {
     Command::new(BIN)
         .arg("--db")
         .arg(db)
@@ -493,7 +505,7 @@ fn help_flag_lists_commands_without_db() {
 
 #[test]
 fn doctor_reports_ok_without_db() {
-    let out = run_bare(&["doctor"]);
+    let out = run_bare(&["--robot", "doctor"]);
     assert!(out.status.success());
     let s = stdout(&out);
     assert!(s.contains("\"ok\":true"), "doctor 应报告 ok:true: {s}");
@@ -811,7 +823,7 @@ fn invalid_output_mode_exits_with_code_2() {
 
 #[test]
 fn doctor_envelope_shape_has_meta_generation_null() {
-    let out = run_bare(&["doctor"]);
+    let out = run_bare(&["--robot", "doctor"]);
     assert!(out.status.success());
     let frame = parse_first_line(&out);
     assert_envelope_shape(&frame, true);
@@ -824,7 +836,7 @@ fn doctor_envelope_shape_has_meta_generation_null() {
 
 #[test]
 fn config_paths_reports_platform_directories() {
-    let out = run_bare(&["config", "paths"]);
+    let out = run_bare(&["--robot", "config", "paths"]);
     assert!(
         out.status.success(),
         "config paths failed: {}",
@@ -860,7 +872,7 @@ fn jsonl_output_is_one_complete_frame_per_line() {
 #[test]
 fn human_error_writes_diagnostic_to_stderr_only() {
     let (_dir, db) = temp_db("env-human-error");
-    let out = run(&db, &["get", "not-a-valid-id"]);
+    let out = run_human(&db, &["get", "not-a-valid-id"]);
     assert!(!out.status.success());
     assert!(
         stdout(&out).is_empty(),
@@ -1015,6 +1027,9 @@ fn generation_bump_invalidates_cursor_with_exit_9() {
     let frame = parse_first_line(&out);
     assert_envelope_shape(&frame, false);
     assert_eq!(frame["error"]["code"], "generation_mismatch");
+    // 结构化 details：调用方无需解析 message 即可拿到两侧 generation（contract §4）。
+    assert_eq!(frame["error"]["details"]["cursor_generation"], 2);
+    assert_eq!(frame["error"]["details"]["active_generation"], 3);
 }
 
 /// 写入 context e2e 用的真实 Claude 格式夹具（合成数据，含 sidechain 与 fork）：
@@ -1147,6 +1162,171 @@ fn context_missing_session_is_not_found() {
     let frame = parse_first_line(&out);
     assert_envelope_shape(&frame, false);
     assert_eq!(frame["error"]["code"], "not_found");
+}
+
+// ─── Human/Robot 输出真值表（contract §4 §6，child 4）───────────────────────
+
+#[test]
+fn human_search_and_status_render_text_not_envelope() {
+    let (_dir, db) = temp_db("human-search");
+    for (fact, text) in [("h1", "human render alpha"), ("h2", "human render beta")] {
+        let out = run(&db, &["index", fact, text]);
+        assert!(out.status.success());
+    }
+
+    let out = run_human(&db, &["search", "render"]);
+    assert!(out.status.success(), "search failed: {}", stdout(&out));
+    let s = stdout(&out);
+    assert!(s.contains("hit(s) (generation"), "human header: {s}");
+    assert!(s.contains("msg_v1_"), "human hits list ids: {s}");
+    assert!(
+        !s.contains("schema_version"),
+        "no envelope in human mode: {s}"
+    );
+
+    // 零结果有措辞，不是空输出。
+    let out = run_human(&db, &["search", "nomatchword"]);
+    assert!(out.status.success());
+    assert!(stdout(&out).contains("no hits"), "got: {}", stdout(&out));
+
+    let out = run_human(&db, &["status"]);
+    let s = stdout(&out);
+    assert!(s.contains("entities: 2"), "human status: {s}");
+    assert!(s.contains("generation:"), "human status: {s}");
+}
+
+#[test]
+fn human_context_renders_chain_and_partial_exits_10() {
+    let (dir, db) = temp_db("human-context");
+    let (fixture_path, _, session_wire) = write_context_fixture(dir.path());
+    let out = run(&db, &["ingest", &fixture_path]);
+    assert!(out.status.success(), "ingest failed: {}", stdout(&out));
+
+    let out = run_human(&db, &["context", &session_wire]);
+    assert!(out.status.success(), "context failed: {}", stdout(&out));
+    let s = stdout(&out);
+    assert!(
+        s.contains(&format!("session {session_wire}")),
+        "header: {s}"
+    );
+    assert!(s.contains("[user] ctx root question"), "messages: {s}");
+    assert!(s.contains("evidence: 3 span(s)"), "evidence line: {s}");
+    assert!(!s.contains("schema_version"), "no envelope: {s}");
+
+    // 预算截断：human 模式同样如实报 partial（截断行 + exit 10）。
+    let out = run_human(&db, &["context", &session_wire, "--max-messages", "2"]);
+    assert_eq!(out.status.code(), Some(10), "stdout={}", stdout(&out));
+    assert!(
+        stdout(&out).contains("truncated: max_messages"),
+        "truncation line: {}",
+        stdout(&out)
+    );
+}
+
+#[test]
+fn jsonl_sync_emits_progress_frames_then_single_response() {
+    let (dir, db) = temp_db("jsonl-progress");
+    let mut paths = Vec::new();
+    for tag in ["p1", "p2"] {
+        let fixture = dir.path().join(format!("{tag}.jsonl"));
+        // 每源内容必须不同：同字节 → 同内容寻址 document/session id，
+        // 而成员消息不同 → 存储层正确拒绝跨源投影冲突。
+        std::fs::write(
+            &fixture,
+            format!(
+                "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":\"progress fixture {tag}\"}}}}\n"
+            ),
+        )
+        .expect("write fixture");
+        paths.push(fixture.to_string_lossy().into_owned());
+    }
+
+    let out = Command::new(BIN)
+        .args([
+            "--db", &db, "--output", "jsonl", "sync", &paths[0], &paths[1],
+        ])
+        .output()
+        .expect("spawn");
+    assert!(out.status.success(), "sync failed: {}", stdout(&out));
+    let text = stdout(&out);
+    let frames: Vec<serde_json::Value> = text
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap_or_else(|e| panic!("bad frame: {e}\n{line}")))
+        .collect();
+    // 逐源 progress + 收尾 response，每行一个完整 frame（contract §4）。
+    assert_eq!(frames.len(), 3, "2 progress + 1 response: {text}");
+    assert_eq!(frames[0]["frame_type"], "progress");
+    assert_eq!(frames[1]["frame_type"], "progress");
+    assert!(
+        frames[0]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("staged")),
+        "{text}"
+    );
+    assert_eq!(frames[2]["frame_type"], "response");
+    assert_eq!(frames[2]["command"], "sync");
+
+    // --robot 禁 progress：同一命令只有一个 response envelope。
+    let (_dir2, db2) = temp_db("robot-no-progress");
+    let out = Command::new(BIN)
+        .args(["--db", &db2, "--robot", "sync", &paths[0], &paths[1]])
+        .output()
+        .expect("spawn");
+    assert!(out.status.success());
+    let text = stdout(&out);
+    assert_eq!(
+        text.lines().count(),
+        1,
+        "robot mode must not emit progress: {text}"
+    );
+    let frame = parse_first_line(&out);
+    assert_eq!(frame["frame_type"], "response");
+}
+
+#[test]
+fn request_id_echoes_verbatim_and_invalid_is_rejected() {
+    let (_dir, db) = temp_db("request-id");
+    let out = Command::new(BIN)
+        .args([
+            "--db",
+            &db,
+            "--robot",
+            "--request-id",
+            "corr.42:a_b-c",
+            "status",
+        ])
+        .output()
+        .expect("spawn");
+    assert!(out.status.success());
+    let frame = parse_first_line(&out);
+    assert_eq!(
+        frame["request_id"], "corr.42:a_b-c",
+        "echo verbatim: {frame}"
+    );
+
+    // 非法 request-id 是用法错误（exit 2），不静默替换。
+    let out = Command::new(BIN)
+        .args(["--db", &db, "--robot", "--request-id", "bad id", "status"])
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(2), "stdout={}", stdout(&out));
+    let frame = parse_first_line(&out);
+    assert_eq!(frame["error"]["code"], "invalid_request");
+}
+
+#[test]
+fn context_envelope_carries_warnings_array_on_modern_store() {
+    let (dir, db) = temp_db("warnings-plumbing");
+    let (fixture_path, _, session_wire) = write_context_fixture(dir.path());
+    let out = run(&db, &["ingest", &fixture_path]);
+    assert!(out.status.success());
+
+    let out = run(&db, &["context", &session_wire]);
+    assert!(out.status.success());
+    let frame = parse_first_line(&out);
+    // 现代库全部 byte 精度 → warnings 存在且为空（通路端到端可见；
+    // 有 unknown 精度时的告警文案由 main.rs 单测锁定，见 design §0.2）。
+    assert_eq!(frame["warnings"], serde_json::json!([]), "{frame}");
 }
 
 // ─── 初始性能基线 ───────────────────────────────────────────────────────────
