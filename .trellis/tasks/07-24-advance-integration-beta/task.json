@@ -18,7 +18,9 @@
   "commit": null,
   "pr_url": null,
   "subtasks": [],
-  "children": [],
+  "children": [
+    "07-26-canonical-source-session-span"
+  ],
   "parent": "07-24-remediation-milestone-closure",
   "relatedFiles": [],
   "notes": "",

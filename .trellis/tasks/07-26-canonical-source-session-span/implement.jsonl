@@ -1,0 +1,10 @@
+{"file": ".trellis/tasks/07-26-canonical-source-session-span/prd.md", "reason": "Requirements and acceptance criteria for this child task"}
+{"file": ".trellis/tasks/07-26-canonical-source-session-span/design.md", "reason": "Technical design: domain/ports/storage/CLI changes and migration shape"}
+{"file": ".trellis/tasks/07-26-canonical-source-session-span/implement.md", "reason": "Ordered execution checklist with validation commands and rollback points"}
+{"file": ".trellis/spec/agentsessions-domain/backend/index.md", "reason": "Domain layer conventions for EvidenceSpan/SourceDocument additions"}
+{"file": ".trellis/spec/agentsessions-ports/backend/index.md", "reason": "Ports contract conventions for MessageEvent/ParseReport changes"}
+{"file": ".trellis/spec/agentsessions-adapters-sqlite/backend/index.md", "reason": "SQLite adapter migration and durable-outbox conventions for v5->v6"}
+{"file": ".trellis/spec/agentsessions-cli/backend/index.md", "reason": "CLI composition-root and show/robot-output conventions"}
+{"file": ".trellis/spec/agentsessions-provider-claude/backend/index.md", "reason": "Claude provider parsing conventions for span/session_native_id"}
+{"file": ".trellis/spec/agentsessions-provider-codex/backend/index.md", "reason": "Codex provider parsing conventions for span/session_native_id"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Change spans domain->ports->application->adapters->cli; keep layering invariants"}
