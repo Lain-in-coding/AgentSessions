@@ -90,6 +90,7 @@ impl SessionBuilder {
                     parent,
                     timestamp: None,
                     is_sidechain: false,
+                    span: None,
                 }
             })
             .collect();
@@ -280,6 +281,7 @@ impl ProviderAdapter for FakeProvider {
                 text,
                 timestamp: None,
                 is_sidechain: false,
+                span: None,
             })
             .map_err(|e| ProviderError::Io(e.to_string()))?;
             report.committed += 1;

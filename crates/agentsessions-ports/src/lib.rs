@@ -228,6 +228,10 @@ pub struct ParseReport {
     pub skipped: usize,
     /// 诊断信息（跳过原因、未知字段计数等）。
     pub diagnostics: Vec<String>,
+    /// provider 报告的 durable 会话 native id（如 Claude Code 的 `sessionId`、
+    /// Codex `session_meta` 的 `session_id`）。`None` 表示 provider 未提供，
+    /// 由上层回退 Reconstructed 派生——绝不臆造。
+    pub session_native_id: Option<String>,
 }
 
 /// 一条规范化消息的事件载荷（RFC-0002 §2）：parse 流式产出的最小单元。
@@ -252,6 +256,12 @@ pub struct MessageEvent<'a> {
     pub timestamp: Option<&'a str>,
     /// 是否为 sidechain（subagent/分支）消息。
     pub is_sidechain: bool,
+    /// 本消息源记录在**已验证快照字节**中的字节区间 `(start, end)`，end 排他。
+    ///
+    /// 坐标系是"快照字节"而非"文件"：对文件级来源即快照全文，对未来的行级
+    /// 来源即提取出的行负载——同一契约无需改动即可覆盖两者（R4）。
+    /// `None` 表示 provider 无法归因一段连续区间，绝不臆造。
+    pub span: Option<(u64, u64)>,
 }
 
 /// Canonical 事件接收端（RFC-0002 §2）：parse 流式产出，绝不整体加载。

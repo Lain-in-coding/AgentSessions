@@ -45,6 +45,9 @@ struct RawLine {
     /// subagent / 分支标记；缺失视为 false（主线）。
     #[serde(default, rename = "isSidechain")]
     is_sidechain: bool,
+    /// 该 transcript 的 durable 会话 id（Claude Code 每条对话记录都携带）。
+    #[serde(default, rename = "sessionId")]
+    session_id: Option<String>,
     /// 嵌套的 message 体（对话类记录才有）。
     #[serde(default)]
     message: Option<RawMessage>,
@@ -194,8 +197,16 @@ impl ProviderAdapter for ClaudeCodeAdapter {
         // seq 是会话内单调序号，只对成功 emit 的对话消息递增，
         // 从而满足 domain Session 的 seq 从 0 连续的不变量。
         let mut seq: u32 = 0;
+        // 手动累计行首偏移：span 以快照字节为坐标系，end 排他且不含换行符。
+        let mut offset: u64 = 0;
 
-        for (line_no, line) in text.lines().enumerate() {
+        for (line_no, raw_line) in text.split_inclusive('\n').enumerate() {
+            let start = offset;
+            offset += raw_line.len() as u64;
+            // 去掉行尾 `\n` / `\r\n`——与 `str::lines` 的行语义一致。
+            let line = raw_line.strip_suffix('\n').unwrap_or(raw_line);
+            let line = line.strip_suffix('\r').unwrap_or(line);
+            let end = start + line.len() as u64;
             if line.trim().is_empty() {
                 continue;
             }
@@ -210,6 +221,14 @@ impl ProviderAdapter for ClaudeCodeAdapter {
                     continue;
                 }
             };
+
+            // 首个携带 sessionId 的记录确定本 transcript 的 durable 会话 id。
+            if report.session_native_id.is_none()
+                && let Some(sid) = rec.session_id.as_deref()
+                && !sid.trim().is_empty()
+            {
+                report.session_native_id = Some(sid.trim().to_string());
+            }
 
             // 非对话记录（工具结果、summary 等）不产生 Canonical 消息，静默略过。
             if !is_conversational(&rec.r#type) {
@@ -240,6 +259,8 @@ impl ProviderAdapter for ClaudeCodeAdapter {
                 text: &body,
                 timestamp: rec.timestamp.as_deref(),
                 is_sidechain: rec.is_sidechain,
+                // 该消息来源行在快照字节中的区间（end 排他，不含换行）。
+                span: Some((start, end)),
             })
             .map_err(|e| ProviderError::StructuralFatal(e.to_string()))?;
             seq += 1;
@@ -268,6 +289,7 @@ mod tests {
         text: String,
         timestamp: Option<String>,
         is_sidechain: bool,
+        span: Option<(u64, u64)>,
     }
     impl CanonicalEventSink for CollectingSink {
         fn emit_message(&mut self, event: MessageEvent<'_>) -> agentsessions_ports::PortResult<()> {
@@ -279,13 +301,14 @@ mod tests {
                 text: event.text.to_string(),
                 timestamp: event.timestamp.map(str::to_string),
                 is_sidechain: event.is_sidechain,
+                span: event.span,
             });
             Ok(())
         }
     }
 
-    const SAMPLE: &str = r#"{"type":"user","uuid":"u-1","parentUuid":null,"timestamp":"2026-06-27T13:57:42.685Z","message":{"role":"user","content":"hello there"}}
-{"type":"assistant","uuid":"a-2","parentUuid":"u-1","isSidechain":true,"message":{"role":"assistant","content":[{"type":"text","text":"hi"},{"type":"text","text":"friend"}]}}
+    const SAMPLE: &str = r#"{"type":"user","uuid":"u-1","parentUuid":null,"sessionId":"sess-abc","timestamp":"2026-06-27T13:57:42.685Z","message":{"role":"user","content":"hello there"}}
+{"type":"assistant","uuid":"a-2","parentUuid":"u-1","sessionId":"sess-abc","isSidechain":true,"message":{"role":"assistant","content":[{"type":"text","text":"hi"},{"type":"text","text":"friend"}]}}
 {"type":"summary","summary":"ignored non-conversational"}"#;
 
     #[test]
@@ -353,5 +376,56 @@ mod tests {
         assert_eq!(report.committed, 1);
         assert_eq!(report.skipped, 1);
         assert_eq!(report.diagnostics.len(), 1);
+    }
+
+    #[test]
+    fn parse_reports_span_roundtripping_to_source_line() {
+        let bytes = SAMPLE.as_bytes();
+        let mut sink = CollectingSink::default();
+        ClaudeCodeAdapter::new().parse(bytes, &mut sink).unwrap();
+        // 每条消息的 span 切回快照字节，必须精确等于其来源行。
+        let lines: Vec<&str> = SAMPLE.lines().collect();
+        for (captured, expected_line) in sink.messages.iter().zip([lines[0], lines[1]]) {
+            let (start, end) = captured.span.expect("provider must report a span");
+            assert_eq!(
+                &bytes[start as usize..end as usize],
+                expected_line.as_bytes()
+            );
+        }
+    }
+
+    #[test]
+    fn parse_reports_span_roundtripping_on_crlf_lines() {
+        // Windows 真实 transcript 常见 CRLF；span 必须不含 `\r`/`\n`，
+        // 切回快照字节应等于去掉行尾换行后的记录正文。
+        let line = r#"{"type":"user","uuid":"crlf-1","sessionId":"sess-crlf","message":{"role":"user","content":"crlf span"}}"#;
+        let bytes = format!("{line}\r\n").into_bytes();
+        let mut sink = CollectingSink::default();
+        ClaudeCodeAdapter::new().parse(&bytes, &mut sink).unwrap();
+        assert_eq!(sink.messages.len(), 1);
+        let (start, end) = sink.messages[0].span.expect("span required");
+        assert_eq!(&bytes[start as usize..end as usize], line.as_bytes());
+        // end 排他：下一字节是 `\r`（CRLF 的 CR），不在 span 内。
+        assert_eq!(bytes[end as usize], b'\r');
+    }
+
+    #[test]
+    fn parse_surfaces_session_native_id() {
+        let mut sink = CollectingSink::default();
+        let report = ClaudeCodeAdapter::new()
+            .parse(SAMPLE.as_bytes(), &mut sink)
+            .unwrap();
+        assert_eq!(report.session_native_id.as_deref(), Some("sess-abc"));
+    }
+
+    #[test]
+    fn parse_without_session_id_reports_none() {
+        let input = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"ok\"}}";
+        let mut sink = CollectingSink::default();
+        let report = ClaudeCodeAdapter::new()
+            .parse(input.as_bytes(), &mut sink)
+            .unwrap();
+        // provider 未提供 sessionId → None，显式缺失不臆造。
+        assert_eq!(report.session_native_id, None);
     }
 }

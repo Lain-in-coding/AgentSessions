@@ -79,6 +79,20 @@ pub struct StagedMessage {
     pub timestamp: Option<String>,
     /// 是否为 sidechain（subagent/分支）消息。
     pub is_sidechain: bool,
+    /// 源记录在已验证快照字节中的区间 `(start, end)`，end 排他；
+    /// `None` 表示 provider 无法归因，绝不臆造。
+    pub span: Option<(u64, u64)>,
+}
+
+/// 一次 staging 的完整产物：缓冲消息 + provider 报告的会话级元数据。
+///
+/// `session_native_id` 从 [`agentsessions_ports::ParseReport`] 透传，供组合根
+/// 派生会话 id（native 优先，缺失回退 Reconstructed）；staging 本身不做派生。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StagedBatch {
+    pub messages: Vec<StagedMessage>,
+    /// provider 报告的 durable 会话 native id；`None` 表示未提供。
+    pub session_native_id: Option<String>,
 }
 
 /// Ingest 编排（RFC-0002 §5 source-level staging）：
@@ -87,9 +101,9 @@ pub struct StagedMessage {
 /// 2. `parse` 把 Canonical 消息推入**内存缓冲**（不写库）；
 /// 3. 仅当 parse 完整成功才返回全部缓冲消息；任何失败返回 Err 且**不产出部分结果**。
 ///
-/// 提交（写 catalog + FTS）由调用方在拿到完整 `Vec<StagedMessage>` 后，
+/// 提交（写 catalog + FTS）由调用方在拿到完整 [`StagedBatch`] 后，
 /// 用单事务原子执行（见 `SqliteStore::commit_batch`）。
-pub fn stage(adapter: &dyn ProviderAdapter, bytes: &[u8]) -> Result<Vec<StagedMessage>, AppError> {
+pub fn stage(adapter: &dyn ProviderAdapter, bytes: &[u8]) -> Result<StagedBatch, AppError> {
     let probe = adapter.probe(bytes)?;
     // ambiguous 置信度：默认拒绝解析，不做"尽量解析"（RFC-0002 §3）。
     if matches!(probe.confidence, Confidence::Ambiguous) {
@@ -100,8 +114,11 @@ pub fn stage(adapter: &dyn ProviderAdapter, bytes: &[u8]) -> Result<Vec<StagedMe
         .into());
     }
     let mut sink = StagingSink::default();
-    adapter.parse(bytes, &mut sink)?;
-    Ok(sink.buffered)
+    let report = adapter.parse(bytes, &mut sink)?;
+    Ok(StagedBatch {
+        messages: sink.buffered,
+        session_native_id: report.session_native_id,
+    })
 }
 
 /// 从多个 provider adapter 中选出匹配的那个，再 stage（RFC-0002 §3 provider 选择）。
@@ -115,7 +132,7 @@ pub fn stage(adapter: &dyn ProviderAdapter, bytes: &[u8]) -> Result<Vec<StagedMe
 pub fn select_and_stage(
     adapters: &[&dyn ProviderAdapter],
     bytes: &[u8],
-) -> Result<Vec<StagedMessage>, AppError> {
+) -> Result<StagedBatch, AppError> {
     // 置信度排序键：越大越可信；ambiguous 不参与。
     fn rank(c: Confidence) -> Option<u8> {
         match c {
@@ -178,6 +195,7 @@ impl CanonicalEventSink for StagingSink {
             text: event.text.to_string(),
             timestamp: event.timestamp.map(str::to_string),
             is_sidechain: event.is_sidechain,
+            span: event.span,
         });
         Ok(())
     }
@@ -368,13 +386,75 @@ mod tests {
     fn stage_returns_all_messages_on_success() {
         let provider = FakeProvider::good("demo", &[("user", "hi"), ("assistant", "yo")]);
         let staged = stage(&provider, b"anything").unwrap();
-        assert_eq!(staged.len(), 2);
-        assert_eq!(staged[0].seq, 0);
-        assert_eq!(staged[0].role, "user");
-        assert_eq!(staged[0].text, "hi");
-        assert_eq!(staged[1].seq, 1);
-        assert_eq!(staged[1].role, "assistant");
-        assert_eq!(staged[1].text, "yo");
+        assert_eq!(staged.messages.len(), 2);
+        assert_eq!(staged.messages[0].seq, 0);
+        assert_eq!(staged.messages[0].role, "user");
+        assert_eq!(staged.messages[0].text, "hi");
+        assert_eq!(staged.messages[1].seq, 1);
+        assert_eq!(staged.messages[1].role, "assistant");
+        assert_eq!(staged.messages[1].text, "yo");
+    }
+
+    #[test]
+    fn stage_preserves_spans_and_session_native_id() {
+        // 内联 provider：emit 带 span 的消息并报告会话 native id，
+        // 验证 staging 对两者的透传（不落在 FakeProvider 上，保持 testkit 最小）。
+        struct SpanProvider;
+        impl ProviderAdapter for SpanProvider {
+            fn provider_id(&self) -> &str {
+                "span-demo"
+            }
+            fn probe(
+                &self,
+                _bytes: &[u8],
+            ) -> Result<agentsessions_ports::ProbeResult, ProviderError> {
+                Ok(agentsessions_ports::ProbeResult {
+                    variant_id: "span-demo/fake-v1".into(),
+                    confidence: Confidence::Confirmed,
+                    matched_evidence: vec!["inline".into()],
+                    unmatched_evidence: Vec::new(),
+                })
+            }
+            fn parse(
+                &self,
+                _bytes: &[u8],
+                sink: &mut dyn CanonicalEventSink,
+            ) -> Result<agentsessions_ports::ParseReport, ProviderError> {
+                sink.emit_message(MessageEvent {
+                    seq: 0,
+                    native_id: "m-1",
+                    parent_native_id: None,
+                    role: "user",
+                    text: "hello",
+                    timestamp: None,
+                    is_sidechain: false,
+                    span: Some((0, 42)),
+                })
+                .map_err(|e| ProviderError::Io(e.to_string()))?;
+                sink.emit_message(MessageEvent {
+                    seq: 1,
+                    native_id: "m-2",
+                    parent_native_id: None,
+                    role: "assistant",
+                    text: "world",
+                    timestamp: None,
+                    is_sidechain: false,
+                    span: None,
+                })
+                .map_err(|e| ProviderError::Io(e.to_string()))?;
+                Ok(agentsessions_ports::ParseReport {
+                    committed: 2,
+                    session_native_id: Some("native-sess-1".into()),
+                    ..Default::default()
+                })
+            }
+        }
+        let staged = stage(&SpanProvider, b"x").unwrap();
+        // span 逐条透传；None 保持显式缺失。
+        assert_eq!(staged.messages[0].span, Some((0, 42)));
+        assert_eq!(staged.messages[1].span, None);
+        // 会话 native id 从 ParseReport 透传到 staging 产物。
+        assert_eq!(staged.session_native_id.as_deref(), Some("native-sess-1"));
     }
 
     #[test]
