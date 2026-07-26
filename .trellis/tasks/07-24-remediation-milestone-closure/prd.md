@@ -10,6 +10,8 @@ Close the gaps identified by the 2026-07-24 repository audit in dependency order
 - Execute blocking correctness and governance work before declaring later milestones complete.
 - Keep product changes minimal and validated by the repository quality gates.
 - Do not create a remote, push, publish, sign, notarize, or use external credentials without separate explicit authorization.
+  - Remote creation and push were authorized by the owner on 2026-07-25 and are done: private repository `qin-devs/AgentSessions`, branches `main` and `chore/batches-1-3-governance-and-evidence`, pull request #1 open and unmerged.
+  - That authorization covers remote creation and push only. Publishing to crates.io, code signing, notarization, and release creation remain unauthorized and outstanding.
 - Do not mark Governance Records Accepted merely because implementation exists; acceptance requires explicit owner/approver decisions.
 
 ## Acceptance Criteria
