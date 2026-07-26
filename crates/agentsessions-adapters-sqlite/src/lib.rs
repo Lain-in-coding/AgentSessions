@@ -12,7 +12,7 @@ pub use cas::{cas_activate, read_current, write_current};
 pub use lease::WriterLease;
 pub use source_fs::{SnapshotFs, capture, read_verified, verify_snapshot};
 
-use agentsessions_domain::StableId;
+use agentsessions_domain::{IdKind, StableId};
 use agentsessions_ports::{
     CatalogEntry, CatalogStore, PortError, PortResult, SearchHit, SearchIndex,
 };
@@ -179,12 +179,19 @@ pub struct SourceBatch {
     /// 该源的稳定标识（当前用其只读路径字符串）。
     pub source_path: String,
     /// 本次 scan 得到的全部 (message id, catalog payload, 索引正文)。
+    ///
+    /// 自 v6 起，条目不限于消息：组合根把该源派生的 session（`ses_v1_*`）与
+    /// document（`doc_v1_*`）目录实体放进同一批 entries，随消息走同一事务提交、
+    /// 同一 membership/tombstone 推导——源消失时容器实体随消息一起退役。
     pub entries: Vec<(StableId, Vec<u8>, String)>,
 }
 
 /// 提交时落库的 source→message membership 快照（内部使用）。
 struct SourceMembership {
     source_path: String,
+    /// 从 entries 推导的文档实体 wire id（首个 `Document` kind 条目）；
+    /// 落库到 `source_membership.document_id` 供来源归属查询，无则 NULL。
+    document_id: Option<String>,
     message_ids: Vec<String>,
 }
 
@@ -372,6 +379,13 @@ impl SqliteStore {
             )
             .map_err(backend)?;
         }
+        if current < 6 {
+            // v6：source_membership 增加可空 document_id——记录各 source 所属文档实体的
+            // wire id，使 source 消失的 tombstone 清理能同步退役其 session/document 目录行。
+            // 旧行保持 NULL（v6 前的 membership 无文档归属信息）。
+            conn.execute_batch("ALTER TABLE source_membership ADD COLUMN document_id TEXT;")
+                .map_err(backend)?;
+        }
         conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))
             .map_err(backend)?;
         Ok(())
@@ -441,6 +455,11 @@ impl SqliteStore {
             let Some(id_json) = id_json else {
                 return Ok(false);
             };
+            // 非 Message 实体不进 fts 全文表（见 commit_index_batch_with_membership），
+            // 其"内容一致"只看 catalog payload 与 fts_ids 身份边车。
+            if id.kind() != IdKind::Message {
+                continue;
+            }
             let indexed_text: Option<String> = conn
                 .query_row("SELECT text FROM fts WHERE id = ?1", [&id_json], |row| {
                     row.get(0)
@@ -549,6 +568,12 @@ impl SqliteStore {
             .iter()
             .map(|s| SourceMembership {
                 source_path: s.source_path.clone(),
+                // 文档归属从 entries 推导：首个 Document kind 实体的 wire id。
+                document_id: s
+                    .entries
+                    .iter()
+                    .find(|(id, _, _)| id.kind() == IdKind::Document)
+                    .map(|(id, _, _)| id.as_str().to_string()),
                 message_ids: s
                     .entries
                     .iter()
@@ -820,11 +845,16 @@ impl SqliteStore {
             .map_err(backend)?;
             tx.execute("DELETE FROM fts_ids WHERE wire_id = ?1", [id.as_str()])
                 .map_err(backend)?;
-            tx.execute(
-                "INSERT INTO fts(id, text) VALUES(?1, ?2)",
-                rusqlite::params![id_json, text],
-            )
-            .map_err(backend)?;
+            // 只有 Message 实体进入 fts 全文表——session/document 是检索容器实体，
+            // 索引其正文会让搜索命中重复计数。fts_ids 身份边车则对所有 kind 保留：
+            // 它保真 kind+stability，rebuild 依赖它恢复非 Unstable 身份（见 rebuild_index）。
+            if id.kind() == IdKind::Message {
+                tx.execute(
+                    "INSERT INTO fts(id, text) VALUES(?1, ?2)",
+                    rusqlite::params![id_json, text],
+                )
+                .map_err(backend)?;
+            }
             tx.execute(
                 "INSERT INTO fts_ids(wire_id, id_json) VALUES(?1, ?2)",
                 rusqlite::params![id.as_str(), id_json],
@@ -853,8 +883,9 @@ impl SqliteStore {
             .map_err(backend)?;
             for message_id in &source.message_ids {
                 tx.execute(
-                    "INSERT INTO source_membership(source_path, message_id) VALUES(?1, ?2)",
-                    rusqlite::params![&source.source_path, message_id],
+                    "INSERT INTO source_membership(source_path, message_id, document_id)
+                     VALUES(?1, ?2, ?3)",
+                    rusqlite::params![&source.source_path, message_id, &source.document_id],
                 )
                 .map_err(backend)?;
             }
@@ -954,11 +985,15 @@ impl SqliteStore {
         tx.execute("DELETE FROM fts_ids", []).map_err(backend)?;
         for (id, _payload, text) in &upserts {
             let id_json = serde_json::to_string(id).map_err(backend)?;
-            tx.execute(
-                "INSERT INTO fts(id, text) VALUES(?1, ?2)",
-                rusqlite::params![id_json, text],
-            )
-            .map_err(backend)?;
+            // 与提交路径一致：只有 Message 实体重投影进 fts；
+            // session/document 仅重建 fts_ids 身份边车。
+            if id.kind() == IdKind::Message {
+                tx.execute(
+                    "INSERT INTO fts(id, text) VALUES(?1, ?2)",
+                    rusqlite::params![id_json, text],
+                )
+                .map_err(backend)?;
+            }
             tx.execute(
                 "INSERT INTO fts_ids(wire_id, id_json) VALUES(?1, ?2)",
                 rusqlite::params![id.as_str(), id_json],
@@ -1054,7 +1089,7 @@ impl SqliteStore {
 }
 
 /// 当前 catalog schema 版本。每次结构变更 +1 并在 [`SqliteStore::migrate`] 追加步骤。
-pub const SCHEMA_VERSION: i64 = 5;
+pub const SCHEMA_VERSION: i64 = 6;
 
 impl CatalogStore for SqliteStore {
     fn get(&self, id: &StableId) -> PortResult<Option<Vec<u8>>> {
@@ -1513,6 +1548,224 @@ mod tests {
     }
 
     #[test]
+    fn v5_db_migrates_membership_document_id_column() {
+        // 带数据的 v5 库升级到 v6：membership 旧行保留且 document_id 为 NULL。
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v5.db");
+        let p = path.to_string_lossy().into_owned();
+        {
+            let conn = rusqlite::Connection::open(&p).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE catalog (id TEXT PRIMARY KEY, payload BLOB NOT NULL);
+                 CREATE VIRTUAL TABLE fts USING fts5(id UNINDEXED, text);
+                 CREATE TABLE store_metadata (singleton INTEGER PRIMARY KEY CHECK(singleton = 1), active_generation INTEGER NOT NULL);
+                 INSERT INTO store_metadata(singleton, active_generation) VALUES(1, 1);
+                 CREATE TABLE index_batches (
+                     operation_id TEXT PRIMARY KEY, base_generation INTEGER NOT NULL,
+                     target_generation INTEGER NOT NULL, state TEXT NOT NULL,
+                     operation_digest TEXT NOT NULL, upsert_ids_json TEXT NOT NULL,
+                     delete_ids_json TEXT NOT NULL, durable_point TEXT NOT NULL,
+                     created_at_ms INTEGER NOT NULL, committed_at_ms INTEGER,
+                     error_code TEXT
+                 );
+                 CREATE TABLE fts_ids (wire_id TEXT PRIMARY KEY, id_json TEXT NOT NULL UNIQUE);
+                 CREATE TABLE source_membership (
+                     source_path TEXT NOT NULL,
+                     message_id  TEXT NOT NULL,
+                     PRIMARY KEY(source_path, message_id)
+                 );
+                 CREATE TABLE source_scans (
+                     source_path   TEXT PRIMARY KEY,
+                     scanned_at_ms INTEGER NOT NULL
+                 );
+                 INSERT INTO catalog(id, payload) VALUES('msg_v1_legacy', X'01');
+                 INSERT INTO source_membership(source_path, message_id)
+                 VALUES('legacy.jsonl', 'msg_v1_legacy');
+                 INSERT INTO source_scans(source_path, scanned_at_ms) VALUES('legacy.jsonl', 1);
+                 PRAGMA user_version = 5;",
+            )
+            .unwrap();
+        }
+        let store = SqliteStore::open(&p).unwrap();
+        assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
+        // 旧数据完整保留。
+        let id = StableId::from_wire("msg_v1_legacy").unwrap();
+        assert_eq!(store.get(&id).unwrap().unwrap(), vec![1u8]);
+        drop(store);
+        let conn = rusqlite::Connection::open(&p).unwrap();
+        let doc: Option<String> = conn
+            .query_row(
+                "SELECT document_id FROM source_membership WHERE message_id = 'msg_v1_legacy'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        // v6 前的 membership 行无文档归属信息——显式 NULL，不臆造。
+        assert_eq!(doc, None);
+    }
+
+    #[test]
+    fn non_message_entities_are_catalog_only() {
+        // session/document 实体入 catalog、可 get/list，但绝不进入全文搜索。
+        let store = SqliteStore::open_in_memory().unwrap();
+        let msg = sid(IdKind::Message, b"cat-only-msg");
+        let ses = sid(IdKind::Session, b"cat-only-ses");
+        let doc = sid(IdKind::Document, b"cat-only-doc");
+        let source = SourceBatch {
+            source_path: "mixed.jsonl".into(),
+            entries: vec![
+                (msg.clone(), b"m".to_vec(), "unique searchable body".into()),
+                (ses.clone(), b"s".to_vec(), "unique searchable body".into()),
+                (doc.clone(), b"d".to_vec(), "unique searchable body".into()),
+            ],
+        };
+        assert!(
+            store
+                .commit_source_batches_if_changed(std::slice::from_ref(&source))
+                .unwrap()
+        );
+        // catalog 三个实体都在。
+        assert_eq!(store.count().unwrap(), 3);
+        assert!(store.get(&ses).unwrap().is_some());
+        assert!(store.get(&doc).unwrap().is_some());
+        // 搜索只命中消息——容器实体不参与全文命中，避免重复计数。
+        let hits = store.query("searchable", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id.as_str(), msg.as_str());
+        // fts_ids 身份边车对所有 kind 保留（rebuild 依赖它保真身份）。
+        let conn = store.conn.borrow();
+        let sidecar: i64 = conn
+            .query_row("SELECT COUNT(*) FROM fts_ids", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(sidecar, 3);
+        // 重复提交同一批是内容级 no-op（非消息实体不因缺 fts 行而误判为变更）。
+        drop(conn);
+        assert!(
+            !store
+                .commit_source_batches_if_changed(std::slice::from_ref(&source))
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn rebuild_keeps_non_message_entities_out_of_fts() {
+        // 混合库 rebuild：身份保真、消息重投影、容器实体仍不进 fts。
+        let store = SqliteStore::open_in_memory().unwrap();
+        let msg = sid(IdKind::Message, b"rebuild-msg");
+        let ses = sid(IdKind::Session, b"rebuild-ses");
+        let source = SourceBatch {
+            source_path: "rebuild.jsonl".into(),
+            entries: vec![
+                (
+                    msg.clone(),
+                    b"role\tbody words".to_vec(),
+                    "body words".into(),
+                ),
+                (ses.clone(), b"s".to_vec(), String::new()),
+            ],
+        };
+        store
+            .commit_source_batches_if_changed(std::slice::from_ref(&source))
+            .unwrap();
+        let rebuilt = store.rebuild_index().unwrap();
+        assert_eq!(rebuilt, 2);
+        // 消息可搜、身份保真（非 Unstable——来自 fts_ids 边车）。
+        let hits = store.query("body", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id.stability(), Stability::Reconstructed);
+        // 容器实体：无 fts 行、有 fts_ids 边车。
+        let conn = store.conn.borrow();
+        let fts_rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM fts", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(fts_rows, 1);
+        let sidecar: i64 = conn
+            .query_row("SELECT COUNT(*) FROM fts_ids", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(sidecar, 2);
+    }
+
+    #[test]
+    fn source_rescan_retires_session_and_document_rows() {
+        // 源缩水成空 scan：其 session/document 目录行随消息一起 tombstone。
+        let store = SqliteStore::open_in_memory().unwrap();
+        let msg = sid(IdKind::Message, b"retire-msg");
+        let ses = sid(IdKind::Session, b"retire-ses");
+        let doc = sid(IdKind::Document, b"retire-doc");
+        let full = SourceBatch {
+            source_path: "retire.jsonl".into(),
+            entries: vec![
+                (msg.clone(), b"m".to_vec(), "text".into()),
+                (ses.clone(), b"s".to_vec(), String::new()),
+                (doc.clone(), b"d".to_vec(), String::new()),
+            ],
+        };
+        store
+            .commit_source_batches_if_changed(std::slice::from_ref(&full))
+            .unwrap();
+        // membership 记录了该源的文档归属。
+        {
+            let conn = store.conn.borrow();
+            let recorded: Option<String> = conn
+                .query_row(
+                    "SELECT document_id FROM source_membership WHERE message_id = ?1",
+                    [msg.as_str()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(recorded.as_deref(), Some(doc.as_str()));
+        }
+        let empty = SourceBatch {
+            source_path: "retire.jsonl".into(),
+            entries: vec![],
+        };
+        store
+            .commit_source_batches_if_changed(std::slice::from_ref(&empty))
+            .unwrap();
+        assert_eq!(store.count().unwrap(), 0);
+        assert!(store.get(&ses).unwrap().is_none());
+        assert!(store.get(&doc).unwrap().is_none());
+    }
+
+    #[test]
+    fn shared_entity_survives_other_source_rescan() {
+        // 两个源共享同一实体：一个源消失不退役另一源仍引用的实体。
+        let store = SqliteStore::open_in_memory().unwrap();
+        let shared = sid(IdKind::Document, b"shared-doc");
+        let m1 = sid(IdKind::Message, b"share-m1");
+        let m2 = sid(IdKind::Message, b"share-m2");
+        let sources = [
+            SourceBatch {
+                source_path: "one.jsonl".into(),
+                entries: vec![
+                    (m1.clone(), b"m1".to_vec(), "one text".into()),
+                    (shared.clone(), b"d".to_vec(), String::new()),
+                ],
+            },
+            SourceBatch {
+                source_path: "two.jsonl".into(),
+                entries: vec![
+                    (m2.clone(), b"m2".to_vec(), "two text".into()),
+                    (shared.clone(), b"d".to_vec(), String::new()),
+                ],
+            },
+        ];
+        store.commit_source_batches_if_changed(&sources).unwrap();
+        assert_eq!(store.count().unwrap(), 3);
+        // 源 one 变空：m1 退役；shared 仍被 two 引用，保留。
+        let shrunk = SourceBatch {
+            source_path: "one.jsonl".into(),
+            entries: vec![],
+        };
+        store
+            .commit_source_batches_if_changed(std::slice::from_ref(&shrunk))
+            .unwrap();
+        assert!(store.get(&m1).unwrap().is_none());
+        assert!(store.get(&shared).unwrap().is_some());
+        assert!(store.get(&m2).unwrap().is_some());
+    }
+
+    #[test]
     fn shared_message_survives_one_source_shrinking() {
         let store = SqliteStore::open_in_memory().unwrap();
         let shared = sid(IdKind::Message, b"shared");
@@ -1750,7 +2003,7 @@ mod tests {
     fn fresh_store_starts_at_generation_zero() {
         let store = SqliteStore::open_in_memory().unwrap();
         assert_eq!(store.active_generation().unwrap(), 0);
-        assert_eq!(store.schema_version().unwrap(), 5);
+        assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
     }
 
     #[test]
@@ -2065,7 +2318,7 @@ mod tests {
         }
         // 新二进制打开：自动迁到 v2，数据保留，generation 从 0 起步。
         let store = SqliteStore::open(&p).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 5);
+        assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
         assert_eq!(store.active_generation().unwrap(), 0);
         let id = StableId::from_wire("msg_v1_legacy").unwrap();
         assert_eq!(store.get(&id).unwrap().unwrap(), vec![1u8]);
