@@ -18,6 +18,7 @@ Real files:
 - `src/protocol.rs` — Robot v1 envelope, `CanonicalCode` error catalog, output modes
 - `src/human.rs` — human-mode success renderer (text lines, no envelope)
 - `src/mcp.rs` — stdio MCP server (JSON-RPC 2.0, contract §8 tools)
+- `src/tui/` — interactive read-only TUI Preview (`core.rs` pure reducer/view-model, `mod.rs` terminal glue)
 
 ---
 
@@ -72,6 +73,15 @@ Before writing code in this crate:
       `SUPPORTED_PROTOCOL_VERSIONS` (negotiation never lies). Tool set is
       frozen: search_sessions / get_session_context / list_sessions /
       list_providers / get_status / doctor.
+- [ ] TUI (`tui` subcommand, `src/tui/`): all state transitions and rendering
+      decisions live in the PURE `core.rs` (no ratatui/crossterm/store/App
+      imports; unit-tested without a terminal); `mod.rs` is thin glue only.
+      Data access goes through `AppRequest::{Search, Show, Context}` and the
+      shared `render()` projection — no SQL, no cursor construction, no
+      branch-selection logic in the TUI. Non-tty stdout → usage error before
+      raw mode; terminal restore covers normal, error, and panic paths; App
+      errors become status-line text, never a crash. The TUI is the only
+      place the `ratatui`/`crossterm` workspace deps may be used.
 - [ ] New error conditions map to an existing `CanonicalCode`. If you need a new
       code, register it in the `CanonicalCode` enum, its `as_str`, `exit_code`,
       `retryable`, **and** the published `schemas/robot/v1/error-catalog.json`
