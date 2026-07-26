@@ -1,0 +1,7 @@
+{"file": ".trellis/tasks/07-26-shared-application-adt/prd.md", "reason": "Requirements and acceptance criteria"}
+{"file": ".trellis/tasks/07-26-shared-application-adt/design.md", "reason": "Authoritative module APIs, rules, and deviations"}
+{"file": ".trellis/tasks/07-26-shared-application-adt/implement.md", "reason": "Phase plan and file ownership"}
+{"file": "docs/contracts/CONTRACT-cli-robot-mcp-draft.md", "reason": "Normative contract for cursor/budget/evidence/envelope semantics"}
+{"file": ".trellis/spec/agentsessions-application/backend/index.md", "reason": "Application layer conventions"}
+{"file": ".trellis/spec/agentsessions-domain/backend/index.md", "reason": "Domain purity conventions for thread.rs"}
+{"file": ".trellis/spec/agentsessions-cli/backend/index.md", "reason": "CLI protocol/envelope conventions"}
