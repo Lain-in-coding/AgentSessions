@@ -11,6 +11,7 @@ on:
       - "scripts/evidence/**"
       - "spikes/data-root-locking/**"
       - "spikes/sqlite-snapshot-wal/**"
+      - "spikes/sqlite-source-identity/**"
   push:
     branches: [main]
     paths:
@@ -21,6 +22,7 @@ on:
       - "scripts/evidence/**"
       - "spikes/data-root-locking/**"
       - "spikes/sqlite-snapshot-wal/**"
+      - "spikes/sqlite-source-identity/**"
 
 permissions:
   contents: read
@@ -144,6 +146,24 @@ jobs:
               Tee-Object -FilePath '../../evidence/ci/sqlite-snapshot-wal-spike.txt'
             if ($walOutput -match '\[FAIL\]') {
               throw 'sqlite-snapshot-wal spike reported a failed assertion'
+            }
+          } finally {
+            Pop-Location
+          }
+
+      - name: SQLite source identity spikes
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          Push-Location 'spikes/sqlite-source-identity'
+          try {
+            foreach ($bin in @('sqlite-source-identity-spike', 'phase2')) {
+              $out = cargo run --locked --release --target '${{ matrix.target }}' --bin $bin 2>&1 |
+                Tee-Object -FilePath "../../evidence/ci/sqlite-source-identity-$bin.txt"
+              if ($out -match '\[FAIL\]') {
+                throw "sqlite-source-identity $bin reported a failed assertion"
+              }
             }
           } finally {
             Pop-Location
