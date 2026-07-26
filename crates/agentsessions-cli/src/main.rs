@@ -15,6 +15,7 @@
 //! 输出走 Robot-JSON 雏形（每行一个 JSON 对象），为后续 CONTRACT 对齐留口。
 
 mod human;
+mod mcp;
 mod protocol;
 
 use agentsessions_adapters_sqlite::{SourceBatch, SqliteStore, capture, verify_snapshot};
@@ -188,6 +189,11 @@ fn run(
         SqliteStore::open(&db)
     }
     .map_err(ProtocolError::from)?;
+    // mcp：stdio JSON-RPC 服务接管整个 stdout（MCP framing 即协议），不走
+    // dispatch/emit_result；--output/--robot/--request-id 对其无意义（design §0.6）。
+    if rest.first().map(String::as_str) == Some("mcp") {
+        return mcp::serve(&store);
+    }
     // catalog 与 index 是同一个 SqliteStore；App 泛型接受同一实例的两次移动，
     // 故这里克隆一个连接语义上的第二把手不可行——改为让 App 持有单一 store。
     let (command, outcome, data, page, warnings) = dispatch(&store, &rest, mode, request_id)?;
@@ -353,6 +359,7 @@ COMMANDS:
     list [limit]           稳定排序列出 catalog 实体（默认 20；支持分页/预算 flag）
     context <ses-id>       装配会话上下文：分支消息链 + 证据区间
     status                 报告 catalog 实体总数
+    mcp                    启动 stdio MCP 服务（JSON-RPC 2.0；stdout 只输出 MCP frame）
     doctor                 环境自检（可选 --db 校验存储可打开）
     config paths           报告当前平台的 config/data/cache/logs 路径
 
