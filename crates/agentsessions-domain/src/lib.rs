@@ -5,9 +5,11 @@
 
 mod error;
 mod ids;
+mod thread;
 
 pub use error::{DomainError, DomainResult};
 pub use ids::{IdKind, Stability, StableId};
+pub use thread::{BranchSelection, ContextPolicy, select_full, select_mainline};
 
 use serde::{Deserialize, Serialize};
 
