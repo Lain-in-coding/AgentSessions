@@ -9,9 +9,16 @@
 
 `agentsessions-domain` is the innermost hexagon layer. It owns:
 
-- **Canonical model** — `Message`, `Session`, `Role` (`src/lib.rs`).
+- **Canonical model** — `Message`, `Session`, `Role`, `EvidenceSpan` (`src/lib.rs`).
 - **Stable identity** — `StableId` with three stability tiers
   (`Native` / `Reconstructed` / `Unstable`) and `IdKind` (`src/ids.rs`).
+- **Branch selection** — `src/thread.rs`: `ContextPolicy` (mainline/full),
+  `select_mainline` / `select_full`. Pure, deterministic functions over
+  threading facts (seq / parent / is_sidechain): mainline = highest-seq
+  non-sidechain leaf, walk parent links root→leaf; orphan parents end the walk
+  gracefully (cross-file pointers tolerated); cycles terminate via a visited
+  set; all-sidechain input falls back honestly to all messages. Never invents
+  a mainline.
 - **Domain errors** — `DomainError` (`src/error.rs`).
 
 It depends on **nothing in this workspace**. Ports, application, adapters, and
