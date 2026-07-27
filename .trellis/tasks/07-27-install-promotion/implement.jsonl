@@ -1,0 +1,6 @@
+{"file": ".trellis/tasks/07-27-install-promotion/design.md", "reason": "Frozen design: file ownership (§1), install/smoke/harness contracts (§2/§2.5/§3), doc scope (§4)."}
+{"file": ".trellis/tasks/07-27-install-promotion/prd.md", "reason": "Requirements R1-R6, acceptance criteria, and out-of-scope boundary."}
+{"file": "docs/operations/core-beta-evidence-matrix.md", "reason": "Evidence status vocabulary and honesty rules new rows must follow."}
+{"file": "docs/product/PROVIDER-MATURITY-MATRIX.md", "reason": "Remaining Beta gaps 4-5 this task closes to the authorized extent."}
+{"file": "docs/operations/migration-v5-to-v6.md", "reason": "Single source of truth the new runbook links instead of rewriting."}
+{"file": "docs/security/FIXTURE-REDACTION-POLICY.md", "reason": "Privacy rules for synthetic fixtures and aggregate-only evidence."}

@@ -1,0 +1,4 @@
+{"file": ".trellis/tasks/07-27-install-promotion/design.md", "reason": "§6 acceptance gates and §5 CI wiring to verify against."}
+{"file": "docs/operations/core-beta-evidence-matrix.md", "reason": "Verify new evidence rows use honest status values and exact caveats."}
+{"file": "docs/product/PROVIDER-MATURITY-MATRIX.md", "reason": "Verify providers stay Experimental with precise remaining blockers."}
+{"file": "CLAUDE.md", "reason": "Quality gate commands and privacy/secrets constraints."}
