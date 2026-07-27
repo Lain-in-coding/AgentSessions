@@ -103,6 +103,47 @@ Before proposing a commit for this crate:
       cursor_expired → 2, not_found → 4, source_io/source_changed → 5,
       catalog/writer_busy → 6, provider → 7, schema_incompatible/
       generation_mismatch → 9, partial success → 10, internal → 70).
+- [ ] Surface changes are mirrored in `scripts/install/smoke.{ps1,sh}`. That
+      script is the installed-artifact contract check (CLI envelopes, exit
+      codes, MCP handshake) and runs on all three OS targets in the `installer`
+      CI job; a new command or exit-code rule that it does not assert is
+      untested against a real install.
+
+---
+
+## Operational surfaces and evidence
+
+- **Install scripts** (`scripts/install/`) build from source with `--locked` and
+  copy one binary into a user-level prefix. They must never modify `PATH`, the
+  registry, or shell profiles, never request elevation, and never download
+  anything beyond what `cargo build` fetches — environment changes are the
+  user's decision, and that constraint is what keeps uninstall a single-file
+  delete. `uninstall` removes exactly that one file, is idempotent (a second run
+  reports "not installed" and exits 0), and never deletes a directory
+  recursively.
+- **Smoke script** never builds. It requires an already-built binary and fails
+  if absent, so a build failure can never masquerade as a smoke pass. Its
+  fixture is synthetic and inlined; it must not read real transcripts.
+- **Real-data regression** (`scripts/evidence/real_data_regression.py`) runs
+  only locally against a throwaway temp store. Its report is a closed field set
+  of aggregate counts and invariant verdicts — no message text, source paths,
+  native ids, fingerprints, usernames, or hostnames. Reports default under the
+  gitignored `evidence-output/`; a report generated from real data is never
+  committed. Adding a report field means extending `validate_report` and the
+  privacy test in the same change.
+- **Evidence honesty.** Rows in `docs/operations/core-beta-evidence-matrix.md`
+  follow that file's status vocabulary literally: `ci_configured_only` until a
+  specific successful run is named, and a failing local run is recorded as a
+  failing run. Neither a passing smoke script nor a green CI job is
+  clean-machine, minimum-OS, or signed-release evidence — hosted runners ship a
+  preinstalled toolchain.
+- **Known blocker (2026-07-27).** Real corpora break `sync`: one Claude Code
+  session commonly spans many `.jsonl` files, while ingestion projects one
+  session per source, so the same `ses_v1_` id arrives with different member
+  lists and the store rejects the batch (`catalog_error`, exit 6). Synthetic
+  one-file-one-session fixtures do not reach that path. Do not "fix" this by
+  relaxing the store's conflict check; the session model is what needs to
+  change. See `docs/evidence/integration-beta/real-data-regression.md`.
 
 ---
 
