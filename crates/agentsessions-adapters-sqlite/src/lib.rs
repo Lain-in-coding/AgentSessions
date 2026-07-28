@@ -92,6 +92,189 @@ fn hash_field(hasher: &mut blake3::Hasher, bytes: &[u8]) {
     hasher.update(bytes);
 }
 
+/// Union two projections of the same message entity.
+///
+/// Claude Code copies a conversation's history into the new transcript when a
+/// session is resumed or forked, so one message legitimately belongs to several
+/// sessions. Everything about such a copy is identical except the `session`
+/// back-reference, so that one field becomes a union (`sessions`, sorted, with
+/// `session` kept as a single-value alias) and every other field must still
+/// agree byte-for-byte. A message whose text, parent, or span depends on which
+/// file it came from is a real inconsistency and is still rejected.
+fn merge_message_payloads(wire: &str, left: &[u8], right: &[u8]) -> PortResult<Vec<u8>> {
+    let parse = |bytes: &[u8]| -> PortResult<serde_json::Map<String, serde_json::Value>> {
+        match serde_json::from_slice::<serde_json::Value>(bytes) {
+            Ok(serde_json::Value::Object(map)) => Ok(map),
+            // Slice-era rows hold bare text rather than canonical JSON. Those
+            // cannot be reconciled field by field, so the conflict stands.
+            _ => Err(PortError::Backend(format!(
+                "message {wire} has conflicting projections across sources"
+            ))),
+        }
+    };
+
+    let left_map = parse(left)?;
+    let right_map = parse(right)?;
+
+    let mut sessions: BTreeSet<String> = BTreeSet::new();
+    // Spans are keyed by contributing document because the same message text
+    // sits at different byte offsets in each file that carries it. Keying by
+    // document also makes a re-sync idempotent: the same file always maps to
+    // the same entry rather than appending a duplicate.
+    let mut spans: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+    for map in [&left_map, &right_map] {
+        if let Some(session) = map.get("session").and_then(|v| v.as_str()) {
+            sessions.insert(session.to_string());
+        }
+        if let Some(list) = map.get("sessions").and_then(|v| v.as_array()) {
+            for entry in list {
+                if let Some(session) = entry.as_str() {
+                    sessions.insert(session.to_string());
+                }
+            }
+        }
+        if let Some(list) = map.get("spans").and_then(|v| v.as_array()) {
+            for entry in list {
+                let Some(document) = entry.get("document").and_then(|v| v.as_str()) else {
+                    return Err(PortError::Backend(format!(
+                        "message {wire} has a span without a document reference"
+                    )));
+                };
+                spans.insert(document.to_string(), entry.clone());
+            }
+        }
+    }
+
+    // A row written before spans carried document attribution has only the
+    // singular `span`. It cannot be keyed by document, so it is kept verbatim as
+    // the alias rather than dropped — losing it would silently downgrade the
+    // evidence for that message from byte precision to unknown.
+    let legacy_span = [&left_map, &right_map]
+        .into_iter()
+        .find_map(|map| map.get("span").filter(|value| value.is_object()).cloned());
+
+    // Only the per-source fields may differ. Comparing every other key in both
+    // directions catches a field present on one side and absent on the other,
+    // which a one-way comparison would silently accept.
+    for (a, b) in [(&left_map, &right_map), (&right_map, &left_map)] {
+        for (key, value) in a {
+            if matches!(key.as_str(), "session" | "sessions" | "span" | "spans") {
+                continue;
+            }
+            if b.get(key) != Some(value) {
+                return Err(PortError::Backend(format!(
+                    "message {wire} has conflicting projections across sources"
+                )));
+            }
+        }
+    }
+
+    let mut merged = left_map;
+    let sessions: Vec<String> = sessions.into_iter().collect();
+    merged.insert(
+        "session".to_string(),
+        sessions
+            .first()
+            .cloned()
+            .map_or(serde_json::Value::Null, serde_json::Value::String),
+    );
+    merged.insert("sessions".to_string(), serde_json::json!(sessions));
+
+    let spans: Vec<serde_json::Value> = spans.into_values().collect();
+    // `span` stays as a single-value alias holding the first contributing
+    // document's offsets, so evidence assembly written against the pre-union
+    // shape keeps reporting byte precision. On a message shared by several
+    // files it names one location, not all of them.
+    merged.insert(
+        "span".to_string(),
+        match spans.first() {
+            Some(first) => serde_json::json!({
+                "start": first.get("start").cloned().unwrap_or(serde_json::Value::Null),
+                "end": first.get("end").cloned().unwrap_or(serde_json::Value::Null),
+            }),
+            None => legacy_span.unwrap_or(serde_json::Value::Null),
+        },
+    );
+    merged.insert("spans".to_string(), serde_json::json!(spans));
+    serde_json::to_vec(&serde_json::Value::Object(merged)).map_err(backend)
+}
+
+/// Union two projections of the same session container entity.
+///
+/// One logical session is routinely split across many transcript files, so each
+/// source contributes only the members it actually carries. Merging appends the
+/// right side's new members after the left side's and unions the contributing
+/// documents. Both inputs must be canonical session JSON; a malformed stored
+/// payload is a real inconsistency and is reported rather than silently
+/// discarded.
+///
+/// Determinism comes from the caller: `sync` rejects duplicate source paths and
+/// the CLI passes sources in a fixed order, so the same corpus yields the same
+/// merged bytes and an unchanged re-sync still registers as a content-level
+/// no-op.
+fn merge_session_payloads(wire: &str, left: &[u8], right: &[u8]) -> PortResult<Vec<u8>> {
+    fn parse(wire: &str, bytes: &[u8]) -> PortResult<serde_json::Value> {
+        serde_json::from_slice(bytes).map_err(|error| {
+            PortError::Backend(format!(
+                "session {wire} payload is not canonical JSON: {error}"
+            ))
+        })
+    }
+
+    let left_value = parse(wire, left)?;
+    let right_value = parse(wire, right)?;
+
+    // Member order is load-bearing: readers treat a member's position in this
+    // array as its in-session sequence number, and branch selection picks the
+    // highest-sequence non-sidechain leaf. Sorting by wire id would therefore
+    // scramble conversation order for real provider-native ids, so the union is
+    // append-only. `documents` carries no such meaning and is sorted.
+    let mut members: Vec<String> = Vec::new();
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut documents: BTreeSet<String> = BTreeSet::new();
+
+    for value in [&left_value, &right_value] {
+        // `document` (single) is the pre-union shape; `documents` (array) is what
+        // a merged payload carries. Accept both so a store written by an older
+        // binary merges cleanly instead of losing its attribution.
+        if let Some(document) = value.get("document").and_then(|v| v.as_str()) {
+            documents.insert(document.to_string());
+        }
+        if let Some(list) = value.get("documents").and_then(|v| v.as_array()) {
+            for entry in list {
+                if let Some(document) = entry.as_str() {
+                    documents.insert(document.to_string());
+                }
+            }
+        }
+        let list = value
+            .get("messages")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| {
+                PortError::Backend(format!("session {wire} payload lacks a messages array"))
+            })?;
+        for entry in list {
+            let member = entry.as_str().ok_or_else(|| {
+                PortError::Backend(format!("session {wire} has a non-string message member"))
+            })?;
+            if seen.insert(member.to_string()) {
+                members.push(member.to_string());
+            }
+        }
+    }
+
+    let documents: Vec<String> = documents.into_iter().collect();
+    let merged = serde_json::json!({
+        // `document` stays as a single-value alias for the first contributing
+        // document so readers written against the pre-union shape keep working.
+        // On a multi-document session it names one contributor, not all of them.
+        "document": documents.first().cloned(),
+        "documents": documents,
+        "messages": members,
+    });
+    serde_json::to_vec(&merged).map_err(backend)
+}
+
 /// Canonicalize and fingerprint one generation change set.
 ///
 /// Sorting by wire ID makes the digest independent of discovery order. Duplicate IDs and
@@ -520,10 +703,32 @@ impl SqliteStore {
                         )));
                     }
                     if old_payload != payload || old_text != text {
-                        return Err(PortError::Backend(format!(
-                            "message {} has conflicting projections across sources",
-                            id.as_str()
-                        )));
+                        // Both entity kinds legitimately differ per source, for
+                        // the same underlying reason: neither "one session per
+                        // file" nor "one session per message" holds in real
+                        // transcripts. A session is often split across many
+                        // files, and resume/fork copies a message into the new
+                        // session's file. Each source therefore carries only a
+                        // partial view, and the union is the whole truth.
+                        let union = match id.kind() {
+                            IdKind::Session => {
+                                merge_session_payloads(id.as_str(), old_payload, payload)?
+                            }
+                            IdKind::Message => {
+                                merge_message_payloads(id.as_str(), old_payload, payload)?
+                            }
+                            // Documents are content-addressed: identical bytes
+                            // give the same id, so a differing payload under one
+                            // document id is a real inconsistency.
+                            _ => {
+                                return Err(PortError::Backend(format!(
+                                    "entity {} has conflicting projections across sources",
+                                    id.as_str()
+                                )));
+                            }
+                        };
+                        merged.insert(id.as_str().to_string(), (id.clone(), union, text.clone()));
+                        continue;
                     }
                 } else {
                     merged.insert(
@@ -533,6 +738,27 @@ impl SqliteStore {
                 }
             }
             present_by_source.insert(source.source_path.as_str(), present);
+        }
+
+        // Fold in what the catalog already holds for each shared entity. Without
+        // this, syncing a corpus in several batches would make each batch's view
+        // overwrite the previous one: a session's stored membership would only
+        // reflect the files in the final batch, and a message shared by several
+        // sessions would keep only the last session that claimed it.
+        for (id, payload, _) in merged.values_mut() {
+            let stored = match self.get(id)? {
+                // Identical bytes need no merge, and attempting one would force
+                // every stored payload to be canonical JSON — including rows
+                // written by the pre-container slice path, which are opaque
+                // blobs. Re-syncing an unchanged corpus must stay a no-op.
+                Some(stored) if stored != *payload => stored,
+                _ => continue,
+            };
+            *payload = match id.kind() {
+                IdKind::Session => merge_session_payloads(id.as_str(), &stored, payload)?,
+                IdKind::Message => merge_message_payloads(id.as_str(), &stored, payload)?,
+                _ => continue,
+            };
         }
 
         let mut deletes = BTreeMap::new();
@@ -1767,6 +1993,469 @@ mod tests {
         assert!(store.get(&m1).unwrap().is_none());
         assert!(store.get(&shared).unwrap().is_some());
         assert!(store.get(&m2).unwrap().is_some());
+    }
+
+    /// Canonical session payload for a source contributing `members`.
+    fn session_payload(document: &str, members: &[&str]) -> Vec<u8> {
+        serde_json::json!({
+            "document": document,
+            "documents": [document],
+            "messages": members,
+        })
+        .to_string()
+        .into_bytes()
+    }
+
+    fn session_members(store: &SqliteStore, id: &StableId) -> Vec<String> {
+        let bytes = store.get(id).unwrap().expect("session must be present");
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        value["messages"]
+            .as_array()
+            .expect("messages array")
+            .iter()
+            .map(|entry| entry.as_str().expect("member is a string").to_string())
+            .collect()
+    }
+
+    fn session_documents(store: &SqliteStore, id: &StableId) -> Vec<String> {
+        let bytes = store.get(id).unwrap().expect("session must be present");
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        value["documents"]
+            .as_array()
+            .expect("documents array")
+            .iter()
+            .map(|entry| entry.as_str().expect("document is a string").to_string())
+            .collect()
+    }
+
+    #[test]
+    fn session_spanning_two_sources_in_one_batch_unions_its_members() {
+        // 真实形态：一个逻辑会话被拆到多个 transcript 文件，每个源只声明自己那部分
+        // 成员。旧行为把这判为冲突投影并拒绝整批（exit 6）；正确行为是取并集。
+        let store = SqliteStore::open_in_memory().unwrap();
+        let ses = sid(IdKind::Session, b"split-session");
+        let doc_a = sid(IdKind::Document, b"split-doc-a");
+        let doc_b = sid(IdKind::Document, b"split-doc-b");
+        let m1 = sid(IdKind::Message, b"split-m1");
+        let m2 = sid(IdKind::Message, b"split-m2");
+        let sources = [
+            SourceBatch {
+                source_path: "part-a.jsonl".into(),
+                entries: vec![
+                    (m1.clone(), b"m1".to_vec(), "first half".into()),
+                    (
+                        ses.clone(),
+                        session_payload(doc_a.as_str(), &[m1.as_str()]),
+                        String::new(),
+                    ),
+                    (doc_a.clone(), b"da".to_vec(), String::new()),
+                ],
+            },
+            SourceBatch {
+                source_path: "part-b.jsonl".into(),
+                entries: vec![
+                    (m2.clone(), b"m2".to_vec(), "second half".into()),
+                    (
+                        ses.clone(),
+                        session_payload(doc_b.as_str(), &[m2.as_str()]),
+                        String::new(),
+                    ),
+                    (doc_b.clone(), b"db".to_vec(), String::new()),
+                ],
+            },
+        ];
+        assert!(store.commit_source_batches_if_changed(&sources).unwrap());
+        assert_eq!(
+            session_members(&store, &ses),
+            vec![m1.as_str().to_string(), m2.as_str().to_string()],
+        );
+        // 两个贡献文档都保留；单值别名取升序首个，供旧读取方使用。
+        let mut expected_docs = vec![doc_a.as_str().to_string(), doc_b.as_str().to_string()];
+        expected_docs.sort();
+        assert_eq!(session_documents(&store, &ses), expected_docs);
+        let bytes = store.get(&ses).unwrap().unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["document"], expected_docs[0].as_str());
+    }
+
+    #[test]
+    fn session_synced_in_separate_batches_accumulates_members() {
+        // 真实语料按批提交（命令行长度上限），所以合并必须以库中现值为起点：
+        // 否则第二批的成员列表会覆盖第一批，只剩最后一批的成员。
+        let store = SqliteStore::open_in_memory().unwrap();
+        let ses = sid(IdKind::Session, b"batched-session");
+        let doc_a = sid(IdKind::Document, b"batched-doc-a");
+        let doc_b = sid(IdKind::Document, b"batched-doc-b");
+        let m1 = sid(IdKind::Message, b"batched-m1");
+        let m2 = sid(IdKind::Message, b"batched-m2");
+
+        let first = SourceBatch {
+            source_path: "batch-a.jsonl".into(),
+            entries: vec![
+                (m1.clone(), b"m1".to_vec(), "batch a".into()),
+                (
+                    ses.clone(),
+                    session_payload(doc_a.as_str(), &[m1.as_str()]),
+                    String::new(),
+                ),
+                (doc_a.clone(), b"da".to_vec(), String::new()),
+            ],
+        };
+        assert!(
+            store
+                .commit_source_batches_if_changed(std::slice::from_ref(&first))
+                .unwrap()
+        );
+
+        let second = SourceBatch {
+            source_path: "batch-b.jsonl".into(),
+            entries: vec![
+                (m2.clone(), b"m2".to_vec(), "batch b".into()),
+                (
+                    ses.clone(),
+                    session_payload(doc_b.as_str(), &[m2.as_str()]),
+                    String::new(),
+                ),
+                (doc_b.clone(), b"db".to_vec(), String::new()),
+            ],
+        };
+        assert!(
+            store
+                .commit_source_batches_if_changed(std::slice::from_ref(&second))
+                .unwrap()
+        );
+
+        assert_eq!(
+            session_members(&store, &ses),
+            vec![m1.as_str().to_string(), m2.as_str().to_string()],
+            "第二批不得覆盖第一批的成员",
+        );
+        assert_eq!(session_documents(&store, &ses).len(), 2);
+    }
+
+    #[test]
+    fn resyncing_a_cross_source_session_is_a_content_level_noop() {
+        // 合并结果必须稳定：同一语料重复 sync 不得推进 generation，否则每次运行都
+        // 会作废所有分页 cursor。
+        let store = SqliteStore::open_in_memory().unwrap();
+        let ses = sid(IdKind::Session, b"noop-session");
+        let doc_a = sid(IdKind::Document, b"noop-doc-a");
+        let doc_b = sid(IdKind::Document, b"noop-doc-b");
+        let m1 = sid(IdKind::Message, b"noop-m1");
+        let m2 = sid(IdKind::Message, b"noop-m2");
+        let sources = [
+            SourceBatch {
+                source_path: "noop-a.jsonl".into(),
+                entries: vec![
+                    (m1.clone(), b"m1".to_vec(), "noop a".into()),
+                    (
+                        ses.clone(),
+                        session_payload(doc_a.as_str(), &[m1.as_str()]),
+                        String::new(),
+                    ),
+                    (doc_a.clone(), b"da".to_vec(), String::new()),
+                ],
+            },
+            SourceBatch {
+                source_path: "noop-b.jsonl".into(),
+                entries: vec![
+                    (m2.clone(), b"m2".to_vec(), "noop b".into()),
+                    (
+                        ses.clone(),
+                        session_payload(doc_b.as_str(), &[m2.as_str()]),
+                        String::new(),
+                    ),
+                    (doc_b.clone(), b"db".to_vec(), String::new()),
+                ],
+            },
+        ];
+        assert!(store.commit_source_batches_if_changed(&sources).unwrap());
+        let generation = store.active_generation().unwrap();
+        assert!(
+            !store.commit_source_batches_if_changed(&sources).unwrap(),
+            "重复提交同一跨源语料应为内容级 no-op",
+        );
+        assert_eq!(store.active_generation().unwrap(), generation);
+    }
+
+    #[test]
+    fn legacy_single_document_session_upgrades_without_losing_members() {
+        // 升级前入库的会话行只有单值 `document`，且没有 `documents` 数组。
+        // 新二进制再次 sync 时必须把旧成员并进来，而不是丢弃或报错。
+        let store = SqliteStore::open_in_memory().unwrap();
+        let ses = sid(IdKind::Session, b"legacy-session");
+        let doc_a = sid(IdKind::Document, b"legacy-doc-a");
+        let doc_b = sid(IdKind::Document, b"legacy-doc-b");
+        let m1 = sid(IdKind::Message, b"legacy-m1");
+        let m2 = sid(IdKind::Message, b"legacy-m2");
+
+        let legacy_payload = serde_json::json!({
+            "document": doc_a.as_str(),
+            "messages": [m1.as_str()],
+        })
+        .to_string()
+        .into_bytes();
+        let legacy = SourceBatch {
+            source_path: "legacy-a.jsonl".into(),
+            entries: vec![
+                (m1.clone(), b"m1".to_vec(), "legacy a".into()),
+                (ses.clone(), legacy_payload, String::new()),
+                (doc_a.clone(), b"da".to_vec(), String::new()),
+            ],
+        };
+        assert!(
+            store
+                .commit_source_batches_if_changed(std::slice::from_ref(&legacy))
+                .unwrap()
+        );
+
+        let modern = SourceBatch {
+            source_path: "legacy-b.jsonl".into(),
+            entries: vec![
+                (m2.clone(), b"m2".to_vec(), "legacy b".into()),
+                (
+                    ses.clone(),
+                    session_payload(doc_b.as_str(), &[m2.as_str()]),
+                    String::new(),
+                ),
+                (doc_b.clone(), b"db".to_vec(), String::new()),
+            ],
+        };
+        assert!(
+            store
+                .commit_source_batches_if_changed(std::slice::from_ref(&modern))
+                .unwrap()
+        );
+
+        assert_eq!(
+            session_members(&store, &ses),
+            vec![m1.as_str().to_string(), m2.as_str().to_string()],
+        );
+        assert_eq!(session_documents(&store, &ses).len(), 2);
+    }
+
+    #[test]
+    fn conflicting_message_projections_are_still_rejected() {
+        // 合并只对容器实体开放。同一条消息在不同源上投影不同是真实的不一致
+        // （同一 native id 却内容不同），必须继续拒绝，不能被容器合并顺带放行。
+        let store = SqliteStore::open_in_memory().unwrap();
+        let msg = sid(IdKind::Message, b"conflict-msg");
+        let sources = [
+            SourceBatch {
+                source_path: "conflict-a.jsonl".into(),
+                entries: vec![(msg.clone(), b"first projection".to_vec(), "one".into())],
+            },
+            SourceBatch {
+                source_path: "conflict-b.jsonl".into(),
+                entries: vec![(msg.clone(), b"second projection".to_vec(), "two".into())],
+            },
+        ];
+        let error = store
+            .commit_source_batches_if_changed(&sources)
+            .expect_err("conflicting message projections must be rejected");
+        assert!(
+            format!("{error}").contains("conflicting projections"),
+            "{error}"
+        );
+    }
+
+    /// Build the canonical message payload shape that ingest writes.
+    fn message_payload(session: &str, text: &str) -> Vec<u8> {
+        serde_json::json!({
+            "role": "user",
+            "text": text,
+            "parent": null,
+            "session": session,
+            "span": { "start": 0, "end": 10 },
+        })
+        .to_string()
+        .into_bytes()
+    }
+
+    /// Same message as it appears in one specific file: the copy sits at that
+    /// file's own byte offsets and names the document it came from.
+    fn message_payload_with_span(
+        session: &str,
+        text: &str,
+        document: &str,
+        start: u64,
+        end: u64,
+    ) -> Vec<u8> {
+        serde_json::json!({
+            "role": "user",
+            "text": text,
+            "parent": null,
+            "session": session,
+            "sessions": [session],
+            "span": { "start": start, "end": end },
+            "spans": [{ "document": document, "start": start, "end": end }],
+        })
+        .to_string()
+        .into_bytes()
+    }
+
+    #[test]
+    fn message_copied_into_another_file_unions_its_per_document_spans() {
+        // A resumed conversation's history is rewritten into the new transcript,
+        // so the same message sits at a different byte offset in each file. Those
+        // offsets are per-source facts: keep both, keyed by document, instead of
+        // calling the difference a conflict.
+        let store = SqliteStore::open_in_memory().unwrap();
+        let msg = sid(IdKind::Message, b"respanned-msg");
+        let sources = [
+            SourceBatch {
+                source_path: "original.jsonl".into(),
+                entries: vec![(
+                    msg.clone(),
+                    message_payload_with_span("ses_v1_aaa", "same body", "doc_v1_aaa", 0, 929),
+                    "same body".into(),
+                )],
+            },
+            SourceBatch {
+                source_path: "resumed.jsonl".into(),
+                entries: vec![(
+                    msg.clone(),
+                    message_payload_with_span("ses_v1_bbb", "same body", "doc_v1_bbb", 512, 1322),
+                    "same body".into(),
+                )],
+            },
+        ];
+        assert!(store.commit_source_batches_if_changed(&sources).unwrap());
+
+        let stored: serde_json::Value =
+            serde_json::from_slice(&store.get(&msg).unwrap().unwrap()).unwrap();
+        let spans = stored["spans"].as_array().expect("spans array");
+        assert_eq!(spans.len(), 2, "both locations must survive: {stored}");
+        // Keyed by document and ordered by it, so the result does not depend on
+        // which file happened to be scanned first.
+        assert_eq!(spans[0]["document"], "doc_v1_aaa");
+        assert_eq!(spans[0]["end"], 929);
+        assert_eq!(spans[1]["document"], "doc_v1_bbb");
+        assert_eq!(spans[1]["start"], 512);
+        // The singular alias still names one real location, so evidence
+        // assembly keeps reporting byte precision rather than degrading.
+        assert_eq!(stored["span"]["start"], 0);
+        assert_eq!(stored["span"]["end"], 929);
+
+        // Re-syncing the same corpus changes nothing: spans are keyed by
+        // document, so a second pass maps onto the same two entries.
+        assert!(!store.commit_source_batches_if_changed(&sources).unwrap());
+    }
+
+    #[test]
+    fn message_shared_by_resumed_sessions_unions_its_session_refs() {
+        // Resuming or forking a session copies history into the new transcript,
+        // so one message id legitimately appears under several session ids with
+        // otherwise identical content. That must union, not conflict.
+        let store = SqliteStore::open_in_memory().unwrap();
+        let msg = sid(IdKind::Message, b"resumed-msg");
+        let sources = [
+            SourceBatch {
+                source_path: "first.jsonl".into(),
+                entries: vec![(
+                    msg.clone(),
+                    message_payload("ses_v1_aaa", "shared body"),
+                    "shared body".into(),
+                )],
+            },
+            SourceBatch {
+                source_path: "second.jsonl".into(),
+                entries: vec![(
+                    msg.clone(),
+                    message_payload("ses_v1_bbb", "shared body"),
+                    "shared body".into(),
+                )],
+            },
+        ];
+        assert!(store.commit_source_batches_if_changed(&sources).unwrap());
+
+        let stored: serde_json::Value =
+            serde_json::from_slice(&store.get(&msg).unwrap().unwrap()).unwrap();
+        assert_eq!(
+            stored["sessions"],
+            serde_json::json!(["ses_v1_aaa", "ses_v1_bbb"]),
+            "both owning sessions must be recorded: {stored}"
+        );
+        // The single-value alias keeps pre-union readers working.
+        assert_eq!(stored["session"], "ses_v1_aaa");
+        // Everything else is untouched by the merge.
+        assert_eq!(stored["text"], "shared body");
+        assert_eq!(stored["span"]["end"], 10);
+    }
+
+    #[test]
+    fn message_with_genuinely_different_content_still_conflicts() {
+        // Only the session back-reference may differ. Diverging text under one
+        // id is a real inconsistency and must not be papered over.
+        let store = SqliteStore::open_in_memory().unwrap();
+        let msg = sid(IdKind::Message, b"divergent-msg");
+        let sources = [
+            SourceBatch {
+                source_path: "first.jsonl".into(),
+                entries: vec![(
+                    msg.clone(),
+                    message_payload("ses_v1_aaa", "original body"),
+                    "original body".into(),
+                )],
+            },
+            SourceBatch {
+                source_path: "second.jsonl".into(),
+                entries: vec![(
+                    msg.clone(),
+                    message_payload("ses_v1_aaa", "rewritten body"),
+                    "rewritten body".into(),
+                )],
+            },
+        ];
+        let error = store
+            .commit_source_batches_if_changed(&sources)
+            .expect_err("diverging message content must be rejected");
+        assert!(
+            format!("{error}").contains("conflicting projections"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn message_session_refs_accumulate_across_separate_batches() {
+        // The same message arriving in a later batch must add its session
+        // without dropping the ones already recorded.
+        let store = SqliteStore::open_in_memory().unwrap();
+        let msg = sid(IdKind::Message, b"batched-msg");
+        let first = SourceBatch {
+            source_path: "first.jsonl".into(),
+            entries: vec![(
+                msg.clone(),
+                message_payload("ses_v1_aaa", "body"),
+                "body".into(),
+            )],
+        };
+        assert!(
+            store
+                .commit_source_batches_if_changed(std::slice::from_ref(&first))
+                .unwrap()
+        );
+        let second = SourceBatch {
+            source_path: "second.jsonl".into(),
+            entries: vec![(
+                msg.clone(),
+                message_payload("ses_v1_bbb", "body"),
+                "body".into(),
+            )],
+        };
+        assert!(
+            store
+                .commit_source_batches_if_changed(std::slice::from_ref(&second))
+                .unwrap()
+        );
+
+        let stored: serde_json::Value =
+            serde_json::from_slice(&store.get(&msg).unwrap().unwrap()).unwrap();
+        assert_eq!(
+            stored["sessions"],
+            serde_json::json!(["ses_v1_aaa", "ses_v1_bbb"]),
+            "earlier batch's session must survive: {stored}"
+        );
     }
 
     #[test]
