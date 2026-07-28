@@ -54,11 +54,19 @@
 - **共同**：真实历史数据回归自 2026-07-27 起有可重复 harness（抛弃式临时 store +
   聚合-only 报告），但语料留本机不可共享，故任何单次运行结果第三方无法复核；
   跨平台真实数据回归（CI 上无真实语料）仍不存在。
-- **共同（2026-07-27 新发现，阻塞级）**：真实语料上 `sync` 无法完成——一个
-  Claude Code 会话常跨多个 `.jsonl` 文件（实测某会话被 55 个文件各自声明），
-  而当前存储层按"一源一会话"投影，同一 `ses_v1_` 在不同源上成员列表不同即被判
-  冲突投影并拒绝整批（`catalog_error`，exit 6）。合成夹具（一文件一会话）不触发
-  此路径，故此前无从暴露。详见 `docs/evidence/integration-beta/real-data-regression.md`。
+- **共同（2026-07-27 新发现，阻塞级）**：真实语料上 `sync` 仍无法跑完全量。
+  根因是同一实体身份跨源共享，但"位置"信息被压进了实体 payload——Claude Code
+  的 resume/fork 会把历史消息复制进新 transcript，于是同一 message uuid 在不同
+  文件里其**所属会话、父指针、字节区间**各不相同。实测四层差异：会话跨文件
+  （某会话被 55 个文件各自声明）、消息跨会话（某消息属 3 个 sessionId）、
+  span 因文件而异（同消息原始行 929 vs 810 字节）、**parent 因文件而异**
+  （同消息在不同文件挂在不同父节点下）。前三层已按并集 + 单值别名修复并入库
+  （见 `docs/evidence/integration-beta/real-data-regression.md`）；第四层
+  parent 不能用并集解决——`select_mainline` 沿单一 parent 链回溯，多 parent 时
+  "主线"无定义，并集会让分支选择静默返回任意结果。正解是让实现回归 RFC-0001
+  §3.2：位置信息（session/thread/branch/parent 边）从消息实体中移出，父子关系
+  用独立的 `MessageEdge` 关系表表达。这是模型级改动，尚未实施。
+  合成夹具（一文件一会话、无 fork）不触发任何一层，故此前无从暴露。
 
 ## 晋级到 Beta 的缺口
 
@@ -73,11 +81,12 @@
    （`scripts/evidence/real_data_regression.py`）在抛弃式临时 data root 上跑
    sync → status/doctor → 逐会话 context → index rebuild 校验六条不变量，报告只含
    聚合计数（见 `docs/operations/REAL-DATA-REGRESSION.md`、证据行
-   `IB-REAL-DATA-REGRESSION-001`）。2026-07-27 对 707 个真实源（605 MB）的运行在
-   第一条不变量 `INV-SYNC-OK` 即失败：跨文件会话触发存储层冲突投影拒绝
-   （见上「已知限制」与
+   `IB-REAL-DATA-REGRESSION-001`）。2026-07-27 对约 700 个真实源（605 MB）的多次
+   运行始终在第一条不变量 `INV-SYNC-OK` 失败：跨文件会话/跨会话消息触发存储层
+   冲突投影拒绝。修复前三层后已提交消息数从 0 推进到 7060 条，但第四层
+   （per-source `parentUuid`）仍拒绝整批（见上「已知限制」与
    `docs/evidence/integration-beta/real-data-regression.md`）。**这是缺口 4 当前
-   的首要阻塞**：产品需先支持会话跨源合并，harness 才可能跑通。
+   的首要阻塞**：需先按 RFC-0001 §3.2 把位置信息移出消息实体，harness 才可能跑通。
 5. 跨正式 target（Windows/Linux/macOS）的 CI 认证——仍缺。`ci.yml` 的 `test` 与
    新增 `installer` job 已配置三平台矩阵（证据行 `IB-CI-INSTALLER-001`），但在
    PR 上跑绿并记录具体 run id 之前只能是 `ci_configured_only`；hosted runner 亦
