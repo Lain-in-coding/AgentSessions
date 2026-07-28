@@ -49,6 +49,40 @@ are derived and must be fully rebuildable from `catalog` at any time.**
   authoritative locked handle, and maps contention to path-redacted WriterBusy.
 - `searchable_text(payload)` — extracts the searchable body from the canonical
   payload for FTS.
+- `merge_session_payloads(...)` / `merge_message_payloads(...)` — union the two
+  projections of one entity that arrive from different sources. Real corpora
+  need this: one logical session spans many transcript files, and resuming or
+  forking a conversation copies its history into the new file, so the same
+  entity legitimately arrives more than once per batch.
+
+## Cross-source entity merging
+
+`commit_source_batches_if_changed` folds an entity that several sources claim
+instead of rejecting the batch. Which fields may differ is deliberately narrow:
+
+| Entity | Unioned fields | Everything else |
+|---|---|---|
+| Session | `messages` (append-order), `documents` (sorted) | must match byte-for-byte |
+| Message | `sessions`, `spans` (keyed by contributing document) | must match byte-for-byte |
+
+- Each unioned field keeps a **singular alias** (`document`, `session`, `span`)
+  holding the first entry, so readers written against the pre-union shape keep
+  working. On a shared entity the alias names *one* contributor, not all of
+  them — treat it as a compatibility shim, never as the complete answer.
+- The merge starts from **the value already in the catalog**, not just from the
+  other source in the current batch. Without that, syncing a corpus in several
+  invocations would let each batch overwrite the previous batch's members.
+- Identical stored bytes skip the merge entirely. That keeps an unchanged
+  re-sync a content-level no-op and avoids forcing slice-era opaque payloads
+  through a JSON parse.
+- Anything outside those fields differing under one id is a real inconsistency
+  and still fails with `conflicting projections across sources`.
+
+**Known limit:** `parent` is per-source too (a fork can re-parent a copied
+message), and it is *not* unioned — mainline selection walks a single parent
+chain, so multiple parents make "the mainline" undefined. Fixing that needs
+the RFC-0001 §3.2 shape (edges as their own relation), not another array here.
+See `docs/evidence/integration-beta/real-data-regression.md`.
 
 ## Common mistakes
 
@@ -56,6 +90,8 @@ are derived and must be fully rebuildable from `catalog` at any time.**
   Unstable. Full identity lives only in `fts_ids.id_json`.
 - Advancing generation outside the committing transaction.
 - Adding an `ALTER`-free destructive "migration".
+- Treating a per-source fact (session, span, parent) as intrinsic to a message.
+  Message *identity* is shared across files; its *position* is not.
 
 ---
 
