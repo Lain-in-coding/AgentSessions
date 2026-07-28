@@ -25,7 +25,8 @@
     "07-26-human-robot-protocol",
     "07-26-mcp-v0-skill",
     "07-27-tui-preview",
-    "07-27-install-promotion"
+    "07-27-install-promotion",
+    "07-27-cross-source-session"
   ],
   "parent": "07-24-remediation-milestone-closure",
   "relatedFiles": [],
