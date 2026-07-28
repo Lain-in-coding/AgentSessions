@@ -1,0 +1,6 @@
+{"file": ".trellis/tasks/07-27-cross-source-session/design.md", "reason": "Frozen design: merge_container_entities contract (§2), payload shape (§3), test matrix (§4), file ownership (§1)."}
+{"file": ".trellis/tasks/07-27-cross-source-session/prd.md", "reason": "Requirements R1-R6, acceptance criteria, and the out-of-scope boundary."}
+{"file": "docs/architecture/RFC-0001-canonical-model-and-stable-id.md", "reason": "Canonical Session entity (§3.2) has no single-document field; this task realigns the implementation with it."}
+{"file": "docs/evidence/integration-beta/real-data-regression.md", "reason": "The failing real-data run this task fixes, including the observed 55-files-one-session shape."}
+{"file": "docs/operations/migration-v5-to-v6.md", "reason": "Existing migration semantics and legacy-row honesty rules the new payload shape must respect."}
+{"file": ".trellis/spec/agentsessions-adapters-sqlite/backend/index.md", "reason": "Storage-layer guidelines: durable batch, membership, and tombstone rules."}
