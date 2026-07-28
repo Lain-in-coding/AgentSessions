@@ -823,11 +823,23 @@ fn staged_to_entries(
                     .map(|p| StableId::native(IdKind::Message, p).as_str().to_string()),
                 "timestamp": message.timestamp,
                 "is_sidechain": message.is_sidechain,
+                // Session and span are per-source facts, carried as arrays because
+                // resuming or forking a conversation copies its history into the new
+                // transcript: one message then belongs to several sessions and sits at
+                // a different byte offset in each file. The singular `session`/`span`
+                // keys stay as aliases for the first entry so readers written against
+                // the pre-union shape keep working.
                 "session": session_id.as_str(),
+                "sessions": [session_id.as_str()],
                 "span": message.span.map(|(start, end)| serde_json::json!({
                     "start": start,
                     "end": end,
                 })),
+                "spans": message.span.map(|(start, end)| serde_json::json!([{
+                    "document": document_id.as_str(),
+                    "start": start,
+                    "end": end,
+                }])),
             })
             .to_string();
             (id, payload.into_bytes(), message.text.clone())
@@ -837,7 +849,13 @@ fn staged_to_entries(
     // 会话/文档目录行：payload 为结构化 JSON，索引正文为空——容器实体不参与全文命中
     // （存储层对非 Message kind 也不会写 fts 行，双保险）。
     let member_ids: Vec<&str> = entries.iter().map(|(id, _, _)| id.as_str()).collect();
+    // `documents` is an array because one logical session routinely spans several
+    // transcript files: each source contributes its own slice, and the storage
+    // layer unions those slices into one session entity on commit. `document`
+    // stays as the first element so readers that want a single attribution keep
+    // working; on a multi-document session it names one contributor, not all.
     let session_payload = serde_json::json!({
+        "documents": [document_id.as_str()],
         "document": document_id.as_str(),
         "messages": member_ids,
     })
