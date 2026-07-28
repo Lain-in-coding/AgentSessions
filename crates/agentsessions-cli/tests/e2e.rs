@@ -1129,6 +1129,119 @@ fn context_assembles_mainline_branch_with_evidence() {
     assert_eq!(full[2], "msg_v1_c0000000-0000-4000-8000-000000000003");
 }
 
+/// 把一个会话拆成两个文件写出：前半 root→reply，后半 sidechain + mainline tail。
+/// 两个文件都声明同一个 `sessionId`——这是真实语料里的常态（会话续写/分片），
+/// 而非人造边角：单会话被 55 个文件各自声明的情况已在真实数据回归中实测。
+fn write_split_session_fixture(dir: &std::path::Path) -> (String, String, String) {
+    let head = concat!(
+        r#"{"type":"user","uuid":"5p1i7000-0000-4000-8000-000000000001","parentUuid":null,"sessionId":"5p1i7aaa-1111-4bbb-8ccc-000000000001","timestamp":"2026-07-27T01:00:00.000Z","message":{"role":"user","content":"split root question"}}"#,
+        "\n",
+        r#"{"type":"assistant","uuid":"5p1i7000-0000-4000-8000-000000000002","parentUuid":"5p1i7000-0000-4000-8000-000000000001","sessionId":"5p1i7aaa-1111-4bbb-8ccc-000000000001","message":{"role":"assistant","content":"split first answer"}}"#,
+        "\n",
+    );
+    let tail = concat!(
+        r#"{"type":"user","uuid":"5p1i7000-0000-4000-8000-000000000003","parentUuid":"5p1i7000-0000-4000-8000-000000000002","isSidechain":true,"sessionId":"5p1i7aaa-1111-4bbb-8ccc-000000000001","message":{"role":"user","content":"split sidechain probe"}}"#,
+        "\n",
+        r#"{"type":"assistant","uuid":"5p1i7000-0000-4000-8000-000000000004","parentUuid":"5p1i7000-0000-4000-8000-000000000002","sessionId":"5p1i7aaa-1111-4bbb-8ccc-000000000001","message":{"role":"assistant","content":"split final answer"}}"#,
+        "\n",
+    );
+    let head_path = dir.join("split-head.jsonl");
+    let tail_path = dir.join("split-tail.jsonl");
+    std::fs::write(&head_path, head).expect("write split head fixture");
+    std::fs::write(&tail_path, tail).expect("write split tail fixture");
+    (
+        head_path.to_string_lossy().into_owned(),
+        tail_path.to_string_lossy().into_owned(),
+        "ses_v1_5p1i7aaa-1111-4bbb-8ccc-000000000001".to_string(),
+    )
+}
+
+#[test]
+fn session_split_across_files_syncs_and_assembles_one_context() {
+    // 修复前：两个源各自声明同一 ses_v1_ 却带不同成员列表，提交层判为冲突投影
+    // 并整批拒绝（catalog_error / exit 6），真实语料因此完全无法入库。
+    let (dir, db) = temp_db("split-session-one-batch");
+    let (head, tail, session_wire) = write_split_session_fixture(dir.path());
+
+    let out = run(&db, &["sync", &head, &tail]);
+    assert!(out.status.success(), "sync failed: {}", stdout(&out));
+    let frame = parse_first_line(&out);
+    assert_eq!(frame["data"]["messages"], 4, "frame={frame}");
+
+    // 会话实体承载两个源的成员并集，并记录两个贡献文档。
+    let out = run(&db, &["show", &session_wire]);
+    assert!(out.status.success(), "show failed: {}", stdout(&out));
+    let entity = parse_first_line(&out)["data"]["entity"].clone();
+    let members = entity["messages"].as_array().expect("session.messages");
+    assert_eq!(members.len(), 4, "entity={entity}");
+    let documents = entity["documents"].as_array().expect("session.documents");
+    assert_eq!(documents.len(), 2, "entity={entity}");
+    // 单值 `document` 是兼容别名：多文档会话上它只指其中一个贡献者。
+    assert!(
+        entity["document"]
+            .as_str()
+            .is_some_and(|d| d.starts_with("doc_v1_")),
+        "entity={entity}"
+    );
+
+    // 跨文件的 parent 边可解析：mainline 链跨越两个源文件。
+    let out = run(&db, &["context", &session_wire]);
+    assert!(out.status.success(), "context failed: {}", stdout(&out));
+    let frame = parse_first_line(&out);
+    assert_eq!(frame["outcome"], "success");
+    let wires: Vec<&str> = frame["data"]["messages"]
+        .as_array()
+        .expect("messages")
+        .iter()
+        .map(|m| m["id"].as_str().expect("message.id"))
+        .collect();
+    assert_eq!(
+        wires,
+        vec![
+            "msg_v1_5p1i7000-0000-4000-8000-000000000001",
+            "msg_v1_5p1i7000-0000-4000-8000-000000000002",
+            "msg_v1_5p1i7000-0000-4000-8000-000000000004",
+        ],
+        "frame={frame}"
+    );
+    assert_eq!(
+        frame["data"]["branch_leaf"],
+        "msg_v1_5p1i7000-0000-4000-8000-000000000004"
+    );
+}
+
+#[test]
+fn session_synced_in_separate_invocations_keeps_both_halves() {
+    // 真实用法：语料太大，分多次 sync。第二批不得覆盖第一批已记录的成员。
+    let (dir, db) = temp_db("split-session-two-batches");
+    let (head, tail, session_wire) = write_split_session_fixture(dir.path());
+
+    let out = run(&db, &["sync", &head]);
+    assert!(out.status.success(), "first sync failed: {}", stdout(&out));
+    let out = run(&db, &["sync", &tail]);
+    assert!(out.status.success(), "second sync failed: {}", stdout(&out));
+
+    let out = run(&db, &["show", &session_wire]);
+    let entity = parse_first_line(&out)["data"]["entity"].clone();
+    assert_eq!(
+        entity["messages"].as_array().expect("messages").len(),
+        4,
+        "第二批 sync 不得丢弃第一批成员: entity={entity}"
+    );
+    assert_eq!(entity["documents"].as_array().expect("documents").len(), 2);
+
+    // 两个半区都可检索，证明并集是真实可用的而非仅 payload 好看。
+    for term in ["\"split root question\"", "\"split final answer\""] {
+        let out = run(&db, &["search", term]);
+        assert!(out.status.success(), "search failed: {}", stdout(&out));
+        let frame = parse_first_line(&out);
+        assert!(
+            !frame["data"]["hits"].as_array().expect("hits").is_empty(),
+            "term={term} frame={frame}"
+        );
+    }
+}
+
 #[test]
 fn context_budget_truncation_reports_partial_exit_10() {
     let (dir, db) = temp_db("context-budget");
