@@ -1,0 +1,5 @@
+{"file": ".trellis/tasks/07-27-cross-source-session/design.md", "reason": "Verify the delivered code against the frozen merge contract and test matrix."}
+{"file": ".trellis/tasks/07-27-cross-source-session/prd.md", "reason": "Check every acceptance criterion, including the real-corpus regression run."}
+{"file": "docs/operations/REAL-DATA-REGRESSION.md", "reason": "How to re-run the authorized regression that must now pass INV-SYNC-OK."}
+{"file": "docs/product/PROVIDER-MATURITY-MATRIX.md", "reason": "The blocking known-limitation entry to update once the fix lands."}
+{"file": "docs/operations/core-beta-evidence-matrix.md", "reason": "Evidence row IB-REAL-DATA-REGRESSION-001 must be restated truthfully after the rerun."}

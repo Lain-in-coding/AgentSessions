@@ -92,6 +92,36 @@
       "operator_action": "Upgrade AgentSessions or rebuild the derived data root."
     },
     {
+      "code": "cursor_invalid",
+      "layer": "protocol",
+      "retryable": false,
+      "partial_allowed": false,
+      "cli_exit_code": 2,
+      "robot_ok": false,
+      "redaction": "none",
+      "operator_action": "Discard the cursor and rerun the query from the start."
+    },
+    {
+      "code": "cursor_expired",
+      "layer": "protocol",
+      "retryable": false,
+      "partial_allowed": false,
+      "cli_exit_code": 2,
+      "robot_ok": false,
+      "redaction": "none",
+      "operator_action": "Rerun the query to obtain a fresh cursor."
+    },
+    {
+      "code": "generation_mismatch",
+      "layer": "protocol",
+      "retryable": false,
+      "partial_allowed": false,
+      "cli_exit_code": 9,
+      "robot_ok": false,
+      "redaction": "none",
+      "operator_action": "The index advanced; rerun the query against the new generation."
+    },
+    {
       "code": "internal",
       "layer": "application",
       "retryable": false,

@@ -46,6 +46,94 @@ jobs:
       - name: Robot contract tests
         run: cargo test -p agentsessions-cli --test e2e robot_ -- --nocapture
 
+  installer:
+    name: installer smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-installer-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-installer-
+
+      - name: Build release binary
+        run: cargo build --locked --release -p agentsessions-cli
+
+      # Installer scripts only copy an already-built artifact here (--skip-build):
+      # the build step above is the reproducible one, and CI must not hide a
+      # build failure inside the installer.
+      - name: Install into a workspace-local prefix (unix)
+        if: runner.os != 'Windows'
+        run: ./scripts/install/install.sh --skip-build --prefix "$PWD/ci-prefix"
+
+      - name: Install into a workspace-local prefix (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/install/install.ps1 -SkipBuild -Prefix "$PWD/ci-prefix"
+
+      - name: Invoke the installed binary (unix)
+        if: runner.os != 'Windows'
+        run: |
+          ./ci-prefix/agentsessions --version
+          ./ci-prefix/agentsessions --robot config paths
+
+      - name: Invoke the installed binary (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          ./ci-prefix/agentsessions.exe --version
+          ./ci-prefix/agentsessions.exe --robot config paths
+
+      # End-to-end surface smoke against the installed artifact: CLI robot
+      # envelopes, documented exit codes, and the MCP stdio handshake.
+      - name: Surface smoke (unix)
+        if: runner.os != 'Windows'
+        run: ./scripts/install/smoke.sh --binary "$PWD/ci-prefix/agentsessions"
+
+      - name: Surface smoke (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/install/smoke.ps1 -Binary "$PWD/ci-prefix/agentsessions.exe"
+
+      # Uninstall must remove exactly one file and stay idempotent: a second
+      # run reports "not installed" and still exits 0.
+      - name: Uninstall twice (unix)
+        if: runner.os != 'Windows'
+        run: |
+          ./scripts/install/uninstall.sh --prefix "$PWD/ci-prefix"
+          test ! -e "$PWD/ci-prefix/agentsessions"
+          ./scripts/install/uninstall.sh --prefix "$PWD/ci-prefix"
+
+      - name: Uninstall twice (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          ./scripts/install/uninstall.ps1 -Prefix "$PWD/ci-prefix"
+          if (Test-Path "$PWD/ci-prefix/agentsessions.exe") { throw "uninstall left the binary behind" }
+          ./scripts/install/uninstall.ps1 -Prefix "$PWD/ci-prefix"
+
+      # Regression harness self-test runs on synthetic fixtures only; real
+      # transcripts are never present in CI.
+      - name: Regression harness self-test
+        run: python -m unittest discover -s scripts/evidence -p "test_real_data_regression.py" -v
+
   deny:
     name: cargo-deny (supply chain)
     runs-on: ubuntu-latest

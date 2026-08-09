@@ -1,5 +1,4 @@
-//! Testkit：跨 crate 复用的测试构件（对应计划 §14 "Testkit、fixture builder、
-//! 只读断言和 fake Provider"）。
+//! Testkit：跨 crate 复用的测试构件，包括 fixture builder、只读断言和 fake Provider。
 //!
 //! 本 crate 只被其他 crate 的 `[dev-dependencies]` 依赖，绝不进入生产依赖图。
 //! 提供四类构件：
@@ -13,10 +12,14 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use agentsessions_domain::{IdKind, Message, Role, Session, Stability, StableId};
+use agentsessions_domain::{
+    DomainResult, IdKind, Message, MessageEdge, MessagePlacement, MessageRelation, Role,
+    SessionContextGraph, SourceDocument, Stability, StableId,
+};
 use agentsessions_ports::{
-    CanonicalEventSink, CatalogEntry, CatalogStore, Confidence, MessageEvent, ParseReport,
-    PortError, PortResult, ProbeResult, ProviderAdapter, ProviderError, SearchHit, SearchIndex,
+    CanonicalEventSink, CatalogEntry, CatalogStore, Confidence, ContextGraphStore, ContextStats,
+    MessageContextCandidate, MessageEvent, ParseReport, PortError, PortResult, ProbeResult,
+    ProviderAdapter, ProviderError, SearchHit, SearchIndex,
 };
 
 /// 构造合法 Canonical 会话的 builder（fixture builder）。
@@ -51,8 +54,8 @@ impl SessionBuilder {
         self
     }
 
-    /// 产出会话。保证通过领域不变量校验。
-    pub fn build(self) -> Session {
+    /// 产出一个线性、placement-aware 的会话图。保证通过领域不变量校验。
+    pub fn build(self) -> SessionContextGraph {
         let document_id = StableId::derive(
             IdKind::Document,
             Stability::Reconstructed,
@@ -70,35 +73,66 @@ impl SessionBuilder {
                 &[self.fact.as_bytes(), &seq.to_le_bytes()],
             )
         };
-        let messages = self
+        let messages: Vec<Message> = self
             .texts
             .iter()
             .enumerate()
             .map(|(i, text)| {
-                let seq = i as u32;
                 let role = if i % 2 == 0 {
                     Role::User
                 } else {
                     Role::Assistant
                 };
-                // 每条消息的父指向上一条，形成一条合法的线性 threading 链。
-                let parent = seq.checked_sub(1).map(mid);
                 Message {
-                    id: mid(seq),
+                    id: mid(i as u32),
                     role,
                     text: text.clone(),
-                    seq,
-                    parent,
                     timestamp: None,
-                    is_sidechain: false,
                 }
             })
             .collect();
-        Session {
-            id,
-            document_id,
+        let placements: Vec<MessagePlacement> = messages
+            .iter()
+            .enumerate()
+            .map(|(i, message)| {
+                MessagePlacement::new(
+                    id.clone(),
+                    document_id.clone(),
+                    message.id.clone(),
+                    i as u32,
+                    false,
+                    None,
+                )
+            })
+            .collect();
+        let edges = placements
+            .iter()
+            .skip(1)
+            .zip(messages.iter())
+            .map(|(child, parent)| MessageEdge {
+                child_placement_id: child.id.clone(),
+                parent_message_id: parent.id.clone(),
+                parent_native_id: None,
+                relation: MessageRelation::Reply,
+            })
+            .collect();
+        let graph = SessionContextGraph {
+            session_id: id,
             messages,
-        }
+            source_documents: vec![SourceDocument {
+                id: document_id,
+                provider_id: "test-provider".into(),
+                variant_id: "test-provider/synthetic-v1".into(),
+                fingerprint: blake3_hex(self.fact.as_bytes()),
+                len: 0,
+            }],
+            placements,
+            edges,
+        };
+        graph
+            .validate()
+            .expect("SessionBuilder must produce a valid graph");
+        graph
     }
 }
 
@@ -110,11 +144,20 @@ impl SessionBuilder {
 pub struct InMemoryStore {
     catalog: RefCell<HashMap<String, Vec<u8>>>,
     index: RefCell<Vec<(StableId, String)>>,
+    graphs: RefCell<HashMap<String, SessionContextGraph>>,
 }
 
 impl InMemoryStore {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn insert_graph(&self, graph: SessionContextGraph) -> DomainResult<()> {
+        graph.validate()?;
+        self.graphs
+            .borrow_mut()
+            .insert(graph.session_id.as_str().to_string(), graph);
+        Ok(())
     }
 }
 
@@ -178,6 +221,59 @@ impl SearchIndex for InMemoryStore {
             })
             .collect();
         Ok(hits)
+    }
+}
+
+impl ContextGraphStore for InMemoryStore {
+    fn load_session_graph(&self, session_id: &StableId) -> PortResult<SessionContextGraph> {
+        self.graphs
+            .borrow()
+            .get(session_id.as_str())
+            .cloned()
+            .ok_or_else(|| PortError::NotFound("session graph not found".into()))
+    }
+
+    fn message_contexts(&self, message_id: &StableId) -> PortResult<Vec<MessageContextCandidate>> {
+        let graphs = self.graphs.borrow();
+        let mut candidates: Vec<MessageContextCandidate> = graphs
+            .values()
+            .filter_map(|graph| {
+                let mut placement_ids = graph
+                    .placements
+                    .iter()
+                    .filter(|placement| placement.message_id.as_str() == message_id.as_str())
+                    .map(|placement| placement.id.clone())
+                    .collect::<Vec<_>>();
+                if placement_ids.is_empty() {
+                    return None;
+                }
+                placement_ids.sort();
+                Some(MessageContextCandidate {
+                    session_id: graph.session_id.clone(),
+                    placement_ids,
+                })
+            })
+            .collect();
+        candidates.sort_by(|left, right| left.session_id.as_str().cmp(right.session_id.as_str()));
+        if candidates.is_empty() {
+            return Err(PortError::NotFound(
+                "message not found in any session graph".into(),
+            ));
+        }
+        Ok(candidates)
+    }
+
+    fn context_stats(&self) -> PortResult<ContextStats> {
+        let placements = self
+            .graphs
+            .borrow()
+            .values()
+            .map(|graph| graph.placements.len() as u64)
+            .sum();
+        Ok(ContextStats {
+            placements,
+            source_placement_claims: placements,
+        })
     }
 }
 
@@ -281,6 +377,7 @@ impl ProviderAdapter for FakeProvider {
                 text,
                 timestamp: None,
                 is_sidechain: false,
+                span: None,
             })
             .map_err(|e| ProviderError::Io(e.to_string()))?;
             report.committed += 1;
@@ -324,23 +421,44 @@ mod tests {
 
     #[test]
     fn session_builder_produces_valid_session() {
-        let s = SessionBuilder::new("t1")
+        let graph = SessionBuilder::new("t1")
             .messages(["hello", "world", "again"])
             .build();
-        assert_eq!(s.messages.len(), 3);
-        assert!(s.validate().is_ok(), "builder 应产出通过不变量的会话");
+        assert_eq!(graph.messages.len(), 3);
+        assert!(graph.validate().is_ok(), "builder 应产出通过不变量的会话图");
         // 角色交替：User, Assistant, User。
-        assert_eq!(s.messages[0].role, Role::User);
-        assert_eq!(s.messages[1].role, Role::Assistant);
-        assert_eq!(s.messages[2].role, Role::User);
+        assert_eq!(graph.messages[0].role, Role::User);
+        assert_eq!(graph.messages[1].role, Role::Assistant);
+        assert_eq!(graph.messages[2].role, Role::User);
+        assert_eq!(graph.placements.len(), 3);
+        assert_eq!(graph.edges.len(), 2);
     }
 
     #[test]
     fn session_builder_is_deterministic() {
         let a = SessionBuilder::new("same").message("x").build();
         let b = SessionBuilder::new("same").message("x").build();
-        assert_eq!(a.id, b.id);
+        assert_eq!(a.session_id, b.session_id);
         assert_eq!(a.messages[0].id, b.messages[0].id);
+        assert_eq!(a.placements[0].id, b.placements[0].id);
+    }
+
+    #[test]
+    fn in_memory_context_store_groups_by_session() {
+        let store = InMemoryStore::new();
+        let graph = SessionBuilder::new("ctx").messages(["a", "b"]).build();
+        let session_id = graph.session_id.clone();
+        let message_id = graph.messages[0].id.clone();
+        store.insert_graph(graph).unwrap();
+
+        assert_eq!(
+            store.load_session_graph(&session_id).unwrap().session_id,
+            session_id
+        );
+        let candidates = store.message_contexts(&message_id).unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].placement_ids.len(), 1);
+        assert_eq!(store.context_stats().unwrap().placements, 2);
     }
 
     #[test]

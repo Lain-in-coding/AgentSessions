@@ -1,4 +1,4 @@
-//! 只读源快照读取（RFC-0002 §4 / 计划审查 #6）。
+//! 只读源快照读取（RFC-0002 §4）。
 //!
 //! 打开后捕获 `(len, mtime_ms, fingerprint)`，只读捕获范围；提交前复核三元组，
 //! 任一变化返回 [`PortError::SnapshotChanged`]。
@@ -173,16 +173,34 @@ mod tests {
     }
 
     #[test]
-    fn equal_length_content_replacement_is_detected() {
+    fn equal_length_content_replacement_is_detected_by_fingerprint() {
         let dir = tempfile::tempdir().unwrap();
         let p = write_file(dir.path(), "a.jsonl", b"AAAAAAAAAA"); // 10 bytes
+        // 捕获原始 mtime，替换后逐字节恢复，使 len 与 mtime 都与快照一致，
+        // fingerprint 成为唯一能检出等长异容替换的信号。
+        let original_modified = std::fs::metadata(&p).unwrap().modified().unwrap();
         let (snap, _) = capture(&p).unwrap();
-        // 等长异容替换：len 相同，fingerprint 必变。
-        // 尽量保持 mtime 一致的难度高，但 fingerprint 检查独立于 mtime。
+
         std::fs::write(&p, b"BBBBBBBBBB").unwrap();
+        File::options()
+            .write(true)
+            .open(&p)
+            .unwrap()
+            .set_modified(original_modified)
+            .unwrap();
+        let restored = std::fs::metadata(&p).unwrap();
+        assert_eq!(
+            mtime_ms(&restored).unwrap(),
+            snap.mtime_ms,
+            "mtime 必须被恢复，fingerprint 才是唯一信号"
+        );
+        assert_eq!(restored.len(), snap.len, "替换必须等长");
+
         let err = verify_snapshot(&p, &snap).unwrap_err();
-        // 可能先撞上 mtime 变化，也可能直接 fingerprint——两种都是 SnapshotChanged。
-        assert!(matches!(err, PortError::SnapshotChanged(_)), "got {err:?}");
+        assert!(
+            matches!(err, PortError::SnapshotChanged(ref m) if m.contains("fingerprint changed")),
+            "got {err:?}"
+        );
     }
 
     #[test]

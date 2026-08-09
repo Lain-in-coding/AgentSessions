@@ -1,4 +1,4 @@
-//! Data-root writer lease（计划审查 #5 / §6.5）。
+//! Data-root writer lease：每个 data root 同时只允许一个写者。
 //!
 //! 权威是 OS 独占文件句柄，不是 PID 超时抢锁。进程崩溃后 OS 自动释放。
 //! Windows 上 fs4 独占锁是强制锁：持锁期间不得对同一路径另开句柄读写
@@ -22,11 +22,8 @@ fn backend<E: std::fmt::Display>(e: E) -> PortError {
     PortError::Backend(e.to_string())
 }
 
-fn held_error(path: &Path) -> PortError {
-    PortError::WriterBusy(format!(
-        "writer lease held by another process: {}",
-        path.display()
-    ))
+fn held_error() -> PortError {
+    PortError::WriterBusy("writer lease is already held".into())
 }
 
 /// Windows 强制锁下，持锁时对同一路径再 open/写会报 error 33 / 32。
@@ -38,6 +35,19 @@ fn is_lock_contention(err: &std::io::Error) -> bool {
             err.kind(),
             std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
         ),
+    }
+}
+
+fn lock_exclusive(file: &File) -> PortResult<()> {
+    classify_lock_result(file.try_lock_exclusive())
+}
+
+fn classify_lock_result(result: std::io::Result<bool>) -> PortResult<()> {
+    match result {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(held_error()),
+        Err(e) if is_lock_contention(&e) => Err(held_error()),
+        Err(e) => Err(backend(e)),
     }
 }
 
@@ -82,7 +92,7 @@ impl WriterLease {
                 .lock()
                 .map_err(|e| backend(format!("lease registry poisoned: {e}")))?;
             if held.iter().any(|k| paths_same_dir(k, &path)) {
-                return Err(held_error(&path));
+                return Err(held_error());
             }
         }
 
@@ -94,7 +104,7 @@ impl WriterLease {
             .open(&path)
         {
             Ok(f) => f,
-            Err(e) if is_lock_contention(&e) => return Err(held_error(&path)),
+            Err(e) if is_lock_contention(&e) => return Err(held_error()),
             Err(e) => return Err(backend(e)),
         };
 
@@ -104,13 +114,11 @@ impl WriterLease {
                 .lock()
                 .map_err(|e| backend(format!("lease registry poisoned: {e}")))?;
             if held.contains(&key) {
-                return Err(held_error(&path));
+                return Err(held_error());
             }
         }
 
-        if file.try_lock_exclusive().is_err() {
-            return Err(held_error(&path));
-        }
+        lock_exclusive(&file)?;
 
         // 写诊断 record；Windows 同进程第二句柄写会 error 33——归一为 held。
         let record = format!(
@@ -130,7 +138,7 @@ impl WriterLease {
         if let Err(e) = write_record(&mut file, &record) {
             let _ = FileExt::unlock(&file);
             if is_lock_contention(&e) {
-                return Err(held_error(&path));
+                return Err(held_error());
             }
             return Err(backend(e));
         }
@@ -199,13 +207,60 @@ mod tests {
     }
 
     #[test]
-    fn second_acquire_is_denied() {
+    fn true_lock_result_is_acquired() {
+        assert!(classify_lock_result(Ok(true)).is_ok());
+    }
+
+    #[test]
+    fn false_lock_result_is_writer_busy() {
+        let err = classify_lock_result(Ok(false)).unwrap_err();
+        assert!(matches!(err, PortError::WriterBusy(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn contention_lock_error_is_writer_busy() {
+        let io_error = std::io::Error::from(std::io::ErrorKind::WouldBlock);
+        let err = classify_lock_result(Err(io_error)).unwrap_err();
+        assert!(matches!(err, PortError::WriterBusy(_)), "got {err:?}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_sharing_and_lock_violations_are_writer_busy() {
+        for code in [32, 33] {
+            let err =
+                classify_lock_result(Err(std::io::Error::from_raw_os_error(code))).unwrap_err();
+            assert!(
+                matches!(err, PortError::WriterBusy(_)),
+                "code={code}, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn non_contention_lock_error_is_backend() {
+        let io_error = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        let err = classify_lock_result(Err(io_error)).unwrap_err();
+        assert!(matches!(err, PortError::Backend(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn second_acquire_is_denied_without_disclosing_path() {
         let dir = tempfile::tempdir().unwrap();
         let _holder = WriterLease::try_acquire(dir.path()).unwrap();
         let err = WriterLease::try_acquire(dir.path()).unwrap_err();
+        let message = match err {
+            PortError::WriterBusy(message) => message,
+            other => panic!("got {other:?}"),
+        };
+        assert!(message.contains("writer lease"), "message={message}");
         assert!(
-            matches!(err, PortError::WriterBusy(ref m) if m.contains("writer lease held")),
-            "got {err:?}"
+            !message.contains(&dir.path().display().to_string()),
+            "message disclosed data root: {message}"
+        );
+        assert!(
+            !message.contains("writer.lock"),
+            "message disclosed lock filename: {message}"
         );
     }
 

@@ -1,13 +1,13 @@
 # search-backend Spike — 证据记录
 
 > Spike Card: [SPIKE-CARD.md](./SPIKE-CARD.md)
-> 状态：**已完成初步对照，产出 Selection Gate go/no-go 证据**
+> 状态：**已完成 Windows x64 初步对照，作为 ADR-0001 证据输入**
 > 执行日期：2026-07-21
-> 探针性质：`spikes/` 下可丢弃代码，不进 `crates/`，R0 后归档
+> 探针性质：`spikes/` 下可丢弃代码，不进 `crates/`；归档时机由 R0 Architecture Review 决定
 
 ---
 
-## 1. 基准环境（计划 §2.2 必填）
+## 1. 基准环境（按 SLI 与基准报告格式记录）
 
 | 项 | 值 |
 |---|---|
@@ -49,45 +49,46 @@
 
 ---
 
-## 4. Selection Gate 判定（对照计划 §6.1 / §14）
+## 4. ADR-0001 决策证据
 
-**硬门（任一不达标即淘汰）**
+**已测硬门（本机 Windows x64 范围）**
 
 | 硬门 | FTS5 | Tantivy |
 |---|---|---|
 | 检索质量（recall@10 达标） | ✅ 1.000 | ✅ 1.000 |
-| 可在正式 target 干净构建 | ✅ MSVC bundled，无系统依赖 | ✅（fast-resume 已证实测跨平台 bug，须复核） |
-| 崩溃恢复可行性 | 待 sqlite-snapshot-wal spike | 待验证 |
+| 本机 target 干净构建 | ✅ MSVC bundled，无系统依赖 | ✅ 本机通过；其他正式 target 未验证 |
+| 崩溃恢复可行性 | 本 spike 未覆盖；另见 sqlite-snapshot-wal spike | 待验证 |
 
 **评分项**
 
 | 维度 | 胜方 | 说明 |
 |---|---|---|
 | recall@10 | 平 | 均 1.000，无可测量差异 |
-| 查询延迟 | Tantivy | 但 FTS5 绝对值 <7.2 ms/20k 文档，可接受 |
-| 索引体积 | Tantivy | 4.75x，但 FTS5 绝对值 16.5 MB 可接受 |
+| 查询延迟 | Tantivy | 但 FTS5 在本轮 20k 文档测量中 <7.2 ms |
+| 索引体积 | Tantivy | 4.75x，但 FTS5 本轮绝对值 16.5 MB |
 | 一致性/运维复杂度 | **FTS5** | 单存储、同事务提交，无跨存储双写与 generation 漂移 |
-| 构建可靠性 | **FTS5** | bundled 无系统依赖；Tantivy 唯一集成参考 fast-resume 有实测跨平台 bug |
+| 构建可靠性 | **FTS5 倾向** | bundled 无系统依赖；跨平台结论尚待正式 target 验证 |
 
-**结论倾向：维持 FTS5 单存储为默认主线。**
+**证据倾向：支持 ADR-0001 当前 Proposed 的 FTS5 单存储默认。**
 
-计划 §6.1 的决策原则是"只有 Tantivy 在关键检索质量、性能或扩展能力上提供**可测量的必要优势**时，才承担双存储成本"。本 spike 显示：
-- Tantivy 在体积和延迟上更优，但两者的 FTS5 绝对值都在可接受范围，不构成"必要"优势；
-- recall 完全打平，Tantivy 未在**检索质量**上越过硬门；
-- FTS5 的单存储一致性和零系统依赖，直接降低计划最担心的 generation 漂移与跨平台构建风险。
+ADR-0001 的当前决策是：只有 Tantivy 在关键检索质量、性能或扩展能力上提供**可测量且必要的优势**时，才重新评估双存储成本。本 spike 显示：
+- Tantivy 在体积和延迟上更优，但本轮数据不足以证明这些优势在标准语料和冻结 SLI 下属于“必要”优势；
+- recall 完全打平，Tantivy 未在本轮**检索质量**指标上越过 FTS5；
+- FTS5 的单存储一致性与 bundled 构建降低 generation 漂移和依赖风险。
 
-因此 Tantivy 未提供足以承担双存储成本的必要优势，默认决策为 FTS5。
+因此本证据支持 FTS5 默认，但 ADR-0001 仍是 Proposed，最终采信与状态变更由 R0 Architecture Review 决定。
 
 ---
 
-## 5. Caveat 与正式 Selection Gate 待办
+## 5. 明确未决限制
 
-本 spike 是**初步证据**，不等同正式 go/no-go。正式 Selection Gate 必须补齐：
+本 spike 是 **ADR-0001 的初步证据输入**，不等同跨平台验证或 R0 Architecture Review 接受。仍需补齐：
 
-1. **规模**：本测 20k 文档，计划标准语料是 100k session / 10M message / 50GB。大规模下 FTS5 的查询延迟和体积增长曲线未知，需在标准语料复测。
-2. **跨平台**：本测仅 Windows x64。需在 Linux x64、macOS x64/ARM64 各复测一次。
-3. **崩溃恢复**：依赖 `spikes/sqlite-snapshot-wal/` 的一致快照证据，本 spike 未覆盖。
-4. **排名质量**：本测只量 recall@10 是否命中，未量相关性排序质量（NDCG）。真实查询需要更细的相关性分级 qrels。
+1. **规模**：本测 20k 文档；`docs/product/SLI-AND-BENCHMARK-FORMAT.md` 定义的标准数据集为 100k session / 10M message / 50GB。大规模下 FTS5 的查询延迟和体积增长曲线未知。
+2. **跨平台**：本测仅 Windows x64。Linux x64、macOS x64/ARM64 尚未复测，不得据此宣称全部正式 target 通过。
+3. **崩溃恢复**：本 spike 未覆盖；SQLite 路径只有独立 `sqlite-snapshot-wal` 探针证据，Tantivy 路径仍待验证。
+4. **排名质量**：本测只量 recall@10 是否命中，未量相关性排序质量（NDCG）；需要带噪声竞争文档的分级 qrels。
 5. **增量成本**：本测只量冷构建全量，未量增量 upsert/delete 成本。
+6. **报告完整性**：本记录缺少 SLI 格式要求的部分环境字段与分位数，不能用于冻结正式 SLO。
 
-在上述补齐前，FTS5 默认是**可推翻的证据倾向**，不是冻结结论。
+在上述补齐前，FTS5 默认是 ADR-0001 中**可复审的 Proposed 决策**。Fixture 来源受 `docs/security/FIXTURE-REDACTION-POLICY.md` 约束；正式测量格式受 `docs/product/SLI-AND-BENCHMARK-FORMAT.md` 约束。

@@ -1,0 +1,5 @@
+# Golden fixture and expected-output files must reach the parser byte-exact.
+# core.autocrlf would otherwise rewrite LF to CRLF on checkout and silently
+# shift every pinned byte span. `-text` opts these paths out of eol handling.
+crates/*/tests/golden/*.jsonl -text
+crates/*/tests/golden/*.expected.json -text

@@ -1,0 +1,6 @@
+{"file":".trellis/spec/guides/index.md","reason":"Repository-wide governance and review guidance"}
+{"file":".trellis/spec/agentsessions-domain/backend/index.md","reason":"Canonical model and stable identity constraints referenced by R0"}
+{"file":".trellis/spec/agentsessions-ports/backend/index.md","reason":"Provider and source port contracts referenced by R0"}
+{"file":".trellis/spec/agentsessions-application/backend/index.md","reason":"Shared application contract referenced by frontend governance"}
+{"file":".trellis/spec/agentsessions-adapters-sqlite/backend/index.md","reason":"Persistence and generation decisions referenced by R0 evidence"}
+{"file":".trellis/spec/agentsessions-cli/backend/index.md","reason":"CLI and robot contract constraints referenced by R0"}

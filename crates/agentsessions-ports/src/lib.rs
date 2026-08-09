@@ -3,9 +3,9 @@
 //! 这里只定义 trait 和相关 DTO，不含任何具体实现——实现属于 adapter crate。
 //! Application 只依赖本 crate 的抽象，从而与 SQLite / 文件系统 / 具体 provider 解耦。
 //!
-//! 分层依赖：domain ← ports ← application ← adapters（见计划 §5 crate 结构）。
+//! 分层依赖不变量：domain ← ports ← application ← adapters。
 
-use agentsessions_domain::{DomainError, DomainResult, StableId};
+use agentsessions_domain::{DomainError, DomainResult, PlacementId, SessionContextGraph, StableId};
 
 /// 端口层错误：包裹底层 IO/存储故障，向上层暴露稳定分类。
 ///
@@ -96,6 +96,38 @@ pub trait CatalogStore {
     fn active_generation(&self) -> PortResult<u64>;
 }
 
+/// One distinct Session that contains placements for a stable Message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessageContextCandidate {
+    pub session_id: StableId,
+    pub placement_ids: Vec<PlacementId>,
+}
+
+/// Aggregate contextual-relation counts exposed without backend details.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ContextStats {
+    pub placements: u64,
+    pub source_placement_claims: u64,
+}
+
+/// Backend-independent read capability for contextual Message relations.
+///
+/// Implementations return Domain graph values and stable typed candidates;
+/// SQLite rows, table names, and compatibility JSON never cross this boundary.
+pub trait ContextGraphStore {
+    fn load_session_graph(&self, session_id: &StableId) -> PortResult<SessionContextGraph>;
+
+    /// Return candidates grouped by distinct Session, not by raw placement.
+    ///
+    /// A message that is not present in the catalog is a lookup miss and must
+    /// fail with [`PortError::NotFound`], matching `load_session_graph`; it is
+    /// never an empty success. Implementations must not invent candidates for
+    /// messages they cannot see.
+    fn message_contexts(&self, message_id: &StableId) -> PortResult<Vec<MessageContextCandidate>>;
+
+    fn context_stats(&self) -> PortResult<ContextStats>;
+}
+
 /// 检索命中：一条搜索结果的最小信息。
 #[derive(Debug, Clone, PartialEq)]
 pub struct SearchHit {
@@ -132,6 +164,20 @@ impl<T: CatalogStore + ?Sized> CatalogStore for &T {
     }
     fn active_generation(&self) -> PortResult<u64> {
         (**self).active_generation()
+    }
+}
+
+impl<T: ContextGraphStore + ?Sized> ContextGraphStore for &T {
+    fn load_session_graph(&self, session_id: &StableId) -> PortResult<SessionContextGraph> {
+        (**self).load_session_graph(session_id)
+    }
+
+    fn message_contexts(&self, message_id: &StableId) -> PortResult<Vec<MessageContextCandidate>> {
+        (**self).message_contexts(message_id)
+    }
+
+    fn context_stats(&self) -> PortResult<ContextStats> {
+        (**self).context_stats()
     }
 }
 
@@ -228,6 +274,10 @@ pub struct ParseReport {
     pub skipped: usize,
     /// 诊断信息（跳过原因、未知字段计数等）。
     pub diagnostics: Vec<String>,
+    /// provider 报告的 durable 会话 native id（如 Claude Code 的 `sessionId`、
+    /// Codex `session_meta` 的 `session_id`）。`None` 表示 provider 未提供，
+    /// 由上层回退 Reconstructed 派生——绝不臆造。
+    pub session_native_id: Option<String>,
 }
 
 /// 一条规范化消息的事件载荷（RFC-0002 §2）：parse 流式产出的最小单元。
@@ -252,6 +302,12 @@ pub struct MessageEvent<'a> {
     pub timestamp: Option<&'a str>,
     /// 是否为 sidechain（subagent/分支）消息。
     pub is_sidechain: bool,
+    /// 本消息源记录在**已验证快照字节**中的字节区间 `(start, end)`，end 排他。
+    ///
+    /// 坐标系是"快照字节"而非"文件"：对文件级来源即快照全文，对未来的行级
+    /// 来源即提取出的行负载——同一契约无需改动即可覆盖两者（R4）。
+    /// `None` 表示 provider 无法归因一段连续区间，绝不臆造。
+    pub span: Option<(u64, u64)>,
 }
 
 /// Canonical 事件接收端（RFC-0002 §2）：parse 流式产出，绝不整体加载。
@@ -290,4 +346,67 @@ pub trait ProviderAdapter: Send + Sync {
         bytes: &[u8],
         sink: &mut dyn CanonicalEventSink,
     ) -> Result<ParseReport, ProviderError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agentsessions_domain::{IdKind, SessionContextGraph, Stability};
+
+    struct FakeContextStore {
+        graph: SessionContextGraph,
+    }
+
+    impl ContextGraphStore for FakeContextStore {
+        fn load_session_graph(&self, session_id: &StableId) -> PortResult<SessionContextGraph> {
+            if session_id.as_str() == self.graph.session_id.as_str() {
+                Ok(self.graph.clone())
+            } else {
+                Err(PortError::NotFound("session graph".into()))
+            }
+        }
+
+        fn message_contexts(
+            &self,
+            _message_id: &StableId,
+        ) -> PortResult<Vec<MessageContextCandidate>> {
+            Ok(Vec::new())
+        }
+
+        fn context_stats(&self) -> PortResult<ContextStats> {
+            Ok(ContextStats {
+                placements: 2,
+                source_placement_claims: 3,
+            })
+        }
+    }
+
+    #[test]
+    fn context_graph_store_reference_blanket_impl_forwards() {
+        let session_id = StableId::derive(IdKind::Session, Stability::Reconstructed, &[b"session"]);
+        let store = FakeContextStore {
+            graph: SessionContextGraph {
+                session_id: session_id.clone(),
+                messages: Vec::new(),
+                source_documents: Vec::new(),
+                placements: Vec::new(),
+                edges: Vec::new(),
+            },
+        };
+        let store_ref = &store;
+
+        assert_eq!(
+            ContextGraphStore::load_session_graph(&store_ref, &session_id)
+                .unwrap()
+                .session_id,
+            session_id
+        );
+        assert_eq!(
+            ContextGraphStore::context_stats(&store_ref).unwrap(),
+            ContextStats {
+                placements: 2,
+                source_placement_claims: 3,
+            }
+        );
+    }
 }

@@ -1,0 +1,6 @@
+{"file": ".trellis/tasks/07-26-shared-application-adt/prd.md", "reason": "Acceptance criteria to verify"}
+{"file": ".trellis/tasks/07-26-shared-application-adt/design.md", "reason": "Design rules incl. documented deviations to verify against"}
+{"file": "docs/contracts/CONTRACT-cli-robot-mcp-draft.md", "reason": "Contract semantics the implementation must honor"}
+{"file": ".trellis/spec/agentsessions-application/backend/quality-guidelines.md", "reason": "Application quality checks"}
+{"file": ".trellis/spec/agentsessions-cli/backend/quality-guidelines.md", "reason": "CLI/protocol quality checks"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Cross-layer consistency for domain/application/cli changes"}

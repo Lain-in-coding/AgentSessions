@@ -1,0 +1,7 @@
+{"file": ".trellis/tasks/07-26-canonical-source-session-span/prd.md", "reason": "Acceptance criteria to verify against"}
+{"file": ".trellis/tasks/07-26-canonical-source-session-span/design.md", "reason": "Design contracts the implementation must match"}
+{"file": ".trellis/tasks/07-26-canonical-source-session-span/implement.md", "reason": "Checklist completeness and validation-command verification"}
+{"file": ".trellis/spec/agentsessions-domain/backend/quality-guidelines.md", "reason": "Domain quality checks"}
+{"file": ".trellis/spec/agentsessions-adapters-sqlite/backend/quality-guidelines.md", "reason": "SQLite adapter quality checks incl. migration safety"}
+{"file": ".trellis/spec/agentsessions-cli/backend/quality-guidelines.md", "reason": "CLI quality checks incl. robot/human output contracts"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Cross-layer consistency verification"}

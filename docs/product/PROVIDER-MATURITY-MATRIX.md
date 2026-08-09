@@ -1,9 +1,9 @@
 # Provider Maturity 与 Capability Matrix
 
-> 对外可见的 Provider 状态清单（计划 §14 0.3 Integration Beta 交付物）。
-> - 术语与晋级证据要求见 `docs/architecture/RFC-0002-provider-adapter-contract.md` §6。
+> 对外可见的 Provider 状态清单，是 `0.3 Integration Beta` 的公开状态记录。
+> - 术语与晋级证据要求见 `../architecture/RFC-0002-provider-adapter-contract.md` §6。
 > - 本文件是**当前实现状态**的事实记录，不是承诺；晋级必须有证据，不由代码存在自动推断。
-> - 最后更新：2026-07-22
+> - 最后更新：2026-07-31
 
 ## 术语
 
@@ -22,14 +22,16 @@
 
 | Provider | provider_id | variant | maturity | 证据 |
 |---|---|---|---|---|
-| Claude Code | `claude-code` | `claude-code/jsonl-v1` | **Experimental** | 单元 + e2e（合成 fixture + 真实 transcript 手工验证）|
-| Codex | `codex` | `codex/rollout-jsonl-v1` | **Experimental** | 单元 + e2e（合成 fixture + 真实 rollout 手工验证）|
+| Claude Code | `claude-code` | `claude-code/jsonl-v1` | **Experimental** | 单元 + e2e + golden（`crates/agentsessions-provider-claude/tests/golden.rs`）+ 确定性 property 套件（`tests/properties.rs`，固定种子）+ span round-trip |
+| Codex | `codex` | `codex/rollout-jsonl-v1` | **Experimental** | 单元 + e2e + golden（`crates/agentsessions-provider-codex/tests/golden.rs`）+ 确定性 property 套件（含镜像去重性质）+ span round-trip |
 | CodeBuddy | — | — | **Unsupported（未实现）** | 无 adapter |
 | Pi | — | — | **Unsupported（未实现）** | 无 adapter |
 | Cursor | — | — | **Unsupported（未实现）** | 无 adapter |
 
-两个已实现 provider 均为 **Experimental**：满足"可发现/probe/解析小 fixture + 限制明确"，
-但尚未达到 Beta——缺 golden 测试、property/fuzz 覆盖与 source span，且未跨正式 target 认证。
+两个已实现 provider 均为 **Experimental**：golden、property、source span 以及
+关系化 Message/Placement/Edge 的合成与 e2e 证据已入库（见下），剩余 blocker
+仍为授权真实数据全量绿色回归与跨 target CI 认证。RFC-0001、RFC-0002 与共享接口
+合同继续保持 **Draft**，本次证据更新不改变治理状态。
 
 ## Capability Matrix
 
@@ -43,19 +45,47 @@
 | parent / threading | `native` | `unsupported` | Claude Code `parentUuid` 形成 DAG；Codex rollout 为线性序列，无显式父指针（threading 靠顺序）|
 | timestamp | `native` | `native` | Claude Code 对话行内 `timestamp`；Codex 记录封套 `timestamp`（ISO-8601 UTC）|
 | is_sidechain | `native` | `derived` | Claude Code `isSidechain`；Codex 无该标记，一律 false |
-| session id | `native` | `native` | 二者均有 native 会话 id；当前切片未落库为独立实体 |
-| git branch / cwd / version | `native` | `partial` | Claude Code 对话行携带；Codex 在 `session_meta` / `turn_context`，当前未抽取 |
+| session id | `native` | `native` | 二者均有 native 会话 id；自 schema v6 起落库为独立 `ses_v1_` 实体 |
+| source span | `native` | `native` | 每条 message 携带源记录在已验证快照内的字节区间（end 排他）；golden/property 测试锁定 round-trip |
+| git branch / cwd / version | `partial` | `partial` | Claude Code 对话行携带（格式上可用）；Codex 在 `session_meta` / `turn_context`。两者均**尚未抽取落库** |
 
 ## 已知限制
 
 - **Claude Code**：只抽取 `user`/`assistant`/`system` 对话记录；工具调用块（无 text）被忽略；`cwd`/`gitBranch`/`version` provenance 尚未落库。
 - **Codex**：只取权威 `response_item` + 内层 `message`，忽略 `event_msg` UI 镜像以避免重复计数；`world_state`/`turn_context`/工具调用记录未抽取；无 threading（线性）。
-- **共同**：session/document 尚未作为独立 Catalog 实体建模（当前只落 message）；source span（原始字节定位）未实现，是 Beta 的前置。
+- **共同**：真实历史数据回归自 2026-07-27 起有可重复 harness（抛弃式临时 store +
+  aggregate-only 报告），但语料留本机不可共享，故任何单次运行结果第三方无法复核；
+  跨平台真实数据回归（CI 上无真实语料）仍不存在。
+- **共同（关系模型已实现，语料级回归仍开放）**：稳定 `Message` 与上下文
+  `MessagePlacement` / `MessageEdge` 已分离，session-scoped graph、精确 placement
+  evidence、不同上下文 parent 以及相应合成/e2e 覆盖均已实现。最新全量授权运行
+  生成于 `2026-07-31T10:04:17Z`，覆盖 879 个源、756,515,768 字节；运行在
+  `INV-SYNC-OK` 以 exit 5、`ok: false` 失败，此前报告 79,958 emitted、0 skipped，
+  其余五条不变量因 sync 失败未评估。aggregate 报告未保留 exit-5 家族中的精确
+  canonical code，因此不能把 `source_changed` 写成已证实根因。随后对当时第 5/5
+  批的回放成功（186 个源：89 Claude Code、97 Codex；223,269,278 字节；exit 0；
+  15,549 emitted、0 skipped、0 diagnostics），说明失败并非在该批上持续可复现，
+  但不构成全量绿色结果，也未评估下游不变量。follow-up 期间活跃 provider roots
+  被观察到仍在变化，仍需在 roots 稳定时完成一次全量六不变量绿色运行。
 
 ## 晋级到 Beta 的缺口
 
-1. golden 测试（固定输入→固定 Canonical 输出快照）；
-2. property/fuzz 覆盖（随机/畸形输入不 panic、不产出部分结果）；
-3. source span（每条 message 可回溯到源文件字节范围）；
-4. 真实历史数据回归（隔离沙箱、授权数据集、不外传）；
-5. 跨正式 target（Windows/Linux/macOS）的 CI 认证。
+1. ~~golden 测试~~ —— 已入库：`tests/golden/` fixture（BLAKE3 锁定字节）+ 结构化
+   期望输出比对，任何 canonical 输出漂移即失败（2026-07-26）。
+2. ~~property/fuzz 覆盖~~ —— 已入库：固定种子确定性 property 套件（畸形行、
+   Unicode 多字节 span、大字段、threading、codex 镜像去重），失败可由种子复现（2026-07-26）。
+3. ~~source span~~ —— 已入库：schema v6 + `MessageEvent.span` 契约，golden/e2e
+   round-trip 锁定（2026-07-26，见 `docs/operations/migration-v5-to-v6.md`）。
+4. ~~真实历史数据回归（隔离沙箱、授权数据集、不外传）~~ —— **已闭合**：全量授权运行
+   （2026-08-09T21:10:16Z，1,242 源、1,177,479,794 字节）六条不变量全绿、harness exit 0：
+   sync 164,136 emitted / 0 skipped、no-parse-loss 164,136 claims、231 sessions 全
+   context 成功、659/659 byte 精度、rebuild 稳定（catalog 151,562 → 151,562）。
+   harness（`scripts/evidence/real_data_regression.py`）在抛弃式临时 data root 上跑
+   sync → status + catalog walk → 逐会话 context → index rebuild，报告只含聚合计数
+   （见 `docs/operations/REAL-DATA-REGRESSION.md`、证据行 `IB-REAL-DATA-REGRESSION-001`）。
+   早期 2026-07-31 运行（exit 5）与 2026-08-10 子集运行如实保留在证据文档中。
+   真实数据 Gate D 已闭合；Provider 晋级仍需独立审查与 owner 决策。
+5. 跨正式 target（Windows/Linux/macOS）的 CI 认证——仍缺。`ci.yml` 的 `test` 与
+   新增 `installer` job 已配置三平台矩阵（证据行 `IB-CI-INSTALLER-001`），但在
+   PR 上跑绿并记录具体 run id 之前只能是 `ci_configured_only`；hosted runner 亦
+   非 clean machine，不构成安装认证。

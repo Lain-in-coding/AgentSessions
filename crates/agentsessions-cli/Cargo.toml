@@ -18,6 +18,9 @@ agentsessions-adapters-sqlite = { path = "../agentsessions-adapters-sqlite" }
 agentsessions-provider-claude = { path = "../agentsessions-provider-claude" }
 agentsessions-provider-codex = { path = "../agentsessions-provider-codex" }
 serde_json.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
 
 [dev-dependencies]
+rusqlite = { version = "0.40", features = ["bundled"] }
 tempfile = "3"

@@ -1,0 +1,32 @@
+{
+  "id": "remediation-milestone-closure",
+  "name": "remediation-milestone-closure",
+  "title": "AgentSessions audit remediation and milestone closure",
+  "description": "",
+  "status": "in_progress",
+  "dev_type": null,
+  "scope": "workspace",
+  "package": "agentsessions-adapters-sqlite",
+  "priority": "P2",
+  "creator": "repository-owner",
+  "assignee": "repository-owner",
+  "createdAt": "2026-07-24",
+  "completedAt": null,
+  "branch": null,
+  "base_branch": "main",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [
+    "07-24-close-r0-governance",
+    "07-24-fix-correctness-security",
+    "07-24-close-core-beta-evidence",
+    "07-24-advance-integration-beta",
+    "07-24-resolve-repository-governance"
+  ],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {}
+}

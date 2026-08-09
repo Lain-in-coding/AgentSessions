@@ -1,0 +1,175 @@
+# Install and upgrade (from source)
+
+Scope: building `agentsessions` from a checkout of this repository and placing
+the binary in a user-level directory. There is no released, signed, or
+published artifact — see [What this does not give you](#what-this-does-not-give-you).
+
+## What the installer does
+
+`scripts/install/install.ps1` (Windows) and `scripts/install/install.sh`
+(Linux, macOS) perform exactly these steps:
+
+1. Resolve the repository root from the script location and confirm
+   `Cargo.toml` is present.
+2. Check that `cargo` is on `PATH`; if not, print the rustup.rs pointer and
+   exit non-zero.
+3. `cargo build --locked --release -p agentsessions-cli`.
+4. Compute the SHA-256 of the built binary, create the destination directory
+   if needed, and copy the binary over any existing file of the same name.
+5. Run the installed binary's `--version` as a self-check.
+6. Print the install path, the SHA-256, the version, and a one-line
+   instruction for adding the directory to `PATH`.
+
+Any failing step exits non-zero with a diagnostic. The script does not modify
+`PATH`, write to the registry, edit shell profiles, request elevation, or
+download anything beyond what `cargo build` itself fetches.
+
+## Default install location
+
+| Platform | Destination |
+|---|---|
+| Windows | `%LOCALAPPDATA%\AgentSessions\bin` |
+| Linux, macOS | `${XDG_BIN_HOME:-$HOME/.local/bin}` |
+
+This is deliberately separate from the config/data/cache/logs directories the
+CLI itself reports. To see those, run:
+
+```
+agentsessions --robot config paths
+```
+
+## Install
+
+Windows (PowerShell 7+):
+
+```powershell
+pwsh -File scripts/install/install.ps1
+```
+
+Linux, macOS:
+
+```sh
+sh scripts/install/install.sh
+```
+
+Both scripts accept:
+
+| Windows | Unix | Meaning |
+|---|---|---|
+| `-Prefix <path>` | `--prefix <path>` | Install to this directory instead of the default. |
+| `-SkipBuild` | `--skip-build` | Skip the build and copy the existing `target/release` binary. Fails if it is absent. |
+| `-DryRun` | `--dry-run` | Print the planned actions and write nothing. |
+
+## Add the directory to PATH
+
+The installer prints the exact line for your platform; it never applies it.
+Apply it yourself, in the shell configuration you actually use.
+
+Windows, current user, persistent:
+
+```powershell
+[Environment]::SetEnvironmentVariable(
+  'Path',
+  [Environment]::GetEnvironmentVariable('Path', 'User') + ';' + "$env:LOCALAPPDATA\AgentSessions\bin",
+  'User')
+```
+
+bash or zsh:
+
+```sh
+export PATH="$HOME/.local/bin:$PATH"   # add to ~/.bashrc or ~/.zshrc
+```
+
+## Verify the install
+
+```
+agentsessions --version
+agentsessions doctor
+agentsessions --robot config paths
+```
+
+`doctor` without `--db` reports the tool version only and does not touch a
+data root. To also check that a store opens, pass a path:
+
+```
+agentsessions doctor --db C:/data/example.db --robot
+```
+
+That form reports `schema`, `generation`, and `interrupted_batches` for the
+store. See `rebuild-and-migration-runbook.md` for how to read those fields.
+
+## Upgrade
+
+Pull the new commit and re-run the installer. It overwrites the binary in
+place; there is no version pinning, rollback, or update channel.
+
+```
+git pull
+pwsh -File scripts/install/install.ps1        # or sh scripts/install/install.sh
+agentsessions --version
+```
+
+An upgraded binary may need to migrate an existing data root on first open.
+Migration is automatic and transactional; the v5 → v6 step is documented in
+`migration-v5-to-v6.md`. An older binary refuses to open a newer store with
+`schema_incompatible` (exit 9) rather than downgrading it.
+
+## Uninstall
+
+```powershell
+pwsh -File scripts/install/uninstall.ps1
+```
+
+```sh
+sh scripts/install/uninstall.sh
+```
+
+Uninstall deletes only the `agentsessions` binary (`agentsessions.exe` on
+Windows) from the install directory. It never removes a directory recursively
+and never touches your data root. Running it when nothing is installed
+reports "not installed" and exits 0, so it is safe to repeat.
+
+Your config, data, cache, and logs survive uninstall. To remove them, delete
+the paths reported by `agentsessions --robot config paths` yourself — the
+scripts will not do it for you.
+
+## Common failures
+
+**`cargo` not found.** Install a Rust toolchain from rustup.rs, open a new
+shell so `PATH` picks it up, and re-run.
+
+**Build fails.** The failure is a `cargo build` failure, not an installer
+failure. Re-run `cargo build --locked --release -p agentsessions-cli`
+directly and read its output. `--locked` means a lockfile that disagrees with
+`Cargo.toml` is an error rather than being silently updated.
+
+**Destination not writable.** Pick a directory you own with `-Prefix` /
+`--prefix`. Do not run the installer elevated to work around this.
+
+**`agentsessions` not found after install.** The installer does not change
+`PATH`. Either apply the printed `PATH` line or invoke the binary by its full
+path.
+
+**Windows blocks or removes the binary.** Endpoint protection can quarantine
+freshly built, unsigned executables. The binary is unsigned by design (see
+below); resolving that is a decision for whoever administers the machine.
+
+## What this does not give you
+
+Stated plainly, because it is easy to assume otherwise:
+
+- **Not signed, not notarized.** The binary carries no Authenticode signature
+  and no Apple notarization ticket. Both are blocked on credentials this
+  project does not have (`CB-SIGNING-001`, `CB-NOTARIZATION-001` in
+  `core-beta-evidence-matrix.md`).
+- **Not published.** No release tag, no crates.io package, no Homebrew,
+  winget, or scoop manifest, no container image. Building from source is the
+  only supported path.
+- **Not clean-machine certified.** CI runs the installer scripts on
+  GitHub-hosted runners whose images already ship a Rust toolchain. That is
+  installer-script smoke evidence: the scripts run and the installed binary
+  executes. It is not evidence that installation works on a machine without a
+  toolchain.
+- **No minimum-OS certification.** The OS versions used in CI are the runner
+  images, not a certified floor. See `external-readiness-gate.md` for the
+  full list of externally blocked release requirements.

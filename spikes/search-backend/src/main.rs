@@ -2,7 +2,7 @@
 //!
 //! 目的：在同一套合成语料 + qrels + backend-neutral analyzer 下，
 //! 对 SQLite FTS5 与 Tantivy 度量 recall@10 / 索引体积 / 构建时间 / 查询延迟，
-//! 为计划 §14 Selection Gate 提供 go/no-go 证据。
+//! 为 ADR-0001 的全文检索引擎决策提供对照证据。
 //!
 //! 用法：
 //!   cargo run --release -- [文档数]
@@ -126,7 +126,7 @@ fn print_comparison(fts5: &BackendReport, tantivy: &BackendReport) {
         );
     }
 
-    println!("\n默认决策依据（计划 §6.1 / §14 Selection Gate）：");
+    println!("\nADR-0001 决策证据：");
     let recall_gap = fts5.mean_recall() - tantivy.mean_recall();
     let size_ratio = if fts5.index_bytes > 0 {
         tantivy.index_bytes as f64 / fts5.index_bytes as f64
@@ -143,5 +143,5 @@ fn print_comparison(fts5: &BackendReport, tantivy: &BackendReport) {
             "FTS5 未被 Tantivy 明显超越 → 维持 FTS5 单存储默认（更低一致性/运维风险）"
         }
     );
-    println!("\n注意：本结论为 spike 初步证据，正式 Selection Gate 需在标准语料与正式 target 上复测。");
+    println!("\n注意：本结论为 ADR-0001 的 Windows x64 初步证据；排序质量、标准语料与其他正式 target 仍待补测。");
 }

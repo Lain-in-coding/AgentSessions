@@ -18,7 +18,7 @@ pub fn run(dir: &Path, docs: &[Doc], queries: &[QueryCase]) -> Result<BackendRep
     let _ = std::fs::remove_file(&db_path);
     let conn = Connection::open(&db_path).context("open sqlite")?;
 
-    // 计划 §9.1：WAL + NORMAL + busy_timeout（借鉴 ctx connection.rs）。
+    // 探针配置：WAL + NORMAL + busy_timeout；正式约束由存储规范/ADR 维护。
     conn.execute_batch(
         "PRAGMA journal_mode=WAL;
          PRAGMA synchronous=NORMAL;

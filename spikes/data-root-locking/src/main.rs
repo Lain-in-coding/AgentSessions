@@ -1,7 +1,7 @@
 //! data-root-locking spike（可丢弃探针，不进 crates/）。
 //!
-//! 目的：为计划审查阻断项 #5（data-root 级全局 writer lease）与 §6.5
-//! 的 CAS activation 提供 Windows 上的实测证据。
+//! 目的：为 data-root 级全局 writer lease 与 CAS activation 提供 Windows 实测证据；
+//! 历史来源为 Plan 审查阻断项 #5 与 §6.5。
 //!
 //! 验证四个断言：
 //!   A. 独占 lease：持有者持锁期间，第二个进程 try-lock 立即失败（不是两个进程都拿到）；
@@ -39,7 +39,11 @@ fn main() -> Result<()> {
 
     // 主流程
     println!("=== data-root-locking spike ===");
-    println!("  os/arch = {}/{}", std::env::consts::OS, std::env::consts::ARCH);
+    println!(
+        "  os/arch = {}/{}",
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    );
     println!();
 
     let tmp = tempfile::tempdir()?;
@@ -60,15 +64,22 @@ fn main() -> Result<()> {
     print_result("C CAS activation：旧基线切换被拒", c.0, &c.1);
     print_result("D lease record 诊断字段可读", d.0, &d.1);
 
-    println!("\n对计划的意义：");
-    println!("  审查#5：OS 独占句柄可作 writer lease 权威，进程崩溃即自动释放（无需 PID 超时抢锁）；");
-    println!("  §6.5：CAS(CURRENT==expected_base) 阻止旧基线覆盖更新的同步结果。");
+    println!("\nContract / decision evidence：");
+    println!(
+        "  writer lease：Windows 探针支持 OS 独占句柄 + 崩溃释放；正式规范仍需定义其他平台语义；"
+    );
+    println!(
+        "  CAS activation：CURRENT==expected_base 可阻止旧基线覆盖更新结果，正式实现需在 lease 下执行。"
+    );
 
     Ok(())
 }
 
 fn print_result(name: &str, pass: bool, detail: &str) {
-    println!("  [{}] {name} — {detail}", if pass { "PASS" } else { "FAIL" });
+    println!(
+        "  [{}] {name} — {detail}",
+        if pass { "PASS" } else { "FAIL" }
+    );
 }
 
 fn self_exe() -> Result<PathBuf> {
@@ -77,10 +88,10 @@ fn self_exe() -> Result<PathBuf> {
 
 // ---- 子进程实现 ----
 
-/// 统一封装 fs4 0.14 的 try_lock_exclusive（返回 Result<(), io::Error>）：
-/// Ok(()) 表示拿到锁，Err（含 WouldBlock）表示被占用。
+/// 统一封装 fs4 0.13 的 try_lock_exclusive（返回 Result<bool, io::Error>）：
+/// Ok(true) 表示拿到锁，Ok(false) 表示锁被占用。
 fn try_lock(file: &File) -> bool {
-    file.try_lock_exclusive().is_ok()
+    matches!(file.try_lock_exclusive(), Ok(true))
 }
 
 /// 持锁 ms 毫秒。成功拿到锁则打印 HELD 并保持，到点释放。
@@ -167,7 +178,11 @@ fn assertion_b_stale_lock_self_heals(base: &Path) -> Result<(bool, String)> {
     std::thread::sleep(Duration::from_millis(200));
 
     // 主进程尝试拿锁——OS 应已释放 stale 锁
-    let file = OpenOptions::new().create(true).read(true).write(true).open(&lock)?;
+    let file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(&lock)?;
     let got = matches!(file.try_lock_exclusive(), Ok(true));
     FileExt::unlock(&file).ok();
 
@@ -198,11 +213,18 @@ fn assertion_c_cas_activation(base: &Path) -> Result<(bool, String)> {
 }
 
 /// D：lease record。拿锁后往锁文件写 owner/pid/process_start/operation_id，
-///    另一路径读回验证字段存在。
+///    通过同一持锁句柄读回并验证字段存在。
 fn assertion_d_lease_record(base: &Path) -> Result<(bool, String)> {
     let lock = base.join("lease_record.lock");
-    let mut file = OpenOptions::new().create(true).read(true).write(true).open(&lock)?;
-    file.try_lock_exclusive()?;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(&lock)?;
+    anyhow::ensure!(
+        file.try_lock_exclusive()?,
+        "lease record lock unexpectedly busy"
+    );
 
     let record = format!(
         "instance_id=inst-abc\npid={}\nprocess_start=2026-07-21T17:00:00Z\noperation_id=op-001\nfencing_token=42\n",
@@ -213,10 +235,10 @@ fn assertion_d_lease_record(base: &Path) -> Result<(bool, String)> {
     file.write_all(record.as_bytes())?;
     file.flush()?;
 
-    // 读回
+    // Windows mandatory locking rejects a second handle while this exclusive lock is held.
+    file.seek(SeekFrom::Start(0))?;
     let mut buf = String::new();
-    let mut ro = File::open(&lock)?;
-    ro.read_to_string(&mut buf)?;
+    file.read_to_string(&mut buf)?;
     FileExt::unlock(&file).ok();
 
     let has_all = buf.contains("instance_id=")
@@ -270,4 +292,18 @@ fn wait_for_line(stdout: &mut std::process::ChildStdout, needle: &str) -> Result
         }
     }
     anyhow::bail!("未等到子进程输出 {needle}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lease_record_is_readable_through_locked_handle() -> Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let (passed, detail) = assertion_d_lease_record(tmp.path())?;
+
+        assert!(passed, "{detail}");
+        Ok(())
+    }
 }

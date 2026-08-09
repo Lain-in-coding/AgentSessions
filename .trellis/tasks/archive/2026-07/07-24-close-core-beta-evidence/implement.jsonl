@@ -1,0 +1,5 @@
+{"file":".trellis/spec/agentsessions-adapters-sqlite/backend/database-guidelines.md","reason":"Production writer lease, durable outbox, generation CAS, source snapshot, recovery, and required process-level evidence contracts."}
+{"file":".trellis/spec/agentsessions-adapters-sqlite/backend/error-handling.md","reason":"Consistency failures must fail closed and contention/source mutation must retain stable error classification."}
+{"file":".trellis/spec/agentsessions-cli/backend/index.md","reason":"CLI composition-root and real-binary E2E constraints for benchmark and platform smoke execution."}
+{"file":".trellis/spec/agentsessions-cli/backend/error-handling.md","reason":"Evidence harnesses must validate canonical robot envelopes and stable process exit semantics."}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Benchmark reports and CI artifacts cross CLI, storage, platform, and documentation boundaries and require one explicit contract."}

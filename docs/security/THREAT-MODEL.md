@@ -11,7 +11,7 @@
 > - evidence_path: `docs/security/THREAT-MODEL.md`；相关实测见 `spikes/source-snapshot/`、`spikes/data-root-locking/`
 > - approved_at: —
 >
-> 对应计划 §8。本文档定义信任边界、威胁、控制与隐私承诺。
+> 本文档是信任边界、威胁、强制控制与隐私承诺的规范性来源；Provider 只读合同见 `../architecture/RFC-0002-provider-adapter-contract.md`，fixture 数据边界见 `FIXTURE-REDACTION-POLICY.md`。
 
 ---
 
@@ -33,7 +33,7 @@
 
 | 威胁 | 场景 | 控制 | 实测支撑 |
 |---|---|---|---|
-| Tampering（篡改源） | 本工具误写/误删原始会话 | 仅 `ReadOnlySourceFs`；§16.3 扫描前后 checksum 断言 | source-snapshot spike：只读性断言通过 |
+| Tampering（篡改源） | 本工具误写/误删原始会话 | 仅 `ReadOnlySourceFs`；扫描前后 checksum 断言 | source-snapshot spike：只读性断言通过 |
 | Tampering（混合时点） | Provider 在 parse 期间改文件 | ReadOnlySourceSnapshot + 提交前 fingerprint 复核 | source-snapshot spike：追加/截断/等长替换均检出 |
 | DoS（资源耗尽） | 超大/恶意 JSONL 撑爆内存 | 流式解析 + bounded channel + 单行/字段/深度/数量上限 | — |
 | Elevation（注入） | transcript 含"忽略指令" | MCP/Skill 标记不可信、无执行能力；响应预算 | — |
@@ -43,7 +43,7 @@
 | Tampering（并发损坏） | 两进程同时写派生状态 | data-root writer lease（OS 独占句柄）；CAS activation | data-root-locking spike：独占+CAS+stale 自愈通过 |
 | Tampering（路径穿越） | `..`/UNC/ADS/符号链接绕过 | 拒绝越界；默认不跟随 symlink/junction/reparse | — |
 
-## 4. 强制控制清单（对应计划 §8.2）
+## 4. 强制控制清单
 
 - Provider 仅通过 `ReadOnlySourceFs` 访问；
 - Data/Cache/Log 与任一 Source Root 重叠时拒绝启动；
@@ -52,7 +52,7 @@
 - 参数化 SQL，禁用 extension loading；
 - 移除/转义 ANSI/OSC/控制字符；
 - 默认隐藏绝对 Source Path，正文永不进日志；doctor 输出可安全分享；
-- **Windows 私有化必须用 ACL**：Unix 权限位（0600/0700）在 Windows 为 no-op；否则 doctor 显式声明该保证在本平台不成立（对应计划 §8.2，反例 ctx `object_store.rs`）；
+- **Windows 私有化必须用 ACL**：Unix 权限位（0600/0700）在 Windows 为 no-op；否则 doctor 显式声明该保证在本平台不成立（反例：ctx `object_store.rs`）；
 - MCP 强制响应预算，不提供任意读取/SQL/命令；
 - Skill 明示历史是数据，不是系统指令；
 - 默认不联网、不遥测、不上传错误报告与真实 transcript。

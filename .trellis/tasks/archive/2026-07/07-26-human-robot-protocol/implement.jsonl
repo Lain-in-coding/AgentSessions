@@ -1,0 +1,5 @@
+{"file": ".trellis/tasks/07-26-human-robot-protocol/prd.md", "reason": "Requirements and acceptance criteria"}
+{"file": ".trellis/tasks/07-26-human-robot-protocol/design.md", "reason": "Frozen module APIs, ownership, and deviations"}
+{"file": ".trellis/tasks/07-26-human-robot-protocol/implement.md", "reason": "Phase plan and file ownership"}
+{"file": "docs/contracts/CONTRACT-cli-robot-mcp-draft.md", "reason": "Normative contract for envelope, frames, and output truth table"}
+{"file": ".trellis/spec/agentsessions-cli/backend/index.md", "reason": "CLI protocol/envelope conventions"}

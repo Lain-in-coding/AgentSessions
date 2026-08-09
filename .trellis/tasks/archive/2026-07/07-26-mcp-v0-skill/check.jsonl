@@ -1,0 +1,4 @@
+{"file": ".trellis/tasks/07-26-mcp-v0-skill/prd.md", "reason": "Acceptance criteria to verify against"}
+{"file": ".trellis/tasks/07-26-mcp-v0-skill/design.md", "reason": "Frozen contract the implementation must match; deviations must be reported"}
+{"file": "docs/contracts/CONTRACT-cli-robot-mcp-draft.md", "reason": "Contract §8 constraints: thin handlers, no arbitrary file/SQL/exec, stdout purity"}
+{"file": ".trellis/spec/agentsessions-cli/backend/index.md", "reason": "Quality checklist for the CLI crate (gates, exit codes, protocol rules)"}

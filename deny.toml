@@ -1,4 +1,4 @@
-# cargo-deny 配置：供应链安全门（对应计划 §19 许可/依赖审计）。
+# cargo-deny 配置：供应链安全门（许可与依赖审计依据见 docs/operations/REUSE-LICENSE-AUDIT.md）。
 #
 # schema 依据 cargo-deny 官方文档（licenses/advisories cfg）：
 # - 近版本 licenses 全默认拒绝，必须显式 allow；已移除 deny/copyleft/default 字段。

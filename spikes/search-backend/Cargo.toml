@@ -1,5 +1,5 @@
-# search-backend spike — 可丢弃探针，不进 crates/，R0 Accepted 后归档
-# 目的：给 Selection Gate 提供 FTS5 vs Tantivy 的 go/no-go 证据
+# search-backend spike — 可丢弃探针，不进 crates/；归档时机由 R0 Architecture Review 决定
+# 目的：为 ADR-0001 提供 FTS5 vs Tantivy 的对照证据
 [package]
 name = "search-backend-spike"
 version = "0.0.0"

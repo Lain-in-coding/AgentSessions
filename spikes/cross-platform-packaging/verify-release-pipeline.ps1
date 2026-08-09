@@ -1,9 +1,9 @@
 # cross-platform-packaging spike（可丢弃探针，不进 crates/）。
-# 目的：为计划 §12.4 发布证据顺序（审查#12）与 Selection Gate 硬门
-# "全部正式 target 干净构建 + 安全构建约束" 提供本机实测证据。
+# 目的：为 External Readiness Gate 的发布证据顺序与 checksum-after-sign
+# 提供 Windows x64 本机实测证据；不验证跨平台、真实签名或公证。
 
 $ErrorActionPreference = "Stop"
-$spike = "C:\AgentSessions\spikes\search-backend"
+$spike = (Resolve-Path (Join-Path $PSScriptRoot "../search-backend")).Path
 Write-Output "=== cross-platform-packaging spike ==="
 Write-Output ("os = {0}" -f [System.Environment]::OSVersion.VersionString)
 
@@ -28,7 +28,7 @@ $bom = Get-ChildItem $spike -Filter "*.json" | Where-Object { $_.Name -match "bo
 Write-Output ("  [{0}] SBOM 生成" -f (@{$true="PASS";$false="INFO"}[[bool]$bom]))
 Pop-Location
 
-Write-Output "`nstep 4: checksum 顺序验证（审查#12）"
+Write-Output "`nstep 4: checksum-after-sign 顺序验证（历史审查#12 证据）"
 $tmp = Join-Path $spike "pkgspike-tmp"
 New-Item -ItemType Directory -Force -Path $tmp | Out-Null
 $artifact = Join-Path $tmp "artifact.bin"
@@ -46,4 +46,4 @@ Write-Output "  [INFO] 多 target 交叉构建：需安装 target 或 CI runner"
 Write-Output "  [INFO] cosign/syft：本机缺，CI 或 External Readiness 阶段补"
 
 Write-Output "`n=== 汇总 ==="
-Write-Output "  本机可验证的发布流程步骤已通过；签名/公证/多平台留待 External Readiness Gate。"
+Write-Output "  Windows x64 本机步骤已通过；签名/公证/其他正式 target 仍待 External Readiness Gate。"
