@@ -35,7 +35,7 @@ AgentSessions 将 Windows x64、Linux x64、macOS x64/ARM64 作为 v1.0 正式�
 ### 依赖与构建约束（Selection Gate 硬门）
 
 - **禁止联网构建依赖**：不得依赖构建期下载模型、protoc 二进制或其他网络产物（反例：memex 的 LanceDB 需 protoc、Recall 的 candle 需模型）。
-- SQLite 采用 `rusqlite` 的 `bundled` feature，随构建静态编入，免系统 SQLite；R0 冻结实际链接的 SQLite 版本并在 `doctor` 暴露（当前 spike 实测 3.53.2）。
+- SQLite 采用 `rusqlite` 的 `bundled` feature，随构建静态编入，免系统 SQLite；R0 冻结实际链接的 SQLite 版本，由 benchmark harness 记录并经 spike 的 `rusqlite::version()` 交叉核对（当前 spike 实测 3.53.2；`doctor` 输出的是 schema/generation/interrupted-batch 状态，不输出 SQLite 版本）。
 - 全文引擎默认 FTS5（ADR-0001），避免 Tantivy 传递引入 `ort-sys` 等许可不干净、需上游 fork 的原生依赖。
 
 ### 非承诺 target

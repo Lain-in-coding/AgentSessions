@@ -43,9 +43,10 @@ SessionId/MessageId/BranchId/CursorToken 为带类型和协议版本的 opaque �
 ## 5. Error Catalog Matrix（统一映射）
 
 字段: canonical_code | layer | retryable | partial_allowed | CLI_exit | robot_ok | MCP_code | redaction | operator_action
-关键码: source_changed | writer_busy | cursor_expired | cursor_expired_generation_reclaimed |
-        cursor_invalid | generation_mismatch | unsupported_variant | snapshot_failed
-Exit Code: 0 成功 / 2 校验 / 3 配置 / 4 不存在 / 5 IO / 6 Catalog|Index / 7 Provider / 8 安全 / 9 协议 / 10 部分成功 / 70 内部
+关键码: source_changed | writer_busy | cursor_invalid | cursor_expired | generation_mismatch |
+        snapshot_failed | catalog_error | schema_incompatible | provider_error | internal |
+        invalid_request | not_found
+Exit Code(权威为 `schemas/robot/v1/error-catalog.json` 的 13 码): 0 成功 / 2 校验(invalid_request, cursor_invalid) / 4 不存在(not_found) / 5 IO(source_io, source_changed, snapshot_failed) / 6 Catalog(writer_busy, catalog_error) / 7 Provider / 9 协议(schema_incompatible, generation_mismatch) / 10 部分成功 / 70 内部。无 3(配置)与 8(安全)退出码。
 
 ## 6. Output Truth Table（stdout/stderr 契约）
 
@@ -56,7 +57,7 @@ Exit Code: 0 成功 / 2 校验 / 3 配置 / 4 不存在 / 5 IO / 6 Catalog|Index
 
 ## 7. Cursor 生命周期（无状态保留模型）
 
-- Cursor 自包含并签名: generation/issued_at/expires_at/query_digest/filters_digest/sort_digest/contract_major。
+- Cursor 自包含并签名: contract_major/generation/issued_at_ms/expires_at_ms/query_digest/sort_digest/offset。
 - 系统不登记活动 Cursor；GC 按 activation + max_cursor_ttl + clock_skew 保留旧 generation。
 - generation 回收/协议不兼容/签名失败/超 TTL → 明确 cursor_expired*，绝不静默从第一页继续。
 - 已由 sqlite-snapshot-wal spike 验证：旧 generation 快照在新写入期间可只读打开，支撑分页 pinning。

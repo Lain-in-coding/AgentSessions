@@ -28,7 +28,7 @@
 | [RFC-0002](RFC-0002-provider-adapter-contract.md) | Draft；probe/parse 最小合同与两个 Adapter 已实现 | roots/excludes、指纹最小集、mixed-version、历史 variants |
 | [ADR-0001](../adr/ADR-0001-fulltext-search-engine.md) | Proposed；FTS5 已实现，20k 合成语料仅 Windows 本地验证 | 正式 corpus、相关性指标、阈值与 FTS5 go/no-go |
 | [ADR-0002](../adr/ADR-0002-platform-targets.md) | Proposed；Windows 证据有限，其他 target 至多为 CI configured only | 正式 target、musl 身份、最低 OS/glibc、认证门 |
-| [CLI/Robot/MCP Contract](../contracts/CONTRACT-cli-robot-mcp-draft.md) | Draft；CLI/Robot v1 子集已实现，MCP 未实现 | not-found、cursor/error、partial、机器模式 help/version |
+| [CLI/Robot/MCP Contract](../contracts/CONTRACT-cli-robot-mcp-draft.md) | Draft；CLI/Robot v1 子集与 MCP v0（stdio JSON-RPC，6 工具）已实现并有 e2e 覆盖 | not-found、cursor/error、partial、机器模式 help/version |
 | [Threat Model](../security/THREAT-MODEL.md) | Draft | 索引期脱敏、隐私模式、网络文件系统 |
 | [Fixture Policy](../security/FIXTURE-REDACTION-POLICY.md) | Proposed | 合成优先、真实 transcript 禁入仓库及审阅责任 |
 | [SLI Format](../product/SLI-AND-BENCHMARK-FORMAT.md) | Draft；当前数据仅为趋势锚点 | North Star 指标、query set/qrels、临时阈值 |

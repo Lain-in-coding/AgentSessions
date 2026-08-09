@@ -53,6 +53,7 @@
 | AgentRecall (MIT, TS) | 迁移 writer 原子协议、capability registry | idea-only | Catalog migration 与 `../architecture/RFC-0002-provider-adapter-contract.md` §6 | — |
 | agent-sessions (MIT, Swift) | FTS5+三触发器、索引期脱敏、语料保全测试 | idea-only | `../adr/ADR-0001-fulltext-search-engine.md`；`../security/THREAT-MODEL.md`；测试策略 | — |
 | claude-historian (MIT, TS) | MCP search→at→get_session 渐进披露契约 | idea-only | `../contracts/CONTRACT-cli-robot-mcp-draft.md` §8 | 署名归属存疑，引用前澄清 |
+| agentsview (Go) | SQLite 检索 UI 的 schema/查询参考 | idea-only | `../contracts/CONTRACT-cli-robot-mcp-draft.md` | 未直接复用资产，仅概念核对 |
 | cass (MIT+Rider) | fail-open/staged-publish/robot-freeze 思想 | idea-only（clean-room） | Provider staging、发布与 Robot contract | 禁读源码 |
 
 ## 4. 反模式登记（作为验收反例，禁止复用）
