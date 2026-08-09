@@ -41,4 +41,5 @@ fixture 若需合法变更，必须递增本文件的 `fixture_revision` 并重�
 
 关键不变量：每条对话在真实 rollout 中出现**两次**（`response_item/message` 权威 +
 `event_msg` 镜像），只有权威记录被提交；Codex 无 `parentUuid`（线性序列，parent 恒
-null）、无 `isSidechain`；消息时间戳取外层封套值。
+null）、无 `isSidechain`。外层时间戳只证明 source occurrence 的封套形态；同一
+native message 的复制记录可携带不同值，因此 canonical Message 时间戳为 null。

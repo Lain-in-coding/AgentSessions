@@ -45,6 +45,13 @@ struct RawLine {
     /// subagent / 分支标记；缺失视为 false（主线）。
     #[serde(default, rename = "isSidechain")]
     is_sidechain: bool,
+    /// Claude-generated meta prompts may be copied with enriched content and
+    /// a copy-local timestamp while retaining one native message identity.
+    #[serde(default, rename = "isMeta")]
+    is_meta: bool,
+    /// Present on the enriched copied form of Claude meta prompts.
+    #[serde(default, rename = "sessionKind")]
+    session_kind: Option<String>,
     /// 该 transcript 的 durable 会话 id（Claude Code 每条对话记录都携带）。
     #[serde(default, rename = "sessionId")]
     session_id: Option<String>,
@@ -77,6 +84,10 @@ enum RawContent {
 
 #[derive(Debug, Deserialize)]
 struct RawBlock {
+    /// Block discriminator used only for narrowly-scoped provider
+    /// normalization; unknown block kinds remain non-fatal.
+    #[serde(default, rename = "type")]
+    kind: String,
     /// 仅抽取带 `text` 的 block（如 `type:"text"`）；工具调用块无 text，忽略。
     #[serde(default)]
     text: Option<String>,
@@ -84,22 +95,72 @@ struct RawBlock {
 
 impl RawContent {
     /// 抽取可检索纯文本；block 数组按顺序拼接各 text 块。
-    fn to_plain_text(&self) -> String {
+    fn to_plain_text(&self, is_meta: bool, has_session_kind: bool) -> String {
         match self {
             RawContent::Text(s) => s.clone(),
-            RawContent::Blocks(blocks) => blocks
-                .iter()
-                .filter_map(|b| b.text.as_deref())
-                .collect::<Vec<_>>()
-                .join("\n"),
+            RawContent::Blocks(blocks) => {
+                if is_meta
+                    && has_session_kind
+                    && let Some(text) = canonical_enriched_meta_prompt(blocks)
+                {
+                    return text.to_string();
+                }
+                let text_blocks = blocks
+                    .iter()
+                    .filter_map(|b| b.text.as_deref())
+                    .collect::<Vec<_>>();
+                if let Some(command) = text_blocks
+                    .first()
+                    .and_then(|text| canonical_local_command_block(text))
+                {
+                    return command.to_string();
+                }
+                text_blocks.join("\n")
+            }
             RawContent::Empty => String::new(),
         }
     }
 }
 
-/// 判定一行是否是我们承认的对话记录类型。
-fn is_conversational(kind: &str) -> bool {
-    matches!(kind, "user" | "assistant" | "system")
+/// Claude copies some generated meta prompts as four blocks: two generated
+/// text blocks, an image block, then the original stable prompt text. The
+/// explicit meta/session markers and exact block shape are required so ordinary
+/// multimodal messages keep every text block.
+fn canonical_enriched_meta_prompt(blocks: &[RawBlock]) -> Option<&str> {
+    match blocks {
+        [first, second, image, original]
+            if first.kind == "text"
+                && second.kind == "text"
+                && image.kind == "image"
+                && original.kind == "text" =>
+        {
+            original.text.as_deref()
+        }
+        _ => None,
+    }
+}
+
+/// Claude Code may enrich a local-command envelope with generated blocks while
+/// retaining the same native message identity. Canonicalize only that shape.
+fn canonical_local_command_block(text: &str) -> Option<&str> {
+    if !text.starts_with("<command-name>")
+        || !text.contains("<command-message>")
+        || !text.contains("<command-args>")
+    {
+        return None;
+    }
+
+    Some(text.strip_suffix('\n').unwrap_or(text))
+}
+
+/// 判定一行是否是我们承认的对话记录。
+///
+/// Claude Code also uses `type:"system"` for event records that carry no
+/// message body. A message-bearing system row remains compatible with the
+/// existing adapter contract, while event-only system rows are metadata.
+fn is_conversational(rec: &RawLine) -> bool {
+    matches!(rec.r#type.as_str(), "user" | "assistant")
+        || (rec.r#type == "system" && rec.message.is_some())
 }
 
 impl ProviderAdapter for ClaudeCodeAdapter {
@@ -137,7 +198,7 @@ impl ProviderAdapter for ClaudeCodeAdapter {
                     if !rec.r#type.is_empty() {
                         typed_lines += 1;
                     }
-                    if is_conversational(&rec.r#type) {
+                    if is_conversational(&rec) {
                         conversational += 1;
                     }
                 }
@@ -231,7 +292,7 @@ impl ProviderAdapter for ClaudeCodeAdapter {
             }
 
             // 非对话记录（工具结果、summary 等）不产生 Canonical 消息，静默略过。
-            if !is_conversational(&rec.r#type) {
+            if !is_conversational(&rec) {
                 continue;
             }
 
@@ -249,7 +310,17 @@ impl ProviderAdapter for ClaudeCodeAdapter {
             } else {
                 &msg.role
             };
-            let body = msg.content.to_plain_text();
+            let body = msg
+                .content
+                .to_plain_text(rec.is_meta, rec.session_kind.is_some());
+            // `isMeta` records are generated/copied by Claude Code. Real corpus
+            // copies retain one UUID but report different top-level timestamps,
+            // so no stable provider timestamp exists for this entity.
+            let timestamp = if rec.is_meta {
+                None
+            } else {
+                rec.timestamp.as_deref()
+            };
 
             sink.emit_message(MessageEvent {
                 seq,
@@ -257,7 +328,7 @@ impl ProviderAdapter for ClaudeCodeAdapter {
                 parent_native_id: rec.parent_uuid.as_deref(),
                 role,
                 text: &body,
-                timestamp: rec.timestamp.as_deref(),
+                timestamp,
                 is_sidechain: rec.is_sidechain,
                 // 该消息来源行在快照字节中的区间（end 排他，不含换行）。
                 span: Some((start, end)),
@@ -310,6 +381,25 @@ mod tests {
     const SAMPLE: &str = r#"{"type":"user","uuid":"u-1","parentUuid":null,"sessionId":"sess-abc","timestamp":"2026-06-27T13:57:42.685Z","message":{"role":"user","content":"hello there"}}
 {"type":"assistant","uuid":"a-2","parentUuid":"u-1","sessionId":"sess-abc","isSidechain":true,"message":{"role":"assistant","content":[{"type":"text","text":"hi"},{"type":"text","text":"friend"}]}}
 {"type":"summary","summary":"ignored non-conversational"}"#;
+
+    fn parse_single_content(content: serde_json::Value) -> String {
+        let input = serde_json::to_vec(&serde_json::json!({
+            "type": "user",
+            "uuid": "shared-command-id",
+            "sessionId": "synthetic-command-session",
+            "message": {
+                "role": "user",
+                "content": content,
+            },
+        }))
+        .expect("serialize synthetic transcript");
+        let mut sink = CollectingSink::default();
+        ClaudeCodeAdapter::new()
+            .parse(&input, &mut sink)
+            .expect("parse synthetic transcript");
+        assert_eq!(sink.messages.len(), 1);
+        sink.messages.remove(0).text
+    }
 
     #[test]
     fn probe_confirms_claude_jsonl() {
@@ -364,6 +454,196 @@ mod tests {
         // isSidechain：缺失视为主线 false，显式 true 被捕获。
         assert!(!sink.messages[0].is_sidechain);
         assert!(sink.messages[1].is_sidechain);
+    }
+
+    #[test]
+    fn parse_canonicalizes_string_and_enriched_local_command_forms() {
+        let envelope = "<command-name>synthetic-local</command-name>\n\
+                        <command-message>run synthetic local command</command-message>\n\
+                        <command-args>--flag value</command-args>";
+        let string_form = parse_single_content(serde_json::json!(envelope));
+        let enriched_form = parse_single_content(serde_json::json!([
+            {"type": "text", "text": format!("{envelope}\n")},
+            {"type": "text", "text": "synthetic stdout"},
+            {"type": "text", "text": "synthetic generated output"}
+        ]));
+
+        assert_eq!(string_form, envelope);
+        assert_eq!(enriched_form, string_form);
+    }
+
+    #[test]
+    fn parse_preserves_ordinary_multiblock_text_and_whitespace() {
+        let text = parse_single_content(serde_json::json!([
+            {"type": "text", "text": " ordinary first block "},
+            {"type": "tool_use", "name": "Synthetic", "input": {}},
+            {"type": "text", "text": "ordinary second block\n"}
+        ]));
+
+        assert_eq!(text, " ordinary first block \nordinary second block\n");
+    }
+
+    #[test]
+    fn parse_keeps_genuinely_different_local_command_text_distinct() {
+        let first = "<command-name>synthetic-local</command-name>\n\
+                     <command-message>run synthetic local command</command-message>\n\
+                     <command-args>--flag first</command-args>";
+        let second = "<command-name>synthetic-local</command-name>\n\
+                      <command-message>run synthetic local command</command-message>\n\
+                      <command-args>--flag second</command-args>";
+        let string_form = parse_single_content(serde_json::json!(first));
+        let enriched_form = parse_single_content(serde_json::json!([
+            {"type": "text", "text": format!("{second}\n")},
+            {"type": "text", "text": "synthetic stdout"}
+        ]));
+
+        assert_eq!(string_form, first);
+        assert_eq!(enriched_form, second);
+        assert_ne!(string_form, enriched_form);
+    }
+
+    #[test]
+    fn parse_ignores_event_only_system_records() {
+        let input = br#"{"type":"system","subtype":"synthetic-event","uuid":"event-1"}
+{"type":"user","uuid":"user-1","message":{"role":"user","content":"kept"}}"#;
+        let mut sink = CollectingSink::default();
+        let report = ClaudeCodeAdapter::new()
+            .parse(input, &mut sink)
+            .expect("parse synthetic transcript");
+
+        assert_eq!(report.committed, 1);
+        assert_eq!(report.skipped, 0);
+        assert_eq!(sink.messages.len(), 1);
+        assert_eq!(sink.messages[0].text, "kept");
+    }
+
+    #[test]
+    fn parse_keeps_message_bearing_system_records() {
+        let input = br#"{"type":"system","uuid":"system-1","message":{"role":"system","content":"kept system message"}}"#;
+        let mut sink = CollectingSink::default();
+        let report = ClaudeCodeAdapter::new()
+            .parse(input, &mut sink)
+            .expect("parse synthetic transcript");
+
+        assert_eq!(report.committed, 1);
+        assert_eq!(report.skipped, 0);
+        assert_eq!(sink.messages.len(), 1);
+        assert_eq!(sink.messages[0].role, "system");
+        assert_eq!(sink.messages[0].text, "kept system message");
+    }
+
+    #[test]
+    fn parse_still_skips_user_records_without_messages() {
+        let input = br#"{"type":"user","uuid":"user-without-message"}"#;
+        let mut sink = CollectingSink::default();
+        let report = ClaudeCodeAdapter::new()
+            .parse(input, &mut sink)
+            .expect("parse synthetic transcript");
+
+        assert_eq!(report.committed, 0);
+        assert_eq!(report.skipped, 1);
+        assert!(sink.messages.is_empty());
+    }
+
+    #[test]
+    fn parse_canonicalizes_original_and_enriched_meta_prompt_forms() {
+        let original = serde_json::json!({
+            "type": "user",
+            "uuid": "shared-meta-id",
+            "isMeta": true,
+            "timestamp": "2026-01-01T00:04:00Z",
+            "message": {
+                "role": "user",
+                "content": [{"type": "text", "text": "stable synthetic meta prompt"}],
+            },
+        });
+        let enriched = serde_json::json!({
+            "type": "user",
+            "uuid": "shared-meta-id",
+            "isMeta": true,
+            "sessionKind": "synthetic-copy",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "message": {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "synthetic generated prefix"},
+                    {"type": "text", "text": "synthetic generated instructions"},
+                    {"type": "image", "source": {"type": "base64", "data": "AA=="}},
+                    {"type": "text", "text": "stable synthetic meta prompt"},
+                ],
+            },
+        });
+
+        let parse = |record: serde_json::Value| {
+            let input = serde_json::to_vec(&record).expect("serialize synthetic transcript");
+            let mut sink = CollectingSink::default();
+            ClaudeCodeAdapter::new()
+                .parse(&input, &mut sink)
+                .expect("parse synthetic transcript");
+            assert_eq!(sink.messages.len(), 1);
+            sink.messages.remove(0)
+        };
+        let original = parse(original);
+        let enriched = parse(enriched);
+
+        assert_eq!(original.text, "stable synthetic meta prompt");
+        assert_eq!(enriched.text, original.text);
+        assert_eq!(original.timestamp, None);
+        assert_eq!(enriched.timestamp, None);
+    }
+
+    #[test]
+    fn parse_preserves_similar_multimodal_content_without_meta_markers() {
+        let input = serde_json::to_vec(&serde_json::json!({
+            "type": "user",
+            "uuid": "ordinary-multimodal-id",
+            "message": {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "ordinary first"},
+                    {"type": "text", "text": "ordinary second"},
+                    {"type": "image", "source": {"type": "base64", "data": "AA=="}},
+                    {"type": "text", "text": "ordinary last"},
+                ],
+            },
+        }))
+        .expect("serialize synthetic transcript");
+        let mut sink = CollectingSink::default();
+        ClaudeCodeAdapter::new()
+            .parse(&input, &mut sink)
+            .expect("parse synthetic transcript");
+
+        assert_eq!(sink.messages.len(), 1);
+        assert_eq!(
+            sink.messages[0].text,
+            "ordinary first\nordinary second\nordinary last"
+        );
+    }
+
+    #[test]
+    fn parse_preserves_meta_content_when_enrichment_shape_is_not_exact() {
+        let input = serde_json::to_vec(&serde_json::json!({
+            "type": "user",
+            "uuid": "different-meta-id",
+            "isMeta": true,
+            "sessionKind": "synthetic-copy",
+            "message": {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "meaningful first"},
+                    {"type": "image", "source": {"type": "base64", "data": "AA=="}},
+                    {"type": "text", "text": "meaningful last"},
+                ],
+            },
+        }))
+        .expect("serialize synthetic transcript");
+        let mut sink = CollectingSink::default();
+        ClaudeCodeAdapter::new()
+            .parse(&input, &mut sink)
+            .expect("parse synthetic transcript");
+
+        assert_eq!(sink.messages.len(), 1);
+        assert_eq!(sink.messages[0].text, "meaningful first\nmeaningful last");
     }
 
     #[test]

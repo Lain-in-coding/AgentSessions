@@ -13,7 +13,8 @@
 //!
 //! 与 Claude Code 的差异：对话字段在 `payload` 封套内（非顶层）；无 `parentUuid`
 //! ——Codex rollout 是线性序列，不提供显式 threading 边，故 parent 一律 `None`
-//! （诚实：不编造上层可推断的线性链）；时间戳在**外层**封套字段。
+//! （诚实：不编造上层可推断的线性链）。外层时间戳是 source occurrence 元数据，
+//! 同一 native message 的复制记录可能不同，因此不进入稳定 Message 投影。
 //!
 //! adapter 只做格式隔离，绝不接触存储 / 检索 / UI（RFC-0002 §7）。
 
@@ -42,7 +43,10 @@ impl CodexAdapter {
 /// （RFC-0002 §3：additive unknown fields 默认忽略但保留诊断）。
 #[derive(Debug, Deserialize)]
 struct RawLine {
-    /// 外层封套时间戳（ISO-8601 UTC）；对话消息的排序键。
+    /// 外层封套时间戳（ISO-8601 UTC）；仅用于识别 rollout 封套形态。
+    ///
+    /// 该值属于 source occurrence，同一 native message 的复制记录可能不同，
+    /// 因此不能作为稳定 Message 字段。
     #[serde(default)]
     timestamp: Option<String>,
     /// 顶层记录类型（`session_meta` / `event_msg` / `response_item` / …）。
@@ -66,9 +70,10 @@ struct RawPayload {
     /// 角色（`developer` / `user` / `assistant`）。
     #[serde(default)]
     role: String,
-    /// content-block 数组，每块可能携带 `text`。
+    /// Message 的 content-block 数组。非 message 的 response_item（例如
+    /// reasoning）可能显式写入 null，必须先按 payload type 分类再解释。
     #[serde(default)]
-    content: Vec<RawBlock>,
+    content: Option<Vec<RawBlock>>,
     /// durable 会话 id（仅 `session_meta` 的 payload 携带）。
     #[serde(default)]
     session_id: Option<String>,
@@ -84,12 +89,14 @@ struct RawBlock {
 
 impl RawPayload {
     /// 抽取可检索纯文本；按顺序拼接各 block 的 text。
-    fn to_plain_text(&self) -> String {
-        self.content
-            .iter()
-            .filter_map(|b| b.text.as_deref())
-            .collect::<Vec<_>>()
-            .join("\n")
+    fn to_plain_text(&self) -> Option<String> {
+        self.content.as_ref().map(|content| {
+            content
+                .iter()
+                .filter_map(|b| b.text.as_deref())
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
     }
 }
 
@@ -141,6 +148,7 @@ impl ProviderAdapter for CodexAdapter {
 
         let mut json_lines = 0usize;
         let mut enveloped = 0usize;
+        let mut timestamped = 0usize;
         let mut has_session_meta = false;
         let mut has_message = false;
         for line in &sample {
@@ -150,6 +158,9 @@ impl ProviderAdapter for CodexAdapter {
                     // Codex 封套的正信号：payload 存在 + type 属于已知集合。
                     if rec.payload.is_some() && is_known_envelope_type(&rec.r#type) {
                         enveloped += 1;
+                        if rec.timestamp.is_some() {
+                            timestamped += 1;
+                        }
                     }
                     if rec.r#type == "session_meta" {
                         has_session_meta = true;
@@ -183,6 +194,11 @@ impl ProviderAdapter for CodexAdapter {
             ));
         }
         matched.push(format!("{enveloped} lines carry a Codex envelope"));
+        if timestamped > 0 {
+            matched.push(format!(
+                "{timestamped} Codex envelopes carry an outer occurrence timestamp"
+            ));
+        }
 
         // session_meta（会话头）或 response_item/message（权威对话）任一出现即高置信。
         let confidence = if has_session_meta || has_message {
@@ -266,10 +282,26 @@ impl ProviderAdapter for CodexAdapter {
                 continue;
             }
             if !is_conversational_role(&payload.role) {
+                // An authoritative conversation occurrence with an unknown or
+                // empty role cannot be emitted; count it as a recoverable skip
+                // like the null-content path below, never silently.
+                report.skipped += 1;
+                report.diagnostics.push(format!(
+                    "line {}: response message with unknown role {:?}, skipped",
+                    line_no + 1,
+                    payload.role
+                ));
                 continue;
             }
 
-            let body = payload.to_plain_text();
+            let Some(body) = payload.to_plain_text() else {
+                report.skipped += 1;
+                report.diagnostics.push(format!(
+                    "line {}: response message without content array, skipped",
+                    line_no + 1
+                ));
+                continue;
+            };
 
             sink.emit_message(MessageEvent {
                 seq,
@@ -278,7 +310,11 @@ impl ProviderAdapter for CodexAdapter {
                 parent_native_id: None,
                 role: &payload.role,
                 text: &body,
-                timestamp: rec.timestamp.as_deref(),
+                // The outer envelope timestamp is occurrence-local. Real
+                // cross-source copies retain one native id and stable content
+                // while carrying different envelope timestamps, so no stable
+                // provider timestamp exists for this Message entity.
+                timestamp: None,
                 is_sidechain: false,
                 // 该消息来源封套行在快照字节中的区间（end 排他，不含换行）。
                 span: Some((start, end)),
@@ -387,14 +423,100 @@ mod tests {
         // content block 数组按序拼接。
         assert_eq!(sink.messages[0].text, "how do I configure the sandbox");
         assert_eq!(sink.messages[1].text, "set the policy\nin config.toml");
-        // 外层封套时间戳被采纳。
-        assert_eq!(
-            sink.messages[0].timestamp.as_deref(),
-            Some("2026-07-19T23:40:01.000Z")
-        );
+        // 外层封套时间戳属于 source occurrence，不进入稳定 Message。
+        assert_eq!(sink.messages[0].timestamp, None);
         // Codex 无显式父指针 / sidechain。
         assert_eq!(sink.messages[0].parent_native_id, None);
         assert!(!sink.messages[0].is_sidechain);
+    }
+
+    #[test]
+    fn parse_ignores_reasoning_with_null_content_without_skip() {
+        let input = br#"{"timestamp":"2026-07-19T23:40:02.000Z","type":"response_item","payload":{"type":"reasoning","id":"rs-null","content":null}}
+{"timestamp":"2026-07-19T23:40:03.000Z","type":"response_item","payload":{"type":"message","id":"msg-kept","role":"assistant","content":[{"type":"output_text","text":"kept"}]}}"#;
+        let mut sink = CollectingSink::default();
+        let report = CodexAdapter::new()
+            .parse(input, &mut sink)
+            .expect("parse synthetic rollout");
+
+        assert_eq!(report.committed, 1);
+        assert_eq!(report.skipped, 0);
+        assert!(report.diagnostics.is_empty());
+        assert_eq!(sink.messages.len(), 1);
+        assert_eq!(sink.messages[0].text, "kept");
+    }
+
+    #[test]
+    fn parse_skips_message_with_null_content_recoverably() {
+        let input = br#"{"timestamp":"2026-07-19T23:40:02.000Z","type":"response_item","payload":{"type":"message","id":"msg-null","role":"assistant","content":null}}"#;
+        let mut sink = CollectingSink::default();
+        let report = CodexAdapter::new()
+            .parse(input, &mut sink)
+            .expect("parse synthetic rollout");
+
+        assert_eq!(report.committed, 0);
+        assert_eq!(report.skipped, 1);
+        assert_eq!(report.diagnostics.len(), 1);
+        assert!(sink.messages.is_empty());
+    }
+
+    fn parse_single_message(timestamp: &str, role: &str, text: &str) -> Captured {
+        let input = serde_json::to_vec(&serde_json::json!({
+            "timestamp": timestamp,
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "id": "shared-synthetic-id",
+                "role": role,
+                "content": [{"type": "input_text", "text": text}],
+            },
+        }))
+        .expect("serialize synthetic rollout");
+        let mut sink = CollectingSink::default();
+        CodexAdapter::new()
+            .parse(&input, &mut sink)
+            .expect("parse synthetic rollout");
+        assert_eq!(sink.messages.len(), 1);
+        sink.messages.remove(0)
+    }
+
+    #[test]
+    fn parse_keeps_stable_projection_equal_across_occurrence_timestamps() {
+        let first = parse_single_message(
+            "2026-07-19T23:40:01.000Z",
+            "user",
+            "stable synthetic content",
+        );
+        let copied = parse_single_message(
+            "2026-07-20T10:15:30.000Z",
+            "user",
+            "stable synthetic content",
+        );
+
+        assert_eq!(first.native_id, copied.native_id);
+        assert_eq!(first.role, copied.role);
+        assert_eq!(first.text, copied.text);
+        assert_eq!(first.timestamp, None);
+        assert_eq!(copied.timestamp, None);
+    }
+
+    #[test]
+    fn parse_preserves_genuine_role_and_text_differences() {
+        let first = parse_single_message(
+            "2026-07-19T23:40:01.000Z",
+            "user",
+            "first synthetic content",
+        );
+        let changed = parse_single_message(
+            "2026-07-20T10:15:30.000Z",
+            "assistant",
+            "changed synthetic content",
+        );
+
+        assert_eq!(first.native_id, changed.native_id);
+        assert_ne!((first.role, first.text), (changed.role, changed.text));
+        assert_eq!(first.timestamp, None);
+        assert_eq!(changed.timestamp, None);
     }
 
     #[test]

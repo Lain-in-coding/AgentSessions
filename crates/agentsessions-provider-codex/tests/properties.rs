@@ -133,7 +133,7 @@ struct ExpectedMessage {
     native_id: String,
     role: String,
     text: String,
-    timestamp: Option<String>,
+    envelope_timestamp: Option<String>,
     line: String,
 }
 
@@ -187,7 +187,7 @@ fn build_case(seed: u64, with_big_field: bool) -> GenCase {
     for i in 0..n_msgs {
         let role = rng.pick(&ROLES).to_string();
         let id = format!("msg-p{seed:016x}-{i:04}");
-        let timestamp = rng
+        let envelope_timestamp = rng
             .chance(7, 8)
             .then(|| format!("2026-07-26T09:00:{i:02}.000Z"));
 
@@ -221,11 +221,11 @@ fn build_case(seed: u64, with_big_field: bool) -> GenCase {
         }
 
         let mut envelope = json!({
-            "timestamp": timestamp.clone(),
+            "timestamp": envelope_timestamp.clone(),
             "type": "response_item",
             "payload": {"type": "message", "id": id.clone(), "role": role.clone(), "content": blocks},
         });
-        if timestamp.is_none() {
+        if envelope_timestamp.is_none() {
             // 缺席时间戳以"字段不存在"呈现（而非 null），贴近真实缺字段形态。
             envelope.as_object_mut().unwrap().remove("timestamp");
         }
@@ -233,7 +233,7 @@ fn build_case(seed: u64, with_big_field: bool) -> GenCase {
             native_id: id,
             role,
             text: texts.join("\n"),
-            timestamp,
+            envelope_timestamp,
             line: envelope.to_string(),
         });
     }
@@ -252,7 +252,7 @@ fn build_case(seed: u64, with_big_field: bool) -> GenCase {
             };
             let line = json!({
                 "timestamp": m
-                    .timestamp
+                    .envelope_timestamp
                     .clone()
                     .unwrap_or_else(|| "2026-07-26T09:59:59.000Z".to_string()),
                 "type": "event_msg",
@@ -270,7 +270,7 @@ fn build_case(seed: u64, with_big_field: bool) -> GenCase {
             0 => json!({
                 "timestamp": "2026-07-26T09:58:00.000Z",
                 "type": "response_item",
-                "payload": {"type": "reasoning", "id": format!("rs-p{seed:016x}-{k}"), "summary": [], "encrypted_content": "synthetic-opaque"},
+                "payload": {"type": "reasoning", "id": format!("rs-p{seed:016x}-{k}"), "content": null, "summary": [], "encrypted_content": "synthetic-opaque"},
             }),
             1 => json!({
                 "timestamp": "2026-07-26T09:58:01.000Z",
@@ -384,8 +384,8 @@ fn run_case(seed: u64, with_big_field: bool) -> GenCase {
             "seed={seed} msg[{i}]: text 应为带 text 的 block 按序 \\n 拼接"
         );
         assert_eq!(
-            got.timestamp, want.timestamp,
-            "seed={seed} msg[{i}]: 时间戳取外层封套值（缺席则 None）"
+            got.timestamp, None,
+            "seed={seed} msg[{i}]: 外层时间戳属于 occurrence，不进入稳定 Message"
         );
         assert_eq!(
             got.parent_native_id, None,
