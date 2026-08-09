@@ -76,19 +76,15 @@
    Unicode 多字节 span、大字段、threading、codex 镜像去重），失败可由种子复现（2026-07-26）。
 3. ~~source span~~ —— 已入库：schema v6 + `MessageEvent.span` 契约，golden/e2e
    round-trip 锁定（2026-07-26，见 `docs/operations/migration-v5-to-v6.md`）。
-4. 真实历史数据回归（隔离沙箱、授权数据集、不外传）——**流程与关系模型已入库；
-   修复后二进制在真实子集上六条不变量全绿；全量运行因慢批仍未完成，缺口部分闭合**。
+4. ~~真实历史数据回归（隔离沙箱、授权数据集、不外传）~~ —— **已闭合**：全量授权运行
+   （2026-08-09T21:10:16Z，1,242 源、1,177,479,794 字节）六条不变量全绿、harness exit 0：
+   sync 164,136 emitted / 0 skipped、no-parse-loss 164,136 claims、231 sessions 全
+   context 成功、659/659 byte 精度、rebuild 稳定（catalog 151,562 → 151,562）。
    harness（`scripts/evidence/real_data_regression.py`）在抛弃式临时 data root 上跑
-   sync → status + catalog walk → 逐会话 context → index rebuild 校验六条不变量，报告只含
-   聚合计数（见 `docs/operations/REAL-DATA-REGRESSION.md`、证据行
-   `IB-REAL-DATA-REGRESSION-001`）。2026-07-31 全量运行在 `INV-SYNC-OK` 以 exit 5
-   失败（879 源、756,515,768 字节、79,958 emitted、0 skipped），报告符合 closed
-   aggregate key set，未保留精确 canonical code，故不能断言 `source_changed` 已证实。
-   **2026-08-10 修复后子集运行**：release 二进制在 137 文件 Claude Code 目录上六条
-   不变量全绿（15,246 emitted、0 skipped、41/41 byte 精度、rebuild 稳定），该目录此前
-   使旧二进制停滞 —— 证明修复解决停滞且真实数据上六条全绿。全量重试（2026-08-09/10）
-   在 ~64% 处因 `AgentHub-novella2` 慢批终止（隔离 60 文件批 2-5 分钟），无代码失败
-   观察，全量六条绿色运行仍开放。**这是缺口 4 当前的首要阻塞**。
+   sync → status + catalog walk → 逐会话 context → index rebuild，报告只含聚合计数
+   （见 `docs/operations/REAL-DATA-REGRESSION.md`、证据行 `IB-REAL-DATA-REGRESSION-001`）。
+   早期 2026-07-31 运行（exit 5）与 2026-08-10 子集运行如实保留在证据文档中。
+   真实数据 Gate D 已闭合；Provider 晋级仍需独立审查与 owner 决策。
 5. 跨正式 target（Windows/Linux/macOS）的 CI 认证——仍缺。`ci.yml` 的 `test` 与
    新增 `installer` job 已配置三平台矩阵（证据行 `IB-CI-INSTALLER-001`），但在
    PR 上跑绿并记录具体 run id 之前只能是 `ci_configured_only`；hosted runner 亦
