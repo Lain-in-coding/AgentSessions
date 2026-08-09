@@ -54,7 +54,7 @@ thresholds without a fixed benchmark environment and approved policy.
 
 `crates/agentsessions-adapters-sqlite/tests/process_evidence.rs` drives
 production `SqliteStore::open_for_write` through the non-user-facing helper
-`src/bin/sqlite_process_helper.rs`. Recorded Windows and WSL2 Linux runs prove:
+`crates/agentsessions-adapters-sqlite/src/bin/sqlite_process_helper.rs`. Recorded Windows and WSL2 Linux runs prove:
 
 1. exactly one writer acquires the data-root lease; contender diagnostics are
    path-free;

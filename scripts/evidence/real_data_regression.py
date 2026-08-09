@@ -179,6 +179,12 @@ def invariant(id_: str, passed: bool, detail: str) -> Dict[str, Any]:
     return {"id": id_, "passed": bool(passed), "detail": detail}
 
 
+def _is_zero_placement_context(data: Dict[str, Any]) -> bool:
+    """Return whether a successful context belongs to a zero-placement Session."""
+    session = data.get("session")
+    return isinstance(session, dict) and session.get("messages") == []
+
+
 def build_report(
     *,
     generated_at_utc: str,
@@ -332,7 +338,8 @@ def run_regression(binary: str, sources: Sequence[str]) -> Dict[str, Any]:
         # read-only regression against a throwaway store, not a production
         # ingest. `sync` is idempotent, so a retry of a chunk changes nothing.
         sync_ok = True
-        reported_messages = 0
+        reported_emitted = 0
+        reported_skipped = 0
         last_code = 0
         last_ok: Any = True
         for chunk in _chunk_sources(sources):
@@ -341,14 +348,16 @@ def run_regression(binary: str, sources: Sequence[str]) -> Dict[str, Any]:
             if last_code != 0 or last_ok is not True:
                 sync_ok = False
                 break
-            reported_messages += int(sync.get("data", {}).get("messages", 0))
+            reported_emitted += int(sync.get("data", {}).get("emitted", 0))
+            reported_skipped += int(sync.get("data", {}).get("skipped", 0))
         code = last_code
         invariants.append(
             invariant(
                 "INV-SYNC-OK",
-                sync_ok and reported_messages > 0,
+                sync_ok and reported_emitted > 0,
                 f"exit {code}, ok={last_ok}, "
-                f"{len(sources)} sources, {reported_messages} messages",
+                f"{len(sources)} sources, {reported_emitted} emitted records, "
+                f"{reported_skipped} skipped",
             )
         )
         if not sync_ok:
@@ -368,7 +377,16 @@ def run_regression(binary: str, sources: Sequence[str]) -> Dict[str, Any]:
                 invariants,
             )
 
-        # 2) catalog census by entity kind.
+        # 2) catalog census by entity kind plus aggregate relation counts.
+        status_code, status = run_cli(binary, db, ["status"])
+        if status_code != 0 or status.get("ok") is not True:
+            raise HarnessError(
+                f"status exited {status_code}: "
+                f"{status.get('error', {}).get('code', 'unknown')}"
+            )
+        source_placement_claims = int(
+            status.get("data", {}).get("source_placement_claims", 0)
+        )
         entries = page_catalog(binary, db)
         message_ids = [
             entry["id"] for entry in entries if entry["id"].startswith(MESSAGE_PREFIX)
@@ -388,9 +406,12 @@ def run_regression(binary: str, sources: Sequence[str]) -> Dict[str, Any]:
         invariants.append(
             invariant(
                 "INV-NO-PARSE-LOSS",
-                reported_messages == len(message_ids),
-                f"provider reported {reported_messages}, catalog holds "
-                f"{len(message_ids)} {MESSAGE_PREFIX} entities",
+                reported_emitted == source_placement_claims
+                and reported_skipped == 0,
+                f"provider emitted {reported_emitted}, persisted "
+                f"{source_placement_claims} source-placement claims, "
+                f"skipped {reported_skipped}; catalog holds "
+                f"{len(message_ids)} de-duplicated {MESSAGE_PREFIX} entities",
             )
         )
         invariants.append(
@@ -404,7 +425,8 @@ def run_regression(binary: str, sources: Sequence[str]) -> Dict[str, Any]:
         # 3) context assembly per session, accumulating aggregate facts only.
         context_failures = 0
         internal_errors = 0
-        empty_sessions = 0
+        zero_placement_sessions = 0
+        unexpected_empty_sessions = 0
         for session_id in session_ids:
             code, envelope = run_cli(
                 binary, db, ["context", session_id, "--policy", "mainline"]
@@ -416,7 +438,10 @@ def run_regression(binary: str, sources: Sequence[str]) -> Dict[str, Any]:
                 continue
             data = envelope["data"]
             if not data.get("messages"):
-                empty_sessions += 1
+                if _is_zero_placement_context(data):
+                    zero_placement_sessions += 1
+                else:
+                    unexpected_empty_sessions += 1
             for _id, payload in (
                 (item["id"], item["payload"]) for item in data.get("messages", [])
             ):
@@ -432,9 +457,11 @@ def run_regression(binary: str, sources: Sequence[str]) -> Dict[str, Any]:
         invariants.append(
             invariant(
                 "INV-CONTEXT-NONEMPTY",
-                context_failures == 0 and empty_sessions == 0,
+                context_failures == 0 and unexpected_empty_sessions == 0,
                 f"{len(session_ids)} sessions, {context_failures} failed, "
-                f"{empty_sessions} empty, {internal_errors} internal errors",
+                f"{zero_placement_sessions} zero-placement, "
+                f"{unexpected_empty_sessions} unexpectedly empty, "
+                f"{internal_errors} internal errors",
             )
         )
 

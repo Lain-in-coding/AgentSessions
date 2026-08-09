@@ -76,6 +76,50 @@ def write_fixture(path: Path, session_uuid: str, tag: str) -> None:
     )
 
 
+def write_reparented_fixture(
+    path: Path,
+    session_uuid: str,
+    shared_uuid: str,
+    shared_text: str,
+    tag: str,
+) -> None:
+    """Write a second session that reuses one stable Message under a new parent."""
+    base = session_uuid[:-1]
+    root_uuid = f"{base}1"
+    records = [
+        {
+            "type": "user",
+            "uuid": root_uuid,
+            "parentUuid": None,
+            "sessionId": session_uuid,
+            "timestamp": "2026-07-27T01:10:00.000Z",
+            "message": {"role": "user", "content": f"{SECRET_TOKEN} root {tag}"},
+        },
+        {
+            "type": "assistant",
+            "uuid": shared_uuid,
+            "parentUuid": root_uuid,
+            "sessionId": session_uuid,
+            # Stable Message fields match the first fixture; only placement differs.
+            "timestamp": "2026-07-27T01:00:01.000Z",
+            "message": {"role": "assistant", "content": shared_text},
+        },
+        {
+            "type": "user",
+            "uuid": f"{base}3",
+            "parentUuid": shared_uuid,
+            "isSidechain": True,
+            "sessionId": session_uuid,
+            "timestamp": "2026-07-27T01:10:02.000Z",
+            "message": {"role": "user", "content": f"{SECRET_TOKEN} probe {tag}"},
+        },
+    ]
+    path.write_text(
+        "\n".join(json.dumps(record) for record in records) + "\n",
+        encoding="utf-8",
+    )
+
+
 def sample_report(invariants=None):
     """A canonical, well-formed report built through the real constructor.
 
@@ -126,6 +170,19 @@ class PureFunctionTests(unittest.TestCase):
             rdr.invariant("INV-SPAN-COVERAGE", False, "byte coverage 0.5 of 1.0")
         ]
         self.assertEqual(sample_report(mixed)["outcome"], "failed")
+
+    def test_zero_placement_context_is_expected_to_be_empty(self):
+        self.assertTrue(
+            rdr._is_zero_placement_context(
+                {"messages": [], "session": {"messages": []}}
+            )
+        )
+        self.assertFalse(
+            rdr._is_zero_placement_context(
+                {"messages": [], "session": {"messages": ["msg_v1_synthetic"]}}
+            )
+        )
+        self.assertFalse(rdr._is_zero_placement_context({"messages": []}))
 
     def test_validate_report_accepts_the_canonical_shape(self):
         self.assertEqual(rdr.validate_report(sample_report()), [])
@@ -184,9 +241,11 @@ class EndToEndTests(unittest.TestCase):
             "aaaa1111-2222-4333-8444-555566667771",
             "alpha",
         )
-        write_fixture(
+        write_reparented_fixture(
             self.corpus / "two.jsonl",
             "bbbb1111-2222-4333-8444-555566667772",
+            "aaaa1111-2222-4333-8444-555566667772",
+            f"{SECRET_TOKEN} reply alpha",
             "beta",
         )
 
@@ -221,9 +280,20 @@ class EndToEndTests(unittest.TestCase):
         reported = [entry["id"] for entry in report["invariants"]]
         self.assertEqual(reported, list(rdr.INVARIANT_IDS))
         self.assertEqual(report["corpus"]["source_files"], 2)
-        self.assertEqual(report["totals"]["messages"], 6)
+        # Six emitted occurrences include one stable Message reused/re-parented
+        # in the second session, so the stable entity census is five.
+        self.assertEqual(report["totals"]["messages"], 5)
         self.assertEqual(report["totals"]["sessions"], 2)
         self.assertEqual(report["evidence_precision"]["unknown"], 0)
+        no_loss = next(
+            item
+            for item in report["invariants"]
+            if item["id"] == "INV-NO-PARSE-LOSS"
+        )
+        self.assertTrue(no_loss["passed"], no_loss)
+        self.assertIn("emitted 6", no_loss["detail"])
+        self.assertIn("persisted 6 source-placement claims", no_loss["detail"])
+        self.assertIn("skipped 0", no_loss["detail"])
 
     def test_report_never_contains_corpus_text(self):
         _, out = self.run_harness()
