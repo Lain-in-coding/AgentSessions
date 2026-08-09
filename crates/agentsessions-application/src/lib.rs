@@ -5,12 +5,14 @@
 //! 分层依赖不变量：domain ← ports ← application ← adapters。
 
 use agentsessions_domain::{
-    ContextPolicy, DomainError, EvidenceSpan, Message, Role, StableId, select_full, select_mainline,
+    ContextPolicy, DomainError, Message, MessagePlacement, SourceDocument, StableId, select_full,
+    select_mainline,
 };
 use agentsessions_ports::{
-    CanonicalEventSink, CatalogEntry, CatalogStore, Confidence, MessageEvent, PortError,
-    PortResult, ProviderAdapter, ProviderError, SearchHit, SearchIndex,
+    CanonicalEventSink, CatalogEntry, CatalogStore, Confidence, ContextGraphStore, MessageEvent,
+    ParseReport, PortError, PortResult, ProviderAdapter, ProviderError, SearchHit, SearchIndex,
 };
+use std::collections::{BTreeMap, BTreeSet};
 
 pub mod budget;
 pub mod cursor;
@@ -76,8 +78,30 @@ pub enum AppRequest {
         policy: ContextPolicy,
         budget: ResponseBudget,
     },
+    /// Resolve every distinct Session that contains placements for one Message.
+    MessageContexts { message_id: StableId },
     /// 返回当前 Catalog 统计状态。
     Status,
+}
+
+/// One placement-aware context response item.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ContextMessage {
+    /// Compatibility alias retained for existing frontends.
+    pub id: String,
+    /// Authoritative occurrence identity.
+    pub placement_id: String,
+    /// Stable Message identity; always equal to `id`.
+    pub message_id: String,
+    /// Existing canonical Message payload, returned opaquely.
+    pub payload: serde_json::Value,
+}
+
+/// One distinct Session candidate for a stable Message.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MessageContextCandidate {
+    pub session_id: String,
+    pub placement_ids: Vec<String>,
 }
 
 /// 应用层结果 ADT：前端据此渲染，不再回到 domain/ports 类型。
@@ -112,17 +136,26 @@ pub enum AppResponse {
         session: serde_json::Value,
         /// 选中分支的叶子消息 wire id；会话无消息时为 `None`。
         branch_leaf: Option<String>,
-        /// root→leaf（mainline）或 seq 升序（full）的 `(wire id, canonical payload)`。
-        messages: Vec<(String, serde_json::Value)>,
+        /// Authoritative leaf occurrence; `branch_leaf` remains its Message-ID alias.
+        branch_leaf_placement_id: Option<String>,
+        /// root→leaf（mainline）或 deterministic placement order（full）的 occurrences。
+        messages: Vec<ContextMessage>,
         /// 与 `messages` 对齐装配的证据区间（可能被 `max_evidence_spans` 截短）。
         evidence: Vec<EvidenceSpanDto>,
         truncation: Truncation,
         generation: u64,
     },
-    /// 当前 Catalog 实体总数与活动 generation。
+    /// Distinct-session candidates for a stable Message.
+    MessageContexts {
+        message_id: String,
+        candidates: Vec<MessageContextCandidate>,
+    },
+    /// 当前 Catalog 实体总数、关系统计与活动 generation。
     Status {
         catalog_count: u64,
         active_generation: u64,
+        placements: u64,
+        source_placement_claims: u64,
     },
 }
 
@@ -149,14 +182,13 @@ pub struct StagedMessage {
     pub span: Option<(u64, u64)>,
 }
 
-/// 一次 staging 的完整产物：缓冲消息 + provider 报告的会话级元数据。
-///
-/// `session_native_id` 从 [`agentsessions_ports::ParseReport`] 透传，供组合根
-/// 派生会话 id（native 优先，缺失回退 Reconstructed）；staging 本身不做派生。
+/// 一次 staging 的完整产物：缓冲消息 + provider 的完整解析报告。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StagedBatch {
     pub messages: Vec<StagedMessage>,
-    /// provider 报告的 durable 会话 native id；`None` 表示未提供。
+    /// Authoritative provider parse accounting and diagnostics.
+    pub report: ParseReport,
+    /// Temporary compatibility alias for current composition-root callers.
     pub session_native_id: Option<String>,
 }
 
@@ -180,9 +212,11 @@ pub fn stage(adapter: &dyn ProviderAdapter, bytes: &[u8]) -> Result<StagedBatch,
     }
     let mut sink = StagingSink::default();
     let report = adapter.parse(bytes, &mut sink)?;
+    let session_native_id = report.session_native_id.clone();
     Ok(StagedBatch {
         messages: sink.buffered,
-        session_native_id: report.session_native_id,
+        report,
+        session_native_id,
     })
 }
 
@@ -274,27 +308,23 @@ fn system_now_ms() -> i64 {
         .unwrap_or(0)
 }
 
-/// Context 装配的中间记录：wire id + 已验证 StableId + 解析后 payload + 原始字节。
-///
-/// 字节供 [`evidence::assemble`]（它只信 canonical payload），Value 供响应透传。
-struct MemberRecord {
-    wire: String,
-    id: StableId,
-    payload: serde_json::Value,
-    bytes: Vec<u8>,
+struct ContextOccurrence {
+    message: ContextMessage,
+    evidence: EvidenceSpanDto,
+    estimated_bytes: usize,
 }
 
 /// 用例执行器：绑定所需端口，串起领域校验与端口调用。
 ///
 /// 泛型而非 trait object——前端在构造期决定后端实现，零动态分发开销。
 /// 时钟以 fn 指针注入：cursor 的发行/校验都不读环境时间（可测确定性）。
-pub struct App<C: CatalogStore, S: SearchIndex> {
+pub struct App<C: CatalogStore + ContextGraphStore, S: SearchIndex> {
     catalog: C,
     index: S,
     clock_ms: fn() -> i64,
 }
 
-impl<C: CatalogStore, S: SearchIndex> App<C, S> {
+impl<C: CatalogStore + ContextGraphStore, S: SearchIndex> App<C, S> {
     pub fn new(catalog: C, index: S) -> Self {
         Self {
             catalog,
@@ -411,8 +441,11 @@ impl<C: CatalogStore, S: SearchIndex> App<C, S> {
                 let (hits, truncation, _) =
                     budget::clamp_items(slice, page, net_bytes, |hit| hit.id.as_str().len() + 24);
                 let consumed = offset + hits.len() as u64;
+                // A truncated page with zero kept hits cannot advance the
+                // cursor offset; terminate paging instead of looping forever.
+                let has_more = fetched_len > consumed && !hits.is_empty();
                 let next_cursor = self.issue_cursor(
-                    fetched_len > consumed,
+                    has_more,
                     generation,
                     &query_digest,
                     SORT_SCORE_DESC,
@@ -470,8 +503,14 @@ impl<C: CatalogStore, S: SearchIndex> App<C, S> {
                         entry.id.as_str().len() + entry.payload.len() + 24
                     });
                 let consumed = offset + entries.len() as u64;
+                // A truncated page with zero kept entries means the first
+                // entity already exceeds the byte budget: the next cursor
+                // would claim the same offset and loop forever. Terminate
+                // paging instead — the page semantics stay honest via
+                // `truncation`.
+                let has_more = fetched_len > consumed && !entries.is_empty();
                 let next_cursor = self.issue_cursor(
-                    fetched_len > consumed,
+                    has_more,
                     generation,
                     &query_digest,
                     SORT_WIRE_ID_ASC,
@@ -489,12 +528,16 @@ impl<C: CatalogStore, S: SearchIndex> App<C, S> {
                 policy,
                 budget,
             } => self.handle_context(session_id, policy, budget),
+            AppRequest::MessageContexts { message_id } => self.handle_message_contexts(message_id),
             AppRequest::Status => {
                 let catalog_count = self.catalog.count()?;
                 let active_generation = self.catalog.active_generation()?;
+                let context_stats = self.catalog.context_stats()?;
                 Ok(AppResponse::Status {
                     catalog_count,
                     active_generation,
+                    placements: context_stats.placements,
+                    source_placement_claims: context_stats.source_placement_claims,
                 })
             }
         }
@@ -502,12 +545,11 @@ impl<C: CatalogStore, S: SearchIndex> App<C, S> {
 
     /// 会话上下文装配（CONTRACT §1-2）：
     ///
-    /// 1. 取会话 canonical payload（`{document, messages}`）；缺行 → NotFound，
-    ///    非 canonical 形状 → InvariantViolation（会话行只由 ingest 写入，畸形即 bug）；
-    /// 2. 逐成员取消息 payload，重建领域 [`Message`]（seq = 会话内序号，parent 用
-    ///    payload 里已解析的 `parent` wire id）；
-    /// 3. 按策略选分支（mainline 排除 sidechain 沿 parent 链，full 全量 seq 序）；
-    /// 4. 预算：`max_messages` + 字节闸裁剪消息，`max_evidence_spans` 裁剪证据；
+    /// 1. 通过 [`ContextGraphStore`] 加载一个 session-scoped typed graph；
+    /// 2. 由 Domain selector 在 placement graph 上选择 mainline/full；
+    /// 3. 从每个 placement 的 exact document/span 装配 occurrence evidence；
+    /// 4. 预算：`max_messages` + 字节闸裁剪 placement occurrences，
+    ///    `max_evidence_spans` 裁剪证据；
     ///    任何裁剪都在 [`Truncation`] 里如实报告对应旋钮名。
     fn handle_context(
         &self,
@@ -517,151 +559,131 @@ impl<C: CatalogStore, S: SearchIndex> App<C, S> {
     ) -> Result<AppResponse, AppError> {
         budget.validate().map_err(AppError::from)?;
         let generation = self.catalog.active_generation()?;
-        let session_bytes = self.catalog.get(&session_id)?.ok_or_else(|| {
-            DomainError::NotFound(format!("session {} not in catalog", session_id.as_str()))
-        })?;
-        let session: serde_json::Value = serde_json::from_slice(&session_bytes).map_err(|_| {
-            DomainError::InvariantViolation(format!(
-                "session {} payload is not canonical JSON",
-                session_id.as_str()
-            ))
-        })?;
-
-        // 文档 payload 仅用于证据 fingerprint；缺失显式降级为 None，不臆造。
-        let document_wire = session
-            .get("document")
-            .and_then(|v| v.as_str())
-            .map(str::to_string);
-        let document_payload = match &document_wire {
-            Some(wire) => StableId::from_wire(wire)
-                .map(|id| self.catalog.get(&id))
-                .transpose()?
-                .flatten(),
-            None => None,
-        };
-
-        let member_values = session
-            .get("messages")
-            .and_then(|v| v.as_array())
-            .ok_or_else(|| {
-                DomainError::InvariantViolation(format!(
-                    "session {} payload lacks a messages array",
-                    session_id.as_str()
-                ))
-            })?;
-        let mut records: Vec<MemberRecord> = Vec::with_capacity(member_values.len());
-        for value in member_values {
-            let wire = value.as_str().ok_or_else(|| {
-                DomainError::InvariantViolation(format!(
-                    "session {} has a non-string message member",
-                    session_id.as_str()
-                ))
-            })?;
-            let id = StableId::from_wire(wire).ok_or_else(|| {
-                DomainError::InvariantViolation(format!(
-                    "session member {wire} is not a valid wire id"
-                ))
-            })?;
-            let bytes = self.catalog.get(&id)?.ok_or_else(|| {
-                DomainError::InvariantViolation(format!(
-                    "session member {wire} is missing from the catalog"
-                ))
-            })?;
-            // 消息 payload 由 ingest 写 canonical JSON；非 JSON（如切片期 index 写入的
-            // 裸文本）按空对象降级——选择仍按 seq 生效，证据端会如实报 Unknown。
-            let payload = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
-            records.push(MemberRecord {
-                wire: wire.to_string(),
-                id,
-                payload,
-                bytes,
-            });
+        let graph = self.catalog.load_session_graph(&session_id)?;
+        if graph.session_id.as_str() != session_id.as_str() {
+            return Err(DomainError::InvariantViolation(
+                "context store returned a different session than requested".into(),
+            )
+            .into());
         }
 
-        // 重建领域消息：seq = 会话内序号（成员数组即 seq 序）。Role 仅为构造所需——
-        // 分支选择只读 seq/parent/is_sidechain，未知角色映射 User 不影响任何输出。
-        let domain_messages: Vec<Message> = records
-            .iter()
-            .enumerate()
-            .map(|(i, r)| Message {
-                id: r.id.clone(),
-                parent: r
-                    .payload
-                    .get("parent")
-                    .and_then(|v| v.as_str())
-                    .and_then(StableId::from_wire),
-                role: match r.payload.get("role").and_then(|v| v.as_str()) {
-                    Some("assistant") => Role::Assistant,
-                    Some("system") => Role::System,
-                    Some("tool") => Role::Tool,
-                    _ => Role::User,
-                },
-                text: r
-                    .payload
-                    .get("text")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string(),
-                seq: i as u32,
-                timestamp: r
-                    .payload
-                    .get("timestamp")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string),
-                is_sidechain: r
-                    .payload
-                    .get("is_sidechain")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false),
-                span: r.payload.get("span").and_then(|s| {
-                    Some(EvidenceSpan {
-                        start: s.get("start")?.as_u64()?,
-                        end: s.get("end")?.as_u64()?,
-                    })
-                }),
-            })
-            .collect();
-
-        let (ordered_seqs, branch_leaf): (Vec<u32>, Option<String>) = match policy {
-            ContextPolicy::Mainline => match select_mainline(&domain_messages) {
-                Some(sel) => (
-                    sel.messages.iter().map(|m| m.seq).collect(),
-                    Some(sel.leaf.id.as_str().to_string()),
+        let (selected, branch_leaf, branch_leaf_placement_id): (
+            Vec<&MessagePlacement>,
+            Option<String>,
+            Option<String>,
+        ) = match policy {
+            ContextPolicy::Mainline => match select_mainline(&graph)? {
+                Some(selection) => (
+                    selection.placements,
+                    Some(selection.leaf.message_id.as_str().to_string()),
+                    Some(selection.leaf.id.as_str().to_string()),
                 ),
-                None => (Vec::new(), None),
+                None => (Vec::new(), None, None),
             },
             ContextPolicy::Full => {
-                let all = select_full(&domain_messages);
-                let leaf = all.last().map(|m| m.id.as_str().to_string());
-                (all.iter().map(|m| m.seq).collect(), leaf)
+                let placements = select_full(&graph)?;
+                let leaf = placements.last().copied();
+                (
+                    placements,
+                    leaf.map(|placement| placement.message_id.as_str().to_string()),
+                    leaf.map(|placement| placement.id.as_str().to_string()),
+                )
             }
         };
 
+        let session_bytes = self.catalog.get(&session_id)?.ok_or_else(|| {
+            DomainError::InvariantViolation("context session is missing from the catalog".into())
+        })?;
+        let session: serde_json::Value = serde_json::from_slice(&session_bytes).map_err(|_| {
+            DomainError::InvariantViolation("session payload is not canonical JSON".into())
+        })?;
+
+        let messages_by_id: BTreeMap<&str, &Message> = graph
+            .messages
+            .iter()
+            .map(|message| (message.id.as_str(), message))
+            .collect();
+        let documents_by_id: BTreeMap<&str, &SourceDocument> = graph
+            .source_documents
+            .iter()
+            .map(|document| (document.id.as_str(), document))
+            .collect();
+        let mut payloads = BTreeMap::<String, (serde_json::Value, usize)>::new();
+        let mut occurrences = Vec::with_capacity(selected.len());
+        for placement in selected {
+            let message = messages_by_id
+                .get(placement.message_id.as_str())
+                .copied()
+                .ok_or_else(|| {
+                    DomainError::InvariantViolation(format!(
+                        "placement {} references a missing message",
+                        placement.id
+                    ))
+                })?;
+            let document = documents_by_id
+                .get(placement.source_document_id.as_str())
+                .copied()
+                .ok_or_else(|| {
+                    DomainError::InvariantViolation(format!(
+                        "placement {} references a missing source document",
+                        placement.id
+                    ))
+                })?;
+
+            let message_wire = message.id.as_str().to_string();
+            let (payload, payload_len) = if let Some((payload, payload_len)) =
+                payloads.get(&message_wire)
+            {
+                (payload.clone(), *payload_len)
+            } else {
+                let bytes = self.catalog.get(&message.id)?.ok_or_else(|| {
+                    DomainError::InvariantViolation(
+                        "context message is missing from the catalog".into(),
+                    )
+                })?;
+                let payload: serde_json::Value = serde_json::from_slice(&bytes).map_err(|_| {
+                    DomainError::InvariantViolation("message payload is not canonical JSON".into())
+                })?;
+                let payload_len = bytes.len();
+                payloads.insert(message_wire.clone(), (payload.clone(), payload_len));
+                (payload, payload_len)
+            };
+
+            let placement_wire = placement.id.as_str().to_string();
+            let estimated_bytes = payload_len
+                .saturating_add(message_wire.len().saturating_mul(2))
+                .saturating_add(placement_wire.len())
+                .saturating_add(96);
+            occurrences.push(ContextOccurrence {
+                message: ContextMessage {
+                    id: message_wire.clone(),
+                    placement_id: placement_wire,
+                    message_id: message_wire,
+                    payload,
+                },
+                evidence: evidence::assemble(message, placement, document, generation),
+                estimated_bytes,
+            });
+        }
+
         let net_bytes = budget
             .max_response_bytes
-            .saturating_sub(ENVELOPE_RESERVE_BYTES);
-        let (kept_seqs, mut truncation, _) =
-            budget::clamp_items(ordered_seqs, budget.max_messages, net_bytes, |seq| {
-                records[*seq as usize].bytes.len()
+            .saturating_sub(ENVELOPE_RESERVE_BYTES)
+            // The session payload is embedded verbatim in the response; count
+            // it against the hard byte gate up front, before clamping keeps.
+            .saturating_sub(session_bytes.len());
+        let (kept_occurrences, mut truncation, _) =
+            budget::clamp_items(occurrences, budget.max_messages, net_bytes, |occurrence| {
+                occurrence.estimated_bytes
             });
         if truncation.reason.as_deref() == Some(budget::TRUNCATION_MAX_ITEMS) {
             // 消息条数闸对应的预算旋钮是 max_messages；如实报告该旋钮名。
             truncation.reason = Some(budget::TRUNCATION_MAX_MESSAGES.to_string());
         }
 
-        let mut evidence: Vec<EvidenceSpanDto> = kept_seqs
+        let mut evidence: Vec<EvidenceSpanDto> = kept_occurrences
             .iter()
-            .map(|seq| {
-                let r = &records[*seq as usize];
-                evidence::assemble(
-                    &r.wire,
-                    &r.bytes,
-                    document_payload.as_deref(),
-                    document_wire.as_deref(),
-                    generation,
-                    *seq,
-                )
-            })
+            .map(|occurrence| occurrence.evidence.clone())
             .collect();
         if evidence.len() > budget.max_evidence_spans {
             evidence.truncate(budget.max_evidence_spans);
@@ -671,22 +693,53 @@ impl<C: CatalogStore, S: SearchIndex> App<C, S> {
             }
         }
 
-        let messages: Vec<(String, serde_json::Value)> = kept_seqs
-            .iter()
-            .map(|seq| {
-                let r = &records[*seq as usize];
-                (r.wire.clone(), r.payload.clone())
-            })
+        let messages: Vec<ContextMessage> = kept_occurrences
+            .into_iter()
+            .map(|occurrence| occurrence.message)
             .collect();
 
         Ok(AppResponse::Context {
             session_id: session_id.as_str().to_string(),
             session,
             branch_leaf,
+            branch_leaf_placement_id,
             messages,
             evidence,
             truncation,
             generation,
+        })
+    }
+
+    fn handle_message_contexts(&self, message_id: StableId) -> Result<AppResponse, AppError> {
+        let raw_candidates = self.catalog.message_contexts(&message_id)?;
+        let mut grouped = BTreeMap::<String, BTreeSet<String>>::new();
+        for candidate in raw_candidates {
+            if candidate.placement_ids.is_empty() {
+                return Err(DomainError::InvariantViolation(
+                    "message context candidate has no placements".into(),
+                )
+                .into());
+            }
+            let placement_ids = grouped
+                .entry(candidate.session_id.as_str().to_string())
+                .or_default();
+            placement_ids.extend(
+                candidate
+                    .placement_ids
+                    .into_iter()
+                    .map(|placement_id| placement_id.as_str().to_string()),
+            );
+        }
+        let candidates = grouped
+            .into_iter()
+            .map(|(session_id, placement_ids)| MessageContextCandidate {
+                session_id,
+                placement_ids: placement_ids.into_iter().collect(),
+            })
+            .collect();
+        Ok(AppResponse::MessageContexts {
+            message_id: message_id.as_str().to_string(),
+            candidates,
         })
     }
 }
@@ -694,8 +747,14 @@ impl<C: CatalogStore, S: SearchIndex> App<C, S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agentsessions_domain::{IdKind, Stability};
-    use agentsessions_ports::{PortResult, SourceSnapshot};
+    use agentsessions_domain::{
+        EvidenceSpan, IdKind, MessageEdge, MessagePlacement, MessageRelation, Role,
+        SessionContextGraph, SourceDocument, Stability,
+    };
+    use agentsessions_ports::{
+        ContextStats, MessageContextCandidate as PortMessageContextCandidate, PortResult,
+        SourceSnapshot,
+    };
     use agentsessions_testkit::FakeProvider;
 
     /// 内存态假后端，仅用于用例逻辑测试。
@@ -722,6 +781,25 @@ mod tests {
         }
         fn active_generation(&self) -> PortResult<u64> {
             Ok(7)
+        }
+    }
+    impl ContextGraphStore for FakeCatalog {
+        fn load_session_graph(&self, _session_id: &StableId) -> PortResult<SessionContextGraph> {
+            Err(PortError::NotFound("session context not found".into()))
+        }
+
+        fn message_contexts(
+            &self,
+            _message_id: &StableId,
+        ) -> PortResult<Vec<PortMessageContextCandidate>> {
+            Ok(Vec::new())
+        }
+
+        fn context_stats(&self) -> PortResult<ContextStats> {
+            Ok(ContextStats {
+                placements: 2,
+                source_placement_claims: 3,
+            })
         }
     }
 
@@ -826,7 +904,9 @@ mod tests {
             r,
             Ok(AppResponse::Status {
                 catalog_count: 1,
-                active_generation: 7
+                active_generation: 7,
+                placements: 2,
+                source_placement_claims: 3,
             })
         ));
     }
@@ -903,6 +983,22 @@ mod tests {
         }
         fn active_generation(&self) -> PortResult<u64> {
             Ok(self.generation.get())
+        }
+    }
+    impl ContextGraphStore for MapCatalog {
+        fn load_session_graph(&self, _session_id: &StableId) -> PortResult<SessionContextGraph> {
+            Err(PortError::NotFound("session context not found".into()))
+        }
+
+        fn message_contexts(
+            &self,
+            _message_id: &StableId,
+        ) -> PortResult<Vec<PortMessageContextCandidate>> {
+            Ok(Vec::new())
+        }
+
+        fn context_stats(&self) -> PortResult<ContextStats> {
+            Ok(ContextStats::default())
         }
     }
 
@@ -1114,75 +1210,290 @@ mod tests {
 
     // ---- context 装配 ----
 
-    fn ctx_msg_payload(
-        role: &str,
-        text: &str,
-        parent: Option<&StableId>,
-        sidechain: bool,
-        span: Option<(u64, u64)>,
-        session: &StableId,
-    ) -> Vec<u8> {
+    fn ctx_msg_payload(role: &str, text: &str, timestamp: &str) -> Vec<u8> {
         serde_json::json!({
             "role": role,
             "text": text,
-            "parent_native_id": null,
-            "parent": parent.map(|p| p.as_str()),
-            "timestamp": "2026-07-26T00:00:00Z",
-            "is_sidechain": sidechain,
-            "session": session.as_str(),
-            "span": span.map(|(start, end)| serde_json::json!({"start": start, "end": end})),
+            "timestamp": timestamp,
+            // Deliberately misleading compatibility aliases. Context must use
+            // the typed graph, never these values.
+            "parent": null,
+            "is_sidechain": false,
+            "span": {"start": 90, "end": 99},
         })
         .to_string()
         .into_bytes()
     }
 
-    /// 会话夹具：m1 → m2 → m3 主线，s1 为挂在 m2 下的 sidechain。
-    fn ctx_fixture() -> (MapCatalog, StableId, [StableId; 4], StableId) {
-        let ses = StableId::native(IdKind::Session, "sess-ctx");
-        let doc = StableId::derive(IdKind::Document, Stability::Reconstructed, &[b"ctx-doc"]);
-        let m1 = StableId::native(IdKind::Message, "ctx-m1");
-        let m2 = StableId::native(IdKind::Message, "ctx-m2");
-        let s1 = StableId::native(IdKind::Message, "ctx-s1");
-        let m3 = StableId::native(IdKind::Message, "ctx-m3");
+    fn context_message(id: StableId, role: Role, text: &str, timestamp: &str) -> Message {
+        Message {
+            id,
+            role,
+            text: text.into(),
+            timestamp: Some(timestamp.into()),
+        }
+    }
 
-        let mut cat = MapCatalog::new(7);
-        cat.insert(
-            &m1,
-            ctx_msg_payload("user", "root", None, false, Some((0, 10)), &ses),
+    fn context_document(id: StableId, fingerprint: &str) -> SourceDocument {
+        SourceDocument {
+            id,
+            provider_id: "test-provider".into(),
+            variant_id: "test-provider/v1".into(),
+            fingerprint: fingerprint.into(),
+            len: 200,
+        }
+    }
+
+    struct GraphCatalog {
+        catalog: MapCatalog,
+        graph: SessionContextGraph,
+        context_message_id: StableId,
+        candidates: Vec<PortMessageContextCandidate>,
+        stats: ContextStats,
+    }
+
+    impl CatalogStore for GraphCatalog {
+        fn get(&self, id: &StableId) -> PortResult<Option<Vec<u8>>> {
+            self.catalog.get(id)
+        }
+
+        fn put(&self, id: &StableId, payload: &[u8]) -> PortResult<()> {
+            self.catalog.put(id, payload)
+        }
+
+        fn list(&self, limit: usize) -> PortResult<Vec<CatalogEntry>> {
+            self.catalog.list(limit)
+        }
+
+        fn count(&self) -> PortResult<u64> {
+            self.catalog.count()
+        }
+
+        fn active_generation(&self) -> PortResult<u64> {
+            self.catalog.active_generation()
+        }
+    }
+
+    impl ContextGraphStore for GraphCatalog {
+        fn load_session_graph(&self, session_id: &StableId) -> PortResult<SessionContextGraph> {
+            if session_id.as_str() == self.graph.session_id.as_str() {
+                Ok(self.graph.clone())
+            } else {
+                Err(PortError::NotFound("session context not found".into()))
+            }
+        }
+
+        fn message_contexts(
+            &self,
+            message_id: &StableId,
+        ) -> PortResult<Vec<PortMessageContextCandidate>> {
+            if message_id.as_str() == self.context_message_id.as_str() {
+                Ok(self.candidates.clone())
+            } else {
+                Ok(Vec::new())
+            }
+        }
+
+        fn context_stats(&self) -> PortResult<ContextStats> {
+            Ok(self.stats)
+        }
+    }
+
+    struct ContextFixture {
+        store: GraphCatalog,
+        session: StableId,
+        document_a: StableId,
+        document_b: StableId,
+        root: StableId,
+        repeated: StableId,
+        sidechain: StableId,
+        leaf: StableId,
+        root_placement: MessagePlacement,
+        repeated_a: MessagePlacement,
+        repeated_b: MessagePlacement,
+        leaf_placement: MessagePlacement,
+    }
+
+    /// Graph shape:
+    ///
+    /// - one stable Message has two placements in one Session;
+    /// - the repeated placement in document B is the parent of the real leaf;
+    /// - a sidechain placement exists but is excluded from mainline;
+    /// - payload aliases disagree with graph facts and must be ignored.
+    fn ctx_fixture() -> ContextFixture {
+        let session = StableId::native(IdKind::Session, "sess-ctx");
+        let document_a = StableId::native(IdKind::Document, "ctx-doc-a");
+        let document_b = StableId::native(IdKind::Document, "ctx-doc-b");
+        let root = StableId::native(IdKind::Message, "ctx-root");
+        let repeated = StableId::native(IdKind::Message, "ctx-repeated");
+        let sidechain = StableId::native(IdKind::Message, "ctx-side");
+        let leaf = StableId::native(IdKind::Message, "ctx-leaf");
+
+        let root_message =
+            context_message(root.clone(), Role::User, "root", "2026-07-26T00:00:00Z");
+        let repeated_message = context_message(
+            repeated.clone(),
+            Role::Assistant,
+            "repeated",
+            "2026-07-26T00:01:00Z",
         );
-        cat.insert(
-            &m2,
-            ctx_msg_payload("assistant", "reply", Some(&m1), false, Some((11, 25)), &ses),
+        let sidechain_message = context_message(
+            sidechain.clone(),
+            Role::Assistant,
+            "side",
+            "2026-07-26T00:01:30Z",
         );
-        cat.insert(
-            &s1,
-            ctx_msg_payload("assistant", "side", Some(&m2), true, Some((26, 40)), &ses),
+        let leaf_message =
+            context_message(leaf.clone(), Role::User, "leaf", "2026-07-26T00:02:00Z");
+        let source_a = context_document(document_a.clone(), "b3-doc-a");
+        let source_b = context_document(document_b.clone(), "b3-doc-b");
+
+        let root_placement = MessagePlacement::new(
+            session.clone(),
+            document_a.clone(),
+            root.clone(),
+            0,
+            false,
+            Some(EvidenceSpan { start: 0, end: 10 }),
         );
-        cat.insert(
-            &m3,
-            ctx_msg_payload("user", "tail", Some(&m2), false, Some((41, 60)), &ses),
+        let repeated_a = MessagePlacement::new(
+            session.clone(),
+            document_a.clone(),
+            repeated.clone(),
+            1,
+            false,
+            Some(EvidenceSpan { start: 11, end: 25 }),
         );
-        cat.insert(
-            &ses,
+        let sidechain_placement = MessagePlacement::new(
+            session.clone(),
+            document_a.clone(),
+            sidechain.clone(),
+            2,
+            true,
+            Some(EvidenceSpan { start: 26, end: 40 }),
+        );
+        let repeated_b = MessagePlacement::new(
+            session.clone(),
+            document_b.clone(),
+            repeated.clone(),
+            0,
+            false,
+            Some(EvidenceSpan { start: 5, end: 19 }),
+        );
+        let leaf_placement = MessagePlacement::new(
+            session.clone(),
+            document_b.clone(),
+            leaf.clone(),
+            1,
+            false,
+            Some(EvidenceSpan { start: 20, end: 40 }),
+        );
+        let edges = vec![
+            MessageEdge {
+                child_placement_id: repeated_a.id.clone(),
+                parent_message_id: root.clone(),
+                parent_native_id: Some("ctx-root".into()),
+                relation: MessageRelation::Reply,
+            },
+            MessageEdge {
+                child_placement_id: repeated_b.id.clone(),
+                parent_message_id: root.clone(),
+                parent_native_id: Some("ctx-root".into()),
+                relation: MessageRelation::Reply,
+            },
+            MessageEdge {
+                child_placement_id: sidechain_placement.id.clone(),
+                parent_message_id: repeated.clone(),
+                parent_native_id: Some("ctx-repeated".into()),
+                relation: MessageRelation::Reply,
+            },
+            MessageEdge {
+                child_placement_id: leaf_placement.id.clone(),
+                parent_message_id: repeated.clone(),
+                parent_native_id: Some("ctx-repeated".into()),
+                relation: MessageRelation::Reply,
+            },
+        ];
+        let graph = SessionContextGraph {
+            session_id: session.clone(),
+            messages: vec![
+                root_message,
+                repeated_message,
+                sidechain_message,
+                leaf_message,
+            ],
+            source_documents: vec![source_a, source_b],
+            placements: vec![
+                root_placement.clone(),
+                repeated_a.clone(),
+                sidechain_placement.clone(),
+                repeated_b.clone(),
+                leaf_placement.clone(),
+            ],
+            edges,
+        };
+        graph.validate().unwrap();
+
+        let mut catalog = MapCatalog::new(7);
+        catalog.insert(
+            &root,
+            ctx_msg_payload("user", "root", "2026-07-26T00:00:00Z"),
+        );
+        catalog.insert(
+            &repeated,
+            ctx_msg_payload("assistant", "repeated", "2026-07-26T00:01:00Z"),
+        );
+        catalog.insert(
+            &sidechain,
+            ctx_msg_payload("assistant", "side", "2026-07-26T00:01:30Z"),
+        );
+        catalog.insert(
+            &leaf,
+            ctx_msg_payload("user", "leaf", "2026-07-26T00:02:00Z"),
+        );
+        catalog.insert(
+            &session,
             serde_json::json!({
-                "document": doc.as_str(),
-                "messages": [m1.as_str(), m2.as_str(), s1.as_str(), m3.as_str()],
+                "document": "doc_v1_wrong-compatibility-alias",
+                "messages": [],
             })
             .to_string()
             .into_bytes(),
         );
-        cat.insert(
-            &doc,
-            serde_json::json!({
-                "provider": "claude-code",
-                "variant": "claude-code/jsonl-v1",
-                "fingerprint": "b3-ctxfp",
-                "len": 99,
-            })
-            .to_string()
-            .into_bytes(),
-        );
-        (cat, ses, [m1, m2, s1, m3], doc)
+
+        let store = GraphCatalog {
+            catalog,
+            graph,
+            context_message_id: repeated.clone(),
+            candidates: vec![
+                PortMessageContextCandidate {
+                    session_id: session.clone(),
+                    placement_ids: vec![repeated_b.id.clone()],
+                },
+                PortMessageContextCandidate {
+                    session_id: session.clone(),
+                    placement_ids: vec![repeated_a.id.clone(), repeated_b.id.clone()],
+                },
+            ],
+            stats: ContextStats {
+                placements: 5,
+                source_placement_claims: 6,
+            },
+        };
+        ContextFixture {
+            store,
+            session,
+            document_a,
+            document_b,
+            root,
+            repeated,
+            sidechain,
+            leaf,
+            root_placement,
+            repeated_a,
+            repeated_b,
+            leaf_placement,
+        }
     }
 
     fn ctx_req(ses: &StableId, policy: ContextPolicy, budget: ResponseBudget) -> AppRequest {
@@ -1194,11 +1505,11 @@ mod tests {
     }
 
     #[test]
-    fn context_mainline_walks_parent_chain_excluding_sidechain() {
-        let (cat, ses, [m1, m2, _s1, m3], doc) = ctx_fixture();
-        let resp = app_ctx(&cat)
+    fn context_mainline_uses_typed_edges_and_exact_placement_evidence() {
+        let fixture = ctx_fixture();
+        let resp = app_ctx(&fixture.store)
             .handle(ctx_req(
-                &ses,
+                &fixture.session,
                 ContextPolicy::Mainline,
                 ResponseBudget::default(),
             ))
@@ -1206,6 +1517,7 @@ mod tests {
         let AppResponse::Context {
             session_id,
             branch_leaf,
+            branch_leaf_placement_id,
             messages,
             evidence,
             truncation,
@@ -1215,31 +1527,71 @@ mod tests {
         else {
             panic!("expected Context response");
         };
-        assert_eq!(session_id, ses.as_str());
+        assert_eq!(session_id, fixture.session.as_str());
         assert_eq!(generation, 7);
         assert!(!truncation.truncated);
-        assert_eq!(branch_leaf.as_deref(), Some(m3.as_str()));
-        let wires: Vec<&str> = messages.iter().map(|(w, _)| w.as_str()).collect();
-        assert_eq!(wires, vec![m1.as_str(), m2.as_str(), m3.as_str()]);
-        // 证据与消息链对齐：byte 精度 + 文档指纹/身份透传；ordinal 是会话内 seq。
+        assert_eq!(branch_leaf.as_deref(), Some(fixture.leaf.as_str()));
+        assert_eq!(
+            branch_leaf_placement_id.as_deref(),
+            Some(fixture.leaf_placement.id.as_str())
+        );
+        let message_ids: Vec<&str> = messages
+            .iter()
+            .map(|message| message.message_id.as_str())
+            .collect();
+        assert_eq!(
+            message_ids,
+            vec![
+                fixture.root.as_str(),
+                fixture.repeated.as_str(),
+                fixture.leaf.as_str()
+            ]
+        );
+        assert_eq!(
+            messages[1].placement_id,
+            fixture.repeated_b.id.as_str(),
+            "same-document parent resolution must choose document B"
+        );
+        assert!(
+            messages
+                .iter()
+                .all(|message| message.id == message.message_id)
+        );
+
         assert_eq!(evidence.len(), 3);
         assert_eq!(evidence[0].precision, evidence::Precision::Byte);
         assert_eq!(evidence[0].byte_start, Some(0));
-        assert_eq!(evidence[2].byte_end, Some(60));
-        assert_eq!(evidence[2].record_ordinal, Some(3));
-        assert_eq!(evidence[0].source_fingerprint.as_deref(), Some("b3-ctxfp"));
+        assert_eq!(evidence[1].byte_start, Some(5));
+        assert_eq!(evidence[2].byte_end, Some(40));
+        assert_eq!(evidence[2].record_ordinal, Some(1));
+        assert_eq!(evidence[0].source_fingerprint.as_deref(), Some("b3-doc-a"));
+        assert_eq!(evidence[1].source_fingerprint.as_deref(), Some("b3-doc-b"));
         assert_eq!(
             evidence[0].source_document_id.as_deref(),
-            Some(doc.as_str())
+            Some(fixture.document_a.as_str())
+        );
+        assert_eq!(
+            evidence[1].source_document_id.as_deref(),
+            Some(fixture.document_b.as_str())
+        );
+        assert_eq!(
+            evidence
+                .iter()
+                .map(|span| span.occurrence_id.as_str())
+                .collect::<Vec<_>>(),
+            messages
+                .iter()
+                .map(|message| message.placement_id.as_str())
+                .collect::<Vec<_>>()
         );
     }
 
     #[test]
-    fn context_full_includes_sidechain_in_seq_order() {
-        let (cat, ses, [m1, m2, s1, m3], _) = ctx_fixture();
-        let resp = app_ctx(&cat)
+    fn context_full_keeps_repeated_stable_messages_as_distinct_occurrences() {
+        let fixture = ctx_fixture();
+        let resp = app_ctx(&fixture.store)
             .handle(ctx_req(
-                &ses,
+                &fixture.session,
                 ContextPolicy::Full,
                 ResponseBudget::default(),
             ))
@@ -1247,28 +1599,49 @@ mod tests {
         let AppResponse::Context {
             messages,
             branch_leaf,
+            branch_leaf_placement_id,
+            evidence,
             ..
         } = resp
         else {
             panic!("expected Context response");
         };
-        let wires: Vec<&str> = messages.iter().map(|(w, _)| w.as_str()).collect();
+        let wires: Vec<&str> = messages
+            .iter()
+            .map(|message| message.message_id.as_str())
+            .collect();
         assert_eq!(
             wires,
-            vec![m1.as_str(), m2.as_str(), s1.as_str(), m3.as_str()]
+            vec![
+                fixture.root.as_str(),
+                fixture.repeated.as_str(),
+                fixture.repeated.as_str(),
+                fixture.sidechain.as_str(),
+                fixture.leaf.as_str(),
+            ]
         );
-        assert_eq!(branch_leaf.as_deref(), Some(m3.as_str()));
+        assert_ne!(messages[1].placement_id, messages[2].placement_id);
+        assert_eq!(messages[1].placement_id, fixture.repeated_a.id.as_str());
+        assert_eq!(messages[2].placement_id, fixture.repeated_b.id.as_str());
+        assert_eq!(evidence.len(), 5);
+        assert_eq!(evidence[1].message_id, evidence[2].message_id);
+        assert_ne!(evidence[1].occurrence_id, evidence[2].occurrence_id);
+        assert_eq!(branch_leaf.as_deref(), Some(fixture.leaf.as_str()));
+        assert_eq!(
+            branch_leaf_placement_id.as_deref(),
+            Some(fixture.leaf_placement.id.as_str())
+        );
     }
 
     #[test]
-    fn context_budget_truncates_messages_with_reason() {
-        let (cat, ses, [m1, m2, ..], _) = ctx_fixture();
-        let resp = app_ctx(&cat)
+    fn context_budget_counts_placement_occurrences() {
+        let fixture = ctx_fixture();
+        let resp = app_ctx(&fixture.store)
             .handle(ctx_req(
-                &ses,
-                ContextPolicy::Mainline,
+                &fixture.session,
+                ContextPolicy::Full,
                 ResponseBudget {
-                    max_messages: 2,
+                    max_messages: 3,
                     ..Default::default()
                 },
             ))
@@ -1282,10 +1655,10 @@ mod tests {
         else {
             panic!("expected Context response");
         };
-        let wires: Vec<&str> = messages.iter().map(|(w, _)| w.as_str()).collect();
-        // root→leaf 序下截前 2 条：保根部链头。
-        assert_eq!(wires, vec![m1.as_str(), m2.as_str()]);
-        assert_eq!(evidence.len(), 2);
+        assert_eq!(messages.len(), 3);
+        assert_eq!(evidence.len(), 3);
+        assert_eq!(messages[1].message_id, messages[2].message_id);
+        assert_ne!(messages[1].placement_id, messages[2].placement_id);
         assert!(truncation.truncated);
         assert_eq!(
             truncation.reason.as_deref(),
@@ -1295,10 +1668,10 @@ mod tests {
 
     #[test]
     fn context_evidence_span_budget_reports_reason() {
-        let (cat, ses, ..) = ctx_fixture();
-        let resp = app_ctx(&cat)
+        let fixture = ctx_fixture();
+        let resp = app_ctx(&fixture.store)
             .handle(ctx_req(
-                &ses,
+                &fixture.session,
                 ContextPolicy::Mainline,
                 ResponseBudget {
                     max_evidence_spans: 1,
@@ -1326,9 +1699,9 @@ mod tests {
 
     #[test]
     fn context_missing_session_is_not_found() {
-        let (cat, ..) = ctx_fixture();
+        let fixture = ctx_fixture();
         let missing = StableId::native(IdKind::Session, "no-such-session");
-        let err = app_ctx(&cat)
+        let err = app_ctx(&fixture.store)
             .handle(ctx_req(
                 &missing,
                 ContextPolicy::Mainline,
@@ -1336,19 +1709,21 @@ mod tests {
             ))
             .unwrap_err();
         assert!(
-            matches!(err, AppError::Domain(DomainError::NotFound(_))),
+            matches!(err, AppError::Port(PortError::NotFound(_))),
             "{err}"
         );
     }
 
     #[test]
     fn context_malformed_session_payload_is_invariant_violation() {
-        let (mut cat, ..) = ctx_fixture();
-        let broken = StableId::native(IdKind::Session, "broken-session");
-        cat.insert(&broken, b"user\tnot canonical json".to_vec());
-        let err = app_ctx(&cat)
+        let mut fixture = ctx_fixture();
+        fixture
+            .store
+            .catalog
+            .insert(&fixture.session, b"user\tnot canonical json".to_vec());
+        let err = app_ctx(&fixture.store)
             .handle(ctx_req(
-                &broken,
+                &fixture.session,
                 ContextPolicy::Mainline,
                 ResponseBudget::default(),
             ))
@@ -1359,7 +1734,73 @@ mod tests {
         );
     }
 
-    fn app_ctx(cat: &MapCatalog) -> App<&MapCatalog, FakeIndex> {
+    #[test]
+    fn message_context_candidates_are_grouped_by_distinct_session() {
+        let mut fixture = ctx_fixture();
+        let second_session = StableId::native(IdKind::Session, "sess-other");
+        fixture.store.candidates.push(PortMessageContextCandidate {
+            session_id: second_session.clone(),
+            placement_ids: vec![fixture.root_placement.id.clone()],
+        });
+
+        let response = app_ctx(&fixture.store)
+            .handle(AppRequest::MessageContexts {
+                message_id: fixture.repeated.clone(),
+            })
+            .unwrap();
+        let AppResponse::MessageContexts {
+            message_id,
+            candidates,
+        } = response
+        else {
+            panic!("expected MessageContexts response");
+        };
+        assert_eq!(message_id, fixture.repeated.as_str());
+        assert_eq!(candidates.len(), 2);
+        let primary = candidates
+            .iter()
+            .find(|candidate| candidate.session_id == fixture.session.as_str())
+            .unwrap();
+        let expected: BTreeSet<String> = [
+            fixture.repeated_a.id.as_str().to_string(),
+            fixture.repeated_b.id.as_str().to_string(),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            primary
+                .placement_ids
+                .iter()
+                .cloned()
+                .collect::<BTreeSet<_>>(),
+            expected
+        );
+        assert!(
+            candidates
+                .iter()
+                .any(|candidate| candidate.session_id == second_session.as_str())
+        );
+    }
+
+    #[test]
+    fn message_contexts_empty_is_an_explicit_index_only_result() {
+        let fixture = ctx_fixture();
+        let index_only = StableId::native(IdKind::Message, "index-only");
+        let response = app_ctx(&fixture.store)
+            .handle(AppRequest::MessageContexts {
+                message_id: index_only.clone(),
+            })
+            .unwrap();
+        assert!(matches!(
+            response,
+            AppResponse::MessageContexts {
+                message_id,
+                candidates
+            } if message_id == index_only.as_str() && candidates.is_empty()
+        ));
+    }
+
+    fn app_ctx(cat: &GraphCatalog) -> App<&GraphCatalog, FakeIndex> {
         App::with_clock(cat, FakeIndex, clock_t0)
     }
 
@@ -1376,10 +1817,13 @@ mod tests {
         assert_eq!(staged.messages[1].seq, 1);
         assert_eq!(staged.messages[1].role, "assistant");
         assert_eq!(staged.messages[1].text, "yo");
+        assert_eq!(staged.report.committed, 2);
+        assert_eq!(staged.report.skipped, 0);
+        assert!(staged.report.diagnostics.is_empty());
     }
 
     #[test]
-    fn stage_preserves_spans_and_session_native_id() {
+    fn stage_preserves_spans_and_complete_parse_report() {
         // 内联 provider：emit 带 span 的消息并报告会话 native id，
         // 验证 staging 对两者的透传（不落在 FakeProvider 上，保持 testkit 最小）。
         struct SpanProvider;
@@ -1427,8 +1871,9 @@ mod tests {
                 .map_err(|e| ProviderError::Io(e.to_string()))?;
                 Ok(agentsessions_ports::ParseReport {
                     committed: 2,
+                    skipped: 3,
+                    diagnostics: vec!["record 3 skipped".into(), "unknown field seen".into()],
                     session_native_id: Some("native-sess-1".into()),
-                    ..Default::default()
                 })
             }
         }
@@ -1436,7 +1881,17 @@ mod tests {
         // span 逐条透传；None 保持显式缺失。
         assert_eq!(staged.messages[0].span, Some((0, 42)));
         assert_eq!(staged.messages[1].span, None);
-        // 会话 native id 从 ParseReport 透传到 staging 产物。
+        assert_eq!(staged.report.committed, 2);
+        assert_eq!(staged.report.skipped, 3);
+        assert_eq!(
+            staged.report.diagnostics,
+            vec!["record 3 skipped", "unknown field seen"]
+        );
+        assert_eq!(
+            staged.report.session_native_id.as_deref(),
+            Some("native-sess-1")
+        );
+        // Compatibility alias remains synchronized with the authoritative report.
         assert_eq!(staged.session_native_id.as_deref(), Some("native-sess-1"));
     }
 
