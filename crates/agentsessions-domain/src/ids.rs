@@ -96,6 +96,7 @@ pub struct StableId {
 /// 32 hex chars = 128 bits. Collision-resistant far beyond the id population we
 /// will ever hold, while keeping ids short enough to eyeball in logs.
 const DIGEST_HEX_LEN: usize = 32;
+const PLACEMENT_ID_PREFIX: &str = "plc_v1_";
 
 impl StableId {
     /// Adopt a provider-native id verbatim (tier [`Stability::Native`]).
@@ -182,11 +183,85 @@ impl StableId {
         }
         None
     }
+
+    /// Verify the wire value is consistent with the declared kind.
+    ///
+    /// A `StableId` deserialized from untrusted JSON could pair an arbitrary
+    /// kind with a mismatched value (e.g. kind `Message` but value
+    /// `"ses_v1_..."`); nothing else in the codebase would catch that because
+    /// entity validation only inspects `kind()`. Rejects empty adopted values
+    /// too, so all-messages-with-empty-native-ids cannot collide on one id.
+    pub fn validate(&self) -> bool {
+        !self.value.is_empty()
+            && self.value.starts_with(self.kind.prefix())
+            && !self.value[self.kind.prefix().len()..].is_empty()
+    }
 }
 
 impl fmt::Display for StableId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.value)
+    }
+}
+
+/// A deterministic identity for one contextual occurrence of a Message.
+///
+/// A placement is not a canonical entity and therefore does not use
+/// [`StableId`] or a stability tier. Its identity is derived only from logical,
+/// path-independent context: session, source document, message, and the
+/// source-local ordinal.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct PlacementId(String);
+
+impl PlacementId {
+    /// Derive the occurrence identity from relocation-invariant context.
+    pub fn derive(
+        session_id: &StableId,
+        source_document_id: &StableId,
+        message_id: &StableId,
+        source_ordinal: u32,
+    ) -> Self {
+        let ordinal = source_ordinal.to_le_bytes();
+        let facts = [
+            session_id.as_str().as_bytes(),
+            source_document_id.as_str().as_bytes(),
+            message_id.as_str().as_bytes(),
+            ordinal.as_slice(),
+        ];
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(PLACEMENT_ID_PREFIX.as_bytes());
+        for fact in facts {
+            hasher.update(&(fact.len() as u64).to_le_bytes());
+            hasher.update(fact);
+        }
+        let digest = hasher.finalize();
+        let hex = digest.to_hex();
+        Self(format!(
+            "{PLACEMENT_ID_PREFIX}{}",
+            &hex.as_str()[..DIGEST_HEX_LEN]
+        ))
+    }
+
+    /// Reconstruct a placement id from its wire representation.
+    pub fn from_wire(wire: &str) -> Option<Self> {
+        let digest = wire.strip_prefix(PLACEMENT_ID_PREFIX)?;
+        if digest.len() == DIGEST_HEX_LEN && digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            Some(Self(wire.to_string()))
+        } else {
+            None
+        }
+    }
+
+    /// The full wire string, including the versioned `plc_v1_` prefix.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for PlacementId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
     }
 }
 
@@ -254,5 +329,75 @@ mod tests {
     fn from_wire_rejects_unknown_prefix() {
         assert!(StableId::from_wire("bogus_v1_deadbeef").is_none());
         assert!(StableId::from_wire("").is_none());
+    }
+
+    #[test]
+    fn placement_id_is_deterministic_and_path_independent() {
+        let session = StableId::derive(IdKind::Session, Stability::Reconstructed, &[b"session"]);
+        let document = StableId::derive(
+            IdKind::Document,
+            Stability::Reconstructed,
+            &[b"document-bytes"],
+        );
+        let message = StableId::native(IdKind::Message, "native-message");
+
+        let at_original_path = PlacementId::derive(&session, &document, &message, 7);
+        let after_source_move = PlacementId::derive(&session, &document, &message, 7);
+
+        assert_eq!(at_original_path, after_source_move);
+        assert!(at_original_path.as_str().starts_with("plc_v1_"));
+        assert_eq!(
+            at_original_path.as_str().len(),
+            PLACEMENT_ID_PREFIX.len() + DIGEST_HEX_LEN
+        );
+    }
+
+    #[test]
+    fn placement_id_changes_with_each_identity_component() {
+        let session = StableId::derive(IdKind::Session, Stability::Reconstructed, &[b"session"]);
+        let other_session = StableId::derive(
+            IdKind::Session,
+            Stability::Reconstructed,
+            &[b"other-session"],
+        );
+        let document = StableId::derive(IdKind::Document, Stability::Reconstructed, &[b"document"]);
+        let other_document = StableId::derive(
+            IdKind::Document,
+            Stability::Reconstructed,
+            &[b"other-document"],
+        );
+        let message = StableId::native(IdKind::Message, "message");
+        let other_message = StableId::native(IdKind::Message, "other-message");
+        let base = PlacementId::derive(&session, &document, &message, 1);
+
+        assert_ne!(
+            base,
+            PlacementId::derive(&other_session, &document, &message, 1)
+        );
+        assert_ne!(
+            base,
+            PlacementId::derive(&session, &other_document, &message, 1)
+        );
+        assert_ne!(
+            base,
+            PlacementId::derive(&session, &document, &other_message, 1)
+        );
+        assert_ne!(base, PlacementId::derive(&session, &document, &message, 2));
+    }
+
+    #[test]
+    fn placement_id_wire_roundtrip_is_strict() {
+        let session = StableId::native(IdKind::Session, "session");
+        let document = StableId::native(IdKind::Document, "document");
+        let message = StableId::native(IdKind::Message, "message");
+        let original = PlacementId::derive(&session, &document, &message, 0);
+
+        assert_eq!(
+            PlacementId::from_wire(original.as_str()).as_ref(),
+            Some(&original)
+        );
+        assert!(PlacementId::from_wire("plc_v1_short").is_none());
+        assert!(PlacementId::from_wire("plc_v1_zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz").is_none());
+        assert!(PlacementId::from_wire("msg_v1_00000000000000000000000000000000").is_none());
     }
 }

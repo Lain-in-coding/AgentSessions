@@ -24,6 +24,10 @@ pub enum DomainError {
     /// 身份稳定性不足，无法按 native 等级承诺（见 RFC-0001）。
     #[error("unstable identity: {0}")]
     UnstableIdentity(String),
+
+    /// 会话内的上下文关系无法唯一解析，不能替调用方猜测分支。
+    #[error("ambiguous graph: {0}")]
+    AmbiguousGraph(String),
 }
 
 impl DomainError {
@@ -35,6 +39,7 @@ impl DomainError {
             DomainError::InvalidRequest(_) => "invalid_request",
             DomainError::InvariantViolation(_) => "invariant_violation",
             DomainError::UnstableIdentity(_) => "unstable_identity",
+            DomainError::AmbiguousGraph(_) => "ambiguous_graph",
         }
     }
 }
@@ -59,6 +64,10 @@ mod tests {
         assert_eq!(
             DomainError::UnstableIdentity("x".into()).code(),
             "unstable_identity"
+        );
+        assert_eq!(
+            DomainError::AmbiguousGraph("x".into()).code(),
+            "ambiguous_graph"
         );
     }
 }
