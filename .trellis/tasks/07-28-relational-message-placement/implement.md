@@ -96,9 +96,11 @@ planning summary receives fresh user approval.
       full-root rerun remains open. (Gate D rerun in progress: fixed-binary
       subset runs pass all six invariants; full-corpus rerun pending result.)
 - [ ] Update real-data evidence, provider maturity, and core evidence matrix from
-      the latest actual run. Both providers remain Experimental and contracts/
-      evidence governance remains Draft; the failed full run is not presented as
-      green.
+      the latest actual run. (Partial update committed 2026-08-10: fixed-binary
+      subset green run recorded and full-corpus rerun marked open; the final
+      update awaits the full-corpus result.) Both providers remain Experimental
+      and contracts/evidence governance remains Draft; the failed full run is
+      not presented as green.
 - [ ] Review the parent task's remaining integration criteria without repeating
       archived children 1–8. The review is complete, but parent acceptance remains
       open pending one corpus-wide full-root run with all six invariants green.
