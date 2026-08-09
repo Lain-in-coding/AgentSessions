@@ -708,6 +708,36 @@ def cmd_add_subtask(args: argparse.Namespace) -> int:
         print(colored(f"Error: Child task.json not found: {args.child_dir}", Colors.RED), file=sys.stderr)
         return 1
 
+    # Reject cycles: linking child -> parent must not create a loop in the
+    # parent/child graph (tree rendering recurses without a visited set, so a
+    # cycle would make `task.py list` blow the stack).
+    def _has_cycle(start_dir_name: str, target_dir_name: str) -> bool:
+        seen: set[str] = set()
+        stack = [start_dir_name]
+        while stack:
+            name = stack.pop()
+            if name in seen:
+                continue
+            seen.add(name)
+            data = read_json(resolve_task_dir(name, repo_root) / FILE_TASK_JSON)
+            if not data:
+                continue
+            for child in data.get("children", []):
+                if child == target_dir_name:
+                    return True
+                stack.append(child)
+        return False
+
+    if _has_cycle(parent_dir.name, child_dir.name):
+        print(
+            colored(
+                f"Error: linking {child_dir.name} -> {parent_dir.name} would create a cycle",
+                Colors.RED,
+            ),
+            file=sys.stderr,
+        )
+        return 1
+
     parent_data = read_json(parent_json_path)
     child_data = read_json(child_json_path)
 

@@ -1,0 +1,16 @@
+{"file":".trellis/tasks/07-28-relational-message-placement/prd.md","reason":"Verify every R1-R12 requirement and acceptance criterion without weakening conflicts or privacy."}
+{"file":".trellis/tasks/07-28-relational-message-placement/design.md","reason":"Review implementation against the frozen placement identity, graph resolution, v7 transaction, and compatibility policy."}
+{"file":".trellis/tasks/07-28-relational-message-placement/implement.md","reason":"Check every ordered implementation item, gate, rollback point, and required validation command."}
+{"file":".trellis/tasks/07-28-relational-message-placement/research/application-context-audit.md","reason":"Re-check that no Application/evidence/TUI alias read path remains authoritative."}
+{"file":".trellis/tasks/07-28-relational-message-placement/research/relational-storage-audit.md","reason":"Re-check relation-only no-op, outbox, tombstone, migration, selector, and parse-loss defects are covered."}
+{"file":"docs/evidence/integration-beta/real-data-regression.md","reason":"Compare the latest actual corpus result with the previous exit-6 blocker; never claim a pass before harness exit 0."}
+{"file":"docs/architecture/RFC-0002-provider-adapter-contract.md","reason":"Verify skipped records mark a source incomplete, cannot derive tombstones, and cannot leave relation completeness enabled."}
+{"file":"docs/operations/REAL-DATA-REGRESSION.md","reason":"Verify read-only operation, six invariants, aggregate-only output, and report privacy."}
+{"file":"docs/product/PROVIDER-MATURITY-MATRIX.md","reason":"Ensure both providers remain Experimental until all independent promotion gaps close."}
+{"file":"docs/operations/core-beta-evidence-matrix.md","reason":"Ensure evidence rows distinguish local process verification from actual corpus outcome."}
+{"file":"docs/contracts/CONTRACT-cli-robot-mcp-draft.md","reason":"Verify CLI, Robot, MCP, and TUI project one shared ADT with exact occurrence/document evidence."}
+{"file":".trellis/spec/agentsessions-domain/backend/index.md","reason":"Check pure placement-aware selector invariants and dependency direction."}
+{"file":".trellis/spec/agentsessions-ports/backend/index.md","reason":"Check the context graph capability leaks no SQLite, JSON schema, or filesystem details."}
+{"file":".trellis/spec/agentsessions-adapters-sqlite/backend/index.md","reason":"Check additive migration, atomic outbox/CAS, no-op, tombstone, and rebuild preservation."}
+{"file":".trellis/spec/agentsessions-cli/backend/index.md","reason":"Check shared renderers, TUI/MCP boundaries, exit codes, and report privacy."}
+{"file": ".trellis/tasks/07-28-relational-message-placement/research/domain-ports-audit.md", "reason": "Verify stable/contextual field split and that contextual event fields feed placements, not stable Message."}

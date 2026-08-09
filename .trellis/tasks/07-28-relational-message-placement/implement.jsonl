@@ -1,0 +1,16 @@
+{"file":".trellis/tasks/07-28-relational-message-placement/prd.md","reason":"Authoritative requirements R1-R12, acceptance criteria, evidence constraints, and scope boundary."}
+{"file":".trellis/tasks/07-28-relational-message-placement/design.md","reason":"Frozen stable Message, placement/edge, typed port, SQLite v7, compatibility, and migration design."}
+{"file":".trellis/tasks/07-28-relational-message-placement/research/authoritative-handoff-audit.md","reason":"Verified Git/task/evidence/model facts and why this child is the remaining Integration Beta blocker."}
+{"file":".trellis/tasks/07-28-relational-message-placement/research/application-context-audit.md","reason":"Verified Application/evidence/frontend read path and placement identity defects."}
+{"file":".trellis/tasks/07-28-relational-message-placement/research/relational-storage-audit.md","reason":"Verified SQLite transaction, migration, selector, parse-loss, and no-loss implications."}
+{"file":"docs/architecture/RFC-0001-canonical-model-and-stable-id.md","reason":"Draft canonical identity/topology model and MessageEdge relation; status must remain Draft."}
+{"file":"docs/architecture/RFC-0002-provider-adapter-contract.md","reason":"Recoverable-skip/incomplete-source semantics that govern relation completeness and tombstone safety."}
+{"file":"docs/contracts/CONTRACT-cli-robot-mcp-draft.md","reason":"Shared Application ADT, exact EvidenceSpan occurrence/document identity, and frontend boundary."}
+{"file":"docs/operations/migration-v5-to-v6.md","reason":"Existing additive migration and honest-null precedent to preserve in v6-to-v7 behavior."}
+{"file":"docs/operations/REAL-DATA-REGRESSION.md","reason":"Authorized read-only aggregate-only regression procedure and six invariant meanings."}
+{"file":".trellis/spec/agentsessions-domain/backend/index.md","reason":"Pure core and selector/identity invariants."}
+{"file":".trellis/spec/agentsessions-ports/backend/index.md","reason":"Backend-independent port boundary and provider event/report contract."}
+{"file":".trellis/spec/agentsessions-application/backend/index.md","reason":"Application ownership of context selection, evidence, budgets, and shared ADT."}
+{"file":".trellis/spec/agentsessions-adapters-sqlite/backend/index.md","reason":"Catalog/FTS truth split, additive migrations, durable outbox, generation, membership, and known parent limit."}
+{"file":".trellis/spec/agentsessions-cli/backend/index.md","reason":"Composition-root, shared renderer, TUI/MCP boundary, privacy, and real-data evidence rules."}
+{"file": ".trellis/tasks/07-28-relational-message-placement/research/domain-ports-audit.md", "reason": "Stable Message field split, required placement/edge relation semantics, MessageEvent facts, and context-graph port consequence."}

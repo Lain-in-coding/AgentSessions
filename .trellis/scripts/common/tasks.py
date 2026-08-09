@@ -107,6 +107,6 @@ def children_progress(
     # parent progress doesn't regress when children are archived.
     done = sum(
         1 for c in children
-        if c not in all_statuses or all_statuses.get(c) in ("completed", "done")
+        if c not in all_statuses or all_statuses.get(c) == "completed"
     )
     return f" [{done}/{len(children)} done]"

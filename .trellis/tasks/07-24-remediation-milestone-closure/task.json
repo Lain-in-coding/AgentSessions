@@ -3,7 +3,7 @@
   "name": "remediation-milestone-closure",
   "title": "AgentSessions audit remediation and milestone closure",
   "description": "",
-  "status": "planning",
+  "status": "in_progress",
   "dev_type": null,
   "scope": "workspace",
   "package": "agentsessions-adapters-sqlite",

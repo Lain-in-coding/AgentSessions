@@ -66,14 +66,15 @@ python ./.trellis/scripts/task.py set-scope <name> <scope>
 # Hierarchy (parent/child)
 python ./.trellis/scripts/task.py add-subtask <parent> <child>
 python ./.trellis/scripts/task.py remove-subtask <parent> <child>
-
-# PR creation
-python ./.trellis/scripts/task.py create-pr [name] [--dry-run]
 ```
 
 > Run `python ./.trellis/scripts/task.py --help` to see the authoritative, up-to-date list.
+> PR/issue creation is handled by the platform's own tooling (`gh pr create`, etc.);
+> `task.py` has no `create-pr` subcommand.
 
-**Current-task mechanism**: `task.py create` creates the task directory and (when session identity is available) auto-sets the per-session active-task pointer so the planning breadcrumb fires immediately. `task.py start` writes the same pointer (idempotent if already set) and flips `task.json.status` from `planning` to `in_progress`. State is stored under `.trellis/.runtime/sessions/`. If no context key is available from hook input, `TRELLIS_CONTEXT_ID`, or a platform-native session environment variable, there is no session-local active pointer and `task.py start` fails with a session identity hint. `task.py current --source` may therefore report no task in a clean clone; use `task.py list` to identify the sole shared task with `status=in_progress`. `task.py finish` deletes the current session file (status unchanged). `task.py archive <task>` writes `status=completed`, moves the directory to `archive/`, and deletes any runtime session files that still point at the archived task.
+> Run `python ./.trellis/scripts/task.py --help` to see the authoritative, up-to-date list.
+
+**Current-task mechanism**: `task.py create` creates the task directory and (when session identity is available) auto-sets the per-session active-task pointer so the planning breadcrumb fires immediately. `task.py start` writes the same pointer (idempotent if already set) and flips `task.json.status` from `planning` to `in_progress`. State is stored under `.trellis/.runtime/sessions/`. If no context key is available from hook input, `TRELLIS_CONTEXT_ID`, or a platform-native session environment variable, there is no session-local active pointer and `task.py start` prints a session identity hint (yellow) while still flipping the status. `task.py current --source` may therefore report no task in a clean clone; use `task.py list` to identify the sole shared task with `status=in_progress`. `task.py finish` deletes the current session file (status unchanged). `task.py archive <task>` writes `status=completed`, moves the directory to `archive/`, and deletes any runtime session files that still point at the archived task.
 
 ### Workspace System
 
@@ -683,20 +684,16 @@ your per-turn prompt text
 Constraints:
 - STATUS charset: `[A-Za-z0-9_-]+` (underscores and hyphens allowed, e.g. `in-review`, `blocked-by-team`)
 - A lifecycle hook must write `task.json.status` to your custom value, otherwise the tag is never read
-- Lifecycle hooks live in `task.json.hooks.after_*` and bind to one of `after_create / after_start / after_finish / after_archive`
+- Lifecycle hooks are configured in `.trellis/config.yaml` under `hooks:`, NOT in `task.json` (the runtime reads only `config.yaml`; a `hooks` field in `task.json` is ignored)
 
 ### Adding a lifecycle hook
 
-Add a `hooks` field to your `task.json`:
+Add the command under `.trellis/config.yaml`:
 
-```json
-{
-  "hooks": {
-    "after_finish": [
-      "your-script-or-command-here"
-    ]
-  }
-}
+```yaml
+hooks:
+  after_finish:
+    - your-script-or-command-here
 ```
 
 Supported events: `after_create / after_start / after_finish / after_archive`. Note that `after_finish` ≠ a status change (it only clears the active-task pointer); use `after_archive` for "task is done" notifications.
@@ -705,5 +702,5 @@ Supported events: `after_create / after_start / after_finish / after_archive`. N
 
 For the workflow state machine's runtime contract, the locations of all status writers, pseudo-statuses (`no_task` / `stale_<source_type>`), the hook reachability matrix, and other deep details, see:
 
-- `.trellis/spec/cli/backend/workflow-state-contract.md` — runtime contract + writer table + test invariants
-- `.trellis/scripts/inject-workflow-state.py` — actual parser (reads workflow.md only, no embedded text)
+- `.trellis/spec/guides/index.md` — package spec index (this repository's spec packages are `agentsessions-*`, not `cli`)
+- `.claude/hooks/inject-workflow-state.py` and `.codex/hooks/inject-workflow-state.py` — the actual parsers (read workflow.md only, no embedded text)

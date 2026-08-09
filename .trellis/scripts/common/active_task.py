@@ -15,7 +15,7 @@ import re
 import sys
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -529,12 +529,21 @@ def _resolve_single_session_fallback(repo_root: Path) -> ActiveTask | None:
     Used when context-key resolution fails (typical for class-2 platform
     sub-agents). Returns None if 0 or ≥2 session files are present — refuses
     to pick across windows so 04-21's multi-session isolation contract holds.
+
+    Session files are considered stale (and ignored for the count) when their
+    `last_seen_at` is older than `SESSION_FILE_TTL_DAYS`; a stale single file
+    must not permanently disable the fallback for a fresh window.
     """
     sessions_dir = _runtime_sessions_dir(repo_root)
     if not sessions_dir.is_dir():
         return None
 
-    session_files = sorted(sessions_dir.glob("*.json"))
+    now = datetime.now(timezone.utc)
+    session_files = sorted(
+        f
+        for f in sessions_dir.glob("*.json")
+        if _session_file_fresh(f, now)
+    )
     if len(session_files) != 1:
         return None
 
@@ -546,6 +555,24 @@ def _resolve_single_session_fallback(repo_root: Path) -> ActiveTask | None:
 
     fallback_key = session_file.stem
     return _active_from_ref(task_ref, repo_root, "session-fallback", fallback_key)
+
+
+SESSION_FILE_TTL_DAYS = 7
+
+
+def _session_file_fresh(path: Path, now: datetime) -> bool:
+    """True when the session file's `last_seen_at` is within the TTL window."""
+    try:
+        context = _read_json(path) or {}
+        last_seen = context.get("last_seen_at")
+        if not isinstance(last_seen, str):
+            return False
+        parsed = datetime.fromisoformat(last_seen.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return (now - parsed) <= timedelta(days=SESSION_FILE_TTL_DAYS)
+    except (ValueError, TypeError, OSError):
+        return False
 
 
 def _utc_now() -> str:

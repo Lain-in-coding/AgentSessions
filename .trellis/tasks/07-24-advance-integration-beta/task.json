@@ -3,7 +3,7 @@
   "name": "advance-integration-beta",
   "title": "Advance 0.3 integration beta",
   "description": "",
-  "status": "planning",
+  "status": "in_progress",
   "dev_type": null,
   "scope": "workspace",
   "package": "agentsessions-adapters-sqlite",
@@ -26,7 +26,8 @@
     "07-26-mcp-v0-skill",
     "07-27-tui-preview",
     "07-27-install-promotion",
-    "07-27-cross-source-session"
+    "07-27-cross-source-session",
+    "07-28-relational-message-placement"
   ],
   "parent": "07-24-remediation-milestone-closure",
   "relatedFiles": [],

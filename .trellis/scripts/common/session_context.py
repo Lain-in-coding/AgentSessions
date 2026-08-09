@@ -609,7 +609,7 @@ def get_context_text(repo_root: Path | None = None) -> str:
     my_task_count = 0
 
     for t in all_tasks.values():
-        if t.assignee == developer and t.status != "done":
+        if t.assignee == developer and t.status != "completed":
             progress = children_progress(t.children, all_statuses)
             lines.append(f"- [{t.priority}] {t.title} ({t.status}){progress}")
             my_task_count += 1
@@ -676,7 +676,7 @@ def get_context_record_json(repo_root: Path | None = None) -> dict:
         if t.assignee == developer:
             done = sum(
                 1 for c in t.children
-                if all_statuses.get(c) in ("completed", "done")
+                if all_statuses.get(c) == "completed"
             )
             my_tasks.append({
                 "dir": t.dir_name,
