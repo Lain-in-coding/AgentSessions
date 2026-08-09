@@ -12,9 +12,13 @@ pub use cas::{cas_activate, read_current, write_current};
 pub use lease::WriterLease;
 pub use source_fs::{SnapshotFs, capture, read_verified, verify_snapshot};
 
-use agentsessions_domain::{IdKind, StableId};
+use agentsessions_domain::{
+    EvidenceSpan, IdKind, Message, MessageEdge, MessagePlacement, MessageRelation, PlacementId,
+    Role, SessionContextGraph, SourceDocument, StableId,
+};
 use agentsessions_ports::{
-    CatalogEntry, CatalogStore, PortError, PortResult, SearchHit, SearchIndex,
+    CatalogEntry, CatalogStore, ContextGraphStore, ContextStats, MessageContextCandidate,
+    PortError, PortResult, SearchHit, SearchIndex,
 };
 use rusqlite::{Connection, OptionalExtension};
 use std::any::Any;
@@ -72,14 +76,22 @@ const INDEX_PROJECTION_VERSION: &[u8] = b"sqlite-fts5-v1";
 
 /// 从存储的 catalog payload 投影出可检索正文——rebuild 的规范投影函数。
 ///
-/// 约定：payload 里首个制表符之前是 role 前缀，之后是消息正文；无制表符则整体即正文。
-/// 这是 ingest/sync 写入路径（`role\ttext`）的精确逆运算，也兼容切片期 `index`
-/// 命令写入的无前缀纯文本（无制表符→整体为正文）。因此仅凭 catalog 即可无损重建
-/// FTS 投影，无需依赖可能已损坏/丢失的旧 FTS 内容。
+/// 约定：现代 ingest/sync 写入的是完整 JSON payload（`{"role":..,"text":..,..}`），
+/// 先尝试解析 JSON 取 `text` 字段；解析失败再回退历史格式——payload 里首个制表符
+/// 之前是 role 前缀、之后是消息正文，无制表符则整体即正文（切片期 `index` 命令写入的
+/// 无前缀纯文本）。因此仅凭 catalog 即可无损重建 FTS 投影，无需依赖可能已损坏/丢失的
+/// 旧 FTS 内容。
 ///
-/// 已知限制：切片期 `index` 命令若写入本身含制表符的正文，投影会截断到首个制表符
-/// 之后——该命令仅供切片期测试，真实数据均经 ingest/sync 带 role 前缀写入。
+/// 已知限制：切片期 `index` 命令若写入本身含制表符的正文，历史格式投影会截断到首个
+/// 制表符之后——该命令仅供切片期测试，真实数据均经 ingest/sync 以 JSON payload 写入。
 fn searchable_text(payload: &[u8]) -> String {
+    // Modern shape: `{"role":...,"text":...,...}`. Indexing the raw JSON would
+    // let structural tokens (`user`, `null`, `sessions`) match every message.
+    if let Ok(value) = serde_json::from_slice::<serde_json::Value>(payload)
+        && let Some(text) = value.get("text").and_then(serde_json::Value::as_str)
+    {
+        return text.to_string();
+    }
     let text = String::from_utf8_lossy(payload);
     match text.split_once('\t') {
         Some((_role, body)) => body.to_string(),
@@ -101,15 +113,15 @@ fn hash_field(hasher: &mut blake3::Hasher, bytes: &[u8]) {
 /// `session` kept as a single-value alias) and every other field must still
 /// agree byte-for-byte. A message whose text, parent, or span depends on which
 /// file it came from is a real inconsistency and is still rejected.
-fn merge_message_payloads(wire: &str, left: &[u8], right: &[u8]) -> PortResult<Vec<u8>> {
+fn merge_message_payloads(_wire: &str, left: &[u8], right: &[u8]) -> PortResult<Vec<u8>> {
     let parse = |bytes: &[u8]| -> PortResult<serde_json::Map<String, serde_json::Value>> {
         match serde_json::from_slice::<serde_json::Value>(bytes) {
             Ok(serde_json::Value::Object(map)) => Ok(map),
             // Slice-era rows hold bare text rather than canonical JSON. Those
             // cannot be reconciled field by field, so the conflict stands.
-            _ => Err(PortError::Backend(format!(
-                "message {wire} has conflicting projections across sources"
-            ))),
+            _ => Err(PortError::Backend(
+                "message has conflicting projections across sources".into(),
+            )),
         }
     };
 
@@ -136,9 +148,9 @@ fn merge_message_payloads(wire: &str, left: &[u8], right: &[u8]) -> PortResult<V
         if let Some(list) = map.get("spans").and_then(|v| v.as_array()) {
             for entry in list {
                 let Some(document) = entry.get("document").and_then(|v| v.as_str()) else {
-                    return Err(PortError::Backend(format!(
-                        "message {wire} has a span without a document reference"
-                    )));
+                    return Err(PortError::Backend(
+                        "message has a span without a document reference".into(),
+                    ));
                 };
                 spans.insert(document.to_string(), entry.clone());
             }
@@ -153,23 +165,67 @@ fn merge_message_payloads(wire: &str, left: &[u8], right: &[u8]) -> PortResult<V
         .into_iter()
         .find_map(|map| map.get("span").filter(|value| value.is_object()).cloned());
 
-    // Only the per-source fields may differ. Comparing every other key in both
-    // directions catches a field present on one side and absent on the other,
-    // which a one-way comparison would silently accept.
+    // Only stable Message fields are conflict authority. Contextual compatibility
+    // aliases may differ and are regenerated from v7 relations once every known
+    // contributing source is relation-complete.
     for (a, b) in [(&left_map, &right_map), (&right_map, &left_map)] {
         for (key, value) in a {
-            if matches!(key.as_str(), "session" | "sessions" | "span" | "spans") {
+            if matches!(
+                key.as_str(),
+                "session"
+                    | "sessions"
+                    | "span"
+                    | "spans"
+                    | "parent"
+                    | "parent_native_id"
+                    | "is_sidechain"
+                    | "seq"
+            ) {
                 continue;
             }
             if b.get(key) != Some(value) {
-                return Err(PortError::Backend(format!(
-                    "message {wire} has conflicting projections across sources"
-                )));
+                // Codex's old adapter stored the occurrence-local outer
+                // envelope timestamp as the message timestamp; the current
+                // adapter emits no stable timestamp (different occurrences
+                // carry different envelope timestamps). Re-ingesting such a
+                // source therefore compares a string against null for the
+                // same stable message, which must not be a conflict: the
+                // merged value is null (no stable timestamp exists).
+                if key == "timestamp"
+                    && matches!(
+                        (value, b.get(key)),
+                        (serde_json::Value::String(_), Some(serde_json::Value::Null))
+                            | (serde_json::Value::Null, Some(serde_json::Value::String(_)))
+                    )
+                {
+                    continue;
+                }
+                return Err(PortError::Backend(
+                    "message has conflicting projections across sources".into(),
+                ));
             }
         }
     }
 
+    // Timestamp is occurrence-local for Codex: an old adapter wrote the outer
+    // envelope timestamp, the current one emits none. When projections disagree
+    // on it (string vs null), converge deterministically on null regardless of
+    // which projection happens to be on the left.
+    let timestamp_values: Vec<&serde_json::Value> = [&left_map, &right_map]
+        .into_iter()
+        .filter_map(|map| map.get("timestamp"))
+        .collect();
+    let timestamp_converges_to_null = timestamp_values
+        .iter()
+        .any(|value| !matches!(value, serde_json::Value::Null))
+        && timestamp_values
+            .iter()
+            .any(|value| matches!(value, serde_json::Value::Null));
+
     let mut merged = left_map;
+    if timestamp_converges_to_null {
+        merged.insert("timestamp".to_string(), serde_json::Value::Null);
+    }
     let sessions: Vec<String> = sessions.into_iter().collect();
     merged.insert(
         "session".to_string(),
@@ -212,17 +268,15 @@ fn merge_message_payloads(wire: &str, left: &[u8], right: &[u8]) -> PortResult<V
 /// the CLI passes sources in a fixed order, so the same corpus yields the same
 /// merged bytes and an unchanged re-sync still registers as a content-level
 /// no-op.
-fn merge_session_payloads(wire: &str, left: &[u8], right: &[u8]) -> PortResult<Vec<u8>> {
-    fn parse(wire: &str, bytes: &[u8]) -> PortResult<serde_json::Value> {
+fn merge_session_payloads(_wire: &str, left: &[u8], right: &[u8]) -> PortResult<Vec<u8>> {
+    fn parse(bytes: &[u8]) -> PortResult<serde_json::Value> {
         serde_json::from_slice(bytes).map_err(|error| {
-            PortError::Backend(format!(
-                "session {wire} payload is not canonical JSON: {error}"
-            ))
+            PortError::Backend(format!("session payload is not canonical JSON: {error}"))
         })
     }
 
-    let left_value = parse(wire, left)?;
-    let right_value = parse(wire, right)?;
+    let left_value = parse(left)?;
+    let right_value = parse(right)?;
 
     // Member order is load-bearing: readers treat a member's position in this
     // array as its in-session sequence number, and branch selection picks the
@@ -250,12 +304,10 @@ fn merge_session_payloads(wire: &str, left: &[u8], right: &[u8]) -> PortResult<V
         let list = value
             .get("messages")
             .and_then(|v| v.as_array())
-            .ok_or_else(|| {
-                PortError::Backend(format!("session {wire} payload lacks a messages array"))
-            })?;
+            .ok_or_else(|| PortError::Backend("session payload lacks a messages array".into()))?;
         for entry in list {
             let member = entry.as_str().ok_or_else(|| {
-                PortError::Backend(format!("session {wire} has a non-string message member"))
+                PortError::Backend("session has a non-string message member".into())
             })?;
             if seen.insert(member.to_string()) {
                 members.push(member.to_string());
@@ -275,6 +327,253 @@ fn merge_session_payloads(wire: &str, left: &[u8], right: &[u8]) -> PortResult<V
     serde_json::to_vec(&merged).map_err(backend)
 }
 
+/// One relation row to insert or replace in a relation-aware batch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RelationUpsertManifest {
+    Placement(MessagePlacement),
+    Edge(MessageEdge),
+}
+
+impl RelationUpsertManifest {
+    fn canonical_key(&self) -> String {
+        match self {
+            Self::Placement(placement) => format!("placement:{}", placement.id.as_str()),
+            Self::Edge(edge) => format!("edge:{}", edge.child_placement_id.as_str()),
+        }
+    }
+
+    fn canonical_value(&self) -> serde_json::Value {
+        match self {
+            Self::Placement(placement) => serde_json::json!({
+                "kind": "message_placement",
+                "placement": placement,
+            }),
+            Self::Edge(edge) => serde_json::json!({
+                "kind": "message_edge",
+                "edge": edge,
+            }),
+        }
+    }
+}
+
+/// One relation row to delete in a relation-aware batch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RelationDeleteManifest {
+    Placement(PlacementId),
+    Edge(PlacementId),
+}
+
+impl RelationDeleteManifest {
+    fn canonical_key(&self) -> String {
+        match self {
+            Self::Placement(id) => format!("placement:{}", id.as_str()),
+            Self::Edge(id) => format!("edge:{}", id.as_str()),
+        }
+    }
+
+    fn canonical_value(&self) -> serde_json::Value {
+        match self {
+            Self::Placement(id) => serde_json::json!({
+                "kind": "message_placement",
+                "placement_id": id,
+            }),
+            Self::Edge(id) => serde_json::json!({
+                "kind": "message_edge",
+                "child_placement_id": id,
+            }),
+        }
+    }
+}
+
+/// One durable source-to-entity membership row.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct SourceEntityMembershipManifest {
+    entity_id: String,
+    document_id: Option<String>,
+}
+
+impl SourceEntityMembershipManifest {
+    fn canonical_value(&self) -> serde_json::Value {
+        serde_json::json!({
+            "entity_id": self.entity_id,
+            "document_id": self.document_id,
+        })
+    }
+}
+
+/// Complete source-scoped state after applying one scan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SourceReplacementManifest {
+    source_path: String,
+    entity_memberships: Vec<SourceEntityMembershipManifest>,
+    placement_ids: Vec<PlacementId>,
+    relation_complete: bool,
+}
+
+impl SourceReplacementManifest {
+    fn canonical_value(&self) -> serde_json::Value {
+        let mut entity_memberships = self.entity_memberships.clone();
+        entity_memberships.sort();
+        let entity_memberships: Vec<_> = entity_memberships
+            .iter()
+            .map(SourceEntityMembershipManifest::canonical_value)
+            .collect();
+        let mut placement_ids = self.placement_ids.clone();
+        placement_ids.sort();
+        serde_json::json!({
+            "source_path": self.source_path,
+            "entity_memberships": entity_memberships,
+            "placement_ids": placement_ids,
+            "relation_complete": self.relation_complete,
+        })
+    }
+}
+
+/// Canonical relation/source manifests stored beside the entity manifest.
+#[derive(Debug, Clone, Default)]
+struct RelationManifests {
+    relation_upserts: Vec<RelationUpsertManifest>,
+    relation_deletes: Vec<RelationDeleteManifest>,
+    source_replacements: Vec<SourceReplacementManifest>,
+}
+
+impl RelationManifests {
+    fn validate(&self) -> PortResult<()> {
+        for upsert in &self.relation_upserts {
+            match upsert {
+                RelationUpsertManifest::Placement(placement) => {
+                    validate_placement(placement)?;
+                }
+                RelationUpsertManifest::Edge(edge) => validate_edge(edge)?,
+            }
+        }
+        let mut upsert_keys: Vec<_> = self
+            .relation_upserts
+            .iter()
+            .map(RelationUpsertManifest::canonical_key)
+            .collect();
+        upsert_keys.sort();
+        if upsert_keys.windows(2).any(|window| window[0] == window[1]) {
+            return Err(PortError::Backend(
+                "index batch contains duplicate relation upserts".into(),
+            ));
+        }
+
+        let mut delete_keys: Vec<_> = self
+            .relation_deletes
+            .iter()
+            .map(RelationDeleteManifest::canonical_key)
+            .collect();
+        delete_keys.sort();
+        if delete_keys.windows(2).any(|window| window[0] == window[1]) {
+            return Err(PortError::Backend(
+                "index batch contains duplicate relation deletes".into(),
+            ));
+        }
+        if upsert_keys
+            .iter()
+            .any(|key| delete_keys.binary_search(key).is_ok())
+        {
+            return Err(PortError::Backend(
+                "index batch cannot upsert and delete the same relation".into(),
+            ));
+        }
+
+        let mut source_paths: Vec<_> = self
+            .source_replacements
+            .iter()
+            .map(|replacement| replacement.source_path.as_str())
+            .collect();
+        source_paths.sort_unstable();
+        if source_paths.windows(2).any(|window| window[0] == window[1]) {
+            return Err(PortError::Backend(
+                "index batch contains duplicate source replacements".into(),
+            ));
+        }
+
+        for replacement in &self.source_replacements {
+            let mut entity_ids: Vec<_> = replacement
+                .entity_memberships
+                .iter()
+                .map(|membership| membership.entity_id.as_str())
+                .collect();
+            entity_ids.sort_unstable();
+            if entity_ids.windows(2).any(|window| window[0] == window[1]) {
+                return Err(PortError::Backend(
+                    "source replacement contains duplicate entity memberships".into(),
+                ));
+            }
+            for membership in &replacement.entity_memberships {
+                StableId::from_wire(&membership.entity_id).ok_or_else(|| {
+                    PortError::Backend("source replacement has an invalid entity id".into())
+                })?;
+                if let Some(document_id) = &membership.document_id {
+                    let document_id = StableId::from_wire(document_id).ok_or_else(|| {
+                        PortError::Backend("source replacement has an invalid document id".into())
+                    })?;
+                    if document_id.kind() != IdKind::Document {
+                        return Err(PortError::Backend(
+                            "source membership document id has wrong kind".into(),
+                        ));
+                    }
+                }
+            }
+
+            let mut placement_ids = replacement.placement_ids.clone();
+            placement_ids.sort();
+            if placement_ids
+                .windows(2)
+                .any(|window| window[0] == window[1])
+            {
+                return Err(PortError::Backend(
+                    "source replacement contains duplicate placement claims".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn canonical_json(&self) -> PortResult<(String, String, String)> {
+        self.validate()?;
+        let mut upserts: Vec<_> = self.relation_upserts.iter().collect();
+        upserts.sort_by_key(|item| item.canonical_key());
+        let upserts: Vec<_> = upserts
+            .into_iter()
+            .map(RelationUpsertManifest::canonical_value)
+            .collect();
+
+        let mut deletes: Vec<_> = self.relation_deletes.iter().collect();
+        deletes.sort_by_key(|item| item.canonical_key());
+        let deletes: Vec<_> = deletes
+            .into_iter()
+            .map(RelationDeleteManifest::canonical_value)
+            .collect();
+
+        let mut replacements: Vec<_> = self.source_replacements.iter().collect();
+        replacements.sort_by(|left, right| left.source_path.cmp(&right.source_path));
+        let replacements: Vec<_> = replacements
+            .into_iter()
+            .map(SourceReplacementManifest::canonical_value)
+            .collect();
+
+        Ok((
+            serde_json::to_string(&upserts).map_err(backend)?,
+            serde_json::to_string(&deletes).map_err(backend)?,
+            serde_json::to_string(&replacements).map_err(backend)?,
+        ))
+    }
+}
+
+/// Canonical durable representation of one generation change set.
+struct CanonicalBatchManifest {
+    upsert_ids: Vec<String>,
+    delete_ids: Vec<String>,
+    relation_upserts_json: String,
+    relation_deletes_json: String,
+    source_replacements_json: String,
+    operation_digest: String,
+}
+
 /// Canonicalize and fingerprint one generation change set.
 ///
 /// Sorting by wire ID makes the digest independent of discovery order. Duplicate IDs and
@@ -282,7 +581,8 @@ fn merge_session_payloads(wire: &str, left: &[u8], right: &[u8]) -> PortResult<V
 fn batch_manifest(
     upserts: &[(StableId, Vec<u8>, String)],
     deletes: &[StableId],
-) -> PortResult<(Vec<String>, Vec<String>, String)> {
+    relations: &RelationManifests,
+) -> PortResult<CanonicalBatchManifest> {
     let mut ordered_upserts: Vec<_> = upserts.iter().collect();
     ordered_upserts.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
     let mut ordered_deletes: Vec<_> = deletes.iter().collect();
@@ -323,11 +623,24 @@ fn batch_manifest(
         hash_field(&mut hasher, b"delete");
         hash_field(&mut hasher, id.as_str().as_bytes());
     }
-    Ok((
+
+    let (relation_upserts_json, relation_deletes_json, source_replacements_json) =
+        relations.canonical_json()?;
+    hash_field(&mut hasher, b"relation_upserts");
+    hash_field(&mut hasher, relation_upserts_json.as_bytes());
+    hash_field(&mut hasher, b"relation_deletes");
+    hash_field(&mut hasher, relation_deletes_json.as_bytes());
+    hash_field(&mut hasher, b"source_replacements");
+    hash_field(&mut hasher, source_replacements_json.as_bytes());
+
+    Ok(CanonicalBatchManifest {
         upsert_ids,
         delete_ids,
-        hasher.finalize().to_hex().to_string(),
-    ))
+        relation_upserts_json,
+        relation_deletes_json,
+        source_replacements_json,
+        operation_digest: hasher.finalize().to_hex().to_string(),
+    })
 }
 
 /// Durable outbox row for an index-generation operation.
@@ -340,6 +653,9 @@ pub struct IndexBatch {
     pub operation_digest: String,
     pub upsert_ids: Vec<String>,
     pub delete_ids: Vec<String>,
+    pub relation_upserts: Vec<serde_json::Value>,
+    pub relation_deletes: Vec<serde_json::Value>,
+    pub source_replacements: Vec<serde_json::Value>,
     pub durable_point: String,
     pub error_code: Option<String>,
 }
@@ -367,15 +683,128 @@ pub struct SourceBatch {
     /// document（`doc_v1_*`）目录实体放进同一批 entries，随消息走同一事务提交、
     /// 同一 membership/tombstone 推导——源消失时容器实体随消息一起退役。
     pub entries: Vec<(StableId, Vec<u8>, String)>,
+    /// 本次 source scan 观察到的全部 contextual message occurrences。
+    ///
+    /// B1 只携带数据；B2 才会把这些关系写入 v7 表。
+    pub placements: Vec<MessagePlacement>,
+    /// 本次 source scan 观察到的全部 contextual parent edges。
+    pub edges: Vec<MessageEdge>,
+    /// 该 source 是否完成了零 skipped 的 relation scan。
+    ///
+    /// B1 不提交 completeness marker；B2 将据此替换或撤销 marker。
+    pub relation_complete: bool,
 }
 
-/// 提交时落库的 source→message membership 快照（内部使用）。
-struct SourceMembership {
-    source_path: String,
-    /// 从 entries 推导的文档实体 wire id（首个 `Document` kind 条目）；
-    /// 落库到 `source_membership.document_id` 供来源归属查询，无则 NULL。
-    document_id: Option<String>,
-    message_ids: Vec<String>,
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StoredPlacement {
+    session_id: String,
+    document_id: String,
+    message_id: String,
+    source_ordinal: u32,
+    is_sidechain: bool,
+    span: Option<(u64, u64)>,
+}
+
+impl StoredPlacement {
+    fn matches(&self, placement: &MessagePlacement) -> bool {
+        self.session_id == placement.session_id.as_str()
+            && self.document_id == placement.source_document_id.as_str()
+            && self.message_id == placement.message_id.as_str()
+            && self.source_ordinal == placement.source_ordinal
+            && self.is_sidechain == placement.is_sidechain
+            && self.span == placement.span.as_ref().map(|span| (span.start, span.end))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StoredEdge {
+    parent_message_id: String,
+    parent_native_id: Option<String>,
+    relation: String,
+}
+
+impl StoredEdge {
+    fn matches(&self, edge: &MessageEdge) -> bool {
+        self.parent_message_id == edge.parent_message_id.as_str()
+            && self.parent_native_id == edge.parent_native_id
+            && self.relation == edge.relation.as_str()
+    }
+}
+
+struct PreparedSource {
+    relation_complete: bool,
+    prior_entity_memberships: BTreeMap<String, Option<String>>,
+    prior_placement_ids: BTreeSet<String>,
+    observed_placements: BTreeMap<String, MessagePlacement>,
+    observed_edges: BTreeMap<String, MessageEdge>,
+    replacement: SourceReplacementManifest,
+}
+
+fn validate_placement(placement: &MessagePlacement) -> PortResult<()> {
+    if placement.session_id.kind() != IdKind::Session
+        || placement.source_document_id.kind() != IdKind::Document
+        || placement.message_id.kind() != IdKind::Message
+    {
+        return Err(PortError::Backend(
+            "message placement contains an entity id with the wrong kind".into(),
+        ));
+    }
+    let expected = PlacementId::derive(
+        &placement.session_id,
+        &placement.source_document_id,
+        &placement.message_id,
+        placement.source_ordinal,
+    );
+    if placement.id != expected {
+        return Err(PortError::Backend(
+            "message placement id does not match its contextual facts".into(),
+        ));
+    }
+    if let Some(span) = &placement.span {
+        if span.end < span.start {
+            return Err(PortError::Backend(
+                "message placement span end precedes start".into(),
+            ));
+        }
+        i64::try_from(span.start).map_err(backend)?;
+        i64::try_from(span.end).map_err(backend)?;
+    }
+    Ok(())
+}
+
+fn validate_edge(edge: &MessageEdge) -> PortResult<()> {
+    if edge.parent_message_id.kind() != IdKind::Message {
+        return Err(PortError::Backend(
+            "message edge parent id has the wrong kind".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn stored_role(value: &str) -> PortResult<Role> {
+    match value {
+        "user" => Ok(Role::User),
+        "assistant" => Ok(Role::Assistant),
+        "system" => Ok(Role::System),
+        "tool" => Ok(Role::Tool),
+        _ => Err(PortError::Backend(
+            "stored message has an unsupported role".into(),
+        )),
+    }
+}
+
+fn stored_relation(value: &str) -> PortResult<MessageRelation> {
+    match value {
+        "reply" => Ok(MessageRelation::Reply),
+        "retry" => Ok(MessageRelation::Retry),
+        "fork" => Ok(MessageRelation::Fork),
+        "continuation" => Ok(MessageRelation::Continuation),
+        "subagent" => Ok(MessageRelation::Subagent),
+        "tool_result" => Ok(MessageRelation::ToolResult),
+        _ => Err(PortError::Backend(
+            "stored message edge has an unsupported relation".into(),
+        )),
+    }
 }
 
 /// SQLite 支撑的存储：catalog 表存规范化实体负载，FTS5 表提供全文检索。
@@ -569,9 +998,87 @@ impl SqliteStore {
             conn.execute_batch("ALTER TABLE source_membership ADD COLUMN document_id TEXT;")
                 .map_err(backend)?;
         }
-        conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))
-            .map_err(backend)?;
+        if current < 6 {
+            // v1-v6 predate the explicit per-step transaction added for v7.
+            // Mark their completed state before entering the atomic v6->v7 step.
+            conn.execute_batch("PRAGMA user_version = 6;")
+                .map_err(backend)?;
+        }
+        if current < 7 {
+            Self::migrate_v6_to_v7(conn)?;
+        }
         Ok(())
+    }
+
+    /// Add the v7 relational schema in one explicit transaction.
+    ///
+    /// Legacy catalog and source-membership rows are retained byte-for-byte.
+    /// No placement, edge, source claim, or relation-complete marker can be
+    /// reconstructed safely from v6 aliases, so all new relation tables start
+    /// empty. `user_version = 7` is part of the same transaction as the DDL.
+    fn migrate_v6_to_v7(conn: &Connection) -> PortResult<()> {
+        Self::migrate_v6_to_v7_inner(conn, false)
+    }
+
+    fn migrate_v6_to_v7_inner(conn: &Connection, inject_failure: bool) -> PortResult<()> {
+        let tx = conn.unchecked_transaction().map_err(backend)?;
+        tx.execute_batch(
+            "CREATE TABLE message_placements (
+                 placement_id   TEXT PRIMARY KEY,
+                 session_id     TEXT NOT NULL,
+                 document_id    TEXT NOT NULL,
+                 message_id     TEXT NOT NULL,
+                 source_ordinal INTEGER NOT NULL CHECK(source_ordinal >= 0),
+                 is_sidechain   INTEGER NOT NULL CHECK(is_sidechain IN (0, 1)),
+                 byte_start     INTEGER,
+                 byte_end       INTEGER,
+                 CHECK(
+                     (byte_start IS NULL AND byte_end IS NULL)
+                     OR (byte_start >= 0 AND byte_end >= byte_start)
+                 ),
+                 UNIQUE(session_id, document_id, source_ordinal)
+             );
+             CREATE TABLE message_edges (
+                 child_placement_id TEXT PRIMARY KEY,
+                 parent_message_id  TEXT NOT NULL,
+                 parent_native_id   TEXT,
+                 relation           TEXT NOT NULL
+             );
+             CREATE TABLE source_placement_membership (
+                 source_path  TEXT NOT NULL,
+                 placement_id TEXT NOT NULL,
+                 PRIMARY KEY(source_path, placement_id)
+             );
+             CREATE TABLE source_relation_scans (
+                 source_path             TEXT PRIMARY KEY,
+                 relation_schema_version INTEGER NOT NULL
+                     CHECK(relation_schema_version >= 7)
+             );
+             CREATE INDEX message_placements_session_order
+             ON message_placements(session_id, document_id, source_ordinal, placement_id);
+             CREATE INDEX message_placements_message
+             ON message_placements(message_id);
+             CREATE INDEX message_placements_document
+             ON message_placements(document_id);
+             CREATE INDEX source_placement_membership_placement
+             ON source_placement_membership(placement_id);
+             ALTER TABLE index_batches
+             ADD COLUMN relation_upserts_json TEXT NOT NULL DEFAULT '[]';
+             ALTER TABLE index_batches
+             ADD COLUMN relation_deletes_json TEXT NOT NULL DEFAULT '[]';
+             ALTER TABLE index_batches
+             ADD COLUMN source_replacements_json TEXT NOT NULL DEFAULT '[]';
+             PRAGMA user_version = 7;",
+        )
+        .map_err(backend)?;
+
+        if inject_failure {
+            return Err(PortError::Backend(
+                "injected v6-to-v7 migration failure".into(),
+            ));
+        }
+
+        tx.commit().map_err(backend)
     }
 
     /// 当前存储读回的 schema 版本（供 doctor/诊断）。
@@ -580,6 +1087,137 @@ impl SqliteStore {
             .borrow()
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .map_err(backend)
+    }
+
+    fn stable_id_from_store(conn: &Connection, wire: &str) -> PortResult<StableId> {
+        let id_json: Option<String> = conn
+            .query_row(
+                "SELECT id_json FROM fts_ids WHERE wire_id = ?1",
+                [wire],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(backend)?;
+        let id = match id_json {
+            Some(json) => serde_json::from_str::<StableId>(&json).map_err(backend)?,
+            None => StableId::from_wire(wire).ok_or_else(|| {
+                PortError::Backend("catalog contains an invalid entity id".into())
+            })?,
+        };
+        if id.as_str() != wire {
+            return Err(PortError::Backend(
+                "stored identity sidecar does not match its catalog key".into(),
+            ));
+        }
+        Ok(id)
+    }
+
+    fn ensure_stored_identity_metadata_matches(
+        &self,
+        entries: &[(StableId, Vec<u8>, String)],
+    ) -> PortResult<()> {
+        let conn = self.conn.borrow();
+        for (id, _, _) in entries {
+            let id_json: Option<String> = conn
+                .query_row(
+                    "SELECT id_json FROM fts_ids WHERE wire_id = ?1",
+                    [id.as_str()],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(backend)?;
+            let Some(id_json) = id_json else {
+                continue;
+            };
+            let stored_id: StableId = serde_json::from_str(&id_json)
+                .map_err(|_| PortError::Backend("stored identity sidecar is not valid".into()))?;
+            if &stored_id != id {
+                return Err(PortError::Backend(
+                    "entity has conflicting identity metadata with stored catalog".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn relation_sources_for_session(
+        conn: &Connection,
+        session_id: &str,
+    ) -> PortResult<BTreeSet<String>> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT source_path FROM source_membership WHERE message_id = ?1
+                 UNION
+                 SELECT claims.source_path
+                 FROM source_placement_membership AS claims
+                 JOIN message_placements AS placements
+                   ON placements.placement_id = claims.placement_id
+                 WHERE placements.session_id = ?1",
+            )
+            .map_err(backend)?;
+        let rows = stmt
+            .query_map([session_id], |row| row.get::<_, String>(0))
+            .map_err(backend)?;
+        let mut sources = BTreeSet::new();
+        for row in rows {
+            sources.insert(row.map_err(backend)?);
+        }
+        Ok(sources)
+    }
+
+    fn relation_sources_for_message(
+        conn: &Connection,
+        message_id: &str,
+    ) -> PortResult<BTreeSet<String>> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT source_path FROM source_membership WHERE message_id = ?1
+                 UNION
+                 SELECT claims.source_path
+                 FROM source_placement_membership AS claims
+                 JOIN message_placements AS placements
+                   ON placements.placement_id = claims.placement_id
+                 WHERE placements.message_id = ?1",
+            )
+            .map_err(backend)?;
+        let rows = stmt
+            .query_map([message_id], |row| row.get::<_, String>(0))
+            .map_err(backend)?;
+        let mut sources = BTreeSet::new();
+        for row in rows {
+            sources.insert(row.map_err(backend)?);
+        }
+        Ok(sources)
+    }
+
+    fn require_relation_complete_sources(
+        conn: &Connection,
+        sources: &BTreeSet<String>,
+        require_known_source: bool,
+        subject: &str,
+    ) -> PortResult<()> {
+        if require_known_source && sources.is_empty() {
+            return Err(PortError::SchemaIncompatible(format!(
+                "{subject} contextual relations are unavailable; re-ingest required"
+            )));
+        }
+        for source_path in sources {
+            let complete: bool = conn
+                .query_row(
+                    "SELECT EXISTS(
+                         SELECT 1 FROM source_relation_scans WHERE source_path = ?1
+                     )",
+                    [source_path],
+                    |row| row.get(0),
+                )
+                .map_err(backend)?;
+            if !complete {
+                return Err(PortError::SchemaIncompatible(format!(
+                    "{subject} contextual relations are incomplete; re-ingest required"
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// 以 durable outbox 包裹一批 upsert，再原子提交 catalog + FTS + generation。
@@ -604,7 +1242,8 @@ impl SqliteStore {
         }
         // Validate the complete change set before the no-op shortcut; duplicate IDs must
         // never be silently accepted just because the first copy is already current.
-        batch_manifest(entries, &[])?;
+        batch_manifest(entries, &[], &RelationManifests::default())?;
+        self.ensure_stored_identity_metadata_matches(entries)?;
         if self.batch_is_current(entries)? {
             return Ok(false);
         }
@@ -614,6 +1253,14 @@ impl SqliteStore {
     }
 
     fn batch_is_current(&self, entries: &[(StableId, Vec<u8>, String)]) -> PortResult<bool> {
+        self.batch_is_current_with_derived_context(entries, false)
+    }
+
+    fn batch_is_current_with_derived_context(
+        &self,
+        entries: &[(StableId, Vec<u8>, String)],
+        contextual_payloads_are_derived: bool,
+    ) -> PortResult<bool> {
         let conn = self.conn.borrow();
         for (id, payload, text) in entries {
             let catalog_payload: Option<Vec<u8>> = conn
@@ -624,7 +1271,14 @@ impl SqliteStore {
                 )
                 .optional()
                 .map_err(backend)?;
-            if catalog_payload.as_deref() != Some(payload.as_slice()) {
+            let payload_is_current = if contextual_payloads_are_derived
+                && matches!(id.kind(), IdKind::Message | IdKind::Session)
+            {
+                catalog_payload.is_some()
+            } else {
+                catalog_payload.as_deref() == Some(payload.as_slice())
+            };
+            if !payload_is_current {
                 return Ok(false);
             }
             let id_json: Option<String> = conn
@@ -638,7 +1292,12 @@ impl SqliteStore {
             let Some(id_json) = id_json else {
                 return Ok(false);
             };
-            // 非 Message 实体不进 fts 全文表（见 commit_index_batch_with_membership），
+            let stored_id: StableId = serde_json::from_str(&id_json)
+                .map_err(|_| PortError::Backend("stored identity sidecar is not valid".into()))?;
+            if &stored_id != id {
+                return Ok(false);
+            }
+            // 非 Message 实体不进 fts 全文表（见 commit_index_batch_with_relations），
             // 其"内容一致"只看 catalog payload 与 fts_ids 身份边车。
             if id.kind() != IdKind::Message {
                 continue;
@@ -656,33 +1315,36 @@ impl SqliteStore {
         Ok(true)
     }
 
-    /// 以 source membership 为依据提交一批只读源的完整 scan 结果，报告是否推进了 generation。
+    /// Commit source-owned entity and relation facts, reporting generation change.
     ///
-    /// 对每个 [`SourceBatch`]：本次出现的 message id 为 upsert；该源上次成功 scan 有、
-    /// 本次没有的 id 推导为 tombstone（删除）。catalog/FTS/membership/generation 在
-    /// [`commit_index_batch`](Self::commit_index_batch) 的同一事务内提交。若整批 upsert 与
-    /// tombstone 都与当前状态一致（内容级 no-op），返回 `false`，不生成新 generation。
-    ///
-    /// 只有完整成功 scan（所有源都已 stage）才可据此确认 missing/tombstone。
+    /// Complete relation scans replace both entity and placement claims and may
+    /// derive tombstones. Incomplete scans union observed claims, derive no
+    /// tombstones, and clear the source relation-completeness marker.
     pub fn commit_source_batches_if_changed(&self, sources: &[SourceBatch]) -> PortResult<bool> {
-        // 源路径不得重复，否则 membership 推导有歧义。
-        let mut paths: Vec<&str> = sources.iter().map(|s| s.source_path.as_str()).collect();
-        paths.sort_unstable();
-        if paths.windows(2).any(|w| w[0] == w[1]) {
+        let mut ordered_sources: Vec<&SourceBatch> = sources.iter().collect();
+        ordered_sources.sort_by(|left, right| left.source_path.cmp(&right.source_path));
+        let paths: Vec<&str> = ordered_sources
+            .iter()
+            .map(|source| source.source_path.as_str())
+            .collect();
+        if paths.windows(2).any(|window| window[0] == window[1]) {
             return Err(PortError::Backend(
                 "source batch contains duplicate source paths".into(),
             ));
         }
 
-        // 汇总所有源的 upsert，先按 wire id 合并跨 source 重叠实体；只有 payload/text
-        // 完全相同才允许共享同一实体，避免一次 batch 的重复 id 被拒绝或产生不确定结果。
-        // 必须先收集完整 incoming 集合，再基于旧 membership 推导 tombstone；否则推导结果
-        // 会依赖 source 输入顺序，并把“从旧 source 移到新 source”的实体同时列入删除与 upsert。
-        let scanned_paths: BTreeSet<&str> = paths.into_iter().collect();
-        let mut merged: BTreeMap<String, (StableId, Vec<u8>, String)> = BTreeMap::new();
-        let mut incoming_ids = BTreeSet::new();
-        let mut present_by_source: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
-        for source in sources {
+        let scanned_paths: BTreeSet<String> = paths.into_iter().map(str::to_string).collect();
+        let current_entities_by_source = self.source_entity_membership_state()?;
+        let current_placements_by_source = self.source_placement_membership_state()?;
+        let stored_placements = self.stored_placements()?;
+        let stored_edges = self.stored_edges()?;
+
+        let mut merged = BTreeMap::<String, (StableId, Vec<u8>, String)>::new();
+        let mut observed_placements = BTreeMap::<String, MessagePlacement>::new();
+        let mut observed_edges = BTreeMap::<String, MessageEdge>::new();
+        let mut prepared_sources = BTreeMap::<String, PreparedSource>::new();
+
+        for source in ordered_sources {
             let present: BTreeSet<&str> = source
                 .entries
                 .iter()
@@ -693,23 +1355,140 @@ impl SqliteStore {
                     "source batch contains duplicate message ids".into(),
                 ));
             }
-            for (id, payload, text) in &source.entries {
-                incoming_ids.insert(id.as_str());
-                if let Some((old_id, old_payload, old_text)) = merged.get(id.as_str()) {
-                    if old_id != id {
+
+            let document_id = source
+                .entries
+                .iter()
+                .find(|(id, _, _)| id.kind() == IdKind::Document)
+                .map(|(id, _, _)| id.as_str().to_string());
+            let incoming_entities: BTreeMap<String, Option<String>> = source
+                .entries
+                .iter()
+                .map(|(id, _, _)| (id.as_str().to_string(), document_id.clone()))
+                .collect();
+            let prior_entity_memberships = current_entities_by_source
+                .get(&source.source_path)
+                .cloned()
+                .unwrap_or_default();
+            let mut final_entities = if source.relation_complete {
+                BTreeMap::new()
+            } else {
+                prior_entity_memberships.clone()
+            };
+            final_entities.extend(incoming_entities);
+
+            let mut source_placements = BTreeMap::new();
+            let mut placement_slots = BTreeSet::new();
+            for placement in &source.placements {
+                validate_placement(placement)?;
+                let placement_id = placement.id.as_str().to_string();
+                if source_placements
+                    .insert(placement_id.clone(), placement.clone())
+                    .is_some()
+                {
+                    return Err(PortError::Backend(
+                        "source batch contains duplicate placement ids".into(),
+                    ));
+                }
+                let slot = (
+                    placement.session_id.as_str().to_string(),
+                    placement.source_document_id.as_str().to_string(),
+                    placement.source_ordinal,
+                );
+                if !placement_slots.insert(slot) {
+                    return Err(PortError::Backend(
+                        "source batch contains duplicate placement ordinals".into(),
+                    ));
+                }
+                if let Some(existing) = observed_placements.get(&placement_id) {
+                    if existing != placement {
                         return Err(PortError::Backend(format!(
-                            "message {} has conflicting identity metadata across sources",
-                            id.as_str()
+                            "placement {placement_id} has conflicting projections across sources"
                         )));
                     }
+                } else {
+                    observed_placements.insert(placement_id, placement.clone());
+                }
+            }
+
+            let mut source_edges = BTreeMap::new();
+            for edge in &source.edges {
+                validate_edge(edge)?;
+                let placement_id = edge.child_placement_id.as_str().to_string();
+                if !source_placements.contains_key(&placement_id) {
+                    return Err(PortError::Backend(
+                        "source batch edge does not belong to an observed placement".into(),
+                    ));
+                }
+                if source_edges
+                    .insert(placement_id.clone(), edge.clone())
+                    .is_some()
+                {
+                    return Err(PortError::Backend(
+                        "source batch contains duplicate edge children".into(),
+                    ));
+                }
+                if let Some(existing) = observed_edges.get(&placement_id) {
+                    if existing != edge {
+                        return Err(PortError::Backend(format!(
+                            "edge {placement_id} has conflicting projections across sources"
+                        )));
+                    }
+                } else {
+                    observed_edges.insert(placement_id, edge.clone());
+                }
+            }
+
+            let prior_placement_ids = current_placements_by_source
+                .get(&source.source_path)
+                .cloned()
+                .unwrap_or_default();
+            let mut final_placement_ids = if source.relation_complete {
+                BTreeSet::new()
+            } else {
+                prior_placement_ids.clone()
+            };
+            final_placement_ids.extend(source_placements.keys().cloned());
+
+            let replacement = SourceReplacementManifest {
+                source_path: source.source_path.clone(),
+                entity_memberships: final_entities
+                    .into_iter()
+                    .map(|(entity_id, document_id)| SourceEntityMembershipManifest {
+                        entity_id,
+                        document_id,
+                    })
+                    .collect(),
+                placement_ids: final_placement_ids
+                    .iter()
+                    .map(|wire| {
+                        PlacementId::from_wire(wire).ok_or_else(|| {
+                            PortError::Backend(format!("invalid placement claim id: {wire}"))
+                        })
+                    })
+                    .collect::<PortResult<Vec<_>>>()?,
+                relation_complete: source.relation_complete,
+            };
+            prepared_sources.insert(
+                source.source_path.clone(),
+                PreparedSource {
+                    relation_complete: source.relation_complete,
+                    prior_entity_memberships,
+                    prior_placement_ids,
+                    observed_placements: source_placements,
+                    observed_edges: source_edges,
+                    replacement,
+                },
+            );
+
+            for (id, payload, text) in &source.entries {
+                if let Some((old_id, old_payload, old_text)) = merged.get(id.as_str()) {
+                    if old_id != id {
+                        return Err(PortError::Backend(
+                            "entity has conflicting identity metadata across sources".into(),
+                        ));
+                    }
                     if old_payload != payload || old_text != text {
-                        // Both entity kinds legitimately differ per source, for
-                        // the same underlying reason: neither "one session per
-                        // file" nor "one session per message" holds in real
-                        // transcripts. A session is often split across many
-                        // files, and resume/fork copies a message into the new
-                        // session's file. Each source therefore carries only a
-                        // partial view, and the union is the whole truth.
                         let union = match id.kind() {
                             IdKind::Session => {
                                 merge_session_payloads(id.as_str(), old_payload, payload)?
@@ -717,14 +1496,10 @@ impl SqliteStore {
                             IdKind::Message => {
                                 merge_message_payloads(id.as_str(), old_payload, payload)?
                             }
-                            // Documents are content-addressed: identical bytes
-                            // give the same id, so a differing payload under one
-                            // document id is a real inconsistency.
                             _ => {
-                                return Err(PortError::Backend(format!(
-                                    "entity {} has conflicting projections across sources",
-                                    id.as_str()
-                                )));
+                                return Err(PortError::Backend(
+                                    "entity has conflicting projections across sources".into(),
+                                ));
                             }
                         };
                         merged.insert(id.as_str().to_string(), (id.clone(), union, text.clone()));
@@ -737,20 +1512,10 @@ impl SqliteStore {
                     );
                 }
             }
-            present_by_source.insert(source.source_path.as_str(), present);
         }
 
-        // Fold in what the catalog already holds for each shared entity. Without
-        // this, syncing a corpus in several batches would make each batch's view
-        // overwrite the previous one: a session's stored membership would only
-        // reflect the files in the final batch, and a message shared by several
-        // sessions would keep only the last session that claimed it.
         for (id, payload, _) in merged.values_mut() {
             let stored = match self.get(id)? {
-                // Identical bytes need no merge, and attempting one would force
-                // every stored payload to be canonical JSON — including rows
-                // written by the pre-container slice path, which are opaque
-                // blobs. Re-syncing an unchanged corpus must stay a no-op.
                 Some(stored) if stored != *payload => stored,
                 _ => continue,
             };
@@ -761,131 +1526,753 @@ impl SqliteStore {
             };
         }
 
-        let mut deletes = BTreeMap::new();
-        for source in sources {
-            if !self.source_was_scanned(&source.source_path)? {
+        let mut final_entity_claimers = BTreeMap::<String, BTreeSet<String>>::new();
+        for (source_path, memberships) in &current_entities_by_source {
+            if scanned_paths.contains(source_path) {
                 continue;
             }
-            let present = present_by_source
-                .get(source.source_path.as_str())
-                .ok_or_else(|| PortError::Backend("source membership derivation failed".into()))?;
-            for prior in self.source_message_ids(&source.source_path)? {
-                if !present.contains(prior.as_str())
-                    && !incoming_ids.contains(prior.as_str())
-                    && !self.message_referenced_by_unscanned_source(&prior, &scanned_paths)?
+            for entity_id in memberships.keys() {
+                final_entity_claimers
+                    .entry(entity_id.clone())
+                    .or_default()
+                    .insert(source_path.clone());
+            }
+        }
+        let mut final_placement_claimers = BTreeMap::<String, BTreeSet<String>>::new();
+        for (source_path, placement_ids) in &current_placements_by_source {
+            if scanned_paths.contains(source_path) {
+                continue;
+            }
+            for placement_id in placement_ids {
+                final_placement_claimers
+                    .entry(placement_id.clone())
+                    .or_default()
+                    .insert(source_path.clone());
+            }
+        }
+        for (source_path, prepared) in &prepared_sources {
+            for membership in &prepared.replacement.entity_memberships {
+                final_entity_claimers
+                    .entry(membership.entity_id.clone())
+                    .or_default()
+                    .insert(source_path.clone());
+            }
+            for placement_id in &prepared.replacement.placement_ids {
+                final_placement_claimers
+                    .entry(placement_id.as_str().to_string())
+                    .or_default()
+                    .insert(source_path.clone());
+            }
+        }
+
+        let mut deletes = BTreeMap::new();
+        let mut placement_delete_ids = BTreeSet::new();
+        for prepared in prepared_sources.values() {
+            if !prepared.relation_complete {
+                continue;
+            }
+            let final_entity_ids: BTreeSet<&str> = prepared
+                .replacement
+                .entity_memberships
+                .iter()
+                .map(|membership| membership.entity_id.as_str())
+                .collect();
+            for prior in prepared.prior_entity_memberships.keys() {
+                if !final_entity_ids.contains(prior.as_str())
+                    && !final_entity_claimers.contains_key(prior)
                 {
-                    let id = StableId::from_wire(&prior).ok_or_else(|| {
+                    let id = StableId::from_wire(prior).ok_or_else(|| {
                         PortError::Backend(format!("invalid membership id: {prior}"))
                     })?;
-                    deletes.insert(prior, id);
+                    deletes.insert(prior.clone(), id);
+                }
+            }
+
+            let final_placement_ids: BTreeSet<&str> = prepared
+                .replacement
+                .placement_ids
+                .iter()
+                .map(PlacementId::as_str)
+                .collect();
+            for prior in &prepared.prior_placement_ids {
+                if !final_placement_ids.contains(prior.as_str())
+                    && !final_placement_claimers.contains_key(prior)
+                    && stored_placements.contains_key(prior)
+                {
+                    placement_delete_ids.insert(prior.clone());
                 }
             }
         }
+
+        for (placement_id, placement) in &observed_placements {
+            let Some(stored) = stored_placements.get(placement_id) else {
+                continue;
+            };
+            if stored.matches(placement) {
+                continue;
+            }
+            let claimers = final_placement_claimers
+                .get(placement_id)
+                .cloned()
+                .unwrap_or_default();
+            let all_claimers_observed_same_placement = !claimers.is_empty()
+                && claimers.iter().all(|source_path| {
+                    prepared_sources.get(source_path).is_some_and(|prepared| {
+                        prepared.observed_placements.get(placement_id) == Some(placement)
+                    })
+                });
+            if !all_claimers_observed_same_placement {
+                return Err(PortError::Backend(format!(
+                    "placement {placement_id} conflicts with a source that did not observe the same placement"
+                )));
+            }
+        }
+
+        for (placement_id, edge) in &observed_edges {
+            let current_matches = stored_edges
+                .get(placement_id)
+                .is_some_and(|stored| stored.matches(edge));
+            let claimers = final_placement_claimers
+                .get(placement_id)
+                .cloned()
+                .unwrap_or_default();
+            if !current_matches {
+                let all_claimers_observed_same_edge = !claimers.is_empty()
+                    && claimers.iter().all(|source_path| {
+                        prepared_sources.get(source_path).is_some_and(|prepared| {
+                            prepared.observed_edges.get(placement_id) == Some(edge)
+                        })
+                    });
+                if !all_claimers_observed_same_edge {
+                    return Err(PortError::Backend(format!(
+                        "edge {placement_id} conflicts with a source that did not observe the same edge"
+                    )));
+                }
+            }
+        }
+
+        let mut edge_delete_ids: BTreeSet<String> = placement_delete_ids
+            .iter()
+            .filter(|placement_id| stored_edges.contains_key(*placement_id))
+            .cloned()
+            .collect();
+        for prepared in prepared_sources.values() {
+            for placement_id in prepared.observed_placements.keys() {
+                if prepared.observed_edges.contains_key(placement_id)
+                    || !stored_edges.contains_key(placement_id)
+                {
+                    continue;
+                }
+                if observed_edges.contains_key(placement_id) {
+                    return Err(PortError::Backend(format!(
+                        "edge {placement_id} has inconsistent complete-source claims"
+                    )));
+                }
+                let claimers = final_placement_claimers
+                    .get(placement_id)
+                    .cloned()
+                    .unwrap_or_default();
+                let all_claimers_observed_root = !claimers.is_empty()
+                    && claimers.iter().all(|source_path| {
+                        prepared_sources.get(source_path).is_some_and(|claimer| {
+                            claimer.observed_placements.contains_key(placement_id)
+                                && !claimer.observed_edges.contains_key(placement_id)
+                        })
+                    });
+                if !all_claimers_observed_root {
+                    return Err(PortError::Backend(format!(
+                        "edge {placement_id} conflicts with a source that did not observe the same root"
+                    )));
+                }
+                edge_delete_ids.insert(placement_id.clone());
+            }
+        }
+
         let upserts: Vec<(StableId, Vec<u8>, String)> = merged.into_values().collect();
         let deletes: Vec<StableId> = deletes.into_values().collect();
+        let relations = RelationManifests {
+            relation_upserts: observed_placements
+                .into_values()
+                .map(RelationUpsertManifest::Placement)
+                .chain(
+                    observed_edges
+                        .into_values()
+                        .map(RelationUpsertManifest::Edge),
+                )
+                .collect(),
+            relation_deletes: edge_delete_ids
+                .into_iter()
+                .map(|wire| {
+                    PlacementId::from_wire(&wire)
+                        .map(RelationDeleteManifest::Edge)
+                        .ok_or_else(|| {
+                            PortError::Backend(format!("invalid edge tombstone id: {wire}"))
+                        })
+                })
+                .chain(placement_delete_ids.into_iter().map(|wire| {
+                    PlacementId::from_wire(&wire)
+                        .map(RelationDeleteManifest::Placement)
+                        .ok_or_else(|| {
+                            PortError::Backend(format!("invalid placement tombstone id: {wire}"))
+                        })
+                }))
+                .collect::<PortResult<Vec<_>>>()?,
+            source_replacements: prepared_sources
+                .into_values()
+                .map(|prepared| prepared.replacement)
+                .collect(),
+        };
 
-        // 校验整体变更集合（重复/交叠即拒绝），再判定是否内容级 no-op。
-        batch_manifest(&upserts, &deletes)?;
-        if self.source_batches_are_current(sources, &upserts)? {
+        batch_manifest(&upserts, &deletes, &relations)?;
+        self.ensure_stored_identity_metadata_matches(&upserts)?;
+        if self.source_batches_are_current(&upserts, &relations)? {
             return Ok(false);
         }
 
-        let membership: Vec<SourceMembership> = sources
-            .iter()
-            .map(|s| SourceMembership {
-                source_path: s.source_path.clone(),
-                // 文档归属从 entries 推导：首个 Document kind 实体的 wire id。
-                document_id: s
-                    .entries
-                    .iter()
-                    .find(|(id, _, _)| id.kind() == IdKind::Document)
-                    .map(|(id, _, _)| id.as_str().to_string()),
-                message_ids: s
-                    .entries
-                    .iter()
-                    .map(|(id, _, _)| id.as_str().to_string())
-                    .collect(),
-            })
-            .collect();
-        let pending = self.begin_index_batch(&upserts, &deletes)?;
-        self.commit_index_batch_with_membership(&pending, &upserts, &deletes, &membership)?;
+        let pending = self.begin_index_batch_with_relations(&upserts, &deletes, &relations)?;
+        self.commit_index_batch_with_relations(&pending, &upserts, &deletes, &relations)?;
         Ok(true)
     }
 
-    /// 读回某源上次成功 scan 记录的 message id 集合（membership）。
-    fn source_message_ids(&self, source_path: &str) -> PortResult<Vec<String>> {
+    fn source_entity_membership_state(
+        &self,
+    ) -> PortResult<BTreeMap<String, BTreeMap<String, Option<String>>>> {
         let conn = self.conn.borrow();
         let mut stmt = conn
-            .prepare("SELECT message_id FROM source_membership WHERE source_path = ?1")
+            .prepare(
+                "SELECT source_path, message_id, document_id
+                 FROM source_membership ORDER BY source_path, message_id",
+            )
             .map_err(backend)?;
         let rows = stmt
-            .query_map([source_path], |row| row.get::<_, String>(0))
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            })
             .map_err(backend)?;
-        let mut ids = Vec::new();
+        let mut state = BTreeMap::<String, BTreeMap<String, Option<String>>>::new();
         for row in rows {
-            ids.push(row.map_err(backend)?);
+            let (source_path, entity_id, document_id) = row.map_err(backend)?;
+            state
+                .entry(source_path)
+                .or_default()
+                .insert(entity_id, document_id);
         }
-        Ok(ids)
+        Ok(state)
+    }
+
+    #[cfg(test)]
+    fn source_message_ids(&self, source_path: &str) -> PortResult<Vec<String>> {
+        Ok(self
+            .source_entity_membership_state()?
+            .remove(source_path)
+            .unwrap_or_default()
+            .into_keys()
+            .collect())
+    }
+
+    fn source_placement_membership_state(&self) -> PortResult<BTreeMap<String, BTreeSet<String>>> {
+        let conn = self.conn.borrow();
+        let mut stmt = conn
+            .prepare(
+                "SELECT source_path, placement_id
+                 FROM source_placement_membership ORDER BY source_path, placement_id",
+            )
+            .map_err(backend)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(backend)?;
+        let mut state = BTreeMap::<String, BTreeSet<String>>::new();
+        for row in rows {
+            let (source_path, placement_id) = row.map_err(backend)?;
+            state.entry(source_path).or_default().insert(placement_id);
+        }
+        Ok(state)
+    }
+
+    fn stored_placements(&self) -> PortResult<BTreeMap<String, StoredPlacement>> {
+        let conn = self.conn.borrow();
+        Self::stored_placements_from(&conn)
+    }
+
+    fn stored_placements_from(conn: &Connection) -> PortResult<BTreeMap<String, StoredPlacement>> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT placement_id, session_id, document_id, message_id,
+                        source_ordinal, is_sidechain, byte_start, byte_end
+                 FROM message_placements ORDER BY placement_id",
+            )
+            .map_err(backend)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, Option<i64>>(6)?,
+                    row.get::<_, Option<i64>>(7)?,
+                ))
+            })
+            .map_err(backend)?;
+        let mut placements = BTreeMap::new();
+        for row in rows {
+            let (placement_id, session_id, document_id, message_id, ordinal, sidechain, start, end) =
+                row.map_err(backend)?;
+            let span = match (start, end) {
+                (None, None) => None,
+                (Some(start), Some(end)) => Some((
+                    u64::try_from(start).map_err(backend)?,
+                    u64::try_from(end).map_err(backend)?,
+                )),
+                _ => {
+                    return Err(PortError::Backend(
+                        "stored placement has a partial span".into(),
+                    ));
+                }
+            };
+            placements.insert(
+                placement_id,
+                StoredPlacement {
+                    session_id,
+                    document_id,
+                    message_id,
+                    source_ordinal: u32::try_from(ordinal).map_err(backend)?,
+                    is_sidechain: sidechain != 0,
+                    span,
+                },
+            );
+        }
+        Ok(placements)
+    }
+
+    fn stored_edges(&self) -> PortResult<BTreeMap<String, StoredEdge>> {
+        let conn = self.conn.borrow();
+        Self::stored_edges_from(&conn)
+    }
+
+    fn stored_edges_from(conn: &Connection) -> PortResult<BTreeMap<String, StoredEdge>> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT child_placement_id, parent_message_id, parent_native_id, relation
+                 FROM message_edges ORDER BY child_placement_id",
+            )
+            .map_err(backend)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    StoredEdge {
+                        parent_message_id: row.get(1)?,
+                        parent_native_id: row.get(2)?,
+                        relation: row.get(3)?,
+                    },
+                ))
+            })
+            .map_err(backend)?;
+        let mut edges = BTreeMap::new();
+        for row in rows {
+            let (placement_id, edge) = row.map_err(backend)?;
+            edges.insert(placement_id, edge);
+        }
+        Ok(edges)
+    }
+
+    fn regenerate_compatibility_aliases_in_tx(tx: &rusqlite::Transaction<'_>) -> PortResult<()> {
+        let complete_sources = {
+            let mut stmt = tx
+                .prepare("SELECT source_path FROM source_relation_scans")
+                .map_err(backend)?;
+            let rows = stmt
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(backend)?;
+            let mut sources = BTreeSet::new();
+            for row in rows {
+                sources.insert(row.map_err(backend)?);
+            }
+            sources
+        };
+
+        let mut claimers_by_entity = BTreeMap::<String, BTreeSet<String>>::new();
+        let mut session_document_claims = BTreeMap::<String, BTreeSet<String>>::new();
+        {
+            let mut stmt = tx
+                .prepare(
+                    "SELECT source_path, message_id, document_id
+                     FROM source_membership",
+                )
+                .map_err(backend)?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                })
+                .map_err(backend)?;
+            for row in rows {
+                let (source_path, entity_id, document_id) = row.map_err(backend)?;
+                claimers_by_entity
+                    .entry(entity_id.clone())
+                    .or_default()
+                    .insert(source_path);
+                if entity_id.starts_with(IdKind::Session.prefix())
+                    && let Some(document_id) = document_id
+                {
+                    session_document_claims
+                        .entry(entity_id)
+                        .or_default()
+                        .insert(document_id);
+                }
+            }
+        }
+        {
+            let mut stmt = tx
+                .prepare(
+                    "SELECT claims.source_path, placements.session_id,
+                            placements.document_id, placements.message_id
+                     FROM source_placement_membership AS claims
+                     JOIN message_placements AS placements
+                       ON placements.placement_id = claims.placement_id",
+                )
+                .map_err(backend)?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                })
+                .map_err(backend)?;
+            for row in rows {
+                let (source_path, session_id, document_id, message_id) = row.map_err(backend)?;
+                for entity_id in [session_id, document_id, message_id] {
+                    claimers_by_entity
+                        .entry(entity_id)
+                        .or_default()
+                        .insert(source_path.clone());
+                }
+            }
+        }
+
+        let fully_complete_entities: BTreeSet<String> = claimers_by_entity
+            .into_iter()
+            .filter_map(|(entity_id, claimers)| {
+                (!claimers.is_empty()
+                    && claimers
+                        .iter()
+                        .all(|source_path| complete_sources.contains(source_path)))
+                .then_some(entity_id)
+            })
+            .collect();
+        if fully_complete_entities.is_empty() {
+            return Ok(());
+        }
+
+        let placements = Self::stored_placements_from(tx)?;
+        let edges = Self::stored_edges_from(tx)?;
+        let mut placements_by_message = BTreeMap::<String, Vec<(String, StoredPlacement)>>::new();
+        let mut placements_by_session = BTreeMap::<String, Vec<(String, StoredPlacement)>>::new();
+        for (placement_id, placement) in placements {
+            placements_by_message
+                .entry(placement.message_id.clone())
+                .or_default()
+                .push((placement_id.clone(), placement.clone()));
+            placements_by_session
+                .entry(placement.session_id.clone())
+                .or_default()
+                .push((placement_id, placement));
+        }
+        for placements in placements_by_message
+            .values_mut()
+            .chain(placements_by_session.values_mut())
+        {
+            placements.sort_by(|left, right| {
+                (
+                    left.1.document_id.as_str(),
+                    left.1.source_ordinal,
+                    left.0.as_str(),
+                )
+                    .cmp(&(
+                        right.1.document_id.as_str(),
+                        right.1.source_ordinal,
+                        right.0.as_str(),
+                    ))
+            });
+        }
+
+        for entity_id in fully_complete_entities {
+            let Some(id) = StableId::from_wire(&entity_id) else {
+                return Err(PortError::Backend(
+                    "source membership contains an invalid entity id".into(),
+                ));
+            };
+            if !matches!(id.kind(), IdKind::Message | IdKind::Session) {
+                continue;
+            }
+            let payload: Option<Vec<u8>> = tx
+                .query_row(
+                    "SELECT payload FROM catalog WHERE id = ?1",
+                    [&entity_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(backend)?;
+            let Some(payload) = payload else {
+                continue;
+            };
+            let mut map = match serde_json::from_slice::<serde_json::Value>(&payload) {
+                Ok(serde_json::Value::Object(map)) => map,
+                _ => continue,
+            };
+
+            match id.kind() {
+                IdKind::Message => {
+                    let placements = placements_by_message
+                        .get(&entity_id)
+                        .cloned()
+                        .unwrap_or_default();
+                    if placements.is_empty() {
+                        continue;
+                    }
+                    let sessions: Vec<String> = placements
+                        .iter()
+                        .map(|(_, placement)| placement.session_id.clone())
+                        .collect::<BTreeSet<_>>()
+                        .into_iter()
+                        .collect();
+                    map.insert(
+                        "session".into(),
+                        sessions
+                            .first()
+                            .cloned()
+                            .map_or(serde_json::Value::Null, serde_json::Value::String),
+                    );
+                    map.insert("sessions".into(), serde_json::json!(sessions));
+
+                    let spans: Vec<serde_json::Value> = placements
+                        .iter()
+                        .filter_map(|(placement_id, placement)| {
+                            placement.span.map(|(start, end)| {
+                                serde_json::json!({
+                                    "placement_id": placement_id,
+                                    "document": placement.document_id,
+                                    "start": start,
+                                    "end": end,
+                                })
+                            })
+                        })
+                        .collect();
+                    map.insert(
+                        "span".into(),
+                        spans.first().map_or(serde_json::Value::Null, |span| {
+                            serde_json::json!({
+                                "start": span.get("start").cloned().unwrap_or(serde_json::Value::Null),
+                                "end": span.get("end").cloned().unwrap_or(serde_json::Value::Null),
+                            })
+                        }),
+                    );
+                    map.insert("spans".into(), serde_json::json!(spans));
+
+                    let parent_facts: Vec<Option<String>> = placements
+                        .iter()
+                        .map(|(placement_id, _)| {
+                            edges
+                                .get(placement_id)
+                                .map(|edge| edge.parent_message_id.clone())
+                        })
+                        .collect();
+                    let parent = match parent_facts.first() {
+                        Some(first) if parent_facts.iter().all(|fact| fact == first) => {
+                            first.clone()
+                        }
+                        _ => None,
+                    };
+                    map.insert(
+                        "parent".into(),
+                        parent.map_or(serde_json::Value::Null, serde_json::Value::String),
+                    );
+
+                    let parent_native_facts: Vec<Option<String>> = placements
+                        .iter()
+                        .map(|(placement_id, _)| {
+                            edges
+                                .get(placement_id)
+                                .and_then(|edge| edge.parent_native_id.clone())
+                        })
+                        .collect();
+                    let parent_native_id = match parent_native_facts.first() {
+                        Some(first) if parent_native_facts.iter().all(|fact| fact == first) => {
+                            first.clone()
+                        }
+                        _ => None,
+                    };
+                    map.insert(
+                        "parent_native_id".into(),
+                        parent_native_id.map_or(serde_json::Value::Null, serde_json::Value::String),
+                    );
+
+                    let is_sidechain = match placements.first() {
+                        Some((_, first))
+                            if placements.iter().all(|(_, placement)| {
+                                placement.is_sidechain == first.is_sidechain
+                            }) =>
+                        {
+                            serde_json::Value::Bool(first.is_sidechain)
+                        }
+                        _ => serde_json::Value::Null,
+                    };
+                    map.insert("is_sidechain".into(), is_sidechain);
+                }
+                IdKind::Session => {
+                    let placements = placements_by_session
+                        .get(&entity_id)
+                        .cloned()
+                        .unwrap_or_default();
+                    if placements.is_empty()
+                        && map
+                            .get("messages")
+                            .and_then(serde_json::Value::as_array)
+                            .is_some_and(|messages| !messages.is_empty())
+                    {
+                        continue;
+                    }
+                    let mut seen_messages = BTreeSet::new();
+                    let mut messages = Vec::new();
+                    let mut documents = session_document_claims
+                        .remove(&entity_id)
+                        .unwrap_or_default();
+                    for (_, placement) in placements {
+                        documents.insert(placement.document_id);
+                        if seen_messages.insert(placement.message_id.clone()) {
+                            messages.push(placement.message_id);
+                        }
+                    }
+                    let documents: Vec<String> = documents.into_iter().collect();
+                    map.insert(
+                        "document".into(),
+                        documents
+                            .first()
+                            .cloned()
+                            .map_or(serde_json::Value::Null, serde_json::Value::String),
+                    );
+                    map.insert("documents".into(), serde_json::json!(documents));
+                    map.insert("messages".into(), serde_json::json!(messages));
+                }
+                _ => unreachable!(),
+            }
+
+            let payload = serde_json::to_vec(&serde_json::Value::Object(map)).map_err(backend)?;
+            tx.execute(
+                "UPDATE catalog SET payload = ?2 WHERE id = ?1",
+                rusqlite::params![entity_id, payload],
+            )
+            .map_err(backend)?;
+        }
+        Ok(())
     }
 
     fn source_batches_are_current(
         &self,
-        sources: &[SourceBatch],
         upserts: &[(StableId, Vec<u8>, String)],
+        relations: &RelationManifests,
     ) -> PortResult<bool> {
-        if !self.batch_is_current(upserts)? {
+        if !self.batch_is_current_with_derived_context(upserts, true)? {
             return Ok(false);
         }
-        for source in sources {
-            if !self.source_was_scanned(&source.source_path)? {
+        let stored_placements = self.stored_placements()?;
+        let stored_edges = self.stored_edges()?;
+        for upsert in &relations.relation_upserts {
+            let current = match upsert {
+                RelationUpsertManifest::Placement(placement) => stored_placements
+                    .get(placement.id.as_str())
+                    .is_some_and(|stored| stored.matches(placement)),
+                RelationUpsertManifest::Edge(edge) => stored_edges
+                    .get(edge.child_placement_id.as_str())
+                    .is_some_and(|stored| stored.matches(edge)),
+            };
+            if !current {
                 return Ok(false);
             }
-            let mut expected: Vec<String> = source
-                .entries
+        }
+        for delete in &relations.relation_deletes {
+            let exists = match delete {
+                RelationDeleteManifest::Placement(id) => {
+                    stored_placements.contains_key(id.as_str())
+                }
+                RelationDeleteManifest::Edge(id) => stored_edges.contains_key(id.as_str()),
+            };
+            if exists {
+                return Ok(false);
+            }
+        }
+
+        let entity_state = self.source_entity_membership_state()?;
+        let placement_state = self.source_placement_membership_state()?;
+        let conn = self.conn.borrow();
+        for replacement in &relations.source_replacements {
+            let expected_entities: BTreeMap<String, Option<String>> = replacement
+                .entity_memberships
                 .iter()
-                .map(|(id, _, _)| id.as_str().to_string())
+                .map(|membership| (membership.entity_id.clone(), membership.document_id.clone()))
                 .collect();
-            expected.sort_unstable();
-            let mut actual = self.source_message_ids(&source.source_path)?;
-            actual.sort_unstable();
-            if actual != expected {
+            if entity_state
+                .get(&replacement.source_path)
+                .cloned()
+                .unwrap_or_default()
+                != expected_entities
+            {
+                return Ok(false);
+            }
+            let expected_placements: BTreeSet<String> = replacement
+                .placement_ids
+                .iter()
+                .map(|id| id.as_str().to_string())
+                .collect();
+            if placement_state
+                .get(&replacement.source_path)
+                .cloned()
+                .unwrap_or_default()
+                != expected_placements
+            {
+                return Ok(false);
+            }
+            let scanned: bool = conn
+                .query_row(
+                    "SELECT EXISTS(
+                         SELECT 1 FROM source_scans WHERE source_path = ?1
+                     )",
+                    [&replacement.source_path],
+                    |row| row.get(0),
+                )
+                .map_err(backend)?;
+            if !scanned {
+                return Ok(false);
+            }
+            let relation_complete: bool = conn
+                .query_row(
+                    "SELECT EXISTS(
+                         SELECT 1 FROM source_relation_scans WHERE source_path = ?1
+                     )",
+                    [&replacement.source_path],
+                    |row| row.get(0),
+                )
+                .map_err(backend)?;
+            if relation_complete != replacement.relation_complete {
                 return Ok(false);
             }
         }
         Ok(true)
-    }
-
-    fn source_was_scanned(&self, source_path: &str) -> PortResult<bool> {
-        let conn = self.conn.borrow();
-        let exists: Option<i64> = conn
-            .query_row(
-                "SELECT 1 FROM source_scans WHERE source_path = ?1",
-                [source_path],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(backend)?;
-        Ok(exists.is_some())
-    }
-
-    fn message_referenced_by_unscanned_source(
-        &self,
-        message_id: &str,
-        scanned_paths: &BTreeSet<&str>,
-    ) -> PortResult<bool> {
-        let conn = self.conn.borrow();
-        let mut stmt = conn
-            .prepare("SELECT source_path FROM source_membership WHERE message_id = ?1")
-            .map_err(backend)?;
-        let rows = stmt
-            .query_map([message_id], |row| row.get::<_, String>(0))
-            .map_err(backend)?;
-        for row in rows {
-            if !scanned_paths.contains(row.map_err(backend)?.as_str()) {
-                return Ok(true);
-            }
-        }
-        Ok(false)
     }
 
     /// 读回当前活动 generation（v2 起可用）。
@@ -914,6 +2301,15 @@ impl SqliteStore {
         upserts: &[(StableId, Vec<u8>, String)],
         deletes: &[StableId],
     ) -> PortResult<PendingIndexBatch> {
+        self.begin_index_batch_with_relations(upserts, deletes, &RelationManifests::default())
+    }
+
+    fn begin_index_batch_with_relations(
+        &self,
+        upserts: &[(StableId, Vec<u8>, String)],
+        deletes: &[StableId],
+        relations: &RelationManifests,
+    ) -> PortResult<PendingIndexBatch> {
         let base = self.active_generation()?;
         let target = base
             .checked_add(1)
@@ -921,23 +2317,29 @@ impl SqliteStore {
         let target_sql = i64::try_from(target).map_err(backend)?;
         let base_sql = i64::try_from(base).map_err(backend)?;
         let op = operation_id()?;
-        let (upsert_ids, delete_ids, digest) = batch_manifest(upserts, deletes)?;
-        let upsert_json = serde_json::to_string(&upsert_ids).map_err(backend)?;
-        let delete_json = serde_json::to_string(&delete_ids).map_err(backend)?;
+        let manifest = batch_manifest(upserts, deletes, relations)?;
+        let upsert_json = serde_json::to_string(&manifest.upsert_ids).map_err(backend)?;
+        let delete_json = serde_json::to_string(&manifest.delete_ids).map_err(backend)?;
         let conn = self.conn.borrow();
         conn.execute(
             "INSERT INTO index_batches(
                  operation_id, base_generation, target_generation, state,
                  operation_digest, upsert_ids_json, delete_ids_json,
-                 durable_point, created_at_ms
-             ) VALUES(?1, ?2, ?3, 'building', ?4, ?5, ?6, 'intent', ?7)",
+                 relation_upserts_json, relation_deletes_json,
+                 source_replacements_json, durable_point, created_at_ms
+             ) VALUES(
+                 ?1, ?2, ?3, 'building', ?4, ?5, ?6, ?7, ?8, ?9, 'intent', ?10
+             )",
             rusqlite::params![
                 op,
                 base_sql,
                 target_sql,
-                digest,
+                manifest.operation_digest,
                 upsert_json,
                 delete_json,
+                manifest.relation_upserts_json,
+                manifest.relation_deletes_json,
+                manifest.source_replacements_json,
                 unix_ms()?,
             ],
         )
@@ -946,7 +2348,7 @@ impl SqliteStore {
             operation_id: op,
             base_generation: base,
             target_generation: target,
-            operation_digest: digest,
+            operation_digest: manifest.operation_digest,
         })
     }
 
@@ -965,18 +2367,24 @@ impl SqliteStore {
         upserts: &[(StableId, Vec<u8>, String)],
         deletes: &[StableId],
     ) -> PortResult<()> {
-        self.commit_index_batch_with_membership(pending, upserts, deletes, &[])
+        self.commit_index_batch_with_relations(
+            pending,
+            upserts,
+            deletes,
+            &RelationManifests::default(),
+        )
     }
 
     /// 事务内校验 pending 句柄仍可安全激活：generation CAS + intent 行状态 + manifest 匹配。
     ///
-    /// 从 [`commit_index_batch_with_membership`](Self::commit_index_batch_with_membership) 抽出，
+    /// 从 [`commit_index_batch_with_relations`](Self::commit_index_batch_with_relations) 抽出，
     /// 使 rebuild 路径复用同一套“不覆盖更新基线 / 不与 durable intent 分歧”的前置检查。
     fn verify_pending_in_tx(
         tx: &rusqlite::Transaction<'_>,
         pending: &PendingIndexBatch,
         upserts: &[(StableId, Vec<u8>, String)],
         deletes: &[StableId],
+        relations: &RelationManifests,
     ) -> PortResult<()> {
         // CAS：活动 generation 必须仍等于 intent 记录的 base，否则中止本批次。
         let current: i64 = tx
@@ -1000,10 +2408,24 @@ impl SqliteStore {
             declared_digest,
             declared_upserts,
             declared_deletes,
-        ): (i64, i64, String, String, String, String) = tx
+            declared_relation_upserts,
+            declared_relation_deletes,
+            declared_source_replacements,
+        ): (
+            i64,
+            i64,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+        ) = tx
             .query_row(
                 "SELECT base_generation, target_generation, state, operation_digest,
-                        upsert_ids_json, delete_ids_json
+                        upsert_ids_json, delete_ids_json, relation_upserts_json,
+                        relation_deletes_json, source_replacements_json
                  FROM index_batches WHERE operation_id = ?1",
                 [&pending.operation_id],
                 |row| {
@@ -1014,6 +2436,9 @@ impl SqliteStore {
                         row.get(3)?,
                         row.get(4)?,
                         row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                        row.get(8)?,
                     ))
                 },
             )
@@ -1024,17 +2449,19 @@ impl SqliteStore {
                 pending.operation_id
             )));
         }
-        let (actual_upsert_ids, actual_delete_ids, actual_digest) =
-            batch_manifest(upserts, deletes)?;
-        let actual_upserts = serde_json::to_string(&actual_upsert_ids).map_err(backend)?;
-        let actual_deletes = serde_json::to_string(&actual_delete_ids).map_err(backend)?;
+        let actual = batch_manifest(upserts, deletes, relations)?;
+        let actual_upserts = serde_json::to_string(&actual.upsert_ids).map_err(backend)?;
+        let actual_deletes = serde_json::to_string(&actual.delete_ids).map_err(backend)?;
         let handle_matches = declared_base == pending.base_generation as i64
             && declared_target == pending.target_generation as i64
             && declared_digest == pending.operation_digest;
         if !handle_matches
-            || declared_digest != actual_digest
+            || declared_digest != actual.operation_digest
             || declared_upserts != actual_upserts
             || declared_deletes != actual_deletes
+            || declared_relation_upserts != actual.relation_upserts_json
+            || declared_relation_deletes != actual.relation_deletes_json
+            || declared_source_replacements != actual.source_replacements_json
         {
             return Err(PortError::Backend(format!(
                 "index batch {} payload does not match durable intent",
@@ -1044,16 +2471,16 @@ impl SqliteStore {
         Ok(())
     }
 
-    fn commit_index_batch_with_membership(
+    fn commit_index_batch_with_relations(
         &self,
         pending: &PendingIndexBatch,
         upserts: &[(StableId, Vec<u8>, String)],
         deletes: &[StableId],
-        membership: &[SourceMembership],
+        relations: &RelationManifests,
     ) -> PortResult<()> {
         let mut conn = self.conn.borrow_mut();
         let tx = conn.transaction().map_err(backend)?;
-        Self::verify_pending_in_tx(&tx, pending, upserts, deletes)?;
+        Self::verify_pending_in_tx(&tx, pending, upserts, deletes, relations)?;
 
         for (id, payload, text) in upserts {
             tx.execute(
@@ -1101,17 +2528,110 @@ impl SqliteStore {
                 .map_err(backend)?;
         }
 
-        for source in membership {
+        for delete in &relations.relation_deletes {
+            match delete {
+                RelationDeleteManifest::Edge(placement_id) => {
+                    tx.execute(
+                        "DELETE FROM message_edges WHERE child_placement_id = ?1",
+                        [placement_id.as_str()],
+                    )
+                    .map_err(backend)?;
+                }
+                RelationDeleteManifest::Placement(placement_id) => {
+                    tx.execute(
+                        "DELETE FROM message_placements WHERE placement_id = ?1",
+                        [placement_id.as_str()],
+                    )
+                    .map_err(backend)?;
+                }
+            }
+        }
+        for upsert in &relations.relation_upserts {
+            match upsert {
+                RelationUpsertManifest::Placement(placement) => {
+                    let (byte_start, byte_end) = match &placement.span {
+                        Some(span) => (
+                            Some(i64::try_from(span.start).map_err(backend)?),
+                            Some(i64::try_from(span.end).map_err(backend)?),
+                        ),
+                        None => (None, None),
+                    };
+                    tx.execute(
+                        "INSERT INTO message_placements(
+                             placement_id, session_id, document_id, message_id,
+                             source_ordinal, is_sidechain, byte_start, byte_end
+                         ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                         ON CONFLICT(placement_id) DO UPDATE SET
+                             session_id = excluded.session_id,
+                             document_id = excluded.document_id,
+                             message_id = excluded.message_id,
+                             source_ordinal = excluded.source_ordinal,
+                             is_sidechain = excluded.is_sidechain,
+                             byte_start = excluded.byte_start,
+                             byte_end = excluded.byte_end",
+                        rusqlite::params![
+                            placement.id.as_str(),
+                            placement.session_id.as_str(),
+                            placement.source_document_id.as_str(),
+                            placement.message_id.as_str(),
+                            i64::from(placement.source_ordinal),
+                            i64::from(placement.is_sidechain),
+                            byte_start,
+                            byte_end,
+                        ],
+                    )
+                    .map_err(backend)?;
+                }
+                RelationUpsertManifest::Edge(edge) => {
+                    tx.execute(
+                        "INSERT INTO message_edges(
+                             child_placement_id, parent_message_id,
+                             parent_native_id, relation
+                         ) VALUES(?1, ?2, ?3, ?4)
+                         ON CONFLICT(child_placement_id) DO UPDATE SET
+                             parent_message_id = excluded.parent_message_id,
+                             parent_native_id = excluded.parent_native_id,
+                             relation = excluded.relation",
+                        rusqlite::params![
+                            edge.child_placement_id.as_str(),
+                            edge.parent_message_id.as_str(),
+                            &edge.parent_native_id,
+                            edge.relation.as_str(),
+                        ],
+                    )
+                    .map_err(backend)?;
+                }
+            }
+        }
+
+        for source in &relations.source_replacements {
             tx.execute(
                 "DELETE FROM source_membership WHERE source_path = ?1",
                 [&source.source_path],
             )
             .map_err(backend)?;
-            for message_id in &source.message_ids {
+            for membership in &source.entity_memberships {
                 tx.execute(
                     "INSERT INTO source_membership(source_path, message_id, document_id)
                      VALUES(?1, ?2, ?3)",
-                    rusqlite::params![&source.source_path, message_id, &source.document_id],
+                    rusqlite::params![
+                        &source.source_path,
+                        &membership.entity_id,
+                        &membership.document_id
+                    ],
+                )
+                .map_err(backend)?;
+            }
+            tx.execute(
+                "DELETE FROM source_placement_membership WHERE source_path = ?1",
+                [&source.source_path],
+            )
+            .map_err(backend)?;
+            for placement_id in &source.placement_ids {
+                tx.execute(
+                    "INSERT INTO source_placement_membership(source_path, placement_id)
+                     VALUES(?1, ?2)",
+                    rusqlite::params![&source.source_path, placement_id.as_str()],
                 )
                 .map_err(backend)?;
             }
@@ -1121,7 +2641,26 @@ impl SqliteStore {
                 rusqlite::params![&source.source_path, unix_ms()?],
             )
             .map_err(backend)?;
+            if source.relation_complete {
+                tx.execute(
+                    "INSERT INTO source_relation_scans(source_path, relation_schema_version)
+                     VALUES(?1, ?2)
+                     ON CONFLICT(source_path) DO UPDATE SET
+                         relation_schema_version = excluded.relation_schema_version",
+                    rusqlite::params![&source.source_path, SCHEMA_VERSION],
+                )
+                .map_err(backend)?;
+            } else {
+                tx.execute(
+                    "DELETE FROM source_relation_scans WHERE source_path = ?1",
+                    [&source.source_path],
+                )
+                .map_err(backend)?;
+            }
         }
+
+        Self::regenerate_compatibility_aliases_in_tx(&tx)?;
+        Self::verify_relational_integrity_in_tx(&tx)?;
 
         tx.execute(
             "UPDATE store_metadata SET active_generation = ?1 WHERE singleton = 1",
@@ -1137,6 +2676,74 @@ impl SqliteStore {
         .map_err(backend)?;
 
         tx.commit().map_err(backend)?;
+        Ok(())
+    }
+
+    fn verify_relational_integrity_in_tx(tx: &rusqlite::Transaction<'_>) -> PortResult<()> {
+        let missing_entity: Option<String> = tx
+            .query_row(
+                "SELECT placement_id
+                 FROM message_placements
+                 WHERE NOT EXISTS(
+                           SELECT 1 FROM catalog WHERE id = message_placements.session_id
+                       )
+                    OR NOT EXISTS(
+                           SELECT 1 FROM catalog WHERE id = message_placements.document_id
+                       )
+                    OR NOT EXISTS(
+                           SELECT 1 FROM catalog WHERE id = message_placements.message_id
+                       )
+                 LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(backend)?;
+        if missing_entity.is_some() {
+            return Err(PortError::Backend(
+                "message placement references a missing catalog entity".into(),
+            ));
+        }
+
+        let missing_placement: Option<String> = tx
+            .query_row(
+                "SELECT child_placement_id
+                 FROM message_edges
+                 WHERE NOT EXISTS(
+                     SELECT 1 FROM message_placements
+                     WHERE placement_id = message_edges.child_placement_id
+                 )
+                 LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(backend)?;
+        if missing_placement.is_some() {
+            return Err(PortError::Backend(
+                "message edge references a missing child placement".into(),
+            ));
+        }
+
+        let missing_claim: Option<String> = tx
+            .query_row(
+                "SELECT placement_id
+                 FROM source_placement_membership
+                 WHERE NOT EXISTS(
+                     SELECT 1 FROM message_placements
+                     WHERE placement_id = source_placement_membership.placement_id
+                 )
+                 LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(backend)?;
+        if missing_claim.is_some() {
+            return Err(PortError::Backend(
+                "source placement claim references a missing placement".into(),
+            ));
+        }
         Ok(())
     }
 
@@ -1190,7 +2797,7 @@ impl SqliteStore {
                 let id = match id_json {
                     Some(json) => serde_json::from_str(&json).map_err(backend)?,
                     None => StableId::from_wire(&wire).ok_or_else(|| {
-                        PortError::Backend(format!("invalid StableId stored in catalog: {wire}"))
+                        PortError::Backend("catalog contains an invalid entity id".into())
                     })?,
                 };
                 let text = searchable_text(&payload);
@@ -1205,7 +2812,7 @@ impl SqliteStore {
         // 3) 单事务：校验句柄 → 整表清空 FTS → 按 catalog 重投影 → 推进 generation → 标记 activated。
         let mut conn = self.conn.borrow_mut();
         let tx = conn.transaction().map_err(backend)?;
-        Self::verify_pending_in_tx(&tx, &pending, &upserts, &[])?;
+        Self::verify_pending_in_tx(&tx, &pending, &upserts, &[], &RelationManifests::default())?;
 
         tx.execute("DELETE FROM fts", []).map_err(backend)?;
         tx.execute("DELETE FROM fts_ids", []).map_err(backend)?;
@@ -1286,7 +2893,8 @@ impl SqliteStore {
             .prepare(
                 "SELECT operation_id, base_generation, target_generation, state,
                         operation_digest, upsert_ids_json, delete_ids_json,
-                        durable_point, error_code
+                        relation_upserts_json, relation_deletes_json,
+                        source_replacements_json, durable_point, error_code
                  FROM index_batches WHERE operation_id = ?1",
             )
             .map_err(backend)?;
@@ -1296,6 +2904,9 @@ impl SqliteStore {
             Some(row) => {
                 let upsert_json: String = row.get(5).map_err(backend)?;
                 let delete_json: String = row.get(6).map_err(backend)?;
+                let relation_upserts_json: String = row.get(7).map_err(backend)?;
+                let relation_deletes_json: String = row.get(8).map_err(backend)?;
+                let source_replacements_json: String = row.get(9).map_err(backend)?;
                 Ok(Some(IndexBatch {
                     operation_id: row.get(0).map_err(backend)?,
                     base_generation: u64::try_from(row.get::<_, i64>(1).map_err(backend)?)
@@ -1306,8 +2917,14 @@ impl SqliteStore {
                     operation_digest: row.get(4).map_err(backend)?,
                     upsert_ids: serde_json::from_str(&upsert_json).map_err(backend)?,
                     delete_ids: serde_json::from_str(&delete_json).map_err(backend)?,
-                    durable_point: row.get(7).map_err(backend)?,
-                    error_code: row.get(8).map_err(backend)?,
+                    relation_upserts: serde_json::from_str(&relation_upserts_json)
+                        .map_err(backend)?,
+                    relation_deletes: serde_json::from_str(&relation_deletes_json)
+                        .map_err(backend)?,
+                    source_replacements: serde_json::from_str(&source_replacements_json)
+                        .map_err(backend)?,
+                    durable_point: row.get(10).map_err(backend)?,
+                    error_code: row.get(11).map_err(backend)?,
                 }))
             }
         }
@@ -1315,7 +2932,7 @@ impl SqliteStore {
 }
 
 /// 当前 catalog schema 版本。每次结构变更 +1 并在 [`SqliteStore::migrate`] 追加步骤。
-pub const SCHEMA_VERSION: i64 = 6;
+pub const SCHEMA_VERSION: i64 = 7;
 
 impl CatalogStore for SqliteStore {
     fn get(&self, id: &StableId) -> PortResult<Option<Vec<u8>>> {
@@ -1357,7 +2974,7 @@ impl CatalogStore for SqliteStore {
         for row in rows {
             let (wire, payload) = row.map_err(backend)?;
             let id = StableId::from_wire(&wire).ok_or_else(|| {
-                PortError::Backend(format!("invalid StableId stored in catalog: {wire}"))
+                PortError::Backend("catalog contains an invalid entity id".into())
             })?;
             entries.push(CatalogEntry { id, payload });
         }
@@ -1374,6 +2991,335 @@ impl CatalogStore for SqliteStore {
 
     fn active_generation(&self) -> PortResult<u64> {
         SqliteStore::active_generation(self)
+    }
+}
+
+impl ContextGraphStore for SqliteStore {
+    fn load_session_graph(&self, session_id: &StableId) -> PortResult<SessionContextGraph> {
+        if session_id.kind() != IdKind::Session {
+            return Err(PortError::NotFound("session context not found".into()));
+        }
+        let conn = self.conn.borrow();
+        let exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM catalog WHERE id = ?1)",
+                [session_id.as_str()],
+                |row| row.get(0),
+            )
+            .map_err(backend)?;
+        if !exists {
+            return Err(PortError::NotFound("session context not found".into()));
+        }
+
+        let sources = Self::relation_sources_for_session(&conn, session_id.as_str())?;
+        Self::require_relation_complete_sources(&conn, &sources, true, "session")?;
+        let stored_session_id = Self::stable_id_from_store(&conn, session_id.as_str())?;
+
+        let raw_placements = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT placement_id, document_id, message_id, source_ordinal,
+                            is_sidechain, byte_start, byte_end
+                     FROM message_placements
+                     WHERE session_id = ?1
+                     ORDER BY document_id, source_ordinal, placement_id",
+                )
+                .map_err(backend)?;
+            let rows = stmt
+                .query_map([session_id.as_str()], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, Option<i64>>(5)?,
+                        row.get::<_, Option<i64>>(6)?,
+                    ))
+                })
+                .map_err(backend)?;
+            let mut placements = Vec::new();
+            for row in rows {
+                placements.push(row.map_err(backend)?);
+            }
+            placements
+        };
+
+        let mut message_wires = BTreeSet::new();
+        let mut document_wires = BTreeSet::new();
+        let mut placements = Vec::with_capacity(raw_placements.len());
+        for (placement_id, document_id, message_id, ordinal, sidechain, start, end) in
+            raw_placements
+        {
+            let span = match (start, end) {
+                (None, None) => None,
+                (Some(start), Some(end)) => Some(EvidenceSpan {
+                    start: u64::try_from(start).map_err(backend)?,
+                    end: u64::try_from(end).map_err(backend)?,
+                }),
+                _ => {
+                    return Err(PortError::Backend(
+                        "stored placement has a partial span".into(),
+                    ));
+                }
+            };
+            message_wires.insert(message_id.clone());
+            document_wires.insert(document_id.clone());
+            placements.push(MessagePlacement {
+                id: PlacementId::from_wire(&placement_id).ok_or_else(|| {
+                    PortError::Backend("stored placement has an invalid id".into())
+                })?,
+                session_id: stored_session_id.clone(),
+                source_document_id: Self::stable_id_from_store(&conn, &document_id)?,
+                message_id: Self::stable_id_from_store(&conn, &message_id)?,
+                source_ordinal: u32::try_from(ordinal).map_err(backend)?,
+                is_sidechain: sidechain != 0,
+                span,
+            });
+        }
+
+        {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT DISTINCT document_id
+                     FROM source_membership
+                     WHERE message_id = ?1 AND document_id IS NOT NULL",
+                )
+                .map_err(backend)?;
+            let rows = stmt
+                .query_map([session_id.as_str()], |row| row.get::<_, String>(0))
+                .map_err(backend)?;
+            for row in rows {
+                document_wires.insert(row.map_err(backend)?);
+            }
+        }
+
+        let mut messages = Vec::with_capacity(message_wires.len());
+        for wire in message_wires {
+            let payload: Vec<u8> = conn
+                .query_row(
+                    "SELECT payload FROM catalog WHERE id = ?1",
+                    [&wire],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(backend)?
+                .ok_or_else(|| {
+                    PortError::Backend("session placement references a missing message".into())
+                })?;
+            let map = match serde_json::from_slice::<serde_json::Value>(&payload) {
+                Ok(serde_json::Value::Object(map)) => map,
+                _ => {
+                    return Err(PortError::Backend(
+                        "stored message payload is not an object".into(),
+                    ));
+                }
+            };
+            let role = map
+                .get("role")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| PortError::Backend("stored message is missing role".into()))
+                .and_then(stored_role)?;
+            let text = map
+                .get("text")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| PortError::Backend("stored message is missing text".into()))?
+                .to_string();
+            let timestamp = match map.get("timestamp") {
+                None | Some(serde_json::Value::Null) => None,
+                Some(serde_json::Value::String(value)) => Some(value.clone()),
+                Some(_) => {
+                    return Err(PortError::Backend(
+                        "stored message timestamp is not a string".into(),
+                    ));
+                }
+            };
+            messages.push(Message {
+                id: Self::stable_id_from_store(&conn, &wire)?,
+                role,
+                text,
+                timestamp,
+            });
+        }
+
+        let mut source_documents = Vec::with_capacity(document_wires.len());
+        for wire in document_wires {
+            let payload: Vec<u8> = conn
+                .query_row(
+                    "SELECT payload FROM catalog WHERE id = ?1",
+                    [&wire],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(backend)?
+                .ok_or_else(|| {
+                    PortError::Backend("session context references a missing document".into())
+                })?;
+            let map = match serde_json::from_slice::<serde_json::Value>(&payload) {
+                Ok(serde_json::Value::Object(map)) => map,
+                _ => {
+                    return Err(PortError::Backend(
+                        "stored document payload is not an object".into(),
+                    ));
+                }
+            };
+            source_documents.push(SourceDocument {
+                id: Self::stable_id_from_store(&conn, &wire)?,
+                provider_id: map
+                    .get("provider")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| {
+                        PortError::Backend("stored document is missing provider".into())
+                    })?
+                    .to_string(),
+                variant_id: map
+                    .get("variant")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| PortError::Backend("stored document is missing variant".into()))?
+                    .to_string(),
+                fingerprint: map
+                    .get("fingerprint")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| {
+                        PortError::Backend("stored document is missing fingerprint".into())
+                    })?
+                    .to_string(),
+                len: map
+                    .get("len")
+                    .and_then(serde_json::Value::as_u64)
+                    .ok_or_else(|| {
+                        PortError::Backend("stored document is missing byte length".into())
+                    })?,
+            });
+        }
+
+        let raw_edges = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT edges.child_placement_id, edges.parent_message_id,
+                            edges.parent_native_id, edges.relation
+                     FROM message_edges AS edges
+                     JOIN message_placements AS placements
+                       ON placements.placement_id = edges.child_placement_id
+                     WHERE placements.session_id = ?1
+                     ORDER BY edges.child_placement_id",
+                )
+                .map_err(backend)?;
+            let rows = stmt
+                .query_map([session_id.as_str()], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                })
+                .map_err(backend)?;
+            let mut edges = Vec::new();
+            for row in rows {
+                edges.push(row.map_err(backend)?);
+            }
+            edges
+        };
+        let mut edges = Vec::with_capacity(raw_edges.len());
+        for (child_placement_id, parent_message_id, parent_native_id, relation) in raw_edges {
+            edges.push(MessageEdge {
+                child_placement_id: PlacementId::from_wire(&child_placement_id).ok_or_else(
+                    || PortError::Backend("stored edge has an invalid child placement id".into()),
+                )?,
+                parent_message_id: Self::stable_id_from_store(&conn, &parent_message_id)?,
+                parent_native_id,
+                relation: stored_relation(&relation)?,
+            });
+        }
+
+        let graph = SessionContextGraph {
+            session_id: stored_session_id,
+            messages,
+            source_documents,
+            placements,
+            edges,
+        };
+        graph
+            .validate()
+            .map_err(|error| PortError::Backend(error.to_string()))?;
+        Ok(graph)
+    }
+
+    fn message_contexts(&self, message_id: &StableId) -> PortResult<Vec<MessageContextCandidate>> {
+        if message_id.kind() != IdKind::Message {
+            return Err(PortError::NotFound("message context not found".into()));
+        }
+        let conn = self.conn.borrow();
+        let exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM catalog WHERE id = ?1)",
+                [message_id.as_str()],
+                |row| row.get(0),
+            )
+            .map_err(backend)?;
+        if !exists {
+            return Err(PortError::NotFound("message context not found".into()));
+        }
+
+        let message_sources = Self::relation_sources_for_message(&conn, message_id.as_str())?;
+        Self::require_relation_complete_sources(&conn, &message_sources, false, "message")?;
+        let mut grouped = BTreeMap::<String, Vec<PlacementId>>::new();
+        {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT session_id, placement_id
+                     FROM message_placements
+                     WHERE message_id = ?1
+                     ORDER BY session_id, placement_id",
+                )
+                .map_err(backend)?;
+            let rows = stmt
+                .query_map([message_id.as_str()], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(backend)?;
+            for row in rows {
+                let (session_id, placement_id) = row.map_err(backend)?;
+                grouped.entry(session_id).or_default().push(
+                    PlacementId::from_wire(&placement_id).ok_or_else(|| {
+                        PortError::Backend("stored placement has an invalid id".into())
+                    })?,
+                );
+            }
+        }
+
+        let mut candidates = Vec::with_capacity(grouped.len());
+        for (session_wire, mut placement_ids) in grouped {
+            let session_sources = Self::relation_sources_for_session(&conn, &session_wire)?;
+            Self::require_relation_complete_sources(&conn, &session_sources, true, "session")?;
+            placement_ids.sort();
+            candidates.push(MessageContextCandidate {
+                session_id: Self::stable_id_from_store(&conn, &session_wire)?,
+                placement_ids,
+            });
+        }
+        Ok(candidates)
+    }
+
+    fn context_stats(&self) -> PortResult<ContextStats> {
+        let conn = self.conn.borrow();
+        let placements: i64 = conn
+            .query_row("SELECT COUNT(*) FROM message_placements", [], |row| {
+                row.get(0)
+            })
+            .map_err(backend)?;
+        let source_placement_claims: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM source_placement_membership",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(backend)?;
+        Ok(ContextStats {
+            placements: u64::try_from(placements).map_err(backend)?,
+            source_placement_claims: u64::try_from(source_placement_claims).map_err(backend)?,
+        })
     }
 }
 
@@ -1440,7 +3386,7 @@ impl SearchIndex for SqliteStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agentsessions_domain::{IdKind, Stability};
+    use agentsessions_domain::{EvidenceSpan, IdKind, MessageRelation, Stability};
 
     fn sid(kind: IdKind, fact: &[u8]) -> StableId {
         StableId::derive(kind, Stability::Reconstructed, &[fact])
@@ -1448,6 +3394,50 @@ mod tests {
 
     fn sqlite_failure(code: i32) -> rusqlite::Error {
         rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(code), None)
+    }
+
+    fn create_v6_schema(conn: &Connection) {
+        conn.execute_batch(
+            "CREATE TABLE catalog (id TEXT PRIMARY KEY, payload BLOB NOT NULL);
+             CREATE VIRTUAL TABLE fts USING fts5(id UNINDEXED, text);
+             CREATE TABLE store_metadata (
+                 singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+                 active_generation INTEGER NOT NULL
+             );
+             INSERT INTO store_metadata(singleton, active_generation) VALUES(1, 1);
+             CREATE TABLE index_batches (
+                 operation_id TEXT PRIMARY KEY,
+                 base_generation INTEGER NOT NULL,
+                 target_generation INTEGER NOT NULL,
+                 state TEXT NOT NULL,
+                 operation_digest TEXT NOT NULL,
+                 upsert_ids_json TEXT NOT NULL,
+                 delete_ids_json TEXT NOT NULL,
+                 durable_point TEXT NOT NULL,
+                 created_at_ms INTEGER NOT NULL,
+                 committed_at_ms INTEGER,
+                 error_code TEXT
+             );
+             CREATE INDEX index_batches_state ON index_batches(state);
+             CREATE TABLE fts_ids (
+                 wire_id TEXT PRIMARY KEY,
+                 id_json TEXT NOT NULL UNIQUE
+             );
+             CREATE TABLE source_membership (
+                 source_path TEXT NOT NULL,
+                 message_id TEXT NOT NULL,
+                 document_id TEXT,
+                 PRIMARY KEY(source_path, message_id)
+             );
+             CREATE INDEX source_membership_source
+             ON source_membership(source_path);
+             CREATE TABLE source_scans (
+                 source_path TEXT PRIMARY KEY,
+                 scanned_at_ms INTEGER NOT NULL
+             );
+             PRAGMA user_version = 6;",
+        )
+        .unwrap();
     }
 
     #[test]
@@ -1515,6 +3505,177 @@ mod tests {
             membership,
             digest,
         )
+    }
+
+    fn entity_entry(id: &StableId) -> (StableId, Vec<u8>, String) {
+        (
+            id.clone(),
+            format!("payload:{}", id.as_str()).into_bytes(),
+            if id.kind() == IdKind::Message {
+                format!("text:{}", id.as_str())
+            } else {
+                String::new()
+            },
+        )
+    }
+
+    fn relational_message_payload(
+        session_id: &StableId,
+        document_id: &StableId,
+        parent_id: &StableId,
+        parent_native_id: &str,
+        is_sidechain: bool,
+        span: (u64, u64),
+    ) -> Vec<u8> {
+        serde_json::json!({
+            "role": "user",
+            "text": "shared stable body",
+            "timestamp": "2026-07-28T00:00:00Z",
+            "parent": parent_id.as_str(),
+            "parent_native_id": parent_native_id,
+            "is_sidechain": is_sidechain,
+            "session": session_id.as_str(),
+            "sessions": [session_id.as_str()],
+            "span": { "start": span.0, "end": span.1 },
+            "spans": [{
+                "document": document_id.as_str(),
+                "start": span.0,
+                "end": span.1,
+            }],
+        })
+        .to_string()
+        .into_bytes()
+    }
+
+    fn typed_message_entry(id: &StableId, text: &str) -> (StableId, Vec<u8>, String) {
+        (
+            id.clone(),
+            serde_json::json!({
+                "role": "user",
+                "text": text,
+                "timestamp": "2026-07-28T00:00:00Z",
+                "parent": null,
+                "parent_native_id": null,
+                "is_sidechain": false,
+                "session": null,
+                "sessions": [],
+                "span": null,
+                "spans": [],
+            })
+            .to_string()
+            .into_bytes(),
+            text.to_string(),
+        )
+    }
+
+    fn typed_document_entry(id: &StableId) -> (StableId, Vec<u8>, String) {
+        (
+            id.clone(),
+            serde_json::json!({
+                "provider": "synthetic",
+                "variant": "synthetic/jsonl-v1",
+                "fingerprint": "0123456789abcdef",
+                "len": 128,
+            })
+            .to_string()
+            .into_bytes(),
+            String::new(),
+        )
+    }
+
+    fn placement(
+        session_id: &StableId,
+        document_id: &StableId,
+        message_id: &StableId,
+        source_ordinal: u32,
+        is_sidechain: bool,
+        span: Option<(u64, u64)>,
+    ) -> MessagePlacement {
+        MessagePlacement::new(
+            session_id.clone(),
+            document_id.clone(),
+            message_id.clone(),
+            source_ordinal,
+            is_sidechain,
+            span.map(|(start, end)| EvidenceSpan { start, end }),
+        )
+    }
+
+    fn reply_edge(placement: &MessagePlacement, parent: &StableId) -> MessageEdge {
+        MessageEdge {
+            child_placement_id: placement.id.clone(),
+            parent_message_id: parent.clone(),
+            parent_native_id: Some("synthetic-parent".into()),
+            relation: MessageRelation::Reply,
+        }
+    }
+
+    fn source_batch(
+        source_path: &str,
+        entries: Vec<(StableId, Vec<u8>, String)>,
+        placements: Vec<MessagePlacement>,
+        edges: Vec<MessageEdge>,
+        relation_complete: bool,
+    ) -> SourceBatch {
+        SourceBatch {
+            source_path: source_path.into(),
+            entries,
+            placements,
+            edges,
+            relation_complete,
+        }
+    }
+
+    fn table_count(store: &SqliteStore, table: &str) -> i64 {
+        store
+            .conn
+            .borrow()
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .unwrap()
+    }
+
+    fn source_placement_claims(store: &SqliteStore, source_path: &str) -> Vec<String> {
+        let conn = store.conn.borrow();
+        let mut stmt = conn
+            .prepare(
+                "SELECT placement_id FROM source_placement_membership
+                 WHERE source_path = ?1 ORDER BY placement_id",
+            )
+            .unwrap();
+        stmt.query_map([source_path], |row| row.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    }
+
+    fn relation_complete_marker(store: &SqliteStore, source_path: &str) -> bool {
+        store
+            .conn
+            .borrow()
+            .query_row(
+                "SELECT EXISTS(
+                     SELECT 1 FROM source_relation_scans WHERE source_path = ?1
+                 )",
+                [source_path],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    fn latest_index_batch(store: &SqliteStore) -> IndexBatch {
+        let operation_id: String = store
+            .conn
+            .borrow()
+            .query_row(
+                "SELECT operation_id FROM index_batches
+                 ORDER BY target_generation DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        store.index_batch(&operation_id).unwrap().unwrap()
     }
 
     #[test]
@@ -1619,6 +3780,174 @@ mod tests {
     }
 
     #[test]
+    fn v6_db_migrates_to_v7_without_fabricating_relations() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v6.db");
+        let p = path.to_string_lossy().into_owned();
+        let payload = vec![0x00, 0xff, 0x7f, 0x01, 0x80];
+        {
+            let conn = rusqlite::Connection::open(&p).unwrap();
+            create_v6_schema(&conn);
+            conn.execute(
+                "INSERT INTO catalog(id, payload) VALUES('msg_v1_legacy', ?1)",
+                [&payload],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO source_membership(source_path, message_id, document_id)
+                 VALUES('legacy.jsonl', 'msg_v1_legacy', NULL)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO source_scans(source_path, scanned_at_ms)
+                 VALUES('legacy.jsonl', 1)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO index_batches(
+                     operation_id, base_generation, target_generation, state,
+                     operation_digest, upsert_ids_json, delete_ids_json,
+                     durable_point, created_at_ms, committed_at_ms
+                 ) VALUES(
+                     'legacy-op', 0, 1, 'activated', 'legacy-digest', '[]', '[]',
+                     'activated', 1, 2
+                 )",
+                [],
+            )
+            .unwrap();
+        }
+
+        let store = SqliteStore::open(&p).unwrap();
+        assert_eq!(store.schema_version().unwrap(), 7);
+        let id = StableId::from_wire("msg_v1_legacy").unwrap();
+        assert_eq!(store.get(&id).unwrap().unwrap(), payload);
+        let batch = store.index_batch("legacy-op").unwrap().unwrap();
+        assert!(batch.relation_upserts.is_empty());
+        assert!(batch.relation_deletes.is_empty());
+        assert!(batch.source_replacements.is_empty());
+        drop(store);
+
+        let conn = rusqlite::Connection::open(&p).unwrap();
+        let document_id: Option<String> = conn
+            .query_row(
+                "SELECT document_id FROM source_membership
+                 WHERE source_path = 'legacy.jsonl' AND message_id = 'msg_v1_legacy'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(document_id, None);
+
+        for table in [
+            "message_placements",
+            "message_edges",
+            "source_placement_membership",
+            "source_relation_scans",
+        ] {
+            let count: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, 0, "{table} must start empty");
+        }
+        let relation_scan_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM source_relation_scans", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(relation_scan_count, 0);
+
+        let manifests: (String, String, String) = conn
+            .query_row(
+                "SELECT relation_upserts_json, relation_deletes_json,
+                        source_replacements_json
+                 FROM index_batches WHERE operation_id = 'legacy-op'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            manifests,
+            ("[]".to_string(), "[]".to_string(), "[]".to_string())
+        );
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT name FROM sqlite_master
+                 WHERE type = 'index' AND name IN (
+                     'message_placements_session_order',
+                     'message_placements_message',
+                     'message_placements_document',
+                     'source_placement_membership_placement'
+                 )
+                 ORDER BY name",
+            )
+            .unwrap();
+        let indexes: Vec<String> = stmt
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(
+            indexes,
+            vec![
+                "message_placements_document",
+                "message_placements_message",
+                "message_placements_session_order",
+                "source_placement_membership_placement",
+            ]
+        );
+    }
+
+    #[test]
+    fn injected_v6_to_v7_failure_rolls_back_schema_and_version() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        create_v6_schema(&conn);
+
+        let err = SqliteStore::migrate_v6_to_v7_inner(&conn, true).unwrap_err();
+        assert!(
+            matches!(err, PortError::Backend(message) if message.contains("injected v6-to-v7"))
+        );
+        assert!(conn.is_autocommit());
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 6);
+
+        for table in [
+            "message_placements",
+            "message_edges",
+            "source_placement_membership",
+            "source_relation_scans",
+        ] {
+            let exists: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master
+                     WHERE type = 'table' AND name = ?1",
+                    [table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(exists, 0, "{table} must roll back");
+        }
+        let mut stmt = conn.prepare("PRAGMA table_info(index_batches)").unwrap();
+        let columns: Vec<String> = stmt
+            .query_map([], |row| row.get(1))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert!(!columns.iter().any(|name| {
+            matches!(
+                name.as_str(),
+                "relation_upserts_json" | "relation_deletes_json" | "source_replacements_json"
+            )
+        }));
+    }
+
+    #[test]
     fn commit_batch_writes_all_entries() {
         let store = SqliteStore::open_in_memory().unwrap();
         let a = sid(IdKind::Message, b"a");
@@ -1646,6 +3975,1090 @@ mod tests {
         assert_eq!(store.get(&id).unwrap().unwrap(), b"role\tv2");
         assert!(store.query("one", 10).unwrap().is_empty());
         assert_eq!(store.query("two", 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn relation_and_marker_only_changes_advance_once_then_noop() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let session = sid(IdKind::Session, b"relation-generation-session");
+        let document = sid(IdKind::Document, b"relation-generation-document");
+        let parent = sid(IdKind::Message, b"relation-generation-parent");
+        let child = sid(IdKind::Message, b"relation-generation-child");
+        let child_placement = placement(&session, &document, &child, 1, false, Some((10, 20)));
+        let entries = || {
+            [&session, &document, &parent, &child]
+                .into_iter()
+                .map(entity_entry)
+                .collect()
+        };
+
+        let initial = source_batch(
+            "relation-generation.jsonl",
+            entries(),
+            vec![child_placement.clone()],
+            Vec::new(),
+            true,
+        );
+        assert!(
+            store
+                .commit_source_batches_if_changed(std::slice::from_ref(&initial))
+                .unwrap()
+        );
+        assert_eq!(store.active_generation().unwrap(), 1);
+
+        let edge = reply_edge(&child_placement, &parent);
+        let relation_only = source_batch(
+            "relation-generation.jsonl",
+            entries(),
+            vec![child_placement.clone()],
+            vec![edge.clone()],
+            true,
+        );
+        assert!(
+            store
+                .commit_source_batches_if_changed(std::slice::from_ref(&relation_only))
+                .unwrap()
+        );
+        assert_eq!(store.active_generation().unwrap(), 2);
+        let relation_batch = latest_index_batch(&store);
+        assert_eq!(relation_batch.relation_upserts.len(), 2);
+        assert!(relation_batch.relation_deletes.is_empty());
+        assert_eq!(relation_batch.source_replacements.len(), 1);
+
+        assert!(
+            !store
+                .commit_source_batches_if_changed(std::slice::from_ref(&relation_only))
+                .unwrap()
+        );
+        assert_eq!(store.active_generation().unwrap(), 2);
+
+        let marker_only = source_batch(
+            "relation-generation.jsonl",
+            entries(),
+            vec![child_placement.clone()],
+            vec![edge.clone()],
+            false,
+        );
+        assert!(
+            store
+                .commit_source_batches_if_changed(std::slice::from_ref(&marker_only))
+                .unwrap()
+        );
+        assert_eq!(store.active_generation().unwrap(), 3);
+        assert!(!relation_complete_marker(
+            &store,
+            "relation-generation.jsonl"
+        ));
+        assert_eq!(
+            latest_index_batch(&store).source_replacements[0]["relation_complete"],
+            serde_json::Value::Bool(false)
+        );
+
+        assert!(
+            !store
+                .commit_source_batches_if_changed(std::slice::from_ref(&marker_only))
+                .unwrap()
+        );
+        assert_eq!(store.active_generation().unwrap(), 3);
+
+        assert!(
+            store
+                .commit_source_batches_if_changed(std::slice::from_ref(&relation_only))
+                .unwrap()
+        );
+        assert_eq!(store.active_generation().unwrap(), 4);
+        assert!(relation_complete_marker(
+            &store,
+            "relation-generation.jsonl"
+        ));
+    }
+
+    #[test]
+    fn complete_relations_regenerate_divergent_context_aliases_without_stable_conflict() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let session_a = sid(IdKind::Session, b"compat-session-a");
+        let session_b = sid(IdKind::Session, b"compat-session-b");
+        let document_a = sid(IdKind::Document, b"compat-document-a");
+        let document_b = sid(IdKind::Document, b"compat-document-b");
+        let parent_a = sid(IdKind::Message, b"compat-parent-a");
+        let parent_b = sid(IdKind::Message, b"compat-parent-b");
+        let child = sid(IdKind::Message, b"compat-child");
+        let placement_a = placement(&session_a, &document_a, &child, 1, false, Some((10, 20)));
+        let placement_b = placement(&session_b, &document_b, &child, 2, true, Some((30, 40)));
+        let edge_a = MessageEdge {
+            child_placement_id: placement_a.id.clone(),
+            parent_message_id: parent_a.clone(),
+            parent_native_id: Some("native-parent-a".into()),
+            relation: MessageRelation::Reply,
+        };
+        let edge_b = MessageEdge {
+            child_placement_id: placement_b.id.clone(),
+            parent_message_id: parent_b.clone(),
+            parent_native_id: Some("native-parent-b".into()),
+            relation: MessageRelation::Reply,
+        };
+        let sources = [
+            source_batch(
+                "compat-a.jsonl",
+                vec![
+                    (
+                        child.clone(),
+                        relational_message_payload(
+                            &session_a,
+                            &document_a,
+                            &parent_a,
+                            "native-parent-a",
+                            false,
+                            (10, 20),
+                        ),
+                        "shared stable body".into(),
+                    ),
+                    (
+                        session_a.clone(),
+                        session_payload(document_a.as_str(), &[child.as_str()]),
+                        String::new(),
+                    ),
+                    entity_entry(&document_a),
+                    entity_entry(&parent_a),
+                ],
+                vec![placement_a.clone()],
+                vec![edge_a],
+                true,
+            ),
+            source_batch(
+                "compat-b.jsonl",
+                vec![
+                    (
+                        child.clone(),
+                        relational_message_payload(
+                            &session_b,
+                            &document_b,
+                            &parent_b,
+                            "native-parent-b",
+                            true,
+                            (30, 40),
+                        ),
+                        "shared stable body".into(),
+                    ),
+                    (
+                        session_b.clone(),
+                        session_payload(document_b.as_str(), &[child.as_str()]),
+                        String::new(),
+                    ),
+                    entity_entry(&document_b),
+                    entity_entry(&parent_b),
+                ],
+                vec![placement_b.clone()],
+                vec![edge_b],
+                true,
+            ),
+        ];
+        assert!(store.commit_source_batches_if_changed(&sources).unwrap());
+
+        let stored: serde_json::Value =
+            serde_json::from_slice(&store.get(&child).unwrap().unwrap()).unwrap();
+        assert_eq!(stored["parent"], serde_json::Value::Null);
+        assert_eq!(stored["parent_native_id"], serde_json::Value::Null);
+        assert_eq!(stored["is_sidechain"], serde_json::Value::Null);
+        assert_eq!(stored["sessions"].as_array().unwrap().len(), 2);
+        let spans = stored["spans"].as_array().unwrap();
+        assert_eq!(spans.len(), 2);
+        assert!(
+            spans
+                .iter()
+                .any(|span| span["placement_id"] == placement_a.id.as_str())
+        );
+        assert!(
+            spans
+                .iter()
+                .any(|span| span["placement_id"] == placement_b.id.as_str())
+        );
+
+        let generation = store.active_generation().unwrap();
+        assert!(!store.commit_source_batches_if_changed(&sources).unwrap());
+        assert_eq!(store.active_generation().unwrap(), generation);
+    }
+
+    #[test]
+    fn mixed_relation_completeness_preserves_alias_until_last_contributor_is_complete() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let session_a = sid(IdKind::Session, b"mixed-session-a");
+        let session_b = sid(IdKind::Session, b"mixed-session-b");
+        let document_a = sid(IdKind::Document, b"mixed-document-a");
+        let document_b = sid(IdKind::Document, b"mixed-document-b");
+        let parent_a = sid(IdKind::Message, b"mixed-parent-a");
+        let parent_b = sid(IdKind::Message, b"mixed-parent-b");
+        let child = sid(IdKind::Message, b"mixed-child");
+        let placement_a = placement(&session_a, &document_a, &child, 1, false, Some((10, 20)));
+        let placement_b = placement(&session_b, &document_b, &child, 2, true, Some((30, 40)));
+        let source_a = |complete| {
+            source_batch(
+                "mixed-a.jsonl",
+                vec![
+                    (
+                        child.clone(),
+                        relational_message_payload(
+                            &session_a,
+                            &document_a,
+                            &parent_a,
+                            "native-parent-a",
+                            false,
+                            (10, 20),
+                        ),
+                        "shared stable body".into(),
+                    ),
+                    (
+                        session_a.clone(),
+                        session_payload(document_a.as_str(), &[child.as_str()]),
+                        String::new(),
+                    ),
+                    entity_entry(&document_a),
+                    entity_entry(&parent_a),
+                ],
+                vec![placement_a.clone()],
+                vec![MessageEdge {
+                    child_placement_id: placement_a.id.clone(),
+                    parent_message_id: parent_a.clone(),
+                    parent_native_id: Some("native-parent-a".into()),
+                    relation: MessageRelation::Reply,
+                }],
+                complete,
+            )
+        };
+        let source_b = source_batch(
+            "mixed-b.jsonl",
+            vec![
+                (
+                    child.clone(),
+                    relational_message_payload(
+                        &session_b,
+                        &document_b,
+                        &parent_b,
+                        "native-parent-b",
+                        true,
+                        (30, 40),
+                    ),
+                    "shared stable body".into(),
+                ),
+                (
+                    session_b.clone(),
+                    session_payload(document_b.as_str(), &[child.as_str()]),
+                    String::new(),
+                ),
+                entity_entry(&document_b),
+                entity_entry(&parent_b),
+            ],
+            vec![placement_b.clone()],
+            vec![MessageEdge {
+                child_placement_id: placement_b.id.clone(),
+                parent_message_id: parent_b.clone(),
+                parent_native_id: Some("native-parent-b".into()),
+                relation: MessageRelation::Reply,
+            }],
+            true,
+        );
+
+        store
+            .commit_source_batches_if_changed(std::slice::from_ref(&source_a(false)))
+            .unwrap();
+        store
+            .commit_source_batches_if_changed(std::slice::from_ref(&source_b))
+            .unwrap();
+        let mixed: serde_json::Value =
+            serde_json::from_slice(&store.get(&child).unwrap().unwrap()).unwrap();
+        assert_eq!(mixed["parent"], parent_a.as_str());
+        assert_eq!(mixed["parent_native_id"], "native-parent-a");
+        assert_eq!(mixed["is_sidechain"], false);
+
+        assert!(
+            store
+                .commit_source_batches_if_changed(std::slice::from_ref(&source_a(true)))
+                .unwrap()
+        );
+        let complete: serde_json::Value =
+            serde_json::from_slice(&store.get(&child).unwrap().unwrap()).unwrap();
+        assert_eq!(complete["parent"], serde_json::Value::Null);
+        assert_eq!(complete["parent_native_id"], serde_json::Value::Null);
+        assert_eq!(complete["is_sidechain"], serde_json::Value::Null);
+        assert_eq!(complete["spans"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn context_graph_store_loads_typed_graph_and_groups_message_candidates_by_session() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let session = sid(IdKind::Session, b"typed-context-session");
+        let document = sid(IdKind::Document, b"typed-context-document");
+        let message = sid(IdKind::Message, b"typed-context-message");
+        let first = placement(&session, &document, &message, 0, false, Some((0, 4)));
+        let second = placement(&session, &document, &message, 1, true, Some((5, 9)));
+        let source = source_batch(
+            "typed-context.jsonl",
+            vec![
+                typed_message_entry(&message, "typed context body"),
+                (
+                    session.clone(),
+                    session_payload(document.as_str(), &[message.as_str()]),
+                    String::new(),
+                ),
+                typed_document_entry(&document),
+            ],
+            vec![first.clone(), second.clone()],
+            Vec::new(),
+            true,
+        );
+        store
+            .commit_source_batches_if_changed(std::slice::from_ref(&source))
+            .unwrap();
+
+        let graph = store.load_session_graph(&session).unwrap();
+        assert_eq!(graph.session_id, session);
+        assert_eq!(graph.messages.len(), 1);
+        assert_eq!(graph.messages[0].id, message);
+        assert_eq!(graph.source_documents.len(), 1);
+        assert_eq!(graph.source_documents[0].id, document);
+        assert_eq!(graph.placements.len(), 2);
+        assert!(graph.edges.is_empty());
+        graph.validate().unwrap();
+
+        let candidates = store.message_contexts(&message).unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].session_id, session);
+        assert_eq!(
+            candidates[0].placement_ids,
+            vec![first.id.clone(), second.id.clone()]
+        );
+        assert_eq!(
+            store.context_stats().unwrap(),
+            ContextStats {
+                placements: 2,
+                source_placement_claims: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn context_graph_store_keeps_zero_message_session_document_attribution() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let session = sid(IdKind::Session, b"zero-message-session");
+        let document = sid(IdKind::Document, b"zero-message-document");
+        let source = source_batch(
+            "zero-message.jsonl",
+            vec![
+                (
+                    session.clone(),
+                    session_payload(document.as_str(), &[]),
+                    String::new(),
+                ),
+                typed_document_entry(&document),
+            ],
+            Vec::new(),
+            Vec::new(),
+            true,
+        );
+        store
+            .commit_source_batches_if_changed(std::slice::from_ref(&source))
+            .unwrap();
+
+        let graph = store.load_session_graph(&session).unwrap();
+        assert!(graph.messages.is_empty());
+        assert!(graph.placements.is_empty());
+        assert!(graph.edges.is_empty());
+        assert_eq!(graph.source_documents.len(), 1);
+        assert_eq!(graph.source_documents[0].id, document);
+        graph.validate().unwrap();
+    }
+
+    #[test]
+    fn every_contributing_source_must_be_relation_complete_before_context_reads() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let session = sid(IdKind::Session, b"incomplete-context-session");
+        let document_a = sid(IdKind::Document, b"complete-context-document");
+        let document_b = sid(IdKind::Document, b"incomplete-context-document");
+        let message_a = sid(IdKind::Message, b"complete-context-message");
+        let message_b = sid(IdKind::Message, b"incomplete-context-message");
+        let placement_a = placement(&session, &document_a, &message_a, 0, false, Some((0, 4)));
+        let placement_b = placement(&session, &document_b, &message_b, 0, false, Some((0, 4)));
+        let complete_source_path = "private-complete-source.jsonl";
+        let incomplete_source_path = "private-incomplete-source.jsonl";
+        let complete_source = source_batch(
+            complete_source_path,
+            vec![
+                typed_message_entry(&message_a, "complete context body"),
+                (
+                    session.clone(),
+                    session_payload(document_a.as_str(), &[message_a.as_str()]),
+                    String::new(),
+                ),
+                typed_document_entry(&document_a),
+            ],
+            vec![placement_a],
+            Vec::new(),
+            true,
+        );
+        let incomplete_source = |complete| {
+            source_batch(
+                incomplete_source_path,
+                vec![
+                    typed_message_entry(&message_b, "incomplete context body"),
+                    (
+                        session.clone(),
+                        session_payload(document_b.as_str(), &[message_b.as_str()]),
+                        String::new(),
+                    ),
+                    typed_document_entry(&document_b),
+                ],
+                vec![placement_b.clone()],
+                Vec::new(),
+                complete,
+            )
+        };
+        store
+            .commit_source_batches_if_changed(&[complete_source, incomplete_source(false)])
+            .unwrap();
+        assert!(relation_complete_marker(&store, complete_source_path));
+        assert!(!relation_complete_marker(&store, incomplete_source_path));
+
+        let session_error = store.load_session_graph(&session).unwrap_err();
+        assert!(
+            matches!(&session_error, PortError::SchemaIncompatible(message) if message.contains("re-ingest required"))
+        );
+        assert!(!session_error.to_string().contains(complete_source_path));
+        assert!(!session_error.to_string().contains(incomplete_source_path));
+
+        let message_error = store.message_contexts(&message_b).unwrap_err();
+        assert!(
+            matches!(&message_error, PortError::SchemaIncompatible(message) if message.contains("re-ingest required"))
+        );
+        assert!(!message_error.to_string().contains(incomplete_source_path));
+
+        assert!(
+            store
+                .commit_source_batches_if_changed(std::slice::from_ref(&incomplete_source(true)))
+                .unwrap()
+        );
+        assert!(relation_complete_marker(&store, incomplete_source_path));
+
+        let graph = store.load_session_graph(&session).unwrap();
+        assert_eq!(graph.placements.len(), 2);
+        assert!(
+            graph
+                .placements
+                .iter()
+                .any(|placement| placement.id == placement_b.id)
+        );
+        let contexts = store.message_contexts(&message_b).unwrap();
+        assert_eq!(contexts.len(), 1);
+        assert_eq!(contexts[0].session_id, session);
+        assert_eq!(contexts[0].placement_ids, vec![placement_b.id.clone()]);
+    }
+
+    #[test]
+    fn rebuild_preserves_relations_context_claims_and_completeness() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let session = sid(IdKind::Session, b"rebuild-context-session");
+        let document = sid(IdKind::Document, b"rebuild-context-document");
+        let parent = sid(IdKind::Message, b"rebuild-context-parent");
+        let child = sid(IdKind::Message, b"rebuild-context-child");
+        let parent_placement = placement(&session, &document, &parent, 0, false, Some((0, 4)));
+        let child_placement = placement(&session, &document, &child, 1, false, Some((5, 9)));
+        let source_path = "rebuild-context.jsonl";
+        let source = source_batch(
+            source_path,
+            vec![
+                typed_message_entry(&parent, "parent body"),
+                typed_message_entry(&child, "child body"),
+                (
+                    session.clone(),
+                    session_payload(document.as_str(), &[parent.as_str(), child.as_str()]),
+                    String::new(),
+                ),
+                typed_document_entry(&document),
+            ],
+            vec![parent_placement, child_placement.clone()],
+            vec![reply_edge(&child_placement, &parent)],
+            true,
+        );
+        store
+            .commit_source_batches_if_changed(std::slice::from_ref(&source))
+            .unwrap();
+        let graph_before = store.load_session_graph(&session).unwrap();
+        let placements_before = store.stored_placements().unwrap();
+        let edges_before = store.stored_edges().unwrap();
+        let claims_before = source_placement_claims(&store, source_path);
+        let stats_before = store.context_stats().unwrap();
+        assert!(relation_complete_marker(&store, source_path));
+
+        store.rebuild_index().unwrap();
+
+        assert_eq!(store.load_session_graph(&session).unwrap(), graph_before);
+        assert_eq!(store.stored_placements().unwrap(), placements_before);
+        assert_eq!(store.stored_edges().unwrap(), edges_before);
+        assert_eq!(source_placement_claims(&store, source_path), claims_before);
+        assert_eq!(store.context_stats().unwrap(), stats_before);
+        assert!(relation_complete_marker(&store, source_path));
+    }
+
+    #[test]
+    fn incomplete_scan_updates_observed_relations_without_tombstoning_unseen_facts() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let session = sid(IdKind::Session, b"incomplete-update-session");
+        let document = sid(IdKind::Document, b"incomplete-update-document");
+        let parent_a = sid(IdKind::Message, b"incomplete-update-parent-a");
+        let parent_b = sid(IdKind::Message, b"incomplete-update-parent-b");
+        let observed_message = sid(IdKind::Message, b"incomplete-update-observed");
+        let unseen_message = sid(IdKind::Message, b"incomplete-update-unseen");
+        let original = placement(
+            &session,
+            &document,
+            &observed_message,
+            1,
+            false,
+            Some((1, 5)),
+        );
+        let changed = placement(
+            &session,
+            &document,
+            &observed_message,
+            1,
+            true,
+            Some((2, 6)),
+        );
+        let unseen = placement(
+            &session,
+            &document,
+            &unseen_message,
+            2,
+            false,
+            Some((7, 11)),
+        );
+        let entries = || {
+            [
+                &session,
+                &document,
+                &parent_a,
+                &parent_b,
+                &observed_message,
+                &unseen_message,
+            ]
+            .into_iter()
+            .map(entity_entry)
+            .collect()
+        };
+        let initial = source_batch(
+            "incomplete-update.jsonl",
+            entries(),
+            vec![original.clone(), unseen.clone()],
+            vec![
+                reply_edge(&original, &parent_a),
+                reply_edge(&unseen, &parent_a),
+            ],
+            true,
+        );
+        store
+            .commit_source_batches_if_changed(std::slice::from_ref(&initial))
+            .unwrap();
+
+        let changed_observation = source_batch(
+            "incomplete-update.jsonl",
+            entries(),
+            vec![changed.clone()],
+            vec![reply_edge(&changed, &parent_b)],
+            false,
+        );
+        assert!(
+            store
+                .commit_source_batches_if_changed(std::slice::from_ref(&changed_observation))
+                .unwrap()
+        );
+        assert!(
+            store
+                .stored_placements()
+                .unwrap()
+                .get(changed.id.as_str())
+                .unwrap()
+                .matches(&changed)
+        );
+        assert!(
+            store
+                .stored_edges()
+                .unwrap()
+                .get(changed.id.as_str())
+                .unwrap()
+                .matches(&reply_edge(&changed, &parent_b))
+        );
+        assert!(
+            store
+                .stored_placements()
+                .unwrap()
+                .contains_key(unseen.id.as_str())
+        );
+        assert!(
+            store
+                .stored_edges()
+                .unwrap()
+                .contains_key(unseen.id.as_str())
+        );
+        assert!(!relation_complete_marker(&store, "incomplete-update.jsonl"));
+
+        let observed_root = source_batch(
+            "incomplete-update.jsonl",
+            entries(),
+            vec![changed.clone()],
+            Vec::new(),
+            false,
+        );
+        assert!(
+            store
+                .commit_source_batches_if_changed(std::slice::from_ref(&observed_root))
+                .unwrap()
+        );
+        assert!(
+            !store
+                .stored_edges()
+                .unwrap()
+                .contains_key(changed.id.as_str())
+        );
+        assert!(
+            store
+                .stored_edges()
+                .unwrap()
+                .contains_key(unseen.id.as_str())
+        );
+    }
+
+    #[test]
+    fn incomplete_scan_unions_claims_and_complete_scan_replaces_with_tombstones() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let session = sid(IdKind::Session, b"replacement-session");
+        let document = sid(IdKind::Document, b"replacement-document");
+        let parent = sid(IdKind::Message, b"replacement-parent");
+        let old_message = sid(IdKind::Message, b"replacement-old");
+        let new_message = sid(IdKind::Message, b"replacement-new");
+        let old_placement = placement(&session, &document, &old_message, 1, false, Some((1, 5)));
+        let new_placement = placement(&session, &document, &new_message, 2, false, Some((6, 10)));
+
+        let initial = source_batch(
+            "replacement.jsonl",
+            [&session, &document, &parent, &old_message]
+                .into_iter()
+                .map(entity_entry)
+                .collect(),
+            vec![old_placement.clone()],
+            vec![reply_edge(&old_placement, &parent)],
+            true,
+        );
+        store
+            .commit_source_batches_if_changed(std::slice::from_ref(&initial))
+            .unwrap();
+
+        let incomplete = source_batch(
+            "replacement.jsonl",
+            [&session, &document, &parent, &new_message]
+                .into_iter()
+                .map(entity_entry)
+                .collect(),
+            vec![new_placement.clone()],
+            vec![reply_edge(&new_placement, &parent)],
+            false,
+        );
+        assert!(
+            store
+                .commit_source_batches_if_changed(std::slice::from_ref(&incomplete))
+                .unwrap()
+        );
+        assert!(store.get(&old_message).unwrap().is_some());
+        assert!(store.get(&new_message).unwrap().is_some());
+        assert!(
+            store
+                .stored_placements()
+                .unwrap()
+                .contains_key(old_placement.id.as_str())
+        );
+        assert!(
+            store
+                .stored_edges()
+                .unwrap()
+                .contains_key(old_placement.id.as_str())
+        );
+        let expected_claims: Vec<_> = [
+            old_placement.id.as_str().to_string(),
+            new_placement.id.as_str().to_string(),
+        ]
+        .into_iter()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+        assert_eq!(
+            source_placement_claims(&store, "replacement.jsonl"),
+            expected_claims
+        );
+        assert!(!relation_complete_marker(&store, "replacement.jsonl"));
+
+        let complete = source_batch(
+            "replacement.jsonl",
+            [&session, &document, &parent, &new_message]
+                .into_iter()
+                .map(entity_entry)
+                .collect(),
+            vec![new_placement.clone()],
+            vec![reply_edge(&new_placement, &parent)],
+            true,
+        );
+        assert!(
+            store
+                .commit_source_batches_if_changed(std::slice::from_ref(&complete))
+                .unwrap()
+        );
+        assert!(store.get(&old_message).unwrap().is_none());
+        assert!(store.get(&new_message).unwrap().is_some());
+        assert!(
+            !store
+                .stored_placements()
+                .unwrap()
+                .contains_key(old_placement.id.as_str())
+        );
+        assert!(
+            !store
+                .stored_edges()
+                .unwrap()
+                .contains_key(old_placement.id.as_str())
+        );
+        assert_eq!(
+            source_placement_claims(&store, "replacement.jsonl"),
+            vec![new_placement.id.as_str().to_string()]
+        );
+        assert!(relation_complete_marker(&store, "replacement.jsonl"));
+    }
+
+    #[test]
+    fn complete_empty_replacement_preserves_shared_facts_then_tombstones_last_claim() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let session = sid(IdKind::Session, b"shared-survival-session");
+        let document = sid(IdKind::Document, b"shared-survival-document");
+        let parent = sid(IdKind::Message, b"shared-survival-parent");
+        let child = sid(IdKind::Message, b"shared-survival-child");
+        let child_placement = placement(&session, &document, &child, 1, false, Some((2, 8)));
+        let entries = || {
+            [&session, &document, &parent, &child]
+                .into_iter()
+                .map(entity_entry)
+                .collect()
+        };
+        let edge = reply_edge(&child_placement, &parent);
+        let sources = [
+            source_batch(
+                "shared-a.jsonl",
+                entries(),
+                vec![child_placement.clone()],
+                vec![edge.clone()],
+                true,
+            ),
+            source_batch(
+                "shared-b.jsonl",
+                entries(),
+                vec![child_placement.clone()],
+                vec![edge],
+                true,
+            ),
+        ];
+        store.commit_source_batches_if_changed(&sources).unwrap();
+
+        let empty_a = source_batch("shared-a.jsonl", Vec::new(), Vec::new(), Vec::new(), true);
+        assert!(
+            store
+                .commit_source_batches_if_changed(std::slice::from_ref(&empty_a))
+                .unwrap()
+        );
+        assert!(store.get(&child).unwrap().is_some());
+        assert!(
+            store
+                .stored_placements()
+                .unwrap()
+                .contains_key(child_placement.id.as_str())
+        );
+        assert!(
+            store
+                .stored_edges()
+                .unwrap()
+                .contains_key(child_placement.id.as_str())
+        );
+        assert!(source_placement_claims(&store, "shared-a.jsonl").is_empty());
+        assert_eq!(
+            source_placement_claims(&store, "shared-b.jsonl"),
+            vec![child_placement.id.as_str().to_string()]
+        );
+        let empty_manifest = latest_index_batch(&store).source_replacements.remove(0);
+        assert_eq!(empty_manifest["source_path"], "shared-a.jsonl");
+        assert_eq!(empty_manifest["entity_memberships"], serde_json::json!([]));
+        assert_eq!(empty_manifest["placement_ids"], serde_json::json!([]));
+        assert_eq!(empty_manifest["relation_complete"], true);
+
+        let generation = store.active_generation().unwrap();
+        assert!(
+            !store
+                .commit_source_batches_if_changed(std::slice::from_ref(&empty_a))
+                .unwrap()
+        );
+        assert_eq!(store.active_generation().unwrap(), generation);
+
+        let empty_b = source_batch("shared-b.jsonl", Vec::new(), Vec::new(), Vec::new(), true);
+        assert!(
+            store
+                .commit_source_batches_if_changed(std::slice::from_ref(&empty_b))
+                .unwrap()
+        );
+        assert!(store.get(&child).unwrap().is_none());
+        assert!(
+            !store
+                .stored_placements()
+                .unwrap()
+                .contains_key(child_placement.id.as_str())
+        );
+        assert!(
+            !store
+                .stored_edges()
+                .unwrap()
+                .contains_key(child_placement.id.as_str())
+        );
+    }
+
+    #[test]
+    fn shared_relation_change_requires_all_claimants_in_one_complete_batch() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let session = sid(IdKind::Session, b"shared-change-session");
+        let document = sid(IdKind::Document, b"shared-change-document");
+        let parent_a = sid(IdKind::Message, b"shared-change-parent-a");
+        let parent_b = sid(IdKind::Message, b"shared-change-parent-b");
+        let child = sid(IdKind::Message, b"shared-change-child");
+        let original = placement(&session, &document, &child, 1, false, Some((10, 20)));
+        let changed = placement(&session, &document, &child, 1, true, Some((11, 21)));
+        assert_eq!(original.id, changed.id);
+        let entries = || {
+            [&session, &document, &parent_a, &parent_b, &child]
+                .into_iter()
+                .map(entity_entry)
+                .collect()
+        };
+        let initial = [
+            source_batch(
+                "change-a.jsonl",
+                entries(),
+                vec![original.clone()],
+                vec![reply_edge(&original, &parent_a)],
+                true,
+            ),
+            source_batch(
+                "change-b.jsonl",
+                entries(),
+                vec![original.clone()],
+                vec![reply_edge(&original, &parent_a)],
+                true,
+            ),
+        ];
+        store.commit_source_batches_if_changed(&initial).unwrap();
+        let generation = store.active_generation().unwrap();
+
+        let only_a = source_batch(
+            "change-a.jsonl",
+            entries(),
+            vec![changed.clone()],
+            vec![reply_edge(&changed, &parent_a)],
+            true,
+        );
+        let err = store
+            .commit_source_batches_if_changed(std::slice::from_ref(&only_a))
+            .unwrap_err();
+        assert!(
+            matches!(err, PortError::Backend(message) if message.contains("did not observe the same placement"))
+        );
+        assert_eq!(store.active_generation().unwrap(), generation);
+        assert!(
+            store
+                .stored_placements()
+                .unwrap()
+                .get(original.id.as_str())
+                .unwrap()
+                .matches(&original)
+        );
+
+        let changed_both = [
+            source_batch(
+                "change-a.jsonl",
+                entries(),
+                vec![changed.clone()],
+                vec![reply_edge(&changed, &parent_b)],
+                true,
+            ),
+            source_batch(
+                "change-b.jsonl",
+                entries(),
+                vec![changed.clone()],
+                vec![reply_edge(&changed, &parent_b)],
+                true,
+            ),
+        ];
+        assert!(
+            store
+                .commit_source_batches_if_changed(&changed_both)
+                .unwrap()
+        );
+        assert_eq!(store.active_generation().unwrap(), generation + 1);
+        assert!(
+            store
+                .stored_placements()
+                .unwrap()
+                .get(changed.id.as_str())
+                .unwrap()
+                .matches(&changed)
+        );
+        assert!(
+            store
+                .stored_edges()
+                .unwrap()
+                .get(changed.id.as_str())
+                .unwrap()
+                .matches(&reply_edge(&changed, &parent_b))
+        );
+    }
+
+    #[test]
+    fn edge_only_change_requires_every_shared_claimant_to_observe_the_new_edge() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let session = sid(IdKind::Session, b"shared-edge-session");
+        let document = sid(IdKind::Document, b"shared-edge-document");
+        let parent_a = sid(IdKind::Message, b"shared-edge-parent-a");
+        let parent_b = sid(IdKind::Message, b"shared-edge-parent-b");
+        let child = sid(IdKind::Message, b"shared-edge-child");
+        let child_placement = placement(&session, &document, &child, 1, false, Some((3, 9)));
+        let entries = || {
+            [&session, &document, &parent_a, &parent_b, &child]
+                .into_iter()
+                .map(entity_entry)
+                .collect()
+        };
+        let initial = [
+            source_batch(
+                "shared-edge-a.jsonl",
+                entries(),
+                vec![child_placement.clone()],
+                vec![reply_edge(&child_placement, &parent_a)],
+                true,
+            ),
+            source_batch(
+                "shared-edge-b.jsonl",
+                entries(),
+                vec![child_placement.clone()],
+                vec![reply_edge(&child_placement, &parent_a)],
+                true,
+            ),
+        ];
+        store.commit_source_batches_if_changed(&initial).unwrap();
+        let generation = store.active_generation().unwrap();
+
+        let only_a = source_batch(
+            "shared-edge-a.jsonl",
+            entries(),
+            vec![child_placement.clone()],
+            vec![reply_edge(&child_placement, &parent_b)],
+            true,
+        );
+        let err = store
+            .commit_source_batches_if_changed(std::slice::from_ref(&only_a))
+            .unwrap_err();
+        assert!(
+            matches!(err, PortError::Backend(message) if message.contains("did not observe the same edge"))
+        );
+        assert_eq!(store.active_generation().unwrap(), generation);
+        assert!(
+            store
+                .stored_edges()
+                .unwrap()
+                .get(child_placement.id.as_str())
+                .unwrap()
+                .matches(&reply_edge(&child_placement, &parent_a))
+        );
+
+        let changed_both = [
+            source_batch(
+                "shared-edge-a.jsonl",
+                entries(),
+                vec![child_placement.clone()],
+                vec![reply_edge(&child_placement, &parent_b)],
+                true,
+            ),
+            source_batch(
+                "shared-edge-b.jsonl",
+                entries(),
+                vec![child_placement.clone()],
+                vec![reply_edge(&child_placement, &parent_b)],
+                true,
+            ),
+        ];
+        assert!(
+            store
+                .commit_source_batches_if_changed(&changed_both)
+                .unwrap()
+        );
+        assert!(
+            store
+                .stored_edges()
+                .unwrap()
+                .get(child_placement.id.as_str())
+                .unwrap()
+                .matches(&reply_edge(&child_placement, &parent_b))
+        );
+    }
+
+    #[test]
+    fn relation_apply_failure_rolls_back_everything_except_building_intent() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        store
+            .conn
+            .borrow()
+            .execute_batch(
+                "CREATE TRIGGER fail_relation_insert
+                 BEFORE INSERT ON message_placements
+                 BEGIN
+                     SELECT RAISE(ABORT, 'injected relation failure');
+                 END;",
+            )
+            .unwrap();
+        let session = sid(IdKind::Session, b"rollback-session");
+        let document = sid(IdKind::Document, b"rollback-document");
+        let message = sid(IdKind::Message, b"rollback-message");
+        let message_placement = placement(&session, &document, &message, 0, false, Some((0, 4)));
+        let source = source_batch(
+            "rollback.jsonl",
+            [&session, &document, &message]
+                .into_iter()
+                .map(entity_entry)
+                .collect(),
+            vec![message_placement],
+            Vec::new(),
+            true,
+        );
+
+        let err = store
+            .commit_source_batches_if_changed(std::slice::from_ref(&source))
+            .unwrap_err();
+        assert!(matches!(err, PortError::Backend(_)));
+        assert_eq!(store.active_generation().unwrap(), 0);
+        for table in [
+            "catalog",
+            "fts",
+            "fts_ids",
+            "source_membership",
+            "source_scans",
+            "message_placements",
+            "message_edges",
+            "source_placement_membership",
+            "source_relation_scans",
+        ] {
+            assert_eq!(table_count(&store, table), 0, "{table} must roll back");
+        }
+        let batch = latest_index_batch(&store);
+        assert_eq!(batch.state, "building");
+        assert_eq!(batch.durable_point, "intent");
     }
 
     #[test]
@@ -1688,6 +5101,9 @@ mod tests {
         let b = sid(IdKind::Message, b"source-b");
         let first = SourceBatch {
             source_path: "fixture.jsonl".into(),
+            placements: Vec::new(),
+            edges: Vec::new(),
+            relation_complete: true,
             entries: vec![
                 (a.clone(), b"a".to_vec(), "keep alpha".into()),
                 (b.clone(), b"b".to_vec(), "remove beta".into()),
@@ -1703,6 +5119,9 @@ mod tests {
 
         let second = SourceBatch {
             source_path: "fixture.jsonl".into(),
+            placements: Vec::new(),
+            edges: Vec::new(),
+            relation_complete: true,
             entries: vec![(a.clone(), b"a".to_vec(), "keep alpha".into())],
         };
         assert!(
@@ -1722,6 +5141,9 @@ mod tests {
         let a = sid(IdKind::Message, b"same-source");
         let source = SourceBatch {
             source_path: "same.jsonl".into(),
+            placements: Vec::new(),
+            edges: Vec::new(),
+            relation_complete: true,
             entries: vec![(a, b"payload".to_vec(), "same text".into())],
         };
         assert!(
@@ -1843,6 +5265,9 @@ mod tests {
         let doc = sid(IdKind::Document, b"cat-only-doc");
         let source = SourceBatch {
             source_path: "mixed.jsonl".into(),
+            placements: Vec::new(),
+            edges: Vec::new(),
+            relation_complete: true,
             entries: vec![
                 (msg.clone(), b"m".to_vec(), "unique searchable body".into()),
                 (ses.clone(), b"s".to_vec(), "unique searchable body".into()),
@@ -1885,6 +5310,9 @@ mod tests {
         let ses = sid(IdKind::Session, b"rebuild-ses");
         let source = SourceBatch {
             source_path: "rebuild.jsonl".into(),
+            placements: Vec::new(),
+            edges: Vec::new(),
+            relation_complete: true,
             entries: vec![
                 (
                     msg.clone(),
@@ -1924,6 +5352,9 @@ mod tests {
         let doc = sid(IdKind::Document, b"retire-doc");
         let full = SourceBatch {
             source_path: "retire.jsonl".into(),
+            placements: Vec::new(),
+            edges: Vec::new(),
+            relation_complete: true,
             entries: vec![
                 (msg.clone(), b"m".to_vec(), "text".into()),
                 (ses.clone(), b"s".to_vec(), String::new()),
@@ -1947,6 +5378,9 @@ mod tests {
         }
         let empty = SourceBatch {
             source_path: "retire.jsonl".into(),
+            placements: Vec::new(),
+            edges: Vec::new(),
+            relation_complete: true,
             entries: vec![],
         };
         store
@@ -1967,6 +5401,9 @@ mod tests {
         let sources = [
             SourceBatch {
                 source_path: "one.jsonl".into(),
+                placements: Vec::new(),
+                edges: Vec::new(),
+                relation_complete: true,
                 entries: vec![
                     (m1.clone(), b"m1".to_vec(), "one text".into()),
                     (shared.clone(), b"d".to_vec(), String::new()),
@@ -1974,6 +5411,9 @@ mod tests {
             },
             SourceBatch {
                 source_path: "two.jsonl".into(),
+                placements: Vec::new(),
+                edges: Vec::new(),
+                relation_complete: true,
                 entries: vec![
                     (m2.clone(), b"m2".to_vec(), "two text".into()),
                     (shared.clone(), b"d".to_vec(), String::new()),
@@ -1985,6 +5425,9 @@ mod tests {
         // 源 one 变空：m1 退役；shared 仍被 two 引用，保留。
         let shrunk = SourceBatch {
             source_path: "one.jsonl".into(),
+            placements: Vec::new(),
+            edges: Vec::new(),
+            relation_complete: true,
             entries: vec![],
         };
         store
@@ -2041,6 +5484,9 @@ mod tests {
         let sources = [
             SourceBatch {
                 source_path: "part-a.jsonl".into(),
+                placements: Vec::new(),
+                edges: Vec::new(),
+                relation_complete: true,
                 entries: vec![
                     (m1.clone(), b"m1".to_vec(), "first half".into()),
                     (
@@ -2053,6 +5499,9 @@ mod tests {
             },
             SourceBatch {
                 source_path: "part-b.jsonl".into(),
+                placements: Vec::new(),
+                edges: Vec::new(),
+                relation_complete: true,
                 entries: vec![
                     (m2.clone(), b"m2".to_vec(), "second half".into()),
                     (
@@ -2091,6 +5540,9 @@ mod tests {
 
         let first = SourceBatch {
             source_path: "batch-a.jsonl".into(),
+            placements: Vec::new(),
+            edges: Vec::new(),
+            relation_complete: true,
             entries: vec![
                 (m1.clone(), b"m1".to_vec(), "batch a".into()),
                 (
@@ -2109,6 +5561,9 @@ mod tests {
 
         let second = SourceBatch {
             source_path: "batch-b.jsonl".into(),
+            placements: Vec::new(),
+            edges: Vec::new(),
+            relation_complete: true,
             entries: vec![
                 (m2.clone(), b"m2".to_vec(), "batch b".into()),
                 (
@@ -2146,6 +5601,9 @@ mod tests {
         let sources = [
             SourceBatch {
                 source_path: "noop-a.jsonl".into(),
+                placements: Vec::new(),
+                edges: Vec::new(),
+                relation_complete: true,
                 entries: vec![
                     (m1.clone(), b"m1".to_vec(), "noop a".into()),
                     (
@@ -2158,6 +5616,9 @@ mod tests {
             },
             SourceBatch {
                 source_path: "noop-b.jsonl".into(),
+                placements: Vec::new(),
+                edges: Vec::new(),
+                relation_complete: true,
                 entries: vec![
                     (m2.clone(), b"m2".to_vec(), "noop b".into()),
                     (
@@ -2197,6 +5658,9 @@ mod tests {
         .into_bytes();
         let legacy = SourceBatch {
             source_path: "legacy-a.jsonl".into(),
+            placements: Vec::new(),
+            edges: Vec::new(),
+            relation_complete: true,
             entries: vec![
                 (m1.clone(), b"m1".to_vec(), "legacy a".into()),
                 (ses.clone(), legacy_payload, String::new()),
@@ -2211,6 +5675,9 @@ mod tests {
 
         let modern = SourceBatch {
             source_path: "legacy-b.jsonl".into(),
+            placements: Vec::new(),
+            edges: Vec::new(),
+            relation_complete: true,
             entries: vec![
                 (m2.clone(), b"m2".to_vec(), "legacy b".into()),
                 (
@@ -2239,14 +5706,21 @@ mod tests {
         // 合并只对容器实体开放。同一条消息在不同源上投影不同是真实的不一致
         // （同一 native id 却内容不同），必须继续拒绝，不能被容器合并顺带放行。
         let store = SqliteStore::open_in_memory().unwrap();
-        let msg = sid(IdKind::Message, b"conflict-msg");
+        let native_id = "private-provider-native-id";
+        let msg = StableId::native(IdKind::Message, native_id);
         let sources = [
             SourceBatch {
                 source_path: "conflict-a.jsonl".into(),
+                placements: Vec::new(),
+                edges: Vec::new(),
+                relation_complete: true,
                 entries: vec![(msg.clone(), b"first projection".to_vec(), "one".into())],
             },
             SourceBatch {
                 source_path: "conflict-b.jsonl".into(),
+                placements: Vec::new(),
+                edges: Vec::new(),
+                relation_complete: true,
                 entries: vec![(msg.clone(), b"second projection".to_vec(), "two".into())],
             },
         ];
@@ -2257,6 +5731,8 @@ mod tests {
             format!("{error}").contains("conflicting projections"),
             "{error}"
         );
+        assert!(!format!("{error}").contains(native_id), "{error}");
+        assert!(!format!("{error}").contains(msg.as_str()), "{error}");
     }
 
     /// Build the canonical message payload shape that ingest writes.
@@ -2295,6 +5771,105 @@ mod tests {
     }
 
     #[test]
+    fn codex_timestamp_occurrence_projections_merge_without_conflict() {
+        // Codex's old adapter stored the occurrence-local envelope timestamp
+        // as the message timestamp; the current adapter emits no stable
+        // timestamp. Re-ingesting an old catalog must therefore merge a
+        // string timestamp with null instead of reporting a conflict.
+        let store = SqliteStore::open_in_memory().unwrap();
+        let msg = StableId::native(IdKind::Message, "codex-msg-timestamp");
+        let old = serde_json::json!({
+            "role": "assistant",
+            "text": "same body",
+            "timestamp": "2026-07-19T23:40:01.000Z",
+        })
+        .to_string()
+        .into_bytes();
+        let new = serde_json::json!({
+            "role": "assistant",
+            "text": "same body",
+            "timestamp": null,
+        })
+        .to_string()
+        .into_bytes();
+        let sources = [
+            SourceBatch {
+                source_path: "old-codex.jsonl".into(),
+                placements: Vec::new(),
+                edges: Vec::new(),
+                relation_complete: true,
+                entries: vec![(msg.clone(), old, "one".into())],
+            },
+            SourceBatch {
+                source_path: "new-codex.jsonl".into(),
+                placements: Vec::new(),
+                edges: Vec::new(),
+                relation_complete: true,
+                entries: vec![(msg.clone(), new, "two".into())],
+            },
+        ];
+        store
+            .commit_source_batches_if_changed(&sources)
+            .expect("occurrence timestamp string/null projections must merge");
+        let stored = store.get(&msg).unwrap().unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&stored).unwrap();
+        assert_eq!(
+            payload.get("timestamp"),
+            Some(&serde_json::Value::Null),
+            "merged message must carry no stable timestamp"
+        );
+        assert_eq!(payload.get("text"), Some(&serde_json::json!("same body")));
+    }
+
+    #[test]
+    fn codex_timestamp_merge_converges_to_null_regardless_of_side() {
+        // The string/null convergence must not depend on which projection is
+        // the left (merge) side.
+        let store = SqliteStore::open_in_memory().unwrap();
+        let msg = StableId::native(IdKind::Message, "codex-msg-timestamp-side");
+        let string_payload = serde_json::json!({
+            "role": "assistant",
+            "text": "same body",
+            "timestamp": "2026-07-19T23:40:01.000Z",
+        })
+        .to_string()
+        .into_bytes();
+        let null_payload = serde_json::json!({
+            "role": "assistant",
+            "text": "same body",
+            "timestamp": null,
+        })
+        .to_string()
+        .into_bytes();
+        let sources = [
+            SourceBatch {
+                source_path: "null-first.jsonl".into(),
+                placements: Vec::new(),
+                edges: Vec::new(),
+                relation_complete: true,
+                entries: vec![(msg.clone(), null_payload, "one".into())],
+            },
+            SourceBatch {
+                source_path: "string-second.jsonl".into(),
+                placements: Vec::new(),
+                edges: Vec::new(),
+                relation_complete: true,
+                entries: vec![(msg.clone(), string_payload, "two".into())],
+            },
+        ];
+        store
+            .commit_source_batches_if_changed(&sources)
+            .expect("null-first/string-second must merge");
+        let stored = store.get(&msg).unwrap().unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&stored).unwrap();
+        assert_eq!(
+            payload.get("timestamp"),
+            Some(&serde_json::Value::Null),
+            "timestamp must converge to null in either order"
+        );
+    }
+
+    #[test]
     fn message_copied_into_another_file_unions_its_per_document_spans() {
         // A resumed conversation's history is rewritten into the new transcript,
         // so the same message sits at a different byte offset in each file. Those
@@ -2305,6 +5880,9 @@ mod tests {
         let sources = [
             SourceBatch {
                 source_path: "original.jsonl".into(),
+                placements: Vec::new(),
+                edges: Vec::new(),
+                relation_complete: true,
                 entries: vec![(
                     msg.clone(),
                     message_payload_with_span("ses_v1_aaa", "same body", "doc_v1_aaa", 0, 929),
@@ -2313,6 +5891,9 @@ mod tests {
             },
             SourceBatch {
                 source_path: "resumed.jsonl".into(),
+                placements: Vec::new(),
+                edges: Vec::new(),
+                relation_complete: true,
                 entries: vec![(
                     msg.clone(),
                     message_payload_with_span("ses_v1_bbb", "same body", "doc_v1_bbb", 512, 1322),
@@ -2352,6 +5933,9 @@ mod tests {
         let sources = [
             SourceBatch {
                 source_path: "first.jsonl".into(),
+                placements: Vec::new(),
+                edges: Vec::new(),
+                relation_complete: true,
                 entries: vec![(
                     msg.clone(),
                     message_payload("ses_v1_aaa", "shared body"),
@@ -2360,6 +5944,9 @@ mod tests {
             },
             SourceBatch {
                 source_path: "second.jsonl".into(),
+                placements: Vec::new(),
+                edges: Vec::new(),
+                relation_complete: true,
                 entries: vec![(
                     msg.clone(),
                     message_payload("ses_v1_bbb", "shared body"),
@@ -2392,6 +5979,9 @@ mod tests {
         let sources = [
             SourceBatch {
                 source_path: "first.jsonl".into(),
+                placements: Vec::new(),
+                edges: Vec::new(),
+                relation_complete: true,
                 entries: vec![(
                     msg.clone(),
                     message_payload("ses_v1_aaa", "original body"),
@@ -2400,6 +5990,9 @@ mod tests {
             },
             SourceBatch {
                 source_path: "second.jsonl".into(),
+                placements: Vec::new(),
+                edges: Vec::new(),
+                relation_complete: true,
                 entries: vec![(
                     msg.clone(),
                     message_payload("ses_v1_aaa", "rewritten body"),
@@ -2424,6 +6017,9 @@ mod tests {
         let msg = sid(IdKind::Message, b"batched-msg");
         let first = SourceBatch {
             source_path: "first.jsonl".into(),
+            placements: Vec::new(),
+            edges: Vec::new(),
+            relation_complete: true,
             entries: vec![(
                 msg.clone(),
                 message_payload("ses_v1_aaa", "body"),
@@ -2437,6 +6033,9 @@ mod tests {
         );
         let second = SourceBatch {
             source_path: "second.jsonl".into(),
+            placements: Vec::new(),
+            edges: Vec::new(),
+            relation_complete: true,
             entries: vec![(
                 msg.clone(),
                 message_payload("ses_v1_bbb", "body"),
@@ -2465,10 +6064,16 @@ mod tests {
         let first = [
             SourceBatch {
                 source_path: "one".into(),
+                placements: Vec::new(),
+                edges: Vec::new(),
+                relation_complete: true,
                 entries: vec![(shared.clone(), b"p".to_vec(), "shared text".into())],
             },
             SourceBatch {
                 source_path: "two".into(),
+                placements: Vec::new(),
+                edges: Vec::new(),
+                relation_complete: true,
                 entries: vec![(shared.clone(), b"p".to_vec(), "shared text".into())],
             },
         ];
@@ -2476,10 +6081,16 @@ mod tests {
         let second = [
             SourceBatch {
                 source_path: "one".into(),
+                placements: Vec::new(),
+                edges: Vec::new(),
+                relation_complete: true,
                 entries: Vec::new(),
             },
             SourceBatch {
                 source_path: "two".into(),
+                placements: Vec::new(),
+                edges: Vec::new(),
+                relation_complete: true,
                 entries: vec![(shared.clone(), b"p".to_vec(), "shared text".into())],
             },
         ];
@@ -2495,6 +6106,9 @@ mod tests {
         let moved = sid(IdKind::Message, b"move-to-new-source");
         let original = SourceBatch {
             source_path: "source-a".into(),
+            placements: Vec::new(),
+            edges: Vec::new(),
+            relation_complete: true,
             entries: vec![(moved.clone(), b"p".to_vec(), "moved text".into())],
         };
         store
@@ -2504,10 +6118,16 @@ mod tests {
         let moved_batches = [
             SourceBatch {
                 source_path: "source-a".into(),
+                placements: Vec::new(),
+                edges: Vec::new(),
+                relation_complete: true,
                 entries: Vec::new(),
             },
             SourceBatch {
                 source_path: "source-b".into(),
+                placements: Vec::new(),
+                edges: Vec::new(),
+                relation_complete: true,
                 entries: vec![(moved.clone(), b"p".to_vec(), "moved text".into())],
             },
         ];
@@ -2539,6 +6159,9 @@ mod tests {
             let initial = [
                 SourceBatch {
                     source_path: "source-a".into(),
+                    placements: Vec::new(),
+                    edges: Vec::new(),
+                    relation_complete: true,
                     entries: vec![
                         (moved.clone(), b"m".to_vec(), "moved text".into()),
                         (removed.clone(), b"r".to_vec(), "removed text".into()),
@@ -2546,6 +6169,9 @@ mod tests {
                 },
                 SourceBatch {
                     source_path: "source-c".into(),
+                    placements: Vec::new(),
+                    edges: Vec::new(),
+                    relation_complete: true,
                     entries: vec![(kept.clone(), b"k".to_vec(), "kept text".into())],
                 },
             ];
@@ -2554,14 +6180,23 @@ mod tests {
             let mut replacement = [
                 Some(SourceBatch {
                     source_path: "source-a".into(),
+                    placements: Vec::new(),
+                    edges: Vec::new(),
+                    relation_complete: true,
                     entries: Vec::new(),
                 }),
                 Some(SourceBatch {
                     source_path: "source-b".into(),
+                    placements: Vec::new(),
+                    edges: Vec::new(),
+                    relation_complete: true,
                     entries: vec![(moved, b"m".to_vec(), "moved text".into())],
                 }),
                 Some(SourceBatch {
                     source_path: "source-c".into(),
+                    placements: Vec::new(),
+                    edges: Vec::new(),
+                    relation_complete: true,
                     entries: vec![(kept, b"k".to_vec(), "kept text".into())],
                 }),
             ];
@@ -2594,6 +6229,9 @@ mod tests {
         let id = sid(IdKind::Message, b"becomes-empty");
         let populated = SourceBatch {
             source_path: "empty-later".into(),
+            placements: Vec::new(),
+            edges: Vec::new(),
+            relation_complete: true,
             entries: vec![(id.clone(), b"p".to_vec(), "will disappear".into())],
         };
         store
@@ -2601,6 +6239,9 @@ mod tests {
             .unwrap();
         let empty = SourceBatch {
             source_path: "empty-later".into(),
+            placements: Vec::new(),
+            edges: Vec::new(),
+            relation_complete: true,
             entries: Vec::new(),
         };
         store
@@ -2616,10 +6257,16 @@ mod tests {
         let sources = [
             SourceBatch {
                 source_path: "same".into(),
+                placements: Vec::new(),
+                edges: Vec::new(),
+                relation_complete: true,
                 entries: Vec::new(),
             },
             SourceBatch {
                 source_path: "same".into(),
+                placements: Vec::new(),
+                edges: Vec::new(),
+                relation_complete: true,
                 entries: Vec::new(),
             },
         ];
@@ -2636,6 +6283,9 @@ mod tests {
         let private_path = "C:/private/provider/session.jsonl";
         let source = SourceBatch {
             source_path: private_path.into(),
+            placements: Vec::new(),
+            edges: Vec::new(),
+            relation_complete: true,
             entries: vec![
                 (id.clone(), b"p".to_vec(), "text".into()),
                 (id, b"p".to_vec(), "text".into()),
@@ -2662,10 +6312,16 @@ mod tests {
         let sources = [
             SourceBatch {
                 source_path: "one".into(),
+                placements: Vec::new(),
+                edges: Vec::new(),
+                relation_complete: true,
                 entries: vec![(reconstructed, b"p".to_vec(), "same text".into())],
             },
             SourceBatch {
                 source_path: "two".into(),
+                placements: Vec::new(),
+                edges: Vec::new(),
+                relation_complete: true,
                 entries: vec![(unstable, b"p".to_vec(), "same text".into())],
             },
         ];
@@ -2675,6 +6331,53 @@ mod tests {
         assert!(
             matches!(err, PortError::Backend(m) if m.contains("conflicting identity metadata"))
         );
+    }
+
+    #[test]
+    fn separate_batches_reject_conflicting_identity_metadata_without_state_change() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let reconstructed = sid(IdKind::Message, b"stored-wire-identity");
+        let wire = reconstructed.as_str().to_string();
+        let unstable = StableId::from_wire(&wire).unwrap();
+        let first = SourceBatch {
+            source_path: "first-source".into(),
+            placements: Vec::new(),
+            edges: Vec::new(),
+            relation_complete: true,
+            entries: vec![(reconstructed, b"p".to_vec(), "same text".into())],
+        };
+        assert!(
+            store
+                .commit_source_batches_if_changed(std::slice::from_ref(&first))
+                .unwrap()
+        );
+        let generation = store.active_generation().unwrap();
+
+        let second = SourceBatch {
+            source_path: "second-source".into(),
+            placements: Vec::new(),
+            edges: Vec::new(),
+            relation_complete: true,
+            entries: vec![(unstable, b"p".to_vec(), "same text".into())],
+        };
+        let err = store
+            .commit_source_batches_if_changed(std::slice::from_ref(&second))
+            .unwrap_err();
+        let PortError::Backend(message) = err else {
+            panic!("expected backend error");
+        };
+        assert!(message.contains("conflicting identity metadata"));
+        assert!(!message.contains(&wire));
+        assert_eq!(store.active_generation().unwrap(), generation);
+        assert!(
+            store
+                .source_message_ids("second-source")
+                .unwrap()
+                .is_empty()
+        );
+        let hits = store.query("same", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id.stability(), Stability::Reconstructed);
     }
 
     #[test]
@@ -2750,6 +6453,82 @@ mod tests {
         );
         assert_eq!(store.active_generation().unwrap(), 0);
         assert_eq!(store.count().unwrap(), 0);
+    }
+
+    #[test]
+    fn commit_rejects_tampered_durable_relation_manifest() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let session = sid(IdKind::Session, b"manifest-session");
+        let document = sid(IdKind::Document, b"manifest-document");
+        let message = sid(IdKind::Message, b"manifest-message");
+        let message_placement = placement(&session, &document, &message, 0, false, Some((0, 4)));
+        let relations = RelationManifests {
+            relation_upserts: vec![RelationUpsertManifest::Placement(message_placement)],
+            ..RelationManifests::default()
+        };
+        let pending = store
+            .begin_index_batch_with_relations(&[], &[], &relations)
+            .unwrap();
+        store
+            .conn
+            .borrow()
+            .execute(
+                "UPDATE index_batches SET relation_upserts_json = '[]'
+                 WHERE operation_id = ?1",
+                [&pending.operation_id],
+            )
+            .unwrap();
+
+        let err = store
+            .commit_index_batch_with_relations(&pending, &[], &[], &relations)
+            .unwrap_err();
+        assert!(
+            matches!(err, PortError::Backend(message) if message.contains("does not match durable intent"))
+        );
+        assert_eq!(store.active_generation().unwrap(), 0);
+        assert_eq!(table_count(&store, "message_placements"), 0);
+        let batch = store.index_batch(&pending.operation_id).unwrap().unwrap();
+        assert_eq!(batch.state, "building");
+        assert_eq!(batch.durable_point, "intent");
+    }
+
+    #[test]
+    fn commit_rejects_tampered_durable_source_replacement_manifest() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let relations = RelationManifests {
+            source_replacements: vec![SourceReplacementManifest {
+                source_path: "manifest-source.jsonl".into(),
+                entity_memberships: Vec::new(),
+                placement_ids: Vec::new(),
+                relation_complete: true,
+            }],
+            ..RelationManifests::default()
+        };
+        let pending = store
+            .begin_index_batch_with_relations(&[], &[], &relations)
+            .unwrap();
+        store
+            .conn
+            .borrow()
+            .execute(
+                "UPDATE index_batches SET source_replacements_json = '[]'
+                 WHERE operation_id = ?1",
+                [&pending.operation_id],
+            )
+            .unwrap();
+
+        let err = store
+            .commit_index_batch_with_relations(&pending, &[], &[], &relations)
+            .unwrap_err();
+        assert!(
+            matches!(err, PortError::Backend(message) if message.contains("does not match durable intent"))
+        );
+        assert_eq!(store.active_generation().unwrap(), 0);
+        assert_eq!(table_count(&store, "source_scans"), 0);
+        assert_eq!(table_count(&store, "source_relation_scans"), 0);
+        let batch = store.index_batch(&pending.operation_id).unwrap().unwrap();
+        assert_eq!(batch.state, "building");
+        assert_eq!(batch.durable_point, "intent");
     }
 
     #[test]
@@ -2857,6 +6636,38 @@ mod tests {
             "rebuild 应清除不在 catalog 中的孤儿 FTS 行"
         );
         assert_eq!(store.query("real", 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn rebuild_indexes_json_payload_text_not_structural_tokens() {
+        // H1 regression: ingest/sync writes full JSON payloads. rebuild must
+        // index only the `text` field — indexing raw JSON would let
+        // structural tokens (`user`, `null`, `sessions`) match every message.
+        let store = SqliteStore::open_in_memory().unwrap();
+        let a = sid(IdKind::Message, b"json-message-a");
+        let payload = serde_json::json!({
+            "role": "user",
+            "text": "the real searchable body",
+            "parent": null,
+            "session": "ses-1",
+            "sessions": ["ses-1"],
+            "timestamp": null,
+        })
+        .to_string()
+        .into_bytes();
+        store
+            .commit_batch(&[(a.clone(), payload, "one".into())])
+            .unwrap();
+        // commit 实时路径用调用方传入的 text（此处为 "one"）。
+        assert_eq!(store.query("one", 10).unwrap().len(), 1);
+        // rebuild 从 catalog 重投影：只索引 JSON 的 text 字段，结构 token 不命中。
+        store.rebuild_index().unwrap();
+        assert_eq!(store.query("searchable", 10).unwrap().len(), 1);
+        assert!(store.query("null", 10).unwrap().is_empty());
+        assert!(store.query("sessions", 10).unwrap().is_empty());
+        // `ses-1` 里的 `-` 会被 FTS5 当成 NOT 运算符（查询报错而非匹配），
+        // 因此用单 token `ses` 断言会话值不被索引。
+        assert!(store.query("ses", 10).unwrap().is_empty());
     }
 
     #[test]
