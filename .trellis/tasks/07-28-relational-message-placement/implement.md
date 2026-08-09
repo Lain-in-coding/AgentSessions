@@ -87,23 +87,25 @@ planning summary receives fresh user approval.
 
 - [x] Update affected crate specs after code behavior is verified.
 - [x] Add v6→v7 migration/operator guidance and compatibility/re-ingest behavior.
-- [ ] Run the authorized real-data harness only after all code gates; do not read,
-      copy, alter, upload, or commit transcript content. The full run generated
-      `2026-07-31T10:04:17Z` was executed and recorded as failed: exit 5,
-      `ok: false`, 79,958 emitted, 0 skipped across 879 sources and 756,515,768
-      bytes. The remaining five invariants were not evaluated. A later final-batch
-      replay succeeded, but active roots changed during follow-up, so a stable
-      full-root rerun remains open. (Gate D rerun in progress: fixed-binary
-      subset runs pass all six invariants; full-corpus rerun pending result.)
-- [ ] Update real-data evidence, provider maturity, and core evidence matrix from
-      the latest actual run. (Partial update committed 2026-08-10: fixed-binary
-      subset green run recorded and full-corpus rerun marked open; the final
-      update awaits the full-corpus result.) Both providers remain Experimental
-      and contracts/evidence governance remains Draft; the failed full run is
-      not presented as green.
-- [ ] Review the parent task's remaining integration criteria without repeating
-      archived children 1–8. The review is complete, but parent acceptance remains
-      open pending one corpus-wide full-root run with all six invariants green.
+- [x] Run the authorized real-data harness only after all code gates; do not read,
+      copy, alter, upload, or commit transcript content. The green full-corpus
+      run (generated `2026-08-09T21:10:16Z`) passes all six invariants with
+      harness exit 0 over 1,242 sources and 1,177,479,794 bytes: 164,136
+      emitted, 0 skipped; 231 sessions all context-successful; 659/659
+      byte-precision spans; rebuild stable (catalog 151,562 -> 151,562). The
+      earlier 2026-07-31 run (exit 5, recorded as-is) and the 2026-08-10
+      subset run remain in the evidence record.
+- [x] Update real-data evidence, provider maturity, and core evidence matrix from
+      the latest actual run. (Committed 2026-08-10: green full-corpus run
+      recorded in real-data-regression.md, core-beta-evidence-matrix.md
+      IB-REAL-DATA-REGRESSION-001/IB-SESSION-CROSS-SOURCE-001, and
+      PROVIDER-MATURITY-MATRIX gap 4 closed.) Both providers remain
+      Experimental pending independent review and owner decision; the failed
+      2026-07-31 run is not presented as green.
+- [x] Review the parent task's remaining integration criteria without repeating
+      archived children 1–8. The review is complete; parent acceptance items
+      that depended on the corpus-wide full-root run with all six invariants
+      green are now met by the 2026-08-09 run.
 
 ## 6. Validation gates
 
