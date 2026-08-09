@@ -21,6 +21,9 @@ pub enum Role {
     User,
     Assistant,
     System,
+    // Codex's authoritative system/permission-layer role; distinct from
+    // `System` because providers emit it verbatim.
+    Developer,
     Tool,
 }
 

@@ -786,6 +786,10 @@ fn stored_role(value: &str) -> PortResult<Role> {
         "user" => Ok(Role::User),
         "assistant" => Ok(Role::Assistant),
         "system" => Ok(Role::System),
+        // Codex's authoritative conversation role for the system/permission
+        // layer; the codex adapter emits it verbatim (see provider-codex
+        // is_conversational_role), so the read path must accept it.
+        "developer" => Ok(Role::Developer),
         "tool" => Ok(Role::Tool),
         _ => Err(PortError::Backend(
             "stored message has an unsupported role".into(),
