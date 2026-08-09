@@ -3,7 +3,7 @@
 > 对外可见的 Provider 状态清单，是 `0.3 Integration Beta` 的公开状态记录。
 > - 术语与晋级证据要求见 `../architecture/RFC-0002-provider-adapter-contract.md` §6。
 > - 本文件是**当前实现状态**的事实记录，不是承诺；晋级必须有证据，不由代码存在自动推断。
-> - 最后更新：2026-07-27
+> - 最后更新：2026-07-31
 
 ## 术语
 
@@ -28,8 +28,10 @@
 | Pi | — | — | **Unsupported（未实现）** | 无 adapter |
 | Cursor | — | — | **Unsupported（未实现）** | 无 adapter |
 
-两个已实现 provider 均为 **Experimental**：golden、property、source span 三项 Beta
-证据已入库（见下），剩余 blocker 收窄为两项——授权真实数据回归与跨 target CI 认证。
+两个已实现 provider 均为 **Experimental**：golden、property、source span 以及
+关系化 Message/Placement/Edge 的合成与 e2e 证据已入库（见下），剩余 blocker
+仍为授权真实数据全量绿色回归与跨 target CI 认证。RFC-0001、RFC-0002 与共享接口
+合同继续保持 **Draft**，本次证据更新不改变治理状态。
 
 ## Capability Matrix
 
@@ -45,28 +47,26 @@
 | is_sidechain | `native` | `derived` | Claude Code `isSidechain`；Codex 无该标记，一律 false |
 | session id | `native` | `native` | 二者均有 native 会话 id；自 schema v6 起落库为独立 `ses_v1_` 实体 |
 | source span | `native` | `native` | 每条 message 携带源记录在已验证快照内的字节区间（end 排他）；golden/property 测试锁定 round-trip |
-| git branch / cwd / version | `native` | `partial` | Claude Code 对话行携带；Codex 在 `session_meta` / `turn_context`，当前未抽取 |
+| git branch / cwd / version | `partial` | `partial` | Claude Code 对话行携带（格式上可用）；Codex 在 `session_meta` / `turn_context`。两者均**尚未抽取落库** |
 
 ## 已知限制
 
 - **Claude Code**：只抽取 `user`/`assistant`/`system` 对话记录；工具调用块（无 text）被忽略；`cwd`/`gitBranch`/`version` provenance 尚未落库。
 - **Codex**：只取权威 `response_item` + 内层 `message`，忽略 `event_msg` UI 镜像以避免重复计数；`world_state`/`turn_context`/工具调用记录未抽取；无 threading（线性）。
 - **共同**：真实历史数据回归自 2026-07-27 起有可重复 harness（抛弃式临时 store +
-  聚合-only 报告），但语料留本机不可共享，故任何单次运行结果第三方无法复核；
+  aggregate-only 报告），但语料留本机不可共享，故任何单次运行结果第三方无法复核；
   跨平台真实数据回归（CI 上无真实语料）仍不存在。
-- **共同（2026-07-27 新发现，阻塞级）**：真实语料上 `sync` 仍无法跑完全量。
-  根因是同一实体身份跨源共享，但"位置"信息被压进了实体 payload——Claude Code
-  的 resume/fork 会把历史消息复制进新 transcript，于是同一 message uuid 在不同
-  文件里其**所属会话、父指针、字节区间**各不相同。实测四层差异：会话跨文件
-  （某会话被 55 个文件各自声明）、消息跨会话（某消息属 3 个 sessionId）、
-  span 因文件而异（同消息原始行 929 vs 810 字节）、**parent 因文件而异**
-  （同消息在不同文件挂在不同父节点下）。前三层已按并集 + 单值别名修复并入库
-  （见 `docs/evidence/integration-beta/real-data-regression.md`）；第四层
-  parent 不能用并集解决——`select_mainline` 沿单一 parent 链回溯，多 parent 时
-  "主线"无定义，并集会让分支选择静默返回任意结果。正解是让实现回归 RFC-0001
-  §3.2：位置信息（session/thread/branch/parent 边）从消息实体中移出，父子关系
-  用独立的 `MessageEdge` 关系表表达。这是模型级改动，尚未实施。
-  合成夹具（一文件一会话、无 fork）不触发任何一层，故此前无从暴露。
+- **共同（关系模型已实现，语料级回归仍开放）**：稳定 `Message` 与上下文
+  `MessagePlacement` / `MessageEdge` 已分离，session-scoped graph、精确 placement
+  evidence、不同上下文 parent 以及相应合成/e2e 覆盖均已实现。最新全量授权运行
+  生成于 `2026-07-31T10:04:17Z`，覆盖 879 个源、756,515,768 字节；运行在
+  `INV-SYNC-OK` 以 exit 5、`ok: false` 失败，此前报告 79,958 emitted、0 skipped，
+  其余五条不变量因 sync 失败未评估。aggregate 报告未保留 exit-5 家族中的精确
+  canonical code，因此不能把 `source_changed` 写成已证实根因。随后对当时第 5/5
+  批的回放成功（186 个源：89 Claude Code、97 Codex；223,269,278 字节；exit 0；
+  15,549 emitted、0 skipped、0 diagnostics），说明失败并非在该批上持续可复现，
+  但不构成全量绿色结果，也未评估下游不变量。follow-up 期间活跃 provider roots
+  被观察到仍在变化，仍需在 roots 稳定时完成一次全量六不变量绿色运行。
 
 ## 晋级到 Beta 的缺口
 
@@ -76,17 +76,19 @@
    Unicode 多字节 span、大字段、threading、codex 镜像去重），失败可由种子复现（2026-07-26）。
 3. ~~source span~~ —— 已入库：schema v6 + `MessageEvent.span` 契约，golden/e2e
    round-trip 锁定（2026-07-26，见 `docs/operations/migration-v5-to-v6.md`）。
-4. 真实历史数据回归（隔离沙箱、授权数据集、不外传）——**流程已入库，但首次
-   授权本机运行判定 FAILED，缺口未闭合**。harness
-   （`scripts/evidence/real_data_regression.py`）在抛弃式临时 data root 上跑
-   sync → status/doctor → 逐会话 context → index rebuild 校验六条不变量，报告只含
+4. 真实历史数据回归（隔离沙箱、授权数据集、不外传）——**流程与关系模型已入库；
+   修复后二进制在真实子集上六条不变量全绿；全量运行因慢批仍未完成，缺口部分闭合**。
+   harness（`scripts/evidence/real_data_regression.py`）在抛弃式临时 data root 上跑
+   sync → status + catalog walk → 逐会话 context → index rebuild 校验六条不变量，报告只含
    聚合计数（见 `docs/operations/REAL-DATA-REGRESSION.md`、证据行
-   `IB-REAL-DATA-REGRESSION-001`）。2026-07-27 对约 700 个真实源（605 MB）的多次
-   运行始终在第一条不变量 `INV-SYNC-OK` 失败：跨文件会话/跨会话消息触发存储层
-   冲突投影拒绝。修复前三层后已提交消息数从 0 推进到 7060 条，但第四层
-   （per-source `parentUuid`）仍拒绝整批（见上「已知限制」与
-   `docs/evidence/integration-beta/real-data-regression.md`）。**这是缺口 4 当前
-   的首要阻塞**：需先按 RFC-0001 §3.2 把位置信息移出消息实体，harness 才可能跑通。
+   `IB-REAL-DATA-REGRESSION-001`）。2026-07-31 全量运行在 `INV-SYNC-OK` 以 exit 5
+   失败（879 源、756,515,768 字节、79,958 emitted、0 skipped），报告符合 closed
+   aggregate key set，未保留精确 canonical code，故不能断言 `source_changed` 已证实。
+   **2026-08-10 修复后子集运行**：release 二进制在 137 文件 Claude Code 目录上六条
+   不变量全绿（15,246 emitted、0 skipped、41/41 byte 精度、rebuild 稳定），该目录此前
+   使旧二进制停滞 —— 证明修复解决停滞且真实数据上六条全绿。全量重试（2026-08-09/10）
+   在 ~64% 处因 `AgentHub-novella2` 慢批终止（隔离 60 文件批 2-5 分钟），无代码失败
+   观察，全量六条绿色运行仍开放。**这是缺口 4 当前的首要阻塞**。
 5. 跨正式 target（Windows/Linux/macOS）的 CI 认证——仍缺。`ci.yml` 的 `test` 与
    新增 `installer` job 已配置三平台矩阵（证据行 `IB-CI-INSTALLER-001`），但在
    PR 上跑绿并记录具体 run id 之前只能是 `ci_configured_only`；hosted runner 亦

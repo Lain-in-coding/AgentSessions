@@ -68,20 +68,21 @@ as source arguments that matched no `.jsonl` files.
 ## What it exercises
 
 Against a temporary data root, in order: one `sync` over all collected
-sources, then `status` and `doctor` for catalog counts plus generation,
-schema, and interrupted-batch state, then `context --policy mainline` for
-every session entity, then `index rebuild` followed by `status` and sampled
+sources, then `status` (catalog count, generation, source-placement claims)
+plus a full catalog `list` walk, then `context --policy mainline` for every
+session entity, then `index rebuild` followed by a catalog walk and sampled
 `search` calls. All CLI calls go through `--robot` and are read from the
-response envelope, not from human-readable text.
+response envelope, not from human-readable text. (`doctor` is not part of
+the harness; its runtime state report is a separate operator command.)
 
 ## The six invariants
 
 | id | What it asserts | What a failure means |
 |---|---|---|
-| `INV-SYNC-OK` | The `sync` envelope reports `ok: true` and more than zero messages. | Ingestion failed outright, or every source was rejected. Read the envelope's error code. |
-| `INV-NO-PARSE-LOSS` | The message count the provider reported equals the number of `msg_v1_` entities in the catalog. | Messages were parsed but not persisted, or were merged. A real data-loss signal. |
+| `INV-SYNC-OK` | Every `sync` chunk reports `ok: true` and the run emits more than zero source occurrences. | Ingestion failed outright, or every source was rejected. Read the envelope's error code. |
+| `INV-NO-PARSE-LOSS` | Provider-emitted source occurrences equal persisted source-placement claims, and `skipped == 0`. | An emitted occurrence lacks a durable claim, claims were duplicated, or parsing skipped input. Stable Message de-duplication is not loss. |
 | `INV-SESSION-PRESENT` | At least one `ses_v1_` entity exists, and no more than one per source file. | Session attribution is missing or duplicated. |
-| `INV-CONTEXT-NONEMPTY` | Every session assembles at least one message, with no `internal` error. | Context assembly cannot reach messages it owns — usually a threading or parent-link problem. An `internal` error is a bug signal, not bad input. |
+| `INV-CONTEXT-NONEMPTY` | Every context request succeeds; a session whose catalog projection owns messages assembles at least one. A verified zero-placement session may return an empty message list. | Context assembly cannot reach messages the session owns, or the request failed. An `internal` error is a bug signal, not bad input. |
 | `INV-SPAN-COVERAGE` | Every evidence span from this ingest has `precision == "byte"`. | Byte offsets were not recorded. Freshly ingested sources should always have them; `unknown` precision belongs to pre-v6 rows, which a fresh temporary store cannot contain. |
 | `INV-REBUILD-STABLE` | Catalog counts before and after `index rebuild` match, and sampled searches return the same number of hits. | Rebuild is not a faithful reprojection of the catalog. See `rebuild-and-migration-runbook.md`. |
 
@@ -97,10 +98,10 @@ the same fields.
 | `binary` | Basename, version, and SHA-256 of the exercised binary. The basename only — no directory. |
 | `environment` | OS family, OS release, Python version. |
 | `corpus` | Number of source files and total bytes. Counts and sizes only, never names. |
-| `totals` | Messages, sessions, documents, and total catalog entities. |
+| `totals` | De-duplicated stable Messages, sessions, documents, and total catalog entities. Message count is a census, not the no-loss denominator. |
 | `role_distribution` | Message count per role. |
 | `evidence_precision` | Span count per precision tier (`byte`, `line`, `record`, `unknown`). |
-| `invariants` | One entry per invariant: `id`, `passed`, and an aggregate-only `detail`. |
+| `invariants` | One entry per invariant: `id`, `passed`, and an aggregate-only `detail`. `INV-NO-PARSE-LOSS` records emitted occurrences, source-placement claims, skipped records, and the separate stable Message census. |
 | `outcome` | `passed` or `failed`. |
 
 ## When it fails
