@@ -32,6 +32,10 @@ protocol code.
 - `UnstableIdentity(String)` — an operation requires a stable identity but only
   an `Unstable` `StableId` is available (see the stable-id three-tier model in
   `index.md`).
+- `AmbiguousGraph(String)` — parent resolution found multiple candidate
+  placements for a child and none is uniquely selected by the child's source
+  document; the request fails loudly rather than picking an arbitrary branch.
+  Maps to a client-visible error at the CLI, not `internal`.
 
 Do not add a new variant unless a genuinely new failure *category* appears.
 Prefer reusing `InvalidRequest` for "caller passed something wrong" and
@@ -45,8 +49,10 @@ forces a matching arm in the CLI's `From<DomainError> for ProtocolError`.
 - Construct with an owned `String` message that states the fact, not the fix:
   `DomainError::InvalidRequest("parent id must be a Message".into())`.
 - Propagate with `?`. The domain layer never logs — it returns.
-- `Session::validate` is the canonical example: it walks structural invariants
-  (e.g. a message `parent` must reference an `IdKind::Message`) and returns
+- `Message::validate` / `Session::validate` are the canonical examples: they
+  check id kind and id-value consistency; `SessionContextGraph::validate`
+  walks structural invariants (edge parent must reference a
+  `IdKind::Message`, spans within document bounds) and returns
   `InvariantViolation` / `InvalidRequest` rather than mutating or guessing.
 - Keep messages deterministic. The same violation must produce the same string
   so contract tests and cross-layer mapping stay stable.

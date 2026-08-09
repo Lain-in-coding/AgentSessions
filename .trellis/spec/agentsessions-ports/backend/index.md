@@ -52,6 +52,67 @@ Depends only on `agentsessions-domain`. Never depends on any adapter crate,
 - `ProviderAdapter` — `probe(bytes) -> Probe` + `parse(bytes, sink)`. The
   probe/select contract lives here; the selection *policy* lives in the
   application core.
+- `ContextGraphStore` — typed contextual reads:
+  `load_session_graph(&SessionId)`, `message_contexts(&MessageId)`, and
+  `context_stats()`. It returns Domain graphs, distinct-session candidates, and
+  aggregate counts; no SQL row or JSON payload shape crosses the port.
+
+## Scenario: Context graph reads
+
+### 1. Scope / Trigger
+
+Use this port when Application needs Message placement, edge, or reverse
+session-membership facts that cannot be represented by `CatalogStore::get`.
+
+### 2. Signatures
+
+```rust
+fn load_session_graph(&self, session_id: &StableId)
+    -> PortResult<SessionContextGraph>;
+fn message_contexts(&self, message_id: &StableId)
+    -> PortResult<Vec<MessageContextCandidate>>;
+fn context_stats(&self) -> PortResult<ContextStats>;
+```
+
+### 3. Contracts
+
+- `message_contexts` groups by distinct Session. Several placements in one
+  Session produce one candidate with several sorted `placement_ids`.
+- `ContextStats` exposes only aggregate placement and source-claim counts.
+- Implement `ContextGraphStore for &T` whenever a concrete store implements it,
+  so one shared store reference can fill Application port slots.
+
+### 4. Validation & Error Matrix
+
+- Unknown Session → `PortError::NotFound`.
+- Migrated legacy relation state that is not complete →
+  `PortError::SchemaIncompatible`.
+- Backend corruption/query failure → `PortError::Backend`.
+- Ambiguous graph topology is Domain selection output, not a SQLite error.
+
+### 5. Good/Base/Bad Cases
+
+- Good: one Message has two placements in one Session → one candidate.
+- Base: one complete Session graph → typed graph with no compatibility parsing.
+- Bad: return raw SQL rows or JSON blobs → port-layer violation.
+
+### 6. Tests Required
+
+- `&T` blanket forwarding.
+- Candidate grouping by Session.
+- Not-found and schema-incompatible classification.
+- Aggregate counts without source paths or payload content.
+
+### 7. Wrong vs Correct
+
+```rust
+// Wrong: leaks persistence shape.
+fn load_edges(&self, session: &str) -> Vec<rusqlite::Row<'_>>;
+
+// Correct: backend-independent Domain values.
+fn load_session_graph(&self, session: &StableId)
+    -> PortResult<SessionContextGraph>;
+```
 
 ---
 

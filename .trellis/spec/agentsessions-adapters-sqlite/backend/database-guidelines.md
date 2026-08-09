@@ -11,10 +11,13 @@
 - The store is the single source of truth for two derived-but-authoritative
   roles: `catalog` (canonical entity payloads) and `fts` (a rebuildable search
   projection). `fts` can always be reconstructed from `catalog`.
-- Schema version is gated by `PRAGMA user_version`; the current version is 6
-  (v6 added `source_membership.document_id`, nullable; NULL = pre-v6 row).
-  Opening a newer schema than the binary understands is an error, not a silent
-  downgrade.
+- Schema version is gated by `PRAGMA user_version`; the current version is 7
+  (v6 added `source_membership.document_id`, nullable; NULL = pre-v6 row; v7
+  added the relational tables `message_placements`, `message_edges`,
+  `source_placement_membership`, `source_relation_scans`, plus the
+  relation-manifest columns on `index_batches`, with a forward additive
+  v6→v7 migration that keeps pre-v7 catalogs readable). Opening a newer schema
+  than the binary understands is an error, not a silent downgrade.
 
 ---
 
@@ -205,7 +208,9 @@ println!("READY");
 ## Naming Conventions
 
 - Tables: `catalog`, `fts`, `fts_ids`, `index_batches`, `store_metadata`,
-  `source_scans`. Snake_case, singular-or-collective as already established.
+  `source_scans`, and (v7+) the relational tables `message_placements`,
+  `message_edges`, `source_placement_membership`, `source_relation_scans`.
+  Snake_case, singular-or-collective as already established.
 - `store_metadata` is a single-row singleton holding `active_generation`.
 - Source membership is a many-to-many via `source_scans` + composite key; an
   entity is only tombstoned when no remaining source references it.

@@ -27,9 +27,12 @@ Canonical rules:
   error.
 - `CanonicalCode` is the error catalog: `invalid_request`, `not_found`,
   `source_io`, `source_changed`, `snapshot_failed`, `catalog_error`,
-  `provider_error`, `writer_busy`, `schema_incompatible`, `internal`. Each code
-  fixes its exit code and `retryable` flag — a new error must be registered here
-  before any entry point may return it.
+  `provider_error`, `writer_busy`, `schema_incompatible`,
+  `cursor_invalid`, `cursor_expired`, `generation_mismatch`, `internal`.
+  Each code fixes its exit code and `retryable` flag — a new error must be
+  registered here before any entry point may return it. The three cursor
+  codes are produced by the pagination layer (bad token, expired token,
+  generation changed mid-paging).
 - `CliError` is a thin wrapper for argument/usage validation (maps to
   `invalid_request` → exit 2).
 

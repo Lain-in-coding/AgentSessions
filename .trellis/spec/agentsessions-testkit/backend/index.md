@@ -8,8 +8,9 @@
 ## Role in the architecture
 
 `agentsessions-testkit` provides reusable builders and helpers for tests across
-the workspace (e.g. `SessionBuilder`). It exists so tests construct canonical
-domain objects consistently instead of hand-rolling them in each crate.
+the workspace. `SessionBuilder` constructs a valid placement-aware
+`SessionContextGraph`; `InMemoryStore` implements `CatalogStore`,
+`SearchIndex`, and `ContextGraphStore`.
 
 Real file: `src/lib.rs`.
 
@@ -17,11 +18,12 @@ Real file: `src/lib.rs`.
 
 ## Pre-Development Checklist
 
-- [ ] When a domain type gains a field (e.g. `Message.parent` / `timestamp` /
-      `is_sidechain`), update the builder here so every downstream test compiles
-      and stays realistic. A missing field here breaks the whole workspace build.
+- [ ] When a stable or contextual domain type changes, update Message,
+      placement, edge, document, and graph construction together. Do not put
+      parent/ordinal/sidechain/span back onto stable `Message`.
 - [ ] Builders produce **valid** domain objects by default (pass
-      `Session::validate`). Provide setters for the fields a test needs to vary.
+      `SessionContextGraph::validate`). Provide setters for the fields a test
+      needs to vary.
 - [ ] This crate is test-support only. Do not pull production logic into it, and
       do not depend on it from non-test production code.
 - [ ] Keep fixture data synthetic and redacted; never embed a real transcript.
@@ -34,6 +36,8 @@ Real file: `src/lib.rs`.
 - [ ] `cargo test -p agentsessions-testkit` green.
 - [ ] Builder changes keep the full-workspace build green
       (`cargo test --workspace`), since every crate's tests depend on it.
+- [ ] `InMemoryStore::message_contexts` returns candidates grouped by distinct
+      Session and `context_stats` remains aggregate-only.
 
 ---
 

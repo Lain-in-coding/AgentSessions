@@ -45,13 +45,19 @@ Before writing code in this crate:
       other write errors → stderr + exit 5) — never bare `println!` for frames.
 - [ ] Progress frames (`protocol::progress_frame`) are emitted ONLY under
       `--output jsonl` (never Json/`--robot`/Human). `diagnostic` frames are
-      schema-defined but v1 emits none.
+      schema-defined but v1 emits none. Progress identifies inputs by bounded
+      source ordinal/count only; it never includes a source path or native ID.
 - [ ] `--request-id` is validated by `protocol::valid_request_id`
       (`^[A-Za-z0-9._:-]+$`, 1-128) and echoed verbatim in every frame;
       invalid values are usage errors, never silently replaced.
-- [ ] Message canonical payloads persist BOTH `parent_native_id` (provider
-      fact) and `parent` (resolved `msg_v1_` wire id via the same native
-      derivation rule) — context assembly consumes the resolved edge.
+- [ ] Source staging de-duplicates stable Message entities but retains every
+      `MessagePlacement` and `MessageEdge`. Native IDs are preferred; the
+      no-native fallback is `Unstable` and derives from provider, variant,
+      content-addressed document, and ordinal — never source path.
+- [ ] Preserve the complete provider `ParseReport`: `committed` must equal
+      emitted occurrences, `skipped` is reported honestly, and only zero-skipped
+      sources are relation-complete. Parent/sidechain/span/session payload keys
+      are compatibility projections; Application context consumes typed edges.
 - [ ] Read paths use `SqliteStore::open`; write paths (`index`/`ingest`/`sync`)
       use `SqliteStore::open_for_write` to take the writer lease. Do not open a
       write connection for a read-only command.
@@ -76,9 +82,12 @@ Before writing code in this crate:
 - [ ] TUI (`tui` subcommand, `src/tui/`): all state transitions and rendering
       decisions live in the PURE `core.rs` (no ratatui/crossterm/store/App
       imports; unit-tested without a terminal); `mod.rs` is thin glue only.
-      Data access goes through `AppRequest::{Search, Show, Context}` and the
-      shared `render()` projection — no SQL, no cursor construction, no
-      branch-selection logic in the TUI. Non-tty stdout → usage error before
+      Data access goes through `AppRequest::{Search, MessageContexts, Context}`
+      and the shared `render()` projection — no SQL, compatibility-alias
+      session selection, cursor construction, or branch logic in the TUI.
+      Reverse candidates are grouped by distinct Session: zero is index-only,
+      one opens, several are explicit ambiguity. Evidence aligns by
+      placement/occurrence ID. Non-tty stdout → usage error before
       raw mode; terminal restore covers normal, error, and panic paths; App
       errors become status-line text, never a crash. The TUI is the only
       place the `ratatui`/`crossterm` workspace deps may be used.
@@ -86,6 +95,9 @@ Before writing code in this crate:
       code, register it in the `CanonicalCode` enum, its `as_str`, `exit_code`,
       `retryable`, **and** the published `schemas/robot/v1/error-catalog.json`
       (the schema-drift test enforces they stay in sync).
+- [ ] Error envelopes and human diagnostics must preserve canonical category
+      while keeping messages bounded and path/native-ID-free. Never relay raw
+      provider, SQLite, or conflict payloads to stdout or stderr.
 
 ---
 
@@ -131,19 +143,22 @@ Before proposing a commit for this crate:
   gitignored `evidence-output/`; a report generated from real data is never
   committed. Adding a report field means extending `validate_report` and the
   privacy test in the same change.
+- **No-loss accounting.** Provider-emitted source occurrences must equal
+  persisted source-placement claims and skipped records must be zero. Stable
+  Message count is a separate de-duplicated census; legal shared identity is
+  not parse loss.
 - **Evidence honesty.** Rows in `docs/operations/core-beta-evidence-matrix.md`
   follow that file's status vocabulary literally: `ci_configured_only` until a
   specific successful run is named, and a failing local run is recorded as a
   failing run. Neither a passing smoke script nor a green CI job is
   clean-machine, minimum-OS, or signed-release evidence — hosted runners ship a
   preinstalled toolchain.
-- **Known blocker (2026-07-27).** Real corpora break `sync`: one Claude Code
-  session commonly spans many `.jsonl` files, while ingestion projects one
-  session per source, so the same `ses_v1_` id arrives with different member
-  lists and the store rejects the batch (`catalog_error`, exit 6). Synthetic
-  one-file-one-session fixtures do not reach that path. Do not "fix" this by
-  relaxing the store's conflict check; the session model is what needs to
-  change. See `docs/evidence/integration-beta/real-data-regression.md`.
+- **Historical blocker (recorded 2026-07-27).** Real corpora proved stable
+  Message identity is shared while session/document/span/parent are contextual.
+  The v7 implementation now stages placements/edges and removes those fields
+  from stable conflict authority without weakening role/text/timestamp
+  conflicts. This is code/process evidence only until the authorized aggregate
+  real-data regression is rerun successfully; providers remain Experimental.
 
 ---
 

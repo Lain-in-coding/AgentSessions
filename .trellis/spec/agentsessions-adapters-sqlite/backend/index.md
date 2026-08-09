@@ -9,9 +9,10 @@
 ## Role in the architecture
 
 `agentsessions-adapters-sqlite` is a **driven adapter**: it implements the
-storage/search ports declared in `agentsessions-ports`. It owns the SQLite
-schema, migrations, writer lease, durable outbox, generation tracking, source
-membership/tombstones, and the FTS5 projection.
+storage/search/context-graph ports declared in `agentsessions-ports`. It owns
+the SQLite schema, migrations, writer lease, durable outbox, generation
+tracking, source entity/placement claims, relation completeness, tombstones,
+and the FTS5 projection.
 
 Core invariant: **`catalog` is authoritative for payload; `fts` + `fts_ids`
 are derived and must be fully rebuildable from `catalog` at any time.**
@@ -49,6 +50,9 @@ are derived and must be fully rebuildable from `catalog` at any time.**
   authoritative locked handle, and maps contention to path-redacted WriterBusy.
 - `searchable_text(payload)` — extracts the searchable body from the canonical
   payload for FTS.
+- `ContextGraphStore` reads — return typed Domain messages/documents/placements/
+  edges, group reverse candidates by distinct Session, and expose aggregate
+  placement/claim counts. They never return SQL rows or compatibility JSON.
 - `merge_session_payloads(...)` / `merge_message_payloads(...)` — union the two
   projections of one entity that arrive from different sources. Real corpora
   need this: one logical session spans many transcript files, and resuming or
@@ -62,8 +66,15 @@ instead of rejecting the batch. Which fields may differ is deliberately narrow:
 
 | Entity | Unioned fields | Everything else |
 |---|---|---|
-| Session | `messages` (append-order), `documents` (sorted) | must match byte-for-byte |
-| Message | `sessions`, `spans` (keyed by contributing document) | must match byte-for-byte |
+| Session | `messages` (append-order), `documents` (sorted) | fields not in the union set (`document`, `documents`, `messages`) are not preserved by the merge |
+| Message | contextual compatibility keys (`session(s)`, `span(s)`, parent provenance, sidechain, seq) | stable role/text and unknown intrinsic fields must match; timestamp has one deliberate exception (below) |
+
+- **Timestamp exception (Codex)**: `timestamp` may differ as `string` vs `null`
+  across projections of the same stable message — the old Codex adapter stored
+  the occurrence-local outer envelope timestamp, the current one emits no
+  stable timestamp, so re-ingesting an old catalog must not conflict. The
+  merged value converges deterministically on `null` regardless of merge
+  order (no stable timestamp exists for the entity).
 
 - Each unioned field keeps a **singular alias** (`document`, `session`, `span`)
   holding the first entry, so readers written against the pre-union shape keep
@@ -75,14 +86,40 @@ instead of rejecting the batch. Which fields may differ is deliberately narrow:
 - Identical stored bytes skip the merge entirely. That keeps an unchanged
   re-sync a content-level no-op and avoids forcing slice-era opaque payloads
   through a JSON parse.
-- Anything outside those fields differing under one id is a real inconsistency
-  and still fails with `conflicting projections across sources`.
+- Once every known contributing source is relation-complete, compatibility
+  aliases are regenerated subtractively from placements/edges/claims:
+  divergent parents/sidechain values become `null`, spans name exact placement
+  and document identities, and zero-message Session documents survive through
+  source entity membership. Mixed legacy/incomplete state preserves existing
+  aliases and never pretends they are complete.
 
-**Known limit:** `parent` is per-source too (a fork can re-parent a copied
-message), and it is *not* unioned — mainline selection walks a single parent
-chain, so multiple parents make "the mainline" undefined. Fixing that needs
-the RFC-0001 §3.2 shape (edges as their own relation), not another array here.
-See `docs/evidence/integration-beta/real-data-regression.md`.
+## SQLite v7 relation commit
+
+- Migration v6→v7 is one explicit transaction. The four relation tables,
+  relation indexes, three default-empty outbox manifest columns, and
+  `PRAGMA user_version = 7` commit or roll back together. No legacy aliases are
+  backfilled into fabricated placements or completeness markers.
+- Durable intent hashes entity changes plus relation upserts/deletes and the
+  final source replacement state: entity memberships (including document
+  attribution), placement claims, and relation marker state. An honestly empty
+  replacement is still manifest data.
+- A complete scan replaces claims and may delete only facts with no surviving
+  source claim. An incomplete scan unions observed entities/placements/edges,
+  derives no missing-record tombstones, and clears its completeness marker.
+  Observed relation changes are allowed only when every final claimant observes
+  the same placement/edge/root fact.
+- Catalog, FTS, identity sidecar, source claims, relations, active generation,
+  and outbox activation are one phase-2 transaction. Failure leaves the
+  durable `building` intent but no data or generation side effect.
+- Every ordinary and source-batch write path validates incoming StableId
+  metadata against persisted `fts_ids.id_json` before taking a no-op shortcut
+  or creating an outbox intent. A cross-batch metadata conflict fails without
+  changing generation, claims, catalog, or index state.
+- FTS rebuild touches only `fts`/`fts_ids`; relation rows, claims, completeness,
+  context graphs, and aggregate context stats must remain byte-for-byte stable.
+- Context reads fail `SchemaIncompatible` with a bounded re-ingest action when
+  any known contributor lacks a v7 completeness marker. They never parse
+  compatibility aliases as graph authority.
 
 ## Common mistakes
 
@@ -92,6 +129,8 @@ See `docs/evidence/integration-beta/real-data-regression.md`.
 - Adding an `ALTER`-free destructive "migration".
 - Treating a per-source fact (session, span, parent) as intrinsic to a message.
   Message *identity* is shared across files; its *position* is not.
+- Treating `skipped > 0` as a complete replacement or retaining an old
+  relation-complete marker after an incomplete re-scan.
 
 ---
 
