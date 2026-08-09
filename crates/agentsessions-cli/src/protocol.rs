@@ -153,6 +153,7 @@ impl From<DomainError> for ProtocolError {
             DomainError::InvalidRequest(_) => CanonicalCode::InvalidRequest,
             DomainError::InvariantViolation(_) => CanonicalCode::Internal,
             DomainError::UnstableIdentity(_) => CanonicalCode::InvalidRequest,
+            DomainError::AmbiguousGraph(_) => CanonicalCode::Internal,
         };
         ProtocolError::new(code, e.to_string())
     }
@@ -414,6 +415,10 @@ mod tests {
     #[test]
     fn invariant_violation_is_internal() {
         let e: ProtocolError = DomainError::InvariantViolation("bug".into()).into();
+        assert_eq!(e.code, CanonicalCode::Internal);
+        assert_eq!(e.code.exit_code(), 70);
+
+        let e: ProtocolError = DomainError::AmbiguousGraph("ambiguous parent".into()).into();
         assert_eq!(e.code, CanonicalCode::Internal);
         assert_eq!(e.code.exit_code(), 70);
     }

@@ -135,7 +135,7 @@ pub(crate) enum Effect {
         query: String,
         cursor: Option<String>,
     },
-    /// 命中→会话解析 + 上下文装配（Show 取 payload 的 `session` 字段后转 Context）。
+    /// 命中→distinct Session candidates 解析 + 上下文装配。
     ResolveAndLoadContext {
         hit_id: String,
         policy: ContextPolicy,

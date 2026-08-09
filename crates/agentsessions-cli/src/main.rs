@@ -24,11 +24,15 @@ use agentsessions_application::{
     App, AppError, AppRequest, AppResponse, ResponseBudget, StagedBatch, Truncation,
     evidence::Precision, select_and_stage,
 };
-use agentsessions_domain::{ContextPolicy, DomainError, IdKind, Stability, StableId};
+use agentsessions_domain::{
+    ContextPolicy, DomainError, EvidenceSpan, IdKind, MessageEdge, MessagePlacement,
+    MessageRelation, Stability, StableId,
+};
 use agentsessions_ports::ProviderAdapter;
 use agentsessions_provider_claude::ClaudeCodeAdapter;
 use agentsessions_provider_codex::CodexAdapter;
 use protocol::{CanonicalCode, ProtocolError};
+use std::collections::{BTreeMap, BTreeSet};
 
 /// CLI 顶层错误：所有失败都归一到 [`ProtocolError`]，exit code 由 Error Catalog 决定。
 ///
@@ -754,29 +758,46 @@ fn stage_with_registry(bytes: &[u8]) -> Result<(StagedBatch, String), CliError> 
     Ok((staged, variant))
 }
 
-/// 把一个源的完整 staging 产物转成 (id, payload, index-text) 目录条目。
+struct StagedMessageEntity {
+    id: StableId,
+    role: String,
+    text: String,
+    timestamp: Option<String>,
+    occurrences: Vec<(MessagePlacement, Option<StableId>, Option<String>)>,
+}
+
+/// 把一个源的完整 staging 产物转成稳定实体 + contextual relations。
 ///
-/// 产出三类实体，随同一 [`SourceBatch`] 单事务提交：
+/// 三类实体与 placements/edges 随同一 [`SourceBatch`] 单事务提交：
 ///
 /// - **消息**：身份优先用 provider-native id（Claude Code 的 `uuid`，tier `Native`），
-///   使身份跨 data-root 迁移与文件重命名存活；provider 未给 native id 时回退到
-///   path+seq 的 `Reconstructed` 派生。payload 存 canonical JSON（role/text/parent/
-///   timestamp/sidechain/span/session），供 `show` 展开；FTS 索引正文仍只喂纯 text。
+///   provider 未给 native id 时使用 provider/variant/document/ordinal 的 path-free
+///   `Unstable` fallback。重复 stable id 只保留一个实体，全部 occurrences 仍保留。
 /// - **会话**：id 优先取 provider 报告的 native 会话 id（`ses_v1_` Native tier），
 ///   缺失回退对 document wire id 的 `Reconstructed` 派生。payload 引用 document
-///   与按 seq 排序的成员消息 wire id。
+///   与按首次 occurrence 排序的去重成员消息 wire id。
 /// - **文档**：内容寻址 `Reconstructed` 派生（provider/variant/fingerprint），
 ///   不含路径——身份不编码位置（RFC-0001）。payload 携 provider/variant/fingerprint/len。
 ///
-/// span 单位是"已验证快照字节"（end 排他）；`None` 显式缺失，不臆造。
-fn staged_to_entries(
+/// `ParseReport.skipped > 0` 会使 source relation-incomplete；observed facts 可提交，
+/// 但存储层不会推导 tombstone，且会撤销旧 completeness marker。
+fn staged_to_source(
     path: &str,
     staged: &StagedBatch,
     provider_id: &str,
     variant: &str,
     fingerprint: &str,
     source_len: u64,
-) -> Vec<(StableId, Vec<u8>, String)> {
+) -> Result<SourceBatch, CliError> {
+    if staged.report.committed != staged.messages.len() {
+        return Err(DomainError::InvariantViolation(format!(
+            "provider reported {} committed messages but emitted {}",
+            staged.report.committed,
+            staged.messages.len()
+        ))
+        .into());
+    }
+
     // 文档实体：内容寻址——同字节重 ingest 得到同一 id（幂等）。
     let document_id = StableId::derive(
         IdKind::Document,
@@ -788,7 +809,7 @@ fn staged_to_entries(
         ],
     );
     // 会话实体：native id 优先；缺失回退 document 派生（一文档一会话，见 design §9）。
-    let session_id = match staged.session_native_id.as_deref() {
+    let session_id = match staged.report.session_native_id.as_deref() {
         Some(sid) if !sid.trim().is_empty() => StableId::native(IdKind::Session, sid),
         _ => StableId::derive(
             IdKind::Session,
@@ -797,63 +818,161 @@ fn staged_to_entries(
         ),
     };
 
-    let mut entries: Vec<(StableId, Vec<u8>, String)> = staged
-        .messages
-        .iter()
-        .map(|message| {
-            let id = if message.native_id.is_empty() {
-                StableId::derive(
-                    IdKind::Message,
-                    Stability::Reconstructed,
-                    &[path.as_bytes(), &message.seq.to_le_bytes()],
-                )
-            } else {
-                StableId::native(IdKind::Message, &message.native_id)
-            };
-            let payload = serde_json::json!({
-                "role": message.role,
-                "text": message.text,
-                "parent_native_id": message.parent_native_id,
-                // 已解析父边：provider native 父指针按同一 native 派生规则映射为消息
-                // wire id（跨文件父边同样可表示；父不在库中由消费方平滑容忍）。
-                "parent": message
-                    .parent_native_id
-                    .as_deref()
-                    .filter(|p| !p.trim().is_empty())
-                    .map(|p| StableId::native(IdKind::Message, p).as_str().to_string()),
-                "timestamp": message.timestamp,
-                "is_sidechain": message.is_sidechain,
-                // Session and span are per-source facts, carried as arrays because
-                // resuming or forking a conversation copies its history into the new
-                // transcript: one message then belongs to several sessions and sits at
-                // a different byte offset in each file. The singular `session`/`span`
-                // keys stay as aliases for the first entry so readers written against
-                // the pre-union shape keep working.
-                "session": session_id.as_str(),
-                "sessions": [session_id.as_str()],
-                "span": message.span.map(|(start, end)| serde_json::json!({
-                    "start": start,
-                    "end": end,
-                })),
-                "spans": message.span.map(|(start, end)| serde_json::json!([{
-                    "document": document_id.as_str(),
-                    "start": start,
-                    "end": end,
-                }])),
-            })
-            .to_string();
-            (id, payload.into_bytes(), message.text.clone())
-        })
-        .collect();
+    let mut entities = BTreeMap::<String, StagedMessageEntity>::new();
+    let mut member_ids = Vec::new();
+    let mut seen_members = BTreeSet::new();
+    let mut placements = Vec::with_capacity(staged.messages.len());
+    let mut edges = Vec::new();
+    for message in &staged.messages {
+        if let Some((start, end)) = message.span
+            && (end < start || end > source_len)
+        {
+            return Err(DomainError::InvariantViolation(
+                "provider emitted a span outside the verified source document".into(),
+            )
+            .into());
+        }
+        let id = if message.native_id.trim().is_empty() {
+            StableId::derive(
+                IdKind::Message,
+                Stability::Unstable,
+                &[
+                    provider_id.as_bytes(),
+                    variant.as_bytes(),
+                    document_id.as_str().as_bytes(),
+                    &message.seq.to_le_bytes(),
+                ],
+            )
+        } else {
+            StableId::native(IdKind::Message, &message.native_id)
+        };
+        let span = message.span.map(|(start, end)| EvidenceSpan { start, end });
+        let placement = MessagePlacement::new(
+            session_id.clone(),
+            document_id.clone(),
+            id.clone(),
+            message.seq,
+            message.is_sidechain,
+            span,
+        );
+        let parent_id = message
+            .parent_native_id
+            .as_deref()
+            .filter(|parent| !parent.trim().is_empty())
+            .map(|parent| StableId::native(IdKind::Message, parent));
+        if let Some(parent_message_id) = &parent_id {
+            edges.push(MessageEdge {
+                child_placement_id: placement.id.clone(),
+                parent_message_id: parent_message_id.clone(),
+                parent_native_id: message.parent_native_id.clone(),
+                relation: MessageRelation::Reply,
+            });
+        }
+        if seen_members.insert(id.as_str().to_string()) {
+            member_ids.push(id.as_str().to_string());
+        }
+        match entities.entry(id.as_str().to_string()) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(StagedMessageEntity {
+                    id: id.clone(),
+                    role: message.role.clone(),
+                    text: message.text.clone(),
+                    timestamp: message.timestamp.clone(),
+                    occurrences: vec![(
+                        placement.clone(),
+                        parent_id,
+                        message.parent_native_id.clone(),
+                    )],
+                });
+            }
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                let entity = entry.get_mut();
+                if entity.id != id
+                    || entity.role != message.role
+                    || entity.text != message.text
+                    || entity.timestamp != message.timestamp
+                {
+                    return Err(DomainError::InvariantViolation(
+                        "message has conflicting stable projections within one source".into(),
+                    )
+                    .into());
+                }
+                entity.occurrences.push((
+                    placement.clone(),
+                    parent_id,
+                    message.parent_native_id.clone(),
+                ));
+            }
+        }
+        placements.push(placement);
+    }
 
-    // 会话/文档目录行：payload 为结构化 JSON，索引正文为空——容器实体不参与全文命中
-    // （存储层对非 Message kind 也不会写 fts 行，双保险）。
-    let member_ids: Vec<&str> = entries.iter().map(|(id, _, _)| id.as_str()).collect();
-    // `documents` is an array because one logical session routinely spans several
-    // transcript files: each source contributes its own slice, and the storage
-    // layer unions those slices into one session entity on commit. `document`
-    // stays as the first element so readers that want a single attribution keep
-    // working; on a multi-document session it names one contributor, not all.
+    let mut entries = Vec::with_capacity(entities.len() + 2);
+    for entity in entities.into_values() {
+        let mut occurrences = entity.occurrences;
+        occurrences.sort_by(|left, right| {
+            (left.0.source_ordinal, left.0.id.as_str())
+                .cmp(&(right.0.source_ordinal, right.0.id.as_str()))
+        });
+        let parent_facts: Vec<Option<String>> = occurrences
+            .iter()
+            .map(|(_, parent_id, _)| parent_id.as_ref().map(|parent| parent.as_str().to_string()))
+            .collect();
+        let parent = match parent_facts.first() {
+            Some(first) if parent_facts.iter().all(|fact| fact == first) => first.clone(),
+            _ => None,
+        };
+        let parent_native_facts: Vec<Option<String>> = occurrences
+            .iter()
+            .map(|(_, _, parent_native_id)| parent_native_id.clone())
+            .collect();
+        let parent_native_id = match parent_native_facts.first() {
+            Some(first) if parent_native_facts.iter().all(|fact| fact == first) => first.clone(),
+            _ => None,
+        };
+        let is_sidechain = match occurrences.first() {
+            Some((first, _, _))
+                if occurrences
+                    .iter()
+                    .all(|(placement, _, _)| placement.is_sidechain == first.is_sidechain) =>
+            {
+                serde_json::Value::Bool(first.is_sidechain)
+            }
+            _ => serde_json::Value::Null,
+        };
+        let spans: Vec<serde_json::Value> = occurrences
+            .iter()
+            .filter_map(|(placement, _, _)| {
+                placement.span.as_ref().map(|span| {
+                    serde_json::json!({
+                        "placement_id": placement.id.as_str(),
+                        "document": placement.source_document_id.as_str(),
+                        "start": span.start,
+                        "end": span.end,
+                    })
+                })
+            })
+            .collect();
+        let payload = serde_json::json!({
+            "role": entity.role,
+            "text": entity.text,
+            "timestamp": entity.timestamp,
+            "parent": parent,
+            "parent_native_id": parent_native_id,
+            "is_sidechain": is_sidechain,
+            "session": session_id.as_str(),
+            "sessions": [session_id.as_str()],
+            "span": spans.first().map(|span| serde_json::json!({
+                "start": span["start"],
+                "end": span["end"],
+            })),
+            "spans": spans,
+        })
+        .to_string()
+        .into_bytes();
+        entries.push((entity.id, payload, entity.text));
+    }
+
     let session_payload = serde_json::json!({
         "documents": [document_id.as_str()],
         "document": document_id.as_str(),
@@ -869,7 +988,14 @@ fn staged_to_entries(
     .to_string();
     entries.push((session_id, session_payload.into_bytes(), String::new()));
     entries.push((document_id, document_payload.into_bytes(), String::new()));
-    entries
+
+    Ok(SourceBatch {
+        source_path: path.to_string(),
+        entries,
+        placements,
+        edges,
+        relation_complete: staged.report.skipped == 0,
+    })
 }
 
 /// 读取原始 .jsonl 文件并 ingest：
@@ -894,17 +1020,14 @@ fn ingest_file(store: &SqliteStore, path: &str) -> Result<serde_json::Value, Cli
     // 4) 派生 id + 构造该源的完整 scan 结果（消息 + 会话/文档目录行），按
     //    source membership 提交。同文件重 ingest 时，本次消失的 id 会被推导为 tombstone。
     let provider = variant.split('/').next().unwrap_or(&variant).to_string();
-    let source = SourceBatch {
-        source_path: path.to_string(),
-        entries: staged_to_entries(
-            path,
-            &staged,
-            &provider,
-            &variant,
-            &snap.fingerprint,
-            snap.len,
-        ),
-    };
+    let source = staged_to_source(
+        path,
+        &staged,
+        &provider,
+        &variant,
+        &snap.fingerprint,
+        snap.len,
+    )?;
     let changed = store
         .commit_source_batches_if_changed(std::slice::from_ref(&source))
         .map_err(ProtocolError::from)?;
@@ -912,9 +1035,11 @@ fn ingest_file(store: &SqliteStore, path: &str) -> Result<serde_json::Value, Cli
     let generation = store.active_generation().map_err(ProtocolError::from)?;
     Ok(serde_json::json!({
         "variant": variant,
+        "emitted": staged.messages.len(),
         "committed": if changed { staged.messages.len() } else { 0 },
         "unchanged": if changed { 0 } else { staged.messages.len() },
-        "skipped": 0,
+        "skipped": staged.report.skipped,
+        "diagnostics": staged.report.diagnostics.len(),
         "generation": generation,
         "source_fp": snap.fingerprint,
     }))
@@ -936,31 +1061,37 @@ fn sync_files(
     let mut sources = Vec::with_capacity(paths.len());
     let mut snapshots = Vec::with_capacity(paths.len());
     let mut message_count = 0usize;
+    let mut skipped_count = 0usize;
+    let mut diagnostic_count = 0usize;
 
-    for path in paths {
+    for (index, path) in paths.iter().enumerate() {
         let path_ref = std::path::Path::new(path);
         let (snap, bytes) = capture(path_ref).map_err(ProtocolError::from)?;
         let (staged, variant) = stage_with_registry(&bytes)?;
         if progress {
             protocol::write_stdout_line(&protocol::progress_frame(
                 "sync",
-                &format!("staged {path} ({} messages)", staged.messages.len()),
+                &format!(
+                    "staged source {}/{} ({} messages)",
+                    index + 1,
+                    paths.len(),
+                    staged.messages.len()
+                ),
                 request_id,
             ));
         }
         message_count += staged.messages.len();
+        skipped_count += staged.report.skipped;
+        diagnostic_count += staged.report.diagnostics.len();
         let provider = variant.split('/').next().unwrap_or(&variant).to_string();
-        sources.push(SourceBatch {
-            source_path: path.clone(),
-            entries: staged_to_entries(
-                path,
-                &staged,
-                &provider,
-                &variant,
-                &snap.fingerprint,
-                snap.len,
-            ),
-        });
+        sources.push(staged_to_source(
+            path,
+            &staged,
+            &provider,
+            &variant,
+            &snap.fingerprint,
+            snap.len,
+        )?);
         snapshots.push((path_ref.to_path_buf(), snap));
     }
 
@@ -974,9 +1105,12 @@ fn sync_files(
     let generation = store.active_generation().map_err(ProtocolError::from)?;
     Ok(serde_json::json!({
         "sources": paths.len(),
+        "emitted": message_count,
         "messages": message_count,
         "committed": if changed { message_count } else { 0 },
         "unchanged": if changed { 0 } else { message_count },
+        "skipped": skipped_count,
+        "diagnostics": diagnostic_count,
         "generation": generation,
     }))
 }
@@ -1072,6 +1206,7 @@ fn render(
             session_id,
             session,
             branch_leaf,
+            branch_leaf_placement_id,
             messages,
             evidence,
             truncation,
@@ -1097,11 +1232,14 @@ fn render(
                 "session_id": session_id,
                 "session": session,
                 "branch_leaf": branch_leaf,
+                "branch_leaf_placement_id": branch_leaf_placement_id,
                 "messages": messages
                     .into_iter()
-                    .map(|(id, payload)| serde_json::json!({
-                        "id": id,
-                        "payload": payload,
+                    .map(|message| serde_json::json!({
+                        "id": message.id,
+                        "placement_id": message.placement_id,
+                        "message_id": message.message_id,
+                        "payload": message.payload,
                     }))
                     .collect::<Vec<_>>(),
                 "evidence": evidence,
@@ -1110,14 +1248,30 @@ fn render(
             });
             (outcome, data, protocol::Page::default(), warnings)
         }
+        AppResponse::MessageContexts {
+            message_id,
+            candidates,
+        } => (
+            protocol::Outcome::Success,
+            serde_json::json!({
+                "message_id": message_id,
+                "candidates": candidates,
+            }),
+            protocol::Page::default(),
+            Vec::new(),
+        ),
         AppResponse::Status {
             catalog_count,
             active_generation,
+            placements,
+            source_placement_claims,
         } => (
             protocol::Outcome::Success,
             serde_json::json!({
                 "catalog_count": catalog_count,
                 "generation": active_generation,
+                "placements": placements,
+                "source_placement_claims": source_placement_claims,
             }),
             protocol::Page::default(),
             Vec::new(),
@@ -1149,7 +1303,188 @@ fn arg<'a>(rest: &'a [String], index: usize, usage: &str) -> Result<&'a str, Cli
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agentsessions_application::EvidenceSpanDto;
+    use agentsessions_application::{EvidenceSpanDto, StagedMessage};
+    use agentsessions_ports::ParseReport;
+
+    fn staged_batch(
+        messages: Vec<StagedMessage>,
+        skipped: usize,
+        session_native_id: &str,
+    ) -> StagedBatch {
+        StagedBatch {
+            session_native_id: Some(session_native_id.into()),
+            report: ParseReport {
+                committed: messages.len(),
+                skipped,
+                diagnostics: if skipped == 0 {
+                    Vec::new()
+                } else {
+                    vec!["synthetic skipped record".into()]
+                },
+                session_native_id: Some(session_native_id.into()),
+            },
+            messages,
+        }
+    }
+
+    fn staged_message(seq: u32, native_id: &str, span: (u64, u64)) -> StagedMessage {
+        StagedMessage {
+            seq,
+            native_id: native_id.into(),
+            parent_native_id: None,
+            role: "user".into(),
+            text: "synthetic body".into(),
+            timestamp: Some("2026-07-28T00:00:00Z".into()),
+            is_sidechain: false,
+            span: Some(span),
+        }
+    }
+
+    #[test]
+    fn fallback_message_and_placement_ids_are_path_independent() {
+        let staged = staged_batch(vec![staged_message(0, "", (0, 4))], 0, "session-1");
+        let first = staged_to_source(
+            "C:/one/transcript.jsonl",
+            &staged,
+            "synthetic",
+            "synthetic/jsonl-v1",
+            "same-fingerprint",
+            8,
+        )
+        .unwrap();
+        let second = staged_to_source(
+            "D:/moved/transcript.jsonl",
+            &staged,
+            "synthetic",
+            "synthetic/jsonl-v1",
+            "same-fingerprint",
+            8,
+        )
+        .unwrap();
+
+        let first_message = first
+            .entries
+            .iter()
+            .find(|(id, _, _)| id.kind() == IdKind::Message)
+            .unwrap();
+        let second_message = second
+            .entries
+            .iter()
+            .find(|(id, _, _)| id.kind() == IdKind::Message)
+            .unwrap();
+        assert_eq!(first_message.0, second_message.0);
+        assert_eq!(first_message.0.stability(), Stability::Unstable);
+        assert_eq!(first.placements[0].id, second.placements[0].id);
+        assert_ne!(first.source_path, second.source_path);
+    }
+
+    #[test]
+    fn duplicate_native_message_keeps_one_entity_and_every_placement() {
+        let staged = staged_batch(
+            vec![
+                staged_message(0, "shared-native", (0, 4)),
+                staged_message(1, "shared-native", (5, 9)),
+            ],
+            0,
+            "session-1",
+        );
+        let source = staged_to_source(
+            "synthetic.jsonl",
+            &staged,
+            "synthetic",
+            "synthetic/jsonl-v1",
+            "fingerprint",
+            16,
+        )
+        .unwrap();
+
+        assert_eq!(
+            source
+                .entries
+                .iter()
+                .filter(|(id, _, _)| id.kind() == IdKind::Message)
+                .count(),
+            1
+        );
+        assert_eq!(source.placements.len(), 2);
+        let message_payload: serde_json::Value = serde_json::from_slice(
+            &source
+                .entries
+                .iter()
+                .find(|(id, _, _)| id.kind() == IdKind::Message)
+                .unwrap()
+                .1,
+        )
+        .unwrap();
+        assert_eq!(message_payload["spans"].as_array().unwrap().len(), 2);
+        let session_payload: serde_json::Value = serde_json::from_slice(
+            &source
+                .entries
+                .iter()
+                .find(|(id, _, _)| id.kind() == IdKind::Session)
+                .unwrap()
+                .1,
+        )
+        .unwrap();
+        assert_eq!(session_payload["messages"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn stable_projection_conflict_does_not_disclose_native_id() {
+        let private_native_id = "private-provider-native-id";
+        let first = staged_message(0, private_native_id, (0, 4));
+        let mut second = staged_message(1, private_native_id, (5, 9));
+        second.text = "different stable text".into();
+        let staged = staged_batch(vec![first, second], 0, "session-1");
+        let error = staged_to_source(
+            "synthetic.jsonl",
+            &staged,
+            "synthetic",
+            "synthetic/jsonl-v1",
+            "fingerprint",
+            16,
+        );
+        let error = match error {
+            Err(error) => error,
+            Ok(_) => panic!("expected stable projection conflict"),
+        };
+        assert!(error.0.message.contains("conflicting stable projections"));
+        assert!(!error.0.message.contains(private_native_id));
+    }
+
+    #[test]
+    fn skipped_records_keep_source_relation_incomplete() {
+        let staged = staged_batch(vec![staged_message(0, "native", (0, 4))], 1, "session-1");
+        let source = staged_to_source(
+            "synthetic.jsonl",
+            &staged,
+            "synthetic",
+            "synthetic/jsonl-v1",
+            "fingerprint",
+            8,
+        )
+        .unwrap();
+        assert!(!source.relation_complete);
+    }
+
+    #[test]
+    fn parse_report_committed_count_must_match_emitted_messages() {
+        let mut staged = staged_batch(vec![staged_message(0, "native", (0, 4))], 0, "session-1");
+        staged.report.committed = 2;
+        let error = staged_to_source(
+            "synthetic.jsonl",
+            &staged,
+            "synthetic",
+            "synthetic/jsonl-v1",
+            "fingerprint",
+            8,
+        );
+        let error = match error {
+            Err(error) => error,
+            Ok(_) => panic!("expected committed/emitted mismatch"),
+        };
+        assert_eq!(error.0.code, CanonicalCode::Internal);
+    }
 
     fn dto(precision: Precision) -> EvidenceSpanDto {
         EvidenceSpanDto {
@@ -1174,6 +1509,7 @@ mod tests {
             session_id: "ses_v1_s".into(),
             session: serde_json::json!({}),
             branch_leaf: None,
+            branch_leaf_placement_id: None,
             messages: Vec::new(),
             evidence,
             truncation: Truncation {

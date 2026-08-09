@@ -4,6 +4,8 @@
 //! 固化进 CI，而非依赖手动运行。Cargo 为集成测试注入 `CARGO_BIN_EXE_<bin>`，
 //! 故此处零第三方依赖即可定位到刚构建的二进制。
 
+use rusqlite::Connection;
+use std::path::Path;
 use std::process::{Command, Output};
 
 /// 刚构建出的 `agentsessions` 二进制的绝对路径（由 Cargo 在编译期注入）。
@@ -83,6 +85,113 @@ fn temp_db(tag: &str) -> (tempfile::TempDir, String) {
     (dir, s)
 }
 
+fn create_v6_catalog(
+    db: &str,
+    source_path: &str,
+    session_wire: &str,
+    message_wire: &str,
+    document_wire: &str,
+    message_text: &str,
+) {
+    let conn = Connection::open(db).expect("open v6 fixture catalog");
+    conn.execute_batch(
+        "CREATE TABLE catalog (id TEXT PRIMARY KEY, payload BLOB NOT NULL);
+         CREATE VIRTUAL TABLE fts USING fts5(id UNINDEXED, text);
+         CREATE TABLE store_metadata (
+             singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+             active_generation INTEGER NOT NULL
+         );
+         INSERT INTO store_metadata(singleton, active_generation) VALUES(1, 1);
+         CREATE TABLE index_batches (
+             operation_id TEXT PRIMARY KEY,
+             base_generation INTEGER NOT NULL,
+             target_generation INTEGER NOT NULL,
+             state TEXT NOT NULL,
+             operation_digest TEXT NOT NULL,
+             upsert_ids_json TEXT NOT NULL,
+             delete_ids_json TEXT NOT NULL,
+             durable_point TEXT NOT NULL,
+             created_at_ms INTEGER NOT NULL,
+             committed_at_ms INTEGER,
+             error_code TEXT
+         );
+         CREATE INDEX index_batches_state ON index_batches(state);
+         CREATE TABLE fts_ids (
+             wire_id TEXT PRIMARY KEY,
+             id_json TEXT NOT NULL UNIQUE
+         );
+         CREATE TABLE source_membership (
+             source_path TEXT NOT NULL,
+             message_id TEXT NOT NULL,
+             document_id TEXT,
+             PRIMARY KEY(source_path, message_id)
+         );
+         CREATE INDEX source_membership_source
+         ON source_membership(source_path);
+         CREATE TABLE source_scans (
+             source_path TEXT PRIMARY KEY,
+             scanned_at_ms INTEGER NOT NULL
+         );
+         PRAGMA user_version = 6;",
+    )
+    .expect("create v6 schema");
+
+    let session_payload = serde_json::json!({
+        "document": document_wire,
+        "documents": [document_wire],
+        "messages": [message_wire],
+    })
+    .to_string();
+    let message_payload = serde_json::json!({
+        "role": "user",
+        "text": message_text,
+        "timestamp": "2026-07-28T00:00:00.000Z",
+        "parent": null,
+        "parent_native_id": null,
+        "is_sidechain": false,
+        "session": session_wire,
+        "sessions": [session_wire],
+        "span": {"start": 0, "end": 1},
+        "spans": [{
+            "document": document_wire,
+            "start": 0,
+            "end": 1,
+        }],
+    })
+    .to_string();
+    let document_payload = serde_json::json!({
+        "provider": "claude-code",
+        "variant": "claude-code/jsonl-v1",
+        "fingerprint": "legacy-v6-fingerprint",
+        "len": 1,
+    })
+    .to_string();
+    for (wire, payload) in [
+        (session_wire, session_payload.as_bytes()),
+        (message_wire, message_payload.as_bytes()),
+        (document_wire, document_payload.as_bytes()),
+    ] {
+        conn.execute(
+            "INSERT INTO catalog(id, payload) VALUES(?1, ?2)",
+            rusqlite::params![wire, payload],
+        )
+        .expect("insert legacy catalog row");
+    }
+    for wire in [session_wire, message_wire, document_wire] {
+        conn.execute(
+            "INSERT INTO source_membership(source_path, message_id, document_id)
+             VALUES(?1, ?2, ?3)",
+            rusqlite::params![source_path, wire, document_wire],
+        )
+        .expect("insert legacy membership");
+    }
+    conn.execute(
+        "INSERT INTO source_scans(source_path, scanned_at_ms) VALUES(?1, 1)",
+        [source_path],
+    )
+    .expect("insert legacy source scan");
+}
+
 fn stdout(o: &Output) -> String {
     String::from_utf8_lossy(&o.stdout).into_owned()
 }
@@ -121,6 +230,129 @@ fn index_search_get_roundtrip() {
     let out = run(&db, &["get", "msg_v1_52db0bc4880412c58a3cc166ec6c389a"]);
     assert!(out.status.success());
     assert!(stdout(&out).contains("the quick brown fox jumps"));
+}
+
+#[test]
+fn migrated_v6_catalog_stays_readable_until_complete_reingest_enables_context() {
+    let (dir, db) = temp_db("migrated-v6-reingest");
+    let session_native = "66111111-1111-4111-8111-111111111111";
+    let message_native = "66222222-2222-4222-8222-222222222222";
+    let session_wire = format!("ses_v1_{session_native}");
+    let message_wire = format!("msg_v1_{message_native}");
+    let legacy_document_wire = "doc_v1_legacy-v6-document";
+    let message_text = "legacy catalog survives migration";
+    let source = dir.path().join("legacy-source.jsonl");
+    let source_content = format!(
+        "{{\"type\":\"user\",\"uuid\":\"{message_native}\",\"parentUuid\":null,\
+         \"sessionId\":\"{session_native}\",\"timestamp\":\"2026-07-28T00:00:00.000Z\",\
+         \"message\":{{\"role\":\"user\",\"content\":\"{message_text}\"}}}}\n"
+    );
+    std::fs::write(&source, &source_content).expect("write v6 re-ingest fixture");
+    let source_path = source.to_string_lossy().into_owned();
+    create_v6_catalog(
+        &db,
+        &source_path,
+        &session_wire,
+        &message_wire,
+        legacy_document_wire,
+        message_text,
+    );
+
+    let get = run(&db, &["get", &message_wire]);
+    assert!(get.status.success(), "get failed: {}", stdout(&get));
+    assert!(
+        parse_first_line(&get)["data"]["payload"]
+            .as_str()
+            .is_some_and(|payload| payload.contains(message_text))
+    );
+
+    let show = run(&db, &["show", &session_wire]);
+    assert!(show.status.success(), "show failed: {}", stdout(&show));
+    assert_eq!(
+        parse_first_line(&show)["data"]["entity"]["document"],
+        legacy_document_wire
+    );
+
+    let list = run(&db, &["list", "10"]);
+    assert!(list.status.success(), "list failed: {}", stdout(&list));
+    let entries = parse_first_line(&list)["data"]["entries"]
+        .as_array()
+        .expect("list entries")
+        .clone();
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry["id"] == session_wire.as_str())
+    );
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry["id"] == message_wire.as_str())
+    );
+
+    let context = run(&db, &["context", &session_wire]);
+    assert_eq!(
+        context.status.code(),
+        Some(9),
+        "context must require re-ingest: {}",
+        stdout(&context)
+    );
+    let error = parse_first_line(&context);
+    assert_eq!(error["error"]["code"], "schema_incompatible");
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("re-ingest required"))
+    );
+    assert!(
+        !stdout(&context).contains(&source_path),
+        "schema error must not disclose the source path"
+    );
+
+    let ingest = run(&db, &["ingest", &source_path]);
+    assert!(
+        ingest.status.success(),
+        "re-ingest failed: {}",
+        stdout(&ingest)
+    );
+    assert_eq!(parse_first_line(&ingest)["data"]["skipped"], 0);
+
+    let context = run(&db, &["context", &session_wire]);
+    assert!(
+        context.status.success(),
+        "context after re-ingest failed: {}",
+        stdout(&context)
+    );
+    let context = parse_first_line(&context);
+    let messages = context["data"]["messages"]
+        .as_array()
+        .expect("context messages");
+    assert_eq!(messages.len(), 1, "{context}");
+    assert_eq!(messages[0]["message_id"], message_wire);
+    assert_eq!(
+        context["data"]["evidence"][0]["occurrence_id"],
+        messages[0]["placement_id"]
+    );
+
+    let show = run(&db, &["show", &session_wire]);
+    let entity = parse_first_line(&show)["data"]["entity"].clone();
+    let documents = entity["documents"].as_array().expect("session documents");
+    assert_eq!(documents.len(), 1, "entity={entity}");
+    assert_ne!(documents[0], legacy_document_wire);
+
+    for command in [
+        vec!["get", message_wire.as_str()],
+        vec!["show", session_wire.as_str()],
+        vec!["list", "10"],
+    ] {
+        let output = run(&db, &command);
+        assert!(
+            output.status.success(),
+            "{} must remain readable after re-ingest: {}",
+            command[0],
+            stdout(&output)
+        );
+    }
 }
 
 #[test]
@@ -1054,6 +1286,64 @@ fn write_context_fixture(dir: &std::path::Path) -> (String, String, String) {
     )
 }
 
+struct RelationalContextFixture {
+    paths: [String; 3],
+    contents: [String; 3],
+    session_a: String,
+    session_b: String,
+    parent_a: String,
+    parent_b: String,
+    shared_message: String,
+}
+
+fn write_relational_context_fixture(dir: &Path) -> RelationalContextFixture {
+    let session_a_native = "aa111111-1111-4111-8111-111111111111";
+    let session_b_native = "bb222222-2222-4222-8222-222222222222";
+    let parent_a_native = "aa333333-3333-4333-8333-333333333333";
+    let parent_b_native = "bb444444-4444-4444-8444-444444444444";
+    let shared_native = "cc555555-5555-4555-8555-555555555555";
+    let head_a = format!(
+        "{{\"type\":\"user\",\"uuid\":\"{parent_a_native}\",\"parentUuid\":null,\
+         \"sessionId\":\"{session_a_native}\",\"timestamp\":\"2026-07-28T01:00:00.000Z\",\
+         \"message\":{{\"role\":\"user\",\"content\":\"relational parent A\"}}}}\n"
+    );
+    let tail_a = format!(
+        "{{\"type\":\"assistant\",\"uuid\":\"{shared_native}\",\
+         \"parentUuid\":\"{parent_a_native}\",\"sessionId\":\"{session_a_native}\",\
+         \"timestamp\":\"2026-07-28T01:00:01.000Z\",\
+         \"message\":{{\"role\":\"assistant\",\"content\":\"relational shared answer\"}}}}\n"
+    );
+    let source_b = format!(
+        "{{\"type\":\"user\",\"uuid\":\"{parent_b_native}\",\"parentUuid\":null,\
+         \"sessionId\":\"{session_b_native}\",\"timestamp\":\"2026-07-28T01:00:00.000Z\",\
+         \"message\":{{\"role\":\"user\",\"content\":\"relational parent B\"}}}}\n\
+         {{\"type\":\"assistant\",\"uuid\":\"{shared_native}\",\
+         \"parentUuid\":\"{parent_b_native}\",\"sessionId\":\"{session_b_native}\",\
+         \"timestamp\":\"2026-07-28T01:00:01.000Z\",\
+         \"message\":{{\"role\":\"assistant\",\"content\":\"relational shared answer\"}}}}\n"
+    );
+    let files = [
+        ("relational-a-head.jsonl", head_a.clone()),
+        ("relational-a-tail.jsonl", tail_a.clone()),
+        ("relational-b.jsonl", source_b.clone()),
+    ];
+    let mut paths = Vec::new();
+    for (name, content) in &files {
+        let path = dir.join(name);
+        std::fs::write(&path, content).expect("write relational context fixture");
+        paths.push(path.to_string_lossy().into_owned());
+    }
+    RelationalContextFixture {
+        paths: paths.try_into().expect("three fixture paths"),
+        contents: [head_a, tail_a, source_b],
+        session_a: format!("ses_v1_{session_a_native}"),
+        session_b: format!("ses_v1_{session_b_native}"),
+        parent_a: format!("msg_v1_{parent_a_native}"),
+        parent_b: format!("msg_v1_{parent_b_native}"),
+        shared_message: format!("msg_v1_{shared_native}"),
+    }
+}
+
 #[test]
 fn context_assembles_mainline_branch_with_evidence() {
     let (dir, db) = temp_db("context-mainline");
@@ -1075,6 +1365,11 @@ fn context_assembles_mainline_branch_with_evidence() {
         .iter()
         .map(|m| m["id"].as_str().expect("message.id"))
         .collect();
+    assert!(
+        messages
+            .iter()
+            .all(|message| message["id"] == message["message_id"])
+    );
     assert_eq!(
         wires,
         vec![
@@ -1088,10 +1383,18 @@ fn context_assembles_mainline_branch_with_evidence() {
         frame["data"]["branch_leaf"],
         "msg_v1_c0000000-0000-4000-8000-000000000004"
     );
+    assert_eq!(
+        frame["data"]["branch_leaf_placement_id"],
+        messages[2]["placement_id"]
+    );
 
     // 证据与链对齐：byte 精度 + 指纹 + 文档身份；span 精确切回源记录。
     let evidence = frame["data"]["evidence"].as_array().expect("evidence");
     assert_eq!(evidence.len(), 3);
+    for (message, span) in messages.iter().zip(evidence) {
+        assert_eq!(span["occurrence_id"], message["placement_id"]);
+        assert_eq!(span["message_id"], message["message_id"]);
+    }
     assert_eq!(evidence[0]["precision"], "byte");
     assert!(
         evidence[0]["source_document_id"]
@@ -1115,7 +1418,8 @@ fn context_assembles_mainline_branch_with_evidence() {
     // 证据 ordinal 是会话内 seq：mainline 第三条是成员序号 3（sidechain 占 2）。
     assert_eq!(evidence[2]["record_ordinal"], 3, "frame={frame}");
 
-    // full 策略包含 sidechain，按 seq 序。
+    // full 策略包含 sidechain，按冻结顺序：missing timestamp 先，再按 ordinal；
+    // 有 timestamp 的 root 最后。该顺序不声称缺失时间的跨记录 chronology。
     let out = run(&db, &["context", &session_wire, "--policy", "full"]);
     assert!(out.status.success());
     let frame = parse_first_line(&out);
@@ -1125,8 +1429,15 @@ fn context_assembles_mainline_branch_with_evidence() {
         .iter()
         .map(|m| m["id"].as_str().unwrap())
         .collect();
-    assert_eq!(full.len(), 4);
-    assert_eq!(full[2], "msg_v1_c0000000-0000-4000-8000-000000000003");
+    assert_eq!(
+        full,
+        vec![
+            "msg_v1_c0000000-0000-4000-8000-000000000002",
+            "msg_v1_c0000000-0000-4000-8000-000000000003",
+            "msg_v1_c0000000-0000-4000-8000-000000000004",
+            "msg_v1_c0000000-0000-4000-8000-000000000001",
+        ]
+    );
 }
 
 /// 把一个会话拆成两个文件写出：前半 root→reply，后半 sidechain + mainline tail。
@@ -1207,6 +1518,139 @@ fn session_split_across_files_syncs_and_assembles_one_context() {
     assert_eq!(
         frame["data"]["branch_leaf"],
         "msg_v1_5p1i7000-0000-4000-8000-000000000004"
+    );
+}
+
+#[test]
+fn shared_message_keeps_per_session_parent_and_exact_evidence_across_split_sources() {
+    let (dir, db) = temp_db("relational-context-shapes");
+    let fixture = write_relational_context_fixture(dir.path());
+    let out = run(
+        &db,
+        &[
+            "sync",
+            &fixture.paths[0],
+            &fixture.paths[1],
+            &fixture.paths[2],
+        ],
+    );
+    assert!(out.status.success(), "sync failed: {}", stdout(&out));
+    let sync = parse_first_line(&out);
+    assert_eq!(sync["data"]["emitted"], 4);
+    assert_eq!(sync["data"]["skipped"], 0);
+
+    let status = run(&db, &["status"]);
+    let status = parse_first_line(&status);
+    assert_eq!(status["data"]["placements"], 4);
+    assert_eq!(status["data"]["source_placement_claims"], 4);
+
+    let list = run(&db, &["list", "20"]);
+    let list = parse_first_line(&list);
+    let stable_messages = list["data"]["entries"]
+        .as_array()
+        .expect("list entries")
+        .iter()
+        .filter(|entry| {
+            entry["id"]
+                .as_str()
+                .is_some_and(|wire| wire.starts_with("msg_v1_"))
+        })
+        .count();
+    assert_eq!(stable_messages, 3, "stable Message census is de-duplicated");
+
+    let shared = run(&db, &["show", &fixture.shared_message]);
+    let shared = parse_first_line(&shared)["data"]["entity"].clone();
+    assert_eq!(shared["sessions"].as_array().expect("sessions").len(), 2);
+    assert_eq!(shared["spans"].as_array().expect("spans").len(), 2);
+    assert!(
+        shared["parent"].is_null(),
+        "divergent parents must not alias"
+    );
+    assert!(
+        shared["parent_native_id"].is_null(),
+        "divergent native parents must not alias"
+    );
+
+    let session_a = run(&db, &["show", &fixture.session_a]);
+    let session_a = parse_first_line(&session_a)["data"]["entity"].clone();
+    assert_eq!(
+        session_a["documents"]
+            .as_array()
+            .expect("session A documents")
+            .len(),
+        2,
+        "session A must span both source documents"
+    );
+
+    let context_a = run(&db, &["context", &fixture.session_a]);
+    assert!(
+        context_a.status.success(),
+        "session A context failed: {}",
+        stdout(&context_a)
+    );
+    let context_a = parse_first_line(&context_a);
+    let messages_a = context_a["data"]["messages"]
+        .as_array()
+        .expect("session A messages");
+    assert_eq!(
+        messages_a
+            .iter()
+            .map(|message| message["message_id"].as_str().expect("message id"))
+            .collect::<Vec<_>>(),
+        vec![fixture.parent_a.as_str(), fixture.shared_message.as_str()]
+    );
+    let evidence_a = context_a["data"]["evidence"]
+        .as_array()
+        .expect("session A evidence");
+    assert_eq!(
+        evidence_a[1]["occurrence_id"],
+        messages_a[1]["placement_id"]
+    );
+    let start_a = evidence_a[1]["byte_start"].as_u64().expect("start A") as usize;
+    let end_a = evidence_a[1]["byte_end"].as_u64().expect("end A") as usize;
+    assert_eq!(
+        &fixture.contents[1].as_bytes()[start_a..end_a],
+        fixture.contents[1].trim_end().as_bytes()
+    );
+
+    let context_b = run(&db, &["context", &fixture.session_b]);
+    assert!(
+        context_b.status.success(),
+        "session B context failed: {}",
+        stdout(&context_b)
+    );
+    let context_b = parse_first_line(&context_b);
+    let messages_b = context_b["data"]["messages"]
+        .as_array()
+        .expect("session B messages");
+    assert_eq!(
+        messages_b
+            .iter()
+            .map(|message| message["message_id"].as_str().expect("message id"))
+            .collect::<Vec<_>>(),
+        vec![fixture.parent_b.as_str(), fixture.shared_message.as_str()]
+    );
+    let evidence_b = context_b["data"]["evidence"]
+        .as_array()
+        .expect("session B evidence");
+    assert_eq!(
+        evidence_b[1]["occurrence_id"],
+        messages_b[1]["placement_id"]
+    );
+    let start_b = evidence_b[1]["byte_start"].as_u64().expect("start B") as usize;
+    let end_b = evidence_b[1]["byte_end"].as_u64().expect("end B") as usize;
+    assert!(fixture.contents[2].as_bytes()[start_b..end_b].starts_with(br#"{"type":"assistant""#));
+    assert_ne!(
+        messages_a[1]["placement_id"], messages_b[1]["placement_id"],
+        "shared stable Message must retain distinct placements"
+    );
+    assert_ne!(
+        evidence_a[1]["source_document_id"], evidence_b[1]["source_document_id"],
+        "each occurrence must retain its exact document"
+    );
+    assert_ne!(
+        evidence_a[1]["byte_start"], evidence_b[1]["byte_start"],
+        "each occurrence must retain its exact source-local span"
     );
 }
 
@@ -1376,6 +1820,13 @@ fn jsonl_sync_emits_progress_frames_then_single_response() {
             .is_some_and(|m| m.contains("staged")),
         "{text}"
     );
+    for frame in &frames[..2] {
+        let message = frame["message"].as_str().expect("progress message");
+        assert!(
+            paths.iter().all(|path| !message.contains(path)),
+            "progress must not disclose source paths: {message}"
+        );
+    }
     assert_eq!(frames[2]["frame_type"], "response");
     assert_eq!(frames[2]["command"], "sync");
 

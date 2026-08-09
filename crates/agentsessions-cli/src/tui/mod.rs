@@ -162,8 +162,8 @@ fn search_msg(response: AppResponse) -> Msg {
     }
 }
 
-/// 命中→会话解析（design §0.5）：`Show` 取 canonical payload 的 `session` 字段，
-/// 缺失/不可解析如实报 index-only，停留在 Results 屏。
+/// 命中→会话解析：Application 按 distinct Session 返回 placement candidates。
+/// 零候选如实报 index-only；多个 Session 明确报歧义，绝不选择兼容 alias。
 fn resolve_and_load(
     app: &App<&SqliteStore, &SqliteStore>,
     hit_id: &str,
@@ -174,21 +174,19 @@ fn resolve_and_load(
             "error [invalid_request]: not a valid entity id: {hit_id}"
         ));
     };
-    let payload = match app.handle(AppRequest::Show { id }) {
-        Ok(AppResponse::Show { payload }) => payload,
-        Ok(_) => return internal("unexpected response for show"),
+    let candidates = match app.handle(AppRequest::MessageContexts { message_id: id }) {
+        Ok(AppResponse::MessageContexts { candidates, .. }) => candidates,
+        Ok(_) => return internal("unexpected response for message contexts"),
         Err(error) => return failed(error),
     };
-    match payload.as_deref().and_then(session_of) {
-        Some(wire) => load_context(app, &wire, policy),
-        None => Msg::EffectFailed("hit has no session (index-only row)".to_string()),
+    match candidates.as_slice() {
+        [] => Msg::EffectFailed("hit has no session (index-only row)".to_string()),
+        [candidate] => load_context(app, &candidate.session_id, policy),
+        _ => Msg::EffectFailed(format!(
+            "hit belongs to {} sessions; choose an explicit session",
+            candidates.len()
+        )),
     }
-}
-
-/// 从消息 canonical payload 提取所属会话 wire id；任一环缺失返回 `None`（不臆造）。
-fn session_of(payload: &[u8]) -> Option<String> {
-    let value: serde_json::Value = serde_json::from_slice(payload).ok()?;
-    Some(value.get("session")?.as_str()?.to_string())
 }
 
 /// 装配会话上下文并投影为 [`ContextView`]。
@@ -220,20 +218,20 @@ fn load_context(
 }
 
 /// 从 [`render`] 的 context data JSON 建 [`ContextView`]。
-/// 证据按 `message_id` 对齐消息；无对应证据条目的消息如实标 `unknown`。
+/// 证据按 authoritative placement/occurrence id 对齐；重复 Message 不折叠。
 fn context_view(data: &serde_json::Value, warnings: Vec<String>) -> ContextView {
     let empty = Vec::new();
     let spans = data["evidence"].as_array().unwrap_or(&empty);
     let precision_of: HashMap<&str, &str> = spans
         .iter()
-        .filter_map(|span| Some((span["message_id"].as_str()?, span["precision"].as_str()?)))
+        .filter_map(|span| Some((span["occurrence_id"].as_str()?, span["precision"].as_str()?)))
         .collect();
     let messages = data["messages"].as_array().unwrap_or(&empty);
     let lines = messages
         .iter()
         .map(|message| {
-            let id = message["id"].as_str().unwrap_or("");
-            let precision = precision_of.get(id).copied().unwrap_or("unknown");
+            let placement_id = message["placement_id"].as_str().unwrap_or("");
+            let precision = precision_of.get(placement_id).copied().unwrap_or("unknown");
             context_message(precision, &message["payload"])
         })
         .collect();
@@ -312,5 +310,159 @@ fn draw(frame: &mut Frame, model: &Model) {
             frame.render_widget(paragraph, body_area);
             frame.render_widget(status, status_area);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agentsessions_adapters_sqlite::SourceBatch;
+    use agentsessions_domain::{IdKind, MessagePlacement, Stability};
+    use serde_json::json;
+
+    fn id(kind: IdKind, tag: &str) -> StableId {
+        StableId::derive(kind, Stability::Reconstructed, &[tag.as_bytes()])
+    }
+
+    fn source_batch(
+        source_path: &str,
+        session: StableId,
+        document: StableId,
+        message: StableId,
+        ordinals: &[u32],
+    ) -> SourceBatch {
+        let message_payload = json!({
+            "role": "assistant",
+            "text": "shared TUI message",
+            "timestamp": "2026-07-28T03:00:00Z",
+        })
+        .to_string()
+        .into_bytes();
+        let session_payload = json!({
+            "document": document.as_str(),
+            "documents": [document.as_str()],
+            "messages": [message.as_str()],
+        })
+        .to_string()
+        .into_bytes();
+        let document_payload = json!({
+            "provider": "synthetic",
+            "variant": "synthetic/jsonl-v1",
+            "fingerprint": format!("fingerprint-{source_path}"),
+            "len": 32,
+        })
+        .to_string()
+        .into_bytes();
+        let placements = ordinals
+            .iter()
+            .map(|ordinal| {
+                MessagePlacement::new(
+                    session.clone(),
+                    document.clone(),
+                    message.clone(),
+                    *ordinal,
+                    false,
+                    None,
+                )
+            })
+            .collect();
+        SourceBatch {
+            source_path: source_path.to_string(),
+            entries: vec![
+                (message, message_payload, "shared TUI message".to_string()),
+                (session, session_payload, String::new()),
+                (document, document_payload, String::new()),
+            ],
+            placements,
+            edges: Vec::new(),
+            relation_complete: true,
+        }
+    }
+
+    #[test]
+    fn resolve_and_load_treats_multiple_placements_in_one_session_as_one_candidate() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let message = id(IdKind::Message, "tui-shared-message");
+        let source = source_batch(
+            "tui-one-session",
+            id(IdKind::Session, "tui-session"),
+            id(IdKind::Document, "tui-document"),
+            message.clone(),
+            &[0, 1],
+        );
+        store
+            .commit_source_batches_if_changed(std::slice::from_ref(&source))
+            .unwrap();
+        let app = App::new(store_ref(&store), store_ref(&store));
+
+        let result = resolve_and_load(&app, message.as_str(), ContextPolicy::Mainline);
+        assert!(
+            matches!(result, Msg::ContextLoaded(view) if view.lines.len() == 1),
+            "multiple placements in one Session must not look ambiguous"
+        );
+    }
+
+    #[test]
+    fn resolve_and_load_reports_ambiguity_only_for_distinct_sessions() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let message = id(IdKind::Message, "tui-ambiguous-message");
+        let sources = [
+            source_batch(
+                "tui-session-a-source",
+                id(IdKind::Session, "tui-session-a"),
+                id(IdKind::Document, "tui-document-a"),
+                message.clone(),
+                &[0],
+            ),
+            source_batch(
+                "tui-session-b-source",
+                id(IdKind::Session, "tui-session-b"),
+                id(IdKind::Document, "tui-document-b"),
+                message.clone(),
+                &[0],
+            ),
+        ];
+        store.commit_source_batches_if_changed(&sources).unwrap();
+        let app = App::new(store_ref(&store), store_ref(&store));
+
+        let result = resolve_and_load(&app, message.as_str(), ContextPolicy::Mainline);
+        assert!(
+            matches!(result, Msg::EffectFailed(message) if message.contains("2 sessions")),
+            "distinct Sessions must remain explicitly ambiguous"
+        );
+    }
+
+    #[test]
+    fn context_view_aligns_evidence_by_placement_id_not_message_or_position() {
+        let data = json!({
+            "session_id": "ses_v1_tui",
+            "messages": [
+                {
+                    "id": "msg_v1_shared",
+                    "message_id": "msg_v1_shared",
+                    "placement_id": "plc_v1_first",
+                    "payload": {"role": "assistant", "text": "first"},
+                },
+                {
+                    "id": "msg_v1_shared",
+                    "message_id": "msg_v1_shared",
+                    "placement_id": "plc_v1_second",
+                    "payload": {"role": "assistant", "text": "second"},
+                },
+            ],
+            "evidence": [
+                {"occurrence_id": "plc_v1_second", "precision": "byte"},
+                {"occurrence_id": "plc_v1_first", "precision": "unknown"},
+            ],
+            "truncation": {"truncated": false, "reason": null},
+            "generation": 7,
+        });
+
+        let view = context_view(&data, Vec::new());
+        assert_eq!(view.lines.len(), 2);
+        assert_eq!(view.lines[0].text, "first");
+        assert_eq!(view.lines[0].precision, "unknown");
+        assert_eq!(view.lines[1].text, "second");
+        assert_eq!(view.lines[1].precision, "byte");
     }
 }

@@ -139,6 +139,64 @@ fn write_context_fixture(dir: &Path) -> (String, String) {
     )
 }
 
+struct RelationalContextFixture {
+    paths: [String; 3],
+    contents: [String; 3],
+    session_a: String,
+    session_b: String,
+    parent_a: String,
+    parent_b: String,
+    shared_message: String,
+}
+
+fn write_relational_context_fixture(dir: &Path) -> RelationalContextFixture {
+    let session_a_native = "da111111-1111-4111-8111-111111111111";
+    let session_b_native = "db222222-2222-4222-8222-222222222222";
+    let parent_a_native = "da333333-3333-4333-8333-333333333333";
+    let parent_b_native = "db444444-4444-4444-8444-444444444444";
+    let shared_native = "dc555555-5555-4555-8555-555555555555";
+    let head_a = format!(
+        "{{\"type\":\"user\",\"uuid\":\"{parent_a_native}\",\"parentUuid\":null,\
+         \"sessionId\":\"{session_a_native}\",\"timestamp\":\"2026-07-28T02:00:00.000Z\",\
+         \"message\":{{\"role\":\"user\",\"content\":\"mcp relational parent A\"}}}}\n"
+    );
+    let tail_a = format!(
+        "{{\"type\":\"assistant\",\"uuid\":\"{shared_native}\",\
+         \"parentUuid\":\"{parent_a_native}\",\"sessionId\":\"{session_a_native}\",\
+         \"timestamp\":\"2026-07-28T02:00:01.000Z\",\
+         \"message\":{{\"role\":\"assistant\",\"content\":\"mcp relational shared\"}}}}\n"
+    );
+    let source_b = format!(
+        "{{\"type\":\"user\",\"uuid\":\"{parent_b_native}\",\"parentUuid\":null,\
+         \"sessionId\":\"{session_b_native}\",\"timestamp\":\"2026-07-28T02:00:00.000Z\",\
+         \"message\":{{\"role\":\"user\",\"content\":\"mcp relational parent B\"}}}}\n\
+         {{\"type\":\"assistant\",\"uuid\":\"{shared_native}\",\
+         \"parentUuid\":\"{parent_b_native}\",\"sessionId\":\"{session_b_native}\",\
+         \"timestamp\":\"2026-07-28T02:00:01.000Z\",\
+         \"message\":{{\"role\":\"assistant\",\"content\":\"mcp relational shared\"}}}}\n"
+    );
+    let files = [
+        ("mcp-relational-a-head.jsonl", head_a.clone()),
+        ("mcp-relational-a-tail.jsonl", tail_a.clone()),
+        ("mcp-relational-b.jsonl", source_b.clone()),
+    ];
+    let mut paths = Vec::new();
+    for (name, content) in &files {
+        let path = dir.join(name);
+        std::fs::write(&path, content).expect("write MCP relational fixture");
+        paths.push(path.to_string_lossy().into_owned());
+    }
+    RelationalContextFixture {
+        paths: paths.try_into().expect("three MCP fixture paths"),
+        contents: [head_a, tail_a, source_b],
+        session_a: format!("ses_v1_{session_a_native}"),
+        session_b: format!("ses_v1_{session_b_native}"),
+        parent_a: format!("msg_v1_{parent_a_native}"),
+        parent_b: format!("msg_v1_{parent_b_native}"),
+        shared_message: format!("msg_v1_{shared_native}"),
+    }
+}
+
 // ─── design §4 场景 1：initialize 握手与版本协商 ────────────────────────────
 
 #[test]
@@ -321,6 +379,87 @@ fn get_session_context_returns_mainline_messages_and_evidence() {
         .as_array()
         .expect("data.evidence");
     assert_eq!(evidence.len(), 3, "{payload}");
+}
+
+#[test]
+fn get_session_context_keeps_shared_message_parent_and_evidence_per_session() {
+    let (dir, db) = temp_db("mcp-relational-context");
+    let fixture = write_relational_context_fixture(dir.path());
+    let out = run_cli(
+        &db,
+        &[
+            "sync",
+            &fixture.paths[0],
+            &fixture.paths[1],
+            &fixture.paths[2],
+        ],
+    );
+    assert!(out.status.success(), "sync failed: {}", stdout(&out));
+
+    let frames = mcp_session(
+        &db,
+        &[
+            initialize_request(1, "2025-06-18"),
+            initialized_notification(),
+            tool_call(
+                2,
+                "get_session_context",
+                json!({ "session_id": fixture.session_a }),
+            ),
+            tool_call(
+                3,
+                "get_session_context",
+                json!({ "session_id": fixture.session_b }),
+            ),
+        ],
+    );
+    assert_eq!(frames.len(), 3, "{frames:?}");
+
+    let mut shared_placements = Vec::new();
+    let mut shared_documents = Vec::new();
+    let cases = [
+        (2, fixture.parent_a.as_str(), 1usize),
+        (3, fixture.parent_b.as_str(), 2usize),
+    ];
+    for (id, expected_parent, content_index) in cases {
+        let result = &frame_by_id(&frames, id)["result"];
+        assert_eq!(result["isError"], false, "{result}");
+        let payload = &result["structuredContent"];
+        let messages = payload["data"]["messages"]
+            .as_array()
+            .expect("context messages");
+        assert_eq!(
+            messages
+                .iter()
+                .map(|message| message["message_id"].as_str().expect("message id"))
+                .collect::<Vec<_>>(),
+            vec![expected_parent, fixture.shared_message.as_str()]
+        );
+        let evidence = payload["data"]["evidence"]
+            .as_array()
+            .expect("context evidence");
+        assert_eq!(evidence[1]["occurrence_id"], messages[1]["placement_id"]);
+        let start = evidence[1]["byte_start"].as_u64().expect("byte start") as usize;
+        let end = evidence[1]["byte_end"].as_u64().expect("byte end") as usize;
+        assert!(
+            fixture.contents[content_index].as_bytes()[start..end]
+                .starts_with(br#"{"type":"assistant""#)
+        );
+        shared_placements.push(
+            messages[1]["placement_id"]
+                .as_str()
+                .expect("placement id")
+                .to_string(),
+        );
+        shared_documents.push(
+            evidence[1]["source_document_id"]
+                .as_str()
+                .expect("document id")
+                .to_string(),
+        );
+    }
+    assert_ne!(shared_placements[0], shared_placements[1]);
+    assert_ne!(shared_documents[0], shared_documents[1]);
 }
 
 // ─── design §4 场景 5：坏 cursor 是业务错误（isError 结果帧）────────────────

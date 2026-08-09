@@ -22,4 +22,5 @@ ratatui.workspace = true
 crossterm.workspace = true
 
 [dev-dependencies]
+rusqlite = { version = "0.40", features = ["bundled"] }
 tempfile = "3"

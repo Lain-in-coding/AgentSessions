@@ -40,6 +40,7 @@ dependencies = [
  "agentsessions-provider-codex",
  "crossterm",
  "ratatui",
+ "rusqlite",
  "serde_json",
  "tempfile",
 ]
