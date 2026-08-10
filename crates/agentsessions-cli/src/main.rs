@@ -28,7 +28,7 @@ use agentsessions_domain::{
     ContextPolicy, DomainError, EvidenceSpan, IdKind, MessageEdge, MessagePlacement,
     MessageRelation, Stability, StableId,
 };
-use agentsessions_ports::ProviderAdapter;
+use agentsessions_ports::{ParseReport, ProviderAdapter};
 use agentsessions_provider_claude::ClaudeCodeAdapter;
 use agentsessions_provider_codex::CodexAdapter;
 use protocol::{CanonicalCode, ProtocolError};
@@ -739,6 +739,25 @@ fn provider_registry() -> Vec<Box<dyn ProviderAdapter>> {
 /// ingest/sync 输出要报 variant；这里复用同一份 registry 借用为 `&[&dyn ...]` 后交给
 /// 编排层，选中的 variant 由事后对全体 adapter 再 probe 取最高置信度得到（与选择逻辑一致）。
 fn stage_with_registry(bytes: &[u8]) -> Result<(StagedBatch, String), CliError> {
+    // 空源（0 字节）是合法的"整源清空"：无 provider 认领空字节，但语义是
+    // 该源的全部消息都应被 tombstone。返回空 staged（0 消息、0 skipped、
+    // relation_complete=true——空扫描是完整扫描），store 层据此对旧消息
+    // 推导 tombstone。
+    if bytes.is_empty() {
+        return Ok((
+            StagedBatch {
+                messages: Vec::new(),
+                report: ParseReport {
+                    committed: 0,
+                    skipped: 0,
+                    diagnostics: Vec::new(),
+                    session_native_id: None,
+                },
+                session_native_id: None,
+            },
+            "empty".into(),
+        ));
+    }
     let registry = provider_registry();
     let refs: Vec<&dyn ProviderAdapter> = registry.iter().map(|a| a.as_ref()).collect();
     let staged = select_and_stage(&refs, bytes)?;
@@ -1079,15 +1098,18 @@ fn sync_files(
         let path_ref = std::path::Path::new(path);
         let (snap, bytes) = capture(path_ref).map_err(ProtocolError::from)?;
         let cached_fp = cached.get(path).and_then(|(_, fp)| fp.clone());
-        let (staged, variant) = if cached_fp.as_deref() == Some(snap.fingerprint.as_str()) {
-            // 字节未变：跳过 parse。store 层仍会做 no-op 判定（entries 为空时
-            // 会走 membership/scan 对比），因此这里只需空 staged 占位。
-            unchanged_messages += unchanged_counts.get(path).copied().unwrap_or(0);
-            (None, None)
-        } else {
-            let (staged, variant) = stage_with_registry(&bytes)?;
-            (Some(staged), Some(variant))
-        };
+        // 空文件（0 字节）不能走指纹跳过：它必须作为"整源清空"批次提交
+        // 以 tombstone 旧消息；跳过会退化成空批 no-op，丢失 tombstone 语义。
+        let (staged, variant) =
+            if !bytes.is_empty() && cached_fp.as_deref() == Some(snap.fingerprint.as_str()) {
+                // 字节未变：跳过 parse。store 层仍会做 no-op 判定（entries 为空时
+                // 会走 membership/scan 对比），因此这里只需空 staged 占位。
+                unchanged_messages += unchanged_counts.get(path).copied().unwrap_or(0);
+                (None, None)
+            } else {
+                let (staged, variant) = stage_with_registry(&bytes)?;
+                (Some(staged), Some(variant))
+            };
         if progress {
             protocol::write_stdout_line(&protocol::progress_frame(
                 "sync",

@@ -987,6 +987,53 @@ fn sync_tombstones_message_removed_from_source() {
     );
 }
 
+#[test]
+fn sync_empty_source_tombstones_all_messages() {
+    // 整源清空：0 字节源必须作为合法空批次提交（tombstone 全部旧消息），
+    // 而不是被 provider 拒绝（此前 "no provider recognized" 使整源清空不可达）。
+    let (dir, db) = temp_db("sync-empty");
+    let fixture = dir.path().join("empty-me.jsonl");
+    std::fs::write(
+        &fixture,
+        concat!(
+            r#"{"type":"user","message":{"role":"user","content":"will be wiped"}}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"role":"assistant","content":"gone too"}}"#,
+            "\n",
+        ),
+    )
+    .expect("write fixture");
+    let path = fixture.to_string_lossy().into_owned();
+
+    let out = run(&db, &["sync", &path]);
+    assert!(out.status.success(), "sync failed: {}", stdout(&out));
+    let out = run(&db, &["search", "wiped"]);
+    assert!(stdout(&out).contains("msg_v1_"), "search={}", stdout(&out));
+
+    // 清空文件后 sync：空源是合法空批次，旧消息全部 tombstone。
+    std::fs::write(&fixture, b"").expect("truncate fixture");
+    let out = run(&db, &["sync", &path]);
+    assert!(
+        out.status.success(),
+        "empty-source sync must succeed: {}",
+        stdout(&out)
+    );
+    let out = run(&db, &["search", "wiped"]);
+    assert!(
+        !stdout(&out).contains("msg_v1_"),
+        "整源清空后消息不应再命中: {}",
+        stdout(&out)
+    );
+    let out = run(&db, &["status"]);
+    // 空源仍派生会话+文档目录实体（内容寻址），但消息全部 tombstone：
+    // placements 归零即证明无消息残留。
+    assert!(
+        stdout(&out).contains("\"placements\":0"),
+        "整源清空后 placements 应为 0: {}",
+        stdout(&out)
+    );
+}
+
 // ─── Robot v1 Envelope 契约 E2E ────────────────────────────────────────────
 
 #[test]
