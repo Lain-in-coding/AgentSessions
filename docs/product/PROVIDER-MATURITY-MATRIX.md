@@ -3,7 +3,7 @@
 > 对外可见的 Provider 状态清单，是 `0.3 Integration Beta` 的公开状态记录。
 > - 术语与晋级证据要求见 `../architecture/RFC-0002-provider-adapter-contract.md` §6。
 > - 本文件是**当前实现状态**的事实记录，不是承诺；晋级必须有证据，不由代码存在自动推断。
-> - 最后更新：2026-07-31
+> - 最后更新：2026-08-10
 
 ## 术语
 
@@ -56,17 +56,16 @@
 - **共同**：真实历史数据回归自 2026-07-27 起有可重复 harness（抛弃式临时 store +
   aggregate-only 报告），但语料留本机不可共享，故任何单次运行结果第三方无法复核；
   跨平台真实数据回归（CI 上无真实语料）仍不存在。
-- **共同（关系模型已实现，语料级回归仍开放）**：稳定 `Message` 与上下文
+- **共同（关系模型已实现，语料级回归已闭合）**：稳定 `Message` 与上下文
   `MessagePlacement` / `MessageEdge` 已分离，session-scoped graph、精确 placement
-  evidence、不同上下文 parent 以及相应合成/e2e 覆盖均已实现。最新全量授权运行
-  生成于 `2026-07-31T10:04:17Z`，覆盖 879 个源、756,515,768 字节；运行在
-  `INV-SYNC-OK` 以 exit 5、`ok: false` 失败，此前报告 79,958 emitted、0 skipped，
-  其余五条不变量因 sync 失败未评估。aggregate 报告未保留 exit-5 家族中的精确
-  canonical code，因此不能把 `source_changed` 写成已证实根因。随后对当时第 5/5
-  批的回放成功（186 个源：89 Claude Code、97 Codex；223,269,278 字节；exit 0；
-  15,549 emitted、0 skipped、0 diagnostics），说明失败并非在该批上持续可复现，
-  但不构成全量绿色结果，也未评估下游不变量。follow-up 期间活跃 provider roots
-  被观察到仍在变化，仍需在 roots 稳定时完成一次全量六不变量绿色运行。
+  evidence、不同上下文 parent 以及相应合成/e2e 覆盖均已实现。全量授权运行
+  （`2026-08-09T21:10:16Z`，1,242 源、1,177,479,794 字节）六条不变量全绿、harness
+  exit 0：sync 164,136 emitted / 0 skipped、no-parse-loss 164,136 claims、
+  231 sessions 全 context 成功、659/659 byte 精度、rebuild 稳定。早期
+  `2026-07-31T10:04:17Z` 运行（879 源，`INV-SYNC-OK` exit 5 失败，79,958 emitted、
+  0 skipped，其余不变量未评估；aggregate 报告未保留精确 canonical code，故
+  `source_changed` 未证实）与 2026-08-10 子集运行（137 源全绿）如实保留在
+  `docs/evidence/integration-beta/real-data-regression.md`。真实数据 Gate D 已闭合。
 
 ## 晋级到 Beta 的缺口
 

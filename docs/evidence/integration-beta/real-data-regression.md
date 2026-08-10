@@ -98,8 +98,7 @@ required.
 After the code-review fixes (message-level leaf exclusion, JSON-aware rebuild
 projection, timestamp merge convergence, unknown-role skip accounting,
 message-contexts NotFound semantics, cursor/budget hardening), the release
-binary was rebuilt and run over a real Claude Code corpus directory
-(`C--Users--Q-Desktop-ObsidianVault------20260620-215544`, 137 source files)
+binary was rebuilt and run over a 137-file real Claude Code corpus directory
 that previously stalled the old binary. **All six invariants pass**:
 
 ```text

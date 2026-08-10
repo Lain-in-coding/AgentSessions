@@ -56,6 +56,13 @@ MESSAGE_PREFIX = "msg_v1_"
 SESSION_PREFIX = "ses_v1_"
 DOCUMENT_PREFIX = "doc_v1_"
 
+#: Closed set of role keys the report may carry; anything else buckets to
+#: "other" so the aggregate key set stays structural (no provider-controlled
+#: strings can surface verbatim in the report).
+ROLE_ALLOWLIST = frozenset(
+    {"user", "assistant", "system", "developer", "tool", "unknown", "other"}
+)
+
 #: Page size used when walking the catalog. Paging is driven by the
 #: envelope's ``page.next_cursor``; the harness never constructs a cursor.
 PAGE_SIZE = 200
@@ -445,9 +452,15 @@ def run_regression(binary: str, sources: Sequence[str]) -> Dict[str, Any]:
             for _id, payload in (
                 (item["id"], item["payload"]) for item in data.get("messages", [])
             ):
+                # Role keys are bucketed to a closed allowlist so the report's
+                # aggregate key set is structural, not data-dependent: an
+                # unexpected role value must never surface verbatim in the
+                # report.
                 role = "unknown"
                 if isinstance(payload, dict):
                     role = str(payload.get("role") or "unknown")
+                if role not in ROLE_ALLOWLIST:
+                    role = "other"
                 role_distribution[role] = role_distribution.get(role, 0) + 1
             for span in data.get("evidence", []):
                 tier = str(span.get("precision", "unknown"))
