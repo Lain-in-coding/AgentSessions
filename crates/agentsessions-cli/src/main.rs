@@ -995,6 +995,8 @@ fn staged_to_source(
         placements,
         edges,
         relation_complete: staged.report.skipped == 0,
+        len_bytes: Some(source_len as i64),
+        fingerprint: Some(fingerprint.to_string()),
     })
 }
 
@@ -1064,10 +1066,28 @@ fn sync_files(
     let mut skipped_count = 0usize;
     let mut diagnostic_count = 0usize;
 
+    // 指纹缓存：capture 后先与已存指纹比对，未变化的源跳过重复解析
+    // （parse 是大语料重扫的主导成本）。指纹缓存缺失/不匹配才走完整路径。
+    let cached = store
+        .source_fingerprints(paths)
+        .map_err(ProtocolError::from)?;
+    let mut unchanged_messages = 0usize;
+    let unchanged_counts = store
+        .source_message_counts(paths)
+        .map_err(ProtocolError::from)?;
     for (index, path) in paths.iter().enumerate() {
         let path_ref = std::path::Path::new(path);
         let (snap, bytes) = capture(path_ref).map_err(ProtocolError::from)?;
-        let (staged, variant) = stage_with_registry(&bytes)?;
+        let cached_fp = cached.get(path).and_then(|(_, fp)| fp.clone());
+        let (staged, variant) = if cached_fp.as_deref() == Some(snap.fingerprint.as_str()) {
+            // 字节未变：跳过 parse。store 层仍会做 no-op 判定（entries 为空时
+            // 会走 membership/scan 对比），因此这里只需空 staged 占位。
+            unchanged_messages += unchanged_counts.get(path).copied().unwrap_or(0);
+            (None, None)
+        } else {
+            let (staged, variant) = stage_with_registry(&bytes)?;
+            (Some(staged), Some(variant))
+        };
         if progress {
             protocol::write_stdout_line(&protocol::progress_frame(
                 "sync",
@@ -1075,23 +1095,25 @@ fn sync_files(
                     "staged source {}/{} ({} messages)",
                     index + 1,
                     paths.len(),
-                    staged.messages.len()
+                    staged.as_ref().map_or(0, |s| s.messages.len())
                 ),
                 request_id,
             ));
         }
-        message_count += staged.messages.len();
-        skipped_count += staged.report.skipped;
-        diagnostic_count += staged.report.diagnostics.len();
-        let provider = variant.split('/').next().unwrap_or(&variant).to_string();
-        sources.push(staged_to_source(
-            path,
-            &staged,
-            &provider,
-            &variant,
-            &snap.fingerprint,
-            snap.len,
-        )?);
+        if let (Some(staged), Some(variant)) = (&staged, &variant) {
+            message_count += staged.messages.len();
+            skipped_count += staged.report.skipped;
+            diagnostic_count += staged.report.diagnostics.len();
+            let provider = variant.split('/').next().unwrap_or(variant).to_string();
+            sources.push(staged_to_source(
+                path,
+                staged,
+                &provider,
+                variant,
+                &snap.fingerprint,
+                snap.len,
+            )?);
+        }
         snapshots.push((path_ref.to_path_buf(), snap));
     }
 
@@ -1103,12 +1125,15 @@ fn sync_files(
         .commit_source_batches_if_changed(&sources)
         .map_err(ProtocolError::from)?;
     let generation = store.active_generation().map_err(ProtocolError::from)?;
+    // `emitted` 只统计本次实际解析的消息；指纹缓存命中的源按已存消息数
+    // 计入 unchanged（与 emitted 同单位：消息数）。
+    let committed = if changed { message_count } else { 0 };
     Ok(serde_json::json!({
         "sources": paths.len(),
         "emitted": message_count,
         "messages": message_count,
-        "committed": if changed { message_count } else { 0 },
-        "unchanged": if changed { 0 } else { message_count },
+        "committed": committed,
+        "unchanged": if changed { unchanged_messages } else { message_count + unchanged_messages },
         "skipped": skipped_count,
         "diagnostics": diagnostic_count,
         "generation": generation,

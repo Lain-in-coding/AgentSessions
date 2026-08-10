@@ -376,6 +376,8 @@ mod tests {
             placements,
             edges: Vec::new(),
             relation_complete: true,
+            len_bytes: None,
+            fingerprint: None,
         }
     }
 

@@ -416,6 +416,9 @@ struct SourceReplacementManifest {
     entity_memberships: Vec<SourceEntityMembershipManifest>,
     placement_ids: Vec<PlacementId>,
     relation_complete: bool,
+    /// 捕获时源字节长度与内容指纹（source-scan 指纹缓存）。
+    len_bytes: Option<i64>,
+    fingerprint: Option<String>,
 }
 
 impl SourceReplacementManifest {
@@ -433,6 +436,8 @@ impl SourceReplacementManifest {
             "entity_memberships": entity_memberships,
             "placement_ids": placement_ids,
             "relation_complete": self.relation_complete,
+            "len_bytes": self.len_bytes,
+            "fingerprint": self.fingerprint,
         })
     }
 }
@@ -682,6 +687,7 @@ pub struct PendingIndexBatch {
 /// `sync`/`ingest` 为每个只读源构造一个 `SourceBatch`，store 据此推导：本次出现的
 /// message id 是 upsert；该源上次成功 scan 有、本次没有的 id 是 tombstone（删除）。
 /// 只有整批全部源都 stage 成功后才提交；missing/tombstone 只能由完整成功 scan 确认。
+#[derive(Clone)]
 pub struct SourceBatch {
     /// 该源的稳定标识（当前用其只读路径字符串）。
     pub source_path: String,
@@ -701,6 +707,10 @@ pub struct SourceBatch {
     ///
     /// B1 不提交 completeness marker；B2 将据此替换或撤销 marker。
     pub relation_complete: bool,
+    /// 捕获时的源字节长度与内容指纹（source-scan 指纹缓存，用于跳过
+    /// 未变化源的重复解析）。None = 未提供（测试/旧调用方）。
+    pub len_bytes: Option<i64>,
+    pub fingerprint: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -831,6 +841,9 @@ pub struct SqliteStore {
     /// 写入路径持有的 data-root 独占 lease；只读打开时为 None。
     _lease: Option<WriterLease>,
 }
+
+/// 一批源路径的指纹缓存项：捕获时长度与内容指纹。
+pub type SourceFingerprint = (Option<i64>, Option<String>);
 
 impl SqliteStore {
     /// 只读打开（不抢 writer lease）。供 search/get/doctor 等读路径。
@@ -998,7 +1011,9 @@ impl SqliteStore {
                  ON source_membership(source_path);
                  CREATE TABLE IF NOT EXISTS source_scans (
                      source_path   TEXT PRIMARY KEY,
-                     scanned_at_ms INTEGER NOT NULL
+                     scanned_at_ms INTEGER NOT NULL,
+                     len_bytes     INTEGER,
+                     fingerprint   TEXT
                  );",
             )
             .map_err(backend)?;
@@ -1097,6 +1112,27 @@ impl SqliteStore {
         )
         .map_err(backend)?;
 
+        // Source-scan fingerprint cache columns (additive within v7): used by
+        // the CLI to skip re-parsing sources whose bytes are unchanged.
+        // Idempotent for catalogs that reached v7 before these columns
+        // existed.
+        let has_len_bytes: bool = tx
+            .prepare("PRAGMA table_info(source_scans)")
+            .map_err(backend)?
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(backend)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(backend)?
+            .iter()
+            .any(|name| name == "len_bytes");
+        if !has_len_bytes {
+            tx.execute_batch(
+                "ALTER TABLE source_scans ADD COLUMN len_bytes INTEGER;
+                 ALTER TABLE source_scans ADD COLUMN fingerprint TEXT;",
+            )
+            .map_err(backend)?;
+        }
+
         if inject_failure {
             return Err(PortError::Backend(
                 "injected v6-to-v7 migration failure".into(),
@@ -1112,6 +1148,54 @@ impl SqliteStore {
             .borrow()
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .map_err(backend)
+    }
+
+    /// 读取一批源路径的指纹缓存（source_scans 的 len/fingerprint 列）。
+    ///
+    /// 返回 `path -> (len_bytes, fingerprint)`；从未扫描过的源不在 map 中。
+    /// CLI 用它跳过未变化源的重复解析（capture 后先比指纹，相同则不再
+    /// parse，直接按 no-op 处理）。
+    pub fn source_fingerprints(
+        &self,
+        paths: &[String],
+    ) -> PortResult<BTreeMap<String, SourceFingerprint>> {
+        let conn = self.conn.borrow();
+        let mut out = BTreeMap::new();
+        for path in paths {
+            let row: Option<SourceFingerprint> = conn
+                .query_row(
+                    "SELECT len_bytes, fingerprint FROM source_scans WHERE source_path = ?1",
+                    [path],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .map_err(backend)?;
+            if let Some(row) = row {
+                out.insert(path.clone(), row);
+            }
+        }
+        Ok(out)
+    }
+
+    /// 读取一批源路径已提交的 message 实体数（membership 中 msg_v1_ 行数）。
+    ///
+    /// CLI 在指纹缓存命中、跳过 parse 时用它上报 unchanged 消息数，保持
+    /// `unchanged` 与 `emitted` 同单位（消息数）。
+    pub fn source_message_counts(&self, paths: &[String]) -> PortResult<BTreeMap<String, usize>> {
+        let conn = self.conn.borrow();
+        let mut out = BTreeMap::new();
+        for path in paths {
+            let count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM source_membership
+                     WHERE source_path = ?1 AND message_id LIKE 'msg_v1_%'",
+                    [path],
+                    |row| row.get(0),
+                )
+                .map_err(backend)?;
+            out.insert(path.clone(), count as usize);
+        }
+        Ok(out)
     }
 
     fn stable_id_from_store(conn: &Connection, wire: &str) -> PortResult<StableId> {
@@ -1358,6 +1442,16 @@ impl SqliteStore {
             ));
         }
 
+        // Cheap no-op check FIRST: building the merged view, claimer graph,
+        // and manifest below costs O(whole catalog). When every source in
+        // this batch is already current (entries, relations, membership,
+        // claims, scans), skip all of it and report no generation change.
+        // The per-batch cost is then proportional to the batch, not the
+        // catalog — this is what makes an unchanged re-sync fast.
+        if self.sources_are_current(&ordered_sources)? {
+            return Ok(false);
+        }
+
         let scanned_paths: BTreeSet<String> = paths.into_iter().map(str::to_string).collect();
         let current_entities_by_source = self.source_entity_membership_state()?;
         let current_placements_by_source = self.source_placement_membership_state()?;
@@ -1493,6 +1587,8 @@ impl SqliteStore {
                     })
                     .collect::<PortResult<Vec<_>>>()?,
                 relation_complete: source.relation_complete,
+                len_bytes: source.len_bytes,
+                fingerprint: source.fingerprint.clone(),
             };
             prepared_sources.insert(
                 source.source_path.clone(),
@@ -1759,6 +1855,252 @@ impl SqliteStore {
         Ok(true)
     }
 
+    /// True when every source in the batch is already fully current: catalog
+    /// entries (payload + fts text), placements, edges, entity membership,
+    /// placement claims, scan record, and relation-completeness marker all
+    /// match the stored state. Called before any heavy merge/manifest work
+    /// so an unchanged re-sync costs O(batch), not O(whole catalog). Every
+    /// query is scoped to this batch's sources/ids — no full-table loads.
+    fn sources_are_current(&self, ordered_sources: &[&SourceBatch]) -> PortResult<bool> {
+        let conn = self.conn.borrow();
+        for source in ordered_sources {
+            // A source that has never been scanned cannot be current; skip the
+            // per-entity queries (which dominate on first ingest of an
+            // empty catalog) and go straight to the heavy path.
+            let scanned: bool = conn
+                .query_row(
+                    "SELECT 1 FROM source_scans WHERE source_path = ?1",
+                    [&source.source_path],
+                    |_| Ok(()),
+                )
+                .optional()
+                .map_err(backend)?
+                .is_some();
+            if !scanned {
+                return Ok(false);
+            }
+
+            // Catalog entries: one batched payload read for all ids.
+            let ids: Vec<&str> = source
+                .entries
+                .iter()
+                .map(|(id, _, _)| id.as_str())
+                .collect();
+            let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            let mut payloads: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+            if !ids.is_empty() {
+                let mut stmt = conn
+                    .prepare(&format!(
+                        "SELECT id, payload FROM catalog WHERE id IN ({placeholders})"
+                    ))
+                    .map_err(backend)?;
+                let rows = stmt
+                    .query_map(rusqlite::params_from_iter(ids.iter().copied()), |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+                    })
+                    .map_err(backend)?;
+                for row in rows {
+                    let (id, payload) = row.map_err(backend)?;
+                    payloads.insert(id, payload);
+                }
+            }
+            for (id, payload, _text) in &source.entries {
+                if payloads.get(id.as_str()).map(Vec::as_slice) != Some(payload.as_slice()) {
+                    return Ok(false);
+                }
+            }
+            // Indexed text: one batched read mapping wire_id -> fts text.
+            let mut fts_text: BTreeMap<String, String> = BTreeMap::new();
+            if !ids.is_empty() {
+                let mut stmt = conn
+                    .prepare(&format!(
+                        "SELECT fi.wire_id, f.text FROM fts f
+                         JOIN fts_ids fi ON fi.id_json = f.id
+                         WHERE fi.wire_id IN ({placeholders})"
+                    ))
+                    .map_err(backend)?;
+                let rows = stmt
+                    .query_map(rusqlite::params_from_iter(ids.iter().copied()), |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                    })
+                    .map_err(backend)?;
+                for row in rows {
+                    let (wire_id, text) = row.map_err(backend)?;
+                    fts_text.insert(wire_id, text);
+                }
+            }
+            for (id, _payload, text) in &source.entries {
+                if fts_text.get(id.as_str()).map(String::as_str) != Some(text.as_str()) {
+                    return Ok(false);
+                }
+            }
+            // Entity membership for this source only.
+            let mut stmt = conn
+                .prepare(
+                    "SELECT message_id, document_id FROM source_membership
+                     WHERE source_path = ?1 ORDER BY message_id",
+                )
+                .map_err(backend)?;
+            let rows = stmt
+                .query_map([&source.source_path], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+                })
+                .map_err(backend)?;
+            let mut stored_membership = BTreeMap::new();
+            for row in rows {
+                let (entity_id, document_id) = row.map_err(backend)?;
+                stored_membership.insert(entity_id, document_id);
+            }
+            let document_id = source
+                .entries
+                .iter()
+                .find(|(id, _, _)| id.kind() == IdKind::Document)
+                .map(|(id, _, _)| id.as_str().to_string());
+            let incoming_entities: BTreeMap<String, Option<String>> = source
+                .entries
+                .iter()
+                .map(|(id, _, _)| (id.as_str().to_string(), document_id.clone()))
+                .collect();
+            if stored_membership != incoming_entities {
+                return Ok(false);
+            }
+            // Placement claims for this source only.
+            let mut stmt = conn
+                .prepare(
+                    "SELECT placement_id FROM source_placement_membership
+                     WHERE source_path = ?1 ORDER BY placement_id",
+                )
+                .map_err(backend)?;
+            let rows = stmt
+                .query_map([&source.source_path], |row| row.get::<_, String>(0))
+                .map_err(backend)?;
+            let stored_placements: BTreeSet<String> =
+                rows.collect::<Result<_, _>>().map_err(backend)?;
+            let expected_placements: BTreeSet<String> = source
+                .placements
+                .iter()
+                .map(|p| p.id.as_str().to_string())
+                .collect();
+            if stored_placements != expected_placements {
+                return Ok(false);
+            }
+            // Stored placements for this source's ids (one batched read).
+            let mut stored_placements: BTreeMap<String, StoredPlacement> = BTreeMap::new();
+            if !source.placements.is_empty() {
+                let placeholders = source
+                    .placements
+                    .iter()
+                    .map(|_| "?")
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let pids: Vec<&str> = source.placements.iter().map(|p| p.id.as_str()).collect();
+                let mut stmt = conn
+                    .prepare(&format!(
+                        "SELECT placement_id, session_id, document_id, message_id,
+                                source_ordinal, is_sidechain, byte_start, byte_end
+                         FROM message_placements WHERE placement_id IN ({placeholders})"
+                    ))
+                    .map_err(backend)?;
+                let rows = stmt
+                    .query_map(rusqlite::params_from_iter(pids.iter().copied()), |row| {
+                        let start: Option<i64> = row.get(6)?;
+                        let end: Option<i64> = row.get(7)?;
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            StoredPlacement {
+                                session_id: row.get(1)?,
+                                document_id: row.get(2)?,
+                                message_id: row.get(3)?,
+                                source_ordinal: row.get(4)?,
+                                is_sidechain: row.get(5)?,
+                                span: match (start, end) {
+                                    (Some(start), Some(end)) => Some((start as u64, end as u64)),
+                                    _ => None,
+                                },
+                            },
+                        ))
+                    })
+                    .map_err(backend)?;
+                for row in rows {
+                    let (pid, stored) = row.map_err(backend)?;
+                    stored_placements.insert(pid, stored);
+                }
+            }
+            for placement in &source.placements {
+                if !stored_placements
+                    .get(placement.id.as_str())
+                    .is_some_and(|stored| stored.matches(placement))
+                {
+                    return Ok(false);
+                }
+            }
+            // Stored edges for this source's ids (one batched read).
+            let mut stored_edges: BTreeMap<String, (String, Option<String>, String)> =
+                BTreeMap::new();
+            if !source.edges.is_empty() {
+                let placeholders = source
+                    .edges
+                    .iter()
+                    .map(|_| "?")
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let cids: Vec<&str> = source
+                    .edges
+                    .iter()
+                    .map(|e| e.child_placement_id.as_str())
+                    .collect();
+                let mut stmt = conn
+                    .prepare(&format!(
+                        "SELECT child_placement_id, parent_message_id, parent_native_id, relation
+                         FROM message_edges WHERE child_placement_id IN ({placeholders})"
+                    ))
+                    .map_err(backend)?;
+                let rows = stmt
+                    .query_map(rusqlite::params_from_iter(cids.iter().copied()), |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            (
+                                row.get::<_, String>(1)?,
+                                row.get::<_, Option<String>>(2)?,
+                                row.get::<_, String>(3)?,
+                            ),
+                        ))
+                    })
+                    .map_err(backend)?;
+                for row in rows {
+                    let (cid, edge) = row.map_err(backend)?;
+                    stored_edges.insert(cid, edge);
+                }
+            }
+            for edge in &source.edges {
+                let matches = stored_edges
+                    .get(edge.child_placement_id.as_str())
+                    .is_some_and(|(parent, native, relation)| {
+                        parent == edge.parent_message_id.as_str()
+                            && native.as_deref() == edge.parent_native_id.as_deref()
+                            && relation == edge.relation.as_str()
+                    });
+                if !matches {
+                    return Ok(false);
+                }
+            }
+            // Completeness marker (scan record already checked at loop head).
+            let complete: bool = conn
+                .query_row(
+                    "SELECT 1 FROM source_relation_scans WHERE source_path = ?1",
+                    [&source.source_path],
+                    |_| Ok(()),
+                )
+                .optional()
+                .map_err(backend)?
+                .is_some();
+            if complete != source.relation_complete {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     fn source_entity_membership_state(
         &self,
     ) -> PortResult<BTreeMap<String, BTreeMap<String, Option<String>>>> {
@@ -1910,7 +2252,10 @@ impl SqliteStore {
         Ok(edges)
     }
 
-    fn regenerate_compatibility_aliases_in_tx(tx: &rusqlite::Transaction<'_>) -> PortResult<()> {
+    fn regenerate_compatibility_aliases_in_tx(
+        tx: &rusqlite::Transaction<'_>,
+        batch_sources: &[String],
+    ) -> PortResult<()> {
         let complete_sources = {
             let mut stmt = tx
                 .prepare("SELECT source_path FROM source_relation_scans")
@@ -1993,7 +2338,15 @@ impl SqliteStore {
         let fully_complete_entities: BTreeSet<String> = claimers_by_entity
             .into_iter()
             .filter_map(|(entity_id, claimers)| {
+                // Only entities whose claimers intersect this batch's sources
+                // can have their aliases changed by this commit; regenerating
+                // the whole catalog per batch is what made first ingest
+                // O(n²). Fully-complete still requires every claimer scanned.
+                let touched_by_batch = claimers
+                    .iter()
+                    .any(|source_path| batch_sources.iter().any(|batch| batch == source_path));
                 (!claimers.is_empty()
+                    && touched_by_batch
                     && claimers
                         .iter()
                         .all(|source_path| complete_sources.contains(source_path)))
@@ -2198,11 +2551,24 @@ impl SqliteStore {
             }
 
             let payload = serde_json::to_vec(&serde_json::Value::Object(map)).map_err(backend)?;
-            tx.execute(
-                "UPDATE catalog SET payload = ?2 WHERE id = ?1",
-                rusqlite::params![entity_id, payload],
-            )
-            .map_err(backend)?;
+            // Skip the write when the rebuilt aliases equal the stored bytes:
+            // regeneration must not rewrite the catalog (and inflate the WAL)
+            // on every commit once aliases are stable.
+            let stored: Option<Vec<u8>> = tx
+                .query_row(
+                    "SELECT payload FROM catalog WHERE id = ?1",
+                    [&entity_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(backend)?;
+            if stored.as_deref() != Some(payload.as_slice()) {
+                tx.execute(
+                    "UPDATE catalog SET payload = ?2 WHERE id = ?1",
+                    rusqlite::params![entity_id, payload],
+                )
+                .map_err(backend)?;
+            }
         }
         Ok(())
     }
@@ -2661,9 +3027,18 @@ impl SqliteStore {
                 .map_err(backend)?;
             }
             tx.execute(
-                "INSERT INTO source_scans(source_path, scanned_at_ms) VALUES(?1, ?2)
-                 ON CONFLICT(source_path) DO UPDATE SET scanned_at_ms = excluded.scanned_at_ms",
-                rusqlite::params![&source.source_path, unix_ms()?],
+                "INSERT INTO source_scans(source_path, scanned_at_ms, len_bytes, fingerprint)
+                 VALUES(?1, ?2, ?3, ?4)
+                 ON CONFLICT(source_path) DO UPDATE SET
+                     scanned_at_ms = excluded.scanned_at_ms,
+                     len_bytes = excluded.len_bytes,
+                     fingerprint = excluded.fingerprint",
+                rusqlite::params![
+                    &source.source_path,
+                    unix_ms()?,
+                    source.len_bytes,
+                    source.fingerprint,
+                ],
             )
             .map_err(backend)?;
             if source.relation_complete {
@@ -2684,7 +3059,12 @@ impl SqliteStore {
             }
         }
 
-        Self::regenerate_compatibility_aliases_in_tx(&tx)?;
+        let batch_sources: Vec<String> = relations
+            .source_replacements
+            .iter()
+            .map(|replacement| replacement.source_path.clone())
+            .collect();
+        Self::regenerate_compatibility_aliases_in_tx(&tx, &batch_sources)?;
         Self::verify_relational_integrity_in_tx(&tx)?;
 
         tx.execute(
@@ -3648,6 +4028,8 @@ mod tests {
             placements,
             edges,
             relation_complete,
+            len_bytes: None,
+            fingerprint: None,
         }
     }
 
@@ -4201,6 +4583,110 @@ mod tests {
 
         let generation = store.active_generation().unwrap();
         assert!(!store.commit_source_batches_if_changed(&sources).unwrap());
+        assert_eq!(store.active_generation().unwrap(), generation);
+    }
+
+    #[test]
+    fn alias_regeneration_is_scoped_to_batch_sources_and_skips_unchanged_rows() {
+        // P0-1: regenerating aliases for the whole catalog per batch made
+        // first ingest O(n²). Only entities whose claimers intersect the
+        // batch's sources may be rewritten, and a rewrite whose bytes are
+        // unchanged must not hit the UPDATE (WAL stays flat).
+        let store = SqliteStore::open_in_memory().unwrap();
+        let session_a = sid(IdKind::Session, b"scope-session-a");
+        let document_a = sid(IdKind::Document, b"scope-document-a");
+        let parent_a = sid(IdKind::Message, b"scope-parent-a");
+        let child_a = sid(IdKind::Message, b"scope-child-a");
+        let placement_a = placement(&session_a, &document_a, &child_a, 1, false, Some((10, 20)));
+        let edge_a = MessageEdge {
+            child_placement_id: placement_a.id.clone(),
+            parent_message_id: parent_a.clone(),
+            parent_native_id: Some("native-parent-a".into()),
+            relation: MessageRelation::Reply,
+        };
+        let batch_a = source_batch(
+            "scope-a.jsonl",
+            vec![
+                (
+                    child_a.clone(),
+                    relational_message_payload(
+                        &session_a,
+                        &document_a,
+                        &parent_a,
+                        "native-parent-a",
+                        false,
+                        (10, 20),
+                    ),
+                    "scope stable body".into(),
+                ),
+                (
+                    session_a.clone(),
+                    session_payload(document_a.as_str(), &[child_a.as_str()]),
+                    String::new(),
+                ),
+                entity_entry(&document_a),
+                entity_entry(&parent_a),
+            ],
+            vec![placement_a.clone()],
+            vec![edge_a],
+            true,
+        );
+        assert!(
+            store
+                .commit_source_batches_if_changed(std::slice::from_ref(&batch_a))
+                .unwrap()
+        );
+
+        // Second batch touches only source B; entity A's stored payload must
+        // remain byte-identical after commit B.
+        let session_b = sid(IdKind::Session, b"scope-session-b");
+        let document_b = sid(IdKind::Document, b"scope-document-b");
+        let parent_b = sid(IdKind::Message, b"scope-parent-b");
+        let child_b = sid(IdKind::Message, b"scope-child-b");
+        let placement_b = placement(&session_b, &document_b, &child_b, 1, false, Some((30, 40)));
+        let edge_b = MessageEdge {
+            child_placement_id: placement_b.id.clone(),
+            parent_message_id: parent_b.clone(),
+            parent_native_id: Some("native-parent-b".into()),
+            relation: MessageRelation::Reply,
+        };
+        let batch_b = source_batch(
+            "scope-b.jsonl",
+            vec![
+                (
+                    child_b.clone(),
+                    relational_message_payload(
+                        &session_b,
+                        &document_b,
+                        &parent_b,
+                        "native-parent-b",
+                        false,
+                        (30, 40),
+                    ),
+                    "scope stable body b".into(),
+                ),
+                (
+                    session_b.clone(),
+                    session_payload(document_b.as_str(), &[child_b.as_str()]),
+                    String::new(),
+                ),
+                entity_entry(&document_b),
+                entity_entry(&parent_b),
+            ],
+            vec![placement_b.clone()],
+            vec![edge_b],
+            true,
+        );
+        let stored_a_before = store.get(&child_a).unwrap().unwrap();
+        assert!(store.commit_source_batches_if_changed(&[batch_b]).unwrap());
+        let stored_a_after = store.get(&child_a).unwrap().unwrap();
+        assert_eq!(
+            stored_a_before, stored_a_after,
+            "entity owned only by an untouched source must not be rewritten"
+        );
+        // And a full re-sync of A is a no-op that does not advance generation.
+        let generation = store.active_generation().unwrap();
+        assert!(!store.commit_source_batches_if_changed(&[batch_a]).unwrap());
         assert_eq!(store.active_generation().unwrap(), generation);
     }
 
@@ -5129,6 +5615,8 @@ mod tests {
             placements: Vec::new(),
             edges: Vec::new(),
             relation_complete: true,
+            len_bytes: None,
+            fingerprint: None,
             entries: vec![
                 (a.clone(), b"a".to_vec(), "keep alpha".into()),
                 (b.clone(), b"b".to_vec(), "remove beta".into()),
@@ -5147,6 +5635,8 @@ mod tests {
             placements: Vec::new(),
             edges: Vec::new(),
             relation_complete: true,
+            len_bytes: None,
+            fingerprint: None,
             entries: vec![(a.clone(), b"a".to_vec(), "keep alpha".into())],
         };
         assert!(
@@ -5169,6 +5659,8 @@ mod tests {
             placements: Vec::new(),
             edges: Vec::new(),
             relation_complete: true,
+            len_bytes: None,
+            fingerprint: None,
             entries: vec![(a, b"payload".to_vec(), "same text".into())],
         };
         assert!(
@@ -5293,6 +5785,8 @@ mod tests {
             placements: Vec::new(),
             edges: Vec::new(),
             relation_complete: true,
+            len_bytes: None,
+            fingerprint: None,
             entries: vec![
                 (msg.clone(), b"m".to_vec(), "unique searchable body".into()),
                 (ses.clone(), b"s".to_vec(), "unique searchable body".into()),
@@ -5338,6 +5832,8 @@ mod tests {
             placements: Vec::new(),
             edges: Vec::new(),
             relation_complete: true,
+            len_bytes: None,
+            fingerprint: None,
             entries: vec![
                 (
                     msg.clone(),
@@ -5380,6 +5876,8 @@ mod tests {
             placements: Vec::new(),
             edges: Vec::new(),
             relation_complete: true,
+            len_bytes: None,
+            fingerprint: None,
             entries: vec![
                 (msg.clone(), b"m".to_vec(), "text".into()),
                 (ses.clone(), b"s".to_vec(), String::new()),
@@ -5406,6 +5904,8 @@ mod tests {
             placements: Vec::new(),
             edges: Vec::new(),
             relation_complete: true,
+            len_bytes: None,
+            fingerprint: None,
             entries: vec![],
         };
         store
@@ -5429,6 +5929,8 @@ mod tests {
                 placements: Vec::new(),
                 edges: Vec::new(),
                 relation_complete: true,
+                len_bytes: None,
+                fingerprint: None,
                 entries: vec![
                     (m1.clone(), b"m1".to_vec(), "one text".into()),
                     (shared.clone(), b"d".to_vec(), String::new()),
@@ -5439,6 +5941,8 @@ mod tests {
                 placements: Vec::new(),
                 edges: Vec::new(),
                 relation_complete: true,
+                len_bytes: None,
+                fingerprint: None,
                 entries: vec![
                     (m2.clone(), b"m2".to_vec(), "two text".into()),
                     (shared.clone(), b"d".to_vec(), String::new()),
@@ -5453,6 +5957,8 @@ mod tests {
             placements: Vec::new(),
             edges: Vec::new(),
             relation_complete: true,
+            len_bytes: None,
+            fingerprint: None,
             entries: vec![],
         };
         store
@@ -5512,6 +6018,8 @@ mod tests {
                 placements: Vec::new(),
                 edges: Vec::new(),
                 relation_complete: true,
+                len_bytes: None,
+                fingerprint: None,
                 entries: vec![
                     (m1.clone(), b"m1".to_vec(), "first half".into()),
                     (
@@ -5527,6 +6035,8 @@ mod tests {
                 placements: Vec::new(),
                 edges: Vec::new(),
                 relation_complete: true,
+                len_bytes: None,
+                fingerprint: None,
                 entries: vec![
                     (m2.clone(), b"m2".to_vec(), "second half".into()),
                     (
@@ -5568,6 +6078,8 @@ mod tests {
             placements: Vec::new(),
             edges: Vec::new(),
             relation_complete: true,
+            len_bytes: None,
+            fingerprint: None,
             entries: vec![
                 (m1.clone(), b"m1".to_vec(), "batch a".into()),
                 (
@@ -5589,6 +6101,8 @@ mod tests {
             placements: Vec::new(),
             edges: Vec::new(),
             relation_complete: true,
+            len_bytes: None,
+            fingerprint: None,
             entries: vec![
                 (m2.clone(), b"m2".to_vec(), "batch b".into()),
                 (
@@ -5629,6 +6143,8 @@ mod tests {
                 placements: Vec::new(),
                 edges: Vec::new(),
                 relation_complete: true,
+                len_bytes: None,
+                fingerprint: None,
                 entries: vec![
                     (m1.clone(), b"m1".to_vec(), "noop a".into()),
                     (
@@ -5644,6 +6160,8 @@ mod tests {
                 placements: Vec::new(),
                 edges: Vec::new(),
                 relation_complete: true,
+                len_bytes: None,
+                fingerprint: None,
                 entries: vec![
                     (m2.clone(), b"m2".to_vec(), "noop b".into()),
                     (
@@ -5686,6 +6204,8 @@ mod tests {
             placements: Vec::new(),
             edges: Vec::new(),
             relation_complete: true,
+            len_bytes: None,
+            fingerprint: None,
             entries: vec![
                 (m1.clone(), b"m1".to_vec(), "legacy a".into()),
                 (ses.clone(), legacy_payload, String::new()),
@@ -5703,6 +6223,8 @@ mod tests {
             placements: Vec::new(),
             edges: Vec::new(),
             relation_complete: true,
+            len_bytes: None,
+            fingerprint: None,
             entries: vec![
                 (m2.clone(), b"m2".to_vec(), "legacy b".into()),
                 (
@@ -5739,6 +6261,8 @@ mod tests {
                 placements: Vec::new(),
                 edges: Vec::new(),
                 relation_complete: true,
+                len_bytes: None,
+                fingerprint: None,
                 entries: vec![(msg.clone(), b"first projection".to_vec(), "one".into())],
             },
             SourceBatch {
@@ -5746,6 +6270,8 @@ mod tests {
                 placements: Vec::new(),
                 edges: Vec::new(),
                 relation_complete: true,
+                len_bytes: None,
+                fingerprint: None,
                 entries: vec![(msg.clone(), b"second projection".to_vec(), "two".into())],
             },
         ];
@@ -5823,6 +6349,8 @@ mod tests {
                 placements: Vec::new(),
                 edges: Vec::new(),
                 relation_complete: true,
+                len_bytes: None,
+                fingerprint: None,
                 entries: vec![(msg.clone(), old, "one".into())],
             },
             SourceBatch {
@@ -5830,6 +6358,8 @@ mod tests {
                 placements: Vec::new(),
                 edges: Vec::new(),
                 relation_complete: true,
+                len_bytes: None,
+                fingerprint: None,
                 entries: vec![(msg.clone(), new, "two".into())],
             },
         ];
@@ -5872,6 +6402,8 @@ mod tests {
                 placements: Vec::new(),
                 edges: Vec::new(),
                 relation_complete: true,
+                len_bytes: None,
+                fingerprint: None,
                 entries: vec![(msg.clone(), null_payload, "one".into())],
             },
             SourceBatch {
@@ -5879,6 +6411,8 @@ mod tests {
                 placements: Vec::new(),
                 edges: Vec::new(),
                 relation_complete: true,
+                len_bytes: None,
+                fingerprint: None,
                 entries: vec![(msg.clone(), string_payload, "two".into())],
             },
         ];
@@ -5908,6 +6442,8 @@ mod tests {
                 placements: Vec::new(),
                 edges: Vec::new(),
                 relation_complete: true,
+                len_bytes: None,
+                fingerprint: None,
                 entries: vec![(
                     msg.clone(),
                     message_payload_with_span("ses_v1_aaa", "same body", "doc_v1_aaa", 0, 929),
@@ -5919,6 +6455,8 @@ mod tests {
                 placements: Vec::new(),
                 edges: Vec::new(),
                 relation_complete: true,
+                len_bytes: None,
+                fingerprint: None,
                 entries: vec![(
                     msg.clone(),
                     message_payload_with_span("ses_v1_bbb", "same body", "doc_v1_bbb", 512, 1322),
@@ -5961,6 +6499,8 @@ mod tests {
                 placements: Vec::new(),
                 edges: Vec::new(),
                 relation_complete: true,
+                len_bytes: None,
+                fingerprint: None,
                 entries: vec![(
                     msg.clone(),
                     message_payload("ses_v1_aaa", "shared body"),
@@ -5972,6 +6512,8 @@ mod tests {
                 placements: Vec::new(),
                 edges: Vec::new(),
                 relation_complete: true,
+                len_bytes: None,
+                fingerprint: None,
                 entries: vec![(
                     msg.clone(),
                     message_payload("ses_v1_bbb", "shared body"),
@@ -6007,6 +6549,8 @@ mod tests {
                 placements: Vec::new(),
                 edges: Vec::new(),
                 relation_complete: true,
+                len_bytes: None,
+                fingerprint: None,
                 entries: vec![(
                     msg.clone(),
                     message_payload("ses_v1_aaa", "original body"),
@@ -6018,6 +6562,8 @@ mod tests {
                 placements: Vec::new(),
                 edges: Vec::new(),
                 relation_complete: true,
+                len_bytes: None,
+                fingerprint: None,
                 entries: vec![(
                     msg.clone(),
                     message_payload("ses_v1_aaa", "rewritten body"),
@@ -6045,6 +6591,8 @@ mod tests {
             placements: Vec::new(),
             edges: Vec::new(),
             relation_complete: true,
+            len_bytes: None,
+            fingerprint: None,
             entries: vec![(
                 msg.clone(),
                 message_payload("ses_v1_aaa", "body"),
@@ -6061,6 +6609,8 @@ mod tests {
             placements: Vec::new(),
             edges: Vec::new(),
             relation_complete: true,
+            len_bytes: None,
+            fingerprint: None,
             entries: vec![(
                 msg.clone(),
                 message_payload("ses_v1_bbb", "body"),
@@ -6092,6 +6642,8 @@ mod tests {
                 placements: Vec::new(),
                 edges: Vec::new(),
                 relation_complete: true,
+                len_bytes: None,
+                fingerprint: None,
                 entries: vec![(shared.clone(), b"p".to_vec(), "shared text".into())],
             },
             SourceBatch {
@@ -6099,6 +6651,8 @@ mod tests {
                 placements: Vec::new(),
                 edges: Vec::new(),
                 relation_complete: true,
+                len_bytes: None,
+                fingerprint: None,
                 entries: vec![(shared.clone(), b"p".to_vec(), "shared text".into())],
             },
         ];
@@ -6109,6 +6663,8 @@ mod tests {
                 placements: Vec::new(),
                 edges: Vec::new(),
                 relation_complete: true,
+                len_bytes: None,
+                fingerprint: None,
                 entries: Vec::new(),
             },
             SourceBatch {
@@ -6116,6 +6672,8 @@ mod tests {
                 placements: Vec::new(),
                 edges: Vec::new(),
                 relation_complete: true,
+                len_bytes: None,
+                fingerprint: None,
                 entries: vec![(shared.clone(), b"p".to_vec(), "shared text".into())],
             },
         ];
@@ -6134,6 +6692,8 @@ mod tests {
             placements: Vec::new(),
             edges: Vec::new(),
             relation_complete: true,
+            len_bytes: None,
+            fingerprint: None,
             entries: vec![(moved.clone(), b"p".to_vec(), "moved text".into())],
         };
         store
@@ -6146,6 +6706,8 @@ mod tests {
                 placements: Vec::new(),
                 edges: Vec::new(),
                 relation_complete: true,
+                len_bytes: None,
+                fingerprint: None,
                 entries: Vec::new(),
             },
             SourceBatch {
@@ -6153,6 +6715,8 @@ mod tests {
                 placements: Vec::new(),
                 edges: Vec::new(),
                 relation_complete: true,
+                len_bytes: None,
+                fingerprint: None,
                 entries: vec![(moved.clone(), b"p".to_vec(), "moved text".into())],
             },
         ];
@@ -6187,6 +6751,8 @@ mod tests {
                     placements: Vec::new(),
                     edges: Vec::new(),
                     relation_complete: true,
+                    len_bytes: None,
+                    fingerprint: None,
                     entries: vec![
                         (moved.clone(), b"m".to_vec(), "moved text".into()),
                         (removed.clone(), b"r".to_vec(), "removed text".into()),
@@ -6197,6 +6763,8 @@ mod tests {
                     placements: Vec::new(),
                     edges: Vec::new(),
                     relation_complete: true,
+                    len_bytes: None,
+                    fingerprint: None,
                     entries: vec![(kept.clone(), b"k".to_vec(), "kept text".into())],
                 },
             ];
@@ -6208,6 +6776,8 @@ mod tests {
                     placements: Vec::new(),
                     edges: Vec::new(),
                     relation_complete: true,
+                    len_bytes: None,
+                    fingerprint: None,
                     entries: Vec::new(),
                 }),
                 Some(SourceBatch {
@@ -6215,6 +6785,8 @@ mod tests {
                     placements: Vec::new(),
                     edges: Vec::new(),
                     relation_complete: true,
+                    len_bytes: None,
+                    fingerprint: None,
                     entries: vec![(moved, b"m".to_vec(), "moved text".into())],
                 }),
                 Some(SourceBatch {
@@ -6222,6 +6794,8 @@ mod tests {
                     placements: Vec::new(),
                     edges: Vec::new(),
                     relation_complete: true,
+                    len_bytes: None,
+                    fingerprint: None,
                     entries: vec![(kept, b"k".to_vec(), "kept text".into())],
                 }),
             ];
@@ -6257,6 +6831,8 @@ mod tests {
             placements: Vec::new(),
             edges: Vec::new(),
             relation_complete: true,
+            len_bytes: None,
+            fingerprint: None,
             entries: vec![(id.clone(), b"p".to_vec(), "will disappear".into())],
         };
         store
@@ -6267,6 +6843,8 @@ mod tests {
             placements: Vec::new(),
             edges: Vec::new(),
             relation_complete: true,
+            len_bytes: None,
+            fingerprint: None,
             entries: Vec::new(),
         };
         store
@@ -6285,6 +6863,8 @@ mod tests {
                 placements: Vec::new(),
                 edges: Vec::new(),
                 relation_complete: true,
+                len_bytes: None,
+                fingerprint: None,
                 entries: Vec::new(),
             },
             SourceBatch {
@@ -6292,6 +6872,8 @@ mod tests {
                 placements: Vec::new(),
                 edges: Vec::new(),
                 relation_complete: true,
+                len_bytes: None,
+                fingerprint: None,
                 entries: Vec::new(),
             },
         ];
@@ -6311,6 +6893,8 @@ mod tests {
             placements: Vec::new(),
             edges: Vec::new(),
             relation_complete: true,
+            len_bytes: None,
+            fingerprint: None,
             entries: vec![
                 (id.clone(), b"p".to_vec(), "text".into()),
                 (id, b"p".to_vec(), "text".into()),
@@ -6340,6 +6924,8 @@ mod tests {
                 placements: Vec::new(),
                 edges: Vec::new(),
                 relation_complete: true,
+                len_bytes: None,
+                fingerprint: None,
                 entries: vec![(reconstructed, b"p".to_vec(), "same text".into())],
             },
             SourceBatch {
@@ -6347,6 +6933,8 @@ mod tests {
                 placements: Vec::new(),
                 edges: Vec::new(),
                 relation_complete: true,
+                len_bytes: None,
+                fingerprint: None,
                 entries: vec![(unstable, b"p".to_vec(), "same text".into())],
             },
         ];
@@ -6369,6 +6957,8 @@ mod tests {
             placements: Vec::new(),
             edges: Vec::new(),
             relation_complete: true,
+            len_bytes: None,
+            fingerprint: None,
             entries: vec![(reconstructed, b"p".to_vec(), "same text".into())],
         };
         assert!(
@@ -6383,6 +6973,8 @@ mod tests {
             placements: Vec::new(),
             edges: Vec::new(),
             relation_complete: true,
+            len_bytes: None,
+            fingerprint: None,
             entries: vec![(unstable, b"p".to_vec(), "same text".into())],
         };
         let err = store
@@ -6526,6 +7118,8 @@ mod tests {
                 entity_memberships: Vec::new(),
                 placement_ids: Vec::new(),
                 relation_complete: true,
+                len_bytes: None,
+                fingerprint: None,
             }],
             ..RelationManifests::default()
         };
