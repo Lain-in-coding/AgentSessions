@@ -500,15 +500,25 @@ def run_regression(binary: str, sources: Sequence[str]) -> Dict[str, Any]:
             if rebuild_ok
             else {}
         )
+        # Blind-pass guards: (1) compare the entity id SET, not just the
+        # count — rebuild dropping one entity and adding another must fail;
+        # (2) a failed search (-1) is a mismatch, never a match (-1 == -1);
+        # (3) an empty sample means the search half was never exercised —
+        # treat that as a failure of the invariant, not a pass.
+        before_ids = {entry["id"] for entry in entries}
+        after_ids = {entry["id"] for entry in after_entries}
+        ids_match = before_ids == after_ids
+        searches_match = sample_terms != [] and after == before and all(
+            v >= 0 for v in after.values()
+        )
         invariants.append(
             invariant(
                 "INV-REBUILD-STABLE",
-                rebuild_ok
-                and len(after_entries) == len(entries)
-                and after == before,
+                rebuild_ok and ids_match and searches_match,
                 f"rebuild exit {code}, catalog {len(entries)} -> "
-                f"{len(after_entries)}, {len(sample_terms)} sampled terms "
-                f"{'match' if after == before else 'diverged'}",
+                f"{len(after_entries)} ({'ids match' if ids_match else 'IDS DIVERGED'}), "
+                f"{len(sample_terms)} sampled terms "
+                f"{'match' if searches_match else 'DIVERGED/EMPTY/FAILED'}",
             )
         )
 

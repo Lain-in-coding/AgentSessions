@@ -359,13 +359,13 @@ fn tool_catalog() -> Value {
                     },
                     "max_items": {
                         "type": "integer",
-                        "minimum": 0,
-                        "description": "Response item budget; also caps the page size."
+                        "minimum": 1,
+                        "description": "Response item budget; also caps the page size. Minimum 1 (runtime rejects 0)."
                     },
                     "max_bytes": {
                         "type": "integer",
-                        "minimum": 0,
-                        "description": "Response byte budget."
+                        "minimum": 4096,
+                        "description": "Response byte budget. Minimum 4096 (runtime rejects smaller)."
                     }
                 },
                 "required": ["query"],
@@ -415,8 +415,8 @@ fn tool_catalog() -> Value {
                 "properties": {
                     "limit": {
                         "type": "integer",
-                        "minimum": 0,
-                        "description": "Page size; defaults to 20."
+                        "minimum": 1,
+                        "description": "Page size; defaults to 20. Minimum 1 (runtime rejects 0)."
                     },
                     "cursor": {
                         "type": "string",
@@ -425,13 +425,13 @@ fn tool_catalog() -> Value {
                     },
                     "max_items": {
                         "type": "integer",
-                        "minimum": 0,
-                        "description": "Response item budget; also caps the page size."
+                        "minimum": 1,
+                        "description": "Response item budget; also caps the page size. Minimum 1 (runtime rejects 0)."
                     },
                     "max_bytes": {
                         "type": "integer",
-                        "minimum": 0,
-                        "description": "Response byte budget."
+                        "minimum": 4096,
+                        "description": "Response byte budget. Minimum 4096 (runtime rejects smaller)."
                     }
                 },
                 "additionalProperties": false
