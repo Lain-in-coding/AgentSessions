@@ -80,15 +80,32 @@ pub fn select_mainline(graph: &SessionContextGraph) -> DomainResult<Option<Branc
         .filter(|candidate| !parent_message_ids.contains(candidate.message_id.as_str()))
         .collect();
 
-    let leaf = leaves
-        .into_iter()
-        .max_by(|left, right| compare_placements(left, right, &messages))
-        .or_else(|| {
-            candidates
-                .iter()
-                .copied()
+    // Leaf copies that carry an out-edge are the ones that continue the
+    // chain; an edgeless copy of the same message is a stale duplicate and
+    // must not win by document-id ordering (which is content-hash-derived
+    // and arbitrary). Prefer the edged leaves when any exist.
+    let leaf = {
+        let edged: Vec<&MessagePlacement> = leaves
+            .iter()
+            .copied()
+            .filter(|placement| edges.contains_key(placement.id.as_str()))
+            .collect();
+        if !edged.is_empty() {
+            edged
+                .into_iter()
                 .max_by(|left, right| compare_placements(left, right, &messages))
-        });
+        } else {
+            leaves
+                .into_iter()
+                .max_by(|left, right| compare_placements(left, right, &messages))
+        }
+    }
+    .or_else(|| {
+        candidates
+            .iter()
+            .copied()
+            .max_by(|left, right| compare_placements(left, right, &messages))
+    });
     let Some(leaf) = leaf else {
         return Ok(None);
     };
@@ -306,6 +323,45 @@ mod tests {
             .iter()
             .map(|placement| placement.source_ordinal)
             .collect()
+    }
+
+    #[test]
+    fn edged_child_copy_wins_over_edgeless_copy_as_leaf() {
+        // Major-2 regression: message C appears in documents d1 and d2; the d1
+        // copy has an out-edge to M (chain continues), the d2 copy is edgeless.
+        // All timestamps are None, so compare_placements would tie-break on
+        // document id (content-hash, arbitrary). The edged copy must win.
+        let session = id(IdKind::Session, "session");
+        let doc_1 = document("doc-1");
+        let doc_2 = document("doc-2");
+        let m = message("m", None);
+        let c = message("c", None);
+        let m_id = m.id.clone();
+        let c_id = c.id.clone();
+        let m_d1 = placement(&session, &doc_1.id, &m_id, 0, false);
+        let c_d1 = placement(&session, &doc_1.id, &c_id, 1, false);
+        let c_d2 = placement(&session, &doc_2.id, &c_id, 0, false);
+        let c_d1_id = c_d1.id.clone();
+        let m_d1_id = m_d1.id.clone();
+        let edge_cd1_m = edge(&c_d1, &m);
+        let graph = graph(
+            session,
+            vec![m, c],
+            vec![doc_1, doc_2],
+            vec![m_d1, c_d1, c_d2],
+            vec![edge_cd1_m],
+        );
+        let branch = select_mainline(&graph).unwrap().unwrap();
+        assert_eq!(
+            branch
+                .placements
+                .iter()
+                .map(|p| p.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![m_d1_id.as_str(), c_d1_id.as_str()],
+            "the edged d1 copy must form the mainline, not the edgeless d2 copy"
+        );
+        assert_eq!(branch.leaf.id, c_d1_id);
     }
 
     #[test]

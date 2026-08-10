@@ -119,6 +119,11 @@ impl SourceDocument {
                 self.id.kind()
             )));
         }
+        if !self.id.validate() {
+            return Err(DomainError::InvariantViolation(
+                "document id value is inconsistent with its kind".into(),
+            ));
+        }
         Ok(())
     }
 }
@@ -227,6 +232,11 @@ impl SessionContextGraph {
                 self.session_id.kind()
             )));
         }
+        if !self.session_id.validate() {
+            return Err(DomainError::InvariantViolation(
+                "context session id value is inconsistent with its kind".into(),
+            ));
+        }
 
         let mut message_ids = HashSet::new();
         for (index, message) in self.messages.iter().enumerate() {
@@ -257,16 +267,31 @@ impl SessionContextGraph {
                     placement.session_id.kind()
                 )));
             }
+            if !placement.session_id.validate() {
+                return Err(DomainError::InvariantViolation(format!(
+                    "placement[{index}] session id value is inconsistent with its kind"
+                )));
+            }
             if placement.source_document_id.kind() != IdKind::Document {
                 return Err(DomainError::InvariantViolation(format!(
                     "placement[{index}] document id has wrong kind: {:?}",
                     placement.source_document_id.kind()
                 )));
             }
+            if !placement.source_document_id.validate() {
+                return Err(DomainError::InvariantViolation(format!(
+                    "placement[{index}] document id value is inconsistent with its kind"
+                )));
+            }
             if placement.message_id.kind() != IdKind::Message {
                 return Err(DomainError::InvariantViolation(format!(
                     "placement[{index}] message id has wrong kind: {:?}",
                     placement.message_id.kind()
+                )));
+            }
+            if !placement.message_id.validate() {
+                return Err(DomainError::InvariantViolation(format!(
+                    "placement[{index}] message id value is inconsistent with its kind"
                 )));
             }
             if placement.session_id.as_str() != self.session_id.as_str() {
