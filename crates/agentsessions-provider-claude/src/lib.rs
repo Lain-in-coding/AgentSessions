@@ -36,7 +36,7 @@ struct RawLine {
     /// 该记录的 provider-native id（Claude Code 每条对话记录都带 `uuid`）。
     #[serde(default)]
     uuid: String,
-    /// 父记录的 native id（threading 边）；根消息为 null/缺失。
+    /// 父记录的 native id（threading 边）；根消息为 null/缺失/空串。
     #[serde(default, rename = "parentUuid")]
     parent_uuid: Option<String>,
     /// ISO-8601 UTC 时间串；缺失则为 None。
@@ -91,6 +91,36 @@ struct RawBlock {
     /// 仅抽取带 `text` 的 block（如 `type:"text"`）；工具调用块无 text，忽略。
     #[serde(default)]
     text: Option<String>,
+    /// `tool_result` block 的载荷在 `content`（字符串或 text block 数组），
+    /// 真实工具输出（文件内容、命令输出）由此携带；缺失则为 None。
+    #[serde(default)]
+    content: Option<RawContent>,
+}
+
+impl RawBlock {
+    /// 抽取本 block 的可检索纯文本：`text` 优先，`tool_result` 的 `content`
+    /// 其次，否则为空。
+    fn plain_text(&self) -> Option<String> {
+        if let Some(text) = self.text.as_deref() {
+            return Some(text.to_string());
+        }
+        match &self.content {
+            Some(RawContent::Text(s)) => Some(s.clone()),
+            Some(RawContent::Blocks(blocks)) => {
+                let joined = blocks
+                    .iter()
+                    .filter_map(|b| b.plain_text())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if joined.is_empty() {
+                    None
+                } else {
+                    Some(joined)
+                }
+            }
+            Some(RawContent::Empty) | None => None,
+        }
+    }
 }
 
 impl RawContent {
@@ -107,7 +137,7 @@ impl RawContent {
                 }
                 let text_blocks = blocks
                     .iter()
-                    .filter_map(|b| b.text.as_deref())
+                    .filter_map(|b| b.plain_text())
                     .collect::<Vec<_>>();
                 if let Some(command) = text_blocks
                     .first()
@@ -325,7 +355,9 @@ impl ProviderAdapter for ClaudeCodeAdapter {
             sink.emit_message(MessageEvent {
                 seq,
                 native_id: &rec.uuid,
-                parent_native_id: rec.parent_uuid.as_deref(),
+                // 空串 parentUuid 语义等价于 null（根消息）；透传空串会在
+                // 上层派生悬空父边，故归一化为 None。
+                parent_native_id: rec.parent_uuid.as_deref().filter(|s| !s.is_empty()),
                 role,
                 text: &body,
                 timestamp,

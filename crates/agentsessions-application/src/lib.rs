@@ -30,6 +30,11 @@ pub const SORT_SCORE_DESC: &str = "score_desc";
 /// 预算下限 4096 保证扣除后仍为正。
 const ENVELOPE_RESERVE_BYTES: usize = 1024;
 
+/// Upper bound on a single fetch window. Cursor offsets are tamper-evident
+/// but not unforgeable; capping the window keeps a forged huge offset from
+/// overflowing into a negative SQL LIMIT (SQLite treats -1 as "no limit").
+const MAX_FETCH_WINDOW: u64 = 1 << 20;
+
 /// Application 边界错误：保留 Domain、Port、Provider、Cursor 与 Budget 的原始分类，
 /// 供各前端统一映射协议（cursor/budget 错误在 protocol 层有专属 canonical code）。
 #[derive(Debug, thiserror::Error)]
@@ -426,9 +431,11 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex> App<C, S> {
                 // 分页模型：钉住排序（bm25 + id tiebreak 全序）内的 offset 续读。
                 // 端口无 offset 参数——超取 offset+page+1（+1 作 has_more 哨兵）后切片。
                 let page = limit.min(budget.max_items);
-                let fetch = usize::try_from(offset.saturating_add(page as u64).saturating_add(1))
-                    .unwrap_or(usize::MAX);
-                let fetched = self.index.query(&query, fetch)?;
+                let fetch = offset
+                    .saturating_add(page as u64)
+                    .saturating_add(1)
+                    .min(MAX_FETCH_WINDOW);
+                let fetched = self.index.query(&query, fetch as usize)?;
                 let fetched_len = fetched.len() as u64;
                 let slice: Vec<SearchHit> = fetched
                     .into_iter()
@@ -486,9 +493,15 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex> App<C, S> {
                 )?;
 
                 let page = limit.min(budget.max_items);
-                let fetch = usize::try_from(offset.saturating_add(page as u64).saturating_add(1))
-                    .unwrap_or(usize::MAX);
-                let fetched = self.catalog.list(fetch)?;
+                // Cursors are tamper-evident but not unforgeable: a forged
+                // huge offset must not overflow into a negative SQL LIMIT
+                // (SQLite treats -1 as "no limit", which would load the whole
+                // catalog into memory). Cap the fetch window instead.
+                let fetch = offset
+                    .saturating_add(page as u64)
+                    .saturating_add(1)
+                    .min(MAX_FETCH_WINDOW);
+                let fetched = self.catalog.list(fetch as usize)?;
                 let fetched_len = fetched.len() as u64;
                 let slice: Vec<CatalogEntry> = fetched
                     .into_iter()
@@ -1290,7 +1303,9 @@ mod tests {
             if message_id.as_str() == self.context_message_id.as_str() {
                 Ok(self.candidates.clone())
             } else {
-                Ok(Vec::new())
+                // Port contract: a message absent from the catalog is a
+                // lookup miss, never an empty success.
+                Err(PortError::NotFound("message not found".into()))
             }
         }
 
@@ -1783,21 +1798,20 @@ mod tests {
     }
 
     #[test]
-    fn message_contexts_empty_is_an_explicit_index_only_result() {
+    fn message_contexts_missing_message_is_not_found() {
+        // Port contract: a message absent from the catalog is a lookup miss
+        // (NotFound), never an empty success.
         let fixture = ctx_fixture();
         let index_only = StableId::native(IdKind::Message, "index-only");
-        let response = app_ctx(&fixture.store)
+        let err = app_ctx(&fixture.store)
             .handle(AppRequest::MessageContexts {
                 message_id: index_only.clone(),
             })
-            .unwrap();
-        assert!(matches!(
-            response,
-            AppResponse::MessageContexts {
-                message_id,
-                candidates
-            } if message_id == index_only.as_str() && candidates.is_empty()
-        ));
+            .unwrap_err();
+        assert!(
+            matches!(err, AppError::Port(PortError::NotFound(_))),
+            "missing message must map to NotFound, got {err:?}"
+        );
     }
 
     fn app_ctx(cat: &GraphCatalog) -> App<&GraphCatalog, FakeIndex> {

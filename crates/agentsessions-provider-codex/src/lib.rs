@@ -460,6 +460,23 @@ mod tests {
         assert!(sink.messages.is_empty());
     }
 
+    #[test]
+    fn parse_skips_message_with_unknown_role_recoverably() {
+        let input = br#"{"timestamp":"2026-07-19T23:40:02.000Z","type":"response_item","payload":{"type":"message","id":"msg-role","role":"function","content":[{"type":"input_text","text":"hi"}]}}"#;
+        let mut sink = CollectingSink::default();
+        let report = CodexAdapter::new()
+            .parse(input, &mut sink)
+            .expect("parse synthetic rollout");
+
+        assert_eq!(report.committed, 0);
+        assert_eq!(
+            report.skipped, 1,
+            "unknown role must count as a recoverable skip"
+        );
+        assert_eq!(report.diagnostics.len(), 1);
+        assert!(sink.messages.is_empty());
+    }
+
     fn parse_single_message(timestamp: &str, role: &str, text: &str) -> Captured {
         let input = serde_json::to_vec(&serde_json::json!({
             "timestamp": timestamp,

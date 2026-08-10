@@ -87,10 +87,14 @@ const INDEX_PROJECTION_VERSION: &[u8] = b"sqlite-fts5-v1";
 fn searchable_text(payload: &[u8]) -> String {
     // Modern shape: `{"role":...,"text":...,...}`. Indexing the raw JSON would
     // let structural tokens (`user`, `null`, `sessions`) match every message.
-    if let Ok(value) = serde_json::from_slice::<serde_json::Value>(payload)
-        && let Some(text) = value.get("text").and_then(serde_json::Value::as_str)
-    {
-        return text.to_string();
+    if let Ok(value) = serde_json::from_slice::<serde_json::Value>(payload) {
+        if let Some(text) = value.get("text").and_then(serde_json::Value::as_str) {
+            return text.to_string();
+        }
+        // JSON that lacks a string `text` field must not fall back to
+        // indexing the raw JSON (structural-token pollution). It carries no
+        // searchable body.
+        return String::new();
     }
     let text = String::from_utf8_lossy(payload);
     match text.split_once('\t') {
@@ -190,12 +194,16 @@ fn merge_message_payloads(_wire: &str, left: &[u8], right: &[u8]) -> PortResult<
                 // carry different envelope timestamps). Re-ingesting such a
                 // source therefore compares a string against null for the
                 // same stable message, which must not be a conflict: the
-                // merged value is null (no stable timestamp exists).
+                // merged value is null (no stable timestamp exists). A
+                // missing key is treated like an explicit null for this
+                // convergence.
                 if key == "timestamp"
                     && matches!(
                         (value, b.get(key)),
                         (serde_json::Value::String(_), Some(serde_json::Value::Null))
                             | (serde_json::Value::Null, Some(serde_json::Value::String(_)))
+                            | (serde_json::Value::String(_), None)
+                            | (serde_json::Value::Null, None)
                     )
                 {
                     continue;
@@ -999,8 +1007,21 @@ impl SqliteStore {
             // v6：source_membership 增加可空 document_id——记录各 source 所属文档实体的
             // wire id，使 source 消失的 tombstone 清理能同步退役其 session/document 目录行。
             // 旧行保持 NULL（v6 前的 membership 无文档归属信息）。
-            conn.execute_batch("ALTER TABLE source_membership ADD COLUMN document_id TEXT;")
-                .map_err(backend)?;
+            // 幂等：v6 步骤此前可能在 PRAGMA user_version=6 之前崩溃（两个独立
+            // autocommit），重跑必须容忍列已存在，否则旧库永久打不开。
+            let has_document_id = conn
+                .prepare("PRAGMA table_info(source_membership)")
+                .map_err(backend)?
+                .query_map([], |row| row.get::<_, String>(1))
+                .map_err(backend)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(backend)?
+                .iter()
+                .any(|name| name == "document_id");
+            if !has_document_id {
+                conn.execute_batch("ALTER TABLE source_membership ADD COLUMN document_id TEXT;")
+                    .map_err(backend)?;
+            }
         }
         if current < 6 {
             // v1-v6 predate the explicit per-step transaction added for v7.

@@ -25,7 +25,7 @@ UTF-8（无 BOM）、LF 行尾，`basic.expected.json` 中 pin 了全文件字�
 | 4 | 空行 | 空白行静默略过，但参与字节偏移 |
 | 5 | 截断的 JSON | 破损行 → record_recoverable：skipped+1 + 诊断，不中止解析 |
 | 6 | `type:"user"`, `isSidechain:true` | sidechain 标记；RTL（阿拉伯文/希伯来文）混排文本 |
-| 7 | `message.role:"tool"` | tool 角色透传（role 取自 `message.role` 而非顶层 `type`）；`tool_result` block 无 `text` 被过滤 |
+| 7 | `message.role:"tool"` | tool 角色透传（role 取自 `message.role` 而非顶层 `type`）；`tool_result` block 的 `content` 字段（工具输出）并入检索文本 |
 | 8 | `type:"assistant"`，无 `timestamp` | timestamp 缺失 → `null`；JSON 转义（`\"`、`\\`）解码后与 span 原始字节不同 |
 
 ## 编码的真实格式知识（仅字段名与封套形状，无真实内容）
@@ -36,7 +36,8 @@ UTF-8（无 BOM）、LF 行尾，`basic.expected.json` 中 pin 了全文件字�
   `sessionId`、`timestamp`（ISO-8601 UTC）、`isSidechain`，另有 `userType`/
   `cwd`/`version` 等 additive 字段；
 - `message.content` 两种形态：纯字符串，或 block 数组（`{"type":"text","text":…}`、
-  `tool_use`、`tool_result` 等，仅 `text` 字段可检索）；
+  `tool_use`、`tool_result` 等；`text` 字段与 `tool_result` 的 `content` 字段
+  （字符串或 text block 数组）可检索）；
 - 非对话行如 `{"type":"summary","summary":…,"leafUuid":…}`。
 
 ## 脱敏与合规声明
