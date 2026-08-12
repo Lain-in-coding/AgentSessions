@@ -1221,6 +1221,26 @@ impl SqliteStore {
         Ok(id)
     }
 
+    /// 批量加载场景下的身份解析：优先用已加载的 fts_ids 映射，缺失回退
+    /// `from_wire`（与 `stable_id_from_store` 语义一致，避免逐条查询）。
+    fn stable_id_from_wire(
+        wire: &str,
+        id_json_by_wire: &BTreeMap<String, String>,
+    ) -> PortResult<StableId> {
+        let id = match id_json_by_wire.get(wire) {
+            Some(json) => serde_json::from_str::<StableId>(json).map_err(backend)?,
+            None => StableId::from_wire(wire).ok_or_else(|| {
+                PortError::Backend("catalog contains an invalid entity id".into())
+            })?,
+        };
+        if id.as_str() != wire {
+            return Err(PortError::Backend(
+                "stored identity sidecar does not match its catalog key".into(),
+            ));
+        }
+        Ok(id)
+    }
+
     fn ensure_stored_identity_metadata_matches(
         &self,
         entries: &[(StableId, Vec<u8>, String)],
@@ -2873,50 +2893,71 @@ impl SqliteStore {
         let tx = conn.transaction().map_err(backend)?;
         Self::verify_pending_in_tx(&tx, pending, upserts, deletes, relations)?;
 
-        for (id, payload, text) in upserts {
-            tx.execute(
-                "INSERT INTO catalog(id, payload) VALUES(?1, ?2)
-                 ON CONFLICT(id) DO UPDATE SET payload = excluded.payload",
-                rusqlite::params![id.as_str(), payload],
-            )
-            .map_err(backend)?;
-            let id_json = serde_json::to_string(id).map_err(backend)?;
-            tx.execute(
-                "DELETE FROM fts
-                 WHERE id = ?1 OR id = (SELECT id_json FROM fts_ids WHERE wire_id = ?2)",
-                rusqlite::params![id_json, id.as_str()],
-            )
-            .map_err(backend)?;
-            tx.execute("DELETE FROM fts_ids WHERE wire_id = ?1", [id.as_str()])
-                .map_err(backend)?;
-            // 只有 Message 实体进入 fts 全文表——session/document 是检索容器实体，
-            // 索引其正文会让搜索命中重复计数。fts_ids 身份边车则对所有 kind 保留：
-            // 它保真 kind+stability，rebuild 依赖它恢复非 Unstable 身份（见 rebuild_index）。
-            if id.kind() == IdKind::Message {
-                tx.execute(
-                    "INSERT INTO fts(id, text) VALUES(?1, ?2)",
-                    rusqlite::params![id_json, text],
+        // Prepared statements hoisted out of the per-entity loops: 200K
+        // entities × 5 statements per batch paid a prepare/finalize per
+        // execute, which dominates the constant factor of first ingest.
+        // Scoped so the borrow ends before the relation/source loops below.
+        {
+            let mut stmt_catalog_upsert = tx
+                .prepare(
+                    "INSERT INTO catalog(id, payload) VALUES(?1, ?2)
+                     ON CONFLICT(id) DO UPDATE SET payload = excluded.payload",
                 )
                 .map_err(backend)?;
+            let mut stmt_fts_delete = tx
+                .prepare(
+                    "DELETE FROM fts
+                     WHERE id = ?1 OR id = (SELECT id_json FROM fts_ids WHERE wire_id = ?2)",
+                )
+                .map_err(backend)?;
+            let mut stmt_fts_ids_delete = tx
+                .prepare("DELETE FROM fts_ids WHERE wire_id = ?1")
+                .map_err(backend)?;
+            let mut stmt_fts_insert = tx
+                .prepare("INSERT INTO fts(id, text) VALUES(?1, ?2)")
+                .map_err(backend)?;
+            let mut stmt_fts_ids_insert = tx
+                .prepare("INSERT INTO fts_ids(wire_id, id_json) VALUES(?1, ?2)")
+                .map_err(backend)?;
+            let mut stmt_catalog_delete = tx
+                .prepare("DELETE FROM catalog WHERE id = ?1")
+                .map_err(backend)?;
+
+            for (id, payload, text) in upserts {
+                stmt_catalog_upsert
+                    .execute(rusqlite::params![id.as_str(), payload])
+                    .map_err(backend)?;
+                let id_json = serde_json::to_string(id).map_err(backend)?;
+                stmt_fts_delete
+                    .execute(rusqlite::params![id_json, id.as_str()])
+                    .map_err(backend)?;
+                stmt_fts_ids_delete
+                    .execute([id.as_str()])
+                    .map_err(backend)?;
+                // 只有 Message 实体进入 fts 全文表——session/document 是检索容器实体，
+                // 索引其正文会让搜索命中重复计数。fts_ids 身份边车则对所有 kind 保留：
+                // 它保真 kind+stability，rebuild 依赖它恢复非 Unstable 身份（见 rebuild_index）。
+                if id.kind() == IdKind::Message {
+                    stmt_fts_insert
+                        .execute(rusqlite::params![id_json, text])
+                        .map_err(backend)?;
+                }
+                stmt_fts_ids_insert
+                    .execute(rusqlite::params![id.as_str(), id_json])
+                    .map_err(backend)?;
             }
-            tx.execute(
-                "INSERT INTO fts_ids(wire_id, id_json) VALUES(?1, ?2)",
-                rusqlite::params![id.as_str(), id_json],
-            )
-            .map_err(backend)?;
-        }
-        for id in deletes {
-            tx.execute("DELETE FROM catalog WHERE id = ?1", [id.as_str()])
-                .map_err(backend)?;
-            let id_json = serde_json::to_string(id).map_err(backend)?;
-            tx.execute(
-                "DELETE FROM fts
-                 WHERE id = ?1 OR id = (SELECT id_json FROM fts_ids WHERE wire_id = ?2)",
-                rusqlite::params![id_json, id.as_str()],
-            )
-            .map_err(backend)?;
-            tx.execute("DELETE FROM fts_ids WHERE wire_id = ?1", [id.as_str()])
-                .map_err(backend)?;
+            for id in deletes {
+                stmt_catalog_delete
+                    .execute([id.as_str()])
+                    .map_err(backend)?;
+                let id_json = serde_json::to_string(id).map_err(backend)?;
+                stmt_fts_delete
+                    .execute(rusqlite::params![id_json, id.as_str()])
+                    .map_err(backend)?;
+                stmt_fts_ids_delete
+                    .execute([id.as_str()])
+                    .map_err(backend)?;
+            }
         }
 
         for delete in &relations.relation_deletes {
@@ -3065,7 +3106,45 @@ impl SqliteStore {
             .map(|replacement| replacement.source_path.clone())
             .collect();
         Self::regenerate_compatibility_aliases_in_tx(&tx, &batch_sources)?;
-        Self::verify_relational_integrity_in_tx(&tx)?;
+
+        // 本批触碰的关系行：只校验这些 id 的引用完整性。
+        let mut touched_placements: Vec<String> = Vec::new();
+        let mut touched_edges: Vec<String> = Vec::new();
+        let mut touched_claims: Vec<String> = Vec::new();
+        for source in &relations.source_replacements {
+            touched_claims.extend(
+                source
+                    .placement_ids
+                    .iter()
+                    .map(|id| id.as_str().to_string()),
+            );
+        }
+        for upsert in &relations.relation_upserts {
+            match upsert {
+                RelationUpsertManifest::Placement(placement) => {
+                    touched_placements.push(placement.id.as_str().to_string());
+                }
+                RelationUpsertManifest::Edge(edge) => {
+                    touched_edges.push(edge.child_placement_id.as_str().to_string());
+                }
+            }
+        }
+        for delete in &relations.relation_deletes {
+            match delete {
+                RelationDeleteManifest::Placement(id) => {
+                    touched_placements.push(id.as_str().to_string());
+                }
+                RelationDeleteManifest::Edge(id) => {
+                    touched_edges.push(id.as_str().to_string());
+                }
+            }
+        }
+        Self::verify_relational_integrity_in_tx(
+            &tx,
+            &touched_placements,
+            &touched_edges,
+            &touched_claims,
+        )?;
 
         tx.execute(
             "UPDATE store_metadata SET active_generation = ?1 WHERE singleton = 1",
@@ -3084,70 +3163,110 @@ impl SqliteStore {
         Ok(())
     }
 
-    fn verify_relational_integrity_in_tx(tx: &rusqlite::Transaction<'_>) -> PortResult<()> {
-        let missing_entity: Option<String> = tx
-            .query_row(
-                "SELECT placement_id
-                 FROM message_placements
-                 WHERE NOT EXISTS(
-                           SELECT 1 FROM catalog WHERE id = message_placements.session_id
-                       )
-                    OR NOT EXISTS(
-                           SELECT 1 FROM catalog WHERE id = message_placements.document_id
-                       )
-                    OR NOT EXISTS(
-                           SELECT 1 FROM catalog WHERE id = message_placements.message_id
-                       )
-                 LIMIT 1",
-                [],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(backend)?;
-        if missing_entity.is_some() {
-            return Err(PortError::Backend(
-                "message placement references a missing catalog entity".into(),
-            ));
+    /// 校验本批触碰的关系行引用完整性。
+    ///
+    /// 只检查本批 upsert/delete 涉及的 placement/edge/claim ids：未触碰行的
+    /// 完整性由归纳保持（每次提交维护自身行、删除只删本批 claims）。全表
+    /// 扫描版本使每批提交成本 O(全库)，是首次 ingest O(n²) 的来源之一。
+    fn verify_relational_integrity_in_tx(
+        tx: &rusqlite::Transaction<'_>,
+        touched_placement_ids: &[String],
+        touched_edge_ids: &[String],
+        touched_claim_ids: &[String],
+    ) -> PortResult<()> {
+        if !touched_placement_ids.is_empty() {
+            let placeholders = touched_placement_ids
+                .iter()
+                .map(|_| "?")
+                .collect::<Vec<_>>()
+                .join(",");
+            let missing_entity: Option<String> = tx
+                .query_row(
+                    &format!(
+                        "SELECT placement_id
+                         FROM message_placements
+                         WHERE placement_id IN ({placeholders})
+                           AND (NOT EXISTS(
+                                    SELECT 1 FROM catalog WHERE id = message_placements.session_id
+                                )
+                             OR NOT EXISTS(
+                                    SELECT 1 FROM catalog WHERE id = message_placements.document_id
+                                )
+                             OR NOT EXISTS(
+                                    SELECT 1 FROM catalog WHERE id = message_placements.message_id
+                                ))
+                         LIMIT 1"
+                    ),
+                    rusqlite::params_from_iter(touched_placement_ids.iter()),
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(backend)?;
+            if missing_entity.is_some() {
+                return Err(PortError::Backend(
+                    "message placement references a missing catalog entity".into(),
+                ));
+            }
         }
 
-        let missing_placement: Option<String> = tx
-            .query_row(
-                "SELECT child_placement_id
-                 FROM message_edges
-                 WHERE NOT EXISTS(
-                     SELECT 1 FROM message_placements
-                     WHERE placement_id = message_edges.child_placement_id
-                 )
-                 LIMIT 1",
-                [],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(backend)?;
-        if missing_placement.is_some() {
-            return Err(PortError::Backend(
-                "message edge references a missing child placement".into(),
-            ));
+        if !touched_edge_ids.is_empty() {
+            let placeholders = touched_edge_ids
+                .iter()
+                .map(|_| "?")
+                .collect::<Vec<_>>()
+                .join(",");
+            let missing_placement: Option<String> = tx
+                .query_row(
+                    &format!(
+                        "SELECT child_placement_id
+                         FROM message_edges
+                         WHERE child_placement_id IN ({placeholders})
+                           AND NOT EXISTS(
+                               SELECT 1 FROM message_placements
+                               WHERE placement_id = message_edges.child_placement_id
+                           )
+                         LIMIT 1"
+                    ),
+                    rusqlite::params_from_iter(touched_edge_ids.iter()),
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(backend)?;
+            if missing_placement.is_some() {
+                return Err(PortError::Backend(
+                    "message edge references a missing child placement".into(),
+                ));
+            }
         }
 
-        let missing_claim: Option<String> = tx
-            .query_row(
-                "SELECT placement_id
-                 FROM source_placement_membership
-                 WHERE NOT EXISTS(
-                     SELECT 1 FROM message_placements
-                     WHERE placement_id = source_placement_membership.placement_id
-                 )
-                 LIMIT 1",
-                [],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(backend)?;
-        if missing_claim.is_some() {
-            return Err(PortError::Backend(
-                "source placement claim references a missing placement".into(),
-            ));
+        if !touched_claim_ids.is_empty() {
+            let placeholders = touched_claim_ids
+                .iter()
+                .map(|_| "?")
+                .collect::<Vec<_>>()
+                .join(",");
+            let missing_claim: Option<String> = tx
+                .query_row(
+                    &format!(
+                        "SELECT placement_id
+                         FROM source_placement_membership
+                         WHERE placement_id IN ({placeholders})
+                           AND NOT EXISTS(
+                               SELECT 1 FROM message_placements
+                               WHERE placement_id = source_placement_membership.placement_id
+                           )
+                         LIMIT 1"
+                    ),
+                    rusqlite::params_from_iter(touched_claim_ids.iter()),
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(backend)?;
+            if missing_claim.is_some() {
+                return Err(PortError::Backend(
+                    "source placement claim references a missing placement".into(),
+                ));
+            }
         }
         Ok(())
     }
@@ -3452,37 +3571,12 @@ impl ContextGraphStore for SqliteStore {
 
         let mut message_wires = BTreeSet::new();
         let mut document_wires = BTreeSet::new();
-        let mut placements = Vec::with_capacity(raw_placements.len());
-        for (placement_id, document_id, message_id, ordinal, sidechain, start, end) in
-            raw_placements
-        {
-            let span = match (start, end) {
-                (None, None) => None,
-                (Some(start), Some(end)) => Some(EvidenceSpan {
-                    start: u64::try_from(start).map_err(backend)?,
-                    end: u64::try_from(end).map_err(backend)?,
-                }),
-                _ => {
-                    return Err(PortError::Backend(
-                        "stored placement has a partial span".into(),
-                    ));
-                }
-            };
+
+        // 先收集全部 wires，再批量加载 payload/identity（避免 N+1）。
+        for (_, document_id, message_id, _, _, _, _) in &raw_placements {
             message_wires.insert(message_id.clone());
             document_wires.insert(document_id.clone());
-            placements.push(MessagePlacement {
-                id: PlacementId::from_wire(&placement_id).ok_or_else(|| {
-                    PortError::Backend("stored placement has an invalid id".into())
-                })?,
-                session_id: stored_session_id.clone(),
-                source_document_id: Self::stable_id_from_store(&conn, &document_id)?,
-                message_id: Self::stable_id_from_store(&conn, &message_id)?,
-                source_ordinal: u32::try_from(ordinal).map_err(backend)?,
-                is_sidechain: sidechain != 0,
-                span,
-            });
         }
-
         {
             let mut stmt = conn
                 .prepare(
@@ -3499,19 +3593,83 @@ impl ContextGraphStore for SqliteStore {
             }
         }
 
-        let mut messages = Vec::with_capacity(message_wires.len());
-        for wire in message_wires {
-            let payload: Vec<u8> = conn
-                .query_row(
-                    "SELECT payload FROM catalog WHERE id = ?1",
-                    [&wire],
-                    |row| row.get(0),
+        // Batch-load message payloads and fts_ids identity for all wires at
+        // once (was N+1 per message: one payload read + two identity reads).
+        let mut payload_by_id: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+        let mut id_json_by_wire: BTreeMap<String, String> = BTreeMap::new();
+        let all_wires: Vec<&str> = message_wires
+            .iter()
+            .chain(document_wires.iter())
+            .map(|wire| wire.as_str())
+            .collect();
+        if !all_wires.is_empty() {
+            let placeholders = all_wires.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            let mut stmt = conn
+                .prepare(&format!(
+                    "SELECT id, payload FROM catalog WHERE id IN ({placeholders})"
+                ))
+                .map_err(backend)?;
+            let rows = stmt
+                .query_map(
+                    rusqlite::params_from_iter(all_wires.iter().copied()),
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
                 )
-                .optional()
-                .map_err(backend)?
-                .ok_or_else(|| {
-                    PortError::Backend("session placement references a missing message".into())
-                })?;
+                .map_err(backend)?;
+            for row in rows {
+                let (id, payload) = row.map_err(backend)?;
+                payload_by_id.insert(id, payload);
+            }
+            let mut stmt = conn
+                .prepare(&format!(
+                    "SELECT wire_id, id_json FROM fts_ids WHERE wire_id IN ({placeholders})"
+                ))
+                .map_err(backend)?;
+            let rows = stmt
+                .query_map(
+                    rusqlite::params_from_iter(all_wires.iter().copied()),
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                )
+                .map_err(backend)?;
+            for row in rows {
+                let (wire_id, id_json) = row.map_err(backend)?;
+                id_json_by_wire.insert(wire_id, id_json);
+            }
+        }
+
+        let mut placements = Vec::with_capacity(raw_placements.len());
+        for (placement_id, document_id, message_id, ordinal, sidechain, start, end) in
+            raw_placements
+        {
+            let span = match (start, end) {
+                (None, None) => None,
+                (Some(start), Some(end)) => Some(EvidenceSpan {
+                    start: u64::try_from(start).map_err(backend)?,
+                    end: u64::try_from(end).map_err(backend)?,
+                }),
+                _ => {
+                    return Err(PortError::Backend(
+                        "stored placement has a partial span".into(),
+                    ));
+                }
+            };
+            placements.push(MessagePlacement {
+                id: PlacementId::from_wire(&placement_id).ok_or_else(|| {
+                    PortError::Backend("stored placement has an invalid id".into())
+                })?,
+                session_id: stored_session_id.clone(),
+                source_document_id: Self::stable_id_from_wire(&document_id, &id_json_by_wire)?,
+                message_id: Self::stable_id_from_wire(&message_id, &id_json_by_wire)?,
+                source_ordinal: u32::try_from(ordinal).map_err(backend)?,
+                is_sidechain: sidechain != 0,
+                span,
+            });
+        }
+
+        let mut messages = Vec::with_capacity(message_wires.len());
+        for wire in &message_wires {
+            let payload = payload_by_id.get(wire).cloned().ok_or_else(|| {
+                PortError::Backend("session placement references a missing message".into())
+            })?;
             let map = match serde_json::from_slice::<serde_json::Value>(&payload) {
                 Ok(serde_json::Value::Object(map)) => map,
                 _ => {
@@ -3540,7 +3698,7 @@ impl ContextGraphStore for SqliteStore {
                 }
             };
             messages.push(Message {
-                id: Self::stable_id_from_store(&conn, &wire)?,
+                id: Self::stable_id_from_wire(wire, &id_json_by_wire)?,
                 role,
                 text,
                 timestamp,
@@ -3548,18 +3706,10 @@ impl ContextGraphStore for SqliteStore {
         }
 
         let mut source_documents = Vec::with_capacity(document_wires.len());
-        for wire in document_wires {
-            let payload: Vec<u8> = conn
-                .query_row(
-                    "SELECT payload FROM catalog WHERE id = ?1",
-                    [&wire],
-                    |row| row.get(0),
-                )
-                .optional()
-                .map_err(backend)?
-                .ok_or_else(|| {
-                    PortError::Backend("session context references a missing document".into())
-                })?;
+        for wire in &document_wires {
+            let payload = payload_by_id.get(wire).cloned().ok_or_else(|| {
+                PortError::Backend("session context references a missing document".into())
+            })?;
             let map = match serde_json::from_slice::<serde_json::Value>(&payload) {
                 Ok(serde_json::Value::Object(map)) => map,
                 _ => {
@@ -3569,7 +3719,7 @@ impl ContextGraphStore for SqliteStore {
                 }
             };
             source_documents.push(SourceDocument {
-                id: Self::stable_id_from_store(&conn, &wire)?,
+                id: Self::stable_id_from_wire(wire, &id_json_by_wire)?,
                 provider_id: map
                     .get("provider")
                     .and_then(serde_json::Value::as_str)
