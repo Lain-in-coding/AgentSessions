@@ -54,6 +54,15 @@ fn backend<E: std::fmt::Display + 'static>(e: E) -> PortError {
 
 static NEXT_OPERATION_ID: AtomicU64 = AtomicU64::new(0);
 
+/// 批量 `IN (...)` 查询的单块 id 上限。SQLite 的变量上限是 999（旧版）/
+/// 32766（3.32+），一个大 batch 的 placement/entity 数远超此限，必须分块。
+const BATCH_IN_CHUNK: usize = 500;
+
+/// 把 id 列表切成不超过 [`BATCH_IN_CHUNK`] 的块（每块一个 `IN (...)` 查询）。
+fn chunk_ids<T: AsRef<str>>(ids: &[T]) -> Vec<&[T]> {
+    ids.chunks(BATCH_IN_CHUNK).collect()
+}
+
 fn unix_ms() -> PortResult<i64> {
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1900,22 +1909,23 @@ impl SqliteStore {
                 return Ok(false);
             }
 
-            // Catalog entries: one batched payload read for all ids.
+            // Catalog entries: batched payload reads, chunked under the
+            // SQLite variable limit.
             let ids: Vec<&str> = source
                 .entries
                 .iter()
                 .map(|(id, _, _)| id.as_str())
                 .collect();
-            let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
             let mut payloads: BTreeMap<String, Vec<u8>> = BTreeMap::new();
-            if !ids.is_empty() {
+            for chunk in chunk_ids(&ids) {
+                let placeholders = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
                 let mut stmt = conn
                     .prepare(&format!(
                         "SELECT id, payload FROM catalog WHERE id IN ({placeholders})"
                     ))
                     .map_err(backend)?;
                 let rows = stmt
-                    .query_map(rusqlite::params_from_iter(ids.iter().copied()), |row| {
+                    .query_map(rusqlite::params_from_iter(chunk.iter().copied()), |row| {
                         Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
                     })
                     .map_err(backend)?;
@@ -1929,9 +1939,10 @@ impl SqliteStore {
                     return Ok(false);
                 }
             }
-            // Indexed text: one batched read mapping wire_id -> fts text.
+            // Indexed text: batched reads mapping wire_id -> fts text.
             let mut fts_text: BTreeMap<String, String> = BTreeMap::new();
-            if !ids.is_empty() {
+            for chunk in chunk_ids(&ids) {
+                let placeholders = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
                 let mut stmt = conn
                     .prepare(&format!(
                         "SELECT fi.wire_id, f.text FROM fts f
@@ -1940,7 +1951,7 @@ impl SqliteStore {
                     ))
                     .map_err(backend)?;
                 let rows = stmt
-                    .query_map(rusqlite::params_from_iter(ids.iter().copied()), |row| {
+                    .query_map(rusqlite::params_from_iter(chunk.iter().copied()), |row| {
                         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
                     })
                     .map_err(backend)?;
@@ -2004,16 +2015,11 @@ impl SqliteStore {
             if stored_placements != expected_placements {
                 return Ok(false);
             }
-            // Stored placements for this source's ids (one batched read).
+            // Stored placements for this source's ids (batched, chunked).
             let mut stored_placements: BTreeMap<String, StoredPlacement> = BTreeMap::new();
-            if !source.placements.is_empty() {
-                let placeholders = source
-                    .placements
-                    .iter()
-                    .map(|_| "?")
-                    .collect::<Vec<_>>()
-                    .join(",");
-                let pids: Vec<&str> = source.placements.iter().map(|p| p.id.as_str()).collect();
+            let pids: Vec<&str> = source.placements.iter().map(|p| p.id.as_str()).collect();
+            for chunk in chunk_ids(&pids) {
+                let placeholders = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
                 let mut stmt = conn
                     .prepare(&format!(
                         "SELECT placement_id, session_id, document_id, message_id,
@@ -2022,7 +2028,7 @@ impl SqliteStore {
                     ))
                     .map_err(backend)?;
                 let rows = stmt
-                    .query_map(rusqlite::params_from_iter(pids.iter().copied()), |row| {
+                    .query_map(rusqlite::params_from_iter(chunk.iter().copied()), |row| {
                         let start: Option<i64> = row.get(6)?;
                         let end: Option<i64> = row.get(7)?;
                         Ok((
@@ -2054,21 +2060,16 @@ impl SqliteStore {
                     return Ok(false);
                 }
             }
-            // Stored edges for this source's ids (one batched read).
+            // Stored edges for this source's ids (batched, chunked).
             let mut stored_edges: BTreeMap<String, (String, Option<String>, String)> =
                 BTreeMap::new();
-            if !source.edges.is_empty() {
-                let placeholders = source
-                    .edges
-                    .iter()
-                    .map(|_| "?")
-                    .collect::<Vec<_>>()
-                    .join(",");
-                let cids: Vec<&str> = source
-                    .edges
-                    .iter()
-                    .map(|e| e.child_placement_id.as_str())
-                    .collect();
+            let cids: Vec<&str> = source
+                .edges
+                .iter()
+                .map(|e| e.child_placement_id.as_str())
+                .collect();
+            for chunk in chunk_ids(&cids) {
+                let placeholders = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
                 let mut stmt = conn
                     .prepare(&format!(
                         "SELECT child_placement_id, parent_message_id, parent_native_id, relation
@@ -2076,7 +2077,7 @@ impl SqliteStore {
                     ))
                     .map_err(backend)?;
                 let rows = stmt
-                    .query_map(rusqlite::params_from_iter(cids.iter().copied()), |row| {
+                    .query_map(rusqlite::params_from_iter(chunk.iter().copied()), |row| {
                         Ok((
                             row.get::<_, String>(0)?,
                             (
@@ -3174,12 +3175,8 @@ impl SqliteStore {
         touched_edge_ids: &[String],
         touched_claim_ids: &[String],
     ) -> PortResult<()> {
-        if !touched_placement_ids.is_empty() {
-            let placeholders = touched_placement_ids
-                .iter()
-                .map(|_| "?")
-                .collect::<Vec<_>>()
-                .join(",");
+        for chunk in chunk_ids(touched_placement_ids) {
+            let placeholders = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
             let missing_entity: Option<String> = tx
                 .query_row(
                     &format!(
@@ -3197,7 +3194,7 @@ impl SqliteStore {
                                 ))
                          LIMIT 1"
                     ),
-                    rusqlite::params_from_iter(touched_placement_ids.iter()),
+                    rusqlite::params_from_iter(chunk.iter()),
                     |row| row.get(0),
                 )
                 .optional()
@@ -3209,12 +3206,8 @@ impl SqliteStore {
             }
         }
 
-        if !touched_edge_ids.is_empty() {
-            let placeholders = touched_edge_ids
-                .iter()
-                .map(|_| "?")
-                .collect::<Vec<_>>()
-                .join(",");
+        for chunk in chunk_ids(touched_edge_ids) {
+            let placeholders = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
             let missing_placement: Option<String> = tx
                 .query_row(
                     &format!(
@@ -3227,7 +3220,7 @@ impl SqliteStore {
                            )
                          LIMIT 1"
                     ),
-                    rusqlite::params_from_iter(touched_edge_ids.iter()),
+                    rusqlite::params_from_iter(chunk.iter()),
                     |row| row.get(0),
                 )
                 .optional()
@@ -3239,12 +3232,8 @@ impl SqliteStore {
             }
         }
 
-        if !touched_claim_ids.is_empty() {
-            let placeholders = touched_claim_ids
-                .iter()
-                .map(|_| "?")
-                .collect::<Vec<_>>()
-                .join(",");
+        for chunk in chunk_ids(touched_claim_ids) {
+            let placeholders = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
             let missing_claim: Option<String> = tx
                 .query_row(
                     &format!(
@@ -3257,7 +3246,7 @@ impl SqliteStore {
                            )
                          LIMIT 1"
                     ),
-                    rusqlite::params_from_iter(touched_claim_ids.iter()),
+                    rusqlite::params_from_iter(chunk.iter()),
                     |row| row.get(0),
                 )
                 .optional()
@@ -3595,6 +3584,7 @@ impl ContextGraphStore for SqliteStore {
 
         // Batch-load message payloads and fts_ids identity for all wires at
         // once (was N+1 per message: one payload read + two identity reads).
+        // Chunked under the SQLite variable limit for very large sessions.
         let mut payload_by_id: BTreeMap<String, Vec<u8>> = BTreeMap::new();
         let mut id_json_by_wire: BTreeMap<String, String> = BTreeMap::new();
         let all_wires: Vec<&str> = message_wires
@@ -3602,18 +3592,17 @@ impl ContextGraphStore for SqliteStore {
             .chain(document_wires.iter())
             .map(|wire| wire.as_str())
             .collect();
-        if !all_wires.is_empty() {
-            let placeholders = all_wires.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        for chunk in chunk_ids(&all_wires) {
+            let placeholders = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
             let mut stmt = conn
                 .prepare(&format!(
                     "SELECT id, payload FROM catalog WHERE id IN ({placeholders})"
                 ))
                 .map_err(backend)?;
             let rows = stmt
-                .query_map(
-                    rusqlite::params_from_iter(all_wires.iter().copied()),
-                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
-                )
+                .query_map(rusqlite::params_from_iter(chunk.iter().copied()), |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+                })
                 .map_err(backend)?;
             for row in rows {
                 let (id, payload) = row.map_err(backend)?;
@@ -3625,10 +3614,9 @@ impl ContextGraphStore for SqliteStore {
                 ))
                 .map_err(backend)?;
             let rows = stmt
-                .query_map(
-                    rusqlite::params_from_iter(all_wires.iter().copied()),
-                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-                )
+                .query_map(rusqlite::params_from_iter(chunk.iter().copied()), |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
                 .map_err(backend)?;
             for row in rows {
                 let (wire_id, id_json) = row.map_err(backend)?;
