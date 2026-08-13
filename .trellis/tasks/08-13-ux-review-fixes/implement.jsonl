@@ -1,0 +1,15 @@
+{"reason":"CLI parsing/help/human-renderer semantics; changed by Phase C/E/F","file":"spec/agentsessions-cli/backend/index.md"}
+{"reason":"operator_action mapping, error envelope semantics","file":"spec/agentsessions-cli/backend/error-handling.md"}
+{"reason":"Application ADT + response budget; changed by Phase A snippet assembly","file":"spec/agentsessions-application/backend/index.md"}
+{"reason":"NUL/control rejection and backend error masking","file":"spec/agentsessions-application/backend/error-handling.md"}
+{"reason":"chunked IN batches for get_many","file":"spec/agentsessions-application/backend/database-guidelines.md"}
+{"reason":"snippet budget tests","file":"spec/agentsessions-application/backend/quality-guidelines.md"}
+{"reason":"CatalogStore implementation; changed by Phase A get_many","file":"spec/agentsessions-adapters-sqlite/backend/index.md"}
+{"reason":"backend error masking","file":"spec/agentsessions-adapters-sqlite/backend/error-handling.md"}
+{"reason":"chunked IN query pattern","file":"spec/agentsessions-adapters-sqlite/backend/database-guidelines.md"}
+{"reason":"query-count tests","file":"spec/agentsessions-adapters-sqlite/backend/quality-guidelines.md"}
+{"reason":"CatalogStore port; changed by Phase A get_many","file":"spec/agentsessions-ports/backend/index.md"}
+{"reason":"InMemoryStore get_many implementation","file":"spec/agentsessions-testkit/backend/index.md"}
+{"reason":"requirements R1-R10 and acceptance criteria","file":"task/prd.md"}
+{"reason":"9-cluster technical design","file":"task/design.md"}
+{"reason":"ordered 38-step checklist and phase gates","file":"task/implement.md"}

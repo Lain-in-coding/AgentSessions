@@ -1,0 +1,4 @@
+{"reason":"R1-R10 acceptance criteria","file":"task/prd.md"}
+{"reason":"phase checklists and gates","file":"task/implement.md"}
+{"reason":"CLI behavior contract","file":"spec/agentsessions-cli/backend/index.md"}
+{"reason":"error envelope contract","file":"spec/agentsessions-cli/backend/error-handling.md"}
