@@ -6,7 +6,7 @@
 //! 指纹。若 git 换行转换或编辑器改写了字节，先在指纹断言处响亮失败，
 //! 而不是留到后面变成难懂的 span 错位。
 
-use agent_session_grep_ports::{CanonicalEventSink, MessageEvent, ProviderAdapter};
+use agent_session_grep_ports::{CanonicalEventSink, Confidence, MessageEvent, ProviderAdapter};
 use agent_session_grep_provider_codex::CodexAdapter;
 use serde_json::{Value, json};
 use std::path::PathBuf;
@@ -115,6 +115,17 @@ fn golden_basic_matches_pinned_canonical_output() {
         "canonical output drifted from basic.expected.json; actual =\n{}",
         serde_json::to_string_pretty(&actual).unwrap()
     );
+}
+
+#[test]
+fn golden_probe_tolerates_intentional_broken_line() {
+    // PRD R2.3：fixture 内置一条故意破损行——probe 必须容忍（≤3），不得
+    // 整源拒绝；置信度降一档（无破损时为 Confirmed → High），保持 adapter 认领。
+    let bytes = read_fixture_bytes();
+    let r = CodexAdapter::new()
+        .probe(&bytes)
+        .expect("golden fixture probe must tolerate the broken line");
+    assert_eq!(r.confidence, Confidence::High);
 }
 
 #[test]

@@ -992,11 +992,7 @@ fn dispatch(
                 cursor,
                 budget,
             })?;
-            let (outcome, mut data, page, warnings) = render(response);
-            // snippet 是 application 检索装配阶段接管的字段（SearchHit.snippet：
-            // 批量取 payload + 预算截取，见 design §1/R1）。它只供 human 渲染器
-            // 展示，机器模式 envelope 不得携带（协议兼容性约束，SearchHit 文档）。
-            strip_snippets_for_machine(&mut data, mode);
+            let (outcome, data, page, warnings) = render(response);
             Ok(("search", outcome, data, page, warnings))
         }
         "get" => {
@@ -1672,7 +1668,12 @@ fn render(
                     .map(|hit| serde_json::json!({
                         "id": hit.id.as_str(),
                         "score": hit.score,
-                        "snippet": hit.snippet,
+                        // R4（ADR-0008）：命中携带所属会话 wire id 与正文摘要
+                        // （追加字段，schema minor：不删除任何既有字段）。
+                        // `text` 字节已计入 Application 的 clamp_items 预算
+                        // （R4.2）；人类渲染器把同一摘要打印为 snippet 行。
+                        "session_id": hit.session_id,
+                        "text": hit.text,
                     }))
                     .collect::<Vec<_>>(),
                 "generation": generation,
@@ -1805,25 +1806,6 @@ fn render(
             protocol::Page::default(),
             Vec::new(),
         ),
-    }
-}
-
-/// snippet 仅供 human 渲染（`SearchHit.snippet` 文档约束：robot/MCP 序列化器
-/// 不得输出该字段）。json/jsonl/robot 模式下从 hits 中剥掉它，保持 envelope
-/// 形状与机器模式兼容（design §1）；human 模式原样保留给渲染器展示。
-fn strip_snippets_for_machine(data: &mut serde_json::Value, mode: protocol::OutputMode) {
-    if mode == protocol::OutputMode::Human {
-        return;
-    }
-    if let Some(hits) = data
-        .get_mut("hits")
-        .and_then(serde_json::Value::as_array_mut)
-    {
-        for hit in hits {
-            if let Some(object) = hit.as_object_mut() {
-                object.remove("snippet");
-            }
-        }
     }
 }
 
@@ -2618,23 +2600,26 @@ mod tests {
         );
     }
 
-    // ---- snippet 接线（R1，application 装配后 main.rs 只投影/剥除）----
+    // ---- search 命中装配接线（R1/ADR-0008：application 装配后 main.rs 只投影）----
 
     #[test]
-    fn render_search_emits_application_snippet() {
-        // SearchHit.snippet 由 application 装配（批量取 payload + 预算截取）；
-        // render 原样投影——Some → 字符串，None → null（human 渲染器不补行）。
+    fn render_search_emits_session_context_fields() {
+        // SearchHit.session_id/text 由 application 装配（批量 session_of +
+        // 批量取 payload 截取摘要）；render 原样投影——Some → 字符串，
+        // None → null（不臆造会话/摘要；human 渲染器不补行）。
         let response = AppResponse::Search {
             hits: vec![
                 agent_session_grep_ports::SearchHit {
                     id: StableId::from_wire("msg_v1_aaaa").expect("valid id"),
                     score: 2.0,
-                    snippet: Some("正文预览".into()),
+                    session_id: Some("ses_v1_aaaa".into()),
+                    text: Some("正文预览".into()),
                 },
                 agent_session_grep_ports::SearchHit {
                     id: StableId::from_wire("msg_v1_bbbb").expect("valid id"),
                     score: 1.0,
-                    snippet: None,
+                    session_id: None,
+                    text: None,
                 },
             ],
             next_cursor: None,
@@ -2645,28 +2630,37 @@ mod tests {
             },
         };
         let (_, data, _, _) = render(response);
-        assert_eq!(data["hits"][0]["snippet"], "正文预览");
-        assert_eq!(data["hits"][1]["snippet"], serde_json::Value::Null);
+        assert_eq!(data["hits"][0]["session_id"], "ses_v1_aaaa");
+        assert_eq!(data["hits"][0]["text"], "正文预览");
+        assert_eq!(data["hits"][1]["session_id"], serde_json::Value::Null);
+        assert_eq!(data["hits"][1]["text"], serde_json::Value::Null);
     }
 
     #[test]
-    fn machine_modes_strip_snippet_from_hits() {
-        // snippet 仅供 human 渲染；json/jsonl/robot envelope 不得携带（协议兼容）。
-        let mut data = serde_json::json!({
-            "hits": [{ "id": "msg_v1_a", "score": 2.0, "snippet": "preview" }],
-        });
-        strip_snippets_for_machine(&mut data, protocol::OutputMode::Human);
-        assert_eq!(data["hits"][0]["snippet"], "preview");
-
-        for mode in [protocol::OutputMode::Json, protocol::OutputMode::Jsonl] {
-            let mut data = serde_json::json!({
-                "hits": [{ "id": "msg_v1_a", "score": 2.0, "snippet": "preview" }],
-            });
-            strip_snippets_for_machine(&mut data, mode);
-            assert!(
-                data["hits"][0].get("snippet").is_none(),
-                "{mode:?} must not carry snippet"
-            );
-        }
+    fn machine_render_never_emits_snippet_field() {
+        // SearchHit 已无 snippet 字段（ADR-0008 由 text 承接摘要）：render 的
+        // 命中 JSON 只携带 {id, score, session_id, text}，任何输出模式下都
+        // 不出现 snippet 键（机器模式协议兼容约束由构造层保证，不再需要剥除）。
+        let response = AppResponse::Search {
+            hits: vec![agent_session_grep_ports::SearchHit {
+                id: StableId::from_wire("msg_v1_aaaa").expect("valid id"),
+                score: 2.0,
+                session_id: Some("ses_v1_aaaa".into()),
+                text: Some("preview".into()),
+            }],
+            next_cursor: None,
+            generation: 3,
+            truncation: Truncation {
+                truncated: false,
+                reason: None,
+            },
+        };
+        let (_, data, _, _) = render(response);
+        let hit = &data["hits"][0];
+        assert!(hit.get("snippet").is_none(), "{hit}");
+        assert_eq!(hit["id"], "msg_v1_aaaa");
+        assert!(hit["score"].is_number(), "{hit}");
+        assert_eq!(hit["session_id"], "ses_v1_aaaa");
+        assert_eq!(hit["text"], "preview");
     }
 }

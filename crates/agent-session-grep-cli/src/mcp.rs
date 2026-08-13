@@ -383,7 +383,9 @@ fn tool_catalog() -> Value {
             "name": "search_sessions",
             "description": "Full-text search over ingested AI coding-agent session \
                 history. Hits are message-level entities (msg_v1_ ids) in relevance \
-                order; pass page.next_cursor back as cursor to fetch the next page.",
+                order, each carrying session_id (owning session wire id) and text \
+                (body summary); pass page.next_cursor back as cursor to fetch the \
+                next page.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1179,6 +1181,12 @@ mod tests {
                 .expect("hit id")
                 .starts_with("msg_v1_")
         );
+        // R4（ADR-0008）：MCP search_sessions 命中与 CLI 共用同一 render 投影，
+        // 携带追加的 session_id/text。seeded store 无 placement、payload 非 JSON，
+        // 二者恒为 null（不臆造会话/摘要）——追加字段、无字段删除。
+        assert!(hits[0]["session_id"].is_null(), "{payload}");
+        assert!(hits[0]["text"].is_null(), "{payload}");
+        assert!(hits[0]["score"].is_number(), "{payload}");
         assert_eq!(payload["page"]["next_cursor"], Value::Null);
         assert_eq!(payload["page"]["has_more"], false);
         // content.text 与 structuredContent 必须是同一 payload 的两种载体。

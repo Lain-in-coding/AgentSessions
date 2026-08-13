@@ -16,10 +16,12 @@ use agent_session_grep_ports::{
 use std::collections::{BTreeMap, BTreeSet};
 
 pub mod budget;
+pub mod cjk;
 pub mod cursor;
 pub mod evidence;
 
 pub use budget::{ResponseBudget, Truncation};
+pub use cjk::bigram_cjk;
 pub use evidence::EvidenceSpanDto;
 
 /// 排序方案标识：catalog 列表的钉住排序（wire id 升序，见 sqlite `ORDER BY id ASC`）。
@@ -305,7 +307,9 @@ fn stage_probed(
 /// 取置信度最高的（Confirmed > High > Low）。若并列最高有多个不同 variant，视为
 /// 无法区分，拒绝（不做"猜一个"）。选中后用该 adapter stage。
 ///
-/// 无任何候选 → `InvalidRequest`（没有 provider 认领此源）。
+/// 无任何候选 → `InvalidRequest`（没有 provider 认领此源）。若存在 probe
+/// 报错的 adapter，错误消息追加最后一个 probe 错误的细节——provider 的拒绝
+/// 诊断自带行号定位与修复方向（PRD R2.2），绝不裸报"没有 provider 认领"。
 /// 组合根（CLI）持有具体 adapter 清单，本函数只负责与格式无关的选择编排。
 pub fn select_and_stage(
     adapters: &[&dyn ProviderAdapter],
@@ -323,10 +327,18 @@ pub fn select_and_stage(
 
     let mut best: Option<(u8, usize, ProbeResult)> = None; // (rank, adapter index, probe)
     let mut tie = false;
+    // 最后一个 probe 报错（PRD R2.2）：全部 adapter 拒绝时，把错误自带的行号
+    // 定位与修复方向带给调用方——绝不裸报 "no provider recognized this source"。
+    // probe 错误只由源字节内容派生（provider 看不到路径），消息即诊断本身。
+    let mut last_probe_error: Option<ProviderError> = None;
     for (idx, adapter) in adapters.iter().enumerate() {
         // probe 报错的 adapter 不是候选——它明确表示"这不是我的格式"。
-        let Ok(probe) = adapter.probe(bytes) else {
-            continue;
+        let probe = match adapter.probe(bytes) {
+            Ok(probe) => probe,
+            Err(error) => {
+                last_probe_error = Some(error);
+                continue;
+            }
         };
         let Some(r) = rank(probe.confidence) else {
             continue;
@@ -345,8 +357,13 @@ pub fn select_and_stage(
         }
     }
 
-    let (_, idx, probe) = best
-        .ok_or_else(|| DomainError::InvalidRequest("no provider recognized this source".into()))?;
+    let (_, idx, probe) = best.ok_or_else(|| {
+        let detail = match last_probe_error {
+            Some(error) => format!("; last probe failure: {error}"),
+            None => String::new(),
+        };
+        DomainError::InvalidRequest(format!("no provider recognized this source{detail}"))
+    })?;
     if tie {
         return Err(DomainError::InvalidRequest(format!(
             "ambiguous provider selection: multiple variants matched with equal confidence \
@@ -528,16 +545,20 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex> App<C, S> {
                     .take(page)
                     .collect();
 
-                // R1（ADR-0004）：snippet 装配——对页内命中一次性批量取 payload
-                // （分块 IN，无 N+1），解析 `text` 字段，按 `max_snippet_chars`
-                // 截取前缀。payload 无 text（或非 JSON）→ None，不臆造正文；
-                // 不做任何脱敏（所有者决定，本地优先工具接受屏显）。
+                // R1/ADR-0008 装配：对页内命中一次性批量取 payload（分块 IN，
+                // 无 N+1），解析 `text` 字段按 `max_snippet_chars` 截取前缀；
+                // 再一次性批量解析归属会话（session_of，同序）。payload 无 text
+                // （或非 JSON）→ text None，不臆造正文；无 placement → session_id
+                // None。不做任何脱敏（ADR-0004 所有者决定，本地优先工具接受屏显）。
                 let ids: Vec<StableId> = slice.iter().map(|hit| hit.id.clone()).collect();
                 let payloads = self.catalog.get_many(&ids)?;
+                let sessions = self.catalog.session_of(&ids)?;
                 let max_snippet_chars = budget.max_snippet_chars;
                 let mut hits = slice;
-                for (hit, (_id, payload)) in hits.iter_mut().zip(payloads) {
-                    hit.snippet = payload.and_then(|bytes| {
+                for (hit, ((_id, payload), (_mid, session))) in
+                    hits.iter_mut().zip(payloads.into_iter().zip(sessions))
+                {
+                    hit.text = payload.and_then(|bytes| {
                         let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
                             return None;
                         };
@@ -546,15 +567,21 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex> App<C, S> {
                             .and_then(serde_json::Value::as_str)
                             .map(|text| text.chars().take(max_snippet_chars).collect())
                     });
+                    hit.session_id = session.map(|s| s.as_str().to_string());
                 }
                 let net_bytes = budget
                     .max_response_bytes
                     .saturating_sub(ENVELOPE_RESERVE_BYTES);
                 let (hits, truncation, _) = budget::clamp_items(hits, page, net_bytes, |hit| {
-                    // 最终渲染 `{id, score, text}`：snippet 字节计入同一字节闸
-                    // （`,"text":` 为字段开销）；截断原因保持显式。
+                    // 机器渲染 `{id, score, session_id, text}`：text 摘要字节
+                    // （R4.2）与 session_id 字节都计入同一字节闸
+                    // （`,"session_id":` / `,"text":` 为字段开销）；截断原因显式。
                     json_string_len(hit.id.as_str())
-                        + hit.snippet.as_ref().map_or(0, |s| json_string_len(s) + 8)
+                        + hit
+                            .session_id
+                            .as_ref()
+                            .map_or(0, |s| json_string_len(s) + 14)
+                        + hit.text.as_ref().map_or(0, |s| json_string_len(s) + 8)
                         + 32
                 });
                 let consumed = offset + hits.len() as u64;
@@ -930,6 +957,10 @@ mod tests {
             Ok(Vec::new())
         }
 
+        fn session_of(&self, ids: &[StableId]) -> PortResult<Vec<(StableId, Option<StableId>)>> {
+            Ok(ids.iter().map(|id| (id.clone(), None)).collect())
+        }
+
         fn context_stats(&self) -> PortResult<ContextStats> {
             Ok(ContextStats {
                 placements: 2,
@@ -947,7 +978,8 @@ mod tests {
             Ok(vec![SearchHit {
                 id: StableId::derive(IdKind::Message, Stability::Reconstructed, &[b"h"]),
                 score: 1.0,
-                snippet: None,
+                session_id: None,
+                text: None,
             }])
         }
     }
@@ -1036,9 +1068,10 @@ mod tests {
     }
 
     #[test]
-    fn search_snippets_extract_text_from_payloads() {
-        // R1（ADR-0004）：snippet 在 Application 检索装配时生成——批量取 payload、
-        // 解析 `text` 字段、截取前缀；不做任何脱敏。
+    fn search_hits_carry_text_summary_from_payloads() {
+        // R1（ADR-0004）/ADR-0008：text 摘要（原 snippet）在 Application 检索
+        // 装配时生成——批量取 payload、解析 `text` 字段、截取前缀；不做任何
+        // 脱敏。MapCatalog 无 placement 数据 → session_id 为 None。
         let mut cat = MapCatalog::new(7);
         for (tag, text) in [("hit00", "hello world"), ("hit01", "second hit")] {
             let id = hit_id(tag);
@@ -1056,13 +1089,14 @@ mod tests {
         };
         assert_eq!(hits.len(), 2);
         assert_eq!(hits[0].id, hit_id("hit00"));
-        assert_eq!(hits[0].snippet.as_deref(), Some("hello world"));
-        assert_eq!(hits[1].snippet.as_deref(), Some("second hit"));
+        assert_eq!(hits[0].text.as_deref(), Some("hello world"));
+        assert_eq!(hits[1].text.as_deref(), Some("second hit"));
+        assert!(hits.iter().all(|hit| hit.session_id.is_none()));
     }
 
     #[test]
-    fn search_snippet_truncates_to_max_snippet_chars() {
-        // R1.2：单条 snippet 按 `max_snippet_chars`（字符数）显式截取前缀。
+    fn search_text_truncates_to_max_snippet_chars() {
+        // R1.2：单条 text 摘要按 `max_snippet_chars`（字符数）显式截取前缀。
         let mut cat = MapCatalog::new(7);
         let id = hit_id("hit00");
         cat.insert(
@@ -1086,12 +1120,12 @@ mod tests {
         let AppResponse::Search { hits, .. } = resp else {
             panic!("expected Search response");
         };
-        assert_eq!(hits[0].snippet.as_deref(), Some("abcd"));
+        assert_eq!(hits[0].text.as_deref(), Some("abcd"));
     }
 
     #[test]
-    fn search_snippet_none_when_payload_has_no_text() {
-        // text 缺失 / 非字符串 / payload 非 JSON → snippet None（不臆造正文）。
+    fn search_text_none_when_payload_has_no_text() {
+        // text 缺失 / 非字符串 / payload 非 JSON → text None（不臆造正文）。
         // 空字符串 text 视为有正文（与旧 CLI 行为一致）。
         let mut cat = MapCatalog::new(7);
         for (tag, payload) in [
@@ -1108,15 +1142,15 @@ mod tests {
         let AppResponse::Search { hits, .. } = resp else {
             panic!("expected Search response");
         };
-        assert_eq!(hits[3].snippet.as_deref(), Some(""));
-        assert!(hits[..3].iter().all(|hit| hit.snippet.is_none()));
+        assert_eq!(hits[3].text.as_deref(), Some(""));
+        assert!(hits[..3].iter().all(|hit| hit.text.is_none()));
     }
 
     #[test]
-    fn search_byte_gate_charges_snippet_bytes() {
-        // R1.2：snippet 字节计入同一 `max_response_bytes` 闸。无 snippet 时
-        // 4 条命中全部放得下（每条仅 ~70 B）；带 1000 字符 snippet 时每条
-        // ~1080 B，净预算 3072 只容 2 条——证明 snippet 字节被计入闸门，
+    fn search_byte_gate_charges_text_bytes() {
+        // R1.2/R4.2：text 摘要字节计入同一 `max_response_bytes` 闸。无 text 时
+        // 4 条命中全部放得下（每条仅 ~70 B）；带 1000 字符 text 时每条
+        // ~1080 B，净预算 3072 只容 2 条——证明摘要字节被计入闸门，
         // 且截断原因显式报 max_response_bytes。
         let mut cat = MapCatalog::new(7);
         for tag in ["hit00", "hit01", "hit02", "hit03"] {
@@ -1147,6 +1181,51 @@ mod tests {
             truncation.reason.as_deref(),
             Some(budget::TRUNCATION_MAX_RESPONSE_BYTES)
         );
+    }
+
+    #[test]
+    fn search_hits_carry_session_id_from_placements() {
+        // ADR-0008：命中带归属会话 wire id（session_of 批量解析）+ text 摘要。
+        // GraphCatalog 的 graph 里有 placement → session_id 有值；payload 的
+        // `text` 字段 → text 有值。
+        let fixture = ctx_fixture();
+        let ids = vec![
+            fixture.root.clone(),
+            fixture.repeated.clone(),
+            fixture.leaf.clone(),
+        ];
+        struct FixedHits(Vec<StableId>);
+        impl SearchIndex for FixedHits {
+            fn index(&self, _id: &StableId, _text: &str) -> PortResult<()> {
+                Ok(())
+            }
+            fn query(&self, _query: &str, limit: usize) -> PortResult<Vec<SearchHit>> {
+                Ok(self
+                    .0
+                    .iter()
+                    .take(limit)
+                    .map(|id| SearchHit {
+                        id: id.clone(),
+                        score: 0.0,
+                        session_id: None,
+                        text: None,
+                    })
+                    .collect())
+            }
+        }
+        let app = App::with_clock(&fixture.store, FixedHits(ids.clone()), clock_t0);
+        let resp = app.handle(search_req("q", 10, None)).unwrap();
+        let AppResponse::Search { hits, .. } = resp else {
+            panic!("expected Search response");
+        };
+        assert_eq!(hits.len(), 3);
+        for (hit, expected) in hits.iter().zip(&ids) {
+            assert_eq!(&hit.id, expected);
+            assert_eq!(hit.session_id.as_deref(), Some(fixture.session.as_str()));
+        }
+        assert_eq!(hits[0].text.as_deref(), Some("root"));
+        assert_eq!(hits[1].text.as_deref(), Some("repeated"));
+        assert_eq!(hits[2].text.as_deref(), Some("leaf"));
     }
 
     #[test]
@@ -1222,7 +1301,8 @@ mod tests {
                         &[format!("hit{i:02}").as_bytes()],
                     ),
                     score: -(i as f32),
-                    snippet: None,
+                    session_id: None,
+                    text: None,
                 })
                 .collect())
         }
@@ -1289,6 +1369,11 @@ mod tests {
             _message_id: &StableId,
         ) -> PortResult<Vec<PortMessageContextCandidate>> {
             Ok(Vec::new())
+        }
+
+        fn session_of(&self, ids: &[StableId]) -> PortResult<Vec<(StableId, Option<StableId>)>> {
+            // 纯 map 目录没有 placement 数据 → 全部 None。
+            Ok(ids.iter().map(|id| (id.clone(), None)).collect())
         }
 
         fn context_stats(&self) -> PortResult<ContextStats> {
@@ -1630,6 +1715,34 @@ mod tests {
                 // lookup miss, never an empty success.
                 Err(PortError::NotFound("message not found".into()))
             }
+        }
+
+        fn session_of(&self, ids: &[StableId]) -> PortResult<Vec<(StableId, Option<StableId>)>> {
+            // 与 SqliteStore 语义一致：取该消息所有 placement 中 wire id 字典序
+            // 最小的会话；无 placement → None。
+            let owners = self.graph.placements.iter().fold(
+                BTreeMap::<String, String>::new(),
+                |mut owners, placement| {
+                    owners
+                        .entry(placement.message_id.as_str().to_string())
+                        .and_modify(|owner| {
+                            if placement.session_id.as_str() < owner.as_str() {
+                                *owner = placement.session_id.as_str().to_string();
+                            }
+                        })
+                        .or_insert_with(|| placement.session_id.as_str().to_string());
+                    owners
+                },
+            );
+            Ok(ids
+                .iter()
+                .map(|id| {
+                    let session = owners
+                        .get(id.as_str())
+                        .and_then(|wire| StableId::from_wire(wire));
+                    (id.clone(), session)
+                })
+                .collect())
         }
 
         fn context_stats(&self) -> PortResult<ContextStats> {
@@ -2358,6 +2471,112 @@ mod tests {
             "选中后不得对同一字节二次 probe"
         );
         assert_eq!(staged.messages.len(), 2);
+    }
+
+    #[test]
+    fn select_and_stage_surfaces_probe_error_line_detail_when_all_rejected() {
+        // PRD R2.2：全部 adapter 拒绝时，最后一个 probe 错误自带的行号定位与
+        // 修复方向必须透出——绝不裸报 "no provider recognized this source"。
+        // （probe 错误只由源字节内容派生，provider 看不到路径，消息即诊断。）
+        struct LineDetailRejecter;
+        impl ProviderAdapter for LineDetailRejecter {
+            fn provider_id(&self) -> &str {
+                "line-detail"
+            }
+            fn probe(
+                &self,
+                _bytes: &[u8],
+            ) -> Result<agent_session_grep_ports::ProbeResult, ProviderError> {
+                Err(ProviderError::AmbiguousVariant(
+                    "not line-delimited JSON: 0/3 sampled lines parsed。第 2 行不是有效 JSON。请修复或删除这些行后重试"
+                        .into(),
+                ))
+            }
+            fn parse(
+                &self,
+                _bytes: &[u8],
+                _sink: &mut dyn CanonicalEventSink,
+            ) -> Result<agent_session_grep_ports::ParseReport, ProviderError> {
+                Ok(agent_session_grep_ports::ParseReport::default())
+            }
+        }
+        struct SilentRejecter;
+        impl ProviderAdapter for SilentRejecter {
+            fn provider_id(&self) -> &str {
+                "silent"
+            }
+            fn probe(
+                &self,
+                _bytes: &[u8],
+            ) -> Result<agent_session_grep_ports::ProbeResult, ProviderError> {
+                Ok(agent_session_grep_ports::ProbeResult {
+                    variant_id: "silent/unknown".into(),
+                    confidence: Confidence::Ambiguous,
+                    matched_evidence: Vec::new(),
+                    unmatched_evidence: Vec::new(),
+                })
+            }
+            fn parse(
+                &self,
+                _bytes: &[u8],
+                _sink: &mut dyn CanonicalEventSink,
+            ) -> Result<agent_session_grep_ports::ParseReport, ProviderError> {
+                Ok(agent_session_grep_ports::ParseReport::default())
+            }
+        }
+        let refs: Vec<&dyn ProviderAdapter> = vec![&SilentRejecter, &LineDetailRejecter];
+        let err = select_and_stage(&refs, b"x").unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("no provider recognized this source"),
+            "分类前缀必须保留: {message}"
+        );
+        assert!(message.contains("第 2 行"), "必须携带行号定位: {message}");
+        assert!(
+            message.contains("请修复或删除这些行后重试"),
+            "必须携带修复方向: {message}"
+        );
+    }
+
+    #[test]
+    fn select_and_stage_all_ambiguous_keeps_bare_message() {
+        // 全部 adapter 只是 ambiguous（非报错）时，保持原有裸消息，不出现
+        // "last probe failure" 后缀（没有可复用的错误细节）。
+        struct AmbiguousOnly;
+        impl ProviderAdapter for AmbiguousOnly {
+            fn provider_id(&self) -> &str {
+                "ambiguous-only"
+            }
+            fn probe(
+                &self,
+                _bytes: &[u8],
+            ) -> Result<agent_session_grep_ports::ProbeResult, ProviderError> {
+                Ok(agent_session_grep_ports::ProbeResult {
+                    variant_id: "ambiguous-only/unknown".into(),
+                    confidence: Confidence::Ambiguous,
+                    matched_evidence: Vec::new(),
+                    unmatched_evidence: Vec::new(),
+                })
+            }
+            fn parse(
+                &self,
+                _bytes: &[u8],
+                _sink: &mut dyn CanonicalEventSink,
+            ) -> Result<agent_session_grep_ports::ParseReport, ProviderError> {
+                Ok(agent_session_grep_ports::ParseReport::default())
+            }
+        }
+        let refs: Vec<&dyn ProviderAdapter> = vec![&AmbiguousOnly];
+        let err = select_and_stage(&refs, b"x").unwrap_err();
+        assert!(matches!(
+            err,
+            AppError::Domain(DomainError::InvalidRequest(_))
+        ));
+        assert_eq!(
+            err.to_string(),
+            "invalid request: no provider recognized this source",
+            "无 probe 错误时消息必须保持原样"
+        );
     }
 
     #[test]

@@ -14,7 +14,22 @@ use serde::Deserialize;
 /// 本 adapter 认证的 variant 标识。
 const VARIANT_ID: &str = "claude-code/jsonl-v1";
 
+/// probe 判定用的样本窗口大小（前 N 个非空行，RFC-0002 §7 bounded）。
+const SAMPLE_LINE_LIMIT: usize = 16;
+/// 样本窗口内容忍的未解析行数上限：≤ 此值只把置信度降一档并继续（解析阶段
+/// 对破损行逐行跳过并给出诊断），超过才整源拒绝（PRD R2.1）。
+const SAMPLE_BROKEN_TOLERANCE: usize = 3;
+/// 拒绝/诊断消息中列出的行号条数上限（bounded detail）。
+const BAD_LINE_LIST_LIMIT: usize = 5;
+/// 多会话诊断中列出的 session id 条数上限（bounded detail）。
+const SESSION_ID_LIST_LIMIT: usize = 3;
+
 /// Claude Code JSONL adapter。无状态——所有解析所需信息都来自输入字节。
+///
+/// **单文件 = 单会话**：一个源文件预期只含一个会话（`sessionId` 贯穿全文）。
+/// 若同一文件出现多个不同的 `sessionId`（如手工拼接的合并文件），全部消息仍
+/// 归属首个出现的会话（保持既有 first-session 契约），解析报告会追加一条
+/// 多会话诊断（PRD R3.1）。
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ClaudeCodeAdapter;
 
@@ -202,6 +217,52 @@ fn is_conversational(rec: &RawLine) -> bool {
         || (rec.r#type == "system" && rec.message.is_some())
 }
 
+/// 把行号序列格式化为中文定位列表；超过上限用"等 N 处"收口（bounded detail）。
+fn list_line_nos(nos: &[usize]) -> String {
+    let mut out = String::new();
+    let shown = nos.len().min(BAD_LINE_LIST_LIMIT);
+    for (i, no) in nos[..shown].iter().enumerate() {
+        if i > 0 {
+            out.push('、');
+        }
+        out.push_str(&no.to_string());
+    }
+    if nos.len() > shown {
+        out.push_str(&format!(" 等 {} 处", nos.len()));
+    }
+    out
+}
+
+/// 整源拒绝时的行号定位 + 修复方向（PRD R2.2）：绝不裸报 "no provider
+/// recognized"；区分"非 JSON"与"合法 JSON 但记录结构不符"，措辞不误导。
+fn bad_lines_detail(bad_lines: &[(usize, bool)]) -> String {
+    let non_json: Vec<usize> = bad_lines
+        .iter()
+        .filter(|(_, is_non_json)| *is_non_json)
+        .map(|(no, _)| *no)
+        .collect();
+    let shape: Vec<usize> = bad_lines
+        .iter()
+        .filter(|(_, is_non_json)| !*is_non_json)
+        .map(|(no, _)| *no)
+        .collect();
+
+    let mut parts = Vec::new();
+    if !non_json.is_empty() {
+        parts.push(format!("第 {} 行不是有效 JSON", list_line_nos(&non_json)));
+    }
+    if !shape.is_empty() {
+        parts.push(format!(
+            "第 {} 行是合法 JSON 但记录结构不受支持",
+            list_line_nos(&shape)
+        ));
+    }
+    format!(
+        "{}。请修复或删除这些行后重试（该文件应为每行一条 JSON 对话记录的 Claude Code transcript）",
+        parts.join("；")
+    )
+}
+
 impl ProviderAdapter for ClaudeCodeAdapter {
     fn provider_id(&self) -> &str {
         "claude-code"
@@ -216,23 +277,31 @@ impl ProviderAdapter for ClaudeCodeAdapter {
         let mut matched = Vec::new();
         let mut unmatched = Vec::new();
 
-        // 取前若干非空行做判定，避免整体加载（RFC-0002 §7 bounded）。
-        let sample: Vec<&str> = text
-            .lines()
-            .filter(|l| !l.trim().is_empty())
-            .take(16)
-            .collect();
+        // 取前若干非空行做判定，避免整体加载（RFC-0002 §7 bounded）；同时保留
+        // 原始行号，供容忍/拒绝路径给出"第 N 行"的准确定位。
+        let mut sample: Vec<(usize, &str)> = Vec::new();
+        for (idx, line) in text.lines().enumerate() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            if sample.len() == SAMPLE_LINE_LIMIT {
+                break;
+            }
+            sample.push((idx + 1, line));
+        }
 
         if sample.is_empty() {
             return Err(ProviderError::AmbiguousVariant(
-                "empty input: no non-blank lines to probe".into(),
+                "empty input: no non-blank lines to probe；请确认该文件不是空文件，且是 Claude Code 的 JSONL transcript"
+                    .into(),
             ));
         }
 
         let mut json_lines = 0usize;
         let mut typed_lines = 0usize;
         let mut conversational = 0usize;
-        for line in &sample {
+        let mut bad_lines: Vec<(usize, bool)> = Vec::new();
+        for &(line_no, line) in &sample {
             match serde_json::from_str::<RawLine>(line) {
                 Ok(rec) => {
                     json_lines += 1;
@@ -244,30 +313,43 @@ impl ProviderAdapter for ClaudeCodeAdapter {
                     }
                 }
                 Err(_) => {
-                    // 有解析失败行 → 不是本 variant 的 JSONL。区分"语法非 JSON"
-                    // 与"合法 JSON 但 shape 不符"（如 content: 42），证据措辞不误导。
-                    if serde_json::from_str::<serde_json::Value>(line).is_ok() {
-                        unmatched.push("found valid JSON with an unsupported record shape".into());
+                    // 区分"语法非 JSON"与"合法 JSON 但 shape 不符"（如 content: 42），
+                    // 证据措辞不误导。
+                    let is_non_json = serde_json::from_str::<serde_json::Value>(line).is_err();
+                    bad_lines.push((line_no, is_non_json));
+                    unmatched.push(if is_non_json {
+                        format!("line {line_no}: found a non-JSON line")
                     } else {
-                        unmatched.push("found a non-JSON line".into());
-                    }
+                        format!("line {line_no}: found valid JSON with an unsupported record shape")
+                    });
                 }
             }
         }
 
-        // 每行都是可支持的 JSON 记录才可能是 JSONL；否则拒绝。
-        if json_lines != sample.len() {
-            return Err(ProviderError::AmbiguousVariant(format!(
-                "not line-delimited JSON of supported records: {}/{} sampled lines parsed",
-                json_lines,
-                sample.len()
-            )));
+        // 样本内少量未解析行（≤ 容忍度且至少有一行可解析）不是整源拒绝的理由：
+        // 降一档置信度继续——解析阶段会对这些行逐行跳过并给出诊断（PRD R2.1）。
+        // 超过容忍度，或一行都没解析出来（整文件是垃圾而非"带破损行的 transcript"）
+        // → 整源拒绝，错误携带行号定位与修复方向（PRD R2.2）。
+        if !bad_lines.is_empty() {
+            if bad_lines.len() > SAMPLE_BROKEN_TOLERANCE || json_lines == 0 {
+                return Err(ProviderError::AmbiguousVariant(format!(
+                    "not line-delimited JSON of supported records: {}/{} sampled lines parsed。{}",
+                    json_lines,
+                    sample.len(),
+                    bad_lines_detail(&bad_lines)
+                )));
+            }
+            let bad_nos: Vec<usize> = bad_lines.iter().map(|(no, _)| *no).collect();
+            unmatched.push(format!(
+                "第 {} 行未解析——在样本容忍度内（≤{SAMPLE_BROKEN_TOLERANCE}），置信度降一档",
+                list_line_nos(&bad_nos)
+            ));
         }
         matched.push(format!("{json_lines} sampled lines are valid JSON objects"));
 
         // 判定置信度：有 type 字段且出现对话类型 → confirmed；
         // 全是 JSON 但无可识别的对话 type → low（可能是别的 JSONL）。
-        let confidence = if typed_lines == sample.len() && conversational > 0 {
+        let mut confidence = if typed_lines == sample.len() && conversational > 0 {
             matched.push(format!(
                 "{typed_lines} lines carry a `type`, {conversational} are conversational"
             ));
@@ -283,6 +365,21 @@ impl ProviderAdapter for ClaudeCodeAdapter {
             unmatched.push("no conversational (user/assistant/system) records found".into());
             Confidence::Low
         };
+
+        // 容忍路径：置信度降一档（Low 不再降——Ambiguous 是拒绝语义，本路径保持认领）。
+        if !bad_lines.is_empty() {
+            confidence = match confidence {
+                Confidence::Confirmed => {
+                    matched.push("confidence degraded to High (tolerated broken lines)".into());
+                    Confidence::High
+                }
+                Confidence::High => {
+                    matched.push("confidence degraded to Low (tolerated broken lines)".into());
+                    Confidence::Low
+                }
+                other => other,
+            };
+        }
 
         Ok(ProbeResult {
             variant_id: VARIANT_ID.to_string(),
@@ -301,6 +398,8 @@ impl ProviderAdapter for ClaudeCodeAdapter {
             .map_err(|e| ProviderError::StructuralFatal(format!("not valid UTF-8: {e}")))?;
 
         let mut report = ParseReport::default();
+        // 本文件出现的全部非空 sessionId（单文件=单会话契约的检测输入）。
+        let mut session_ids: Vec<String> = Vec::new();
         // seq 是会话内单调序号，只对成功 emit 的对话消息递增，
         // 从而满足 domain Session 的 seq 从 0 连续的不变量。
         let mut seq: u32 = 0;
@@ -344,12 +443,18 @@ impl ProviderAdapter for ClaudeCodeAdapter {
                 }
             };
 
-            // 首个携带 sessionId 的记录确定本 transcript 的 durable 会话 id。
-            if report.session_native_id.is_none()
-                && let Some(sid) = rec.session_id.as_deref()
+            // 首个携带 sessionId 的记录确定本 transcript 的 durable 会话 id；
+            // 同时收集全部非空 sessionId，供末尾的多会话诊断（PRD R3.1）。
+            if let Some(sid) = rec.session_id.as_deref()
                 && !sid.trim().is_empty()
             {
-                report.session_native_id = Some(sid.trim().to_string());
+                let sid = sid.trim();
+                if report.session_native_id.is_none() {
+                    report.session_native_id = Some(sid.to_string());
+                }
+                if !session_ids.iter().any(|s| s == sid) {
+                    session_ids.push(sid.to_string());
+                }
             }
 
             // 非对话记录（工具结果、summary 等）不产生 Canonical 消息，静默略过。
@@ -399,6 +504,26 @@ impl ProviderAdapter for ClaudeCodeAdapter {
             .map_err(|e| ProviderError::StructuralFatal(e.to_string()))?;
             seq += 1;
             report.committed += 1;
+        }
+
+        // 多会话诊断（PRD R3.1）：单文件=单会话。同一文件出现多个不同 sessionId
+        // 时不得静默折叠——报告数量与前若干 id，归属保持首个会话不变。
+        if session_ids.len() > 1 {
+            let mut id_list = session_ids
+                .iter()
+                .take(SESSION_ID_LIST_LIMIT)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("、");
+            if session_ids.len() > SESSION_ID_LIST_LIMIT {
+                id_list.push_str(" 等");
+            }
+            report.diagnostics.push(format!(
+                "文件包含 {} 个不同 sessionId（{}）——单文件=单会话，全部消息归属首个会话 {}",
+                session_ids.len(),
+                id_list,
+                session_ids[0]
+            ));
         }
 
         Ok(report)
@@ -510,6 +635,119 @@ mod tests {
         assert!(
             msg.contains("supported records"),
             "拒绝措辞应区分 shape 不符而非非 JSON: {msg}"
+        );
+    }
+
+    #[test]
+    fn probe_tolerates_broken_line_within_tolerance() {
+        // 1 条非 JSON 行 ≤ 容忍度（3）：不整源拒绝，置信度降一档
+        // （无破损时为 High → Low），并保留 tolerance 证据（PRD R2.1）。
+        let input = format!(
+            "{}\nthis is not json\n{}",
+            SAMPLE.lines().next().unwrap(),
+            SAMPLE.lines().nth(1).unwrap()
+        );
+        let r = ClaudeCodeAdapter::new().probe(input.as_bytes()).unwrap();
+        assert_eq!(r.confidence, Confidence::Low);
+        assert!(
+            r.unmatched_evidence.iter().any(|e| e.contains("容忍")),
+            "unmatched evidence 应说明容忍降档: {:?}",
+            r.unmatched_evidence
+        );
+    }
+
+    #[test]
+    fn probe_tolerates_up_to_three_broken_lines() {
+        // 恰好 3 条破损行 + 至少一条可解析行 → 仍在容忍度内，不拒绝。
+        let input = "bad one\nbad two\nbad three\n".to_string() + SAMPLE.lines().next().unwrap();
+        let r = ClaudeCodeAdapter::new().probe(input.as_bytes()).unwrap();
+        assert_eq!(r.confidence, Confidence::Low); // would-be High → Low
+    }
+
+    #[test]
+    fn probe_tolerates_shape_mismatch_line_within_tolerance() {
+        // shape 不符行同样计入容忍度：1 条合法 JSON 但结构不支持的行不整源拒绝。
+        let input = format!(
+            "{}\n{}\n{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":42}}}}",
+            SAMPLE.lines().next().unwrap(),
+            SAMPLE.lines().nth(1).unwrap()
+        );
+        let r = ClaudeCodeAdapter::new().probe(input.as_bytes()).unwrap();
+        assert_eq!(r.confidence, Confidence::Low);
+    }
+
+    #[test]
+    fn probe_rejects_broken_lines_beyond_tolerance_with_line_numbers() {
+        // 破损行数超过容忍度（4 > 3）：整源拒绝，错误携带"第 N 行"定位
+        // 与修复方向（PRD R2.2），绝不裸报。
+        let input = format!(
+            "{}\n{}\n{}\n{}\n{}",
+            "this is not json 1",
+            "this is not json 2",
+            "this is not json 3",
+            "this is not json 4",
+            SAMPLE.lines().next().unwrap(),
+        );
+        let err = ClaudeCodeAdapter::new()
+            .probe(input.as_bytes())
+            .unwrap_err();
+        let ProviderError::AmbiguousVariant(msg) = &err else {
+            panic!("expected AmbiguousVariant, got {err:?}");
+        };
+        assert!(msg.contains("第 1、2、3、4 行"), "应列出破损行号: {msg}");
+        assert!(
+            msg.contains("修复") && msg.contains("重试"),
+            "应给出修复方向: {msg}"
+        );
+    }
+
+    #[test]
+    fn parse_reports_multi_session_diagnostic_and_keeps_first_session() {
+        // 同一文件出现两个不同 sessionId（手工拼接的合并文件）：不静默折叠——
+        // 产出诊断（数量 + id），归属仍为首个会话（PRD R3.1）。
+        let first = SAMPLE
+            .lines()
+            .next()
+            .unwrap()
+            .replace("sess-abc", "sess-first");
+        let second = SAMPLE
+            .lines()
+            .nth(1)
+            .unwrap()
+            .replace("sess-abc", "sess-second");
+        let input = format!("{first}\n{second}");
+        let mut sink = CollectingSink::default();
+        let report = ClaudeCodeAdapter::new()
+            .parse(input.as_bytes(), &mut sink)
+            .unwrap();
+        assert_eq!(report.session_native_id.as_deref(), Some("sess-first"));
+        assert_eq!(report.committed, 2);
+        let diag = report
+            .diagnostics
+            .iter()
+            .find(|d| d.contains("不同 sessionId"))
+            .expect("must emit a multi-session diagnostic");
+        assert!(diag.contains('2'), "诊断应含会话数量: {diag}");
+        assert!(
+            diag.contains("sess-first") && diag.contains("sess-second"),
+            "诊断应含会话 id: {diag}"
+        );
+    }
+
+    #[test]
+    fn parse_single_session_emits_no_multi_session_diagnostic() {
+        let mut sink = CollectingSink::default();
+        let report = ClaudeCodeAdapter::new()
+            .parse(SAMPLE.as_bytes(), &mut sink)
+            .unwrap();
+        assert!(report.session_native_id.is_some());
+        assert!(
+            !report
+                .diagnostics
+                .iter()
+                .any(|d| d.contains("不同 sessionId")),
+            "单会话文件不得产生多会话诊断: {:?}",
+            report.diagnostics
         );
     }
 

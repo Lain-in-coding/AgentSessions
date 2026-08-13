@@ -133,21 +133,37 @@ pub trait ContextGraphStore {
     /// messages they cannot see.
     fn message_contexts(&self, message_id: &StableId) -> PortResult<Vec<MessageContextCandidate>>;
 
+    /// 批量解析消息的归属会话（ADR-0008）：返回与 `message_ids` 同序的
+    /// `(消息 id, 会话 id)`。消息没有任何 placement → `None`。
+    ///
+    /// 消息可同时属于多个会话（多会话文件、被复制的历史）；此处取确定的单个
+    /// 会话——所有 placement 中 wire id 字典序最小的会话（与列表类用例的
+    /// wire-id-asc 惯例一致），保证分页游标下的结果稳定。实现必须批量读取
+    /// （分块 IN），不得逐条查询（N+1）。
+    fn session_of(&self, message_ids: &[StableId])
+    -> PortResult<Vec<(StableId, Option<StableId>)>>;
+
     fn context_stats(&self) -> PortResult<ContextStats>;
 }
 
-/// 检索命中：一条搜索结果的最小信息。
+/// 检索命中：一条搜索结果。
 #[derive(Debug, Clone, PartialEq)]
 pub struct SearchHit {
     /// 命中实体的稳定 ID。
     pub id: StableId,
     /// 相关性打分（后端相对值，跨后端不可比）。
     pub score: f32,
-    /// 命中实体正文的前缀摘要，由 Application 检索装配时填充（保序批量取 payload
-    /// 后截取 `text` 字段）。`None` 表示该实体没有可展示正文。
+    /// 命中实体的归属会话 wire id（ADR-0008），由 Application 检索装配时经
+    /// [`ContextGraphStore::session_of`] 批量填充。`None` 表示该消息没有
+    /// 任何 placement（无归属会话）。
+    pub session_id: Option<String>,
+    /// 命中实体正文的摘要，由 Application 检索装配时填充（保序批量取 payload
+    /// 后截取 `text` 字段，按 `max_snippet_chars` 截前缀）。`None` 表示该实体
+    /// 没有可展示正文。
     ///
-    /// 仅供人类渲染使用；robot/MCP 序列化器不得输出此字段（协议兼容性约束）。
-    pub snippet: Option<String>,
+    /// robot/json/jsonl 序列化器输出为命中对象的 `text` 字段；人类渲染器打印
+    /// 同一摘要作为 snippet 行（R4.3：human 输出不变）。
+    pub text: Option<String>,
 }
 
 /// 全文检索端口：对应 FTS5 主存（见 ADR-0001）。
@@ -190,6 +206,13 @@ impl<T: ContextGraphStore + ?Sized> ContextGraphStore for &T {
 
     fn message_contexts(&self, message_id: &StableId) -> PortResult<Vec<MessageContextCandidate>> {
         (**self).message_contexts(message_id)
+    }
+
+    fn session_of(
+        &self,
+        message_ids: &[StableId],
+    ) -> PortResult<Vec<(StableId, Option<StableId>)>> {
+        (**self).session_of(message_ids)
     }
 
     fn context_stats(&self) -> PortResult<ContextStats> {
@@ -410,6 +433,13 @@ mod tests {
             _message_id: &StableId,
         ) -> PortResult<Vec<MessageContextCandidate>> {
             Ok(Vec::new())
+        }
+
+        fn session_of(
+            &self,
+            message_ids: &[StableId],
+        ) -> PortResult<Vec<(StableId, Option<StableId>)>> {
+            Ok(message_ids.iter().map(|id| (id.clone(), None)).collect())
         }
 
         fn context_stats(&self) -> PortResult<ContextStats> {

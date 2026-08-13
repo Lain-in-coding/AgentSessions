@@ -5,7 +5,9 @@
 //! Beta 认证的可复核证据。fixture 为纯合成数据，来源与覆盖点见
 //! `tests/golden/PROVENANCE.md`。
 
-use agent_session_grep_ports::{CanonicalEventSink, MessageEvent, ParseReport, ProviderAdapter};
+use agent_session_grep_ports::{
+    CanonicalEventSink, Confidence, MessageEvent, ParseReport, ProviderAdapter,
+};
 use agent_session_grep_provider_claude::ClaudeCodeAdapter;
 use serde_json::{Value, json};
 
@@ -122,6 +124,18 @@ fn golden_canonical_output_is_pinned() {
         actual, expected,
         "canonical 输出与 pinned 期望不一致——parser 行为漂移或 fixture 未经评审变更。actual =\n{actual_pretty}"
     );
+}
+
+#[test]
+fn golden_probe_tolerates_intentional_broken_line() {
+    // PRD R2.3：fixture 内置一条故意破损行——probe 必须容忍（≤3），不得
+    // 整源拒绝；置信度降一档（无破损时为 High → Low），保持 adapter 认领。
+    let expected = read_expected();
+    let bytes = read_fixture_verified(&expected);
+    let r = ClaudeCodeAdapter::new()
+        .probe(&bytes)
+        .expect("golden fixture probe must tolerate the broken line");
+    assert_eq!(r.confidence, Confidence::Low);
 }
 
 #[test]

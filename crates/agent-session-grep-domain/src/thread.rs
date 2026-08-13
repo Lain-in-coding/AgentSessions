@@ -38,6 +38,8 @@ pub fn select_mainline(graph: &SessionContextGraph) -> DomainResult<Option<Branc
     graph.validate()?;
 
     let messages = messages_by_id(graph);
+    // 每条消息的时间戳只解析一次;比较时读 map(逐跳重复解析是 O(n²) 热点)。
+    let instants = instants_by_id(&messages);
     let edges: BTreeMap<&str, &MessageEdge> = graph
         .edges
         .iter()
@@ -45,6 +47,9 @@ pub fn select_mainline(graph: &SessionContextGraph) -> DomainResult<Option<Branc
         .collect();
 
     let all_placements: Vec<&MessagePlacement> = graph.placements.iter().collect();
+    // 每条消息的全部出现按图内顺序索引一次;父解析从逐跳扫描全部出现降为
+    // 一次 map 查找(候选图很大时逐跳扫描是 O(n²) 热点)。
+    let placements_by_message = placements_by_message(&all_placements);
     let mut candidates: Vec<&MessagePlacement> = all_placements
         .iter()
         .copied()
@@ -90,18 +95,18 @@ pub fn select_mainline(graph: &SessionContextGraph) -> DomainResult<Option<Branc
         if !edged.is_empty() {
             edged
                 .into_iter()
-                .max_by(|left, right| compare_placements(left, right, &messages))
+                .max_by(|left, right| compare_placements(left, right, &messages, &instants))
         } else {
             leaves
                 .into_iter()
-                .max_by(|left, right| compare_placements(left, right, &messages))
+                .max_by(|left, right| compare_placements(left, right, &messages, &instants))
         }
     }
     .or_else(|| {
         candidates
             .iter()
             .copied()
-            .max_by(|left, right| compare_placements(left, right, &messages))
+            .max_by(|left, right| compare_placements(left, right, &messages, &instants))
     });
     let Some(leaf) = leaf else {
         return Ok(None);
@@ -113,7 +118,7 @@ pub fn select_mainline(graph: &SessionContextGraph) -> DomainResult<Option<Branc
     let mut current = leaf;
     // 沿选中分支惰性解析父链:不在分支上的候选即使父解析歧义也不阻塞
     // 整条 mainline(如 fork/retry 子消息指向只存在于其他文档的父)。
-    while let Some(parent) = resolve_parent(current, &all_placements, &edges)? {
+    while let Some(parent) = resolve_parent(current, &placements_by_message, &edges)? {
         if !visited.insert(parent.id.as_str()) {
             break;
         }
@@ -129,8 +134,9 @@ pub fn select_mainline(graph: &SessionContextGraph) -> DomainResult<Option<Branc
 pub fn select_full(graph: &SessionContextGraph) -> DomainResult<Vec<&MessagePlacement>> {
     graph.validate()?;
     let messages = messages_by_id(graph);
+    let instants = instants_by_id(&messages);
     let mut placements: Vec<&MessagePlacement> = graph.placements.iter().collect();
-    placements.sort_by(|left, right| compare_placements(left, right, &messages));
+    placements.sort_by(|left, right| compare_placements(left, right, &messages, &instants));
     Ok(placements)
 }
 
@@ -142,26 +148,50 @@ fn messages_by_id(graph: &SessionContextGraph) -> BTreeMap<&str, &Message> {
         .collect()
 }
 
+/// 每条消息的解析后时间戳(秒 + 纳秒),每消息只解析一次。缺失或不可解析均为
+/// `None`;不可解析时比较回退原始字节序,与逐次解析的语义一致。
+fn instants_by_id<'a>(
+    messages: &'a BTreeMap<&'a str, &'a Message>,
+) -> BTreeMap<&'a str, Option<Instant>> {
+    messages
+        .iter()
+        .map(|(id, message)| (*id, message.timestamp.as_deref().and_then(parse_instant)))
+        .collect()
+}
+
+/// 每条消息的全部出现,按图内出现顺序索引。
+fn placements_by_message<'a>(
+    placements: &[&'a MessagePlacement],
+) -> BTreeMap<&'a str, Vec<&'a MessagePlacement>> {
+    let mut index: BTreeMap<&str, Vec<&MessagePlacement>> = BTreeMap::new();
+    for placement in placements {
+        index
+            .entry(placement.message_id.as_str())
+            .or_default()
+            .push(*placement);
+    }
+    index
+}
+
 fn resolve_parent<'a>(
     child: &'a MessagePlacement,
-    candidates: &[&'a MessagePlacement],
+    placements_by_message: &BTreeMap<&str, Vec<&'a MessagePlacement>>,
     edges: &BTreeMap<&str, &MessageEdge>,
 ) -> DomainResult<Option<&'a MessagePlacement>> {
     let Some(edge) = edges.get(child.id.as_str()) else {
         return Ok(None);
     };
 
-    let matching: Vec<&MessagePlacement> = candidates
-        .iter()
-        .copied()
-        .filter(|placement| placement.message_id.as_str() == edge.parent_message_id.as_str())
-        .collect();
-    match matching.as_slice() {
+    let matching: &[&'a MessagePlacement] = placements_by_message
+        .get(edge.parent_message_id.as_str())
+        .map_or(&[][..], |placements| placements.as_slice());
+    match matching {
         [] => Ok(None),
         [parent] => Ok(Some(*parent)),
         _ => {
             let same_document: Vec<&MessagePlacement> = matching
-                .into_iter()
+                .iter()
+                .copied()
                 .filter(|placement| {
                     placement.source_document_id.as_str() == child.source_document_id.as_str()
                 })
@@ -174,25 +204,6 @@ fn resolve_parent<'a>(
                 ))),
             }
         }
-    }
-}
-
-/// Compare two timestamps in ISO-8601 form.
-///
-/// Raw byte comparison reverses order when the two values disagree about the
-/// fractional-second digits (`"00:04:00Z"` vs `"00:04:00.123Z"`: `'Z'` (0x5A)
-/// sorts after `'.'` (0x2E) even though `.123Z` is later), and when one carries
-/// a numeric timezone offset (`"00:04:00+08:00"` sorts after `"00:04:00Z"`
-/// though it is eight hours *earlier*). Providers emit both shapes, so each
-/// value is parsed into a UTC instant (seconds since the epoch + nanoseconds)
-/// before comparison: `±HH:MM` / `±HHMM` offsets are applied, fractions keep
-/// full nanosecond precision (shorter fractions are zero-padded to nine
-/// digits), and a missing zone is treated as UTC. Unparseable values fall back
-/// to a deterministic raw byte comparison. The parser allocates nothing.
-fn cmp_timestamps(left: &str, right: &str) -> std::cmp::Ordering {
-    match (parse_instant(left), parse_instant(right)) {
-        (Some(a), Some(b)) => a.cmp(&b),
-        _ => left.as_bytes().cmp(right.as_bytes()),
     }
 }
 
@@ -295,23 +306,36 @@ fn days_from_civil(year: i64, month: u32, day: u32) -> Option<i64> {
     Some(era * 146097 + day_of_era - 719468)
 }
 
+/// 比较两个出现:先按消息时间戳(预解析 map,每消息解析一次),缺失排在
+/// 有值之前;时间戳相同时按文档 id → 源内序号 → 出现 id 的字节序决胜。
+///
+/// 时间戳值都在 `instants` 里预解析过;两个都能解析则按 UTC 瞬时比较,
+/// 任一不可解析则回退原始字节比较(与逐次解析的 `cmp_timestamps` 一致)。
 fn compare_placements(
     left: &MessagePlacement,
     right: &MessagePlacement,
     messages: &BTreeMap<&str, &Message>,
+    instants: &BTreeMap<&str, Option<Instant>>,
 ) -> Ordering {
-    let left_timestamp = messages
+    let left_raw = messages
         .get(left.message_id.as_str())
         .and_then(|message| message.timestamp.as_deref());
-    let right_timestamp = messages
+    let right_raw = messages
         .get(right.message_id.as_str())
         .and_then(|message| message.timestamp.as_deref());
 
-    match (left_timestamp, right_timestamp) {
+    match (left_raw, right_raw) {
         (None, None) => Ordering::Equal,
         (None, Some(_)) => Ordering::Less,
         (Some(_), None) => Ordering::Greater,
-        (Some(left), Some(right)) => cmp_timestamps(left, right),
+        (Some(left_raw), Some(right_raw)) => {
+            let left_instant = instants.get(left.message_id.as_str()).copied().flatten();
+            let right_instant = instants.get(right.message_id.as_str()).copied().flatten();
+            match (left_instant, right_instant) {
+                (Some(left_instant), Some(right_instant)) => left_instant.cmp(&right_instant),
+                _ => left_raw.as_bytes().cmp(right_raw.as_bytes()),
+            }
+        }
     }
     .then_with(|| {
         left.source_document_id
@@ -403,6 +427,314 @@ mod tests {
             .iter()
             .map(|placement| placement.source_ordinal)
             .collect()
+    }
+
+    // ===== pre-change reference implementation (property-test oracle) =====
+    //
+    // The production path pre-parses timestamps into a map and resolves parents
+    // through a per-message placement index; this copy preserves the original
+    // per-comparison parse + per-hop scan semantics to prove the selection is
+    // byte-for-byte identical on generated graphs.
+
+    /// Compare two timestamps in ISO-8601 form.
+    ///
+    /// Raw byte comparison reverses order when the two values disagree about the
+    /// fractional-second digits (`"00:04:00Z"` vs `"00:04:00.123Z"`: `'Z'` (0x5A)
+    /// sorts after `'.'` (0x2E) even though `.123Z` is later), and when one carries
+    /// a numeric timezone offset (`"00:04:00+08:00"` sorts after `"00:04:00Z"`
+    /// though it is eight hours *earlier*). Providers emit both shapes, so each
+    /// value is parsed into a UTC instant (seconds since the epoch + nanoseconds)
+    /// before comparison: `±HH:MM` / `±HHMM` offsets are applied, fractions keep
+    /// full nanosecond precision (shorter fractions are zero-padded to nine
+    /// digits), and a missing zone is treated as UTC. Unparseable values fall back
+    /// to a deterministic raw byte comparison. The parser allocates nothing.
+    fn cmp_timestamps(left: &str, right: &str) -> std::cmp::Ordering {
+        match (parse_instant(left), parse_instant(right)) {
+            (Some(a), Some(b)) => a.cmp(&b),
+            _ => left.as_bytes().cmp(right.as_bytes()),
+        }
+    }
+
+    fn compare_placements_reference(
+        left: &MessagePlacement,
+        right: &MessagePlacement,
+        messages: &BTreeMap<&str, &Message>,
+    ) -> Ordering {
+        let left_timestamp = messages
+            .get(left.message_id.as_str())
+            .and_then(|message| message.timestamp.as_deref());
+        let right_timestamp = messages
+            .get(right.message_id.as_str())
+            .and_then(|message| message.timestamp.as_deref());
+
+        match (left_timestamp, right_timestamp) {
+            (None, None) => Ordering::Equal,
+            (None, Some(_)) => Ordering::Less,
+            (Some(_), None) => Ordering::Greater,
+            (Some(left), Some(right)) => cmp_timestamps(left, right),
+        }
+        .then_with(|| {
+            left.source_document_id
+                .as_str()
+                .as_bytes()
+                .cmp(right.source_document_id.as_str().as_bytes())
+        })
+        .then_with(|| left.source_ordinal.cmp(&right.source_ordinal))
+        .then_with(|| {
+            left.id
+                .as_str()
+                .as_bytes()
+                .cmp(right.id.as_str().as_bytes())
+        })
+    }
+
+    fn resolve_parent_reference<'a>(
+        child: &'a MessagePlacement,
+        candidates: &[&'a MessagePlacement],
+        edges: &BTreeMap<&str, &MessageEdge>,
+    ) -> DomainResult<Option<&'a MessagePlacement>> {
+        let Some(edge) = edges.get(child.id.as_str()) else {
+            return Ok(None);
+        };
+
+        let matching: Vec<&MessagePlacement> = candidates
+            .iter()
+            .copied()
+            .filter(|placement| placement.message_id.as_str() == edge.parent_message_id.as_str())
+            .collect();
+        match matching.as_slice() {
+            [] => Ok(None),
+            [parent] => Ok(Some(*parent)),
+            _ => {
+                let same_document: Vec<&MessagePlacement> = matching
+                    .into_iter()
+                    .filter(|placement| {
+                        placement.source_document_id.as_str() == child.source_document_id.as_str()
+                    })
+                    .collect();
+                match same_document.as_slice() {
+                    [parent] => Ok(Some(*parent)),
+                    _ => Err(DomainError::AmbiguousGraph(format!(
+                        "child placement {} has multiple possible parents",
+                        child.id
+                    ))),
+                }
+            }
+        }
+    }
+
+    fn select_mainline_reference(
+        graph: &SessionContextGraph,
+    ) -> DomainResult<Option<BranchSelection<'_>>> {
+        graph.validate()?;
+
+        let messages = messages_by_id(graph);
+        let edges: BTreeMap<&str, &MessageEdge> = graph
+            .edges
+            .iter()
+            .map(|edge| (edge.child_placement_id.as_str(), edge))
+            .collect();
+
+        let all_placements: Vec<&MessagePlacement> = graph.placements.iter().collect();
+        let mut candidates: Vec<&MessagePlacement> = all_placements
+            .iter()
+            .copied()
+            .filter(|placement| !placement.is_sidechain)
+            .collect();
+        if candidates.is_empty() {
+            candidates.extend(all_placements.iter().copied());
+        }
+        if candidates.is_empty() {
+            return Ok(None);
+        }
+
+        let parent_message_ids: BTreeSet<&str> = candidates
+            .iter()
+            .filter_map(|candidate| {
+                edges
+                    .get(candidate.id.as_str())
+                    .map(|edge| edge.parent_message_id.as_str())
+            })
+            .collect();
+        let leaves: Vec<&MessagePlacement> = candidates
+            .iter()
+            .copied()
+            .filter(|candidate| !parent_message_ids.contains(candidate.message_id.as_str()))
+            .collect();
+
+        let leaf = {
+            let edged: Vec<&MessagePlacement> = leaves
+                .iter()
+                .copied()
+                .filter(|placement| edges.contains_key(placement.id.as_str()))
+                .collect();
+            if !edged.is_empty() {
+                edged
+                    .into_iter()
+                    .max_by(|left, right| compare_placements_reference(left, right, &messages))
+            } else {
+                leaves
+                    .into_iter()
+                    .max_by(|left, right| compare_placements_reference(left, right, &messages))
+            }
+        }
+        .or_else(|| {
+            candidates
+                .iter()
+                .copied()
+                .max_by(|left, right| compare_placements_reference(left, right, &messages))
+        });
+        let Some(leaf) = leaf else {
+            return Ok(None);
+        };
+
+        let mut placements = vec![leaf];
+        let mut visited = BTreeSet::new();
+        visited.insert(leaf.id.as_str());
+        let mut current = leaf;
+        while let Some(parent) = resolve_parent_reference(current, &all_placements, &edges)? {
+            if !visited.insert(parent.id.as_str()) {
+                break;
+            }
+            placements.push(parent);
+            current = parent;
+        }
+        placements.reverse();
+
+        Ok(Some(BranchSelection { leaf, placements }))
+    }
+
+    /// 确定性 LCG,用于随机图生成(无外部依赖)。
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn new(seed: u64) -> Self {
+            Lcg(seed)
+        }
+
+        fn next(&mut self) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            self.0 >> 33
+        }
+
+        fn below(&mut self, bound: u64) -> u64 {
+            self.next() % bound
+        }
+    }
+
+    fn random_graph(
+        rng: &mut Lcg,
+        session: &StableId,
+        message_count: u64,
+        target_placement_count: u64,
+    ) -> SessionContextGraph {
+        let timestamps: [Option<&str>; 9] = [
+            None,
+            Some("2026-01-01T00:04:00Z"),
+            Some("2026-01-01T00:04:00.123Z"),
+            Some("2026-01-01T00:04:00+08:00"),
+            Some("2026-01-01T00:04:00-05:00"),
+            Some("2026-01-01T00:04:00.123456789Z"),
+            Some("2026-01-01T00:04:00"),
+            Some("2026-13-40T99:99:99Z"),
+            Some("not-a-timestamp"),
+        ];
+        let mut messages = Vec::new();
+        for index in 0..message_count {
+            let timestamp = timestamps[rng.below(timestamps.len() as u64) as usize];
+            messages.push(message(&format!("m{index}"), timestamp));
+        }
+        let document_count = 1 + rng.below(3);
+        let documents: Vec<SourceDocument> = (0..document_count)
+            .map(|index| document(&format!("d{index}")))
+            .collect();
+
+        // 出现坐标(session, doc, message, ordinal)必须唯一;碰撞则重试。
+        let mut placements = Vec::new();
+        let mut coordinates = BTreeSet::new();
+        let mut attempts = 0u64;
+        while placements.len() < target_placement_count as usize
+            && attempts < target_placement_count * 32
+        {
+            attempts += 1;
+            let document = &documents[rng.below(document_count) as usize];
+            let message = &messages[rng.below(message_count) as usize];
+            let ordinal = rng.below(8) as u32;
+            let coordinate = (
+                document.id.as_str().to_string(),
+                message.id.as_str().to_string(),
+                ordinal,
+            );
+            if !coordinates.insert(coordinate) {
+                continue;
+            }
+            let is_sidechain = rng.below(4) == 0;
+            placements.push(placement(
+                session,
+                &document.id,
+                &message.id,
+                ordinal,
+                is_sidechain,
+            ));
+        }
+
+        // 约 2/3 的出现带一条出边;父消息一半取自图内(可能无出现 → 孤儿父),
+        // 一半是图外消息 id(跨文档/会话的孤儿父)。
+        let mut edges = Vec::new();
+        for child in &placements {
+            if rng.below(3) == 0 {
+                continue;
+            }
+            let parent = if rng.below(2) == 0 {
+                messages[rng.below(message_count) as usize].id.clone()
+            } else {
+                let orphan = format!("orphan-{}", rng.below(4096));
+                StableId::derive(IdKind::Message, Stability::Unstable, &[orphan.as_bytes()])
+            };
+            edges.push(MessageEdge {
+                child_placement_id: child.id.clone(),
+                parent_message_id: parent,
+                parent_native_id: None,
+                relation: MessageRelation::Reply,
+            });
+        }
+
+        graph(session.clone(), messages, documents, placements, edges)
+    }
+
+    fn selection_outcome(
+        branch: &Option<BranchSelection<'_>>,
+    ) -> Option<(PlacementId, Vec<PlacementId>)> {
+        branch.as_ref().map(|branch| {
+            (
+                branch.leaf.id.clone(),
+                branch
+                    .placements
+                    .iter()
+                    .map(|placement| placement.id.clone())
+                    .collect(),
+            )
+        })
+    }
+
+    #[test]
+    fn select_mainline_matches_pre_change_reference_on_random_graphs() {
+        // R2/R3 行为保真:主链选择(叶子 + 完整分支)与改前逐跳扫描/逐次解析
+        // 的实现完全一致。生成图覆盖跨文档重复消息(叉/歧义)、孤儿父、
+        // sidechain、不可解析时间戳与各种时区/小数形态。
+        let session = id(IdKind::Session, "property-session");
+        let mut rng = Lcg::new(0x9e37_79b9_7f4a_7c15);
+        for iteration in 0..400 {
+            let graph = random_graph(&mut rng, &session, 6, 12);
+            let before_result = select_mainline_reference(&graph);
+            let after_result = select_mainline(&graph);
+            let before = before_result.as_ref().map(selection_outcome);
+            let after = after_result.as_ref().map(selection_outcome);
+            assert_eq!(after, before, "iteration {iteration}");
+        }
     }
 
     #[test]

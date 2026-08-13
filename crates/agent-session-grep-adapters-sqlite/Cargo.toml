@@ -7,9 +7,11 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+agent-session-grep-application = { path = "../agent-session-grep-application" }
 agent-session-grep-domain = { path = "../agent-session-grep-domain" }
 agent-session-grep-ports = { path = "../agent-session-grep-ports" }
-rusqlite = { version = "0.40", features = ["bundled"] }
+# "trace" 仅供测试的 SQL 语句计数守卫使用(sqlite3_trace_v2 钩子)。
+rusqlite = { version = "0.40", features = ["bundled", "trace"] }
 serde_json.workspace = true
 blake3.workspace = true
 # 与 spikes/data-root-locking 同一原语：OS 独占文件锁作 writer lease 权威。

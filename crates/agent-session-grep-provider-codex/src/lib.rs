@@ -27,7 +27,22 @@ use serde::Deserialize;
 /// 本 adapter 认证的 variant 标识。
 const VARIANT_ID: &str = "codex/rollout-jsonl-v1";
 
+/// probe 判定用的样本窗口大小（前 N 个非空行，RFC-0002 §7 bounded）。
+const SAMPLE_LINE_LIMIT: usize = 16;
+/// 样本窗口内容忍的未解析行数上限：≤ 此值只把置信度降一档并继续（解析阶段
+/// 对破损行逐行跳过并给出诊断），超过才整源拒绝（PRD R2.1）。
+const SAMPLE_BROKEN_TOLERANCE: usize = 3;
+/// 拒绝/诊断消息中列出的行号条数上限（bounded detail）。
+const BAD_LINE_LIST_LIMIT: usize = 5;
+/// 多会话诊断中列出的 session id 条数上限（bounded detail）。
+const SESSION_ID_LIST_LIMIT: usize = 3;
+
 /// Codex rollout JSONL adapter。无状态——所有解析所需信息都来自输入字节。
+///
+/// **单文件 = 单会话**：一个源文件预期只含一个会话（`session_meta` 的
+/// `session_id`）。若同一文件出现多个不同的 `session_id`（如手工拼接的合并
+/// 文件），全部消息仍归属首个出现的会话（保持既有 first-session 契约），
+/// 解析报告会追加一条多会话诊断（PRD R3.1）。
 #[derive(Debug, Default, Clone, Copy)]
 pub struct CodexAdapter;
 
@@ -121,6 +136,31 @@ fn is_known_envelope_type(kind: &str) -> bool {
     )
 }
 
+/// 把行号序列格式化为中文定位列表；超过上限用"等 N 处"收口（bounded detail）。
+fn list_line_nos(nos: &[usize]) -> String {
+    let mut out = String::new();
+    let shown = nos.len().min(BAD_LINE_LIST_LIMIT);
+    for (i, no) in nos[..shown].iter().enumerate() {
+        if i > 0 {
+            out.push('、');
+        }
+        out.push_str(&no.to_string());
+    }
+    if nos.len() > shown {
+        out.push_str(&format!(" 等 {} 处", nos.len()));
+    }
+    out
+}
+
+/// 整源拒绝时的行号定位 + 修复方向（PRD R2.2）：绝不裸报 "no provider
+/// recognized"。
+fn bad_lines_detail(bad_lines: &[usize]) -> String {
+    format!(
+        "第 {} 行不是有效 JSON。请修复或删除这些行后重试（该文件应为每行一条 JSON 封套记录的 Codex rollout JSONL）",
+        list_line_nos(bad_lines)
+    )
+}
+
 impl ProviderAdapter for CodexAdapter {
     fn provider_id(&self) -> &str {
         "codex"
@@ -135,16 +175,23 @@ impl ProviderAdapter for CodexAdapter {
         let mut matched = Vec::new();
         let mut unmatched = Vec::new();
 
-        // 取前若干非空行做判定，避免整体加载（RFC-0002 §7 bounded）。
-        let sample: Vec<&str> = text
-            .lines()
-            .filter(|l| !l.trim().is_empty())
-            .take(16)
-            .collect();
+        // 取前若干非空行做判定，避免整体加载（RFC-0002 §7 bounded）；同时保留
+        // 原始行号，供容忍/拒绝路径给出"第 N 行"的准确定位。
+        let mut sample: Vec<(usize, &str)> = Vec::new();
+        for (idx, line) in text.lines().enumerate() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            if sample.len() == SAMPLE_LINE_LIMIT {
+                break;
+            }
+            sample.push((idx + 1, line));
+        }
 
         if sample.is_empty() {
             return Err(ProviderError::AmbiguousVariant(
-                "empty input: no non-blank lines to probe".into(),
+                "empty input: no non-blank lines to probe；请确认该文件不是空文件，且是 Codex CLI 的 rollout JSONL"
+                    .into(),
             ));
         }
 
@@ -153,7 +200,8 @@ impl ProviderAdapter for CodexAdapter {
         let mut timestamped = 0usize;
         let mut has_session_meta = false;
         let mut has_message = false;
-        for line in &sample {
+        let mut bad_lines: Vec<usize> = Vec::new();
+        for &(line_no, line) in &sample {
             match serde_json::from_str::<RawLine>(line) {
                 Ok(rec) => {
                     json_lines += 1;
@@ -174,25 +222,37 @@ impl ProviderAdapter for CodexAdapter {
                     }
                 }
                 Err(_) => {
-                    unmatched.push("found a non-JSON line".into());
+                    bad_lines.push(line_no);
+                    unmatched.push(format!("line {line_no}: found a non-JSON line"));
                 }
             }
         }
 
-        // 每行都是 JSON 才可能是 JSONL；否则拒绝。
-        if json_lines != sample.len() {
-            return Err(ProviderError::AmbiguousVariant(format!(
-                "not line-delimited JSON: {}/{} sampled lines parsed",
-                json_lines,
-                sample.len()
-            )));
+        // 样本内少量未解析行（≤ 容忍度且至少有一行可解析）不是整源拒绝的理由：
+        // 降一档置信度继续——解析阶段会对这些行逐行跳过并给出诊断（PRD R2.1）。
+        // 超过容忍度，或一行都没解析出来（整文件是垃圾而非"带破损行的 rollout"）
+        // → 整源拒绝，错误携带行号定位与修复方向（PRD R2.2）。
+        if !bad_lines.is_empty() {
+            if bad_lines.len() > SAMPLE_BROKEN_TOLERANCE || json_lines == 0 {
+                return Err(ProviderError::AmbiguousVariant(format!(
+                    "not line-delimited JSON: {}/{} sampled lines parsed。{}",
+                    json_lines,
+                    sample.len(),
+                    bad_lines_detail(&bad_lines)
+                )));
+            }
+            unmatched.push(format!(
+                "第 {} 行未解析——在样本容忍度内（≤{SAMPLE_BROKEN_TOLERANCE}），置信度降一档",
+                list_line_nos(&bad_lines)
+            ));
         }
         matched.push(format!("{json_lines} sampled lines are valid JSON objects"));
 
         // 无任何 Codex 封套结构 → 不是本 variant（可能是别的 JSONL，如 Claude Code）。
         if enveloped == 0 {
             return Err(ProviderError::AmbiguousVariant(
-                "no Codex envelope records ({timestamp,type,payload}) found".into(),
+                "no Codex envelope records ({timestamp,type,payload}) found；该文件可能不是 Codex CLI 的 rollout JSONL，请确认来源文件"
+                    .into(),
             ));
         }
         matched.push(format!("{enveloped} lines carry a Codex envelope"));
@@ -204,7 +264,7 @@ impl ProviderAdapter for CodexAdapter {
 
         // 收紧正信号：单条封套行不足以 Confirmed——至少 2 条封套行（其余行已由
         // 全量可解析门保证）且出现会话头或权威对话记录才承诺 Confirmed。
-        let confidence = if enveloped >= 2 && (has_session_meta || has_message) {
+        let mut confidence = if enveloped >= 2 && (has_session_meta || has_message) {
             if has_session_meta {
                 matched.push("session_meta header present".into());
             }
@@ -221,6 +281,21 @@ impl ProviderAdapter for CodexAdapter {
             unmatched.push("no session_meta or response_item/message in sample".into());
             Confidence::High
         };
+
+        // 容忍路径：置信度降一档（Low 不再降——Ambiguous 是拒绝语义，本路径保持认领）。
+        if !bad_lines.is_empty() {
+            confidence = match confidence {
+                Confidence::Confirmed => {
+                    matched.push("confidence degraded to High (tolerated broken lines)".into());
+                    Confidence::High
+                }
+                Confidence::High => {
+                    matched.push("confidence degraded to Low (tolerated broken lines)".into());
+                    Confidence::Low
+                }
+                other => other,
+            };
+        }
 
         Ok(ProbeResult {
             variant_id: VARIANT_ID.to_string(),
@@ -239,6 +314,8 @@ impl ProviderAdapter for CodexAdapter {
             .map_err(|e| ProviderError::StructuralFatal(format!("not valid UTF-8: {e}")))?;
 
         let mut report = ParseReport::default();
+        // 本文件出现的全部非空 session id（单文件=单会话契约的检测输入）。
+        let mut session_ids: Vec<String> = Vec::new();
         // seq 是会话内单调序号，只对成功 emit 的对话消息递增，
         // 从而满足 domain Session 的 seq 从 0 连续的不变量。
         let mut seq: u32 = 0;
@@ -273,13 +350,19 @@ impl ProviderAdapter for CodexAdapter {
                 }
             };
 
-            // session_meta 头携带 durable 会话 id——上报后该行不产生 Canonical 消息。
+            // session_meta 头携带 durable 会话 id——上报后该行不产生 Canonical 消息；
+            // 同时收集全部非空 session id，供末尾的多会话诊断（PRD R3.1）。
             if rec.r#type == "session_meta" {
-                if report.session_native_id.is_none()
-                    && let Some(sid) = rec.payload.as_ref().and_then(|p| p.session_id.as_deref())
+                if let Some(sid) = rec.payload.as_ref().and_then(|p| p.session_id.as_deref())
                     && !sid.trim().is_empty()
                 {
-                    report.session_native_id = Some(sid.trim().to_string());
+                    let sid = sid.trim();
+                    if report.session_native_id.is_none() {
+                        report.session_native_id = Some(sid.to_string());
+                    }
+                    if !session_ids.iter().any(|s| s == sid) {
+                        session_ids.push(sid.to_string());
+                    }
                 }
                 continue;
             }
@@ -336,6 +419,26 @@ impl ProviderAdapter for CodexAdapter {
             .map_err(|e| ProviderError::StructuralFatal(e.to_string()))?;
             seq += 1;
             report.committed += 1;
+        }
+
+        // 多会话诊断（PRD R3.1）：单文件=单会话。同一文件出现多个不同 session id
+        // 时不得静默折叠——报告数量与前若干 id，归属保持首个会话不变。
+        if session_ids.len() > 1 {
+            let mut id_list = session_ids
+                .iter()
+                .take(SESSION_ID_LIST_LIMIT)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("、");
+            if session_ids.len() > SESSION_ID_LIST_LIMIT {
+                id_list.push_str(" 等");
+            }
+            report.diagnostics.push(format!(
+                "文件包含 {} 个不同 session id（{}）——单文件=单会话，全部消息归属首个会话 {}",
+                session_ids.len(),
+                id_list,
+                session_ids[0]
+            ));
         }
 
         Ok(report)
@@ -417,6 +520,99 @@ mod tests {
 {"type":"assistant","uuid":"a-1","message":{"role":"assistant","content":"yo"}}"#;
         let err = CodexAdapter::new().probe(claude.as_bytes()).unwrap_err();
         assert!(matches!(err, ProviderError::AmbiguousVariant(_)));
+    }
+
+    #[test]
+    fn probe_tolerates_broken_line_within_tolerance() {
+        // 1 条非 JSON 行 ≤ 容忍度（3）：不整源拒绝，置信度降一档
+        // （无破损时为 Confirmed → High），并保留 tolerance 证据（PRD R2.1）。
+        let mut lines: Vec<&str> = SAMPLE.lines().collect();
+        lines.insert(1, "this is not json");
+        let input = lines.join("\n");
+        let r = CodexAdapter::new().probe(input.as_bytes()).unwrap();
+        assert_eq!(r.confidence, Confidence::High);
+        assert!(
+            r.unmatched_evidence.iter().any(|e| e.contains("容忍")),
+            "unmatched evidence 应说明容忍降档: {:?}",
+            r.unmatched_evidence
+        );
+    }
+
+    #[test]
+    fn probe_tolerates_up_to_three_broken_lines() {
+        // 恰好 3 条破损行 + 至少一条可解析行 → 仍在容忍度内，不拒绝。
+        let mut lines: Vec<&str> = SAMPLE.lines().collect();
+        lines.insert(1, "bad one");
+        lines.insert(1, "bad two");
+        lines.insert(1, "bad three");
+        let input = lines.join("\n");
+        let r = CodexAdapter::new().probe(input.as_bytes()).unwrap();
+        assert_eq!(r.confidence, Confidence::High); // would-be Confirmed → High
+    }
+
+    #[test]
+    fn probe_rejects_broken_lines_beyond_tolerance_with_line_numbers() {
+        // 破损行数超过容忍度（4 > 3）：整源拒绝，错误携带"第 N 行"定位
+        // 与修复方向（PRD R2.2），绝不裸报。
+        let input = concat!(
+            "bad one\n",
+            "bad two\n",
+            "bad three\n",
+            "bad four\n",
+            "{\"timestamp\":\"t\",\"type\":\"session_meta\",\"payload\":{\"session_id\":\"s-1\"}}",
+        );
+        let err = CodexAdapter::new().probe(input.as_bytes()).unwrap_err();
+        let ProviderError::AmbiguousVariant(msg) = &err else {
+            panic!("expected AmbiguousVariant, got {err:?}");
+        };
+        assert!(msg.contains("第 1、2、3、4 行"), "应列出破损行号: {msg}");
+        assert!(
+            msg.contains("修复") && msg.contains("重试"),
+            "应给出修复方向: {msg}"
+        );
+    }
+
+    #[test]
+    fn parse_reports_multi_session_diagnostic_and_keeps_first_session() {
+        // 两个 session_meta 头带不同 session_id（手工拼接的合并文件）：不静默
+        // 折叠——产出诊断（数量 + id），归属仍为首个会话（PRD R3.1）。
+        let meta = SAMPLE.lines().next().unwrap();
+        let first = meta.replace("019f7b08", "sess-first");
+        let second = meta.replace("019f7b08", "sess-second");
+        let input = format!("{first}\n{second}\n{}", SAMPLE.lines().nth(2).unwrap());
+        let mut sink = CollectingSink::default();
+        let report = CodexAdapter::new()
+            .parse(input.as_bytes(), &mut sink)
+            .unwrap();
+        assert_eq!(report.session_native_id.as_deref(), Some("sess-first"));
+        assert_eq!(report.committed, 1);
+        let diag = report
+            .diagnostics
+            .iter()
+            .find(|d| d.contains("不同 session id"))
+            .expect("must emit a multi-session diagnostic");
+        assert!(diag.contains('2'), "诊断应含会话数量: {diag}");
+        assert!(
+            diag.contains("sess-first") && diag.contains("sess-second"),
+            "诊断应含会话 id: {diag}"
+        );
+    }
+
+    #[test]
+    fn parse_single_session_emits_no_multi_session_diagnostic() {
+        let mut sink = CollectingSink::default();
+        let report = CodexAdapter::new()
+            .parse(SAMPLE.as_bytes(), &mut sink)
+            .unwrap();
+        assert!(report.session_native_id.is_some());
+        assert!(
+            !report
+                .diagnostics
+                .iter()
+                .any(|d| d.contains("不同 session id")),
+            "单会话文件不得产生多会话诊断: {:?}",
+            report.diagnostics
+        );
     }
 
     #[test]

@@ -5,8 +5,9 @@
 //! 故此处零第三方依赖即可定位到刚构建的二进制。
 
 use rusqlite::Connection;
+use std::io::Write;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 /// 刚构建出的 `agent-session-grep` 二进制的绝对路径（由 Cargo 在编译期注入）。
 const BIN: &str = env!("CARGO_BIN_EXE_agent-session-grep");
@@ -625,14 +626,21 @@ fn ingest_persists_session_and_document_entities_with_spans() {
         stdout(&out)
     );
 
-    // 容器实体不参与全文搜索：搜索只命中消息。
+    // 容器实体不参与全文搜索：搜索只命中消息。命中携带的 session_id 是追加的
+    // 归属字段（ADR-0008），断言必须检查 hit 的 id——原始输出字符串会被
+    // session_id 字段值误伤。
     let out = run(&db, &["search", "span"]);
-    let s = stdout(&out);
-    assert!(s.contains("msg_v1_"), "消息应命中: {s}");
-    assert!(
-        !s.contains("ses_v1_") && !s.contains("doc_v1_"),
-        "容器实体不应命中搜索: {s}"
-    );
+    let frame = parse_first_line(&out);
+    let hits = frame["data"]["hits"].as_array().expect("hits");
+    assert!(!hits.is_empty(), "消息应命中: {frame}");
+    for hit in hits {
+        assert!(
+            hit["id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("msg_v1_")),
+            "容器实体不应命中搜索: {hit}"
+        );
+    }
 }
 
 #[test]
@@ -2759,4 +2767,221 @@ fn snippet_renders_in_human_search_but_is_stripped_in_machine_modes() {
             );
         }
     }
+}
+
+// ─── R4/ADR-0008：search 命中携带 session_id 与 text 摘要 ───────────────────
+
+/// 带 sessionId 的合成 Claude 夹具：返回 (路径, 会话 wire id, 两条消息正文)。
+/// `long` 为 true 时两条正文都超长（用于字节预算截断用例）。
+fn write_session_hits_fixture(dir: &Path, long: bool) -> (String, String, String, String) {
+    let body_a = if long {
+        format!("widgets in the attic{}", "x".repeat(2000))
+    } else {
+        "widgets in the attic".into()
+    };
+    let body_b = if long {
+        format!("widgets reply{}", "y".repeat(2000))
+    } else {
+        "widgets reply".to_string()
+    };
+    let line_a = serde_json::json!({
+        "type": "user",
+        "uuid": "aaaa1111-2222-4333-8444-555566667777",
+        "sessionId": "abcd1234-5678-4abc-8def-aabbccddeeff",
+        "message": { "role": "user", "content": body_a },
+    })
+    .to_string();
+    let line_b = serde_json::json!({
+        "type": "assistant",
+        "uuid": "bbbb2222-3333-4444-8555-666677778888",
+        "sessionId": "abcd1234-5678-4abc-8def-aabbccddeeff",
+        "message": { "role": "assistant", "content": body_b },
+    })
+    .to_string();
+    let fixture = dir.join("session-hits.jsonl");
+    std::fs::write(&fixture, format!("{line_a}\n{line_b}\n")).expect("write fixture");
+    (
+        fixture.to_string_lossy().into_owned(),
+        "ses_v1_abcd1234-5678-4abc-8def-aabbccddeeff".into(),
+        body_a,
+        body_b,
+    )
+}
+
+#[test]
+fn search_robot_hits_carry_session_id_and_text() {
+    // R4/ADR-0008：robot 搜索命中携带 session_id（所属会话 wire id）与 text
+    // （正文摘要，按 max_snippet_chars 截取）。追加字段、无字段删除：id/score
+    // 原样保留，机器模式仍不带 human-only 的 snippet。
+    let (dir, db) = temp_db("hit-session-context");
+    let (fixture_path, session_wire, body_a, body_b) =
+        write_session_hits_fixture(dir.path(), false);
+    let out = run(&db, &["ingest", &fixture_path]);
+    assert!(out.status.success(), "ingest failed: {}", stdout(&out));
+
+    let out = run(&db, &["search", "widgets"]);
+    assert!(out.status.success(), "search failed: {}", stdout(&out));
+    let frame = parse_first_line(&out);
+    assert_envelope_shape(&frame, true);
+    let hits = frame["data"]["hits"].as_array().expect("hits");
+    assert_eq!(hits.len(), 2, "{frame}");
+    // 两条消息同属一个会话：session_id 都指向该会话的 wire id。
+    for hit in hits {
+        assert_eq!(hit["session_id"], session_wire, "{hit}");
+        assert!(
+            hit["id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("msg_v1_")),
+            "{hit}"
+        );
+        assert!(hit["score"].is_number(), "{hit}");
+        assert!(
+            hit.get("snippet").is_none(),
+            "机器模式不得携带 snippet: {hit}"
+        );
+    }
+    // text 摘要与消息正文一致（短正文不截断）。
+    let texts: Vec<&str> = hits
+        .iter()
+        .map(|hit| hit["text"].as_str().expect("hit text"))
+        .collect();
+    assert!(texts.contains(&body_a.as_str()), "{texts:?}");
+    assert!(texts.contains(&body_b.as_str()), "{texts:?}");
+}
+
+#[test]
+fn search_byte_budget_truncates_but_keeps_session_context_in_hits() {
+    // R4.2：摘要字节计入 max_response_bytes 字节闸。两条 2000+ 字符正文的命中
+    // 在最小预算 4096（净 3072）下必然被截断（即使按最宽松的字节估算也放不下
+    // 两条）；截断原因显式（max_response_bytes），保留下来的命中仍携带
+    // session_id/text。
+    let (dir, db) = temp_db("hit-session-budget");
+    let (fixture_path, session_wire, body_a, body_b) = write_session_hits_fixture(dir.path(), true);
+    let out = run(&db, &["ingest", &fixture_path]);
+    assert!(out.status.success(), "ingest failed: {}", stdout(&out));
+
+    let out = run(&db, &["search", "widgets", "--max-bytes", "4096"]);
+    // 预算截断按 contract §5 exit 10（partial）：结果可用但不完整，不伪装 success。
+    assert_eq!(
+        out.status.code(),
+        Some(10),
+        "预算截断应 exit 10: {}",
+        stdout(&out)
+    );
+    let frame = parse_first_line(&out);
+    assert_envelope_shape(&frame, true);
+    assert_eq!(frame["outcome"], "partial", "{frame}");
+    assert_eq!(
+        frame["data"]["truncation"]["truncated"], true,
+        "字节预算必须显式截断: {frame}"
+    );
+    assert_eq!(
+        frame["data"]["truncation"]["reason"], "max_response_bytes",
+        "截断原因必须显式: {frame}"
+    );
+    let hits = frame["data"]["hits"].as_array().expect("hits");
+    assert!(
+        hits.len() < 2,
+        "两条长正文命中放不进 4096 字节预算: {frame}"
+    );
+    for hit in hits {
+        // 截断后保留的命中仍是完整命中：session_id/text 不因截断而丢失。
+        assert_eq!(hit["session_id"], session_wire, "{hit}");
+        let text = hit["text"].as_str().expect("hit text");
+        assert!(!text.is_empty(), "{hit}");
+        assert!(
+            text.chars().count() <= 2000,
+            "text 摘要不得超过 max_snippet_chars: {hit}"
+        );
+        assert!(
+            body_a.starts_with(text) || body_b.starts_with(text),
+            "摘要应是正文前缀: {hit}"
+        );
+    }
+}
+
+#[test]
+fn mcp_search_sessions_hits_carry_session_id_and_text() {
+    // R4/ADR-0008：MCP search_sessions 命中与 CLI 共用同一 render 投影，携带
+    // 追加的 session_id/text；id/score 与既有字段不删除（无字段删除，schema
+    // minor）。tight 预算下 outcome=partial、截断原因显式。
+    let (dir, db) = temp_db("mcp-hit-session-context");
+    let (fixture_path, session_wire, body_a, _) = write_session_hits_fixture(dir.path(), false);
+    let out = run(&db, &["ingest", &fixture_path]);
+    assert!(out.status.success(), "ingest failed: {}", stdout(&out));
+
+    let inputs = [
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": { "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "e2e", "version": "0" } }
+        }),
+        serde_json::json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": { "name": "search_sessions", "arguments": { "query": "widgets" } }
+        }),
+    ];
+    let frames = mcp_frames(&db, &inputs);
+    let search = frames
+        .iter()
+        .find(|frame| frame["id"] == serde_json::json!(2))
+        .expect("search response frame");
+    assert_eq!(search["result"]["isError"], false, "{search}");
+    let payload = &search["result"]["structuredContent"];
+    let hits = payload["data"]["hits"].as_array().expect("hits");
+    assert_eq!(hits.len(), 2, "{search}");
+    for hit in hits {
+        assert_eq!(hit["session_id"], session_wire, "{hit}");
+        assert!(
+            hit["id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("msg_v1_")),
+            "{hit}"
+        );
+        assert!(hit["score"].is_number(), "{hit}");
+        assert!(hit["text"].as_str().is_some_and(|t| !t.is_empty()), "{hit}");
+    }
+    assert!(
+        hits.iter().any(|hit| hit["text"] == body_a),
+        "MCP 命中应携带正文摘要: {search}"
+    );
+}
+
+/// 跑一个完整 MCP stdio 会话（逐行喂入 → EOF → 收集全部响应帧）。
+/// 只用于本文件内的 MCP 断言；mcp_e2e.rs 另有完整矩阵。
+fn mcp_frames(db: &str, inputs: &[serde_json::Value]) -> Vec<serde_json::Value> {
+    let mut child = Command::new(BIN)
+        .arg("--db")
+        .arg(db)
+        .arg("mcp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn agent-session-grep mcp");
+    {
+        let mut stdin = child.stdin.take().expect("child stdin must be piped");
+        for input in inputs {
+            writeln!(stdin, "{input}").expect("write stdin frame");
+        }
+        // 作用域结束丢弃 stdin → EOF，服务器应据此优雅停机。
+    }
+    let out = child.wait_with_output().expect("wait for mcp server");
+    assert!(
+        out.status.success(),
+        "mcp server must exit 0 on EOF, got {:?}\nstderr: {}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    stdout(&out)
+        .lines()
+        .map(|line| {
+            serde_json::from_str(line)
+                .unwrap_or_else(|error| panic!("stdout not pure JSON-RPC: {error}\nline: {line}"))
+        })
+        .collect()
 }

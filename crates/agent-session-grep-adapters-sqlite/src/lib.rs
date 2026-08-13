@@ -3,6 +3,10 @@
 //!
 //! 本 crate 是 hexagonal 架构里的 driven adapter——只依赖 domain + ports 的抽象，
 //! 把端口契约翻译成具体的 SQLite/FTS5 SQL，绝不反向依赖 application。
+//!
+//! 唯一例外：CJK bigram transform（ADR-0007）按约定放在 application crate 的
+//! `cjk` 模块，由本 crate 在 FTS 写入/查询两侧调用（索引与查询必须共享同一
+//! transform 才能匹配），纯函数无 use-case 语义。
 
 mod cas;
 mod lease;
@@ -12,6 +16,7 @@ pub use cas::{cas_activate, read_current, write_current};
 pub use lease::WriterLease;
 pub use source_fs::{SnapshotFs, capture, read_verified, verify_snapshot};
 
+use agent_session_grep_application::bigram_cjk;
 use agent_session_grep_domain::{
     EvidenceSpan, IdKind, Message, MessageEdge, MessagePlacement, MessageRelation, PlacementId,
     Role, SessionContextGraph, SourceDocument, StableId,
@@ -1594,7 +1599,11 @@ impl SqliteStore {
                 )
                 .optional()
                 .map_err(backend)?;
-            if indexed_text.as_deref() != Some(text.as_str()) {
+            // fts 存的是 bigram 变换后的正文（见 fts 写入侧），current 判定
+            // 必须对同一 text 施加同一 transform 再比较，否则已同步的源每次
+            // 重同步都被误判为 not-current、反复推进 generation。
+            let expected = bigram_cjk(text);
+            if indexed_text.as_deref() != Some(expected.as_str()) {
                 return Ok(false);
             }
         }
@@ -1822,17 +1831,28 @@ impl SqliteStore {
             }
         }
 
+        // 合并前先批量读取 catalog 中已有的 payload(分块 IN,同 get_many 模式),
+        // 取代逐实体 get 的 N+1;与 get 语义一致:目录中不存在的 id 视为 None。
+        let merged_ids: Vec<StableId> = merged.values().map(|(id, _, _)| id.clone()).collect();
+        let stored_payloads = self.get_many(&merged_ids)?;
+        let stored_by_id: BTreeMap<String, Vec<u8>> = stored_payloads
+            .into_iter()
+            .filter_map(|(id, payload)| payload.map(|payload| (id.as_str().to_string(), payload)))
+            .collect();
+
         for (id, payload, text) in merged.values_mut() {
-            let stored = match self.get(id)? {
-                Some(stored) if stored != *payload => stored,
-                _ => continue,
+            let Some(stored) = stored_by_id.get(id.as_str()) else {
+                continue;
             };
+            if stored == payload {
+                continue;
+            }
             match id.kind() {
                 IdKind::Session => {
-                    *payload = merge_session_payloads(id.as_str(), &stored, payload)?;
+                    *payload = merge_session_payloads(id.as_str(), stored, payload)?;
                 }
                 IdKind::Message => {
-                    let union = merge_message_payloads(id.as_str(), &stored, payload)?;
+                    let union = merge_message_payloads(id.as_str(), stored, payload)?;
                     // 与 stored 合并后再次重投影正文：合并结果可能以 stored 中更长的
                     // text 为准，FTS 必须索引 searchable_text(合并后 payload) 而非
                     // 来源侧原始 text，否则 payload 与搜索索引再次分叉。
@@ -2136,7 +2156,9 @@ impl SqliteStore {
                 }
             }
             for (id, _payload, text) in &source.entries {
-                if fts_text.get(id.as_str()).map(String::as_str) != Some(text.as_str()) {
+                // 与写入侧同一 transform：fts 正文存的是 bigram(text)。
+                let expected = bigram_cjk(text);
+                if fts_text.get(id.as_str()).map(String::as_str) != Some(expected.as_str()) {
                     return Ok(false);
                 }
             }
@@ -3124,9 +3146,11 @@ impl SqliteStore {
                 // 它保真 kind+stability，rebuild 依赖它恢复非 Unstable 身份（见 rebuild_index）。
                 // fts_rowid 只对进入 fts 的 Message 行回写，其余保持 NULL——删除按
                 // NULL 定位即无操作，与旧语义一致（无 fts 行可删）。
+                // 索引侧 CJK bigram（ADR-0007）：写入 fts 的正文先经 bigram_cjk，
+                // 与查询侧 transform 配对（见 SearchIndex::query）。
                 let fts_rowid = if id.kind() == IdKind::Message {
                     stmt_fts_insert
-                        .execute(rusqlite::params![id_json, text])
+                        .execute(rusqlite::params![id_json, bigram_cjk(text)])
                         .map_err(backend)?;
                     Some(tx.last_insert_rowid())
                 } else {
@@ -3531,9 +3555,11 @@ impl SqliteStore {
         tx.execute("DELETE FROM fts_ids WHERE wire_id = ?1", [id.as_str()])
             .map_err(backend)?;
         let fts_rowid = if id.kind() == IdKind::Message {
+            // 索引侧 CJK bigram（ADR-0007）：`SearchIndex::index` 与
+            // `CatalogStore::put` 两条单条写入路径与批量提交共用同一 transform。
             tx.execute(
                 "INSERT INTO fts(id, text) VALUES(?1, ?2)",
-                rusqlite::params![id_json, text],
+                rusqlite::params![id_json, bigram_cjk(text)],
             )
             .map_err(backend)?;
             Some(tx.last_insert_rowid())
@@ -3571,30 +3597,29 @@ impl SqliteStore {
     /// 主动请求“干净重建”，不做 no-op 短路。返回重新索引的实体条数。
     pub fn rebuild_index(&self) -> PortResult<usize> {
         // 1) 以 catalog 为权威实体集，投影检索正文；身份优先取 fts_ids 保真。
+        // 单个 LEFT JOIN 取代逐行 fts_ids 查询(每行一次 prepare+execute 的 N+1)。
         let upserts: Vec<(StableId, Vec<u8>, String)> = {
             let conn = self.conn.borrow();
             let mut stmt = conn
-                .prepare("SELECT id, payload FROM catalog ORDER BY id ASC")
+                .prepare(
+                    "SELECT catalog.id, catalog.payload, fts_ids.id_json
+                     FROM catalog
+                     LEFT JOIN fts_ids ON fts_ids.wire_id = catalog.id
+                     ORDER BY catalog.id ASC",
+                )
                 .map_err(backend)?;
             let rows = stmt
                 .query_map([], |row| {
                     let wire: String = row.get(0)?;
                     let payload: Vec<u8> = row.get(1)?;
-                    Ok((wire, payload))
+                    let id_json: Option<String> = row.get(2)?;
+                    Ok((wire, payload, id_json))
                 })
                 .map_err(backend)?;
             let mut out = Vec::new();
             for row in rows {
-                let (wire, payload) = row.map_err(backend)?;
+                let (wire, payload, id_json) = row.map_err(backend)?;
                 // 优先用 fts_ids 里保真的 id_json（含 kind+stability）；缺失才回退 from_wire。
-                let id_json: Option<String> = conn
-                    .query_row(
-                        "SELECT id_json FROM fts_ids WHERE wire_id = ?1",
-                        [&wire],
-                        |row| row.get(0),
-                    )
-                    .optional()
-                    .map_err(backend)?;
                 let id = match id_json {
                     Some(json) => serde_json::from_str(&json).map_err(backend)?,
                     None => StableId::from_wire(&wire).ok_or_else(|| {
@@ -3629,8 +3654,9 @@ impl SqliteStore {
             for (id, _payload, text) in &upserts {
                 let id_json = serde_json::to_string(id).map_err(backend)?;
                 let fts_rowid = if id.kind() == IdKind::Message {
+                    // 与提交路径同一索引侧 transform（ADR-0007）。
                     stmt_fts_insert
-                        .execute(rusqlite::params![id_json, text])
+                        .execute(rusqlite::params![id_json, bigram_cjk(text)])
                         .map_err(backend)?;
                     Some(tx.last_insert_rowid())
                 } else {
@@ -3916,15 +3942,57 @@ impl ContextGraphStore for SqliteStore {
             }
         }
 
+        // 边查询提前到批量加载之前:父消息 wire 必须并入 fts_ids 身份批集,否则
+        // 每条边一次身份查询(N+1),且孤儿父(在本会话无出现的父)会退化为
+        // Unstable 身份(降级)。
+        let raw_edges = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT edges.child_placement_id, edges.parent_message_id,
+                            edges.parent_native_id, edges.relation
+                     FROM message_edges AS edges
+                     JOIN message_placements AS placements
+                       ON placements.placement_id = edges.child_placement_id
+                     WHERE placements.session_id = ?1
+                     ORDER BY edges.child_placement_id",
+                )
+                .map_err(backend)?;
+            let rows = stmt
+                .query_map([session_id.as_str()], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                })
+                .map_err(backend)?;
+            let mut edges = Vec::new();
+            for row in rows {
+                edges.push(row.map_err(backend)?);
+            }
+            edges
+        };
+        let mut parent_message_wires = BTreeSet::new();
+        for (_, parent_message_id, _, _) in &raw_edges {
+            parent_message_wires.insert(parent_message_id.clone());
+        }
+
         // Batch-load message payloads and fts_ids identity for all wires at
         // once (was N+1 per message: one payload read + two identity reads).
         // Chunked under the SQLite variable limit for very large sessions.
+        // 身份批集额外并入边的父消息 wire(含孤儿父),保真其 fts_ids 身份等级。
         let mut payload_by_id: BTreeMap<String, Vec<u8>> = BTreeMap::new();
         let mut id_json_by_wire: BTreeMap<String, String> = BTreeMap::new();
         let all_wires: Vec<&str> = message_wires
             .iter()
             .chain(document_wires.iter())
             .map(|wire| wire.as_str())
+            .collect();
+        let identity_wires: Vec<&str> = all_wires
+            .iter()
+            .copied()
+            .chain(parent_message_wires.iter().map(|wire| wire.as_str()))
             .collect();
         for chunk in chunk_ids(&all_wires) {
             let placeholders = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
@@ -3942,6 +4010,9 @@ impl ContextGraphStore for SqliteStore {
                 let (id, payload) = row.map_err(backend)?;
                 payload_by_id.insert(id, payload);
             }
+        }
+        for chunk in chunk_ids(&identity_wires) {
+            let placeholders = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
             let mut stmt = conn
                 .prepare(&format!(
                     "SELECT wire_id, id_json FROM fts_ids WHERE wire_id IN ({placeholders})"
@@ -4070,41 +4141,13 @@ impl ContextGraphStore for SqliteStore {
             });
         }
 
-        let raw_edges = {
-            let mut stmt = conn
-                .prepare(
-                    "SELECT edges.child_placement_id, edges.parent_message_id,
-                            edges.parent_native_id, edges.relation
-                     FROM message_edges AS edges
-                     JOIN message_placements AS placements
-                       ON placements.placement_id = edges.child_placement_id
-                     WHERE placements.session_id = ?1
-                     ORDER BY edges.child_placement_id",
-                )
-                .map_err(backend)?;
-            let rows = stmt
-                .query_map([session_id.as_str()], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, Option<String>>(2)?,
-                        row.get::<_, String>(3)?,
-                    ))
-                })
-                .map_err(backend)?;
-            let mut edges = Vec::new();
-            for row in rows {
-                edges.push(row.map_err(backend)?);
-            }
-            edges
-        };
         let mut edges = Vec::with_capacity(raw_edges.len());
         for (child_placement_id, parent_message_id, parent_native_id, relation) in raw_edges {
             edges.push(MessageEdge {
                 child_placement_id: PlacementId::from_wire(&child_placement_id).ok_or_else(
                     || PortError::Backend("stored edge has an invalid child placement id".into()),
                 )?,
-                parent_message_id: Self::stable_id_from_store(&conn, &parent_message_id)?,
+                parent_message_id: Self::stable_id_from_wire(&parent_message_id, &id_json_by_wire)?,
                 parent_native_id,
                 relation: stored_relation(&relation)?,
             });
@@ -4179,6 +4222,51 @@ impl ContextGraphStore for SqliteStore {
         Ok(candidates)
     }
 
+    fn session_of(
+        &self,
+        message_ids: &[StableId],
+    ) -> PortResult<Vec<(StableId, Option<StableId>)>> {
+        let conn = self.conn.borrow();
+        let wires: Vec<&str> = message_ids.iter().map(|id| id.as_str()).collect();
+        // 批量解析归属会话：每块一条 `MIN(session_id) GROUP BY message_id`，
+        // 分块在 SQLite 变量上限之下（与 get_many 同一模式，无 N+1）。
+        // MIN 取 wire id 字典序最小的会话（确定性，跨页稳定）。
+        let mut owners: BTreeMap<String, String> = BTreeMap::new();
+        for chunk in chunk_ids(&wires) {
+            let placeholders = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            let mut stmt = conn
+                .prepare(&format!(
+                    "SELECT message_id, MIN(session_id)
+                     FROM message_placements
+                     WHERE message_id IN ({placeholders})
+                     GROUP BY message_id"
+                ))
+                .map_err(backend)?;
+            let rows = stmt
+                .query_map(rusqlite::params_from_iter(chunk.iter().copied()), |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(backend)?;
+            for row in rows {
+                let (message_id, session_id) = row.map_err(backend)?;
+                owners.insert(message_id, session_id);
+            }
+        }
+        // 保序：与 `message_ids` 同序；无任何 placement 的消息 → None。
+        message_ids
+            .iter()
+            .map(|id| {
+                let session = match owners.get(id.as_str()) {
+                    Some(wire) => Some(StableId::from_wire(wire).ok_or_else(|| {
+                        PortError::Backend("stored placement has an invalid session id".into())
+                    })?),
+                    None => None,
+                };
+                Ok((id.clone(), session))
+            })
+            .collect()
+    }
+
     fn context_stats(&self) -> PortResult<ContextStats> {
         let conn = self.conn.borrow();
         let placements: i64 = conn
@@ -4211,11 +4299,15 @@ impl SearchIndex for SqliteStore {
 
     fn query(&self, query: &str, limit: usize) -> PortResult<Vec<SearchHit>> {
         let conn = self.conn.borrow();
+        // 查询侧先做与索引侧同一的 CJK bigram transform（ADR-0007），再字面量化：
+        // bigram 输出里的单个空格就是词元分隔符，顺序敏感——先字面量化会把
+        // bigram 输出的空格包进引号，变成整段 bigram 连写的短语，无法匹配。
+        // cursor digest 绑定的是 Application 侧的原始用户查询，此处变换不影响。
         // 用户查询按字面量分词：冒号/点号/连字符等是 FTS5 语法保留字符，直接
         // MATCH 会泄漏 `fts5: syntax error near "."` 之类的底层报错（10 角色
         // 体验测试缺陷）。把每个词用引号包裹成短语查询，保留词内特殊字符的字面
         // 含义，同时保持原来的空格 AND 语义。
-        let safe_query = safe_fts_query(query);
+        let safe_query = safe_fts_query(&bigram_cjk(query));
         if safe_query.is_empty() {
             // 空查询（全标点/空白）无词可查：返回空而非让 FTS5 报语法错误。
             return Ok(Vec::new());
@@ -4241,8 +4333,10 @@ impl SearchIndex for SqliteStore {
             hits.push(SearchHit {
                 id,
                 score: -bm25 as f32,
-                // 端口只提供 id+score；snippet 由 Application 装配（批量取 payload）。
-                snippet: None,
+                // 端口只提供 id+score；session_id/text 由 Application 装配
+                // （批量 session_of + 批量取 payload）。
+                session_id: None,
+                text: None,
             });
         }
         Ok(hits)
@@ -4593,6 +4687,109 @@ mod tests {
             .unwrap()
     }
 
+    thread_local! {
+        static TRACED_STATEMENTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    /// 在该 store 的连接上挂 `SQLITE_TRACE_STMT` 钩子执行 `run`,返回期间执行的
+    /// SQL 语句总数(prepare 不计;同一 prepared statement 每次执行都计一条)。
+    /// 钩子是每连接独立的,测试各跑各的线程,互不干扰。
+    fn counted_statements<R>(store: &SqliteStore, run: impl FnOnce() -> R) -> usize {
+        TRACED_STATEMENTS.with(|cell| cell.set(0));
+        {
+            let conn = store.conn.borrow();
+            conn.trace_v2(
+                rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
+                Some(|_| TRACED_STATEMENTS.with(|cell| cell.set(cell.get() + 1))),
+            );
+        }
+        let result = run();
+        {
+            let conn = store.conn.borrow();
+            conn.trace_v2(rusqlite::trace::TraceEventCodes::empty(), None);
+        }
+        let _ = result;
+        TRACED_STATEMENTS.with(|cell| cell.get())
+    }
+
+    /// 大会话源批次:chain_len 条链式消息(除首条外每条带边指向前一条)+
+    /// orphan_count 条孤儿父消息(Native 身份,入库但无出现,由带出现的子消息
+    /// 指向),外加会话与文档条目。返回批次与孤儿父消息 id(供等级断言)。
+    fn chain_source_batch(
+        source_path: &str,
+        session: &StableId,
+        document: &StableId,
+        chain_len: usize,
+        orphan_count: usize,
+    ) -> (SourceBatch, Vec<StableId>) {
+        let mut entries = Vec::new();
+        let mut placements = Vec::new();
+        let mut edges = Vec::new();
+        let chain_messages: Vec<StableId> = (0..chain_len)
+            .map(|index| {
+                sid(
+                    IdKind::Message,
+                    format!("{source_path}-chain-{index}").as_bytes(),
+                )
+            })
+            .collect();
+        for (index, message) in chain_messages.iter().enumerate() {
+            entries.push(typed_message_entry(message, &format!("chain body {index}")));
+            let placement = placement(
+                session,
+                document,
+                message,
+                index as u32,
+                false,
+                Some((0, 4)),
+            );
+            if index > 0 {
+                edges.push(reply_edge(&placement, &chain_messages[index - 1]));
+            }
+            placements.push(placement);
+        }
+        let orphans: Vec<StableId> = (0..orphan_count)
+            .map(|index| {
+                StableId::native(IdKind::Message, &format!("{source_path}-orphan-{index}"))
+            })
+            .collect();
+        for (index, orphan) in orphans.iter().enumerate() {
+            entries.push(typed_message_entry(orphan, &format!("orphan body {index}")));
+            let child = sid(
+                IdKind::Message,
+                format!("{source_path}-orphan-child-{index}").as_bytes(),
+            );
+            entries.push(typed_message_entry(
+                &child,
+                &format!("orphan child body {index}"),
+            ));
+            let child_placement = placement(
+                session,
+                document,
+                &child,
+                (chain_len + index) as u32,
+                false,
+                Some((0, 4)),
+            );
+            edges.push(reply_edge(&child_placement, orphan));
+            placements.push(child_placement);
+        }
+        let placed_ids: Vec<&str> = placements
+            .iter()
+            .map(|placement| placement.message_id.as_str())
+            .collect();
+        entries.push((
+            session.clone(),
+            session_payload(document.as_str(), &placed_ids),
+            String::new(),
+        ));
+        entries.push(typed_document_entry(document));
+        (
+            source_batch(source_path, entries, placements, edges, true),
+            orphans,
+        )
+    }
+
     fn latest_index_batch(store: &SqliteStore) -> IndexBatch {
         let operation_id: String = store
             .conn
@@ -4665,6 +4862,121 @@ mod tests {
         }
     }
 
+    /// 向 message_placements 直接插入一行（session_of 只读该表，无需 catalog/提交机制）。
+    fn insert_placement(
+        store: &SqliteStore,
+        placement_id: &str,
+        session: &StableId,
+        document: &StableId,
+        message: &StableId,
+        source_ordinal: i64,
+    ) {
+        let conn = store.conn.borrow();
+        conn.execute(
+            "INSERT INTO message_placements(
+                 placement_id, session_id, document_id, message_id,
+                 source_ordinal, is_sidechain, byte_start, byte_end)
+             VALUES (?1, ?2, ?3, ?4, ?5, 0, NULL, NULL)",
+            rusqlite::params![
+                placement_id,
+                session.as_str(),
+                document.as_str(),
+                message.as_str(),
+                source_ordinal,
+            ],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn session_of_resolves_owning_session_batched_and_order_preserving() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let session_a = sid(IdKind::Session, b"owner-session-a");
+        let session_b = sid(IdKind::Session, b"owner-session-b");
+        let document = sid(IdKind::Document, b"owner-document");
+        let msg_only_a = sid(IdKind::Message, b"owner-msg-only-a");
+        let msg_both = sid(IdKind::Message, b"owner-msg-both");
+        let msg_none = sid(IdKind::Message, b"owner-msg-none");
+        insert_placement(
+            &store,
+            "plc_v1_owner_0",
+            &session_a,
+            &document,
+            &msg_only_a,
+            0,
+        );
+        insert_placement(
+            &store,
+            "plc_v1_owner_1",
+            &session_a,
+            &document,
+            &msg_both,
+            1,
+        );
+        insert_placement(
+            &store,
+            "plc_v1_owner_2",
+            &session_b,
+            &document,
+            &msg_both,
+            0,
+        );
+
+        // 乱序请求：结果与请求同序；msg_both 在两个会话都有 placement →
+        // 确定性取 wire id 字典序最小的会话（跨页稳定）；msg_none 无 placement → None。
+        let got = store
+            .session_of(&[msg_both.clone(), msg_none.clone(), msg_only_a.clone()])
+            .unwrap();
+        let expected_both = [session_a.as_str(), session_b.as_str()]
+            .iter()
+            .min()
+            .unwrap()
+            .to_string();
+        assert_eq!(got.len(), 3);
+        assert_eq!(got[0].0, msg_both);
+        assert_eq!(
+            got[0].1.as_ref().map(StableId::as_str),
+            Some(expected_both.as_str())
+        );
+        assert_eq!(got[1].0, msg_none);
+        assert_eq!(got[1].1, None);
+        assert_eq!(got[2].0, msg_only_a);
+        // 会话经 wire 往返重建（from_wire → Unstable tier），按 wire 串比较。
+        assert_eq!(
+            got[2].1.as_ref().map(StableId::as_str),
+            Some(session_a.as_str())
+        );
+        // 空请求 → 空结果。
+        assert!(store.session_of(&[]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn session_of_chunks_over_variable_limit() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let session = sid(IdKind::Session, b"chunk-session");
+        let document = sid(IdKind::Document, b"chunk-document");
+        // 501 个消息跨过 BATCH_IN_CHUNK(500) 分块边界：两块 GROUP BY 查询都取回。
+        let mut ids: Vec<StableId> = Vec::new();
+        for i in 0..501u32 {
+            let id = sid(IdKind::Message, &i.to_le_bytes());
+            insert_placement(
+                &store,
+                &format!("plc_v1_chunk_{i}"),
+                &session,
+                &document,
+                &id,
+                i as i64,
+            );
+            ids.push(id);
+        }
+        let got = store.session_of(&ids).unwrap();
+        assert_eq!(got.len(), 501);
+        for (i, (id, owner)) in got.iter().enumerate() {
+            assert_eq!(id, &ids[i]);
+            assert_eq!(owner.as_ref().map(StableId::as_str), Some(session.as_str()));
+        }
+    }
+
     #[test]
     fn search_finds_indexed_and_rebuilds_id() {
         let store = SqliteStore::open_in_memory().unwrap();
@@ -4689,6 +5001,181 @@ mod tests {
         assert!(store.query("beta", 10).unwrap().is_empty());
         assert_eq!(store.query("gamma", 10).unwrap().len(), 1);
         assert_eq!(store.query("alpha", 10).unwrap().len(), 1);
+    }
+
+    // ─── CJK bigram（ADR-0007）───
+
+    #[test]
+    fn cjk_bigram_recall_hits_two_char_queries_in_longer_sentences() {
+        // R1.4：双字查询"配置"/"数据库"命中包含它们的长句。索引侧与查询侧
+        // 同一 bigram transform：整段汉字从 1 个 FTS 词元变成相邻两字 bigram
+        // 词元（"配置数据库迁移" → "配置 置数 数据 据库 库迁 迁移"）。
+        let store = SqliteStore::open_in_memory().unwrap();
+        let id = sid(IdKind::Message, b"cjk-m1");
+        store
+            .index(&id, "我们已经在生产环境配置了数据库迁移，备份策略也更新了")
+            .unwrap();
+        for query in ["配置", "数据库", "备份", "迁移", "策略"] {
+            let hits = store.query(query, 10).unwrap();
+            assert_eq!(hits.len(), 1, "query {query:?} must recall the message");
+            assert_eq!(hits[0].id, id);
+        }
+        // 多字查询按 bigram 并集 AND 匹配。
+        assert_eq!(store.query("数据库迁移", 10).unwrap().len(), 1);
+        // 不存在的双字组合不命中。
+        assert!(store.query("翻墙", 10).unwrap().is_empty());
+        // 单字 CJK 查询仍弱（已知边界，ADR-0007 §后果）：transform 后为空串，
+        // 无结果且不触发 FTS 语法错误。
+        assert!(store.query("了", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn cjk_bigram_applies_on_source_batch_sync_path() {
+        // 真实 ingest 路径（SourceBatch → commit_source_batches_if_changed）
+        // 的 fts 写入与单条 SearchIndex::index 共用同一索引侧 transform。
+        let store = SqliteStore::open_in_memory().unwrap();
+        let session = sid(IdKind::Session, b"cjk-ses");
+        let document = sid(IdKind::Document, b"cjk-doc");
+        let message = sid(IdKind::Message, b"cjk-msg");
+        let source = source_batch(
+            "cjk-sync.jsonl",
+            vec![
+                entity_entry(&session),
+                entity_entry(&document),
+                typed_message_entry(&message, "启动服务时记得检查配置文件的路径"),
+            ],
+            vec![placement(
+                &session,
+                &document,
+                &message,
+                0,
+                false,
+                Some((0, 4)),
+            )],
+            Vec::new(),
+            true,
+        );
+        let changed = store
+            .commit_source_batches_if_changed(std::slice::from_ref(&source))
+            .unwrap();
+        assert!(changed);
+        assert_eq!(store.query("配置", 10).unwrap().len(), 1);
+        assert_eq!(store.query("路径", 10).unwrap().len(), 1);
+        assert_eq!(store.query("配置文件", 10).unwrap().len(), 1);
+
+        // 内容级 no-op：再次同步同一源不推进 generation——current 判定对 fts
+        // 存储的 bigram 正文与同一 transform 后的 batch text 比较（若只比原文，
+        // 已同步的源每次重同步都会被误判为 not-current 而反复推进 generation）。
+        let generation = store.active_generation().unwrap();
+        let again = store
+            .commit_source_batches_if_changed(std::slice::from_ref(&source))
+            .unwrap();
+        assert!(!again, "unchanged re-sync must be a no-op");
+        assert_eq!(store.active_generation().unwrap(), generation);
+    }
+
+    #[test]
+    fn cjk_bigram_rebuild_reprojects_from_catalog_and_bumps_generation() {
+        // R1.2：rebuild 从权威 catalog 重投影 FTS（searchable_text + 同一索引侧
+        // transform），无 schema 变更、无 catalog 迁移；重建推进 generation
+        // （旧 cursor 因此失效——正常契约行为）。
+        // 词元增长：消息正文"今天把数据库备份到了新目录"（11 字）从 1 个整段
+        // 词元变为 10 个 bigram 词元——纯 CJK 文本约 2x 最坏增长（ADR-0007 §后果）。
+        let store = SqliteStore::open_in_memory().unwrap();
+        let session = sid(IdKind::Session, b"rebuild-ses");
+        let document = sid(IdKind::Document, b"rebuild-doc");
+        let message = sid(IdKind::Message, b"rebuild-msg");
+        let source = source_batch(
+            "rebuild-cjk.jsonl",
+            vec![
+                entity_entry(&session),
+                entity_entry(&document),
+                typed_message_entry(&message, "今天把数据库备份到了新目录"),
+            ],
+            vec![placement(
+                &session,
+                &document,
+                &message,
+                0,
+                false,
+                Some((0, 4)),
+            )],
+            Vec::new(),
+            true,
+        );
+        store
+            .commit_source_batches_if_changed(std::slice::from_ref(&source))
+            .unwrap();
+        assert_eq!(store.query("数据库", 10).unwrap().len(), 1);
+
+        let generation_before = store.active_generation().unwrap();
+        let n = store.rebuild_index().unwrap();
+        assert_eq!(n, 3, "rebuild 应从 catalog 重投影全部 3 个实体");
+        assert_eq!(
+            store.active_generation().unwrap(),
+            generation_before + 1,
+            "rebuild 必须推进 generation"
+        );
+        // rebuild 后 CJK 依旧可搜（同一 searchable_text 投影 + 同一 transform）。
+        assert_eq!(store.query("数据库", 10).unwrap().len(), 1);
+        assert_eq!(store.query("备份", 10).unwrap().len(), 1);
+        assert_eq!(store.query("新目录", 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn cjk_bigram_keeps_ascii_path_and_punctuation_literals_unchanged() {
+        // R1.3（ADR-0003）：纯 ASCII/路径/标点输入不含汉字，bigram_cjk 原样
+        // 返回——字面量化语义与之前逐字节一致，FTS 词元不变。
+        let store = SqliteStore::open_in_memory().unwrap();
+        let id = sid(IdKind::Message, b"literal");
+        store
+            .index(&id, "check C:\\Users\\dev\\mcp.json config:backup")
+            .unwrap();
+        for query in ["mcp.json", "config:backup", "Users", "backup", "check"] {
+            let hits = store.query(query, 10).unwrap();
+            assert_eq!(hits.len(), 1, "query {query:?} must recall");
+            assert_eq!(hits[0].id, id);
+        }
+        // 标点/操作符仍按字面量处理，不泄漏 FTS 语法错误。
+        for query in ["a:b", "x-y", "prefix*", "AND OR NOT", "* - :"] {
+            assert!(store.query(query, 10).unwrap().is_empty(), "{query:?}");
+        }
+        // 汉字与 ASCII 混合的内容两侧变换一致："配置v2.0" → "配置 v2.0" AND 匹配。
+        let mixed = sid(IdKind::Message, b"cjk-mixed");
+        store.index(&mixed, "使用配置v2.0备份").unwrap();
+        assert_eq!(store.query("配置v2.0", 10).unwrap().len(), 1);
+        assert_eq!(store.query("v2.0", 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn raw_han_sentence_is_one_token_without_bigram_transform() {
+        // 对照基线（bigram 落地前的旧行为）：未经 transform 的原始正文经
+        // unicode61 把整段汉字当一个词元，"配置"/"数据库"这类双字查询无法
+        // 命中（ADR-0007 实证：中文召回 8-33%）。此 fixture 证明 recall 提升
+        // 来自索引侧 transform 本身，而不是查询侧的特判；同时防止将来有人
+        // 只回退写入侧、留下查询侧变换造成两侧错配。
+        let store = SqliteStore::open_in_memory().unwrap();
+        let id = sid(IdKind::Message, b"raw-han");
+        let id_json = serde_json::to_string(&id).unwrap();
+        {
+            let conn = store.conn.borrow();
+            conn.execute(
+                "INSERT INTO fts(id, text) VALUES(?1, ?2)",
+                rusqlite::params![
+                    id_json,
+                    "我们已经在生产环境配置了数据库迁移，备份策略也更新了"
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO fts_ids(wire_id, id_json, fts_rowid) VALUES(?1, ?2, NULL)",
+                rusqlite::params![id.as_str(), serde_json::to_string(&id).unwrap()],
+            )
+            .unwrap();
+        }
+        assert!(store.query("配置", 10).unwrap().is_empty());
+        assert!(store.query("数据库", 10).unwrap().is_empty());
+        assert!(store.query("迁移", 10).unwrap().is_empty());
     }
 
     #[test]
@@ -5573,6 +6060,104 @@ mod tests {
         assert_eq!(source_placement_claims(&store, source_path), claims_before);
         assert_eq!(store.context_stats().unwrap(), stats_before);
         assert!(relation_complete_marker(&store, source_path));
+    }
+
+    #[test]
+    fn load_session_graph_statement_count_is_bounded_regardless_of_edge_count() {
+        // 上下文装配的 SQL 语句数只随 wire 批块增长,与边数无关(改前每条边
+        // 一次父身份查询,N+1)。两个 1K+/2K+ 边的会话都应在常数界内,且
+        // 语句数随边翻倍只增加批块差(≤12),不随边线性增长。
+        let measure = |chain_len: usize, label: &str| -> (usize, usize) {
+            let store = SqliteStore::open_in_memory().unwrap();
+            let session = sid(IdKind::Session, format!("count-session-{label}").as_bytes());
+            let document = sid(
+                IdKind::Document,
+                format!("count-document-{label}").as_bytes(),
+            );
+            let (source, _) =
+                chain_source_batch(&format!("{label}.jsonl"), &session, &document, chain_len, 5);
+            store
+                .commit_source_batches_if_changed(std::slice::from_ref(&source))
+                .unwrap();
+            let edges = source.edges.len();
+            let statements =
+                counted_statements(&store, || store.load_session_graph(&session).unwrap());
+            (statements, edges)
+        };
+        let (small_statements, small_edges) = measure(1200, "small");
+        let (large_statements, large_edges) = measure(2400, "large");
+        assert!(
+            small_edges >= 1000,
+            "fixture must exceed 1K edges, got {small_edges}"
+        );
+        assert!(
+            small_statements <= 30,
+            "small session ({small_edges} edges) issued {small_statements} statements; expected a constant bound independent of edge count"
+        );
+        assert!(
+            large_statements <= 30,
+            "large session ({large_edges} edges) issued {large_statements} statements; expected a constant bound independent of edge count"
+        );
+        assert!(
+            large_statements <= small_statements + 12,
+            "statement count must scale with wire chunks, not edges: {small_statements} -> {large_statements}"
+        );
+    }
+
+    #[test]
+    fn load_session_graph_keeps_orphan_parent_identity_grade() {
+        // R1.2: 孤儿父(在本会话无出现、仅由边引用的消息)的身份必须经批量
+        // fts_ids 加载保真,不能因批量路径缺 wire 而退化为 from_wire(Unstable)。
+        let store = SqliteStore::open_in_memory().unwrap();
+        let session = sid(IdKind::Session, b"grade-session");
+        let document = sid(IdKind::Document, b"grade-document");
+        let (source, orphans) = chain_source_batch("grade.jsonl", &session, &document, 20, 3);
+        store
+            .commit_source_batches_if_changed(std::slice::from_ref(&source))
+            .unwrap();
+
+        let graph = store.load_session_graph(&session).unwrap();
+        // 边按 child_placement_id 排序,与孤儿索引顺序无关,按排序后的集合比较。
+        let mut orphan_parents: Vec<&str> = graph
+            .edges
+            .iter()
+            .filter(|edge| edge.parent_message_id.stability() == Stability::Native)
+            .map(|edge| edge.parent_message_id.as_str())
+            .collect();
+        let mut expected: Vec<&str> = orphans.iter().map(|id| id.as_str()).collect();
+        orphan_parents.sort();
+        expected.sort();
+        assert_eq!(
+            orphan_parents, expected,
+            "orphan parent identities must keep their Native grade and value"
+        );
+    }
+
+    #[test]
+    fn rebuild_index_statement_count_is_bounded_per_catalog_row() {
+        // 读相从逐行 fts_ids 查询改为单条 LEFT JOIN:语句数相对改前恰好减少
+        // catalog 行数。界取 2.5×rows:改后 ≈2×rows(读 1 + 写相每实体固定),
+        // 改前 ≈3×rows(读相每行 1 条),回归会超出此界。
+        let store = SqliteStore::open_in_memory().unwrap();
+        let session = sid(IdKind::Session, b"rebuild-count-session");
+        let document = sid(IdKind::Document, b"rebuild-count-document");
+        let (source, _) = chain_source_batch("rebuild-count.jsonl", &session, &document, 1200, 5);
+        store
+            .commit_source_batches_if_changed(std::slice::from_ref(&source))
+            .unwrap();
+        let rows = table_count(&store, "catalog");
+        assert!(
+            rows > 1000,
+            "fixture must exceed 1K catalog rows, got {rows}"
+        );
+        let statements = counted_statements(&store, || store.rebuild_index().unwrap());
+        // 语句数含 FTS5 影子表维护,约 7×rows;改前逐行 fts_ids 身份读取还要再
+        // 加 rows 条(≈8×rows),此界把逐行读回归挡在门外。
+        assert!(
+            statements as i64 <= rows * 7 + 600,
+            "rebuild issued {statements} statements for {rows} catalog rows; expected <= {} (a per-row identity read would add ~{rows} more)",
+            rows * 7 + 600
+        );
     }
 
     #[test]

@@ -89,8 +89,9 @@ fn render_search(data: &Value) -> Vec<String> {
             .unwrap_or_else(|| "?".into());
         lines.push(format!("  {}. {id}  score {score}", index + 1));
         // 正文预览：命中是否有用一瞥即知。取不到 preview 的命中不补行。
-        // `snippet` 是 application 装配后接管的字段名，`text` 是旧路径；
-        // 两者任一存在即渲染，都不存在则省略该行。
+        // ADR-0008 后摘要统一由命中对象的 `text` 字段承载（application 装配，
+        // 按 max_snippet_chars 截前缀）；`snippet` 是旧字段名，为兼容旧形状
+        // 仍作为回退读取。两者都不存在则省略该行。
         if let Some(text) = hit
             .get("snippet")
             .or_else(|| hit.get("text"))
@@ -484,7 +485,8 @@ mod tests {
 
     #[test]
     fn search_renders_snippet_field_when_present() {
-        // application 装配的 snippet 字段名：渲染器对 snippet/text 两者都认。
+        // 旧字段名兼容：渲染器对 snippet/text 两者都认（ADR-0008 后摘要由
+        // text 承载，snippet 回退读取）。
         let data = json!({
             "hits": [{ "id": "msg_v1_aaaa", "score": 2.0, "snippet": "新的 snippet 字段" }],
             "generation": 3,

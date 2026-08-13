@@ -247,8 +247,9 @@ impl SearchIndex for InMemoryStore {
             .map(|(id, _)| SearchHit {
                 id: id.clone(),
                 score: 1.0,
-                // 端口只提供 id+score；snippet 由 Application 装配。
-                snippet: None,
+                // 端口只提供 id+score；session_id/text 由 Application 装配。
+                session_id: None,
+                text: None,
             })
             .collect();
         // 与 SQLite 的全序一致：score 降序，同分按 id 升序（全 1.0 时退化为
@@ -311,6 +312,37 @@ impl ContextGraphStore for InMemoryStore {
             .collect();
         candidates.sort_by(|left, right| left.session_id.as_str().cmp(right.session_id.as_str()));
         Ok(candidates)
+    }
+
+    fn session_of(
+        &self,
+        message_ids: &[StableId],
+    ) -> PortResult<Vec<(StableId, Option<StableId>)>> {
+        // 保序 + 无 placement → None；消息可属多会话时取 wire id 字典序最小的
+        // 会话（与 SqliteStore 的 MIN(session_id) 语义一致）。
+        let graphs = self.graphs.borrow();
+        let mut owners: HashMap<String, String> = HashMap::new();
+        for graph in graphs.values() {
+            for placement in &graph.placements {
+                owners
+                    .entry(placement.message_id.as_str().to_string())
+                    .and_modify(|owner| {
+                        if placement.session_id.as_str() < owner.as_str() {
+                            *owner = placement.session_id.as_str().to_string();
+                        }
+                    })
+                    .or_insert_with(|| placement.session_id.as_str().to_string());
+            }
+        }
+        Ok(message_ids
+            .iter()
+            .map(|id| {
+                let session = owners
+                    .get(id.as_str())
+                    .and_then(|wire| StableId::from_wire(wire));
+                (id.clone(), session)
+            })
+            .collect())
     }
 
     fn context_stats(&self) -> PortResult<ContextStats> {
@@ -585,8 +617,44 @@ mod tests {
         let hits = store.query("brown", 10).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, id);
-        // 端口只产 id+score；snippet 留给 Application 装配。
-        assert!(hits[0].snippet.is_none());
+        // 端口只产 id+score；session_id/text 留给 Application 装配。
+        assert!(hits[0].session_id.is_none());
+        assert!(hits[0].text.is_none());
+    }
+
+    #[test]
+    fn in_memory_session_of_resolves_min_session_and_misses() {
+        let store = InMemoryStore::new();
+        let graph = SessionBuilder::new("sess-of").messages(["a", "b"]).build();
+        let session_id = graph.session_id.clone();
+        let message_a = graph.messages[0].id.clone();
+        let message_b = graph.messages[1].id.clone();
+        let ghost = StableId::derive(IdKind::Message, Stability::Reconstructed, &[b"ghost"]);
+        store.put(&session_id, b"session").unwrap();
+        for message in &graph.messages {
+            store.put(&message.id, b"message").unwrap();
+        }
+        store.insert_graph(graph).unwrap();
+
+        // 乱序请求保序返回；无 placement 的消息 → None。
+        let got = store
+            .session_of(&[message_b.clone(), ghost.clone(), message_a.clone()])
+            .unwrap();
+        assert_eq!(got.len(), 3);
+        assert_eq!(got[0].0, message_b);
+        // 会话经 wire 往返重建（from_wire → Unstable tier），按 wire 串比较。
+        assert_eq!(
+            got[0].1.as_ref().map(StableId::as_str),
+            Some(session_id.as_str())
+        );
+        assert_eq!(got[1].0, ghost);
+        assert_eq!(got[1].1, None);
+        assert_eq!(got[2].0, message_a);
+        assert_eq!(
+            got[2].1.as_ref().map(StableId::as_str),
+            Some(session_id.as_str())
+        );
+        assert!(store.session_of(&[]).unwrap().is_empty());
     }
 
     #[test]
