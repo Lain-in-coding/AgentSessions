@@ -166,14 +166,14 @@ Assert-That ($r.Code -eq 0) 'status exits 0' "exit=$($r.Code) stdout=$($r.Text)"
 $count = if ($null -ne $r.Frame) { [int]$r.Frame.data.catalog_count } else { -1 }
 Assert-That ($count -ge 5) 'status reports data.catalog_count >= 5' "catalog_count=$count"
 
-# 7. get on a well-formed but absent id: documented as exit 0 with a null
-# payload (absence is data, not an error). See the deviation note in the task
-# report: design §2.5 expected exit 4 here, the product returns 0.
+# 7. get on a well-formed but absent id: exit 4 with a not_found envelope
+# (ADR-0005; the message is generic and never echoes the wire id).
 $r = Invoke-Robot @('--db', $db, '--robot', 'get', 'ses_v1_nope')
-Assert-That ($r.Code -eq 0) 'get <absent id> exits 0' "exit=$($r.Code) stdout=$($r.Text)"
-Assert-That ($null -ne $r.Frame -and $null -eq $r.Frame.data.payload) 'get <absent id> returns data.payload == null' $r.Text
+Assert-That ($r.Code -eq 4) 'get <absent id> exits 4' "exit=$($r.Code) stdout=$($r.Text)"
+Assert-That ($null -ne $r.Frame -and $r.Frame.ok -eq $false) 'get <absent id> reports ok:false' $r.Text
+Assert-That ($null -ne $r.Frame -and $r.Frame.error.code -eq 'not_found') 'get <absent id> reports error.code == not_found' $r.Text
 
-# 8. context on an absent session: this is the surface that carries not_found.
+# 8. context on an absent session: same not_found contract as get.
 $r = Invoke-Robot @('--db', $db, '--robot', 'context', 'ses_v1_nope')
 Assert-That ($r.Code -eq 4) 'context <absent session> exits 4' "exit=$($r.Code) stdout=$($r.Text)"
 Assert-That ($null -ne $r.Frame -and $r.Frame.error.code -eq 'not_found') 'context <absent session> reports error.code == not_found' $r.Text

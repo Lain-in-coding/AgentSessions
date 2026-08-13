@@ -47,12 +47,14 @@ SessionId/MessageId/BranchId/CursorToken 为带类型和协议版本的 opaque �
         snapshot_failed | catalog_error | schema_incompatible | provider_error | internal |
         invalid_request | not_found
 Exit Code(权威为 `schemas/robot/v1/error-catalog.json` 的 13 码): 0 成功 / 2 校验(invalid_request, cursor_invalid) / 4 不存在(not_found) / 5 IO(source_io, source_changed, snapshot_failed) / 6 Catalog(writer_busy, catalog_error) / 7 Provider / 9 协议(schema_incompatible, generation_mismatch) / 10 部分成功 / 70 内部。无 3(配置)与 8(安全)退出码。
+- `get`/`show` 对缺失实体统一 exit 4 + `not_found` envelope，不返回 exit 0 + `payload:null`（ADR-0005，已实现）。
 
 ## 6. Output Truth Table（stdout/stderr 契约）
 
 模式 human/json/jsonl/--robot/MCP 各自冻结: stdout frame、stderr、颜色、进度、warnings、零结果、
 部分成功、fatal、broken pipe、取消、exit code。
 - Robot JSON 单 envelope；Robot JSONL 只允许版本化协议 frame；进程诊断永远走 stderr。
+- `--help` / `--version` 在任何输出模式下恒 exit 0（语义上不是错误）：human 模式打印文本；robot/json/jsonl 模式返回 success envelope，帮助文本/版本号置于 `data.help_text` / `data.version`（ADR-0006，已实现）。
 - MCP stdout 只允许合法 MCP frame，panic/backtrace 不得污染 stdout。
 
 ## 7. Cursor 生命周期（无状态保留模型）
@@ -68,3 +70,7 @@ tools: search_sessions / get_session_context / list_sessions / list_providers / 
 - 固定并测试 protocol version、capability negotiation、tool schema、错误映射、取消、超时、shutdown。
 - handler 只校验协议 + 映射 ADT，不复制搜索/分支/分页/预算规则。
 - 不提供任意文件读取、SQL 或命令执行。取消/超时后不留半提交 Catalog 或活动 IndexWriter。
+
+## 9. Search 查询语义（plain-text-only）
+
+`SearchRequest.query` 只支持 plain-text 关键词：按空白切分的字面 token、隐式 AND。FTS5 操作符（`AND`/`OR`/`NOT`、`NEAR(...)`、短语引号、前缀 `*`）**不是查询语言**，一律作为字面文本参与匹配；不存在高级查询语法（ADR-0003，已实现）。`safe_fts_query` 是该语义的强制边界，CLI/MCP/Port 入口共用。

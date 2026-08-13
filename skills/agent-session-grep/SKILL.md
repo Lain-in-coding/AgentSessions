@@ -62,7 +62,6 @@ loop:
 | --- | --- |
 | 0 | success |
 | 2 | validation error (bad arguments, invalid or expired cursor) |
-| 3 | configuration error |
 | 4 | not found |
 | 5 | source / file IO error |
 | 6 | catalog or index error (includes retryable `writer_busy`) |
@@ -71,17 +70,21 @@ loop:
 | 10 | partial success — results are usable but truncated; raise the budget knob named in `data.truncation.reason`, or paginate |
 | 70 | internal error (bug signal) |
 
+`--help` / `--version` always exit 0 — never a configuration error. In robot/json/jsonl modes they are success envelopes, not bare text: help text or version string ride in `data.help_text` / `data.version` (ADR-0006).
+
 ### Commands
 
 | command | purpose |
 | --- | --- |
-| `search "<query>"` | full-text search over messages; hits carry `msg_v1_` ids |
+| `search "<query>"` | full-text search over messages; hits carry `msg_v1_` ids; plain-text keywords only — FTS operators (`AND`/`OR`/`NEAR`, quotes, `*`) match literally, there is no advanced query language (ADR-0003) |
 | `list <limit>` | page catalog entities in stable id order |
 | `context <session-id>` | assemble one session branch with evidence spans |
 | `get <wire-id>` | raw stored payload of one entity |
 | `show <wire-id>` | structured entity view (role, text, parent, session, span) |
 | `status` | catalog entity count and active generation |
 | `doctor` | health: db, schema, generation, interrupted_batches |
+
+`get`/`show` on a missing entity return exit 4 with a `not_found` error envelope (ADR-0005).
 
 Budget flags (accepted where meaningful): `--max-items`, `--max-bytes`, `--max-messages`. Hitting a budget is reported as `outcome: "partial"` plus `data.truncation` and exit 10 — never a silent cut.
 

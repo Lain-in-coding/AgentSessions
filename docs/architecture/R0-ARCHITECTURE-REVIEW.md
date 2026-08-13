@@ -29,7 +29,7 @@
 | [ADR-0001](../adr/ADR-0001-fulltext-search-engine.md) | Proposed；FTS5 已实现，20k 合成语料仅 Windows 本地验证 | 正式 corpus、相关性指标、阈值与 FTS5 go/no-go |
 | [ADR-0002](../adr/ADR-0002-platform-targets.md) | Proposed；Windows 证据有限，其他 target 至多为 CI configured only | 正式 target、musl 身份、最低 OS/glibc、认证门 |
 | [CLI/Robot/MCP Contract](../contracts/CONTRACT-cli-robot-mcp-draft.md) | Draft；CLI/Robot v1 子集与 MCP v0（stdio JSON-RPC，6 工具）已实现并有 e2e 覆盖 | not-found、cursor/error、partial、机器模式 help/version |
-| [Threat Model](../security/THREAT-MODEL.md) | Draft | 索引期脱敏、隐私模式、网络文件系统 |
+| [Threat Model](../security/THREAT-MODEL.md) | Draft；脱敏时机已由 ADR-0004 裁定（2026-08-13：不做脱敏，本地显示为可接受风险） | 隐私模式、网络文件系统 |
 | [Fixture Policy](../security/FIXTURE-REDACTION-POLICY.md) | Proposed | 合成优先、真实 transcript 禁入仓库及审阅责任 |
 | [SLI Format](../product/SLI-AND-BENCHMARK-FORMAT.md) | Draft；当前数据仅为趋势锚点 | North Star 指标、query set/qrels、临时阈值 |
 | [Reuse/License Audit](../operations/REUSE-LICENSE-AUDIT.md) | Draft | 来源、版本、attribution 与 clean-room 边界 |
@@ -74,7 +74,7 @@
 
 ### Threat Model
 
-- 默认输出期脱敏；版本化索引期 redaction 仅在重建语义明确后启用。
+- 脱敏时机已由 owner 裁定（2026-08-13，ADR-0004）：输出期与索引期均不做脱敏；search 输出有界正文片段（human 模式，受预算约束），本地显示密钥为可接受风险。若未来引入任何网络能力须重新评审并默认恢复脱敏。
 - 提供显式隐私模式，隐藏 project/path 并收紧 snippets。
 - v1.0 data-root 拒绝网络文件系统；Source root 可只读访问并提供降级诊断。
 
@@ -114,7 +114,7 @@
 - [ ] ADR-0001 的 corpus、指标、阈值和后端决定签署。
 - [ ] ADR-0002 的 target、最低平台和认证门签署。
 - [ ] CLI/Robot/MCP 的 not-found、cursor、partial、机器模式签署。
-- [ ] Threat Model 三项开放问题签署。
+- [ ] Threat Model 两项开放问题（隐私模式、网络文件系统）签署；脱敏时机已由 ADR-0004 裁定（2026-08-13）。
 - [ ] Fixture、SLI、license 与 external readiness 各有 owner/approver。
 - [ ] 对先实现后审批作显式 exception/追认决定，不回填虚假历史日期。
 

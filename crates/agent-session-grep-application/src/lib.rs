@@ -489,6 +489,15 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex> App<C, S> {
                 if limit == 0 {
                     return Err(DomainError::InvalidRequest("limit must be > 0".into()).into());
                 }
+                // R4.2（ADR-0003）：NUL/C0/C1 控制字符在 Application 边界拒绝为
+                // invalid_request，绝不清除式净化（删除会拼接 token）。必须发生在
+                // 任何索引查询之前。
+                if query.chars().any(char::is_control) {
+                    return Err(DomainError::InvalidRequest(
+                        "query contains control characters".into(),
+                    )
+                    .into());
+                }
                 if query.trim().is_empty() {
                     return Err(
                         DomainError::InvalidRequest("query must not be empty".into()).into(),
@@ -518,11 +527,35 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex> App<C, S> {
                     .skip(usize::try_from(offset).unwrap_or(usize::MAX))
                     .take(page)
                     .collect();
+
+                // R1（ADR-0004）：snippet 装配——对页内命中一次性批量取 payload
+                // （分块 IN，无 N+1），解析 `text` 字段，按 `max_snippet_chars`
+                // 截取前缀。payload 无 text（或非 JSON）→ None，不臆造正文；
+                // 不做任何脱敏（所有者决定，本地优先工具接受屏显）。
+                let ids: Vec<StableId> = slice.iter().map(|hit| hit.id.clone()).collect();
+                let payloads = self.catalog.get_many(&ids)?;
+                let max_snippet_chars = budget.max_snippet_chars;
+                let mut hits = slice;
+                for (hit, (_id, payload)) in hits.iter_mut().zip(payloads) {
+                    hit.snippet = payload.and_then(|bytes| {
+                        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+                            return None;
+                        };
+                        value
+                            .get("text")
+                            .and_then(serde_json::Value::as_str)
+                            .map(|text| text.chars().take(max_snippet_chars).collect())
+                    });
+                }
                 let net_bytes = budget
                     .max_response_bytes
                     .saturating_sub(ENVELOPE_RESERVE_BYTES);
-                let (hits, truncation, _) = budget::clamp_items(slice, page, net_bytes, |hit| {
-                    json_string_len(hit.id.as_str()) + 32
+                let (hits, truncation, _) = budget::clamp_items(hits, page, net_bytes, |hit| {
+                    // 最终渲染 `{id, score, text}`：snippet 字节计入同一字节闸
+                    // （`,"text":` 为字段开销）；截断原因保持显式。
+                    json_string_len(hit.id.as_str())
+                        + hit.snippet.as_ref().map_or(0, |s| json_string_len(s) + 8)
+                        + 32
                 });
                 let consumed = offset + hits.len() as u64;
                 // A truncated page with zero kept hits cannot advance the
@@ -859,6 +892,12 @@ mod tests {
         fn get(&self, _id: &StableId) -> PortResult<Option<Vec<u8>>> {
             Ok(Some(b"payload".to_vec()))
         }
+        fn get_many(&self, ids: &[StableId]) -> PortResult<Vec<(StableId, Option<Vec<u8>>)>> {
+            Ok(ids
+                .iter()
+                .map(|id| (id.clone(), Some(b"payload".to_vec())))
+                .collect())
+        }
         fn put(&self, _id: &StableId, _payload: &[u8]) -> PortResult<()> {
             Ok(())
         }
@@ -908,6 +947,7 @@ mod tests {
             Ok(vec![SearchHit {
                 id: StableId::derive(IdKind::Message, Stability::Reconstructed, &[b"h"]),
                 score: 1.0,
+                snippet: None,
             }])
         }
     }
@@ -959,6 +999,154 @@ mod tests {
             r.unwrap_err(),
             AppError::Domain(DomainError::InvalidRequest(_))
         ));
+    }
+
+    #[test]
+    fn search_rejects_control_characters_before_index_query() {
+        // R4.2（ADR-0003）：NUL/C0/C1 控制字符在 Application 边界拒绝为
+        // invalid_request，绝不清除式净化（删除会拼接 token）；且必须发生在
+        // 任何索引查询之前——命中索引即 panic。
+        struct ExplodingIndex;
+        impl SearchIndex for ExplodingIndex {
+            fn index(&self, _id: &StableId, _text: &str) -> PortResult<()> {
+                Ok(())
+            }
+            fn query(&self, _query: &str, _limit: usize) -> PortResult<Vec<SearchHit>> {
+                panic!("control-character query must be rejected before any index query")
+            }
+        }
+        let app = App::new(FakeCatalog, ExplodingIndex);
+        for query in [
+            "\u{0}", "a\u{1}b", "\u{7f}", "a\u{80}b", "\u{9f}", "a\tb", "a\nb",
+        ] {
+            let err = app
+                .handle(search_req(query, 5, None))
+                .expect_err("query {query:?} must be rejected");
+            assert!(
+                matches!(err, AppError::Domain(DomainError::InvalidRequest(_))),
+                "{query:?}: {err}"
+            );
+        }
+    }
+
+    /// 与 [`PagedIndex`] 的派生规则一致（`hit{i:02}` 种子），使目录 payload
+    /// 能对应到检索命中。
+    fn hit_id(tag: &str) -> StableId {
+        StableId::derive(IdKind::Message, Stability::Reconstructed, &[tag.as_bytes()])
+    }
+
+    #[test]
+    fn search_snippets_extract_text_from_payloads() {
+        // R1（ADR-0004）：snippet 在 Application 检索装配时生成——批量取 payload、
+        // 解析 `text` 字段、截取前缀；不做任何脱敏。
+        let mut cat = MapCatalog::new(7);
+        for (tag, text) in [("hit00", "hello world"), ("hit01", "second hit")] {
+            let id = hit_id(tag);
+            cat.insert(
+                &id,
+                serde_json::json!({ "role": "user", "text": text })
+                    .to_string()
+                    .into_bytes(),
+            );
+        }
+        let app = App::with_clock(&cat, PagedIndex { n: 2 }, clock_t0);
+        let resp = app.handle(search_req("q", 10, None)).unwrap();
+        let AppResponse::Search { hits, .. } = resp else {
+            panic!("expected Search response");
+        };
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].id, hit_id("hit00"));
+        assert_eq!(hits[0].snippet.as_deref(), Some("hello world"));
+        assert_eq!(hits[1].snippet.as_deref(), Some("second hit"));
+    }
+
+    #[test]
+    fn search_snippet_truncates_to_max_snippet_chars() {
+        // R1.2：单条 snippet 按 `max_snippet_chars`（字符数）显式截取前缀。
+        let mut cat = MapCatalog::new(7);
+        let id = hit_id("hit00");
+        cat.insert(
+            &id,
+            serde_json::json!({ "text": "abcdefghij" })
+                .to_string()
+                .into_bytes(),
+        );
+        let app = App::with_clock(&cat, PagedIndex { n: 1 }, clock_t0);
+        let resp = app
+            .handle(AppRequest::Search {
+                query: "q".into(),
+                limit: 5,
+                cursor: None,
+                budget: ResponseBudget {
+                    max_snippet_chars: 4,
+                    ..Default::default()
+                },
+            })
+            .unwrap();
+        let AppResponse::Search { hits, .. } = resp else {
+            panic!("expected Search response");
+        };
+        assert_eq!(hits[0].snippet.as_deref(), Some("abcd"));
+    }
+
+    #[test]
+    fn search_snippet_none_when_payload_has_no_text() {
+        // text 缺失 / 非字符串 / payload 非 JSON → snippet None（不臆造正文）。
+        // 空字符串 text 视为有正文（与旧 CLI 行为一致）。
+        let mut cat = MapCatalog::new(7);
+        for (tag, payload) in [
+            ("hit00", br#"{"role":"user"}"#.as_slice()),
+            ("hit01", br#"{"text":42}"#.as_slice()),
+            ("hit02", b"not json".as_slice()),
+            ("hit03", br#"{"text":""}"#.as_slice()),
+        ] {
+            let id = hit_id(tag);
+            cat.insert(&id, payload.to_vec());
+        }
+        let app = App::with_clock(&cat, PagedIndex { n: 4 }, clock_t0);
+        let resp = app.handle(search_req("q", 10, None)).unwrap();
+        let AppResponse::Search { hits, .. } = resp else {
+            panic!("expected Search response");
+        };
+        assert_eq!(hits[3].snippet.as_deref(), Some(""));
+        assert!(hits[..3].iter().all(|hit| hit.snippet.is_none()));
+    }
+
+    #[test]
+    fn search_byte_gate_charges_snippet_bytes() {
+        // R1.2：snippet 字节计入同一 `max_response_bytes` 闸。无 snippet 时
+        // 4 条命中全部放得下（每条仅 ~70 B）；带 1000 字符 snippet 时每条
+        // ~1080 B，净预算 3072 只容 2 条——证明 snippet 字节被计入闸门，
+        // 且截断原因显式报 max_response_bytes。
+        let mut cat = MapCatalog::new(7);
+        for tag in ["hit00", "hit01", "hit02", "hit03"] {
+            let id = hit_id(tag);
+            cat.insert(
+                &id,
+                serde_json::json!({ "text": "x".repeat(1000) })
+                    .to_string()
+                    .into_bytes(),
+            );
+        }
+        let app = App::with_clock(&cat, PagedIndex { n: 4 }, clock_t0);
+        let resp = app
+            .handle(AppRequest::Search {
+                query: "q".into(),
+                limit: 10,
+                cursor: None,
+                budget: ResponseBudget {
+                    max_response_bytes: budget::MIN_RESPONSE_BYTES,
+                    ..Default::default()
+                },
+            })
+            .unwrap();
+        let (ids, _, _, truncation) = hits_of(resp);
+        assert!(!ids.is_empty() && ids.len() < 4, "kept {}", ids.len());
+        assert!(truncation.truncated);
+        assert_eq!(
+            truncation.reason.as_deref(),
+            Some(budget::TRUNCATION_MAX_RESPONSE_BYTES)
+        );
     }
 
     #[test]
@@ -1034,6 +1222,7 @@ mod tests {
                         &[format!("hit{i:02}").as_bytes()],
                     ),
                     score: -(i as f32),
+                    snippet: None,
                 })
                 .collect())
         }
@@ -1059,6 +1248,15 @@ mod tests {
     impl CatalogStore for MapCatalog {
         fn get(&self, id: &StableId) -> PortResult<Option<Vec<u8>>> {
             Ok(self.map.get(id.as_str()).cloned())
+        }
+        fn get_many(&self, ids: &[StableId]) -> PortResult<Vec<(StableId, Option<Vec<u8>>)>> {
+            Ok(ids
+                .iter()
+                .map(|id| {
+                    let payload = self.map.get(id.as_str()).cloned();
+                    (id.clone(), payload)
+                })
+                .collect())
         }
         fn put(&self, _id: &StableId, _payload: &[u8]) -> PortResult<()> {
             Ok(())
@@ -1389,6 +1587,10 @@ mod tests {
     impl CatalogStore for GraphCatalog {
         fn get(&self, id: &StableId) -> PortResult<Option<Vec<u8>>> {
             self.catalog.get(id)
+        }
+
+        fn get_many(&self, ids: &[StableId]) -> PortResult<Vec<(StableId, Option<Vec<u8>>)>> {
+            self.catalog.get_many(ids)
         }
 
         fn put(&self, id: &StableId, payload: &[u8]) -> PortResult<()> {

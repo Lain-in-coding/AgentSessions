@@ -119,6 +119,36 @@ impl CanonicalCode {
             CanonicalCode::WriterBusy | CanonicalCode::SourceChanged
         )
     }
+
+    /// 人类可读的"下一步怎么办"指引。与 `schemas/robot/v1/error-catalog.json` 的
+    /// `operator_action` 对齐（逐 code 独立映射，禁止合并分组——错误语义互不相同），
+    /// 但写成对不读源码的新手也能执行的步骤；human 模式渲染错误时追加到报错行之后
+    /// （robot/json 模式保持稳定 code，指引留给调用方）。
+    pub fn operator_action(self) -> &'static str {
+        match self {
+            CanonicalCode::InvalidRequest => "检查命令与参数写法，运行 --help 查看完整用法",
+            CanonicalCode::NotFound => "确认实体 ID 是否正确（运行 list 可浏览可用实体）",
+            CanonicalCode::SourceIo => "确认源文件路径存在且可读",
+            CanonicalCode::SourceChanged => {
+                "源文件正在被写入（例如 Claude Code 正在记录当前会话），稍等后重试"
+            }
+            CanonicalCode::SnapshotFailed => "快照校验失败：检查源文件元数据与文件系统健康状态",
+            CanonicalCode::CatalogError => {
+                "数据库打开/读取失败：检查 --db 路径是否正确（路径末尾不要带斜杠），可运行 doctor --db <path> 自检"
+            }
+            CanonicalCode::ProviderError => "该文件不是可识别的 transcript 格式，或文件已被破坏",
+            CanonicalCode::WriterBusy => {
+                "另一个进程正在写入数据库，等待其结束（或结束残留的 agent-session-grep 进程）后重试"
+            }
+            CanonicalCode::SchemaIncompatible => {
+                "数据库版本与当前程序不兼容：升级程序，或对旧库重新执行完整同步"
+            }
+            CanonicalCode::CursorInvalid => "游标无效：丢弃该游标，从第一页重新执行查询",
+            CanonicalCode::CursorExpired => "游标已过期：重新执行查询以获得新的游标",
+            CanonicalCode::GenerationMismatch => "索引已推进：请从第一页重新执行查询",
+            CanonicalCode::Internal => "内部错误：请记录完整输出并反馈",
+        }
+    }
 }
 
 /// 归一后的协议错误：稳定 code + 安全 message + 有界结构化 details。
@@ -206,34 +236,59 @@ impl From<PortError> for ProtocolError {
             PortError::SnapshotChanged(_) => CanonicalCode::SourceChanged,
             PortError::WriterBusy(_) => CanonicalCode::WriterBusy,
         };
-        ProtocolError::new(code, e.to_string())
+        // R4.3：Backend 携带 rusqlite/FTS parser 等后端原始细节，绝不进入用户可见
+        // message（NUL 查询曾以 "backend failure: unterminated string" 漏出）。
+        // 其余变体已验证不携带路径/ID（静态文案或数值），保持原样。
+        let message = match &e {
+            PortError::Backend(_) => "数据库内部错误".to_string(),
+            _ => e.to_string(),
+        };
+        ProtocolError::new(code, message)
     }
 }
 
 /// 从参数中解析输出模式：`--robot` 等价稳定 JSON；`--output human|json|jsonl`。
 ///
 /// `--robot` 优先级最高（等价 `--output json` + 无色 + 无进度）。缺省为 Human。
-/// 未知或缺少 `--output` 值属于请求错误，不能静默降级为另一种协议。
+/// 未知或缺少 `--output` 值属于请求错误，不能静默降级为另一种协议；
+/// `--output` 与 `--robot` 互相冲突、同类 flag 重复出现同样是请求错误，
+/// 不允许静默 first-wins（R8.2）。
 ///
 /// flag 只在前缀位置识别：扫描在第一个裸参数（命令名）处停止，命令名之后的
 /// token 一律不当 flag——否则 `search --robot` 这类"查询文本恰等于 flag 名"
 /// 的合法检索会被误判输出模式。
 pub fn parse_output_mode(args: &[String]) -> Result<OutputMode, String> {
     let mut it = args.iter();
+    // 已选定的模式；再次遇到 --robot/--output（重复或冲突）即报错。
+    let mut chosen: Option<OutputMode> = None;
     while let Some(a) = it.next() {
         if !a.starts_with('-') {
             break; // 第一个位置参数（命令名）之后的 token 不当 flag 解析
         }
         match a.as_str() {
-            "--robot" => return Ok(OutputMode::Json),
+            "--robot" => {
+                if chosen.is_some() {
+                    return Err(
+                        "conflicting output flags: --robot cannot be combined with --output".into(),
+                    );
+                }
+                chosen = Some(OutputMode::Json);
+            }
             "--output" => {
-                return match it.next().map(|s| s.as_str()) {
-                    Some("human") => Ok(OutputMode::Human),
-                    Some("json") => Ok(OutputMode::Json),
-                    Some("jsonl") => Ok(OutputMode::Jsonl),
-                    Some(value) => Err(format!("unsupported output mode: {value}")),
-                    None => Err("--output requires human|json|jsonl".into()),
+                let mode = match it.next().map(|s| s.as_str()) {
+                    Some("human") => OutputMode::Human,
+                    Some("json") => OutputMode::Json,
+                    Some("jsonl") => OutputMode::Jsonl,
+                    Some(value) => return Err(format!("unsupported output mode: {value}")),
+                    None => return Err("--output requires human|json|jsonl".into()),
                 };
+                if chosen.is_some() {
+                    return Err(
+                        "duplicate output flags: --output cannot be repeated or combined with --robot"
+                            .into(),
+                    );
+                }
+                chosen = Some(mode);
             }
             // 其它带值 flag 及其取值不在本层消费，跳过取值避免误判。
             "--db" | "--request-id" | "--cursor" | "--max-items" | "--max-bytes"
@@ -243,7 +298,7 @@ pub fn parse_output_mode(args: &[String]) -> Result<OutputMode, String> {
             _ => {}
         }
     }
-    Ok(OutputMode::Human)
+    Ok(chosen.unwrap_or(OutputMode::Human))
 }
 
 /// request_id 语义：调用方提供（`--request-id`）则逐字回显；缺省生成 `cli-<pid>-<millis>`。
@@ -407,6 +462,65 @@ mod tests {
     }
 
     #[test]
+    fn operator_action_exists_for_every_code() {
+        for code in [
+            CanonicalCode::InvalidRequest,
+            CanonicalCode::NotFound,
+            CanonicalCode::SourceIo,
+            CanonicalCode::SourceChanged,
+            CanonicalCode::SnapshotFailed,
+            CanonicalCode::CatalogError,
+            CanonicalCode::ProviderError,
+            CanonicalCode::WriterBusy,
+            CanonicalCode::SchemaIncompatible,
+            CanonicalCode::CursorInvalid,
+            CanonicalCode::CursorExpired,
+            CanonicalCode::GenerationMismatch,
+            CanonicalCode::Internal,
+        ] {
+            assert!(!code.operator_action().is_empty(), "{}", code.as_str());
+        }
+    }
+
+    #[test]
+    fn cursor_snapshot_generation_actions_match_catalog_semantics() {
+        // catalog cursor_invalid: "Discard the cursor and rerun the query from the start."
+        let invalid = CanonicalCode::CursorInvalid.operator_action();
+        assert!(
+            invalid.contains("丢弃") && invalid.contains("重新"),
+            "{invalid}"
+        );
+        assert!(
+            !invalid.contains("--help"),
+            "cursor_invalid 不得把用户引向 --help: {invalid}"
+        );
+
+        // catalog cursor_expired: "Rerun the query to obtain a fresh cursor."
+        let expired = CanonicalCode::CursorExpired.operator_action();
+        assert!(expired.contains("重新执行查询"), "{expired}");
+
+        // catalog snapshot_failed: "Inspect source metadata and filesystem health."（非重试）
+        let snapshot = CanonicalCode::SnapshotFailed.operator_action();
+        assert!(
+            snapshot.contains("文件系统") || snapshot.contains("源文件"),
+            "{snapshot}"
+        );
+        assert!(
+            !snapshot.contains("重试"),
+            "snapshot_failed 不可重试: {snapshot}"
+        );
+
+        // catalog generation_mismatch: "The index advanced; rerun the query against the
+        // new generation."（不是 schema 不兼容）
+        let generation = CanonicalCode::GenerationMismatch.operator_action();
+        assert!(generation.contains("重新执行查询"), "{generation}");
+        assert!(
+            !generation.contains("升级") && !generation.contains("不兼容"),
+            "generation_mismatch 不是 schema 不兼容: {generation}"
+        );
+    }
+
+    #[test]
     fn writer_busy_maps_from_port_error() {
         let e: ProtocolError = PortError::WriterBusy("held".into()).into();
         assert_eq!(e.code, CanonicalCode::WriterBusy);
@@ -423,6 +537,16 @@ mod tests {
 
         let e: ProtocolError = PortError::SchemaIncompatible("newer schema".into()).into();
         assert_eq!(e.code, CanonicalCode::SchemaIncompatible);
+    }
+
+    #[test]
+    fn backend_port_error_is_masked_in_message() {
+        // R4.3：Backend 原始细节（rusqlite/FTS parser 等）不得进入用户可见 message。
+        let e: ProtocolError = PortError::Backend("unterminated string".into()).into();
+        assert_eq!(e.code, CanonicalCode::CatalogError);
+        assert_eq!(e.message, "数据库内部错误");
+        assert!(!e.message.contains("unterminated"));
+        assert!(!e.message.contains("backend failure"));
     }
 
     #[test]
@@ -755,8 +879,43 @@ mod tests {
     fn output_mode_rejects_unknown_or_missing_value() {
         assert!(parse_output_mode(&["--output".into(), "yaml".into()]).is_err());
         assert!(parse_output_mode(&["--output".into()]).is_err());
+        // --robot 先到、--output 后带非法值：同样是用法错误，不静默接受。
+        assert!(parse_output_mode(&["--robot".into(), "--output".into(), "yaml".into()]).is_err());
+    }
+
+    #[test]
+    fn output_mode_rejects_conflicting_or_duplicate_flags() {
+        // --robot 与 --output 冲突（无论取值）：用法错误，不静默 first-wins。
+        assert!(parse_output_mode(&["--output".into(), "human".into(), "--robot".into()]).is_err());
+        assert!(parse_output_mode(&["--robot".into(), "--output".into(), "json".into()]).is_err());
+        assert!(parse_output_mode(&["--robot".into(), "--robot".into()]).is_err());
+        // --output 重复（即使取值不同）：用法错误，不静默 first-wins。
+        assert!(
+            parse_output_mode(&[
+                "--output".into(),
+                "json".into(),
+                "--output".into(),
+                "yaml".into()
+            ])
+            .is_err()
+        );
+        assert!(
+            parse_output_mode(&[
+                "--output".into(),
+                "human".into(),
+                "--output".into(),
+                "json".into()
+            ])
+            .is_err()
+        );
+        // 命令名之前的其它 flag 仍正常跳过取值，不影响模式解析。
         assert_eq!(
-            parse_output_mode(&["--robot".into(), "--output".into(), "yaml".into()]),
+            parse_output_mode(&[
+                "--db".into(),
+                "store.db".into(),
+                "--output".into(),
+                "json".into()
+            ]),
             Ok(OutputMode::Json)
         );
     }

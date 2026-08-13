@@ -120,6 +120,8 @@ pub struct Truncation {
 ///
 /// - **排序在先是调用方义务**：本函数保序贪心，不重排；
 /// - `max_bytes` 应是扣除 envelope 预留后的净预算（envelope 开销由调用方保留）；
+/// - `est` 必须计入条目最终渲染的全部字节——检索命中携带的 snippet 同样受
+///   `max_response_bytes` 闸约束（snippet 是渲染产物，不是免费内容）；
 /// - 两道闸都触发时 reason 报字节闸——它决定了最终条数，增大 `max_items` 无济于事；
 /// - 首条即超字节预算时返回空集（consumed 为 0），由调用方决定如何降级。
 pub fn clamp_items<T>(
@@ -287,6 +289,19 @@ mod tests {
         assert!(!trunc.truncated);
         assert_eq!(trunc.reason, None);
         assert_eq!(consumed, 10);
+    }
+
+    #[test]
+    fn clamp_charges_snippet_bytes_toward_byte_gate() {
+        // R1.2 约定：est 必须计入 snippet 字节（snippet 是渲染产物，不是免费内容）。
+        // est = id(10) + snippet 序列化字节 + `,"text":` 字段开销(8)。
+        // 预算 130 只容 1 条带 100 字符 snippet 的命中；截断原因显式报字节闸。
+        let items = vec!["a".repeat(100), "b".repeat(100), "c".repeat(100)];
+        let (kept, trunc, consumed) = clamp_items(items, 10, 130, |s: &String| 10 + s.len() + 8);
+        assert_eq!(kept.len(), 1);
+        assert!(trunc.truncated);
+        assert_eq!(trunc.reason.as_deref(), Some(TRUNCATION_MAX_RESPONSE_BYTES));
+        assert_eq!(consumed, 118);
     }
 
     #[test]

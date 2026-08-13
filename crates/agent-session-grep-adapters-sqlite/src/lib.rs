@@ -3755,6 +3755,39 @@ impl CatalogStore for SqliteStore {
         }
     }
 
+    fn get_many(&self, ids: &[StableId]) -> PortResult<Vec<(StableId, Option<Vec<u8>>)>> {
+        let conn = self.conn.borrow();
+        let wires: Vec<&str> = ids.iter().map(|id| id.as_str()).collect();
+        // 批量读取，分块在 SQLite 变量上限之下（复用 integrity check 的 chunk 模式），
+        // 绝不逐条查询（N+1）。
+        let mut payloads: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+        for chunk in chunk_ids(&wires) {
+            let placeholders = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            let mut stmt = conn
+                .prepare(&format!(
+                    "SELECT id, payload FROM catalog WHERE id IN ({placeholders})"
+                ))
+                .map_err(backend)?;
+            let rows = stmt
+                .query_map(rusqlite::params_from_iter(chunk.iter().copied()), |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+                })
+                .map_err(backend)?;
+            for row in rows {
+                let (id, payload) = row.map_err(backend)?;
+                payloads.insert(id, payload);
+            }
+        }
+        // 保序：结果与 `ids` 同序；目录中不存在的 id → None。
+        Ok(ids
+            .iter()
+            .map(|id| {
+                let payload = payloads.get(id.as_str()).cloned();
+                (id.clone(), payload)
+            })
+            .collect())
+    }
+
     fn put(&self, id: &StableId, payload: &[u8]) -> PortResult<()> {
         let mut conn = self.conn.borrow_mut();
         let tx = conn.transaction().map_err(backend)?;
@@ -4178,8 +4211,15 @@ impl SearchIndex for SqliteStore {
 
     fn query(&self, query: &str, limit: usize) -> PortResult<Vec<SearchHit>> {
         let conn = self.conn.borrow();
-        // bm25() 越小越相关，ASC 排序即"相关性降序"（契约要求最相关在前）。
-        // 次序键补 id：等分命中获得跨次运行稳定的全序，cursor 分页依赖它（CONTRACT §7）。
+        // 用户查询按字面量分词：冒号/点号/连字符等是 FTS5 语法保留字符，直接
+        // MATCH 会泄漏 `fts5: syntax error near "."` 之类的底层报错（10 角色
+        // 体验测试缺陷）。把每个词用引号包裹成短语查询，保留词内特殊字符的字面
+        // 含义，同时保持原来的空格 AND 语义。
+        let safe_query = safe_fts_query(query);
+        if safe_query.is_empty() {
+            // 空查询（全标点/空白）无词可查：返回空而非让 FTS5 报语法错误。
+            return Ok(Vec::new());
+        }
         let mut stmt = conn
             .prepare(
                 "SELECT id, bm25(fts) FROM fts WHERE fts MATCH ?1
@@ -4187,7 +4227,7 @@ impl SearchIndex for SqliteStore {
             )
             .map_err(backend)?;
         let rows = stmt
-            .query_map(rusqlite::params![query, limit as i64], |row| {
+            .query_map(rusqlite::params![safe_query, limit as i64], |row| {
                 let id_json: String = row.get(0)?;
                 let bm25: f64 = row.get(1)?;
                 Ok((id_json, bm25))
@@ -4201,10 +4241,33 @@ impl SearchIndex for SqliteStore {
             hits.push(SearchHit {
                 id,
                 score: -bm25 as f32,
+                // 端口只提供 id+score；snippet 由 Application 装配（批量取 payload）。
+                snippet: None,
             });
         }
         Ok(hits)
     }
+}
+
+/// 把用户搜索词转成 FTS5 安全查询：按空白分词，每个词用双引号包裹成短语查询，
+/// 引号内的 FTS 保留字符（`: . - ( ) { } [ ] "`）按字面量匹配。
+///
+/// 这样 `search "codebuddy mcp.json"` 或搜索 Windows 路径片段不会触发
+/// `fts5: syntax error near "."` 之类的底层错误。纯空白/纯标点输入返回空串。
+fn safe_fts_query(query: &str) -> String {
+    let mut words: Vec<String> = Vec::new();
+    for raw in query.split_whitespace() {
+        let word = raw.replace('"', "\"\"");
+        if word.is_empty() {
+            continue;
+        }
+        // 全标点无字母数字的词对 FTS 无意义，跳过以免生成空短语 `""`。
+        if word.chars().all(|c| !c.is_alphanumeric()) {
+            continue;
+        }
+        words.push(format!("\"{word}\""));
+    }
+    words.join(" ")
 }
 
 #[cfg(test)]
@@ -4214,6 +4277,46 @@ mod tests {
 
     fn sid(kind: IdKind, fact: &[u8]) -> StableId {
         StableId::derive(kind, Stability::Reconstructed, &[fact])
+    }
+
+    #[test]
+    fn safe_fts_query_treats_operators_and_special_chars_as_literal_tokens() {
+        // R4.1（ADR-0003）：FTS 操作符与保留字符（AND/OR/NOT/NEAR/引号/冒号/
+        // 点号/连字符/星号）全部按字面量 token 包裹——输出永不含裸操作符，
+        // 因此不可能触发 FTS5 语法错误或把查询解释为布尔表达式。纯标点词
+        // （`*`、`-`）对 FTS 无意义，跳过。
+        let cases = [
+            // (输入查询, safe_fts_query 输出)
+            ("AND OR NOT", "\"AND\" \"OR\" \"NOT\""),
+            ("and or not", "\"and\" \"or\" \"not\""),
+            ("NEAR", "\"NEAR\""),
+            ("mcp.json", "\"mcp.json\""),
+            ("a:b x-y", "\"a:b\" \"x-y\""),
+            ("\"phrase\"", "\"\"\"phrase\"\"\""),
+            ("prefix*", "\"prefix*\""),
+            ("column: value", "\"column:\" \"value\""),
+            ("*", ""),
+            ("* - :", ""),
+            ("a - b", "\"a\" \"b\""),
+            ("hello  world", "\"hello\" \"world\""),
+            ("", ""),
+            ("   ", ""),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(safe_fts_query(input), expected, "safe_fts_query({input:?})");
+        }
+        // 任何输出都不是裸操作符开头：逐词断言无 FTS 语法关键字裸露。
+        for input in [
+            "AND", "OR", "NOT", "NEAR", "a AND b", "NOT x", "x OR y", "a NEAR b",
+        ] {
+            let safe = safe_fts_query(input);
+            for word in safe.split(' ') {
+                assert!(
+                    word.starts_with('"'),
+                    "词必须被引号包裹: {input:?} -> {safe:?} (word {word:?})"
+                );
+            }
+        }
     }
 
     fn sqlite_failure(code: i32) -> rusqlite::Error {
@@ -4520,6 +4623,46 @@ mod tests {
         store.put(&id, b"first").unwrap();
         store.put(&id, b"second").unwrap();
         assert_eq!(store.get(&id).unwrap().unwrap(), b"second");
+    }
+
+    #[test]
+    fn catalog_get_many_preserves_order_and_misses() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let a = sid(IdKind::Message, b"gma");
+        let b = sid(IdKind::Message, b"gmb");
+        let missing = sid(IdKind::Message, b"missing");
+        store.put(&a, b"payload-a").unwrap();
+        store.put(&b, b"payload-b").unwrap();
+        // 乱序请求：结果必须与请求同序（保序契约），目录中不存在的 id → None。
+        let got = store
+            .get_many(&[b.clone(), missing.clone(), a.clone()])
+            .unwrap();
+        assert_eq!(got.len(), 3);
+        assert_eq!(got[0], (b, Some(b"payload-b".to_vec())));
+        assert_eq!(got[1], (missing, None));
+        assert_eq!(got[2], (a, Some(b"payload-a".to_vec())));
+        // 空请求 → 空结果。
+        assert!(store.get_many(&[]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn catalog_get_many_chunks_over_variable_limit() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        // 501 个 id 跨过 BATCH_IN_CHUNK(500) 分块边界：两块 IN 都能正确取回。
+        let mut ids: Vec<StableId> = Vec::new();
+        for i in 0..501u32 {
+            let id = sid(IdKind::Message, &i.to_le_bytes());
+            store
+                .put(&id, &format!("payload-{i}").into_bytes())
+                .unwrap();
+            ids.push(id);
+        }
+        let got = store.get_many(&ids).unwrap();
+        assert_eq!(got.len(), 501);
+        for (i, (id, payload)) in got.iter().enumerate() {
+            assert_eq!(id, &ids[i]);
+            assert_eq!(payload.as_deref(), Some(format!("payload-{i}").as_bytes()));
+        }
     }
 
     #[test]

@@ -88,8 +88,7 @@ agent-session-grep doctor
 agent-session-grep --robot config paths
 ```
 
-`doctor` without `--db` reports the tool version only and does not touch a
-data root. To also check that a store opens, pass a path:
+`doctor` without `--db` checks only the environment: it reports the tool name and version, plus `db: not-checked` / `schema: null`, and prints an actionable hint pointing at `doctor --db <path>`. Only the db/schema validation is skipped; no data root is touched. To also check that a store opens, pass a path:
 
 ```
 agent-session-grep --robot doctor --db C:/data/example.db

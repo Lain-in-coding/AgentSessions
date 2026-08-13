@@ -189,19 +189,16 @@ assert_envelope 'get' 0 \
     'f["data"]["payload"]'
 pass 'get returned a non-empty payload for the search hit'
 
-# 7. A well-formed but absent id makes `get` succeed with payload null, which is
-#    the documented contract (see the get_missing_returns_null_payload test), so
-#    it is asserted as such rather than as the exit 4 design §2.5 predicts.
+# 7. A well-formed but absent id is not_found: exit 4 with ok:false and
+#    error.code not_found (ADR-0005; the message is generic and never echoes
+#    the wire id).
 run_robot get 'ses_v1_nope'
-assert_envelope 'get-absent' 0 \
-    'f["ok"] is True' \
-    'f["data"]["payload"] is None'
-pass 'absent id makes get exit 0 with data.payload null'
+assert_envelope 'get-absent' 4 \
+    'f["ok"] is False' \
+    'f["error"]["code"] == "not_found"'
+pass 'absent id yields exit 4 with error.code not_found'
 
-# 8. not_found (exit 4) is therefore asserted through `context`, the surface that
-#    does reject an absent session. Weakening step 7 to expect exit 4 would have
-#    failed against the shipped CLI; dropping the code entirely would have left
-#    the documented exit 4 untested.
+# 8. context on an absent session carries the same not_found contract.
 run_robot context 'ses_v1_ffffffff-ffff-4fff-8fff-ffffffffffff'
 assert_envelope 'not-found' 4 \
     'f["ok"] is False' \

@@ -380,12 +380,29 @@ fn migrated_v6_catalog_stays_readable_until_complete_reingest_enables_context() 
 }
 
 #[test]
-fn get_missing_returns_null_payload() {
+fn get_missing_is_not_found_with_generic_message() {
     let (_dir, db) = temp_db("missing");
-    // 合法前缀但从未写入的 id：解析成功、catalog 查无 → payload:null。
-    let out = run(&db, &["get", "msg_v1_ffffffffffffffffffffffffffffffff"]);
-    assert!(out.status.success());
-    assert!(stdout(&out).contains("\"payload\":null"));
+    // ADR-0005：合法前缀但从未写入的 id → not_found（exit 4）。消息固定为通用
+    // 文案，绝不回显 wire id（R2.1 隐私）；robot envelope 与 human stderr 双验证。
+    let missing = "msg_v1_ffffffffffffffffffffffffffffffff";
+    let out = run(&db, &["get", missing]);
+    assert_eq!(out.status.code(), Some(4), "stdout={}", stdout(&out));
+    let frame = parse_first_line(&out);
+    assert_envelope_shape(&frame, false);
+    assert_eq!(frame["error"]["code"], "not_found");
+    assert_eq!(frame["error"]["message"], "entity not found", "{frame}");
+    assert!(
+        !stdout(&out).contains(missing),
+        "envelope 不得回显 wire id: {}",
+        stdout(&out)
+    );
+    let out = run_human(&db, &["get", missing]);
+    assert_eq!(out.status.code(), Some(4));
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        !stderr.contains(missing),
+        "human stderr 不得回显 wire id: {stderr}"
+    );
 }
 
 #[test]
@@ -444,15 +461,28 @@ fn show_returns_normalized_role_and_text() {
 }
 
 #[test]
-fn show_missing_returns_null_entity() {
+fn show_missing_is_not_found_with_generic_message() {
     let (_dir, db) = temp_db("show-missing");
-    // 合法前缀但从未写入的 id：解析成功、catalog 查无 → entity:null。
-    let out = run(&db, &["show", "msg_v1_ffffffffffffffffffffffffffffffff"]);
-    assert!(out.status.success());
+    // ADR-0005：show 缺失实体与 get 同一契约——exit 4 + not_found + 通用消息，
+    // 不回显 wire id（R2.1）。
+    let missing = "msg_v1_ffffffffffffffffffffffffffffffff";
+    let out = run(&db, &["show", missing]);
+    assert_eq!(out.status.code(), Some(4), "show={}", stdout(&out));
+    let frame = parse_first_line(&out);
+    assert_envelope_shape(&frame, false);
+    assert_eq!(frame["error"]["code"], "not_found", "{frame}");
+    assert_eq!(frame["error"]["message"], "entity not found", "{frame}");
     assert!(
-        stdout(&out).contains("\"entity\":null"),
-        "show={}",
+        !stdout(&out).contains(missing),
+        "envelope 不得回显 wire id: {}",
         stdout(&out)
+    );
+    let out = run_human(&db, &["show", missing]);
+    assert_eq!(out.status.code(), Some(4));
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        !stderr.contains(missing),
+        "human stderr 不得回显 wire id: {stderr}"
     );
 }
 
@@ -770,51 +800,50 @@ fn search_flag_named_query_is_searched_not_intercepted() {
     assert!(!frame["data"]["hits"].as_array().expect("hits").is_empty());
 
     // `--output` 在命令名之后是查询文本：参数解析放行给 search 引擎。
-    // 引擎层对纯否定查询（"--output" 分词后是 `NOT output`）报 catalog_error——
-    // 这正说明查询串抵达检索层；若被误判为输出模式，这里会是 exit 2 的
-    // "--output requires human|json|jsonl" 模式错误。
+    // 引擎层对带连字符的查询做字面量转义（10 角色体验测试缺陷修复——原来
+    // "--output" 触发 FTS 语法错误，新手搜含冒号/点号/连字符的文本直接报错）。
+    // 若被误判为输出模式，这里会是 exit 2 的 "--output requires human|json|jsonl"。
     let out = run(&db, &["search", "--output"]);
-    assert_eq!(out.status.code(), Some(6), "stdout={}", stdout(&out));
+    assert_eq!(out.status.code(), Some(0), "stdout={}", stdout(&out));
     let frame = parse_first_line(&out);
-    assert_envelope_shape(&frame, false);
+    assert_envelope_shape(&frame, true);
     assert_eq!(frame["command"], "search");
-    assert_eq!(frame["error"]["code"], "catalog_error");
-    assert!(
-        frame["error"]["message"]
-            .as_str()
-            .is_some_and(|m| m.contains("fts5")),
-        "错误应来自检索层: {frame}"
-    );
 
     // --robot 在命令名之前仍是合法输出模式 flag；query "--robot" 同样放行给检索层。
     let out = run(&db, &["search", "--robot"]);
-    assert_eq!(out.status.code(), Some(6), "stdout={}", stdout(&out));
+    assert_eq!(out.status.code(), Some(0), "stdout={}", stdout(&out));
     let frame = parse_first_line(&out);
-    assert_envelope_shape(&frame, false);
+    assert_envelope_shape(&frame, true);
     assert_eq!(frame["command"], "search");
-    assert_eq!(frame["error"]["code"], "catalog_error");
 
-    // --help 在命令名之后是查询文本，不打印帮助；human stdout 保持协议干净。
+    // --help 紧跟命令名：渲染该子命令的用法（10 角色体验测试缺陷修复——
+    // 原来 `search --help` 把 "--help" 当查询喂给 FTS5 报 catalog_error，新手
+    // 无法查单个命令怎么用）。`search foo --help` 里的 --help 仍是查询文本。
     let out = run_human(&db, &["search", "--help"]);
-    assert_eq!(out.status.code(), Some(6), "stdout={}", stdout(&out));
+    assert_eq!(out.status.code(), Some(0), "stdout={}", stdout(&out));
+    assert!(
+        stdout(&out).contains("search <query>"),
+        "应渲染 search 子命令帮助: {}",
+        stdout(&out)
+    );
+    // 查询文本含 --help 但不在命令名紧跟位：--help 落在查询文本之后成为多余
+    // 位置参数 → usage error（exit 2，human stderr 诊断，stdout 保持协议干净），
+    // 不渲染帮助文本（帮助旗标只在命令名紧跟位识别，R3.1/R8.3）。
+    let out = run_human(&db, &["search", "foo", "--help"]);
+    assert_eq!(out.status.code(), Some(2), "stdout={}", stdout(&out));
     assert!(
         stdout(&out).is_empty(),
         "human 模式 stdout 不得出现帮助文本: {}",
         stdout(&out)
     );
-    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-    assert!(
-        stderr.contains("catalog_error"),
-        "search --help 应走检索层错误: {stderr}"
-    );
 
     // --request-id 在命令名之后同样是查询文本，不被 request-id 抽取误判。
     let out = run_human(&db, &["search", "--request-id"]);
-    assert_eq!(out.status.code(), Some(6), "stdout={}", stdout(&out));
+    assert_eq!(out.status.code(), Some(0), "stdout={}", stdout(&out));
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     assert!(
-        stderr.contains("catalog_error"),
-        "search --request-id 应走检索层错误: {stderr}"
+        !stderr.contains("--request-id requires"),
+        "search --request-id 不应被 request-id 抽取误判: {stderr}"
     );
 }
 
@@ -1012,6 +1041,120 @@ fn help_flag_lists_commands_without_db() {
 }
 
 #[test]
+fn machine_mode_help_emits_single_success_envelope() {
+    // ADR-0006（R3.2）：--robot / --output json / --output jsonl 的 --help 都是
+    // exit 0 的 success envelope，帮助文本在 data.help_text；jsonl 恰为一帧；
+    // --request-id 原样回显。
+    for (mode_args, command) in [
+        (vec!["--robot"], "help"),
+        (vec!["--output", "json"], "help"),
+        (vec!["--output", "jsonl"], "help"),
+    ] {
+        let mut args = vec!["--request-id", "help.req-1"];
+        args.extend(mode_args.iter().copied());
+        args.push("--help");
+        let out = run_bare(&args);
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{mode_args:?}: {}",
+            stdout(&out)
+        );
+        let text = stdout(&out);
+        assert_eq!(
+            text.lines().count(),
+            1,
+            "{mode_args:?} 的 --help 应恰好一帧: {text}"
+        );
+        let frame: serde_json::Value = serde_json::from_str(text.lines().next().unwrap())
+            .expect("help envelope must be valid JSON");
+        assert_envelope_shape(&frame, true);
+        assert_eq!(frame["command"], command, "{mode_args:?}: {frame}");
+        assert_eq!(frame["request_id"], "help.req-1", "{frame}");
+        assert!(
+            frame["data"]["help_text"]
+                .as_str()
+                .is_some_and(|help| help.contains("COMMANDS")),
+            "data.help_text 应携带帮助文本: {frame}"
+        );
+    }
+}
+
+#[test]
+fn machine_mode_version_emits_single_success_envelope() {
+    // ADR-0006（R3.2）：--robot --version 是 success envelope，版本串在
+    // data.version；request-id 回显。
+    let out = run_bare(&["--robot", "--request-id", "ver.42", "--version"]);
+    assert_eq!(out.status.code(), Some(0), "stdout={}", stdout(&out));
+    let text = stdout(&out);
+    assert_eq!(text.lines().count(), 1, "一帧: {text}");
+    let frame: serde_json::Value =
+        serde_json::from_str(text.lines().next().unwrap()).expect("valid JSON");
+    assert_envelope_shape(&frame, true);
+    assert_eq!(frame["command"], "version");
+    assert_eq!(frame["request_id"], "ver.42");
+    assert!(
+        frame["data"]["version"]
+            .as_str()
+            .is_some_and(|version| version.contains("agent-session-grep")),
+        "data.version 应携带版本串: {frame}"
+    );
+}
+
+#[test]
+fn machine_mode_subcommand_help_echoes_request_id() {
+    // `<cmd> --help` 在机器模式下同样走单帧 success envelope（R3.2），
+    // `command` 是子命令名。
+    let out = run_bare(&[
+        "--output",
+        "jsonl",
+        "--request-id",
+        "sh.7",
+        "search",
+        "--help",
+    ]);
+    assert_eq!(out.status.code(), Some(0), "stdout={}", stdout(&out));
+    let text = stdout(&out);
+    assert_eq!(text.lines().count(), 1, "jsonl 单帧: {text}");
+    let frame: serde_json::Value =
+        serde_json::from_str(text.lines().next().unwrap()).expect("valid JSON");
+    assert_envelope_shape(&frame, true);
+    assert_eq!(frame["command"], "search");
+    assert_eq!(frame["request_id"], "sh.7");
+    assert!(
+        frame["data"]["help_text"]
+            .as_str()
+            .is_some_and(|help| help.contains("search <query>")),
+        "子命令帮助应在 data.help_text: {frame}"
+    );
+}
+
+#[test]
+fn help_and_version_require_no_db_and_create_no_file() {
+    // R3.1：help/version 在 --db 解析与存储打开之前拦截——全新库路径上跑
+    // 顶层与子命令 help、version 都不得创建 db 文件。
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("must-not-exist.db");
+    let db_s = db.to_string_lossy().into_owned();
+    let cases: Vec<Vec<&str>> = vec![
+        vec!["--db", &db_s, "--robot", "--help"],
+        vec!["--db", &db_s, "--robot", "--version"],
+        vec!["--db", &db_s, "--robot", "search", "--help"],
+        vec!["--db", &db_s, "--robot", "index", "rebuild", "--help"],
+        vec!["--db", &db_s, "doctor", "--help"],
+    ];
+    for args in cases {
+        let out = run_bare(&args);
+        assert!(out.status.success(), "{args:?}: {}", stdout(&out));
+        assert!(
+            !db.exists(),
+            "{args:?} 不得创建 db 文件: {}",
+            dir.path().display()
+        );
+    }
+}
+
+#[test]
 fn doctor_reports_ok_without_db() {
     let out = run_bare(&["--robot", "doctor"]);
     assert!(out.status.success());
@@ -1030,7 +1173,9 @@ fn doctor_with_db_reports_generation_and_recovery_evidence() {
     let out = run(&db, &["index", "d1", "doctor evidence content"]);
     assert!(out.status.success());
 
-    let out = run(&db, &["doctor", "--db", &db]);
+    // `run` 已在前缀位置给出 --db；doctor 的 --db 跟在命令名后会造成重复
+    // --db（R8.2 用法错误），故只传子命令本身。
+    let out = run(&db, &["doctor"]);
     assert!(out.status.success(), "doctor failed: {}", stdout(&out));
     let frame = parse_first_line(&out);
     assert_envelope_shape(&frame, true);
@@ -1561,7 +1706,6 @@ fn tampered_cursor_is_rejected_with_cursor_invalid() {
     let out = run(
         &db,
         &[
-            "--robot",
             "search",
             "tamper",
             "--max-items",
@@ -1602,15 +1746,7 @@ fn generation_bump_invalidates_cursor_with_exit_9() {
 
     let out = run(
         &db,
-        &[
-            "--robot",
-            "search",
-            "probe",
-            "--max-items",
-            "1",
-            "--cursor",
-            &token,
-        ],
+        &["search", "probe", "--max-items", "1", "--cursor", &token],
     );
     assert_eq!(out.status.code(), Some(9), "stdout={}", stdout(&out));
     let frame = parse_first_line(&out);
@@ -2064,13 +2200,10 @@ fn context_budget_truncation_reports_partial_exit_10() {
 #[test]
 fn context_missing_session_is_not_found() {
     let (_dir, db) = temp_db("context-missing");
+    // `run` 已带 --robot；这里只给子命令参数（重复 --robot 是用法错误，R8.2）。
     let out = run(
         &db,
-        &[
-            "--robot",
-            "context",
-            "ses_v1_ffffffff-ffff-4fff-8fff-ffffffffffff",
-        ],
+        &["context", "ses_v1_ffffffff-ffff-4fff-8fff-ffffffffffff"],
     );
     assert_eq!(out.status.code(), Some(4), "stdout={}", stdout(&out));
     let frame = parse_first_line(&out);
@@ -2308,4 +2441,322 @@ fn perf_baseline_100_messages_index_and_search() {
     // 仅输出历史 smoke 基线供观察。正式性能分布、环境和样本量由
     // scripts/evidence/core_beta_benchmark.py 负责；普通 CI 机器不以固定墙钟阈值阻断。
     eprintln!("[perf-baseline] index 100 msgs: {index_ms}ms  search: {query_ms}ms");
+}
+
+// ─── UX review 修复后的契约回归（R8 解析健壮性 / R2 隐私 / R4 字面量 / R1 snippet）───
+
+#[test]
+fn value_flags_reject_missing_value_or_flag_named_value() {
+    // R8.1：--db / --request-id 缺值或取值是已知 flag 都是用法错误（exit 2），
+    // `--db --robot status` 不得造出名为 `--robot` 的文件。这些错误在 human
+    // 模式走 stderr 诊断，stdout 保持协议干净。
+    let (dir, db) = temp_db("value-flag");
+    let db_s = db;
+    let robot_cwd = dir.path().join("cwd");
+    std::fs::create_dir_all(&robot_cwd).expect("cwd dir");
+    let robot_cwd_s = robot_cwd.to_string_lossy().into_owned();
+    let cases: Vec<(Vec<String>, &str)> = vec![
+        (
+            vec!["--db".into(), "--robot".into(), "status".into()],
+            "--db requires a path",
+        ),
+        (vec!["--db".into()], "--db requires a path"),
+        (
+            vec![
+                "--db".into(),
+                "a.db".into(),
+                "--db".into(),
+                "b.db".into(),
+                "status".into(),
+            ],
+            "duplicate --db",
+        ),
+        (
+            vec!["--request-id".into(), "--robot".into(), "status".into()],
+            "--request-id requires a value",
+        ),
+        (
+            vec![
+                "--request-id".into(),
+                "a".into(),
+                "--request-id".into(),
+                "b".into(),
+                "status".into(),
+            ],
+            "duplicate --request-id",
+        ),
+    ];
+    for (args, needle) in &cases {
+        let out = Command::new(BIN)
+            .current_dir(&robot_cwd)
+            .args(args)
+            .output()
+            .expect("spawn");
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "{args:?}: stdout={}",
+            stdout(&out)
+        );
+        assert!(
+            stdout(&out).is_empty(),
+            "human 模式 stdout 应保持协议干净: {args:?} {}",
+            stdout(&out)
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert!(
+            stderr.contains(needle),
+            "{args:?} 应报 {needle:?}: {stderr}"
+        );
+    }
+    // `--db --robot status` 不得把 `--robot` 当路径创建文件（R8.1）。
+    let robot_file = robot_cwd.join("--robot");
+    assert!(
+        !robot_file.exists(),
+        "不得创建名为 --robot 的文件: {}",
+        robot_cwd_s
+    );
+    // 同一组参数在机器人模式（前缀 --robot）下输出错误 envelope。
+    let out = run(&db_s, &["--db", "bogus-path", "status"]);
+    assert_eq!(out.status.code(), Some(2), "stdout={}", stdout(&out));
+    let frame = parse_first_line(&out);
+    assert_envelope_shape(&frame, false);
+    assert_eq!(frame["error"]["code"], "invalid_request");
+    assert!(
+        frame["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("duplicate --db")),
+        "{frame}"
+    );
+}
+
+#[test]
+fn conflicting_output_flags_are_usage_errors() {
+    // R8.2：--output 与 --robot 冲突、--output 重复都不允许静默 first-wins。
+    for args in [
+        vec!["--output", "human", "--robot", "status"],
+        vec!["--robot", "--output", "yaml", "status"],
+        vec!["--output", "json", "--output", "yaml", "status"],
+        vec!["--robot", "--robot", "status"],
+    ] {
+        let out = run_bare(&args);
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {}", stdout(&out));
+        let frame = parse_first_line(&out);
+        assert_envelope_shape(&frame, false);
+        assert_eq!(
+            frame["error"]["code"], "invalid_request",
+            "{args:?}: {frame}"
+        );
+        // 具体措辞随触发点而变（冲突/重复/非法值），契约点是 usage error。
+        assert!(
+            frame["error"]["message"]
+                .as_str()
+                .is_some_and(|m| !m.is_empty()),
+            "{args:?}: {frame}"
+        );
+    }
+}
+
+#[test]
+fn doctor_and_config_reject_unknown_tokens() {
+    // R8.3：doctor/config 的多余位置参数是用法错误，不再静默丢弃后 exit 0。
+    let out = run_bare(&["--robot", "doctor", "--bogus"]);
+    assert_eq!(out.status.code(), Some(2), "stdout={}", stdout(&out));
+    let frame = parse_first_line(&out);
+    assert_envelope_shape(&frame, false);
+    assert_eq!(frame["error"]["code"], "invalid_request");
+    assert_eq!(frame["command"], "doctor", "{frame}");
+
+    let out = run_bare(&["--robot", "config", "paths", "--bogus"]);
+    assert_eq!(out.status.code(), Some(2), "stdout={}", stdout(&out));
+    let frame = parse_first_line(&out);
+    assert_envelope_shape(&frame, false);
+    assert_eq!(frame["error"]["code"], "invalid_request");
+    assert_eq!(frame["command"], "config", "{frame}");
+}
+
+#[test]
+fn error_envelope_command_points_at_the_failing_token() {
+    // R8.4：未知 `-` 开头 token 是命令名笔误，envelope 的 `command` 指向它，
+    // 而不是后面的真命令。
+    let out = run_bare(&["--bogus", "--robot", "status"]);
+    assert_eq!(out.status.code(), Some(2), "stdout={}", stdout(&out));
+    let frame = parse_first_line(&out);
+    assert_envelope_shape(&frame, false);
+    assert_eq!(frame["command"], "--bogus", "{frame}");
+}
+
+#[test]
+fn sync_directory_rejection_is_path_free_and_platform_neutral() {
+    // R2.2：sync 传目录 → invalid_request（exit 2）；消息不含路径，展开示例
+    // 平台中立（不给 PowerShell-only 的 Get-ChildItem 例子）。robot envelope
+    // 与 human stderr 双验证。
+    let dir = tempfile::tempdir().expect("tempdir");
+    let dir_path = dir.path().to_string_lossy().into_owned();
+    let (_dbdir, db) = temp_db("sync-dir");
+
+    let out = run(&db, &["sync", &dir_path]);
+    assert_eq!(out.status.code(), Some(2), "stdout={}", stdout(&out));
+    let frame = parse_first_line(&out);
+    assert_envelope_shape(&frame, false);
+    assert_eq!(frame["error"]["code"], "invalid_request");
+    let robot_text = stdout(&out);
+    assert!(!robot_text.contains(&dir_path), "路径外泄: {robot_text}");
+    assert!(
+        !robot_text.contains("PowerShell") && !robot_text.contains("Get-ChildItem"),
+        "平台中立: {robot_text}"
+    );
+
+    let out = run_human(&db, &["sync", &dir_path]);
+    assert_eq!(out.status.code(), Some(2), "stdout={}", stdout(&out));
+    let human_text = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(!human_text.contains(&dir_path), "路径外泄: {human_text}");
+    assert!(
+        !human_text.contains("PowerShell") && !human_text.contains("Get-ChildItem"),
+        "平台中立: {human_text}"
+    );
+}
+
+#[test]
+fn literal_queries_with_fts_special_characters_succeed() {
+    // ADR-0003（R4.1）：冒号/点号/连字符与 FTS 操作符（AND/OR/NOT/NEAR/引号/*）
+    // 都是字面量 token——查询成功（exit 0），绝不触发 FTS 语法错误或
+    // catalog_error；命中按字面匹配。
+    let (_dir, db) = temp_db("literal");
+    for (fact, text) in [
+        ("l1", "configure the mcp.json bridge"),
+        ("l2", "ratio a:b and range x-y"),
+        ("l3", "AND OR NOT are ordinary words here"),
+        ("l4", "quoted \"phrase\" words"),
+        ("l5", "star * literal"),
+    ] {
+        let out = run(&db, &["index", fact, text]);
+        assert!(out.status.success(), "index {fact}: {}", stdout(&out));
+    }
+    // 每类特殊字符查询都成功且只字面命中对应文档（FTS5 短语匹配 = 相邻 token，
+    // 保留字符不再解释为语法）；`*` 单独是纯标点词 → 空查询 → 0 命中但 exit 0。
+    let hit_count = |query: &str| -> usize {
+        let out = run(&db, &["search", query]);
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "query {query:?} 不得报错: {}",
+            stdout(&out)
+        );
+        let frame = parse_first_line(&out);
+        assert_envelope_shape(&frame, true);
+        assert_eq!(frame["command"], "search");
+        frame["data"]["hits"].as_array().expect("hits").len()
+    };
+    for (query, expected) in [
+        ("mcp.json", 1),
+        ("a:b", 1),
+        ("x-y", 1),
+        // AND 命中 2 条：FTS 分词器大小写不敏感，l2 的 "and" 与 l3 的 "AND"
+        // 同 token——行为是字面 token 匹配而非语法，只是大小写折叠。
+        ("AND", 2),
+        ("OR", 1),
+        ("NOT", 1),
+        ("\"phrase\"", 1),
+    ] {
+        assert_eq!(
+            hit_count(query),
+            expected,
+            "query {query:?} 应字面命中 {expected} 条"
+        );
+    }
+    // NEAR 无对应文本：成功且空命中；`*` 同理（纯标点 → 空查询）。
+    for query in ["NEAR", "*"] {
+        let out = run(&db, &["search", query]);
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "query {query:?}: {}",
+            stdout(&out)
+        );
+        let frame = parse_first_line(&out);
+        assert_envelope_shape(&frame, true);
+    }
+}
+
+#[test]
+fn control_characters_in_query_are_invalid_request() {
+    // R4.2：控制字符在 Application 边界拒绝为 invalid_request（exit 2），
+    // 绝不清除式净化（删除会拼接 token）。Windows 命令行无法传递 NUL
+    // （std::process::Command 拒绝 NUL 参数），故 e2e 用 C0 非 NUL 控制字符；
+    // NUL 本身的边界拒绝由 application 层单元测试覆盖
+    // （search_rejects_control_characters_before_index_query）。
+    let (_dir, db) = temp_db("nul-query");
+    for query in ["a\tb", "a\nb"] {
+        let out = run(&db, &["search", query]);
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "query {query:?}: {}",
+            stdout(&out)
+        );
+        let frame = parse_first_line(&out);
+        assert_envelope_shape(&frame, false);
+        assert_eq!(frame["error"]["code"], "invalid_request", "{frame}");
+        assert!(
+            !stdout(&out).contains("backend") && !stdout(&out).contains("fts5"),
+            "不得泄漏后端细节: {}",
+            stdout(&out)
+        );
+    }
+}
+
+#[test]
+fn snippet_renders_in_human_search_but_is_stripped_in_machine_modes() {
+    // R1/ADR-0004：snippet 由 application 检索装配阶段从 canonical JSON payload
+    // 的 `text` 字段生成；human 渲染器打印片段行，json/jsonl/robot envelope
+    // 不得携带 snippet 字段（协议兼容）。index 命令写入裸文本 payload（无 text
+    // 字段），故用 ingest 的 canonical payload 路径验证。
+    let (dir, db) = temp_db("snippet");
+    let fixture = dir.path().join("snippet.jsonl");
+    std::fs::write(
+        &fixture,
+        concat!(
+            r#"{"type":"user","message":{"role":"user","content":"snippet visible in human output"}}"#,
+            "\n",
+        ),
+    )
+    .expect("write fixture");
+    let fixture_path = fixture.to_string_lossy().into_owned();
+    let out = run(&db, &["ingest", &fixture_path]);
+    assert!(out.status.success(), "ingest failed: {}", stdout(&out));
+
+    let out = run_human(&db, &["search", "snippet"]);
+    assert!(
+        out.status.success(),
+        "human search failed: {}",
+        stdout(&out)
+    );
+    assert!(
+        stdout(&out).contains("snippet visible in human output"),
+        "human 应渲染 snippet 行: {}",
+        stdout(&out)
+    );
+
+    for machine_args in [
+        vec!["--db", &db, "--robot", "search", "snippet"],
+        vec!["--db", &db, "--output", "json", "search", "snippet"],
+        vec!["--db", &db, "--output", "jsonl", "search", "snippet"],
+    ] {
+        let out = Command::new(BIN)
+            .args(&machine_args)
+            .output()
+            .expect("spawn");
+        assert!(out.status.success(), "{machine_args:?}: {}", stdout(&out));
+        let frame = parse_first_line(&out);
+        assert_envelope_shape(&frame, true);
+        let hits = frame["data"]["hits"].as_array().expect("hits").clone();
+        assert!(!hits.is_empty(), "{machine_args:?}: {frame}");
+        for hit in hits {
+            assert!(
+                hit.get("snippet").is_none(),
+                "机器模式不得携带 snippet: {machine_args:?} {frame}"
+            );
+        }
+    }
 }

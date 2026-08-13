@@ -124,6 +124,18 @@ The byte/item caps (default 4 MiB / 1000 items / 2000 snippets / 500 messages /
 ordered, never silent.
 _Avoid_: limits, pagination, max results
 
+**Snippet**:
+The bounded text preview attached to a search hit in human output only.
+Not redacted (owner decision 2026-08-13, ADR-0004); snippets count against
+the Response Budget.
+_Avoid_: preview, excerpt, summary line
+
+**Plain-text Query**:
+The only supported search-query form: whitespace-split literal tokens joined
+with implicit AND. FTS operators and phrase/prefix syntax are literal text,
+not a query language (ADR-0003).
+_Avoid_: FTS query, advanced query, raw query
+
 **Data Root**:
 The local directory (config / data / cache / logs) that holds the catalog and
 its sidecars. A single writer lease (OS-level lock) serializes writers;
@@ -175,3 +187,40 @@ _Avoid_: support level, compatibility
   progress frames as part of the run.
 - **Docs (Q10)**: this CONTEXT.md is the canonical glossary; decisions are
   logged here (and, when irreversible, in ADRs under docs/adr/).
+
+## Decision log (2026-08-13 — UX review fix round)
+
+- **Fix scope (Q1)**: this round fixes all findings introduced by the UX diff
+  plus the parser-robustness batch; perf P1s, MCP pre-existing contract gaps,
+  and the evidence/install-script cluster move to a separate task.
+- **Task structure (Q2)**: new Trellis task `08-13-ux-review-fixes` owns the
+  production fixes; `e2e-hardening-followup` keeps its tests-only scope.
+- **Snippets (Q3, owner revised)**: keep human search snippets with no
+  redaction — the tool is local-first with zero network egress; on-screen
+  secret display is accepted risk (ADR-0004). Budget enforcement is still
+  required.
+- **Search semantics (Q4)**: search is officially plain-text-only;
+  literalization is a feature, not a regression (ADR-0003).
+- **Missing-entity contract (Q5)**: get and show both return exit 4 +
+  not_found; smoke scripts and CONTRACT updated in the same change (ADR-0005).
+- **show projection (Q6)**: messages get the curated projection;
+  session/document entities fall back to generic key/value rendering.
+- **Machine-mode help/version (Q7)**: help and version always exit 0 in every
+  mode; robot/json/jsonl wrap the text in a success envelope `data`
+  (ADR-0006). No mode-dependent exit codes.
+
+## Decision log (2026-08-13 — next round planning)
+
+- **Next-round scope (Q1)**: three parallel tasks — A core usability (CJK
+  tokenization, probe tolerance, merged-file session diagnostics, search-hit
+  session context), B competitor borrowings (time/provider filters,
+  system-noise filtering, group-by-session, around/get_message, summary
+  levels), C context/perf Top 5 (edge batching, mainline index, timestamp
+  pre-parse, rebuild join, merged IN). Each task owns a worktree; A lands
+  first because B's contract depends on A's schema decisions.
+- **CJK scheme (Q2)**: CJK bigram pre-processing at index write time
+  ("配置备份" → "配置 置备 备份"); the FTS5 projection stays rebuildable via
+  index rebuild. Trigram rejected (≤2-char queries die — the core Chinese
+  query unit); dual-column is a later enhancement (ADR-0007).
+- **Dependencies (Q3)**: A first (index-layer + contract), B depends on A's
+  search-hit schema, C fully independent and parallel.

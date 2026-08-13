@@ -86,7 +86,7 @@ fn main() {
             let err = ProtocolError::new(CanonicalCode::InvalidRequest, message);
             match mode {
                 protocol::OutputMode::Human => {
-                    eprintln!("error [{}]: {}", err.code.as_str(), err.message);
+                    render_human_error(&err);
                 }
                 protocol::OutputMode::Json | protocol::OutputMode::Jsonl => {
                     protocol::write_stdout_line(&protocol::error_envelope(&command, &err, None));
@@ -103,7 +103,7 @@ fn main() {
             // 错误 envelope 只写 stdout 一个对象；进程级诊断（人类模式）走 stderr。
             match mode {
                 protocol::OutputMode::Human => {
-                    eprintln!("error [{}]: {}", err.code.as_str(), err.message);
+                    render_human_error(&err);
                 }
                 protocol::OutputMode::Json | protocol::OutputMode::Jsonl => {
                     protocol::write_stdout_line(&protocol::error_envelope(
@@ -118,25 +118,45 @@ fn main() {
     }
 }
 
+/// 人类模式的错误渲染：报错行（保留稳定 code 前缀）+ 一行白话"下一步"指引
+/// （error catalog 的 `operator_action` 面向新手落地）。robot/json 模式保持
+/// 稳定 envelope，不受影响。
+fn render_human_error(err: &ProtocolError) {
+    eprintln!("error [{}]: {}", err.code.as_str(), err.message);
+    eprintln!("下一步：{}", err.code.operator_action());
+}
+
 /// 从参数抽出 `--request-id`：缺 flag → None；有 flag 则值必须满足 envelope
 /// 约束（`^[A-Za-z0-9._:-]+$`，1..=128），否则是用法错误。
 ///
 /// 与 [`protocol::parse_output_mode`] 同一规则：flag 只在前缀位置（第一个位置
 /// 参数之前）识别——命令名/查询文本恰等于 `--request-id` 时按查询走，不得误判。
+/// 取值为已知 flag 名（`--request-id --robot` 会把 flag 当取值，且 `--robot`
+/// 恰好能通过 id 字符集校验）与重复 `--request-id`（不再静默 first-wins）
+/// 都是用法错误（R8.1/R8.2）。
 fn extract_request_id(args: &[String]) -> Result<Option<String>, String> {
     let mut it = args.iter();
+    let mut seen: Option<String> = None;
     while let Some(a) = it.next() {
         if !a.starts_with('-') {
-            return Ok(None); // 已到命令名：之后的 token 不当 flag 解析
+            return Ok(seen); // 已到命令名：之后的 token 不当 flag 解析
         }
         if a == "--request-id" {
             let value = it.next().ok_or("--request-id requires a value")?;
+            if is_known_flag_name(value) {
+                return Err(format!(
+                    "--request-id requires a value, got {value:?} (a flag name)"
+                ));
+            }
             if !protocol::valid_request_id(value) {
                 return Err(format!(
                     "--request-id must match ^[A-Za-z0-9._:-]+$ (1..=128 chars), got {value:?}"
                 ));
             }
-            return Ok(Some(value.clone()));
+            if seen.is_some() {
+                return Err("duplicate --request-id".into());
+            }
+            seen = Some(value.clone());
         }
         // 其它带值 flag 跳过其取值，避免把取值误当位置参数提前终止扫描。
         match a.as_str() {
@@ -147,13 +167,15 @@ fn extract_request_id(args: &[String]) -> Result<Option<String>, String> {
             _ => {}
         }
     }
-    Ok(None)
+    Ok(seen)
 }
 
 /// 从参数里解出子命令名（用于错误 envelope 的 `command` 字段）。
 ///
-/// 跳过带值 flag（`--db <path>` / `--output <mode>` / 分页与预算 flag）及其取值，
-/// 第一个裸参数即命令。
+/// 跳过已知 flag（带值的连同其取值）；第一个既不是已知 flag、也不是已知 flag
+/// 取值的 token 即命令名。未知的 `-` 开头 token 不是 flag——它是命令名笔误
+/// （如 `--bogus`），错误 envelope 的 `command` 必须指向它而不是后面的真命令
+/// （R8.4：`--bogus --robot status` 的失败者是 `--bogus`，不是 `status`）。
 fn command_name(args: &[String]) -> String {
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -162,11 +184,74 @@ fn command_name(args: &[String]) -> String {
             | "--policy" | "--request-id" => {
                 it.next(); // 消费其取值
             }
-            s if s.starts_with('-') => {}
+            "--robot" | "--no-color" | "--help" | "-h" | "--version" | "-V" => {}
             s => return s.to_string(),
         }
     }
     "unknown".into()
+}
+
+/// help/version 拦截结果（ADR-0006）：在 `--db` 解析与存储打开之前识别。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum HelpRequest {
+    /// 顶层 `--help` / `-h`（无子命令）。
+    TopLevelHelp,
+    /// 顶层 `--version` / `-V`。
+    TopLevelVersion,
+    /// `<cmd> --help` / `-h`（含 `index rebuild --help`）。
+    SubcommandHelp(String),
+}
+
+/// 提前拦截 help/version（ADR-0006）：只在全局 flag 前缀位置之后识别。
+///
+/// - 全为前缀 flag（无命令名）时，`--help`/`-h` → 顶层帮助，`--version`/`-V`
+///   → 版本；两者同时出现时帮助优先（与旧行为一致）。
+/// - 命令名紧跟 `--help`/`-h` → 该子命令帮助（`index rebuild --help` 也覆盖）；
+///   `search foo --help` 里更靠后的 `--help` 不在此位——不得拦截，交给命令层
+///   按位置参数处理（search 只接受一个查询词，多余 token 是 usage error）。
+/// - 未知命令（不在 [`known_subcommand`]）后的 `--help` 不拦截——交给 dispatch
+///   报 unknown subcommand，而不是给出误导性帮助。
+fn intercept_help_or_version(args: &[String]) -> Option<HelpRequest> {
+    let mut it = args.iter();
+    let mut prefix_help = false;
+    let mut prefix_version = false;
+    while let Some(token) = it.next() {
+        if !token.starts_with('-') {
+            // 第一个裸 token 即命令名：紧随其后的 --help/-h 是子命令帮助。
+            let cmd = token.as_str();
+            match it.next().map(String::as_str) {
+                Some("--help") | Some("-h") if known_subcommand(cmd) => {
+                    return Some(HelpRequest::SubcommandHelp(cmd.to_string()));
+                }
+                // index rebuild --help：rebuild 是 index 的子词，帮助旗标跟在它后面。
+                Some("rebuild") if cmd == "index" => {
+                    if matches!(it.next().map(String::as_str), Some("--help") | Some("-h")) {
+                        return Some(HelpRequest::SubcommandHelp("index".into()));
+                    }
+                }
+                _ => {}
+            }
+            // 命令已出现且帮助旗标不在紧跟位：不拦截，按正常命令/查询走。
+            return None;
+        }
+        match token.as_str() {
+            "--help" | "-h" => prefix_help = true,
+            "--version" | "-V" => prefix_version = true,
+            // 带值 flag 跳过其取值，避免把取值误当命令名。
+            "--db" | "--output" | "--request-id" | "--cursor" | "--max-items" | "--max-bytes"
+            | "--max-messages" | "--policy" => {
+                it.next();
+            }
+            _ => {}
+        }
+    }
+    if prefix_help {
+        Some(HelpRequest::TopLevelHelp)
+    } else if prefix_version {
+        Some(HelpRequest::TopLevelVersion)
+    } else {
+        None
+    }
 }
 
 fn run(
@@ -175,21 +260,28 @@ fn run(
     request_id: Option<&str>,
 ) -> Result<protocol::Outcome, CliError> {
     let started = std::time::Instant::now();
-    // --help / --version / doctor 在解析 --db 之前拦截——它们不需要数据库。
-    // 放在最前面，使 `agent-session-grep --help`（无 --db）也能正常工作。
-    // flag 只在前缀位置识别：存在位置参数（命令名/查询）时同名 token 是查询
-    // 文本而非 flag，不得短路——`search --help` 应检索字面量 "--help"。
-    let has_positional = command_name(args) != "unknown";
-    if !has_positional && args.iter().any(|a| a == "--help" || a == "-h") {
-        print_help();
-        return Ok(protocol::Outcome::Success);
-    }
-    if !has_positional && args.iter().any(|a| a == "--version" || a == "-V") {
-        protocol::write_stdout_line(&format!(
-            "{} {}",
-            env!("CARGO_PKG_NAME"),
-            env!("CARGO_PKG_VERSION")
-        ));
+    // help/version 提前拦截（ADR-0006）：在解析 --db、打开存储、special-command
+    // 分发（doctor/config/mcp/tui）之前处理——`<cmd> --help` 不要求 --db，任何
+    // help 路径都不创建数据库、不抢 writer lease、无文件副作用。
+    // 语义：--help/-h/--version 紧跟命令名（对 index 可跟在 rebuild 后）才是
+    // 子命令帮助；命令名之后更靠后的同名 token 不得拦截——由命令层按位置参数
+    // 处理（search 只接受一个查询词，`search foo --help` 因此是多余参数
+    // usage error，`search --help` 则始终是帮助拦截）。查询文本恰等于 flag 名
+    // 的检索（`search --robot` / `search --output`）只发生在 help 旗标不在
+    // 命令名紧跟位时。
+    if let Some(intercept) = intercept_help_or_version(args) {
+        match intercept {
+            HelpRequest::TopLevelHelp => emit_help("help", &help_text(), mode, request_id),
+            HelpRequest::TopLevelVersion => emit_version(
+                "version",
+                &format!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")),
+                mode,
+                request_id,
+            ),
+            HelpRequest::SubcommandHelp(cmd) => {
+                emit_help(&cmd, subcommand_help_text(&cmd), mode, request_id);
+            }
+        }
         return Ok(protocol::Outcome::Success);
     }
     if command_name(args) == "doctor" {
@@ -388,12 +480,19 @@ fn platform_paths_impl() -> Result<serde_json::Value, CliError> {
     }))
 }
 
-fn print_help() {
-    // 与 --version 一样走协议出口：裸 println! 会在下游提前关管道时 panic
-    // （exit 101 + stderr 污染），违反 CONTRACT §6 的 EPIPE 静默 exit 0。
-    let help = format!(
+/// 顶层帮助文本。与 --version 一样走协议出口：裸 println! 会在下游提前关管道时
+/// panic（exit 101 + stderr 污染），违反 CONTRACT §6 的 EPIPE 静默 exit 0。
+fn help_text() -> String {
+    format!(
         "{name} {version}
-AI coding-agent history search engine.
+AI coding-agent history search engine（本地 AI 编程会话历史搜索）。
+
+快速上手（新手从这里开始）:
+    agent-session-grep config paths                 查看数据默认放哪里
+    agent-session-grep --db <库路径> search 关键词    搜索历史会话
+    agent-session-grep --db <库路径> show <命中ID>   看一条命中的正文
+    agent-session-grep --db <库路径> context <会话ID> 展开一个会话的上下文
+数据流：search 返回命中消息 → show <msg_id> 看正文 → context <ses_id> 看整个会话。
 
 USAGE:
     agent-session-grep --db <path> <COMMAND> [ARGS]
@@ -426,21 +525,169 @@ CONTEXT:
     --max-messages <n>     消息条数预算
     --max-bytes <n>        响应字节预算
 
-GLOBAL:
-    --db <path>            SQLite 数据存储路径（除 doctor/help/version 外必需）
+GLOBAL（全局 flag 放在命令名之前；子命令 flag 如 --max-items 放在命令名之后）:
+    --db <path>            SQLite 数据存储路径（doctor/help/version/config paths 除外必需）
     --output human|json|jsonl  输出模式（默认 human：人类可读文本；json/jsonl 为协议 envelope）
     --robot                等价 --output json，无颜色/进度（stdout 只输出协议）
     --request-id <id>      robot 调用方关联 id，原样回显于每个 frame（A-Za-z0-9._:- 计 1-128 字符）
     -h, --help             打印本帮助
     -V, --version          打印版本
 
+术语速记:
+    generation       第 N 次入库（数据每更新一次 +1）
+    cursor           翻页令牌（结果多于一页时用来取下一页）
+    wire-id          实体 ID（msg_v1_ 消息 / ses_v1_ 会话 / doc_v1_ 文档）
+    score            相关度分数（越高越相关，按分数降序排列）
+
 EXIT CODES:
     0 成功；10 部分成功（预算截断，结果可用但不完整）；其余见 error catalog",
         name = env!("CARGO_PKG_NAME"),
         version = env!("CARGO_PKG_VERSION"),
+    )
+}
+
+/// 帮助/版本统一出口（ADR-0006）：human 逐行打印文本到 stdout；json/jsonl/robot
+/// 输出单个 success envelope（jsonl 即单帧），`--request-id` 原样回显。所有
+/// help 路径都发生在 --db 解析与存储打开之前，无任何文件副作用。
+fn emit_help(command: &str, text: &str, mode: protocol::OutputMode, request_id: Option<&str>) {
+    emit_help_payload(
+        command,
+        serde_json::json!({ "help_text": text }),
+        text,
+        mode,
+        request_id,
     );
-    for line in help.lines() {
-        protocol::write_stdout_line(line);
+}
+
+/// 版本统一出口：与 [`emit_help`] 同构，版本串放进 `data.version`。
+fn emit_version(command: &str, text: &str, mode: protocol::OutputMode, request_id: Option<&str>) {
+    emit_help_payload(
+        command,
+        serde_json::json!({ "version": text }),
+        text,
+        mode,
+        request_id,
+    );
+}
+
+/// [`emit_help`] / [`emit_version`] 的公共实现。stdout 写入统一走
+/// [`protocol::write_stdout_line`]（EPIPE 静默 exit 0，CONTRACT §6）。
+fn emit_help_payload(
+    command: &str,
+    data: serde_json::Value,
+    text: &str,
+    mode: protocol::OutputMode,
+    request_id: Option<&str>,
+) {
+    match mode {
+        protocol::OutputMode::Human => {
+            for line in text.lines() {
+                protocol::write_stdout_line(line);
+            }
+        }
+        protocol::OutputMode::Json | protocol::OutputMode::Jsonl => {
+            protocol::write_stdout_line(&help_envelope(command, data, request_id));
+        }
+    }
+}
+
+/// 机器模式下 help/version 的 envelope（json/jsonl 同形：单个 success envelope，
+/// jsonl 即单帧；`data` 携带帮助文本/版本串；`--request-id` 原样回显）。
+fn help_envelope(command: &str, data: serde_json::Value, request_id: Option<&str>) -> String {
+    protocol::success_envelope(
+        command,
+        protocol::Outcome::Success,
+        data,
+        0,
+        &protocol::Page::default(),
+        &[],
+        request_id,
+    )
+}
+
+/// 是否为已知子命令（用于子命令 `--help` 拦截与 unknown-subcommand 报错提示）。
+fn known_subcommand(cmd: &str) -> bool {
+    matches!(
+        cmd,
+        "ingest"
+            | "sync"
+            | "index"
+            | "search"
+            | "get"
+            | "show"
+            | "list"
+            | "context"
+            | "status"
+            | "mcp"
+            | "tui"
+            | "doctor"
+            | "config"
+    )
+}
+
+/// 子命令级帮助文本：渲染该命令的签名、flag 与一个真实示例。由 help/version
+/// 提前拦截阶段（ADR-0006）在 `<cmd> --help|-h`（含 `index rebuild --help`）时
+/// 触发——顶层 --help 只给全局概览，子命令帮助给单命令的用法。
+fn subcommand_help_text(cmd: &str) -> &'static str {
+    match cmd {
+        "search" => {
+            "search <query>：全文检索历史会话，按相关性降序返回命中。\n\
+                     示例：agent-session-grep --db <path> search 配置备份\n\
+                     flag（放子命令后）：--max-items <n> 页大小、--cursor <token> 翻页、--max-bytes <n> 预算"
+        }
+        "get" => {
+            "get <wire-id>：按实体 ID 取回原始 payload。\n\
+                  示例：agent-session-grep --db <path> get msg_v1_..."
+        }
+        "show" => {
+            "show <wire-id>：按实体 ID 取回并展示（role/text/时间戳）。\n\
+                   示例：agent-session-grep --db <path> show msg_v1_...\n\
+                   从 search 命中或 show 输出里的 session 字段，可继续用 context 展开会话。"
+        }
+        "list" => {
+            "list [limit]：按稳定序列出实体（默认 20）。\n\
+                   示例：agent-session-grep --db <path> list 50\n\
+                   flag（放子命令后）：--cursor <token> 翻页"
+        }
+        "context" => {
+            "context <ses-id>：装配一个会话的完整上下文（消息链 + 证据区间）。\n\
+                      示例：agent-session-grep --db <path> context ses_v1_...\n\
+                      flag：--policy mainline|full、--max-messages <n>、--max-bytes <n>"
+        }
+        "status" => {
+            "status：报告当前库的实体总数与 generation。\n\
+                     示例：agent-session-grep --db <path> status"
+        }
+        "sync" => {
+            "sync <file>...：原子扫描一个或多个 .jsonl 文件入库；无变化不写库。\n\
+                   示例：agent-session-grep --db <path> --robot sync 会话.jsonl\n\
+                   提示：只接受 .jsonl 文件，不接受目录；需要整个目录时用你的 shell 展开文件列表后逐个传入。"
+        }
+        "ingest" => {
+            "ingest <file>：解析单个 .jsonl 文件入库。\n\
+                     示例：agent-session-grep --db <path> ingest 会话.jsonl"
+        }
+        "index" => {
+            "index <id-fact> <text>：写入一条 catalog + 索引；index rebuild 重建全文索引。\n\
+                   示例：agent-session-grep --db <path> --robot index rebuild"
+        }
+        "doctor" => {
+            "doctor [--db <path>]：环境自检；带 --db 时校验存储可打开、报 schema。\n\
+                     示例：agent-session-grep --db <path> doctor"
+        }
+        "mcp" => {
+            "mcp：启动 stdio MCP 服务（供 Claude Code 等 AI 宿主调用）。\n\
+                  示例：agent-session-grep --db <path> mcp"
+        }
+        "tui" => {
+            "tui：交互式只读浏览（Preview）。需要交互式终端。\n\
+                  示例：agent-session-grep --db <path> tui"
+        }
+        "config" => {
+            "config paths：报告当前平台的 config/data/cache/logs 路径。\n\
+                     示例：agent-session-grep config paths"
+        }
+        _ => "运行 agent-session-grep --help 查看完整命令列表。",
     }
 }
 
@@ -455,19 +702,22 @@ fn doctor(
     if bare_positionals(args).len() > 1 {
         return Err(CliError::usage("doctor takes no positional arguments"));
     }
-    let db_opt = args
-        .iter()
-        .position(|a| a == "--db")
-        .and_then(|i| args.get(i + 1));
+    // 与 parse_db_flag 共用同一 --db 取值守卫：`doctor --db --robot` 不得把
+    // --robot 当路径（会造出同名文件），重复 --db 是用法错误（R8.1/R8.2）。
+    // doctor 的 --db 允许在命令名之后（`doctor [--db <path>]`），故整串扫描。
+    let db_opt = extract_db_flag_anywhere(args)?;
     let data = match db_opt {
         None => serde_json::json!({
             "tool": env!("CARGO_PKG_NAME"),
             "version": env!("CARGO_PKG_VERSION"),
             "db": "not-checked",
             "schema": null,
+            // 新手会误以为 db: not-checked 是自检失败（10 角色体验测试缺陷）。
+            // 加一行白话提示，说明如何真正校验。
+            "hint": "未指定数据库：以上仅检查了环境。运行 doctor --db <path> 可校验数据库与 schema。",
         }),
         Some(path) => {
-            let store = SqliteStore::open(path).map_err(ProtocolError::from)?;
+            let store = SqliteStore::open(&path).map_err(ProtocolError::from)?;
             let schema = store.schema_version().map_err(ProtocolError::from)?;
             // generation 与待收敛 intent 数是 durable outbox 中断恢复与一致性的只读证据。
             let generation = store.active_generation().map_err(ProtocolError::from)?;
@@ -498,13 +748,88 @@ fn doctor(
     Ok(protocol::Outcome::Success)
 }
 
+/// 已知 flag 名全集（前缀位置可出现的旗标）。取值守卫用它拒绝 `--db --robot`
+/// 这类把 flag 当取值的写法——否则 `parse_db_flag` 会造出名为 `--robot` 的文件。
+fn is_known_flag_name(token: &str) -> bool {
+    matches!(
+        token,
+        "--db"
+            | "--output"
+            | "--request-id"
+            | "--robot"
+            | "--no-color"
+            | "--help"
+            | "-h"
+            | "--version"
+            | "-V"
+            | "--cursor"
+            | "--max-items"
+            | "--max-bytes"
+            | "--max-messages"
+            | "--policy"
+    )
+}
+
+/// 从前缀位置抽出 `--db <path>`；缺省返回 None。带值 flag 的取值跳过。
+///
+/// 取值缺失、取值是已知 flag 名（`--db --robot` 会造出名为 `--robot` 的文件）、
+/// 重复出现（`--db a --db b` 不再静默 last-wins）都是用法错误（R8.1/R8.2）。
+/// doctor 与 [`parse_db_flag`] 共用同一守卫，避免 doctor 的 --db 绕过校验。
+fn extract_db_flag(args: &[String]) -> Result<Option<String>, CliError> {
+    extract_db_flag_impl(args, true)
+}
+
+/// doctor 专用变体：`--db` 允许跟在命令名之后（`doctor [--db <path>]`），
+/// 扫描全部 token 而非只扫前缀；取值守卫与 [`extract_db_flag`] 一致。
+fn extract_db_flag_anywhere(args: &[String]) -> Result<Option<String>, CliError> {
+    extract_db_flag_impl(args, false)
+}
+
+fn extract_db_flag_impl(args: &[String], prefix_only: bool) -> Result<Option<String>, CliError> {
+    let mut db = None;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if !a.starts_with('-') {
+            if prefix_only {
+                break; // 已到命令名：之后的 token 不当全局 flag 解析
+            }
+            continue; // doctor 的扫描：非 flag token 直接跳过
+        }
+        if a == "--db" {
+            let value = it
+                .next()
+                .ok_or_else(|| CliError::usage("--db requires a path"))?;
+            if is_known_flag_name(value) {
+                return Err(CliError::usage(format!(
+                    "--db requires a path (got flag {value}); --db <path> must precede other flags"
+                )));
+            }
+            if db.is_some() {
+                return Err(CliError::usage("duplicate --db flag"));
+            }
+            db = Some(value.clone());
+        }
+        match a.as_str() {
+            "--output" | "--request-id" | "--cursor" | "--max-items" | "--max-bytes"
+            | "--max-messages" | "--policy" => {
+                it.next();
+            }
+            _ => {}
+        }
+    }
+    Ok(db)
+}
+
 /// 从 `--db <path>` 抽出数据库路径，返回其余参数。
 ///
 /// flag 只在前缀位置（第一个裸参数即命令名之前）识别；命令名之后的 token
 /// 原样进 `rest`，由 dispatch 的 `extract_flag` 挑出命令级 flag——这样查询文本
 /// 恰等于 `--help`/`--robot`/`--output` 等 flag 名时不会被吞掉。
+///
+/// `--db` 的取值守卫（缺值、取值为已知 flag、重复）统一在 [`extract_db_flag`]
+/// 完成（R8.1/R8.2）。
 fn parse_db_flag(args: &[String]) -> Result<(String, Vec<String>), CliError> {
-    let mut db = None;
+    let db = extract_db_flag(args)?;
     let mut rest = Vec::new();
     let mut seen_command = false;
     let mut it = args.iter();
@@ -514,15 +839,8 @@ fn parse_db_flag(args: &[String]) -> Result<(String, Vec<String>), CliError> {
             continue;
         }
         match a.as_str() {
-            "--db" => {
-                let v = it
-                    .next()
-                    .ok_or_else(|| CliError::usage("--db requires a path"))?;
-                db = Some(v.clone());
-            }
-            // 输出模式与全局 flag 在 main 里已消费；这里跳过，避免落入 rest 被当子命令。
-            "--output" | "--request-id" => {
-                it.next();
+            "--db" | "--output" | "--request-id" => {
+                it.next(); // 消费其取值（--db 取值已由 extract_db_flag 校验）
             }
             "--robot" | "--no-color" | "--help" | "-h" | "--version" | "-V" => {}
             other => {
@@ -531,12 +849,30 @@ fn parse_db_flag(args: &[String]) -> Result<(String, Vec<String>), CliError> {
             }
         }
     }
-    let db = db.ok_or_else(|| CliError::usage("--db <path> is required"))?;
+    let db = db.ok_or_else(|| {
+        // 缺 --db 是新手第一道坎：报错带两条路——config paths 找默认数据位置、
+        // --help 看用法。已经给出子命令（如 `hello`、`search`）时提示它可能不是命令。
+        if rest.is_empty() {
+            CliError::usage(
+                "需要数据库参数 --db <path>。\n\
+                 可先运行 `config paths` 查看默认数据位置；运行 `--help` 查看完整用法。",
+            )
+        } else {
+            CliError::usage(format!(
+                "需要数据库参数 --db <path>（而且 `{}` 可能不是有效命令）。\n\
+                 可先运行 `config paths` 查看默认数据位置；运行 `--help` 查看完整用法。",
+                rest[0]
+            ))
+        }
+    })?;
     Ok((db, rest))
 }
 
-/// 提取纯位置参数（跳过带值 flag 及其取值、裸 flag）——供 doctor/config 这类
-/// 绕过 parse_db_flag 的命令做多余参数校验。
+/// 提取纯位置参数（跳过已知带值 flag 及其取值、已知裸 flag）——供 doctor/config
+/// 这类绕过 parse_db_flag 的命令做多余参数校验。
+///
+/// 未知的 `-` 开头 token 不是已知 flag，按多余位置参数计入（R8.3）：`doctor
+/// --bogus` 不能静默丢弃 `--bogus` 后假装成功（exit 0 + db:not-checked）。
 fn bare_positionals(args: &[String]) -> Vec<String> {
     let mut out = Vec::new();
     let mut it = args.iter();
@@ -546,7 +882,7 @@ fn bare_positionals(args: &[String]) -> Vec<String> {
             | "--max-messages" | "--policy" => {
                 it.next(); // 消费其取值
             }
-            s if s.starts_with('-') => {}
+            "--robot" | "--no-color" | "--help" | "-h" | "--version" | "-V" => {}
             s => out.push(s.to_string()),
         }
     }
@@ -656,7 +992,11 @@ fn dispatch(
                 cursor,
                 budget,
             })?;
-            let (outcome, data, page, warnings) = render(response);
+            let (outcome, mut data, page, warnings) = render(response);
+            // snippet 是 application 检索装配阶段接管的字段（SearchHit.snippet：
+            // 批量取 payload + 预算截取，见 design §1/R1）。它只供 human 渲染器
+            // 展示，机器模式 envelope 不得携带（协议兼容性约束，SearchHit 文档）。
+            strip_snippets_for_machine(&mut data, mode);
             Ok(("search", outcome, data, page, warnings))
         }
         "get" => {
@@ -665,7 +1005,16 @@ fn dispatch(
             let id = StableId::from_wire(wire)
                 .ok_or_else(|| CliError::usage(format!("not a valid entity id: {wire}")))?;
             let app = App::new(store_ref(store), store_ref(store));
-            let response = app.handle(AppRequest::Get { id })?;
+            let response = app.handle(AppRequest::Get { id: id.clone() })?;
+            // 未找到实体：按 error catalog 映射 exit 4，而非当成功渲染 "not found"
+            // （10 角色体验测试缺陷：show/get 不存在 ID 返回 exit 0，脚本无法区分）。
+            // 消息固定为通用文案，不回显 wire/native ID（R2.1 隐私）。
+            if matches!(&response, AppResponse::Get { payload: None }) {
+                return Err(CliError(ProtocolError::new(
+                    CanonicalCode::NotFound,
+                    "entity not found",
+                )));
+            }
             let (outcome, data, page, warnings) = render(response);
             Ok(("get", outcome, data, page, warnings))
         }
@@ -675,7 +1024,13 @@ fn dispatch(
             let id = StableId::from_wire(wire)
                 .ok_or_else(|| CliError::usage(format!("not a valid entity id: {wire}")))?;
             let app = App::new(store_ref(store), store_ref(store));
-            let response = app.handle(AppRequest::Show { id })?;
+            let response = app.handle(AppRequest::Show { id: id.clone() })?;
+            if matches!(&response, AppResponse::Show { payload: None }) {
+                return Err(CliError(ProtocolError::new(
+                    CanonicalCode::NotFound,
+                    "entity not found",
+                )));
+            }
             let (outcome, data, page, warnings) = render(response);
             Ok(("show", outcome, data, page, warnings))
         }
@@ -740,7 +1095,16 @@ fn dispatch(
             let (outcome, data, page, warnings) = render(response);
             Ok(("status", outcome, data, page, warnings))
         }
-        other => Err(CliError::usage(format!("unknown subcommand: {other}"))),
+        other => {
+            let commands = [
+                "ingest", "sync", "index", "search", "get", "show", "list", "context", "status",
+                "mcp", "tui", "doctor", "config",
+            ];
+            Err(CliError::usage(format!(
+                "unknown subcommand: {other}（可用命令：{}；运行 --help 查看完整用法）",
+                commands.join("、")
+            )))
+        }
     }
 }
 
@@ -1172,6 +1536,18 @@ fn sync_files(
     if paths.is_empty() {
         return Err(CliError::usage("sync <file>... requires at least one file"));
     }
+    // 新手第一本能是给 sync 传整个目录；目录不是 .jsonl 文件，捕获要读它时会
+    // 报"拒绝访问 (os error 5)"，误导新手去折腾权限/杀毒（10 角色体验测试缺陷）。
+    // 这里显式拦截并给出正确用法。消息不带路径（隐私：用户目录布局不外泄），
+    // 展开示例保持平台中立（不给 PowerShell-only 的 Get-ChildItem 例子，R2.2）。
+    for path in paths {
+        if std::path::Path::new(path).is_dir() {
+            return Err(CliError::usage(
+                "sync 接受一个或多个 .jsonl 文件，不接受目录；\
+                 需要同步整个目录时，请用你的 shell 展开文件列表，把文件逐个传给 sync",
+            ));
+        }
+    }
     // 重复路径去重（保持出现顺序）：同一文件列两次是书写冗余而非两个源；
     // 不去重会让 store 层把同一路径当两个 source batch 提交而判 catalog_error
     // （exit 6）——sync 幂等语义下应提前归一为单个源。
@@ -1296,6 +1672,7 @@ fn render(
                     .map(|hit| serde_json::json!({
                         "id": hit.id.as_str(),
                         "score": hit.score,
+                        "snippet": hit.snippet,
                     }))
                     .collect::<Vec<_>>(),
                 "generation": generation,
@@ -1428,6 +1805,25 @@ fn render(
             protocol::Page::default(),
             Vec::new(),
         ),
+    }
+}
+
+/// snippet 仅供 human 渲染（`SearchHit.snippet` 文档约束：robot/MCP 序列化器
+/// 不得输出该字段）。json/jsonl/robot 模式下从 hits 中剥掉它，保持 envelope
+/// 形状与机器模式兼容（design §1）；human 模式原样保留给渲染器展示。
+fn strip_snippets_for_machine(data: &mut serde_json::Value, mode: protocol::OutputMode) {
+    if mode == protocol::OutputMode::Human {
+        return;
+    }
+    if let Some(hits) = data
+        .get_mut("hits")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        for hit in hits {
+            if let Some(object) = hit.as_object_mut() {
+                object.remove("snippet");
+            }
+        }
     }
 }
 
@@ -1817,5 +2213,460 @@ mod tests {
             None
         );
         assert!(extract_request_id(&["--request-id".into()]).is_err());
+    }
+
+    // ---- help/version 提前拦截（ADR-0006，R3）----
+
+    const KNOWN_COMMANDS: [&str; 13] = [
+        "ingest", "sync", "index", "search", "get", "show", "list", "context", "status", "mcp",
+        "tui", "doctor", "config",
+    ];
+
+    #[test]
+    fn intercept_top_level_help_and_version() {
+        assert_eq!(intercept_help_or_version(&[]), None);
+        assert_eq!(
+            intercept_help_or_version(&["--help".into()]),
+            Some(HelpRequest::TopLevelHelp)
+        );
+        assert_eq!(
+            intercept_help_or_version(&["-h".into()]),
+            Some(HelpRequest::TopLevelHelp)
+        );
+        assert_eq!(
+            intercept_help_or_version(&["--version".into()]),
+            Some(HelpRequest::TopLevelVersion)
+        );
+        assert_eq!(
+            intercept_help_or_version(&["-V".into()]),
+            Some(HelpRequest::TopLevelVersion)
+        );
+        // 带值 flag 的取值跳过，不影响顶层拦截。
+        assert_eq!(
+            intercept_help_or_version(&["--db".into(), "s.db".into(), "--help".into()]),
+            Some(HelpRequest::TopLevelHelp)
+        );
+        assert_eq!(
+            intercept_help_or_version(&["--output".into(), "json".into(), "--version".into()]),
+            Some(HelpRequest::TopLevelVersion)
+        );
+        // 两者同时出现时帮助优先（与旧行为一致）。
+        assert_eq!(
+            intercept_help_or_version(&["--help".into(), "--version".into()]),
+            Some(HelpRequest::TopLevelHelp)
+        );
+    }
+
+    #[test]
+    fn intercept_subcommand_help_for_every_known_command() {
+        for cmd in KNOWN_COMMANDS {
+            assert_eq!(
+                intercept_help_or_version(&[cmd.into(), "--help".into()]),
+                Some(HelpRequest::SubcommandHelp(cmd.into())),
+                "{cmd} --help"
+            );
+            assert_eq!(
+                intercept_help_or_version(&[cmd.into(), "-h".into()]),
+                Some(HelpRequest::SubcommandHelp(cmd.into())),
+                "{cmd} -h"
+            );
+            // --db 前置时同样拦截——help 不要求 --db（R3.1）。
+            assert_eq!(
+                intercept_help_or_version(&[
+                    "--db".into(),
+                    "s.db".into(),
+                    cmd.into(),
+                    "--help".into()
+                ]),
+                Some(HelpRequest::SubcommandHelp(cmd.into())),
+                "--db s.db {cmd} --help"
+            );
+        }
+        // index rebuild --help / -h 也覆盖。
+        assert_eq!(
+            intercept_help_or_version(&["index".into(), "rebuild".into(), "--help".into()]),
+            Some(HelpRequest::SubcommandHelp("index".into()))
+        );
+        assert_eq!(
+            intercept_help_or_version(&[
+                "--db".into(),
+                "s.db".into(),
+                "index".into(),
+                "rebuild".into(),
+                "-h".into()
+            ]),
+            Some(HelpRequest::SubcommandHelp("index".into()))
+        );
+    }
+
+    #[test]
+    fn help_flag_after_query_text_is_not_intercepted() {
+        // `search foo --help`：--help 不在命令名的紧跟位，是查询文本（R3.1/R9.4）。
+        assert_eq!(
+            intercept_help_or_version(&["search".into(), "foo".into(), "--help".into()]),
+            None
+        );
+        // 未知命令后的 --help 不拦截，留给 dispatch 报 unknown subcommand。
+        assert_eq!(
+            intercept_help_or_version(&["bogus".into(), "--help".into()]),
+            None
+        );
+        // 无帮助旗标的普通命令也不拦截。
+        assert_eq!(intercept_help_or_version(&["status".into()]), None);
+        assert_eq!(
+            intercept_help_or_version(&["index".into(), "rebuild".into()]),
+            None
+        );
+    }
+
+    #[test]
+    fn every_known_subcommand_has_help_text() {
+        for cmd in KNOWN_COMMANDS {
+            let text = subcommand_help_text(cmd);
+            assert!(text.contains(cmd), "{cmd}: {text}");
+            assert!(!text.is_empty(), "{cmd}");
+        }
+        // 顶层帮助列出 index rebuild，且能到达（R3.1 可达性）。
+        assert!(help_text().contains("index rebuild"));
+    }
+
+    #[test]
+    fn machine_mode_help_is_a_success_envelope() {
+        let envelope = help_envelope(
+            "search",
+            serde_json::json!({ "help_text": "search <query>..." }),
+            Some("req-9"),
+        );
+        let v: serde_json::Value = serde_json::from_str(&envelope).expect("valid JSON");
+        assert_eq!(v["frame_type"], "response");
+        assert_eq!(v["command"], "search");
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["request_id"], "req-9");
+        assert_eq!(v["data"]["help_text"], "search <query>...");
+
+        let version = help_envelope(
+            "version",
+            serde_json::json!({ "version": "agent-session-grep 0.3.0" }),
+            None,
+        );
+        let v: serde_json::Value = serde_json::from_str(&version).expect("valid JSON");
+        assert_eq!(v["command"], "version");
+        assert_eq!(v["data"]["version"], "agent-session-grep 0.3.0");
+    }
+
+    #[test]
+    fn subcommand_help_works_without_db() {
+        // run() 在拦截阶段就返回，不进入 parse_db_flag / 存储打开（R3.1：help
+        // 无需 --db，且不创建任何文件）。
+        assert!(run(&["--help".into()], protocol::OutputMode::Human, None).is_ok());
+        assert!(run(&["--version".into()], protocol::OutputMode::Human, None).is_ok());
+        assert!(
+            run(
+                &["search".into(), "--help".into()],
+                protocol::OutputMode::Human,
+                None
+            )
+            .is_ok()
+        );
+        assert!(
+            run(
+                &["index".into(), "rebuild".into(), "--help".into()],
+                protocol::OutputMode::Human,
+                None
+            )
+            .is_ok()
+        );
+        // 机器模式同样成功（exit 0），不发裸文本。
+        assert!(
+            run(
+                &["--robot".into(), "--help".into()],
+                protocol::OutputMode::Json,
+                None
+            )
+            .is_ok()
+        );
+    }
+
+    // ---- 解析健壮性（R8）----
+
+    #[test]
+    fn db_flag_rejects_flag_named_value() {
+        // `--db --robot status` 曾造出名为 `--robot` 的文件；取值是已知 flag
+        // 一律用法错误（R8.1），任何取值都不落入文件系统。
+        for value in [
+            "--robot",
+            "--output",
+            "--request-id",
+            "--help",
+            "--version",
+            "--db",
+            "-h",
+            "-V",
+            "--cursor",
+            "--max-items",
+            "--max-bytes",
+            "--max-messages",
+            "--policy",
+        ] {
+            let error = parse_db_flag(&["--db".into(), value.into(), "status".into()])
+                .expect_err("flag-named value must be rejected");
+            assert_eq!(error.0.code, CanonicalCode::InvalidRequest, "{value}");
+        }
+        // 缺值同样是用法错误。
+        let error = parse_db_flag(&["--db".into()]).expect_err("missing value rejected");
+        assert_eq!(error.0.code, CanonicalCode::InvalidRequest);
+    }
+
+    #[test]
+    fn db_flag_rejects_duplicate() {
+        // `--db a --db b status` 曾静默 last-wins；重复 --db 是用法错误（R8.2）。
+        let error = parse_db_flag(&[
+            "--db".into(),
+            "a.db".into(),
+            "--db".into(),
+            "b.db".into(),
+            "status".into(),
+        ])
+        .expect_err("duplicate --db rejected");
+        assert_eq!(error.0.code, CanonicalCode::InvalidRequest);
+        assert!(error.0.message.contains("duplicate"));
+    }
+
+    #[test]
+    fn request_id_rejects_flag_value_and_duplicate() {
+        // `--request-id --robot` 的 --robot 能通过 id 字符集校验，曾静默当作合法
+        // id；取值是已知 flag 与重复 --request-id 都是用法错误（R8.1/R8.2）。
+        assert!(
+            extract_request_id(&["--request-id".into(), "--robot".into(), "status".into()])
+                .is_err()
+        );
+        assert!(
+            extract_request_id(&[
+                "--request-id".into(),
+                "a".into(),
+                "--request-id".into(),
+                "b".into(),
+                "status".into()
+            ])
+            .is_err()
+        );
+        assert!(extract_request_id(&["--request-id".into()]).is_err());
+        // 合法取值不受影响。
+        assert_eq!(
+            extract_request_id(&["--request-id".into(), "corr.1".into(), "status".into()])
+                .expect("valid id"),
+            Some("corr.1".to_string())
+        );
+    }
+
+    #[test]
+    fn doctor_and_config_reject_unknown_positionals() {
+        // `--robot doctor --bogus` 曾静默丢弃 --bogus 后 exit 0（R8.3）。
+        assert!(
+            doctor(
+                &["doctor".into(), "--bogus".into()],
+                protocol::OutputMode::Human,
+                None
+            )
+            .is_err()
+        );
+        // doctor 的 --db 同样受取值守卫保护：flag 当取值 / 重复 / 缺值都拒绝。
+        assert!(
+            doctor(
+                &["doctor".into(), "--db".into(), "--robot".into()],
+                protocol::OutputMode::Human,
+                None
+            )
+            .is_err()
+        );
+        assert!(
+            doctor(
+                &[
+                    "doctor".into(),
+                    "--db".into(),
+                    "a.db".into(),
+                    "--db".into(),
+                    "b.db".into()
+                ],
+                protocol::OutputMode::Human,
+                None
+            )
+            .is_err()
+        );
+        assert!(
+            doctor(
+                &["doctor".into(), "--db".into()],
+                protocol::OutputMode::Human,
+                None
+            )
+            .is_err()
+        );
+        // `--robot config paths --bogus` 曾 exit 0。
+        assert!(
+            run(
+                &["config".into(), "paths".into(), "--bogus".into()],
+                protocol::OutputMode::Human,
+                None
+            )
+            .is_err()
+        );
+        assert!(
+            run(
+                &[
+                    "--robot".into(),
+                    "config".into(),
+                    "paths".into(),
+                    "--bogus".into()
+                ],
+                protocol::OutputMode::Json,
+                None
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn command_name_points_at_failing_token() {
+        // 未知 '-' 开头 token 不是 flag——它是命令名笔误，错误 envelope 的
+        // command 必须指向它，而不是后面的真命令（R8.4）。
+        assert_eq!(
+            command_name(&["--bogus".into(), "--robot".into(), "status".into()]),
+            "--bogus"
+        );
+        assert_eq!(
+            command_name(&[
+                "--db".into(),
+                "s.db".into(),
+                "--bogus".into(),
+                "status".into()
+            ]),
+            "--bogus"
+        );
+        // 已知 flag 与其取值跳过，命令名正常识别。
+        assert_eq!(command_name(&["--robot".into(), "status".into()]), "status");
+        assert_eq!(
+            command_name(&[
+                "--db".into(),
+                "s.db".into(),
+                "--output".into(),
+                "json".into(),
+                "search".into()
+            ]),
+            "search"
+        );
+        assert_eq!(
+            command_name(&[
+                "--request-id".into(),
+                "r1".into(),
+                "sync".into(),
+                "a.jsonl".into()
+            ]),
+            "sync"
+        );
+        assert_eq!(
+            command_name(&["--robot".into(), "--help".into()]),
+            "unknown"
+        );
+    }
+
+    // ---- 隐私（R2）----
+
+    #[test]
+    fn not_found_error_never_echoes_the_wire_id() {
+        let store = SqliteStore::open_in_memory().expect("in-memory store opens");
+        let wire = "msg_v1_private-wire-id";
+        for cmd in ["get", "show"] {
+            let error = dispatch(
+                &store,
+                &[cmd.into(), wire.into()],
+                protocol::OutputMode::Human,
+                None,
+            )
+            .expect_err("missing entity must fail");
+            // exit 4 契约（ADR-0005）不变，只改消息。
+            assert_eq!(error.0.code, CanonicalCode::NotFound, "{cmd}");
+            assert_eq!(error.0.message, "entity not found", "{cmd}");
+            assert!(
+                !error.0.message.contains(wire),
+                "{cmd} message must not echo the wire id"
+            );
+        }
+    }
+
+    #[test]
+    fn sync_directory_rejection_is_path_free_and_platform_neutral() {
+        let store = SqliteStore::open_in_memory().expect("in-memory store opens");
+        let dir = std::env::temp_dir();
+        let dir_str = dir.to_string_lossy().into_owned();
+        let error = dispatch(
+            &store,
+            &["sync".into(), dir_str.clone()],
+            protocol::OutputMode::Json,
+            None,
+        )
+        .expect_err("directory must be rejected");
+        assert_eq!(error.0.code, CanonicalCode::InvalidRequest);
+        let message = &error.0.message;
+        assert!(!message.contains(&dir_str), "path must not leak: {message}");
+        assert!(
+            !message.contains("PowerShell"),
+            "platform-neutral: {message}"
+        );
+        assert!(
+            !message.contains("Get-ChildItem"),
+            "platform-neutral: {message}"
+        );
+    }
+
+    // ---- snippet 接线（R1，application 装配后 main.rs 只投影/剥除）----
+
+    #[test]
+    fn render_search_emits_application_snippet() {
+        // SearchHit.snippet 由 application 装配（批量取 payload + 预算截取）；
+        // render 原样投影——Some → 字符串，None → null（human 渲染器不补行）。
+        let response = AppResponse::Search {
+            hits: vec![
+                agent_session_grep_ports::SearchHit {
+                    id: StableId::from_wire("msg_v1_aaaa").expect("valid id"),
+                    score: 2.0,
+                    snippet: Some("正文预览".into()),
+                },
+                agent_session_grep_ports::SearchHit {
+                    id: StableId::from_wire("msg_v1_bbbb").expect("valid id"),
+                    score: 1.0,
+                    snippet: None,
+                },
+            ],
+            next_cursor: None,
+            generation: 3,
+            truncation: Truncation {
+                truncated: false,
+                reason: None,
+            },
+        };
+        let (_, data, _, _) = render(response);
+        assert_eq!(data["hits"][0]["snippet"], "正文预览");
+        assert_eq!(data["hits"][1]["snippet"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn machine_modes_strip_snippet_from_hits() {
+        // snippet 仅供 human 渲染；json/jsonl/robot envelope 不得携带（协议兼容）。
+        let mut data = serde_json::json!({
+            "hits": [{ "id": "msg_v1_a", "score": 2.0, "snippet": "preview" }],
+        });
+        strip_snippets_for_machine(&mut data, protocol::OutputMode::Human);
+        assert_eq!(data["hits"][0]["snippet"], "preview");
+
+        for mode in [protocol::OutputMode::Json, protocol::OutputMode::Jsonl] {
+            let mut data = serde_json::json!({
+                "hits": [{ "id": "msg_v1_a", "score": 2.0, "snippet": "preview" }],
+            });
+            strip_snippets_for_machine(&mut data, mode);
+            assert!(
+                data["hits"][0].get("snippet").is_none(),
+                "{mode:?} must not carry snippet"
+            );
+        }
     }
 }

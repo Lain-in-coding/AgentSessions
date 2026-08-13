@@ -179,6 +179,18 @@ impl CatalogStore for InMemoryStore {
         Ok(self.catalog.borrow().get(id.as_str()).cloned())
     }
 
+    fn get_many(&self, ids: &[StableId]) -> PortResult<Vec<(StableId, Option<Vec<u8>>)>> {
+        // 保序 + 缺失 → None，与端口契约一致；内存 map 查找即批量。
+        let catalog = self.catalog.borrow();
+        Ok(ids
+            .iter()
+            .map(|id| {
+                let payload = catalog.get(id.as_str()).cloned();
+                (id.clone(), payload)
+            })
+            .collect())
+    }
+
     fn put(&self, id: &StableId, payload: &[u8]) -> PortResult<()> {
         self.catalog
             .borrow_mut()
@@ -235,6 +247,8 @@ impl SearchIndex for InMemoryStore {
             .map(|(id, _)| SearchHit {
                 id: id.clone(),
                 score: 1.0,
+                // 端口只提供 id+score；snippet 由 Application 装配。
+                snippet: None,
             })
             .collect();
         // 与 SQLite 的全序一致：score 降序，同分按 id 升序（全 1.0 时退化为
@@ -571,6 +585,27 @@ mod tests {
         let hits = store.query("brown", 10).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, id);
+        // 端口只产 id+score；snippet 留给 Application 装配。
+        assert!(hits[0].snippet.is_none());
+    }
+
+    #[test]
+    fn in_memory_get_many_preserves_order_and_misses() {
+        let store = InMemoryStore::new();
+        let a = StableId::derive(IdKind::Message, Stability::Reconstructed, &[b"ma"]);
+        let b = StableId::derive(IdKind::Message, Stability::Reconstructed, &[b"mb"]);
+        let missing = StableId::derive(IdKind::Message, Stability::Reconstructed, &[b"miss"]);
+        store.put(&a, b"payload-a").unwrap();
+        store.put(&b, b"payload-b").unwrap();
+        // 乱序请求：结果与请求同序（保序契约），缺失 id → None。
+        let got = store
+            .get_many(&[b.clone(), missing.clone(), a.clone()])
+            .unwrap();
+        assert_eq!(got.len(), 3);
+        assert_eq!(got[0], (b, Some(b"payload-b".to_vec())));
+        assert_eq!(got[1], (missing, None));
+        assert_eq!(got[2], (a, Some(b"payload-a".to_vec())));
+        assert!(store.get_many(&[]).unwrap().is_empty());
     }
 
     #[test]

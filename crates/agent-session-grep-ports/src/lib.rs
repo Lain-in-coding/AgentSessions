@@ -85,6 +85,12 @@ pub trait CatalogStore {
     /// 按 StableId 取回已规范化实体的原始 JSON 负载。
     fn get(&self, id: &StableId) -> PortResult<Option<Vec<u8>>>;
 
+    /// 按多个 StableId 批量取回已规范化实体的原始 JSON 负载。
+    ///
+    /// 返回顺序与 `ids` 完全一致（保序）；目录中不存在的 id 对应 `None`。
+    /// 实现必须批量读取（分块 IN 等），不得逐条查询（N+1）。
+    fn get_many(&self, ids: &[StableId]) -> PortResult<Vec<(StableId, Option<Vec<u8>>)>>;
+
     /// 写入（或覆盖）一个规范化实体。
     fn put(&self, id: &StableId, payload: &[u8]) -> PortResult<()>;
 
@@ -137,6 +143,11 @@ pub struct SearchHit {
     pub id: StableId,
     /// 相关性打分（后端相对值，跨后端不可比）。
     pub score: f32,
+    /// 命中实体正文的前缀摘要，由 Application 检索装配时填充（保序批量取 payload
+    /// 后截取 `text` 字段）。`None` 表示该实体没有可展示正文。
+    ///
+    /// 仅供人类渲染使用；robot/MCP 序列化器不得输出此字段（协议兼容性约束）。
+    pub snippet: Option<String>,
 }
 
 /// 全文检索端口：对应 FTS5 主存（见 ADR-0001）。
@@ -154,6 +165,9 @@ pub trait SearchIndex {
 impl<T: CatalogStore + ?Sized> CatalogStore for &T {
     fn get(&self, id: &StableId) -> PortResult<Option<Vec<u8>>> {
         (**self).get(id)
+    }
+    fn get_many(&self, ids: &[StableId]) -> PortResult<Vec<(StableId, Option<Vec<u8>>)>> {
+        (**self).get_many(ids)
     }
     fn put(&self, id: &StableId, payload: &[u8]) -> PortResult<()> {
         (**self).put(id, payload)
