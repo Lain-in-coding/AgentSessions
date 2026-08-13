@@ -2769,6 +2769,102 @@ fn snippet_renders_in_human_search_but_is_stripped_in_machine_modes() {
     }
 }
 
+#[test]
+fn golden_broken_line_syncs_with_visible_diagnostic() {
+    // R2.3：仓库固定的 Claude golden fixture 内含一条故意截断行。真实 sync
+    // 必须成功，并把 parser 的行号诊断通过公开 warnings 通道带给调用方。
+    let (_dir, db) = temp_db("golden-broken-line");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../agent-session-grep-provider-claude/tests/golden/basic.jsonl");
+    let fixture_path = fixture.to_string_lossy().into_owned();
+    let out = run(&db, &["sync", &fixture_path]);
+    assert!(
+        out.status.success(),
+        "golden fixture must sync: {}",
+        stdout(&out)
+    );
+    let frame = parse_first_line(&out);
+    assert_envelope_shape(&frame, true);
+    assert_eq!(frame["data"]["skipped"], 1, "{frame}");
+    assert_eq!(frame["data"]["diagnostics"], 1, "{frame}");
+    let warnings = frame["warnings"].as_array().expect("warnings");
+    assert!(
+        warnings.iter().any(|warning| warning
+            .as_str()
+            .is_some_and(|text| text.contains("line 5") && text.contains("invalid JSON"))),
+        "broken-line diagnostic must be visible: {frame}"
+    );
+}
+
+#[test]
+fn fatal_source_rejection_reports_line_numbers_and_repair_direction() {
+    // R2.2：超过 probe 容忍度的结构性破损必须失败；错误不能只说 provider
+    // 未识别，而要保留行号和修复方向。
+    let (dir, db) = temp_db("fatal-line-detail");
+    let fixture = dir.path().join("fatal-lines.jsonl");
+    std::fs::write(
+        &fixture,
+        concat!(
+            "bad one\n",
+            "bad two\n",
+            "bad three\n",
+            "bad four\n",
+            r#"{"type":"user","uuid":"fatal-valid","message":{"role":"user","content":"kept only as probe evidence"}}"#,
+        ),
+    )
+    .expect("write fatal fixture");
+    let fixture_path = fixture.to_string_lossy().into_owned();
+    let out = run(&db, &["ingest", &fixture_path]);
+    assert_eq!(out.status.code(), Some(2), "{}", stdout(&out));
+    let frame = parse_first_line(&out);
+    assert_envelope_shape(&frame, false);
+    let message = frame["error"]["message"].as_str().expect("message");
+    assert!(
+        message.contains("第 1、2、3、4 行"),
+        "fatal rejection must identify lines: {message}"
+    );
+    assert!(
+        message.contains("修复") && message.contains("重试"),
+        "fatal rejection must give repair direction: {message}"
+    );
+}
+
+#[test]
+fn multi_session_file_emits_visible_session_diagnostic() {
+    // R3.1：provider 已检测同文件多 sessionId；CLI 必须实际公开数量和 ID，
+    // 不能只把 diagnostics 数量从 0 改成 1 后仍让用户看不到原因。
+    let (dir, db) = temp_db("multi-session-warning");
+    let fixture = dir.path().join("multi-session.jsonl");
+    let first = serde_json::json!({
+        "type": "user",
+        "uuid": "multi-message-first",
+        "sessionId": "multi-session-first",
+        "message": { "role": "user", "content": "merged session diagnostic" },
+    });
+    let second = serde_json::json!({
+        "type": "assistant",
+        "uuid": "multi-message-second",
+        "sessionId": "multi-session-second",
+        "message": { "role": "assistant", "content": "merged session diagnostic reply" },
+    });
+    std::fs::write(&fixture, format!("{first}\n{second}\n")).expect("write fixture");
+    let fixture_path = fixture.to_string_lossy().into_owned();
+    let out = run(&db, &["ingest", &fixture_path]);
+    assert!(out.status.success(), "ingest failed: {}", stdout(&out));
+    let frame = parse_first_line(&out);
+    assert_envelope_shape(&frame, true);
+    assert_eq!(frame["data"]["diagnostics"], 1, "{frame}");
+    let warnings = frame["warnings"].as_array().expect("warnings");
+    let diagnostic = warnings
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .find(|warning| warning.contains("2 个不同 sessionId"))
+        .unwrap_or_else(|| panic!("multi-session diagnostic missing: {frame}"));
+    assert!(diagnostic.contains("multi-session-first"), "{diagnostic}");
+    assert!(diagnostic.contains("multi-session-second"), "{diagnostic}");
+    assert!(diagnostic.contains("归属首个会话"), "{diagnostic}");
+}
+
 // ─── R4/ADR-0008：search 命中携带 session_id 与 text 摘要 ───────────────────
 
 /// 带 sessionId 的合成 Claude 夹具：返回 (路径, 会话 wire id, 两条消息正文)。

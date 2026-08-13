@@ -97,6 +97,12 @@ agent-session-grep --robot doctor --db C:/data/example.db
 That form reports `schema`, `generation`, and `interrupted_batches` for the
 store. See `rebuild-and-migration-runbook.md` for how to read those fields.
 
+When loading transcripts, `ingest <file>` and each input passed to
+`sync <file>...` treat one file as one session source. A transcript file should
+therefore contain a single distinct `sessionId`. If several are detected, the
+file remains assigned to the first session and the command returns a bounded
+warning listing the detected session count and IDs.
+
 ## Upgrade
 
 Pull the new commit and re-run the installer. It overwrites the binary in

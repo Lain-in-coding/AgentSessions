@@ -34,6 +34,13 @@ use agent_session_grep_provider_codex::CodexAdapter;
 use protocol::{CanonicalCode, ProtocolError};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Provider parse diagnostics exposed through the existing success-envelope
+/// `warnings` channel are bounded at the CLI boundary. This keeps a badly
+/// damaged source from producing an unbounded response while preserving the
+/// actionable line/session detail required by sync diagnostics.
+const DIAGNOSTIC_WARNING_LIMIT: usize = 16;
+const DIAGNOSTIC_WARNING_CHARS: usize = 512;
+
 /// CLI 顶层错误：所有失败都归一到 [`ProtocolError`]，exit code 由 Error Catalog 决定。
 ///
 /// `Usage` 保留为薄封装，仅表示参数校验失败（映射 `invalid_request` → exit 2），
@@ -124,6 +131,38 @@ fn main() {
 fn render_human_error(err: &ProtocolError) {
     eprintln!("error [{}]: {}", err.code.as_str(), err.message);
     eprintln!("下一步：{}", err.code.operator_action());
+}
+
+/// Convert provider parse diagnostics into bounded public warnings. Diagnostics
+/// are source-derived and may include line numbers or bounded session IDs, but
+/// never source paths; each warning is independently clamped before rendering.
+fn diagnostic_warnings<'a>(
+    diagnostics: impl IntoIterator<Item = &'a str>,
+    total: usize,
+) -> Vec<String> {
+    let detail_limit = if total > DIAGNOSTIC_WARNING_LIMIT {
+        DIAGNOSTIC_WARNING_LIMIT.saturating_sub(1)
+    } else {
+        DIAGNOSTIC_WARNING_LIMIT
+    };
+    let mut warnings: Vec<String> = diagnostics
+        .into_iter()
+        .take(detail_limit)
+        .map(|diagnostic| {
+            let mut bounded: String = diagnostic.chars().take(DIAGNOSTIC_WARNING_CHARS).collect();
+            if diagnostic.chars().count() > DIAGNOSTIC_WARNING_CHARS {
+                bounded.push('…');
+            }
+            bounded
+        })
+        .collect();
+    if total > detail_limit {
+        warnings.push(format!(
+            "{} additional provider diagnostics omitted",
+            total - detail_limit
+        ));
+    }
+    warnings
 }
 
 /// 从参数抽出 `--request-id`：缺 flag → None；有 flag 则值必须满足 envelope
@@ -661,11 +700,13 @@ fn subcommand_help_text(cmd: &str) -> &'static str {
         "sync" => {
             "sync <file>...：原子扫描一个或多个 .jsonl 文件入库；无变化不写库。\n\
                    示例：agent-session-grep --db <path> --robot sync 会话.jsonl\n\
+                   约束：单个 transcript 文件应只包含一个会话；检测到多个 sessionId 时仍归属首个会话，并在 warnings 报告。\n\
                    提示：只接受 .jsonl 文件，不接受目录；需要整个目录时用你的 shell 展开文件列表后逐个传入。"
         }
         "ingest" => {
             "ingest <file>：解析单个 .jsonl 文件入库。\n\
-                     示例：agent-session-grep --db <path> ingest 会话.jsonl"
+                     示例：agent-session-grep --db <path> ingest 会话.jsonl\n\
+                     约束：单个 transcript 文件应只包含一个会话；检测到多个 sessionId 时仍归属首个会话，并输出诊断 warning。"
         }
         "index" => {
             "index <id-fact> <text>：写入一条 catalog + 索引；index rebuild 重建全文索引。\n\
@@ -948,29 +989,33 @@ fn dispatch(
         "ingest" => {
             no_extra_args(rest, 1, "ingest <file>")?;
             let path = arg(rest, 1, "ingest <file>")?;
+            let (data, warnings) = ingest_file(store, path)?;
             Ok((
                 "ingest",
                 protocol::Outcome::Success,
-                ingest_file(store, path)?,
+                data,
                 protocol::Page::default(),
-                Vec::new(),
+                warnings,
             ))
         }
         // sync 对显式列出的多个源执行同一套只读快照 + staging，并在全部成功后
         // 通过一次 durable batch 提交，避免部分 source 已写入、后续 source 失败。
         // jsonl 模式下逐源发 progress frame（contract §4；--robot/Json 禁 progress）。
-        "sync" => Ok((
-            "sync",
-            protocol::Outcome::Success,
-            sync_files(
+        "sync" => {
+            let (data, warnings) = sync_files(
                 store,
                 &rest[1..],
                 mode == protocol::OutputMode::Jsonl,
                 request_id,
-            )?,
-            protocol::Page::default(),
-            Vec::new(),
-        )),
+            )?;
+            Ok((
+                "sync",
+                protocol::Outcome::Success,
+                data,
+                protocol::Page::default(),
+                warnings,
+            ))
+        }
         "search" => {
             let mut args = rest.to_vec();
             let cursor = extract_flag(&mut args, "--cursor")?;
@@ -1480,7 +1525,10 @@ fn staged_to_source(
 /// - RFC-0002 §5 source-level staging：parse 只缓冲，成功后才 commit_batch。
 ///
 /// 会话 fact 用文件路径，保证同文件重 ingest 得到稳定 id（幂等重索引）。
-fn ingest_file(store: &SqliteStore, path: &str) -> Result<serde_json::Value, CliError> {
+fn ingest_file(
+    store: &SqliteStore,
+    path: &str,
+) -> Result<(serde_json::Value, Vec<String>), CliError> {
     let path_ref = std::path::Path::new(path);
     // 1) 捕获只读源快照 + 字节（严格只读打开源文件）。
     let (snap, bytes) = capture(path_ref).map_err(ProtocolError::from)?;
@@ -1507,16 +1555,23 @@ fn ingest_file(store: &SqliteStore, path: &str) -> Result<serde_json::Value, Cli
         .map_err(ProtocolError::from)?;
 
     let generation = store.active_generation().map_err(ProtocolError::from)?;
-    Ok(serde_json::json!({
-        "variant": variant,
-        "emitted": staged.messages.len(),
-        "committed": if changed { staged.messages.len() } else { 0 },
-        "unchanged": if changed { 0 } else { staged.messages.len() },
-        "skipped": staged.report.skipped,
-        "diagnostics": staged.report.diagnostics.len(),
-        "generation": generation,
-        "source_fp": snap.fingerprint,
-    }))
+    let warnings = diagnostic_warnings(
+        staged.report.diagnostics.iter().map(String::as_str),
+        staged.report.diagnostics.len(),
+    );
+    Ok((
+        serde_json::json!({
+            "variant": variant,
+            "emitted": staged.messages.len(),
+            "committed": if changed { staged.messages.len() } else { 0 },
+            "unchanged": if changed { 0 } else { staged.messages.len() },
+            "skipped": staged.report.skipped,
+            "diagnostics": staged.report.diagnostics.len(),
+            "generation": generation,
+            "source_fp": snap.fingerprint,
+        }),
+        warnings,
+    ))
 }
 
 /// 同步显式给定的源文件：所有文件先完成 capture + stage + verify，之后才提交
@@ -1528,7 +1583,7 @@ fn sync_files(
     paths: &[String],
     progress: bool,
     request_id: Option<&str>,
-) -> Result<serde_json::Value, CliError> {
+) -> Result<(serde_json::Value, Vec<String>), CliError> {
     if paths.is_empty() {
         return Err(CliError::usage("sync <file>... requires at least one file"));
     }
@@ -1559,6 +1614,7 @@ fn sync_files(
     let mut message_count = 0usize;
     let mut skipped_count = 0usize;
     let mut diagnostic_count = 0usize;
+    let mut diagnostics = Vec::new();
 
     // 指纹缓存：capture 后先与已存指纹比对，未变化的源跳过重复解析
     // （parse 是大语料重扫的主导成本）。指纹缓存缺失/不匹配才走完整路径。
@@ -1603,6 +1659,7 @@ fn sync_files(
             message_count += staged.messages.len();
             skipped_count += staged.report.skipped;
             diagnostic_count += staged.report.diagnostics.len();
+            diagnostics.extend(staged.report.diagnostics.iter().cloned());
             let provider = variant.split('/').next().unwrap_or(variant).to_string();
             sources.push(staged_to_source(
                 path,
@@ -1627,16 +1684,20 @@ fn sync_files(
     // `emitted` 只统计本次实际解析的消息；指纹缓存命中的源按已存消息数
     // 计入 unchanged（与 emitted 同单位：消息数）。
     let committed = if changed { message_count } else { 0 };
-    Ok(serde_json::json!({
-        "sources": paths.len(),
-        "emitted": message_count,
-        "messages": message_count,
-        "committed": committed,
-        "unchanged": if changed { unchanged_messages } else { message_count + unchanged_messages },
-        "skipped": skipped_count,
-        "diagnostics": diagnostic_count,
-        "generation": generation,
-    }))
+    let warnings = diagnostic_warnings(diagnostics.iter().map(String::as_str), diagnostic_count);
+    Ok((
+        serde_json::json!({
+            "sources": paths.len(),
+            "emitted": message_count,
+            "messages": message_count,
+            "committed": committed,
+            "unchanged": if changed { unchanged_messages } else { message_count + unchanged_messages },
+            "skipped": skipped_count,
+            "diagnostics": diagnostic_count,
+            "generation": generation,
+        }),
+        warnings,
+    ))
 }
 
 /// 把应用结果投影为 (outcome, data, page, warnings)：截断 → partial（exit 10），
