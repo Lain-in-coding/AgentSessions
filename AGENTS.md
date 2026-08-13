@@ -20,13 +20,13 @@ Managed by Trellis. Edits outside this block are preserved; edits inside may be 
 
 <!-- TRELLIS:END -->
 
-# AgentSessions Repository Onboarding
+# agent-session-grep Repository Onboarding
 
 ## Tooling boundary
 
 Trellis and the platform integration roots (`.trellis/`, `.agents/`,
 `.codebuddy/`, and `.codex/`) are development workflow tooling. They are not
-AgentSessions product features, provider adapters, or user-facing Skills.
+agent-session-grep product features, provider adapters, or user-facing Skills.
 Product behavior lives in the Rust crates, schemas, and product documentation.
 
 ## Clean-clone quick start
@@ -81,7 +81,7 @@ identity or workspace state is not shared project truth.
 
 Platform integration trees intentionally contain generated or duplicated
 Trellis assets so supported tools can operate from a clone. Do not infer
-AgentSessions product behavior from them. Files marked as managed or generated
+agent-session-grep product behavior from them. Files marked as managed or generated
 may be replaced by a Trellis update; change their canonical source and
 regenerate them rather than relying on hand edits to generated copies.
 

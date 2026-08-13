@@ -56,7 +56,7 @@ sqlite_version   = <sqlite3 version()>
 ### 2.1 可复现 Core/Beta 报告契约
 
 仓库脚本 `scripts/evidence/core_beta_benchmark.py` 生成的权威文件是 JSON，
-`schema_version` 固定为 `agentsessions.core-beta-benchmark/v1`。同名 Markdown
+`schema_version` 固定为 `agent-session-grep.core-beta-benchmark/v1`。同名 Markdown
 仅是便于审阅的投影，不替代 JSON 原始样本。该契约不改变本文的 **Draft**
 状态，也不表示 R0 已批准任何数值 SLO。
 

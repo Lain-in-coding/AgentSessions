@@ -89,7 +89,7 @@
       "cli_exit_code": 9,
       "robot_ok": false,
       "redaction": "none",
-      "operator_action": "Upgrade AgentSessions or rebuild the derived data root."
+      "operator_action": "Upgrade agent-session-grep or rebuild the derived data root."
     },
     {
       "code": "cursor_invalid",

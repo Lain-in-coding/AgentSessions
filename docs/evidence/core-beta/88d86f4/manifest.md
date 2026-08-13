@@ -17,7 +17,7 @@
 | Evidence | Environment | Result | Reproduce |
 |---|---|---|---|
 | Full benchmark | Windows 11, `x86_64-pc-windows-msvc`, rustc 1.97.1, SQLite 3.53.2, 22 logical CPUs, 31.5 GB RAM, Samsung NVMe SSD, NTFS, Defender real-time on | Strengthened validator passes; startup 20+20, search/show/get 100 each, sync workloads 3 each | `python scripts/evidence/core_beta_benchmark.py run --profile full --workspace . --output-dir evidence-output --expected-commit 88d86f44a0f8d4d0261aaddddb99524514e57d7b --disk "Samsung NVMe SSD" --filesystem NTFS --antivirus-state "Windows Defender real-time protection enabled" --sqlite-version 3.53.2 --sqlite-version-source "same-commit sqlite-snapshot-wal rusqlite::version(); workspace and spike lock rusqlite 0.40.1/libsqlite3-sys 0.38.1"` |
-| Production SQLite process evidence (Windows) | Windows x64, rustc 1.97.1 | 56 adapter unit tests + 4 process tests pass after independent-review fixes | `cargo test -p agentsessions-adapters-sqlite --all-targets` |
+| Production SQLite process evidence (Windows) | Windows x64, rustc 1.97.1 | 56 adapter unit tests + 4 process tests pass after independent-review fixes | `cargo test -p agent-session-grep-adapters-sqlite --all-targets` |
 | Linux build/test/smoke | WSL2 Ubuntu 22.04, glibc 2.35, kernel 6.6.87.2, x86_64, rustc/cargo 1.97.1 | locked release CLI build, direct `--version` and robot `config paths` smoke, and full workspace tests pass | see `linux-wsl2-build-test-smoke.txt` |
 | WAL snapshot feasibility | Windows x64, SQLite 3.53.2 | A/B/C/D pass; assertion failure exits nonzero | `cargo run --locked --release --manifest-path spikes/sqlite-snapshot-wal/Cargo.toml` |
 
@@ -52,9 +52,9 @@ thresholds without a fixed benchmark environment and approved policy.
 
 ## Production process and source evidence
 
-`crates/agentsessions-adapters-sqlite/tests/process_evidence.rs` drives
+`crates/agent-session-grep-adapters-sqlite/tests/process_evidence.rs` drives
 production `SqliteStore::open_for_write` through the non-user-facing helper
-`crates/agentsessions-adapters-sqlite/src/bin/sqlite_process_helper.rs`. Recorded Windows and WSL2 Linux runs prove:
+`crates/agent-session-grep-adapters-sqlite/src/bin/sqlite_process_helper.rs`. Recorded Windows and WSL2 Linux runs prove:
 
 1. exactly one writer acquires the data-root lease; contender diagnostics are
    path-free;

@@ -112,21 +112,23 @@ channel:
 #   dispatch_mode: auto  # or "inline"; legacy alias: "sub-agent"
 
 # Auto-detected monorepo packages
+# Note: package keys follow the (historical) spec package names under
+# .trellis/spec/; `path` values point at the renamed crate directories.
 packages:
   agentsessions-adapters-sqlite:
-    path: crates/agentsessions-adapters-sqlite
+    path: crates/agent-session-grep-adapters-sqlite
   agentsessions-application:
-    path: crates/agentsessions-application
+    path: crates/agent-session-grep-application
   agentsessions-cli:
-    path: crates/agentsessions-cli
+    path: crates/agent-session-grep-cli
   agentsessions-domain:
-    path: crates/agentsessions-domain
+    path: crates/agent-session-grep-domain
   agentsessions-ports:
-    path: crates/agentsessions-ports
+    path: crates/agent-session-grep-ports
   agentsessions-provider-claude:
-    path: crates/agentsessions-provider-claude
+    path: crates/agent-session-grep-provider-claude
   agentsessions-provider-codex:
-    path: crates/agentsessions-provider-codex
+    path: crates/agent-session-grep-provider-codex
   agentsessions-testkit:
-    path: crates/agentsessions-testkit
+    path: crates/agent-session-grep-testkit
 default_package: agentsessions-adapters-sqlite

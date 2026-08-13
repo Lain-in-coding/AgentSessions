@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Drive every outward surface of an ALREADY-BUILT agentsessions binary against a
+# Drive every outward surface of an ALREADY-BUILT agent-session-grep binary against a
 # throwaway data root seeded with a synthetic fixture. This script never builds:
 # building is the job of install.sh or CI, and a smoke run that could rebuild
 # would let a stale artifact pass as a fresh one.
@@ -20,7 +20,7 @@ usage() {
     cat <<'EOF'
 usage: smoke.sh [--binary <path>]
 
-  --binary <path>  binary under test (default: target/release/agentsessions)
+  --binary <path>  binary under test (default: target/release/agent-session-grep)
 EOF
 }
 
@@ -46,15 +46,15 @@ script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_root=$(CDPATH= cd -- "$script_dir/../.." && pwd)
 
 if [ -z "$binary" ]; then
-    binary="$repo_root/target/release/agentsessions"
+    binary="$repo_root/target/release/agent-session-grep"
 fi
 [ -f "$binary" ] || \
-    fail "binary not found: $binary (this script does not build; run install.sh or cargo build --locked --release -p agentsessions-cli first)"
+    fail "binary not found: $binary (this script does not build; run install.sh or cargo build --locked --release -p agent-session-grep-cli first)"
 
 command -v python3 >/dev/null 2>&1 || \
     fail 'python3 not found on PATH; it is required to parse robot envelopes'
 
-workdir=$(mktemp -d 2>/dev/null || mktemp -d -t agentsessions-smoke)
+workdir=$(mktemp -d 2>/dev/null || mktemp -d -t agent-session-grep-smoke)
 db="$workdir/smoke.db"
 fixture="$workdir/synthetic-session.jsonl"
 

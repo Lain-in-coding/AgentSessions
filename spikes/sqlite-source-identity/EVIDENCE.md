@@ -12,7 +12,7 @@
 
 ## 动机
 
-`agentsessions-ports::SourceSnapshot` 当前把源身份定义为
+`agent-session-grep-ports::SourceSnapshot` 当前把源身份定义为
 `(path, len, mtime_ms, BLAKE3(整文件))`，`source_fs.rs` 的 capture/verify 按此实现。
 该契约假设**一个源文件承载一个可独立校验的单元**。
 

@@ -3,7 +3,7 @@
 > 对外可见的 Provider 状态清单，是 `0.3 Integration Beta` 的公开状态记录。
 > - 术语与晋级证据要求见 `../architecture/RFC-0002-provider-adapter-contract.md` §6。
 > - 本文件是**当前实现状态**的事实记录，不是承诺；晋级必须有证据，不由代码存在自动推断。
-> - 最后更新：2026-08-10
+> - 最后更新：2026-08-13
 
 ## 术语
 
@@ -22,8 +22,8 @@
 
 | Provider | provider_id | variant | maturity | 证据 |
 |---|---|---|---|---|
-| Claude Code | `claude-code` | `claude-code/jsonl-v1` | **Experimental** | 单元 + e2e + golden（`crates/agentsessions-provider-claude/tests/golden.rs`）+ 确定性 property 套件（`tests/properties.rs`，固定种子）+ span round-trip |
-| Codex | `codex` | `codex/rollout-jsonl-v1` | **Experimental** | 单元 + e2e + golden（`crates/agentsessions-provider-codex/tests/golden.rs`）+ 确定性 property 套件（含镜像去重性质）+ span round-trip |
+| Claude Code | `claude-code` | `claude-code/jsonl-v1` | **Experimental** | 单元 + e2e + golden（`crates/agent-session-grep-provider-claude/tests/golden.rs`）+ 确定性 property 套件（`tests/properties.rs`，固定种子）+ span round-trip |
+| Codex | `codex` | `codex/rollout-jsonl-v1` | **Experimental** | 单元 + e2e + golden（`crates/agent-session-grep-provider-codex/tests/golden.rs`）+ 确定性 property 套件（含镜像去重性质）+ span round-trip |
 | CodeBuddy | — | — | **Unsupported（未实现）** | 无 adapter |
 | Pi | — | — | **Unsupported（未实现）** | 无 adapter |
 | Cursor | — | — | **Unsupported（未实现）** | 无 adapter |
@@ -35,7 +35,7 @@
 
 ## Capability Matrix
 
-字段对应 Canonical `Message`（`crates/agentsessions-domain/src/lib.rs`）与解析产出。
+字段对应 Canonical `Message`（`crates/agent-session-grep-domain/src/lib.rs`）与解析产出。
 
 | 字段 | Claude Code | Codex | 说明 |
 |---|---|---|---|
@@ -61,11 +61,17 @@
   evidence、不同上下文 parent 以及相应合成/e2e 覆盖均已实现。全量授权运行
   （`2026-08-09T21:10:16Z`，1,242 源、1,177,479,794 字节）六条不变量全绿、harness
   exit 0：sync 164,136 emitted / 0 skipped、no-parse-loss 164,136 claims、
-  231 sessions 全 context 成功、659/659 byte 精度、rebuild 稳定。早期
-  `2026-07-31T10:04:17Z` 运行（879 源，`INV-SYNC-OK` exit 5 失败，79,958 emitted、
-  0 skipped，其余不变量未评估；aggregate 报告未保留精确 canonical code，故
-  `source_changed` 未证实）与 2026-08-10 子集运行（137 源全绿）如实保留在
-  `docs/evidence/integration-beta/real-data-regression.md`。真实数据 Gate D 已闭合。
+  231 sessions 全 context 成功、659/659 byte 精度、rebuild 稳定。最新两次全量
+  运行同样全绿：`2026-08-12T23:51:23Z`（1,328 源、1,253,494,481 字节；180,218
+  emitted / 0 skipped；242 sessions；630/630 byte 精度；rebuild 166,380 →
+  166,380）与 `2026-08-13T00:26:57Z`（1,330 源、1,255,049,984 字节；180,718
+  emitted / 0 skipped；242 sessions；630/630 byte 精度；rebuild 166,882 →
+  166,882）——后者由改名后的 `agent-session-grep` 二进制执行，验证改名无功能
+  回归。早期 `2026-07-31T10:04:17Z` 运行（879 源，`INV-SYNC-OK` exit 5 失败，
+  79,958 emitted、0 skipped，其余不变量未评估；aggregate 报告未保留精确 canonical
+  code，故 `source_changed` 未证实）与 2026-08-10 子集运行（137 源全绿）如实保留
+  在 `docs/evidence/integration-beta/real-data-regression.md`。真实数据 Gate D 已
+  闭合。
 
 ## 晋级到 Beta 的缺口
 
@@ -75,14 +81,19 @@
    Unicode 多字节 span、大字段、threading、codex 镜像去重），失败可由种子复现（2026-07-26）。
 3. ~~source span~~ —— 已入库：schema v6 + `MessageEvent.span` 契约，golden/e2e
    round-trip 锁定（2026-07-26，见 `docs/operations/migration-v5-to-v6.md`）。
-4. ~~真实历史数据回归（隔离沙箱、授权数据集、不外传）~~ —— **已闭合**：全量授权运行
-   （2026-08-09T21:10:16Z，1,242 源、1,177,479,794 字节）六条不变量全绿、harness exit 0：
-   sync 164,136 emitted / 0 skipped、no-parse-loss 164,136 claims、231 sessions 全
-   context 成功、659/659 byte 精度、rebuild 稳定（catalog 151,562 → 151,562）。
-   harness（`scripts/evidence/real_data_regression.py`）在抛弃式临时 data root 上跑
+4. ~~真实历史数据回归（隔离沙箱、授权数据集、不外传）~~ —— **已闭合**：最新全量
+   授权运行（`2026-08-13T00:26:57Z`，改名后的 `agent-session-grep` 二进制，1,330
+   源、1,255,049,984 字节）六条不变量全绿、harness exit 0：sync 180,718 emitted /
+   0 skipped、no-parse-loss 180,718 claims、242 sessions 全 context 成功（11
+   zero-placement，0 failed）、630/630 byte 精度、rebuild 稳定（catalog 166,882 →
+   166,882，ids match）。此前运行均如实保留：2026-08-09/10 全量（1,242 源、164,136
+   emitted、231 sessions、659/659 byte、rebuild 151,562 → 151,562）、2026-08-12
+   v3（1,328 源、180,218 emitted、rebuild 166,380 → 166,380）、2026-08-10 子集
+   （137 源）与 2026-07-31 失败运行（exit 5）见
+   `docs/evidence/integration-beta/real-data-regression.md`。harness
+   （`scripts/evidence/real_data_regression.py`）在抛弃式临时 data root 上跑
    sync → status + catalog walk → 逐会话 context → index rebuild，报告只含聚合计数
    （见 `docs/operations/REAL-DATA-REGRESSION.md`、证据行 `IB-REAL-DATA-REGRESSION-001`）。
-   早期 2026-07-31 运行（exit 5）与 2026-08-10 子集运行如实保留在证据文档中。
    真实数据 Gate D 已闭合；Provider 晋级仍需独立审查与 owner 决策。
 5. 跨正式 target（Windows/Linux/macOS）的 CI 认证——仍缺。`ci.yml` 的 `test` 与
    新增 `installer` job 已配置三平台矩阵（证据行 `IB-CI-INSTALLER-001`），但在

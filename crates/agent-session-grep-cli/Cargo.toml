@@ -1,0 +1,26 @@
+[package]
+name = "agent-session-grep-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "agent-session-grep"
+path = "src/main.rs"
+
+[dependencies]
+agent-session-grep-domain = { path = "../agent-session-grep-domain" }
+agent-session-grep-ports = { path = "../agent-session-grep-ports" }
+agent-session-grep-application = { path = "../agent-session-grep-application" }
+agent-session-grep-adapters-sqlite = { path = "../agent-session-grep-adapters-sqlite" }
+agent-session-grep-provider-claude = { path = "../agent-session-grep-provider-claude" }
+agent-session-grep-provider-codex = { path = "../agent-session-grep-provider-codex" }
+serde_json.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
+
+[dev-dependencies]
+rusqlite = { version = "0.40", features = ["bundled"] }
+tempfile = "3"

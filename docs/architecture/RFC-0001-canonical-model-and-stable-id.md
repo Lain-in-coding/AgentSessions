@@ -20,7 +20,7 @@
 
 ## 1. 背景与问题
 
-AgentSessions 需要把 Claude Code、Codex、CodeBuddy、Pi、Cursor 等 Provider 写入本机的异构历史记录，归一化到一个稳定的领域模型，使 CLI、Robot、MCP、TUI 能在其上提供一致的检索与渐进披露。
+agent-session-grep 需要把 Claude Code、Codex、CodeBuddy、Pi、Cursor 等 Provider 写入本机的异构历史记录，归一化到一个稳定的领域模型，使 CLI、Robot、MCP、TUI 能在其上提供一致的检索与渐进披露。
 
 Canonical Model 要解决四个根问题：
 

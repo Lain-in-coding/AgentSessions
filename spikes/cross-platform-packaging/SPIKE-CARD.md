@@ -22,7 +22,7 @@
 
 ## 2. Fixture / Fault model
 
-- 被构建对象是现有 `spikes/search-backend`，不是正式 `agentsessions` release binary；
+- 被构建对象是现有 `spikes/search-backend`，不是正式 `agent-session-grep` release binary；
 - 脚本通过 `$PSScriptRoot` 解析相邻 `search-backend` 目录，可从任意 checkout 路径运行；
 - checksum fixture 是 100 字节合成文件，追加 ASCII `SIGNATURE` 仅模拟签名导致的字节变化；
 - 没有调用 Authenticode、Apple notarization、cosign、GitHub Release 或安装渠道；

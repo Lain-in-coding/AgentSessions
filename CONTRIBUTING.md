@@ -1,4 +1,4 @@
-# Contributing to AgentSessions
+# Contributing to agent-session-grep
 
 Thanks for your interest in contributing. This document defines the commit and
 collaboration standards for this repository. They are strict on purpose: the

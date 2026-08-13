@@ -28,21 +28,21 @@ cargo 1.97.1 (c980f4866 2026-06-30)
    Compiling fs4 v0.13.1
    Compiling thiserror-impl v2.0.19
    Compiling serde_derive v1.0.229
-   Compiling agentsessions-domain v0.1.0 (/mnt/c/AgentSessions/crates/agentsessions-domain)
-   Compiling agentsessions-ports v0.1.0 (/mnt/c/AgentSessions/crates/agentsessions-ports)
-   Compiling agentsessions-application v0.1.0 (/mnt/c/AgentSessions/crates/agentsessions-application)
-   Compiling agentsessions-provider-codex v0.1.0 (/mnt/c/AgentSessions/crates/agentsessions-provider-codex)
-   Compiling agentsessions-provider-claude v0.1.0 (/mnt/c/AgentSessions/crates/agentsessions-provider-claude)
+   Compiling agent-session-grep-domain v0.1.0 (/mnt/c/AgentSessions/crates/agent-session-grep-domain)
+   Compiling agent-session-grep-ports v0.1.0 (/mnt/c/AgentSessions/crates/agent-session-grep-ports)
+   Compiling agent-session-grep-application v0.1.0 (/mnt/c/AgentSessions/crates/agent-session-grep-application)
+   Compiling agent-session-grep-provider-codex v0.1.0 (/mnt/c/AgentSessions/crates/agent-session-grep-provider-codex)
+   Compiling agent-session-grep-provider-claude v0.1.0 (/mnt/c/AgentSessions/crates/agent-session-grep-provider-claude)
    Compiling rusqlite v0.40.1
-   Compiling agentsessions-adapters-sqlite v0.1.0 (/mnt/c/AgentSessions/crates/agentsessions-adapters-sqlite)
-   Compiling agentsessions-cli v0.1.0 (/mnt/c/AgentSessions/crates/agentsessions-cli)
+   Compiling agent-session-grep-adapters-sqlite v0.1.0 (/mnt/c/AgentSessions/crates/agent-session-grep-adapters-sqlite)
+   Compiling agent-session-grep-cli v0.1.0 (/mnt/c/AgentSessions/crates/agent-session-grep-cli)
     Finished `release` profile [optimized] target(s) in 55.05s
 === DIRECT SMOKE ===
-agentsessions-cli 0.1.0
+agent-session-grep-cli 0.1.0
 {"command":"config.paths","data":{"cache":"<redacted-home>/.cache/agentsessions","config":"<redacted-home>/.config/agentsessions/config.toml","data":"<redacted-home>/.local/share/agentsessions","logs":"<redacted-home>/.local/share/agentsessions/logs"},"frame_type":"response","meta":{"duration_ms":0,"generation":null},"ok":true,"outcome":"success","page":{"has_more":false,"next_cursor":null},"request_id":"cli-949-1784975967528","schema_version":"1.0","warnings":[]}
 === WORKSPACE TESTS ===
     Finished `test` profile [unoptimized + debuginfo] target(s) in 1.69s
-     Running unittests src/lib.rs (target/debug/deps/agentsessions_adapters_sqlite-743935eb97bf4468)
+     Running unittests src/lib.rs (target/debug/deps/agent_session_grep_adapters_sqlite-743935eb97bf4468)
 
 running 55 tests
 test lease::tests::false_lock_result_is_writer_busy ... ok
@@ -119,7 +119,7 @@ test production_open_recovers_durable_intent_without_changing_catalog_or_generat
 
 test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.33s
 
-     Running unittests src/lib.rs (target/debug/deps/agentsessions_application-21914acade0708f2)
+     Running unittests src/lib.rs (target/debug/deps/agent_session_grep_application-21914acade0708f2)
 
 running 10 tests
 test tests::list_rejects_zero_limit ... ok
@@ -135,7 +135,7 @@ test tests::list_returns_stable_entries ... ok
 
 test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
 
-     Running unittests src/main.rs (target/debug/deps/agentsessions-9b604f432749d819)
+     Running unittests src/main.rs (target/debug/deps/agent-session-grep-9b604f432749d819)
 
 running 9 tests
 test protocol::tests::exit_codes_follow_contract ... ok
@@ -196,7 +196,7 @@ test matrix_declares_each_provider_id_and_variant ... ok
 
 test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
-     Running unittests src/lib.rs (target/debug/deps/agentsessions_domain-244a1898914a53ae)
+     Running unittests src/lib.rs (target/debug/deps/agent_session_grep_domain-244a1898914a53ae)
 
 running 14 tests
 test ids::tests::from_wire_rejects_unknown_prefix ... ok
@@ -216,13 +216,13 @@ test tests::wrong_id_kind_rejected ... ok
 
 test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
 
-     Running unittests src/lib.rs (target/debug/deps/agentsessions_ports-fbf571145a94b42a)
+     Running unittests src/lib.rs (target/debug/deps/agent_session_grep_ports-fbf571145a94b42a)
 
 running 0 tests
 
 test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
-     Running unittests src/lib.rs (target/debug/deps/agentsessions_provider_claude-ed6e1b5d0d47e52f)
+     Running unittests src/lib.rs (target/debug/deps/agent_session_grep_provider_claude-ed6e1b5d0d47e52f)
 
 running 5 tests
 test tests::probe_rejects_empty ... ok
@@ -233,7 +233,7 @@ test tests::probe_confirms_claude_jsonl ... ok
 
 test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
-     Running unittests src/lib.rs (target/debug/deps/agentsessions_provider_codex-7a2852cb3d37957e)
+     Running unittests src/lib.rs (target/debug/deps/agent_session_grep_provider_codex-7a2852cb3d37957e)
 
 running 6 tests
 test tests::probe_rejects_empty ... ok
@@ -245,7 +245,7 @@ test tests::probe_confirms_codex_rollout ... ok
 
 test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
-     Running unittests src/lib.rs (target/debug/deps/agentsessions_testkit-7c31cef84d1f6cf1)
+     Running unittests src/lib.rs (target/debug/deps/agent_session_grep_testkit-7c31cef84d1f6cf1)
 
 running 8 tests
 test tests::fake_provider_ambiguous_signals_ambiguous ... ok
@@ -259,43 +259,43 @@ test tests::session_builder_produces_valid_session ... ok
 
 test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
 
-   Doc-tests agentsessions_adapters_sqlite
+   Doc-tests agent_session_grep_adapters_sqlite
 
 running 0 tests
 
 test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
-   Doc-tests agentsessions_application
+   Doc-tests agent_session_grep_application
 
 running 0 tests
 
 test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
-   Doc-tests agentsessions_domain
+   Doc-tests agent_session_grep_domain
 
 running 0 tests
 
 test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
-   Doc-tests agentsessions_ports
+   Doc-tests agent_session_grep_ports
 
 running 0 tests
 
 test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
-   Doc-tests agentsessions_provider_claude
+   Doc-tests agent_session_grep_provider_claude
 
 running 0 tests
 
 test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
-   Doc-tests agentsessions_provider_codex
+   Doc-tests agent_session_grep_provider_codex
 
 running 0 tests
 
 test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
-   Doc-tests agentsessions_testkit
+   Doc-tests agent_session_grep_testkit
 
 running 0 tests
 

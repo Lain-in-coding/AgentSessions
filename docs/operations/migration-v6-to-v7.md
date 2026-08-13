@@ -14,7 +14,7 @@ Scope: data roots at schema v6 (`PRAGMA user_version = 6`).
 
 ## Before upgrading
 
-1. Stop every AgentSessions process that can write the data root.
+1. Stop every agent-session-grep process that can write the data root.
 2. Back up the SQLite database and any adjacent `-wal` and `-shm` files as one
    consistent set.
 3. Record the v6 binary version so the backup can be inspected with the same
@@ -46,19 +46,26 @@ context stays disabled.
 For a single source:
 
 ```text
-agentsessions --db <catalog.db> --robot ingest <source.jsonl>
+agent-session-grep --db <catalog.db> --robot ingest <source.jsonl>
 ```
 
 For a known source set:
 
 ```text
-agentsessions --db <catalog.db> --robot sync <source.jsonl>...
+agent-session-grep --db <catalog.db> --robot sync <source.jsonl>...
 ```
 
 The re-ingest upserts stable entities, writes source-placement claims and
 relations, and regenerates compatibility aliases from complete relational
 facts. Shared Messages remain one catalog entity while retaining distinct
-per-session placements, parents, documents, and spans.
+per-session placements, parents, documents, and spans. When two sources
+project the same stable message with different content, `text` is exempt
+from conflict authority — it is a content projection, not a stable identity
+field, and a resumed/forked session copy may legitimately carry a different
+number of content blocks. The merged payload deterministically keeps the
+longer text projection so no retrieved content is lost, and FTS is
+reprojected from `searchable_text` of the merged payload so the search
+index reflects the single merged fact.
 
 ## Verify
 

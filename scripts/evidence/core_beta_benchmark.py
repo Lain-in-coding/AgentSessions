@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Repeatable Core/Beta benchmark evidence for the AgentSessions CLI.
+"""Repeatable Core/Beta benchmark evidence for the agent-session-grep CLI.
 
 This harness uses only the Python standard library and generates synthetic
 Claude Code JSONL fixtures. It never discovers or reads provider data roots.
@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-SCHEMA_VERSION = "agentsessions.core-beta-benchmark/v1"
+SCHEMA_VERSION = "agent-session-grep.core-beta-benchmark/v1"
 PROFILES = {
     "smoke": {"files": 2, "messages_per_file": 12, "startup": 3, "sync": 1, "query": 5},
     "full": {"files": 20, "messages_per_file": 200, "startup": 20, "sync": 3, "query": 100},
@@ -318,11 +318,11 @@ def resolve_binary(workspace: Path, args: argparse.Namespace) -> Path:
         binary = Path(args.binary).expanduser().resolve()
     else:
         subprocess.run(
-            [args.cargo, "build", "--locked", "--release", "-p", "agentsessions-cli"],
+            [args.cargo, "build", "--locked", "--release", "-p", "agent-session-grep-cli"],
             cwd=workspace,
             check=True,
         )
-        name = "agentsessions.exe" if os.name == "nt" else "agentsessions"
+        name = "agent-session-grep.exe" if os.name == "nt" else "agent-session-grep"
         binary = workspace / "target" / "release" / name
     if not binary.is_file():
         raise FileNotFoundError(f"release CLI binary not found: {binary}")
@@ -373,7 +373,7 @@ def run_benchmark(args: argparse.Namespace) -> Path:
     binary = resolve_binary(workspace, args)
     binary_provenance = "caller_supplied_prebuilt" if args.binary else "built_by_harness_from_workspace"
 
-    with tempfile.TemporaryDirectory(prefix="agentsessions-evidence-") as temp_name:
+    with tempfile.TemporaryDirectory(prefix="agent-session-grep-evidence-") as temp_name:
         scratch = Path(temp_name)
         master = scratch / "dataset-master"
         dataset_files, all_ids = write_dataset(master, profile["files"], profile["messages_per_file"])

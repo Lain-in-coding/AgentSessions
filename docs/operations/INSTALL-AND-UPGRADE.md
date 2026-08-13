@@ -1,6 +1,6 @@
 # Install and upgrade (from source)
 
-Scope: building `agentsessions` from a checkout of this repository and placing
+Scope: building `agent-session-grep` from a checkout of this repository and placing
 the binary in a user-level directory. There is no released, signed, or
 published artifact — see [What this does not give you](#what-this-does-not-give-you).
 
@@ -13,7 +13,7 @@ published artifact — see [What this does not give you](#what-this-does-not-giv
    `Cargo.toml` is present.
 2. Check that `cargo` is on `PATH`; if not, print the rustup.rs pointer and
    exit non-zero.
-3. `cargo build --locked --release -p agentsessions-cli`.
+3. `cargo build --locked --release -p agent-session-grep-cli`.
 4. Compute the SHA-256 of the built binary, create the destination directory
    if needed, and copy the binary over any existing file of the same name.
 5. Run the installed binary's `--version` as a self-check.
@@ -28,14 +28,14 @@ download anything beyond what `cargo build` itself fetches.
 
 | Platform | Destination |
 |---|---|
-| Windows | `%LOCALAPPDATA%\AgentSessions\bin` |
+| Windows | `%LOCALAPPDATA%\agent-session-grep\bin` |
 | Linux, macOS | `${XDG_BIN_HOME:-$HOME/.local/bin}` |
 
 This is deliberately separate from the config/data/cache/logs directories the
 CLI itself reports. To see those, run:
 
 ```
-agentsessions --robot config paths
+agent-session-grep --robot config paths
 ```
 
 ## Install
@@ -70,7 +70,7 @@ Windows, current user, persistent:
 ```powershell
 [Environment]::SetEnvironmentVariable(
   'Path',
-  [Environment]::GetEnvironmentVariable('Path', 'User') + ';' + "$env:LOCALAPPDATA\AgentSessions\bin",
+  [Environment]::GetEnvironmentVariable('Path', 'User') + ';' + "$env:LOCALAPPDATA\agent-session-grep\bin",
   'User')
 ```
 
@@ -83,16 +83,16 @@ export PATH="$HOME/.local/bin:$PATH"   # add to ~/.bashrc or ~/.zshrc
 ## Verify the install
 
 ```
-agentsessions --version
-agentsessions doctor
-agentsessions --robot config paths
+agent-session-grep --version
+agent-session-grep doctor
+agent-session-grep --robot config paths
 ```
 
 `doctor` without `--db` reports the tool version only and does not touch a
 data root. To also check that a store opens, pass a path:
 
 ```
-agentsessions doctor --db C:/data/example.db --robot
+agent-session-grep --robot doctor --db C:/data/example.db
 ```
 
 That form reports `schema`, `generation`, and `interrupted_batches` for the
@@ -106,13 +106,14 @@ place; there is no version pinning, rollback, or update channel.
 ```
 git pull
 pwsh -File scripts/install/install.ps1        # or sh scripts/install/install.sh
-agentsessions --version
+agent-session-grep --version
 ```
 
 An upgraded binary may need to migrate an existing data root on first open.
-Migration is automatic and transactional; the v5 → v6 step is documented in
-`migration-v5-to-v6.md`. An older binary refuses to open a newer store with
-`schema_incompatible` (exit 9) rather than downgrading it.
+Migration is automatic and transactional; the latest v6 → v7 steps are
+documented in `migration-v6-to-v7.md` (the v5 → v6 step in
+`migration-v5-to-v6.md` is historical). An older binary refuses to open a
+newer store with `schema_incompatible` (exit 9) rather than downgrading it.
 
 ## Uninstall
 
@@ -124,13 +125,13 @@ pwsh -File scripts/install/uninstall.ps1
 sh scripts/install/uninstall.sh
 ```
 
-Uninstall deletes only the `agentsessions` binary (`agentsessions.exe` on
+Uninstall deletes only the `agent-session-grep` binary (`agent-session-grep.exe` on
 Windows) from the install directory. It never removes a directory recursively
 and never touches your data root. Running it when nothing is installed
 reports "not installed" and exits 0, so it is safe to repeat.
 
 Your config, data, cache, and logs survive uninstall. To remove them, delete
-the paths reported by `agentsessions --robot config paths` yourself — the
+the paths reported by `agent-session-grep --robot config paths` yourself — the
 scripts will not do it for you.
 
 ## Common failures
@@ -139,14 +140,14 @@ scripts will not do it for you.
 shell so `PATH` picks it up, and re-run.
 
 **Build fails.** The failure is a `cargo build` failure, not an installer
-failure. Re-run `cargo build --locked --release -p agentsessions-cli`
+failure. Re-run `cargo build --locked --release -p agent-session-grep-cli`
 directly and read its output. `--locked` means a lockfile that disagrees with
 `Cargo.toml` is an error rather than being silently updated.
 
 **Destination not writable.** Pick a directory you own with `-Prefix` /
 `--prefix`. Do not run the installer elevated to work around this.
 
-**`agentsessions` not found after install.** The installer does not change
+**`agent-session-grep` not found after install.** The installer does not change
 `PATH`. Either apply the printed `PATH` line or invoke the binary by its full
 path.
 

@@ -44,25 +44,25 @@ jobs:
             label: Windows x64 / MSVC
             runner: windows-2022
             target: x86_64-pc-windows-msvc
-            binary: agentsessions.exe
+            binary: agent-session-grep.exe
             rustflags: -C target-feature=+crt-static
           - id: linux-gnu-x64
             label: Ubuntu 22.04 / GNU x64
             runner: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
-            binary: agentsessions
+            binary: agent-session-grep
             rustflags: ""
           - id: macos-intel
             label: macOS Intel / x64
             runner: macos-15-intel
             target: x86_64-apple-darwin
-            binary: agentsessions
+            binary: agent-session-grep
             rustflags: ""
           - id: macos-arm64
             label: macOS Apple Silicon / ARM64
             runner: macos-15
             target: aarch64-apple-darwin
-            binary: agentsessions
+            binary: agent-session-grep
             rustflags: ""
 
     steps:
@@ -85,7 +85,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
-          cargo build --locked --release --target '${{ matrix.target }}' -p agentsessions-cli
+          cargo build --locked --release --target '${{ matrix.target }}' -p agent-session-grep-cli
 
       - name: Direct binary smoke
         shell: pwsh
@@ -122,7 +122,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
-          cargo test --locked --target '${{ matrix.target }}' -p agentsessions-adapters-sqlite --all-targets -- --nocapture 2>&1 |
+          cargo test --locked --target '${{ matrix.target }}' -p agent-session-grep-adapters-sqlite --all-targets -- --nocapture 2>&1 |
             Tee-Object -FilePath 'evidence/ci/sqlite-adapter-tests.txt'
 
       - name: Storage feasibility spikes

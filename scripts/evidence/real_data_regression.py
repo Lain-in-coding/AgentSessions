@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Authorized real-data regression harness.
 
-Drives the real ``agentsessions`` binary over transcripts the operator is
+Drives the real ``agent-session-grep`` binary over transcripts the operator is
 authorized to read, and checks that ingestion, context assembly, and index
 rebuild hold their invariants on real input rather than only on synthetic
 fixtures.
@@ -15,7 +15,7 @@ hostnames ever reach the report. See
 
 Usage:
     python scripts/evidence/real_data_regression.py \
-        --binary target/release/agentsessions \
+        --binary target/release/agent-session-grep \
         --sources <dir-or-file> [--sources ...] \
         [--out <path>] [--json] [--dry-run]
 
@@ -35,6 +35,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 REPORT_SCHEMA_VERSION = "1.0"
@@ -104,6 +105,15 @@ def run_cli(binary: str, db: str, args: Sequence[str]) -> Tuple[int, Dict[str, A
             f"envelope: {error}"
         ) from error
     return completed.returncode, envelope
+
+
+#: Max re-attempts for a sync chunk that failed with ``source_changed``
+#: (exit 5). Real corpora include transcripts being appended to by a live
+#: session; the snapshot check correctly rejects them, and a bounded wait
+#: lets the file settle instead of failing the whole run. Any other failure
+#: (or a change that persists across retries) is still reported verbatim.
+SYNC_CHANGED_RETRIES = 3
+SYNC_CHANGED_BACKOFF_S = 3.0
 
 
 def _chunk_sources(sources: Sequence[str], budget: int = 24_000) -> List[List[str]]:
@@ -330,7 +340,7 @@ def run_regression(binary: str, sources: Sequence[str]) -> Dict[str, Any]:
     sha256 = sha256_of(binary)
     total_bytes = sum(os.path.getsize(path) for path in sources)
 
-    workdir = tempfile.mkdtemp(prefix="agentsessions-regression-")
+    workdir = tempfile.mkdtemp(prefix="agent-session-grep-regression-")
     db = os.path.join(workdir, "regression.db")
     invariants: List[Dict[str, Any]] = []
     totals = {"messages": 0, "sessions": 0, "documents": 0, "catalog_entities": 0}
@@ -352,6 +362,18 @@ def run_regression(binary: str, sources: Sequence[str]) -> Dict[str, Any]:
         for chunk in _chunk_sources(sources):
             last_code, sync = run_cli(binary, db, ["sync", *chunk])
             last_ok = sync.get("ok")
+            if (last_code == 5 and not last_ok) or (
+                last_code == 0 and last_ok is not True
+            ):
+                # A source in the chunk was written during the sync (a live
+                # session appending). Wait for it to settle and retry; a
+                # persistent change is a real failure, not a skip.
+                for _attempt in range(SYNC_CHANGED_RETRIES):
+                    time.sleep(SYNC_CHANGED_BACKOFF_S)
+                    last_code, sync = run_cli(binary, db, ["sync", *chunk])
+                    last_ok = sync.get("ok")
+                    if last_code == 0 and last_ok is True:
+                        break
             if last_code != 0 or last_ok is not True:
                 sync_ok = False
                 break
@@ -607,7 +629,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         description="Authorized real-data regression over local transcripts.",
     )
-    parser.add_argument("--binary", required=True, help="agentsessions binary to drive")
+    parser.add_argument("--binary", required=True, help="agent-session-grep binary to drive")
     parser.add_argument(
         "--sources",
         action="append",

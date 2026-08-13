@@ -1,5 +1,5 @@
 {
-  "schema_version": "agentsessions.core-beta-benchmark/v1",
+  "schema_version": "agent-session-grep.core-beta-benchmark/v1",
   "evidence_status": "locally_verified",
   "profile": "full",
   "generated_at_utc": "2026-07-25T10:38:56.619078Z",

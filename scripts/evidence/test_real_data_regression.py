@@ -27,11 +27,11 @@ SECRET_TOKEN = "zqxjkbrw-corpus-secret-token"
 
 def locate_binary():
     """Return the release binary, or None when the workspace is unbuilt."""
-    override = os.environ.get("AGENTSESSIONS_BINARY")
+    override = os.environ.get("AGENT_SESSION_GREP_BINARY")
     if override:
         candidate = Path(override)
         return candidate if candidate.is_file() else None
-    name = "agentsessions.exe" if os.name == "nt" else "agentsessions"
+    name = "agent-session-grep.exe" if os.name == "nt" else "agent-session-grep"
     candidate = REPO_ROOT / "target" / "release" / name
     return candidate if candidate.is_file() else None
 
@@ -133,7 +133,7 @@ def sample_report(invariants=None):
         ]
     return rdr.build_report(
         generated_at_utc="2026-07-27T00:00:00Z",
-        binary_basename="agentsessions.exe",
+        binary_basename="agent-session-grep.exe",
         version="0.1.0",
         sha256="0" * 64,
         environment={"os": "Windows", "release": "11", "python": "3.10.11"},
@@ -227,8 +227,8 @@ class EndToEndTests(unittest.TestCase):
         if cls.binary is None:
             raise unittest.SkipTest(
                 "release binary not found; run "
-                "cargo build --locked --release -p agentsessions-cli "
-                "or set AGENTSESSIONS_BINARY"
+                "cargo build --locked --release -p agent-session-grep-cli "
+                "or set AGENT_SESSION_GREP_BINARY"
             )
 
     def setUp(self):

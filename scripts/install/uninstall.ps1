@@ -20,7 +20,7 @@ function Fail {
 }
 
 $exeSuffix = if ($IsWindows) { '.exe' } else { '' }
-$binaryName = "agentsessions$exeSuffix"
+$binaryName = "agent-session-grep$exeSuffix"
 
 # Prefix resolution mirrors install.ps1 exactly; a divergence here would leave
 # an installed binary that uninstall cannot see.
@@ -29,7 +29,7 @@ if ([string]::IsNullOrWhiteSpace($Prefix)) {
         if (-not $env:LOCALAPPDATA) {
             Fail 'LOCALAPPDATA is not set; pass -Prefix <dir> to choose the install directory'
         }
-        $Prefix = Join-Path $env:LOCALAPPDATA 'AgentSessions\bin'
+        $Prefix = Join-Path $env:LOCALAPPDATA 'agent-session-grep\bin'
     } else {
         $base = if ($env:XDG_BIN_HOME) { $env:XDG_BIN_HOME } elseif ($env:HOME) { Join-Path $env:HOME '.local/bin' } else { '' }
         if (-not $base) {
@@ -55,5 +55,5 @@ if (Test-Path -LiteralPath $target) {
 Write-Host "uninstall: removed $target"
 Write-Host "uninstall: the directory $Prefix was left in place."
 Write-Host 'uninstall: config, data, cache, and logs were not touched. To remove those,'
-Write-Host 'uninstall: delete the paths reported by: agentsessions --robot config paths'
+Write-Host 'uninstall: delete the paths reported by: agent-session-grep --robot config paths'
 exit 0

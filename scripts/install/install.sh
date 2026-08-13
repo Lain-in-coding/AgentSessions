@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build agentsessions from source and copy the binary into a user-level bin
+# Build agent-session-grep from source and copy the binary into a user-level bin
 # directory. The artifact is unsigned and unnotarized, so this script is the
 # only supported install path; it deliberately does NOT touch PATH, the
 # registry, or shell profiles — environment changes are the user's decision and
@@ -57,7 +57,7 @@ repo_root=$(CDPATH= cd -- "$script_dir/../.." && pwd)
 [ -f "$repo_root/Cargo.toml" ] || \
     fail "cannot find Cargo.toml at $repo_root; run this script from a checkout of the repository"
 
-binary_name="agentsessions"
+binary_name="agent-session-grep"
 
 if [ -z "$prefix" ]; then
     if [ -n "${XDG_BIN_HOME:-}" ]; then
@@ -79,11 +79,11 @@ if [ "$skip_build" -eq 0 ]; then
     cargo --version || fail 'cargo --version failed'
 
     if [ "$dry_run" -eq 1 ]; then
-        printf 'install: dry run: would run cargo build --locked --release -p agentsessions-cli in %s\n' "$repo_root"
+        printf 'install: dry run: would run cargo build --locked --release -p agent-session-grep-cli in %s\n' "$repo_root"
     else
         # --locked keeps the build reproducible: an install must never silently
         # resolve different dependency versions than CI did.
-        (cd "$repo_root" && cargo build --locked --release -p agentsessions-cli) || \
+        (cd "$repo_root" && cargo build --locked --release -p agent-session-grep-cli) || \
             fail 'cargo build failed'
     fi
 fi
@@ -96,7 +96,7 @@ fi
 
 if [ ! -f "$artifact" ]; then
     if [ "$skip_build" -eq 1 ]; then
-        fail "$artifact does not exist; --skip-build requires a prior cargo build --locked --release -p agentsessions-cli"
+        fail "$artifact does not exist; --skip-build requires a prior cargo build --locked --release -p agent-session-grep-cli"
     fi
     fail "$artifact does not exist after a successful build"
 fi

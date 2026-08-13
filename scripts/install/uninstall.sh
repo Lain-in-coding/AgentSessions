@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Remove the installed agentsessions binary.
+# Remove the installed agent-session-grep binary.
 #
-# Deletes exactly one file: agentsessions in the install directory. It never
+# Deletes exactly one file: agent-session-grep in the install directory. It never
 # removes a directory recursively and never touches a data root, so it cannot
 # take your config, cache, or indexed history with it. Running it when nothing
 # is installed reports "not installed" and exits 0, which makes it safe to
@@ -42,7 +42,7 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-binary_name="agentsessions"
+binary_name="agent-session-grep"
 
 if [ -z "$prefix" ]; then
     if [ -n "${XDG_BIN_HOME:-}" ]; then
@@ -65,4 +65,4 @@ rm -f "$installed_binary" || fail "cannot remove $installed_binary"
 printf 'removed: %s\n' "$installed_binary"
 printf '\n'
 printf 'Your config, data, cache, and logs were not touched. To remove those,\n'
-printf 'delete the paths reported by: agentsessions --robot config paths\n'
+printf 'delete the paths reported by: agent-session-grep --robot config paths\n'

@@ -1,6 +1,6 @@
 # Rebuild and migration runbook
 
-Scope: operator procedures for an existing AgentSessions data root — schema
+Scope: operator procedures for an existing agent-session-grep data root — schema
 upgrades, full index rebuild, store reconstruction, write-contention
 recovery, and the generation/cursor semantics behind them.
 
@@ -11,12 +11,12 @@ output is the JSON envelope, not the human rendering. Paths are placeholders.
 
 | Command | Writes? | Purpose |
 |---|---|---|
-| `agentsessions doctor --db <path> --robot` | no | Report store schema, generation, and interrupted-batch count. |
-| `agentsessions --db <path> sync <file>... --robot` | yes | Atomically ingest the listed sources; no new generation when content is unchanged. |
-| `agentsessions --db <path> ingest <file> --robot` | yes | Ingest one source file. |
-| `agentsessions --db <path> index rebuild --robot` | yes | Reproject the FTS index from the catalog. |
-| `agentsessions --db <path> status --robot` | no | Report catalog entity count and active generation. |
-| `agentsessions --db <path> search <query> --robot` | no | Full-text search over the current generation. |
+| `agent-session-grep --robot doctor --db <path>` | no | Report store schema, generation, and interrupted-batch count. |
+| `agent-session-grep --robot --db <path> sync <file>...` | yes | Atomically ingest the listed sources; no new generation when content is unchanged. |
+| `agent-session-grep --robot --db <path> ingest <file>` | yes | Ingest one source file. |
+| `agent-session-grep --robot --db <path> index rebuild` | yes | Reproject the FTS index from the catalog. |
+| `agent-session-grep --robot --db <path> status` | no | Report catalog entity count and active generation. |
+| `agent-session-grep --robot --db <path> search <query>` | no | Full-text search over the current generation. |
 
 Error and exit-code mapping: usage or cursor errors exit `2`, not-found `4`,
 source I/O and source-changed `5`, catalog errors and `writer_busy` `6`,
@@ -27,7 +27,7 @@ usable result exits `10`. The envelope's `error.code` is the stable spelling.
 ## Reading doctor
 
 ```
-agentsessions doctor --db C:/data/example.db --robot
+agent-session-grep --robot doctor --db C:/data/example.db
 ```
 
 `data.db` is `"ok"` when the store opens, or `"not-checked"` when no `--db`
@@ -50,22 +50,26 @@ most usefully `schema_incompatible` when the store is newer than the binary.
 There is no manual upgrade command. Opening an older store with a newer
 binary migrates it in a single transaction gated by `PRAGMA user_version`;
 on failure the transaction rolls back and the old binary can still read the
-store. The v5 → v6 step is specified in `migration-v5-to-v6.md`, which is the
-single source of truth — this runbook does not restate it.
+store. The v6 → v7 step is specified in `migration-v6-to-v7.md`, which is the
+current migration source — this runbook does not restate it. The v5 → v6
+step in `migration-v5-to-v6.md` is historical; stores at v5 or v6 migrate
+stepwise to v7 on first open by the current binary.
 
 Operational sequence:
 
-1. Note the pre-state: `agentsessions doctor --db <path> --robot`.
+1. Note the pre-state: `agent-session-grep --robot doctor --db <path>`.
 2. Keep a copy of the data root before first open if it matters. There is no
    production snapshot or bundle API today (`CB-PROD-SNAPSHOT-API-001` is
    `not_implemented`); the WAL-aware feasibility spike shows why copying the
    main database file alone while a writer is live is unsafe.
-3. Run the new binary against the store: `agentsessions doctor --db <path> --robot`.
+3. Run the new binary against the store: `agent-session-grep --robot doctor --db <path>`.
 4. Confirm `data.schema` is the new version and `data.db` is `"ok"`.
 5. Re-ingest sources (`sync`) to lift legacy rows to current fidelity.
    Migration never fabricates data; rows created before v6 have no session or
-   span attribution until re-ingested, and `context --robot` reports them as
-   `unknown` precision in `warnings` with an explicit re-ingest hint.
+   span attribution until re-ingested. `context` remains disabled with
+   `schema_incompatible` and a bounded re-ingest-required action until every
+   known contributing source has completed a zero-skipped v7 scan
+   (relation-complete); see `migration-v6-to-v7.md`.
 
 The reverse direction is refused: an older binary opening a newer store gets
 `schema_incompatible` (exit 9), not a silent downgrade.
@@ -76,7 +80,7 @@ Rebuild when the FTS index is damaged or suspect and the catalog is
 trustworthy. The catalog is the authority; the index is a projection of it.
 
 ```
-agentsessions --db C:/data/example.db index rebuild --robot
+agent-session-grep --robot --db C:/data/example.db index rebuild
 ```
 
 The result reports `data.reindexed` (messages written back into FTS) and
@@ -93,6 +97,13 @@ The result reports `data.reindexed` (messages written back into FTS) and
 - Preserves identity tiers via the `fts_ids` sidecar (fallback to parsing the
   wire id, with the documented catalog-key constraint; see
   `migration-v5-to-v6.md`).
+- Deletes FTS rows through the `fts_ids.fts_rowid` sidecar column rather than
+  by matching FTS content columns. The sidecar maps each message's wire id to
+  its FTS rowid, turning the per-row clear/reproject delete from a
+  content-column scan into a rowid lookup (O(1)); this is what makes rebuilds
+  on large stores fast. `fts_rowid` is a v7-era additive extension that an
+  existing v7 store gains on its next open, with `user_version` unchanged
+  (see `migration-v6-to-v7.md`).
 
 A rebuild **advances the generation**, which invalidates outstanding cursors.
 It does not rewrite catalog payloads, so evidence spans inside payloads are
@@ -101,8 +112,8 @@ untouched.
 Verify afterwards:
 
 ```
-agentsessions --db C:/data/example.db status --robot
-agentsessions --db C:/data/example.db search "<known term>" --robot
+agent-session-grep --robot --db C:/data/example.db status
+agent-session-grep --robot --db C:/data/example.db search "<known term>"
 ```
 
 Compare `catalog_count` against the pre-rebuild value and confirm the known
@@ -116,7 +127,7 @@ on legacy rows, rebuild the data root from the sources. Sources are the
 ground truth and ingestion is read-only against them.
 
 ```
-agentsessions --db C:/data/example-new.db sync <file1.jsonl> <file2.jsonl> --robot
+agent-session-grep --robot --db C:/data/example-new.db sync <file1.jsonl> <file2.jsonl>
 ```
 
 Semantics that make this safe to reason about:

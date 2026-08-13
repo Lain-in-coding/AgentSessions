@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://agentsessions.dev/schemas/robot/v1/envelope.schema.json",
-  "title": "AgentSessions Robot Protocol Envelope v1",
-  "description": "A complete AgentSessions JSON or JSONL protocol frame.",
+  "$id": "https://agent-session-grep.dev/schemas/robot/v1/envelope.schema.json",
+  "title": "agent-session-grep Robot Protocol Envelope v1",
+  "description": "A complete agent-session-grep JSON or JSONL protocol frame.",
   "oneOf": [
     { "$ref": "#/$defs/success" },
     { "$ref": "#/$defs/error" },

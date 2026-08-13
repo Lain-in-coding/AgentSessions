@@ -1,5 +1,5 @@
 #!/usr/bin/env pwsh
-# Build agentsessions from source and copy the binary into a user-level bin
+# Build agent-session-grep from source and copy the binary into a user-level bin
 # directory. The artifact is unsigned and unnotarized, so this script is the
 # only supported install path; it deliberately does NOT touch PATH, the
 # registry, or shell profiles — environment changes are the user's decision and
@@ -30,14 +30,14 @@ if (-not (Test-Path -LiteralPath (Join-Path $repoRoot 'Cargo.toml'))) {
 }
 
 $exeSuffix = if ($IsWindows) { '.exe' } else { '' }
-$binaryName = "agentsessions$exeSuffix"
+$binaryName = "agent-session-grep$exeSuffix"
 
 if ([string]::IsNullOrWhiteSpace($Prefix)) {
     if ($IsWindows) {
         if (-not $env:LOCALAPPDATA) {
             Fail 'LOCALAPPDATA is not set; pass -Prefix <dir> to choose an install directory'
         }
-        $Prefix = Join-Path $env:LOCALAPPDATA 'AgentSessions\bin'
+        $Prefix = Join-Path $env:LOCALAPPDATA 'agent-session-grep\bin'
     } else {
         $base = if ($env:XDG_BIN_HOME) { $env:XDG_BIN_HOME } elseif ($env:HOME) { Join-Path $env:HOME '.local/bin' } else { '' }
         if (-not $base) {
@@ -60,14 +60,14 @@ if (-not $SkipBuild) {
     if ($LASTEXITCODE -ne 0) { Fail "cargo --version failed with exit code $LASTEXITCODE" }
 
     if ($DryRun) {
-        Write-Host "install: dry run: would run cargo build --locked --release -p agentsessions-cli in $repoRoot"
+        Write-Host "install: dry run: would run cargo build --locked --release -p agent-session-grep-cli in $repoRoot"
     } else {
         $buildCode = 1
         Push-Location $repoRoot
         try {
             # --locked keeps the build reproducible: an install must never
             # silently resolve different dependency versions than CI did.
-            & cargo build --locked --release -p agentsessions-cli
+            & cargo build --locked --release -p agent-session-grep-cli
             $buildCode = $LASTEXITCODE
         } finally {
             Pop-Location
@@ -84,7 +84,7 @@ if ($DryRun -and -not (Test-Path -LiteralPath $artifact)) {
 
 if (-not (Test-Path -LiteralPath $artifact)) {
     if ($SkipBuild) {
-        Fail "$artifact does not exist; -SkipBuild requires a prior cargo build --locked --release -p agentsessions-cli"
+        Fail "$artifact does not exist; -SkipBuild requires a prior cargo build --locked --release -p agent-session-grep-cli"
     }
     Fail "$artifact does not exist after a successful build"
 }

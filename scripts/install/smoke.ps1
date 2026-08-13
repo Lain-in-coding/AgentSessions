@@ -58,10 +58,10 @@ function Abort {
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 if ([string]::IsNullOrWhiteSpace($Binary)) {
     $exeSuffix = if ($IsWindows) { '.exe' } else { '' }
-    $Binary = Join-Path $repoRoot (Join-Path 'target/release' "agentsessions$exeSuffix")
+    $Binary = Join-Path $repoRoot (Join-Path 'target/release' "agent-session-grep$exeSuffix")
 }
 if (-not (Test-Path -LiteralPath $Binary)) {
-    Abort "binary not found: $Binary (build it first: cargo build --locked --release -p agentsessions-cli)"
+    Abort "binary not found: $Binary (build it first: cargo build --locked --release -p agent-session-grep-cli)"
 }
 $Binary = (Resolve-Path -LiteralPath $Binary).Path
 
@@ -86,7 +86,7 @@ function Test-HasProperty {
     return [bool]($Object.PSObject.Properties.Name -contains $Name)
 }
 
-$script:TempDir = Join-Path ([System.IO.Path]::GetTempPath()) ("agentsessions-smoke-" + [guid]::NewGuid().ToString('N'))
+$script:TempDir = Join-Path ([System.IO.Path]::GetTempPath()) ("agent-session-grep-smoke-" + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $script:TempDir -Force | Out-Null
 $db = Join-Path $script:TempDir 'smoke.db'
 $fixture = Join-Path $script:TempDir 'fixture.jsonl'

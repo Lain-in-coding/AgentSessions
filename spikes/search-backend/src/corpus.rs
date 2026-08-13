@@ -55,7 +55,7 @@ const CODE_FILLER: &[&str] = &[
     "serde_json::from_str", "BLAKE3", "IndexWriter",
 ];
 const PATH_FILLER: &[&str] = &[
-    "src/db/schema.rs", "crates/agentsessions-storage/src/lib.rs",
+    "src/db/schema.rs", "crates/agent-session-grep-storage/src/lib.rs",
     "C:\\Users\\dev\\project\\main.rs", "/home/user/.codex/sessions/2026/07",
     "docs/architecture/rfc-0001.md", "src/adapters/claude.rs",
 ];

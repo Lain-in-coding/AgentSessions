@@ -11,7 +11,7 @@
 
 ## 背景
 
-AgentSessions 将 Windows x64、Linux x64、macOS x64/ARM64 作为 v1.0 正式平台候选；本 ADR 在 R0
+agent-session-grep 将 Windows x64、Linux x64、macOS x64/ARM64 作为 v1.0 正式平台候选；本 ADR 在 R0
 冻结准确 target triple、最低 OS/glibc 和链接策略。Selection Gate 硬门之一是
 "全部正式 target 干净构建"，因此平台集合必须先冻结。
 

@@ -3,11 +3,11 @@
 version = 4
 
 [[package]]
-name = "agentsessions-adapters-sqlite"
+name = "agent-session-grep-adapters-sqlite"
 version = "0.1.0"
 dependencies = [
- "agentsessions-domain",
- "agentsessions-ports",
+ "agent-session-grep-domain",
+ "agent-session-grep-ports",
  "blake3",
  "fs4",
  "rusqlite",
@@ -16,12 +16,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "agentsessions-application"
+name = "agent-session-grep-application"
 version = "0.1.0"
 dependencies = [
- "agentsessions-domain",
- "agentsessions-ports",
- "agentsessions-testkit",
+ "agent-session-grep-domain",
+ "agent-session-grep-ports",
+ "agent-session-grep-testkit",
  "blake3",
  "serde",
  "serde_json",
@@ -29,15 +29,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "agentsessions-cli"
+name = "agent-session-grep-cli"
 version = "0.1.0"
 dependencies = [
- "agentsessions-adapters-sqlite",
- "agentsessions-application",
- "agentsessions-domain",
- "agentsessions-ports",
- "agentsessions-provider-claude",
- "agentsessions-provider-codex",
+ "agent-session-grep-adapters-sqlite",
+ "agent-session-grep-application",
+ "agent-session-grep-domain",
+ "agent-session-grep-ports",
+ "agent-session-grep-provider-claude",
+ "agent-session-grep-provider-codex",
  "crossterm",
  "ratatui",
  "rusqlite",
@@ -46,7 +46,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "agentsessions-domain"
+name = "agent-session-grep-domain"
 version = "0.1.0"
 dependencies = [
  "blake3",
@@ -56,41 +56,41 @@ dependencies = [
 ]
 
 [[package]]
-name = "agentsessions-ports"
+name = "agent-session-grep-ports"
 version = "0.1.0"
 dependencies = [
- "agentsessions-domain",
+ "agent-session-grep-domain",
  "thiserror",
 ]
 
 [[package]]
-name = "agentsessions-provider-claude"
+name = "agent-session-grep-provider-claude"
 version = "0.1.0"
 dependencies = [
- "agentsessions-domain",
- "agentsessions-ports",
+ "agent-session-grep-domain",
+ "agent-session-grep-ports",
  "blake3",
  "serde",
  "serde_json",
 ]
 
 [[package]]
-name = "agentsessions-provider-codex"
+name = "agent-session-grep-provider-codex"
 version = "0.1.0"
 dependencies = [
- "agentsessions-domain",
- "agentsessions-ports",
+ "agent-session-grep-domain",
+ "agent-session-grep-ports",
  "blake3",
  "serde",
  "serde_json",
 ]
 
 [[package]]
-name = "agentsessions-testkit"
+name = "agent-session-grep-testkit"
 version = "0.1.0"
 dependencies = [
- "agentsessions-domain",
- "agentsessions-ports",
+ "agent-session-grep-domain",
+ "agent-session-grep-ports",
  "blake3",
 ]
 

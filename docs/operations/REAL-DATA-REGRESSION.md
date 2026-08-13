@@ -38,7 +38,7 @@ every documented gate is green.
 ## Prerequisites
 
 - A release binary. Build it with
-  `cargo build --locked --release -p agentsessions-cli`, or use an installed
+  `cargo build --locked --release -p agent-session-grep-cli`, or use an installed
   one (see `INSTALL-AND-UPGRADE.md`).
 - Python 3. No third-party packages.
 - One or more directories or files of `.jsonl` transcripts you are authorized
@@ -48,14 +48,14 @@ every documented gate is green.
 
 ```
 python scripts/evidence/real_data_regression.py \
-  --binary target/release/agentsessions \
+  --binary target/release/agent-session-grep \
   --sources C:/data/example-transcripts \
   --out evidence-output/real-data-regression.json
 ```
 
 | Flag | Meaning |
 |---|---|
-| `--binary <path>` | The `agentsessions` binary to exercise. Required. |
+| `--binary <path>` | The `agent-session-grep` binary to exercise. Required. |
 | `--sources <dir\|file>` | Transcript directory (searched recursively for `.jsonl`) or single file. Repeatable. |
 | `--out <path>` | Report destination. Defaults under `evidence-output/`. |
 | `--json` | Emit the JSON report to stdout in addition to the file. |
@@ -74,6 +74,16 @@ session entity, then `index rebuild` followed by a catalog walk and sampled
 `search` calls. All CLI calls go through `--robot` and are read from the
 response envelope, not from human-readable text. (`doctor` is not part of
 the harness; its runtime state report is a separate operator command.)
+
+`sync` runs in chunks. When a chunk fails with `source_changed` — the
+transcript was modified between its capture and the post-stage verification,
+typically by the live session still appending — the harness waits
+`SYNC_CHANGED_BACKOFF_S` (3 seconds) and retries the same chunk, up to
+`SYNC_CHANGED_RETRIES` (3) attempts. `sync` is idempotent and chunk-scoped,
+so a retried chunk commits nothing from the failed attempt. Other errors are
+not retried: a persistent `source_changed` or any other failure is reported
+as-is in the report and the run finishes with the invariants it could still
+evaluate.
 
 ## The six invariants
 
