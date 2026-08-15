@@ -246,6 +246,21 @@ impl ProviderCapabilityMatrix {
                     source_span: CapabilityLevel::Native,
                     incremental: CapabilityLevel::Unsupported,
                 },
+                ProviderCapability {
+                    provider_id: "cline".into(),
+                    variant_id: "cline/api-conversation-history-v1".into(),
+                    maturity: ProviderMaturity::Experimental,
+                    discover: CapabilityLevel::Unsupported,
+                    probe: CapabilityLevel::Native,
+                    parse: CapabilityLevel::Native,
+                    search: CapabilityLevel::Native,
+                    context: CapabilityLevel::Unsupported,
+                    resume: CapabilityLevel::Unsupported,
+                    handoff: CapabilityLevel::Unsupported,
+                    tool_activity: CapabilityLevel::Unsupported,
+                    source_span: CapabilityLevel::Derived,
+                    incremental: CapabilityLevel::Unsupported,
+                },
             ],
         }
     }
@@ -287,8 +302,17 @@ mod tests {
         for p in &m.providers {
             let target = ProviderMaturity::target_for(&p.provider_id);
             assert!(target.is_some(), "{} should have a target", p.provider_id);
-            // 当前 maturity 均为 experimental；目标分级严格更高。
-            assert_ne!(p.maturity, target.unwrap());
+            // Providers whose target IS experimental (cline, aider, zcode, cursor)
+            // may have target == current; all others should have target strictly
+            // higher than the current experimental maturity.
+            if target.unwrap() != ProviderMaturity::Experimental {
+                assert_ne!(
+                    p.maturity,
+                    target.unwrap(),
+                    "{} target should differ from current experimental",
+                    p.provider_id
+                );
+            }
         }
     }
 
