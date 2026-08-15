@@ -127,6 +127,21 @@ impl ProviderCapabilityMatrix {
         Self {
             providers: vec![
                 ProviderCapability {
+                    provider_id: "aider".into(),
+                    variant_id: "aider/chat-history-md-v1".into(),
+                    maturity: ProviderMaturity::Experimental,
+                    discover: CapabilityLevel::Unsupported,
+                    probe: CapabilityLevel::Native,
+                    parse: CapabilityLevel::Native,
+                    search: CapabilityLevel::Native,
+                    context: CapabilityLevel::Unsupported,
+                    resume: CapabilityLevel::Unsupported,
+                    handoff: CapabilityLevel::Unsupported,
+                    tool_activity: CapabilityLevel::Partial,
+                    source_span: CapabilityLevel::Derived,
+                    incremental: CapabilityLevel::Unsupported,
+                },
+                ProviderCapability {
                     provider_id: "claude-code".into(),
                     variant_id: "claude-code/jsonl-v1".into(),
                     maturity: ProviderMaturity::Experimental,
