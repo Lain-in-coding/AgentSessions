@@ -29,8 +29,10 @@ Before writing code in this crate:
 - [ ] Argument parsing is **hand-written**, no third-party CLI framework. Match
       the existing style in `main.rs` (`parse_db_flag`, `command_name`,
       `arg(rest, i, usage)`, `extract_flag` for value flags); do not introduce
-      clap/structopt. New value flags must also be added to `command_name`'s
-      skip list so error envelopes label the right command.
+      clap/structopt. Boolean flags use `take_bool_flag` (MCP uses `opt_bool`);
+      every new flag must be registered in every prefix scanner that skips
+      value-bearing flags (`command_name`, request-id/output-mode scans),
+      otherwise a value can hide a later `--robot`/`--output` flag.
 - [ ] Every new subcommand goes through `dispatch()` and returns
       `(&'static str command, Outcome, serde_json::Value, protocol::Page, Vec<String> warnings)`.
       Errors return `CliError`, never `panic!` / `unwrap` on user input.
@@ -77,8 +79,13 @@ Before writing code in this crate:
       `structuredContent.error.canonical_code`. `initialize`/`ping` bypass the
       initialize gate; supported protocol versions are pinned in
       `SUPPORTED_PROTOCOL_VERSIONS` (negotiation never lies). Tool set is
-      frozen: search_sessions / get_session_context / list_sessions /
-      list_providers / get_status / doctor.
+      frozen: search_sessions / get_session_context / get_message /
+      list_sessions / list_providers / get_status / doctor.
+- [ ] MCP legacy compatibility duplicates a successful payload in
+      `structuredContent` and `content[0].text`. Application/Robot byte estimates
+      cover one rendered payload, not the complete duplicated JSON-RPC frame;
+      do not claim a hard MCP frame-byte limit until the MCP boundary enforces
+      and tests that separate contract.
 - [ ] TUI (`tui` subcommand, `src/tui/`): all state transitions and rendering
       decisions live in the PURE `core.rs` (no ratatui/crossterm/store/App
       imports; unit-tested without a terminal); `mod.rs` is thin glue only.
@@ -159,6 +166,34 @@ Before proposing a commit for this crate:
   from stable conflict authority without weakening role/text/timestamp
   conflicts. This is code/process evidence only until the authorized aggregate
   real-data regression is rerun successfully; providers remain Experimental.
+- **Resume protocol (ADR-0009, recorded 2026-08-14).** `get-session-resume`
+  CLI command and `get_session_resume` MCP tool return ONLY the fixed nullable
+  fields: `session_id`, `provider_id`, `resume_available`,
+  `provider_session_id`, `original_working_directory`, `unavailable_reason`.
+  Never emit `command`, `resume_command`, `source_path`, or `transcript_path`
+  (asserted in `tests/mcp_e2e.rs` and `tests/e2e.rs`). Resume Metadata is
+  isolated in its own port struct and SQLite table; it never enters FTS text,
+  opaque session payload, diagnostics, progress frames, or error messages.
+  Multi-Session Sources fail closed. Canonical `session_id` (`ses_v1_*`) is the
+  catalog identity; the Provider-native ID is Resume Metadata only — the two
+  are not interchangeable and `ses_v1_*` cannot be reversed to the native ID.
+- **Scoped canonical Session identity (2026-08-14).** Native Session IDs are
+  namespaced by `SessionIdentityNamespace` (provider + installation
+  namespace) before hashing (`StableId::native_session_scoped`). The
+  composition-root `installation_namespace` derives the namespace from the
+  provider data-root prefix path (`.claude`/`.codex`) or, for unknown
+  providers, the source's parent directory. Known RFC-0001 §5.1 debt: this
+  derives from absolute path and lacks a persisted registry, `id_alias` table,
+  and path case normalization; relocation does not preserve Session identity.
+  The domain layer is correct; the gap is composition-root only.
+- **Human session table (2026-08-14).** Human search renders a frozen
+  five-column table: `日期 | Provider | 会话标题 | 工作目录 | Session ID`.
+  Provider and Session ID are never truncated; title uses tail ellipsis;
+  working directory uses middle collapse; missing renders `—`. 日期 is the
+  per-Session latest message timestamp truncated to `YYYY-MM-DD` (batched
+  `MAX(json_extract(catalog.payload,'$.timestamp'))`, no N+1); 会话标题 is the
+  highest-relevance hit `text` on the current page. Robot/MCP output is
+  unchanged (Human-mode only projection).
 
 ---
 

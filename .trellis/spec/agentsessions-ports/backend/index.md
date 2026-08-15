@@ -52,6 +52,15 @@ Depends only on `agentsessions-domain`. Never depends on any adapter crate,
 - `ProviderAdapter` — `probe(bytes) -> Probe` + `parse(bytes, sink)`. The
   probe/select contract lives here; the selection *policy* lives in the
   application core.
+- `SearchQuery<'a>` — literal query text plus normalized `SearchFilters`.
+  Providers are backend-independent enum values; time bounds use a normalized
+  `(unix_seconds, nanosecond)` instant. Adapters must apply filters before
+  storage `LIMIT`, not post-filter paginated hits.
+- `SearchHit` — ranked stable identity plus additive text/session/guidance
+  projection fields. `occurrences` is 1 on the default (non-grouped) path and
+  the per-session collapse count on the grouped path. Guidance is assembled by
+  Application; storage leaves `why_matched` and `suggested_next_commands`
+  empty.
 - `ContextGraphStore` — typed contextual reads:
   `load_session_graph(&SessionId)`, `message_contexts(&MessageId)`, and
   `context_stats()`. It returns Domain graphs, distinct-session candidates, and

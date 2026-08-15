@@ -50,6 +50,11 @@ are derived and must be fully rebuildable from `catalog` at any time.**
   authoritative locked handle, and maps contention to path-redacted WriterBusy.
 - `searchable_text(payload)` — extracts the searchable body from the canonical
   payload for FTS.
+- Filtered FTS search — uses one prepared query with `fts MATCH` plus provider
+  and normalized timestamp predicates before `LIMIT`; retains the pinned BM25
+  score/StableId order. Empty filters keep the legacy SQL path. SQLite FTS5
+  auxiliary functions and `MATCH` name the real virtual table (`fts`), not a
+  table alias.
 - `ContextGraphStore` reads — return typed Domain messages/documents/placements/
   edges, group reverse candidates by distinct Session, and expose aggregate
   placement/claim counts. They never return SQL rows or compatibility JSON.
@@ -131,6 +136,46 @@ instead of rejecting the batch. Which fields may differ is deliberately narrow:
   Message *identity* is shared across files; its *position* is not.
 - Treating `skipped > 0` as a complete replacement or retaining an old
   relation-complete marker after an incomplete re-scan.
+
+---
+
+## Resume Metadata claims (ADR-0009, schema v8)
+
+`source_session_resume_claims` holds source-scoped Resume Metadata written
+atomically with source replacement and cleared on source removal (tombstone).
+The canonical `ses_v1_*` is the catalog identity; the Provider-native ID and
+Original Working Directory are isolated Resume Metadata, never entering FTS
+text, opaque Session payload, diagnostics, progress, or errors.
+
+- **Pair association**: `original_working_directory` is returned only when
+  `pair_observed = 1` AND `original_working_directory_state = 'resolved'`.
+  A cwd seen without a co-observed Provider Session ID is suppressed even
+  when the ID itself is resolved. Implemented in `resume_metadata_from_claim`.
+- **Fail-closed conflicts**: when the same canonical Session has conflicting
+  claims across Sources, `resume_of` returns `resume_available = false` with
+  `unavailable_reason = "conflicting resume metadata claims"` and discloses
+  none of the conflicting values. It never picks by source path or order.
+- **No reverse derivation**: there is no path from `ses_v1_*` back to the
+  Provider-native ID. The native ID lives only in the claim row.
+- **Multi-Session Sources fail closed**: a Source declaring more than one
+  native Session is not resumable (ambiguous), though still searchable.
+- **Batched reads**: `resume_of` chunks via `BATCH_IN_CHUNK` (no N+1) and
+  short-circuits empty input with zero SQL statements. The `session_id` lookup
+  is backed by index `source_session_resume_claims_session`, not a full scan
+  (asserted by an EXPLAIN QUERY PLAN test).
+- **Latest activity**: `latest_activity_ymd_for_sessions` batches
+  `MAX(json_extract(catalog.payload, '$.timestamp'))` per canonical Session,
+  truncated to `YYYY-MM-DD`, for the Human table 日期 column. No port/DTO/schema
+  change; Robot/MCP output is unaffected (Human-mode only projection).
+
+### Known RFC-0001 §5.1 identity debt (follow-up, not blocking Resume)
+
+`installation_namespace` derives from absolute path and lacks: a persisted
+`installation_namespaces` registry, an `id_alias(old_id, new_id)` table with
+TTL, Windows path-case normalization, and resume claims keyed by
+`(namespace_registry_id, session_id)`. Relocation does not preserve Session
+identity. The domain layer (`StableId::native_session_scoped`,
+`SessionIdentityNamespace`) is correct; the gap is composition-root only.
 
 ---
 

@@ -23,7 +23,7 @@ agent-session-grep --db C:/data/example.db --robot search "index rebuild" --max-
 
 ```json
 {
-  "schema_version": "1.0",
+  "schema_version": "1.1",
   "frame_type": "response",
   "command": "search",
   "request_id": "cli-4242-1753500000000",
@@ -120,8 +120,10 @@ Run the same binary as a stdio MCP server (tools only, sequential, read-only):
 
 | tool | when to use |
 | --- | --- |
-| `search_sessions` | full-text query; params: `query` (required), `limit`, `cursor`, `max_items`, `max_bytes` |
+| `search_sessions` | full-text query; params: `query` (required), `limit`, `cursor`, `max_items`, `max_bytes`; hits carry `session_id`, `text`, and `resume_available` |
 | `get_session_context` | pull one session branch: `session_id` (required, `ses_v1_...`), `policy` (`mainline` or `full`), `max_messages`, `max_bytes` |
+| `get_message` | one message plus ±`around` neighbors inside its session: `message_id` (required), `session_id` (required when the message is shared), `around`, `max_items`, `max_bytes` |
+| `get_session_resume` | read-only Resume Metadata for one session: `session_id` (required, `ses_v1_...`) → `provider_id`, `provider_session_id`, `original_working_directory`, `resume_available`, `unavailable_reason`. Returns structured data only — never a shell command, and never a transcript/source path |
 | `list_sessions` | page catalog entities in stable id order (see caution below) |
 | `list_providers` | which source formats are supported (`claude-code`, `codex`) |
 | `get_status` | catalog count and active generation |
@@ -131,6 +133,19 @@ Run the same binary as a stdio MCP server (tools only, sequential, read-only):
 - Business failures (bad cursor, not found) come back as `isError: true` results with `structuredContent.error.canonical_code`; malformed or invalid params are JSON-RPC errors (`-32602`).
 - Cursors are stateless signed tokens: a `page.next_cursor` from one `search_sessions` call works in a later call — even across server restarts — as long as the index generation is unchanged and the TTL has not passed.
 - v0 executes requests sequentially; `notifications/cancelled` is accepted but is a best-effort no-op.
+
+## Session discovery and resume (read-only)
+
+To surface an old conversation as a resumable session:
+
+1. `search_sessions` (or `list_sessions`) to find the session; each hit's `resume_available` tells you whether Resume Metadata exists.
+2. `get_session_resume` on the hit's `session_id` to obtain `provider_id`, `provider_session_id`, and `original_working_directory`.
+3. Render the results to the user as one horizontal table with columns `日期 | Provider | 会话标题 | 工作目录 | Session ID`:
+   - date as local `YYYY-MM-DD`; `Provider` and `Session ID` are always complete, never truncated;
+   - title may truncate at the end and the working directory may collapse in the middle (`C:/…/agent-session-grep`);
+   - missing values render as `—`;
+   - all matched sessions are shown — pagination transports bounded pages, it never hides rows.
+4. Do NOT construct or execute a resume shell command, change directory, open a terminal, or launch the provider. Resume Metadata is data only; the user decides how to continue the session.
 
 ## Cautions
 

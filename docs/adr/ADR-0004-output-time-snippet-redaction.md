@@ -22,4 +22,6 @@ review 曾复现 snippet 直接打印 API key 值，违反 THREAT-MODEL §5 草�
 
 - THREAT-MODEL §5 隐私承诺已同步修订为"默认搜索输出有界正文片段（human 模式，受预算约束）"，原"不回显 value"承诺撤回；§6.1 未决问题已裁定关闭；
 - snippet 仍必须计入响应预算（绕过 `max_snippet_chars`/`max_response_bytes` 是独立的契约缺陷，不在本决策豁免范围）；
-- 若未来增加任何网络能力（遥测、分享、云端索引），本决策必须重新评审并默认恢复脱敏。
+- ADR-0009 现已划出跨边界输出规则：本文仅约束 Human CLI/TUI 的本地人工
+  search snippet；Web、Handoff、MCP、Robot、HTTP 等机器/跨边界输出不适用
+  本文例外，统一按 ADR-0009 默认脱敏。

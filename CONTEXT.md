@@ -1,10 +1,12 @@
 # agent-session-grep Context
 
-Local-first search engine over AI coding-agent conversation history (Claude
-Code, Codex, and future providers). Normalizes heterogeneous JSONL transcripts
-into a canonical domain model with stable identity and nonlinear message
-graphs, then serves full-text retrieval through CLI, Robot, MCP, and TUI
-surfaces sharing one application ADT.
+Local-first, CLI-first search engine over AI coding-agent session history across
+16 planned providers (with evidence-based maturity levels). It normalizes
+heterogeneous provider transcripts into a canonical domain model with stable
+identity and nonlinear message graphs, then serves retrieval, resume, and
+handoff through CLI, Robot, MCP, TUI, and loopback Web UI surfaces sharing one
+Application ADT. Native GUI is not a first-release surface, but remains a
+future extension boundary.
 
 ## Language
 
@@ -224,3 +226,79 @@ _Avoid_: support level, compatibility
   query unit); dual-column is a later enhancement (ADR-0007).
 - **Dependencies (Q3)**: A first (index-layer + contract), B depends on A's
   search-hit schema, C fully independent and parallel.
+
+## Decision log (2026-08-15 — open-source product roadmap)
+
+> Full decision record: `.trellis/tasks/08-15-open-source-product-roadmap/prd.md`
+> and `docs/product/OPEN-SOURCE-ROADMAP.md`. Owner confirmed Q1–Q55 over a
+> grill-with-docs session; key locks below.
+
+- **Identity (naming)**: product name is `agent-session-grep`, CLI alias `asg`.
+  "Agent Session Group" was a typo and is retired.
+- **Positioning**: unified core, CLI-first with multiple entries; first user is the
+  personal heavy coding-agent user, second is agent/MCP consumers. Team sync, cloud,
+  and knowledge graphs are out of the first public release. Native GUI is not a
+  first-release surface but remains a future extension boundary.
+- **Release shape**: one-shot complete public release; repo stays PRIVATE until
+  the release gate is green; publishing is the owner's final call. Retention
+  (7-day ≥2 successful retrievals/handoffs) and technical reputation are the
+  floor metrics; stars are an outcome, not a goal.
+- **Provider wave (frozen list, 16)**: Claude Code, Codex CLI, DeepSeek
+  Harness, Grok Build, Antigravity, OpenCode, Pi, Aider, Cline, Cursor,
+  OpenClaw, Hermes, Kimi Code, ZCode, Qoder, Tencent CodeBuddy. Maturity is
+  graded (certified / GA / beta / experimental / unsupported) and promoted by
+  evidence only; Claude Code + Codex target `certified` (cross-platform Gate D
+  required); DeepSeek Harness and ZCode currently lack transcript evidence and
+  must be evidenced before launch or the release is delayed — no guessing
+  formats. Discovery is explicit (`sync --discover`), canonical-root-scoped,
+  and reports complete/incomplete/unsupported layouts.
+- **Adapter ecosystem**: official 16 adapters are built-in Rust; community
+  adapters use a versioned external-process Provider Adapter Protocol
+  (manifest: provider_id, variant, roots, capabilities, maturity, license,
+  network permission; read-only, no network by default; invalid canonical
+  events are quarantined). Provider discovery/read/parse failures are isolated
+  to provider diagnostics, preserve successful increments from other providers,
+  and obey fail-without-delete semantics; one provider must not abort the whole
+  sync or create misleading tombstones.
+- **Retrieval**: semantic search is a launch hard-gate — official default
+  local embedding model selected by CJK/English/code benchmark and locked via
+  manifest (id/hash/dimension/license); explicit first-use download; external
+  embedding APIs are opt-in only. Recall granularity is message/placement →
+  session aggregation → mainline expansion. Lexical is always available;
+  model failure degrades to `retrieval_mode=lexical_fallback` loudly, never
+  silently.
+- **Resume/Handoff**: resume restores the original provider/session/cwd/
+  permission mode, dry-run preview by default with opt-in auto-execution and a
+  forced first preview; handoff emits a versioned `handoff-pack/v1` (JSON
+  authoritative, Markdown projection, evidence vs inference separated,
+  budget/truncation/redaction recorded, reproducible) and is preview-only —
+  never silent injection.
+- **Privacy (ADR-0009)**: zero telemetry, zero upload, offline by default
+  (`--offline`, CI-enforced); catalog keeps原文; cross-boundary outputs
+  (Web UI, handoff pack, MCP, Robot, HTTP API) are redacted by default with
+  explicit audited reveal, while local CLI/TUI human output stays unredacted
+  per ADR-0004.
+- **Hooks**: Claude Code hooks (SessionStart/UserPromptSubmit) ship with the
+  product but are OFF by default (owner revised from recommendation); when
+  enabled they obey max_tokens, provider/time filters, decay, and one-switch
+  disable. The first release only defines pull-style hooks; any future `push
+  API` requires a separately versioned contract, permission model, audit, and
+  offline/redaction acceptance.
+- **Web UI**: local Web UI with core parity at launch; `asg serve` loopback
+  HTTP is the single backend, Web UI is a protocol client over the same
+  Application ADT/Robot contract; loopback + random token + Host/Origin check
+  by default, explicit audited LAN mode; dangerous actions preview by default.
+- **Platforms & license**: Windows + macOS + Linux all GA at launch;
+  Apache-2.0 with a Provider Adapter Protocol contribution policy.
+- **Proof**: public reproducible benchmark (discovery coverage, parse loss,
+  lexical/semantic/hybrid recall, p50/p95, index size, resume/handoff success)
+  plus an honest comparison table vs the 13 currently verified external projects;
+  the 15-project claim may return only after two independent external baselines
+  are added — no un-reproducible claims.
+- **Execution**: parent task `08-15-open-source-product-roadmap` with 10
+  children (unified-release-contract, sixteen-provider-evidence-wave,
+  semantic-hybrid-local-retrieval, evidence-handoff-pack,
+  resume-metadata-execution, structured-activity-context-facets,
+  loopback-web-ui-parity, offline-privacy-hooks,
+  benchmark-install-open-source-gate, final-integration-release-rehearsal).
+  08-13/08-14 task trees are Phase 0 and are absorbed, not duplicated.

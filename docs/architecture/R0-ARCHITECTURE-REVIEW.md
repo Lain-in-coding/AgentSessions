@@ -74,7 +74,10 @@
 
 ### Threat Model
 
-- 脱敏时机已由 owner 裁定（2026-08-13，ADR-0004）：输出期与索引期均不做脱敏；search 输出有界正文片段（human 模式，受预算约束），本地显示密钥为可接受风险。若未来引入任何网络能力须重新评审并默认恢复脱敏。
+- 脱敏边界已由 ADR-0004/ADR-0009 分层裁定：Human CLI/TUI search 输出保留
+  有界正文片段；Web、Handoff、MCP、Robot、HTTP 等机器/跨边界输出统一按
+  ADR-0009 默认脱敏，显式 reveal 需认证和审计，不得把“未来引入网络”作为
+  脱敏启用条件。
 - 提供显式隐私模式，隐藏 project/path 并收紧 snippets。
 - v1.0 data-root 拒绝网络文件系统；Source root 可只读访问并提供降级诊断。
 

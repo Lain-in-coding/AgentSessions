@@ -37,7 +37,7 @@
 | Tampering（混合时点） | Provider 在 parse 期间改文件 | ReadOnlySourceSnapshot + 提交前 fingerprint 复核 | source-snapshot spike：追加/截断/等长替换均检出 |
 | DoS（资源耗尽） | 超大/恶意 JSONL 撑爆内存 | 流式解析 + bounded channel + 单行/字段/深度/数量上限 | — |
 | Elevation（注入） | transcript 含"忽略指令" | MCP/Skill 标记不可信、无执行能力；响应预算 | — |
-| Info Disclosure（隐私） | 日志/doctor 泄漏正文或密钥 | 默认隐藏绝对路径；正文永不入日志；doctor 输出可安全分享 | — |
+| Info Disclosure（隐私） | 日志/doctor/跨边界输出泄漏正文、密钥或绝对路径 | Human CLI/TUI 按 ADR-0004 保持本地人工输出边界；Robot/MCP/Web/HTTP/Handoff、warning/error、metadata、config path 统一经 ADR-0009 boundary-aware redactor；默认不写入 secret，reveal 需认证、审计且不持久化原文 | — |
 | Tampering（SQL 注入） | 恶意 query | 参数化 SQL；禁用 SQLite extension loading | — |
 | DoS（终端注入） | ANSI/OSC 控制字符 | 移除或转义 ANSI/OSC/控制字符 | — |
 | Tampering（并发损坏） | 两进程同时写派生状态 | data-root writer lease（OS 独占句柄）；CAS activation | data-root-locking spike：独占+CAS+stale 自愈通过 |
@@ -65,9 +65,21 @@
 - 默认搜索输出为有界正文片段（human 模式，受 Response Budget 约束；见 ADR-0004）。因工具零联网、零上传，本地终端显示密钥属于 owner 裁定的可接受风险；
 - 所有对外分享物（doctor、日志、bug report 模板）默认脱敏。
 
+- **输出边界矩阵**：Human CLI/TUI 的 search/list/get/show/context/resume preview
+  可按 ADR-0004 显示原文；Robot/MCP/Web/HTTP/Handoff 的 payload、warning/error、
+  metadata、tool activity、resume preview、config paths 全部默认经 ADR-0009
+  redaction projection。显式 reveal 仅对已认证本地请求生效，默认单响应，带
+  `audit_id`/`[revealed]`，审计事件和 cache/catalog 不得含 secret 原文。
+- **secret fixture gate**：跨边界 fixture 必须递归检查 JSON/JSONL、MCP
+  `content` 与 `structuredContent`、Markdown、stderr/stdout、copy/export 和
+  重渲染结果；扫描不完整时 fail-closed，不得以 bounded 长度替代脱敏。
+
 ## 6. 未决问题（R0 需回答）
 
-1. ~~密钥检测/脱敏在索引期做还是仅在输出期做？（agent-sessions 在索引期脱敏可借鉴）~~ **已裁定（2026-08-13，ADR-0004）**：两者都不做；search 输出有界正文片段，本地显示为可接受风险。若未来引入任何网络能力，须重新评审并默认恢复脱敏。
+> ADR-0009 已定义跨边界默认脱敏规则；本节未决项不得推翻该边界。ADR-0004
+> 的旧措辞仅适用于 local-human snippet，不适用于 Web/MCP/Robot/HTTP/Handoff。
+
+1. ~~密钥检测/脱敏在索引期做还是仅在输出期做？（agent-sessions 在索引期脱敏可借鉴）~~ **已裁定（2026-08-13，ADR-0004；跨边界规则由 ADR-0009 补充）**：Catalog 不在索引期改写原文；Human CLI/TUI search 输出按 ADR-0004 保持有界正文片段。Robot/MCP/Web/HTTP/Handoff 始终按 ADR-0009 默认脱敏，不以“未来有网络”作为启用条件。
 2. 是否需要一个"隐私模式"配置项，进一步隐藏 project path 片段？
 3. 网络文件系统作为 data-root 的拒绝/降级策略（data-root-locking spike 已确认 lease 不支持 NFS）。
 

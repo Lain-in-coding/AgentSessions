@@ -42,18 +42,29 @@ Everything stays inside the existing envelope/budget/cursor contracts.
   summaries; sessions=session-level summary) with automatic fallback when a
   level is empty; response includes a `hint` pointing to the next useful
   call. Summaries are assembled structurally (first user message, message
-  count, file list) — no LLM, no regex heuristics (avoids claude-historian's
-  fake-positive trap).
+  count, file list) — no LLM, no regex heuristics (avoids
+  claude-historian's fake-positive trap).
+
+### R6 Search match guidance (ctx precedent)
+- R6.1 Machine and MCP search hits gain deterministic `why_matched` and bounded
+  `suggested_next_commands`; human output and ranking remain unchanged.
+- R6.2 Guidance is derived only from the literal query and identifiers already
+  present on the hit. It never invokes an LLM, exposes FTS syntax, or invents
+  a session/message identifier.
+- R6.3 Guidance bytes count toward `max_response_bytes`; generated message
+  calls include `session_id` whenever available so shared message identities
+  are not resolved by guessing.
 
 ## Acceptance Criteria
 
-- [ ] provider/time filters return correct subsets (unit + e2e).
-- [ ] `list_sessions` returns sessions only.
-- [ ] system noise excluded by default, opt-in restores.
-- [ ] group_by_session collapses with occurrences; default path unchanged.
-- [ ] get_message + around return the correct window within budget.
-- [ ] level summaries fall back and carry hints.
-- [ ] Gates: fmt / clippy -D warnings / test --workspace / build --release.
+- [x] provider/time filters return correct subsets (unit + e2e).
+- [x] `list_sessions` returns sessions only.
+- [x] system noise excluded by default, opt-in restores.
+- [x] group_by_session collapses with occurrences; default path unchanged.
+- [x] get_message + around return the correct window within budget.
+- [x] level summaries fall back and carry hints.
+- [x] search hits explain literal matches and suggest valid bounded next calls.
+- [x] Gates: fmt / clippy -D warnings / test --workspace / build --release.
 - [ ] Gate D re-run green.
 
 ## Constraints

@@ -238,9 +238,10 @@ impl From<PortError> for ProtocolError {
         };
         // R4.3：Backend 携带 rusqlite/FTS parser 等后端原始细节，绝不进入用户可见
         // message（NUL 查询曾以 "backend failure: unterminated string" 漏出）。
-        // 其余变体已验证不携带路径/ID（静态文案或数值），保持原样。
+        // SourceIo 也可能包含绝对 transcript/source path，统一使用固定消息。
         let message = match &e {
             PortError::Backend(_) => "数据库内部错误".to_string(),
+            PortError::SourceIo(_) => "源文件无法读取".to_string(),
             _ => e.to_string(),
         };
         ProtocolError::new(code, message)
@@ -537,6 +538,16 @@ mod tests {
 
         let e: ProtocolError = PortError::SchemaIncompatible("newer schema".into()).into();
         assert_eq!(e.code, CanonicalCode::SchemaIncompatible);
+    }
+
+    #[test]
+    fn source_io_error_masks_source_path_in_message() {
+        let e: ProtocolError =
+            PortError::SourceIo("cannot open C:/Users/secret/transcript.jsonl".into()).into();
+        assert_eq!(e.code, CanonicalCode::SourceIo);
+        assert_eq!(e.message, "源文件无法读取");
+        assert!(!e.message.contains("secret"));
+        assert!(!e.message.contains("transcript.jsonl"));
     }
 
     #[test]
