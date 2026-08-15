@@ -9,7 +9,7 @@ use agent_session_grep_ports::{
     CanonicalEventSink, Confidence, MessageEvent, ParseReport, ProbeResult, ProviderAdapter,
     ProviderError,
 };
-use serde::Deserialize;
+use serde::{Deserialize, de::IgnoredAny};
 
 /// 本 adapter 认证的 variant 标识。
 const VARIANT_ID: &str = "claude-code/jsonl-v1";
@@ -23,6 +23,143 @@ const SAMPLE_BROKEN_TOLERANCE: usize = 3;
 const BAD_LINE_LIST_LIMIT: usize = 5;
 /// 多会话诊断中列出的 session id 条数上限（bounded detail）。
 const SESSION_ID_LIST_LIMIT: usize = 3;
+
+// Adapted from claude-historian-mcp/src/parser.ts:74-92 (MIT): inspect cheap
+// JSONL markers before invoking serde. Keep this predicate conservative: an
+// unknown or ambiguous line is parsed rather than being silently discarded.
+#[derive(Default)]
+struct TopLevelMarkers<'a> {
+    kind: Option<&'a [u8]>,
+    has_message: bool,
+    has_session_id: bool,
+    ambiguous: bool,
+}
+
+fn json_string_end(line: &[u8], quote: usize) -> Option<(usize, bool)> {
+    let mut cursor = quote + 1;
+    let mut escaped = false;
+    while cursor < line.len() {
+        match line[cursor] {
+            b'"' => return Some((cursor, escaped)),
+            b'\\' => {
+                escaped = true;
+                cursor = cursor.checked_add(2)?;
+            }
+            _ => cursor += 1,
+        }
+    }
+    None
+}
+
+fn top_level_markers(line: &[u8]) -> TopLevelMarkers<'_> {
+    let mut markers = TopLevelMarkers::default();
+    let mut cursor = 0usize;
+    while line.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+        cursor += 1;
+    }
+    if line.get(cursor) != Some(&b'{') {
+        markers.ambiguous = true;
+        return markers;
+    }
+
+    let mut depth = 1usize;
+    cursor += 1;
+    while cursor < line.len() && depth > 0 {
+        match line[cursor] {
+            b'{' | b'[' => {
+                depth += 1;
+                cursor += 1;
+            }
+            b'}' | b']' => {
+                depth = depth.saturating_sub(1);
+                cursor += 1;
+            }
+            b'"' => {
+                let Some((key_end, escaped)) = json_string_end(line, cursor) else {
+                    markers.ambiguous = true;
+                    break;
+                };
+                if depth != 1 {
+                    cursor = key_end + 1;
+                    continue;
+                }
+                if escaped {
+                    markers.ambiguous = true;
+                    cursor = key_end + 1;
+                    continue;
+                }
+
+                let key = &line[cursor + 1..key_end];
+                let mut value_cursor = key_end + 1;
+                while line.get(value_cursor).is_some_and(u8::is_ascii_whitespace) {
+                    value_cursor += 1;
+                }
+                if line.get(value_cursor) != Some(&b':') {
+                    cursor = key_end + 1;
+                    continue;
+                }
+                value_cursor += 1;
+                while line.get(value_cursor).is_some_and(u8::is_ascii_whitespace) {
+                    value_cursor += 1;
+                }
+
+                match key {
+                    b"message" => markers.has_message = true,
+                    b"sessionId" => markers.has_session_id = true,
+                    b"type" => {
+                        if markers.kind.is_some() {
+                            markers.kind = None;
+                            markers.ambiguous = true;
+                        } else if line.get(value_cursor) == Some(&b'"') {
+                            let Some((value_end, value_escaped)) =
+                                json_string_end(line, value_cursor)
+                            else {
+                                markers.ambiguous = true;
+                                break;
+                            };
+                            if value_escaped {
+                                markers.ambiguous = true;
+                            } else {
+                                markers.kind = Some(&line[value_cursor + 1..value_end]);
+                            }
+                            cursor = value_end + 1;
+                            continue;
+                        } else {
+                            markers.ambiguous = true;
+                        }
+                    }
+                    _ => {}
+                }
+                cursor = key_end + 1;
+            }
+            _ => cursor += 1,
+        }
+    }
+    markers
+}
+
+fn claude_line_may_need_deserialize(line: &[u8]) -> bool {
+    let markers = top_level_markers(line);
+    if markers.ambiguous || markers.has_message || markers.has_session_id {
+        return true;
+    }
+
+    const IGNORED_TYPES: [&[u8]; 10] = [
+        b"summary",
+        b"custom-title",
+        b"mode",
+        b"permission-mode",
+        b"file-history-snapshot",
+        b"file-history-delta",
+        b"attachment",
+        b"last-prompt",
+        b"queue-operation",
+        b"agent-name",
+    ];
+    !markers
+        .kind
+        .is_some_and(|kind| IGNORED_TYPES.contains(&kind))
+}
 
 /// Claude Code JSONL adapter。无状态——所有解析所需信息都来自输入字节。
 ///
@@ -420,6 +557,15 @@ impl ProviderAdapter for ClaudeCodeAdapter {
             };
             let end = start + line.len() as u64;
             if parse_line.trim().is_empty() {
+                continue;
+            }
+            // Prefilter (adapted from claude-historian-mcp, MIT): skip
+            // deserialization for records whose type marker is a known
+            // non-conversational, non-session-bearing envelope. Conservative:
+            // unknown/ambiguous records fall through to serde.
+            if !claude_line_may_need_deserialize(parse_line.as_bytes())
+                && serde_json::from_str::<IgnoredAny>(parse_line).is_ok()
+            {
                 continue;
             }
             let rec: RawLine = match serde_json::from_str(parse_line) {
@@ -1085,5 +1231,142 @@ mod tests {
             .unwrap();
         // provider 未提供 sessionId → None，显式缺失不臆造。
         assert_eq!(report.session_native_id, None);
+    }
+
+    #[test]
+    fn prefilter_skips_non_conversational_lines_without_counting_them() {
+        // Known non-conversational records should be skipped by the prefilter
+        // before serde is invoked, so they do not enter skipped/diagnostics.
+        let noise = r#"{"type":"summary","summary":"noise"}"#;
+        assert!(!claude_line_may_need_deserialize(noise.as_bytes()));
+        let mut input = String::new();
+        for _ in 0..10_000 {
+            input.push_str(noise);
+            input.push('\n');
+        }
+        // Append one conversational record so the file is non-empty.
+        input.push_str(
+            r#"{"type":"user","uuid":"u-1","sessionId":"sess-prefilter","message":{"role":"user","content":"kept"}}"#,
+        );
+
+        let mut sink = CollectingSink::default();
+        let report = ClaudeCodeAdapter::new()
+            .parse(input.as_bytes(), &mut sink)
+            .expect("parse synthetic transcript");
+        assert_eq!(report.committed, 1);
+        assert_eq!(report.skipped, 0);
+        assert_eq!(sink.messages.len(), 1);
+        assert_eq!(sink.messages[0].text, "kept");
+    }
+
+    #[test]
+    fn prefilter_preserves_unknown_type_records_for_future_fields() {
+        // Unknown legal records retain the original behavior: serde accepts
+        // them, no message is emitted, and they are not recoverable skips.
+        let input = concat!(
+            r#"{"type":"unknown-future-type","uuid":"x","future":{"type":"summary"}}"#,
+            "\n",
+            r#"{"type":"user","uuid":"u-1","sessionId":"s","message":{"role":"user","content":"ok"}}"#,
+        );
+        assert!(claude_line_may_need_deserialize(
+            input.lines().next().expect("unknown row").as_bytes()
+        ));
+        let mut sink = CollectingSink::default();
+        let report = ClaudeCodeAdapter::new()
+            .parse(input.as_bytes(), &mut sink)
+            .expect("parse synthetic transcript");
+        assert_eq!(report.committed, 1);
+        assert_eq!(report.skipped, 0);
+        assert!(report.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn prefilter_uses_only_top_level_type_and_preserves_broken_rows() {
+        let nested = r#"{"type":"future-record","payload":{"type":"summary"}}"#;
+        assert!(claude_line_may_need_deserialize(nested.as_bytes()));
+
+        let broken = r#"{"type":"summary","summary":"truncated""#;
+        assert!(!claude_line_may_need_deserialize(broken.as_bytes()));
+        let mut sink = CollectingSink::default();
+        let report = ClaudeCodeAdapter::new()
+            .parse(broken.as_bytes(), &mut sink)
+            .expect("parse broken transcript recoverably");
+        assert_eq!(report.committed, 0);
+        assert_eq!(report.skipped, 1);
+        assert_eq!(report.diagnostics.len(), 1);
+        assert!(report.diagnostics[0].contains("invalid JSON"));
+    }
+
+    #[test]
+    fn prefilter_preserves_session_metadata_in_non_conversational_types() {
+        // file-history-snapshot lacks sessionId but is a known ignored type;
+        // last-prompt carries sessionId and must still be parsed for identity.
+        let input = concat!(
+            r#"{"type":"file-history-snapshot","snapshot":"noise"}"#,
+            "\n",
+            r#"{"type":"last-prompt","sessionId":"sess-meta","prompt":"p"}"#,
+            "\n",
+            r#"{"type":"user","uuid":"u-1","sessionId":"sess-meta","message":{"role":"user","content":"ok"}}"#,
+        );
+        let mut sink = CollectingSink::default();
+        let report = ClaudeCodeAdapter::new()
+            .parse(input.as_bytes(), &mut sink)
+            .expect("parse synthetic transcript");
+        assert_eq!(report.session_native_id.as_deref(), Some("sess-meta"));
+        assert_eq!(report.committed, 1);
+        assert_eq!(report.skipped, 0);
+    }
+
+    #[test]
+    #[ignore = "raw timing microbenchmark; run explicitly in release mode"]
+    fn prefilter_raw_timing_10k_ignored_rows() {
+        const ROWS: usize = 10_000;
+        const SAMPLES: usize = 5;
+        let noise = r#"{"type":"summary","summary":"noise"}"#;
+
+        for sample in 1..=SAMPLES {
+            let full_start = std::time::Instant::now();
+            let mut full_count = 0usize;
+            for _ in 0..ROWS {
+                if std::hint::black_box(serde_json::from_str::<RawLine>(std::hint::black_box(
+                    noise,
+                )))
+                .is_ok()
+                {
+                    full_count += 1;
+                }
+            }
+            let full_raw_line = full_start.elapsed();
+
+            let marker_start = std::time::Instant::now();
+            let mut candidate_count = 0usize;
+            for _ in 0..ROWS {
+                candidate_count += usize::from(claude_line_may_need_deserialize(
+                    std::hint::black_box(noise.as_bytes()),
+                ));
+            }
+            let marker_scan = marker_start.elapsed();
+
+            let validated_start = std::time::Instant::now();
+            let mut valid_count = 0usize;
+            for _ in 0..ROWS {
+                let line = std::hint::black_box(noise);
+                let may_need = claude_line_may_need_deserialize(line.as_bytes());
+                if may_need || serde_json::from_str::<IgnoredAny>(line).is_ok() {
+                    valid_count += 1;
+                }
+            }
+            let marker_plus_syntax = validated_start.elapsed();
+
+            assert_eq!(full_count, ROWS);
+            assert_eq!(candidate_count, 0);
+            assert_eq!(valid_count, ROWS);
+            eprintln!(
+                "provider=claude-code sample={sample} rows={ROWS} full_raw_line_us={} marker_scan_us={} marker_plus_syntax_us={}",
+                full_raw_line.as_micros(),
+                marker_scan.as_micros(),
+                marker_plus_syntax.as_micros()
+            );
+        }
     }
 }

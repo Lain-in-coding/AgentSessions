@@ -22,7 +22,7 @@ use agent_session_grep_ports::{
     CanonicalEventSink, Confidence, MessageEvent, ParseReport, ProbeResult, ProviderAdapter,
     ProviderError,
 };
-use serde::Deserialize;
+use serde::{Deserialize, de::IgnoredAny};
 
 /// 本 adapter 认证的 variant 标识。
 const VARIANT_ID: &str = "codex/rollout-jsonl-v1";
@@ -36,6 +36,124 @@ const SAMPLE_BROKEN_TOLERANCE: usize = 3;
 const BAD_LINE_LIST_LIMIT: usize = 5;
 /// 多会话诊断中列出的 session id 条数上限（bounded detail）。
 const SESSION_ID_LIST_LIMIT: usize = 3;
+
+// Adapted from claude-historian-mcp/src/parser.ts:74-92 (MIT): inspect cheap
+// JSONL markers before invoking serde. Unknown or ambiguous lines remain parse
+// candidates so the adapter keeps its existing recoverable-error behavior.
+#[derive(Default)]
+struct TopLevelMarkers<'a> {
+    kind: Option<&'a [u8]>,
+    ambiguous: bool,
+}
+
+fn json_string_end(line: &[u8], quote: usize) -> Option<(usize, bool)> {
+    let mut cursor = quote + 1;
+    let mut escaped = false;
+    while cursor < line.len() {
+        match line[cursor] {
+            b'"' => return Some((cursor, escaped)),
+            b'\\' => {
+                escaped = true;
+                cursor = cursor.checked_add(2)?;
+            }
+            _ => cursor += 1,
+        }
+    }
+    None
+}
+
+fn top_level_markers(line: &[u8]) -> TopLevelMarkers<'_> {
+    let mut markers = TopLevelMarkers::default();
+    let mut cursor = 0usize;
+    while line.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+        cursor += 1;
+    }
+    if line.get(cursor) != Some(&b'{') {
+        markers.ambiguous = true;
+        return markers;
+    }
+
+    let mut depth = 1usize;
+    cursor += 1;
+    while cursor < line.len() && depth > 0 {
+        match line[cursor] {
+            b'{' | b'[' => {
+                depth += 1;
+                cursor += 1;
+            }
+            b'}' | b']' => {
+                depth = depth.saturating_sub(1);
+                cursor += 1;
+            }
+            b'"' => {
+                let Some((key_end, escaped)) = json_string_end(line, cursor) else {
+                    markers.ambiguous = true;
+                    break;
+                };
+                if depth != 1 {
+                    cursor = key_end + 1;
+                    continue;
+                }
+                if escaped {
+                    markers.ambiguous = true;
+                    cursor = key_end + 1;
+                    continue;
+                }
+
+                let key = &line[cursor + 1..key_end];
+                let mut value_cursor = key_end + 1;
+                while line.get(value_cursor).is_some_and(u8::is_ascii_whitespace) {
+                    value_cursor += 1;
+                }
+                if line.get(value_cursor) != Some(&b':') {
+                    cursor = key_end + 1;
+                    continue;
+                }
+                value_cursor += 1;
+                while line.get(value_cursor).is_some_and(u8::is_ascii_whitespace) {
+                    value_cursor += 1;
+                }
+
+                if key == b"type" {
+                    if markers.kind.is_some() {
+                        markers.kind = None;
+                        markers.ambiguous = true;
+                    } else if line.get(value_cursor) == Some(&b'"') {
+                        let Some((value_end, value_escaped)) = json_string_end(line, value_cursor)
+                        else {
+                            markers.ambiguous = true;
+                            break;
+                        };
+                        if value_escaped {
+                            markers.ambiguous = true;
+                        } else {
+                            markers.kind = Some(&line[value_cursor + 1..value_end]);
+                        }
+                        cursor = value_end + 1;
+                        continue;
+                    } else {
+                        markers.ambiguous = true;
+                    }
+                }
+                cursor = key_end + 1;
+            }
+            _ => cursor += 1,
+        }
+    }
+    markers
+}
+
+fn codex_line_may_need_deserialize(line: &[u8]) -> bool {
+    let markers = top_level_markers(line);
+    if markers.ambiguous {
+        return true;
+    }
+
+    const IGNORED_TYPES: [&[u8]; 4] = [b"event_msg", b"turn_context", b"world_state", b"compacted"];
+    !markers
+        .kind
+        .is_some_and(|kind| IGNORED_TYPES.contains(&kind))
+}
 
 /// Codex rollout JSONL adapter。无状态——所有解析所需信息都来自输入字节。
 ///
@@ -336,6 +454,15 @@ impl ProviderAdapter for CodexAdapter {
             };
             let end = start + line.len() as u64;
             if parse_line.trim().is_empty() {
+                continue;
+            }
+            // Prefilter (adapted from claude-historian-mcp, MIT): skip
+            // deserialization for records whose type marker is a known
+            // non-conversational, non-session-bearing envelope. Conservative:
+            // unknown/ambiguous records fall through to serde.
+            if !codex_line_may_need_deserialize(parse_line.as_bytes())
+                && serde_json::from_str::<IgnoredAny>(parse_line).is_ok()
+            {
                 continue;
             }
             let rec: RawLine = match serde_json::from_str(parse_line) {
@@ -865,5 +992,138 @@ mod tests {
             .unwrap();
         // 无 session_meta → None，显式缺失不臆造。
         assert_eq!(report.session_native_id, None);
+    }
+
+    #[test]
+    fn prefilter_skips_non_conversational_envelope_lines_without_counting_them() {
+        // Known non-conversational envelopes should be skipped by the prefilter
+        // before serde is invoked, so they do not enter skipped/diagnostics.
+        let noise = r#"{"timestamp":"2026-07-19T23:40:00.000Z","type":"event_msg","payload":{"type":"token_count","count":1}}"#;
+        assert!(!codex_line_may_need_deserialize(noise.as_bytes()));
+        let mut input = String::new();
+        for _ in 0..10_000 {
+            input.push_str(noise);
+            input.push('\n');
+        }
+        // Append one authoritative message so the file is non-empty.
+        input.push_str(
+            r#"{"timestamp":"2026-07-19T23:41:00.000Z","type":"response_item","payload":{"type":"message","id":"msg-kept","role":"user","content":[{"type":"input_text","text":"kept"}]}}"#,
+        );
+
+        let mut sink = CollectingSink::default();
+        let report = CodexAdapter::new()
+            .parse(input.as_bytes(), &mut sink)
+            .expect("parse synthetic rollout");
+        assert_eq!(report.committed, 1);
+        assert_eq!(report.skipped, 0);
+        assert_eq!(sink.messages.len(), 1);
+        assert_eq!(sink.messages[0].text, "kept");
+    }
+
+    #[test]
+    fn prefilter_preserves_unknown_type_records_for_future_fields() {
+        // Unknown legal envelopes retain the original behavior: serde accepts
+        // them, no message is emitted, and they are not recoverable skips.
+        let input = concat!(
+            r#"{"timestamp":"t","type":"unknown-future-type","payload":{"type":"event_msg"}}"#,
+            "\n",
+            r#"{"timestamp":"t","type":"response_item","payload":{"type":"message","id":"m1","role":"user","content":[{"type":"input_text","text":"ok"}]}}"#,
+        );
+        assert!(codex_line_may_need_deserialize(
+            input.lines().next().expect("unknown row").as_bytes()
+        ));
+        let mut sink = CollectingSink::default();
+        let report = CodexAdapter::new()
+            .parse(input.as_bytes(), &mut sink)
+            .expect("parse synthetic rollout");
+        assert_eq!(report.committed, 1);
+        assert_eq!(report.skipped, 0);
+        assert!(report.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn prefilter_uses_only_top_level_type_and_preserves_broken_rows() {
+        let nested = r#"{"timestamp":"t","type":"future-record","payload":{"type":"event_msg"}}"#;
+        assert!(codex_line_may_need_deserialize(nested.as_bytes()));
+
+        let broken = r#"{"timestamp":"t","type":"event_msg","payload":{"type":"token_count"}"#;
+        assert!(!codex_line_may_need_deserialize(broken.as_bytes()));
+        let mut sink = CollectingSink::default();
+        let report = CodexAdapter::new()
+            .parse(broken.as_bytes(), &mut sink)
+            .expect("parse broken rollout recoverably");
+        assert_eq!(report.committed, 0);
+        assert_eq!(report.skipped, 1);
+        assert_eq!(report.diagnostics.len(), 1);
+        assert!(report.diagnostics[0].contains("invalid JSON"));
+    }
+
+    #[test]
+    fn prefilter_preserves_session_meta_for_identity() {
+        // session_meta must always be parsed to establish the durable session id.
+        let input = concat!(
+            r#"{"timestamp":"2026-07-19T15:40:00.000Z","type":"session_meta","payload":{"session_id":"sess-prefilter","cwd":"/tmp"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-07-19T15:41:00.000Z","type":"response_item","payload":{"type":"message","id":"m1","role":"user","content":[{"type":"input_text","text":"ok"}]}}"#,
+        );
+        let mut sink = CollectingSink::default();
+        let report = CodexAdapter::new()
+            .parse(input.as_bytes(), &mut sink)
+            .expect("parse synthetic rollout");
+        assert_eq!(report.session_native_id.as_deref(), Some("sess-prefilter"));
+        assert_eq!(report.committed, 1);
+    }
+
+    #[test]
+    #[ignore = "raw timing microbenchmark; run explicitly in release mode"]
+    fn prefilter_raw_timing_10k_ignored_rows() {
+        const ROWS: usize = 10_000;
+        const SAMPLES: usize = 5;
+        let noise = r#"{"timestamp":"2026-07-19T23:40:00.000Z","type":"event_msg","payload":{"type":"token_count","count":1}}"#;
+
+        for sample in 1..=SAMPLES {
+            let full_start = std::time::Instant::now();
+            let mut full_count = 0usize;
+            for _ in 0..ROWS {
+                if std::hint::black_box(serde_json::from_str::<RawLine>(std::hint::black_box(
+                    noise,
+                )))
+                .is_ok()
+                {
+                    full_count += 1;
+                }
+            }
+            let full_raw_line = full_start.elapsed();
+
+            let marker_start = std::time::Instant::now();
+            let mut candidate_count = 0usize;
+            for _ in 0..ROWS {
+                candidate_count += usize::from(codex_line_may_need_deserialize(
+                    std::hint::black_box(noise.as_bytes()),
+                ));
+            }
+            let marker_scan = marker_start.elapsed();
+
+            let validated_start = std::time::Instant::now();
+            let mut valid_count = 0usize;
+            for _ in 0..ROWS {
+                let line = std::hint::black_box(noise);
+                let may_need = codex_line_may_need_deserialize(line.as_bytes());
+                if may_need || serde_json::from_str::<IgnoredAny>(line).is_ok() {
+                    valid_count += 1;
+                }
+            }
+            let marker_plus_syntax = validated_start.elapsed();
+
+            assert_eq!(full_count, ROWS);
+            assert_eq!(candidate_count, 0);
+            assert_eq!(valid_count, ROWS);
+            eprintln!(
+                "provider=codex sample={sample} rows={ROWS} full_raw_line_us={} marker_scan_us={} marker_plus_syntax_us={}",
+                full_raw_line.as_micros(),
+                marker_scan.as_micros(),
+                marker_plus_syntax.as_micros()
+            );
+        }
     }
 }
