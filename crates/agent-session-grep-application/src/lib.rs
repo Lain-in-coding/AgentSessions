@@ -16,6 +16,7 @@ use agent_session_grep_ports::{
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
+pub mod activity;
 pub mod budget;
 pub mod cjk;
 pub mod cursor;
