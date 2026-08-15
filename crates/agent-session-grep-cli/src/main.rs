@@ -17,6 +17,7 @@
 mod human;
 mod mcp;
 mod protocol;
+mod redaction;
 mod tui;
 
 use agent_session_grep_adapters_sqlite::{SourceBatch, SqliteStore, capture, verify_snapshot};
@@ -418,16 +419,36 @@ fn emit_result(
             }
         }
         protocol::OutputMode::Json | protocol::OutputMode::Jsonl => {
+            // ADR-0009: machine/cross-boundary output is redacted by default.
+            // Human CLI output stays unredacted per ADR-0004 (handled above).
+            let (redacted_data, mut redaction) = redaction::redact_value(data);
+            let redacted_warnings: Vec<String> = warnings
+                .iter()
+                .map(|w| {
+                    let (r, _) = redaction::redact_text(w);
+                    r
+                })
+                .collect();
+            // If any warning was redacted, merge into the count.
+            let warning_redactions = warnings
+                .iter()
+                .zip(redacted_warnings.iter())
+                .filter(|(a, b)| a != b)
+                .count() as u64;
+            if warning_redactions > 0 {
+                redaction.redacted_count += warning_redactions;
+                redaction.status = agent_session_grep_ports::RedactionState::Applied;
+            }
             protocol::write_stdout_line(&protocol::success_envelope(
                 command,
                 outcome,
-                data,
+                redacted_data,
                 duration_ms,
                 page,
-                warnings,
+                &redacted_warnings,
                 request_id,
                 RetrievalMode::default(),
-                &RedactionStatus::default(),
+                &redaction,
             ));
         }
     }
