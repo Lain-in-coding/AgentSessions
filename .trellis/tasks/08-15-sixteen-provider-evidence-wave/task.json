@@ -3,7 +3,7 @@
   "name": "sixteen-provider-evidence-wave",
   "title": "16 provider adapter evidence wave",
   "description": "",
-  "status": "planning",
+  "status": "in_progress",
   "dev_type": null,
   "scope": null,
   "package": "agentsessions-adapters-sqlite",
