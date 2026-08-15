@@ -10,8 +10,9 @@ publish = false
 agent-session-grep-application = { path = "../agent-session-grep-application" }
 agent-session-grep-domain = { path = "../agent-session-grep-domain" }
 agent-session-grep-ports = { path = "../agent-session-grep-ports" }
-# "trace" 仅供测试的 SQL 语句计数守卫使用(sqlite3_trace_v2 钩子)。
-rusqlite = { version = "0.40", features = ["bundled", "trace"] }
+# "trace" 仅供测试的 SQL 语句计数守卫使用(sqlite3_trace_v2 钩子)；
+# "functions" 供时间过滤谓词的 ISO-8601 → sort-key 标量函数注册。
+rusqlite = { version = "0.40", features = ["bundled", "trace", "functions"] }
 serde_json.workspace = true
 blake3.workspace = true
 # 与 spikes/data-root-locking 同一原语：OS 独占文件锁作 writer lease 权威。

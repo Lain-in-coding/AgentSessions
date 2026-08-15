@@ -250,9 +250,14 @@ fn parse_instant(value: &str) -> Option<Instant> {
     }
 
     let days = days_from_civil(year, month, day)?;
-    let seconds =
-        days * 86400 + i64::from(hour) * 3600 + i64::from(minute) * 60 + i64::from(second)
-            - i64::from(offset_minutes) * 60;
+    // 超大年份会溢出 i64 秒：checked 算术，溢出即 None（与"anything that
+    // does not parse"契约一致），绝不 panic 或静默 wrap。
+    let seconds = days
+        .checked_mul(86400)?
+        .checked_add(i64::from(hour).checked_mul(3600)?)?
+        .checked_add(i64::from(minute).checked_mul(60)?)?
+        .checked_add(i64::from(second))?
+        .checked_sub(i64::from(offset_minutes).checked_mul(60)?)?;
     Some((seconds, nanos as u32))
 }
 
@@ -267,7 +272,9 @@ fn split_zone(time: &str) -> (&str, i32) {
         let magnitude = hours.parse::<i32>().ok()? * 60 + minutes.parse::<i32>().ok()?;
         Some(if sign == b'-' { -magnitude } else { magnitude })
     };
-    if time.len() >= 6 {
+    // 字节窗口必须落在 char 边界上，否则非 ASCII 时间戳会 panic。失败返回
+    // (time, 0)，调用方最终回退字节比较（None 语义由 parse_instant 保证）。
+    if time.len() >= 6 && time.is_char_boundary(time.len() - 6) {
         let suffix = &time[time.len() - 6..];
         let bytes = suffix.as_bytes();
         if (bytes[0] == b'+' || bytes[0] == b'-')
@@ -277,7 +284,7 @@ fn split_zone(time: &str) -> (&str, i32) {
             return (&time[..time.len() - 6], offset);
         }
     }
-    if time.len() >= 5 {
+    if time.len() >= 5 && time.is_char_boundary(time.len() - 5) {
         let suffix = &time[time.len() - 5..];
         let bytes = suffix.as_bytes();
         if (bytes[0] == b'+' || bytes[0] == b'-')
@@ -302,8 +309,16 @@ fn days_from_civil(year: i64, month: u32, day: u32) -> Option<i64> {
     let year_of_era = year - era * 400;
     let shifted_month = (month + 9) % 12;
     let day_of_year = ((153 * shifted_month + 2) / 5 + day - 1) as i64;
-    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
-    Some(era * 146097 + day_of_era - 719468)
+    let day_of_era = year_of_era
+        .checked_mul(365)?
+        .checked_add(year_of_era / 4)?
+        .checked_sub(year_of_era / 100)?
+        .checked_add(day_of_year)?;
+    let days = era
+        .checked_mul(146097)?
+        .checked_add(day_of_era)?
+        .checked_sub(719468)?;
+    Some(days)
 }
 
 /// 比较两个出现:先按消息时间戳(预解析 map,每消息解析一次),缺失排在

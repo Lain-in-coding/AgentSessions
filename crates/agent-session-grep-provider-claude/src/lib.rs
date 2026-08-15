@@ -6,8 +6,8 @@
 //! adapter 只做格式隔离，绝不接触存储 / 检索 / UI（RFC-0002 §7）。
 
 use agent_session_grep_ports::{
-    CanonicalEventSink, Confidence, MessageEvent, ParseReport, ProbeResult, ProviderAdapter,
-    ProviderError,
+    CanonicalEventSink, Confidence, MessageEvent, MetadataResolution, ParseReport, ProbeResult,
+    ProviderAdapter, ProviderError,
 };
 use serde::Deserialize;
 
@@ -70,6 +70,11 @@ struct RawLine {
     /// 该 transcript 的 durable 会话 id（Claude Code 每条对话记录都携带）。
     #[serde(default, rename = "sessionId")]
     session_id: Option<String>,
+    /// 会话启动时的工作目录（Resume metadata 的 Original Working Directory，
+    /// ADR-0009）。真实 transcript 的顶层记录携带；缺失/空白 → None，绝不臆造。
+    /// 只在与同一条记录的非空 `sessionId` 同现时被接受为 pair（R3 保关联）。
+    #[serde(default)]
+    cwd: Option<String>,
     /// 嵌套的 message 体（对话类记录才有）。
     #[serde(default)]
     message: Option<RawMessage>,
@@ -455,6 +460,25 @@ impl ProviderAdapter for ClaudeCodeAdapter {
                 if !session_ids.iter().any(|s| s == sid) {
                     session_ids.push(sid.to_string());
                 }
+                // Resume metadata（ADR-0009）：provider_session_id 取首个非空
+                // sessionId；只有 sid 无 cwd 时目录保持 Missing（显式缺失不臆造）。
+                if report.session_observation.provider_session_id == MetadataResolution::Missing {
+                    report.session_observation.provider_session_id =
+                        MetadataResolution::Resolved(sid.to_string());
+                }
+                // Original Working Directory 只从「同一条记录同时携带非空
+                // sessionId 与 cwd」的首个 pair 观测，且该 pair 必须属于首个
+                // 会话——其它会话记录上的 cwd 绝不拼接进来（R3 保关联，绝不
+                // 把不同记录/会话的值拼成假 pair）。
+                if !report.session_observation.pair_observed
+                    && report.session_native_id.as_deref() == Some(sid)
+                    && let Some(cwd) = rec.cwd.as_deref()
+                    && !cwd.trim().is_empty()
+                {
+                    report.session_observation.original_working_directory =
+                        MetadataResolution::Resolved(cwd.trim().to_string());
+                    report.session_observation.pair_observed = true;
+                }
             }
 
             // 非对话记录（工具结果、summary 等）不产生 Canonical 消息，静默略过。
@@ -509,6 +533,12 @@ impl ProviderAdapter for ClaudeCodeAdapter {
         // 多会话诊断（PRD R3.1）：单文件=单会话。同一文件出现多个不同 sessionId
         // 时不得静默折叠——报告数量与前若干 id，归属保持首个会话不变。
         if session_ids.len() > 1 {
+            // Resume metadata 的 typed 映射（ADR-0009）：Source 携带多个不同
+            // Session ID → fail closed——multi_session 置位，且不把首条 id 当
+            // 权威 Resume 声明（provider_session_id 置 Ambiguous）；目录保持
+            // 已观测 pair 值或 Missing，由上层按 multi_session 判定不可恢复。
+            report.session_observation.multi_session = true;
+            report.session_observation.provider_session_id = MetadataResolution::Ambiguous;
             let mut id_list = session_ids
                 .iter()
                 .take(SESSION_ID_LIST_LIMIT)
@@ -1085,5 +1115,205 @@ mod tests {
             .unwrap();
         // provider 未提供 sessionId → None，显式缺失不臆造。
         assert_eq!(report.session_native_id, None);
+    }
+
+    #[test]
+    fn parse_observation_reports_pair_from_same_record() {
+        // 同一条记录同时携带非空 sessionId 与 cwd → pair 关联被捕获（R3 保关联）。
+        let input = concat!(
+            r#"{"type":"user","uuid":"u-1","sessionId":"sess-a","cwd":"/tmp/synthetic-proj","message":{"role":"user","content":"hi"}}"#,
+            "\n",
+            r#"{"type":"assistant","uuid":"a-1","sessionId":"sess-a","message":{"role":"assistant","content":"yo"}}"#,
+        );
+        let mut sink = CollectingSink::default();
+        let report = ClaudeCodeAdapter::new()
+            .parse(input.as_bytes(), &mut sink)
+            .unwrap();
+        let obs = &report.session_observation;
+        assert_eq!(
+            obs.provider_session_id,
+            MetadataResolution::Resolved("sess-a".to_string())
+        );
+        assert_eq!(
+            obs.original_working_directory,
+            MetadataResolution::Resolved("/tmp/synthetic-proj".to_string())
+        );
+        assert!(obs.pair_observed);
+        assert!(!obs.multi_session);
+    }
+
+    #[test]
+    fn parse_observation_sid_only_keeps_directory_missing() {
+        // 只有 sid 无 cwd：provider_session_id 可解析，目录保持 Missing（不臆造）。
+        let input = r#"{"type":"user","uuid":"u-1","sessionId":"sess-a","message":{"role":"user","content":"hi"}}"#;
+        let mut sink = CollectingSink::default();
+        let report = ClaudeCodeAdapter::new()
+            .parse(input.as_bytes(), &mut sink)
+            .unwrap();
+        let obs = &report.session_observation;
+        assert_eq!(
+            obs.provider_session_id,
+            MetadataResolution::Resolved("sess-a".to_string())
+        );
+        assert_eq!(obs.original_working_directory, MetadataResolution::Missing);
+        assert!(!obs.pair_observed);
+        assert!(!obs.multi_session);
+    }
+
+    #[test]
+    fn parse_observation_all_missing_when_fields_absent() {
+        // sessionId 与 cwd 都缺失 → 全 Missing（ADR-0009 默认态）。
+        let input = r#"{"type":"user","uuid":"u-1","message":{"role":"user","content":"hi"}}"#;
+        let mut sink = CollectingSink::default();
+        let report = ClaudeCodeAdapter::new()
+            .parse(input.as_bytes(), &mut sink)
+            .unwrap();
+        let obs = &report.session_observation;
+        assert_eq!(obs.provider_session_id, MetadataResolution::Missing);
+        assert_eq!(obs.original_working_directory, MetadataResolution::Missing);
+        assert!(!obs.pair_observed);
+        assert!(!obs.multi_session);
+    }
+
+    #[test]
+    fn parse_observation_blank_values_are_missing() {
+        // 空白 sessionId / 空白 cwd 均视为缺失；空白 sid 上的 cwd 不被接受
+        // （无非空 sid 不配 pair）。
+        let input = concat!(
+            r#"{"type":"user","uuid":"u-1","sessionId":"   ","cwd":"/tmp/synthetic-a","message":{"role":"user","content":"hi"}}"#,
+            "\n",
+            r#"{"type":"user","uuid":"u-2","sessionId":"sess-b","cwd":"   ","message":{"role":"user","content":"hi2"}}"#,
+        );
+        let mut sink = CollectingSink::default();
+        let report = ClaudeCodeAdapter::new()
+            .parse(input.as_bytes(), &mut sink)
+            .unwrap();
+        let obs = &report.session_observation;
+        // 首条非空 sessionId 是 sess-b（首行 sid 空白 → 不计）。
+        assert_eq!(
+            obs.provider_session_id,
+            MetadataResolution::Resolved("sess-b".to_string())
+        );
+        // 两个 cwd 都不合格：一个挂在空白 sid 上，另一个本身空白。
+        assert_eq!(obs.original_working_directory, MetadataResolution::Missing);
+        assert!(!obs.pair_observed);
+        assert!(!obs.multi_session);
+    }
+
+    #[test]
+    fn parse_observation_repeated_identical_pair_is_not_ambiguous() {
+        // 同一 sid + 同一 cwd 反复出现 → 单值不歧义，无多会话诊断。
+        let line = r#"{"type":"user","uuid":"u-1","sessionId":"sess-a","cwd":"/tmp/synthetic-proj","message":{"role":"user","content":"hi"}}"#;
+        let input = format!("{line}\n{line}");
+        let mut sink = CollectingSink::default();
+        let report = ClaudeCodeAdapter::new()
+            .parse(input.as_bytes(), &mut sink)
+            .unwrap();
+        let obs = &report.session_observation;
+        assert_eq!(
+            obs.provider_session_id,
+            MetadataResolution::Resolved("sess-a".to_string())
+        );
+        assert_eq!(
+            obs.original_working_directory,
+            MetadataResolution::Resolved("/tmp/synthetic-proj".to_string())
+        );
+        assert!(obs.pair_observed);
+        assert!(!obs.multi_session);
+        assert!(
+            !report
+                .diagnostics
+                .iter()
+                .any(|d| d.contains("不同 sessionId")),
+            "重复相同 sid 不得产生多会话诊断: {:?}",
+            report.diagnostics
+        );
+    }
+
+    #[test]
+    fn parse_observation_pair_from_later_record_of_first_session() {
+        // pair 不必出现在首条记录：首条只有 sid，同会话后续记录带 cwd → 仍成 pair。
+        let input = concat!(
+            r#"{"type":"user","uuid":"u-1","sessionId":"sess-a","message":{"role":"user","content":"hi"}}"#,
+            "\n",
+            r#"{"type":"assistant","uuid":"a-1","sessionId":"sess-a","cwd":"/tmp/synthetic-proj","message":{"role":"assistant","content":"yo"}}"#,
+        );
+        let mut sink = CollectingSink::default();
+        let report = ClaudeCodeAdapter::new()
+            .parse(input.as_bytes(), &mut sink)
+            .unwrap();
+        let obs = &report.session_observation;
+        assert_eq!(
+            obs.provider_session_id,
+            MetadataResolution::Resolved("sess-a".to_string())
+        );
+        assert_eq!(
+            obs.original_working_directory,
+            MetadataResolution::Resolved("/tmp/synthetic-proj".to_string())
+        );
+        assert!(obs.pair_observed);
+        assert!(!obs.multi_session);
+    }
+
+    #[test]
+    fn parse_observation_multi_session_fails_closed() {
+        // 两个不同 sessionId → multi_session + provider_session_id Ambiguous
+        // （不把首条 id 当权威 Resume 声明）；首会话的 pair 目录保持观测值。
+        let first = r#"{"type":"user","uuid":"u-1","sessionId":"sess-first","cwd":"/tmp/first-dir","message":{"role":"user","content":"hi"}}"#;
+        let second = r#"{"type":"user","uuid":"u-2","sessionId":"sess-second","cwd":"/tmp/second-dir","message":{"role":"user","content":"yo"}}"#;
+        let input = format!("{first}\n{second}");
+        let mut sink = CollectingSink::default();
+        let report = ClaudeCodeAdapter::new()
+            .parse(input.as_bytes(), &mut sink)
+            .unwrap();
+        let obs = &report.session_observation;
+        assert!(obs.multi_session);
+        assert_eq!(obs.provider_session_id, MetadataResolution::Ambiguous);
+        assert_eq!(
+            obs.original_working_directory,
+            MetadataResolution::Resolved("/tmp/first-dir".to_string())
+        );
+        assert!(obs.pair_observed);
+        // 现有诊断契约不变。
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .any(|d| d.contains("不同 sessionId"))
+        );
+    }
+
+    #[test]
+    fn parse_observation_never_splices_cwd_from_other_session() {
+        // 首会话无 cwd，第二会话有 cwd → 目录保持 Missing，绝不跨会话拼 pair。
+        let first = r#"{"type":"user","uuid":"u-1","sessionId":"sess-first","message":{"role":"user","content":"hi"}}"#;
+        let second = r#"{"type":"user","uuid":"u-2","sessionId":"sess-second","cwd":"/tmp/second-dir","message":{"role":"user","content":"yo"}}"#;
+        let input = format!("{first}\n{second}");
+        let mut sink = CollectingSink::default();
+        let report = ClaudeCodeAdapter::new()
+            .parse(input.as_bytes(), &mut sink)
+            .unwrap();
+        let obs = &report.session_observation;
+        assert!(obs.multi_session);
+        assert_eq!(obs.provider_session_id, MetadataResolution::Ambiguous);
+        assert_eq!(obs.original_working_directory, MetadataResolution::Missing);
+        assert!(!obs.pair_observed);
+    }
+
+    #[test]
+    fn parse_observation_diagnostics_never_leak_working_directories() {
+        // 隐私（PRD R4）：诊断只含行号/数量/有界 id 列表，绝不包含 cwd 路径。
+        let first = r#"{"type":"user","uuid":"u-1","sessionId":"sess-first","cwd":"/tmp/first-dir","message":{"role":"user","content":"hi"}}"#;
+        let second = r#"{"type":"user","uuid":"u-2","sessionId":"sess-second","cwd":"/tmp/second-dir","message":{"role":"user","content":"yo"}}"#;
+        let input = format!("{first}\n{second}");
+        let mut sink = CollectingSink::default();
+        let report = ClaudeCodeAdapter::new()
+            .parse(input.as_bytes(), &mut sink)
+            .unwrap();
+        for diag in &report.diagnostics {
+            assert!(!diag.contains("first-dir"), "诊断不得含 cwd: {diag}");
+            assert!(!diag.contains("second-dir"), "诊断不得含 cwd: {diag}");
+            assert!(!diag.contains("/tmp"), "诊断不得含路径: {diag}");
+        }
     }
 }

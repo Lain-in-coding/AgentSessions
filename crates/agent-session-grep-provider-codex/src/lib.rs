@@ -19,8 +19,8 @@
 //! adapter 只做格式隔离，绝不接触存储 / 检索 / UI（RFC-0002 §7）。
 
 use agent_session_grep_ports::{
-    CanonicalEventSink, Confidence, MessageEvent, ParseReport, ProbeResult, ProviderAdapter,
-    ProviderError,
+    CanonicalEventSink, Confidence, MessageEvent, MetadataResolution, ParseReport, ProbeResult,
+    ProviderAdapter, ProviderError,
 };
 use serde::Deserialize;
 
@@ -92,6 +92,13 @@ struct RawPayload {
     /// durable 会话 id（仅 `session_meta` 的 payload 携带）。
     #[serde(default)]
     session_id: Option<String>,
+    /// 会话启动时的工作目录（仅 `session_meta` 的 payload 携带且权威；ADR-0009
+    /// Resume metadata 的 Original Working Directory）。`turn_context` 等其它
+    /// 类型的 payload 也可能出现 `cwd`，但那是 turn-scoped 状态——解析只在
+    /// `session_meta` 分支读取本字段，其它类型的 cwd 绝不作为 working
+    /// directory。缺失/空白 → None，绝不臆造。
+    #[serde(default)]
+    cwd: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -363,6 +370,27 @@ impl ProviderAdapter for CodexAdapter {
                     if !session_ids.iter().any(|s| s == sid) {
                         session_ids.push(sid.to_string());
                     }
+                    // Resume metadata（ADR-0009）：provider_session_id 取首个非空
+                    // session_id；只有 sid 无 cwd 时目录保持 Missing（显式缺失不臆造）。
+                    if report.session_observation.provider_session_id == MetadataResolution::Missing
+                    {
+                        report.session_observation.provider_session_id =
+                            MetadataResolution::Resolved(sid.to_string());
+                    }
+                    // Original Working Directory 只从「同一条 session_meta
+                    // payload 同时携带非空 session_id 与 cwd」的首个 pair 观测，
+                    // 且该 pair 必须属于首个会话——其它会话的 cwd 绝不拼接
+                    // （R3 保关联）。turn_context 的 cwd 是 turn-scoped，绝不
+                    // 作为 working directory（见 RawPayload::cwd 注释）。
+                    if !report.session_observation.pair_observed
+                        && report.session_native_id.as_deref() == Some(sid)
+                        && let Some(cwd) = rec.payload.as_ref().and_then(|p| p.cwd.as_deref())
+                        && !cwd.trim().is_empty()
+                    {
+                        report.session_observation.original_working_directory =
+                            MetadataResolution::Resolved(cwd.trim().to_string());
+                        report.session_observation.pair_observed = true;
+                    }
                 }
                 continue;
             }
@@ -424,6 +452,12 @@ impl ProviderAdapter for CodexAdapter {
         // 多会话诊断（PRD R3.1）：单文件=单会话。同一文件出现多个不同 session id
         // 时不得静默折叠——报告数量与前若干 id，归属保持首个会话不变。
         if session_ids.len() > 1 {
+            // Resume metadata 的 typed 映射（ADR-0009）：Source 携带多个不同
+            // Session ID → fail closed——multi_session 置位，且不把首条 id 当
+            // 权威 Resume 声明（provider_session_id 置 Ambiguous）；目录保持
+            // 已观测 pair 值或 Missing，由上层按 multi_session 判定不可恢复。
+            report.session_observation.multi_session = true;
+            report.session_observation.provider_session_id = MetadataResolution::Ambiguous;
             let mut id_list = session_ids
                 .iter()
                 .take(SESSION_ID_LIST_LIMIT)
@@ -865,5 +899,216 @@ mod tests {
             .unwrap();
         // 无 session_meta → None，显式缺失不臆造。
         assert_eq!(report.session_native_id, None);
+    }
+
+    #[test]
+    fn parse_observation_reports_pair_from_session_meta() {
+        // SAMPLE 的 session_meta payload 同时携带 session_id 与 cwd → pair
+        // 关联被捕获（R3 保关联：两值来自同一条权威 payload）。
+        let mut sink = CollectingSink::default();
+        let report = CodexAdapter::new()
+            .parse(SAMPLE.as_bytes(), &mut sink)
+            .unwrap();
+        let obs = &report.session_observation;
+        assert_eq!(
+            obs.provider_session_id,
+            MetadataResolution::Resolved("019f7b08".to_string())
+        );
+        assert_eq!(
+            obs.original_working_directory,
+            MetadataResolution::Resolved("/tmp".to_string())
+        );
+        assert!(obs.pair_observed);
+        assert!(!obs.multi_session);
+    }
+
+    #[test]
+    fn parse_observation_sid_only_keeps_directory_missing() {
+        // session_meta 只有 session_id 无 cwd：目录保持 Missing（不臆造）。
+        let input = concat!(
+            r#"{"timestamp":"2026-07-19T15:40:00.000Z","type":"session_meta","payload":{"session_id":"s-1"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-07-19T15:41:00.000Z","type":"response_item","payload":{"type":"message","id":"m-1","role":"user","content":[{"type":"input_text","text":"hi"}]}}"#,
+        );
+        let mut sink = CollectingSink::default();
+        let report = CodexAdapter::new()
+            .parse(input.as_bytes(), &mut sink)
+            .unwrap();
+        let obs = &report.session_observation;
+        assert_eq!(
+            obs.provider_session_id,
+            MetadataResolution::Resolved("s-1".to_string())
+        );
+        assert_eq!(obs.original_working_directory, MetadataResolution::Missing);
+        assert!(!obs.pair_observed);
+        assert!(!obs.multi_session);
+    }
+
+    #[test]
+    fn parse_observation_blank_values_are_missing() {
+        // 空白 session_id → 不计（不 Resolved）；非空 sid + 空白 cwd → 目录
+        // Missing。空白 sid 上的 cwd 不被接受（无非空 sid 不配 pair）。
+        let input = concat!(
+            r#"{"timestamp":"t1","type":"session_meta","payload":{"session_id":"   ","cwd":"/tmp/synthetic-a"}}"#,
+            "\n",
+            r#"{"timestamp":"t2","type":"session_meta","payload":{"session_id":"s-1","cwd":"   "}}"#,
+            "\n",
+            r#"{"timestamp":"t3","type":"response_item","payload":{"type":"message","id":"m-1","role":"user","content":[{"type":"input_text","text":"hi"}]}}"#,
+        );
+        let mut sink = CollectingSink::default();
+        let report = CodexAdapter::new()
+            .parse(input.as_bytes(), &mut sink)
+            .unwrap();
+        let obs = &report.session_observation;
+        assert_eq!(
+            obs.provider_session_id,
+            MetadataResolution::Resolved("s-1".to_string())
+        );
+        assert_eq!(obs.original_working_directory, MetadataResolution::Missing);
+        assert!(!obs.pair_observed);
+        assert!(!obs.multi_session);
+    }
+
+    #[test]
+    fn parse_observation_repeated_identical_meta_not_ambiguous() {
+        // 相同 session_meta（同 sid 同 cwd）出现两次 → 单值不歧义，无多会话诊断。
+        let meta = r#"{"timestamp":"t","type":"session_meta","payload":{"session_id":"s-1","cwd":"/tmp/synthetic-proj"}}"#;
+        let msg = r#"{"timestamp":"t","type":"response_item","payload":{"type":"message","id":"m-1","role":"user","content":[{"type":"input_text","text":"hi"}]}}"#;
+        let input = format!("{meta}\n{msg}\n{meta}");
+        let mut sink = CollectingSink::default();
+        let report = CodexAdapter::new()
+            .parse(input.as_bytes(), &mut sink)
+            .unwrap();
+        let obs = &report.session_observation;
+        assert_eq!(
+            obs.provider_session_id,
+            MetadataResolution::Resolved("s-1".to_string())
+        );
+        assert_eq!(
+            obs.original_working_directory,
+            MetadataResolution::Resolved("/tmp/synthetic-proj".to_string())
+        );
+        assert!(obs.pair_observed);
+        assert!(!obs.multi_session);
+        assert!(
+            !report
+                .diagnostics
+                .iter()
+                .any(|d| d.contains("不同 session id")),
+            "重复相同 sid 不得产生多会话诊断: {:?}",
+            report.diagnostics
+        );
+    }
+
+    #[test]
+    fn parse_observation_multi_session_fails_closed() {
+        // 两条不同 sid 的 session_meta → multi_session + provider_session_id
+        // Ambiguous（不把首条 id 当权威 Resume 声明）；首会话 pair 目录保持观测值。
+        let first = r#"{"timestamp":"t1","type":"session_meta","payload":{"session_id":"sess-first","cwd":"/tmp/first-dir"}}"#;
+        let second = r#"{"timestamp":"t2","type":"session_meta","payload":{"session_id":"sess-second","cwd":"/tmp/second-dir"}}"#;
+        let msg = r#"{"timestamp":"t3","type":"response_item","payload":{"type":"message","id":"m-1","role":"user","content":[{"type":"input_text","text":"hi"}]}}"#;
+        let input = format!("{first}\n{second}\n{msg}");
+        let mut sink = CollectingSink::default();
+        let report = CodexAdapter::new()
+            .parse(input.as_bytes(), &mut sink)
+            .unwrap();
+        let obs = &report.session_observation;
+        assert!(obs.multi_session);
+        assert_eq!(obs.provider_session_id, MetadataResolution::Ambiguous);
+        assert_eq!(
+            obs.original_working_directory,
+            MetadataResolution::Resolved("/tmp/first-dir".to_string())
+        );
+        assert!(obs.pair_observed);
+        // 现有诊断契约不变。
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .any(|d| d.contains("不同 session id"))
+        );
+    }
+
+    #[test]
+    fn parse_observation_never_splices_cwd_from_second_session_meta() {
+        // 首会话 session_meta 无 cwd，第二会话有 cwd → 目录 Missing，绝不跨会话拼 pair。
+        let first =
+            r#"{"timestamp":"t1","type":"session_meta","payload":{"session_id":"sess-first"}}"#;
+        let second = r#"{"timestamp":"t2","type":"session_meta","payload":{"session_id":"sess-second","cwd":"/tmp/second-dir"}}"#;
+        let msg = r#"{"timestamp":"t3","type":"response_item","payload":{"type":"message","id":"m-1","role":"user","content":[{"type":"input_text","text":"hi"}]}}"#;
+        let input = format!("{first}\n{second}\n{msg}");
+        let mut sink = CollectingSink::default();
+        let report = CodexAdapter::new()
+            .parse(input.as_bytes(), &mut sink)
+            .unwrap();
+        let obs = &report.session_observation;
+        assert!(obs.multi_session);
+        assert_eq!(obs.provider_session_id, MetadataResolution::Ambiguous);
+        assert_eq!(obs.original_working_directory, MetadataResolution::Missing);
+        assert!(!obs.pair_observed);
+    }
+
+    #[test]
+    fn parse_observation_ignores_turn_context_cwd() {
+        // turn_context 的 cwd 是 turn-scoped，绝不作为 working directory（R2）；
+        // turn_context 携带的 session_id 同样不被收集（不触发多会话）。
+        let meta = r#"{"timestamp":"t1","type":"session_meta","payload":{"session_id":"s-1","cwd":"/tmp/meta-dir"}}"#;
+        let turn = r#"{"timestamp":"t2","type":"turn_context","payload":{"type":"turn_context","session_id":"s-turn-scoped","cwd":"/tmp/turn-dir"}}"#;
+        let msg = r#"{"timestamp":"t3","type":"response_item","payload":{"type":"message","id":"m-1","role":"user","content":[{"type":"input_text","text":"hi"}]}}"#;
+        let input = format!("{meta}\n{turn}\n{msg}");
+        let mut sink = CollectingSink::default();
+        let report = CodexAdapter::new()
+            .parse(input.as_bytes(), &mut sink)
+            .unwrap();
+        let obs = &report.session_observation;
+        assert_eq!(
+            obs.provider_session_id,
+            MetadataResolution::Resolved("s-1".to_string())
+        );
+        assert_eq!(
+            obs.original_working_directory,
+            MetadataResolution::Resolved("/tmp/meta-dir".to_string())
+        );
+        assert!(obs.pair_observed);
+        assert!(!obs.multi_session);
+    }
+
+    #[test]
+    fn parse_observation_turn_context_cwd_alone_never_becomes_directory() {
+        // 只有 turn_context 带 cwd（session_meta 无 cwd）→ 目录保持 Missing。
+        let meta = r#"{"timestamp":"t1","type":"session_meta","payload":{"session_id":"s-1"}}"#;
+        let turn = r#"{"timestamp":"t2","type":"turn_context","payload":{"type":"turn_context","session_id":"s-1","cwd":"/tmp/turn-dir"}}"#;
+        let msg = r#"{"timestamp":"t3","type":"response_item","payload":{"type":"message","id":"m-1","role":"user","content":[{"type":"input_text","text":"hi"}]}}"#;
+        let input = format!("{meta}\n{turn}\n{msg}");
+        let mut sink = CollectingSink::default();
+        let report = CodexAdapter::new()
+            .parse(input.as_bytes(), &mut sink)
+            .unwrap();
+        let obs = &report.session_observation;
+        assert_eq!(
+            obs.provider_session_id,
+            MetadataResolution::Resolved("s-1".to_string())
+        );
+        assert_eq!(obs.original_working_directory, MetadataResolution::Missing);
+        assert!(!obs.pair_observed);
+        assert!(!obs.multi_session);
+    }
+
+    #[test]
+    fn parse_observation_diagnostics_never_leak_working_directories() {
+        // 隐私（PRD R4）：多会话诊断只含数量 + 有界 id 列表，绝不包含 cwd 路径。
+        let first = r#"{"timestamp":"t1","type":"session_meta","payload":{"session_id":"sess-first","cwd":"/tmp/first-dir"}}"#;
+        let second = r#"{"timestamp":"t2","type":"session_meta","payload":{"session_id":"sess-second","cwd":"/tmp/second-dir"}}"#;
+        let msg = r#"{"timestamp":"t3","type":"response_item","payload":{"type":"message","id":"m-1","role":"user","content":[{"type":"input_text","text":"hi"}]}}"#;
+        let input = format!("{first}\n{second}\n{msg}");
+        let mut sink = CollectingSink::default();
+        let report = CodexAdapter::new()
+            .parse(input.as_bytes(), &mut sink)
+            .unwrap();
+        for diag in &report.diagnostics {
+            assert!(!diag.contains("first-dir"), "诊断不得含 cwd: {diag}");
+            assert!(!diag.contains("second-dir"), "诊断不得含 cwd: {diag}");
+            assert!(!diag.contains("/tmp"), "诊断不得含路径: {diag}");
+        }
     }
 }

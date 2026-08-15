@@ -124,7 +124,12 @@ if [ "$dry_run" -eq 1 ]; then
 fi
 
 mkdir -p "$prefix" || fail "cannot create install directory $prefix"
-cp -f "$artifact" "$target" || fail "cannot copy the binary into $prefix"
+# 原子替换：先落到同目录临时文件，再 mv 换名覆盖目标。mv 在同一文件系统内
+# 是 rename(2)，读取方永远看到完整文件；直接 cp -f 覆盖运行中的二进制可能
+# 失败或留下被截断的窗口（install design）。
+tmp_target="$prefix/.$binary_name.tmp.$$"
+cp -f "$artifact" "$tmp_target" || fail "cannot stage the binary in $prefix"
+mv -f "$tmp_target" "$target" || { rm -f "$tmp_target"; fail "cannot atomically replace $target"; }
 chmod +x "$target" || fail "cannot mark $target executable"
 
 version_line=$("$target" --version) || \

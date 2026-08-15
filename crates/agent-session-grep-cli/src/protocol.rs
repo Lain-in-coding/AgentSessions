@@ -1,7 +1,7 @@
 //! Robot 协议层：统一 JSON envelope、错误目录（Error Catalog）与 Outcome。
 //!
 //! 遵循 `docs/contracts/CONTRACT-cli-robot-mcp-draft.md`、
-//! `schemas/robot/v1/envelope.schema.json` 与 `schemas/robot/v1/error-catalog.json`：所有入口
+//! `schemas/robot/v1.1/envelope.schema.json` 与 `schemas/robot/v1/error-catalog.json`：所有入口
 //! 先把结果/错误归一到同一组版本化 DTO，再按同一映射投影到 exit code / JSON，
 //! 不允许各命令各自决定语义。本模块目前是唯一消费者（CLI）；MCP 落地时再抽 crate。
 //!
@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 use std::io::{ErrorKind, Write};
 
 /// 当前协议 schema 版本（major.minor）。未知 major 必须拒绝，兼容 minor 按合同处理。
-pub const SCHEMA_VERSION: &str = "1.0";
+pub const SCHEMA_VERSION: &str = "1.1";
 
 /// 业务结果层级。与进程错误分离：partial 绝不伪装成 success。
 #[allow(dead_code)]
@@ -212,9 +212,16 @@ impl From<AppError> for ProtocolError {
                 };
                 ProtocolError::new(code, error.to_string()).with_details(details)
             }
-            // 预算过小是请求校验失败（CONTRACT §3）。
             AppError::Budget(error) => {
                 ProtocolError::new(CanonicalCode::InvalidRequest, error.to_string())
+            }
+            AppError::MessageAmbiguous(ambiguity) => {
+                ProtocolError::new(CanonicalCode::InvalidRequest, ambiguity.to_string())
+                    .with_details(json!({
+                        "candidate_count": ambiguity.candidate_count,
+                        "candidate_session_ids": ambiguity.candidate_session_ids,
+                        "hint": ambiguity.hint
+                    }))
             }
         }
     }
@@ -236,9 +243,9 @@ impl From<PortError> for ProtocolError {
             PortError::SnapshotChanged(_) => CanonicalCode::SourceChanged,
             PortError::WriterBusy(_) => CanonicalCode::WriterBusy,
         };
-        // R4.3：Backend 携带 rusqlite/FTS parser 等后端原始细节，绝不进入用户可见
-        // message（NUL 查询曾以 "backend failure: unterminated string" 漏出）。
-        // SourceIo 也可能包含绝对 transcript/source path，统一使用固定消息。
+        // R4.3：Backend、SourceIo 携带后端/文件系统原始细节，绝不进入用户可见
+        // message（其中 SourceIo 可能包含绝对 transcript 路径）。其余变体已验证
+        // 不携带路径/ID（静态文案或数值），保持原样。
         let message = match &e {
             PortError::Backend(_) => "数据库内部错误".to_string(),
             PortError::SourceIo(_) => "源文件无法读取".to_string(),
@@ -292,8 +299,12 @@ pub fn parse_output_mode(args: &[String]) -> Result<OutputMode, String> {
                 chosen = Some(mode);
             }
             // 其它带值 flag 及其取值不在本层消费，跳过取值避免误判。
+            // 列表必须与 main.rs 各前缀扫描器（extract_request_id/command_name/
+            // intercept_help_or_version/extract_db_flag_impl）保持一致，漏掉一个
+            // 会让它的取值把后面的 --robot/--output 挡在扫描之外。
             "--db" | "--request-id" | "--cursor" | "--max-items" | "--max-bytes"
-            | "--max-messages" | "--policy" => {
+            | "--max-messages" | "--policy" | "--level" | "--provider" | "--since" | "--until"
+            | "--session" | "--around" => {
                 it.next();
             }
             _ => {}
@@ -533,8 +544,11 @@ mod tests {
         let e: ProtocolError = PortError::SnapshotChanged("mtime".into()).into();
         assert_eq!(e.code, CanonicalCode::SourceChanged);
 
-        let e: ProtocolError = PortError::SourceIo("cannot open source".into()).into();
+        let e: ProtocolError =
+            PortError::SourceIo("cannot open C:/Users/secret/transcript.jsonl".into()).into();
         assert_eq!(e.code, CanonicalCode::SourceIo);
+        assert_eq!(e.message, "源文件无法读取");
+        assert!(!e.message.contains("secret"));
 
         let e: ProtocolError = PortError::SchemaIncompatible("newer schema".into()).into();
         assert_eq!(e.code, CanonicalCode::SchemaIncompatible);
@@ -614,7 +628,7 @@ mod tests {
             &[],
             None,
         );
-        assert!(s.contains("\"schema_version\":\"1.0\""));
+        assert!(s.contains("\"schema_version\":\"1.1\""));
         assert!(s.contains("\"frame_type\":\"response\""));
         assert!(s.contains("\"command\":\"status\""));
         assert!(s.contains("\"ok\":true"));
@@ -759,6 +773,27 @@ mod tests {
     }
 
     #[test]
+    fn message_ambiguity_maps_to_bounded_invalid_request_details() {
+        let error: ProtocolError =
+            AppError::MessageAmbiguous(agent_session_grep_application::MessageAmbiguity {
+                candidate_session_ids: vec!["ses_v1_aaaa".into(), "ses_v1_bbbb".into()],
+                candidate_count: 2,
+                hint: "retry get_message with one candidate session_id".into(),
+            })
+            .into();
+        assert_eq!(error.code, CanonicalCode::InvalidRequest);
+        assert_eq!(error.code.exit_code(), 2);
+        assert_eq!(
+            error.details,
+            json!({
+                "candidate_count": 2,
+                "candidate_session_ids": ["ses_v1_aaaa", "ses_v1_bbbb"],
+                "hint": "retry get_message with one candidate session_id"
+            })
+        );
+    }
+
+    #[test]
     fn non_mismatch_errors_keep_empty_details() {
         let e: ProtocolError = AppError::Cursor(CursorError::Invalid("x".into())).into();
         assert_eq!(e.details, json!({}));
@@ -824,7 +859,7 @@ mod tests {
     fn published_envelope_schema_contains_runtime_contract() {
         let schema: Value = serde_json::from_str(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../schemas/robot/v1/envelope.schema.json"
+            "/../../schemas/robot/v1.1/envelope.schema.json"
         )))
         .expect("published envelope schema must be valid JSON");
         assert_eq!(
@@ -839,6 +874,27 @@ mod tests {
             .as_array()
             .expect("schema must enumerate canonical error codes");
         assert_eq!(codes.len(), 13);
+        let search_condition = &schema["$defs"]["success"]["allOf"][0];
+        assert_eq!(
+            search_condition["if"]["properties"]["command"]["const"],
+            "search"
+        );
+        assert_eq!(
+            search_condition["then"]["properties"]["data"]["$ref"],
+            "#/$defs/searchData"
+        );
+        assert_eq!(
+            schema["$defs"]["searchData"]["properties"]["hits"]["items"]["$ref"],
+            "#/$defs/searchHit"
+        );
+        assert_eq!(
+            schema["$defs"]["searchHit"]["properties"]["why_matched"]["maxItems"],
+            8
+        );
+        assert_eq!(
+            schema["$defs"]["searchHit"]["properties"]["suggested_next_commands"]["maxItems"],
+            2
+        );
         for field in [
             "schema_version",
             "frame_type",
@@ -858,7 +914,40 @@ mod tests {
                 "missing {field}"
             );
         }
+        // v1.1 追加字段：occurrences（省略即 1）与 resume_available（boolean）。
+        assert_eq!(
+            schema["$defs"]["searchHit"]["properties"]["occurrences"]["type"],
+            "integer"
+        );
+        assert_eq!(
+            schema["$defs"]["searchHit"]["properties"]["occurrences"]["minimum"],
+            1
+        );
+        assert_eq!(
+            schema["$defs"]["searchHit"]["properties"]["resume_available"]["type"],
+            "boolean"
+        );
         // frame 词汇表：response/error/progress/diagnostic 四种，全部挂在顶层 oneOf。
+        // 冻结断言：1.0 保持发布时原样。测试内不能跑 git，改为显式结构断言——
+        // 1.0 的 searchHit 不得包含 v1.1 才引入的 occurrences/resume_available。
+        let frozen: Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../schemas/robot/v1/envelope.schema.json"
+        )))
+        .expect("frozen 1.0 envelope schema must be valid JSON");
+        assert_eq!(
+            frozen["$defs"]["success"]["properties"]["schema_version"]["const"],
+            "1.0"
+        );
+        let frozen_hit = &frozen["$defs"]["searchHit"]["properties"];
+        assert!(
+            frozen_hit.get("occurrences").is_none(),
+            "1.0 must stay frozen: no occurrences"
+        );
+        assert!(
+            frozen_hit.get("resume_available").is_none(),
+            "1.0 must stay frozen: no resume_available"
+        );
         let one_of = schema["oneOf"]
             .as_array()
             .expect("schema oneOf must be an array");
@@ -954,6 +1043,15 @@ mod tests {
                 "--robot".into(),
                 "search".into(),
                 "--output".into(),
+            ]),
+            Ok(OutputMode::Json)
+        );
+        assert_eq!(
+            parse_output_mode(&[
+                "--level".into(),
+                "talks".into(),
+                "--robot".into(),
+                "context".into(),
             ]),
             Ok(OutputMode::Json)
         );

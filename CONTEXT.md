@@ -16,6 +16,18 @@ a provider. A session lives across source documents (a transcript file and its
 subagent files) and may be split or merged across providers.
 _Avoid_: conversation, chat, thread, history
 
+**Provider Session ID**:
+The provider-issued identifier used by that provider to resume a Session. It is
+resume metadata, not the Canonical Session identity: it is interpreted together
+with the provider and may be unavailable for reconstructed or partial Sources.
+_Avoid_: session_id (ambiguous), StableId, Canonical Session ID
+
+**Original Working Directory**:
+The working directory recorded by the provider when a Session ran. It is a
+resume hint and may later be missing or stale; it is not the Source locator,
+Transcript storage directory, repository root, or part of Stable Identity.
+_Avoid_: session folder, transcript folder, project path (unless equivalence is proven)
+
 **Source (document)**:
 One transcript file on disk as recorded by a provider (e.g. a Claude Code
 `*.jsonl` or a Codex rollout). Sources are the unit of capture, fingerprinting,
@@ -211,9 +223,40 @@ _Avoid_: support level, compatibility
   mode; robot/json/jsonl wrap the text in a success envelope `data`
   (ADR-0006). No mode-dependent exit codes.
 
-## Decision log (2026-08-13 — next round planning)
+## Decision log (2026-08-14 — resume metadata implementation)
 
-- **Next-round scope (Q1)**: three parallel tasks — A core usability (CJK
+- **Contract (ADR-0009)**: canonical `session_id` (`ses_v1_*`) stays the
+  catalog identity; Provider Session ID and Original Working Directory are
+  separate, exact, nullable Resume Metadata resolved through a read-only
+  `get_session_resume`. First version returns structured data only — never a
+  shell command, terminal launch, or Source path.
+- **Identity namespace**: native Session identity is
+  `ses_v1_digest(provider, installation, native_id)`; equal native IDs across
+  providers/installations cannot collide, and no reverse derivation from
+  `ses_v1_*` to the native ID exists.
+- **Resume persistence**: source-scoped `source_session_resume_claims`,
+  written atomically with source replacement and cleared on source removal;
+  multi-Session Sources fail closed (ambiguous, not resumable).
+- **Schema**: Robot `1.1` published (occurrences + resume_available);
+  `1.0` frozen. Cursors gain a result-set discriminator (`list` vs
+  `list_sessions`).
+- **Human table**: `日期 | Provider | 会话标题 | 工作目录 | Session ID`;
+  Provider/Session ID never truncated; missing renders `—`; all matched
+  sessions shown via pagination.
+- **Human table data source (2026-08-14)**: 日期 = batched
+  `MAX(json_extract(catalog.payload, '$.timestamp'))` per canonical Session
+  truncated to `YYYY-MM-DD`; 会话标题 = highest-relevance hit `text` on the
+  current page (preserves search ordering). Derived in CLI Human mode only;
+  Robot/MCP output unchanged. No port/DTO/schema change.
+- **Installation namespace (2026-08-14)**: composition root derives namespace
+  from the provider data-root prefix path (`.claude`/`.codex`) or, for unknown
+  providers, the source's parent directory. Known RFC-0001 §5.1 debt: this
+  derives from absolute path, lacks relocation invariance and host-distinctness
+  (no registry, no `id_alias`, no path case normalization). Domain layer
+  (`native_session_scoped`) is correct; the gap is composition-root only and is
+  tracked as a follow-up.
+
+## Decision log (2026-08-13 — next round planning)- **Next-round scope (Q1)**: three parallel tasks — A core usability (CJK
   tokenization, probe tolerance, merged-file session diagnostics, search-hit
   session context), B competitor borrowings (time/provider filters,
   system-noise filtering, group-by-session, around/get_message, summary

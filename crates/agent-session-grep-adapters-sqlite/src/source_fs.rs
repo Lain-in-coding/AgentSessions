@@ -79,7 +79,35 @@ pub fn verify_snapshot(path: &Path, snap: &SourceSnapshot) -> PortResult<Vec<u8>
             "fingerprint changed (content replaced at same len)".into(),
         ));
     }
+    // 复核读取期间（首次 stat → read 之间）源被追加/截断：内容按旧 len 截断后
+    // 指纹仍可与快照一致，等长替换也已被指纹覆盖，因此再核对一次 len+mtime 以
+    // 收窄窗口。诚实的结论是“复核读取窗口内未观察到变化”。
+    post_read_verify(path, snap)?;
     Ok(buf)
+}
+
+/// 读取完成后的最终复核：源文件的 len/mtime 不得在读取窗口内变化。
+///
+/// 单独抽取为可测试函数——真实竞态（stat→read 之间追加）无法在单测里确定性
+/// 复现，但“读取后文件已变化”这一状态可以直接构造（写入新内容后本函数必须
+/// 报告 SnapshotChanged）。
+fn post_read_verify(path: &Path, snap: &SourceSnapshot) -> PortResult<()> {
+    let meta_after = std::fs::metadata(path).map_err(backend)?;
+    if meta_after.len() != snap.len {
+        return Err(PortError::SnapshotChanged(format!(
+            "len changed during verification {} -> {}",
+            snap.len,
+            meta_after.len()
+        )));
+    }
+    let after_mtime = mtime_ms(&meta_after)?;
+    if after_mtime != snap.mtime_ms {
+        return Err(PortError::SnapshotChanged(format!(
+            "mtime changed during verification {} -> {after_mtime}",
+            snap.mtime_ms
+        )));
+    }
+    Ok(())
 }
 
 /// 捕获并立即复核——适合"读取即提交前"的简单路径。
@@ -157,6 +185,25 @@ mod tests {
         }
         let err = verify_snapshot(&p, &snap).unwrap_err();
         assert!(matches!(err, PortError::SnapshotChanged(ref m) if m.contains("len")));
+    }
+
+    #[test]
+    fn append_between_stat_and_read_is_detected_after_read() {
+        // 复核读取窗口内追加：首次 stat 后、read 完成后文件才被追加。指纹校验
+        // 只覆盖读取范围（按旧 len 截断），追加的字节重建后不会被指纹识别；
+        // verify_snapshot 必须在读取后再次核对 len+mtime 才能检出。
+        // 真实竞态（stat→read 之间追加）无法在单测里确定性复现，因此直接驱动
+        // 读后复检函数 post_read_verify——它必须在读取完成后捕获 len/mtime 变化。
+        let dir = tempfile::tempdir().unwrap();
+        let p = write_file(dir.path(), "a.jsonl", b"hello world!!!!!");
+        let (snap, _) = capture(&p).unwrap();
+        // 捕获后截短内容：等价于"read 已完成、源在窗口内被改写"的状态。
+        std::fs::write(&p, b"12345").unwrap();
+        let err = post_read_verify(&p, &snap).unwrap_err();
+        assert!(
+            matches!(err, PortError::SnapshotChanged(ref m) if m.contains("len changed during verification")),
+            "got {err:?}"
+        );
     }
 
     #[test]

@@ -97,6 +97,13 @@ pub trait CatalogStore {
     /// 按 wire id 升序列出最多 `limit` 个实体；稳定排序便于后续接 cursor。
     fn list(&self, limit: usize) -> PortResult<Vec<CatalogEntry>>;
 
+    /// 只列出 Session 实体（`ses_v1_` 前缀），仍按 wire id 升序。
+    ///
+    /// 过滤必须在存储层完成（而不是 application 取全量后再筛）：调用方按
+    /// 过滤后集合的 offset 续页，若先 `list(limit)` 再筛会得到少于 `limit`
+    /// 的结果并让 cursor 错位（competitor-borrowings R1.3）。
+    fn list_sessions(&self, limit: usize) -> PortResult<Vec<CatalogEntry>>;
+
     /// Catalog 当前实体总数（status/doctor 使用）。
     fn count(&self) -> PortResult<u64>;
 
@@ -146,6 +153,79 @@ pub trait ContextGraphStore {
     fn context_stats(&self) -> PortResult<ContextStats>;
 }
 
+/// A provider whose authoritative source-document metadata may constrain search.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum SearchProvider {
+    Claude,
+    Codex,
+}
+
+impl SearchProvider {
+    /// Canonical provider id stored in SourceDocument payloads.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Claude => "claude-code",
+            Self::Codex => "codex",
+        }
+    }
+}
+
+/// A normalized instant used by backend-independent search filters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SearchInstant {
+    pub unix_seconds: i64,
+    pub nanosecond: u32,
+}
+
+impl SearchInstant {
+    pub fn from_unix_millis(milliseconds: i64) -> Self {
+        Self {
+            unix_seconds: milliseconds.div_euclid(1_000),
+            nanosecond: (milliseconds.rem_euclid(1_000) as u32) * 1_000_000,
+        }
+    }
+
+    /// Big-endian key whose byte order is the instant order. SQLite uses this
+    /// as a BLOB so comparisons retain nanosecond precision.
+    pub fn sort_key(self) -> [u8; 12] {
+        let mut key = [0; 12];
+        key[..8].copy_from_slice(&((self.unix_seconds as u64) ^ (1_u64 << 63)).to_be_bytes());
+        key[8..].copy_from_slice(&self.nanosecond.to_be_bytes());
+        key
+    }
+}
+
+/// Backend-independent, normalized metadata predicates for a search query.
+///
+/// `providers` is a canonical sorted set at the Application boundary. Provider
+/// entries are ORed; provider and time dimensions are ANDed. Time is a
+/// half-open UTC interval `[since, until)`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SearchFilters {
+    pub providers: Vec<SearchProvider>,
+    pub since: Option<SearchInstant>,
+    pub until: Option<SearchInstant>,
+}
+
+impl SearchFilters {
+    pub const EMPTY: Self = Self {
+        providers: Vec::new(),
+        since: None,
+        until: None,
+    };
+
+    pub fn is_empty(&self) -> bool {
+        self.providers.is_empty() && self.since.is_none() && self.until.is_none()
+    }
+}
+
+/// One normalized full-text query and its metadata predicates.
+#[derive(Debug, Clone, Copy)]
+pub struct SearchQuery<'a> {
+    pub text: &'a str,
+    pub filters: &'a SearchFilters,
+}
+
 /// 检索命中：一条搜索结果。
 #[derive(Debug, Clone, PartialEq)]
 pub struct SearchHit {
@@ -164,6 +244,22 @@ pub struct SearchHit {
     /// robot/json/jsonl 序列化器输出为命中对象的 `text` 字段；人类渲染器打印
     /// 同一摘要作为 snippet 行（R4.3：human 输出不变）。
     pub text: Option<String>,
+    /// 确定性字面量命中证据（search-match-guidance）：由 Application 用与索引侧
+    /// 同一 CJK/plain-text 词元分析对用户**字面查询**派生，逐词断言在命中完整正文
+    /// 中存在。只含字面词元/字段名——绝不携带 FTS 引号化查询串或语法表达式。
+    /// 空列表表示无证据可附；序列化时空列表省略（追加字段，字节兼容）。
+    pub why_matched: Vec<String>,
+    /// 建议的下一步调用（search-match-guidance）：只由命中实际携带的 id 派生
+    /// （get_message 需 message_id + session_id，缺任一则省略该条建议），
+    /// 条数固定有界，绝不臆造标识符。
+    pub suggested_next_commands: Vec<String>,
+    /// 归并计数（competitor-borrowings R3）：`group_by_session` 模式下同一会话
+    /// 的命中数；非归并模式下恒为 1（序列化时省略，保持既有输出字节兼容）。
+    pub occurrences: usize,
+    /// Resume Metadata 可用性（ADR-0009）：Application 经
+    /// [`ResumeClaimsStore::resume_of`] 批量装配。`false` 仅表示该会话
+    /// 没有可恢复的 Provider 元数据，绝不表示历史不可检索。
+    pub resume_available: bool,
 }
 
 /// 全文检索端口：对应 FTS5 主存（见 ADR-0001）。
@@ -171,8 +267,21 @@ pub trait SearchIndex {
     /// 将实体文本纳入索引。`text` 为已抽取的可检索正文。
     fn index(&self, id: &StableId, text: &str) -> PortResult<()>;
 
-    /// 执行查询，返回按相关性降序的命中，最多 `limit` 条。
-    fn query(&self, query: &str, limit: usize) -> PortResult<Vec<SearchHit>>;
+    /// Keep the omitted-filter call shape for existing clients. Application
+    /// uses `query_filtered` when metadata predicates are present.
+    fn query(&self, query: &str, limit: usize) -> PortResult<Vec<SearchHit>> {
+        self.query_filtered(
+            SearchQuery {
+                text: query,
+                filters: &SearchFilters::EMPTY,
+            },
+            limit,
+        )
+    }
+
+    /// Execute a query with normalized metadata predicates, returning at most
+    /// `limit` hits in the backend's pinned relevance order.
+    fn query_filtered(&self, query: SearchQuery<'_>, limit: usize) -> PortResult<Vec<SearchHit>>;
 }
 
 // 对 `&T` 的 blanket impl：端口方法均取 `&self`，故一个具体 store 可以
@@ -190,6 +299,9 @@ impl<T: CatalogStore + ?Sized> CatalogStore for &T {
     }
     fn list(&self, limit: usize) -> PortResult<Vec<CatalogEntry>> {
         (**self).list(limit)
+    }
+    fn list_sessions(&self, limit: usize) -> PortResult<Vec<CatalogEntry>> {
+        (**self).list_sessions(limit)
     }
     fn count(&self) -> PortResult<u64> {
         (**self).count()
@@ -224,8 +336,8 @@ impl<T: SearchIndex + ?Sized> SearchIndex for &T {
     fn index(&self, id: &StableId, text: &str) -> PortResult<()> {
         (**self).index(id, text)
     }
-    fn query(&self, query: &str, limit: usize) -> PortResult<Vec<SearchHit>> {
-        (**self).query(query, limit)
+    fn query_filtered(&self, query: SearchQuery<'_>, limit: usize) -> PortResult<Vec<SearchHit>> {
+        (**self).query_filtered(query, limit)
     }
 }
 
@@ -340,6 +452,133 @@ pub struct ParseReport {
     /// Codex `session_meta` 的 `session_id`）。`None` 表示 provider 未提供，
     /// 由上层回退 Reconstructed 派生——绝不臆造。
     pub session_native_id: Option<String>,
+    /// Provider-native Resume Metadata 观察（ADR-0009）：native id 之外的
+    /// `provider_session_id` 与 `original_working_directory` 同源关联、
+    /// 显式可空、歧义 fail closed。旧 adapter 未填充时保持全 Missing。
+    pub session_observation: ProviderSessionObservation,
+}
+
+/// 单个 Provider-native Resume Metadata 值的解析状态（ADR-0009）：
+/// 缺失/解析成功/歧义三态，绝不臆造、绝不把不同来源的值拼成假 pair。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum MetadataResolution<T> {
+    /// provider 未提供（字段缺失/空白）。
+    #[default]
+    Missing,
+    /// provider 权威提供且唯一。
+    Resolved(T),
+    /// 同一 Source 观察到多个不同值（多会话/合并文件）——fail closed。
+    Ambiguous,
+}
+
+/// 一次权威的 Provider-native Session Resume Metadata 观察（ADR-0009）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProviderSessionObservation {
+    pub provider_session_id: MetadataResolution<String>,
+    pub original_working_directory: MetadataResolution<String>,
+    /// 两值来自同一条权威 provider 记录（保关联，绝不跨记录拼 pair）。
+    pub pair_observed: bool,
+    /// Source 携带多个不同 native Session ID（现有诊断契约的 typed 映射）。
+    pub multi_session: bool,
+}
+
+/// 只读、固定形状的会话 Resume Metadata 投影（ADR-0009）：字段恒在、
+/// 未知/歧义为 `None`；从不省略、从不臆造、从不暴露 Source path。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionResumeMetadata {
+    /// Canonical Session 身份（关联/分组键，不是 provider 恢复标识）。
+    pub session_id: StableId,
+    pub provider_id: Option<String>,
+    pub resume_available: bool,
+    pub provider_session_id: Option<String>,
+    pub original_working_directory: Option<String>,
+    pub unavailable_reason: Option<String>,
+}
+
+/// Source-scoped Resume Metadata 声明的批量只读解析端口（ADR-0009）。
+/// 与 Catalog/FTS 分离；历史缺失/歧义恒可检索，只是不可恢复。
+pub trait ResumeClaimsStore {
+    /// 批量解析 Session 的 Resume Metadata；与 `session_ids` 同序。
+    /// 实现必须分块 IN 批量读取（无 N+1）；无声明/legacy → 全字段
+    /// `None` + `resume_available:false` + 明确的 unavailable_reason。
+    fn resume_of(&self, session_ids: &[StableId]) -> PortResult<Vec<SessionResumeMetadata>>;
+}
+
+/// Source-scoped Resume Metadata 声明（ADR-0009）：组合根把
+/// [`ParseReport::session_observation`] 归一为本形状，随 source 事务
+/// 原子写入；`None` 表示该 source 无可声明值（缺失/歧义已折叠进 state）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceResumeClaim {
+    /// 该 source 认领的 provider id（如 `claude-code` / `codex`）。
+    pub provider_id: String,
+    /// 组合根派生的 canonical Session wire id（`ses_v1_*`），与本声明
+    /// 同步写入同一 source 事务。
+    pub session_id: String,
+    pub provider_session_id: Option<String>,
+    pub provider_session_id_state: String,
+    pub original_working_directory: Option<String>,
+    pub original_working_directory_state: String,
+    pub pair_observed: bool,
+}
+
+impl SourceResumeClaim {
+    /// 把 provider 观察转为 source 声明；state 取值与
+    /// [`MetadataResolution`] 一一对应（`missing`/`resolved`/`ambiguous`）。
+    pub fn from_observation(
+        provider_id: &str,
+        session_id: &str,
+        observation: &ProviderSessionObservation,
+    ) -> Self {
+        // fail closed：同一 Source 出现多个不同 native Session ID 时，
+        // 任何单个 ID 都不能被宣称权威（ADR-0009）——折叠为 ambiguous。
+        let multi = observation.multi_session;
+        let (id_value, id_state) = match &observation.provider_session_id {
+            MetadataResolution::Missing => (None, "missing"),
+            MetadataResolution::Resolved(v) if !multi => (Some(v.clone()), "resolved"),
+            _ => (None, "ambiguous"),
+        };
+        let (dir_value, dir_state) = match &observation.original_working_directory {
+            MetadataResolution::Missing => (None, "missing"),
+            MetadataResolution::Resolved(v) if !multi => (Some(v.clone()), "resolved"),
+            _ => (None, "ambiguous"),
+        };
+        Self {
+            provider_id: provider_id.to_string(),
+            session_id: session_id.to_string(),
+            provider_session_id: id_value,
+            provider_session_id_state: id_state.to_string(),
+            original_working_directory: dir_value,
+            original_working_directory_state: dir_state.to_string(),
+            pair_observed: observation.pair_observed && !multi,
+        }
+    }
+}
+
+/// 默认空实现：任何 Session 均不可恢复（legacy/无声明）。App 在
+/// 调用方未提供实现时用它兜底，保证既有构造签名不变。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoResumeClaims;
+
+impl ResumeClaimsStore for NoResumeClaims {
+    fn resume_of(&self, session_ids: &[StableId]) -> PortResult<Vec<SessionResumeMetadata>> {
+        Ok(session_ids
+            .iter()
+            .map(|id| SessionResumeMetadata {
+                session_id: id.clone(),
+                provider_id: None,
+                resume_available: false,
+                provider_session_id: None,
+                original_working_directory: None,
+                unavailable_reason: Some("no resume metadata claims".into()),
+            })
+            .collect())
+    }
+}
+
+impl<T: ResumeClaimsStore + ?Sized> ResumeClaimsStore for &T {
+    fn resume_of(&self, session_ids: &[StableId]) -> PortResult<Vec<SessionResumeMetadata>> {
+        (**self).resume_of(session_ids)
+    }
 }
 
 /// 一条规范化消息的事件载荷（RFC-0002 §2）：parse 流式产出的最小单元。
@@ -414,6 +653,106 @@ pub trait ProviderAdapter: Send + Sync {
 mod tests {
     use super::*;
     use agent_session_grep_domain::{IdKind, SessionContextGraph, Stability};
+
+    #[test]
+    fn search_provider_maps_to_canonical_ids() {
+        assert_eq!(SearchProvider::Claude.as_str(), "claude-code");
+        assert_eq!(SearchProvider::Codex.as_str(), "codex");
+    }
+
+    #[test]
+    fn search_instant_orders_by_seconds_then_nanoseconds() {
+        let base = SearchInstant {
+            unix_seconds: 1_000,
+            nanosecond: 0,
+        };
+        let same_second = SearchInstant {
+            unix_seconds: 1_000,
+            nanosecond: 1,
+        };
+        let next_second = SearchInstant {
+            unix_seconds: 1_001,
+            nanosecond: 0,
+        };
+        assert!(base < same_second);
+        assert!(same_second < next_second);
+    }
+
+    #[test]
+    fn search_instant_sort_key_byte_order_is_instant_order() {
+        let negative = SearchInstant {
+            unix_seconds: -1,
+            nanosecond: 999_999_999,
+        };
+        let epoch = SearchInstant {
+            unix_seconds: 0,
+            nanosecond: 0,
+        };
+        let positive = SearchInstant {
+            unix_seconds: 1,
+            nanosecond: 0,
+        };
+        let positive_nanos = SearchInstant {
+            unix_seconds: 1,
+            nanosecond: 1,
+        };
+        let mut keys = [
+            positive_nanos.sort_key(),
+            epoch.sort_key(),
+            positive.sort_key(),
+            negative.sort_key(),
+        ];
+        keys.sort();
+        assert_eq!(
+            keys,
+            [
+                negative.sort_key(),
+                epoch.sort_key(),
+                positive.sort_key(),
+                positive_nanos.sort_key(),
+            ]
+        );
+    }
+
+    #[test]
+    fn search_instant_from_unix_millis_uses_euclid_for_negative_values() {
+        let instant = SearchInstant::from_unix_millis(-1);
+        assert_eq!(instant.unix_seconds, -1);
+        assert_eq!(instant.nanosecond, 999_000_000);
+        let epoch = SearchInstant::from_unix_millis(0);
+        assert_eq!(epoch.unix_seconds, 0);
+        assert_eq!(epoch.nanosecond, 0);
+        let positive = SearchInstant::from_unix_millis(1_234);
+        assert_eq!(positive.unix_seconds, 1);
+        assert_eq!(positive.nanosecond, 234_000_000);
+    }
+
+    #[test]
+    fn search_filters_is_empty_reflects_all_dimensions() {
+        assert!(SearchFilters::EMPTY.is_empty());
+        assert!(SearchFilters::default().is_empty());
+        let provider_only = SearchFilters {
+            providers: vec![SearchProvider::Claude],
+            ..SearchFilters::default()
+        };
+        assert!(!provider_only.is_empty());
+        let since_only = SearchFilters {
+            since: Some(SearchInstant {
+                unix_seconds: 0,
+                nanosecond: 0,
+            }),
+            ..SearchFilters::default()
+        };
+        assert!(!since_only.is_empty());
+        let until_only = SearchFilters {
+            until: Some(SearchInstant {
+                unix_seconds: 0,
+                nanosecond: 0,
+            }),
+            ..SearchFilters::default()
+        };
+        assert!(!until_only.is_empty());
+    }
 
     struct FakeContextStore {
         graph: SessionContextGraph,

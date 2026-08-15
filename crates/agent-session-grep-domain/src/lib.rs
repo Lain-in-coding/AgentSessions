@@ -8,7 +8,7 @@ mod ids;
 mod thread;
 
 pub use error::{DomainError, DomainResult};
-pub use ids::{IdKind, PlacementId, Stability, StableId};
+pub use ids::{IdKind, PlacementId, SessionIdentityNamespace, Stability, StableId};
 pub use thread::{BranchSelection, ContextPolicy, select_full, select_mainline};
 
 use serde::{Deserialize, Serialize};
