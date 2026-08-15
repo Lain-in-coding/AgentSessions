@@ -202,6 +202,9 @@ fn generate_token() -> String {
     hex
 }
 
+/// The embedded Web UI HTML (single-page app, no external dependencies).
+const WEB_UI_HTML: &str = include_str!("web/index.html");
+
 /// Route an HTTP request to the appropriate response (stub for now —
 /// full Application ADT wiring deferred to integration).
 pub fn route_request(req: &HttpRequest, token: &str) -> HttpResponse {
@@ -213,12 +216,24 @@ pub fn route_request(req: &HttpRequest, token: &str) -> HttpResponse {
         return HttpResponse::json(403, r#"{"error":"forbidden: non-loopback host"}"#);
     }
     match (req.method.as_str(), req.path.as_str()) {
-        ("GET", "/") => HttpResponse::text(200, "agent-session-grep serve (loopback)"),
-        ("GET", "/health") => HttpResponse::json(200, r#"{"status":"ok"}"#),
-        ("GET", "/api/status") => HttpResponse::json(200, r#"{"command":"status"}"#),
-        ("GET", "/api/search") => {
-            HttpResponse::json(200, r#"{"command":"search","data":{"hits":[]}}"#)
-        }
+        ("GET", "/") => HttpResponse {
+            status: 200,
+            body: WEB_UI_HTML.to_string(),
+            content_type: "text/html; charset=utf-8",
+        },
+        ("GET", "/health") => HttpResponse::json(200, r#"{"status":"ok","generation":1}"#),
+        ("GET", "/api/status") => HttpResponse::json(
+            200,
+            r#"{"command":"status","providers":[{"id":"claude-code","found":0,"complete":true},{"id":"codex","found":0,"complete":true},{"id":"grok-build","found":0,"complete":false},{"id":"pi","found":0,"complete":false},{"id":"kimi-code","found":0,"complete":false}]}"#,
+        ),
+        ("GET", "/api/search") => HttpResponse::json(
+            200,
+            r#"{"retrieval_mode":"lexical","hits":[{"id":"msg_v1_demo","score":0.5,"text":"demo hit","session_id":"ses_v1_demo","why_matched":["demo"]}]}"#,
+        ),
+        ("GET", "/api/context") => HttpResponse::json(
+            200,
+            r#"{"session_id":"ses_v1_demo","messages":[{"role":"user","text":"hello"},{"role":"assistant","text":"hi there"}]}"#,
+        ),
         _ => HttpResponse::json(404, r#"{"error":"not found"}"#),
     }
 }
