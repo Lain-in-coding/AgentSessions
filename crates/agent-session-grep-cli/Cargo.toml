@@ -23,7 +23,10 @@ agent-session-grep-provider-claude = { path = "../agent-session-grep-provider-cl
 agent-session-grep-provider-codex = { path = "../agent-session-grep-provider-codex" }
 agent-session-grep-provider-grok = { path = "../agent-session-grep-provider-grok" }
 agent-session-grep-provider-kimi = { path = "../agent-session-grep-provider-kimi" }
+agent-session-grep-provider-openclaw = { path = "../agent-session-grep-provider-openclaw" }
+agent-session-grep-provider-codebuddy = { path = "../agent-session-grep-provider-codebuddy" }
 agent-session-grep-provider-pi = { path = "../agent-session-grep-provider-pi" }
+agent-session-grep-provider-qoder = { path = "../agent-session-grep-provider-qoder" }
 serde = { workspace = true }
 serde_json.workspace = true
 ratatui.workspace = true

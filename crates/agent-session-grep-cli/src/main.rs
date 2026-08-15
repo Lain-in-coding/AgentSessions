@@ -36,10 +36,13 @@ use agent_session_grep_ports::{
     RetrievalMode, SearchFilters, SearchProvider, SourceResumeClaim,
 };
 use agent_session_grep_provider_claude::ClaudeCodeAdapter;
+use agent_session_grep_provider_codebuddy::CodeBuddyAdapter;
 use agent_session_grep_provider_codex::CodexAdapter;
 use agent_session_grep_provider_grok::GrokBuildAdapter;
 use agent_session_grep_provider_kimi::KimiCodeAdapter;
+use agent_session_grep_provider_openclaw::OpenClawAdapter;
 use agent_session_grep_provider_pi::PiAdapter;
+use agent_session_grep_provider_qoder::QoderAdapter;
 use protocol::{CanonicalCode, ProtocolError};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -1542,7 +1545,10 @@ fn provider_registry() -> Vec<Box<dyn ProviderAdapter>> {
         Box::new(CodexAdapter::new()),
         Box::new(GrokBuildAdapter::new()),
         Box::new(PiAdapter::new()),
+        Box::new(QoderAdapter::new()),
         Box::new(KimiCodeAdapter::new()),
+        Box::new(OpenClawAdapter::new()),
+        Box::new(CodeBuddyAdapter::new()),
     ]
 }
 
@@ -1656,6 +1662,8 @@ fn provider_data_root(provider_id: &str) -> Option<std::path::PathBuf> {
     let sub = match provider_id {
         "claude-code" => ".claude/projects",
         "codex" => ".codex/sessions",
+        "openclaw" => ".openclaw/agents",
+        "tencent-codebuddy" => ".codebuddy/projects",
         _ => return None,
     };
     let home = std::env::var_os("HOME")

@@ -1,8 +1,8 @@
 //! Provider Capability Matrix（能力矩阵单源权威）。
 //!
 //! 所有入口（CLI/MCP/Robot/Web）渲染 provider 能力必须读本矩阵，禁止硬编码。
-//! 当前已实现的 2 个 provider（Claude Code、Codex）maturity=experimental。
-//! 其余 14 个 provider 在 `08-15-sixteen-provider-evidence-wave` 任务中逐步实现。
+//! 当前已实现的 provider maturity=experimental，在 `08-15-sixteen-provider-evidence-wave`
+//! 任务中逐步实现并晋级。
 //!
 //! 参考：ctx 的 `provider-support-matrix.json` 格式（idea-only）。
 
@@ -189,6 +189,51 @@ impl ProviderCapabilityMatrix {
                 ProviderCapability {
                     provider_id: "kimi-code".into(),
                     variant_id: "kimi-code/wire-jsonl-v1".into(),
+                    maturity: ProviderMaturity::Experimental,
+                    discover: CapabilityLevel::Unsupported,
+                    probe: CapabilityLevel::Native,
+                    parse: CapabilityLevel::Native,
+                    search: CapabilityLevel::Native,
+                    context: CapabilityLevel::Unsupported,
+                    resume: CapabilityLevel::Unknown,
+                    handoff: CapabilityLevel::Unsupported,
+                    tool_activity: CapabilityLevel::Unsupported,
+                    source_span: CapabilityLevel::Native,
+                    incremental: CapabilityLevel::Unsupported,
+                },
+                ProviderCapability {
+                    provider_id: "qoder".into(),
+                    variant_id: "qoder/transcript-jsonl-v1".into(),
+                    maturity: ProviderMaturity::Experimental,
+                    discover: CapabilityLevel::Unsupported,
+                    probe: CapabilityLevel::Native,
+                    parse: CapabilityLevel::Native,
+                    search: CapabilityLevel::Native,
+                    context: CapabilityLevel::Unsupported,
+                    resume: CapabilityLevel::Unknown,
+                    handoff: CapabilityLevel::Unsupported,
+                    tool_activity: CapabilityLevel::Unsupported,
+                    source_span: CapabilityLevel::Native,
+                    incremental: CapabilityLevel::Unsupported,
+                },
+                ProviderCapability {
+                    provider_id: "openclaw".into(),
+                    variant_id: "openclaw/session-jsonl-v3".into(),
+                    maturity: ProviderMaturity::Experimental,
+                    discover: CapabilityLevel::Unsupported,
+                    probe: CapabilityLevel::Native,
+                    parse: CapabilityLevel::Native,
+                    search: CapabilityLevel::Native,
+                    context: CapabilityLevel::Unsupported,
+                    resume: CapabilityLevel::Unsupported,
+                    handoff: CapabilityLevel::Unsupported,
+                    tool_activity: CapabilityLevel::Unsupported,
+                    source_span: CapabilityLevel::Native,
+                    incremental: CapabilityLevel::Unsupported,
+                },
+                ProviderCapability {
+                    provider_id: "tencent-codebuddy".into(),
+                    variant_id: "tencent-codebuddy/cli-jsonl-v1".into(),
                     maturity: ProviderMaturity::Experimental,
                     discover: CapabilityLevel::Unsupported,
                     probe: CapabilityLevel::Native,
