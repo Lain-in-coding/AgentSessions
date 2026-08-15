@@ -361,6 +361,59 @@ pub trait SearchIndex {
     fn query_filtered(&self, query: SearchQuery<'_>, limit: usize) -> PortResult<Vec<SearchHit>>;
 }
 
+/// 语义检索端口：本地 embedding 向量检索（ADR pending / #3 任务）。
+///
+/// 这是 semantic search 的端口契约。具体实现（sqlite-vec + ONNX Runtime
+/// 或 candle）落在 adapter crate；Application 只依赖本抽象。
+/// Lexical 永远可用；semantic 不可用时 Application 显式降级到
+/// `RetrievalMode::LexicalFallback` + warning，禁止静默切换。
+pub trait SemanticIndex {
+    /// 将一条消息的 embedding 纳入向量索引。
+    ///
+    /// `embedding` 是归一化后的 float 向量（维度由模型 manifest 声明）。
+    fn index_embedding(&self, id: &StableId, embedding: &[f32]) -> PortResult<()>;
+
+    /// 执行语义查询：返回与 query embedding 最相似的 top-k 消息。
+    ///
+    /// 结果按余弦相似度降序。`limit` 是最大返回数。
+    fn query_semantic(&self, query_embedding: &[f32], limit: usize) -> PortResult<Vec<SearchHit>>;
+
+    /// 语义索引是否就绪（模型已加载、向量索引已建）。
+    /// 未就绪时 Application 应回退到 lexical。
+    fn is_ready(&self) -> bool;
+}
+
+/// Embedding 模型端口：把文本转成归一化向量。
+///
+/// 实现可能是 ONNX Runtime 动态加载、candle 本地推理、或外部 API（opt-in）。
+/// 模型 manifest 记录 id/hash/dimension/license（#3 Req 1）。
+pub trait EmbeddingModel {
+    /// 把单条文本转成归一化 embedding 向量。
+    ///
+    /// `is_query` 为 true 时使用 query 前缀（如 `query: `），
+    /// false 时使用 passage 前缀（如 `passage: `）。
+    fn embed(&self, text: &str, is_query: bool) -> PortResult<Vec<f32>>;
+
+    /// 模型维度（embedding 向量长度）。
+    fn dimension(&self) -> usize;
+
+    /// 模型 manifest 信息（id/hash/license）。
+    fn manifest(&self) -> &EmbeddingManifest;
+}
+
+/// Embedding 模型 manifest：锁定模型身份与完整性（#3 Req 1）。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct EmbeddingManifest {
+    /// 模型 id（如 `multilingual-e5-small`）。
+    pub model_id: String,
+    /// 模型文件 SHA-256（首次下载后校验）。
+    pub file_hash: String,
+    /// 向量维度。
+    pub dimension: usize,
+    /// 模型 license。
+    pub license: String,
+}
+
 // 对 `&T` 的 blanket impl：端口方法均取 `&self`，故一个具体 store 可以
 // 用共享引用同时填充 App<C,S> 的两个泛型槽（catalog 与 index 是同一实例）。
 // 组合根据此复用单一 SqliteStore，无需两份连接或内部 Arc。
