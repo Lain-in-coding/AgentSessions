@@ -45,7 +45,7 @@ asg handoff "how did we configure the database?"
 
 ## Providers
 
-Currently implemented (5/16 planned):
+Currently implemented (8/16 planned):
 
 | Provider | Status | Format |
 |---|---|---|
@@ -54,6 +54,9 @@ Currently implemented (5/16 planned):
 | Grok Build | Experimental | ACP `updates.jsonl` (`session/update` stream) |
 | Pi | Experimental | session JSONL (`type:session/message`) |
 | Kimi Code | Experimental | wire.jsonl (`context.append_message`) |
+| OpenClaw | Experimental | v3 JSONL header + message records |
+| Qoder | Experimental | JSONL (`session_meta` + `type:user/assistant`) |
+| Tencent CodeBuddy | Experimental | OpenAI-style JSONL (`role`/`content`/`sessionId`) |
 
 See [Provider Maturity Matrix](docs/product/PROVIDER-MATURITY-MATRIX.md) for
 the full 16-provider roadmap.
