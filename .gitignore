@@ -1,5 +1,7 @@
 # Rust build artifacts (所有层级，含 spikes/*/target)
 target/
+# Isolated --target-dir outputs used for parallel/worktree verification runs
+target-*/
 **/*.rs.bk
 
 # Reference source repos (studied for patterns, not part of this project)
@@ -27,6 +29,7 @@ credentials*
 
 # Local agent / editor configuration
 .claude/
+.codegraph/
 .idea/
 .vscode/
 
