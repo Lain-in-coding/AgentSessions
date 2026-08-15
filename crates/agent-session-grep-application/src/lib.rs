@@ -21,6 +21,7 @@ pub mod cjk;
 pub mod cursor;
 pub mod evidence;
 pub mod guidance;
+pub mod hybrid;
 
 pub use budget::{ResponseBudget, Truncation};
 pub use cjk::bigram_cjk;
