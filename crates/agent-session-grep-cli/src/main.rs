@@ -19,6 +19,7 @@ mod human;
 mod mcp;
 mod protocol;
 mod redaction;
+mod serve;
 mod tui;
 
 use agent_session_grep_adapters_sqlite::{SourceBatch, SqliteStore, capture, verify_snapshot};
