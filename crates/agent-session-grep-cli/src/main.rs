@@ -36,6 +36,7 @@ use agent_session_grep_ports::{
     RetrievalMode, SearchFilters, SearchProvider, SourceResumeClaim,
 };
 use agent_session_grep_provider_claude::ClaudeCodeAdapter;
+use agent_session_grep_provider_cline::ClineAdapter;
 use agent_session_grep_provider_codebuddy::CodeBuddyAdapter;
 use agent_session_grep_provider_codex::CodexAdapter;
 use agent_session_grep_provider_grok::GrokBuildAdapter;
@@ -1549,6 +1550,7 @@ fn provider_registry() -> Vec<Box<dyn ProviderAdapter>> {
         Box::new(KimiCodeAdapter::new()),
         Box::new(OpenClawAdapter::new()),
         Box::new(CodeBuddyAdapter::new()),
+        Box::new(ClineAdapter::new()),
     ]
 }
 

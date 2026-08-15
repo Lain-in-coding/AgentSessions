@@ -38,6 +38,7 @@ dependencies = [
  "agent-session-grep-domain",
  "agent-session-grep-ports",
  "agent-session-grep-provider-claude",
+ "agent-session-grep-provider-cline",
  "agent-session-grep-provider-codebuddy",
  "agent-session-grep-provider-codex",
  "agent-session-grep-provider-grok",
@@ -75,6 +76,17 @@ dependencies = [
 
 [[package]]
 name = "agent-session-grep-provider-claude"
+version = "0.1.0"
+dependencies = [
+ "agent-session-grep-domain",
+ "agent-session-grep-ports",
+ "blake3",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "agent-session-grep-provider-cline"
 version = "0.1.0"
 dependencies = [
  "agent-session-grep-domain",

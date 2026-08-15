@@ -20,6 +20,7 @@ agent-session-grep-ports = { path = "../agent-session-grep-ports" }
 agent-session-grep-application = { path = "../agent-session-grep-application" }
 agent-session-grep-adapters-sqlite = { path = "../agent-session-grep-adapters-sqlite" }
 agent-session-grep-provider-claude = { path = "../agent-session-grep-provider-claude" }
+agent-session-grep-provider-cline = { path = "../agent-session-grep-provider-cline" }
 agent-session-grep-provider-codex = { path = "../agent-session-grep-provider-codex" }
 agent-session-grep-provider-grok = { path = "../agent-session-grep-provider-grok" }
 agent-session-grep-provider-kimi = { path = "../agent-session-grep-provider-kimi" }
