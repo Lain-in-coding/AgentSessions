@@ -45,7 +45,7 @@ asg handoff "how did we configure the database?"
 
 ## Providers
 
-Currently implemented (4/16 planned):
+Currently implemented (5/16 planned):
 
 | Provider | Status | Format |
 |---|---|---|
@@ -53,6 +53,7 @@ Currently implemented (4/16 planned):
 | Codex CLI | Experimental | rollout JSONL (`response_item`/`message`) |
 | Grok Build | Experimental | ACP `updates.jsonl` (`session/update` stream) |
 | Pi | Experimental | session JSONL (`type:session/message`) |
+| Kimi Code | Experimental | wire.jsonl (`context.append_message`) |
 
 See [Provider Maturity Matrix](docs/product/PROVIDER-MATURITY-MATRIX.md) for
 the full 16-provider roadmap.
