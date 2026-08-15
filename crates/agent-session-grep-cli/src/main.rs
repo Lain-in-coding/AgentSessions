@@ -14,6 +14,7 @@
 //! 参数解析刻意手写、不引第三方 CLI 框架——切片阶段只需最小可用面。
 //! 输出走 Robot-JSON 雏形（每行一个 JSON 对象），为后续 CONTRACT 对齐留口。
 
+mod hooks;
 mod human;
 mod mcp;
 mod protocol;
