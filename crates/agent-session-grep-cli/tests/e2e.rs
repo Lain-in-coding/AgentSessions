@@ -3805,6 +3805,53 @@ fn sync_discover_re_runs_converge() {
 }
 
 #[test]
+fn sync_discover_backfills_explicit_source_before_tombstone_diff() {
+    let (home_dir, home) = discover_env();
+    let (_db_dir, db) = temp_db("discover-provider-backfill");
+    let claude_proj = home_dir
+        .path()
+        .join(".claude")
+        .join("projects")
+        .join("backfill");
+    std::fs::create_dir_all(&claude_proj).expect("create claude proj dir");
+    let claude_file = claude_proj.join("backfill.jsonl");
+    std::fs::write(
+        &claude_file,
+        format!("{}\n", claude_fixture("\"provider backfill keeper\"")),
+    )
+    .expect("write claude fixture");
+    let source = claude_file.to_str().expect("utf-8 fixture path");
+
+    // Explicit sync records the source with provider_id = NULL.
+    let out = run_with_home(&db, &home, &["sync", source]);
+    assert!(out.status.success(), "explicit sync: {}", stdout(&out));
+
+    // The file is unchanged, so discovery takes the fingerprint fast path. It must
+    // still associate the source with claude-code for future prior-path diffs.
+    let out = run_with_home(&db, &home, &["sync", "--discover"]);
+    assert!(out.status.success(), "discover backfill: {}", stdout(&out));
+
+    std::fs::remove_file(&claude_file).expect("remove fixture");
+    let out = run_with_home(&db, &home, &["sync", "--discover"]);
+    assert!(out.status.success(), "discover removal: {}", stdout(&out));
+    let frame = parse_first_line(&out);
+    let claude = frame["data"]["discovery"]["providers"]
+        .as_array()
+        .expect("providers")
+        .iter()
+        .find(|provider| provider["id"] == "claude-code")
+        .expect("claude-code");
+    assert_eq!(claude["removed"], 1, "backfilled source must diff: {frame}");
+
+    let out = run_with_home(&db, &home, &["search", "backfill"]);
+    assert!(
+        !stdout(&out).contains("msg_v1_"),
+        "removed explicit source must be tombstoned: {}",
+        stdout(&out)
+    );
+}
+
+#[test]
 fn sync_discover_tombstones_removed_source_on_complete_scan() {
     let (home_dir, home) = discover_env();
     let (_db_dir, db) = temp_db("discover-tombstone");

@@ -1631,6 +1631,19 @@ fn provider_data_root(provider_id: &str) -> Option<std::path::PathBuf> {
     Some(home.join(sub))
 }
 
+fn source_path_identity(path: &str) -> String {
+    if !cfg!(windows) {
+        return path.to_string();
+    }
+    let mut normalized = path.replace('\\', "/");
+    let bytes = normalized.as_bytes();
+    if bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_uppercase() {
+        let drive = (bytes[0].to_ascii_lowercase() as char).to_string();
+        normalized.replace_range(..1, &drive);
+    }
+    normalized
+}
+
 /// 递归遍历 `root`，收集所有 `.jsonl` 文件路径（正斜杠归一）。
 ///
 /// 返回 `(paths, complete)`：`complete = false` 表示遍历中途遇到不可读目录
@@ -1682,7 +1695,7 @@ fn discover_provider_sources(root: &std::path::Path) -> (Vec<String>, bool) {
             } else if file_type.is_file()
                 && path.extension().and_then(|e| e.to_str()) == Some("jsonl")
             {
-                paths.push(path.to_string_lossy().replace('\\', "/"));
+                paths.push(source_path_identity(&path.to_string_lossy()));
             }
         }
     }
@@ -1796,8 +1809,8 @@ fn sync_discover(
                     placements: Vec::new(),
                     edges: Vec::new(),
                     relation_complete: true,
-                    len_bytes: Some(0),
-                    fingerprint: Some(String::new()),
+                    len_bytes: None,
+                    fingerprint: None,
                     provider_id: Some(pid.clone()),
                     resume_claim: None,
                 });
@@ -2216,8 +2229,9 @@ fn sync_files(
     // （exit 6）——sync 幂等语义下应提前归一为单个源。
     let mut unique: Vec<String> = Vec::with_capacity(paths.len());
     for path in paths {
-        if !unique.iter().any(|existing| existing == path) {
-            unique.push(path.clone());
+        let path = source_path_identity(path);
+        if !unique.iter().any(|existing| existing == &path) {
+            unique.push(path);
         }
     }
     sync_files_inner(
@@ -2279,6 +2293,7 @@ fn sync_files_inner(
         .source_fingerprints(paths)
         .map_err(ProtocolError::from)?;
     let mut unchanged_messages = 0usize;
+    let mut provider_id_backfills = Vec::new();
     let unchanged_counts = store
         .source_message_counts(paths)
         .map_err(ProtocolError::from)?;
@@ -2334,6 +2349,8 @@ fn sync_files_inner(
                 source.relation_complete = false;
             }
             sources.push(source);
+        } else if let Some(provider_id) = discovered_provider_ids.get(path) {
+            provider_id_backfills.push((path.clone(), provider_id.clone()));
         }
         snapshots.push((path_ref.to_path_buf(), snap));
     }
@@ -2347,6 +2364,9 @@ fn sync_files_inner(
 
     let changed = store
         .commit_source_batches_if_changed(&sources)
+        .map_err(ProtocolError::from)?;
+    store
+        .backfill_source_provider_ids(&provider_id_backfills)
         .map_err(ProtocolError::from)?;
     let generation = store.active_generation().map_err(ProtocolError::from)?;
     // `emitted` 只统计本次实际解析的消息；指纹缓存命中的源按已存消息数
@@ -3492,7 +3512,6 @@ mod tests {
         .expect_err("discover must reject unknown extra flags");
         assert_eq!(error.0.code, CanonicalCode::InvalidRequest);
     }
-
 
     #[test]
     fn take_bool_flag_removes_and_reports_presence() {

@@ -544,7 +544,8 @@ mod tests {
         let e: ProtocolError = PortError::SnapshotChanged("mtime".into()).into();
         assert_eq!(e.code, CanonicalCode::SourceChanged);
 
-        let e: ProtocolError = PortError::SourceIo("cannot open C:/Users/secret/transcript.jsonl".into()).into();
+        let e: ProtocolError =
+            PortError::SourceIo("cannot open C:/Users/secret/transcript.jsonl".into()).into();
         assert_eq!(e.code, CanonicalCode::SourceIo);
         assert_eq!(e.message, "源文件无法读取");
         assert!(!e.message.contains("secret"));

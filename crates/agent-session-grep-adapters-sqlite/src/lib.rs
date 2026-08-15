@@ -1651,6 +1651,29 @@ impl SqliteStore {
         Ok(out)
     }
 
+    /// Associate previously explicit-synced sources with providers resolved by
+    /// canonical-root discovery. Existing associations are immutable.
+    pub fn backfill_source_provider_ids(&self, sources: &[(String, String)]) -> PortResult<usize> {
+        let mut conn = self.conn.borrow_mut();
+        let tx = conn.transaction().map_err(backend)?;
+        let changed = {
+            let mut stmt = tx
+                .prepare(
+                    "UPDATE source_scans
+                     SET provider_id = ?2
+                     WHERE source_path = ?1 AND provider_id IS NULL",
+                )
+                .map_err(backend)?;
+            let mut changed = 0usize;
+            for (source_path, provider_id) in sources {
+                changed += stmt.execute([source_path, provider_id]).map_err(backend)?;
+            }
+            changed
+        };
+        tx.commit().map_err(backend)?;
+        Ok(changed)
+    }
+
     /// 列出指定路径中缺少完整 relation marker 的源。
     ///
     /// `sync --discover` 在部分 root scan 后再次遇到同一字节源时，必须重新
@@ -2441,16 +2464,16 @@ impl SqliteStore {
             // A source that has never been scanned cannot be current; skip the
             // per-entity queries (which dominate on first ingest of an
             // empty catalog) and go straight to the heavy path.
-            let stored_scan: Option<(i64, Option<i64>, Option<String>)> = conn
+            let stored_scan: Option<(Option<i64>, Option<String>, Option<String>)> = conn
                 .query_row(
-                    "SELECT 1, len_bytes, fingerprint
+                    "SELECT len_bytes, fingerprint, provider_id
                      FROM source_scans WHERE source_path = ?1",
                     [&source.source_path],
                     |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                 )
                 .optional()
                 .map_err(backend)?;
-            let Some((_, stored_len, stored_fingerprint)) = stored_scan else {
+            let Some((stored_len, stored_fingerprint, stored_provider_id)) = stored_scan else {
                 return Ok(false);
             };
             // 指纹缓存参与 current 判定：len/fingerprint 任一变说明源字节已变而
@@ -2458,6 +2481,15 @@ impl SqliteStore {
             // CLI 每次运行都重解析全部源。
             if source.len_bytes != stored_len
                 || source.fingerprint.as_deref() != stored_fingerprint.as_deref()
+            {
+                return Ok(false);
+            }
+            // provider_id 回填同样参与 current 判定：discover 发现的源可能携带
+            // provider_id，而已存行为 NULL（先显式 sync 后 discovery 的场景）。
+            // 仅当 incoming 是 Some 且与 stored 不同时才判 not-current——
+            // incoming None（显式 sync）不覆盖已有 provider_id，保持一致。
+            if let Some(incoming_provider_id) = source.provider_id.as_deref()
+                && stored_provider_id.as_deref() != Some(incoming_provider_id)
             {
                 return Ok(false);
             }
@@ -3225,22 +3257,27 @@ impl SqliteStore {
             {
                 return Ok(false);
             }
-            let stored_scan: Option<(i64, Option<i64>, Option<String>)> = conn
+            let stored_scan: Option<(Option<i64>, Option<String>, Option<String>)> = conn
                 .query_row(
-                    "SELECT 1, len_bytes, fingerprint
+                    "SELECT len_bytes, fingerprint, provider_id
                      FROM source_scans WHERE source_path = ?1",
                     [&replacement.source_path],
                     |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                 )
                 .optional()
                 .map_err(backend)?;
-            let Some((_, stored_len, stored_fingerprint)) = stored_scan else {
+            let Some((stored_len, stored_fingerprint, stored_provider_id)) = stored_scan else {
                 return Ok(false);
             };
             // 与 sources_are_current 同口径：指纹缓存参与 no-op 判定。字节已变而
             // 缓存未更新的源必须走提交路径重写 source_scans，否则指纹缓存永不收敛。
             if replacement.len_bytes != stored_len
                 || replacement.fingerprint.as_deref() != stored_fingerprint.as_deref()
+            {
+                return Ok(false);
+            }
+            if let Some(incoming_provider_id) = replacement.provider_id.as_deref()
+                && stored_provider_id.as_deref() != Some(incoming_provider_id)
             {
                 return Ok(false);
             }
@@ -10612,6 +10649,91 @@ mod tests {
         assert_eq!(
             store.source_paths_for_provider("unknown").unwrap(),
             Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn source_provider_id_backfill_is_detected_and_never_overwrites() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let path = "provider-backfill.jsonl";
+        let msg = sid(IdKind::Message, b"provider-backfill-msg");
+        let explicit_batch = SourceBatch {
+            source_path: path.into(),
+            entries: vec![(msg, b"payload".to_vec(), "backfill text".into())],
+            placements: Vec::new(),
+            edges: Vec::new(),
+            relation_complete: true,
+            len_bytes: Some(7),
+            fingerprint: Some("backfill-fp".into()),
+            provider_id: None,
+            resume_claim: None,
+        };
+        assert!(
+            store
+                .commit_source_batches_if_changed(std::slice::from_ref(&explicit_batch))
+                .unwrap()
+        );
+        assert!(
+            store
+                .source_paths_for_provider("claude-code")
+                .unwrap()
+                .is_empty()
+        );
+
+        let mut discovered_batch = explicit_batch.clone();
+        discovered_batch.provider_id = Some("claude-code".into());
+        assert!(
+            store
+                .commit_source_batches_if_changed(std::slice::from_ref(&discovered_batch))
+                .unwrap(),
+            "provider-only change must not be treated as current"
+        );
+        assert_eq!(
+            store.source_paths_for_provider("claude-code").unwrap(),
+            vec![path.to_string()]
+        );
+        assert_eq!(
+            store
+                .backfill_source_provider_ids(&[(path.into(), "codex".into())])
+                .unwrap(),
+            0,
+            "backfill must not overwrite an existing provider"
+        );
+        assert!(store.source_paths_for_provider("codex").unwrap().is_empty());
+    }
+
+    #[test]
+    fn backfill_source_provider_ids_associates_explicit_sync_rows() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let path = "explicit-provider-backfill.jsonl";
+        let batch = SourceBatch {
+            source_path: path.into(),
+            entries: vec![(
+                sid(IdKind::Message, b"explicit-provider-backfill-msg"),
+                b"payload".to_vec(),
+                "backfill text".into(),
+            )],
+            placements: Vec::new(),
+            edges: Vec::new(),
+            relation_complete: true,
+            len_bytes: Some(7),
+            fingerprint: Some("backfill-fp".into()),
+            provider_id: None,
+            resume_claim: None,
+        };
+        store
+            .commit_source_batches_if_changed(std::slice::from_ref(&batch))
+            .unwrap();
+
+        assert_eq!(
+            store
+                .backfill_source_provider_ids(&[(path.into(), "claude-code".into())])
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store.source_paths_for_provider("claude-code").unwrap(),
+            vec![path.to_string()]
         );
     }
 
