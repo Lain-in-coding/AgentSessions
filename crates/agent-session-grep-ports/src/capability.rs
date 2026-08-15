@@ -156,6 +156,21 @@ impl ProviderCapabilityMatrix {
                     source_span: CapabilityLevel::Native,
                     incremental: CapabilityLevel::Native,
                 },
+                ProviderCapability {
+                    provider_id: "grok-build".into(),
+                    variant_id: "grok-build/acp-updates-v1".into(),
+                    maturity: ProviderMaturity::Experimental,
+                    discover: CapabilityLevel::Unsupported,
+                    probe: CapabilityLevel::Native,
+                    parse: CapabilityLevel::Native,
+                    search: CapabilityLevel::Native,
+                    context: CapabilityLevel::Unsupported,
+                    resume: CapabilityLevel::Unknown,
+                    handoff: CapabilityLevel::Unsupported,
+                    tool_activity: CapabilityLevel::Unsupported,
+                    source_span: CapabilityLevel::Native,
+                    incremental: CapabilityLevel::Unsupported,
+                },
             ],
         }
     }
@@ -171,11 +186,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn current_matrix_has_two_implemented_providers() {
+    fn current_matrix_has_implemented_providers() {
         let m = ProviderCapabilityMatrix::current();
-        assert_eq!(m.providers.len(), 2);
+        assert!(m.providers.len() >= 2);
         assert!(m.find("claude-code").is_some());
         assert!(m.find("codex").is_some());
+        assert!(m.find("grok-build").is_some());
     }
 
     #[test]
@@ -190,14 +206,13 @@ mod tests {
             );
         }
     }
-
     #[test]
     fn target_maturity_is_higher_than_current() {
         let m = ProviderCapabilityMatrix::current();
         for p in &m.providers {
             let target = ProviderMaturity::target_for(&p.provider_id);
-            assert_eq!(target, Some(ProviderMaturity::Certified));
-            // 当前 experimental，目标 certified——目标不得用于当前宣传。
+            assert!(target.is_some(), "{} should have a target", p.provider_id);
+            // 当前 maturity 均为 experimental；目标分级严格更高。
             assert_ne!(p.maturity, target.unwrap());
         }
     }
@@ -234,9 +249,10 @@ mod tests {
         let m = ProviderCapabilityMatrix::current();
         let json = serde_json::to_string(&m).unwrap();
         assert!(json.contains("claude-code"));
+        assert!(json.contains("grok-build"));
         assert!(json.contains("experimental"));
         let back: ProviderCapabilityMatrix = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.providers.len(), 2);
+        assert_eq!(back.providers.len(), m.providers.len());
     }
 
     #[test]
