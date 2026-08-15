@@ -44,6 +44,7 @@ dependencies = [
  "crossterm",
  "ratatui",
  "rusqlite",
+ "serde",
  "serde_json",
  "tempfile",
 ]
