@@ -311,14 +311,16 @@ impl McpServer<'_> {
         };
         match self.call_tool(name, arguments) {
             Ok(payload) => {
+                // ADR-0009: MCP is a cross-boundary output → redact by default.
+                let (redacted_payload, _redaction) = crate::redaction::redact_value(payload);
                 // content.text 与 structuredContent 是同一 payload 的两种载体
                 // （2025-06-18 字段；老客户端忽略未知字段，design §0.2）。
-                let text = payload.to_string();
+                let text = redacted_payload.to_string();
                 result_frame(
                     id,
                     json!({
                         "content": [{ "type": "text", "text": text }],
-                        "structuredContent": payload,
+                        "structuredContent": redacted_payload,
                         "isError": false,
                     }),
                 )
