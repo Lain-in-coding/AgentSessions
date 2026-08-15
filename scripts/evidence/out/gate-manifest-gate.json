@@ -1,0 +1,155 @@
+{
+  "schema_version": "agent-session-grep.open-source-gate/v1",
+  "generated_at_utc": "2026-08-15T05:50:15.131705Z",
+  "commit": "f4175a0085b10ad16f50cb8b0be01cba574ff8ab",
+  "environment": {
+    "os": "windows",
+    "arch": "AMD64",
+    "build": "release",
+    "commit": "f4175a0085b10ad16f50cb8b0be01cba574ff8ab",
+    "provider_fixture_set_id": "gate-synthetic-v1",
+    "python_version": "3.10.11"
+  },
+  "corpus": {
+    "kind": "deterministic_synthetic_labeled",
+    "contains_real_transcripts": false,
+    "fixture_set_id": "gate-synthetic-v1",
+    "providers": [
+      "claude-code",
+      "codex"
+    ],
+    "file_count": 3,
+    "fixture_hash": "09197b648d17f4f619edc8bc97857c0783214f0087e70cc3f620c974fb29f7be",
+    "hash_algorithm": "sha256"
+  },
+  "binary": {
+    "hash_algorithm": "sha256",
+    "binary_hash": "e5d7f680c2a0bf6c461d1330edfc39c94d00e805158c66e6de5bf2bbb6445309"
+  },
+  "metrics": [
+    {
+      "name": "lexical_recall_at_10",
+      "unit": "ratio",
+      "state": "measured",
+      "value": 1.0,
+      "threshold": 0.95,
+      "pass": true
+    },
+    {
+      "name": "parse_loss_ratio",
+      "unit": "ratio",
+      "state": "measured",
+      "value": 0.0,
+      "threshold": 0.05,
+      "pass": true
+    },
+    {
+      "name": "discovery_coverage",
+      "unit": "ratio",
+      "state": "not_applicable",
+      "value": null,
+      "threshold": 0.95,
+      "pass": null,
+      "reason": "sync --discover is not yet implemented (task 08-14-provider-source-auto-discovery); corpus is synced via explicit paths."
+    },
+    {
+      "name": "resume_handoff_success",
+      "unit": "count",
+      "state": "not_applicable",
+      "value": null,
+      "threshold": 1.0,
+      "pass": null,
+      "reason": "resume/handoff execution has not landed (task 08-15-resume-metadata-execution); counter scaffolding only."
+    }
+  ],
+  "recall_detail": [
+    {
+      "query_id": "q-retry-budget",
+      "query": "gateprobe retry budget",
+      "expected_count": 2,
+      "found_count": 2,
+      "recall_at_10": 1.0,
+      "missing_ids": []
+    },
+    {
+      "query_id": "q-backoff",
+      "query": "gateprobe backoff",
+      "expected_count": 1,
+      "found_count": 1,
+      "recall_at_10": 1.0,
+      "missing_ids": []
+    },
+    {
+      "query_id": "q-indexing",
+      "query": "kairostopic indexing pipeline",
+      "expected_count": 2,
+      "found_count": 2,
+      "recall_at_10": 1.0,
+      "missing_ids": []
+    },
+    {
+      "query_id": "q-outbox",
+      "query": "kairostopic outbox durability",
+      "expected_count": 1,
+      "found_count": 1,
+      "recall_at_10": 1.0,
+      "missing_ids": []
+    },
+    {
+      "query_id": "q-tombstone",
+      "query": "zetacode tombstone",
+      "expected_count": 1,
+      "found_count": 1,
+      "recall_at_10": 1.0,
+      "missing_ids": []
+    },
+    {
+      "query_id": "q-incomplete-scan",
+      "query": "zetacode incomplete scan",
+      "expected_count": 2,
+      "found_count": 2,
+      "recall_at_10": 1.0,
+      "missing_ids": []
+    }
+  ],
+  "parse_loss_detail": {
+    "emitted": 12,
+    "skipped": 0,
+    "parse_loss_ratio": 0.0
+  },
+  "latency_p50_p95_ms": {
+    "search": {
+      "p50": 9.8283,
+      "p95": 10.8693,
+      "count": 6
+    },
+    "show": {
+      "p50": 9.0315,
+      "p95": 13.4134,
+      "count": 10
+    },
+    "get": {
+      "p50": 7.4988,
+      "p95": 13.0253,
+      "count": 10
+    },
+    "initial_sync": {
+      "p50": 49.2173,
+      "p95": 49.2173,
+      "count": 1
+    }
+  },
+  "index_size": {
+    "store_bytes_including_sidecars": 167936,
+    "source_bytes": 3482,
+    "index_size_ratio": 48.229753
+  },
+  "gate": {
+    "pass": true,
+    "failures": [],
+    "deferred": [
+      "discovery_coverage",
+      "resume_handoff_success"
+    ]
+  }
+}

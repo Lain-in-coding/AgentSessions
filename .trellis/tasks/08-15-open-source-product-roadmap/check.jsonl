@@ -1,0 +1,2 @@
+{"_example": "Fill with {\"file\": \"<path>\", \"reason\": \"<why>\"}. Put spec/research files only — no code paths. Run `python .trellis/scripts/get_context.py --mode packages` to list available specs. Delete this line once real entries are added."}
+{"file": ".trellis/tasks/08-15-open-source-product-roadmap/research/2026-08-15-borrowable-code-inventory.md", "reason": "13 仓库可直接借用代码清单:40 个条目(8 大 feature area x 10 子任务映射)+ 7 条 don't-borrow 警告 + license 核验表(cass 标 clean-room);行号经 Grep 实测核验"}

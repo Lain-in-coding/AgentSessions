@@ -1,0 +1,5 @@
+{"file": ".trellis/tasks/08-14-provider-source-auto-discovery/prd.md", "reason": "Requirements R1-R4 and acceptance criteria for sync --discover"}
+{"file": ".trellis/tasks/08-14-provider-source-auto-discovery/design.md", "reason": "Decisions D1-D5: CLI-local root resolution, Vec<String> to sync_files, prior-path diff, schema v9 provider_id, completeness via relation_complete"}
+{"file": ".trellis/tasks/08-14-provider-source-auto-discovery/research/2026-08-14-discovery-scope-audit.md", "reason": "Code locations: sync dispatch main.rs:1054, sync_files main.rs:1898, installation_namespace main.rs:1576, tombstone lib.rs:2161, provider_registry main.rs:1491, SourceDiscovery port ports/src/lib.rs:64"}
+{"file": ".trellis/spec/agentsessions-cli/backend/index.md", "reason": "CLI composition-root conventions: hand-written arg parsing, flag registration in prefix scanners, writer-lease gating, privacy (no path leakage)"}
+{"file": ".trellis/spec/agentsessions-adapters-sqlite/backend/index.md", "reason": "Schema migration rules (bump user_version, additive ALTER), catalog-as-truth, tombstone relation_complete semantics, outbox two-phase path"}

@@ -1,0 +1,4 @@
+{"file": ".trellis/tasks/08-15-evidence-handoff-pack/prd.md", "reason": "Acceptance criteria to verify: pack fields, evidence/inference separation, deterministic reproducibility, redaction status, quality gate green"}
+{"file": ".trellis/tasks/08-15-evidence-handoff-pack/design.md", "reason": "Verify decisions honored: D1 pure builder, D2 pack shape, D3 budget convergence, D4 redaction seam, D5 additive CLI surface, D6 flag scanners"}
+{"file": "docs/adr/ADR-0009-cross-boundary-output-redaction.md", "reason": "Redaction metadata field shapes (mode/status/ruleset_version/redacted_count/audit_id) and cross-boundary default redaction rule"}
+{"file": ".trellis/spec/agentsessions-cli/backend/index.md", "reason": "Verify: handoff registered in all prefix scanners, envelope/exit codes, no path leakage in any result/warning/progress frame"}

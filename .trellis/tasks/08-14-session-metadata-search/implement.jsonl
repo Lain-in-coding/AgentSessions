@@ -1,0 +1,5 @@
+{"file": ".trellis/tasks/08-14-session-metadata-search/prd.md", "reason": "Requirements R1-R3: metadata searchable, source-path safety, dedup+budget"}
+{"file": ".trellis/tasks/08-14-session-metadata-search/design.md", "reason": "Decisions D1-D5: separate session_fts table, adapter-internal merge, privacy text composition, schema v10 additive, no port change"}
+{"file": ".trellis/tasks/08-14-session-metadata-search/research/2026-08-14-status-audit.md", "reason": "Gap confirmation: searchable_text lib.rs:103 indexes only message text; resume_of persists metadata but does not search it; AC2/AC3/AC5 done, AC1/AC4 gap"}
+{"file": ".trellis/spec/agentsessions-adapters-sqlite/backend/index.md", "reason": "FTS5 projection rebuild invariant, catalog-as-truth, schema migration rules, resume claims pair_observed privacy rule"}
+{"file": ".trellis/spec/agentsessions-application/backend/index.md", "reason": "SearchHit shape, assemble_resume_availability batch join, response budget byte accounting, cursor result-set discriminator"}

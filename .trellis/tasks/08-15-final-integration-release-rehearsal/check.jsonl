@@ -1,0 +1,4 @@
+{"file": ".trellis/spec/agentsessions-cli/backend/index.md", "reason": "Verify CLI and MCP contracts for entry-point consistency"}
+{"file": ".trellis/spec/agentsessions-adapters-sqlite/backend/index.md", "reason": "Verify catalog/FTS invariants and evidence honesty for rehearsal checks"}
+{"file": ".trellis/spec/agentsessions-ports/backend/index.md", "reason": "Verify port boundaries the rehearsal must exercise"}
+{"file": "docs/product/OPEN-SOURCE-ROADMAP.md", "reason": "Verify release gate expectations the rehearsal serves"}

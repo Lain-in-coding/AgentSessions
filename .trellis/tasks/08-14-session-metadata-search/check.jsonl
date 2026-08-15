@@ -1,0 +1,15 @@
+{"file": ".trellis/tasks/08-14-session-metadata-search/prd.md", "reason": "Verify resolved Provider Session ID, first chronological user request, pair-observed cwd search scope; source-path safety; mode-aware dedup; and explicit custom title/summary deferral"}
+{"file": ".trellis/tasks/08-14-session-metadata-search/design.md", "reason": "Verify separate session_fts projection, metadata-only canonical Session hits, system/developer representative guard, mode-aware merge, additive schema v10, and backend-local ranking caveat"}
+{"file": ".trellis/spec/agentsessions-adapters-sqlite/backend/index.md", "reason": "Verify FTS rebuildable projection, catalog-as-truth, identity sidecar fidelity, no source_path in index, migration additive, and pair_observed privacy rule"}
+{"file": ".trellis/spec/agentsessions-application/backend/index.md", "reason": "Verify default message-grained search, group_by_session canonical Session dedup, occurrences, resume_available batch join, budget and cursor behavior"}
+{"file": "crates/agent-session-grep-adapters-sqlite/src/lib.rs", "reason": "Verify schema v10, session metadata projection, bounded fields, atomic incremental/full rebuild, metadata/message merge, filters, and system-only regression"}
+{"file": "crates/agent-session-grep-application/src/lib.rs", "reason": "Verify adapter-provided canonical session_id is preserved and grouped/default search semantics remain compatible"}
+{"file": "crates/agent-session-grep-cli/src/main.rs", "reason": "Verify only formatting changed outside the metadata implementation and Human/MCP composition remains compatible"}
+{"file": "crates/agent-session-grep-cli/src/protocol.rs", "reason": "Verify SourceIo errors remain path-redacted and only formatting changed in this task worktree"}
+{"command": "cargo fmt --manifest-path C:/AgentSessions/.claude/worktrees/session-metadata-search-08-15/Cargo.toml --all --check", "result": "pass"}
+{"command": "cargo clippy --manifest-path C:/AgentSessions/.claude/worktrees/session-metadata-search-08-15/Cargo.toml --workspace --all-targets -- -D warnings", "result": "pass"}
+{"command": "cargo test --manifest-path C:/AgentSessions/.claude/worktrees/session-metadata-search-08-15/Cargo.toml --workspace", "result": "pass"}
+{"command": "cargo build --manifest-path C:/AgentSessions/.claude/worktrees/session-metadata-search-08-15/Cargo.toml --release", "result": "pass (isolated CARGO_TARGET_DIR)"}
+{"command": "cargo test --manifest-path C:/AgentSessions/.claude/worktrees/session-metadata-search-08-15/Cargo.toml -p agent-session-grep-adapters-sqlite session_metadata_search_is_private_incremental_and_rebuildable", "result": "pass; includes system-only metadata regression"}
+{"command": "cargo test --manifest-path C:/AgentSessions/.claude/worktrees/session-metadata-search-08-15/Cargo.toml -p agent-session-grep-application search_group_by_session", "result": "pass; default/grouped occurrences and resume availability"}
+{"command": "git -C C:/AgentSessions/.claude/worktrees/session-metadata-search-08-15 diff --check", "result": "pass"}

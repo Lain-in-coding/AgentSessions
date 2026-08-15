@@ -1,0 +1,6 @@
+{"file": ".trellis/tasks/08-15-unified-release-contract/prd.md", "reason": "Verify slice covers PRD reqs delivered here (req 2 error codes, req 3 capability surface, req 7 handoff-pack schema, req 8 asg alias) and defers identity migration (req 1)"}
+{"file": ".trellis/tasks/08-15-unified-release-contract/design.md", "reason": "Verify D1-D4 honored (asg second [[bin]], additive Robot 1.1 with 4 new codes, ports types only, handoff draft) and deferred identity migration plan present"}
+{"file": ".trellis/spec/agentsessions-cli/backend/index.md", "reason": "Verify: SCHEMA_VERSION bump additive, error catalog registered in CanonicalCode, drift tests updated, no protocol field renamed/removed"}
+{"file": ".trellis/spec/agentsessions-adapters-sqlite/backend/index.md", "reason": "Verify: no SQLite schema change in this slice (identity migration deferred), catalog-as-truth untouched"}
+{"file": "docs/adr/ADR-0009-cross-boundary-output-redaction.md", "reason": "Verify RedactionMetadata has exactly mode/status/ruleset_version/redacted_count/audit_id and ADR stays Proposed (not marked Accepted)"}
+{"file": "schemas/handoff-pack/v1/handoff-pack.schema.json", "reason": "Verify draft marker present (status draft, schema_version draft-2026-08-15) and redaction object mirrors RedactionMetadata"}

@@ -1,0 +1,2 @@
+{"file": "design.md", "reason": "ToolActivity model, ordered kind/target/status/actor/attachment rule set (R1-R6), schema v12 projection design, facet query SQL"}
+{"file": "implement.md", "reason": "Execution plan: domain->ports->providers->application->adapter->CLI/MCP->e2e goldens; validation commands"}

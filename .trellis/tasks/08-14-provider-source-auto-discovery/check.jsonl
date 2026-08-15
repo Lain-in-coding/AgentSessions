@@ -1,0 +1,4 @@
+{"file": ".trellis/tasks/08-14-provider-source-auto-discovery/prd.md", "reason": "Acceptance criteria to verify: discover finds/syncs sources, partial scan no tombstone, checksums unchanged, re-runs converge, quality gate green"}
+{"file": ".trellis/tasks/08-14-provider-source-auto-discovery/design.md", "reason": "Verify decisions honored: D1 CLI-local resolver (no trait change), D2 Vec<String> via sync_files, D3 prior-path diff only on complete scan, D4 schema v9 additive, D5 completeness via relation_complete"}
+{"file": ".trellis/spec/agentsessions-cli/backend/index.md", "reason": "Verify: --discover registered in ALL prefix scanners, writer-lease still acquired, no absolute transcript path in any result/error/progress frame"}
+{"file": ".trellis/spec/agentsessions-adapters-sqlite/backend/index.md", "reason": "Verify: schema v9 migration additive/non-destructive, tombstone derivation unchanged, catalog-as-truth preserved"}

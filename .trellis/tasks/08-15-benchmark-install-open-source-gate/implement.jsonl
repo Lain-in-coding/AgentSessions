@@ -1,0 +1,4 @@
+{"file": ".trellis/spec/agentsessions-cli/backend/index.md", "reason": "Composition root: CLI flag registration, prefix scanners, envelope shape, install scripts contract"}
+{"file": ".trellis/spec/agentsessions-adapters-sqlite/backend/index.md", "reason": "Store/outbox invariants that the benchmark's parse-loss and index-size metrics touch"}
+{"file": "docs/product/SLI-AND-BENCHMARK-FORMAT.md", "reason": "Required report fields, sample methodology, core-beta report contract that the gate manifest extends"}
+{"file": "docs/product/OPEN-SOURCE-ROADMAP.md", "reason": "§5 external-project baseline count reconciled in this slice"}

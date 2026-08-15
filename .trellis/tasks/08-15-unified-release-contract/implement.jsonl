@@ -1,0 +1,7 @@
+{"file": ".trellis/tasks/08-15-unified-release-contract/prd.md", "reason": "Requirements for unified release contract (Robot 1.1, capability surface, handoff-pack, asg alias, identity)"}
+{"file": ".trellis/tasks/08-15-unified-release-contract/design.md", "reason": "Design decisions D1-D4 and deferred provider-scoped identity migration plan"}
+{"file": "docs/product/OPEN-SOURCE-ROADMAP.md", "reason": "Phase 1 task tree and asg alias / handoff-pack contract context"}
+{"file": "docs/adr/ADR-0009-cross-boundary-output-redaction.md", "reason": "RedactionMetadata field contract (mode/status/ruleset_version/redacted_count/audit_id) and boundary split"}
+{"file": "docs/adr/ADR-0004-output-time-snippet-redaction.md", "reason": "Local human output exemption retained; cross-boundary default redaction per ADR-0009"}
+{"file": ".trellis/spec/agentsessions-cli/backend/index.md", "reason": "CLI conventions: protocol layer owns SCHEMA_VERSION + CanonicalCode + drift tests"}
+{"file": ".trellis/spec/agentsessions-ports/backend/index.md", "reason": "Ports crate conventions: types only, no implementation"}
