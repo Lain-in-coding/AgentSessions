@@ -23,13 +23,22 @@ agent-session-grep --db C:/data/example.db --robot search "index rebuild" --max-
 
 ```json
 {
-  "schema_version": "1.0",
+  "schema_version": "1.1",
   "frame_type": "response",
   "command": "search",
   "request_id": "cli-4242-1753500000000",
   "ok": true,
   "outcome": "success",
-  "data": { "hits": [{ "id": "msg_v1_abc123", "score": -1.42 }], "generation": 3 },
+  "data": {
+    "hits": [{
+      "id": "msg_v1_abc123",
+      "score": 1.42,
+      "session_id": "ses_v1_0123456789abcdef0123456789abcdef",
+      "resume_available": true,
+      "text": "index rebuild"
+    }],
+    "generation": 3
+  },
   "warnings": [],
   "page": { "next_cursor": "eyJjb250cmFjdF9tYWpvciI6MX0.a1b2c3d4e5f60718", "has_more": true },
   "meta": { "duration_ms": 12, "generation": 3 }
@@ -76,12 +85,15 @@ loop:
 
 | command | purpose |
 | --- | --- |
-| `search "<query>"` | full-text search over messages; hits carry `msg_v1_` ids; plain-text keywords only — FTS operators (`AND`/`OR`/`NEAR`, quotes, `*`) match literally, there is no advanced query language (ADR-0003) |
+| `search "<query>"` | full-text search over messages; hits carry canonical `session_id`, `resume_available`, and bounded `text`; plain-text keywords only — FTS operators (`AND`/`OR`/`NEAR`, quotes, `*`) match literally, there is no advanced query language (ADR-0003) |
+| `get-session-resume <session-id>` | resolve fixed-shape read-only Resume Metadata for a canonical `ses_v1_*` id; returns nullable Provider-native Session ID and Original Working Directory, never a command or Source path |
+| `get-message <message-id>` | return one message and bounded mainline neighbors; use `--session` when a shared Message belongs to multiple Sessions |
 | `list <limit>` | page catalog entities in stable id order |
 | `context <session-id>` | assemble one session branch with evidence spans |
 | `get <wire-id>` | raw stored payload of one entity |
 | `show <wire-id>` | structured entity view (role, text, parent, session, span) |
 | `status` | catalog entity count and active generation |
+| `sync --discover` | scan each provider's canonical data root (`~/.claude/projects`, `~/.codex/sessions`) and sync every `.jsonl` transcript found; read-only on provider files; the response reports per-provider `found`/`removed` counts and scan completeness — never file paths |
 | `doctor` | health: db, schema, generation, interrupted_batches |
 
 `get`/`show` on a missing entity return exit 4 with a `not_found` error envelope (ADR-0005).
@@ -120,9 +132,11 @@ Run the same binary as a stdio MCP server (tools only, sequential, read-only):
 
 | tool | when to use |
 | --- | --- |
-| `search_sessions` | full-text query; params: `query` (required), `limit`, `cursor`, `max_items`, `max_bytes` |
-| `get_session_context` | pull one session branch: `session_id` (required, `ses_v1_...`), `policy` (`mainline` or `full`), `max_messages`, `max_bytes` |
-| `list_sessions` | page catalog entities in stable id order (see caution below) |
+| `search_sessions` | full-text query; params: `query` (required), `limit`, `cursor`, `max_items`, `max_bytes`; each hit includes canonical `session_id` and `resume_available` |
+| `get_session_context` | pull one session branch: `session_id` (required, canonical `ses_v1_...`), `policy` (`mainline` or `full`), `max_messages`, `max_bytes` |
+| `get_session_resume` | resolve fixed-shape Resume Metadata from a canonical `session_id`; nullable `provider_session_id` and `original_working_directory`; never returns a command or Source path |
+| `get_message` | return one Message and bounded mainline neighbors; params include canonical `message_id`, optional canonical `session_id`, `around`, and budgets |
+| `list_sessions` | page Session entities only in stable canonical-id order |
 | `list_providers` | which source formats are supported (`claude-code`, `codex`) |
 | `get_status` | catalog count and active generation |
 | `doctor` | health probe: `db: "ok"`, schema, generation, interrupted batches |
@@ -134,7 +148,8 @@ Run the same binary as a stdio MCP server (tools only, sequential, read-only):
 
 ## Cautions
 
-- Read-only: search/context/MCP never modify your history. The MCP server opens only the `--db` store given at startup; it exposes no arbitrary file read, no SQL, no command execution.
-- Cursor lifecycle: cursors expire after 15 minutes and die whenever new data is ingested (generation change). On `cursor_expired`, `cursor_invalid`, or `generation_mismatch`, do not retry the token — re-issue the query from page 1.
-- `list_sessions` v0 pages ALL catalog entities in stable id order — expect interleaved `msg_v1_`, `ses_v1_`, and `doc_v1_` prefixed ids; filter for the `ses_v1_` prefix yourself.
+- Read-only: search/context/resume/MCP never modify your history. The MCP server opens only the `--db` store given at startup; it exposes no arbitrary file read, no SQL, no command execution.
+- Two-ID contract: canonical `session_id` (`ses_v1_...`) is the catalog identity used by every tool; the Provider-native Session ID is Resume Metadata obtainable only via `get-session-resume` / `get_session_resume`. Never treat the native ID as canonical or vice versa.
+- Resume Metadata is structured data only. If you need to resume a native session, take the returned `provider_session_id` and run the provider's own resume flow yourself; this tool never builds or runs that command.
+- Cursor lifecycle: cursors expire after 15 minutes and die whenever new data is ingested (generation change). On `cursor_expired`, `cursor_invalid`, or `generation_mismatch`, do not retry the token — re-issue the query from page 1. Cursors are also result-set-bound: a `search` cursor only works for `search`, a `list` cursor for `list`, and a `list_sessions` cursor for `list_sessions`.
 - Never parse human-mode output (the default without `--robot`); its wording can change at any time. Machine consumption is `--robot`, `--output json` / `--output jsonl`, or MCP only.

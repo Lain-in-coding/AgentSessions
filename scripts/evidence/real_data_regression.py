@@ -257,6 +257,24 @@ def validate_report(report: Dict[str, Any]) -> List[str]:
     ):
         if field not in report:
             problems.append(f"missing field: {field}")
+    # 字段集是闭的（build_report 的隐私契约）：未知顶层字段可能携带未脱敏的
+    # 敏感数据，必须拒绝而非静默透传。
+    closed = {
+        "schema_version",
+        "kind",
+        "generated_at_utc",
+        "binary",
+        "environment",
+        "corpus",
+        "totals",
+        "role_distribution",
+        "evidence_precision",
+        "invariants",
+        "outcome",
+    }
+    for key in report:
+        if key not in closed:
+            problems.append(f"unexpected field: {key}")
     seen = [entry.get("id") for entry in report.get("invariants", [])]
     for id_ in INVARIANT_IDS:
         if id_ not in seen:

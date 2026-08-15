@@ -139,7 +139,9 @@ print(value)
 }
 
 # 1. doctor on a fresh store: opening it creates and migrates the schema.
-run_robot doctor --db "$db"
+#    run_robot already prepends --db "$db" --robot; passing --db again here
+#    yields a duplicate flag and fails the first smoke step.
+run_robot doctor
 assert_envelope 'doctor' 0 \
     'f["ok"] is True' \
     'f["data"]["db"] == "ok"' \
@@ -174,6 +176,7 @@ assert_envelope 'context' 0 \
     'len(f["data"]["messages"]) > 0' \
     'len(f["data"]["evidence"]) > 0'
 pass "context assembled messages and evidence for $session_id"
+anchor_id=$(envelope_value 'f["data"]["messages"][0]["message_id"]')
 
 # 5. catalog holds 3 messages + 1 session + 1 document.
 run_robot status
@@ -222,6 +225,8 @@ cat > "$mcp_in" <<'EOF'
 {"jsonrpc":"2.0","id":2,"method":"tools/list"}
 {"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"get_status","arguments":{}}}
 EOF
+printf '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"get_message","arguments":{"message_id":"%s","session_id":"%s","around":0}}}\n' \
+    "$anchor_id" "$session_id" >> "$mcp_in"
 
 set +e
 "$binary" --db "$db" mcp <"$mcp_in" >"$mcp_out" 2>"$workdir/mcp-stderr.txt"
@@ -249,15 +254,15 @@ with open(sys.argv[1], encoding="utf-8") as handle:
             sys.exit(1)
 
 by_id = {frame.get("id"): frame for frame in frames}
-for expected in (1, 2, 3):
+for expected in (1, 2, 3, 4):
     if expected not in by_id:
         print(f"missing JSON-RPC response for id {expected}", file=sys.stderr)
         sys.exit(1)
 
 listed = by_id[2].get("result", {}).get("tools")
-if not isinstance(listed, list) or len(listed) != 6:
+if not isinstance(listed, list) or len(listed) != 7:
     count = len(listed) if isinstance(listed, list) else "absent"
-    print(f"tools/list must report exactly 6 tools, got {count}", file=sys.stderr)
+    print(f"tools/list must report exactly 7 tools, got {count}", file=sys.stderr)
     sys.exit(1)
 
 called = by_id[3].get("result", {})
@@ -265,12 +270,24 @@ flag = called.get("isError")
 if flag is not False:
     print(f"tools/call get_status must report isError false, got {flag!r}", file=sys.stderr)
     sys.exit(1)
-' "$mcp_out"; then
+
+message_result = by_id[4].get("result", {})
+if message_result.get("isError") is not False:
+    print("tools/call get_message must report isError false", file=sys.stderr)
+    sys.exit(1)
+message_data = message_result.get("structuredContent", {}).get("data", {})
+if message_data.get("message_id") != sys.argv[2]:
+    print("get_message did not return the requested real message id", file=sys.stderr)
+    sys.exit(1)
+if len(message_data.get("messages", [])) != 1:
+    print("get_message around=0 must return exactly one message", file=sys.stderr)
+    sys.exit(1)
+' "$mcp_out" "$anchor_id"; then
     printf 'smoke: mcp: handshake assertions failed\n' >&2
     cat "$mcp_out" >&2
     exit 1
 fi
-pass 'MCP stdio handshake: 6 tools listed, get_status returned isError false'
+pass 'MCP stdio handshake: 7 tools listed, get_status and get_message succeeded'
 
 printf 'smoke: all %d assertions passed against %s\n' "$step" "$binary"
 exit 0

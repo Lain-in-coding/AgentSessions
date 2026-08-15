@@ -59,14 +59,15 @@ Exit Code(权威为 `schemas/robot/v1/error-catalog.json` 的 13 码): 0 成功 
 
 ## 7. Cursor 生命周期（无状态保留模型）
 
-- Cursor 自包含并签名: contract_major/generation/issued_at_ms/expires_at_ms/query_digest/sort_digest/offset。
+- Cursor 自包含并签名: contract_major/generation/issued_at_ms/expires_at_ms/query_digest/sort_digest/offset/result_set。`list` 与 `list_sessions` 的 result_set 判别器互斥——跨结果集复用 cursor 显式拒绝，绝不静默从第一页继续。
 - 系统不登记活动 Cursor；GC 按 activation + max_cursor_ttl + clock_skew 保留旧 generation。
 - generation 回收/协议不兼容/签名失败/超 TTL → 明确 cursor_expired*，绝不静默从第一页继续。
 - 已由 sqlite-snapshot-wal spike 验证：旧 generation 快照在新写入期间可只读打开，支撑分页 pinning。
 
 ## 8. MCP 契约
 
-tools: search_sessions / get_session_context / list_sessions / list_providers / get_status / doctor
+tools: search_sessions / get_session_context / get_message / list_sessions / list_providers / get_status / doctor
+- `get_session_resume`（ADR-0009，只读 Resume Metadata）作为第 8 个工具随 Resume 流落地：入参 canonical `ses_v1_*`，返回固定可空字段（provider_id / provider_session_id / original_working_directory / resume_available / unavailable_reason）；绝不构造或执行 shell 命令、绝不返回 transcript/source path。
 - 固定并测试 protocol version、capability negotiation、tool schema、错误映射、取消、超时、shutdown。
 - handler 只校验协议 + 映射 ADT，不复制搜索/分支/分页/预算规则。
 - 不提供任意文件读取、SQL 或命令执行。取消/超时后不留半提交 Catalog 或活动 IndexWriter。

@@ -45,8 +45,10 @@ adapters know *how*. Depends on `agentsessions-domain` and
   sensitive provider or storage details remain behind the port boundary.
 - `AppRequest` / `AppResponse` — the use-case envelope. Handlers match
   exhaustively; a new variant must be rendered by the CLI (`render` in main.rs).
-  `Search`/`List` carry `cursor: Option<String>` + `budget: ResponseBudget`;
-  `Context { session_id, policy, budget }` assembles a session branch.
+  `Search` carries normalized provider/time filters plus cursor and budget;
+  `List` carries cursor and budget; `Context` carries session, branch policy,
+  `raw|talks|sessions` level, and budget; `Message` carries a stable Message,
+  optional Session, around radius, and budget.
 - `cursor` module — self-contained stateless pagination token (CONTRACT §7):
   `issue`/`verify` over `CursorClaims` (contract_major, generation, TTL,
   query/sort digest, offset). Keyless BLAKE3 integrity digest, domain-prefixed
@@ -71,11 +73,35 @@ adapters know *how*. Depends on `agentsessions-domain` and
   `ContextGraphStore`, invokes Domain placement-aware selectors, applies budgets
   to occurrences, and assembles evidence from each selected placement's exact
   document/span. It never reads `session`, `parent`, `span`, or sidechain
-  compatibility aliases.
+  compatibility aliases. Derived views retain the additive raw `messages` field:
+  fixed structural metadata is reserved once, while each duplicated message is
+  charged per retained occurrence. Budget fallback retries in detail order
+  `sessions -> talks -> raw`; context item clamps expose `max_messages`, never
+  the internal generic `max_items` reason.
 - `ContextMessage` carries `{ id, placement_id, message_id, payload }`;
   `id == message_id` is the compatibility alias and `placement_id` is
   authoritative. `branch_leaf_placement_id` is authoritative while
   `branch_leaf` remains a Message-ID alias.
+- Search filters use backend-independent normalized UTC instants. Provider
+  values are sorted and deduplicated before cursor digesting; provider values
+  are ORed, provider/time dimensions are ANDed, and the time interval is
+  half-open `[since, until)`. Omitted filters preserve the legacy digest and
+  storage query path.
+- System-noise messages (payload `role` system/developer) are excluded from
+  search by default; `include_system: true` opts back in. `group_by_session`
+  collapses hits per session over a bounded scan window: the best-scoring hit
+  is kept first and `occurrences` counts all grouped hits; the default path
+  keeps `occurrences == 1`. Both are additive and participate in the cursor
+  digest.
+- Search guidance is deterministic Application output: `why_matched` uses
+  literal plain-text/CJK terms against full hit text, and bounded suggested
+  calls use only real Message/Session IDs. JSON-escaped guidance bytes are
+  charged before result clamping and never affect ranking or cursor identity.
+- `Message` retrieval resolves typed Session candidates without guessing,
+  selects a unique mainline placement, and returns a chronological around
+  window that always retains the anchor. If only a projected anchor fits, keep
+  its Message/Session/placement identity and truncate payload text under the
+  final Robot byte budget.
 - `MessageContexts` resolves reverse membership through the typed port and
   returns candidates grouped by distinct Session. Multiple placements in one
   Session are one candidate; Application never chooses between several Sessions.

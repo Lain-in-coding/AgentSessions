@@ -19,7 +19,7 @@ use agent_session_grep_domain::{
 use agent_session_grep_ports::{
     CanonicalEventSink, CatalogEntry, CatalogStore, Confidence, ContextGraphStore, ContextStats,
     MessageContextCandidate, MessageEvent, ParseReport, PortError, PortResult, ProbeResult,
-    ProviderAdapter, ProviderError, SearchHit, SearchIndex,
+    ProviderAdapter, ProviderError, SearchHit, SearchIndex, SearchQuery,
 };
 
 /// 构造合法 Canonical 会话的 builder（fixture builder）。
@@ -172,6 +172,31 @@ impl InMemoryStore {
         *self.claims.borrow_mut() += claims;
         Ok(())
     }
+
+    /// 按 wire id 升序分页列出 catalog；`kind` 为 `Some` 时只保留该 kind 前缀
+    /// 的实体（`list`/`list_sessions` 共用；与 SQLite 的 `list_filtered` 对齐，
+    /// 过滤在取 limit 之前做，保证分页语义作用于过滤后的集合）。
+    fn list_by_kind(&self, kind: Option<IdKind>, limit: usize) -> PortResult<Vec<CatalogEntry>> {
+        let catalog = self.catalog.borrow();
+        let mut rows: Vec<_> = catalog.iter().collect();
+        rows.sort_by_key(|(id, _)| *id);
+        rows.into_iter()
+            .filter(|(wire, _)| match kind {
+                Some(kind) => wire.starts_with(kind.prefix()),
+                None => true,
+            })
+            .take(limit)
+            .map(|(wire, payload)| {
+                let id = StableId::from_wire(wire).ok_or_else(|| {
+                    PortError::Backend(format!("invalid StableId in fake catalog: {wire}"))
+                })?;
+                Ok(CatalogEntry {
+                    id,
+                    payload: payload.clone(),
+                })
+            })
+            .collect()
+    }
 }
 
 impl CatalogStore for InMemoryStore {
@@ -195,25 +220,17 @@ impl CatalogStore for InMemoryStore {
         self.catalog
             .borrow_mut()
             .insert(id.as_str().to_string(), payload.to_vec());
+        // 与 SqliteStore::put 一致：单条写入也推进 generation（游标 CAS 契约）。
+        *self.generation.borrow_mut() += 1;
         Ok(())
     }
 
     fn list(&self, limit: usize) -> PortResult<Vec<CatalogEntry>> {
-        let catalog = self.catalog.borrow();
-        let mut rows: Vec<_> = catalog.iter().collect();
-        rows.sort_by_key(|(id, _)| *id);
-        rows.into_iter()
-            .take(limit)
-            .map(|(wire, payload)| {
-                let id = StableId::from_wire(wire).ok_or_else(|| {
-                    PortError::Backend(format!("invalid StableId in fake catalog: {wire}"))
-                })?;
-                Ok(CatalogEntry {
-                    id,
-                    payload: payload.clone(),
-                })
-            })
-            .collect()
+        self.list_by_kind(None, limit)
+    }
+
+    fn list_sessions(&self, limit: usize) -> PortResult<Vec<CatalogEntry>> {
+        self.list_by_kind(Some(IdKind::Session), limit)
     }
 
     fn count(&self) -> PortResult<u64> {
@@ -231,25 +248,38 @@ impl SearchIndex for InMemoryStore {
         // 幂等：先移除同 id 旧条目，与真实 adapter 的重索引语义一致。
         idx.retain(|(existing, _)| existing.as_str() != id.as_str());
         idx.push((id.clone(), text.to_string()));
+        // 与 SqliteStore::index 一致：索引写入也推进 generation。
+        *self.generation.borrow_mut() += 1;
         Ok(())
     }
 
-    fn query(&self, query: &str, limit: usize) -> PortResult<Vec<SearchHit>> {
+    fn query_filtered(&self, query: SearchQuery<'_>, limit: usize) -> PortResult<Vec<SearchHit>> {
         // 空查询返回零命中：SQLite 端空 MATCH 是错误，这里以空结果近似，
         // 绝不返回全部（内存实现无 SQL 语法层，无法复刻报错）。
-        if query.is_empty() {
+        if query.text.is_empty() {
             return Ok(Vec::new());
+        }
+        // 内存后端不保存 provider/timestamp 元数据：非空 filter 无法兑现语义，
+        // 返回有界错误而非静默忽略（SQLite adapter 覆盖真正的 pushdown 测试）。
+        if !query.filters.is_empty() {
+            return Err(PortError::Backend(
+                "InMemoryStore does not support provider/time filters".into(),
+            ));
         }
         let idx = self.index.borrow();
         let mut hits: Vec<SearchHit> = idx
             .iter()
-            .filter(|(_, text)| text.contains(query))
+            .filter(|(_, text)| text.contains(query.text))
             .map(|(id, _)| SearchHit {
                 id: id.clone(),
                 score: 1.0,
-                // 端口只提供 id+score；session_id/text 由 Application 装配。
+                // 端口只提供 id+score；session_id/text/guidance 由 Application 装配。
                 session_id: None,
                 text: None,
+                why_matched: Vec::new(),
+                suggested_next_commands: Vec::new(),
+                occurrences: 1,
+                resume_available: false,
             })
             .collect();
         // 与 SQLite 的全序一致：score 降序，同分按 id 升序（全 1.0 时退化为
@@ -549,8 +579,9 @@ mod tests {
         assert_eq!(stats.placements, 2);
         // claims 来自独立计数（insert_graph 时写入），本用例与 placements 同值。
         assert_eq!(stats.source_placement_claims, 2);
-        // 提交一个批次 → generation 推进为 1（与 SqliteStore 批次语义一致）。
-        assert_eq!(store.active_generation().unwrap(), 1);
+        // 两次 put（session/message）+ insert_graph 一批 → generation 推进为 3
+        // （与 SqliteStore 一致：单条写入与批次提交都推进 generation）。
+        assert_eq!(store.active_generation().unwrap(), 3);
     }
 
     #[test]

@@ -29,8 +29,10 @@ Before writing code in this crate:
 - [ ] Argument parsing is **hand-written**, no third-party CLI framework. Match
       the existing style in `main.rs` (`parse_db_flag`, `command_name`,
       `arg(rest, i, usage)`, `extract_flag` for value flags); do not introduce
-      clap/structopt. New value flags must also be added to `command_name`'s
-      skip list so error envelopes label the right command.
+      clap/structopt. Boolean flags use `take_bool_flag` (MCP uses `opt_bool`);
+      every new flag must be registered in every prefix scanner that skips
+      value-bearing flags (`command_name`, request-id/output-mode scans),
+      otherwise a value can hide a later `--robot`/`--output` flag.
 - [ ] Every new subcommand goes through `dispatch()` and returns
       `(&'static str command, Outcome, serde_json::Value, protocol::Page, Vec<String> warnings)`.
       Errors return `CliError`, never `panic!` / `unwrap` on user input.
@@ -77,8 +79,13 @@ Before writing code in this crate:
       `structuredContent.error.canonical_code`. `initialize`/`ping` bypass the
       initialize gate; supported protocol versions are pinned in
       `SUPPORTED_PROTOCOL_VERSIONS` (negotiation never lies). Tool set is
-      frozen: search_sessions / get_session_context / list_sessions /
-      list_providers / get_status / doctor.
+      frozen: search_sessions / get_session_context / get_message /
+      list_sessions / list_providers / get_status / doctor.
+- [ ] MCP legacy compatibility duplicates a successful payload in
+      `structuredContent` and `content[0].text`. Application/Robot byte estimates
+      cover one rendered payload, not the complete duplicated JSON-RPC frame;
+      do not claim a hard MCP frame-byte limit until the MCP boundary enforces
+      and tests that separate contract.
 - [ ] TUI (`tui` subcommand, `src/tui/`): all state transitions and rendering
       decisions live in the PURE `core.rs` (no ratatui/crossterm/store/App
       imports; unit-tested without a terminal); `mod.rs` is thin glue only.

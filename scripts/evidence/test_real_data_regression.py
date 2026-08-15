@@ -200,6 +200,14 @@ class PureFunctionTests(unittest.TestCase):
         del report["corpus"]
         self.assertIn("missing field: corpus", rdr.validate_report(report))
 
+    def test_validate_report_rejects_unexpected_top_level_fields(self):
+        # 字段集是闭的：未知顶层字段可能携带未脱敏的敏感数据，必须拒绝。
+        report = sample_report()
+        report["unexpected_sensitive_field"] = "secret"
+        problems = rdr.validate_report(report)
+        self.assertIn("unexpected field: unexpected_sensitive_field", problems)
+        self.assertEqual(len(problems), 1)
+
     def test_report_carries_a_basename_never_a_directory(self):
         # The privacy contract allows the binary's basename only — no directory
         # component may reach the report, so an absolute path must not survive.

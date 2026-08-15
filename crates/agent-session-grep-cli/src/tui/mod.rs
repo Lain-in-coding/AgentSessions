@@ -16,18 +16,22 @@ mod core;
 
 use crate::protocol::{CanonicalCode, Outcome, ProtocolError};
 use crate::tui::core::{
-    ContextMessage, ContextView, Effect, KeyInput, Model, Msg, Screen, SearchPage,
+    ContextMessage, ContextView, Effect, KeyInput, Model, Msg, ResumeMetadataView, Screen,
+    SearchHitView, SearchPage,
 };
-use crate::tui::core::{context_lines, hit_lines, status_line, title_line, update};
+use crate::tui::core::{context_lines, hit_lines, resume_lines, status_line, title_line, update};
 use crate::{CliError, render, store_ref};
 use agent_session_grep_adapters_sqlite::SqliteStore;
-use agent_session_grep_application::{App, AppError, AppRequest, AppResponse, ResponseBudget};
+use agent_session_grep_application::{
+    App, AppError, AppRequest, AppResponse, ContextLevel, ResponseBudget,
+};
 use agent_session_grep_domain::{ContextPolicy, StableId};
+use agent_session_grep_ports::{ResumeClaimsStore, SearchFilters};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Modifier, Style};
-use ratatui::widgets::{List, ListItem, Paragraph};
+use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 use std::collections::HashMap;
 use std::io::IsTerminal;
 use std::time::Duration;
@@ -44,6 +48,10 @@ pub(crate) fn run(store: &SqliteStore) -> Result<Outcome, CliError> {
         return Err(CliError::usage("tui requires an interactive terminal"));
     }
     let mut terminal = ratatui::try_init().map_err(|error| {
+        // try_init 内部先 enable_raw_mode 再 EnterAlternateScreen：若第二步
+        // 失败，raw mode 已经开启。此时必须主动 restore，否则终端残留 raw
+        // mode（无回显、无行缓冲）。ratatui::restore 是幂等的，失败路径安全。
+        ratatui::restore();
         ProtocolError::new(
             CanonicalCode::SourceIo,
             format!("cannot initialize terminal: {error}"),
@@ -117,14 +125,17 @@ fn key_input(event: Event) -> Option<KeyInput> {
 /// 执行一个 Effect：构造 [`AppRequest`]（与 main.rs dispatch 同参），把
 /// [`AppResponse`] 投影为平数据 Msg。失败进状态行，绝不向上抛、绝不 panic。
 fn execute(store: &SqliteStore, effect: Effect) -> Msg {
-    let app = App::new(store_ref(store), store_ref(store));
+    let app = App::with_resume(store_ref(store), store_ref(store), store_ref(store));
     match effect {
         Effect::Search { query, cursor } => {
             let request = AppRequest::Search {
                 query,
+                filters: SearchFilters::default(),
                 limit: SEARCH_PAGE_LIMIT,
                 cursor,
                 budget: ResponseBudget::default(),
+                include_system: false,
+                group_by_session: false,
             };
             match app.handle(request) {
                 Ok(response) => search_msg(response),
@@ -133,6 +144,7 @@ fn execute(store: &SqliteStore, effect: Effect) -> Msg {
         }
         Effect::ResolveAndLoadContext { hit_id, policy } => resolve_and_load(&app, &hit_id, policy),
         Effect::LoadContext { session_id, policy } => load_context(&app, &session_id, policy),
+        Effect::LoadResumeMetadata { session_id } => load_resume_metadata(&app, &session_id),
     }
 }
 
@@ -147,7 +159,12 @@ fn search_msg(response: AppResponse) -> Msg {
         } => {
             let hits = hits
                 .into_iter()
-                .map(|hit| (hit.id.as_str().to_string(), hit.score))
+                .map(|hit| SearchHitView {
+                    id: hit.id.as_str().to_string(),
+                    score: hit.score,
+                    session_id: hit.session_id,
+                    resume_available: hit.resume_available,
+                })
                 .collect();
             Msg::SearchLoaded(SearchPage {
                 hits,
@@ -164,8 +181,8 @@ fn search_msg(response: AppResponse) -> Msg {
 
 /// 命中→会话解析：Application 按 distinct Session 返回 placement candidates。
 /// 零候选如实报 index-only；多个 Session 明确报歧义，绝不选择兼容 alias。
-fn resolve_and_load(
-    app: &App<&SqliteStore, &SqliteStore>,
+fn resolve_and_load<R: ResumeClaimsStore>(
+    app: &App<&SqliteStore, &SqliteStore, R>,
     hit_id: &str,
     policy: ContextPolicy,
 ) -> Msg {
@@ -193,8 +210,8 @@ fn resolve_and_load(
 ///
 /// 投影复用 CLI 的 [`render`]：截断/警告（含 unknown-precision 降级计数）与
 /// Human/Robot/MCP 三面完全同源，本层不重算任何呈现规则。
-fn load_context(
-    app: &App<&SqliteStore, &SqliteStore>,
+fn load_context<R: ResumeClaimsStore>(
+    app: &App<&SqliteStore, &SqliteStore, R>,
     session_wire: &str,
     policy: ContextPolicy,
 ) -> Msg {
@@ -206,6 +223,7 @@ fn load_context(
     let request = AppRequest::Context {
         session_id,
         policy,
+        level: ContextLevel::Raw,
         budget: ResponseBudget::default(),
     };
     let response = match app.handle(request) {
@@ -215,6 +233,31 @@ fn load_context(
     };
     let (_, data, _, warnings) = render(response);
     Msg::ContextLoaded(context_view(&data, warnings))
+}
+
+/// 通过 Application 固定契约读取 Resume Metadata；只投影结构化字段，
+/// 不读取 Source/transcript path，也不构造或执行恢复命令。
+fn load_resume_metadata<R: ResumeClaimsStore>(
+    app: &App<&SqliteStore, &SqliteStore, R>,
+    session_wire: &str,
+) -> Msg {
+    let Some(session_id) = StableId::from_wire(session_wire) else {
+        return Msg::EffectFailed(format!(
+            "error [invalid_request]: not a valid session id: {session_wire}"
+        ));
+    };
+    match app.handle(AppRequest::GetSessionResume { session_id }) {
+        Ok(AppResponse::SessionResume(metadata)) => Msg::ResumeLoaded(ResumeMetadataView {
+            session_id: metadata.session_id.as_str().to_string(),
+            provider_id: metadata.provider_id,
+            resume_available: metadata.resume_available,
+            provider_session_id: metadata.provider_session_id,
+            original_working_directory: metadata.original_working_directory,
+            unavailable_reason: metadata.unavailable_reason,
+        }),
+        Ok(_) => internal("unexpected response for session resume"),
+        Err(error) => failed(error),
+    }
 }
 
 /// 从 [`render`] 的 context data JSON 建 [`ContextView`]。
@@ -293,17 +336,28 @@ fn draw(frame: &mut Frame, model: &Model) {
             let input = Paragraph::new(format!("query> {}", model.input));
             frame.render_widget(input, input_area);
             let items: Vec<ListItem> = hit_lines(model).into_iter().map(ListItem::new).collect();
-            frame.render_widget(List::new(items), list_area);
+            // 结果列表是 stateful 渲染：每帧构造 ListState 并 select 当前行，
+            // ratatui 会把选中行滚入可视区（翻页/下移后不再滚出屏幕）。
+            // 选中行前缀由 hit_lines 的 `> ` 提供，这里不再设 highlight_symbol。
+            let mut list_state = ListState::default();
+            if model.selected < items.len() {
+                list_state.select(Some(model.selected));
+            }
+            let list = List::new(items);
+            frame.render_stateful_widget(list, list_area, &mut list_state);
             frame.render_widget(status, status_area);
         }
         Screen::Context => {
-            let [title_area, body_area, status_area] = Layout::vertical([
+            let [title_area, resume_area, body_area, status_area] = Layout::vertical([
                 Constraint::Length(1),
+                Constraint::Length(5),
                 Constraint::Min(0),
                 Constraint::Length(1),
             ])
             .areas(frame.area());
             frame.render_widget(title, title_area);
+            let resume = Paragraph::new(resume_lines(model).join("\n"));
+            frame.render_widget(resume, resume_area);
             let body = context_lines(model).join("\n");
             let scroll = u16::try_from(model.scroll).unwrap_or(u16::MAX);
             let paragraph = Paragraph::new(body).scroll((scroll, 0));
@@ -322,6 +376,59 @@ mod tests {
 
     fn id(kind: IdKind, tag: &str) -> StableId {
         StableId::derive(kind, Stability::Reconstructed, &[tag.as_bytes()])
+    }
+
+    #[test]
+    fn search_msg_projects_resume_availability_without_source_data() {
+        let response = AppResponse::Search {
+            hits: vec![agent_session_grep_ports::SearchHit {
+                id: id(IdKind::Message, "tui-resume-hit"),
+                score: 2.0,
+                session_id: Some(
+                    id(IdKind::Session, "tui-resume-session")
+                        .as_str()
+                        .to_string(),
+                ),
+                text: Some("preview".to_string()),
+                why_matched: Vec::new(),
+                suggested_next_commands: Vec::new(),
+                occurrences: 1,
+                resume_available: true,
+            }],
+            next_cursor: None,
+            generation: 7,
+            truncation: agent_session_grep_application::Truncation {
+                truncated: false,
+                reason: None,
+            },
+        };
+
+        let Msg::SearchLoaded(page) = search_msg(response) else {
+            panic!("expected SearchLoaded");
+        };
+
+        assert_eq!(page.hits.len(), 1);
+        assert!(page.hits[0].resume_available);
+        assert!(page.hits[0].session_id.is_some());
+    }
+
+    #[test]
+    fn load_resume_metadata_uses_application_fixed_shape() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let app = App::new(store_ref(&store), store_ref(&store));
+        let session = id(IdKind::Session, "tui-resume-detail");
+
+        let result = load_resume_metadata(&app, session.as_str());
+
+        let Msg::ResumeLoaded(metadata) = result else {
+            panic!("expected ResumeLoaded");
+        };
+        assert_eq!(metadata.session_id, session.as_str());
+        assert!(!metadata.resume_available);
+        assert!(metadata.provider_id.is_none());
+        assert!(metadata.provider_session_id.is_none());
+        assert!(metadata.original_working_directory.is_none());
+        assert!(metadata.unavailable_reason.is_some());
     }
 
     fn source_batch(
@@ -378,6 +485,8 @@ mod tests {
             relation_complete: true,
             len_bytes: None,
             fingerprint: None,
+            provider_id: None,
+            resume_claim: None,
         }
     }
 

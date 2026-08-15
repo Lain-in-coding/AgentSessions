@@ -147,12 +147,17 @@ if ($hitId) {
 }
 
 # 5. context for that session: mainline messages plus their evidence spans.
+$mainlineMessageId = $null
 if ($sessionId) {
     $r = Invoke-Robot @('--db', $db, '--robot', 'context', $sessionId)
     Assert-That ($r.Code -eq 0) 'context <ses-id> exits 0' "exit=$($r.Code) stdout=$($r.Text)"
     if ($null -ne $r.Frame) {
-        Assert-That (@($r.Frame.data.messages).Count -gt 0) 'context returns non-empty data.messages' $r.Text
+        $contextMessages = @($r.Frame.data.messages)
+        Assert-That ($contextMessages.Count -gt 0) 'context returns non-empty data.messages' $r.Text
         Assert-That (@($r.Frame.data.evidence).Count -gt 0) 'context returns non-empty data.evidence' $r.Text
+        if ($contextMessages.Count -gt 0) {
+            $mainlineMessageId = $contextMessages[0].message_id
+        }
     } else {
         Write-Fail 'context returns non-empty data.messages' $r.Text
     }
@@ -190,6 +195,15 @@ $mcpInput = @(
     '{"jsonrpc":"2.0","method":"notifications/initialized"}'
     '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
     '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"get_status","arguments":{}}}'
+    (@{
+        jsonrpc = '2.0'
+        id = 4
+        method = 'tools/call'
+        params = @{
+            name = 'get_message'
+            arguments = @{ message_id = $mainlineMessageId; session_id = $sessionId; around = 0 }
+        }
+    } | ConvertTo-Json -Depth 5 -Compress)
 )
 $mcpOut = $mcpInput | & $Binary --db $db mcp
 $mcpCode = $LASTEXITCODE
@@ -206,10 +220,16 @@ Assert-That $pureJson 'every mcp stdout line is valid JSON' $mcpText
 
 $listFrame = $frames | Where-Object { (Test-HasProperty $_ 'id') -and $_.id -eq 2 } | Select-Object -First 1
 $toolCount = if ($null -ne $listFrame) { @($listFrame.result.tools).Count } else { -1 }
-Assert-That ($toolCount -eq 6) 'tools/list returns exactly 6 tools' "tools=$toolCount"
+Assert-That ($toolCount -eq 7) 'tools/list returns exactly 7 tools' "tools=$toolCount"
 
 $callFrame = $frames | Where-Object { (Test-HasProperty $_ 'id') -and $_.id -eq 3 } | Select-Object -First 1
 Assert-That ($null -ne $callFrame -and $callFrame.result.isError -eq $false) 'tools/call get_status returns isError:false' $mcpText
+
+$messageFrame = $frames | Where-Object { (Test-HasProperty $_ 'id') -and $_.id -eq 4 } | Select-Object -First 1
+$messageData = if ($null -ne $messageFrame) { $messageFrame.result.structuredContent.data } else { $null }
+Assert-That ($null -ne $messageFrame -and $messageFrame.result.isError -eq $false) 'tools/call get_message returns isError:false' $mcpText
+Assert-That ($null -ne $messageData -and $messageData.message_id -eq $mainlineMessageId) 'get_message returns the real anchor message id' $mcpText
+Assert-That ($null -ne $messageData -and @($messageData.messages).Count -eq 1) 'get_message around=0 returns exactly one message' $mcpText
 
 if ($script:Failures -gt 0) {
     Write-Host "smoke: $script:Failures assertion(s) failed" -ForegroundColor Red

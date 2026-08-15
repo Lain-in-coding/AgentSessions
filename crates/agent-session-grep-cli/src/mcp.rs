@@ -14,8 +14,11 @@
 use crate::protocol::{self, CanonicalCode, Outcome, ProtocolError};
 use crate::{CliError, provider_registry, render, store_ref};
 use agent_session_grep_adapters_sqlite::SqliteStore;
-use agent_session_grep_application::{App, AppRequest, ResponseBudget};
-use agent_session_grep_domain::{ContextPolicy, StableId};
+use agent_session_grep_application::{
+    App, AppRequest, ContextLevel, ResponseBudget, parse_search_instant,
+};
+use agent_session_grep_domain::{ContextPolicy, IdKind, StableId};
+use agent_session_grep_ports::{SearchFilters, SearchProvider};
 use serde_json::{Map, Value, json};
 
 /// 支持的 MCP 协议版本（新→旧）。协商绝不谎报支持：请求版本在列才回显。
@@ -28,6 +31,10 @@ const PARSE_ERROR: i64 = -32700;
 const INVALID_REQUEST: i64 = -32600;
 const METHOD_NOT_FOUND: i64 = -32601;
 const INVALID_PARAMS: i64 = -32602;
+
+/// 错误消息插值上界（design R5）：回显的 method/tool/id/参数值截断到 128 字符，
+/// 截断处以 "..." 标记——超长输入不得放大错误帧。
+const ECHO_CAP: usize = 128;
 
 /// 在已打开的只读 store 上服务 MCP，直到 stdin EOF（→ 干净停机）。
 ///
@@ -61,13 +68,15 @@ struct McpServer<'a> {
     store: &'a SqliteStore,
     /// `notifications/initialized` 之前只放行 initialize/ping（design §0.7）。
     initialized: bool,
-    /// 是否收到过 initialize 请求：门闩只在握手之后打开，未握手先发
-    /// initialized 通知是协议违规，不得开门（Minor-8）。
+    /// 是否收到过成功 initialize 握手：门闩只在握手之后打开，未握手先发
+    /// initialized 通知是协议违规，不得开门（Minor-8）；失败的 initialize
+    /// （参数校验不过）不算握手。
     initialize_seen: bool,
 }
 
 /// 工具调用的两类失败（design §0.3）：结构/校验问题 → JSON-RPC `-32602`；
 /// 良构 [`AppRequest`] 之后的业务失败 → `isError: true` 工具结果。
+#[derive(Debug)]
 enum ToolError {
     Params(String),
     Business(ProtocolError),
@@ -75,7 +84,8 @@ enum ToolError {
 
 impl McpServer<'_> {
     /// 处理一行输入：notification（无 `id` 键）永不回应，request 必回一帧。
-    /// 坏 JSON → `-32700`（id null）；非对象（含批量数组）→ `-32600`。
+    /// 坏 JSON → `-32700`（id null）；非对象（含批量数组）→ `-32600`；
+    /// `jsonrpc` 非字面 "2.0" 或 id 非法（array/object/浮点）→ `-32600`。
     fn handle_line(&mut self, line: &str) -> Option<String> {
         let value: Value = match serde_json::from_str(line) {
             Ok(value) => value,
@@ -97,14 +107,46 @@ impl McpServer<'_> {
                 None,
             ));
         };
+        // 每个消息（request 与 notification 一视同仁，R3）必须携带字面 "2.0"；
+        // 版本不符时请求 id 不可信 → 错误帧 id null（JSON-RPC §5）。
+        if message.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
+            return Some(error_frame(
+                Value::Null,
+                INVALID_REQUEST,
+                "jsonrpc must be \"2.0\"",
+                None,
+            ));
+        }
+        // id：键缺席是 notification（JSON-RPC 规定永不回应；未知 notification
+        // 方法静默忽略，`notifications/cancelled` 是 documented no-op）；
+        // 键在场必须是 string/整数/null，array/object/浮点 id 是非法请求
+        // → -32600（非法 id 无法回显，错误帧 id null）。
+        let id = match message.get("id") {
+            None => None,
+            Some(id) if is_valid_jsonrpc_id(id) => Some(id.clone()),
+            Some(_) => {
+                return Some(error_frame(
+                    Value::Null,
+                    INVALID_REQUEST,
+                    "id must be a string, an integer, or null",
+                    None,
+                ));
+            }
+        };
         let method = message.get("method").and_then(Value::as_str);
-        match message.get("id") {
-            // notification：JSON-RPC 规定永不回应；未知 notification 方法静默忽略。
-            // `notifications/cancelled` 是 documented no-op（v0 顺序执行请求）。
-            // 缺 method / method 非字符串的不是合法 notification → -32600；
-            // `notifications/initialized` 只在收到过 initialize 请求后开门闩。
+        match id {
+            // `notifications/initialized` 只在收到过成功 initialize 后开门闩；
+            // params 必须是对象或缺失，畸形通知回 -32600 且不得开门（R3）。
             None => match method {
                 Some("notifications/initialized") => {
+                    if !params_object_or_absent(message.get("params")) {
+                        return Some(error_frame(
+                            Value::Null,
+                            INVALID_REQUEST,
+                            "notification params must be an object when present",
+                            None,
+                        ));
+                    }
                     if self.initialize_seen {
                         self.initialized = true;
                     }
@@ -119,7 +161,6 @@ impl McpServer<'_> {
                 )),
             },
             Some(id) => {
-                let id = id.clone();
                 let Some(method) = method else {
                     return Some(error_frame(
                         id,
@@ -135,51 +176,106 @@ impl McpServer<'_> {
 
     /// request 分发。initialize/ping 始终放行；其余方法要求已初始化（design §0.7），
     /// 门闩优先于方法分发——未初始化时未知方法同样回 `-32600`。
+    /// ping/tools/list 的 params 必须是对象或缺失（R3）；未知方法回显截断（R5）。
     fn handle_request(&mut self, id: Value, method: &str, params: Option<&Value>) -> String {
         match method {
-            "initialize" => {
-                // 记录握手已发生：此后的 initialized 通知才有权开门闩。
-                self.initialize_seen = true;
-                // params 非对象是参数校验失败（-32602），不得静默按缺失处理。
-                let requested = match params {
-                    None => None,
-                    Some(Value::Object(object)) => {
-                        object.get("protocolVersion").and_then(Value::as_str)
-                    }
-                    Some(_) => {
-                        return error_frame(
-                            id,
-                            INVALID_PARAMS,
-                            "params must be an object",
-                            Some(invalid_request_data()),
-                        );
-                    }
-                };
-                result_frame(
-                    id,
-                    json!({
-                        "protocolVersion": negotiate_version(requested),
-                        "capabilities": { "tools": {} },
-                        "serverInfo": {
-                            "name": "agent-session-grep",
-                            "version": env!("CARGO_PKG_VERSION"),
-                        },
-                    }),
-                )
+            "initialize" => self.handle_initialize(id, params),
+            "ping" => {
+                if !params_object_or_absent(params) {
+                    return error_frame(
+                        id,
+                        INVALID_PARAMS,
+                        "params must be an object when present",
+                        Some(invalid_request_data()),
+                    );
+                }
+                result_frame(id, json!({}))
             }
-            "ping" => result_frame(id, json!({})),
             _ if !self.initialized => {
                 error_frame(id, INVALID_REQUEST, "server not initialized", None)
             }
-            "tools/list" => result_frame(id, json!({ "tools": tool_catalog() })),
+            "tools/list" => {
+                if !params_object_or_absent(params) {
+                    return error_frame(
+                        id,
+                        INVALID_PARAMS,
+                        "params must be an object when present",
+                        Some(invalid_request_data()),
+                    );
+                }
+                result_frame(id, json!({ "tools": tool_catalog() }))
+            }
             "tools/call" => self.handle_tools_call(id, params),
             other => error_frame(
                 id,
                 METHOD_NOT_FOUND,
-                &format!("method not found: {other}"),
+                &format!("method not found: {}", bounded(other)),
                 None,
             ),
         }
+    }
+
+    /// initialize 握手（R3）：params 必须是对象且含 protocolVersion(string)、
+    /// capabilities(object)、clientInfo(object)；缺失或类型不符 → -32602。
+    /// 只有校验全部通过才算成功握手（推进 initialize_seen）——失败的 initialize
+    /// 之后，notifications/initialized 通知无权开门闩。
+    fn handle_initialize(&mut self, id: Value, params: Option<&Value>) -> String {
+        let Some(Value::Object(object)) = params else {
+            return error_frame(
+                id,
+                INVALID_PARAMS,
+                "params must be an object carrying protocolVersion, capabilities and clientInfo",
+                Some(invalid_request_data()),
+            );
+        };
+        let requested = match object.get("protocolVersion") {
+            Some(Value::String(version)) => version.as_str(),
+            Some(_) => {
+                return error_frame(
+                    id,
+                    INVALID_PARAMS,
+                    "params.protocolVersion must be a string",
+                    Some(invalid_request_data()),
+                );
+            }
+            None => {
+                return error_frame(
+                    id,
+                    INVALID_PARAMS,
+                    "missing required parameter: protocolVersion",
+                    Some(invalid_request_data()),
+                );
+            }
+        };
+        if !object.get("capabilities").is_some_and(Value::is_object) {
+            return error_frame(
+                id,
+                INVALID_PARAMS,
+                "params.capabilities must be an object",
+                Some(invalid_request_data()),
+            );
+        }
+        if !object.get("clientInfo").is_some_and(Value::is_object) {
+            return error_frame(
+                id,
+                INVALID_PARAMS,
+                "params.clientInfo must be an object",
+                Some(invalid_request_data()),
+            );
+        }
+        // 成功握手：此后的 initialized 通知才有权开门闩（Minor-8）。
+        self.initialize_seen = true;
+        result_frame(
+            id,
+            json!({
+                "protocolVersion": negotiate_version(Some(requested)),
+                "capabilities": { "tools": {} },
+                "serverInfo": {
+                    "name": "agent-session-grep",
+                    "version": env!("CARGO_PKG_VERSION"),
+                },
+            }),
+        )
     }
 
     /// tools/call：解出 name/arguments 后按 [`ToolError`] 分层投影。
@@ -234,11 +330,13 @@ impl McpServer<'_> {
         }
     }
 
-    /// 工具名分发（合同 §8 的 6 个工具）；未知工具是请求校验失败 → `-32602`。
+    /// 工具名分发（合同 §8 的 8 个工具）；未知工具是请求校验失败 → `-32602`。
     fn call_tool(&self, name: &str, args: &Map<String, Value>) -> Result<Value, ToolError> {
         match name {
             "search_sessions" => self.tool_search(args),
             "get_session_context" => self.tool_context(args),
+            "get_session_resume" => self.tool_session_resume(args),
+            "get_message" => self.tool_message(args),
             "list_sessions" => self.tool_list(args),
             "list_providers" => {
                 reject_unknown_keys(args, &[])?;
@@ -252,80 +350,187 @@ impl McpServer<'_> {
                 reject_unknown_keys(args, &[])?;
                 self.tool_doctor()
             }
-            other => Err(ToolError::Params(format!("unknown tool: {other}"))),
+            other => Err(ToolError::Params(format!(
+                "unknown tool: {}",
+                bounded(other)
+            ))),
         }
     }
 
     fn tool_search(&self, args: &Map<String, Value>) -> Result<Value, ToolError> {
         reject_unknown_keys(
             args,
-            &["query", "limit", "cursor", "max_items", "max_bytes"],
+            &[
+                "query",
+                "limit",
+                "cursor",
+                "max_items",
+                "max_bytes",
+                "providers",
+                "since",
+                "until",
+                "include_system",
+                "group_by_session",
+            ],
         )?;
         let query = required_str(args, "query")?;
         let limit = opt_usize(args, "limit")?;
-        // schema 声明 limit/max_items minimum 1（design §3）；additionalProperties
-        // 同理代码侧强制。0 在协议层拒绝（-32602），不落成 App 层 isError 业务帧。
-        if limit == Some(0) {
-            return Err(ToolError::Params("limit must be >= 1".into()));
-        }
         let cursor = opt_str(args, "cursor")?;
         let max_items = opt_usize(args, "max_items")?;
         let max_bytes = opt_usize(args, "max_bytes")?;
-        if max_items == Some(0) {
-            return Err(ToolError::Params("max_items must be >= 1".into()));
-        }
+        // 预算下限（R4）：limit/max_items < 1、max_bytes < 4096 在协议层 -32602，
+        // 在构造 AppRequest 之前拒绝；App 层 validate 保留为纵深防御。
+        // schema 同步声明这些 minimum（design §3），additionalProperties 由
+        // reject_unknown_keys 代码侧强制。
+        reject_below_floor(limit, "limit", 1)?;
+        reject_below_floor(max_items, "max_items", 1)?;
+        reject_below_floor(max_bytes, "max_bytes", 4096)?;
+        let filters = opt_filters(args)?;
+        let include_system = opt_bool(args, "include_system", false)?;
+        let group_by_session = opt_bool(args, "group_by_session", false)?;
         self.run_app(AppRequest::Search {
             query,
+            filters,
             limit: limit.or(max_items).unwrap_or(20),
             cursor,
             budget: budget_with(max_items, max_bytes, None),
+            include_system,
+            group_by_session,
         })
     }
 
     fn tool_context(&self, args: &Map<String, Value>) -> Result<Value, ToolError> {
-        reject_unknown_keys(args, &["session_id", "policy", "max_messages", "max_bytes"])?;
+        reject_unknown_keys(
+            args,
+            &["session_id", "policy", "level", "max_messages", "max_bytes"],
+        )?;
         let wire = required_str(args, "session_id")?;
         // wire id 解析失败属请求校验（→ -32602）；格式合法但库中不存在则走
-        // Application 的 not_found 业务路径（design §2 note）。
-        let session_id = StableId::from_wire(&wire).ok_or_else(|| {
-            ToolError::Params(format!("session_id is not a valid entity id: {wire}"))
-        })?;
+        // Application 的 not_found 业务路径（design §2 note）。kind 同样属于
+        // 协议层校验：session_id 必须是 Session 实体，Message/Document id 不能
+        // 冒充（否则 get_session_context 的上下文装配语义会被错置）。
+        let session_id = StableId::from_wire(&wire)
+            .filter(|id| id.kind() == IdKind::Session)
+            .ok_or_else(|| {
+                ToolError::Params(format!(
+                    "session_id is not a valid session id: {}",
+                    bounded(&wire)
+                ))
+            })?;
         let policy = match opt_str(args, "policy")?.as_deref() {
             None | Some("mainline") => ContextPolicy::Mainline,
             Some("full") => ContextPolicy::Full,
             Some(other) => {
                 return Err(ToolError::Params(format!(
-                    "policy must be mainline|full, got {other}"
+                    "policy must be mainline|full, got {}",
+                    bounded(other)
+                )));
+            }
+        };
+        let level = match opt_str(args, "level")?.as_deref() {
+            None | Some("raw") => ContextLevel::Raw,
+            Some("talks") => ContextLevel::Talks,
+            Some("sessions") => ContextLevel::Sessions,
+            Some(other) => {
+                return Err(ToolError::Params(format!(
+                    "level must be raw|talks|sessions, got {}",
+                    bounded(other)
                 )));
             }
         };
         let max_messages = opt_usize(args, "max_messages")?;
         let max_bytes = opt_usize(args, "max_bytes")?;
+        // 预算下限（R4）：max_messages < 1、max_bytes < 4096 协议层 -32602。
+        reject_below_floor(max_messages, "max_messages", 1)?;
+        reject_below_floor(max_bytes, "max_bytes", 4096)?;
         self.run_app(AppRequest::Context {
             session_id,
             policy,
+            level,
             budget: budget_with(None, max_bytes, max_messages),
+        })
+    }
+
+    fn tool_session_resume(&self, args: &Map<String, Value>) -> Result<Value, ToolError> {
+        reject_unknown_keys(args, &["session_id"])?;
+        let wire = required_str(args, "session_id")?;
+        let session_id = StableId::from_wire(&wire)
+            .filter(|id| id.kind() == IdKind::Session)
+            .ok_or_else(|| {
+                ToolError::Params(format!(
+                    "session_id is not a valid session id: {}",
+                    bounded(&wire)
+                ))
+            })?;
+        self.run_app(AppRequest::GetSessionResume { session_id })
+    }
+
+    fn tool_message(&self, args: &Map<String, Value>) -> Result<Value, ToolError> {
+        reject_unknown_keys(
+            args,
+            &[
+                "message_id",
+                "session_id",
+                "around",
+                "max_items",
+                "max_bytes",
+            ],
+        )?;
+        let message_wire = required_str(args, "message_id")?;
+        // wire id 解析失败属请求校验（→ -32602）；格式合法但库中不存在则走
+        // Application 的 not_found 业务路径 (design §2 note). kind 同属协议层
+        // 校验：message_id 必须是 Message 实体。
+        let message_id = StableId::from_wire(&message_wire)
+            .filter(|id| id.kind() == IdKind::Message)
+            .ok_or_else(|| {
+                ToolError::Params(format!(
+                    "message_id is not a valid message id: {}",
+                    bounded(&message_wire)
+                ))
+            })?;
+        let session_id = match opt_str(args, "session_id")? {
+            None => None,
+            Some(wire) => Some(
+                StableId::from_wire(&wire)
+                    .filter(|id| id.kind() == IdKind::Session)
+                    .ok_or_else(|| {
+                        ToolError::Params(format!(
+                            "session_id is not a valid session id: {}",
+                            bounded(&wire)
+                        ))
+                    })?,
+            ),
+        };
+        let around = opt_usize(args, "around")?.unwrap_or(0);
+        let max_items = opt_usize(args, "max_items")?;
+        let max_bytes = opt_usize(args, "max_bytes")?;
+        // 预算下限（R4）：max_items < 1、max_bytes < 4096 协议层 -32602。
+        reject_below_floor(max_items, "max_items", 1)?;
+        reject_below_floor(max_bytes, "max_bytes", 4096)?;
+        self.run_app(AppRequest::Message {
+            message_id,
+            session_id,
+            around,
+            budget: budget_with(max_items, max_bytes, None),
         })
     }
 
     fn tool_list(&self, args: &Map<String, Value>) -> Result<Value, ToolError> {
         reject_unknown_keys(args, &["limit", "cursor", "max_items", "max_bytes"])?;
         let limit = opt_usize(args, "limit")?;
-        // 与 search_sessions 同层（协议层 -32602）：limit:0 / max_items:0 不得
-        // 漏到 App 层变 isError 业务帧（分层一致性，Minor-7）。
-        if limit == Some(0) {
-            return Err(ToolError::Params("limit must be >= 1".into()));
-        }
         let cursor = opt_str(args, "cursor")?;
         let max_items = opt_usize(args, "max_items")?;
         let max_bytes = opt_usize(args, "max_bytes")?;
-        if max_items == Some(0) {
-            return Err(ToolError::Params("max_items must be >= 1".into()));
-        }
+        // 与 search_sessions 同层（R4，Minor-7）：limit/max_items/max_bytes 低于
+        // 下限在协议层 -32602，不得漏到 App 层变 isError 业务帧。
+        reject_below_floor(limit, "limit", 1)?;
+        reject_below_floor(max_items, "max_items", 1)?;
+        reject_below_floor(max_bytes, "max_bytes", 4096)?;
         self.run_app(AppRequest::List {
             limit: limit.or(max_items).unwrap_or(20),
             cursor,
             budget: budget_with(max_items, max_bytes, None),
+            sessions_only: true,
         })
     }
 
@@ -352,7 +557,11 @@ impl McpServer<'_> {
     /// 良构请求进 Application，成功走 CLI 同一个 [`render`] 投影；
     /// 失败即业务错误——此后不再产生 `-32602`（design §2 note）。
     fn run_app(&self, request: AppRequest) -> Result<Value, ToolError> {
-        let app = App::new(store_ref(self.store), store_ref(self.store));
+        let app = App::with_resume(
+            store_ref(self.store),
+            store_ref(self.store),
+            store_ref(self.store),
+        );
         match app.handle(request) {
             Ok(response) => {
                 let (outcome, data, page, warnings) = render(response);
@@ -374,9 +583,8 @@ fn negotiate_version(requested: Option<&str>) -> &'static str {
     LATEST_PROTOCOL_VERSION
 }
 
-/// tools/list 目录：合同 §8 固定顺序的 6 个工具。schema 与代码侧校验一致
-/// （`additionalProperties: false`、整数非负、search 的 limit 最小 1）；描述
-/// 如实陈述 v0 限制（命中是消息级实体；list_sessions 分页全部 catalog 实体）。
+/// tools/list catalog: the eight MCP tools exposed by this build. Schema and
+/// code-side validation remain aligned (`additionalProperties: false`).
 fn tool_catalog() -> Value {
     json!([
         {
@@ -389,7 +597,11 @@ fn tool_catalog() -> Value {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "query": { "type": "string", "description": "Full-text query." },
+                    "query": {
+                        "type": "string",
+                        "maxLength": 4096,
+                        "description": "Full-text query."
+                    },
                     "limit": {
                         "type": "integer",
                         "minimum": 1,
@@ -397,6 +609,7 @@ fn tool_catalog() -> Value {
                     },
                     "cursor": {
                         "type": "string",
+                        "maxLength": 512,
                         "description": "Continuation token from the previous page's \
                             page.next_cursor."
                     },
@@ -409,6 +622,35 @@ fn tool_catalog() -> Value {
                         "type": "integer",
                         "minimum": 4096,
                         "description": "Response byte budget. Minimum 4096 (runtime rejects smaller)."
+                    },
+                    "providers": {
+                        "type": "array",
+                        "maxItems": 2,
+                        "items": { "type": "string", "enum": ["claude", "codex"] },
+                        "description": "Restrict hits to these providers (OR). Omitted matches all providers."
+                    },
+                    "since": {
+                        "type": "string",
+                        "maxLength": 64,
+                        "description": "Inclusive lower time bound as an absolute ISO-8601 \
+                            timestamp with offset (e.g. 2026-08-01T00:00:00Z). Compact \
+                            durations are not accepted."
+                    },
+                    "until": {
+                        "type": "string",
+                        "maxLength": 64,
+                        "description": "Exclusive upper time bound; same syntax as since. \
+                            Interval is half-open [since, until)."
+                    },
+                    "include_system": {
+                        "type": "boolean",
+                        "description": "Include system/developer-role messages. Default \
+                            false: system noise is excluded from hits."
+                    },
+                    "group_by_session": {
+                        "type": "boolean",
+                        "description": "Collapse hits per session: best-scoring hit first, \
+                            with an occurrences count. Default false keeps one hit per match."
                     }
                 },
                 "required": ["query"],
@@ -425,12 +667,23 @@ fn tool_catalog() -> Value {
                 "properties": {
                     "session_id": {
                         "type": "string",
+                        "maxLength": 128,
                         "description": "Session wire id (ses_v1_ prefix)."
                     },
                     "policy": {
                         "type": "string",
                         "enum": ["mainline", "full"],
                         "description": "Branch selection policy; defaults to mainline."
+                    },
+                    "level": {
+                        "type": "string",
+                        "enum": ["raw", "talks", "sessions"],
+                        "description": "Structural response level; defaults to raw \
+                            (omission preserves the raw message stream). talks groups \
+                            each user message with its following assistant/tool \
+                            messages; sessions adds one structural overview. Empty \
+                            derived views fall back toward more detail \
+                            (sessions -> talks -> raw) and report effective_level."
                     },
                     "max_messages": {
                         "type": "integer",
@@ -448,11 +701,62 @@ fn tool_catalog() -> Value {
             }
         },
         {
+            "name": "get_session_resume",
+            "description": "Return read-only structured resume metadata for one canonical Session. Nullable fields remain explicit; no command or source path is returned.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "session_id": {
+                        "type": "string",
+                        "maxLength": 128,
+                        "description": "Canonical Session wire id (ses_v1_ prefix)."
+                    }
+                },
+                "required": ["session_id"],
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "get_message",
+            "description": "Return one message and a bounded ordered window around it. The message_id may be shared across sessions; omit session_id only when it resolves uniquely. around defaults to 0 and includes the anchor only.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "message_id": {
+                        "type": "string",
+                        "maxLength": 128,
+                        "description": "Message wire id (msg_v1_ prefix)."
+                    },
+                    "session_id": {
+                        "type": "string",
+                        "maxLength": 128,
+                        "description": "Optional Session wire id (ses_v1_ prefix). Required when the message occurs in multiple sessions."
+                    },
+                    "around": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "Number of mainline neighbors requested on each side; defaults to 0."
+                    },
+                    "max_items": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Maximum number of returned messages, including the anchor."
+                    },
+                    "max_bytes": {
+                        "type": "integer",
+                        "minimum": 4096,
+                        "description": "Response byte budget. Minimum 4096 (runtime rejects smaller)."
+                    }
+                },
+                "required": ["message_id"],
+                "additionalProperties": false
+            }
+        },
+        {
             "name": "list_sessions",
-            "description": "Page catalog entities in stable wire-id order. v0 \
-                limitation: pages ALL entity kinds (messages msg_v1_, sessions \
-                ses_v1_, documents doc_v1_), not only sessions; filter on the \
-                ses_v1_ prefix client-side.",
+            "description": "Page Session entities (ses_v1_) in stable wire-id order. \
+                Documents and messages are not returned (competitor-borrowings R1.3); \
+                only session entities are listed.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -463,6 +767,7 @@ fn tool_catalog() -> Value {
                     },
                     "cursor": {
                         "type": "string",
+                        "maxLength": 512,
                         "description": "Continuation token from the previous page's \
                             page.next_cursor."
                     },
@@ -512,7 +817,7 @@ fn tool_catalog() -> Value {
     ])
 }
 
-/// 成功工具 payload（6 个工具同形，design §2）：outcome/data/warnings/page。
+/// 成功工具 payload（8 个工具同形，design §2）：outcome/data/warnings/page。
 fn success_payload(
     outcome: Outcome,
     data: Value,
@@ -589,10 +894,14 @@ fn error_frame(id: Value, code: i64, message: &str, data: Option<Value>) -> Stri
 }
 
 /// schema `additionalProperties: false` 的代码侧强制：未知键 → `-32602`。
+/// 键名回显前截断（R5）。
 fn reject_unknown_keys(args: &Map<String, Value>, allowed: &[&str]) -> Result<(), ToolError> {
     for key in args.keys() {
         if !allowed.contains(&key.as_str()) {
-            return Err(ToolError::Params(format!("unknown parameter: {key}")));
+            return Err(ToolError::Params(format!(
+                "unknown parameter: {}",
+                bounded(key)
+            )));
         }
     }
     Ok(())
@@ -600,7 +909,10 @@ fn reject_unknown_keys(args: &Map<String, Value>, allowed: &[&str]) -> Result<()
 
 fn required_str(args: &Map<String, Value>, key: &str) -> Result<String, ToolError> {
     match args.get(key) {
-        Some(Value::String(value)) => Ok(value.clone()),
+        Some(Value::String(value)) => {
+            validate_string_length(key, value)?;
+            Ok(value.clone())
+        }
         Some(_) => Err(ToolError::Params(format!("{key} must be a string"))),
         None => Err(ToolError::Params(format!(
             "missing required parameter: {key}"
@@ -611,9 +923,76 @@ fn required_str(args: &Map<String, Value>, key: &str) -> Result<String, ToolErro
 fn opt_str(args: &Map<String, Value>, key: &str) -> Result<Option<String>, ToolError> {
     match args.get(key) {
         None => Ok(None),
-        Some(Value::String(value)) => Ok(Some(value.clone())),
+        Some(Value::String(value)) => {
+            validate_string_length(key, value)?;
+            Ok(Some(value.clone()))
+        }
         Some(_) => Err(ToolError::Params(format!("{key} must be a string"))),
     }
+}
+
+fn validate_string_length(key: &str, value: &str) -> Result<(), ToolError> {
+    let max = match key {
+        "query" => 4096,
+        "cursor" => 512,
+        "since" | "until" => 64,
+        "session_id" | "message_id" => 128,
+        _ => return Ok(()),
+    };
+    if value.chars().count() > max {
+        return Err(ToolError::Params(format!(
+            "{key} exceeds the maximum length of {max} characters"
+        )));
+    }
+    Ok(())
+}
+
+/// 检索过滤参数（design §3）：providers 别名数组（OR 语义）+ 绝对 ISO-8601
+/// 的 since/until（半开区间 [since, until)，边界比较由 Application 统一执行）。
+/// MCP 只接受绝对时间：紧凑相对量（"1h"）没有声明的时钟基准，属非法参数。
+fn opt_filters(args: &Map<String, Value>) -> Result<SearchFilters, ToolError> {
+    let mut filters = SearchFilters::default();
+    if let Some(value) = args.get("providers") {
+        let Value::Array(entries) = value else {
+            return Err(ToolError::Params("providers must be an array".into()));
+        };
+        for entry in entries {
+            let Some(provider) = entry.as_str() else {
+                return Err(ToolError::Params(
+                    "providers entries must be strings".into(),
+                ));
+            };
+            filters.providers.push(match provider {
+                "claude" => SearchProvider::Claude,
+                "codex" => SearchProvider::Codex,
+                other => {
+                    return Err(ToolError::Params(format!(
+                        "providers must contain only claude|codex, got {}",
+                        bounded(other)
+                    )));
+                }
+            });
+        }
+    }
+    filters.since = opt_instant(args, "since")?;
+    filters.until = opt_instant(args, "until")?;
+    Ok(filters)
+}
+
+/// 绝对时间参数：RFC3339/ISO-8601（带 offset/Z）。紧凑相对量（"1h"）在 MCP
+/// 层直接拒绝——协议不携带时钟基准，不得静默换算。
+fn opt_instant(
+    args: &Map<String, Value>,
+    key: &str,
+) -> Result<Option<agent_session_grep_ports::SearchInstant>, ToolError> {
+    let Some(raw) = opt_str(args, key)? else {
+        return Ok(None);
+    };
+    parse_search_instant(&raw).map(Some).ok_or_else(|| {
+        ToolError::Params(format!(
+            "{key} must be an absolute ISO-8601 timestamp with offset (e.g. 2026-08-01T00:00:00Z)"
+        ))
+    })
 }
 
 /// 整数参数（design §3）：必须是非负整数 JSON number 且装得进 usize；
@@ -629,6 +1008,54 @@ fn opt_usize(args: &Map<String, Value>, key: &str) -> Result<Option<usize>, Tool
                 .map(Some)
                 .map_err(|_| ToolError::Params(format!("{key} exceeds the platform usize range")))
         }
+    }
+}
+
+/// 布尔参数：必须是 JSON bool；省略时取 `default`。
+fn opt_bool(args: &Map<String, Value>, key: &str, default: bool) -> Result<bool, ToolError> {
+    match args.get(key) {
+        None => Ok(default),
+        Some(value) => value
+            .as_bool()
+            .map(Ok)
+            .unwrap_or_else(|| Err(ToolError::Params(format!("{key} must be a boolean")))),
+    }
+}
+
+/// params 形状（ping / tools/list / notifications/initialized 共用，R3）：
+/// 缺失或对象合法；null/数组/原语非法。
+fn params_object_or_absent(params: Option<&Value>) -> bool {
+    matches!(params, None | Some(Value::Object(_)))
+}
+
+/// 严格 id 校验（R3）：string / null / 整数 number 合法；array、object、
+/// 浮点型 number（含 1.0 这类 float 字面量）与 bool 一律非法 → `-32600`。
+fn is_valid_jsonrpc_id(id: &Value) -> bool {
+    match id {
+        Value::Null | Value::String(_) => true,
+        Value::Number(number) => number.is_i64() || number.is_u64(),
+        _ => false,
+    }
+}
+
+/// 错误消息插值截断（R5）：超长 method/tool/id/参数值回显前截到
+/// [`ECHO_CAP`] 字符，截断处以 "..." 标记。
+fn bounded(value: &str) -> String {
+    let mut chars = value.chars();
+    let head: String = chars.by_ref().take(ECHO_CAP).collect();
+    if chars.next().is_some() {
+        format!("{head}...")
+    } else {
+        head
+    }
+}
+
+/// 预算/分页下限（R4）：低于下限在协议层 -32602，在构造 [`AppRequest`]
+/// 之前拒绝；App 层 `ResponseBudget::validate` 保留为纵深防御。
+fn reject_below_floor(value: Option<usize>, key: &str, floor: usize) -> Result<(), ToolError> {
+    match value {
+        Some(value) if value < floor => Err(ToolError::Params(format!("{key} must be >= {floor}"))),
+        _ => Ok(()),
     }
 }
 
@@ -708,6 +1135,16 @@ mod tests {
         json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }).to_string()
     }
 
+    /// 完整合法的 initialize params（R3 起 protocolVersion/capabilities/clientInfo
+    /// 三个字段全部必填）。
+    fn init_params(version: &str) -> Value {
+        json!({
+            "protocolVersion": version,
+            "capabilities": {},
+            "clientInfo": { "name": "test-client", "version": "0" },
+        })
+    }
+
     fn respond(server: &mut McpServer<'_>, line: &str) -> Value {
         let frame = server
             .handle_line(line)
@@ -749,15 +1186,7 @@ mod tests {
         let mut server = fresh(&store);
         let v = respond(
             &mut server,
-            &request(
-                1,
-                "initialize",
-                json!({
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": {},
-                    "clientInfo": { "name": "test-client", "version": "0" },
-                }),
-            ),
+            &request(1, "initialize", init_params("2024-11-05")),
         );
         assert_eq!(v["jsonrpc"], "2.0");
         assert_eq!(v["id"], 1);
@@ -771,7 +1200,7 @@ mod tests {
         // 不支持的版本诚实回落钉住的最新版，绝不回显谎报。
         let v = respond(
             &mut server,
-            &request(2, "initialize", json!({ "protocolVersion": "9999-01-01" })),
+            &request(2, "initialize", init_params("9999-01-01")),
         );
         assert_eq!(v["result"]["protocolVersion"], "2025-06-18");
     }
@@ -809,7 +1238,10 @@ mod tests {
         let store = open_store(&dir);
         let mut server = fresh(&store);
         // 握手先行：initialize 请求之后，initialized 通知才开门闩（Minor-8）。
-        let v = respond(&mut server, &request(1, "initialize", json!({})));
+        let v = respond(
+            &mut server,
+            &request(1, "initialize", init_params("2025-06-18")),
+        );
         assert!(v["result"]["protocolVersion"].is_string());
         let silent = server.handle_line(
             &json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }).to_string(),
@@ -864,17 +1296,177 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = open_store(&dir);
         let mut server = fresh(&store);
-        for params in [json!(42), json!(null), json!("x")] {
+        for params in [json!(42), json!(null), json!("x"), json!([])] {
             let v = respond(&mut server, &request(1, "initialize", params.clone()));
             assert_eq!(v["error"]["code"], -32602, "{params}");
             assert_eq!(v["error"]["data"]["canonical_code"], "invalid_request");
         }
-        // params 缺失（键缺席）仍合法：协议版本回落钉住的最新版。
+        // params 键缺席同样是失败握手：initialize 必须携带完整 params（R3），
+        // 不再静默回落钉住的最新版。
         let v = respond(
             &mut server,
             &json!({ "jsonrpc": "2.0", "id": 2, "method": "initialize" }).to_string(),
         );
-        assert_eq!(v["result"]["protocolVersion"], LATEST_PROTOCOL_VERSION);
+        assert_eq!(v["error"]["code"], -32602, "{v}");
+    }
+
+    #[test]
+    fn non_2_0_jsonrpc_is_invalid_request_everywhere() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = open_store(&dir);
+        let mut server = ready(&store);
+        for line in [
+            json!({ "id": 1, "method": "ping" }).to_string(),
+            json!({ "jsonrpc": "1.0", "id": 1, "method": "ping" }).to_string(),
+            json!({ "jsonrpc": 2.0, "id": 1, "method": "ping" }).to_string(),
+            json!({ "jsonrpc": ["2.0"], "id": 1, "method": "ping" }).to_string(),
+            // notification 同样必须携带 2.0（R3）。
+            json!({ "jsonrpc": "1.0", "method": "notifications/initialized" }).to_string(),
+        ] {
+            let frame = server
+                .handle_line(&line)
+                .unwrap_or_else(|| panic!("bad jsonrpc must get a response: {line}"));
+            let v = parse(&frame);
+            assert_eq!(v["error"]["code"], -32600, "{line}");
+            assert!(v["id"].is_null(), "{line}");
+        }
+    }
+
+    #[test]
+    fn invalid_id_types_are_invalid_request() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = open_store(&dir);
+        let mut server = ready(&store);
+        for line in [
+            json!({ "jsonrpc": "2.0", "id": [1], "method": "ping" }).to_string(),
+            json!({ "jsonrpc": "2.0", "id": {}, "method": "ping" }).to_string(),
+            json!({ "jsonrpc": "2.0", "id": true, "method": "ping" }).to_string(),
+            json!({ "jsonrpc": "2.0", "id": 1.5, "method": "ping" }).to_string(),
+            json!({ "jsonrpc": "2.0", "id": 1.0, "method": "ping" }).to_string(),
+        ] {
+            let v = respond(&mut server, &line);
+            assert_eq!(v["error"]["code"], -32600, "{line}");
+            assert!(v["id"].is_null(), "非法 id 无法回显: {line}");
+        }
+        // 合法形态照常应答：整数、字符串（null 由既有用例覆盖）。
+        let v = respond(
+            &mut server,
+            &json!({ "jsonrpc": "2.0", "id": 7, "method": "ping" }).to_string(),
+        );
+        assert_eq!(v["id"], 7);
+        let v = respond(
+            &mut server,
+            &json!({ "jsonrpc": "2.0", "id": "abc", "method": "ping" }).to_string(),
+        );
+        assert_eq!(v["id"], "abc");
+    }
+
+    #[test]
+    fn initialize_requires_protocol_version_capabilities_and_client_info() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = open_store(&dir);
+        let mut server = fresh(&store);
+        let cases = [
+            json!({}),
+            json!({ "protocolVersion": "2025-06-18" }),
+            json!({ "protocolVersion": "2025-06-18", "capabilities": {} }),
+            json!({ "protocolVersion": 7, "capabilities": {}, "clientInfo": {} }),
+            json!({ "protocolVersion": "2025-06-18", "capabilities": [], "clientInfo": {} }),
+            json!({ "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": "x" }),
+        ];
+        for (index, params) in cases.iter().enumerate() {
+            let v = respond(
+                &mut server,
+                &request(index as u64, "initialize", params.clone()),
+            );
+            assert_eq!(v["error"]["code"], -32602, "{params}");
+            assert_eq!(v["error"]["data"]["canonical_code"], "invalid_request");
+        }
+        // 任何一次失败握手都不得推进 initialize_seen：initialized 通知无权开门。
+        let silent = server.handle_line(
+            &json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }).to_string(),
+        );
+        assert!(silent.is_none());
+        let v = respond(&mut server, &request(9, "tools/list", json!({})));
+        assert_eq!(v["error"]["code"], -32600, "{v}");
+        // 完整 params 才握手成功（MCP 允许的额外字段不影响校验）。
+        let mut params = init_params("2025-06-18");
+        params["extra"] = json!(true);
+        let v = respond(&mut server, &request(10, "initialize", params));
+        assert_eq!(v["result"]["protocolVersion"], "2025-06-18");
+    }
+
+    #[test]
+    fn failed_initialize_does_not_open_gate_via_initialized_notification() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = open_store(&dir);
+        let mut server = fresh(&store);
+        // 失败握手（params 非对象）：initialize_seen 不得推进。
+        let v = respond(&mut server, &request(1, "initialize", json!(42)));
+        assert_eq!(v["error"]["code"], -32602);
+        // 随后的 initialized 通知不得开门闩。
+        let silent = server.handle_line(
+            &json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }).to_string(),
+        );
+        assert!(silent.is_none());
+        let v = respond(&mut server, &request(2, "tools/list", json!({})));
+        assert_eq!(v["error"]["code"], -32600, "{v}");
+    }
+
+    #[test]
+    fn ping_and_tools_list_require_object_or_absent_params() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = open_store(&dir);
+        let mut server = ready(&store);
+        for params in [json!([]), json!("x"), json!(5), json!(null)] {
+            let v = respond(&mut server, &request(1, "ping", params.clone()));
+            assert_eq!(v["error"]["code"], -32602, "ping {params}");
+            let v = respond(&mut server, &request(2, "tools/list", params.clone()));
+            assert_eq!(v["error"]["code"], -32602, "tools/list {params}");
+        }
+        // 对象（含未知键）与缺失照常应答。
+        let v = respond(&mut server, &request(3, "ping", json!({ "extra": true })));
+        assert_eq!(v["result"], json!({}));
+        let v = respond(
+            &mut server,
+            &json!({ "jsonrpc": "2.0", "id": 4, "method": "ping" }).to_string(),
+        );
+        assert_eq!(v["result"], json!({}));
+        let v = respond(&mut server, &request(5, "tools/list", json!({})));
+        assert!(v["result"]["tools"].is_array());
+    }
+
+    #[test]
+    fn initialized_notification_with_non_object_params_is_rejected_and_does_not_open_gate() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = open_store(&dir);
+        let mut server = fresh(&store);
+        // 成功握手先行。
+        let v = respond(
+            &mut server,
+            &request(1, "initialize", init_params("2025-06-18")),
+        );
+        assert!(v["result"]["protocolVersion"].is_string());
+        // params 非法（数组）→ 畸形通知回 -32600（id null），且不得开门闩。
+        let frame = server
+            .handle_line(
+                &json!({ "jsonrpc": "2.0", "method": "notifications/initialized", "params": [1] })
+                    .to_string(),
+            )
+            .expect("malformed notification must get a response");
+        let v = parse(&frame);
+        assert_eq!(v["error"]["code"], -32600);
+        assert!(v["id"].is_null());
+        let v = respond(&mut server, &request(2, "tools/list", json!({})));
+        assert_eq!(v["error"]["code"], -32600, "gate must stay closed: {v}");
+        // 合法 initialized 通知（对象 params）→ 静默且开门。
+        let silent = server.handle_line(
+            &json!({ "jsonrpc": "2.0", "method": "notifications/initialized", "params": {} })
+                .to_string(),
+        );
+        assert!(silent.is_none());
+        let v = respond(&mut server, &request(3, "tools/list", json!({})));
+        assert!(v["result"]["tools"].is_array());
     }
 
     #[test]
@@ -935,7 +1527,7 @@ mod tests {
     }
 
     #[test]
-    fn tools_list_exposes_exactly_the_six_contract_tools() {
+    fn tools_list_exposes_exactly_the_eight_contract_tools() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = open_store(&dir);
         let mut server = ready(&store);
@@ -950,6 +1542,8 @@ mod tests {
             [
                 "search_sessions",
                 "get_session_context",
+                "get_session_resume",
+                "get_message",
                 "list_sessions",
                 "list_providers",
                 "get_status",
@@ -989,6 +1583,63 @@ mod tests {
     }
 
     #[test]
+    fn get_session_resume_validates_session_id_at_protocol_layer() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = open_store(&dir);
+        let mut server = ready(&store);
+        let cases = [
+            json!({}),
+            json!({ "session_id": "not-a-wire-id" }),
+            json!({ "session_id": "msg_v1_c0000000-0000-4000-8000-000000000001" }),
+            json!({
+                "session_id": "ses_v1_ccdd1234-5678-4abc-8def-001122334455",
+                "extra": true,
+            }),
+        ];
+        for arguments in cases {
+            let v = call(&mut server, "get_session_resume", arguments.clone());
+            assert_eq!(v["error"]["code"], -32602, "{arguments}");
+            assert_eq!(
+                v["error"]["data"]["canonical_code"], "invalid_request",
+                "{arguments}"
+            );
+        }
+    }
+
+    #[test]
+    fn get_session_resume_returns_fixed_read_only_metadata_shape() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = open_store(&dir);
+        let mut server = ready(&store);
+        let session_id = "ses_v1_ccdd1234-5678-4abc-8def-001122334455";
+        let v = call(
+            &mut server,
+            "get_session_resume",
+            json!({ "session_id": session_id }),
+        );
+        assert_eq!(v["result"]["isError"], false, "{v}");
+        let data = &v["result"]["structuredContent"]["data"];
+        assert_eq!(data["session_id"], session_id);
+        for field in [
+            "provider_id",
+            "resume_available",
+            "provider_session_id",
+            "original_working_directory",
+            "unavailable_reason",
+        ] {
+            assert!(data.get(field).is_some(), "missing {field}: {data}");
+        }
+        assert!(data["provider_id"].is_null(), "{data}");
+        assert_eq!(data["resume_available"], false, "{data}");
+        assert!(data["provider_session_id"].is_null(), "{data}");
+        assert!(data["original_working_directory"].is_null(), "{data}");
+        assert!(data["unavailable_reason"].is_string(), "{data}");
+        assert!(data.get("command").is_none(), "{data}");
+        assert!(data.get("source_path").is_none(), "{data}");
+        assert!(data.get("transcript_path").is_none(), "{data}");
+    }
+
+    #[test]
     fn out_of_schema_parameter_values_are_invalid_params() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = open_store(&dir);
@@ -1009,6 +1660,104 @@ mod tests {
                 "{arguments}"
             );
         }
+    }
+
+    #[test]
+    fn search_filter_schema_and_runtime_validation_stay_aligned() {
+        let catalog = tool_catalog();
+        let search = catalog
+            .as_array()
+            .and_then(|tools| tools.iter().find(|tool| tool["name"] == "search_sessions"))
+            .expect("search_sessions tool must exist");
+        let properties = &search["inputSchema"]["properties"];
+        assert_eq!(
+            properties["providers"]["items"]["enum"],
+            json!(["claude", "codex"])
+        );
+        assert_eq!(properties["since"]["type"], "string");
+        assert_eq!(properties["until"]["type"], "string");
+
+        let valid = json!({
+            "providers": ["codex", "claude"],
+            "since": "2026-08-01T00:00:00Z",
+            "until": "2026-08-02T00:00:00+00:00"
+        });
+        let filters = opt_filters(valid.as_object().expect("filter object"))
+            .expect("declared filter values must parse");
+        assert_eq!(
+            filters.providers,
+            vec![SearchProvider::Codex, SearchProvider::Claude]
+        );
+        assert!(filters.since.is_some());
+        assert!(filters.until.is_some());
+        assert!(filters.since < filters.until);
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = open_store(&dir);
+        let mut server = ready(&store);
+        for arguments in [
+            json!({ "query": "x", "providers": "claude" }),
+            json!({ "query": "x", "providers": ["other"] }),
+            json!({ "query": "x", "providers": [1] }),
+            json!({ "query": "x", "since": "1h" }),
+            json!({ "query": "x", "until": "2026-08-01" }),
+        ] {
+            let v = call(&mut server, "search_sessions", arguments.clone());
+            assert_eq!(v["error"]["code"], -32602, "{arguments}");
+            assert_eq!(
+                v["error"]["data"]["canonical_code"], "invalid_request",
+                "{arguments}"
+            );
+            assert!(v["result"].is_null(), "{arguments}");
+        }
+    }
+
+    #[test]
+    fn search_r2r3_flags_validate_and_apply() {
+        // R2/R3 参数：schema 声明布尔型；非布尔值协议层拒绝；合法布尔被接受并
+        // 贯通到 Application（seeded store 无 placement → 归并退化为单例组）。
+        let catalog = tool_catalog();
+        let search = catalog
+            .as_array()
+            .and_then(|tools| tools.iter().find(|tool| tool["name"] == "search_sessions"))
+            .expect("search_sessions tool must exist");
+        let properties = &search["inputSchema"]["properties"];
+        assert_eq!(properties["include_system"]["type"], "boolean");
+        assert_eq!(properties["group_by_session"]["type"], "boolean");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = seeded_store(&dir);
+        let mut server = ready(&store);
+        for arguments in [
+            json!({ "query": "x", "include_system": "yes" }),
+            json!({ "query": "x", "group_by_session": 1 }),
+        ] {
+            let v = call(&mut server, "search_sessions", arguments.clone());
+            assert_eq!(v["error"]["code"], -32602, "{arguments}");
+            assert_eq!(
+                v["error"]["data"]["canonical_code"], "invalid_request",
+                "{arguments}"
+            );
+        }
+        let v = call(
+            &mut server,
+            "search_sessions",
+            json!({
+                "query": "hello",
+                "include_system": true,
+                "group_by_session": true,
+                "limit": 5
+            }),
+        );
+        assert_eq!(v["result"]["isError"], false);
+        let hits = v["result"]["structuredContent"]["data"]["hits"]
+            .as_array()
+            .expect("hits");
+        // seeded store 两条命中均无 placement → 归并退化为逐条单例组（各 1 次）。
+        assert_eq!(hits.len(), 2);
+        // 归并模式下 occurrences==1 仍省略（与默认值省略约定一致）。
+        assert!(hits[0].get("occurrences").is_none(), "{hits:?}");
+        assert!(hits[1].get("occurrences").is_none(), "{hits:?}");
     }
 
     #[test]
@@ -1046,6 +1795,176 @@ mod tests {
     }
 
     #[test]
+    fn budget_floors_are_protocol_errors_before_app_request() {
+        // R4：max_bytes < 4096、max_messages < 1、max_items < 1、limit < 1 都在
+        // 协议层 -32602（构造 AppRequest 之前），不落成 App 层 isError 业务帧。
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = seeded_store(&dir);
+        let mut server = ready(&store);
+        let cases = [
+            (
+                "search_sessions",
+                json!({ "query": "hello", "max_bytes": 4095 }),
+            ),
+            (
+                "search_sessions",
+                json!({ "query": "hello", "max_items": 0 }),
+            ),
+            ("search_sessions", json!({ "query": "hello", "limit": 0 })),
+            (
+                "get_session_context",
+                json!({ "session_id": "ses_v1_aaaa", "max_bytes": 4095 }),
+            ),
+            (
+                "get_session_context",
+                json!({ "session_id": "ses_v1_aaaa", "max_messages": 0 }),
+            ),
+            (
+                "get_message",
+                json!({ "message_id": "msg_v1_aaaa", "max_bytes": 4095 }),
+            ),
+            (
+                "get_message",
+                json!({ "message_id": "msg_v1_aaaa", "max_items": 0 }),
+            ),
+            ("list_sessions", json!({ "max_bytes": 4095 })),
+            ("list_sessions", json!({ "max_items": 0 })),
+            ("list_sessions", json!({ "limit": 0 })),
+        ];
+        for (tool, arguments) in cases {
+            let v = call(&mut server, tool, arguments.clone());
+            assert_eq!(v["error"]["code"], -32602, "{tool} {arguments}");
+            assert_eq!(
+                v["error"]["data"]["canonical_code"], "invalid_request",
+                "{tool} {arguments}"
+            );
+            assert!(v["result"].is_null(), "{tool} {arguments}");
+        }
+        // 精确下限（4096/1）放行到 App 层：合法业务请求。
+        let v = call(
+            &mut server,
+            "search_sessions",
+            json!({ "query": "hello", "max_bytes": 4096 }),
+        );
+        assert_eq!(v["result"]["isError"], false, "{v}");
+        let v = call(
+            &mut server,
+            "get_session_context",
+            json!({ "session_id": "ses_v1_aaaa", "max_messages": 1 }),
+        );
+        assert_eq!(
+            v["result"]["structuredContent"]["error"]["canonical_code"], "not_found",
+            "{v}"
+        );
+    }
+
+    #[test]
+    fn error_messages_truncate_echoed_values() {
+        // R5：method/tool/id/参数值回显进错误消息前截断到 ECHO_CAP 字符。
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = open_store(&dir);
+        let mut server = ready(&store);
+        let long = "x".repeat(500);
+        // 未知方法：method 值回显截断。
+        let v = respond(&mut server, &request(1, &long, json!({})));
+        assert_eq!(v["error"]["code"], -32601);
+        let message = v["error"]["message"].as_str().expect("message");
+        assert!(message.starts_with("method not found: "), "{message}");
+        assert!(
+            message.len() <= "method not found: ".len() + ECHO_CAP + 3,
+            "{message}"
+        );
+        assert!(message.ends_with("..."), "{message}");
+        // 未知工具：tool 值回显截断。
+        let v = call(&mut server, &long, json!({}));
+        assert_eq!(v["error"]["code"], -32602);
+        let message = v["error"]["message"].as_str().expect("message");
+        assert!(
+            message.len() <= "unknown tool: ".len() + ECHO_CAP + 3,
+            "{message}"
+        );
+        assert!(message.ends_with("..."), "{message}");
+        // 未知参数键回显截断。
+        let mut args = Map::new();
+        args.insert("query".to_string(), json!("x"));
+        args.insert(long.clone(), json!(true));
+        let v = call(&mut server, "search_sessions", Value::Object(args));
+        assert_eq!(v["error"]["code"], -32602);
+        let message = v["error"]["message"].as_str().expect("message");
+        assert!(
+            message.len() <= "unknown parameter: ".len() + ECHO_CAP + 3,
+            "{message}"
+        );
+        assert!(message.ends_with("..."), "{message}");
+        // enum 参数值与 wire id 回显截断。
+        let v = call(
+            &mut server,
+            "get_session_context",
+            json!({ "session_id": "ses_v1_aaaa", "policy": long.as_str() }),
+        );
+        assert_eq!(v["error"]["code"], -32602);
+        let message = v["error"]["message"].as_str().expect("message");
+        assert!(
+            message.len() <= "policy must be mainline|full, got ".len() + ECHO_CAP + 3,
+            "{message}"
+        );
+        assert!(message.ends_with("..."), "{message}");
+        let wire = format!("ses_v1_{long}");
+        let v = call(
+            &mut server,
+            "get_session_context",
+            json!({ "session_id": wire }),
+        );
+        assert_eq!(v["error"]["code"], -32602);
+        let message = v["error"]["message"].as_str().expect("message");
+        assert!(message.contains("maximum length of 128"), "{message}");
+    }
+
+    #[test]
+    fn tool_schemas_bound_unbounded_strings_and_arrays() {
+        // R5：无界 string 参数加 maxLength、无界 array 参数加 maxItems。
+        let tools = tool_catalog().as_array().expect("tools").clone();
+        let tool = |name: &str| -> Value {
+            tools
+                .iter()
+                .find(|tool| tool["name"] == name)
+                .unwrap_or_else(|| panic!("missing tool {name}"))
+                .clone()
+        };
+        let search = tool("search_sessions");
+        let properties = &search["inputSchema"]["properties"];
+        assert_eq!(properties["query"]["maxLength"], 4096);
+        assert_eq!(properties["cursor"]["maxLength"], 512);
+        assert_eq!(properties["since"]["maxLength"], 64);
+        assert_eq!(properties["until"]["maxLength"], 64);
+        assert_eq!(properties["providers"]["maxItems"], 2);
+        let context = tool("get_session_context");
+        assert_eq!(
+            context["inputSchema"]["properties"]["session_id"]["maxLength"],
+            128
+        );
+        let resume = tool("get_session_resume");
+        assert_eq!(
+            resume["inputSchema"]["properties"]["session_id"]["maxLength"],
+            128
+        );
+        let message = tool("get_message");
+        assert_eq!(
+            message["inputSchema"]["properties"]["message_id"]["maxLength"],
+            128
+        );
+        assert_eq!(
+            message["inputSchema"]["properties"]["session_id"]["maxLength"],
+            128
+        );
+        let list = tool("list_sessions");
+        assert_eq!(
+            list["inputSchema"]["properties"]["cursor"]["maxLength"],
+            512
+        );
+    }
+
+    #[test]
     fn tool_schema_floors_match_runtime_budget_validation() {
         // 发布 schema 的下限必须与 ResponseBudget::validate 的运行时下限一致
         // （1 / 4096），不允许声明 0 又让运行时拒绝（Minor-6）。
@@ -1078,6 +1997,22 @@ mod tests {
         assert_eq!(
             context["inputSchema"]["properties"]["max_bytes"]["minimum"], 4096,
             "get_session_context.max_bytes 下限必须与运行时一致"
+        );
+        let message = tools
+            .iter()
+            .find(|tool| tool["name"] == "get_message")
+            .expect("get_message");
+        assert_eq!(
+            message["inputSchema"]["properties"]["around"]["minimum"], 0,
+            "get_message.around 下限必须与运行时一致"
+        );
+        assert_eq!(
+            message["inputSchema"]["properties"]["max_items"]["minimum"], 1,
+            "get_message.max_items 下限必须与运行时一致"
+        );
+        assert_eq!(
+            message["inputSchema"]["properties"]["max_bytes"]["minimum"], 4096,
+            "get_message.max_bytes 下限必须与运行时一致"
         );
     }
 
@@ -1114,6 +2049,73 @@ mod tests {
     }
 
     #[test]
+    fn get_message_wire_id_errors_are_invalid_params() {
+        // 与 get_session_context 同层：缺失/非法 wire id 与 max_items:0 都是
+        // 请求校验失败（-32602），不得落成 App 层 isError 业务帧（design §2 note）。
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = open_store(&dir);
+        let mut server = ready(&store);
+        for arguments in [
+            json!({}),
+            json!({ "message_id": "not-a-wire-id" }),
+            json!({ "message_id": "msg_v1_aaaa", "session_id": "junk" }),
+            json!({ "message_id": "msg_v1_aaaa", "max_items": 0 }),
+            // kind 错配也是请求校验：session/document id 不能冒充 message_id，
+            // message id 也不能冒充 session_id（协议层校验，不落 App 层）。
+            json!({ "message_id": "ses_v1_aaaa" }),
+            json!({ "message_id": "msg_v1_aaaa", "session_id": "doc_v1_aaaa" }),
+        ] {
+            let v = call(&mut server, "get_message", arguments.clone());
+            assert_eq!(v["error"]["code"], -32602, "{arguments}");
+            assert_eq!(
+                v["error"]["data"]["canonical_code"], "invalid_request",
+                "{arguments}"
+            );
+            assert!(v["result"].is_null(), "{arguments}");
+        }
+    }
+
+    #[test]
+    fn get_session_context_rejects_wrong_kind_session_id() {
+        // session_id 必须是 Session 实体；message/document id 属于协议层请求
+        // 校验失败，而非 App 层 not_found。
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = open_store(&dir);
+        let mut server = ready(&store);
+        for arguments in [
+            json!({ "session_id": "msg_v1_aaaa" }),
+            json!({ "session_id": "doc_v1_aaaa" }),
+        ] {
+            let v = call(&mut server, "get_session_context", arguments.clone());
+            assert_eq!(v["error"]["code"], -32602, "{arguments}");
+            assert_eq!(
+                v["error"]["data"]["canonical_code"], "invalid_request",
+                "{arguments}"
+            );
+            assert!(v["result"].is_null(), "{arguments}");
+        }
+    }
+
+    #[test]
+    fn get_message_unknown_message_is_business_not_found() {
+        // 格式合法但库中不存在的 message_id 走 Application 的 not_found 业务
+        // 路径（isError 工具结果），而非协议层 -32602（design §2 note）。
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = open_store(&dir);
+        let mut server = ready(&store);
+        let v = call(
+            &mut server,
+            "get_message",
+            json!({ "message_id": "msg_v1_aaaa" }),
+        );
+        assert_eq!(v["result"]["isError"], true);
+        assert_eq!(
+            v["result"]["structuredContent"]["error"]["canonical_code"],
+            "not_found"
+        );
+    }
+
+    #[test]
     fn out_of_enum_policy_is_invalid_params() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = open_store(&dir);
@@ -1124,6 +2126,39 @@ mod tests {
             json!({ "session_id": "ses_v1_nope", "policy": "weird" }),
         );
         assert_eq!(v["error"]["code"], -32602);
+    }
+
+    #[test]
+    fn out_of_enum_level_is_invalid_params() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = open_store(&dir);
+        let mut server = ready(&store);
+        let v = call(
+            &mut server,
+            "get_session_context",
+            json!({ "session_id": "ses_v1_nope", "level": "everything" }),
+        );
+        assert_eq!(v["error"]["code"], -32602);
+        assert_eq!(v["error"]["data"]["canonical_code"], "invalid_request");
+    }
+
+    #[test]
+    fn get_session_context_schema_declares_level_enum() {
+        let catalog = tool_catalog();
+        let context_tool = catalog
+            .as_array()
+            .and_then(|tools| {
+                tools
+                    .iter()
+                    .find(|tool| tool["name"] == "get_session_context")
+            })
+            .expect("get_session_context tool must exist");
+        let level = &context_tool["inputSchema"]["properties"]["level"];
+        assert_eq!(
+            level["enum"],
+            json!(["raw", "talks", "sessions"]),
+            "schema must declare the level enum"
+        );
     }
 
     #[test]
@@ -1187,6 +2222,14 @@ mod tests {
         assert!(hits[0]["session_id"].is_null(), "{payload}");
         assert!(hits[0]["text"].is_null(), "{payload}");
         assert!(hits[0]["score"].is_number(), "{payload}");
+        // Search guidance is assembled and byte-clamped by Application, then
+        // carried through this same render projection. A catalog-only fixture
+        // has no text/session evidence, so guidance must remain absent.
+        assert!(hits[0].get("why_matched").is_none(), "{payload}");
+        assert!(
+            hits[0].get("suggested_next_commands").is_none(),
+            "{payload}"
+        );
         assert_eq!(payload["page"]["next_cursor"], Value::Null);
         assert_eq!(payload["page"]["has_more"], false);
         // content.text 与 structuredContent 必须是同一 payload 的两种载体。

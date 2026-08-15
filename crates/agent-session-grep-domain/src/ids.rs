@@ -77,6 +77,25 @@ pub enum Stability {
     Unstable,
 }
 
+/// The identity namespace that scopes a provider-native Session id.
+///
+/// Two providers can independently emit the same native Session id string, and
+/// two installations of the same provider (e.g. two machines ingesting their
+/// own history) can as well. Canonical Session identity therefore namespaces
+/// the native id by both facts — see [`StableId::native_session_scoped`] — so
+/// equal native ids from different providers or installations can never
+/// collide in a merged catalog.
+///
+/// Both fields must be *relocation-invariant*: stable across re-ingest of the
+/// same provider installation, and distinct between different installations.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SessionIdentityNamespace<'a> {
+    /// The stable provider tag (e.g. `"claude-code"`).
+    pub provider_id: &'a str,
+    /// A stable identifier for the provider installation.
+    pub installation_namespace: &'a str,
+}
+
 /// A typed, opaque, stable identifier.
 ///
 /// The wire form is `<prefix><hex-blake3-digest>` for derived ids, or
@@ -109,6 +128,13 @@ const NATIVE_SUFFIX_MAX_CHARS: usize = 256;
 
 impl StableId {
     /// Adopt a provider-native id verbatim (tier [`Stability::Native`]).
+    ///
+    /// For provider-native *Session* ids, use
+    /// [`StableId::native_session_scoped`] instead: canonical Session identity
+    /// must be namespaced by provider and installation
+    /// ([`SessionIdentityNamespace`]) or equal native ids from different
+    /// providers/installations collide. This constructor keeps its original
+    /// semantics for every other kind (e.g. message native ids).
     ///
     /// The raw id is sanitized (trimmed, control characters stripped, suffix
     /// clamped to [`NATIVE_SUFFIX_MAX_CHARS`]) so that hostile or pathological
@@ -154,6 +180,40 @@ impl StableId {
             stability,
             value: format!("{}{truncated}", kind.prefix()),
         }
+    }
+
+    /// Canonical id for a Session whose provider emitted a durable native id.
+    ///
+    /// Canonical identity is the digest of
+    /// `(provider_id, installation_namespace, native_session_id)`, hashed with
+    /// the same length-prefixed framing as [`StableId::derive`] and the usual
+    /// Session domain separation. The wire string keeps the ordinary
+    /// [`IdKind::Session`] prefix — `ses_v1_` + digest — so the namespace does
+    /// not introduce a new prefix or format.
+    ///
+    /// Because the namespace facts are *hashed*, the resulting id contains
+    /// neither the native id nor the namespace in recoverable form. **Never**
+    /// attempt to recover a provider-native id by stripping the `ses_v1_`
+    /// prefix — that transform is lossy and unreliable, and no reverse
+    /// derivation path exists. Callers that need the native id must carry it
+    /// alongside the canonical id.
+    ///
+    /// The id is tier [`Stability::Native`]: every input fact is durable and
+    /// provider-guaranteed, so the derivation is as stable as the native id
+    /// itself.
+    pub fn native_session_scoped(
+        namespace: &SessionIdentityNamespace<'_>,
+        native_session_id: &str,
+    ) -> Self {
+        Self::derive(
+            IdKind::Session,
+            Stability::Native,
+            &[
+                namespace.provider_id.as_bytes(),
+                namespace.installation_namespace.as_bytes(),
+                native_session_id.as_bytes(),
+            ],
+        )
     }
 
     /// The entity kind this id names.
@@ -312,6 +372,79 @@ mod tests {
             "msg_v1_".len() + NATIVE_SUFFIX_MAX_CHARS
         );
         assert!(oversized.validate());
+    }
+
+    #[test]
+    fn scoped_session_native_ids_namespace_by_provider_and_installation() {
+        let ns = SessionIdentityNamespace {
+            provider_id: "claude-code",
+            installation_namespace: "install-a",
+        };
+        let other_provider = SessionIdentityNamespace {
+            provider_id: "codex",
+            installation_namespace: "install-a",
+        };
+        let other_install = SessionIdentityNamespace {
+            provider_id: "claude-code",
+            installation_namespace: "install-b",
+        };
+
+        let base = StableId::native_session_scoped(&ns, "session-123");
+
+        // 同 native id + 不同 provider → 不同 canonical session id。
+        assert_ne!(
+            base,
+            StableId::native_session_scoped(&other_provider, "session-123")
+        );
+        // 同 provider + 不同 installation → 不同 canonical session id。
+        assert_ne!(
+            base,
+            StableId::native_session_scoped(&other_install, "session-123")
+        );
+
+        // wire 前缀仍是 ses_v1_;类型、稳定性、digest 长度均正确。
+        assert!(base.as_str().starts_with("ses_v1_"));
+        assert_eq!(base.as_str().len(), "ses_v1_".len() + DIGEST_HEX_LEN);
+        assert_eq!(base.kind(), IdKind::Session);
+        assert_eq!(base.stability(), Stability::Native);
+        assert!(base.validate());
+
+        // 命名空间与 native id 被哈希吸收,不是 verbatim 采纳的
+        // `ses_v1_session-123` 形态。
+        assert_ne!(base.as_str(), "ses_v1_session-123");
+        // 且均不可从 wire 反推(digest 只含 0-9a-f)。
+        assert!(!base.as_str().contains("session-123"));
+        assert!(!base.as_str().contains("claude-code"));
+        assert!(!base.as_str().contains("install-a"));
+    }
+
+    #[test]
+    fn scoped_session_native_ids_are_deterministic() {
+        let ns = SessionIdentityNamespace {
+            provider_id: "claude-code",
+            installation_namespace: "install-a",
+        };
+        let a = StableId::native_session_scoped(&ns, "session-123");
+        let b = StableId::native_session_scoped(&ns, "session-123");
+        // 同 provider + installation + native id → 确定性一致。
+        assert_eq!(a, b);
+        // 同命名空间下不同 native id → 不同 id。
+        assert_ne!(a, StableId::native_session_scoped(&ns, "session-124"));
+    }
+
+    #[test]
+    fn scoped_session_native_id_wire_roundtrip() {
+        let ns = SessionIdentityNamespace {
+            provider_id: "claude-code",
+            installation_namespace: "install-a",
+        };
+        let original = StableId::native_session_scoped(&ns, "session-123");
+        let reparsed = StableId::from_wire(original.as_str()).unwrap();
+        // Value(catalog 查找键)原样保留,kind 从前缀恢复。
+        assert_eq!(reparsed.as_str(), original.as_str());
+        assert_eq!(reparsed.kind(), IdKind::Session);
+        // Stability 不在 wire 上。
+        assert_eq!(reparsed.stability(), Stability::Unstable);
     }
 
     #[test]

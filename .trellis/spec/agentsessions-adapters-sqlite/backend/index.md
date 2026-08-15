@@ -50,6 +50,11 @@ are derived and must be fully rebuildable from `catalog` at any time.**
   authoritative locked handle, and maps contention to path-redacted WriterBusy.
 - `searchable_text(payload)` — extracts the searchable body from the canonical
   payload for FTS.
+- Filtered FTS search — uses one prepared query with `fts MATCH` plus provider
+  and normalized timestamp predicates before `LIMIT`; retains the pinned BM25
+  score/StableId order. Empty filters keep the legacy SQL path. SQLite FTS5
+  auxiliary functions and `MATCH` name the real virtual table (`fts`), not a
+  table alias.
 - `ContextGraphStore` reads — return typed Domain messages/documents/placements/
   edges, group reverse candidates by distinct Session, and expose aggregate
   placement/claim counts. They never return SQL rows or compatibility JSON.

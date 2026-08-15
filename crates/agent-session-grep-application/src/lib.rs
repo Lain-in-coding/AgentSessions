@@ -5,20 +5,22 @@
 //! 分层依赖不变量：domain ← ports ← application ← adapters。
 
 use agent_session_grep_domain::{
-    ContextPolicy, DomainError, Message, MessagePlacement, SourceDocument, StableId, select_full,
-    select_mainline,
+    ContextPolicy, DomainError, IdKind, Message, MessagePlacement, Role, SourceDocument, StableId,
+    select_full, select_mainline,
 };
 use agent_session_grep_ports::{
     CanonicalEventSink, CatalogEntry, CatalogStore, Confidence, ContextGraphStore, MessageEvent,
-    ParseReport, PortError, PortResult, ProbeResult, ProviderAdapter, ProviderError, SearchHit,
-    SearchIndex,
+    NoResumeClaims, ParseReport, PortError, PortResult, ProbeResult, ProviderAdapter,
+    ProviderError, ResumeClaimsStore, SearchFilters, SearchHit, SearchIndex, SearchInstant,
+    SearchQuery, SessionResumeMetadata,
 };
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 pub mod budget;
 pub mod cjk;
 pub mod cursor;
 pub mod evidence;
+pub mod guidance;
 
 pub use budget::{ResponseBudget, Truncation};
 pub use cjk::bigram_cjk;
@@ -29,14 +31,36 @@ pub const SORT_WIRE_ID_ASC: &str = "wire_id_asc";
 /// 排序方案标识：检索结果的钉住排序（bm25 降序 + id tiebreak，全序确定）。
 pub const SORT_SCORE_DESC: &str = "score_desc";
 
+/// Cursor 结果集判别器（resume-protocol-prerequisites R2）：`list` 全部实体。
+pub const RESULT_SET_ALL: &str = "all";
+/// Cursor 结果集判别器：`list_sessions` 仅会话实体。
+pub const RESULT_SET_SESSIONS_ONLY: &str = "sessions_only";
+
+/// `resume_available` 恒序列化进 searchHit 的字节开销（`, "resume_available":false`）。
+const RESUME_AVAILABLE_FIELD_BYTES: usize = 24;
+
 /// clamp 前从 `max_response_bytes` 扣除的 envelope 预留（budget.rs 声明预留是调用方义务）。
 /// 预算下限 4096 保证扣除后仍为正。
 const ENVELOPE_RESERVE_BYTES: usize = 1024;
+
+/// Maximum number of Session IDs exposed by a message-resolution ambiguity.
+/// The total count remains available separately while the candidate list stays
+/// bounded for protocol and privacy safety.
+pub const MAX_MESSAGE_AMBIGUITY_CANDIDATES: usize = 8;
+
+/// Fixed metadata for a derived context view. Duplicated message payloads are
+/// charged per retained occurrence so clamping can still preserve a prefix.
+const STRUCTURAL_METADATA_RESERVE_BYTES: usize = 320;
 
 /// Upper bound on a single fetch window. Cursor offsets are tamper-evident
 /// but not unforgeable; capping the window keeps a forged huge offset from
 /// overflowing into a negative SQL LIMIT (SQLite treats -1 as "no limit").
 const MAX_FETCH_WINDOW: u64 = 1 << 20;
+
+/// group_by_session（R3）模式下相对分页窗口的扫描放大倍数：归并需要把命中先
+/// 汇到会话级再切页，扫描窗口取 `页窗口 × GROUP_SCAN_FACTOR`（仍被
+/// MAX_FETCH_WINDOW 封顶），使 `occurrences` 覆盖更有意义的命中样本。
+const GROUP_SCAN_FACTOR: u64 = 16;
 
 /// 一条 JSON 字符串字面量的序列化长度（含两端引号与转义）。
 fn json_string_len(value: &str) -> usize {
@@ -108,6 +132,8 @@ pub enum AppError {
     Cursor(#[from] cursor::CursorError),
     #[error(transparent)]
     Budget(#[from] budget::BudgetError),
+    #[error(transparent)]
+    MessageAmbiguous(#[from] MessageAmbiguity),
 }
 
 /// 应用层请求 ADT：所有前端的统一入口。
@@ -119,12 +145,21 @@ pub enum AppRequest {
     /// 全文检索：按查询串返回命中列表（分页 + 预算）。
     Search {
         query: String,
+        /// Optional normalized metadata predicates. Providers are ORed; the
+        /// provider and half-open UTC time dimensions are ANDed.
+        filters: SearchFilters,
         /// 最多返回条数；0 视为非法请求。与 `budget.max_items` 取较小者为页大小。
         limit: usize,
         /// 上一页发出的续读令牌；`None` 表示第一页。
         cursor: Option<String>,
         /// 响应预算（CONTRACT §3）；低于下限即校验错误。
         budget: ResponseBudget,
+        /// 是否包含系统噪声（competitor-borrowings R2）：`false`（默认）排除
+        /// role 为 system/developer 的命中，`true` 显式恢复。
+        include_system: bool,
+        /// 是否按会话归并（competitor-borrowings R3）：`false`（默认）保持
+        /// 逐命中分页；`true` 时每会话只保留最高分命中并附带 `occurrences`。
+        group_by_session: bool,
     },
     /// 按稳定 ID 取回单个实体的原始负载。
     Get { id: StableId },
@@ -135,17 +170,51 @@ pub enum AppRequest {
         limit: usize,
         cursor: Option<String>,
         budget: ResponseBudget,
+        /// true 时只列出 Session 实体（competitor-borrowings R1.3：`list_sessions`
+        /// 不再被 doc/msg 实体淹没）。过滤在存储层做，offset/limit 分页语义
+        /// 保持作用在过滤后的集合上。
+        sessions_only: bool,
     },
     /// 会话上下文装配：按策略选取分支，返回消息链与证据区间（CONTRACT §1-2）。
     Context {
         session_id: StableId,
         policy: ContextPolicy,
+        level: ContextLevel,
+        budget: ResponseBudget,
+    },
+    /// Resolve one stable Message in an authoritative Session mainline and
+    /// return a bounded placement window around it.
+    Message {
+        message_id: StableId,
+        session_id: Option<StableId>,
+        around: usize,
         budget: ResponseBudget,
     },
     /// Resolve every distinct Session that contains placements for one Message.
     MessageContexts { message_id: StableId },
+    /// Resolve read-only Resume Metadata for one canonical Session (ADR-0009).
+    GetSessionResume { session_id: StableId },
     /// 返回当前 Catalog 统计状态。
     Status,
+}
+
+/// Detail level for a context response. `Raw` is the compatibility default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ContextLevel {
+    Raw,
+    Talks,
+    Sessions,
+}
+
+impl ContextLevel {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Raw => "raw",
+            Self::Talks => "talks",
+            Self::Sessions => "sessions",
+        }
+    }
 }
 
 /// One placement-aware context response item.
@@ -161,6 +230,30 @@ pub struct ContextMessage {
     pub payload: serde_json::Value,
 }
 
+/// A structural talk: one user message followed by assistant/tool messages.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ContextTalk {
+    pub user_message: ContextMessage,
+    pub following_messages: Vec<ContextMessage>,
+}
+
+/// A bounded structural overview of one selected context branch.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ContextSessionSummary {
+    pub first_user_message: Option<ContextMessage>,
+    pub message_count: usize,
+    pub turn_count: usize,
+    pub file_references: Vec<String>,
+}
+
+/// A deterministic next-call hint. Identifiers are copied from the context.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ContextHint {
+    pub command: String,
+    pub session_id: String,
+    pub level: ContextLevel,
+}
+
 /// One distinct Session candidate for a stable Message.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MessageContextCandidate {
@@ -168,8 +261,36 @@ pub struct MessageContextCandidate {
     pub placement_ids: Vec<String>,
 }
 
+/// Bounded explicit ambiguity when a shared Message belongs to several Sessions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessageAmbiguity {
+    pub candidate_session_ids: Vec<String>,
+    pub candidate_count: usize,
+    pub hint: String,
+}
+
+impl std::fmt::Display for MessageAmbiguity {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("message belongs to multiple sessions; provide session_id")
+    }
+}
+
+impl std::error::Error for MessageAmbiguity {}
+
+/// One message window selected from an authoritative Session mainline.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MessageWindow {
+    pub message_id: String,
+    pub session_id: String,
+    pub anchor_placement_id: String,
+    pub messages: Vec<ContextMessage>,
+    pub truncation: Truncation,
+    pub generation: u64,
+}
+
 /// 应用层结果 ADT：前端据此渲染，不再回到 domain/ports 类型。
 #[derive(Debug, Clone, PartialEq)]
+#[allow(clippy::large_enum_variant)]
 pub enum AppResponse {
     /// 检索结果，按相关性降序（bm25 + id tiebreak 的钉住全序）。
     Search {
@@ -206,14 +327,27 @@ pub enum AppResponse {
         messages: Vec<ContextMessage>,
         /// 与 `messages` 对齐装配的证据区间（可能被 `max_evidence_spans` 截短）。
         evidence: Vec<EvidenceSpanDto>,
+        /// Requested and effective structural response levels.
+        requested_level: ContextLevel,
+        effective_level: ContextLevel,
+        /// Structural talk groups for `talks` responses.
+        talks: Vec<ContextTalk>,
+        /// Structural overview for `sessions` responses.
+        summary: Option<ContextSessionSummary>,
+        /// Deterministic next-call hint, when a real session identifier is available.
+        hint: Option<ContextHint>,
         truncation: Truncation,
         generation: u64,
     },
+    /// One placement-aware mainline window.
+    Message { window: MessageWindow },
     /// Distinct-session candidates for a stable Message.
     MessageContexts {
         message_id: String,
         candidates: Vec<MessageContextCandidate>,
     },
+    /// Read-only Resume Metadata projection (ADR-0009)：固定可空字段，恒在。
+    SessionResume(SessionResumeMetadata),
     /// 当前 Catalog 实体总数、关系统计与活动 generation。
     Status {
         catalog_count: u64,
@@ -398,6 +532,272 @@ impl CanonicalEventSink for StagingSink {
     }
 }
 
+/// Parse a timezone-qualified RFC3339/ISO-8601 timestamp into a normalized
+/// UTC instant. Naive local times are rejected because the application cannot
+/// infer a timezone without introducing host-dependent behavior.
+pub fn parse_search_instant(value: &str) -> Option<SearchInstant> {
+    let value = value.trim();
+    let (date, time) = value.split_once(['T', ' '])?;
+    let mut date_parts = date.split('-');
+    let year: i64 = date_parts.next()?.parse().ok()?;
+    let month: u32 = date_parts.next()?.parse().ok()?;
+    let day: u32 = date_parts.next()?.parse().ok()?;
+    if date_parts.next().is_some() || !(1..=12).contains(&month) {
+        return None;
+    }
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let days_in_month = match month {
+        2 if leap => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    };
+    if day == 0 || day > days_in_month {
+        return None;
+    }
+
+    let (clock, offset_minutes) = if let Some(clock) = time.strip_suffix('Z') {
+        (clock, 0_i32)
+    } else {
+        let sign_at = time.rfind(['+', '-'])?;
+        if sign_at == 0 {
+            return None;
+        }
+        let (clock, offset) = time.split_at(sign_at);
+        let (sign, digits) = offset.split_at(1);
+        let (hours, minutes) = digits
+            .split_once(':')
+            .unwrap_or_else(|| digits.split_at_checked(2).unwrap_or((digits, "")));
+        if minutes.is_empty() || hours.len() != 2 || minutes.len() != 2 {
+            return None;
+        }
+        let hours: i32 = hours.parse().ok()?;
+        let minutes: i32 = minutes.parse().ok()?;
+        if hours > 23 || minutes > 59 {
+            return None;
+        }
+        let magnitude = hours * 60 + minutes;
+        (clock, if sign == "+" { magnitude } else { -magnitude })
+    };
+    let (clock, mut fraction, has_fraction) = match clock.split_once('.') {
+        Some((clock, fraction)) => (clock, fraction, true),
+        None => (clock, "", false),
+    };
+    let (hour, minute, second) = match clock.split_once(':') {
+        Some(_) => {
+            let mut parts = clock.split(':');
+            let hour: i64 = parts.next()?.parse().ok()?;
+            let minute: i64 = parts.next()?.parse().ok()?;
+            let second: i64 = parts.next()?.parse().ok()?;
+            if parts.next().is_some() {
+                return None;
+            }
+            (hour, minute, second)
+        }
+        None => {
+            if clock.len() != 6 || !clock.bytes().all(|byte| byte.is_ascii_digit()) {
+                return None;
+            }
+            (
+                clock[0..2].parse().ok()?,
+                clock[2..4].parse().ok()?,
+                clock[4..6].parse().ok()?,
+            )
+        }
+    };
+    if hour > 23 || minute > 59 || second > 59 {
+        return None;
+    }
+    if has_fraction && (fraction.is_empty() || !fraction.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        return None;
+    }
+    if !has_fraction {
+        fraction = "0";
+    }
+    let mut nanoseconds = 0_u32;
+    for digit in fraction.bytes().take(9) {
+        nanoseconds = nanoseconds * 10 + u32::from(digit - b'0');
+    }
+    if fraction.len() > 9 && fraction.bytes().skip(9).any(|digit| digit != b'0') {
+        return None;
+    }
+    for _ in fraction.len().min(9)..9 {
+        nanoseconds *= 10;
+    }
+    let days = days_from_civil(year, month, day)?;
+    let seconds = days
+        .checked_mul(86_400)?
+        .checked_add(hour.checked_mul(3_600)?)?
+        .checked_add(minute.checked_mul(60)?)?
+        .checked_add(second)?
+        .checked_sub(i64::from(offset_minutes) * 60)?;
+    Some(SearchInstant {
+        unix_seconds: seconds,
+        nanosecond: nanoseconds,
+    })
+}
+
+fn days_from_civil(year: i64, month: u32, day: u32) -> Option<i64> {
+    let year = if month <= 2 {
+        year.checked_sub(1)?
+    } else {
+        year
+    };
+    let era = year.div_euclid(400);
+    let year_of_era = year - era * 400;
+    let shifted_month = (month + 9) % 12;
+    let day_of_year = ((153 * shifted_month + 2) / 5 + day - 1) as i64;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    Some(era * 146097 + day_of_era - 719468)
+}
+
+/// Resolve the CLI's compact duration syntax against the caller's injected
+/// application clock. Absolute timestamps are handled by `parse_search_instant`.
+pub fn parse_relative_search_instant(value: &str, now_ms: i64) -> Option<SearchInstant> {
+    let value = value.trim();
+    let (digits, unit) = value.split_at_checked(value.len().saturating_sub(1))?;
+    let amount: i64 = digits.parse().ok()?;
+    if amount <= 0 {
+        return None;
+    }
+    let multiplier = match unit {
+        "h" => 3_600_000,
+        "d" => 86_400_000,
+        "w" => 604_800_000,
+        _ => return None,
+    };
+    let delta = amount.checked_mul(multiplier)?;
+    Some(SearchInstant::from_unix_millis(now_ms.checked_sub(delta)?))
+}
+
+fn search_query_digest(
+    query: &str,
+    filters: &SearchFilters,
+    include_system: bool,
+    group_by_session: bool,
+) -> String {
+    if filters.is_empty() && !include_system && !group_by_session {
+        return cursor::digest_query(query);
+    }
+    let providers = filters
+        .providers
+        .iter()
+        .map(|provider| provider.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
+    let since = filters
+        .since
+        .map(|instant| format!("{}:{}", instant.unix_seconds, instant.nanosecond))
+        .unwrap_or_default();
+    let until = filters
+        .until
+        .map(|instant| format!("{}:{}", instant.unix_seconds, instant.nanosecond))
+        .unwrap_or_default();
+    cursor::digest_query(&format!(
+        "search-filter-v1\0{}\0providers={}\0since={}\0until={}\0include_system={}\0group_by_session={}",
+        query, providers, since, until, include_system, group_by_session
+    ))
+}
+
+/// R2 系统噪声判定：canonical message payload 的 `role` 字段为 system 或
+/// developer（Codex 的 system/permission 层角色）即视为系统上下文。compaction
+/// summary 在 parse 期已跳过（不产生消息）；AGENTS.md/skills/system prompt 以
+/// 请求记录的 `system` 数组形式存在而非消息实体，故无需额外标记。payload 非
+/// JSON 或无 role 字段（legacy）一律不判为噪声。
+fn payload_role_is_system_noise(payload: Option<&[u8]>) -> bool {
+    payload
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(bytes).ok())
+        .and_then(|value| {
+            value
+                .get("role")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .is_some_and(|role| role == "system" || role == "developer")
+}
+
+/// 装配一条检索命中（R1/ADR-0008 + guidance）：从 payload 解析 `text` 摘要、
+/// 填充归属会话、派生确定性 `why_matched` 与 `suggested_next_commands`。
+/// payload 无 text（或非 JSON）→ text None；无 placement → session_id None。
+fn assemble_search_hit(
+    hit: &mut SearchHit,
+    payload: Option<&[u8]>,
+    session: Option<&StableId>,
+    max_snippet_chars: usize,
+    query_terms: &[String],
+) {
+    let full_text = payload.and_then(|bytes| {
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+            return None;
+        };
+        value
+            .get("text")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+    });
+    // 证据装配期间全量 payload 仍可用：除规范 `text` 字段外，把整棵 JSON 值
+    // 交给 guidance（string-leaves 源覆盖 Codex content blocks 等无顶层 text
+    // 的 payload），显示前缀作最后一个兜底源（可能是截断 snippet，会漏掉前缀
+    // 之后的真实命中——guidance design §2）。
+    let payload_value =
+        payload.and_then(|bytes| serde_json::from_slice::<serde_json::Value>(bytes).ok());
+    hit.text = full_text
+        .as_deref()
+        .map(|text| text.chars().take(max_snippet_chars).collect());
+    hit.session_id = session.map(|s| s.as_str().to_string());
+    hit.why_matched = guidance::why_matched(
+        query_terms,
+        full_text.as_deref(),
+        None,
+        payload_value.as_ref(),
+        hit.text.as_deref(),
+    );
+    hit.suggested_next_commands = guidance::suggested_next_commands(hit);
+}
+
+/// 检索命中在 `max_response_bytes` 闸内的序列化字节估算（与 CLI 渲染对齐）：
+/// id + session_id + text + guidance；`occurrences` 仅当 >1（归并模式）时计入，
+/// 与序列化器"occurrences == 1 时省略该键"的约定一致。
+fn search_hit_charge(hit: &SearchHit) -> usize {
+    let why_matched_len = if hit.why_matched.is_empty() {
+        0
+    } else {
+        hit.why_matched
+            .iter()
+            .map(|value| json_string_len(value))
+            .sum::<usize>()
+            + hit.why_matched.len()
+            + 15
+    };
+    let suggested_len = if hit.suggested_next_commands.is_empty() {
+        0
+    } else {
+        hit.suggested_next_commands
+            .iter()
+            .map(|value| json_string_len(value))
+            .sum::<usize>()
+            + hit.suggested_next_commands.len()
+            + 27
+    };
+    let occurrences_len = if hit.occurrences > 1 {
+        hit.occurrences.to_string().len() + 14
+    } else {
+        0
+    };
+    json_string_len(hit.id.as_str())
+        + hit
+            .session_id
+            .as_ref()
+            .map_or(0, |s| json_string_len(s) + 14)
+        + hit.text.as_ref().map_or(0, |s| json_string_len(s) + 8)
+        + why_matched_len
+        + suggested_len
+        + occurrences_len
+        + RESUME_AVAILABLE_FIELD_BYTES
+        + 32
+}
+
 /// 系统时钟（Unix 毫秒）。[`App::new`] 的默认时钟；测试经 [`App::with_clock`] 注入固定值。
 fn system_now_ms() -> i64 {
     std::time::SystemTime::now()
@@ -406,27 +806,449 @@ fn system_now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+#[derive(Clone)]
 struct ContextOccurrence {
     message: ContextMessage,
     evidence: EvidenceSpanDto,
+    role: Role,
+    source_document_id: String,
     estimated_bytes: usize,
+}
+
+struct MessageOccurrence {
+    message: ContextMessage,
+    estimated_bytes: usize,
+    is_anchor: bool,
+    payload_truncated: bool,
+}
+
+fn role_name(role: Role) -> &'static str {
+    match role {
+        Role::User => "user",
+        Role::Assistant => "assistant",
+        Role::System => "system",
+        Role::Developer => "developer",
+        Role::Tool => "tool",
+    }
+}
+
+fn json_escaped_char_len(value: char) -> usize {
+    match value {
+        '"' | '\\' | '\u{0008}' | '\t' | '\n' | '\u{000c}' | '\r' => 2,
+        '\u{0000}'..='\u{001f}' => 6,
+        _ => value.len_utf8(),
+    }
+}
+
+fn project_anchor_payload(
+    message: &mut ContextMessage,
+    role: Role,
+    full_text: &str,
+    max_bytes: usize,
+) -> Result<bool, budget::BudgetError> {
+    if context_message_bytes(message) <= max_bytes {
+        return Ok(false);
+    }
+
+    let preserves_other_fields = message
+        .payload
+        .as_object_mut()
+        .and_then(|payload| payload.get_mut("text"))
+        .is_some_and(|text| {
+            if text.is_string() {
+                *text = serde_json::Value::String(String::new());
+                true
+            } else {
+                false
+            }
+        });
+    if !preserves_other_fields || context_message_bytes(message) > max_bytes {
+        message.payload = serde_json::json!({
+            "role": role_name(role),
+            "text": "",
+        });
+    }
+
+    let base_bytes = context_message_bytes(message);
+    if base_bytes > max_bytes {
+        return Err(budget::BudgetError::TooSmall(
+            "max_response_bytes cannot fit the message anchor identity".into(),
+        ));
+    }
+
+    let mut text = String::new();
+    let mut remaining = max_bytes - base_bytes;
+    for value in full_text.chars() {
+        let escaped_len = json_escaped_char_len(value);
+        if escaped_len > remaining {
+            break;
+        }
+        text.push(value);
+        remaining -= escaped_len;
+    }
+    message
+        .payload
+        .as_object_mut()
+        .expect("projected message payload is an object")
+        .insert("text".into(), serde_json::Value::String(text));
+    debug_assert!(context_message_bytes(message) <= max_bytes);
+    Ok(true)
+}
+
+fn structural_metadata_reserve(session_id: &StableId, requested_level: ContextLevel) -> usize {
+    match requested_level {
+        ContextLevel::Raw => 0,
+        ContextLevel::Talks | ContextLevel::Sessions => {
+            STRUCTURAL_METADATA_RESERVE_BYTES.saturating_add(session_id.as_str().len())
+        }
+    }
+}
+
+fn occurrence_response_bytes(
+    occurrence: &ContextOccurrence,
+    requested_level: ContextLevel,
+    has_user_anchor: &mut bool,
+    references: &mut BTreeSet<String>,
+) -> usize {
+    let derived_copy = match requested_level {
+        ContextLevel::Raw => false,
+        ContextLevel::Talks => {
+            if occurrence.role == Role::User {
+                *has_user_anchor = true;
+                true
+            } else {
+                *has_user_anchor && matches!(occurrence.role, Role::Assistant | Role::Tool)
+            }
+        }
+        ContextLevel::Sessions => occurrence.role == Role::User && !*has_user_anchor,
+    };
+    if occurrence.role == Role::User {
+        *has_user_anchor = true;
+    }
+    occurrence
+        .estimated_bytes
+        .saturating_add(if derived_copy {
+            occurrence.estimated_bytes
+        } else {
+            0
+        })
+        .saturating_add(
+            if requested_level == ContextLevel::Sessions
+                && references.insert(occurrence.source_document_id.clone())
+            {
+                occurrence.source_document_id.len().saturating_add(4)
+            } else {
+                0
+            },
+        )
+}
+
+fn clamp_context_occurrences(
+    occurrences: Vec<ContextOccurrence>,
+    level: ContextLevel,
+    max_messages: usize,
+    max_bytes: usize,
+) -> (Vec<ContextOccurrence>, Truncation, usize) {
+    let mut has_user_anchor = false;
+    let mut references = BTreeSet::new();
+    let costed = occurrences
+        .into_iter()
+        .map(|occurrence| {
+            let cost = occurrence_response_bytes(
+                &occurrence,
+                level,
+                &mut has_user_anchor,
+                &mut references,
+            );
+            (occurrence, cost)
+        })
+        .collect();
+    let (kept, mut truncation, consumed) =
+        budget::clamp_items(costed, max_messages, max_bytes, |(_, cost)| *cost);
+    if truncation.reason.as_deref() == Some(budget::TRUNCATION_MAX_ITEMS) {
+        truncation.reason = Some(budget::TRUNCATION_MAX_MESSAGES.to_string());
+    }
+    (
+        kept.into_iter().map(|(occurrence, _)| occurrence).collect(),
+        truncation,
+        consumed,
+    )
+}
+
+fn talks_of(occurrences: &[&ContextOccurrence]) -> Vec<ContextTalk> {
+    let mut talks = Vec::new();
+    for occurrence in occurrences {
+        if occurrence.role == Role::User {
+            talks.push(ContextTalk {
+                user_message: occurrence.message.clone(),
+                following_messages: Vec::new(),
+            });
+        } else if matches!(occurrence.role, Role::Assistant | Role::Tool)
+            && let Some(talk) = talks.last_mut()
+        {
+            talk.following_messages.push(occurrence.message.clone());
+        }
+    }
+    talks
+}
+
+fn summary_of(occurrences: &[&ContextOccurrence]) -> ContextSessionSummary {
+    let first_user_message = occurrences
+        .iter()
+        .find(|occurrence| occurrence.role == Role::User)
+        .map(|occurrence| occurrence.message.clone());
+    let turn_count = occurrences
+        .iter()
+        .filter(|occurrence| occurrence.role == Role::User)
+        .count();
+    let mut file_references = Vec::new();
+    for occurrence in occurrences {
+        if !file_references.contains(&occurrence.source_document_id) {
+            file_references.push(occurrence.source_document_id.clone());
+        }
+    }
+    ContextSessionSummary {
+        first_user_message,
+        message_count: occurrences.len(),
+        turn_count,
+        file_references,
+    }
+}
+
+fn available_level(
+    requested_level: ContextLevel,
+    occurrences: &[ContextOccurrence],
+) -> ContextLevel {
+    match requested_level {
+        ContextLevel::Raw => ContextLevel::Raw,
+        ContextLevel::Talks | ContextLevel::Sessions
+            if occurrences
+                .iter()
+                .any(|occurrence| occurrence.role == Role::User) =>
+        {
+            requested_level
+        }
+        ContextLevel::Talks | ContextLevel::Sessions => ContextLevel::Raw,
+    }
+}
+
+fn assemble_level(
+    requested_level: ContextLevel,
+    kept_occurrences: &[ContextOccurrence],
+) -> (
+    ContextLevel,
+    Vec<ContextTalk>,
+    Option<ContextSessionSummary>,
+) {
+    let occurrences: Vec<&ContextOccurrence> = kept_occurrences.iter().collect();
+    match requested_level {
+        ContextLevel::Raw => (ContextLevel::Raw, Vec::new(), None),
+        ContextLevel::Talks => {
+            let talks = talks_of(&occurrences);
+            if talks.is_empty() {
+                (ContextLevel::Raw, Vec::new(), None)
+            } else {
+                (ContextLevel::Talks, talks, None)
+            }
+        }
+        ContextLevel::Sessions => {
+            let talks = talks_of(&occurrences);
+            if talks.is_empty() {
+                (ContextLevel::Raw, Vec::new(), None)
+            } else {
+                (
+                    ContextLevel::Sessions,
+                    Vec::new(),
+                    Some(summary_of(&occurrences)),
+                )
+            }
+        }
+    }
+}
+
+fn build_hint(
+    session_id: &StableId,
+    requested_level: ContextLevel,
+    effective_level: ContextLevel,
+) -> Option<ContextHint> {
+    let next = match (requested_level, effective_level) {
+        (ContextLevel::Sessions, ContextLevel::Sessions) => ContextLevel::Talks,
+        (ContextLevel::Sessions, ContextLevel::Talks)
+        | (ContextLevel::Talks, ContextLevel::Talks) => ContextLevel::Raw,
+        _ => return None,
+    };
+    Some(ContextHint {
+        command: "get_session_context".to_string(),
+        session_id: session_id.as_str().to_string(),
+        level: next,
+    })
+}
+
+fn structural_fields_bytes(
+    talks: &[ContextTalk],
+    summary: &Option<ContextSessionSummary>,
+    hint: &Option<ContextHint>,
+) -> usize {
+    let mut bytes = 128usize;
+    if let Some(hint) = hint {
+        bytes = bytes
+            .saturating_add(hint.command.len())
+            .saturating_add(hint.session_id.len())
+            .saturating_add(hint.level.as_str().len())
+            .saturating_add(48);
+    }
+    for talk in talks {
+        bytes = bytes
+            .saturating_add(context_message_bytes(&talk.user_message))
+            .saturating_add(32);
+        for message in &talk.following_messages {
+            bytes = bytes
+                .saturating_add(context_message_bytes(message))
+                .saturating_add(8);
+        }
+    }
+    if let Some(summary) = summary {
+        bytes = bytes.saturating_add(96);
+        if let Some(message) = &summary.first_user_message {
+            bytes = bytes.saturating_add(context_message_bytes(message));
+        }
+        for reference in &summary.file_references {
+            bytes = bytes.saturating_add(reference.len()).saturating_add(4);
+        }
+    }
+    bytes
+}
+
+fn context_message_bytes(message: &ContextMessage) -> usize {
+    message
+        .id
+        .len()
+        .saturating_add(message.placement_id.len())
+        .saturating_add(message.message_id.len())
+        .saturating_add(message.payload.to_string().len())
+        .saturating_add(48)
+}
+
+fn message_occurrence_bytes(message: &ContextMessage) -> usize {
+    context_message_bytes(message).saturating_add(48)
+}
+
+fn clamp_message_window(
+    occurrences: Vec<MessageOccurrence>,
+    budget: &ResponseBudget,
+    max_bytes: usize,
+) -> (Vec<MessageOccurrence>, Truncation) {
+    let total = occurrences.len();
+    let anchor_index = occurrences
+        .iter()
+        .position(|occurrence| occurrence.is_anchor)
+        .expect("message windows always contain their anchor");
+    let anchor_cost = occurrences[anchor_index].estimated_bytes;
+    let anchor_payload_truncated = occurrences[anchor_index].payload_truncated;
+    let mut start = anchor_index;
+    let mut end = anchor_index + 1;
+    let mut consumed = anchor_cost;
+    let mut byte_limited = anchor_payload_truncated || anchor_cost > max_bytes;
+    let mut prefer_left = true;
+
+    if !byte_limited {
+        loop {
+            let left = start.checked_sub(1);
+            let right = (end < total).then_some(end);
+            if left.is_none() && right.is_none() {
+                break;
+            }
+            if end - start >= budget.max_items {
+                break;
+            }
+            let next = match (left, right) {
+                (Some(left), Some(right)) => {
+                    let next = if prefer_left { left } else { right };
+                    prefer_left = !prefer_left;
+                    next
+                }
+                (Some(left), None) => left,
+                (None, Some(right)) => right,
+                (None, None) => unreachable!(),
+            };
+            let cost = occurrences[next].estimated_bytes;
+            if consumed.saturating_add(cost) > max_bytes {
+                byte_limited = true;
+                break;
+            }
+            consumed += cost;
+            if next < start {
+                start = next;
+            } else {
+                end = next + 1;
+            }
+        }
+    }
+
+    let kept_count = end - start;
+    let truncated = kept_count < total || anchor_payload_truncated || anchor_cost > max_bytes;
+    let reason = if byte_limited {
+        Some(budget::TRUNCATION_MAX_RESPONSE_BYTES.to_string())
+    } else if kept_count < total {
+        Some(budget::TRUNCATION_MAX_ITEMS.to_string())
+    } else {
+        None
+    };
+    let kept = occurrences
+        .into_iter()
+        .skip(start)
+        .take(kept_count)
+        .collect();
+    (kept, Truncation { truncated, reason })
 }
 
 /// 用例执行器：绑定所需端口，串起领域校验与端口调用。
 ///
 /// 泛型而非 trait object——前端在构造期决定后端实现，零动态分发开销。
 /// 时钟以 fn 指针注入：cursor 的发行/校验都不读环境时间（可测确定性）。
-pub struct App<C: CatalogStore + ContextGraphStore, S: SearchIndex> {
+pub struct App<
+    C: CatalogStore + ContextGraphStore,
+    S: SearchIndex,
+    R: ResumeClaimsStore = NoResumeClaims,
+> {
     catalog: C,
     index: S,
+    resume: R,
     clock_ms: fn() -> i64,
 }
 
-impl<C: CatalogStore + ContextGraphStore, S: SearchIndex> App<C, S> {
+impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore> App<C, S, R> {
+    /// 绑定 Resume 声明存储的构造器（ADR-0009）：生产路径（CLI/Robot/MCP）
+    /// 用同一 SqliteStore 实例填充 catalog/index/resume 三个槽。
+    pub fn with_resume(catalog: C, index: S, resume: R) -> Self {
+        Self {
+            catalog,
+            index,
+            resume,
+            clock_ms: system_now_ms,
+        }
+    }
+
+    /// 固定时钟 + Resume 声明存储（测试用）。
+    pub fn with_resume_and_clock(catalog: C, index: S, resume: R, clock_ms: fn() -> i64) -> Self {
+        Self {
+            catalog,
+            index,
+            resume,
+            clock_ms,
+        }
+    }
+}
+
+/// `NoResumeClaims` 固定槽的构造器：函数级泛型默认参数不生效（Rust 限制），
+/// 把这些不携带 Resume 实现的构造器放进专属 impl，既有 `App::new` /
+/// `App::with_clock` 调用点零改动继续编译。
+impl<C: CatalogStore + ContextGraphStore, S: SearchIndex> App<C, S, NoResumeClaims> {
     pub fn new(catalog: C, index: S) -> Self {
         Self {
             catalog,
             index,
+            resume: NoResumeClaims,
             clock_ms: system_now_ms,
         }
     }
@@ -436,8 +1258,17 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex> App<C, S> {
         Self {
             catalog,
             index,
+            resume: NoResumeClaims,
             clock_ms,
         }
+    }
+}
+
+impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore> App<C, S, R> {
+    /// Read the injected application clock. Relative search filters use this
+    /// value so every frontend shares the same time source.
+    pub fn now_ms(&self) -> i64 {
+        (self.clock_ms)()
     }
 
     /// 解析续读偏移：无令牌即第一页（offset 0）；有令牌则完整校验
@@ -448,6 +1279,7 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex> App<C, S> {
         active_generation: u64,
         query_digest: &str,
         sort_digest: &str,
+        result_set: Option<&str>,
     ) -> Result<u64, AppError> {
         match token {
             None => Ok(0),
@@ -459,6 +1291,7 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex> App<C, S> {
                         active_generation,
                         query_digest: query_digest.to_string(),
                         sort_digest: sort_digest.to_string(),
+                        result_set: result_set.map(str::to_string),
                     },
                 )?;
                 Ok(claims.offset)
@@ -473,6 +1306,7 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex> App<C, S> {
         generation: u64,
         query_digest: &str,
         sort_digest: &str,
+        result_set: Option<&str>,
         offset_next: u64,
     ) -> Option<String> {
         if !has_more {
@@ -487,10 +1321,46 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex> App<C, S> {
                 expires_at_ms: now + cursor::DEFAULT_TTL_MS,
                 query_digest: query_digest.to_string(),
                 sort_digest: sort_digest.to_string(),
+                result_set: result_set.map(str::to_string),
                 offset: offset_next,
             })
             .into_string(),
         )
+    }
+
+    /// Resume 可用性批量装配（ADR-0009）：收集本页所有携带 `session_id` 的
+    /// 命中，一次 `resume_of` 解析（分块 IN，无 N+1），按 wire id 映射回
+    /// `hit.resume_available`。`session_id` 缺失或 wire 无效的命中保持 `false`
+    /// ——可用性缺失绝不影响历史可检索。
+    fn assemble_resume_availability(&self, hits: &mut [SearchHit]) -> PortResult<()> {
+        if hits.is_empty() {
+            return Ok(());
+        }
+        let ids: Vec<StableId> = hits
+            .iter()
+            .filter_map(|hit| {
+                hit.session_id
+                    .as_deref()
+                    .and_then(StableId::from_wire)
+                    .filter(|id| id.kind() == IdKind::Session)
+            })
+            .collect();
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let metadata = self.resume.resume_of(&ids)?;
+        let availability: HashMap<&str, bool> = metadata
+            .iter()
+            .map(|meta| (meta.session_id.as_str(), meta.resume_available))
+            .collect();
+        for hit in hits.iter_mut() {
+            if let Some(wire) = hit.session_id.as_deref()
+                && let Some(available) = availability.get(wire)
+            {
+                hit.resume_available = *available;
+            }
+        }
+        Ok(())
     }
 
     /// 执行一个应用请求。校验错误保持 Domain 分类，端口错误保持 Port 分类，
@@ -499,9 +1369,12 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex> App<C, S> {
         match req {
             AppRequest::Search {
                 query,
+                mut filters,
                 limit,
                 cursor: token,
                 budget,
+                include_system,
+                group_by_session,
             } => {
                 if limit == 0 {
                     return Err(DomainError::InvalidRequest("limit must be > 0".into()).into());
@@ -520,26 +1393,140 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex> App<C, S> {
                         DomainError::InvalidRequest("query must not be empty".into()).into(),
                     );
                 }
+                filters.providers.sort_unstable();
+                filters.providers.dedup();
+                if let (Some(since), Some(until)) = (filters.since, filters.until)
+                    && since >= until
+                {
+                    return Err(DomainError::InvalidRequest(
+                        "since must be earlier than until".into(),
+                    )
+                    .into());
+                }
                 budget.validate().map_err(AppError::from)?;
                 let generation = self.catalog.active_generation()?;
-                let query_digest = cursor::digest_query(&query);
+                let query_digest =
+                    search_query_digest(&query, &filters, include_system, group_by_session);
                 let offset = self.resolve_offset(
                     token.as_deref(),
                     generation,
                     &query_digest,
                     SORT_SCORE_DESC,
+                    None,
                 )?;
 
                 // 分页模型：钉住排序（bm25 + id tiebreak 全序）内的 offset 续读。
-                // 端口无 offset 参数——超取 offset+page+1（+1 作 has_more 哨兵）后切片。
+                // 端口无 offset 参数——超取 offset+page+1（+1 作 has_more 哨兵）后
+                // 切片。grouped 模式把扫描窗放大 GROUP_SCAN_FACTOR 倍（仍封顶），
+                // 让 occurrences 覆盖更有意义的同会话命中样本。
                 let page = limit.min(budget.max_items);
                 let fetch = offset
                     .saturating_add(page as u64)
                     .saturating_add(1)
                     .min(MAX_FETCH_WINDOW);
-                let fetched = self.index.query(&query, fetch as usize)?;
-                let fetched_len = fetched.len() as u64;
-                let slice: Vec<SearchHit> = fetched
+                let scan = if group_by_session {
+                    fetch
+                        .saturating_mul(GROUP_SCAN_FACTOR)
+                        .min(MAX_FETCH_WINDOW)
+                } else {
+                    fetch
+                };
+                let mut scanned = self.index.query_filtered(
+                    SearchQuery {
+                        text: &query,
+                        filters: &filters,
+                    },
+                    scan as usize,
+                )?;
+
+                // R2 系统噪声默认排除：role=system/developer 的命中不进入结果，
+                // `include_system` 显式恢复。过滤先于 offset 切片，cursor 位置因此
+                // 指向"非系统"序列。判定需整窗 payload（分块批量取，无 N+1）；扫描
+                // 窗内系统噪声饱和时可能提前终止分页（边界行为，见 GROUP_SCAN_FACTOR）。
+                if !include_system {
+                    let scanned_ids: Vec<StableId> =
+                        scanned.iter().map(|hit| hit.id.clone()).collect();
+                    let scanned_payloads = self.catalog.get_many(&scanned_ids)?;
+                    scanned = scanned
+                        .into_iter()
+                        .zip(scanned_payloads)
+                        .filter(|(_, payload)| !payload_role_is_system_noise(payload.1.as_deref()))
+                        .map(|(hit, _)| hit)
+                        .collect();
+                }
+
+                // R3 按会话归并：整窗装配后每会话只保留最高分命中（钉住顺序中的
+                // 首个），occurrences 为该会话在扫描窗内的命中数；offset 语义为会话
+                // 组偏移。非归并路径保持逐命中分页不变。
+                if group_by_session {
+                    let ids: Vec<StableId> = scanned.iter().map(|hit| hit.id.clone()).collect();
+                    let payloads = self.catalog.get_many(&ids)?;
+                    let sessions = self.catalog.session_of(&ids)?;
+                    let max_snippet_chars = budget.max_snippet_chars;
+                    let query_terms = guidance::literal_terms(&query);
+                    let mut assembled = scanned;
+                    for (hit, ((_id, payload), (_mid, session))) in
+                        assembled.iter_mut().zip(payloads.into_iter().zip(sessions))
+                    {
+                        assemble_search_hit(
+                            hit,
+                            payload.as_deref(),
+                            session.as_ref(),
+                            max_snippet_chars,
+                            &query_terms,
+                        );
+                    }
+                    let mut grouped: Vec<SearchHit> = Vec::new();
+                    let mut group_index: HashMap<String, usize> = HashMap::new();
+                    for hit in assembled {
+                        let key = hit
+                            .session_id
+                            .clone()
+                            .unwrap_or_else(|| hit.id.as_str().to_string());
+                        match group_index.get(&key).copied() {
+                            Some(index) => grouped[index].occurrences += 1,
+                            None => {
+                                group_index.insert(key, grouped.len());
+                                grouped.push(hit);
+                            }
+                        }
+                    }
+                    let grouped_kept: Vec<SearchHit> = grouped
+                        .into_iter()
+                        .skip(usize::try_from(offset).unwrap_or(usize::MAX))
+                        .take(page + 1)
+                        .collect();
+                    let has_more = grouped_kept.len() > page;
+                    let slice: Vec<SearchHit> = grouped_kept.into_iter().take(page).collect();
+                    let net_bytes = budget
+                        .max_response_bytes
+                        .saturating_sub(ENVELOPE_RESERVE_BYTES);
+                    let (mut hits, truncation, _) =
+                        budget::clamp_items(slice, page, net_bytes, search_hit_charge);
+                    // Resume 可用性（ADR-0009）：只对保留的命中批量解析一次（无 N+1）。
+                    self.assemble_resume_availability(&mut hits)?;
+                    let consumed = offset + hits.len() as u64;
+                    // 与逐命中/List 分支相同的守卫：字节 clamp 把本页清空（首条组
+                    // 超预算）时 cursor 停在原 offset，must 终止分页而非死循环。
+                    let has_more = has_more && !hits.is_empty();
+                    let next_cursor = self.issue_cursor(
+                        has_more,
+                        generation,
+                        &query_digest,
+                        SORT_SCORE_DESC,
+                        None,
+                        consumed,
+                    );
+                    return Ok(AppResponse::Search {
+                        hits,
+                        next_cursor,
+                        generation,
+                        truncation,
+                    });
+                }
+
+                let scanned_len = scanned.len() as u64;
+                let slice: Vec<SearchHit> = scanned
                     .into_iter()
                     .skip(usize::try_from(offset).unwrap_or(usize::MAX))
                     .take(page)
@@ -554,45 +1541,36 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex> App<C, S> {
                 let payloads = self.catalog.get_many(&ids)?;
                 let sessions = self.catalog.session_of(&ids)?;
                 let max_snippet_chars = budget.max_snippet_chars;
+                let query_terms = guidance::literal_terms(&query);
                 let mut hits = slice;
                 for (hit, ((_id, payload), (_mid, session))) in
                     hits.iter_mut().zip(payloads.into_iter().zip(sessions))
                 {
-                    hit.text = payload.and_then(|bytes| {
-                        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
-                            return None;
-                        };
-                        value
-                            .get("text")
-                            .and_then(serde_json::Value::as_str)
-                            .map(|text| text.chars().take(max_snippet_chars).collect())
-                    });
-                    hit.session_id = session.map(|s| s.as_str().to_string());
+                    assemble_search_hit(
+                        hit,
+                        payload.as_deref(),
+                        session.as_ref(),
+                        max_snippet_chars,
+                        &query_terms,
+                    );
                 }
                 let net_bytes = budget
                     .max_response_bytes
                     .saturating_sub(ENVELOPE_RESERVE_BYTES);
-                let (hits, truncation, _) = budget::clamp_items(hits, page, net_bytes, |hit| {
-                    // 机器渲染 `{id, score, session_id, text}`：text 摘要字节
-                    // （R4.2）与 session_id 字节都计入同一字节闸
-                    // （`,"session_id":` / `,"text":` 为字段开销）；截断原因显式。
-                    json_string_len(hit.id.as_str())
-                        + hit
-                            .session_id
-                            .as_ref()
-                            .map_or(0, |s| json_string_len(s) + 14)
-                        + hit.text.as_ref().map_or(0, |s| json_string_len(s) + 8)
-                        + 32
-                });
+                let (mut hits, truncation, _) =
+                    budget::clamp_items(hits, page, net_bytes, search_hit_charge);
+                // Resume 可用性（ADR-0009）：只对保留的命中批量解析一次（无 N+1）。
+                self.assemble_resume_availability(&mut hits)?;
                 let consumed = offset + hits.len() as u64;
                 // A truncated page with zero kept hits cannot advance the
                 // cursor offset; terminate paging instead of looping forever.
-                let has_more = fetched_len > consumed && !hits.is_empty();
+                let has_more = scanned_len > consumed && !hits.is_empty();
                 let next_cursor = self.issue_cursor(
                     has_more,
                     generation,
                     &query_digest,
                     SORT_SCORE_DESC,
+                    None,
                     consumed,
                 );
                 Ok(AppResponse::Search {
@@ -614,19 +1592,27 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex> App<C, S> {
                 limit,
                 cursor: token,
                 budget,
+                sessions_only,
             } => {
                 if limit == 0 {
                     return Err(DomainError::InvalidRequest("limit must be > 0".into()).into());
                 }
                 budget.validate().map_err(AppError::from)?;
                 let generation = self.catalog.active_generation()?;
-                // list 无查询串；令牌以空串摘要 + wire_id_asc 排序标识绑定用例。
+                // list 无查询串；令牌以空串摘要 + wire_id_asc 排序标识绑定用例；
+                // result_set 判别器把 `list` 与 `list_sessions` 的续读序列隔开。
                 let query_digest = cursor::digest_query("");
+                let result_set = if sessions_only {
+                    RESULT_SET_SESSIONS_ONLY
+                } else {
+                    RESULT_SET_ALL
+                };
                 let offset = self.resolve_offset(
                     token.as_deref(),
                     generation,
                     &query_digest,
                     SORT_WIRE_ID_ASC,
+                    Some(result_set),
                 )?;
 
                 let page = limit.min(budget.max_items);
@@ -638,7 +1624,11 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex> App<C, S> {
                     .saturating_add(page as u64)
                     .saturating_add(1)
                     .min(MAX_FETCH_WINDOW);
-                let fetched = self.catalog.list(fetch as usize)?;
+                let fetched = if sessions_only {
+                    self.catalog.list_sessions(fetch as usize)?
+                } else {
+                    self.catalog.list(fetch as usize)?
+                };
                 let fetched_len = fetched.len() as u64;
                 let slice: Vec<CatalogEntry> = fetched
                     .into_iter()
@@ -668,6 +1658,7 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex> App<C, S> {
                     generation,
                     &query_digest,
                     SORT_WIRE_ID_ASC,
+                    Some(result_set),
                     consumed,
                 );
                 Ok(AppResponse::List {
@@ -680,9 +1671,37 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex> App<C, S> {
             AppRequest::Context {
                 session_id,
                 policy,
+                level,
                 budget,
-            } => self.handle_context(session_id, policy, budget),
+            } => self.handle_context(session_id, policy, level, budget),
+            AppRequest::Message {
+                message_id,
+                session_id,
+                around,
+                budget,
+            } => self.handle_message(message_id, session_id, around, budget),
             AppRequest::MessageContexts { message_id } => self.handle_message_contexts(message_id),
+            AppRequest::GetSessionResume { session_id } => {
+                // 会话必须有 `ses_v1_*` 种类（protocol 层已校验，这里是纵深防御）。
+                if session_id.kind() != IdKind::Session {
+                    return Err(DomainError::InvalidRequest(
+                        "session id must be a ses_v1_* id".into(),
+                    )
+                    .into());
+                }
+                let mut metadata = self
+                    .resume
+                    .resume_of(std::slice::from_ref(&session_id))?
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| {
+                        AppError::from(PortError::Backend(
+                            "resume resolver returned no metadata".into(),
+                        ))
+                    })?;
+                metadata.session_id = session_id;
+                Ok(AppResponse::SessionResume(metadata))
+            }
             AppRequest::Status => {
                 let catalog_count = self.catalog.count()?;
                 let active_generation = self.catalog.active_generation()?;
@@ -709,6 +1728,7 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex> App<C, S> {
         &self,
         session_id: StableId,
         policy: ContextPolicy,
+        requested_level: ContextLevel,
         budget: ResponseBudget,
     ) -> Result<AppResponse, AppError> {
         budget.validate().map_err(AppError::from)?;
@@ -816,25 +1836,74 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex> App<C, S> {
                     payload,
                 },
                 evidence: evidence::assemble(message, placement, document, generation),
+                role: message.role,
+                source_document_id: document.id.as_str().to_string(),
                 estimated_bytes,
             });
         }
 
-        let net_bytes = budget
+        let pre_clamp_level = available_level(requested_level, &occurrences);
+        let base_net_bytes = budget
             .max_response_bytes
             .saturating_sub(ENVELOPE_RESERVE_BYTES)
             // The session payload is embedded verbatim in the response; count
             // it against the hard byte gate up front, before clamping keeps.
             .saturating_sub(session_bytes.len());
-        let (kept_occurrences, mut truncation, _) =
-            budget::clamp_items(occurrences, budget.max_messages, net_bytes, |occurrence| {
-                occurrence.estimated_bytes
-            });
-        if truncation.reason.as_deref() == Some(budget::TRUNCATION_MAX_ITEMS) {
-            // 消息条数闸对应的预算旋钮是 max_messages；如实报告该旋钮名。
-            truncation.reason = Some(budget::TRUNCATION_MAX_MESSAGES.to_string());
+        let mut assembly_level = requested_level;
+        let mut net_bytes = base_net_bytes
+            .saturating_sub(structural_metadata_reserve(&session_id, pre_clamp_level));
+        let (mut kept_occurrences, mut truncation, _) = clamp_context_occurrences(
+            occurrences.clone(),
+            pre_clamp_level,
+            budget.max_messages,
+            net_bytes,
+        );
+        let mut fallback_reason = None;
+        if pre_clamp_level != ContextLevel::Raw
+            && available_level(pre_clamp_level, &kept_occurrences) == ContextLevel::Raw
+        {
+            fallback_reason = truncation.reason.clone();
+            if requested_level == ContextLevel::Sessions {
+                let talks_net_bytes = base_net_bytes.saturating_sub(structural_metadata_reserve(
+                    &session_id,
+                    ContextLevel::Talks,
+                ));
+                let (talks_occurrences, talks_truncation, _) = clamp_context_occurrences(
+                    occurrences.clone(),
+                    ContextLevel::Talks,
+                    budget.max_messages,
+                    talks_net_bytes,
+                );
+                if available_level(ContextLevel::Talks, &talks_occurrences) == ContextLevel::Talks {
+                    assembly_level = ContextLevel::Talks;
+                    net_bytes = talks_net_bytes;
+                    kept_occurrences = talks_occurrences;
+                    truncation = talks_truncation;
+                }
+            }
+            if available_level(assembly_level, &kept_occurrences) == ContextLevel::Raw {
+                assembly_level = ContextLevel::Raw;
+                net_bytes = base_net_bytes;
+                (kept_occurrences, truncation, _) = clamp_context_occurrences(
+                    occurrences,
+                    ContextLevel::Raw,
+                    budget.max_messages,
+                    net_bytes,
+                );
+            }
         }
-
+        if let Some(reason) = fallback_reason
+            && !truncation
+                .reason
+                .as_deref()
+                .is_some_and(|current| current.split(',').any(|value| value == reason))
+        {
+            truncation.truncated = true;
+            truncation.reason = Some(match truncation.reason.take() {
+                None => reason,
+                Some(current) => format!("{current},{reason}"),
+            });
+        }
         let mut evidence: Vec<EvidenceSpanDto> = kept_occurrences
             .iter()
             .map(|occurrence| occurrence.evidence.clone())
@@ -850,9 +1919,25 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex> App<C, S> {
         }
 
         let messages: Vec<ContextMessage> = kept_occurrences
-            .into_iter()
-            .map(|occurrence| occurrence.message)
+            .iter()
+            .map(|occurrence| occurrence.message.clone())
             .collect();
+        let (effective_level, talks, summary) = assemble_level(assembly_level, &kept_occurrences);
+        let hint = build_hint(&session_id, requested_level, effective_level);
+        if structural_fields_bytes(&talks, &summary, &hint) > net_bytes {
+            truncation.truncated = true;
+            truncation.reason = Some(match truncation.reason.take() {
+                None => budget::TRUNCATION_MAX_RESPONSE_BYTES.to_string(),
+                Some(prior)
+                    if prior
+                        .split(',')
+                        .any(|reason| reason == budget::TRUNCATION_MAX_RESPONSE_BYTES) =>
+                {
+                    prior
+                }
+                Some(prior) => format!("{prior},{}", budget::TRUNCATION_MAX_RESPONSE_BYTES),
+            });
+        }
 
         Ok(AppResponse::Context {
             session_id: session_id.as_str().to_string(),
@@ -861,8 +1946,182 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex> App<C, S> {
             branch_leaf_placement_id,
             messages,
             evidence,
+            requested_level,
+            effective_level,
+            talks,
+            summary,
+            hint,
             truncation,
             generation,
+        })
+    }
+
+    fn handle_message(
+        &self,
+        message_id: StableId,
+        session_id: Option<StableId>,
+        around: usize,
+        budget: ResponseBudget,
+    ) -> Result<AppResponse, AppError> {
+        budget.validate().map_err(AppError::from)?;
+        let candidates = self.catalog.message_contexts(&message_id)?;
+        let selected_session = match session_id {
+            Some(requested) => {
+                if !candidates
+                    .iter()
+                    .any(|candidate| candidate.session_id.as_str() == requested.as_str())
+                {
+                    return Err(DomainError::NotFound(
+                        "message has no placement in the requested session".into(),
+                    )
+                    .into());
+                }
+                requested
+            }
+            None => {
+                let session_ids = candidates
+                    .iter()
+                    .map(|candidate| candidate.session_id.as_str().to_string())
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect::<Vec<_>>();
+                match session_ids.as_slice() {
+                    [] => {
+                        return Err(DomainError::NotFound(
+                            "message has no session placement".into(),
+                        )
+                        .into());
+                    }
+                    [only] => StableId::from_wire(only).ok_or_else(|| {
+                        AppError::Domain(DomainError::InvariantViolation(
+                            "context store returned a session id outside the wire format".into(),
+                        ))
+                    })?,
+                    _ => {
+                        let mut session_ids = session_ids;
+                        let candidate_count = session_ids.len();
+                        session_ids.truncate(MAX_MESSAGE_AMBIGUITY_CANDIDATES);
+                        return Err(MessageAmbiguity {
+                            candidate_session_ids: session_ids,
+                            candidate_count,
+                            hint: "retry get_message with one candidate session_id".into(),
+                        }
+                        .into());
+                    }
+                }
+            }
+        };
+
+        let generation = self.catalog.active_generation()?;
+        let graph = self.catalog.load_session_graph(&selected_session)?;
+        if graph.session_id.as_str() != selected_session.as_str() {
+            return Err(DomainError::InvariantViolation(
+                "context store returned a different session than requested".into(),
+            )
+            .into());
+        }
+        let mainline = select_mainline(&graph)?
+            .map(|selection| selection.placements)
+            .unwrap_or_default();
+        let matching_anchor_indexes = mainline
+            .iter()
+            .enumerate()
+            .filter_map(|(index, placement)| {
+                (placement.message_id.as_str() == message_id.as_str()).then_some(index)
+            })
+            .collect::<Vec<_>>();
+        let anchor_index = match matching_anchor_indexes.as_slice() {
+            [index] => *index,
+            [] => {
+                return Err(DomainError::NotFound(
+                    "message is not on the selected session mainline".into(),
+                )
+                .into());
+            }
+            _ => {
+                return Err(DomainError::InvalidRequest(
+                    "message has multiple placements on selected session mainline; use get_session_context to inspect placements".into(),
+                )
+                .into());
+            }
+        };
+        let start = anchor_index.saturating_sub(around);
+        let end = anchor_index
+            .saturating_add(around)
+            .saturating_add(1)
+            .min(mainline.len());
+        let selected = &mainline[start..end];
+        let anchor_placement_id = mainline[anchor_index].id.as_str().to_string();
+        let messages_by_id: BTreeMap<&str, &Message> = graph
+            .messages
+            .iter()
+            .map(|message| (message.id.as_str(), message))
+            .collect();
+        let net_bytes = budget
+            .max_response_bytes
+            .saturating_sub(ENVELOPE_RESERVE_BYTES);
+        let mut occurrences = Vec::with_capacity(selected.len());
+        for placement in selected {
+            let message = messages_by_id
+                .get(placement.message_id.as_str())
+                .copied()
+                .ok_or_else(|| {
+                    DomainError::InvariantViolation(
+                        "message placement references a missing message".into(),
+                    )
+                })?;
+            let bytes = self.catalog.get(&message.id)?.ok_or_else(|| {
+                DomainError::InvariantViolation("message is missing from the catalog".into())
+            })?;
+            let payload = serde_json::from_slice::<serde_json::Value>(&bytes).map_err(|_| {
+                DomainError::InvariantViolation("message payload is not canonical JSON".into())
+            })?;
+            let full_text = payload
+                .get("text")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+                .unwrap_or_else(|| message.text.clone());
+            let message_wire = message.id.as_str().to_string();
+            let placement_wire = placement.id.as_str().to_string();
+            let is_anchor = placement.id.as_str() == anchor_placement_id;
+            let mut context_message = ContextMessage {
+                id: message_wire.clone(),
+                placement_id: placement_wire,
+                message_id: message_wire,
+                payload,
+            };
+            let payload_truncated = if is_anchor {
+                project_anchor_payload(
+                    &mut context_message,
+                    message.role,
+                    &full_text,
+                    net_bytes.saturating_sub(48),
+                )?
+            } else {
+                false
+            };
+            occurrences.push(MessageOccurrence {
+                estimated_bytes: message_occurrence_bytes(&context_message),
+                is_anchor,
+                payload_truncated,
+                message: context_message,
+            });
+        }
+
+        let (kept, truncation) = clamp_message_window(occurrences, &budget, net_bytes);
+        let messages = kept
+            .into_iter()
+            .map(|occurrence| occurrence.message)
+            .collect();
+        Ok(AppResponse::Message {
+            window: MessageWindow {
+                message_id: message_id.as_str().to_string(),
+                session_id: selected_session.as_str().to_string(),
+                anchor_placement_id,
+                messages,
+                truncation,
+                generation,
+            },
         })
     }
 
@@ -915,6 +2174,25 @@ mod tests {
 
     /// 内存态假后端，仅用于用例逻辑测试。
     struct FakeCatalog;
+    impl FakeCatalog {
+        fn list_mock(&self, kind: Option<IdKind>, limit: usize) -> PortResult<Vec<CatalogEntry>> {
+            let id = match kind {
+                Some(IdKind::Session) => StableId::derive(
+                    IdKind::Session,
+                    Stability::Reconstructed,
+                    &[b"listed-session"],
+                ),
+                _ => StableId::derive(IdKind::Message, Stability::Reconstructed, &[b"listed"]),
+            };
+            Ok(vec![CatalogEntry {
+                id,
+                payload: b"payload".to_vec(),
+            }]
+            .into_iter()
+            .take(limit)
+            .collect())
+        }
+    }
     impl CatalogStore for FakeCatalog {
         fn get(&self, _id: &StableId) -> PortResult<Option<Vec<u8>>> {
             Ok(Some(b"payload".to_vec()))
@@ -929,14 +2207,10 @@ mod tests {
             Ok(())
         }
         fn list(&self, limit: usize) -> PortResult<Vec<CatalogEntry>> {
-            let id = StableId::derive(IdKind::Message, Stability::Reconstructed, &[b"listed"]);
-            Ok(vec![CatalogEntry {
-                id,
-                payload: b"payload".to_vec(),
-            }]
-            .into_iter()
-            .take(limit)
-            .collect())
+            self.list_mock(None, limit)
+        }
+        fn list_sessions(&self, limit: usize) -> PortResult<Vec<CatalogEntry>> {
+            self.list_mock(Some(IdKind::Session), limit)
         }
         fn count(&self) -> PortResult<u64> {
             Ok(1)
@@ -974,12 +2248,20 @@ mod tests {
         fn index(&self, _id: &StableId, _text: &str) -> PortResult<()> {
             Ok(())
         }
-        fn query(&self, _query: &str, _limit: usize) -> PortResult<Vec<SearchHit>> {
+        fn query_filtered(
+            &self,
+            _query: SearchQuery<'_>,
+            _limit: usize,
+        ) -> PortResult<Vec<SearchHit>> {
             Ok(vec![SearchHit {
                 id: StableId::derive(IdKind::Message, Stability::Reconstructed, &[b"h"]),
                 score: 1.0,
                 session_id: None,
                 text: None,
+                why_matched: Vec::new(),
+                suggested_next_commands: Vec::new(),
+                occurrences: 1,
+                resume_available: false,
             }])
         }
     }
@@ -998,9 +2280,12 @@ mod tests {
     fn search_returns_hits() {
         let r = app().handle(AppRequest::Search {
             query: "hello".into(),
+            filters: SearchFilters::default(),
             limit: 10,
             cursor: None,
             budget: ResponseBudget::default(),
+            include_system: false,
+            group_by_session: false,
         });
         assert!(matches!(r, Ok(AppResponse::Search { hits, .. }) if hits.len() == 1));
     }
@@ -1009,9 +2294,12 @@ mod tests {
     fn search_rejects_zero_limit() {
         let r = app().handle(AppRequest::Search {
             query: "x".into(),
+            filters: SearchFilters::default(),
             limit: 0,
             cursor: None,
             budget: ResponseBudget::default(),
+            include_system: false,
+            group_by_session: false,
         });
         assert!(matches!(
             r.unwrap_err(),
@@ -1023,9 +2311,12 @@ mod tests {
     fn search_rejects_empty_query() {
         let r = app().handle(AppRequest::Search {
             query: "   ".into(),
+            filters: SearchFilters::default(),
             limit: 5,
             cursor: None,
             budget: ResponseBudget::default(),
+            include_system: false,
+            group_by_session: false,
         });
         assert!(matches!(
             r.unwrap_err(),
@@ -1043,7 +2334,11 @@ mod tests {
             fn index(&self, _id: &StableId, _text: &str) -> PortResult<()> {
                 Ok(())
             }
-            fn query(&self, _query: &str, _limit: usize) -> PortResult<Vec<SearchHit>> {
+            fn query_filtered(
+                &self,
+                _query: SearchQuery<'_>,
+                _limit: usize,
+            ) -> PortResult<Vec<SearchHit>> {
                 panic!("control-character query must be rejected before any index query")
             }
         }
@@ -1109,12 +2404,15 @@ mod tests {
         let resp = app
             .handle(AppRequest::Search {
                 query: "q".into(),
+                filters: SearchFilters::default(),
                 limit: 5,
                 cursor: None,
                 budget: ResponseBudget {
                     max_snippet_chars: 4,
                     ..Default::default()
                 },
+                include_system: false,
+                group_by_session: false,
             })
             .unwrap();
         let AppResponse::Search { hits, .. } = resp else {
@@ -1166,12 +2464,15 @@ mod tests {
         let resp = app
             .handle(AppRequest::Search {
                 query: "q".into(),
+                filters: SearchFilters::default(),
                 limit: 10,
                 cursor: None,
                 budget: ResponseBudget {
                     max_response_bytes: budget::MIN_RESPONSE_BYTES,
                     ..Default::default()
                 },
+                include_system: false,
+                group_by_session: false,
             })
             .unwrap();
         let (ids, _, _, truncation) = hits_of(resp);
@@ -1194,25 +2495,6 @@ mod tests {
             fixture.repeated.clone(),
             fixture.leaf.clone(),
         ];
-        struct FixedHits(Vec<StableId>);
-        impl SearchIndex for FixedHits {
-            fn index(&self, _id: &StableId, _text: &str) -> PortResult<()> {
-                Ok(())
-            }
-            fn query(&self, _query: &str, limit: usize) -> PortResult<Vec<SearchHit>> {
-                Ok(self
-                    .0
-                    .iter()
-                    .take(limit)
-                    .map(|id| SearchHit {
-                        id: id.clone(),
-                        score: 0.0,
-                        session_id: None,
-                        text: None,
-                    })
-                    .collect())
-            }
-        }
         let app = App::with_clock(&fixture.store, FixedHits(ids.clone()), clock_t0);
         let resp = app.handle(search_req("q", 10, None)).unwrap();
         let AppResponse::Search { hits, .. } = resp else {
@@ -1241,8 +2523,22 @@ mod tests {
             limit: 10,
             cursor: None,
             budget: ResponseBudget::default(),
+            sessions_only: false,
         });
         assert!(matches!(r, Ok(AppResponse::List { entries, .. }) if entries.len() == 1));
+    }
+
+    #[test]
+    fn list_sessions_only_filters_to_session_kind() {
+        let r = app().handle(AppRequest::List {
+            limit: 10,
+            cursor: None,
+            budget: ResponseBudget::default(),
+            sessions_only: true,
+        });
+        assert!(
+            matches!(r, Ok(AppResponse::List { entries, .. }) if entries.iter().all(|e| e.id.kind() == IdKind::Session))
+        );
     }
 
     #[test]
@@ -1252,6 +2548,7 @@ mod tests {
                 limit: 0,
                 cursor: None,
                 budget: ResponseBudget::default(),
+                sessions_only: false,
             })
             .unwrap_err();
         assert!(matches!(
@@ -1292,7 +2589,11 @@ mod tests {
         fn index(&self, _id: &StableId, _text: &str) -> PortResult<()> {
             Ok(())
         }
-        fn query(&self, _query: &str, limit: usize) -> PortResult<Vec<SearchHit>> {
+        fn query_filtered(
+            &self,
+            _query: SearchQuery<'_>,
+            limit: usize,
+        ) -> PortResult<Vec<SearchHit>> {
             Ok((0..self.n.min(limit))
                 .map(|i| SearchHit {
                     id: StableId::derive(
@@ -1303,6 +2604,38 @@ mod tests {
                     score: -(i as f32),
                     session_id: None,
                     text: None,
+                    why_matched: Vec::new(),
+                    suggested_next_commands: Vec::new(),
+                    occurrences: 1,
+                    resume_available: false,
+                })
+                .collect())
+        }
+    }
+
+    struct FixedHits(Vec<StableId>);
+    impl SearchIndex for FixedHits {
+        fn index(&self, _id: &StableId, _text: &str) -> PortResult<()> {
+            Ok(())
+        }
+        fn query_filtered(
+            &self,
+            _query: SearchQuery<'_>,
+            limit: usize,
+        ) -> PortResult<Vec<SearchHit>> {
+            Ok(self
+                .0
+                .iter()
+                .take(limit)
+                .map(|id| SearchHit {
+                    id: id.clone(),
+                    score: 0.0,
+                    session_id: None,
+                    text: None,
+                    why_matched: Vec::new(),
+                    suggested_next_commands: Vec::new(),
+                    occurrences: 1,
+                    resume_available: false,
                 })
                 .collect())
         }
@@ -1313,16 +2646,24 @@ mod tests {
     struct MapCatalog {
         map: std::collections::BTreeMap<String, Vec<u8>>,
         generation: std::cell::Cell<u64>,
+        session_of: std::collections::BTreeMap<String, String>,
     }
     impl MapCatalog {
         fn new(generation: u64) -> Self {
             Self {
                 map: Default::default(),
                 generation: std::cell::Cell::new(generation),
+                session_of: Default::default(),
             }
         }
         fn insert(&mut self, id: &StableId, payload: impl Into<Vec<u8>>) {
             self.map.insert(id.as_str().to_string(), payload.into());
+        }
+        fn set_session_of(&mut self, message_id: &StableId, session_id: &StableId) {
+            self.session_of.insert(
+                message_id.as_str().to_string(),
+                session_id.as_str().to_string(),
+            );
         }
     }
     impl CatalogStore for MapCatalog {
@@ -1352,6 +2693,18 @@ mod tests {
                 })
                 .collect())
         }
+        fn list_sessions(&self, limit: usize) -> PortResult<Vec<CatalogEntry>> {
+            Ok(self
+                .map
+                .iter()
+                .filter(|(k, _)| k.starts_with("ses_v1_"))
+                .take(limit)
+                .map(|(k, v)| CatalogEntry {
+                    id: StableId::from_wire(k).expect("map keys are wire ids"),
+                    payload: v.clone(),
+                })
+                .collect())
+        }
         fn count(&self) -> PortResult<u64> {
             Ok(self.map.len() as u64)
         }
@@ -1372,8 +2725,18 @@ mod tests {
         }
 
         fn session_of(&self, ids: &[StableId]) -> PortResult<Vec<(StableId, Option<StableId>)>> {
-            // 纯 map 目录没有 placement 数据 → 全部 None。
-            Ok(ids.iter().map(|id| (id.clone(), None)).collect())
+            // 纯 map 目录没有 placement 数据 → 全部 None；测试可用 set_session_of
+            // 显式注入归属（R3 归并按会话坍缩需要真实归属）。
+            Ok(ids
+                .iter()
+                .map(|id| {
+                    let session = self
+                        .session_of
+                        .get(id.as_str())
+                        .and_then(|wire| StableId::from_wire(wire));
+                    (id.clone(), session)
+                })
+                .collect())
         }
 
         fn context_stats(&self) -> PortResult<ContextStats> {
@@ -1384,9 +2747,494 @@ mod tests {
     fn search_req(query: &str, limit: usize, cursor: Option<String>) -> AppRequest {
         AppRequest::Search {
             query: query.into(),
+            filters: SearchFilters::default(),
             limit,
             cursor,
             budget: ResponseBudget::default(),
+            include_system: false,
+            group_by_session: false,
+        }
+    }
+
+    #[test]
+    fn search_attaches_cjk_and_ascii_why_matched_and_suggestions() {
+        let mut cat = MapCatalog::new(7);
+        cat.insert(
+            &hit_id("hit00"),
+            serde_json::json!({ "text": "包含数据库迁移方案 guidance" })
+                .to_string()
+                .into_bytes(),
+        );
+        cat.insert(
+            &hit_id("hit01"),
+            serde_json::json!({ "text": "different guidance" })
+                .to_string()
+                .into_bytes(),
+        );
+        let app = App::with_clock(cat, PagedIndex { n: 2 }, clock_t0);
+        let AppResponse::Search { hits, .. } =
+            app.handle(search_req("数据库 guidance", 10, None)).unwrap()
+        else {
+            panic!("expected Search response");
+        };
+        assert_eq!(hits[0].why_matched, vec!["数据", "据库", "guidance"]);
+        assert_eq!(hits[1].why_matched, vec!["guidance"]);
+        assert!(
+            hits.iter()
+                .all(|hit| hit.suggested_next_commands.is_empty())
+        );
+    }
+
+    #[test]
+    fn search_excludes_system_and_developer_roles_by_default() {
+        // R2 系统噪声默认排除：role=system/developer 的命中不进结果；无 role
+        // 字段或非 JSON payload（legacy）不判为噪声。过滤发生在 offset 切片前，
+        // 保证 cursor 位置指向"非系统"序列。
+        let mut cat = MapCatalog::new(7);
+        cat.insert(
+            &hit_id("hit00"),
+            serde_json::json!({ "role": "user", "text": "needle" })
+                .to_string()
+                .into_bytes(),
+        );
+        cat.insert(
+            &hit_id("hit01"),
+            serde_json::json!({ "role": "system", "text": "needle" })
+                .to_string()
+                .into_bytes(),
+        );
+        cat.insert(
+            &hit_id("hit02"),
+            serde_json::json!({ "role": "developer", "text": "needle" })
+                .to_string()
+                .into_bytes(),
+        );
+        cat.insert(&hit_id("hit03"), b"not json".to_vec());
+        let index = FixedHits(vec![
+            hit_id("hit00"),
+            hit_id("hit01"),
+            hit_id("hit02"),
+            hit_id("hit03"),
+        ]);
+        let app = App::with_clock(cat, index, clock_t0);
+        let AppResponse::Search { hits, .. } = app.handle(search_req("needle", 10, None)).unwrap()
+        else {
+            panic!("expected Search response");
+        };
+        let kept: Vec<StableId> = hits.iter().map(|hit| hit.id.clone()).collect();
+        assert_eq!(kept, vec![hit_id("hit00"), hit_id("hit03")]);
+    }
+
+    #[test]
+    fn search_include_system_restores_system_developer_hits() {
+        // R2 opt-in：include_system=true 时 system/developer 命中恢复进结果。
+        let mut cat = MapCatalog::new(7);
+        cat.insert(
+            &hit_id("hit00"),
+            serde_json::json!({ "role": "system", "text": "needle" })
+                .to_string()
+                .into_bytes(),
+        );
+        let index = FixedHits(vec![hit_id("hit00")]);
+        let app = App::with_clock(cat, index, clock_t0);
+        let AppResponse::Search { hits, .. } = app
+            .handle(AppRequest::Search {
+                query: "needle".into(),
+                filters: SearchFilters::default(),
+                limit: 10,
+                cursor: None,
+                budget: ResponseBudget::default(),
+                include_system: true,
+                group_by_session: false,
+            })
+            .unwrap()
+        else {
+            panic!("expected Search response");
+        };
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, hit_id("hit00"));
+    }
+
+    #[test]
+    fn search_group_by_session_collapses_with_occurrences() {
+        // R3 归并：每会话保留最高分命中（钉住顺序中的首个），occurrences 为该
+        // 会话在扫描窗内的命中数；无归属（None）命中自成单例组。
+        let mut cat = MapCatalog::new(7);
+        let session_a = StableId::derive(IdKind::Session, Stability::Reconstructed, &[b"sA"]);
+        let session_b = StableId::derive(IdKind::Session, Stability::Reconstructed, &[b"sB"]);
+        for (tag, session) in [
+            ("hit00", Some(&session_a)),
+            ("hit01", Some(&session_a)),
+            ("hit02", Some(&session_b)),
+            ("hit03", Some(&session_b)),
+            ("hit04", None),
+        ] {
+            let id = hit_id(tag);
+            cat.insert(
+                &id,
+                serde_json::json!({ "role": "user", "text": "needle" })
+                    .to_string()
+                    .into_bytes(),
+            );
+            if let Some(session) = session {
+                cat.set_session_of(&id, session);
+            }
+        }
+        let index = FixedHits(vec![
+            hit_id("hit00"),
+            hit_id("hit01"),
+            hit_id("hit02"),
+            hit_id("hit03"),
+            hit_id("hit04"),
+        ]);
+        let app = App::with_clock(cat, index, clock_t0);
+        let AppResponse::Search { hits, .. } = app
+            .handle(AppRequest::Search {
+                query: "needle".into(),
+                filters: SearchFilters::default(),
+                limit: 10,
+                cursor: None,
+                budget: ResponseBudget::default(),
+                include_system: false,
+                group_by_session: true,
+            })
+            .unwrap()
+        else {
+            panic!("expected Search response");
+        };
+        assert_eq!(hits.len(), 3, "one group per session + singleton");
+        assert_eq!(hits[0].id, hit_id("hit00"));
+        assert_eq!(hits[0].occurrences, 2);
+        assert_eq!(hits[0].session_id.as_deref(), Some(session_a.as_str()));
+        assert_eq!(hits[1].id, hit_id("hit02"));
+        assert_eq!(hits[1].occurrences, 2);
+        assert_eq!(hits[1].session_id.as_deref(), Some(session_b.as_str()));
+        assert_eq!(hits[2].id, hit_id("hit04"));
+        assert_eq!(hits[2].occurrences, 1);
+        assert!(hits[2].session_id.is_none());
+    }
+
+    #[test]
+    fn search_group_by_session_default_path_keeps_occurrences_one() {
+        // R3 默认路径（group_by_session=false）保持不变：不归并、逐命中返回，
+        // occurrences 恒为 1（序列化时省略该键，与既有输出字节兼容）。
+        let mut cat = MapCatalog::new(7);
+        let session_a = StableId::derive(IdKind::Session, Stability::Reconstructed, &[b"sA"]);
+        for tag in ["hit00", "hit01"] {
+            let id = hit_id(tag);
+            cat.insert(
+                &id,
+                serde_json::json!({ "role": "user", "text": "needle" })
+                    .to_string()
+                    .into_bytes(),
+            );
+            cat.set_session_of(&id, &session_a);
+        }
+        let index = FixedHits(vec![hit_id("hit00"), hit_id("hit01")]);
+        let app = App::with_clock(cat, index, clock_t0);
+        let AppResponse::Search { hits, .. } = app.handle(search_req("needle", 10, None)).unwrap()
+        else {
+            panic!("expected Search response");
+        };
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].id, hit_id("hit00"));
+        assert_eq!(hits[0].occurrences, 1);
+        assert_eq!(hits[1].occurrences, 1);
+    }
+
+    #[test]
+    fn search_why_matched_detects_term_beyond_displayed_prefix() {
+        let mut cat = MapCatalog::new(7);
+        let mut text = "x".repeat(1500);
+        text.push_str(" needle");
+        cat.insert(
+            &hit_id("hit00"),
+            serde_json::json!({ "text": text }).to_string().into_bytes(),
+        );
+        let app = App::with_clock(cat, PagedIndex { n: 1 }, clock_t0);
+        let AppResponse::Search { hits, .. } = app
+            .handle(AppRequest::Search {
+                query: "needle".into(),
+                filters: SearchFilters::default(),
+                limit: 10,
+                cursor: None,
+                budget: ResponseBudget {
+                    max_snippet_chars: 8,
+                    ..Default::default()
+                },
+                include_system: false,
+                group_by_session: false,
+            })
+            .unwrap()
+        else {
+            panic!("expected Search response");
+        };
+        assert_eq!(hits[0].text.as_deref(), Some("xxxxxxxx"));
+        assert_eq!(hits[0].why_matched, vec!["needle"]);
+    }
+
+    #[test]
+    fn search_json_escaped_guidance_counts_toward_byte_budget() {
+        let mut cat = MapCatalog::new(7);
+        for tag in ["hit00", "hit01", "hit02", "hit03"] {
+            let text = format!("{} quoted \\\"needle\\\"", "x".repeat(1000));
+            cat.insert(
+                &hit_id(tag),
+                serde_json::json!({ "text": text }).to_string().into_bytes(),
+            );
+        }
+        let app = App::with_clock(cat, PagedIndex { n: 4 }, clock_t0);
+        let response = app
+            .handle(AppRequest::Search {
+                query: "quoted needle".into(),
+                filters: SearchFilters::default(),
+                limit: 10,
+                cursor: None,
+                budget: ResponseBudget {
+                    max_response_bytes: budget::MIN_RESPONSE_BYTES,
+                    ..Default::default()
+                },
+                include_system: false,
+                group_by_session: false,
+            })
+            .unwrap();
+        let (kept, next, _, truncation) = hits_of(response);
+        assert!(!kept.is_empty() && kept.len() < 4);
+        assert_eq!(
+            truncation.reason.as_deref(),
+            Some(budget::TRUNCATION_MAX_RESPONSE_BYTES)
+        );
+        assert!(next.is_some());
+    }
+
+    #[test]
+    fn search_guidance_deterministic_across_identical_queries() {
+        let mut cat = MapCatalog::new(7);
+        cat.insert(
+            &hit_id("hit00"),
+            serde_json::json!({ "text": "数据库 guidance" })
+                .to_string()
+                .into_bytes(),
+        );
+        let app = App::with_clock(&cat, PagedIndex { n: 1 }, clock_t0);
+        let first = app.handle(search_req("数据库 guidance", 10, None)).unwrap();
+        let second = app.handle(search_req("数据库 guidance", 10, None)).unwrap();
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn search_guidance_uses_real_session_id_in_suggestions() {
+        let mut fixture = ctx_fixture();
+        fixture.store.catalog.insert(
+            &fixture.leaf,
+            serde_json::json!({ "text": "leaf guidance" })
+                .to_string()
+                .into_bytes(),
+        );
+        let app = App::with_clock(
+            &fixture.store,
+            FixedHits(vec![fixture.leaf.clone()]),
+            clock_t0,
+        );
+        let AppResponse::Search { hits, .. } =
+            app.handle(search_req("guidance", 10, None)).unwrap()
+        else {
+            panic!("expected Search response");
+        };
+        let hit = &hits[0];
+        assert_eq!(hit.session_id.as_deref(), Some(fixture.session.as_str()));
+        assert_eq!(hit.why_matched, vec!["guidance"]);
+        assert!(hit.suggested_next_commands[0].contains(hit.id.as_str()));
+        assert!(
+            hit.suggested_next_commands
+                .iter()
+                .all(|command| command.contains(fixture.session.as_str()))
+        );
+    }
+
+    #[test]
+    fn search_guidance_omits_get_message_when_session_id_missing() {
+        let mut cat = MapCatalog::new(7);
+        cat.insert(
+            &hit_id("hit00"),
+            serde_json::json!({ "text": "needle" })
+                .to_string()
+                .into_bytes(),
+        );
+        let app = App::with_clock(cat, PagedIndex { n: 1 }, clock_t0);
+        let AppResponse::Search { hits, .. } = app.handle(search_req("needle", 10, None)).unwrap()
+        else {
+            panic!("expected Search response");
+        };
+        assert!(hits[0].session_id.is_none());
+        assert!(hits[0].suggested_next_commands.is_empty());
+    }
+
+    fn filtered_search_req(
+        query: &str,
+        limit: usize,
+        cursor: Option<String>,
+        filters: SearchFilters,
+    ) -> AppRequest {
+        AppRequest::Search {
+            query: query.into(),
+            filters,
+            limit,
+            cursor,
+            budget: ResponseBudget::default(),
+            include_system: false,
+            group_by_session: false,
+        }
+    }
+
+    fn seconds_instant(unix_seconds: i64) -> SearchInstant {
+        SearchInstant {
+            unix_seconds,
+            nanosecond: 0,
+        }
+    }
+
+    #[test]
+    fn search_rejects_since_not_before_until() {
+        for (since, until) in [
+            (seconds_instant(1_000), seconds_instant(1_000)),
+            (seconds_instant(2_000), seconds_instant(1_000)),
+        ] {
+            let err = app()
+                .handle(filtered_search_req(
+                    "q",
+                    5,
+                    None,
+                    SearchFilters {
+                        providers: Vec::new(),
+                        since: Some(since),
+                        until: Some(until),
+                    },
+                ))
+                .expect_err("since >= until must be rejected");
+            assert!(matches!(
+                err,
+                AppError::Domain(DomainError::InvalidRequest(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn search_cursor_is_bound_to_normalized_filters() {
+        use agent_session_grep_ports::SearchProvider;
+
+        let app = App::with_clock(FakeCatalog, PagedIndex { n: 5 }, clock_t0);
+        let issued_filters = SearchFilters {
+            providers: vec![SearchProvider::Codex, SearchProvider::Claude],
+            since: Some(seconds_instant(1_000)),
+            until: None,
+        };
+        let (_, next, _, _) = hits_of(
+            app.handle(filtered_search_req("q", 2, None, issued_filters))
+                .unwrap(),
+        );
+        let normalized_equivalent = SearchFilters {
+            providers: vec![
+                SearchProvider::Claude,
+                SearchProvider::Codex,
+                SearchProvider::Claude,
+            ],
+            since: Some(seconds_instant(1_000)),
+            until: None,
+        };
+        assert!(
+            app.handle(filtered_search_req(
+                "q",
+                2,
+                next.clone(),
+                normalized_equivalent,
+            ))
+            .is_ok()
+        );
+
+        let mutated = SearchFilters {
+            providers: Vec::new(),
+            since: Some(seconds_instant(2_000)),
+            until: None,
+        };
+        let err = app
+            .handle(filtered_search_req("q", 2, next.clone(), mutated))
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            AppError::Cursor(cursor::CursorError::Invalid(_))
+        ));
+
+        let err = app.handle(search_req("q", 2, next)).unwrap_err();
+        assert!(matches!(
+            err,
+            AppError::Cursor(cursor::CursorError::Invalid(_))
+        ));
+
+        let (_, plain_next, _, _) = hits_of(app.handle(search_req("q", 2, None)).unwrap());
+        let err = app
+            .handle(filtered_search_req(
+                "q",
+                2,
+                plain_next,
+                SearchFilters {
+                    providers: vec![SearchProvider::Claude],
+                    since: None,
+                    until: None,
+                },
+            ))
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            AppError::Cursor(cursor::CursorError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn parse_search_instant_normalizes_offsets_and_compact_time() {
+        let z = parse_search_instant("2026-07-28T12:00:00Z").unwrap();
+        for parsed in [
+            parse_search_instant("2026-07-28T14:00:00+02:00").unwrap(),
+            parse_search_instant("2026-07-28T140000+0200").unwrap(),
+            parse_search_instant("2026-07-28 07:00:00-05:00").unwrap(),
+        ] {
+            assert_eq!(parsed, z);
+        }
+        assert_eq!(z.unix_seconds, 1_785_240_000);
+        assert_eq!(z.nanosecond, 0);
+    }
+
+    #[test]
+    fn parse_search_instant_validates_ranges_and_precision() {
+        let instant = parse_search_instant("2026-07-28T00:00:00.123456789Z").unwrap();
+        assert_eq!(instant.nanosecond, 123_456_789);
+        for value in [
+            "2026-07-28T12:00:00",
+            "2026-02-29T00:00:00Z",
+            "2026-07-28T24:00:00Z",
+            "2026-07-28T00:00:00.1234567891Z",
+            "2026-07-28T12:00Z",
+            "1h",
+            "",
+        ] {
+            assert!(parse_search_instant(value).is_none(), "{value:?}");
+        }
+        assert!(parse_search_instant("2024-02-29T00:00:00Z").is_some());
+    }
+
+    #[test]
+    fn parse_relative_search_instant_uses_injected_clock_and_rejects_negative_amounts() {
+        let now_ms = 1_000_000_000;
+        assert_eq!(
+            parse_relative_search_instant("1h", now_ms).unwrap(),
+            SearchInstant::from_unix_millis(now_ms - 3_600_000)
+        );
+        assert_eq!(
+            parse_relative_search_instant(" 2d ", now_ms).unwrap(),
+            SearchInstant::from_unix_millis(now_ms - 2 * 86_400_000)
+        );
+        for value in ["", "h", "1m", "-1h", "0h", "1.5h"] {
+            assert!(parse_relative_search_instant(value, now_ms).is_none());
         }
     }
 
@@ -1481,12 +3329,15 @@ mod tests {
         let resp = app
             .handle(AppRequest::Search {
                 query: "q".into(),
+                filters: SearchFilters::default(),
                 limit: 60,
                 cursor: None,
                 budget: ResponseBudget {
                     max_response_bytes: budget::MIN_RESPONSE_BYTES,
                     ..Default::default()
                 },
+                include_system: false,
+                group_by_session: false,
             })
             .unwrap();
         let (ids, next, _, truncation) = hits_of(resp);
@@ -1504,6 +3355,7 @@ mod tests {
                 active_generation: 7,
                 query_digest: cursor::digest_query("q"),
                 sort_digest: SORT_SCORE_DESC.into(),
+                result_set: None,
             },
         )
         .unwrap();
@@ -1515,12 +3367,15 @@ mod tests {
         let err = app()
             .handle(AppRequest::Search {
                 query: "q".into(),
+                filters: SearchFilters::default(),
                 limit: 5,
                 cursor: None,
                 budget: ResponseBudget {
                     max_items: 0,
                     ..Default::default()
                 },
+                include_system: false,
+                group_by_session: false,
             })
             .unwrap_err();
         assert!(
@@ -1542,6 +3397,7 @@ mod tests {
                 limit: 2,
                 cursor: None,
                 budget: ResponseBudget::default(),
+                sessions_only: false,
             })
             .unwrap();
         let AppResponse::List {
@@ -1558,6 +3414,7 @@ mod tests {
                 limit: 2,
                 cursor: next_cursor,
                 budget: ResponseBudget::default(),
+                sessions_only: false,
             })
             .unwrap();
         let AppResponse::List {
@@ -1607,6 +3464,7 @@ mod tests {
                     max_response_bytes: budget::MIN_RESPONSE_BYTES,
                     ..Default::default()
                 },
+                sessions_only: false,
             })
             .unwrap();
         let AppResponse::List {
@@ -1684,6 +3542,10 @@ mod tests {
 
         fn list(&self, limit: usize) -> PortResult<Vec<CatalogEntry>> {
             self.catalog.list(limit)
+        }
+
+        fn list_sessions(&self, limit: usize) -> PortResult<Vec<CatalogEntry>> {
+            self.catalog.list_sessions(limit)
         }
 
         fn count(&self) -> PortResult<u64> {
@@ -1951,6 +3813,21 @@ mod tests {
         AppRequest::Context {
             session_id: ses.clone(),
             policy,
+            level: ContextLevel::Raw,
+            budget,
+        }
+    }
+
+    fn ctx_req_level(
+        ses: &StableId,
+        policy: ContextPolicy,
+        level: ContextLevel,
+        budget: ResponseBudget,
+    ) -> AppRequest {
+        AppRequest::Context {
+            session_id: ses.clone(),
+            policy,
+            level,
             budget,
         }
     }
@@ -2287,6 +4164,767 @@ mod tests {
         App::with_clock(cat, FakeIndex, clock_t0)
     }
 
+    #[test]
+    fn context_talks_group_user_message_with_following_messages() {
+        let fixture = ctx_fixture();
+        let AppResponse::Context {
+            requested_level,
+            effective_level,
+            talks,
+            summary,
+            hint,
+            messages,
+            ..
+        } = app_ctx(&fixture.store)
+            .handle(ctx_req_level(
+                &fixture.session,
+                ContextPolicy::Mainline,
+                ContextLevel::Talks,
+                ResponseBudget::default(),
+            ))
+            .unwrap()
+        else {
+            panic!("expected Context response");
+        };
+        assert_eq!(requested_level, ContextLevel::Talks);
+        assert_eq!(effective_level, ContextLevel::Talks);
+        assert!(summary.is_none());
+        assert_eq!(talks.len(), 2);
+        assert_eq!(talks[0].user_message.message_id, fixture.root.as_str());
+        assert_eq!(
+            talks[0]
+                .following_messages
+                .iter()
+                .map(|message| message.message_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![fixture.repeated.as_str()]
+        );
+        assert_eq!(talks[1].user_message.message_id, fixture.leaf.as_str());
+        assert!(talks[1].following_messages.is_empty());
+        assert_eq!(messages.len(), 3);
+        let hint = hint.expect("talks must hint toward raw");
+        assert_eq!(hint.command, "get_session_context");
+        assert_eq!(hint.session_id, fixture.session.as_str());
+        assert_eq!(hint.level, ContextLevel::Raw);
+    }
+
+    #[test]
+    fn context_talks_only_include_assistant_and_tool_followers() {
+        for (role, payload_role, included) in [
+            (Role::Assistant, "assistant", true),
+            (Role::Tool, "tool", true),
+            (Role::System, "system", false),
+            (Role::Developer, "developer", false),
+        ] {
+            let mut fixture = ctx_fixture();
+            fixture.store.catalog.insert(
+                &fixture.repeated,
+                ctx_msg_payload(payload_role, payload_role, "2026-07-26T00:01:00Z"),
+            );
+            fixture
+                .store
+                .graph
+                .messages
+                .iter_mut()
+                .find(|message| message.id == fixture.repeated)
+                .expect("repeated message")
+                .role = role;
+            let AppResponse::Context {
+                talks, messages, ..
+            } = app_ctx(&fixture.store)
+                .handle(ctx_req_level(
+                    &fixture.session,
+                    ContextPolicy::Mainline,
+                    ContextLevel::Talks,
+                    ResponseBudget::default(),
+                ))
+                .unwrap()
+            else {
+                panic!("expected Context response");
+            };
+            assert_eq!(talks.len(), 2);
+            assert_eq!(talks[0].following_messages.len(), included as usize);
+            assert_eq!(messages.len(), 3);
+        }
+    }
+
+    #[test]
+    fn context_sessions_returns_structural_overview_and_talk_hint() {
+        let fixture = ctx_fixture();
+        let AppResponse::Context {
+            requested_level,
+            effective_level,
+            talks,
+            summary,
+            hint,
+            ..
+        } = app_ctx(&fixture.store)
+            .handle(ctx_req_level(
+                &fixture.session,
+                ContextPolicy::Mainline,
+                ContextLevel::Sessions,
+                ResponseBudget::default(),
+            ))
+            .unwrap()
+        else {
+            panic!("expected Context response");
+        };
+        assert_eq!(requested_level, ContextLevel::Sessions);
+        assert_eq!(effective_level, ContextLevel::Sessions);
+        let summary = summary.expect("sessions must produce a summary");
+        assert_eq!(
+            summary.first_user_message.unwrap().message_id,
+            fixture.root.as_str()
+        );
+        assert_eq!(summary.message_count, 3);
+        assert_eq!(summary.turn_count, 2);
+        assert_eq!(
+            summary.file_references,
+            vec![
+                fixture.document_a.as_str().to_string(),
+                fixture.document_b.as_str().to_string(),
+            ]
+        );
+        assert!(talks.is_empty());
+        let hint = hint.expect("sessions must hint toward talks");
+        assert_eq!(hint.command, "get_session_context");
+        assert_eq!(hint.session_id, fixture.session.as_str());
+        assert_eq!(hint.level, ContextLevel::Talks);
+    }
+
+    #[test]
+    fn context_talks_and_sessions_fall_back_toward_raw_without_user() {
+        let mut fixture = ctx_fixture();
+        fixture
+            .store
+            .graph
+            .messages
+            .iter_mut()
+            .for_each(|message| message.role = Role::Assistant);
+        for requested in [ContextLevel::Talks, ContextLevel::Sessions] {
+            let AppResponse::Context {
+                requested_level,
+                effective_level,
+                talks,
+                summary,
+                hint,
+                messages,
+                ..
+            } = app_ctx(&fixture.store)
+                .handle(ctx_req_level(
+                    &fixture.session,
+                    ContextPolicy::Mainline,
+                    requested,
+                    ResponseBudget::default(),
+                ))
+                .unwrap()
+            else {
+                panic!("expected Context response");
+            };
+            assert_eq!(requested_level, requested);
+            assert_eq!(effective_level, ContextLevel::Raw);
+            assert!(talks.is_empty());
+            assert!(summary.is_none());
+            assert!(hint.is_none());
+            assert_eq!(messages.len(), 3);
+        }
+    }
+
+    #[test]
+    fn context_sessions_budget_falls_back_through_talks_before_raw() {
+        let mut fixture = ctx_fixture();
+        fixture
+            .store
+            .graph
+            .messages
+            .iter_mut()
+            .find(|message| message.id == fixture.root)
+            .expect("root message")
+            .role = Role::System;
+        let mut response = None;
+        for text_len in 1000..=2000 {
+            fixture.store.catalog.insert(
+                &fixture.root,
+                ctx_msg_payload("system", &"x".repeat(text_len), "2026-07-26T00:00:00Z"),
+            );
+            let candidate = app_ctx(&fixture.store)
+                .handle(ctx_req_level(
+                    &fixture.session,
+                    ContextPolicy::Mainline,
+                    ContextLevel::Sessions,
+                    ResponseBudget {
+                        max_response_bytes: budget::MIN_RESPONSE_BYTES,
+                        ..Default::default()
+                    },
+                ))
+                .unwrap();
+            if matches!(
+                &candidate,
+                AppResponse::Context {
+                    effective_level: ContextLevel::Talks,
+                    ..
+                }
+            ) {
+                response = Some(candidate);
+                break;
+            }
+        }
+        let AppResponse::Context {
+            requested_level,
+            effective_level,
+            talks,
+            summary,
+            hint,
+            truncation,
+            ..
+        } = response.expect("a boundary must exist where sessions falls back to talks")
+        else {
+            panic!("expected Context response");
+        };
+        assert_eq!(requested_level, ContextLevel::Sessions);
+        assert_eq!(effective_level, ContextLevel::Talks);
+        assert_eq!(talks.len(), 1);
+        assert!(summary.is_none());
+        assert_eq!(
+            hint.expect("talks fallback must hint raw").level,
+            ContextLevel::Raw
+        );
+        assert!(truncation.truncated);
+        assert!(
+            truncation
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains(budget::TRUNCATION_MAX_RESPONSE_BYTES))
+        );
+    }
+
+    #[test]
+    fn context_clamp_reports_public_max_messages_reason() {
+        let fixture = ctx_fixture();
+        let AppResponse::Context { truncation, .. } = app_ctx(&fixture.store)
+            .handle(ctx_req_level(
+                &fixture.session,
+                ContextPolicy::Mainline,
+                ContextLevel::Talks,
+                ResponseBudget {
+                    max_messages: 1,
+                    ..Default::default()
+                },
+            ))
+            .unwrap()
+        else {
+            panic!("expected Context response");
+        };
+        assert!(truncation.truncated);
+        assert_eq!(
+            truncation.reason.as_deref(),
+            Some(budget::TRUNCATION_MAX_MESSAGES)
+        );
+        assert!(
+            !truncation
+                .reason
+                .unwrap()
+                .contains(budget::TRUNCATION_MAX_ITEMS)
+        );
+    }
+
+    #[test]
+    fn context_fallback_does_not_charge_unproduced_derived_bytes() {
+        let mut fixture = ctx_fixture();
+        fixture
+            .store
+            .graph
+            .messages
+            .iter_mut()
+            .for_each(|message| message.role = Role::Assistant);
+        let floor_budget = || ResponseBudget {
+            max_response_bytes: budget::MIN_RESPONSE_BYTES,
+            ..Default::default()
+        };
+        let AppResponse::Context {
+            messages: raw_messages,
+            truncation: raw_truncation,
+            ..
+        } = app_ctx(&fixture.store)
+            .handle(ctx_req_level(
+                &fixture.session,
+                ContextPolicy::Mainline,
+                ContextLevel::Raw,
+                floor_budget(),
+            ))
+            .unwrap()
+        else {
+            panic!("expected Context response");
+        };
+        let AppResponse::Context {
+            effective_level,
+            messages: fallback_messages,
+            truncation: fallback_truncation,
+            ..
+        } = app_ctx(&fixture.store)
+            .handle(ctx_req_level(
+                &fixture.session,
+                ContextPolicy::Mainline,
+                ContextLevel::Talks,
+                floor_budget(),
+            ))
+            .unwrap()
+        else {
+            panic!("expected Context response");
+        };
+        assert_eq!(effective_level, ContextLevel::Raw);
+        assert_eq!(fallback_messages, raw_messages);
+        assert_eq!(fallback_truncation, raw_truncation);
+    }
+
+    #[test]
+    fn context_raw_never_falls_back_and_carries_no_hint() {
+        let fixture = ctx_fixture();
+        let AppResponse::Context {
+            requested_level,
+            effective_level,
+            talks,
+            summary,
+            hint,
+            ..
+        } = app_ctx(&fixture.store)
+            .handle(ctx_req_level(
+                &fixture.session,
+                ContextPolicy::Mainline,
+                ContextLevel::Raw,
+                ResponseBudget::default(),
+            ))
+            .unwrap()
+        else {
+            panic!("expected Context response");
+        };
+        assert_eq!(requested_level, ContextLevel::Raw);
+        assert_eq!(effective_level, ContextLevel::Raw);
+        assert!(talks.is_empty());
+        assert!(summary.is_none());
+        assert!(hint.is_none());
+    }
+
+    #[test]
+    fn context_derived_level_bytes_count_toward_budget() {
+        let mut fixture = ctx_fixture();
+        let big_text = "x".repeat(900);
+        for (id, role, timestamp) in [
+            (&fixture.root, "user", "2026-07-26T00:00:00Z"),
+            (&fixture.repeated, "assistant", "2026-07-26T00:01:00Z"),
+            (&fixture.leaf, "user", "2026-07-26T00:02:00Z"),
+        ] {
+            fixture
+                .store
+                .catalog
+                .insert(id, ctx_msg_payload(role, &big_text, timestamp));
+        }
+        let floor_budget = || ResponseBudget {
+            max_response_bytes: budget::MIN_RESPONSE_BYTES,
+            ..Default::default()
+        };
+        let AppResponse::Context {
+            messages: raw_messages,
+            ..
+        } = app_ctx(&fixture.store)
+            .handle(ctx_req_level(
+                &fixture.session,
+                ContextPolicy::Mainline,
+                ContextLevel::Raw,
+                floor_budget(),
+            ))
+            .unwrap()
+        else {
+            panic!("expected Context response");
+        };
+        let AppResponse::Context {
+            messages: derived_messages,
+            effective_level,
+            truncation,
+            ..
+        } = app_ctx(&fixture.store)
+            .handle(ctx_req_level(
+                &fixture.session,
+                ContextPolicy::Mainline,
+                ContextLevel::Talks,
+                floor_budget(),
+            ))
+            .unwrap()
+        else {
+            panic!("expected Context response");
+        };
+        assert_eq!(effective_level, ContextLevel::Talks);
+        assert!(truncation.truncated);
+        assert!(
+            truncation
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains(budget::TRUNCATION_MAX_RESPONSE_BYTES))
+        );
+        assert!(derived_messages.len() < raw_messages.len());
+    }
+
+    #[test]
+    fn context_derived_views_honor_message_clamp() {
+        let fixture = ctx_fixture();
+        let AppResponse::Context {
+            effective_level,
+            talks,
+            summary,
+            truncation,
+            ..
+        } = app_ctx(&fixture.store)
+            .handle(ctx_req_level(
+                &fixture.session,
+                ContextPolicy::Mainline,
+                ContextLevel::Sessions,
+                ResponseBudget {
+                    max_messages: 2,
+                    ..Default::default()
+                },
+            ))
+            .unwrap()
+        else {
+            panic!("expected Context response");
+        };
+        assert!(truncation.truncated);
+        assert_eq!(
+            truncation.reason.as_deref(),
+            Some(budget::TRUNCATION_MAX_MESSAGES)
+        );
+        assert_eq!(effective_level, ContextLevel::Sessions);
+        assert!(talks.is_empty());
+        let summary = summary.expect("clamped sessions still summarizes");
+        assert_eq!(summary.message_count, 2);
+        assert_eq!(summary.turn_count, 1);
+    }
+
+    fn message_req_with_id(
+        message_id: StableId,
+        session_id: Option<StableId>,
+        around: usize,
+        budget: ResponseBudget,
+    ) -> AppRequest {
+        AppRequest::Message {
+            message_id,
+            session_id,
+            around,
+            budget,
+        }
+    }
+
+    fn message_req(
+        fixture: &ContextFixture,
+        session_id: Option<StableId>,
+        around: usize,
+        budget: ResponseBudget,
+    ) -> AppRequest {
+        message_req_with_id(fixture.repeated.clone(), session_id, around, budget)
+    }
+
+    #[test]
+    fn message_around_zero_returns_anchor_only() {
+        let fixture = ctx_fixture();
+        let AppResponse::Message { window } = app_ctx(&fixture.store)
+            .handle(message_req(
+                &fixture,
+                Some(fixture.session.clone()),
+                0,
+                ResponseBudget::default(),
+            ))
+            .unwrap()
+        else {
+            panic!("expected Message response");
+        };
+        assert_eq!(window.message_id, fixture.repeated.as_str());
+        assert_eq!(window.session_id, fixture.session.as_str());
+        assert_eq!(window.anchor_placement_id, fixture.repeated_b.id.as_str());
+        assert_eq!(window.messages.len(), 1);
+        assert_eq!(
+            window.messages[0].placement_id,
+            fixture.repeated_b.id.as_str()
+        );
+        assert!(!window.truncation.truncated);
+    }
+
+    #[test]
+    fn message_window_clamps_at_mainline_ends_and_stays_chronological() {
+        let fixture = ctx_fixture();
+        let AppResponse::Message { window } = app_ctx(&fixture.store)
+            .handle(message_req(
+                &fixture,
+                Some(fixture.session.clone()),
+                9,
+                ResponseBudget::default(),
+            ))
+            .unwrap()
+        else {
+            panic!("expected Message response");
+        };
+        assert_eq!(
+            window
+                .messages
+                .iter()
+                .map(|message| message.message_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                fixture.root.as_str(),
+                fixture.repeated.as_str(),
+                fixture.leaf.as_str(),
+            ]
+        );
+        assert!(
+            !window
+                .messages
+                .iter()
+                .any(|message| message.message_id == fixture.sidechain.as_str())
+        );
+    }
+
+    #[test]
+    fn message_window_includes_one_neighbor_per_side() {
+        let fixture = ctx_fixture();
+        let AppResponse::Message { window } = app_ctx(&fixture.store)
+            .handle(message_req(
+                &fixture,
+                Some(fixture.session.clone()),
+                1,
+                ResponseBudget::default(),
+            ))
+            .unwrap()
+        else {
+            panic!("expected Message response");
+        };
+        assert_eq!(window.messages.len(), 3);
+        assert_eq!(window.messages[0].message_id, fixture.root.as_str());
+        assert_eq!(window.messages[2].message_id, fixture.leaf.as_str());
+    }
+
+    #[test]
+    fn message_multiple_mainline_placements_is_invalid_request() {
+        let mut fixture = ctx_fixture();
+        fixture.store.graph.placements[2].is_sidechain = false;
+        fixture.store.graph.edges[1].parent_message_id = fixture.sidechain.clone();
+        fixture.store.graph.validate().unwrap();
+
+        let err = app_ctx(&fixture.store)
+            .handle(message_req(
+                &fixture,
+                Some(fixture.session.clone()),
+                0,
+                ResponseBudget::default(),
+            ))
+            .unwrap_err();
+        let AppError::Domain(error @ DomainError::InvalidRequest(_)) = err else {
+            panic!("expected InvalidRequest, got {err:?}");
+        };
+        assert_eq!(error.code(), "invalid_request");
+        let DomainError::InvalidRequest(message) = error else {
+            unreachable!();
+        };
+        assert!(message.contains("multiple placements"), "{message}");
+        assert!(message.contains("get_session_context"), "{message}");
+    }
+
+    #[test]
+    fn message_without_session_auto_resolves_single_candidate() {
+        let fixture = ctx_fixture();
+        let AppResponse::Message { window } = app_ctx(&fixture.store)
+            .handle(message_req(&fixture, None, 0, ResponseBudget::default()))
+            .unwrap()
+        else {
+            panic!("expected Message response");
+        };
+        assert_eq!(window.session_id, fixture.session.as_str());
+        assert_eq!(window.messages.len(), 1);
+    }
+
+    #[test]
+    fn message_with_unknown_session_is_not_found() {
+        let fixture = ctx_fixture();
+        let wrong = StableId::native(IdKind::Session, "sess-not-a-candidate");
+        let err = app_ctx(&fixture.store)
+            .handle(message_req(
+                &fixture,
+                Some(wrong),
+                0,
+                ResponseBudget::default(),
+            ))
+            .unwrap_err();
+        assert!(matches!(err, AppError::Domain(DomainError::NotFound(_))));
+    }
+
+    #[test]
+    fn message_ambiguity_is_bounded_sorted_and_actionable() {
+        let mut fixture = ctx_fixture();
+        fixture.store.candidates = (0..10)
+            .map(|index| PortMessageContextCandidate {
+                session_id: StableId::native(IdKind::Session, &format!("sess-x{index}")),
+                placement_ids: vec![fixture.repeated_a.id.clone()],
+            })
+            .collect();
+        let AppError::MessageAmbiguous(ambiguity) = app_ctx(&fixture.store)
+            .handle(message_req(&fixture, None, 0, ResponseBudget::default()))
+            .unwrap_err()
+        else {
+            panic!("expected MessageAmbiguous error");
+        };
+        assert_eq!(ambiguity.candidate_count, 10);
+        assert_eq!(
+            ambiguity.candidate_session_ids.len(),
+            MAX_MESSAGE_AMBIGUITY_CANDIDATES
+        );
+        let mut sorted = ambiguity.candidate_session_ids.clone();
+        sorted.sort();
+        assert_eq!(ambiguity.candidate_session_ids, sorted);
+        assert!(!ambiguity.hint.is_empty());
+    }
+
+    #[test]
+    fn message_missing_is_not_found() {
+        let fixture = ctx_fixture();
+        let err = app_ctx(&fixture.store)
+            .handle(message_req_with_id(
+                StableId::native(IdKind::Message, "index-only"),
+                None,
+                0,
+                ResponseBudget::default(),
+            ))
+            .unwrap_err();
+        assert!(matches!(err, AppError::Port(PortError::NotFound(_))));
+    }
+
+    #[test]
+    fn message_off_mainline_is_not_found() {
+        let mut fixture = ctx_fixture();
+        fixture.store.context_message_id = fixture.sidechain.clone();
+        fixture.store.candidates = vec![PortMessageContextCandidate {
+            session_id: fixture.session.clone(),
+            placement_ids: vec![fixture.store.graph.placements[2].id.clone()],
+        }];
+        let err = app_ctx(&fixture.store)
+            .handle(message_req_with_id(
+                fixture.sidechain.clone(),
+                Some(fixture.session.clone()),
+                0,
+                ResponseBudget::default(),
+            ))
+            .unwrap_err();
+        assert!(matches!(err, AppError::Domain(DomainError::NotFound(_))));
+    }
+
+    #[test]
+    fn message_budget_rejects_below_floor() {
+        let fixture = ctx_fixture();
+        let err = app_ctx(&fixture.store)
+            .handle(message_req(
+                &fixture,
+                Some(fixture.session.clone()),
+                0,
+                ResponseBudget {
+                    max_response_bytes: budget::MIN_RESPONSE_BYTES - 1,
+                    ..Default::default()
+                },
+            ))
+            .unwrap_err();
+        assert!(matches!(err, AppError::Budget(_)));
+    }
+
+    #[test]
+    fn message_item_budget_keeps_anchor_and_reports_max_items() {
+        let fixture = ctx_fixture();
+        let AppResponse::Message { window } = app_ctx(&fixture.store)
+            .handle(message_req(
+                &fixture,
+                Some(fixture.session.clone()),
+                9,
+                ResponseBudget {
+                    max_items: 1,
+                    ..Default::default()
+                },
+            ))
+            .unwrap()
+        else {
+            panic!("expected Message response");
+        };
+        assert_eq!(window.messages.len(), 1);
+        assert_eq!(
+            window.messages[0].placement_id,
+            fixture.repeated_b.id.as_str()
+        );
+        assert_eq!(
+            window.truncation.reason.as_deref(),
+            Some(budget::TRUNCATION_MAX_ITEMS)
+        );
+    }
+
+    #[test]
+    fn message_byte_budget_keeps_anchor_and_reports_max_response_bytes() {
+        let mut fixture = ctx_fixture();
+        fixture.store.context_message_id = fixture.root.clone();
+        fixture.store.candidates = vec![PortMessageContextCandidate {
+            session_id: fixture.session.clone(),
+            placement_ids: vec![fixture.root_placement.id.clone()],
+        }];
+        let oversized_text = "\"\n".repeat(3072);
+        fixture.store.catalog.insert(
+            &fixture.root,
+            serde_json::json!({
+                "role": "user",
+                "text": oversized_text.clone(),
+                "metadata": "m".repeat(4096),
+            })
+            .to_string()
+            .into_bytes(),
+        );
+        let requested_budget = budget::MIN_RESPONSE_BYTES;
+        let AppResponse::Message { window } = app_ctx(&fixture.store)
+            .handle(message_req_with_id(
+                fixture.root.clone(),
+                Some(fixture.session.clone()),
+                9,
+                ResponseBudget {
+                    max_response_bytes: requested_budget,
+                    ..Default::default()
+                },
+            ))
+            .unwrap()
+        else {
+            panic!("expected Message response");
+        };
+        assert_eq!(window.message_id, fixture.root.as_str());
+        assert_eq!(window.session_id, fixture.session.as_str());
+        assert_eq!(
+            window.anchor_placement_id,
+            fixture.root_placement.id.as_str()
+        );
+        assert_eq!(window.messages.len(), 1);
+        let anchor = &window.messages[0];
+        assert_eq!(anchor.id, fixture.root.as_str());
+        assert_eq!(anchor.message_id, fixture.root.as_str());
+        assert_eq!(anchor.placement_id, fixture.root_placement.id.as_str());
+        assert!(anchor.payload.get("metadata").is_none());
+        assert_eq!(anchor.payload["role"], "user");
+        assert!(
+            anchor.payload["text"].as_str().unwrap().len() < oversized_text.len(),
+            "oversized anchor text must be projected"
+        );
+        assert_eq!(
+            window.truncation.reason.as_deref(),
+            Some(budget::TRUNCATION_MAX_RESPONSE_BYTES)
+        );
+        let render_equivalent_bytes = ENVELOPE_RESERVE_BYTES
+            + window
+                .messages
+                .iter()
+                .map(message_occurrence_bytes)
+                .sum::<usize>();
+        assert!(
+            render_equivalent_bytes <= requested_budget,
+            "projected response estimate {render_equivalent_bytes} exceeds {requested_budget}"
+        );
+    }
+
     // ---- stage（RFC-0002 §5）----
 
     #[test]
@@ -2357,6 +4995,7 @@ mod tests {
                     skipped: 3,
                     diagnostics: vec!["record 3 skipped".into(), "unknown field seen".into()],
                     session_native_id: Some("native-sess-1".into()),
+                    session_observation: Default::default(),
                 })
             }
         }
@@ -2591,5 +5230,242 @@ mod tests {
             AppError::Provider(ProviderError::StructuralFatal(_))
         ));
         assert!(err.to_string().contains("structural fatal"));
+    }
+
+    // ---- ADR-0009 resume metadata / cursor result_set ----
+
+    struct FakeResumeClaims;
+    impl ResumeClaimsStore for FakeResumeClaims {
+        fn resume_of(&self, session_ids: &[StableId]) -> PortResult<Vec<SessionResumeMetadata>> {
+            Ok(session_ids
+                .iter()
+                .map(|id| SessionResumeMetadata {
+                    session_id: id.clone(),
+                    provider_id: Some("claude-code".into()),
+                    resume_available: true,
+                    provider_session_id: Some("prov-sess-1".into()),
+                    original_working_directory: Some("C:/work".into()),
+                    unavailable_reason: None,
+                })
+                .collect())
+        }
+    }
+
+    #[test]
+    fn get_session_resume_returns_fixed_nullable_metadata() {
+        let session = StableId::native(IdKind::Session, "sess-resume");
+        let app = App::with_resume_and_clock(FakeCatalog, FakeIndex, FakeResumeClaims, clock_t0);
+        let AppResponse::SessionResume(metadata) = app
+            .handle(AppRequest::GetSessionResume {
+                session_id: session.clone(),
+            })
+            .unwrap()
+        else {
+            panic!("expected SessionResume response");
+        };
+        assert_eq!(metadata.session_id, session);
+        assert_eq!(metadata.provider_id.as_deref(), Some("claude-code"));
+        assert!(metadata.resume_available);
+        assert_eq!(metadata.provider_session_id.as_deref(), Some("prov-sess-1"));
+        assert_eq!(
+            metadata.original_working_directory.as_deref(),
+            Some("C:/work")
+        );
+        assert!(metadata.unavailable_reason.is_none());
+    }
+
+    #[test]
+    fn get_session_resume_rejects_non_session_kind() {
+        let message = StableId::native(IdKind::Message, "msg-not-session");
+        let err = app()
+            .handle(AppRequest::GetSessionResume {
+                session_id: message,
+            })
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            AppError::Domain(DomainError::InvalidRequest(_))
+        ));
+    }
+
+    #[test]
+    fn get_session_resume_without_claims_reports_unavailable() {
+        // NoResumeClaims 兜底：resume_available=false + 明确 unavailable_reason。
+        let session = StableId::native(IdKind::Session, "sess-no-claims");
+        let AppResponse::SessionResume(metadata) = app()
+            .handle(AppRequest::GetSessionResume {
+                session_id: session.clone(),
+            })
+            .unwrap()
+        else {
+            panic!("expected SessionResume response");
+        };
+        assert_eq!(metadata.session_id, session);
+        assert!(!metadata.resume_available);
+        assert!(metadata.unavailable_reason.is_some());
+    }
+
+    #[test]
+    fn search_hits_carry_resume_availability_from_claims() {
+        // 一次批量 resume_of 装配页内命中：有声明 → true；无声明/无归属 → false。
+        let mut cat = MapCatalog::new(7);
+        let session_a = StableId::native(IdKind::Session, "sess-a");
+        let session_b = StableId::native(IdKind::Session, "sess-b");
+        for (tag, session) in [
+            ("hit00", Some(&session_a)),
+            ("hit01", Some(&session_b)),
+            ("hit02", None),
+        ] {
+            let id = hit_id(tag);
+            cat.insert(
+                &id,
+                serde_json::json!({ "role": "user", "text": "needle" })
+                    .to_string()
+                    .into_bytes(),
+            );
+            if let Some(session) = session {
+                cat.set_session_of(&id, session);
+            }
+        }
+        struct OnlySessionA;
+        impl ResumeClaimsStore for OnlySessionA {
+            fn resume_of(
+                &self,
+                session_ids: &[StableId],
+            ) -> PortResult<Vec<SessionResumeMetadata>> {
+                Ok(session_ids
+                    .iter()
+                    .map(|id| SessionResumeMetadata {
+                        session_id: id.clone(),
+                        provider_id: None,
+                        resume_available: id.as_str().ends_with("sess-a"),
+                        provider_session_id: None,
+                        original_working_directory: None,
+                        unavailable_reason: (!id.as_str().ends_with("sess-a"))
+                            .then(|| "no claims".into()),
+                    })
+                    .collect())
+            }
+        }
+        let index = FixedHits(vec![hit_id("hit00"), hit_id("hit01"), hit_id("hit02")]);
+        let app = App::with_resume_and_clock(cat, index, OnlySessionA, clock_t0);
+        let AppResponse::Search { hits, .. } = app.handle(search_req("needle", 10, None)).unwrap()
+        else {
+            panic!("expected Search response");
+        };
+        assert_eq!(hits.len(), 3);
+        assert!(hits[0].resume_available, "claimed session must be true");
+        assert!(!hits[1].resume_available, "unclaimed session must be false");
+        assert!(!hits[2].resume_available, "no session_id must be false");
+    }
+
+    #[test]
+    fn search_group_by_session_carries_resume_availability() {
+        // 归并路径同样在 clamp 后装配：组代表命中携带其会话的声明。
+        let mut cat = MapCatalog::new(7);
+        let session_a = StableId::native(IdKind::Session, "sess-a");
+        for tag in ["hit00", "hit01"] {
+            let id = hit_id(tag);
+            cat.insert(
+                &id,
+                serde_json::json!({ "role": "user", "text": "needle" })
+                    .to_string()
+                    .into_bytes(),
+            );
+            cat.set_session_of(&id, &session_a);
+        }
+        let index = FixedHits(vec![hit_id("hit00"), hit_id("hit01")]);
+        let app = App::with_resume_and_clock(cat, index, FakeResumeClaims, clock_t0);
+        let AppResponse::Search { hits, .. } = app
+            .handle(AppRequest::Search {
+                query: "needle".into(),
+                filters: SearchFilters::default(),
+                limit: 10,
+                cursor: None,
+                budget: ResponseBudget::default(),
+                include_system: false,
+                group_by_session: true,
+            })
+            .unwrap()
+        else {
+            panic!("expected Search response");
+        };
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].occurrences, 2);
+        assert!(hits[0].resume_available);
+    }
+
+    #[test]
+    fn search_without_resume_claims_reports_false() {
+        // NoResumeClaims 默认：resume_available 恒 false。
+        let mut cat = MapCatalog::new(7);
+        let session_a = StableId::native(IdKind::Session, "sess-a");
+        let id = hit_id("hit00");
+        cat.insert(
+            &id,
+            serde_json::json!({ "role": "user", "text": "needle" })
+                .to_string()
+                .into_bytes(),
+        );
+        cat.set_session_of(&id, &session_a);
+        let app = App::with_clock(cat, FixedHits(vec![id]), clock_t0);
+        let AppResponse::Search { hits, .. } = app.handle(search_req("needle", 10, None)).unwrap()
+        else {
+            panic!("expected Search response");
+        };
+        assert_eq!(hits.len(), 1);
+        assert!(!hits[0].resume_available);
+    }
+
+    #[test]
+    fn list_cursor_rejects_result_set_mismatch() {
+        // result_set 判别器：sessions_only 与全实体列表的续读令牌不得互换。
+        let mut cat = MapCatalog::new(7);
+        for tag in ["la", "lb", "lc"] {
+            let id = StableId::derive(IdKind::Message, Stability::Reconstructed, &[tag.as_bytes()]);
+            cat.insert(&id, b"x".to_vec());
+        }
+        for tag in ["ls-a", "ls-b", "ls-c"] {
+            let id = StableId::native(IdKind::Session, tag);
+            cat.insert(&id, b"x".to_vec());
+        }
+        let app = App::with_clock(&cat, FakeIndex, clock_t0);
+        let list_req = |cursor: Option<String>, sessions_only: bool| AppRequest::List {
+            limit: 2,
+            cursor,
+            budget: ResponseBudget::default(),
+            sessions_only,
+        };
+        let AppResponse::List { next_cursor, .. } = app.handle(list_req(None, false)).unwrap()
+        else {
+            panic!("expected List response");
+        };
+        let all_token = next_cursor.expect("list must page");
+
+        // 全实体令牌 + sessions_only=true → 拒绝。
+        let err = app
+            .handle(list_req(Some(all_token.clone()), true))
+            .unwrap_err();
+        assert!(
+            matches!(err, AppError::Cursor(cursor::CursorError::Invalid(_))),
+            "{err}"
+        );
+
+        // 反向：sessions_only 令牌 + 全实体 → 拒绝。
+        let AppResponse::List { next_cursor, .. } = app.handle(list_req(None, true)).unwrap()
+        else {
+            panic!("expected List response");
+        };
+        let sessions_token = next_cursor.expect("sessions list must page");
+        let err = app
+            .handle(list_req(Some(sessions_token), false))
+            .unwrap_err();
+        assert!(
+            matches!(err, AppError::Cursor(cursor::CursorError::Invalid(_))),
+            "{err}"
+        );
+
+        // 同判别器续读正常。
+        assert!(app.handle(list_req(Some(all_token), false)).is_ok());
     }
 }

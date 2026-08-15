@@ -21,14 +21,17 @@ mod tui;
 
 use agent_session_grep_adapters_sqlite::{SourceBatch, SqliteStore, capture, verify_snapshot};
 use agent_session_grep_application::{
-    App, AppError, AppRequest, AppResponse, ResponseBudget, StagedBatch, Truncation,
-    evidence::Precision, select_and_stage,
+    App, AppError, AppRequest, AppResponse, ContextLevel, ResponseBudget, StagedBatch, Truncation,
+    evidence::Precision, parse_relative_search_instant, parse_search_instant, select_and_stage,
 };
 use agent_session_grep_domain::{
     ContextPolicy, DomainError, EvidenceSpan, IdKind, MessageEdge, MessagePlacement,
-    MessageRelation, Stability, StableId,
+    MessageRelation, SessionIdentityNamespace, Stability, StableId,
 };
-use agent_session_grep_ports::{ParseReport, ProviderAdapter};
+use agent_session_grep_ports::{
+    ParseReport, ProviderAdapter, ProviderSessionObservation, ResumeClaimsStore, SearchFilters,
+    SearchProvider, SourceResumeClaim,
+};
 use agent_session_grep_provider_claude::ClaudeCodeAdapter;
 use agent_session_grep_provider_codex::CodexAdapter;
 use protocol::{CanonicalCode, ProtocolError};
@@ -200,7 +203,8 @@ fn extract_request_id(args: &[String]) -> Result<Option<String>, String> {
         // 其它带值 flag 跳过其取值，避免把取值误当位置参数提前终止扫描。
         match a.as_str() {
             "--db" | "--output" | "--cursor" | "--max-items" | "--max-bytes" | "--max-messages"
-            | "--policy" => {
+            | "--policy" | "--level" | "--provider" | "--since" | "--until" | "--session"
+            | "--around" => {
                 it.next();
             }
             _ => {}
@@ -220,10 +224,11 @@ fn command_name(args: &[String]) -> String {
     while let Some(a) = it.next() {
         match a.as_str() {
             "--db" | "--output" | "--cursor" | "--max-items" | "--max-bytes" | "--max-messages"
-            | "--policy" | "--request-id" => {
+            | "--policy" | "--level" | "--request-id" | "--provider" | "--since" | "--until"
+            | "--session" | "--around" => {
                 it.next(); // 消费其取值
             }
-            "--robot" | "--no-color" | "--help" | "-h" | "--version" | "-V" => {}
+            "--robot" | "--no-color" | "--help" | "-h" | "--version" | "-V" | "--discover" => {}
             s => return s.to_string(),
         }
     }
@@ -278,7 +283,8 @@ fn intercept_help_or_version(args: &[String]) -> Option<HelpRequest> {
             "--version" | "-V" => prefix_version = true,
             // 带值 flag 跳过其取值，避免把取值误当命令名。
             "--db" | "--output" | "--request-id" | "--cursor" | "--max-items" | "--max-bytes"
-            | "--max-messages" | "--policy" => {
+            | "--max-messages" | "--policy" | "--level" | "--provider" | "--since" | "--until"
+            | "--session" | "--around" => {
                 it.next();
             }
             _ => {}
@@ -541,9 +547,12 @@ USAGE:
 COMMANDS:
     ingest <file>          解析原始 .jsonl 文件并入库（只读源）
     sync <file>...          原子扫描多个 .jsonl 文件；无变化时不生成新 generation
+    sync --discover          自动发现各 provider 数据根下的 .jsonl 源并同步（只读源）
     index <id-fact> <text> 直接写入一条 catalog + 索引（切片期写入入口）
     index rebuild          从权威 catalog 全量重投影 FTS 索引（维护命令）
-    search <query>         全文检索，按相关性降序返回命中（支持分页/预算 flag）
+    search <query>         全文检索，按相关性降序返回命中（支持分页/预算/过滤 flag）
+    get-message <msg-id>   返回命中消息及其同会话主线邻居（--session/--around）
+    get-session-resume <ses-id> 返回只读 Resume Metadata（Provider Session ID / Original Working Directory）
     get <wire-id>          按实体 id 取回原始 payload
     show <wire-id>         按实体 id 取回并归一化展示（role/text 结构）
     list [limit]           稳定排序列出 catalog 实体（默认 20；支持分页/预算 flag）
@@ -559,8 +568,22 @@ PAGINATION / BUDGET (search, list):
     --max-items <n>        页大小上限（同时作为响应条目预算）
     --max-bytes <n>        响应字节预算（最低 4096）
 
+FILTER (search):
+    --provider claude|codex  限定 provider（可重复，多个取值按 OR 合并）
+    --since <time>         起始时间（含）；RFC3339/ISO-8601 绝对值或 1h/1d/1w 相对量
+    --until <time>         结束时间（不含）；语法同 --since
+    --include-system       默认排除 system/developer 角色消息；加此旗标恢复
+    --group-by-session     按会话归并：每会话保留最高分命中并附 occurrences 计数
+
+GET MESSAGE:
+    --session <ses-id>     共享消息的所属会话；有歧义时必须指定
+    --around <n>           主线两侧各返回 n 条邻居（默认 0，仅锚点）
+    --max-items <n>        返回消息条数预算
+    --max-bytes <n>        响应字节预算（最低 4096）
+
 CONTEXT:
     --policy mainline|full 分支策略（默认 mainline：排除 sidechain 沿 parent 链）
+    --level raw|talks|sessions 结构层级（默认 raw：纯消息链；talks 按用户消息分组；sessions 结构概览）
     --max-messages <n>     消息条数预算
     --max-bytes <n>        响应字节预算
 
@@ -652,6 +675,8 @@ fn known_subcommand(cmd: &str) -> bool {
             | "sync"
             | "index"
             | "search"
+            | "get-message"
+            | "get-session-resume"
             | "get"
             | "show"
             | "list"
@@ -672,11 +697,24 @@ fn subcommand_help_text(cmd: &str) -> &'static str {
         "search" => {
             "search <query>：全文检索历史会话，按相关性降序返回命中。\n\
                      示例：agent-session-grep --db <path> search 配置备份\n\
-                     flag（放子命令后）：--max-items <n> 页大小、--cursor <token> 翻页、--max-bytes <n> 预算"
+                     flag（放子命令后）：--max-items <n> 页大小、--cursor <token> 翻页、--max-bytes <n> 预算；\n\
+                     过滤：--provider claude|codex（可重复，OR）、--since/--until <RFC3339 或 1h|1d|1w>（半开区间 [since, until)）；\n\
+                     --include-system（默认排除 system/developer 角色消息）、--group-by-session（按会话归并并附 occurrences）"
+        }
+        "get-message" => {
+            "get-message <msg-id>：返回一个消息及其同会话主线邻居。\n\
+                          示例：agent-session-grep --db <path> get-message msg_v1_... --session ses_v1_... --around 2\n\
+                          flag：--session <ses-id>、--around <n>、--max-items <n>、--max-bytes <n>"
         }
         "get" => {
             "get <wire-id>：按实体 ID 取回原始 payload。\n\
                   示例：agent-session-grep --db <path> get msg_v1_..."
+        }
+        "get-session-resume" => {
+            "get-session-resume <ses-id>：返回一个会话的只读 Resume Metadata。\n\
+                  示例：agent-session-grep --db <path> get-session-resume ses_v1_...\n\
+                  固定字段（缺失为 null）：provider_session_id、original_working_directory；\n\
+                  不会生成/执行任何恢复命令，也不暴露 transcript 路径。"
         }
         "show" => {
             "show <wire-id>：按实体 ID 取回并展示（role/text/时间戳）。\n\
@@ -691,7 +729,7 @@ fn subcommand_help_text(cmd: &str) -> &'static str {
         "context" => {
             "context <ses-id>：装配一个会话的完整上下文（消息链 + 证据区间）。\n\
                       示例：agent-session-grep --db <path> context ses_v1_...\n\
-                      flag：--policy mainline|full、--max-messages <n>、--max-bytes <n>"
+                      flag：--policy mainline|full、--level raw|talks|sessions、--max-messages <n>、--max-bytes <n>"
         }
         "status" => {
             "status：报告当前库的实体总数与 generation。\n\
@@ -699,9 +737,11 @@ fn subcommand_help_text(cmd: &str) -> &'static str {
         }
         "sync" => {
             "sync <file>...：原子扫描一个或多个 .jsonl 文件入库；无变化不写库。\n\
+                   sync --discover：自动发现各 provider 数据根（~/.claude/projects、~/.codex/sessions）下的 .jsonl 源并同步。\n\
                    示例：agent-session-grep --db <path> --robot sync 会话.jsonl\n\
+                   示例：agent-session-grep --db <path> sync --discover\n\
                    约束：单个 transcript 文件应只包含一个会话；检测到多个 sessionId 时仍归属首个会话，并在 warnings 报告。\n\
-                   提示：只接受 .jsonl 文件，不接受目录；需要整个目录时用你的 shell 展开文件列表后逐个传入。"
+                   提示：只接受 .jsonl 文件，不接受目录；--discover 会递归扫描 provider 数据根。"
         }
         "ingest" => {
             "ingest <file>：解析单个 .jsonl 文件入库。\n\
@@ -808,6 +848,13 @@ fn is_known_flag_name(token: &str) -> bool {
             | "--max-bytes"
             | "--max-messages"
             | "--policy"
+            | "--level"
+            | "--provider"
+            | "--since"
+            | "--until"
+            | "--session"
+            | "--around"
+            | "--discover"
     )
 }
 
@@ -845,6 +892,11 @@ fn extract_db_flag_impl(args: &[String], prefix_only: bool) -> Result<Option<Str
                     "--db requires a path (got flag {value}); --db <path> must precede other flags"
                 )));
             }
+            if value.is_empty() {
+                return Err(CliError::usage(
+                    "--db requires a non-empty path (an empty path silently uses SQLite's private temporary database)",
+                ));
+            }
             if db.is_some() {
                 return Err(CliError::usage("duplicate --db flag"));
             }
@@ -852,7 +904,8 @@ fn extract_db_flag_impl(args: &[String], prefix_only: bool) -> Result<Option<Str
         }
         match a.as_str() {
             "--output" | "--request-id" | "--cursor" | "--max-items" | "--max-bytes"
-            | "--max-messages" | "--policy" => {
+            | "--max-messages" | "--policy" | "--level" | "--provider" | "--since" | "--until"
+            | "--session" | "--around" => {
                 it.next();
             }
             _ => {}
@@ -883,7 +936,7 @@ fn parse_db_flag(args: &[String]) -> Result<(String, Vec<String>), CliError> {
             "--db" | "--output" | "--request-id" => {
                 it.next(); // 消费其取值（--db 取值已由 extract_db_flag 校验）
             }
-            "--robot" | "--no-color" | "--help" | "-h" | "--version" | "-V" => {}
+            "--robot" | "--no-color" | "--help" | "-h" | "--version" | "-V" | "--discover" => {}
             other => {
                 seen_command = true;
                 rest.push(other.to_string());
@@ -920,10 +973,11 @@ fn bare_positionals(args: &[String]) -> Vec<String> {
     while let Some(a) = it.next() {
         match a.as_str() {
             "--db" | "--output" | "--request-id" | "--cursor" | "--max-items" | "--max-bytes"
-            | "--max-messages" | "--policy" => {
+            | "--max-messages" | "--policy" | "--level" | "--provider" | "--since" | "--until"
+            | "--session" | "--around" => {
                 it.next(); // 消费其取值
             }
-            "--robot" | "--no-color" | "--help" | "-h" | "--version" | "-V" => {}
+            "--robot" | "--no-color" | "--help" | "-h" | "--version" | "-V" | "--discover" => {}
             s => out.push(s.to_string()),
         }
     }
@@ -1001,13 +1055,27 @@ fn dispatch(
         // sync 对显式列出的多个源执行同一套只读快照 + staging，并在全部成功后
         // 通过一次 durable batch 提交，避免部分 source 已写入、后续 source 失败。
         // jsonl 模式下逐源发 progress frame（contract §4；--robot/Json 禁 progress）。
+        // `--discover` 是 opt-in：遍历各 provider 的数据根自动发现源，不传路径。
         "sync" => {
-            let (data, warnings) = sync_files(
-                store,
-                &rest[1..],
-                mode == protocol::OutputMode::Jsonl,
-                request_id,
-            )?;
+            let mut args = rest.to_vec();
+            let discover = take_bool_flag(&mut args, "--discover");
+            let (data, warnings) = if discover {
+                // --discover 不接受额外参数（路径由发现填充）。未知 flag 也不能
+                // 静默忽略，否则拼写错误会伪装成成功的空发现。
+                if args.len() > 1 {
+                    return Err(CliError::usage(
+                        "sync --discover 不接受路径或额外 flag；路径由 provider 数据根自动发现",
+                    ));
+                }
+                sync_discover(store, mode == protocol::OutputMode::Jsonl, request_id)?
+            } else {
+                sync_files(
+                    store,
+                    &args[1..],
+                    mode == protocol::OutputMode::Jsonl,
+                    request_id,
+                )?
+            };
             Ok((
                 "sync",
                 protocol::Outcome::Success,
@@ -1021,6 +1089,18 @@ fn dispatch(
             let cursor = extract_flag(&mut args, "--cursor")?;
             let max_items = extract_flag(&mut args, "--max-items")?;
             let max_bytes = extract_flag(&mut args, "--max-bytes")?;
+            let providers = extract_repeated_flag(&mut args, "--provider")?;
+            let since = extract_flag(&mut args, "--since")?;
+            let until = extract_flag(&mut args, "--until")?;
+            let include_system = take_bool_flag(&mut args, "--include-system");
+            let group_by_session = take_bool_flag(&mut args, "--group-by-session");
+            let app = App::with_resume(store_ref(store), store_ref(store), store_ref(store));
+            let filters = search_filters_from_flags(
+                &providers,
+                since.as_deref(),
+                until.as_deref(),
+                app.now_ms(),
+            )?;
             let budget = budget_from_flags(max_items.as_deref(), max_bytes.as_deref(), None)?;
             no_extra_args(&args, 1, "search <query>")?;
             // 页大小旋钮即 --max-items；未给时保守默认 20（App 内仍与 budget 取小）。
@@ -1030,22 +1110,63 @@ fn dispatch(
                 20
             };
             let query = arg(&args, 1, "search <query>")?.to_string();
-            let app = App::new(store_ref(store), store_ref(store));
             let response = app.handle(AppRequest::Search {
                 query,
+                filters,
                 limit,
                 cursor,
                 budget,
+                include_system,
+                group_by_session,
+            })?;
+            let (outcome, mut data, page, warnings) = render(response);
+            if mode == protocol::OutputMode::Human {
+                attach_session_resume_rows(store, &mut data)?;
+            }
+            Ok(("search", outcome, data, page, warnings))
+        }
+        "get-message" => {
+            let mut args = rest.to_vec();
+            let session = extract_flag(&mut args, "--session")?;
+            let around_value = extract_flag(&mut args, "--around")?;
+            let around = around_value
+                .as_deref()
+                .map(str::parse::<usize>)
+                .transpose()
+                .map_err(|_| CliError::usage("--around must be a non-negative integer"))?
+                .unwrap_or(0);
+            let max_items = extract_flag(&mut args, "--max-items")?;
+            let max_bytes = extract_flag(&mut args, "--max-bytes")?;
+            let budget = budget_from_flags(max_items.as_deref(), max_bytes.as_deref(), None)?;
+            no_extra_args(&args, 1, "get-message <message-wire-id>")?;
+            let wire = arg(&args, 1, "get-message <message-wire-id>")?;
+            let message_id = StableId::from_wire(wire)
+                .filter(|id| id.kind() == IdKind::Message)
+                .ok_or_else(|| CliError::usage(format!("not a valid message id: {wire}")))?;
+            let session_id = session
+                .as_deref()
+                .map(|wire| {
+                    StableId::from_wire(wire)
+                        .filter(|id| id.kind() == IdKind::Session)
+                        .ok_or_else(|| CliError::usage(format!("not a valid session id: {wire}")))
+                })
+                .transpose()?;
+            let app = App::with_resume(store_ref(store), store_ref(store), store_ref(store));
+            let response = app.handle(AppRequest::Message {
+                message_id,
+                session_id,
+                around,
+                budget,
             })?;
             let (outcome, data, page, warnings) = render(response);
-            Ok(("search", outcome, data, page, warnings))
+            Ok(("get-message", outcome, data, page, warnings))
         }
         "get" => {
             no_extra_args(rest, 1, "get <wire-id>")?;
             let wire = arg(rest, 1, "get <wire-id>")?;
             let id = StableId::from_wire(wire)
                 .ok_or_else(|| CliError::usage(format!("not a valid entity id: {wire}")))?;
-            let app = App::new(store_ref(store), store_ref(store));
+            let app = App::with_resume(store_ref(store), store_ref(store), store_ref(store));
             let response = app.handle(AppRequest::Get { id: id.clone() })?;
             // 未找到实体：按 error catalog 映射 exit 4，而非当成功渲染 "not found"
             // （10 角色体验测试缺陷：show/get 不存在 ID 返回 exit 0，脚本无法区分）。
@@ -1064,7 +1185,7 @@ fn dispatch(
             let wire = arg(rest, 1, "show <wire-id>")?;
             let id = StableId::from_wire(wire)
                 .ok_or_else(|| CliError::usage(format!("not a valid entity id: {wire}")))?;
-            let app = App::new(store_ref(store), store_ref(store));
+            let app = App::with_resume(store_ref(store), store_ref(store), store_ref(store));
             let response = app.handle(AppRequest::Show { id: id.clone() })?;
             if matches!(&response, AppResponse::Show { payload: None }) {
                 return Err(CliError(ProtocolError::new(
@@ -1074,6 +1195,20 @@ fn dispatch(
             }
             let (outcome, data, page, warnings) = render(response);
             Ok(("show", outcome, data, page, warnings))
+        }
+        "get-session-resume" => {
+            // 只读 Resume Metadata（ADR-0009）：只返回结构化字段，绝不构造/执行
+            // shell 命令、绝不返回 transcript/source path。
+            no_extra_args(rest, 1, "get-session-resume <session-id>")?;
+            let wire = arg(rest, 1, "get-session-resume <session-id>")?;
+            let id = StableId::from_wire(wire)
+                .ok_or_else(|| CliError::usage(format!("not a valid entity id: {wire}")))?;
+            let app = App::with_resume(store_ref(store), store_ref(store), store_ref(store));
+            let response = app.handle(AppRequest::GetSessionResume {
+                session_id: id.clone(),
+            })?;
+            let (outcome, data, page, warnings) = render(response);
+            Ok(("get-session-resume", outcome, data, page, warnings))
         }
         "list" => {
             let mut args = rest.to_vec();
@@ -1092,11 +1227,12 @@ fn dispatch(
                 } else {
                     20
                 });
-            let app = App::new(store_ref(store), store_ref(store));
+            let app = App::with_resume(store_ref(store), store_ref(store), store_ref(store));
             let response = app.handle(AppRequest::List {
                 limit,
                 cursor,
                 budget,
+                sessions_only: false,
             })?;
             let (outcome, data, page, warnings) = render(response);
             Ok(("list", outcome, data, page, warnings))
@@ -1115,15 +1251,27 @@ fn dispatch(
             };
             let max_messages = extract_flag(&mut args, "--max-messages")?;
             let max_bytes = extract_flag(&mut args, "--max-bytes")?;
+            let level = match extract_flag(&mut args, "--level")?.as_deref() {
+                None | Some("raw") => ContextLevel::Raw,
+                Some("talks") => ContextLevel::Talks,
+                Some("sessions") => ContextLevel::Sessions,
+                Some(other) => {
+                    return Err(CliError::usage(format!(
+                        "--level must be raw|talks|sessions, got {other}"
+                    )));
+                }
+            };
             let budget = budget_from_flags(None, max_bytes.as_deref(), max_messages.as_deref())?;
             no_extra_args(&args, 1, "context <session-wire-id>")?;
             let wire = arg(&args, 1, "context <session-wire-id>")?;
             let session_id = StableId::from_wire(wire)
-                .ok_or_else(|| CliError::usage(format!("not a valid entity id: {wire}")))?;
-            let app = App::new(store_ref(store), store_ref(store));
+                .filter(|id| id.kind() == IdKind::Session)
+                .ok_or_else(|| CliError::usage(format!("not a valid session id: {wire}")))?;
+            let app = App::with_resume(store_ref(store), store_ref(store), store_ref(store));
             let response = app.handle(AppRequest::Context {
                 session_id,
                 policy,
+                level,
                 budget,
             })?;
             let (outcome, data, page, warnings) = render(response);
@@ -1131,15 +1279,27 @@ fn dispatch(
         }
         "status" => {
             no_extra_args(rest, 0, "status")?;
-            let app = App::new(store_ref(store), store_ref(store));
+            let app = App::with_resume(store_ref(store), store_ref(store), store_ref(store));
             let response = app.handle(AppRequest::Status)?;
             let (outcome, data, page, warnings) = render(response);
             Ok(("status", outcome, data, page, warnings))
         }
         other => {
             let commands = [
-                "ingest", "sync", "index", "search", "get", "show", "list", "context", "status",
-                "mcp", "tui", "doctor", "config",
+                "ingest",
+                "sync",
+                "index",
+                "search",
+                "get-message",
+                "get",
+                "show",
+                "list",
+                "context",
+                "status",
+                "mcp",
+                "tui",
+                "doctor",
+                "config",
             ];
             Err(CliError::usage(format!(
                 "unknown subcommand: {other}（可用命令：{}；运行 --help 查看完整用法）",
@@ -1160,6 +1320,78 @@ fn extract_flag(args: &mut Vec<String>, name: &str) -> Result<Option<String>, Cl
     let value = args.remove(i + 1);
     args.remove(i);
     Ok(Some(value))
+}
+
+/// 可重复带值 flag 的收集变体（`--provider`）：按出现顺序取走全部取值；
+/// 在场缺值是用法错误，重复出现是合法累积（provider 维度按 OR 语义）。
+fn extract_repeated_flag(args: &mut Vec<String>, name: &str) -> Result<Vec<String>, CliError> {
+    let mut values = Vec::new();
+    while let Some(i) = args.iter().position(|a| a == name) {
+        if i + 1 >= args.len() {
+            return Err(CliError::usage(format!("{name} requires a value")));
+        }
+        values.push(args.remove(i + 1));
+        args.remove(i);
+    }
+    Ok(values)
+}
+
+/// 布尔 flag 提取（`--include-system`/`--group-by-session`）：在场移除该 token
+/// 并返回 true，缺场返回 false。不消费取值；重复出现视为在场一次。
+fn take_bool_flag(args: &mut Vec<String>, name: &str) -> bool {
+    if let Some(i) = args.iter().position(|a| a == name) {
+        args.remove(i);
+        true
+    } else {
+        false
+    }
+}
+
+/// CLI 检索过滤参数归一化：provider 别名 → 规范 id；时间值接受 RFC3339/ISO-8601
+/// 绝对时间或 `1h|1d|1w` 紧凑相对量（相对量以注入的 application 时钟 `now_ms`
+/// 为基准，全程同一时钟源）。取值非法是用法错误（exit 2）。
+fn search_filters_from_flags(
+    providers: &[String],
+    since: Option<&str>,
+    until: Option<&str>,
+    now_ms: i64,
+) -> Result<SearchFilters, CliError> {
+    let mut filters = SearchFilters::default();
+    for provider in providers {
+        filters.providers.push(match provider.as_str() {
+            "claude" => SearchProvider::Claude,
+            "codex" => SearchProvider::Codex,
+            other => {
+                return Err(CliError::usage(format!(
+                    "unknown provider: {other} (expected claude|codex)"
+                )));
+            }
+        });
+    }
+    filters.since = parse_time_flag("--since", since, now_ms)?;
+    filters.until = parse_time_flag("--until", until, now_ms)?;
+    Ok(filters)
+}
+
+/// 解析单个时间 flag：先按绝对 RFC3339/ISO-8601，失败再按紧凑相对量；两者都
+/// 不成立即用法错误（错误信息不含原始值回显以外的后端细节）。
+fn parse_time_flag(
+    name: &str,
+    value: Option<&str>,
+    now_ms: i64,
+) -> Result<Option<agent_session_grep_ports::SearchInstant>, CliError> {
+    let Some(raw) = value else {
+        return Ok(None);
+    };
+    if let Some(instant) = parse_search_instant(raw) {
+        return Ok(Some(instant));
+    }
+    if let Some(instant) = parse_relative_search_instant(raw, now_ms) {
+        return Ok(Some(instant));
+    }
+    Err(CliError::usage(format!(
+        "{name} must be an RFC3339/ISO-8601 timestamp or a compact duration (1h|1d|1w), got {raw:?}"
+    )))
 }
 
 /// 用 flag 覆盖默认预算；数值解析失败是用法错误，下限校验由 App 层统一执行。
@@ -1216,6 +1448,61 @@ fn store_ref(store: &SqliteStore) -> &SqliteStore {
     store
 }
 
+/// Human search 的会话表格行按 canonical Session 去重后批量解析 Resume
+/// Metadata。此投影只在 Human 模式附加，Robot/MCP 协议形状不受影响。
+///
+/// 日期取该 Session 最近活动 timestamp 的 `YYYY-MM-DD`（批量一次查询，无 N+1）；
+/// 标题取当前页中该 Session 的最高相关度命中 `text`——标题跟随搜索排序，
+/// 与“相关度优先”不变量一致。两者缺失渲染为 `—`。
+fn attach_session_resume_rows(
+    store: &SqliteStore,
+    data: &mut serde_json::Value,
+) -> Result<(), CliError> {
+    let Some(hits) = data.get("hits").and_then(serde_json::Value::as_array) else {
+        return Ok(());
+    };
+    let mut seen = BTreeSet::new();
+    let session_ids: Vec<StableId> = hits
+        .iter()
+        .filter_map(|hit| hit.get("session_id").and_then(serde_json::Value::as_str))
+        .filter(|wire| seen.insert((*wire).to_string()))
+        .filter_map(StableId::from_wire)
+        .filter(|id| id.kind() == IdKind::Session)
+        .collect();
+    let metadata = store.resume_of(&session_ids).map_err(ProtocolError::from)?;
+    let latest_ymd = store
+        .latest_activity_ymd_for_sessions(&session_ids)
+        .map_err(ProtocolError::from)?;
+    let rows: Vec<serde_json::Value> = metadata
+        .iter()
+        .map(|metadata| {
+            let session_wire = metadata.session_id.as_str();
+            let date = latest_ymd.get(session_wire).cloned();
+            let title = hits
+                .iter()
+                .filter_map(|hit| {
+                    let hit_session = hit.get("session_id").and_then(serde_json::Value::as_str)?;
+                    (hit_session == session_wire)
+                        .then_some(())
+                        .and_then(|_| hit.get("text").and_then(serde_json::Value::as_str))
+                })
+                .next()
+                .map(|text| text.to_string());
+            serde_json::json!({
+                "date": date,
+                "provider": metadata.provider_id,
+                "title": title,
+                "working_directory": metadata.original_working_directory,
+                "session_id": metadata.provider_session_id,
+            })
+        })
+        .collect();
+    if let Some(object) = data.as_object_mut() {
+        object.insert("session_resume_rows".into(), serde_json::Value::Array(rows));
+    }
+    Ok(())
+}
+
 /// 组合根持有的 provider adapter 清单。ingest/sync 用它 probe-select，
 /// 由 [`select_and_stage`] 挑出认领此源的 adapter（见 RFC-0002 §3）。
 /// 新增 provider 只需在此登记一行。
@@ -1245,6 +1532,7 @@ fn stage_with_registry(bytes: &[u8]) -> Result<(StagedBatch, String), CliError> 
                     skipped: 0,
                     diagnostics: Vec::new(),
                     session_native_id: None,
+                    session_observation: ProviderSessionObservation::default(),
                 },
                 session_native_id: None,
             },
@@ -1298,6 +1586,285 @@ struct StagedMessageEntity {
 ///
 /// `ParseReport.skipped > 0` 会使 source relation-incomplete；observed facts 可提交，
 /// 但存储层不会推导 tombstone，且会撤销旧 completeness marker。
+///
+/// 从源路径推导该 provider 安装的 namespace：优先使用路径上最后一个 provider
+/// 数据根（`.claude` / `.codex`）的完整路径，使同一安装下的 transcript
+/// 共享 namespace、不同安装分离。手动 ingest 的 Source 若不在已知数据根下，
+/// 以其共同父目录作为未知安装边界，避免同一 Session 分散在多个文件时被拆开。
+fn installation_namespace(path: &str, provider_id: &str) -> String {
+    let marker = match provider_id {
+        "claude-code" => ".claude",
+        "codex" => ".codex",
+        _ => "",
+    };
+    let segments: Vec<&str> = path.split(['/', '\\']).filter(|s| !s.is_empty()).collect();
+    if !marker.is_empty()
+        && let Some(index) = segments.iter().rposition(|s| *s == marker)
+    {
+        return format!("{provider_id}:{}", segments[..=index].join("/"));
+    }
+    let parent = match segments.split_last() {
+        Some((_, parent)) if !parent.is_empty() => parent.join("/"),
+        _ => ".".to_string(),
+    };
+    format!("{provider_id}:{parent}")
+}
+
+/// 解析当前用户 home 目录下某 provider 的规范化 transcript 数据根。
+///
+/// 与 [`installation_namespace`] 复用同一组 marker 常量（`.claude` / `.codex`）。
+/// home 目录优先取 `HOME`（Unix），回退 `USERPROFILE`（Windows）；两者都缺失返回
+/// `None`，调用方应跳过该 provider 的发现（R4：不猜路径）。
+///
+/// - `claude-code` → `~/.claude/projects`
+/// - `codex` → `~/.codex/sessions`
+/// - 未知 provider → `None`
+fn provider_data_root(provider_id: &str) -> Option<std::path::PathBuf> {
+    let sub = match provider_id {
+        "claude-code" => ".claude/projects",
+        "codex" => ".codex/sessions",
+        _ => return None,
+    };
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(std::path::PathBuf::from)?;
+    Some(home.join(sub))
+}
+
+/// 递归遍历 `root`，收集所有 `.jsonl` 文件路径（正斜杠归一）。
+///
+/// 返回 `(paths, complete)`：`complete = false` 表示遍历中途遇到不可读目录
+/// （权限错误等），此时返回已收集到的路径并标记不完整——调用方据此对受影响
+/// provider 的源设置 `relation_complete = false`，从而不推导 tombstone（R2）。
+///
+/// 不跟随符号链接（避免循环 / 越出数据根）；不读取文件内容，只枚举路径。
+fn discover_provider_sources(root: &std::path::Path) -> (Vec<String>, bool) {
+    let mut paths = Vec::new();
+    let mut complete = true;
+    let root_type = match std::fs::symlink_metadata(root) {
+        Ok(metadata) => metadata.file_type(),
+        Err(_) => return (paths, false),
+    };
+    if root_type.is_symlink() || !root_type.is_dir() {
+        return (paths, false);
+    }
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(_) => {
+                complete = false;
+                continue;
+            }
+        };
+        for entry_result in entries {
+            let entry = match entry_result {
+                Ok(entry) => entry,
+                Err(_) => {
+                    complete = false;
+                    continue;
+                }
+            };
+            let file_type = match entry.file_type() {
+                Ok(ft) => ft,
+                Err(_) => {
+                    complete = false;
+                    continue;
+                }
+            };
+            let path = entry.path();
+            // 不跟随符号链接：file_type() 对 symlink 返回 symlink 类型而非目标。
+            if file_type.is_symlink() {
+                continue;
+            }
+            if file_type.is_dir() {
+                stack.push(path);
+            } else if file_type.is_file()
+                && path.extension().and_then(|e| e.to_str()) == Some("jsonl")
+            {
+                paths.push(path.to_string_lossy().replace('\\', "/"));
+            }
+        }
+    }
+    paths.sort();
+    (paths, complete)
+}
+
+/// `sync --discover` 的 per-provider 发现结果。
+struct ProviderDiscovery {
+    id: String,
+    found: usize,
+    removed: usize,
+    complete: bool,
+}
+
+/// 执行 `sync --discover`：遍历所有已知 provider 的数据根，收集 `.jsonl` 源，
+/// diff 已存路径合成空批 tombstone（仅完整扫描时），并把发现的路径与合成批
+/// 一起交给 [`sync_files`] 的核心流程。
+///
+/// 隐私：结果只报计数与 provider id，绝不包含绝对 transcript 路径。
+fn sync_discover(
+    store: &SqliteStore,
+    progress: bool,
+    request_id: Option<&str>,
+) -> Result<(serde_json::Value, Vec<String>), CliError> {
+    let mut all_paths: Vec<String> = Vec::new();
+    let mut providers_out: Vec<ProviderDiscovery> = Vec::new();
+    let mut discovered_provider_ids: BTreeMap<String, String> = BTreeMap::new();
+    let mut overall_complete = true;
+    // 每个 provider 的 (provider_id, discovered_paths, complete)
+    let mut per_provider: Vec<(String, Vec<String>, bool)> = Vec::new();
+    for adapter in provider_registry() {
+        let pid = adapter.provider_id().to_string();
+        let Some(root) = provider_data_root(&pid) else {
+            // 无法解析当前用户 home：该 provider 的根扫描不完整，不能 tombstone。
+            overall_complete = false;
+            per_provider.push((pid.clone(), Vec::new(), false));
+            providers_out.push(ProviderDiscovery {
+                id: pid,
+                found: 0,
+                removed: 0,
+                complete: false,
+            });
+            continue;
+        };
+        if !root.is_dir() {
+            // 根目录不存在时无法确认 provider 源是否只是暂时不可见；保守标记
+            // partial，绝不因为缺少根目录而 tombstone prior paths。
+            overall_complete = false;
+            per_provider.push((pid.clone(), Vec::new(), false));
+            providers_out.push(ProviderDiscovery {
+                id: pid,
+                found: 0,
+                removed: 0,
+                complete: false,
+            });
+            continue;
+        }
+        let (paths, complete) = discover_provider_sources(&root);
+        overall_complete = overall_complete && complete;
+        per_provider.push((pid.clone(), paths.clone(), complete));
+        let found = paths.len();
+        for path in &paths {
+            discovered_provider_ids.insert(path.clone(), pid.clone());
+        }
+        all_paths.extend(paths.iter().cloned());
+        providers_out.push(ProviderDiscovery {
+            id: pid,
+            found,
+            removed: 0, // diff 后回填
+            complete,
+        });
+    }
+    // dedup all_paths preserving order
+    let mut unique: Vec<String> = Vec::with_capacity(all_paths.len());
+    for p in &all_paths {
+        if !unique.iter().any(|e| e == p) {
+            unique.push(p.clone());
+        }
+    }
+    let incomplete_providers: BTreeSet<String> = per_provider
+        .iter()
+        .filter(|(_, _, complete)| !complete)
+        .map(|(pid, _, _)| pid.clone())
+        .collect();
+    let incomplete_paths: BTreeSet<String> = per_provider
+        .iter()
+        .filter(|(_, _, complete)| !complete)
+        .flat_map(|(_, paths, _)| paths.iter().cloned())
+        .collect();
+    let relation_recovery_paths = store
+        .source_paths_requiring_relation_scan(&unique)
+        .map_err(ProtocolError::from)?;
+    // Prior-path diff per provider：仅完整扫描时合成空批 tombstone。
+    let mut synthetic_batches: Vec<SourceBatch> = Vec::new();
+    for (i, (pid, paths, complete)) in per_provider.iter().enumerate() {
+        if !complete {
+            continue;
+        }
+        let prior = store
+            .source_paths_for_provider(pid.as_str())
+            .map_err(ProtocolError::from)?;
+        let discovered_for_provider: BTreeSet<&str> = paths.iter().map(String::as_str).collect();
+        let mut removed = 0usize;
+        for prior_path in &prior {
+            if !discovered_for_provider.contains(prior_path.as_str()) {
+                // 源曾在该 provider 下被 sync，本次完整扫描未出现在磁盘上 → 合成空批。
+                synthetic_batches.push(SourceBatch {
+                    source_path: prior_path.clone(),
+                    entries: Vec::new(),
+                    placements: Vec::new(),
+                    edges: Vec::new(),
+                    relation_complete: true,
+                    len_bytes: Some(0),
+                    fingerprint: Some(String::new()),
+                    provider_id: Some(pid.clone()),
+                    resume_claim: None,
+                });
+                removed += 1;
+            }
+        }
+        providers_out[i].removed = removed;
+    }
+    // 把发现的路径交给 sync_files 核心（绕过目录拒绝 guard）。
+    // 若既无发现的源也无被删除的源（例如本机未安装任何 provider），返回一个
+    // 不推进 generation 的空成功，而非 usage error——discover 空跑是合法状态。
+    let (sync_data, warnings) = if unique.is_empty() && synthetic_batches.is_empty() {
+        let generation = store.active_generation().map_err(ProtocolError::from)?;
+        (
+            serde_json::json!({
+                "sources": 0,
+                "emitted": 0,
+                "messages": 0,
+                "committed": 0,
+                "unchanged": 0,
+                "skipped": 0,
+                "diagnostics": 0,
+                "generation": generation,
+            }),
+            Vec::new(),
+        )
+    } else {
+        sync_files_inner(
+            store,
+            &unique,
+            &SyncContext {
+                synthetic_batches,
+                incomplete_providers,
+                relation_recovery_paths,
+                incomplete_paths,
+                discovered_provider_ids,
+            },
+            true,
+            progress,
+            request_id,
+        )?
+    };
+    // 组装 discovery 结果对象（绝不含绝对路径）。
+    let providers_json: Vec<serde_json::Value> = providers_out
+        .iter()
+        .map(|p| {
+            serde_json::json!({
+                "id": p.id,
+                "found": p.found,
+                "removed": p.removed,
+                "complete": p.complete,
+            })
+        })
+        .collect();
+    let mut data = sync_data;
+    if let Some(obj) = data.as_object_mut() {
+        obj.insert(
+            "discovery".into(),
+            serde_json::json!({
+                "complete": overall_complete,
+                "providers": providers_json,
+            }),
+        );
+    }
+    Ok((data, warnings))
+}
+
 fn staged_to_source(
     path: &str,
     staged: &StagedBatch,
@@ -1305,6 +1872,26 @@ fn staged_to_source(
     variant: &str,
     fingerprint: &str,
     source_len: u64,
+) -> Result<SourceBatch, CliError> {
+    staged_to_source_with_provider(
+        path,
+        staged,
+        provider_id,
+        variant,
+        fingerprint,
+        source_len,
+        None,
+    )
+}
+
+fn staged_to_source_with_provider(
+    path: &str,
+    staged: &StagedBatch,
+    provider_id: &str,
+    variant: &str,
+    fingerprint: &str,
+    source_len: u64,
+    discovered_provider_id: Option<&str>,
 ) -> Result<SourceBatch, CliError> {
     if staged.report.committed != staged.messages.len() {
         return Err(DomainError::InvariantViolation(format!(
@@ -1326,8 +1913,18 @@ fn staged_to_source(
         ],
     );
     // 会话实体：native id 优先；缺失回退 document 派生（一文档一会话，见 design §9）。
+    // Native 路径必须走 namespaced 构造函数（identity 前置）：canonical 身份 =
+    // digest(provider, installation, native id)，同 native id 跨 provider/安装
+    // 绝不碰撞；wire 仍为 `ses_v1_` + digest，native id 单独经 Resume claim 持久化。
+    let install_ns = installation_namespace(path, provider_id);
     let session_id = match staged.report.session_native_id.as_deref() {
-        Some(sid) if !sid.trim().is_empty() => StableId::native(IdKind::Session, sid),
+        Some(sid) if !sid.trim().is_empty() => StableId::native_session_scoped(
+            &SessionIdentityNamespace {
+                provider_id,
+                installation_namespace: &install_ns,
+            },
+            sid,
+        ),
         _ => StableId::derive(
             IdKind::Session,
             Stability::Reconstructed,
@@ -1503,6 +2100,18 @@ fn staged_to_source(
         "len": source_len,
     })
     .to_string();
+    // Source-scoped Resume Metadata 声明（ADR-0009）：把 provider 观察归一为
+    // claim，随本批 source 事务原子写入；缺失/歧义已折叠进 state。
+    let resume_claim = if provider_id == "empty" {
+        None
+    } else {
+        Some(SourceResumeClaim::from_observation(
+            provider_id,
+            session_id.as_str(),
+            &staged.report.session_observation,
+        ))
+    };
+
     entries.push((session_id, session_payload.into_bytes(), String::new()));
     entries.push((document_id, document_payload.into_bytes(), String::new()));
 
@@ -1514,6 +2123,8 @@ fn staged_to_source(
         relation_complete: staged.report.skipped == 0,
         len_bytes: Some(source_len as i64),
         fingerprint: Some(fingerprint.to_string()),
+        provider_id: discovered_provider_id.map(str::to_string),
+        resume_claim,
     })
 }
 
@@ -1591,6 +2202,7 @@ fn sync_files(
     // 报"拒绝访问 (os error 5)"，误导新手去折腾权限/杀毒（10 角色体验测试缺陷）。
     // 这里显式拦截并给出正确用法。消息不带路径（隐私：用户目录布局不外泄），
     // 展开示例保持平台中立（不给 PowerShell-only 的 Get-ChildItem 例子，R2.2）。
+    // discover 路径不走此 guard——它已经枚举了文件而非目录。
     for path in paths {
         if std::path::Path::new(path).is_dir() {
             return Err(CliError::usage(
@@ -1608,8 +2220,53 @@ fn sync_files(
             unique.push(path.clone());
         }
     }
-    let paths = &unique;
-    let mut sources = Vec::with_capacity(paths.len());
+    sync_files_inner(
+        store,
+        &unique,
+        &SyncContext::default(),
+        false,
+        progress,
+        request_id,
+    )
+}
+
+/// `sync_files_inner` 的 discover 扩展上下文：plain sync 全部为空，`sync --discover`
+/// 注入合成空批、完整性降级集合与 path→provider 归属表。
+#[derive(Default)]
+struct SyncContext {
+    /// discover 为已删除源合成的空批（`relation_complete = true`），不经过
+    /// capture（文件已不在磁盘上），直接追加进提交批次以触发 tombstone。
+    synthetic_batches: Vec<SourceBatch>,
+    /// 部分 root scan 的 provider：其批次 relation_complete 降级为 false。
+    incomplete_providers: BTreeSet<String>,
+    /// 强制重扫之前关系不完整的源（无视指纹缓存）。
+    relation_recovery_paths: BTreeSet<String>,
+    /// 之前扫描 skipped>0 的源路径（同样绕过指纹跳过）。
+    incomplete_paths: BTreeSet<String>,
+    /// discover 归属表：源路径 → provider id；落入 `source_scans.provider_id`。
+    discovered_provider_ids: BTreeMap<String, String>,
+}
+
+/// `sync_files` / `sync_discover` 共享的核心流程。
+///
+/// `paths` 应已去重且不含目录（调用方负责）。
+fn sync_files_inner(
+    store: &SqliteStore,
+    paths: &[String],
+    ctx: &SyncContext,
+    allow_empty: bool,
+    progress: bool,
+    request_id: Option<&str>,
+) -> Result<(serde_json::Value, Vec<String>), CliError> {
+    let synthetic_batches = &ctx.synthetic_batches;
+    let incomplete_providers = &ctx.incomplete_providers;
+    let relation_recovery_paths = &ctx.relation_recovery_paths;
+    let incomplete_paths = &ctx.incomplete_paths;
+    let discovered_provider_ids = &ctx.discovered_provider_ids;
+    if paths.is_empty() && synthetic_batches.is_empty() && !allow_empty {
+        return Err(CliError::usage("sync <file>... requires at least one file"));
+    }
+    let mut sources = Vec::with_capacity(paths.len() + synthetic_batches.len());
     let mut snapshots = Vec::with_capacity(paths.len());
     let mut message_count = 0usize;
     let mut skipped_count = 0usize;
@@ -1631,16 +2288,19 @@ fn sync_files(
         let cached_fp = cached.get(path).and_then(|(_, fp)| fp.clone());
         // 空文件（0 字节）不能走指纹跳过：它必须作为"整源清空"批次提交
         // 以 tombstone 旧消息；跳过会退化成空批 no-op，丢失 tombstone 语义。
-        let (staged, variant) =
-            if !bytes.is_empty() && cached_fp.as_deref() == Some(snap.fingerprint.as_str()) {
-                // 字节未变：跳过 parse。store 层仍会做 no-op 判定（entries 为空时
-                // 会走 membership/scan 对比），因此这里只需空 staged 占位。
-                unchanged_messages += unchanged_counts.get(path).copied().unwrap_or(0);
-                (None, None)
-            } else {
-                let (staged, variant) = stage_with_registry(&bytes)?;
-                (Some(staged), Some(variant))
-            };
+        let (staged, variant) = if !bytes.is_empty()
+            && cached_fp.as_deref() == Some(snap.fingerprint.as_str())
+            && !relation_recovery_paths.contains(path)
+            && !incomplete_paths.contains(path)
+        {
+            // 字节未变：跳过 parse。store 层仍会做 no-op 判定（entries 为空时
+            // 会走 membership/scan 对比），因此这里只需空 staged 占位。
+            unchanged_messages += unchanged_counts.get(path).copied().unwrap_or(0);
+            (None, None)
+        } else {
+            let (staged, variant) = stage_with_registry(&bytes)?;
+            (Some(staged), Some(variant))
+        };
         if progress {
             // 措辞如实区分两种路径：指纹命中只是 checked（未 parse），
             // 走完整解析的才是 scanned——不得把缓存命中的源谎报为 "staged (0 messages)"。
@@ -1661,14 +2321,19 @@ fn sync_files(
             diagnostic_count += staged.report.diagnostics.len();
             diagnostics.extend(staged.report.diagnostics.iter().cloned());
             let provider = variant.split('/').next().unwrap_or(variant).to_string();
-            sources.push(staged_to_source(
+            let mut source = staged_to_source_with_provider(
                 path,
                 staged,
                 &provider,
                 variant,
                 &snap.fingerprint,
                 snap.len,
-            )?);
+                discovered_provider_ids.get(path).map(String::as_str),
+            )?;
+            if incomplete_providers.contains(&provider) {
+                source.relation_complete = false;
+            }
+            sources.push(source);
         }
         snapshots.push((path_ref.to_path_buf(), snap));
     }
@@ -1676,6 +2341,9 @@ fn sync_files(
     for (path, snapshot) in &snapshots {
         verify_snapshot(path, snapshot).map_err(ProtocolError::from)?;
     }
+
+    // discover 合成的空批（已删除源的 tombstone）追加进提交批次。
+    sources.extend(synthetic_batches.iter().cloned());
 
     let changed = store
         .commit_source_batches_if_changed(&sources)
@@ -1685,9 +2353,10 @@ fn sync_files(
     // 计入 unchanged（与 emitted 同单位：消息数）。
     let committed = if changed { message_count } else { 0 };
     let warnings = diagnostic_warnings(diagnostics.iter().map(String::as_str), diagnostic_count);
+    let source_count = paths.len() + synthetic_batches.len();
     Ok((
         serde_json::json!({
-            "sources": paths.len(),
+            "sources": source_count,
             "emitted": message_count,
             "messages": message_count,
             "committed": committed,
@@ -1726,16 +2395,35 @@ fn render(
             let data = serde_json::json!({
                 "hits": hits
                     .into_iter()
-                    .map(|hit| serde_json::json!({
-                        "id": hit.id.as_str(),
-                        "score": hit.score,
-                        // R4（ADR-0008）：命中携带所属会话 wire id 与正文摘要
-                        // （追加字段，schema minor：不删除任何既有字段）。
-                        // `text` 字节已计入 Application 的 clamp_items 预算
-                        // （R4.2）；人类渲染器把同一摘要打印为 snippet 行。
-                        "session_id": hit.session_id,
-                        "text": hit.text,
-                    }))
+                    .map(|hit| {
+                        // search-match-guidance：guidance 为追加字段——空集合时
+                        // 整个键省略，与既有机器人输出字节兼容。
+                        let mut json = serde_json::json!({
+                            "id": hit.id.as_str(),
+                            "score": hit.score,
+                            // R4（ADR-0008）：命中携带所属会话 wire id 与正文摘要
+                            // （追加字段，schema minor：不删除任何既有字段）。
+                            // `text` 字节已计入 Application 的 clamp_items 预算
+                            // （R4.2）；人类渲染器把同一摘要打印为 snippet 行。
+                            "session_id": hit.session_id,
+                            "text": hit.text,
+                        });
+                        if !hit.why_matched.is_empty() {
+                            json["why_matched"] = serde_json::json!(hit.why_matched);
+                        }
+                        if !hit.suggested_next_commands.is_empty() {
+                            json["suggested_next_commands"] =
+                                serde_json::json!(hit.suggested_next_commands);
+                        }
+                        // R3 occurrences：非归并命中恒为 1，与 guidance 一致采用
+                        // "等于默认值即省略"的追加字段约定，保持既有输出字节兼容。
+                        if hit.occurrences > 1 {
+                            json["occurrences"] = serde_json::json!(hit.occurrences);
+                        }
+                        // resume_available（ADR-0009）：恒序列化，schema 1.1 声明。
+                        json["resume_available"] = serde_json::json!(hit.resume_available);
+                        json
+                    })
                     .collect::<Vec<_>>(),
                 "generation": generation,
                 "truncation": truncation_json(&truncation),
@@ -1746,6 +2434,21 @@ fn render(
             protocol::Outcome::Success,
             serde_json::json!({
                 "payload": payload.map(|bytes| String::from_utf8_lossy(&bytes).into_owned()),
+            }),
+            protocol::Page::default(),
+            Vec::new(),
+        ),
+        // Resume Metadata（ADR-0009）：固定可空字段恒在；缺失统一 null，
+        // 绝不回显 transcript/source path。
+        AppResponse::SessionResume(metadata) => (
+            protocol::Outcome::Success,
+            serde_json::json!({
+                "session_id": metadata.session_id.as_str(),
+                "provider_id": metadata.provider_id,
+                "resume_available": metadata.resume_available,
+                "provider_session_id": metadata.provider_session_id,
+                "original_working_directory": metadata.original_working_directory,
+                "unavailable_reason": metadata.unavailable_reason,
             }),
             protocol::Page::default(),
             Vec::new(),
@@ -1800,6 +2503,11 @@ fn render(
             branch_leaf_placement_id,
             messages,
             evidence,
+            requested_level,
+            effective_level,
+            talks,
+            summary,
+            hint,
             truncation,
             generation,
         } => {
@@ -1834,10 +2542,35 @@ fn render(
                     }))
                     .collect::<Vec<_>>(),
                 "evidence": evidence,
+                "requested_level": requested_level,
+                "effective_level": effective_level,
+                "talks": talks,
+                "summary": summary,
+                "hint": hint,
                 "truncation": truncation_json(&truncation),
                 "generation": generation,
             });
             (outcome, data, protocol::Page::default(), warnings)
+        }
+        AppResponse::Message { window } => {
+            let outcome = outcome_of(&window.truncation);
+            let data = serde_json::json!({
+                "message_id": window.message_id,
+                "session_id": window.session_id,
+                "anchor_placement_id": window.anchor_placement_id,
+                "messages": window.messages
+                    .into_iter()
+                    .map(|message| serde_json::json!({
+                        "id": message.id,
+                        "placement_id": message.placement_id,
+                        "message_id": message.message_id,
+                        "payload": message.payload,
+                    }))
+                    .collect::<Vec<_>>(),
+                "truncation": truncation_json(&window.truncation),
+                "generation": window.generation,
+            });
+            (outcome, data, protocol::Page::default(), Vec::new())
         }
         AppResponse::MessageContexts {
             message_id,
@@ -1924,6 +2657,7 @@ mod tests {
                     vec!["synthetic skipped record".into()]
                 },
                 session_native_id: Some(session_native_id.into()),
+                session_observation: ProviderSessionObservation::default(),
             },
             messages,
         }
@@ -1943,7 +2677,68 @@ mod tests {
     }
 
     #[test]
-    fn fallback_message_and_placement_ids_are_path_independent() {
+    fn provider_data_root_rejects_unknown_provider() {
+        assert!(provider_data_root("unknown-provider").is_none());
+    }
+
+    #[test]
+    fn discover_provider_sources_collects_jsonl_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("one.jsonl"), b"fixture").unwrap();
+        std::fs::write(nested.join("two.txt"), b"not a source").unwrap();
+        let (paths, complete) = discover_provider_sources(dir.path());
+        assert!(complete);
+        assert_eq!(paths.len(), 1);
+        assert!(paths[0].ends_with("nested/one.jsonl"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discover_provider_sources_does_not_follow_symlink_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let real_root = dir.path().join("real-root");
+        std::fs::create_dir(&real_root).unwrap();
+        std::fs::write(real_root.join("hidden.jsonl"), b"fixture").unwrap();
+        let linked_root = dir.path().join("linked-root");
+        std::os::unix::fs::symlink(&real_root, &linked_root).unwrap();
+
+        let (paths, complete) = discover_provider_sources(&linked_root);
+        assert!(paths.is_empty());
+        assert!(!complete);
+    }
+
+    #[test]
+    fn installation_namespace_groups_sources_by_provider_root() {
+        assert_eq!(
+            installation_namespace("C:/profiles/one/.claude/projects/a.jsonl", "claude-code"),
+            installation_namespace("C:/profiles/one/.claude/projects/b.jsonl", "claude-code")
+        );
+        assert_ne!(
+            installation_namespace("C:/profiles/one/.claude/projects/a.jsonl", "claude-code"),
+            installation_namespace("D:/profiles/two/.claude/projects/a.jsonl", "claude-code")
+        );
+        assert_ne!(
+            installation_namespace("C:/profiles/one/.claude/projects/a.jsonl", "claude-code"),
+            installation_namespace("C:/profiles/one/.codex/sessions/a.jsonl", "codex")
+        );
+    }
+
+    #[test]
+    fn installation_namespace_fallback_groups_sibling_sources() {
+        assert_eq!(
+            installation_namespace("C:/fixtures/head.jsonl", "synthetic"),
+            installation_namespace("C:/fixtures/tail.jsonl", "synthetic")
+        );
+        assert_ne!(
+            installation_namespace("C:/fixtures/head.jsonl", "synthetic"),
+            installation_namespace("D:/other/head.jsonl", "synthetic")
+        );
+    }
+
+    #[test]
+    fn fallback_message_id_is_path_independent_but_placement_is_installation_scoped() {
         let staged = staged_batch(vec![staged_message(0, "", (0, 4))], 0, "session-1");
         let first = staged_to_source(
             "C:/one/transcript.jsonl",
@@ -1976,7 +2771,7 @@ mod tests {
             .unwrap();
         assert_eq!(first_message.0, second_message.0);
         assert_eq!(first_message.0.stability(), Stability::Unstable);
-        assert_eq!(first.placements[0].id, second.placements[0].id);
+        assert_ne!(first.placements[0].id, second.placements[0].id);
         assert_ne!(first.source_path, second.source_path);
     }
 
@@ -2114,6 +2909,11 @@ mod tests {
             branch_leaf_placement_id: None,
             messages: Vec::new(),
             evidence,
+            requested_level: ContextLevel::Raw,
+            effective_level: ContextLevel::Raw,
+            talks: Vec::new(),
+            summary: None,
+            hint: None,
             truncation: Truncation {
                 truncated: false,
                 reason: None,
@@ -2260,9 +3060,22 @@ mod tests {
 
     // ---- help/version 提前拦截（ADR-0006，R3）----
 
-    const KNOWN_COMMANDS: [&str; 13] = [
-        "ingest", "sync", "index", "search", "get", "show", "list", "context", "status", "mcp",
-        "tui", "doctor", "config",
+    const KNOWN_COMMANDS: [&str; 15] = [
+        "ingest",
+        "sync",
+        "index",
+        "search",
+        "get-message",
+        "get-session-resume",
+        "get",
+        "show",
+        "list",
+        "context",
+        "status",
+        "mcp",
+        "tui",
+        "doctor",
+        "config",
     ];
 
     #[test]
@@ -2450,6 +3263,12 @@ mod tests {
             "--max-bytes",
             "--max-messages",
             "--policy",
+            "--level",
+            "--provider",
+            "--since",
+            "--until",
+            "--session",
+            "--around",
         ] {
             let error = parse_db_flag(&["--db".into(), value.into(), "status".into()])
                 .expect_err("flag-named value must be rejected");
@@ -2661,7 +3480,55 @@ mod tests {
         );
     }
 
-    // ---- search 命中装配接线（R1/ADR-0008：application 装配后 main.rs 只投影）----
+    #[test]
+    fn sync_discover_rejects_extra_flags() {
+        let store = SqliteStore::open_in_memory().expect("in-memory store opens");
+        let error = dispatch(
+            &store,
+            &["sync".into(), "--discover".into(), "--bogus".into()],
+            protocol::OutputMode::Json,
+            None,
+        )
+        .expect_err("discover must reject unknown extra flags");
+        assert_eq!(error.0.code, CanonicalCode::InvalidRequest);
+    }
+
+
+    #[test]
+    fn take_bool_flag_removes_and_reports_presence() {
+        // R2/R3 布尔旗标：在场移除 token 并返回 true，缺场返回 false；不消费取值。
+        let mut args = vec![
+            "foo".into(),
+            "--include-system".into(),
+            "--group-by-session".into(),
+        ];
+        assert!(take_bool_flag(&mut args, "--include-system"));
+        assert!(take_bool_flag(&mut args, "--group-by-session"));
+        assert!(!take_bool_flag(&mut args, "--include-system"));
+        assert_eq!(args, vec![String::from("foo")]);
+    }
+
+    #[test]
+    fn search_dispatch_accepts_r2r3_flags_on_empty_store() {
+        // 空库上 search 返回零命中但不应把 R2/R3 旗标当多余参数拒绝（R2/R3 是
+        // 合法命令级 flag）。缺实现时 --include-system 会触发 usage error。
+        let store = SqliteStore::open_in_memory().expect("in-memory store opens");
+        let (command, outcome, data, _, _) = dispatch(
+            &store,
+            &[
+                "search".into(),
+                "foo".into(),
+                "--include-system".into(),
+                "--group-by-session".into(),
+            ],
+            protocol::OutputMode::Json,
+            None,
+        )
+        .expect("search with r2r3 flags must succeed");
+        assert_eq!(command, "search");
+        assert_eq!(outcome, protocol::Outcome::Success);
+        assert_eq!(data["hits"].as_array().expect("hits").len(), 0);
+    }
 
     #[test]
     fn render_search_emits_session_context_fields() {
@@ -2675,12 +3542,20 @@ mod tests {
                     score: 2.0,
                     session_id: Some("ses_v1_aaaa".into()),
                     text: Some("正文预览".into()),
+                    why_matched: Vec::new(),
+                    suggested_next_commands: Vec::new(),
+                    occurrences: 1,
+                    resume_available: false,
                 },
                 agent_session_grep_ports::SearchHit {
                     id: StableId::from_wire("msg_v1_bbbb").expect("valid id"),
                     score: 1.0,
                     session_id: None,
                     text: None,
+                    why_matched: Vec::new(),
+                    suggested_next_commands: Vec::new(),
+                    occurrences: 1,
+                    resume_available: false,
                 },
             ],
             next_cursor: None,
@@ -2695,6 +3570,52 @@ mod tests {
         assert_eq!(data["hits"][0]["text"], "正文预览");
         assert_eq!(data["hits"][1]["session_id"], serde_json::Value::Null);
         assert_eq!(data["hits"][1]["text"], serde_json::Value::Null);
+        assert!(
+            data["hits"][0].get("why_matched").is_none(),
+            "empty collections must be omitted: {}",
+            data["hits"][0]
+        );
+        assert!(
+            data["hits"][0].get("suggested_next_commands").is_none(),
+            "empty collections must be omitted: {}",
+            data["hits"][0]
+        );
+    }
+
+    #[test]
+    fn render_search_emits_guidance_when_present() {
+        let response = AppResponse::Search {
+            hits: vec![agent_session_grep_ports::SearchHit {
+                id: StableId::from_wire("msg_v1_aaaa").expect("valid id"),
+                score: 2.0,
+                session_id: Some("ses_v1_aaaa".into()),
+                text: Some("preview".into()),
+                why_matched: vec!["needle".into()],
+                suggested_next_commands: vec![
+                    "agent-session-grep get-message msg_v1_aaaa --session ses_v1_aaaa --around 2"
+                        .into(),
+                    "agent-session-grep context ses_v1_aaaa".into(),
+                ],
+                occurrences: 1,
+                resume_available: false,
+            }],
+            next_cursor: None,
+            generation: 3,
+            truncation: Truncation {
+                truncated: false,
+                reason: None,
+            },
+        };
+        let (_, data, _, _) = render(response);
+        let hit = &data["hits"][0];
+        assert_eq!(hit["why_matched"], serde_json::json!(["needle"]));
+        assert_eq!(
+            hit["suggested_next_commands"],
+            serde_json::json!([
+                "agent-session-grep get-message msg_v1_aaaa --session ses_v1_aaaa --around 2",
+                "agent-session-grep context ses_v1_aaaa"
+            ])
+        );
     }
 
     #[test]
@@ -2708,6 +3629,10 @@ mod tests {
                 score: 2.0,
                 session_id: Some("ses_v1_aaaa".into()),
                 text: Some("preview".into()),
+                why_matched: Vec::new(),
+                suggested_next_commands: Vec::new(),
+                occurrences: 1,
+                resume_available: false,
             }],
             next_cursor: None,
             generation: 3,
@@ -2723,5 +3648,39 @@ mod tests {
         assert!(hit["score"].is_number(), "{hit}");
         assert_eq!(hit["session_id"], "ses_v1_aaaa");
         assert_eq!(hit["text"], "preview");
+    }
+
+    #[test]
+    fn render_message_window_projects_typed_placement_fields() {
+        let response = AppResponse::Message {
+            window: agent_session_grep_application::MessageWindow {
+                message_id: "msg_v1_anchor".into(),
+                session_id: "ses_v1_s".into(),
+                anchor_placement_id: "plc_v1_anchor".into(),
+                messages: vec![agent_session_grep_application::ContextMessage {
+                    id: "msg_v1_anchor".into(),
+                    placement_id: "plc_v1_anchor".into(),
+                    message_id: "msg_v1_anchor".into(),
+                    payload: serde_json::json!({"role": "user", "text": "hi"}),
+                }],
+                truncation: Truncation {
+                    truncated: false,
+                    reason: None,
+                },
+                generation: 5,
+            },
+        };
+        let (outcome, data, page, warnings) = render(response);
+        assert!(matches!(outcome, protocol::Outcome::Success));
+        assert!(warnings.is_empty());
+        assert!(!page.has_more);
+        assert_eq!(data["message_id"], "msg_v1_anchor");
+        assert_eq!(data["session_id"], "ses_v1_s");
+        assert_eq!(data["anchor_placement_id"], "plc_v1_anchor");
+        assert_eq!(data["generation"], 5);
+        let messages = data["messages"].as_array().expect("messages");
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["placement_id"], "plc_v1_anchor");
+        assert_eq!(messages[0]["payload"]["text"], "hi");
     }
 }

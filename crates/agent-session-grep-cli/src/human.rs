@@ -60,6 +60,39 @@ pub fn render_success(command: &str, outcome: Outcome, data: &Value, page: &Page
 /// 若命中有正文预览（human 渲染前由 CLI 附加）则追加一行缩进的片段；
 /// 零命中给措辞 `no hits` 并提示换词。
 fn render_search(data: &Value) -> Vec<String> {
+    if let Some(rows) = data.get("session_resume_rows").and_then(Value::as_array)
+        && !rows.is_empty()
+    {
+        let rows: Vec<SessionResumeTableRow> = rows
+            .iter()
+            .map(|row| SessionResumeTableRow {
+                date_ymd: row
+                    .get("date")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                provider: row
+                    .get("provider")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                title: row.get("title").and_then(Value::as_str).map(str::to_string),
+                working_directory: row
+                    .get("working_directory")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                session_id: row
+                    .get("session_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+            })
+            .collect();
+        return render_session_resume_table(&rows)
+            .lines()
+            .map(str::to_string)
+            .collect();
+    }
     let hits = data
         .get("hits")
         .and_then(Value::as_array)
@@ -395,6 +428,254 @@ fn preview(text: &str, max: usize) -> String {
 /// 仅单行化、不截断。
 fn sanitize(text: &str) -> String {
     preview(text, usize::MAX)
+}
+
+/// Session Resume 表格的一行（human 渲染专用；值由 main.rs 装配，`date_ymd`
+/// 已格式化为本地 `YYYY-MM-DD`）。
+pub struct SessionResumeTableRow {
+    pub date_ymd: String,
+    pub provider: String,
+    pub title: Option<String>,
+    pub working_directory: Option<String>,
+    pub session_id: String,
+}
+
+/// 表格目标总宽：日期/Provider/Session ID 按内容占满后，标题与工作目录在
+/// 剩余预算内按 35%/65% 分配；预算不足时保留最小列宽，整体超宽交给终端换行。
+const TABLE_TARGET_COLS: usize = 100;
+/// 标题列最小显示宽度。
+const TITLE_MIN_COLS: usize = 12;
+/// 工作目录列最小显示宽度。
+const CWD_MIN_COLS: usize = 16;
+/// 列间隔 ` | ` 的显示宽度。
+const COL_GAP_COLS: usize = 3;
+/// 缺失值占位符。
+const MISSING: &str = "—";
+
+/// 清洗后的单行单元格（缺失值已统一替换为 `—`）。
+struct PreparedResumeRow {
+    date: String,
+    provider: String,
+    title: String,
+    working_directory: String,
+    session_id: String,
+}
+
+/// 渲染一组会话 Resume 元数据为横向表格（ADR-0009）：
+/// `日期 | Provider | 会话标题 | 工作目录 | Session ID`。
+///
+/// - Provider 与 Session ID 永不截断；标题超长尾部省略（`…`）、工作目录超长
+///   中间折叠（如 `C:/…/agent-session-grep`）；缺失值统一渲染 `—`；
+///   newline/tab 清洗为空格；CJK 按显示宽度 2 对齐。
+/// - 宽度不足时不切换纵向版式：行保持完整、字段值不截断，超宽由终端换行。
+pub fn render_session_resume_table(rows: &[SessionResumeTableRow]) -> String {
+    if rows.is_empty() {
+        return String::new();
+    }
+    let cells: Vec<PreparedResumeRow> = rows.iter().map(prepare_resume_row).collect();
+    let date_width = display_width("日期")
+        .max(10)
+        .max(widest(&cells, |cell| &cell.date));
+    let provider_width = display_width("Provider").max(widest(&cells, |cell| &cell.provider));
+    let session_width = display_width("Session ID").max(widest(&cells, |cell| &cell.session_id));
+    let fixed_cols = date_width + provider_width + session_width + COL_GAP_COLS * 4;
+    let remaining = TABLE_TARGET_COLS.saturating_sub(fixed_cols);
+    let title_width = TITLE_MIN_COLS.max(remaining * 35 / 100);
+    let cwd_width = CWD_MIN_COLS.max(remaining * 65 / 100);
+
+    let mut lines = vec![format!(
+        "{} | {} | {} | {} | Session ID",
+        pad_to_width("日期", date_width),
+        pad_to_width("Provider", provider_width),
+        pad_to_width("会话标题", title_width),
+        pad_to_width("工作目录", cwd_width),
+    )];
+    for cell in &cells {
+        lines.push(format!(
+            "{} | {} | {} | {} | {}",
+            pad_to_width(&cell.date, date_width),
+            pad_to_width(&cell.provider, provider_width),
+            pad_to_width(
+                &truncate_tail_ellipsis(&cell.title, title_width),
+                title_width
+            ),
+            pad_to_width(
+                &collapse_middle(&cell.working_directory, cwd_width),
+                cwd_width
+            ),
+            cell.session_id,
+        ));
+    }
+    lines.join("\n")
+}
+
+/// 各单元格的最大显示宽度。
+fn widest(cells: &[PreparedResumeRow], key: impl Fn(&PreparedResumeRow) -> &str) -> usize {
+    cells.iter().map(key).map(display_width).max().unwrap_or(0)
+}
+
+/// 清洗单元格并统一缺失值：控制字符替换为空格，空白（含空串）渲染 `—`。
+fn prepare_resume_row(row: &SessionResumeTableRow) -> PreparedResumeRow {
+    PreparedResumeRow {
+        date: cell_text(&row.date_ymd),
+        provider: cell_text(&row.provider),
+        title: row
+            .title
+            .as_deref()
+            .map(cell_text)
+            .unwrap_or_else(|| MISSING.into()),
+        working_directory: row
+            .working_directory
+            .as_deref()
+            .map(cell_text)
+            .unwrap_or_else(|| MISSING.into()),
+        session_id: cell_text(&row.session_id),
+    }
+}
+
+/// 单元格文本：控制字符清洗为空格；空白视为缺失，统一渲染 `—`。
+fn cell_text(raw: &str) -> String {
+    let text = sanitize(raw);
+    if text.trim().is_empty() {
+        MISSING.into()
+    } else {
+        text
+    }
+}
+
+/// 按显示宽度右填充空格至 `width` 列；已超宽时原样返回（不截断）。
+fn pad_to_width(text: &str, width: usize) -> String {
+    let used = display_width(text);
+    if used >= width {
+        text.to_string()
+    } else {
+        format!("{text}{}", " ".repeat(width - used))
+    }
+}
+
+/// 尾部省略：超出 `max_width` 时按显示宽度截前缀并接 `…`（占 1 列）。
+fn truncate_tail_ellipsis(text: &str, max_width: usize) -> String {
+    let text = sanitize(text);
+    if display_width(&text) <= max_width {
+        return text;
+    }
+    let prefix = take_display_prefix(&text, max_width.saturating_sub(1));
+    format!("{prefix}…")
+}
+
+/// 工作目录中间折叠：保留首段与尾段、中间接 `…`（如 `C:/…/agent-session-grep`）；
+/// 单段路径或预算过小退化为字符级中间折叠。
+fn collapse_middle(text: &str, max_width: usize) -> String {
+    let text = sanitize(text);
+    if display_width(&text) <= max_width {
+        return text;
+    }
+    let parts: Vec<&str> = text.split(&['/', '\\'][..]).collect();
+    if parts.len() <= 1 || max_width <= 3 {
+        return char_fold_middle(&text, max_width);
+    }
+    let head_budget = (max_width - 3) / 2;
+    let tail_budget = max_width - 3 - head_budget;
+    let mut head: Vec<&str> = Vec::new();
+    let mut head_used = 0usize;
+    for (index, part) in parts.iter().enumerate() {
+        let cost = display_width(part) + usize::from(index > 0);
+        if index > 0 && head_used + cost > head_budget {
+            break;
+        }
+        head_used += cost;
+        head.push(part);
+    }
+    let mut tail: Vec<&str> = Vec::new();
+    let mut tail_used = 0usize;
+    for (offset, part) in parts.iter().rev().enumerate() {
+        let cost = display_width(part) + 1;
+        if offset > 0 && tail_used + cost > tail_budget {
+            break;
+        }
+        tail_used += cost;
+        tail.push(part);
+    }
+    let mut tail: Vec<&str> = tail.into_iter().rev().collect();
+    if head.len() + tail.len() > parts.len() {
+        tail.truncate(parts.len() - head.len());
+    }
+    let sep = text
+        .chars()
+        .find(|c| matches!(c, '/' | '\\'))
+        .unwrap_or('/');
+    let head_text = head.join(&sep.to_string());
+    if tail.is_empty() {
+        return format!("{head_text}{sep}…");
+    }
+    let tail_text = tail.join(&sep.to_string());
+    format!("{head_text}{sep}…{sep}{tail_text}")
+}
+
+/// 字符级中间折叠：前缀 + `…` + 后缀（单段路径或极小预算的退路）。
+fn char_fold_middle(text: &str, max_width: usize) -> String {
+    let prefix_width = max_width.saturating_sub(1) / 2;
+    let suffix_width = max_width.saturating_sub(1) - prefix_width;
+    let prefix = take_display_prefix(text, prefix_width);
+    let suffix = take_display_suffix(text, suffix_width);
+    format!("{prefix}…{suffix}")
+}
+
+/// 按显示宽度取前缀，字符边界安全。
+fn take_display_prefix(text: &str, max_width: usize) -> String {
+    let mut prefix = String::new();
+    let mut used = 0usize;
+    for c in text.chars() {
+        let width = char_display_width(c);
+        if used + width > max_width {
+            break;
+        }
+        used += width;
+        prefix.push(c);
+    }
+    prefix
+}
+
+/// 按显示宽度取后缀（从尾部累计，再恢复原顺序）。
+fn take_display_suffix(text: &str, max_width: usize) -> String {
+    let mut suffix: Vec<char> = Vec::new();
+    let mut used = 0usize;
+    for c in text.chars().rev() {
+        let width = char_display_width(c);
+        if used + width > max_width {
+            break;
+        }
+        used += width;
+        suffix.push(c);
+    }
+    suffix.into_iter().rev().collect()
+}
+
+/// 字符串显示宽度：CJK（统一表意文字、假名、谚文、全角形式等）按 2 列计。
+fn display_width(text: &str) -> usize {
+    text.chars().map(char_display_width).sum()
+}
+
+/// 单字符显示宽度：CJK 及其兼容形式按 2 列计，其余按 1 列计。
+fn char_display_width(c: char) -> usize {
+    let code = c as u32;
+    if (0x1100..=0x115F).contains(&code) // 谚文字母
+        || (0x2E80..=0x303E).contains(&code) // CJK 部首与标点
+        || (0x3041..=0x33FF).contains(&code) // 假名、CJK 兼容
+        || (0x3400..=0x4DBF).contains(&code) // CJK 扩展 A
+        || (0x4E00..=0x9FFF).contains(&code) // CJK 统一表意文字
+        || (0xA000..=0xA4CF).contains(&code) // 彝文
+        || (0xAC00..=0xD7A3).contains(&code) // 谚文音节
+        || (0xF900..=0xFAFF).contains(&code) // CJK 兼容表意文字
+        || (0xFE30..=0xFE4F).contains(&code) // CJK 兼容形式
+        || (0xFF00..=0xFF60).contains(&code) // 全角形式
+        || (0xFFE0..=0xFFE6).contains(&code)
+    // 全角符号
+    {
+        2
+    } else {
+        1
+    }
 }
 
 #[cfg(test)]
@@ -996,6 +1277,186 @@ mod tests {
                     assert!(lines.last().is_none_or(|line| !line.trim().is_empty()));
                 }
             }
+        }
+    }
+
+    #[test]
+    fn resume_table_renders_five_columns_in_contract_order() {
+        let rows = [resume_row(
+            "2026-08-14",
+            "claude-code",
+            Some("配置数据库连接"),
+            Some("C:/dev/agent-session-grep"),
+            "ses_v1_abc",
+        )];
+        let output = render_session_resume_table(&rows);
+        // 列宽：日期 10、Provider 11（内容全宽）、Session ID 10；
+        // 剩余 100 - 10 - 11 - 10 - 12 = 57 → 标题 19、工作目录 37。
+        let header = format!(
+            "日期{} | Provider{} | 会话标题{} | 工作目录{} | Session ID",
+            " ".repeat(6),
+            " ".repeat(3),
+            " ".repeat(11),
+            " ".repeat(29),
+        );
+        let body = format!(
+            "2026-08-14 | claude-code | 配置数据库连接{} | C:/dev/agent-session-grep{} | ses_v1_abc",
+            " ".repeat(5),
+            " ".repeat(12),
+        );
+        assert_eq!(output, format!("{header}\n{body}"));
+    }
+
+    #[test]
+    fn resume_table_never_truncates_provider_or_session_id() {
+        let provider = "hyperbolic-parallel-provider-v9";
+        let session_id = format!("ses_v1_{}", "abcdef0123456789".repeat(4));
+        let rows = [resume_row(
+            "2026-08-14",
+            provider,
+            Some("短标题"),
+            Some("C:/a"),
+            &session_id,
+        )];
+        let output = render_session_resume_table(&rows);
+        let body = output.lines().nth(1).unwrap();
+        // Session ID 是末列且不加填充：整行必须以完整 ID 收尾。
+        assert!(
+            body.ends_with(&session_id),
+            "session id truncated: {body:?}"
+        );
+        // Provider 按内容全宽：完整出现且紧跟列分隔符。
+        assert!(
+            body.contains(&format!("{provider} |")),
+            "provider truncated: {body:?}"
+        );
+    }
+
+    #[test]
+    fn resume_table_renders_dash_for_missing_values() {
+        let rows = [
+            resume_row("", "codex", None, None, "ses_v1_xyz"),
+            resume_row("", "", None, None, "ses_v1_uvw"),
+        ];
+        let output = render_session_resume_table(&rows);
+        // 列宽：日期 10、Provider 8、Session ID 10；剩余 60 → 标题 21、工作目录 39。
+        let row1 = format!(
+            "—{} | codex{} | —{} | —{} | ses_v1_xyz",
+            " ".repeat(9),
+            " ".repeat(3),
+            " ".repeat(20),
+            " ".repeat(38),
+        );
+        let row2 = format!(
+            "—{} | —{} | —{} | —{} | ses_v1_uvw",
+            " ".repeat(9),
+            " ".repeat(7),
+            " ".repeat(20),
+            " ".repeat(38),
+        );
+        assert_eq!(output.lines().nth(1), Some(row1.as_str()));
+        assert_eq!(output.lines().nth(2), Some(row2.as_str()));
+    }
+
+    #[test]
+    fn collapse_middle_keeps_head_and_tail_segments() {
+        // 30 列预算：首段 C:/Users、尾段 agent-session-grep，中间折叠。
+        assert_eq!(
+            collapse_middle("C:/Users/someone/dev/agent-session-grep", 30),
+            "C:/Users/…/agent-session-grep"
+        );
+        // 反斜杠路径同样折叠，分隔符保持原样。
+        assert_eq!(
+            collapse_middle(r"C:\Users\someone\dev\agent-session-grep", 30),
+            r"C:\Users\…\agent-session-grep"
+        );
+        // 宽度足够时原样返回。
+        assert_eq!(
+            collapse_middle("C:/dev/agent-session-grep", 40),
+            "C:/dev/agent-session-grep"
+        );
+        // 单段路径退化为字符级中间折叠。
+        assert_eq!(
+            collapse_middle("abcdefghijklmnopqrstuvwxyz", 10),
+            "abcd…vwxyz"
+        );
+    }
+
+    #[test]
+    fn display_width_counts_cjk_as_two_columns() {
+        assert_eq!(display_width("会话标题"), 8);
+        assert_eq!(display_width("abc"), 3);
+        assert_eq!(display_width("2026-08-14"), 10);
+        // 12 列预算：按显示宽度截前缀（10 列）再补 `…`（1 列）。
+        assert_eq!(
+            truncate_tail_ellipsis("这是一段非常非常长的会话标题", 12),
+            "这是一段非…"
+        );
+        // 未超宽不截断。
+        assert_eq!(truncate_tail_ellipsis("short", 12), "short");
+    }
+
+    #[test]
+    fn resume_table_truncates_cjk_title_by_display_width() {
+        // 标题列 19：20 个 CJK 字（40 列）→ 按显示宽度保留 9 字 + `…`。
+        let rows = [resume_row(
+            "2026-08-14",
+            "claude-code",
+            Some(&"标".repeat(20)),
+            Some("C:/a"),
+            "ses_v1_abc",
+        )];
+        let output = render_session_resume_table(&rows);
+        let body = output.lines().nth(1).unwrap();
+        let expected_title = format!("{}…", "标".repeat(9));
+        assert!(
+            body.contains(&format!("{expected_title} |")),
+            "title not truncated by display width: {body:?}"
+        );
+    }
+
+    #[test]
+    fn resume_table_sanitizes_newlines_and_tabs() {
+        let rows = [resume_row(
+            "2026-08-14",
+            "claude-code",
+            Some("第一行\n第二行\ttab"),
+            Some("C:/a\r\nb"),
+            "ses_v1_abc",
+        )];
+        let output = render_session_resume_table(&rows);
+        assert!(!output.contains('\t'));
+        assert!(!output.contains('\r'));
+        assert!(!output.ends_with('\n'));
+        let body = output.lines().nth(1).unwrap();
+        assert!(
+            body.contains("第一行 第二行 tab"),
+            "control chars not cleaned: {body:?}"
+        );
+        assert!(
+            body.contains("C:/a  b"),
+            "cwd control chars not cleaned: {body:?}"
+        );
+    }
+
+    #[test]
+    fn resume_table_empty_input_renders_empty_string() {
+        assert_eq!(render_session_resume_table(&[]), "");
+    }
+
+    fn resume_row(
+        date: &str,
+        provider: &str,
+        title: Option<&str>,
+        cwd: Option<&str>,
+        session: &str,
+    ) -> SessionResumeTableRow {
+        SessionResumeTableRow {
+            date_ymd: date.to_string(),
+            provider: provider.to_string(),
+            title: title.map(str::to_string),
+            working_directory: cwd.map(str::to_string),
+            session_id: session.to_string(),
         }
     }
 }

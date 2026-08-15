@@ -30,18 +30,39 @@ pub(crate) enum KeyInput {
     CtrlC,
 }
 
+/// 一条检索命中的纯 UI 投影。Resume 只保留 Application 已解析的可用性；
+/// core 不读取 source/transcript，也不构造恢复命令。
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SearchHitView {
+    pub id: String,
+    pub score: f32,
+    pub session_id: Option<String>,
+    pub resume_available: bool,
+}
+
 /// 一页检索结果的平数据投影（glue 从 `AppResponse::Search` 构造）。
 ///
 /// `next_cursor`/`has_more` 只来自 App 响应——core 不构造、不解析令牌。
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct SearchPage {
-    /// 命中 `(wire id, score)`，App 钉住排序原样透传。
-    pub hits: Vec<(String, f32)>,
+    /// App 钉住排序原样透传；Resume 可用性同样来自 Application 批量解析。
+    pub hits: Vec<SearchHitView>,
     pub next_cursor: Option<String>,
     pub has_more: bool,
     pub generation: u64,
     pub truncated: bool,
     pub truncation_reason: Option<String>,
+}
+
+/// 固定形状的只读 Resume Metadata 纯 UI 投影。字段缺失保持 `None`，不猜测。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResumeMetadataView {
+    pub session_id: String,
+    pub provider_id: Option<String>,
+    pub resume_available: bool,
+    pub provider_session_id: Option<String>,
+    pub original_working_directory: Option<String>,
+    pub unavailable_reason: Option<String>,
 }
 
 /// Context 屏单条消息的展示事实：角色 + 文本 + 证据精度（wire 字符串，如 `byte`）。
@@ -73,13 +94,15 @@ pub(crate) struct Model {
     /// 最近一次提交的查询串——续页 Effect 绑定它，而非编辑中的 `input`。
     pub query: String,
     /// 已累积的命中（`n` 追加下一页，提交新查询时清空）。
-    pub hits: Vec<(String, f32)>,
+    pub hits: Vec<SearchHitView>,
     pub selected: usize,
     pub next_cursor: Option<String>,
     pub has_more: bool,
     /// 最近一次翻页的追加事实（如 `+5`）；首页加载为 `None`。
     pub page_note: Option<String>,
     pub context: Option<ContextView>,
+    /// 当前 Context Session 的只读 Resume Metadata；切换 Session 时清空重取。
+    pub resume: Option<ResumeMetadataView>,
     pub scroll: usize,
     pub policy: ContextPolicy,
     /// 最近一次错误或提示（如 `no hits`）；渲染进状态行，不弹窗、不退出。
@@ -104,6 +127,7 @@ impl Default for Model {
             has_more: false,
             page_note: None,
             context: None,
+            resume: None,
             scroll: 0,
             policy: ContextPolicy::Mainline,
             status: None,
@@ -122,6 +146,7 @@ pub(crate) enum Msg {
     Key(KeyInput),
     SearchLoaded(SearchPage),
     ContextLoaded(ContextView),
+    ResumeLoaded(ResumeMetadataView),
     /// Effect 执行失败的状态行文本（`error [<code>]: <msg>` 或解析类提示）。
     EffectFailed(String),
 }
@@ -145,6 +170,8 @@ pub(crate) enum Effect {
         session_id: String,
         policy: ContextPolicy,
     },
+    /// 通过 Application 固定契约读取当前 Session 的只读 Resume Metadata。
+    LoadResumeMetadata { session_id: String },
 }
 
 /// 状态转移唯一入口：`(Model, Msg) -> (Model, Option<Effect>)`。纯函数、可单测。
@@ -153,6 +180,7 @@ pub(crate) fn update(model: Model, msg: Msg) -> (Model, Option<Effect>) {
         Msg::Key(key) => handle_key(model, key),
         Msg::SearchLoaded(page) => search_loaded(model, page),
         Msg::ContextLoaded(view) => context_loaded(model, view),
+        Msg::ResumeLoaded(metadata) => resume_loaded(model, metadata),
         Msg::EffectFailed(text) => effect_failed(model, text),
     }
 }
@@ -188,9 +216,10 @@ fn handle_key(mut model: Model, key: KeyInput) -> (Model, Option<Effect>) {
                 model.truncated = false;
                 model.truncation_reason = None;
                 model.warnings.clear();
-                // 新查询是一次全新浏览：旧的 ContextView 不得残留到下次进入
-                // Context 屏（Minor-11）。
+                // 新查询是一次全新浏览：旧的 ContextView/Resume Metadata 不得残留到
+                // 下次进入 Context 屏（Minor-11）。
                 model.context = None;
+                model.resume = None;
                 let effect = Effect::Search {
                     query: model.query.clone(),
                     cursor: None,
@@ -217,9 +246,9 @@ fn handle_key(mut model: Model, key: KeyInput) -> (Model, Option<Effect>) {
                 (model, None)
             }
             KeyInput::Enter => match model.hits.get(model.selected) {
-                Some((id, _)) => {
+                Some(hit) => {
                     let effect = Effect::ResolveAndLoadContext {
-                        hit_id: id.clone(),
+                        hit_id: hit.id.clone(),
                         policy: model.policy,
                     };
                     (model, Some(effect))
@@ -329,8 +358,17 @@ fn search_loaded(mut model: Model, page: SearchPage) -> (Model, Option<Effect>) 
     (model, None)
 }
 
-/// 上下文加载：截断/警告事实提升到 Model（状态行渲染源），滚动复位。
+/// 上下文加载：截断/警告事实提升到 Model（状态行渲染源），滚动复位；
+/// Session 改变时清空旧 metadata，并通过 Application Effect 读取固定 Resume 契约。
 fn context_loaded(mut model: Model, view: ContextView) -> (Model, Option<Effect>) {
+    let session_id = view.session_id.clone();
+    let metadata_is_current = model
+        .resume
+        .as_ref()
+        .is_some_and(|metadata| metadata.session_id == session_id);
+    if !metadata_is_current {
+        model.resume = None;
+    }
     model.generation = view.generation;
     model.truncated = view.truncated;
     model.truncation_reason = view.truncation_reason.clone();
@@ -339,6 +377,20 @@ fn context_loaded(mut model: Model, view: ContextView) -> (Model, Option<Effect>
     model.scroll = 0;
     model.status = None;
     model.screen = Screen::Context;
+    let effect = (!metadata_is_current).then_some(Effect::LoadResumeMetadata { session_id });
+    (model, effect)
+}
+
+/// 仅接受当前 Context Session 的 metadata；同步执行路径之外也不会让陈旧结果串屏。
+fn resume_loaded(mut model: Model, metadata: ResumeMetadataView) -> (Model, Option<Effect>) {
+    if model
+        .context
+        .as_ref()
+        .is_some_and(|context| context.session_id == metadata.session_id)
+    {
+        model.resume = Some(metadata);
+        model.status = None;
+    }
     (model, None)
 }
 
@@ -357,15 +409,71 @@ fn max_scroll(model: &Model) -> usize {
         .unwrap_or(0)
 }
 
-/// 命中列表行：选中行前缀 `> `，其余两空格对齐。
+/// 命中列表行：选中行前缀 `> `，其余两空格对齐；Session 与 Resume
+/// 可用性只展示 Application 已返回的结构化事实。
 pub(crate) fn hit_lines(model: &Model) -> Vec<String> {
     model
         .hits
         .iter()
         .enumerate()
-        .map(|(i, (id, score))| {
+        .map(|(i, hit)| {
             let prefix = if i == model.selected { "> " } else { "  " };
-            format!("{prefix}{id}  score {score:.3}")
+            let session = hit.session_id.as_deref().unwrap_or("—");
+            let resume = if hit.resume_available { "yes" } else { "no" };
+            format!(
+                "{prefix}{}  score {:.3}  session {session}  resume {resume}",
+                hit.id, hit.score
+            )
+        })
+        .collect()
+}
+
+/// Resume detail panel：固定字段恒展示，缺失为 `—`；控制字符折叠为空格，
+/// 防止 provider-native metadata 改写终端布局。这里不生成命令，也没有 Source path 字段。
+pub(crate) fn resume_lines(model: &Model) -> Vec<String> {
+    let Some(metadata) = &model.resume else {
+        return vec!["Resume Metadata: —".to_string()];
+    };
+    vec![
+        format!(
+            "Resume Metadata: {}",
+            if metadata.resume_available {
+                "available"
+            } else {
+                "unavailable"
+            }
+        ),
+        format!(
+            "provider: {}",
+            display_field(metadata.provider_id.as_deref())
+        ),
+        format!(
+            "provider session: {}",
+            display_field(metadata.provider_session_id.as_deref())
+        ),
+        format!(
+            "working directory: {}",
+            display_field(metadata.original_working_directory.as_deref())
+        ),
+        format!(
+            "unavailable reason: {}",
+            display_field(metadata.unavailable_reason.as_deref())
+        ),
+    ]
+}
+
+fn display_field(value: Option<&str>) -> String {
+    let Some(value) = value.filter(|value| !value.is_empty()) else {
+        return "—".to_string();
+    };
+    value
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
         })
         .collect()
 }
@@ -452,12 +560,18 @@ mod tests {
         model
     }
 
+    fn hit(id: &str, score: f32) -> SearchHitView {
+        SearchHitView {
+            id: id.to_string(),
+            score,
+            session_id: None,
+            resume_available: false,
+        }
+    }
+
     fn page(hits: &[(&str, f32)], cursor: Option<&str>) -> SearchPage {
         SearchPage {
-            hits: hits
-                .iter()
-                .map(|(id, score)| ((*id).to_string(), *score))
-                .collect(),
+            hits: hits.iter().map(|(id, score)| hit(id, *score)).collect(),
             next_cursor: cursor.map(str::to_string),
             has_more: cursor.is_some(),
             generation: 7,
@@ -486,6 +600,17 @@ mod tests {
             truncation_reason: None,
             warnings: Vec::new(),
             generation: 7,
+        }
+    }
+
+    fn metadata(session: &str, available: bool) -> ResumeMetadataView {
+        ResumeMetadataView {
+            session_id: session.to_string(),
+            provider_id: Some("synthetic-provider".to_string()),
+            resume_available: available,
+            provider_session_id: available.then(|| "provider-session-1".to_string()),
+            original_working_directory: available.then(|| "C:/workspace/example".to_string()),
+            unavailable_reason: (!available).then(|| "metadata_missing".to_string()),
         }
     }
 
@@ -519,7 +644,7 @@ mod tests {
     #[test]
     fn enter_submits_search_and_resets_hits() {
         let mut model = typed(Model::default(), "rust");
-        model.hits = vec![("msg_v1_old".to_string(), 1.0)];
+        model.hits = vec![hit("msg_v1_old", 1.0)];
         model.next_cursor = Some("stale".to_string());
         model.has_more = true;
         let (model, effect) = key(model, KeyInput::Enter);
@@ -565,6 +690,27 @@ mod tests {
     }
 
     #[test]
+    fn search_loaded_preserves_session_and_resume_availability() {
+        let mut loaded = page(&[], None);
+        loaded.hits = vec![SearchHitView {
+            id: "msg_v1_resumable".to_string(),
+            score: 2.0,
+            session_id: Some("ses_v1_resumable".to_string()),
+            resume_available: true,
+        }];
+
+        let (model, effect) = update(submitted("rust"), Msg::SearchLoaded(loaded));
+
+        assert!(effect.is_none());
+        assert_eq!(model.hits.len(), 1);
+        assert_eq!(
+            model.hits[0].session_id.as_deref(),
+            Some("ses_v1_resumable")
+        );
+        assert!(model.hits[0].resume_available);
+    }
+
+    #[test]
     fn search_loaded_empty_page_reports_no_hits_and_stays_functional() {
         let loaded = Msg::SearchLoaded(page(&[], None));
         let (model, _) = update(submitted("nope"), loaded);
@@ -600,7 +746,7 @@ mod tests {
         let (model, _) = key(model, KeyInput::Char('n'));
         let loaded = Msg::SearchLoaded(page(&[("msg_v1_c", 1.0)], None));
         let (model, _) = update(model, loaded);
-        let ids: Vec<&str> = model.hits.iter().map(|(id, _)| id.as_str()).collect();
+        let ids: Vec<&str> = model.hits.iter().map(|hit| hit.id.as_str()).collect();
         assert_eq!(ids, vec!["msg_v1_a", "msg_v1_b", "msg_v1_c"]);
         assert_eq!(model.selected, 2, "selection jumps to first new row");
         assert!(!model.has_more);
@@ -678,10 +824,48 @@ mod tests {
         let mut model = results(&[("msg_v1_a", 2.0)], None);
         model.scroll = 9;
         let (model, effect) = update(model, Msg::ContextLoaded(view("ses_v1_s", 3)));
-        assert!(effect.is_none());
+        assert_eq!(
+            effect,
+            Some(Effect::LoadResumeMetadata {
+                session_id: "ses_v1_s".to_string(),
+            })
+        );
         assert_eq!(model.screen, Screen::Context);
         assert_eq!(model.scroll, 0);
         assert!(model.context.is_some());
+        assert!(model.resume.is_none());
+    }
+
+    #[test]
+    fn resume_loaded_populates_only_the_current_context_detail() {
+        let model = in_context("ses_v1_s", 1);
+        let (model, effect) = update(model, Msg::ResumeLoaded(metadata("ses_v1_s", true)));
+        assert!(effect.is_none());
+        assert!(model.resume.as_ref().is_some_and(|resume| {
+            resume.resume_available
+                && resume.provider_session_id.as_deref() == Some("provider-session-1")
+        }));
+
+        let (model, _) = update(model, Msg::ResumeLoaded(metadata("ses_v1_other", true)));
+        assert_eq!(
+            model
+                .resume
+                .as_ref()
+                .map(|resume| resume.session_id.as_str()),
+            Some("ses_v1_s"),
+            "stale metadata must not replace the current detail"
+        );
+    }
+
+    #[test]
+    fn context_reload_for_same_session_does_not_refetch_resume_metadata() {
+        let model = in_context("ses_v1_s", 1);
+        let (model, _) = update(model, Msg::ResumeLoaded(metadata("ses_v1_s", true)));
+
+        let (model, effect) = update(model, Msg::ContextLoaded(view("ses_v1_s", 2)));
+
+        assert!(effect.is_none());
+        assert!(model.resume.is_some());
     }
 
     #[test]
@@ -776,10 +960,12 @@ mod tests {
         // Minor-11：提交新查询必须清掉上一次的 ContextView，防止旧上下文
         // 残留到下次进入 Context 屏。
         let model = in_context("ses_v1_s", 3);
+        let (model, _) = update(model, Msg::ResumeLoaded(metadata("ses_v1_s", true)));
         assert!(
             model.context.is_some(),
             "precondition: stale context present"
         );
+        assert!(model.resume.is_some(), "precondition: stale resume present");
         // 退回 Search 屏并清空残留输入（Esc 链：Context → Results → Search → 清空）。
         let (model, _) = key(model, KeyInput::Esc);
         let (model, _) = key(model, KeyInput::Esc);
@@ -793,6 +979,10 @@ mod tests {
             model.context.is_none(),
             "new query must clear stale context"
         );
+        assert!(
+            model.resume.is_none(),
+            "new query must clear stale resume metadata"
+        );
         assert_eq!(model.query, "fresh");
     }
 
@@ -805,6 +995,46 @@ mod tests {
         let lines = hit_lines(&model);
         assert!(lines[0].starts_with("  msg_v1_a"), "{lines:?}");
         assert!(lines[1].starts_with("> msg_v1_b"), "{lines:?}");
+    }
+
+    #[test]
+    fn hit_lines_render_session_and_resume_availability() {
+        let mut model = results(&[], None);
+        model.hits = vec![SearchHitView {
+            id: "msg_v1_a".to_string(),
+            score: 2.0,
+            session_id: Some("ses_v1_a".to_string()),
+            resume_available: true,
+        }];
+
+        let lines = hit_lines(&model);
+
+        assert_eq!(
+            lines,
+            vec!["> msg_v1_a  score 2.000  session ses_v1_a  resume yes"]
+        );
+    }
+
+    #[test]
+    fn resume_lines_render_fixed_nullable_fields_and_sanitize_controls() {
+        let mut resume = metadata("ses_v1_s", true);
+        resume.provider_id = Some("synthetic\nprovider".to_string());
+        resume.original_working_directory = Some("C:/work\tspace/example".to_string());
+        resume.unavailable_reason = None;
+        let model = Model {
+            resume: Some(resume),
+            ..Model::default()
+        };
+
+        let lines = resume_lines(&model);
+
+        assert_eq!(lines[0], "Resume Metadata: available");
+        assert_eq!(lines[1], "provider: synthetic provider");
+        assert_eq!(lines[3], "working directory: C:/work space/example");
+        assert_eq!(lines[4], "unavailable reason: —");
+        let rendered = lines.join("\n");
+        assert!(!rendered.contains("source_path"));
+        assert!(!rendered.contains("transcript"));
     }
 
     #[test]

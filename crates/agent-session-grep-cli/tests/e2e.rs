@@ -46,7 +46,7 @@ fn parse_first_line(o: &Output) -> serde_json::Value {
 
 /// 断言 frame 满足 Robot v1 envelope 最小契约。
 fn assert_envelope_shape(frame: &serde_json::Value, ok: bool) {
-    assert_eq!(frame["schema_version"], "1.0", "schema_version");
+    assert_eq!(frame["schema_version"], "1.1", "schema_version");
     assert_eq!(frame["ok"], ok, "ok");
     if ok {
         assert_eq!(frame["frame_type"], "response", "frame_type");
@@ -221,6 +221,21 @@ fn stdout(o: &Output) -> String {
     String::from_utf8_lossy(&o.stdout).into_owned()
 }
 
+fn session_wire_for_message(db: &str, message_wire: &str) -> String {
+    Connection::open(db)
+        .expect("open catalog")
+        .query_row(
+            "SELECT session_id
+             FROM message_placements
+             WHERE message_id = ?1
+             ORDER BY session_id
+             LIMIT 1",
+            [message_wire],
+            |row| row.get(0),
+        )
+        .expect("message must have a canonical Session placement")
+}
+
 /// 不带 `--db` 跑一次 CLI——用于 `--help`/`--version`/`doctor` 等无需存储的命令。
 fn run_bare(args: &[&str]) -> Output {
     Command::new(BIN)
@@ -262,7 +277,7 @@ fn migrated_v6_catalog_stays_readable_until_complete_reingest_enables_context() 
     let (dir, db) = temp_db("migrated-v6-reingest");
     let session_native = "66111111-1111-4111-8111-111111111111";
     let message_native = "66222222-2222-4222-8222-222222222222";
-    let session_wire = format!("ses_v1_{session_native}");
+    let legacy_session_wire = format!("ses_v1_{session_native}");
     let message_wire = format!("msg_v1_{message_native}");
     let legacy_document_wire = "doc_v1_legacy-v6-document";
     let message_text = "legacy catalog survives migration";
@@ -277,7 +292,7 @@ fn migrated_v6_catalog_stays_readable_until_complete_reingest_enables_context() 
     create_v6_catalog(
         &db,
         &source_path,
-        &session_wire,
+        &legacy_session_wire,
         &message_wire,
         legacy_document_wire,
         message_text,
@@ -291,7 +306,7 @@ fn migrated_v6_catalog_stays_readable_until_complete_reingest_enables_context() 
             .is_some_and(|payload| payload.contains(message_text))
     );
 
-    let show = run(&db, &["show", &session_wire]);
+    let show = run(&db, &["show", &legacy_session_wire]);
     assert!(show.status.success(), "show failed: {}", stdout(&show));
     assert_eq!(
         parse_first_line(&show)["data"]["entity"]["document"],
@@ -307,7 +322,7 @@ fn migrated_v6_catalog_stays_readable_until_complete_reingest_enables_context() 
     assert!(
         entries
             .iter()
-            .any(|entry| entry["id"] == session_wire.as_str())
+            .any(|entry| entry["id"] == legacy_session_wire.as_str())
     );
     assert!(
         entries
@@ -315,7 +330,7 @@ fn migrated_v6_catalog_stays_readable_until_complete_reingest_enables_context() 
             .any(|entry| entry["id"] == message_wire.as_str())
     );
 
-    let context = run(&db, &["context", &session_wire]);
+    let context = run(&db, &["context", &legacy_session_wire]);
     assert_eq!(
         context.status.code(),
         Some(9),
@@ -341,6 +356,8 @@ fn migrated_v6_catalog_stays_readable_until_complete_reingest_enables_context() 
         stdout(&ingest)
     );
     assert_eq!(parse_first_line(&ingest)["data"]["skipped"], 0);
+    let session_wire = session_wire_for_message(&db, &message_wire);
+    assert_ne!(session_wire, legacy_session_wire);
 
     let context = run(&db, &["context", &session_wire]);
     assert!(
@@ -568,11 +585,11 @@ fn ingest_persists_session_and_document_entities_with_spans() {
     assert!(out.status.success(), "show failed: {}", stdout(&out));
     let frame = parse_first_line(&out);
     let entity = &frame["data"]["entity"];
-    let session_wire = "ses_v1_abcd1234-5678-4abc-8def-aabbccddeeff";
+    let session_wire = session_wire_for_message(&db, "msg_v1_33333333-3333-4333-8333-333333333333");
     assert_eq!(
         entity["session"],
-        session_wire,
-        "消息应引用 native 会话 id: {}",
+        session_wire.as_str(),
+        "消息应引用 canonical 会话 id: {}",
         stdout(&out)
     );
     // span round-trip：按 show 返回的区间切源文件字节 == 原始行。
@@ -585,7 +602,7 @@ fn ingest_persists_session_and_document_entities_with_spans() {
     );
 
     // 会话实体：引用文档 + 按序成员消息。
-    let out = run(&db, &["show", session_wire]);
+    let out = run(&db, &["show", &session_wire]);
     assert!(
         out.status.success(),
         "show session failed: {}",
@@ -1106,6 +1123,20 @@ fn machine_mode_version_emits_single_success_envelope() {
             .as_str()
             .is_some_and(|version| version.contains("agent-session-grep")),
         "data.version 应携带版本串: {frame}"
+    );
+}
+
+#[test]
+fn level_value_before_robot_flag_still_emits_robot_error_envelope() {
+    let out = run_bare(&["--level", "talks", "--robot", "context", "not-a-session-id"]);
+    assert_eq!(out.status.code(), Some(2), "{}", stdout(&out));
+    let frame = parse_first_line(&out);
+    assert_envelope_shape(&frame, false);
+    assert_eq!(frame["error"]["code"], "invalid_request", "{frame}");
+    assert!(
+        out.stderr.is_empty(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
     );
 }
 
@@ -1639,6 +1670,142 @@ fn hit_ids(frame: &serde_json::Value) -> Vec<String> {
 }
 
 #[test]
+fn search_guidance_robot_json_contains_fields_and_valid_commands() {
+    let (dir, db) = temp_db("guidance-robot");
+    let (fixture_path, _content, anchor_message) = write_context_fixture(dir.path());
+    let out = run(&db, &["ingest", &fixture_path]);
+    assert!(out.status.success(), "ingest failed: {}", stdout(&out));
+    let session_wire = session_wire_for_message(&db, &anchor_message);
+    let out = run(&db, &["search", "ctx"]);
+    assert!(out.status.success());
+    let frame = parse_first_line(&out);
+    assert_envelope_shape(&frame, true);
+    let hits = frame["data"]["hits"].as_array().expect("hits");
+    assert!(!hits.is_empty(), "至少一条命中: {frame}");
+    for hit in hits {
+        assert_eq!(
+            hit["session_id"].as_str(),
+            Some(session_wire.as_str()),
+            "{hit}"
+        );
+        assert!(
+            hit["why_matched"]
+                .as_array()
+                .is_some_and(|a| a.iter().any(|t| t == "ctx")),
+            "why_matched 必须包含字面词元 ctx: {hit}"
+        );
+        let suggested = hit["suggested_next_commands"]
+            .as_array()
+            .expect("suggested_next_commands");
+        assert_eq!(suggested.len(), 2, "{hit}");
+        assert!(
+            suggested[0]
+                .as_str()
+                .is_some_and(|c| c.contains("get-message")
+                    && c.contains(hit["id"].as_str().expect("id"))
+                    && c.contains(&session_wire)),
+            "get-message 建议必须含真实 message/session id: {suggested:?}"
+        );
+        assert!(
+            suggested[1]
+                .as_str()
+                .is_some_and(|c| c.contains("context ") && c.contains(&session_wire)),
+            "context 建议必须含真实 session wire id: {suggested:?}"
+        );
+    }
+}
+
+#[test]
+fn search_guidance_byte_budget_truncates_explicitly() {
+    // guidance 的 JSON 转义字节计入 clamp：两条 2000+ 字符正文的命中各带
+    // why_matched（widgets 词元）与 2 条建议命令，最小预算 4096（净 3072）下
+    // 必然显式截断，而不是悄悄溢出 envelope。
+    let (dir, db) = temp_db("guidance-budget");
+    let (fixture_path, _anchor_message, _a, _b) = write_session_hits_fixture(dir.path(), true);
+    let out = run(&db, &["ingest", &fixture_path]);
+    assert!(out.status.success(), "ingest failed: {}", stdout(&out));
+    let out = run(&db, &["search", "widgets", "--max-bytes", "4096"]);
+    assert_eq!(
+        out.status.code(),
+        Some(10),
+        "预算截断应 exit 10: {}",
+        stdout(&out)
+    );
+    let frame = parse_first_line(&out);
+    assert_envelope_shape(&frame, true);
+    assert_eq!(frame["outcome"], "partial", "{frame}");
+    assert!(
+        frame["data"]["truncation"]["truncated"].as_bool().unwrap(),
+        "{frame}"
+    );
+    assert_eq!(
+        frame["data"]["truncation"]["reason"].as_str().unwrap(),
+        "max_response_bytes",
+        "{frame}"
+    );
+    let hits = frame["data"]["hits"].as_array().expect("hits");
+    assert!(
+        hits.len() < 2,
+        "长正文 + guidance 放不进 4096 字节: {frame}"
+    );
+    for hit in hits {
+        assert!(
+            hit["why_matched"]
+                .as_array()
+                .is_some_and(|a| a.iter().any(|t| t == "widgets")),
+            "保留的命中仍带 guidance 证据: {hit}"
+        );
+        let suggested = hit["suggested_next_commands"]
+            .as_array()
+            .expect("保留的命中必须仍带建议命令");
+        assert_eq!(suggested.len(), 2, "{hit}");
+        assert!(
+            suggested.iter().any(|c| c.as_str().is_some_and(
+                |s| s.contains("get-message") && s.contains(hit["id"].as_str().expect("id"))
+            )),
+            "证据+建议同时计入 clamp 后，保留的命中上下一致: {hit}"
+        );
+    }
+}
+
+#[test]
+fn search_guidance_human_output_is_unchanged() {
+    // human 渲染不读 guidance 字段：输出与 guidance 加入前的形状一致。
+    let (_dir, db) = temp_db("guidance-human");
+    let out = run(&db, &["index", "g1", "human guidance probe"]);
+    assert!(out.status.success());
+    let out = run_human(&db, &["search", "guidance"]);
+    assert!(out.status.success());
+    let s = stdout(&out);
+    assert!(s.contains("hit(s) (generation"), "{s}");
+    assert!(s.contains("msg_v1_"), "{s}");
+    // `index` 命令只把 plain text 写入 catalog；Application 只从 JSON
+    // payload 的 `text` 字段装配预览，所以该 legacy 路径没有正文预览行。
+    // guidance 加入后仍不得改变这段 human 输出形状。
+    assert_eq!(s.lines().count(), 2, "{s}");
+    assert!(!s.contains("why_matched"), "{s}");
+    assert!(!s.contains("suggested_next_commands"), "{s}");
+    assert!(!s.contains("schema_version"), "{s}");
+}
+
+#[test]
+fn search_guidance_omits_suggestions_without_session_id() {
+    // 纯 index 写入的消息没有 placement → session_id None → get_message/context
+    // 建议必须省略；只有 why_matched 存在。
+    let (_dir, db) = temp_db("guidance-nosession");
+    let out = run(&db, &["index", "g1", "no session here guidance"]);
+    assert!(out.status.success());
+    let out = run(&db, &["search", "guidance"]);
+    assert!(out.status.success());
+    let frame = parse_first_line(&out);
+    let hit = &frame["data"]["hits"][0];
+    assert!(hit["session_id"].is_null(), "{hit}");
+    let suggested = &hit["suggested_next_commands"];
+    let exists_empty = suggested.is_null() || suggested.as_array().is_none_or(Vec::is_empty);
+    assert!(exists_empty, "无 session_id 时建议必须省略或为空: {hit}");
+}
+
+#[test]
 fn search_cursor_pages_partition_results() {
     let (_dir, db) = temp_db("cursor-pages");
     for (fact, text) in [
@@ -1766,7 +1933,7 @@ fn generation_bump_invalidates_cursor_with_exit_9() {
 }
 
 /// 写入 context e2e 用的真实 Claude 格式夹具（合成数据，含 sidechain 与 fork）：
-/// root → reply → { sidechain probe, mainline tail }。返回 (夹具字节, 会话 wire id)。
+/// root → reply → { sidechain probe, mainline tail }。返回夹具路径、字节和锚点消息。
 fn write_context_fixture(dir: &std::path::Path) -> (String, String, String) {
     let lines = concat!(
         r#"{"type":"user","uuid":"c0000000-0000-4000-8000-000000000001","parentUuid":null,"sessionId":"ccdd1234-5678-4abc-8def-001122334455","timestamp":"2026-07-26T01:00:00.000Z","message":{"role":"user","content":"ctx root question"}}"#,
@@ -1783,7 +1950,7 @@ fn write_context_fixture(dir: &std::path::Path) -> (String, String, String) {
     (
         fixture.to_string_lossy().into_owned(),
         lines.to_string(),
-        "ses_v1_ccdd1234-5678-4abc-8def-001122334455".to_string(),
+        "msg_v1_c0000000-0000-4000-8000-000000000001".to_string(),
     )
 }
 
@@ -1837,20 +2004,135 @@ fn write_relational_context_fixture(dir: &Path) -> RelationalContextFixture {
     RelationalContextFixture {
         paths: paths.try_into().expect("three fixture paths"),
         contents: [head_a, tail_a, source_b],
-        session_a: format!("ses_v1_{session_a_native}"),
-        session_b: format!("ses_v1_{session_b_native}"),
+        session_a: format!("msg_v1_{parent_a_native}"),
+        session_b: format!("msg_v1_{parent_b_native}"),
         parent_a: format!("msg_v1_{parent_a_native}"),
         parent_b: format!("msg_v1_{parent_b_native}"),
         shared_message: format!("msg_v1_{shared_native}"),
     }
 }
 
+fn write_oversized_anchor_fixture(dir: &Path) -> (String, String, usize) {
+    let message_native = "d0000000-0000-4000-8000-000000000001";
+    let session_native = "ddde1234-5678-4abc-8def-001122334455";
+    let body = "\"\n".repeat(4096);
+    let line = serde_json::json!({
+        "type": "user",
+        "uuid": message_native,
+        "parentUuid": null,
+        "sessionId": session_native,
+        "timestamp": "2026-07-26T01:00:00.000Z",
+        "message": { "role": "user", "content": body },
+    })
+    .to_string();
+    let fixture = dir.join("oversized-anchor.jsonl");
+    std::fs::write(&fixture, line).expect("write oversized anchor fixture");
+    (
+        fixture.to_string_lossy().into_owned(),
+        format!("msg_v1_{message_native}"),
+        body.len(),
+    )
+}
+
+#[test]
+fn get_message_oversized_anchor_respects_final_robot_byte_budget() {
+    let (dir, db) = temp_db("message-anchor-budget");
+    let (fixture_path, message_wire, original_text_len) =
+        write_oversized_anchor_fixture(dir.path());
+    let ingest = run(&db, &["ingest", &fixture_path]);
+    assert!(
+        ingest.status.success(),
+        "ingest failed: {}",
+        stdout(&ingest)
+    );
+    let session_wire = session_wire_for_message(&db, &message_wire);
+
+    let out = run(
+        &db,
+        &[
+            "get-message",
+            &message_wire,
+            "--session",
+            &session_wire,
+            "--around",
+            "0",
+            "--max-bytes",
+            "4096",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(10), "{}", stdout(&out));
+    assert!(
+        out.stdout.len() <= 4096,
+        "final Robot frame is {} bytes: {}",
+        out.stdout.len(),
+        stdout(&out)
+    );
+    let frame = parse_first_line(&out);
+    assert_envelope_shape(&frame, true);
+    assert_eq!(frame["outcome"], "partial", "{frame}");
+    assert_eq!(frame["data"]["message_id"], message_wire, "{frame}");
+    assert_eq!(frame["data"]["session_id"], session_wire, "{frame}");
+    assert_eq!(frame["data"]["messages"].as_array().unwrap().len(), 1);
+    let anchor = &frame["data"]["messages"][0];
+    assert_eq!(anchor["message_id"], message_wire, "{anchor}");
+    assert!(
+        anchor["payload"]["text"]
+            .as_str()
+            .is_some_and(|text| text.len() < original_text_len),
+        "oversized anchor text must be projected: {anchor}"
+    );
+    assert_eq!(frame["data"]["truncation"]["reason"], "max_response_bytes");
+}
+
+#[test]
+fn context_derived_view_respects_final_robot_byte_budget() {
+    let (dir, db) = temp_db("context-derived-budget");
+    let (fixture_path, _, _) = write_oversized_anchor_fixture(dir.path());
+    let ingest = run(&db, &["ingest", &fixture_path]);
+    assert!(
+        ingest.status.success(),
+        "ingest failed: {}",
+        stdout(&ingest)
+    );
+    let session_wire = session_wire_for_message(&db, "msg_v1_d0000000-0000-4000-8000-000000000001");
+
+    let out = run(
+        &db,
+        &[
+            "context",
+            &session_wire,
+            "--level",
+            "talks",
+            "--max-bytes",
+            "4096",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(10), "{}", stdout(&out));
+    assert!(
+        out.stdout.len() <= 4096,
+        "final Robot frame is {} bytes: {}",
+        out.stdout.len(),
+        stdout(&out)
+    );
+    let frame = parse_first_line(&out);
+    assert_envelope_shape(&frame, true);
+    assert_eq!(frame["outcome"], "partial", "{frame}");
+    assert_eq!(frame["data"]["requested_level"], "talks", "{frame}");
+    assert!(
+        frame["data"]["truncation"]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("max_response_bytes")),
+        "{frame}"
+    );
+}
+
 #[test]
 fn context_assembles_mainline_branch_with_evidence() {
     let (dir, db) = temp_db("context-mainline");
-    let (fixture_path, content, session_wire) = write_context_fixture(dir.path());
+    let (fixture_path, content, anchor_message) = write_context_fixture(dir.path());
     let out = run(&db, &["ingest", &fixture_path]);
     assert!(out.status.success(), "ingest failed: {}", stdout(&out));
+    let session_wire = session_wire_for_message(&db, &anchor_message);
 
     let out = run(&db, &["context", &session_wire]);
     assert!(out.status.success(), "context failed: {}", stdout(&out));
@@ -1944,6 +2226,7 @@ fn context_assembles_mainline_branch_with_evidence() {
 /// 把一个会话拆成两个文件写出：前半 root→reply，后半 sidechain + mainline tail。
 /// 两个文件都声明同一个 `sessionId`——这是真实语料里的常态（会话续写/分片），
 /// 而非人造边角：单会话被 55 个文件各自声明的情况已在真实数据回归中实测。
+/// 返回两个路径与可用于查询 canonical Session 的锚点 Message ID。
 fn write_split_session_fixture(dir: &std::path::Path) -> (String, String, String) {
     let head = concat!(
         r#"{"type":"user","uuid":"5p1i7000-0000-4000-8000-000000000001","parentUuid":null,"sessionId":"5p1i7aaa-1111-4bbb-8ccc-000000000001","timestamp":"2026-07-27T01:00:00.000Z","message":{"role":"user","content":"split root question"}}"#,
@@ -1964,7 +2247,7 @@ fn write_split_session_fixture(dir: &std::path::Path) -> (String, String, String
     (
         head_path.to_string_lossy().into_owned(),
         tail_path.to_string_lossy().into_owned(),
-        "ses_v1_5p1i7aaa-1111-4bbb-8ccc-000000000001".to_string(),
+        "msg_v1_5p1i7000-0000-4000-8000-000000000001".to_string(),
     )
 }
 
@@ -1973,12 +2256,13 @@ fn session_split_across_files_syncs_and_assembles_one_context() {
     // 修复前：两个源各自声明同一 ses_v1_ 却带不同成员列表，提交层判为冲突投影
     // 并整批拒绝（catalog_error / exit 6），真实语料因此完全无法入库。
     let (dir, db) = temp_db("split-session-one-batch");
-    let (head, tail, session_wire) = write_split_session_fixture(dir.path());
+    let (head, tail, anchor_message) = write_split_session_fixture(dir.path());
 
     let out = run(&db, &["sync", &head, &tail]);
     assert!(out.status.success(), "sync failed: {}", stdout(&out));
     let frame = parse_first_line(&out);
     assert_eq!(frame["data"]["messages"], 4, "frame={frame}");
+    let session_wire = session_wire_for_message(&db, &anchor_message);
 
     // 会话实体承载两个源的成员并集，并记录两个贡献文档。
     let out = run(&db, &["show", &session_wire]);
@@ -2072,7 +2356,11 @@ fn shared_message_keeps_per_session_parent_and_exact_evidence_across_split_sourc
         "divergent native parents must not alias"
     );
 
-    let session_a = run(&db, &["show", &fixture.session_a]);
+    let session_a_wire = session_wire_for_message(&db, &fixture.session_a);
+    let session_b_wire = session_wire_for_message(&db, &fixture.session_b);
+    assert_ne!(session_a_wire, session_b_wire);
+
+    let session_a = run(&db, &["show", &session_a_wire]);
     let session_a = parse_first_line(&session_a)["data"]["entity"].clone();
     assert_eq!(
         session_a["documents"]
@@ -2083,7 +2371,7 @@ fn shared_message_keeps_per_session_parent_and_exact_evidence_across_split_sourc
         "session A must span both source documents"
     );
 
-    let context_a = run(&db, &["context", &fixture.session_a]);
+    let context_a = run(&db, &["context", &session_a_wire]);
     assert!(
         context_a.status.success(),
         "session A context failed: {}",
@@ -2114,7 +2402,7 @@ fn shared_message_keeps_per_session_parent_and_exact_evidence_across_split_sourc
         fixture.contents[1].trim_end().as_bytes()
     );
 
-    let context_b = run(&db, &["context", &fixture.session_b]);
+    let context_b = run(&db, &["context", &session_b_wire]);
     assert!(
         context_b.status.success(),
         "session B context failed: {}",
@@ -2159,12 +2447,13 @@ fn shared_message_keeps_per_session_parent_and_exact_evidence_across_split_sourc
 fn session_synced_in_separate_invocations_keeps_both_halves() {
     // 真实用法：语料太大，分多次 sync。第二批不得覆盖第一批已记录的成员。
     let (dir, db) = temp_db("split-session-two-batches");
-    let (head, tail, session_wire) = write_split_session_fixture(dir.path());
+    let (head, tail, anchor_message) = write_split_session_fixture(dir.path());
 
     let out = run(&db, &["sync", &head]);
     assert!(out.status.success(), "first sync failed: {}", stdout(&out));
     let out = run(&db, &["sync", &tail]);
     assert!(out.status.success(), "second sync failed: {}", stdout(&out));
+    let session_wire = session_wire_for_message(&db, &anchor_message);
 
     let out = run(&db, &["show", &session_wire]);
     let entity = parse_first_line(&out)["data"]["entity"].clone();
@@ -2190,9 +2479,10 @@ fn session_synced_in_separate_invocations_keeps_both_halves() {
 #[test]
 fn context_budget_truncation_reports_partial_exit_10() {
     let (dir, db) = temp_db("context-budget");
-    let (fixture_path, _, session_wire) = write_context_fixture(dir.path());
+    let (fixture_path, _, anchor_message) = write_context_fixture(dir.path());
     let out = run(&db, &["ingest", &fixture_path]);
     assert!(out.status.success(), "ingest failed: {}", stdout(&out));
+    let session_wire = session_wire_for_message(&db, &anchor_message);
 
     let out = run(&db, &["context", &session_wire, "--max-messages", "2"]);
     // 部分成功：结果可用但被预算截断 → outcome partial + exit 10（contract §5）。
@@ -2253,9 +2543,10 @@ fn human_search_and_status_render_text_not_envelope() {
 #[test]
 fn human_context_renders_chain_and_partial_exits_10() {
     let (dir, db) = temp_db("human-context");
-    let (fixture_path, _, session_wire) = write_context_fixture(dir.path());
+    let (fixture_path, _, anchor_message) = write_context_fixture(dir.path());
     let out = run(&db, &["ingest", &fixture_path]);
     assert!(out.status.success(), "ingest failed: {}", stdout(&out));
+    let session_wire = session_wire_for_message(&db, &anchor_message);
 
     let out = run_human(&db, &["context", &session_wire]);
     assert!(out.status.success(), "context failed: {}", stdout(&out));
@@ -2407,9 +2698,10 @@ fn request_id_echoes_verbatim_and_invalid_is_rejected() {
 #[test]
 fn context_envelope_carries_warnings_array_on_modern_store() {
     let (dir, db) = temp_db("warnings-plumbing");
-    let (fixture_path, _, session_wire) = write_context_fixture(dir.path());
+    let (fixture_path, _, anchor_message) = write_context_fixture(dir.path());
     let out = run(&db, &["ingest", &fixture_path]);
     assert!(out.status.success());
+    let session_wire = session_wire_for_message(&db, &anchor_message);
 
     let out = run(&db, &["context", &session_wire]);
     assert!(out.status.success());
@@ -2716,16 +3008,15 @@ fn control_characters_in_query_are_invalid_request() {
 
 #[test]
 fn snippet_renders_in_human_search_but_is_stripped_in_machine_modes() {
-    // R1/ADR-0004：snippet 由 application 检索装配阶段从 canonical JSON payload
-    // 的 `text` 字段生成；human 渲染器打印片段行，json/jsonl/robot envelope
-    // 不得携带 snippet 字段（协议兼容）。index 命令写入裸文本 payload（无 text
-    // 字段），故用 ingest 的 canonical payload 路径验证。
+    // R1/ADR-0004 + 2026-08-14 决策：human search 渲染冻结的五列会话表
+    // （日期 | Provider | 会话标题 | 工作目录 | Session ID）；snippet 字段只在
+    // 旧版 per-hit 渲染中存在，机器模式（robot/json/jsonl）一律不得携带。
     let (dir, db) = temp_db("snippet");
     let fixture = dir.path().join("snippet.jsonl");
     std::fs::write(
         &fixture,
         concat!(
-            r#"{"type":"user","message":{"role":"user","content":"snippet visible in human output"}}"#,
+            r#"{"type":"user","uuid":"s0000000-0000-4000-8000-000000000001","sessionId":"s0000000-0000-4000-8000-000000000002","timestamp":"2026-07-26T01:00:00.000Z","message":{"role":"user","content":"snippet visible in human output"}}"#,
             "\n",
         ),
     )
@@ -2740,10 +3031,28 @@ fn snippet_renders_in_human_search_but_is_stripped_in_machine_modes() {
         "human search failed: {}",
         stdout(&out)
     );
+    let human = stdout(&out);
     assert!(
-        stdout(&out).contains("snippet visible in human output"),
-        "human 应渲染 snippet 行: {}",
-        stdout(&out)
+        human.contains("日期")
+            && human.contains("Provider")
+            && human.contains("会话标题")
+            && human.contains("工作目录")
+            && human.contains("Session ID"),
+        "human 应渲染固定五列表头: {human}"
+    );
+    assert!(
+        human.contains("claude-code"),
+        "human 应渲染 Provider 行: {human}"
+    );
+    // 真实日期（消息 timestamp 的 YYYY-MM-DD）和标题（命中 text）应被渲染，
+    // 而不是固定回退为 —。
+    assert!(
+        human.contains("2026-07-26"),
+        "human 应渲染真实最近活动日期: {human}"
+    );
+    assert!(
+        human.contains("snippet vis"),
+        "human 应以命中 text 作为会话标题（可能被尾部截断）: {human}"
     );
 
     for machine_args in [
@@ -2867,7 +3176,7 @@ fn multi_session_file_emits_visible_session_diagnostic() {
 
 // ─── R4/ADR-0008：search 命中携带 session_id 与 text 摘要 ───────────────────
 
-/// 带 sessionId 的合成 Claude 夹具：返回 (路径, 会话 wire id, 两条消息正文)。
+/// 带 sessionId 的合成 Claude 夹具：返回（路径、锚点消息 ID、两条消息正文）。
 /// `long` 为 true 时两条正文都超长（用于字节预算截断用例）。
 fn write_session_hits_fixture(dir: &Path, long: bool) -> (String, String, String, String) {
     let body_a = if long {
@@ -2898,7 +3207,7 @@ fn write_session_hits_fixture(dir: &Path, long: bool) -> (String, String, String
     std::fs::write(&fixture, format!("{line_a}\n{line_b}\n")).expect("write fixture");
     (
         fixture.to_string_lossy().into_owned(),
-        "ses_v1_abcd1234-5678-4abc-8def-aabbccddeeff".into(),
+        "msg_v1_aaaa1111-2222-4333-8444-555566667777".into(),
         body_a,
         body_b,
     )
@@ -2910,10 +3219,11 @@ fn search_robot_hits_carry_session_id_and_text() {
     // （正文摘要，按 max_snippet_chars 截取）。追加字段、无字段删除：id/score
     // 原样保留，机器模式仍不带 human-only 的 snippet。
     let (dir, db) = temp_db("hit-session-context");
-    let (fixture_path, session_wire, body_a, body_b) =
+    let (fixture_path, anchor_message, body_a, body_b) =
         write_session_hits_fixture(dir.path(), false);
     let out = run(&db, &["ingest", &fixture_path]);
     assert!(out.status.success(), "ingest failed: {}", stdout(&out));
+    let session_wire = session_wire_for_message(&db, &anchor_message);
 
     let out = run(&db, &["search", "widgets"]);
     assert!(out.status.success(), "search failed: {}", stdout(&out));
@@ -2952,9 +3262,11 @@ fn search_byte_budget_truncates_but_keeps_session_context_in_hits() {
     // 两条）；截断原因显式（max_response_bytes），保留下来的命中仍携带
     // session_id/text。
     let (dir, db) = temp_db("hit-session-budget");
-    let (fixture_path, session_wire, body_a, body_b) = write_session_hits_fixture(dir.path(), true);
+    let (fixture_path, anchor_message, body_a, body_b) =
+        write_session_hits_fixture(dir.path(), true);
     let out = run(&db, &["ingest", &fixture_path]);
     assert!(out.status.success(), "ingest failed: {}", stdout(&out));
+    let session_wire = session_wire_for_message(&db, &anchor_message);
 
     let out = run(&db, &["search", "widgets", "--max-bytes", "4096"]);
     // 预算截断按 contract §5 exit 10（partial）：结果可用但不完整，不伪装 success。
@@ -3002,9 +3314,10 @@ fn mcp_search_sessions_hits_carry_session_id_and_text() {
     // 追加的 session_id/text；id/score 与既有字段不删除（无字段删除，schema
     // minor）。tight 预算下 outcome=partial、截断原因显式。
     let (dir, db) = temp_db("mcp-hit-session-context");
-    let (fixture_path, session_wire, body_a, _) = write_session_hits_fixture(dir.path(), false);
+    let (fixture_path, anchor_message, body_a, _) = write_session_hits_fixture(dir.path(), false);
     let out = run(&db, &["ingest", &fixture_path]);
     assert!(out.status.success(), "ingest failed: {}", stdout(&out));
+    let session_wire = session_wire_for_message(&db, &anchor_message);
 
     let inputs = [
         serde_json::json!({
@@ -3047,6 +3360,278 @@ fn mcp_search_sessions_hits_carry_session_id_and_text() {
     );
 }
 
+// ─── search provider/time 过滤（08-13）：--provider/--since/--until ──────────
+
+/// 双 provider 共享 token 夹具：Claude 两条（带时间戳）+ Codex 一条
+/// （现代 codex 消息 timestamp 为 null）。Codex 消息被时间维度排除是
+/// design 的明示语义（authoritative timestamp 缺失即不匹配时间谓词）。
+fn write_filter_fixtures(dir: &Path) -> (String, String) {
+    let claude = dir.join("filter-claude.jsonl");
+    std::fs::write(
+        &claude,
+        concat!(
+            r#"{"type":"user","uuid":"f1111111-1111-4111-8111-111111111111","sessionId":"fa111111-1111-4111-8111-111111111111","timestamp":"2026-07-01T00:00:00.000Z","message":{"role":"user","content":"filterme early note"}}"#,
+            "\n",
+            r#"{"type":"assistant","uuid":"f1111111-1111-4111-8111-111111111112","parentUuid":"f1111111-1111-4111-8111-111111111111","sessionId":"fa111111-1111-4111-8111-111111111111","timestamp":"2026-07-28T00:00:00.000Z","message":{"role":"assistant","content":"filterme mid note"}}"#,
+            "\n",
+        ),
+    )
+    .expect("write claude filter fixture");
+    let codex = dir.join("filter-codex.jsonl");
+    std::fs::write(
+        &codex,
+        concat!(
+            r#"{"timestamp":"2026-08-10T00:00:00.000Z","type":"session_meta","payload":{"session_id":"fb222222-2222-4222-8222-222222222222","cwd":"/tmp","originator":"codex","cli_version":"1.0"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-08-10T00:01:00.000Z","type":"response_item","payload":{"type":"message","id":"msg_filter_codex","role":"user","content":[{"type":"input_text","text":"filterme codex note"}]}}"#,
+            "\n",
+        ),
+    )
+    .expect("write codex filter fixture");
+    (
+        claude.to_string_lossy().into_owned(),
+        codex.to_string_lossy().into_owned(),
+    )
+}
+
+fn filter_db(tag: &str) -> (tempfile::TempDir, String) {
+    let (dir, db) = temp_db(tag);
+    let (claude, codex) = write_filter_fixtures(dir.path());
+    for fixture in [&claude, &codex] {
+        let out = run(&db, &["ingest", fixture]);
+        assert!(out.status.success(), "ingest {fixture}: {}", stdout(&out));
+    }
+    (dir, db)
+}
+
+fn filtered_hit_ids(db: &str, extra: &[&str]) -> Vec<String> {
+    let mut args = vec!["search", "filterme"];
+    args.extend_from_slice(extra);
+    let out = run(db, &args);
+    assert!(
+        out.status.success(),
+        "search {args:?} failed: {}",
+        stdout(&out)
+    );
+    let frame = parse_first_line(&out);
+    assert_envelope_shape(&frame, true);
+    hit_ids(&frame)
+}
+
+fn bucket(ids: &[String], db: &str) -> (usize, usize, usize) {
+    let mut buckets = (0, 0, 0);
+    for id in ids {
+        let out = run(db, &["show", id]);
+        assert!(out.status.success(), "show {id}: {}", stdout(&out));
+        let text = parse_first_line(&out)["data"]["entity"]["text"]
+            .as_str()
+            .expect("entity text")
+            .to_string();
+        match text.as_str() {
+            "filterme early note" => buckets.0 += 1,
+            "filterme mid note" => buckets.1 += 1,
+            "filterme codex note" => buckets.2 += 1,
+            other => panic!("unexpected hit body: {other}"),
+        }
+    }
+    buckets
+}
+
+#[test]
+fn omitted_filters_preserve_baseline_search_results() {
+    let (_dir, db) = filter_db("filter-baseline");
+    let ids = filtered_hit_ids(&db, &[]);
+    assert_eq!(ids.len(), 3, "baseline={ids:?}");
+    assert_eq!(bucket(&ids, &db), (1, 1, 1), "{ids:?}");
+}
+
+#[test]
+fn provider_filter_subsets_and_multi_provider_or() {
+    let (_dir, db) = filter_db("filter-provider");
+    let claude = filtered_hit_ids(&db, &["--provider", "claude"]);
+    assert_eq!(bucket(&claude, &db), (1, 1, 0), "{claude:?}");
+    let codex = filtered_hit_ids(&db, &["--provider", "codex"]);
+    assert_eq!(bucket(&codex, &db), (0, 0, 1), "{codex:?}");
+    let both = filtered_hit_ids(&db, &["--provider", "codex", "--provider", "claude"]);
+    assert_eq!(bucket(&both, &db), (1, 1, 1), "{both:?}");
+    let dup = filtered_hit_ids(&db, &["--provider", "claude", "--provider", "claude"]);
+    assert_eq!(bucket(&dup, &db), (1, 1, 0), "{dup:?}");
+}
+
+#[test]
+fn time_filter_is_half_open_since_inclusive_until_exclusive() {
+    let (_dir, db) = filter_db("filter-time");
+    let since = filtered_hit_ids(&db, &["--since", "2026-07-28T00:00:00Z"]);
+    assert_eq!(bucket(&since, &db), (0, 1, 0), "since inclusive: {since:?}");
+    let until = filtered_hit_ids(&db, &["--until", "2026-07-28T00:00:00Z"]);
+    assert_eq!(bucket(&until, &db), (1, 0, 0), "until exclusive: {until:?}");
+    let window = filtered_hit_ids(
+        &db,
+        &[
+            "--since",
+            "2026-07-01T00:00:01Z",
+            "--until",
+            "2026-07-28T00:00:00Z",
+        ],
+    );
+    assert!(window.is_empty(), "[early+1s, mid) 应为空: {window:?}");
+    let offset = filtered_hit_ids(&db, &["--since", "2026-07-28T02:00:00+02:00"]);
+    assert_eq!(offset, since, "offset 形式应归一化为同一 UTC 下界");
+}
+
+#[test]
+fn provider_and_time_dimensions_are_anded() {
+    let (_dir, db) = filter_db("filter-and");
+    let hits = filtered_hit_ids(
+        &db,
+        &["--provider", "claude", "--since", "2026-07-28T00:00:00Z"],
+    );
+    assert_eq!(bucket(&hits, &db), (0, 1, 0), "{hits:?}");
+    let empty = filtered_hit_ids(
+        &db,
+        &["--provider", "claude", "--until", "2026-07-01T00:00:00Z"],
+    );
+    assert!(empty.is_empty(), "零匹配应返回干净空页: {empty:?}");
+    let out = run(
+        &db,
+        &[
+            "search",
+            "filterme",
+            "--provider",
+            "claude",
+            "--until",
+            "2026-07-01T00:00:00Z",
+        ],
+    );
+    let frame = parse_first_line(&out);
+    assert_envelope_shape(&frame, true);
+    assert_eq!(frame["data"]["hits"].as_array().expect("hits").len(), 0);
+    assert_eq!(frame["page"]["has_more"], false, "{frame}");
+    assert!(frame["page"]["next_cursor"].is_null(), "{frame}");
+}
+
+#[test]
+fn invalid_filters_are_usage_errors() {
+    let (_dir, db) = filter_db("filter-invalid");
+    for args in [
+        vec!["search", "filterme", "--provider", "gemini"],
+        vec!["search", "filterme", "--since", "yesterday-ish"],
+        vec!["search", "filterme", "--until", "2026-07-28 12:00:00"],
+        vec![
+            "search",
+            "filterme",
+            "--since",
+            "2026-08-10T00:00:00Z",
+            "--until",
+            "2026-07-01T00:00:00Z",
+        ],
+        vec![
+            "search",
+            "filterme",
+            "--since",
+            "2026-07-28T00:00:00Z",
+            "--until",
+            "2026-07-28T00:00:00Z",
+        ],
+        vec!["search", "filterme", "--provider"],
+        vec!["search", "filterme", "--since"],
+    ] {
+        let out = run(&db, &args);
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "{args:?} 应是 usage error: {}",
+            stdout(&out)
+        );
+        let frame = parse_first_line(&out);
+        assert_envelope_shape(&frame, false);
+        assert_eq!(
+            frame["error"]["code"], "invalid_request",
+            "{args:?}: {frame}"
+        );
+    }
+}
+
+#[test]
+fn compact_relative_duration_uses_application_clock() {
+    let (_dir, db) = filter_db("filter-relative");
+    let recent = filtered_hit_ids(&db, &["--since", "1h"]);
+    assert!(recent.is_empty(), "1h 内无任何历史夹具命中: {recent:?}");
+    let recent_days = filtered_hit_ids(&db, &["--since", "1d"]);
+    assert!(recent_days.is_empty(), "{recent_days:?}");
+    let recent_weeks = filtered_hit_ids(&db, &["--since", "1w"]);
+    assert!(recent_weeks.is_empty(), "{recent_weeks:?}");
+    let before_now = filtered_hit_ids(&db, &["--until", "1h"]);
+    assert_eq!(bucket(&before_now, &db), (1, 1, 0), "{before_now:?}");
+    let claude_before_now = filtered_hit_ids(&db, &["--until", "1w", "--provider", "claude"]);
+    assert_eq!(
+        bucket(&claude_before_now, &db),
+        (1, 1, 0),
+        "{claude_before_now:?}"
+    );
+}
+
+#[test]
+fn cursor_reissued_under_mutated_filters_is_rejected() {
+    let (_dir, db) = filter_db("filter-cursor");
+    let out = run(
+        &db,
+        &[
+            "search",
+            "filterme",
+            "--provider",
+            "claude",
+            "--max-items",
+            "1",
+        ],
+    );
+    assert!(out.status.success(), "page1: {}", stdout(&out));
+    let frame = parse_first_line(&out);
+    let token = frame["page"]["next_cursor"]
+        .as_str()
+        .expect("page1 must issue next_cursor")
+        .to_string();
+
+    let out = run(
+        &db,
+        &[
+            "search",
+            "filterme",
+            "--provider",
+            "claude",
+            "--max-items",
+            "1",
+            "--cursor",
+            &token,
+        ],
+    );
+    assert!(out.status.success(), "同过滤续读应成功: {}", stdout(&out));
+
+    for extra in [
+        vec!["--provider", "codex"],
+        vec!["--provider", "claude", "--since", "2026-07-28T00:00:00Z"],
+        vec![],
+    ] {
+        let mut args: Vec<&str> = vec!["search", "filterme", "--max-items", "1"];
+        args.extend_from_slice(&extra);
+        args.push("--cursor");
+        args.push(&token);
+        let out = run(&db, &args);
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "{args:?} 应拒绝变更过滤的 cursor: {}",
+            stdout(&out)
+        );
+        let frame = parse_first_line(&out);
+        assert_envelope_shape(&frame, false);
+        assert_eq!(
+            frame["error"]["code"], "cursor_invalid",
+            "{args:?}: {frame}"
+        );
+    }
+}
+
 /// 跑一个完整 MCP stdio 会话（逐行喂入 → EOF → 收集全部响应帧）。
 /// 只用于本文件内的 MCP 断言；mcp_e2e.rs 另有完整矩阵。
 fn mcp_frames(db: &str, inputs: &[serde_json::Value]) -> Vec<serde_json::Value> {
@@ -3080,4 +3665,273 @@ fn mcp_frames(db: &str, inputs: &[serde_json::Value]) -> Vec<serde_json::Value> 
                 .unwrap_or_else(|error| panic!("stdout not pure JSON-RPC: {error}\nline: {line}"))
         })
         .collect()
+}
+
+// ─── sync --discover ───────────────────────────────────────────────────────
+
+/// 在一个带隔离 HOME 的临时目录里构造 provider 数据根，让 `sync --discover`
+/// 能找到合成 fixture 而不触碰真实用户目录。
+fn discover_env() -> (tempfile::TempDir, String) {
+    let dir = tempfile::tempdir().expect("tempdir for discover home");
+    let home = dir.path().to_string_lossy().into_owned();
+    // provider_data_root 读 HOME（Unix）/ USERPROFILE（Windows）。
+    std::fs::create_dir_all(dir.path().join(".claude").join("projects"))
+        .expect("create claude projects root");
+    std::fs::create_dir_all(dir.path().join(".codex").join("sessions"))
+        .expect("create codex sessions root");
+    (dir, home)
+}
+
+/// 以隔离 HOME 运行 CLI（robot 模式），让 discover 解析到临时 provider 根。
+fn run_with_home(db: &str, home: &str, args: &[&str]) -> Output {
+    let mut cmd = Command::new(BIN);
+    cmd.arg("--db").arg(db).arg("--robot").args(args);
+    // 两个变量都设，避免平台/继承差异导致 provider_data_root 解析到真实 home。
+    cmd.env("HOME", home);
+    cmd.env("USERPROFILE", home);
+    cmd.output()
+        .expect("failed to spawn agent-session-grep binary")
+}
+
+fn claude_fixture(content: &str) -> String {
+    format!(
+        r#"{{"type":"user","uuid":"d1c00000-0000-4000-8000-000000000001","parentUuid":null,"sessionId":"d1c00000-0000-4000-8000-000000000002","timestamp":"2026-08-14T01:00:00.000Z","message":{{"role":"user","content":{content}}}}}"#
+    )
+}
+
+fn codex_fixture(content: &str) -> String {
+    // Codex rollout-style entry (payload.id 是 message id, payload.timestamp 绝对)。
+    format!(
+        r#"{{"timestamp":"2026-08-14T02:00:00.000Z","type":"response_item","payload":{{"type":"message","id":"d1e00000-0000-4000-8000-000000000001","role":"user","content":[{{"type":"input_text","text":{content}}}]}}}}"#
+    )
+}
+
+#[test]
+fn sync_discover_finds_and_syncs_provider_sources() {
+    let (home_dir, home) = discover_env();
+    let (_db_dir, db) = temp_db("discover-finds");
+    // 在 .claude/projects/<proj>/ 写一个 .jsonl；在 .codex/sessions/ 写一个。
+    let claude_proj = home_dir.path().join(".claude").join("projects").join("p1");
+    std::fs::create_dir_all(&claude_proj).expect("create claude proj dir");
+    let claude_file = claude_proj.join("c1.jsonl");
+    std::fs::write(
+        &claude_file,
+        format!("{}\n", claude_fixture("\"discover claude hello\"")),
+    )
+    .expect("write claude fixture");
+    let codex_dir = home_dir.path().join(".codex").join("sessions");
+    let codex_file = codex_dir.join("r1.jsonl");
+    std::fs::write(
+        &codex_file,
+        format!("{}\n", codex_fixture("\"discover codex hello\"")),
+    )
+    .expect("write codex fixture");
+
+    let out = run_with_home(&db, &home, &["sync", "--discover"]);
+    assert!(
+        out.status.success(),
+        "sync --discover failed: {}",
+        stdout(&out)
+    );
+    let frame = parse_first_line(&out);
+    assert_eq!(frame["command"], "sync", "{frame}");
+    assert_eq!(frame["outcome"], "success", "{frame}");
+    let discovery = &frame["data"]["discovery"];
+    assert_eq!(discovery["complete"], true, "{frame}");
+    let providers = discovery["providers"].as_array().expect("providers");
+    let claude = providers
+        .iter()
+        .find(|p| p["id"] == "claude-code")
+        .expect("claude-code in discovery");
+    assert_eq!(claude["found"], 1, "{frame}");
+    assert_eq!(claude["complete"], true, "{frame}");
+    let codex = providers
+        .iter()
+        .find(|p| p["id"] == "codex")
+        .expect("codex in discovery");
+    assert_eq!(codex["found"], 1, "{frame}");
+    assert_eq!(codex["complete"], true, "{frame}");
+    // 结果里绝不暴露绝对 transcript 路径（隐私契约）。
+    let blob = stdout(&out);
+    assert!(
+        !blob.contains("projects/p1") && !blob.contains("sessions/r1"),
+        "discovery result must not leak absolute transcript paths: {blob}"
+    );
+
+    // 两个 provider 的消息都可检索。
+    let out = run_with_home(&db, &home, &["search", "claude"]);
+    assert!(
+        stdout(&out).contains("msg_v1_"),
+        "claude search: {}",
+        stdout(&out)
+    );
+    let out = run_with_home(&db, &home, &["search", "codex"]);
+    assert!(
+        stdout(&out).contains("msg_v1_"),
+        "codex search: {}",
+        stdout(&out)
+    );
+}
+
+#[test]
+fn sync_discover_re_runs_converge() {
+    let (home_dir, home) = discover_env();
+    let (_db_dir, db) = temp_db("discover-converge");
+    let claude_proj = home_dir
+        .path()
+        .join(".claude")
+        .join("projects")
+        .join("conv");
+    std::fs::create_dir_all(&claude_proj).expect("create claude proj dir");
+    let claude_file = claude_proj.join("conv.jsonl");
+    std::fs::write(
+        &claude_file,
+        format!("{}\n", claude_fixture("\"converge hello\"")),
+    )
+    .expect("write claude fixture");
+
+    let out = run_with_home(&db, &home, &["sync", "--discover"]);
+    assert!(out.status.success(), "first discover: {}", stdout(&out));
+    let first = parse_first_line(&out);
+    let gen1 = first["data"]["generation"].as_u64().expect("generation");
+
+    // 第二次 discover，无变化：no-op，generation 不推进。
+    let out = run_with_home(&db, &home, &["sync", "--discover"]);
+    assert!(out.status.success(), "second discover: {}", stdout(&out));
+    let second = parse_first_line(&out);
+    let gen2 = second["data"]["generation"].as_u64().expect("generation");
+    assert_eq!(gen1, gen2, "re-run should not advance generation: {second}");
+    assert_eq!(second["data"]["committed"], 0, "{second}");
+}
+
+#[test]
+fn sync_discover_tombstones_removed_source_on_complete_scan() {
+    let (home_dir, home) = discover_env();
+    let (_db_dir, db) = temp_db("discover-tombstone");
+    let claude_proj = home_dir
+        .path()
+        .join(".claude")
+        .join("projects")
+        .join("tomb");
+    std::fs::create_dir_all(&claude_proj).expect("create claude proj dir");
+    let claude_file = claude_proj.join("tomb.jsonl");
+    std::fs::write(
+        &claude_file,
+        format!("{}\n", claude_fixture("\"tombstone keeper\"")),
+    )
+    .expect("write claude fixture");
+
+    // 首次 discover：源入库。
+    let out = run_with_home(&db, &home, &["sync", "--discover"]);
+    assert!(out.status.success(), "first discover: {}", stdout(&out));
+    let out = run_with_home(&db, &home, &["search", "tombstone"]);
+    assert!(
+        stdout(&out).contains("msg_v1_"),
+        "keeper visible: {}",
+        stdout(&out)
+    );
+
+    // 删除源文件后再次 discover：完整扫描 → 合成空批 tombstone。
+    std::fs::remove_file(&claude_file).expect("remove fixture");
+    let out = run_with_home(&db, &home, &["sync", "--discover"]);
+    assert!(out.status.success(), "second discover: {}", stdout(&out));
+    let frame = parse_first_line(&out);
+    let discovery = &frame["data"]["discovery"];
+    assert_eq!(discovery["complete"], true, "{frame}");
+    let claude = discovery["providers"]
+        .as_array()
+        .expect("providers")
+        .iter()
+        .find(|p| p["id"] == "claude-code")
+        .expect("claude-code");
+    assert_eq!(claude["removed"], 1, "removed source count: {frame}");
+    assert_eq!(claude["found"], 0, "{frame}");
+
+    // 消息已 tombstone，不再可检索。
+    let out = run_with_home(&db, &home, &["search", "tombstone"]);
+    assert!(
+        !stdout(&out).contains("msg_v1_"),
+        "removed source's messages must be tombstoned: {}",
+        stdout(&out)
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn sync_discover_partial_scan_does_not_tombstone() {
+    let (home_dir, home) = discover_env();
+    let (_db_dir, db) = temp_db("discover-partial");
+    let claude_proj = home_dir
+        .path()
+        .join(".claude")
+        .join("projects")
+        .join("partial");
+    std::fs::create_dir_all(&claude_proj).expect("create claude proj dir");
+    let claude_file = claude_proj.join("partial.jsonl");
+    std::fs::write(
+        &claude_file,
+        format!("{}\n", claude_fixture("\"partial keeper\"")),
+    )
+    .expect("write claude fixture");
+
+    // 首次 discover：源入库。
+    let out = run_with_home(&db, &home, &["sync", "--discover"]);
+    assert!(out.status.success(), "first discover: {}", stdout(&out));
+    let out = run_with_home(&db, &home, &["search", "partial"]);
+    assert!(
+        stdout(&out).contains("msg_v1_"),
+        "keeper visible: {}",
+        stdout(&out)
+    );
+
+    // 删除源文件并把整个 projects 目录设为不可读，模拟部分扫描失败。
+    std::fs::remove_file(&claude_file).expect("remove fixture");
+    let projects_root = home_dir.path().join(".claude").join("projects");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&projects_root)
+            .expect("meta")
+            .permissions();
+        perms.set_mode(0o000);
+        std::fs::set_permissions(&projects_root, perms).expect("chmod 000");
+    }
+
+    let out = run_with_home(&db, &home, &["sync", "--discover"]);
+    assert!(out.status.success(), "partial discover: {}", stdout(&out));
+    let frame = parse_first_line(&out);
+    let discovery = &frame["data"]["discovery"];
+    // 目录不可读 → complete=false。
+    assert_eq!(
+        discovery["complete"], false,
+        "partial scan must be incomplete: {frame}"
+    );
+    let claude = discovery["providers"]
+        .as_array()
+        .expect("providers")
+        .iter()
+        .find(|p| p["id"] == "claude-code")
+        .expect("claude-code");
+    assert_eq!(claude["complete"], false, "{frame}");
+    assert_eq!(
+        claude["removed"], 0,
+        "partial scan must not tombstone: {frame}"
+    );
+
+    // 不完整扫描不 tombstone，消息仍可检索。
+    let out = run_with_home(&db, &home, &["search", "partial"]);
+    assert!(
+        stdout(&out).contains("msg_v1_"),
+        "partial scan must not tombstone unseen sources: {}",
+        stdout(&out)
+    );
+
+    // 恢复权限以便 tempdir 清理。
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&projects_root)
+            .expect("meta")
+            .permissions();
+        perms.set_mode(0o755);
+        let _ = std::fs::set_permissions(&projects_root, perms);
+    }
 }

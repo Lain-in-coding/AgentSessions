@@ -18,7 +18,12 @@
   "commit": null,
   "pr_url": null,
   "subtasks": [],
-  "children": [],
+  "children": [
+    "08-13-context-summary-hints",
+    "08-13-search-match-guidance",
+    "08-13-search-provider-time-filters",
+    "08-13-message-around-context"
+  ],
   "parent": null,
   "relatedFiles": [],
   "notes": "",

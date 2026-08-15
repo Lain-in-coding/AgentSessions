@@ -40,6 +40,11 @@ pub struct CursorClaims {
     /// 排序方案标识：用例内常量（如 `"wire_id_asc"` / `"score_desc"`）或其摘要，
     /// [`verify`] 只做等值比较。
     pub sort_digest: String,
+    /// 结果集判别器（resume-protocol-prerequisites R2）：同一排序标识下不同
+    /// 结果序列（如 `list` 全部实体 vs `list_sessions` 仅会话）不得互换续读。
+    /// 旧令牌（serde default）为 `None`，与期望带判别器时 fail closed。
+    #[serde(default)]
+    pub result_set: Option<String>,
     /// 钉住排序内的续读偏移。
     pub offset: u64,
 }
@@ -77,6 +82,8 @@ pub struct CursorExpectations {
     pub query_digest: String,
     /// 本次请求的排序方案标识。
     pub sort_digest: String,
+    /// 本次请求的结果集判别器；`None` 表示该用例不区分结果集。
+    pub result_set: Option<String>,
 }
 
 /// Cursor 校验错误。每条消息都指示调用方去掉 cursor 重新发起查询——
@@ -167,6 +174,13 @@ pub fn verify(token: &str, expect: &CursorExpectations) -> Result<CursorClaims, 
             "cursor was issued for a different sort order".into(),
         ));
     }
+    if let Some(expected_set) = expect.result_set.as_deref()
+        && claims.result_set.as_deref() != Some(expected_set)
+    {
+        return Err(CursorError::Invalid(
+            "cursor was issued for a different result set".into(),
+        ));
+    }
     Ok(claims)
 }
 
@@ -255,6 +269,7 @@ mod tests {
             expires_at_ms: 1_000 + DEFAULT_TTL_MS,
             query_digest: digest_query("hello world"),
             sort_digest: "score_desc".into(),
+            result_set: None,
             offset: 40,
         }
     }
@@ -265,6 +280,7 @@ mod tests {
             active_generation: 7,
             query_digest: digest_query("hello world"),
             sort_digest: "score_desc".into(),
+            result_set: None,
         }
     }
 

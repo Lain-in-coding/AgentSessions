@@ -103,7 +103,19 @@ if ($DryRun) {
 if (-not (Test-Path -LiteralPath $Prefix)) {
     New-Item -ItemType Directory -Path $Prefix -Force | Out-Null
 }
-Copy-Item -LiteralPath $artifact -Destination $target -Force
+
+# 原子替换：先把新二进制落到同目录临时文件，再经 Move-Item 换名覆盖目标。
+# 直接 Copy-Item -Force 覆盖运行中的可执行文件在 Windows 上会因 EBUSY 失败，
+# 或留下目标被截断的窗口；先写后换名让读取方永远看到完整文件（install design）。
+$tempTarget = Join-Path $Prefix ".$binaryName.tmp-$(Get-Random)"
+try {
+    Copy-Item -LiteralPath $artifact -Destination $tempTarget -Force
+    Move-Item -LiteralPath $tempTarget -Destination $target -Force
+} finally {
+    if (Test-Path -LiteralPath $tempTarget) {
+        Remove-Item -LiteralPath $tempTarget -Force -ErrorAction SilentlyContinue
+    }
+}
 
 $versionLine = & $target --version
 $versionCode = $LASTEXITCODE
