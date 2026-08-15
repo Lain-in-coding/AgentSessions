@@ -35,6 +35,7 @@ use agent_session_grep_ports::{
     ParseReport, ProviderAdapter, ProviderSessionObservation, RedactionStatus, ResumeClaimsStore,
     RetrievalMode, SearchFilters, SearchProvider, SourceResumeClaim,
 };
+use agent_session_grep_provider_aider::AiderAdapter;
 use agent_session_grep_provider_claude::ClaudeCodeAdapter;
 use agent_session_grep_provider_cline::ClineAdapter;
 use agent_session_grep_provider_codebuddy::CodeBuddyAdapter;
@@ -1543,6 +1544,7 @@ fn attach_session_resume_rows(
 fn provider_registry() -> Vec<Box<dyn ProviderAdapter>> {
     vec![
         Box::new(ClaudeCodeAdapter::new()),
+        Box::new(AiderAdapter::new()),
         Box::new(CodexAdapter::new()),
         Box::new(GrokBuildAdapter::new()),
         Box::new(PiAdapter::new()),
