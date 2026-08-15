@@ -186,6 +186,21 @@ impl ProviderCapabilityMatrix {
                     source_span: CapabilityLevel::Native,
                     incremental: CapabilityLevel::Unsupported,
                 },
+                ProviderCapability {
+                    provider_id: "kimi-code".into(),
+                    variant_id: "kimi-code/wire-jsonl-v1".into(),
+                    maturity: ProviderMaturity::Experimental,
+                    discover: CapabilityLevel::Unsupported,
+                    probe: CapabilityLevel::Native,
+                    parse: CapabilityLevel::Native,
+                    search: CapabilityLevel::Native,
+                    context: CapabilityLevel::Unsupported,
+                    resume: CapabilityLevel::Unknown,
+                    handoff: CapabilityLevel::Unsupported,
+                    tool_activity: CapabilityLevel::Unsupported,
+                    source_span: CapabilityLevel::Native,
+                    incremental: CapabilityLevel::Unsupported,
+                },
             ],
         }
     }

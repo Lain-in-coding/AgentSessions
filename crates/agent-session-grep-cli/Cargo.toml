@@ -22,6 +22,7 @@ agent-session-grep-adapters-sqlite = { path = "../agent-session-grep-adapters-sq
 agent-session-grep-provider-claude = { path = "../agent-session-grep-provider-claude" }
 agent-session-grep-provider-codex = { path = "../agent-session-grep-provider-codex" }
 agent-session-grep-provider-grok = { path = "../agent-session-grep-provider-grok" }
+agent-session-grep-provider-kimi = { path = "../agent-session-grep-provider-kimi" }
 agent-session-grep-provider-pi = { path = "../agent-session-grep-provider-pi" }
 serde = { workspace = true }
 serde_json.workspace = true
