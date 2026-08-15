@@ -171,6 +171,21 @@ impl ProviderCapabilityMatrix {
                     source_span: CapabilityLevel::Native,
                     incremental: CapabilityLevel::Unsupported,
                 },
+                ProviderCapability {
+                    provider_id: "pi".into(),
+                    variant_id: "pi/session-jsonl-v1".into(),
+                    maturity: ProviderMaturity::Experimental,
+                    discover: CapabilityLevel::Unsupported,
+                    probe: CapabilityLevel::Native,
+                    parse: CapabilityLevel::Native,
+                    search: CapabilityLevel::Native,
+                    context: CapabilityLevel::Unsupported,
+                    resume: CapabilityLevel::Derived,
+                    handoff: CapabilityLevel::Unsupported,
+                    tool_activity: CapabilityLevel::Unsupported,
+                    source_span: CapabilityLevel::Native,
+                    incremental: CapabilityLevel::Unsupported,
+                },
             ],
         }
     }

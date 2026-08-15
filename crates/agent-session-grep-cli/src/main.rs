@@ -35,6 +35,7 @@ use agent_session_grep_ports::{
 use agent_session_grep_provider_claude::ClaudeCodeAdapter;
 use agent_session_grep_provider_codex::CodexAdapter;
 use agent_session_grep_provider_grok::GrokBuildAdapter;
+use agent_session_grep_provider_pi::PiAdapter;
 use protocol::{CanonicalCode, ProtocolError};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -1516,6 +1517,7 @@ fn provider_registry() -> Vec<Box<dyn ProviderAdapter>> {
         Box::new(ClaudeCodeAdapter::new()),
         Box::new(CodexAdapter::new()),
         Box::new(GrokBuildAdapter::new()),
+        Box::new(PiAdapter::new()),
     ]
 }
 
