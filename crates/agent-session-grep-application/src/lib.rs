@@ -23,6 +23,7 @@ pub mod evidence;
 pub mod guidance;
 pub mod handoff_pack;
 pub mod hybrid;
+pub mod resume;
 
 pub use budget::{ResponseBudget, Truncation};
 pub use cjk::bigram_cjk;
