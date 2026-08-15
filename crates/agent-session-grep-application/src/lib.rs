@@ -21,6 +21,7 @@ pub mod cjk;
 pub mod cursor;
 pub mod evidence;
 pub mod guidance;
+pub mod handoff_pack;
 pub mod hybrid;
 
 pub use budget::{ResponseBudget, Truncation};
