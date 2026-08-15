@@ -28,6 +28,18 @@
         "generation": { "type": ["integer", "string", "null"] }
       }
     },
+    "redaction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "status", "ruleset_version", "redacted_count"],
+      "properties": {
+        "mode": { "enum": ["default", "revealed"] },
+        "status": { "enum": ["applied", "none", "partial"] },
+        "ruleset_version": { "type": "string", "maxLength": 64 },
+        "redacted_count": { "type": "integer", "minimum": 0 },
+        "audit_id": { "type": ["string", "null"], "maxLength": 128 }
+      }
+    },
     "errorBody": {
       "type": "object",
       "additionalProperties": false,
@@ -71,6 +83,8 @@
         "ok",
         "outcome",
         "data",
+        "retrieval_mode",
+        "redaction",
         "warnings",
         "page",
         "meta"
@@ -88,6 +102,10 @@
         "ok": { "const": true },
         "outcome": { "enum": ["success", "partial"] },
         "data": true,
+        "retrieval_mode": {
+          "enum": ["lexical", "semantic", "hybrid", "lexical_fallback"]
+        },
+        "redaction": { "$ref": "#/$defs/redaction" },
         "warnings": {
           "type": "array",
           "maxItems": 128,

@@ -3,7 +3,7 @@
   "name": "unified-release-contract",
   "title": "统一发布契约与 provider-scoped identity",
   "description": "",
-  "status": "planning",
+  "status": "in_progress",
   "dev_type": null,
   "scope": null,
   "package": "agentsessions-adapters-sqlite",

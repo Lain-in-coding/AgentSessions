@@ -262,6 +262,83 @@ pub struct SearchHit {
     pub resume_available: bool,
 }
 
+/// 检索模式：标识本次搜索结果使用哪种匹配策略（wire 字符串见 [`RetrievalMode::as_str`]）。
+///
+/// 与 `schemas/handoff/v1/pack.schema.json` 中 `retrieval_mode` 枚举一致。
+/// 当前所有检索均为 [`RetrievalMode::Lexical`]（语义检索尚未实现）；
+/// `LexicalFallback` 预留给语义检索失败后回退到词法检索的场景。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetrievalMode {
+    #[default]
+    Lexical,
+    Semantic,
+    Hybrid,
+    LexicalFallback,
+}
+
+impl RetrievalMode {
+    /// Wire 字符串（envelope `retrieval_mode` 字段值），与 schema 枚举一致。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RetrievalMode::Lexical => "lexical",
+            RetrievalMode::Semantic => "semantic",
+            RetrievalMode::Hybrid => "hybrid",
+            RetrievalMode::LexicalFallback => "lexical_fallback",
+        }
+    }
+}
+
+/// 脱敏状态：envelope `redaction` 字段的投影。
+///
+/// 与 `schemas/handoff/v1/pack.schema.json` 中 `redaction` 定义一致。
+/// 当前所有响应固定为 `mode=default, status=none`（脱敏实现尚未落地，
+/// 由后续任务完成）。`redacted_count` 为已脱敏条数；`audit_id` 关联审计记录。
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub struct RedactionStatus {
+    pub mode: RedactionMode,
+    pub status: RedactionState,
+    pub ruleset_version: String,
+    pub redacted_count: u64,
+    pub audit_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RedactionMode {
+    #[default]
+    Default,
+    Revealed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RedactionState {
+    Applied,
+    #[default]
+    None,
+    Partial,
+}
+
+impl RedactionMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RedactionMode::Default => "default",
+            RedactionMode::Revealed => "revealed",
+        }
+    }
+}
+
+impl RedactionState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RedactionState::Applied => "applied",
+            RedactionState::None => "none",
+            RedactionState::Partial => "partial",
+        }
+    }
+}
+
 /// 全文检索端口：对应 FTS5 主存（见 ADR-0001）。
 pub trait SearchIndex {
     /// 将实体文本纳入索引。`text` 为已抽取的可检索正文。
@@ -648,6 +725,10 @@ pub trait ProviderAdapter: Send + Sync {
         sink: &mut dyn CanonicalEventSink,
     ) -> Result<ParseReport, ProviderError>;
 }
+
+#[cfg(test)]
+pub mod capability;
+pub mod handoff;
 
 #[cfg(test)]
 mod tests {

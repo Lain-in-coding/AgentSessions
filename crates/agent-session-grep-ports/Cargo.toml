@@ -9,3 +9,5 @@ publish = false
 [dependencies]
 agent-session-grep-domain = { path = "../agent-session-grep-domain" }
 thiserror.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true

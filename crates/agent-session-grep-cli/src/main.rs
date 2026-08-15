@@ -29,8 +29,8 @@ use agent_session_grep_domain::{
     MessageRelation, SessionIdentityNamespace, Stability, StableId,
 };
 use agent_session_grep_ports::{
-    ParseReport, ProviderAdapter, ProviderSessionObservation, ResumeClaimsStore, SearchFilters,
-    SearchProvider, SourceResumeClaim,
+    ParseReport, ProviderAdapter, ProviderSessionObservation, RedactionStatus, ResumeClaimsStore,
+    RetrievalMode, SearchFilters, SearchProvider, SourceResumeClaim,
 };
 use agent_session_grep_provider_claude::ClaudeCodeAdapter;
 use agent_session_grep_provider_codex::CodexAdapter;
@@ -424,6 +424,8 @@ fn emit_result(
                 page,
                 warnings,
                 request_id,
+                RetrievalMode::default(),
+                &RedactionStatus::default(),
             ));
         }
     }
@@ -664,6 +666,8 @@ fn help_envelope(command: &str, data: serde_json::Value, request_id: Option<&str
         &protocol::Page::default(),
         &[],
         request_id,
+        RetrievalMode::default(),
+        &RedactionStatus::default(),
     )
 }
 
