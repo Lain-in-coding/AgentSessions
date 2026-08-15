@@ -61,6 +61,8 @@ name = "agent-session-grep-ports"
 version = "0.1.0"
 dependencies = [
  "agent-session-grep-domain",
+ "serde",
+ "serde_json",
  "thiserror",
 ]
 

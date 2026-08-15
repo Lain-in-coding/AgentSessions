@@ -13,7 +13,7 @@
 use agent_session_grep_application::AppError;
 use agent_session_grep_application::cursor::CursorError;
 use agent_session_grep_domain::DomainError;
-use agent_session_grep_ports::{PortError, ProviderError};
+use agent_session_grep_ports::{PortError, ProviderError, RedactionStatus, RetrievalMode};
 use serde_json::{Value, json};
 use std::io::{ErrorKind, Write};
 
@@ -331,6 +331,11 @@ pub struct Page {
 
 /// 成功 envelope。`data` 是已验证的 JSON Value，不接受未校验字符串片段。
 /// `warnings` 原样序列化进 envelope 数组；模式分支（human vs envelope）由 main.rs 决定。
+///
+/// `retrieval_mode` 标识本次检索使用的匹配策略（lexical/semantic/hybrid/lexical_fallback），
+/// 当前固定为 [`RetrievalMode::Lexical`]（语义检索尚未实现）。
+/// `redaction` 投影脱敏状态，当前固定为 `mode=default, status=none`（脱敏实现尚未落地）。
+#[allow(clippy::too_many_arguments)]
 pub fn success_envelope(
     command: &str,
     outcome: Outcome,
@@ -339,6 +344,8 @@ pub fn success_envelope(
     page: &Page,
     warnings: &[String],
     request_id: Option<&str>,
+    retrieval_mode: RetrievalMode,
+    redaction: &RedactionStatus,
 ) -> String {
     let outcome_str = match outcome {
         Outcome::Success => "success",
@@ -353,6 +360,14 @@ pub fn success_envelope(
         "ok": true,
         "outcome": outcome_str,
         "data": data,
+        "retrieval_mode": retrieval_mode.as_str(),
+        "redaction": {
+            "mode": redaction.mode.as_str(),
+            "status": redaction.status.as_str(),
+            "ruleset_version": redaction.ruleset_version,
+            "redacted_count": redaction.redacted_count,
+            "audit_id": redaction.audit_id,
+        },
         "warnings": warnings,
         "page": {
             "next_cursor": page.next_cursor.as_deref().map_or(Value::Null, |c| json!(c)),
@@ -602,6 +617,8 @@ mod tests {
             &Page::default(),
             &[],
             None,
+            RetrievalMode::default(),
+            &RedactionStatus::default(),
         );
         assert!(s.contains("\"schema_version\":\"1.0\""));
         assert!(s.contains("\"frame_type\":\"response\""));
@@ -614,6 +631,10 @@ mod tests {
         assert!(s.contains("\"next_cursor\":null"));
         assert!(s.contains("\"has_more\":false"));
         assert!(s.contains("\"warnings\":[]"));
+        assert!(s.contains("\"retrieval_mode\":\"lexical\""));
+        assert!(s.contains("\"mode\":\"default\""));
+        assert!(s.contains("\"status\":\"none\""));
+        assert!(s.contains("\"redacted_count\":0"));
     }
 
     #[test]
@@ -629,6 +650,8 @@ mod tests {
             },
             &[],
             None,
+            RetrievalMode::default(),
+            &RedactionStatus::default(),
         );
         assert!(s.contains("\"outcome\":\"partial\""));
         assert!(s.contains("\"next_cursor\":\"tok.abc\""));
@@ -646,9 +669,32 @@ mod tests {
             &Page::default(),
             &warnings,
             None,
+            RetrievalMode::default(),
+            &RedactionStatus::default(),
         );
         let v: Value = serde_json::from_str(&s).expect("envelope must be valid JSON");
         assert_eq!(v["warnings"], json!(["w1", "w2"]));
+    }
+
+    #[test]
+    fn success_envelope_carries_retrieval_mode_and_redaction() {
+        let s = success_envelope(
+            "search",
+            Outcome::Success,
+            json!({ "hits": [] }),
+            0,
+            &Page::default(),
+            &[],
+            None,
+            RetrievalMode::default(),
+            &RedactionStatus::default(),
+        );
+        let v: Value = serde_json::from_str(&s).expect("envelope must be valid JSON");
+        assert_eq!(v["retrieval_mode"], "lexical");
+        assert_eq!(v["redaction"]["mode"], "default");
+        assert_eq!(v["redaction"]["status"], "none");
+        assert_eq!(v["redaction"]["redacted_count"], 0);
+        assert_eq!(v["redaction"]["audit_id"], Value::Null);
     }
 
     #[test]
@@ -676,6 +722,8 @@ mod tests {
             &Page::default(),
             &[],
             Some("abc.123"),
+            RetrievalMode::default(),
+            &RedactionStatus::default(),
         );
         assert!(s.contains("\"request_id\":\"abc.123\""));
 
@@ -697,6 +745,8 @@ mod tests {
             &Page::default(),
             &[],
             None,
+            RetrievalMode::default(),
+            &RedactionStatus::default(),
         );
         assert!(s.contains("\"request_id\":\"cli-"));
         let s = progress_frame("sync", "staged", None);
@@ -835,6 +885,8 @@ mod tests {
             "request_id",
             "ok",
             "outcome",
+            "retrieval_mode",
+            "redaction",
             "warnings",
             "page",
             "meta",

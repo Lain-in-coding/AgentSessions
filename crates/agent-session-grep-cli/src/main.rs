@@ -28,7 +28,7 @@ use agent_session_grep_domain::{
     ContextPolicy, DomainError, EvidenceSpan, IdKind, MessageEdge, MessagePlacement,
     MessageRelation, Stability, StableId,
 };
-use agent_session_grep_ports::{ParseReport, ProviderAdapter};
+use agent_session_grep_ports::{ParseReport, ProviderAdapter, RedactionStatus, RetrievalMode};
 use agent_session_grep_provider_claude::ClaudeCodeAdapter;
 use agent_session_grep_provider_codex::CodexAdapter;
 use protocol::{CanonicalCode, ProtocolError};
@@ -418,6 +418,8 @@ fn emit_result(
                 page,
                 warnings,
                 request_id,
+                RetrievalMode::default(),
+                &RedactionStatus::default(),
             ));
         }
     }
@@ -641,6 +643,8 @@ fn help_envelope(command: &str, data: serde_json::Value, request_id: Option<&str
         &protocol::Page::default(),
         &[],
         request_id,
+        RetrievalMode::default(),
+        &RedactionStatus::default(),
     )
 }
 
