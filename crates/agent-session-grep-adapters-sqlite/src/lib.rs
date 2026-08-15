@@ -65,6 +65,52 @@ static NEXT_OPERATION_ID: AtomicU64 = AtomicU64::new(0);
 /// 32766（3.32+），一个大 batch 的 placement/entity 数远超此限，必须分块。
 const BATCH_IN_CHUNK: usize = 500;
 
+/// 批量 INSERT 每块行数。
+///
+/// 借鉴 hstry `bulk_insert_messages_in_tx`（MIT，
+/// hstry/crates/hstry-core/src/db.rs:2990）：同一事务内用多行 VALUES 语句
+/// 替代逐行 prepared execute，把往返次数从 N 压到 N/CHUNK。块内参数数
+/// 不得超过 SQLite 默认的 SQLITE_MAX_VARIABLE_NUMBER（999）；本文件最宽的
+/// 批量语句是 message_placements 的 8 列，8 × 100 = 800，与 hstry 的
+/// `COLS * ROWS_PER_CHUNK <= 950` 编译期断言保持同一保守上限（db.rs:3058）。
+const BULK_INSERT_ROWS_PER_CHUNK: usize = 100;
+const _: () = assert!(8 * BULK_INSERT_ROWS_PER_CHUNK <= 950);
+
+type PlacementInsertRow<'a> = (
+    &'a str,
+    &'a str,
+    &'a str,
+    &'a str,
+    i64,
+    i64,
+    Option<i64>,
+    Option<i64>,
+);
+
+/// 生成多行 VALUES 元组串：`rows` 个 `(?,?,...)`（每元组 `cols` 个占位符）。
+fn multi_row_values(rows: usize, cols: usize) -> String {
+    let mut sql = String::new();
+    for row in 0..rows {
+        if row > 0 {
+            sql.push(',');
+        }
+        sql.push('(');
+        for col in 0..cols {
+            if col > 0 {
+                sql.push(',');
+            }
+            sql.push('?');
+        }
+        sql.push(')');
+    }
+    sql
+}
+
+/// 生成 `IN (...)` 子句的占位符串：`count` 个逗号分隔的 `?`。
+fn in_placeholders(count: usize) -> String {
+    vec!["?"; count].join(",")
+}
+
 /// 把 id 列表切成不超过 [`BATCH_IN_CHUNK`] 的块（每块一个 `IN (...)` 查询）。
 fn chunk_ids<T: AsRef<str>>(ids: &[T]) -> Vec<&[T]> {
     ids.chunks(BATCH_IN_CHUNK).collect()
@@ -2285,6 +2331,11 @@ impl SqliteStore {
 
         let mut deletes = BTreeMap::new();
         let mut placement_delete_ids = BTreeSet::new();
+        // 失败/不完整扫描不变量（与 fast-resume `failed_incremental_scan` 同一
+        // 原则：任何 IO/解析/目录错误都不删除已索引内容）：relation_complete=false
+        // 的源绝不推导 tombstone——"这次没看到"不是"已被删除"，只有完整成功的
+        // 扫描才能确认缺席。CLI 层对截断尾源（Invalid 健康度）直接 retain 旧索引
+        // （不提交批次），同样不会走到这里。
         for prepared in prepared_sources.values() {
             if !prepared.relation_complete {
                 continue;
@@ -3513,76 +3564,61 @@ impl SqliteStore {
         let tx = conn.transaction().map_err(backend)?;
         Self::verify_pending_in_tx(&tx, pending, upserts, deletes, relations)?;
 
-        // Prepared statements hoisted out of the per-entity loops: 200K
-        // entities × 5 statements per batch paid a prepare/finalize per
-        // execute, which dominates the constant factor of first ingest.
-        // Scoped so the borrow ends before the relation/source loops below.
+        // 批量写入：同一事务内以多行 VALUES 语句替代逐行 prepared execute
+        // （借鉴 hstry bulk_insert_messages_in_tx，MIT，
+        // hstry/crates/hstry-core/src/db.rs:2990）。200K 实体 × 5 条语句的
+        // 逐行 execute 支配了首次 ingest 的常数因子；批量后每 100 实体只发
+        // 5 条语句。Scoped so the borrow ends before the relation/source
+        // loops below.
         {
-            let mut stmt_catalog_upsert = tx
-                .prepare(
-                    "INSERT INTO catalog(id, payload) VALUES(?1, ?2)
+            const _: () = assert!(2 * BULK_INSERT_ROWS_PER_CHUNK <= 950);
+            for chunk in upserts.chunks(BULK_INSERT_ROWS_PER_CHUNK) {
+                let sql = format!(
+                    "INSERT INTO catalog(id, payload) VALUES {}
                      ON CONFLICT(id) DO UPDATE SET payload = excluded.payload",
-                )
-                .map_err(backend)?;
-            // 按 rowid 删除而非按内容列 id 比较：fts5 的 id 是内容列不是 rowid，
-            // 内容比较会让每次删除整表扫描（O(N²) 病根）。rowid 在插入时回写进
-            // fts_ids.fts_rowid 边车，此处经边车 wire_id 主键 O(1) 定位；wire 与
-            // id_json 两种删除源都归一到该主键（同一实体只占一行 fts_ids）。
-            let mut stmt_fts_delete = tx
-                .prepare(
-                    "DELETE FROM fts
-                     WHERE rowid = (SELECT fts_rowid FROM fts_ids WHERE wire_id = ?1)",
-                )
-                .map_err(backend)?;
-            let mut stmt_fts_ids_delete = tx
-                .prepare("DELETE FROM fts_ids WHERE wire_id = ?1")
-                .map_err(backend)?;
-            let mut stmt_fts_insert = tx
-                .prepare("INSERT INTO fts(id, text) VALUES(?1, ?2)")
-                .map_err(backend)?;
-            let mut stmt_fts_ids_insert = tx
-                .prepare("INSERT INTO fts_ids(wire_id, id_json, fts_rowid) VALUES(?1, ?2, ?3)")
-                .map_err(backend)?;
-            let mut stmt_catalog_delete = tx
-                .prepare("DELETE FROM catalog WHERE id = ?1")
-                .map_err(backend)?;
-
-            for (id, payload, text) in upserts {
-                stmt_catalog_upsert
-                    .execute(rusqlite::params![id.as_str(), payload])
-                    .map_err(backend)?;
-                let id_json = serde_json::to_string(id).map_err(backend)?;
-                stmt_fts_delete.execute([id.as_str()]).map_err(backend)?;
-                stmt_fts_ids_delete
-                    .execute([id.as_str()])
-                    .map_err(backend)?;
-                // 只有 Message 实体进入 fts 全文表——session/document 是检索容器实体，
-                // 索引其正文会让搜索命中重复计数。fts_ids 身份边车则对所有 kind 保留：
-                // 它保真 kind+stability，rebuild 依赖它恢复非 Unstable 身份（见 rebuild_index）。
-                // fts_rowid 只对进入 fts 的 Message 行回写，其余保持 NULL——删除按
-                // NULL 定位即无操作，与旧语义一致（无 fts 行可删）。
-                // 索引侧 CJK bigram（ADR-0007）：写入 fts 的正文先经 bigram_cjk，
-                // 与查询侧 transform 配对（见 SearchIndex::query）。
-                let fts_rowid = if id.kind() == IdKind::Message {
-                    stmt_fts_insert
-                        .execute(rusqlite::params![id_json, bigram_cjk(text)])
-                        .map_err(backend)?;
-                    Some(tx.last_insert_rowid())
-                } else {
-                    None
-                };
-                stmt_fts_ids_insert
-                    .execute(rusqlite::params![id.as_str(), id_json, fts_rowid])
+                    multi_row_values(chunk.len(), 2)
+                );
+                let rows: Vec<(String, &Vec<u8>)> = chunk
+                    .iter()
+                    .map(|(id, payload, _)| (id.as_str().to_string(), payload))
+                    .collect();
+                let params: Vec<&dyn rusqlite::ToSql> = rows
+                    .iter()
+                    .flat_map(|(wire, payload)| {
+                        let c0: &dyn rusqlite::ToSql = wire;
+                        let c1: &dyn rusqlite::ToSql = payload;
+                        [c0, c1]
+                    })
+                    .collect();
+                tx.execute(&sql, rusqlite::params_from_iter(params))
                     .map_err(backend)?;
             }
-            for id in deletes {
-                stmt_catalog_delete
-                    .execute([id.as_str()])
-                    .map_err(backend)?;
-                stmt_fts_delete.execute([id.as_str()]).map_err(backend)?;
-                stmt_fts_ids_delete
-                    .execute([id.as_str()])
-                    .map_err(backend)?;
+            // fts 行与 fts_ids 身份边车的批量维护（含按 rowid 的旧行删除）：
+            // 与逐行路径同语义，rowid 显式分配（见 batch_upsert_fts_in_tx）。
+            Self::batch_upsert_fts_in_tx(&tx, upserts)?;
+            for chunk in deletes.chunks(BULK_INSERT_ROWS_PER_CHUNK) {
+                let ids: Vec<&str> = chunk.iter().map(|id| id.as_str()).collect();
+                let placeholders = in_placeholders(ids.len());
+                tx.execute(
+                    &format!("DELETE FROM catalog WHERE id IN ({placeholders})"),
+                    rusqlite::params_from_iter(ids.iter().copied()),
+                )
+                .map_err(backend)?;
+                tx.execute(
+                    &format!(
+                        "DELETE FROM fts
+                         WHERE rowid IN (
+                             SELECT fts_rowid FROM fts_ids WHERE wire_id IN ({placeholders})
+                         )"
+                    ),
+                    rusqlite::params_from_iter(ids.iter().copied()),
+                )
+                .map_err(backend)?;
+                tx.execute(
+                    &format!("DELETE FROM fts_ids WHERE wire_id IN ({placeholders})"),
+                    rusqlite::params_from_iter(ids.iter().copied()),
+                )
+                .map_err(backend)?;
             }
         }
 
@@ -3604,9 +3640,14 @@ impl SqliteStore {
                 }
             }
         }
-        for upsert in &relations.relation_upserts {
-            match upsert {
-                RelationUpsertManifest::Placement(placement) => {
+        // 关系行 upsert：多行批量（借鉴 hstry bulk_insert_messages_in_tx，MIT，
+        // hstry/crates/hstry-core/src/db.rs:2990）。message_placements 8 列 ×
+        // 100 行 = 800 参数，message_edges 4 列 × 100 行 = 400 参数，均低于
+        // SQLite 默认 999 变量上限（模块级编译期断言守住上限）。
+        {
+            let mut placement_rows: Vec<PlacementInsertRow<'_>> = Vec::new();
+            for upsert in &relations.relation_upserts {
+                if let RelationUpsertManifest::Placement(placement) = upsert {
                     let (byte_start, byte_end) = match &placement.span {
                         Some(span) => (
                             Some(i64::try_from(span.start).map_err(backend)?),
@@ -3614,51 +3655,88 @@ impl SqliteStore {
                         ),
                         None => (None, None),
                     };
-                    tx.execute(
-                        "INSERT INTO message_placements(
-                             placement_id, session_id, document_id, message_id,
-                             source_ordinal, is_sidechain, byte_start, byte_end
-                         ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-                         ON CONFLICT(placement_id) DO UPDATE SET
-                             session_id = excluded.session_id,
-                             document_id = excluded.document_id,
-                             message_id = excluded.message_id,
-                             source_ordinal = excluded.source_ordinal,
-                             is_sidechain = excluded.is_sidechain,
-                             byte_start = excluded.byte_start,
-                             byte_end = excluded.byte_end",
-                        rusqlite::params![
-                            placement.id.as_str(),
-                            placement.session_id.as_str(),
-                            placement.source_document_id.as_str(),
-                            placement.message_id.as_str(),
-                            i64::from(placement.source_ordinal),
-                            i64::from(placement.is_sidechain),
-                            byte_start,
-                            byte_end,
-                        ],
-                    )
-                    .map_err(backend)?;
+                    placement_rows.push((
+                        placement.id.as_str(),
+                        placement.session_id.as_str(),
+                        placement.source_document_id.as_str(),
+                        placement.message_id.as_str(),
+                        i64::from(placement.source_ordinal),
+                        i64::from(placement.is_sidechain),
+                        byte_start,
+                        byte_end,
+                    ));
                 }
-                RelationUpsertManifest::Edge(edge) => {
-                    tx.execute(
-                        "INSERT INTO message_edges(
-                             child_placement_id, parent_message_id,
-                             parent_native_id, relation
-                         ) VALUES(?1, ?2, ?3, ?4)
-                         ON CONFLICT(child_placement_id) DO UPDATE SET
-                             parent_message_id = excluded.parent_message_id,
-                             parent_native_id = excluded.parent_native_id,
-                             relation = excluded.relation",
-                        rusqlite::params![
-                            edge.child_placement_id.as_str(),
-                            edge.parent_message_id.as_str(),
-                            &edge.parent_native_id,
-                            edge.relation.as_str(),
-                        ],
-                    )
+            }
+            const _: () = assert!(8 * BULK_INSERT_ROWS_PER_CHUNK <= 950);
+            for chunk in placement_rows.chunks(BULK_INSERT_ROWS_PER_CHUNK) {
+                let sql = format!(
+                    "INSERT INTO message_placements(
+                         placement_id, session_id, document_id, message_id,
+                         source_ordinal, is_sidechain, byte_start, byte_end
+                     ) VALUES {}
+                     ON CONFLICT(placement_id) DO UPDATE SET
+                         session_id = excluded.session_id,
+                         document_id = excluded.document_id,
+                         message_id = excluded.message_id,
+                         source_ordinal = excluded.source_ordinal,
+                         is_sidechain = excluded.is_sidechain,
+                         byte_start = excluded.byte_start,
+                         byte_end = excluded.byte_end",
+                    multi_row_values(chunk.len(), 8)
+                );
+                let params: Vec<&dyn rusqlite::ToSql> = chunk
+                    .iter()
+                    .flat_map(|row| {
+                        let c0: &dyn rusqlite::ToSql = &row.0;
+                        let c1: &dyn rusqlite::ToSql = &row.1;
+                        let c2: &dyn rusqlite::ToSql = &row.2;
+                        let c3: &dyn rusqlite::ToSql = &row.3;
+                        let c4: &dyn rusqlite::ToSql = &row.4;
+                        let c5: &dyn rusqlite::ToSql = &row.5;
+                        let c6: &dyn rusqlite::ToSql = &row.6;
+                        let c7: &dyn rusqlite::ToSql = &row.7;
+                        [c0, c1, c2, c3, c4, c5, c6, c7]
+                    })
+                    .collect();
+                tx.execute(&sql, rusqlite::params_from_iter(params))
                     .map_err(backend)?;
+            }
+            let mut edge_rows: Vec<(&str, &str, Option<&str>, &str)> = Vec::new();
+            for upsert in &relations.relation_upserts {
+                if let RelationUpsertManifest::Edge(edge) = upsert {
+                    edge_rows.push((
+                        edge.child_placement_id.as_str(),
+                        edge.parent_message_id.as_str(),
+                        edge.parent_native_id.as_deref(),
+                        edge.relation.as_str(),
+                    ));
                 }
+            }
+            const _: () = assert!(4 * BULK_INSERT_ROWS_PER_CHUNK <= 950);
+            for chunk in edge_rows.chunks(BULK_INSERT_ROWS_PER_CHUNK) {
+                let sql = format!(
+                    "INSERT INTO message_edges(
+                         child_placement_id, parent_message_id,
+                         parent_native_id, relation
+                     ) VALUES {}
+                     ON CONFLICT(child_placement_id) DO UPDATE SET
+                         parent_message_id = excluded.parent_message_id,
+                         parent_native_id = excluded.parent_native_id,
+                         relation = excluded.relation",
+                    multi_row_values(chunk.len(), 4)
+                );
+                let params: Vec<&dyn rusqlite::ToSql> = chunk
+                    .iter()
+                    .flat_map(|row| {
+                        let c0: &dyn rusqlite::ToSql = &row.0;
+                        let c1: &dyn rusqlite::ToSql = &row.1;
+                        let c2: &dyn rusqlite::ToSql = &row.2;
+                        let c3: &dyn rusqlite::ToSql = &row.3;
+                        [c0, c1, c2, c3]
+                    })
+                    .collect();
+                tx.execute(&sql, rusqlite::params_from_iter(params))
+                    .map_err(backend)?;
             }
         }
 
@@ -3668,30 +3746,53 @@ impl SqliteStore {
                 [&source.source_path],
             )
             .map_err(backend)?;
-            for membership in &source.entity_memberships {
-                tx.execute(
+            // 每源成员行可能上千，多行批量插入（同 hstry bulk_insert 模式，
+            // 3 列 × 100 行 = 300 参数）。
+            const _: () = assert!(3 * BULK_INSERT_ROWS_PER_CHUNK <= 950);
+            for chunk in source.entity_memberships.chunks(BULK_INSERT_ROWS_PER_CHUNK) {
+                let sql = format!(
                     "INSERT INTO source_membership(source_path, message_id, document_id)
-                     VALUES(?1, ?2, ?3)",
-                    rusqlite::params![
-                        &source.source_path,
-                        &membership.entity_id,
-                        &membership.document_id
-                    ],
-                )
-                .map_err(backend)?;
+                     VALUES {}",
+                    multi_row_values(chunk.len(), 3)
+                );
+                let params: Vec<&dyn rusqlite::ToSql> = chunk
+                    .iter()
+                    .flat_map(|membership| {
+                        let c0: &dyn rusqlite::ToSql = &source.source_path;
+                        let c1: &dyn rusqlite::ToSql = &membership.entity_id;
+                        let c2: &dyn rusqlite::ToSql = &membership.document_id;
+                        [c0, c1, c2]
+                    })
+                    .collect();
+                tx.execute(&sql, rusqlite::params_from_iter(params))
+                    .map_err(backend)?;
             }
             tx.execute(
                 "DELETE FROM source_placement_membership WHERE source_path = ?1",
                 [&source.source_path],
             )
             .map_err(backend)?;
-            for placement_id in &source.placement_ids {
-                tx.execute(
+            const _: () = assert!(2 * BULK_INSERT_ROWS_PER_CHUNK <= 950);
+            for chunk in source.placement_ids.chunks(BULK_INSERT_ROWS_PER_CHUNK) {
+                let sql = format!(
                     "INSERT INTO source_placement_membership(source_path, placement_id)
-                     VALUES(?1, ?2)",
-                    rusqlite::params![&source.source_path, placement_id.as_str()],
-                )
-                .map_err(backend)?;
+                     VALUES {}",
+                    multi_row_values(chunk.len(), 2)
+                );
+                let rows: Vec<String> = chunk
+                    .iter()
+                    .map(|placement_id| placement_id.as_str().to_string())
+                    .collect();
+                let params: Vec<&dyn rusqlite::ToSql> = rows
+                    .iter()
+                    .flat_map(|placement_id| {
+                        let c0: &dyn rusqlite::ToSql = &source.source_path;
+                        let c1: &dyn rusqlite::ToSql = placement_id;
+                        [c0, c1]
+                    })
+                    .collect();
+                tx.execute(&sql, rusqlite::params_from_iter(params))
+                    .map_err(backend)?;
             }
             tx.execute(
                 "INSERT INTO source_scans(source_path, scanned_at_ms, len_bytes, fingerprint, provider_id)
@@ -3995,6 +4096,121 @@ impl SqliteStore {
         Ok(())
     }
 
+    /// 在给定事务内批量维护一批实体的 fts 行与 fts_ids 身份边车。
+    ///
+    /// 与 [`Self::upsert_fts_row_in_tx`]（单条路径）同语义，但以多行
+    /// `INSERT ... VALUES (...),(...),...` 批量执行（借鉴 hstry
+    /// `bulk_insert_messages_in_tx`，MIT，hstry/crates/hstry-core/src/db.rs:2990）：
+    /// 先按边车记录的 rowid 批量删除旧 fts 行（避免内容列整表扫描），再按
+    /// kind 门控——只有 Message 实体进入 fts 全文表，session/document 是
+    /// 容器实体，索引其正文会让搜索命中重复计数；非 Message 只保留身份边车
+    /// （fts_rowid 为 NULL，按 NULL 定位删除即无操作）。
+    ///
+    /// fts5 的 rowid 由本函数显式分配（`INSERT INTO fts(rowid, ...)`）：
+    /// 多行 INSERT 无法逐行取 `last_insert_rowid()`（只返回最后一行），而
+    /// `RETURNING rowid` 在 fts5 上不可用（实测返回 -1）。分配从当前
+    /// `MAX(rowid)+1` 起顺序递增；本批次每个 wire_id 至多出现一次且旧行
+    /// 已先删除，故不会与存量行或同批其他行冲突。索引侧正文与查询侧配对
+    /// 同一 CJK bigram transform（ADR-0007）。
+    fn batch_upsert_fts_in_tx(
+        tx: &rusqlite::Transaction<'_>,
+        upserts: &[(StableId, Vec<u8>, String)],
+    ) -> PortResult<()> {
+        if upserts.is_empty() {
+            return Ok(());
+        }
+        let mut next_fts_rowid: Option<i64> = None;
+        let mut allocate_rowid = || -> PortResult<i64> {
+            match next_fts_rowid {
+                Some(id) => {
+                    next_fts_rowid = Some(id + 1);
+                    Ok(id)
+                }
+                None => {
+                    let max: i64 = tx
+                        .query_row("SELECT COALESCE(MAX(rowid), 0) FROM fts", [], |row| {
+                            row.get(0)
+                        })
+                        .map_err(backend)?;
+                    next_fts_rowid = Some(max + 2);
+                    Ok(max + 1)
+                }
+            }
+        };
+        for chunk in upserts.chunks(BULK_INSERT_ROWS_PER_CHUNK) {
+            // StableId 无字符串反解构造器，故存其 serde JSON 以便查询时无损重建
+            // （wire 串不含 stability，无法从 as_str() 还原完整身份）。
+            let ids: Vec<&str> = chunk.iter().map(|(id, _, _)| id.as_str()).collect();
+            let placeholders = in_placeholders(ids.len());
+            tx.execute(
+                &format!(
+                    "DELETE FROM fts
+                     WHERE rowid IN (
+                         SELECT fts_rowid FROM fts_ids WHERE wire_id IN ({placeholders})
+                     )"
+                ),
+                rusqlite::params_from_iter(ids.iter().copied()),
+            )
+            .map_err(backend)?;
+            tx.execute(
+                &format!("DELETE FROM fts_ids WHERE wire_id IN ({placeholders})"),
+                rusqlite::params_from_iter(ids.iter().copied()),
+            )
+            .map_err(backend)?;
+
+            // 显式 rowid 的顺序与消息实体顺序一一对应；非 Message 边车行 rowid 为 NULL。
+            // 先收集自有行（id_json/wire 是逐实体新建的 String，不能跨语句借用），
+            // 再在 execute 语句内取引用构造参数。
+            let mut fts_rows: Vec<(i64, String, String)> = Vec::new();
+            let mut fts_ids_rows: Vec<(String, String, Option<i64>)> = Vec::new();
+            for (id, _payload, text) in chunk {
+                let id_json = serde_json::to_string(id).map_err(backend)?;
+                if id.kind() == IdKind::Message {
+                    let fts_rowid = allocate_rowid()?;
+                    fts_rows.push((fts_rowid, id_json.clone(), bigram_cjk(text)));
+                    fts_ids_rows.push((id.as_str().to_string(), id_json, Some(fts_rowid)));
+                } else {
+                    fts_ids_rows.push((id.as_str().to_string(), id_json, None));
+                }
+            }
+            if !fts_rows.is_empty() {
+                const _: () = assert!(3 * BULK_INSERT_ROWS_PER_CHUNK <= 950);
+                let sql = format!(
+                    "INSERT INTO fts(rowid, id, text) VALUES {}",
+                    multi_row_values(fts_rows.len(), 3)
+                );
+                let params: Vec<&dyn rusqlite::ToSql> = fts_rows
+                    .iter()
+                    .flat_map(|(rowid, id_json, text)| {
+                        let c0: &dyn rusqlite::ToSql = rowid;
+                        let c1: &dyn rusqlite::ToSql = id_json;
+                        let c2: &dyn rusqlite::ToSql = text;
+                        [c0, c1, c2]
+                    })
+                    .collect();
+                tx.execute(&sql, rusqlite::params_from_iter(params))
+                    .map_err(backend)?;
+            }
+            const _: () = assert!(3 * BULK_INSERT_ROWS_PER_CHUNK <= 950);
+            let sql = format!(
+                "INSERT INTO fts_ids(wire_id, id_json, fts_rowid) VALUES {}",
+                multi_row_values(fts_ids_rows.len(), 3)
+            );
+            let params: Vec<&dyn rusqlite::ToSql> = fts_ids_rows
+                .iter()
+                .flat_map(|(wire, id_json, rowid)| {
+                    let c0: &dyn rusqlite::ToSql = wire;
+                    let c1: &dyn rusqlite::ToSql = id_json;
+                    let c2: &dyn rusqlite::ToSql = rowid;
+                    [c0, c1, c2]
+                })
+                .collect();
+            tx.execute(&sql, rusqlite::params_from_iter(params))
+                .map_err(backend)?;
+        }
+        Ok(())
+    }
+
     /// 在给定事务内维护单条实体的 fts 行与 fts_ids 身份边车。
     ///
     /// 与批量提交路径同语义：先按边车记录的 rowid 删除旧 fts 行（避免内容列整表
@@ -4123,29 +4339,9 @@ impl SqliteStore {
         tx.execute("DELETE FROM fts_ids", []).map_err(backend)?;
         // 与提交路径一致：只有 Message 实体重投影进 fts，且把 fts5 行 rowid 回写
         // 进 fts_ids 边车，删除才能按 rowid 定位（见 ensure_fts_ids_rowid）。
-        {
-            let mut stmt_fts_insert = tx
-                .prepare("INSERT INTO fts(id, text) VALUES(?1, ?2)")
-                .map_err(backend)?;
-            let mut stmt_fts_ids_insert = tx
-                .prepare("INSERT INTO fts_ids(wire_id, id_json, fts_rowid) VALUES(?1, ?2, ?3)")
-                .map_err(backend)?;
-            for (id, _payload, text) in &upserts {
-                let id_json = serde_json::to_string(id).map_err(backend)?;
-                let fts_rowid = if id.kind() == IdKind::Message {
-                    // 与提交路径同一索引侧 transform（ADR-0007）。
-                    stmt_fts_insert
-                        .execute(rusqlite::params![id_json, bigram_cjk(text)])
-                        .map_err(backend)?;
-                    Some(tx.last_insert_rowid())
-                } else {
-                    None
-                };
-                stmt_fts_ids_insert
-                    .execute(rusqlite::params![id.as_str(), id_json, fts_rowid])
-                    .map_err(backend)?;
-            }
-        }
+        // 批量多行写入（与提交路径共用 batch_upsert_fts_in_tx；整表清空后
+        // rowid 从 1 起显式分配，语义与逐行 last_insert_rowid 一致）。
+        Self::batch_upsert_fts_in_tx(&tx, &upserts)?;
 
         tx.execute(
             "UPDATE store_metadata SET active_generation = ?1 WHERE singleton = 1",
@@ -5033,20 +5229,35 @@ where
 /// 把用户搜索词转成 FTS5 安全查询：按空白分词，每个词用双引号包裹成短语查询，
 /// 引号内的 FTS 保留字符（`: . - ( ) { } [ ] "`）按字面量匹配。
 ///
+/// 尾随的 `*` 保留在引号外（`work*` → `"work"*`）：FTS5 只有引号外的 `*` 才是
+/// 前缀操作符，包进引号（`"work*"`）会被分词器当字面分隔符丢弃，前缀查询静默
+/// 退化为精确词匹配。
+///
 /// 这样 `search "codebuddy mcp.json"` 或搜索 Windows 路径片段不会触发
-/// `fts5: syntax error near "."` 之类的底层错误。纯空白/纯标点输入返回空串。
+/// `fts5: syntax error near "."` 之类的底层错误，`hp-z8` 也不会被解析成
+/// `hp NOT z8`（连字符被引号字面量化，不再是 NOT 操作符）。
+/// 纯空白/纯标点输入返回空串。
+///
+/// 参考 hstry `sanitize_fts_query`（MIT，hstry/crates/hstry-core/src/db.rs:3177）
+/// 的逐 token 引号化 + 引号外前缀 `*` 模式；本项目保留 CJK bigram 前置变换
+/// （ADR-0007）与全标点词跳过。
 fn safe_fts_query(query: &str) -> String {
     let mut words: Vec<String> = Vec::new();
     for raw in query.split_whitespace() {
-        let word = raw.replace('"', "\"\"");
-        if word.is_empty() {
+        let is_prefix = raw.ends_with('*');
+        let stem = raw.trim_end_matches('*').replace('"', "\"\"");
+        if stem.is_empty() {
             continue;
         }
         // 全标点无字母数字的词对 FTS 无意义，跳过以免生成空短语 `""`。
-        if word.chars().all(|c| !c.is_alphanumeric()) {
+        if stem.chars().all(|c| !c.is_alphanumeric()) {
             continue;
         }
-        words.push(format!("\"{word}\""));
+        if is_prefix {
+            words.push(format!("\"{stem}\"*"));
+        } else {
+            words.push(format!("\"{stem}\""));
+        }
     }
     words.join(" ")
 }
@@ -5435,6 +5646,17 @@ mod tests {
     use super::*;
     use agent_session_grep_domain::{EvidenceSpan, IdKind, MessageRelation, Stability};
 
+    type PlacementSnapshotRow = (
+        String,
+        String,
+        String,
+        String,
+        i64,
+        i64,
+        Option<i64>,
+        Option<i64>,
+    );
+
     pub(crate) fn sid(kind: IdKind, fact: &[u8]) -> StableId {
         StableId::derive(kind, Stability::Reconstructed, &[fact])
     }
@@ -5453,7 +5675,13 @@ mod tests {
             ("mcp.json", "\"mcp.json\""),
             ("a:b x-y", "\"a:b\" \"x-y\""),
             ("\"phrase\"", "\"\"\"phrase\"\"\""),
-            ("prefix*", "\"prefix*\""),
+            // 尾随 `*` 保留在引号外才是 FTS5 前缀操作符（hstry sanitize 模式）；
+            // 包进引号会被分词器当字面分隔符丢弃，前缀查询静默退化。
+            ("prefix*", "\"prefix\"*"),
+            ("work*", "\"work\"*"),
+            ("a* b", "\"a\"* \"b\""),
+            ("a**", "\"a\"*"),
+            ("*a", "\"*a\""),
             ("column: value", "\"column:\" \"value\""),
             ("*", ""),
             ("* - :", ""),
@@ -5477,6 +5705,36 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn hyphenated_query_stays_literal_not_not_operator() {
+        // 回归（hstry sanitize_fts_query 修复的同一 misparse 类）：FTS5 裸查询
+        // `hp-z8` 被解析成 `hp NOT z8` 并报 `no such column: z8`。字面量化后
+        // 连字符不再是 NOT 操作符，含 `hp-z8` 的正文必须命中而不是语法错误。
+        let store = SqliteStore::open_in_memory().unwrap();
+        let id = sid(IdKind::Message, b"hyphen-m1");
+        store
+            .index(&id, "fixed the hp-z8 backplane firmware")
+            .unwrap();
+        let hits = store.query("hp-z8", 10).unwrap();
+        assert_eq!(hits.len(), 1, "hp-z8 must recall, not parse as NOT");
+        assert_eq!(hits[0].id, id);
+    }
+
+    #[test]
+    fn trailing_star_keeps_fts5_prefix_semantics() {
+        // hstry 模式：`*` 保留在引号外才是 FTS5 前缀操作符（`"work"*` 命中
+        // workstation）；包进引号（`"work*"`）会被分词器当字面分隔符丢弃，
+        // 前缀查询静默退化为精确词。纯字母数字查询输出与之前逐字节一致。
+        let store = SqliteStore::open_in_memory().unwrap();
+        let id = sid(IdKind::Message, b"prefix-m1");
+        store.index(&id, "the workstation was rebooted").unwrap();
+        let hits = store.query("work*", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, id);
+        // 精确词 `work` 不命中 workstation——证明 `*` 是前缀操作符而非字面量。
+        assert!(store.query("work", 10).unwrap().is_empty());
     }
 
     fn sqlite_failure(code: i32) -> rusqlite::Error {
@@ -6529,6 +6787,220 @@ mod tests {
         assert_eq!(store.get(&id).unwrap().unwrap(), b"role\tv2");
         assert!(store.query("one", 10).unwrap().is_empty());
         assert_eq!(store.query("two", 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn batched_commit_rows_match_sequential_commit_rows() {
+        // 批量 INSERT（多行 VALUES，100 行/块，见 BULK_INSERT_ROWS_PER_CHUNK）
+        // 与逐行 INSERT 必须落出相同的 catalog/fts/fts_ids/placement/edge 行。
+        // Store A 把整个 fixture 一次提交（256 实体 → 3 个 100 行块，走多行
+        // 批量语句）；Store B 逐实体提交（每批 1 条 entry/placement/edge →
+        // 逐行语句形状）。源级表（source_scans/source_membership 等）因源路径
+        // 分布按设计不同而不比较；会话/文档容器 payload 的兼容别名按源拓扑
+        // 重投影（document_id 归属不同），也不比较——消息 payload 必须逐字节相同。
+        let session = sid(IdKind::Session, b"batch-equiv-session");
+        let document = sid(IdKind::Document, b"batch-equiv-document");
+        let (source, _) = chain_source_batch("batched.jsonl", &session, &document, 250, 2);
+        assert!(
+            source.entries.len() > 200 && source.placements.len() > 200,
+            "fixture must span multiple 100-row chunks, got {} entries / {} placements",
+            source.entries.len(),
+            source.placements.len()
+        );
+
+        // Store A：单次大批次提交（多行批量路径）。
+        let store_a = SqliteStore::open_in_memory().unwrap();
+        store_a
+            .commit_source_batches_if_changed(std::slice::from_ref(&source))
+            .unwrap();
+
+        // Store B：逐实体提交（每批 1 条 entry → 逐行语句形状）。
+        let store_b = SqliteStore::open_in_memory().unwrap();
+        let mut container_entries: Vec<(StableId, Vec<u8>, String)> = source
+            .entries
+            .iter()
+            .filter(|(id, _, _)| id.kind() != IdKind::Message)
+            .cloned()
+            .collect();
+        container_entries.sort_by(|left, right| left.0.as_str().cmp(right.0.as_str()));
+        // 会话与文档实体必须先提交：placement 完整性校验要求被引用的
+        // session/document/message 实体已存在于 catalog。
+        for (index, entry) in container_entries.iter().enumerate() {
+            let batch = source_batch(
+                &format!("seq-container-{index}.jsonl"),
+                vec![entry.clone()],
+                vec![],
+                vec![],
+                true,
+            );
+            store_b
+                .commit_source_batches_if_changed(std::slice::from_ref(&batch))
+                .unwrap();
+        }
+        let message_entries: Vec<(StableId, Vec<u8>, String)> = source
+            .entries
+            .iter()
+            .filter(|(id, _, _)| id.kind() == IdKind::Message)
+            .cloned()
+            .collect();
+        for (index, entry) in message_entries.iter().enumerate() {
+            let placements: Vec<MessagePlacement> = source
+                .placements
+                .iter()
+                .filter(|placement| placement.message_id == entry.0)
+                .cloned()
+                .collect();
+            let edges: Vec<MessageEdge> = source
+                .edges
+                .iter()
+                .filter(|edge| {
+                    placements
+                        .iter()
+                        .any(|placement| placement.id == edge.child_placement_id)
+                })
+                .cloned()
+                .collect();
+            let batch = source_batch(
+                &format!("seq-msg-{index:04}.jsonl"),
+                vec![entry.clone()],
+                placements,
+                edges,
+                true,
+            );
+            store_b
+                .commit_source_batches_if_changed(std::slice::from_ref(&batch))
+                .unwrap();
+        }
+
+        // 实体级表行数相等。
+        for table in [
+            "catalog",
+            "fts",
+            "fts_ids",
+            "message_placements",
+            "message_edges",
+        ] {
+            assert_eq!(
+                table_count(&store_a, table),
+                table_count(&store_b, table),
+                "{table} row count must match between batched and sequential commits"
+            );
+        }
+        // 源级表按设计不同：Store A 1 个源，Store B 逐实体一源。
+        assert_eq!(table_count(&store_a, "source_scans"), 1);
+        assert_eq!(
+            table_count(&store_b, "source_scans"),
+            (message_entries.len() + container_entries.len()) as i64
+        );
+
+        // 消息 payload 逐实体相等（容器实体的兼容别名按源拓扑重投影，跳过）。
+        let catalog_payloads = |store: &SqliteStore| -> BTreeMap<String, Vec<u8>> {
+            let conn = store.conn.borrow();
+            let mut stmt = conn
+                .prepare("SELECT id, payload FROM catalog ORDER BY id")
+                .unwrap();
+            stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+            })
+            .unwrap()
+            .map(Result::unwrap)
+            .filter(|(wire, _)| !wire.starts_with("ses_v1_") && !wire.starts_with("doc_v1_"))
+            .collect()
+        };
+        assert_eq!(catalog_payloads(&store_a), catalog_payloads(&store_b));
+
+        // fts 正文逐实体相等（fts 存 id_json + bigram 正文）。
+        let fts_rows = |store: &SqliteStore| -> BTreeMap<String, String> {
+            let conn = store.conn.borrow();
+            let mut stmt = conn
+                .prepare("SELECT id, text FROM fts ORDER BY id")
+                .unwrap();
+            stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+        };
+        assert_eq!(fts_rows(&store_a), fts_rows(&store_b));
+
+        // fts_ids 边车逐实体相等（wire_id → id_json）。fts_rowid 是 FTS 内部
+        // 物理 rowid，批量和顺序插入的分配顺序可以不同，不属于目录语义；下方
+        // 另行断言每个 store 内部的 rowid 指向关系完整。
+        let fts_ids_rows = |store: &SqliteStore| -> BTreeMap<String, String> {
+            let conn = store.conn.borrow();
+            let mut stmt = conn
+                .prepare("SELECT wire_id, id_json FROM fts_ids ORDER BY wire_id")
+                .unwrap();
+            stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect()
+        };
+        assert_eq!(fts_ids_rows(&store_a), fts_ids_rows(&store_b));
+        for store in [&store_a, &store_b] {
+            let mismatched: i64 = store
+                .conn
+                .borrow()
+                .query_row(
+                    "SELECT COUNT(*) FROM fts f
+                     JOIN fts_ids fi ON fi.id_json = f.id
+                     WHERE fi.fts_rowid IS NULL OR fi.fts_rowid != f.rowid",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                mismatched, 0,
+                "fts_ids.fts_rowid must match the fts row's actual rowid"
+            );
+        }
+
+        // placements 全列相等。
+        let placement_rows = |store: &SqliteStore| -> Vec<PlacementSnapshotRow> {
+            let conn = store.conn.borrow();
+            let mut stmt = conn
+                .prepare(
+                    "SELECT placement_id, session_id, document_id, message_id,
+                                source_ordinal, is_sidechain, byte_start, byte_end
+                         FROM message_placements ORDER BY placement_id",
+                )
+                .unwrap();
+            stmt.query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                ))
+            })
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+        };
+        assert_eq!(placement_rows(&store_a), placement_rows(&store_b));
+
+        // edges 全列相等。
+        let edge_rows = |store: &SqliteStore| -> Vec<(String, String, Option<String>, String)> {
+            let conn = store.conn.borrow();
+            let mut stmt = conn
+                .prepare(
+                    "SELECT child_placement_id, parent_message_id, parent_native_id, relation
+                         FROM message_edges ORDER BY child_placement_id",
+                )
+                .unwrap();
+            stmt.query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+        };
+        assert_eq!(edge_rows(&store_a), edge_rows(&store_b));
     }
 
     #[test]

@@ -2198,10 +2198,65 @@ fn ingest_file(
     ))
 }
 
+/// JSONL 源健康度三态分类。改编自 fast-resume 的 `jsonl_health`
+/// （`src/adapters/shared.rs`，MIT License，Copyright (c) 2025 Stanislas Lange）：
+///
+/// - `Clean`：全部非空行都是合法 JSON；
+/// - `Partial`：存在坏行但之后仍有合法行——recoverable，解析时逐行跳过
+///   （provider 既有的 recoverable-skip 语义，此处只做源级分类）；
+/// - `Invalid`：坏行之后没有合法行——典型是尾部截断（EOF 落在记录中间，
+///   agent 正在写文件）。对已索引源采取 Retain：保留旧索引、不重 parse。
+///
+/// 行切分按字节（`\n`，容忍 `\r\n`），首行剥离 UTF-8 BOM，与 provider
+/// 解析语义一致。只读字节，不碰文件系统。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JsonlHealth {
+    Clean,
+    Partial,
+    Invalid,
+}
+
+fn jsonl_health(bytes: &[u8]) -> JsonlHealth {
+    let mut valid_rows = 0usize;
+    let mut malformed_rows = 0usize;
+    let mut valid_after_last_malformed = false;
+    for (index, raw_line) in bytes.split(|b| *b == b'\n').enumerate() {
+        let mut line = raw_line.strip_suffix(b"\r").unwrap_or(raw_line);
+        if index == 0 {
+            line = line.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(line);
+        }
+        if line.iter().all(|b| b.is_ascii_whitespace()) {
+            continue;
+        }
+        if serde_json::from_slice::<serde_json::Value>(line).is_err() {
+            malformed_rows += 1;
+            valid_after_last_malformed = false;
+        } else {
+            valid_rows += 1;
+            if malformed_rows > 0 {
+                valid_after_last_malformed = true;
+            }
+        }
+    }
+    match (valid_rows, malformed_rows) {
+        (_, 0) => JsonlHealth::Clean,
+        (0, _) => JsonlHealth::Invalid,
+        _ if valid_after_last_malformed => JsonlHealth::Partial,
+        _ => JsonlHealth::Invalid,
+    }
+}
+
 /// 同步显式给定的源文件：所有文件先完成 capture + stage + verify，之后才提交
 /// 一个 durable batch。这样任一文件失败都不会留下其它文件的部分更新。
 /// `progress` 为 true（仅 jsonl 模式）时逐源发 progress frame——staging 是
 /// 长任务里唯一逐文件推进的阶段，提交本身是单事务不可分。
+///
+/// 扫描期健康分诊（fast-resume `jsonl_health` 模式）：已索引过的源若检出截断尾
+/// （`JsonlHealth::Invalid`，agent 正在写），Retain——不重 parse、不推进指纹、
+/// 不提交，保留旧索引并报诊断，避免 rebuild churn 与误 tombstone；写完后再 sync
+/// 会因指纹不匹配走完整重扫。新源（无缓存指纹）没有旧索引可保留，照常走
+/// recoverable-skip：有效前缀提交、截断行计入 skipped + 诊断（relation_complete
+/// = false，store 层不推导 tombstone）。
 fn sync_files(
     store: &SqliteStore,
     paths: &[String],
@@ -2284,6 +2339,7 @@ fn sync_files_inner(
     let mut snapshots = Vec::with_capacity(paths.len());
     let mut message_count = 0usize;
     let mut skipped_count = 0usize;
+    let mut retained_count = 0usize;
     let mut diagnostic_count = 0usize;
     let mut diagnostics = Vec::new();
 
@@ -2303,6 +2359,7 @@ fn sync_files_inner(
         let cached_fp = cached.get(path).and_then(|(_, fp)| fp.clone());
         // 空文件（0 字节）不能走指纹跳过：它必须作为"整源清空"批次提交
         // 以 tombstone 旧消息；跳过会退化成空批 no-op，丢失 tombstone 语义。
+        let mut retained = false;
         let (staged, variant) = if !bytes.is_empty()
             && cached_fp.as_deref() == Some(snap.fingerprint.as_str())
             && !relation_recovery_paths.contains(path)
@@ -2312,21 +2369,50 @@ fn sync_files_inner(
             // 会走 membership/scan 对比），因此这里只需空 staged 占位。
             unchanged_messages += unchanged_counts.get(path).copied().unwrap_or(0);
             (None, None)
+        } else if !bytes.is_empty()
+            && cached_fp.is_some()
+            && jsonl_health(&bytes) == JsonlHealth::Invalid
+        {
+            // 截断尾（EOF 落在记录中间）＝agent 正在写这个源。已索引过的源
+            // 必须 Retain：不重 parse、不推进指纹、不提交——旧索引原样保留，
+            // 不产生 rebuild churn，也不误 tombstone（fast-resume
+            // Invalid→Retain 语义）。只报诊断；文件写完后再 sync 会因指纹
+            // 不匹配走完整重扫。新源（cached_fp 为 None）无旧索引可保留，
+            // 落到下一分支走既有 recoverable-skip。
+            retained = true;
+            retained_count += 1;
+            diagnostics.push(format!(
+                "source {} of {}: truncated tail (a JSON record is cut off at EOF, \
+                 the file may still be written); keeping previously indexed content \
+                 — re-run sync when the file is complete",
+                index + 1,
+                paths.len()
+            ));
+            diagnostic_count += 1;
+            (None, None)
         } else {
             let (staged, variant) = stage_with_registry(&bytes)?;
             (Some(staged), Some(variant))
         };
         if progress {
-            // 措辞如实区分两种路径：指纹命中只是 checked（未 parse），
-            // 走完整解析的才是 scanned——不得把缓存命中的源谎报为 "staged (0 messages)"。
-            let message = match &staged {
-                Some(staged) => format!(
+            // 措辞如实区分三种路径：指纹命中只是 checked（未 parse），
+            // 走完整解析的才是 scanned，截断尾 retain 是 kept——不得谎报
+            // 缓存命中的源为 "staged (0 messages)"。
+            let message = match (&staged, retained) {
+                (Some(staged), _) => format!(
                     "scanned source {}/{} ({} messages)",
                     index + 1,
                     paths.len(),
                     staged.messages.len()
                 ),
-                None => format!("checked source {}/{} (unchanged)", index + 1, paths.len()),
+                (None, true) => format!(
+                    "retained source {}/{} (truncated tail — keeping previous index)",
+                    index + 1,
+                    paths.len()
+                ),
+                (None, false) => {
+                    format!("checked source {}/{} (unchanged)", index + 1, paths.len())
+                }
             };
             protocol::write_stdout_line(&protocol::progress_frame("sync", &message, request_id));
         }
@@ -2370,7 +2456,8 @@ fn sync_files_inner(
         .map_err(ProtocolError::from)?;
     let generation = store.active_generation().map_err(ProtocolError::from)?;
     // `emitted` 只统计本次实际解析的消息；指纹缓存命中的源按已存消息数
-    // 计入 unchanged（与 emitted 同单位：消息数）。
+    // 计入 unchanged（与 emitted 同单位：消息数）。截断尾被 retain 的源既不
+    // 解析也不提交，单列 `retained`（源数），其诊断进 warnings 通道。
     let committed = if changed { message_count } else { 0 };
     let warnings = diagnostic_warnings(diagnostics.iter().map(String::as_str), diagnostic_count);
     let source_count = paths.len() + synthetic_batches.len();
@@ -2381,6 +2468,7 @@ fn sync_files_inner(
             "messages": message_count,
             "committed": committed,
             "unchanged": if changed { unchanged_messages } else { message_count + unchanged_messages },
+            "retained": retained_count,
             "skipped": skipped_count,
             "diagnostics": diagnostic_count,
             "generation": generation,
@@ -2755,6 +2843,48 @@ mod tests {
             installation_namespace("C:/fixtures/head.jsonl", "synthetic"),
             installation_namespace("D:/other/head.jsonl", "synthetic")
         );
+    }
+
+    #[test]
+    fn jsonl_health_classifies_clean_partial_and_truncated() {
+        // 完全合法（含无尾换行、CRLF、空行、首行 UTF-8 BOM、空文件）→ Clean。
+        assert_eq!(jsonl_health(b"{\"a\":1}\n{\"b\":2}\n"), JsonlHealth::Clean);
+        assert_eq!(jsonl_health(b"{\"a\":1}"), JsonlHealth::Clean);
+        assert_eq!(
+            jsonl_health(b"{\"a\":1}\r\n{\"b\":2}\r\n"),
+            JsonlHealth::Clean
+        );
+        assert_eq!(jsonl_health(b"\n  \n{\"a\":1}\n"), JsonlHealth::Clean);
+        assert_eq!(
+            jsonl_health(b"\xEF\xBB\xBF{\"a\":1}\n{\"b\":2}\n"),
+            JsonlHealth::Clean
+        );
+        assert_eq!(jsonl_health(b""), JsonlHealth::Clean);
+        // 坏行后仍有合法行 → Partial（recoverable-skip，provider 逐行跳过）。
+        assert_eq!(
+            jsonl_health(b"{\"a\":1}\n{\n{\"b\":2}\n"),
+            JsonlHealth::Partial
+        );
+        // 尾部截断（EOF 落在记录中间）与全垃圾 → Invalid（已索引源触发 Retain）。
+        assert_eq!(jsonl_health(b"{\"a\":1}\n{\"b\":2"), JsonlHealth::Invalid);
+        assert_eq!(jsonl_health(b"{\"a\":1\n"), JsonlHealth::Invalid);
+        assert_eq!(jsonl_health(b"{\n"), JsonlHealth::Invalid);
+        assert_eq!(jsonl_health(b"garbage"), JsonlHealth::Invalid);
+        // 与 fast-resume 测试矩阵对齐（shared.rs tests::classifies_clean_partial_and_invalid_jsonl）。
+        assert_eq!(
+            jsonl_health(b"{\"valid\":true}\n{\n{\"later\":true}\n"),
+            JsonlHealth::Partial
+        );
+        assert_eq!(jsonl_health(b"{\"valid\":true}\n{\n"), JsonlHealth::Invalid);
+    }
+
+    #[test]
+    fn jsonl_health_never_claims_completeness_on_error() {
+        // failed-scan 不变量在分类层的体现：任何无法完整解析的状态（截断/垃圾/
+        // 不可读）都不得给出 Clean——Clean 是"可安全替换旧索引"的唯一信号。
+        assert_ne!(jsonl_health(b"{\"a\":1}\n{\"b\":2"), JsonlHealth::Clean);
+        assert_ne!(jsonl_health(b"{\n"), JsonlHealth::Clean);
+        assert_ne!(jsonl_health(b"{\"a\":1}\n{\n"), JsonlHealth::Clean);
     }
 
     #[test]

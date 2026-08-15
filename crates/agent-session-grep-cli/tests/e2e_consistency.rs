@@ -31,31 +31,19 @@ fn consistency_script() -> PathBuf {
 }
 
 fn run_script(args: &[&str]) -> Output {
-    // Prefer `python` (Windows), fall back to `python3` (POSIX).
-    let candidates = ["python", "python3"];
-    let mut last_error: Option<Output> = None;
-    for interpreter in candidates {
-        let out = Command::new(interpreter)
-            .arg(consistency_script())
-            .args(args)
-            .output();
-        match out {
-            Ok(output) => {
-                if output.status.success() {
-                    return output;
-                }
-                last_error = Some(output);
-            }
-            Err(_) => continue,
-        }
-    }
-    last_error.unwrap_or_else(|| {
-        Command::new("python")
+    // Prefer `python` (Windows), fall back to `python3` (POSIX). Once an
+    // interpreter successfully spawns, preserve its real exit/output instead
+    // of allowing a later WindowsApps launcher stub to mask the failure.
+    for interpreter in ["python", "python3"] {
+        if let Ok(output) = Command::new(interpreter)
             .arg(consistency_script())
             .args(args)
             .output()
-            .expect("failed to spawn python for compare_entrypoints.py")
-    })
+        {
+            return output;
+        }
+    }
+    panic!("failed to spawn python for compare_entrypoints.py")
 }
 
 fn stdout(o: &Output) -> String {
@@ -83,8 +71,8 @@ fn consistency_report_cli_mcp_agree_pending_skipped_explicit() {
         "compare_entrypoints.py must exit 0, got {code}\nstderr: {stderr_text}"
     );
 
-    let report: serde_json::Value = serde_json::from_str(&stdout(&out))
-        .expect("report must be valid JSON");
+    let report: serde_json::Value =
+        serde_json::from_str(&stdout(&out)).expect("report must be valid JSON");
 
     // Schema version must match.
     assert_eq!(
@@ -128,11 +116,7 @@ fn consistency_report_cli_mcp_agree_pending_skipped_explicit() {
             .unwrap_or_default();
         let skipped: Vec<&str> = op["skipped"]
             .as_array()
-            .map(|a| {
-                a.iter()
-                    .filter_map(|v| v["entry_point"].as_str())
-                    .collect()
-            })
+            .map(|a| a.iter().filter_map(|v| v["entry_point"].as_str()).collect())
             .unwrap_or_default();
         for ep in ["cli", "mcp", "robot", "web", "tui"] {
             let in_compared = compared.contains(&ep);

@@ -169,9 +169,15 @@ def cli_run_operation(
         )
         return strip_robot_envelope(frame)
     if op == "list_sessions":
-        # CLI `list` takes a positional limit.
+        # CLI `list` exposes the complete catalog; MCP `list_sessions` is
+        # session-only. Normalize the CLI payload to the same session set.
         frame = run_cli_json(binary, db, ["list", str(CANONICAL_PAGE_SIZE)])
-        return strip_robot_envelope(frame)
+        payload = strip_robot_envelope(frame)
+        entries = payload.get("data", {}).get("entries", [])
+        payload.setdefault("data", {})["entries"] = [
+            entry for entry in entries if str(entry.get("id", "")).startswith("ses_v1_")
+        ]
+        return payload
     raise HarnessError(f"unknown canonical operation for CLI: {op}")
 
 

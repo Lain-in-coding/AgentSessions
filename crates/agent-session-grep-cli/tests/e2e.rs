@@ -1528,6 +1528,198 @@ fn sync_empty_source_tombstones_all_messages() {
     );
 }
 
+#[test]
+fn sync_truncated_tail_retains_previous_index_without_churn() {
+    // agent 正在写源：文件尾部被截断（EOF 落在记录中间）。已索引过的源必须
+    // retain——不重 parse、不推进指纹、不推进 generation、不 tombstone 旧内容，
+    // 只报诊断（fast-resume 的 Invalid→Retain 语义）；文件写完后再 sync 完整重扫。
+    let (dir, db) = temp_db("sync-truncated");
+    let fixture = dir.path().join("live.jsonl");
+    std::fs::write(
+        &fixture,
+        concat!(
+            r#"{"type":"user","message":{"role":"user","content":"tune the index"}}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"role":"assistant","content":"raise the batch size"}}"#,
+            "\n",
+        ),
+    )
+    .expect("write fixture");
+    let path = fixture.to_string_lossy().into_owned();
+
+    let out = run(&db, &["sync", &path]);
+    assert!(out.status.success(), "sync failed: {}", stdout(&out));
+    assert!(
+        stdout(&out).contains("\"generation\":1"),
+        "{}",
+        stdout(&out)
+    );
+
+    // 模拟 agent 正在写：追加一条未闭合记录（无尾换行，EOF 落在记录中间）。
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&fixture)
+        .expect("open fixture");
+    write!(
+        file,
+        r#"{{"type":"assistant","message":{{"role":"assistant","content":"still thinking"}}"#
+    )
+    .expect("append truncated tail");
+    drop(file);
+
+    let out = run(&db, &["sync", &path]);
+    assert!(
+        out.status.success(),
+        "truncated-tail sync must succeed: {}",
+        stdout(&out)
+    );
+    let frame = parse_first_line(&out);
+    assert_eq!(frame["data"]["retained"], 1, "{frame}");
+    assert_eq!(frame["data"]["emitted"], 0, "截断源不应重 parse: {frame}");
+    assert_eq!(frame["data"]["committed"], 0, "{frame}");
+    assert_eq!(
+        frame["data"]["generation"], 1,
+        "retain 不应推进 generation: {frame}"
+    );
+    let warnings = frame["warnings"].as_array().expect("warnings");
+    assert!(
+        warnings.iter().any(|warning| warning
+            .as_str()
+            .is_some_and(|text| text.contains("truncated"))),
+        "retain 诊断必须可见: {frame}"
+    );
+
+    // 已索引内容零丢失：两条旧消息仍可检索。
+    for needle in ["tune", "batch"] {
+        let out = run(&db, &["search", needle]);
+        assert!(
+            stdout(&out).contains("msg_v1_"),
+            "search {needle} 应命中已索引内容: {}",
+            stdout(&out)
+        );
+    }
+}
+
+#[test]
+fn sync_new_truncated_source_parses_valid_prefix_recoverably() {
+    // 从未索引过的新源带截断尾：没有旧索引可 retain，走既有 recoverable-skip——
+    // 有效前缀照常解析提交（可搜索），截断行计入 skipped + 诊断（relation_complete
+    // = false，store 层不推导 tombstone）。
+    let (dir, db) = temp_db("sync-new-truncated");
+    let fixture = dir.path().join("brand-new.jsonl");
+    std::fs::write(
+        &fixture,
+        concat!(
+            r#"{"type":"user","message":{"role":"user","content":"complete line"}}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"role":"assistant","content":"half-written"}"#,
+        ),
+    )
+    .expect("write fixture");
+    let path = fixture.to_string_lossy().into_owned();
+
+    let out = run(&db, &["sync", &path]);
+    assert!(out.status.success(), "sync failed: {}", stdout(&out));
+    let frame = parse_first_line(&out);
+    assert_eq!(frame["data"]["messages"], 1, "有效前缀应解析: {frame}");
+    assert_eq!(frame["data"]["committed"], 1, "有效前缀应提交: {frame}");
+    assert_eq!(frame["data"]["skipped"], 1, "截断行应计 skipped: {frame}");
+    assert_eq!(frame["data"]["diagnostics"], 1, "{frame}");
+    let out = run(&db, &["search", "complete"]);
+    assert!(stdout(&out).contains("msg_v1_"), "search={}", stdout(&out));
+}
+
+#[test]
+fn sync_partial_scan_never_tombstones_unseen_messages() {
+    // 不完整扫描（坏行 + 消息被移除）：relation_complete=false → store 层只并集
+    // 观察到的 claims、不推导 tombstone（fast-resume failed_incremental_scan
+    // 不变量：任何解析错误都不删除已索引内容）。"这次没看到"≠"已被删除"。
+    let (dir, db) = temp_db("sync-partial");
+    let fixture = dir.path().join("partial.jsonl");
+    std::fs::write(
+        &fixture,
+        concat!(
+            r#"{"type":"user","message":{"role":"user","content":"keep this message"}}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"role":"assistant","content":"unseen message"}}"#,
+            "\n",
+        ),
+    )
+    .expect("write fixture");
+    let path = fixture.to_string_lossy().into_owned();
+
+    let out = run(&db, &["sync", &path]);
+    assert!(out.status.success(), "sync failed: {}", stdout(&out));
+    let out = run(&db, &["search", "unseen"]);
+    assert!(stdout(&out).contains("msg_v1_"), "search={}", stdout(&out));
+
+    // 重写：中部一行坏 JSON（recoverable skip），同时"删掉"了 unseen 消息。
+    // 扫描不完整 → 本次没看到的 unseen 消息必须原样保留。
+    std::fs::write(
+        &fixture,
+        concat!(
+            "{ this is not json }\n",
+            r#"{"type":"user","message":{"role":"user","content":"keep this message"}}"#,
+            "\n",
+        ),
+    )
+    .expect("rewrite fixture");
+
+    let out = run(&db, &["sync", &path]);
+    assert!(
+        out.status.success(),
+        "partial sync must succeed: {}",
+        stdout(&out)
+    );
+    let frame = parse_first_line(&out);
+    assert_eq!(frame["data"]["skipped"], 1, "坏行应计 skipped: {frame}");
+    assert_eq!(frame["data"]["committed"], 1, "好行应提交: {frame}");
+    let out = run(&db, &["search", "unseen"]);
+    assert!(
+        stdout(&out).contains("msg_v1_"),
+        "不完整扫描不得 tombstone 未看到的消息: {}",
+        stdout(&out)
+    );
+}
+
+#[test]
+fn sync_io_error_during_rescan_never_tombstones() {
+    // 硬错误（源文件消失）：capture 失败 → 整批 sync 失败，什么都不写。
+    // 已索引内容必须原样保留（fast-resume failed_incremental_scan 不变量：
+    // 任何 IO/解析错误都不删除已索引会话）。
+    let (dir, db) = temp_db("sync-io-error");
+    let fixture = dir.path().join("gone.jsonl");
+    std::fs::write(
+        &fixture,
+        concat!(
+            r#"{"type":"user","message":{"role":"user","content":"survives the error"}}"#,
+            "\n",
+        ),
+    )
+    .expect("write fixture");
+    let path = fixture.to_string_lossy().into_owned();
+
+    let out = run(&db, &["sync", &path]);
+    assert!(out.status.success(), "sync failed: {}", stdout(&out));
+    let out = run(&db, &["search", "survives"]);
+    assert!(stdout(&out).contains("msg_v1_"), "search={}", stdout(&out));
+
+    // 源消失后重扫：sync 必须失败（错误 envelope），且 catalog 原样保留。
+    std::fs::remove_file(&fixture).expect("remove fixture");
+    let out = run(&db, &["sync", &path]);
+    assert!(
+        !out.status.success(),
+        "缺失源的 sync 必须失败: {}",
+        stdout(&out)
+    );
+    let out = run(&db, &["search", "survives"]);
+    assert!(
+        stdout(&out).contains("msg_v1_"),
+        "失败的扫描不得丢已索引内容: {}",
+        stdout(&out)
+    );
+}
+
 // ─── Robot v1 Envelope 契约 E2E ────────────────────────────────────────────
 
 #[test]

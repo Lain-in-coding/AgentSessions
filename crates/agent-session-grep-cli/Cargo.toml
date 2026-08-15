@@ -22,5 +22,7 @@ ratatui.workspace = true
 crossterm.workspace = true
 
 [dev-dependencies]
-rusqlite = { version = "0.40", features = ["bundled"] }
+# default-features = false 与 adapters-sqlite 保持一致,避免 test 图的特性
+# 统一把 cache/ffi-sqlite-wasm-rs 重新拉回来。
+rusqlite = { version = "0.40", default-features = false, features = ["bundled"] }
 tempfile = "3"
