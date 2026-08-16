@@ -404,6 +404,12 @@ fn run(
     if rest.first().map(String::as_str) == Some("serve") {
         let mut args = rest[1..].to_vec();
         let port_value = extract_flag(&mut args, "--port")?;
+        let lan_requested = take_bool_flag(&mut args, "--lan");
+        if lan_requested {
+            return Err(CliError::usage(
+                "serve --lan: capability_not_supported; this release is loopback-only",
+            ));
+        }
         if !args.is_empty() {
             return Err(CliError::usage("serve takes no positional arguments"));
         }
