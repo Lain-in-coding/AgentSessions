@@ -19,7 +19,20 @@ class GateManifestTests(unittest.TestCase):
         for entry in labels["queries"]:
             self.assertTrue(entry["query"])
             self.assertTrue(entry["expected_message_ids"])
-            self.assertTrue(entry["expected_session_ids"])
+            # Canonical session ids are digests over the corpus location, so the
+            # labels pin provider-native ids and the harness resolves canonical
+            # ids at run time. A pinned ses_v1_* here would break on any move.
+            self.assertTrue(entry["expected_provider_session_ids"])
+            self.assertNotIn("expected_session_ids", entry)
+            for native in entry["expected_provider_session_ids"]:
+                self.assertFalse(native.startswith("ses_v1_"))
+
+    def test_discovery_roots_cover_every_fixture_group(self) -> None:
+        # If a fixture group has no data-root mapping, discovery coverage would
+        # plant it nowhere and silently measure a lower number.
+        groups = {path.parent.name for path in GATE.corpus_files()}
+        self.assertTrue(groups)
+        self.assertTrue(groups.issubset(set(GATE.DISCOVERY_ROOTS)))
 
     def test_corpus_files_exclude_labels_manifest(self) -> None:
         files = GATE.corpus_files()

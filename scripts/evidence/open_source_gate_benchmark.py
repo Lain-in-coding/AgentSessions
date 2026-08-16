@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import platform
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -30,7 +32,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from core_beta_benchmark import (  # noqa: E402
     cli,
     command_text,
+    parse_frame,
     rounded_summary,
+    run_process,
     sha256_file,
     tree_hash,
 )
@@ -56,6 +60,14 @@ GATE_THRESHOLDS = {
 INFORMATIONAL_METRICS = {
     "semantic_recall_at_10",
     "hybrid_recall_at_10",
+}
+
+# Where each fixture group is planted for the discovery measurement, keyed by
+# the fixture subdirectory name. The suffix must match `provider_data_root` in
+# the CLI — if the two drift, discovery coverage would silently read 0.
+DISCOVERY_ROOTS = {
+    "claude": ("claude-code", Path(".claude") / "projects"),
+    "codex": ("codex", Path(".codex") / "sessions"),
 }
 
 
@@ -159,6 +171,218 @@ def lexical_recall_at_10(
     return recall_at_10(binary, workspace, db, labels, "lexical")
 
 
+def discovery_coverage(
+    binary: Path,
+    workspace: Path,
+    scratch: Path,
+    fixture_files: list[Path],
+) -> dict[str, Any]:
+    """Measure what fraction of planted sources `sync --discover` finds.
+
+    Each fixture is planted under the data root of the provider that wrote it
+    (`claude/` → `~/.claude/projects`, `codex/` → `~/.codex/sessions`), then
+    discovery runs against a fake HOME containing only those copies. Real user
+    transcripts are never read: the gate corpus is synthetic and HOME/USERPROFILE
+    are redirected for this one call.
+    """
+    fake_home = scratch / "discovery-home"
+    planted_by_provider: dict[str, int] = {}
+    for source in fixture_files:
+        group = source.parent.name
+        if group not in DISCOVERY_ROOTS:
+            raise RuntimeError(
+                f"fixture {source.name} lives in unmapped group {group!r}; "
+                f"add it to DISCOVERY_ROOTS so discovery coverage stays honest"
+            )
+        provider_id, root_suffix = DISCOVERY_ROOTS[group]
+        planted_root = fake_home / root_suffix
+        planted_root.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, planted_root / source.name)
+        planted_by_provider[provider_id] = planted_by_provider.get(provider_id, 0) + 1
+
+    env = dict(os.environ)
+    env["HOME"] = str(fake_home)
+    env["USERPROFILE"] = str(fake_home)
+    db = scratch / "discovery.db"
+    sample = run_process(
+        [str(binary), "--db", str(db), "--output", "json", "sync", "--discover"],
+        workspace,
+        env=env,
+    )
+    data = parse_frame(sample["stdout"])["data"]
+    # `sync --discover` reports per-provider counts, never absolute paths.
+    discovery = data.get("discovery", {})
+    by_id = {p.get("id"): p for p in discovery.get("providers", [])}
+
+    planted = sum(planted_by_provider.values())
+    found = 0
+    detail: list[dict[str, Any]] = []
+    all_complete = True
+    for provider_id, expected in sorted(planted_by_provider.items()):
+        entry = by_id.get(provider_id, {})
+        provider_found = int(entry.get("found", 0))
+        complete = bool(entry.get("complete", False))
+        found += min(provider_found, expected)
+        all_complete = all_complete and complete
+        detail.append(
+            {
+                "provider_id": provider_id,
+                "planted": expected,
+                "found": provider_found,
+                "complete": complete,
+            }
+        )
+
+    return {
+        "coverage": round(found / planted, 6) if planted else 1.0,
+        "planted": planted,
+        "found": found,
+        "planted_providers_complete": all_complete,
+        "messages": data.get("messages"),
+        "emitted": data.get("emitted"),
+        "per_provider": detail,
+        "sample": sample,
+    }
+
+
+def resolve_canonical_session_ids(
+    binary: Path,
+    workspace: Path,
+    db: Path,
+) -> dict[str, str]:
+    """Map each provider-native session id to its canonical `ses_v1_*` wire id.
+
+    Canonical session identity is a digest over (provider, installation
+    namespace, native id), so it depends on where the corpus lives on disk and
+    cannot be pinned in the labels file. The mapping is read back from the store
+    via `get-session-resume`, which is the same contract a user would use.
+    """
+    listing = cli(binary, workspace, db, "list", "1000")
+    page = listing["frame"].get("page", {})
+    if page.get("has_more"):
+        raise RuntimeError("gate store holds more entities than one page; raise the list limit")
+    session_ids = [
+        entry["id"]
+        for entry in listing["frame"]["data"]["entries"]
+        if str(entry["id"]).startswith("ses_v1_")
+    ]
+    mapping: dict[str, str] = {}
+    for canonical in session_ids:
+        data = cli(binary, workspace, db, "get-session-resume", canonical)["frame"]["data"]
+        native = data.get("provider_session_id")
+        if not native:
+            continue
+        if native in mapping:
+            raise RuntimeError(
+                f"provider session id {native!r} maps to two canonical sessions; "
+                f"the gate corpus must keep native ids unique per provider"
+            )
+        mapping[native] = canonical
+    return mapping
+
+
+def resume_handoff_success(
+    binary: Path,
+    workspace: Path,
+    db: Path,
+    labels: dict[str, Any],
+) -> dict[str, Any]:
+    """Count sessions where resume preview and handoff both produce a result.
+
+    Resume runs as dry-run only — the gate never spawns a provider process, so
+    a "success" means the CLI produced a concrete, inspectable command, not that
+    a provider was launched. A handoff counts when the pack carries at least one
+    verbatim evidence span.
+
+    The denominator is the labeled ground truth: every provider-native session
+    id named in the labels must resolve to a canonical session that previews a
+    resume command.
+    """
+    expected_native = sorted(
+        {sid for entry in labels["queries"] for sid in entry["expected_provider_session_ids"]}
+    )
+    if not expected_native:
+        raise RuntimeError("labels name no provider session ids; resume cannot be measured")
+    resolved = resolve_canonical_session_ids(binary, workspace, db)
+
+    detail: list[dict[str, Any]] = []
+    resume_samples: list[dict[str, Any]] = []
+    resume_ok = 0
+    for native in expected_native:
+        canonical = resolved.get(native)
+        if canonical is None:
+            # A labeled session whose resume metadata never landed is a failure,
+            # not an excuse to shrink the denominator.
+            detail.append(
+                {
+                    "provider_session_id": native,
+                    "session_id": None,
+                    "provider_id": None,
+                    "resume_available": False,
+                    "resume_command_present": False,
+                    "executed": False,
+                    "unavailable_reason": "no canonical session claims this provider session id",
+                }
+            )
+            continue
+        result = cli(binary, workspace, db, "resume", canonical)
+        resume_samples.append(result)
+        data = result["frame"]["data"]
+        available = bool(data.get("available"))
+        has_command = bool(data.get("command"))
+        executed = bool(data.get("executed"))
+        if available and has_command and not executed:
+            resume_ok += 1
+        detail.append(
+            {
+                "provider_session_id": native,
+                "session_id": canonical,
+                "provider_id": data.get("provider_id"),
+                "resume_available": available,
+                "resume_command_present": has_command,
+                "executed": executed,
+                "unavailable_reason": data.get("unavailable_reason"),
+            }
+        )
+
+    handoff_ok = 0
+    handoff_samples: list[dict[str, Any]] = []
+    handoff_detail: list[dict[str, Any]] = []
+    for entry in labels["queries"]:
+        result = cli(binary, workspace, db, "handoff", entry["query"])
+        handoff_samples.append(result)
+        pack = result["frame"]["data"]
+        evidence = pack.get("evidence", [])
+        if evidence:
+            handoff_ok += 1
+        handoff_detail.append(
+            {
+                "query_id": entry["id"],
+                "evidence_count": len(evidence),
+                "matched_sessions": len(pack.get("matched_sessions", [])),
+                "confidence": pack.get("confidence", {}).get("overall"),
+                "truncated": pack.get("truncation", {}).get("truncated"),
+            }
+        )
+
+    total = len(expected_native) + len(labels["queries"])
+    succeeded = resume_ok + handoff_ok
+    ratio = round(succeeded / total, 6) if total else 1.0
+    return {
+        "ratio": ratio,
+        "attempted": total,
+        "succeeded": succeeded,
+        "resume_sessions": len(expected_native),
+        "resume_previews_ok": resume_ok,
+        "handoff_queries": len(labels["queries"]),
+        "handoff_packs_ok": handoff_ok,
+        "resume_detail": detail,
+        "handoff_detail": handoff_detail,
+        "resume_samples": resume_samples,
+        "handoff_samples": handoff_samples,
+    }
+
+
 def parse_loss_from_sync(sync_frames: list[dict[str, Any]]) -> dict[str, Any]:
     emitted = sum(int(f["data"].get("emitted", 0)) for f in sync_frames)
     skipped = sum(int(f["data"].get("skipped", 0)) for f in sync_frames)
@@ -211,8 +435,9 @@ def run_gate(args: argparse.Namespace) -> Path:
         scratch = Path(temp_name)
         db = scratch / "gate.db"
 
-        # Sync the labeled corpus explicitly (sync --discover is not yet
-        # implemented; discovery_coverage is recorded as not_applicable below).
+        # Sync the labeled corpus by explicit path. discovery_coverage below
+        # re-runs the same corpus through `sync --discover` against a redirected
+        # HOME so the two paths are measured independently.
         sync_frames: list[dict[str, Any]] = []
         sync_samples: list[dict[str, Any]] = []
         for _ in range(max(1, args.sync_reps)):
@@ -240,6 +465,13 @@ def run_gate(args: argparse.Namespace) -> Path:
             for q in semantic_per_query + hybrid_per_query
         )
 
+        # Auto-discovery coverage: plants the same synthetic corpus under a
+        # redirected HOME and checks `sync --discover` finds every source.
+        discovery = discovery_coverage(binary, workspace, scratch, fixture_files)
+
+        # Resume + handoff: both dry-run only, no provider process is spawned.
+        resume_handoff = resume_handoff_success(binary, workspace, db, labels)
+
         # Latency for show/get against known wire ids from the labels.
         first_expected = labels["queries"][0]["expected_message_ids"][0]
         show_samples = [
@@ -255,9 +487,9 @@ def run_gate(args: argparse.Namespace) -> Path:
         source_bytes = sum(p.stat().st_size for p in fixture_files)
         index_size_ratio = round(store_bytes / source_bytes, 6) if source_bytes else None
 
-    # Gate metrics. discovery_coverage and resume_handoff_success are recorded
-    # explicitly as not_applicable until their features land — never silently
-    # skipped.
+    # Gate metrics. Every threshold metric is measured; nothing is silently
+    # skipped, and a metric may only be state "not_applicable" when the feature
+    # it measures genuinely does not exist.
     metrics: list[dict[str, Any]] = [
         metric_entry(
             "lexical_recall_at_10",
@@ -302,20 +534,16 @@ def run_gate(args: argparse.Namespace) -> Path:
         metric_entry(
             "discovery_coverage",
             "ratio",
-            None,
+            discovery["coverage"],
             GATE_THRESHOLDS["discovery_coverage"],
-            None,
-            state="not_applicable",
-            reason="sync --discover is not yet implemented (task 08-14-provider-source-auto-discovery); corpus is synced via explicit paths.",
+            discovery["coverage"] >= GATE_THRESHOLDS["discovery_coverage"],
         ),
         metric_entry(
             "resume_handoff_success",
-            "count",
-            None,
+            "ratio",
+            resume_handoff["ratio"],
             GATE_THRESHOLDS["resume_handoff_success"],
-            None,
-            state="not_applicable",
-            reason="resume/handoff execution has not landed (task 08-15-resume-metadata-execution); counter scaffolding only.",
+            resume_handoff["ratio"] >= GATE_THRESHOLDS["resume_handoff_success"],
         ),
     ]
 
@@ -368,6 +596,26 @@ def run_gate(args: argparse.Namespace) -> Path:
             "hybrid_detail": hybrid_per_query,
         },
         "parse_loss_detail": loss,
+        "discovery_detail": {
+            "mechanism": "sync --discover against a redirected HOME holding synthetic fixture copies",
+            "reads_real_transcripts": False,
+            "planted": discovery["planted"],
+            "found": discovery["found"],
+            "planted_providers_complete": discovery["planted_providers_complete"],
+            "messages": discovery["messages"],
+            "per_provider": discovery["per_provider"],
+        },
+        "resume_handoff_detail": {
+            "mechanism": "resume dry-run (no provider process spawned) + handoff pack evidence check",
+            "attempted": resume_handoff["attempted"],
+            "succeeded": resume_handoff["succeeded"],
+            "resume_sessions": resume_handoff["resume_sessions"],
+            "resume_previews_ok": resume_handoff["resume_previews_ok"],
+            "handoff_queries": resume_handoff["handoff_queries"],
+            "handoff_packs_ok": resume_handoff["handoff_packs_ok"],
+            "resume_detail": resume_handoff["resume_detail"],
+            "handoff_detail": resume_handoff["handoff_detail"],
+        },
         "latency_p50_p95_ms": {
             "search": latency_p50_p95(search_samples),
             "search_semantic": latency_p50_p95(semantic_samples),
@@ -375,6 +623,9 @@ def run_gate(args: argparse.Namespace) -> Path:
             "show": latency_p50_p95(show_samples),
             "get": latency_p50_p95(get_samples),
             "initial_sync": latency_p50_p95(sync_samples),
+            "discovery_sync": latency_p50_p95([discovery["sample"]]),
+            "resume_preview": latency_p50_p95(resume_handoff["resume_samples"]),
+            "handoff": latency_p50_p95(resume_handoff["handoff_samples"]),
         },
         "index_size": {
             "store_bytes_including_sidecars": store_bytes,

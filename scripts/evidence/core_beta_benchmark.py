@@ -138,9 +138,13 @@ def peak_working_set_bytes(process: subprocess.Popen[bytes]) -> int | None:
     return None
 
 
-def run_process(command: list[str], cwd: Path) -> dict[str, Any]:
+def run_process(
+    command: list[str], cwd: Path, env: dict[str, str] | None = None
+) -> dict[str, Any]:
     started = time.perf_counter_ns()
-    process = subprocess.Popen(command, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    process = subprocess.Popen(
+        command, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+    )
     peaks: list[int] = []
     stop_sampling = threading.Event()
 

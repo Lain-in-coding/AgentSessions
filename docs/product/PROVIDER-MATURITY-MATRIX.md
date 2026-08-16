@@ -42,9 +42,11 @@
 | ZCode | `zcode` | — | **Unsupported（deferred）** | 无任何 transcript 证据（本机无 `~/.zcode`，参考项目无 adapter）；决策见 `deferred-deepseek-zcode.md` |
 
 14 个已实现 provider 均为 **Experimental**：golden、property、source span 以及
-关系化 Message/Placement/Edge 的合成与 e2e 证据已入库（见下），剩余 blocker
-仍为授权真实数据全量绿色回归与跨 target CI 认证。两个 deferred provider
-（DeepSeek Harness、ZCode）保留 16 行但不宣传为已实现、不设 maturity target。
+关系化 Message/Placement/Edge 的合成与 e2e 证据已入库（见下），授权真实数据全量
+绿色回归亦已闭合（见「晋级到 Beta 的缺口」第 4 条）。剩余 blocker 为跨 target CI
+认证、provider 级回滚策略、`AdapterManifest` 结构化声明，以及只读约束的运行时
+checksum 断言——逐条见下方缺口清单。两个 deferred provider（DeepSeek Harness、
+ZCode）保留 16 行但不宣传为已实现、不设 maturity target。
 
 ## Capability Matrix（逐字段，2026-08-16）
 
@@ -119,4 +121,23 @@ cargo run -q -p agent-session-grep-cli -- --help   # 入口层读取 capability.
 5. 跨正式 target（Windows/Linux/macOS）的 CI 认证——仍缺。`ci.yml` 的 `test` 与
    新增 `installer` job 已配置三平台矩阵（证据行 `IB-CI-INSTALLER-001`），但在
    PR 上跑绿并记录具体 run id 之前只能是 `ci_configured_only`；hosted runner 亦
-   非 clean machine，不构成安装认证。
+   非 clean machine，不构成安装认证。`core-beta-evidence.yml` 的四 target job 只
+   跑 sqlite adapter 测试与 storage spike，**不含 provider golden/property**——跨
+   target 认证需要把 provider 测试纳入该矩阵。
+6. Provider 级回滚策略——仍缺。RFC-0002 §6 把「回滚策略」列为晋级硬性证据，但
+   docs 下无对应文档，`capability.rs` 只声明 maturity 而无降级机制，且 CLI/MCP
+   渲染 provider 时只输出 `id`、不读 capability.rs，降级也无从在入口层体现。
+7. `AdapterManifest` 结构化声明——仍缺。RFC-0002 §6 要求声明 provider_id、variant
+   范围、maturity、能力矩阵、fixture revision、最后认证 target、已知限制；当前
+   `ProviderAdapter` trait 只有 `provider_id`/`probe`/`parse`，`fixture_revision`
+   只以 PROVENANCE.md 文本形式存在，不进结构化 manifest。
+8. 只读约束的运行时断言——部分满足。adapter 层结构上无法写源（无 `std::fs`/
+   `std::env` 引用，parse 只收 `&[u8]`），但 testkit 的 `assert_read_only` 至今
+   没有被任何 provider 测试调用，真实回归 harness 的六条不变量也不含「源文件
+   checksum 前后一致」。「read-only」目前是结构性事实加文档声明，缺机器断言。
+9. Codex 增量的直接证据——部分满足。幂等/tombstone 的 e2e 用的都是 claude 形态
+   fixture；codex 侧唯一的 e2e 只覆盖 probe-select 与镜像去重，不含 resync。
+   `capability.rs` 对 codex 标 `incremental: native` 依赖通用机制而非直接测试。
+
+审计依据：`.trellis/tasks/08-15-sixteen-provider-evidence-wave/research/beta-promotion-audit.md`
+（2026-08-16，逐项只读核查，含每项的 file:line 与测试名）。
