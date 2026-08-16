@@ -67,9 +67,14 @@ ZCode）保留 16 行但不宣传为已实现、不设 maturity target。
 ### 逐 provider 明细见 capability.rs（单源权威）
 
 ```bash
-# 渲染当前矩阵（JSON）：
-cargo run -q -p agent-session-grep-cli -- --help   # 入口层读取 capability.rs，禁止硬编码
+# 渲染当前矩阵（Human）：
+cargo run -q -p agent-session-grep-cli -- providers
+# 渲染当前矩阵（Robot JSON envelope）：
+cargo run -q -p agent-session-grep-cli -- --output json providers
 ```
+
+入口层不得硬编码 provider maturity 或 capability；上述命令与 MCP
+`list_providers` 均从 `ProviderCapabilityMatrix::current()` 投影。
 
 ## 已知限制
 
@@ -121,23 +126,25 @@ cargo run -q -p agent-session-grep-cli -- --help   # 入口层读取 capability.
 5. 跨正式 target（Windows/Linux/macOS）的 CI 认证——仍缺。`ci.yml` 的 `test` 与
    新增 `installer` job 已配置三平台矩阵（证据行 `IB-CI-INSTALLER-001`），但在
    PR 上跑绿并记录具体 run id 之前只能是 `ci_configured_only`；hosted runner 亦
-   非 clean machine，不构成安装认证。`core-beta-evidence.yml` 的四 target job 只
-   跑 sqlite adapter 测试与 storage spike，**不含 provider golden/property**——跨
-   target 认证需要把 provider 测试纳入该矩阵。
-6. Provider 级回滚策略——仍缺。RFC-0002 §6 把「回滚策略」列为晋级硬性证据，但
-   docs 下无对应文档，`capability.rs` 只声明 maturity 而无降级机制，且 CLI/MCP
-   渲染 provider 时只输出 `id`、不读 capability.rs，降级也无从在入口层体现。
-7. `AdapterManifest` 结构化声明——仍缺。RFC-0002 §6 要求声明 provider_id、variant
-   范围、maturity、能力矩阵、fixture revision、最后认证 target、已知限制；当前
-   `ProviderAdapter` trait 只有 `provider_id`/`probe`/`parse`，`fixture_revision`
-   只以 PROVENANCE.md 文本形式存在，不进结构化 manifest。
-8. 只读约束的运行时断言——部分满足。adapter 层结构上无法写源（无 `std::fs`/
-   `std::env` 引用，parse 只收 `&[u8]`），但 testkit 的 `assert_read_only` 至今
-   没有被任何 provider 测试调用，真实回归 harness 的六条不变量也不含「源文件
-   checksum 前后一致」。「read-only」目前是结构性事实加文档声明，缺机器断言。
-9. Codex 增量的直接证据——部分满足。幂等/tombstone 的 e2e 用的都是 claude 形态
-   fixture；codex 侧唯一的 e2e 只覆盖 probe-select 与镜像去重，不含 resync。
-   `capability.rs` 对 codex 标 `incremental: native` 依赖通用机制而非直接测试。
+   非 clean machine，不构成安装认证。`core-beta-evidence.yml` 的四 target job 现在也
+   纳入 Claude/Codex provider evidence 与 open-source gate benchmark；但最新推送
+   的运行因 GitHub account billing/spending-limit 在首步前失败，尚无 named successful
+   run，因此仍为 `ci_configured_only`。
+6. 回滚策略——**部分闭合，仍保持 Proposed**：`docs/adr/ADR-0010-provider-maturity-rollback.md`
+   已记录 RFC-0002 §6 的晋级证据、降级触发条件、单源改动顺序、历史恒可检索不变量
+   与 owner/approver 责任；CLI `providers`、human/Robot 投影及 MCP `list_providers`
+   现在读取 `ProviderCapabilityMatrix::current()`，因此降级后的 maturity 会自动
+   对外可见。剩余阻塞是 owner/approver 在 ADR-0010 治理记录中补 `accepted_at` 与
+   关联实现/跨边界证据；在此之前不得把该条划掉或宣称 Accepted。
+7. `AdapterManifest` 结构化声明——**已闭合实现，晋级证据仍待认证**：
+   `ProviderAdapter::manifest()` 与 owned `AdapterManifest` 已落地，14 个 provider
+   显式实现；Claude/Codex `fixture_revision=1`，其余无可核验 revision 为 null，
+   `last_certified_targets` 均为空，等待 named successful cross-target run 后填写。
+8. 只读约束的运行时断言——**已闭合**：Claude/Codex golden 测试通过
+   `testkit::assert_read_only` 守护 probe/parse；真实回归 harness 新增
+   `INV-SOURCES-UNCHANGED`，以聚合 checksum 计数验证扫描不改源且不泄露路径。
+9. Codex 增量的直接证据——**已闭合**：新增 Codex 重 sync 幂等、源收缩 tombstone、
+   空源 tombstone 三项合成 e2e，直接支撑 `incremental: native`。
 
 审计依据：`.trellis/tasks/08-15-sixteen-provider-evidence-wave/research/beta-promotion-audit.md`
 （2026-08-16，逐项只读核查，含每项的 file:line 与测试名）。
