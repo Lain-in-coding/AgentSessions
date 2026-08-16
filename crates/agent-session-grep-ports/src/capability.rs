@@ -123,7 +123,9 @@ pub struct ProviderCapabilityMatrix {
 }
 
 impl ProviderCapabilityMatrix {
-    /// 返回当前 16 个 provider 的能力矩阵（evidence wave 08-15 全量）。
+    /// 返回当前 16 个 provider 的能力矩阵（evidence wave 08-15 全量：
+    /// 14 个已实现 + 2 个 deferred）。deferred provider（deepseek-harness/zcode）
+    /// 无 transcript 证据，保持 Unsupported 不宣传。
     pub fn current() -> Self {
         Self {
             providers: vec![
@@ -293,7 +295,7 @@ impl ProviderCapabilityMatrix {
                     resume: CapabilityLevel::Unsupported,
                     handoff: CapabilityLevel::Unsupported,
                     tool_activity: CapabilityLevel::Unsupported,
-                    source_span: CapabilityLevel::Derived,
+                    source_span: CapabilityLevel::Unsupported,
                     incremental: CapabilityLevel::Unsupported,
                 },
                 ProviderCapability {

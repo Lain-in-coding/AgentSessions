@@ -11,3 +11,7 @@ agent-session-grep-ports = { path = "../agent-session-grep-ports" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 rusqlite = { version = "0.40", default-features = false, features = ["bundled"] }
+
+[dev-dependencies]
+agent-session-grep-testkit = { path = "../agent-session-grep-testkit" }
+blake3 = { workspace = true }

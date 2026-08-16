@@ -26,27 +26,27 @@
 |---|---|---|---|---|
 | Claude Code | `claude-code` | `claude-code/jsonl-v1` | **Experimental** | 单元 + e2e + golden（`crates/agent-session-grep-provider-claude/tests/golden.rs`）+ 确定性 property 套件（`tests/properties.rs`，固定种子）+ span round-trip |
 | Codex | `codex` | `codex/rollout-jsonl-v1` | **Experimental** | 单元 + e2e + golden（`crates/agent-session-grep-provider-codex/tests/golden.rs`）+ 确定性 property 套件（含镜像去重性质）+ span round-trip |
-| Grok Build | `grok-build` | `grok-build/acp-updates-v1` | **Experimental** | ACP `updates.jsonl`（`session/update` stream），主格式证据充分，variant 分层 |
-| Antigravity | `antigravity` | `antigravity/transcript-jsonl-v1` | **Experimental** | 本机真实格式核验（2026-08-15）：`brain/<uuid>/.system_generated/logs/transcript.jsonl`；identity 在目录名，文件内无 session id 字段 |
-| OpenCode | `opencode` | `opencode/sqlite-v1` | **Experimental** | `opencode.db` SQLite（session/message/part 表），只读打开（SQLITE_OPEN_READONLY + busy_timeout） |
-| Pi | `pi` | `pi/session-jsonl-v1` | **Experimental** | session JSONL（`type:session` header + message），path override env 待补 fixture |
-| Hermes | `hermes` | `hermes/session-json-v1` | **Experimental** | `~/.hermes/sessions/session_<id>.json`（session_id/messages），hstry@88b78b1 (MIT) 格式证据 |
-| Cursor | `cursor` | `cursor/vscdb-chat-v1` | **Experimental** | `state.vscdb` SQLite KV（ItemTable `chatdata`/`prompts` key），hstry@88b78b1 (MIT) 格式证据，多代格式分层待补 |
-| Kimi Code | `kimi-code` | `kimi-code/wire-jsonl-v1` | **Experimental** | wire.jsonl（`context.append_message`） |
-| OpenClaw | `openclaw` | `openclaw/session-jsonl-v3` | **Experimental** | v3 JSONL header + message records，本机仅 config 无 transcript 样本 |
-| Qoder | `qoder` | `qoder/transcript-jsonl-v1` | **Experimental** | JSONL（`session_meta` + `type:user/assistant`），官方路径已实现 |
-| Tencent CodeBuddy | `tencent-codebuddy` | `tencent-codebuddy/cli-jsonl-v1` | **Experimental** | CLI OpenAI-style JSONL（`role`/`content`/`sessionId`），extension variant 待分层 |
-| Cline | `cline` | `cline/api-conversation-history-v1` | **Experimental** | `api_conversation_history.json` JSON family |
-| Aider | `aider` | `aider/chat-history-md-v1` | **Experimental** | Markdown chat history（`#### ` user prompts），`.aider.chat.history.md` 为候选 root 待核验 |
+| Grok Build | `grok-build` | `grok-build/acp-updates-v1` | **Experimental** | ACP `updates.jsonl`（`session/update` stream），主格式证据充分，variant 分层 + golden（`tests/golden.rs`） |
+| Antigravity | `antigravity` | `antigravity/transcript-jsonl-v1` | **Experimental** | 本机真实格式核验（2026-08-15）：`brain/<uuid>/.system_generated/logs/transcript.jsonl`；identity 在目录名，文件内无 session id 字段 + golden（`tests/golden.rs`） |
+| OpenCode | `opencode` | `opencode/sqlite-v1` | **Experimental** | `opencode.db` SQLite（session/message/part 表），只读打开（SQLITE_OPEN_READONLY + busy_timeout）+ golden（`tests/golden.rs`） |
+| Pi | `pi` | `pi/session-jsonl-v1` | **Experimental** | session JSONL（`type:session` header + message）+ golden（`tests/golden.rs`） |
+| Hermes | `hermes` | `hermes/session-json-v1` | **Experimental** | `~/.hermes/sessions/session_<id>.json`（session_id/messages），hstry@88b78b1 (MIT) 格式证据 + golden（`tests/golden.rs`） |
+| Cursor | `cursor` | `cursor/vscdb-chat-v1` | **Experimental** | `state.vscdb` SQLite KV（ItemTable `chatdata`/`prompts` key），hstry@88b78b1 (MIT) 格式证据，多代格式分层待补 + golden（`tests/golden.rs`） |
+| Kimi Code | `kimi-code` | `kimi-code/wire-jsonl-v1` | **Experimental** | wire.jsonl（`context.append_message`）+ golden（`tests/golden.rs`） |
+| OpenClaw | `openclaw` | `openclaw/session-jsonl-v3` | **Experimental** | v3 JSONL header + message records，本机仅 config 无 transcript 样本 + golden（`tests/golden.rs`） |
+| Qoder | `qoder` | `qoder/transcript-jsonl-v1` | **Experimental** | JSONL（`session_meta` + `type:user/assistant`），官方路径已实现 + golden（`tests/golden.rs`） |
+| Tencent CodeBuddy | `tencent-codebuddy` | `tencent-codebuddy/cli-jsonl-v1` | **Experimental** | CLI OpenAI-style JSONL（`role`/`content`/`sessionId`），extension variant 待分层 + golden（`tests/golden.rs`） |
+| Cline | `cline` | `cline/api-conversation-history-v1` | **Experimental** | `api_conversation_history.json` JSON family + golden（`tests/golden.rs`） |
+| Aider | `aider` | `aider/chat-history-md-v1` | **Experimental** | Markdown chat history（`#### ` user prompts），`.aider.chat.history.md` 为候选 root 待核验 + golden（`tests/golden.rs`） |
 | DeepSeek Harness | `deepseek-harness` | — | **Unsupported（deferred）** | 无任何 transcript 证据（本机无 `~/.deepseek`，参考项目无 adapter）；决策见 `deferred-deepseek-zcode.md` |
 | ZCode | `zcode` | — | **Unsupported（deferred）** | 无任何 transcript 证据（本机无 `~/.zcode`，参考项目无 adapter）；决策见 `deferred-deepseek-zcode.md` |
 
 14 个已实现 provider 均为 **Experimental**：golden、property、source span 以及
 关系化 Message/Placement/Edge 的合成与 e2e 证据已入库（见下），授权真实数据全量
 绿色回归亦已闭合（见「晋级到 Beta 的缺口」第 4 条）。剩余 blocker 为跨 target CI
-认证、provider 级回滚策略、`AdapterManifest` 结构化声明，以及只读约束的运行时
-checksum 断言——逐条见下方缺口清单。两个 deferred provider（DeepSeek Harness、
-ZCode）保留 16 行但不宣传为已实现、不设 maturity target。
+认证与 provider 级回滚策略的 owner 批准——逐条见下方缺口清单。两个 deferred
+provider（DeepSeek Harness、ZCode）保留 16 行但不宣传为已实现、不设 maturity
+target。
 
 ## Capability Matrix（逐字段，2026-08-16）
 
@@ -62,7 +62,7 @@ ZCode）保留 16 行但不宣传为已实现、不设 maturity target。
 | discover | `native`（claude-code/codex）；`unsupported`（其余） | 仅 claude-code/codex 注册了 discovery root；antigravity/opencode 已加入 `provider_data_root` |
 | resume | `derived`（claude-code/codex/pi/opencode）；`unknown`（grok/kimi/qoder/codebuddy/hermes/antigravity/cursor）；`unsupported`（aider/cline/openclaw） | 未核验的 resume 命令一律不设默认值 |
 | context / handoff / tool_activity / incremental | `unsupported` 或 `unknown` | 属后续全能力链任务（`08-15-structured-activity-context-facets`），不在本任务范围 |
-| source_span | `native`（claude/codex/grok/pi/kimi/openclaw/qoder/codebuddy）；`derived`（cline/aider）；`unsupported`（opencode/hermes/antigravity/cursor） | SQLite/目录名身份类 provider 无文件内字节 span |
+| source_span | `native`（claude/codex/grok/pi/kimi/openclaw/qoder/codebuddy）；`derived`（aider）；`unsupported`（opencode/hermes/antigravity/cursor/cline） | SQLite/目录名身份/单文档 JSON 类 provider 无文件内字节 span；cline 的数组下标 pseudo-span 已移除并如实降级为 unsupported |
 
 ### 逐 provider 明细见 capability.rs（单源权威）
 
@@ -78,12 +78,24 @@ cargo run -q -p agent-session-grep-cli -- --output json providers
 
 ## 已知限制
 
+各条与 `AdapterManifest.known_limitations` 一一对应（14 个已实现 provider 的
+manifest 均已填真实限制，见各 `crates/agent-session-grep-provider-*/src/lib.rs`）。
+
 - **Claude Code**：只抽取 `user`/`assistant`/`system` 对话记录；工具调用块（无 text）被忽略；`cwd`/`gitBranch`/`version` provenance 尚未落库。
 - **Codex**：只取权威 `response_item` + 内层 `message`，忽略 `event_msg` UI 镜像以避免重复计数；`world_state`/`turn_context`/工具调用记录未抽取；无 threading（线性）。
-- **Antigravity**：文件内无 session id 字段（identity 在 `brain/<uuid>` 目录名），parse 时 `session_native_id`/`provider_session_id` 如实留缺；`span` 用字节区间。
-- **Hermes**：`session_<id>.json` 为主格式；同目录 `<id>.jsonl` 仅含部分近期状态，忽略。
-- **Cursor**：`state.vscdb` 为 chatdata/prompts 两 key 的多代格式，版本分层待补。
-- **OpenCode / Hermes / Kimi**：SQLite 类 provider 一律只读打开（`SQLITE_OPEN_READONLY` + `busy_timeout`），绝不写 provider 数据库。
+- **Grok Build**：chunk 分组重建角色，无逐消息 native id（合成 `grok-msg-{seq}`）；逐消息时间戳未抽取；会话身份回退到首个 ACP `promptId`，非持久 session id。
+- **Antigravity**：文件内无 session id 字段（identity 在 `brain/<uuid>` 目录名），parse 时 `session_native_id`/`provider_session_id` 如实留缺；`SYSTEM`/`CONVERSATION_HISTORY` 与工具活动步骤永不为消息；`span` 用字节区间。
+- **OpenCode**：SQLite 源无字节 span；只提交 `text` part 且角色为 user/assistant；逐消息时间戳未抽取。
+- **Pi**：`session_info`/`compaction`/`custom_message` 等非对话类型跳过；无 native 消息 id（合成 `pi-msg-{seq}`）。
+- **Hermes**：`session_<id>.json` 为主格式；同目录 `<id>.jsonl` 仅含部分近期状态，忽略；无字节 span，消息时间戳缺失时回退 `session_start`。
+- **Cursor**：`state.vscdb` 为 chatdata/prompts 两 key 的多代格式，版本分层待补；SQLite 无字节 span；无 native 消息 id（合成 `cursor-msg-{seq}`）。
+- **Kimi Code**：`context.append_loop_event`（step/tool 事件）暂未解析；wire.jsonl 罕见携带 session id，通常留缺；逐消息时间戳未抽取。
+- **OpenClaw**：resume 有意不支持（gateway-managed）；无 native 消息 id（合成 `openclaw-msg-{seq}`）。
+- **Qoder**：身份字段（session_id/cwd）从 `session_meta` lenient 匹配；`progress`/`tool_use`/`tool_result` 非对话记录跳过。
+- **Tencent CodeBuddy**：根启动关键字用户消息（content 恰为 `"code"`）被过滤；无 cwd pair 观察（无独立 cwd 头记录）；无 native 消息 id（合成 `codebuddy-msg-{seq}`）。
+- **Cline**：JSON 数组文件内无 session id，`session_native_id` 留缺；无字节 span（数组下标 pseudo-span 已移除）；无 native 消息 id（合成 `cline-msg-{seq}`）。
+- **Aider**：span 为派生近似（块起始行 + 文本长度），非逐字节整行切片；blockquote 工具/编辑输出并入助手正文；会话身份为首个 run 头时间戳。
+- **OpenCode / Cursor / Hermes / Kimi（SQLite 类与文档类）**：一律只读打开（`SQLITE_OPEN_READONLY` + `busy_timeout`），绝不写 provider 数据库；无文件内字节 span（round-trip 标 N/A）。
 - **共同（关系模型已实现，语料级回归已闭合）**：稳定 `Message` 与上下文
   `MessagePlacement` / `MessageEdge` 已分离，session-scoped graph、精确 placement
   evidence、不同上下文 parent 以及相应合成/e2e 覆盖均已实现。全量授权运行
@@ -138,11 +150,13 @@ cargo run -q -p agent-session-grep-cli -- --output json providers
    关联实现/跨边界证据；在此之前不得把该条划掉或宣称 Accepted。
 7. `AdapterManifest` 结构化声明——**已闭合实现，晋级证据仍待认证**：
    `ProviderAdapter::manifest()` 与 owned `AdapterManifest` 已落地，14 个 provider
-   显式实现；Claude/Codex `fixture_revision=1`，其余无可核验 revision 为 null，
+   显式实现；14 个已实现 provider 均有 golden fixture，`fixture_revision=1`，
+   `known_limitations` 已从空数组填上真实限制（见上文「已知限制」），
    `last_certified_targets` 均为空，等待 named successful cross-target run 后填写。
-8. 只读约束的运行时断言——**已闭合**：Claude/Codex golden 测试通过
-   `testkit::assert_read_only` 守护 probe/parse；真实回归 harness 新增
-   `INV-SOURCES-UNCHANGED`，以聚合 checksum 计数验证扫描不改源且不泄露路径。
+8. 只读约束的运行时断言——**已闭合**：全部 14 个已实现 provider 的 golden 测试通过
+   `testkit::assert_read_only` 守护 probe/parse（含 opencode/cursor 的 SQLite
+   只读打开路径）；真实回归 harness 新增 `INV-SOURCES-UNCHANGED`，以聚合
+   checksum 计数验证扫描不改源且不泄露路径。
 9. Codex 增量的直接证据——**已闭合**：新增 Codex 重 sync 幂等、源收缩 tombstone、
    空源 tombstone 三项合成 e2e，直接支撑 `incremental: native`。
 

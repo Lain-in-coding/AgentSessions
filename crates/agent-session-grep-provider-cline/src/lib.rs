@@ -50,7 +50,14 @@ impl ProviderAdapter for ClineAdapter {
     }
 
     fn manifest(&self) -> AdapterManifest {
-        manifest_for(self.provider_id(), None, &[])
+        manifest_for(
+            self.provider_id(),
+            Some(1),
+            &[
+                "no session id in the JSON array file; session_native_id is left unset",
+                "no byte spans (whole-file JSON array); native message ids are not preserved (synthetic cline-msg-{seq})",
+            ],
+        )
     }
 
     fn probe(&self, bytes: &[u8]) -> Result<ProbeResult, ProviderError> {
@@ -147,9 +154,6 @@ impl ProviderAdapter for ClineAdapter {
 
         let mut report = ParseReport::default();
         let mut seq: u32 = 0;
-        // Byte offset: since Cline is a single JSON array (not line-delimited),
-        // we use the array index as a pseudo-span (offset = index, end = index+1).
-        // This is a simplification; a real span would require byte-level JSON parsing.
 
         for (idx, record) in arr.iter().enumerate() {
             let rec: ClineMessage = match serde_json::from_value(record.clone()) {
@@ -188,7 +192,12 @@ impl ProviderAdapter for ClineAdapter {
                 text: &text,
                 timestamp,
                 is_sidechain: false,
-                span: Some((idx as u64, (idx + 1) as u64)),
+                // Cline is a single JSON array, not a line-delimited format: the
+                // adapter cannot attribute a byte range to one message without
+                // byte-level JSON parsing. Emitting array-index pseudo-spans
+                // would violate the span contract (byte offsets into the source),
+                // so span is left None (capability.rs `source_span: unsupported`).
+                span: None,
             })
             .map_err(|e| ProviderError::StructuralFatal(e.to_string()))?;
             seq += 1;
@@ -234,7 +243,7 @@ mod tests {
         assert_eq!(manifest.capabilities.provider_id, adapter.provider_id());
         assert_eq!(manifest.capabilities.variant_id, VARIANT_ID);
         assert!(manifest.last_certified_targets.is_empty());
-        assert_eq!(manifest.fixture_revision, None);
+        assert_eq!(manifest.fixture_revision, Some(1));
     }
 
     struct CountSink {

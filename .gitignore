@@ -15,6 +15,10 @@ target-*/
 *.sqlite
 *.sqlite3
 
+# Golden SQLite fixtures are committed test data (BLAKE3-pinned bytes),
+# not scratch databases — re-include them from the `*.db` rule above.
+!crates/*/tests/golden/*.db
+
 # Generated local benchmark evidence (reports may contain machine details)
 /evidence-output/
 

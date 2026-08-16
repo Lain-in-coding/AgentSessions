@@ -101,7 +101,15 @@ impl ProviderAdapter for CursorAdapter {
     }
 
     fn manifest(&self) -> AdapterManifest {
-        manifest_for(self.provider_id(), None, &[])
+        manifest_for(
+            self.provider_id(),
+            Some(1),
+            &[
+                "SQLite source has no byte spans",
+                "chatdata/prompts are multi-generation formats; version layering is not yet implemented",
+                "native message ids are not preserved (synthetic cursor-msg-{seq})",
+            ],
+        )
     }
 
     fn probe(&self, bytes: &[u8]) -> Result<ProbeResult, ProviderError> {
@@ -463,7 +471,7 @@ mod tests {
         assert_eq!(manifest.capabilities.provider_id, adapter.provider_id());
         assert_eq!(manifest.capabilities.variant_id, VARIANT_ID);
         assert!(manifest.last_certified_targets.is_empty());
-        assert_eq!(manifest.fixture_revision, None);
+        assert_eq!(manifest.fixture_revision, Some(1));
     }
 
     /// Records (seq, role, text, timestamp) of every emitted message.
