@@ -64,6 +64,7 @@ impl ServeSession {
 /// slow or non-reading client can occupy at most one bounded worker slot.
 pub fn run(
     session: &ServeSession,
+    db: &str,
     store: &SqliteStore,
 ) -> Result<crate::protocol::Outcome, crate::CliError> {
     let listener = TcpListener::bind(session.address())
@@ -76,8 +77,14 @@ pub fn run(
         session.token()
     );
     eprintln!("asg serve: loopback-only; LAN mode is capability_not_supported");
-    serve_listener(listener, session.token(), store, ServerLimits::production())
-        .map_err(|e| crate::CliError::usage(format!("serve: listener failed: {e}")))?;
+    serve_listener(
+        listener,
+        session.token(),
+        db,
+        store,
+        ServerLimits::production(),
+    )
+    .map_err(|e| crate::CliError::usage(format!("serve: listener failed: {e}")))?;
     Ok(crate::protocol::Outcome::Success)
 }
 
@@ -109,6 +116,7 @@ enum WorkerEvent {
 fn serve_listener(
     listener: TcpListener,
     token: &str,
+    db: &str,
     store: &SqliteStore,
     limits: ServerLimits,
 ) -> std::io::Result<()> {
@@ -148,12 +156,12 @@ fn serve_listener(
             }
 
             match event_rx.recv_timeout(Duration::from_millis(5)) {
-                Ok(event) => handle_worker_event(event, token, store, &mut completed),
+                Ok(event) => handle_worker_event(event, token, db, store, &mut completed),
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
             }
             while let Ok(event) = event_rx.try_recv() {
-                handle_worker_event(event, token, store, &mut completed);
+                handle_worker_event(event, token, db, store, &mut completed);
             }
 
             if limits.stop_after.is_some_and(|max| completed >= max) {
@@ -209,13 +217,14 @@ fn worker_loop(
 fn handle_worker_event(
     event: WorkerEvent,
     token: &str,
+    db: &str,
     store: &SqliteStore,
     completed: &mut usize,
 ) {
     match event {
         WorkerEvent::Parsed { request, reply } => {
             let response = match request {
-                Ok(request) => route_request(&request, token, store),
+                Ok(request) => route_request(&request, token, db, store),
                 Err(error)
                     if matches!(
                         error.kind(),
@@ -606,7 +615,12 @@ fn path_only(path: &str) -> &str {
 ///
 /// All JSON responses pass through the cross-boundary redactor (ADR-0009):
 /// Web 是跨边界输出,secret 模式一律脱敏(与 Robot/MCP/Handoff 同规则)。
-pub fn route_request(req: &HttpRequest, token: &str, store: &SqliteStore) -> HttpResponse {
+pub fn route_request(
+    req: &HttpRequest,
+    token: &str,
+    db: &str,
+    store: &SqliteStore,
+) -> HttpResponse {
     // The order deliberately reveals no token validity to a non-loopback Host
     // or Origin. Every rejection has a fixed, path-free, secret-free body.
     if !req.check_host_loopback() {
@@ -700,7 +714,7 @@ pub fn route_request(req: &HttpRequest, token: &str, store: &SqliteStore) -> Htt
         return fixed_error(404, "not_found", "HTTP route not found");
     }
 
-    match crate::dispatch(store, &args, crate::protocol::OutputMode::Json, None) {
+    match crate::dispatch(store, db, &args, crate::protocol::OutputMode::Json, None) {
         Ok((command, outcome, data, page, warnings)) => {
             let outcome = match outcome {
                 crate::protocol::Outcome::Success => "success",
@@ -885,6 +899,7 @@ mod tests {
             serve_listener(
                 listener,
                 &server_token,
+                "test.db",
                 &store,
                 ServerLimits {
                     read_timeout,
@@ -977,7 +992,10 @@ mod tests {
             "/api/status",
             vec![("Host".into(), "127.0.0.1:8080".into())],
         );
-        assert_eq!(route_request(&no_token, TEST_TOKEN, &store).status, 401);
+        assert_eq!(
+            route_request(&no_token, TEST_TOKEN, "test.db", &store).status,
+            401
+        );
 
         let bad_host = request(
             "GET",
@@ -987,14 +1005,17 @@ mod tests {
                 ("Host".into(), "example.test".into()),
             ],
         );
-        assert_eq!(route_request(&bad_host, TEST_TOKEN, &store).status, 403);
+        assert_eq!(
+            route_request(&bad_host, TEST_TOKEN, "test.db", &store).status,
+            403
+        );
 
         let bootstrap = request(
             "GET",
             &format!("/?token={TEST_TOKEN}"),
             vec![("Host".into(), "127.0.0.1:8080".into())],
         );
-        let response = route_request(&bootstrap, TEST_TOKEN, &store);
+        let response = route_request(&bootstrap, TEST_TOKEN, "test.db", &store);
         assert_eq!(response.status, 200);
         assert!(response.body.contains("local session observatory"));
 
@@ -1004,7 +1025,7 @@ mod tests {
             vec![("Host".into(), "127.0.0.1:8080".into())],
         );
         assert_eq!(
-            route_request(&api_query_token, TEST_TOKEN, &store).status,
+            route_request(&api_query_token, TEST_TOKEN, "test.db", &store).status,
             401
         );
     }
@@ -1018,7 +1039,7 @@ mod tests {
             "/api/search?q=needle&mode=lexical&limit=20",
             "/api/handoff?q=needle",
         ] {
-            let response = route_request(&authorized("GET", path), TEST_TOKEN, &store);
+            let response = route_request(&authorized("GET", path), TEST_TOKEN, "test.db", &store);
             assert_eq!(response.status, 200, "{path}: {}", response.body);
             let body: serde_json::Value = serde_json::from_str(&response.body).expect("JSON");
             assert!(body.get("data").is_some() || path == "/api/providers");
@@ -1027,6 +1048,7 @@ mod tests {
         let invalid = route_request(
             &authorized("GET", "/api/show?id=C%3A%2FUsers%2Falice%2Fsecret.jsonl"),
             TEST_TOKEN,
+            "test.db",
             &store,
         );
         assert_eq!(invalid.status, 400);
@@ -1039,7 +1061,7 @@ mod tests {
         let store = SqliteStore::open_in_memory().expect("store");
         let missing_origin = authorized("POST", "/api/resume");
         assert_eq!(
-            route_request(&missing_origin, TEST_TOKEN, &store).status,
+            route_request(&missing_origin, TEST_TOKEN, "test.db", &store).status,
             403
         );
 
@@ -1047,11 +1069,14 @@ mod tests {
         valid_guard
             .headers
             .push(("Origin".into(), "http://127.0.0.1:8080".into()));
-        assert_eq!(route_request(&valid_guard, TEST_TOKEN, &store).status, 403);
+        assert_eq!(
+            route_request(&valid_guard, TEST_TOKEN, "test.db", &store).status,
+            403
+        );
         valid_guard
             .headers
             .push(("X-CSRF-Token".into(), TEST_TOKEN.into()));
-        let response = route_request(&valid_guard, TEST_TOKEN, &store);
+        let response = route_request(&valid_guard, TEST_TOKEN, "test.db", &store);
         assert_eq!(response.status, 501);
         assert!(response.body.contains("capability_not_supported"));
     }
