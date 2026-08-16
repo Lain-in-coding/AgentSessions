@@ -1,12 +1,12 @@
 {
   "schema_version": "agent-session-grep.open-source-gate/v1",
-  "generated_at_utc": "2026-08-16T01:29:36.250698Z",
-  "commit": "df887078e942027e9cf26feebf70a2e95430b417",
+  "generated_at_utc": "2026-08-16T01:48:17.624071Z",
+  "commit": "b0990d4af1e1d065e8a77ec19c409d4803bdaff1",
   "environment": {
     "os": "windows",
     "arch": "AMD64",
     "build": "release",
-    "commit": "df887078e942027e9cf26feebf70a2e95430b417",
+    "commit": "b0990d4af1e1d065e8a77ec19c409d4803bdaff1",
     "provider_fixture_set_id": "gate-synthetic-v1",
     "python_version": "3.10.11"
   },
@@ -24,7 +24,7 @@
   },
   "binary": {
     "hash_algorithm": "sha256",
-    "binary_hash": "c0c99f9868e27f14edd04da2de70bc590e26530c4c955167150eb8baae1e8855"
+    "binary_hash": "e273e3a8ed2ebcace02cad09a1e07e00cad507c194cfedc189bb63a3bc1ac8de"
   },
   "metrics": [
     {
@@ -119,23 +119,23 @@
   },
   "latency_p50_p95_ms": {
     "search": {
-      "p50": 10.4126,
-      "p95": 12.7522,
+      "p50": 14.1473,
+      "p95": 22.1938,
       "count": 6
     },
     "show": {
-      "p50": 9.1814,
-      "p95": 36.0332,
+      "p50": 9.0453,
+      "p95": 19.1003,
       "count": 10
     },
     "get": {
-      "p50": 9.0334,
-      "p95": 11.3431,
+      "p50": 10.4181,
+      "p95": 19.7549,
       "count": 10
     },
     "initial_sync": {
-      "p50": 77.704,
-      "p95": 77.704,
+      "p50": 62.7856,
+      "p95": 62.7856,
       "count": 1
     }
   },
