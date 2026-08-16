@@ -79,3 +79,17 @@
 - **跨平台预检**(9cd22f7 + c03a7f7):gate_smoke.sh `set -e` 下 `[ -n "$prefix" ] && ...` 默认路径必失败 → 改显式 if;docs 中 `sh install.sh`(dash 缺 pipefail)/`powershell install.ps1`(5.1 缺 $IsWindows)改为 bash/pwsh;.gitattributes 补 `*.sh/*.py eol=lf` 防 CRLF blob 破坏 Unix CI;恢复 install.sh/smoke.sh 执行位。
 - **CHANGELOG + SECURITY**(47291c0):开源必配文档。
 - **CI 阻塞**:GitHub 账单问题导致三平台矩阵无法运行(见残留风险),本地预检替代,无跨平台阻塞发现。
+
+## Round 5(2026-08-16):Linux 侧 WSL 验证(替代 CI ubuntu job)
+
+CI 因 GitHub 账单问题不可用,在 WSL(Ubuntu,ext4,rustup stable 1.97.1 minimal)克隆仓库到 ext4 后完整验证:
+
+| 检查 | 结果 |
+|---|---|
+| `cargo fmt --all --check` | ✓ 通过 |
+| `cargo clippy --workspace --all-targets -- -D warnings` | ✓ 通过(57s) |
+| `cargo test --workspace` | ✓ 全绿(230+98+37+48+25+8+11+43+3+5+10+14+38 passed,2 ignored 常规,0 failed) |
+| `cargo build --release --locked -p agent-session-grep-cli` | ✓ 6,004,544 字节 |
+| `python3 scripts/verify-release.py --asg <linux binary>` | ✓ 5/5 通过 |
+
+结论:Linux 侧(ubuntu)验证完整替代 CI ubuntu job;macOS 无法本地模拟(无 mac 环境),仍待 CI 恢复后补跑。注意:WSL `/mnt/c` 挂载层会把 LF 文件自动转 CRLF(DrvFs 行为),`bash -n` 在挂载层报假 CRLF 错误——git-bash(msys)是 Windows 上正确的 bash 验证工具。
