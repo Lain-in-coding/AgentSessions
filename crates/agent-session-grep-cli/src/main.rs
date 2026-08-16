@@ -628,6 +628,7 @@ COMMANDS:
     get-message <msg-id>   返回命中消息及其同会话主线邻居（--session/--around）
     get-session-resume <ses-id> 返回只读 Resume Metadata（Provider Session ID / Original Working Directory）
     resume <ses-id>        预览恢复命令（默认 dry-run；--yes 才实际执行）
+    hook <event>           Claude Code Hook 集成（默认关闭；--enable 才注入历史）
     get <wire-id>          按实体 id 取回原始 payload
     show <wire-id>         按实体 id 取回并归一化展示（role/text 结构）
     list [limit]           稳定排序列出 catalog 实体（默认 20；支持分页/预算 flag）
@@ -756,6 +757,7 @@ fn known_subcommand(cmd: &str) -> bool {
             | "get-message"
             | "get-session-resume"
             | "resume"
+            | "hook"
             | "get"
             | "show"
             | "list"
@@ -808,6 +810,14 @@ fn subcommand_help_text(cmd: &str) -> &'static str {
                   默认 dry-run——打印将执行的完整命令（provider/cwd/session id）并退出；\n\
                   确认无误后加 --yes 才在原工作目录实际启动 provider 进程。\n\
                   未核验恢复命令的 provider 报 available:false，绝不编造命令。"
+        }
+        "hook" => {
+            "hook <session-start|user-prompt-submit>：Claude Code Hook 集成（默认关闭）。\n\
+                  示例：echo '{\"prompt\":\"数据库迁移\"}' | agent-session-grep --db <path> hook user-prompt-submit --enable\n\
+                  从 stdin 读 hook payload，检索历史并按 hookSpecificOutput 契约输出；\n\
+                  不加 --enable 时输出空 context（不注入任何历史）；\n\
+                  flag：--enable 启用注入、--max-tokens <n> 预算（默认 2000）。\n\
+                  注入文本经跨边界脱敏（ADR-0009）。"
         }
         "show" => {
             "show <wire-id>：按实体 ID 取回并展示（role/text/时间戳）。\n\
@@ -1452,6 +1462,89 @@ fn dispatch(
                 data,
                 protocol::Page::default(),
                 warnings,
+            ))
+        }
+        "hook" => {
+            // Claude Code Hook（#8）：默认关闭，用户显式 --enable 才注入历史上下文。
+            // payload 从 stdin 读，输出走 Claude Code 的 hookSpecificOutput 契约。
+            // 未启用时输出空 context——不报错、不注入任何历史。
+            let mut args = rest.to_vec();
+            let max_tokens_flag = extract_flag(&mut args, "--max-tokens")?;
+            let enabled = take_bool_flag(&mut args, "--enable");
+            no_extra_args(&args, 1, "hook <session-start|user-prompt-submit>")?;
+            let raw_event = arg(&args, 1, "hook <session-start|user-prompt-submit>")?;
+            let event = hooks::HookEvent::parse(raw_event).ok_or_else(|| {
+                CliError::usage("hook <event>: event must be session-start|user-prompt-submit")
+            })?;
+            let max_tokens = max_tokens_flag
+                .as_deref()
+                .map(|v| {
+                    v.parse::<u64>()
+                        .map_err(|_| CliError::usage("--max-tokens 需要非负整数"))
+                })
+                .transpose()?
+                .unwrap_or(2000);
+            let config = hooks::HookConfig {
+                enabled,
+                max_tokens,
+                ..Default::default()
+            };
+            // stdin payload 允许为空（手工调用/探测）：空即无 query，注入空 context。
+            let mut raw_payload = String::new();
+            use std::io::Read as _;
+            std::io::stdin()
+                .read_to_string(&mut raw_payload)
+                .map_err(|_| CliError::usage("hook: failed to read payload from stdin"))?;
+            let payload: serde_json::Value = if raw_payload.trim().is_empty() {
+                serde_json::json!({})
+            } else {
+                serde_json::from_str(&raw_payload)
+                    .map_err(|_| CliError::usage("hook: payload is not valid JSON"))?
+            };
+            let query = hooks::query_from_payload(event, &payload);
+            let (text, hits_count) = match (config.should_run(), query) {
+                (true, Some(query)) => {
+                    let app =
+                        App::with_resume(store_ref(store), store_ref(store), store_ref(store));
+                    let response = app.handle(AppRequest::Search {
+                        query: query.clone(),
+                        filters: SearchFilters::default(),
+                        limit: 10,
+                        cursor: None,
+                        budget: ResponseBudget::default(),
+                        include_system: false,
+                        group_by_session: true,
+                        mode: RetrievalMode::Lexical,
+                        query_embedding: None,
+                    })?;
+                    let AppResponse::Search { hits, .. } = response else {
+                        return Err(CliError::usage("hook: unexpected search response"));
+                    };
+                    let mut text = hooks::format_context_header(&query, hits.len());
+                    for hit in &hits {
+                        // Hook 注入是跨边界输出：文本经脱敏后才进入其他 agent 上下文。
+                        let (body, _) = redaction::redact_text(hit.text.as_deref().unwrap_or(""));
+                        text.push_str(&format!("- [{}] {}\n", hit.id.as_str(), body));
+                    }
+                    let count = hits.len();
+                    (text, count)
+                }
+                _ => (String::new(), 0usize),
+            };
+            let output = hooks::build_hook_output(&text, config.max_tokens);
+            let mut data = serde_json::to_value(&output)
+                .map_err(|e| CliError::usage(format!("hook: serialization error: {e}")))?;
+            if let Some(object) = data.as_object_mut() {
+                object.insert("event".into(), serde_json::json!(event.as_str()));
+                object.insert("enabled".into(), serde_json::json!(config.should_run()));
+                object.insert("hits".into(), serde_json::json!(hits_count));
+            }
+            Ok((
+                "hook",
+                protocol::Outcome::Success,
+                data,
+                protocol::Page::default(),
+                Vec::new(),
             ))
         }
         "get-session-resume" => {
@@ -3541,7 +3634,7 @@ mod tests {
 
     // ---- help/version 提前拦截（ADR-0006，R3）----
 
-    const KNOWN_COMMANDS: [&str; 17] = [
+    const KNOWN_COMMANDS: [&str; 18] = [
         "ingest",
         "sync",
         "index",
@@ -3550,6 +3643,7 @@ mod tests {
         "get-message",
         "get-session-resume",
         "resume",
+        "hook",
         "get",
         "show",
         "list",

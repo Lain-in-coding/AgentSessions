@@ -16,9 +16,9 @@
 //!
 //! Output format: Claude Code `hookSpecificOutput.additional_context` contract.
 //!
-//! NOTE: types and functions here are not yet wired to a CLI subcommand;
-//! they define the contract for the upcoming `asg hook` integration.
-#![allow(dead_code)]
+//! The `asg hook <event>` subcommand is the wiring: it reads the hook payload
+//! from stdin, honours `HookConfig` (loaded from the config file, disabled by
+//! default), and writes the hook output to stdout.
 
 use serde::{Deserialize, Serialize};
 
@@ -115,6 +115,52 @@ pub fn format_context_header(query: &str, hit_count: usize) -> String {
     )
 }
 
+/// Supported hook events. Anything else is a usage error — the hook contract
+/// is not open-ended, and silently accepting an unknown event would make a
+/// typo in the user's Claude Code settings look like a working hook.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookEvent {
+    SessionStart,
+    UserPromptSubmit,
+}
+
+impl HookEvent {
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "session-start" | "SessionStart" => Some(Self::SessionStart),
+            "user-prompt-submit" | "UserPromptSubmit" => Some(Self::UserPromptSubmit),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::SessionStart => "SessionStart",
+            Self::UserPromptSubmit => "UserPromptSubmit",
+        }
+    }
+}
+
+/// Extract the search query from a hook payload.
+///
+/// `UserPromptSubmit` carries the user's prompt; `SessionStart` has no prompt,
+/// so the caller must supply one (or the hook injects nothing). Unknown payload
+/// shapes yield `None` rather than a guess.
+pub fn query_from_payload(event: HookEvent, payload: &serde_json::Value) -> Option<String> {
+    match event {
+        HookEvent::UserPromptSubmit => payload
+            .get("prompt")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        // SessionStart 没有 prompt 字段：cwd 是唯一可用的检索线索。
+        HookEvent::SessionStart => payload
+            .get("cwd")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+    }
+    .filter(|q| !q.trim().is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -206,5 +252,46 @@ mod tests {
         assert_eq!(back.max_tokens, 3000);
         assert_eq!(back.providers, vec!["claude-code"]);
         assert_eq!(back.decay_days, 7);
+    }
+
+    #[test]
+    fn hook_event_parses_both_spellings_and_rejects_unknown() {
+        assert_eq!(
+            HookEvent::parse("session-start"),
+            Some(HookEvent::SessionStart)
+        );
+        assert_eq!(
+            HookEvent::parse("SessionStart"),
+            Some(HookEvent::SessionStart)
+        );
+        assert_eq!(
+            HookEvent::parse("user-prompt-submit"),
+            Some(HookEvent::UserPromptSubmit)
+        );
+        assert_eq!(HookEvent::parse("PostToolUse"), None);
+        assert_eq!(HookEvent::parse(""), None);
+    }
+
+    #[test]
+    fn query_from_payload_reads_prompt_and_cwd() {
+        let prompt_payload = serde_json::json!({ "prompt": "fix the parser" });
+        assert_eq!(
+            query_from_payload(HookEvent::UserPromptSubmit, &prompt_payload).as_deref(),
+            Some("fix the parser")
+        );
+        let start_payload = serde_json::json!({ "cwd": "/home/u/proj" });
+        assert_eq!(
+            query_from_payload(HookEvent::SessionStart, &start_payload).as_deref(),
+            Some("/home/u/proj")
+        );
+    }
+
+    #[test]
+    fn query_from_payload_rejects_blank_and_missing() {
+        let blank = serde_json::json!({ "prompt": "   " });
+        assert!(query_from_payload(HookEvent::UserPromptSubmit, &blank).is_none());
+        let missing = serde_json::json!({});
+        assert!(query_from_payload(HookEvent::UserPromptSubmit, &missing).is_none());
+        assert!(query_from_payload(HookEvent::SessionStart, &missing).is_none());
     }
 }
