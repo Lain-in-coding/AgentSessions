@@ -46,6 +46,7 @@ pub fn render_success(command: &str, outcome: Outcome, data: &Value, page: &Page
         "sync" => render_sync(data),
         "ingest" => render_ingest(data),
         "handoff" => render_handoff(data),
+        "resume" => render_resume(data),
         "config.paths" => {
             // config paths 报告的是"默认位置"，未用到就不会创建；新手照着找会扑空
             // （10 角色体验测试缺陷）。加一句说明，结构本身保持稳定。
@@ -55,6 +56,62 @@ pub fn render_success(command: &str, outcome: Outcome, data: &Value, page: &Page
         }
         _ => kv_lines(data),
     }
+}
+
+/// `resume`：dry-run 预览把要执行的命令摊开给人看——可恢复性、完整命令、
+/// 原工作目录、权限模式，以及是否已执行。不可恢复时给出原因与措辞，
+/// 不打印空命令行。
+fn render_resume(data: &Value) -> Vec<String> {
+    let mut lines = Vec::new();
+    let session = data
+        .get("session_id")
+        .and_then(Value::as_str)
+        .map(sanitize)
+        .unwrap_or_else(|| "?".into());
+    let provider = data
+        .get("provider_id")
+        .and_then(Value::as_str)
+        .map(sanitize)
+        .unwrap_or_else(|| MISSING.into());
+    lines.push(format!("session {session}  (provider {provider})"));
+
+    let available = data
+        .get("available")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if !available {
+        let reason = data
+            .get("unavailable_reason")
+            .and_then(Value::as_str)
+            .map(sanitize)
+            .unwrap_or_else(|| "未记录原因".into());
+        lines.push(format!("不可恢复：{reason}"));
+        lines.push("说明：历史仍可检索，只是无法原地恢复。".into());
+        return lines;
+    }
+
+    let command = data
+        .get("command")
+        .and_then(Value::as_str)
+        .map(sanitize)
+        .unwrap_or_else(|| "?".into());
+    lines.push(format!("命令：{command}"));
+    if let Some(dir) = data.get("working_directory").and_then(Value::as_str) {
+        lines.push(format!("工作目录：{}", sanitize(dir)));
+    }
+    if let Some(mode) = data.get("permission_mode").and_then(Value::as_str) {
+        lines.push(format!("权限模式：{}", sanitize(mode)));
+    }
+    let executed = data
+        .get("executed")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if executed {
+        lines.push("已执行：provider 进程已启动并退出。".into());
+    } else {
+        lines.push("dry-run：未执行。加 --yes 实际恢复。".into());
+    }
+    lines
 }
 
 /// `handoff`：把 handoff pack 投影为可读分栏——pack 元信息、matched
@@ -809,6 +866,78 @@ mod tests {
             next_cursor: Some(token.into()),
             has_more: true,
         }
+    }
+
+    #[test]
+    fn resume_renders_dry_run_preview() {
+        let data = json!({
+            "session_id": "ses_v1_aaa",
+            "provider_id": "claude-code",
+            "available": true,
+            "command": "(cd /home/u/proj && claude --resume abc-123)",
+            "working_directory": "/home/u/proj",
+            "permission_mode": null,
+            "unavailable_reason": null,
+            "executed": false,
+        });
+        let lines = render_success("resume", Outcome::Success, &data, &Page::default());
+        assert_eq!(
+            lines,
+            [
+                "session ses_v1_aaa  (provider claude-code)",
+                "命令：(cd /home/u/proj && claude --resume abc-123)",
+                "工作目录：/home/u/proj",
+                "dry-run：未执行。加 --yes 实际恢复。",
+            ]
+        );
+    }
+
+    #[test]
+    fn resume_renders_unavailable_without_command_line() {
+        let data = json!({
+            "session_id": "ses_v1_bbb",
+            "provider_id": null,
+            "available": false,
+            "command": null,
+            "working_directory": null,
+            "permission_mode": null,
+            "unavailable_reason": "no resume metadata claims",
+            "executed": false,
+        });
+        let lines = render_success("resume", Outcome::Success, &data, &Page::default());
+        assert_eq!(
+            lines,
+            [
+                "session ses_v1_bbb  (provider —)",
+                "不可恢复：no resume metadata claims",
+                "说明：历史仍可检索，只是无法原地恢复。",
+            ]
+        );
+    }
+
+    #[test]
+    fn resume_renders_executed_state() {
+        let data = json!({
+            "session_id": "ses_v1_ccc",
+            "provider_id": "codex",
+            "available": true,
+            "command": "codex resume xyz",
+            "working_directory": null,
+            "permission_mode": "--dangerously-bypass-approvals-and-sandbox",
+            "unavailable_reason": null,
+            "executed": true,
+        });
+        let lines = render_success("resume", Outcome::Success, &data, &Page::default());
+        assert!(
+            lines
+                .iter()
+                .any(|l| l == "已执行：provider 进程已启动并退出。")
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l == "权限模式：--dangerously-bypass-approvals-and-sandbox")
+        );
     }
 
     #[test]

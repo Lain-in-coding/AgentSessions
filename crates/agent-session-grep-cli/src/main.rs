@@ -627,6 +627,7 @@ COMMANDS:
     handoff <query>        检索并为查询生成 handoff pack（原文证据 + 建议命令；dry-run）
     get-message <msg-id>   返回命中消息及其同会话主线邻居（--session/--around）
     get-session-resume <ses-id> 返回只读 Resume Metadata（Provider Session ID / Original Working Directory）
+    resume <ses-id>        预览恢复命令（默认 dry-run；--yes 才实际执行）
     get <wire-id>          按实体 id 取回原始 payload
     show <wire-id>         按实体 id 取回并归一化展示（role/text 结构）
     list [limit]           稳定排序列出 catalog 实体（默认 20；支持分页/预算 flag）
@@ -754,6 +755,7 @@ fn known_subcommand(cmd: &str) -> bool {
             | "handoff"
             | "get-message"
             | "get-session-resume"
+            | "resume"
             | "get"
             | "show"
             | "list"
@@ -799,6 +801,13 @@ fn subcommand_help_text(cmd: &str) -> &'static str {
                   示例：agent-session-grep --db <path> get-session-resume ses_v1_...\n\
                   固定字段（缺失为 null）：provider_session_id、original_working_directory；\n\
                   不会生成/执行任何恢复命令，也不暴露 transcript 路径。"
+        }
+        "resume" => {
+            "resume <ses-id>：预览（默认）或执行会话的原地恢复。\n\
+                  示例：agent-session-grep --db <path> resume ses_v1_...\n\
+                  默认 dry-run——打印将执行的完整命令（provider/cwd/session id）并退出；\n\
+                  确认无误后加 --yes 才在原工作目录实际启动 provider 进程。\n\
+                  未核验恢复命令的 provider 报 available:false，绝不编造命令。"
         }
         "show" => {
             "show <wire-id>：按实体 ID 取回并展示（role/text/时间戳）。\n\
@@ -1386,6 +1395,65 @@ fn dispatch(
             let (outcome, data, page, warnings) = render(response);
             Ok(("show", outcome, data, page, warnings))
         }
+        "resume" => {
+            // Resume 执行层（#5）：默认 dry-run 预览完整命令；`--yes` 显式 opt-in
+            // 才实际 spawn provider 进程。未核验 resume 命令的 provider 恒为
+            // 不可恢复（null/—），绝不编造命令。
+            let mut args = rest.to_vec();
+            let confirmed = take_bool_flag(&mut args, "--yes");
+            no_extra_args(&args, 1, "resume <session-id>")?;
+            let wire = arg(&args, 1, "resume <session-id>")?;
+            let id = StableId::from_wire(wire)
+                .filter(|id| id.kind() == IdKind::Session)
+                .ok_or_else(|| CliError::usage(format!("not a valid session id: {wire}")))?;
+            let app = App::with_resume(store_ref(store), store_ref(store), store_ref(store));
+            let response = app.handle(AppRequest::GetSessionResume {
+                session_id: id.clone(),
+            })?;
+            let AppResponse::SessionResume(metadata) = response else {
+                return Err(CliError::usage("resume: unexpected response"));
+            };
+            let preview =
+                agent_session_grep_application::resume::build_resume_descriptor(&metadata);
+            let mut data = serde_json::json!({
+                "session_id": metadata.session_id.as_str(),
+                "provider_id": metadata.provider_id,
+                "available": preview.available,
+                "command": if preview.command_string.is_empty() {
+                    serde_json::Value::Null
+                } else {
+                    serde_json::json!(preview.command_string)
+                },
+                "working_directory": preview.descriptor.working_directory,
+                "permission_mode": preview.descriptor.permission_mode,
+                "unavailable_reason": preview.unavailable_reason,
+                "executed": false,
+            });
+            // 不可恢复不是错误：历史恒可检索，只是不可恢复（ADR-0009）。
+            if !preview.available {
+                return Ok((
+                    "resume",
+                    protocol::Outcome::Success,
+                    data,
+                    protocol::Page::default(),
+                    Vec::new(),
+                ));
+            }
+            let mut warnings = Vec::new();
+            if confirmed {
+                execute_resume(&preview.descriptor)?;
+                data["executed"] = serde_json::json!(true);
+            } else {
+                warnings.push("dry-run：未执行。确认命令无误后加 --yes 实际恢复会话。".to_string());
+            }
+            Ok((
+                "resume",
+                protocol::Outcome::Success,
+                data,
+                protocol::Page::default(),
+                warnings,
+            ))
+        }
         "get-session-resume" => {
             // 只读 Resume Metadata（ADR-0009）：只返回结构化字段，绝不构造/执行
             // shell 命令、绝不返回 transcript/source path。
@@ -1609,6 +1677,57 @@ fn budget_from_flags(
     Ok(budget)
 }
 
+/// 执行 resume：在原 cwd 下 spawn provider 进程并等待其退出（前台接管）。
+///
+/// 执行前校验 cwd 存在（存在但不可访问也在此暴露）；provider 二进制缺失、
+/// cwd 不存在、进程非零退出都返回结构化错误，绝不静默。permission_mode 只在
+/// 用户显式选择时出现在 descriptor 中（默认 None，不自动带 yolo）。
+fn execute_resume(
+    descriptor: &agent_session_grep_application::resume::ResumeDescriptor,
+) -> Result<(), CliError> {
+    if let Some(dir) = &descriptor.working_directory
+        && !std::path::Path::new(dir).is_dir()
+    {
+        return Err(CliError(
+            ProtocolError::new(
+                CanonicalCode::SourceIo,
+                "resume working directory does not exist",
+            )
+            .with_details(serde_json::json!({ "stage": "cwd_check" })),
+        ));
+    }
+    let mut command = std::process::Command::new(&descriptor.provider_binary);
+    command.args(&descriptor.args);
+    if let Some(dir) = &descriptor.working_directory {
+        command.current_dir(dir);
+    }
+    let status = command.status().map_err(|e| {
+        // provider 二进制缺失是最常见失败；不回显完整路径，只给可操作原因。
+        let reason = if e.kind() == std::io::ErrorKind::NotFound {
+            "provider binary not found on PATH"
+        } else {
+            "failed to start provider process"
+        };
+        CliError(
+            ProtocolError::new(CanonicalCode::ProviderError, reason)
+                .with_details(serde_json::json!({ "stage": "spawn" })),
+        )
+    })?;
+    if !status.success() {
+        return Err(CliError(
+            ProtocolError::new(
+                CanonicalCode::ProviderError,
+                "provider exited with a non-zero status",
+            )
+            .with_details(serde_json::json!({
+                "stage": "provider_exit",
+                "exit_code": status.code(),
+            })),
+        ));
+    }
+    Ok(())
+}
+
 /// 用与 CLI `index`/`get` 一致的派生路径，从一个 fact 造出 message id。
 fn message_id(fact: &str) -> StableId {
     StableId::derive(
@@ -1631,7 +1750,6 @@ fn index_one(store: &SqliteStore, fact: &str, text: &str) -> Result<serde_json::
 }
 
 /// 借用 store 作为端口 trait 对象的辅助——App 需要两个泛型参数各持一份。
-///
 /// 由于 App<C,S> 按值持有两个后端，而我们只有一个 SqliteStore 实例，
 /// 这里用 `&SqliteStore` 满足两个 trait 约束（trait 对 &T 亦实现）。
 fn store_ref(store: &SqliteStore) -> &SqliteStore {
@@ -3423,7 +3541,7 @@ mod tests {
 
     // ---- help/version 提前拦截（ADR-0006，R3）----
 
-    const KNOWN_COMMANDS: [&str; 16] = [
+    const KNOWN_COMMANDS: [&str; 17] = [
         "ingest",
         "sync",
         "index",
@@ -3431,6 +3549,7 @@ mod tests {
         "handoff",
         "get-message",
         "get-session-resume",
+        "resume",
         "get",
         "show",
         "list",
