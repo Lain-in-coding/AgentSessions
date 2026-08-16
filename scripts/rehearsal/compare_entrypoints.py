@@ -1,35 +1,23 @@
 #!/usr/bin/env python3
-"""Five-entry-point consistency harness for the agent-session-grep release rehearsal.
+"""Five-entry-point consistency harness for the release rehearsal.
 
-Runs the same canonical operations through every available entry point against a
-synthetic fixture catalog, then diffs the shared canonical fields across entry
-points and emits a consistency report JSON. The report is privacy-safe: it
-carries aggregate counts and per-field verdicts only — never message text,
-absolute source paths, provider-native ids, fingerprints, usernames, or
-hostnames.
+Runs one fixed synthetic search through CLI JSON, Robot, MCP, Web/HTTP, and the
+TUI's headless structural projection. Web is exercised through a real loopback
+``serve`` process bound to an OS-assigned port with its generated bearer token;
+TUI comparison reuses the same pure Application-backed projection as the
+interactive reducer and does not automate a terminal.
 
-Design (see ``docs/release/rehearsal-runbook.md`` and the task PRD §2 "契约
-一致性终检"):
-
-* Entry points are pluggable adapters. Each adapter implements ``run`` and
-  returns a normalized ``CanonicalResult`` for each canonical operation.
-* Adapters that do not exist yet (Web/HTTP, TUI automated) default to an
-  explicit ``{"status": "skipped", "reason": "not implemented"}`` entry —
-  they are never silently omitted, so a missing entry point can never masquerade
-  as a passed check.
-* Comparison is over a closed set of canonical fields per operation. Transport
-  envelopes (Robot v1 envelope, JSON-RPC frame) are stripped before diffing.
-  Non-semantic ordering fields (``request_id``, ``meta.duration_ms``) are
-  ignored.
+The report contains a closed privacy-safe field set only. Any declared entry
+point that returns ``not_implemented`` makes the operation and overall verdict
+fail; missing coverage can never be reported as consistent.
 
 Usage::
 
     python scripts/rehearsal/compare_entrypoints.py --binary <path-to-bin>
     python scripts/rehearsal/compare_entrypoints.py --help
 
-Exit codes: 0 all compared adapters agree; 1 at least one divergence; 2 usage
-error. Skipped adapters never cause exit 1 — they are surfaced in the report
-and the Rust smoke test asserts the skip is explicit.
+Exit codes: 0 all five entry points agree; 1 divergence or unimplemented entry
+point; 2 usage/environment failure.
 """
 
 from __future__ import annotations
@@ -39,11 +27,16 @@ import hashlib
 import json
 import os
 import platform
+import queue
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Sequence, Tuple
 
@@ -53,15 +46,12 @@ REPORT_SCHEMA_VERSION = "agent-session-grep.entrypoint-consistency/v1"
 #: The five entry points the release rehearsal must eventually cover.
 ENTRY_POINTS = ("cli", "mcp", "robot", "web", "tui")
 
-#: Entry points that are implemented today. The rest default to explicit skips.
-IMPLEMENTED_ENTRY_POINTS = ("cli", "mcp", "robot")
+#: All five declared entry points are exercised by this harness.
+IMPLEMENTED_ENTRY_POINTS = ENTRY_POINTS
 
-#: Canonical operations every entry point must support. Each maps to a closed
-#: set of canonical fields compared across entry points.
+#: The fixed query projection shared by every entry point.
 CANONICAL_OPERATIONS: Dict[str, Sequence[str]] = {
-    # operation_name -> tuple of canonical field paths (dot-notation) compared.
     "search": ("data.hits[*].id", "page.has_more", "outcome"),
-    "list_sessions": ("data.entries[*].id", "page.has_more", "outcome"),
 }
 
 #: A synthetic Claude Code JSONL fixture. Two messages, both containing the
@@ -80,8 +70,10 @@ FIXTURE_LINES = [
 ]
 #: Canonical query and page size shared by every entry point, so results are
 #: comparable (a divergent default limit would produce a false divergence).
+#: Page size 20 matches the CLI default limit, the MCP limit default, the Web
+#: projection budget, and the TUI search page limit.
 CANONICAL_QUERY = "rehearsaltoken"
-CANONICAL_PAGE_SIZE = 50
+CANONICAL_PAGE_SIZE = 20
 
 
 class HarnessError(Exception):
@@ -112,14 +104,17 @@ def write_fixture(dir_path: Path) -> Path:
 
 # ─── CLI / Robot adapter ─────────────────────────────────────────────────────
 #
-# The CLI and Robot entry points share a binary: the only difference is that
-# Robot mode wraps the result in the Robot v1 envelope. We normalize both to
-# the same canonical payload by stripping the envelope.
+# The CLI and Robot entry points share a binary: CLI emits `--output json`,
+# Robot wraps the same result in the explicit `--robot` envelope. We normalize
+# both to the same canonical payload by stripping the envelope.
 
 
-def run_cli_json(binary: str, db: str, args: Sequence[str]) -> Dict[str, Any]:
-    """Run the binary in robot mode, return the parsed first JSON line."""
-    cmd = [binary, "--db", db, "--robot", *args]
+def run_cli_json(
+    binary: str, db: str, args: Sequence[str], *, robot: bool = False
+) -> Dict[str, Any]:
+    """Run one CLI command and parse its first JSON line."""
+    mode_args = ["--robot"] if robot else ["--output", "json"]
+    cmd = [binary, "--db", db, *mode_args, *args]
     proc = subprocess.run(
         cmd,
         stdout=subprocess.PIPE,
@@ -162,23 +157,28 @@ def strip_robot_envelope(frame: Dict[str, Any]) -> Dict[str, Any]:
 def cli_run_operation(
     binary: str, db: str, op: str
 ) -> Dict[str, Any]:
-    """Run one canonical operation through the CLI (robot JSON) entry point."""
-    if op == "search":
-        frame = run_cli_json(
-            binary, db, ["search", CANONICAL_QUERY, "--max-items", str(CANONICAL_PAGE_SIZE)]
-        )
-        return strip_robot_envelope(frame)
-    if op == "list_sessions":
-        # CLI `list` exposes the complete catalog; MCP `list_sessions` is
-        # session-only. Normalize the CLI payload to the same session set.
-        frame = run_cli_json(binary, db, ["list", str(CANONICAL_PAGE_SIZE)])
-        payload = strip_robot_envelope(frame)
-        entries = payload.get("data", {}).get("entries", [])
-        payload.setdefault("data", {})["entries"] = [
-            entry for entry in entries if str(entry.get("id", "")).startswith("ses_v1_")
-        ]
-        return payload
-    raise HarnessError(f"unknown canonical operation for CLI: {op}")
+    """Run one canonical operation through the CLI (--output json) entry point."""
+    if op != "search":
+        raise HarnessError(f"unknown canonical operation for CLI: {op}")
+    frame = run_cli_json(
+        binary,
+        db,
+        ["search", CANONICAL_QUERY, "--max-items", str(CANONICAL_PAGE_SIZE)],
+    )
+    return strip_robot_envelope(frame)
+
+
+def robot_run_operation(binary: str, db: str, op: str) -> Dict[str, Any]:
+    """Run the same command through the explicit ``--robot`` entry point."""
+    if op != "search":
+        raise HarnessError(f"unknown canonical operation for Robot: {op}")
+    frame = run_cli_json(
+        binary,
+        db,
+        ["search", CANONICAL_QUERY, "--max-items", str(CANONICAL_PAGE_SIZE)],
+        robot=True,
+    )
+    return strip_robot_envelope(frame)
 
 
 # ─── MCP adapter ─────────────────────────────────────────────────────────────
@@ -252,14 +252,10 @@ def mcp_run_operation(
     binary: str, db: str, op: str
 ) -> Dict[str, Any]:
     """Run one canonical operation through the MCP JSON-RPC entry point."""
-    if op == "search":
-        tool_name = "search_sessions"
-        arguments = {"query": CANONICAL_QUERY, "max_items": CANONICAL_PAGE_SIZE}
-    elif op == "list_sessions":
-        tool_name = "list_sessions"
-        arguments = {"max_items": CANONICAL_PAGE_SIZE}
-    else:
+    if op != "search":
         raise HarnessError(f"unknown canonical operation for MCP: {op}")
+    tool_name = "search_sessions"
+    arguments = {"query": CANONICAL_QUERY, "max_items": CANONICAL_PAGE_SIZE}
     call = json.dumps(
         {
             "jsonrpc": "2.0",
@@ -273,17 +269,98 @@ def mcp_run_operation(
     return mcp_structured_content(resp)
 
 
-# ─── Not-yet-implemented adapters ─────────────────────────────────────────────
+# ─── TUI adapter ─────────────────────────────────────────────────────────────
 
 
-def skipped_adapter(entry_point: str, op: str) -> Dict[str, Any]:
-    """Explicit skip record for an entry point that does not exist yet."""
-    return {
-        "entry_point": entry_point,
-        "operation": op,
-        "status": "skipped",
-        "reason": "not implemented",
-    }
+def tui_run_operation(binary: str, db: str, op: str) -> Dict[str, Any]:
+    """Run the TUI's headless Application-backed projection."""
+    if op != "search":
+        raise HarnessError(f"unknown canonical operation for TUI: {op}")
+    return run_cli_json(binary, db, ["tui", "--snapshot-json", CANONICAL_QUERY])
+
+
+# ─── Web / HTTP adapter ──────────────────────────────────────────────────────
+
+
+def _serve_url(binary: str, db: str) -> Tuple[subprocess.Popen[str], str]:
+    """Start serve on an ephemeral loopback port and discover its token/address."""
+    proc: subprocess.Popen[str] = subprocess.Popen(
+        [binary, "--db", db, "serve", "--port", "0"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        bufsize=1,
+    )
+    assert proc.stderr is not None
+    lines: queue.Queue[str] = queue.Queue()
+
+    def collect_stderr() -> None:
+        assert proc.stderr is not None
+        for line in proc.stderr:
+            lines.put(line.rstrip())
+
+    threading.Thread(target=collect_stderr, daemon=True).start()
+    deadline = time.monotonic() + 10
+    address = token = None
+    while time.monotonic() < deadline:
+        try:
+            line = lines.get(timeout=0.1)
+        except queue.Empty:
+            if proc.poll() is not None:
+                break
+            continue
+        # Current serve prints one ready line: `asg serve: open http://<addr>/?token=<token>`.
+        if line.startswith("asg serve: open http://") and address is None:
+            ready = line.removeprefix("asg serve: open ")
+            parsed = urllib.parse.urlsplit(ready)
+            address = f"{parsed.scheme}://{parsed.netloc}"
+            token = urllib.parse.parse_qs(parsed.query).get("token", [None])[0]
+        if address and token:
+            return proc, f"{address}?token={urllib.parse.quote(token)}"
+    stderr = "\\n".join(list(lines.queue))
+    proc.terminate()
+    proc.wait(timeout=5)
+    raise HarnessError(f"serve did not become ready: {stderr}")
+
+
+def web_get(base_url: str, path: str, token: str) -> Dict[str, Any]:
+    request = urllib.request.Request(
+        f"{base_url}{path}",
+        headers={"Authorization": f"Bearer {token}", "Host": "127.0.0.1"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:
+            if response.status != 200:
+                raise HarnessError(f"Web GET {path} returned HTTP {response.status}")
+            return json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, json.JSONDecodeError) as exc:
+        raise HarnessError(f"Web GET {path} failed: {exc}") from exc
+
+
+def web_run_operation(binary: str, db: str, op: str) -> Dict[str, Any]:
+    """Exercise the real loopback Web API and return its shared projection."""
+    if op != "search":
+        raise HarnessError(f"unknown canonical operation for Web: {op}")
+    proc, ready_url = _serve_url(binary, db)
+    try:
+        parsed = urllib.parse.urlsplit(ready_url)
+        base_url = f"{parsed.scheme}://{parsed.netloc}"
+        token = urllib.parse.parse_qs(parsed.query)["token"][0]
+        payload = web_get(
+            base_url,
+            f"/api/projection/search?q={urllib.parse.quote(CANONICAL_QUERY)}",
+            token,
+        )
+        return payload
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
 
 
 # ─── Canonical field extraction ──────────────────────────────────────────────
@@ -336,18 +413,33 @@ def canonical_view(
 def compare_canonical(
     op: str, results: Dict[str, Dict[str, Any]]
 ) -> Dict[str, Any]:
-    """Compare canonical views across all non-skipped entry points for one op."""
+    """Compare canonical views across all entry points for one op.
+
+    A ``not_implemented`` adapter fails the operation outright: release
+    consistency never treats missing coverage as a pass.
+    """
     views: Dict[str, Dict[str, Any]] = {}
     skipped: List[Dict[str, Any]] = []
     aliases: List[Dict[str, Any]] = []
+    unimplemented: List[Dict[str, Any]] = []
     for entry_point, payload in results.items():
-        if isinstance(payload, dict) and payload.get("status") == "skipped":
-            skipped.append(payload)
+        if isinstance(payload, dict) and payload.get("status") == "not_implemented":
+            unimplemented.append(payload)
             continue
         if isinstance(payload, dict) and payload.get("status") == "alias":
             aliases.append({"entry_point": entry_point, **payload})
             continue
         views[entry_point] = canonical_view(payload, op)
+    if unimplemented:
+        return {
+            "operation": op,
+            "verdict": "not_implemented",
+            "compared": list(views.keys()),
+            "skipped": [],
+            "aliases": aliases,
+            "unimplemented": unimplemented,
+            "divergences": [],
+        }
     if not views:
         return {
             "operation": op,
@@ -355,6 +447,7 @@ def compare_canonical(
             "compared": [],
             "skipped": skipped,
             "aliases": aliases,
+            "unimplemented": [],
             "divergences": [],
         }
     reference_ep = next(iter(views))
@@ -380,6 +473,7 @@ def compare_canonical(
         "compared": list(views.keys()),
         "skipped": skipped,
         "aliases": aliases,
+        "unimplemented": [],
         "divergences": divergences,
     }
 
@@ -426,27 +520,13 @@ def run_all(
 
     per_op: List[Dict[str, Any]] = []
     for op in CANONICAL_OPERATIONS:
-        results: Dict[str, Dict[str, Any]] = {}
-        # CLI + Robot share the same binary/envelope; robot is the same call
-        # surface, so we record CLI as the representative and note robot as
-        # alias-consistent in the report.
-        if "cli" in IMPLEMENTED_ENTRY_POINTS:
-            results["cli"] = cli_run_operation(binary, db, op)
-        if "mcp" in IMPLEMENTED_ENTRY_POINTS:
-            results["mcp"] = mcp_run_operation(binary, db, op)
-        # Robot entry point uses the identical code path as CLI (same binary,
-        # --robot envelope); mark alias-consistent rather than re-running.
-        if "robot" in IMPLEMENTED_ENTRY_POINTS and "cli" in results:
-            results["robot"] = {
-                "status": "alias",
-                "alias_of": "cli",
-                "note": "Robot shares the CLI binary and --robot envelope; "
-                "canonical payload is identical by construction.",
-            }
-        # Not-yet-implemented entry points.
-        for ep in ("web", "tui"):
-            if ep not in IMPLEMENTED_ENTRY_POINTS:
-                results[ep] = skipped_adapter(ep, op)
+        results: Dict[str, Dict[str, Any]] = {
+            "cli": cli_run_operation(binary, db, op),
+            "mcp": mcp_run_operation(binary, db, op),
+            "robot": robot_run_operation(binary, db, op),
+            "web": web_run_operation(binary, db, op),
+            "tui": tui_run_operation(binary, db, op),
+        }
         per_op.append(compare_canonical(op, results))
     report = build_report(binary, per_op)
     return report, per_op
@@ -455,7 +535,7 @@ def run_all(
 def build_report(binary: str, per_op: List[Dict[str, Any]]) -> Dict[str, Any]:
     overall = "consistent"
     for comparison in per_op:
-        if comparison["verdict"] == "divergent":
+        if comparison["verdict"] != "consistent":
             overall = "divergent"
             break
     return {

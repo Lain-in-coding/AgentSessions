@@ -1,11 +1,8 @@
 //! Consistency smoke test: shells the five-entry-point comparison script
 //! (``scripts/rehearsal/compare_entrypoints.py``) in fixtures-only mode against
-//! the freshly compiled binary. Asserts the report is well-formed, the overall
-//! verdict is "consistent", and every not-yet-implemented entry point is an
-//! explicit skip — never silently absent.
-//!
-//! Gated to run green TODAY: only CLI and MCP are compared; Web/TUI are
-//! represented as explicit ``skipped: not implemented`` entries.
+//! the freshly compiled binary. The Web adapter launches the real loopback
+//! server; TUI is checked through its headless structural projection.
+//! No real transcripts or terminal automation are involved.
 
 use std::path::PathBuf;
 use std::process::{Command, Output};
@@ -55,7 +52,7 @@ fn stderr(o: &Output) -> String {
 }
 
 #[test]
-fn consistency_report_cli_mcp_agree_pending_skipped_explicit() {
+fn consistency_report_all_five_entry_points_agree() {
     let script = consistency_script();
     assert!(
         script.is_file(),
@@ -89,7 +86,9 @@ fn consistency_report_cli_mcp_agree_pending_skipped_explicit() {
         serde_json::to_string_pretty(&report).unwrap_or_default()
     );
 
-    // Every operation must be consistent.
+    // Every operation must be consistent and every entry point directly
+    // compared. Release consistency no longer permits skipped or
+    // alias-as-pass surfaces.
     let operations = report["operations"]
         .as_array()
         .expect("report.operations must be an array");
@@ -104,73 +103,41 @@ fn consistency_report_cli_mcp_agree_pending_skipped_explicit() {
             "operation {} must be consistent",
             op["operation"]
         );
-        // Every declared entry point must appear — compared, aliased, or
-        // explicitly skipped.
         let compared: Vec<&str> = op["compared"]
             .as_array()
             .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
             .unwrap_or_default();
-        let aliases: Vec<&str> = op["aliases"]
-            .as_array()
-            .map(|a| a.iter().filter_map(|v| v["entry_point"].as_str()).collect())
-            .unwrap_or_default();
-        let skipped: Vec<&str> = op["skipped"]
-            .as_array()
-            .map(|a| a.iter().filter_map(|v| v["entry_point"].as_str()).collect())
-            .unwrap_or_default();
-        for ep in ["cli", "mcp", "robot", "web", "tui"] {
-            let in_compared = compared.contains(&ep);
-            let in_aliases = aliases.contains(&ep);
-            let in_skipped = skipped.contains(&ep);
-            assert!(
-                in_compared || in_aliases || in_skipped,
-                "entry point {ep} must appear as compared, aliased, or skipped \
-                 in operation {}",
-                op["operation"]
-            );
-        }
-        // Pending entry points must be explicitly skipped, not compared.
-        if let Some(skips) = op["skipped"].as_array() {
-            for skip in skips {
-                assert_eq!(
-                    skip["status"].as_str().unwrap_or(""),
-                    "skipped",
-                    "pending entry point must have status=skipped"
-                );
-                assert_eq!(
-                    skip["reason"].as_str().unwrap_or(""),
-                    "not implemented",
-                    "pending entry point must say reason=not implemented"
-                );
-            }
-        }
-        // Aliased entry points must declare which entry point they alias.
-        if let Some(alias_records) = op["aliases"].as_array() {
-            for alias in alias_records {
-                assert_eq!(
-                    alias["status"].as_str().unwrap_or(""),
-                    "alias",
-                    "alias record must have status=alias"
-                );
-                assert!(
-                    alias["alias_of"].is_string(),
-                    "alias record must name alias_of"
-                );
-            }
-        }
+        assert_eq!(compared, vec!["cli", "mcp", "robot", "web", "tui"]);
+        assert!(
+            op["skipped"].as_array().is_some_and(Vec::is_empty),
+            "no entry point may be skipped"
+        );
+        assert!(
+            op["aliases"].as_array().is_some_and(Vec::is_empty),
+            "Robot must be exercised, not assumed as an alias"
+        );
+        assert!(
+            op["unimplemented"].as_array().is_some_and(Vec::is_empty),
+            "an unimplemented entry point must fail the harness"
+        );
     }
 
-    // Entry-point metadata must declare all five, with web/tui pending.
+    // Entry-point metadata must declare and implement all five.
     let declared: Vec<&str> = report["entry_points"]["declared"]
         .as_array()
         .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
         .unwrap_or_default();
     assert_eq!(declared, vec!["cli", "mcp", "robot", "web", "tui"]);
-    let pending: Vec<&str> = report["entry_points"]["pending"]
+    let implemented: Vec<&str> = report["entry_points"]["implemented"]
         .as_array()
         .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
         .unwrap_or_default();
-    assert_eq!(pending, vec!["web", "tui"]);
+    assert_eq!(implemented, declared);
+    assert!(
+        report["entry_points"]["pending"]
+            .as_array()
+            .is_some_and(Vec::is_empty)
+    );
 
     // Privacy fields must be asserted in the report.
     let privacy = &report["privacy"];
