@@ -5,6 +5,7 @@
 //! probe 出的标识对照——文档与代码任一改动而未同步，CI 立即失败（与 Robot envelope
 //! schema 用 include_str! 交叉验证同一纪律）。
 
+use agent_session_grep_ports::capability::ProviderCapabilityMatrix;
 use agent_session_grep_ports::ProviderAdapter;
 use agent_session_grep_provider_claude::ClaudeCodeAdapter;
 use agent_session_grep_provider_codex::CodexAdapter;
@@ -89,6 +90,42 @@ fn matrix_marks_both_providers_experimental_not_beta() {
         assert_eq!(
             row.3, "Experimental",
             "provider `{provider}` 当前只能 Experimental，晋级必须有证据"
+        );
+    }
+}
+
+#[test]
+fn matrix_rows_match_capability_matrix_all_sixteen() {
+    // capability.rs 是单源权威（本文件头注释声明同一纪律）；矩阵文档必须与它
+    // 逐行一致。任一侧增删 provider 或改 variant/maturity 而未同步，立即失败。
+    let matrix = ProviderCapabilityMatrix::current();
+    let rows = matrix_rows();
+    assert_eq!(matrix.providers.len(), 16, "capability.rs 应有 16 行");
+    assert_eq!(rows.len(), 16, "矩阵文档应有 16 行");
+
+    for cap in &matrix.providers {
+        let row = rows
+            .iter()
+            .find(|(_, provider_id, _, _)| provider_id == &cap.provider_id)
+            .unwrap_or_else(|| panic!("矩阵文档缺少 provider_id `{}` 的行", cap.provider_id));
+        // deferred provider 无 variant，文档以 — 占位。
+        let expected_variant = if cap.variant_id.is_empty() {
+            "—"
+        } else {
+            cap.variant_id.as_str()
+        };
+        assert_eq!(
+            row.2, expected_variant,
+            "variant 列必须与 capability.rs 一致 (provider `{}`)",
+            cap.provider_id
+        );
+        // maturity 列文档用首字母大写，Unsupported 行带（deferred）注解，
+        // 因此按 capability.rs 的 as_str 前缀匹配。
+        assert!(
+            row.3.to_lowercase().starts_with(cap.maturity.as_str()),
+            "maturity 列必须与 capability.rs 一致 (provider `{}`，文档为 `{}`)",
+            cap.provider_id,
+            row.3
         );
     }
 }
