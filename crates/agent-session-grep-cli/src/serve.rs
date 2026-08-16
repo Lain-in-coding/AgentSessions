@@ -708,6 +708,7 @@ pub fn route_request(
         "/health"
             | "/api/status"
             | "/api/search"
+            | "/api/projection/search"
             | "/api/context"
             | "/api/handoff"
             | "/api/providers"
@@ -756,7 +757,7 @@ fn request_args(req: &HttpRequest) -> Result<Vec<String>, HttpResponse> {
     match path {
         "/" | "/health" | "/api/providers" => Ok(Vec::new()),
         "/api/status" => Ok(vec!["status".to_string()]),
-        "/api/search" => {
+        "/api/search" | "/api/projection/search" => {
             let Some(query) = value("q") else {
                 return Err(fixed_error(400, "invalid_request", "missing q parameter"));
             };

@@ -63,6 +63,48 @@ pub(crate) fn run(store: &SqliteStore) -> Result<Outcome, CliError> {
     Ok(Outcome::Success)
 }
 
+/// Headless structural projection for the release consistency harness.
+///
+/// This does not automate a terminal. It drives the same [`Effect::Search`]
+/// path as the interactive reducer (shared Application projection) and
+/// serializes only the stable fields used by the cross-entry-point
+/// comparison: `outcome`, `data.hits[].id`, `page.has_more`, `page.next_cursor`.
+pub(crate) fn snapshot_search(
+    store: &SqliteStore,
+    query: String,
+) -> Result<serde_json::Value, CliError> {
+    match execute(
+        store,
+        Effect::Search {
+            query,
+            cursor: None,
+        },
+    ) {
+        Msg::SearchLoaded(page) => {
+            let outcome = if page.truncated { "partial" } else { "success" };
+            Ok(serde_json::json!({
+                "outcome": outcome,
+                "data": {
+                    "hits": page.hits.into_iter().map(|hit| serde_json::json!({
+                        "id": hit.id,
+                    })).collect::<Vec<_>>(),
+                },
+                "page": {
+                    "has_more": page.has_more,
+                    "next_cursor": page.next_cursor,
+                },
+                "warnings": [],
+            }))
+        }
+        Msg::EffectFailed(message) => Err(CliError::usage(format!(
+            "tui snapshot search failed: {message}"
+        ))),
+        _ => Err(CliError::usage(
+            "tui snapshot search received an unexpected projection",
+        )),
+    }
+}
+
 /// 主循环：draw → poll(250ms) → 按键映射 → update → 内联执行 Effect 并回灌。
 fn event_loop(
     terminal: &mut ratatui::DefaultTerminal,

@@ -430,8 +430,22 @@ fn run(
     }
     // tui：交互式只读浏览（Preview）。同 mcp 一样接管终端，不走 dispatch/
     // emit_result；输出模式 flag 对其无意义（task design §0.6）。
+    // `tui --snapshot-json <query>` 是无终端的 headless 结构投影，供 release
+    // 一致性 harness 复用同一 Application 搜索路径做跨入口比对。
     if rest.first().map(String::as_str) == Some("tui") {
-        if rest.len() > 1 {
+        let mut tui_args = rest[1..].to_vec();
+        let snapshot_query = extract_flag(&mut tui_args, "--snapshot-json")?;
+        if let Some(query) = snapshot_query {
+            if !tui_args.is_empty() {
+                return Err(CliError::usage(
+                    "tui --snapshot-json <query> takes no additional arguments",
+                ));
+            }
+            let snapshot = tui::snapshot_search(&store, query)?;
+            protocol::write_stdout_line(&snapshot.to_string());
+            return Ok(protocol::Outcome::Success);
+        }
+        if !tui_args.is_empty() {
             return Err(CliError::usage("tui takes no positional arguments"));
         }
         return tui::run(&store);
@@ -1073,6 +1087,7 @@ fn is_known_flag_name(token: &str) -> bool {
             | "--until"
             | "--session"
             | "--around"
+            | "--snapshot-json"
             | "--discover"
             | "--offline"
     )
@@ -4300,6 +4315,7 @@ mod tests {
             "--until",
             "--session",
             "--around",
+            "--snapshot-json",
             "--offline",
         ] {
             let error = parse_db_flag(&["--db".into(), value.into(), "status".into()])
