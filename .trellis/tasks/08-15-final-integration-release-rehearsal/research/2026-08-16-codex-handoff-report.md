@@ -43,7 +43,7 @@
 
 | # | 缺口 | 证据 | 建议修复 |
 |---|---|---|---|
-| P0-1 | 公开树/历史含个人绝对路径（`C:/Users/小Q` 4 处、`C:/AgentSessions` 27 处，含 `provider-codebuddy/src/lib.rs:14` 与大量 trellis 文档） | audit-privacy-security / docs-consistency | 当前树替换为 `<repo>`/相对路径；历史由 owner 用 filter-repo/新公开仓库决策（写 `docs/operations/PUBLIC-HISTORY-SCRUB.md`） |
+| P0-1 | 公开树/历史含个人绝对路径（tracked 文件多处含本机用户目录与工程根路径，含 `provider-codebuddy/src/lib.rs:14` 与大量 trellis 文档） | audit-privacy-security / docs-consistency | 当前树替换为 `<repo>`/相对路径；历史由 owner 用 filter-repo/新公开仓库决策（见 `docs/operations/PUBLIC-HISTORY-SCRUB.md`，本报告发布前已由 privacy 清扫 commit 清理当前树） |
 | P0-4 | release pipeline 已存在但从未有 named successful run；无 SBOM/NOTICE/third-party attribution；`ci_configured_only` | audit-release-ci / quality-gate | 修 billing 后跑 exact SHA 的 4-target run；补 NOTICE/REUSE audit 收尾 |
 | P0-5 | 五入口一致性 harness 仍允许 Web/TUI skip-as-pass（`compare_entrypoints.py:30-32,446-475`、`e2e_consistency.rs:57-71`）；`verify-release.py` docstring 声称全流程但实际只 5 项 | audit-entrypoints | 让 Web 真实启动 loopback serve 比对；TUI 用 App projection 测试；runbook 更新到真实命令；产出 Go/No-Go 草案 |
 | P0-6 | Provider ingest 仍整文件 `read_to_end`（`source_fs.rs:38,74`）、`ProviderAdapter::parse(&[u8])`（`ports/lib.rs:820`），违反 RFC-0002 §7 release-blocking bounded-buffer | audit-quality-gate | 引入 bounded reader/chunked stream；保留 fingerprint/source_changed 原子性；大文件内存上限回归 |
