@@ -45,6 +45,7 @@ pub fn render_success(command: &str, outcome: Outcome, data: &Value, page: &Page
         "status" => render_status(data),
         "sync" => render_sync(data),
         "ingest" => render_ingest(data),
+        "handoff" => render_handoff(data),
         "config.paths" => {
             // config paths 报告的是"默认位置"，未用到就不会创建；新手照着找会扑空
             // （10 角色体验测试缺陷）。加一句说明，结构本身保持稳定。
@@ -54,6 +55,126 @@ pub fn render_success(command: &str, outcome: Outcome, data: &Value, page: &Page
         }
         _ => kv_lines(data),
     }
+}
+
+/// `handoff`：把 handoff pack 投影为可读分栏——pack 元信息、matched
+/// sessions、原文证据（evidence）、推断（inference）与预算/截断状态。
+/// 任何字段缺失都降级为 `?` 或空态措辞（与其余渲染器同一约束）。
+fn render_handoff(data: &Value) -> Vec<String> {
+    let mut lines = Vec::new();
+    let pack_id = data
+        .get("pack_id")
+        .and_then(Value::as_str)
+        .map(sanitize)
+        .unwrap_or_else(|| "?".into());
+    let created_at = data
+        .get("created_at")
+        .and_then(Value::as_str)
+        .map(sanitize)
+        .unwrap_or_else(|| "?".into());
+    let generation = number_text(data, "catalog_generation");
+    let schema_version = data
+        .get("schema_version")
+        .and_then(Value::as_str)
+        .unwrap_or("?");
+    lines.push(format!(
+        "handoff pack {pack_id} (schema {schema_version}; generation {generation})"
+    ));
+    lines.push(format!("created_at: {created_at}"));
+
+    let confidence = data
+        .get("confidence")
+        .and_then(|c| c.get("overall"))
+        .and_then(Value::as_str)
+        .unwrap_or("?");
+    lines.push(format!("confidence: {confidence}"));
+
+    // Matched sessions: id + occurrences.
+    let matched = data
+        .get("matched_sessions")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    if matched.is_empty() {
+        lines.push("matched_sessions: none".into());
+    } else {
+        lines.push(format!("matched_sessions: {}", matched.len()));
+        for session in matched {
+            let id = session
+                .get("session_id")
+                .and_then(|s| s.get("value"))
+                .and_then(Value::as_str)
+                .map(sanitize)
+                .unwrap_or_else(|| "?".into());
+            let occurrences = session
+                .get("occurrences")
+                .and_then(Value::as_u64)
+                .unwrap_or(1);
+            lines.push(format!("  {id}  ({occurrences} occurrence(s))"));
+        }
+    }
+
+    // Evidence: original text spans, one line each (truncated preview).
+    let evidence = data
+        .get("evidence")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    lines.push(format!("evidence: {}", evidence.len()));
+    for entry in evidence {
+        let text = entry
+            .get("text")
+            .and_then(Value::as_str)
+            .map(|text| preview(text, CONTEXT_TEXT_CHARS))
+            .unwrap_or_default();
+        let id = entry
+            .get("message_id")
+            .and_then(|m| m.get("value"))
+            .and_then(Value::as_str)
+            .map(sanitize)
+            .unwrap_or_else(|| "?".into());
+        lines.push(format!("  [{id}] {text}"));
+    }
+
+    // Inference: deterministic generator emits none; render honestly.
+    let inference = data
+        .get("inference")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    if inference.is_empty() {
+        lines.push("inference: none (deterministic)".into());
+    } else {
+        lines.push(format!("inference: {}", inference.len()));
+        for entry in inference {
+            let text = entry
+                .get("text")
+                .and_then(Value::as_str)
+                .map(|text| preview(text, CONTEXT_TEXT_CHARS))
+                .unwrap_or_default();
+            lines.push(format!("  {text}"));
+        }
+    }
+
+    // Truncation: only surface when the pack is incomplete.
+    if let Some(truncation) = data.get("truncation") {
+        let truncated = truncation
+            .get("truncated")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if truncated {
+            let reason = truncation
+                .get("reason")
+                .and_then(Value::as_str)
+                .unwrap_or("?");
+            let dropped = truncation
+                .get("dropped_count")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            lines.push(format!("truncated: reason={reason} dropped={dropped}"));
+        }
+    }
+    lines
 }
 
 /// `search`：头行 `N hit(s) (generation G)` + 每命中 `  <rank>. <id>  score <s>`，
@@ -688,6 +809,65 @@ mod tests {
             next_cursor: Some(token.into()),
             has_more: true,
         }
+    }
+
+    #[test]
+    fn handoff_renders_sections_and_schema() {
+        let data = json!({
+            "pack_id": "pack_v1_abcd1234",
+            "schema_version": "1.0",
+            "catalog_generation": 3,
+            "created_at": "2026-08-16T01:00:00Z",
+            "confidence": { "overall": "high" },
+            "matched_sessions": [
+                { "session_id": { "value": "ses_v1_aaa" }, "occurrences": 2 }
+            ],
+            "evidence": [
+                { "message_id": { "value": "msg_v1_aaa" }, "text": "the real evidence text" }
+            ],
+            "inference": [],
+            "truncation": { "truncated": false, "reason": "none", "dropped_count": 0 },
+        });
+        let lines = render_success("handoff", Outcome::Success, &data, &Page::default());
+        assert_eq!(
+            lines,
+            [
+                "handoff pack pack_v1_abcd1234 (schema 1.0; generation 3)",
+                "created_at: 2026-08-16T01:00:00Z",
+                "confidence: high",
+                "matched_sessions: 1",
+                "  ses_v1_aaa  (2 occurrence(s))",
+                "evidence: 1",
+                "  [msg_v1_aaa] the real evidence text",
+                "inference: none (deterministic)",
+            ]
+        );
+    }
+
+    #[test]
+    fn handoff_renders_truncation_when_incomplete() {
+        let data = json!({
+            "pack_id": "pack_v1_x",
+            "schema_version": "1.0",
+            "catalog_generation": 1,
+            "created_at": "2026-08-16T01:00:00Z",
+            "confidence": { "overall": "low" },
+            "matched_sessions": [],
+            "evidence": [],
+            "inference": [],
+            "truncation": { "truncated": true, "reason": "max_evidence", "dropped_count": 9 },
+        });
+        let lines = render_success("handoff", Outcome::Success, &data, &Page::default());
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with("matched_sessions: none"))
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l == "truncated: reason=max_evidence dropped=9")
+        );
     }
 
     #[test]
