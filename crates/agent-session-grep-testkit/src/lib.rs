@@ -19,7 +19,8 @@ use agent_session_grep_domain::{
 use agent_session_grep_ports::{
     AdapterManifest, CanonicalEventSink, CatalogEntry, CatalogStore, Confidence, ContextGraphStore,
     ContextStats, MessageContextCandidate, MessageEvent, ParseReport, PortError, PortResult,
-    ProbeResult, ProviderAdapter, ProviderError, SearchHit, SearchIndex, SearchQuery, manifest_for,
+    ProbeResult, ProviderAdapter, ProviderError, SearchHit, SearchIndex, SearchQuery,
+    SourcePlacement, manifest_for,
 };
 
 /// 构造合法 Canonical 会话的 builder（fixture builder）。
@@ -372,6 +373,39 @@ impl ContextGraphStore for InMemoryStore {
                     .and_then(|wire| StableId::from_wire(wire));
                 (id.clone(), session)
             })
+            .collect())
+    }
+
+    fn source_placements_of(
+        &self,
+        message_ids: &[StableId],
+    ) -> PortResult<Vec<(StableId, Option<SourcePlacement>)>> {
+        // 与 SqliteStore 一致：取每个 message 所有 placement 中 source_document_id
+        // 字典序最小的 placement 作为权威来源；无 placement → None。
+        let graphs = self.graphs.borrow();
+        let mut best: HashMap<String, SourcePlacement> = HashMap::new();
+        for graph in graphs.values() {
+            for placement in &graph.placements {
+                best.entry(placement.message_id.as_str().to_string())
+                    .and_modify(|current| {
+                        if placement.source_document_id.as_str()
+                            < current.source_document_id.as_str()
+                        {
+                            current.source_document_id = placement.source_document_id.clone();
+                            current.byte_start = placement.span.as_ref().map(|s| s.start);
+                            current.byte_end = placement.span.as_ref().map(|s| s.end);
+                        }
+                    })
+                    .or_insert_with(|| SourcePlacement {
+                        source_document_id: placement.source_document_id.clone(),
+                        byte_start: placement.span.as_ref().map(|s| s.start),
+                        byte_end: placement.span.as_ref().map(|s| s.end),
+                    });
+            }
+        }
+        Ok(message_ids
+            .iter()
+            .map(|id| (id.clone(), best.get(id.as_str()).cloned()))
             .collect())
     }
 

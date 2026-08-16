@@ -27,7 +27,7 @@ use agent_session_grep_domain::{
 use agent_session_grep_ports::{
     CatalogEntry, CatalogStore, ContextGraphStore, ContextStats, MessageContextCandidate,
     PortError, PortResult, ResumeClaimsStore, SearchHit, SearchIndex, SearchQuery, SemanticIndex,
-    SessionResumeMetadata, SourceResumeClaim,
+    SessionResumeMetadata, SourcePlacement, SourceResumeClaim,
 };
 use rusqlite::{Connection, OptionalExtension};
 use std::any::Any;
@@ -4993,6 +4993,61 @@ impl ContextGraphStore for SqliteStore {
                     None => None,
                 };
                 Ok((id.clone(), session))
+            })
+            .collect()
+    }
+
+    fn source_placements_of(
+        &self,
+        message_ids: &[StableId],
+    ) -> PortResult<Vec<(StableId, Option<SourcePlacement>)>> {
+        let conn = self.conn.borrow();
+        let wires: Vec<&str> = message_ids.iter().map(|id| id.as_str()).collect();
+        // 批量读取全部相关 placement，再在 Rust 侧取每个 message 的确定性单个
+        // placement（source_document_id 字典序最小，其次 source_ordinal）——
+        // 与 session_of 的 MIN 约定一致，跨调用稳定。无 N+1。
+        let mut best: BTreeMap<String, (String, Option<i64>, Option<i64>)> = BTreeMap::new();
+        for chunk in chunk_ids(&wires) {
+            let placeholders = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            let mut stmt = conn
+                .prepare(&format!(
+                    "SELECT message_id, document_id, byte_start, byte_end
+                     FROM message_placements
+                     WHERE message_id IN ({placeholders})
+                     ORDER BY document_id, source_ordinal"
+                ))
+                .map_err(backend)?;
+            let rows = stmt
+                .query_map(rusqlite::params_from_iter(chunk.iter().copied()), |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<i64>>(2)?,
+                        row.get::<_, Option<i64>>(3)?,
+                    ))
+                })
+                .map_err(backend)?;
+            for row in rows {
+                let (message_id, document_id, byte_start, byte_end) = row.map_err(backend)?;
+                // 已按 document_id, source_ordinal 排序 → 每 message 首条即确定性最小。
+                best.entry(message_id)
+                    .or_insert_with(|| (document_id, byte_start, byte_end));
+            }
+        }
+        message_ids
+            .iter()
+            .map(|id| {
+                let placement = match best.get(id.as_str()) {
+                    Some((document_id, byte_start, byte_end)) => Some(SourcePlacement {
+                        source_document_id: StableId::from_wire(document_id).ok_or_else(|| {
+                            PortError::Backend("stored placement has an invalid document id".into())
+                        })?,
+                        byte_start: byte_start.map(|v| v as u64),
+                        byte_end: byte_end.map(|v| v as u64),
+                    }),
+                    None => None,
+                };
+                Ok((id.clone(), placement))
             })
             .collect()
     }

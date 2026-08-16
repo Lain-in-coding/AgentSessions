@@ -11,7 +11,7 @@
 //! 本轮不处理。
 
 /// 汉字（Unicode Han）分类：CJK 统一表意文字主区 + 扩展 A + 兼容区 + 扩展 B-F。
-fn is_han(c: char) -> bool {
+pub(crate) fn is_han(c: char) -> bool {
     matches!(
         c as u32,
         0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF | 0x20000..=0x2FA1F

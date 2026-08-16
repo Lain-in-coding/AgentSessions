@@ -235,9 +235,10 @@ Assert-That $pureJson 'every mcp stdout line is valid JSON' $mcpText
 
 $listFrame = $frames | Where-Object { (Test-HasProperty $_ 'id') -and $_.id -eq 2 } | Select-Object -First 1
 $toolCount = if ($null -ne $listFrame) { @($listFrame.result.tools).Count } else { -1 }
-# 8 tools as of the 16-provider evidence wave (search_sessions, get_session_context,
-# get_session_resume, get_message, list_sessions, list_providers, get_status, doctor).
-Assert-That ($toolCount -eq 8) 'tools/list returns exactly 8 tools' "tools=$toolCount"
+# 9 tools as of the 16-provider evidence wave (search_sessions, get_session_context,
+# get_session_resume, get_message, list_sessions, generate_handoff, list_providers,
+# get_status, doctor).
+Assert-That ($toolCount -eq 9) 'tools/list returns exactly 9 tools' "tools=$toolCount"
 
 $callFrame = $frames | Where-Object { (Test-HasProperty $_ 'id') -and $_.id -eq 3 } | Select-Object -First 1
 Assert-That ($null -ne $callFrame -and $callFrame.result.isError -eq $false) 'tools/call get_status returns isError:false' $mcpText

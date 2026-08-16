@@ -265,7 +265,7 @@ fn initialize_negotiates_versions_honestly_and_ping_answers() {
 // ─── design §4 场景 2：tools/list 固定工具集 ────────────────────────────────
 
 #[test]
-fn tools_list_exposes_exactly_eight_contract_tools() {
+fn tools_list_exposes_exactly_nine_contract_tools() {
     let (_dir, db) = temp_db("mcp-tools");
     let frames = mcp_session(
         &db,
@@ -291,6 +291,7 @@ fn tools_list_exposes_exactly_eight_contract_tools() {
             "get_session_resume",
             "get_message",
             "list_sessions",
+            "generate_handoff",
             "list_providers",
             "get_status",
             "doctor",

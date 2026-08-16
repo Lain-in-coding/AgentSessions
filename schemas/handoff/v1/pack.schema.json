@@ -9,6 +9,7 @@
     "schema_version",
     "pack_id",
     "catalog_generation",
+    "generation_mode",
     "query",
     "created_at",
     "matched_sessions",
@@ -27,11 +28,15 @@
       "minLength": 1,
       "maxLength": 128,
       "pattern": "^[A-Za-z0-9._:-]+$",
-      "description": "Deterministic pack identifier derived from generation + query + budget."
+      "description": "Deterministic pack identifier derived from generation + query + filters + budget."
     },
     "catalog_generation": {
       "type": ["integer", "string"],
       "description": "The catalog generation pinned when the pack was assembled."
+    },
+    "generation_mode": {
+      "const": "deterministic",
+      "description": "How the pack was generated. Current builds emit deterministic only (PRD Q44 default: no model calls); local-LLM summaries would mark local_llm."
     },
     "query": {
       "type": "object",
@@ -64,7 +69,7 @@
     "created_at": {
       "type": "string",
       "format": "date-time",
-      "description": "ISO-8601 UTC timestamp of pack assembly (for audit, not reproducibility)."
+      "description": "Deterministic ISO-8601 UTC timestamp derived from the pinned catalog generation (fixed base + generation seconds). The same generation/query/budget always yields the same value, so packs are byte-reproducible."
     },
     "matched_sessions": {
       "type": "array",
@@ -104,6 +109,27 @@
     "truncation": { "$ref": "#/$defs/truncation" },
     "redaction": { "$ref": "#/$defs/redaction" },
     "confidence": { "$ref": "#/$defs/confidence" },
+    "time_window": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "description": "Half-open time window [since, until) applied to the query, projected from the query filters. Null when neither bound is set.",
+      "properties": {
+        "since": { "type": ["string", "null"] },
+        "until": { "type": ["string", "null"] }
+      }
+    },
+    "provenance": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "description": "Pack provenance: target provider/session. Search-based packs have no single session/provider and stay null (never fabricated).",
+      "properties": {
+        "provider_id": { "type": ["string", "null"], "maxLength": 64 },
+        "session_id": {
+          "type": ["string", "null"],
+          "pattern": "^ses_v1_[A-Za-z0-9]+$"
+        }
+      }
+    },
     "tool_activity": {
       "type": "array",
       "description": "Structured tool activity relevant to the matched sessions (optional projection).",

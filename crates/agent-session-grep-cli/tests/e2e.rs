@@ -2372,6 +2372,125 @@ fn resume_unavailable_session_reports_reason_without_command() {
 }
 
 #[test]
+fn handoff_pack_is_byte_deterministic_across_runs() {
+    let (dir, db) = temp_db("handoff-det");
+    let (fixture_path, _, _) = write_context_fixture(dir.path());
+    let ingest = run(&db, &["ingest", &fixture_path]);
+    assert!(
+        ingest.status.success(),
+        "ingest failed: {}",
+        stdout(&ingest)
+    );
+
+    let first = run(&db, &["handoff", "ctx"]);
+    assert!(first.status.success(), "handoff failed: {}", stdout(&first));
+    let second = run(&db, &["handoff", "ctx"]);
+    assert!(
+        second.status.success(),
+        "handoff failed: {}",
+        stdout(&second)
+    );
+
+    let f1 = parse_first_line(&first);
+    let f2 = parse_first_line(&second);
+    // 同输入两次运行 → pack 逐字节一致（determinism 契约，PRD Q50）。
+    assert_eq!(
+        f1["data"].to_string(),
+        f2["data"].to_string(),
+        "pack must be byte-identical across runs"
+    );
+    assert!(
+        f1["data"]["evidence"]
+            .as_array()
+            .is_some_and(|ev| !ev.is_empty()),
+        "pack must carry evidence: {f1}"
+    );
+    assert_eq!(f1["data"]["schema_version"], "1.0");
+    assert_eq!(f1["data"]["generation_mode"], "deterministic");
+    // 权威 source locator：证据携带 doc_v1_ 文档 id 与消息 cursor 反向追踪。
+    assert!(
+        f1["data"]["evidence"][0]["source_document_id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("doc_v1_")),
+        "{f1}"
+    );
+    assert!(
+        f1["data"]["source_locators"]
+            .as_array()
+            .is_some_and(|locs| !locs.is_empty()),
+        "{f1}"
+    );
+}
+
+#[test]
+fn handoff_budget_truncation_reports_partial_and_exit_10() {
+    let (dir, db) = temp_db("handoff-trunc");
+    let (fixture_path, _, _) = write_context_fixture(dir.path());
+    let ingest = run(&db, &["ingest", &fixture_path]);
+    assert!(
+        ingest.status.success(),
+        "ingest failed: {}",
+        stdout(&ingest)
+    );
+
+    // 极小证据上限 → 截断 → partial（exit 10），绝不伪装 success。
+    let out = run(&db, &["handoff", "ctx", "--max-evidence", "1"]);
+    assert_eq!(
+        out.status.code(),
+        Some(10),
+        "truncated handoff must exit 10: {}",
+        stdout(&out)
+    );
+    let frame = parse_first_line(&out);
+    assert_eq!(frame["outcome"], "partial");
+    assert_eq!(frame["data"]["truncation"]["truncated"], true);
+    assert!(
+        frame["data"]["evidence"]
+            .as_array()
+            .is_some_and(|ev| ev.len() <= 1),
+        "evidence must be capped: {frame}"
+    );
+
+    // 无截断时 outcome 为 success。
+    let ok = run(&db, &["handoff", "ctx"]);
+    assert!(ok.status.success(), "handoff failed: {}", stdout(&ok));
+    assert_eq!(parse_first_line(&ok)["outcome"], "success");
+}
+
+#[test]
+fn handoff_redacts_secrets_in_evidence() {
+    let (dir, db) = temp_db("handoff-redact");
+    // 一条含 API key 的消息，用于验证 pack 默认脱敏（ADR-0009）。
+    let secret = "the token is sk-ant-api03-1234567890abcdef end";
+    let fixture_path = dir.path().join("secret.jsonl");
+    let line = serde_json::json!({
+        "type": "user",
+        "uuid": "e0000000-0000-4000-8000-000000000001",
+        "parentUuid": null,
+        "sessionId": "ee123456-5678-4abc-8def-001122334455",
+        "timestamp": "2026-07-26T01:00:00.000Z",
+        "message": { "role": "user", "content": secret },
+    })
+    .to_string();
+    std::fs::write(&fixture_path, line).expect("write secret fixture");
+    let ingest = run(&db, &["ingest", &fixture_path.to_string_lossy()]);
+    assert!(
+        ingest.status.success(),
+        "ingest failed: {}",
+        stdout(&ingest)
+    );
+
+    let out = run(&db, &["handoff", "token"]);
+    assert!(out.status.success(), "handoff failed: {}", stdout(&out));
+    let frame = parse_first_line(&out);
+    let data = &frame["data"];
+    let text = data["evidence"][0]["text"].as_str().unwrap_or("");
+    assert!(!text.contains("sk-ant-"), "secret leaked into pack: {text}");
+    assert_eq!(data["redaction"]["status"], "applied");
+    assert!(data["redaction"]["redacted_count"].as_u64().unwrap_or(0) >= 1);
+}
+
+#[test]
 fn jsonl_output_is_one_complete_frame_per_line() {
     let (_dir, db) = temp_db("env-jsonl");
     let out = Command::new(BIN)

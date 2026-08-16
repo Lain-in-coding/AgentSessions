@@ -15,11 +15,14 @@ use crate::protocol::{self, CanonicalCode, Outcome, ProtocolError};
 use crate::{CliError, provider_registry, render, store_ref};
 use agent_session_grep_adapters_sqlite::SqliteStore;
 use agent_session_grep_application::{
-    App, AppRequest, ContextLevel, ResponseBudget, parse_search_instant,
+    App, AppRequest, AppResponse, ContextLevel, ResponseBudget,
+    handoff_pack::{HandoffInput, resolve_source_locations},
+    parse_search_instant,
 };
 use agent_session_grep_domain::{ContextPolicy, IdKind, StableId};
 use agent_session_grep_ports::{
-    SearchFilters, SearchProvider, capability::ProviderCapabilityMatrix,
+    RetrievalMode, SearchFilters, SearchProvider, capability::ProviderCapabilityMatrix,
+    handoff::HandoffFilters,
 };
 use serde_json::{Map, Value, json};
 
@@ -334,7 +337,7 @@ impl McpServer<'_> {
         }
     }
 
-    /// 工具名分发（合同 §8 的 8 个工具）；未知工具是请求校验失败 → `-32602`。
+    /// 工具名分发（合同 §8 的 9 个工具）；未知工具是请求校验失败 → `-32602`。
     fn call_tool(&self, name: &str, args: &Map<String, Value>) -> Result<Value, ToolError> {
         match name {
             "search_sessions" => self.tool_search(args),
@@ -342,6 +345,7 @@ impl McpServer<'_> {
             "get_session_resume" => self.tool_session_resume(args),
             "get_message" => self.tool_message(args),
             "list_sessions" => self.tool_list(args),
+            "generate_handoff" => self.tool_handoff(args),
             "list_providers" => {
                 reject_unknown_keys(args, &[])?;
                 Ok(providers_payload())
@@ -538,6 +542,110 @@ impl McpServer<'_> {
             budget: budget_with(max_items, max_bytes, None),
             sessions_only: true,
         })
+    }
+
+    /// generate_handoff：检索命中 → 权威 source locator → deterministic pack。
+    /// 与 CLI `handoff` 走同一 Application ADT 用例与同一包构建器；预算截断
+    /// 如实报 `partial`（outcome），绝不伪装 success。
+    fn tool_handoff(&self, args: &Map<String, Value>) -> Result<Value, ToolError> {
+        reject_unknown_keys(
+            args,
+            &[
+                "query",
+                "limit",
+                "max_evidence",
+                "max_tokens",
+                "max_bytes",
+                "providers",
+                "since",
+                "until",
+            ],
+        )?;
+        let query = required_str(args, "query")?;
+        let limit = opt_usize(args, "limit")?;
+        let max_evidence = opt_usize(args, "max_evidence")?.unwrap_or(20);
+        let max_tokens = opt_usize(args, "max_tokens")?.unwrap_or(8000);
+        let max_bytes = opt_usize(args, "max_bytes")?.unwrap_or(2_000_000);
+        reject_below_floor(limit, "limit", 1)?;
+        reject_below_floor(max_evidence.into(), "max_evidence", 1)?;
+        reject_below_floor(max_tokens.into(), "max_tokens", 1)?;
+        reject_below_floor(max_bytes.into(), "max_bytes", 4096)?;
+        let filters = opt_filters(args)?;
+        let search_limit = limit.unwrap_or(50);
+        let app = App::with_resume(
+            store_ref(self.store),
+            store_ref(self.store),
+            store_ref(self.store),
+        );
+        // 检索作为装配源：宽松 fetch-all 预算 + 全文级 snippet；pack 预算由
+        // 包构建器单一执行（与 CLI handoff 同一约定）。
+        let response = app.handle(AppRequest::Search {
+            query: query.clone(),
+            filters: filters.clone(),
+            limit: search_limit,
+            cursor: None,
+            budget: ResponseBudget {
+                max_items: search_limit,
+                max_response_bytes: 64 * 1024 * 1024,
+                max_snippet_chars: 65536,
+                max_messages: search_limit,
+                max_evidence_spans: 512,
+            },
+            include_system: false,
+            group_by_session: false,
+            mode: RetrievalMode::Lexical,
+            query_embedding: None,
+        });
+        let (hits, generation) = match response {
+            Ok(AppResponse::Search {
+                hits, generation, ..
+            }) => (hits, generation),
+            Ok(_) => {
+                return Err(ToolError::Params(
+                    "handoff: unexpected search response".into(),
+                ));
+            }
+            Err(error) => return Err(ToolError::Business(error.into())),
+        };
+        let source_locations = resolve_source_locations(self.store, &hits).map_err(business)?;
+        let pack =
+            agent_session_grep_application::handoff_pack::generate_deterministic(HandoffInput {
+                query_terms: std::slice::from_ref(&query),
+                retrieval_mode: RetrievalMode::Lexical,
+                filters: HandoffFilters {
+                    providers: filters
+                        .providers
+                        .iter()
+                        .map(|p| p.as_str().to_string())
+                        .collect(),
+                    since: filters
+                        .since
+                        .map(|s| format!("{}.{:09}Z", s.unix_seconds, s.nanosecond)),
+                    until: filters
+                        .until
+                        .map(|s| format!("{}.{:09}Z", s.unix_seconds, s.nanosecond)),
+                },
+                hits: &hits,
+                source_locations: &source_locations,
+                catalog_generation: generation,
+                max_tokens: max_tokens as u64,
+                max_bytes: max_bytes as u64,
+                max_evidence,
+                target: None,
+            });
+        let outcome = if pack.truncation.truncated {
+            Outcome::Partial
+        } else {
+            Outcome::Success
+        };
+        let data = serde_json::to_value(&pack)
+            .map_err(|e| ToolError::Params(format!("handoff: serialization error: {e}")))?;
+        Ok(success_payload(
+            outcome,
+            data,
+            &protocol::Page::default(),
+            &[],
+        ))
     }
 
     /// doctor 不经 App：直接读 store 只读事实，data 形状与 CLI doctor 对齐。
@@ -792,6 +900,62 @@ fn tool_catalog() -> Value {
             }
         },
         {
+            "name": "generate_handoff",
+            "description": "Assemble a deterministic handoff pack (handoff-pack/v1) for \
+                a query: search hits become evidence spans with authoritative source \
+                document locators, budgets (max_evidence/max_tokens/max_bytes) are \
+                enforced, and evidence is cross-boundary redacted by default (ADR-0009). \
+                Truncation is reported as outcome partial.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "maxLength": 4096,
+                        "description": "Full-text query."
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Search page size; defaults to 50."
+                    },
+                    "max_evidence": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Evidence entry cap. Minimum 1 (runtime rejects 0)."
+                    },
+                    "max_tokens": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Token budget for evidence. Minimum 1 (runtime rejects 0)."
+                    },
+                    "max_bytes": {
+                        "type": "integer",
+                        "minimum": 4096,
+                        "description": "Serialized pack byte budget. Minimum 4096 (runtime rejects smaller)."
+                    },
+                    "providers": {
+                        "type": "array",
+                        "maxItems": 2,
+                        "items": { "type": "string", "enum": ["claude", "codex"] },
+                        "description": "Restrict hits to these providers (OR). Omitted matches all providers."
+                    },
+                    "since": {
+                        "type": "string",
+                        "maxLength": 64,
+                        "description": "Inclusive lower time bound as an absolute ISO-8601 timestamp with offset."
+                    },
+                    "until": {
+                        "type": "string",
+                        "maxLength": 64,
+                        "description": "Exclusive upper time bound; same syntax as since."
+                    }
+                },
+                "required": ["query"],
+                "additionalProperties": false
+            }
+        },
+        {
             "name": "list_providers",
             "description": "List the provider adapters this build can ingest, including each adapter's capability-matrix maturity \
                 (stable ids such as claude-code).",
@@ -823,7 +987,7 @@ fn tool_catalog() -> Value {
     ])
 }
 
-/// 成功工具 payload（8 个工具同形，design §2）：outcome/data/warnings/page。
+/// 成功工具 payload（9 个工具同形，design §2）：outcome/data/warnings/page。
 fn success_payload(
     outcome: Outcome,
     data: Value,
@@ -1543,7 +1707,7 @@ mod tests {
     }
 
     #[test]
-    fn tools_list_exposes_exactly_the_eight_contract_tools() {
+    fn tools_list_exposes_exactly_the_nine_contract_tools() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = open_store(&dir);
         let mut server = ready(&store);
@@ -1561,6 +1725,7 @@ mod tests {
                 "get_session_resume",
                 "get_message",
                 "list_sessions",
+                "generate_handoff",
                 "list_providers",
                 "get_status",
                 "doctor",
@@ -1575,6 +1740,75 @@ mod tests {
             );
             assert!(tool["description"].as_str().is_some_and(|d| !d.is_empty()));
         }
+    }
+
+    #[test]
+    fn generate_handoff_tool_returns_deterministic_pack_with_evidence() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = open_store(&dir);
+        let message_a = StableId::derive(IdKind::Message, Stability::Reconstructed, &[b"h1"]);
+        let message_b = StableId::derive(IdKind::Message, Stability::Reconstructed, &[b"h2"]);
+        store
+            .commit_batch(&[
+                (
+                    message_a.clone(),
+                    br#"{"text":"hello world"}"#.to_vec(),
+                    "hello world".to_string(),
+                ),
+                (
+                    message_b.clone(),
+                    br#"{"text":"hello there"}"#.to_vec(),
+                    "hello there".to_string(),
+                ),
+            ])
+            .expect("commit searchable rows");
+        // 权威 source placement：直接写入 message → session/document/span 关系行。
+        let session = StableId::derive(IdKind::Session, Stability::Reconstructed, &[b"ses1"]);
+        let document = StableId::derive(IdKind::Document, Stability::Reconstructed, &[b"doc1"]);
+        {
+            use rusqlite::Connection;
+            let conn = Connection::open(dir.path().join("mcp-test.db")).expect("open raw conn");
+            for (index, (message, byte_end)) in [(&message_a, 11u64), (&message_b, 12u64)]
+                .iter()
+                .enumerate()
+            {
+                conn.execute(
+                    "INSERT INTO message_placements(
+                         placement_id, session_id, document_id, message_id,
+                         source_ordinal, is_sidechain, byte_start, byte_end)
+                     VALUES (?1, ?2, ?3, ?4, ?5, 0, 0, ?6)",
+                    rusqlite::params![
+                        format!("plc_v1_{}", message.as_str()),
+                        session.as_str(),
+                        document.as_str(),
+                        message.as_str(),
+                        index as i64,
+                        *byte_end as i64,
+                    ],
+                )
+                .expect("insert placement");
+            }
+        }
+        let mut server = ready(&store);
+        let v = call(&mut server, "generate_handoff", json!({ "query": "hello" }));
+        assert_eq!(v["result"]["isError"], false, "{v}");
+        let data = &v["result"]["structuredContent"]["data"];
+        assert_eq!(data["schema_version"], "1.0");
+        assert_eq!(data["generation_mode"], "deterministic");
+        assert!(
+            data["pack_id"].as_str().is_some_and(|id| id.len() > 8),
+            "pack_id must be present"
+        );
+        let evidence = data["evidence"].as_array().expect("evidence array");
+        assert_eq!(evidence.len(), 2);
+        assert!(
+            evidence[0]["source_document_id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("doc_v1_"))
+        );
+        assert_eq!(data["redaction"]["status"], "none");
+        assert_eq!(data["truncation"]["truncated"], false);
+        assert_eq!(v["result"]["structuredContent"]["outcome"], "success");
     }
 
     #[test]

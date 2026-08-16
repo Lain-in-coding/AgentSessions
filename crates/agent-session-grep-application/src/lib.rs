@@ -2371,6 +2371,7 @@ mod tests {
         EvidenceSpan, IdKind, MessageEdge, MessagePlacement, MessageRelation, Role,
         SessionContextGraph, SourceDocument, Stability,
     };
+    use agent_session_grep_ports::SourcePlacement;
     use agent_session_grep_ports::{
         ContextStats, MessageContextCandidate as PortMessageContextCandidate, PortResult,
         SourceSnapshot,
@@ -2437,6 +2438,13 @@ mod tests {
         }
 
         fn session_of(&self, ids: &[StableId]) -> PortResult<Vec<(StableId, Option<StableId>)>> {
+            Ok(ids.iter().map(|id| (id.clone(), None)).collect())
+        }
+
+        fn source_placements_of(
+            &self,
+            ids: &[StableId],
+        ) -> PortResult<Vec<(StableId, Option<SourcePlacement>)>> {
             Ok(ids.iter().map(|id| (id.clone(), None)).collect())
         }
 
@@ -2952,6 +2960,13 @@ mod tests {
                     (id.clone(), session)
                 })
                 .collect())
+        }
+
+        fn source_placements_of(
+            &self,
+            ids: &[StableId],
+        ) -> PortResult<Vec<(StableId, Option<SourcePlacement>)>> {
+            Ok(ids.iter().map(|id| (id.clone(), None)).collect())
         }
 
         fn context_stats(&self) -> PortResult<ContextStats> {
@@ -3914,6 +3929,33 @@ mod tests {
                         .and_then(|wire| StableId::from_wire(wire));
                     (id.clone(), session)
                 })
+                .collect())
+        }
+
+        fn source_placements_of(
+            &self,
+            ids: &[StableId],
+        ) -> PortResult<Vec<(StableId, Option<SourcePlacement>)>> {
+            // 与 SqliteStore 语义一致：取该消息所有 placement 中 source_document_id
+            // 字典序最小的 placement 作为权威来源（确定、稳定）。
+            let mut best: BTreeMap<String, SourcePlacement> = BTreeMap::new();
+            for placement in &self.graph.placements {
+                let entry = best
+                    .entry(placement.message_id.as_str().to_string())
+                    .or_insert_with(|| SourcePlacement {
+                        source_document_id: placement.source_document_id.clone(),
+                        byte_start: placement.span.as_ref().map(|s| s.start),
+                        byte_end: placement.span.as_ref().map(|s| s.end),
+                    });
+                if placement.source_document_id.as_str() < entry.source_document_id.as_str() {
+                    entry.source_document_id = placement.source_document_id.clone();
+                    entry.byte_start = placement.span.as_ref().map(|s| s.start);
+                    entry.byte_end = placement.span.as_ref().map(|s| s.end);
+                }
+            }
+            Ok(ids
+                .iter()
+                .map(|id| (id.clone(), best.get(id.as_str()).cloned()))
                 .collect())
         }
 

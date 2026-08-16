@@ -7,12 +7,14 @@
 //! The redactor recursively walks a `serde_json::Value` tree and replaces
 //! string values matching high-confidence secret patterns with a mode
 //! reference. The redaction status is carried in the Robot envelope's
-//! `redaction` field.
+//! `redaction` field. The string-level engine lives in
+//! [`agent_session_grep_ports::redact`] so the Handoff Pack builder shares the
+//! same default-mode redaction; this module adds the JSON-tree walker.
 
 use agent_session_grep_ports::{RedactionMode, RedactionState, RedactionStatus};
 
-/// Ruleset version — bumped when detection patterns change.
-pub const RULESET_VERSION: &str = "v1.0";
+/// Ruleset version — shared with the ports engine (bump in `ports::redact`).
+pub const RULESET_VERSION: &str = agent_session_grep_ports::redact::RULESET_VERSION;
 
 /// Detect and redact secrets in a JSON value tree.
 ///
@@ -46,7 +48,7 @@ pub fn redact_value(value: serde_json::Value) -> (serde_json::Value, RedactionSt
 fn redact_value_inner(value: serde_json::Value, count: &mut u64) -> serde_json::Value {
     match value {
         serde_json::Value::String(s) => {
-            if let Some(redacted) = redact_string(&s) {
+            if let Some(redacted) = agent_session_grep_ports::redact::redact_string(&s) {
                 *count += 1;
                 serde_json::Value::String(redacted)
             } else {
@@ -113,149 +115,12 @@ fn is_secret_key(key: &str) -> bool {
     SECRET_KEY_FRAGMENTS.iter().any(|frag| lower.contains(frag))
 }
 
-/// Check a string value for high-confidence secret patterns and return a
-/// redacted replacement if matched.
-///
-/// Patterns are deliberately conservative: only high-confidence, structured
-/// secret formats are matched to avoid false positives that would erode trust.
-/// Matches both standalone secrets (the whole string is a secret) and secrets
-/// embedded inside prose ("the key is AKIA...") — cross-boundary output must
-/// not leak either form (ADR-0009).
-fn redact_string(s: &str) -> Option<String> {
-    if s.is_empty() || s.len() < 8 {
-        return None;
-    }
-    // Standalone (whole-string) match first: the value is exactly one secret.
-    if let Some(marker) = standalone_secret(s) {
-        return Some(marker.to_string());
-    }
-    // Embedded match: scan for each known secret shape inside the string and
-    // replace matched spans with their redaction marker.
-    let mut redacted = s.to_string();
-    let mut count = 0u64;
-    for shape in embedded_shapes() {
-        let mut search_from = 0usize;
-        while let Some((start, end, marker)) = find_embedded(&redacted[search_from..], shape) {
-            let abs_start = search_from + start;
-            redacted.replace_range(abs_start..abs_start + end, marker);
-            search_from = abs_start + marker.len();
-            count += 1;
-            if count >= 16 {
-                break; // bounded: never rewrite more than 16 spans per value
-            }
-        }
-    }
-    if count == 0 { None } else { Some(redacted) }
-}
-
-/// Whole-string secret match (existing behavior): the value itself is a
-/// single secret token.
-fn standalone_secret(s: &str) -> Option<&'static str> {
-    // AWS access key: AKIA + 16 uppercase alphanumeric
-    if s.starts_with("AKIA") && s.len() >= 20 && s[..20].chars().all(|c| c.is_ascii_alphanumeric())
-    {
-        return Some("[redacted:aws_access_key]");
-    }
-    // AWS secret key: 40-char base64-ish (heuristic, only if it looks like a standalone token)
-    if s.len() == 40
-        && s.chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=')
-    {
-        return Some("[redacted:aws_secret_key]");
-    }
-    // GitHub PAT: ghp_ / gho_ / ghs_ / ghu_ / gsr_ + 36 chars
-    for prefix in &["ghp_", "gho_", "ghs_", "ghu_", "ghr_", "ghs_"] {
-        if s.starts_with(prefix) && s.len() >= 40 {
-            return Some("[redacted:github_token]");
-        }
-    }
-    // Generic API key patterns: sk- (OpenAI), sk-ant- (Anthropic), xai- (xAI)
-    for prefix in &["sk-ant-", "sk-", "xai-"] {
-        if s.starts_with(prefix) && s.len() >= 20 {
-            return Some("[redacted:api_key]");
-        }
-    }
-    // Bearer token in a string value
-    if s.starts_with("Bearer ") && s.len() > 10 {
-        return Some("[redacted:bearer_token]");
-    }
-    // Private key header (PEM)
-    if s.contains("-----BEGIN ") && s.contains("PRIVATE KEY-----") {
-        return Some("[redacted:private_key]");
-    }
-    None
-}
-
-/// Embedded secret shape: (prefix, minimum total length, redaction marker).
-type SecretShape = (&'static str, usize, &'static str);
-
-/// The known secret shapes, longest prefix first so more specific shapes
-/// (sk-ant- before sk-) win the first-match.
-fn embedded_shapes() -> Vec<SecretShape> {
-    vec![
-        // AWS access key: AKIA + 16 alphanumeric = 20 chars
-        ("AKIA", 20, "[redacted:aws_access_key]"),
-        // GitHub PAT: ghp_ + 36 = 40 chars
-        ("ghp_", 40, "[redacted:github_token]"),
-        ("gho_", 40, "[redacted:github_token]"),
-        ("ghs_", 40, "[redacted:github_token]"),
-        ("ghu_", 40, "[redacted:github_token]"),
-        ("ghr_", 40, "[redacted:github_token]"),
-        // Anthropic before generic sk-
-        ("sk-ant-", 20, "[redacted:api_key]"),
-        // OpenAI / xAI
-        ("sk-", 20, "[redacted:api_key]"),
-        ("xai-", 20, "[redacted:api_key]"),
-        // Bearer tokens in prose
-        ("Bearer ", 11, "[redacted:bearer_token]"),
-    ]
-}
-
-/// Find one embedded secret span in `s` starting at the given offset.
-///
-/// Returns (start, end, marker) where end is the matched span length —
-/// prefix + the trailing run of token characters (alphanumerics, '_', '-',
-/// '+', '/', '='). The span is bounded to the shape's minimum length to
-/// avoid over-consuming trailing prose.
-fn find_embedded(s: &str, shape: SecretShape) -> Option<(usize, usize, &'static str)> {
-    let (prefix, min_len, marker) = shape;
-    let mut search = 0usize;
-    while let Some(rel) = s[search..].find(prefix) {
-        let start = search + rel;
-        let after = start + prefix.len();
-        // Require a non-alphanumeric boundary before the prefix (avoid
-        // matching inside a longer identifier like "myAKIA...").
-        let boundary_ok = start == 0
-            || !s[..start]
-                .chars()
-                .next_back()
-                .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
-        if boundary_ok {
-            let mut end = after;
-            for c in s[after..].chars() {
-                if c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '+' | '/' | '=') {
-                    end += c.len_utf8();
-                } else {
-                    break;
-                }
-            }
-            let span_len = end - start;
-            if span_len >= min_len {
-                return Some((start, span_len, marker));
-            }
-        }
-        search = after;
-    }
-    None
-}
-
 /// Redact a plain string (non-JSON) for warning/error channels.
+///
+/// Delegates to the shared engine in `ports::redact` so the Handoff Pack and
+/// the envelope use identical patterns and ruleset version.
 pub fn redact_text(s: &str) -> (String, RedactionStatus) {
-    let mut count = 0u64;
-    let redacted = redact_string(s).unwrap_or_else(|| s.to_string());
-    if redacted != s {
-        count = 1;
-    }
+    let (redacted, count) = agent_session_grep_ports::redact::redact_text(s);
     let status = if count == 0 {
         RedactionStatus {
             mode: RedactionMode::Default,

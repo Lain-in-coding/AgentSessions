@@ -276,9 +276,9 @@ for expected in (1, 2, 3, 4):
         sys.exit(1)
 
 listed = by_id[2].get("result", {}).get("tools")
-if not isinstance(listed, list) or len(listed) != 8:
+if not isinstance(listed, list) or len(listed) != 9:
     count = len(listed) if isinstance(listed, list) else "absent"
-    print(f"tools/list must report exactly 8 tools, got {count}", file=sys.stderr)
+    print(f"tools/list must report exactly 9 tools, got {count}", file=sys.stderr)
     sys.exit(1)
 
 called = by_id[3].get("result", {})
@@ -303,7 +303,7 @@ if len(message_data.get("messages", [])) != 1:
     cat "$mcp_out" >&2
     exit 1
 fi
-pass 'MCP stdio handshake: 8 tools listed, get_status and get_message succeeded'
+pass 'MCP stdio handshake: 9 tools listed, get_status and get_message succeeded'
 
 printf 'smoke: all %d assertions passed against %s\n' "$step" "$binary"
 exit 0

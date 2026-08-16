@@ -303,8 +303,8 @@ pub fn parse_output_mode(args: &[String]) -> Result<OutputMode, String> {
             // intercept_help_or_version/extract_db_flag_impl）保持一致，漏掉一个
             // 会让它的取值把后面的 --robot/--output 挡在扫描之外。
             "--db" | "--request-id" | "--cursor" | "--max-items" | "--max-bytes"
-            | "--max-messages" | "--policy" | "--level" | "--provider" | "--since" | "--until"
-            | "--session" | "--around" => {
+            | "--max-messages" | "--max-evidence" | "--max-tokens" | "--policy" | "--level"
+            | "--provider" | "--since" | "--until" | "--session" | "--around" => {
                 it.next();
             }
             _ => {}

@@ -5,6 +5,8 @@
 //!
 //! 分层依赖不变量：domain ← ports ← application ← adapters。
 
+pub mod redact;
+
 use agent_session_grep_domain::{
     DomainError, DomainResult, PlacementId, SessionContextGraph, StableId,
 };
@@ -119,6 +121,20 @@ pub struct MessageContextCandidate {
     pub placement_ids: Vec<PlacementId>,
 }
 
+/// The authoritative source placement of one Message: the owning document and
+/// the provider-reported evidence byte range within it.
+///
+/// Byte ranges are half-open `[byte_start, byte_end)` offsets into the exact
+/// verified source document named by `source_document_id`. Absolute paths never
+/// cross this boundary. `byte_start`/`byte_end` are `None` when the provider
+/// could not attribute one contiguous range.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourcePlacement {
+    pub source_document_id: StableId,
+    pub byte_start: Option<u64>,
+    pub byte_end: Option<u64>,
+}
+
 /// Aggregate contextual-relation counts exposed without backend details.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ContextStats {
@@ -150,6 +166,19 @@ pub trait ContextGraphStore {
     /// （分块 IN），不得逐条查询（N+1）。
     fn session_of(&self, message_ids: &[StableId])
     -> PortResult<Vec<(StableId, Option<StableId>)>>;
+
+    /// Batch-resolve each Message's authoritative source placement (owning
+    /// document + evidence byte range), in `message_ids` order.
+    ///
+    /// A message with no placement resolves to `None`. For a message with
+    /// multiple placements the deterministic single placement is chosen —
+    /// the lexicographically smallest `source_document_id` wire id (matching
+    /// the [`Self::session_of`] convention), so results are stable across
+    /// calls. Implementations must batch read (chunked IN), never query per id.
+    fn source_placements_of(
+        &self,
+        message_ids: &[StableId],
+    ) -> PortResult<Vec<(StableId, Option<SourcePlacement>)>>;
 
     fn context_stats(&self) -> PortResult<ContextStats>;
 }
@@ -480,6 +509,13 @@ impl<T: ContextGraphStore + ?Sized> ContextGraphStore for &T {
         message_ids: &[StableId],
     ) -> PortResult<Vec<(StableId, Option<StableId>)>> {
         (**self).session_of(message_ids)
+    }
+
+    fn source_placements_of(
+        &self,
+        message_ids: &[StableId],
+    ) -> PortResult<Vec<(StableId, Option<SourcePlacement>)>> {
+        (**self).source_placements_of(message_ids)
     }
 
     fn context_stats(&self) -> PortResult<ContextStats> {
@@ -1268,6 +1304,13 @@ mod tests {
             &self,
             message_ids: &[StableId],
         ) -> PortResult<Vec<(StableId, Option<StableId>)>> {
+            Ok(message_ids.iter().map(|id| (id.clone(), None)).collect())
+        }
+
+        fn source_placements_of(
+            &self,
+            message_ids: &[StableId],
+        ) -> PortResult<Vec<(StableId, Option<SourcePlacement>)>> {
             Ok(message_ids.iter().map(|id| (id.clone(), None)).collect())
         }
 

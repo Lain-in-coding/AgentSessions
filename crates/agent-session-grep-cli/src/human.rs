@@ -225,7 +225,6 @@ fn render_handoff(data: &Value) -> Vec<String> {
         for session in matched {
             let id = session
                 .get("session_id")
-                .and_then(|s| s.get("value"))
                 .and_then(Value::as_str)
                 .map(sanitize)
                 .unwrap_or_else(|| "?".into());
@@ -252,7 +251,6 @@ fn render_handoff(data: &Value) -> Vec<String> {
             .unwrap_or_default();
         let id = entry
             .get("message_id")
-            .and_then(|m| m.get("value"))
             .and_then(Value::as_str)
             .map(sanitize)
             .unwrap_or_else(|| "?".into());
@@ -1090,10 +1088,10 @@ mod tests {
             "created_at": "2026-08-16T01:00:00Z",
             "confidence": { "overall": "high" },
             "matched_sessions": [
-                { "session_id": { "value": "ses_v1_aaa" }, "occurrences": 2 }
+                { "session_id": "ses_v1_aaa", "occurrences": 2 }
             ],
             "evidence": [
-                { "message_id": { "value": "msg_v1_aaa" }, "text": "the real evidence text" }
+                { "message_id": "msg_v1_aaa", "text": "the real evidence text" }
             ],
             "inference": [],
             "truncation": { "truncated": false, "reason": "none", "dropped_count": 0 },

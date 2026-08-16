@@ -222,8 +222,8 @@ fn extract_request_id(args: &[String]) -> Result<Option<String>, String> {
         // 其它带值 flag 跳过其取值，避免把取值误当位置参数提前终止扫描。
         match a.as_str() {
             "--db" | "--output" | "--cursor" | "--max-items" | "--max-bytes" | "--max-messages"
-            | "--policy" | "--level" | "--provider" | "--since" | "--until" | "--session"
-            | "--around" => {
+            | "--max-evidence" | "--max-tokens" | "--policy" | "--level" | "--provider"
+            | "--since" | "--until" | "--session" | "--around" => {
                 it.next();
             }
             _ => {}
@@ -243,8 +243,8 @@ fn command_name(args: &[String]) -> String {
     while let Some(a) = it.next() {
         match a.as_str() {
             "--db" | "--output" | "--cursor" | "--max-items" | "--max-bytes" | "--max-messages"
-            | "--policy" | "--level" | "--request-id" | "--provider" | "--since" | "--until"
-            | "--session" | "--around" => {
+            | "--max-evidence" | "--max-tokens" | "--policy" | "--level" | "--request-id"
+            | "--provider" | "--since" | "--until" | "--session" | "--around" => {
                 it.next(); // 消费其取值
             }
             "--robot" | "--no-color" | "--help" | "-h" | "--version" | "-V" | "--discover" => {}
@@ -302,8 +302,8 @@ fn intercept_help_or_version(args: &[String]) -> Option<HelpRequest> {
             "--version" | "-V" => prefix_version = true,
             // 带值 flag 跳过其取值，避免把取值误当命令名。
             "--db" | "--output" | "--request-id" | "--cursor" | "--max-items" | "--max-bytes"
-            | "--max-messages" | "--policy" | "--level" | "--provider" | "--since" | "--until"
-            | "--session" | "--around" => {
+            | "--max-messages" | "--max-evidence" | "--max-tokens" | "--policy" | "--level"
+            | "--provider" | "--since" | "--until" | "--session" | "--around" => {
                 it.next();
             }
             _ => {}
@@ -855,7 +855,8 @@ fn subcommand_help_text(cmd: &str) -> &'static str {
                      示例：agent-session-grep --db <path> handoff 配置备份\n\
                      检索命中后组装：原文证据（evidence）与推断（inference）严格分栏；\n\
                      deterministic 默认（无 LLM 调用）；dry-run——只输出 pack 与建议命令，不注入任何 agent。\n\
-                     flag：--max-evidence <n> 证据条数上限（默认 20）、--max-tokens <n> 预算（默认 8000）"
+                     flag：--max-evidence <n> 证据条数上限（默认 20）、--max-tokens <n> token 预算（默认 8000）、\n\
+                     --max-bytes <n> 序列化字节预算（默认 2000000）；截断时 exit 10"
         }
         "get" => {
             "get <wire-id>：按实体 ID 取回原始 payload。\n\
@@ -1020,6 +1021,8 @@ fn is_known_flag_name(token: &str) -> bool {
             | "--max-items"
             | "--max-bytes"
             | "--max-messages"
+            | "--max-evidence"
+            | "--max-tokens"
             | "--policy"
             | "--level"
             | "--provider"
@@ -1077,8 +1080,8 @@ fn extract_db_flag_impl(args: &[String], prefix_only: bool) -> Result<Option<Str
         }
         match a.as_str() {
             "--output" | "--request-id" | "--cursor" | "--max-items" | "--max-bytes"
-            | "--max-messages" | "--policy" | "--level" | "--provider" | "--since" | "--until"
-            | "--session" | "--around" => {
+            | "--max-messages" | "--max-evidence" | "--max-tokens" | "--policy" | "--level"
+            | "--provider" | "--since" | "--until" | "--session" | "--around" => {
                 it.next();
             }
             _ => {}
@@ -1146,8 +1149,8 @@ fn bare_positionals(args: &[String]) -> Vec<String> {
     while let Some(a) = it.next() {
         match a.as_str() {
             "--db" | "--output" | "--request-id" | "--cursor" | "--max-items" | "--max-bytes"
-            | "--max-messages" | "--policy" | "--level" | "--provider" | "--since" | "--until"
-            | "--session" | "--around" => {
+            | "--max-messages" | "--max-evidence" | "--max-tokens" | "--policy" | "--level"
+            | "--provider" | "--since" | "--until" | "--session" | "--around" => {
                 it.next(); // 消费其取值
             }
             "--robot" | "--no-color" | "--help" | "-h" | "--version" | "-V" | "--discover" => {}
@@ -1363,6 +1366,7 @@ fn dispatch(
             let mut args = rest.to_vec();
             let max_evidence = extract_flag(&mut args, "--max-evidence")?;
             let max_tokens = extract_flag(&mut args, "--max-tokens")?;
+            let max_bytes = extract_flag(&mut args, "--max-bytes")?;
             let providers = extract_repeated_flag(&mut args, "--provider")?;
             let since = extract_flag(&mut args, "--since")?;
             let until = extract_flag(&mut args, "--until")?;
@@ -1376,6 +1380,10 @@ fn dispatch(
             no_extra_args(&args, 1, "handoff <query>")?;
             let query = arg(&args, 1, "handoff <query>")?.to_string();
             let search_limit = 50usize;
+            // 检索作为装配源：用宽松的 fetch-all 预算（含全文级 snippet），pack
+            // 预算由包构建器单一执行（设计 D3——Context 路径的独立 clamp 会双重
+            // 应用用户预算）。max_snippet_chars 放大到 schema 上限，让证据尽量
+            // 携带原文而非 512 字符截断摘要。
             let response = app.handle(AppRequest::Search {
                 query: query.clone(),
                 filters: filters.clone(),
@@ -1383,10 +1391,10 @@ fn dispatch(
                 cursor: None,
                 budget: ResponseBudget {
                     max_items: search_limit,
-                    max_response_bytes: 2_000_000,
-                    max_snippet_chars: 512,
-                    max_messages: 512,
-                    max_evidence_spans: 64,
+                    max_response_bytes: 64 * 1024 * 1024,
+                    max_snippet_chars: 65536,
+                    max_messages: search_limit,
+                    max_evidence_spans: 512,
                 },
                 include_system: false,
                 group_by_session: false,
@@ -1415,6 +1423,20 @@ fn dispatch(
                 })
                 .transpose()?
                 .unwrap_or(8000);
+            let max_bytes_n = max_bytes
+                .as_deref()
+                .map(|v| {
+                    v.parse::<usize>()
+                        .map_err(|_| CliError::usage("--max-bytes 需要正整数"))
+                })
+                .transpose()?
+                .unwrap_or(2_000_000);
+            // 权威 source locator：批量解析每条命中的 source document + span。
+            let source_locations =
+                agent_session_grep_application::handoff_pack::resolve_source_locations(
+                    store, &hits,
+                )
+                .map_err(|e| CliError(e.into()))?;
             let pack = agent_session_grep_application::handoff_pack::generate_deterministic(
                 HandoffInput {
                     query_terms: std::slice::from_ref(&query),
@@ -1433,16 +1455,23 @@ fn dispatch(
                             .map(|s| format!("{}.{:09}Z", s.unix_seconds, s.nanosecond)),
                     },
                     hits: &hits,
+                    source_locations: &source_locations,
                     catalog_generation: generation,
                     max_tokens: max_tokens_n as u64,
-                    max_bytes: 2_000_000,
+                    max_bytes: max_bytes_n as u64,
                     max_evidence: max_evidence_n,
                     target: None,
                 },
             );
+            // 预算截断 → partial（exit 10），绝不伪装 success（contract §5）。
+            let outcome = if pack.truncation.truncated {
+                protocol::Outcome::Partial
+            } else {
+                protocol::Outcome::Success
+            };
             Ok((
                 "handoff",
-                protocol::Outcome::Success,
+                outcome,
                 serde_json::to_value(&pack)
                     .map_err(|e| CliError::usage(format!("handoff: serialization error: {e}")))?,
                 protocol::Page::default(),
