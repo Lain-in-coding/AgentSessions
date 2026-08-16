@@ -26,6 +26,7 @@ agent-session-grep-provider-codex = { path = "../agent-session-grep-provider-cod
 agent-session-grep-provider-grok = { path = "../agent-session-grep-provider-grok" }
 agent-session-grep-provider-kimi = { path = "../agent-session-grep-provider-kimi" }
 agent-session-grep-provider-openclaw = { path = "../agent-session-grep-provider-openclaw" }
+agent-session-grep-provider-opencode = { path = "../agent-session-grep-provider-opencode" }
 agent-session-grep-provider-codebuddy = { path = "../agent-session-grep-provider-codebuddy" }
 agent-session-grep-provider-pi = { path = "../agent-session-grep-provider-pi" }
 agent-session-grep-provider-qoder = { path = "../agent-session-grep-provider-qoder" }
