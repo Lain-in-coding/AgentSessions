@@ -8,7 +8,8 @@
 pub mod redact;
 
 use agent_session_grep_domain::{
-    DomainError, DomainResult, PlacementId, SessionContextGraph, StableId,
+    DomainError, DomainResult, PlacementId, SessionContextGraph, StableId, ToolActivity,
+    ToolActivityKind,
 };
 use std::io::{BufRead, Read};
 
@@ -369,6 +370,138 @@ impl RedactionState {
     }
 }
 
+/// 检索的 sidechain facet：命中消息的 sidechain 状态过滤。
+///
+/// 语义（确定性）：`MainOnly` 只保留**没有任何** sidechain placement 的消息；
+/// `SubagentOnly` 只保留**至少一个** sidechain placement 的消息；
+/// `Include`（默认）不过滤。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SidechainFacet {
+    #[default]
+    Include,
+    MainOnly,
+    SubagentOnly,
+}
+
+impl SidechainFacet {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Include => "include",
+            Self::MainOnly => "main_only",
+            Self::SubagentOnly => "subagent_only",
+        }
+    }
+}
+
+/// 检索的 facet 过滤器（additive；默认值 = 无过滤，行为与 `query` 完全一致）。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SearchFacets {
+    pub sidechain: SidechainFacet,
+    /// 只保留附着至少一条 `kind` 工具活动的消息（闭集：file/command/web/query/unknown）。
+    pub tool_kind: Option<String>,
+    /// 只保留附着该工具名（逐字相等）活动的消息。
+    pub tool_name: Option<String>,
+}
+
+impl SearchFacets {
+    /// 是否与默认值（无过滤）相同。
+    pub fn is_default(&self) -> bool {
+        self.sidechain == SidechainFacet::Include
+            && self.tool_kind.is_none()
+            && self.tool_name.is_none()
+    }
+
+    /// 规范化绑定串：cursor 的 query digest 用它把 facet 绑定进续读令牌
+    /// （同串在发行与校验两侧计算，facet 变化即旧令牌失效）。
+    pub fn canonical_binding(&self) -> String {
+        format!(
+            "sidechain={}|tool_kind={}|tool_name={}",
+            self.sidechain.as_str(),
+            self.tool_kind.as_deref().unwrap_or(""),
+            self.tool_name.as_deref().unwrap_or(""),
+        )
+    }
+}
+
+/// 工具活动 kind 推断规则（设计 R2）：按 provider 记录的**工具名**判定，
+/// 顺序匹配、首个命中生效；不在已知闭集内 → [`ToolActivityKind::Unknown`]
+/// （fail-closed，绝不猜）。
+pub fn infer_tool_activity_kind(name: &str) -> ToolActivityKind {
+    match name {
+        "Bash" | "shell" | "exec" => ToolActivityKind::Command,
+        "Read" | "Write" | "Edit" | "MultiEdit" | "NotebookEdit" | "ApplyPatch" => {
+            ToolActivityKind::File
+        }
+        "Glob" | "Grep" => ToolActivityKind::Query,
+        "WebFetch" | "WebSearch" => ToolActivityKind::Web,
+        "Task" => ToolActivityKind::Query,
+        _ => ToolActivityKind::Unknown,
+    }
+}
+
+/// 把 provider 记录的调用事实构造成规范活动（设计 R1/R2/R4 的单一落点）。
+///
+/// fail-closed 双保险：未知名 → `kind = Unknown` **且** `target = None`
+/// （即使 input 带了形似 command 的字段也不猜）；已知名但 input 无可用字段 →
+/// kind 保留、`target = None`。
+pub fn build_tool_activity(
+    name: &str,
+    actor: agent_session_grep_domain::ToolActivityActor,
+    input: &serde_json::Value,
+    status: agent_session_grep_domain::ToolActivityStatus,
+) -> ToolActivity {
+    let kind = infer_tool_activity_kind(name);
+    let target = if kind == ToolActivityKind::Unknown {
+        None
+    } else {
+        extract_tool_activity_target(input)
+    };
+    ToolActivity {
+        kind,
+        actor,
+        name: name.to_string(),
+        target,
+        status,
+    }
+}
+
+/// 工具活动 target 提取优先级链（设计 R1）：在 provider 记录的 input 对象里按
+/// 固定键序取第一个非空字符串；全部缺失/为空 → `None`（绝不猜）。
+///
+/// 键集与大体顺序沿用 Recall `src/adapters/events.rs::target_from_value`（MIT，
+/// 已注明出处）：`path/file_path/filePath/target/command/cmd/…/pattern/glob/
+/// glob_pattern/regex`；两处刻意调整并在设计文档记录：`url` 提到 `query` 之前
+/// （本项目 Web 工具的 input 只有 url），末尾追加 `description`（Task 类工具）。
+/// 与 Recall 的差异：只接受字符串值（数组形态的 `bash -c …` 参数在 Claude/Codex
+/// 记录中不出现，fail-closed 不猜），键匹配区分大小写（provider 记录的确切字段名）。
+pub fn extract_tool_activity_target(input: &serde_json::Value) -> Option<String> {
+    const PRIORITY: [&str; 13] = [
+        "path",
+        "file_path",
+        "filePath",
+        "target",
+        "command",
+        "cmd",
+        "url",
+        "query",
+        "pattern",
+        "glob",
+        "glob_pattern",
+        "regex",
+        "description",
+    ];
+    let object = input.as_object()?;
+    for key in PRIORITY {
+        if let Some(value) = object.get(key).and_then(serde_json::Value::as_str) {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    None
+}
+
 /// 全文检索端口：对应 FTS5 主存（见 ADR-0001）。
 pub trait SearchIndex {
     /// 将实体文本纳入索引。`text` 为已抽取的可检索正文。
@@ -389,6 +522,19 @@ pub trait SearchIndex {
     /// Execute a query with normalized metadata predicates, returning at most
     /// `limit` hits in the backend's pinned relevance order.
     fn query_filtered(&self, query: SearchQuery<'_>, limit: usize) -> PortResult<Vec<SearchHit>>;
+
+    /// 带 facet 过滤的查询（additive）：`facets` 为默认值时语义与
+    /// [`Self::query_filtered`] 完全一致（实现可短路）。命中仍按钉住排序
+    /// （bm25 + id tiebreak）。
+    fn query_faceted(
+        &self,
+        query: SearchQuery<'_>,
+        limit: usize,
+        facets: &SearchFacets,
+    ) -> PortResult<Vec<SearchHit>> {
+        let _ = facets;
+        self.query_filtered(query, limit)
+    }
 }
 
 /// 语义检索端口：本地 embedding 向量检索（ADR pending / #3 任务）。
@@ -529,6 +675,14 @@ impl<T: SearchIndex + ?Sized> SearchIndex for &T {
     }
     fn query_filtered(&self, query: SearchQuery<'_>, limit: usize) -> PortResult<Vec<SearchHit>> {
         (**self).query_filtered(query, limit)
+    }
+    fn query_faceted(
+        &self,
+        query: SearchQuery<'_>,
+        limit: usize,
+        facets: &SearchFacets,
+    ) -> PortResult<Vec<SearchHit>> {
+        (**self).query_faceted(query, limit, facets)
     }
 }
 
@@ -826,6 +980,21 @@ pub struct MessageEvent<'a> {
     pub span: Option<(u64, u64)>,
 }
 
+/// 一条规范化的工具活动观察（RFC-0002 §2 扩展）：provider 把 `tool_use` /
+/// `tool_result`（或 Codex `custom_tool_call` / `function_call_output`）配对后
+/// 连同锚定消息一起推入 sink。
+///
+/// 事实提取遵循任务 design 的显式有序规则集（target 优先级链、kind 推断、
+/// actor、status）；fail-closed——未知一律 `kind = Unknown`、`target = None`，
+/// 绝不臆造。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolActivityEvent<'a> {
+    /// 锚定消息的 provider-native id（设计 R5 的 attachment 规则决定哪条消息）。
+    pub message_native_id: &'a str,
+    /// 提取出的完整活动事实（owned：provider 必须分配 target 字符串）。
+    pub activity: ToolActivity,
+}
+
 /// Canonical 事件接收端（RFC-0002 §2）：parse 流式产出，绝不整体加载。
 ///
 /// adapter 把每条规范化消息推入 sink；sink 的具体实现（staging / 直接入库）
@@ -837,6 +1006,14 @@ pub trait CanonicalEventSink {
     /// 角色/ id 均以字符串传递，避免 ports 依赖 domain 的 `Role`/`StableId` 构造细节，
     /// 由 sink 侧负责映射到 Canonical 类型（未知角色、id 稳定性策略归 sink）。
     fn emit_message(&mut self, event: MessageEvent<'_>) -> PortResult<()>;
+
+    /// 接收一条工具活动观察（additive：默认实现为 no-op，既有 sink 不受影响）。
+    ///
+    /// 活动附着在 `event.message_native_id` 指向的消息上；sink 负责把 native id
+    /// 解析为稳定消息身份，解析失败的活动必须丢弃（绝不臆造锚点）。
+    fn emit_activity(&mut self, _event: ToolActivityEvent<'_>) -> PortResult<()> {
+        Ok(())
+    }
 }
 
 /// A fresh, read-only view of one captured source (RFC-0002 §7 bounded ingest).
@@ -1179,6 +1356,135 @@ pub use manifest::{
 mod tests {
     use super::*;
     use agent_session_grep_domain::{IdKind, SessionContextGraph, Stability};
+
+    // ---- 工具活动规则集（设计 R1/R2）----
+
+    #[test]
+    fn tool_activity_kind_inference_follows_the_ordered_table() {
+        use agent_session_grep_domain::ToolActivityKind as K;
+        let cases = [
+            ("Bash", K::Command),
+            ("shell", K::Command),
+            ("exec", K::Command),
+            ("Read", K::File),
+            ("Write", K::File),
+            ("Edit", K::File),
+            ("MultiEdit", K::File),
+            ("NotebookEdit", K::File),
+            ("ApplyPatch", K::File),
+            ("Glob", K::Query),
+            ("Grep", K::Query),
+            ("WebFetch", K::Web),
+            ("WebSearch", K::Web),
+            ("Task", K::Query),
+            // 未知名字（含大小写变体）→ Unknown，绝不猜。
+            ("BASH", K::Unknown),
+            ("read", K::Unknown),
+            ("CustomThing", K::Unknown),
+            ("", K::Unknown),
+        ];
+        for (name, expected) in cases {
+            assert_eq!(infer_tool_activity_kind(name), expected, "name: {name:?}");
+        }
+    }
+
+    #[test]
+    fn tool_activity_target_priority_chain_first_present_wins() {
+        use serde_json::json;
+        // 优先级（借用 Recall events.rs::target_from_value 的键序）：
+        // path/file_path/filePath/target > command/cmd > url > query >
+        // pattern/glob/glob_pattern/regex > description。
+        assert_eq!(
+            extract_tool_activity_target(&json!({"command": "ls", "file_path": "a.rs"})).as_deref(),
+            Some("a.rs")
+        );
+        assert_eq!(
+            extract_tool_activity_target(&json!({"url": "https://x", "command": "ls"})).as_deref(),
+            Some("ls")
+        );
+        assert_eq!(
+            extract_tool_activity_target(&json!({"query": "fn main", "url": "https://x"}))
+                .as_deref(),
+            Some("https://x")
+        );
+        assert_eq!(
+            extract_tool_activity_target(&json!({"pattern": "*.rs", "query": "q"})).as_deref(),
+            Some("q")
+        );
+        assert_eq!(
+            extract_tool_activity_target(&json!({"description": "do it", "pattern": "p"}))
+                .as_deref(),
+            Some("p")
+        );
+        // 别名覆盖：path 优先于 file_path；filePath/target/cmd/glob 生效。
+        assert_eq!(
+            extract_tool_activity_target(&json!({"file_path": "b.rs", "path": "a.rs"})).as_deref(),
+            Some("a.rs")
+        );
+        assert_eq!(
+            extract_tool_activity_target(&json!({"filePath": "c.rs"})).as_deref(),
+            Some("c.rs")
+        );
+        assert_eq!(
+            extract_tool_activity_target(&json!({"target": "d.rs"})).as_deref(),
+            Some("d.rs")
+        );
+        assert_eq!(
+            extract_tool_activity_target(&json!({"cmd": "ls -la"})).as_deref(),
+            Some("ls -la")
+        );
+        assert_eq!(
+            extract_tool_activity_target(&json!({"glob": "**/*.rs"})).as_deref(),
+            Some("**/*.rs")
+        );
+        // 空串 / 纯空白视为缺失，继续向下取。
+        assert_eq!(
+            extract_tool_activity_target(&json!({"file_path": "  ", "command": "ok"})).as_deref(),
+            Some("ok")
+        );
+        // 全部缺失 / 非字符串 / 非对象 → None（fail-closed，不猜）。
+        assert_eq!(extract_tool_activity_target(&json!({})), None);
+        assert_eq!(
+            extract_tool_activity_target(&json!({"file_path": 42})),
+            None
+        );
+        assert_eq!(extract_tool_activity_target(&json!(null)), None);
+        assert_eq!(extract_tool_activity_target(&json!("not an object")), None);
+        // 数组值（Recall 的 bash -c 形态）在本项目 fail-closed：不猜。
+        assert_eq!(
+            extract_tool_activity_target(&json!({"command": ["bash", "-c", "ls"]})),
+            None
+        );
+        // 返回值已 trim。
+        assert_eq!(
+            extract_tool_activity_target(&json!({"command": "  git status  "})).as_deref(),
+            Some("git status")
+        );
+    }
+
+    #[test]
+    fn search_facets_default_and_canonical_binding() {
+        let default = SearchFacets::default();
+        assert!(default.is_default());
+        assert_eq!(default.sidechain, SidechainFacet::Include);
+        assert_eq!(
+            default.canonical_binding(),
+            "sidechain=include|tool_kind=|tool_name="
+        );
+
+        let faceted = SearchFacets {
+            sidechain: SidechainFacet::MainOnly,
+            tool_kind: Some("command".into()),
+            tool_name: Some("Bash".into()),
+        };
+        assert!(!faceted.is_default());
+        assert_eq!(
+            faceted.canonical_binding(),
+            "sidechain=main_only|tool_kind=command|tool_name=Bash"
+        );
+        // 绑定串确定性：同 facets 同串。
+        assert_eq!(faceted.canonical_binding(), faceted.canonical_binding());
+    }
 
     #[test]
     fn search_provider_maps_to_canonical_ids() {

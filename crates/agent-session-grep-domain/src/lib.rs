@@ -209,6 +209,105 @@ pub struct MessageEdge {
     pub relation: MessageRelation,
 }
 
+/// The retrieval facet kind of one tool activity (design R2).
+///
+/// Fail-closed: a tool name outside the known closed set infers `Unknown`,
+/// never a guessed kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolActivityKind {
+    /// File-system content tools (Read/Write/Edit/...).
+    File,
+    /// Shell/command execution tools (Bash/shell/exec).
+    Command,
+    /// Web retrieval tools (WebFetch/WebSearch).
+    Web,
+    /// Pattern/search tools (Glob/Grep) and Task-style queries.
+    Query,
+    /// Name outside the known set — never guessed.
+    Unknown,
+}
+
+impl ToolActivityKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::File => "file",
+            Self::Command => "command",
+            Self::Web => "web",
+            Self::Query => "query",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// Who performed the tool activity (design R3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolActivityActor {
+    Main,
+    Subagent,
+}
+
+impl ToolActivityActor {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Main => "main",
+            Self::Subagent => "subagent",
+        }
+    }
+}
+
+/// The provider-recorded outcome of one tool activity (design R4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolActivityStatus {
+    Success,
+    Error,
+    /// The call was observed but no result record exists in the source
+    /// (truncated transcript) — never guessed.
+    Unknown,
+}
+
+impl ToolActivityStatus {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Error => "error",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// One typed tool activity observation attached to a canonical Message.
+///
+/// Facts are provider-recorded first; extraction follows the explicit ordered
+/// rule set in the task design (R1 target priority chain, R2 kind inference,
+/// R3 actor, R4 status). Fail-closed: unknown → `kind = Unknown`,
+/// `target = None` — never guessed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolActivity {
+    pub kind: ToolActivityKind,
+    pub actor: ToolActivityActor,
+    /// Provider-reported tool name, verbatim (e.g. `Bash`, `Read`, `shell`).
+    pub name: String,
+    /// Extracted target (file path / command / url / pattern); `None` when
+    /// unknown. Bounding happens at the persistence boundary.
+    pub target: Option<String>,
+    pub status: ToolActivityStatus,
+}
+
+impl ToolActivity {
+    /// Validate invariants intrinsic to a ToolActivity.
+    pub fn validate(&self) -> DomainResult<()> {
+        if self.name.trim().is_empty() {
+            return Err(DomainError::InvariantViolation(
+                "tool activity name must not be empty".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// The complete typed graph needed to resolve one Session context.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionContextGraph {
@@ -698,5 +797,70 @@ mod tests {
                 format!("\"{wire}\"")
             );
         }
+    }
+
+    #[test]
+    fn tool_activity_wire_values_are_stable() {
+        let kinds = [
+            (ToolActivityKind::File, "file"),
+            (ToolActivityKind::Command, "command"),
+            (ToolActivityKind::Web, "web"),
+            (ToolActivityKind::Query, "query"),
+            (ToolActivityKind::Unknown, "unknown"),
+        ];
+        for (kind, wire) in kinds {
+            assert_eq!(kind.as_str(), wire);
+            assert_eq!(serde_json::to_string(&kind).unwrap(), format!("\"{wire}\""));
+        }
+        let actors = [
+            (ToolActivityActor::Main, "main"),
+            (ToolActivityActor::Subagent, "subagent"),
+        ];
+        for (actor, wire) in actors {
+            assert_eq!(actor.as_str(), wire);
+            assert_eq!(
+                serde_json::to_string(&actor).unwrap(),
+                format!("\"{wire}\"")
+            );
+        }
+        let statuses = [
+            (ToolActivityStatus::Success, "success"),
+            (ToolActivityStatus::Error, "error"),
+            (ToolActivityStatus::Unknown, "unknown"),
+        ];
+        for (status, wire) in statuses {
+            assert_eq!(status.as_str(), wire);
+            assert_eq!(
+                serde_json::to_string(&status).unwrap(),
+                format!("\"{wire}\"")
+            );
+        }
+        // Round-trip of the full model.
+        let activity = ToolActivity {
+            kind: ToolActivityKind::Command,
+            actor: ToolActivityActor::Main,
+            name: "Bash".into(),
+            target: Some("ls -la".into()),
+            status: ToolActivityStatus::Success,
+        };
+        activity.validate().unwrap();
+        let json = serde_json::to_string(&activity).unwrap();
+        let restored: ToolActivity = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored, activity);
+    }
+
+    #[test]
+    fn tool_activity_rejects_empty_name() {
+        let activity = ToolActivity {
+            kind: ToolActivityKind::Unknown,
+            actor: ToolActivityActor::Main,
+            name: " ".into(),
+            target: None,
+            status: ToolActivityStatus::Unknown,
+        };
+        assert_eq!(
+            activity.validate().unwrap_err().code(),
+            "invariant_violation"
+        );
     }
 }
