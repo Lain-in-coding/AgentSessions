@@ -45,7 +45,7 @@
 - 团队同步、云端、知识图谱**不在首发范围**。
 - 发布形态:一次性完整开源(仓库保持 PRIVATE 直到发布门全绿,公开是
   owner 最终裁量)。
-- License:Apache-2.0 + Provider Adapter Protocol contribution policy。
+- License:MIT OR Apache-2.0 + Provider Adapter Protocol contribution policy。
 
 ## 2. 差异化主张(对已核验外部参考项目)
 
@@ -53,9 +53,9 @@
 |---|---|---|
 | Evidence-first | 每条结果带 source span 可回溯原文;handoff pack 原文/推断分栏 | 无人做到 pack 级证据契约 |
 | 身份与一致性 | StableId 三级 + durable outbox + CAS generation + 失败不删除 | hstry 的 UUID v5 最接近但无 outbox |
-| CJK 一等公民 | bigram 索引 + 中文语义模型 benchmark 达标后锁定 | 竞品基本无中文分词处理 |
+| CJK 一等公民 | bigram 索引 + 中文语义模型 benchmark 待落地后锁定(当前向量模式为 bigram-hash fuzzy-lexical,非真实语义模型) | 竞品基本无中文分词处理 |
 | 诚实能力矩阵 | certified/GA/beta/experimental/unsupported 分级,证据晋级,禁止跨级宣传 | 多数项目虚标 provider 数 |
-| 零遥测可验证 | 代码级禁止 + CI 静态检查 + `--offline` | 无人做到可验证 |
+| 零遥测可验证 | 代码级禁止 + CI 静态检查(当前无 `--offline` flag,规划中) | 无人做到可验证 |
 | 跨边界默认脱敏 | Web/Handoff/MCP/Robot 默认脱敏,CLI/TUI 本地不脱敏 | agentsview 有 secret 扫描但非分层边界 |
 | Robot 契约 | 13+ 码 error catalog + cursor 防篡改 + retrieval_mode | cass robot 模式粒度更粗 |
 

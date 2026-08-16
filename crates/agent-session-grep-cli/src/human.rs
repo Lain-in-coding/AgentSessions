@@ -1579,7 +1579,7 @@ mod tests {
         );
         let data = json!({
             "tool": "agent-session-grep",
-            "version": "0.3.0",
+            "version": "0.1.0",
             "db": "not-checked",
             "schema": null,
         });
@@ -1590,7 +1590,7 @@ mod tests {
                 "db: not-checked",
                 "schema: null",
                 "tool: agent-session-grep",
-                "version: 0.3.0",
+                "version: 0.1.0",
             ]
         );
     }

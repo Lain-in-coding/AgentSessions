@@ -3984,12 +3984,12 @@ mod tests {
 
         let version = help_envelope(
             "version",
-            serde_json::json!({ "version": "agent-session-grep 0.3.0" }),
+            serde_json::json!({ "version": "agent-session-grep 0.1.0" }),
             None,
         );
         let v: serde_json::Value = serde_json::from_str(&version).expect("valid JSON");
         assert_eq!(v["command"], "version");
-        assert_eq!(v["data"]["version"], "agent-session-grep 0.3.0");
+        assert_eq!(v["data"]["version"], "agent-session-grep 0.1.0");
     }
 
     #[test]
