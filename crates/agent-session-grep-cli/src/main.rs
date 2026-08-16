@@ -391,6 +391,26 @@ fn run(
         }
         return tui::run(&store);
     }
+    // serve：loopback HTTP + 嵌入式 Web UI。同样接管（长期运行），不走
+    // dispatch/emit_result；--output/--robot 无意义。`--port <n>` 可选（默认 0 = 随机端口）。
+    if rest.first().map(String::as_str) == Some("serve") {
+        let mut args = rest[1..].to_vec();
+        let port_value = extract_flag(&mut args, "--port")?;
+        if !args.is_empty() {
+            return Err(CliError::usage("serve takes no positional arguments"));
+        }
+        let port = port_value
+            .as_deref()
+            .map(|v| {
+                v.parse::<u16>()
+                    .map_err(|_| CliError::usage("--port 需要 0-65535 的整数"))
+            })
+            .transpose()?
+            .unwrap_or(0);
+        let session = serve::ServeSession::bind_loopback(port)
+            .map_err(|e| CliError::usage(format!("serve: bind failed: {e}")))?;
+        return serve::run(&session, &store);
+    }
     // catalog 与 index 是同一个 SqliteStore；App 泛型接受同一实例的两次移动，
     // 故这里克隆一个连接语义上的第二把手不可行——改为让 App 持有单一 store。
     let (command, outcome, data, page, warnings) = dispatch(&store, &rest, mode, request_id)?;
