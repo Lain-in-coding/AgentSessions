@@ -735,6 +735,20 @@ impl<T: ResumeClaimsStore + ?Sized> ResumeClaimsStore for &T {
     }
 }
 
+impl<T: SemanticIndex + ?Sized> SemanticIndex for &T {
+    fn index_embedding(&self, id: &StableId, embedding: &[f32]) -> PortResult<()> {
+        (**self).index_embedding(id, embedding)
+    }
+
+    fn query_semantic(&self, query_embedding: &[f32], limit: usize) -> PortResult<Vec<SearchHit>> {
+        (**self).query_semantic(query_embedding, limit)
+    }
+
+    fn is_ready(&self) -> bool {
+        (**self).is_ready()
+    }
+}
+
 /// 一条规范化消息的事件载荷（RFC-0002 §2）：parse 流式产出的最小单元。
 ///
 /// 用结构体而非长参数列表，使后续增删字段（如工具调用元数据）不必改动

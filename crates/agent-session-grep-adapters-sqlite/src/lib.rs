@@ -24,7 +24,7 @@ use agent_session_grep_domain::{
 };
 use agent_session_grep_ports::{
     CatalogEntry, CatalogStore, ContextGraphStore, ContextStats, MessageContextCandidate,
-    PortError, PortResult, ResumeClaimsStore, SearchHit, SearchIndex, SearchQuery,
+    PortError, PortResult, ResumeClaimsStore, SearchHit, SearchIndex, SearchQuery, SemanticIndex,
     SessionResumeMetadata, SourceResumeClaim,
 };
 use rusqlite::{Connection, OptionalExtension};
@@ -1090,6 +1090,10 @@ pub struct SqliteStore {
     conn: RefCell<Connection>,
     /// 写入路径持有的 data-root 独占 lease；只读打开时为 None。
     _lease: Option<WriterLease>,
+    /// 当前语义模型 id（#3）：`None` 表示未配置语义检索，`SemanticIndex`
+    /// 全部方法降级为空/未就绪。设置它是调用方声明"这些向量属于哪个模型"，
+    /// 换模型后旧维度向量因 model_id 不匹配自然被排除。
+    semantic_model_id: RefCell<Option<String>>,
 }
 
 /// 一批源路径的指纹缓存项：捕获时长度与内容指纹。
@@ -1103,6 +1107,7 @@ impl SqliteStore {
         Ok(SqliteStore {
             conn: RefCell::new(conn),
             _lease: None,
+            semantic_model_id: RefCell::new(None),
         })
     }
 
@@ -1125,6 +1130,7 @@ impl SqliteStore {
         let store = SqliteStore {
             conn: RefCell::new(conn),
             _lease: Some(lease),
+            semantic_model_id: RefCell::new(None),
         };
         // lease 已到手，当前进程是唯一写者；安全收敛上次崩溃留下的无副作用 intent。
         store.recover_interrupted()?;
@@ -1138,6 +1144,7 @@ impl SqliteStore {
         Ok(SqliteStore {
             conn: RefCell::new(conn),
             _lease: None,
+            semantic_model_id: RefCell::new(None),
         })
     }
 
@@ -1346,6 +1353,9 @@ impl SqliteStore {
         }
         if current < 9 {
             Self::migrate_v8_to_v9(conn)?;
+        }
+        if current < 10 {
+            Self::migrate_v9_to_v10(conn)?;
         }
         // 不随 user_version 门控：旧 v7 库（本列存在前建成的）打开时同样需要。
         Self::ensure_fts_ids_rowid(conn)?;
@@ -1575,6 +1585,46 @@ impl SqliteStore {
         )
         .map_err(backend)?;
         tx.commit().map_err(backend)
+    }
+
+    /// v9→v10：语义向量边车表（#3）。
+    ///
+    /// `message_vec` 与 `fts` 同级——都是 catalog 的可重建投影，不是权威数据。
+    /// 向量以 little-endian f32 blob 存储（`dimension` 显式记录，避免读回时
+    /// 靠 blob 长度推断）；`model_id` 让换模型后的旧向量可被识别并清理，而不是
+    /// 与新维度向量混在一张表里静默产生垃圾相似度。
+    /// 主键是 wire_id：与 `fts_ids` 同一连接键，删除路径无需第二套 id 映射。
+    fn migrate_v9_to_v10(conn: &Connection) -> PortResult<()> {
+        let tx = conn.unchecked_transaction().map_err(backend)?;
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS message_vec (
+                 wire_id   TEXT PRIMARY KEY,
+                 model_id  TEXT NOT NULL,
+                 dimension INTEGER NOT NULL CHECK(dimension > 0),
+                 embedding BLOB NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS message_vec_model ON message_vec(model_id);
+             PRAGMA user_version = 10;",
+        )
+        .map_err(backend)?;
+        tx.commit().map_err(backend)
+    }
+
+    /// 声明语义向量归属的模型 id（#3）。未设置时 `SemanticIndex` 全部方法
+    /// 视为未配置：`is_ready` 为 false、查询返回空、写入报错——这样"忘了配模型"
+    /// 不会变成往表里写无归属向量。
+    pub fn set_semantic_model(&self, model_id: impl Into<String>) {
+        *self.semantic_model_id.borrow_mut() = Some(model_id.into());
+    }
+
+    /// 清除当前模型下的全部向量（换模型或 rebuild 语义索引时使用）。
+    /// 返回删除行数。向量表是投影而非权威数据，清除永不影响 catalog。
+    pub fn clear_embeddings(&self, model_id: &str) -> PortResult<usize> {
+        let conn = self.conn.borrow();
+        let n = conn
+            .execute("DELETE FROM message_vec WHERE model_id = ?1", [model_id])
+            .map_err(backend)?;
+        Ok(n)
     }
 
     /// 当前存储读回的 schema 版本（供 doctor/诊断）。
@@ -4452,7 +4502,10 @@ const RELATION_SCHEMA_VERSION: i64 = 7;
 /// v9：`source_scans` 增加可空 `provider_id TEXT` 列——`sync --discover` 用它
 /// 按 provider diff 已存源路径，找出已被删除的源并合成空批 tombstone。
 /// 旧行保持 NULL（直到该源被再次扫描时回填）；列是 additive，v8 库前向迁移。
-pub const SCHEMA_VERSION: i64 = 9;
+///
+/// v10：`message_vec` 语义向量边车表（#3）。与 `fts` 同级的 catalog 投影，
+/// 可从 catalog 全量重建；记录 model_id/dimension，换模型后旧向量可识别可清理。
+pub const SCHEMA_VERSION: i64 = 10;
 
 impl CatalogStore for SqliteStore {
     fn get(&self, id: &StableId) -> PortResult<Option<Vec<u8>>> {
@@ -5081,6 +5134,160 @@ impl SearchIndex for SqliteStore {
     }
 }
 
+/// 语义向量边车（#3，schema v10）。
+///
+/// 向量以 little-endian f32 blob 存储；余弦相似度在 Rust 侧计算——SQLite 无
+/// 向量扩展依赖（sqlite-vec 需额外二进制），语料规模下全表扫描 + Rust 点积
+/// 已足够，且不引入新供应链。查询按 `model_id` 过滤：换模型后旧维度向量不会
+/// 与新向量混算出垃圾相似度。
+///
+/// `is_ready` 表示"这张表里有当前模型的向量"，而不是"表存在"——空表意味着
+/// 语义检索不可用，Application 必须显式降级到 lexical_fallback。
+impl SemanticIndex for SqliteStore {
+    fn index_embedding(&self, id: &StableId, embedding: &[f32]) -> PortResult<()> {
+        if embedding.is_empty() {
+            return Err(PortError::Backend("embedding must not be empty".into()));
+        }
+        let model_id = self.semantic_model_id.borrow().clone().ok_or_else(|| {
+            PortError::Backend("semantic model id not set; call set_semantic_model first".into())
+        })?;
+        let blob = f32_slice_to_bytes(embedding);
+        let conn = self.conn.borrow();
+        conn.execute(
+            "INSERT INTO message_vec(wire_id, model_id, dimension, embedding)
+             VALUES(?1, ?2, ?3, ?4)
+             ON CONFLICT(wire_id) DO UPDATE SET
+                 model_id = excluded.model_id,
+                 dimension = excluded.dimension,
+                 embedding = excluded.embedding",
+            rusqlite::params![id.as_str(), model_id, embedding.len() as i64, blob],
+        )
+        .map_err(backend)?;
+        Ok(())
+    }
+
+    fn query_semantic(&self, query_embedding: &[f32], limit: usize) -> PortResult<Vec<SearchHit>> {
+        if query_embedding.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+        let Some(model_id) = self.semantic_model_id.borrow().clone() else {
+            return Ok(Vec::new());
+        };
+        let conn = self.conn.borrow();
+        // 只取与查询同模型同维度的向量：维度不符的行是换模型残留，跳过而非
+        // 截断比较（截断会产出看似合理却无意义的相似度）。
+        let mut stmt = conn
+            .prepare(
+                "SELECT mv.wire_id, fi.id_json, mv.embedding
+                 FROM message_vec mv
+                 LEFT JOIN fts_ids fi ON fi.wire_id = mv.wire_id
+                 WHERE mv.model_id = ?1 AND mv.dimension = ?2",
+            )
+            .map_err(backend)?;
+        let rows = stmt
+            .query_map(
+                rusqlite::params![model_id, query_embedding.len() as i64],
+                |row| {
+                    let wire: String = row.get(0)?;
+                    let id_json: Option<String> = row.get(1)?;
+                    let blob: Vec<u8> = row.get(2)?;
+                    Ok((wire, id_json, blob))
+                },
+            )
+            .map_err(backend)?;
+
+        let mut scored: Vec<(f32, StableId)> = Vec::new();
+        for row in rows {
+            let (wire, id_json, blob) = row.map_err(backend)?;
+            let vector = bytes_to_f32_vec(&blob);
+            if vector.len() != query_embedding.len() {
+                continue;
+            }
+            let score = cosine_similarity(query_embedding, &vector);
+            // 身份优先取 fts_ids 的保真 id_json（含 kind+stability）；缺失回退
+            // wire（降级为 Unstable，与 rebuild 同一约定）。
+            let id = match id_json {
+                Some(json) => serde_json::from_str(&json).map_err(backend)?,
+                None => match StableId::from_wire(&wire) {
+                    Some(id) => id,
+                    None => continue,
+                },
+            };
+            scored.push((score, id));
+        }
+        // 相似度降序；同分按 wire id 升序，保证分页顺序确定（与 FTS 路径的
+        // bm25+id tiebreak 同一约定）。
+        scored.sort_by(|a, b| {
+            b.0.partial_cmp(&a.0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.1.as_str().cmp(b.1.as_str()))
+        });
+        scored.truncate(limit);
+        Ok(scored
+            .into_iter()
+            .map(|(score, id)| SearchHit {
+                id,
+                score,
+                session_id: None,
+                text: None,
+                why_matched: Vec::new(),
+                suggested_next_commands: Vec::new(),
+                occurrences: 1,
+                resume_available: false,
+            })
+            .collect())
+    }
+
+    fn is_ready(&self) -> bool {
+        let Some(model_id) = self.semantic_model_id.borrow().clone() else {
+            return false;
+        };
+        let conn = self.conn.borrow();
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM message_vec WHERE model_id = ?1)",
+            [model_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|exists| exists == 1)
+        .unwrap_or(false)
+    }
+}
+
+/// Serialize an f32 slice as little-endian bytes for BLOB storage.
+fn f32_slice_to_bytes(values: &[f32]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(values.len() * 4);
+    for value in values {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    bytes
+}
+
+/// Read a little-endian f32 BLOB back into a vector. A trailing partial float
+/// is dropped rather than reconstructed from padding.
+fn bytes_to_f32_vec(bytes: &[u8]) -> Vec<f32> {
+    bytes
+        .chunks_exact(4)
+        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .collect()
+}
+
+/// Cosine similarity of two equal-length vectors. Zero-norm inputs score 0
+/// (no direction to compare) rather than producing NaN.
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    let mut dot = 0.0f32;
+    let mut norm_a = 0.0f32;
+    let mut norm_b = 0.0f32;
+    for (x, y) in a.iter().zip(b.iter()) {
+        dot += x * y;
+        norm_a += x * x;
+        norm_b += y * y;
+    }
+    if norm_a == 0.0 || norm_b == 0.0 {
+        return 0.0;
+    }
+    dot / (norm_a.sqrt() * norm_b.sqrt())
+}
+
 impl ResumeClaimsStore for SqliteStore {
     /// 批量解析 Session 的 Resume Metadata（ADR-0009）：分块 IN 一次查询
     /// 拿回全部命中 session 的声明行（无 N+1），仅在全部 source 声明完全
@@ -5659,6 +5866,116 @@ mod tests {
 
     pub(crate) fn sid(kind: IdKind, fact: &[u8]) -> StableId {
         StableId::derive(kind, Stability::Reconstructed, &[fact])
+    }
+
+    #[test]
+    fn semantic_index_is_not_ready_without_model_or_vectors() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        // 未设模型：未就绪，查询空，写入报错（不写无归属向量）。
+        assert!(!store.is_ready());
+        assert!(store.query_semantic(&[0.1, 0.2], 5).unwrap().is_empty());
+        assert!(
+            store
+                .index_embedding(&sid(IdKind::Message, b"m"), &[0.1])
+                .is_err()
+        );
+        // 设了模型但表空：仍未就绪，Application 必须降级为 lexical_fallback。
+        store.set_semantic_model("test-model");
+        assert!(!store.is_ready());
+    }
+
+    #[test]
+    fn semantic_index_round_trips_and_ranks_by_cosine() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        store.set_semantic_model("test-model");
+        let near = sid(IdKind::Message, b"near");
+        let far = sid(IdKind::Message, b"far");
+        // near 与查询同向；far 正交。
+        store.index_embedding(&near, &[1.0, 0.0, 0.0]).unwrap();
+        store.index_embedding(&far, &[0.0, 1.0, 0.0]).unwrap();
+        assert!(store.is_ready());
+
+        let hits = store.query_semantic(&[1.0, 0.0, 0.0], 10).unwrap();
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].id.as_str(), near.as_str());
+        assert!(hits[0].score > hits[1].score);
+        assert!((hits[0].score - 1.0).abs() < 1e-5);
+        assert!(hits[1].score.abs() < 1e-5);
+    }
+
+    #[test]
+    fn semantic_query_skips_other_models_and_dimensions() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        store.set_semantic_model("model-a");
+        store
+            .index_embedding(&sid(IdKind::Message, b"a"), &[1.0, 0.0])
+            .unwrap();
+        // 换模型：旧向量因 model_id 不匹配被排除，不参与相似度。
+        store.set_semantic_model("model-b");
+        assert!(!store.is_ready());
+        assert!(store.query_semantic(&[1.0, 0.0], 10).unwrap().is_empty());
+        // 同模型但维度不同的查询也不匹配（避免截断比较产出无意义分数）。
+        store.set_semantic_model("model-a");
+        assert!(
+            store
+                .query_semantic(&[1.0, 0.0, 0.0], 10)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn semantic_index_upserts_and_clear_removes_only_that_model() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let id = sid(IdKind::Message, b"m");
+        store.set_semantic_model("model-a");
+        store.index_embedding(&id, &[1.0, 0.0]).unwrap();
+        // 同 id 重写是 upsert，不是第二行。
+        store.index_embedding(&id, &[0.0, 1.0]).unwrap();
+        let hits = store.query_semantic(&[0.0, 1.0], 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!((hits[0].score - 1.0).abs() < 1e-5);
+
+        store.set_semantic_model("model-b");
+        store
+            .index_embedding(&sid(IdKind::Message, b"n"), &[1.0, 0.0])
+            .unwrap();
+        assert_eq!(store.clear_embeddings("model-a").unwrap(), 1);
+        // model-b 的向量不受影响。
+        assert!(store.is_ready());
+    }
+
+    #[test]
+    fn f32_blob_round_trips_and_drops_partial_tail() {
+        let values = [1.5f32, -2.25, 0.0];
+        let bytes = f32_slice_to_bytes(&values);
+        assert_eq!(bytes.len(), 12);
+        assert_eq!(bytes_to_f32_vec(&bytes), values);
+        // 截断的尾部字节不被当成一个 float 复原。
+        assert_eq!(bytes_to_f32_vec(&bytes[..10]).len(), 2);
+    }
+
+    #[test]
+    fn cosine_similarity_handles_zero_norm() {
+        assert_eq!(cosine_similarity(&[0.0, 0.0], &[1.0, 1.0]), 0.0);
+        assert_eq!(cosine_similarity(&[1.0, 1.0], &[0.0, 0.0]), 0.0);
+        assert!((cosine_similarity(&[1.0, 0.0], &[-1.0, 0.0]) + 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn schema_v10_creates_message_vec_table() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
+        assert_eq!(SCHEMA_VERSION, 10);
+        let conn = store.conn.borrow();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='message_vec'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
     }
 
     #[test]

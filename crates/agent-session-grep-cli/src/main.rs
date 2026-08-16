@@ -623,6 +623,7 @@ COMMANDS:
     sync --discover          自动发现各 provider 数据根下的 .jsonl 源并同步（只读源）
     index <id-fact> <text> 直接写入一条 catalog + 索引（切片期写入入口）
     index rebuild          从权威 catalog 全量重投影 FTS 索引（维护命令）
+    index embeddings       从权威 catalog 构建语义向量索引（semantic/hybrid 检索前置）
     search <query>         全文检索，按相关性降序返回命中（支持分页/预算/过滤 flag）
     handoff <query>        检索并为查询生成 handoff pack（原文证据 + 建议命令；dry-run）
     get-message <msg-id>   返回命中消息及其同会话主线邻居（--session/--around）
@@ -780,6 +781,8 @@ fn subcommand_help_text(cmd: &str) -> &'static str {
                      示例：agent-session-grep --db <path> search 配置备份\n\
                      flag（放子命令后）：--max-items <n> 页大小、--cursor <token> 翻页、--max-bytes <n> 预算；\n\
                      过滤：--provider claude|codex（可重复，OR）、--since/--until <RFC3339 或 1h|1d|1w>（半开区间 [since, until)）；\n\
+                     检索模式：--mode lexical|semantic|hybrid（默认 lexical）。semantic/hybrid 需先跑 `index embeddings`；\n\
+                     向量索引未就绪时结果标注 retrieval_mode=lexical_fallback 并给出 warning，绝不静默降级；\n\
                      --include-system（默认排除 system/developer 角色消息）、--group-by-session（按会话归并并附 occurrences）"
         }
         "get-message" => {
@@ -1128,6 +1131,20 @@ fn dispatch(
                     protocol::Page::default(),
                     Vec::new(),
                 ))
+            } else if rest.get(1).map(String::as_str) == Some("embeddings") {
+                // 语义向量索引构建（#3）：从权威 catalog 重投影 message_vec。
+                // 与 `index rebuild` 同级——向量表是 catalog 的投影，不是权威数据，
+                // 可随时整表重建。构建后 semantic/hybrid 检索才会离开
+                // lexical_fallback。
+                no_extra_args(rest, 1, "index embeddings")?;
+                let (data, warnings) = build_embeddings(store)?;
+                Ok((
+                    "index.embeddings",
+                    protocol::Outcome::Success,
+                    data,
+                    protocol::Page::default(),
+                    warnings,
+                ))
             } else {
                 no_extra_args(rest, 2, "index <id-fact> <text>")?;
                 let fact = arg(rest, 1, "index <id-fact> <text>")?;
@@ -1224,20 +1241,50 @@ fn dispatch(
             } else {
                 20
             };
+            // #3 语义/混合模式：注入 SqliteStore 作为 SemanticIndex，并用同一
+            // vectorizer 生成查询向量。`index embeddings` 未跑过时向量表为空，
+            // store.is_ready() 为 false，Application 显式降级为 lexical_fallback
+            // + warning（禁止静默切换）。
             let query = arg(&args, 1, "search <query>")?.to_string();
-            // #3 查询向量：当前 CLI 未注入语义模型，semantic/hybrid 请求由
-            // Application 显式降级为 lexical_fallback + warning（禁止静默切换）。
-            let response = app.handle(AppRequest::Search {
-                query,
-                filters,
-                limit,
-                cursor,
-                budget,
-                include_system,
-                group_by_session,
-                mode: retrieval_mode,
-                query_embedding: None,
-            })?;
+            let response = if retrieval_mode == RetrievalMode::Lexical {
+                let app = App::with_resume(store_ref(store), store_ref(store), store_ref(store));
+                app.handle(AppRequest::Search {
+                    query,
+                    filters,
+                    limit,
+                    cursor,
+                    budget,
+                    include_system,
+                    group_by_session,
+                    mode: retrieval_mode,
+                    query_embedding: None,
+                })?
+            } else {
+                use agent_session_grep_application::embedding::{
+                    BIGRAM_HASH_MODEL_ID, BigramHashModel,
+                };
+                use agent_session_grep_ports::EmbeddingModel;
+                store.set_semantic_model(BIGRAM_HASH_MODEL_ID);
+                let model = BigramHashModel::new();
+                let query_embedding = model.embed(&query, true).map_err(ProtocolError::from)?;
+                let app = App::with_resume_semantic(
+                    store_ref(store),
+                    store_ref(store),
+                    store_ref(store),
+                    store_ref(store),
+                );
+                app.handle(AppRequest::Search {
+                    query,
+                    filters,
+                    limit,
+                    cursor,
+                    budget,
+                    include_system,
+                    group_by_session,
+                    mode: retrieval_mode,
+                    query_embedding: Some(query_embedding),
+                })?
+            };
             let (outcome, mut data, page, warnings) = render(response);
             if mode == protocol::OutputMode::Human {
                 attach_session_resume_rows(store, &mut data)?;
@@ -1819,6 +1866,71 @@ fn execute_resume(
         ));
     }
     Ok(())
+}
+
+/// 从权威 catalog 重建语义向量索引（`index embeddings`，#3）。
+///
+/// 与 FTS rebuild 同一语义：向量表是 catalog 的投影，整表清空后按 catalog
+/// 重投影，失败不留半成品（每条 upsert 独立，重跑幂等）。只对 Message 实体
+/// 建向量——session/document 没有检索正文。
+fn build_embeddings(store: &SqliteStore) -> Result<(serde_json::Value, Vec<String>), CliError> {
+    use agent_session_grep_application::embedding::{BIGRAM_HASH_MODEL_ID, BigramHashModel};
+    use agent_session_grep_ports::{CatalogStore, EmbeddingModel, SemanticIndex};
+
+    let model = BigramHashModel::new();
+    store.set_semantic_model(BIGRAM_HASH_MODEL_ID);
+    // 先清除本模型的旧向量：重建语义与 `index rebuild` 一致（整表重投影，
+    // 不是增量补齐），否则 catalog 里已删除的实体会留下孤儿向量。
+    let cleared = store
+        .clear_embeddings(BIGRAM_HASH_MODEL_ID)
+        .map_err(ProtocolError::from)?;
+
+    // catalog 全量扫描：payload 里没有可检索正文的实体跳过（不臆造向量）。
+    let entries = store.list(usize::MAX).map_err(ProtocolError::from)?;
+    let mut indexed = 0usize;
+    let mut skipped = 0usize;
+    for entry in &entries {
+        if entry.id.kind() != IdKind::Message {
+            skipped += 1;
+            continue;
+        }
+        let text = serde_json::from_slice::<serde_json::Value>(&entry.payload)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("text")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+            })
+            .unwrap_or_default();
+        if text.trim().is_empty() {
+            skipped += 1;
+            continue;
+        }
+        let vector = model.embed(&text, false).map_err(ProtocolError::from)?;
+        store
+            .index_embedding(&entry.id, &vector)
+            .map_err(ProtocolError::from)?;
+        indexed += 1;
+    }
+
+    let manifest = model.manifest();
+    let warnings = vec![
+        "当前向量化器是 bigram-hash（模糊词法相似，非语义）；semantic/hybrid 因此仅供实验，lexical 仍是默认。"
+            .to_string(),
+    ];
+    Ok((
+        serde_json::json!({
+            "model_id": manifest.model_id,
+            "dimension": manifest.dimension,
+            "license": manifest.license,
+            "file_hash": manifest.file_hash,
+            "indexed": indexed,
+            "skipped": skipped,
+            "cleared": cleared,
+        }),
+        warnings,
+    ))
 }
 
 /// 用与 CLI `index`/`get` 一致的派生路径，从一个 fact 造出 message id。
