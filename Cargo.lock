@@ -38,6 +38,7 @@ dependencies = [
  "agent-session-grep-domain",
  "agent-session-grep-ports",
  "agent-session-grep-provider-aider",
+ "agent-session-grep-provider-antigravity",
  "agent-session-grep-provider-claude",
  "agent-session-grep-provider-cline",
  "agent-session-grep-provider-codebuddy",

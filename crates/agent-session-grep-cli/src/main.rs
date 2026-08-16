@@ -36,6 +36,7 @@ use agent_session_grep_ports::{
     RetrievalMode, SearchFilters, SearchProvider, SourceResumeClaim,
 };
 use agent_session_grep_provider_aider::AiderAdapter;
+use agent_session_grep_provider_antigravity::AntigravityAdapter;
 use agent_session_grep_provider_claude::ClaudeCodeAdapter;
 use agent_session_grep_provider_cline::ClineAdapter;
 use agent_session_grep_provider_codebuddy::CodeBuddyAdapter;
@@ -43,6 +44,7 @@ use agent_session_grep_provider_codex::CodexAdapter;
 use agent_session_grep_provider_grok::GrokBuildAdapter;
 use agent_session_grep_provider_kimi::KimiCodeAdapter;
 use agent_session_grep_provider_openclaw::OpenClawAdapter;
+use agent_session_grep_provider_opencode::OpenCodeAdapter;
 use agent_session_grep_provider_pi::PiAdapter;
 use agent_session_grep_provider_qoder::QoderAdapter;
 use protocol::{CanonicalCode, ProtocolError};
@@ -1551,8 +1553,10 @@ fn provider_registry() -> Vec<Box<dyn ProviderAdapter>> {
         Box::new(QoderAdapter::new()),
         Box::new(KimiCodeAdapter::new()),
         Box::new(OpenClawAdapter::new()),
+        Box::new(OpenCodeAdapter::new()),
         Box::new(CodeBuddyAdapter::new()),
         Box::new(ClineAdapter::new()),
+        Box::new(AntigravityAdapter::new()),
     ]
 }
 
@@ -1668,6 +1672,8 @@ fn provider_data_root(provider_id: &str) -> Option<std::path::PathBuf> {
         "codex" => ".codex/sessions",
         "openclaw" => ".openclaw/agents",
         "tencent-codebuddy" => ".codebuddy/projects",
+        "antigravity" => ".gemini/antigravity-cli/brain",
+        "opencode" => ".local/share/opencode",
         _ => return None,
     };
     let home = std::env::var_os("HOME")
