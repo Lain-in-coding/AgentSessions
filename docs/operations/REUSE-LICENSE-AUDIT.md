@@ -29,6 +29,13 @@
 2. **fixtures 一律重造**：所有调研项目的 fixtures provenance 未核实，禁止复制任何真实 transcript；本项目按 `docs/security/FIXTURE-REDACTION-POLICY.md` 生成合成数据。
 3. **语言边界**：本项目是全新 Rust 项目。Rust 仓（ctx / agf / Recall / hstry / memex / sessiongrep / fast-resume）代码在许可允许下可 copy/adapt；Swift/TS 仓（agent-sessions / AgentRecall / claude-historian-mcp）只能 idea-only。
 4. **依赖许可单列**：任何被复用资产引入的传递依赖（如 agf 的 nucleo 系列为 MPL-2.0，须 attribution；tantivy 传递引入 ort-sys 许可不干净——已由 spike 实证）必须进 SBOM 与 `cargo deny` 白名单，未过 deny 门不得合入。
+5. **制品 attribution 诚实边界**：release pipeline 生成的
+   `THIRD-PARTY-DEPENDENCIES.json/.csv` 是可审计 resolved-dependency 报告，
+   仅记录 `cargo metadata --locked --format-version 1` 与 `Cargo.lock` 实际
+   提供的 name/version/source/lock checksum/declared license 字段；Cargo
+   metadata 未声明 license 时保持 null/缺失状态，不推断 SPDX ID，不把它
+   说成完整 SPDX SBOM 或最终 legal clearance，也不凭空生成固定 NOTICE/
+   归属文字；每次 release bundle 仍携带该报告供 approver 复核。
 
 ## 3. 可复用项判定（经独立复核 CONFIRMED）
 
@@ -77,7 +84,23 @@
 
 - **Tantivy 供应链风险已实证**：`cargo tree` 确认 tantivy 0.26.1 传递引入 `ort-sys`（ONNX Runtime），`cargo deny` 报 unlicensed。该证据从供应链维度进一步支持 `../adr/ADR-0001-fulltext-search-engine.md` 的 FTS5 默认选择（另见 `spikes/search-backend/EVIDENCE.md`、`spikes/cross-platform-packaging/EVIDENCE.md`）。
 
-## 6. 退出条件
+## 6. Release attribution bundle contract
+
+The configured release workflow builds a third-party attribution bundle from the
+locked resolved graph and carries both machine-readable forms in every target
+archive. The JSON schema is
+`agent-session-grep.third-party-dependencies/v1`; it explicitly sets
+`spdx_document: false` and records why declared license values are
+unverified. The CSV is a review-friendly projection of the same rows.
+
+This closes the repository's missing release artifact surface, not the human
+approval of source reuse. The bundle does not copy third-party license text,
+inspect a declared `license_file`, grant a legal opinion, or replace
+`cargo-deny`; any dependency whose metadata is incomplete remains an explicit
+review item. The REUSE audit therefore stays `Draft` until its owner and
+approver sign the direct-copy/attribution matrix.
+
+## 7. 退出条件
 
 - 每项拟复用资产有明确判定、来源许可、attribution 义务；
 - cass clean-room 边界有可执行约束（禁止读其源码者以外的人实现）；

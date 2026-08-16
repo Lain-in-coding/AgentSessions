@@ -49,6 +49,7 @@ A `ci_verified` row means the named run above passed that job. It does not mean 
 | `CB-MACOS-12-001` | Runtime certification on macOS 12 for Intel and ARM64 | `externally_blocked` | `docs/adr/ADR-0002-platform-targets.md` | A deployment-target environment variable and newer hosted runners are not runtime certification on macOS 12. |
 | `CB-SIGNING-001` | Windows Authenticode signing | `externally_blocked` | `docs/operations/external-readiness-gate.md` | No signing identity or credential is available; the evidence workflow uploads explicitly unsigned artifacts. |
 | `CB-NOTARIZATION-001` | macOS signing and notarization | `externally_blocked` | `docs/operations/external-readiness-gate.md` | No Apple signing identity, notarization credential, or governed release run is available. |
+| `RL-UNSIGNED-ARTIFACTS-001` | Tag-gated four-target unsigned release archives, synthetic smoke, SHA256SUMS, path-free provenance manifests, and Cargo metadata dependency JSON/CSV | `ci_configured_only` | `.github/workflows/release.yml`; `scripts/release/build-manifest.py`; `docs/release/rehearsal-runbook.md` | This records configured release machinery only. A named successful release run and downloaded assets are required before `ci_verified`; manifests are self-reported and not signatures, notarization, or GitHub Artifact Attestation. Workflow dispatch does not create a GitHub Release; tag publication remains an owner action. |
 
 ## What the dedicated workflow records
 

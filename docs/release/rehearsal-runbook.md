@@ -50,6 +50,40 @@ Before starting, fill in the environment manifest template at
 
 A completed manifest is the entry ticket — no manifest, no rehearsal.
 
+### 0.4 Unsigned release artifact contract
+
+`.github/workflows/release.yml` is configured for `v*` tag pushes and explicit
+`workflow_dispatch` runs against an existing `v*` tag. Configuration is not
+execution evidence: until a named successful run and downloaded assets are
+recorded, its accounting state is `ci_configured_only`.
+
+The configured matrix matches the committed platform targets:
+
+- `x86_64-pc-windows-msvc` (`.zip`, static CRT);
+- `x86_64-unknown-linux-gnu` (`.tar.gz`);
+- `x86_64-apple-darwin` (`.tar.gz`);
+- `aarch64-apple-darwin` (`.tar.gz`).
+
+Each archive is allowlist-built and contains only the canonical binary,
+`README.md`, `LICENSE-MIT`, `LICENSE-APACHE`, `CHANGELOG.md`, `SECURITY.md`,
+and the JSON/CSV third-party dependency inventory. The assembled bundle also
+contains per-target `*.manifest.json` files, the common dependency inventory,
+and `SHA256SUMS`. Manifests record target, version, full source commit,
+Cargo.lock hash, archive/member hashes, and `unsigned: true`; they intentionally
+contain no build-machine paths or identities.
+
+Before any artifact upload, the workflow validates that the checked-out tag
+points at `HEAD`, that `v<version>` matches `Cargo.toml`, Cargo metadata, and
+the CLI entry in `Cargo.lock`, then runs `scripts/verify-release.py` on the
+built target using committed synthetic fixtures only. A manual dispatch stores
+the complete bundle as a GitHub Actions artifact but does **not** create a
+GitHub Release. A future owner-created `v*` tag push may create or update that
+tag's GitHub Release with the same explicitly unsigned assets.
+
+`SHA256SUMS` and the self-reported manifests provide integrity and reproducible
+provenance inputs; they are not signatures, notarization, or cryptographic
+attestations. Those identity-backed controls remain external release gates.
+
 ---
 
 ## 1. Install
@@ -270,6 +304,13 @@ Verify that README, quickstart, comparison table, demo dataset, and benchmark
 numbers are mutually consistent. Check LICENSE, third-party attributions, and
 fixture provenance.
 
+For a release rehearsal, also inspect the assembled unsigned bundle: all four
+promised target archives and manifests are present, every archive is listed in
+`SHA256SUMS`, each manifest's tag/version/commit/Cargo.lock hash matches the
+checkout, and no archive contains `target/`, a database, or a transcript. Do
+not record a checksum or manifest as signing, notarization, or attestation
+evidence.
+
 ---
 
 ## 13. Uninstall
@@ -314,6 +355,7 @@ Submit to owner for the final public-release decision.
 | Step | Artifact | Format |
 |---|---|---|
 | 0 | environment manifest | JSON |
+| 0a | unsigned target archives, manifests, dependency inventory, and checksums | ZIP/TAR.GZ + JSON/CSV/TXT |
 | 1 | install log | text |
 | 2 | ingest robot envelope | JSON |
 | 3 | search robot envelope | JSON |
