@@ -9,6 +9,7 @@ use agent_session_grep_ports::{
     CanonicalEventSink, Confidence, MessageEvent, ParseReport, ProviderAdapter,
 };
 use agent_session_grep_provider_claude::ClaudeCodeAdapter;
+use agent_session_grep_testkit::assert_read_only;
 use serde_json::{Value, json};
 
 /// fixture 与期望文件随 crate 固定存放；以 manifest 目录定位，不依赖 cwd。
@@ -108,6 +109,31 @@ fn canonical_json(fixture_blake3: &str, report: &ParseReport, messages: &[Captur
             })
             .collect::<Vec<_>>(),
     })
+}
+
+#[test]
+fn probe_never_mutates_source_bytes() {
+    let expected = read_expected();
+    let bytes = read_fixture_verified(&expected);
+
+    // RFC-0002 §7 的只读契约必须有可执行守护，不能只依赖代码审查。
+    assert_read_only(&bytes, |source| ClaudeCodeAdapter::new().probe(source))
+        .expect("golden fixture probe must succeed");
+}
+
+#[test]
+fn parse_never_mutates_source_bytes() {
+    let expected = read_expected();
+    let bytes = read_fixture_verified(&expected);
+    let mut sink = CollectingSink::default();
+
+    // parse 是实际产出路径；运行时指纹断言守护 RFC-0002 §7 的源只读契约。
+    let report = assert_read_only(&bytes, |source| {
+        ClaudeCodeAdapter::new().parse(source, &mut sink)
+    })
+    .expect("golden fixture parse must succeed");
+    assert!(report.committed > 0, "fixture must exercise message output");
+    assert!(!sink.messages.is_empty(), "fixture must emit messages");
 }
 
 #[test]

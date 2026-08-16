@@ -8,6 +8,7 @@
 
 use agent_session_grep_ports::{CanonicalEventSink, Confidence, MessageEvent, ProviderAdapter};
 use agent_session_grep_provider_codex::CodexAdapter;
+use agent_session_grep_testkit::assert_read_only;
 use serde_json::{Value, json};
 use std::path::PathBuf;
 
@@ -87,6 +88,29 @@ fn parse_to_canonical_json(bytes: &[u8]) -> Value {
         "skipped": report.skipped,
         "messages": messages,
     })
+}
+
+#[test]
+fn probe_never_mutates_source_bytes() {
+    let bytes = read_fixture_bytes();
+
+    // RFC-0002 §7 的只读契约必须有可执行守护，不能只依赖代码审查。
+    assert_read_only(&bytes, |source| CodexAdapter::new().probe(source))
+        .expect("golden fixture probe must succeed");
+}
+
+#[test]
+fn parse_never_mutates_source_bytes() {
+    let bytes = read_fixture_bytes();
+    let mut sink = CollectingSink::default();
+
+    // parse 是实际产出路径；运行时指纹断言守护 RFC-0002 §7 的源只读契约。
+    let report = assert_read_only(&bytes, |source| {
+        CodexAdapter::new().parse(source, &mut sink)
+    })
+    .expect("golden fixture must parse");
+    assert!(report.committed > 0, "fixture must exercise message output");
+    assert!(!sink.messages.is_empty(), "fixture must emit messages");
 }
 
 #[test]
