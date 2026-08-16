@@ -1,11 +1,7 @@
 #!/usr/bin/env bash
-# Local install gate: install -> smoke -> uninstall -> reinstall -> smoke again,
-# against a throwaway prefix. Best-effort wrapper around the existing
-# install.sh / smoke.sh / uninstall.sh scripts; emits a JSON result fragment
-# into the gate evidence output directory. Never touches PATH or shell profiles.
-#
-# The reinstall leg proves idempotency: a second install over the same prefix
-# must succeed and the reinstalled binary must pass smoke again.
+# Local install gate: install -> smoke both commands -> upgrade in place ->
+# uninstall twice -> reinstall -> smoke -> final uninstall, all against a
+# throwaway prefix.
 
 set -euo pipefail
 
@@ -118,56 +114,81 @@ if [ -z "$prefix" ]; then
     fi
 fi
 installed="$prefix/agent-session-grep"
+installed_alias="$prefix/asg"
 
 run_smoke() {
     local label="$1"
     set +e
-    "$smoke" --binary "$installed"
+    "$smoke" --binary "$installed" --alias-binary "$installed_alias"
     code=$?
     set -e
     record "$label" "$([ "$code" -eq 0 ] && echo 0 || echo 1)" "exit=$code"
 }
 
-if [ -f "$installed" ]; then
+if [ -f "$installed" ] && { [ -f "$installed_alias" ] || [ -L "$installed_alias" ]; }; then
     run_smoke 'smoke-installed'
 else
-    record 'smoke-installed' 1 "installed binary not found at $installed"
+    record 'smoke-installed' 1 "installed commands not found at $installed and $installed_alias"
 fi
 
-# 3. uninstall: exactly the one file.
+# 3. Upgrade in place while both managed commands already exist.
+set +e
+"$install" "${install_args[@]}"
+code=$?
+set -e
+record 'upgrade' "$([ "$code" -eq 0 ] && echo 0 || echo 1)" "exit=$code"
+if [ -f "$installed" ] && { [ -f "$installed_alias" ] || [ -L "$installed_alias" ]; }; then
+    run_smoke 'smoke-upgraded'
+else
+    record 'smoke-upgraded' 1 "upgraded commands not found at $installed and $installed_alias"
+fi
+
+# 4. Uninstall both managed commands.
 set +e
 "$uninstall" --prefix "$prefix"
 code=$?
 set -e
 record 'uninstall' "$([ "$code" -eq 0 ] && echo 0 || echo 1)" "exit=$code"
+if { [ ! -e "$installed" ] && [ ! -L "$installed" ]; } && \
+   { [ ! -e "$installed_alias" ] && [ ! -L "$installed_alias" ]; }; then
+    record 'uninstall-files-removed' 0 ''
+else
+    record 'uninstall-files-removed' 1 "canonical=$installed alias=$installed_alias"
+fi
 
-# 4. uninstall again: second run reports "not installed" and exits 0.
+# 5. Uninstall again: second run reports "not installed" and exits 0.
 set +e
 "$uninstall" --prefix "$prefix"
 code=$?
 set -e
 record 'uninstall-idempotent' "$([ "$code" -eq 0 ] && echo 0 || echo 1)" "exit=$code"
 
-# 5. reinstall over the same prefix: idempotent install.
+# 6. Reinstall after a clean uninstall.
 set +e
 "$install" "${install_args[@]}"
 code=$?
 set -e
 record 'reinstall' "$([ "$code" -eq 0 ] && echo 0 || echo 1)" "exit=$code"
 
-# 6. smoke against the reinstalled binary.
-if [ -f "$installed" ]; then
+# 7. Smoke against both reinstalled commands.
+if [ -f "$installed" ] && { [ -f "$installed_alias" ] || [ -L "$installed_alias" ]; }; then
     run_smoke 'smoke-reinstalled'
 else
-    record 'smoke-reinstalled' 1 "installed binary not found at $installed"
+    record 'smoke-reinstalled' 1 "reinstalled commands not found at $installed and $installed_alias"
 fi
 
-# 7. final uninstall leaves the prefix clean.
+# 8. Final uninstall leaves both managed paths absent.
 set +e
 "$uninstall" --prefix "$prefix"
 code=$?
 set -e
 record 'uninstall-final' "$([ "$code" -eq 0 ] && echo 0 || echo 1)" "exit=$code"
+if { [ ! -e "$installed" ] && [ ! -L "$installed" ]; } && \
+   { [ ! -e "$installed_alias" ] && [ ! -L "$installed_alias" ]; }; then
+    record 'uninstall-final-files-removed' 0 ''
+else
+    record 'uninstall-final-files-removed' 1 "canonical=$installed alias=$installed_alias"
+fi
 
 steps="${steps%,}"
 os="$(uname -s | tr '[:upper:]' '[:lower:]')"

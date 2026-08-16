@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
-# Build agent-session-grep from source and copy the binary into a user-level bin
-# directory. The artifact is unsigned and unnotarized, so this script is the
-# only supported install path; it deliberately does NOT touch PATH, the
-# registry, or shell profiles — environment changes are the user's decision and
-# would make uninstall irreversible.
+# Build agent-session-grep from source and install the canonical command plus an
+# asg alias into a user-level bin directory. The alias is a relative symlink
+# when supported, with a marked wrapper fallback. The artifact is unsigned and
+# unnotarized; this script deliberately does NOT edit PATH or shell profiles.
 
 set -euo pipefail
 
@@ -58,6 +57,8 @@ repo_root=$(CDPATH= cd -- "$script_dir/../.." && pwd)
     fail "cannot find Cargo.toml at $repo_root; run this script from a checkout of the repository"
 
 binary_name="agent-session-grep"
+alias_name="asg"
+wrapper_marker="# agent-session-grep managed asg wrapper"
 
 if [ -z "$prefix" ]; then
     if [ -n "${XDG_BIN_HOME:-}" ]; then
@@ -91,6 +92,7 @@ fi
 if [ "$dry_run" -eq 1 ] && [ ! -f "$artifact" ]; then
     printf 'install: dry run: no file written\n'
     printf 'install: dry run: would install %s -> %s\n' "$artifact" "$prefix/$binary_name"
+    printf 'install: dry run: would link %s -> %s\n' "$prefix/$alias_name" "$binary_name"
     exit 0
 fi
 
@@ -114,29 +116,63 @@ else
 fi
 
 target="$prefix/$binary_name"
+alias_target="$prefix/$alias_name"
+
+alias_is_managed() {
+    if [ -L "$alias_target" ]; then
+        alias_link=$(readlink "$alias_target") || return 1
+        [ "$alias_link" = "$binary_name" ] || [ "$alias_link" = "$target" ]
+    elif [ -f "$alias_target" ]; then
+        [ "$(sed -n '2p' "$alias_target")" = "$wrapper_marker" ] || \
+            { [ -f "$target" ] && cmp -s "$alias_target" "$target"; }
+    else
+        return 1
+    fi
+}
+
+# A custom prefix may be shared. Replace only an alias that this installer can
+# identify (our symlink, marked wrapper, or an older identical executable copy).
+if { [ -e "$alias_target" ] || [ -L "$alias_target" ]; } && ! alias_is_managed; then
+    fail "$alias_target already exists and is not a managed agent-session-grep alias"
+fi
 
 if [ "$dry_run" -eq 1 ]; then
     printf 'install: dry run: no file written\n'
     printf 'install: dry run: would create directory %s\n' "$prefix"
     printf 'install: dry run: would copy %s -> %s\n' "$artifact" "$target"
+    printf 'install: dry run: would link %s -> %s (with a marked wrapper fallback)\n' "$alias_target" "$binary_name"
     printf 'install: dry run: artifact sha256 %s\n' "$sha256"
     exit 0
 fi
 
 mkdir -p "$prefix" || fail "cannot create install directory $prefix"
-# 原子替换：先落到同目录临时文件，再 mv 换名覆盖目标。mv 在同一文件系统内
-# 是 rename(2)，读取方永远看到完整文件；直接 cp -f 覆盖运行中的二进制可能
-# 失败或留下被截断的窗口（install design）。
+# Stage both files before replacement. The relative link remains valid if the
+# prefix directory is moved as a unit.
 tmp_target="$prefix/.$binary_name.tmp.$$"
+tmp_alias="$prefix/.$alias_name.tmp.$$"
 cp -f "$artifact" "$tmp_target" || fail "cannot stage the binary in $prefix"
-mv -f "$tmp_target" "$target" || { rm -f "$tmp_target"; fail "cannot atomically replace $target"; }
-chmod +x "$target" || fail "cannot mark $target executable"
+chmod +x "$tmp_target" || { rm -f "$tmp_target"; fail "cannot mark the staged binary executable"; }
+if ! ln -s "$binary_name" "$tmp_alias" 2>/dev/null; then
+    cat > "$tmp_alias" <<'EOF'
+#!/usr/bin/env sh
+# agent-session-grep managed asg wrapper
+exec "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/agent-session-grep" "$@"
+EOF
+    chmod +x "$tmp_alias" || { rm -f "$tmp_target" "$tmp_alias"; fail "cannot create the asg wrapper in $prefix"; }
+fi
+mv -f "$tmp_target" "$target" || { rm -f "$tmp_target" "$tmp_alias"; fail "cannot atomically replace $target"; }
+mv -f "$tmp_alias" "$alias_target" || { rm -f "$tmp_alias"; fail "cannot atomically replace $alias_target"; }
 
 version_line=$("$target" --version) || \
     fail "installed binary failed its self check: $target --version did not exit 0"
+alias_version_line=$("$alias_target" --version) || \
+    fail "installed alias failed its self check: $alias_target --version did not exit 0"
+[ "$version_line" = "$alias_version_line" ] || \
+    fail 'installed commands reported different versions'
 
 printf 'install: installed %s\n' "$version_line"
-printf 'install: path     %s\n' "$target"
+printf 'install: command  %s\n' "$target"
+printf 'install: alias    %s\n' "$alias_target"
 printf 'install: sha256   %s\n' "$sha256"
 printf 'install: this script does not modify PATH. To use the binary by name in\n'
 printf 'install: the current shell session, run:\n'

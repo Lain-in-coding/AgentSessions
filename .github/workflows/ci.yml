@@ -88,37 +88,43 @@ jobs:
         shell: pwsh
         run: ./scripts/install/install.ps1 -SkipBuild -Prefix "$PWD/ci-prefix"
 
-      - name: Invoke the installed binary (unix)
+      - name: Invoke both installed commands (unix)
         if: runner.os != 'Windows'
         run: |
           ./ci-prefix/agent-session-grep --version
+          ./ci-prefix/asg --version
           ./ci-prefix/agent-session-grep --robot config paths
+          ./ci-prefix/asg --robot config paths
 
-      - name: Invoke the installed binary (windows)
+      - name: Invoke both installed commands (windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           ./ci-prefix/agent-session-grep.exe --version
+          ./ci-prefix/asg.exe --version
           ./ci-prefix/agent-session-grep.exe --robot config paths
+          ./ci-prefix/asg.exe --robot config paths
 
       # End-to-end surface smoke against the installed artifact: CLI robot
       # envelopes, documented exit codes, and the MCP stdio handshake.
       - name: Surface smoke (unix)
         if: runner.os != 'Windows'
-        run: ./scripts/install/smoke.sh --binary "$PWD/ci-prefix/agent-session-grep"
+        run: ./scripts/install/smoke.sh --binary "$PWD/ci-prefix/agent-session-grep" --alias-binary "$PWD/ci-prefix/asg"
 
       - name: Surface smoke (windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: ./scripts/install/smoke.ps1 -Binary "$PWD/ci-prefix/agent-session-grep.exe"
+        run: ./scripts/install/smoke.ps1 -Binary "$PWD/ci-prefix/agent-session-grep.exe" -AliasBinary "$PWD/ci-prefix/asg.exe"
 
-      # Uninstall must remove exactly one file and stay idempotent: a second
-      # run reports "not installed" and still exits 0.
+      # Uninstall must remove exactly the two installer-owned command files and
+      # stay idempotent: a second run reports "not installed" and exits 0.
       - name: Uninstall twice (unix)
         if: runner.os != 'Windows'
         run: |
           ./scripts/install/uninstall.sh --prefix "$PWD/ci-prefix"
           test ! -e "$PWD/ci-prefix/agent-session-grep"
+          test ! -e "$PWD/ci-prefix/asg"
+          test ! -L "$PWD/ci-prefix/asg"
           ./scripts/install/uninstall.sh --prefix "$PWD/ci-prefix"
 
       - name: Uninstall twice (windows)
@@ -126,7 +132,8 @@ jobs:
         shell: pwsh
         run: |
           ./scripts/install/uninstall.ps1 -Prefix "$PWD/ci-prefix"
-          if (Test-Path "$PWD/ci-prefix/agent-session-grep.exe") { throw "uninstall left the binary behind" }
+          if (Test-Path "$PWD/ci-prefix/agent-session-grep.exe") { throw "uninstall left the canonical command behind" }
+          if (Test-Path "$PWD/ci-prefix/asg.exe") { throw "uninstall left the asg alias behind" }
           ./scripts/install/uninstall.ps1 -Prefix "$PWD/ci-prefix"
 
       # Regression harness self-test runs on synthetic fixtures only; real

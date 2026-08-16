@@ -1,8 +1,9 @@
 # Install and upgrade (from source)
 
 Scope: building `agent-session-grep` from a checkout of this repository and placing
-the binary in a user-level directory. There is no released, signed, or
-published artifact — see [What this does not give you](#what-this-does-not-give-you).
+both the canonical command and the `asg` alias in a user-level directory. There
+is no released, signed, or published artifact — see
+[What this does not give you](#what-this-does-not-give-you).
 
 ## What the installer does
 
@@ -15,9 +16,14 @@ published artifact — see [What this does not give you](#what-this-does-not-giv
    exit non-zero.
 3. `cargo build --locked --release -p agent-session-grep-cli`.
 4. Compute the SHA-256 of the built binary, create the destination directory
-   if needed, and copy the binary over any existing file of the same name.
-5. Run the installed binary's `--version` as a self-check.
-6. Print the install path, the SHA-256, the version, and a one-line
+   if needed, and atomically replace the canonical command.
+5. Install `asg.exe` as a second executable copy on Windows. On Unix, install
+   `asg` as a relative symlink to `agent-session-grep`, with a marked wrapper
+   fallback when symlinks are unavailable. An unrelated existing alias is never
+   overwritten.
+6. Run both installed command names with `--version` and require identical
+   output.
+7. Print both install paths, the SHA-256, the version, and a one-line
    instruction for adding the directory to `PATH`.
 
 Any failing step exits non-zero with a diagnostic. The script does not modify
@@ -88,6 +94,7 @@ export PATH="$HOME/.local/bin:$PATH"   # add to ~/.bashrc or ~/.zshrc
 
 ```
 agent-session-grep --version
+asg --version
 agent-session-grep doctor
 agent-session-grep --robot config paths
 ```
@@ -109,13 +116,16 @@ warning listing the detected session count and IDs.
 
 ## Upgrade
 
-Pull the new commit and re-run the installer. It overwrites the binary in
-place; there is no version pinning, rollback, or update channel.
+Pull the new commit and re-run the installer. It upgrades both managed command
+files in place; there is no version pinning, rollback, or update channel. Running
+the installer again over an existing install is supported and preserves the
+canonical/alias relationship.
 
 ```
 git pull
 pwsh -File scripts/install/install.ps1        # or bash scripts/install/install.sh
 agent-session-grep --version
+asg --version
 ```
 
 An upgraded binary may need to migrate an existing data root on first open.
@@ -134,10 +144,12 @@ pwsh -File scripts/install/uninstall.ps1
 sh scripts/install/uninstall.sh
 ```
 
-Uninstall deletes only the `agent-session-grep` binary (`agent-session-grep.exe` on
-Windows) from the install directory. It never removes a directory recursively
-and never touches your data root. Running it when nothing is installed
-reports "not installed" and exits 0, so it is safe to repeat.
+Uninstall deletes only the two managed command files (`agent-session-grep.exe`
+and `asg.exe` on Windows; `agent-session-grep` and `asg` on Unix) from the
+install directory. It never removes a directory recursively and never touches
+your data root. Running it when neither command is installed reports "not
+installed" and exits 0, so it is safe to repeat. If `asg` no longer matches the
+managed copy/link, uninstall refuses to remove it.
 
 Your config, data, cache, and logs survive uninstall. To remove them, delete
 the paths reported by `agent-session-grep --robot config paths` yourself — the
@@ -156,9 +168,13 @@ directly and read its output. `--locked` means a lockfile that disagrees with
 **Destination not writable.** Pick a directory you own with `-Prefix` /
 `--prefix`. Do not run the installer elevated to work around this.
 
-**`agent-session-grep` not found after install.** The installer does not change
-`PATH`. Either apply the printed `PATH` line or invoke the binary by its full
-path.
+**`agent-session-grep` or `asg` not found after install.** The installer does not
+change `PATH`. Either apply the printed `PATH` line or invoke the command by its
+full path.
+
+**`asg` already exists in a custom prefix.** The installer refuses to overwrite
+an alias it cannot identify as its own. Choose another prefix or move the
+unrelated file aside, then re-run the installer.
 
 **Windows blocks or removes the binary.** Endpoint protection can quarantine
 freshly built, unsigned executables. The binary is unsigned by design (see

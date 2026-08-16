@@ -26,10 +26,31 @@ schema. `agent-session-grep` solves this by:
 
 ## Quickstart
 
-```bash
-# Build
-cargo build --workspace
+Install from a repository checkout. The installers build the release binary and
+install both `agent-session-grep` and `asg`; they print a PATH hint but do not
+edit PATH for you.
 
+Windows (PowerShell 7+):
+
+```powershell
+pwsh -File scripts/install/install.ps1
+$env:PATH = "$env:LOCALAPPDATA\agent-session-grep\bin;$env:PATH"
+agent-session-grep --version
+asg --version
+```
+
+Linux or macOS:
+
+```bash
+bash scripts/install/install.sh
+export PATH="${XDG_BIN_HOME:-$HOME/.local/bin}:$PATH"
+agent-session-grep --version
+asg --version
+```
+
+Then use either command name:
+
+```bash
 # Index your Claude Code + Codex sessions
 asg sync --discover
 
@@ -45,6 +66,9 @@ asg resume <session-id>
 # Generate a handoff pack for another agent
 asg handoff "how did we configure the database?"
 ```
+
+See [Install and upgrade](docs/operations/INSTALL-AND-UPGRADE.md) for custom
+prefixes, persistent PATH setup, upgrades, and safe uninstall.
 
 ## Providers
 
@@ -100,14 +124,8 @@ MIT OR Apache-2.0
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Community provider adapters follow
-the [Provider Adapter Contributor Guide](docs/PROVIDER-ADAPTER-CONTRIBUTOR-GUIDE.md)
-and the Provider Adapter Protocol (versioned external process, manifest-declared,
+the Provider Adapter Protocol (versioned external process, manifest-declared,
 read-only, no network by default).
-
-Use the [bug report](.github/ISSUE_TEMPLATE/bug-report.yml) or
-[feature request](.github/ISSUE_TEMPLATE/feature-request.yml) forms for
-privacy-safe proposals; the [pull request template](.github/pull_request_template.md)
-records the evidence and validation checklist.
 
 Release history is tracked in [CHANGELOG.md](CHANGELOG.md); security
 boundaries and the vulnerability reporting process are in

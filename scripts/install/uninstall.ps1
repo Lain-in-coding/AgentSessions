@@ -1,8 +1,7 @@
 #!/usr/bin/env pwsh
-# Remove the binary installed by install.ps1. This deletes exactly one file and
-# never recurses into a directory: the prefix may be a shared bin directory
-# holding other people's tools, and a data root must survive an uninstall.
-# Missing binary is success, not failure, so repeated runs and CI are safe.
+# Remove the two commands installed by install.ps1. This deletes only
+# agent-session-grep[.exe] and its managed asg[.exe] copy; it never recurses
+# into a shared bin directory or touches a data root. Missing files are success.
 
 [CmdletBinding()]
 param(
@@ -21,6 +20,7 @@ function Fail {
 
 $exeSuffix = if ($IsWindows) { '.exe' } else { '' }
 $binaryName = "agent-session-grep$exeSuffix"
+$aliasName = "asg$exeSuffix"
 
 # Prefix resolution mirrors install.ps1 exactly; a divergence here would leave
 # an installed binary that uninstall cannot see.
@@ -40,19 +40,45 @@ if ([string]::IsNullOrWhiteSpace($Prefix)) {
 }
 
 $target = Join-Path $Prefix $binaryName
+$aliasTarget = Join-Path $Prefix $aliasName
+$targetExists = Test-Path -LiteralPath $target
+$aliasExists = Test-Path -LiteralPath $aliasTarget
 
-if (-not (Test-Path -LiteralPath $target)) {
-    Write-Host "uninstall: not installed: $target"
+if (-not $targetExists -and -not $aliasExists) {
+    Write-Host "uninstall: not installed: $target or $aliasTarget"
     Write-Host 'uninstall: nothing to do'
     exit 0
 }
 
-Remove-Item -LiteralPath $target -Force
-if (Test-Path -LiteralPath $target) {
-    Fail "could not remove $target"
+# install.ps1 creates the Windows alias as an identical executable copy. If a
+# custom shared prefix now contains a different asg.exe, fail closed instead of
+# deleting a file this installer cannot identify as its own.
+if ($aliasExists) {
+    if (-not $targetExists -or
+        -not (Test-Path -LiteralPath $target -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $aliasTarget -PathType Leaf)) {
+        Fail "$aliasTarget exists without its managed canonical executable; refusing to remove it"
+    }
+    $targetHash = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash
+    $aliasHash = (Get-FileHash -LiteralPath $aliasTarget -Algorithm SHA256).Hash
+    if ($targetHash -ne $aliasHash) {
+        Fail "$aliasTarget differs from $target; refusing to remove either file"
+    }
+    Remove-Item -LiteralPath $aliasTarget -Force
+    if (Test-Path -LiteralPath $aliasTarget) {
+        Fail "could not remove $aliasTarget"
+    }
+    Write-Host "uninstall: removed $aliasTarget"
 }
 
-Write-Host "uninstall: removed $target"
+if ($targetExists) {
+    Remove-Item -LiteralPath $target -Force
+    if (Test-Path -LiteralPath $target) {
+        Fail "could not remove $target"
+    }
+    Write-Host "uninstall: removed $target"
+}
+
 Write-Host "uninstall: the directory $Prefix was left in place."
 Write-Host 'uninstall: config, data, cache, and logs were not touched. To remove those,'
 Write-Host 'uninstall: delete the paths reported by: agent-session-grep --robot config paths'

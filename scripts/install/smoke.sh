@@ -10,6 +10,7 @@
 set -euo pipefail
 
 binary=""
+alias_binary=""
 
 fail() {
     printf 'smoke: error: %s\n' "$1" >&2
@@ -18,9 +19,10 @@ fail() {
 
 usage() {
     cat <<'EOF'
-usage: smoke.sh [--binary <path>]
+usage: smoke.sh [--binary <path>] [--alias-binary <path>]
 
-  --binary <path>  binary under test (default: target/release/agent-session-grep)
+  --binary <path>        binary under test (default: target/release/agent-session-grep)
+  --alias-binary <path>  installed asg alias; checks version parity before smoke
 EOF
 }
 
@@ -29,6 +31,11 @@ while [ $# -gt 0 ]; do
         --binary)
             [ $# -ge 2 ] || fail '--binary requires a path'
             binary="$2"
+            shift 2
+            ;;
+        --alias-binary)
+            [ $# -ge 2 ] || fail '--alias-binary requires a path'
+            alias_binary="$2"
             shift 2
             ;;
         -h|--help)
@@ -50,6 +57,15 @@ if [ -z "$binary" ]; then
 fi
 [ -f "$binary" ] || \
     fail "binary not found: $binary (this script does not build; run install.sh or cargo build --locked --release -p agent-session-grep-cli first)"
+
+if [ -n "$alias_binary" ]; then
+    [ -f "$alias_binary" ] || [ -L "$alias_binary" ] || fail "alias binary not found: $alias_binary"
+    canonical_version=$("$binary" --version) || fail "agent-session-grep --version failed"
+    alias_version=$("$alias_binary" --version) || fail "asg --version failed"
+    [ "$canonical_version" = "$alias_version" ] || \
+        fail "agent-session-grep and asg reported different versions"
+    printf 'smoke: ok alias version parity (%s)\n' "$canonical_version"
+fi
 
 command -v python3 >/dev/null 2>&1 || \
     fail 'python3 not found on PATH; it is required to parse robot envelopes'

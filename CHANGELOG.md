@@ -18,6 +18,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `cline`, and `aider`. Each adapter has evidence-backed synthetic fixtures;
   DeepSeek Harness and ZCode remain deferred because no transcript evidence is
   available.
+- Source installers install both `agent-session-grep` and `asg`: Windows uses
+  two executable copies; Unix uses a managed symlink or wrapper. Upgrade and
+  uninstall are idempotent and refuse unrelated aliases.
 - `handoff <query>` CLI subcommand — deterministic handoff-pack/v1 generation
   with evidence/inference separation and budget truncation.
 - `resume <session-id>` CLI subcommand — dry-run by default (prints the

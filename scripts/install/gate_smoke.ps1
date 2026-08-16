@@ -1,11 +1,7 @@
 #!/usr/bin/env pwsh
-# Local install gate: install -> smoke -> uninstall -> reinstall -> smoke again,
-# against a throwaway prefix. Best-effort wrapper around the existing
-# install.ps1 / smoke.ps1 / uninstall.ps1 scripts; emits a JSON result fragment
-# into the gate evidence output directory. Never touches PATH or shell profiles.
-#
-# The reinstall leg proves idempotency: a second install over the same prefix
-# must succeed and the reinstalled binary must pass smoke again.
+# Local install gate: install -> smoke both commands -> upgrade in place ->
+# uninstall twice -> reinstall -> smoke -> final uninstall, all against a
+# throwaway prefix.
 
 [CmdletBinding()]
 param(
@@ -89,36 +85,54 @@ if ([string]::IsNullOrWhiteSpace($Prefix)) {
     }
 }
 $installed = Join-Path $Prefix "agent-session-grep$exeSuffix"
-if (Test-Path -LiteralPath $installed) {
-    & $smoke -Binary $installed
-    Record-Step 'smoke-installed' ($LASTEXITCODE -eq 0) "exit=$LASTEXITCODE"
+$installedAlias = Join-Path $Prefix "asg$exeSuffix"
+function Run-Smoke {
+    param([string]$Name)
+    & $smoke -Binary $installed -AliasBinary $installedAlias
+    Record-Step $Name ($LASTEXITCODE -eq 0) "exit=$LASTEXITCODE"
+}
+if ((Test-Path -LiteralPath $installed) -and (Test-Path -LiteralPath $installedAlias)) {
+    Run-Smoke 'smoke-installed'
 } else {
-    Record-Step 'smoke-installed' $false "installed binary not found at $installed"
+    Record-Step 'smoke-installed' $false "installed commands not found at $installed and $installedAlias"
 }
 
-# 3. uninstall: exactly the one file, idempotent.
+# 3. upgrade in place: both managed commands already exist and must be
+# replaced safely without a separate uninstall.
+& $install @installArgs
+Record-Step 'upgrade' ($LASTEXITCODE -eq 0) "exit=$LASTEXITCODE"
+if ((Test-Path -LiteralPath $installed) -and (Test-Path -LiteralPath $installedAlias)) {
+    Run-Smoke 'smoke-upgraded'
+} else {
+    Record-Step 'smoke-upgraded' $false "upgraded commands not found at $installed and $installedAlias"
+}
+
+# 4. uninstall: both installer-owned files must be gone, and only those files.
 & $uninstall @uninstallArgs
 Record-Step 'uninstall' ($LASTEXITCODE -eq 0) "exit=$LASTEXITCODE"
+$cleanAfterUninstall = -not (Test-Path -LiteralPath $installed) -and -not (Test-Path -LiteralPath $installedAlias)
+Record-Step 'uninstall-files-removed' $cleanAfterUninstall "canonical=$installed alias=$installedAlias"
 
-# 4. uninstall again: second run must report "not installed" and exit 0.
+# 5. uninstall again: second run must report "not installed" and exit 0.
 & $uninstall @uninstallArgs
 Record-Step 'uninstall-idempotent' ($LASTEXITCODE -eq 0) "exit=$LASTEXITCODE"
 
-# 5. reinstall over the same prefix: idempotent install.
+# 6. reinstall after a clean uninstall.
 & $install @installArgs
 Record-Step 'reinstall' ($LASTEXITCODE -eq 0) "exit=$LASTEXITCODE"
 
-# 6. smoke against the reinstalled binary.
-if (Test-Path -LiteralPath $installed) {
-    & $smoke -Binary $installed
-    Record-Step 'smoke-reinstalled' ($LASTEXITCODE -eq 0) "exit=$LASTEXITCODE"
+# 7. smoke against the reinstalled commands.
+if ((Test-Path -LiteralPath $installed) -and (Test-Path -LiteralPath $installedAlias)) {
+    Run-Smoke 'smoke-reinstalled'
 } else {
-    Record-Step 'smoke-reinstalled' $false "installed binary not found at $installed"
+    Record-Step 'smoke-reinstalled' $false "reinstalled commands not found at $installed and $installedAlias"
 }
 
-# 7. final uninstall leaves the prefix clean.
+# 8. final uninstall leaves both installer-owned files absent.
 & $uninstall @uninstallArgs
 Record-Step 'uninstall-final' ($LASTEXITCODE -eq 0) "exit=$LASTEXITCODE"
+$cleanAfterFinal = -not (Test-Path -LiteralPath $installed) -and -not (Test-Path -LiteralPath $installedAlias)
+Record-Step 'uninstall-final-files-removed' $cleanAfterFinal "canonical=$installed alias=$installedAlias"
 
 $os = if ($IsWindows) { 'windows' } elseif ($IsMacOS) { 'macos' } else { 'linux' }
 $result = [ordered]@{

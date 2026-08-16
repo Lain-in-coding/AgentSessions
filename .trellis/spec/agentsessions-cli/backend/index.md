@@ -133,11 +133,13 @@ Before proposing a commit for this crate:
 ## Operational surfaces and evidence
 
 - **Install scripts** (`scripts/install/`) build from source with `--locked` and
-  copy one binary into a user-level prefix. They must never modify `PATH`, the
-  registry, or shell profiles, never request elevation, and never download
-  anything beyond what `cargo build` fetches — environment changes are the
-  user's decision, and that constraint is what keeps uninstall a single-file
-  delete. `uninstall` removes exactly that one file, is idempotent (a second run
+  install exactly two command files into a user-level prefix:
+  `agent-session-grep[.exe]` and `asg[.exe]`. Windows uses an executable copy;
+  Unix prefers a relative symlink and may use a marked wrapper fallback. The
+  scripts must never modify `PATH`, the registry, or shell profiles, never
+  request elevation, and never download anything beyond what `cargo build`
+  fetches. Upgrade replaces only the managed command paths. `uninstall`
+  removes exactly those two managed files, is idempotent (a second run
   reports "not installed" and exits 0), and never deletes a directory
   recursively.
 - **Smoke script** never builds. It requires an already-built binary and fails

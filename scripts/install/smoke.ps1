@@ -8,7 +8,8 @@
 
 [CmdletBinding()]
 param(
-    [string]$Binary
+    [string]$Binary,
+    [string]$AliasBinary
 )
 
 Set-StrictMode -Version Latest
@@ -64,6 +65,20 @@ if (-not (Test-Path -LiteralPath $Binary)) {
     Abort "binary not found: $Binary (build it first: cargo build --locked --release -p agent-session-grep-cli)"
 }
 $Binary = (Resolve-Path -LiteralPath $Binary).Path
+
+if (-not [string]::IsNullOrWhiteSpace($AliasBinary)) {
+    if (-not (Test-Path -LiteralPath $AliasBinary)) {
+        Abort "alias binary not found: $AliasBinary"
+    }
+    $AliasBinary = (Resolve-Path -LiteralPath $AliasBinary).Path
+    $canonicalVersion = (& $Binary --version | Out-String).Trim()
+    $canonicalCode = $LASTEXITCODE
+    $aliasVersion = (& $AliasBinary --version | Out-String).Trim()
+    $aliasCode = $LASTEXITCODE
+    Assert-That ($canonicalCode -eq 0) 'agent-session-grep --version exits 0' "exit=$canonicalCode"
+    Assert-That ($aliasCode -eq 0) 'asg --version exits 0' "exit=$aliasCode"
+    Assert-That ($canonicalVersion -eq $aliasVersion) 'agent-session-grep and asg report the same version' "canonical=$canonicalVersion alias=$aliasVersion"
+}
 
 # Robot invocation returning both the parsed first stdout frame and the exit
 # code: every assertion below is about that pair.
