@@ -20,6 +20,15 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     gemini, gpt-codex, bolt, cody, continue, windsurf).
 - `handoff <query>` CLI subcommand — deterministic handoff-pack/v1 generation
   with evidence/inference separation and budget truncation.
+- `resume <session-id>` CLI subcommand — dry-run by default (prints the
+  provider command, original working directory, and permission mode);
+  `--yes` spawns the provider in that directory. Providers whose resume
+  command is unverified report `available:false` rather than a fabricated
+  command.
+- `search --mode lexical|semantic|hybrid` — retrieval mode selection. Semantic
+  and hybrid require a ready semantic index; without one the response is
+  explicitly marked `retrieval_mode: lexical_fallback` with a warning, never
+  silently downgraded.
 - `serve --port <n>` CLI subcommand — loopback HTTP server (random bearer
   token, Host loopback check, embedded Web UI, JSON API).
 - MCP tools `search_sessions` and `get_session_resume`.
