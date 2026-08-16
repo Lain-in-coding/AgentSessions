@@ -15,7 +15,9 @@ mod source_fs;
 
 pub use cas::{cas_activate, read_current, write_current};
 pub use lease::WriterLease;
-pub use source_fs::{SnapshotFs, capture, read_verified, verify_snapshot};
+pub use source_fs::{
+    FileSource, SnapshotFs, capture, open_snapshot_source, read_verified, verify_snapshot,
+};
 
 use agent_session_grep_application::{bigram_cjk, parse_search_instant};
 use agent_session_grep_domain::{

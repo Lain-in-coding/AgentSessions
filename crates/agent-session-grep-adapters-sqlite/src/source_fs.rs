@@ -1,16 +1,22 @@
-//! 只读源快照读取（RFC-0002 §4）。
+//! 只读源快照读取（RFC-0002 §4, §7 bounded ingest）。
 //!
-//! 打开后捕获 `(len, mtime_ms, fingerprint)`，只读捕获范围；提交前复核三元组，
-//! 任一变化返回 [`PortError::SnapshotChanged`]。
+//! 打开后流式捕获 `(len, mtime_ms, fingerprint)`，只读捕获范围；提交前流式复核
+//! 三元组，任一变化返回 [`PortError::SnapshotChanged`]。capture / parse / verify
+//! 各自重新打开文件，以固定大小缓冲流式读取——不再为整个 transcript 分配 Vec。
 //!
 //! **等长异容替换**必须靠 content fingerprint——len+mtime 不足
 //! （证据：`spikes/source-snapshot/EVIDENCE.md` assertion D）。
 
-use agent_session_grep_ports::{PortError, PortResult, SourceSnapshot};
+use agent_session_grep_ports::{
+    JSON_FAMILY_MAX_SOURCE_BYTES, PortError, PortResult, ReadOnlySource, SourceSnapshot,
+};
 use std::fs::File;
-use std::io::Read;
-use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::io::{BufRead, BufReader, Read};
+use std::path::{Path, PathBuf};
+use std::time::UNIX_EPOCH;
+
+/// Fixed filesystem buffer used by capture, parse readers, and verification.
+pub const SOURCE_IO_BUFFER_BYTES: usize = 64 * 1024;
 
 fn backend<E: std::fmt::Display>(e: E) -> PortError {
     PortError::SourceIo(e.to_string())
@@ -21,102 +27,151 @@ fn mtime_ms(meta: &std::fs::Metadata) -> PortResult<i64> {
     Ok(m.duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as i64)
 }
 
-fn fingerprint_hex(bytes: &[u8]) -> String {
-    blake3::hash(bytes).to_hex().to_string()
+/// Stream a reader through BLAKE3, returning `(total_bytes, hex fingerprint)`.
+///
+/// Bounded by a fixed-size chunk; the caller is responsible for limiting the
+/// read range (`std::io::Take`) so a concurrently growing file cannot blow up
+/// the fingerprint pass.
+fn fingerprint_reader(reader: &mut dyn Read) -> PortResult<(u64, String)> {
+    let mut hasher = blake3::Hasher::new();
+    let mut total = 0_u64;
+    let mut chunk = [0_u8; SOURCE_IO_BUFFER_BYTES];
+    loop {
+        let read = reader.read(&mut chunk).map_err(backend)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&chunk[..read]);
+        total = total.saturating_add(read as u64);
+    }
+    Ok((total, hasher.finalize().to_hex().to_string()))
 }
 
-/// 打开路径、捕获快照元数据并读入捕获范围的字节。
-///
-/// 返回 `(snapshot, bytes)`。调用方在处理完后应再调 [`verify_snapshot`]
-/// 做提交前复核（或使用 [`read_verified`] 一次完成）。
-pub fn capture(path: &Path) -> PortResult<(SourceSnapshot, Vec<u8>)> {
-    let mut file = File::open(path).map_err(backend)?;
-    let meta = file.metadata().map_err(backend)?;
-    let len = meta.len();
-    let mtime = mtime_ms(&meta)?;
-    let mut buf = Vec::with_capacity(len as usize);
-    file.read_to_end(&mut buf).map_err(backend)?;
-    // 固定捕获长度：若读期间文件被追加，仍只认初始 len 范围。
-    buf.truncate(len as usize);
-    let fingerprint = fingerprint_hex(&buf);
-    let snap = SourceSnapshot {
-        path: path.to_string_lossy().into_owned(),
-        len,
-        mtime_ms: mtime,
-        fingerprint,
-    };
-    Ok((snap, buf))
-}
-
-/// 提交前复核：重读元数据与捕获范围内容，任一变化即
-/// [`PortError::SnapshotChanged`]。
-///
-/// 返回复核时读取的字节，调用方可直接复用——避免复核后再整读一次
-/// （`SnapshotFs::read_verified` 曾因此对同一文件读取三次）。
-pub fn verify_snapshot(path: &Path, snap: &SourceSnapshot) -> PortResult<Vec<u8>> {
-    let meta = std::fs::metadata(path).map_err(backend)?;
-    let cur_len = meta.len();
-    let cur_mtime = mtime_ms(&meta)?;
-    if cur_len != snap.len {
+/// 元数据复核：len + mtime 任一变化即 [`PortError::SnapshotChanged`]。
+fn verify_metadata(meta: &std::fs::Metadata, snap: &SourceSnapshot) -> PortResult<()> {
+    if meta.len() != snap.len {
         return Err(PortError::SnapshotChanged(format!(
-            "len {} -> {cur_len}",
-            snap.len
-        )));
-    }
-    if cur_mtime != snap.mtime_ms {
-        return Err(PortError::SnapshotChanged(format!(
-            "mtime {} -> {cur_mtime}",
-            snap.mtime_ms
-        )));
-    }
-    let mut file = File::open(path).map_err(backend)?;
-    let mut buf = Vec::with_capacity(snap.len as usize);
-    file.read_to_end(&mut buf).map_err(backend)?;
-    buf.truncate(snap.len as usize);
-    let cur_fp = fingerprint_hex(&buf);
-    if cur_fp != snap.fingerprint {
-        return Err(PortError::SnapshotChanged(
-            "fingerprint changed (content replaced at same len)".into(),
-        ));
-    }
-    // 复核读取期间（首次 stat → read 之间）源被追加/截断：内容按旧 len 截断后
-    // 指纹仍可与快照一致，等长替换也已被指纹覆盖，因此再核对一次 len+mtime 以
-    // 收窄窗口。诚实的结论是“复核读取窗口内未观察到变化”。
-    post_read_verify(path, snap)?;
-    Ok(buf)
-}
-
-/// 读取完成后的最终复核：源文件的 len/mtime 不得在读取窗口内变化。
-///
-/// 单独抽取为可测试函数——真实竞态（stat→read 之间追加）无法在单测里确定性
-/// 复现，但“读取后文件已变化”这一状态可以直接构造（写入新内容后本函数必须
-/// 报告 SnapshotChanged）。
-fn post_read_verify(path: &Path, snap: &SourceSnapshot) -> PortResult<()> {
-    let meta_after = std::fs::metadata(path).map_err(backend)?;
-    if meta_after.len() != snap.len {
-        return Err(PortError::SnapshotChanged(format!(
-            "len changed during verification {} -> {}",
+            "len {} -> {}",
             snap.len,
-            meta_after.len()
+            meta.len()
         )));
     }
-    let after_mtime = mtime_ms(&meta_after)?;
-    if after_mtime != snap.mtime_ms {
+    let current_mtime = mtime_ms(meta)?;
+    if current_mtime != snap.mtime_ms {
         return Err(PortError::SnapshotChanged(format!(
-            "mtime changed during verification {} -> {after_mtime}",
+            "mtime {} -> {current_mtime}",
             snap.mtime_ms
         )));
     }
     Ok(())
 }
 
-/// 捕获并立即复核——适合"读取即提交前"的简单路径。
+/// Capture `(len, mtime, BLAKE3)` with one fixed-buffer pass.
 ///
-/// 若在 capture 与 verify 之间源被改写，返回 SnapshotChanged。
-pub fn read_verified(path: &Path) -> PortResult<(SourceSnapshot, Vec<u8>)> {
-    let (snap, _bytes) = capture(path)?;
-    let bytes = verify_snapshot(path, &snap)?;
-    Ok((snap, bytes))
+/// No source bytes are retained. Production parsing reopens the same path
+/// through [`open_snapshot_source`]; [`verify_snapshot`] performs a final
+/// streaming fingerprint pass before staged data may commit.
+pub fn capture(path: &Path) -> PortResult<SourceSnapshot> {
+    let file = File::open(path).map_err(backend)?;
+    let meta = file.metadata().map_err(backend)?;
+    let len = meta.len();
+    let mtime = mtime_ms(&meta)?;
+    // 固定捕获长度：若读期间文件被追加，仍只认初始 len 范围。
+    let mut captured = file.take(len);
+    let (read_len, fingerprint) = fingerprint_reader(&mut captured)?;
+    if read_len != len {
+        return Err(PortError::SnapshotChanged(format!(
+            "len changed during capture {len} -> {read_len}"
+        )));
+    }
+    let snap = SourceSnapshot {
+        path: path.to_string_lossy().into_owned(),
+        len,
+        mtime_ms: mtime,
+        fingerprint,
+    };
+    post_read_verify(path, &snap)?;
+    Ok(snap)
+}
+
+/// A repeatable, read-only view limited to the captured byte range.
+#[derive(Clone)]
+pub struct FileSource {
+    path: PathBuf,
+    snapshot: SourceSnapshot,
+}
+
+impl ReadOnlySource for FileSource {
+    fn len(&self) -> u64 {
+        self.snapshot.len
+    }
+
+    fn open(&self) -> PortResult<Box<dyn BufRead + Send + '_>> {
+        let file = File::open(&self.path).map_err(backend)?;
+        // 每次重开都先核对 len/mtime：并发改写（含等长替换的 mtime 变化）在此
+        // 被尽早拒绝，避免在"过期视图"上继续解析。
+        verify_metadata(&file.metadata().map_err(backend)?, &self.snapshot)?;
+        Ok(Box::new(BufReader::with_capacity(
+            SOURCE_IO_BUFFER_BYTES,
+            file.take(self.snapshot.len),
+        )))
+    }
+}
+
+/// Reopen a captured source without reading it eagerly.
+pub fn open_snapshot_source(path: &Path, snapshot: &SourceSnapshot) -> PortResult<FileSource> {
+    let meta = std::fs::metadata(path).map_err(backend)?;
+    verify_metadata(&meta, snapshot)?;
+    Ok(FileSource {
+        path: path.to_path_buf(),
+        snapshot: snapshot.clone(),
+    })
+}
+
+/// Final pre-commit verification: metadata + captured-range BLAKE3, all streamed.
+pub fn verify_snapshot(path: &Path, snap: &SourceSnapshot) -> PortResult<()> {
+    let file = File::open(path).map_err(backend)?;
+    verify_metadata(&file.metadata().map_err(backend)?, snap)?;
+    let mut captured = file.take(snap.len);
+    let (read_len, current_fingerprint) = fingerprint_reader(&mut captured)?;
+    if read_len != snap.len {
+        return Err(PortError::SnapshotChanged(format!(
+            "len changed during verification {} -> {read_len}",
+            snap.len
+        )));
+    }
+    if current_fingerprint != snap.fingerprint {
+        return Err(PortError::SnapshotChanged(
+            "fingerprint changed (content replaced at same len)".into(),
+        ));
+    }
+    // 复核读取期间（首次 stat → read 之间）源被追加/截断：内容按旧 len 截断后
+    // 指纹仍可与快照一致，等长替换也已被指纹覆盖，因此再核对一次 len+mtime 以
+    // 收窄窗口。诚实的结论是"复核读取窗口内未观察到变化"。
+    post_read_verify(path, snap)
+}
+
+/// 读取完成后的最终复核：源文件的 len/mtime 不得在读取窗口内变化。
+///
+/// 单独抽取为可测试函数——真实竞态（stat→read 之间追加）无法在单测里确定性
+/// 复现，但"读取后文件已变化"这一状态可以直接构造（写入新内容后本函数必须
+/// 报告 SnapshotChanged）。
+fn post_read_verify(path: &Path, snap: &SourceSnapshot) -> PortResult<()> {
+    let meta_after = std::fs::metadata(path).map_err(backend)?;
+    verify_metadata(&meta_after, snap).map_err(|error| match error {
+        PortError::SnapshotChanged(detail) => {
+            PortError::SnapshotChanged(format!("source changed during verification: {detail}"))
+        }
+        other => other,
+    })
+}
+
+/// Capture and return a repeatable reader source; no transcript-sized `Vec`.
+pub fn read_verified(path: &Path) -> PortResult<(SourceSnapshot, FileSource)> {
+    let snapshot = capture(path)?;
+    let source = open_snapshot_source(path, &snapshot)?;
+    verify_snapshot(path, &snapshot)?;
+    Ok((snapshot, source))
 }
 
 /// 基于已有快照元数据的只读路径发现器（实现 [`SourceDiscovery`] 的最小落地）。
@@ -139,16 +194,33 @@ impl agent_session_grep_ports::SourceDiscovery for SnapshotFs {
     }
 
     fn read_verified(&self, snapshot: &SourceSnapshot) -> PortResult<Vec<u8>> {
+        // 兼容的整读路径：生产 ingest 已改走 `ReadOnlySource` 流式；这里保留
+        // 给测试/旧字节调用方，但显式硬上限（与 JSON 系 manifest 一致），
+        // 绝不无界整读。
+        if snapshot.len > JSON_FAMILY_MAX_SOURCE_BYTES {
+            return Err(PortError::SourceIo(format!(
+                "legacy verified-byte read exceeds bounded limit {JSON_FAMILY_MAX_SOURCE_BYTES}"
+            )));
+        }
         let path = Path::new(&snapshot.path);
-        // verify 已整读复核并返回字节，直接复用，不再读第三次
-        // （capture 一次 + verify 一次即够）。
-        verify_snapshot(path, snapshot)
+        let source = open_snapshot_source(path, snapshot)?;
+        let mut reader = source.open()?;
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(snapshot.len as usize)
+            .map_err(|_| PortError::SourceIo("bounded source allocation failed".into()))?;
+        let mut chunk = [0_u8; SOURCE_IO_BUFFER_BYTES];
+        loop {
+            let read = reader.read(&mut chunk).map_err(backend)?;
+            if read == 0 {
+                break;
+            }
+            bytes.extend_from_slice(&chunk[..read]);
+        }
+        verify_snapshot(path, snapshot)?;
+        Ok(bytes)
     }
 }
-
-// 抑制未使用警告：SystemTime 仅经 mtime_ms 间接使用。
-#[allow(dead_code)]
-fn _system_time_is_available(_: SystemTime) {}
 
 #[cfg(test)]
 mod tests {
@@ -167,8 +239,11 @@ mod tests {
     fn capture_and_verify_stable_file() {
         let dir = tempfile::tempdir().unwrap();
         let p = write_file(dir.path(), "a.jsonl", b"hello stable content");
-        let (snap, bytes) = capture(&p).unwrap();
-        assert_eq!(bytes, b"hello stable content");
+        let snap = capture(&p).unwrap();
+        assert_eq!(
+            snap.fingerprint,
+            blake3::hash(b"hello stable content").to_hex().to_string()
+        );
         assert_eq!(snap.len, 20);
         verify_snapshot(&p, &snap).unwrap();
     }
@@ -177,7 +252,7 @@ mod tests {
     fn append_is_detected() {
         let dir = tempfile::tempdir().unwrap();
         let p = write_file(dir.path(), "a.jsonl", b"hello");
-        let (snap, _) = capture(&p).unwrap();
+        let snap = capture(&p).unwrap();
         // 追加
         {
             let mut f = std::fs::OpenOptions::new().append(true).open(&p).unwrap();
@@ -196,12 +271,12 @@ mod tests {
         // 读后复检函数 post_read_verify——它必须在读取完成后捕获 len/mtime 变化。
         let dir = tempfile::tempdir().unwrap();
         let p = write_file(dir.path(), "a.jsonl", b"hello world!!!!!");
-        let (snap, _) = capture(&p).unwrap();
+        let snap = capture(&p).unwrap();
         // 捕获后截短内容：等价于"read 已完成、源在窗口内被改写"的状态。
         std::fs::write(&p, b"12345").unwrap();
         let err = post_read_verify(&p, &snap).unwrap_err();
         assert!(
-            matches!(err, PortError::SnapshotChanged(ref m) if m.contains("len changed during verification")),
+            matches!(err, PortError::SnapshotChanged(ref m) if m.contains("source changed during verification")),
             "got {err:?}"
         );
     }
@@ -210,7 +285,7 @@ mod tests {
     fn truncate_is_detected() {
         let dir = tempfile::tempdir().unwrap();
         let p = write_file(dir.path(), "a.jsonl", b"hello world!!!!!");
-        let (snap, _) = capture(&p).unwrap();
+        let snap = capture(&p).unwrap();
         {
             let f = std::fs::OpenOptions::new().write(true).open(&p).unwrap();
             f.set_len(5).unwrap();
@@ -226,7 +301,7 @@ mod tests {
         // 捕获原始 mtime，替换后逐字节恢复，使 len 与 mtime 都与快照一致，
         // fingerprint 成为唯一能检出等长异容替换的信号。
         let original_modified = std::fs::metadata(&p).unwrap().modified().unwrap();
-        let (snap, _) = capture(&p).unwrap();
+        let snap = capture(&p).unwrap();
 
         std::fs::write(&p, b"BBBBBBBBBB").unwrap();
         File::options()
@@ -254,12 +329,63 @@ mod tests {
     fn snapshot_fs_read_verified_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
         let p = write_file(dir.path(), "s.jsonl", b"payload-bytes");
-        let (snap, _) = capture(&p).unwrap();
+        let snap = capture(&p).unwrap();
         let fs = SnapshotFs::new(vec![snap.clone()]);
         use agent_session_grep_ports::SourceDiscovery;
         let discovered = fs.discover().unwrap();
         assert_eq!(discovered.len(), 1);
         let bytes = fs.read_verified(&snap).unwrap();
         assert_eq!(bytes, b"payload-bytes");
+    }
+
+    #[test]
+    fn read_verified_returns_repeatable_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = write_file(dir.path(), "s.jsonl", b"line one\nline two\n");
+        let (snap, source) = read_verified(&p).unwrap();
+        assert_eq!(snap.len, 18);
+        let mut reader = source.open().unwrap();
+        let mut text = String::new();
+        reader.read_to_string(&mut text).unwrap();
+        assert_eq!(text, "line one\nline two\n");
+    }
+
+    #[test]
+    fn file_source_reader_detects_replacement_at_reopen() {
+        // 等长异容替换后重新 open：metadata 一致（len+mtime 相同）仍会读到替换
+        // 内容——这正是 ReadOnlySource 只读视图的诚实边界；提交前 verify_snapshot
+        // 用 fingerprint 兜住（等长替换检测测试已覆盖）。
+        let dir = tempfile::tempdir().unwrap();
+        let p = write_file(dir.path(), "a.jsonl", b"AAAAAAAAAA");
+        let original_modified = std::fs::metadata(&p).unwrap().modified().unwrap();
+        let snap = capture(&p).unwrap();
+        std::fs::write(&p, b"BBBBBBBBBB").unwrap();
+        File::options()
+            .write(true)
+            .open(&p)
+            .unwrap()
+            .set_modified(original_modified)
+            .unwrap();
+        let source = open_snapshot_source(&p, &snap).unwrap();
+        let mut reader = source.open().unwrap();
+        let mut buf = Vec::new();
+        reader.read_to_end(&mut buf).unwrap();
+        assert_eq!(buf, b"BBBBBBBBBB");
+    }
+
+    #[test]
+    fn snapshot_fs_read_verified_rejects_oversized_source() {
+        // 兼容整读路径必须诚实拒绝超过 JSON 系上限的源，而非按大文件分配。
+        let dir = tempfile::tempdir().unwrap();
+        let big = vec![b'x'; (JSON_FAMILY_MAX_SOURCE_BYTES as usize) + 1];
+        let p = write_file(dir.path(), "big.jsonl", &big);
+        let snap = capture(&p).unwrap();
+        let fs = SnapshotFs::new(vec![snap.clone()]);
+        use agent_session_grep_ports::SourceDiscovery;
+        let err = fs.read_verified(&snap).unwrap_err();
+        assert!(
+            matches!(err, PortError::SourceIo(ref m) if m.contains("bounded limit")),
+            "got {err:?}"
+        );
     }
 }
