@@ -304,13 +304,19 @@ loopback `TcpListener` — enforced by `tests/network_egress.rs` and the
 
 ### 10.2 Redaction spot-check
 
-```text
-[pending feature 08-15-offline-privacy-hooks]
-```
-
 Verify cross-boundary outputs (Web, Handoff, MCP, Robot) apply default
 redaction. Inject a secret-pattern fixture and confirm it never appears in
 output.
+
+1. Create a synthetic transcript fixture containing known secret patterns
+   (GitHub PAT, AWS secret key, API key) and sync it into the rehearsal
+   catalog.
+2. Search across all four cross-boundary entry points (`--output json` Robot,
+   MCP `search_sessions`, Web `/api/search`, handoff pack) for the injected
+   secret terms.
+3. Assert that every occurrence of the secret pattern in output is replaced
+   by its `[redacted:...]` placeholder. Confirm the CLI plain-text output
+   (local, no redaction) still shows the raw value for comparison.
 
 ### 10.3 Log / diagnostic audit
 
@@ -322,12 +328,22 @@ usernames, or hostnames appear in diagnostics.
 
 ## 11. Performance final check
 
-```text
-[pending feature 08-15-benchmark-install-open-source-gate]
+```bash
+# Rebuild the release binary first; write generated evidence only under the
+# ignored output directory.
+cargo build --release --locked -p agent-session-grep-cli
+python scripts/evidence/open_source_gate_benchmark.py run \
+  --binary target/release/agent-session-grep \
+  --profile rehearsal \
+  --output-dir scripts/evidence/out
+python scripts/evidence/open_source_gate_benchmark.py validate-report \
+  scripts/evidence/out/gate-manifest-rehearsal.json
 ```
 
 Run the full Gate D benchmark suite against the rehearsal corpus. Verify all
-six invariants pass. Refresh the benchmark report with this run's numbers.
+six invariants pass. Refresh the benchmark report with this run's numbers,
+recording the measured commit in the external rehearsal evidence; do not
+commit the generated manifest from `scripts/evidence/out/`.
 
 ---
 
