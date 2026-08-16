@@ -22,19 +22,21 @@ mod redaction;
 mod serve;
 mod tui;
 
-use agent_session_grep_adapters_sqlite::{SourceBatch, SqliteStore, capture, verify_snapshot};
+use agent_session_grep_adapters_sqlite::{
+    SourceBatch, SqliteStore, capture, open_snapshot_source, verify_snapshot,
+};
 use agent_session_grep_application::{
     App, AppError, AppRequest, AppResponse, ContextLevel, ResponseBudget, StagedBatch, Truncation,
     evidence::Precision, handoff_pack::HandoffInput, parse_relative_search_instant,
-    parse_search_instant, select_and_stage,
+    parse_search_instant, select_and_stage_source,
 };
 use agent_session_grep_domain::{
     ContextPolicy, DomainError, EvidenceSpan, IdKind, MessageEdge, MessagePlacement,
     MessageRelation, SessionIdentityNamespace, Stability, StableId,
 };
 use agent_session_grep_ports::{
-    ParseReport, ProviderAdapter, ProviderSessionObservation, RedactionStatus, ResumeClaimsStore,
-    RetrievalMode, SearchFilters, SearchProvider, SourceResumeClaim,
+    ParseReport, ProviderAdapter, ProviderSessionObservation, ReadOnlySource, RedactionStatus,
+    ResumeClaimsStore, RetrievalMode, SearchFilters, SearchProvider, SourceResumeClaim,
     capability::{ProviderCapability, ProviderCapabilityMatrix, ProviderMaturity},
 };
 use agent_session_grep_provider_aider::AiderAdapter;
@@ -2173,7 +2175,7 @@ fn attach_session_resume_rows(
 }
 
 /// 组合根持有的 provider adapter 清单。ingest/sync 用它 probe-select，
-/// 由 [`select_and_stage`] 挑出认领此源的 adapter（见 RFC-0002 §3）。
+/// 由 [`select_and_stage_source`] 挑出认领此源的 adapter（见 RFC-0002 §3）。
 /// 新增 provider 只需在此登记一行。
 fn provider_registry() -> Vec<Box<dyn ProviderAdapter>> {
     vec![
@@ -2194,17 +2196,15 @@ fn provider_registry() -> Vec<Box<dyn ProviderAdapter>> {
     ]
 }
 
-/// 对一个源字节流 probe-select 并 stage，同时返回选中 adapter 判定的 variant。
+/// 对一个可重复打开的只读 source probe-select 并 stage，同时返回选中 variant。
 ///
-/// `select_and_stage` 回完整 [`StagedBatch`]（消息 + provider 报告的会话 native id），
-/// ingest/sync 输出要报 variant；这里复用同一份 registry 借用为 `&[&dyn ...]` 后交给
-/// 编排层，选中的 variant 由事后对全体 adapter 再 probe 取最高置信度得到（与选择逻辑一致）。
-fn stage_with_registry(bytes: &[u8]) -> Result<(StagedBatch, String), CliError> {
-    // 空源（0 字节）是合法的"整源清空"：无 provider 认领空字节，但语义是
-    // 该源的全部消息都应被 tombstone。返回空 staged（0 消息、0 skipped、
-    // relation_complete=true——空扫描是完整扫描），store 层据此对旧消息
-    // 推导 tombstone。
-    if bytes.is_empty() {
+/// 空源保留整源清空/tombstone 语义；其它源的每次 probe/parse 都由 source
+/// 重新打开 bounded reader（JSONL 逐行 / 整档格式按 manifest 上限），生产路径
+/// 绝不把完整 transcript 变成 Vec（RFC-0002 §7）。
+fn stage_with_source(
+    source: &dyn agent_session_grep_ports::ReadOnlySource,
+) -> Result<(StagedBatch, String), CliError> {
+    if source.is_empty() {
         return Ok((
             StagedBatch {
                 messages: Vec::new(),
@@ -2222,26 +2222,7 @@ fn stage_with_registry(bytes: &[u8]) -> Result<(StagedBatch, String), CliError> 
     }
     let registry = provider_registry();
     let refs: Vec<&dyn ProviderAdapter> = registry.iter().map(|a| a.as_ref()).collect();
-    let staged = select_and_stage(&refs, bytes)?;
-    // 选中的 variant：取所有 adapter 中 probe 成功且置信度最高的那个 variant_id。
-    let variant = refs
-        .iter()
-        .filter_map(|a| a.probe(bytes).ok())
-        .filter(|p| {
-            !matches!(
-                p.confidence,
-                agent_session_grep_ports::Confidence::Ambiguous
-            )
-        })
-        .max_by_key(|p| match p.confidence {
-            agent_session_grep_ports::Confidence::Confirmed => 3,
-            agent_session_grep_ports::Confidence::High => 2,
-            agent_session_grep_ports::Confidence::Low => 1,
-            agent_session_grep_ports::Confidence::Ambiguous => 0,
-        })
-        .map(|p| p.variant_id)
-        .unwrap_or_else(|| "unknown".into());
-    Ok((staged, variant))
+    select_and_stage_source(&refs, source).map_err(Into::into)
 }
 
 struct StagedMessageEntity {
@@ -2839,11 +2820,12 @@ fn ingest_file(
     path: &str,
 ) -> Result<(serde_json::Value, Vec<String>), CliError> {
     let path_ref = std::path::Path::new(path);
-    // 1) 捕获只读源快照 + 字节（严格只读打开源文件）。
-    let (snap, bytes) = capture(path_ref).map_err(ProtocolError::from)?;
+    // 1) 捕获只读源快照（只计算 len/mtime/fingerprint，不保留源字节）。
+    let snap = capture(path_ref).map_err(ProtocolError::from)?;
+    let source = open_snapshot_source(path_ref, &snap).map_err(ProtocolError::from)?;
 
-    // 2) probe-select + stage：从 registry 挑出认领此源的 provider；失败即弃，不写库。
-    let (staged, variant) = stage_with_registry(&bytes)?;
+    // 2) probe-select + stage：每个 probe/parse 都从只读 source 重新打开 bounded reader。
+    let (staged, variant) = stage_with_source(&source)?;
 
     // 3) 提交前复核：源在 stage 期间被改写则拒绝提交（RFC-0002 §4）。
     verify_snapshot(path_ref, &snap).map_err(ProtocolError::from)?;
@@ -2893,7 +2875,8 @@ fn ingest_file(
 ///   agent 正在写文件）。对已索引源采取 Retain：保留旧索引、不重 parse。
 ///
 /// 行切分按字节（`\n`，容忍 `\r\n`），首行剥离 UTF-8 BOM，与 provider
-/// 解析语义一致。只读字节，不碰文件系统。
+/// 解析语义一致。经 [`for_each_bounded_source_line`] 流式遍历，内存上界为
+/// 单条记录（RFC-0002 §7），绝不把整源读入内存。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum JsonlHealth {
     Clean,
@@ -2901,34 +2884,40 @@ enum JsonlHealth {
     Invalid,
 }
 
-fn jsonl_health(bytes: &[u8]) -> JsonlHealth {
+fn jsonl_health(
+    path: &std::path::Path,
+    snapshot: &agent_session_grep_ports::SourceSnapshot,
+) -> Result<JsonlHealth, agent_session_grep_ports::ProviderError> {
+    let source = open_snapshot_source(path, snapshot)
+        .map_err(|error| agent_session_grep_ports::ProviderError::Io(error.to_string()))?;
     let mut valid_rows = 0usize;
     let mut malformed_rows = 0usize;
     let mut valid_after_last_malformed = false;
-    for (index, raw_line) in bytes.split(|b| *b == b'\n').enumerate() {
-        let mut line = raw_line.strip_suffix(b"\r").unwrap_or(raw_line);
-        if index == 0 {
-            line = line.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(line);
-        }
-        if line.iter().all(|b| b.is_ascii_whitespace()) {
-            continue;
-        }
-        if serde_json::from_slice::<serde_json::Value>(line).is_err() {
-            malformed_rows += 1;
-            valid_after_last_malformed = false;
-        } else {
-            valid_rows += 1;
-            if malformed_rows > 0 {
-                valid_after_last_malformed = true;
+    agent_session_grep_ports::for_each_bounded_source_line(
+        &source,
+        agent_session_grep_ports::STREAM_RECORD_MAX_BYTES,
+        |line| {
+            if line.bytes.iter().all(u8::is_ascii_whitespace) {
+                return Ok(());
             }
-        }
-    }
-    match (valid_rows, malformed_rows) {
+            if serde_json::from_slice::<serde_json::Value>(line.bytes).is_err() {
+                malformed_rows += 1;
+                valid_after_last_malformed = false;
+            } else {
+                valid_rows += 1;
+                if malformed_rows > 0 {
+                    valid_after_last_malformed = true;
+                }
+            }
+            Ok(())
+        },
+    )?;
+    Ok(match (valid_rows, malformed_rows) {
         (_, 0) => JsonlHealth::Clean,
         (0, _) => JsonlHealth::Invalid,
         _ if valid_after_last_malformed => JsonlHealth::Partial,
         _ => JsonlHealth::Invalid,
-    }
+    })
 }
 
 /// 同步显式给定的源文件：所有文件先完成 capture + stage + verify，之后才提交
@@ -3040,12 +3029,13 @@ fn sync_files_inner(
         .map_err(ProtocolError::from)?;
     for (index, path) in paths.iter().enumerate() {
         let path_ref = std::path::Path::new(path);
-        let (snap, bytes) = capture(path_ref).map_err(ProtocolError::from)?;
+        let snap = capture(path_ref).map_err(ProtocolError::from)?;
+        let source = open_snapshot_source(path_ref, &snap).map_err(ProtocolError::from)?;
         let cached_fp = cached.get(path).and_then(|(_, fp)| fp.clone());
         // 空文件（0 字节）不能走指纹跳过：它必须作为"整源清空"批次提交
         // 以 tombstone 旧消息；跳过会退化成空批 no-op，丢失 tombstone 语义。
         let mut retained = false;
-        let (staged, variant) = if !bytes.is_empty()
+        let (staged, variant) = if !source.is_empty()
             && cached_fp.as_deref() == Some(snap.fingerprint.as_str())
             && !relation_recovery_paths.contains(path)
             && !incomplete_paths.contains(path)
@@ -3054,9 +3044,9 @@ fn sync_files_inner(
             // 会走 membership/scan 对比），因此这里只需空 staged 占位。
             unchanged_messages += unchanged_counts.get(path).copied().unwrap_or(0);
             (None, None)
-        } else if !bytes.is_empty()
+        } else if !source.is_empty()
             && cached_fp.is_some()
-            && jsonl_health(&bytes) == JsonlHealth::Invalid
+            && jsonl_health(path_ref, &snap).map_err(ProtocolError::from)? == JsonlHealth::Invalid
         {
             // 截断尾（EOF 落在记录中间）＝agent 正在写这个源。已索引过的源
             // 必须 Retain：不重 parse、不推进指纹、不提交——旧索引原样保留，
@@ -3076,7 +3066,7 @@ fn sync_files_inner(
             diagnostic_count += 1;
             (None, None)
         } else {
-            let (staged, variant) = stage_with_registry(&bytes)?;
+            let (staged, variant) = stage_with_source(&source)?;
             (Some(staged), Some(variant))
         };
         if progress {
@@ -3537,46 +3527,52 @@ mod tests {
         );
     }
 
+    /// 把内容写入临时文件并 capture，再按生产路径的流式分类。
+    fn health_of(content: &[u8]) -> JsonlHealth {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("health.jsonl");
+        std::fs::write(&path, content).unwrap();
+        let snap = capture(&path).unwrap();
+        jsonl_health(&path, &snap).unwrap()
+    }
+
     #[test]
     fn jsonl_health_classifies_clean_partial_and_truncated() {
         // 完全合法（含无尾换行、CRLF、空行、首行 UTF-8 BOM、空文件）→ Clean。
-        assert_eq!(jsonl_health(b"{\"a\":1}\n{\"b\":2}\n"), JsonlHealth::Clean);
-        assert_eq!(jsonl_health(b"{\"a\":1}"), JsonlHealth::Clean);
+        assert_eq!(health_of(b"{\"a\":1}\n{\"b\":2}\n"), JsonlHealth::Clean);
+        assert_eq!(health_of(b"{\"a\":1}"), JsonlHealth::Clean);
+        assert_eq!(health_of(b"{\"a\":1}\r\n{\"b\":2}\r\n"), JsonlHealth::Clean);
+        assert_eq!(health_of(b"\n  \n{\"a\":1}\n"), JsonlHealth::Clean);
         assert_eq!(
-            jsonl_health(b"{\"a\":1}\r\n{\"b\":2}\r\n"),
+            health_of(b"\xEF\xBB\xBF{\"a\":1}\n{\"b\":2}\n"),
             JsonlHealth::Clean
         );
-        assert_eq!(jsonl_health(b"\n  \n{\"a\":1}\n"), JsonlHealth::Clean);
-        assert_eq!(
-            jsonl_health(b"\xEF\xBB\xBF{\"a\":1}\n{\"b\":2}\n"),
-            JsonlHealth::Clean
-        );
-        assert_eq!(jsonl_health(b""), JsonlHealth::Clean);
+        assert_eq!(health_of(b""), JsonlHealth::Clean);
         // 坏行后仍有合法行 → Partial（recoverable-skip，provider 逐行跳过）。
         assert_eq!(
-            jsonl_health(b"{\"a\":1}\n{\n{\"b\":2}\n"),
+            health_of(b"{\"a\":1}\n{\n{\"b\":2}\n"),
             JsonlHealth::Partial
         );
         // 尾部截断（EOF 落在记录中间）与全垃圾 → Invalid（已索引源触发 Retain）。
-        assert_eq!(jsonl_health(b"{\"a\":1}\n{\"b\":2"), JsonlHealth::Invalid);
-        assert_eq!(jsonl_health(b"{\"a\":1\n"), JsonlHealth::Invalid);
-        assert_eq!(jsonl_health(b"{\n"), JsonlHealth::Invalid);
-        assert_eq!(jsonl_health(b"garbage"), JsonlHealth::Invalid);
+        assert_eq!(health_of(b"{\"a\":1}\n{\"b\":2"), JsonlHealth::Invalid);
+        assert_eq!(health_of(b"{\"a\":1\n"), JsonlHealth::Invalid);
+        assert_eq!(health_of(b"{\n"), JsonlHealth::Invalid);
+        assert_eq!(health_of(b"garbage"), JsonlHealth::Invalid);
         // 与 fast-resume 测试矩阵对齐（shared.rs tests::classifies_clean_partial_and_invalid_jsonl）。
         assert_eq!(
-            jsonl_health(b"{\"valid\":true}\n{\n{\"later\":true}\n"),
+            health_of(b"{\"valid\":true}\n{\n{\"later\":true}\n"),
             JsonlHealth::Partial
         );
-        assert_eq!(jsonl_health(b"{\"valid\":true}\n{\n"), JsonlHealth::Invalid);
+        assert_eq!(health_of(b"{\"valid\":true}\n{\n"), JsonlHealth::Invalid);
     }
 
     #[test]
     fn jsonl_health_never_claims_completeness_on_error() {
         // failed-scan 不变量在分类层的体现：任何无法完整解析的状态（截断/垃圾/
         // 不可读）都不得给出 Clean——Clean 是"可安全替换旧索引"的唯一信号。
-        assert_ne!(jsonl_health(b"{\"a\":1}\n{\"b\":2"), JsonlHealth::Clean);
-        assert_ne!(jsonl_health(b"{\n"), JsonlHealth::Clean);
-        assert_ne!(jsonl_health(b"{\"a\":1}\n{\n"), JsonlHealth::Clean);
+        assert_ne!(health_of(b"{\"a\":1}\n{\"b\":2"), JsonlHealth::Clean);
+        assert_ne!(health_of(b"{\n"), JsonlHealth::Clean);
+        assert_ne!(health_of(b"{\"a\":1}\n{\n"), JsonlHealth::Clean);
     }
 
     #[test]
