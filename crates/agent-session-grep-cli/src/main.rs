@@ -35,6 +35,7 @@ use agent_session_grep_domain::{
 use agent_session_grep_ports::{
     ParseReport, ProviderAdapter, ProviderSessionObservation, RedactionStatus, ResumeClaimsStore,
     RetrievalMode, SearchFilters, SearchProvider, SourceResumeClaim,
+    capability::{ProviderCapability, ProviderCapabilityMatrix, ProviderMaturity},
 };
 use agent_session_grep_provider_aider::AiderAdapter;
 use agent_session_grep_provider_antigravity::AntigravityAdapter;
@@ -363,6 +364,13 @@ fn run(
         ));
     }
 
+    if command_name(args) == "providers" {
+        if bare_positionals(args).len() > 1 {
+            return Err(CliError::usage("providers takes no positional arguments"));
+        }
+        return providers(mode, request_id);
+    }
+
     let (db, rest) = parse_db_flag(args)?;
     // 写入子命令抢 data-root writer lease；读路径不抢，允许多读者并发。
     let writes = rest
@@ -501,6 +509,47 @@ fn emit_result(
     }
 }
 
+#[derive(serde::Serialize)]
+struct ProviderCapabilityView<'a> {
+    #[serde(flatten)]
+    capability: &'a ProviderCapability,
+    maturity_target: Option<ProviderMaturity>,
+}
+
+/// Read-only public projection of the provider capability matrix. The current
+/// matrix supplies every fact; only `maturity_target` is computed, through the
+/// matrix-owned roadmap function rather than an entry-point-local table.
+fn provider_matrix_data() -> serde_json::Value {
+    let matrix = ProviderCapabilityMatrix::current();
+    let providers = matrix
+        .providers
+        .iter()
+        .map(|capability| ProviderCapabilityView {
+            capability,
+            maturity_target: ProviderMaturity::target_for(&capability.provider_id),
+        })
+        .collect::<Vec<_>>();
+    serde_json::json!({ "providers": providers })
+}
+
+fn providers(
+    mode: protocol::OutputMode,
+    request_id: Option<&str>,
+) -> Result<protocol::Outcome, CliError> {
+    emit_result(
+        "providers",
+        mode,
+        protocol::Outcome::Success,
+        provider_matrix_data(),
+        0,
+        &protocol::Page::default(),
+        &[],
+        request_id,
+        RetrievalMode::Lexical,
+    );
+    Ok(protocol::Outcome::Success)
+}
+
 fn config_paths(
     mode: protocol::OutputMode,
     request_id: Option<&str>,
@@ -607,6 +656,7 @@ AI coding-agent history search engine（本地 AI 编程会话历史搜索）。
 
 快速上手（新手从这里开始）:
     agent-session-grep config paths                 查看数据默认放哪里
+    agent-session-grep providers                    查看 Provider 成熟度与能力
     agent-session-grep --db <库路径> search 关键词    搜索历史会话
     agent-session-grep --db <库路径> show <命中ID>   看一条命中的正文
     agent-session-grep --db <库路径> context <会话ID> 展开一个会话的上下文
@@ -638,6 +688,7 @@ COMMANDS:
     mcp                    启动 stdio MCP 服务（JSON-RPC 2.0；stdout 只输出 MCP frame）
     tui                    交互式只读浏览（Preview；需要交互式终端）
     doctor                 环境自检（可选 --db 校验存储可打开）
+    providers              报告 Provider 成熟度、路线目标与逐字段能力
     config paths           报告当前平台的 config/data/cache/logs 路径
 
 PAGINATION / BUDGET (search, list):
@@ -767,6 +818,7 @@ fn known_subcommand(cmd: &str) -> bool {
             | "mcp"
             | "tui"
             | "doctor"
+            | "providers"
             | "config"
     )
 }
@@ -869,6 +921,11 @@ fn subcommand_help_text(cmd: &str) -> &'static str {
         "tui" => {
             "tui：交互式只读浏览（Preview）。需要交互式终端。\n\
                   示例：agent-session-grep --db <path> tui"
+        }
+        "providers" => {
+            "providers：报告当前 Provider 能力矩阵（成熟度事实、路线目标与逐字段能力）。\n\
+                         示例：agent-session-grep --robot providers\n\
+                         数据来自唯一能力矩阵；deferred provider 的 maturity_target 为 null。"
         }
         "config" => {
             "config paths：报告当前平台的 config/data/cache/logs 路径。\n\
@@ -3744,9 +3801,44 @@ mod tests {
         assert!(extract_request_id(&["--request-id".into()]).is_err());
     }
 
+    // ---- Provider capability matrix entry-point projection ----
+
+    #[test]
+    fn provider_output_has_every_current_matrix_row_and_enum_maturity() {
+        let matrix = ProviderCapabilityMatrix::current();
+        let output = provider_matrix_data();
+        let rows = output["providers"].as_array().expect("providers array");
+        assert_eq!(rows.len(), matrix.providers.len());
+        for (row, capability) in rows.iter().zip(&matrix.providers) {
+            assert_eq!(row["provider_id"], capability.provider_id);
+            assert_eq!(
+                row["maturity"],
+                serde_json::to_value(capability.maturity).expect("serialize maturity")
+            );
+            assert_eq!(
+                row["maturity_target"],
+                serde_json::to_value(ProviderMaturity::target_for(&capability.provider_id))
+                    .expect("serialize maturity target")
+            );
+        }
+    }
+
+    #[test]
+    fn deferred_provider_output_has_null_maturity_target() {
+        let output = provider_matrix_data();
+        let rows = output["providers"].as_array().expect("providers array");
+        for provider_id in ["deepseek-harness", "zcode"] {
+            let row = rows
+                .iter()
+                .find(|row| row["provider_id"] == provider_id)
+                .unwrap_or_else(|| panic!("missing deferred provider {provider_id}"));
+            assert!(row["maturity_target"].is_null(), "{row}");
+        }
+    }
+
     // ---- help/version 提前拦截（ADR-0006，R3）----
 
-    const KNOWN_COMMANDS: [&str; 18] = [
+    const KNOWN_COMMANDS: [&str; 19] = [
         "ingest",
         "sync",
         "index",
@@ -3764,6 +3856,7 @@ mod tests {
         "mcp",
         "tui",
         "doctor",
+        "providers",
         "config",
     ];
 

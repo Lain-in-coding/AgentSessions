@@ -2039,6 +2039,93 @@ fn config_paths_reports_platform_directories() {
         assert!(!value.is_empty(), "{field} must not be empty");
     }
 }
+
+#[test]
+fn providers_robot_output_is_a_stable_matrix_envelope() {
+    use agent_session_grep_ports::capability::{ProviderCapabilityMatrix, ProviderMaturity};
+
+    let out = run_bare(&["--output", "json", "providers"]);
+    assert!(out.status.success(), "providers failed: {}", stdout(&out));
+    let frame = parse_first_line(&out);
+    assert_envelope_shape(&frame, true);
+    assert_eq!(frame["command"], "providers");
+    assert_eq!(frame["retrieval_mode"], "lexical");
+    assert_eq!(frame["redaction"]["mode"], "default");
+    assert_eq!(frame["redaction"]["status"], "none");
+    assert_eq!(frame["page"]["next_cursor"], serde_json::Value::Null);
+    assert_eq!(frame["page"]["has_more"], false);
+
+    let matrix = ProviderCapabilityMatrix::current();
+    let rows = frame["data"]["providers"]
+        .as_array()
+        .expect("providers array");
+    assert_eq!(rows.len(), matrix.providers.len());
+    let expected_keys = [
+        "context",
+        "discover",
+        "handoff",
+        "incremental",
+        "maturity",
+        "maturity_target",
+        "parse",
+        "probe",
+        "provider_id",
+        "resume",
+        "search",
+        "source_span",
+        "tool_activity",
+        "variant_id",
+    ]
+    .into_iter()
+    .collect::<std::collections::BTreeSet<_>>();
+    for (row, capability) in rows.iter().zip(&matrix.providers) {
+        let actual_keys = row
+            .as_object()
+            .expect("provider row object")
+            .keys()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(actual_keys, expected_keys, "{row}");
+        assert_eq!(row["provider_id"], capability.provider_id);
+        assert_eq!(
+            row["maturity"],
+            serde_json::to_value(capability.maturity).expect("serialize maturity")
+        );
+        assert_eq!(
+            row["maturity_target"],
+            serde_json::to_value(ProviderMaturity::target_for(&capability.provider_id))
+                .expect("serialize maturity target")
+        );
+    }
+    for deferred in ["deepseek-harness", "zcode"] {
+        let row = rows
+            .iter()
+            .find(|row| row["provider_id"] == deferred)
+            .unwrap_or_else(|| panic!("missing deferred provider {deferred}"));
+        assert!(row["maturity_target"].is_null(), "{row}");
+    }
+}
+
+#[test]
+fn providers_human_output_uses_the_human_renderer() {
+    let out = run_bare(&["providers"]);
+    assert!(out.status.success(), "providers failed: {}", stdout(&out));
+    let text = stdout(&out);
+    let expected_count = agent_session_grep_ports::capability::ProviderCapabilityMatrix::current()
+        .providers
+        .len();
+    assert!(
+        text.lines()
+            .next()
+            .is_some_and(|line| line == format!("providers: {expected_count}")),
+        "{text}"
+    );
+    assert!(text.contains("maturity=experimental"), "{text}");
+    assert!(text.contains("target=—"), "{text}");
+    assert!(text.contains("tool_activity="), "{text}");
+    assert!(text.contains("incremental="), "{text}");
+}
+
 #[test]
 fn jsonl_output_is_one_complete_frame_per_line() {
     let (_dir, db) = temp_db("env-jsonl");

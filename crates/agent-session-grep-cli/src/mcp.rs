@@ -18,7 +18,9 @@ use agent_session_grep_application::{
     App, AppRequest, ContextLevel, ResponseBudget, parse_search_instant,
 };
 use agent_session_grep_domain::{ContextPolicy, IdKind, StableId};
-use agent_session_grep_ports::{SearchFilters, SearchProvider};
+use agent_session_grep_ports::{
+    SearchFilters, SearchProvider, capability::ProviderCapabilityMatrix,
+};
 use serde_json::{Map, Value, json};
 
 /// 支持的 MCP 协议版本（新→旧）。协商绝不谎报支持：请求版本在列才回显。
@@ -791,7 +793,7 @@ fn tool_catalog() -> Value {
         },
         {
             "name": "list_providers",
-            "description": "List the provider adapters this build can ingest \
+            "description": "List the provider adapters this build can ingest, including each adapter's capability-matrix maturity \
                 (stable ids such as claude-code).",
             "inputSchema": {
                 "type": "object",
@@ -843,11 +845,21 @@ fn success_payload(
     })
 }
 
-/// list_providers 不经 App：组合根的 registry 即权威清单（design §3）。
+/// list_providers 以组合根 registry 限定本构建可 ingest 的 adapter；maturity 从
+/// capability matrix 读取，避免跨边界把不同 provider 伪装成同一成熟度。
 fn providers_payload() -> Value {
+    let matrix = ProviderCapabilityMatrix::current();
     let providers: Vec<Value> = provider_registry()
         .iter()
-        .map(|adapter| json!({ "id": adapter.provider_id() }))
+        .map(|adapter| {
+            let capability = matrix
+                .find(adapter.provider_id())
+                .expect("every registered provider must have a capability matrix row");
+            json!({
+                "id": capability.provider_id.as_str(),
+                "maturity": capability.maturity,
+            })
+        })
         .collect();
     success_payload(
         Outcome::Success,
@@ -2318,5 +2330,17 @@ mod tests {
             .collect();
         assert!(ids.contains(&"claude-code"), "{ids:?}");
         assert!(ids.contains(&"codex"), "{ids:?}");
+        for provider in providers {
+            let id = provider["id"].as_str().expect("provider id");
+            let expected = ProviderCapabilityMatrix::current()
+                .find(id)
+                .unwrap_or_else(|| panic!("missing capability matrix row for {id}"))
+                .maturity;
+            assert_eq!(
+                provider["maturity"],
+                serde_json::to_value(expected).expect("serialize maturity"),
+                "{provider}"
+            );
+        }
     }
 }

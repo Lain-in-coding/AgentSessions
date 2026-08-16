@@ -1,7 +1,7 @@
 //! Human 渲染器：把成功结果投影为人类可读文本行（无 envelope、无颜色）。
 //!
 //! 见 `.trellis/tasks/07-26-human-robot-protocol/design.md` §2。
-//! search/list/get/show/context/status 各有专属版式，sync 与 ingest 各有统计
+//! search/list/get/show/context/status/providers 各有专属版式，sync 与 ingest 各有统计
 //! 版式，其余命令（index/index.rebuild/doctor/config.paths 及未知命令）共用
 //! 同一条排序 `key: value` 兜底路径。约束：无颜色、无新依赖；任何输入不
 //! panic——缺失或异常字段降级为 `?` 占位或空态措辞；每个返回元素都是单行
@@ -47,6 +47,7 @@ pub fn render_success(command: &str, outcome: Outcome, data: &Value, page: &Page
         "ingest" => render_ingest(data),
         "handoff" => render_handoff(data),
         "resume" => render_resume(data),
+        "providers" => render_providers(data),
         "config.paths" => {
             // config paths 报告的是"默认位置"，未用到就不会创建；新手照着找会扑空
             // （10 角色体验测试缺陷）。加一句说明，结构本身保持稳定。
@@ -56,6 +57,54 @@ pub fn render_success(command: &str, outcome: Outcome, data: &Value, page: &Page
         }
         _ => kv_lines(data),
     }
+}
+
+/// `providers`：每个 provider 用两行展示成熟度/路线目标及完整逐字段能力。
+/// `maturity_target: null`（deferred）与空 variant 都显示为破折号，不把未知目标
+/// 伪装为当前事实。
+fn render_providers(data: &Value) -> Vec<String> {
+    let providers = data
+        .get("providers")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    if providers.is_empty() {
+        return vec!["providers: none".into()];
+    }
+
+    let field = |provider: &Value, key: &str| {
+        provider
+            .get(key)
+            .and_then(Value::as_str)
+            .map(sanitize)
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| MISSING.into())
+    };
+    let mut lines = Vec::with_capacity(1 + providers.len() * 2);
+    lines.push(format!("providers: {}", providers.len()));
+    for provider in providers {
+        lines.push(format!(
+            "{}  maturity={}  target={}  variant={}",
+            field(provider, "provider_id"),
+            field(provider, "maturity"),
+            field(provider, "maturity_target"),
+            field(provider, "variant_id"),
+        ));
+        lines.push(format!(
+            "  discover={} probe={} parse={} search={} context={} resume={} handoff={} tool_activity={} source_span={} incremental={}",
+            field(provider, "discover"),
+            field(provider, "probe"),
+            field(provider, "parse"),
+            field(provider, "search"),
+            field(provider, "context"),
+            field(provider, "resume"),
+            field(provider, "handoff"),
+            field(provider, "tool_activity"),
+            field(provider, "source_span"),
+            field(provider, "incremental"),
+        ));
+    }
+    lines
 }
 
 /// `resume`：dry-run 预览把要执行的命令摊开给人看——可恢复性、完整命令、
@@ -866,6 +915,52 @@ mod tests {
             next_cursor: Some(token.into()),
             has_more: true,
         }
+    }
+
+    #[test]
+    fn providers_renders_maturity_target_and_all_capabilities() {
+        let data = json!({
+            "providers": [{
+                "provider_id": "claude-code",
+                "variant_id": "claude-code/jsonl-v1",
+                "maturity": "experimental",
+                "maturity_target": "certified",
+                "discover": "native",
+                "probe": "native",
+                "parse": "native",
+                "search": "native",
+                "context": "native",
+                "resume": "derived",
+                "handoff": "unsupported",
+                "tool_activity": "partial",
+                "source_span": "native",
+                "incremental": "native"
+            }, {
+                "provider_id": "zcode",
+                "variant_id": "",
+                "maturity": "unsupported",
+                "maturity_target": null,
+                "discover": "unknown",
+                "probe": "unknown",
+                "parse": "unknown",
+                "search": "unknown",
+                "context": "unknown",
+                "resume": "unknown",
+                "handoff": "unknown",
+                "tool_activity": "unknown",
+                "source_span": "unknown",
+                "incremental": "unknown"
+            }]
+        });
+        let lines = render_success("providers", Outcome::Success, &data, &Page::default());
+        assert_eq!(lines.len(), 5);
+        assert_eq!(lines[0], "providers: 2");
+        assert!(lines[1].contains("maturity=experimental"), "{lines:?}");
+        assert!(lines[1].contains("target=certified"), "{lines:?}");
+        assert!(lines[2].contains("tool_activity=partial"), "{lines:?}");
+        assert!(lines[3].contains("target=—"), "{lines:?}");
+        assert!(lines[3].contains("variant=—"), "{lines:?}");
+        assert!(lines[4].contains("incremental=unknown"), "{lines:?}");
     }
 
     #[test]
