@@ -30,9 +30,9 @@
 ## 残留风险
 
 - macOS/Linux 演练未跑(本机 Windows;CI 三平台矩阵已配置,需 PR 上跑绿记录 run id)。
-- `handoff` human 输出为原始 JSON 投影(无专门 human 渲染器)——功能正确,观感可后续优化。
-- serve 为单线程逐连接处理(无并发);GET-only;POST 端点(body 解析已保留)未实现。
-- 能力矩阵与 release 二进制基于 HEAD 46e4c5f 构建;gate manifest 需随新构建刷新。
+  **阻塞点**:GitHub 账号账单问题("recent account payments have failed")导致 CI job 无法启动——所有 7 个 job 未运行即 failure,非代码问题;需用户在 GitHub Billing & plans 修复后重跑 CI。已做最大限度的本地跨平台预检(见 cross-platform-precheck.md):无跨平台阻塞,修复了 gate_smoke.sh 默认用法 bug、docs 中 sh/powershell 指令、.gitattributes eol 规则。
+- serve 为单线程逐连接处理(无并发)——loopback 单用户场景可接受,已加 15s 读超时防慢客户端拖死;GET-only;POST 端点未实现(记录为后续迭代,不阻塞开源)。
+- 能力矩阵与 release 二进制需随新构建刷新(gate manifest 已随 8cc165e 刷新,release 二进制需 rebuild + verify-release 重跑)。
 
 ## 一致性终检(2026-08-16,追加)
 
@@ -70,3 +70,12 @@
 - 单元测试 13→16(新增 embedded prose、边界安全、embedded bearer 3 个);workspace gate 全绿(fmt/clippy/test);已 push。
 
 **残余风险**:redaction 规则集为保守子集(AWS/GitHub/OpenAI/Anthropic/xAI/Bearer/PEM + secret-key-name),其他格式(如自定义企业 token)不在覆盖范围——后续可按需扩展 `embedded_shapes()` 并 bump RULESET_VERSION。
+
+## Round 4(2026-08-16):开源就绪补强
+
+- **handoff created_at 缺陷**(8cc165e):`utc_now_iso8601` 把 epoch 秒拼进分秒字段(`1970-01-01T00:00:1786844148Z`,非法时间戳)。改为手写 UTC civil 转换(无 chrono 依赖)+ 已知 epoch 单元测试(含闰日)。
+- **handoff human 渲染器**(8f3644f):替换原始 JSON 投影为可读分栏(header/created_at/confidence/matched_sessions/evidence/inference/truncation),2 个单元测试。
+- **serve 会话 token 安全加固**(0630971):LCG + 时间种子的 token 生成器(注释承认非密码学安全)替换为 getrandom CSPRNG(已在 lock 图,经 tempfile 传递);加 15s 读超时。
+- **跨平台预检**(9cd22f7 + c03a7f7):gate_smoke.sh `set -e` 下 `[ -n "$prefix" ] && ...` 默认路径必失败 → 改显式 if;docs 中 `sh install.sh`(dash 缺 pipefail)/`powershell install.ps1`(5.1 缺 $IsWindows)改为 bash/pwsh;.gitattributes 补 `*.sh/*.py eol=lf` 防 CRLF blob 破坏 Unix CI;恢复 install.sh/smoke.sh 执行位。
+- **CHANGELOG + SECURITY**(47291c0):开源必配文档。
+- **CI 阻塞**:GitHub 账单问题导致三平台矩阵无法运行(见残留风险),本地预检替代,无跨平台阻塞发现。
