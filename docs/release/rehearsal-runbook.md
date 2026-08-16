@@ -1,7 +1,9 @@
 # Release Rehearsal Runbook
 
 > Task: `08-15-final-integration-release-rehearsal`
-> Status: framework ready — feature-dependent steps marked `pending feature <subtask>`
+> Status: P0-5 五入口一致性 harness 已去 skip-as-pass（Web loopback + TUI 快照）
+> 且 verify-release 已补全；semantic/resume/handoff/offline 步骤已落地。仍 pending:
+> Gate D performance、三平台干净环境演练（macOS 受 CI billing 外部阻塞）。
 
 This runbook defines the full release-rehearsal procedure for
 agent-session-grep. It is executed per-platform (Windows, macOS, Linux) in a
@@ -47,6 +49,14 @@ Before starting, fill in the environment manifest template at
 - Installer artifact SHA-256 hash
 - Tool versions (rustc, cargo, python, git)
 - Provider fixture license + redaction status
+
+Manifests carry **aggregate environment facts only** — OS/build, clean-image
+identifier, artifact hashes, toolchain versions, fixture license/redaction
+status, run id. They must **never** contain personal paths, hostnames, or
+operator identities. The manifest schema's `rehearsal.operator` field is an
+opaque operator identifier, not a personal name. The local Windows/WSL
+rehearsal evidence follows the same rule: manifests record the aggregate
+environment, commit, and hashes only.
 
 A completed manifest is the entry ticket — no manifest, no rehearsal.
 
@@ -149,12 +159,24 @@ agent-session-grep --db /tmp/rehearsal.db --robot search "<canonical-query>"
 
 ### 3.2 Semantic / hybrid search
 
-```text
-[pending feature 08-15-semantic-hybrid-local-retrieval]
+```bash
+# Build the bigram-hash embedding projection first (catalog-derived, rebuildable):
+agent-session-grep --db /tmp/rehearsal.db --robot index embeddings
+
+# Then the semantic/hybrid modes become effective (until then they fall back
+# explicitly to lexical_fallback with a warning — never silently):
+agent-session-grep --db /tmp/rehearsal.db --robot search "<canonical-query>" --mode semantic
+agent-session-grep --db /tmp/rehearsal.db --robot search "<canonical-query>" --mode hybrid
 ```
 
-When semantic search lands, repeat §3.1 with the semantic and hybrid retrieval
-modes. Record per-mode latency and result-set overlap.
+**Expected evidence**: `index embeddings` reports `model_id: bigram-hash-v1`,
+`dimension: 384`, `indexed > 0`. Semantic/hybrid searches report
+`retrieval_mode: semantic` / `hybrid` with hits. Record per-mode latency and
+result-set overlap. **Honesty note**: `bigram-hash-v1` is a fuzzy lexical
+bigram vectorizer, explicitly **not** a semantic model; semantic/hybrid modes
+are experimental and lexical remains the default.
+
+**Run id**: `search-<platform>-<date>`.
 
 ---
 
@@ -173,54 +195,61 @@ by default; evidence spans are present.
 
 ## 5. Resume dry-run
 
-```text
-[pending feature 08-15-resume-metadata-execution]
-```
-
-When the resume command matrix lands:
-
 ```bash
-agent-session-grep --db /tmp/rehearsal.db --robot get-session-resume "<session-id>"
+# Read-only resume metadata (fixed nullable fields; never echoes a source path):
+agent-session-grep --db /tmp/rehearsal.db --robot get-session-resume "<session-id-from-search>"
+
+# Dry-run execution preview (default, no side effects):
+agent-session-grep --db /tmp/rehearsal.db --robot resume "<session-id-from-search>"
 ```
 
-Verify: `resume_available` is a boolean; `provider_session_id` and
-`original_working_directory` are present only when resolved; dry-run mode is
-the default (no side effects); first-run forces a preview.
+**Expected evidence**: `get-session-resume` reports `resume_available` as a
+boolean with `provider_session_id` and `original_working_directory` present
+only when resolved. `resume` defaults to dry-run: `executed: false`, prints
+the full command/cwd/permission mode, and makes **no** side effects. First-run
+forces a preview; `--yes` is the explicit opt-in for real execution.
+Unverified providers report `available: false` rather than fabricating a
+command.
+
+**Run id**: `resume-<platform>-<date>`.
 
 ---
 
 ## 6. Handoff pack generation
 
-```text
-[pending feature 08-15-evidence-handoff-pack]
-```
-
-When the handoff pack schema lands:
-
 ```bash
-agent-session-grep --db /tmp/rehearsal.db --robot handoff "<session-id>"
+agent-session-grep --db /tmp/rehearsal.db --robot handoff "<query>"
 ```
 
-Verify: pack conforms to `handoff-pack/v1` schema; evidence and inference are
-in separate sections; budget/truncation/redaction rules are applied; the pack
-is deterministic (two runs produce identical output).
+**Expected evidence**: pack conforms to `HandoffPack` schema version `1.0`
+(`schema_version: "1.0"`); evidence and inference are in separate sections
+(deterministic packs carry `inference: []`); budget/truncation/redaction rules
+are applied; the pack is deterministic (two runs produce the identical
+`pack_id` and output).
+
+**Run id**: `handoff-<platform>-<date>`.
 
 ---
 
 ## 7. Web UI walkthrough
 
-```text
-[pending feature 08-15-loopback-web-ui-parity]
-```
-
-When `asg serve` lands:
-
 ```bash
 agent-session-grep --db /tmp/rehearsal.db serve
 ```
 
-Walk through: search → session detail → context → evidence highlight →
-resume action (dry-run). Verify parity with CLI output for the same queries.
+The server prints the effective loopback URL with a per-session bearer token
+to stderr:
+
+```text
+asg serve: open http://127.0.0.1:<port>/?token=<32-hex>
+```
+
+Walk through with the token (`Authorization: Bearer <token>`, loopback Host
+required): `/` (embedded Web UI), `/api/status`, `/api/search?q=`,
+`/api/context?session=`, and the canonical projection endpoint
+`/api/projection/search?q=` used by the five-entry consistency harness.
+Verify parity with CLI output for the same queries; verify no-token requests
+return 401 and non-loopback Host requests return 403.
 
 ---
 
@@ -247,8 +276,11 @@ python scripts/rehearsal/compare_entrypoints.py \
 ```
 
 **Expected evidence**: `overall_verdict == "consistent"`; every declared entry
-point appears as compared, aliased, or explicitly skipped; pending entry points
-have `status: "skipped"`, `reason: "not implemented"`.
+point (cli, mcp, robot, web, tui) is **directly compared** for the canonical
+search operation — the harness launches the real loopback `serve` process for
+Web and drives the TUI's headless `--snapshot-json` projection. `skipped`,
+`aliases`, and `unimplemented` are all empty; an unimplemented entry point
+fails the harness (exit 1), never a skip-as-pass.
 
 **Run id**: `consistency-<platform>-<date>`.
 
@@ -339,7 +371,8 @@ untouched (install must not delete user data).
 
 ## 15. Go/No-Go report
 
-Fill in `docs/release/go-no-go.template.md` with:
+Fill in `docs/release/go-no-go.template.md` (or a generated non-template draft
+derived from it) with:
 
 - All run ids and their pass/fail verdicts
 - Residual risk list
@@ -347,7 +380,11 @@ Fill in `docs/release/go-no-go.template.md` with:
 - Privacy / performance / materials check results
 - Owner sign-off block
 
-Submit to owner for the final public-release decision.
+The current draft is `docs/release/go-no-go.2026-08-16.md` (No-Go: local
+P0/external gates remain open). Submit to owner for the final public-release
+decision. On Windows the local rehearsal evidence (including any WSL Linux
+rehearsal) is recorded in aggregate — environment, commit, and hashes only,
+with no personal paths.
 
 ---
 
