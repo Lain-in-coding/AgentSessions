@@ -149,7 +149,7 @@ def sample_report(invariants=None):
 class PureFunctionTests(unittest.TestCase):
     """Report construction and invariant judgement need no binary."""
 
-    def test_invariant_ids_are_the_documented_six(self):
+    def test_invariant_ids_are_complete_and_ordered(self):
         self.assertEqual(
             rdr.INVARIANT_IDS,
             (
@@ -159,8 +159,33 @@ class PureFunctionTests(unittest.TestCase):
                 "INV-CONTEXT-NONEMPTY",
                 "INV-SPAN-COVERAGE",
                 "INV-REBUILD-STABLE",
+                "INV-SOURCES-UNCHANGED",
             ),
         )
+
+    def test_source_integrity_invariant_counts_changes_without_leaking_paths(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            unchanged = root / "unchanged.jsonl"
+            modified = root / "modified.jsonl"
+            removed = root / "removed.jsonl"
+            for path in (unchanged, modified, removed):
+                path.write_bytes(b"synthetic source\n")
+            sources = [str(unchanged), str(modified), str(removed)]
+            before = {path: rdr.sha256_of(path) for path in sources}
+
+            modified.write_bytes(b"synthetic source changed\n")
+            removed.unlink()
+            verdict = rdr._source_integrity_invariant(sources, before)
+
+            self.assertEqual(verdict["id"], "INV-SOURCES-UNCHANGED")
+            self.assertFalse(verdict["passed"])
+            self.assertEqual(
+                verdict["detail"],
+                "3 sources checked, 1 unchanged, 2 changed",
+            )
+            for path in sources:
+                self.assertNotIn(path, verdict["detail"])
 
     def test_outcome_is_failed_when_any_invariant_fails(self):
         # build_report derives outcome from the verdicts: one failure is enough.
@@ -287,6 +312,16 @@ class EndToEndTests(unittest.TestCase):
         self.assertEqual(report["outcome"], "passed", report["invariants"])
         reported = [entry["id"] for entry in report["invariants"]]
         self.assertEqual(reported, list(rdr.INVARIANT_IDS))
+        source_integrity = next(
+            item
+            for item in report["invariants"]
+            if item["id"] == "INV-SOURCES-UNCHANGED"
+        )
+        self.assertTrue(source_integrity["passed"], source_integrity)
+        self.assertEqual(
+            source_integrity["detail"],
+            "2 sources checked, 2 unchanged, 0 changed",
+        )
         self.assertEqual(report["corpus"]["source_files"], 2)
         # Six emitted occurrences include one stable Message reused/re-parented
         # in the second session, so the stable entity census is five.

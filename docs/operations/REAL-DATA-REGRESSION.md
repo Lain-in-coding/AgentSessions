@@ -2,8 +2,8 @@
 
 Scope: running `scripts/evidence/real_data_regression.py` against your own
 Claude Code and Codex transcripts to check that ingestion, context assembly,
-and index rebuild hold their invariants on real input instead of only on
-synthetic fixtures.
+index rebuild, and source immutability hold their invariants on real input
+instead of only on synthetic fixtures.
 
 ## Why this runs locally and stays local
 
@@ -13,7 +13,9 @@ built around that constraint rather than trusting the operator to redact
 afterwards.
 
 - Sources are opened read-only. The provider path never writes to a
-  transcript.
+  transcript, and `INV-SOURCES-UNCHANGED` compares every source's SHA-256
+  before sync and after the full run. Fingerprints remain process-local and
+  never enter the report.
 - Ingestion targets a throwaway temporary data root created per run and
   deleted at the end. Your real data root is untouched.
 - The report contains aggregate counts and invariant verdicts only. No
@@ -67,13 +69,15 @@ as source arguments that matched no `.jsonl` files.
 
 ## What it exercises
 
-Against a temporary data root, in order: one `sync` over all collected
-sources, then `status` (catalog count, generation, source-placement claims)
-plus a full catalog `list` walk, then `context --policy mainline` for every
-session entity, then `index rebuild` followed by a catalog walk and sampled
-`search` calls. All CLI calls go through `--robot` and are read from the
-response envelope, not from human-readable text. (`doctor` is not part of
-the harness; its runtime state report is a separate operator command.)
+Against a temporary data root, the harness first fingerprints every source,
+then runs one `sync` over all collected sources, followed by `status` (catalog
+count, generation, source-placement claims) plus a full catalog `list` walk,
+then `context --policy mainline` for every session entity, then `index rebuild`
+followed by a catalog walk and sampled `search` calls. Finally it fingerprints
+every source again and compares aggregate results. All CLI calls go through
+`--robot` and are read from the response envelope, not from human-readable
+text. (`doctor` is not part of the harness; its runtime state report is a
+separate operator command.)
 
 `sync` runs in chunks. When a chunk fails with `source_changed` — the
 transcript was modified between its capture and the post-stage verification,
@@ -85,7 +89,7 @@ not retried: a persistent `source_changed` or any other failure is reported
 as-is in the report and the run finishes with the invariants it could still
 evaluate.
 
-## The six invariants
+## The seven invariants
 
 | id | What it asserts | What a failure means |
 |---|---|---|
@@ -95,6 +99,7 @@ evaluate.
 | `INV-CONTEXT-NONEMPTY` | Every context request succeeds; a session whose catalog projection owns messages assembles at least one. A verified zero-placement session may return an empty message list. | Context assembly cannot reach messages the session owns, or the request failed. An `internal` error is a bug signal, not bad input. |
 | `INV-SPAN-COVERAGE` | Every evidence span from this ingest has `precision == "byte"`. | Byte offsets were not recorded. Freshly ingested sources should always have them; `unknown` precision belongs to pre-v6 rows, which a fresh temporary store cannot contain. |
 | `INV-REBUILD-STABLE` | Catalog counts before and after `index rebuild` match, and sampled searches return the same number of hits. | Rebuild is not a faithful reprojection of the catalog. See `rebuild-and-migration-runbook.md`. |
+| `INV-SOURCES-UNCHANGED` | Every collected source has the same SHA-256 before `sync` and after the full harness run. | A source was changed, deleted, or became unreadable while the harness ran. The detail contains only checked, unchanged, and changed counts. |
 
 ## Reading the report
 
@@ -111,7 +116,7 @@ the same fields.
 | `totals` | De-duplicated stable Messages, sessions, documents, and total catalog entities. Message count is a census, not the no-loss denominator. |
 | `role_distribution` | Message count per role. |
 | `evidence_precision` | Span count per precision tier (`byte`, `line`, `record`, `unknown`). |
-| `invariants` | One entry per invariant: `id`, `passed`, and an aggregate-only `detail`. `INV-NO-PARSE-LOSS` records emitted occurrences, source-placement claims, skipped records, and the separate stable Message census. |
+| `invariants` | One entry per invariant: `id`, `passed`, and an aggregate-only `detail`. `INV-NO-PARSE-LOSS` records emitted occurrences, source-placement claims, skipped records, and the separate stable Message census. `INV-SOURCES-UNCHANGED` records checked, unchanged, and changed source counts only. |
 | `outcome` | `passed` or `failed`. |
 
 ## When it fails

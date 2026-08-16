@@ -50,6 +50,7 @@ INVARIANT_IDS = (
     "INV-CONTEXT-NONEMPTY",
     "INV-SPAN-COVERAGE",
     "INV-REBUILD-STABLE",
+    "INV-SOURCES-UNCHANGED",
 )
 
 #: Wire-id prefixes of the three catalog entity kinds (RFC-0001).
@@ -194,6 +195,28 @@ def collect_sources(roots: Sequence[str]) -> List[str]:
 def invariant(id_: str, passed: bool, detail: str) -> Dict[str, Any]:
     """One invariant verdict. ``detail`` must carry aggregate numbers only."""
     return {"id": id_, "passed": bool(passed), "detail": detail}
+
+
+def _source_integrity_invariant(
+    sources: Sequence[str], before: Dict[str, str]
+) -> Dict[str, Any]:
+    """Compare source checksums without exposing paths or fingerprints."""
+    unchanged = 0
+    changed = 0
+    for path in sources:
+        try:
+            matches = sha256_of(path) == before[path]
+        except (KeyError, OSError):
+            matches = False
+        if matches:
+            unchanged += 1
+        else:
+            changed += 1
+    return invariant(
+        "INV-SOURCES-UNCHANGED",
+        changed == 0,
+        f"{len(sources)} sources checked, {unchanged} unchanged, {changed} changed",
+    )
 
 
 def _is_zero_placement_context(data: Dict[str, Any]) -> bool:
@@ -357,6 +380,7 @@ def run_regression(binary: str, sources: Sequence[str]) -> Dict[str, Any]:
     version = binary_version(binary)
     sha256 = sha256_of(binary)
     total_bytes = sum(os.path.getsize(path) for path in sources)
+    source_checksums_before = {path: sha256_of(path) for path in sources}
 
     workdir = tempfile.mkdtemp(prefix="agent-session-grep-regression-")
     db = os.path.join(workdir, "regression.db")
@@ -370,8 +394,9 @@ def run_regression(binary: str, sources: Sequence[str]) -> Dict[str, Any]:
         # together exceed the OS command-line limit (32 KiB on Windows), so the
         # source list is chunked. Each chunk is atomic on its own; the corpus as
         # a whole is not one transaction, which is fine here because this is a
-        # read-only regression against a throwaway store, not a production
-        # ingest. `sync` is idempotent, so a retry of a chunk changes nothing.
+        # source-read-only regression against a throwaway store, guarded by
+        # INV-SOURCES-UNCHANGED after the full run. `sync` is idempotent, so a
+        # retry of a chunk changes nothing.
         sync_ok = True
         reported_emitted = 0
         reported_skipped = 0
@@ -410,8 +435,11 @@ def run_regression(binary: str, sources: Sequence[str]) -> Dict[str, Any]:
         if not sync_ok:
             # Nothing downstream is meaningful without a committed corpus;
             # report the remaining invariants as failed rather than skipped.
-            for id_ in INVARIANT_IDS[1:]:
+            for id_ in INVARIANT_IDS[1:-1]:
                 invariants.append(invariant(id_, False, "not evaluated: sync failed"))
+            invariants.append(
+                _source_integrity_invariant(sources, source_checksums_before)
+            )
             return _finish(
                 binary,
                 version,
@@ -561,6 +589,7 @@ def run_regression(binary: str, sources: Sequence[str]) -> Dict[str, Any]:
                 f"{'match' if searches_match else 'DIVERGED/EMPTY/FAILED'}",
             )
         )
+        invariants.append(_source_integrity_invariant(sources, source_checksums_before))
 
         return _finish(
             binary,
