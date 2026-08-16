@@ -45,21 +45,29 @@ asg handoff "how did we configure the database?"
 
 ## Providers
 
-Currently implemented (8/16 planned):
+Currently implemented (14/16 planned; 2 deferred — no transcript evidence):
 
 | Provider | Status | Format |
 |---|---|---|
 | Claude Code | Experimental | JSONL (`type:user/assistant`, `sessionId`/`uuid`/`parentUuid`) |
 | Codex CLI | Experimental | rollout JSONL (`response_item`/`message`) |
 | Grok Build | Experimental | ACP `updates.jsonl` (`session/update` stream) |
+| Antigravity | Experimental | transcript JSONL (`brain/<uuid>/.system_generated/logs`) |
+| OpenCode | Experimental | SQLite `opencode.db` (session/message/part, read-only) |
 | Pi | Experimental | session JSONL (`type:session/message`) |
+| Hermes | Experimental | `session_<id>.json` (session_id/messages) |
+| Cursor | Experimental | `state.vscdb` SQLite KV (`chatdata`/`prompts`) |
 | Kimi Code | Experimental | wire.jsonl (`context.append_message`) |
 | OpenClaw | Experimental | v3 JSONL header + message records |
 | Qoder | Experimental | JSONL (`session_meta` + `type:user/assistant`) |
 | Tencent CodeBuddy | Experimental | OpenAI-style JSONL (`role`/`content`/`sessionId`) |
+| Cline | Experimental | JSON (`api_conversation_history.json`) |
+| Aider | Experimental | Markdown chat history (`#### ` user prompts) |
+| DeepSeek Harness | Deferred | — (no transcript evidence yet) |
+| ZCode | Deferred | — (no transcript evidence yet) |
 
 See [Provider Maturity Matrix](docs/product/PROVIDER-MATURITY-MATRIX.md) for
-the full 16-provider roadmap.
+the full 16-provider roadmap and capability details.
 
 ## Architecture
 

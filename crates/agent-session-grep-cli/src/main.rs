@@ -42,6 +42,7 @@ use agent_session_grep_provider_cline::ClineAdapter;
 use agent_session_grep_provider_codebuddy::CodeBuddyAdapter;
 use agent_session_grep_provider_codex::CodexAdapter;
 use agent_session_grep_provider_grok::GrokBuildAdapter;
+use agent_session_grep_provider_hermes::OpenHermesAdapter;
 use agent_session_grep_provider_kimi::KimiCodeAdapter;
 use agent_session_grep_provider_openclaw::OpenClawAdapter;
 use agent_session_grep_provider_opencode::OpenCodeAdapter;
@@ -1557,6 +1558,7 @@ fn provider_registry() -> Vec<Box<dyn ProviderAdapter>> {
         Box::new(CodeBuddyAdapter::new()),
         Box::new(ClineAdapter::new()),
         Box::new(AntigravityAdapter::new()),
+        Box::new(OpenHermesAdapter::new()),
     ]
 }
 

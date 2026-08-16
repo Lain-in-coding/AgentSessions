@@ -44,6 +44,7 @@ dependencies = [
  "agent-session-grep-provider-codebuddy",
  "agent-session-grep-provider-codex",
  "agent-session-grep-provider-grok",
+ "agent-session-grep-provider-hermes",
  "agent-session-grep-provider-kimi",
  "agent-session-grep-provider-openclaw",
  "agent-session-grep-provider-opencode",
