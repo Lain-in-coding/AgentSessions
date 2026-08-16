@@ -21,6 +21,9 @@ target-*/
 
 # Generated local benchmark evidence (reports may contain machine details)
 /evidence-output/
+# Generated gate/install manifests (reproducible by re-running the harnesses;
+# may contain local machine details). Keeps scripts/evidence/out/README.md tracked.
+/scripts/evidence/out/*.json
 
 # Secrets / credentials (绝不入库)
 .env
