@@ -54,3 +54,19 @@
   lexical_recall_at_10=1.00 (≥0.95 ✓)、parse_loss_ratio=0.00 (≤0.05 ✓),
   discovery_coverage/resume_handoff_success 仍 not_applicable(对应功能未达阈值条件)。
 - verify-release 5/5 通过。HEAD 7d73ee3 已 push。
+
+## Round 3(2026-08-16):隐私终检
+
+**发现**:Web/JSON 边界存在两处 secret 泄露:(a) serve.rs 从未调用 redactor(文档声称 ADR-0009 但未实现);(b) `redact_string` 只匹配独立 secret,散文内嵌 secret(`"config with key AKIAIOSFODNN7EXAMPLE"`)全部泄露。
+
+**修复**(b1060d4):
+1. serve.rs:所有 JSON API 响应(`/api/search`、`/api/context`、`/api/status` 之外的 3 个路径)经 `redacted_json()` 统一走 `redact_value`。
+2. redaction.rs:拆分 `standalone_secret`(整串匹配)+ `embedded_shapes()`(10 个 prefix/min_len/marker 形状,longest-first)+ `find_embedded`(边界安全 prefix 匹配 + 消费 trailing token run + span ≥ min_len)+ 每 value 16 span 上限。
+
+**端到端验证**(synthetic secret fixture,非真实数据):
+- CLI `--output json` search:AKIA→`[redacted:aws_access_key]`、ghp_→`[redacted:github_token]`、sk-ant-→`[redacted:api_key]` ✓
+- CLI human context/search:raw secret 完整展示(ADR-0004 本地不脱敏)✓
+- Web `GET /api/search?q=`:hits text 全脱敏,原始响应无泄露 ✓
+- 单元测试 13→16(新增 embedded prose、边界安全、embedded bearer 3 个);workspace gate 全绿(fmt/clippy/test);已 push。
+
+**残余风险**:redaction 规则集为保守子集(AWS/GitHub/OpenAI/Anthropic/xAI/Bearer/PEM + secret-key-name),其他格式(如自定义企业 token)不在覆盖范围——后续可按需扩展 `embedded_shapes()` 并 bump RULESET_VERSION。
