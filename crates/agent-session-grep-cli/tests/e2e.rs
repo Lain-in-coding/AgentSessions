@@ -1298,6 +1298,41 @@ fn list_and_status_report_catalog_contents() {
     assert!(s.contains("\"id\":\"msg_v1_"), "list={s}");
 }
 
+fn codex_incremental_fixture(session_id: &str, messages: &[(&str, &str, &str)]) -> String {
+    let mut lines = vec![
+        serde_json::json!({
+            "timestamp": "2026-08-15T03:00:00.000Z",
+            "type": "session_meta",
+            "payload": {
+                "session_id": session_id,
+                "cwd": "/workspace/synthetic-codex-fixture",
+            },
+        })
+        .to_string(),
+    ];
+    for (index, &(id, role, text)) in messages.iter().enumerate() {
+        let content_type = if role == "user" {
+            "input_text"
+        } else {
+            "output_text"
+        };
+        lines.push(
+            serde_json::json!({
+                "timestamp": format!("2026-08-15T03:00:{:02}.000Z", index + 1),
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "id": id,
+                    "role": role,
+                    "content": [{"type": content_type, "text": text}],
+                },
+            })
+            .to_string(),
+        );
+    }
+    format!("{}\n", lines.join("\n"))
+}
+
 #[test]
 fn sync_commits_then_reports_unchanged_on_resync() {
     let (dir, db) = temp_db("sync");
@@ -1335,6 +1370,60 @@ fn sync_commits_then_reports_unchanged_on_resync() {
     assert!(
         s.contains("\"generation\":1"),
         "resync 不应推进 generation: {s}"
+    );
+}
+
+#[test]
+fn sync_commits_then_reports_unchanged_on_resync_codex() {
+    let (dir, db) = temp_db("sync-codex");
+    let fixture = dir.path().join("rollout-idempotent.jsonl");
+    std::fs::write(
+        &fixture,
+        codex_incremental_fixture(
+            "synthetic-codex-idempotent-session",
+            &[
+                (
+                    "codex_idempotent_root",
+                    "user",
+                    "verify the codex idempotent marker",
+                ),
+                (
+                    "codex_idempotent_reply",
+                    "assistant",
+                    "the codex resync is unchanged",
+                ),
+            ],
+        ),
+    )
+    .expect("write codex fixture");
+    let path = fixture.to_string_lossy().into_owned();
+
+    let out = run(&db, &["sync", &path]);
+    assert!(out.status.success(), "sync failed: {}", stdout(&out));
+    let first = parse_first_line(&out);
+    assert_eq!(first["data"]["messages"], 2, "{first}");
+    assert_eq!(first["data"]["committed"], 2, "{first}");
+    assert_eq!(first["data"]["unchanged"], 0, "{first}");
+    assert_eq!(first["data"]["skipped"], 0, "{first}");
+    assert_eq!(first["data"]["generation"], 1, "{first}");
+
+    let out = run(&db, &["search", "idempotent"]);
+    assert!(
+        stdout(&out).contains("msg_v1_codex_idempotent_root"),
+        "codex message should be searchable: {}",
+        stdout(&out)
+    );
+
+    let out = run(&db, &["sync", &path]);
+    assert!(out.status.success(), "resync failed: {}", stdout(&out));
+    let second = parse_first_line(&out);
+    assert_eq!(second["data"]["messages"], 0, "{second}");
+    assert_eq!(second["data"]["committed"], 0, "{second}");
+    assert_eq!(second["data"]["unchanged"], 2, "{second}");
+    assert_eq!(second["data"]["skipped"], 0, "{second}");
+    assert_eq!(
+        second["data"]["generation"], first["data"]["generation"],
+        "unchanged codex resync must not advance generation: {second}"
     );
 }
 
@@ -1482,6 +1571,87 @@ fn sync_tombstones_message_removed_from_source() {
 }
 
 #[test]
+fn sync_tombstones_message_removed_from_source_codex() {
+    // 源收缩的 codex 形态证据：删掉尾部 response_item 后重 sync，被移除的权威
+    // 消息必须 tombstone（不可检索），仍在的消息不受影响。codex 的 session id
+    // 取自 session_meta 的 native id（provider+安装 namespace 派生），因此与
+    // claude 形态不同——收缩后会话 id 不变，只有内容寻址的文档 id 随指纹变化。
+    let (dir, db) = temp_db("sync-shrink-codex");
+    let fixture = dir.path().join("rollout-shrink.jsonl");
+    let session = "synthetic-codex-shrink-session";
+    std::fs::write(
+        &fixture,
+        codex_incremental_fixture(
+            session,
+            &[
+                ("codex_shrink_keep", "user", "keep this codex message"),
+                ("codex_shrink_drop", "assistant", "drop this codex message"),
+            ],
+        ),
+    )
+    .expect("write codex fixture");
+    let path = fixture.to_string_lossy().into_owned();
+
+    let out = run(&db, &["sync", &path]);
+    assert!(out.status.success(), "sync failed: {}", stdout(&out));
+    let out = run(&db, &["status"]);
+    let status = parse_first_line(&out);
+    // 2 条消息 + 会话 + 文档目录行 = 4 个 catalog 实体。
+    assert_eq!(status["data"]["catalog_count"], 4, "{status}");
+    assert_eq!(status["data"]["placements"], 2, "{status}");
+    let out = run(&db, &["search", "drop"]);
+    assert!(
+        stdout(&out).contains("msg_v1_codex_shrink_drop"),
+        "search={}",
+        stdout(&out)
+    );
+
+    // 去掉尾部 response_item：完整扫描（skipped=0 → relation_complete=true），
+    // 被移除的消息声明缺席，store 层据此推导 tombstone。
+    std::fs::write(
+        &fixture,
+        codex_incremental_fixture(
+            session,
+            &[("codex_shrink_keep", "user", "keep this codex message")],
+        ),
+    )
+    .expect("rewrite codex fixture");
+
+    let out = run(&db, &["sync", &path]);
+    assert!(
+        out.status.success(),
+        "reshrink sync failed: {}",
+        stdout(&out)
+    );
+    let frame = parse_first_line(&out);
+    assert_eq!(frame["data"]["messages"], 1, "{frame}");
+    assert_eq!(frame["data"]["committed"], 1, "{frame}");
+    assert_eq!(
+        frame["data"]["skipped"], 0,
+        "完整扫描才允许 tombstone: {frame}"
+    );
+
+    let out = run(&db, &["search", "drop"]);
+    assert!(
+        !stdout(&out).contains("msg_v1_"),
+        "被移除的 codex 消息不应再命中搜索: {}",
+        stdout(&out)
+    );
+    let out = run(&db, &["search", "keep"]);
+    assert!(
+        stdout(&out).contains("msg_v1_codex_shrink_keep"),
+        "保留的 codex 消息仍应命中: {}",
+        stdout(&out)
+    );
+    let out = run(&db, &["status"]);
+    let status = parse_first_line(&out);
+    // 收缩后：1 条消息 + 会话 + 新文档 = 3。旧文档随旧 membership 一起 tombstone，
+    // 被移除消息的 placement 也随之删除。
+    assert_eq!(status["data"]["catalog_count"], 3, "{status}");
+    assert_eq!(status["data"]["placements"], 1, "{status}");
+}
+
+#[test]
 fn sync_empty_source_tombstones_all_messages() {
     // 整源清空：0 字节源必须作为合法空批次提交（tombstone 全部旧消息），
     // 而不是被 provider 拒绝（此前 "no provider recognized" 使整源清空不可达）。
@@ -1525,6 +1695,57 @@ fn sync_empty_source_tombstones_all_messages() {
         stdout(&out).contains("\"placements\":0"),
         "整源清空后 placements 应为 0: {}",
         stdout(&out)
+    );
+}
+
+#[test]
+fn sync_empty_source_tombstones_all_messages_codex() {
+    // codex 形态的整源清空：0 字节源无 provider 认领（走 CLI 的 "empty" 空批），
+    // 但语义是完整扫描 → 该源此前提交的全部 codex 消息都被 tombstone。
+    let (dir, db) = temp_db("sync-empty-codex");
+    let fixture = dir.path().join("rollout-wipe.jsonl");
+    std::fs::write(
+        &fixture,
+        codex_incremental_fixture(
+            "synthetic-codex-wipe-session",
+            &[
+                ("codex_wipe_first", "user", "codex will be wiped"),
+                ("codex_wipe_second", "assistant", "codex gone too"),
+            ],
+        ),
+    )
+    .expect("write codex fixture");
+    let path = fixture.to_string_lossy().into_owned();
+
+    let out = run(&db, &["sync", &path]);
+    assert!(out.status.success(), "sync failed: {}", stdout(&out));
+    let out = run(&db, &["search", "wiped"]);
+    assert!(
+        stdout(&out).contains("msg_v1_codex_wipe_first"),
+        "search={}",
+        stdout(&out)
+    );
+
+    std::fs::write(&fixture, b"").expect("truncate codex fixture");
+    let out = run(&db, &["sync", &path]);
+    assert!(
+        out.status.success(),
+        "empty codex source sync must succeed: {}",
+        stdout(&out)
+    );
+    for needle in ["wiped", "gone"] {
+        let out = run(&db, &["search", needle]);
+        assert!(
+            !stdout(&out).contains("msg_v1_"),
+            "整源清空后 codex 消息不应再命中 ({needle}): {}",
+            stdout(&out)
+        );
+    }
+    let out = run(&db, &["status"]);
+    let status = parse_first_line(&out);
+    assert_eq!(
+        status["data"]["placements"], 0,
+        "整源清空后 placements 应为 0: {status}"
     );
 }
 
