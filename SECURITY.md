@@ -37,5 +37,15 @@ not rely on redaction for secrets whose format is not covered by the ruleset.
 
 ## Dependencies
 
-Supply-chain auditing runs in CI via cargo-deny (see
-`.github/workflows/ci.yml`). Keep `Cargo.lock` committed for all releases.
+Pull-request checks run `cargo deny check`, while
+`.github/workflows/security-audit.yml` runs `cargo deny check` and
+`cargo audit --file Cargo.lock` weekly and on manual dispatch. Audit tool
+versions and their install dependency graphs are pinned, the committed lockfile
+is verified with `cargo metadata --locked`, and the workflow has read-only
+repository permissions with checkout credential persistence disabled. It has no
+step that uploads repository source or audit artifacts.
+
+Dependabot checks Cargo and GitHub Actions dependencies weekly. Keep
+`Cargo.lock` committed for all releases. These controls do not generate or
+attest an SBOM, third-party license bundle, provenance, signature, or
+notarization; those remain separate release and governance work.
