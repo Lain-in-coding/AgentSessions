@@ -91,6 +91,30 @@ ALLOWLIST: frozenset[tuple[str, str, str]] = frozenset(
         ("crates/agent-session-grep-provider-openclaw/src/lib.rs", "user-home", LINUX_HOME + "user"),
         ("crates/agent-session-grep-provider-pi/src/lib.rs", "user-home", LINUX_HOME + "user"),
         ("crates/agent-session-grep-provider-qoder/src/lib.rs", "user-home", LINUX_HOME + "user"),
+        # Golden fixtures for the same two providers: the byte-pinned synthetic
+        # transcript declares a placeholder Linux home working directory, and
+        # each PROVENANCE.md documents it. The fixtures are BLAKE3-pinned, so
+        # the placeholder is allowlisted rather than rewritten.
+        (
+            "crates/agent-session-grep-provider-openclaw/tests/golden/basic.jsonl",
+            "user-home",
+            LINUX_HOME + "user",
+        ),
+        (
+            "crates/agent-session-grep-provider-openclaw/tests/golden/PROVENANCE.md",
+            "user-home",
+            LINUX_HOME + "user",
+        ),
+        (
+            "crates/agent-session-grep-provider-pi/tests/golden/basic.jsonl",
+            "user-home",
+            LINUX_HOME + "user",
+        ),
+        (
+            "crates/agent-session-grep-provider-pi/tests/golden/PROVENANCE.md",
+            "user-home",
+            LINUX_HOME + "user",
+        ),
         ("spikes/search-backend/src/corpus.rs", "user-home", LINUX_HOME + "user"),
         # Synthetic Windows user homes in redaction/path-handling fixtures:
         # accounts named `secret`, `someone`, `me`, `dev` are placeholders, and
@@ -103,6 +127,9 @@ ALLOWLIST: frozenset[tuple[str, str, str]] = frozenset(
         ("crates/agent-session-grep-cli/src/human.rs", "user-home", WIN_HOME + "someone"),
         ("crates/agent-session-grep-cli/src/human.rs", "user-home", WIN_HOME + "…"),
         ("crates/agent-session-grep-cli/src/protocol.rs", "user-home", SLASH_WIN_HOME + "secret"),
+        # serve's POST-echo regression asserts a synthetic Windows user-home
+        # transcript path is never reflected back in the 501 body.
+        ("crates/agent-session-grep-cli/src/serve.rs", "user-home", SLASH_WIN_HOME + "alice"),
         ("crates/agent-session-grep-ports/src/lib.rs", "user-home", RUST_WIN_HOME + "secret"),
         ("spikes/search-backend/src/corpus.rs", "user-home", RUST_WIN_HOME + "dev"),
         (
