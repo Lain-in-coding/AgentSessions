@@ -98,6 +98,22 @@ ProbeResult
 只有在具名 workflow run 于对应 target 成功后才能填写；仅配置 workflow 或本地测试
 不得作为认证记录。
 
+实现注记（bounded ingest，闭合 §7 的 release-blocking 约束）：`§7 硬约束`的
+"流式解析，禁止整体加载大型 transcript，使用 bounded buffer"已在端口层落实：
+
+- `agent-session-grep-ports::ReadOnlySource` 是只读、可重复打开的源视图；JSONL
+  adapter 的生产解析经 `BoundedLineReader` 逐行流式读取，内存上界是单条记录
+  （manifest `max_record_size`，8 MiB），与文件大小无关。整档格式（JSON
+  array / Markdown / SQLite）无法流式解析，改为显式、受测的 `max_source_size`
+  上限（JSON 系 32 MiB、SQLite 128 MiB），由 manifest 的 `streaming_support` /
+  `max_source_size` / `max_record_size` 字段诚实声明——不宣称 streaming 而实际
+  整读。
+- 快照读取（`agent-session-grep-adapters-sqlite::source_fs`）的 capture / verify
+  各以固定大小缓冲流式计算 `len + BLAKE3`，不再按文件长度分配 `Vec`；parse 阶段
+  重新打开只读文件，提交前再流式复核指纹。span 的原始 byte offset（CRLF / UTF-8
+  BOM / truncated tail）、等长异容替换的 fingerprint 检出、以及
+  `source_changed_during_read` 的原子回滚语义均保持不变。
+
 ## 7. 硬约束（Release 阻断级）
 
 - Adapter 只通过 `ReadOnlySourceFs` 访问已授权 root，绝不修改/移动/删除/锁定源文件；
