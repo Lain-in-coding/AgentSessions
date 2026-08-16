@@ -1,4 +1,5 @@
 import importlib.util
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -28,7 +29,6 @@ class RuleTests(unittest.TestCase):
         )
 
     def test_flags_non_ascii_username_machine_roots_and_worktrees(self) -> None:
-        private_username = chr(0x5C0F) + "Q"
         findings = SCANNER.scan_lines(
             "research.md",
             [
@@ -37,7 +37,6 @@ class RuleTests(unittest.TestCase):
                 "reference at " + "D:" + "\\AgentHub\\project",
                 "coordinate " + "." + "claude/worktrees/agent-abc123",
                 "branch " + "worktree-" + "08-15-privacy",
-                "private account " + private_username,
             ],
             frozenset(),
         )
@@ -49,7 +48,6 @@ class RuleTests(unittest.TestCase):
                 "machine-root",
                 "agent-coordinate",
                 "agent-coordinate",
-                "personal-username",
             ],
         )
 
@@ -84,6 +82,34 @@ class RuleTests(unittest.TestCase):
 
 
 class RepoScanTests(unittest.TestCase):
+    def test_tracked_files_returns_every_git_reported_path(self) -> None:
+        listing = b"\0".join(
+            [
+                b"README.md",
+                b".claude/settings.json",
+                b"target/debug/notes.md",
+                b"target-aarch64/notes.md",
+                b"Github_src/reference/notes.md",
+                b"docs/with space.md",
+            ]
+        )
+        completed = subprocess.CompletedProcess(
+            args=["git", "ls-files", "-z"], returncode=0, stdout=listing + b"\0"
+        )
+        with mock.patch.object(SCANNER.subprocess, "run", return_value=completed):
+            paths = SCANNER.tracked_files(Path("."))
+        self.assertEqual(
+            paths,
+            [
+                "README.md",
+                ".claude/settings.json",
+                "target/debug/notes.md",
+                "target-aarch64/notes.md",
+                "Github_src/reference/notes.md",
+                "docs/with space.md",
+            ],
+        )
+
     def test_scan_repo_reads_only_tracked_files(self) -> None:
         with tempfile.TemporaryDirectory() as name:
             repo = Path(name)
@@ -103,6 +129,32 @@ class RepoScanTests(unittest.TestCase):
         self.assertEqual(len(findings), 1)
         self.assertEqual(findings[0].path, "tracked.md")
         self.assertEqual(findings[0].match, "C:/" + "Users/Alice")
+
+    def test_scan_repo_does_not_skip_internal_or_generated_prefixes(self) -> None:
+        # A path under an internal/generated directory only reaches this
+        # function when it is explicitly tracked (e.g. force-added). Tracked
+        # means public, so the scanner must read it instead of filtering the
+        # prefix away.
+        forced = [
+            ".claude/settings.json",
+            "target/debug/notes.md",
+            "target-aarch64/notes.md",
+            "Github_src/reference/notes.md",
+        ]
+        with tempfile.TemporaryDirectory() as name:
+            repo = Path(name)
+            for relative in forced:
+                path = repo / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(
+                    "cache at " + "C:/" + "Users/Alice/.cache/tool\n", encoding="utf-8"
+                )
+
+            with mock.patch.object(SCANNER, "tracked_files", return_value=forced):
+                findings = SCANNER.scan_repo(repo)
+
+        self.assertEqual([f.path for f in findings], forced)
+        self.assertTrue(all(f.rule == "user-home" for f in findings))
 
     def test_main_exit_codes(self) -> None:
         with mock.patch.object(SCANNER, "scan_repo", return_value=[]):

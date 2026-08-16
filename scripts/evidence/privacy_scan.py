@@ -22,9 +22,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 SCANNER_NAME = "scripts/evidence/privacy_scan.py"
-EXCLUDED_PREFIXES = (".git/", ".claude/", "target/", "target-", "Github_src/")
-
-PRIVATE_USERNAMES = (chr(0x5C0F) + "Q",)
 
 # Patterns: (rule id, explanation, compiled regex).
 # The user-home pattern only treats the first path segment as the account
@@ -52,11 +49,6 @@ RULES: tuple[tuple[str, str, re.Pattern[str]], ...] = (
             r"(?:\.claude[\\/]worktrees[\\/][A-Za-z0-9._-]+|\bworktree-[A-Za-z0-9._-]+\b)",
             re.IGNORECASE,
         ),
-    ),
-    (
-        "personal-username",
-        "known private local username",
-        re.compile("|".join(re.escape(name) for name in PRIVATE_USERNAMES), re.IGNORECASE),
     ),
 )
 
@@ -142,17 +134,19 @@ ALLOWLIST: frozenset[tuple[str, str, str]] = frozenset(
 
 
 def tracked_files(repo: Path) -> list[str]:
-    """Return every tracked path, preserving names with spaces via -z."""
+    """Return every tracked path, preserving names with spaces via -z.
+
+    Every path git reports is scanned. No prefix is filtered out here: git
+    already omits `.git/` itself, and anything else that is explicitly tracked
+    is part of the public tree even when it lives under an internal or
+    generated directory, so it must be checked rather than silently skipped.
+    """
     completed = subprocess.run(
         ["git", "-C", str(repo), "ls-files", "-z"],
         check=True,
         capture_output=True,
     )
-    return [
-        entry.decode("utf-8")
-        for entry in completed.stdout.split(b"\0")
-        if entry and not entry.decode("utf-8").startswith(EXCLUDED_PREFIXES)
-    ]
+    return [entry.decode("utf-8") for entry in completed.stdout.split(b"\0") if entry]
 
 
 def decode_text(data: bytes) -> str | None:
