@@ -22,12 +22,12 @@ pub use source_fs::{
 use agent_session_grep_application::{bigram_cjk, parse_search_instant};
 use agent_session_grep_domain::{
     EvidenceSpan, IdKind, Message, MessageEdge, MessagePlacement, MessageRelation, PlacementId,
-    Role, SessionContextGraph, SourceDocument, StableId,
+    Role, SessionContextGraph, SourceDocument, StableId, ToolActivity,
 };
 use agent_session_grep_ports::{
     CatalogEntry, CatalogStore, ContextGraphStore, ContextStats, MessageContextCandidate,
-    PortError, PortResult, ResumeClaimsStore, SearchHit, SearchIndex, SearchQuery, SemanticIndex,
-    SessionResumeMetadata, SourcePlacement, SourceResumeClaim,
+    PortError, PortResult, ResumeClaimsStore, SearchFacets, SearchHit, SearchIndex, SearchQuery,
+    SemanticIndex, SessionResumeMetadata, SidechainFacet, SourcePlacement, SourceResumeClaim,
 };
 use rusqlite::{Connection, OptionalExtension};
 use std::any::Any;
@@ -451,6 +451,7 @@ fn merge_session_payloads(_wire: &str, left: &[u8], right: &[u8]) -> PortResult<
 enum RelationUpsertManifest {
     Placement(MessagePlacement),
     Edge(MessageEdge),
+    Activity(StoredActivity),
 }
 
 impl RelationUpsertManifest {
@@ -458,6 +459,7 @@ impl RelationUpsertManifest {
         match self {
             Self::Placement(placement) => format!("placement:{}", placement.id.as_str()),
             Self::Edge(edge) => format!("edge:{}", edge.child_placement_id.as_str()),
+            Self::Activity(activity) => format!("activity:{}", activity.activity_id),
         }
     }
 
@@ -471,6 +473,18 @@ impl RelationUpsertManifest {
                 "kind": "message_edge",
                 "edge": edge,
             }),
+            Self::Activity(activity) => serde_json::json!({
+                "kind": "tool_activity",
+                "activity": {
+                    "activity_id": activity.activity_id,
+                    "message_id": activity.message_id,
+                    "kind": activity.kind,
+                    "actor": activity.actor,
+                    "name": activity.name,
+                    "target": activity.target,
+                    "status": activity.status,
+                },
+            }),
         }
     }
 }
@@ -480,6 +494,7 @@ impl RelationUpsertManifest {
 enum RelationDeleteManifest {
     Placement(PlacementId),
     Edge(PlacementId),
+    Activity(String),
 }
 
 impl RelationDeleteManifest {
@@ -487,6 +502,7 @@ impl RelationDeleteManifest {
         match self {
             Self::Placement(id) => format!("placement:{}", id.as_str()),
             Self::Edge(id) => format!("edge:{}", id.as_str()),
+            Self::Activity(activity_id) => format!("activity:{activity_id}"),
         }
     }
 
@@ -499,6 +515,10 @@ impl RelationDeleteManifest {
             Self::Edge(id) => serde_json::json!({
                 "kind": "message_edge",
                 "child_placement_id": id,
+            }),
+            Self::Activity(activity_id) => serde_json::json!({
+                "kind": "tool_activity",
+                "activity_id": activity_id,
             }),
         }
     }
@@ -526,6 +546,8 @@ struct SourceReplacementManifest {
     source_path: String,
     entity_memberships: Vec<SourceEntityMembershipManifest>,
     placement_ids: Vec<PlacementId>,
+    /// 该源声明的工具活动 id（v12；按 activity_id 排序去重）。
+    activity_ids: Vec<String>,
     relation_complete: bool,
     /// 捕获时源字节长度与内容指纹（source-scan 指纹缓存）。
     len_bytes: Option<i64>,
@@ -547,10 +569,13 @@ impl SourceReplacementManifest {
             .collect();
         let mut placement_ids = self.placement_ids.clone();
         placement_ids.sort();
+        let mut activity_ids = self.activity_ids.clone();
+        activity_ids.sort();
         serde_json::json!({
             "source_path": self.source_path,
             "entity_memberships": entity_memberships,
             "placement_ids": placement_ids,
+            "activity_ids": activity_ids,
             "relation_complete": self.relation_complete,
             "len_bytes": self.len_bytes,
             "fingerprint": self.fingerprint,
@@ -676,6 +701,9 @@ impl RelationManifests {
                     validate_placement(placement)?;
                 }
                 RelationUpsertManifest::Edge(edge) => validate_edge(edge)?,
+                // StoredActivity 在构造（stored_activity_from）时已完成
+                // 领域校验与边界截断；此处只做清单结构校验（键唯一等）。
+                RelationUpsertManifest::Activity(_) => {}
             }
         }
         let mut upsert_keys: Vec<_> = self
@@ -758,6 +786,14 @@ impl RelationManifests {
             {
                 return Err(PortError::Backend(
                     "source replacement contains duplicate placement claims".into(),
+                ));
+            }
+
+            let mut activity_ids = replacement.activity_ids.clone();
+            activity_ids.sort();
+            if activity_ids.windows(2).any(|window| window[0] == window[1]) {
+                return Err(PortError::Backend(
+                    "source replacement contains duplicate activity claims".into(),
                 ));
             }
 
@@ -951,6 +987,11 @@ pub struct SourceBatch {
     pub placements: Vec<MessagePlacement>,
     /// 本次 source scan 观察到的全部 contextual parent edges。
     pub edges: Vec<MessageEdge>,
+    /// 本次 source scan 观察到的全部工具活动（v12 投影；默认为空）。
+    ///
+    /// 活动锚定在 `message_id` 上；同一活动事实 + 同一锚点在不同源里派生同一
+    /// activity_id（跨源副本去重，claims 计数决定行生命周期）。
+    pub activities: Vec<SourceActivity>,
     /// 该 source 是否完成了零 skipped 的 relation scan。
     ///
     /// B1 不提交 completeness marker；B2 将据此替换或撤销 marker。
@@ -965,6 +1006,104 @@ pub struct SourceBatch {
     /// Source-scoped Resume Metadata 声明（ADR-0009）；随 source 事务原子写入，
     /// source 移除时同事务清除。`None` = 该 source 无可声明值。
     pub resume_claim: Option<SourceResumeClaim>,
+}
+
+/// 一条锚定在稳定消息上的工具活动（v12）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceActivity {
+    pub message_id: StableId,
+    pub activity: ToolActivity,
+}
+
+/// `tool_activities` 表行 + 活动 id 的存储视图。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StoredActivity {
+    activity_id: String,
+    message_id: String,
+    kind: String,
+    actor: String,
+    name: String,
+    target: Option<String>,
+    status: String,
+}
+
+impl StoredActivity {
+    fn matches(&self, other: &StoredActivity) -> bool {
+        self.message_id == other.message_id
+            && self.kind == other.kind
+            && self.actor == other.actor
+            && self.name == other.name
+            && self.target == other.target
+            && self.status == other.status
+    }
+}
+
+/// 工具名存储上限（字符数）：显式截断，防止 provider 失控的工具名膨胀存储。
+const TOOL_ACTIVITY_NAME_MAX_CHARS: usize = 128;
+/// 工具 target 存储上限（字符数）：显式截断；真实 transcript 的路径/命令
+/// 可能很长，但活动只承载检索面事实，不需要全文。
+const TOOL_ACTIVITY_TARGET_MAX_CHARS: usize = 512;
+
+/// 内容寻址的活动 id：`act_v1_<hex16(blake3("tool-activity-v1" || …))>`。
+///
+/// 同一 (message_id, kind, actor, name, target, status) 派生同一 id——跨源副本
+/// 天然去重；facts 在派生前已按存储上限截断（归一化点唯一，两侧一致）。
+fn activity_id_for(message_id: &str, facts: &[&str]) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"tool-activity-v1");
+    hasher.update(message_id.as_bytes());
+    hasher.update(&[0]);
+    for fact in facts {
+        hasher.update(fact.as_bytes());
+        hasher.update(&[0]);
+    }
+    let hex = hasher.finalize().to_hex();
+    format!("act_v1_{}", &hex.as_str()[..16])
+}
+
+/// 把领域活动规范化为存储行（边界：显式截断 name/target；fail-closed 校验）。
+fn stored_activity_from(
+    message_id: &StableId,
+    activity: &ToolActivity,
+) -> PortResult<StoredActivity> {
+    activity.validate().map_err(|error| {
+        PortError::Backend(format!("tool activity violates domain invariants: {error}"))
+    })?;
+    if message_id.kind() != IdKind::Message {
+        return Err(PortError::Backend(
+            "tool activity message anchor has the wrong kind".into(),
+        ));
+    }
+    let name: String = activity
+        .name
+        .chars()
+        .take(TOOL_ACTIVITY_NAME_MAX_CHARS)
+        .collect();
+    let target = activity.target.as_deref().map(|target| {
+        target
+            .chars()
+            .take(TOOL_ACTIVITY_TARGET_MAX_CHARS)
+            .collect()
+    });
+    let row = StoredActivity {
+        activity_id: activity_id_for(
+            message_id.as_str(),
+            &[
+                activity.kind.as_str(),
+                activity.actor.as_str(),
+                &name,
+                target.as_deref().unwrap_or(""),
+                activity.status.as_str(),
+            ],
+        ),
+        message_id: message_id.as_str().to_string(),
+        kind: activity.kind.as_str().to_string(),
+        actor: activity.actor.as_str().to_string(),
+        name,
+        target,
+        status: activity.status.as_str().to_string(),
+    };
+    Ok(row)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1007,6 +1146,7 @@ struct PreparedSource {
     relation_complete: bool,
     prior_entity_memberships: BTreeMap<String, Option<String>>,
     prior_placement_ids: BTreeSet<String>,
+    prior_activity_ids: BTreeSet<String>,
     observed_placements: BTreeMap<String, MessagePlacement>,
     observed_edges: BTreeMap<String, MessageEdge>,
     replacement: SourceReplacementManifest,
@@ -1364,6 +1504,9 @@ impl SqliteStore {
         if current < 11 {
             Self::migrate_v10_to_v11(conn)?;
         }
+        if current < 12 {
+            Self::migrate_v11_to_v12(conn)?;
+        }
         // 不随 user_version 门控：旧 v7 库（本列存在前建成的）打开时同样需要。
         Self::ensure_fts_ids_rowid(conn)?;
         Ok(())
@@ -1633,6 +1776,43 @@ impl SqliteStore {
                  fts_rowid    INTEGER NOT NULL
              );
              PRAGMA user_version = 11;",
+        )
+        .map_err(backend)?;
+        tx.commit().map_err(backend)
+    }
+
+    /// Add the v12 tool-activity projection in one explicit transaction
+    /// (additive, non-destructive).
+    ///
+    /// `tool_activities` stores typed tool-call observations anchored to stable
+    /// message wire ids; `tool_activity_membership` records per-source claims so
+    /// the lifecycle mirrors `message_placements` (complete-scan replace,
+    /// incomplete-scan union, tombstone via claims). The step depends only on
+    /// v7+ tables, so it runs cleanly on any catalog at v7..=11 — merge-safe
+    /// with parallel schema branches. `user_version = 12` commits with the DDL.
+    fn migrate_v11_to_v12(conn: &Connection) -> PortResult<()> {
+        let tx = conn.unchecked_transaction().map_err(backend)?;
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS tool_activities (
+                 activity_id TEXT PRIMARY KEY,
+                 message_id  TEXT NOT NULL,
+                 kind        TEXT NOT NULL,
+                 actor       TEXT NOT NULL,
+                 name        TEXT NOT NULL,
+                 target      TEXT,
+                 status      TEXT NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS tool_activities_message ON tool_activities(message_id);
+             CREATE INDEX IF NOT EXISTS tool_activities_kind ON tool_activities(kind);
+             CREATE INDEX IF NOT EXISTS tool_activities_name ON tool_activities(name);
+             CREATE TABLE IF NOT EXISTS tool_activity_membership (
+                 source_path TEXT NOT NULL,
+                 activity_id TEXT NOT NULL,
+                 PRIMARY KEY(source_path, activity_id)
+             );
+             CREATE INDEX IF NOT EXISTS tool_activity_membership_activity
+             ON tool_activity_membership(activity_id);
+             PRAGMA user_version = 12;",
         )
         .map_err(backend)?;
         tx.commit().map_err(backend)
@@ -2144,12 +2324,15 @@ impl SqliteStore {
         let scanned_paths: BTreeSet<String> = paths.into_iter().map(str::to_string).collect();
         let current_entities_by_source = self.source_entity_membership_state()?;
         let current_placements_by_source = self.source_placement_membership_state()?;
+        let current_activities_by_source = self.source_activity_membership_state()?;
         let stored_placements = self.stored_placements()?;
         let stored_edges = self.stored_edges()?;
+        let stored_activities = self.stored_activities()?;
 
         let mut merged = BTreeMap::<String, (StableId, Vec<u8>, String)>::new();
         let mut observed_placements = BTreeMap::<String, MessagePlacement>::new();
         let mut observed_edges = BTreeMap::<String, MessageEdge>::new();
+        let mut observed_activities = BTreeMap::<String, StoredActivity>::new();
         let mut prepared_sources = BTreeMap::<String, PreparedSource>::new();
 
         for source in ordered_sources {
@@ -2258,6 +2441,42 @@ impl SqliteStore {
             };
             final_placement_ids.extend(source_placements.keys().cloned());
 
+            // 工具活动（v12）：派生活动 id、校验锚点/重复，跨源事实冲突拒绝。
+            let mut source_activities = BTreeMap::new();
+            for source_activity in &source.activities {
+                let stored =
+                    stored_activity_from(&source_activity.message_id, &source_activity.activity)?;
+                if source_activities
+                    .insert(stored.activity_id.clone(), stored.clone())
+                    .is_some()
+                {
+                    return Err(PortError::Backend(format!(
+                        "source batch contains duplicate activity ids ({})",
+                        stored.activity_id
+                    )));
+                }
+                if let Some(existing) = observed_activities.get(&stored.activity_id) {
+                    if existing != &stored {
+                        return Err(PortError::Backend(format!(
+                            "activity {} has conflicting projections across sources",
+                            stored.activity_id
+                        )));
+                    }
+                } else {
+                    observed_activities.insert(stored.activity_id.clone(), stored);
+                }
+            }
+            let prior_activity_ids = current_activities_by_source
+                .get(&source.source_path)
+                .cloned()
+                .unwrap_or_default();
+            let mut final_activity_ids = if source.relation_complete {
+                BTreeSet::new()
+            } else {
+                prior_activity_ids.clone()
+            };
+            final_activity_ids.extend(source_activities.keys().cloned());
+
             let replacement = SourceReplacementManifest {
                 source_path: source.source_path.clone(),
                 entity_memberships: final_entities
@@ -2275,6 +2494,7 @@ impl SqliteStore {
                         })
                     })
                     .collect::<PortResult<Vec<_>>>()?,
+                activity_ids: final_activity_ids.into_iter().collect(),
                 relation_complete: source.relation_complete,
                 len_bytes: source.len_bytes,
                 fingerprint: source.fingerprint.clone(),
@@ -2287,6 +2507,7 @@ impl SqliteStore {
                     relation_complete: source.relation_complete,
                     prior_entity_memberships,
                     prior_placement_ids,
+                    prior_activity_ids,
                     observed_placements: source_placements,
                     observed_edges: source_edges,
                     replacement,
@@ -2406,9 +2627,30 @@ impl SqliteStore {
                     .insert(source_path.clone());
             }
         }
+        let mut final_activity_claimers = BTreeMap::<String, BTreeSet<String>>::new();
+        for (source_path, activity_ids) in &current_activities_by_source {
+            if scanned_paths.contains(source_path) {
+                continue;
+            }
+            for activity_id in activity_ids {
+                final_activity_claimers
+                    .entry(activity_id.clone())
+                    .or_default()
+                    .insert(source_path.clone());
+            }
+        }
+        for (source_path, prepared) in &prepared_sources {
+            for activity_id in &prepared.replacement.activity_ids {
+                final_activity_claimers
+                    .entry(activity_id.clone())
+                    .or_default()
+                    .insert(source_path.clone());
+            }
+        }
 
         let mut deletes = BTreeMap::new();
         let mut placement_delete_ids = BTreeSet::new();
+        let mut activity_delete_ids = BTreeSet::new();
         // 失败/不完整扫描不变量（与 fast-resume `failed_incremental_scan` 同一
         // 原则：任何 IO/解析/目录错误都不删除已索引内容）：relation_complete=false
         // 的源绝不推导 tombstone——"这次没看到"不是"已被删除"，只有完整成功的
@@ -2447,6 +2689,21 @@ impl SqliteStore {
                     && stored_placements.contains_key(prior)
                 {
                     placement_delete_ids.insert(prior.clone());
+                }
+            }
+
+            let final_activity_ids: BTreeSet<&str> = prepared
+                .replacement
+                .activity_ids
+                .iter()
+                .map(String::as_str)
+                .collect();
+            for prior in &prepared.prior_activity_ids {
+                if !final_activity_ids.contains(prior.as_str())
+                    && !final_activity_claimers.contains_key(prior)
+                    && stored_activities.contains_key(prior)
+                {
+                    activity_delete_ids.insert(prior.clone());
                 }
             }
         }
@@ -2546,6 +2803,11 @@ impl SqliteStore {
                         .into_values()
                         .map(RelationUpsertManifest::Edge),
                 )
+                .chain(
+                    observed_activities
+                        .into_values()
+                        .map(RelationUpsertManifest::Activity),
+                )
                 .collect(),
             relation_deletes: edge_delete_ids
                 .into_iter()
@@ -2563,6 +2825,11 @@ impl SqliteStore {
                             PortError::Backend(format!("invalid placement tombstone id: {wire}"))
                         })
                 }))
+                .chain(
+                    activity_delete_ids
+                        .into_iter()
+                        .map(|id| Ok(RelationDeleteManifest::Activity(id))),
+                )
                 .collect::<PortResult<Vec<_>>>()?,
             source_replacements: prepared_sources
                 .into_values()
@@ -2821,6 +3088,72 @@ impl SqliteStore {
                     return Ok(false);
                 }
             }
+            // Tool-activity claims for this source only.
+            let mut stmt = conn
+                .prepare(
+                    "SELECT activity_id FROM tool_activity_membership
+                     WHERE source_path = ?1 ORDER BY activity_id",
+                )
+                .map_err(backend)?;
+            let rows = stmt
+                .query_map([&source.source_path], |row| row.get::<_, String>(0))
+                .map_err(backend)?;
+            let stored_activity_claims: BTreeSet<String> =
+                rows.collect::<Result<_, _>>().map_err(backend)?;
+            let expected_activity_claims: BTreeSet<String> = source
+                .activities
+                .iter()
+                .map(|source_activity| {
+                    stored_activity_from(&source_activity.message_id, &source_activity.activity)
+                        .map(|stored| stored.activity_id)
+                })
+                .collect::<PortResult<BTreeSet<_>>>()?;
+            if stored_activity_claims != expected_activity_claims {
+                return Ok(false);
+            }
+            // Stored activity rows for this source's ids (batched, chunked).
+            let mut stored_rows: BTreeMap<String, StoredActivity> = BTreeMap::new();
+            let activity_ids: Vec<String> = expected_activity_claims.into_iter().collect();
+            for chunk in chunk_ids(&activity_ids) {
+                let placeholders = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+                let mut stmt = conn
+                    .prepare(&format!(
+                        "SELECT activity_id, message_id, kind, actor, name, target, status
+                         FROM tool_activities WHERE activity_id IN ({placeholders})"
+                    ))
+                    .map_err(backend)?;
+                let rows = stmt
+                    .query_map(rusqlite::params_from_iter(chunk.iter()), |row| {
+                        let id: String = row.get(0)?;
+                        Ok((
+                            id.clone(),
+                            StoredActivity {
+                                activity_id: id,
+                                message_id: row.get(1)?,
+                                kind: row.get(2)?,
+                                actor: row.get(3)?,
+                                name: row.get(4)?,
+                                target: row.get(5)?,
+                                status: row.get(6)?,
+                            },
+                        ))
+                    })
+                    .map_err(backend)?;
+                for row in rows {
+                    let (id, stored) = row.map_err(backend)?;
+                    stored_rows.insert(id, stored);
+                }
+            }
+            for source_activity in &source.activities {
+                let expected =
+                    stored_activity_from(&source_activity.message_id, &source_activity.activity)?;
+                if !stored_rows
+                    .get(&expected.activity_id)
+                    .is_some_and(|stored| stored.matches(&expected))
+                {
+                    return Ok(false);
+                }
+            }
             // Completeness marker (scan record already checked at loop head).
             let complete: bool = conn
                 .query_row(
@@ -2998,6 +3331,64 @@ impl SqliteStore {
             edges.insert(placement_id, edge);
         }
         Ok(edges)
+    }
+
+    fn stored_activities(&self) -> PortResult<BTreeMap<String, StoredActivity>> {
+        let conn = self.conn.borrow();
+        Self::stored_activities_from(&conn)
+    }
+
+    fn stored_activities_from(conn: &Connection) -> PortResult<BTreeMap<String, StoredActivity>> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT activity_id, message_id, kind, actor, name, target, status
+                 FROM tool_activities ORDER BY activity_id",
+            )
+            .map_err(backend)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    StoredActivity {
+                        activity_id: String::new(), // 键即 id，行内不重复承载
+                        message_id: row.get(1)?,
+                        kind: row.get(2)?,
+                        actor: row.get(3)?,
+                        name: row.get(4)?,
+                        target: row.get(5)?,
+                        status: row.get(6)?,
+                    },
+                ))
+            })
+            .map_err(backend)?;
+        let mut activities = BTreeMap::new();
+        for row in rows {
+            let (activity_id, mut activity) = row.map_err(backend)?;
+            activity.activity_id = activity_id.clone();
+            activities.insert(activity_id, activity);
+        }
+        Ok(activities)
+    }
+
+    fn source_activity_membership_state(&self) -> PortResult<BTreeMap<String, BTreeSet<String>>> {
+        let conn = self.conn.borrow();
+        let mut stmt = conn
+            .prepare(
+                "SELECT source_path, activity_id
+                 FROM tool_activity_membership ORDER BY source_path, activity_id",
+            )
+            .map_err(backend)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(backend)?;
+        let mut state = BTreeMap::<String, BTreeSet<String>>::new();
+        for row in rows {
+            let (source_path, activity_id) = row.map_err(backend)?;
+            state.entry(source_path).or_default().insert(activity_id);
+        }
+        Ok(state)
     }
 
     fn regenerate_compatibility_aliases_in_tx(
@@ -3331,6 +3722,7 @@ impl SqliteStore {
         }
         let stored_placements = self.stored_placements()?;
         let stored_edges = self.stored_edges()?;
+        let stored_activities = self.stored_activities()?;
         for upsert in &relations.relation_upserts {
             let current = match upsert {
                 RelationUpsertManifest::Placement(placement) => stored_placements
@@ -3339,6 +3731,9 @@ impl SqliteStore {
                 RelationUpsertManifest::Edge(edge) => stored_edges
                     .get(edge.child_placement_id.as_str())
                     .is_some_and(|stored| stored.matches(edge)),
+                RelationUpsertManifest::Activity(activity) => stored_activities
+                    .get(&activity.activity_id)
+                    .is_some_and(|stored| stored.matches(activity)),
             };
             if !current {
                 return Ok(false);
@@ -3350,6 +3745,9 @@ impl SqliteStore {
                     stored_placements.contains_key(id.as_str())
                 }
                 RelationDeleteManifest::Edge(id) => stored_edges.contains_key(id.as_str()),
+                RelationDeleteManifest::Activity(activity_id) => {
+                    stored_activities.contains_key(activity_id)
+                }
             };
             if exists {
                 return Ok(false);
@@ -3358,6 +3756,7 @@ impl SqliteStore {
 
         let entity_state = self.source_entity_membership_state()?;
         let placement_state = self.source_placement_membership_state()?;
+        let activity_state = self.source_activity_membership_state()?;
         let conn = self.conn.borrow();
         for replacement in &relations.source_replacements {
             let expected_entities: BTreeMap<String, Option<String>> = replacement
@@ -3383,6 +3782,16 @@ impl SqliteStore {
                 .cloned()
                 .unwrap_or_default()
                 != expected_placements
+            {
+                return Ok(false);
+            }
+            let expected_activity_ids: BTreeSet<String> =
+                replacement.activity_ids.iter().cloned().collect();
+            if activity_state
+                .get(&replacement.source_path)
+                .cloned()
+                .unwrap_or_default()
+                != expected_activity_ids
             {
                 return Ok(false);
             }
@@ -4036,6 +4445,13 @@ impl SqliteStore {
                     )
                     .map_err(backend)?;
                 }
+                RelationDeleteManifest::Activity(activity_id) => {
+                    tx.execute(
+                        "DELETE FROM tool_activities WHERE activity_id = ?1",
+                        [activity_id],
+                    )
+                    .map_err(backend)?;
+                }
             }
         }
         // 关系行 upsert：多行批量（借鉴 hstry bulk_insert_messages_in_tx，MIT，
@@ -4138,6 +4554,35 @@ impl SqliteStore {
             }
         }
 
+        // 工具活动 upsert（v12）：逐行 upsert。活动行是内容寻址的（activity_id），
+        // 同一事实跨源去重；行数由工具调用数决定，量级远小于 placements/edges。
+        for upsert in &relations.relation_upserts {
+            if let RelationUpsertManifest::Activity(activity) = upsert {
+                tx.execute(
+                    "INSERT INTO tool_activities(
+                         activity_id, message_id, kind, actor, name, target, status
+                     ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                     ON CONFLICT(activity_id) DO UPDATE SET
+                         message_id = excluded.message_id,
+                         kind = excluded.kind,
+                         actor = excluded.actor,
+                         name = excluded.name,
+                         target = excluded.target,
+                         status = excluded.status",
+                    rusqlite::params![
+                        activity.activity_id,
+                        activity.message_id,
+                        activity.kind,
+                        activity.actor,
+                        activity.name,
+                        activity.target,
+                        activity.status,
+                    ],
+                )
+                .map_err(backend)?;
+            }
+        }
+
         for source in &relations.source_replacements {
             tx.execute(
                 "DELETE FROM source_membership WHERE source_path = ?1",
@@ -4191,6 +4636,21 @@ impl SqliteStore {
                     .collect();
                 tx.execute(&sql, rusqlite::params_from_iter(params))
                     .map_err(backend)?;
+            }
+            // 工具活动成员（v12）：与 placement 同一生命周期——先清旧声明，
+            // 本批带活动才写新行；无活动即清除（source 不再观察/移除）。
+            tx.execute(
+                "DELETE FROM tool_activity_membership WHERE source_path = ?1",
+                [&source.source_path],
+            )
+            .map_err(backend)?;
+            for activity_id in &source.activity_ids {
+                tx.execute(
+                    "INSERT INTO tool_activity_membership(source_path, activity_id)
+                     VALUES(?1, ?2)",
+                    rusqlite::params![&source.source_path, activity_id],
+                )
+                .map_err(backend)?;
             }
             tx.execute(
                 "INSERT INTO source_scans(source_path, scanned_at_ms, len_bytes, fingerprint, provider_id)
@@ -4285,6 +4745,8 @@ impl SqliteStore {
                 RelationUpsertManifest::Edge(edge) => {
                     touched_edges.push(edge.child_placement_id.as_str().to_string());
                 }
+                // 工具活动不参与 placement/edge 引用完整性校验（独立表）。
+                RelationUpsertManifest::Activity(_) => {}
             }
         }
         for delete in &relations.relation_deletes {
@@ -4295,6 +4757,7 @@ impl SqliteStore {
                 RelationDeleteManifest::Edge(id) => {
                     touched_edges.push(id.as_str().to_string());
                 }
+                RelationDeleteManifest::Activity(_) => {}
             }
         }
         Self::verify_relational_integrity_in_tx(
@@ -4866,7 +5329,12 @@ const RELATION_SCHEMA_VERSION: i64 = 7;
 /// Original Working Directory、首个有效 user request 的 title-like 字段）；
 /// 旧目录无需数据迁移，rebuild 或后续 source 提交填充。Provider custom
 /// title/summary 仍未进入 Canonical 契约，继续显式 deferred。
-pub const SCHEMA_VERSION: i64 = 11;
+///
+/// v12：新增 `tool_activities` 与 `tool_activity_membership`——typed tool-call
+/// 观察投影，content-addressed activity_id 跨 source 去重，生命周期镜像
+/// `message_placements`（complete-scan replace、incomplete-scan union、
+/// claims tombstone）；随 rebuild 或后续 source 提交填充。
+pub const SCHEMA_VERSION: i64 = 12;
 
 impl CatalogStore for SqliteStore {
     fn get(&self, id: &StableId) -> PortResult<Option<Vec<u8>>> {
@@ -5758,6 +6226,131 @@ impl SearchIndex for SqliteStore {
         hits.truncate(limit);
         Ok(hits)
     }
+
+    fn query_faceted(
+        &self,
+        query: SearchQuery<'_>,
+        limit: usize,
+        facets: &SearchFacets,
+    ) -> PortResult<Vec<SearchHit>> {
+        if facets.is_default() {
+            return self.query_filtered(query, limit);
+        }
+        let conn = self.conn.borrow();
+        let safe_query = safe_fts_query(&bigram_cjk(query.text));
+        if safe_query.is_empty() {
+            return Ok(Vec::new());
+        }
+        // 带 facet 的钉住排序查询：与 query_filtered 同基座（filter 谓词全部下推），
+        // 再叠加索引列上的 EXISTS 探针。每个谓词都走索引（fts_ids.id_json UNIQUE +
+        // message_placements_message / tool_activities_message 等），无全表扫描；
+        // kind/name 只用等值比较。sidechain 语义（确定性）：MainOnly = 无任何
+        // sidechain placement；SubagentOnly = 至少一个 sidechain placement。
+        let mut sql = String::from(
+            "SELECT f.id, bm25(fts) FROM fts AS f
+             WHERE fts MATCH ?1",
+        );
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(safe_query)];
+        if !query.filters.providers.is_empty() {
+            let mut clause = String::from(
+                " AND EXISTS (
+                     SELECT 1 FROM message_placements mp
+                     JOIN catalog doc ON doc.id = mp.document_id
+                     WHERE mp.message_id = (
+                         SELECT wire_id FROM fts_ids WHERE id_json = f.id
+                     )
+                     AND json_extract(doc.payload, '$.provider') IN (",
+            );
+            for (index, provider) in query.filters.providers.iter().enumerate() {
+                if index > 0 {
+                    clause.push(',');
+                }
+                clause.push('?');
+                params.push(Box::new(provider.as_str()));
+            }
+            clause.push_str("))");
+            sql.push_str(&clause);
+        }
+        if query.filters.since.is_some() || query.filters.until.is_some() {
+            sql.push_str(
+                " AND EXISTS (
+                     SELECT 1 FROM catalog msg
+                     WHERE msg.id = (
+                         SELECT wire_id FROM fts_ids WHERE id_json = f.id
+                     )",
+            );
+            if let Some(since) = query.filters.since {
+                sql.push_str(
+                    " AND asg_instant_sort_key(json_extract(msg.payload, '$.timestamp')) >= ?",
+                );
+                params.push(Box::new(since.sort_key().to_vec()));
+            }
+            if let Some(until) = query.filters.until {
+                sql.push_str(
+                    " AND asg_instant_sort_key(json_extract(msg.payload, '$.timestamp')) < ?",
+                );
+                params.push(Box::new(until.sort_key().to_vec()));
+            }
+            sql.push(')');
+        }
+        match facets.sidechain {
+            SidechainFacet::Include => {}
+            SidechainFacet::MainOnly => {
+                sql.push_str(
+                    " AND NOT EXISTS(
+                         SELECT 1 FROM fts_ids fi2
+                         JOIN message_placements mp ON mp.message_id = fi2.wire_id
+                         WHERE fi2.id_json = f.id AND mp.is_sidechain = 1
+                     )",
+                );
+            }
+            SidechainFacet::SubagentOnly => {
+                sql.push_str(
+                    " AND EXISTS(
+                         SELECT 1 FROM fts_ids fi2
+                         JOIN message_placements mp ON mp.message_id = fi2.wire_id
+                         WHERE fi2.id_json = f.id AND mp.is_sidechain = 1
+                     )",
+                );
+            }
+        }
+        if let Some(kind) = &facets.tool_kind {
+            params.push(Box::new(kind.clone()));
+            let index = params.len();
+            sql.push_str(&format!(
+                " AND EXISTS(
+                     SELECT 1 FROM fts_ids fi2
+                     JOIN tool_activities ta ON ta.message_id = fi2.wire_id
+                     WHERE fi2.id_json = f.id AND ta.kind = ?{index}
+                 )",
+            ));
+        }
+        if let Some(name) = &facets.tool_name {
+            params.push(Box::new(name.clone()));
+            let index = params.len();
+            sql.push_str(&format!(
+                " AND EXISTS(
+                     SELECT 1 FROM fts_ids fi2
+                     JOIN tool_activities ta ON ta.message_id = fi2.wire_id
+                     WHERE fi2.id_json = f.id AND ta.name = ?{index}
+                 )",
+            ));
+        }
+        sql.push_str(" ORDER BY bm25(fts), f.id LIMIT ?");
+        params.push(Box::new(limit as i64));
+
+        let mut stmt = conn.prepare(&sql).map_err(backend)?;
+        let params_ref: Vec<&dyn rusqlite::ToSql> =
+            params.iter().map(std::convert::AsRef::as_ref).collect();
+        let rows = stmt
+            .query_map(&*params_ref, |row| {
+                let id_json: String = row.get(0)?;
+                let bm25: f64 = row.get(1)?;
+                Ok((id_json, bm25))
+            })
+            .map_err(backend)?;
+        collect_hits(rows)
+    }
 }
 
 /// 语义向量边车（#3，schema v10）。
@@ -6477,7 +7070,11 @@ mod filtered_query_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_session_grep_domain::{EvidenceSpan, IdKind, MessageRelation, Stability};
+    use agent_session_grep_domain::{
+        EvidenceSpan, IdKind, MessageRelation, Stability, ToolActivity, ToolActivityActor,
+        ToolActivityKind, ToolActivityStatus,
+    };
+    use agent_session_grep_ports::SearchFilters;
 
     type PlacementSnapshotRow = (
         String,
@@ -6592,6 +7189,7 @@ mod tests {
     fn schema_v10_creates_message_vec_table() {
         let store = SqliteStore::open_in_memory().unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
+        assert_eq!(SCHEMA_VERSION, 12);
         let conn = store.conn.borrow();
         let count: i64 = conn
             .query_row(
@@ -6909,6 +7507,7 @@ mod tests {
             entries,
             placements,
             edges,
+            activities: Vec::new(),
             relation_complete,
             len_bytes: None,
             fingerprint: None,
@@ -9280,6 +9879,7 @@ mod tests {
             source_path: "rowid.jsonl".into(),
             placements: Vec::new(),
             edges: Vec::new(),
+            activities: Vec::new(),
             relation_complete: true,
             len_bytes: None,
             fingerprint: None,
@@ -9381,6 +9981,7 @@ mod tests {
             source_path: "bulk.jsonl".into(),
             placements: Vec::new(),
             edges: Vec::new(),
+            activities: Vec::new(),
             relation_complete: true,
             len_bytes: None,
             fingerprint: None,
@@ -9499,6 +10100,7 @@ mod tests {
             source_path: "fixture.jsonl".into(),
             placements: Vec::new(),
             edges: Vec::new(),
+            activities: Vec::new(),
             relation_complete: true,
             len_bytes: None,
             fingerprint: None,
@@ -9521,6 +10123,7 @@ mod tests {
             source_path: "fixture.jsonl".into(),
             placements: Vec::new(),
             edges: Vec::new(),
+            activities: Vec::new(),
             relation_complete: true,
             len_bytes: None,
             fingerprint: None,
@@ -9547,6 +10150,7 @@ mod tests {
             source_path: "same.jsonl".into(),
             placements: Vec::new(),
             edges: Vec::new(),
+            activities: Vec::new(),
             relation_complete: true,
             len_bytes: None,
             fingerprint: None,
@@ -9675,6 +10279,7 @@ mod tests {
             source_path: "mixed.jsonl".into(),
             placements: Vec::new(),
             edges: Vec::new(),
+            activities: Vec::new(),
             relation_complete: true,
             len_bytes: None,
             fingerprint: None,
@@ -9724,6 +10329,7 @@ mod tests {
             source_path: "rebuild.jsonl".into(),
             placements: Vec::new(),
             edges: Vec::new(),
+            activities: Vec::new(),
             relation_complete: true,
             len_bytes: None,
             fingerprint: None,
@@ -9770,6 +10376,7 @@ mod tests {
             source_path: "retire.jsonl".into(),
             placements: Vec::new(),
             edges: Vec::new(),
+            activities: Vec::new(),
             relation_complete: true,
             len_bytes: None,
             fingerprint: None,
@@ -9800,6 +10407,7 @@ mod tests {
             source_path: "retire.jsonl".into(),
             placements: Vec::new(),
             edges: Vec::new(),
+            activities: Vec::new(),
             relation_complete: true,
             len_bytes: None,
             fingerprint: None,
@@ -9827,6 +10435,7 @@ mod tests {
                 source_path: "one.jsonl".into(),
                 placements: Vec::new(),
                 edges: Vec::new(),
+                activities: Vec::new(),
                 relation_complete: true,
                 len_bytes: None,
                 fingerprint: None,
@@ -9841,6 +10450,7 @@ mod tests {
                 source_path: "two.jsonl".into(),
                 placements: Vec::new(),
                 edges: Vec::new(),
+                activities: Vec::new(),
                 relation_complete: true,
                 len_bytes: None,
                 fingerprint: None,
@@ -9859,6 +10469,7 @@ mod tests {
             source_path: "one.jsonl".into(),
             placements: Vec::new(),
             edges: Vec::new(),
+            activities: Vec::new(),
             relation_complete: true,
             len_bytes: None,
             fingerprint: None,
@@ -9922,6 +10533,7 @@ mod tests {
                 source_path: "part-a.jsonl".into(),
                 placements: Vec::new(),
                 edges: Vec::new(),
+                activities: Vec::new(),
                 relation_complete: true,
                 len_bytes: None,
                 fingerprint: None,
@@ -9941,6 +10553,7 @@ mod tests {
                 source_path: "part-b.jsonl".into(),
                 placements: Vec::new(),
                 edges: Vec::new(),
+                activities: Vec::new(),
                 relation_complete: true,
                 len_bytes: None,
                 fingerprint: None,
@@ -9986,6 +10599,7 @@ mod tests {
             source_path: "batch-a.jsonl".into(),
             placements: Vec::new(),
             edges: Vec::new(),
+            activities: Vec::new(),
             relation_complete: true,
             len_bytes: None,
             fingerprint: None,
@@ -10011,6 +10625,7 @@ mod tests {
             source_path: "batch-b.jsonl".into(),
             placements: Vec::new(),
             edges: Vec::new(),
+            activities: Vec::new(),
             relation_complete: true,
             len_bytes: None,
             fingerprint: None,
@@ -10055,6 +10670,7 @@ mod tests {
                 source_path: "noop-a.jsonl".into(),
                 placements: Vec::new(),
                 edges: Vec::new(),
+                activities: Vec::new(),
                 relation_complete: true,
                 len_bytes: None,
                 fingerprint: None,
@@ -10074,6 +10690,7 @@ mod tests {
                 source_path: "noop-b.jsonl".into(),
                 placements: Vec::new(),
                 edges: Vec::new(),
+                activities: Vec::new(),
                 relation_complete: true,
                 len_bytes: None,
                 fingerprint: None,
@@ -10120,6 +10737,7 @@ mod tests {
             source_path: "legacy-a.jsonl".into(),
             placements: Vec::new(),
             edges: Vec::new(),
+            activities: Vec::new(),
             relation_complete: true,
             len_bytes: None,
             fingerprint: None,
@@ -10141,6 +10759,7 @@ mod tests {
             source_path: "legacy-b.jsonl".into(),
             placements: Vec::new(),
             edges: Vec::new(),
+            activities: Vec::new(),
             relation_complete: true,
             len_bytes: None,
             fingerprint: None,
@@ -10181,6 +10800,7 @@ mod tests {
                 source_path: "conflict-a.jsonl".into(),
                 placements: Vec::new(),
                 edges: Vec::new(),
+                activities: Vec::new(),
                 relation_complete: true,
                 len_bytes: None,
                 fingerprint: None,
@@ -10192,6 +10812,7 @@ mod tests {
                 source_path: "conflict-b.jsonl".into(),
                 placements: Vec::new(),
                 edges: Vec::new(),
+                activities: Vec::new(),
                 relation_complete: true,
                 len_bytes: None,
                 fingerprint: None,
@@ -10273,6 +10894,7 @@ mod tests {
                 source_path: "old-codex.jsonl".into(),
                 placements: Vec::new(),
                 edges: Vec::new(),
+                activities: Vec::new(),
                 relation_complete: true,
                 len_bytes: None,
                 fingerprint: None,
@@ -10284,6 +10906,7 @@ mod tests {
                 source_path: "new-codex.jsonl".into(),
                 placements: Vec::new(),
                 edges: Vec::new(),
+                activities: Vec::new(),
                 relation_complete: true,
                 len_bytes: None,
                 fingerprint: None,
@@ -10330,6 +10953,7 @@ mod tests {
                 source_path: "null-first.jsonl".into(),
                 placements: Vec::new(),
                 edges: Vec::new(),
+                activities: Vec::new(),
                 relation_complete: true,
                 len_bytes: None,
                 fingerprint: None,
@@ -10341,6 +10965,7 @@ mod tests {
                 source_path: "string-second.jsonl".into(),
                 placements: Vec::new(),
                 edges: Vec::new(),
+                activities: Vec::new(),
                 relation_complete: true,
                 len_bytes: None,
                 fingerprint: None,
@@ -10374,6 +10999,7 @@ mod tests {
                 source_path: "original.jsonl".into(),
                 placements: Vec::new(),
                 edges: Vec::new(),
+                activities: Vec::new(),
                 relation_complete: true,
                 len_bytes: None,
                 fingerprint: None,
@@ -10389,6 +11015,7 @@ mod tests {
                 source_path: "resumed.jsonl".into(),
                 placements: Vec::new(),
                 edges: Vec::new(),
+                activities: Vec::new(),
                 relation_complete: true,
                 len_bytes: None,
                 fingerprint: None,
@@ -10435,6 +11062,7 @@ mod tests {
                 source_path: "first.jsonl".into(),
                 placements: Vec::new(),
                 edges: Vec::new(),
+                activities: Vec::new(),
                 relation_complete: true,
                 len_bytes: None,
                 fingerprint: None,
@@ -10450,6 +11078,7 @@ mod tests {
                 source_path: "second.jsonl".into(),
                 placements: Vec::new(),
                 edges: Vec::new(),
+                activities: Vec::new(),
                 relation_complete: true,
                 len_bytes: None,
                 fingerprint: None,
@@ -10493,6 +11122,7 @@ mod tests {
                 source_path: "first.jsonl".into(),
                 placements: Vec::new(),
                 edges: Vec::new(),
+                activities: Vec::new(),
                 relation_complete: true,
                 len_bytes: None,
                 fingerprint: None,
@@ -10508,6 +11138,7 @@ mod tests {
                 source_path: "second.jsonl".into(),
                 placements: Vec::new(),
                 edges: Vec::new(),
+                activities: Vec::new(),
                 relation_complete: true,
                 len_bytes: None,
                 fingerprint: None,
@@ -10552,6 +11183,7 @@ mod tests {
                 source_path: "aaa-long.jsonl".into(),
                 placements: Vec::new(),
                 edges: Vec::new(),
+                activities: Vec::new(),
                 relation_complete: true,
                 len_bytes: None,
                 fingerprint: None,
@@ -10567,6 +11199,7 @@ mod tests {
                 source_path: "zzz-short.jsonl".into(),
                 placements: Vec::new(),
                 edges: Vec::new(),
+                activities: Vec::new(),
                 relation_complete: true,
                 len_bytes: None,
                 fingerprint: None,
@@ -10624,6 +11257,7 @@ mod tests {
             source_path: "payload-only.jsonl".into(),
             placements: Vec::new(),
             edges: Vec::new(),
+            activities: Vec::new(),
             relation_complete: true,
             len_bytes: None,
             fingerprint: None,
@@ -10646,6 +11280,7 @@ mod tests {
             source_path: "payload-only.jsonl".into(),
             placements: Vec::new(),
             edges: Vec::new(),
+            activities: Vec::new(),
             relation_complete: true,
             len_bytes: None,
             fingerprint: None,
@@ -10690,6 +11325,7 @@ mod tests {
             source_path: "fingerprint.jsonl".into(),
             placements: Vec::new(),
             edges: Vec::new(),
+            activities: Vec::new(),
             relation_complete: true,
             len_bytes: Some(10),
             fingerprint: Some(fingerprint.to_string()),
@@ -10868,6 +11504,7 @@ mod tests {
             source_path: "put.jsonl".into(),
             placements: Vec::new(),
             edges: Vec::new(),
+            activities: Vec::new(),
             relation_complete: true,
             len_bytes: None,
             fingerprint: None,
@@ -10944,6 +11581,7 @@ mod tests {
             source_path: "first.jsonl".into(),
             placements: Vec::new(),
             edges: Vec::new(),
+            activities: Vec::new(),
             relation_complete: true,
             len_bytes: None,
             fingerprint: None,
@@ -10964,6 +11602,7 @@ mod tests {
             source_path: "second.jsonl".into(),
             placements: Vec::new(),
             edges: Vec::new(),
+            activities: Vec::new(),
             relation_complete: true,
             len_bytes: None,
             fingerprint: None,
@@ -10999,6 +11638,7 @@ mod tests {
                 source_path: "one".into(),
                 placements: Vec::new(),
                 edges: Vec::new(),
+                activities: Vec::new(),
                 relation_complete: true,
                 len_bytes: None,
                 fingerprint: None,
@@ -11010,6 +11650,7 @@ mod tests {
                 source_path: "two".into(),
                 placements: Vec::new(),
                 edges: Vec::new(),
+                activities: Vec::new(),
                 relation_complete: true,
                 len_bytes: None,
                 fingerprint: None,
@@ -11024,6 +11665,7 @@ mod tests {
                 source_path: "one".into(),
                 placements: Vec::new(),
                 edges: Vec::new(),
+                activities: Vec::new(),
                 relation_complete: true,
                 len_bytes: None,
                 fingerprint: None,
@@ -11035,6 +11677,7 @@ mod tests {
                 source_path: "two".into(),
                 placements: Vec::new(),
                 edges: Vec::new(),
+                activities: Vec::new(),
                 relation_complete: true,
                 len_bytes: None,
                 fingerprint: None,
@@ -11057,6 +11700,7 @@ mod tests {
             source_path: "source-a".into(),
             placements: Vec::new(),
             edges: Vec::new(),
+            activities: Vec::new(),
             relation_complete: true,
             len_bytes: None,
             fingerprint: None,
@@ -11073,6 +11717,7 @@ mod tests {
                 source_path: "source-a".into(),
                 placements: Vec::new(),
                 edges: Vec::new(),
+                activities: Vec::new(),
                 relation_complete: true,
                 len_bytes: None,
                 fingerprint: None,
@@ -11084,6 +11729,7 @@ mod tests {
                 source_path: "source-b".into(),
                 placements: Vec::new(),
                 edges: Vec::new(),
+                activities: Vec::new(),
                 relation_complete: true,
                 len_bytes: None,
                 fingerprint: None,
@@ -11122,6 +11768,7 @@ mod tests {
                     source_path: "source-a".into(),
                     placements: Vec::new(),
                     edges: Vec::new(),
+                    activities: Vec::new(),
                     relation_complete: true,
                     len_bytes: None,
                     fingerprint: None,
@@ -11136,6 +11783,7 @@ mod tests {
                     source_path: "source-c".into(),
                     placements: Vec::new(),
                     edges: Vec::new(),
+                    activities: Vec::new(),
                     relation_complete: true,
                     len_bytes: None,
                     fingerprint: None,
@@ -11151,6 +11799,7 @@ mod tests {
                     source_path: "source-a".into(),
                     placements: Vec::new(),
                     edges: Vec::new(),
+                    activities: Vec::new(),
                     relation_complete: true,
                     len_bytes: None,
                     fingerprint: None,
@@ -11162,6 +11811,7 @@ mod tests {
                     source_path: "source-b".into(),
                     placements: Vec::new(),
                     edges: Vec::new(),
+                    activities: Vec::new(),
                     relation_complete: true,
                     len_bytes: None,
                     fingerprint: None,
@@ -11173,6 +11823,7 @@ mod tests {
                     source_path: "source-c".into(),
                     placements: Vec::new(),
                     edges: Vec::new(),
+                    activities: Vec::new(),
                     relation_complete: true,
                     len_bytes: None,
                     fingerprint: None,
@@ -11212,6 +11863,7 @@ mod tests {
             source_path: "empty-later".into(),
             placements: Vec::new(),
             edges: Vec::new(),
+            activities: Vec::new(),
             relation_complete: true,
             len_bytes: None,
             fingerprint: None,
@@ -11226,6 +11878,7 @@ mod tests {
             source_path: "empty-later".into(),
             placements: Vec::new(),
             edges: Vec::new(),
+            activities: Vec::new(),
             relation_complete: true,
             len_bytes: None,
             fingerprint: None,
@@ -11248,6 +11901,7 @@ mod tests {
                 source_path: "same".into(),
                 placements: Vec::new(),
                 edges: Vec::new(),
+                activities: Vec::new(),
                 relation_complete: true,
                 len_bytes: None,
                 fingerprint: None,
@@ -11259,6 +11913,7 @@ mod tests {
                 source_path: "same".into(),
                 placements: Vec::new(),
                 edges: Vec::new(),
+                activities: Vec::new(),
                 relation_complete: true,
                 len_bytes: None,
                 fingerprint: None,
@@ -11282,6 +11937,7 @@ mod tests {
             source_path: private_path.into(),
             placements: Vec::new(),
             edges: Vec::new(),
+            activities: Vec::new(),
             relation_complete: true,
             len_bytes: None,
             fingerprint: None,
@@ -11315,6 +11971,7 @@ mod tests {
                 source_path: "one".into(),
                 placements: Vec::new(),
                 edges: Vec::new(),
+                activities: Vec::new(),
                 relation_complete: true,
                 len_bytes: None,
                 fingerprint: None,
@@ -11326,6 +11983,7 @@ mod tests {
                 source_path: "two".into(),
                 placements: Vec::new(),
                 edges: Vec::new(),
+                activities: Vec::new(),
                 relation_complete: true,
                 len_bytes: None,
                 fingerprint: None,
@@ -11352,6 +12010,7 @@ mod tests {
             source_path: "first-source".into(),
             placements: Vec::new(),
             edges: Vec::new(),
+            activities: Vec::new(),
             relation_complete: true,
             len_bytes: None,
             fingerprint: None,
@@ -11370,6 +12029,7 @@ mod tests {
             source_path: "second-source".into(),
             placements: Vec::new(),
             edges: Vec::new(),
+            activities: Vec::new(),
             relation_complete: true,
             len_bytes: None,
             fingerprint: None,
@@ -11517,6 +12177,7 @@ mod tests {
                 source_path: "manifest-source.jsonl".into(),
                 entity_memberships: Vec::new(),
                 placement_ids: Vec::new(),
+                activity_ids: Vec::new(),
                 relation_complete: true,
                 len_bytes: None,
                 fingerprint: None,
@@ -12266,6 +12927,7 @@ mod tests {
             ],
             placements: Vec::new(),
             edges: Vec::new(),
+            activities: Vec::new(),
             relation_complete: true,
             len_bytes: Some(7),
             fingerprint: Some("fp-claude".into()),
@@ -12288,6 +12950,7 @@ mod tests {
             ],
             placements: Vec::new(),
             edges: Vec::new(),
+            activities: Vec::new(),
             relation_complete: true,
             len_bytes: Some(6),
             fingerprint: Some("fp-codex".into()),
@@ -12331,6 +12994,7 @@ mod tests {
             entries: vec![(msg, b"payload".to_vec(), "backfill text".into())],
             placements: Vec::new(),
             edges: Vec::new(),
+            activities: Vec::new(),
             relation_complete: true,
             len_bytes: Some(7),
             fingerprint: Some("backfill-fp".into()),
@@ -12384,6 +13048,7 @@ mod tests {
             )],
             placements: Vec::new(),
             edges: Vec::new(),
+            activities: Vec::new(),
             relation_complete: true,
             len_bytes: Some(7),
             fingerprint: Some("backfill-fp".into()),
@@ -12416,6 +13081,7 @@ mod tests {
             entries: vec![(msg, b"payload".to_vec(), "text".into())],
             placements: Vec::new(),
             edges: Vec::new(),
+            activities: Vec::new(),
             relation_complete: true,
             len_bytes: Some(7),
             fingerprint: Some("recovery-fp".into()),
@@ -12443,6 +13109,7 @@ mod tests {
             entries: vec![(msg, b"payload".to_vec(), "text".into())],
             placements: Vec::new(),
             edges: Vec::new(),
+            activities: Vec::new(),
             relation_complete: false,
             len_bytes: Some(7),
             fingerprint: Some("recovery-incomplete-fp".into()),
@@ -12479,6 +13146,7 @@ mod tests {
             source_path: "resume.jsonl".into(),
             placements: Vec::new(),
             edges: Vec::new(),
+            activities: Vec::new(),
             relation_complete: true,
             len_bytes: None,
             fingerprint: None,
@@ -12824,5 +13492,622 @@ mod tests {
             !plan.to_lowercase().contains("scan"),
             "resume 查询必须使用索引而非全表扫描，实际 plan: {plan}"
         );
+    }
+
+    // ---- 工具活动（v12）：提交/去重/tombstone/边界/查询 ----
+
+    fn tool_activity_batch(
+        source_path: &str,
+        message_id: &StableId,
+        name: &str,
+        kind: &str,
+        target: Option<&str>,
+        status: &str,
+    ) -> SourceBatch {
+        SourceBatch {
+            source_path: source_path.into(),
+            entries: vec![entity_entry(message_id)],
+            placements: Vec::new(),
+            edges: Vec::new(),
+            activities: vec![SourceActivity {
+                message_id: message_id.clone(),
+                activity: ToolActivity {
+                    kind: match kind {
+                        "file" => ToolActivityKind::File,
+                        "command" => ToolActivityKind::Command,
+                        "web" => ToolActivityKind::Web,
+                        "query" => ToolActivityKind::Query,
+                        _ => ToolActivityKind::Unknown,
+                    },
+                    actor: ToolActivityActor::Main,
+                    name: name.into(),
+                    target: target.map(str::to_string),
+                    status: match status {
+                        "success" => ToolActivityStatus::Success,
+                        "error" => ToolActivityStatus::Error,
+                        _ => ToolActivityStatus::Unknown,
+                    },
+                },
+            }],
+            relation_complete: true,
+            len_bytes: Some(1),
+            fingerprint: Some(source_path.into()),
+            provider_id: None,
+            resume_claim: None,
+        }
+    }
+
+    fn activity_rows(
+        store: &SqliteStore,
+    ) -> Vec<(String, String, String, String, Option<String>, String)> {
+        store
+            .conn
+            .borrow()
+            .prepare("SELECT message_id, kind, actor, name, target, status FROM tool_activities ORDER BY activity_id")
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, String>(5)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    }
+
+    #[test]
+    fn activity_commit_roundtrips_and_survives_unchanged_resync() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let message = sid(IdKind::Message, b"activity-msg");
+        let source = tool_activity_batch(
+            "activity.jsonl",
+            &message,
+            "Bash",
+            "command",
+            Some("ls -la"),
+            "success",
+        );
+        assert!(store.commit_source_batches_if_changed(&[source]).unwrap());
+        assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
+
+        let rows = activity_rows(&store);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, message.as_str());
+        assert_eq!(rows[0].1, "command");
+        assert_eq!(rows[0].2, "main");
+        assert_eq!(rows[0].3, "Bash");
+        assert_eq!(rows[0].4.as_deref(), Some("ls -la"));
+        assert_eq!(rows[0].5, "success");
+
+        // 内容未变 → 重同步是 no-op（sources_are_current 含活动行/claims 对比）。
+        let source = tool_activity_batch(
+            "activity.jsonl",
+            &message,
+            "Bash",
+            "command",
+            Some("ls -la"),
+            "success",
+        );
+        assert!(!store.commit_source_batches_if_changed(&[source]).unwrap());
+        assert_eq!(activity_rows(&store).len(), 1);
+    }
+
+    #[test]
+    fn activity_commit_is_idempotent_across_fingerprint_change() {
+        // 指纹变化（重解析）但活动事实相同：幂等重写，不产生重复行。
+        let store = SqliteStore::open_in_memory().unwrap();
+        let message = sid(IdKind::Message, b"activity-msg");
+        let first = tool_activity_batch(
+            "activity.jsonl",
+            &message,
+            "Bash",
+            "command",
+            Some("ls -la"),
+            "success",
+        );
+        assert!(store.commit_source_batches_if_changed(&[first]).unwrap());
+        let mut second = tool_activity_batch(
+            "activity.jsonl",
+            &message,
+            "Bash",
+            "command",
+            Some("ls -la"),
+            "success",
+        );
+        second.fingerprint = Some("changed-fingerprint".into());
+        assert!(store.commit_source_batches_if_changed(&[second]).unwrap());
+        assert_eq!(activity_rows(&store).len(), 1);
+    }
+
+    #[test]
+    fn activity_target_is_bounded_before_storage() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let message = sid(IdKind::Message, b"activity-bound");
+        let long_target = "x".repeat(TOOL_ACTIVITY_TARGET_MAX_CHARS + 100);
+        let source = tool_activity_batch(
+            "bound.jsonl",
+            &message,
+            "Bash",
+            "command",
+            Some(&long_target),
+            "success",
+        );
+        store.commit_source_batches_if_changed(&[source]).unwrap();
+        let rows = activity_rows(&store);
+        assert_eq!(rows.len(), 1);
+        let stored = rows[0].4.clone().unwrap();
+        assert_eq!(stored.chars().count(), TOOL_ACTIVITY_TARGET_MAX_CHARS);
+    }
+
+    #[test]
+    fn complete_rescan_removes_dropped_activities_and_empty_scan_tombstones_all() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let msg_a = sid(IdKind::Message, b"act-a");
+        let msg_b = sid(IdKind::Message, b"act-b");
+        let batch = |entries: Vec<(StableId, Vec<u8>, String)>, activities: Vec<SourceActivity>| {
+            SourceBatch {
+                source_path: "rescan.jsonl".into(),
+                entries,
+                placements: Vec::new(),
+                edges: Vec::new(),
+                activities,
+                relation_complete: true,
+                len_bytes: Some(1),
+                fingerprint: Some("rescan-fp".into()),
+                provider_id: None,
+                resume_claim: None,
+            }
+        };
+        let activity = |message_id: &StableId, name: &str| SourceActivity {
+            message_id: message_id.clone(),
+            activity: ToolActivity {
+                kind: ToolActivityKind::Command,
+                actor: ToolActivityActor::Main,
+                name: name.into(),
+                target: Some(format!("cmd-{name}")),
+                status: ToolActivityStatus::Success,
+            },
+        };
+        let first = batch(
+            vec![entity_entry(&msg_a), entity_entry(&msg_b)],
+            vec![activity(&msg_a, "Bash"), activity(&msg_b, "Read")],
+        );
+        assert!(store.commit_source_batches_if_changed(&[first]).unwrap());
+        assert_eq!(activity_rows(&store).len(), 2);
+
+        // 完整重扫只保留 Read：Bash 活动被 tombstone（claim 消失且无他人认领）。
+        let second = batch(vec![entity_entry(&msg_b)], vec![activity(&msg_b, "Read")]);
+        assert!(store.commit_source_batches_if_changed(&[second]).unwrap());
+        let rows = activity_rows(&store);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].3, "Read");
+
+        // 空源（整源清空，relation_complete=true）：全部活动 tombstone。
+        let empty = batch(Vec::new(), Vec::new());
+        assert!(store.commit_source_batches_if_changed(&[empty]).unwrap());
+        assert!(activity_rows(&store).is_empty());
+    }
+
+    #[test]
+    fn incomplete_scan_unions_activities_without_tombstoning() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let msg_a = sid(IdKind::Message, b"inc-a");
+        let msg_b = sid(IdKind::Message, b"inc-b");
+        let batch = |entries: Vec<(StableId, Vec<u8>, String)>,
+                     activities: Vec<SourceActivity>,
+                     complete: bool| {
+            SourceBatch {
+                source_path: "incomplete.jsonl".into(),
+                entries,
+                placements: Vec::new(),
+                edges: Vec::new(),
+                activities,
+                relation_complete: complete,
+                len_bytes: Some(1),
+                fingerprint: Some("inc-fp".into()),
+                provider_id: None,
+                resume_claim: None,
+            }
+        };
+        let activity = |message_id: &StableId, name: &str| SourceActivity {
+            message_id: message_id.clone(),
+            activity: ToolActivity {
+                kind: ToolActivityKind::File,
+                actor: ToolActivityActor::Main,
+                name: name.into(),
+                target: None,
+                status: ToolActivityStatus::Success,
+            },
+        };
+        let first = batch(
+            vec![entity_entry(&msg_a)],
+            vec![activity(&msg_a, "Read")],
+            true,
+        );
+        assert!(store.commit_source_batches_if_changed(&[first]).unwrap());
+
+        // 不完整重扫（skipped>0 → relation_complete=false）：union，不删旧活动。
+        let second = batch(
+            vec![entity_entry(&msg_b)],
+            vec![activity(&msg_b, "Grep")],
+            false,
+        );
+        assert!(store.commit_source_batches_if_changed(&[second]).unwrap());
+        let rows = activity_rows(&store);
+        assert_eq!(rows.len(), 2, "不完整扫描必须保留未观察到的活动");
+        let names: Vec<&str> = rows.iter().map(|row| row.3.as_str()).collect();
+        assert!(names.contains(&"Read") && names.contains(&"Grep"));
+    }
+
+    #[test]
+    fn identical_activity_from_two_sources_dedups_into_one_row() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let message = sid(IdKind::Message, b"shared-act");
+        let first = tool_activity_batch(
+            "source-a.jsonl",
+            &message,
+            "Bash",
+            "command",
+            Some("ls"),
+            "success",
+        );
+        let second = tool_activity_batch(
+            "source-b.jsonl",
+            &message,
+            "Bash",
+            "command",
+            Some("ls"),
+            "success",
+        );
+        assert!(
+            store
+                .commit_source_batches_if_changed(&[first, second])
+                .unwrap()
+        );
+        assert_eq!(
+            activity_rows(&store).len(),
+            1,
+            "同事实同锚点 → 同一行，两份 claim"
+        );
+
+        // 一个源消失（空批）不删除仍被另一源认领的活动。
+        let empty = SourceBatch {
+            source_path: "source-a.jsonl".into(),
+            entries: Vec::new(),
+            placements: Vec::new(),
+            edges: Vec::new(),
+            activities: Vec::new(),
+            relation_complete: true,
+            len_bytes: Some(0),
+            fingerprint: Some("empty-a".into()),
+            provider_id: None,
+            resume_claim: None,
+        };
+        assert!(store.commit_source_batches_if_changed(&[empty]).unwrap());
+        assert_eq!(activity_rows(&store).len(), 1);
+
+        // 两个源都消失 → 行删除。
+        let empty_b = SourceBatch {
+            source_path: "source-b.jsonl".into(),
+            entries: Vec::new(),
+            placements: Vec::new(),
+            edges: Vec::new(),
+            activities: Vec::new(),
+            relation_complete: true,
+            len_bytes: Some(0),
+            fingerprint: Some("empty-b".into()),
+            provider_id: None,
+            resume_claim: None,
+        };
+        assert!(store.commit_source_batches_if_changed(&[empty_b]).unwrap());
+        assert!(activity_rows(&store).is_empty());
+    }
+
+    #[test]
+    fn distinct_activity_facts_on_one_message_coexist_across_sources() {
+        // activity_id 由事实内容寻址：同一消息上不同事实 → 不同行，两源各自认领。
+        // （同消息同事实 → 同一行 + 双 claim，见 identical_activity_from_two_sources。）
+        let store = SqliteStore::open_in_memory().unwrap();
+        let message = sid(IdKind::Message, b"conflict-act");
+        let mut first = tool_activity_batch(
+            "source-a.jsonl",
+            &message,
+            "Bash",
+            "command",
+            Some("ls"),
+            "success",
+        );
+        first.entries = vec![entity_entry(&message)];
+        first.fingerprint = Some("fp-a".into());
+        let mut second = tool_activity_batch(
+            "source-b.jsonl",
+            &message,
+            "Bash",
+            "command",
+            Some("ls -la"),
+            "success",
+        );
+        second.entries = vec![entity_entry(&message)];
+        second.fingerprint = Some("fp-b".into());
+        assert!(
+            store
+                .commit_source_batches_if_changed(&[first, second])
+                .unwrap()
+        );
+        let rows = activity_rows(&store);
+        assert_eq!(rows.len(), 2, "不同事实 → 两行（锚点相同、事实不同）");
+        let targets: Vec<Option<&str>> = rows.iter().map(|row| row.4.as_deref()).collect();
+        assert!(targets.contains(&Some("ls")) && targets.contains(&Some("ls -la")));
+    }
+
+    #[test]
+    fn activity_anchored_to_non_message_is_rejected() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let session = sid(IdKind::Session, b"not-a-message");
+        let source = tool_activity_batch(
+            "bad-anchor.jsonl",
+            &session,
+            "Bash",
+            "command",
+            None,
+            "success",
+        );
+        let error = store
+            .commit_source_batches_if_changed(&[source])
+            .unwrap_err();
+        assert!(matches!(error, PortError::Backend(_)));
+    }
+
+    // ---- 活动 facet 查询（v12）----
+
+    #[test]
+    fn query_faceted_default_matches_plain_query() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let message = sid(IdKind::Message, b"facet-msg");
+        let source = tool_activity_batch(
+            "facet.jsonl",
+            &message,
+            "Bash",
+            "command",
+            Some("ls"),
+            "success",
+        );
+        store.commit_source_batches_if_changed(&[source]).unwrap();
+        let plain = store.query("msg_v1", 10).unwrap();
+        assert_eq!(
+            plain.len(),
+            1,
+            "查询必须实际命中（FTS 正文是 wire id 文本）"
+        );
+        let faceted = store
+            .query_faceted(
+                SearchQuery {
+                    text: "msg_v1",
+                    filters: &SearchFilters::EMPTY,
+                },
+                10,
+                &SearchFacets::default(),
+            )
+            .unwrap();
+        assert_eq!(plain, faceted);
+    }
+
+    #[test]
+    fn query_faceted_filters_by_tool_kind_and_name() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let msg_a = sid(IdKind::Message, b"facet-bash");
+        let msg_b = sid(IdKind::Message, b"facet-read");
+        let batch = |entries: Vec<(StableId, Vec<u8>, String)>, activities: Vec<SourceActivity>| {
+            SourceBatch {
+                source_path: "facet-two.jsonl".into(),
+                entries,
+                placements: Vec::new(),
+                edges: Vec::new(),
+                activities,
+                relation_complete: true,
+                len_bytes: Some(1),
+                fingerprint: Some("facet-two-fp".into()),
+                provider_id: None,
+                resume_claim: None,
+            }
+        };
+        let activity = |message_id: &StableId, kind: ToolActivityKind, name: &str| SourceActivity {
+            message_id: message_id.clone(),
+            activity: ToolActivity {
+                kind,
+                actor: ToolActivityActor::Main,
+                name: name.into(),
+                target: None,
+                status: ToolActivityStatus::Success,
+            },
+        };
+        let source = batch(
+            vec![entity_entry(&msg_a), entity_entry(&msg_b)],
+            vec![
+                activity(&msg_a, ToolActivityKind::Command, "Bash"),
+                activity(&msg_b, ToolActivityKind::File, "Read"),
+            ],
+        );
+        store.commit_source_batches_if_changed(&[source]).unwrap();
+
+        let by_kind = store
+            .query_faceted(
+                SearchQuery {
+                    text: "msg_v1",
+                    filters: &SearchFilters::EMPTY,
+                },
+                10,
+                &SearchFacets {
+                    tool_kind: Some("command".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(by_kind.len(), 1);
+        assert_eq!(by_kind[0].id.as_str(), msg_a.as_str());
+
+        let by_name = store
+            .query_faceted(
+                SearchQuery {
+                    text: "msg_v1",
+                    filters: &SearchFilters::EMPTY,
+                },
+                10,
+                &SearchFacets {
+                    tool_name: Some("Read".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(by_name.len(), 1);
+        assert_eq!(by_name[0].id.as_str(), msg_b.as_str());
+
+        let none = store
+            .query_faceted(
+                SearchQuery {
+                    text: "msg_v1",
+                    filters: &SearchFilters::EMPTY,
+                },
+                10,
+                &SearchFacets {
+                    tool_name: Some("Grep".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(none.is_empty());
+    }
+
+    #[test]
+    fn query_faceted_filters_sidechains_on_indexed_columns() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let session = sid(IdKind::Session, b"facet-session");
+        let document = sid(IdKind::Document, b"facet-doc");
+        let main_msg = sid(IdKind::Message, b"facet-main");
+        let side_msg = sid(IdKind::Message, b"facet-side");
+        let main_placement = MessagePlacement::new(
+            session.clone(),
+            document.clone(),
+            main_msg.clone(),
+            0,
+            false,
+            None,
+        );
+        let side_placement = MessagePlacement::new(
+            session.clone(),
+            document.clone(),
+            side_msg.clone(),
+            1,
+            true,
+            None,
+        );
+        let source = SourceBatch {
+            source_path: "facet-sidechain.jsonl".into(),
+            entries: vec![
+                entity_entry(&main_msg),
+                entity_entry(&side_msg),
+                entity_entry(&session),
+                entity_entry(&document),
+            ],
+            placements: vec![main_placement, side_placement],
+            edges: Vec::new(),
+            activities: Vec::new(),
+            relation_complete: true,
+            len_bytes: Some(1),
+            fingerprint: Some("facet-sidechain-fp".into()),
+            provider_id: None,
+            resume_claim: None,
+        };
+        store.commit_source_batches_if_changed(&[source]).unwrap();
+
+        let main_only = store
+            .query_faceted(
+                SearchQuery {
+                    text: "msg_v1",
+                    filters: &SearchFilters::EMPTY,
+                },
+                10,
+                &SearchFacets {
+                    sidechain: SidechainFacet::MainOnly,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let ids: Vec<&str> = main_only.iter().map(|hit| hit.id.as_str()).collect();
+        assert!(ids.contains(&main_msg.as_str()));
+        assert!(!ids.contains(&side_msg.as_str()));
+
+        let subagent_only = store
+            .query_faceted(
+                SearchQuery {
+                    text: "msg_v1",
+                    filters: &SearchFilters::EMPTY,
+                },
+                10,
+                &SearchFacets {
+                    sidechain: SidechainFacet::SubagentOnly,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let ids: Vec<&str> = subagent_only.iter().map(|hit| hit.id.as_str()).collect();
+        assert_eq!(ids, vec![side_msg.as_str()]);
+    }
+
+    #[test]
+    fn v7_catalog_migrates_to_v12_adding_activity_tables() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v7.db");
+        let p = path.to_string_lossy().into_owned();
+        // 手工造一个 v7 库（最小关系 schema），打开后应迁到 v12 并补建活动表。
+        {
+            let conn = rusqlite::Connection::open(&p).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE catalog (id TEXT PRIMARY KEY, payload BLOB NOT NULL);
+                 CREATE VIRTUAL TABLE fts USING fts5(id UNINDEXED, text);
+                 CREATE TABLE store_metadata (
+                     singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+                     active_generation INTEGER NOT NULL
+                 );
+                 INSERT INTO store_metadata(singleton, active_generation) VALUES(1, 3);
+                 CREATE TABLE fts_ids (wire_id TEXT PRIMARY KEY, id_json TEXT NOT NULL UNIQUE);
+                 CREATE TABLE source_membership (
+                     source_path TEXT NOT NULL,
+                     message_id TEXT NOT NULL,
+                     document_id TEXT,
+                     PRIMARY KEY(source_path, message_id)
+                 );
+                 CREATE TABLE source_scans (
+                     source_path TEXT PRIMARY KEY,
+                     scanned_at_ms INTEGER NOT NULL,
+                     len_bytes INTEGER,
+                     fingerprint TEXT
+                 );
+                 PRAGMA user_version = 7;",
+            )
+            .unwrap();
+        }
+        let store = SqliteStore::open(&p).unwrap();
+        assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
+        assert_eq!(store.active_generation().unwrap(), 3);
+        // 活动表已建好且可写（直接 SQL 写入验证，不依赖完整 v7 关系提交路径）。
+        let conn = store.conn.borrow();
+        conn.execute(
+            "INSERT INTO tool_activities(
+                 activity_id, message_id, kind, actor, name, target, status
+             ) VALUES('act_v1_test', 'msg_v1_migrated', 'command', 'main', 'Bash', 'ls', 'success')",
+            [],
+        )
+        .unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM tool_activities", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+        drop(conn);
     }
 }

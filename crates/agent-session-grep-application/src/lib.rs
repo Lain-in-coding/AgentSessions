@@ -6,14 +6,14 @@
 
 use agent_session_grep_domain::{
     ContextPolicy, DomainError, IdKind, Message, MessagePlacement, Role, SourceDocument, StableId,
-    select_full, select_mainline,
+    ToolActivity, select_full, select_mainline,
 };
 use agent_session_grep_ports::{
     CanonicalEventSink, CatalogEntry, CatalogStore, Confidence, ContextGraphStore, MessageEvent,
     NoResumeClaims, NoSemanticIndex, ParseReport, PortError, PortResult, ProbeResult,
-    ProviderAdapter, ProviderError, ReadOnlySource, ResumeClaimsStore, RetrievalMode,
+    ProviderAdapter, ProviderError, ReadOnlySource, ResumeClaimsStore, RetrievalMode, SearchFacets,
     SearchFilters, SearchHit, SearchIndex, SearchInstant, SearchQuery, SemanticIndex,
-    SessionResumeMetadata,
+    SessionResumeMetadata, ToolActivityEvent,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -154,6 +154,9 @@ pub enum AppRequest {
         /// Optional normalized metadata predicates. Providers are ORed; the
         /// provider and half-open UTC time dimensions are ANDed.
         filters: SearchFilters,
+        /// 结构化 facet 过滤（sidechain / 工具 kind / 工具名）。默认值 = 无过滤，
+        /// 行为与旧版完全一致；facet 变化会使已发 cursor 失效（绑定进 digest）。
+        facets: SearchFacets,
         /// 最多返回条数；0 视为非法请求。与 `budget.max_items` 取较小者为页大小。
         limit: usize,
         /// 上一页发出的续读令牌；`None` 表示第一页。
@@ -398,12 +401,24 @@ pub struct StagedMessage {
     pub span: Option<(u64, u64)>,
 }
 
+/// 一条经 staging 缓冲、待原子提交的工具活动观察（RFC-0002 §5 扩展）。
+///
+/// 锚点以 provider-native 消息 id 承载；[`StagedBatch`] 的调用方负责把它解析
+/// 为本批内稳定消息身份——解析失败（锚点消息未 emit）即丢弃，绝不臆造锚点。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StagedActivity {
+    pub message_native_id: String,
+    pub activity: ToolActivity,
+}
+
 /// 一次 staging 的完整产物：缓冲消息 + provider 的完整解析报告。
 ///
 /// 会话 native id 的唯一权威来源是 [`ParseReport::session_native_id`]。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StagedBatch {
     pub messages: Vec<StagedMessage>,
+    /// 工具活动观察（设计 R1-R6；provider 未声明工具活动时为空）。
+    pub activities: Vec<StagedActivity>,
     /// Authoritative provider parse accounting and diagnostics.
     pub report: ParseReport,
     /// Deprecated compatibility shim: the CLI composition root still
@@ -469,6 +484,7 @@ fn staged_batch(sink: StagingSink, report: ParseReport) -> StagedBatch {
     let session_native_id = report.session_native_id.clone();
     StagedBatch {
         messages: sink.buffered,
+        activities: sink.activities,
         report,
         session_native_id,
     }
@@ -619,6 +635,7 @@ pub fn select_and_stage_source(
 #[derive(Default)]
 struct StagingSink {
     buffered: Vec<StagedMessage>,
+    activities: Vec<StagedActivity>,
 }
 
 impl CanonicalEventSink for StagingSink {
@@ -632,6 +649,14 @@ impl CanonicalEventSink for StagingSink {
             timestamp: event.timestamp.map(str::to_string),
             is_sidechain: event.is_sidechain,
             span: event.span,
+        });
+        Ok(())
+    }
+
+    fn emit_activity(&mut self, event: ToolActivityEvent<'_>) -> PortResult<()> {
+        self.activities.push(StagedActivity {
+            message_native_id: event.message_native_id.to_string(),
+            activity: event.activity,
         });
         Ok(())
     }
@@ -779,10 +804,11 @@ pub fn parse_relative_search_instant(value: &str, now_ms: i64) -> Option<SearchI
 fn search_query_digest(
     query: &str,
     filters: &SearchFilters,
+    facets: &SearchFacets,
     include_system: bool,
     group_by_session: bool,
 ) -> String {
-    if filters.is_empty() && !include_system && !group_by_session {
+    if filters.is_empty() && facets.is_default() && !include_system && !group_by_session {
         return cursor::digest_query(query);
     }
     let providers = filters
@@ -800,8 +826,14 @@ fn search_query_digest(
         .map(|instant| format!("{}:{}", instant.unix_seconds, instant.nanosecond))
         .unwrap_or_default();
     cursor::digest_query(&format!(
-        "search-filter-v1\0{}\0providers={}\0since={}\0until={}\0include_system={}\0group_by_session={}",
-        query, providers, since, until, include_system, group_by_session
+        "search-filter-v1\0{}\0providers={}\0since={}\0until={}\0include_system={}\0group_by_session={}\0facets={}",
+        query,
+        providers,
+        since,
+        until,
+        include_system,
+        group_by_session,
+        facets.canonical_binding(),
     ))
 }
 
@@ -1524,6 +1556,7 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore, 
             AppRequest::Search {
                 query,
                 mut filters,
+                facets,
                 limit,
                 cursor: token,
                 budget,
@@ -1561,8 +1594,13 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore, 
                 }
                 budget.validate().map_err(AppError::from)?;
                 let generation = self.catalog.active_generation()?;
-                let query_digest =
-                    search_query_digest(&query, &filters, include_system, group_by_session);
+                let query_digest = search_query_digest(
+                    &query,
+                    &filters,
+                    &facets,
+                    include_system,
+                    group_by_session,
+                );
                 let offset = self.resolve_offset(
                     token.as_deref(),
                     generation,
@@ -1592,12 +1630,13 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore, 
                 // （PRD Q54：禁止静默切换）。
                 let (mut scanned, fallback_warning) = if mode == RetrievalMode::Lexical {
                     (
-                        self.index.query_filtered(
+                        self.index.query_faceted(
                             SearchQuery {
                                 text: &query,
                                 filters: &filters,
                             },
                             scan as usize,
+                            &facets,
                         )?,
                         None,
                     )
@@ -1610,12 +1649,13 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore, 
                     if mode == RetrievalMode::Semantic {
                         (semantic_hits, None)
                     } else {
-                        let lexical_hits = self.index.query_filtered(
+                        let lexical_hits = self.index.query_faceted(
                             SearchQuery {
                                 text: &query,
                                 filters: &filters,
                             },
                             scan as usize,
+                            &facets,
                         )?;
                         (hybrid::fuse(&lexical_hits, &semantic_hits), None)
                     }
@@ -1625,12 +1665,13 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore, 
                         mode.as_str()
                     ));
                     (
-                        self.index.query_filtered(
+                        self.index.query_faceted(
                             SearchQuery {
                                 text: &query,
                                 filters: &filters,
                             },
                             scan as usize,
+                            &facets,
                         )?,
                         warning,
                     )
@@ -2379,7 +2420,7 @@ mod tests {
     use agent_session_grep_ports::SourcePlacement;
     use agent_session_grep_ports::{
         ContextStats, MessageContextCandidate as PortMessageContextCandidate, PortResult,
-        SourceSnapshot,
+        SidechainFacet, SourceSnapshot,
     };
     use agent_session_grep_testkit::FakeProvider;
 
@@ -2499,6 +2540,7 @@ mod tests {
         let r = app().handle(AppRequest::Search {
             query: "hello".into(),
             filters: SearchFilters::default(),
+            facets: SearchFacets::default(),
             limit: 10,
             cursor: None,
             budget: ResponseBudget::default(),
@@ -2515,6 +2557,7 @@ mod tests {
         let r = app().handle(AppRequest::Search {
             query: "x".into(),
             filters: SearchFilters::default(),
+            facets: SearchFacets::default(),
             limit: 0,
             cursor: None,
             budget: ResponseBudget::default(),
@@ -2534,6 +2577,7 @@ mod tests {
         let r = app().handle(AppRequest::Search {
             query: "   ".into(),
             filters: SearchFilters::default(),
+            facets: SearchFacets::default(),
             limit: 5,
             cursor: None,
             budget: ResponseBudget::default(),
@@ -2629,6 +2673,7 @@ mod tests {
             .handle(AppRequest::Search {
                 query: "q".into(),
                 filters: SearchFilters::default(),
+                facets: SearchFacets::default(),
                 limit: 5,
                 cursor: None,
                 budget: ResponseBudget {
@@ -2691,6 +2736,7 @@ mod tests {
             .handle(AppRequest::Search {
                 query: "q".into(),
                 filters: SearchFilters::default(),
+                facets: SearchFacets::default(),
                 limit: 10,
                 cursor: None,
                 budget: ResponseBudget {
@@ -2983,6 +3029,28 @@ mod tests {
         AppRequest::Search {
             query: query.into(),
             filters: SearchFilters::default(),
+            facets: SearchFacets::default(),
+            limit,
+            cursor,
+            budget: ResponseBudget::default(),
+            include_system: false,
+            group_by_session: false,
+            mode: RetrievalMode::Lexical,
+            query_embedding: None,
+        }
+    }
+
+    /// 与 [`search_req`] 同构，但携带 facet 过滤。
+    fn search_req_facets(
+        query: &str,
+        limit: usize,
+        cursor: Option<String>,
+        facets: SearchFacets,
+    ) -> AppRequest {
+        AppRequest::Search {
+            query: query.into(),
+            filters: SearchFilters::default(),
+            facets,
             limit,
             cursor,
             budget: ResponseBudget::default(),
@@ -3039,6 +3107,7 @@ mod tests {
                 .handle(AppRequest::Search {
                     query: "needle".into(),
                     filters: SearchFilters::default(),
+                    facets: SearchFacets::default(),
                     limit: 10,
                     cursor: None,
                     budget: ResponseBudget::default(),
@@ -3083,6 +3152,7 @@ mod tests {
             .handle(AppRequest::Search {
                 query: "needle".into(),
                 filters: SearchFilters::default(),
+                facets: SearchFacets::default(),
                 limit: 10,
                 cursor: None,
                 budget: ResponseBudget::default(),
@@ -3155,6 +3225,7 @@ mod tests {
             .handle(AppRequest::Search {
                 query: "needle".into(),
                 filters: SearchFilters::default(),
+                facets: SearchFacets::default(),
                 limit: 10,
                 cursor: None,
                 budget: ResponseBudget::default(),
@@ -3208,6 +3279,7 @@ mod tests {
             .handle(AppRequest::Search {
                 query: "needle".into(),
                 filters: SearchFilters::default(),
+                facets: SearchFacets::default(),
                 limit: 10,
                 cursor: None,
                 budget: ResponseBudget::default(),
@@ -3274,6 +3346,7 @@ mod tests {
             .handle(AppRequest::Search {
                 query: "needle".into(),
                 filters: SearchFilters::default(),
+                facets: SearchFacets::default(),
                 limit: 10,
                 cursor: None,
                 budget: ResponseBudget {
@@ -3308,6 +3381,7 @@ mod tests {
             .handle(AppRequest::Search {
                 query: "quoted needle".into(),
                 filters: SearchFilters::default(),
+                facets: SearchFacets::default(),
                 limit: 10,
                 cursor: None,
                 budget: ResponseBudget {
@@ -3401,6 +3475,7 @@ mod tests {
         AppRequest::Search {
             query: query.into(),
             filters,
+            facets: SearchFacets::default(),
             limit,
             cursor,
             budget: ResponseBudget::default(),
@@ -3638,6 +3713,29 @@ mod tests {
     }
 
     #[test]
+    fn search_cursor_is_bound_to_facets() {
+        // 同一查询串、不同 facet 的旧令牌必须失效（设计：facet 绑定进 digest）——
+        // 否则换 facet 翻页会跨过滤条件续读。
+        let app = App::with_clock(FakeCatalog, PagedIndex { n: 5 }, clock_t0);
+        let (_, next, _, _) = hits_of(app.handle(search_req("q", 2, None)).unwrap());
+        let err = app
+            .handle(search_req_facets(
+                "q",
+                2,
+                next,
+                SearchFacets {
+                    sidechain: SidechainFacet::MainOnly,
+                    ..Default::default()
+                },
+            ))
+            .unwrap_err();
+        assert!(
+            matches!(err, AppError::Cursor(cursor::CursorError::Invalid(_))),
+            "{err}"
+        );
+    }
+
+    #[test]
     fn search_cursor_expires_after_ttl() {
         let issued = App::with_clock(FakeCatalog, PagedIndex { n: 5 }, clock_t0);
         let (_, next, _, _) = hits_of(issued.handle(search_req("q", 2, None)).unwrap());
@@ -3656,6 +3754,7 @@ mod tests {
             .handle(AppRequest::Search {
                 query: "q".into(),
                 filters: SearchFilters::default(),
+                facets: SearchFacets::default(),
                 limit: 60,
                 cursor: None,
                 budget: ResponseBudget {
@@ -3696,6 +3795,7 @@ mod tests {
             .handle(AppRequest::Search {
                 query: "q".into(),
                 filters: SearchFilters::default(),
+                facets: SearchFacets::default(),
                 limit: 5,
                 cursor: None,
                 budget: ResponseBudget {
@@ -5833,6 +5933,7 @@ mod tests {
             .handle(AppRequest::Search {
                 query: "needle".into(),
                 filters: SearchFilters::default(),
+                facets: SearchFacets::default(),
                 limit: 10,
                 cursor: None,
                 budget: ResponseBudget::default(),
