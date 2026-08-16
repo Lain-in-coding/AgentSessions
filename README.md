@@ -37,7 +37,7 @@ asg search "authentication refactor"
 asg context <session-id>
 
 # Preview resume command for a session
-asg resume <session-id>
+asg get-session-resume <session-id>
 
 # Generate a handoff pack for another agent
 asg handoff "how did we configure the database?"
