@@ -85,7 +85,14 @@ impl ProviderAdapter for QoderAdapter {
     }
 
     fn manifest(&self) -> AdapterManifest {
-        manifest_for(self.provider_id(), None, &[])
+        manifest_for(
+            self.provider_id(),
+            Some(1),
+            &[
+                "identity fields are matched leniently from session_meta (session_id/cwd)",
+                "non-conversational records (progress/tool_use/tool_result) are skipped",
+            ],
+        )
     }
 
     fn probe(&self, bytes: &[u8]) -> Result<ProbeResult, ProviderError> {
@@ -373,7 +380,7 @@ mod tests {
         assert_eq!(manifest.capabilities.provider_id, adapter.provider_id());
         assert_eq!(manifest.capabilities.variant_id, VARIANT_ID);
         assert!(manifest.last_certified_targets.is_empty());
-        assert_eq!(manifest.fixture_revision, None);
+        assert_eq!(manifest.fixture_revision, Some(1));
     }
 
     struct CountSink {

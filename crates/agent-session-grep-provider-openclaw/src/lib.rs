@@ -77,7 +77,14 @@ impl ProviderAdapter for OpenClawAdapter {
     }
 
     fn manifest(&self) -> AdapterManifest {
-        manifest_for(self.provider_id(), None, &[])
+        manifest_for(
+            self.provider_id(),
+            Some(1),
+            &[
+                "resume is intentionally unsupported (gateway-managed)",
+                "native message ids are not preserved (synthetic openclaw-msg-{seq})",
+            ],
+        )
     }
 
     fn probe(&self, bytes: &[u8]) -> Result<ProbeResult, ProviderError> {
@@ -352,7 +359,7 @@ mod tests {
         assert_eq!(manifest.capabilities.provider_id, adapter.provider_id());
         assert_eq!(manifest.capabilities.variant_id, VARIANT_ID);
         assert!(manifest.last_certified_targets.is_empty());
-        assert_eq!(manifest.fixture_revision, None);
+        assert_eq!(manifest.fixture_revision, Some(1));
     }
 
     struct CountSink {

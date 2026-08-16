@@ -74,7 +74,15 @@ impl ProviderAdapter for CodeBuddyAdapter {
     }
 
     fn manifest(&self) -> AdapterManifest {
-        manifest_for(self.provider_id(), None, &[])
+        manifest_for(
+            self.provider_id(),
+            Some(1),
+            &[
+                "the root startup-keyword user message (content: \"code\") is filtered out",
+                "no working-directory pair observation (no separate cwd-bearing header record)",
+                "native message ids are not preserved (synthetic codebuddy-msg-{seq})",
+            ],
+        )
     }
 
     fn probe(&self, bytes: &[u8]) -> Result<ProbeResult, ProviderError> {
@@ -370,7 +378,7 @@ mod tests {
         assert_eq!(manifest.capabilities.provider_id, adapter.provider_id());
         assert_eq!(manifest.capabilities.variant_id, VARIANT_ID);
         assert!(manifest.last_certified_targets.is_empty());
-        assert_eq!(manifest.fixture_revision, None);
+        assert_eq!(manifest.fixture_revision, Some(1));
     }
 
     struct CountSink {
