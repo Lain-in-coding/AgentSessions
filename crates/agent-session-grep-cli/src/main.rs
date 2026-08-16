@@ -36,7 +36,8 @@ use agent_session_grep_domain::{
 };
 use agent_session_grep_ports::{
     ParseReport, ProviderAdapter, ProviderSessionObservation, ReadOnlySource, RedactionStatus,
-    ResumeClaimsStore, RetrievalMode, SearchFilters, SearchInstant, SearchProvider, SourceResumeClaim,
+    ResumeClaimsStore, RetrievalMode, SearchFilters, SearchInstant, SearchProvider,
+    SourceResumeClaim,
     capability::{ProviderCapability, ProviderCapabilityMatrix, ProviderMaturity},
 };
 use agent_session_grep_provider_aider::AiderAdapter;
@@ -459,7 +460,7 @@ fn run(
             .unwrap_or(0);
         let session = serve::ServeSession::bind_loopback(port)
             .map_err(|e| CliError::usage(format!("serve: bind failed: {e}")))?;
-        return serve::run(&session, &db, &store);
+        return serve::run(&session, &db, offline, &store);
     }
     // catalog 与 index 是同一个 SqliteStore；App 泛型接受同一实例的两次移动，
     // 故这里克隆一个连接语义上的第二把手不可行——改为让 App 持有单一 store。
