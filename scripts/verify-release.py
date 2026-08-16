@@ -23,8 +23,12 @@ def run_asg(asg_bin: str, data_root: str, args: list[str]) -> tuple[int, str, st
     """Run asg with given args, return (exit_code, stdout, stderr)."""
     env = os.environ.copy()
     env["ASG_DATA_ROOT"] = data_root
+    # CLI requires an explicit --db for store-touching commands; use the
+    # ASG_DATA_ROOT-scoped default database path. Global flags (--db, --output)
+    # go before the subcommand; per-command flags after it.
+    db = str(Path(data_root) / "asg.db")
     result = subprocess.run(
-        [asg_bin] + args,
+        [asg_bin, "--db", db, "--output", "json"] + args,
         capture_output=True,
         text=True,
         env=env,
@@ -48,21 +52,30 @@ def verify_build(asg_bin: str) -> bool:
 
 
 def verify_sync(asg_bin: str, data_root: str) -> bool:
-    """Verify sync --discover runs without error."""
-    code, out, _ = run_asg(asg_bin, data_root, ["sync", "--discover", "--output", "json"])
+    """Verify sync runs without error on a synthetic fixture source.
+
+    sync --discover would scan the real provider data roots on the machine
+    running the release verification — correct for a full regression, but
+    slow and privacy-relevant for a smoke test. Use the committed synthetic
+    gate fixture instead.
+    """
+    fixture = Path(__file__).parent / "evidence" / "fixtures" / "gate" / "claude" / "session-alpha.jsonl"
+    if not fixture.exists():
+        return step("sync", False, f"fixture not found: {fixture}")
+    code, out, _ = run_asg(asg_bin, data_root, ["sync", str(fixture)])
     if code != 0:
-        return step("sync --discover", False, f"exit {code}")
+        return step("sync", False, f"exit {code}")
     try:
         frame = json.loads(out.strip().split("\n")[0])
         gen = frame.get("data", {}).get("generation", 0)
-        return step("sync --discover", True, f"generation {gen}")
+        return step("sync", True, f"generation {gen}")
     except (json.JSONDecodeError, IndexError):
-        return step("sync --discover", False, "invalid JSON")
+        return step("sync", False, "invalid JSON")
 
 
 def verify_search(asg_bin: str, data_root: str) -> bool:
     """Verify search runs and returns valid JSON."""
-    code, out, _ = run_asg(asg_bin, data_root, ["search", "test", "--output", "json", "--limit", "5"])
+    code, out, _ = run_asg(asg_bin, data_root, ["search", "retry", "--max-items", "5"])
     if code != 0:
         return step("search", False, f"exit {code}")
     try:
@@ -76,7 +89,7 @@ def verify_search(asg_bin: str, data_root: str) -> bool:
 
 def verify_status(asg_bin: str, data_root: str) -> bool:
     """Verify status command reports catalog state."""
-    code, out, _ = run_asg(asg_bin, data_root, ["status", "--output", "json"])
+    code, out, _ = run_asg(asg_bin, data_root, ["status"])
     if code != 0:
         return step("status", False, f"exit {code}")
     try:
