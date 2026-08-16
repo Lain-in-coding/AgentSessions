@@ -87,7 +87,9 @@ record() {
 }
 
 install_args=()
-[ -n "$prefix" ] && install_args+=(--prefix "$prefix")
+if [ -n "$prefix" ]; then
+    install_args+=(--prefix "$prefix")
+fi
 if [ -n "$binary" ]; then
     [ -f "$binary" ] || fail "binary not found: $binary"
     # install.sh --skip-build copies target/release/agent-session-grep, so a

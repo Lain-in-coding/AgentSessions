@@ -59,7 +59,7 @@ A completed manifest is the entry ticket — no manifest, no rehearsal.
 ```bash
 cargo build --release --locked
 # Run the platform install script:
-#   Windows: powershell scripts/install/install.ps1
+#   Windows: pwsh scripts/install/install.ps1   (PowerShell 7+; scripts use $IsWindows)
 #   macOS/Linux: bash scripts/install/install.sh
 ```
 
@@ -275,7 +275,7 @@ fixture provenance.
 ## 13. Uninstall
 
 ```bash
-# Windows: powershell scripts/install/uninstall.ps1
+# Windows: pwsh scripts/install/uninstall.ps1
 # macOS/Linux: bash scripts/install/uninstall.sh
 ```
 

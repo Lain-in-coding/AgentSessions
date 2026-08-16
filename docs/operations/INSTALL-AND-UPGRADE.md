@@ -49,8 +49,12 @@ pwsh -File scripts/install/install.ps1
 Linux, macOS:
 
 ```sh
-sh scripts/install/install.sh
+bash scripts/install/install.sh
 ```
+
+`install.sh` requires Bash (it uses `set -o pipefail`); invoking it as
+`sh scripts/install/install.sh` works on macOS but fails on Debian/Ubuntu
+where `sh` is dash.
 
 Both scripts accept:
 
@@ -110,7 +114,7 @@ place; there is no version pinning, rollback, or update channel.
 
 ```
 git pull
-pwsh -File scripts/install/install.ps1        # or sh scripts/install/install.sh
+pwsh -File scripts/install/install.ps1        # or bash scripts/install/install.sh
 agent-session-grep --version
 ```
 
