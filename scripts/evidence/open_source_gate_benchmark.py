@@ -48,6 +48,16 @@ GATE_THRESHOLDS = {
     "resume_handoff_success": 1.0,
 }
 
+# Measured but deliberately un-thresholded. These are reported so the numbers
+# are public and comparable, without letting them gate a release: the shipped
+# vectorizer is a bigram hash (fuzzy lexical, not semantic), so a good score
+# here would not justify promoting semantic retrieval. Each entry must carry a
+# reason explaining why it has no threshold.
+INFORMATIONAL_METRICS = {
+    "semantic_recall_at_10",
+    "hybrid_recall_at_10",
+}
+
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -92,24 +102,32 @@ def resolve_binary(workspace: Path, args: argparse.Namespace) -> Path:
     return binary
 
 
-def lexical_recall_at_10(
+def recall_at_10(
     binary: Path,
     workspace: Path,
     db: Path,
     labels: dict[str, Any],
+    mode: str,
 ) -> tuple[float, list[dict[str, Any]], list[dict[str, Any]]]:
-    """Run every labeled query and score message-id recall in the top 10.
+    """Run every labeled query in one retrieval mode and score id recall @10.
 
     Returns (mean_recall, per_query_detail, raw_search_samples). Search hits
-    are message-level; recall is computed against expected_message_ids.
+    are message-level; recall is computed against expected_message_ids. A
+    response whose effective retrieval_mode differs from the requested one
+    (i.e. it fell back) is recorded per query so a fallback can never be
+    reported as a semantic measurement.
     """
     per_query: list[dict[str, Any]] = []
     search_samples: list[dict[str, Any]] = []
     recalls: list[float] = []
     for entry in labels["queries"]:
-        result = cli(binary, workspace, db, "search", entry["query"], "--max-items", "10")
+        extra = [] if mode == "lexical" else ["--mode", mode]
+        result = cli(
+            binary, workspace, db, "search", entry["query"], "--max-items", "10", *extra
+        )
         search_samples.append(result)
-        hits = result["frame"]["data"].get("hits", [])
+        frame = result["frame"]
+        hits = frame["data"].get("hits", [])
         hit_ids = {hit.get("id") for hit in hits}
         expected = set(entry["expected_message_ids"])
         found = expected & hit_ids
@@ -119,6 +137,8 @@ def lexical_recall_at_10(
             {
                 "query_id": entry["id"],
                 "query": entry["query"],
+                "requested_mode": mode,
+                "effective_mode": frame.get("retrieval_mode", "not_recorded"),
                 "expected_count": len(expected),
                 "found_count": len(found),
                 "recall_at_10": round(recall, 6),
@@ -127,6 +147,16 @@ def lexical_recall_at_10(
         )
     mean_recall = round(sum(recalls) / len(recalls), 6) if recalls else 1.0
     return mean_recall, per_query, search_samples
+
+
+def lexical_recall_at_10(
+    binary: Path,
+    workspace: Path,
+    db: Path,
+    labels: dict[str, Any],
+) -> tuple[float, list[dict[str, Any]], list[dict[str, Any]]]:
+    """Lexical recall @10 (the gate threshold metric)."""
+    return recall_at_10(binary, workspace, db, labels, "lexical")
 
 
 def parse_loss_from_sync(sync_frames: list[dict[str, Any]]) -> dict[str, Any]:
@@ -194,6 +224,22 @@ def run_gate(args: argparse.Namespace) -> Path:
 
         mean_recall, per_query, search_samples = lexical_recall_at_10(binary, workspace, db, labels)
 
+        # Semantic/hybrid recall (#3). The vector index must be built first;
+        # without it every query falls back to lexical and the numbers would
+        # describe lexical retrieval under a semantic label.
+        embeddings_result = cli(binary, workspace, db, "index", "embeddings")
+        embeddings_frame = embeddings_result["frame"]["data"]
+        semantic_recall, semantic_per_query, semantic_samples = recall_at_10(
+            binary, workspace, db, labels, "semantic"
+        )
+        hybrid_recall, hybrid_per_query, hybrid_samples = recall_at_10(
+            binary, workspace, db, labels, "hybrid"
+        )
+        semantic_fell_back = any(
+            q["effective_mode"] != q["requested_mode"]
+            for q in semantic_per_query + hybrid_per_query
+        )
+
         # Latency for show/get against known wire ids from the labels.
         first_expected = labels["queries"][0]["expected_message_ids"][0]
         show_samples = [
@@ -227,6 +273,32 @@ def run_gate(args: argparse.Namespace) -> Path:
             GATE_THRESHOLDS["parse_loss_ratio"],
             loss["parse_loss_ratio"] <= GATE_THRESHOLDS["parse_loss_ratio"],
         ),
+        # semantic/hybrid recall are measured but carry no gate threshold: the
+        # shipped vectorizer is a bigram hash (fuzzy lexical, not semantic), so
+        # a passing number here would not license promoting semantic retrieval.
+        # A real embedding model is what makes a threshold meaningful.
+        metric_entry(
+            "semantic_recall_at_10",
+            "ratio",
+            semantic_recall,
+            None,
+            None,
+            reason=(
+                "measured with the bigram-hash vectorizer (fuzzy lexical similarity, "
+                "not semantic); no gate threshold until a real embedding model lands"
+            ),
+        ),
+        metric_entry(
+            "hybrid_recall_at_10",
+            "ratio",
+            hybrid_recall,
+            None,
+            None,
+            reason=(
+                "RRF fusion of lexical + bigram-hash vectors; no gate threshold until "
+                "a real embedding model lands"
+            ),
+        ),
         metric_entry(
             "discovery_coverage",
             "ratio",
@@ -247,7 +319,9 @@ def run_gate(args: argparse.Namespace) -> Path:
         ),
     ]
 
-    applicable = [m for m in metrics if m["state"] == "measured"]
+    applicable = [
+        m for m in metrics if m["name"] in GATE_THRESHOLDS and m["state"] == "measured"
+    ]
     failures = [m["name"] for m in applicable if m["pass"] is False]
     deferred = [m["name"] for m in metrics if m["state"] == "not_applicable"]
     gate_pass = not failures
@@ -279,9 +353,25 @@ def run_gate(args: argparse.Namespace) -> Path:
         },
         "metrics": metrics,
         "recall_detail": per_query,
+        "retrieval_modes": {
+            "vectorizer": {
+                "model_id": embeddings_frame.get("model_id"),
+                "dimension": embeddings_frame.get("dimension"),
+                "license": embeddings_frame.get("license"),
+                "file_hash": embeddings_frame.get("file_hash"),
+                "kind": "bigram_hash_not_semantic",
+            },
+            "vectors_indexed": embeddings_frame.get("indexed"),
+            "vectors_skipped": embeddings_frame.get("skipped"),
+            "any_request_fell_back": semantic_fell_back,
+            "semantic_detail": semantic_per_query,
+            "hybrid_detail": hybrid_per_query,
+        },
         "parse_loss_detail": loss,
         "latency_p50_p95_ms": {
             "search": latency_p50_p95(search_samples),
+            "search_semantic": latency_p50_p95(semantic_samples),
+            "search_hybrid": latency_p50_p95(hybrid_samples),
             "show": latency_p50_p95(show_samples),
             "get": latency_p50_p95(get_samples),
             "initial_sync": latency_p50_p95(sync_samples),
@@ -317,16 +407,26 @@ def validate_manifest(path: Path) -> dict[str, Any]:
     metrics = manifest.get("metrics")
     if not isinstance(metrics, list) or not metrics:
         raise ValueError("metrics must be a non-empty list")
-    expected_names = set(GATE_THRESHOLDS)
+    expected_names = set(GATE_THRESHOLDS) | INFORMATIONAL_METRICS
     actual_names = {m.get("name") for m in metrics}
     if actual_names != expected_names:
         raise ValueError(f"metric names {sorted(actual_names)} do not match gate schema {sorted(expected_names)}")
     for m in metrics:
         name = m.get("name")
         threshold = m.get("threshold")
+        state = m.get("state")
+        if name in INFORMATIONAL_METRICS:
+            # Informational: no threshold, no pass verdict, and a stated reason
+            # so a reader cannot mistake it for a gate metric.
+            if threshold is not None or m.get("pass") is not None:
+                raise ValueError(f"{name}: informational metrics must carry null threshold and pass")
+            if not m.get("reason"):
+                raise ValueError(f"{name}: informational metrics must record a reason")
+            if not isinstance(m.get("value"), (int, float)):
+                raise ValueError(f"{name}: informational metrics must carry a numeric value")
+            continue
         if threshold != GATE_THRESHOLDS[name]:
             raise ValueError(f"{name}: threshold {threshold!r} != expected {GATE_THRESHOLDS[name]!r}")
-        state = m.get("state")
         if state == "not_applicable":
             if m.get("value") is not None or m.get("pass") is not None:
                 raise ValueError(f"{name}: not_applicable metrics must carry null value and pass")
@@ -341,7 +441,9 @@ def validate_manifest(path: Path) -> dict[str, Any]:
             raise ValueError(f"{name}: unknown state {state!r}")
     gate = manifest.get("gate", {})
     applicable_failures = [
-        m["name"] for m in metrics if m["state"] == "measured" and m["pass"] is False
+        m["name"]
+        for m in metrics
+        if m["name"] in GATE_THRESHOLDS and m["state"] == "measured" and m["pass"] is False
     ]
     if gate.get("failures") != applicable_failures:
         raise ValueError("gate.failures does not match measured metric pass flags")

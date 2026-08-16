@@ -86,6 +86,22 @@ class GateManifestTests(unittest.TestCase):
                     state="not_applicable",
                     reason="resume execution not yet landed",
                 ),
+                GATE.metric_entry(
+                    "semantic_recall_at_10",
+                    "ratio",
+                    1.0,
+                    None,
+                    None,
+                    reason="bigram-hash vectorizer; no threshold until a real model lands",
+                ),
+                GATE.metric_entry(
+                    "hybrid_recall_at_10",
+                    "ratio",
+                    1.0,
+                    None,
+                    None,
+                    reason="RRF over bigram-hash vectors; no threshold yet",
+                ),
             ],
             "gate": {
                 "pass": True,
@@ -100,13 +116,58 @@ class GateManifestTests(unittest.TestCase):
         bad = dict(manifest)
         bad["metrics"] = [
             GATE.metric_entry("lexical_recall_at_10", "ratio", 1.0, 0.5, True),
-            bad["metrics"][1],
-            bad["metrics"][2],
-            bad["metrics"][3],
+            *bad["metrics"][1:],
         ]
         with tempfile.TemporaryDirectory() as name:
             path = Path(name) / "bad.json"
             path.write_text(json.dumps(bad), encoding="utf-8")
+            with self.assertRaises(ValueError):
+                GATE.validate_manifest(path)
+
+    def test_informational_metric_must_not_carry_a_pass_verdict(self) -> None:
+        # An informational metric with a pass flag would read as a gate result;
+        # the validator rejects it so semantic recall can never gate a release
+        # while the vectorizer is a bigram hash.
+        manifest = {
+            "schema_version": GATE.GATE_SCHEMA_VERSION,
+            "commit": "f" * 40,
+            "corpus": {"contains_real_transcripts": False},
+            "metrics": [
+                GATE.metric_entry("lexical_recall_at_10", "ratio", 1.0, 0.95, True),
+                GATE.metric_entry("parse_loss_ratio", "ratio", 0.0, 0.05, True),
+                GATE.metric_entry(
+                    "discovery_coverage",
+                    "ratio",
+                    None,
+                    0.95,
+                    None,
+                    state="not_applicable",
+                    reason="not implemented",
+                ),
+                GATE.metric_entry(
+                    "resume_handoff_success",
+                    "count",
+                    None,
+                    1.0,
+                    None,
+                    state="not_applicable",
+                    reason="not landed",
+                ),
+                # Illegal: threshold + pass on an informational metric.
+                GATE.metric_entry("semantic_recall_at_10", "ratio", 1.0, 0.95, True),
+                GATE.metric_entry(
+                    "hybrid_recall_at_10", "ratio", 1.0, None, None, reason="ok"
+                ),
+            ],
+            "gate": {
+                "pass": True,
+                "failures": [],
+                "deferred": ["discovery_coverage", "resume_handoff_success"],
+            },
+        }
+        with tempfile.TemporaryDirectory() as name:
+            path = Path(name) / "bad.json"
+            path.write_text(json.dumps(manifest), encoding="utf-8")
             with self.assertRaises(ValueError):
                 GATE.validate_manifest(path)
 
