@@ -25,7 +25,8 @@ mod tui;
 use agent_session_grep_adapters_sqlite::{SourceBatch, SqliteStore, capture, verify_snapshot};
 use agent_session_grep_application::{
     App, AppError, AppRequest, AppResponse, ContextLevel, ResponseBudget, StagedBatch, Truncation,
-    evidence::Precision, parse_relative_search_instant, parse_search_instant, select_and_stage,
+    evidence::Precision, handoff_pack::HandoffInput, parse_relative_search_instant,
+    parse_search_instant, select_and_stage,
 };
 use agent_session_grep_domain::{
     ContextPolicy, DomainError, EvidenceSpan, IdKind, MessageEdge, MessagePlacement,
@@ -588,6 +589,7 @@ COMMANDS:
     index <id-fact> <text> 直接写入一条 catalog + 索引（切片期写入入口）
     index rebuild          从权威 catalog 全量重投影 FTS 索引（维护命令）
     search <query>         全文检索，按相关性降序返回命中（支持分页/预算/过滤 flag）
+    handoff <query>        检索并为查询生成 handoff pack（原文证据 + 建议命令；dry-run）
     get-message <msg-id>   返回命中消息及其同会话主线邻居（--session/--around）
     get-session-resume <ses-id> 返回只读 Resume Metadata（Provider Session ID / Original Working Directory）
     get <wire-id>          按实体 id 取回原始 payload
@@ -714,6 +716,7 @@ fn known_subcommand(cmd: &str) -> bool {
             | "sync"
             | "index"
             | "search"
+            | "handoff"
             | "get-message"
             | "get-session-resume"
             | "get"
@@ -744,6 +747,13 @@ fn subcommand_help_text(cmd: &str) -> &'static str {
             "get-message <msg-id>：返回一个消息及其同会话主线邻居。\n\
                           示例：agent-session-grep --db <path> get-message msg_v1_... --session ses_v1_... --around 2\n\
                           flag：--session <ses-id>、--around <n>、--max-items <n>、--max-bytes <n>"
+        }
+        "handoff" => {
+            "handoff <query>：为查询生成 handoff pack（handoff-pack/v1）。\n\
+                     示例：agent-session-grep --db <path> handoff 配置备份\n\
+                     检索命中后组装：原文证据（evidence）与推断（inference）严格分栏；\n\
+                     deterministic 默认（无 LLM 调用）；dry-run——只输出 pack 与建议命令，不注入任何 agent。\n\
+                     flag：--max-evidence <n> 证据条数上限（默认 20）、--max-tokens <n> 预算（默认 8000）"
         }
         "get" => {
             "get <wire-id>：按实体 ID 取回原始 payload。\n\
@@ -1163,6 +1173,94 @@ fn dispatch(
                 attach_session_resume_rows(store, &mut data)?;
             }
             Ok(("search", outcome, data, page, warnings))
+        }
+        "handoff" => {
+            let mut args = rest.to_vec();
+            let max_evidence = extract_flag(&mut args, "--max-evidence")?;
+            let max_tokens = extract_flag(&mut args, "--max-tokens")?;
+            let providers = extract_repeated_flag(&mut args, "--provider")?;
+            let since = extract_flag(&mut args, "--since")?;
+            let until = extract_flag(&mut args, "--until")?;
+            let app = App::with_resume(store_ref(store), store_ref(store), store_ref(store));
+            let filters = search_filters_from_flags(
+                &providers,
+                since.as_deref(),
+                until.as_deref(),
+                app.now_ms(),
+            )?;
+            no_extra_args(&args, 1, "handoff <query>")?;
+            let query = arg(&args, 1, "handoff <query>")?.to_string();
+            let search_limit = 50usize;
+            let response = app.handle(AppRequest::Search {
+                query: query.clone(),
+                filters: filters.clone(),
+                limit: search_limit,
+                cursor: None,
+                budget: ResponseBudget {
+                    max_items: search_limit,
+                    max_response_bytes: 2_000_000,
+                    max_snippet_chars: 512,
+                    max_messages: 512,
+                    max_evidence_spans: 64,
+                },
+                include_system: false,
+                group_by_session: false,
+            })?;
+            let (hits, generation) = match &response {
+                AppResponse::Search {
+                    hits, generation, ..
+                } => (hits.clone(), *generation),
+                _ => return Err(CliError::usage("handoff: unexpected search response")),
+            };
+            let max_evidence_n = max_evidence
+                .as_deref()
+                .map(|v| {
+                    v.parse::<usize>()
+                        .map_err(|_| CliError::usage("--max-evidence 需要正整数"))
+                })
+                .transpose()?
+                .unwrap_or(20);
+            let max_tokens_n = max_tokens
+                .as_deref()
+                .map(|v| {
+                    v.parse::<usize>()
+                        .map_err(|_| CliError::usage("--max-tokens 需要正整数"))
+                })
+                .transpose()?
+                .unwrap_or(8000);
+            let pack = agent_session_grep_application::handoff_pack::generate_deterministic(
+                HandoffInput {
+                    query_terms: std::slice::from_ref(&query),
+                    retrieval_mode: agent_session_grep_ports::RetrievalMode::Lexical,
+                    filters: agent_session_grep_ports::handoff::HandoffFilters {
+                        providers: filters
+                            .providers
+                            .iter()
+                            .map(|p| p.as_str().to_string())
+                            .collect(),
+                        since: filters
+                            .since
+                            .map(|s| format!("{}.{:09}Z", s.unix_seconds, s.nanosecond)),
+                        until: filters
+                            .until
+                            .map(|s| format!("{}.{:09}Z", s.unix_seconds, s.nanosecond)),
+                    },
+                    hits: &hits,
+                    catalog_generation: generation,
+                    max_tokens: max_tokens_n as u64,
+                    max_bytes: 2_000_000,
+                    max_evidence: max_evidence_n,
+                    target: None,
+                },
+            );
+            Ok((
+                "handoff",
+                protocol::Outcome::Success,
+                serde_json::to_value(&pack)
+                    .map_err(|e| CliError::usage(format!("handoff: serialization error: {e}")))?,
+                protocol::Page::default(),
+                Vec::new(),
+            ))
         }
         "get-message" => {
             let mut args = rest.to_vec();
@@ -3265,11 +3363,12 @@ mod tests {
 
     // ---- help/version 提前拦截（ADR-0006，R3）----
 
-    const KNOWN_COMMANDS: [&str; 15] = [
+    const KNOWN_COMMANDS: [&str; 16] = [
         "ingest",
         "sync",
         "index",
         "search",
+        "handoff",
         "get-message",
         "get-session-resume",
         "get",
