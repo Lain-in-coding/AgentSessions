@@ -97,6 +97,7 @@
             "snapshot_failed",
             "catalog_error",
             "provider_error",
+            "capability_not_supported",
             "writer_busy",
             "schema_incompatible",
             "cursor_invalid",

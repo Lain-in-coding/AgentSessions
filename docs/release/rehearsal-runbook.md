@@ -258,11 +258,12 @@ have `status: "skipped"`, `reason: "not implemented"`.
 
 ### 10.1 Zero telemetry
 
-```text
-[pending feature 08-15-offline-privacy-hooks]
-```
-
-When offline mode lands:
+Offline mode is implemented: the global `--offline` flag is registered in every
+prefix scanner and fails closed for future network capabilities
+(`capability_not_supported`); `doctor`/`hook` report the flag. The default
+build carries no HTTP client dependency, and the only socket is `serve`'s
+loopback `TcpListener` — enforced by `tests/network_egress.rs` and the
+`security-audit` workflow step.
 
 1. Run the full rehearsal with network capture active (Wireshark / tcpdump /
    `netstat`). Verify zero outbound connections except explicit model downloads.

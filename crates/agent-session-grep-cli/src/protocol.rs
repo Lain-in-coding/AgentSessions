@@ -61,6 +61,9 @@ pub enum CanonicalCode {
     CatalogError,
     /// Provider 格式或 Adapter 错误 → exit 7。
     ProviderError,
+    /// 请求的能力当前不可用（provider 未声明，或 `--offline` 拒绝联网）→ exit 7。
+    /// 不静默降级——调用方必须收到明确信号（unified-release-contract D2）。
+    CapabilityNotSupported,
     /// writer lease 未取得（`writer_busy`）→ exit 6，可重试。
     WriterBusy,
     /// JSON/协议版本不兼容 → exit 9。
@@ -86,6 +89,7 @@ impl CanonicalCode {
             CanonicalCode::SnapshotFailed => "snapshot_failed",
             CanonicalCode::CatalogError => "catalog_error",
             CanonicalCode::ProviderError => "provider_error",
+            CanonicalCode::CapabilityNotSupported => "capability_not_supported",
             CanonicalCode::WriterBusy => "writer_busy",
             CanonicalCode::SchemaIncompatible => "schema_incompatible",
             CanonicalCode::CursorInvalid => "cursor_invalid",
@@ -106,7 +110,7 @@ impl CanonicalCode {
             | CanonicalCode::SourceChanged
             | CanonicalCode::SnapshotFailed => 5,
             CanonicalCode::CatalogError | CanonicalCode::WriterBusy => 6,
-            CanonicalCode::ProviderError => 7,
+            CanonicalCode::ProviderError | CanonicalCode::CapabilityNotSupported => 7,
             CanonicalCode::SchemaIncompatible | CanonicalCode::GenerationMismatch => 9,
             CanonicalCode::Internal => 70,
         }
@@ -137,6 +141,9 @@ impl CanonicalCode {
                 "数据库打开/读取失败：检查 --db 路径是否正确（路径末尾不要带斜杠），可运行 doctor --db <path> 自检"
             }
             CanonicalCode::ProviderError => "该文件不是可识别的 transcript 格式，或文件已被破坏",
+            CanonicalCode::CapabilityNotSupported => {
+                "该能力当前不可用：--offline 下拒绝需要联网的操作，或该 provider 未声明此能力"
+            }
             CanonicalCode::WriterBusy => {
                 "另一个进程正在写入数据库，等待其结束（或结束残留的 agent-session-grep 进程）后重试"
             }
@@ -484,6 +491,7 @@ mod tests {
         assert_eq!(CanonicalCode::CatalogError.exit_code(), 6);
         assert_eq!(CanonicalCode::WriterBusy.exit_code(), 6);
         assert_eq!(CanonicalCode::ProviderError.exit_code(), 7);
+        assert_eq!(CanonicalCode::CapabilityNotSupported.exit_code(), 7);
         assert_eq!(CanonicalCode::SchemaIncompatible.exit_code(), 9);
         assert_eq!(CanonicalCode::Internal.exit_code(), 70);
     }
@@ -498,6 +506,7 @@ mod tests {
             CanonicalCode::SnapshotFailed,
             CanonicalCode::CatalogError,
             CanonicalCode::ProviderError,
+            CanonicalCode::CapabilityNotSupported,
             CanonicalCode::WriterBusy,
             CanonicalCode::SchemaIncompatible,
             CanonicalCode::CursorInvalid,
@@ -886,6 +895,7 @@ mod tests {
             CanonicalCode::SnapshotFailed,
             CanonicalCode::CatalogError,
             CanonicalCode::ProviderError,
+            CanonicalCode::CapabilityNotSupported,
             CanonicalCode::WriterBusy,
             CanonicalCode::SchemaIncompatible,
             CanonicalCode::CursorInvalid,
@@ -923,7 +933,7 @@ mod tests {
         let codes = schema["$defs"]["errorBody"]["properties"]["code"]["enum"]
             .as_array()
             .expect("schema must enumerate canonical error codes");
-        assert_eq!(codes.len(), 13);
+        assert_eq!(codes.len(), 14);
         let search_condition = &schema["$defs"]["success"]["allOf"][0];
         assert_eq!(
             search_condition["if"]["properties"]["command"]["const"],

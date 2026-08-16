@@ -112,7 +112,10 @@ domain ← ports ← application ← adapters
 - **Stable Identity**: BLAKE3-based content-addressed IDs that survive file
   moves, renames, and incremental appends
 - **Evidence-first**: every search hit carries a source span for verification
-- **Privacy**: zero telemetry, zero upload, offline by default; cross-boundary
+- **Privacy**: zero telemetry, zero upload, offline by default; the global
+  `--offline` flag refuses any network-requiring capability (fail-closed),
+  and the default build has no HTTP client dependency (verified by a static
+  network-egress test and the security-audit workflow); cross-boundary
   outputs (Robot/MCP/Web/Handoff) are redacted by default (ADR-0009)
 - **Honest maturity**: providers are graded certified/GA/beta/experimental/
   unsupported — never inflated

@@ -36,7 +36,7 @@ use agent_session_grep_domain::{
 };
 use agent_session_grep_ports::{
     ParseReport, ProviderAdapter, ProviderSessionObservation, ReadOnlySource, RedactionStatus,
-    ResumeClaimsStore, RetrievalMode, SearchFilters, SearchProvider, SourceResumeClaim,
+    ResumeClaimsStore, RetrievalMode, SearchFilters, SearchInstant, SearchProvider, SourceResumeClaim,
     capability::{ProviderCapability, ProviderCapabilityMatrix, ProviderMaturity},
 };
 use agent_session_grep_provider_aider::AiderAdapter;
@@ -124,7 +124,12 @@ fn main() {
             std::process::exit(err.code.exit_code());
         }
     };
-    match run(&args, mode, request_id.as_deref()) {
+    match run(
+        &args,
+        mode,
+        request_id.as_deref(),
+        extract_offline_flag(&args),
+    ) {
         Ok(protocol::Outcome::Success) => {}
         // 部分成功（预算截断）按 contract §5 exit 10——结果可用但不完整，不伪装 success。
         Ok(protocol::Outcome::Partial) => std::process::exit(10),
@@ -187,6 +192,31 @@ fn diagnostic_warnings<'a>(
     warnings
 }
 
+/// 从参数抽出 `--offline`（裸 flag，无取值）：只在全局 flag 前缀位置识别。
+/// 缺省 false；命令名之后的同名 token 是位置参数，不当 flag 解析。重复出现
+/// 与其它裸 flag（`--discover`/`--include-system`）一致，按在场一次处理。
+fn extract_offline_flag(args: &[String]) -> bool {
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if !a.starts_with('-') {
+            return false; // 已到命令名：之后的 token 不当 flag 解析
+        }
+        if a == "--offline" {
+            return true;
+        }
+        // 其它带值 flag 跳过其取值，避免把取值误当命令名。
+        match a.as_str() {
+            "--db" | "--output" | "--request-id" | "--cursor" | "--max-items" | "--max-bytes"
+            | "--max-messages" | "--policy" | "--level" | "--provider" | "--since" | "--until"
+            | "--session" | "--around" => {
+                it.next();
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
 /// 从参数抽出 `--request-id`：缺 flag → None；有 flag 则值必须满足 envelope
 /// 约束（`^[A-Za-z0-9._:-]+$`，1..=128），否则是用法错误。
 ///
@@ -247,7 +277,8 @@ fn command_name(args: &[String]) -> String {
             | "--provider" | "--since" | "--until" | "--session" | "--around" => {
                 it.next(); // 消费其取值
             }
-            "--robot" | "--no-color" | "--help" | "-h" | "--version" | "-V" | "--discover" => {}
+            "--robot" | "--no-color" | "--help" | "-h" | "--version" | "-V" | "--discover"
+            | "--offline" => {}
             s => return s.to_string(),
         }
     }
@@ -300,6 +331,8 @@ fn intercept_help_or_version(args: &[String]) -> Option<HelpRequest> {
         match token.as_str() {
             "--help" | "-h" => prefix_help = true,
             "--version" | "-V" => prefix_version = true,
+            // 裸 flag（无取值）不改变拦截判定：--robot/--no-color/--offline 等同理。
+            "--robot" | "--no-color" | "--discover" | "--offline" => {}
             // 带值 flag 跳过其取值，避免把取值误当命令名。
             "--db" | "--output" | "--request-id" | "--cursor" | "--max-items" | "--max-bytes"
             | "--max-messages" | "--max-evidence" | "--max-tokens" | "--policy" | "--level"
@@ -322,6 +355,7 @@ fn run(
     args: &[String],
     mode: protocol::OutputMode,
     request_id: Option<&str>,
+    offline: bool,
 ) -> Result<protocol::Outcome, CliError> {
     let started = std::time::Instant::now();
     // help/version 提前拦截（ADR-0006）：在解析 --db、打开存储、special-command
@@ -349,7 +383,7 @@ fn run(
         return Ok(protocol::Outcome::Success);
     }
     if command_name(args) == "doctor" {
-        return doctor(args, mode, request_id);
+        return doctor(args, mode, request_id, offline);
     }
     if command_name(args) == "config" {
         let positionals = bare_positionals(args);
@@ -429,7 +463,8 @@ fn run(
     }
     // catalog 与 index 是同一个 SqliteStore；App 泛型接受同一实例的两次移动，
     // 故这里克隆一个连接语义上的第二把手不可行——改为让 App 持有单一 store。
-    let (command, outcome, data, page, warnings) = dispatch(&store, &db, &rest, mode, request_id)?;
+    let (command, outcome, data, page, warnings) =
+        dispatch(&store, &db, &rest, mode, request_id, offline)?;
     let duration_ms = started.elapsed().as_millis() as u64;
     // 生效检索模式：search 的 data 已含 `retrieval_mode` 字段（render 投影）；
     // 其他命令恒为 lexical。
@@ -728,6 +763,7 @@ GLOBAL（全局 flag 放在命令名之前；子命令 flag 如 --max-items 放�
     --output human|json|jsonl  输出模式（默认 human：人类可读文本；json/jsonl 为协议 envelope）
     --robot                等价 --output json，无颜色/进度（stdout 只输出协议）
     --request-id <id>      robot 调用方关联 id，原样回显于每个 frame（A-Za-z0-9._:- 计 1-128 字符）
+    --offline              拒绝任何需要联网的显式操作（fail-closed；当前所有命令本地执行，本 flag 是稳定显式模式，doctor/hook 会如实上报）
     -h, --help             打印本帮助
     -V, --version          打印版本
 
@@ -881,8 +917,9 @@ fn subcommand_help_text(cmd: &str) -> &'static str {
                   示例：echo '{\"prompt\":\"数据库迁移\"}' | agent-session-grep --db <path> hook user-prompt-submit --enable\n\
                   从 stdin 读 hook payload，检索历史并按 hookSpecificOutput 契约输出；\n\
                   不加 --enable 时输出空 context（不注入任何历史）；\n\
-                  flag：--enable 启用注入、--max-tokens <n> 预算（默认 2000）。\n\
-                  注入文本经跨边界脱敏（ADR-0009）。"
+                  flag：--enable 启用注入、--max-tokens <n> 预算（默认 2000）；\n\
+                  --provider claude|codex（可重复，OR 限定 provider）、--decay-days <n>（只注入最近 N 天）；\n\
+                  注入文本经跨边界脱敏（ADR-0009）；全局 --offline 时如实上报 offline 字段。"
         }
         "show" => {
             "show <wire-id>：按实体 ID 取回并展示（role/text/时间戳）。\n\
@@ -946,10 +983,13 @@ fn subcommand_help_text(cmd: &str) -> &'static str {
 }
 
 /// doctor：最小环境自检。报告版本；若给了 --db，尝试打开存储并报告 schema。
+/// `offline` 作为诊断字段原样上报（design D5）：`--offline` 是稳定显式模式，
+/// 当前没有任何命令需要联网，doctor 如实反映调用方声明的 offline 意图。
 fn doctor(
     args: &[String],
     mode: protocol::OutputMode,
     request_id: Option<&str>,
+    offline: bool,
 ) -> Result<protocol::Outcome, CliError> {
     let started = std::time::Instant::now();
     // 多余位置参数是用法错误，不静默忽略（与其它子命令一致）。
@@ -966,6 +1006,7 @@ fn doctor(
             "version": env!("CARGO_PKG_VERSION"),
             "db": "not-checked",
             "schema": null,
+            "offline": offline,
             // 新手会误以为 db: not-checked 是自检失败（10 角色体验测试缺陷）。
             // 加一行白话提示，说明如何真正校验。
             "hint": "未指定数据库：以上仅检查了环境。运行 doctor --db <path> 可校验数据库与 schema。",
@@ -983,6 +1024,7 @@ fn doctor(
                 "version": env!("CARGO_PKG_VERSION"),
                 "db": "ok",
                 "schema": schema,
+                "offline": offline,
                 "generation": generation,
                 "interrupted_batches": interrupted,
             })
@@ -1031,6 +1073,7 @@ fn is_known_flag_name(token: &str) -> bool {
             | "--session"
             | "--around"
             | "--discover"
+            | "--offline"
     )
 }
 
@@ -1112,7 +1155,8 @@ fn parse_db_flag(args: &[String]) -> Result<(String, Vec<String>), CliError> {
             "--db" | "--output" | "--request-id" => {
                 it.next(); // 消费其取值（--db 取值已由 extract_db_flag 校验）
             }
-            "--robot" | "--no-color" | "--help" | "-h" | "--version" | "-V" | "--discover" => {}
+            "--robot" | "--no-color" | "--help" | "-h" | "--version" | "-V" | "--discover"
+            | "--offline" => {}
             other => {
                 seen_command = true;
                 rest.push(other.to_string());
@@ -1153,22 +1197,42 @@ fn bare_positionals(args: &[String]) -> Vec<String> {
             | "--provider" | "--since" | "--until" | "--session" | "--around" => {
                 it.next(); // 消费其取值
             }
-            "--robot" | "--no-color" | "--help" | "-h" | "--version" | "-V" | "--discover" => {}
+            "--robot" | "--no-color" | "--help" | "-h" | "--version" | "-V" | "--discover"
+            | "--offline" => {}
             s => out.push(s.to_string()),
         }
     }
     out
 }
 
+/// `--offline` fail-closed 网关（design D5）：未来需要联网的能力（模型下载、
+/// 外部 Embedding API、telemetry）在尝试连接前必须先经过本网关。offline 下
+/// 以 `capability_not_supported` 拒绝，绝不静默降级。当前没有任何能力需要
+/// 联网，网关由未来命令调用、测试直接覆盖。
+fn offline_capability_gate(offline: bool, capability: &str) -> Result<(), CliError> {
+    if offline {
+        return Err(CliError(ProtocolError::new(
+            CanonicalCode::CapabilityNotSupported,
+            format!("capability {capability} requires network; refused under --offline"),
+        )));
+    }
+    Ok(())
+}
+
 /// 分发子命令。`store` 同时充当 CatalogStore 与 SearchIndex（同一 SqliteStore）。
 /// `db` 用于 resume 首次预览标记的 data-root 定位（与 writer lease 同一根）。
 /// `mode`/`request_id` 只喂给需要发协议 frame 的子命令（sync 的 jsonl progress）。
+/// `offline` 是 `--offline` 全局 flag 的 fail-closed 网关（design D5）：当前没有任何
+/// 子命令需要联网，flag 不改动既有行为；未来需要联网的能力（模型下载、外部
+/// Embedding API、telemetry）必须先经过 [`offline_capability_gate`]，在 offline
+/// 下以 `capability_not_supported` 拒绝，绝不静默降级。
 fn dispatch(
     store: &SqliteStore,
     db: &str,
     rest: &[String],
     mode: protocol::OutputMode,
     request_id: Option<&str>,
+    offline: bool,
 ) -> Result<
     (
         &'static str,
@@ -1183,6 +1247,16 @@ fn dispatch(
         .first()
         .ok_or_else(|| CliError::usage("missing subcommand"))?
         .as_str();
+    // Design D5 fail-closed gate: 未来需要联网的子命令必须在此登记，并在连接前
+    // 经过 [`offline_capability_gate`]。当前没有任何子命令需要联网（模型下载、
+    // 外部 Embedding API、telemetry 均未实现），列表为空——offline 是稳定显式
+    // 模式，不改动既有命令行为；测试直接覆盖网关语义。
+    const NETWORK_REQUIRING_SUBCOMMANDS: &[&str] = &[];
+    for network_cmd in NETWORK_REQUIRING_SUBCOMMANDS {
+        if cmd == *network_cmd {
+            offline_capability_gate(offline, cmd)?;
+        }
+    }
     match cmd {
         // index 是切片期的写入入口：派生一个 Reconstructed 消息 id，写 catalog + 索引。
         // 它不经 Application（Application 首片只暴露读用例），直接用端口写入。
@@ -1652,6 +1726,10 @@ fn dispatch(
             let mut args = rest.to_vec();
             let max_tokens_flag = extract_flag(&mut args, "--max-tokens")?;
             let enabled = take_bool_flag(&mut args, "--enable");
+            // #8 hook provider/time filter：--provider 可重复（OR），--decay-days
+            // 限定时间窗（0 = 不过滤）。两者都是 opt-in，缺省空/0 = 全部历史。
+            let providers = extract_repeated_flag(&mut args, "--provider")?;
+            let decay_days = extract_flag(&mut args, "--decay-days")?;
             no_extra_args(&args, 1, "hook <session-start|user-prompt-submit>")?;
             let raw_event = arg(&args, 1, "hook <session-start|user-prompt-submit>")?;
             let event = hooks::HookEvent::parse(raw_event).ok_or_else(|| {
@@ -1668,6 +1746,15 @@ fn dispatch(
             let config = hooks::HookConfig {
                 enabled,
                 max_tokens,
+                providers,
+                decay_days: decay_days
+                    .as_deref()
+                    .map(|v| {
+                        v.parse::<u32>()
+                            .map_err(|_| CliError::usage("--decay-days 需要非负整数"))
+                    })
+                    .transpose()?
+                    .unwrap_or(0),
                 ..Default::default()
             };
             // stdin payload 允许为空（手工调用/探测）：空即无 query，注入空 context。
@@ -1689,7 +1776,7 @@ fn dispatch(
                         App::with_resume(store_ref(store), store_ref(store), store_ref(store));
                     let response = app.handle(AppRequest::Search {
                         query: query.clone(),
-                        filters: SearchFilters::default(),
+                        filters: hook_search_filters(&config, app.now_ms())?,
                         limit: 10,
                         cursor: None,
                         budget: ResponseBudget::default(),
@@ -1718,6 +1805,7 @@ fn dispatch(
             if let Some(object) = data.as_object_mut() {
                 object.insert("event".into(), serde_json::json!(event.as_str()));
                 object.insert("enabled".into(), serde_json::json!(config.should_run()));
+                object.insert("offline".into(), serde_json::json!(offline));
                 object.insert("hits".into(), serde_json::json!(hits_count));
             }
             Ok((
@@ -1902,6 +1990,31 @@ fn search_filters_from_flags(
     }
     filters.since = parse_time_flag("--since", since, now_ms)?;
     filters.until = parse_time_flag("--until", until, now_ms)?;
+    Ok(filters)
+}
+
+/// 从 HookConfig 构建检索过滤（#8）：provider 白名单（空 = 全部）+ 时间衰减
+/// （`decay_days` > 0 时 `since = now - decay_days`，旧历史整体排除；0 = 不过滤）。
+/// provider 值接受与 search `--provider` 相同的 `claude|codex` 别名。
+/// 注入文本保持跨边界脱敏（ADR-0009）由调用方 hook 分支负责，本层只出过滤条件。
+fn hook_search_filters(config: &hooks::HookConfig, now_ms: i64) -> Result<SearchFilters, CliError> {
+    let mut filters = SearchFilters::default();
+    for provider in &config.providers {
+        filters.providers.push(match provider.as_str() {
+            "claude" => SearchProvider::Claude,
+            "codex" => SearchProvider::Codex,
+            other => {
+                return Err(CliError::usage(format!(
+                    "hook --provider: unknown provider {other} (expected claude|codex)"
+                )));
+            }
+        });
+    }
+    if config.decay_days > 0 {
+        let day_ms = 86_400_000i64;
+        let since_ms = now_ms.saturating_sub(i64::from(config.decay_days).saturating_mul(day_ms));
+        filters.since = Some(SearchInstant::from_unix_millis(since_ms));
+    }
     Ok(filters)
 }
 
@@ -4120,13 +4233,22 @@ mod tests {
     fn subcommand_help_works_without_db() {
         // run() 在拦截阶段就返回，不进入 parse_db_flag / 存储打开（R3.1：help
         // 无需 --db，且不创建任何文件）。
-        assert!(run(&["--help".into()], protocol::OutputMode::Human, None).is_ok());
-        assert!(run(&["--version".into()], protocol::OutputMode::Human, None).is_ok());
+        assert!(run(&["--help".into()], protocol::OutputMode::Human, None, false).is_ok());
+        assert!(
+            run(
+                &["--version".into()],
+                protocol::OutputMode::Human,
+                None,
+                false
+            )
+            .is_ok()
+        );
         assert!(
             run(
                 &["search".into(), "--help".into()],
                 protocol::OutputMode::Human,
-                None
+                None,
+                false
             )
             .is_ok()
         );
@@ -4134,7 +4256,8 @@ mod tests {
             run(
                 &["index".into(), "rebuild".into(), "--help".into()],
                 protocol::OutputMode::Human,
-                None
+                None,
+                false
             )
             .is_ok()
         );
@@ -4143,7 +4266,8 @@ mod tests {
             run(
                 &["--robot".into(), "--help".into()],
                 protocol::OutputMode::Json,
-                None
+                None,
+                false
             )
             .is_ok()
         );
@@ -4175,6 +4299,7 @@ mod tests {
             "--until",
             "--session",
             "--around",
+            "--offline",
         ] {
             let error = parse_db_flag(&["--db".into(), value.into(), "status".into()])
                 .expect_err("flag-named value must be rejected");
@@ -4234,7 +4359,8 @@ mod tests {
             doctor(
                 &["doctor".into(), "--bogus".into()],
                 protocol::OutputMode::Human,
-                None
+                None,
+                false
             )
             .is_err()
         );
@@ -4243,7 +4369,8 @@ mod tests {
             doctor(
                 &["doctor".into(), "--db".into(), "--robot".into()],
                 protocol::OutputMode::Human,
-                None
+                None,
+                false
             )
             .is_err()
         );
@@ -4257,7 +4384,8 @@ mod tests {
                     "b.db".into()
                 ],
                 protocol::OutputMode::Human,
-                None
+                None,
+                false
             )
             .is_err()
         );
@@ -4265,7 +4393,8 @@ mod tests {
             doctor(
                 &["doctor".into(), "--db".into()],
                 protocol::OutputMode::Human,
-                None
+                None,
+                false
             )
             .is_err()
         );
@@ -4274,7 +4403,8 @@ mod tests {
             run(
                 &["config".into(), "paths".into(), "--bogus".into()],
                 protocol::OutputMode::Human,
-                None
+                None,
+                false
             )
             .is_err()
         );
@@ -4287,7 +4417,8 @@ mod tests {
                     "--bogus".into()
                 ],
                 protocol::OutputMode::Json,
-                None
+                None,
+                false
             )
             .is_err()
         );
@@ -4337,6 +4468,170 @@ mod tests {
         );
     }
 
+    // ---- `--offline` 全局 flag（design D5 / PRD 08-15-offline-privacy-hooks）----
+
+    #[test]
+    fn extract_offline_flag_only_reads_prefix_position() {
+        // 前缀位置（命令名之前）识别；命令名之后同名 token 是位置参数。
+        assert!(extract_offline_flag(&["--offline".into(), "status".into()]));
+        assert!(extract_offline_flag(&[
+            "--db".into(),
+            "s.db".into(),
+            "--offline".into(),
+            "status".into()
+        ]));
+        assert!(extract_offline_flag(&["--offline".into()]));
+        assert!(!extract_offline_flag(&["status".into()]));
+        assert!(!extract_offline_flag(&[
+            "status".into(),
+            "--offline".into()
+        ]));
+        // 带值 flag 的取值跳过，不会把取值误当命令名。
+        assert!(extract_offline_flag(&[
+            "--db".into(),
+            "s.db".into(),
+            "--offline".into(),
+            "search".into()
+        ]));
+        assert!(!extract_offline_flag(&["--db".into(), "--offline".into()]));
+    }
+
+    #[test]
+    fn offline_is_registered_in_all_prefix_scanners() {
+        // command_name 跳过 --offline，命令名正确识别。
+        assert_eq!(
+            command_name(&["--offline".into(), "status".into()]),
+            "status"
+        );
+        // is_known_flag_name 覆盖 --offline：`--db --offline` 不得把 --offline 当路径。
+        assert!(is_known_flag_name("--offline"));
+        assert!(parse_db_flag(&["--db".into(), "--offline".into(), "status".into()]).is_err());
+        // bare_positionals 跳过 --offline：doctor 的多余参数校验不受影响。
+        assert_eq!(
+            bare_positionals(&["--offline".into(), "doctor".into()]),
+            vec!["doctor".to_string()]
+        );
+        // parse_db_flag 跳过 --offline：命令名之后是 rest，不吞命令。
+        let (db, rest) = parse_db_flag(&[
+            "--db".into(),
+            "s.db".into(),
+            "--offline".into(),
+            "search".into(),
+        ])
+        .expect("offline must not break parse_db_flag");
+        assert_eq!(db, "s.db");
+        assert_eq!(rest, vec!["search".to_string()]);
+        // help 拦截：--offline --help 仍是顶层帮助。
+        assert_eq!(
+            intercept_help_or_version(&["--offline".into(), "--help".into()]),
+            Some(HelpRequest::TopLevelHelp)
+        );
+    }
+
+    #[test]
+    fn offline_gate_refuses_network_capabilities_and_passes_local_ones() {
+        // 未来联网命令在 offline 下必须拒绝，且 code 稳定为 capability_not_supported。
+        let error = offline_capability_gate(true, "model-download")
+            .expect_err("offline must refuse network capability");
+        assert_eq!(error.0.code, CanonicalCode::CapabilityNotSupported);
+        assert_eq!(error.0.code.exit_code(), 7);
+        assert!(!error.0.code.retryable());
+        assert!(error.0.message.contains("model-download"));
+        // 非 offline 时正常放行；任何命令在非 offline 下都不该被 gate 拦。
+        assert!(offline_capability_gate(false, "model-download").is_ok());
+        assert!(offline_capability_gate(false, "telemetry").is_ok());
+    }
+
+    #[test]
+    fn offline_combines_with_sync_and_search_dispatch() {
+        // offline + 既有本地命令（sync/search）必须正常：flag 不改动既有行为。
+        let store = SqliteStore::open_in_memory().expect("in-memory store opens");
+        let (command, outcome, data, _, _) = dispatch(
+            &store,
+            "test.db",
+            &["search".into(), "foo".into()],
+            protocol::OutputMode::Json,
+            None,
+            true,
+        )
+        .expect("offline search must succeed");
+        assert_eq!(command, "search");
+        assert_eq!(outcome, protocol::Outcome::Success);
+        assert_eq!(data["hits"].as_array().expect("hits").len(), 0);
+        // sync 目录拒绝在 offline 下同样走 usage error（不吞错误）。
+        let dir = std::env::temp_dir().to_string_lossy().into_owned();
+        let error = dispatch(
+            &store,
+            "test.db",
+            &["sync".into(), dir.clone()],
+            protocol::OutputMode::Json,
+            None,
+            true,
+        )
+        .expect_err("offline sync directory must still be rejected");
+        assert_eq!(error.0.code, CanonicalCode::InvalidRequest);
+        assert!(!error.0.message.contains(&dir), "{:?}", error.0.message);
+    }
+
+    #[test]
+    fn doctor_accepts_offline_without_error() {
+        // doctor 在 --offline 下照常自检（offline 是稳定显式模式，不新增错误路径）；
+        // offline 字段由 emit_result 输出，unit 层只验证成功与诊断字段存在性。
+        assert!(doctor(&["doctor".into()], protocol::OutputMode::Human, None, true).is_ok());
+        // 与不带 --db 的默认 doctor 等价，offline 不改变退出语义。
+        assert!(
+            doctor(
+                &["--offline".into(), "doctor".into()],
+                protocol::OutputMode::Human,
+                None,
+                true
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn hook_search_filters_maps_providers_and_decay() {
+        // 空配置：不过滤（EMPTY filters）。
+        let empty = hooks::HookConfig::default();
+        let filters = hook_search_filters(&empty, 1_000_000).expect("empty config is valid");
+        assert!(filters.providers.is_empty());
+        assert!(filters.since.is_none());
+        assert!(filters.until.is_none());
+
+        // provider 白名单：claude/codex 别名映射到 SearchProvider。
+        let providers = hooks::HookConfig {
+            providers: vec!["claude".into(), "codex".into()],
+            ..Default::default()
+        };
+        let filters = hook_search_filters(&providers, 0).expect("providers valid");
+        assert_eq!(
+            filters.providers,
+            vec![SearchProvider::Claude, SearchProvider::Codex]
+        );
+        assert!(filters.since.is_none());
+
+        // 未知 provider 是用法错误，不静默忽略（fail-closed）；错误信息与
+        // search --provider 同风格回显取值（provider 值不是路径/secret）。
+        let bad = hooks::HookConfig {
+            providers: vec!["nope".into()],
+            ..Default::default()
+        };
+        let error = hook_search_filters(&bad, 0).expect_err("unknown provider rejected");
+        assert_eq!(error.0.code, CanonicalCode::InvalidRequest);
+        assert!(error.0.message.contains("nope"), "{:?}", error.0.message);
+
+        // 时间衰减：decay_days = 7 → since ≈ now - 7 天。
+        let decay = hooks::HookConfig {
+            decay_days: 7,
+            ..Default::default()
+        };
+        let now_ms = 1_000_000_000i64;
+        let filters = hook_search_filters(&decay, now_ms).expect("decay valid");
+        let since_ms = filters.since.expect("decay sets since").unix_seconds * 1_000;
+        assert_eq!(since_ms, now_ms - 7 * 86_400_000);
+    }
+
     // ---- 隐私（R2）----
 
     #[test]
@@ -4350,6 +4645,7 @@ mod tests {
                 &[cmd.into(), wire.into()],
                 protocol::OutputMode::Human,
                 None,
+                false,
             )
             .expect_err("missing entity must fail");
             // exit 4 契约（ADR-0005）不变，只改消息。
@@ -4373,6 +4669,7 @@ mod tests {
             &["sync".into(), dir_str.clone()],
             protocol::OutputMode::Json,
             None,
+            false,
         )
         .expect_err("directory must be rejected");
         assert_eq!(error.0.code, CanonicalCode::InvalidRequest);
@@ -4397,6 +4694,7 @@ mod tests {
             &["sync".into(), "--discover".into(), "--bogus".into()],
             protocol::OutputMode::Json,
             None,
+            false,
         )
         .expect_err("discover must reject unknown extra flags");
         assert_eq!(error.0.code, CanonicalCode::InvalidRequest);
@@ -4432,6 +4730,7 @@ mod tests {
             ],
             protocol::OutputMode::Json,
             None,
+            false,
         )
         .expect("search with r2r3 flags must succeed");
         assert_eq!(command, "search");

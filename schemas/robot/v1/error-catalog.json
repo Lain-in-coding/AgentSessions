@@ -72,6 +72,16 @@
       "operator_action": "Check provider variant support and diagnostics."
     },
     {
+      "code": "capability_not_supported",
+      "layer": "application",
+      "retryable": false,
+      "partial_allowed": false,
+      "cli_exit_code": 7,
+      "robot_ok": false,
+      "redaction": "none",
+      "operator_action": "Requested capability is not declared by the provider; under --offline, operations requiring network are refused."
+    },
+    {
       "code": "writer_busy",
       "layer": "storage",
       "retryable": true,

@@ -32,5 +32,25 @@ jobs:
       - name: Check dependency policy
         run: cargo deny check
 
+      - name: Check zero-egress static audit
+        # 零遥测审计（design D5 / PRD 08-15-offline-privacy-hooks）：默认 build 不得
+        # 依赖 HTTP client，唯一 socket 是 serve 的 loopback TcpListener。
+        # 与 crates/agent-session-grep-cli/tests/network_egress.rs 同一语义，此处用
+        # grep 作 CI 前置快速闸门（不依赖 cargo build）。
+        run: |
+          set -euo pipefail
+          for crate in reqwest hyper ureq isahc surf attohttpc tiny_http rouille warp axum tokio async-std; do
+            if grep -q "^name = \"${crate}\"" Cargo.lock; then
+              echo "zero-egress audit failed: HTTP client dependency ${crate} found in Cargo.lock" >&2
+              exit 1
+            fi
+          done
+          sockets=$(grep -rlE 'TcpListener|TcpStream|TcpSocket|UdpSocket|std::net' crates --include='*.rs' | grep '/src/' | grep -v 'crates/agent-session-grep-cli/src/serve.rs' || true)
+          if [ -n "${sockets}" ]; then
+            echo "zero-egress audit failed: socket usage outside serve.rs:" >&2
+            echo "${sockets}" >&2
+            exit 1
+          fi
+
       - name: Check RustSec advisories
         run: cargo audit --file Cargo.lock

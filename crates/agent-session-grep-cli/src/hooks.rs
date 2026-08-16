@@ -17,8 +17,9 @@
 //! Output format: Claude Code `hookSpecificOutput.additional_context` contract.
 //!
 //! The `asg hook <event>` subcommand is the wiring: it reads the hook payload
-//! from stdin, honours `HookConfig` (loaded from the config file, disabled by
-//! default), and writes the hook output to stdout.
+//! from stdin, honours `HookConfig` (flag-configured: `--enable`, `--max-tokens`,
+//! `--provider`, `--decay-days`; disabled by default), and writes the hook output
+//! to stdout.
 
 use serde::{Deserialize, Serialize};
 
