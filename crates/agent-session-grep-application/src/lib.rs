@@ -10,9 +10,9 @@ use agent_session_grep_domain::{
 };
 use agent_session_grep_ports::{
     CanonicalEventSink, CatalogEntry, CatalogStore, Confidence, ContextGraphStore, MessageEvent,
-    NoResumeClaims, ParseReport, PortError, PortResult, ProbeResult, ProviderAdapter,
-    ProviderError, ResumeClaimsStore, SearchFilters, SearchHit, SearchIndex, SearchInstant,
-    SearchQuery, SessionResumeMetadata,
+    NoResumeClaims, NoSemanticIndex, ParseReport, PortError, PortResult, ProbeResult,
+    ProviderAdapter, ProviderError, ResumeClaimsStore, RetrievalMode, SearchFilters, SearchHit,
+    SearchIndex, SearchInstant, SearchQuery, SemanticIndex, SessionResumeMetadata,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -165,6 +165,13 @@ pub enum AppRequest {
         /// 是否按会话归并（competitor-borrowings R3）：`false`（默认）保持
         /// 逐命中分页；`true` 时每会话只保留最高分命中并附带 `occurrences`。
         group_by_session: bool,
+        /// 检索模式（#3）：`Lexical`（默认）走 FTS；`Semantic`/`Hybrid` 需要
+        /// 已就绪的语义索引与 `query_embedding`，否则显式降级为
+        /// `LexicalFallback` + warning。
+        mode: RetrievalMode,
+        /// 查询文本的 embedding（调用方经 EmbeddingModel 生成，Application
+        /// 保持模型无关）。`Semantic`/`Hybrid` 模式必须提供；缺失即降级。
+        query_embedding: Option<Vec<f32>>,
     },
     /// 按稳定 ID 取回单个实体的原始负载。
     Get { id: StableId },
@@ -306,6 +313,11 @@ pub enum AppResponse {
         generation: u64,
         /// 预算截断标记；`truncated` 时前端应报 partial。
         truncation: Truncation,
+        /// 实际生效的检索模式（#3）：请求 semantic/hybrid 但索引未就绪时为
+        /// `LexicalFallback`，envelope 必须如实标注。
+        retrieval_mode: RetrievalMode,
+        /// 降级说明（#3）：semantic/hybrid 降级到 lexical 时的 warning 文本。
+        fallback_warning: Option<String>,
     },
     /// 单个实体的原始负载；`None` 表示未找到。
     Get { payload: Option<Vec<u8>> },
@@ -1215,21 +1227,27 @@ pub struct App<
     C: CatalogStore + ContextGraphStore,
     S: SearchIndex,
     R: ResumeClaimsStore = NoResumeClaims,
+    M: SemanticIndex = NoSemanticIndex,
 > {
     catalog: C,
     index: S,
     resume: R,
+    semantic: M,
     clock_ms: fn() -> i64,
 }
 
-impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore> App<C, S, R> {
+impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore>
+    App<C, S, R, NoSemanticIndex>
+{
     /// 绑定 Resume 声明存储的构造器（ADR-0009）：生产路径（CLI/Robot/MCP）
-    /// 用同一 SqliteStore 实例填充 catalog/index/resume 三个槽。
+    /// 用同一 SqliteStore 实例填充 catalog/index/resume 三个槽；semantic 为
+    /// 占位 `NoSemanticIndex`（semantic 请求显式降级 lexical_fallback）。
     pub fn with_resume(catalog: C, index: S, resume: R) -> Self {
         Self {
             catalog,
             index,
             resume,
+            semantic: NoSemanticIndex,
             clock_ms: system_now_ms,
         }
     }
@@ -1240,6 +1258,38 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore> 
             catalog,
             index,
             resume,
+            semantic: NoSemanticIndex,
+            clock_ms,
+        }
+    }
+}
+
+/// 注入语义索引的构造器（#3）。
+impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore, M: SemanticIndex>
+    App<C, S, R, M>
+{
+    pub fn with_resume_semantic(catalog: C, index: S, resume: R, semantic: M) -> Self {
+        Self {
+            catalog,
+            index,
+            resume,
+            semantic,
+            clock_ms: system_now_ms,
+        }
+    }
+
+    pub fn with_resume_semantic_and_clock(
+        catalog: C,
+        index: S,
+        resume: R,
+        semantic: M,
+        clock_ms: fn() -> i64,
+    ) -> Self {
+        Self {
+            catalog,
+            index,
+            resume,
+            semantic,
             clock_ms,
         }
     }
@@ -1248,12 +1298,15 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore> 
 /// `NoResumeClaims` 固定槽的构造器：函数级泛型默认参数不生效（Rust 限制），
 /// 把这些不携带 Resume 实现的构造器放进专属 impl，既有 `App::new` /
 /// `App::with_clock` 调用点零改动继续编译。
-impl<C: CatalogStore + ContextGraphStore, S: SearchIndex> App<C, S, NoResumeClaims> {
+impl<C: CatalogStore + ContextGraphStore, S: SearchIndex>
+    App<C, S, NoResumeClaims, NoSemanticIndex>
+{
     pub fn new(catalog: C, index: S) -> Self {
         Self {
             catalog,
             index,
             resume: NoResumeClaims,
+            semantic: NoSemanticIndex,
             clock_ms: system_now_ms,
         }
     }
@@ -1264,12 +1317,15 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex> App<C, S, NoResumeClai
             catalog,
             index,
             resume: NoResumeClaims,
+            semantic: NoSemanticIndex,
             clock_ms,
         }
     }
 }
 
-impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore> App<C, S, R> {
+impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore, M: SemanticIndex>
+    App<C, S, R, M>
+{
     /// Read the injected application clock. Relative search filters use this
     /// value so every frontend shares the same time source.
     pub fn now_ms(&self) -> i64 {
@@ -1380,6 +1436,8 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore> 
                 budget,
                 include_system,
                 group_by_session,
+                mode,
+                query_embedding,
             } => {
                 if limit == 0 {
                     return Err(DomainError::InvalidRequest("limit must be > 0".into()).into());
@@ -1436,13 +1494,63 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore> 
                 } else {
                     fetch
                 };
-                let mut scanned = self.index.query_filtered(
-                    SearchQuery {
-                        text: &query,
-                        filters: &filters,
-                    },
-                    scan as usize,
-                )?;
+                // 检索模式（#3）：semantic/hybrid 需要已就绪的语义索引与调用方
+                // 提供的查询向量；任一缺失时显式降级为 lexical_fallback + warning
+                // （PRD Q54：禁止静默切换）。
+                let (mut scanned, fallback_warning) = if mode == RetrievalMode::Lexical {
+                    (
+                        self.index.query_filtered(
+                            SearchQuery {
+                                text: &query,
+                                filters: &filters,
+                            },
+                            scan as usize,
+                        )?,
+                        None,
+                    )
+                } else if self.semantic.is_ready()
+                    && let Some(query_embedding) = query_embedding.as_deref()
+                {
+                    let semantic_hits = self
+                        .semantic
+                        .query_semantic(query_embedding, scan as usize)?;
+                    if mode == RetrievalMode::Semantic {
+                        (semantic_hits, None)
+                    } else {
+                        let lexical_hits = self.index.query_filtered(
+                            SearchQuery {
+                                text: &query,
+                                filters: &filters,
+                            },
+                            scan as usize,
+                        )?;
+                        (hybrid::fuse(&lexical_hits, &semantic_hits), None)
+                    }
+                } else {
+                    let warning = Some(format!(
+                        "semantic search unavailable (mode {}); fell back to lexical",
+                        mode.as_str()
+                    ));
+                    (
+                        self.index.query_filtered(
+                            SearchQuery {
+                                text: &query,
+                                filters: &filters,
+                            },
+                            scan as usize,
+                        )?,
+                        warning,
+                    )
+                };
+
+                // 生效检索模式（#3）：请求 semantic/hybrid 而索引未就绪 → 降级
+                // lexical_fallback，warning 已随 fallback_warning 返回。
+                let response_mode = if fallback_warning.is_some() {
+                    RetrievalMode::LexicalFallback
+                } else {
+                    mode
+                };
+                let response_warning = fallback_warning.clone();
 
                 // R2 系统噪声默认排除：role=system/developer 的命中不进入结果，
                 // `include_system` 显式恢复。过滤先于 offset 切片，cursor 位置因此
@@ -1527,6 +1635,8 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore> 
                         next_cursor,
                         generation,
                         truncation,
+                        retrieval_mode: response_mode,
+                        fallback_warning: response_warning,
                     });
                 }
 
@@ -1583,6 +1693,8 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore> 
                     next_cursor,
                     generation,
                     truncation,
+                    retrieval_mode: response_mode,
+                    fallback_warning: response_warning,
                 })
             }
             AppRequest::Get { id } => {
@@ -2291,6 +2403,8 @@ mod tests {
             budget: ResponseBudget::default(),
             include_system: false,
             group_by_session: false,
+            mode: RetrievalMode::Lexical,
+            query_embedding: None,
         });
         assert!(matches!(r, Ok(AppResponse::Search { hits, .. }) if hits.len() == 1));
     }
@@ -2305,6 +2419,8 @@ mod tests {
             budget: ResponseBudget::default(),
             include_system: false,
             group_by_session: false,
+            mode: RetrievalMode::Lexical,
+            query_embedding: None,
         });
         assert!(matches!(
             r.unwrap_err(),
@@ -2322,6 +2438,8 @@ mod tests {
             budget: ResponseBudget::default(),
             include_system: false,
             group_by_session: false,
+            mode: RetrievalMode::Lexical,
+            query_embedding: None,
         });
         assert!(matches!(
             r.unwrap_err(),
@@ -2418,6 +2536,8 @@ mod tests {
                 },
                 include_system: false,
                 group_by_session: false,
+                mode: RetrievalMode::Lexical,
+                query_embedding: None,
             })
             .unwrap();
         let AppResponse::Search { hits, .. } = resp else {
@@ -2478,6 +2598,8 @@ mod tests {
                 },
                 include_system: false,
                 group_by_session: false,
+                mode: RetrievalMode::Lexical,
+                query_embedding: None,
             })
             .unwrap();
         let (ids, _, _, truncation) = hits_of(resp);
@@ -2758,6 +2880,8 @@ mod tests {
             budget: ResponseBudget::default(),
             include_system: false,
             group_by_session: false,
+            mode: RetrievalMode::Lexical,
+            query_embedding: None,
         }
     }
 
@@ -2788,6 +2912,83 @@ mod tests {
             hits.iter()
                 .all(|hit| hit.suggested_next_commands.is_empty())
         );
+    }
+
+    #[test]
+    fn semantic_mode_without_index_falls_back_explicitly() {
+        // #3 Q54：semantic/hybrid 在语义索引未就绪（占位 NoSemanticIndex）时
+        // 必须显式降级为 lexical_fallback + warning，禁止静默切换。
+        let mut cat = MapCatalog::new(7);
+        cat.insert(
+            &hit_id("hit00"),
+            serde_json::json!({ "text": "needle in haystack" })
+                .to_string()
+                .into_bytes(),
+        );
+        let app = App::with_clock(cat, PagedIndex { n: 2 }, clock_t0);
+        for mode in [RetrievalMode::Semantic, RetrievalMode::Hybrid] {
+            let response = app
+                .handle(AppRequest::Search {
+                    query: "needle".into(),
+                    filters: SearchFilters::default(),
+                    limit: 10,
+                    cursor: None,
+                    budget: ResponseBudget::default(),
+                    include_system: false,
+                    group_by_session: false,
+                    mode,
+                    query_embedding: Some(vec![0.1f32; 384]),
+                })
+                .unwrap();
+            let AppResponse::Search {
+                hits,
+                retrieval_mode,
+                fallback_warning,
+                ..
+            } = response
+            else {
+                panic!("expected Search response");
+            };
+            // 词法命中仍可用（结果非空），但模式如实标注降级。
+            assert!(!hits.is_empty());
+            assert_eq!(retrieval_mode, RetrievalMode::LexicalFallback);
+            let warning = fallback_warning.expect("fallback must be surfaced");
+            assert!(warning.contains("fell back to lexical"));
+        }
+    }
+
+    #[test]
+    fn lexical_mode_is_never_marked_fallback() {
+        let mut cat = MapCatalog::new(7);
+        cat.insert(
+            &hit_id("hit00"),
+            serde_json::json!({ "text": "needle" })
+                .to_string()
+                .into_bytes(),
+        );
+        let app = App::with_clock(cat, PagedIndex { n: 2 }, clock_t0);
+        let AppResponse::Search {
+            retrieval_mode,
+            fallback_warning,
+            ..
+        } = app
+            .handle(AppRequest::Search {
+                query: "needle".into(),
+                filters: SearchFilters::default(),
+                limit: 10,
+                cursor: None,
+                budget: ResponseBudget::default(),
+                include_system: false,
+                group_by_session: false,
+                mode: RetrievalMode::Lexical,
+                query_embedding: None,
+            })
+            .unwrap()
+        else {
+            panic!("expected Search response");
+        };
+        assert_eq!(retrieval_mode, RetrievalMode::Lexical);
+        assert!(fallback_warning.is_none());
     }
 
     #[test]
@@ -2851,6 +3052,8 @@ mod tests {
                 budget: ResponseBudget::default(),
                 include_system: true,
                 group_by_session: false,
+                mode: RetrievalMode::Lexical,
+                query_embedding: None,
             })
             .unwrap()
         else {
@@ -2902,6 +3105,8 @@ mod tests {
                 budget: ResponseBudget::default(),
                 include_system: false,
                 group_by_session: true,
+                mode: RetrievalMode::Lexical,
+                query_embedding: None,
             })
             .unwrap()
         else {
@@ -2969,6 +3174,8 @@ mod tests {
                 },
                 include_system: false,
                 group_by_session: false,
+                mode: RetrievalMode::Lexical,
+                query_embedding: None,
             })
             .unwrap()
         else {
@@ -3001,6 +3208,8 @@ mod tests {
                 },
                 include_system: false,
                 group_by_session: false,
+                mode: RetrievalMode::Lexical,
+                query_embedding: None,
             })
             .unwrap();
         let (kept, next, _, truncation) = hits_of(response);
@@ -3089,6 +3298,8 @@ mod tests {
             budget: ResponseBudget::default(),
             include_system: false,
             group_by_session: false,
+            mode: RetrievalMode::Lexical,
+            query_embedding: None,
         }
     }
 
@@ -3250,6 +3461,8 @@ mod tests {
                 next_cursor,
                 generation,
                 truncation,
+                retrieval_mode: _,
+                fallback_warning: _,
             } => (
                 hits.iter().map(|h| h.id.as_str().to_string()).collect(),
                 next_cursor,
@@ -3343,6 +3556,8 @@ mod tests {
                 },
                 include_system: false,
                 group_by_session: false,
+                mode: RetrievalMode::Lexical,
+                query_embedding: None,
             })
             .unwrap();
         let (ids, next, _, truncation) = hits_of(resp);
@@ -3381,6 +3596,8 @@ mod tests {
                 },
                 include_system: false,
                 group_by_session: false,
+                mode: RetrievalMode::Lexical,
+                query_embedding: None,
             })
             .unwrap_err();
         assert!(
@@ -5390,6 +5607,8 @@ mod tests {
                 budget: ResponseBudget::default(),
                 include_system: false,
                 group_by_session: true,
+                mode: RetrievalMode::Lexical,
+                query_embedding: None,
             })
             .unwrap()
         else {

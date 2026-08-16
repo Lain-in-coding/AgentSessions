@@ -383,6 +383,30 @@ pub trait SemanticIndex {
     fn is_ready(&self) -> bool;
 }
 
+/// 未提供语义索引实现时的占位（对应 `App<.., NoSemanticIndex>`）：语义/
+/// 混合检索请求显式降级为 `RetrievalMode::LexicalFallback` + warning，
+/// 与 `NoResumeClaims` 同一模式——既有构造签名零改动。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoSemanticIndex;
+
+impl SemanticIndex for NoSemanticIndex {
+    fn index_embedding(&self, _id: &StableId, _embedding: &[f32]) -> PortResult<()> {
+        Ok(())
+    }
+
+    fn query_semantic(
+        &self,
+        _query_embedding: &[f32],
+        _limit: usize,
+    ) -> PortResult<Vec<SearchHit>> {
+        Ok(Vec::new())
+    }
+
+    fn is_ready(&self) -> bool {
+        false
+    }
+}
+
 /// Embedding 模型端口：把文本转成归一化向量。
 ///
 /// 实现可能是 ONNX Runtime 动态加载、candle 本地推理、或外部 API（opt-in）。

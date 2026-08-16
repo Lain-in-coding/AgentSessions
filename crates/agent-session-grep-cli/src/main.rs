@@ -415,6 +415,18 @@ fn run(
     // 故这里克隆一个连接语义上的第二把手不可行——改为让 App 持有单一 store。
     let (command, outcome, data, page, warnings) = dispatch(&store, &rest, mode, request_id)?;
     let duration_ms = started.elapsed().as_millis() as u64;
+    // 生效检索模式：search 的 data 已含 `retrieval_mode` 字段（render 投影）；
+    // 其他命令恒为 lexical。
+    let retrieval_mode = data
+        .get("retrieval_mode")
+        .and_then(serde_json::Value::as_str)
+        .map(|s| match s {
+            "semantic" => RetrievalMode::Semantic,
+            "hybrid" => RetrievalMode::Hybrid,
+            "lexical_fallback" => RetrievalMode::LexicalFallback,
+            _ => RetrievalMode::Lexical,
+        })
+        .unwrap_or(RetrievalMode::Lexical);
     emit_result(
         command,
         mode,
@@ -424,6 +436,7 @@ fn run(
         &page,
         &warnings,
         request_id,
+        retrieval_mode,
     );
     Ok(outcome)
 }
@@ -441,6 +454,7 @@ fn emit_result(
     page: &protocol::Page,
     warnings: &[String],
     request_id: Option<&str>,
+    retrieval_mode: RetrievalMode,
 ) {
     match mode {
         protocol::OutputMode::Human => {
@@ -480,7 +494,7 @@ fn emit_result(
                 page,
                 &redacted_warnings,
                 request_id,
-                RetrievalMode::default(),
+                retrieval_mode,
                 &redaction,
             ));
         }
@@ -501,6 +515,7 @@ fn config_paths(
         &protocol::Page::default(),
         &[],
         request_id,
+        RetrievalMode::Lexical,
     );
     Ok(protocol::Outcome::Success)
 }
@@ -894,6 +909,7 @@ fn doctor(
         &protocol::Page::default(),
         &[],
         request_id,
+        RetrievalMode::Lexical,
     );
     Ok(protocol::Outcome::Success)
 }
@@ -1163,6 +1179,17 @@ fn dispatch(
             let until = extract_flag(&mut args, "--until")?;
             let include_system = take_bool_flag(&mut args, "--include-system");
             let group_by_session = take_bool_flag(&mut args, "--group-by-session");
+            // #3 检索模式：--mode lexical|semantic|hybrid；默认 lexical。
+            let retrieval_mode = match extract_flag(&mut args, "--mode")?.as_deref() {
+                None | Some("lexical") => RetrievalMode::Lexical,
+                Some("semantic") => RetrievalMode::Semantic,
+                Some("hybrid") => RetrievalMode::Hybrid,
+                Some(other) => {
+                    return Err(CliError::usage(format!(
+                        "--mode must be lexical|semantic|hybrid, got {other}"
+                    )));
+                }
+            };
             let app = App::with_resume(store_ref(store), store_ref(store), store_ref(store));
             let filters = search_filters_from_flags(
                 &providers,
@@ -1179,6 +1206,8 @@ fn dispatch(
                 20
             };
             let query = arg(&args, 1, "search <query>")?.to_string();
+            // #3 查询向量：当前 CLI 未注入语义模型，semantic/hybrid 请求由
+            // Application 显式降级为 lexical_fallback + warning（禁止静默切换）。
             let response = app.handle(AppRequest::Search {
                 query,
                 filters,
@@ -1187,6 +1216,8 @@ fn dispatch(
                 budget,
                 include_system,
                 group_by_session,
+                mode: retrieval_mode,
+                query_embedding: None,
             })?;
             let (outcome, mut data, page, warnings) = render(response);
             if mode == protocol::OutputMode::Human {
@@ -1225,6 +1256,8 @@ fn dispatch(
                 },
                 include_system: false,
                 group_by_session: false,
+                mode: RetrievalMode::Lexical,
+                query_embedding: None,
             })?;
             let (hits, generation) = match &response {
                 AppResponse::Search {
@@ -2667,13 +2700,20 @@ fn render(
             next_cursor,
             generation,
             truncation,
+            retrieval_mode: effective_mode,
+            fallback_warning,
         } => {
             let outcome = outcome_of(&truncation);
             let page = protocol::Page {
                 has_more: next_cursor.is_some(),
                 next_cursor,
             };
+            let mut warnings = Vec::new();
+            if let Some(warning) = fallback_warning {
+                warnings.push(warning);
+            }
             let data = serde_json::json!({
+                "retrieval_mode": effective_mode.as_str(),
                 "hits": hits
                     .into_iter()
                     .map(|hit| {
@@ -2709,7 +2749,7 @@ fn render(
                 "generation": generation,
                 "truncation": truncation_json(&truncation),
             });
-            (outcome, data, page, Vec::new())
+            (outcome, data, page, warnings)
         }
         AppResponse::Get { payload } => (
             protocol::Outcome::Success,
@@ -3887,6 +3927,8 @@ mod tests {
                 truncated: false,
                 reason: None,
             },
+            retrieval_mode: RetrievalMode::Lexical,
+            fallback_warning: None,
         };
         let (_, data, _, _) = render(response);
         assert_eq!(data["hits"][0]["session_id"], "ses_v1_aaaa");
@@ -3928,6 +3970,8 @@ mod tests {
                 truncated: false,
                 reason: None,
             },
+            retrieval_mode: RetrievalMode::Lexical,
+            fallback_warning: None,
         };
         let (_, data, _, _) = render(response);
         let hit = &data["hits"][0];
@@ -3963,6 +4007,8 @@ mod tests {
                 truncated: false,
                 reason: None,
             },
+            retrieval_mode: RetrievalMode::Lexical,
+            fallback_warning: None,
         };
         let (_, data, _, _) = render(response);
         let hit = &data["hits"][0];

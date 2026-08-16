@@ -398,6 +398,8 @@ impl McpServer<'_> {
             budget: budget_with(max_items, max_bytes, None),
             include_system,
             group_by_session,
+            mode: agent_session_grep_ports::RetrievalMode::Lexical,
+            query_embedding: None,
         })
     }
 

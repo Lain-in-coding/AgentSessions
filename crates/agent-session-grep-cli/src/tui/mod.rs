@@ -136,6 +136,8 @@ fn execute(store: &SqliteStore, effect: Effect) -> Msg {
                 budget: ResponseBudget::default(),
                 include_system: false,
                 group_by_session: false,
+                mode: agent_session_grep_ports::RetrievalMode::Lexical,
+                query_embedding: None,
             };
             match app.handle(request) {
                 Ok(response) => search_msg(response),
@@ -156,6 +158,8 @@ fn search_msg(response: AppResponse) -> Msg {
             next_cursor,
             generation,
             truncation,
+            retrieval_mode: _,
+            fallback_warning: _,
         } => {
             let hits = hits
                 .into_iter()
@@ -401,6 +405,8 @@ mod tests {
                 truncated: false,
                 reason: None,
             },
+            retrieval_mode: agent_session_grep_ports::RetrievalMode::Lexical,
+            fallback_warning: None,
         };
 
         let Msg::SearchLoaded(page) = search_msg(response) else {

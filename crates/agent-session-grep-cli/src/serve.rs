@@ -322,6 +322,8 @@ pub fn route_request(
                 budget,
                 include_system: false,
                 group_by_session: false,
+                mode: agent_session_grep_ports::RetrievalMode::Lexical,
+                query_embedding: None,
             }) {
                 Ok(AppResponse::Search {
                     hits, generation, ..
