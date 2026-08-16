@@ -148,8 +148,19 @@ fn render_resume(data: &Value) -> Vec<String> {
     if let Some(dir) = data.get("working_directory").and_then(Value::as_str) {
         lines.push(format!("工作目录：{}", sanitize(dir)));
     }
-    if let Some(mode) = data.get("permission_mode").and_then(Value::as_str) {
-        lines.push(format!("权限模式：{}", sanitize(mode)));
+    // 权限模式恒如实标注：未核验时明示"未核验"，绝不静默省略（audit P1-2）。
+    let permission_mode = data
+        .get("permission_mode")
+        .and_then(Value::as_str)
+        .map(sanitize);
+    let permission_verified = data
+        .get("permission_mode_verified")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    match permission_mode {
+        Some(mode) => lines.push(format!("权限模式：{}", mode)),
+        None if permission_verified => lines.push("权限模式：默认（无 yolo/full-auto）".into()),
+        None => lines.push("权限模式：未核验（默认不带，不自动加 yolo/full-auto）".into()),
     }
     let executed = data
         .get("executed")
@@ -157,6 +168,12 @@ fn render_resume(data: &Value) -> Vec<String> {
         .unwrap_or(false);
     if executed {
         lines.push("已执行：provider 进程已启动并退出。".into());
+    } else if data
+        .get("first_run_preview")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        lines.push("首次使用：已强制预览未执行（--yes 已被忽略）。再次运行 resume --yes 确认后才会真正执行。".into());
     } else {
         lines.push("dry-run：未执行。加 --yes 实际恢复。".into());
     }
@@ -972,6 +989,7 @@ mod tests {
             "command": "(cd /home/u/proj && claude --resume abc-123)",
             "working_directory": "/home/u/proj",
             "permission_mode": null,
+            "permission_mode_verified": false,
             "unavailable_reason": null,
             "executed": false,
         });
@@ -982,8 +1000,36 @@ mod tests {
                 "session ses_v1_aaa  (provider claude-code)",
                 "命令：(cd /home/u/proj && claude --resume abc-123)",
                 "工作目录：/home/u/proj",
+                "权限模式：未核验（默认不带，不自动加 yolo/full-auto）",
                 "dry-run：未执行。加 --yes 实际恢复。",
             ]
+        );
+    }
+
+    #[test]
+    fn resume_renders_first_run_forced_preview() {
+        let data = json!({
+            "session_id": "ses_v1_ddd",
+            "provider_id": "codex",
+            "available": true,
+            "command": "codex resume xyz",
+            "working_directory": null,
+            "permission_mode": null,
+            "permission_mode_verified": false,
+            "unavailable_reason": null,
+            "executed": false,
+            "first_run_preview": true,
+        });
+        let lines = render_success("resume", Outcome::Success, &data, &Page::default());
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with("首次使用：已强制预览未执行")),
+            "{lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("--yes 已被忽略")),
+            "{lines:?}"
         );
     }
 

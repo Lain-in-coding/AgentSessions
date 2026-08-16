@@ -123,8 +123,7 @@ pub struct ProviderCapabilityMatrix {
 }
 
 impl ProviderCapabilityMatrix {
-    /// 返回当前已实现的 2 个 provider 的能力矩阵。
-    /// 其余 14 个 provider 在 #2 任务实现后加入。
+    /// 返回当前 16 个 provider 的能力矩阵（evidence wave 08-15 全量）。
     pub fn current() -> Self {
         Self {
             providers: vec![
@@ -182,7 +181,9 @@ impl ProviderCapabilityMatrix {
                     parse: CapabilityLevel::Native,
                     search: CapabilityLevel::Native,
                     context: CapabilityLevel::Unsupported,
-                    resume: CapabilityLevel::Unknown,
+                    // resume 命令已由 application::resume builder 支持（grok --resume），
+                    // 与矩阵一致标记 Derived（audit P1-2 drift 测试守护）。
+                    resume: CapabilityLevel::Derived,
                     handoff: CapabilityLevel::Unsupported,
                     tool_activity: CapabilityLevel::Unsupported,
                     source_span: CapabilityLevel::Native,
@@ -272,7 +273,9 @@ impl ProviderCapabilityMatrix {
                     parse: CapabilityLevel::Native,
                     search: CapabilityLevel::Native,
                     context: CapabilityLevel::Unsupported,
-                    resume: CapabilityLevel::Derived,
+                    // resume 命令尚无权威模板（builder 未支持），如实标记 Unknown——
+                    // 曾误标 Derived（audit P1-2 drift 测试守护）。
+                    resume: CapabilityLevel::Unknown,
                     handoff: CapabilityLevel::Unsupported,
                     tool_activity: CapabilityLevel::Unsupported,
                     source_span: CapabilityLevel::Unsupported,

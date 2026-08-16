@@ -64,6 +64,25 @@ pub fn build_resume_descriptor(metadata: &SessionResumeMetadata) -> ResumePrevie
     let provider_id = metadata.provider_id.as_deref().unwrap_or("");
     let session_id = metadata.provider_session_id.as_deref().unwrap_or("");
 
+    // Fail-closed 边界（audit P1-2）：`resume_available=true` 但 provider
+    // session id 缺失/空白时，已知 provider 也会造出空 SID 命令
+    // （`claude --resume ""`）——必须降级为不可用 + 原因，绝不生成空命令。
+    if session_id.trim().is_empty() {
+        return ResumePreview {
+            descriptor: ResumeDescriptor {
+                provider_binary: String::new(),
+                args: Vec::new(),
+                working_directory: metadata.original_working_directory.clone(),
+                permission_mode: None,
+            },
+            command_string: String::new(),
+            available: false,
+            unavailable_reason: Some(
+                "resume metadata is missing the provider session id".to_string(),
+            ),
+        };
+    }
+
     let (binary, args) = match provider_id {
         "claude-code" => (
             "claude",
@@ -126,8 +145,42 @@ fn format_command(binary: &str, args: &[String], cwd: &Option<String>) -> String
 
 /// Provider-specific permission mode hint (none by default — user must opt-in).
 /// Returns `None` for all providers: resume never auto-carries yolo/full-auto.
+///
+/// 诚实口径：permission mode 目前恒未核验（metadata/配置均不携带真实模式），
+/// 由 CLI 层在 preview 中如实标注 `permission_mode_verified: false`，不编造。
 fn metadata_provider_permission_hint(_provider_id: &str) -> Option<String> {
     None
+}
+
+/// 首次 resume 强制预览的持久标记（PRD Q24 / audit P1-2）。
+///
+/// 契约：安装后第一次 `resume`（无论是否 `--yes`）只预览不执行，并落一个
+/// 持久标记；标记存在后 `--yes` 才允许实际执行。标记按 db 所在 data root
+/// 放置（与 writer lease 同一根），同一 data root 的多库共享"已看过预览"状态。
+pub const RESUME_PREVIEW_ACK_FILE: &str = ".agent-session-grep-resume-ack";
+
+/// 返回 data root 下首次预览标记的路径。
+pub fn resume_preview_ack_path(data_root: &std::path::Path) -> std::path::PathBuf {
+    data_root.join(RESUME_PREVIEW_ACK_FILE)
+}
+
+/// 首次预览是否已被确认（标记文件存在）。
+pub fn resume_preview_acknowledged(data_root: &std::path::Path) -> bool {
+    resume_preview_ack_path(data_root).is_file()
+}
+
+/// 落首次预览标记（幂等）。写失败返回错误——调用方必须保持强制预览（fail closed）。
+pub fn acknowledge_resume_preview(data_root: &std::path::Path) -> std::io::Result<()> {
+    let path = resume_preview_ack_path(data_root);
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+    {
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(e) => Err(e),
+    }
 }
 
 #[cfg(test)]
@@ -227,5 +280,101 @@ mod tests {
         assert!(preview.available);
         assert_eq!(preview.descriptor.provider_binary, "grok");
         assert_eq!(preview.descriptor.args, vec!["--resume", "grok-sess"]);
+    }
+
+    #[test]
+    fn resume_available_without_provider_session_id_fails_closed() {
+        // audit P1-2：`resume_available=true` 但 provider_session_id 缺失——
+        // 已知 provider 也会生成空 SID 命令，必须降级为不可用 + 原因。
+        let m = SessionResumeMetadata {
+            session_id: StableId::from_wire("ses_v1_test").unwrap(),
+            provider_id: Some("claude-code".to_string()),
+            resume_available: true,
+            provider_session_id: None,
+            original_working_directory: None,
+            unavailable_reason: None,
+        };
+        let preview = build_resume_descriptor(&m);
+        assert!(!preview.available);
+        assert!(preview.command_string.is_empty());
+        let reason = preview.unavailable_reason.as_deref().unwrap();
+        assert!(
+            reason.contains("missing the provider session id"),
+            "reason: {reason}"
+        );
+
+        // 空白字符串同样视为缺失。
+        let m_blank = SessionResumeMetadata {
+            session_id: StableId::from_wire("ses_v1_test").unwrap(),
+            provider_id: Some("codex".to_string()),
+            resume_available: true,
+            provider_session_id: Some("   ".to_string()),
+            original_working_directory: None,
+            unavailable_reason: None,
+        };
+        let preview = build_resume_descriptor(&m_blank);
+        assert!(!preview.available);
+        assert!(preview.command_string.is_empty());
+    }
+
+    #[test]
+    fn capability_matrix_resume_level_matches_builder_support() {
+        // audit P1-2 drift 测试：capability.rs 的 resume 级别必须与 resume
+        // builder 的实际支持一致，防止矩阵与 builder 漂移。
+        use agent_session_grep_ports::capability::{CapabilityLevel, ProviderCapabilityMatrix};
+        let matrix = ProviderCapabilityMatrix::current();
+        for capability in &matrix.providers {
+            let m = SessionResumeMetadata {
+                session_id: StableId::from_wire("ses_v1_drift").unwrap(),
+                provider_id: Some(capability.provider_id.clone()),
+                resume_available: true,
+                provider_session_id: Some("synthetic-session".to_string()),
+                original_working_directory: None,
+                unavailable_reason: None,
+            };
+            let builder_supports = build_resume_descriptor(&m).available;
+            assert_eq!(
+                capability.resume == CapabilityLevel::Derived,
+                builder_supports,
+                "provider {}: capability matrix resume={:?} but resume builder support={}",
+                capability.provider_id,
+                capability.resume,
+                builder_supports
+            );
+        }
+    }
+
+    #[test]
+    fn first_run_preview_marker_starts_unacknowledged_and_is_idempotent() {
+        let dir = unique_temp_dir("marker-ack");
+        assert!(!resume_preview_acknowledged(&dir));
+        acknowledge_resume_preview(&dir).expect("acknowledge");
+        assert!(resume_preview_acknowledged(&dir));
+        // 幂等：重复落标记不报错。
+        acknowledge_resume_preview(&dir).expect("acknowledge again");
+        assert!(resume_preview_acknowledged(&dir));
+    }
+
+    #[test]
+    fn first_run_preview_marker_is_scoped_to_data_root() {
+        let a = unique_temp_dir("marker-a");
+        let b = unique_temp_dir("marker-b");
+        acknowledge_resume_preview(&a).expect("acknowledge a");
+        assert!(resume_preview_acknowledged(&a));
+        assert!(!resume_preview_acknowledged(&b));
+    }
+
+    /// 测试专用唯一临时目录（std-only，避免新增依赖）。
+    fn unique_temp_dir(tag: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "asg-resume-marker-{tag}-{}-{n}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        dir
     }
 }

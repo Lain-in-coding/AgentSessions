@@ -15,6 +15,11 @@ path = "src/main.rs"
 name = "asg"
 path = "src/main.rs"
 
+# Test-only fake provider for the resume smoke e2e test (never shipped to users).
+[[bin]]
+name = "resume-smoke-provider"
+path = "src/bin/resume_smoke_provider.rs"
+
 [dependencies]
 agent-session-grep-domain = { path = "../agent-session-grep-domain" }
 agent-session-grep-ports = { path = "../agent-session-grep-ports" }

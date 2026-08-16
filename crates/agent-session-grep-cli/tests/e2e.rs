@@ -2126,6 +2126,251 @@ fn providers_human_output_uses_the_human_renderer() {
     assert!(text.contains("incremental="), "{text}");
 }
 
+// ─── Resume 执行层 smoke（audit P1-2）───────────────────────────────────────
+
+/// 写入带 `cwd` 的合成 Claude fixture（恢复命令应回到该目录 spawn），返回
+/// (fixture 路径, 锚点 message wire id)。
+fn write_claude_resume_fixture(dir: &Path, cwd: &str) -> (String, String) {
+    let line = serde_json::json!({
+        "type": "user",
+        "uuid": "c0000000-0000-4000-8000-000000000001",
+        "parentUuid": null,
+        "sessionId": "ccdd1234-5678-4abc-8def-001122334455",
+        "cwd": cwd,
+        "timestamp": "2026-07-26T01:00:00.000Z",
+        "message": { "role": "user", "content": "resume smoke root" },
+    })
+    .to_string();
+    let fixture = dir.join("resume-smoke.jsonl");
+    std::fs::write(&fixture, format!("{line}\n")).expect("write resume fixture");
+    (
+        fixture.to_string_lossy().into_owned(),
+        "msg_v1_c0000000-0000-4000-8000-000000000001".to_string(),
+    )
+}
+
+/// 把测试专用 fake provider（`resume-smoke-provider` bin）复制为 `claude`。
+fn write_fake_provider(fake_dir: &Path) {
+    let helper = Path::new(env!("CARGO_BIN_EXE_resume-smoke-provider"));
+    #[cfg(windows)]
+    let target = fake_dir.join("claude.exe");
+    #[cfg(not(windows))]
+    let target = fake_dir.join("claude");
+    std::fs::copy(helper, &target).expect("copy fake provider binary");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod fake provider");
+    }
+}
+
+/// 以 robot 模式跑 CLI，PATH 前置 `path`，并把 fake provider 的 cwd/args
+/// 记录文件路径经环境变量传入（fake provider 由 CLI 继承后记录）。
+fn run_with_path(
+    db: &str,
+    path: &std::ffi::OsStr,
+    cwd_out: &Path,
+    args_out: &Path,
+    args: &[&str],
+) -> Output {
+    let mut cmd = Command::new(BIN);
+    cmd.arg("--db").arg(db).arg("--robot").args(args);
+    cmd.env("PATH", path);
+    cmd.env("RESUME_SMOKE_CWD_OUT", cwd_out);
+    cmd.env("RESUME_SMOKE_ARGS_OUT", args_out);
+    cmd.output()
+        .expect("failed to spawn agent-session-grep binary")
+}
+
+/// cwd 文本比较：忽略尾部分隔符；Windows 大小写不敏感。
+fn same_cwd(recorded: &str, expected: &str) -> bool {
+    let recorded = recorded.trim().trim_end_matches(['/', '\\']);
+    let expected = expected.trim().trim_end_matches(['/', '\\']);
+    #[cfg(windows)]
+    {
+        recorded.eq_ignore_ascii_case(expected)
+    }
+    #[cfg(not(windows))]
+    {
+        recorded == expected
+    }
+}
+
+#[test]
+fn resume_yes_first_run_forced_preview_then_spawns_in_original_cwd() {
+    let (dir, db) = temp_db("resume-spawn");
+    let workdir = dir.path().join("original-workspace");
+    std::fs::create_dir_all(&workdir).expect("create workspace");
+    let workdir_str = workdir.to_string_lossy().into_owned();
+    let (fixture_path, anchor_message) = write_claude_resume_fixture(dir.path(), &workdir_str);
+    let out = run(&db, &["ingest", &fixture_path]);
+    assert!(out.status.success(), "ingest failed: {}", stdout(&out));
+    let session_wire = session_wire_for_message(&db, &anchor_message);
+
+    let fake_dir = dir.path().join("fake-bin");
+    std::fs::create_dir_all(&fake_dir).expect("create fake bin dir");
+    write_fake_provider(&fake_dir);
+    let cwd_out = dir.path().join("spawn-cwd.txt");
+    let args_out = dir.path().join("spawn-args.txt");
+    // PATH 前置 fake 目录（追加原 PATH，保证进程正常加载）。
+    let path = std::env::var_os("PATH")
+        .map(|p| {
+            let mut dirs = std::env::split_paths(&p).collect::<Vec<_>>();
+            dirs.insert(0, fake_dir.clone());
+            std::env::join_paths(dirs).expect("join PATH")
+        })
+        .unwrap_or_else(|| fake_dir.clone().into_os_string());
+
+    // 1) 首次 resume --yes：强制预览不执行（持久标记缺失），落标记。
+    let out = run_with_path(
+        &db,
+        &path,
+        &cwd_out,
+        &args_out,
+        &["resume", &session_wire, "--yes"],
+    );
+    assert!(
+        out.status.success(),
+        "first resume failed: {}",
+        stdout(&out)
+    );
+    let frame = parse_first_line(&out);
+    assert_envelope_shape(&frame, true);
+    assert_eq!(frame["data"]["executed"], false, "{frame}");
+    assert_eq!(frame["data"]["first_run_preview"], true, "{frame}");
+    assert_eq!(frame["data"]["permission_mode_verified"], false, "{frame}");
+    assert!(!cwd_out.exists(), "first run must not spawn provider");
+    assert!(!args_out.exists(), "first run must not spawn provider");
+
+    // 2) 第二次 resume --yes：标记已确认，真实 spawn 到原 cwd 并传正确参数。
+    let out = run_with_path(
+        &db,
+        &path,
+        &cwd_out,
+        &args_out,
+        &["resume", &session_wire, "--yes"],
+    );
+    assert!(
+        out.status.success(),
+        "second resume failed: {}",
+        stdout(&out)
+    );
+    let frame = parse_first_line(&out);
+    assert_envelope_shape(&frame, true);
+    assert_eq!(frame["data"]["executed"], true, "{frame}");
+    assert!(
+        frame["data"].get("first_run_preview").is_none(),
+        "second run must not report first-run: {frame}"
+    );
+    let recorded_cwd = std::fs::read_to_string(&cwd_out).expect("read recorded cwd");
+    assert!(
+        same_cwd(&recorded_cwd, &workdir_str),
+        "spawned cwd {recorded_cwd:?} != expected {workdir_str:?}"
+    );
+    let recorded_args = std::fs::read_to_string(&args_out).expect("read recorded args");
+    assert!(recorded_args.contains("--resume"), "args {recorded_args:?}");
+    assert!(
+        recorded_args.contains("ccdd1234-5678-4abc-8def-001122334455"),
+        "args must carry the provider session id: {recorded_args:?}"
+    );
+
+    // 3) dry-run 命令字符串：标记确认后无 --yes 只预览，命令含 cwd 与参数。
+    let out = run_with_path(&db, &path, &cwd_out, &args_out, &["resume", &session_wire]);
+    assert!(out.status.success(), "dry-run failed: {}", stdout(&out));
+    let frame = parse_first_line(&out);
+    assert_envelope_shape(&frame, true);
+    assert_eq!(frame["data"]["executed"], false, "{frame}");
+    let command = frame["data"]["command"].as_str().expect("command string");
+    assert!(command.contains("claude --resume"), "command {command}");
+    assert!(command.contains(&workdir_str), "command {command}");
+}
+
+#[test]
+fn resume_yes_missing_provider_binary_returns_structured_error() {
+    let (dir, db) = temp_db("resume-missing-bin");
+    let cwd_str = dir.path().to_string_lossy().into_owned();
+    let (fixture_path, anchor_message) = write_claude_resume_fixture(dir.path(), &cwd_str);
+    let out = run(&db, &["ingest", &fixture_path]);
+    assert!(out.status.success(), "ingest failed: {}", stdout(&out));
+    let session_wire = session_wire_for_message(&db, &anchor_message);
+
+    // 空 PATH 目录：不包含任何 provider 二进制（保证机器上即使装了 claude 也不命中）。
+    let empty_bin = dir.path().join("empty-bin");
+    std::fs::create_dir_all(&empty_bin).expect("create empty bin dir");
+    let cwd_out = dir.path().join("never-cwd.txt");
+    let args_out = dir.path().join("never-args.txt");
+
+    // 首次 resume --yes：强制预览 + 落标记（不触发 preflight）。
+    let out = run_with_path(
+        &db,
+        empty_bin.as_os_str(),
+        &cwd_out,
+        &args_out,
+        &["resume", &session_wire, "--yes"],
+    );
+    assert!(
+        out.status.success(),
+        "first resume failed: {}",
+        stdout(&out)
+    );
+    let frame = parse_first_line(&out);
+    assert_eq!(frame["data"]["executed"], false, "{frame}");
+    assert!(!cwd_out.exists(), "first run must not spawn");
+
+    // 第二次 --yes：preflight 拦截缺失二进制 → 结构化 provider_error（exit 7）。
+    let out = run_with_path(
+        &db,
+        empty_bin.as_os_str(),
+        &cwd_out,
+        &args_out,
+        &["resume", &session_wire, "--yes"],
+    );
+    assert!(
+        !out.status.success(),
+        "second resume should fail: {}",
+        stdout(&out)
+    );
+    assert_eq!(out.status.code(), Some(7), "provider_error exit code");
+    let frame = parse_first_line(&out);
+    assert_envelope_shape(&frame, false);
+    assert_eq!(frame["error"]["code"], "provider_error", "{frame}");
+    assert_eq!(
+        frame["error"]["details"]["stage"], "binary_preflight",
+        "{frame}"
+    );
+    assert_eq!(frame["error"]["details"]["binary"], "claude", "{frame}");
+    assert!(
+        frame["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("install")),
+        "error message must hint installation: {frame}"
+    );
+}
+
+#[test]
+fn resume_unavailable_session_reports_reason_without_command() {
+    let (dir, db) = temp_db("resume-unavailable");
+    // 空库上任何 session 都无 resume 声明 → available:false + reason。
+    let out = run(&db, &["resume", "ses_v1_00000000000000000000000000"]);
+    assert!(out.status.success(), "resume failed: {}", stdout(&out));
+    let frame = parse_first_line(&out);
+    assert_envelope_shape(&frame, true);
+    assert_eq!(frame["data"]["available"], false, "{frame}");
+    assert_eq!(frame["data"]["command"], serde_json::Value::Null, "{frame}");
+    assert_eq!(
+        frame["data"]["unavailable_reason"], "no resume metadata claims",
+        "{frame}"
+    );
+    assert_eq!(frame["data"]["executed"], false, "{frame}");
+    // 不可恢复不落首次预览标记。
+    let marker = dir.path().join(".agent-session-grep-resume-ack");
+    assert!(
+        !marker.exists(),
+        "unavailable session must not ack first-run marker"
+    );
+}
+
 #[test]
 fn jsonl_output_is_one_complete_frame_per_line() {
     let (_dir, db) = temp_db("env-jsonl");

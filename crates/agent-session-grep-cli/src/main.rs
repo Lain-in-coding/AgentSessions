@@ -427,7 +427,7 @@ fn run(
     }
     // catalog 与 index 是同一个 SqliteStore；App 泛型接受同一实例的两次移动，
     // 故这里克隆一个连接语义上的第二把手不可行——改为让 App 持有单一 store。
-    let (command, outcome, data, page, warnings) = dispatch(&store, &rest, mode, request_id)?;
+    let (command, outcome, data, page, warnings) = dispatch(&store, &db, &rest, mode, request_id)?;
     let duration_ms = started.elapsed().as_millis() as u64;
     // 生效检索模式：search 的 data 已含 `retrieval_mode` 字段（render 投影）；
     // 其他命令恒为 lexical。
@@ -870,6 +870,7 @@ fn subcommand_help_text(cmd: &str) -> &'static str {
                   示例：agent-session-grep --db <path> resume ses_v1_...\n\
                   默认 dry-run——打印将执行的完整命令（provider/cwd/session id）并退出；\n\
                   确认无误后加 --yes 才在原工作目录实际启动 provider 进程。\n\
+                  首次使用 resume 强制只预览一次（持久标记），--yes 从第二次起才生效；\n\
                   未核验恢复命令的 provider 报 available:false，绝不编造命令。"
         }
         "hook" => {
@@ -1155,9 +1156,11 @@ fn bare_positionals(args: &[String]) -> Vec<String> {
 }
 
 /// 分发子命令。`store` 同时充当 CatalogStore 与 SearchIndex（同一 SqliteStore）。
+/// `db` 用于 resume 首次预览标记的 data-root 定位（与 writer lease 同一根）。
 /// `mode`/`request_id` 只喂给需要发协议 frame 的子命令（sync 的 jsonl progress）。
 fn dispatch(
     store: &SqliteStore,
+    db: &str,
     rest: &[String],
     mode: protocol::OutputMode,
     request_id: Option<&str>,
@@ -1516,9 +1519,11 @@ fn dispatch(
             Ok(("show", outcome, data, page, warnings))
         }
         "resume" => {
-            // Resume 执行层（#5）：默认 dry-run 预览完整命令；`--yes` 显式 opt-in
-            // 才实际 spawn provider 进程。未核验 resume 命令的 provider 恒为
-            // 不可恢复（null/—），绝不编造命令。
+            // Resume 执行层（#5 + audit P1-2）：默认 dry-run 预览完整命令；
+            // `--yes` 显式 opt-in 才实际 spawn provider 进程。首次使用无论是否
+            // `--yes` 都强制只预览一次（持久标记），标记确认后才允许 `--yes`
+            // 直接执行。未核验 resume 命令的 provider 恒为不可恢复（null/—），
+            // 绝不编造命令。
             let mut args = rest.to_vec();
             let confirmed = take_bool_flag(&mut args, "--yes");
             no_extra_args(&args, 1, "resume <session-id>")?;
@@ -1546,6 +1551,9 @@ fn dispatch(
                 },
                 "working_directory": preview.descriptor.working_directory,
                 "permission_mode": preview.descriptor.permission_mode,
+                // 诚实口径：permission mode 恒未核验（metadata/配置不携带真实
+                // 模式），如实标注，绝不宣称已校验（audit P1-2）。
+                "permission_mode_verified": false,
                 "unavailable_reason": preview.unavailable_reason,
                 "executed": false,
             });
@@ -1560,6 +1568,38 @@ fn dispatch(
                 ));
             }
             let mut warnings = Vec::new();
+            // 首次强制预览（PRD Q24）：持久标记缺失时，即使 `--yes` 也只预览
+            // 不执行，并落标记；标记写失败时安全侧继续强制预览（fail closed）。
+            let marker_root = resume_marker_root(db);
+            let first_run =
+                !agent_session_grep_application::resume::resume_preview_acknowledged(&marker_root);
+            if first_run {
+                match agent_session_grep_application::resume::acknowledge_resume_preview(
+                    &marker_root,
+                ) {
+                    Ok(()) => {
+                        if confirmed {
+                            data["first_run_preview"] = serde_json::json!(true);
+                            warnings.push(
+                                "首次使用 resume：已强制预览未执行。再次运行 resume --yes <session-id> 确认后才会真正执行。"
+                                    .to_string(),
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        warnings.push(format!(
+                            "resume: 首次预览标记写入失败（将继续强制预览）：{error}"
+                        ));
+                    }
+                }
+                return Ok((
+                    "resume",
+                    protocol::Outcome::Success,
+                    data,
+                    protocol::Page::default(),
+                    warnings,
+                ));
+            }
             if confirmed {
                 execute_resume(&preview.descriptor)?;
                 data["executed"] = serde_json::json!(true);
@@ -1882,9 +1922,10 @@ fn budget_from_flags(
 
 /// 执行 resume：在原 cwd 下 spawn provider 进程并等待其退出（前台接管）。
 ///
-/// 执行前校验 cwd 存在（存在但不可访问也在此暴露）；provider 二进制缺失、
-/// cwd 不存在、进程非零退出都返回结构化错误，绝不静默。permission_mode 只在
-/// 用户显式选择时出现在 descriptor 中（默认 None，不自动带 yolo）。
+/// 执行前校验 cwd 存在（存在但不可访问也在此暴露）与 provider 二进制在 PATH
+/// 上（缺失即结构化错误、提示安装，不再等到 spawn 才报）；cwd 不存在、二进制
+/// 缺失、进程非零退出都返回结构化错误，绝不静默。permission_mode 只在用户
+/// 显式选择时出现在 descriptor 中（默认 None，不自动带 yolo）。
 fn execute_resume(
     descriptor: &agent_session_grep_application::resume::ResumeDescriptor,
 ) -> Result<(), CliError> {
@@ -1899,13 +1940,28 @@ fn execute_resume(
             .with_details(serde_json::json!({ "stage": "cwd_check" })),
         ));
     }
+    // provider 二进制 preflight（audit P1-2）：缺失在 spawn 之前就报结构化
+    // 错误并提示安装；dry-run 不经过这里（预览不校验二进制）。
+    if !provider_binary_on_path(&descriptor.provider_binary) {
+        return Err(CliError(
+            ProtocolError::new(
+                CanonicalCode::ProviderError,
+                "provider binary not found on PATH; install the provider CLI or add it to PATH before resuming",
+            )
+            .with_details(serde_json::json!({
+                "stage": "binary_preflight",
+                "binary": descriptor.provider_binary,
+            })),
+        ));
+    }
     let mut command = std::process::Command::new(&descriptor.provider_binary);
     command.args(&descriptor.args);
     if let Some(dir) = &descriptor.working_directory {
         command.current_dir(dir);
     }
     let status = command.status().map_err(|e| {
-        // provider 二进制缺失是最常见失败；不回显完整路径，只给可操作原因。
+        // 二进制缺失理论上已被 preflight 拦截；此处兜底处理竞态（preflight 后
+        // 才被移除）。不回显完整路径，只给可操作原因。
         let reason = if e.kind() == std::io::ErrorKind::NotFound {
             "provider binary not found on PATH"
         } else {
@@ -1929,6 +1985,43 @@ fn execute_resume(
         ));
     }
     Ok(())
+}
+
+/// 解析 resume 首次预览标记所在的 data root：与 writer lease 同一根——
+/// db 文件所在目录（裸相对文件名按当前工作目录）。
+fn resume_marker_root(db: &str) -> std::path::PathBuf {
+    let db_path = std::path::Path::new(db);
+    match db_path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+        _ => std::path::PathBuf::from("."),
+    }
+}
+
+/// provider 二进制是否能在 PATH 上解析（`Command::new` 的查找近似）。
+///
+/// Unix 要求是普通文件且带执行位；Windows 的 CreateProcess 会依次查找
+/// `.exe`/`.com`/`.bat`/`.cmd`，这里覆盖 `.exe`/`.cmd`/`.bat`。
+fn provider_binary_on_path(binary: &str) -> bool {
+    let Some(path_var) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path_var).any(|dir| {
+        let candidate = dir.join(binary);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::metadata(&candidate)
+                .ok()
+                .is_some_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+        }
+        #[cfg(not(unix))]
+        {
+            candidate.is_file()
+                || ["exe", "cmd", "bat"]
+                    .iter()
+                    .any(|ext| candidate.with_extension(ext).is_file())
+        }
+    })
 }
 
 /// 从权威 catalog 重建语义向量索引（`index embeddings`，#3）。
@@ -4228,6 +4321,7 @@ mod tests {
         for cmd in ["get", "show"] {
             let error = dispatch(
                 &store,
+                "test.db",
                 &[cmd.into(), wire.into()],
                 protocol::OutputMode::Human,
                 None,
@@ -4250,6 +4344,7 @@ mod tests {
         let dir_str = dir.to_string_lossy().into_owned();
         let error = dispatch(
             &store,
+            "test.db",
             &["sync".into(), dir_str.clone()],
             protocol::OutputMode::Json,
             None,
@@ -4273,6 +4368,7 @@ mod tests {
         let store = SqliteStore::open_in_memory().expect("in-memory store opens");
         let error = dispatch(
             &store,
+            "test.db",
             &["sync".into(), "--discover".into(), "--bogus".into()],
             protocol::OutputMode::Json,
             None,
@@ -4302,6 +4398,7 @@ mod tests {
         let store = SqliteStore::open_in_memory().expect("in-memory store opens");
         let (command, outcome, data, _, _) = dispatch(
             &store,
+            "test.db",
             &[
                 "search".into(),
                 "foo".into(),
