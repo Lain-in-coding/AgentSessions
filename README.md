@@ -99,3 +99,7 @@ MIT OR Apache-2.0
 See [CONTRIBUTING.md](CONTRIBUTING.md). Community provider adapters follow
 the Provider Adapter Protocol (versioned external process, manifest-declared,
 read-only, no network by default).
+
+Release history is tracked in [CHANGELOG.md](CHANGELOG.md); security
+boundaries and the vulnerability reporting process are in
+[SECURITY.md](SECURITY.md).
