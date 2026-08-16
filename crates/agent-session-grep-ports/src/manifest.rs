@@ -2,6 +2,28 @@
 
 use crate::capability::{ProviderCapability, ProviderCapabilityMatrix, ProviderMaturity};
 
+/// How an adapter consumes a provider source in production (RFC-0002 §7 bounded
+/// ingestion). The manifest declares the mode so limits are honest and machine
+/// readable instead of an implicit implementation detail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StreamingSupport {
+    /// The source is parsed incrementally line-by-line; memory is bounded by
+    /// `max_record_size` (the largest single record), not by file size.
+    RecordStream,
+    /// The format requires a complete payload (whole-document JSON, Markdown,
+    /// SQLite); production reads are hard-capped by `max_source_size`.
+    BoundedWholeSource,
+}
+
+/// Maximum one-line/record allocation for streaming text adapters (8 MiB).
+pub const STREAM_RECORD_MAX_BYTES: u64 = 8 * 1024 * 1024;
+/// Maximum complete JSON-family (JSON array / JSONL fallback) or Markdown
+/// source accepted by whole-document adapters (32 MiB).
+pub const JSON_FAMILY_MAX_SOURCE_BYTES: u64 = 32 * 1024 * 1024;
+/// Maximum SQLite source copied through the bounded whole-source path (128 MiB).
+pub const SQLITE_MAX_SOURCE_BYTES: u64 = 128 * 1024 * 1024;
+
 /// Machine-readable metadata for one implemented provider adapter.
 ///
 /// The capability row, provider id, current maturity, and current variant are
@@ -23,6 +45,45 @@ pub struct AdapterManifest {
     pub last_certified_targets: Vec<String>,
     /// Concise, user-relevant limits of the current adapter implementation.
     pub known_limitations: Vec<String>,
+    /// Production source-consumption mode for the supported variant.
+    pub streaming_support: StreamingSupport,
+    /// Maximum accepted source size when the format requires whole-source
+    /// parsing (`BoundedWholeSource`). `None` means total size is not the
+    /// memory bound (record streaming).
+    pub max_source_size: Option<u64>,
+    /// Maximum in-memory record/line size for streaming text variants
+    /// (`RecordStream`). `None` for whole-source adapters.
+    pub max_record_size: Option<u64>,
+}
+
+/// Classify each implemented adapter by its source format. This is the single
+/// source of truth for the manifest's streaming/limit fields; adapters must not
+/// override the mode per-instance (the format is a property of the provider).
+fn source_consumption(provider_id: &str) -> (StreamingSupport, Option<u64>, Option<u64>) {
+    match provider_id {
+        // Whole-document JSON arrays (cline api-conversation-history, hermes
+        // session JSON) and Markdown (aider chat history): the parser needs the
+        // complete document, so production reads carry an honest hard cap.
+        "cline" | "hermes" | "aider" => (
+            StreamingSupport::BoundedWholeSource,
+            Some(JSON_FAMILY_MAX_SOURCE_BYTES),
+            None,
+        ),
+        // SQLite databases (opencode.db, cursor vscdb) are buffered whole and
+        // parsed read-only; the copy is hard-capped rather than unbounded.
+        "opencode" | "cursor" => (
+            StreamingSupport::BoundedWholeSource,
+            Some(SQLITE_MAX_SOURCE_BYTES),
+            None,
+        ),
+        // Line-delimited JSON transcripts: production parse streams records,
+        // so memory is bounded by the largest record, not the file size.
+        _ => (
+            StreamingSupport::RecordStream,
+            None,
+            Some(STREAM_RECORD_MAX_BYTES),
+        ),
+    }
 }
 
 /// Build an adapter manifest from the authoritative capability matrix row.
@@ -44,6 +105,8 @@ pub fn manifest_for(
     } else {
         vec![capabilities.variant_id.clone()]
     };
+    let (streaming_support, max_source_size, max_record_size) =
+        source_consumption(&capabilities.provider_id);
 
     AdapterManifest {
         provider_id: capabilities.provider_id.clone(),
@@ -56,6 +119,9 @@ pub fn manifest_for(
             .iter()
             .map(|limitation| (*limitation).to_string())
             .collect(),
+        streaming_support,
+        max_source_size,
+        max_record_size,
     }
 }
 
@@ -106,6 +172,55 @@ mod tests {
             assert_eq!(&manifest.capabilities, capability);
             assert_eq!(manifest.maturity, ProviderMaturity::Experimental);
             assert!(manifest.last_certified_targets.is_empty());
+            // Every implemented adapter declares a bounded ingestion mode and
+            // exactly one matching limit (record cap for streaming, source cap
+            // for whole-source formats) — RFC-0002 §7 honesty, never unbounded.
+            match manifest.streaming_support {
+                StreamingSupport::RecordStream => {
+                    assert!(
+                        manifest.max_record_size.is_some() && manifest.max_source_size.is_none(),
+                        "{provider_id}: record stream must declare max_record_size only"
+                    );
+                }
+                StreamingSupport::BoundedWholeSource => {
+                    assert!(
+                        manifest.max_source_size.is_some() && manifest.max_record_size.is_none(),
+                        "{provider_id}: whole source must declare max_source_size only"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn source_consumption_classifies_formats_honestly() {
+        // JSONL transcripts stream records; whole-document JSON/Markdown/SQLite
+        // carry an explicit hard cap. This is the release-blocking RFC-0002 §7
+        // honesty contract: no adapter may silently claim streaming while its
+        // parser needs the complete source.
+        for provider_id in IMPLEMENTED_PROVIDERS {
+            let manifest = manifest_for(provider_id, fixture_revision(provider_id), &[]);
+            let line_based = matches!(
+                provider_id,
+                "claude-code"
+                    | "codex"
+                    | "grok-build"
+                    | "antigravity"
+                    | "pi"
+                    | "kimi-code"
+                    | "openclaw"
+                    | "qoder"
+                    | "tencent-codebuddy"
+            );
+            assert_eq!(
+                manifest.streaming_support,
+                if line_based {
+                    StreamingSupport::RecordStream
+                } else {
+                    StreamingSupport::BoundedWholeSource
+                },
+                "{provider_id}"
+            );
         }
     }
 
@@ -138,6 +253,9 @@ mod tests {
             "fixture_revision",
             "last_certified_targets",
             "known_limitations",
+            "streaming_support",
+            "max_source_size",
+            "max_record_size",
         ] {
             assert!(json.get(field).is_some(), "missing JSON field `{field}`");
         }

@@ -8,6 +8,7 @@
 use agent_session_grep_domain::{
     DomainError, DomainResult, PlacementId, SessionContextGraph, StableId,
 };
+use std::io::{BufRead, Read};
 
 /// 端口层错误：包裹底层 IO/存储故障，向上层暴露稳定分类。
 ///
@@ -558,6 +559,16 @@ pub enum ProviderError {
     #[error("source changed during read: {0}")]
     SourceChangedDuringRead(String),
 
+    /// 源超过了该 adapter manifest 声明的受测上限——诚实拒绝而非 OOM。
+    #[error("source is too large for this adapter: {actual} bytes exceeds supported limit {max}")]
+    SourceTooLarge { actual: u64, max: u64 },
+
+    /// 单条记录超过了该 adapter manifest 声明的受测上限。
+    #[error(
+        "source record is too large for this adapter: {actual} bytes exceeds supported limit {max}"
+    )]
+    RecordTooLarge { actual: u64, max: u64 },
+
     /// 底层 IO 故障。
     #[error("io failure: {0}")]
     Io(String),
@@ -792,6 +803,259 @@ pub trait CanonicalEventSink {
     fn emit_message(&mut self, event: MessageEvent<'_>) -> PortResult<()>;
 }
 
+/// A fresh, read-only view of one captured source (RFC-0002 §7 bounded ingest).
+///
+/// Implementations must return a newly positioned reader for every `open`
+/// call. This lets capture, probe/parse, and final verification stream
+/// independently without ever retaining the complete source in memory.
+pub trait ReadOnlySource: Send + Sync {
+    /// Captured byte length (the source's stable identity, not the live file).
+    fn len(&self) -> u64;
+
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Open a fresh reader positioned at the start of the captured range.
+    ///
+    /// Whole-source adapters bound total memory via their manifest
+    /// `max_source_size`; record-stream adapters bound per-record memory.
+    fn open(&self) -> PortResult<Box<dyn BufRead + Send + '_>>;
+}
+
+/// Bounded compatibility source over an in-memory slice.
+///
+/// Used by adapter unit tests and legacy byte callers (`parse(&[u8])`); it
+/// produces the same line/offset semantics as a file-backed source.
+pub struct SliceSource<'a> {
+    bytes: &'a [u8],
+}
+
+impl<'a> SliceSource<'a> {
+    pub fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes }
+    }
+}
+
+impl ReadOnlySource for SliceSource<'_> {
+    fn len(&self) -> u64 {
+        self.bytes.len() as u64
+    }
+
+    fn open(&self) -> PortResult<Box<dyn BufRead + Send + '_>> {
+        Ok(Box::new(std::io::BufReader::with_capacity(
+            64 * 1024,
+            std::io::Cursor::new(self.bytes),
+        )))
+    }
+}
+
+/// 端口错误 → provider 错误（携带稳定分类，细节由端口层日志承担）。
+fn provider_io(error: PortError) -> ProviderError {
+    ProviderError::Io(error.to_string())
+}
+
+/// Read a whole source into a byte buffer bounded by `max_source_size`.
+///
+/// For `BoundedWholeSource` formats (JSON array / Markdown / SQLite) that need
+/// the complete payload. The allocation is `try_reserve_exact`-guarded and the
+/// total is re-checked while reading, so an adversarial growth never overflows
+/// the declared limit.
+pub fn read_bounded_source(
+    source: &dyn ReadOnlySource,
+    max_source_size: u64,
+) -> Result<Vec<u8>, ProviderError> {
+    if source.len() > max_source_size {
+        return Err(ProviderError::SourceTooLarge {
+            actual: source.len(),
+            max: max_source_size,
+        });
+    }
+    let capacity = usize::try_from(source.len()).map_err(|_| ProviderError::SourceTooLarge {
+        actual: source.len(),
+        max: max_source_size,
+    })?;
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(capacity)
+        .map_err(|_| ProviderError::Io("bounded source buffer allocation failed".into()))?;
+    let mut reader = source.open().map_err(provider_io)?;
+    let mut chunk = [0_u8; 64 * 1024];
+    let mut total = 0_u64;
+    loop {
+        let read = reader
+            .read(&mut chunk)
+            .map_err(|error| ProviderError::Io(error.to_string()))?;
+        if read == 0 {
+            break;
+        }
+        total = total.saturating_add(read as u64);
+        if total > max_source_size {
+            return Err(ProviderError::SourceTooLarge {
+                actual: total,
+                max: max_source_size,
+            });
+        }
+        bytes.extend_from_slice(&chunk[..read]);
+    }
+    Ok(bytes)
+}
+
+/// Read one line (through `\n`) into `line`, bounded by `max_record_size`.
+///
+/// Returns the number of bytes read; 0 means EOF. The line buffer is cleared
+/// and reused on every call, so streaming adapters never allocate per record.
+fn read_one_bounded_line(
+    reader: &mut dyn BufRead,
+    line: &mut Vec<u8>,
+    max_record_size: u64,
+) -> Result<usize, ProviderError> {
+    line.clear();
+    loop {
+        let available = reader
+            .fill_buf()
+            .map_err(|error| ProviderError::Io(error.to_string()))?;
+        if available.is_empty() {
+            return Ok(line.len());
+        }
+        let newline = available.iter().position(|byte| *byte == b'\n');
+        let take = newline.map_or(available.len(), |index| index + 1);
+        let actual = line.len() as u64 + take as u64;
+        if actual > max_record_size {
+            return Err(ProviderError::RecordTooLarge {
+                actual,
+                max: max_record_size,
+            });
+        }
+        line.extend_from_slice(&available[..take]);
+        reader.consume(take);
+        if newline.is_some() {
+            return Ok(line.len());
+        }
+    }
+}
+
+/// One bounded text record with original snapshot byte coordinates.
+///
+/// `bytes` is the record payload with CR/LF and a first-record UTF-8 BOM
+/// removed; `start`/`end` are the record's byte range in the captured source
+/// (end is exclusive and excludes the trailing newline, matching the
+/// `MessageEvent::span` coordinate system). CRLF/BOM/truncated-tail handling
+/// is byte-identical to the legacy whole-slice line split.
+pub struct BoundedSourceLine<'a> {
+    pub number: usize,
+    pub start: u64,
+    pub end: u64,
+    pub bytes: &'a [u8],
+}
+
+/// A reusable bounded line reader over a [`ReadOnlySource`].
+///
+/// Production JSONL adapters iterate this with `while let Some(line) = ...`
+/// so their per-line logic (including `continue`) stays in a plain loop. The
+/// raw record buffer is reused across iterations, so memory is bounded by
+/// `max_record_size`, never by file size.
+pub struct BoundedLineReader<'a> {
+    reader: Box<dyn BufRead + Send + 'a>,
+    raw: Vec<u8>,
+    offset: u64,
+    number: usize,
+    max_record_size: u64,
+}
+
+impl<'a> BoundedLineReader<'a> {
+    pub fn new(source: &'a dyn ReadOnlySource, max_record_size: u64) -> PortResult<Self> {
+        Ok(Self {
+            reader: source.open()?,
+            raw: Vec::new(),
+            offset: 0,
+            number: 1,
+            max_record_size,
+        })
+    }
+
+    /// Read the next stripped record; `Ok(None)` at EOF.
+    ///
+    /// The returned record borrows the reader's internal buffer and is only
+    /// valid until the next call — iterate with `while let` and process each
+    /// record before advancing.
+    pub fn next_record(&mut self) -> Result<Option<BoundedSourceLine<'_>>, ProviderError> {
+        let read =
+            read_one_bounded_line(self.reader.as_mut(), &mut self.raw, self.max_record_size)?;
+        if read == 0 {
+            return Ok(None);
+        }
+        let start = self.offset;
+        self.offset = self.offset.saturating_add(read as u64);
+        let payload = self.raw.strip_suffix(b"\n").unwrap_or(&self.raw);
+        let payload = payload.strip_suffix(b"\r").unwrap_or(payload);
+        // end includes a first-record BOM (span is byte-exact vs. whole-slice
+        // parse, where `end = start + line.len()` also includes the BOM).
+        let end = start.saturating_add(payload.len() as u64);
+        let bytes = if self.number == 1 {
+            payload.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(payload)
+        } else {
+            payload
+        };
+        let number = self.number;
+        self.number += 1;
+        Ok(Some(BoundedSourceLine {
+            number,
+            start,
+            end,
+            bytes,
+        }))
+    }
+}
+
+/// Visit a line-delimited source without retaining more than one bounded
+/// record. `visit` is called synchronously per record; the borrowed `bytes`
+/// slice is only valid for the duration of the call.
+pub fn for_each_bounded_source_line(
+    source: &dyn ReadOnlySource,
+    max_record_size: u64,
+    mut visit: impl FnMut(BoundedSourceLine<'_>) -> Result<(), ProviderError>,
+) -> Result<(), ProviderError> {
+    let mut reader = BoundedLineReader::new(source, max_record_size).map_err(provider_io)?;
+    while let Some(line) = reader.next_record()? {
+        visit(line)?;
+    }
+    Ok(())
+}
+
+/// Read a bounded probe sample from a record-stream source.
+///
+/// Collects up to `MAX_NON_BLANK_LINES` non-blank lines (and the blank lines
+/// between them) without exceeding `max_record_size` total. Adapters probe on
+/// this prefix, mirroring their existing sample-window logic.
+pub fn read_probe_sample(
+    source: &dyn ReadOnlySource,
+    max_record_size: u64,
+) -> Result<Vec<u8>, ProviderError> {
+    const MAX_NON_BLANK_LINES: usize = 64;
+    let mut reader = source.open().map_err(provider_io)?;
+    let mut raw = Vec::new();
+    let mut sample = Vec::new();
+    let mut non_blank = 0_usize;
+    loop {
+        let read = read_one_bounded_line(reader.as_mut(), &mut raw, max_record_size)?;
+        if read == 0 {
+            break;
+        }
+        if sample.len().saturating_add(raw.len()) > max_record_size as usize {
+            break;
+        }
+        sample.extend_from_slice(&raw);
+        if !raw.iter().all(u8::is_ascii_whitespace) {
+            non_blank += 1;
+            if non_blank == MAX_NON_BLANK_LINES {
+                break;
+            }
+        }
+    }
+    Ok(sample)
+}
+
 /// Provider adapter 最低合同（RFC-0002 §2）。
 ///
 /// 四阶段中，discover/fingerprint 在首个切片从简（由 SourceDiscovery 端口承担
@@ -818,13 +1082,62 @@ pub trait ProviderAdapter: Send + Sync {
         bytes: &[u8],
         sink: &mut dyn CanonicalEventSink,
     ) -> Result<ParseReport, ProviderError>;
+
+    /// Probe a fresh read-only source (RFC-0002 §7 bounded ingest).
+    ///
+    /// Default: record-stream adapters receive a bounded sample (memory bounded
+    /// by `max_record_size`), whole-source adapters receive a `max_source_size`
+    ///-capped complete read. The probe judgement itself never changes — it
+    /// runs on the same sample window the byte `probe` already uses.
+    fn probe_source(&self, source: &dyn ReadOnlySource) -> Result<ProbeResult, ProviderError> {
+        let manifest = self.manifest();
+        let bytes = match manifest.streaming_support {
+            StreamingSupport::RecordStream => read_probe_sample(
+                source,
+                manifest.max_record_size.unwrap_or(STREAM_RECORD_MAX_BYTES),
+            )?,
+            StreamingSupport::BoundedWholeSource => {
+                let max = manifest.max_source_size.ok_or_else(|| {
+                    ProviderError::StructuralFatal(
+                        "bounded adapter manifest is missing max_source_size".into(),
+                    )
+                })?;
+                read_bounded_source(source, max)?
+            }
+        };
+        self.probe(&bytes)
+    }
+
+    /// Parse a fresh read-only source (RFC-0002 §7 bounded ingest).
+    ///
+    /// Default: whole-source formats read a `max_source_size`-capped buffer and
+    /// delegate to the byte `parse`. Record-stream adapters **must override**
+    /// this to iterate `for_each_bounded_source_line`; the default refuses
+    /// rather than silently buffering an unbounded transcript.
+    fn parse_source(
+        &self,
+        source: &dyn ReadOnlySource,
+        sink: &mut dyn CanonicalEventSink,
+    ) -> Result<ParseReport, ProviderError> {
+        let manifest = self.manifest();
+        let max = manifest.max_source_size.ok_or_else(|| {
+            ProviderError::StructuralFatal(
+                "record-stream adapter must implement parse_source".into(),
+            )
+        })?;
+        let bytes = read_bounded_source(source, max)?;
+        self.parse(&bytes, sink)
+    }
 }
 
 pub mod capability;
 pub mod handoff;
 pub mod manifest;
 
-pub use manifest::{AdapterManifest, manifest_for};
+pub use manifest::{
+    AdapterManifest, JSON_FAMILY_MAX_SOURCE_BYTES, SQLITE_MAX_SOURCE_BYTES,
+    STREAM_RECORD_MAX_BYTES, StreamingSupport, manifest_for,
+};
 
 #[cfg(test)]
 mod tests {
@@ -1084,5 +1397,89 @@ mod tests {
             !message.contains("secret") && !message.contains("sqlite"),
             "错误消息只保留分类，不带后端载荷: {message}"
         );
+    }
+
+    // ---- bounded source streaming（RFC-0002 §7）----
+
+    fn collect_lines(
+        source: &dyn ReadOnlySource,
+        max_record_size: u64,
+    ) -> Result<Vec<(usize, u64, u64, String)>, ProviderError> {
+        let mut out = Vec::new();
+        for_each_bounded_source_line(source, max_record_size, |line| {
+            out.push((
+                line.number,
+                line.start,
+                line.end,
+                String::from_utf8_lossy(line.bytes).into_owned(),
+            ));
+            Ok(())
+        })?;
+        Ok(out)
+    }
+
+    #[test]
+    fn bounded_line_iteration_preserves_byte_offsets_and_crlf_bom() {
+        // BOM + CRLF + blank line + truncated tail (no trailing newline).
+        // Byte layout: BOM(0-2) {"a":1}(3-9) \r(10) \n(11) \r(12) \n(13) {"b":2}(14-20)
+        let bytes = b"\xEF\xBB\xBF{\"a\":1}\r\n\r\n{\"b\":2}";
+        let source = SliceSource::new(bytes);
+        let lines = collect_lines(&source, 1024).unwrap();
+        assert_eq!(
+            lines,
+            vec![
+                (1, 0, 10, "{\"a\":1}".to_string()), // BOM stripped, end covers BOM+\r\n-exclusive
+                (2, 12, 12, String::new()),          // blank CRLF line at [12,12)
+                (3, 14, 21, "{\"b\":2}".to_string()), // truncated tail
+            ]
+        );
+    }
+
+    #[test]
+    fn bounded_line_iteration_matches_legacy_split_semantics() {
+        // Byte-identical to the legacy `split_inclusive('\n')` header that
+        // JSONL adapters used: end excludes \n/\r but includes a first-line BOM.
+        let bytes = b"abc\r\ndef\nghi";
+        let source = SliceSource::new(bytes);
+        let mut offset = 0_u64;
+        let mut expected = Vec::new();
+        for (idx, raw) in bytes.split(|b| *b == b'\n').enumerate() {
+            let start = offset;
+            offset += raw.len() as u64 + 1;
+            let line = raw.strip_suffix(b"\r").unwrap_or(raw);
+            let parse_line = if idx == 0 {
+                line.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(line)
+            } else {
+                line
+            };
+            expected.push((
+                idx + 1,
+                start,
+                start + line.len() as u64,
+                String::from_utf8_lossy(parse_line).into_owned(),
+            ));
+        }
+        let lines = collect_lines(&source, 1024).unwrap();
+        assert_eq!(lines, expected);
+    }
+
+    #[test]
+    fn bounded_line_iteration_rejects_oversized_record() {
+        let source = SliceSource::new(b"{\"small\":true}\n{\"this line is too long\":1}");
+        let err = collect_lines(&source, 16).unwrap_err();
+        assert!(
+            matches!(err, ProviderError::RecordTooLarge { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn read_bounded_source_enforces_cap_before_and_during_read() {
+        let source = SliceSource::new(b"0123456789");
+        let err = read_bounded_source(&source, 5).unwrap_err();
+        assert!(matches!(err, ProviderError::SourceTooLarge { max: 5, .. }));
+
+        let ok = read_bounded_source(&source, 10).unwrap();
+        assert_eq!(ok, b"0123456789");
     }
 }
