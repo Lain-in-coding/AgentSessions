@@ -1,12 +1,12 @@
 {
   "schema_version": "agent-session-grep.open-source-gate/v1",
-  "generated_at_utc": "2026-08-16T05:15:54.850321Z",
-  "commit": "83d072d0c01ad75fbac622a1b68d5d681a28f329",
+  "generated_at_utc": "2026-08-16T06:36:58.062780Z",
+  "commit": "aeb65f342f4d76e7bb3fa6478e7ea5ae0ff283fc",
   "environment": {
     "os": "windows",
     "arch": "AMD64",
     "build": "release",
-    "commit": "83d072d0c01ad75fbac622a1b68d5d681a28f329",
+    "commit": "aeb65f342f4d76e7bb3fa6478e7ea5ae0ff283fc",
     "provider_fixture_set_id": "gate-synthetic-v1",
     "python_version": "3.10.11"
   },
@@ -64,20 +64,18 @@
     {
       "name": "discovery_coverage",
       "unit": "ratio",
-      "state": "not_applicable",
-      "value": null,
+      "state": "measured",
+      "value": 1.0,
       "threshold": 0.95,
-      "pass": null,
-      "reason": "sync --discover is not yet implemented (task 08-14-provider-source-auto-discovery); corpus is synced via explicit paths."
+      "pass": true
     },
     {
       "name": "resume_handoff_success",
-      "unit": "count",
-      "state": "not_applicable",
-      "value": null,
+      "unit": "ratio",
+      "state": "measured",
+      "value": 1.0,
       "threshold": 1.0,
-      "pass": null,
-      "reason": "resume/handoff execution has not landed (task 08-15-resume-metadata-execution); counter scaffolding only."
+      "pass": true
     }
   ],
   "recall_detail": [
@@ -283,36 +281,155 @@
     "skipped": 0,
     "parse_loss_ratio": 0.0
   },
+  "discovery_detail": {
+    "mechanism": "sync --discover against a redirected HOME holding synthetic fixture copies",
+    "reads_real_transcripts": false,
+    "planted": 3,
+    "found": 3,
+    "planted_providers_complete": true,
+    "messages": 12,
+    "per_provider": [
+      {
+        "provider_id": "claude-code",
+        "planted": 2,
+        "found": 2,
+        "complete": true
+      },
+      {
+        "provider_id": "codex",
+        "planted": 1,
+        "found": 1,
+        "complete": true
+      }
+    ]
+  },
+  "resume_handoff_detail": {
+    "mechanism": "resume dry-run (no provider process spawned) + handoff pack evidence check",
+    "attempted": 9,
+    "succeeded": 9,
+    "resume_sessions": 3,
+    "resume_previews_ok": 3,
+    "handoff_queries": 6,
+    "handoff_packs_ok": 6,
+    "resume_detail": [
+      {
+        "provider_session_id": "gate-alpha-0001",
+        "session_id": "ses_v1_4cc5cb2237d20522f262abd4dc3df9ba",
+        "provider_id": "claude-code",
+        "resume_available": true,
+        "resume_command_present": true,
+        "executed": false,
+        "unavailable_reason": null
+      },
+      {
+        "provider_session_id": "gate-beta-0002",
+        "session_id": "ses_v1_889b43fe1965d1ac77a459bb5bd1d794",
+        "provider_id": "claude-code",
+        "resume_available": true,
+        "resume_command_present": true,
+        "executed": false,
+        "unavailable_reason": null
+      },
+      {
+        "provider_session_id": "gate-gamma-0003",
+        "session_id": "ses_v1_ed4871fb013d1aa762c1cbca27cf30e5",
+        "provider_id": "codex",
+        "resume_available": true,
+        "resume_command_present": true,
+        "executed": false,
+        "unavailable_reason": null
+      }
+    ],
+    "handoff_detail": [
+      {
+        "query_id": "q-retry-budget",
+        "evidence_count": 2,
+        "matched_sessions": 1,
+        "confidence": "high",
+        "truncated": false
+      },
+      {
+        "query_id": "q-backoff",
+        "evidence_count": 1,
+        "matched_sessions": 1,
+        "confidence": "high",
+        "truncated": false
+      },
+      {
+        "query_id": "q-indexing",
+        "evidence_count": 2,
+        "matched_sessions": 1,
+        "confidence": "high",
+        "truncated": false
+      },
+      {
+        "query_id": "q-outbox",
+        "evidence_count": 1,
+        "matched_sessions": 1,
+        "confidence": "high",
+        "truncated": false
+      },
+      {
+        "query_id": "q-tombstone",
+        "evidence_count": 1,
+        "matched_sessions": 1,
+        "confidence": "high",
+        "truncated": false
+      },
+      {
+        "query_id": "q-incomplete-scan",
+        "evidence_count": 2,
+        "matched_sessions": 1,
+        "confidence": "high",
+        "truncated": false
+      }
+    ]
+  },
   "latency_p50_p95_ms": {
     "search": {
-      "p50": 10.7631,
-      "p95": 11.7297,
+      "p50": 26.0816,
+      "p95": 27.8036,
       "count": 6
     },
     "search_semantic": {
-      "p50": 10.5853,
-      "p95": 11.8025,
+      "p50": 20.1852,
+      "p95": 35.8588,
       "count": 6
     },
     "search_hybrid": {
-      "p50": 11.7652,
-      "p95": 11.8438,
+      "p50": 32.3176,
+      "p95": 35.5292,
       "count": 6
     },
     "show": {
-      "p50": 9.5153,
-      "p95": 10.7153,
+      "p50": 12.8315,
+      "p95": 23.3999,
       "count": 10
     },
     "get": {
-      "p50": 8.7489,
-      "p95": 14.0652,
+      "p50": 17.625,
+      "p95": 20.4499,
       "count": 10
     },
     "initial_sync": {
-      "p50": 62.1679,
-      "p95": 62.1679,
+      "p50": 114.1763,
+      "p95": 114.1763,
       "count": 1
+    },
+    "discovery_sync": {
+      "p50": 78.2843,
+      "p95": 78.2843,
+      "count": 1
+    },
+    "resume_preview": {
+      "p50": 23.1818,
+      "p95": 25.3848,
+      "count": 3
+    },
+    "handoff": {
+      "p50": 17.9968,
+      "p95": 31.7217,
+      "count": 6
     }
   },
   "index_size": {
@@ -323,9 +440,6 @@
   "gate": {
     "pass": true,
     "failures": [],
-    "deferred": [
-      "discovery_coverage",
-      "resume_handoff_success"
-    ]
+    "deferred": []
   }
 }
