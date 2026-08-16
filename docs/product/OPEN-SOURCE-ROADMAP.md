@@ -9,7 +9,26 @@
 > - evidence_path: `.trellis/tasks/08-15-open-source-product-roadmap/prd.md`(决策全文)
 > - 本文是执行总规划的持久化入口;新会话/新 agent 以本文 + 父任务 PRD 为权威。
 
-## 1. 使命与定位
+## 0.1 2026-08-16 阶段交接快照
+
+本阶段（provider evidence / release-gate integration）已完成并推送到 `main`，最新阶段提交为 `caafb44`；这表示“当前阶段的集成工作完成”，不表示项目已经满足公开发布门。
+
+### 已完成并验证
+
+- 16 行 Provider capability matrix 对外可见：CLI `providers`、Robot JSON、Human、MCP 均从 `ProviderCapabilityMatrix::current()` 投影。
+- 14 个 implemented provider 均具备结构化 `AdapterManifest`；Claude/Codex fixture revision 为 `1`，认证 target 在跨平台成功 run 前保持为空。
+- Claude/Codex probe/parse source bytes read-only assertions 与真实回归 `INV-SOURCES-UNCHANGED` 已落地。
+- Codex incremental resync、source-shrink tombstone、empty-source tombstone 三项合成 e2e 已落地。
+- `discovery_coverage`、`resume_handoff_success` 已从 deferred 改为 measured；Windows 与 WSL2 Linux gate 均为 `pass=true`、`deferred=[]`。
+- Provider rollback ADR-0010 已落地但状态仍为 `Proposed`，不得代 owner/approver 宣称 Accepted。
+
+### 交接时仍开放
+
+- 最终 readiness audit verdict：`NOT_READY_LOCAL_BLOCKERS`；当前为 6 组本地 P0、6 组 P1、5 组 External，详见 `.trellis/tasks/08-15-final-integration-release-rehearsal/research/2026-08-16-final-open-source-audit.md`。
+- 首要 P0：公开树/历史绝对路径清理、版本/宣传口径统一、安装器 `asg` 一致性、release workflow/checksum/SBOM/third-party 制品、Web/TUI/三平台终局 rehearsal、bounded ingestion。
+- Semantic 当前仍是 `bigram-hash-v1` fuzzy lexical vectorizer；真实模型调研建议下一阶段使用 optional `semantic-candle` + pinned `multilingual-e5-small`，默认不启用、不在本阶段实现。
+- GitHub hosted CI 当前因 account billing/spending-limit 在首步前失败；这属于 External，不得改代码伪造跨平台认证。仓库仍保持 PRIVATE，公开/tag/release/签名与 owner governance 由后续 owner 决定。
+
 
 **产品名 `agent-session-grep`,CLI 别名 `asg`。**
 

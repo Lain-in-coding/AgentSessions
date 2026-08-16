@@ -3,7 +3,7 @@
   "name": "open-source-product-roadmap",
   "title": "agent-session-grep 开源登顶产品路线与发布总规划",
   "description": "统一核心、多入口、本地优先的 agent-session-grep 产品路线：16 个 provider 成熟度分级、evidence-first 搜索、resume/handoff、local semantic/hybrid search、loopback Web UI、Hook 默认关闭、零遥测、Provider Adapter Protocol 与可复现开源发布门槛。",
-  "status": "completed",
+  "status": "planning",
   "dev_type": null,
   "scope": null,
   "package": "agentsessions-adapters-sqlite",
@@ -11,11 +11,11 @@
   "creator": "QIN",
   "assignee": "QIN",
   "createdAt": "2026-08-15",
-  "completedAt": "2026-08-16",
+  "completedAt": null,
   "branch": null,
   "base_branch": "main",
   "worktree_path": null,
-  "commit": "c5e7292",
+  "commit": "caafb44",
   "pr_url": null,
   "subtasks": [],
   "children": [
@@ -32,6 +32,6 @@
   ],
   "parent": null,
   "relatedFiles": [],
-  "notes": "阶段完成：gate 全指标 measured/pass；AdapterManifest、read-only checksum、Codex incremental evidence、providers maturity projection、ADR-0010 rollback 已合入并推送。剩余发布门见 final-open-source-release-audit：semantic real model、三平台成功 CI/clean rehearsal、owner governance/public release 等。",
+  "notes": "2026-08-16 当前集成阶段已完成并交接 CodeX；总路线仍未完成。已闭合：gate 全阈值 measured/pass、AdapterManifest、read-only checksum、Codex incremental evidence、providers maturity projection、ADR-0010 rollback。剩余本地 P0=6、P1=6、External=5，详见 final open-source audit。",
   "meta": {}
-}`n
+}
