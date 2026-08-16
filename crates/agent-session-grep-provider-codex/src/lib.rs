@@ -446,8 +446,23 @@ impl ProviderAdapter for CodexAdapter {
         bytes: &[u8],
         sink: &mut dyn CanonicalEventSink,
     ) -> Result<ParseReport, ProviderError> {
-        let text = std::str::from_utf8(bytes)
-            .map_err(|e| ProviderError::StructuralFatal(format!("not valid UTF-8: {e}")))?;
+        // 字节兼容路径：把整段字节包成只读切片源，与生产流式路径共用同一实现。
+        let source = agent_session_grep_ports::SliceSource::new(bytes);
+        self.parse_source(&source, sink)
+    }
+
+    fn parse_source(
+        &self,
+        source: &dyn agent_session_grep_ports::ReadOnlySource,
+        sink: &mut dyn CanonicalEventSink,
+    ) -> Result<ParseReport, ProviderError> {
+        // 流式逐行读取：内存上界是单条记录（manifest max_record_size），
+        // 不是文件大小（RFC-0002 §7）。
+        let mut lines = agent_session_grep_ports::BoundedLineReader::new(
+            source,
+            agent_session_grep_ports::STREAM_RECORD_MAX_BYTES,
+        )
+        .map_err(|e| ProviderError::Io(e.to_string()))?;
 
         let mut report = ParseReport::default();
         // 本文件出现的全部非空 session id（单文件=单会话契约的检测输入）。
@@ -455,22 +470,15 @@ impl ProviderAdapter for CodexAdapter {
         // seq 是会话内单调序号，只对成功 emit 的对话消息递增，
         // 从而满足 domain Session 的 seq 从 0 连续的不变量。
         let mut seq: u32 = 0;
-        // 手动累计行首偏移：span 以快照字节为坐标系，end 排他且不含换行符。
-        let mut offset: u64 = 0;
 
-        for (line_no, raw_line) in text.split_inclusive('\n').enumerate() {
-            let start = offset;
-            offset += raw_line.len() as u64;
-            // 去掉行尾 `\n` / `\r\n`——与 `str::lines` 的行语义一致。
-            let line = raw_line.strip_suffix('\n').unwrap_or(raw_line);
-            let line = line.strip_suffix('\r').unwrap_or(line);
-            // UTF-8 BOM 只可能出现在文件首行：仅对解析剥离，span 仍以快照字节为坐标系。
-            let parse_line = if line_no == 0 {
-                line.strip_prefix('\u{feff}').unwrap_or(line)
-            } else {
-                line
-            };
-            let end = start + line.len() as u64;
+        while let Some(line) = lines.next_record()? {
+            // 行负载已由 BoundedLineReader 剥离 \n/\r 与首行 BOM，span 仍以
+            // 快照字节为坐标系（start/end 与整段 parse 逐字节一致）。
+            let parse_line = std::str::from_utf8(line.bytes)
+                .map_err(|e| ProviderError::StructuralFatal(format!("not valid UTF-8: {e}")))?;
+            let line_no = line.number - 1;
+            let start = line.start;
+            let end = line.end;
             if parse_line.trim().is_empty() {
                 continue;
             }

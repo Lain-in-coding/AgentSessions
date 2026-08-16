@@ -547,8 +547,23 @@ impl ProviderAdapter for ClaudeCodeAdapter {
         bytes: &[u8],
         sink: &mut dyn CanonicalEventSink,
     ) -> Result<ParseReport, ProviderError> {
-        let text = std::str::from_utf8(bytes)
-            .map_err(|e| ProviderError::StructuralFatal(format!("not valid UTF-8: {e}")))?;
+        // 字节兼容路径：把整段字节包成只读切片源，与生产流式路径共用同一实现。
+        let source = agent_session_grep_ports::SliceSource::new(bytes);
+        self.parse_source(&source, sink)
+    }
+
+    fn parse_source(
+        &self,
+        source: &dyn agent_session_grep_ports::ReadOnlySource,
+        sink: &mut dyn CanonicalEventSink,
+    ) -> Result<ParseReport, ProviderError> {
+        // 流式逐行读取：内存上界是单条记录（manifest max_record_size），
+        // 不是文件大小（RFC-0002 §7）。
+        let mut lines = agent_session_grep_ports::BoundedLineReader::new(
+            source,
+            agent_session_grep_ports::STREAM_RECORD_MAX_BYTES,
+        )
+        .map_err(|e| ProviderError::Io(e.to_string()))?;
 
         let mut report = ParseReport::default();
         // 本文件出现的全部非空 sessionId（单文件=单会话契约的检测输入）。
@@ -556,22 +571,15 @@ impl ProviderAdapter for ClaudeCodeAdapter {
         // seq 是会话内单调序号，只对成功 emit 的对话消息递增，
         // 从而满足 domain Session 的 seq 从 0 连续的不变量。
         let mut seq: u32 = 0;
-        // 手动累计行首偏移：span 以快照字节为坐标系，end 排他且不含换行符。
-        let mut offset: u64 = 0;
 
-        for (line_no, raw_line) in text.split_inclusive('\n').enumerate() {
-            let start = offset;
-            offset += raw_line.len() as u64;
-            // 去掉行尾 `\n` / `\r\n`——与 `str::lines` 的行语义一致。
-            let line = raw_line.strip_suffix('\n').unwrap_or(raw_line);
-            let line = line.strip_suffix('\r').unwrap_or(line);
-            // UTF-8 BOM 只可能出现在文件首行：仅对解析剥离，span 仍以快照字节为坐标系。
-            let parse_line = if line_no == 0 {
-                line.strip_prefix('\u{feff}').unwrap_or(line)
-            } else {
-                line
-            };
-            let end = start + line.len() as u64;
+        while let Some(line) = lines.next_record()? {
+            // 行负载已由 BoundedLineReader 剥离 \n/\r 与首行 BOM，span 仍以
+            // 快照字节为坐标系（start/end 与整段 parse 逐字节一致）。
+            let parse_line = std::str::from_utf8(line.bytes)
+                .map_err(|e| ProviderError::StructuralFatal(format!("not valid UTF-8: {e}")))?;
+            let line_no = line.number - 1;
+            let start = line.start;
+            let end = line.end;
             if parse_line.trim().is_empty() {
                 continue;
             }
@@ -1264,6 +1272,46 @@ mod tests {
         assert_eq!(&bytes[start as usize..end as usize], line.as_bytes());
         // end 排他：下一字节是 `\r`（CRLF 的 CR），不在 span 内。
         assert_eq!(bytes[end as usize], b'\r');
+    }
+
+    #[test]
+    fn parse_source_streams_records_with_identical_spans() {
+        // 生产路径：parse_source 从只读 source 逐行流式解析，span 坐标必须与
+        // 整段字节 parse 完全一致（RFC-0002 §7 语义不变）。
+        let bytes = SAMPLE.as_bytes();
+        let source = agent_session_grep_ports::SliceSource::new(bytes);
+        let mut sink = CollectingSink::default();
+        ClaudeCodeAdapter::new()
+            .parse_source(&source, &mut sink)
+            .unwrap();
+        let lines: Vec<&str> = SAMPLE.lines().collect();
+        for (captured, expected_line) in sink.messages.iter().zip([lines[0], lines[1]]) {
+            let (start, end) = captured.span.expect("provider must report a span");
+            assert_eq!(
+                &bytes[start as usize..end as usize],
+                expected_line.as_bytes(),
+                "流式 span 与整段 parse 必须逐字节一致"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_source_rejects_oversized_record() {
+        // 大文件上限回归：单条记录超过 manifest max_record_size（8 MiB）时，
+        // 流式路径必须诚实拒绝（RecordTooLarge），而不是按文件大小分配内存。
+        let oversized = format!(
+            "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":\"{}\"}}}}\n",
+            "a".repeat((agent_session_grep_ports::STREAM_RECORD_MAX_BYTES as usize) + 1024)
+        );
+        let source = agent_session_grep_ports::SliceSource::new(oversized.as_bytes());
+        let mut sink = CollectingSink::default();
+        let err = ClaudeCodeAdapter::new()
+            .parse_source(&source, &mut sink)
+            .unwrap_err();
+        assert!(
+            matches!(err, ProviderError::RecordTooLarge { .. }),
+            "got {err:?}"
+        );
     }
 
     #[test]
