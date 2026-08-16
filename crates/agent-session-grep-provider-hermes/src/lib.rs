@@ -121,8 +121,7 @@ impl ProviderAdapter for OpenHermesAdapter {
 
         if !messages_ok && !session_id_ok {
             return Err(ProviderError::AmbiguousVariant(
-                "no Hermes `messages` array with role-bearing elements, nor a `session_id`"
-                    .into(),
+                "no Hermes `messages` array with role-bearing elements, nor a `session_id`".into(),
             ));
         }
         if session_id_ok {
@@ -145,8 +144,9 @@ impl ProviderAdapter for OpenHermesAdapter {
         let text = std::str::from_utf8(bytes)
             .map_err(|e| ProviderError::StructuralFatal(format!("not valid UTF-8: {e}")))?;
         let text = text.strip_prefix('\u{feff}').unwrap_or(text);
-        let session: HermesSessionFile = serde_json::from_str(text)
-            .map_err(|e| ProviderError::StructuralFatal(format!("not a Hermes session JSON: {e}")))?;
+        let session: HermesSessionFile = serde_json::from_str(text).map_err(|e| {
+            ProviderError::StructuralFatal(format!("not a Hermes session JSON: {e}"))
+        })?;
 
         let mut report = ParseReport::default();
         let session_start = session.session_start.as_deref();
@@ -300,7 +300,9 @@ mod tests {
     fn parse_extracts_user_assistant_messages() {
         let adapter = OpenHermesAdapter::new();
         let mut sink = CapturingSink::default();
-        let report = adapter.parse(hermes_fixture().as_bytes(), &mut sink).unwrap();
+        let report = adapter
+            .parse(hermes_fixture().as_bytes(), &mut sink)
+            .unwrap();
 
         assert_eq!(report.committed, 3);
         assert_eq!(
@@ -326,7 +328,10 @@ mod tests {
         assert_eq!(events[1].seq, 1);
         assert_eq!(events[1].native_id, "hermes-msg-3");
         assert_eq!(events[1].role, "assistant");
-        assert_eq!(events[1].text, "[thinking]\nthinking hard\n[/thinking]\nhi there");
+        assert_eq!(
+            events[1].text,
+            "[thinking]\nthinking hard\n[/thinking]\nhi there"
+        );
         assert_eq!(
             events[1].timestamp.as_deref(),
             Some("2026-04-18T04:53:25.274422")
