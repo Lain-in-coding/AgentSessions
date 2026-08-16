@@ -43,6 +43,7 @@ dependencies = [
  "agent-session-grep-provider-cline",
  "agent-session-grep-provider-codebuddy",
  "agent-session-grep-provider-codex",
+ "agent-session-grep-provider-cursor",
  "agent-session-grep-provider-grok",
  "agent-session-grep-provider-hermes",
  "agent-session-grep-provider-kimi",

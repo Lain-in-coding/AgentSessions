@@ -24,6 +24,7 @@ agent-session-grep-provider-antigravity = { path = "../agent-session-grep-provid
 agent-session-grep-provider-claude = { path = "../agent-session-grep-provider-claude" }
 agent-session-grep-provider-cline = { path = "../agent-session-grep-provider-cline" }
 agent-session-grep-provider-codex = { path = "../agent-session-grep-provider-codex" }
+agent-session-grep-provider-cursor = { path = "../agent-session-grep-provider-cursor" }
 agent-session-grep-provider-grok = { path = "../agent-session-grep-provider-grok" }
 agent-session-grep-provider-hermes = { path = "../agent-session-grep-provider-hermes" }
 agent-session-grep-provider-kimi = { path = "../agent-session-grep-provider-kimi" }
