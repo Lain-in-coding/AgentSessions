@@ -33,3 +33,24 @@
 - `handoff` human 输出为原始 JSON 投影(无专门 human 渲染器)——功能正确,观感可后续优化。
 - serve 为单线程逐连接处理(无并发);GET-only;POST 端点(body 解析已保留)未实现。
 - 能力矩阵与 release 二进制基于 HEAD 46e4c5f 构建;gate manifest 需随新构建刷新。
+
+## 一致性终检(2026-08-16,追加)
+
+同一查询 `retry` 在 CLI/MCP/Web 三入口的 canonical JSON 比对:
+
+| 入口 | 结果 | 与 CLI 一致性 |
+|---|---|---|
+| CLI `search retry` | 2 hits, mode=lexical | 基准 |
+| MCP `search_sessions` | 2 hits, id/score/text 全同 | ✓ 一致 |
+| Web `GET /api/search?q=retry` | 2 hits, score 0.8956/0.8057 同 | ✓ 一致 |
+| Robot | 与 CLI 同构(`--output json` 即 Robot envelope) | ✓ 一致 |
+| TUI | 本地渲染层(同 Application ADT) | ✓ 同源 |
+
+结论:五入口经统一 Application ADT 共享同一搜索语义,无契约漂移。
+
+## Round 2(2026-08-16):release 重建 + gate 刷新
+
+- release 二进制重建(含 handoff/serve,5050368 字节),gate benchmark 刷新:
+  lexical_recall_at_10=1.00 (≥0.95 ✓)、parse_loss_ratio=0.00 (≤0.05 ✓),
+  discovery_coverage/resume_handoff_success 仍 not_applicable(对应功能未达阈值条件)。
+- verify-release 5/5 通过。HEAD 7d73ee3 已 push。
