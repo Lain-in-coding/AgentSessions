@@ -16,8 +16,8 @@
 //! local sample `~/.gemini/antigravity-cli/brain/` (structural shapes only).
 
 use agent_session_grep_ports::{
-    CanonicalEventSink, Confidence, MessageEvent, ParseReport, ProbeResult, ProviderAdapter,
-    ProviderError,
+    AdapterManifest, CanonicalEventSink, Confidence, MessageEvent, ParseReport, ProbeResult,
+    ProviderAdapter, ProviderError, manifest_for,
 };
 
 /// Variant id surfaced in probe results.
@@ -69,6 +69,10 @@ struct StepRecord {
 impl ProviderAdapter for AntigravityAdapter {
     fn provider_id(&self) -> &str {
         "antigravity"
+    }
+
+    fn manifest(&self) -> AdapterManifest {
+        manifest_for(self.provider_id(), None, &[])
     }
 
     fn probe(&self, bytes: &[u8]) -> Result<ProbeResult, ProviderError> {
@@ -301,6 +305,18 @@ fn is_rfc3339(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn manifest_matches_provider_matrix() {
+        let adapter = AntigravityAdapter::new();
+        let manifest = adapter.manifest();
+        assert_eq!(manifest.provider_id, adapter.provider_id());
+        assert_eq!(manifest.supported_variants, vec![VARIANT_ID.to_string()]);
+        assert_eq!(manifest.capabilities.provider_id, adapter.provider_id());
+        assert_eq!(manifest.capabilities.variant_id, VARIANT_ID);
+        assert!(manifest.last_certified_targets.is_empty());
+        assert_eq!(manifest.fixture_revision, None);
+    }
 
     /// Synthetic Antigravity transcript (never real user data).
     fn transcript_fixture() -> String {

@@ -5174,6 +5174,9 @@ mod tests {
             fn provider_id(&self) -> &str {
                 "span-demo"
             }
+            fn manifest(&self) -> agent_session_grep_ports::AdapterManifest {
+                agent_session_grep_ports::manifest_for(self.provider_id(), None, &[])
+            }
             fn probe(
                 &self,
                 _bytes: &[u8],
@@ -5258,6 +5261,9 @@ mod tests {
             fn provider_id(&self) -> &str {
                 "leaky"
             }
+            fn manifest(&self) -> agent_session_grep_ports::AdapterManifest {
+                agent_session_grep_ports::manifest_for(self.provider_id(), None, &[])
+            }
             fn probe(
                 &self,
                 _bytes: &[u8],
@@ -5299,6 +5305,9 @@ mod tests {
         impl ProviderAdapter for ProbeCounting<'_> {
             fn provider_id(&self) -> &str {
                 self.inner.provider_id()
+            }
+            fn manifest(&self) -> agent_session_grep_ports::AdapterManifest {
+                self.inner.manifest()
             }
             fn probe(
                 &self,
@@ -5344,6 +5353,9 @@ mod tests {
             fn provider_id(&self) -> &str {
                 "line-detail"
             }
+            fn manifest(&self) -> agent_session_grep_ports::AdapterManifest {
+                agent_session_grep_ports::manifest_for(self.provider_id(), None, &[])
+            }
             fn probe(
                 &self,
                 _bytes: &[u8],
@@ -5365,6 +5377,9 @@ mod tests {
         impl ProviderAdapter for SilentRejecter {
             fn provider_id(&self) -> &str {
                 "silent"
+            }
+            fn manifest(&self) -> agent_session_grep_ports::AdapterManifest {
+                agent_session_grep_ports::manifest_for(self.provider_id(), None, &[])
             }
             fn probe(
                 &self,
@@ -5407,6 +5422,9 @@ mod tests {
         impl ProviderAdapter for AmbiguousOnly {
             fn provider_id(&self) -> &str {
                 "ambiguous-only"
+            }
+            fn manifest(&self) -> agent_session_grep_ports::AdapterManifest {
+                agent_session_grep_ports::manifest_for(self.provider_id(), None, &[])
             }
             fn probe(
                 &self,

@@ -6,8 +6,8 @@
 //! adapter 只做格式隔离，绝不接触存储 / 检索 / UI（RFC-0002 §7）。
 
 use agent_session_grep_ports::{
-    CanonicalEventSink, Confidence, MessageEvent, MetadataResolution, ParseReport, ProbeResult,
-    ProviderAdapter, ProviderError,
+    AdapterManifest, CanonicalEventSink, Confidence, MessageEvent, MetadataResolution, ParseReport,
+    ProbeResult, ProviderAdapter, ProviderError, manifest_for,
 };
 use serde::{Deserialize, de::IgnoredAny};
 
@@ -410,6 +410,17 @@ impl ProviderAdapter for ClaudeCodeAdapter {
         "claude-code"
     }
 
+    fn manifest(&self) -> AdapterManifest {
+        manifest_for(
+            self.provider_id(),
+            Some(1),
+            &[
+                "tool activity extraction is partial",
+                "turn_context metadata is not surfaced as canonical messages",
+            ],
+        )
+    }
+
     fn probe(&self, bytes: &[u8]) -> Result<ProbeResult, ProviderError> {
         let text = std::str::from_utf8(bytes)
             .map_err(|e| ProviderError::StructuralFatal(format!("not valid UTF-8: {e}")))?;
@@ -709,6 +720,18 @@ impl ProviderAdapter for ClaudeCodeAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn manifest_matches_provider_matrix() {
+        let adapter = ClaudeCodeAdapter::new();
+        let manifest = adapter.manifest();
+        assert_eq!(manifest.provider_id, adapter.provider_id());
+        assert_eq!(manifest.supported_variants, vec![VARIANT_ID.to_string()]);
+        assert_eq!(manifest.capabilities.provider_id, adapter.provider_id());
+        assert_eq!(manifest.capabilities.variant_id, VARIANT_ID);
+        assert!(manifest.last_certified_targets.is_empty());
+        assert_eq!(manifest.fixture_revision, Some(1));
+    }
 
     /// 收集 emit 的消息事件，供断言解析结果（含 native 身份/threading）。
     #[derive(Default)]

@@ -15,13 +15,13 @@ use std::io::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use agent_session_grep_ports::{
-    CanonicalEventSink, Confidence, MessageEvent, MetadataResolution, ParseReport, ProbeResult,
-    ProviderAdapter, ProviderError,
+    AdapterManifest, CanonicalEventSink, Confidence, MessageEvent, MetadataResolution, ParseReport,
+    ProbeResult, ProviderAdapter, ProviderError, manifest_for,
 };
 use rusqlite::{Connection, OpenFlags, params};
 
 /// Variant id surfaced in probe results.
-const VARIANT_ID: &str = "cursor/vscdb-v1";
+const VARIANT_ID: &str = "cursor/vscdb-chat-v1";
 
 /// SQLite magic header: every SQLite database starts with "SQLite format 3\0".
 const SQLITE_MAGIC: &[u8] = b"SQLite format 3\0";
@@ -98,6 +98,10 @@ struct Prompt {
 impl ProviderAdapter for CursorAdapter {
     fn provider_id(&self) -> &str {
         "cursor"
+    }
+
+    fn manifest(&self) -> AdapterManifest {
+        manifest_for(self.provider_id(), None, &[])
     }
 
     fn probe(&self, bytes: &[u8]) -> Result<ProbeResult, ProviderError> {
@@ -449,6 +453,18 @@ fn read_key(conn: &Connection, key: &str) -> Result<Option<String>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn manifest_matches_provider_matrix() {
+        let adapter = CursorAdapter::new();
+        let manifest = adapter.manifest();
+        assert_eq!(manifest.provider_id, adapter.provider_id());
+        assert_eq!(manifest.supported_variants, vec![VARIANT_ID.to_string()]);
+        assert_eq!(manifest.capabilities.provider_id, adapter.provider_id());
+        assert_eq!(manifest.capabilities.variant_id, VARIANT_ID);
+        assert!(manifest.last_certified_targets.is_empty());
+        assert_eq!(manifest.fixture_revision, None);
+    }
 
     /// Records (seq, role, text, timestamp) of every emitted message.
     struct RecordingSink {

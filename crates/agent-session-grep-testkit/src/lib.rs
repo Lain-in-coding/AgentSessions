@@ -17,9 +17,9 @@ use agent_session_grep_domain::{
     SessionContextGraph, SourceDocument, Stability, StableId,
 };
 use agent_session_grep_ports::{
-    CanonicalEventSink, CatalogEntry, CatalogStore, Confidence, ContextGraphStore, ContextStats,
-    MessageContextCandidate, MessageEvent, ParseReport, PortError, PortResult, ProbeResult,
-    ProviderAdapter, ProviderError, SearchHit, SearchIndex, SearchQuery,
+    AdapterManifest, CanonicalEventSink, CatalogEntry, CatalogStore, Confidence, ContextGraphStore,
+    ContextStats, MessageContextCandidate, MessageEvent, ParseReport, PortError, PortResult,
+    ProbeResult, ProviderAdapter, ProviderError, SearchHit, SearchIndex, SearchQuery, manifest_for,
 };
 
 /// 构造合法 Canonical 会话的 builder（fixture builder）。
@@ -462,6 +462,10 @@ impl FakeProvider {
 impl ProviderAdapter for FakeProvider {
     fn provider_id(&self) -> &str {
         &self.provider_id
+    }
+
+    fn manifest(&self) -> AdapterManifest {
+        manifest_for(self.provider_id(), None, &[])
     }
 
     fn probe(&self, _bytes: &[u8]) -> Result<ProbeResult, ProviderError> {

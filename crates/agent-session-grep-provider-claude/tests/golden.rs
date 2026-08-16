@@ -137,6 +137,14 @@ fn parse_never_mutates_source_bytes() {
 }
 
 #[test]
+fn golden_provenance_revision_matches_manifest() {
+    assert_eq!(
+        ClaudeCodeAdapter::new().manifest().fixture_revision,
+        Some(1)
+    );
+}
+
+#[test]
 fn golden_canonical_output_is_pinned() {
     let expected = read_expected();
     let bytes = read_fixture_verified(&expected);

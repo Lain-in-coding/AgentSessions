@@ -13,8 +13,8 @@ use std::io::Write;
 
 use agent_session_grep_ports::MetadataResolution;
 use agent_session_grep_ports::{
-    CanonicalEventSink, Confidence, MessageEvent, ParseReport, ProbeResult, ProviderAdapter,
-    ProviderError,
+    AdapterManifest, CanonicalEventSink, Confidence, MessageEvent, ParseReport, ProbeResult,
+    ProviderAdapter, ProviderError, manifest_for,
 };
 use rusqlite::{Connection, OpenFlags};
 
@@ -46,6 +46,10 @@ impl Default for OpenCodeAdapter {
 impl ProviderAdapter for OpenCodeAdapter {
     fn provider_id(&self) -> &str {
         "opencode"
+    }
+
+    fn manifest(&self) -> AdapterManifest {
+        manifest_for(self.provider_id(), None, &[])
     }
 
     fn probe(&self, bytes: &[u8]) -> Result<ProbeResult, ProviderError> {
@@ -271,6 +275,18 @@ fn table_exists(conn: &Connection, table_name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn manifest_matches_provider_matrix() {
+        let adapter = OpenCodeAdapter::new();
+        let manifest = adapter.manifest();
+        assert_eq!(manifest.provider_id, adapter.provider_id());
+        assert_eq!(manifest.supported_variants, vec![VARIANT_ID.to_string()]);
+        assert_eq!(manifest.capabilities.provider_id, adapter.provider_id());
+        assert_eq!(manifest.capabilities.variant_id, VARIANT_ID);
+        assert!(manifest.last_certified_targets.is_empty());
+        assert_eq!(manifest.fixture_revision, None);
+    }
 
     #[test]
     fn probe_rejects_non_sqlite_bytes() {

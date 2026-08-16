@@ -114,6 +114,11 @@ fn parse_never_mutates_source_bytes() {
 }
 
 #[test]
+fn golden_provenance_revision_matches_manifest() {
+    assert_eq!(CodexAdapter::new().manifest().fixture_revision, Some(1));
+}
+
+#[test]
 fn golden_basic_matches_pinned_canonical_output() {
     let bytes = read_fixture_bytes();
     let expected: Value = serde_json::from_slice(

@@ -93,6 +93,11 @@ ProbeResult
 
 `AdapterManifest` 必须声明：`provider_id`、支持的版本/variant 范围、maturity、能力矩阵、fixture revision、最后认证 target、已知限制。
 
+实现注记：Rust 结构定义于 `agent-session-grep-ports::AdapterManifest`，并由
+`ProviderAdapter::manifest()` 强制每个 adapter 显式提供。`last_certified_targets`
+只有在具名 workflow run 于对应 target 成功后才能填写；仅配置 workflow 或本地测试
+不得作为认证记录。
+
 ## 7. 硬约束（Release 阻断级）
 
 - Adapter 只通过 `ReadOnlySourceFs` 访问已授权 root，绝不修改/移动/删除/锁定源文件；

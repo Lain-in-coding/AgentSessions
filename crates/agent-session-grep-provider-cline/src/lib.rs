@@ -11,8 +11,8 @@
 //! and ~/.cline/data/tasks/*/.
 
 use agent_session_grep_ports::{
-    CanonicalEventSink, Confidence, MessageEvent, ParseReport, ProbeResult, ProviderAdapter,
-    ProviderError,
+    AdapterManifest, CanonicalEventSink, Confidence, MessageEvent, ParseReport, ProbeResult,
+    ProviderAdapter, ProviderError, manifest_for,
 };
 
 /// Variant id surfaced in probe results.
@@ -47,6 +47,10 @@ struct ClineMessage {
 impl ProviderAdapter for ClineAdapter {
     fn provider_id(&self) -> &str {
         "cline"
+    }
+
+    fn manifest(&self) -> AdapterManifest {
+        manifest_for(self.provider_id(), None, &[])
     }
 
     fn probe(&self, bytes: &[u8]) -> Result<ProbeResult, ProviderError> {
@@ -220,6 +224,18 @@ fn cline_content_text(content: &serde_json::Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn manifest_matches_provider_matrix() {
+        let adapter = ClineAdapter::new();
+        let manifest = adapter.manifest();
+        assert_eq!(manifest.provider_id, adapter.provider_id());
+        assert_eq!(manifest.supported_variants, vec![VARIANT_ID.to_string()]);
+        assert_eq!(manifest.capabilities.provider_id, adapter.provider_id());
+        assert_eq!(manifest.capabilities.variant_id, VARIANT_ID);
+        assert!(manifest.last_certified_targets.is_empty());
+        assert_eq!(manifest.fixture_revision, None);
+    }
 
     struct CountSink {
         count: usize,

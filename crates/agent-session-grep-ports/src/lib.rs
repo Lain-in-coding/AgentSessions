@@ -800,6 +800,9 @@ pub trait ProviderAdapter: Send + Sync {
     /// 稳定的 provider 标识（如 `claude-code`）。
     fn provider_id(&self) -> &str;
 
+    /// Stable, structured metadata for this adapter (RFC-0002 §6).
+    fn manifest(&self) -> AdapterManifest;
+
     /// 判定字节流属于哪个 variant 及置信度。
     ///
     /// `ambiguous`/未知 variant 必须返回 [`Confidence::Ambiguous`] 或
@@ -817,9 +820,11 @@ pub trait ProviderAdapter: Send + Sync {
     ) -> Result<ParseReport, ProviderError>;
 }
 
-#[cfg(test)]
 pub mod capability;
 pub mod handoff;
+pub mod manifest;
+
+pub use manifest::{AdapterManifest, manifest_for};
 
 #[cfg(test)]
 mod tests {
