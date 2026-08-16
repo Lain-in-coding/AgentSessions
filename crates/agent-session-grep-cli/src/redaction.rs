@@ -118,41 +118,133 @@ fn is_secret_key(key: &str) -> bool {
 ///
 /// Patterns are deliberately conservative: only high-confidence, structured
 /// secret formats are matched to avoid false positives that would erode trust.
+/// Matches both standalone secrets (the whole string is a secret) and secrets
+/// embedded inside prose ("the key is AKIA...") — cross-boundary output must
+/// not leak either form (ADR-0009).
 fn redact_string(s: &str) -> Option<String> {
     if s.is_empty() || s.len() < 8 {
         return None;
     }
+    // Standalone (whole-string) match first: the value is exactly one secret.
+    if let Some(marker) = standalone_secret(s) {
+        return Some(marker.to_string());
+    }
+    // Embedded match: scan for each known secret shape inside the string and
+    // replace matched spans with their redaction marker.
+    let mut redacted = s.to_string();
+    let mut count = 0u64;
+    for shape in embedded_shapes() {
+        let mut search_from = 0usize;
+        while let Some((start, end, marker)) = find_embedded(&redacted[search_from..], shape) {
+            let abs_start = search_from + start;
+            redacted.replace_range(abs_start..abs_start + end, marker);
+            search_from = abs_start + marker.len();
+            count += 1;
+            if count >= 16 {
+                break; // bounded: never rewrite more than 16 spans per value
+            }
+        }
+    }
+    if count == 0 { None } else { Some(redacted) }
+}
+
+/// Whole-string secret match (existing behavior): the value itself is a
+/// single secret token.
+fn standalone_secret(s: &str) -> Option<&'static str> {
     // AWS access key: AKIA + 16 uppercase alphanumeric
     if s.starts_with("AKIA") && s.len() >= 20 && s[..20].chars().all(|c| c.is_ascii_alphanumeric())
     {
-        return Some("[redacted:aws_access_key]".to_string());
+        return Some("[redacted:aws_access_key]");
     }
     // AWS secret key: 40-char base64-ish (heuristic, only if it looks like a standalone token)
     if s.len() == 40
         && s.chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=')
     {
-        return Some("[redacted:aws_secret_key]".to_string());
+        return Some("[redacted:aws_secret_key]");
     }
     // GitHub PAT: ghp_ / gho_ / ghs_ / ghu_ / gsr_ + 36 chars
     for prefix in &["ghp_", "gho_", "ghs_", "ghu_", "ghr_", "ghs_"] {
         if s.starts_with(prefix) && s.len() >= 40 {
-            return Some("[redacted:github_token]".to_string());
+            return Some("[redacted:github_token]");
         }
     }
     // Generic API key patterns: sk- (OpenAI), sk-ant- (Anthropic), xai- (xAI)
     for prefix in &["sk-ant-", "sk-", "xai-"] {
         if s.starts_with(prefix) && s.len() >= 20 {
-            return Some("[redacted:api_key]".to_string());
+            return Some("[redacted:api_key]");
         }
     }
     // Bearer token in a string value
     if s.starts_with("Bearer ") && s.len() > 10 {
-        return Some("[redacted:bearer_token]".to_string());
+        return Some("[redacted:bearer_token]");
     }
     // Private key header (PEM)
     if s.contains("-----BEGIN ") && s.contains("PRIVATE KEY-----") {
-        return Some("[redacted:private_key]".to_string());
+        return Some("[redacted:private_key]");
+    }
+    None
+}
+
+/// Embedded secret shape: (prefix, minimum total length, redaction marker).
+type SecretShape = (&'static str, usize, &'static str);
+
+/// The known secret shapes, longest prefix first so more specific shapes
+/// (sk-ant- before sk-) win the first-match.
+fn embedded_shapes() -> Vec<SecretShape> {
+    vec![
+        // AWS access key: AKIA + 16 alphanumeric = 20 chars
+        ("AKIA", 20, "[redacted:aws_access_key]"),
+        // GitHub PAT: ghp_ + 36 = 40 chars
+        ("ghp_", 40, "[redacted:github_token]"),
+        ("gho_", 40, "[redacted:github_token]"),
+        ("ghs_", 40, "[redacted:github_token]"),
+        ("ghu_", 40, "[redacted:github_token]"),
+        ("ghr_", 40, "[redacted:github_token]"),
+        // Anthropic before generic sk-
+        ("sk-ant-", 20, "[redacted:api_key]"),
+        // OpenAI / xAI
+        ("sk-", 20, "[redacted:api_key]"),
+        ("xai-", 20, "[redacted:api_key]"),
+        // Bearer tokens in prose
+        ("Bearer ", 11, "[redacted:bearer_token]"),
+    ]
+}
+
+/// Find one embedded secret span in `s` starting at the given offset.
+///
+/// Returns (start, end, marker) where end is the matched span length —
+/// prefix + the trailing run of token characters (alphanumerics, '_', '-',
+/// '+', '/', '='). The span is bounded to the shape's minimum length to
+/// avoid over-consuming trailing prose.
+fn find_embedded(s: &str, shape: SecretShape) -> Option<(usize, usize, &'static str)> {
+    let (prefix, min_len, marker) = shape;
+    let mut search = 0usize;
+    while let Some(rel) = s[search..].find(prefix) {
+        let start = search + rel;
+        let after = start + prefix.len();
+        // Require a non-alphanumeric boundary before the prefix (avoid
+        // matching inside a longer identifier like "myAKIA...").
+        let boundary_ok = start == 0
+            || !s[..start]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+        if boundary_ok {
+            let mut end = after;
+            for c in s[after..].chars() {
+                if c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '+' | '/' | '=') {
+                    end += c.len_utf8();
+                } else {
+                    break;
+                }
+            }
+            let span_len = end - start;
+            if span_len >= min_len {
+                return Some((start, span_len, marker));
+            }
+        }
+        search = after;
     }
     None
 }
@@ -293,6 +385,48 @@ mod tests {
         let (redacted, status) = redact_text("normal warning text");
         assert_eq!(redacted, "normal warning text");
         assert_eq!(status.redacted_count, 0);
+    }
+
+    #[test]
+    fn redacts_embedded_secret_in_prose() {
+        let val = serde_json::json!({
+            "text": "config with key AKIAIOSFODNN7EXAMPLE and token ghp_1234567890abcdefghijklmnopqrstuvwxyz trailing"
+        });
+        let (redacted, status) = redact_value(val);
+        assert_eq!(
+            redacted["text"],
+            "config with key [redacted:aws_access_key] and token [redacted:github_token] trailing"
+        );
+        assert_eq!(status.redacted_count, 1); // one value, two spans
+    }
+
+    #[test]
+    fn does_not_redact_embedded_like_prefixes() {
+        // Prefix inside a longer identifier must not match; too-short spans must
+        // not match either.
+        let val = serde_json::json!({
+            "a": "myAKIAIOSFODNN7EXAMPLE-suffix",
+            "b": "token ghp_tooshort trailing",
+            "c": "plain sk- text with nothing after"
+        });
+        let (redacted, status) = redact_value(val);
+        assert_eq!(redacted["a"], "myAKIAIOSFODNN7EXAMPLE-suffix");
+        assert_eq!(redacted["b"], "token ghp_tooshort trailing");
+        assert_eq!(redacted["c"], "plain sk- text with nothing after");
+        assert_eq!(status.redacted_count, 0);
+    }
+
+    #[test]
+    fn redacts_embedded_bearer_token() {
+        let val = serde_json::json!({
+            "text": "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9 with payload"
+        });
+        let (redacted, status) = redact_value(val);
+        assert_eq!(
+            redacted["text"],
+            "Authorization: [redacted:bearer_token] with payload"
+        );
+        assert_eq!(status.redacted_count, 1);
     }
 
     #[test]

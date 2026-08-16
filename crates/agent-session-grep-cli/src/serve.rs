@@ -263,6 +263,9 @@ fn path_only(path: &str) -> &str {
 
 /// Route an HTTP request to the appropriate response, backed by the
 /// Application ADT over the same SqliteStore used by CLI/MCP/Robot.
+///
+/// All JSON responses pass through the cross-boundary redactor (ADR-0009):
+/// Web 是跨边界输出,secret 模式一律脱敏(与 Robot/MCP/Handoff 同规则)。
 pub fn route_request(
     req: &HttpRequest,
     token: &str,
@@ -287,14 +290,13 @@ pub fn route_request(
                 catalog_count,
                 active_generation,
                 ..
-            }) => HttpResponse::json(
+            }) => redacted_json(
                 200,
-                &serde_json::json!({
+                serde_json::json!({
                     "command": "status",
                     "catalog_count": catalog_count,
                     "generation": active_generation,
-                })
-                .to_string(),
+                }),
             ),
             Ok(_) => HttpResponse::json(500, r#"{"error":"unexpected response"}"#),
             Err(e) => HttpResponse::json(
@@ -325,9 +327,9 @@ pub fn route_request(
             }) {
                 Ok(AppResponse::Search {
                     hits, generation, ..
-                }) => HttpResponse::json(
+                }) => redacted_json(
                     200,
-                    &serde_json::json!({
+                    serde_json::json!({
                         "retrieval_mode": "lexical",
                         "generation": generation,
                         "hits": hits.iter().map(|h| serde_json::json!({
@@ -336,8 +338,7 @@ pub fn route_request(
                             "session_id": h.session_id,
                             "text": h.text,
                         })).collect::<Vec<_>>(),
-                    })
-                    .to_string(),
+                    }),
                 ),
                 Ok(_) => HttpResponse::json(500, r#"{"error":"unexpected response"}"#),
                 Err(e) => HttpResponse::json(
@@ -371,17 +372,16 @@ pub fn route_request(
                     session_id,
                     messages,
                     ..
-                }) => HttpResponse::json(
+                }) => redacted_json(
                     200,
-                    &serde_json::json!({
+                    serde_json::json!({
                         "session_id": session_id,
                         "messages": messages.iter().map(|m| serde_json::json!({
                             "id": m.id,
                             "placement_id": m.placement_id,
                             "payload": m.payload,
                         })).collect::<Vec<_>>(),
-                    })
-                    .to_string(),
+                    }),
                 ),
                 Ok(_) => HttpResponse::json(500, r#"{"error":"unexpected response"}"#),
                 Err(e) => HttpResponse::json(
@@ -392,6 +392,12 @@ pub fn route_request(
         }
         _ => HttpResponse::json(404, r#"{"error":"not found"}"#),
     }
+}
+
+/// Serialize a JSON value through the cross-boundary redactor (ADR-0009).
+fn redacted_json(status: u16, value: serde_json::Value) -> HttpResponse {
+    let (redacted, _status) = crate::redaction::redact_value(value);
+    HttpResponse::json(status, &redacted.to_string())
 }
 
 #[cfg(test)]
