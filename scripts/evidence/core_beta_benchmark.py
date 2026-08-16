@@ -192,10 +192,10 @@ def cli(binary: Path, workspace: Path, db: Path, *args: str) -> dict[str, Any]:
     return result
 
 
-def synthetic_record(index: int) -> dict[str, Any]:
+def synthetic_record(index: int, local_index: int) -> dict[str, Any]:
     role = "user" if index % 2 == 0 else "assistant"
     uuid = f"00000000-0000-4000-8000-{index:012d}"
-    parent = None if index % 10 == 0 else f"00000000-0000-4000-8000-{index - 1:012d}"
+    parent = None if local_index % 10 == 0 else f"00000000-0000-4000-8000-{index - 1:012d}"
     category = ["alpha", "配置", "src/main.rs", "EVIDENCE42"][index % 4]
     return {
         "type": role,
@@ -219,8 +219,8 @@ def write_dataset(root: Path, file_count: int, messages_per_file: int) -> tuple[
     for file_number in range(file_count):
         path = root / f"session-{file_number:04d}.jsonl"
         with path.open("w", encoding="utf-8", newline="\n") as handle:
-            for _ in range(messages_per_file):
-                record = synthetic_record(index)
+            for local_index in range(messages_per_file):
+                record = synthetic_record(index, local_index)
                 handle.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
                 ids.append(f"msg_v1_{record['uuid']}")
                 index += 1
