@@ -125,6 +125,35 @@ jobs:
           cargo test --locked --target '${{ matrix.target }}' -p agent-session-grep-adapters-sqlite --all-targets -- --nocapture 2>&1 |
             Tee-Object -FilePath 'evidence/ci/sqlite-adapter-tests.txt'
 
+      # Provider Beta evidence must execute on every named target, not only in
+      # the generic ci.yml matrix. These tests pin fixture bytes, canonical
+      # output, deterministic properties, and source-span round trips.
+      - name: Claude and Codex provider evidence tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          cargo test --locked --target '${{ matrix.target }}' `
+            -p agent-session-grep-provider-claude `
+            -p agent-session-grep-provider-codex `
+            --all-targets -- --nocapture 2>&1 |
+            Tee-Object -FilePath 'evidence/ci/provider-evidence-tests.txt'
+
+      - name: Open-source gate benchmark
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $binary = Join-Path 'target/${{ matrix.target }}/release' '${{ matrix.binary }}'
+          python -m unittest scripts/evidence/test_open_source_gate_benchmark.py
+          python scripts/evidence/open_source_gate_benchmark.py run `
+            --profile '${{ matrix.id }}' `
+            --workspace . `
+            --output-dir 'evidence/ci/open-source-gate' `
+            --binary $binary
+          python scripts/evidence/open_source_gate_benchmark.py validate-report `
+            "evidence/ci/open-source-gate/gate-manifest-${{ matrix.id }}.json"
+
       - name: Storage feasibility spikes
         shell: pwsh
         run: |
