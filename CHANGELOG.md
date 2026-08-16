@@ -29,6 +29,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and hybrid require a ready semantic index; without one the response is
   explicitly marked `retrieval_mode: lexical_fallback` with a warning, never
   silently downgraded.
+- `hook <session-start|user-prompt-submit>` CLI subcommand — Claude Code hook
+  integration, disabled by default. Reads the hook payload from stdin and emits
+  the `hookSpecificOutput.additionalContext` contract; nothing is injected
+  unless `--enable` is passed. Injected text is redacted (ADR-0009).
 - `serve --port <n>` CLI subcommand — loopback HTTP server (random bearer
   token, Host loopback check, embedded Web UI, JSON API).
 - MCP tools `search_sessions` and `get_session_resume`.
