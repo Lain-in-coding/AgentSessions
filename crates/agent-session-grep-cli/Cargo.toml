@@ -37,6 +37,8 @@ serde = { workspace = true }
 serde_json.workspace = true
 ratatui.workspace = true
 crossterm.workspace = true
+# 平台 CSPRNG(serve 会话 token 生成;getrandom 已在 lock 图中,经 tempfile dev-dep)
+getrandom = "0.4"
 
 [dev-dependencies]
 # default-features = false 与 adapters-sqlite 保持一致,避免 test 图的特性

@@ -52,6 +52,7 @@ dependencies = [
  "agent-session-grep-provider-pi",
  "agent-session-grep-provider-qoder",
  "crossterm",
+ "getrandom",
  "ratatui",
  "rusqlite",
  "serde",

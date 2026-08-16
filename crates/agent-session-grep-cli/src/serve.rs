@@ -68,6 +68,10 @@ pub fn run(
     for stream in listener.incoming() {
         match stream {
             Ok(mut stream) => {
+                // 慢客户端不能占用服务器:15 秒内未完成请求读取即断开。
+                // 单线程逐连接处理(loopback 单用户场景;SQLite store 非
+                // Sync,多连接并发需每线程重开只读连接,暂不需要)。
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(15)));
                 let response = match parse_request(&mut stream) {
                     Ok(req) => route_request(&req, session.token(), &app),
                     Err(_) => HttpResponse::json(400, r#"{"error":"malformed request"}"#),
@@ -233,21 +237,15 @@ pub fn parse_request(stream: &mut TcpStream) -> std::io::Result<HttpRequest> {
 }
 
 /// Generate a random 32-char hex token for session authentication.
+///
+/// Uses the platform CSPRNG via getrandom; the token guards loopback API
+/// access, so it must not be predictable from the clock (LCG + timestamp
+/// was not).
 fn generate_token() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let seed = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    // Simple LCG-based pseudo-random for token (not crypto-secure, but
-    // adequate for loopback session auth; replaces with a CSPRNG if needed).
-    let mut state = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+    let mut bytes = [0u8; 16];
+    getrandom::fill(&mut bytes).expect("CSPRNG must be available on serve host");
     let mut hex = String::with_capacity(32);
-    for _ in 0..16 {
-        state = state
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
-        let byte = (state >> 33) as u8;
+    for byte in bytes {
         hex.push_str(&format!("{byte:02x}"));
     }
     hex
@@ -413,13 +411,9 @@ mod tests {
 
     #[test]
     fn tokens_are_unique() {
-        // Generate multiple tokens; they should differ (probabilistically).
         let t1 = generate_token();
         let t2 = generate_token();
-        // Note: if called within the same nanosecond this could theoretically
-        // collide, but in practice the nanosecond counter advances.
-        // We allow this test to be lenient.
-        let _ = (t1, t2);
+        assert_ne!(t1, t2);
     }
 
     #[test]
