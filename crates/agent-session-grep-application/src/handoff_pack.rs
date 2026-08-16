@@ -193,20 +193,53 @@ fn derive_pack_id(generation: u64, terms: &[String]) -> String {
 }
 
 /// Current UTC time as ISO-8601 (for audit, not reproducibility).
+///
+/// Hand-rolled from Unix epoch seconds (no chrono/time dependency): the
+/// previous implementation embedded the epoch seconds into the minute field,
+/// producing a non-conforming timestamp.
 fn utc_now_iso8601() -> String {
-    // Simplified: use SystemTime. Full chrono integration deferred.
     use std::time::{SystemTime, UNIX_EPOCH};
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    format!("1970-01-01T00:00:{secs:05}Z")
+    format_utc_iso8601(secs)
+}
+
+/// Format Unix seconds as `YYYY-MM-DDTHH:MM:SSZ` in UTC using the
+/// civil-from-days algorithm (Howard Hinnant, public domain).
+fn format_utc_iso8601(secs: u64) -> String {
+    let days = (secs / 86_400) as i64;
+    let rem = secs % 86_400;
+    let (hour, minute, second) = (rem / 3_600, (rem % 3_600) / 60, rem % 60);
+
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097; // [0, 146096]
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
+    let year = if m <= 2 { y + 1 } else { y };
+    format!("{year:04}-{m:02}-{d:02}T{hour:02}:{minute:02}:{second:02}Z")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use agent_session_grep_domain::StableId;
+
+    #[test]
+    fn utc_iso8601_known_epochs() {
+        assert_eq!(format_utc_iso8601(0), "1970-01-01T00:00:00Z");
+        assert_eq!(format_utc_iso8601(86_400), "1970-01-02T00:00:00Z");
+        // 2026-08-16T00:00:00Z = 1786838400 (leap years included)
+        assert_eq!(format_utc_iso8601(1_786_838_400), "2026-08-16T00:00:00Z");
+        // Leap day: 2024-02-29T12:34:56Z
+        assert_eq!(format_utc_iso8601(1_709_210_096), "2024-02-29T12:34:56Z");
+    }
 
     fn hit(id: &str, score: f32, text: &str) -> SearchHit {
         SearchHit {
