@@ -1,67 +1,73 @@
-# Codex 交接报告 — agent-session-grep 开源就绪状态（2026-08-16）
+# Codex 交接报告 — agent-session-grep 开源就绪状态（2026-08-17 更新）
 
-- **Date**: 2026-08-16
-- **Main HEAD / origin/main**: `9014546f73376d2c371c3fc08be6e227536654c8`
-- **工作区**: clean（本报告前已完成全部可本地闭合的合并与推送）
-- **Audit basis**: 10 路并行只读审计（trellis-tree / quality-gate / retrieval / entrypoints / privacy-security / release-ci / providers / resume-handoff / activity-hooks-serve / docs-consistency / git-debris）+ 本轮额外闭合的 P0 修复。
+- **Date**: 2026-08-17（本报告由 2026-08-16 版本更新；主会话已闭合全部本地 P0/P1 功能波）
+- **Main HEAD / origin/main**: `2fdbb093cac1308d0f259f2ee5d6bb668e581988`
+- **工作区**: clean（P0-5 已合入；ToolActivity 移植由集成 agent 在隔离 worktree 进行中）
+- **Audit basis**: 10 路并行只读审计（2026-08-16）+ 本轮闭合的 P0/P1 功能波
 
 ---
 
 ## 0. 一句话结论
 
-**项目当前 NOT_READY_LOCAL_BLOCKERS：核心产品面与门禁证据大体齐备，但仍有本地可闭合的 P0/P1 缺口，且 GitHub Actions 因账户欠费无法运行。** 交接给 Codex 的首要任务是闭合剩余本地 P0、跑出三平台成功证据，然后把公开决定留给 owner。
+**项目当前 NOT_READY_EXTERNAL_BLOCKERS：所有本地可闭合的 P0/P1 已落地并通过质量门与发布验证；剩余阻断全部是外部/owner 侧（GitHub Actions 欠费、provider maturity 门禁、公开/签名/治理签署）。** 交接给 Codex 的首要任务是闭合 P0-4（billing 修复后跑 named successful run + SBOM/NOTICE/REUSE），然后跑出三平台干净环境证据，把公开决定留给 owner。
 
 ---
 
-## 1. 已完成并合入 main（交接前已推送）
+## 1. 已合入 main（本轮之前 + 本轮闭合）
 
-| Commit | 内容 |
+### 本轮之前已合入（2026-08-16 交接前）
+`97e1324`（AdapterManifest）、`f4787c9`（providers 子命令）、`c5e7292`（ADR-0010）、`989c034`（源 checksum）、`243d7d5`（Claude/Codex 只读断言）、`432744f`（Codex resync e2e）、`4086f55`（release workflow）、`ccb89a1`（发布证据文档）、`8236f59`（Contributor Guide）、`7849a3c`（Dependabot + security-audit）、`e506288`（宣传口径修正）、`919b48e`（asg 别名三平台安装器）、`9014546`（版本字符串修正）。
+
+### 本轮闭合的本地 P0/P1 功能波
+| Commit/波 | 内容 |
 |---|---|
-| `97e1324` | 结构化 `AdapterManifest`（14 provider，Claude/Codex fixture_revision=1，其余 null，last_certified_targets 空） |
-| `f4787c9` | Provider maturity CLI/Robot/human 投影（`providers` 子命令，数据来自 capability.rs） |
-| `c5e7292` | ADR-0010 Provider maturity rollback（status Proposed） |
-| `989c034` | 真实数据回归 `INV-SOURCES-UNCHANGED` 源 checksum |
-| `243d7d5` | Claude/Codex probe/parse 只读字节断言 |
-| `432744f` | Codex incremental resync/tombstone e2e |
-| `4086f55` | tag-gated release workflow（4 target unsigned archive/SHA256SUMS/inventory） |
-| `ccb89a1` | 发布证据文档 |
-| `8236f59` | Provider Adapter Contributor Guide + issue/PR templates |
-| `7849a3c` | Dependabot + weekly security-audit workflow |
-| `e506288` | 版本/宣传口径修正（CHANGELOG 改为 Unreleased、删除 v0.1.0 已发布断言、COMPETITOR-COMPARISON 去掉 `--offline`/semantic 虚标、go-no-go 模板 v0.3.0→v0.1.0、README/SECURITY 0.1.x） |
-| `919b48e` | **asg 别名三平台安装器落地**（Windows 双 exe；Unix symlink/wrapper；upgrade/uninstall 原子且拒绝无关 alias；CI 三平台验证两个命令）+ backend spec/README/CHANGELOG/INSTALL-AND-UPGRADE 同步 |
-| `9014546` | 修正 main.rs/human.rs 硬编码 0.3.0→0.1.0 版本字符串 + OPEN-SOURCE-ROADMAP License 行 + CJK/offline 主张弱化 |
+| `bfb5f21` + `86f30b0` | **P0-6 bounded ingestion**：`ReadOnlySource`/`BoundedLineReader`，per-format 上限（JSONL 8MiB/record、JSON 族 32MiB、SQLite 128MiB），`SourceTooLarge`/`RecordTooLarge` fail-closed |
+| `cd59ad1`（privacy sweep） | **P0-1 隐私清扫**：`privacy_scan.py` 扫描 tracked 文本个人/机器绝对路径（当前 HEAD 0 findings）；`PUBLIC-HISTORY-SCRUB.md` 记录历史改写决策 |
+| `1748a63` | **session-metadata search（SQLite v11）**：`session_fts` 投影只索引 resolved provider session id / pair-observed cwd / 首条 user request；`group_by_session` 去重 |
+| `ea983cb` 等 | **handoff determinism 契约**：时钟无关 `created_at`/`pack_id`、真实 token/byte 预算三级截断、共享 `redact.rs`、权威 source locator、MCP `generate_handoff`（9 工具） |
+| `123d837` | **`--offline` 全局 flag + hook provider/time filters**：fail-closed `capability_not_supported`（exit 7）、零出口静态审计（`network_egress.rs`）、`--provider`/`--decay-days` |
+| resume 波 | **resume 执行契约**：first-run 强制预览 marker、provider binary preflight、dry-run 默认、capability 矩阵↔builder drift 测试 |
+| 12-provider golden | 12 个 provider 合成 fixture + PROVENANCE.md + pinned canonical output + span round-trip + 只读 checksum（grok/antigravity/pi/kimi/openclaw/qoder/codebuddy/hermes/hermes/opencode/cursor/aider/cline） |
+| serve hardening | loopback worker pool + Host/Origin/CSRF/体积限制 + `/api/projection/search` 别名 |
+| `89d5081` | **P0-5 代码件**：`tui --snapshot-json <query>` headless 投影 + serve projection 别名 |
+| `f4c1da1` | **P0-5 harness**：五入口一致性 harness 去 skip-as-pass（Web 真实 loopback serve + TUI 快照），`verify-release.py` 扩到 10/10 |
+| `2fdbb09` | **P0-5 docs**：runbook 更新到 landed 功能 + `go-no-go.2026-08-16.md` No-Go 草案 |
 
-### 已全链路人工验证（Windows 本机）
-- `install.ps1 -Prefix <tmp> -SkipBuild` → 安装 `agent-session-grep.exe` 与 `asg.exe`（版本一致）
-- `smoke.ps1 -Binary … -AliasBinary …` → 33 项断言全过（doctor/sync/search/get/context/status/exit-code/MCP 8-tool handshake）
-- `uninstall.ps1` → 删除两文件；第二次报告 "not installed" 退出 0
-- `cargo fmt --all --check` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo test --workspace` 全绿（opencode 测试为 temp-file 竞态 flake，单独/复跑均通过）
+### 已全链路人工验证（Windows 本机，release build）
+- `cargo fmt --all --check` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo test --workspace` 全绿（含去 skip 后的五入口 harness e2e）
+- `verify-release.py` → **10/10 checks passed**
+- `compare_entrypoints.py` → **overall_verdict=consistent**，5 入口全部直接比对，skipped/aliases/unimplemented 全空
+- `open_source_gate_benchmark.py` → 4/4 gated 指标 measured+pass（lexical_recall 1.0、parse_loss 0.0、discovery_coverage 1.0、resume_handoff_success 1.0），semantic/hybrid informational
+- `smoke.ps1`（release）→ 33 项断言全过；MCP 9 工具 handshake
+- Python 单测 `test_compare_entrypoints.py` + `test_verify_release.py` → 10 项全过
 
 ---
 
-## 2. 仍开放：本地可闭合 P0（Codex 优先）
+## 2. 仍开放：本地 P0（Codex 优先）
 
 | # | 缺口 | 证据 | 建议修复 |
 |---|---|---|---|
-| P0-1 | 公开树/历史含个人绝对路径（tracked 文件多处含本机用户目录与工程根路径，含 `provider-codebuddy/src/lib.rs:14` 与大量 trellis 文档） | audit-privacy-security / docs-consistency | 当前树替换为 `<repo>`/相对路径；历史由 owner 用 filter-repo/新公开仓库决策（见 `docs/operations/PUBLIC-HISTORY-SCRUB.md`，本报告发布前已由 privacy 清扫 commit 清理当前树） |
-| P0-4 | release pipeline 已存在但从未有 named successful run；无 SBOM/NOTICE/third-party attribution；`ci_configured_only` | audit-release-ci / quality-gate | 修 billing 后跑 exact SHA 的 4-target run；补 NOTICE/REUSE audit 收尾 |
-| P0-5 | 五入口一致性 harness 仍允许 Web/TUI skip-as-pass（`compare_entrypoints.py:30-32,446-475`、`e2e_consistency.rs:57-71`）；`verify-release.py` docstring 声称全流程但实际只 5 项 | audit-entrypoints | 让 Web 真实启动 loopback serve 比对；TUI 用 App projection 测试；runbook 更新到真实命令；产出 Go/No-Go 草案 |
-| P0-6 | Provider ingest 仍整文件 `read_to_end`（`source_fs.rs:38,74`）、`ProviderAdapter::parse(&[u8])`（`ports/lib.rs:820`），违反 RFC-0002 §7 release-blocking bounded-buffer | audit-quality-gate | 引入 bounded reader/chunked stream；保留 fingerprint/source_changed 原子性；大文件内存上限回归 |
+| P0-4 | release pipeline 已配置但从未有 named successful run；无 SBOM/NOTICE/third-party attribution；`ci_configured_only` | audit-release-ci | **修 billing 后**跑 exact SHA 的 4-target run，记录 named successful run 才升级 `ci_configured_only`；补 NOTICE/REUSE audit 收尾 |
 
-## 3. 仍开放：本地 P1（功能补强，不阻断首次公开但属宣传缺口）
+（P0-1 隐私清扫、P0-5 release rehearsal、P0-6 bounded ingestion 均已在当前 main 闭合。）
 
-1. **handoff-pack 未满足 PRD deterministic/budget/redaction**：`created_at` 用实时时钟（非字节确定性）、`max_bytes` 不参与裁剪、pack 内部 redaction 恒 default、source_document_id 直接用 hit.id、schema 路径 `schemas/handoff/v1/pack.schema.json` 与 PRD 的 draft 路径漂移；MCP/Robot 无 handoff 工具（仅 CLI）。
-2. **resume 执行层未核验**：无 first-run 强制预览状态；Claude/Codex 无真实 provider spawn smoke；capability.rs 与 resume builder 不一致（opencode 标 Derived 但 builder 不支持、grok-build Unknown 但有模板）；`permission_mode` 恒 None。
-3. **结构化 ToolActivity 未进生产**：`application/src/activity.rs` 是孤立 extractor；`agent-ae5601a055cc14728` worktree 有完整未提交实现（R1+R2 search facets：`SearchFacets/query_faceted`、SQLite v12、CLI flags），基于旧树需手工移植；session-metadata-search 类似（`session-metadata-search-08-15` worktree，SQLite v11）。
-4. **serve hardening 未合入**：main serve 单线程、无 Origin 校验、无请求体积限制、Host 解析不支持 `::1`；`agent-a52175662fdf83038` worktree 有未提交 worker-pool/Origin/CSRF/limits 实现，基于旧树需移植 3 个文件 hunk。
-5. **`--offline` 不存在**：仅 hooks.rs:14 注释与文档宣称；README/CONTEXT/runbook 需统一（或实现全局 flag）。
-6. **Hook 高级 filter 未实现**：PRD 的 provider/time/decay/config 加载未落地（当前仅 `--enable`/`--max-tokens`）。
+---
+
+## 3. 仍开放：本地 P1
+
+1. **ToolActivity 移植合入 main**：集成 agent 正在隔离 worktree 把 `agent-a79f8db9b001ffc53`（baseline 058b434 → tip ed761cd，3 commits：`ba3a35d` domain+ports / `fe48b0a` sqlite+application schema v12 / `ed761cd` cli+providers+tests）cherry-pick 到 current main，冲突解决优先级：main 的 v10→v11 session_fts 迁移保持不变、在其上新增 v11→v12 tool_activities；保留 bounded ingestion/offline/serve-hardening/12-provider golden。合入后需复跑质量门。**已知 deferred**（与参考实现一致）：context enrichment（上下文视图携带活动）、TUI facet 控件、Robot capability 界面、retention/清理策略、source_fs capture/verify 流式化。
+2. **core-beta source-shrink 的 store-layer edge-integrity 缺陷**（既有）：`cannot delete a catalog entity still referenced by message edges` —— 基准测试 source-shrink 步骤触发，待修。
+3. **Cline `source_span: derived`** 实为 array-index pseudo-span（非 byte span），需修正或降级。
+
+---
 
 ## 4. Provider 域结论
 
-- 16 行矩阵事实准确（14 Experimental + 2 deferred）；但**仅 Claude/Codex 有外置 golden/property/span round-trip**；其余 12 个 `AdapterManifest.known_limitations=[]` 与公开限制不一致；`capability.rs` 注释仍称 "2 个 provider"（陈旧）。
-- PRD 要求 ≥5 个 Beta + Claude/Codex certified，当前 0 个 Beta。跨 target provider evidence 已配置但无 named success。
-- Cline 的 `source_span: derived` 实为 array-index pseudo-span（非 byte span），需修正或降级。
+- 16 行矩阵事实准确（14 Experimental + 2 deferred）；12 个 provider 现已有外置 golden/PROVENANCE/property/span round-trip（本轮闭合），`capability.rs` 陈旧 "2 providers" 注释已修。
+- PRD 要求 ≥5 个 Beta + Claude/Codex certified，当前 **0 个 Beta**（仍是宣传/门禁缺口）。
+- `tool_activity: Partial` 在 capability.rs/manifest.rs 诚实声明（claude-code/codex/aider）。
+
+---
 
 ## 5. External（只能 owner/平台）
 
@@ -70,33 +76,25 @@
 - Windows Authenticode / Apple notarization / cosign/OIDC / artifact attestation
 - branch protection（private 计划下 API 403）
 - ADR-0009 / ADR-0010 / REUSE audit / Go-No-Go 的 owner/approver 签署（`accepted_at`）
+- macOS 干净环境 rehearsal（受 CI billing 外部阻塞）
 
-## 6. 交接时的重要工作区/分支
+---
 
-- **已完成并吸收**：`a03b5a`(release)、`a6c097`(codex e2e)、`aa940`(read-only)、`afa53`(manifest)、`a8a4c4`(security)、`adc518`(contributor)、`a3a648`(docs+installer dirty) — 均已 cherry-pick 或人工合并进 main。
-- **有独有价值但基于旧树的未提交/未合并实现（Codex 手工移植）**：
-  - `agent-ae5601a055cc14728` — ToolActivity search facets（13 files，+3001/-29）
-  - `session-metadata-search-08-15` — SQLite v11 session search（8 tracked）
-  - `agent-a52175662fdf83038` — serve hardening（3 files，+1158/-451）
-  - `agent-a4584f60772294ec2` — release rehearsal 一致性/验证（6 tracked）
-- **陈旧/clean**：`08-16-semantic-candle` 空占位分支（无语义实现，可清理）；大量 f4175a0/8ef6a7c 旧 worktree 的 dirty 残留为早期 spike，审阅前勿批量删除。
-
-## 7. 语义检索诚实口径（重要，避免宣传越界）
+## 6. 语义检索诚实口径（重要，避免宣传越界）
 
 - 当前 "semantic/hybrid" = `bigram-hash-v1` fuzzy-lexical vectorizer（`embedding.rs` 文件头明言 NOT semantic）；gate 的 semantic/hybrid 指标为 informational（threshold/pass 均 null），manifest 强制该校验。
 - 真实模型仅停留在研究文档（`.trellis/tasks/08-15-open-source-product-roadmap/research/2026-08-16-embedding-model-options.md`：Candle CPU + pinned multilingual-e5-small，`semantic-candle` optional feature，默认关闭）。**任何宣传不得称当前已支持语义检索。**
 
-## 8. 建议 Codex 下一步（按序）
+---
 
-1. P0-1 隐私清扫 + `docs/operations/PUBLIC-HISTORY-SCRUB.md` + 复跑 privacy scan（若已由隐私 agent 完成则核对合入）。
-2. P0-6 bounded ingestion（RFC-0002 §7 release-blocking）。
-3. P0-5 五入口 harness 去 skip-as-pass + verify-release.py 补 context/resume/handoff/embeddings/hook + 生成 Go/No-Go 草案。
-4. 移植 `agent-ae5601a055cc14728`/`session-metadata-search-08-15`/`agent-a52175662fdf83038` 三个未合并实现到 current main（逐个审阅+测试）。
-5. handoff determinism/budget/redaction/schema 与 resume first-run/真实 smoke 补强。
-6. Provider：为其余 12 个补外置 golden/PROVENANCE/property，`known_limitations` 接真实限制，修 Cline pseudo-span，capability.rs 陈旧注释。
-7. 修 billing 后对 exact SHA 跑 4-target evidence + release dry-run，记录 named successful run 才可升级 `ci_configured_only`。
-8. 由 owner 决定 public + tag + release + 治理签署。
+## 7. 建议 Codex 下一步（按序）
+
+1. 接收 ToolActivity 集成 agent 结果：合入 3 commit 到 main，复跑 fmt/clippy/test + verify-release + 五入口 harness（确认 MCP 仍 9 工具）。
+2. P0-4：修 billing 后对 exact SHA 跑 4-target evidence + release dry-run，记录 named successful run；补 NOTICE/SBOM/REUSE audit。
+3. 修 core-beta source-shrink 的 store-layer edge-integrity 缺陷。
+4. 三平台干净环境演练（Windows 本机已过；macOS 等 billing 恢复）。
+5. 由 owner 决定 public + tag + release + 治理签署（ADR-0009/0010、Go/No-Go）。
 
 ---
 
-_生成：本会话 10 路并行只读审计 + 主会话合并修复后。仅供 Codex 接手参考。_
+_生成：主会话合并修复 + 发布验证后。仅供 Codex 接手参考。_
