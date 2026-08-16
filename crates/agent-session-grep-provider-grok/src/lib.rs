@@ -9,8 +9,7 @@
 //! chunks by `update._meta.promptIndex`. A `rewind_marker` truncates the
 //! reconstructed message list to the target prompt index.
 //!
-//! Format evidence: fast-resume (MIT) `src/adapters/grok.rs`, deep-read report
-//! `C:/AgentHub/project/Github_src/deep-read-fast-resume.md`. The chunk-grouping
+//! Format evidence: fast-resume (MIT) `src/adapters/grok.rs`. The chunk-grouping
 //! approach is adapted from fast-resume under its MIT license.
 
 use agent_session_grep_ports::MetadataResolution;

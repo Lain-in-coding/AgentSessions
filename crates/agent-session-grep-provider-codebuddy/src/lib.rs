@@ -10,8 +10,8 @@
 //! source, MIT), that root message is filtered out — it is not a real user
 //! turn, only a launcher token.
 //!
-//! Format evidence: deep-read research
-//! `C:/AgentSessions/.trellis/tasks/08-15-sixteen-provider-evidence-wave/
+//! Format evidence: tracked research
+//! `.trellis/tasks/08-15-sixteen-provider-evidence-wave/
 //! research/2026-08-15-provider-evidence-wave.md` (line 153); PRD row 42;
 //! AgentRecall (`codebuddy-cli` source, MIT). The `type:"message"` dispatch,
 //! top-level `role`/`content`, `sessionId` identity, and `"code"` root-message

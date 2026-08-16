@@ -8,13 +8,13 @@
 
 | Source | Path | License | Borrowing boundary |
 |---|---|---|---|
-| fast-resume | `C:\AgentHub\project\Github_src\fast-resume\src\adapters\grok.rs` | MIT (Copyright (c) 2025 Stanislas Lange) | MIT permits copy/modity/merge with license+notice retention. Code may be adapted. |
-| fast-resume config | `C:\AgentHub\project\Github_src\fast-resume\src\config.rs` | MIT | Same as above. |
-| fast-resume docs | `C:\AgentHub\project\Github_src\fast-resume\docs\how-it-works.md` | MIT | Same. |
-| fast-resume tests | `C:\AgentHub\project\Github_src\fast-resume\tests\cli.rs` | MIT | Same. |
-| Recall | `C:\AgentSessions\Github_src\Recall\src\adapters\grok.rs` | (Recall license not checked in this pass; treat as reference-only unless verified) | Reference-only unless license verified. |
-| Our AgentSessions ports | `C:\AgentSessions\crates\agent-session-grep-ports\src\lib.rs` | (this repo) | Our own contract — the target trait. |
-| Our Claude adapter | `C:\AgentSessions\crates\agent-session-grep-provider-claude\src\lib.rs` | (this repo) | Our own reference implementation pattern. |
+| fast-resume | `src/adapters/grok.rs` | MIT (Copyright (c) 2025 Stanislas Lange) | MIT permits copy/modity/merge with license+notice retention. Code may be adapted. |
+| fast-resume config | `src/config.rs` | MIT | Same as above. |
+| fast-resume docs | `docs/how-it-works.md` | MIT | Same. |
+| fast-resume tests | `tests/cli.rs` | MIT | Same. |
+| Recall | `src/adapters/grok.rs` | (Recall license not checked in this pass; treat as reference-only unless verified) | Reference-only unless license verified. |
+| Our AgentSessions ports | `crates/agent-session-grep-ports/src/lib.rs` | (this repo) | Our own contract — the target trait. |
+| Our Claude adapter | `crates/agent-session-grep-provider-claude/src/lib.rs` | (this repo) | Our own reference implementation pattern. |
 
 **License conclusion**: fast-resume is MIT-licensed. We MAY adapt its code (copy + modify) provided we retain the MIT copyright notice and permission text in our adaptation. Recall's license was not checked this pass — treat Recall as idea-level reference only until its LICENSE is verified.
 

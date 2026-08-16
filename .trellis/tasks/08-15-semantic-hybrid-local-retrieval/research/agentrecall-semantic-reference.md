@@ -32,9 +32,9 @@ hybrid reciprocal rank fusion"。这两个是设计意图中的参考来源。
 
 ## 固定 clone 路径
 
-- Recall: `C:/Users/小Q/.cache/agent-history-src/Recall` (commit 22625bf)
-- ctx: `C:/Users/小Q/.cache/agent-history-src/ctx` (commit 06bc5ed)
-- AgentRecall: `C:/AgentHub/project/Github_src/AgentRecall` (commit 7895144)
+- Recall: `<user-home>/.cache/agent-history-src/Recall` (commit 22625bf)
+- ctx: `<user-home>/.cache/agent-history-src/ctx` (commit 06bc5ed)
+- AgentRecall: `<user-home>/AgentHub/project/Github_src/AgentRecall` (commit 7895144)
 
 ---
 

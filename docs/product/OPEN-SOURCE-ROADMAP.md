@@ -112,9 +112,10 @@ benchmark/文档/对比表一致、三平台演练通过。
 - 检索:纯 FTS5 系(sessiongrep/agent-sessions)、FTS+模糊(fast-resume)、
   hybrid RRF(ctx/cass/Recall/agentsview/memex)、fuzzy(agf)、零存储全扫
   (claude-historian-mcp)。
-- 深度精读报告(万字)存于 `C:/AgentHub/project/Github_src/deep-read-*.md`
-  (15 份:13 份外部项目 + 2 份本项目文档,2026-08-14 生成;cass 因
-  clean-room 边界不产 deep-read 报告),provider 格式证据主要来源。
+- 深度精读报告(15 份:13 份外部项目 + 2 份本项目文档,2026-08-14
+  生成)仅作为本地研究输入,不纳入公开树;cass 因 clean-room 边界不产
+  deep-read 报告。公开的 provider 格式结论落在对应 `.trellis/tasks/`
+  research 记录中。
 - 法律红线:cass LICENSE 含 rider,仅 clean-room 思路;REUSE-LICENSE-AUDIT
   维护 direct-copy/adapt/idea-only/reject 边界。
 

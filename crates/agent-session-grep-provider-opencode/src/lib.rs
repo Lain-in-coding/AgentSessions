@@ -5,8 +5,7 @@
 //! temporary file, and opens it read-only (SQLITE_OPEN_READONLY + busy_timeout)
 //! per PRD requirement #4.
 //!
-//! Format evidence: fast-resume (MIT) `src/adapters/opencode.rs`,
-//! deep-read report `C:/AgentHub/project/Github_src/deep-read-fast-resume.md`.
+//! Format evidence: fast-resume (MIT) `src/adapters/opencode.rs`.
 //! The schema queries are adapted from fast-resume under its MIT license.
 
 use std::io::Write;

@@ -2,7 +2,7 @@
 
 ## Preconditions
 
-- Work directly in `C:/AgentSessions` (scripts/docs scope only).
+- Work directly in the repository root (scripts/docs scope only).
 - Read `core_beta_benchmark.py`, install scripts, roadmap §5.
 
 ## Steps

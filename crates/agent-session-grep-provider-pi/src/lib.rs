@@ -6,8 +6,7 @@
 //! `type: "session_info"` carries `name`; `custom_message`/`compaction` are
 //! non-conversational and skipped by the canonical adapter.
 //!
-//! Format evidence: fast-resume (MIT) `src/adapters/pi.rs`, deep-read report
-//! `C:/AgentHub/project/Github_src/deep-read-fast-resume.md`. The type-based
+//! Format evidence: fast-resume (MIT) `src/adapters/pi.rs`. The type-based
 //! dispatch and content extraction are adapted from fast-resume under MIT.
 
 use agent_session_grep_ports::MetadataResolution;

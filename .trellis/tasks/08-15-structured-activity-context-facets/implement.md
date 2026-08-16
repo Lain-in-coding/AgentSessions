@@ -1,8 +1,8 @@
 # Structured activity and context facets — Implementation (slice R1+R2)
 
-> Follows `design.md` in this task dir. Worktree:
-> `C:/AgentSessions/.claude/worktrees/agent-ae5601a055cc14728` (base = main
-> `f4175a0`, schema v7). Do NOT touch session-metadata-search work.
+> Follows `design.md` in this task dir. Implemented in an isolated worktree
+> based on main `f4175a0` (schema v7). Do NOT touch session-metadata-search
+> work.
 
 ## Steps
 
@@ -78,7 +78,7 @@
 ## Validation
 
 ```
-$env:CARGO_TARGET_DIR='C:/AgentSessions/target-08-15-structured-activity'
+CARGO_TARGET_DIR=<repo>/target-08-15-structured-activity
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace

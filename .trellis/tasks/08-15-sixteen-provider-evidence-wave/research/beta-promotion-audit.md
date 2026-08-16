@@ -3,16 +3,16 @@
 - **Query**: 核查 claude-code 与 codex 是否满足 RFC-0002 §6 的 Beta 晋级门槛
 - **Scope**: internal（代码 + 文档证据核查，只读）
 - **Date**: 2026-08-16
-- **审计基线**: main 分支 @ `a4309bd`（Windows，本机真实 checkout）。`worktree-08-15-provider-opencode` 的 `capability.rs`/matrix 文档与 main 有偏差（见 §0）；一切证据以 main 为准。
+- **审计基线**: main 分支 @ `a4309bd`（Windows，本机 checkout）。并行 provider checkout 的 `capability.rs`/matrix 文档与 main 有偏差（见 §0）；一切证据以 main 为准。
 - **权威门槛来源**: `docs/architecture/RFC-0002-provider-adapter-contract.md:90-94`（§6）
 
 ## 0. 审计环境警示（必须先说明）
 
 | 发现 | 证据 |
 |---|---|
-| 当前工作目录是 **opencode worktree**，不是 main | `git worktree list`；CWD = `C:/AgentSessions/.claude/worktrees/08-15-provider-opencode` |
-| 该 worktree 的 `capability.rs`/`lib.rs`/matrix 文档与 main **分歧**（少了 164/38 行，矩阵文档差 69 行） | `git diff --stat main worktree-08-15-provider-opencode -- crates/...` |
-| **审计目标（Beta 晋级证据）在 main 上**，故全部证据行号引自 `C:/AgentSessions`（main checkout） | `git log main -3` = a4309bd |
+| 当前审计 checkout 不是 main | `git worktree list`；目标证据以 main 为准 |
+| 并行 checkout 的 `capability.rs`/`lib.rs`/matrix 文档与 main **分歧**（少了 164/38 行，矩阵文档差 69 行） | `git diff --stat main <parallel-checkout> -- crates/...` |
+| **审计目标（Beta 晋级证据）在 main 上**，故全部证据行号引自仓库相对路径 | `git log main -3` = a4309bd |
 
 `docs/product/PROVIDER-MATURITY-MATRIX.md`（main:6）自记 "最后更新 2026-08-16"。
 

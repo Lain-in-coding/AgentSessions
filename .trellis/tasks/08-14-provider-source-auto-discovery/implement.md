@@ -3,8 +3,8 @@
 ## Preconditions
 
 - `task.py start` this task before editing.
-- Work in `C:/AgentSessions/.claude/worktrees/integration-08-13-four-features-v2`
-  on top of the verified Resume-protocol baseline.
+- Work in the task's isolated worktree on top of the verified Resume-protocol
+  baseline.
 - Research: `research/2026-08-14-discovery-scope-audit.md` (code locations).
 - Design: `design.md` (decisions D1-D5).
 

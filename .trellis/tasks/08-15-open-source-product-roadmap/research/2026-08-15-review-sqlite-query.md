@@ -3,7 +3,7 @@
 - **Query**: 审查 agent-session-grep SQLite adapter 的 QUERY/SEARCH 路径——FTS5 查询构建、bm25 评分、EXPLAIN 级查询计划、cursor digest、facet EXISTS 探针、group_by_session 去重、prepared statement 复用
 - **Scope**: internal(代码 + design 文档 + competitor clone 对照)
 - **Date**: 2026-08-15
-- **审查对象**: main 分支 `crates/agent-session-grep-adapters-sqlite/src/lib.rs`(SCHEMA_VERSION=7, f4175a0)+ worktree `C:/AgentSessions/.claude/worktrees/session-metadata-search-08-15`(SCHEMA_VERSION=11, 7b9675a, 含 session_fts / group_by_session)+ `.trellis/tasks/08-15-structured-activity-context-facets/design.md`(query_faceted v12 计划)
+- **审查对象**: main 分支 `crates/agent-session-grep-adapters-sqlite/src/lib.rs`(SCHEMA_VERSION=7, f4175a0)+ metadata-search 隔离 checkout(SCHEMA_VERSION=11, 7b9675a, 含 session_fts / group_by_session)+ `.trellis/tasks/08-15-structured-activity-context-facets/design.md`(query_faceted v12 计划)
 
 ---
 

@@ -6,8 +6,7 @@
 //! events (step.begin/content.part/tool.call/tool.result/step.end) — this
 //! initial implementation handles append_message; loop events are deferred.
 //!
-//! Format evidence: fast-resume (MIT) `src/adapters/kimi.rs`, deep-read report
-//! `C:/AgentHub/project/Github_src/deep-read-fast-resume.md`. The message
+//! Format evidence: fast-resume (MIT) `src/adapters/kimi.rs`. The message
 //! extraction is adapted from fast-resume under its MIT license.
 
 use agent_session_grep_ports::MetadataResolution;

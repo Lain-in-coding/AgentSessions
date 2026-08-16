@@ -3,9 +3,9 @@
 - **Query**: 审查 Codex CLI provider adapter 的解析性能与健壮性（7 个 focus 项），产出带严重级/修复方向的 findings
 - **Scope**: internal（本仓库代码 + 本机真实 rollout 样本 + 13 个 competitor 固定 clone 交叉核验）
 - **Date**: 2026-08-15
-- **审查对象**: `C:/AgentSessions/crates/agent-session-grep-provider-codex/src/lib.rs`（870 行，含 tests）、`tests/properties.rs`（482 行）、`tests/golden.rs`、`tests/golden/basic.jsonl`
+- **审查对象**: `crates/agent-session-grep-provider-codex/src/lib.rs`（870 行，含 tests）、`tests/properties.rs`（482 行）、`tests/golden.rs`、`tests/golden/basic.jsonl`
 - **基准规范**: `.trellis/spec/agentsessions-provider-codex/backend/index.md`、`ports/src/lib.rs`（ParseReport §332-343）
-- **方法**: 静态阅读 + 对 143 个真实 rollout 文件（`C:/Users/小Q/.codex/sessions/`，71,176 行，仅统计字段名/类型频率，未读取消息正文）做行类型分布量化 + peer 实现逐行核验
+- **方法**: 静态阅读 + 对 143 个授权本地 rollout 文件（`<user-home>/.codex/sessions/`，71,176 行，仅统计字段名/类型频率，未读取消息正文）做行类型分布量化 + peer 实现逐行核验
 
 ---
 

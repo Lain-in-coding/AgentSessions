@@ -1,9 +1,9 @@
 # Research: Architecture-Level Review（agent-session-grep，Rust workspace）
 
-- **Query**: 对 C:/AgentSessions（8-crate hexagonal workspace）做架构级评审，对照 6 个 peer（hstry/Recall/memex/fast-resume/sessiongrep/cass）的架构模式，输出按维度的现状/对标/建议/风险与 top-10 优化机会
+- **Query**: 对 `<repo>`（8-crate hexagonal workspace）做架构级评审，对照 6 个 peer（hstry/Recall/memex/fast-resume/sessiongrep/cass）的架构模式，输出按维度的现状/对标/建议/风险与 top-10 优化机会
 - **Scope**: internal（本地代码 + peer deep-read 报告 + borrowable-code-inventory）
 - **Date**: 2026-08-15
-- **前置资料**: `2026-08-15-borrowable-code-inventory.md`（参考地图）、`C:/AgentHub/project/Github_src/deep-read-{hstry,Recall,memex,fast-resume,sessiongrep,coding_agent_session_search}.md`
+- **前置资料**: `2026-08-15-borrowable-code-inventory.md`（参考地图）与本地忽略的固定 peer clone/deep-read 报告
 - **方法**: 全部 file:line 均经 Read/Grep 实测核验；workspace 总代码量 26,851 行（wc -l 实测）
 
 ---

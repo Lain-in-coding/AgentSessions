@@ -8,8 +8,7 @@
 //!   - plain text after a turn → assistant response
 //!   - "> <text>" → aider tool/edit output (blockquote)
 //!
-//! Format evidence: agentsview (MIT) `internal/parser/aider.go`,
-//! deep-read report `C:/AgentHub/project/Github_src/deep-read-agentsview.md`.
+//! Format evidence: agentsview (MIT) `internal/parser/aider.go`.
 //! The line-prefix role reconstruction is adapted from agentsview under MIT.
 
 use agent_session_grep_ports::{

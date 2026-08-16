@@ -30,7 +30,7 @@
 - 关系/成员路径再逐条:`message_placements`(3202)、`message_edges`(3229)、`source_membership` 每行(3258)、`source_placement_membership` 每行(3275)、`source_scans`(3282)、`source_relation_scans`(3298)。**合计约 8-10 条 execute/消息**。
 - 另:循环内每实体 `serde_json::to_string(id)`(3139)重复分配,可提升到循环外。
 
-### 对标 hstry(`C:/Users/小Q/.cache/agent-history-src/hstry/crates/hstry-core/src/db.rs`)
+### 对标 hstry(`Github_src/hstry/crates/hstry-core/src/db.rs`)
 - `bulk_insert_messages_in_tx`(db.rs:2990-3062):**multi-row INSERT**,15 列 × 60 行/chunk = 900 参数,`ON CONFLICT(conversation_id, idx) DO UPDATE`(3015-3028);编译期断言 `const _: () = assert!(COLS * ROWS_PER_CHUNK <= 950);`(db.rs:3058);注释明言 "cuts the number of round-trips by ~60×"(2988-2989)。
 - 其连接级 `PRAGMA synchronous = NORMAL`(db.rs:2976)+ `ANALYZE`(2979)。
 

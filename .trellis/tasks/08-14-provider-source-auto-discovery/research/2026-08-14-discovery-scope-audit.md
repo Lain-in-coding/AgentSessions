@@ -3,11 +3,9 @@
 - **Query**: Locate the code paths that `sync --discover` must touch: CLI sync dispatch, provider data-root resolution, source file enumeration, fingerprint + unchanged-skip, tombstone, list_providers.
 - **Scope**: internal
 - **Date**: 2026-08-14
-- **Worktree**: `C:/AgentSessions/.claude/worktrees/integration-08-13-four-features-v2`
+- **Checkout**: isolated worktree on branch `integration-08-13-four-features-v2`
 
-All `file:line` references are relative to that worktree unless noted. The
-task's canonical repo root is `C:/AgentSessions`; the worktree is a checkout of
-the `integration-08-13-four-features-v2` branch.
+All `file:line` references are repository-relative.
 
 ---
 

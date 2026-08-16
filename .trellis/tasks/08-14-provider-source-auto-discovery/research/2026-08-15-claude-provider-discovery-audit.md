@@ -3,7 +3,7 @@
 - **Query**: Audit Claude provider parser/probe/source discovery, metadata extraction, prefilter, provider-scoped/session identity, and malformed JSON behavior; report completed items and P0/P1 regression risks with file:line evidence.
 - **Scope**: internal
 - **Date**: 2026-08-15
-- **Worktree inspected**: `C:/AgentSessions/.claude/worktrees/agent-a341e3add01961c60`
+- **Checkout inspected**: isolated audit worktree
 
 ## Findings
 

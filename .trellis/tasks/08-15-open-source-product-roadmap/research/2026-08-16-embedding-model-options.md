@@ -12,7 +12,7 @@
 
 **现在不应把真实语义模型放进默认构建；若开实验入口，首选 `candle` CPU + pinned `intfloat/multilingual-e5-small`（fp32 safetensors），Cargo feature 建议 `semantic-candle`、默认关闭，模型只能由用户显式 `model install` 或本地目录导入。** 这是唯一同时守住“构建时零下载、运行时不隐式联网、Windows/Linux/macOS、无额外运行时 DLL、现有 384 维/E5 前缀契约不变”的现实路线；代价是约 449 MiB 权重 + 16 MiB tokenizer、CPU 索引成本和 512-token 截断，必须先过项目自己的中英混合 recall benchmark，未过就继续把 `bigram-hash-v1` 明确定位为“模糊词法”，不宣传为 semantic。
 
-来源：当前代码契约（`C:/AgentSessions/crates/agent-session-grep-application/src/embedding.rs`）；[Candle README/CPU backend](https://github.com/huggingface/candle)、[Candle 三平台 CI](https://github.com/huggingface/candle/blob/main/.github/workflows/rust-ci.yml)、[multilingual-e5-small model card](https://huggingface.co/intfloat/multilingual-e5-small)、[pinned model revision API](https://huggingface.co/api/models/intfloat/multilingual-e5-small)。
+来源：当前代码契约（`crates/agent-session-grep-application/src/embedding.rs`）；[Candle README/CPU backend](https://github.com/huggingface/candle)、[Candle 三平台 CI](https://github.com/huggingface/candle/blob/main/.github/workflows/rust-ci.yml)、[multilingual-e5-small model card](https://huggingface.co/intfloat/multilingual-e5-small)、[pinned model revision API](https://huggingface.co/api/models/intfloat/multilingual-e5-small)。
 
 ---
 

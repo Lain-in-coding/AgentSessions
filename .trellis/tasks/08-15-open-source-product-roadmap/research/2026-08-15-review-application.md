@@ -8,7 +8,7 @@
 ## 重要前提(必须先读)
 
 **08-15 各子任务(redaction seam / handoff pack / ResumePreviewService / retrieval_mode)的代码均不在 main 分支**:
-- `RetrievalMode` / `RetrievalCapabilities` / `retrieval_degradation` 在 `crates/` 下零命中 —— semantic-hybrid 设计自称 "contract-and-plumbing slice implemented (2026-08-15)",但代码在兄弟分支(`session-metadata-search-08-15`、`worktree-agent-*`),未合并
+- `RetrievalMode` / `RetrievalCapabilities` / `retrieval_degradation` 在 `crates/` 下零命中 —— semantic-hybrid 设计自称 "contract-and-plumbing slice implemented (2026-08-15)",但代码在兄弟功能分支,未合并
 - `RedactionMetadata` / `OutputBoundary` / `CapabilityManifest` 同样零命中(unified-release-contract D3 的 ports 类型未落码)
 - `application/src/handoff.rs` 不存在(evidence-handoff-pack design D1 的目标文件)
 - `ResumePreviewService` 只在 `08-15-resume-metadata-execution/design.md` 出现

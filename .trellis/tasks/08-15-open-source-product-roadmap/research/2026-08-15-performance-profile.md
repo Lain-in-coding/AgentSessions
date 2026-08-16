@@ -3,7 +3,7 @@
 - **Query**: Profile agent-session-grep's performance hot paths; find concrete optimization targets (benchmark tables + static analysis + ranked targets)
 - **Scope**: internal (code + local read-only benchmarks)
 - **Date**: 2026-08-15
-- **Binary**: `C:/AgentSessions/target-08-15-profile/release/agent-session-grep.exe` (isolated CARGO_TARGET_DIR, never touched `target/release`), sha256 `a3cc60fefcbbd11b2ffcc118e53ee865a26282635f02e69dbfc1552e6de57d4e`, commit `f4175a0`
+- **Binary**: isolated `target-08-15-profile/release/agent-session-grep.exe` build, sha256 `a3cc60fefcbbd11b2ffcc118e53ee865a26282635f02e69dbfc1552e6de57d4e`, commit `f4175a0`
 - **Environment**: Windows 11 Home 22631, release build, Python 3.10, WAL mode SQLite (rusqlite). Absolute numbers have machine variance (Defender scans); relative scaling is the signal.
 
 ---
