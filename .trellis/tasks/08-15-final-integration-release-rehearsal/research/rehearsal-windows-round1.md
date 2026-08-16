@@ -93,3 +93,21 @@ CI 因 GitHub 账单问题不可用,在 WSL(Ubuntu,ext4,rustup stable 1.97.1 min
 | `python3 scripts/verify-release.py --asg <linux binary>` | ✓ 5/5 通过 |
 
 结论:Linux 侧(ubuntu)验证完整替代 CI ubuntu job;macOS 无法本地模拟(无 mac 环境),仍待 CI 恢复后补跑。注意:WSL `/mnt/c` 挂载层会把 LF 文件自动转 CRLF(DrvFs 行为),`bash -n` 在挂载层报假 CRLF 错误——git-bash(msys)是 Windows 上正确的 bash 验证工具。
+
+## Round 6(2026-08-16):P0 功能缺口补齐(semantic/resume/hook)
+
+三个 roadmap P0 验收项从"骨架存在但无入口"补到"全链路可用":
+
+| 功能 | 缺口 | 落地 |
+|---|---|---|
+| semantic/hybrid 检索 | SemanticIndex/EmbeddingModel port + RRF fusion 是死代码,search 无 dispatch | `9d62208`:AppRequest::Search 加 `mode`+`query_embedding`,App 加 `M: SemanticIndex` 槽(NoSemanticIndex 占位保持既有调用点零改动),`search --mode lexical\|semantic\|hybrid`,索引未就绪时显式 `retrieval_mode=lexical_fallback` + warning(Q54 禁止静默切换),3 个降级单测 |
+| resume 执行层 | application 层能造 descriptor,但无 CLI 入口 | `80277d1`:`resume <ses-id>` 默认 dry-run(打印命令/cwd/权限模式),`--yes` 才在原 cwd spawn provider;未核验命令的 provider 报 `available:false` 不编造;cwd 缺失/二进制不在 PATH/非零退出均为结构化错误(带 stage detail);human 渲染器 + 3 单测 |
+| Claude Code Hook | hooks.rs 整个模块 `#![allow(dead_code)]`,无 CLI 入口 | `904f4fa`:`hook <session-start\|user-prompt-submit>` 从 stdin 读 payload、按 hookSpecificOutput 契约输出;默认关闭(不加 `--enable` 输出空 context,Q35=B);注入文本经跨边界脱敏;未知 event 报 exit 2 不静默;4 单测 |
+
+**端到端验证**(synthetic fixture):
+- `--mode semantic` → `retrieval_mode: lexical_fallback` + warning "semantic search unavailable (mode semantic); fell back to lexical",词法命中仍返回 ✓
+- `resume <sid>` dry-run → `(cd C:/AgentSessions && claude --resume resume-ses-1)`;`--yes` 触发真实 claude 进程并把其非零退出转为 exit 7 + provider_error ✓
+- `hook user-prompt-submit`(无 --enable)→ 空 context;加 `--enable` → 命中 + `ghp_...` 脱敏为 `[redacted:github_token]` ✓
+- 命令面 16→18(`resume`/`hook`);KNOWN_COMMANDS 测试同步。
+
+**验证矩阵**:Windows fmt/clippy/test 全绿(50 套件)、smoke 30 断言全过、verify-release 5/5、gate manifest 刷新;WSL Linux 侧同 HEAD(e66f96f)fmt/clippy/test 全绿。
