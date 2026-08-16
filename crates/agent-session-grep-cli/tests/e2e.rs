@@ -4935,3 +4935,242 @@ fn sync_discover_partial_scan_does_not_tombstone() {
         let _ = std::fs::set_permissions(&projects_root, perms);
     }
 }
+
+// ---- 工具活动 + facet 过滤（08-15 structured-activity，schema v12）----
+// 合成 fixture：无真实 transcript 数据（隐私）。
+
+use agent_session_grep_domain::{IdKind, StableId};
+
+/// 与组合根同一派生规则：provider-native 消息 id → 稳定 wire id。
+fn native_msg_wire(native: &str) -> String {
+    StableId::native(IdKind::Message, native)
+        .as_str()
+        .to_string()
+}
+
+/// Claude 合成 fixture：主线 Bash 调用 + sidechain Read 调用。
+const CLAUDE_TOOL_FIXTURE: &str = r#"{"type":"user","uuid":"u-1","sessionId":"sess-tools","message":{"role":"user","content":"run the build please"}}
+{"type":"assistant","uuid":"a-1","parentUuid":"u-1","sessionId":"sess-tools","message":{"role":"assistant","content":[{"type":"text","text":"running build"},{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"cargo build --release"}}]}}
+{"type":"user","uuid":"r-1","parentUuid":"a-1","sessionId":"sess-tools","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"build finished ok","is_error":false}]}}
+{"type":"assistant","uuid":"a-2","parentUuid":"r-1","sessionId":"sess-tools","isSidechain":true,"message":{"role":"assistant","content":[{"type":"text","text":"checking the file"},{"type":"tool_use","id":"toolu_2","name":"Read","input":{"file_path":"src/main.rs"}}]}}
+{"type":"user","uuid":"r-2","parentUuid":"a-2","sessionId":"sess-tools","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_2","content":"read the file contents","is_error":false}]}}"#;
+
+#[test]
+fn sync_indexes_tool_activities_and_search_facets_filter_them() {
+    let (dir, db) = temp_db("sync-act");
+    let fixture = dir.path().join("claude-tools.jsonl");
+    std::fs::write(&fixture, CLAUDE_TOOL_FIXTURE).expect("write fixture");
+    let path = fixture.to_string_lossy().into_owned();
+
+    let out = run(&db, &["sync", &path]);
+    assert!(out.status.success(), "sync failed: {}", stdout(&out));
+    assert!(stdout(&out).contains("\"messages\":5"), "{}", stdout(&out));
+
+    // 默认检索不带 facets 回显（输出字节与旧版一致）。
+    let out = run(&db, &["search", "build"]);
+    assert!(out.status.success(), "search: {}", stdout(&out));
+    let frame = parse_first_line(&out);
+    assert!(
+        frame["data"].get("facets").is_none(),
+        "默认检索不得回显 facets: {frame}"
+    );
+
+    // --tool-kind command：只有携带 Bash 活动（锚定在 r-1）的消息命中。
+    let out = run(&db, &["search", "build", "--tool-kind", "command"]);
+    let frame = parse_first_line(&out);
+    assert_eq!(frame["data"]["facets"]["sidechain"], "include", "{frame}");
+    assert_eq!(frame["data"]["facets"]["tool_kind"], "command", "{frame}");
+    let hits = frame["data"]["hits"].as_array().unwrap();
+    assert_eq!(hits.len(), 1, "command facet: {frame}");
+    assert_eq!(
+        hits[0]["id"],
+        native_msg_wire("r-1"),
+        "活动锚定在携带 tool_result 的消息: {frame}"
+    );
+
+    // --tool-kind file：sidechain 的 Read 活动（锚定在 r-2），查询词换 file。
+    let out = run(&db, &["search", "file", "--tool-kind", "file"]);
+    let frame = parse_first_line(&out);
+    let hits = frame["data"]["hits"].as_array().unwrap();
+    assert_eq!(hits.len(), 1, "file facet: {frame}");
+    assert_eq!(hits[0]["id"], native_msg_wire("r-2"), "{frame}");
+    assert_eq!(frame["data"]["facets"]["tool_kind"], "file", "{frame}");
+
+    // --tool-name Read：按工具名逐字过滤。
+    let out = run(&db, &["search", "file", "--tool-name", "Read"]);
+    let frame = parse_first_line(&out);
+    let hits = frame["data"]["hits"].as_array().unwrap();
+    assert_eq!(hits.len(), 1, "name facet: {frame}");
+    assert_eq!(frame["data"]["facets"]["tool_name"], "Read", "{frame}");
+
+    // 不存在的工具名 → 空命中。
+    let out = run(&db, &["search", "file", "--tool-name", "Grep"]);
+    let frame = parse_first_line(&out);
+    assert_eq!(
+        frame["data"]["hits"].as_array().unwrap().len(),
+        0,
+        "{frame}"
+    );
+
+    // main-only：主线消息（u-1/a-1/r-1）保留，sidechain 消息排除。
+    let out = run(&db, &["search", "build", "--main-only"]);
+    let frame = parse_first_line(&out);
+    assert_eq!(frame["data"]["facets"]["sidechain"], "main_only", "{frame}");
+    let hits = frame["data"]["hits"].as_array().unwrap();
+    assert_eq!(hits.len(), 3, "main-only 保留全部主线: {frame}");
+
+    // main-only：sidechain 的 a-2 被排除；r-2（tool_result 中继，主线）保留。
+    let out = run(&db, &["search", "file", "--main-only"]);
+    let frame = parse_first_line(&out);
+    let hits = frame["data"]["hits"].as_array().unwrap();
+    assert_eq!(hits.len(), 1, "file 的 sidechain 消息被排除: {frame}");
+    assert_eq!(hits[0]["id"], native_msg_wire("r-2"), "{frame}");
+
+    // subagent-only：只保留 sidechain 消息（a-2）。
+    let out = run(&db, &["search", "file", "--subagent-only"]);
+    let frame = parse_first_line(&out);
+    assert_eq!(
+        frame["data"]["facets"]["sidechain"], "subagent_only",
+        "{frame}"
+    );
+    let hits = frame["data"]["hits"].as_array().unwrap();
+    assert_eq!(hits.len(), 1, "sidechain 一条: {frame}");
+    assert_eq!(hits[0]["id"], native_msg_wire("a-2"), "{frame}");
+}
+
+#[test]
+fn sync_tool_activities_survive_resync_without_new_generation() {
+    let (dir, db) = temp_db("sync-act-resync");
+    let fixture = dir.path().join("claude-tools.jsonl");
+    std::fs::write(&fixture, CLAUDE_TOOL_FIXTURE).expect("write fixture");
+    let path = fixture.to_string_lossy().into_owned();
+
+    let out = run(&db, &["sync", &path]);
+    assert!(out.status.success(), "sync: {}", stdout(&out));
+    assert!(
+        stdout(&out).contains("\"generation\":1"),
+        "{}",
+        stdout(&out)
+    );
+
+    // 重同步未变化源：no-op，generation 不推进（活动行/claims 参与 current 判定）。
+    let out = run(&db, &["sync", &path]);
+    assert!(out.status.success(), "resync: {}", stdout(&out));
+    let s = stdout(&out);
+    assert!(s.contains("\"committed\":0"), "resync={s}");
+    assert!(
+        s.contains("\"generation\":1"),
+        "resync 不应推进 generation: {s}"
+    );
+
+    // 活动 facet 仍然可用。
+    let out = run(&db, &["search", "build", "--tool-kind", "command"]);
+    let frame = parse_first_line(&out);
+    assert_eq!(
+        frame["data"]["hits"].as_array().unwrap().len(),
+        1,
+        "{frame}"
+    );
+}
+
+#[test]
+fn sync_tombstones_activities_when_source_is_emptied() {
+    let (dir, db) = temp_db("sync-act-tomb");
+    let fixture = dir.path().join("claude-tools.jsonl");
+    std::fs::write(&fixture, CLAUDE_TOOL_FIXTURE).expect("write fixture");
+    let path = fixture.to_string_lossy().into_owned();
+
+    let out = run(&db, &["sync", &path]);
+    assert!(out.status.success(), "sync: {}", stdout(&out));
+    let out = run(&db, &["search", "build", "--tool-kind", "command"]);
+    assert_eq!(
+        parse_first_line(&out)["data"]["hits"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1,
+        "{}",
+        stdout(&out)
+    );
+
+    // 清空源文件 → 整源清空批次：消息与活动一并 tombstone。
+    std::fs::write(&fixture, "").expect("truncate fixture");
+    let out = run(&db, &["sync", &path]);
+    assert!(out.status.success(), "empty sync: {}", stdout(&out));
+
+    let out = run(&db, &["search", "build", "--tool-kind", "command"]);
+    let frame = parse_first_line(&out);
+    assert_eq!(
+        frame["data"]["hits"].as_array().unwrap().len(),
+        0,
+        "清空后活动 facet 不应再命中: {frame}"
+    );
+    let out = run(&db, &["search", "build"]);
+    assert_eq!(
+        parse_first_line(&out)["data"]["hits"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0,
+        "消息本体也应被 tombstone: {}",
+        stdout(&out)
+    );
+}
+
+#[test]
+fn sync_extracts_codex_function_call_activities() {
+    let (dir, db) = temp_db("sync-act-codex");
+    let fixture = dir.path().join("codex-rollout.jsonl");
+    std::fs::write(
+        &fixture,
+        concat!(
+            r#"{"timestamp":"2026-08-15T00:00:00.000Z","type":"session_meta","payload":{"session_id":"sess-cx"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-08-15T00:00:01.000Z","type":"response_item","payload":{"type":"message","id":"msg_cx1","role":"assistant","content":[{"type":"output_text","text":"checking the sandbox"}]}}"#,
+            "\n",
+            r#"{"timestamp":"2026-08-15T00:00:02.000Z","type":"response_item","payload":{"type":"custom_tool_call","id":"call_cx1","tool_call_id":"call_cx1","name":"shell","arguments":"{\"command\":\"cat config.toml\"}"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-08-15T00:00:03.000Z","type":"response_item","payload":{"type":"function_call_output","id":"fco_cx1","call_id":"call_cx1","output":"policy = safe","is_error":true}}"#,
+            "\n",
+        ),
+    )
+    .expect("write codex fixture");
+    let path = fixture.to_string_lossy().into_owned();
+
+    let out = run(&db, &["sync", &path]);
+    assert!(out.status.success(), "sync: {}", stdout(&out));
+
+    // 锚定在发出调用的助理消息：--tool-kind command 命中 msg_cx1。
+    let out = run(&db, &["search", "sandbox", "--tool-kind", "command"]);
+    let frame = parse_first_line(&out);
+    let hits = frame["data"]["hits"].as_array().unwrap();
+    assert_eq!(hits.len(), 1, "codex command facet: {frame}");
+    assert_eq!(hits[0]["id"], native_msg_wire("msg_cx1"), "{frame}");
+
+    // 失败的工具调用可按 --tool-name shell 过滤。
+    let out = run(&db, &["search", "sandbox", "--tool-name", "shell"]);
+    let frame = parse_first_line(&out);
+    assert_eq!(
+        frame["data"]["hits"].as_array().unwrap().len(),
+        1,
+        "{frame}"
+    );
+}
+
+#[test]
+fn search_facet_flag_validation_is_explicit() {
+    let (_dir, db) = temp_db("sync-act-flags");
+    // 互斥组合是用法错误（exit 2）。
+    let out = run(&db, &["search", "q", "--main-only", "--subagent-only"]);
+    assert_eq!(out.status.code(), Some(2), "{}", stdout(&out));
+    let out = run(&db, &["search", "q", "--main-only", "--include-sidechain"]);
+    assert_eq!(out.status.code(), Some(2), "{}", stdout(&out));
+    // 未知 kind 是用法错误。
+    let out = run(&db, &["search", "q", "--tool-kind", "bogus"]);
+    assert_eq!(out.status.code(), Some(2), "{}", stdout(&out));
+    assert!(
+        stdout(&out).contains("file|command|web|query|unknown"),
+        "{}",
+        stdout(&out)
+    );
+}

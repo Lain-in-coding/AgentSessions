@@ -176,6 +176,8 @@ fn execute(store: &SqliteStore, effect: Effect) -> Msg {
                 limit: SEARCH_PAGE_LIMIT,
                 cursor,
                 budget: ResponseBudget::default(),
+                // TUI 暂不暴露 facet 控件：默认无过滤（设计 defer）。
+                facets: agent_session_grep_ports::SearchFacets::default(),
                 include_system: false,
                 group_by_session: false,
                 mode: agent_session_grep_ports::RetrievalMode::Lexical,
@@ -530,6 +532,7 @@ mod tests {
             ],
             placements,
             edges: Vec::new(),
+            activities: Vec::new(),
             relation_complete: true,
             len_bytes: None,
             fingerprint: None,

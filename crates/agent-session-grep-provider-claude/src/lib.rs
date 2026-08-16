@@ -5,9 +5,11 @@
 //! `{"type":"user"|"assistant"|..., "message":{"role":..,"content":..}}`。
 //! adapter 只做格式隔离，绝不接触存储 / 检索 / UI（RFC-0002 §7）。
 
+use agent_session_grep_domain::{ToolActivityActor, ToolActivityStatus};
 use agent_session_grep_ports::{
     AdapterManifest, CanonicalEventSink, Confidence, MessageEvent, MetadataResolution, ParseReport,
-    ProbeResult, ProviderAdapter, ProviderError, manifest_for,
+    ProbeResult, ProviderAdapter, ProviderError, ToolActivityEvent, build_tool_activity,
+    manifest_for,
 };
 use serde::{Deserialize, de::IgnoredAny};
 
@@ -253,6 +255,32 @@ struct RawBlock {
     /// 真实工具输出（文件内容、命令输出）由此携带；缺失则为 None。
     #[serde(default)]
     content: Option<RawContent>,
+    /// `tool_use` block 的调用 id（Claude Code 的 `id`，如 `toolu_01...`）。
+    #[serde(default)]
+    id: Option<String>,
+    /// `tool_result` block 引用的调用 id（与 `tool_use` 的 `id` 配对）。
+    #[serde(default, rename = "tool_use_id")]
+    tool_use_id: Option<String>,
+    /// `tool_use` block 的工具名（如 `Bash` / `Read`）。缺失 → 该调用视为不透明，跳过。
+    #[serde(default)]
+    name: Option<String>,
+    /// `tool_use` block 的输入对象（provider 记录的事实字段，target 提取依据）。
+    #[serde(default)]
+    input: Option<serde_json::Value>,
+    /// `tool_result` block 的失败标记；缺失视为 false（成功）。
+    #[serde(default, rename = "is_error")]
+    is_error: bool,
+}
+
+/// 一次尚未配对到结果的工具调用（设计 R5/R6：跨消息按 `tool_use_id` 配对）。
+struct PendingToolCall {
+    tool_use_id: String,
+    name: String,
+    input: serde_json::Value,
+    /// 携带该调用的消息 native id（unpaired 调用的活动锚点）。
+    caller_uuid: String,
+    /// 调用方消息是否为 sidechain（设计 R3 的 actor 依据）。
+    caller_is_sidechain: bool,
 }
 
 impl RawBlock {
@@ -316,6 +344,107 @@ impl RawContent {
             RawContent::Empty => String::new(),
         }
     }
+
+    /// 块数组视图（字符串/空形态无块）。
+    fn blocks(&self) -> &[RawBlock] {
+        match self {
+            RawContent::Blocks(blocks) => blocks.as_slice(),
+            _ => &[],
+        }
+    }
+}
+
+/// 观察一块内容中的工具调用（设计 R1-R6）：
+///
+/// - `tool_use`：记入 `pending`（缺 id/name 视为不透明，R6 静默跳过）；
+/// - `tool_result`：按 `tool_use_id` 配对已记调用，返回 `(call, is_error)` 待 emit；
+///   无匹配 result 视为不透明（R6），静默跳过。
+///
+/// 返回本内容中新配对的 (调用, 是否失败) 列表，按块出现顺序。
+fn observe_tool_blocks(
+    content: &RawContent,
+    pending: &mut Vec<PendingToolCall>,
+    caller_uuid: &str,
+    caller_is_sidechain: bool,
+) -> Vec<(PendingToolCall, bool)> {
+    let mut resolved = Vec::new();
+    for block in content.blocks() {
+        match block.kind.as_str() {
+            "tool_use" => {
+                if let (Some(tool_use_id), Some(name)) = (&block.id, &block.name)
+                    && !tool_use_id.trim().is_empty()
+                    && !name.trim().is_empty()
+                {
+                    pending.push(PendingToolCall {
+                        tool_use_id: tool_use_id.clone(),
+                        name: name.clone(),
+                        input: block.input.clone().unwrap_or(serde_json::Value::Null),
+                        caller_uuid: caller_uuid.to_string(),
+                        caller_is_sidechain,
+                    });
+                }
+            }
+            "tool_result" => {
+                if let Some(tool_use_id) = &block.tool_use_id
+                    && let Some(index) = pending
+                        .iter()
+                        .position(|call| call.tool_use_id == *tool_use_id)
+                {
+                    resolved.push((pending.remove(index), block.is_error));
+                }
+            }
+            _ => {}
+        }
+    }
+    resolved
+}
+
+/// 把配对好的调用构建为活动并 emit（设计 R2/R3/R4）。
+fn emit_paired_activity(
+    sink: &mut dyn CanonicalEventSink,
+    call: &PendingToolCall,
+    is_error: bool,
+    anchor_native_id: &str,
+) -> agent_session_grep_ports::PortResult<()> {
+    let activity = build_tool_activity(
+        &call.name,
+        if call.caller_is_sidechain {
+            ToolActivityActor::Subagent
+        } else {
+            ToolActivityActor::Main
+        },
+        &call.input,
+        if is_error {
+            ToolActivityStatus::Error
+        } else {
+            ToolActivityStatus::Success
+        },
+    );
+    sink.emit_activity(ToolActivityEvent {
+        message_native_id: anchor_native_id,
+        activity,
+    })
+}
+
+/// 未配对调用在文件末尾以 `Unknown` 状态如实上报（设计 R4.3），绝不臆造结果。
+fn emit_unpaired_activity(
+    sink: &mut dyn CanonicalEventSink,
+    call: &PendingToolCall,
+) -> agent_session_grep_ports::PortResult<()> {
+    let activity = build_tool_activity(
+        &call.name,
+        if call.caller_is_sidechain {
+            ToolActivityActor::Subagent
+        } else {
+            ToolActivityActor::Main
+        },
+        &call.input,
+        ToolActivityStatus::Unknown,
+    );
+    sink.emit_activity(ToolActivityEvent {
+        message_native_id: &call.caller_uuid,
+        activity,
+    })
 }
 
 /// Claude copies some generated meta prompts as four blocks: two generated
@@ -571,6 +700,8 @@ impl ProviderAdapter for ClaudeCodeAdapter {
         // seq 是会话内单调序号，只对成功 emit 的对话消息递增，
         // 从而满足 domain Session 的 seq 从 0 连续的不变量。
         let mut seq: u32 = 0;
+        // 工具活动观察（设计 R1-R6）：按 `tool_use_id` 跨消息配对的待决调用。
+        let mut pending_calls: Vec<PendingToolCall> = Vec::new();
 
         while let Some(line) = lines.next_record()? {
             // 行负载已由 BoundedLineReader 剥离 \n/\r 与首行 BOM，span 仍以
@@ -677,6 +808,15 @@ impl ProviderAdapter for ClaudeCodeAdapter {
                 rec.timestamp.as_deref()
             };
 
+            // 工具活动观察：先在本记录内容块里配对/登记（设计 R5/R6），
+            // 消息 emit 之后按块顺序 emit 本记录配对的 activities。
+            let paired = observe_tool_blocks(
+                &msg.content,
+                &mut pending_calls,
+                &rec.uuid,
+                rec.is_sidechain,
+            );
+
             sink.emit_message(MessageEvent {
                 seq,
                 native_id: &rec.uuid,
@@ -693,6 +833,17 @@ impl ProviderAdapter for ClaudeCodeAdapter {
             .map_err(|e| ProviderError::StructuralFatal(e.to_string()))?;
             seq += 1;
             report.committed += 1;
+
+            for (call, is_error) in paired {
+                emit_paired_activity(sink, &call, is_error, &rec.uuid)
+                    .map_err(|e| ProviderError::StructuralFatal(e.to_string()))?;
+            }
+        }
+
+        // 文件末尾仍未配对的调用：以 Unknown 状态如实上报（设计 R4.3）。
+        for call in &pending_calls {
+            emit_unpaired_activity(sink, call)
+                .map_err(|e| ProviderError::StructuralFatal(e.to_string()))?;
         }
 
         // 多会话诊断（PRD R3.1）：单文件=单会话。同一文件出现多个不同 sessionId
@@ -728,6 +879,7 @@ impl ProviderAdapter for ClaudeCodeAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_session_grep_domain::{ToolActivity, ToolActivityKind};
 
     #[test]
     fn manifest_matches_provider_matrix() {
@@ -745,6 +897,7 @@ mod tests {
     #[derive(Default)]
     struct CollectingSink {
         messages: Vec<Captured>,
+        activities: Vec<CapturedActivity>,
     }
     /// 拍平的事件快照（`MessageEvent` 借用输入，测试侧需拥有所有权）。
     struct Captured {
@@ -756,6 +909,11 @@ mod tests {
         timestamp: Option<String>,
         is_sidechain: bool,
         span: Option<(u64, u64)>,
+    }
+    /// 拍平的活动快照（anchor + 完整事实）。
+    struct CapturedActivity {
+        message_native_id: String,
+        activity: ToolActivity,
     }
     impl CanonicalEventSink for CollectingSink {
         fn emit_message(
@@ -771,6 +929,17 @@ mod tests {
                 timestamp: event.timestamp.map(str::to_string),
                 is_sidechain: event.is_sidechain,
                 span: event.span,
+            });
+            Ok(())
+        }
+
+        fn emit_activity(
+            &mut self,
+            event: ToolActivityEvent<'_>,
+        ) -> agent_session_grep_ports::PortResult<()> {
+            self.activities.push(CapturedActivity {
+                message_native_id: event.message_native_id.to_string(),
+                activity: event.activity,
             });
             Ok(())
         }
@@ -1669,5 +1838,250 @@ mod tests {
                 marker_plus_syntax.as_micros()
             );
         }
+    }
+
+    // ---- 工具活动观察（设计 R1-R6）----
+
+    /// 解析一组合成记录，返回 (消息数, activities)。
+    fn parse_records(records: &[serde_json::Value]) -> (usize, Vec<CapturedActivity>) {
+        let input = records
+            .iter()
+            .map(serde_json::to_string)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("serialize synthetic records")
+            .join("\n");
+        let mut sink = CollectingSink::default();
+        ClaudeCodeAdapter::new()
+            .parse(input.as_bytes(), &mut sink)
+            .expect("parse synthetic transcript");
+        (sink.messages.len(), sink.activities)
+    }
+
+    fn assistant(uuid: &str, is_sidechain: bool, blocks: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "type": "assistant",
+            "uuid": uuid,
+            "parentUuid": null,
+            "sessionId": "sess-act",
+            "isSidechain": is_sidechain,
+            "message": { "role": "assistant", "content": blocks },
+        })
+    }
+
+    fn user(uuid: &str, parent: &str, blocks: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "type": "user",
+            "uuid": uuid,
+            "parentUuid": parent,
+            "sessionId": "sess-act",
+            "message": { "role": "user", "content": blocks },
+        })
+    }
+
+    #[test]
+    fn parse_extracts_paired_tool_activities_with_kinds_and_targets() {
+        let (messages, activities) = parse_records(&[
+            assistant(
+                "a-1",
+                false,
+                serde_json::json!([
+                    {"type": "text", "text": "running"},
+                    {"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {"command": "ls -la"}},
+                ]),
+            ),
+            user(
+                "r-1",
+                "a-1",
+                serde_json::json!([
+                    {"type": "tool_result", "tool_use_id": "toolu_1", "content": "total 0", "is_error": false},
+                ]),
+            ),
+            assistant(
+                "a-2",
+                false,
+                serde_json::json!([
+                    {"type": "tool_use", "id": "toolu_2", "name": "Read", "input": {"file_path": "src/main.rs"}},
+                ]),
+            ),
+            user(
+                "r-2",
+                "a-2",
+                serde_json::json!([
+                    {"type": "tool_result", "tool_use_id": "toolu_2", "content": "not found", "is_error": true},
+                ]),
+            ),
+            assistant(
+                "a-3",
+                false,
+                serde_json::json!([
+                    {"type": "tool_use", "id": "toolu_3", "name": "WebFetch", "input": {"url": "https://example.test/docs"}},
+                ]),
+            ),
+            user(
+                "r-3",
+                "a-3",
+                serde_json::json!([
+                    {"type": "tool_result", "tool_use_id": "toolu_3", "content": "fetched"},
+                ]),
+            ),
+            assistant(
+                "a-4",
+                false,
+                serde_json::json!([
+                    {"type": "tool_use", "id": "toolu_4", "name": "Grep", "input": {"pattern": "fn main"}},
+                ]),
+            ),
+            user(
+                "r-4",
+                "a-4",
+                serde_json::json!([
+                    {"type": "tool_result", "tool_use_id": "toolu_4", "content": "main.rs:1"},
+                ]),
+            ),
+        ]);
+        assert_eq!(messages, 8);
+        assert_eq!(activities.len(), 4);
+
+        let bash = &activities[0];
+        assert_eq!(
+            bash.message_native_id, "r-1",
+            "活动锚定在携带 tool_result 的消息上"
+        );
+        assert_eq!(bash.activity.kind, ToolActivityKind::Command);
+        assert_eq!(bash.activity.name, "Bash");
+        assert_eq!(bash.activity.target.as_deref(), Some("ls -la"));
+        assert_eq!(bash.activity.status, ToolActivityStatus::Success);
+        assert_eq!(bash.activity.actor, ToolActivityActor::Main);
+
+        let read = &activities[1];
+        assert_eq!(read.activity.kind, ToolActivityKind::File);
+        assert_eq!(read.activity.name, "Read");
+        assert_eq!(read.activity.target.as_deref(), Some("src/main.rs"));
+        assert_eq!(
+            read.activity.status,
+            ToolActivityStatus::Error,
+            "is_error 如实映射"
+        );
+        assert_eq!(read.activity.actor, ToolActivityActor::Main);
+
+        let web = &activities[2];
+        assert_eq!(web.activity.kind, ToolActivityKind::Web);
+        assert_eq!(
+            web.activity.target.as_deref(),
+            Some("https://example.test/docs")
+        );
+        // is_error 缺失 → 成功（设计 R4.2）。
+        assert_eq!(web.activity.status, ToolActivityStatus::Success);
+
+        let grep = &activities[3];
+        assert_eq!(grep.activity.kind, ToolActivityKind::Query);
+        assert_eq!(grep.activity.target.as_deref(), Some("fn main"));
+    }
+
+    #[test]
+    fn parse_marks_unpaired_tool_use_as_unknown_status() {
+        // 截断 transcript：tool_use 没有后续 tool_result → status Unknown，
+        // 锚定在调用方消息（设计 R4.3/R5.1），绝不臆造结果。
+        let (messages, activities) = parse_records(&[assistant(
+            "a-unpaired",
+            false,
+            serde_json::json!([
+                {"type": "tool_use", "id": "toolu_x", "name": "Bash", "input": {"command": "npm test"}},
+            ]),
+        )]);
+        assert_eq!(messages, 1);
+        assert_eq!(activities.len(), 1);
+        assert_eq!(activities[0].message_native_id, "a-unpaired");
+        assert_eq!(activities[0].activity.kind, ToolActivityKind::Command);
+        assert_eq!(activities[0].activity.target.as_deref(), Some("npm test"));
+        assert_eq!(activities[0].activity.status, ToolActivityStatus::Unknown);
+    }
+
+    #[test]
+    fn parse_derives_subagent_actor_from_sidechain_caller() {
+        let (_, activities) = parse_records(&[
+            assistant(
+                "a-sub",
+                true,
+                serde_json::json!([
+                    {"type": "tool_use", "id": "toolu_s", "name": "Read", "input": {"file_path": "lib/util.rs"}},
+                ]),
+            ),
+            user(
+                "r-sub",
+                "a-sub",
+                serde_json::json!([
+                    {"type": "tool_result", "tool_use_id": "toolu_s", "content": "ok"},
+                ]),
+            ),
+        ]);
+        assert_eq!(activities.len(), 1);
+        assert_eq!(
+            activities[0].activity.actor,
+            ToolActivityActor::Subagent,
+            "sidechain 调用方 → actor=subagent"
+        );
+    }
+
+    #[test]
+    fn parse_skips_orphan_tool_result_without_fabrication() {
+        // tool_result 引用不存在的 tool_use_id：不透明（R6），静默跳过，
+        // 不产出活动。
+        let (messages, activities) = parse_records(&[user(
+            "r-orphan",
+            "a-1",
+            serde_json::json!([
+                {"type": "tool_result", "tool_use_id": "toolu_missing", "content": "who knows"},
+            ]),
+        )]);
+        assert_eq!(messages, 1);
+        assert!(activities.is_empty(), "孤儿 result 不得臆造活动");
+    }
+
+    #[test]
+    fn parse_skips_opaque_tool_blocks() {
+        // 无 name 的 tool_use 与无 id 的 tool_use 都是不透明记录（R6）：跳过。
+        let (_, activities) = parse_records(&[assistant(
+            "a-opaque",
+            false,
+            serde_json::json!([
+                {"type": "tool_use", "id": "toolu_n", "input": {"command": "ls"}},
+                {"type": "tool_use", "name": "Read", "input": {"file_path": "x.rs"}},
+                {"type": "tool_use", "id": "toolu_ok", "name": "Bash", "input": {"command": "pwd"}},
+            ]),
+        )]);
+        assert_eq!(
+            activities.len(),
+            1,
+            "只有 id+name 齐全的调用登记 pending（EOF 以 Unknown 上报）"
+        );
+        assert_eq!(activities[0].activity.name, "Bash");
+        assert_eq!(activities[0].activity.status, ToolActivityStatus::Unknown);
+    }
+
+    #[test]
+    fn parse_unknown_tool_name_fails_closed() {
+        // 名字不在已知闭集 → kind=unknown、target=None，即使 input 带了
+        // 形似 command 的字段也不猜（设计 R2 第 6 条）。
+        let (_, activities) = parse_records(&[
+            assistant(
+                "a-unk",
+                false,
+                serde_json::json!([
+                    {"type": "tool_use", "id": "toolu_u", "name": "CustomThing", "input": {"command": "secret op"}},
+                ]),
+            ),
+            user(
+                "r-unk",
+                "a-unk",
+                serde_json::json!([
+                    {"type": "tool_result", "tool_use_id": "toolu_u", "content": "ok"},
+                ]),
+            ),
+        ]);
+        assert_eq!(activities.len(), 1);
+        assert_eq!(activities[0].activity.kind, ToolActivityKind::Unknown);
+        assert_eq!(activities[0].activity.target, None);
+        assert_eq!(activities[0].activity.status, ToolActivityStatus::Success);
     }
 }

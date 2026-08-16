@@ -21,8 +21,8 @@ use agent_session_grep_application::{
 };
 use agent_session_grep_domain::{ContextPolicy, IdKind, StableId};
 use agent_session_grep_ports::{
-    RetrievalMode, SearchFilters, SearchProvider, capability::ProviderCapabilityMatrix,
-    handoff::HandoffFilters,
+    RetrievalMode, SearchFacets, SearchFilters, SearchProvider, SidechainFacet,
+    capability::ProviderCapabilityMatrix, handoff::HandoffFilters,
 };
 use serde_json::{Map, Value, json};
 
@@ -379,6 +379,9 @@ impl McpServer<'_> {
                 "until",
                 "include_system",
                 "group_by_session",
+                "sidechain",
+                "tool_kind",
+                "tool_name",
             ],
         )?;
         let query = required_str(args, "query")?;
@@ -396,9 +399,36 @@ impl McpServer<'_> {
         let filters = opt_filters(args)?;
         let include_system = opt_bool(args, "include_system", false)?;
         let group_by_session = opt_bool(args, "group_by_session", false)?;
+        let sidechain = match opt_str(args, "sidechain")?.as_deref() {
+            None | Some("include") => SidechainFacet::Include,
+            Some("main_only") => SidechainFacet::MainOnly,
+            Some("subagent_only") => SidechainFacet::SubagentOnly,
+            Some(other) => {
+                return Err(ToolError::Params(format!(
+                    "sidechain must be include|main_only|subagent_only, got {other}"
+                )));
+            }
+        };
+        let tool_kind = opt_str(args, "tool_kind")?;
+        if let Some(kind) = &tool_kind
+            && !matches!(
+                kind.as_str(),
+                "file" | "command" | "web" | "query" | "unknown"
+            )
+        {
+            return Err(ToolError::Params(format!(
+                "tool_kind must be file|command|web|query|unknown, got {kind}"
+            )));
+        }
+        let tool_name = opt_str(args, "tool_name")?;
         self.run_app(AppRequest::Search {
             query,
             filters,
+            facets: SearchFacets {
+                sidechain,
+                tool_kind,
+                tool_name,
+            },
             limit: limit.or(max_items).unwrap_or(20),
             cursor,
             budget: budget_with(max_items, max_bytes, None),
@@ -582,6 +612,7 @@ impl McpServer<'_> {
         let response = app.handle(AppRequest::Search {
             query: query.clone(),
             filters: filters.clone(),
+            facets: SearchFacets::default(),
             limit: search_limit,
             cursor: None,
             budget: ResponseBudget {
@@ -765,6 +796,24 @@ fn tool_catalog() -> Value {
                         "type": "boolean",
                         "description": "Collapse hits per session: best-scoring hit first, \
                             with an occurrences count. Default false keeps one hit per match."
+                    },
+                    "sidechain": {
+                        "type": "string",
+                        "enum": ["include", "main_only", "subagent_only"],
+                        "description": "Sidechain facet: include (default) keeps all; \
+                            main_only keeps messages with no sidechain placement; \
+                            subagent_only keeps messages with at least one."
+                    },
+                    "tool_kind": {
+                        "type": "string",
+                        "enum": ["file", "command", "web", "query", "unknown"],
+                        "description": "Keep only messages carrying a tool activity of \
+                            this kind (closed set; unknown = tools outside the known set)."
+                    },
+                    "tool_name": {
+                        "type": "string",
+                        "description": "Keep only messages carrying a tool activity with \
+                            this exact tool name (e.g. Bash, Read, shell)."
                     }
                 },
                 "required": ["query"],

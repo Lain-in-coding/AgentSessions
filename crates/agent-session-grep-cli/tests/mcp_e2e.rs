@@ -1881,3 +1881,81 @@ fn mcp_stderr_stays_clean_on_protocol_errors() {
     );
     assert!(stderr.is_empty(), "参数错误不得写入 stderr: {stderr}");
 }
+
+// ─── design §4 场景补充：search_sessions facet 参数（08-15 structured-activity）──
+
+#[test]
+fn search_sessions_facet_params_filter_and_validate() {
+    let (dir, db) = temp_db("mcp-facets");
+    // 种子数据：Claude 合成夹具（Bash 主线 + Read sidechain，含检索词 "facet"）。
+    let fixture = dir.path().join("claude-tools.jsonl");
+    std::fs::write(
+        &fixture,
+        concat!(
+            r#"{"type":"user","uuid":"f-1","sessionId":"sess-f","message":{"role":"user","content":"facet kickoff"}}"#,
+            "\n",
+            r#"{"type":"assistant","uuid":"f-2","parentUuid":"f-1","sessionId":"sess-f","message":{"role":"assistant","content":[{"type":"text","text":"facet running"},{"type":"tool_use","id":"toolu_f1","name":"Bash","input":{"command":"facet build"}}]}}"#,
+            "\n",
+            r#"{"type":"user","uuid":"f-3","parentUuid":"f-2","sessionId":"sess-f","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_f1","content":"facet done","is_error":false}]}}"#,
+            "\n",
+            r#"{"type":"assistant","uuid":"f-4","parentUuid":"f-3","sessionId":"sess-f","isSidechain":true,"message":{"role":"assistant","content":[{"type":"text","text":"facet subagent work"},{"type":"tool_use","id":"toolu_f2","name":"Read","input":{"file_path":"facet.txt"}}]}}"#,
+            "\n",
+            r#"{"type":"user","uuid":"f-5","parentUuid":"f-4","sessionId":"sess-f","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_f2","content":"facet contents","is_error":false}]}}"#,
+            "\n",
+        ),
+    )
+    .expect("write fixture");
+    let path = fixture.to_string_lossy().into_owned();
+    let out = run_cli(&db, &["sync", &path]);
+    assert!(out.status.success(), "seed sync: {}", stdout(&out));
+    assert!(
+        stdout(&out).contains("\"messages\":5"),
+        "seed sync content: {}",
+        stdout(&out)
+    );
+
+    let init = initialize_request(1, "2025-06-18");
+    let frames = mcp_session(
+        &db,
+        &[
+            init,
+            initialized_notification(),
+            tool_call(
+                2,
+                "search_sessions",
+                json!({ "query": "facet", "tool_kind": "command" }),
+            ),
+            tool_call(
+                3,
+                "search_sessions",
+                json!({ "query": "facet", "sidechain": "subagent_only" }),
+            ),
+            tool_call(
+                4,
+                "search_sessions",
+                json!({ "query": "facet", "tool_kind": "bogus" }),
+            ),
+        ],
+    );
+
+    // --tool-kind command：只有锚定 Bash 活动的 f-3 命中。
+    let result = &frame_by_id(&frames, 2)["result"];
+    assert_eq!(result["isError"], false, "{result}");
+    let hits = result["structuredContent"]["data"]["hits"]
+        .as_array()
+        .unwrap();
+    assert_eq!(hits.len(), 1, "{result}");
+    assert_eq!(hits[0]["id"], "msg_v1_f-3", "{result}");
+
+    // sidechain=subagent_only：只有 sidechain 的 f-4 命中。
+    let result = &frame_by_id(&frames, 3)["result"];
+    let hits = result["structuredContent"]["data"]["hits"]
+        .as_array()
+        .unwrap();
+    assert_eq!(hits.len(), 1, "{result}");
+    assert_eq!(hits[0]["id"], "msg_v1_f-4", "{result}");
+
+    // 非法 tool_kind 是协议层 -32602。
+    let error = &frame_by_id(&frames, 4)["error"];
+    assert_eq!(error["code"], -32602, "{error}");
+}

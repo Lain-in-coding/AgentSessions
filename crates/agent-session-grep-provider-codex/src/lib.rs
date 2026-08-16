@@ -18,9 +18,11 @@
 //!
 //! adapter 只做格式隔离，绝不接触存储 / 检索 / UI（RFC-0002 §7）。
 
+use agent_session_grep_domain::{ToolActivityActor, ToolActivityStatus};
 use agent_session_grep_ports::{
     AdapterManifest, CanonicalEventSink, Confidence, MessageEvent, MetadataResolution, ParseReport,
-    ProbeResult, ProviderAdapter, ProviderError, manifest_for,
+    ProbeResult, ProviderAdapter, ProviderError, ToolActivityEvent, build_tool_activity,
+    manifest_for,
 };
 use serde::{Deserialize, de::IgnoredAny};
 
@@ -191,7 +193,8 @@ struct RawLine {
 }
 
 /// `payload` 的最小视图。因各 `type` 的 payload 结构不同，只声明对话消息
-/// （`response_item` + 内层 `message`）所需字段；其它类型缺失这些字段无妨。
+/// （`response_item` + 内层 `message`）与工具调用（`custom_tool_call` /
+/// `function_call_output`）所需字段；其它类型缺失这些字段无妨。
 #[derive(Debug, Deserialize)]
 struct RawPayload {
     /// 内层记录类型（`message` / `reasoning` / `custom_tool_call` / …）。
@@ -217,6 +220,45 @@ struct RawPayload {
     /// directory。缺失/空白 → None，绝不臆造。
     #[serde(default)]
     cwd: Option<String>,
+    /// `custom_tool_call` 的工具名（如 `shell`）。缺失/空 → 视为不透明调用。
+    #[serde(default)]
+    name: String,
+    /// `custom_tool_call` 的参数：JSON 字符串或对象两种形态都接受
+    /// （老版本 rollout 为字符串；新版本直接为对象）。
+    #[serde(default)]
+    arguments: Option<serde_json::Value>,
+    /// `custom_tool_call` 的调用 id（新版本字段；旧版本复用顶层 `id`）。
+    #[serde(default, rename = "tool_call_id")]
+    tool_call_id: Option<String>,
+    /// `function_call_output` 引用的调用 id（与 `custom_tool_call` 配对）。
+    #[serde(default, rename = "call_id")]
+    call_id: Option<String>,
+    /// `function_call_output` 的失败标记；缺失视为 false（成功）。
+    #[serde(default, rename = "is_error")]
+    is_error: bool,
+}
+
+impl RawPayload {
+    /// 归一化的调用参数对象：JSON 字符串解析为对象，对象形态原样使用，
+    /// 其余（缺失/非对象/解析失败）一律按不透明 `Null` 处理（fail-closed）。
+    fn normalized_arguments(&self) -> serde_json::Value {
+        match &self.arguments {
+            Some(serde_json::Value::String(raw)) => {
+                serde_json::from_str(raw).unwrap_or(serde_json::Value::Null)
+            }
+            Some(value @ serde_json::Value::Object(_)) => value.clone(),
+            _ => serde_json::Value::Null,
+        }
+    }
+}
+
+/// 一次尚未配对到结果的工具调用（设计 R5/R6：按 `call_id` 跨记录配对）。
+struct PendingToolCall {
+    call_id: String,
+    name: String,
+    input: serde_json::Value,
+    /// 发出该调用时最近 emit 的消息 native id（活动锚点，设计 R5.2）。
+    anchor: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -246,6 +288,46 @@ impl RawPayload {
 /// 过滤，adapter 不做语义裁剪（RFC-0002 §7：provider 只做格式隔离）。
 fn is_conversational_role(role: &str) -> bool {
     matches!(role, "user" | "assistant" | "developer" | "system")
+}
+
+/// 把配对好的调用构建为活动并 emit（设计 R2/R3/R4）。
+fn emit_paired_activity(
+    sink: &mut dyn CanonicalEventSink,
+    call: &PendingToolCall,
+    is_error: bool,
+) -> agent_session_grep_ports::PortResult<()> {
+    let activity = build_tool_activity(
+        &call.name,
+        // Codex rollout 无 sidechain 字段（设计 R3）：一律 Main。
+        ToolActivityActor::Main,
+        &call.input,
+        if is_error {
+            ToolActivityStatus::Error
+        } else {
+            ToolActivityStatus::Success
+        },
+    );
+    sink.emit_activity(ToolActivityEvent {
+        message_native_id: call.anchor.as_deref().unwrap_or(""),
+        activity,
+    })
+}
+
+/// 未配对调用在文件末尾以 `Unknown` 状态如实上报（设计 R4.3），绝不臆造结果。
+fn emit_unpaired_activity(
+    sink: &mut dyn CanonicalEventSink,
+    call: &PendingToolCall,
+) -> agent_session_grep_ports::PortResult<()> {
+    let activity = build_tool_activity(
+        &call.name,
+        ToolActivityActor::Main,
+        &call.input,
+        ToolActivityStatus::Unknown,
+    );
+    sink.emit_activity(ToolActivityEvent {
+        message_native_id: call.anchor.as_deref().unwrap_or(""),
+        activity,
+    })
 }
 
 /// Codex 已知的顶层封套类型——probe 判定用。
@@ -470,6 +552,11 @@ impl ProviderAdapter for CodexAdapter {
         // seq 是会话内单调序号，只对成功 emit 的对话消息递增，
         // 从而满足 domain Session 的 seq 从 0 连续的不变量。
         let mut seq: u32 = 0;
+        // 工具活动观察（设计 R1-R6）：按 `call_id` 跨记录配对的待决调用。
+        let mut pending_calls: Vec<PendingToolCall> = Vec::new();
+        // 最近一次成功 emit 的消息 native id——custom_tool_call 的活动锚点
+        // （设计 R5.2：Codex 无显式 call→message 指针，取发出调用的助理消息）。
+        let mut last_emitted_native_id: Option<String> = None;
 
         while let Some(line) = lines.next_record()? {
             // 行负载已由 BoundedLineReader 剥离 \n/\r 与首行 BOM，span 仍以
@@ -549,6 +636,46 @@ impl ProviderAdapter for CodexAdapter {
             let Some(payload) = rec.payload else {
                 continue;
             };
+            // 工具活动观察（设计 R1-R6）：custom_tool_call 登记待决调用；
+            // function_call_output 配对后 emit。两者都不是对话消息记录。
+            if payload.r#type == "custom_tool_call" {
+                let call_id = payload
+                    .tool_call_id
+                    .clone()
+                    .or_else(|| {
+                        if payload.id.trim().is_empty() {
+                            None
+                        } else {
+                            Some(payload.id.clone())
+                        }
+                    })
+                    .filter(|id| !id.trim().is_empty());
+                if let (Some(call_id), name) = (call_id, payload.name.trim())
+                    && !name.is_empty()
+                {
+                    pending_calls.push(PendingToolCall {
+                        call_id,
+                        name: name.to_string(),
+                        input: payload.normalized_arguments(),
+                        anchor: last_emitted_native_id.clone(),
+                    });
+                }
+                // 缺 call id 或 name 的调用视为不透明（R6），静默跳过。
+                continue;
+            }
+            if payload.r#type == "function_call_output" {
+                if let Some(call_id) = payload.call_id.as_deref()
+                    && let Some(index) = pending_calls
+                        .iter()
+                        .position(|call| call.call_id == *call_id)
+                {
+                    let call = pending_calls.remove(index);
+                    emit_paired_activity(sink, &call, payload.is_error)
+                        .map_err(|e| ProviderError::StructuralFatal(e.to_string()))?;
+                }
+                // 无匹配 call_id 的输出视为不透明（R6），静默跳过。
+                continue;
+            }
             if payload.r#type != "message" {
                 continue;
             }
@@ -593,6 +720,15 @@ impl ProviderAdapter for CodexAdapter {
             .map_err(|e| ProviderError::StructuralFatal(e.to_string()))?;
             seq += 1;
             report.committed += 1;
+            if !payload.id.trim().is_empty() {
+                last_emitted_native_id = Some(payload.id.clone());
+            }
+        }
+
+        // 文件末尾仍未配对的调用：以 Unknown 状态如实上报（设计 R4.3）。
+        for call in &pending_calls {
+            emit_unpaired_activity(sink, call)
+                .map_err(|e| ProviderError::StructuralFatal(e.to_string()))?;
         }
 
         // 多会话诊断（PRD R3.1）：单文件=单会话。同一文件出现多个不同 session id
@@ -628,6 +764,7 @@ impl ProviderAdapter for CodexAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_session_grep_domain::{ToolActivity, ToolActivityKind};
 
     #[test]
     fn manifest_matches_provider_matrix() {
@@ -645,6 +782,7 @@ mod tests {
     #[derive(Default)]
     struct CollectingSink {
         messages: Vec<Captured>,
+        activities: Vec<CapturedActivity>,
     }
     struct Captured {
         seq: u32,
@@ -655,6 +793,11 @@ mod tests {
         timestamp: Option<String>,
         is_sidechain: bool,
         span: Option<(u64, u64)>,
+    }
+    /// 拍平的活动快照（anchor + 完整事实）。
+    struct CapturedActivity {
+        message_native_id: String,
+        activity: ToolActivity,
     }
     impl CanonicalEventSink for CollectingSink {
         fn emit_message(
@@ -670,6 +813,17 @@ mod tests {
                 timestamp: event.timestamp.map(str::to_string),
                 is_sidechain: event.is_sidechain,
                 span: event.span,
+            });
+            Ok(())
+        }
+
+        fn emit_activity(
+            &mut self,
+            event: ToolActivityEvent<'_>,
+        ) -> agent_session_grep_ports::PortResult<()> {
+            self.activities.push(CapturedActivity {
+                message_native_id: event.message_native_id.to_string(),
+                activity: event.activity,
             });
             Ok(())
         }
@@ -1401,5 +1555,172 @@ mod tests {
                 marker_plus_syntax.as_micros()
             );
         }
+    }
+
+    // ---- 工具活动观察（设计 R1-R6）----
+
+    /// 解析一组合成 rollout 记录，返回 (消息数, activities)。
+    fn parse_rollout_records(records: &[serde_json::Value]) -> (usize, Vec<CapturedActivity>) {
+        let input = records
+            .iter()
+            .map(serde_json::to_string)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("serialize synthetic rollout")
+            .join("\n");
+        let mut sink = CollectingSink::default();
+        CodexAdapter::new()
+            .parse(input.as_bytes(), &mut sink)
+            .expect("parse synthetic rollout");
+        (sink.messages.len(), sink.activities)
+    }
+
+    fn response_item(payload: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "timestamp": "2026-08-15T00:00:00.000Z",
+            "type": "response_item",
+            "payload": payload,
+        })
+    }
+
+    fn assistant_message(id: &str, text: &str) -> serde_json::Value {
+        response_item(serde_json::json!({
+            "type": "message",
+            "id": id,
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": text}],
+        }))
+    }
+
+    #[test]
+    fn parse_extracts_paired_tool_activities_from_function_calls() {
+        let (messages, activities) = parse_rollout_records(&[
+            assistant_message("msg_a1", "checking the sandbox"),
+            response_item(serde_json::json!({
+                "type": "custom_tool_call",
+                "id": "call_1",
+                "tool_call_id": "call_1",
+                "name": "shell",
+                "arguments": "{\"command\":\"cat config.toml\"}",
+            })),
+            response_item(serde_json::json!({
+                "type": "function_call_output",
+                "id": "fco_1",
+                "call_id": "call_1",
+                "output": "policy = \"safe\"",
+                "is_error": false,
+            })),
+            assistant_message("msg_a2", "fixing the typo"),
+            response_item(serde_json::json!({
+                "type": "custom_tool_call",
+                "id": "call_2",
+                "name": "apply_patch",
+                "arguments": {"file_path": "config.toml"},
+            })),
+            response_item(serde_json::json!({
+                "type": "function_call_output",
+                "id": "fco_2",
+                "call_id": "call_2",
+                "output": "patch failed",
+                "is_error": true,
+            })),
+        ]);
+        assert_eq!(messages, 2, "工具记录不产生对话消息");
+        assert_eq!(activities.len(), 2);
+
+        let shell = &activities[0];
+        assert_eq!(
+            shell.message_native_id, "msg_a1",
+            "活动锚定在发出调用的助理消息"
+        );
+        assert_eq!(shell.activity.kind, ToolActivityKind::Command);
+        assert_eq!(shell.activity.name, "shell");
+        assert_eq!(shell.activity.target.as_deref(), Some("cat config.toml"));
+        assert_eq!(shell.activity.status, ToolActivityStatus::Success);
+        assert_eq!(shell.activity.actor, ToolActivityActor::Main);
+
+        let patch = &activities[1];
+        assert_eq!(
+            patch.activity.kind,
+            ToolActivityKind::Unknown,
+            "apply_patch 不在已知闭集"
+        );
+        assert_eq!(patch.activity.target, None, "未知名不猜 target");
+        assert_eq!(patch.activity.status, ToolActivityStatus::Error);
+    }
+
+    #[test]
+    fn parse_accepts_object_form_arguments() {
+        let (_, activities) = parse_rollout_records(&[
+            assistant_message("msg_a1", "inspecting"),
+            response_item(serde_json::json!({
+                "type": "custom_tool_call",
+                "id": "call_obj",
+                "name": "shell",
+                "arguments": {"command": "git status"},
+            })),
+            response_item(serde_json::json!({
+                "type": "function_call_output",
+                "id": "fco_obj",
+                "call_id": "call_obj",
+                "output": "clean",
+            })),
+        ]);
+        assert_eq!(activities.len(), 1);
+        assert_eq!(activities[0].activity.target.as_deref(), Some("git status"));
+        assert_eq!(activities[0].activity.status, ToolActivityStatus::Success);
+    }
+
+    #[test]
+    fn parse_marks_unpaired_custom_tool_call_as_unknown() {
+        // 截断 rollout：custom_tool_call 没有 function_call_output →
+        // status Unknown（设计 R4.3），绝不臆造结果。
+        let (_, activities) = parse_rollout_records(&[
+            assistant_message("msg_a1", "running"),
+            response_item(serde_json::json!({
+                "type": "custom_tool_call",
+                "id": "call_x",
+                "name": "shell",
+                "arguments": "{\"command\":\"npm test\"}",
+            })),
+        ]);
+        assert_eq!(activities.len(), 1);
+        assert_eq!(activities[0].message_native_id, "msg_a1");
+        assert_eq!(activities[0].activity.status, ToolActivityStatus::Unknown);
+        assert_eq!(activities[0].activity.target.as_deref(), Some("npm test"));
+    }
+
+    #[test]
+    fn parse_skips_orphan_function_call_output() {
+        // function_call_output 引用不存在的 call_id：不透明（R6），静默跳过。
+        let (_, activities) = parse_rollout_records(&[
+            assistant_message("msg_a1", "hmm"),
+            response_item(serde_json::json!({
+                "type": "function_call_output",
+                "id": "fco_orphan",
+                "call_id": "call_missing",
+                "output": "???",
+                "is_error": false,
+            })),
+        ]);
+        assert!(activities.is_empty(), "孤儿输出不得臆造活动");
+    }
+
+    #[test]
+    fn parse_skips_opaque_custom_tool_call() {
+        // 无 name 或无 call id 的调用是不透明记录（R6）：跳过，不登记。
+        let (_, activities) = parse_rollout_records(&[
+            assistant_message("msg_a1", "opaque"),
+            response_item(serde_json::json!({
+                "type": "custom_tool_call",
+                "id": "call_noname",
+                "arguments": "{\"command\":\"ls\"}",
+            })),
+            response_item(serde_json::json!({
+                "type": "custom_tool_call",
+                "name": "shell",
+                "arguments": "{\"command\":\"pwd\"}",
+            })),
+        ]);
+        assert!(activities.is_empty(), "不透明调用不得产出活动");
     }
 }

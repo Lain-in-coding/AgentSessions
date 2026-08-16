@@ -23,7 +23,7 @@ mod serve;
 mod tui;
 
 use agent_session_grep_adapters_sqlite::{
-    SourceBatch, SqliteStore, capture, open_snapshot_source, verify_snapshot,
+    SourceActivity, SourceBatch, SqliteStore, capture, open_snapshot_source, verify_snapshot,
 };
 use agent_session_grep_application::{
     App, AppError, AppRequest, AppResponse, ContextLevel, ResponseBudget, StagedBatch, Truncation,
@@ -36,8 +36,8 @@ use agent_session_grep_domain::{
 };
 use agent_session_grep_ports::{
     ParseReport, ProviderAdapter, ProviderSessionObservation, ReadOnlySource, RedactionStatus,
-    ResumeClaimsStore, RetrievalMode, SearchFilters, SearchInstant, SearchProvider,
-    SourceResumeClaim,
+    ResumeClaimsStore, RetrievalMode, SearchFacets, SearchFilters, SearchInstant, SearchProvider,
+    SidechainFacet, SourceResumeClaim,
     capability::{ProviderCapability, ProviderCapabilityMatrix, ProviderMaturity},
 };
 use agent_session_grep_provider_aider::AiderAdapter;
@@ -254,7 +254,7 @@ fn extract_request_id(args: &[String]) -> Result<Option<String>, String> {
         match a.as_str() {
             "--db" | "--output" | "--cursor" | "--max-items" | "--max-bytes" | "--max-messages"
             | "--max-evidence" | "--max-tokens" | "--policy" | "--level" | "--provider"
-            | "--since" | "--until" | "--session" | "--around" => {
+            | "--since" | "--until" | "--session" | "--around" | "--tool-kind" | "--tool-name" => {
                 it.next();
             }
             _ => {}
@@ -275,7 +275,8 @@ fn command_name(args: &[String]) -> String {
         match a.as_str() {
             "--db" | "--output" | "--cursor" | "--max-items" | "--max-bytes" | "--max-messages"
             | "--max-evidence" | "--max-tokens" | "--policy" | "--level" | "--request-id"
-            | "--provider" | "--since" | "--until" | "--session" | "--around" => {
+            | "--provider" | "--since" | "--until" | "--session" | "--around" | "--tool-kind"
+            | "--tool-name" => {
                 it.next(); // 消费其取值
             }
             "--robot" | "--no-color" | "--help" | "-h" | "--version" | "-V" | "--discover"
@@ -337,7 +338,8 @@ fn intercept_help_or_version(args: &[String]) -> Option<HelpRequest> {
             // 带值 flag 跳过其取值，避免把取值误当命令名。
             "--db" | "--output" | "--request-id" | "--cursor" | "--max-items" | "--max-bytes"
             | "--max-messages" | "--max-evidence" | "--max-tokens" | "--policy" | "--level"
-            | "--provider" | "--since" | "--until" | "--session" | "--around" => {
+            | "--provider" | "--since" | "--until" | "--session" | "--around" | "--tool-kind"
+            | "--tool-name" => {
                 it.next();
             }
             _ => {}
@@ -761,6 +763,13 @@ FILTER (search):
     --include-system       默认排除 system/developer 角色消息；加此旗标恢复
     --group-by-session     按会话归并：每会话保留最高分命中并附 occurrences 计数
 
+FACETS (search，结构化过滤；默认不过滤，输出与旧版一致):
+    --main-only            只看主线消息（排除 sidechain）
+    --subagent-only        只看 subagent（sidechain）消息；与 --main-only 互斥
+    --include-sidechain    显式包含 sidechain（默认值；不与上述两者并用）
+    --tool-kind <kind>     只保留做过 file|command|web|query|unknown 工具调用的消息
+    --tool-name <name>     只保留用过该工具（逐字相等）的消息
+
 GET MESSAGE:
     --session <ses-id>     共享消息的所属会话；有歧义时必须指定
     --around <n>           主线两侧各返回 n 条邻居（默认 0，仅锚点）
@@ -894,7 +903,10 @@ fn subcommand_help_text(cmd: &str) -> &'static str {
                      过滤：--provider claude|codex（可重复，OR）、--since/--until <RFC3339 或 1h|1d|1w>（半开区间 [since, until)）；\n\
                      检索模式：--mode lexical|semantic|hybrid（默认 lexical）。semantic/hybrid 需先跑 `index embeddings`；\n\
                      向量索引未就绪时结果标注 retrieval_mode=lexical_fallback 并给出 warning，绝不静默降级；\n\
-                     --include-system（默认排除 system/developer 角色消息）、--group-by-session（按会话归并并附 occurrences）"
+                     --include-system（默认排除 system/developer 角色消息）、--group-by-session（按会话归并并附 occurrences）；\n\
+                     结构化过滤：--main-only 只看主线（排除 sidechain）、--subagent-only 只看 subagent 消息、\n\
+                     --tool-kind file|command|web|query|unknown 只保留做过该种工具调用的消息、\n\
+                     --tool-name <名字> 只保留用过该工具（逐字相等）的消息（--main-only 与 --subagent-only 互斥）"
         }
         "get-message" => {
             "get-message <msg-id>：返回一个消息及其同会话主线邻居。\n\
@@ -1090,6 +1102,11 @@ fn is_known_flag_name(token: &str) -> bool {
             | "--snapshot-json"
             | "--discover"
             | "--offline"
+            | "--main-only"
+            | "--subagent-only"
+            | "--include-sidechain"
+            | "--tool-kind"
+            | "--tool-name"
     )
 }
 
@@ -1140,7 +1157,8 @@ fn extract_db_flag_impl(args: &[String], prefix_only: bool) -> Result<Option<Str
         match a.as_str() {
             "--output" | "--request-id" | "--cursor" | "--max-items" | "--max-bytes"
             | "--max-messages" | "--max-evidence" | "--max-tokens" | "--policy" | "--level"
-            | "--provider" | "--since" | "--until" | "--session" | "--around" => {
+            | "--provider" | "--since" | "--until" | "--session" | "--around" | "--tool-kind"
+            | "--tool-name" => {
                 it.next();
             }
             _ => {}
@@ -1210,7 +1228,8 @@ fn bare_positionals(args: &[String]) -> Vec<String> {
         match a.as_str() {
             "--db" | "--output" | "--request-id" | "--cursor" | "--max-items" | "--max-bytes"
             | "--max-messages" | "--max-evidence" | "--max-tokens" | "--policy" | "--level"
-            | "--provider" | "--since" | "--until" | "--session" | "--around" => {
+            | "--provider" | "--since" | "--until" | "--session" | "--around" | "--tool-kind"
+            | "--tool-name" => {
                 it.next(); // 消费其取值
             }
             "--robot" | "--no-color" | "--help" | "-h" | "--version" | "-V" | "--discover"
@@ -1387,6 +1406,12 @@ fn dispatch(
                     )));
                 }
             };
+            // 结构化 facet 过滤（additive；默认无过滤，行为与旧版一致）。
+            let main_only = take_bool_flag(&mut args, "--main-only");
+            let subagent_only = take_bool_flag(&mut args, "--subagent-only");
+            let include_sidechain = take_bool_flag(&mut args, "--include-sidechain");
+            let tool_kind = extract_flag(&mut args, "--tool-kind")?;
+            let tool_name = extract_flag(&mut args, "--tool-name")?;
             let app = App::with_resume(store_ref(store), store_ref(store), store_ref(store));
             let filters = search_filters_from_flags(
                 &providers,
@@ -1396,6 +1421,46 @@ fn dispatch(
             )?;
             let budget = budget_from_flags(max_items.as_deref(), max_bytes.as_deref(), None)?;
             no_extra_args(&args, 1, "search <query>")?;
+            let sidechain = match (main_only, subagent_only) {
+                (true, true) => {
+                    return Err(CliError::usage(
+                        "--main-only and --subagent-only are mutually exclusive",
+                    ));
+                }
+                (true, false) => {
+                    if include_sidechain {
+                        return Err(CliError::usage(
+                            "--include-sidechain conflicts with --main-only",
+                        ));
+                    }
+                    SidechainFacet::MainOnly
+                }
+                (false, true) => {
+                    if include_sidechain {
+                        return Err(CliError::usage(
+                            "--include-sidechain conflicts with --subagent-only",
+                        ));
+                    }
+                    SidechainFacet::SubagentOnly
+                }
+                (false, false) => SidechainFacet::Include,
+            };
+            let kind = match tool_kind.as_deref() {
+                None => None,
+                Some("file") | Some("command") | Some("web") | Some("query") | Some("unknown") => {
+                    Some(tool_kind.unwrap())
+                }
+                Some(other) => {
+                    return Err(CliError::usage(format!(
+                        "--tool-kind must be one of file|command|web|query|unknown, got {other}"
+                    )));
+                }
+            };
+            let facets = SearchFacets {
+                sidechain,
+                tool_kind: kind,
+                tool_name,
+            };
             // 页大小旋钮即 --max-items；未给时保守默认 20（App 内仍与 budget 取小）。
             let limit = if max_items.is_some() {
                 budget.max_items
@@ -1412,6 +1477,7 @@ fn dispatch(
                 app.handle(AppRequest::Search {
                     query,
                     filters,
+                    facets: facets.clone(),
                     limit,
                     cursor,
                     budget,
@@ -1437,6 +1503,7 @@ fn dispatch(
                 app.handle(AppRequest::Search {
                     query,
                     filters,
+                    facets: facets.clone(),
                     limit,
                     cursor,
                     budget,
@@ -1449,6 +1516,18 @@ fn dispatch(
             let (outcome, mut data, page, warnings) = render(response);
             if mode == protocol::OutputMode::Human {
                 attach_session_resume_rows(store, &mut data)?;
+            }
+            // Robot/机器面如实回显本次应用的 facet（默认值不回显——输出字节不变）。
+            if !facets.is_default() {
+                let echo = data.as_object_mut().expect("search data is an object");
+                echo.insert(
+                    "facets".into(),
+                    serde_json::json!({
+                        "sidechain": facets.sidechain.as_str(),
+                        "tool_kind": facets.tool_kind,
+                        "tool_name": facets.tool_name,
+                    }),
+                );
             }
             Ok(("search", outcome, data, page, warnings))
         }
@@ -1477,6 +1556,7 @@ fn dispatch(
             let response = app.handle(AppRequest::Search {
                 query: query.clone(),
                 filters: filters.clone(),
+                facets: SearchFacets::default(),
                 limit: search_limit,
                 cursor: None,
                 budget: ResponseBudget {
@@ -1793,6 +1873,7 @@ fn dispatch(
                     let response = app.handle(AppRequest::Search {
                         query: query.clone(),
                         filters: hook_search_filters(&config, app.now_ms())?,
+                        facets: SearchFacets::default(),
                         limit: 10,
                         cursor: None,
                         budget: ResponseBudget::default(),
@@ -2366,6 +2447,7 @@ fn stage_with_source(
         return Ok((
             StagedBatch {
                 messages: Vec::new(),
+                activities: Vec::new(),
                 report: ParseReport {
                     committed: 0,
                     skipped: 0,
@@ -2632,6 +2714,7 @@ fn sync_discover(
                     entries: Vec::new(),
                     placements: Vec::new(),
                     edges: Vec::new(),
+                    activities: Vec::new(),
                     relation_complete: true,
                     len_bytes: None,
                     fingerprint: None,
@@ -2950,13 +3033,47 @@ fn staged_to_source_with_provider(
     };
 
     entries.push((session_id, session_payload.into_bytes(), String::new()));
+    let document_wire = document_id.as_str().to_string();
     entries.push((document_id, document_payload.into_bytes(), String::new()));
+
+    // 工具活动锚点解析（设计 R5.3）：把 provider-native 锚点 id 解析为本批的
+    // 稳定消息 id。规则与消息实体去重一致（seq 顺序首现匹配、native 优先、
+    // 缺省回退派生）；锚点消息未被 emit（skipped/非对话）→ 活动丢弃，绝不臆造。
+    let mut activities = Vec::new();
+    for staged_activity in &staged.activities {
+        let Some(anchor) = staged
+            .messages
+            .iter()
+            .find(|message| message.native_id == staged_activity.message_native_id)
+        else {
+            continue;
+        };
+        let id = if anchor.native_id.trim().is_empty() {
+            StableId::derive(
+                IdKind::Message,
+                Stability::Unstable,
+                &[
+                    provider_id.as_bytes(),
+                    variant.as_bytes(),
+                    document_wire.as_bytes(),
+                    &anchor.seq.to_le_bytes(),
+                ],
+            )
+        } else {
+            StableId::native(IdKind::Message, &anchor.native_id)
+        };
+        activities.push(SourceActivity {
+            message_id: id,
+            activity: staged_activity.activity.clone(),
+        });
+    }
 
     Ok(SourceBatch {
         source_path: path.to_string(),
         entries,
         placements,
         edges,
+        activities,
         relation_complete: staged.report.skipped == 0,
         len_bytes: Some(source_len as i64),
         fingerprint: Some(fingerprint.to_string()),
@@ -3594,10 +3711,13 @@ mod tests {
         skipped: usize,
         session_native_id: &str,
     ) -> StagedBatch {
+        let committed = messages.len();
         StagedBatch {
+            messages,
+            activities: Vec::new(),
             session_native_id: Some(session_native_id.into()),
             report: ParseReport {
-                committed: messages.len(),
+                committed,
                 skipped,
                 diagnostics: if skipped == 0 {
                     Vec::new()
@@ -3607,7 +3727,6 @@ mod tests {
                 session_native_id: Some(session_native_id.into()),
                 session_observation: ProviderSessionObservation::default(),
             },
-            messages,
         }
     }
 
