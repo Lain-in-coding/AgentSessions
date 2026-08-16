@@ -8,6 +8,9 @@ message graphs, then serves full-text retrieval, resume, and handoff through
 CLI, MCP, Robot, TUI, and loopback Web UI surfaces — all sharing one
 Application ADT.
 
+**Release status:** the first public version is planned as `0.1.0`, matching the
+Cargo workspace version. No release tag or published artifact exists yet.
+
 ## Why?
 
 Every AI coding agent (Claude Code, Codex, Grok, Pi, …) writes its session

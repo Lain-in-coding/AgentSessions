@@ -6,18 +6,18 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+> Planned first public version: `0.1.0`. No tag or release has been published.
+
 ### Added
 
 - 16-provider capability matrix (`agent-session-grep-ports`) with deferred
-  provider rows (deepseek-harness, zcode) and per-provider maturity grading.
-- New provider adapters (14 implemented, all with evidence-backed fixtures):
-  - `opencode` — parses opencode.db SQLite transcripts (temp-file + read-only
-    + busy_timeout).
-  - `hermes` — parses OpenHermes `session_<id>.json` transcripts.
-  - `antigravity` — parses `.gemini/antigravity-cli/brain` transcript JSONL.
-  - `cursor` — parses Cursor `state.vscdb` chat history.
-  - `aider`, `cline`, plus the earlier-wave adapters (claude-code, codex,
-    gemini, gpt-codex, bolt, cody, continue, windsurf).
+  provider rows (`deepseek-harness`, `zcode`) and per-provider maturity grading.
+- Provider adapters for the 14 implemented, Experimental providers:
+  `claude-code`, `codex`, `grok-build`, `antigravity`, `opencode`, `pi`,
+  `hermes`, `cursor`, `kimi-code`, `openclaw`, `qoder`, `tencent-codebuddy`,
+  `cline`, and `aider`. Each adapter has evidence-backed synthetic fixtures;
+  DeepSeek Harness and ZCode remain deferred because no transcript evidence is
+  available.
 - `handoff <query>` CLI subcommand — deterministic handoff-pack/v1 generation
   with evidence/inference separation and budget truncation.
 - `resume <session-id>` CLI subcommand — dry-run by default (prints the
@@ -25,10 +25,11 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `--yes` spawns the provider in that directory. Providers whose resume
   command is unverified report `available:false` rather than a fabricated
   command.
-- `search --mode lexical|semantic|hybrid` — retrieval mode selection. Semantic
-  and hybrid require a ready semantic index; without one the response is
-  explicitly marked `retrieval_mode: lexical_fallback` with a warning, never
-  silently downgraded.
+- `search --mode lexical|semantic|hybrid` — retrieval mode selection. The
+  current vector mode uses bigram hashes for fuzzy lexical matching, not a
+  semantic model; hybrid combines lexical and vector rankings with RRF.
+  Semantic and hybrid metrics remain informational and carry no release
+  threshold or quality claim.
 - `hook <session-start|user-prompt-submit>` CLI subcommand — Claude Code hook
   integration, disabled by default. Reads the hook payload from stdin and emits
   the `hookSpecificOutput.additionalContext` contract; nothing is injected
@@ -50,19 +51,14 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Redaction now covers secrets embedded inside prose (previously only
   whole-string secrets were matched).
 
-## [0.1.0] — 2026-08-15
+### Planned for 0.1.0
 
-### Added
-
-- First open-source-ready release: CLI, Robot JSON protocol, MCP server,
-  TUI, and Web UI sharing one Application ADT (consistent search semantics
-  across all five entry points).
-- Session search over Claude Code and Codex transcripts (lexical FTS5 plus
-  ranked retrieval), resume metadata extraction, and handoff packs.
-- Installer scripts for Windows (PowerShell) and Unix (sh), release
+- First public release: CLI, Robot JSON protocol, MCP server, TUI, and Web UI
+  adapters sharing one Application ADT. Full cross-entry release rehearsal is
+  still required before publication.
+- Session search over the implemented provider set (lexical FTS5 plus ranked
+  fuzzy-lexical retrieval), resume metadata extraction, and handoff packs.
+- Installer scripts for Windows (PowerShell) and Unix (Bash), release
   rehearsal automation, and an evidence-backed open-source gate manifest.
-- Core Beta evidence harness: lexical recall at 10 = 1.00, parse loss = 0.00
-  on the committed gate fixture.
-
-[Unreleased]: https://github.com/qin-devs/AgentSessions/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/qin-devs/AgentSessions/releases/tag/v0.1.0
+- Core Beta evidence harness: lexical recall at 10 = 1.00 and parse loss =
+  0.00 on the committed synthetic gate fixture.

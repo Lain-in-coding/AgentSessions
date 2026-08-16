@@ -9,8 +9,8 @@ that content.
 
 | Version | Supported |
 |---|---|
-| 0.1.x   | ✅ |
-| < 0.1   | ❌ |
+| 0.1.x | Planned first public series; not released yet |
+| Published releases | None |
 
 ## Reporting a vulnerability
 

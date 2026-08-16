@@ -1,4 +1,4 @@
-# Go/No-Go Report — agent-session-grep v0.3.0
+# Go/No-Go Report — agent-session-grep v0.1.0
 
 > Template. Fill in every section. Delete angle-bracket placeholders.
 
@@ -13,8 +13,7 @@
 
 | Check | Status | Evidence |
 |---|---|---|
-| Zero outbound network (excl. explicit model download) | <pass/fail> | <capture log ref> |
-| `--offline` full workflow | <pass/fail> | <run id> |
+| Zero outbound network during supported runtime workflows | <pass/fail> | <capture log ref> |
 | Cross-boundary redaction (Web/Handoff/MCP/Robot) | <pass/fail> | <spot-check notes> |
 | Secret fixture never surfaces | <pass/fail> | <fixture + output ref> |
 | No transcript leak in logs/diagnostics | <pass/fail> | <log audit notes> |
