@@ -61,7 +61,8 @@ target。
 | search | `native` | 统一经 canonical 索引检索 |
 | discover | `native`（claude-code/codex）；`unsupported`（其余） | 仅 claude-code/codex 注册了 discovery root；antigravity/opencode 已加入 `provider_data_root` |
 | resume | `derived`（claude-code/codex/pi/opencode）；`unknown`（grok/kimi/qoder/codebuddy/hermes/antigravity/cursor）；`unsupported`（aider/cline/openclaw） | 未核验的 resume 命令一律不设默认值 |
-| context / handoff / tool_activity / incremental | `unsupported` 或 `unknown` | 属后续全能力链任务（`08-15-structured-activity-context-facets`），不在本任务范围 |
+| context / handoff / incremental | `unsupported` 或 `unknown` | 属后续全能力链任务（`08-15-structured-activity-context-facets`），不在本任务范围 |
+| tool_activity | `partial`（claude-code/codex/aider，schema v12 `tool_activities` 落库）；`unknown`（deepseek-harness/zcode，deferred）；`unsupported`（其余 11 个已实现 provider） | CLI `--tool-kind`/`--tool-name`/`--main-only`/`--subagent-only`/`--include-sidechain` 与 MCP 同名参数已落地 |
 | source_span | `native`（claude/codex/grok/pi/kimi/openclaw/qoder/codebuddy）；`derived`（aider）；`unsupported`（opencode/hermes/antigravity/cursor/cline） | SQLite/目录名身份/单文档 JSON 类 provider 无文件内字节 span；cline 的数组下标 pseudo-span 已移除并如实降级为 unsupported |
 
 ### 逐 provider 明细见 capability.rs（单源权威）
