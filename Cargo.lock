@@ -86,6 +86,7 @@ version = "0.1.0"
 dependencies = [
  "agent-session-grep-domain",
  "agent-session-grep-ports",
+ "agent-session-grep-testkit",
  "blake3",
  "serde",
  "serde_json",
@@ -97,6 +98,7 @@ version = "0.1.0"
 dependencies = [
  "agent-session-grep-domain",
  "agent-session-grep-ports",
+ "agent-session-grep-testkit",
  "blake3",
  "serde",
  "serde_json",
@@ -120,6 +122,7 @@ version = "0.1.0"
 dependencies = [
  "agent-session-grep-domain",
  "agent-session-grep-ports",
+ "agent-session-grep-testkit",
  "blake3",
  "serde",
  "serde_json",
@@ -131,6 +134,7 @@ version = "0.1.0"
 dependencies = [
  "agent-session-grep-domain",
  "agent-session-grep-ports",
+ "agent-session-grep-testkit",
  "blake3",
  "serde",
  "serde_json",
@@ -153,6 +157,8 @@ name = "agent-session-grep-provider-cursor"
 version = "0.1.0"
 dependencies = [
  "agent-session-grep-ports",
+ "agent-session-grep-testkit",
+ "blake3",
  "rusqlite",
  "serde",
  "serde_json",
@@ -164,6 +170,7 @@ version = "0.1.0"
 dependencies = [
  "agent-session-grep-domain",
  "agent-session-grep-ports",
+ "agent-session-grep-testkit",
  "blake3",
  "serde",
  "serde_json",
@@ -174,6 +181,8 @@ name = "agent-session-grep-provider-hermes"
 version = "0.1.0"
 dependencies = [
  "agent-session-grep-ports",
+ "agent-session-grep-testkit",
+ "blake3",
  "serde",
  "serde_json",
 ]
@@ -184,6 +193,7 @@ version = "0.1.0"
 dependencies = [
  "agent-session-grep-domain",
  "agent-session-grep-ports",
+ "agent-session-grep-testkit",
  "blake3",
  "serde",
  "serde_json",
@@ -195,6 +205,7 @@ version = "0.1.0"
 dependencies = [
  "agent-session-grep-domain",
  "agent-session-grep-ports",
+ "agent-session-grep-testkit",
  "blake3",
  "serde",
  "serde_json",
@@ -206,6 +217,7 @@ version = "0.1.0"
 dependencies = [
  "agent-session-grep-domain",
  "agent-session-grep-ports",
+ "agent-session-grep-testkit",
  "blake3",
  "rusqlite",
  "serde",
@@ -218,6 +230,7 @@ version = "0.1.0"
 dependencies = [
  "agent-session-grep-domain",
  "agent-session-grep-ports",
+ "agent-session-grep-testkit",
  "blake3",
  "serde",
  "serde_json",
@@ -229,6 +242,7 @@ version = "0.1.0"
 dependencies = [
  "agent-session-grep-domain",
  "agent-session-grep-ports",
+ "agent-session-grep-testkit",
  "blake3",
  "serde",
  "serde_json",

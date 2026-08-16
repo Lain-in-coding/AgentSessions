@@ -59,7 +59,15 @@ impl ProviderAdapter for KimiCodeAdapter {
     }
 
     fn manifest(&self) -> AdapterManifest {
-        manifest_for(self.provider_id(), None, &[])
+        manifest_for(
+            self.provider_id(),
+            Some(1),
+            &[
+                "context.append_loop_event records (step/tool events) are not yet parsed",
+                "session id is rarely carried in wire.jsonl; session_native_id is usually left unset",
+                "per-message timestamps are not extracted",
+            ],
+        )
     }
 
     fn probe(&self, bytes: &[u8]) -> Result<ProbeResult, ProviderError> {
@@ -281,7 +289,7 @@ mod tests {
         assert_eq!(manifest.capabilities.provider_id, adapter.provider_id());
         assert_eq!(manifest.capabilities.variant_id, VARIANT_ID);
         assert!(manifest.last_certified_targets.is_empty());
-        assert_eq!(manifest.fixture_revision, None);
+        assert_eq!(manifest.fixture_revision, Some(1));
     }
 
     struct CountSink {

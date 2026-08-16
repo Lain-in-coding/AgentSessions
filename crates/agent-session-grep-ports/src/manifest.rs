@@ -147,8 +147,12 @@ mod tests {
     ];
 
     fn fixture_revision(provider_id: &str) -> Option<u32> {
+        // All 14 implemented providers carry a golden fixture (revision 1);
+        // the two deferred providers (deepseek-harness/zcode) are not in this list.
         match provider_id {
-            "claude-code" | "codex" => Some(1),
+            "claude-code" | "codex" | "grok-build" | "antigravity" | "opencode" | "pi"
+            | "hermes" | "cursor" | "kimi-code" | "openclaw" | "qoder" | "tencent-codebuddy"
+            | "cline" | "aider" => Some(1),
             _ => None,
         }
     }
@@ -228,11 +232,11 @@ mod tests {
     fn only_provenance_backed_fixture_revisions_are_declared() {
         for provider_id in IMPLEMENTED_PROVIDERS {
             let manifest = manifest_for(provider_id, fixture_revision(provider_id), &[]);
-            let expected = match provider_id {
-                "claude-code" | "codex" => Some(1),
-                _ => None,
-            };
-            assert_eq!(manifest.fixture_revision, expected, "{provider_id}");
+            assert_eq!(
+                manifest.fixture_revision,
+                Some(1),
+                "{provider_id} should carry fixture_revision 1"
+            );
         }
     }
 

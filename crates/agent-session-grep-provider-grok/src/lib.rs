@@ -64,7 +64,10 @@ struct UpdateRecord {
 struct UpdateParams {
     #[serde(default)]
     update: Option<UpdateBody>,
-    #[serde(default)]
+    // The ACP `session/update` payload nests meta under `_meta` (leading
+    // underscore); `rename_all` alone would not map `meta` → `_meta`, so the
+    // explicit rename is required for promptId/promptIndex to be observed.
+    #[serde(default, rename = "_meta")]
     meta: Option<UpdateMeta>,
 }
 
@@ -96,7 +99,15 @@ impl ProviderAdapter for GrokBuildAdapter {
     }
 
     fn manifest(&self) -> AdapterManifest {
-        manifest_for(self.provider_id(), None, &[])
+        manifest_for(
+            self.provider_id(),
+            Some(1),
+            &[
+                "chunk grouping reconstructs roles; no per-message native ids (synthetic grok-msg-{seq})",
+                "per-message timestamps are not extracted (always None)",
+                "session identity falls back to the first ACP promptId seen, not a durable session id",
+            ],
+        )
     }
 
     fn probe(&self, bytes: &[u8]) -> Result<ProbeResult, ProviderError> {
@@ -417,7 +428,7 @@ mod tests {
         assert_eq!(manifest.capabilities.provider_id, adapter.provider_id());
         assert_eq!(manifest.capabilities.variant_id, VARIANT_ID);
         assert!(manifest.last_certified_targets.is_empty());
-        assert_eq!(manifest.fixture_revision, None);
+        assert_eq!(manifest.fixture_revision, Some(1));
     }
 
     #[test]
