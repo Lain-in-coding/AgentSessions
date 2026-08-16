@@ -97,8 +97,14 @@ MIT OR Apache-2.0
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Community provider adapters follow
-the Provider Adapter Protocol (versioned external process, manifest-declared,
+the [Provider Adapter Contributor Guide](docs/PROVIDER-ADAPTER-CONTRIBUTOR-GUIDE.md)
+and the Provider Adapter Protocol (versioned external process, manifest-declared,
 read-only, no network by default).
+
+Use the [bug report](.github/ISSUE_TEMPLATE/bug-report.yml) or
+[feature request](.github/ISSUE_TEMPLATE/feature-request.yml) forms for
+privacy-safe proposals; the [pull request template](.github/pull_request_template.md)
+records the evidence and validation checklist.
 
 Release history is tracked in [CHANGELOG.md](CHANGELOG.md); security
 boundaries and the vulnerability reporting process are in

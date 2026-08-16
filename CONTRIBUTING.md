@@ -5,6 +5,16 @@ collaboration standards for this repository. They are strict on purpose: the
 project is local-first and privacy-sensitive, so keeping secrets and personal
 data out of history is the highest priority.
 
+## Contribution entry points
+
+- Provider adapters: [Provider Adapter Contributor Guide](docs/PROVIDER-ADAPTER-CONTRIBUTOR-GUIDE.md)
+- Bugs: [bug report form](.github/ISSUE_TEMPLATE/bug-report.yml)
+- Ideas: [feature request form](.github/ISSUE_TEMPLATE/feature-request.yml)
+- Pull requests: [pull request template](.github/pull_request_template.md)
+
+The adapter guide adds provider-specific evidence and privacy requirements; the
+commit, collaboration, and quality standards below remain in force.
+
 ## Commit messages (Conventional Commits)
 
 1. Format: `type(scope): subject`, where `type` is one of
