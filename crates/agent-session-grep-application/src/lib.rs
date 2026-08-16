@@ -11,8 +11,9 @@ use agent_session_grep_domain::{
 use agent_session_grep_ports::{
     CanonicalEventSink, CatalogEntry, CatalogStore, Confidence, ContextGraphStore, MessageEvent,
     NoResumeClaims, NoSemanticIndex, ParseReport, PortError, PortResult, ProbeResult,
-    ProviderAdapter, ProviderError, ResumeClaimsStore, RetrievalMode, SearchFilters, SearchHit,
-    SearchIndex, SearchInstant, SearchQuery, SemanticIndex, SessionResumeMetadata,
+    ProviderAdapter, ProviderError, ReadOnlySource, ResumeClaimsStore, RetrievalMode,
+    SearchFilters, SearchHit, SearchIndex, SearchInstant, SearchQuery, SemanticIndex,
+    SessionResumeMetadata,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -442,14 +443,35 @@ fn stage_probed(
     }
     let mut sink = StagingSink::default();
     let report = adapter.parse(bytes, &mut sink)?;
+    Ok(staged_batch(sink, report))
+}
+
+/// Reader-aware variant of [`stage_probed`]: parses via a fresh bounded reader,
+/// so no source-sized byte buffer crosses the application boundary.
+fn stage_source_probed(
+    adapter: &dyn ProviderAdapter,
+    source: &dyn ReadOnlySource,
+    probe: ProbeResult,
+) -> Result<StagedBatch, AppError> {
+    if matches!(probe.confidence, Confidence::Ambiguous) {
+        return Err(
+            DomainError::InvalidRequest(format!("ambiguous variant {}", probe.variant_id)).into(),
+        );
+    }
+    let mut sink = StagingSink::default();
+    let report = adapter.parse_source(source, &mut sink)?;
+    Ok(staged_batch(sink, report))
+}
+
+fn staged_batch(sink: StagingSink, report: ParseReport) -> StagedBatch {
     // 镜像到兼容别名（见 StagedBatch::session_native_id 文档）：唯一权威来源
     // 是 report.session_native_id。
     let session_native_id = report.session_native_id.clone();
-    Ok(StagedBatch {
+    StagedBatch {
         messages: sink.buffered,
         report,
         session_native_id,
-    })
+    }
 }
 
 /// 从多个 provider adapter 中选出匹配的那个，再 stage（RFC-0002 §3 provider 选择）。
@@ -525,6 +547,72 @@ pub fn select_and_stage(
     }
     // 复用选中时的 probe 结果，不再对同一字节第二次 probe。
     stage_probed(adapters[idx], bytes, probe)
+}
+
+/// Select and stage a repeatable read-only source (RFC-0002 §7 bounded ingest).
+///
+/// Same selection rules as [`select_and_stage`], but every probe/parse opens a
+/// fresh bounded reader, so no source-sized byte buffer crosses the application
+/// boundary. Returns `(staged, selected variant_id)`.
+pub fn select_and_stage_source(
+    adapters: &[&dyn ProviderAdapter],
+    source: &dyn ReadOnlySource,
+) -> Result<(StagedBatch, String), AppError> {
+    // 置信度排序键：越大越可信；ambiguous 不参与。
+    fn rank(c: Confidence) -> Option<u8> {
+        match c {
+            Confidence::Confirmed => Some(3),
+            Confidence::High => Some(2),
+            Confidence::Low => Some(1),
+            Confidence::Ambiguous => None,
+        }
+    }
+
+    let mut best: Option<(u8, usize, ProbeResult)> = None; // (rank, adapter index, probe)
+    let mut tie = false;
+    let mut last_probe_error: Option<ProviderError> = None;
+    for (idx, adapter) in adapters.iter().enumerate() {
+        let probe = match adapter.probe_source(source) {
+            Ok(probe) => probe,
+            Err(error) => {
+                last_probe_error = Some(error);
+                continue;
+            }
+        };
+        let Some(r) = rank(probe.confidence) else {
+            continue;
+        };
+        match &best {
+            Some((best_rank, _, best_probe)) => {
+                if r > *best_rank {
+                    best = Some((r, idx, probe));
+                    tie = false;
+                } else if r == *best_rank && probe.variant_id != best_probe.variant_id {
+                    tie = true;
+                }
+            }
+            None => best = Some((r, idx, probe)),
+        }
+    }
+
+    let (_, idx, probe) = best.ok_or_else(|| {
+        let detail = match last_probe_error {
+            Some(error) => format!("; last probe failure: {error}"),
+            None => String::new(),
+        };
+        DomainError::InvalidRequest(format!("no provider recognized this source{detail}"))
+    })?;
+    if tie {
+        return Err(DomainError::InvalidRequest(format!(
+            "ambiguous provider selection: multiple variants matched with equal confidence \
+             (one candidate was {})",
+            probe.variant_id
+        ))
+        .into());
+    }
+    let variant = probe.variant_id.clone();
+    let staged = stage_source_probed(adapters[idx], source, probe)?;
+    Ok((staged, variant))
 }
 
 /// 内存 staging sink：只缓冲，绝不触库。
@@ -5455,6 +5543,84 @@ mod tests {
             err.to_string(),
             "invalid request: no provider recognized this source",
             "无 probe 错误时消息必须保持原样"
+        );
+    }
+
+    // ---- source-scoped staging（RFC-0002 §7 bounded ingest）----
+
+    /// 用 BoundedWholeSource provider id（cline）的 fake：默认 probe_source /
+    /// parse_source 走「上限内整读 + 委托字节 parse」路径，无需覆盖新方法。
+    struct SourceFake;
+    impl ProviderAdapter for SourceFake {
+        fn provider_id(&self) -> &str {
+            "cline"
+        }
+        fn manifest(&self) -> agent_session_grep_ports::AdapterManifest {
+            agent_session_grep_ports::manifest_for(self.provider_id(), None, &[])
+        }
+        fn probe(
+            &self,
+            _bytes: &[u8],
+        ) -> Result<agent_session_grep_ports::ProbeResult, ProviderError> {
+            Ok(agent_session_grep_ports::ProbeResult {
+                variant_id: "cline/fake-v1".into(),
+                confidence: Confidence::Confirmed,
+                matched_evidence: vec!["fake probe".into()],
+                unmatched_evidence: Vec::new(),
+            })
+        }
+        fn parse(
+            &self,
+            _bytes: &[u8],
+            sink: &mut dyn CanonicalEventSink,
+        ) -> Result<agent_session_grep_ports::ParseReport, ProviderError> {
+            sink.emit_message(MessageEvent {
+                seq: 0,
+                native_id: "m-1",
+                parent_native_id: None,
+                role: "user",
+                text: "hi",
+                timestamp: None,
+                is_sidechain: false,
+                span: Some((0, 2)),
+            })
+            .map_err(|e| ProviderError::Io(e.to_string()))?;
+            Ok(agent_session_grep_ports::ParseReport {
+                committed: 1,
+                ..Default::default()
+            })
+        }
+    }
+
+    #[test]
+    fn select_and_stage_source_streams_selected_variant() {
+        // 生产路径：probe/parse 都从只读 source 重新打开，返回 (staged, variant)。
+        let source = agent_session_grep_ports::SliceSource::new(b"{}");
+        let refs: Vec<&dyn ProviderAdapter> = vec![&SourceFake];
+        let (staged, variant) = select_and_stage_source(&refs, &source).unwrap();
+        assert_eq!(variant, "cline/fake-v1");
+        assert_eq!(staged.messages.len(), 1);
+        assert_eq!(staged.messages[0].text, "hi");
+        assert_eq!(staged.report.committed, 1);
+    }
+
+    #[test]
+    fn select_and_stage_source_rejects_source_beyond_declared_cap() {
+        // 大文件上限回归：超过 manifest max_source_size 的源必须诚实拒绝
+        // （SourceTooLarge 诊断），而不是按文件大小分配内存或静默截断。
+        let big = vec![b'x'; (agent_session_grep_ports::JSON_FAMILY_MAX_SOURCE_BYTES as usize) + 1];
+        let source = agent_session_grep_ports::SliceSource::new(&big);
+        let refs: Vec<&dyn ProviderAdapter> = vec![&SourceFake];
+        let err = select_and_stage_source(&refs, &source).unwrap_err();
+        // probe 失败按既有选择语义跳过该 adapter，但最后 probe 错误细节（含
+        // 受测上限）必须透出，绝不 OOM、绝不静默截断。
+        assert!(matches!(
+            err,
+            AppError::Domain(DomainError::InvalidRequest(_))
+        ));
+        assert!(
+            err.to_string().contains("exceeds supported limit"),
+            "必须携带受测上限诊断: {err}"
         );
     }
 
