@@ -5,6 +5,9 @@ edition = "2021"
 publish = false
 description = "R0 可丢弃探针：验证 WAL 一致快照、旧 generation 只读打开与 Windows rename 语义。不进 crates/。"
 
+# 独立 workspace，避免被父目录意外纳入
+[workspace]
+
 [[bin]]
 name = "sqlite-snapshot-wal-spike"
 path = "src/main.rs"
