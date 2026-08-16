@@ -34,12 +34,14 @@ impl ProviderMaturity {
     }
 
     /// 目标分级（路线图），不是当前实现状态。
+    /// Deferred provider（无 transcript 证据）不声明目标，返回 None。
     pub fn target_for(provider_id: &str) -> Option<Self> {
         match provider_id {
             "claude-code" | "codex" => Some(Self::Certified),
             "grok-build" | "opencode" | "pi" | "antigravity" | "kimi-code" | "openclaw"
-            | "hermes" | "qoder" | "tencent-codebuddy" | "deepseek-harness" => Some(Self::Beta),
-            "zcode" | "aider" | "cline" | "cursor" => Some(Self::Experimental),
+            | "hermes" | "qoder" | "tencent-codebuddy" => Some(Self::Beta),
+            "aider" | "cline" | "cursor" => Some(Self::Experimental),
+            // deepseek-harness / zcode: 无证据 deferred，不设目标
             _ => None,
         }
     }
@@ -262,6 +264,21 @@ impl ProviderCapabilityMatrix {
                     incremental: CapabilityLevel::Unsupported,
                 },
                 ProviderCapability {
+                    provider_id: "opencode".into(),
+                    variant_id: "opencode/sqlite-v1".into(),
+                    maturity: ProviderMaturity::Experimental,
+                    discover: CapabilityLevel::Unsupported,
+                    probe: CapabilityLevel::Native,
+                    parse: CapabilityLevel::Native,
+                    search: CapabilityLevel::Native,
+                    context: CapabilityLevel::Unsupported,
+                    resume: CapabilityLevel::Derived,
+                    handoff: CapabilityLevel::Unsupported,
+                    tool_activity: CapabilityLevel::Unsupported,
+                    source_span: CapabilityLevel::Unsupported,
+                    incremental: CapabilityLevel::Unsupported,
+                },
+                ProviderCapability {
                     provider_id: "cline".into(),
                     variant_id: "cline/api-conversation-history-v1".into(),
                     maturity: ProviderMaturity::Experimental,
@@ -275,6 +292,81 @@ impl ProviderCapabilityMatrix {
                     tool_activity: CapabilityLevel::Unsupported,
                     source_span: CapabilityLevel::Derived,
                     incremental: CapabilityLevel::Unsupported,
+                },
+                ProviderCapability {
+                    provider_id: "hermes".into(),
+                    variant_id: "hermes/session-json-v1".into(),
+                    maturity: ProviderMaturity::Experimental,
+                    discover: CapabilityLevel::Unsupported,
+                    probe: CapabilityLevel::Native,
+                    parse: CapabilityLevel::Native,
+                    search: CapabilityLevel::Native,
+                    context: CapabilityLevel::Unsupported,
+                    resume: CapabilityLevel::Unknown,
+                    handoff: CapabilityLevel::Unsupported,
+                    tool_activity: CapabilityLevel::Unsupported,
+                    source_span: CapabilityLevel::Unsupported,
+                    incremental: CapabilityLevel::Unsupported,
+                },
+                ProviderCapability {
+                    provider_id: "antigravity".into(),
+                    variant_id: "antigravity/transcript-jsonl-v1".into(),
+                    maturity: ProviderMaturity::Experimental,
+                    discover: CapabilityLevel::Unsupported,
+                    probe: CapabilityLevel::Native,
+                    parse: CapabilityLevel::Native,
+                    search: CapabilityLevel::Native,
+                    context: CapabilityLevel::Unsupported,
+                    resume: CapabilityLevel::Unknown,
+                    handoff: CapabilityLevel::Unsupported,
+                    tool_activity: CapabilityLevel::Unsupported,
+                    source_span: CapabilityLevel::Unsupported,
+                    incremental: CapabilityLevel::Unsupported,
+                },
+                ProviderCapability {
+                    provider_id: "cursor".into(),
+                    variant_id: "cursor/vscdb-chat-v1".into(),
+                    maturity: ProviderMaturity::Experimental,
+                    discover: CapabilityLevel::Unsupported,
+                    probe: CapabilityLevel::Native,
+                    parse: CapabilityLevel::Native,
+                    search: CapabilityLevel::Native,
+                    context: CapabilityLevel::Unsupported,
+                    resume: CapabilityLevel::Unknown,
+                    handoff: CapabilityLevel::Unsupported,
+                    tool_activity: CapabilityLevel::Unsupported,
+                    source_span: CapabilityLevel::Unsupported,
+                    incremental: CapabilityLevel::Unsupported,
+                },
+                ProviderCapability {
+                    provider_id: "deepseek-harness".into(),
+                    variant_id: String::new(),
+                    maturity: ProviderMaturity::Unsupported,
+                    discover: CapabilityLevel::Unknown,
+                    probe: CapabilityLevel::Unknown,
+                    parse: CapabilityLevel::Unknown,
+                    search: CapabilityLevel::Unknown,
+                    context: CapabilityLevel::Unknown,
+                    resume: CapabilityLevel::Unknown,
+                    handoff: CapabilityLevel::Unknown,
+                    tool_activity: CapabilityLevel::Unknown,
+                    source_span: CapabilityLevel::Unknown,
+                    incremental: CapabilityLevel::Unknown,
+                },
+                ProviderCapability {
+                    provider_id: "zcode".into(),
+                    variant_id: String::new(),
+                    maturity: ProviderMaturity::Unsupported,
+                    discover: CapabilityLevel::Unknown,
+                    probe: CapabilityLevel::Unknown,
+                    parse: CapabilityLevel::Unknown,
+                    search: CapabilityLevel::Unknown,
+                    context: CapabilityLevel::Unknown,
+                    resume: CapabilityLevel::Unknown,
+                    handoff: CapabilityLevel::Unknown,
+                    tool_activity: CapabilityLevel::Unknown,
+                    source_span: CapabilityLevel::Unknown,
+                    incremental: CapabilityLevel::Unknown,
                 },
             ],
         }
@@ -303,6 +395,10 @@ mod tests {
     fn implemented_providers_are_experimental() {
         let m = ProviderCapabilityMatrix::current();
         for p in &m.providers {
+            // Deferred providers (deepseek-harness/zcode) 保持 Unsupported 无证据，跳过。
+            if p.maturity == ProviderMaturity::Unsupported {
+                continue;
+            }
             assert_eq!(
                 p.maturity,
                 ProviderMaturity::Experimental,
@@ -315,6 +411,16 @@ mod tests {
     fn target_maturity_is_higher_than_current() {
         let m = ProviderCapabilityMatrix::current();
         for p in &m.providers {
+            // Deferred providers (no evidence yet) have no declared target;
+            // they stay Unsupported until evidence arrives.
+            if p.maturity == ProviderMaturity::Unsupported {
+                assert!(
+                    ProviderMaturity::target_for(&p.provider_id).is_none(),
+                    "{} is unsupported/deferred and must not claim a target",
+                    p.provider_id
+                );
+                continue;
+            }
             let target = ProviderMaturity::target_for(&p.provider_id);
             assert!(target.is_some(), "{} should have a target", p.provider_id);
             // Providers whose target IS experimental (cline, aider, zcode, cursor)
@@ -350,10 +456,62 @@ mod tests {
 
     #[test]
     fn experimental_targets_are_correct() {
-        for id in &["zcode", "aider", "cline", "cursor"] {
+        for id in &["aider", "cline", "cursor"] {
             assert_eq!(
                 ProviderMaturity::target_for(id),
                 Some(ProviderMaturity::Experimental)
+            );
+        }
+        // zcode 无证据 deferred，与 deepseek-harness 一致：不声明目标
+        assert!(ProviderMaturity::target_for("zcode").is_none());
+    }
+
+    #[test]
+    fn current_matrix_has_all_sixteen_providers() {
+        let m = ProviderCapabilityMatrix::current();
+        assert_eq!(
+            m.providers.len(),
+            16,
+            "matrix must list all 16 providers (evidence wave 08-15), got {}",
+            m.providers.len()
+        );
+    }
+
+    #[test]
+    fn deepseek_harness_and_zcode_are_deferred() {
+        let m = ProviderCapabilityMatrix::current();
+        for id in &["deepseek-harness", "zcode"] {
+            let p = m
+                .find(id)
+                .unwrap_or_else(|| panic!("{id} should be in matrix"));
+            assert_eq!(
+                p.maturity,
+                ProviderMaturity::Unsupported,
+                "{id} must remain unsupported/deferred until real transcript evidence exists"
+            );
+            assert!(
+                p.variant_id.is_empty(),
+                "{id} variant must be empty when deferred, got {}",
+                p.variant_id
+            );
+        }
+    }
+
+    #[test]
+    fn hermes_antigravity_cursor_are_experimental() {
+        let m = ProviderCapabilityMatrix::current();
+        for id in &["hermes", "antigravity", "cursor"] {
+            let p = m
+                .find(id)
+                .unwrap_or_else(|| panic!("{id} should be in matrix"));
+            assert_eq!(
+                p.maturity,
+                ProviderMaturity::Experimental,
+                "{id} should be experimental (evidence wave 08-16)"
+            );
+            assert!(
+                !p.variant_id.is_empty(),
+                "{id} should have a variant id after evidence-wave implementation"
             );
         }
     }
