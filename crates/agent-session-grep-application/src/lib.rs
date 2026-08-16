@@ -850,7 +850,12 @@ fn assemble_search_hit(
     hit.text = full_text
         .as_deref()
         .map(|text| text.chars().take(max_snippet_chars).collect());
-    hit.session_id = session.map(|s| s.as_str().to_string());
+    // 保留 adapter 提供的 canonical session_id（Session 元数据命中自带归属
+    // 会话）；否则才用 placement 解析的归属会话回填。metadata-only Session
+    // 命中无 placement，session_of 返回 None，不得把既有值覆盖成 None。
+    if hit.session_id.is_none() {
+        hit.session_id = session.map(|s| s.as_str().to_string());
+    }
     hit.why_matched = guidance::why_matched(
         query_terms,
         full_text.as_deref(),

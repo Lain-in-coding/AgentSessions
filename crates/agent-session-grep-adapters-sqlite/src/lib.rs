@@ -66,6 +66,8 @@ static NEXT_OPERATION_ID: AtomicU64 = AtomicU64::new(0);
 /// 批量 `IN (...)` 查询的单块 id 上限。SQLite 的变量上限是 999（旧版）/
 /// 32766（3.32+），一个大 batch 的 placement/entity 数远超此限，必须分块。
 const BATCH_IN_CHUNK: usize = 500;
+/// Session 元数据搜索投影（`session_fts.text`）单字段的字符上限（schema v11）。
+const SESSION_SEARCH_FIELD_CHARS: usize = 4096;
 
 /// 批量 INSERT 每块行数。
 ///
@@ -1359,6 +1361,9 @@ impl SqliteStore {
         if current < 10 {
             Self::migrate_v9_to_v10(conn)?;
         }
+        if current < 11 {
+            Self::migrate_v10_to_v11(conn)?;
+        }
         // 不随 user_version 门控：旧 v7 库（本列存在前建成的）打开时同样需要。
         Self::ensure_fts_ids_rowid(conn)?;
         Ok(())
@@ -1607,6 +1612,27 @@ impl SqliteStore {
              );
              CREATE INDEX IF NOT EXISTS message_vec_model ON message_vec(model_id);
              PRAGMA user_version = 10;",
+        )
+        .map_err(backend)?;
+        tx.commit().map_err(backend)
+    }
+
+    /// Add the v11 privacy-safe Session metadata search projection.
+    ///
+    /// Both tables are derived state: `session_fts` holds only bounded, resolved
+    /// Session metadata and `session_fts_ids` maps the canonical Session wire to
+    /// the FTS rowid. Existing catalog, message FTS, claims, and relations remain
+    /// untouched; rebuild or the next affected source commit populates the new
+    /// projection for migrated databases.
+    fn migrate_v10_to_v11(conn: &Connection) -> PortResult<()> {
+        let tx = conn.unchecked_transaction().map_err(backend)?;
+        tx.execute_batch(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS session_fts USING fts5(session_wire UNINDEXED, text);
+             CREATE TABLE IF NOT EXISTS session_fts_ids (
+                 session_wire TEXT PRIMARY KEY,
+                 fts_rowid    INTEGER NOT NULL
+             );
+             PRAGMA user_version = 11;",
         )
         .map_err(backend)?;
         tx.commit().map_err(backend)
@@ -3605,6 +3631,264 @@ impl SqliteStore {
         Ok(())
     }
 
+    /// 收集本批被触碰的 placement id 归属的 Session 集合（分块 IN，无 N+1）。
+    fn collect_placement_sessions(
+        conn: &Connection,
+        placement_ids: &[String],
+        sessions: &mut BTreeSet<String>,
+    ) -> PortResult<()> {
+        for chunk in chunk_ids(placement_ids) {
+            let placeholders = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            let mut stmt = conn
+                .prepare(&format!(
+                    "SELECT DISTINCT session_id FROM message_placements
+                     WHERE placement_id IN ({placeholders})"
+                ))
+                .map_err(backend)?;
+            let rows = stmt
+                .query_map(rusqlite::params_from_iter(chunk.iter()), |row| {
+                    row.get::<_, String>(0)
+                })
+                .map_err(backend)?;
+            for row in rows {
+                sessions.insert(row.map_err(backend)?);
+            }
+        }
+        Ok(())
+    }
+
+    /// 收集本批被触碰的 message id 归属的 Session 集合（分块 IN，无 N+1）。
+    fn collect_message_sessions(
+        conn: &Connection,
+        message_ids: &[String],
+        sessions: &mut BTreeSet<String>,
+    ) -> PortResult<()> {
+        for chunk in chunk_ids(message_ids) {
+            let placeholders = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            let mut stmt = conn
+                .prepare(&format!(
+                    "SELECT DISTINCT session_id FROM message_placements
+                     WHERE message_id IN ({placeholders})"
+                ))
+                .map_err(backend)?;
+            let rows = stmt
+                .query_map(rusqlite::params_from_iter(chunk.iter()), |row| {
+                    row.get::<_, String>(0)
+                })
+                .map_err(backend)?;
+            for row in rows {
+                sessions.insert(row.map_err(backend)?);
+            }
+        }
+        Ok(())
+    }
+
+    /// 收集本批 source replacement 触碰的 Session 集合（分块 IN，无 N+1）。
+    fn collect_resume_claim_sessions(
+        conn: &Connection,
+        source_paths: &[String],
+        sessions: &mut BTreeSet<String>,
+    ) -> PortResult<()> {
+        for chunk in chunk_ids(source_paths) {
+            let placeholders = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            let mut stmt = conn
+                .prepare(&format!(
+                    "SELECT DISTINCT session_id FROM source_session_resume_claims
+                     WHERE source_path IN ({placeholders})"
+                ))
+                .map_err(backend)?;
+            let rows = stmt
+                .query_map(rusqlite::params_from_iter(chunk.iter()), |row| {
+                    row.get::<_, String>(0)
+                })
+                .map_err(backend)?;
+            for row in rows {
+                sessions.insert(row.map_err(backend)?);
+            }
+        }
+        Ok(())
+    }
+
+    /// Build one Session's bounded search text from authoritative relational
+    /// state. A representative placement is required so a metadata match can be
+    /// returned as an existing Message `SearchHit` without fabricating an id.
+    fn session_search_text(conn: &Connection, session_wire: &str) -> PortResult<Option<String>> {
+        let session_exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM catalog WHERE id = ?1)",
+                [session_wire],
+                |row| row.get(0),
+            )
+            .map_err(backend)?;
+        if !session_exists {
+            return Ok(None);
+        }
+
+        let first_user_text = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT catalog.payload
+                     FROM message_placements
+                     JOIN catalog ON catalog.id = message_placements.message_id
+                     WHERE message_placements.session_id = ?1
+                     ORDER BY asg_instant_sort_key(
+                                  CASE WHEN json_valid(catalog.payload)
+                                       THEN json_extract(catalog.payload, '$.timestamp') END
+                              ) IS NULL,
+                              asg_instant_sort_key(
+                                  CASE WHEN json_valid(catalog.payload)
+                                       THEN json_extract(catalog.payload, '$.timestamp') END
+                              ),
+                              message_placements.document_id,
+                              message_placements.source_ordinal,
+                              message_placements.placement_id",
+                )
+                .map_err(backend)?;
+            let rows = stmt
+                .query_map([session_wire], |row| row.get::<_, Vec<u8>>(0))
+                .map_err(backend)?;
+            let mut first_user_text = None;
+            for row in rows {
+                let payload = row.map_err(backend)?;
+                if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&payload)
+                    && value.get("role").and_then(serde_json::Value::as_str) == Some("user")
+                    && let Some(text) = value.get("text").and_then(serde_json::Value::as_str)
+                    && !text.is_empty()
+                {
+                    first_user_text = Some(
+                        text.chars()
+                            .take(SESSION_SEARCH_FIELD_CHARS)
+                            .collect::<String>(),
+                    );
+                    break;
+                }
+            }
+            first_user_text
+        };
+
+        // Claims for one canonical Session must agree exactly. Conflict is
+        // privacy-sensitive, so fail closed and index none of their values.
+        let resolved_claim = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT session_id, provider_id, provider_session_id,
+                            provider_session_id_state, original_working_directory,
+                            original_working_directory_state, pair_observed
+                     FROM source_session_resume_claims
+                     WHERE session_id = ?1",
+                )
+                .map_err(backend)?;
+            let rows = stmt
+                .query_map([session_wire], |row| {
+                    Ok(StoredResumeClaim {
+                        session_id: row.get(0)?,
+                        provider_id: row.get(1)?,
+                        provider_session_id: row.get(2)?,
+                        provider_session_id_state: row.get(3)?,
+                        original_working_directory: row.get(4)?,
+                        original_working_directory_state: row.get(5)?,
+                        pair_observed: row.get(6)?,
+                    })
+                })
+                .map_err(backend)?;
+            let mut claim: Option<StoredResumeClaim> = None;
+            let mut conflicting = false;
+            for row in rows {
+                let next = row.map_err(backend)?;
+                if claim.as_ref().is_some_and(|current| current != &next) {
+                    conflicting = true;
+                    break;
+                }
+                claim = Some(next);
+            }
+            if conflicting { None } else { claim }
+        };
+
+        let mut fields = Vec::new();
+        if let Some(claim) = resolved_claim
+            && claim.provider_session_id_state == "resolved"
+            && let Some(provider_session_id) = claim.provider_session_id
+            && !provider_session_id.is_empty()
+        {
+            fields.push(
+                provider_session_id
+                    .chars()
+                    .take(SESSION_SEARCH_FIELD_CHARS)
+                    .collect(),
+            );
+            if claim.pair_observed
+                && claim.original_working_directory_state == "resolved"
+                && let Some(directory) = claim.original_working_directory
+                && !directory.is_empty()
+            {
+                fields.push(directory.chars().take(SESSION_SEARCH_FIELD_CHARS).collect());
+            }
+        }
+        if let Some(text) = first_user_text {
+            fields.push(text);
+        }
+        if fields.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(fields.join("\n")))
+        }
+    }
+
+    fn rebuild_session_search_row_in_tx(
+        tx: &rusqlite::Transaction<'_>,
+        session_wire: &str,
+    ) -> PortResult<()> {
+        tx.execute(
+            "DELETE FROM session_fts
+             WHERE rowid = (
+                 SELECT fts_rowid FROM session_fts_ids WHERE session_wire = ?1
+             )",
+            [session_wire],
+        )
+        .map_err(backend)?;
+        tx.execute(
+            "DELETE FROM session_fts_ids WHERE session_wire = ?1",
+            [session_wire],
+        )
+        .map_err(backend)?;
+        if let Some(text) = Self::session_search_text(tx, session_wire)? {
+            tx.execute(
+                "INSERT INTO session_fts(session_wire, text) VALUES(?1, ?2)",
+                rusqlite::params![session_wire, bigram_cjk(&text)],
+            )
+            .map_err(backend)?;
+            tx.execute(
+                "INSERT INTO session_fts_ids(session_wire, fts_rowid) VALUES(?1, ?2)",
+                rusqlite::params![session_wire, tx.last_insert_rowid()],
+            )
+            .map_err(backend)?;
+        }
+        Ok(())
+    }
+
+    fn rebuild_all_session_search_in_tx(tx: &rusqlite::Transaction<'_>) -> PortResult<()> {
+        tx.execute("DELETE FROM session_fts", []).map_err(backend)?;
+        tx.execute("DELETE FROM session_fts_ids", [])
+            .map_err(backend)?;
+        let sessions = {
+            let mut stmt = tx
+                .prepare("SELECT id FROM catalog WHERE id LIKE 'ses_v1_%' ORDER BY id")
+                .map_err(backend)?;
+            let rows = stmt
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(backend)?;
+            let mut sessions = Vec::new();
+            for row in rows {
+                sessions.push(row.map_err(backend)?);
+            }
+            sessions
+        };
+        for session_wire in sessions {
+            Self::rebuild_session_search_row_in_tx(tx, &session_wire)?;
+        }
+        Ok(())
+    }
+
     fn commit_index_batch_with_relations(
         &self,
         pending: &PendingIndexBatch,
@@ -3615,6 +3899,68 @@ impl SqliteStore {
         let mut conn = self.conn.borrow_mut();
         let tx = conn.transaction().map_err(backend)?;
         Self::verify_pending_in_tx(&tx, pending, upserts, deletes, relations)?;
+
+        // Session 元数据投影（schema v11）：收集本批触碰的 Session，提交末尾
+        // 逐个重建其 `session_fts` 行（删除按 rowid 经边车定位，重插新投影）。
+        // 覆盖 upsert/delete 实体、placement 变动（含移动归属的旧主）、以及
+        // source replacement 的旧 placement 与 claim 行——与写入路径同事务。
+        let mut affected_sessions = BTreeSet::new();
+        for id in upserts.iter().map(|(id, _, _)| id).chain(deletes.iter()) {
+            match id.kind() {
+                IdKind::Session => {
+                    affected_sessions.insert(id.as_str().to_string());
+                }
+                IdKind::Message => {
+                    Self::collect_message_sessions(
+                        &tx,
+                        &[id.as_str().to_string()],
+                        &mut affected_sessions,
+                    )?;
+                }
+                IdKind::Document => {}
+                IdKind::Source => {}
+            }
+        }
+        let mut old_placement_ids = Vec::new();
+        let mut source_paths = Vec::new();
+        for delete in &relations.relation_deletes {
+            if let RelationDeleteManifest::Placement(placement_id) = delete {
+                old_placement_ids.push(placement_id.as_str().to_string());
+            }
+        }
+        for upsert in &relations.relation_upserts {
+            if let RelationUpsertManifest::Placement(placement) = upsert {
+                // An upsert can move an existing placement to another Session;
+                // read its old owner before the INSERT ... ON CONFLICT update.
+                old_placement_ids.push(placement.id.as_str().to_string());
+                affected_sessions.insert(placement.session_id.as_str().to_string());
+                Self::collect_message_sessions(
+                    &tx,
+                    &[placement.message_id.as_str().to_string()],
+                    &mut affected_sessions,
+                )?;
+            }
+        }
+        for source in &relations.source_replacements {
+            source_paths.push(source.source_path.clone());
+            if let Some(claim) = &source.resume_claim {
+                affected_sessions.insert(claim.session_id.clone());
+            }
+            let mut stmt = tx
+                .prepare(
+                    "SELECT placement_id FROM source_placement_membership
+                     WHERE source_path = ?1",
+                )
+                .map_err(backend)?;
+            let rows = stmt
+                .query_map([&source.source_path], |row| row.get::<_, String>(0))
+                .map_err(backend)?;
+            for row in rows {
+                old_placement_ids.push(row.map_err(backend)?);
+            }
+        }
+        Self::collect_placement_sessions(&tx, &old_placement_ids, &mut affected_sessions)?;
+        Self::collect_resume_claim_sessions(&tx, &source_paths, &mut affected_sessions)?;
 
         // 批量写入：同一事务内以多行 VALUES 语句替代逐行 prepared execute
         // （借鉴 hstry bulk_insert_messages_in_tx，MIT，
@@ -3915,6 +4261,9 @@ impl SqliteStore {
             .map(|replacement| replacement.source_path.clone())
             .collect();
         Self::regenerate_compatibility_aliases_in_tx(&tx, &batch_sources)?;
+        for session_wire in affected_sessions {
+            Self::rebuild_session_search_row_in_tx(&tx, &session_wire)?;
+        }
 
         // 本批触碰的关系行：只校验这些 id 的引用完整性。
         let mut touched_placements: Vec<String> = Vec::new();
@@ -4389,6 +4738,10 @@ impl SqliteStore {
 
         tx.execute("DELETE FROM fts", []).map_err(backend)?;
         tx.execute("DELETE FROM fts_ids", []).map_err(backend)?;
+        // Session 元数据投影（schema v11）：全量重建 `session_fts`——与消息
+        // FTS 同一"catalog + claims 可重建投影"不变量，从声明与目录逐会话
+        // 重投影，绝不从既有 session_fts 内容复制。
+        Self::rebuild_all_session_search_in_tx(&tx)?;
         // 与提交路径一致：只有 Message 实体重投影进 fts，且把 fts5 行 rowid 回写
         // 进 fts_ids 边车，删除才能按 rowid 定位（见 ensure_fts_ids_rowid）。
         // 批量多行写入（与提交路径共用 batch_upsert_fts_in_tx；整表清空后
@@ -4507,7 +4860,13 @@ const RELATION_SCHEMA_VERSION: i64 = 7;
 ///
 /// v10：`message_vec` 语义向量边车表（#3）。与 `fts` 同级的 catalog 投影，
 /// 可从 catalog 全量重建；记录 model_id/dimension，换模型后旧向量可识别可清理。
-pub const SCHEMA_VERSION: i64 = 10;
+///
+/// v11：新增 `session_fts` 与 `session_fts_ids`，作为可重建、隐私安全的
+/// Session metadata 搜索投影（resolved Provider-native Session ID、pair-observed
+/// Original Working Directory、首个有效 user request 的 title-like 字段）；
+/// 旧目录无需数据迁移，rebuild 或后续 source 提交填充。Provider custom
+/// title/summary 仍未进入 Canonical 契约，继续显式 deferred。
+pub const SCHEMA_VERSION: i64 = 11;
 
 impl CatalogStore for SqliteStore {
     fn get(&self, id: &StableId) -> PortResult<Option<Vec<u8>>> {
@@ -5073,6 +5432,176 @@ impl ContextGraphStore for SqliteStore {
     }
 }
 
+impl SqliteStore {
+    /// 把 Session 元数据命中（`session_fts MATCH`）并进既有消息命中列表。
+    ///
+    /// 查询侧先做与消息路径同一的 CJK bigram 前置变换 + 字面量化；候选按
+    /// `bm25(session_fts)` 排序后取前 `limit` 条。每条命中以"首个非系统
+    /// 消息"作代表（保既有 SearchHit 形状，不臆造 id）；无非系统消息的
+    /// Session（metadata-only）直接以 canonical Session 身份返回。已由匹配
+    /// 非系统消息代表过的 Session 被排除（R3 去重），系统/developer 消息
+    /// 单独命中不得压制 metadata-only Session。
+    fn append_session_metadata_hits(
+        conn: &Connection,
+        safe_query: &str,
+        filters: &agent_session_grep_ports::SearchFilters,
+        message_wires: &[String],
+        limit: usize,
+        hits: &mut Vec<SearchHit>,
+    ) -> PortResult<()> {
+        if limit == 0 {
+            return Ok(());
+        }
+        let mut sql = String::from(
+            "SELECT
+                 COALESCE(
+                     (SELECT fi.id_json
+                        FROM fts_ids fi
+                      WHERE fi.wire_id = (
+                          SELECT representative.message_id
+                            FROM message_placements representative
+                            JOIN catalog representative_message
+                              ON representative_message.id = representative.message_id
+                           WHERE representative.session_id = sfi.session_wire
+                             AND COALESCE(
+                                     CASE WHEN json_valid(representative_message.payload)
+                                          THEN json_extract(
+                                              representative_message.payload,
+                                              '$.role'
+                                          ) END,
+                                     ''
+                                 ) NOT IN ('system', 'developer')
+                           ORDER BY representative.document_id,
+                                    representative.source_ordinal,
+                                    representative.placement_id
+                           LIMIT 1
+                      )),
+                     (SELECT fi.id_json
+                        FROM fts_ids fi
+                       WHERE fi.wire_id = sfi.session_wire)
+                 ),
+                 (SELECT representative.message_id
+                    FROM message_placements representative
+                    JOIN catalog representative_message
+                      ON representative_message.id = representative.message_id
+                   WHERE representative.session_id = sfi.session_wire
+                     AND COALESCE(
+                             CASE WHEN json_valid(representative_message.payload)
+                                  THEN json_extract(representative_message.payload, '$.role') END,
+                             ''
+                         ) NOT IN ('system', 'developer')
+                   ORDER BY representative.document_id,
+                            representative.source_ordinal,
+                            representative.placement_id
+                   LIMIT 1),
+                 sfi.session_wire,
+                 bm25(session_fts)
+             FROM session_fts
+             JOIN session_fts_ids sfi ON sfi.session_wire = session_fts.session_wire
+             WHERE session_fts MATCH ?1",
+        );
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(safe_query.to_string())];
+        for message_wire in message_wires {
+            sql.push_str(
+                " AND NOT EXISTS (
+                SELECT 1 FROM message_placements excluded_placement
+                JOIN catalog excluded_message
+                  ON excluded_message.id = excluded_placement.message_id
+                WHERE excluded_placement.session_id = sfi.session_wire
+                  AND excluded_placement.message_id = ?
+                  AND COALESCE(
+                          CASE WHEN json_valid(excluded_message.payload)
+                               THEN json_extract(excluded_message.payload, '$.role') END,
+                          ''
+                      ) NOT IN ('system', 'developer')
+            )",
+            );
+            params.push(Box::new(message_wire.clone()));
+        }
+        if !filters.providers.is_empty() || filters.since.is_some() || filters.until.is_some() {
+            sql.push_str(
+                " AND EXISTS (
+                     SELECT 1 FROM message_placements filtered_placement
+                     JOIN catalog filtered_document
+                       ON filtered_document.id = filtered_placement.document_id
+                     JOIN catalog filtered_message
+                       ON filtered_message.id = filtered_placement.message_id
+                     WHERE filtered_placement.session_id = sfi.session_wire",
+            );
+            if !filters.providers.is_empty() {
+                sql.push_str(
+                    " AND CASE WHEN json_valid(filtered_document.payload)
+                              THEN json_extract(filtered_document.payload, '$.provider') END IN (",
+                );
+                for (index, provider) in filters.providers.iter().enumerate() {
+                    if index > 0 {
+                        sql.push(',');
+                    }
+                    sql.push('?');
+                    params.push(Box::new(provider.as_str()));
+                }
+                sql.push(')');
+            }
+            if let Some(since) = filters.since {
+                sql.push_str(
+                    " AND asg_instant_sort_key(CASE WHEN json_valid(filtered_message.payload)
+                                                     THEN json_extract(filtered_message.payload, '$.timestamp') END) >= ?",
+                );
+                params.push(Box::new(since.sort_key().to_vec()));
+            }
+            if let Some(until) = filters.until {
+                sql.push_str(
+                    " AND asg_instant_sort_key(CASE WHEN json_valid(filtered_message.payload)
+                                                     THEN json_extract(filtered_message.payload, '$.timestamp') END) < ?",
+                );
+                params.push(Box::new(until.sort_key().to_vec()));
+            }
+            sql.push(')');
+        }
+        sql.push_str(" ORDER BY bm25(session_fts), sfi.session_wire LIMIT ?");
+        params.push(Box::new(limit as i64));
+
+        let mut stmt = conn.prepare(&sql).map_err(backend)?;
+        let params_ref: Vec<&dyn rusqlite::ToSql> =
+            params.iter().map(std::convert::AsRef::as_ref).collect();
+        let rows = stmt
+            .query_map(&*params_ref, |row| {
+                let id_json: Option<String> = row.get(0)?;
+                let message_wire: Option<String> = row.get(1)?;
+                let session_wire: String = row.get(2)?;
+                let bm25: f64 = row.get(3)?;
+                Ok((id_json, message_wire, session_wire, bm25))
+            })
+            .map_err(backend)?;
+        for row in rows {
+            let (id_json, message_wire, session_wire, bm25) = row.map_err(backend)?;
+            let id = match id_json {
+                Some(json) => serde_json::from_str(&json).map_err(backend)?,
+                None => message_wire
+                    .as_deref()
+                    .or(Some(session_wire.as_str()))
+                    .and_then(StableId::from_wire)
+                    .ok_or_else(|| {
+                        PortError::Backend(
+                            "session metadata representative has an invalid id".into(),
+                        )
+                    })?,
+            };
+            hits.push(SearchHit {
+                id,
+                score: -bm25 as f32,
+                session_id: Some(session_wire),
+                text: None,
+                why_matched: Vec::new(),
+                suggested_next_commands: Vec::new(),
+                occurrences: 1,
+                resume_available: false,
+            });
+        }
+        Ok(())
+    }
+}
+
 impl SearchIndex for SqliteStore {
     fn index(&self, id: &StableId, text: &str) -> PortResult<()> {
         let mut conn = self.conn.borrow_mut();
@@ -5102,20 +5631,40 @@ impl SearchIndex for SqliteStore {
         let filters = query.filters;
         if filters.is_empty() {
             // 无 filter：保持原有 SQL 形状逐字节不变，结果与排序与旧路径一致。
-            let mut stmt = conn
-                .prepare(
-                    "SELECT id, bm25(fts) FROM fts WHERE fts MATCH ?1
-                     ORDER BY bm25(fts), id LIMIT ?2",
-                )
-                .map_err(backend)?;
-            let rows = stmt
-                .query_map(rusqlite::params![safe_query, limit as i64], |row| {
-                    let id_json: String = row.get(0)?;
-                    let bm25: f64 = row.get(1)?;
-                    Ok((id_json, bm25))
-                })
-                .map_err(backend)?;
-            return collect_hits(rows);
+            let mut hits = {
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT id, bm25(fts) FROM fts WHERE fts MATCH ?1
+                         ORDER BY bm25(fts), id LIMIT ?2",
+                    )
+                    .map_err(backend)?;
+                let rows = stmt
+                    .query_map(rusqlite::params![&safe_query, limit as i64], |row| {
+                        let id_json: String = row.get(0)?;
+                        let bm25: f64 = row.get(1)?;
+                        Ok((id_json, bm25))
+                    })
+                    .map_err(backend)?;
+                collect_hits(rows)?
+            };
+            let message_wires: Vec<String> =
+                hits.iter().map(|hit| hit.id.as_str().to_string()).collect();
+            Self::append_session_metadata_hits(
+                &conn,
+                &safe_query,
+                filters,
+                &message_wires,
+                limit,
+                &mut hits,
+            )?;
+            hits.sort_by(|left, right| {
+                right
+                    .score
+                    .total_cmp(&left.score)
+                    .then_with(|| left.id.as_str().cmp(right.id.as_str()))
+            });
+            hits.truncate(limit);
+            return Ok(hits);
         }
 
         // Filtered path：谓词全部下推到同一条 prepared query，在 LIMIT 之前
@@ -5131,7 +5680,7 @@ impl SearchIndex for SqliteStore {
             "SELECT f.id, bm25(fts) FROM fts AS f
              WHERE fts MATCH ?1",
         );
-        let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(safe_query)];
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(safe_query.clone())];
         if !filters.providers.is_empty() {
             let mut clause = String::from(
                 " AND EXISTS (
@@ -5177,17 +5726,37 @@ impl SearchIndex for SqliteStore {
         sql.push_str(" ORDER BY bm25(fts), f.id LIMIT ?");
         params.push(Box::new(limit as i64));
 
-        let mut stmt = conn.prepare(&sql).map_err(backend)?;
-        let params_ref: Vec<&dyn rusqlite::ToSql> =
-            params.iter().map(std::convert::AsRef::as_ref).collect();
-        let rows = stmt
-            .query_map(&*params_ref, |row| {
-                let id_json: String = row.get(0)?;
-                let bm25: f64 = row.get(1)?;
-                Ok((id_json, bm25))
-            })
-            .map_err(backend)?;
-        collect_hits(rows)
+        let (mut hits, safe_query) = {
+            let mut stmt = conn.prepare(&sql).map_err(backend)?;
+            let params_ref: Vec<&dyn rusqlite::ToSql> =
+                params.iter().map(std::convert::AsRef::as_ref).collect();
+            let rows = stmt
+                .query_map(&*params_ref, |row| {
+                    let id_json: String = row.get(0)?;
+                    let bm25: f64 = row.get(1)?;
+                    Ok((id_json, bm25))
+                })
+                .map_err(backend)?;
+            (collect_hits(rows)?, safe_query)
+        };
+        let message_wires: Vec<String> =
+            hits.iter().map(|hit| hit.id.as_str().to_string()).collect();
+        Self::append_session_metadata_hits(
+            &conn,
+            &safe_query,
+            filters,
+            &message_wires,
+            limit,
+            &mut hits,
+        )?;
+        hits.sort_by(|left, right| {
+            right
+                .score
+                .total_cmp(&left.score)
+                .then_with(|| left.id.as_str().cmp(right.id.as_str()))
+        });
+        hits.truncate(limit);
+        Ok(hits)
     }
 }
 
@@ -5871,8 +6440,8 @@ mod filtered_query_tests {
             "claude rows must be excluded before LIMIT"
         );
         assert_eq!(
-            statements, 1,
-            "pushdown must stay inside a single prepared statement"
+            statements, 2,
+            "filtered message and session metadata candidates each use one prepared statement"
         );
     }
 
@@ -6023,7 +6592,6 @@ mod tests {
     fn schema_v10_creates_message_vec_table() {
         let store = SqliteStore::open_in_memory().unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 10);
         let conn = store.conn.borrow();
         let count: i64 = conn
             .query_row(
@@ -11424,6 +11992,261 @@ mod tests {
             )
             .unwrap();
         assert_eq!(legacy_fingerprint, "legacy-fingerprint");
+        // 重新打开同样触发 v10→v11 迁移：Session 元数据搜索投影表必须存在。
+        for table in ["session_fts", "session_fts_ids"] {
+            let exists: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE name = ?1",
+                    [table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(exists, 1, "migrated database must contain {table}");
+        }
+    }
+
+    #[test]
+    fn fresh_db_creates_session_metadata_projection_tables() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
+        let conn = store.conn.borrow();
+        for table in ["session_fts", "session_fts_ids"] {
+            let exists: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master
+                     WHERE name = ?1",
+                    [table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(exists, 1, "{table} must exist in a fresh database");
+        }
+        let columns: Vec<String> = conn
+            .prepare("PRAGMA table_info(session_fts_ids)")
+            .unwrap()
+            .query_map([], |row| row.get(1))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(columns, vec!["session_wire", "fts_rowid"]);
+    }
+
+    #[test]
+    fn session_metadata_search_is_private_incremental_and_rebuildable() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let session = sid(IdKind::Session, b"metadata-session");
+        let document = sid(IdKind::Document, b"metadata-document");
+        let message = sid(IdKind::Message, b"metadata-message");
+        let claim = |native: &str, pair_observed: bool| SourceResumeClaim {
+            provider_id: "synthetic".into(),
+            session_id: session.as_str().into(),
+            provider_session_id: Some(native.into()),
+            provider_session_id_state: "resolved".into(),
+            original_working_directory: Some("C:/private/worktree".into()),
+            original_working_directory_state: "resolved".into(),
+            pair_observed,
+        };
+        let batch = |claim: SourceResumeClaim| SourceBatch {
+            source_path: "private-source.jsonl".into(),
+            entries: vec![
+                entity_entry(&session),
+                typed_document_entry(&document),
+                typed_message_entry(&message, "first user metadata body"),
+            ],
+            placements: vec![placement(
+                &session,
+                &document,
+                &message,
+                0,
+                false,
+                Some((0, 5)),
+            )],
+            edges: Vec::new(),
+            relation_complete: true,
+            len_bytes: None,
+            fingerprint: None,
+            provider_id: None,
+            resume_claim: Some(claim),
+        };
+
+        store
+            .commit_source_batches_if_changed(std::slice::from_ref(&batch(claim(
+                "native-one",
+                true,
+            ))))
+            .unwrap();
+        let text: String = store
+            .conn
+            .borrow()
+            .query_row(
+                "SELECT text FROM session_fts WHERE session_wire = ?1",
+                [session.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(text.contains("native-one"));
+        assert!(text.contains("C:/private/worktree"));
+        assert!(text.contains("first user metadata body"));
+        assert!(!text.contains("private-source.jsonl"));
+
+        let native_hits = store.query("native-one", 10).unwrap();
+        assert_eq!(native_hits.len(), 1);
+        assert_eq!(native_hits[0].id, message);
+        assert_eq!(native_hits[0].session_id.as_deref(), Some(session.as_str()));
+        assert!(store.query("private-source.jsonl", 10).unwrap().is_empty());
+
+        {
+            let conn = store.conn.borrow();
+            conn.execute("DELETE FROM session_fts", []).unwrap();
+            conn.execute("DELETE FROM session_fts_ids", []).unwrap();
+        }
+        assert!(store.query("native-one", 10).unwrap().is_empty());
+        store.rebuild_index().unwrap();
+        assert_eq!(store.query("native-one", 10).unwrap().len(), 1);
+
+        store
+            .commit_source_batches_if_changed(std::slice::from_ref(&batch(claim(
+                "native-two",
+                false,
+            ))))
+            .unwrap();
+        assert!(store.query("native-one", 10).unwrap().is_empty());
+        let updated = store.query("native-two", 10).unwrap();
+        assert_eq!(updated.len(), 1);
+        let updated_text: String = store
+            .conn
+            .borrow()
+            .query_row(
+                "SELECT text FROM session_fts WHERE session_wire = ?1",
+                [session.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!updated_text.contains("C:/private/worktree"));
+
+        // A system-only representative must not suppress the metadata hit: the
+        // Application layer removes system messages by default, so the Session
+        // candidate remains the user-visible result for a native-id query.
+        {
+            let conn = store.conn.borrow();
+            conn.execute(
+                "UPDATE catalog SET payload = ?1 WHERE id = ?2",
+                rusqlite::params![
+                    serde_json::json!({ "role": "system", "text": "native-two" })
+                        .to_string()
+                        .into_bytes(),
+                    message.as_str(),
+                ],
+            )
+            .unwrap();
+        }
+        store.rebuild_index().unwrap();
+        let system_metadata_hits = store.query("native-two", 10).unwrap();
+        assert!(
+            system_metadata_hits
+                .iter()
+                .any(|hit| hit.id == session && hit.session_id.as_deref() == Some(session.as_str()))
+        );
+    }
+
+    #[test]
+    fn metadata_search_indexes_claim_without_user_message_or_placement() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let session = sid(IdKind::Session, b"metadata-only-session");
+        let claim = SourceResumeClaim {
+            provider_id: "synthetic".into(),
+            session_id: session.as_str().into(),
+            provider_session_id: Some("metadata-only-native".into()),
+            provider_session_id_state: "resolved".into(),
+            original_working_directory: Some("C:/metadata-only-worktree".into()),
+            original_working_directory_state: "resolved".into(),
+            pair_observed: true,
+        };
+        let batch = SourceBatch {
+            source_path: "metadata-only-source.jsonl".into(),
+            entries: vec![entity_entry(&session)],
+            placements: Vec::new(),
+            edges: Vec::new(),
+            relation_complete: true,
+            len_bytes: None,
+            fingerprint: None,
+            provider_id: None,
+            resume_claim: Some(claim),
+        };
+
+        store
+            .commit_source_batches_if_changed(std::slice::from_ref(&batch))
+            .unwrap();
+
+        let hits = store.query("metadata-only-native", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, session);
+        assert_eq!(hits[0].session_id.as_deref(), Some(session.as_str()));
+        assert!(store.query("C:/metadata-only-worktree", 10).unwrap().len() == 1);
+    }
+
+    #[test]
+    fn session_metadata_search_conflicting_claims_fail_closed() {
+        // 两个 Source 认领同一 canonical Session，但 provider_session_id 不同。
+        // `session_search_text` 必须 fail closed：两个 native id 都不进入
+        // session_fts 投影（首个 user 消息的 title-like 字段仍在——它不来自声明）。
+        let store = SqliteStore::open_in_memory().unwrap();
+        let session = sid(IdKind::Session, b"conflict-session");
+        let document = sid(IdKind::Document, b"conflict-document");
+        let message = sid(IdKind::Message, b"conflict-message");
+        let claim = |native: &str| SourceResumeClaim {
+            provider_id: "synthetic".into(),
+            session_id: session.as_str().into(),
+            provider_session_id: Some(native.into()),
+            provider_session_id_state: "resolved".into(),
+            original_working_directory: Some("C:/conflict-cwd".into()),
+            original_working_directory_state: "resolved".into(),
+            pair_observed: true,
+        };
+        let batch = |source_path: &str, native: &str| SourceBatch {
+            source_path: source_path.into(),
+            entries: vec![
+                entity_entry(&session),
+                typed_document_entry(&document),
+                typed_message_entry(&message, "conflict user body"),
+            ],
+            placements: vec![placement(&session, &document, &message, 0, false, None)],
+            edges: Vec::new(),
+            relation_complete: true,
+            len_bytes: None,
+            fingerprint: None,
+            provider_id: None,
+            resume_claim: Some(claim(native)),
+        };
+        store
+            .commit_source_batches_if_changed(&[
+                batch("conflict-a.jsonl", "conflict-native-alpha"),
+                batch("conflict-b.jsonl", "conflict-native-beta"),
+            ])
+            .unwrap();
+
+        // 任一冲突 native id 都不可检索。
+        assert!(
+            store.query("conflict-native-alpha", 10).unwrap().is_empty(),
+            "conflicting native id alpha must not be indexed"
+        );
+        assert!(
+            store.query("conflict-native-beta", 10).unwrap().is_empty(),
+            "conflicting native id beta must not be indexed"
+        );
+        // session_fts 行仍含首 user 消息投影（不来自冲突声明）。
+        let text: String = store
+            .conn
+            .borrow()
+            .query_row(
+                "SELECT text FROM session_fts WHERE session_wire = ?1",
+                [session.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(text.contains("conflict user body"));
+        assert!(!text.contains("conflict-native-alpha"));
+        assert!(!text.contains("conflict-native-beta"));
     }
 
     #[test]

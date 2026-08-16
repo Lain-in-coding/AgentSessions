@@ -168,6 +168,41 @@ text, opaque Session payload, diagnostics, progress, or errors.
   truncated to `YYYY-MM-DD`, for the Human table 日期 column. No port/DTO/schema
   change; Robot/MCP output is unaffected (Human-mode only projection).
 
+## Session metadata search projection (schema v11)
+
+`schema v11` (`migrate_v10_to_v11`) adds `session_fts` (FTS5,
+`session_wire UNINDEXED, text`) and `session_fts_ids` (session wire ↔ FTS
+rowid sidecar) as a rebuildable, privacy-safe search projection over Session
+metadata. It is a derived projection like the message `fts`, populated from
+`source_session_resume_claims` + catalog; never authoritative.
+
+- **Indexed fields**: resolved Provider-native Session ID
+  (`provider_session_id_state = 'resolved'`), Original Working Directory only
+  when `pair_observed = 1` AND resolved, and the first chronological valid
+  user request as the deterministic title-like field. Each field is bounded by
+  `SESSION_SEARCH_FIELD_CHARS` (4096 chars). Provider custom title/summary are
+  not yet part of the Canonical provider contract and remain explicitly
+  deferred.
+- **Fail-closed conflicts**: when the same canonical Session has conflicting
+  claims across Sources (any field disagrees), `session_search_text` returns
+  `None` for the claim block — none of that Session's claim values are
+  indexed, matching the `resume_of` conflict rule. It never picks by source
+  path or order.
+- **Never indexed**: `source_path`, transcript path, native IDs from other
+  providers, or anything outside the fixed privacy-filtered metadata shape.
+- **Maintenance**: `commit_index_batch_with_relations` collects affected
+  Sessions (upserts/deletes, placement moves, source replacements and claim
+  rows) and rebuilds their `session_fts` rows in the same transaction;
+  `rebuild_index` repopulates the projection entirely from catalog + claims.
+  Delete is rowid-scoped via the `session_fts_ids` sidecar.
+- **Query merge**: `query_filtered` runs the message-FTS query and a second
+  `session_fts MATCH` with the same `safe_fts_query`, merges deterministically
+  (score desc, wire id asc) and truncates to the limit. A Session already
+  represented by a matching non-system Message hit is deduplicated; a
+  metadata-only Session returns its canonical identity (or its first
+  non-system Message as representative) and remains discoverable before
+  Application-level system filtering.
+
 ### Known RFC-0001 §5.1 identity debt (follow-up, not blocking Resume)
 
 `installation_namespace` derives from absolute path and lacks: a persisted

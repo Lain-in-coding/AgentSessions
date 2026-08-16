@@ -1,8 +1,8 @@
 {"file": ".trellis/tasks/08-14-session-metadata-search/prd.md", "reason": "Verify resolved Provider Session ID, first chronological user request, pair-observed cwd search scope; source-path safety; mode-aware dedup; and explicit custom title/summary deferral"}
-{"file": ".trellis/tasks/08-14-session-metadata-search/design.md", "reason": "Verify separate session_fts projection, metadata-only canonical Session hits, system/developer representative guard, mode-aware merge, additive schema v10, and backend-local ranking caveat"}
+{"file": ".trellis/tasks/08-14-session-metadata-search/design.md", "reason": "Verify separate session_fts projection, metadata-only canonical Session hits, system/developer representative guard, mode-aware merge, additive schema v11, and backend-local ranking caveat"}
 {"file": ".trellis/spec/agentsessions-adapters-sqlite/backend/index.md", "reason": "Verify FTS rebuildable projection, catalog-as-truth, identity sidecar fidelity, no source_path in index, migration additive, and pair_observed privacy rule"}
 {"file": ".trellis/spec/agentsessions-application/backend/index.md", "reason": "Verify default message-grained search, group_by_session canonical Session dedup, occurrences, resume_available batch join, budget and cursor behavior"}
-{"file": "crates/agent-session-grep-adapters-sqlite/src/lib.rs", "reason": "Verify schema v10, session metadata projection, bounded fields, atomic incremental/full rebuild, metadata/message merge, filters, and system-only regression"}
+{"file": "crates/agent-session-grep-adapters-sqlite/src/lib.rs", "reason": "Verify schema v11, session metadata projection, bounded fields, atomic incremental/full rebuild, metadata/message merge, filters, and system-only regression"}
 {"file": "crates/agent-session-grep-application/src/lib.rs", "reason": "Verify adapter-provided canonical session_id is preserved and grouped/default search semantics remain compatible"}
 {"file": "crates/agent-session-grep-cli/src/main.rs", "reason": "Verify only formatting changed outside the metadata implementation and Human/MCP composition remains compatible"}
 {"file": "crates/agent-session-grep-cli/src/protocol.rs", "reason": "Verify SourceIo errors remain path-redacted and only formatting changed in this task worktree"}
@@ -12,4 +12,11 @@
 {"command": "cargo build --release", "result": "pass (isolated CARGO_TARGET_DIR)"}
 {"command": "cargo test -p agent-session-grep-adapters-sqlite session_metadata_search_is_private_incremental_and_rebuildable", "result": "pass; includes system-only metadata regression"}
 {"command": "cargo test -p agent-session-grep-application search_group_by_session", "result": "pass; default/grouped occurrences and resume availability"}
+{"command": "cargo test -p agent-session-grep-cli --test e2e search_by_provider_session_id", "result": "pass"}
+{"command": "cargo test -p agent-session-grep-cli --test e2e search_by_working_directory", "result": "pass; source path not searchable"}
 {"command": "git diff --check", "result": "pass"}
+{"check": "schema v11 migration", "reason": "SCHEMA_VERSION=11; migrate_v10_to_v11 creates session_fts/session_fts_ids after the v10 message_vec migration; additive CREATE, old catalogs migrate forward; title/summary columns not added (deferred)"}
+{"check": "session_fts projection", "reason": "session_search_text includes resolved provider_session_id, pair-observed resolved cwd, and first chronological user request, each bounded by SESSION_SEARCH_FIELD_CHARS (4096); never includes source_path"}
+{"check": "conflict fail-closed", "reason": "when the same canonical Session has conflicting claims (any field differs across Sources), session_search_text returns None for the claim block; the conflict test proves neither native id is indexed"}
+{"check": "incremental + rebuild", "reason": "commit_index_batch_with_relations rebuilds affected session_fts rows in the same transaction; rebuild_index repopulates the projection entirely from catalog + claims"}
+{"check": "system-only regression", "reason": "a matching system/developer Message does not suppress a metadata-only Session before Application-level system filtering"}

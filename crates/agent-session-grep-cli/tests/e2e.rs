@@ -1428,6 +1428,83 @@ fn sync_commits_then_reports_unchanged_on_resync_codex() {
 }
 
 #[test]
+fn search_by_provider_session_id_returns_session() {
+    // PRD R1（session metadata search）：resolved Provider-native Session ID
+    // 可检索——元数据命中以首个非系统用户消息为代表，携带 canonical session_id。
+    let (dir, db) = temp_db("metadata-native-id");
+    let fixture = dir.path().join("rollout-metadata-native.jsonl");
+    std::fs::write(
+        &fixture,
+        codex_incremental_fixture(
+            "native-metadata-session-id",
+            &[(
+                "metadata_user_message",
+                "user",
+                "metadata body user request",
+            )],
+        ),
+    )
+    .expect("write codex fixture");
+    let path = fixture.to_string_lossy().into_owned();
+
+    let out = run(&db, &["sync", &path]);
+    assert!(out.status.success(), "sync failed: {}", stdout(&out));
+
+    let out = run(&db, &["search", "native-metadata-session-id"]);
+    assert!(out.status.success(), "search failed: {}", stdout(&out));
+    let s = stdout(&out);
+    assert!(
+        s.contains("msg_v1_"),
+        "native id search should return a representative message hit: {s}"
+    );
+    assert!(
+        s.contains("ses_v1_"),
+        "native id hit should carry the canonical session_id: {s}"
+    );
+}
+
+#[test]
+fn search_by_working_directory_returns_session() {
+    // PRD R1：pair-observed Original Working Directory 可检索；source path
+    // 片段不可检索（R2 源路径安全）。
+    let (dir, db) = temp_db("metadata-cwd");
+    let fixture = dir.path().join("rollout-metadata-cwd.jsonl");
+    std::fs::write(
+        &fixture,
+        codex_incremental_fixture(
+            "cwd-metadata-session",
+            &[("cwd_user_message", "user", "cwd metadata body")],
+        ),
+    )
+    .expect("write codex fixture");
+    let path = fixture.to_string_lossy().into_owned();
+
+    let out = run(&db, &["sync", &path]);
+    assert!(out.status.success(), "sync failed: {}", stdout(&out));
+
+    let out = run(&db, &["search", "synthetic-codex-fixture"]);
+    assert!(out.status.success(), "search failed: {}", stdout(&out));
+    assert!(
+        stdout(&out).contains("msg_v1_"),
+        "pair-observed cwd should be searchable: {}",
+        stdout(&out)
+    );
+
+    let source_name = Path::new(&path)
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let out = run(&db, &["search", &source_name]);
+    assert!(out.status.success(), "search failed: {}", stdout(&out));
+    assert!(
+        !stdout(&out).contains("msg_v1_"),
+        "source path must never be searchable: {}",
+        stdout(&out)
+    );
+}
+
+#[test]
 fn sync_requires_at_least_one_file() {
     let (_dir, db) = temp_db("sync-empty");
     let out = run(&db, &["sync"]);

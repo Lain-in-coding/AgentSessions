@@ -22,7 +22,7 @@ Search resolved Provider Session ID, the current title-like first user request p
 
 ## Acceptance Criteria
 
-- [ ] Metadata-only queries return Sessions by resolved Provider Session ID, first chronological user request, and pair-observed working directory; provider custom title/summary remain explicitly deferred.
+- [x] Metadata-only queries return Sessions by resolved Provider Session ID, first chronological user request, and pair-observed working directory; provider custom title/summary remain explicitly deferred.
 - [x] No Source path is indexed, returned, or diagnosable.
 - [x] Session hits deduplicate against matching non-system Message hits and join with `resume_available`; final canonical Session dedup remains available through `group_by_session`.
 - [x] Budgets enforce JSON-escaped byte accounting for returned search fields.
