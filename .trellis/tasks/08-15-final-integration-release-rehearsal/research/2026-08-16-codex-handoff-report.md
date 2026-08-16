@@ -57,7 +57,10 @@
 
 1. **ToolActivity 移植合入 main**：集成 agent 正在隔离 worktree 把 `agent-a79f8db9b001ffc53`（baseline 058b434 → tip ed761cd，3 commits：`ba3a35d` domain+ports / `fe48b0a` sqlite+application schema v12 / `ed761cd` cli+providers+tests）cherry-pick 到 current main，冲突解决优先级：main 的 v10→v11 session_fts 迁移保持不变、在其上新增 v11→v12 tool_activities；保留 bounded ingestion/offline/serve-hardening/12-provider golden。合入后需复跑质量门。**已知 deferred**（与参考实现一致）：context enrichment（上下文视图携带活动）、TUI facet 控件、Robot capability 界面、retention/清理策略、source_fs capture/verify 流式化。
 2. **core-beta source-shrink 的 store-layer edge-integrity 缺陷**（既有）：`cannot delete a catalog entity still referenced by message edges` —— 基准测试 source-shrink 步骤触发，待修。
-3. **Cline `source_span: derived`** 实为 array-index pseudo-span（非 byte span），需修正或降级。
+3. ~~Cline `source_span: derived` 实为 array-index pseudo-span~~ ——已核实并非缺口：
+   `provider-cline/src/lib.rs` 已将 span 显式留空（`span: None`）并在
+   `capability.rs` 诚实声明 `source_span: unsupported`；PROVENANCE.md 记录了拒绝
+   pseudo-span 的理由。此条从残留风险中移除。
 
 ---
 
