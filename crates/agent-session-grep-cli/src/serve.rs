@@ -256,6 +256,11 @@ fn generate_token() -> String {
 /// The embedded Web UI HTML (single-page app, no external dependencies).
 const WEB_UI_HTML: &str = include_str!("web/index.html");
 
+/// Strip a query string from a request path for route matching.
+fn path_only(path: &str) -> &str {
+    path.split_once('?').map(|(p, _)| p).unwrap_or(path)
+}
+
 /// Route an HTTP request to the appropriate response, backed by the
 /// Application ADT over the same SqliteStore used by CLI/MCP/Robot.
 pub fn route_request(
@@ -270,7 +275,7 @@ pub fn route_request(
     if !req.check_host_loopback() {
         return HttpResponse::json(403, r#"{"error":"forbidden: non-loopback host"}"#);
     }
-    match (req.method.as_str(), req.path.as_str()) {
+    match (req.method.as_str(), path_only(req.path.as_str())) {
         ("GET", "/") => HttpResponse {
             status: 200,
             body: WEB_UI_HTML.to_string(),
