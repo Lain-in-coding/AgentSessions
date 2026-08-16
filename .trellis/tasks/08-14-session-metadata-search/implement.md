@@ -3,7 +3,7 @@
 ## Preconditions
 
 - `task.py start` this task before editing.
-- Work in `C:/AgentSessions/.claude/worktrees/integration-08-13-four-features-v2`.
+- Work in the task's isolated worktree.
 - Depends on `source_session_resume_claims` (schema v8) being present.
 - Research: `research/2026-08-14-status-audit.md` (gap confirmation).
 - Design: `design.md` (decisions D1-D5).

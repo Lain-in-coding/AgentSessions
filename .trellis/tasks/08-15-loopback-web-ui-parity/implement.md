@@ -2,13 +2,13 @@
 
 ## Preconditions
 
-- Worktree `C:/AgentSessions/.claude/worktrees/agent-ab5d10e0870a8bce9` on top
-  of the verified 08-13/08-14 baseline (main branch).
+- Work in an isolated worktree on top of the verified 08-13/08-14 baseline
+  (main branch).
 - Design: `design.md` (decisions D1-D7); research:
   `08-15-open-source-product-roadmap/research/2026-08-15-borrowable-code-inventory.md`
   (W1 agentsview auth pattern, MIT attribution).
 - Isolated build target to avoid polluting other agents' artifacts:
-  `CARGO_TARGET_DIR='C:/AgentSessions/target-08-15-web-ui'`.
+  `CARGO_TARGET_DIR=<repo>/target-08-15-web-ui`.
 
 ## Steps (as executed)
 

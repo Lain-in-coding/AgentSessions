@@ -4,10 +4,9 @@
 > Slice scope: ADR-0009 redaction engine + output-boundary wiring + `--offline`
 > flag + audit type + hook config documentation (no hook executor yet).
 >
-> NOTE: This design.md lives in the worktree task-dir copy because the main
-> repo task dir (`C:/AgentSessions/.trellis/tasks/08-15-offline-privacy-hooks/`)
-> was not writable from the isolated worktree. On integration, copy this file
-> (and the check.jsonl entry below) to the main repo.
+> NOTE: This design.md was first written in an isolated task-dir copy because
+> the main checkout task dir was not writable. On integration, copy this file
+> (and the check.jsonl entry below) to the main repository.
 
 ## Context
 
@@ -146,7 +145,7 @@ On integration, append as THREAT-MODEL.md section 8 (Proposed Additions).
 ## Verification (green at slice completion 2026-08-15)
 
 ```
-$env:CARGO_TARGET_DIR='C:/AgentSessions/target-08-15-privacy-hooks'
+CARGO_TARGET_DIR=<repo>/target-08-15-privacy-hooks
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace

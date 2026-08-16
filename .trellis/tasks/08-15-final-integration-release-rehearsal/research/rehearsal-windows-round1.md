@@ -106,7 +106,7 @@ CI 因 GitHub 账单问题不可用,在 WSL(Ubuntu,ext4,rustup stable 1.97.1 min
 
 **端到端验证**(synthetic fixture):
 - `--mode semantic` → `retrieval_mode: lexical_fallback` + warning "semantic search unavailable (mode semantic); fell back to lexical",词法命中仍返回 ✓
-- `resume <sid>` dry-run → `(cd C:/AgentSessions && claude --resume resume-ses-1)`;`--yes` 触发真实 claude 进程并把其非零退出转为 exit 7 + provider_error ✓
+- `resume <sid>` dry-run → `(cd <repo> && claude --resume resume-ses-1)`;`--yes` 触发真实 claude 进程并把其非零退出转为 exit 7 + provider_error ✓
 - `hook user-prompt-submit`(无 --enable)→ 空 context;加 `--enable` → 命中 + `ghp_...` 脱敏为 `[redacted:github_token]` ✓
 - 命令面 16→18(`resume`/`hook`);KNOWN_COMMANDS 测试同步。
 

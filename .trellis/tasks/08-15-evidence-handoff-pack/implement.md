@@ -7,7 +7,7 @@
   `08-15-offline-privacy-hooks` run in parallel — do not wait for them).
 - Research: parent PRD (`prd.md`), ADR-0009 (`docs/adr/ADR-0009-*.md`,
   Proposed — field shapes only), design.md (D1-D7).
-- Competitor scan: `C:/AgentHub/project/Github_src/` — verified no
+- Competitor scan: local ignored reference checkouts — verified no
   handoff-pack/context-pack contract exists in hstry / fast-resume / memex
   (parent PRD finding). fast-resume's truncation code is CLI resume-command
   specific, not applicable to the deterministic pack byte gate. Nothing to
@@ -91,7 +91,7 @@
 
 ## Validation
 
-- `CARGO_TARGET_DIR=C:/AgentSessions/target-08-15-handoff-pack`
+- With `CARGO_TARGET_DIR=<repo>/target-08-15-handoff-pack`:
   - `cargo fmt --all --check`
   - `cargo clippy --workspace --all-targets -- -D warnings`
   - `cargo test --workspace`

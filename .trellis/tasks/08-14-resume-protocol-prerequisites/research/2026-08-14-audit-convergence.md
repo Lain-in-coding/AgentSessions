@@ -2,8 +2,8 @@
 
 ## Quality gate status
 
-Full workspace gate GREEN (in `integration-08-13-four-features-v2` worktree,
-`CARGO_TARGET_DIR=C:/AgentSessions/target-resume-integration`):
+Full workspace gate GREEN in an isolated worktree
+(`CARGO_TARGET_DIR=<repo>/target-resume-integration`):
 
 - `cargo fmt --all --check` — pass
 - `cargo clippy --workspace --all-targets -- -D warnings` — pass
@@ -23,9 +23,9 @@ Full workspace gate GREEN (in `integration-08-13-four-features-v2` worktree,
 - **Fix** (`crates/agent-session-grep-cli/src/main.rs:1549`):
   - claude-code/codex branch now uses the full prefix path through and
     including the marker (`.claude`/`.codex`), e.g.
-    `claude-code:C:/users/x/.claude`.
+    `claude-code:<user-home>/.claude`.
   - fallback branch now uses the source's parent directory (e.g.
-    `synthetic:C:/fixtures`), grouping sibling sources.
+    `synthetic:<repo>/fixtures`), grouping sibling sources.
 - **Regression tests added**: `installation_namespace_groups_sources_by_provider_root`,
   `installation_namespace_fallback_groups_sibling_sources`.
 - **Renamed**: `fallback_message_and_placement_ids_are_path_independent` →

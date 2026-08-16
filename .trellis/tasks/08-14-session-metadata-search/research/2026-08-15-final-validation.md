@@ -1,6 +1,6 @@
 # Final validation: session metadata search
 
-- Worktree: `C:/AgentSessions/.claude/worktrees/session-metadata-search-08-15`
+- Checkout: isolated task worktree
 - Scope: schema v10 `session_fts` projection, metadata/message merge, canonical identity preservation, privacy and system-only regression.
 
 ## Delivered

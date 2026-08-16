@@ -3,7 +3,8 @@
 ## Preconditions
 
 - `task.py start` this task before editing.
-- Work in `C:/AgentSessions/.claude/worktrees/integration-08-13-four-features-v2` on top of the verified baseline (HEAD `f4175a0`, 33 modified/untracked paths, quality gate green).
+- Work in the task's isolated worktree on top of the verified baseline (HEAD
+  `f4175a0`, 33 modified/untracked paths, quality gate green).
 
 ## Steps
 

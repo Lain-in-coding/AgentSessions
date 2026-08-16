@@ -7,9 +7,9 @@
 ## Task metadata
 
 - `task.json` status: `planning`; `worktree_path: null`; `branch: null`; `completedAt: null`.
-- The task directory (`C:/AgentSessions/.trellis/tasks/08-14-session-metadata-search/`) contains only `prd.md`, `task.json`, and the empty `implement.jsonl` / `check.jsonl` scaffolds. No `design.md` or `implement.md` exists for this task.
+- The task directory (`.trellis/tasks/08-14-session-metadata-search/`) contains only `prd.md`, `task.json`, and the empty `implement.jsonl` / `check.jsonl` scaffolds. No `design.md` or `implement.md` exists for this task.
 - The referenced `implement.md` roadmap lives in the sibling task `08-14-resume-protocol-prerequisites` research file (`2026-08-14-audit-convergence.md`), which describes "Step 1 of roadmap" — the Human table real date + title work. That step belongs to the umbrella parent (`08-14-historical-session-discovery-resume`), not specifically to this metadata-search child task.
-- Worktree under audit: `C:/AgentSessions/.claude/worktrees/integration-08-13-four-features-v2`.
+- Checkout under audit: isolated worktree.
 
 ## PRD acceptance criteria vs. implementation
 
@@ -54,7 +54,7 @@ Conclusion: the metadata is stored and resolvable, but it is NOT queryable. A us
 
 **Status: DONE (as of the audit convergence file).**
 
-- The `2026-08-14-audit-convergence.md` records full workspace gate GREEN in the worktree (`CARGO_TARGET_DIR=C:/AgentSessions/target-resume-integration`): fmt pass, clippy pass, test pass (SQLite 135, Application 133, CLI 181, Claude 38, Codex 33, MCP 37, E2E 89), release build pass.
+- The `2026-08-14-audit-convergence.md` records full workspace gate GREEN in an isolated worktree (`CARGO_TARGET_DIR=<repo>/target-resume-integration`): fmt pass, clippy pass, test pass (SQLite 135, Application 133, CLI 181, Claude 38, Codex 33, MCP 37, E2E 89), release build pass.
 
 ## Step-1 roadmap item (referenced in the task prompt)
 
@@ -64,7 +64,7 @@ The task prompt asked to confirm whether "Step 1 — wire real `date_ymd` and `t
 
 ### `attach_session_resume_rows`
 
-- File: `C:/AgentSessions/.claude/worktrees/integration-08-13-four-features-v2/crates/agent-session-grep-cli/src/main.rs:1439-1486`.
+- File: `crates/agent-session-grep-cli/src/main.rs:1439-1486`.
 - Called only in Human mode (`main.rs:1105-1107`).
 - Collects distinct canonical Session IDs from page hits, calls `store.resume_of(&session_ids)` for resume metadata, then calls `store.latest_activity_ymd_for_sessions(&session_ids)` for the 日期 column.
 - Title is taken from the highest-relevance hit's `text` field on the current page (first matching hit for each session wire id) — `main.rs:1463-1472`. Missing → rendered as `—` downstream.
@@ -72,14 +72,14 @@ The task prompt asked to confirm whether "Step 1 — wire real `date_ymd` and `t
 
 ### `latest_activity_ymd_for_sessions`
 
-- File: `C:/AgentSessions/.claude/worktrees/integration-08-13-four-features-v2/crates/agent-session-grep-adapters-sqlite/src/lib.rs:4826-4861`.
+- File: `crates/agent-session-grep-adapters-sqlite/src/lib.rs:4826-4861`.
 - Batched `MAX(json_extract(catalog.payload, '$.timestamp'))` per canonical Session, truncated to `YYYY-MM-DD` (first 10 chars).
 - Chunked via `chunk_ids` / `BATCH_IN_CHUNK` (no N+1).
 - Returns `HashMap<String, String>` keyed by session wire id.
 
 ### Human table rendering
 
-- File: `C:/AgentSessions/.claude/worktrees/integration-08-13-four-features-v2/crates/agent-session-grep-cli/src/human.rs`.
+- File: `crates/agent-session-grep-cli/src/human.rs`.
 - `render_search` (line 62) checks for `session_resume_rows`; if present and non-empty, delegates to `render_session_resume_table` (line 471).
 - `render_session_resume_table` renders the frozen five-column header `日期 | Provider | 会话标题 | 工作目录 | Session ID` with column-width budgeting (TABLE_TARGET_COLS=100; title 35% / cwd 65% of remaining; tail-ellipsis for title; middle-collapse for cwd).
 - E2E test `snippet_renders_in_human_search_but_is_stripped_in_machine_modes` (`tests/e2e.rs:3009`) asserts the header, a real Provider row, real date (`2026-07-26`), and real title (`snippet vis`).

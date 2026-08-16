@@ -2,7 +2,7 @@
 
 ## Preconditions
 
-- Work in the main repo `C:/AgentSessions` (write set: task dir,
+- Work in the repository root (write set: task dir,
   `docs/release/`, `scripts/rehearsal/`, `tests/e2e_consistency*`).
 - Design: `design.md` (decisions D1-D4).
 

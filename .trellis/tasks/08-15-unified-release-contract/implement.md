@@ -74,7 +74,7 @@
 ## Validation
 
 ```
-CARGO_TARGET_DIR=C:/AgentSessions/target-08-15-unified-release-contract
+CARGO_TARGET_DIR=<repo>/target-08-15-unified-release-contract
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace

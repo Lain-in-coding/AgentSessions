@@ -74,11 +74,11 @@
 ## Validation
 
 ```
-CARGO_TARGET_DIR='C:/AgentSessions/target-08-15-resume-execution' \
+CARGO_TARGET_DIR=<repo>/target-08-15-resume-execution \
   cargo fmt --all --check
-CARGO_TARGET_DIR='C:/AgentSessions/target-08-15-resume-execution' \
+CARGO_TARGET_DIR=<repo>/target-08-15-resume-execution \
   cargo clippy --workspace --all-targets -- -D warnings
-CARGO_TARGET_DIR='C:/AgentSessions/target-08-15-resume-execution' \
+CARGO_TARGET_DIR=<repo>/target-08-15-resume-execution \
   cargo test --workspace
 ```
 

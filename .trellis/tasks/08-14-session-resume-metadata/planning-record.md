@@ -27,8 +27,8 @@
 
 ## Current repository / integration state (snapshot)
 
-- Worktree: `C:/AgentSessions/.claude/worktrees/integration-08-13-four-features-v2`,
-  branch-based, 29 modified + 4 untracked paths on top of commit `f4175a0`.
+- Checkout: branch-based isolated worktree, 29 modified + 4 untracked paths on
+  top of commit `f4175a0`.
 - Uncommitted production work in this worktree includes:
   - Fixes for 8 confirmed review findings (see below);
   - the 4-feature integration (filters, get_message, context levels, guidance);
