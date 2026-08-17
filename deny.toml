@@ -34,6 +34,25 @@ wildcards = "deny"
 # workspace 内 path 依赖不写 version 会被判为 wildcard，这是本地依赖的正常写法，
 # 放行它们；对 crates.io 依赖的 wildcard 仍然 deny。
 allow-wildcard-paths = true
+# 零网络出站保证的第二道门：HTTP client / 服务框架 crate 一律禁止进入依赖树，
+# 与 crates/agent-session-grep-cli/tests/network_egress.rs 的静态断言同源。
+deny = [
+    { name = "reqwest", reason = "zero-egress: HTTP client" },
+    { name = "hyper", reason = "zero-egress: HTTP client" },
+    { name = "ureq", reason = "zero-egress: HTTP client" },
+    { name = "isahc", reason = "zero-egress: HTTP client" },
+    { name = "surf", reason = "zero-egress: HTTP client" },
+    { name = "attohttpc", reason = "zero-egress: HTTP client" },
+    { name = "curl", reason = "zero-egress: HTTP client" },
+    { name = "quinn", reason = "zero-egress: transport" },
+    { name = "quiche", reason = "zero-egress: transport" },
+    { name = "tiny_http", reason = "zero-egress: HTTP server" },
+    { name = "rouille", reason = "zero-egress: HTTP server" },
+    { name = "warp", reason = "zero-egress: HTTP server" },
+    { name = "axum", reason = "zero-egress: HTTP server" },
+    { name = "tokio", reason = "zero-egress: async runtime" },
+    { name = "async-std", reason = "zero-egress: async runtime" },
+]
 
 [sources]
 # 只信任 crates.io 官方源；未知 registry / git 源一律拒绝。

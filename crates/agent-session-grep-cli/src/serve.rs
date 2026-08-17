@@ -29,6 +29,16 @@ const MAX_HEADER_BYTES: usize = 64 * 1024;
 const MAX_HEADER_COUNT: usize = 100;
 const MAX_BODY_BYTES: usize = 1024 * 1024;
 
+/// 常量时间字节比较（无新依赖）：逐字节 XOR 累计，长度不等也照常遍历
+/// 短者全程，避免 early-return 时序差异。
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    let mut diff = 0u8;
+    for (a, b) in left.iter().zip(right.iter()) {
+        diff |= a ^ b;
+    }
+    left.len() == right.len() && diff == 0
+}
+
 /// A random bearer token generated for each `asg serve` session.
 /// Clients must send it in the `Authorization: Bearer <token>` header.
 pub struct ServeSession {
@@ -272,11 +282,14 @@ impl HttpRequest {
     }
 
     /// Check the Authorization header against a token.
+    ///
+    /// 常量时间比较：即便 loopback-only 且 token 为 CSPRNG，也不给任何
+    /// 时序侧信道（audit 建议的 one-line hardening）。
     pub fn check_token(&self, expected: &str) -> bool {
         if let Some(auth) = self.header("authorization")
             && let Some(token) = auth.strip_prefix("Bearer ")
         {
-            return token == expected;
+            return constant_time_eq(token.as_bytes(), expected.as_bytes());
         }
         false
     }
@@ -677,7 +690,7 @@ pub fn route_request(
         let mut response = HttpResponse::text(200, WEB_UI_HTML, "text/html; charset=utf-8");
         response.headers.push((
             "Content-Security-Policy",
-            "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; object-src 'none'",
+            "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; object-src 'none'; frame-ancestors 'none'",
         ));
         return response;
     }

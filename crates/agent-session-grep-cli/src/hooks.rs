@@ -108,6 +108,9 @@ pub fn build_hook_output(text: &str, max_tokens: u64) -> HookOutput {
 /// agent-session-grep historical search, so the agent knows it's data not
 /// instructions.
 pub fn format_context_header(query: &str, hit_count: usize) -> String {
+    // SessionStart 的 query 是绝对 cwd 路径，命中文本已脱敏；header 自身
+    // 也必须过同一脱敏，防止本地路径/密钥原样进 hook 输出。
+    let (query, _) = crate::redaction::redact_text(query);
     format!(
         "## Historical Session Context (from agent-session-grep)\n\
          Query: {query}\n\

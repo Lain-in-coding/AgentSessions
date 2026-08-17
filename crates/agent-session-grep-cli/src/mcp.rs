@@ -1110,15 +1110,19 @@ fn providers_payload() -> Value {
 }
 
 /// 业务失败的工具结果：`isError: true` + canonical error（design §2）。
+/// 与成功路径同一脱敏纪律：error message/details 也经 cross-boundary
+/// 脱敏后再上帧，防止用户参数回声里的密钥/路径泄漏（ADR-0009）。
 fn business_error_result(error: &ProtocolError) -> Value {
+    let (message, _) = crate::redaction::redact_text(&error.message);
+    let (details, _) = crate::redaction::redact_value(error.details.clone());
     json!({
-        "content": [{ "type": "text", "text": error.message }],
+        "content": [{ "type": "text", "text": message }],
         "structuredContent": {
             "error": {
                 "canonical_code": error.code.as_str(),
-                "message": error.message,
+                "message": message,
                 "retryable": error.code.retryable(),
-                "details": error.details,
+                "details": details,
             }
         },
         "isError": true,
@@ -1142,6 +1146,9 @@ fn result_frame(id: Value, result: Value) -> String {
 }
 
 fn error_frame(id: Value, code: i64, message: &str, data: Option<Value>) -> String {
+    // 协议错误帧同样脱敏：-32602 消息可能回声用户参数（工具名/键名），
+    // 跨边界输出不得泄漏密钥/路径（ADR-0009）。
+    let (message, _) = crate::redaction::redact_text(message);
     let mut error = json!({ "code": code, "message": message });
     if let Some(data) = data {
         error["data"] = data;
