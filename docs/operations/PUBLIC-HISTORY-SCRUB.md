@@ -18,6 +18,24 @@ python scripts/evidence/privacy_scan.py --repo .
 python -m unittest discover -s scripts/evidence -p "test_privacy_scan.py" -v
 ```
 
+The owner may create a clean public-tree candidate without rewriting private
+history by exporting the exact publication SHA. This is the preferred Option A
+mechanical rehearsal:
+
+```powershell
+$destination = Join-Path $env:TEMP "agent-session-grep-public-tree"
+python scripts/release/export_public_tree.py --repo . `
+  --commit <publication-sha> --destination $destination
+python -m unittest discover -s "$destination/scripts/release" -p "test_*.py"
+```
+
+The exporter copies only tracked files, excludes internal coordination prefixes
+(`.trellis/`, `.codex/`, `.codebuddy/`, `.agents/`, `.claude/` and generated
+`scripts/evidence/out/` output), writes `PUBLIC-TREE-MANIFEST.json` with the
+source SHA and per-file SHA-256, and runs the same privacy rules against the
+ordinary exported directory. It does not modify refs or repository visibility;
+review the destination and publish it only after the owner chooses Option A.
+
 This does **not** clean older commits. Git history can still retain superseded
 copies of personal paths. Do not make the repository public until the owner
 chooses one of these publication strategies:
