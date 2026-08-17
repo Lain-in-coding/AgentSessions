@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://agent-session-grep.dev/schemas/robot/v1.1/envelope.schema.json",
   "title": "agent-session-grep Robot Protocol Envelope v1.1",
-  "description": "A complete agent-session-grep JSON or JSONL protocol frame. Additive evolution of the frozen v1 envelope: searchHit gains occurrences and resume_available.",
+  "description": "A complete agent-session-grep JSON or JSONL protocol frame. Additive evolution of the frozen v1 envelope: searchHit gains occurrences and resume_available; searchData gains an optional facets echo.",
   "oneOf": [
     { "$ref": "#/$defs/success" },
     { "$ref": "#/$defs/error" },
@@ -61,7 +61,24 @@
           "items": { "$ref": "#/$defs/searchHit" }
         },
         "generation": { "type": "integer", "minimum": 0 },
-        "truncation": { "$ref": "#/$defs/truncation" }
+        "truncation": { "$ref": "#/$defs/truncation" },
+        "facets": { "$ref": "#/$defs/searchFacets" }
+      }
+    },
+    "searchFacets": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Structured facet filters echoed back as applied. The key is omitted entirely when every facet holds its default (sidechain=include, no tool filters), keeping default output byte-compatible.",
+      "properties": {
+        "sidechain": { "enum": ["include", "main_only", "subagent_only"] },
+        "tool_kind": {
+          "enum": ["file", "command", "web", "query", "unknown", null],
+          "description": "Closed tool-activity kind set; null means no tool_kind filter was applied."
+        },
+        "tool_name": {
+          "type": ["string", "null"],
+          "description": "Verbatim tool name filter; null means no tool_name filter was applied."
+        }
       }
     },
     "page": {

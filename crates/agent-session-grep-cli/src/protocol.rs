@@ -311,7 +311,8 @@ pub fn parse_output_mode(args: &[String]) -> Result<OutputMode, String> {
             // 会让它的取值把后面的 --robot/--output 挡在扫描之外。
             "--db" | "--request-id" | "--cursor" | "--max-items" | "--max-bytes"
             | "--max-messages" | "--max-evidence" | "--max-tokens" | "--policy" | "--level"
-            | "--provider" | "--since" | "--until" | "--session" | "--around" => {
+            | "--provider" | "--since" | "--until" | "--session" | "--around" | "--tool-kind"
+            | "--tool-name" => {
                 it.next();
             }
             _ => {}
@@ -947,6 +948,23 @@ mod tests {
             schema["$defs"]["searchData"]["properties"]["hits"]["items"]["$ref"],
             "#/$defs/searchHit"
         );
+        // facets: optional structured facet echo, matching SearchFacets enum sets.
+        let facets_def = &schema["$defs"]["searchData"]["properties"]["facets"];
+        assert_eq!(facets_def["$ref"], "#/$defs/searchFacets");
+        let facets_schema = &schema["$defs"]["searchFacets"];
+        assert_eq!(facets_schema["additionalProperties"], false);
+        assert_eq!(
+            facets_schema["properties"]["sidechain"]["enum"],
+            json!(["include", "main_only", "subagent_only"])
+        );
+        assert_eq!(
+            facets_schema["properties"]["tool_kind"]["enum"],
+            json!(["file", "command", "web", "query", "unknown", null])
+        );
+        assert_eq!(
+            facets_schema["properties"]["tool_name"]["type"],
+            json!(["string", "null"])
+        );
         assert_eq!(
             schema["$defs"]["searchHit"]["properties"]["why_matched"]["maxItems"],
             8
@@ -1141,5 +1159,34 @@ mod tests {
         assert!(s.contains("\"retryable\":true"));
         assert!(s.contains("\"duration_ms\":0"));
         assert!(s.contains("\"details\":{}"));
+    }
+
+    #[test]
+    fn value_flag_skip_lists_cover_tool_facets_across_all_scanners() {
+        // parse_output_mode 上方的注释要求带值 flag 列表与 main.rs 各前缀
+        // 扫描器保持一致。此测试把 main.rs 源 include 进来，逐扫描器断言
+        // --tool-kind/--tool-name 都在跳过列表里——上次 drift 正是漏掉它们。
+        let main_src = include_str!("main.rs");
+        let scanners = [
+            "fn extract_request_id",
+            "fn command_name",
+            "fn intercept_help_or_version",
+            "fn extract_db_flag_impl",
+            "fn bare_positionals",
+        ];
+        for scanner in scanners {
+            let start = main_src
+                .find(scanner)
+                .unwrap_or_else(|| panic!("main.rs missing {scanner}"));
+            let end = main_src[start..]
+                .find("\n}\n")
+                .map(|offset| start + offset)
+                .unwrap_or(main_src.len());
+            let body = &main_src[start..end];
+            assert!(
+                body.contains("\"--tool-kind\"") && body.contains("\"--tool-name\""),
+                "{scanner} value-skip list missing --tool-kind/--tool-name"
+            );
+        }
     }
 }
