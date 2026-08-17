@@ -2075,13 +2075,13 @@ fn search_filters_from_flags(
 ) -> Result<SearchFilters, CliError> {
     let mut filters = SearchFilters::default();
     for provider in providers {
-        filters.providers.push(
-            canonical_search_provider(provider).ok_or_else(|| {
+        filters
+            .providers
+            .push(canonical_search_provider(provider).ok_or_else(|| {
                 CliError::usage(format!(
                     "unknown provider: {provider} (expected {PROVIDER_VALUE_HINT})"
                 ))
-            })?,
-        );
+            })?);
     }
     filters.since = parse_time_flag("--since", since, now_ms)?;
     filters.until = parse_time_flag("--until", until, now_ms)?;
@@ -2118,13 +2118,13 @@ fn canonical_search_provider(provider: &str) -> Option<SearchProvider> {
 fn hook_search_filters(config: &hooks::HookConfig, now_ms: i64) -> Result<SearchFilters, CliError> {
     let mut filters = SearchFilters::default();
     for provider in &config.providers {
-        filters.providers.push(
-            canonical_search_provider(provider).ok_or_else(|| {
+        filters
+            .providers
+            .push(canonical_search_provider(provider).ok_or_else(|| {
                 CliError::usage(format!(
                     "hook --provider: unknown provider {provider} (expected {PROVIDER_VALUE_HINT})"
                 ))
-            })?,
-        );
+            })?);
     }
     if config.decay_days > 0 {
         let day_ms = 86_400_000i64;

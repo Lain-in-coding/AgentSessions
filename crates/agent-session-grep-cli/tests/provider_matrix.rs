@@ -5,8 +5,8 @@
 //! probe 出的标识对照——文档与代码任一改动而未同步，CI 立即失败（与 Robot envelope
 //! schema 用 include_str! 交叉验证同一纪律）。
 
-use agent_session_grep_ports::capability::ProviderCapabilityMatrix;
 use agent_session_grep_ports::ProviderAdapter;
+use agent_session_grep_ports::capability::ProviderCapabilityMatrix;
 use agent_session_grep_provider_claude::ClaudeCodeAdapter;
 use agent_session_grep_provider_codex::CodexAdapter;
 

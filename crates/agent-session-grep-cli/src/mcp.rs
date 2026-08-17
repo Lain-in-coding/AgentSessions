@@ -21,7 +21,7 @@ use agent_session_grep_application::{
 };
 use agent_session_grep_domain::{ContextPolicy, IdKind, StableId};
 use agent_session_grep_ports::{
-    RetrievalMode, SearchFacets, SearchFilters, SearchProvider, SidechainFacet,
+    RetrievalMode, SearchFacets, SearchFilters, SidechainFacet,
     capability::{ProviderCapabilityMatrix, ProviderMaturity},
     handoff::HandoffFilters,
 };
@@ -1084,7 +1084,10 @@ fn success_payload(
 fn providers_payload() -> Value {
     let matrix = ProviderCapabilityMatrix::current();
     let registered = provider_registry();
-    let registry: Vec<&str> = registered.iter().map(|adapter| adapter.provider_id()).collect();
+    let registry: Vec<&str> = registered
+        .iter()
+        .map(|adapter| adapter.provider_id())
+        .collect();
     let providers: Vec<Value> = matrix
         .providers
         .iter()
@@ -1336,6 +1339,7 @@ fn budget_with(
 mod tests {
     use super::*;
     use agent_session_grep_domain::{IdKind, Stability};
+    use agent_session_grep_ports::SearchProvider;
 
     fn open_store(dir: &tempfile::TempDir) -> SqliteStore {
         let path = dir.path().join("mcp-test.db");
@@ -2105,11 +2109,7 @@ mod tests {
         assert_eq!(facets["tool_kind"], "file", "{facets}");
         assert_eq!(facets["tool_name"], "Bash", "{facets}");
 
-        let v = call(
-            &mut server,
-            "search_sessions",
-            json!({ "query": "hello" }),
-        );
+        let v = call(&mut server, "search_sessions", json!({ "query": "hello" }));
         assert!(
             v["result"]["structuredContent"]["data"]
                 .get("facets")

@@ -1625,7 +1625,7 @@ fn search_sessions_schema_publishes_provider_and_time_filters() {
     assert_eq!(properties["providers"]["type"], "array", "{search}");
     assert_eq!(
         properties["providers"]["items"]["enum"],
-        json!(["claude", "codex"]),
+        json!(["claude", "claude-code", "codex"]),
         "{search}"
     );
     assert_eq!(properties["since"]["type"], "string", "{search}");
