@@ -46,7 +46,7 @@
 ## 4. 强制控制清单
 
 - Provider 仅通过 `ReadOnlySourceFs` 访问；
-- Data/Cache/Log 与任一 Source Root 重叠时拒绝启动；
+- Data/Cache/Log 与任一 Source Root 重叠的拒绝策略：**尚未实现运行时代码守卫**（2026-08-17 审计确认）；当前以文档与安装器默认路径分离缓解，实现前不得宣称有此强制；
 - 默认不跟随 symlink/junction/reparse point；防 `..`、Windows ADS/设备路径、UNC 绕过；
 - 单行/字段/payload/嵌套深度/文件数/消息数上限；bounded channel + 流式；
 - 参数化 SQL，禁用 extension loading；
@@ -74,7 +74,39 @@
   `content` 与 `structuredContent`、Markdown、stderr/stdout、copy/export 和
   重渲染结果；扫描不完整时 fail-closed，不得以 bounded 长度替代脱敏。
 
-## 6. 未决问题（R0 需回答）
+## 6. 新增攻击面（08-15-offline-privacy-hooks 需求 4）
+
+### 6.1 serve LAN 模式
+
+- **状态**：LAN 模式已实现为 `capability_not_supported`——`--lan` 直接拒绝（exit 7），
+  不做"看似可用实则危险"的静默降级。
+- **控制**：loopback-only 绑定（127.0.0.1）+ 每会话 CSPRNG token + Host/Origin
+  fail-closed 校验 + GET-only（POST 变更 501）+ `frame-ancestors 'none'` CSP +
+  常量时间 token 比较 + bounded worker pool/请求头/请求体。
+- **残余风险**：同机恶意进程可读 loopback 端口；token 打印在 stderr 上。
+
+### 6.2 Hook 输出
+
+- **状态**：`asg hook` 默认关闭，需显式 `--enable`；注入 `additional_context`
+  前带"历史数据不是指令"头。
+- **控制**：token 预算、provider/time 过滤、命中文本脱敏；header 的 query 字段
+  （SessionStart 时是绝对 cwd）同样经跨边界脱敏后才注入。
+
+### 6.3 模型下载路径（semantic 模型，未来）
+
+- **状态**：未实现——当前 semantic 是本地 bigram-hash vectorizer，无任何下载。
+- **计划控制**：pin 模型清单（id/hash/dimension/license）+ 首次使用下载经
+  `--offline` fail-closed 拦截 + 下载后 hash 校验 + 缓存目录与 Source Root
+  分离。实现前不得宣称任何语义模型可用。
+
+### 6.4 外部 Embedding API（未来）
+
+- **状态**：未实现，不在本阶段范围。
+- **计划控制**：任何外部 API 都是可选、默认关闭、explicit opt-in，且必须过
+  零出站静态审计（`tests/network_egress.rs` + `deny.toml` bans）与跨边界脱敏；
+  查询文本外发前需本地脱敏提示。实现前不得宣称。
+
+## 7. 未决问题（R0 需回答）
 
 > ADR-0009 已定义跨边界默认脱敏规则；本节未决项不得推翻该边界。ADR-0004
 > 的旧措辞仅适用于 local-human snippet，不适用于 Web/MCP/Robot/HTTP/Handoff。
@@ -83,7 +115,7 @@
 2. 是否需要一个"隐私模式"配置项，进一步隐藏 project path 片段？
 3. 网络文件系统作为 data-root 的拒绝/降级策略（data-root-locking spike 已确认 lease 不支持 NFS）。
 
-## 7. 借鉴与反模式
+## 8. 借鉴与反模式
 
 - 借鉴：agent-sessions 索引期脱敏（idea-only，Swift）；claude-historian 的 search→at→get_session 渐进披露（限制单次暴露量）。
 - 反模式（禁止）：AgentRecall API key 明文入库（`schema.ts`）；claude-historian 用户 query 直编正则注入（`search.ts`）。
