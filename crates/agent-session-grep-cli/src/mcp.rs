@@ -12,7 +12,7 @@
 //!   成功 JSON-RPC response，result 携 `isError: true` + canonical error 结构。
 
 use crate::protocol::{self, CanonicalCode, Outcome, ProtocolError};
-use crate::{CliError, provider_registry, render, store_ref};
+use crate::{CliError, canonical_search_provider, provider_registry, render, store_ref};
 use agent_session_grep_adapters_sqlite::SqliteStore;
 use agent_session_grep_application::{
     App, AppRequest, AppResponse, ContextLevel, ResponseBudget,
@@ -771,7 +771,7 @@ fn tool_catalog() -> Value {
                     "providers": {
                         "type": "array",
                         "maxItems": 2,
-                        "items": { "type": "string", "enum": ["claude", "codex"] },
+                        "items": { "type": "string", "enum": ["claude", "claude-code", "codex"] },
                         "description": "Restrict hits to these providers (OR). Omitted matches all providers."
                     },
                     "since": {
@@ -986,7 +986,7 @@ fn tool_catalog() -> Value {
                     "providers": {
                         "type": "array",
                         "maxItems": 2,
-                        "items": { "type": "string", "enum": ["claude", "codex"] },
+                        "items": { "type": "string", "enum": ["claude", "claude-code", "codex"] },
                         "description": "Restrict hits to these providers (OR). Omitted matches all providers."
                     },
                     "since": {
@@ -1178,6 +1178,8 @@ fn validate_string_length(key: &str, value: &str) -> Result<(), ToolError> {
 
 /// 检索过滤参数（design §3）：providers 别名数组（OR 语义）+ 绝对 ISO-8601
 /// 的 since/until（半开区间 [since, until)，边界比较由 Application 统一执行）。
+/// provider 值经 [`crate::canonical_search_provider`] 归一（canonical id 与
+/// 历史别名），与 CLI `--provider` 同一套取值。
 /// MCP 只接受绝对时间：紧凑相对量（"1h"）没有声明的时钟基准，属非法参数。
 fn opt_filters(args: &Map<String, Value>) -> Result<SearchFilters, ToolError> {
     let mut filters = SearchFilters::default();
@@ -1191,16 +1193,12 @@ fn opt_filters(args: &Map<String, Value>) -> Result<SearchFilters, ToolError> {
                     "providers entries must be strings".into(),
                 ));
             };
-            filters.providers.push(match provider {
-                "claude" => SearchProvider::Claude,
-                "codex" => SearchProvider::Codex,
-                other => {
-                    return Err(ToolError::Params(format!(
-                        "providers must contain only claude|codex, got {}",
-                        bounded(other)
-                    )));
-                }
-            });
+            filters.providers.push(canonical_search_provider(provider).ok_or_else(|| {
+                ToolError::Params(format!(
+                    "providers must contain only claude|claude-code|codex, got {}",
+                    bounded(provider)
+                ))
+            })?);
         }
     }
     filters.since = opt_instant(args, "since")?;
@@ -1971,13 +1969,13 @@ mod tests {
         let properties = &search["inputSchema"]["properties"];
         assert_eq!(
             properties["providers"]["items"]["enum"],
-            json!(["claude", "codex"])
+            json!(["claude", "claude-code", "codex"])
         );
         assert_eq!(properties["since"]["type"], "string");
         assert_eq!(properties["until"]["type"], "string");
 
         let valid = json!({
-            "providers": ["codex", "claude"],
+            "providers": ["codex", "claude", "claude-code"],
             "since": "2026-08-01T00:00:00Z",
             "until": "2026-08-02T00:00:00+00:00"
         });
@@ -1985,7 +1983,11 @@ mod tests {
             .expect("declared filter values must parse");
         assert_eq!(
             filters.providers,
-            vec![SearchProvider::Codex, SearchProvider::Claude]
+            vec![
+                SearchProvider::Codex,
+                SearchProvider::Claude,
+                SearchProvider::Claude
+            ]
         );
         assert!(filters.since.is_some());
         assert!(filters.until.is_some());

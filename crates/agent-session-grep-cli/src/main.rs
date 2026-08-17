@@ -757,7 +757,7 @@ PAGINATION / BUDGET (search, list):
     --max-bytes <n>        响应字节预算（最低 4096）
 
 FILTER (search):
-    --provider claude|codex  限定 provider（可重复，多个取值按 OR 合并）
+    --provider claude|claude-code|codex  限定 provider（可重复，多个取值按 OR 合并）
     --since <time>         起始时间（含）；RFC3339/ISO-8601 绝对值或 1h/1d/1w 相对量
     --until <time>         结束时间（不含）；语法同 --since
     --include-system       默认排除 system/developer 角色消息；加此旗标恢复
@@ -900,7 +900,7 @@ fn subcommand_help_text(cmd: &str) -> &'static str {
             "search <query>：全文检索历史会话，按相关性降序返回命中。\n\
                      示例：agent-session-grep --db <path> search 配置备份\n\
                      flag（放子命令后）：--max-items <n> 页大小、--cursor <token> 翻页、--max-bytes <n> 预算；\n\
-                     过滤：--provider claude|codex（可重复，OR）、--since/--until <RFC3339 或 1h|1d|1w>（半开区间 [since, until)）；\n\
+                     过滤：--provider claude|claude-code|codex（可重复，OR）、--since/--until <RFC3339 或 1h|1d|1w>（半开区间 [since, until)）；\n\
                      检索模式：--mode lexical|semantic|hybrid（默认 lexical）。semantic/hybrid 需先跑 `index embeddings`；\n\
                      向量索引未就绪时结果标注 retrieval_mode=lexical_fallback 并给出 warning，绝不静默降级；\n\
                      --include-system（默认排除 system/developer 角色消息）、--group-by-session（按会话归并并附 occurrences）；\n\
@@ -945,7 +945,7 @@ fn subcommand_help_text(cmd: &str) -> &'static str {
                   从 stdin 读 hook payload，检索历史并按 hookSpecificOutput 契约输出；\n\
                   不加 --enable 时输出空 context（不注入任何历史）；\n\
                   flag：--enable 启用注入、--max-tokens <n> 预算（默认 2000）；\n\
-                  --provider claude|codex（可重复，OR 限定 provider）、--decay-days <n>（只注入最近 N 天）；\n\
+                  --provider claude|claude-code|codex（可重复，OR 限定 provider）、--decay-days <n>（只注入最近 N 天）；\n\
                   注入文本经跨边界脱敏（ADR-0009）；全局 --offline 时如实上报 offline 字段。"
         }
         "show" => {
@@ -2075,37 +2075,56 @@ fn search_filters_from_flags(
 ) -> Result<SearchFilters, CliError> {
     let mut filters = SearchFilters::default();
     for provider in providers {
-        filters.providers.push(match provider.as_str() {
-            "claude" => SearchProvider::Claude,
-            "codex" => SearchProvider::Codex,
-            other => {
-                return Err(CliError::usage(format!(
-                    "unknown provider: {other} (expected claude|codex)"
-                )));
-            }
-        });
+        filters.providers.push(
+            canonical_search_provider(provider).ok_or_else(|| {
+                CliError::usage(format!(
+                    "unknown provider: {provider} (expected {PROVIDER_VALUE_HINT})"
+                ))
+            })?,
+        );
     }
     filters.since = parse_time_flag("--since", since, now_ms)?;
     filters.until = parse_time_flag("--until", until, now_ms)?;
     Ok(filters)
 }
 
+/// Accepted `--provider` values, rendered in every provider usage error.
+const PROVIDER_VALUE_HINT: &str = "claude|claude-code|codex";
+
+/// Normalize one provider request value to [`SearchProvider`]; `None` = unknown.
+///
+/// Accepts the canonical provider ids that every machine surface already
+/// publishes ([`SearchProvider::as_str`], `providers` / `list_providers` /
+/// `/api/providers` `provider_id`) plus the historical short aliases. The
+/// embedded Web UI fills its provider selector from `/api/providers`, so a
+/// canonical id must be a first-class value here — otherwise
+/// `/api/search?provider=claude-code` fails `invalid_request` while the
+/// equivalent CLI alias succeeds, which is exactly the CLI/Web fork the
+/// loopback surface forbids. Unknown values stay fail-closed (usage error at
+/// the caller), never silently dropped.
+fn canonical_search_provider(provider: &str) -> Option<SearchProvider> {
+    match provider {
+        "claude" | "claude-code" => Some(SearchProvider::Claude),
+        "codex" => Some(SearchProvider::Codex),
+        _ => None,
+    }
+}
+
 /// 从 HookConfig 构建检索过滤（#8）：provider 白名单（空 = 全部）+ 时间衰减
 /// （`decay_days` > 0 时 `since = now - decay_days`，旧历史整体排除；0 = 不过滤）。
-/// provider 值接受与 search `--provider` 相同的 `claude|codex` 别名。
+/// provider 值经 [`parse_provider_value`] 归一，与 search `--provider` 同一套
+/// canonical id 与别名。
 /// 注入文本保持跨边界脱敏（ADR-0009）由调用方 hook 分支负责，本层只出过滤条件。
 fn hook_search_filters(config: &hooks::HookConfig, now_ms: i64) -> Result<SearchFilters, CliError> {
     let mut filters = SearchFilters::default();
     for provider in &config.providers {
-        filters.providers.push(match provider.as_str() {
-            "claude" => SearchProvider::Claude,
-            "codex" => SearchProvider::Codex,
-            other => {
-                return Err(CliError::usage(format!(
-                    "hook --provider: unknown provider {other} (expected claude|codex)"
-                )));
-            }
-        });
+        filters.providers.push(
+            canonical_search_provider(provider).ok_or_else(|| {
+                CliError::usage(format!(
+                    "hook --provider: unknown provider {provider} (expected {PROVIDER_VALUE_HINT})"
+                ))
+            })?,
+        );
     }
     if config.decay_days > 0 {
         let day_ms = 86_400_000i64;
@@ -4746,6 +4765,15 @@ mod tests {
             vec![SearchProvider::Claude, SearchProvider::Codex]
         );
         assert!(filters.since.is_none());
+
+        // The hook consumes the same provider values as search. Canonical ids
+        // emitted by machine surfaces must resolve exactly like legacy aliases.
+        let canonical = hooks::HookConfig {
+            providers: vec!["claude-code".into()],
+            ..Default::default()
+        };
+        let filters = hook_search_filters(&canonical, 0).expect("canonical id valid");
+        assert_eq!(filters.providers, vec![SearchProvider::Claude]);
 
         // 未知 provider 是用法错误，不静默忽略（fail-closed）；错误信息与
         // search --provider 同风格回显取值（provider 值不是路径/secret）。
