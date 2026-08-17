@@ -74,7 +74,7 @@ def benchmark_search_latency(asg_bin: str, data_root: str, queries: list[str]) -
     for query in queries:
         start = time.perf_counter()
         code, stdout, _ = run_asg(
-            asg_bin, data_root, ["search", query, "--output", "json", "--limit", "20"]
+            asg_bin, data_root, ["search", query, "--output", "json", "--max-items", "20"]
         )
         elapsed_ms = (time.perf_counter() - start) * 1000
 
