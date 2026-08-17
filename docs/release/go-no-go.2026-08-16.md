@@ -123,11 +123,12 @@ certified — currently 0 Beta. **Not release-ready per provider gate.**
    Release; Authenticode/notarization/cosign; branch protection; ADR
    signing/owner decisions.
 4. **macOS**: rehearsal not run (external CI-billing blocker).
-5. **Known deferred**: core-beta source-shrink store-layer edge-integrity
-   defect ("cannot delete a catalog entity still referenced by message edges");
-   context enrichment (ToolActivity in context view), TUI facet controls,
-   Robot capability UI, retention/cleanup policy — all explicitly deferred
-   with the reference implementation.
+5. **Known deferred**: real local semantic model (`semantic-candle` + pinned
+   multilingual-e5-small) and benchmark gate; context enrichment (ToolActivity
+   in context view), TUI facet controls, Robot capability UI, retention/cleanup
+   policy — all explicitly deferred with the reference implementation. The
+   current `bigram-hash-v1` vectorizer remains honestly labeled fuzzy-lexical,
+   not semantic.
 
 Closed since this draft's original date: P0-1 privacy scrub, P0-6 bounded
 ingestion, handoff determinism/budget/redaction, resume first-run preview,
