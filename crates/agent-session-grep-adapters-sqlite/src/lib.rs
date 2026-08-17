@@ -1835,6 +1835,53 @@ impl SqliteStore {
         Ok(n)
     }
 
+    /// Batch-load role + sidechain facts for the given message wire ids.
+    ///
+    /// Role comes from the canonical message payload; sidechain is true when
+    /// the message has at least one `message_placements.is_sidechain = 1` row.
+    /// Missing messages are omitted (caller treats absence as unknown/false).
+    pub fn message_facts_for(
+        &self,
+        message_ids: &[StableId],
+    ) -> PortResult<Vec<(String, String, bool)>> {
+        if message_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.conn.borrow();
+        let wires: Vec<&str> = message_ids.iter().map(|id| id.as_str()).collect();
+        let mut out = Vec::new();
+        for chunk in chunk_ids(&wires) {
+            let placeholders = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            // Role from catalog payload JSON; sidechain via EXISTS on placements.
+            let mut stmt = conn
+                .prepare(&format!(
+                    "SELECT c.id,
+                            COALESCE(json_extract(c.payload, '$.role'), 'unknown'),
+                            EXISTS(
+                              SELECT 1 FROM message_placements mp
+                              WHERE mp.message_id = c.id AND mp.is_sidechain = 1
+                            )
+                     FROM catalog c
+                     WHERE c.id IN ({placeholders})
+                     ORDER BY c.id"
+                ))
+                .map_err(backend)?;
+            let rows = stmt
+                .query_map(rusqlite::params_from_iter(chunk.iter().copied()), |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)? != 0,
+                    ))
+                })
+                .map_err(backend)?;
+            for row in rows {
+                out.push(row.map_err(backend)?);
+            }
+        }
+        Ok(out)
+    }
+
     /// Batch-load tool activities for the given message wire ids (handoff pack).
     ///
     /// Returns one JSON object per activity, stable-ordered by

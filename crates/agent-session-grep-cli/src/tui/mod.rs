@@ -78,6 +78,7 @@ pub(crate) fn snapshot_search(
         Effect::Search {
             query,
             cursor: None,
+            facets: agent_session_grep_ports::SearchFacets::default(),
         },
     ) {
         Msg::SearchLoaded(page) => {
@@ -169,15 +170,19 @@ fn key_input(event: Event) -> Option<KeyInput> {
 fn execute(store: &SqliteStore, effect: Effect) -> Msg {
     let app = App::with_resume(store_ref(store), store_ref(store), store_ref(store));
     match effect {
-        Effect::Search { query, cursor } => {
+        Effect::Search {
+            query,
+            cursor,
+            facets,
+        } => {
             let request = AppRequest::Search {
                 query,
                 filters: SearchFilters::default(),
                 limit: SEARCH_PAGE_LIMIT,
                 cursor,
                 budget: ResponseBudget::default(),
-                // TUI 暂不暴露 facet 控件：默认无过滤（设计 defer）。
-                facets: agent_session_grep_ports::SearchFacets::default(),
+                // Facets come from the pure-core Model toggles (m/k keys).
+                facets,
                 include_system: false,
                 group_by_session: false,
                 mode: agent_session_grep_ports::RetrievalMode::Lexical,

@@ -71,11 +71,22 @@ pub struct HandoffInput<'a> {
     /// Pre-resolved tool activities for the hit messages (empty when none).
     /// Caller batches via the store; the pack never queries storage itself.
     pub tool_activities: &'a [serde_json::Value],
+    /// Optional per-message role/sidechain facts, keyed by message wire id.
+    /// Missing entries render as role=`unknown`, is_sidechain=`false`.
+    pub message_facts: &'a [MessageFact],
     pub catalog_generation: u64,
     pub max_tokens: u64,
     pub max_bytes: u64,
     pub max_evidence: usize,
     pub target: Option<HandoffTarget>,
+}
+
+/// Authoritative per-message facts used by the mainline projection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessageFact {
+    pub message_id: String,
+    pub role: String,
+    pub is_sidechain: bool,
 }
 
 /// 确定性 pack 装配时间基点：2026-08-16T00:00:00Z。`created_at =
@@ -99,6 +110,11 @@ pub fn generate_deterministic(input: HandoffInput<'_>) -> HandoffPack {
 
     // 候选证据：redact 原文 → 附权威 source locator。无 source document 的命中
     // 直接排除（设计 D2：cursor-less entries excluded，绝不臆造文档身份）。
+    let facts: std::collections::BTreeMap<&str, &MessageFact> = input
+        .message_facts
+        .iter()
+        .map(|f| (f.message_id.as_str(), f))
+        .collect();
     let mut candidates: Vec<Candidate> = Vec::new();
     for (hit, loc) in input.hits.iter().zip(input.source_locations.iter()) {
         let Some(source_document_id) = loc.source_document_id.clone() else {
@@ -117,6 +133,7 @@ pub fn generate_deterministic(input: HandoffInput<'_>) -> HandoffPack {
             .and_then(|wire| StableId::from_wire(wire))
             .filter(|id| id.kind() == agent_session_grep_domain::IdKind::Session)
             .map(|_| hit.session_id.clone().unwrap_or_default());
+        let fact = facts.get(hit.id.as_str());
         candidates.push(Candidate {
             message_id: hit.id.as_str().to_string(),
             source_document_id: source_document_id.as_str().to_string(),
@@ -126,6 +143,10 @@ pub fn generate_deterministic(input: HandoffInput<'_>) -> HandoffPack {
             text: redacted_text,
             tokens,
             redacted: redacted_count > 0,
+            role: fact
+                .map(|f| f.role.clone())
+                .unwrap_or_else(|| "unknown".to_string()),
+            is_sidechain: fact.map(|f| f.is_sidechain).unwrap_or(false),
         });
     }
 
@@ -166,16 +187,16 @@ pub fn generate_deterministic(input: HandoffInput<'_>) -> HandoffPack {
 
     // 证据与 mainline（mainline 是 evidence 的确定性投影，保持对齐）。
     let evidence: Vec<EvidenceEntry> = kept.iter().map(Candidate::evidence_entry).collect();
-    let mainline: Vec<MainlineEntry> = evidence
+    let mainline: Vec<MainlineEntry> = kept
         .iter()
         .enumerate()
-        .map(|(ord, entry)| MainlineEntry {
-            message_id: entry.message_id.clone(),
-            session_id: entry.session_id.clone(),
-            role: "unknown".to_string(),
+        .map(|(ord, candidate)| MainlineEntry {
+            message_id: candidate.message_id.clone(),
+            session_id: candidate.session_id.clone(),
+            role: candidate.role.clone(),
             ordinal: ord as u64,
-            text_preview: Some(entry.text.chars().take(256).collect()),
-            is_sidechain: false,
+            text_preview: Some(candidate.text.chars().take(256).collect()),
+            is_sidechain: candidate.is_sidechain,
         })
         .collect();
 
@@ -312,6 +333,10 @@ struct Candidate {
     tokens: u64,
     /// 该条原文在默认脱敏模式下是否真的发生了替换（ADR-0009）。
     redacted: bool,
+    /// Canonical role from the hit payload when available; "unknown" otherwise.
+    role: String,
+    /// True when the hit message has at least one sidechain placement.
+    is_sidechain: bool,
 }
 
 impl Candidate {
@@ -517,6 +542,7 @@ mod tests {
     ) -> HandoffInput<'a> {
         static EMPTY: Vec<String> = Vec::new();
         static EMPTY_ACT: Vec<serde_json::Value> = Vec::new();
+        static EMPTY_FACTS: Vec<MessageFact> = Vec::new();
         HandoffInput {
             query_terms: &EMPTY,
             retrieval_mode: RetrievalMode::Lexical,
@@ -524,6 +550,7 @@ mod tests {
             hits,
             source_locations,
             tool_activities: &EMPTY_ACT,
+            message_facts: &EMPTY_FACTS,
             catalog_generation: 1,
             max_tokens: 10000,
             max_bytes: 1_000_000,

@@ -7,6 +7,7 @@
 //! 命中→会话解析全部通过 Effect 交回 Application ADT，本层只持有 UI 状态。
 
 use agent_session_grep_domain::ContextPolicy;
+use agent_session_grep_ports::{SearchFacets, SidechainFacet};
 
 /// 三屏状态机（PRD R2）：Search（输入）→ Results(命中列表) → Context（消息链）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -14,6 +15,85 @@ pub(crate) enum Screen {
     Search,
     Results,
     Context,
+}
+
+/// Search-screen facet cycle (mainline filter). Keys: `m` cycles
+/// Include → MainOnly → SubagentOnly → Include.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum SidechainMode {
+    #[default]
+    Include,
+    MainOnly,
+    SubagentOnly,
+}
+
+impl SidechainMode {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Include => "all",
+            Self::MainOnly => "main",
+            Self::SubagentOnly => "sub",
+        }
+    }
+
+    pub(crate) fn cycle(self) -> Self {
+        match self {
+            Self::Include => Self::MainOnly,
+            Self::MainOnly => Self::SubagentOnly,
+            Self::SubagentOnly => Self::Include,
+        }
+    }
+
+    pub(crate) fn to_facet(self) -> SidechainFacet {
+        match self {
+            Self::Include => SidechainFacet::Include,
+            Self::MainOnly => SidechainFacet::MainOnly,
+            Self::SubagentOnly => SidechainFacet::SubagentOnly,
+        }
+    }
+}
+
+/// Tool-kind cycle for Search facets. Keys: `k` cycles through the closed set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum ToolKindMode {
+    #[default]
+    Any,
+    File,
+    Command,
+    Web,
+    Query,
+    Unknown,
+}
+
+impl ToolKindMode {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Any => "any",
+            Self::File => "file",
+            Self::Command => "command",
+            Self::Web => "web",
+            Self::Query => "query",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    pub(crate) fn cycle(self) -> Self {
+        match self {
+            Self::Any => Self::File,
+            Self::File => Self::Command,
+            Self::Command => Self::Web,
+            Self::Web => Self::Query,
+            Self::Query => Self::Unknown,
+            Self::Unknown => Self::Any,
+        }
+    }
+
+    pub(crate) fn to_filter(self) -> Option<String> {
+        match self {
+            Self::Any => None,
+            other => Some(other.as_str().to_string()),
+        }
+    }
 }
 
 /// 键盘输入的自有枚举：core 保持 crossterm-free，glue 负责 KeyEvent → KeyInput 映射。
@@ -105,6 +185,10 @@ pub(crate) struct Model {
     pub resume: Option<ResumeMetadataView>,
     pub scroll: usize,
     pub policy: ContextPolicy,
+    /// Search-screen facet: sidechain filter (cycled with `m`).
+    pub sidechain: SidechainMode,
+    /// Search-screen facet: tool-kind filter (cycled with `k`).
+    pub tool_kind: ToolKindMode,
     /// 最近一次错误或提示（如 `no hits`）；渲染进状态行，不弹窗、不退出。
     pub status: Option<String>,
     /// 最近一次加载的截断事实（PARTIAL 渲染依据），来自 App 响应。
@@ -130,6 +214,8 @@ impl Default for Model {
             resume: None,
             scroll: 0,
             policy: ContextPolicy::Mainline,
+            sidechain: SidechainMode::Include,
+            tool_kind: ToolKindMode::Any,
             status: None,
             truncated: false,
             truncation_reason: None,
@@ -159,6 +245,7 @@ pub(crate) enum Effect {
     Search {
         query: String,
         cursor: Option<String>,
+        facets: SearchFacets,
     },
     /// 命中→distinct Session candidates 解析 + 上下文装配。
     ResolveAndLoadContext {
@@ -193,6 +280,18 @@ fn handle_key(mut model: Model, key: KeyInput) -> (Model, Option<Effect>) {
     }
     match model.screen {
         Screen::Search => match key {
+            // Facet cycles only when the input box is empty so typing a query
+            // that contains `m`/`k` is never intercepted.
+            KeyInput::Char('m') if model.input.is_empty() => {
+                model.sidechain = model.sidechain.cycle();
+                model.status = Some(format!("facet sidechain={}", model.sidechain.as_str()));
+                (model, None)
+            }
+            KeyInput::Char('k') if model.input.is_empty() => {
+                model.tool_kind = model.tool_kind.cycle();
+                model.status = Some(format!("facet tool_kind={}", model.tool_kind.as_str()));
+                (model, None)
+            }
             KeyInput::Char(c) => {
                 model.input.push(c);
                 (model, None)
@@ -223,6 +322,7 @@ fn handle_key(mut model: Model, key: KeyInput) -> (Model, Option<Effect>) {
                 let effect = Effect::Search {
                     query: model.query.clone(),
                     cursor: None,
+                    facets: model.search_facets(),
                 };
                 (model, Some(effect))
             }
@@ -261,11 +361,49 @@ fn handle_key(mut model: Model, key: KeyInput) -> (Model, Option<Effect>) {
                     let effect = Effect::Search {
                         query: model.query.clone(),
                         cursor: Some(cursor),
+                        facets: model.search_facets(),
                     };
                     (model, Some(effect))
                 }
-                _ => (model, None),
+                _ => (model, None)
             },
+            // Re-run current query with cycled facets from Results.
+            KeyInput::Char('m') => {
+                model.sidechain = model.sidechain.cycle();
+                if model.query.trim().is_empty() {
+                    model.status = Some(format!("facet sidechain={}", model.sidechain.as_str()));
+                    return (model, None);
+                }
+                model.hits.clear();
+                model.selected = 0;
+                model.next_cursor = None;
+                model.has_more = false;
+                model.page_note = None;
+                let effect = Effect::Search {
+                    query: model.query.clone(),
+                    cursor: None,
+                    facets: model.search_facets(),
+                };
+                (model, Some(effect))
+            }
+            KeyInput::Char('k') => {
+                model.tool_kind = model.tool_kind.cycle();
+                if model.query.trim().is_empty() {
+                    model.status = Some(format!("facet tool_kind={}", model.tool_kind.as_str()));
+                    return (model, None);
+                }
+                model.hits.clear();
+                model.selected = 0;
+                model.next_cursor = None;
+                model.has_more = false;
+                model.page_note = None;
+                let effect = Effect::Search {
+                    query: model.query.clone(),
+                    cursor: None,
+                    facets: model.search_facets(),
+                };
+                (model, Some(effect))
+            }
             KeyInput::Char('q') => {
                 model.quit = true;
                 (model, None)
@@ -400,6 +538,17 @@ fn effect_failed(mut model: Model, text: String) -> (Model, Option<Effect>) {
     (model, None)
 }
 
+impl Model {
+    /// Project current UI facet toggles into the Application SearchFacets contract.
+    pub(crate) fn search_facets(&self) -> SearchFacets {
+        SearchFacets {
+            sidechain: self.sidechain.to_facet(),
+            tool_kind: self.tool_kind.to_filter(),
+            tool_name: None,
+        }
+    }
+}
+
 /// Context 屏滚动上界：最后一行仍可见（无内容时为 0）。
 fn max_scroll(model: &Model) -> usize {
     model
@@ -513,7 +662,11 @@ pub(crate) fn status_line(model: &Model) -> String {
 /// 标题行：当前屏 + 键位提示 + 诚实的分页/策略事实。
 pub(crate) fn title_line(model: &Model) -> String {
     match model.screen {
-        Screen::Search => "Search - type query, Enter: run, Esc: clear/quit".to_string(),
+        Screen::Search => format!(
+            "Search - Enter: run  Esc: clear/quit  m: sidechain={}  k: tool={}",
+            model.sidechain.as_str(),
+            model.tool_kind.as_str()
+        ),
         Screen::Results => {
             let more = if model.has_more { "  n: next page" } else { "" };
             let note = model
@@ -522,8 +675,10 @@ pub(crate) fn title_line(model: &Model) -> String {
                 .map(|n| format!("  [{n}]"))
                 .unwrap_or_default();
             format!(
-                "Results - {} hits{more}{note}  Enter: open, Esc: back, q: quit",
-                model.hits.len()
+                "Results - {} hits  sidechain={} tool={}{more}{note}  Enter: open  m/k: facets  Esc: back  q: quit",
+                model.hits.len(),
+                model.sidechain.as_str(),
+                model.tool_kind.as_str()
             )
         }
         Screen::Context => {
@@ -653,6 +808,7 @@ mod tests {
             Some(Effect::Search {
                 query: "rust".to_string(),
                 cursor: None,
+                facets: SearchFacets::default(),
             })
         );
         assert!(model.hits.is_empty());
@@ -736,6 +892,7 @@ mod tests {
             Some(Effect::Search {
                 query: "rust".to_string(),
                 cursor: Some("tok1".to_string()),
+                facets: SearchFacets::default(),
             })
         );
     }
@@ -773,6 +930,7 @@ mod tests {
             Some(Effect::Search {
                 query: "rust".to_string(),
                 cursor: Some("tok1".to_string()),
+                facets: SearchFacets::default(),
             })
         );
         let (model, _) = update(model, Msg::SearchLoaded(page(&[], None)));
@@ -888,6 +1046,71 @@ mod tests {
                 policy: ContextPolicy::Mainline,
             })
         );
+    }
+
+    #[test]
+    fn search_screen_cycles_sidechain_and_tool_kind_facets() {
+        let model = Model::default();
+        assert_eq!(model.sidechain, SidechainMode::Include);
+        assert_eq!(model.tool_kind, ToolKindMode::Any);
+        let (model, effect) = key(model, KeyInput::Char('m'));
+        assert!(effect.is_none());
+        assert_eq!(model.sidechain, SidechainMode::MainOnly);
+        let (model, _) = key(model, KeyInput::Char('m'));
+        assert_eq!(model.sidechain, SidechainMode::SubagentOnly);
+        let (model, _) = key(model, KeyInput::Char('k'));
+        assert_eq!(model.tool_kind, ToolKindMode::File);
+        let facets = model.search_facets();
+        assert_eq!(facets.sidechain, SidechainFacet::SubagentOnly);
+        assert_eq!(facets.tool_kind.as_deref(), Some("file"));
+        // With empty input, m/k are facet keys (not typed). Typing them only
+        // happens once the input is non-empty.
+        let model = typed(Model::default(), "x");
+        let model = typed(model, "m");
+        assert_eq!(model.input, "xm");
+        assert_eq!(model.sidechain, SidechainMode::Include);
+    }
+
+    #[test]
+    fn results_screen_facet_cycle_reissues_search_with_facets() {
+        let model = Model {
+            screen: Screen::Results,
+            query: "rust".into(),
+            hits: vec![SearchHitView {
+                id: "msg_v1_a".into(),
+                score: 1.0,
+                session_id: Some("ses_v1_s".into()),
+                resume_available: false,
+            }],
+            ..Model::default()
+        };
+        let (model, effect) = key(model, KeyInput::Char('m'));
+        assert_eq!(model.sidechain, SidechainMode::MainOnly);
+        assert_eq!(
+            effect,
+            Some(Effect::Search {
+                query: "rust".into(),
+                cursor: None,
+                facets: SearchFacets {
+                    sidechain: SidechainFacet::MainOnly,
+                    tool_kind: None,
+                    tool_name: None,
+                },
+            })
+        );
+        assert!(model.hits.is_empty(), "facet cycle clears prior hits");
+    }
+
+    #[test]
+    fn title_line_reports_active_facets() {
+        let model = Model {
+            sidechain: SidechainMode::MainOnly,
+            tool_kind: ToolKindMode::Command,
+            ..Model::default()
+        };
+        let title = title_line(&model);
+        assert!(title.contains("sidechain=main"), "{title}");
+        assert!(title.contains("tool=command"), "{title}");
     }
 
     #[test]

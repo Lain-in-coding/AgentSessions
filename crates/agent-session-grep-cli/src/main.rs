@@ -1827,6 +1827,18 @@ fn dispatch(
             let tool_activities = store
                 .tool_activities_for_messages(&hit_ids)
                 .map_err(|e| CliError(e.into()))?;
+            let message_facts: Vec<_> = store
+                .message_facts_for(&hit_ids)
+                .map_err(|e| CliError(e.into()))?
+                .into_iter()
+                .map(|(message_id, role, is_sidechain)| {
+                    agent_session_grep_application::handoff_pack::MessageFact {
+                        message_id,
+                        role,
+                        is_sidechain,
+                    }
+                })
+                .collect();
             let pack = agent_session_grep_application::handoff_pack::generate_deterministic(
                 HandoffInput {
                     query_terms: std::slice::from_ref(&query),
@@ -1847,6 +1859,7 @@ fn dispatch(
                     hits: &hits,
                     source_locations: &source_locations,
                     tool_activities: &tool_activities,
+                    message_facts: &message_facts,
                     catalog_generation: generation,
                     max_tokens: max_tokens_n as u64,
                     max_bytes: max_bytes_n as u64,
