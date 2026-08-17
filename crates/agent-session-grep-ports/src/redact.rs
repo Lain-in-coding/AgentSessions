@@ -44,18 +44,35 @@ pub fn redact_string(s: &str) -> Option<String> {
     let mut redacted = s.to_string();
     let mut count = 0u64;
     for shape in embedded_shapes() {
-        let mut search_from = 0usize;
-        while let Some((start, end, marker)) = find_embedded(&redacted[search_from..], shape) {
-            let abs_start = search_from + start;
-            redacted.replace_range(abs_start..abs_start + end, marker);
-            search_from = abs_start + marker.len();
-            count += 1;
-            if count >= 16 {
-                break; // bounded: never rewrite more than 16 spans per value
-            }
+        replace_spans(&mut redacted, &mut count, |text| find_embedded(text, shape));
+    }
+    // The AWS secret key shape carries no prefix to anchor on, so it gets its
+    // own boundary-anchored pass (the standalone rule only covers a value that
+    // *is* the key; an embedded one must be redacted too).
+    replace_spans(&mut redacted, &mut count, find_embedded_aws_secret);
+    if count == 0 { None } else { Some(redacted) }
+}
+
+/// Replace every span a finder reports, bounded to 16 spans per value.
+///
+/// The finder returns `(start, span_len, marker)` relative to the slice it was
+/// given; scanning resumes after the inserted marker so a marker is never
+/// re-scanned.
+fn replace_spans(
+    text: &mut String,
+    count: &mut u64,
+    finder: impl Fn(&str) -> Option<(usize, usize, &'static str)>,
+) {
+    let mut search_from = 0usize;
+    while let Some((start, span_len, marker)) = finder(&text[search_from..]) {
+        let abs_start = search_from + start;
+        text.replace_range(abs_start..abs_start + span_len, marker);
+        search_from = abs_start + marker.len();
+        *count += 1;
+        if *count >= 16 {
+            break; // bounded: never rewrite more than 16 spans per value
         }
     }
-    if count == 0 { None } else { Some(redacted) }
 }
 
 /// Whole-string secret match: the value itself is a single secret token.
@@ -72,9 +89,17 @@ fn standalone_secret(s: &str) -> Option<&'static str> {
     {
         return Some("[redacted:aws_secret_key]");
     }
-    // GitHub PAT: ghp_ / gho_ / ghs_ / ghu_ / gsr_ + 36 chars
-    for prefix in &["ghp_", "gho_", "ghs_", "ghu_", "ghr_", "ghs_"] {
-        if s.starts_with(prefix) && s.len() >= 40 {
+    // GitHub tokens: fine-grained PAT (github_pat_) plus the classic
+    // ghp_/gho_/ghs_/ghu_/ghr_ family. Mirrors `embedded_shapes`.
+    for &(prefix, min_len) in &[
+        ("github_pat_", 20),
+        ("ghp_", 40),
+        ("gho_", 40),
+        ("ghs_", 40),
+        ("ghu_", 40),
+        ("ghr_", 40),
+    ] {
+        if s.starts_with(prefix) && s.len() >= min_len {
             return Some("[redacted:github_token]");
         }
     }
@@ -104,6 +129,8 @@ fn embedded_shapes() -> Vec<SecretShape> {
     vec![
         // AWS access key: AKIA + 16 alphanumeric = 20 chars
         ("AKIA", 20, "[redacted:aws_access_key]"),
+        // GitHub fine-grained PAT: github_pat_ + 9 = 20 chars minimum
+        ("github_pat_", 20, "[redacted:github_token]"),
         // GitHub PAT: ghp_ + 36 = 40 chars
         ("ghp_", 40, "[redacted:github_token]"),
         ("gho_", 40, "[redacted:github_token]"),
@@ -156,6 +183,47 @@ fn find_embedded(s: &str, shape: SecretShape) -> Option<(usize, usize, &'static 
         search = after;
     }
     None
+}
+
+/// Find one embedded AWS secret access key span in `s`.
+///
+/// An AWS secret key carries no prefix to anchor on — the shape is a 40-char
+/// token from the base64 alphabet (`[A-Za-z0-9+/]`, never padded at that
+/// length). The span is therefore anchored the other way round: a maximal run
+/// of those characters, exactly 40 long, whose preceding character is a
+/// boundary (not `_`/`-`, so a slice of a longer identifier never matches).
+///
+/// The run must additionally mix upper and lower case, which a random base64
+/// secret always does and a 40-character hex digest (a git object id, quoted
+/// constantly in real transcripts) never does.
+fn find_embedded_aws_secret(s: &str) -> Option<(usize, usize, &'static str)> {
+    const AWS_SECRET_LEN: usize = 40;
+    let bytes = s.as_bytes();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        if !is_base64_token_byte(bytes[index]) {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        while index < bytes.len() && is_base64_token_byte(bytes[index]) {
+            index += 1;
+        }
+        let span = &s[start..index];
+        let boundary_ok = start == 0 || !matches!(bytes[start - 1], b'_' | b'-');
+        if boundary_ok
+            && span.len() == AWS_SECRET_LEN
+            && span.bytes().any(|b| b.is_ascii_uppercase())
+            && span.bytes().any(|b| b.is_ascii_lowercase())
+        {
+            return Some((start, AWS_SECRET_LEN, "[redacted:aws_secret_key]"));
+        }
+    }
+    None
+}
+
+fn is_base64_token_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/')
 }
 
 #[cfg(test)]
@@ -245,6 +313,46 @@ mod tests {
     fn short_strings_not_redacted() {
         let (redacted, count) = redact_text("AKIA");
         assert_eq!(redacted, "AKIA");
+        assert_eq!(count, 0);
+    }
+    #[test]
+    fn redacts_github_fine_grained_pat() {
+        let (redacted, count) = redact_text("github_pat_11ABCDEFG0abcdefghijklmnopqrstuvwxyz");
+        assert_eq!(redacted, "[redacted:github_token]");
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn redacts_embedded_github_fine_grained_pat_in_prose() {
+        let (redacted, count) =
+            redact_text("set GITHUB_TOKEN=github_pat_11ABCDEFG0abcdefghijrstuvwxyz before running");
+        assert_eq!(
+            redacted,
+            "set GITHUB_TOKEN=[redacted:github_token] before running"
+        );
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn redacts_embedded_aws_secret_key_in_prose() {
+        let (redacted, count) = redact_text(
+            "aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY trailing",
+        );
+        assert_eq!(
+            redacted,
+            "aws_secret_access_key = [redacted:aws_secret_key] trailing"
+        );
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn does_not_redact_forty_char_hex_git_sha() {
+        let (redacted, count) =
+            redact_text("commit 1234567890abcdef1234567890abcdef12345678 landed");
+        assert_eq!(
+            redacted,
+            "commit 1234567890abcdef1234567890abcdef12345678 landed"
+        );
         assert_eq!(count, 0);
     }
 }
