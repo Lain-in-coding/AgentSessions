@@ -119,9 +119,10 @@ certified — currently 0 Beta. **Not release-ready per provider gate.**
    billing blocks all jobs; SBOM/NOTICE/REUSE audit open.
 2. **Provider maturity**: 0 Beta; Claude/Codex not certified against the PRD
    gate — remains below the ≥5 Beta requirement.
-3. **External**: GitHub Actions billing; PRIVATE→public switch, tag, GitHub
-   Release; Authenticode/notarization/cosign; branch protection; ADR
-   signing/owner decisions.
+3. **External**: GitHub Actions billing; PRIVATE→public switch (Option-A public
+   tree exporter `scripts/release/export_public_tree.py` is ready and current-tree
+   privacy gates are green), tag, GitHub Release; Authenticode/notarization/cosign;
+   branch protection; ADR signing/owner decisions.
 4. **macOS**: rehearsal not run (external CI-billing blocker).
 5. **Known deferred**: real local semantic model (`semantic-candle` + pinned
    multilingual-e5-small) and benchmark gate; context enrichment (ToolActivity

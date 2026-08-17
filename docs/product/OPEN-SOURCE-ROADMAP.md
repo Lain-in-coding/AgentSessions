@@ -27,7 +27,7 @@
 ### 交接时仍开放
 
 - 最终 readiness audit verdict：`NOT_READY_EXTERNAL_BLOCKERS`——全部仓库本地 P0/P1 已闭合，剩余均为 External/owner 决定：GitHub Actions billing（跨平台 CI 无 named successful run）、仓库 PRIVATE→public 与历史清洗决策、tag/Release/签名/notarization/attestation、SBOM/NOTICE/REUSE 审核签署、provider maturity 晋级（0 Beta，Claude/Codex 未 certified）、ADR/THREAT-MODEL owner 签署。详见 `.trellis/tasks/08-15-final-integration-release-rehearsal/research/2026-08-16-codex-handoff-report.md`。
-- Semantic 当前仍是 `bigram-hash-v1` fuzzy lexical vectorizer；真实模型调研建议下一阶段使用 optional `semantic-candle` + pinned `multilingual-e5-small`，默认不启用、不在本阶段实现。
+- Semantic 当前仍是 `bigram-hash-v1` fuzzy lexical vectorizer；真实模型调研建议下一阶段使用 optional `semantic-candle` + pinned `multilingual-e5-small`，默认不启用、不在本阶段实现。当前仓库已提供可审计的公开树导出器（`scripts/release/export_public_tree.py`），因此 semantic 仍是唯一尚未实现的主要本地产品能力，不能在宣传中称为真实语义搜索。
 - GitHub hosted CI 当前因 account billing/spending-limit 在首步前失败；这属于 External，不得改代码伪造跨平台认证。仓库仍保持 PRIVATE，公开/tag/release/签名与 owner governance 由后续 owner 决定。
 
 
