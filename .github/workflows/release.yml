@@ -19,6 +19,10 @@ env:
   MACOSX_DEPLOYMENT_TARGET: "12.0"
 
 jobs:
+  quality:
+    name: required CI quality gates
+    uses: ./.github/workflows/ci.yml
+
   prepare:
     name: validate release inputs
     runs-on: ubuntu-22.04
@@ -100,7 +104,7 @@ jobs:
 
   build:
     name: build ${{ matrix.target }}
-    needs: [prepare, test, deny, installer]
+    needs: [prepare, quality]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     strategy:
