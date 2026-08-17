@@ -6,6 +6,7 @@
 > - 最后更新：2026-08-16（16-provider evidence wave，`08-15-sixteen-provider-evidence-wave`）
 > - 权威数据源：`crates/agent-session-grep-ports/src/capability.rs` 的
 >   `ProviderCapabilityMatrix::current()`；本表与其保持一致，不一致以 capability.rs 为准。
+> - Beta 本地/外部缺口分账见 `PROVIDER-BETA-READINESS.md`（不得仅凭代码存在晋级）。
 
 ## 术语
 
