@@ -659,6 +659,11 @@ impl McpServer<'_> {
             Err(error) => return Err(ToolError::Business(error.into())),
         };
         let source_locations = resolve_source_locations(self.store, &hits).map_err(business)?;
+        let hit_ids: Vec<_> = hits.iter().map(|h| h.id.clone()).collect();
+        let tool_activities = self
+            .store
+            .tool_activities_for_messages(&hit_ids)
+            .map_err(business)?;
         let pack =
             agent_session_grep_application::handoff_pack::generate_deterministic(HandoffInput {
                 query_terms: std::slice::from_ref(&query),
@@ -678,6 +683,7 @@ impl McpServer<'_> {
                 },
                 hits: &hits,
                 source_locations: &source_locations,
+                tool_activities: &tool_activities,
                 catalog_generation: generation,
                 max_tokens: max_tokens as u64,
                 max_bytes: max_bytes as u64,

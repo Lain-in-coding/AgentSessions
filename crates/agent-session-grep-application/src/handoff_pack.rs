@@ -68,6 +68,9 @@ pub struct HandoffInput<'a> {
     pub hits: &'a [SearchHit],
     /// 与 `hits` 同序的权威 source placements（见 [`resolve_source_locations`]）。
     pub source_locations: &'a [SourceLocationInfo],
+    /// Pre-resolved tool activities for the hit messages (empty when none).
+    /// Caller batches via the store; the pack never queries storage itself.
+    pub tool_activities: &'a [serde_json::Value],
     pub catalog_generation: u64,
     pub max_tokens: u64,
     pub max_bytes: u64,
@@ -230,7 +233,9 @@ pub fn generate_deterministic(input: HandoffInput<'_>) -> HandoffPack {
             overall,
             per_session,
         },
-        tool_activity: Vec::new(),
+        // Project caller-supplied activities (already redacted at source when
+        // needed). Empty when the catalog has no tool_activities for these hits.
+        tool_activity: input.tool_activities.to_vec(),
         source_locators: Vec::new(),
     };
 
@@ -511,12 +516,14 @@ mod tests {
         source_locations: &'a [SourceLocationInfo],
     ) -> HandoffInput<'a> {
         static EMPTY: Vec<String> = Vec::new();
+        static EMPTY_ACT: Vec<serde_json::Value> = Vec::new();
         HandoffInput {
             query_terms: &EMPTY,
             retrieval_mode: RetrievalMode::Lexical,
             filters: HandoffFilters::default(),
             hits,
             source_locations,
+            tool_activities: &EMPTY_ACT,
             catalog_generation: 1,
             max_tokens: 10000,
             max_bytes: 1_000_000,

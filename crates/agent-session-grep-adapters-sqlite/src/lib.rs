@@ -1835,6 +1835,60 @@ impl SqliteStore {
         Ok(n)
     }
 
+    /// Batch-load tool activities for the given message wire ids (handoff pack).
+    ///
+    /// Returns one JSON object per activity, stable-ordered by
+    /// `(message_id, activity_id)`. Unknown message ids contribute nothing.
+    pub fn tool_activities_for_messages(
+        &self,
+        message_ids: &[StableId],
+    ) -> PortResult<Vec<serde_json::Value>> {
+        if message_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.conn.borrow();
+        let wires: Vec<&str> = message_ids.iter().map(|id| id.as_str()).collect();
+        let mut out = Vec::new();
+        for chunk in chunk_ids(&wires) {
+            let placeholders = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            let mut stmt = conn
+                .prepare(&format!(
+                    "SELECT activity_id, message_id, kind, actor, name, target, status
+                     FROM tool_activities
+                     WHERE message_id IN ({placeholders})
+                     ORDER BY message_id, activity_id"
+                ))
+                .map_err(backend)?;
+            let rows = stmt
+                .query_map(rusqlite::params_from_iter(chunk.iter().copied()), |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                        row.get::<_, String>(6)?,
+                    ))
+                })
+                .map_err(backend)?;
+            for row in rows {
+                let (activity_id, message_id, kind, actor, name, target, status) =
+                    row.map_err(backend)?;
+                out.push(serde_json::json!({
+                    "activity_id": activity_id,
+                    "message_id": message_id,
+                    "kind": kind,
+                    "actor": actor,
+                    "name": name,
+                    "target": target,
+                    "status": status,
+                }));
+            }
+        }
+        Ok(out)
+    }
+
     /// 当前存储读回的 schema 版本（供 doctor/诊断）。
     pub fn schema_version(&self) -> PortResult<i64> {
         self.conn
