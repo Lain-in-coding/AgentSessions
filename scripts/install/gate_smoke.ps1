@@ -23,14 +23,16 @@ if (-not (Test-Path -LiteralPath $OutputDir)) {
     New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
 }
 
-# install.ps1 takes -Prefix/-SkipBuild; uninstall.ps1 takes only -Prefix.
-# install's --skip-build copies target/release/agent-session-grep, so a
+# install.ps1 takes -Prefix/-SkipBuild; uninstall.ps1 takes only -Prefix. These
+# are PowerShell parameters, so the wrapped calls splat hashtables rather than
+# passing GNU-style flags, which bind as positional arguments and fail.
+# install's -SkipBuild copies target/release/agent-session-grep, so a
 # caller-supplied binary is staged into target/release first.
-$installArgs = @()
-$uninstallArgs = @()
+$installArgs = @{}
+$uninstallArgs = @{}
 if (-not [string]::IsNullOrWhiteSpace($Prefix)) {
-    $installArgs += @('--prefix', $Prefix)
-    $uninstallArgs += @('--prefix', $Prefix)
+    $installArgs['Prefix'] = $Prefix
+    $uninstallArgs['Prefix'] = $Prefix
 }
 if (-not [string]::IsNullOrWhiteSpace($Binary)) {
     if (-not (Test-Path -LiteralPath $Binary)) {
@@ -43,8 +45,25 @@ if (-not [string]::IsNullOrWhiteSpace($Binary)) {
     }
     $exeSuffix = if ($IsWindows) { '.exe' } else { '' }
     $repoArtifact = Join-Path $repoArtifactDir "agent-session-grep$exeSuffix"
-    Copy-Item -LiteralPath $Binary -Destination $repoArtifact -Force
-    $installArgs += @('--skip-build')
+    # -Binary is commonly the repo artifact itself; Copy-Item refuses to
+    # overwrite a file with itself, so compare resolved paths and skip staging.
+    $binaryFull = (Resolve-Path -LiteralPath $Binary).Path
+    $repoArtifactFull = if (Test-Path -LiteralPath $repoArtifact) {
+        (Resolve-Path -LiteralPath $repoArtifact).Path
+    } else {
+        [System.IO.Path]::GetFullPath($repoArtifact)
+    }
+    $comparison = if ($IsWindows) {
+        [System.StringComparison]::OrdinalIgnoreCase
+    } else {
+        [System.StringComparison]::Ordinal
+    }
+    if ([string]::Equals($binaryFull, $repoArtifactFull, $comparison)) {
+        Write-Host "gate: binary is already the repo artifact; skipping staging copy"
+    } else {
+        Copy-Item -LiteralPath $Binary -Destination $repoArtifact -Force
+    }
+    $installArgs['SkipBuild'] = $true
 }
 
 $script:Failures = 0

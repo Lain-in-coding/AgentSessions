@@ -89,10 +89,16 @@ fi
 if [ -n "$binary" ]; then
     [ -f "$binary" ] || fail "binary not found: $binary"
     # install.sh --skip-build copies target/release/agent-session-grep, so a
-    # caller-supplied binary is staged into target/release first.
+    # caller-supplied binary is staged into target/release first. --binary is
+    # commonly the repo artifact itself, and `cp` refuses a same-file copy, so
+    # a destination that already holds those bytes skips the copy.
     mkdir -p "$repo_root/target/release"
     repo_artifact="$repo_root/target/release/agent-session-grep"
-    cp -f "$binary" "$repo_artifact" || fail "cannot stage binary into $repo_artifact"
+    if [ -f "$repo_artifact" ] && cmp -s "$binary" "$repo_artifact"; then
+        printf 'gate: binary already matches the repo artifact; skipping staging copy\n'
+    else
+        cp -f "$binary" "$repo_artifact" || fail "cannot stage binary into $repo_artifact"
+    fi
     install_args+=(--skip-build)
 fi
 
