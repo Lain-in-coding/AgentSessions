@@ -57,12 +57,12 @@
 
 | 东西 | 路径 |
 |---|---|
-| 主仓库 checkout（main 分支被它占用） | `C:\AgentSessions` |
-| 本波发布的隔离工作树 | `C:\AgentSessions\.claude\worktrees\public-release-audit`（分支 `worktree-public-release-audit`） |
-| 其余历史工作树 | `C:\AgentSessions\.claude\worktrees\08-15-*`、`08-16-*`、`agent-*` 等（多为陈旧任务残留，见 §2.3 警告） |
-| 参考源码（可借鉴/可抄） | `C:\AgentHub\project\Github_src`（13 可引用 + cass 仅 clean-room） |
-| 我的持久 memory | `C:\Users\小Q\.claude\projects\C--AgentSessions\memory\`（索引 `MEMORY.md`） |
-| 用户全局规则 | `C:\Users\小Q\.claude\rules\*`（powershell.md、code-search.md、search_core.md、backup-before-edit.md） |
+| 主仓库 checkout（main 分支被它占用） | `<repo-root>` |
+| 本波发布的隔离工作树 | `<repo-root>/.claude/worktrees/<public-release-audit-name>`（分支 `worktree-<public-release-audit-name>`） |
+| 其余历史工作树 | `<repo-root>/.claude/worktrees/<task-or-agent-name>` 等（多为陈旧任务残留，见 §2.3 警告） |
+| 参考源码（可借鉴/可抄） | `<reference-src>/Github_src`（13 可引用 + cass 仅 clean-room） |
+| 我的持久 memory | `<user-home>/.claude/projects/<project-id>/memory/`（索引 `MEMORY.md`） |
+| 用户全局规则 | `<user-home>/.claude/rules/*`（powershell.md、code-search.md、search_core.md、backup-before-edit.md） |
 
 ### 2.2 Shell 与工具纪律（重要）
 
@@ -70,11 +70,11 @@
 - 文件操作用专用工具：列文件 Glob、读文件 Read、搜内容 Grep（即 rg，**不要**在 shell 里调 rg）、编辑 Edit/Write。
 - **编辑含大量中文的文件时，Write/Edit 偶发 JSON 编码损坏**（本波已踩坑多次）。稳妥做法：Read 原样取字符串 → 小段 Edit；大段中文改写优先用 PowerShell 单引号 here-string `@'...'@` + `Set-Content`（注意 here-string 闭合 `'@` 必须顶格）。
 - 写文件默认 UTF-8 无 BOM（pwsh 7 默认）；不要手动加 BOM。
-- 路径一律正斜杠 `C:/...`。
+- 路径一律正斜杠（例如 `C:/...` 形态）。
 
 ### 2.3 Git 与 worktree 纪律（防止事故）
 
-- **`main` 分支被主 checkout `C:\AgentSessions` 占用**，无法在此 worktree 内 `git branch -f main`；同步靠 `git push origin HEAD:main` 与 `git fetch origin`。
+- **`main` 分支被主 checkout `<repo-root>` 占用**，无法在此 worktree 内 `git branch -f main`；同步靠 `git push origin HEAD:main` 与 `git fetch origin`。
 - **git stash 是多 worktree 共享的**：绝不要裸 `git stash pop`（可能弹出别的会话的改动）。要暂存先 `git stash push -u -m "<唯一标签>"` 并记下 SHA，用 `git stash apply <sha>` 恢复。
 - **陈旧 worktree `08-15-provider-opencode` 有未提交改动且已过时**（capability.rs 里 opencode 的 `resume: Derived` 是**错误旧值**，main 已修正为 `Unknown`）。**不要合并它**；main 是最新权威。
 - 提交纪律见 §10；用户在本波任务中已授权**自主 commit/push/merge**（无需逐次征求同意），但合并 PR 仍是 owner 决定、main 直接 push 请保持 Conventional Commits 与质量门绿。
@@ -307,13 +307,13 @@ origin/main `8de7312` → `dc704df` 共 26 个提交，按组列出（每组含�
 ### 9.1 仓库本地可做（按优先级）
 
 1. **真实本地语义模型（最大缺口，登顶差异化的核心）**——任务 `08-15-semantic-hybrid-local-retrieval`（prd.md + design.md 完整规划）与调研 `08-15-open-source-product-roadmap/research/2026-08-16-embedding-model-options.md`（已锁定模型/feature/分发策略）。要点：
-   - 实现栈：`candle-core/candle-nn/candle-transformers 0.11` + `tokenizers` + safetensors；模型 `intfloat/multilingual-e5-small@614241f6...`（384 维、mean pooling、L2、`query:`/`passage:` 前缀）；本机 Cargo 缓存已有 candle-core 0.10.2，参考实现 `C:\AgentHub\project\Github_src\Recall\src\embedding.rs`（MIT，可借鉴）。
+   - 实现栈：`candle-core/candle-nn/candle-transformers 0.10` + `tokenizers` + safetensors；模型 `intfloat/multilingual-e5-small@614241f6...`（384 维、mean pooling、L2、`query:`/`passage:` 前缀）；本机 Cargo 缓存已有 candle-core 0.10.2，参考实现 `<reference-src>/Github_src/Recall/src/embedding.rs`（MIT，可借鉴）。
    - Cargo feature 名 `semantic-candle`，**默认 off**；`cargo install` 默认保持纯 lexical。
    - 模型获取两入口且网络隔离：`model import --dir <bundle>`（全离线、校验 pinned manifest/SHA-256/license）与 `model install multilingual-e5-small`（**唯一允许联网的命令**、先打印 repo/revision/size/license、staging+hash+atomic rename）；search/sync/index/model load 永不联网；`--offline` 下不可用 → 显式 `lexical_fallback`。
-   - `EmbeddingModel`/`SemanticIndex`/`EmbeddingManifest`/`message_vec`（model_id 隔离）/RRF 融合/`lexical_fallback` 全部已就位；新实现用**新 model_id**（如 `intfloat-multilingual-e5-small@614241f6-candle-f32-meanpool-l2-qpass-v1`），旧 bigram rows 自动 inert。
+   - `EmbeddingModel`/`SemanticIndex`/`EmbeddingManifest`/`message_vec`（model_id 隔离）/RRF 融合/`lexical_fallback` 全部已就位；可选 Candle 后端与 offline import 已落地（feature `semantic-candle`）；新实现用**新 model_id**（`intfloat-multilingual-e5-small@614241f6-candle-f32-meanpool-l2-qpass-v1`），旧 bigram rows 自动 inert。
    - 门槛：frozen benchmark（CJK/英文/代码 recall + p50/p95 + 体积）达标前 maturity 保持 beta、lexical 保持默认；不得只凭"能跑"升级宣传。相应更新 `PROVIDER-MATURITY-MATRIX`、`COMPETITOR-COMPARISON`、`verify-release.py` 的 semantic 检查。
 2. **Provider 晋级证据推进**：14 个 Experimental→Beta 需跨 target named CI run（billing 解锁后）+ owner 决策；仓库内可先行的是把每个 provider 的"Beta 本地缺口 vs 外部缺口"结构化到 `AdapterManifest`/矩阵文档（避免"机制存在=证据存在"的误判），并补齐 context/handoff/incremental 覆盖（对 partial 的 claude-code/codex/aider 尤其）。
-3. **context/handoff 工具活动富化**：schema v12 已有 tool_activities，但 `handoff_pack.rs` 仍 `tool_activity: Vec::new()`、context 视图不投影 sidechain/tool activity（任务 `08-15-evidence-handoff-pack` 要求 pack 带 tool activity；schemas/handoff/v1 已预留字段）。需加批量读取、预算/脱敏、golden/契约测试。
+3. **context 工具活动富化（handoff 已投影）**：schema v12 已有 tool_activities；handoff pack 现已批量投影 `tool_activity`。context 视图仍不投影 sidechain/tool activity（任务 `08-15-evidence-handoff-pack` 后续）。需加 context 侧批量读取、预算/脱敏、golden/契约测试。
 4. **TUI facet 控件 + Robot capability UI**：CLI/MCP 已有 facets，TUI `SearchFacets::default()` 是显式 deferred；加控件后更新五入口 harness。
 5. **ToolActivity retention/cleanup 策略**：表/索引已有，生命周期策略 deferred（WriterLease/CAS 下安全修剪 + 审计 + rebuild 不变量测试）。
 6. **provider-scoped session identity 迁移**：`08-15-unified-release-contract/design.md` §Deferred 的 `ses_v2` wire ids + `installation_namespaces` registry + `id_alias` TTL + backfill（RFC-0001 §5.1 open debt）——最大的剩余本地 feature。
@@ -351,13 +351,13 @@ origin/main `8de7312` → `dc704df` 共 26 个提交，按组列出（每组含�
 
 ## 11. 给新 Agent 的第一步（30 分钟确认环境）
 
-1. `git -C C:\AgentSessions\.claude\worktrees\public-release-audit status --short --branch`（应显示 `worktree-public-release-audit` 分支，HEAD=`dc704df`，工作树干净；若在别的目录工作，先建自己的 worktree）。
-2. `git fetch origin` 确认 origin/main=`dc704df`。
+1. `git -C <repo-root>/.claude/worktrees/<public-release-audit-name> status --short --branch`（应显示对应 worktree 分支，HEAD 与 origin/main 一致，工作树干净；若在别的目录工作，先建自己的 worktree）。
+2. `git fetch origin` 确认 origin/main 与本地 HEAD 一致。
 3. 跑 §7.1 全门一次，确认你接手的环境与文档一致（预期：fmt/clippy/全部 Rust+Python 测试绿、privacy 0 findings、deny ok）。
 4. 读四个文件建立心智模型：`CLAUDE.md`、`docs/product/OPEN-SOURCE-ROADMAP.md`、`docs/product/PROVIDER-MATURITY-MATRIX.md`、`crates/agent-session-grep-ports/src/capability.rs`（矩阵单源）。
 5. 读 `crates/agent-session-grep-cli/src/main.rs` 的 dispatch 与 `crates/agent-session-grep-application/src/lib.rs` 的 App 入口，理解五个入口共享 ADT。
 6. 用 `cargo run -q -p agent-session-grep-cli -- --db <临时> search test`（或 `--robot`）各跑一条，感受 envelope 形状。
-7. 再从 §9.1 选一个任务开工（推荐 #1 语义模型 或 #3 context 富化），按 §10 纪律提交。
+7. 再从 §9.1 选一个任务开工（推荐 semantic weights/benchmark 或 context 富化），按 §10 纪律提交。
 
 ## 12. 附录：速查
 
