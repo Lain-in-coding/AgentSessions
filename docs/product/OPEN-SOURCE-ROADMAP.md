@@ -9,23 +9,24 @@
 > - evidence_path: `.trellis/tasks/08-15-open-source-product-roadmap/prd.md`(决策全文)
 > - 本文是执行总规划的持久化入口;新会话/新 agent 以本文 + 父任务 PRD 为权威。
 
-## 0.1 2026-08-16 阶段交接快照
+## 0.1 2026-08-17 阶段交接快照
 
-本阶段（provider evidence / release-gate integration）已完成并推送到 `main`，最新阶段提交为 `caafb44`；这表示“当前阶段的集成工作完成”，不表示项目已经满足公开发布门。
+本阶段（provider evidence / release-gate integration / release-gap 收口）已完成并推送到 `main`，阶段主体提交为 `8de7312`（ToolActivity/schema-v12 落地），2026-08-17 收口 wave 追加 Robot facets schema、Web/MCP provider 一致性、16 行矩阵漂移守护、privacy 扫描强化、CI Python 套件接线等本地修复；这表示“当前阶段的集成工作完成”，不表示项目已经满足公开发布门。
 
 ### 已完成并验证
 
-- 16 行 Provider capability matrix 对外可见：CLI `providers`、Robot JSON、Human、MCP 均从 `ProviderCapabilityMatrix::current()` 投影。
+- 16 行 Provider capability matrix 对外可见：CLI `providers`、Robot JSON、Human、Web `/api/providers` 与 MCP `list_providers`（含 deferred 行 `ingestible:false`）均从 `ProviderCapabilityMatrix::current()` 投影，并有 16 行全量漂移测试守护。
 - 14 个 implemented provider 均具备结构化 `AdapterManifest`；Claude/Codex fixture revision 为 `1`，认证 target 在跨平台成功 run 前保持为空。
 - Claude/Codex probe/parse source bytes read-only assertions 与真实回归 `INV-SOURCES-UNCHANGED` 已落地。
 - Codex incremental resync、source-shrink tombstone、empty-source tombstone 三项合成 e2e 已落地。
 - `discovery_coverage`、`resume_handoff_success` 已从 deferred 改为 measured；Windows 与 WSL2 Linux gate 均为 `pass=true`、`deferred=[]`。
+- 五入口一致性 harness 全直接对比通过；`verify-release.py` 10/10；privacy scan 0 findings。
+- 跨边界脱敏规则覆盖 fine-grained GitHub PAT 与嵌入 AWS secret key；MCP/Robot/Web 三入口 facet 回显与 envelope 形状一致。
 - Provider rollback ADR-0010 已落地但状态仍为 `Proposed`，不得代 owner/approver 宣称 Accepted。
 
 ### 交接时仍开放
 
-- 最终 readiness audit verdict：`NOT_READY_LOCAL_BLOCKERS`；当前为 6 组本地 P0、6 组 P1、5 组 External，详见 `.trellis/tasks/08-15-final-integration-release-rehearsal/research/2026-08-16-final-open-source-audit.md`。
-- 首要 P0：公开树/历史绝对路径清理、版本/宣传口径统一、安装器 `asg` 一致性、release workflow/checksum/SBOM/third-party 制品、Web/TUI/三平台终局 rehearsal、bounded ingestion。
+- 最终 readiness audit verdict：`NOT_READY_EXTERNAL_BLOCKERS`——全部仓库本地 P0/P1 已闭合，剩余均为 External/owner 决定：GitHub Actions billing（跨平台 CI 无 named successful run）、仓库 PRIVATE→public 与历史清洗决策、tag/Release/签名/notarization/attestation、SBOM/NOTICE/REUSE 审核签署、provider maturity 晋级（0 Beta，Claude/Codex 未 certified）、ADR/THREAT-MODEL owner 签署。详见 `.trellis/tasks/08-15-final-integration-release-rehearsal/research/2026-08-16-codex-handoff-report.md`。
 - Semantic 当前仍是 `bigram-hash-v1` fuzzy lexical vectorizer；真实模型调研建议下一阶段使用 optional `semantic-candle` + pinned `multilingual-e5-small`，默认不启用、不在本阶段实现。
 - GitHub hosted CI 当前因 account billing/spending-limit 在首步前失败；这属于 External，不得改代码伪造跨平台认证。仓库仍保持 PRIVATE，公开/tag/release/签名与 owner governance 由后续 owner 决定。
 
