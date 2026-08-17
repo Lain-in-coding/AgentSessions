@@ -3,6 +3,7 @@ name: security-audit
 "on":
   schedule:
     - cron: "23 4 * * 1"
+  pull_request:
   workflow_dispatch:
 
 permissions:
