@@ -135,6 +135,23 @@ ingestion, handoff determinism/budget/redaction, resume first-run preview,
 v12, serve hardening, P0-5 release rehearsal (verify-release 10/10, five-entry
 consistency harness all-direct).
 
+Closed by the 2026-08-17 release-gap wave (post-draft audit fixes, pushed to
+`main` at `ed57a9a`): Robot v1.1 `searchData.facets` schema echo + protocol
+flag-skip parity; Web/MCP canonical provider ids (`claude-code`/`codex`); root
+installer scripts delegate to canonical `scripts/install/`; MCP facets echo +
+`list_providers` 16-row matrix projection + Web `/api/providers` standard
+envelope; gate-smoke PowerShell flag style + self-copy hazard; CI runs Python
+release/evidence suites and gates release on green CI; workflow actions pinned
+to SHAs; `security-audit.yml` gains `pull_request` trigger; redaction covers
+fine-grained GitHub PATs + embedded AWS secret keys + MCP error frames + hook
+headers; serve token compare made constant-time + `frame-ancestors 'none'` CSP;
+`deny.toml` bans HTTP-client crates; spikes get standalone `[workspace]`
+markers; privacy scanner drops hardcoded operator username and scans all
+tracked paths (0 findings); 16-row capability-matrix drift test; tracked
+generated gate manifest untracked per out/README contract; THREAT-MODEL gains
+serve-LAN/hook/model-download/embedding-API attack surfaces; roadmap phase
+snapshot refreshed to `NOT_READY_EXTERNAL_BLOCKERS`.
+
 ---
 
 ## 8. Recommendation
