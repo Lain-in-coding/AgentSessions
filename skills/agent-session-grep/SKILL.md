@@ -135,13 +135,13 @@ Run the same binary as a stdio MCP server (tools only, sequential, read-only):
 
 | tool | when to use |
 | --- | --- |
-| `search_sessions` | full-text query; params: `query` (required), `limit`, `cursor`, `max_items`, `max_bytes`; optional `providers` (`claude`/`codex` only), `since`/`until`, `include_system`, `group_by_session`; facets `sidechain` (`include`/`main_only`/`subagent_only`), `tool_kind` (`file`/`command`/`web`/`query`/`unknown`), `tool_name`; each hit includes canonical `session_id` and `resume_available` |
+| `search_sessions` | full-text query; params: `query` (required), `limit`, `cursor`, `max_items`, `max_bytes`; optional `providers` (`claude`/`claude-code`/`codex`), `since`/`until`, `include_system`, `group_by_session`; facets `sidechain` (`include`/`main_only`/`subagent_only`), `tool_kind` (`file`/`command`/`web`/`query`/`unknown`), `tool_name`; each hit includes canonical `session_id` and `resume_available`; non-default facets are echoed in `data.facets` |
 | `get_session_context` | pull one session branch: `session_id` (required, canonical `ses_v1_...`), `policy` (`mainline` or `full`), `level` (`raw`/`talks`/`sessions`), `max_messages`, `max_bytes` |
 | `get_session_resume` | resolve fixed-shape Resume Metadata from a canonical `session_id`; nullable `provider_session_id` and `original_working_directory`; never returns a command or Source path |
 | `get_message` | return one Message and bounded mainline neighbors; params include canonical `message_id`, optional canonical `session_id`, `around`, and budgets |
 | `list_sessions` | page Session entities only in stable canonical-id order |
 | `generate_handoff` | assemble a deterministic handoff pack (`handoff-pack/v1`) for a query: search hits become evidence spans with authoritative source locators; budgets `max_evidence`/`max_tokens`/`max_bytes` are enforced and cross-boundary redaction is on by default (ADR-0009); truncation is reported as `outcome: partial` |
-| `list_providers` | list the adapters this build can ingest — the 14 implemented providers, each with `id` (stable, e.g. `claude-code`) and its capability-matrix `maturity`. The 2 deferred unsupported rows are not ingestible and are therefore absent here; for the full 16-row matrix with per-field capabilities use the CLI `providers` command or `docs/product/PROVIDER-MATURITY-MATRIX.md` |
+| `list_providers` | return the complete 16-row capability matrix from the same source as CLI `providers`: 14 implemented rows with `ingestible: true` and 2 deferred unsupported rows (`deepseek-harness`, `zcode`) with `ingestible: false`; each row includes `id`, `variant`, current `maturity`, and `maturity_target` |
 | `get_status` | catalog count and active generation |
 | `doctor` | health probe: `db: "ok"`, schema, generation, interrupted batches |
 

@@ -37,7 +37,7 @@
 | 身份 | StableId 三级 + durable outbox + CAS generation + 失败不删除 | hstry 使用 UUID v5;固定快照中未见 durable outbox | 两者身份与恢复机制不同;本表不作可靠性优劣结论 |
 | 成熟度 | certified/GA/beta/experimental/unsupported 证据晋级 | 各项目使用各自 provider 支持口径 | 术语与证据门槛不可直接等同 |
 | 隐私 | 零遥测代码约束 + CI 静态检查 + 跨边界默认脱敏 | agentsview 有 secret 扫描 | 边界模型不同;仅比较当前已实现的控制 |
-| 入口 | CLI/MCP/Robot/TUI/Web 共用 Application ADT | 各参考项目入口形态不同 | 本产品五入口终局一致性演练仍待完成,不宣称跨项目入口优势 |
+| 入口 | CLI/MCP/Robot/TUI/Web 共用 Application ADT | 各参考项目入口形态不同 | 五入口终局一致性 harness 已全直接对比通过（`overall_verdict=consistent`，无 skipped/aliases/unimplemented）；未做跨项目入口质量 benchmark |
 
 ## 不可比清单
 
