@@ -685,7 +685,18 @@ pub fn route_request(
         args = vec!["status".to_string()];
     }
     if path == "/api/providers" {
-        return redacted_json(200, crate::provider_matrix_data());
+        // 与其它 Web 路由共用同一 envelope（command/outcome/data/page/warnings），
+        // 客户端无需为单一路由特判响应形状（audit P1-6）。
+        return redacted_json(
+            200,
+            serde_json::json!({
+                "command": "providers",
+                "outcome": "success",
+                "data": crate::provider_matrix_data(),
+                "page": { "next_cursor": null, "has_more": false },
+                "warnings": [],
+            }),
+        );
     }
     if let Some(id) = path.strip_prefix("/api/show/") {
         args = vec!["show".to_string(), id.to_string()];
@@ -1065,7 +1076,8 @@ mod tests {
             );
             assert_eq!(response.status, 200, "{path}: {}", response.body);
             let body: serde_json::Value = serde_json::from_str(&response.body).expect("JSON");
-            assert!(body.get("data").is_some() || path == "/api/providers");
+            assert!(body.get("data").is_some());
+            assert_eq!(body.get("outcome"), Some(&serde_json::json!("success")));
         }
 
         let invalid = route_request(

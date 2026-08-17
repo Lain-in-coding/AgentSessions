@@ -22,7 +22,8 @@ use agent_session_grep_application::{
 use agent_session_grep_domain::{ContextPolicy, IdKind, StableId};
 use agent_session_grep_ports::{
     RetrievalMode, SearchFacets, SearchFilters, SearchProvider, SidechainFacet,
-    capability::ProviderCapabilityMatrix, handoff::HandoffFilters,
+    capability::{ProviderCapabilityMatrix, ProviderMaturity},
+    handoff::HandoffFilters,
 };
 use serde_json::{Map, Value, json};
 
@@ -421,14 +422,15 @@ impl McpServer<'_> {
             )));
         }
         let tool_name = opt_str(args, "tool_name")?;
-        self.run_app(AppRequest::Search {
+        let facets = SearchFacets {
+            sidechain,
+            tool_kind,
+            tool_name,
+        };
+        let mut payload = self.run_app(AppRequest::Search {
             query,
             filters,
-            facets: SearchFacets {
-                sidechain,
-                tool_kind,
-                tool_name,
-            },
+            facets: facets.clone(),
             limit: limit.or(max_items).unwrap_or(20),
             cursor,
             budget: budget_with(max_items, max_bytes, None),
@@ -436,7 +438,25 @@ impl McpServer<'_> {
             group_by_session,
             mode: agent_session_grep_ports::RetrievalMode::Lexical,
             query_embedding: None,
-        })
+        })?;
+        // CLI（Robot）search 在非默认 facet 时回显 data.facets；MCP 必须一致，
+        // 否则同一能力在两个入口呈现不同契约（audit P1-5）。
+        if !facets.is_default() {
+            let data = payload
+                .as_object_mut()
+                .and_then(|frame| frame.get_mut("data"))
+                .and_then(|data| data.as_object_mut())
+                .expect("success_payload carries a data object");
+            data.insert(
+                "facets".into(),
+                serde_json::json!({
+                    "sidechain": facets.sidechain.as_str(),
+                    "tool_kind": facets.tool_kind,
+                    "tool_name": facets.tool_name,
+                }),
+            );
+        }
+        Ok(payload)
     }
 
     fn tool_context(&self, args: &Map<String, Value>) -> Result<Value, ToolError> {
@@ -1058,19 +1078,23 @@ fn success_payload(
     })
 }
 
-/// list_providers 以组合根 registry 限定本构建可 ingest 的 adapter；maturity 从
-/// capability matrix 读取，避免跨边界把不同 provider 伪装成同一成熟度。
+/// list_providers 投影完整 16 行能力矩阵（14 个可 ingest + 2 个 deferred），
+/// 与 CLI `providers` 命令同一单源。`ingestible` 区分注册表内 adapter 与
+/// deferred 行：deferred 行如实标注 false 而非被静默省略（audit P1-5）。
 fn providers_payload() -> Value {
     let matrix = ProviderCapabilityMatrix::current();
-    let providers: Vec<Value> = provider_registry()
+    let registered = provider_registry();
+    let registry: Vec<&str> = registered.iter().map(|adapter| adapter.provider_id()).collect();
+    let providers: Vec<Value> = matrix
+        .providers
         .iter()
-        .map(|adapter| {
-            let capability = matrix
-                .find(adapter.provider_id())
-                .expect("every registered provider must have a capability matrix row");
+        .map(|capability| {
             json!({
                 "id": capability.provider_id.as_str(),
+                "variant": capability.variant_id.as_str(),
                 "maturity": capability.maturity,
+                "maturity_target": ProviderMaturity::target_for(&capability.provider_id),
+                "ingestible": registry.contains(&capability.provider_id.as_str()),
             })
         })
         .collect();
@@ -1193,12 +1217,14 @@ fn opt_filters(args: &Map<String, Value>) -> Result<SearchFilters, ToolError> {
                     "providers entries must be strings".into(),
                 ));
             };
-            filters.providers.push(canonical_search_provider(provider).ok_or_else(|| {
-                ToolError::Params(format!(
-                    "providers must contain only claude|claude-code|codex, got {}",
-                    bounded(provider)
-                ))
-            })?);
+            filters
+                .providers
+                .push(canonical_search_provider(provider).ok_or_else(|| {
+                    ToolError::Params(format!(
+                        "providers must contain only claude|claude-code|codex, got {}",
+                        bounded(provider)
+                    ))
+                })?);
         }
     }
     filters.since = opt_instant(args, "since")?;
@@ -2062,6 +2088,37 @@ mod tests {
     }
 
     #[test]
+    fn search_echoes_non_default_facets_like_the_cli_robot_surface() {
+        // CLI（Robot）search 在非默认 facet 时回显 data.facets；MCP 必须一致
+        // （audit P1-5）。默认 facet 请求不出现 facets 键，保持输出字节兼容。
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = seeded_store(&dir);
+        let mut server = ready(&store);
+        let v = call(
+            &mut server,
+            "search_sessions",
+            json!({ "query": "hello", "tool_kind": "file", "tool_name": "Bash" }),
+        );
+        assert_eq!(v["result"]["isError"], false);
+        let facets = &v["result"]["structuredContent"]["data"]["facets"];
+        assert_eq!(facets["sidechain"], "include", "{facets}");
+        assert_eq!(facets["tool_kind"], "file", "{facets}");
+        assert_eq!(facets["tool_name"], "Bash", "{facets}");
+
+        let v = call(
+            &mut server,
+            "search_sessions",
+            json!({ "query": "hello" }),
+        );
+        assert!(
+            v["result"]["structuredContent"]["data"]
+                .get("facets")
+                .is_none(),
+            "default facets must not echo"
+        );
+    }
+
+    #[test]
     fn unknown_extra_property_is_invalid_params() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = open_store(&dir);
@@ -2609,6 +2666,8 @@ mod tests {
         assert_eq!(payload["outcome"], "success");
         assert_eq!(payload["page"]["next_cursor"], Value::Null);
         let providers = payload["data"]["providers"].as_array().expect("providers");
+        // 16 行全量矩阵投影：14 个 ingestible + 2 个 deferred（ingestible=false）。
+        assert_eq!(providers.len(), 16, "{providers:?}");
         let ids: Vec<&str> = providers
             .iter()
             .map(|provider| provider["id"].as_str().expect("provider id"))
@@ -2626,6 +2685,24 @@ mod tests {
                 serde_json::to_value(expected).expect("serialize maturity"),
                 "{provider}"
             );
+            if provider["ingestible"] == true {
+                assert!(
+                    provider_registry()
+                        .iter()
+                        .any(|adapter| adapter.provider_id() == id),
+                    "{id} marked ingestible but not registered"
+                );
+            }
         }
+        let deferred: Vec<&Value> = providers
+            .iter()
+            .filter(|provider| provider["ingestible"] == false)
+            .collect();
+        assert_eq!(deferred.len(), 2, "{deferred:?}");
+        assert!(
+            deferred
+                .iter()
+                .all(|provider| provider["maturity"] == "unsupported")
+        );
     }
 }
