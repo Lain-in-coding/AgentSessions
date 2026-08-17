@@ -7,6 +7,13 @@ rust-version.workspace = true
 publish = false
 default-run = "agent-session-grep"
 
+[features]
+default = []
+# Optional real local semantic backend. Off by default; enable with
+# `--features semantic-candle` when building a semantic-capable binary.
+# The default release path stays bigram-hash / lexical-only.
+semantic-candle = ["agent-session-grep-application/semantic-candle"]
+
 [[bin]]
 name = "agent-session-grep"
 path = "src/main.rs"

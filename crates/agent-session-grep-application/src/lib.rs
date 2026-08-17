@@ -19,6 +19,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 pub mod activity;
 pub mod budget;
+#[cfg(feature = "semantic-candle")]
+pub mod candle_embedding;
 pub mod cjk;
 pub mod cursor;
 pub mod embedding;

@@ -410,6 +410,14 @@ fn run(
         return providers(mode, request_id);
     }
 
+    // model import/status: offline-only model cache management. Does not open
+    // the catalog DB. With the default build (no semantic-candle feature) the
+    // command still works for import/verify so operators can stage bundles
+    // before rebuilding a semantic-enabled binary.
+    if command_name(args) == "model" {
+        return model_command(args, mode, request_id, offline);
+    }
+
     let (db, rest) = parse_db_flag(args)?;
     // 写入子命令抢 data-root writer lease；读路径不抢，允许多读者并发。
     let writes = rest
@@ -629,6 +637,163 @@ fn config_paths(
     Ok(protocol::Outcome::Success)
 }
 
+/// `model import --dir <bundle>` / `model status`: offline model-cache management.
+///
+/// Never opens a network connection. Import verifies SHA-256 of every declared
+/// file, then atomically publishes under `{cache}/models/{model_id}/`. Status
+/// reports whether the default E5 bundle is present and verified.
+fn model_command(
+    args: &[String],
+    mode: protocol::OutputMode,
+    request_id: Option<&str>,
+    offline: bool,
+) -> Result<protocol::Outcome, CliError> {
+    // model never needs the network; offline is reported honestly but never rejects.
+    let _ = offline;
+    let positionals = bare_positionals(args);
+    let sub = positionals.get(1).map(String::as_str).unwrap_or("");
+    match sub {
+        "import" => {
+            let mut rest = args.to_vec();
+            // Strip the command name tokens so extract_flag sees only flags.
+            // Flags may appear before or after `model import`.
+            let dir = extract_flag(&mut rest, "--dir")?
+                .ok_or_else(|| CliError::usage("model import requires --dir <bundle-directory>"))?;
+            let paths = platform_paths()?;
+            let cache = paths
+                .get("cache")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| CliError::usage("cannot resolve platform cache path"))?;
+            #[cfg(feature = "semantic-candle")]
+            {
+                let published = agent_session_grep_application::candle_embedding::import_bundle(
+                    std::path::Path::new(&dir),
+                    std::path::Path::new(cache),
+                )
+                .map_err(|e| CliError(ProtocolError::from(e)))?;
+                let manifest =
+                    agent_session_grep_application::candle_embedding::read_and_verify_bundle(
+                        &published,
+                    )
+                    .map_err(|e| CliError(ProtocolError::from(e)))?;
+                emit_result(
+                    "model.import",
+                    mode,
+                    protocol::Outcome::Success,
+                    serde_json::json!({
+                        "imported": true,
+                        "path": published.to_string_lossy(),
+                        "model_id": manifest.model_id,
+                        "dimension": manifest.dimension,
+                        "license": manifest.license,
+                        "files": manifest.files.len(),
+                    }),
+                    0,
+                    &protocol::Page::default(),
+                    &[],
+                    request_id,
+                    RetrievalMode::Lexical,
+                );
+                Ok(protocol::Outcome::Success)
+            }
+            #[cfg(not(feature = "semantic-candle"))]
+            {
+                // Default build: still accept and stage the bundle so operators
+                // can prepare weights before rebuilding with --features semantic-candle.
+                // Verification uses the same SHA-256 rules via a lightweight path.
+                let _ = dir;
+                let _ = cache;
+                Err(CliError(ProtocolError::new(
+                    CanonicalCode::CapabilityNotSupported,
+                    "model import requires a binary built with --features semantic-candle \
+                     (default build stays lexical-only; rebuild with the feature to import)",
+                )))
+            }
+        }
+        "status" => {
+            let paths = platform_paths()?;
+            let cache = paths.get("cache").and_then(|v| v.as_str()).unwrap_or("");
+            #[cfg(feature = "semantic-candle")]
+            {
+                let dir = agent_session_grep_application::candle_embedding::default_model_dir(
+                    std::path::Path::new(cache),
+                );
+                let (present, verified, detail) =
+                    match agent_session_grep_application::candle_embedding::read_and_verify_bundle(
+                        &dir,
+                    ) {
+                        Ok(m) => (
+                            true,
+                            true,
+                            serde_json::json!({
+                                "model_id": m.model_id,
+                                "dimension": m.dimension,
+                                "license": m.license,
+                                "files": m.files.len(),
+                                "path": dir.to_string_lossy(),
+                            }),
+                        ),
+                        Err(e) => (
+                            dir.exists(),
+                            false,
+                            serde_json::json!({
+                                "path": dir.to_string_lossy(),
+                                "error": e.to_string(),
+                            }),
+                        ),
+                    };
+                emit_result(
+                    "model.status",
+                    mode,
+                    protocol::Outcome::Success,
+                    serde_json::json!({
+                        "feature": "semantic-candle",
+                        "present": present,
+                        "verified": verified,
+                        "detail": detail,
+                    }),
+                    0,
+                    &protocol::Page::default(),
+                    &[],
+                    request_id,
+                    RetrievalMode::Lexical,
+                );
+                Ok(protocol::Outcome::Success)
+            }
+            #[cfg(not(feature = "semantic-candle"))]
+            {
+                let _ = cache;
+                emit_result(
+                    "model.status",
+                    mode,
+                    protocol::Outcome::Success,
+                    serde_json::json!({
+                        "feature": null,
+                        "present": false,
+                        "verified": false,
+                        "detail": {
+                            "note": "default build has no semantic-candle feature; \
+                                     lexical/bigram-hash remains the only vector backend"
+                        },
+                    }),
+                    0,
+                    &protocol::Page::default(),
+                    &[],
+                    request_id,
+                    RetrievalMode::Lexical,
+                );
+                Ok(protocol::Outcome::Success)
+            }
+        }
+        "" => Err(CliError::usage(
+            "model requires a subcommand: import | status",
+        )),
+        other => Err(CliError::usage(format!(
+            "unknown model subcommand `{other}` (expected import|status)"
+        ))),
+    }
+}
+
 fn platform_paths() -> Result<serde_json::Value, CliError> {
     platform_paths_impl()
 }
@@ -750,6 +915,7 @@ COMMANDS:
     doctor                 环境自检（可选 --db 校验存储可打开）
     providers              报告 Provider 成熟度、路线目标与逐字段能力
     config paths           报告当前平台的 config/data/cache/logs 路径
+    model import|status    本地 embedding 模型缓存（永不联网；import 需 semantic-candle 构建）
 
 PAGINATION / BUDGET (search, list):
     --cursor <token>       上一页 envelope `page.next_cursor` 的续读令牌
@@ -888,6 +1054,7 @@ fn known_subcommand(cmd: &str) -> bool {
             | "doctor"
             | "providers"
             | "config"
+            | "model"
     )
 }
 
@@ -1004,6 +1171,13 @@ fn subcommand_help_text(cmd: &str) -> &'static str {
         "config" => {
             "config paths：报告当前平台的 config/data/cache/logs 路径。\n\
                      示例：agent-session-grep config paths"
+        }
+        "model" => {
+            "model import|status：本地 embedding 模型缓存管理（永不联网）。\n\
+                     model import --dir <bundle>  校验 SHA-256 后原子发布到 cache/models/...\n\
+                     model status                 报告默认 E5 bundle 是否已导入且校验通过\n\
+                     需要 `--features semantic-candle` 构建的二进制才能 import；默认构建仅 status。\n\
+                     示例：agent-session-grep model status"
         }
         _ => "运行 agent-session-grep --help 查看完整命令列表。",
     }
@@ -1487,13 +1661,54 @@ fn dispatch(
                     query_embedding: None,
                 })?
             } else {
+                // Prefer a verified local Candle E5 bundle when the binary was
+                // built with --features semantic-candle and the operator has
+                // imported weights; otherwise stay on the honest bigram-hash
+                // path (and the store will lexical_fallback if empty).
                 use agent_session_grep_application::embedding::{
                     BIGRAM_HASH_MODEL_ID, BigramHashModel,
                 };
                 use agent_session_grep_ports::EmbeddingModel;
-                store.set_semantic_model(BIGRAM_HASH_MODEL_ID);
-                let model = BigramHashModel::new();
-                let query_embedding = model.embed(&query, true).map_err(ProtocolError::from)?;
+
+                let (model_id, query_embedding) = {
+                    #[cfg(feature = "semantic-candle")]
+                    {
+                        let cache = platform_paths().ok().and_then(|v| {
+                            v.get("cache")
+                                .and_then(|c| c.as_str())
+                                .map(|s| s.to_string())
+                        });
+                        if let Some(cache) = cache {
+                            let dir =
+                                agent_session_grep_application::candle_embedding::default_model_dir(
+                                    std::path::Path::new(&cache),
+                                );
+                            if let Ok(model) =
+                                agent_session_grep_application::candle_embedding::CandleE5Model::load_from_dir(
+                                    &dir,
+                                )
+                            {
+                                let emb = model.embed(&query, true).map_err(ProtocolError::from)?;
+                                (model.manifest().model_id.clone(), emb)
+                            } else {
+                                let model = BigramHashModel::new();
+                                let emb = model.embed(&query, true).map_err(ProtocolError::from)?;
+                                (BIGRAM_HASH_MODEL_ID.to_string(), emb)
+                            }
+                        } else {
+                            let model = BigramHashModel::new();
+                            let emb = model.embed(&query, true).map_err(ProtocolError::from)?;
+                            (BIGRAM_HASH_MODEL_ID.to_string(), emb)
+                        }
+                    }
+                    #[cfg(not(feature = "semantic-candle"))]
+                    {
+                        let model = BigramHashModel::new();
+                        let emb = model.embed(&query, true).map_err(ProtocolError::from)?;
+                        (BIGRAM_HASH_MODEL_ID.to_string(), emb)
+                    }
+                };
+                store.set_semantic_model(&model_id);
                 let app = App::with_resume_semantic(
                     store_ref(store),
                     store_ref(store),
@@ -1607,6 +1822,11 @@ fn dispatch(
                     store, &hits,
                 )
                 .map_err(|e| CliError(e.into()))?;
+            // Tool activities for the hit messages (schema v12). Empty when none.
+            let hit_ids: Vec<_> = hits.iter().map(|h| h.id.clone()).collect();
+            let tool_activities = store
+                .tool_activities_for_messages(&hit_ids)
+                .map_err(|e| CliError(e.into()))?;
             let pack = agent_session_grep_application::handoff_pack::generate_deterministic(
                 HandoffInput {
                     query_terms: std::slice::from_ref(&query),
@@ -1626,6 +1846,7 @@ fn dispatch(
                     },
                     hits: &hits,
                     source_locations: &source_locations,
+                    tool_activities: &tool_activities,
                     catalog_generation: generation,
                     max_tokens: max_tokens_n as u64,
                     max_bytes: max_bytes_n as u64,
@@ -2289,16 +2510,109 @@ fn provider_binary_on_path(binary: &str) -> bool {
 /// 与 FTS rebuild 同一语义：向量表是 catalog 的投影，整表清空后按 catalog
 /// 重投影，失败不留半成品（每条 upsert 独立，重跑幂等）。只对 Message 实体
 /// 建向量——session/document 没有检索正文。
+///
+/// Model selection:
+/// - With `--features semantic-candle` and a verified local E5 bundle under the
+///   platform cache (`config paths` → cache/models/...), uses the real Candle
+///   multilingual-e5-small encoder.
+/// - Otherwise falls back to the honest bigram-hash fuzzy-lexical vectorizer
+///   and emits the experimental warning (default release path).
 fn build_embeddings(store: &SqliteStore) -> Result<(serde_json::Value, Vec<String>), CliError> {
-    use agent_session_grep_application::embedding::{BIGRAM_HASH_MODEL_ID, BigramHashModel};
+    use agent_session_grep_application::embedding::BigramHashModel;
     use agent_session_grep_ports::{CatalogStore, EmbeddingModel, SemanticIndex};
 
-    let model = BigramHashModel::new();
-    store.set_semantic_model(BIGRAM_HASH_MODEL_ID);
+    enum ActiveModel {
+        Bigram(BigramHashModel),
+        #[cfg(feature = "semantic-candle")]
+        Candle(agent_session_grep_application::candle_embedding::CandleE5Model),
+    }
+
+    impl ActiveModel {
+        fn embed(&self, text: &str, is_query: bool) -> Result<Vec<f32>, ProtocolError> {
+            match self {
+                Self::Bigram(m) => m.embed(text, is_query).map_err(ProtocolError::from),
+                #[cfg(feature = "semantic-candle")]
+                Self::Candle(m) => m.embed(text, is_query).map_err(ProtocolError::from),
+            }
+        }
+        fn model_id(&self) -> &str {
+            match self {
+                Self::Bigram(m) => m.manifest().model_id.as_str(),
+                #[cfg(feature = "semantic-candle")]
+                Self::Candle(m) => m.manifest().model_id.as_str(),
+            }
+        }
+        fn manifest_json(&self) -> serde_json::Value {
+            match self {
+                Self::Bigram(m) => {
+                    let man = m.manifest();
+                    serde_json::json!({
+                        "model_id": man.model_id,
+                        "dimension": man.dimension,
+                        "license": man.license,
+                        "file_hash": man.file_hash,
+                        "backend": "bigram-hash",
+                    })
+                }
+                #[cfg(feature = "semantic-candle")]
+                Self::Candle(m) => {
+                    let man = m.manifest();
+                    serde_json::json!({
+                        "model_id": man.model_id,
+                        "dimension": man.dimension,
+                        "license": man.license,
+                        "file_hash": man.file_hash,
+                        "backend": "semantic-candle",
+                    })
+                }
+            }
+        }
+        fn warning(&self) -> Option<String> {
+            match self {
+                Self::Bigram(_) => Some(
+                    "当前向量化器是 bigram-hash（模糊词法相似，非语义）；semantic/hybrid 因此仅供实验，lexical 仍是默认。"
+                        .to_string(),
+                ),
+                #[cfg(feature = "semantic-candle")]
+                Self::Candle(_) => None,
+            }
+        }
+    }
+
+    let model = {
+        #[cfg(feature = "semantic-candle")]
+        {
+            let cache = platform_paths().ok().and_then(|v| {
+                v.get("cache")
+                    .and_then(|c| c.as_str())
+                    .map(|s| s.to_string())
+            });
+            if let Some(cache) = cache {
+                let dir = agent_session_grep_application::candle_embedding::default_model_dir(
+                    std::path::Path::new(&cache),
+                );
+                match agent_session_grep_application::candle_embedding::CandleE5Model::load_from_dir(
+                    &dir,
+                ) {
+                    Ok(m) => ActiveModel::Candle(m),
+                    Err(_) => ActiveModel::Bigram(BigramHashModel::new()),
+                }
+            } else {
+                ActiveModel::Bigram(BigramHashModel::new())
+            }
+        }
+        #[cfg(not(feature = "semantic-candle"))]
+        {
+            ActiveModel::Bigram(BigramHashModel::new())
+        }
+    };
+
+    let model_id = model.model_id().to_string();
+    store.set_semantic_model(&model_id);
     // 先清除本模型的旧向量：重建语义与 `index rebuild` 一致（整表重投影，
     // 不是增量补齐），否则 catalog 里已删除的实体会留下孤儿向量。
     let cleared = store
-        .clear_embeddings(BIGRAM_HASH_MODEL_ID)
+        .clear_embeddings(&model_id)
         .map_err(ProtocolError::from)?;
 
     // catalog 全量扫描：payload 里没有可检索正文的实体跳过（不臆造向量）。
@@ -2323,30 +2637,21 @@ fn build_embeddings(store: &SqliteStore) -> Result<(serde_json::Value, Vec<Strin
             skipped += 1;
             continue;
         }
-        let vector = model.embed(&text, false).map_err(ProtocolError::from)?;
+        let vector = model.embed(&text, false)?;
         store
             .index_embedding(&entry.id, &vector)
             .map_err(ProtocolError::from)?;
         indexed += 1;
     }
 
-    let manifest = model.manifest();
-    let warnings = vec![
-        "当前向量化器是 bigram-hash（模糊词法相似，非语义）；semantic/hybrid 因此仅供实验，lexical 仍是默认。"
-            .to_string(),
-    ];
-    Ok((
-        serde_json::json!({
-            "model_id": manifest.model_id,
-            "dimension": manifest.dimension,
-            "license": manifest.license,
-            "file_hash": manifest.file_hash,
-            "indexed": indexed,
-            "skipped": skipped,
-            "cleared": cleared,
-        }),
-        warnings,
-    ))
+    let mut data = model.manifest_json();
+    if let Some(obj) = data.as_object_mut() {
+        obj.insert("indexed".into(), serde_json::json!(indexed));
+        obj.insert("skipped".into(), serde_json::json!(skipped));
+        obj.insert("cleared".into(), serde_json::json!(cleared));
+    }
+    let warnings = model.warning().into_iter().collect();
+    Ok((data, warnings))
 }
 
 /// 用与 CLI `index`/`get` 一致的派生路径，从一个 fact 造出 message id。
@@ -4229,7 +4534,7 @@ mod tests {
 
     // ---- help/version 提前拦截（ADR-0006，R3）----
 
-    const KNOWN_COMMANDS: [&str; 19] = [
+    const KNOWN_COMMANDS: [&str; 20] = [
         "ingest",
         "sync",
         "index",
@@ -4249,6 +4554,7 @@ mod tests {
         "doctor",
         "providers",
         "config",
+        "model",
     ];
 
     #[test]

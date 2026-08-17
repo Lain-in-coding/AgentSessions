@@ -124,12 +124,14 @@ certified — currently 0 Beta. **Not release-ready per provider gate.**
    privacy gates are green), tag, GitHub Release; Authenticode/notarization/cosign;
    branch protection; ADR signing/owner decisions.
 4. **macOS**: rehearsal not run (external CI-billing blocker).
-5. **Known deferred**: real local semantic model (`semantic-candle` + pinned
-   multilingual-e5-small) and benchmark gate; context enrichment (ToolActivity
-   in context view), TUI facet controls, Robot capability UI, retention/cleanup
-   policy — all explicitly deferred with the reference implementation. The
-   current `bigram-hash-v1` vectorizer remains honestly labeled fuzzy-lexical,
-   not semantic.
+5. **Known deferred**: real local semantic model **weights delivery + recall
+   benchmark gate** (the optional `semantic-candle` runtime and offline
+   `model import` path are now implemented; default builds stay bigram-hash /
+   lexical-only and must not be marketed as semantic). Context enrichment
+   beyond handoff tool_activity projection, TUI facet controls, Robot
+   capability UI, retention/cleanup policy remain explicitly deferred. The
+   current default `bigram-hash-v1` vectorizer remains honestly labeled
+   fuzzy-lexical, not semantic.
 
 Closed since this draft's original date: P0-1 privacy scrub, P0-6 bounded
 ingestion, handoff determinism/budget/redaction, resume first-run preview,
