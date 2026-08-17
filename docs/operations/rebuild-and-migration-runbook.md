@@ -50,10 +50,16 @@ most usefully `schema_incompatible` when the store is newer than the binary.
 There is no manual upgrade command. Opening an older store with a newer
 binary migrates it in a single transaction gated by `PRAGMA user_version`;
 on failure the transaction rolls back and the old binary can still read the
-store. The v6 → v7 step is specified in `migration-v6-to-v7.md`, which is the
-current migration source — this runbook does not restate it. The v5 → v6
-step in `migration-v5-to-v6.md` is historical; stores at v5 or v6 migrate
-stepwise to v7 on first open by the current binary.
+store. `SCHEMA_VERSION` is currently 12, and v8 through v12 are the current
+additive steps (v8 resume-claims, v9 source-scan provider id, v10 semantic
+vector sidecar, v11 session-metadata search projection, v12 tool-activity
+projection). They run stepwise on first open; the v7 → v12 chain is specified
+in this runbook's procedures below and in the store source
+(`crates/agent-session-grep-adapters-sqlite/src/lib.rs`, the
+`migrate_v7_to_v8` … `migrate_v11_to_v12` steps), not restated here. The
+v5 → v6 (`migration-v5-to-v6.md`) and v6 → v7 (`migration-v6-to-v7.md`) steps
+are historical by design; stores at v5 or v6 migrate stepwise to the current
+version on first open by the current binary.
 
 Operational sequence:
 
@@ -101,9 +107,10 @@ The result reports `data.reindexed` (messages written back into FTS) and
   by matching FTS content columns. The sidecar maps each message's wire id to
   its FTS rowid, turning the per-row clear/reproject delete from a
   content-column scan into a rowid lookup (O(1)); this is what makes rebuilds
-  on large stores fast. `fts_rowid` is a v7-era additive extension that an
-  existing v7 store gains on its next open, with `user_version` unchanged
-  (see `migration-v6-to-v7.md`).
+  on large stores fast. `fts_rowid` is part of the `fts_ids` sidecar
+  (introduced at schema v3): new catalogs carry the column from the v3 DDL,
+  and catalogs created before it existed gain it via `ensure_fts_ids_rowid`
+  on their next open, with `user_version` unchanged.
 
 A rebuild **advances the generation**, which invalidates outstanding cursors.
 It does not rewrite catalog payloads, so evidence spans inside payloads are
