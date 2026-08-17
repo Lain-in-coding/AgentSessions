@@ -1,11 +1,11 @@
 ---
 name: agent-session-grep
-description: Search local AI coding-agent session history (Claude Code, Codex) via the agent-session-grep robot CLI or MCP server.
+description: Search local AI coding-agent session history (16-provider capability matrix; 14 implemented, 2 deferred) via the agent-session-grep robot CLI or MCP server.
 ---
 
 # agent-session-grep
 
-agent-session-grep indexes local AI coding-agent transcripts (Claude Code JSONL, Codex rollout JSONL) into a read-only searchable catalog: full-text search, session context assembly, and evidence spans that point back into the source files. Reach for it when you need to recall what happened in a past coding session.
+agent-session-grep indexes local AI coding-agent transcripts into a read-only searchable catalog: full-text search, session context assembly, and evidence spans that point back into the source files. The provider capability matrix spans 16 rows — 14 implemented providers (claude-code, codex, grok-build, opencode, antigravity, pi, hermes, cursor, kimi-code, openclaw, qoder, tencent-codebuddy, cline, aider) plus 2 deferred unsupported (deepseek-harness, zcode). The authoritative per-provider maturity and field capabilities live in `docs/product/PROVIDER-MATURITY-MATRIX.md`. Reach for it when you need to recall what happened in a past coding session.
 
 Two machine surfaces exist. Prefer the MCP server when the client supports MCP; otherwise drive the robot CLI. Never scrape human-mode output.
 
@@ -85,7 +85,8 @@ loop:
 
 | command | purpose |
 | --- | --- |
-| `search "<query>"` | full-text search over messages; hits carry canonical `session_id`, `resume_available`, and bounded `text`; plain-text keywords only — FTS operators (`AND`/`OR`/`NEAR`, quotes, `*`) match literally, there is no advanced query language (ADR-0003) |
+| `search "<query>"` | full-text search over messages; hits carry canonical `session_id`, `resume_available`, and bounded `text`; plain-text keywords only — FTS operators (`AND`/`OR`/`NEAR`, quotes, `*`) match literally, there is no advanced query language (ADR-0003). Facets (all optional): `--main-only`, `--subagent-only` (mutually exclusive), `--include-sidechain` (the default), `--tool-kind` (`file`/`command`/`web`/`query`/`unknown`), `--tool-name <name>` (exact match) |
+| `handoff "<query>"` | assemble a deterministic handoff pack (`handoff-pack/v1`) from search hits; verbatim evidence and inference stay separated, no LLM call, dry-run only; budgets `--max-evidence` (default 20), `--max-tokens` (8000), `--max-bytes` (2000000) |
 | `get-session-resume <session-id>` | resolve fixed-shape read-only Resume Metadata for a canonical `ses_v1_*` id; returns nullable Provider-native Session ID and Original Working Directory, never a command or Source path |
 | `get-message <message-id>` | return one message and bounded mainline neighbors; use `--session` when a shared Message belongs to multiple Sessions |
 | `list <limit>` | page catalog entities in stable id order |
@@ -93,7 +94,8 @@ loop:
 | `get <wire-id>` | raw stored payload of one entity |
 | `show <wire-id>` | structured entity view (role, text, parent, session, span) |
 | `status` | catalog entity count and active generation |
-| `sync --discover` | scan each provider's canonical data root (`~/.claude/projects`, `~/.codex/sessions`) and sync every `.jsonl` transcript found; read-only on provider files; the response reports per-provider `found`/`removed` counts and scan completeness — never file paths |
+| `providers` | report the 16-row provider capability matrix: 14 implemented (all experimental) + 2 deferred unsupported (`deepseek-harness`, `zcode`), with per-field capabilities |
+| `sync --discover` | scan the registered provider data roots (`claude-code`, `codex`, `openclaw`, `tencent-codebuddy`, `antigravity`, `opencode`) and sync every `.jsonl` transcript found; read-only on provider files; the response reports per-provider `found`/`removed` counts and scan completeness — never file paths |
 | `doctor` | health: db, schema, generation, interrupted_batches |
 
 `get`/`show` on a missing entity return exit 4 with a `not_found` error envelope (ADR-0005).
@@ -110,10 +112,11 @@ agent-session-grep --db C:/data/example.db --robot context ses_v1_abc123 --polic
 - `data.evidence[]` has one span per returned message: source document id, source fingerprint, and location fields with `precision` tiers `byte`, `line`, `record`, or `unknown`.
 - `unknown` precision means the location fields are null (data ingested before spans existed). Re-ingest the source to restore byte-precision spans; a warning is emitted alongside.
 
-### Correlation and streaming
+### Global flags
 
 - `--request-id run.42:a` is echoed verbatim in every frame (charset `[A-Za-z0-9._:-]`, 1-128 chars); use it to correlate envelopes with your own logs.
 - `--output jsonl` streams one complete frame per line and may emit `frame_type: "progress"` frames before the final response (long `sync` runs). `--robot` never emits progress frames.
+- `--offline` (global, placed before the command name) is a stable explicit fail-closed mode: any operation that would need the network is refused instead of degraded. Every current command runs locally, so it changes no behaviour today; `doctor` echoes the flag in its `offline` field.
 
 ## MCP server
 
@@ -132,12 +135,13 @@ Run the same binary as a stdio MCP server (tools only, sequential, read-only):
 
 | tool | when to use |
 | --- | --- |
-| `search_sessions` | full-text query; params: `query` (required), `limit`, `cursor`, `max_items`, `max_bytes`; each hit includes canonical `session_id` and `resume_available` |
-| `get_session_context` | pull one session branch: `session_id` (required, canonical `ses_v1_...`), `policy` (`mainline` or `full`), `max_messages`, `max_bytes` |
+| `search_sessions` | full-text query; params: `query` (required), `limit`, `cursor`, `max_items`, `max_bytes`; optional `providers` (`claude`/`codex` only), `since`/`until`, `include_system`, `group_by_session`; facets `sidechain` (`include`/`main_only`/`subagent_only`), `tool_kind` (`file`/`command`/`web`/`query`/`unknown`), `tool_name`; each hit includes canonical `session_id` and `resume_available` |
+| `get_session_context` | pull one session branch: `session_id` (required, canonical `ses_v1_...`), `policy` (`mainline` or `full`), `level` (`raw`/`talks`/`sessions`), `max_messages`, `max_bytes` |
 | `get_session_resume` | resolve fixed-shape Resume Metadata from a canonical `session_id`; nullable `provider_session_id` and `original_working_directory`; never returns a command or Source path |
 | `get_message` | return one Message and bounded mainline neighbors; params include canonical `message_id`, optional canonical `session_id`, `around`, and budgets |
 | `list_sessions` | page Session entities only in stable canonical-id order |
-| `list_providers` | which source formats are supported (`claude-code`, `codex`) |
+| `generate_handoff` | assemble a deterministic handoff pack (`handoff-pack/v1`) for a query: search hits become evidence spans with authoritative source locators; budgets `max_evidence`/`max_tokens`/`max_bytes` are enforced and cross-boundary redaction is on by default (ADR-0009); truncation is reported as `outcome: partial` |
+| `list_providers` | list the adapters this build can ingest — the 14 implemented providers, each with `id` (stable, e.g. `claude-code`) and its capability-matrix `maturity`. The 2 deferred unsupported rows are not ingestible and are therefore absent here; for the full 16-row matrix with per-field capabilities use the CLI `providers` command or `docs/product/PROVIDER-MATURITY-MATRIX.md` |
 | `get_status` | catalog count and active generation |
 | `doctor` | health probe: `db: "ok"`, schema, generation, interrupted batches |
 
