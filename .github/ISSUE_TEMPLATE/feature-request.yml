@@ -32,18 +32,18 @@ body:
     attributes:
       label: Version
       description: Provide the released version or development version where you observed the need.
-      placeholder: v0.3.0 or 0.3.x
+      placeholder: v0.2.0 or 0.2.x
     validations:
       required: true
 
   - type: input
     id: commit
     attributes:
-      label: Commit
-      description: Provide the 40-character commit SHA when reporting a development build.
+      label: Commit (development builds only)
+      description: For a development build, provide the 40-character commit SHA. Leave this empty when you are using a released version.
       placeholder: 0123456789abcdef0123456789abcdef01234567
     validations:
-      required: true
+      required: false
 
   - type: textarea
     id: synthetic_fixture
