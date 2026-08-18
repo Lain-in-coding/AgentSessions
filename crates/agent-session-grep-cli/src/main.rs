@@ -1298,9 +1298,12 @@ fn subcommand_help_text(cmd: &str) -> &'static str {
         }
         "sync" => {
             "sync <file>...：原子扫描一个或多个 transcript 文件入库；无变化不写库。\n\
+                   sync --from-file <清单>：从清单文件读路径（每行一个，空行与 # 注释忽略）。\n\
+                   \u{20}  源很多时用它——几千个路径展开后会超出命令行长度上限。\n\
                    sync --discover：自动发现各 provider 数据根（~/.claude/projects、~/.codex/sessions 等）下的源并同步；\n\
                    \u{20}  是不是源由各 provider 自己的 probe 判定，不按扩展名（SQLite/JSON/Markdown transcript 同样能被发现）。\n\
                    示例：agent-session-grep --db <path> --robot sync 会话.jsonl\n\
+                   示例：agent-session-grep --db <path> sync --from-file sources.txt\n\
                    示例：agent-session-grep --db <path> sync --discover\n\
                    约束：单个 transcript 文件应只包含一个会话；检测到多个 sessionId 时仍归属首个会话，并在 warnings 报告。\n\
                    提示：不接受目录；--discover 会递归扫描 provider 数据根，无法归属的文件跳过并计数。"
@@ -1842,15 +1845,46 @@ fn dispatch(
         "sync" => {
             let mut args = rest.to_vec();
             let discover = take_bool_flag(&mut args, "--discover");
+            let from_file = extract_flag(&mut args, "--from-file")?;
             let (data, warnings) = if discover {
                 // --discover 不接受额外参数（路径由发现填充）。未知 flag 也不能
                 // 静默忽略，否则拼写错误会伪装成成功的空发现。
+                if from_file.is_some() {
+                    return Err(CliError::usage(
+                        "sync --discover 与 --from-file 互斥：前者从 provider 数据根发现路径，后者从清单读路径",
+                    ));
+                }
                 if args.len() > 1 {
                     return Err(CliError::usage(
                         "sync --discover 不接受路径或额外 flag；路径由 provider 数据根自动发现",
                     ));
                 }
                 sync_discover(store, mode == protocol::OutputMode::Jsonl, request_id)?
+            } else if let Some(list_path) = from_file {
+                // 5000 个源文件的路径展开后超过 Windows 的命令行长度上限，进程根本
+                // 起不来。`--from-file` 收一份每行一个路径的清单（ripgrep/xargs
+                // 惯例），把长度限制从命令行搬到文件里。
+                //
+                // 这条缺口此前由调用方各自绕过：real_data_regression.py 与
+                // synthetic_corpus.py 都实现了自己的分批逻辑——同一个 workaround
+                // 写两遍，说明缺的是工具能力而不是脚本技巧。
+                if args.len() > 1 {
+                    return Err(CliError::usage(
+                        "sync --from-file <list> 不接受额外路径：路径全部来自清单文件",
+                    ));
+                }
+                let paths = read_source_list(&list_path)?;
+                if paths.is_empty() {
+                    return Err(CliError::usage(format!(
+                        "sync --from-file: {list_path} 里没有任何路径（空行与 # 注释会被忽略）"
+                    )));
+                }
+                sync_files(
+                    store,
+                    &paths,
+                    mode == protocol::OutputMode::Jsonl,
+                    request_id,
+                )?
             } else {
                 no_flag_like_positional(&args[1..], "sync <file>... | sync --discover")?;
                 sync_files(
@@ -4669,6 +4703,25 @@ fn no_flag_like_positional(args: &[String], usage: &str) -> Result<(), CliError>
     Ok(())
 }
 
+/// 读 `--from-file` 的源清单：每行一个路径，空行与 `#` 注释行忽略。
+///
+/// 行内不做 glob 展开、不做 shell 引号解析：一行就是一个路径，字面。这样含空格
+/// 的路径不需要引号，也不会被误当成两个路径——清单文件的存在意义就是绕开
+/// shell 的分词。
+fn read_source_list(path: &str) -> Result<Vec<String>, CliError> {
+    let text = std::fs::read_to_string(path).map_err(|error| {
+        // 清单本身读不到是用法错误（用户给错了 --from-file 的路径），不是
+        // source_io——后者指 transcript 源读不到，两者的下一步动作不同。
+        CliError::usage(format!("sync --from-file: 无法读取清单 {path}: {error}"))
+    })?;
+    Ok(text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(str::to_string)
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5252,6 +5305,48 @@ mod tests {
         assert_eq!(
             rest,
             vec!["status".to_string(), "--db".to_string(), "x".to_string(),]
+        );
+    }
+
+    #[test]
+    fn source_list_ignores_blank_lines_and_comments_but_keeps_spaces() {
+        // `--from-file` 存在的意义是绕开 shell 分词，所以含空格的路径必须原样
+        // 保留（不做引号解析、不做 glob 展开）——否则清单又要处理引号，缺口没补上。
+        let dir = tempfile::tempdir().expect("tempdir");
+        let list = dir.path().join("sources.txt");
+        std::fs::write(
+            &list,
+            "# 注释行\n\
+             \n\
+             C:/dir with spaces/a.jsonl\n\
+             \t  b.jsonl  \t\n\
+             # 又一条注释\n\
+             c.jsonl\n",
+        )
+        .expect("write list");
+
+        let paths = read_source_list(&list.to_string_lossy()).expect("a readable list must parse");
+        assert_eq!(
+            paths,
+            vec![
+                "C:/dir with spaces/a.jsonl".to_string(),
+                "b.jsonl".to_string(),
+                "c.jsonl".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn missing_source_list_is_a_usage_error_not_a_source_io_error() {
+        // 清单读不到 = 用户给错了 --from-file；transcript 读不到 = source_io。
+        // 两者的下一步动作不同，不能塌成同一个码。
+        let err = read_source_list("this-list-does-not-exist.txt")
+            .expect_err("a missing list must be rejected");
+        assert_eq!(err.0.code, CanonicalCode::InvalidRequest);
+        assert!(
+            err.0.message.contains("--from-file"),
+            "message must name the flag: {}",
+            err.0.message
         );
     }
 
