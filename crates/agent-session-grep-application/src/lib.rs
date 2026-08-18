@@ -3688,6 +3688,7 @@ mod tests {
                 truncation,
                 retrieval_mode: _,
                 fallback_warning: _,
+                time_filter_excluded: _,
             } => (
                 hits.iter().map(|h| h.id.as_str().to_string()).collect(),
                 next_cursor,

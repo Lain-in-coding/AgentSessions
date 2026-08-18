@@ -457,6 +457,7 @@ mod tests {
             },
             retrieval_mode: agent_session_grep_ports::RetrievalMode::Lexical,
             fallback_warning: None,
+            time_filter_excluded: 0,
         };
 
         let Msg::SearchLoaded(page) = search_msg(response) else {

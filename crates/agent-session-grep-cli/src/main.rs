@@ -5432,6 +5432,7 @@ mod tests {
             },
             retrieval_mode: RetrievalMode::Lexical,
             fallback_warning: None,
+            time_filter_excluded: 0,
         };
         let (_, data, _, _) = render(response);
         assert_eq!(data["hits"][0]["session_id"], "ses_v1_aaaa");
@@ -5475,6 +5476,7 @@ mod tests {
             },
             retrieval_mode: RetrievalMode::Lexical,
             fallback_warning: None,
+            time_filter_excluded: 0,
         };
         let (_, data, _, _) = render(response);
         let hit = &data["hits"][0];
@@ -5512,6 +5514,7 @@ mod tests {
             },
             retrieval_mode: RetrievalMode::Lexical,
             fallback_warning: None,
+            time_filter_excluded: 0,
         };
         let (_, data, _, _) = render(response);
         let hit = &data["hits"][0];
