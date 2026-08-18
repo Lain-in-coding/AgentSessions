@@ -493,7 +493,7 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   `git log -S"<username>" --all -p` 这样的搜索配方。
   **验收**:公开树无此文件。
 
-- [ ] **M0-6 `R0-ARCHITECTURE-REVIEW.md` 不进公开树**
+- [x] **M0-6 `R0-ARCHITECTURE-REVIEW.md` 不进公开树**
   标题写"待签署",正文写"Review status: Pending — not approved"、
   "此前 R0 Gate 整体保持未通过",还有 15 个未勾选决策框,其中一条是
   "对先实现后审批作显式 exception" —— 等于公开承认实现跑在架构审批之前。
@@ -592,7 +592,7 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   那一句实质内容。
   **验收**:附录删除。
 
-- [ ] **M0-19 机器与私有语料细节脱敏**
+- [x] **M0-19 机器与私有语料细节脱敏**
   - `core-beta-benchmark-full.json:14-19` 含 CPU 型号串
     `Intel64 Family 6 Model 170 Stepping 4`、22 逻辑核、31.5 GB RAM、
     `Samsung NVMe SSD`、`antivirus_state`。硬件行作为 benchmark 出处可保留
@@ -910,7 +910,7 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
     数量**,不能静默丢。这条还没做,且它与 provider 覆盖面无关 —— 即使全部
     provider 都有时间戳,`timestamp IS NULL` 的历史行仍会被静默排除。
 
-- [ ] **M2P-14 合成消息 id 跨文档碰撞 → 静默丢数据(新发现,独立于时间戳)**
+- [x] **M2P-14 合成消息 id 跨文档碰撞 → 静默丢数据(新发现,独立于时间戳)**
   **这是比时间戳更严重的缺陷,而且此刻正在发生。**
   cline / grok-build / kimi-code / aider(可能还有 hermes/pi/qoder/openclaw/
   codebuddy)emit 形如 `cline-msg-{seq}` 的**按序号合成 id**。序号是文档内计数,
@@ -1578,7 +1578,9 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
 
 | 日期 | 任务 | 结论 | commit |
 |---|---|---|---|
-| 2026-08-19 | **M2-4 分层语义检索 + 生产接线** | 语义打分改为「有界候选集 + 精确重排」:候选集经与 lexical 完全同一套 FTS 路径召回至多 2000 条,只对候选读向量算余弦。10 万条 × 384 维实测 p50 895.6→24.6 ms、p95 1111.2→26.6 ms(达标 ≤50 ms);候选集为空/过小(<500)时**回退全量精确打分**,因为实测 100 条 gold query 字面最多只命中 8 条(中位 2),不回退会正好抹掉 paraphrase 召回——语义检索存在的唯一理由。踩坑:SQLite 选了非选择性的 `message_vec_model` 索引全表扫,分层白做(674 ms),两个谓词加一元 `+` 强制走主键(674→24 ms),已用查询计划断言锁住(选错计划是"结果正确但慢",行为测试抓不到)。recall 与 §1.5 基线逐位一致。**接线**:`query_semantic` 端口只收 `(embedding, limit)` 无查询原文,故分层路径在生产里是死的(仍走 147 ms 回退);已在 `main.rs`/`mcp.rs` 两处 search 入口逐请求设置候选原文(不能只设一次,否则上一次的原文会筛这一次的候选集),索引构建路径无查询不设 | `1c4d633` `8e17e81` `2adf345` |
+| 2026-08-19 | **M2P-14 合成 id 碰撞(11 个 provider,比预估多 7 个)** | 缺陷面比登记时大:除 cline/grok/kimi/aider,还有 hermes/pi/qoder/openclaw/codebuddy/cursor/antigravity。**antigravity 最严重** —— 它把 `step_index` 当持久 id 直传,于是**每一份** transcript 的第一步都声明 id `"0"`,连 provider 前缀都没有。cursor 的代码注释还写着 id 是按序号派生的"与 cline/codebuddy/qoder adapter 相同" —— 缺陷在树里被当成可复制的范式记录着。11 个 provider 现改为 emit 空 `native_id`,由 CLI 的 `[provider, variant, document_id, seq]` 派生文档作用域 id。**fixture 源字节零改动**(BLAKE3 pin 全部仍匹配),只有 `expected.json` 里的 `native_id` 值变了 —— 这正是 golden 应有的行为。副产物:去掉 antigravity 的 id 用法后 `StepRecord.step_index` 成死代码被 clippy 抓到(probe 判别改读原始 JSON 值),已删字段并注明为何刻意缺席。**我独立端到端复验**:两份互不相关的 pi transcript 各含一条消息 0,sync 报 2 条,两条的标记词各搜各中(修复前第二条静默消失),派生 id 是两个不同的 `msg_v1_<hex>` | `d01f47e`..`8387387` 共 11 个 |
+| 2026-08-19 | **M0 全 20 项闭合** | 剩余两条清掉:14 处发布文件把治理状态挂在**不发布**的架构审查文档上(读者被指向打不开的记录),改为指向各文件自己已记录的 `approver`,只有一处真属 ADR-0001 才引 ADR;裸「本机」在发布文档里会被读成对**读者**机器的断言,provenance 站点统一改「维护者开发机」。刻意保留四处(ADR-0004/0009 的 local-first 隐私声明、RFC-0001、探针脚本自己的输出)—— 那里「本机」确实指读者的机器,改了会把隐私声明反转 | `c1e2a88` `33f1194` `9f738a9` |
+| 2026-08-19 | **M2-4 分层语义检索 + 生产接线** | 语义打分改为「有界候选集 + 精确重排」:候选集经与 lexical 完全同一套 FTS 路径召回至多 2000 条,只对候选读向量算余弦。10 万条 × 384 维实测 p50 895.6→24.6 ms、p95 1111.2→26.6 ms(达标 ≤50 ms);候选集为空/过小(<500)时**回退全量精确打分**,因为实测 100 条 gold query 字面最多只命中 8 条(中位 2),不回退会正好抹掉 paraphrase 召回——语义检索存在的唯一理由。踩坑:SQLite 选了非选择性的 `message_vec_model` 索引全表扫,分层白做(674 ms),两个谓词加一元 `+` 强制走主键(674→24 ms),已用查询计划断言锁住(选错计划是"结果正确但慢",行为测试抓不到)。recall 与 §1.5 基线逐位一致。**接线**:`query_semantic` 端口只收 `(embedding, limit)` 无查询原文,故分层路径在生产里是死的(仍走 147 ms 回退);已在 `main.rs`/`mcp.rs` 两处 search 入口逐请求设置候选原文(不能只设一次,否则上一次的原文会筛这一次的候选集),索引构建路径无查询不设。**我独立端到端复验**:查询词完全不在语料里时仍返回 5 条命中 —— 若候选为空时没回退,结果会是 0 命中(即静默退化成 lexical) | `1c4d633` `8e17e81` `2adf345` |
 | 2026-08-19 | **M2P-12 opencode 消息时间戳** | opencode `ORDER BY time_created` 但从未 select 该列,每条消息的 `timestamp` 都是 None → 落在所有时间窗过滤之外。现读取 epoch-ms 并渲染 RFC3339 UTC(`parse_search_instant` 拒绝无时区后缀的裸本地时间,所以必须渲染而非直传);缺失或超范围(≤0 / >9999-12-31)保持 None 而非编造时刻。golden 测试用**生产解析器**解每条时间戳并断言落在预期窗口内 | `559cfcf` |
 | 2026-08-19 | **M0 公开树收口(20 条中 18 条)** | 发布工具链与内部草稿出公开树;`export_public_tree.py` 的自豁免 bug 修法是把 manifest 写到目标目录**之外**——它唯一写的那个文件曾是唯一不被扫的文件,这正是 `PUBLIC-TREE-MANIFEST.json:3` 的泄漏能在一轮报"0 findings"里存活的原因。实测导出 475 文件、public profile 0 findings。文档数字与出处对齐(七条不变量、14 码 error catalog、semantic ≥ lexical 方向纠正、延迟数字补 n=10 限定)。M0-6/M0-19(c) 有残留悬挂引用,已派单独 agent | `2ba7022` 及其 8 个来源 commit |
 | 2026-08-19 | **M1-13 + M2P-13(首个实施任务)** | 行为断言落地(`capability_behaviour.rs`,4 条断言含覆盖面守护),**矩阵不再能自我认证**;修 aider 假声明 `Partial→Unsupported` 及两份 ledger 的同步漂移。已自证断言会咬(临时把 openclaw/cline 改成过度声明,两条如期失败)。副产物:codex golden fixture 缺 tool-call 记录,无法见证自己声明的能力(提取是真实现的)→ 已登记进 M1-5 | `e4f836f` `c1356cb` `2fc1d3e` |
