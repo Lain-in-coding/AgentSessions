@@ -1785,7 +1785,7 @@ fn dispatch(
                                     std::path::Path::new(&cache),
                                 );
                             if let Ok(model) =
-                                agent_session_grep_application::candle_embedding::CandleE5Model::load_from_dir(
+                                agent_session_grep_application::candle_embedding::CandleE5Model::load_cached(
                                     &dir,
                                 )
                             {

@@ -62,6 +62,22 @@ pub struct CandleE5Model {
 }
 
 impl CandleE5Model {
+    /// Load a verified local bundle once per process and cache it.
+    ///
+    /// The first semantic search in a long-lived process (MCP / TUI / serve)
+    /// pays the ~seconds model-load cost; every later query reuses the cached
+    /// encoder. One-shot CLI invocations still pay the load once per process —
+    /// that cost is reported honestly by the benchmark, not hidden.
+    pub fn load_cached(dir: impl AsRef<Path>) -> PortResult<&'static CandleE5Model> {
+        static CACHE: std::sync::OnceLock<Result<CandleE5Model, String>> =
+            std::sync::OnceLock::new();
+        let cached = CACHE
+            .get_or_init(|| CandleE5Model::load_from_dir(dir).map_err(|error| error.to_string()));
+        cached
+            .as_ref()
+            .map_err(|error| PortError::Backend(error.clone()))
+    }
+
     /// Load a verified local bundle. Fails closed on any missing/mismatched file.
     pub fn load_from_dir(dir: impl AsRef<Path>) -> PortResult<Self> {
         let dir = dir.as_ref();
