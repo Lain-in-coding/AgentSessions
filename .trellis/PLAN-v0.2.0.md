@@ -460,7 +460,7 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
 
 ### M0 — 收口当前遗留(小而急,先清掉)
 
-- [ ] **M0-1 从公开树排除发布工具链(D18)**
+- [x] **M0-1 从公开树排除发布工具链(D18)**
   `scripts/release/export_public_tree.py` 的 `EXCLUDED_PREFIXES` 增加
   `scripts/evidence/privacy_scan.py`、`scripts/evidence/test_privacy_scan.py`、
   `scripts/release/export_public_tree.py`、`scripts/release/test_export_public_tree.py`。
@@ -470,24 +470,24 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   改为扫描 manifest,或干脆不发布 manifest。
   **验收**:导出后这四个文件不在公开树;public-profile 扫描 0 findings。
 
-- [ ] **M0-2 `PUBLIC-TREE-MANIFEST.json` 不进公开树**
+- [x] **M0-2 `PUBLIC-TREE-MANIFEST.json` 不进公开树**
   它含 `excluded_prefixes`(泄漏内部目录布局)、`source_commit`(指向公开
   读者无法解析的私有 SHA)、482 行 SHA-256(对读者零价值)。
   **验收**:公开树无此文件;导出仍在本地写 manifest 供校验。
 
-- [ ] **M0-3 修 SECURITY.md 支持版本表**
+- [x] **M0-3 修 SECURITY.md 支持版本表**
   当前写 "0.1.x | 不支持 / Published releases | None",但 `v0.1.0` 已发。
   改为 `0.1.x | Supported`,删掉 "None" 行。
   **验收**:与 CHANGELOG、README 的版本陈述一致。
 
-- [ ] **M0-4 `go-no-go.2026-08-16.md` 与 `go-no-go.template.md` 不进公开树**
+- [x] **M0-4 `go-no-go.2026-08-16.md` 与 `go-no-go.template.md` 不进公开树**
   它是内部决策草稿,结论是 **No-Go**,还带 7 条 P0 缺陷清单
   (含 "serve token generator not CSPRNG"、"Web/JSON boundary leaked secrets")
   和未签名的签字块。公开读者下载 v0.1.0 会看到维护者自己判定不该发。
   保留 `rehearsal-runbook.md`(是真有用的流程文档)。
   **验收**:公开树无 go-no-go;README/CHANGELOG 不再引用它。
 
-- [ ] **M0-5 `PUBLIC-HISTORY-SCRUB.md` 不进公开树**
+- [x] **M0-5 `PUBLIC-HISTORY-SCRUB.md` 不进公开树**
   公开仓库只有 1 个 commit,历史重写手册在结构上不适用;而它公布了
   "45 个 commit 带路径痕迹、6 个 commit 含 secret 形状"的度量表和
   `git log -S"<username>" --all -p` 这样的搜索配方。
@@ -500,7 +500,7 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   内容已被各 ADR 取代。
   **验收**:公开树无此文件;引用它的地方改指 ADR。
 
-- [ ] **M0-7 治理文档的 owner 字段统一**
+- [x] **M0-7 治理文档的 owner 字段统一**
   18 个文件写 `owner: （待指派）`、`approver: 项目最终验收人`、`approved_at: —`
   (全部 ADR 0001-0009、RFC-0001/0002、CLI 契约、THREAT-MODEL、
   FIXTURE-REDACTION-POLICY、REUSE-LICENSE-AUDIT、SLI-AND-BENCHMARK-FORMAT、
@@ -509,7 +509,7 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   统一填 `QIN`。
   **验收**:`docs/` 内无 `（待指派）`。
 
-- [ ] **M0-8 `CONTEXT.md` 决策日志段落处理**
+- [x] **M0-8 `CONTEXT.md` 决策日志段落处理**
   第 174-346 行是内部决策日志,其中 `:199`/`:284-285` 写"仓库保持 PRIVATE"、
   `:176` 写"完成 0.3 后再决定发布"(已发 0.1.0)、`:259` 有编辑事故
   (标题与正文粘连)、`:319` 有未翻译中文混在英文句中、`:243`/`:245` 有中文
@@ -517,7 +517,7 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   指向的东西,质量很好),砍掉决策日志或把耐久部分移入 ADR。
   **验收**:术语表完整保留;无 PRIVATE 陈述;`:259`/`:319` 修好。
 
-- [ ] **M0-9 `OPEN-SOURCE-ROADMAP.md` 标题与章节修复**
+- [x] **M0-9 `OPEN-SOURCE-ROADMAP.md` 标题与章节修复**
   标题 `开源登顶路线图`(字面意思"登上开源榜首")与项目其余部分的保守克制
   完全相反,改成中性的"开源交付路线图"。章节编号从 `## 0.1` 直接跳到 `## 2`,
   缺 `## 1`,第 39-53 行是孤立散文。两处 "无人做到" 的无限定断言
@@ -525,26 +525,26 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   `§0.1` 是带 `NOT_READY_EXTERNAL_BLOCKERS` 判定的过时内部快照,删或重写。
   **验收**:章节编号连续;无绝对化竞品断言。
 
-- [ ] **M0-10 `INSTALL-AND-UPGRADE.md:145` 修 uninstall 调用**
+- [x] **M0-10 `INSTALL-AND-UPGRADE.md:145` 修 uninstall 调用**
   写着 `sh scripts/install/uninstall.sh`,但该脚本是
   `#!/usr/bin/env bash` + `set -euo pipefail`,同一文档 `:61-63` 自己警告过
   Debian/Ubuntu 的 `sh` 是 dash 会失败。改成 `bash`。
   **验收**:与 `rehearsal-runbook.md:368` 的写法一致。**这条会真实影响用户。**
 
-- [ ] **M0-11 CLI 输出移除内部编号**
+- [x] **M0-11 CLI 输出移除内部编号**
   `scripts/verify-release.py:246` 打印 `agent-session-grep release verification (#10)`,
   `scripts/benchmark.py:2` 是 `"""agent-session-grep benchmark harness (#9)."""`。
   `(#9)`/`(#10)` 是内部任务号,出现在用户可见输出里。
   **验收**:输出无内部编号。
 
-- [ ] **M0-12 ISSUE_TEMPLATE 版本占位符修正**
+- [x] **M0-12 ISSUE_TEMPLATE 版本占位符修正**
   `bug-report.yml:43` 与 `feature-request.yml:35` 的 `placeholder: v0.3.0 or 0.3.x`
   (0.3 是内部里程碑编号,已发布版本是 0.1.0)。且两者把 40 位 commit SHA 设为
   `required: true`,用发布版二进制的报告者填不出来。
   改 placeholder 为 `v0.2.0 or 0.2.x`,commit 改为可选或注明"仅开发构建"。
   **验收**:模板可被真实用户填完。
 
-- [ ] **M0-13 spike 卡片断链修复**
+- [x] **M0-13 spike 卡片断链修复**
   `spikes/search-backend/SPIKE-CARD.md:100-102` 引用了不存在的
   `report.md`、`selection-gate.md`、`fts5/`、`tantivy/` 目录
   (实际是扁平的 `src/fts5.rs`、`src/tantivy_be.rs`)。
@@ -553,7 +553,7 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   已补 Spike Card"并列了五个。
   **验收**:所有 backtick 路径解析成功。
 
-- [ ] **M0-14 数字一致性修正**
+- [x] **M0-14 数字一致性修正**
   - 七条不变量 vs 八处文档写"六条"(`CONTEXT.md:160` 是术语表定义,最该修)
   - error catalog 实际 14 码,`CONTRACT-cli-robot-mcp-draft.md:49` 写 13 码,
     `OPEN-SOURCE-ROADMAP.md:65` 写 "13+ 码"
@@ -562,7 +562,7 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   - `COMPETITOR-COMPARISON.md:52-53` 的 12/13 算术不闭合
   **验收**:每个数字与代码/schema 一致,或改为引用 schema 不写死数字。
 
-- [ ] **M0-15 semantic 证据自相矛盾修正**
+- [x] **M0-15 semantic 证据自相矛盾修正**
   `SEMANTIC-MODEL-BUNDLE.md:140` 写 "semantic recall@k **tracked at/below
   lexical**",而 `go-no-go.2026-08-16.md:137` 写 "**semantic ≥ lexical**"。
   按 §1.5 实测:semantic 在 @5/@10/@20 全部 ≥ lexical(0.720/0.755/0.775 vs
@@ -572,12 +572,12 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   标注 n=10、语料 10 条合成消息,否则是引人误解的 benchmark 数字。
   **验收**:两处方向一致且与报告 JSON 相符;延迟数字带样本量限定。
 
-- [ ] **M0-16 `docs/performance-baseline-0.2.md` 重命名与限定**
+- [x] **M0-16 `docs/performance-baseline-0.2.md` 重命名与限定**
   文件名和标题写 0.2,但那时还没有 0.2;`:80-81` 的 "16.5s → 2.79s"、
   "25.3s → 2.87s" 是开发机真实语料的加速比,摘要行没写语料。
   **验收**:文件名与版本对应;每个数字带语料说明。
 
-- [ ] **M0-17 `spikes/sqlite-source-identity/EVIDENCE.md` 竞品拆解处理**
+- [x] **M0-17 `spikes/sqlite-source-identity/EVIDENCE.md` 竞品拆解处理**
   `:131-180` 点名 `jhlee0409/claude-code-history-viewer`(MIT, v1.22.0)并
   判定其方案劣于本项目,依据是"临时下载后 grep,下载物已删除"。
   公开点名评判个人项目会招致审视。技术发现(SQLite provider 的行级身份)
@@ -585,7 +585,7 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   或压成一句中性陈述。
   **验收**:无对第三方项目的优劣判定。
 
-- [ ] **M0-18 `spikes/R0-EVIDENCE-SUMMARY.md:90-94` 删杀软逸事**
+- [x] **M0-18 `spikes/R0-EVIDENCE-SUMMARY.md:90-94` 删杀软逸事**
   记录了开发者的杀软反复静默删除 `EXTERNAL-READINESS-GATE.md`、改成全小写
   文件名后才留存。诚实但读起来像环境不稳 + 轻度绕过 AV。
   保留 `SLI-AND-BENCHMARK-FORMAT.md` 里关于为何记录 `antivirus_state` 的
@@ -607,7 +607,7 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
     agent 工具)。
   **验收**:无对读者环境的误导;私有语料计数有出处说明或删除。
 
-- [ ] **M0-20 CI 证据的不可达引用处理**
+- [x] **M0-20 CI 证据的不可达引用处理**
   `core-beta-evidence-matrix.md:21` 写 run `30165919066` / PR #1,实测:
   该 run 在公开仓库 404,只在私有仓库存在(分支
   `chore/batches-1-3-governance-and-evidence`);公开仓库 PR #1 是
@@ -894,6 +894,22 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   **依赖**:grok/kimi/cline 必须先做 M2P-14(合成 id 碰撞),否则传播时间戳会把
   一个静默丢数据的 bug 变成整轮 sync 硬失败。
 
+  **进度(2026-08-19)**:
+  - [x] **opencode 已完成** `559cfcf`。原本连 `time_created` 列都没 select
+    (只出现在 `ORDER BY` 里),所以每条消息都是 `timestamp: None`。现读 epoch-ms
+    渲染成 `YYYY-MM-DDTHH:MM:SS.mmmZ`;`<= 0` 或 `> 9999-12-31` 返回 None
+    而非编造时刻;列类型异常时丢时间戳而不丢消息。golden 新增
+    `golden_timestamps_fall_inside_search_window`,用**生产**的
+    `parse_search_instant` 解每条时间戳并断言 `sort_key()` 落在预期窗口内 ——
+    这样"能被时间过滤命中"本身成了被测性质,而不是靠肉眼看字符串像不像。
+  - [x] **codex 结论已定:不传播**(见上表理由),需在 `known_limitations`
+    写明 envelope 时间是重放写入时刻。
+  - [ ] **grok-build / kimi-code / cline** —— 阻塞在 M2P-14,等其合并后再做。
+  - [ ] **aider** —— 补 `known_limitations` 一条"无逐消息时间戳"。
+  - [ ] **G18 的另一半**:无论传播到什么程度,时间过滤都必须**明确告知被排除的
+    数量**,不能静默丢。这条还没做,且它与 provider 覆盖面无关 —— 即使全部
+    provider 都有时间戳,`timestamp IS NULL` 的历史行仍会被静默排除。
+
 - [ ] **M2P-14 合成消息 id 跨文档碰撞 → 静默丢数据(新发现,独立于时间戳)**
   **这是比时间戳更严重的缺陷,而且此刻正在发生。**
   cline / grok-build / kimi-code / aider(可能还有 hermes/pi/qoder/openclaw/
@@ -1055,11 +1071,19 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   **验收**:吞吐 ≥ 3.5 MB/s;七条不变量仍全绿;确定性输出不变
   (同一输入产出同一 catalog)。
 
-- [ ] **M2-4 修 semantic 全表扇描(瓶颈 #1,D14)**
-  `query_semantic` 改为分层检索:先用 FTS 召回候选集(比如 top 500),
-  只对候选集算余弦。这符合现有架构(hybrid 已用 RRF 融合两路),零新依赖。
+- [x] **M2-4 修 semantic 全表扇描(瓶颈 #1,D14)**
+  `query_semantic` 改为分层检索:先用 FTS 召回候选集,只对候选集算余弦。
+  这符合现有架构(hybrid 已用 RRF 融合两路),零新依赖。
   **验收**:10 万条下 semantic p95 ≤ 50 ms;recall 不低于当前
   (与 §1.5 基线对比,不得回退)。
+  **已完成**(`1c4d633` `8e17e81` `2adf345`):候选上限取 **2000** 而非计划举例的
+  500 —— 重排 2000 条只花 ~24 ms 仍在预算内,降到 500 只省个位数毫秒却把召回
+  安全边际砍掉 75%;2000 = 100 × recall@20,且恰好等于冻结语料全量,所以在
+  recall 基线上分层路径可证穷尽。实测 p50 895.6→24.6 ms、p95 1111.2→26.6 ms,
+  recall 与 §1.5 逐位一致。**候选集过小(<500)时回退全量精确打分**(147 ms,
+  结果与旧路径逐位相同):实测 100 条 gold query 字面最多命中 8 条(中位 2),
+  不回退就会把 paraphrase 召回抹平成 lexical。裸迭代 10 万行 `message_vec`
+  本身就要 ~150 ms,所以有界候选是达标的**必要**条件而非优化选项。
 
 - [ ] **M2-5 存储放大治理(瓶颈 #3)**
   评估 FTS5 改 external-content(`content=` 指向 catalog),消除文本双存。
@@ -1527,6 +1551,9 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
 
 | 日期 | 任务 | 结论 | commit |
 |---|---|---|---|
+| 2026-08-19 | **M2-4 分层语义检索 + 生产接线** | 语义打分改为「有界候选集 + 精确重排」:候选集经与 lexical 完全同一套 FTS 路径召回至多 2000 条,只对候选读向量算余弦。10 万条 × 384 维实测 p50 895.6→24.6 ms、p95 1111.2→26.6 ms(达标 ≤50 ms);候选集为空/过小(<500)时**回退全量精确打分**,因为实测 100 条 gold query 字面最多只命中 8 条(中位 2),不回退会正好抹掉 paraphrase 召回——语义检索存在的唯一理由。踩坑:SQLite 选了非选择性的 `message_vec_model` 索引全表扫,分层白做(674 ms),两个谓词加一元 `+` 强制走主键(674→24 ms),已用查询计划断言锁住(选错计划是"结果正确但慢",行为测试抓不到)。recall 与 §1.5 基线逐位一致。**接线**:`query_semantic` 端口只收 `(embedding, limit)` 无查询原文,故分层路径在生产里是死的(仍走 147 ms 回退);已在 `main.rs`/`mcp.rs` 两处 search 入口逐请求设置候选原文(不能只设一次,否则上一次的原文会筛这一次的候选集),索引构建路径无查询不设 | `1c4d633` `8e17e81` `2adf345` |
+| 2026-08-19 | **M2P-12 opencode 消息时间戳** | opencode `ORDER BY time_created` 但从未 select 该列,每条消息的 `timestamp` 都是 None → 落在所有时间窗过滤之外。现读取 epoch-ms 并渲染 RFC3339 UTC(`parse_search_instant` 拒绝无时区后缀的裸本地时间,所以必须渲染而非直传);缺失或超范围(≤0 / >9999-12-31)保持 None 而非编造时刻。golden 测试用**生产解析器**解每条时间戳并断言落在预期窗口内 | `559cfcf` |
+| 2026-08-19 | **M0 公开树收口(20 条中 18 条)** | 发布工具链与内部草稿出公开树;`export_public_tree.py` 的自豁免 bug 修法是把 manifest 写到目标目录**之外**——它唯一写的那个文件曾是唯一不被扫的文件,这正是 `PUBLIC-TREE-MANIFEST.json:3` 的泄漏能在一轮报"0 findings"里存活的原因。实测导出 475 文件、public profile 0 findings。文档数字与出处对齐(七条不变量、14 码 error catalog、semantic ≥ lexical 方向纠正、延迟数字补 n=10 限定)。M0-6/M0-19(c) 有残留悬挂引用,已派单独 agent | `2ba7022` 及其 8 个来源 commit |
 | 2026-08-19 | **M1-13 + M2P-13(首个实施任务)** | 行为断言落地(`capability_behaviour.rs`,4 条断言含覆盖面守护),**矩阵不再能自我认证**;修 aider 假声明 `Partial→Unsupported` 及两份 ledger 的同步漂移。已自证断言会咬(临时把 openclaw/cline 改成过度声明,两条如期失败)。副产物:codex golden fixture 缺 tool-call 记录,无法见证自己声明的能力(提取是真实现的)→ 已登记进 M1-5 | `e4f836f` `c1356cb` `2fc1d3e` |
 | 2026-08-18 | 功能缺口审计 | v0.1.0 发布门 12 条:3 满足 / 7 部分 / 2 未满足,且 3 条本地不可能满足 → 门已重写(§3)。最大缺口:五个入口都答不了"我昨天干了什么"(无任何 recency 排序);`--since` 静默丢弃 Codex 全部历史;catalog 层完全无删除路径;矩阵只比对声明↔文档不比对声明↔行为,所以 `aider: tool_activity=Partial` 假声明能过全绿 CI | — |
 | 2026-08-18 | 搜索作用域调研 | 14/14 同类工具默认全库,零个默认当前项目;agf 试过项目默认并撤回两次(原因是"不可见"非加权本身),claude-historian 从按项目扫描改为无上限跨项目,Recall 把 current-repo 默认做出来后关掉,atuin 四年未改 global 默认。决策 D26 落定:全库默认 + 加性同项目加权 + 双侧显示来源 | `d706e46` |
