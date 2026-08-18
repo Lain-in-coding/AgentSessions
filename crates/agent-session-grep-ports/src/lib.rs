@@ -546,6 +546,31 @@ pub trait SearchIndex {
         let _ = facets;
         self.query_filtered(query, limit)
     }
+
+    /// Count the records an active time window excluded for want of a timestamp.
+    ///
+    /// Time predicates are pushed down as `sort_key(timestamp) >= ?` and in SQL
+    /// NULL fails every comparison, so a record with no parseable timestamp can
+    /// never satisfy any `[since, until)` window. That is a permanent, correct
+    /// state for providers with no per-message time (aider carries only a
+    /// run-level header time; codex deliberately does not propagate its replay
+    /// envelope time), so the exclusion must be **reported**, not repaired
+    /// (D11: be permissive, report the count).
+    ///
+    /// The count is taken over the same candidate set as
+    /// [`Self::query_faceted`] with every **non-time** predicate of `query`
+    /// and `facets` applied — never a whole-table count, which would overstate
+    /// the exclusion. Returns 0 when no time window is active. The value is
+    /// reported to the operator verbatim: implementations that cannot answer
+    /// must return 0 rather than an estimate.
+    fn count_time_filter_excluded(
+        &self,
+        query: SearchQuery<'_>,
+        facets: &SearchFacets,
+    ) -> PortResult<u64> {
+        let _ = (query, facets);
+        Ok(0)
+    }
 }
 
 /// 语义检索端口：本地 embedding 向量检索（ADR pending）。
@@ -701,6 +726,13 @@ impl<T: SearchIndex + ?Sized> SearchIndex for &T {
         facets: &SearchFacets,
     ) -> PortResult<Vec<SearchHit>> {
         (**self).query_faceted(query, limit, facets)
+    }
+    fn count_time_filter_excluded(
+        &self,
+        query: SearchQuery<'_>,
+        facets: &SearchFacets,
+    ) -> PortResult<u64> {
+        (**self).count_time_filter_excluded(query, facets)
     }
 }
 

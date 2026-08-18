@@ -324,6 +324,12 @@ pub enum AppResponse {
         retrieval_mode: RetrievalMode,
         /// 降级说明（#3）：semantic/hybrid 降级到 lexical 时的 warning 文本。
         fallback_warning: Option<String>,
+        /// 时间窗因缺时间戳而排除的记录数（D11：宽容但报数）。SQL 里 NULL 对
+        /// 每个比较都为假，故无 per-message 时间戳的记录（aider 只有 run 级
+        /// 头部时间、codex 故意不传播 replay envelope 时间）落不进任何
+        /// `[since, until)` 窗口。0 表示无时间窗或无排除——前端此时不得发
+        /// warning（输出字节不变）。
+        time_filter_excluded: u64,
     },
     /// 单个实体的原始负载；`None` 表示未找到。
     Get { payload: Option<Vec<u8>> },
@@ -1691,6 +1697,26 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore, 
                 };
                 let response_warning = fallback_warning.clone();
 
+                // D11（宽容但报数）：时间窗谓词下推成 `sort_key(timestamp) >= ?`，
+                // SQL 里 NULL 对每个比较都为假——无 per-message 时间戳的记录被
+                // 静默排除。真查一次同一非时间谓词下的 NULL 计数，让调用方知道
+                // 漏了多少；绝不估算、不抽样，也不查忽略其它 filter 的整表计数。
+                // 纯 semantic 路径不经 lexical 下推（`query_semantic` 不吃
+                // filters），此时无"时间窗排除"事实可报，计数保持 0。
+                let time_filter_excluded = if response_mode != RetrievalMode::Semantic
+                    && (filters.since.is_some() || filters.until.is_some())
+                {
+                    self.index.count_time_filter_excluded(
+                        SearchQuery {
+                            text: &query,
+                            filters: &filters,
+                        },
+                        &facets,
+                    )?
+                } else {
+                    0
+                };
+
                 // R2 系统噪声默认排除：role=system/developer 的命中不进入结果，
                 // `include_system` 显式恢复。过滤先于 offset 切片，cursor 位置因此
                 // 指向"非系统"序列。判定需整窗 payload（分块批量取，无 N+1）；扫描
@@ -1776,6 +1802,7 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore, 
                         truncation,
                         retrieval_mode: response_mode,
                         fallback_warning: response_warning,
+                        time_filter_excluded,
                     });
                 }
 
@@ -1834,6 +1861,7 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore, 
                     truncation,
                     retrieval_mode: response_mode,
                     fallback_warning: response_warning,
+                    time_filter_excluded,
                 })
             }
             AppRequest::Get { id } => {
