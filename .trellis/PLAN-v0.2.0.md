@@ -289,16 +289,80 @@ CI 更快。
 
 ### 2.1 待 owner 决定(不要自己拍)
 
-- **Q16 搜索默认作用域** — owner 反问得很关键:"如果默认只在本项目搜索,
-  那我有上下文我直接问 AI 我还用得着通过 asg 搜索吗?" 这个质疑成立,
-  说明**默认只搜当前项目是错的**。倾向方案:**默认全库 + 同项目排序加权 +
-  每条结果显示来源项目**,收窄用 `--project`。正在调研 13 个同类项目与
-  atuin 的实际做法(atuin 有 session/directory/host/global 循环过滤模式,
-  且默认档位改过 —— 那个改动方向是最强信号)。调研回来后确认再落 ADR。
-- **provider 真实样本获取路径** — 16 个 provider 逐个给"自己生成/花钱买/
-  拿不到"的判定与操作步骤。调研中。
 - **M4-11 文档语言方针** — 用户可见输出全改英文 / 双语 / 明确中文优先。
   选第一个是最大的一次改写。
+- **转 public 的时机取舍** — 现在走最短路径清干净树后转(立刻解锁 CI,
+  但未完成状态公开可见),还是等全做完再转(这期间性能阀值只能本地跑
+  记为 `locally_verified`)。
+
+### 2.3 搜索作用域决策(D26,调研已闭环,owner 的反问是对的)
+
+owner 的质疑:"如果默认只在本项目搜索,那我有上下文我直接问 AI
+我还用得着通过 asg 搜索吗?" —— **这个质疑完全成立,而且被 14 个同类工具
+的实际做法证实。**
+
+**14 个工具全部默认全库搜索。零个默认当前项目。**
+(atuin、mcfly、zoxide、fzf Ctrl-R、ctx、sessiongrep、fast-resume、
+agentsview、agent-sessions、agf、Recall、claude-historian-mcp、memex、
+cc-switch、claude-code-history-viewer —— 已逐个读源码/配置默认值核实)
+
+唯一会收窄默认的三处都不是"按项目":(a) sessiongrep 是**排序**加权不是过滤;
+(b) ctx 排除的是**当前活跃会话**不是项目;(c) zoxide 排除**你已经在的那个目录**。
+
+**四条最强证据 —— 有人试过项目默认,然后撤回了:**
+
+1. **agf 撤回了两次。** v0.11.0 移除了同项目排序加权,理由(CHANGELOG:123)
+   是关键:"那个把 `project_path == $PWD` 的会话推到最上面的二次排序
+   **让按时间排序的列表看起来是坏的**……这个加权是隐式的(**没有屏幕上的
+   指示器**),所以用户读成'时间排序错了'"。
+   v0.11.2 又**回滚了一个已合并的 PR**(那个 PR 把搜索框预填成 `$PWD`):
+   "它改变了**每一个** agent 的无参数行为(**在非项目目录里得到空列表**),
+   并重新引入了 v0.11.0 刻意移除的 cwd 特殊处理"。
+   两次独立撤回,一次针对排序一次针对过滤,**声明的失败原因都是"不可见"
+   而不是加权本身**。struct 上的 `pub cwd` 还留着标了
+   `#[allow(dead_code)]`,注释说留给"未来 settings-gated 的重新引入"。
+2. **claude-historian 从有上限的按项目扫描改成了无上限的跨项目扫描。**
+   commit `7a21053e` 删掉了 `limit * 8` 收集、`perProject` 上限、分批
+   和 per-file `break`,留下的注释是
+   `// Search all projects — no artificial scope limits`。
+   同一个 commit **保留并扩展了项目名加权** —— 方向是:召回放宽,由排序收窄。
+3. **Recall 把"当前 repo 默认"做出来了然后默认关掉。**
+   `default_current_repo_scope: bool` 的 `Default` 推导为 `false`。
+   他们自己的 skill 文档解释了为什么路径推导的作用域不可靠:
+   "`recall --project` 只按精确会话目录加子路径过滤;它不理解 repo 名、
+   remote、符号链接、或 worktree"。
+4. **claude-code-history-viewer 事后才给全库结果补上来源标注**
+   (issue #420:"全局搜索结果现在显示每条命中属于哪个会话")——
+   证明全库默认能活下来的前提是**每条命中都说清来自哪里**。
+
+**反向信号同样重要:atuin 四年没改过默认。** `filter_mode` 从 v12.0.0
+到现在都是 `global`。变的全是**增量**:filter 顺序可配了(默认仍以 global 开头)、
+`workspaces` 存在但 `set_default("workspaces", false)`、
+2025-09 加的 `session-preload` 是"当前会话**加上会话开始之前的全部全局历史**"——
+**连它最窄的可用模式都拒绝放弃全局语料**。
+而且 atuin 的循环 UI 配着一个**常驻屏幕指示器**(把过滤模式首字母渲染进
+提示符:`G>`、`D>`、`W>`)—— 这正是 agf 说自己缺的那个东西。
+
+**对本项目最要命的一条(架构论证):**
+你现在唯一的项目信号是 resume claim 上的 `original_working_directory`,
+它被 `pair_observed && original_working_directory_state == "resolved"` 门控,
+多源冲突时**整个丢弃**(`adapters-sqlite/src/lib.rs:4384-4441`)。
+而 `SearchFilters`(`ports/src/lib.rs:246-250`)只有
+`providers`/`since`/`until`,**根本没有项目维度**。
+让**默认行为**依赖一个对很多会话合法为 null 的字段,意味着默认会
+**静默隐藏可召回的历史**;而对同一字段做**加权**则优雅降级 ——
+null 只是没有加分。**这是决定性的架构理由。**
+
+还有一条具体的:本仓库现在就跑在
+`C:\AgentSessions\.claude\worktrees\public-release-audit` ——
+一个与主 checkout **不共享任何路径前缀**的 git worktree。
+Recall 的 skill 文档正好记录了路径前缀作用域在这类情况下的失败。
+
+**量级参考(sessiongrep,本项目最接近的结构同类:Rust + SQLite/FTS5 +
+CLI/TUI/MCP)**:`prefer_current_repo = true` 默认开,同 repo 命中 **+200**,
+对比标题精确匹配 **600**、recency **≤180**(`src/db.rs:318-374`)。
+claude-historian 叠了同样的思路(cwd 匹配加性 +5,查询词命中项目名时
+乘性 ×3)—— **拿不准就用加性**,乘性项目加权会压过文本相关性。
 
 ### 2.2 CI 决策(已查实,D22-D25)
 
@@ -308,6 +372,7 @@ CI 更快。
 | D23 | **不用 linux.do 或任何第三方的 CI 账号/runner。** runner registration token 等价于代码执行权 + 仓库写权限:对方能拿到 `GITHUB_TOKEN`、所有 secrets、以及构建产物的完整控制权 —— 对一个别人会 `cargo install` 的项目是教科书级供应链投毒入口。linux.do 社区规则第一条自己就写"勿外借、买卖账号"。同样零收益。 | owner 问过,答案是强烈反对 |
 | D24 | **public 仓库上绝不挂 self-hosted runner。** GitHub secure-use 官方原文:"self-hosted runners should **almost never** be used for public repositories, because any user can open pull requests against the repository and compromise the environment"。Legit Security 扫到 43,803 个公开仓库这么干,Sysdig 记录了 Shai-Hulud 用这条路径植入后门的真实案例。owner 的 Windows 11 主机上有真实 transcript 与 `.claude` 配置,不能暴露。 | 安全红线 |
 | D25 | **CI 解法 = 转 public(免费无限)+ 砍 PR 上的 macOS job + Actions budget 设 $5 兜底。** 预期成本 $0,耗时 1 小时内,且与 D1 完全同向。 | 见 §1.9.1 |
+| D26 | **搜索默认全库 + 同项目加性加权 + 每条结果显示来源项目。不做 `--all` 逃生舱。** | 14/14 同类工具默认全库;agf 试过项目默认并撤回两次;本项目的项目信号字段对很多会话合法为 null,做默认会静默隐藏历史,做加权则优雅降级。详见 §2.3 |
 
 **替代平台已全部评估过,没有一个能提供 "免费 + 三平台 + 含 macOS" 的组合**:
 Cirrus CI **已停服**(2026-06-01,Cirrus Labs 加入 OpenAI);Travis OSS 免费层
@@ -915,10 +980,28 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   catalog、fts、fts_ids 边车、message_vec、tool_activities 等所有表。
   **验收**:每个维度有测试;删除后 `doctor` 报告一致;rebuild 后不复活。
 
-- [ ] **M3-3 搜索作用域(待 owner 确认,见 §2.1 Q16)**
-  倾向方案:默认全库 + 同项目排序加权 + 每条结果显示来源项目,
-  `--project` 收窄。**等调研结论与 owner 确认后落 ADR 再实现。**
-  **验收**:ADR 落地;实现与 ADR 一致;结果显示来源项目。
+- [ ] **M3-3 搜索作用域:全库默认 + 同项目加权 + 每条显示来源(D26)**
+  调研已闭环,结论明确,见 §2.3。落一份 ADR 再实现。
+  **具体形状**:
+  - 默认作用域:**全库**。不加新的默认过滤,**不做 `--all` 逃生舱**。
+  - 新增 `--project <path-or-name>` 显式收窄(`SearchFilters` 加一个维度,
+    对解析出的工作目录做前缀/子串匹配,对齐 ctx 的 `--workspace` 与
+    sessiongrep 的 `--path`)。同时加 `--exclude-project`(agentsview 有,
+    用户会要)。
+  - 加**加性**同项目加权:cwd → git toplevel 解析,**量级要明显低于
+    精确文本相关性**。做成 config key 默认开(照 sessiongrep 的
+    `prefer_current_repo`),工作目录无法解析时自动变成 no-op。
+    CLI 与 **MCP 两条路径都要应用** —— agent 问"这个项目"时收益最大。
+    ⚠️ **不要用乘性加权** —— 会压过文本相关性。
+  - 每条结果在 **human 与 robot 两侧**都显示来源项目,并在 header 里
+    写明生效的作用域(例如 `scope: global (this project boosted)`)。
+  - **robot/MCP 侧的 project 字段没做好之前,不要上线加权** ——
+    否则会精确复刻 agf 的 bug。
+  - 暂不做循环过滤模式 UI:atuin 的 ctrl-r 循环之所以成立,是因为它是
+    常开的交互式 TUI 且有常驻单字符指示器;一次性 CLI 用
+    `--project` + 可见的 scope 行就能拿到同样收益,成本低得多。
+  **验收**:ADR 落地;实现与 ADR 一致;human 与 robot 都显示来源项目;
+  加权在工作目录未解析时无副作用。
 
 - [ ] **M3-4 审计列出的其余功能缺口**
   待功能缺口审计 agent 回报后填充。已知方向:过滤维度、输出格式、
@@ -1152,8 +1235,11 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   根因不是封号也不是中国网络:私有仓库 2,000 min/月 配额被 macOS 的
   10 倍倍率烧穿(两天 7,397 计费分钟,超 3.7 倍)。
   **public 仓库标准 runner 免费无限 —— 转公开本身就是解法。**
-- [ ] **搜索作用域惯例调研** — 13 个同类项目 + atuin/mcfly/zoxide 的默认
-  作用域与演变。填入后 M3-3 才能落 ADR。
+- [x] **搜索作用域惯例调研** — 已回报并落地为 D26、§2.3、M3-3。
+  **14/14 同类工具默认全库,零个默认当前项目。** agf 试过项目默认并
+  **撤回两次**(排序加权 + cwd 预填),声明原因都是"不可见"。
+  atuin 四年没改过 `global` 默认。本项目的架构理由更硬:
+  项目信号字段对很多会话合法为 null。
 - [ ] **功能缺口完整清单** — 填入 M3-4。
 - [x] **文档/UX 缺口完整清单** — 已回报并落地为 M2P-1..11 与 M4-1..11。
   关键方法论:该审计**用真实二进制在一次性伪 HOME 下逐条实测**,
@@ -1165,7 +1251,8 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
 
 | 日期 | 任务 | 结论 | commit |
 |---|---|---|---|
-| 2026-08-18 | provider 样本调研 | 推翻两个 deferred 前提:zcode 与 deepseek-harness 本机都有真实 transcript(dsh 的 home 是 `~/.dsh` 不是 `~/.deepseek`)。发现 opencode probe 会误认 zcode DB(真实 AmbiguousVariant)、qoder 路径三方不一致、hermes 声明的格式已被上游停用。12 个可一小时内自建,grok-build/cursor 拿不到 | — |
+| 2026-08-18 | 搜索作用域调研 | 14/14 同类工具默认全库,零个默认当前项目;agf 试过项目默认并撤回两次(原因是"不可见"非加权本身),claude-historian 从按项目扫描改为无上限跨项目,Recall 把 current-repo 默认做出来后关掉,atuin 四年未改 global 默认。决策 D26 落定:全库默认 + 加性同项目加权 + 双侧显示来源 | — |
+| 2026-08-18 | provider 样本调研 | 推翻两个 deferred 前提:zcode 与 deepseek-harness 本机都有真实 transcript(dsh 的 home 是 `~/.dsh` 不是 `~/.deepseek`)。发现 opencode probe 会误认 zcode DB(真实 AmbiguousVariant)、qoder 路径三方不一致、hermes 声明的格式已被上游停用。12 个可一小时内自建,grok-build/cursor 拿不到 | `42b5936` |
 | 2026-08-18 | CI 调研 | 根因查实:不是封号/中国网络,是私有仓库 2000 min/月 配额被 macOS 10x 倍率烧穿(两天 7397 计费分钟)。public 仓库 runner 免费无限 → 转公开本身即解法。多账号与借用第三方 CI 均否决(ToS + 供应链风险 + 零收益) | `f4df823` |
 | 2026-08-18 | 文档/UX 审计 | 用真实二进制实测发现 11 条首次运行 P0/P1 功能缺陷(落为 M2P)+ 11 条文档缺口(落为 M4);最严重:human search 输出的 session id 喂给 context 会被拒、读命令打错路径静默建空库 | `eeea337` |
 | 2026-08-18 | 规划 | 本文件建立;owner 拷问确认 D1-D21 共 21 条决策 | `af26bb6` |
