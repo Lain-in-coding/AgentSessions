@@ -3232,6 +3232,21 @@ fn provider_registry() -> Vec<Box<dyn ProviderAdapter>> {
 fn stage_with_source(
     source: &dyn agent_session_grep_ports::ReadOnlySource,
 ) -> Result<(StagedBatch, String), AppError> {
+    let registry = provider_registry();
+    let refs: Vec<&dyn ProviderAdapter> = registry.iter().map(|a| a.as_ref()).collect();
+    stage_with_registry(&refs, source)
+}
+
+/// [`stage_with_source`] against a caller-owned adapter registry.
+///
+/// Split out so a multi-source sync builds the 14 adapters once and shares the
+/// borrowed slice across parse threads instead of re-boxing the whole registry
+/// per file. `ProviderAdapter: Send + Sync`, so `&[&dyn ProviderAdapter]` is
+/// safe to hand to every worker.
+fn stage_with_registry(
+    registry: &[&dyn ProviderAdapter],
+    source: &dyn agent_session_grep_ports::ReadOnlySource,
+) -> Result<(StagedBatch, String), AppError> {
     if source.is_empty() {
         return Ok((
             StagedBatch {
@@ -3249,9 +3264,7 @@ fn stage_with_source(
             "empty".into(),
         ));
     }
-    let registry = provider_registry();
-    let refs: Vec<&dyn ProviderAdapter> = registry.iter().map(|a| a.as_ref()).collect();
-    select_and_stage_source(&refs, source)
+    select_and_stage_source(registry, source)
 }
 
 struct StagedMessageEntity {
@@ -4191,6 +4204,245 @@ struct SyncContext {
 /// `sync_files` / `sync_discover` 共享的核心流程。
 ///
 /// `paths` 应已去重且不含目录（调用方负责）。
+/// One source's fully prepared, store-independent ingest product.
+///
+/// Everything in here is derived from the read-only source plus values read from
+/// the store *before* any thread starts (`cached` fingerprints, the discover
+/// context). Nothing in here touches the connection, which is what makes the
+/// preparation safe to run off the writer thread — see [`prepare_sources`].
+struct PreparedSource {
+    /// The captured snapshot, re-verified before commit on the writer thread.
+    snapshot: agent_session_grep_ports::SourceSnapshot,
+    /// `Some` when this source was parsed this run; `None` for the three
+    /// no-parse outcomes (fingerprint hit, truncated-tail retain, skipped).
+    parsed: Option<ParsedSource>,
+    outcome: PrepareOutcome,
+}
+
+/// A parsed source's committable batch plus the counters the report needs.
+struct ParsedSource {
+    batch: SourceBatch,
+    message_count: usize,
+    skipped: usize,
+    diagnostics: Vec<String>,
+}
+
+/// Which of the four per-source paths a prepared source took. Drives the
+/// progress wording and the report counters, both of which stay on the writer
+/// thread so their order is the caller's path order, never completion order.
+enum PrepareOutcome {
+    /// Parsed and staged; carries no extra state (the batch is in `parsed`).
+    Scanned,
+    /// Fingerprint cache hit: parse skipped, this many messages already indexed.
+    Unchanged(usize),
+    /// Truncated tail on an already-indexed source: keep the previous index.
+    Retained,
+    /// Not attributable to any provider (unclaimed or ambiguous); skipped.
+    Unrecognized(SourceRejection),
+}
+
+/// Run `work` over `0..len` across the machine's cores, funneling each result
+/// back over a channel, and return the results in **index order**.
+///
+/// Borrowed from `agf`'s `start_stale_scan` (`src/cache.rs`, MIT License,
+/// Copyright (c) 2025 subinium): "one worker thread per stale agent, each worker
+/// sends its result back over a channel", plus fast-resume's `refresh.rs`
+/// (MIT License, Copyright (c) 2025 Stanislas Lange) for dropping the original
+/// sender so the drain terminates when the last worker exits. Two deliberate
+/// departures, because the unit of work here is a source file rather than a
+/// whole provider:
+///
+/// - **Bounded pool, not one thread per unit.** A 5,000-file corpus cannot get
+///   5,000 threads. Workers claim indices from a shared atomic cursor, so the
+///   thread count comes from `available_parallelism()` and never scales with
+///   the corpus.
+/// - **Order restored before use.** Both upstreams ingest results in completion
+///   order, which is fine for a session list that gets sorted anyway. Here
+///   completion order must not be observable: message identity for providers
+///   that emit an empty `native_id` is derived per document, and sync
+///   diagnostics are numbered "source N of M". So each result carries its index
+///   and the drain writes it into a slot.
+///
+/// `on_ready` is invoked on the draining thread in strictly increasing index
+/// order — the contiguous ready prefix is flushed after each receive, so
+/// progress output stays both incremental and deterministic.
+///
+/// The lowest-index error wins, matching a serial loop's early return.
+///
+/// No `store` is in scope by construction, which is how the single-writer rule
+/// (`adapters-sqlite/src/lease.rs`) survives the fan-out: parsing goes wide,
+/// SQLite stays single-threaded in the caller.
+fn parallel_map_indexed<T, W, R>(
+    len: usize,
+    work: W,
+    mut on_ready: R,
+) -> Result<Vec<T>, CliError>
+where
+    T: Send,
+    W: Fn(usize) -> Result<T, CliError> + Send + Sync,
+    R: FnMut(usize, &T),
+{
+    // A single unit needs no fan-out; skip the pool so `sync <one file>` keeps
+    // its current cost profile exactly.
+    if len <= 1 {
+        let mut out = Vec::with_capacity(len);
+        for index in 0..len {
+            let value = work(index)?;
+            on_ready(index, &value);
+            out.push(value);
+        }
+        return Ok(out);
+    }
+
+    let workers = std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(1)
+        .min(len);
+    let cursor = std::sync::atomic::AtomicUsize::new(0);
+    let mut slots: Vec<Option<Result<T, CliError>>> = (0..len).map(|_| None).collect();
+
+    std::thread::scope(|scope| {
+        let (tx, rx) = std::sync::mpsc::channel::<(usize, Result<T, CliError>)>();
+        for _ in 0..workers {
+            let tx = tx.clone();
+            let cursor = &cursor;
+            let work = &work;
+            scope.spawn(move || {
+                loop {
+                    let index = cursor.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if index >= len {
+                        return;
+                    }
+                    // The receiver lives until the scope joins every worker, so
+                    // a send error is unreachable; stop claiming work rather
+                    // than dropping a result, which would silently lose a unit.
+                    if tx.send((index, work(index))).is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+        // Drop the original sender so the drain ends once every worker is done.
+        drop(tx);
+
+        let mut next = 0usize;
+        for (index, value) in rx {
+            slots[index] = Some(value);
+            while next < len {
+                match slots[next].as_ref() {
+                    Some(Ok(value)) => on_ready(next, value),
+                    // A failed unit gets no callback; the error surfaces from
+                    // the ordered collect below.
+                    Some(Err(_)) => {}
+                    None => break,
+                }
+                next += 1;
+            }
+        }
+    });
+
+    let mut out = Vec::with_capacity(len);
+    for slot in slots {
+        out.push(slot.expect("every index is filled before the channel closes")?);
+    }
+    Ok(out)
+}
+
+/// Prepare a single source: capture, health-triage, parse, derive the
+/// committable batch. Pure with respect to the store; runs on a worker thread.
+///
+/// Everything it reads from the store was read before any thread started
+/// (`cached` fingerprints, `unchanged_counts`, the discover context), so no
+/// connection is touched here.
+fn prepare_one(
+    path: &str,
+    registry: &[&dyn ProviderAdapter],
+    ctx: &SyncContext,
+    cached: &BTreeMap<String, agent_session_grep_adapters_sqlite::SourceFingerprint>,
+    unchanged_counts: &BTreeMap<String, usize>,
+) -> Result<PreparedSource, CliError> {
+    let path_ref = std::path::Path::new(path);
+    let snapshot = capture(path_ref).map_err(ProtocolError::from)?;
+    let source = open_snapshot_source(path_ref, &snapshot).map_err(ProtocolError::from)?;
+    let cached_fp = cached.get(path).and_then(|(_, fp)| fp.clone());
+
+    // 空文件（0 字节）不能走指纹跳过：它必须作为"整源清空"批次提交
+    // 以 tombstone 旧消息；跳过会退化成空批 no-op，丢失 tombstone 语义。
+    if !source.is_empty()
+        && cached_fp.as_deref() == Some(snapshot.fingerprint.as_str())
+        && !ctx.relation_recovery_paths.contains(path)
+        && !ctx.incomplete_paths.contains(path)
+    {
+        // 字节未变：跳过 parse。store 层仍会做 no-op 判定（entries 为空时
+        // 会走 membership/scan 对比），因此这里只需空 staged 占位。
+        let already = unchanged_counts.get(path).copied().unwrap_or(0);
+        return Ok(PreparedSource {
+            snapshot,
+            parsed: None,
+            outcome: PrepareOutcome::Unchanged(already),
+        });
+    }
+
+    // 截断尾（EOF 落在记录中间）＝agent 正在写这个源。已索引过的源
+    // 必须 Retain：不重 parse、不推进指纹、不提交——旧索引原样保留，
+    // 不产生 rebuild churn，也不误 tombstone（fast-resume
+    // Invalid→Retain 语义）。只报诊断；文件写完后再 sync 会因指纹
+    // 不匹配走完整重扫。新源（cached_fp 为 None）无旧索引可保留，
+    // 落到下面走既有 recoverable-skip。
+    if !source.is_empty()
+        && cached_fp.is_some()
+        && jsonl_health(path_ref, &snapshot).map_err(ProtocolError::from)? == JsonlHealth::Invalid
+    {
+        return Ok(PreparedSource {
+            snapshot,
+            parsed: None,
+            outcome: PrepareOutcome::Retained,
+        });
+    }
+
+    let (staged, variant) = match stage_with_registry(registry, &source) {
+        Ok(staged) => staged,
+        // 文件级宽容（M2P-5）：源不被任何 provider 认领，或多个 provider
+        // 同分而歧义（repo 原则：歧义拒绝，绝不猜）。两者都是关于这一个
+        // 文件的判定，不是整轮的失败——跳过、计数，末尾经既有
+        // diagnostics/warnings 通道如实报告，与行级 skip 同一条通道。
+        Err(error) if ctx.skip_unrecognized_sources && source_rejection(&error).is_some() => {
+            let reason = source_rejection(&error).expect("checked by guard");
+            return Ok(PreparedSource {
+                snapshot,
+                parsed: None,
+                outcome: PrepareOutcome::Unrecognized(reason),
+            });
+        }
+        Err(error) => return Err(error.into()),
+    };
+
+    let provider = variant.split('/').next().unwrap_or(&variant).to_string();
+    let mut batch = staged_to_source_with_provider(
+        path,
+        &staged,
+        &provider,
+        &variant,
+        &snapshot.fingerprint,
+        snapshot.len,
+        ctx.discovered_provider_ids.get(path).map(String::as_str),
+    )?;
+    if ctx.incomplete_providers.contains(&provider) {
+        batch.relation_complete = false;
+    }
+
+    Ok(PreparedSource {
+        parsed: Some(ParsedSource {
+            batch,
+            message_count: staged.messages.len(),
+            skipped: staged.report.skipped,
+            diagnostics: staged.report.diagnostics.clone(),
+        }),
+        snapshot,
+        outcome: PrepareOutcome::Scanned,
+    })
+}
+
 fn sync_files_inner(
     store: &SqliteStore,
     paths: &[String],
@@ -4200,16 +4452,10 @@ fn sync_files_inner(
     request_id: Option<&str>,
 ) -> Result<(serde_json::Value, Vec<String>), CliError> {
     let synthetic_batches = &ctx.synthetic_batches;
-    let incomplete_providers = &ctx.incomplete_providers;
-    let relation_recovery_paths = &ctx.relation_recovery_paths;
-    let incomplete_paths = &ctx.incomplete_paths;
-    let discovered_provider_ids = &ctx.discovered_provider_ids;
-    let skip_unrecognized_sources = ctx.skip_unrecognized_sources;
     if paths.is_empty() && synthetic_batches.is_empty() && !allow_empty {
         return Err(CliError::usage("sync <file>... requires at least one file"));
     }
     let mut sources = Vec::with_capacity(paths.len() + synthetic_batches.len());
-    let mut snapshots = Vec::with_capacity(paths.len());
     let mut message_count = 0usize;
     let mut skipped_count = 0usize;
     let mut retained_count = 0usize;
@@ -4219,6 +4465,7 @@ fn sync_files_inner(
 
     // 指纹缓存：capture 后先与已存指纹比对，未变化的源跳过重复解析
     // （parse 是大语料重扫的主导成本）。指纹缓存缺失/不匹配才走完整路径。
+    // 两次 store 读取都在 fan-out 之前完成，之后的准备阶段不再触碰连接。
     let cached = store
         .source_fingerprints(paths)
         .map_err(ProtocolError::from)?;
@@ -4227,136 +4474,123 @@ fn sync_files_inner(
     let unchanged_counts = store
         .source_message_counts(paths)
         .map_err(ProtocolError::from)?;
-    for (index, path) in paths.iter().enumerate() {
-        let path_ref = std::path::Path::new(path);
-        let snap = capture(path_ref).map_err(ProtocolError::from)?;
-        let source = open_snapshot_source(path_ref, &snap).map_err(ProtocolError::from)?;
-        let cached_fp = cached.get(path).and_then(|(_, fp)| fp.clone());
-        // 空文件（0 字节）不能走指纹跳过：它必须作为"整源清空"批次提交
-        // 以 tombstone 旧消息；跳过会退化成空批 no-op，丢失 tombstone 语义。
-        let mut retained = false;
-        let mut unrecognized = false;
-        let (staged, variant) = if !source.is_empty()
-            && cached_fp.as_deref() == Some(snap.fingerprint.as_str())
-            && !relation_recovery_paths.contains(path)
-            && !incomplete_paths.contains(path)
-        {
-            // 字节未变：跳过 parse。store 层仍会做 no-op 判定（entries 为空时
-            // 会走 membership/scan 对比），因此这里只需空 staged 占位。
-            unchanged_messages += unchanged_counts.get(path).copied().unwrap_or(0);
-            (None, None)
-        } else if !source.is_empty()
-            && cached_fp.is_some()
-            && jsonl_health(path_ref, &snap).map_err(ProtocolError::from)? == JsonlHealth::Invalid
-        {
-            // 截断尾（EOF 落在记录中间）＝agent 正在写这个源。已索引过的源
-            // 必须 Retain：不重 parse、不推进指纹、不提交——旧索引原样保留，
-            // 不产生 rebuild churn，也不误 tombstone（fast-resume
-            // Invalid→Retain 语义）。只报诊断；文件写完后再 sync 会因指纹
-            // 不匹配走完整重扫。新源（cached_fp 为 None）无旧索引可保留，
-            // 落到下一分支走既有 recoverable-skip。
-            retained = true;
-            retained_count += 1;
-            diagnostics.push(format!(
-                "source {} of {}: truncated tail (a JSON record is cut off at EOF, \
-                 the file may still be written); keeping previously indexed content \
-                 — re-run sync when the file is complete",
-                index + 1,
-                paths.len()
-            ));
-            diagnostic_count += 1;
-            (None, None)
-        } else {
-            match stage_with_source(&source) {
-                Ok((staged, variant)) => (Some(staged), Some(variant)),
-                // 文件级宽容（M2P-5）：源不被任何 provider 认领，或多个 provider
-                // 同分而歧义（repo 原则：歧义拒绝，绝不猜）。两者都是关于这一个
-                // 文件的判定，不是整轮的失败——跳过、计数，末尾经既有
-                // diagnostics/warnings 通道如实报告，与行级 skip 同一条通道。
-                Err(error) if skip_unrecognized_sources && source_rejection(&error).is_some() => {
-                    let reason = source_rejection(&error).expect("checked by guard");
-                    unrecognized = true;
-                    unrecognized_count += 1;
-                    diagnostics.push(match reason {
-                        SourceRejection::Unclaimed => format!(
-                            "source {} of {}: not a recognized agent transcript, skipped \
-                             (nothing was indexed from it)",
-                            index + 1,
-                            paths.len()
-                        ),
-                        // 歧义源确实被认领了，只是无法唯一归属——措辞不能说
-                        // "不是 transcript"，那会把用户引向错误的方向。
-                        SourceRejection::Ambiguous => format!(
-                            "source {} of {}: matched more than one provider format equally \
-                             well, skipped rather than guessed; sync this file explicitly to \
-                             see which formats collided",
-                            index + 1,
-                            paths.len()
-                        ),
-                    });
-                    diagnostic_count += 1;
-                    (None, None)
-                }
-                Err(error) => return Err(error.into()),
+
+    // 准备阶段跨核并行；提交阶段单线程（SQLite 单写者，见 lease.rs）。
+    // 每个源的 capture(BLAKE3) + probe/parse + id 派生互不相干，是本函数的
+    // 主导成本；顺序由 parallel_map_indexed 还原为 path 顺序。
+    let registry = provider_registry();
+    let refs: Vec<&dyn ProviderAdapter> = registry.iter().map(|a| a.as_ref()).collect();
+    let prepared = parallel_map_indexed(
+        paths.len(),
+        |index| prepare_one(&paths[index], &refs, ctx, &cached, &unchanged_counts),
+        |index, prepared: &PreparedSource| {
+            if !progress {
+                return;
             }
-        };
-        if progress {
-            // 措辞如实区分三种路径：指纹命中只是 checked（未 parse），
-            // 走完整解析的才是 scanned，截断尾 retain 是 kept——不得谎报
-            // 缓存命中的源为 "staged (0 messages)"。
-            let message = match (&staged, retained, unrecognized) {
-                (Some(staged), _, _) => format!(
+            // 措辞如实区分四种路径：指纹命中只是 checked（未 parse），
+            // 走完整解析的才是 scanned，截断尾 retain 是 kept，无法归属的是
+            // skipped——不得谎报缓存命中的源为 "staged (0 messages)"。
+            let total = paths.len();
+            let message = match &prepared.outcome {
+                PrepareOutcome::Scanned => format!(
                     "scanned source {}/{} ({} messages)",
                     index + 1,
-                    paths.len(),
-                    staged.messages.len()
+                    total,
+                    prepared
+                        .parsed
+                        .as_ref()
+                        .map_or(0, |parsed| parsed.message_count)
                 ),
-                (None, true, _) => format!(
+                PrepareOutcome::Retained => format!(
                     "retained source {}/{} (truncated tail — keeping previous index)",
                     index + 1,
-                    paths.len()
+                    total
                 ),
-                (None, _, true) => format!(
+                PrepareOutcome::Unrecognized(_) => format!(
                     "skipped source {}/{} (not a recognized agent transcript)",
                     index + 1,
-                    paths.len()
+                    total
                 ),
-                (None, false, false) => {
-                    format!("checked source {}/{} (unchanged)", index + 1, paths.len())
+                PrepareOutcome::Unchanged(_) => {
+                    format!("checked source {}/{} (unchanged)", index + 1, total)
                 }
             };
             protocol::write_stdout_line(&protocol::progress_frame("sync", &message, request_id));
-        }
-        if let (Some(staged), Some(variant)) = (&staged, &variant) {
-            message_count += staged.messages.len();
-            skipped_count += staged.report.skipped;
-            diagnostic_count += staged.report.diagnostics.len();
-            diagnostics.extend(staged.report.diagnostics.iter().cloned());
-            let provider = variant.split('/').next().unwrap_or(variant).to_string();
-            let mut source = staged_to_source_with_provider(
-                path,
-                staged,
-                &provider,
-                variant,
-                &snap.fingerprint,
-                snap.len,
-                discovered_provider_ids.get(path).map(String::as_str),
-            )?;
-            if incomplete_providers.contains(&provider) {
-                source.relation_complete = false;
-            }
-            sources.push(source);
-        } else if let Some(provider_id) = discovered_provider_ids.get(path)
-            && !unrecognized
-        {
-            // 跳过的文件没有 source 行可回填，也不该被登记成某 provider 的源。
-            provider_id_backfills.push((path.clone(), provider_id.clone()));
-        }
-        snapshots.push((path_ref.to_path_buf(), snap));
-    }
+        },
+    )?;
 
-    for (path, snapshot) in &snapshots {
-        verify_snapshot(path, snapshot).map_err(ProtocolError::from)?;
+    // 提交前复核：所有源都完成 staging 之后才 verify，保持 RFC-0002 §4 的
+    // "staged 全部就绪 → 复核 → 单事务提交" 顺序。复核本身是每源独立的
+    // BLAKE3 全量重读，同样跨核并行。
+    parallel_map_indexed(
+        paths.len(),
+        |index| {
+            verify_snapshot(
+                std::path::Path::new(&paths[index]),
+                &prepared[index].snapshot,
+            )
+            .map_err(ProtocolError::from)?;
+            Ok(())
+        },
+        |_, _: &()| {},
+    )?;
+
+    // 单写者路径：按 path 顺序归并计数、诊断与批次。顺序由
+    // parallel_map_indexed 保证，与线程完成顺序无关。
+    for (index, prepare) in prepared.into_iter().enumerate() {
+        match prepare.outcome {
+            PrepareOutcome::Unchanged(already) => unchanged_messages += already,
+            PrepareOutcome::Retained => {
+                retained_count += 1;
+                diagnostics.push(format!(
+                    "source {} of {}: truncated tail (a JSON record is cut off at EOF, \
+                     the file may still be written); keeping previously indexed content \
+                     — re-run sync when the file is complete",
+                    index + 1,
+                    paths.len()
+                ));
+                diagnostic_count += 1;
+            }
+            PrepareOutcome::Unrecognized(reason) => {
+                unrecognized_count += 1;
+                diagnostics.push(match reason {
+                    SourceRejection::Unclaimed => format!(
+                        "source {} of {}: not a recognized agent transcript, skipped \
+                         (nothing was indexed from it)",
+                        index + 1,
+                        paths.len()
+                    ),
+                    // 歧义源确实被认领了，只是无法唯一归属——措辞不能说
+                    // "不是 transcript"，那会把用户引向错误的方向。
+                    SourceRejection::Ambiguous => format!(
+                        "source {} of {}: matched more than one provider format equally \
+                         well, skipped rather than guessed; sync this file explicitly to \
+                         see which formats collided",
+                        index + 1,
+                        paths.len()
+                    ),
+                });
+                diagnostic_count += 1;
+                continue;
+            }
+            PrepareOutcome::Scanned => {}
+        }
+        match prepare.parsed {
+            Some(parsed) => {
+                message_count += parsed.message_count;
+                skipped_count += parsed.skipped;
+                diagnostic_count += parsed.diagnostics.len();
+                diagnostics.extend(parsed.diagnostics);
+                sources.push(parsed.batch);
+            }
+            // 跳过的文件没有 source 行可回填，也不该被登记成某 provider 的源
+            // （Unrecognized 已在上面 `continue`）。
+            None => {
+                if let Some(provider_id) = ctx.discovered_provider_ids.get(&paths[index]) {
+                    provider_id_backfills.push((paths[index].clone(), provider_id.clone()));
+                }
+            }
+        }
     }
 
     // discover 合成的空批（已删除源的 tombstone）追加进提交批次。
