@@ -581,4 +581,413 @@ mod tests {
         assert!(PlacementId::from_wire("plc_v1_zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz").is_none());
         assert!(PlacementId::from_wire("msg_v1_00000000000000000000000000000000").is_none());
     }
+
+    // ------------------------------------------------------------------
+    // Provider-scoped identity migration plan (schema v13, design.md
+    // "Deferred"): test-local mirrors of the proposed `ses_v2_`
+    // derivation, namespace-key normalization, and TTL alias resolution.
+    // Production code is deliberately untouched — `native_session_scoped`
+    // keeps emitting `ses_v1_` until the migration task lands. These pure
+    // functions pin the plan's determinism/reversibility properties
+    // before any schema or wire change ships.
+    //
+    // Plan: .trellis/tasks/08-15-unified-release-contract/research/
+    //       2026-08-18-provider-scoped-identity-plan.md
+    // ------------------------------------------------------------------
+
+    /// Proposed `ses_v2_` scoped-session wire prefix — the format bump that
+    /// `IdKind` documents: a changed hashing scheme bumps `_v1_` → `_v2_`
+    /// and both coexist during migration.
+    const SESSION_V2_PREFIX: &str = "ses_v2_";
+
+    /// Proposed v2 derivation: digest of
+    /// `(provider_id, installation_namespace_key, native_session_id)`,
+    /// domain-separated by the `ses_v2_` prefix and length-prefix framed
+    /// exactly like [`StableId::derive`]. The prefix doubles as the domain
+    /// separator, so identical facts can never produce a v1 digest.
+    fn session_v2_wire(
+        provider_id: &str,
+        installation_namespace_key: &str,
+        native_session_id: &str,
+    ) -> String {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(SESSION_V2_PREFIX.as_bytes());
+        for fact in [
+            provider_id.as_bytes(),
+            installation_namespace_key.as_bytes(),
+            native_session_id.as_bytes(),
+        ] {
+            hasher.update(&(fact.len() as u64).to_le_bytes());
+            hasher.update(fact);
+        }
+        let hex = hasher.finalize().to_hex();
+        format!("{SESSION_V2_PREFIX}{}", &hex.as_str()[..DIGEST_HEX_LEN])
+    }
+
+    /// Proposed registry-key derivation: composition-root rule (last
+    /// provider data-root marker) plus the Windows path-case normalization
+    /// the migration adds (`windows` lowercases the whole key; non-Windows
+    /// keeps the spelling). Production `installation_namespace` in
+    /// `crates/agent-session-grep-cli/src/main.rs` lacks the normalization
+    /// today — that is the known debt this mirror fixes ahead of time.
+    fn namespace_key(path: &str, provider_id: &str, windows: bool) -> String {
+        let folded = path.replace('\\', "/");
+        let normalized = if windows {
+            folded.to_ascii_lowercase()
+        } else {
+            folded
+        };
+        let marker = match provider_id {
+            "claude-code" => ".claude",
+            "codex" => ".codex",
+            _ => "",
+        };
+        let segments: Vec<&str> = normalized.split('/').filter(|s| !s.is_empty()).collect();
+        let root = if !marker.is_empty()
+            && let Some(index) = segments.iter().rposition(|s| *s == marker)
+        {
+            segments[..=index].join("/")
+        } else {
+            match segments.split_last() {
+                Some((_, parent)) if !parent.is_empty() => parent.join("/"),
+                _ => ".".to_string(),
+            }
+        };
+        format!("{provider_id}:{root}")
+    }
+
+    /// What alias resolution decided for a legacy `ses_v1_*` wire id.
+    #[derive(Debug, PartialEq, Eq)]
+    enum LegacyResolution {
+        /// No rewrite exists: the legacy id stays the lookup key.
+        KeepLegacy(String),
+        /// Exactly one live alias: resolve the legacy id to this wire id.
+        Rewritten(String),
+        /// Multiple distinct live targets: fail closed, disclose nothing.
+        Conflict,
+    }
+
+    /// Proposed `id_alias` row as read back from storage.
+    struct AliasRow {
+        new_id: String,
+        expires_at_ms: u64,
+    }
+
+    /// Proposed resolution of a legacy id against its alias rows at `now`.
+    ///
+    /// Deterministic and total:
+    /// - no live rows → `KeepLegacy` (legacy ids stay valid/searchable);
+    /// - exactly one live distinct target → `Rewritten`;
+    /// - identity rows (`new_id == old_id`) mark "not yet rewritten" →
+    ///   `KeepLegacy`;
+    /// - two or more live distinct targets → `Conflict` (never pick by
+    ///   path, order, or value);
+    /// - expiry is `now >= expires_at_ms` (half-open; the boundary is
+    ///   expired), and expired rows are filtered before conflict detection.
+    fn resolve_legacy(legacy: &str, rows: &[AliasRow], now_ms: u64) -> LegacyResolution {
+        let mut live: Vec<&str> = rows
+            .iter()
+            .filter(|row| now_ms < row.expires_at_ms)
+            .map(|row| row.new_id.as_str())
+            .collect();
+        live.sort_unstable();
+        live.dedup();
+        match live.as_slice() {
+            [] => LegacyResolution::KeepLegacy(legacy.to_string()),
+            [only] if *only == legacy => LegacyResolution::KeepLegacy(legacy.to_string()),
+            [only] => LegacyResolution::Rewritten((*only).to_string()),
+            _ => LegacyResolution::Conflict,
+        }
+    }
+
+    /// Proposed extension of [`StableId::from_wire`]: recover the kind
+    /// version from the `ses_v2_` prefix and preserve the value exactly
+    /// (catalog lookups key on the preserved wire string).
+    fn session_v2_from_wire(wire: &str) -> Option<&str> {
+        wire.strip_prefix(SESSION_V2_PREFIX)
+            .filter(|suffix| !suffix.is_empty())
+    }
+
+    #[test]
+    fn v2_scoped_wire_is_deterministic_and_namespaced() {
+        let key = "claude-code:c:/profiles/one/.claude";
+        let a = session_v2_wire("claude-code", key, "session-123");
+        let b = session_v2_wire("claude-code", key, "session-123");
+        assert_eq!(a, b);
+
+        // 任一身份轴变化 → 不同 id;digest 只含 hex。
+        assert_ne!(a, session_v2_wire("codex", key, "session-123"));
+        assert_ne!(
+            a,
+            session_v2_wire(
+                "claude-code",
+                "claude-code:d:/profiles/two/.claude",
+                "session-123"
+            )
+        );
+        assert_ne!(a, session_v2_wire("claude-code", key, "session-124"));
+        assert!(a.starts_with(SESSION_V2_PREFIX));
+        assert_eq!(a.len(), SESSION_V2_PREFIX.len() + DIGEST_HEX_LEN);
+        assert!(
+            a[SESSION_V2_PREFIX.len()..]
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        );
+    }
+
+    #[test]
+    fn v2_scoped_wire_never_collides_with_v1_for_identical_facts() {
+        let key = "claude-code:c:/profiles/one/.claude";
+        let v1 = StableId::native_session_scoped(
+            &SessionIdentityNamespace {
+                provider_id: "claude-code",
+                installation_namespace: key,
+            },
+            "session-123",
+        );
+        let v2 = session_v2_wire("claude-code", key, "session-123");
+        // 前缀 bump 即域分隔:相同事实在 v1/v2 方案下得到不同 digest。
+        assert_ne!(v1.as_str(), v2);
+        assert!(v1.as_str().starts_with("ses_v1_"));
+        assert!(v2.starts_with("ses_v2_"));
+    }
+
+    #[test]
+    fn v2_scoped_wire_hides_namespace_and_native_id() {
+        let wire = session_v2_wire(
+            "claude-code",
+            "claude-code:c:/profiles/one/.claude",
+            "session-123",
+        );
+        // 与 v1 契约一致:无反向派生路径——wire 不携带 provider、命名空间
+        // 或 native id 的任何可恢复成分。
+        assert!(!wire.contains("claude-code"));
+        assert!(!wire.contains("profiles"));
+        assert!(!wire.contains("session-123"));
+    }
+
+    #[test]
+    fn v2_scoped_wire_roundtrip_preserves_value() {
+        let wire = session_v2_wire("claude-code", "claude-code:c:/profiles/one/.claude", "s");
+        let parsed = session_v2_from_wire(&wire).unwrap();
+        // wire 自描述:前缀恢复 kind 版本,值原样保留(catalog 查找键不漂移)。
+        assert_eq!(format!("{SESSION_V2_PREFIX}{parsed}"), wire);
+        assert_eq!(parsed.len(), DIGEST_HEX_LEN);
+        // 裸前缀不合法——与 v1 的 from_wire 判定一致。
+        assert!(session_v2_from_wire("ses_v2_").is_none());
+    }
+
+    #[test]
+    fn namespace_key_windows_case_variants_collapse() {
+        let key = namespace_key(
+            "C:/profiles/one/.claude/projects/a.jsonl",
+            "claude-code",
+            true,
+        );
+        // 同一安装的 case/分隔符变体 → 同一 key(NTFS 大小写不敏感)。
+        assert_eq!(
+            key,
+            namespace_key(
+                "c:\\profiles\\one\\.claude\\projects\\a.jsonl",
+                "claude-code",
+                true
+            )
+        );
+        // 不同根 → 不同 key。
+        assert_ne!(
+            key,
+            namespace_key(
+                "D:/profiles/two/.claude/projects/a.jsonl",
+                "claude-code",
+                true
+            )
+        );
+        // provider marker 区分安装。
+        assert_ne!(
+            key,
+            namespace_key("C:/profiles/one/.codex/sessions/a.jsonl", "codex", true)
+        );
+        assert_eq!(key, "claude-code:c:/profiles/one/.claude");
+    }
+
+    #[test]
+    fn namespace_key_is_deterministic_per_platform_flag() {
+        let path = "C:/profiles/one/.claude/projects/a.jsonl";
+        assert_eq!(
+            namespace_key(path, "claude-code", true),
+            namespace_key(path, "claude-code", true)
+        );
+        // 非 Windows 保留原拼写,分隔符仍归一。
+        assert_eq!(
+            namespace_key(path, "claude-code", false),
+            "claude-code:C:/profiles/one/.claude"
+        );
+    }
+
+    #[test]
+    fn namespace_key_fallback_uses_parent_directory_boundary() {
+        // 不在已知数据根下的源:以共同父目录为未知安装边界
+        // (与组合根规则一致)。
+        assert_eq!(
+            namespace_key("C:/fixtures/head.jsonl", "synthetic", false),
+            "synthetic:C:/fixtures"
+        );
+    }
+
+    #[test]
+    fn alias_resolution_is_deterministic_and_total() {
+        let old = "ses_v1_legacy";
+        let new = "ses_v2_00000000000000000000000000000000";
+        let now = 1_000;
+
+        // 无别名行 → 旧 id 保持有效(共存)。
+        assert_eq!(
+            resolve_legacy(old, &[], now),
+            LegacyResolution::KeepLegacy(old.into())
+        );
+        // 单一未过期行 → 重写目标,且重复解析一致(确定性)。
+        let rows = [AliasRow {
+            new_id: new.into(),
+            expires_at_ms: now + 500,
+        }];
+        assert_eq!(
+            resolve_legacy(old, &rows, now),
+            LegacyResolution::Rewritten(new.into())
+        );
+        assert_eq!(
+            resolve_legacy(old, &rows, now),
+            resolve_legacy(old, &rows, now)
+        );
+        // 同一目标的重复行 → 去重后仍唯一,不误判冲突。
+        let dupes = [
+            AliasRow {
+                new_id: new.into(),
+                expires_at_ms: now + 500,
+            },
+            AliasRow {
+                new_id: new.into(),
+                expires_at_ms: now + 900,
+            },
+        ];
+        assert_eq!(
+            resolve_legacy(old, &dupes, now),
+            LegacyResolution::Rewritten(new.into())
+        );
+    }
+
+    #[test]
+    fn alias_resolution_ttl_boundary_is_half_open() {
+        let old = "ses_v1_legacy";
+        let new = "ses_v2_00000000000000000000000000000000";
+        let rows = [AliasRow {
+            new_id: new.into(),
+            expires_at_ms: 1_000,
+        }];
+        // 恰在过期时刻 → 已过期(半开区间)→ 回退旧 id。
+        assert_eq!(
+            resolve_legacy(old, &rows, 1_000),
+            LegacyResolution::KeepLegacy(old.into())
+        );
+        assert_eq!(
+            resolve_legacy(old, &rows, 999),
+            LegacyResolution::Rewritten(new.into())
+        );
+    }
+
+    #[test]
+    fn alias_resolution_identity_marker_means_not_rewritten() {
+        // 设计契约:不可解析根(legacy 绝对路径)保持 ses_v1_*,写 identity
+        // 行(old→old)+ 短 TTL 作为"待重写"标记。
+        let old = "ses_v1_legacy";
+        let rows = [AliasRow {
+            new_id: old.into(),
+            expires_at_ms: 1_000,
+        }];
+        assert_eq!(
+            resolve_legacy(old, &rows, 900),
+            LegacyResolution::KeepLegacy(old.into())
+        );
+    }
+
+    #[test]
+    fn alias_resolution_conflicting_targets_fail_closed() {
+        // 多-ID 分裂:旧 id 解析到多个不同 v2 目标 → Conflict,绝不按路径/
+        // 顺序/值猜选,不披露冲突值。
+        let old = "ses_v1_legacy";
+        let rows = [
+            AliasRow {
+                new_id: "ses_v2_00000000000000000000000000000000".into(),
+                expires_at_ms: 2_000,
+            },
+            AliasRow {
+                new_id: "ses_v2_11111111111111111111111111111111".into(),
+                expires_at_ms: 2_000,
+            },
+        ];
+        assert_eq!(
+            resolve_legacy(old, &rows, 1_000),
+            LegacyResolution::Conflict
+        );
+        // 其中一个过期 → 只剩一个 live 目标 → 不再冲突(过期行先滤除)。
+        let one_expired = [
+            AliasRow {
+                new_id: "ses_v2_00000000000000000000000000000000".into(),
+                expires_at_ms: 900,
+            },
+            AliasRow {
+                new_id: "ses_v2_11111111111111111111111111111111".into(),
+                expires_at_ms: 2_000,
+            },
+        ];
+        assert_eq!(
+            resolve_legacy(old, &one_expired, 1_000),
+            LegacyResolution::Rewritten("ses_v2_11111111111111111111111111111111".into())
+        );
+    }
+
+    #[test]
+    fn alias_mapping_is_one_directional_by_design() {
+        // 可逆性仅存在于 wire round-trip;alias 有意单向(old→new):新 id 是
+        // digest,不可能恢复旧 native id。
+        let old = "ses_v1_legacy-session";
+        let new = session_v2_wire(
+            "claude-code",
+            "claude-code:c:/profiles/one/.claude",
+            "legacy-session",
+        );
+        let rows = [AliasRow {
+            new_id: new.clone(),
+            expires_at_ms: 2_000,
+        }];
+        assert_eq!(
+            resolve_legacy(old, &rows, 1_000),
+            LegacyResolution::Rewritten(new.clone())
+        );
+        assert!(!new.contains("legacy"));
+    }
+
+    #[test]
+    fn placement_rederivation_after_session_rewrite_is_deterministic() {
+        // 计划关键发现:PlacementId 哈希会话 wire,会话 id 从 ses_v1_ 改写为
+        // ses_v2_ 后,每个 placement id 都必须机械重派生。重派生是
+        // (session, document, message, ordinal) 的纯函数——确定性。
+        let document = StableId::native(IdKind::Document, "document");
+        let message = StableId::native(IdKind::Message, "message");
+        let v1 = StableId::native(IdKind::Session, "legacy-session");
+        let v2 = session_v2_wire(
+            "claude-code",
+            "claude-code:c:/profiles/one/.claude",
+            "legacy-session",
+        );
+        let v2_id = StableId {
+            kind: IdKind::Session,
+            stability: Stability::Native,
+            value: v2,
+        };
+
+        let before = PlacementId::derive(&v1, &document, &message, 3);
+        let after = PlacementId::derive(&v2_id, &document, &message, 3);
+        assert_ne!(before, after);
+        assert_eq!(after, PlacementId::derive(&v2_id, &document, &message, 3));
+    }
 }
