@@ -365,7 +365,7 @@ fn handle_key(mut model: Model, key: KeyInput) -> (Model, Option<Effect>) {
                     };
                     (model, Some(effect))
                 }
-                _ => (model, None)
+                _ => (model, None),
             },
             // Re-run current query with cycled facets from Results.
             KeyInput::Char('m') => {
