@@ -162,6 +162,66 @@ message / 231 session,**七条全 PASS**,harness 退出 0,报告仅含聚合数�
 真实样本验证过的只有 Claude Code 和 Codex(owner 本机语料)。其余 12 个
 provider 只有合成 fixture,格式来自同类项目的格式证据,**未经真实数据验证**。
 
+#### 1.8.1 真实样本获取现状(已实测,推翻两个 deferred 前提)
+
+**头号发现:两个"拿不到样本"的 provider 本机就有真实 transcript。**
+`deferred-deepseek-zcode.md` 的判定建立在 "`~/.deepseek` 不存在 /
+`~/.zcode` 不存在" 上,两个前提都已过时:
+
+- **`~/.zcode/cli/db/db.sqlite` 存在**(ZCode 3.7.7 装在 `C:\apps\ZCode`,
+  目录建于 2026-08-16)。1 个真实 session / 7 消息 / 22 parts,
+  另有 `~/.zcode/cli/rollout/model-io-sess_<id>.jsonl`。
+- **DeepSeek Harness 已装**,包名 `@deepseek-ai/dsh` 0.1.0-rc.6(全局 npm,
+  `dsh` 在 PATH 上)。它的 home 是 **`~/.dsh` 而不是 `~/.deepseek`** ——
+  这就是之前扫描漏掉的原因。
+
+**⚠️ 已确认的真实 bug:zcode 的 CLI DB 是 opencode schema 的 fork。**
+拿 opencode adapter 的三条 SQL(`provider-opencode/src/lib.rs:133,151,171`)
+对 zcode 的 `db.sqlite` 临时副本执行,**三条全部成功**(1 session /
+6 text parts / 7 messages,角色正确)。列差异:zcode 的 session 多出
+`task_type`/`title_source`/`trace_id`/`title_message_id`/`time_title_updated`,
+少了 opencode 的 token/cost 列;message/part 只多一个 `sequence`。
+→ **`opencode/sqlite-v1` 的 probe 会自信地把 zcode DB 认成 opencode**
+(真实 `AmbiguousVariant` 缺陷),同时这也是最便宜的 zcode adapter 起点。
+
+**Tier A — 已在磁盘上,0 分钟(实测计数)**
+
+| Provider | 真实产物 | 路径 |
+|---|---|---|
+| claude-code | **1,856** 个 `.jsonl`,24 个项目目录 | `~/.claude/projects/<enc>/<sessionId>.jsonl` |
+| codex | **148** 个 rollout | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` |
+| antigravity | **40** 个 transcript(53 brain 目录) | `~/.gemini/antigravity-cli/brain/<uuid>/.system_generated/logs/transcript.jsonl` |
+| pi | **7** 个 `.jsonl` | `~/.pi/agent/sessions/--C--Users-<user>--/<ts>_<uuid>.jsonl` |
+| opencode | `opencode.db` 1.7 MB:10 session / 261 msg / 886 part | `~/.local/share/opencode/` |
+| **zcode** | `db.sqlite` + `model-io-*.jsonl` | `~/.zcode/cli/db/`、`~/.zcode/cli/rollout/` |
+
+**Tier B — 本周可自建**
+
+| Provider | 工时 | 关键事实 |
+|---|---|---|
+| **deepseek-harness** | **5 分钟,零成本,不需要有效 key** | 默认产物是 zstd 压缩的 `session.jsonl.zstd`(不可按行读),用 patch overlay 强制 raw JSONL:`- id: session-persistence-jsonl / config: {root, compression: none, packChunks: false}`,然后 `$env:DSH_HOME=...; dsh --profile headless --patch raw.yml "reply ok"`。**认证失败(exit 1)但日志仍完整写出** —— 实测拿到 19 行。权威类型联合已在本机:`dsh-session/lib/types/types.d.ts:223-452`(`SessionEventMap`,每事件带 `seq`/`time`/`data`),header 形状 `dsh-session-persistence-jsonl/lib/types/format.d.ts:24-35`,root 解析 `dsh-home-paths/lib/index.js:73`(configured > `$DSH_HOME` > `~/.dsh`)。**不需要猜格式。** |
+| qoder | 15 分钟 | `npm i -g @qoder-ai/qodercli`(1.1.25,2026-08-18),Node ≥20 ✓。落 `~/.qoder/projects/<project>/*.jsonl` + `state.json`;`QODER_CONFIG_DIR` 可覆盖 |
+| tencent-codebuddy | 15 分钟 | `npm i -g @tencent-ai/codebuddy-code`(2.137.1,bin `codebuddy`/`cbc`)。落 `~/.codebuddy/projects/**/*.jsonl`。本机 `~/.codebuddy` 只有 skills/plugins/rules,CLI 从未跑过 |
+| kimi-code | 15 分钟 | `winget install MoonshotAI.KimiCodeCLI`(0.36.1)或 `npm i -g @moonshot-ai/kimi-code`(0.37.0,MIT),Node ≥22.19 ✓。落 `~/.kimi-code/sessions/wd_<hash>/<id>/agents/main/wire.jsonl` + `session_index.jsonl` + `state.json` |
+| aider | 15 分钟 | `uv tool install aider-chat`(0.86.2,需 Python <3.13 ≥3.10,本机 3.10.11 ✓)。**不要用 pip** —— 本机 pip 25.1.1 的 `--dry-run` 会 JSON 解码崩溃。**`.aider.chat.history.md` 写在项目 cwd 而不是 home** —— 这就是之前只扫 home 找不到的原因。用 `--model deepseek/deepseek-chat` 只花几分钱 |
+| cline | 30 分钟 | VS Code 1.131.0 已装且 `code` 在 PATH,`saoudrizwan.gallery.vsassets.io` 直连 200 → `code --install-extension saoudrizwan.claude-dev` 可用。落 `%APPDATA%\Code\User\globalStorage\saoudrizwan.claude-dev\tasks\<taskId>\api_conversation_history.json`(+ `ui_messages.json`/`task_metadata.json`/`context_history.json`) |
+| openclaw | 30-45 分钟 | `openclaw` 2026.7.1-2 MIT,但 `engines.node` 要 ≥24.15.0,**本机 24.14.1 差一个 patch**。`nvm` 已装但 `nvm list available` 直连 nodejs.org 失败;`cdn.npmmirror.com/binaries/node/index.json` 是 200 → 设 `NVM_NODEJS_ORG_MIRROR` 后装 24.15.x。cc-switch 里已有两个 openclaw provider profile(DeepSeek Chat、MiniMax2.7),BYO key 已解决。落 `~/.openclaw/agents/<agent>/sessions/*.jsonl` |
+
+**Tier C — 现实拿不到(2 个)**
+
+- **grok-build**:`@xai-official/grok` 1.0.5 Apache-2.0 能装,但网络上
+  `x.ai` 直连 403、`api.x.ai` 直连不可达 / 经代理 401(说明活着)。
+  需要 xAI 账号 + 额度,这是国内的硬门槛。
+- **cursor**:下载 CDN 直连和经代理都 403,需付费订阅。**而且声明的
+  `cursor/vscdb-chat-v1` variant 针对的是旧 VS Code KV 形状**
+  (`workbench.panel.aichat.view.aichat.chatdata`、`aiService.prompts`),
+  当前 Cursor CLI 写的是
+  `~/.cursor/projects/{workspaceSlug}/agent-transcripts/{sessionId}/{sessionId}.jsonl`。
+  建议诚实标注"declared but unverified" + 注明该 variant 是**历史格式** ——
+  这是站得住脚且真实的。
+  ⚠️ `npm i cursor-agent` **不是 Cursor**,是 `zalab-inc/cursor_agent`
+  一个无关的任务序列工具,别装错。
+
 ### 1.9 外部阻塞项
 
 | 项 | 状态 | 影响 |
@@ -476,6 +536,20 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   在仓库外或 gitignored 路径下建 `evidence-input/real-samples/<provider>/`,
   写一份 `README`(**不进仓库**)说明:样本永不 `git add`、永不上传、
   只用于本地定位。`.gitignore` 加规则确保误 add 会被拦。
+  ⚠️ **第三方公开仓库里的真实 transcript 也放这里**,不进仓库:
+  它们含提交者的 prompt、文件路径、用户名,偶尔有近似凭据的输出。
+  按只读第三方 PII 处理 —— 仅用于验证 probe/parse 行为,
+  **永不提交、永不再分发、永不在文档或 commit message 里引用内容**。
+  无 license 的仓库不授予任何再分发权;AGPL-3.0 的更会让派生提交物
+  变成许可问题。这与现有 `docs/security/FIXTURE-REDACTION-POLICY.md`
+  的"合成优先、禁止真实 transcript"一致。
+  已知可用的公开真实样本(仅供本地核验):
+  `thetom42/stock-portfolio`(~103 个 Cline task,**无 license**)、
+  `TimeWarpEngineering/timewarp-simple-icons`(CC0)、
+  `unmodeled-tyler/aider-ollama`(MIT)、`MarioPadilla/claude-vault`(无 license)。
+  注:`rollout-*.jsonl` 按文件名搜索**零命中**,
+  `parentUuid isSidechain sessionId` 也**零命中** ——
+  真实 claude/codex transcript 基本没人公开提交。
   **验收**:`git status` 在放入样本后仍干净;`git check-ignore` 确认命中。
 
 - [ ] **M1-2 冻结真实语料快照(D7)**
@@ -484,16 +558,26 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   (不进仓库)。后续所有真实回归跑这一份。
   **验收**:清单可复算;`real_data_regression.py` 能指向该快照运行。
 
-- [ ] **M1-3 样本采集执行(D21)**
-  按调研产出的获取路径,逐个 provider 拿真实 transcript。优先级:
-  1. Claude Code、Codex — 已有(owner 本机)
-  2. 国内可及且易得的:kimi-code(Moonshot)、qoder(阿里)、
-     tencent-codebuddy(腾讯)—— 这三家国内注册付费最顺
-  3. 开源 / BYO key 可自建的:aider、cline、opencode
-  4. 其余按调研判定
-  每个 provider 只需**一次约 5 分钟的真实会话**即可产出格式样本 ——
-  模型质量无关,只要磁盘格式真实。可用 Ollama / DeepSeek API / Moonshot API
-  等便宜后端。
+- [ ] **M1-3 样本采集执行(D21)—— 已有实测路径,见 §1.8.1**
+  按 §1.8.1 的 Tier 分级逐个执行。**建议顺序(每步都已实测可行)**:
+  1. **今天 15 分钟**:用有效 DeepSeek key 重跑 dsh raw-JSONL 配方,
+     拿到含 `assistant/message` / `tool/call` / `tool/result` 的完整一轮 →
+     直接写 `deepseek-harness/session-jsonl-v0` adapter
+     (类型联合已在本机 `types.d.ts`,**不需要猜**)
+  2. **今天 30 分钟**:promote zcode。从 opencode adapter 起步,
+     按 zcode 独有列(`session.task_type`/`trace_id`、`message.sequence`)
+     判别,**同时收紧 opencode 的 probe 让它拒绝 zcode**(见 M1-9)。
+     root:`~/.zcode/cli/db/db.sqlite`
+  3. **第 2 天 45 分钟**:kimi-code + qoder + codebuddy 连着做
+     (三家国内直连,各一次登录)。**趁 ground truth 在眼前时顺手修
+     qoder 路径漂移**(见 M1-10)
+  4. **第 3 天**:aider(注意在 **cwd** 不在 home)和 cline。
+     锁 variant 前先对照 `deja-vu` 的 cline legacy-vs-modern 两种布局
+  5. **第 4 天**:openclaw(先升 node 到 24.15+)
+  6. **然后决策**:hermes 是新增 variant 还是撤回声明(见 M1-11);
+     grok-build / cursor 记为诚实未验证
+  **本周内无论做什么都改变不了 grok-build 和 cursor** —— 那需要
+  xAI / Cursor 的付费通道。
   **验收**:每个采集到的 provider 在 §7 记录"已采集 + 落点 + 采集方式"。
 
 - [ ] **M1-4 逐 provider 解析无损验证(D9)**
@@ -507,6 +591,18 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   按真实样本观察到的**形状**手写一份合成 fixture(虚构项目代号、假 UUID、
   占位路径),配 `PROVENANCE.md` 说明它模仿的真实结构与固定种子/BLAKE3 哈希。
   用 insta 快照(D13)固定归一化结果。
+  **格式证据的最佳来源(全部宽松许可,可放心参考形状)**:
+  `vshulcz/deja-vu`(MIT,644★)是最全的 registry —— `fixtures/registry/`
+  下有 aider/antigravity/claude-code/cline/codex/copilot/cursor/gemini/
+  goose/grok/hermes/kimi/openclaw/opencode/pi/qwen/roo/zed,
+  且含 **cline 的 legacy 与 modern 两套布局**、grok 的
+  `summary.json` + `updates.jsonl`、openclaw 的
+  `.jsonl` + `.checkpoint.<uuid>.jsonl` + `sessions.json`、
+  hermes/opencode/zed 的 `.sql`。
+  另有 `eric-tramel/moraine`(Apache-2.0,110★,含 kimi 子 agent、
+  hermes trajectory、cursor `state-vscdb-kv.jsonl`)、
+  `letta-ai/trajectory`(Apache-2.0,227★)、`rjx18/codor`(MIT,271★)、
+  `GliteTech/glite-english-audit`(Apache-2.0,每场景一份 `opencode.db.sql`)。
   **验收**:golden 测试进 `cargo test --workspace`;真实样本不进仓库。
 
 - [ ] **M1-6 解析容错改造(D11)**
@@ -528,6 +624,45 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   `PROVIDER-MATURITY-MATRIX.md:63` 那句自相矛盾(说"仅 claude-code/codex 注册"
   又说"antigravity/opencode 已加入")必须改。
   **验收**:三处(代码、矩阵、SKILL.md)一致。
+
+- [ ] **M1-9 修 opencode↔zcode probe 冲突(真实 `AmbiguousVariant` 缺陷)**
+  实测:opencode adapter 的三条 SQL 对 zcode 的 `db.sqlite` **全部成功**,
+  所以 `opencode/sqlite-v1` 会把 zcode DB 认成 opencode。
+  按 zcode 独有列判别:`session.task_type`/`title_source`/`trace_id`/
+  `title_message_id`/`time_title_updated`、`message.sequence`;
+  zcode 少了 opencode 的 token/cost 列。
+  **收紧 opencode 的 probe 让它显式拒绝 zcode**,并新增 zcode adapter。
+  **验收**:两个真实 DB 各被正确识别;probe 冲突有回归测试。
+
+- [ ] **M1-10 修 qoder 路径三方不一致**
+  adapter 与文档写 `~/.qoder/projects/<project>/transcript/*.jsonl`;
+  官方文档写 `~/.qoder/projects/<项目>/*.jsonl` + `state.json`
+  (**没有 `transcript/` 这一段**);而本机装的 Qoder IDE 1.106.3 实际写
+  `~/.qoder/cache/projects/<project>-<hash>/conversation-history/<id>.txt` ——
+  实测是**纯文本不是 JSONL**(空行、`--- Request: <uuid> ---`、`user:`、
+  `<communication>…</communication>`、`<user_query>…</user_query>`)。
+  AgentRecall 声称那个路径是 `*.jsonl`,本机是 `.txt`。**三方分歧。**
+  M1-3 第 3 步拿到 ground truth 时一并修。
+  **验收**:路径与格式与真实观察一致;CLI 与 IDE 两条路径都被记录。
+
+- [ ] **M1-11 hermes 声明的格式已停用(需决策)**
+  上游文档明确:`~/.hermes/state.db`(SQLite + FTS5,WAL)是权威格式,
+  **"replaces the earlier per-session JSONL file approach"**;
+  遗留在 `~/.hermes/sessions/` 的 `.jsonl` **"no longer written or read"**。
+  AgentRecall 也指向 `state.db`。而本项目 adapter 解析的是
+  `~/.hermes/sessions/session_<id>.json`。
+  → **生成一个真实 hermes session 会产出 adapter 读不了的文件。**
+  本机 `~/.hermes` 只有 `config.yaml`,无 `state.db`。
+  **决策**:新增 `hermes/state-db-v1` variant,还是撤回 hermes 声明。
+  **验收**:声明与上游现实一致。
+
+- [ ] **M1-12 kimi wire.jsonl 未处理的记录类型**
+  `deja-vu`(MIT,644★)的 kimi fixture 覆盖 14 条记录 / 6 种类型
+  (`metadata`、`config.update`、`turn.prompt`、`context.append_message`、
+  `context.append_loop_event`、`usage.record`),是本项目 golden fixture
+  6 行的**严格超集** —— `usage.record`、`turn.prompt`、`metadata`、
+  `config.update` 是未处理类型,值得补。
+  **验收**:补齐后 golden fixture 覆盖全部 6 种类型。
 
 ---
 
@@ -1007,9 +1142,12 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
 
 ## 6. 待补充(调研 agent 回报后填这里)
 
-- [ ] **provider 真实样本获取路径表** — 16 个 provider 的
-  "自己生成/花钱买/拿不到"判定 + 逐个操作步骤 + 工时估算。
-  填入后 M1-3 才能执行。
+- [x] **provider 真实样本获取路径表** — 已回报并落地为 §1.8.1 与
+  M1-3/M1-9/M1-10/M1-11/M1-12。**头号发现:两个 deferred provider
+  本机就有真实 transcript**(`~/.zcode/cli/db/db.sqlite` 存在;
+  DeepSeek Harness 装成 `@deepseek-ai/dsh`,home 是 `~/.dsh` 不是
+  `~/.deepseek` —— 之前的扫描找错地方了)。
+  12 个可一小时内自建,2 个(grok-build、cursor)现实拿不到。
 - [x] **CI 方案结论** — 已回报并落地为 D22-D25 与 M2C-1..5。
   根因不是封号也不是中国网络:私有仓库 2,000 min/月 配额被 macOS 的
   10 倍倍率烧穿(两天 7,397 计费分钟,超 3.7 倍)。
@@ -1027,7 +1165,8 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
 
 | 日期 | 任务 | 结论 | commit |
 |---|---|---|---|
-| 2026-08-18 | CI 调研 | 根因查实:不是封号/中国网络,是私有仓库 2000 min/月 配额被 macOS 10x 倍率烧穿(两天 7397 计费分钟)。public 仓库 runner 免费无限 → 转公开本身即解法。多账号与借用第三方 CI 均否决(ToS + 供应链风险 + 零收益) | — |
+| 2026-08-18 | provider 样本调研 | 推翻两个 deferred 前提:zcode 与 deepseek-harness 本机都有真实 transcript(dsh 的 home 是 `~/.dsh` 不是 `~/.deepseek`)。发现 opencode probe 会误认 zcode DB(真实 AmbiguousVariant)、qoder 路径三方不一致、hermes 声明的格式已被上游停用。12 个可一小时内自建,grok-build/cursor 拿不到 | — |
+| 2026-08-18 | CI 调研 | 根因查实:不是封号/中国网络,是私有仓库 2000 min/月 配额被 macOS 10x 倍率烧穿(两天 7397 计费分钟)。public 仓库 runner 免费无限 → 转公开本身即解法。多账号与借用第三方 CI 均否决(ToS + 供应链风险 + 零收益) | `f4df823` |
 | 2026-08-18 | 文档/UX 审计 | 用真实二进制实测发现 11 条首次运行 P0/P1 功能缺陷(落为 M2P)+ 11 条文档缺口(落为 M4);最严重:human search 输出的 session id 喂给 context 会被拒、读命令打错路径静默建空库 | `eeea337` |
 | 2026-08-18 | 规划 | 本文件建立;owner 拷问确认 D1-D21 共 21 条决策 | `af26bb6` |
 | 2026-08-18 | 发布后审计 | 发现内部过程泄漏(5 CRITICAL + 11 HIGH)与 3 处许可违规,已修;仓库转回 PRIVATE | `ff0838a` |
