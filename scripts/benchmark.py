@@ -21,14 +21,17 @@ from pathlib import Path
 
 
 def run_asg(asg_bin: str, data_root: str, args: list[str]) -> tuple[int, str, str]:
-    """Run asg with given args, return (exit_code, stdout, stderr)."""
-    env = os.environ.copy()
-    env["ASG_DATA_ROOT"] = data_root
+    """Run asg with given args, return (exit_code, stdout, stderr).
+
+    The CLI contract puts global flags before the command name: --db and
+    --output are prefixed here, subcommand flags stay in `args`. The SQLite
+    store lives at ``<data_root>/catalog.db``.
+    """
+    db = str(Path(data_root) / "catalog.db")
     result = subprocess.run(
-        [asg_bin] + args,
+        [asg_bin, "--db", db, "--output", "json", *args],
         capture_output=True,
         text=True,
-        env=env,
         timeout=120,
     )
     return result.returncode, result.stdout, result.stderr
@@ -37,7 +40,7 @@ def run_asg(asg_bin: str, data_root: str, args: list[str]) -> tuple[int, str, st
 def benchmark_discovery(asg_bin: str, data_root: str) -> dict:
     """Measure discovery coverage: sync --discover reports sources found."""
     start = time.perf_counter()
-    code, stdout, stderr = run_asg(asg_bin, data_root, ["sync", "--discover", "--output", "json"])
+    code, stdout, stderr = run_asg(asg_bin, data_root, ["sync", "--discover"])
     elapsed_ms = (time.perf_counter() - start) * 1000
 
     if code != 0:
@@ -74,7 +77,7 @@ def benchmark_search_latency(asg_bin: str, data_root: str, queries: list[str]) -
     for query in queries:
         start = time.perf_counter()
         code, stdout, _ = run_asg(
-            asg_bin, data_root, ["search", query, "--output", "json", "--max-items", "20"]
+            asg_bin, data_root, ["search", query, "--max-items", "20"]
         )
         elapsed_ms = (time.perf_counter() - start) * 1000
 
