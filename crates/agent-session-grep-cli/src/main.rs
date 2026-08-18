@@ -2637,8 +2637,11 @@ fn build_embeddings(store: &SqliteStore) -> Result<(serde_json::Value, Vec<Strin
 
     enum ActiveModel {
         Bigram(BigramHashModel),
+        // Boxed: the loaded BERT model is far larger than BigramHashModel, and
+        // the enum only lives for the duration of this rebuild (clippy
+        // large_enum_variant). Semantics unchanged.
         #[cfg(feature = "semantic-candle")]
-        Candle(agent_session_grep_application::candle_embedding::CandleE5Model),
+        Candle(Box<agent_session_grep_application::candle_embedding::CandleE5Model>),
     }
 
     impl ActiveModel {
@@ -2708,7 +2711,7 @@ fn build_embeddings(store: &SqliteStore) -> Result<(serde_json::Value, Vec<Strin
                 match agent_session_grep_application::candle_embedding::CandleE5Model::load_from_dir(
                     &dir,
                 ) {
-                    Ok(m) => ActiveModel::Candle(m),
+                    Ok(m) => ActiveModel::Candle(Box::new(m)),
                     Err(_) => ActiveModel::Bigram(BigramHashModel::new()),
                 }
             } else {
