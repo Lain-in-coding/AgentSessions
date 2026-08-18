@@ -587,6 +587,29 @@ def run_performance_gate(args: argparse.Namespace) -> Path:
                 "mode": "lexical",
                 "process_model": "one mcp process for the whole sequence, handshake paid once",
                 "harness": "scripts/evidence/semantic_mcp_latency.py::measure_tool_calls",
+                # Stated on the metric itself, not only in limitations: the
+                # threshold's wording says "encoder resident", and a reader
+                # checking this one entry must be able to see what was actually
+                # loaded in the process that served these calls.
+                "encoder_resident": False,
+                "binary_vector_backend": vectorizer["backend"],
+                "binary_vector_model_id": vectorizer["model_id"],
+                "binary_has_real_embedding_model": vectorizer["is_real_embedding_model"],
+                "threshold_scope_note": (
+                    "this metric times a default lexical tools/call, which loads no "
+                    "encoder at all, against a store with no vector index yet. The 50 ms "
+                    "threshold was stated for an encoder-resident process, so a pass here "
+                    "means the resident-process call path is fast at this corpus size, not "
+                    "that a semantic call with a real embedding model meets 50 ms. "
+                    + (
+                        f"The measured binary's vector backend is "
+                        f"{vectorizer['backend']!r}, not a real embedding model, so the "
+                        f"encoder-resident condition is not reproducible with it at all."
+                        if not vectorizer["is_real_embedding_model"]
+                        else "The measured binary does carry a real embedding model; see "
+                        "mcp_semantic_call_latency_p95_ms for the encoder-resident figure."
+                    )
+                ),
             },
         ),
         performance_metric(
@@ -600,6 +623,9 @@ def run_performance_gate(args: argparse.Namespace) -> Path:
             detail={
                 "p50_ms": mcp_semantic_p50,
                 "mode": "semantic",
+                "encoder_resident": vectorizer["is_real_embedding_model"],
+                "binary_vector_backend": vectorizer["backend"],
+                "binary_vector_model_id": vectorizer["model_id"],
                 "vectorizer": vectorizer,
                 "harness": "scripts/evidence/semantic_mcp_latency.py::measure_tool_calls",
             },
@@ -812,6 +838,18 @@ def validate_performance_manifest(path: Path) -> dict[str, Any]:
             raise ValueError(f"{name}: must record what one sample is")
         if not entry.get("action"):
             raise ValueError(f"{name}: must name the action measured")
+        # Both MCP metrics carry a threshold whose wording names a condition
+        # ("encoder resident") that a default build cannot satisfy. Each must
+        # state on its own entry what was loaded, so reading one metric is
+        # enough to know how narrow its number is.
+        if name.startswith("mcp_"):
+            detail = entry.get("detail")
+            if not isinstance(detail, dict):
+                raise ValueError(f"{name}: must carry a detail block")
+            if not isinstance(detail.get("encoder_resident"), bool):
+                raise ValueError(f"{name}: must state whether an encoder was resident")
+            if not detail.get("binary_vector_backend"):
+                raise ValueError(f"{name}: must name the binary's vector backend")
         if name in PERFORMANCE_INFORMATIONAL_METRICS:
             if entry.get("threshold") is not None or entry.get("pass") is not None:
                 raise ValueError(

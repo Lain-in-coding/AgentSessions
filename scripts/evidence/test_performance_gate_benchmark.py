@@ -66,6 +66,11 @@ def passing_metrics(at_threshold_scale: bool = True) -> list[dict]:
     reason = None if at_threshold_scale else "below the scale the thresholds are stated at"
     messages = None if at_threshold_scale else 6_000
     reference = reference_block(at_threshold_scale, messages)
+    mcp_detail = {
+        "encoder_resident": False,
+        "binary_vector_backend": PERF.FALLBACK_BACKEND,
+        "binary_vector_model_id": "bigram-hash-v1",
+    }
     values = {
         "initial_index_throughput_mib_s": 9.0,
         "noop_sync_latency_ms": 500.0,
@@ -83,6 +88,7 @@ def passing_metrics(at_threshold_scale: bool = True) -> list[dict]:
             sample_unit="sample",
             state=state,
             reason=reason,
+            detail=dict(mcp_detail) if name.startswith("mcp_") else None,
         )
         for name, value in values.items()
     ]
@@ -95,6 +101,7 @@ def passing_metrics(at_threshold_scale: bool = True) -> list[dict]:
             corpus=reference,
             sample_count=10,
             sample_unit="sample",
+            detail=dict(mcp_detail) if name.startswith("mcp_") else None,
         )
         for name in PERF.PERFORMANCE_INFORMATIONAL_METRICS
     )
@@ -375,6 +382,26 @@ class ValidatorTests(unittest.TestCase):
         manifest["gate"] = {"pass": True, "failures": [], "deferred": []}
         with self.assertRaises(ValueError):
             self.validate(manifest)
+
+    def test_rejects_an_mcp_metric_that_hides_which_backend_was_resident(self) -> None:
+        # The 50 ms MCP threshold is worded "encoder resident". A reader checking
+        # that one entry must not have to cross-reference limitations to learn
+        # the number describes a narrower condition.
+        for field in ("encoder_resident", "binary_vector_backend"):
+            metrics = passing_metrics()
+            for entry in metrics:
+                if entry["name"] == "mcp_single_call_latency_p95_ms":
+                    del entry["detail"][field]
+            with self.assertRaises(ValueError, msg=f"missing {field} was accepted"):
+                self.validate(manifest_with(metrics))
+
+    def test_rejects_an_mcp_metric_with_no_detail_block(self) -> None:
+        metrics = passing_metrics()
+        for entry in metrics:
+            if entry["name"] == "mcp_semantic_call_latency_p95_ms":
+                entry.pop("detail", None)
+        with self.assertRaises(ValueError):
+            self.validate(manifest_with(metrics))
 
 
 class QuerySetTests(unittest.TestCase):
