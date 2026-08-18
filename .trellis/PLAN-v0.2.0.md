@@ -877,18 +877,41 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
 
 - [ ] **M2P-12 `--since`/`--until` 静默丢弃无时间戳 provider(接近正确性 bug)**
   时间过滤下推是 `asg_instant_sort_key(...) >= ?`,而 **NULL 对任何比较都失败**
-  (`adapters-sqlite/src/lib.rs:6395-6405`,注释在 `:6360-6361`)。
-  无条件 emit `timestamp: None` 的 provider:**codex**(`provider-codex/src/lib.rs:715`)、
-  grok(`:364`)、kimi(`:238`)、aider(`:159`)、opencode(`:217`);
-  cline 把数字时间戳转成空串(`provider-cline/src/lib.rs:181-185`),也解析成 NULL。
-  → **用户跑 `--since 1w`,Codex 全部历史无声消失。**
-  help 文本(`main.rs:988-989`)承诺时间过滤且无任何限定说明。
-  同一原因导致 human search 表格的日期列对 Codex 永远是 `—`
-  (`latest_activity_ymd_for_sessions`,`adapters-sqlite/src/lib.rs:6808-6843`)。
+  (`adapters-sqlite/src/lib.rs:6395-6405`)。
   **静默给错答案比报错更糟,这违反本项目自己的原则。**
-  **最低诚实修法**:`warnings` 里写明"N 条消息因缺时间戳被排除";
-  **真修法**:为 codex/grok/kimi/opencode/cline 提取时间戳。
-  **验收**:时间过滤要么覆盖全部 provider,要么明确告知被排除的数量。
+
+  ⚠️ **2026-08-19 调研推翻了原本的"直接传播时间戳"方案。逐 provider 结论:**
+
+  | provider | 格式里有逐消息时间戳吗 | 结论 |
+  |---|---|---|
+  | **codex** | 有 envelope `timestamp`,**但它是 per-occurrence 的重放写入时间** | **不要传播**。resume 会把复制的前缀用重放时刻重新盖章(原作于 02:08 的消息在续接文件里盖成 03:03:50)。传播 = 另一个方向的静默错误,**而且会让多文件 ingest 硬失败**:同一 msg id 在两个文件里带不同 timestamp,`merge_message_payloads` 判冲突 → exit 6 → **旗舰 provider 的历史变成不可 ingest**。另有 e2e `compact_relative_duration_uses_application_clock` 断言了当前的 NULL 排除行为(CLI 层测试,provider agent 改不了)。→ 保持 None,在 `known_limitations` 里诚实写明"envelope 时间是重放写入时刻,不作为稳定消息时间传播",并记录它对时间过滤的影响 |
+  | **opencode** | 有 `message.time_created`(epoch millis,本机真实库已验证) | **可安全传播**。它用真实 `msg_id` 做 native id,跨文件不碰撞 → 无 merge 冲突。需 epoch→RFC3339 转换(`parse_search_instant` 只认带时区的 RFC3339)。golden fixture 的 `time_created` 是 1/2/3/4 占位值,应重生成为真实量级 epoch |
+  | **grok-build** | 有,每行 RFC3339 字符串 | 可传播(取该消息首个 chunk 的时间,是真实创作时刻不是臆造)。**但被下面的碰撞问题阻塞**。另有latent bug:`UpdateRecord.timestamp` 声明为 `Option<String>`,真实数据若是数字会导致整行反序列化失败被跳过 → 应改 `Option<Value>` 兼容 |
+  | **kimi-code** | 有,记录级 `time`(epoch millis) | 同上,被碰撞阻塞 |
+  | **cline** | 有,记录级 `timestamp`(字符串或 epoch) | 同上。现有代码把数字时间戳转成**空字符串**(`provider-cline/src/lib.rs:181-185`),这是明确的 bug |
+  | **aider** | **确实没有**(只有 run 级 header 时间) | 不传播;在 `known_limitations` 补一条"无逐消息时间戳" |
+
+  **依赖**:grok/kimi/cline 必须先做 M2P-14(合成 id 碰撞),否则传播时间戳会把
+  一个静默丢数据的 bug 变成整轮 sync 硬失败。
+
+- [ ] **M2P-14 合成消息 id 跨文档碰撞 → 静默丢数据(新发现,独立于时间戳)**
+  **这是比时间戳更严重的缺陷,而且此刻正在发生。**
+  cline / grok-build / kimi-code / aider(可能还有 hermes/pi/qoder/openclaw/
+  codebuddy)emit 形如 `cline-msg-{seq}` 的**按序号合成 id**。序号是文档内计数,
+  所以**任意两个文件的第 0 条消息都拿到同一个 id**。
+  **已实测**:两个互不相关的 cline task 文件各含一条消息,都得到
+  `cline-msg-0`;sync 报告"新增 2 条消息",但**第二条被静默丢弃**,
+  搜索搜不到。`merge_message_payloads` 在 text 差异时保留较长的那条,
+  等长时保留先到的 —— 另一条无声消失。
+  **修法**:CLI 已经有正确路径 —— `main.rs:3317` 在 `native_id` 为空时
+  按 `[provider, variant, document_id, seq]` 派生**文档作用域**的 id
+  (`Stability::Unstable`)。所以这些 provider 应该 **emit 空 native_id**,
+  让 CLI 派生,而不是自己造一个会碰撞的。
+  副作用:存储 id 从 `msg_v1_cline-msg-0` 变成 `msg_v1_<hex>`;
+  同内容重复 sync 仍幂等(document_id 是内容指纹)。
+  ⚠️ 落地前先 grep 非 provider crate 是否有测试断言这些合成 id
+  (CLI e2e 若断言了,provider agent 改不了那些测试 → 需要单独一轮)。
+  **验收**:两个不同文件的同序号消息都能被搜到;有回归测试。
 
 - [x] **M2P-13 `aider` 的 `tool_activity: Partial` 是假声明** — 已完成
   `c1356cb`(声明)+ `2fc1d3e`(两份 ledger)。
