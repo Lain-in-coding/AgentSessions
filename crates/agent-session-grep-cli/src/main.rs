@@ -156,9 +156,22 @@ fn main() {
 /// 人类模式的错误渲染：报错行（保留稳定 code 前缀）+ 一行白话"下一步"指引
 /// （error catalog 的 `operator_action` 面向新手落地）。robot/json 模式保持
 /// 稳定 envelope，不受影响。
+///
+/// 消息自己已经给出可执行的下一步时不再追加通用指引：`operator_action` 是逐
+/// code 的**通用**兜底，遇到更具体的场景就会说错话。库不存在时 `not_found`
+/// 的通用指引是"确认实体 ID 是否正确（运行 list 可浏览可用实体）"——既答错了
+/// 问题（缺的是库不是 id），又推荐了一条同样需要库的命令。
 fn render_human_error(err: &ProtocolError) {
     eprintln!("error [{}]: {}", err.code.as_str(), err.message);
-    eprintln!("下一步：{}", err.code.operator_action());
+    if !message_states_next_step(&err.message) {
+        eprintln!("下一步：{}", err.code.operator_action());
+    }
+}
+
+/// 错误消息是否已自带可执行的下一步命令。判据是消息里出现了本二进制的调用
+/// 形态——只有构造方明确写了完整命令时才成立，不做模糊猜测。
+fn message_states_next_step(message: &str) -> bool {
+    message.contains("asg ") || message.contains("agent-session-grep ")
 }
 
 /// Convert provider parse diagnostics into bounded public warnings. Diagnostics
