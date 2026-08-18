@@ -918,6 +918,34 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   或在 help、README 与 Web 下拉框三处同时明写限制。
   **验收**:能按任一已实现 provider 过滤,或限制在三处一致地被文档化。
 
+  **2026-08-19 实测复现 + 修法已定(读代码确认,可直接照做)**:
+  ```
+  sync 一条 codebuddy 记录 → committed: 1
+  search "marker"                        → hits=1   ← 数据在库里
+  search "marker" --provider tencent-codebuddy
+    → invalid_request: unknown provider: tencent-codebuddy
+      (expected claude|claude-code|codex)          ← 按自己的 provider 过滤被拒
+  ```
+  **关键发现:enum 是多余的抽象,不需要列 16 个变体。** SQL 下推处
+  (`adapters-sqlite/src/lib.rs:6276-6282` 与 `push_provider_predicate`)
+  只用 `provider.as_str()` 拼 `json_extract(payload,'$.provider') IN (?,?)`
+  —— **存储层根本不关心有几个变体,它只要字符串**。全仓库对
+  `SearchProvider::Claude|Codex` 的引用只有两处解析点
+  (`main.rs:2630-2631`、`mcp.rs` 的 enum)其余全是测试。
+  → 正确修法是把 `SearchProvider` 从**封闭 enum** 换成**对
+  `ProviderCapabilityMatrix::current()` 校验过的字符串**:合法性由单一真源
+  (矩阵)判定,不再由类型系统里一份手抄的副本判定。这同时消掉了"加 provider
+  要改 enum"这条隐性维护债。
+  建议只允许 `search: Native` 的 provider(14 个已实现全是 Native;两个
+  deferred 是 Unknown,应拒绝)—— 让能力矩阵真正成为过滤器的权威。
+  **Web/serve 是同一根因不需单独修**:`serve.rs:796,826` 把 `provider` 查询参数
+  原样转成 `--provider` 交给同一个解析函数,所以 CLI 修好后 HTTP 400 自动消失。
+  下拉框(`web/index.html:166-176`)本来就从 `/api/providers` 拉全部 16 行,
+  修好后它才第一次名副其实。
+  ⚠️ **落地时机**:`ports/src/lib.rs` 当前被 M2P-5/7 的 agent 持有
+  (它在同文件加 `read_source_head` / `SourceFormatFamily`),等其合并后再动,
+  否则必冲突。
+
 - [ ] **M2P-12 `--since`/`--until` 静默丢弃无时间戳 provider(接近正确性 bug)**
   时间过滤下推是 `asg_instant_sort_key(...) >= ?`,而 **NULL 对任何比较都失败**
   (`adapters-sqlite/src/lib.rs:6395-6405`)。
