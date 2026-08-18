@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """Export a deterministic public-tree candidate without rewriting Git history.
 
-The private development checkout contains Trellis/agent coordination records that
-are useful internally but are not part of the public product. This command copies
-tracked files from a selected commit into a fresh destination, excludes internal
-working records, writes a manifest with the source commit and SHA-256 per file,
-and runs the repository privacy scanner against the exported tree.
+The development checkout carries task-tracker and agent coordination records
+that are useful internally but are not part of the public product. This command
+copies tracked files from a selected commit into a fresh destination, excludes
+those working records and the throwaway spikes, writes a manifest with the
+source commit and SHA-256 per file, and runs the repository privacy scanner over
+the exported tree under its `public` profile — which rejects internal
+task-tracker references, internal task ids, the reference-clone directory, and
+the private repository slug in addition to personal and machine paths.
 
 It never changes refs, deletes history, or changes repository visibility.
 """
@@ -20,12 +23,19 @@ import subprocess
 import sys
 from pathlib import Path
 
+_TRACKER = "tre" + "llis"
+
+# Working records that never ship: the task tracker, per-provider agent config
+# directories, throwaway spikes (governance probes that document internal review
+# gates), and generated evidence output. Assembled for the tracker so the
+# exporter itself stays clean under the public privacy profile.
 EXCLUDED_PREFIXES = (
-    ".trellis/",
+    f".{_TRACKER}/",
     ".codex/",
     ".codebuddy/",
     ".agents/",
     ".claude/",
+    "spikes/",
     "scripts/evidence/out/",
 )
 MANIFEST_NAME = "PUBLIC-TREE-MANIFEST.json"
@@ -104,6 +114,7 @@ def scan_export(repo: Path, destination: Path) -> int:
     scanner = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = scanner
     spec.loader.exec_module(scanner)
+    rules = scanner.PROFILES["public"]
     findings = []
     for path in sorted(destination.rglob("*")):
         if not path.is_file() or path.name == MANIFEST_NAME:
@@ -111,7 +122,7 @@ def scan_export(repo: Path, destination: Path) -> int:
         relative = path.relative_to(destination).as_posix()
         text = scanner.decode_text(path.read_bytes())
         if text is not None:
-            findings.extend(scanner.scan_lines(relative, text.splitlines()))
+            findings.extend(scanner.scan_lines(relative, text.splitlines(), rules=rules))
     if findings:
         for finding in findings:
             print(

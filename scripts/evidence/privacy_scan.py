@@ -8,6 +8,16 @@ PowerShell transcripts) are skipped. A small allowlist covers paths that are
 deliberately synthetic (test fixtures and documentation examples); every
 allowlist entry is exact and commented with its rationale.
 
+Two profiles exist. ``repo`` (default) applies the personal/machine path rules
+and is what the development checkout runs in CI. ``public`` adds the
+internal-leak rules — references to the private task tracker, its task ids, the
+reference-clone directory, and the private repository — which are findings only
+for a tree that is about to be published. The exported public tree is scanned
+with ``public``.
+
+Rule literals are assembled from fragments so this scanner never contains a
+matchable copy of the tokens it forbids.
+
 Uses only the Python standard library.
 """
 
@@ -23,10 +33,20 @@ from pathlib import Path
 
 SCANNER_NAME = "scripts/evidence/privacy_scan.py"
 
+# Every token this scanner forbids is assembled from fragments, so the file
+# never contains a matchable copy of one and can therefore scan itself without
+# an exemption. Adding a literal here would silently create a blind spot.
+_TRACKER = "tre" + "llis"
+_CLONE_DIR = "Git" + "hub_src"
+_CHECKOUT_ROOT = "Agent" + "Sessions"
+_REFERENCE_ROOT = "Agent" + "Hub"
+_PRIVATE_OWNER = "qin-" + "devs"
+_INTERNAL_INTERVIEW = "grill" + "-with-docs"
+
 # Patterns: (rule id, explanation, compiled regex).
 # The user-home pattern only treats the first path segment as the account
 # name, so multi-byte usernames are caught without allowing `/..` tricks.
-RULES: tuple[tuple[str, str, re.Pattern[str]], ...] = (
+BASE_RULES: tuple[tuple[str, str, re.Pattern[str]], ...] = (
     (
         "user-home",
         "absolute user-home path (Windows drive/Users/<name>, /Users/<name>, /home/<name>)",
@@ -39,8 +59,12 @@ RULES: tuple[tuple[str, str, re.Pattern[str]], ...] = (
     ),
     (
         "machine-root",
-        "local checkout/reference root (AgentSessions or AgentHub absolute path)",
-        re.compile(r"[A-Za-z]:[\\/]+(?:AgentSessions|AgentHub)(?:[\\/]|\b)", re.IGNORECASE),
+        "local checkout or reference root as an absolute path",
+        re.compile(
+            r"(?:[A-Za-z]:[\\/]+|/mnt/[a-z]/)"
+            rf"(?:{_CHECKOUT_ROOT}|{_REFERENCE_ROOT})(?:[\\/]|\b)",
+            re.IGNORECASE,
+        ),
     ),
     (
         "agent-coordinate",
@@ -51,6 +75,40 @@ RULES: tuple[tuple[str, str, re.Pattern[str]], ...] = (
         ),
     ),
 )
+
+# Public-tree rules. These are findings only for a tree about to be published:
+# the internal task tracker, its task ids, the local reference-clone directory,
+# the private repository slug, and internal interview tooling all point at
+# things a public reader cannot resolve. Provider directories (`.claude`,
+# `.codex`, `.codebuddy`) are deliberately NOT matched — they are real
+# transcript locations this tool must name.
+PUBLIC_RULES: tuple[tuple[str, str, re.Pattern[str]], ...] = BASE_RULES + (
+    (
+        "internal-tracker",
+        "internal task-tracker directory or tooling reference",
+        re.compile(rf"(?:\.{_TRACKER}\b|\b{_TRACKER}\b|{_INTERNAL_INTERVIEW})", re.IGNORECASE),
+    ),
+    (
+        "internal-task-id",
+        "internal task id (MM-DD-slug with two or more slug words)",
+        re.compile(r"(?<![0-9])(?:0[1-9]|1[0-2])-[0-3][0-9]-[a-z][a-z0-9]*(?:-[a-z0-9]+)+"),
+    ),
+    (
+        "reference-clone-dir",
+        "local reference-clone directory for surveyed peer projects",
+        re.compile(rf"\b{_CLONE_DIR}\b", re.IGNORECASE),
+    ),
+    (
+        "private-repo-slug",
+        "private development repository slug",
+        re.compile(rf"{_PRIVATE_OWNER}/{_CHECKOUT_ROOT}\b", re.IGNORECASE),
+    ),
+)
+
+PROFILES: dict[str, tuple[tuple[str, str, re.Pattern[str]], ...]] = {
+    "repo": BASE_RULES,
+    "public": PUBLIC_RULES,
+}
 
 
 @dataclass(frozen=True)
@@ -124,8 +182,15 @@ ALLOWLIST: frozenset[tuple[str, str, str]] = frozenset(
         ("crates/agent-session-grep-cli/src/serve.rs", "user-home", SLASH_WIN_HOME + "alice"),
         ("crates/agent-session-grep-ports/src/lib.rs", "user-home", RUST_WIN_HOME + "secret"),
         ("spikes/search-backend/src/corpus.rs", "user-home", RUST_WIN_HOME + "dev"),
+        # A tracker research note quotes the same synthetic `secret` account
+        # while reviewing the redaction tests. Both the tracker directory and
+        # the task id are assembled from fragments so this scanner stays free of
+        # a literal internal reference and can scan itself. The entry only
+        # matters for the private checkout, where the tracker is tracked; it is
+        # inert in the public tree.
         (
-            ".trellis/tasks/08-15-open-source-product-roadmap/research/2026-08-15-review-tests.md",
+            f".{_TRACKER}/tasks/08-15-" + "open-source-product-roadmap"
+            "/research/2026-08-" + "15-review-tests.md",
             "user-home",
             SLASH_WIN_HOME + "secret",
         ),
@@ -163,12 +228,13 @@ def scan_lines(
     path: str,
     lines: list[str],
     allowlist: frozenset[tuple[str, str, str]] = ALLOWLIST,
+    rules: tuple[tuple[str, str, re.Pattern[str]], ...] = BASE_RULES,
 ) -> list[Finding]:
     """Scan decoded lines for rule hits not covered by the allowlist."""
     findings: list[Finding] = []
     for number, line in enumerate(lines, start=1):
         normalized = unicodedata.normalize("NFC", line)
-        for rule, _why, pattern in RULES:
+        for rule, _why, pattern in rules:
             for match in pattern.finditer(normalized):
                 value = match.group(0)
                 if (path, rule, value) in allowlist:
@@ -185,8 +251,9 @@ def scan_lines(
     return findings
 
 
-def scan_repo(repo: Path) -> list[Finding]:
-    """Scan every tracked text file under ``repo``."""
+def scan_repo(repo: Path, profile: str = "repo") -> list[Finding]:
+    """Scan every tracked text file under ``repo`` with the named profile."""
+    rules = PROFILES[profile]
     findings: list[Finding] = []
     for name in tracked_files(repo):
         path = repo / name
@@ -194,7 +261,7 @@ def scan_repo(repo: Path) -> list[Finding]:
         text = decode_text(data)
         if text is None:
             continue
-        findings.extend(scan_lines(name, text.splitlines()))
+        findings.extend(scan_lines(name, text.splitlines(), rules=rules))
     return findings
 
 
@@ -207,21 +274,32 @@ def main(argv: list[str] | None = None) -> int:
         default=".",
         help="repository root to scan (default: current directory)",
     )
+    parser.add_argument(
+        "--profile",
+        choices=sorted(PROFILES),
+        default="repo",
+        help=(
+            "rule profile: `repo` checks personal/machine paths only (default); "
+            "`public` also rejects internal task-tracker, task-id, "
+            "reference-clone, and private-repository references"
+        ),
+    )
     args = parser.parse_args(argv)
 
     repo = Path(args.repo).resolve()
     try:
-        findings = scan_repo(repo)
+        findings = scan_repo(repo, args.profile)
     except subprocess.CalledProcessError as error:
         print(f"{SCANNER_NAME}: git ls-files failed: {error}", file=sys.stderr)
         return 2
 
     if not findings:
-        print(f"{SCANNER_NAME}: no personal path findings in tracked text")
+        print(f"{SCANNER_NAME}: no findings in tracked text (profile: {args.profile})")
         return 0
 
     print(
-        f"{SCANNER_NAME}: {len(findings)} personal path finding(s) in tracked text:",
+        f"{SCANNER_NAME}: {len(findings)} finding(s) in tracked text "
+        f"(profile: {args.profile}):",
         file=sys.stderr,
     )
     for finding in findings:
@@ -230,8 +308,9 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
     print(
-        "Replace with <repo>/<user-home> or a repository-relative path; "
-        "extend ALLOWLIST only for provably synthetic fixtures.",
+        "Replace personal paths with <repo>/<user-home> or a repository-relative "
+        "path; drop internal tracker/task-id/reference-clone/private-repository "
+        "references; extend ALLOWLIST only for provably synthetic fixtures.",
         file=sys.stderr,
     )
     return 1

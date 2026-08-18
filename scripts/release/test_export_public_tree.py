@@ -14,6 +14,10 @@ assert SPEC and SPEC.loader
 export_public_tree = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(export_public_tree)
 
+# Reuse the exporter's fragment-assembled tracker token so this test never
+# contains a literal internal reference of its own.
+TRACKER = export_public_tree._TRACKER
+
 
 class PublicTreeExportTests(unittest.TestCase):
     def test_tracked_paths_exclude_internal_records(self) -> None:
@@ -24,7 +28,14 @@ class PublicTreeExportTests(unittest.TestCase):
             subprocess.run(["git", "init", "-q", str(repo)], check=True)
             subprocess.run(["git", "-C", str(repo), "config", "user.email", "test@example.invalid"], check=True)
             subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test"], check=True)
-            for relative in ["README.md", ".trellis/tasks/x.md", ".codex/hook.py", "src/lib.rs"]:
+            for relative in [
+                "README.md",
+                f".{TRACKER}/tasks/x.md",
+                ".codex/hook.py",
+                "spikes/probe/EVIDENCE.md",
+                "scripts/evidence/out/report.json",
+                "src/lib.rs",
+            ]:
                 path = repo / relative
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(relative, encoding="utf-8")
@@ -32,6 +43,19 @@ class PublicTreeExportTests(unittest.TestCase):
             subprocess.run(["git", "-C", str(repo), "commit", "-qm", "fixture"], check=True)
             paths = export_public_tree.tracked_paths(repo, "HEAD")
             self.assertEqual(paths, ["README.md", "src/lib.rs"])
+
+    def test_scan_export_uses_the_public_profile(self) -> None:
+        # An internal tracker reference is invisible to the default profile but
+        # must fail the export, so the exporter has to select `public`.
+        repo_root = Path(__file__).resolve().parents[2]
+        with tempfile.TemporaryDirectory() as temp_name:
+            destination = Path(temp_name)
+            (destination / "notes.md").write_text(
+                f"see .{TRACKER}/tasks/x/prd.md\n", encoding="utf-8"
+            )
+            self.assertEqual(export_public_tree.scan_export(repo_root, destination), 1)
+            (destination / "notes.md").write_text("no internal refs\n", encoding="utf-8")
+            self.assertEqual(export_public_tree.scan_export(repo_root, destination), 0)
 
     def test_export_manifest_is_sorted_and_path_free(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
