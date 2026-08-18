@@ -816,7 +816,7 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   "索引为空 — 运行:asg --db &lt;path&gt; sync --discover"。
   **验收**:三条命令在空库上都给出该提示。
 
-- [ ] **M2P-5 一个坏 `.jsonl` 让整个 discover 退出 2**
+- [x] **M2P-5 一个坏 `.jsonl` 让整个 discover 退出 2**
   实测:放一个非法 jsonl 进 `~/.claude/projects/`,`sync --discover` 报
   `no provider recognized this source; ...not a SQLite database (missing
   magic header)` 并**整轮退出 2,零消息入库**。既泄漏 probe 内部细节,
@@ -837,7 +837,7 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   提示手动传什么文件),摘要改按 `committed` 分支。
   **验收**:human 输出能看出扫描覆盖面;no-op 重跑不谎报新增。
 
-- [ ] **M2P-7 discover 只认 `.jsonl` 扩展名 → 6 个已注册根里有的永远找不到**
+- [x] **M2P-7 discover 只认 `.jsonl` 扩展名 → 6 个已注册根里有的永远找不到**
   `discover_provider_sources`(`main.rs:3049-3051`)只收扩展名恰好是
   `jsonl` 的文件。实测:把真实 `opencode.db` 放到它注册的根
   `~/.local/share/opencode/`,得到 `{"complete":true,"found":0,"id":"opencode"}`
@@ -1696,6 +1696,7 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
 
 | 日期 | 任务 | 结论 | commit |
 |---|---|---|---|
+| 2026-08-19 | **M2P-5 + M2P-7 discover 宽容化与格式感知** | **M2P-5**:`--discover` 走的是用户没点名的目录,所以一个非 transcript 文件(编辑器备份、写一半的日志、别的工具的输出)就让整轮退出 2、零消息入库。现改为跳过并计数,与 D11 对损坏行的既有处理对齐;显式 `sync <file>` 仍然失败 —— 那是用户自己点的路径。误导性诊断另有根因:`last_probe_error` 报的是**最后一个** probe 的失败,而 registry 以 SQLite 的 Cursor adapter 结尾,于是每个不认识的文本文件都被怪成"缺 SQLite magic header";现按源自身的 format family 过滤 probe 失败。**M2P-7**:候选文件按 `.jsonl` 扩展名收,于是 opencode(根已注册、格式是 SQLite)永远 `found=0` 却报 `complete=true` —— 而 complete 正是 tombstone 差分的依据。现读 64 KiB 头按签名分类,只把源交给同族 adapter;实测 300 个垃圾文件 + 3 个真源 = 105 ms。**歧义的处置已明确决策**:`AmbiguousVariant` 也是跳过并计数而非致命,措辞单列 —— 拒绝猜测的原则不变,变的只是波及面;把用户真实的 pi/openclaw transcript 说成"不是可识别的 transcript"会把人送去查错误的问题。**我独立端到端复验四条**:1 好 + 2 垃圾 → 退出 0、好的那条可搜;歧义源 → 退出 0、`unrecognized=1`、warning 说"匹配了多个格式,跳过而非猜测,显式 sync 这个文件可看到哪些格式冲突";显式 sync 垃圾文件仍退出 2;错误消息里再无 SQLite 字样 | `cf7b48a` `e70426f` `6a1d83f` |
 | 2026-08-19 | **M2P-11 `index` 直写后门加门** | 先实测确认它**真的能用**:往库里写任意文本、`search` 立刻能搜到,而它就登在用户 `--help` 里 —— 等于邀请用户破坏自己的真实历史(写进去的东西无源文件、无 provenance,`index rebuild` 会忠实重投影)。现在需显式 `--force-dev`,拒绝时指向 `sync --discover`;三处 help(顶层 COMMANDS、`index --help`、模块头)全部撤下。15 个 e2e 测试用它造数据 —— 它们不是编码了错误行为(后门本就该留给测试),所以走一个新的 `seed()` 辅助函数集中补 flag,而不是把 flag 抄 15 遍。四个用例实测:无门拒绝且指向 sync / 顶层 help 无痕 / 子命令 help 无痕 / 带门仍可写且可搜 | `5a1d52e` |
 | 2026-08-19 | **M2-1 十万条确定性合成语料** | 发布门的每条性能阀值都写在 10 万条上,而树里最大语料只有 2000 条 —— 阀值 harness、增量同步、存储放大三项都无从测量。**语料不入库**(约 49 MB,可由生成器 + 种子完全重建),入库的是生成器 + 26 个常驻测试 + 冻结清单(CRLF 归一化树哈希 + 逐 provider 计数)。确定性来自逐 session 独立播种,所以一个 session 的字节不依赖语料规模或写入顺序。**我独立复算复验**:重新生成得 `65cc08e9…`,与冻结清单逐位一致;摄入 100,000 emitted / 0 skipped / 100,000 placements、catalog 110,000(10 万消息 + 5 千 session + 5 千 document,零去重塌陷)—— 这同时证明 M2P-14 的修复在 10 万条规模上成立。我自己也写了一版生成器,发现 agent 版本更完备(它刻意避开了 pi/qoder/codebuddy 的歧义陷阱,我撞上了才知道)后弃用自己的 | `4c46802`..`2892783` 共 5 个 |
 | 2026-08-19 | **M2P 首次运行:M2P-1/2/3/4/6/8 + M2P-15** | 用户头一分钟就会撞到的六条已修。**M2P-2 最重要**:读命令过去在 `--db` 打错时会**静默建一个 233 KB 的空库并报"无结果"** —— 打错一个字母得到"干净的无结果",毫无警告;现在报 `not_found` 且不留文件(实测确认)。M2P-3 存储路径改为 `--db` > `$ASG_DB` > `<data>/asg.db`,零配置可用。M2P-1 human 表格改渲染规范 `ses_v1_` id,并有测试**像用户那样**从表格里抓 id 再喂给 `context`。M2P-15(我自己发现并自己修的)`sync` 把未识别 flag 当路径,再拿 `source_io`「确认源文件路径存在且可读」怪路径 —— 路径明明存在可读;现在报 `invalid_request` 并回显该 flag,`-`(stdin 惯例)仍合法,真正缺文件仍报 `source_io`。**计划里"给 `source_io` 的 details 加路径"那条建议是错的,已否决**:`protocol.rs:253` 明确写了 SourceIo 细节被扣留正因为它可能含绝对 transcript 路径,加上去会违反代码自己在执行的隐私约束。顺带修了 `render_human_error` 无条件追加通用指引的问题 —— 库不存在时它会在正确的下一步命令后面再补一句"确认实体 ID 是否正确(运行 list 可浏览)",既答错问题又推荐一条同样需要库的命令 | `8d0d43b` `e801a59` `3d8cf91` `89a058c` `0dfaf19` `568472c` `4243f98` |
