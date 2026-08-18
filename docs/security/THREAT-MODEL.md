@@ -78,8 +78,9 @@
 
 ### 6.1 serve LAN 模式
 
-- **状态**：LAN 模式已实现为 `capability_not_supported`——`--lan` 直接拒绝（exit 7），
-  不做"看似可用实则危险"的静默降级。
+- **状态**：LAN 模式未实现——`--lan` 以 usage 错误拒绝（canonical `invalid_request`，
+  exit 2；消息显式点名 capability_not_supported），HTTP 层对任何变更请求（POST）
+  返回 501 `capability_not_supported`。两者都不做"看似可用实则危险"的静默降级。
 - **控制**：loopback-only 绑定（127.0.0.1）+ 每会话 CSPRNG token + Host/Origin
   fail-closed 校验 + GET-only（POST 变更 501）+ `frame-ancestors 'none'` CSP +
   常量时间 token 比较 + bounded worker pool/请求头/请求体。
