@@ -14,7 +14,7 @@
 > - preliminary_finding: 在 20k 合成文档 + backend-neutral analyzer 下，FTS5 与 Tantivy 的 recall@10 完全打平（均 1.000）；Tantivy 在索引体积（3.4MB vs 16.5MB）与查询延迟（max 0.56ms vs 7.1ms）上占优，但 FTS5 绝对延迟为毫秒级。该证据支持 **ADR-0001 当前 Proposed 的 FTS5 单存储默认**，但不构成跨平台或最终接受结论。详见 `EVIDENCE.md`。
 > - caveat: 本 spike 用独特 beacon 词，仅证明 analyzer 公平性与词法等价性，**未测排序质量差异**（需带噪声/竞争文档的分级 qrels）；还需按 `docs/product/SLI-AND-BENCHMARK-FORMAT.md` 在标准语料与全部正式 target 上复测。
 >
-> 本 Spike 是可丢弃探针，**不进入 `crates/` 生产源码树**，不形成正式 API/Crate/迁移承诺。是否归档由 R0 Architecture Review 决定；当前产出作为 ADR-0001 的证据输入。
+> 本 Spike 是可丢弃探针，**不进入 `crates/` 生产源码树**，不形成正式 API/Crate/迁移承诺。是否归档由 approver 决定；当前产出作为 ADR-0001 的证据输入。
 
 ---
 
@@ -102,4 +102,4 @@
   由 `src/main.rs` 驱动）；
 - `spikes/search-backend/EVIDENCE.md`：实测环境、§5 测量结果与硬门/评分讨论，
   以及本卡 §6 的 go/no-go 结论输入;
-- 将证据链接回 ADR-0001；状态变更由 R0 Architecture Review 记录。
+- 将证据链接回 ADR-0001；状态变更记录在 `docs/adr/ADR-0001-fulltext-search-engine.md` 的治理记录中。

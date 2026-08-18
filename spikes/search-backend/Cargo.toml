@@ -1,4 +1,4 @@
-# search-backend spike — 可丢弃探针，不进 crates/；归档时机由 R0 Architecture Review 决定
+# search-backend spike — 可丢弃探针，不进 crates/；归档时机由 approver 决定
 # 目的：为 ADR-0001 提供 FTS5 vs Tantivy 的对照证据
 [package]
 name = "search-backend-spike"

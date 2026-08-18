@@ -31,4 +31,4 @@
 ## Contract / decision evidence 与正式记录建议
 - `docs/operations/external-readiness-gate.md` 应继续引用本机已测的 checksum-after-sign、依赖审计与 SBOM 证据；
 - 签名/公证/多平台构建仍是 External Readiness Gate 的未决项，本 spike 不构成通过声明；
-- FTS5/Tantivy 供应链结果作为 ADR-0001 的证据输入，ADR 状态由 R0 Architecture Review 决定。
+- FTS5/Tantivy 供应链结果作为 ADR-0001 的证据输入，ADR 状态由其 approver 决定。

@@ -3,7 +3,7 @@
 > Spike Card: [SPIKE-CARD.md](./SPIKE-CARD.md)
 > 状态：**已完成 Windows x64 初步对照，作为 ADR-0001 证据输入**
 > 执行日期：2026-07-21
-> 探针性质：`spikes/` 下可丢弃代码，不进 `crates/`；归档时机由 R0 Architecture Review 决定
+> 探针性质：`spikes/` 下可丢弃代码，不进 `crates/`；归档时机由 approver 决定
 
 ---
 
@@ -76,13 +76,13 @@ ADR-0001 的当前决策是：只有 Tantivy 在关键检索质量、性能或�
 - recall 完全打平，Tantivy 未在本轮**检索质量**指标上越过 FTS5；
 - FTS5 的单存储一致性与 bundled 构建降低 generation 漂移和依赖风险。
 
-因此本证据支持 FTS5 默认，但 ADR-0001 仍是 Proposed，最终采信与状态变更由 R0 Architecture Review 决定。
+因此本证据支持 FTS5 默认，但 ADR-0001 仍是 Proposed，最终采信与状态变更由 ADR-0001 的 approver 决定。
 
 ---
 
 ## 5. 明确未决限制
 
-本 spike 是 **ADR-0001 的初步证据输入**，不等同跨平台验证或 R0 Architecture Review 接受。仍需补齐：
+本 spike 是 **ADR-0001 的初步证据输入**，不等同跨平台验证或 approver 接受。仍需补齐：
 
 1. **规模**：本测 20k 文档；`docs/product/SLI-AND-BENCHMARK-FORMAT.md` 定义的标准数据集为 100k session / 10M message / 50GB。大规模下 FTS5 的查询延迟和体积增长曲线未知。
 2. **跨平台**：本测仅 Windows x64。Linux x64、macOS x64/ARM64 尚未复测，不得据此宣称全部正式 target 通过。
