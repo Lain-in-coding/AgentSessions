@@ -55,7 +55,7 @@ impl ProviderAdapter for ClineAdapter {
             Some(1),
             &[
                 "no session id in the JSON array file; session_native_id is left unset",
-                "no byte spans (whole-file JSON array); native message ids are not preserved (synthetic cline-msg-{seq})",
+                "no byte spans (whole-file JSON array); the format carries no per-message native id, so message identity is reconstructed document-scoped by the ingestion layer (Unstable)",
             ],
         )
     }
@@ -186,7 +186,14 @@ impl ProviderAdapter for ClineAdapter {
 
             sink.emit_message(MessageEvent {
                 seq,
-                native_id: &format!("cline-msg-{seq}"),
+                // The Cline format carries no per-message native id. Emitting a
+                // synthetic `cline-msg-{seq}` would collide across documents,
+                // because seq restarts at 0 in every task file: the first message
+                // of every task would share one id and the storage merge would
+                // silently drop all but one payload. Emit an empty native_id so
+                // the ingestion layer derives a document-scoped id from
+                // [provider_id, variant, document_id, seq].
+                native_id: "",
                 parent_native_id: None,
                 role,
                 text: &text,
