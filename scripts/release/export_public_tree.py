@@ -26,16 +26,20 @@ from pathlib import Path
 _TRACKER = "tre" + "llis"
 
 # Working records that never ship: the task tracker, per-provider agent config
-# directories, throwaway spikes (governance probes that document internal review
-# gates), and generated evidence output. Assembled for the tracker so the
+# directories, and generated evidence output. Assembled for the tracker so the
 # exporter itself stays clean under the public privacy profile.
+#
+# `spikes/` deliberately DOES ship. The spike cards and EVIDENCE.md files are
+# the reproducible measurements that docs/adr and docs/architecture cite; a
+# reader evaluating those decisions needs them, and excluding the directory
+# would break 18 evidence links across the ADRs, the RFCs, the threat model,
+# and the evidence matrix.
 EXCLUDED_PREFIXES = (
     f".{_TRACKER}/",
     ".codex/",
     ".codebuddy/",
     ".agents/",
     ".claude/",
-    "spikes/",
     "scripts/evidence/out/",
 )
 MANIFEST_NAME = "PUBLIC-TREE-MANIFEST.json"

@@ -32,8 +32,8 @@ class PublicTreeExportTests(unittest.TestCase):
                 "README.md",
                 f".{TRACKER}/tasks/x.md",
                 ".codex/hook.py",
-                "spikes/probe/EVIDENCE.md",
                 "scripts/evidence/out/report.json",
+                "spikes/probe/EVIDENCE.md",
                 "src/lib.rs",
             ]:
                 path = repo / relative
@@ -42,7 +42,8 @@ class PublicTreeExportTests(unittest.TestCase):
             subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
             subprocess.run(["git", "-C", str(repo), "commit", "-qm", "fixture"], check=True)
             paths = export_public_tree.tracked_paths(repo, "HEAD")
-            self.assertEqual(paths, ["README.md", "src/lib.rs"])
+            # spikes/ ships: the ADRs and RFCs cite its EVIDENCE.md files.
+            self.assertEqual(paths, ["README.md", "spikes/probe/EVIDENCE.md", "src/lib.rs"])
 
     def test_scan_export_uses_the_public_profile(self) -> None:
         # An internal tracker reference is invisible to the default profile but
