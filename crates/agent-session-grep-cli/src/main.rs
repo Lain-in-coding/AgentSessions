@@ -2603,9 +2603,8 @@ fn search_filters_from_flags(
         filters
             .providers
             .push(canonical_search_provider(provider).ok_or_else(|| {
-                CliError::usage(format!(
-                    "unknown provider: {provider} (expected {PROVIDER_VALUE_HINT})"
-                ))
+                let hint = provider_value_hint();
+                CliError::usage(format!("unknown provider: {provider} (expected {hint})"))
             })?);
     }
     filters.since = parse_time_flag("--since", since, now_ms)?;
@@ -2614,7 +2613,15 @@ fn search_filters_from_flags(
 }
 
 /// Accepted `--provider` values, rendered in every provider usage error.
-const PROVIDER_VALUE_HINT: &str = "claude|claude-code|codex";
+///
+/// 从能力矩阵派生而非写死:写死的名单会在加 provider 时静默过期,而这条提示
+/// 恰恰是用户唯一能看到的合法取值来源。`claude` 是 `claude-code` 的历史别名,
+/// 单独列出。
+fn provider_value_hint() -> String {
+    let mut ids = SearchProvider::accepted_ids();
+    ids.sort();
+    format!("claude|{}", ids.join("|"))
+}
 
 /// Normalize one provider request value to [`SearchProvider`]; `None` = unknown.
 ///
@@ -2628,11 +2635,14 @@ const PROVIDER_VALUE_HINT: &str = "claude|claude-code|codex";
 /// loopback surface forbids. Unknown values stay fail-closed (usage error at
 /// the caller), never silently dropped.
 fn canonical_search_provider(provider: &str) -> Option<SearchProvider> {
-    match provider {
-        "claude" | "claude-code" => Some(SearchProvider::Claude),
-        "codex" => Some(SearchProvider::Codex),
-        _ => None,
-    }
+    // `claude` 是 `claude-code` 的历史别名,保留;其余一律按 canonical id 走
+    // 矩阵校验(合法性的真源是矩阵,不是这里的名单)。
+    let canonical = if provider == "claude" {
+        "claude-code"
+    } else {
+        provider
+    };
+    SearchProvider::parse(canonical)
 }
 
 /// 从 HookConfig 构建检索过滤（#8）：provider 白名单（空 = 全部）+ 时间衰减
@@ -2646,8 +2656,9 @@ fn hook_search_filters(config: &hooks::HookConfig, now_ms: i64) -> Result<Search
         filters
             .providers
             .push(canonical_search_provider(provider).ok_or_else(|| {
+                let hint = provider_value_hint();
                 CliError::usage(format!(
-                    "hook --provider: unknown provider {provider} (expected {PROVIDER_VALUE_HINT})"
+                    "hook --provider: unknown provider {provider} (expected {hint})"
                 ))
             })?);
     }
@@ -5908,7 +5919,7 @@ mod tests {
         let filters = hook_search_filters(&providers, 0).expect("providers valid");
         assert_eq!(
             filters.providers,
-            vec![SearchProvider::Claude, SearchProvider::Codex]
+            vec![SearchProvider::claude_code(), SearchProvider::codex()]
         );
         assert!(filters.since.is_none());
 
@@ -5919,7 +5930,7 @@ mod tests {
             ..Default::default()
         };
         let filters = hook_search_filters(&canonical, 0).expect("canonical id valid");
-        assert_eq!(filters.providers, vec![SearchProvider::Claude]);
+        assert_eq!(filters.providers, vec![SearchProvider::claude_code()]);
 
         // 未知 provider 是用法错误，不静默忽略（fail-closed）；错误信息与
         // search --provider 同风格回显取值（provider 值不是路径/secret）。

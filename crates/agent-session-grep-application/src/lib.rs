@@ -3633,7 +3633,7 @@ mod tests {
 
         let app = App::with_clock(FakeCatalog, PagedIndex { n: 5 }, clock_t0);
         let issued_filters = SearchFilters {
-            providers: vec![SearchProvider::Codex, SearchProvider::Claude],
+            providers: vec![SearchProvider::codex(), SearchProvider::claude_code()],
             since: Some(seconds_instant(1_000)),
             until: None,
         };
@@ -3643,9 +3643,9 @@ mod tests {
         );
         let normalized_equivalent = SearchFilters {
             providers: vec![
-                SearchProvider::Claude,
-                SearchProvider::Codex,
-                SearchProvider::Claude,
+                SearchProvider::claude_code(),
+                SearchProvider::codex(),
+                SearchProvider::claude_code(),
             ],
             since: Some(seconds_instant(1_000)),
             until: None,
@@ -3686,7 +3686,7 @@ mod tests {
                 2,
                 plain_next,
                 SearchFilters {
-                    providers: vec![SearchProvider::Claude],
+                    providers: vec![SearchProvider::claude_code()],
                     since: None,
                     until: None,
                 },

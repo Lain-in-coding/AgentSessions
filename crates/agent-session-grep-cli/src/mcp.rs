@@ -2126,9 +2126,9 @@ mod tests {
         assert_eq!(
             filters.providers,
             vec![
-                SearchProvider::Codex,
-                SearchProvider::Claude,
-                SearchProvider::Claude
+                SearchProvider::codex(),
+                SearchProvider::claude_code(),
+                SearchProvider::claude_code()
             ]
         );
         assert!(filters.since.is_some());

@@ -196,19 +196,68 @@ pub trait ContextGraphStore {
 }
 
 /// A provider whose authoritative source-document metadata may constrain search.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum SearchProvider {
-    Claude,
-    Codex,
-}
+///
+/// 合法性由**能力矩阵**判定，不由这里的变体列表判定。此前它是
+/// `enum { Claude, Codex }`——一份手抄的 provider 名单，于是 `--provider aider`
+/// 在 aider 的数据明明已入库且可被搜到时仍被拒绝，而 Web 下拉框（从矩阵拉全部
+/// 16 行）里有 13 个选项返回 HTTP 400。
+///
+/// 存储层从来只要字符串：SQL 下推是
+/// `json_extract(payload,'$.provider') IN (?,?)`，参数来自 [`Self::as_str`]，
+/// 它不关心有几个 provider。所以正确的真源是
+/// `ProviderCapabilityMatrix::current()`，而不是类型系统里的副本——那份副本
+/// 每加一个 provider 就要手工同步一次，且没有任何机制强制它同步。
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SearchProvider(String);
 
 impl SearchProvider {
+    /// 按 canonical provider id 构造，未通过矩阵校验则拒绝。
+    ///
+    /// 只接受 `search` 能力为 [`CapabilityLevel::Native`] 的 provider：过滤一个
+    /// 检索能力未评估的 provider 只能得到静默空结果，与 `--provider` 的语义
+    /// （"只看这个 provider 的历史"）不符。两个 deferred provider 的 `search`
+    /// 是 `Unknown`，因此被拒绝——这正是矩阵该起的作用。
+    pub fn parse(provider_id: &str) -> Option<Self> {
+        let matrix = capability::ProviderCapabilityMatrix::current();
+        matrix
+            .providers
+            .iter()
+            .find(|entry| {
+                entry.provider_id == provider_id
+                    && entry.search == capability::CapabilityLevel::Native
+            })
+            .map(|entry| Self(entry.provider_id.clone()))
+    }
+
+    /// 可被 `--provider` 接受的全部 canonical id，用于 help 与错误消息。
+    ///
+    /// 与 [`Self::parse`] 同一判据，因此两者不可能漂移。
+    pub fn accepted_ids() -> Vec<String> {
+        capability::ProviderCapabilityMatrix::current()
+            .providers
+            .into_iter()
+            .filter(|entry| entry.search == capability::CapabilityLevel::Native)
+            .map(|entry| entry.provider_id)
+            .collect()
+    }
+
     /// Canonical provider id stored in SourceDocument payloads.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Claude => "claude-code",
-            Self::Codex => "codex",
-        }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// `claude-code`,测试与 fixture 构造用。
+    ///
+    /// 这两个便捷构造子刻意只给最常用的两个 provider:它们是唯一有真实语料回归
+    /// 的两个,测试里出现频率远高于其他。任意 provider 走
+    /// [`Self::parse`]——那条路径才是被矩阵校验的那条。
+    pub fn claude_code() -> Self {
+        Self("claude-code".to_string())
+    }
+
+    /// `codex`,测试与 fixture 构造用。见 [`Self::claude_code`]。
+    pub fn codex() -> Self {
+        Self("codex".to_string())
     }
 }
 
@@ -1569,8 +1618,8 @@ mod tests {
 
     #[test]
     fn search_provider_maps_to_canonical_ids() {
-        assert_eq!(SearchProvider::Claude.as_str(), "claude-code");
-        assert_eq!(SearchProvider::Codex.as_str(), "codex");
+        assert_eq!(SearchProvider::claude_code().as_str(), "claude-code");
+        assert_eq!(SearchProvider::codex().as_str(), "codex");
     }
 
     #[test]
@@ -1645,7 +1694,7 @@ mod tests {
         assert!(SearchFilters::EMPTY.is_empty());
         assert!(SearchFilters::default().is_empty());
         let provider_only = SearchFilters {
-            providers: vec![SearchProvider::Claude],
+            providers: vec![SearchProvider::claude_code()],
             ..SearchFilters::default()
         };
         assert!(!provider_only.is_empty());

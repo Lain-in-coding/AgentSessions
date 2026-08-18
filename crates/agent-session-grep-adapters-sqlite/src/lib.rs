@@ -7147,7 +7147,9 @@ fn push_provider_predicate(
             clause.push(',');
         }
         clause.push('?');
-        params.push(Box::new(provider.as_str()));
+        // `as_str` 借用自 provider（不再是 `&'static str`），而参数要活到语句执行，
+        // 故在此拥有一份。
+        params.push(Box::new(provider.as_str().to_string()));
     }
     clause.push_str("))");
     sql.push_str(&clause);
@@ -7471,7 +7473,7 @@ mod filtered_query_tests {
     fn provider_filter_matches_document_provider_or() {
         let fixture = filter_fixture();
         let claude_only = SearchFilters {
-            providers: vec![SearchProvider::Claude],
+            providers: vec![SearchProvider::claude_code()],
             ..SearchFilters::default()
         };
         let mut hits = search_filtered(&fixture.store, "shared-token", &claude_only);
@@ -7486,7 +7488,7 @@ mod filtered_query_tests {
         // Multi-provider OR: both providers, and the null-timestamp row is
         // still included when no time dimension constrains it.
         let both = SearchFilters {
-            providers: vec![SearchProvider::Claude, SearchProvider::Codex],
+            providers: vec![SearchProvider::claude_code(), SearchProvider::codex()],
             ..SearchFilters::default()
         };
         let hits = search_filtered(&fixture.store, "shared-token", &both);
@@ -7600,7 +7602,7 @@ mod filtered_query_tests {
         let fixture = filter_fixture();
         let window = (Some(instant(1_785_196_800)), Some(instant(1_786_320_000)));
         let claude_only = SearchFilters {
-            providers: vec![SearchProvider::Claude],
+            providers: vec![SearchProvider::claude_code()],
             since: window.0,
             until: window.1,
         };
@@ -7609,7 +7611,7 @@ mod filtered_query_tests {
             0
         );
         let codex_only = SearchFilters {
-            providers: vec![SearchProvider::Codex],
+            providers: vec![SearchProvider::codex()],
             since: window.0,
             until: window.1,
         };
@@ -7658,7 +7660,7 @@ mod filtered_query_tests {
         assert_eq!(statements, 0, "no window must not query the database");
 
         let provider_only = SearchFilters {
-            providers: vec![SearchProvider::Codex],
+            providers: vec![SearchProvider::codex()],
             ..SearchFilters::default()
         };
         assert_eq!(
@@ -7671,7 +7673,7 @@ mod filtered_query_tests {
     fn provider_and_time_dimensions_are_anded() {
         let fixture = filter_fixture();
         let filters = SearchFilters {
-            providers: vec![SearchProvider::Codex],
+            providers: vec![SearchProvider::codex()],
             since: Some(instant(1_785_196_800)),
             until: Some(instant(1_786_320_000)),
         };
@@ -7683,7 +7685,7 @@ mod filtered_query_tests {
     fn zero_match_filters_return_clean_empty_page() {
         let fixture = filter_fixture();
         let no_provider_overlap = SearchFilters {
-            providers: vec![SearchProvider::Claude],
+            providers: vec![SearchProvider::claude_code()],
             since: Some(instant(1_786_320_000)), // late window: codex only
             until: None,
         };
@@ -7703,7 +7705,7 @@ mod filtered_query_tests {
         // filtering happens inside the single statement, before LIMIT.
         let fixture = filter_fixture();
         let filters = SearchFilters {
-            providers: vec![SearchProvider::Codex],
+            providers: vec![SearchProvider::codex()],
             ..SearchFilters::default()
         };
         let mut hits = Vec::new();
@@ -7744,7 +7746,7 @@ mod filtered_query_tests {
     fn filtered_query_preserves_score_order_and_scores() {
         let fixture = filter_fixture();
         let filters = SearchFilters {
-            providers: vec![SearchProvider::Codex],
+            providers: vec![SearchProvider::codex()],
             ..SearchFilters::default()
         };
         let hits = fixture
