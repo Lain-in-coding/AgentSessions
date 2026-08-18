@@ -407,6 +407,12 @@ def build_text(rng: random.Random, language: str, target: int, single_line: bool
     Fragments are appended whole, so the result never cuts a word or an
     identifier in half; the achieved length distribution is measured after
     generation rather than assumed from ``target``.
+
+    Chinese fragments run together the way Chinese punctuation allows, but an
+    interleaved latin snippet is space-separated on both sides: gluing
+    ``bytes`` to ``本地`` would hand the analyzer a token boundary real
+    transcripts do not have, and every downstream retrieval measurement would
+    inherit that artifact.
     """
     if language == "zh":
         bank, joiner = ZH_FRAGMENTS, ""
@@ -420,12 +426,14 @@ def build_text(rng: random.Random, language: str, target: int, single_line: bool
     length = 0
     while length < target:
         if language == "zh" and len(parts) % ZH_LATIN_EVERY == ZH_LATIN_EVERY - 1:
-            piece = rng.choice(ZH_LATIN_TOKENS)
+            piece = f" {rng.choice(ZH_LATIN_TOKENS)} "
         else:
             piece = rng.choice(bank)
         parts.append(piece)
         length += len(piece) + len(joiner)
     text = joiner.join(parts)
+    if language == "zh":
+        text = " ".join(text.split())
     if single_line:
         text = " ".join(text.split("\n"))
     return text

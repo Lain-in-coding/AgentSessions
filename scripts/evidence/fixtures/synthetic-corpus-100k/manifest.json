@@ -12,37 +12,37 @@
     "session_count": 5000,
     "message_count": 100000,
     "file_count": 5000,
-    "total_bytes": 51115978,
+    "total_bytes": 50920199,
     "providers": {
       "aider": {
         "sessions": 450,
         "messages": 9242,
-        "bytes": 2818544
+        "bytes": 2817943
       },
       "claude-code": {
         "sessions": 2000,
         "messages": 41185,
-        "bytes": 26046146
+        "bytes": 25875239
       },
       "cline": {
         "sessions": 450,
         "messages": 9004,
-        "bytes": 3418036
+        "bytes": 3432531
       },
       "codex": {
         "sessions": 1250,
         "messages": 24211,
-        "bytes": 12125071
+        "bytes": 12196067
       },
       "hermes": {
         "sessions": 425,
         "messages": 8250,
-        "bytes": 3372577
+        "bytes": 3235636
       },
       "kimi": {
         "sessions": 425,
         "messages": 8108,
-        "bytes": 3335604
+        "bytes": 3362783
       }
     },
     "session_messages": {
@@ -50,7 +50,7 @@
       "max": 95,
       "mean": 20.0
     },
-    "fixture_hash": "1ea91b034bda850028f2eb5ca0addca6d8e8f433752aebde10d74feb3b12922a",
+    "fixture_hash": "65cc08e90dbf7fd406c96ee51cb658d3c36a909ca5c229a308da0b58b4d8c457",
     "hash_algorithm": "sha256",
     "hash_normalization": "crlf_to_lf"
   },
@@ -163,21 +163,21 @@
     "message_text_chars": {
       "count": 100000,
       "min": 23,
-      "p10": 54,
+      "p10": 55,
       "p25": 66,
       "p50": 115,
-      "p75": 144,
+      "p75": 142,
       "p90": 327,
-      "p99": 2017,
+      "p99": 2034,
       "max": 7998,
-      "mean": 223.645
+      "mean": 223.296
     },
-    "cjk_char_ratio": 0.138959,
-    "total_text_chars": 22364549,
+    "cjk_char_ratio": 0.135837,
+    "total_text_chars": 22329604,
     "language_mix": {
-      "code": 20772,
-      "en": 35103,
-      "zh": 44125
+      "code": 20873,
+      "en": 34911,
+      "zh": 44216
     }
   }
 }
