@@ -189,9 +189,10 @@ Stated plainly, because it is easy to assume otherwise:
   and no Apple notarization ticket. Both are blocked on credentials this
   project does not have (`CB-SIGNING-001`, `CB-NOTARIZATION-001` in
   `core-beta-evidence-matrix.md`).
-- **Not published.** No release tag, no crates.io package, no Homebrew,
-  winget, or scoop manifest, no container image. Building from source is the
-  only supported path.
+- **No package-manager distribution.** The `0.1.0` release publishes source
+  only: no crates.io package, no Homebrew, winget, or scoop manifest, no
+  container image, no prebuilt binary attached to the release. Building from
+  source is the only supported path.
 - **Not clean-machine certified.** CI runs the installer scripts on
   GitHub-hosted runners whose images already ship a Rust toolchain. That is
   installer-script smoke evidence: the scripts run and the installed binary

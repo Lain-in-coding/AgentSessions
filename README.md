@@ -8,8 +8,12 @@ message graphs, then serves full-text retrieval, resume, and handoff through
 CLI, MCP, Robot, TUI, and loopback Web UI surfaces — all sharing one
 Application ADT.
 
-**Release status:** the first public version is planned as `0.1.0`, matching the
-Cargo workspace version. No release tag or published artifact exists yet.
+**Release status:** `0.1.0` is the first public release, matching the Cargo
+workspace version. Provider adapters are Experimental maturity and the optional
+semantic backend carries no quality claim — see
+[`docs/product/PROVIDER-MATURITY-MATRIX.md`](docs/product/PROVIDER-MATURITY-MATRIX.md).
+Release archives are built from source; no signed or notarized binaries are
+published yet.
 
 ## Why?
 

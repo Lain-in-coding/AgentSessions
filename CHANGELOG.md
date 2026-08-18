@@ -4,9 +4,9 @@ All notable changes to agent-session-grep are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.0] — 2026-08-18
 
-> Planned first public version: `0.1.0`. No tag or release has been published.
+First public release. Everything below shipped in `0.1.0`.
 
 ### Added
 
@@ -118,11 +118,12 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Redaction now covers secrets embedded inside prose (previously only
   whole-string secrets were matched).
 
-### Planned for 0.1.0
+### Release scope
 
-- First public release: CLI, Robot JSON protocol, MCP server, TUI, and Web UI
-  adapters sharing one Application ADT. Full cross-entry release rehearsal is
-  still required before publication.
+- CLI, Robot JSON protocol, MCP server, TUI, and Web UI adapters sharing one
+  Application ADT. The cross-entry consistency harness reports `consistent`
+  across all five; the three-platform clean-environment rehearsal is not
+  complete (macOS was not run).
 - Session search over the implemented provider set (lexical FTS5 plus ranked
   fuzzy-lexical retrieval), resume metadata extraction, and handoff packs.
 - Installer scripts for Windows (PowerShell) and Unix (Bash), release
