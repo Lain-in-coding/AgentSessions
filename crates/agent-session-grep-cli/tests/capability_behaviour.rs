@@ -222,27 +222,114 @@ fn behaviour_subjects_cover_every_implemented_provider() {
     );
 }
 
+/// Supplementary behavioural evidence for providers whose committed golden
+/// fixture contains no tool-call records at all, so the golden alone cannot
+/// witness a declared `tool_activity` capability.
+///
+/// This is **not** an escape hatch: the sample listed here must itself make the
+/// adapter emit at least one activity (asserted below), so a provider that
+/// genuinely extracts nothing — aider folds its blockquote tool output into
+/// assistant text — can never be laundered through this list. Its only effect
+/// is to name, in code, which golden fixtures still owe tool-call coverage.
+///
+/// `codex`: `provider-codex/tests/golden/basic.jsonl` has no
+/// `custom_tool_call` / `function_call_output` pair, so the pairing path
+/// (provider-codex/src/lib.rs `emit_paired_activity`) is never reached. The
+/// adapter's own unit tests do cover it; the golden fixture is the gap.
+fn supplementary_activity_sample(provider_id: &str) -> Option<&'static [u8]> {
+    match provider_id {
+        "codex" => Some(
+            concat!(
+                r#"{"timestamp":"2026-07-26T08:00:00.000Z","type":"session_meta","payload":{"session_id":"0198aaaa-bbbb-7ccc-8ddd-eeeeffff0002","cwd":"/workspace/fixture-project"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-07-26T08:00:01.000Z","type":"response_item","payload":{"type":"message","id":"msg-act-0001","role":"user","content":[{"type":"input_text","text":"run the tests"}]}}"#,
+                "\n",
+                r#"{"timestamp":"2026-07-26T08:00:02.000Z","type":"response_item","payload":{"type":"custom_tool_call","id":"call-act-0001","tool_call_id":"call-act-0001","name":"shell","arguments":"{\"command\":\"cargo test\"}"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-07-26T08:00:03.000Z","type":"response_item","payload":{"type":"function_call_output","id":"out-act-0001","call_id":"call-act-0001","output":"ok"}}"#,
+                "\n",
+            )
+            .as_bytes(),
+        ),
+        _ => None,
+    }
+}
+
 #[test]
 fn declared_tool_activity_matches_emitted_activities() {
-    // The assertion that catches a self-certifying matrix: a provider may only
-    // declare a tool_activity level other than Unsupported if parsing its
-    // golden fixture actually pushes at least one ToolActivityEvent into the
-    // sink. The converse holds too — declaring Unsupported while emitting
-    // activities is an equally real drift — so this is an if-and-only-if,
-    // matching the resume precedent in application/src/resume.rs.
+    // The assertion that catches a self-certifying matrix. Two directions:
+    //
+    // * declares Unsupported  => parsing must emit zero activities (a provider
+    //   quietly emitting while declaring nothing is real drift too);
+    // * declares anything else => the adapter must demonstrably emit at least
+    //   one ToolActivityEvent on its behavioural evidence — its golden fixture,
+    //   or the named supplementary sample when the golden carries no tool-call
+    //   records (see `supplementary_activity_sample`).
+    //
+    // Shaped after the resume precedent in application/src/resume.rs, which
+    // asserts resume == Derived iff the resume-command builder yields a command.
     for subject in golden_subjects() {
         let provider_id = subject.adapter.provider_id().to_string();
         let capability = declared(&provider_id);
-        let observed = observe(&subject);
+        let golden_activities = observe(&subject).activities;
 
-        let declares_activity = capability.tool_activity != CapabilityLevel::Unsupported;
-        let emits_activity = observed.activities > 0;
+        if capability.tool_activity == CapabilityLevel::Unsupported {
+            assert_eq!(
+                golden_activities, 0,
+                "provider {provider_id}: capability matrix declares tool_activity=Unsupported but \
+                 parsing its golden fixture emitted {golden_activities} tool activities — the \
+                 declaration understates the adapter."
+            );
+            continue;
+        }
+
+        let (source, evidence) = match supplementary_activity_sample(&provider_id) {
+            Some(sample) => (sample, "supplementary sample"),
+            None => (subject.fixture, "golden fixture"),
+        };
+        let mut sink = ObservingSink::default();
+        subject
+            .adapter
+            .parse(source, &mut sink)
+            .unwrap_or_else(|error| panic!("{provider_id}: {evidence} parse failed: {error:?}"));
+        assert!(
+            sink.activities > 0,
+            "provider {provider_id}: capability matrix declares tool_activity={:?} but parsing its \
+             {evidence} emitted zero tool activities. Either implement the extraction or downgrade \
+             the declaration to Unsupported — the matrix must not certify itself.",
+            capability.tool_activity
+        );
+    }
+}
+
+#[test]
+fn supplementary_activity_samples_are_all_still_needed() {
+    // Keep the supplementary list honest in both directions: an entry may only
+    // exist while the provider's golden fixture really emits nothing (otherwise
+    // the golden now covers tool calls and the entry is stale and should be
+    // deleted), and the entry must actually witness the capability.
+    for subject in golden_subjects() {
+        let provider_id = subject.adapter.provider_id().to_string();
+        let Some(sample) = supplementary_activity_sample(&provider_id) else {
+            continue;
+        };
         assert_eq!(
-            declares_activity, emits_activity,
-            "provider {provider_id}: capability matrix declares tool_activity={:?} but parsing \
-             its golden fixture emitted {} tool activities. Either implement the extraction or \
-             downgrade the declaration to Unsupported — the matrix must not certify itself.",
-            capability.tool_activity, observed.activities
+            observe(&subject).activities,
+            0,
+            "provider {provider_id}: golden fixture now emits tool activities, so the \
+             supplementary sample entry is stale — delete it and let the golden carry the evidence."
+        );
+        let mut sink = ObservingSink::default();
+        subject
+            .adapter
+            .parse(sample, &mut sink)
+            .unwrap_or_else(|error| {
+                panic!("{provider_id}: supplementary sample must parse, got {error:?}")
+            });
+        assert!(
+            sink.activities > 0,
+            "provider {provider_id}: supplementary sample emitted zero activities, so it witnesses \
+             nothing — this list must never be used to excuse a non-extracting adapter."
         );
     }
 }

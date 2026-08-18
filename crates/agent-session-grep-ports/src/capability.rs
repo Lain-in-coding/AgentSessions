@@ -140,7 +140,11 @@ impl ProviderCapabilityMatrix {
                     context: CapabilityLevel::Unsupported,
                     resume: CapabilityLevel::Unsupported,
                     handoff: CapabilityLevel::Unsupported,
-                    tool_activity: CapabilityLevel::Partial,
+                    // Aider 折叠 blockquote 工具输出进 assistant 文本
+                    // （provider-aider/src/lib.rs 只调 emit_message，零 emit_activity），
+                    // 因此无任何 tool activity。曾误标 Partial——由
+                    // cli/tests/capability_behaviour.rs 的行为断言守护。
+                    tool_activity: CapabilityLevel::Unsupported,
                     source_span: CapabilityLevel::Derived,
                     incremental: CapabilityLevel::Unsupported,
                 },
