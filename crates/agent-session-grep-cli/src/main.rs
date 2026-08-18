@@ -426,15 +426,32 @@ fn run(
         return model_command(args, mode, request_id, offline);
     }
 
-    let (db, rest) = parse_db_flag(args)?;
+    let (db_flag, rest) = parse_db_flag(args)?;
+    // 未知子命令在打开存储之前就拒绝：`asg handof q` 必须报 did-you-mean，
+    // 而不是先因为缺库报 not_found（错的那层）。列表由 KNOWN_SUBCOMMANDS 派生。
+    match rest.first() {
+        None => return Err(missing_subcommand_error()),
+        Some(cmd) if !known_subcommand(cmd) => {
+            return Err(unknown_subcommand_error(cmd));
+        }
+        Some(_) => {}
+    }
+    let (db, db_origin) = resolve_store_path(db_flag)?;
     // 写入子命令抢 data-root writer lease；读路径不抢，允许多读者并发。
     let writes = rest
         .first()
         .map(|c| matches!(c.as_str(), "index" | "ingest" | "sync"))
         .unwrap_or(false);
     let store = if writes {
+        // 写路径负责把 data root 建出来：默认库落在平台数据目录下，而那个目录
+        // 在首次写入前并不存在（旧行为是让 SQLite 报 catalog_error 并倒过来
+        // 怪用户的路径写法）。
+        create_store_parent_dir(&db)?;
         SqliteStore::open_for_write(&db)
     } else {
+        // 读路径绝不建库（M2P-2）：`--db <typo>` 或未同步过的默认库过去会得到
+        // 一个"干净的零命中"外加一个新建的空库文件——最容易的静默失败。
+        require_existing_store(&db, db_origin)?;
         SqliteStore::open(&db)
     }
     .map_err(ProtocolError::from)?;
@@ -939,15 +956,16 @@ fn help_text() -> String {
 AI coding-agent history search engine（本地 AI 编程会话历史搜索）。
 
 快速上手（新手从这里开始）:
+    agent-session-grep sync --discover              扫描各 provider 数据根建立索引
+    agent-session-grep search 关键词                 搜索历史会话
+    agent-session-grep show <命中ID>                 看一条命中的正文
+    agent-session-grep context <会话ID>              展开一个会话的上下文
     agent-session-grep config paths                 查看数据默认放哪里
     agent-session-grep providers                    查看 Provider 成熟度与能力
-    agent-session-grep --db <库路径> search 关键词    搜索历史会话
-    agent-session-grep --db <库路径> show <命中ID>   看一条命中的正文
-    agent-session-grep --db <库路径> context <会话ID> 展开一个会话的上下文
 数据流：search 返回命中消息 → show <msg_id> 看正文 → context <ses_id> 看整个会话。
 
 USAGE:
-    agent-session-grep --db <path> <COMMAND> [ARGS]
+    agent-session-grep [--db <path>] <COMMAND> [ARGS]
     agent-session-grep doctor [--db <path>]
     agent-session-grep --help | --version
 
@@ -1010,7 +1028,9 @@ CONTEXT:
     --max-bytes <n>        响应字节预算
 
 GLOBAL（全局 flag 放在命令名之前；子命令 flag 如 --max-items 放在命令名之后）:
-    --db <path>            SQLite 数据存储路径（doctor/help/version/config paths 除外必需）
+    --db <path>            SQLite store path. Optional: defaults to <data dir>/asg.db
+                           (override with $ASG_DB; `config paths` prints the data dir).
+                           Read commands never create a store; write commands do.
     --output human|json|jsonl  输出模式（默认 human：人类可读文本；json/jsonl 为协议 envelope）
     --robot                等价 --output json，无颜色/进度（stdout 只输出协议）
     --request-id <id>      robot 调用方关联 id，原样回显于每个 frame（A-Za-z0-9._:- 计 1-128 字符）
@@ -1092,32 +1112,93 @@ fn help_envelope(command: &str, data: serde_json::Value, request_id: Option<&str
     )
 }
 
+/// 全部子命令名——`known_subcommand` 与 unknown-subcommand 报错共用的唯一真源。
+///
+/// 过去这两处是两份手写列表，报错那份漏了 7 个命令（`asg handof q` 会声称
+/// `handoff` 不是可用命令）。任何新子命令只加这一行即可，二者不可能再漂移。
+const KNOWN_SUBCOMMANDS: &[&str] = &[
+    "ingest",
+    "sync",
+    "index",
+    "search",
+    "handoff",
+    "get-message",
+    "get-session-resume",
+    "resume",
+    "hook",
+    "get",
+    "show",
+    "list",
+    "context",
+    "status",
+    "mcp",
+    "tui",
+    "serve",
+    "doctor",
+    "providers",
+    "config",
+    "model",
+];
+
 /// 是否为已知子命令（用于子命令 `--help` 拦截与 unknown-subcommand 报错提示）。
 fn known_subcommand(cmd: &str) -> bool {
-    matches!(
-        cmd,
-        "ingest"
-            | "sync"
-            | "index"
-            | "search"
-            | "handoff"
-            | "get-message"
-            | "get-session-resume"
-            | "resume"
-            | "hook"
-            | "get"
-            | "show"
-            | "list"
-            | "context"
-            | "status"
-            | "mcp"
-            | "tui"
-            | "serve"
-            | "doctor"
-            | "providers"
-            | "config"
-            | "model"
-    )
+    KNOWN_SUBCOMMANDS.contains(&cmd)
+}
+
+/// 与输入最接近的子命令名（did-you-mean）。
+///
+/// 用 Levenshtein 距离，阈值随输入长度放宽（短名字的一次编辑就可能是另一个真命令，
+/// 所以 ≤4 字符只容 1 次编辑）。无足够接近的候选返回 `None`——绝不瞎猜。
+fn closest_subcommand(input: &str) -> Option<&'static str> {
+    let lowered = input.trim().to_ascii_lowercase();
+    if lowered.is_empty() {
+        return None;
+    }
+    let budget = if lowered.chars().count() <= 4 { 1 } else { 2 };
+    KNOWN_SUBCOMMANDS
+        .iter()
+        .map(|candidate| (*candidate, edit_distance(&lowered, candidate)))
+        .filter(|(_, distance)| *distance <= budget)
+        .min_by_key(|(candidate, distance)| (*distance, candidate.len()))
+        .map(|(candidate, _)| candidate)
+}
+
+/// Levenshtein 距离（滚动一行 DP，无新依赖）。
+fn edit_distance(left: &str, right: &str) -> usize {
+    let right_chars: Vec<char> = right.chars().collect();
+    let mut previous: Vec<usize> = (0..=right_chars.len()).collect();
+    let mut current = vec![0usize; right_chars.len() + 1];
+    for (i, left_char) in left.chars().enumerate() {
+        current[0] = i + 1;
+        for (j, right_char) in right_chars.iter().enumerate() {
+            let substitution = previous[j] + usize::from(left_char != *right_char);
+            current[j + 1] = substitution.min(previous[j + 1] + 1).min(current[j] + 1);
+        }
+        std::mem::swap(&mut previous, &mut current);
+    }
+    previous[right_chars.len()]
+}
+
+/// unknown-subcommand 报错：列表由 [`KNOWN_SUBCOMMANDS`] 派生，并在有足够接近的
+/// 候选时给 did-you-mean。
+fn unknown_subcommand_error(cmd: &str) -> CliError {
+    let mut message = format!("unknown subcommand: {cmd}\n");
+    if let Some(suggestion) = closest_subcommand(cmd) {
+        message.push_str(&format!("Did you mean `{suggestion}`?\n"));
+    }
+    message.push_str(&format!(
+        "Available commands: {}\nRun `--help` for full usage.",
+        KNOWN_SUBCOMMANDS.join(", ")
+    ));
+    CliError::usage(message)
+}
+
+/// 无子命令时的报错：同样把完整命令表说出来。
+fn missing_subcommand_error() -> CliError {
+    CliError::usage(format!(
+        "missing subcommand.\nAvailable commands: {}\nRun `--help` for full usage.",
+        KNOWN_SUBCOMMANDS.join(", ")
+    ))
 }
 
 /// 子命令级帮助文本：渲染该命令的签名、flag 与一个真实示例。由 help/version
@@ -1436,7 +1517,10 @@ fn extract_db_flag_impl(args: &[String], prefix_only: bool) -> Result<Option<Str
 ///
 /// `--db` 的取值守卫（缺值、取值为已知 flag、重复）统一在 [`extract_db_flag`]
 /// 完成（R8.1/R8.2）。
-fn parse_db_flag(args: &[String]) -> Result<(String, Vec<String>), CliError> {
+///
+/// `--db` 缺席不是错误：store path 由 [`resolve_store_path`] 按
+/// `--db` > `$ASG_DB` > 平台数据目录默认值解析（D8 零配置）。
+fn parse_db_flag(args: &[String]) -> Result<(Option<String>, Vec<String>), CliError> {
     let db = extract_db_flag(args)?;
     let mut rest = Vec::new();
     let mut seen_command = false;
@@ -1458,23 +1542,105 @@ fn parse_db_flag(args: &[String]) -> Result<(String, Vec<String>), CliError> {
             }
         }
     }
-    let db = db.ok_or_else(|| {
-        // 缺 --db 是新手第一道坎：报错带两条路——config paths 找默认数据位置、
-        // --help 看用法。已经给出子命令（如 `hello`、`search`）时提示它可能不是命令。
-        if rest.is_empty() {
-            CliError::usage(
-                "需要数据库参数 --db <path>。\n\
-                 可先运行 `config paths` 查看默认数据位置；运行 `--help` 查看完整用法。",
-            )
-        } else {
-            CliError::usage(format!(
-                "需要数据库参数 --db <path>（而且 `{}` 可能不是有效命令）。\n\
-                 可先运行 `config paths` 查看默认数据位置；运行 `--help` 查看完整用法。",
-                rest[0]
-            ))
-        }
-    })?;
     Ok((db, rest))
+}
+
+/// store path 的来源，决定给用户的提示里是否需要带 `--db`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DbOrigin {
+    /// 显式 `--db <path>`。
+    Flag,
+    /// `$ASG_DB` 环境变量。
+    Env,
+    /// 平台数据目录下的默认库（零配置路径）。
+    Default,
+}
+
+/// 默认库文件名（落在 `config paths` 报告的 data 目录下）。
+const DEFAULT_DB_FILE_NAME: &str = "asg.db";
+
+/// 覆盖默认 store path 的环境变量名。
+const DB_ENV_VAR: &str = "ASG_DB";
+
+/// 解析本次调用要用的 store path（D8：零配置优先，显式覆盖优先级最高）。
+///
+/// 优先级 `--db <path>` > `$ASG_DB` > `<平台 data 目录>/asg.db`——与
+/// ripgrep/gh/atuin 的习惯一致：装完即可用，路径只在需要时才显式给。
+/// 默认位置恰是 `config paths` 报告的 data 目录，因此那条命令不再"撒谎"。
+fn resolve_store_path(flag: Option<String>) -> Result<(String, DbOrigin), CliError> {
+    if let Some(path) = flag {
+        return Ok((path, DbOrigin::Flag));
+    }
+    // 环境变量为空串时视为未设置：空路径会让 SQLite 静默启用私有临时库。
+    if let Some(value) = std::env::var_os(DB_ENV_VAR) {
+        let path = value.to_string_lossy().into_owned();
+        if !path.trim().is_empty() {
+            return Ok((path, DbOrigin::Env));
+        }
+    }
+    let paths = platform_paths()?;
+    let data = paths
+        .get("data")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| CliError::usage("cannot resolve the platform data directory"))?;
+    let path = std::path::Path::new(data).join(DEFAULT_DB_FILE_NAME);
+    Ok((path.to_string_lossy().into_owned(), DbOrigin::Default))
+}
+
+/// 命令行前缀：默认/环境变量解析出的库无需 `--db`，显式 `--db` 的提示必须带上
+/// 同一路径，否则复制粘贴出来的命令会指向另一个库。
+fn db_flag_prefix(db: &str, origin: DbOrigin) -> String {
+    match origin {
+        DbOrigin::Flag => format!("--db {db} "),
+        DbOrigin::Env | DbOrigin::Default => String::new(),
+    }
+}
+
+/// 空库/缺库时该跑的那条命令（提示里逐字给出，用户可直接复制）。
+fn sync_discover_command(db: &str, origin: DbOrigin) -> String {
+    format!("asg {}sync --discover", db_flag_prefix(db, origin))
+}
+
+/// 写路径的 data root 兜底创建。默认库位于平台数据目录，首次写入前该目录不存在。
+fn create_store_parent_dir(db: &str) -> Result<(), CliError> {
+    let Some(parent) = std::path::Path::new(db).parent() else {
+        return Ok(());
+    };
+    if parent.as_os_str().is_empty() || parent.is_dir() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(parent).map_err(|error| {
+        CliError(ProtocolError::new(
+            CanonicalCode::CatalogError,
+            format!(
+                "cannot create the store directory {}: {error}",
+                parent.display()
+            ),
+        ))
+    })
+}
+
+/// 读路径的存在性前置检查（M2P-2）：库不存在时报 `not_found` 并给出路径本身
+/// 与该跑的完整命令，而不是静默新建一个空库然后报"零命中"。
+fn require_existing_store(db: &str, origin: DbOrigin) -> Result<(), CliError> {
+    if std::path::Path::new(db).exists() {
+        return Ok(());
+    }
+    let command = sync_discover_command(db, origin);
+    let where_from = match origin {
+        DbOrigin::Flag => " (from --db)",
+        DbOrigin::Env => " (from $ASG_DB)",
+        DbOrigin::Default => " (default store path)",
+    };
+    Err(CliError(ProtocolError::new(
+        CanonicalCode::NotFound,
+        format!(
+            "no store at {db}{where_from}.\n\
+             Build one with: {command}\n\
+             Reads never create a store, so a mistyped --db fails here instead of \
+             returning an empty result."
+        ),
+    )))
 }
 
 /// 提取纯位置参数（跳过已知带值 flag 及其取值、已知裸 flag）——供 doctor/config
@@ -1539,10 +1705,7 @@ fn dispatch(
     ),
     CliError,
 > {
-    let cmd = rest
-        .first()
-        .ok_or_else(|| CliError::usage("missing subcommand"))?
-        .as_str();
+    let cmd = rest.first().ok_or_else(missing_subcommand_error)?.as_str();
     // Design D5 fail-closed gate: 未来需要联网的子命令必须在此登记，并在连接前
     // 经过 [`offline_capability_gate`]。当前没有任何子命令需要联网（模型下载、
     // 外部 Embedding API、telemetry 均未实现），列表为空——offline 是稳定显式
@@ -2343,28 +2506,7 @@ fn dispatch(
             let (outcome, data, page, warnings) = render(response);
             Ok(("status", outcome, data, page, warnings))
         }
-        other => {
-            let commands = [
-                "ingest",
-                "sync",
-                "index",
-                "search",
-                "get-message",
-                "get",
-                "show",
-                "list",
-                "context",
-                "status",
-                "mcp",
-                "tui",
-                "doctor",
-                "config",
-            ];
-            Err(CliError::usage(format!(
-                "unknown subcommand: {other}（可用命令：{}；运行 --help 查看完整用法）",
-                commands.join("、")
-            )))
-        }
+        other => Err(unknown_subcommand_error(other)),
     }
 }
 
@@ -4559,6 +4701,102 @@ mod tests {
     // ---- 参数解析（Minor-2 / Minor-3）----
 
     #[test]
+    fn known_subcommand_and_unknown_error_share_one_source_of_truth() {
+        // M2P-8：过去 known_subcommand 与 unknown-subcommand 报错各有一份手写列表，
+        // 报错那份漏了 handoff/resume/hook/serve/providers/model/get-session-resume。
+        // 现在两者都从 KNOWN_SUBCOMMANDS 派生——本测试在任一侧漂移时失败。
+        let message = unknown_subcommand_error("definitely-not-a-command")
+            .0
+            .message;
+        for command in KNOWN_SUBCOMMANDS {
+            assert!(
+                known_subcommand(command),
+                "{command} 在 KNOWN_SUBCOMMANDS 里却不被 known_subcommand 承认"
+            );
+            assert!(
+                message.contains(*command),
+                "unknown-subcommand 报错漏了 {command}: {message}"
+            );
+        }
+        // help 拦截与报错共用同一判定：非列表成员一律不是子命令。
+        assert!(!known_subcommand("handof"));
+        assert!(!known_subcommand(""));
+        // 报错里出现的每个候选都必须是真命令（防止列表混入不存在的名字）。
+        let listed = message
+            .rsplit_once("Available commands: ")
+            .map(|(_, tail)| tail)
+            .and_then(|tail| tail.split_once('\n'))
+            .map(|(list, _)| list)
+            .expect("报错必须包含可用命令表");
+        let listed: Vec<&str> = listed.split(", ").collect();
+        assert_eq!(
+            listed, KNOWN_SUBCOMMANDS,
+            "报错列表必须与 KNOWN_SUBCOMMANDS 逐项一致"
+        );
+    }
+
+    #[test]
+    fn unknown_subcommand_suggests_the_closest_real_command() {
+        // did-you-mean：一次编辑距离内的笔误必须被指出来。
+        assert_eq!(closest_subcommand("handof"), Some("handoff"));
+        assert_eq!(closest_subcommand("serch"), Some("search"));
+        assert_eq!(closest_subcommand("statuss"), Some("status"));
+        assert_eq!(closest_subcommand("SEARCH"), Some("search"));
+        // 差得太远时不瞎猜。
+        assert_eq!(closest_subcommand("completely-different"), None);
+        assert_eq!(closest_subcommand(""), None);
+        // 短名字只容一次编辑：两次编辑会把它变成另一个真命令。
+        assert_eq!(closest_subcommand("gt"), Some("get"));
+    }
+
+    #[test]
+    fn store_path_resolution_prefers_flag_then_env_then_default() {
+        // M2P-3：`--db` > `$ASG_DB` > 平台数据目录默认值。flag 分支不读环境，
+        // 因此这条断言不受测试进程环境影响。
+        let (path, origin) = resolve_store_path(Some("explicit.db".into())).expect("flag path");
+        assert_eq!(path, "explicit.db");
+        assert_eq!(origin, DbOrigin::Flag);
+
+        // 默认与环境分支解析出的路径无需 `--db` 前缀，显式 flag 必须带上。
+        assert_eq!(db_flag_prefix("x.db", DbOrigin::Default), "");
+        assert_eq!(db_flag_prefix("x.db", DbOrigin::Env), "");
+        assert_eq!(db_flag_prefix("x.db", DbOrigin::Flag), "--db x.db ");
+        assert_eq!(
+            sync_discover_command("x.db", DbOrigin::Default),
+            "asg sync --discover"
+        );
+        assert_eq!(
+            sync_discover_command("x.db", DbOrigin::Flag),
+            "asg --db x.db sync --discover"
+        );
+    }
+
+    #[test]
+    fn missing_store_error_is_not_found_and_names_the_next_command() {
+        // M2P-2：读路径缺库是 not_found（exit 4），消息里必须有路径与全命令。
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("absent.db");
+        let missing_s = missing.to_string_lossy().into_owned();
+        let error = require_existing_store(&missing_s, DbOrigin::Flag)
+            .expect_err("缺库必须报错而不是静默新建");
+        assert_eq!(error.0.code, CanonicalCode::NotFound);
+        assert_eq!(error.0.code.exit_code(), 4);
+        assert!(error.0.message.contains(&missing_s), "{}", error.0.message);
+        assert!(error.0.message.contains("asg --db"), "{}", error.0.message);
+        assert!(
+            error.0.message.contains("sync --discover"),
+            "{}",
+            error.0.message
+        );
+        // 检查本身无副作用：不得把库或父目录造出来。
+        assert!(!missing.exists());
+
+        // 库存在时放行。
+        std::fs::write(&missing, b"").expect("touch store");
+        assert!(require_existing_store(&missing_s, DbOrigin::Flag).is_ok());
+    }
+
+    #[test]
     fn parse_db_flag_keeps_flag_named_tokens_after_command_as_query_text() {
         // 命令名之后的 token 即使形如 flag 也是位置参数（查询文本），
         // 不得被全局 flag 跳过逻辑吞掉。
@@ -4569,7 +4807,7 @@ mod tests {
             "--output".into(),
         ])
         .expect("valid db flag");
-        assert_eq!(db, "store.db");
+        assert_eq!(db.as_deref(), Some("store.db"));
         assert_eq!(rest, vec!["search".to_string(), "--output".to_string()]);
 
         let (_, rest) = parse_db_flag(&[
@@ -4595,7 +4833,7 @@ mod tests {
             "x".into(),
         ])
         .expect("valid db flag");
-        assert_eq!(db, "s.db");
+        assert_eq!(db.as_deref(), Some("s.db"));
         assert_eq!(
             rest,
             vec!["status".to_string(), "--db".to_string(), "x".to_string(),]
@@ -5156,7 +5394,7 @@ mod tests {
             "search".into(),
         ])
         .expect("offline must not break parse_db_flag");
-        assert_eq!(db, "s.db");
+        assert_eq!(db.as_deref(), Some("s.db"));
         assert_eq!(rest, vec!["search".to_string()]);
         // help 拦截：--offline --help 仍是顶层帮助。
         assert_eq!(
