@@ -8,6 +8,7 @@
 //! 字节 span（`span: None`）——span round-trip 标记 N/A；capability.rs 的
 //! `source_span` 诚实声明为 `unsupported`。
 
+use agent_session_grep_application::parse_search_instant;
 use agent_session_grep_ports::{
     CanonicalEventSink, Confidence, MessageEvent, ParseReport, ProviderAdapter,
 };
@@ -205,6 +206,87 @@ fn distinct_documents_do_not_collide_on_seq_zero() {
 
     // 文本仍然可区分，证明两条消息是不同 payload 而非同一条。
     assert_ne!(messages_a[0].text, messages_b[0].text);
+}
+
+/// 时间过滤回归：`--since`/`--until` 下推为 `sort_key >= ?`，而 NULL 比较恒假——
+/// 没有 timestamp 的消息会被每一次时间窗查询静默排除。此测试用**生产**解析器
+/// `parse_search_instant` 解析每条 emitted timestamp，并断言其落在合成窗口内
+/// （即 `--since`/`--until` 会命中这些消息）。只断言"非 None"是不够的：一个
+/// 过滤器无法解析的字符串（历史缺陷里的 `""`）也能通过那种断言。
+#[test]
+fn golden_timestamps_fall_inside_search_window() {
+    let expected = read_expected();
+    let bytes = read_fixture_verified(&expected);
+    let (_, messages) = parse_fixture(&bytes);
+    assert!(!messages.is_empty(), "golden fixture must emit messages");
+
+    let since = parse_search_instant("2026-01-01T00:00:00Z").expect("window lower bound parses");
+    let until = parse_search_instant("2026-01-01T01:00:00Z").expect("window upper bound parses");
+
+    let mut timestamped = 0_usize;
+    for message in &messages {
+        let Some(raw) = message.timestamp.as_deref() else {
+            continue;
+        };
+        // 空串比 None 更糟：它看起来像数据，却解析不出任何 instant。
+        assert!(
+            !raw.trim().is_empty(),
+            "seq {} 的 timestamp 是空串——应当为 None",
+            message.seq
+        );
+        let instant = parse_search_instant(raw).unwrap_or_else(|| {
+            panic!("timestamp {raw} must parse with the production search filter parser")
+        });
+        assert!(
+            instant.sort_key() >= since.sort_key() && instant.sort_key() <= until.sort_key(),
+            "timestamp {raw} 落在时间窗之外——`--since`/`--until` 会漏掉该消息"
+        );
+        timestamped += 1;
+    }
+    // fixture 只有最后一条带 timestamp：钉住数量，避免"全部为 None"时本测试空转通过。
+    assert_eq!(
+        timestamped, 1,
+        "fixture 应恰有 1 条带 timestamp 的消息（其余诚实地为 None）"
+    );
+}
+
+/// epoch 毫秒整数必须被**渲染**成过滤器可解析的 RFC3339，而不是被丢弃。
+///
+/// 历史缺陷：整数被映射成 `""`——值读到了却扔掉，换成一个"看起来像数据"的空串。
+/// fixture 字节不可变更（BLAKE3 已钉住），故 epoch 形态用内联合成文档覆盖。
+#[test]
+fn epoch_millis_timestamp_matches_the_same_window_as_its_string_form() {
+    // 1767225660000 ms 与 fixture 里的 "2026-01-01T00:01:00Z" 是同一时刻。
+    let epoch_doc = br#"[{"role":"user","content":"epoch form","timestamp":1767225660000}]"#;
+    let string_doc =
+        br#"[{"role":"user","content":"string form","timestamp":"2026-01-01T00:01:00Z"}]"#;
+
+    let (_, epoch_messages) = parse_fixture(epoch_doc);
+    let (_, string_messages) = parse_fixture(string_doc);
+
+    let since = parse_search_instant("2026-01-01T00:00:00Z").expect("window lower bound parses");
+    let until = parse_search_instant("2026-01-01T01:00:00Z").expect("window upper bound parses");
+
+    let epoch_raw = epoch_messages[0]
+        .timestamp
+        .as_deref()
+        .expect("epoch-millis timestamp must be rendered, not discarded");
+    let string_raw = string_messages[0]
+        .timestamp
+        .as_deref()
+        .expect("string timestamp must pass through");
+
+    let epoch_instant = parse_search_instant(epoch_raw)
+        .expect("rendered epoch must parse with the production parser");
+    let string_instant = parse_search_instant(string_raw).expect("string form must parse");
+
+    // 两种形态指向同一 instant：整数形态确实落在窗口里，而不是被静默排除。
+    assert_eq!(epoch_instant.sort_key(), string_instant.sort_key());
+    assert!(
+        epoch_instant.sort_key() >= since.sort_key()
+            && epoch_instant.sort_key() <= until.sort_key(),
+        "渲染出的 {epoch_raw} 落在时间窗之外"
+    );
 }
 
 /// 手动再生辅助：
