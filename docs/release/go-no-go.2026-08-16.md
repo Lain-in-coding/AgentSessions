@@ -57,10 +57,12 @@
 | Comparison table ↔ benchmark numbers | pass | `--offline`/semantic over-claims removed (e506288) |
 | Demo dataset ↔ quickstart commands | pass | fixture provenance documented |
 | LICENSE present and correct | pass | MIT + Apache-2.0, REUSE audit pending owner signing |
-| Third-party attributions complete | **pending** | NOTICE / third-party inventory outstanding (P0-4) |
+| Third-party attributions complete | **pass (factual NOTICE landed)** | `NOTICE` now ships in every release archive; approval of the reuse matrix remains owner-signed (REUSE audit Draft) |
 | Fixture provenance documented | pass | synthetic gate fixtures, license + redaction recorded |
 
-**Residual materials risks**: SBOM/NOTICE/REUSE audit not closed.
+**Residual materials risks**: factual `NOTICE` + machine-readable third-party
+inventory now land in every archive; the REUSE reuse-matrix approval and any
+formal SBOM certification decision remain owner-signed (Draft).
 
 ---
 
@@ -116,7 +118,8 @@ certified — currently 0 Beta. **Not release-ready per provider gate.**
 ## 7. Residual risk summary
 
 1. **P0-4**: release pipeline configured but never a named successful run; CI
-   billing blocks all jobs; SBOM/NOTICE/REUSE audit open.
+   billing blocks all jobs; factual NOTICE landed and ships in archives;
+   REUSE reuse-matrix approval + SBOM certification decision remain owner-signed.
 2. **Provider maturity**: 0 Beta; Claude/Codex not certified against the PRD
    gate — remains below the ≥5 Beta requirement.
 3. **External**: GitHub Actions billing; PRIVATE→public switch (Option-A public
