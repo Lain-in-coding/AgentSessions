@@ -6,10 +6,13 @@
 //! 首个垂直切片只暴露两个子命令，用于端到端打通 discovery→catalog→search 骨架：
 //!
 //! ```text
-//! agent-session-grep --db <path> index <id-fact> <text>   # 写入 catalog 并索引
+//! agent-session-grep --db <path> sync --discover           # 建立索引
 //! agent-session-grep --db <path> search <query>           # 全文检索
 //! agent-session-grep --db <path> get <wire-id>            # 按 id 取回 payload
 //! ```
+//!
+//! `index <id-fact> <text>` 是切片期留下的直写入口，绕过 provider 解析，需
+//! `--force-dev` 且不在用户 help 里公布。
 //!
 //! 参数解析刻意手写、不引第三方 CLI 框架——切片阶段只需最小可用面。
 //! 输出走 Robot-JSON 雏形（每行一个 JSON 对象），为后续 CONTRACT 对齐留口。
@@ -989,7 +992,6 @@ COMMANDS:
     ingest <file>          解析原始 .jsonl 文件并入库（只读源）
     sync <file>...          原子扫描多个 .jsonl 文件；无变化时不生成新 generation
     sync --discover          自动发现各 provider 数据根下的 .jsonl 源并同步（只读源）
-    index <id-fact> <text> 直接写入一条 catalog + 索引（切片期写入入口）
     index rebuild          从权威 catalog 全量重投影 FTS 索引（维护命令）
     index embeddings       从权威 catalog 构建语义向量索引（semantic/hybrid 检索前置）
     index purge-activities 修剪孤儿工具活动行（无 catalog 消息的活动/悬空 claim；维护命令）
@@ -1307,9 +1309,10 @@ fn subcommand_help_text(cmd: &str) -> &'static str {
                      约束：单个 transcript 文件应只包含一个会话；检测到多个 sessionId 时仍归属首个会话，并输出诊断 warning。"
         }
         "index" => {
-            "index <id-fact> <text>：写入一条 catalog + 索引。\n\
-                    index rebuild：从权威 catalog 重建全文（FTS）索引；\n\
+            "index rebuild：从权威 catalog 重建全文（FTS）索引；\n\
                     index embeddings：从权威 catalog 构建语义向量索引（semantic/hybrid 检索前置，需 semantic-candle 构建的二进制）。\n\
+                    index purge-activities：修剪孤儿工具活动行（维护命令）。\n\
+                   建立索引请用 sync --discover，不要用 index 直写。\n\
                    示例：agent-session-grep --db <path> --robot index rebuild"
         }
         "doctor" => {
@@ -1788,9 +1791,24 @@ fn dispatch(
                     Vec::new(),
                 ))
             } else {
-                no_extra_args(rest, 2, "index <id-fact> <text>")?;
-                let fact = arg(rest, 1, "index <id-fact> <text>")?;
-                let text = arg(rest, 2, "index <id-fact> <text>")?;
+                // 直写入口：绕过 provider 解析,把任意文本塞进权威 catalog。切片
+                // 期的开发工具,对真实库是破坏性的——它写进去的东西没有源文件、
+                // 没有 provenance,`index rebuild` 会忠实地把它重投影出来。
+                //
+                // 因此不在用户 help 里公布(见 `help_text`),并要求显式
+                // `--force-dev`:能力保留给测试与切片,但不能被顺手用在自己的
+                // 真实历史上。
+                let mut args = rest.to_vec();
+                if !take_bool_flag(&mut args, "--force-dev") {
+                    return Err(CliError::usage(
+                        "index <id-fact> <text> 是开发直写入口，会绕过 provider 解析\
+                         把无来源的内容写进权威 catalog；确实要用请加 --force-dev。\
+                         要建立索引请用：sync --discover",
+                    ));
+                }
+                no_extra_args(&args, 2, "index <id-fact> <text> --force-dev")?;
+                let fact = arg(&args, 1, "index <id-fact> <text> --force-dev")?;
+                let text = arg(&args, 2, "index <id-fact> <text> --force-dev")?;
                 Ok((
                     "index",
                     protocol::Outcome::Success,

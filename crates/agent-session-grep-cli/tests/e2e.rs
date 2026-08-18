@@ -24,6 +24,13 @@ fn run(db: &str, args: &[&str]) -> Output {
         .expect("failed to spawn agent-session-grep binary")
 }
 
+/// `index <id-fact> <text>` 的直写入口需要 `--force-dev`（它绕过 provider 解析，
+/// 把无来源内容写进权威 catalog，因此不对用户公布）。测试仍然要用它造数据，
+/// 所以在一处补上该 flag，而不是散落到每个调用点。
+fn seed(db: &str, fact: &str, text: &str) -> Output {
+    run(db, &["index", fact, text, "--force-dev"])
+}
+
 /// 在给定 db 上以默认 human 模式跑一次 CLI（无 --robot）：验证人类渲染器输出。
 fn run_human(db: &str, args: &[&str]) -> Output {
     Command::new(BIN)
@@ -270,12 +277,12 @@ fn run_bare(args: &[&str]) -> Output {
 fn index_search_get_roundtrip() {
     let (_dir, db) = temp_db("roundtrip");
 
-    let out = run(&db, &["index", "m1", "the quick brown fox jumps"]);
+    let out = seed(&db, "m1", "the quick brown fox jumps");
     assert!(out.status.success());
     assert!(stdout(&out).contains("\"ok\":true"));
     assert!(stdout(&out).contains("msg_v1_"));
 
-    run(&db, &["index", "m2", "lazy dog sleeps all day"]);
+    seed(&db, "m2", "lazy dog sleeps all day");
 
     // search 命中正确文档：查 "brown" 只应命中 m1。
     let out = run(&db, &["search", "brown"]);
@@ -829,13 +836,10 @@ fn search_flag_named_query_is_searched_not_intercepted() {
     // Minor-2：query 恰等于 flag 名（--output/--robot/--help/--request-id）时按
     // 查询走，不得被输出模式解析、help/version 拦截或 request-id 抽取短路。
     let (_dir, db) = temp_db("flag-query");
-    let out = run(
+    let out = seed(
         &db,
-        &[
-            "index",
-            "f1",
-            "literal --output --robot --help --request-id flag text",
-        ],
+        "f1",
+        "literal --output --robot --help --request-id flag text",
     );
     assert!(out.status.success(), "index failed: {}", stdout(&out));
 
@@ -1009,7 +1013,7 @@ fn writer_busy_exits_6_with_retryable_flag() {
     let (dir, db) = temp_db("exit-6");
     let lease = agent_session_grep_adapters_sqlite::WriterLease::try_acquire(dir.path())
         .expect("test process acquires the writer lease");
-    let out = run(&db, &["index", "w1", "writer busy probe"]);
+    let out = seed(&db, "w1", "writer busy probe");
     assert_eq!(out.status.code(), Some(6), "stdout={}", stdout(&out));
     let frame = parse_first_line(&out);
     assert_envelope_shape(&frame, false);
@@ -1017,7 +1021,7 @@ fn writer_busy_exits_6_with_retryable_flag() {
     assert_eq!(frame["error"]["retryable"], true);
     drop(lease);
     // 释放后写入恢复。
-    let out = run(&db, &["index", "w1", "writer busy probe"]);
+    let out = seed(&db, "w1", "writer busy probe");
     assert!(
         out.status.success(),
         "write must succeed after lease release: {}",
@@ -1159,7 +1163,7 @@ fn level_value_before_robot_flag_still_emits_robot_error_envelope() {
     // envelope。store 必须真实存在——读命令不再新建库（M2P-2），否则这里会先
     // 因 not_found 失败，测不到本用例关心的 flag 顺序语义。
     let (_dir, db) = temp_db("level-before-robot");
-    let out = run(&db, &["index", "lv1", "level flag ordering"]);
+    let out = seed(&db, "lv1", "level flag ordering");
     assert!(out.status.success(), "index failed: {}", stdout(&out));
 
     let out = Command::new(BIN)
@@ -1294,7 +1298,7 @@ fn write_commands_create_the_store_parent_directory() {
     let nested_s = nested.to_string_lossy().into_owned();
     assert!(!nested.parent().expect("parent").exists());
 
-    let out = run(&nested_s, &["index", "d1", "parent directory creation"]);
+    let out = seed(&nested_s, "d1", "parent directory creation");
     assert!(
         out.status.success(),
         "index 应自动建出父目录: {}",
@@ -1313,7 +1317,13 @@ fn asg_db_env_var_supplies_the_store_path() {
     // 写命令经环境变量拿到路径并建库。
     let out = Command::new(BIN)
         .env("ASG_DB", &db_s)
-        .args(["--robot", "index", "e1", "env var store path"])
+        .args([
+            "--robot",
+            "index",
+            "e1",
+            "env var store path",
+            "--force-dev",
+        ])
         .output()
         .expect("spawn");
     assert!(out.status.success(), "index via ASG_DB: {}", stdout(&out));
@@ -1419,7 +1429,7 @@ fn empty_catalog_names_sync_discover_in_search_list_and_status() {
     );
 
     // 非空库不得谎报为空：有内容后 search 无命中仍是"换关键词"那条路径。
-    let out = run(&db, &["index", "e1", "content that exists"]);
+    let out = seed(&db, "e1", "content that exists");
     assert!(out.status.success(), "index failed: {}", stdout(&out));
     let text = stdout(&run_human(&db, &["search", "nothingmatchesthis"]));
     assert!(
@@ -1509,7 +1519,7 @@ fn doctor_reports_ok_without_db() {
 fn doctor_with_db_reports_generation_and_recovery_evidence() {
     let (_dir, db) = temp_db("doctor-db");
     // 写一条推进 generation 到 1。
-    let out = run(&db, &["index", "d1", "doctor evidence content"]);
+    let out = seed(&db, "d1", "doctor evidence content");
     assert!(out.status.success());
 
     // `run` 已在前缀位置给出 --db；doctor 的 --db 跟在命令名后会造成重复
@@ -1547,7 +1557,7 @@ fn doctor_reports_orphaned_tool_activities_and_purge_removes_them() {
     // 工具活动保留策略端到端：doctor 报出孤儿投影行（活动锚点悬空 / claim
     // 悬空），`index purge-activities` 确定性修剪且不触碰 catalog/FTS。
     let (_dir, db) = temp_db("purge-activities");
-    let out = run(&db, &["index", "d1", "purge evidence content"]);
+    let out = seed(&db, "d1", "purge evidence content");
     assert!(out.status.success());
 
     // 写路径同事务保证无法产生孤儿行：直接 SQL 构造漂移状态（模拟
@@ -1657,9 +1667,9 @@ fn ingest_search_get_roundtrip_via_binary() {
 #[test]
 fn list_and_status_report_catalog_contents() {
     let (_dir, db) = temp_db("list-status");
-    let out = run(&db, &["index", "a", "alpha payload"]);
+    let out = seed(&db, "a", "alpha payload");
     assert!(out.status.success());
-    let out = run(&db, &["index", "b", "beta payload"]);
+    let out = seed(&db, "b", "beta payload");
     assert!(out.status.success());
 
     let out = run(&db, &["status"]);
@@ -2403,7 +2413,7 @@ fn sync_io_error_during_rescan_never_tombstones() {
 #[test]
 fn robot_envelope_shape_on_success() {
     let (_dir, db) = temp_db("env-ok");
-    let out = run(&db, &["index", "e1", "envelope shape test"]);
+    let out = seed(&db, "e1", "envelope shape test");
     assert!(out.status.success());
     let frame = parse_first_line(&out);
     assert_envelope_shape(&frame, true);
@@ -3123,7 +3133,7 @@ fn search_guidance_byte_budget_truncates_explicitly() {
 fn search_guidance_human_output_is_unchanged() {
     // human 渲染不读 guidance 字段：输出与 guidance 加入前的形状一致。
     let (_dir, db) = temp_db("guidance-human");
-    let out = run(&db, &["index", "g1", "human guidance probe"]);
+    let out = seed(&db, "g1", "human guidance probe");
     assert!(out.status.success());
     let out = run_human(&db, &["search", "guidance"]);
     assert!(out.status.success());
@@ -3144,7 +3154,7 @@ fn search_guidance_omits_suggestions_without_session_id() {
     // 纯 index 写入的消息没有 placement → session_id None → get_message/context
     // 建议必须省略；只有 why_matched 存在。
     let (_dir, db) = temp_db("guidance-nosession");
-    let out = run(&db, &["index", "g1", "no session here guidance"]);
+    let out = seed(&db, "g1", "no session here guidance");
     assert!(out.status.success());
     let out = run(&db, &["search", "guidance"]);
     assert!(out.status.success());
@@ -3164,7 +3174,7 @@ fn search_cursor_pages_partition_results() {
         ("c2", "cursor pagination alpha two"),
         ("c3", "cursor pagination alpha three"),
     ] {
-        let out = run(&db, &["index", fact, text]);
+        let out = seed(&db, fact, text);
         assert!(out.status.success());
     }
 
@@ -3215,7 +3225,7 @@ fn search_cursor_pages_partition_results() {
 fn tampered_cursor_is_rejected_with_cursor_invalid() {
     let (_dir, db) = temp_db("cursor-tamper");
     for (fact, text) in [("t1", "tamper target one"), ("t2", "tamper target two")] {
-        let out = run(&db, &["index", fact, text]);
+        let out = seed(&db, fact, text);
         assert!(out.status.success());
     }
     let out = run(&db, &["search", "tamper", "--max-items", "1"]);
@@ -3257,7 +3267,7 @@ fn tampered_cursor_is_rejected_with_cursor_invalid() {
 fn generation_bump_invalidates_cursor_with_exit_9() {
     let (_dir, db) = temp_db("cursor-generation");
     for (fact, text) in [("g1", "bump probe one"), ("g2", "bump probe two")] {
-        let out = run(&db, &["index", fact, text]);
+        let out = seed(&db, fact, text);
         assert!(out.status.success());
     }
     let out = run(&db, &["search", "probe", "--max-items", "1"]);
@@ -3267,7 +3277,7 @@ fn generation_bump_invalidates_cursor_with_exit_9() {
         .to_string();
 
     // 再写一条推进 generation：数据已换代，旧令牌必须显式失效。
-    let out = run(&db, &["index", "g3", "bump probe three"]);
+    let out = seed(&db, "g3", "bump probe three");
     assert!(out.status.success());
 
     let out = run(
@@ -3866,7 +3876,7 @@ fn context_missing_session_is_not_found() {
 fn human_search_and_status_render_text_not_envelope() {
     let (_dir, db) = temp_db("human-search");
     for (fact, text) in [("h1", "human render alpha"), ("h2", "human render beta")] {
-        let out = run(&db, &["index", fact, text]);
+        let out = seed(&db, fact, text);
         assert!(out.status.success());
     }
 
@@ -4074,7 +4084,7 @@ fn perf_baseline_100_messages_index_and_search() {
     for i in 0..100u32 {
         let fact = format!("perf-fact-{i}");
         let text = format!("performance baseline message number {i} with unique content");
-        let out = run(&db, &["index", &fact, &text]);
+        let out = seed(&db, &fact, &text);
         assert!(out.status.success(), "index {i} failed: {}", stdout(&out));
     }
     let index_ms = start.elapsed().as_millis();
@@ -4282,7 +4292,7 @@ fn literal_queries_with_fts_special_characters_succeed() {
         ("l4", "quoted \"phrase\" words"),
         ("l5", "star * literal"),
     ] {
-        let out = run(&db, &["index", fact, text]);
+        let out = seed(&db, fact, text);
         assert!(out.status.success(), "index {fact}: {}", stdout(&out));
     }
     // 每类特殊字符查询都成功且只字面命中对应文档（FTS5 短语匹配 = 相邻 token，
