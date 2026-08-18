@@ -1099,6 +1099,19 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   **验收**:agent 运行中跑 discover 能成功入库并正确报告部分性;
   不留 `writer.lock`。
 
+  ⚠️ **2026-08-19 实测:"不留 `writer.lock`"这条验收标准是错的,已撤销。**
+  成功运行之后 `writer.lock` **同样**留在 data root 里,而紧接着的第二次
+  sync 照常成功(`emitted: 0` 幂等)。原因写在 `lease.rs:3`:
+  **lease 的权威是 OS 独占文件句柄,不是文件是否存在** —— 进程崩溃时 OS
+  自动释放锁,残留的文件不拦任何人。`Drop for WriterLease` 只 `unlock` 不删文件,
+  这是刻意的:Windows 上强制锁期间删除/重开同一路径会 error 33
+  (`spikes/data-root-locking/EVIDENCE.md`)。
+  → **这条不是缺陷,删掉它反而会引入 Windows 上的竞态。**
+  M2P-10 真正要解的只剩 `source_changed` 那一半:agent 正在写时 transcript
+  一直在长,快照校验必然失败,重试赢不了。
+  **修正后的验收**:agent 运行中跑 discover 能入库并如实报告部分性。
+  (`writer.lock` 的存在不作为失败判据。)
+
 - [x] **M2P-11 `index <id-fact> <text>` 开发后门出现在用户 help 里**
   `main.rs:958` 在面向用户的 `--help` 里公布了这个直写入口,而且真的能用 ——
   等于邀请用户破坏自己的真实库。
