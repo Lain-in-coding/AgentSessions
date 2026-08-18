@@ -5,7 +5,7 @@
 > - decision_id: ADR-0008
 > - title: search 命中携带 session_id 与正文摘要
 > - status: **Proposed（2026-08-13 下轮规划，owner 裁定）**
-> - owner: （待指派）
+> - owner: QIN
 > - approver: 项目最终验收人
 > - due_milestone: R0
 > - evidence_path: ux-mcp 实测（search 命中只有 {id,score}，AI 无法判断相关性、无法从 msg id 导航到会话，平均多花 3-4 倍 token）；review-features Top 3

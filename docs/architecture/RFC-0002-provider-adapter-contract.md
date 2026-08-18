@@ -5,7 +5,7 @@
 > - decision_id: RFC-0002
 > - title: Provider Adapter 合同（discovery / probe / fingerprint / parse + maturity + variant + staging）
 > - status: **Draft**（待 R0 评审）
-> - owner: （待指派）
+> - owner: QIN
 > - approver: 项目最终验收人
 > - due_milestone: R0 Feasibility / Contract Gate
 > - evidence_path: `docs/architecture/RFC-0002-provider-adapter-contract.md`；相关实测见 `spikes/source-snapshot/EVIDENCE.md`

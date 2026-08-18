@@ -3,7 +3,7 @@
 > 治理记录
 > - decision_id: R0-EXTERNAL-READINESS
 > - status: Draft（待 R0 评审）
-> - owner: （待指派）  approver: 项目最终验收人
+> - owner: QIN  approver: 项目最终验收人
 > - due_milestone: R0；正式发布前必须再次执行一次完整 dry-run
 > - evidence_path: docs/operations/ + CI 发布日志
 

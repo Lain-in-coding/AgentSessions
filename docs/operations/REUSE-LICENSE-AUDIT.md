@@ -4,7 +4,7 @@
 >
 > - decision_id: R0-REUSE-LICENSE-AUDIT
 > - status: **Draft（待 approver 审阅）**
-> - owner: （待指派）
+> - owner: QIN
 > - approver: 项目最终验收人
 > - due_milestone: R0 Feasibility / Contract Gate
 > - evidence_path: `docs/operations/REUSE-LICENSE-AUDIT.md`

@@ -5,7 +5,7 @@
 > - decision_id: ADR-0004
 > - title: 搜索 snippet 不做脱敏
 > - status: **Proposed（2026-08-13，owner 亲自裁定）**
-> - owner: （待指派）
+> - owner: QIN
 > - approver: 项目最终验收人
 > - due_milestone: R0
 > - evidence_path: `docs/security/THREAT-MODEL.md` §5/§6.1；privacy/FTS reviewer 密钥回显复现

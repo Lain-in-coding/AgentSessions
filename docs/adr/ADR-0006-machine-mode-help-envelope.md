@@ -5,7 +5,7 @@
 > - decision_id: ADR-0006
 > - title: 机器模式 help/version 输出协议 envelope
 > - status: **Proposed（2026-08-13 UX review fix round）**
-> - owner: （待指派）
+> - owner: QIN
 > - approver: 项目最终验收人
 > - due_milestone: R0
 > - evidence_path: `docs/contracts/CONTRACT-cli-robot-mcp-draft.md` §6；parser/protocol reviewer 复现

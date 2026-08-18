@@ -4,7 +4,7 @@
 >
 > - decision_id: DOC-SLI-BENCHMARK
 > - status: **Draft**（待 R0 评审）
-> - owner: （待指派）
+> - owner: QIN
 > - approver: 项目最终验收人
 > - due_milestone: R0 Feasibility / Contract Gate
 > - evidence_path: `docs/product/SLI-AND-BENCHMARK-FORMAT.md` + `spikes/*/EVIDENCE.md`

@@ -5,7 +5,7 @@
 > - decision_id: RFC-0001
 > - title: Canonical Model 与 Stable ID
 > - status: **Draft**（待 R0 Architecture Review）
-> - owner: （待指派，负责起草与证据收集）
+> - owner: QIN（负责起草与证据收集）
 > - approver: 项目最终验收人（架构师本人；owner 与 approver 不得为同一人）
 > - contributors: —
 > - due_milestone: R0 Feasibility / Contract Gate

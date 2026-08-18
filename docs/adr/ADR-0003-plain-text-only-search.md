@@ -5,7 +5,7 @@
 > - decision_id: ADR-0003
 > - title: 搜索查询语义 plain-text-only
 > - status: **Proposed（2026-08-13 UX review fix round）**
-> - owner: （待指派）
+> - owner: QIN
 > - approver: 项目最终验收人
 > - due_milestone: R0
 > - evidence_path: `docs/contracts/CONTRACT-cli-robot-mcp-draft.md`；`crates/agent-session-grep-adapters-sqlite/src/lib.rs` `safe_fts_query`；8 路 review 交叉复现

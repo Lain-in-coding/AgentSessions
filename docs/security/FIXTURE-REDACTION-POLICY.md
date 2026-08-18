@@ -3,7 +3,7 @@
 > 治理记录
 > - decision_id: POLICY-fixture-redaction
 > - status: **Proposed**（待 R0 Accepted）
-> - owner: （待指派）  approver: 项目最终验收人
+> - owner: QIN  approver: 项目最终验收人
 > - due_milestone: R0
 > - evidence_path: `docs/security/FIXTURE-REDACTION-POLICY.md`
 
