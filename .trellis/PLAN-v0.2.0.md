@@ -1314,6 +1314,27 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   记录聚合数字(D5:只提交聚合)。与 §1.6 的历史数字对比确认无回退。
   **验收**:harness 退出 0;`docs/evidence/` 记录聚合结果。
 
+  **⚠️ 2026-08-19 我在 10 万条合成语料上试跑,发现 harness 自己有个缺陷 ——
+  它会静默漏掉四分之一的语料,先修它再谈 G5。**
+  试跑结果(`--sources evidence-output/synthetic-corpus-100k/corpus`,290 s):
+  七条不变量**全 PASS**、harness 退出 0,数字自洽
+  (3,675 源 / 73,504 emitted / 0 skipped / 73,504 persisted / 3,675 session /
+  42,569 span 全字节精度 / rebuild 80,854→80,854 ids match)。
+  **但语料实际是 5,000 个文件 / 10 万条消息。** 按扩展名分:
+  `.jsonl` 3,675、`.json` 875、`.md` 450 —— **harness 只收了 `.jsonl`**
+  (`collect_sources()` 在 `real_data_regression.py:170-185`,三处硬编码
+  `endswith(".jsonl")`),于是 **26.5% 的语料被静默排除,而报告仍宣称全绿**。
+  这与 CLI 刚修掉的 M2P-7 是**同一类缺陷**:工具侧已改为按 provider probe
+  判定,harness 侧还在按扩展名过滤。危险在于它不报错也不计数 ——
+  "七条全绿"读起来像覆盖了全部语料。
+  **修法**:`collect_sources` 改为收全部候选文件并交给 probe 判定(或至少
+  把跳过的非 `.jsonl` 文件计数上报,与 D11 一致);`--sources` 的 help 与
+  错误消息里的 "`.jsonl` file" 措辞同步改掉。
+  **修完再跑,并把「源文件数 = 语料文件数」作为新的前置断言** ——
+  否则下一次静默漏文件仍然抓不到。
+  **G5 本身仍依赖 M1-2**(真实冻结快照尚未建立);上述合成语料试跑
+  不能替代它,只是提前暴露了 harness 缺陷。
+
 ---
 
 ### M3 — 功能补齐(D15 全部补齐,D12 数据生命周期)

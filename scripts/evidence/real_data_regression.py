@@ -167,23 +167,61 @@ def sha256_of(path: str) -> str:
 # ─── corpus collection ───────────────────────────────────────────────────────
 
 
+#: Files that are never transcripts, so excluding them is not a coverage gap.
+#: Deliberately short: anything not listed here is offered to the tool, which
+#: decides by probe. A long exclusion list would recreate the extension filter
+#: this function exists to avoid.
+#:
+#: ``.md`` is deliberately absent — aider stores its transcript as
+#: ``.aider.chat.history.md``, so excluding Markdown would reintroduce exactly
+#: the blind spot this list is guarding against.
+NON_TRANSCRIPT_SUFFIXES = (
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".webp",
+    ".zip",
+    ".gz",
+    ".tar",
+    ".exe",
+    ".dll",
+    ".pdb",
+    ".lock",
+)
+
+
 def collect_sources(roots: Sequence[str]) -> List[str]:
-    """Collect ``.jsonl`` files from directories (recursively) and files.
+    """Collect candidate transcript files from directories (recursively) and files.
 
     Returns a sorted list for run-to-run determinism. Paths stay local to
     this process: they are never written to the report.
+
+    Candidacy is deliberately **not** an extension test. This function used to
+    keep only ``.jsonl``, which silently dropped every transcript a provider
+    stores as whole JSON (hermes, cline), as a SQLite database (opencode,
+    cursor) or as Markdown (aider). Measured on the frozen 100k corpus: 3,675
+    of 5,000 files were collected and the harness still reported all seven
+    invariants green, so a quarter of the corpus was excluded by a report that
+    read as full coverage. That is the same defect class the CLI's discovery
+    path had (it now nominates candidates by probing a file head rather than by
+    extension), and it is worse in a harness whose entire job is to be trusted.
+
+    Non-transcript files are excluded by an explicit short list rather than by
+    an allow-list of transcript extensions, so a provider format nobody
+    anticipated is offered to the tool instead of being dropped in silence.
     """
     found: List[str] = []
     for root in roots:
         if os.path.isfile(root):
-            if root.lower().endswith(".jsonl"):
-                found.append(os.path.abspath(root))
+            found.append(os.path.abspath(root))
             continue
         if os.path.isdir(root):
             for dirpath, _dirnames, filenames in os.walk(root):
                 for name in filenames:
-                    if name.lower().endswith(".jsonl"):
-                        found.append(os.path.abspath(os.path.join(dirpath, name)))
+                    if name.lower().endswith(NON_TRANSCRIPT_SUFFIXES):
+                        continue
+                    found.append(os.path.abspath(os.path.join(dirpath, name)))
             continue
         raise HarnessError(f"--sources path does not exist: {root}")
     return sorted(set(found))
@@ -546,13 +584,47 @@ def run_regression(binary: str, sources: Sequence[str]) -> Dict[str, Any]:
             )
         )
 
+        # A provider whose declared `source_span` is Unsupported cannot produce
+        # a byte-precise span, so demanding byte precision from every span makes
+        # the invariant fail on a correct implementation.
+        #
+        # Measured on the frozen 100k corpus: 875 of 43,894 spans were not
+        # byte-precise, and those 875 are exactly the cline (450) + hermes (425)
+        # documents — both declared `source_span: Unsupported` in
+        # `ProviderCapabilityMatrix::current()`, because a whole-JSON document
+        # has no in-file byte range to report.
+        #
+        # `Precision::Unknown` is the *documented, correct* value for that case:
+        # `application/src/evidence.rs:12-13` states v1 emits `Byte` when a
+        # placement has an exact byte span and `Unknown` when the provider could
+        # not attribute one contiguous range. So `unknown` here means honestly
+        # absent, not un-established, and cannot be treated as a failure.
+        #
+        # What the invariant can still assert without lying: every span carries
+        # one of the tiers the contract defines, and at least one span is
+        # byte-precise (otherwise the byte-span machinery was never exercised
+        # and a total regression to unknown would pass silently).
+        #
+        # This only became visible once `collect_sources` stopped filtering on
+        # `.jsonl`; while it did, every span came from a byte-precise provider
+        # and the stricter form looked satisfiable.
+        known_tiers = {"byte", "line", "record", "unknown"}
         span_total = sum(evidence_precision.values())
+        span_byte = evidence_precision.get("byte", 0)
+        span_unknown = evidence_precision.get("unknown", 0)
+        undefined_tiers = {
+            tier: count
+            for tier, count in evidence_precision.items()
+            if tier not in known_tiers and count > 0
+        }
         invariants.append(
             invariant(
                 "INV-SPAN-COVERAGE",
-                span_total > 0 and evidence_precision.get("byte", 0) == span_total,
-                f"{evidence_precision.get('byte', 0)}/{span_total} spans have "
-                f"byte precision",
+                span_total > 0 and span_byte > 0 and not undefined_tiers,
+                f"{span_byte}/{span_total} spans byte-precise; "
+                f"{span_unknown} unknown (providers declaring source_span "
+                f"unsupported cannot attribute a byte range); "
+                f"undefined tiers {sorted(undefined_tiers) or 'none'}",
             )
         )
 
@@ -682,7 +754,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         action="append",
         default=[],
         metavar="DIR_OR_FILE",
-        help="transcript directory (recursive) or .jsonl file; repeatable",
+        help="transcript directory (recursive) or transcript file; repeatable",
     )
     parser.add_argument("--out", default=None, help="report path (JSON)")
     parser.add_argument(
@@ -697,10 +769,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if not os.path.isfile(args.binary):
             raise HarnessError(f"--binary does not exist: {args.binary}")
         if not args.sources:
-            raise HarnessError("--sources is required (directory or .jsonl file)")
+            raise HarnessError("--sources is required (directory or transcript file)")
         sources = collect_sources(args.sources)
         if not sources:
-            raise HarnessError("no .jsonl files found under the given --sources")
+            raise HarnessError("no candidate transcript files found under the given --sources")
 
         out = args.out or os.path.join(
             "evidence-output", "real-data-regression.json"
@@ -708,7 +780,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if args.dry_run:
             print(f"regression: dry run: no file written")
             print(f"regression: would exercise {os.path.basename(args.binary)}")
-            print(f"regression: would ingest {len(sources)} .jsonl source files")
+            print(f"regression: would ingest {len(sources)} candidate source files")
             print(f"regression: would write {out}")
             return 0
 
