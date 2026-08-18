@@ -583,16 +583,13 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Provider-scoped identity migration plan (schema v13, design.md
-    // "Deferred"): test-local mirrors of the proposed `ses_v2_`
-    // derivation, namespace-key normalization, and TTL alias resolution.
+    // Provider-scoped identity migration plan (schema v13, deferred):
+    // test-local mirrors of the proposed `ses_v2_` derivation,
+    // namespace-key normalization, and TTL alias resolution.
     // Production code is deliberately untouched — `native_session_scoped`
-    // keeps emitting `ses_v1_` until the migration task lands. These pure
+    // keeps emitting `ses_v1_` until the migration lands. These pure
     // functions pin the plan's determinism/reversibility properties
     // before any schema or wire change ships.
-    //
-    // Plan: .trellis/tasks/08-15-unified-release-contract/research/
-    //       2026-08-18-provider-scoped-identity-plan.md
     // ------------------------------------------------------------------
 
     /// Proposed `ses_v2_` scoped-session wire prefix — the format bump that

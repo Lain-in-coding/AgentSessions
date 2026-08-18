@@ -1,4 +1,4 @@
-//! TUI Preview：交互式只读浏览（task design 07-27-tui-preview）。
+//! TUI Preview：交互式只读浏览。
 //!
 //! 本文件是薄 glue：终端生命周期（raw mode + 备用屏 + panic 恢复钩子）、
 //! crossterm 事件 → [`KeyInput`] 映射、[`Effect`] 对 App ADT 的同步执行、

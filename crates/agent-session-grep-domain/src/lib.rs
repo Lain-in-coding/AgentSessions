@@ -280,8 +280,8 @@ impl ToolActivityStatus {
 
 /// One typed tool activity observation attached to a canonical Message.
 ///
-/// Facts are provider-recorded first; extraction follows the explicit ordered
-/// rule set in the task design (R1 target priority chain, R2 kind inference,
+/// Facts are provider-recorded first; extraction follows an explicit ordered
+/// rule set (R1 target priority chain, R2 kind inference,
 /// R3 actor, R4 status). Fail-closed: unknown → `kind = Unknown`,
 /// `target = None` — never guessed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

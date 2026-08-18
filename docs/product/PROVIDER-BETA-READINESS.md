@@ -7,13 +7,13 @@
 > repository-local gaps from external/owner gates. Do not promote from this
 > file alone.
 
-Last updated: 2026-08-17 (HEAD after semantic-candle + handoff tool_activity).
+Last updated: 2026-08-17 (after semantic-candle + handoff tool_activity landed).
 
 ## Global external blockers (apply to every promotion)
 
 | Blocker | Owner | Notes |
 |---|---|---|
-| Named successful cross-target CI run | GitHub billing + CI | `last_certified_targets` stays empty until a green Windows/Linux/macOS run id is recorded |
+| Named successful cross-target CI run | external CI | `last_certified_targets` stays empty until a green Windows/Linux/macOS run id is recorded |
 | ADR-0010 accepted_at | owner/approver | Rollback policy is Proposed only |
 | Independent owner promotion decision | owner | RFC-0002 §6 forbids code-existence promotion |
 

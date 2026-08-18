@@ -4,16 +4,15 @@
 >
 > - decision_id: ADR-0009
 > - title: 跨边界输出默认脱敏
-> - status: **Proposed(2026-08-15,owner 拷问确认 Q45/Q49)**
+> - status: **Proposed(2026-08-15,owner 决策确认)**
 > - owner: QIN
 > - approver: 项目最终验收人
 > - due_milestone: 开源发布门
-> - evidence_path: `docs/adr/ADR-0004-output-time-snippet-redaction.md`;
-  `.trellis/tasks/08-15-open-source-product-roadmap/prd.md`
+> - evidence_path: `docs/adr/ADR-0004-output-time-snippet-redaction.md`
 > - governance: status=Proposed is a design decision only; the release gate
 >   accepts this rule only after owner/approver records `accepted_at`, approver,
 >   implementation evidence and passing cross-boundary fixture tests. Until then,
->   roadmap/parent/child references must not claim the ADR is Accepted.
+>   no roadmap or other document may claim the ADR is Accepted.
 
 ## 决策
 
@@ -33,7 +32,7 @@ Catalog 保留原文。输出脱敏按**输出边界**分两层:
 开源发布将引入 Web UI(`asg serve`)、handoff pack(会被粘贴给其他
 agent)、MCP/Robot(会被程序消费转发)。这些输出离开"本机人工查看"边界,
 被自动转发、粘贴、注入的概率远高于终端屏幕;ADR-0004 的"零外发路径"
-前提在跨边界场景不再成立。owner 在 2026-08-15 产品拷问中确认:
+前提在跨边界场景不再成立。owner 在 2026-08-15 的产品评审中确认:
 目录原文不动(保 evidence fidelity),脱敏在投影层做。
 
 ## 后果
@@ -43,5 +42,5 @@ agent)、MCP/Robot(会被程序消费转发)。这些输出离开"本机人工�
 - 检测规则与脱敏 fixture 入库并进 CI;误报保守处理(脱敏优先)。
 - 若未来增加网络能力(遥测/分享/云端),ADR-0004 的重评审条款仍适用,
   且跨边界默认脱敏不得放松。
-- 实现落在 `08-15-offline-privacy-hooks` 子任务;Handoff pack 的
+- 实现落在离线与隐私 hook 阶段;Handoff pack 的
   redaction 状态字段属于 handoff-pack/v1 契约。

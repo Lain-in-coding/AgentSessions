@@ -5,7 +5,7 @@
 //! 参数映射：良构参数构造 [`AppRequest`] 交给 Application，成功结果复用 CLI
 //! 同一个 [`crate::render`] 投影——不复制搜索/分支/分页/预算业务规则。
 //!
-//! 错误分层（task design §0.3）：
+//! 错误分层（design §0.3）：
 //! - 协议层问题（坏 JSON、批量数组、未知方法/工具、非法参数、未初始化）→
 //!   JSON-RPC error 对象；`-32602` 携带 `data.canonical_code = invalid_request`；
 //! - 良构 [`AppRequest`] 之后的业务失败（cursor_invalid、not_found、...）→

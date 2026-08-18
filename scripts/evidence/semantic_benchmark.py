@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Frozen semantic/hybrid retrieval benchmark for agent-session-grep.
 
-Implements PRD requirement 7 of task `08-15-semantic-hybrid-local-retrieval`:
+The benchmark has three parts:
 
 - A deterministic, seeded synthetic corpus (~2000 messages, ~200 sessions)
   mixing CJK Chinese prose, English prose, and code snippets, with planted

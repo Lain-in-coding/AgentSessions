@@ -15,7 +15,7 @@ that content.
 ## Reporting a vulnerability
 
 Please report security issues privately — do not open a public issue.
-Open a [GitHub Security Advisory](https://github.com/qin-devs/AgentSessions/security/advisories/new)
+Open a [GitHub Security Advisory](https://github.com/qin-devs/agent-session-grep/security/advisories/new)
 or email the maintainers directly. You can expect:
 
 - An acknowledgement within 3 business days.

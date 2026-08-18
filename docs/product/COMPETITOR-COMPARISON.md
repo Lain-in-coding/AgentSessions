@@ -1,9 +1,9 @@
 # Competitor Comparison Table
 
-> Open-source gate artifact (08-15-benchmark-install-open-source-gate R1):
+> Open-source gate artifact:
 > 与当前已核验外部参考项目的公开对比表。只列可复现事实(provider 数、
 > 能力、license、形态);不能合法/稳定运行的竞品标「不可比」。
-> 证据来源: 本地深读报告(13 份外部项目,不纳入公开树)与固定 clone(commit 见
+> 证据来源: 本地深读报告(报告本身不纳入公开树)与固定 clone(commit 见
 > `docs/operations/REUSE-LICENSE-AUDIT.md`)。
 > cass(coding_agent_session_search)因 LICENSE 含 restricted-party rider
 > 仅 clean-room 思路可引用,不进入可复现对比基线。

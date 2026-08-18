@@ -1,8 +1,8 @@
 //! Provider Capability Matrix（能力矩阵单源权威）。
 //!
 //! 所有入口（CLI/MCP/Robot/Web）渲染 provider 能力必须读本矩阵，禁止硬编码。
-//! 当前已实现的 provider maturity=experimental，在 `08-15-sixteen-provider-evidence-wave`
-//! 任务中逐步实现并晋级。
+//! 当前已实现的 provider maturity=experimental，按证据逐步晋级
+//! （晋级门槛见 `docs/architecture/RFC-0002-provider-adapter-contract.md` §6）。
 //!
 //! 参考：ctx 的 `provider-support-matrix.json` 格式（idea-only）。
 
@@ -123,9 +123,9 @@ pub struct ProviderCapabilityMatrix {
 }
 
 impl ProviderCapabilityMatrix {
-    /// 返回当前 16 个 provider 的能力矩阵（evidence wave 08-15 全量：
-    /// 14 个已实现 + 2 个 deferred）。deferred provider（deepseek-harness/zcode）
-    /// 无 transcript 证据，保持 Unsupported 不宣传。
+    /// 返回当前 16 个 provider 的能力矩阵（14 个已实现 + 2 个 deferred）。
+    /// deferred provider（deepseek-harness/zcode）无 transcript 证据，
+    /// 保持 Unsupported 不宣传。
     pub fn current() -> Self {
         Self {
             providers: vec![
@@ -477,7 +477,7 @@ mod tests {
         assert_eq!(
             m.providers.len(),
             16,
-            "matrix must list all 16 providers (evidence wave 08-15), got {}",
+            "matrix must list all 16 providers, got {}",
             m.providers.len()
         );
     }
@@ -512,11 +512,11 @@ mod tests {
             assert_eq!(
                 p.maturity,
                 ProviderMaturity::Experimental,
-                "{id} should be experimental (evidence wave 08-16)"
+                "{id} should be experimental"
             );
             assert!(
                 !p.variant_id.is_empty(),
-                "{id} should have a variant id after evidence-wave implementation"
+                "{id} should have a variant id once implemented"
             );
         }
     }

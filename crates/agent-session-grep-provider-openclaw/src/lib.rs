@@ -10,11 +10,11 @@
 //! Identity: the header `id` field. Resume is intentionally unsupported
 //! (gateway-managed) — the adapter never emits a resume command.
 //!
-//! Format evidence: PRD `08-15-sixteen-provider-evidence-wave` (v3 JSONL
-//! header `{type:session,id,timestamp,cwd}` + `{type:message,...}`), deep-read
-//! report `2026-08-15-provider-evidence-wave.md` §11. The type-based dispatch
-//! and content extraction follow the same v3 JSONL shape as the Pi adapter
-//! (`agent-session-grep-provider-pi`), which is adapted from fast-resume (MIT).
+//! Format evidence: OpenClaw v3 JSONL (header
+//! `{type:session,id,timestamp,cwd}` + `{type:message,...}`). The type-based
+//! dispatch and content extraction follow the same v3 JSONL shape as the Pi
+//! adapter (`agent-session-grep-provider-pi`), which is adapted from
+//! fast-resume (MIT).
 
 use agent_session_grep_ports::MetadataResolution;
 use agent_session_grep_ports::{

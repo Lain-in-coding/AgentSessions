@@ -16,7 +16,7 @@
 
 ## 1. 审查范围
 
-对 `Github_src/` 下 12 个同类开源项目的调研结论做许可与复用判定。判定分四级：
+对已调研的 12 个同类开源项目（固定 clone，逐项核对 remote/HEAD）的结论做许可与复用判定。判定分四级：
 
 - **direct-copy**：许可 + 语言兼容，保留版权/NOTICE、标注修改后可直接复制到本项目 Rust 源码；
 - **adapt**：设计与实现可移植，但需按本项目 Canonical/契约重写，不逐行照抄；
@@ -50,8 +50,7 @@
 | agf | shell quoting / PowerShell 包装 | direct-copy | CLI 入口实现 | 保留 MIT 声明 |
 | Recall (MIT) | FTS5 external-content + 触发器 | adapt | `../adr/ADR-0001-fulltext-search-engine.md` | — |
 | Recall | RRF k=60、目录子树过滤、迁移幂等骨架、JSONL roundtrip | adapt | Search、Catalog 迁移与 CLI contract 测试 | — |
-| sessiongrep (Apache-2.0) | 纯函数 find_repo_root/extract_text/highlight/timeline/escape | direct-copy | Provider discovery 与 Search 展示实现 | 保留版权头 |
-| sessiongrep | 两段式检索（FTS 召回→Rust 重排） | adapt | `../adr/ADR-0001-fulltext-search-engine.md` | — |
+| sessiongrep (Apache-2.0) | 两段式检索（FTS 召回→Rust 重排） | adapt | `../adr/ADR-0001-fulltext-search-engine.md` | — |
 | sessiongrep | 全 crates.io 无 vendored 供应链基线 | idea-only（模板） | 发布与供应链审计 | — |
 | hstry (MIT) | 事务化 migration runner、source-scoped purge、peek bundle | adapt | Catalog 迁移与 `../contracts/CONTRACT-cli-robot-mcp-draft.md` §7 | — |
 | hstry | version 单调 / outbox / retention 测试 | adapt | Catalog 一致性与 generation retention 测试 | — |

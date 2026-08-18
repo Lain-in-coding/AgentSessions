@@ -12,8 +12,8 @@
 //! to `user`, `MODEL` to `assistant`; SYSTEM steps (including
 //! CONVERSATION_HISTORY dumps) are never emitted as messages.
 //!
-//! Format evidence: 2026-08-15 provider-evidence-wave research, Antigravity
-//! local sample `~/.gemini/antigravity-cli/brain/` (structural shapes only).
+//! Format evidence: local sample verification of
+//! `~/.gemini/antigravity-cli/brain/` (structural shapes only).
 
 use agent_session_grep_ports::{
     AdapterManifest, CanonicalEventSink, Confidence, MessageEvent, ParseReport, ProbeResult,

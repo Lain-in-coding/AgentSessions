@@ -7,9 +7,8 @@
 //! `message.content` body; `progress` / `tool_use` / `tool_result` are
 //! non-conversational and skipped by the canonical adapter.
 //!
-//! Format evidence: PRD `08-15-sixteen-provider-evidence-wave` and
-//! `ctx provider-support-matrix.json` — source root
-//! `~/.qoder/projects/<project>/transcript/*.jsonl`, record types
+//! Format evidence: ctx (Apache-2.0) `provider-support-matrix.json` — source
+//! root `~/.qoder/projects/<project>/transcript/*.jsonl`, record types
 //! `session_meta`/`user`/`assistant`/`progress`/`tool_use`/`tool_result`.
 //! Identity fields are extracted from `session_meta` (fixture-derived;
 //! `session_id`/`cwd` keys are matched leniently).

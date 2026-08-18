@@ -86,7 +86,7 @@ fn parse_fixture(bytes: &[u8]) -> (ParseReport, Vec<Captured>) {
     (report, sink.messages)
 }
 
-/// 把解析结果序列化为 design.md 约定的 canonical 输出形状。
+/// 把解析结果序列化为 golden 契约约定的 canonical 输出形状。
 fn canonical_json(fixture_blake3: &str, report: &ParseReport, messages: &[Captured]) -> Value {
     json!({
         "fixture_blake3": fixture_blake3,

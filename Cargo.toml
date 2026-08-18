@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
-exclude = ["spikes", "Github_src"]
+exclude = ["spikes"]
 
 [workspace.package]
 edition = "2024"
@@ -25,9 +25,9 @@ candle-transformers = "0.10.2"
 tokenizers = { version = "0.22.2", default-features = false, features = ["onig"] }
 safetensors = "0.4.5"
 
-# Release profile rationale (2026-08-15, task 08-15 open-source-product-roadmap).
-# Peer evidence — borrowable-code-inventory.md §9 "Don't Borrow", verified against
-# the fixed competitor clones (memex @9a88a5c, hstry @88b78b1):
+# Release profile rationale. Peer evidence — the release profiles of two
+# comparable Rust session-history CLIs were reviewed before choosing these
+# values:
 #   * hstry: opt-level="z" + lto=true + codegen-units=1 + panic="abort" + strip=true.
 #     panic="abort" is NOT adopted: it sacrifices unwinding — no catch_unwind,
 #     no Drop cleanup on panic, and buffered stderr diagnostics can be lost.
@@ -41,5 +41,5 @@ safetensors = "0.4.5"
 opt-level = 3        # latency-first -O3; reject "z"/"s" (hstry/memex are size-first caches, not query tools)
 lto = "thin"         # cross-crate inlining across the 8 workspace crates; thin keeps build time/memory sane (memex thin, hstry fat)
 codegen-units = 1    # per-crate max optimization; the workspace crates are small, so the single-unit compile cost is acceptable (hstry 1, memex 4)
-panic = "unwind"     # keep unwinding — deliberate divergence from hstry's panic="abort" (don't-borrow §9)
+panic = "unwind"     # keep unwinding — deliberate divergence from hstry's panic="abort"
 strip = "debuginfo"  # measured 2026-08-15: same binary size as strip=true (3,817,984 B) on MSVC, but keeps symbol names so RUST_BACKTRACE=1 stays actionable; panic messages keep their compile-time file:line either way

@@ -6,16 +6,14 @@
 //! and `content` at the top level (OpenAI-style), plus a `sessionId`.
 //!
 //! CodeBuddy records a startup keyword as a root user message whose content
-//! is the literal `"code"`; per the PRD evidence (AgentRecall `codebuddy-cli`
-//! source, MIT), that root message is filtered out — it is not a real user
-//! turn, only a launcher token.
+//! is the literal `"code"`; per the upstream evidence (AgentRecall
+//! `codebuddy-cli` source, MIT), that root message is filtered out — it is not
+//! a real user turn, only a launcher token.
 //!
-//! Format evidence: tracked research
-//! `.trellis/tasks/08-15-sixteen-provider-evidence-wave/
-//! research/2026-08-15-provider-evidence-wave.md` (line 153); PRD row 42;
-//! AgentRecall (`codebuddy-cli` source, MIT). The `type:"message"` dispatch,
-//! top-level `role`/`content`, `sessionId` identity, and `"code"` root-message
-//! filter are adapted idea-level from AgentRecall under its MIT license.
+//! Format evidence: AgentRecall (`codebuddy-cli` source, MIT). The
+//! `type:"message"` dispatch, top-level `role`/`content`, `sessionId` identity,
+//! and `"code"` root-message filter are adapted idea-level from AgentRecall
+//! under its MIT license.
 //!
 //! Variant ID: `tencent-codebuddy/cli-jsonl-v1`.
 

@@ -2,7 +2,7 @@
 //!
 //! JSON 是权威结构；Markdown 是 deterministic projection。
 //! evidence（原文证据）与 inference（推断摘要）严格分栏，不混写。
-//! 实现落在 `08-15-evidence-handoff-pack` 子任务；本模块只定义契约类型。
+//! 本模块只定义契约类型；生成实现在 Application 层（`handoff_pack.rs`）。
 //!
 //! `RetrievalMode`、`RedactionStatus`、`RedactionMode`、`RedactionState`
 //! 定义在 crate root（`lib.rs`），本模块 re-export 以保持 handoff 契约自洽。

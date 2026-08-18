@@ -1887,7 +1887,7 @@ fn mcp_stderr_stays_clean_on_protocol_errors() {
     assert!(stderr.is_empty(), "参数错误不得写入 stderr: {stderr}");
 }
 
-// ─── design §4 场景补充：search_sessions facet 参数（08-15 structured-activity）──
+// ─── design §4 场景补充：search_sessions facet 参数（structured activity）──
 
 #[test]
 fn search_sessions_facet_params_filter_and_validate() {

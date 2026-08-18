@@ -3,7 +3,7 @@
 > 对外可见的 Provider 状态清单，是 `0.1.0`（首个计划公开版本，`Cargo.toml`）的公开状态记录。
 > - 术语与晋级证据要求见 `../architecture/RFC-0002-provider-adapter-contract.md` §6。
 > - 本文件是**当前实现状态**的事实记录，不是承诺；晋级必须有证据，不由代码存在自动推断。
-> - 最后更新：2026-08-18（16-provider evidence wave + semantic-candle/handoff/context/TUI 投影 wave，HEAD `f7e2a49`）
+> - 最后更新：2026-08-18（16-provider 证据链 + semantic-candle/handoff/context/TUI 投影）
 > - 权威数据源：`crates/agent-session-grep-ports/src/capability.rs` 的
 >   `ProviderCapabilityMatrix::current()`；本表与其保持一致，不一致以 capability.rs 为准。
 > - Beta 本地/外部缺口分账见 `PROVIDER-BETA-READINESS.md`（不得仅凭代码存在晋级）。
@@ -39,8 +39,8 @@
 | Tencent CodeBuddy | `tencent-codebuddy` | `tencent-codebuddy/cli-jsonl-v1` | **Experimental** | CLI OpenAI-style JSONL（`role`/`content`/`sessionId`），extension variant 待分层 + golden（`tests/golden.rs`） |
 | Cline | `cline` | `cline/api-conversation-history-v1` | **Experimental** | `api_conversation_history.json` JSON family + golden（`tests/golden.rs`） |
 | Aider | `aider` | `aider/chat-history-md-v1` | **Experimental** | Markdown chat history（`#### ` user prompts），`.aider.chat.history.md` 为候选 root 待核验 + golden（`tests/golden.rs`） |
-| DeepSeek Harness | `deepseek-harness` | — | **Unsupported（deferred）** | 无任何 transcript 证据（本机无 `~/.deepseek`，参考项目无 adapter）；决策见 `deferred-deepseek-zcode.md` |
-| ZCode | `zcode` | — | **Unsupported（deferred）** | 无任何 transcript 证据（本机无 `~/.zcode`，参考项目无 adapter）；决策见 `deferred-deepseek-zcode.md` |
+| DeepSeek Harness | `deepseek-harness` | — | **Unsupported（deferred）** | 无任何 transcript 证据（本机无 `~/.deepseek`，参考项目无 adapter）；证据出现前不实现、不宣传 |
+| ZCode | `zcode` | — | **Unsupported（deferred）** | 无任何 transcript 证据（本机无 `~/.zcode`，参考项目无 adapter）；证据出现前不实现、不宣传 |
 
 14 个已实现 provider 均为 **Experimental**：golden、property、source span 以及
 关系化 Message/Placement/Edge 的合成与 e2e 证据已入库（见下），授权真实数据全量
@@ -62,7 +62,7 @@ target。
 | search | `native` | 统一经 canonical 索引检索 |
 | discover | `native`（claude-code/codex）；`unsupported`（其余） | 仅 claude-code/codex 注册了 discovery root；antigravity/opencode 已加入 `provider_data_root` |
 | resume | `derived`（claude-code/codex/pi/grok）；`unknown`（opencode/kimi/qoder/codebuddy/hermes/antigravity/cursor）；`unsupported`（aider/cline/openclaw） | 未核验的 resume 命令一律不设默认值 |
-| context / handoff / incremental | `unsupported` 或 `unknown` | 属后续全能力链任务（`08-15-structured-activity-context-facets`），不在本任务范围 |
+| context / handoff / incremental | `unsupported` 或 `unknown` | 属后续全能力链工作，尚未逐 provider 评估 |
 | tool_activity | `partial`（claude-code/codex/aider，schema v12 `tool_activities` 落库）；`unknown`（deepseek-harness/zcode，deferred）；`unsupported`（其余 11 个已实现 provider） | CLI `--tool-kind`/`--tool-name`/`--main-only`/`--subagent-only`/`--include-sidechain`、MCP 同名参数与 TUI 分面键（`m` sidechain / `k` tool-kind）已落地；handoff pack 投影 `tool_activity` + 权威 `role`/`is_sidechain`，context 响应投影 `tool_activities` |
 | source_span | `native`（claude/codex/grok/pi/kimi/openclaw/qoder/codebuddy）；`derived`（aider）；`unsupported`（opencode/hermes/antigravity/cursor/cline） | SQLite/目录名身份/单文档 JSON 类 provider 无文件内字节 span；cline 的数组下标 pseudo-span 已移除并如实降级为 unsupported |
 
@@ -141,9 +141,9 @@ manifest 均已填真实限制，见各 `crates/agent-session-grep-provider-*/sr
    新增 `installer` job 已配置三平台矩阵（证据行 `IB-CI-INSTALLER-001`），但在
    PR 上跑绿并记录具体 run id 之前只能是 `ci_configured_only`；hosted runner 亦
    非 clean machine，不构成安装认证。`core-beta-evidence.yml` 的四 target job 现在也
-   纳入 Claude/Codex provider evidence 与 open-source gate benchmark；但最新推送
-   的运行因 GitHub account billing/spending-limit 在首步前失败，尚无 named successful
-   run，因此仍为 `ci_configured_only`。
+   纳入 Claude/Codex provider evidence 与 open-source gate benchmark；但最新触发
+   的运行未能完成（外部 CI 阻塞），尚无 named successful run，因此仍为
+   `ci_configured_only`。
 6. 回滚策略——**部分闭合，仍保持 Proposed**：`docs/adr/ADR-0010-provider-maturity-rollback.md`
    已记录 RFC-0002 §6 的晋级证据、降级触发条件、单源改动顺序、历史恒可检索不变量
    与 owner/approver 责任；CLI `providers`、human/Robot 投影及 MCP `list_providers`
@@ -162,5 +162,5 @@ manifest 均已填真实限制，见各 `crates/agent-session-grep-provider-*/sr
 9. Codex 增量的直接证据——**已闭合**：新增 Codex 重 sync 幂等、源收缩 tombstone、
    空源 tombstone 三项合成 e2e，直接支撑 `incremental: native`。
 
-审计依据：`.trellis/tasks/08-15-sixteen-provider-evidence-wave/research/beta-promotion-audit.md`
-（2026-08-16，逐项只读核查，含每项的 file:line 与测试名）。
+上述缺口清单经 2026-08-16 的逐项只读核查确认（每项都核对了对应实现位置与测试
+名），核查本身不构成晋级；晋级仍需 owner 决策。

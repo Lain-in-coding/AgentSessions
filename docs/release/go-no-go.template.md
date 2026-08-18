@@ -108,4 +108,4 @@
 | Decision | <go / no-go> |
 | Date | <YYYY-MM-DD> |
 | Owner | QIN |
-| Signature | <recorded in task system> |
+| Signature | <owner signature> |

@@ -74,7 +74,7 @@
   `content` 与 `structuredContent`、Markdown、stderr/stdout、copy/export 和
   重渲染结果；扫描不完整时 fail-closed，不得以 bounded 长度替代脱敏。
 
-## 6. 新增攻击面（08-15-offline-privacy-hooks 需求 4）
+## 6. 新增攻击面（离线与隐私 hook）
 
 ### 6.1 serve LAN 模式
 

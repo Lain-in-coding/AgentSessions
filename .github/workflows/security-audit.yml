@@ -34,8 +34,8 @@ jobs:
         run: cargo deny check
 
       - name: Check zero-egress static audit
-        # 零遥测审计（design D5 / PRD 08-15-offline-privacy-hooks）：默认 build 不得
-        # 依赖 HTTP client，唯一 socket 是 serve 的 loopback TcpListener。
+        # 零遥测审计：默认 build 不得依赖 HTTP client，唯一 socket 是 serve 的
+        # loopback TcpListener。
         # 与 crates/agent-session-grep-cli/tests/network_egress.rs 同一语义，此处用
         # grep 作 CI 前置快速闸门（不依赖 cargo build）。
         run: |

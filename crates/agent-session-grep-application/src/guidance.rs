@@ -116,6 +116,8 @@ fn collect_string_leaves(value: &serde_json::Value, out: &mut Vec<String>) {
 /// POSIX 单引号包裹：参数含 shell 元字符或空白时用 `'...'` 包裹、内嵌单引号按
 /// `'\''` 转义；仅由字母/数字/`_./-` 构成的安全参数原样返回。这样既保证建议
 /// 命令可直接粘贴进 shell，又不改变常见安全 wire id 的既有输出字节。
+///
+/// 改编自 agf 的 shell quoting（MIT License）。
 fn shell_quote_arg(arg: &str) -> String {
     if !arg.is_empty()
         && arg

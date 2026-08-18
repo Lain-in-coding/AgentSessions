@@ -24,10 +24,11 @@ adapted carry the following attributions:
 |---|---|---|---|
 | ctx (ctxrs) | Apache-2.0 | WAL PRAGMA group, doctor integrity_check; CJK bigram tokenization (adapted); hybrid RRF k=60 reference (adapted) | direct-copy / adapt |
 | agf | MIT | bounded reader (read_head_tail / char_prefix); shell quoting / PowerShell wrapper | direct-copy |
-| sessiongrep | Apache-2.0 | pure helpers (find_repo_root, extract_text, highlight, timeline, escape); two-stage FTS recall + rerank (adapted) | direct-copy / adapt |
+| sessiongrep | Apache-2.0 | two-stage retrieval shape: FTS recall of bm25-ranked candidates, then rerank in Rust (adapted) | adapt |
 | Recall (samzong) | MIT | tool-activity target priority chain (adapted); Candle E5 embedding pipeline shape (adapted: BertModel + mean pooling + L2 + query:/passage: prefixes) | adapt |
 | fast-resume | MIT | jsonl_health source classification (adapted, retains upstream copyright line in code); opencode schema queries; pi/grok/kimi extraction approach | adapt |
 | hstry | MIT | hermes session JSON shapes and per-message extraction; transactional migration runner concepts | adapt |
+| memex | MIT | layered-dedup UNIQUE-constraint design (adapted as the placement constraint `UNIQUE(session_id, document_id, source_ordinal)`) | adapt |
 | agentsview | MIT | aider line-prefix role reconstruction | adapt |
 | claude-historian-mcp | MIT | codex/claude prefilter (skip non-dialogue records) | adapt |
 | AgentRecall | MIT | codebuddy idea-level filter; agent-sessions index-time redaction idea | adapt / idea-only |

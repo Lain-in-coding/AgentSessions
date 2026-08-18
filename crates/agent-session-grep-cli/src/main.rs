@@ -447,7 +447,7 @@ fn run(
         return mcp::serve(&store);
     }
     // tui：交互式只读浏览（Preview）。同 mcp 一样接管终端，不走 dispatch/
-    // emit_result；输出模式 flag 对其无意义（task design §0.6）。
+    // emit_result；输出模式 flag 对其无意义（design §0.6）。
     // `tui --snapshot-json <query>` 是无终端的 headless 结构投影，供 release
     // 一致性 harness 复用同一 Application 搜索路径做跨入口比对。
     if rest.first().map(String::as_str) == Some("tui") {
@@ -5105,7 +5105,7 @@ mod tests {
         );
     }
 
-    // ---- `--offline` 全局 flag（design D5 / PRD 08-15-offline-privacy-hooks）----
+    // ---- `--offline` 全局 flag（design D5：零出网是硬要求）----
 
     #[test]
     fn extract_offline_flag_only_reads_prefix_position() {

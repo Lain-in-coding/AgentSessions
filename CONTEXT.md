@@ -207,8 +207,8 @@ _Avoid_: support level, compatibility
 - **Fix scope (Q1)**: this round fixes all findings introduced by the UX diff
   plus the parser-robustness batch; perf P1s, MCP pre-existing contract gaps,
   and the evidence/install-script cluster move to a separate task.
-- **Task structure (Q2)**: new Trellis task `08-13-ux-review-fixes` owns the
-  production fixes; `e2e-hardening-followup` keeps its tests-only scope.
+- **Task structure (Q2)**: the production fixes are scoped as their own work
+  item; the e2e hardening follow-up keeps its tests-only scope.
 - **Snippets (Q3, owner revised)**: keep human search snippets with no
   redaction — the tool is local-first with zero network egress; on-screen
   secret display is accepted risk (ADR-0004). Budget enforcement is still
@@ -261,8 +261,8 @@ _Avoid_: support level, compatibility
   session context), B competitor borrowings (time/provider filters,
   system-noise filtering, group-by-session, around/get_message, summary
   levels), C context/perf Top 5 (edge batching, mainline index, timestamp
-  pre-parse, rebuild join, merged IN). Each task owns a worktree; A lands
-  first because B's contract depends on A's schema decisions.
+  pre-parse, rebuild join, merged IN). The three streams are developed in
+  isolation; A lands first because B's contract depends on A's schema decisions.
 - **CJK scheme (Q2)**: CJK bigram pre-processing at index write time
   ("配置备份" → "配置 置备 备份"); the FTS5 projection stays rebuildable via
   index rebuild. Trigram rejected (≤2-char queries die — the core Chinese
@@ -272,9 +272,8 @@ _Avoid_: support level, compatibility
 
 ## Decision log (2026-08-15 — open-source product roadmap)
 
-> Full decision record: `.trellis/tasks/08-15-open-source-product-roadmap/prd.md`
-> and `docs/product/OPEN-SOURCE-ROADMAP.md`. Owner confirmed Q1–Q55 over a
-> grill-with-docs session; key locks below.
+> Full decision record: `docs/product/OPEN-SOURCE-ROADMAP.md`. Owner confirmed
+> Q1–Q55 over a requirements review; key locks below.
 
 - **Identity (naming)**: product name is `agent-session-grep`, CLI alias `asg`.
   "Agent Session Group" was a typo and is retired.
@@ -338,10 +337,10 @@ _Avoid_: support level, compatibility
   plus an honest comparison table vs the 13 currently verified external projects;
   the 15-project claim may return only after two independent external baselines
   are added — no un-reproducible claims.
-- **Execution**: parent task `08-15-open-source-product-roadmap` with 10
-  children (unified-release-contract, sixteen-provider-evidence-wave,
-  semantic-hybrid-local-retrieval, evidence-handoff-pack,
-  resume-metadata-execution, structured-activity-context-facets,
-  loopback-web-ui-parity, offline-privacy-hooks,
-  benchmark-install-open-source-gate, final-integration-release-rehearsal).
-  08-13/08-14 task trees are Phase 0 and are absorbed, not duplicated.
+- **Execution**: the roadmap is delivered in ten stages — unified release
+  contract, 16-provider evidence wave, semantic/hybrid local retrieval,
+  evidence handoff pack, resume metadata and execution, structured activity and
+  context facets, loopback Web UI parity, offline/privacy hooks, benchmark +
+  install + open-source gate, final integration and release rehearsal — as
+  enumerated in `docs/product/OPEN-SOURCE-ROADMAP.md` §3. The 2026-08-13 and
+  2026-08-14 decision rounds above are Phase 0 and are absorbed, not duplicated.

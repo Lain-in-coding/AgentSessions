@@ -1,4 +1,4 @@
-//! 零遥测静态审计（design D5 / PRD 08-15-offline-privacy-hooks 要求）：
+//! 零遥测静态审计（design D5：零出网是硬要求）：
 //! 证明默认 build 无 HTTP client 依赖，且唯一 socket 是 `serve` 的 loopback
 //! TcpListener。README/SECURITY 的 "zero telemetry, zero upload, offline by
 //! default" 宣称由本测试固化——任何新增 HTTP client 依赖或额外 socket 都

@@ -1,4 +1,4 @@
-//! TUI 纯核心（Elm-style，task design 07-27-tui-preview §2）：
+//! TUI 纯核心（Elm-style，design §2）：
 //! `Model` + `Msg` + `Effect` + [`update`] reducer 与 view-model 纯函数。
 //!
 //! 约束：本文件不 import ratatui / crossterm / store / App——键盘输入用自带的
@@ -272,7 +272,7 @@ pub(crate) fn update(model: Model, msg: Msg) -> (Model, Option<Effect>) {
     }
 }
 
-/// 键位表（task design §2，冻结）：全局 Ctrl+C 退出；各屏见 match 各臂。
+/// 键位表（design §2，冻结）：全局 Ctrl+C 退出；各屏见 match 各臂。
 fn handle_key(mut model: Model, key: KeyInput) -> (Model, Option<Effect>) {
     if key == KeyInput::CtrlC {
         model.quit = true;

@@ -1293,6 +1293,9 @@ impl SqliteStore {
     }
 
     /// 打开并把 schema 迁移到当前版本，为版本化 migration 与可重建索引奠基。
+    ///
+    /// WAL journal 模式的 PRAGMA 初始化复制自 ctx（ctxrs，Apache-2.0）的
+    /// catalog 初始化。
     fn init(conn: &Connection) -> PortResult<()> {
         conn.execute_batch("PRAGMA journal_mode=WAL;")
             .map_err(backend)?;

@@ -5042,7 +5042,7 @@ fn sync_discover_partial_scan_does_not_tombstone() {
     }
 }
 
-// ---- 工具活动 + facet 过滤（08-15 structured-activity，schema v12）----
+// ---- 工具活动 + facet 过滤（structured activity，schema v12）----
 // 合成 fixture：无真实 transcript 数据（隐私）。
 
 use agent_session_grep_domain::{IdKind, StableId};

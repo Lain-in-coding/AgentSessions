@@ -4,8 +4,8 @@ target/
 target-*/
 **/*.rs.bk
 
-# Reference source repos (studied for patterns, not part of this project)
-/Github_src
+# Local clones of third-party reference projects (never part of this project)
+/*_src/
 
 # Local scratch databases + SQLite 侧车文件
 *.db

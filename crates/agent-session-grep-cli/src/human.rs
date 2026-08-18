@@ -1,6 +1,5 @@
 //! Human 渲染器：把成功结果投影为人类可读文本行（无 envelope、无颜色）。
 //!
-//! 见 `.trellis/tasks/07-26-human-robot-protocol/design.md` §2。
 //! search/list/get/show/context/status/providers 各有专属版式，sync 与 ingest 各有统计
 //! 版式，其余命令（index/index.rebuild/doctor/config.paths 及未知命令）共用
 //! 同一条排序 `key: value` 兜底路径。约束：无颜色、无新依赖；任何输入不

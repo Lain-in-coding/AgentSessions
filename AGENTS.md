@@ -1,91 +1,122 @@
-<!-- TRELLIS:START -->
-# Trellis Instructions
-
-These instructions are for AI assistants working in this project.
-
-This project is managed by Trellis. Shared workflow knowledge lives under `.trellis/`; local journals are optional and non-authoritative:
-
-- `.trellis/workflow.md` — development phases, when to create tasks, skill routing
-- `.trellis/spec/` — package- and layer-scoped coding guidelines (read before writing code in a given layer)
-- `.trellis/tasks/` — active and archived tasks (PRDs, research, jsonl context)
-- `.trellis/workspace/` — optional per-developer local journals; never current-state authority
-
-If a Trellis command is available on your platform (e.g. `/trellis:finish-work`, `/trellis:continue`), prefer it over manual steps. Not every platform exposes every command.
-
-If you're using Codex or another agent-capable tool, additional project-scoped helpers may live in:
-- `.agents/skills/` — reusable Trellis skills
-- `.codex/agents/` — optional custom subagents
-
-Managed by Trellis. Edits outside this block are preserved; edits inside may be overwritten by a future `trellis update`.
-
-<!-- TRELLIS:END -->
-
 # agent-session-grep Repository Onboarding
 
-## Tooling boundary
+Orientation for AI coding agents working in this repository. `CLAUDE.md` holds
+the agent-specific rules and `CONTRIBUTING.md` holds the full commit and
+collaboration standards; this file adds the repository map and the reading order
+that make those rules actionable. Where they overlap, `CLAUDE.md` and
+`CONTRIBUTING.md` win.
 
-Trellis and the platform integration roots (`.trellis/`, `.agents/`,
-`.codebuddy/`, and `.codex/`) are development workflow tooling. They are not
-agent-session-grep product features, provider adapters, or user-facing Skills.
-Product behavior lives in the Rust crates, schemas, and product documentation.
+## What this project is
 
-## Clean-clone quick start
+`agent-session-grep` (CLI alias `asg`) is a local-first, CLI-first search engine
+over AI coding-agent session history. It discovers provider transcripts on disk,
+normalizes them into a canonical domain model with stable content-derived
+identity and nonlinear message graphs, and serves retrieval, session context,
+resume, and handoff through CLI, Robot JSON/JSONL, MCP, TUI, and loopback Web UI
+surfaces that all share one Application ADT.
 
-Run these commands from the repository root. The two `--help` commands are the
-authoritative way to confirm the installed workflow CLI before using it.
+It is a read-only consumer of transcripts: no telemetry, no upload, offline by
+default.
 
-```text
-python ./.trellis/scripts/task.py --help
-python ./.trellis/scripts/get_context.py --help
-python ./.trellis/scripts/task.py list
-python ./.trellis/scripts/task.py current --source
-python ./.trellis/scripts/get_context.py --mode packages
+## Architecture
+
+The workspace is hexagonal. Dependencies point one way only:
+
+```
+domain ← ports ← application ← adapters ← cli
 ```
 
-`task.py current --source` exits nonzero when no task is active; that is a
-normal clean-clone state. If it does, use `task.py list`: the sole shared task
-with `status=in_progress` is the repository's current work, while a runtime
-pointer only records the current session's selection. Before creating or
-starting a task, follow `.trellis/workflow.md`, including its consent and
-planning gates.
+| Layer | Crate(s) | Responsibility |
+|---|---|---|
+| domain | `agent-session-grep-domain` | Canonical entities and invariants (Message, Session, SourceDocument, Placement, StableId, mainline selection). No I/O, no provider types. |
+| ports | `agent-session-grep-ports` | Trait contracts the application depends on (`SourceDiscovery`, `CatalogStore`, `ContextGraphStore`, `SearchIndex`, `SemanticIndex`, `ProviderAdapter`, …). |
+| application | `agent-session-grep-application` | Use cases over the ports: search, session context, activity facets, cursors, response budget, hybrid fusion, resume, handoff pack. |
+| adapters | `agent-session-grep-adapters-sqlite`, `agent-session-grep-provider-*` | Concrete port implementations: the SQLite catalog + FTS projection, and one crate per provider transcript format. |
+| cli | `agent-session-grep-cli` | Composition root and every entry point: human CLI, Robot modes, MCP stdio server, TUI, `serve` loopback HTTP + Web UI, hooks, redaction. |
+
+`agent-session-grep-testkit` provides shared test helpers and is a dev
+dependency only.
+
+Rules that follow from the layering:
+
+- Provider-native fields never leak past an adapter boundary; adapters reduce a
+  transcript to canonical events.
+- Application code depends on ports, never on a concrete adapter.
+- Every surface goes through the same Application ADT, so a behavior change
+  belongs in `application`, not in one entry point.
+
+## Quality gate
+
+Run these from the repository root and confirm green before proposing a commit:
+
+```
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+```
+
+The Python evidence, release, and installer harnesses are stdlib-only
+`unittest`. Run the suite for whichever directory you touched:
+
+```
+python -m unittest discover -s scripts -p "test_*.py"
+python -m unittest discover -s scripts/evidence -p "test_*.py"
+python -m unittest discover -s scripts/release -p "test_*.py"
+```
+
+## Commit and collaboration
+
+- Conventional Commits: `type(scope): subject`, subject ≤ 50 characters,
+  imperative mood, no trailing period. One logical change per commit.
+- Never run `git commit` or `git push` unless the user explicitly asks. Stage
+  specific files; never `git add .` blindly.
+- Feature branch → pull request into `main`. Do not push to `main` and do not
+  merge pull requests; merging is the repository owner's decision.
+- Commits are authored by the repository owner only: no AI co-author trailer,
+  no "Generated with ..." footer, no command transcript in the message.
+- Do not amend, squash, or rebase pushed commits unless explicitly asked.
+- Destructive commands (`git reset --hard`, `git clean -fd`, `git push -f`,
+  `rm -rf`) are prohibited unless the user gives the exact command in the same
+  message and states they understand the consequences.
+
+## Privacy rules
+
+- Provider transcripts are read-only. Never modify, upload, or commit a real
+  user's session data.
+- Keep real personal paths, hostnames, and identities out of code, tests,
+  fixtures, docs, commit messages, and pull request text. Test fixtures are
+  synthetic or irreversibly redacted, with provenance documented.
+- Never commit secrets. `.env`, `*.pem`, `*.key`, and `credentials*` are
+  gitignored; keep it that way.
+- Do not add telemetry, uploads, or unrequested network access. The default
+  build has no HTTP client dependency and the only socket is `serve`'s loopback
+  listener; a static test and the `security-audit` workflow enforce this.
+- Human CLI/TUI output is local and unredacted by design (ADR-0004);
+  cross-boundary output (Robot, MCP, HTTP, Web UI, handoff pack) is redacted by
+  default (ADR-0009). Do not move content across that boundary without going
+  through the redaction path.
 
 ## Authority order
 
-When sources disagree, use this order:
+When sources disagree, prefer in this order:
 
-1. The user's current request and repository-level instructions.
-2. The active task under `.trellis/tasks/`.
-3. Applicable contracts in `.trellis/spec/` and the lifecycle in
-   `.trellis/workflow.md`.
-4. RFCs, ADRs, schemas, and other formal records under `docs/` and `schemas/`.
-5. Executable evidence: tests, CI results, and spike evidence.
-6. Git history for historical context only.
+1. The user's current request and the repository-level instruction files
+   (`CLAUDE.md`, `CONTRIBUTING.md`, this file).
+2. Formal records: ADRs under `docs/adr/`, RFCs under `docs/architecture/`, the
+   contract under `docs/contracts/`, and the JSON Schemas under `schemas/`.
+3. Executable evidence: tests, CI results, and the harnesses under `scripts/`.
+4. Git history and `CHANGELOG.md`, for historical context only.
 
-Legacy plans, handoff notes, workspace journals, and runtime pointers are not
-current-state authorities.
+## Where to read next
 
-## Active-task read order
-
-Resolve the task with `task.py current --source`. For an implementation or
-check agent, read the applicable `implement.jsonl` or `check.jsonl` entries and
-the files they reference first, then read `prd.md`, `design.md` if present, and
-`implement.md` if present. Consult `task.json` for lifecycle metadata; do not
-treat it as a replacement for the requirements and design artifacts.
-
-## Local and generated state
-
-Do not share or commit developer identity, runtime task pointers, caches,
-backups, transcripts, local journals, credentials, machine-specific approvals,
-or personal paths. In particular, content under `.trellis/.runtime/` and local
-identity or workspace state is not shared project truth.
-
-Platform integration trees intentionally contain generated or duplicated
-Trellis assets so supported tools can operate from a clone. Do not infer
-agent-session-grep product behavior from them. Files marked as managed or generated
-may be replaced by a Trellis update; change their canonical source and
-regenerate them rather than relying on hand edits to generated copies.
-
-Cloning the repository does not automatically trust or enable project-level
-agent integrations. Review the checked-in configuration, then use each
-platform's user-level trust, approval, or enablement controls before running
-hooks, Skills, agents, or commands.
+- `README.md` — product overview, install, provider table.
+- `CONTEXT.md` — canonical glossary; use its terms and avoid the listed
+  synonyms.
+- `docs/PROVIDER-ADAPTER-CONTRIBUTOR-GUIDE.md` — the contract, evidence, and
+  privacy requirements for adding a provider adapter.
+- `docs/contracts/CONTRACT-cli-robot-mcp-draft.md` — the shared CLI / Robot /
+  MCP contract, including exit codes and error envelopes.
+- `docs/architecture/RFC-0001-canonical-model-and-stable-id.md` and
+  `RFC-0002-provider-adapter-contract.md` — canonical model and adapter
+  contract.
+- `SECURITY.md` — boundaries, guarantees, and vulnerability reporting.

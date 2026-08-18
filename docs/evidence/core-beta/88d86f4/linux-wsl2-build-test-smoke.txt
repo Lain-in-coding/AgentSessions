@@ -1,5 +1,6 @@
 # WSL2 Linux x64 build/test/smoke evidence
-# Shared copy redacts the local home path; command results are unchanged
+# Shared copy replaces the local home path and checkout root with placeholders;
+# command results are unchanged
 # Source commit: 88d86f4
 # Scope: WSL2 Ubuntu 22.04 / glibc 2.35 only; not glibc 2.31 or distribution certification
 kernel=6.6.87.2-microsoft-standard-WSL2
@@ -28,14 +29,14 @@ cargo 1.97.1 (c980f4866 2026-06-30)
    Compiling fs4 v0.13.1
    Compiling thiserror-impl v2.0.19
    Compiling serde_derive v1.0.229
-   Compiling agent-session-grep-domain v0.1.0 (/mnt/c/AgentSessions/crates/agent-session-grep-domain)
-   Compiling agent-session-grep-ports v0.1.0 (/mnt/c/AgentSessions/crates/agent-session-grep-ports)
-   Compiling agent-session-grep-application v0.1.0 (/mnt/c/AgentSessions/crates/agent-session-grep-application)
-   Compiling agent-session-grep-provider-codex v0.1.0 (/mnt/c/AgentSessions/crates/agent-session-grep-provider-codex)
-   Compiling agent-session-grep-provider-claude v0.1.0 (/mnt/c/AgentSessions/crates/agent-session-grep-provider-claude)
+   Compiling agent-session-grep-domain v0.1.0 (<repo>/crates/agent-session-grep-domain)
+   Compiling agent-session-grep-ports v0.1.0 (<repo>/crates/agent-session-grep-ports)
+   Compiling agent-session-grep-application v0.1.0 (<repo>/crates/agent-session-grep-application)
+   Compiling agent-session-grep-provider-codex v0.1.0 (<repo>/crates/agent-session-grep-provider-codex)
+   Compiling agent-session-grep-provider-claude v0.1.0 (<repo>/crates/agent-session-grep-provider-claude)
    Compiling rusqlite v0.40.1
-   Compiling agent-session-grep-adapters-sqlite v0.1.0 (/mnt/c/AgentSessions/crates/agent-session-grep-adapters-sqlite)
-   Compiling agent-session-grep-cli v0.1.0 (/mnt/c/AgentSessions/crates/agent-session-grep-cli)
+   Compiling agent-session-grep-adapters-sqlite v0.1.0 (<repo>/crates/agent-session-grep-adapters-sqlite)
+   Compiling agent-session-grep-cli v0.1.0 (<repo>/crates/agent-session-grep-cli)
     Finished `release` profile [optimized] target(s) in 55.05s
 === DIRECT SMOKE ===
 agent-session-grep-cli 0.1.0

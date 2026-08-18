@@ -1,9 +1,8 @@
 # Release Rehearsal Runbook
 
-> Task: `08-15-final-integration-release-rehearsal`
-> Status: P0-5 五入口一致性 harness 已去 skip-as-pass（Web loopback + TUI 快照）
+> Status: 五入口一致性 harness 已去 skip-as-pass（Web loopback + TUI 快照）
 > 且 verify-release 已补全；semantic/resume/handoff/offline 步骤已落地。仍 pending:
-> Gate D performance、三平台干净环境演练（macOS 受 CI billing 外部阻塞）。
+> Gate D performance、三平台干净环境演练（macOS 受外部 CI 阻塞）。
 
 This runbook defines the full release-rehearsal procedure for
 agent-session-grep. It is executed per-platform (Windows, macOS, Linux) in a
@@ -11,7 +10,7 @@ clean environment before the owner makes the final go/no-go decision.
 
 **Hard rule**: every step records its command, run id, wall-clock time, errors,
 and a pass/fail verdict. Anything the docs don't cover, a command that doesn't
-work, or an unexpected result is a defect and flows back into the task tree.
+work, or an unexpected result is a defect and must be tracked and fixed.
 
 ---
 

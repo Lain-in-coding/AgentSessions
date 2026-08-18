@@ -548,7 +548,7 @@ pub trait SearchIndex {
     }
 }
 
-/// 语义检索端口：本地 embedding 向量检索（ADR pending / #3 任务）。
+/// 语义检索端口：本地 embedding 向量检索（ADR pending）。
 ///
 /// 这是 semantic search 的端口契约。具体实现（sqlite-vec + ONNX Runtime
 /// 或 candle）落在 adapter crate；Application 只依赖本抽象。
@@ -1002,7 +1002,7 @@ pub struct MessageEvent<'a> {
 /// `tool_result`（或 Codex `custom_tool_call` / `function_call_output`）配对后
 /// 连同锚定消息一起推入 sink。
 ///
-/// 事实提取遵循任务 design 的显式有序规则集（target 优先级链、kind 推断、
+/// 事实提取遵循显式有序规则集（target 优先级链、kind 推断、
 /// actor、status）；fail-closed——未知一律 `kind = Unknown`、`target = None`，
 /// 绝不臆造。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1136,6 +1136,10 @@ pub fn read_bounded_source(
 ///
 /// Returns the number of bytes read; 0 means EOF. The line buffer is cleared
 /// and reused on every call, so streaming adapters never allocate per record.
+///
+/// The bounded-reader pattern shared by this function, [`BoundedSourceLine`],
+/// [`BoundedLineReader`] and [`for_each_bounded_source_line`] is adapted from
+/// agf's bounded reader (`read_head_tail` / `char_prefix`, MIT License).
 fn read_one_bounded_line(
     reader: &mut dyn BufRead,
     line: &mut Vec<u8>,
