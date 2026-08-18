@@ -51,12 +51,12 @@
 
 ## 4. ADR-0001 决策证据
 
-**已测硬门（本机 Windows x64 范围）**
+**已测硬门（维护者开发机 Windows x64 范围）**
 
 | 硬门 | FTS5 | Tantivy |
 |---|---|---|
 | 检索质量（recall@10 达标） | ✅ 1.000 | ✅ 1.000 |
-| 本机 target 干净构建 | ✅ MSVC bundled，无系统依赖 | ✅ 本机通过；其他正式 target 未验证 |
+| 维护者开发机 target 干净构建 | ✅ MSVC bundled，无系统依赖 | ✅ 维护者开发机通过；其他正式 target 未验证 |
 | 崩溃恢复可行性 | 本 spike 未覆盖；另见 sqlite-snapshot-wal spike | 待验证 |
 
 **评分项**

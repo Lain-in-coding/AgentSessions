@@ -50,12 +50,12 @@
 - **关键结论**：**D 证明 len+mtime 不足，等长内容替换必须靠内容 fingerprint**。生产实现的提交前复核必须包含内容指纹，否则会漏检、提交混合时点数据。
 - **E 只读性**：本工具全程未改动源内容。
 
-### 1.5 cross-platform-packaging（发布顺序证据）→ 仅本机可验证项通过
+### 1.5 cross-platform-packaging（发布顺序证据）→ 仅维护者开发机可验证项通过
 - **干净构建**：本 target（x86_64-pc-windows-msvc）release 构建成功。
 - **供应链审计**：cargo-audit 无已知漏洞；cargo-deny 报 tantivy→**ort-sys（ONNX）unlicensed**——实证 Tantivy 传递依赖许可不干净，正是 ctx 不得不 fork 的 crate，从供应链维度进一步支持 FTS5。
 - **SBOM**：cargo-cyclonedx 生成成功。
 - **checksum 顺序（历史审查证据#12）**：追加模拟签名后对最终字节计算 checksum，两次 re-hash 稳定一致；未执行 checksum 后再次改字节的失败场景。
-- **留待 External Readiness Gate**：Authenticode 签名（需证书）、macOS Notarization（需 Apple 凭据 + macOS 主机）、多 target 交叉构建（需装 target/CI runner）、cosign/syft（本机缺）。
+- **留待 External Readiness Gate**：Authenticode 签名（需证书）、macOS Notarization（需 Apple 凭据 + macOS 主机）、多 target 交叉构建（需装 target/CI runner）、cosign/syft（维护者开发机缺）。
 
 ---
 
@@ -66,7 +66,7 @@
 3. **不可变 bundle / cursor contract**：引用旧快照只读打开与 CAS activation 证据。
 4. **RFC-0002 / Threat Model**：已承接提交前 fingerprint 复核与 `source_changed_during_read` 行为；保持 spike 作为来源证据。
 5. **writer lease 存储规范**：记录 OS 独占句柄、崩溃释放，以及 Windows 强制锁要求复用同一持锁句柄的 caveat。
-6. **External Readiness Gate**：保持 checksum-after-sign、本机未验证签名/公证/多 target 的边界。
+6. **External Readiness Gate**：保持 checksum-after-sign、维护者开发机未验证签名/公证/多 target 的边界。
 7. **SLI 与基准报告格式**：所有后续性能或跨平台结论必须按 `docs/product/SLI-AND-BENCHMARK-FORMAT.md` 补齐环境和分位数字段。
 8. **Fixture Policy**：检索与 Provider 证据数据继续遵循 `docs/security/FIXTURE-REDACTION-POLICY.md`，不得使用真实 transcript。
 
