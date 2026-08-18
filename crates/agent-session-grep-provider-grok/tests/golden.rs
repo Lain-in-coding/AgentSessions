@@ -223,6 +223,42 @@ fn golden_spans_slice_back_to_exact_source_lines() {
     }
 }
 
+/// 回归：两个不同 updates.jsonl 的 seq-0 消息不得共享 native id。
+///
+/// 历史缺陷：适配器合成 `grok-msg-{seq}`，而 seq 每个文档从 0 重启，因此任意两个
+/// 会话文件的首条消息都会得到 `grok-msg-0`——storage merge 只保留一份 payload，
+/// 另一条被静默丢弃（sync 仍报 "2 added"）。
+///
+/// 修复后适配器发出空 native_id；document-scoped 派生发生在 CLI 摄取层
+/// （`[provider_id, variant, document_id, seq]` + `Stability::Unstable`），
+/// 适配器层只能断言"未发明 id"。
+#[test]
+fn distinct_documents_do_not_collide_on_seq_zero() {
+    let doc_a = b"{\"params\":{\"update\":{\"sessionUpdate\":\"user_message_chunk\",\"content\":\"session A first message\"},\"_meta\":{\"promptIndex\":0}}}\n";
+    let doc_b = b"{\"params\":{\"update\":{\"sessionUpdate\":\"user_message_chunk\",\"content\":\"session B first message\"},\"_meta\":{\"promptIndex\":0}}}\n";
+
+    let (report_a, messages_a) = parse_fixture(doc_a);
+    let (report_b, messages_b) = parse_fixture(doc_b);
+
+    assert_eq!(report_a.committed, 1);
+    assert_eq!(report_b.committed, 1);
+    assert_eq!(messages_a[0].seq, 0);
+    assert_eq!(messages_b[0].seq, 0);
+
+    // 关键断言：适配器不发明 native id，把身份交给 document-scoped 派生。
+    assert!(
+        messages_a[0].native_id.is_empty(),
+        "grok 不应合成 native message id（会跨文档碰撞）"
+    );
+    assert!(
+        messages_b[0].native_id.is_empty(),
+        "grok 不应合成 native message id（会跨文档碰撞）"
+    );
+
+    // 文本仍然可区分，证明两条消息是不同 payload 而非同一条。
+    assert_ne!(messages_a[0].text, messages_b[0].text);
+}
+
 /// 手动再生辅助：fixture 合法变更（PROVENANCE.md 的 fixture_revision 递增）后，
 /// 运行下面命令打印新的 canonical JSON，人工审阅后粘贴回 basic.expected.json：
 ///

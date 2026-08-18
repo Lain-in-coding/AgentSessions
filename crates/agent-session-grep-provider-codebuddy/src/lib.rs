@@ -78,7 +78,7 @@ impl ProviderAdapter for CodeBuddyAdapter {
             &[
                 "the root startup-keyword user message (content: \"code\") is filtered out",
                 "no working-directory pair observation (no separate cwd-bearing header record)",
-                "native message ids are not preserved (synthetic codebuddy-msg-{seq})",
+                "the format carries no per-message native id, so message identity is reconstructed document-scoped by the ingestion layer (Unstable)",
             ],
         )
     }
@@ -308,7 +308,14 @@ impl ProviderAdapter for CodeBuddyAdapter {
             let timestamp = rec.timestamp.as_deref();
             sink.emit_message(MessageEvent {
                 seq,
-                native_id: &format!("codebuddy-msg-{seq}"),
+                // The format carries no per-message native id. A synthetic
+                // `codebuddy-msg-{seq}` would collide across documents because
+                // seq restarts at 0 in every file, so the first message of every
+                // session would share one id and the storage merge would
+                // silently drop all but one payload. Emit an empty native_id so
+                // the ingestion layer derives a document-scoped id from
+                // [provider_id, variant, document_id, seq].
+                native_id: "",
                 parent_native_id: None,
                 role,
                 text: &text,

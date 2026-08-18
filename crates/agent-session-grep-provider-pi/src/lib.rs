@@ -75,7 +75,7 @@ impl ProviderAdapter for PiAdapter {
             Some(1),
             &[
                 "non-conversational types (session_info/compaction/custom_message) are skipped",
-                "native message ids are not preserved (synthetic pi-msg-{seq})",
+                "the format carries no per-message native id, so message identity is reconstructed document-scoped by the ingestion layer (Unstable)",
             ],
         )
     }
@@ -279,7 +279,15 @@ impl ProviderAdapter for PiAdapter {
                         .or(rec.timestamp.as_deref());
                     sink.emit_message(MessageEvent {
                         seq,
-                        native_id: &format!("pi-msg-{seq}"),
+                        // The format carries no per-message native id. A
+                        // synthetic `pi-msg-{seq}` would collide across
+                        // documents because seq restarts at 0 in every file, so
+                        // the first message of every session would share one id
+                        // and the storage merge would silently drop all but one
+                        // payload. Emit an empty native_id so the ingestion layer
+                        // derives a document-scoped id from
+                        // [provider_id, variant, document_id, seq].
+                        native_id: "",
                         parent_native_id: None,
                         role,
                         text: &text,

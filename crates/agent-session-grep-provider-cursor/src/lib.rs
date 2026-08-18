@@ -107,7 +107,7 @@ impl ProviderAdapter for CursorAdapter {
             &[
                 "SQLite source has no byte spans",
                 "chatdata/prompts are multi-generation formats; version layering is not yet implemented",
-                "native message ids are not preserved (synthetic cursor-msg-{seq})",
+                "bubbles and prompt records carry no per-message native id (tab/prompt ids are shared by several messages), so message identity is reconstructed document-scoped by the ingestion layer (Unstable)",
             ],
         )
     }
@@ -369,8 +369,11 @@ fn register_session(report: &mut ParseReport, session_count: &mut usize, native_
 /// Emit one canonical message with a document-stable synthetic native id.
 ///
 /// Bubbles and prompt records carry no per-message id (a tab id or prompt id
-/// is shared by several messages), so a sequence-derived id is used, same as
-/// the cline/codebuddy/qoder adapters.
+/// is shared by several messages), so the adapter emits an empty `native_id`
+/// and the ingestion layer derives a document-scoped id from
+/// `[provider_id, variant, document_id, seq]`. A sequence-derived id invented
+/// here would collide across databases, because seq restarts at 0 in every
+/// document — same reasoning as the cline/codebuddy/qoder adapters.
 fn emit_message(
     sink: &mut dyn CanonicalEventSink,
     report: &mut ParseReport,
@@ -381,7 +384,7 @@ fn emit_message(
 ) -> Result<(), ProviderError> {
     sink.emit_message(MessageEvent {
         seq: *seq,
-        native_id: &format!("cursor-msg-{}", *seq),
+        native_id: "",
         parent_native_id: None,
         role,
         text,
@@ -722,5 +725,65 @@ mod tests {
             MetadataResolution::Ambiguous
         );
         assert!(report.session_observation.multi_session);
+    }
+
+    /// Records the emitted `native_id` alongside the text.
+    struct IdSink {
+        events: Vec<(String, String)>,
+    }
+    impl CanonicalEventSink for IdSink {
+        fn emit_message(
+            &mut self,
+            event: MessageEvent<'_>,
+        ) -> agent_session_grep_ports::PortResult<()> {
+            self.events
+                .push((event.native_id.to_string(), event.text.to_string()));
+            Ok(())
+        }
+    }
+
+    /// Regression: two different state.vscdb documents must not share a message id.
+    ///
+    /// The adapter used to emit `cursor-msg-{seq}` from a per-document sequence
+    /// that restarts at 0 in every database, so the first message of every
+    /// workspace collided with the first message of every other workspace and the
+    /// storage merge silently discarded all but one payload.
+    ///
+    /// Bubbles/prompts genuinely carry no per-message id, so the adapter now emits
+    /// an empty `native_id`; the document-scoped derivation
+    /// (`[provider_id, variant, document_id, seq]` + `Stability::Unstable`) happens
+    /// in the CLI ingestion layer, which this adapter-level test cannot observe —
+    /// it can only assert that no id is invented here.
+    #[test]
+    fn distinct_documents_do_not_collide_on_seq_zero() {
+        let adapter = CursorAdapter::new();
+        let db_a = create_cursor_db(
+            Some(
+                r#"{"tabs":[{"id":"tab-a","bubbles":[{"type":"user","text":"workspace A first message","timingInfo":{"startTime":1}}]}]}"#,
+            ),
+            None,
+        );
+        let db_b = create_cursor_db(
+            Some(
+                r#"{"tabs":[{"id":"tab-b","bubbles":[{"type":"user","text":"workspace B first message","timingInfo":{"startTime":1}}]}]}"#,
+            ),
+            None,
+        );
+
+        let mut sink_a = IdSink { events: Vec::new() };
+        let mut sink_b = IdSink { events: Vec::new() };
+        assert_eq!(adapter.parse(&db_a, &mut sink_a).unwrap().committed, 1);
+        assert_eq!(adapter.parse(&db_b, &mut sink_b).unwrap().committed, 1);
+
+        assert!(
+            sink_a.events[0].0.is_empty(),
+            "cursor must not invent a native message id (it would collide across documents)"
+        );
+        assert!(
+            sink_b.events[0].0.is_empty(),
+            "cursor must not invent a native message id (it would collide across documents)"
+        );
+        // The payloads stay distinguishable: these are two different messages.
+        assert_ne!(sink_a.events[0].1, sink_b.events[0].1);
     }
 }

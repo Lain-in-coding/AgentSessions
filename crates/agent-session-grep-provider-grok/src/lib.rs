@@ -103,7 +103,7 @@ impl ProviderAdapter for GrokBuildAdapter {
             self.provider_id(),
             Some(1),
             &[
-                "chunk grouping reconstructs roles; no per-message native ids (synthetic grok-msg-{seq})",
+                "chunk grouping reconstructs roles; the ACP update stream carries no per-message native id, so message identity is reconstructed document-scoped by the ingestion layer (Unstable)",
                 "per-message timestamps are not extracted (always None)",
                 "session identity falls back to the first ACP promptId seen, not a durable session id",
             ],
@@ -358,7 +358,15 @@ impl ProviderAdapter for GrokBuildAdapter {
             let span = message_first_spans.get(idx).copied().flatten();
             sink.emit_message(MessageEvent {
                 seq,
-                native_id: &format!("grok-msg-{seq}"),
+                // Reconstructed messages have no native id: the ACP update
+                // stream identifies chunks, not messages. A synthetic
+                // `grok-msg-{seq}` would collide across documents because seq
+                // restarts at 0 in every updates.jsonl, so the first message of
+                // every session would share one id and the storage merge would
+                // silently drop all but one payload. Emit an empty native_id so
+                // the ingestion layer derives a document-scoped id from
+                // [provider_id, variant, document_id, seq].
+                native_id: "",
                 parent_native_id: None,
                 role,
                 text,

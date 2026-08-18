@@ -49,11 +49,12 @@ impl Default for AntigravityAdapter {
 /// Minimal deserialization target for one Antigravity step record.
 ///
 /// Only fields needed for probe/parse are modeled; unknown fields (status,
-/// tool_calls, ...) are silently ignored (forward-compatible).
+/// tool_calls, ...) are silently ignored (forward-compatible). `step_index` is
+/// deliberately absent: probe checks for it on the raw JSON value as the format
+/// discriminator, and parse must not use it as a message id (it is only a
+/// per-transcript counter — see the `native_id` comment below).
 #[derive(serde::Deserialize)]
 struct StepRecord {
-    #[serde(default)]
-    step_index: Option<u64>,
     #[serde(default)]
     source: Option<String>,
     #[serde(default)]
@@ -78,6 +79,7 @@ impl ProviderAdapter for AntigravityAdapter {
             &[
                 "session identity lives in the brain/<uuid> directory name, not in the transcript file; session_native_id is left unset",
                 "SYSTEM/CONVERSATION_HISTORY steps and tool activity are never emitted as messages",
+                "step_index is only a per-transcript counter, not a globally unique message id, so message identity is reconstructed document-scoped by the ingestion layer (Unstable)",
             ],
         )
     }
@@ -240,14 +242,17 @@ impl ProviderAdapter for AntigravityAdapter {
             };
 
             let timestamp = rec.created_at.as_deref().filter(|t| is_rfc3339(t));
-            let native_id = match rec.step_index {
-                Some(i) => i.to_string(),
-                None => format!("antigravity-msg-{seq}"),
-            };
 
             sink.emit_message(MessageEvent {
                 seq,
-                native_id: &native_id,
+                // `step_index` is only a per-transcript monotonic counter, not a
+                // durable message id: it restarts at 0 in every transcript.jsonl,
+                // so the first step of every session would share the id "0" and
+                // the storage merge would silently drop all but one payload.
+                // Emit an empty native_id so the ingestion layer derives a
+                // document-scoped id from
+                // [provider_id, variant, document_id, seq].
+                native_id: "",
                 parent_native_id: None,
                 role,
                 text,
@@ -418,11 +423,14 @@ mod tests {
         assert_eq!(report.committed, 2);
         assert_eq!(sink.events.len(), 2);
         assert_eq!(sink.events[0].0, 0);
-        assert_eq!(sink.events[0].1, "0");
+        // step_index is not a durable id; native_id is left empty and the CLI
+        // derives a document-scoped id — see
+        // `distinct_documents_do_not_collide_on_seq_zero` in tests/golden.rs.
+        assert_eq!(sink.events[0].1, "");
         assert_eq!(sink.events[0].2, "user");
         assert_eq!(sink.events[0].3, "build the project");
         assert_eq!(sink.events[1].0, 1);
-        assert_eq!(sink.events[1].1, "2");
+        assert_eq!(sink.events[1].1, "");
         assert_eq!(sink.events[1].2, "assistant");
         assert_eq!(sink.events[1].3, "plan accepted");
         // SYSTEM steps never surface as user/assistant.
