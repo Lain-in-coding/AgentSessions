@@ -4,18 +4,26 @@
 >
 > - evidence id: `IB-REAL-DATA-REGRESSION-001`
 > - status: **passed** — the latest fixed-binary full-corpus run
->   (2026-08-13) satisfies all six invariants with harness exit 0.
+>   (2026-08-13) satisfies every invariant the harness evaluated at that time
+>   with harness exit 0.
 > - latest full run: generated `2026-08-13T01:46:55Z` (Thursday, August 13,
 >   2026 local date), outcome `passed` (v5, review-fixed renamed binary).
 > - harness: `scripts/evidence/real_data_regression.py`
 > - authorization: the operator's own machine and transcripts; data never
 >   leaves the host. This file carries aggregate-only facts.
+> - invariant set: the runs below were executed against the six invariants the
+>   harness defined at the time (`INV-SYNC-OK` through `INV-REBUILD-STABLE`).
+>   `INV-SOURCES-UNCHANGED` was added on 2026-08-16, after these runs, bringing
+>   the current set — authoritatively `INVARIANT_IDS` in the harness — to seven.
+>   Each run below is reported with the invariant count it actually evaluated;
+>   the counts are not retroactively restated.
 
 ## Method
 
 The harness built a throwaway temporary data root, ingested the authorized
 Claude Code and Codex corpus through the real release binary in `--robot` mode,
-and was configured to evaluate six invariants. Sources remained read-only.
+and was configured to evaluate the six invariants then defined. Sources remained
+read-only.
 
 The generated report matched the exact closed aggregate key sets. A raw-value
 scan found no Windows, Unix-home, or UNC paths, UUIDs, or complete stable entity
@@ -26,7 +34,7 @@ hash. Process stderr was empty. The report remains under the gitignored
 
 ## Green full-corpus run (2026-08-09/10, PASSED)
 
-The full authorized run over both provider roots passes all six invariants:
+The full authorized run over both provider roots passes all six invariants then defined:
 
 | Item | Value |
 |---|---|
@@ -46,14 +54,14 @@ INV-REBUILD-STABLE    PASS  rebuild exit 0, catalog 151562 -> 151562, sampled te
 ```
 
 This is the corpus-wide green Gate D result: stable full-root, all six
-invariants, harness exit 0, aggregate-only report. Provider Beta promotion
-gates that depend on this evidence are now met (independent review and
+invariants then defined, harness exit 0, aggregate-only report. Provider Beta
+promotion gates that depend on this evidence are now met (independent review and
 owner decision still apply).
 
 ## Latest green full-corpus runs (2026-08-12 v3 and 2026-08-13 v4, PASSED)
 
 Two later full-corpus runs over the same authorized roots also pass all six
-invariants. The numbers below are aggregate counts quoted from the
+invariants then defined. The numbers below are aggregate counts quoted from the
 gitignored `evidence-output/` reports; the reports themselves are not copied
 into the repository.
 
@@ -93,7 +101,7 @@ serves as the comparison baseline at the same corpus scale).
 ## Latest run: v5 (2026-08-13, review-fixed binary, PASSED)
 
 The v5 run exercised the binary rebuilt after the full-repo review fixes
-(2 major + ~48 minor findings). All six invariants pass:
+(2 major + ~48 minor findings). All six invariants then defined pass:
 
 | Item | Value |
 |---|---|
@@ -163,7 +171,7 @@ After the code-review fixes (message-level leaf exclusion, JSON-aware rebuild
 projection, timestamp merge convergence, unknown-role skip accounting,
 message-contexts NotFound semantics, cursor/budget hardening), the release
 binary was rebuilt and run over a 137-file real Claude Code corpus directory
-that previously stalled the old binary. **All six invariants pass**:
+that previously stalled the old binary. **All six invariants then defined pass**:
 
 ```text
 INV-SYNC-OK           PASS  exit 0, ok=True, 137 sources, 15246 emitted, 0 skipped
@@ -174,20 +182,31 @@ INV-SPAN-COVERAGE     PASS  41/41 spans have byte precision
 INV-REBUILD-STABLE    PASS  rebuild exit 0, catalog 14140 -> 14140, sampled terms match
 ```
 
-This proved the fixed binary produces a green six-invariant result on real
-data, and that the previously observed stall on this directory is resolved.
-A subsequent fix added `Role::Developer` read-path support, which the green
-full-corpus run above includes.
+This proved the fixed binary produces a green result on every invariant then
+defined, on real data, and that the previously observed stall on this directory
+is resolved. A subsequent fix added `Role::Developer` read-path support, which
+the green full-corpus run above includes.
+
+## Reader note on verifiability
+
+Every count on this page is an aggregate quoted from a report generated on the
+maintainer's development machine over the maintainer's own private transcripts.
+Those transcripts are never committed or uploaded, and the generated reports
+live under the gitignored `evidence-output/` directory, so **a reader cannot
+independently reproduce or verify these numbers.** They are recorded here for
+provenance and for tracking regressions between runs on that one corpus, not as
+externally checkable evidence. The reproducible, committed benchmark is the
+synthetic gate fixture under `scripts/evidence/fixtures/`.
 
 ## What these runs establish and do not establish
 
 Establishes:
 
 - A green full-corpus Gate D: 1,242 sources, 164,136 emitted, 0 skipped,
-  all six invariants pass, harness exit 0 (2026-08-09T21:10:16Z).
+  all six invariants then defined pass, harness exit 0 (2026-08-09T21:10:16Z).
 - Two later full-corpus greens over the same roots: 2026-08-12T23:51:23Z
   (1,328 sources, 180,218 emitted) and 2026-08-13T00:26:57Z (1,330 sources,
-  180,718 emitted), all six invariants pass, harness exit 0; the
+  180,718 emitted), all six invariants then defined pass, harness exit 0; the
   2026-08-13 run is the renamed-binary Gate D verification.
 - The authorized aggregate-only process executes over real sources without
   recording disallowed report fields or emitting stderr.

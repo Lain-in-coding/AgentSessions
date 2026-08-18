@@ -101,7 +101,8 @@ manifest 均已填真实限制，见各 `crates/agent-session-grep-provider-*/sr
 - **共同（关系模型已实现，语料级回归已闭合）**：稳定 `Message` 与上下文
   `MessagePlacement` / `MessageEdge` 已分离，session-scoped graph、精确 placement
   evidence、不同上下文 parent 以及相应合成/e2e 覆盖均已实现。全量授权运行
-  （`2026-08-09T21:10:16Z`，1,242 源、1,177,479,794 字节）六条不变量全绿、harness
+  （`2026-08-09T21:10:16Z`，1,242 源、1,177,479,794 字节）当时定义的六条不变量
+  全绿、harness
   exit 0：sync 164,136 emitted / 0 skipped、no-parse-loss 164,136 claims、
   231 sessions 全 context 成功、659/659 byte 精度、rebuild 稳定。最新两次全量
   运行同样全绿：`2026-08-12T23:51:23Z`（1,328 源、1,253,494,481 字节；180,218
@@ -112,7 +113,10 @@ manifest 均已填真实限制，见各 `crates/agent-session-grep-provider-*/sr
   回归。早期 `2026-07-31T10:04:17Z` 运行（879 源，`INV-SYNC-OK` exit 5 失败，
   79,958 emitted、0 skipped，其余不变量未评估；aggregate 报告未保留精确 canonical
   code，故 `source_changed` 未证实）与 2026-08-10 子集运行（137 源全绿）如实保留
-  在 `docs/evidence/integration-beta/real-data-regression.md`。真实数据 Gate D 已
+  在 `docs/evidence/integration-beta/real-data-regression.md`。不变量集合以
+  `scripts/evidence/real_data_regression.py` 的 `INVARIANT_IDS` 为准（现为七条，
+  `INV-SOURCES-UNCHANGED` 于 2026-08-16 在上述运行之后加入）；上述计数均为
+  维护者开发机上私有语料的聚合数字，读者无法独立复核。真实数据 Gate D 已
   闭合。
 
 ## 晋级到 Beta 的缺口
@@ -125,10 +129,12 @@ manifest 均已填真实限制，见各 `crates/agent-session-grep-provider-*/sr
    round-trip 锁定（2026-07-26，见 `docs/operations/migration-v5-to-v6.md`）。
 4. ~~真实历史数据回归（隔离沙箱、授权数据集、不外传）~~ —— **已闭合**：最新全量
    授权运行（`2026-08-13T00:26:57Z`，改名后的 `agent-session-grep` 二进制，1,330
-   源、1,255,049,984 字节）六条不变量全绿、harness exit 0：sync 180,718 emitted /
+   源、1,255,049,984 字节）当时定义的六条不变量全绿、harness exit 0：sync 180,718
+   emitted /
    0 skipped、no-parse-loss 180,718 claims、242 sessions 全 context 成功（11
    zero-placement，0 failed）、630/630 byte 精度、rebuild 稳定（catalog 166,882 →
-   166,882，ids match）。此前运行均如实保留：2026-08-09/10 全量（1,242 源、164,136
+   166,882，ids match）。不变量集合以
+   `scripts/evidence/real_data_regression.py` 的 `INVARIANT_IDS` 为准。此前运行均如实保留：2026-08-09/10 全量（1,242 源、164,136
    emitted、231 sessions、659/659 byte、rebuild 151,562 → 151,562）、2026-08-12
    v3（1,328 源、180,218 emitted、rebuild 166,380 → 166,380）、2026-08-10 子集
    （137 源）与 2026-07-31 失败运行（exit 5）见
@@ -136,6 +142,7 @@ manifest 均已填真实限制，见各 `crates/agent-session-grep-provider-*/sr
    （`scripts/evidence/real_data_regression.py`）在抛弃式临时 data root 上跑
    sync → status + catalog walk → 逐会话 context → index rebuild，报告只含聚合计数
    （见 `docs/operations/REAL-DATA-REGRESSION.md`、证据行 `IB-REAL-DATA-REGRESSION-001`）。
+   上述计数来自维护者开发机上的私有语料，读者无法独立复核。
    真实数据 Gate D 已闭合；Provider 晋级仍需独立审查与 owner 决策。
 5. 跨正式 target（Windows/Linux/macOS）的 CI 认证——仍缺。`ci.yml` 的 `test` 与
    新增 `installer` job 已配置三平台矩阵（证据行 `IB-CI-INSTALLER-001`），但在

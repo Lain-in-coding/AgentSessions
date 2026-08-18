@@ -41,15 +41,19 @@
 
 ## 不可比清单
 
+外部项目共 13 项(见上表,不含本产品)。其中两项不进入可复现对比:
+
 - **cc-switch**: 配置切换器,无检索能力。
 - **cass**: 受限 license,不可复现对比。
-- 其余 12 项:license 可自由引用,但 provider 数、能力为 deep-read 快照
-  (2026-08-14),与最新上游可能有差异;发布 benchmark 时以固定 clone commit
-  为准复现。
+- 余下 **11 项**:license 可自由引用,且具备可对比的检索能力;但 provider 数、
+  能力为 deep-read 快照(2026-08-14),与最新上游可能有差异;发布 benchmark 时
+  以固定 clone commit 为准复现。
 
 ## 口径说明
 
-- 「12 个外部项目」= 可自由引用集合(12 项);总名单 13 项(含 clean-room-only
-  cass)。未补齐新的独立外部基线前,不使用更大的宣传口径。
+- 外部项目总名单 **13 项**。按 license 划分:**12 项可自由引用**
+  (13 项减去 clean-room-only 的 cass);按可对比性划分:**11 项**进入可复现
+  对比基线(12 项可引用中再减去无检索能力的 cc-switch)。未补齐新的独立外部
+  基线前,不使用更大的宣传口径。
 - 本表与 PROVIDER-MATURITY-MATRIX.md、README 数字一致(16 行矩阵、
   14 实现 + 2 deferred)。

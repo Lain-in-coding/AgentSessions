@@ -3,7 +3,7 @@
 > 治理记录
 > - decision_id: CONTRACT-cli-robot-mcp
 > - status: **Draft（待 R0 评审）**
-> - owner: （待指派）  approver: 项目最终验收人
+> - owner: QIN  approver: 项目最终验收人
 > - due_milestone: R0
 > - evidence_path: docs/contracts/CONTRACT-cli-robot-mcp-draft.md
 >
@@ -46,7 +46,7 @@ SessionId/MessageId/BranchId/CursorToken 为带类型和协议版本的 opaque �
 关键码: source_changed | writer_busy | cursor_invalid | cursor_expired | generation_mismatch |
         snapshot_failed | catalog_error | schema_incompatible | provider_error | internal |
         invalid_request | not_found
-Exit Code(权威为 `schemas/robot/v1/error-catalog.json` 的 13 码): 0 成功 / 2 校验(invalid_request, cursor_invalid) / 4 不存在(not_found) / 5 IO(source_io, source_changed, snapshot_failed) / 6 Catalog(writer_busy, catalog_error) / 7 Provider / 9 协议(schema_incompatible, generation_mismatch) / 10 部分成功 / 70 内部。无 3(配置)与 8(安全)退出码。
+Exit Code(权威码表为 `schemas/robot/v1/error-catalog.json`,以该文件的 `errors` 数组为准): 0 成功 / 2 校验(invalid_request, cursor_invalid) / 4 不存在(not_found) / 5 IO(source_io, source_changed, snapshot_failed) / 6 Catalog(writer_busy, catalog_error) / 7 Provider / 9 协议(schema_incompatible, generation_mismatch) / 10 部分成功 / 70 内部。无 3(配置)与 8(安全)退出码。
 - `get`/`show` 对缺失实体统一 exit 4 + `not_found` envelope，不返回 exit 0 + `payload:null`（ADR-0005，已实现）。
 
 ## 6. Output Truth Table（stdout/stderr 契约）
