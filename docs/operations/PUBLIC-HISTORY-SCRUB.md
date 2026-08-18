@@ -89,6 +89,46 @@ git -C public-history-audit.git log --all --name-only --pretty=format: |
 Do not put real private values in this tracked runbook or in a committed
 replacement file.
 
+## Measured read-only history audit
+
+Snapshot measured 2026-08-18 at commit `f7e2a49` with strictly read-only
+commands: `git log --all -G<pattern>` over every ref, plus per-commit diff
+attribution (`git show <commit> --format= --unified=0`) to count introduced
+match-lines per file. Counts only; no private value is recorded here.
+
+| pattern family | matching commits | introduced match-lines | distinct files | files still in HEAD | files inside the export set |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Windows user home paths | 17 | 28 | 16 | 16 | 9 |
+| Unix user home paths (`/Users/`, `/home/`) | 17 | 27 | 14 | 14 | 13 |
+| machine roots (checkout/reference roots) | 24 | 73 | 40 | 40 | 11 |
+| worktree coordinates (`.claude/worktrees/<name>`, `worktree-<name>`) | 9 | 31 | 15 | 15 | 0 |
+| secret shapes (GitHub PAT, AWS key, private key block) | 6 | 18 | 3 | 3 | 2 |
+| union of all families | 45 distinct commits | 177 | 61 | 61 | 29 |
+
+File-family distribution of the union (match-lines / files): internal
+coordination records excluded by the exporter 104 / 32; product crates 65 / 23;
+docs and release notes 4 / 3; spikes 3 / 2; root-level schemas 1 / 1.
+
+Reading the numbers:
+
+- Every match-carrying file still exists at HEAD, and the current-tree scanner
+  reports 0 findings. The 29 union files inside the export set carry only
+  synthetic fixtures already allowlisted by the scanner (test vectors and
+  redaction examples); the remaining 32 are internal coordination records that
+  the exporter drops.
+- The 6 secret-shape commits contain only redaction rule definitions and
+  synthetic test vectors (AWS/GitHub documentation examples), not real
+  credentials. This measurement triggers no credential rotation; rerun the
+  exact-string searches in the previous section if a later audit finds a new
+  shape.
+- Worktree coordinates appear only in excluded internal records: 0 files inside
+  the export set.
+
+Export verification at this snapshot: the exporter copied 277 tracked files
+from `f7e2a49`; its built-in scanner and a standalone scanner run over the
+destination both reported 0 findings; the scanner and exporter unittest gates
+were green. History was not modified by this audit.
+
 ## Preview text replacement
 
 Create an untracked replacement file outside the repository. Each line is a
@@ -112,6 +152,29 @@ streams under `filter-repo/` for comparison. Inspect those streams and rerun the
 history searches above before approving a real rewrite.
 
 ## Owner decision: rewrite or publish a clean repository
+
+### Decision checklist
+
+Complete this checklist at the publication SHA before either option is
+executed. The rewrite itself is never executed from this runbook.
+
+- [ ] Review the measured audit snapshot above and the current-tree scan
+      result at the publication SHA.
+- [ ] Choose and record the strategy: Option A (publish the exported clean
+      tree as a new repository, dropping private development history) or
+      Option B (`git-filter-repo` rewrite of the private history).
+- [ ] Credential rotation check: the measured secret-shape hits are all
+      redaction rules and synthetic test vectors. If any exact-string search
+      finds a real credential instead, rotate it before proceeding and treat
+      the exposure as an incident.
+- [ ] Collaborator freeze (Option B only): ask every collaborator to stop
+      pushing for the rewrite window and plan to delete or re-verify every
+      clone afterwards. Option A needs no freeze, only that pushes stop at
+      the chosen publication SHA.
+- [ ] Backup: archive the private repository before any rewrite or
+      publication decision.
+- [ ] Record the chosen option, the publication SHA, and the date in the
+      release record.
 
 ### Option A: new public repository
 
