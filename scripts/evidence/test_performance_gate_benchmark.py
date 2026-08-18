@@ -403,6 +403,50 @@ class ValidatorTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.validate(manifest_with(metrics))
 
+    def test_accepts_an_unmeasured_informational_metric_with_a_reason(self) -> None:
+        metrics = passing_metrics()
+        for entry in metrics:
+            if entry["name"] == "embeddings_index_build_ms":
+                entry["state"] = PERF.STATE_NOT_MEASURED
+                entry["value"] = None
+                entry["detail"] = {"skipped_reason": "--skip-embeddings"}
+        self.validate(manifest_with(metrics))
+
+    def test_rejects_an_unmeasured_metric_that_still_carries_a_value(self) -> None:
+        metrics = passing_metrics()
+        for entry in metrics:
+            if entry["name"] == "embeddings_index_build_ms":
+                entry["state"] = PERF.STATE_NOT_MEASURED
+                entry["value"] = 285_000.0  # an estimate masquerading as a skip
+                entry["detail"] = {"skipped_reason": "--skip-embeddings"}
+        with self.assertRaises(ValueError):
+            self.validate(manifest_with(metrics))
+
+    def test_rejects_an_unmeasured_metric_with_no_stated_reason(self) -> None:
+        metrics = passing_metrics()
+        for entry in metrics:
+            if entry["name"] == "embeddings_index_build_ms":
+                entry["state"] = PERF.STATE_NOT_MEASURED
+                entry["value"] = None
+                entry["detail"] = {}
+        with self.assertRaises(ValueError):
+            self.validate(manifest_with(metrics))
+
+    def test_a_thresholded_metric_can_never_be_left_unmeasured(self) -> None:
+        # --skip-embeddings must not become a way to drop a gated metric.
+        with self.assertRaises(ValueError):
+            PERF.performance_metric(
+                "search_latency_p95_ms",
+                "ms",
+                None,
+                action="skipped",
+                corpus=reference_block(),
+                sample_count=1,
+                sample_unit="search invocation",
+                state=PERF.STATE_NOT_MEASURED,
+                reason="skipped",
+            )
+
 
 class QuerySetTests(unittest.TestCase):
     def test_query_set_is_non_empty_and_unique(self) -> None:
@@ -461,12 +505,26 @@ class ReportingHelperTests(unittest.TestCase):
 
     def test_ci_viability_states_a_verdict_either_way(self) -> None:
         descriptor = {"message_count": 100_000, "source_bytes": 50_920_199}
-        fast = PERF.ci_viability(30.0, {"initial_sync_s": 20.0}, descriptor)
-        slow = PERF.ci_viability(900.0, {"initial_sync_s": 800.0}, descriptor)
+        fast = PERF.ci_viability(30.0, {"initial_sync_s": 20.0}, descriptor, False)
+        slow = PERF.ci_viability(900.0, {"initial_sync_s": 800.0}, descriptor, False)
         self.assertIs(fast["fits_a_5_minute_ci_budget"], True)
         self.assertIs(slow["fits_a_5_minute_ci_budget"], False)
         self.assertTrue(fast["verdict"])
         self.assertIn("900.0", slow["verdict"])
+
+    def test_ci_viability_subtracts_the_informational_phases(self) -> None:
+        # The proposed CI subset must be derived from the measured breakdown, not
+        # from a guess: dropping the embeddings phases leaves all four thresholds.
+        descriptor = {"message_count": 100_000, "source_bytes": 50_920_199}
+        result = PERF.ci_viability(
+            372.0,
+            {"initial_sync_s": 70.0, "embeddings_index_s": 285.0, "mcp_semantic_s": 4.0},
+            descriptor,
+            False,
+        )
+        self.assertEqual(result["embeddings_phase_s"], 289.0)
+        self.assertEqual(result["thresholded_metrics_only_wall_clock_s"], 83.0)
+        self.assertIn("--skip-embeddings", result["proposed_subset_for_per_pr_ci"]["run"])
 
     def test_limitations_disclose_a_missing_encoder(self) -> None:
         bigram = PERF.limitations(
