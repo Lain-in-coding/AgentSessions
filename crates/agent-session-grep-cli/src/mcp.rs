@@ -383,6 +383,7 @@ impl McpServer<'_> {
                 "sidechain",
                 "tool_kind",
                 "tool_name",
+                "mode",
             ],
         )?;
         let query = required_str(args, "query")?;
@@ -397,6 +398,18 @@ impl McpServer<'_> {
         reject_below_floor(limit, "limit", 1)?;
         reject_below_floor(max_items, "max_items", 1)?;
         reject_below_floor(max_bytes, "max_bytes", 4096)?;
+        // 检索模式：与 CLI --mode 同一闭集；semantic/hybrid 在向量索引未就绪时
+        // 由 Application 显式降级 lexical_fallback + warning（禁止静默切换）。
+        let mode = match opt_str(args, "mode")?.as_deref() {
+            None | Some("lexical") => RetrievalMode::Lexical,
+            Some("semantic") => RetrievalMode::Semantic,
+            Some("hybrid") => RetrievalMode::Hybrid,
+            Some(other) => {
+                return Err(ToolError::Params(format!(
+                    "mode must be lexical|semantic|hybrid, got {other}"
+                )));
+            }
+        };
         let filters = opt_filters(args)?;
         let include_system = opt_bool(args, "include_system", false)?;
         let group_by_session = opt_bool(args, "group_by_session", false)?;
@@ -427,6 +440,63 @@ impl McpServer<'_> {
             tool_kind,
             tool_name,
         };
+        // 语义/混合查询向量：与 CLI search 同一策略——有已导入且验证过的
+        // 本地 Candle E5 bundle 时用真实模型（进程内缓存，MCP 长连接下后续
+        // 查询零加载成本），否则回退 bigram-hash。向量索引未就绪时 Application
+        // 显式 lexical_fallback。
+        let query_embedding = if mode == RetrievalMode::Lexical {
+            None
+        } else {
+            use agent_session_grep_application::embedding::BigramHashModel;
+            use agent_session_grep_ports::EmbeddingModel;
+            let (model_id, embedding) = {
+                #[cfg(feature = "semantic-candle")]
+                {
+                    let cache = crate::platform_paths_for_mcp().ok().and_then(|v| {
+                        v.get("cache")
+                            .and_then(|c| c.as_str())
+                            .map(|s| s.to_string())
+                    });
+                    if let Some(cache) = cache {
+                        let dir =
+                            agent_session_grep_application::candle_embedding::default_model_dir(
+                                std::path::Path::new(&cache),
+                            );
+                        if let Ok(model) =
+                            agent_session_grep_application::candle_embedding::CandleE5Model::load_cached(
+                                &dir,
+                            )
+                        {
+                            let emb =
+                                model.embed(&query, true).map_err(|error| ToolError::Business(error.into()))?;
+                            (model.manifest().model_id.clone(), Some(emb))
+                        } else {
+                            let model = BigramHashModel::new();
+                            let emb = model
+                                .embed(&query, true)
+                                .map_err(|error| ToolError::Business(error.into()))?;
+                            (model.manifest().model_id.clone(), Some(emb))
+                        }
+                    } else {
+                        let model = BigramHashModel::new();
+                        let emb = model
+                            .embed(&query, true)
+                            .map_err(|error| ToolError::Business(error.into()))?;
+                        (model.manifest().model_id.clone(), Some(emb))
+                    }
+                }
+                #[cfg(not(feature = "semantic-candle"))]
+                {
+                    let model = BigramHashModel::new();
+                    let emb = model
+                        .embed(&query, true)
+                        .map_err(|error| ToolError::Business(error.into()))?;
+                    (model.manifest().model_id.clone(), Some(emb))
+                }
+            };
+            self.store.set_semantic_model(&model_id);
+            embedding
+        };
         let mut payload = self.run_app(AppRequest::Search {
             query,
             filters,
@@ -436,8 +506,8 @@ impl McpServer<'_> {
             budget: budget_with(max_items, max_bytes, None),
             include_system,
             group_by_session,
-            mode: agent_session_grep_ports::RetrievalMode::Lexical,
-            query_embedding: None,
+            mode,
+            query_embedding,
         })?;
         // CLI（Robot）search 在非默认 facet 时回显 data.facets；MCP 必须一致，
         // 否则同一能力在两个入口呈现不同契约（audit P1-5）。
@@ -858,6 +928,14 @@ fn tool_catalog() -> Value {
                         "type": "string",
                         "description": "Keep only messages carrying a tool activity with \
                             this exact tool name (e.g. Bash, Read, shell)."
+                    },
+                    "mode": {
+                        "type": "string",
+                        "enum": ["lexical", "semantic", "hybrid"],
+                        "description": "Retrieval mode. Default lexical. semantic/hybrid \
+                            require the vector index (`index embeddings`); when it is \
+                            not ready the response honestly reports \
+                            retrieval_mode=lexical_fallback with a warning."
                     }
                 },
                 "required": ["query"],

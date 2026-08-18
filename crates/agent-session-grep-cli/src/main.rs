@@ -850,6 +850,13 @@ fn platform_paths() -> Result<serde_json::Value, CliError> {
     platform_paths_impl()
 }
 
+/// MCP 侧可直接调用的平台路径解析（无需 CliError 转协议）。
+/// 仅在 semantic-candle 构建下被 mcp.rs 使用。
+#[cfg(feature = "semantic-candle")]
+pub(crate) fn platform_paths_for_mcp() -> Result<serde_json::Value, CliError> {
+    platform_paths_impl()
+}
+
 #[cfg(windows)]
 // 数据兼容性：目录名 `AgentSessions` 刻意保留旧名——data-root 布局（config/data/
 // cache/logs）与既有安装共享，改名会破坏已存在 data root 的路径查找。
