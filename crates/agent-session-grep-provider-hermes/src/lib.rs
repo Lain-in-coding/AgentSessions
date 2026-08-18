@@ -72,6 +72,7 @@ impl ProviderAdapter for OpenHermesAdapter {
             &[
                 "sibling <id>.jsonl files (partial recent state) are ignored; only session_<id>.json is parsed",
                 "no byte spans (whole-file JSON); message timestamps fall back to session_start when absent",
+                "message objects carry no native id (only their array position), so message identity is reconstructed document-scoped by the ingestion layer (Unstable)",
             ],
         )
     }
@@ -173,7 +174,7 @@ impl ProviderAdapter for OpenHermesAdapter {
 
         let mut seq: u32 = 0;
         if let Some(messages) = &session.messages {
-            for (idx, msg) in messages.iter().enumerate() {
+            for msg in messages {
                 let role = msg.role.as_str();
                 if !matches!(role, "user" | "assistant") {
                     continue;
@@ -195,7 +196,14 @@ impl ProviderAdapter for OpenHermesAdapter {
                     .or(session_start);
                 sink.emit_message(MessageEvent {
                     seq,
-                    native_id: &format!("hermes-msg-{idx}"),
+                    // Message objects carry no id — `idx` is only their position
+                    // in the `messages` array, which restarts at 0 in every
+                    // session file. A synthetic `hermes-msg-{idx}` would collide
+                    // across documents, so the storage merge would silently drop
+                    // all but one payload. Emit an empty native_id so the
+                    // ingestion layer derives a document-scoped id from
+                    // [provider_id, variant, document_id, seq].
+                    native_id: "",
                     parent_native_id: None,
                     role,
                     text: &text,
@@ -339,17 +347,18 @@ mod tests {
 
         let events = sink.events;
         assert_eq!(events.len(), 3);
-        // System/tool/empty-content messages are skipped; native_id uses the
-        // message index inside the messages array.
+        // System/tool/empty-content messages are skipped. The format has no
+        // native message id, so native_id is empty and the CLI derives a
+        // document-scoped id — see `distinct_documents_do_not_collide_on_seq_zero`.
         assert_eq!(events[0].seq, 0);
-        assert_eq!(events[0].native_id, "hermes-msg-1");
+        assert_eq!(events[0].native_id, "");
         assert_eq!(events[0].role, "user");
         assert_eq!(events[0].text, "hello world");
         assert_eq!(events[0].timestamp.as_deref(), Some("2026-04-18T04:53:26"));
         // Reasoning is kept as a [thinking] block; no own timestamp → fallback
         // to session_start.
         assert_eq!(events[1].seq, 1);
-        assert_eq!(events[1].native_id, "hermes-msg-3");
+        assert_eq!(events[1].native_id, "");
         assert_eq!(events[1].role, "assistant");
         assert_eq!(
             events[1].text,
@@ -360,7 +369,7 @@ mod tests {
             Some("2026-04-18T04:53:25.274422")
         );
         assert_eq!(events[2].seq, 2);
-        assert_eq!(events[2].native_id, "hermes-msg-5");
+        assert_eq!(events[2].native_id, "");
         assert_eq!(events[2].role, "user");
         assert_eq!(events[2].text, "next question");
         assert_eq!(
