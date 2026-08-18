@@ -513,8 +513,11 @@ fn run(
     }
     // catalog 与 index 是同一个 SqliteStore；App 泛型接受同一实例的两次移动，
     // 故这里克隆一个连接语义上的第二把手不可行——改为让 App 持有单一 store。
-    let (command, outcome, data, page, warnings) =
+    let (command, outcome, mut data, page, warnings) =
         dispatch(&store, &db, &rest, mode, request_id, offline)?;
+    if mode == protocol::OutputMode::Human {
+        attach_empty_catalog_hint(&store, command, &mut data, &db, db_origin)?;
+    }
     let duration_ms = started.elapsed().as_millis() as u64;
     // 生效检索模式：search 的 data 已含 `retrieval_mode` 字段（render 投影）；
     // 其他命令恒为 lexical。
@@ -2946,6 +2949,59 @@ fn index_one(store: &SqliteStore, fact: &str, text: &str) -> Result<serde_json::
 /// 这里用 `&SqliteStore` 满足两个 trait 约束（trait 对 &T 亦实现）。
 fn store_ref(store: &SqliteStore) -> &SqliteStore {
     store
+}
+
+/// 空 catalog 时给出下一步动作（M2P-4，仅 Human 模式）。
+///
+/// `search` → `no hits`、`list` → `catalog is empty`、`status` → `entities: 0`
+/// 三条过去都没说出全新库上唯一正确的下一步动作。这里在 catalog 真为空时注入
+/// `catalog_count` 与一条可直接复制的 `sync --discover` 命令，由 human 渲染器
+/// 打印。只在 Human 模式附加，Robot/MCP 协议形状不受影响。
+///
+/// 只在结果本身为空时才查 catalog 计数——有命中的查询不付这次计数开销。
+fn attach_empty_catalog_hint(
+    store: &SqliteStore,
+    command: &str,
+    data: &mut serde_json::Value,
+    db: &str,
+    origin: DbOrigin,
+) -> Result<(), CliError> {
+    let looks_empty = match command {
+        "search" => data
+            .get("hits")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(Vec::is_empty),
+        "list" => data
+            .get("entries")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(Vec::is_empty),
+        // status 的 catalog_count 已在 data 里，直接读，不再查一次库。
+        "status" => {
+            data.get("catalog_count")
+                .and_then(serde_json::Value::as_u64)
+                == Some(0)
+        }
+        _ => false,
+    };
+    if !looks_empty {
+        return Ok(());
+    }
+    // search/list 的空结果可能只是查询无命中或游标翻过了尾页；只有 catalog 真为
+    // 空时才说"索引是空的"，否则会把"没搜到"误报成"没索引"。
+    // 全限定调用：裸 `store.count()` 会解析到 Iterator::count。
+    let catalog_count =
+        agent_session_grep_ports::CatalogStore::count(store).map_err(ProtocolError::from)?;
+    if catalog_count > 0 {
+        return Ok(());
+    }
+    if let Some(object) = data.as_object_mut() {
+        object.insert("catalog_count".into(), serde_json::json!(catalog_count));
+        object.insert(
+            "empty_catalog_next_command".into(),
+            serde_json::json!(sync_discover_command(db, origin)),
+        );
+    }
+    Ok(())
 }
 
 /// Human search 的会话表格行按 canonical Session 去重后批量解析 Resume

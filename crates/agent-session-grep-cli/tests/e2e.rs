@@ -1390,6 +1390,46 @@ fn unknown_subcommand_lists_every_known_command_and_suggests_the_closest() {
 }
 
 #[test]
+fn empty_catalog_names_sync_discover_in_search_list_and_status() {
+    // M2P-4：全新库上 search→`no hits`、list→`catalog is empty`、status→`entities: 0`
+    // 一次都没说出唯一正确的下一步动作。三条命令现在都点名 `sync --discover`。
+    let (_dir, db) = temp_db("empty-catalog-hint");
+    create_empty_store(&db);
+
+    for args in [vec!["search", "anything"], vec!["list"], vec!["status"]] {
+        let out = run_human(&db, &args);
+        assert!(out.status.success(), "{args:?}: {}", stdout(&out));
+        let text = stdout(&out);
+        assert!(
+            text.contains("sync --discover"),
+            "{args:?} 应点名 sync --discover: {text}"
+        );
+        // 提示必须是可直接复制的整条命令：显式 --db 时要带上同一路径。
+        assert!(
+            text.contains(&format!("asg --db {db} sync --discover")),
+            "{args:?} 提示应是可执行全命令: {text}"
+        );
+    }
+
+    // 换个错的建议不该再出现在空库上。
+    let text = stdout(&run_human(&db, &["search", "anything"]));
+    assert!(
+        !text.contains("试试更短或更少的关键词"),
+        "空库不应建议换关键词: {text}"
+    );
+
+    // 非空库不得谎报为空：有内容后 search 无命中仍是"换关键词"那条路径。
+    let out = run(&db, &["index", "e1", "content that exists"]);
+    assert!(out.status.success(), "index failed: {}", stdout(&out));
+    let text = stdout(&run_human(&db, &["search", "nothingmatchesthis"]));
+    assert!(
+        !text.contains("the catalog is empty"),
+        "非空库上零命中不得报成空索引: {text}"
+    );
+    assert!(text.contains("no hits"), "{text}");
+}
+
+#[test]
 fn doctor_reports_ok_without_db() {
     let out = run_bare(&["--robot", "doctor"]);
     assert!(out.status.success());

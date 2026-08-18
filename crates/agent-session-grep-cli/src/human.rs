@@ -341,6 +341,10 @@ fn render_search(data: &Value) -> Vec<String> {
         .map(Vec::as_slice)
         .unwrap_or_default();
     if hits.is_empty() {
+        // 全新库上"换个关键词"是错的建议——真正的下一步是先建索引（M2P-4）。
+        if let Some(lines) = empty_catalog_lines(data) {
+            return lines;
+        }
         return vec![
             "no hits".into(),
             "提示：试试更短或更少的关键词（如只搜一个词）。".into(),
@@ -389,6 +393,9 @@ fn render_list(data: &Value) -> Vec<String> {
         .map(Vec::as_slice)
         .unwrap_or_default();
     if entries.is_empty() {
+        if let Some(lines) = empty_catalog_lines(data) {
+            return lines;
+        }
         return vec!["catalog is empty".into()];
     }
     let mut lines = vec![format!(
@@ -538,12 +545,35 @@ fn render_context(data: &Value) -> Vec<String> {
     lines
 }
 
-/// `status`：`entities: N` + `generation: G` 两行。
+/// `status`：`entities: N` + `generation: G` 两行。空库时补上下一步动作（M2P-4）。
 fn render_status(data: &Value) -> Vec<String> {
-    vec![
+    let mut lines = vec![
         format!("entities: {}", number_text(data, "catalog_count")),
         format!("generation: {}", number_text(data, "generation")),
-    ]
+    ];
+    if let Some(command) = empty_catalog_next_command(data) {
+        lines.push(format!("The catalog is empty — run: {command}"));
+    }
+    lines
+}
+
+/// 空 catalog 的统一措辞（M2P-4）：`search`/`list` 在全新库上共用这两行。
+///
+/// 仅当 CLI 已确认 catalog 真为空时（`empty_catalog_next_command` 在场）才生效——
+/// 否则"没搜到"会被误报成"没索引"。
+fn empty_catalog_lines(data: &Value) -> Option<Vec<String>> {
+    let command = empty_catalog_next_command(data)?;
+    Some(vec![
+        "the catalog is empty (nothing has been indexed yet)".into(),
+        format!("Next: {command}"),
+    ])
+}
+
+/// CLI 在 Human 模式注入的建索引命令；catalog 非空时不在场。
+fn empty_catalog_next_command(data: &Value) -> Option<&str> {
+    data.get("empty_catalog_next_command")
+        .and_then(Value::as_str)
+        .filter(|command| !command.is_empty())
 }
 
 /// `sync`/`ingest`：字段统计 + 一句人话总结。unchanged 是消息条数而非文件数，
