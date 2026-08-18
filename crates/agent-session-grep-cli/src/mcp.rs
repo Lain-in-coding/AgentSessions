@@ -495,6 +495,9 @@ impl McpServer<'_> {
                 }
             };
             self.store.set_semantic_model(&model_id);
+            // 逐请求设置候选查询原文（M2-4 分层检索）。MCP 是长连接，若只设一次，
+            // 后续查询会被上一次的原文筛候选集。
+            self.store.set_semantic_candidate_query(query.as_str());
             embedding
         };
         let mut payload = self.run_app(AppRequest::Search {

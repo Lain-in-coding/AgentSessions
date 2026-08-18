@@ -1817,6 +1817,9 @@ fn dispatch(
                     }
                 };
                 store.set_semantic_model(&model_id);
+                // 每次查询都重设候选查询原文，开启 M2-4 的分层检索。必须逐请求
+                // 设置：留着上一次的原文会让它去筛这一次的候选集。
+                store.set_semantic_candidate_query(query.as_str());
                 let app = App::with_resume_semantic(
                     store_ref(store),
                     store_ref(store),
