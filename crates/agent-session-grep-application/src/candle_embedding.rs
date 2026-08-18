@@ -456,11 +456,82 @@ mod tests {
     }
 
     #[test]
+    fn sha256_known_vectors_long_inputs() {
+        // FIPS 180-4 multi-block vectors; exercise the padding + chunk loop
+        // beyond the single-block cases above.
+        assert_eq!(
+            sha256_hex(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"),
+            "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
+        );
+        let million_a = vec![b'a'; 1_000_000];
+        assert_eq!(
+            sha256_hex(&million_a),
+            "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0"
+        );
+    }
+
+    #[test]
     fn verify_bundle_rejects_missing_files() {
         let dir = tempfile_dir();
         let err = read_and_verify_bundle(&dir).unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("missing required file"), "{msg}");
+    }
+
+    #[test]
+    fn verify_bundle_rejects_size_mismatch() {
+        let dir = tempfile_dir();
+        write_minimal_bundle(&dir);
+        let mut manifest = read_manifest(&dir);
+        manifest.files[0].size_bytes += 1;
+        write_manifest(&dir, &manifest);
+        let err = read_and_verify_bundle(&dir).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("size mismatch"), "{msg}");
+    }
+
+    #[test]
+    fn verify_bundle_rejects_sha256_mismatch() {
+        let dir = tempfile_dir();
+        write_minimal_bundle(&dir);
+        // Flip a byte in place after the manifest was written: the declared
+        // size still matches, but the digest no longer does.
+        flip_first_byte(&dir.join("model.safetensors"), b'X');
+        let err = read_and_verify_bundle(&dir).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("sha256 mismatch"), "{msg}");
+    }
+
+    #[test]
+    fn verify_bundle_rejects_declared_file_missing() {
+        let dir = tempfile_dir();
+        write_minimal_bundle(&dir);
+        // Manifest declares a file that is absent from the directory.
+        let mut manifest = read_manifest(&dir);
+        manifest.files.push(ModelBundleFile {
+            name: "extra.bin".to_string(),
+            sha256: "ab".repeat(32),
+            size_bytes: 1,
+        });
+        write_manifest(&dir, &manifest);
+        let err = read_and_verify_bundle(&dir).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("read extra.bin"), "{msg}");
+    }
+
+    #[test]
+    fn verify_bundle_rejects_malformed_manifest() {
+        let dir = tempfile_dir();
+        // Model files present, manifest not JSON: parsing must fail closed.
+        for name in REQUIRED_BUNDLE_FILES {
+            if *name != "MODEL-MANIFEST.json" {
+                fs::write(dir.join(name), b"x").unwrap();
+            }
+        }
+        fs::write(dir.join("MODEL-MANIFEST.json"), b"{not json").unwrap();
+        let err = read_and_verify_bundle(&dir).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("parse MODEL-MANIFEST.json"), "{msg}");
     }
 
     #[test]
@@ -473,6 +544,135 @@ mod tests {
         // Second import of identical bundle is idempotent.
         let again = import_bundle(&source, &cache).expect("re-import");
         assert_eq!(published, again);
+    }
+
+    #[test]
+    fn import_bundle_publishes_to_sanitized_model_id_dir() {
+        let source = tempfile_dir();
+        let cache = tempfile_dir();
+        write_minimal_bundle(&source);
+        let published = import_bundle(&source, &cache).expect("import");
+        assert_eq!(
+            published,
+            cache
+                .join("models")
+                .join(sanitize_model_id(E5_SMALL_MODEL_ID))
+        );
+        // Only the published model dir remains — no staging leftovers.
+        let names: Vec<String> = fs::read_dir(cache.join("models"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec![sanitize_model_id(E5_SMALL_MODEL_ID)]);
+    }
+
+    #[test]
+    fn import_bundle_tampered_source_fails_without_touching_cache() {
+        let source = tempfile_dir();
+        let cache = tempfile_dir();
+        write_minimal_bundle(&source);
+        flip_first_byte(&source.join("tokenizer.json"), b'X');
+        let err = import_bundle(&source, &cache).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("sha256 mismatch"), "{msg}");
+        let models = cache.join("models");
+        if models.exists() {
+            assert_eq!(fs::read_dir(&models).unwrap().count(), 0);
+        }
+    }
+
+    #[test]
+    fn import_bundle_reverifies_published_copy_on_reimport() {
+        let source = tempfile_dir();
+        let cache = tempfile_dir();
+        write_minimal_bundle(&source);
+        let published = import_bundle(&source, &cache).expect("import");
+        // Tamper the published copy: a re-import must detect it and never
+        // silently "repair" or overwrite.
+        flip_first_byte(&published.join("model.safetensors"), b'X');
+        let err = import_bundle(&source, &cache).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("sha256 mismatch"), "{msg}");
+        let tampered = fs::read(published.join("model.safetensors")).unwrap();
+        assert_eq!(tampered[0], b'X');
+    }
+
+    #[test]
+    fn import_bundle_rejects_conflicting_existing_publish() {
+        let source = tempfile_dir();
+        let cache = tempfile_dir();
+        write_minimal_bundle(&source);
+        let published = import_bundle(&source, &cache).expect("import");
+        // Replace the published manifest with a different (but internally
+        // consistent) one: same model id, different weights bytes.
+        let other = tempfile_dir();
+        write_minimal_bundle_with_bytes(&other, b"different-weight-bytes");
+        fs::copy(
+            other.join("model.safetensors"),
+            published.join("model.safetensors"),
+        )
+        .unwrap();
+        fs::copy(
+            other.join("MODEL-MANIFEST.json"),
+            published.join("MODEL-MANIFEST.json"),
+        )
+        .unwrap();
+        let err = import_bundle(&source, &cache).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("already has a different bundle"), "{msg}");
+        // The conflicting publish was not overwritten.
+        let stored = fs::read(published.join("model.safetensors")).unwrap();
+        assert!(stored.ends_with(b"different-weight-bytes"));
+    }
+
+    #[test]
+    fn load_from_dir_rejects_wrong_model_id_before_loading_weights() {
+        let dir = tempfile_dir();
+        write_minimal_bundle(&dir);
+        let mut manifest = read_manifest(&dir);
+        manifest.model_id = "someone-elses-model@v9".to_string();
+        write_manifest(&dir, &manifest);
+        let err = match CandleE5Model::load_from_dir(&dir) {
+            Err(err) => err,
+            Ok(_) => panic!("load must fail for a mismatched model_id"),
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("unsupported model_id"), "{msg}");
+    }
+
+    #[test]
+    fn load_from_dir_rejects_dimension_mismatch_before_loading_weights() {
+        let dir = tempfile_dir();
+        write_minimal_bundle(&dir);
+        let mut manifest = read_manifest(&dir);
+        manifest.dimension = 768;
+        write_manifest(&dir, &manifest);
+        let err = match CandleE5Model::load_from_dir(&dir) {
+            Err(err) => err,
+            Ok(_) => panic!("load must fail for a dimension mismatch"),
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("does not match storage layout"), "{msg}");
+    }
+
+    #[test]
+    fn sanitize_model_id_replaces_unsafe_characters() {
+        assert_eq!(sanitize_model_id("a/b\\c d"), "a_b_c_d");
+        // The pinned id is already sanitized-safe.
+        assert_eq!(sanitize_model_id(E5_SMALL_MODEL_ID), E5_SMALL_MODEL_ID);
+    }
+
+    #[test]
+    fn manifest_serde_round_trip() {
+        let dir = tempfile_dir();
+        write_minimal_bundle(&dir);
+        let manifest = read_and_verify_bundle(&dir).expect("verify");
+        assert_eq!(manifest.model_id, E5_SMALL_MODEL_ID);
+        assert_eq!(manifest.dimension, BIGRAM_HASH_DIMENSION);
+        assert_eq!(manifest.files.len(), 3);
+        let bytes = serde_json::to_vec(&manifest).unwrap();
+        let decoded: ModelBundleManifest = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(manifest, decoded);
     }
 
     fn tempfile_dir() -> PathBuf {
@@ -489,7 +689,32 @@ mod tests {
         dir
     }
 
+    /// Overwrite the first byte of a file in place (length unchanged) so the
+    /// digest check — not the size check — is what rejects it.
+    fn flip_first_byte(path: &Path, byte: u8) {
+        let mut f = fs::OpenOptions::new().write(true).open(path).unwrap();
+        f.write_all(&[byte]).unwrap();
+        f.flush().unwrap();
+    }
+
+    fn read_manifest(dir: &Path) -> ModelBundleManifest {
+        let raw = fs::read_to_string(dir.join("MODEL-MANIFEST.json")).unwrap();
+        serde_json::from_str(&raw).unwrap()
+    }
+
+    fn write_manifest(dir: &Path, manifest: &ModelBundleManifest) {
+        fs::write(
+            dir.join("MODEL-MANIFEST.json"),
+            serde_json::to_string_pretty(manifest).unwrap(),
+        )
+        .unwrap();
+    }
+
     fn write_minimal_bundle(dir: &Path) {
+        write_minimal_bundle_with_bytes(dir, b"not-a-real-weight");
+    }
+
+    fn write_minimal_bundle_with_bytes(dir: &Path, weights: &[u8]) {
         // Minimal valid-looking files for hash/size verification only — not a
         // loadable model. Load tests require a real e5-small bundle.
         let files = [
@@ -498,7 +723,7 @@ mod tests {
                 b"{\"architectures\":[\"BertModel\"]}" as &[u8],
             ),
             ("tokenizer.json", b"{\"version\":\"1.0\"}"),
-            ("model.safetensors", b"not-a-real-weight"),
+            ("model.safetensors", weights),
         ];
         let mut manifest_files = Vec::new();
         for (name, bytes) in files {
@@ -516,10 +741,6 @@ mod tests {
             license: "MIT (intfloat/multilingual-e5-small model weights)".into(),
             files: manifest_files,
         };
-        fs::write(
-            dir.join("MODEL-MANIFEST.json"),
-            serde_json::to_string_pretty(&manifest).unwrap(),
-        )
-        .unwrap();
+        write_manifest(dir, &manifest);
     }
 }
