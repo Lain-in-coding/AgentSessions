@@ -110,6 +110,25 @@ fn temp_db(tag: &str) -> (tempfile::TempDir, String) {
     (dir, s)
 }
 
+/// 在 `db` 上建出一个空库（已迁移、零实体）。
+///
+/// 读命令不再新建库（M2P-2：`--db <typo>` 过去会得到"干净的零命中"外加一个新文件），
+/// 所以只验证读路径语义（未知 id、参数校验、envelope 版式）的用例必须先把库显式
+/// 造出来。用 `index rebuild` 触发创建与迁移：它是写命令但不写入任何实体，
+/// 因此库存在且仍为空——正是这些用例需要的前置状态。
+fn create_empty_store(db: &str) {
+    let out = Command::new(BIN)
+        .env_remove("ASG_DB")
+        .args(["--db", db, "--robot", "index", "rebuild"])
+        .output()
+        .expect("failed to spawn agent-session-grep binary");
+    assert!(
+        out.status.success(),
+        "创建空库失败: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
 fn create_v6_catalog(
     db: &str,
     source_path: &str,
@@ -237,8 +256,11 @@ fn session_wire_for_message(db: &str, message_wire: &str) -> String {
 }
 
 /// 不带 `--db` 跑一次 CLI——用于 `--help`/`--version`/`doctor` 等无需存储的命令。
+/// 显式清掉 `ASG_DB`：默认 store path 支持环境变量覆盖（D8），开发机上若设了它，
+/// 这些用例就不再测的是"无 store 参数"的那条路径。
 fn run_bare(args: &[&str]) -> Output {
     Command::new(BIN)
+        .env_remove("ASG_DB")
         .args(args)
         .output()
         .expect("failed to spawn agent-session-grep binary")
@@ -400,6 +422,7 @@ fn migrated_v6_catalog_stays_readable_until_complete_reingest_enables_context() 
 #[test]
 fn get_missing_is_not_found_with_generic_message() {
     let (_dir, db) = temp_db("missing");
+    create_empty_store(&db);
     // ADR-0005：合法前缀但从未写入的 id → not_found（exit 4）。消息固定为通用
     // 文案，绝不回显 wire id（R2.1 隐私）；robot envelope 与 human stderr 双验证。
     let missing = "msg_v1_ffffffffffffffffffffffffffffffff";
@@ -426,6 +449,7 @@ fn get_missing_is_not_found_with_generic_message() {
 #[test]
 fn get_malformed_id_is_usage_error() {
     let (_dir, db) = temp_db("malformed");
+    create_empty_store(&db);
     // 无已知前缀的串无法反解为实体 id（见 StableId::from_wire）→ 用法错误 exit 2。
     let out = run(&db, &["get", "does-not-exist"]);
     assert_eq!(out.status.code(), Some(2));
@@ -481,6 +505,7 @@ fn show_returns_normalized_role_and_text() {
 #[test]
 fn show_missing_is_not_found_with_generic_message() {
     let (_dir, db) = temp_db("show-missing");
+    create_empty_store(&db);
     // ADR-0005：show 缺失实体与 get 同一契约——exit 4 + not_found + 通用消息，
     // 不回显 wire id（R2.1）。
     let missing = "msg_v1_ffffffffffffffffffffffffffffffff";
@@ -507,6 +532,7 @@ fn show_missing_is_not_found_with_generic_message() {
 #[test]
 fn show_malformed_id_is_usage_error() {
     let (_dir, db) = temp_db("show-malformed");
+    create_empty_store(&db);
     let out = run(&db, &["show", "does-not-exist"]);
     assert_eq!(out.status.code(), Some(2));
 }
@@ -876,6 +902,7 @@ fn search_flag_named_query_is_searched_not_intercepted() {
 fn extra_positional_arguments_are_rejected_with_exit_2() {
     // Minor-3：多余位置参数是用法错误（exit 2），不静默忽略。
     let (dir, db) = temp_db("extra-args");
+    create_empty_store(&db);
     let fixture = dir.path().join("extra.jsonl");
     std::fs::write(&fixture, b"").expect("write empty fixture");
     let path = fixture.to_string_lossy().into_owned();
@@ -1128,7 +1155,25 @@ fn machine_mode_version_emits_single_success_envelope() {
 
 #[test]
 fn level_value_before_robot_flag_still_emits_robot_error_envelope() {
-    let out = run_bare(&["--level", "talks", "--robot", "context", "not-a-session-id"]);
+    // `--level` 的取值出现在 `--robot` 之前时不得吞掉输出模式：错误仍走 robot
+    // envelope。store 必须真实存在——读命令不再新建库（M2P-2），否则这里会先
+    // 因 not_found 失败，测不到本用例关心的 flag 顺序语义。
+    let (_dir, db) = temp_db("level-before-robot");
+    let out = run(&db, &["index", "lv1", "level flag ordering"]);
+    assert!(out.status.success(), "index failed: {}", stdout(&out));
+
+    let out = Command::new(BIN)
+        .args([
+            "--level",
+            "talks",
+            "--db",
+            &db,
+            "--robot",
+            "context",
+            "not-a-session-id",
+        ])
+        .output()
+        .expect("failed to spawn agent-session-grep binary");
     assert_eq!(out.status.code(), Some(2), "{}", stdout(&out));
     let frame = parse_first_line(&out);
     assert_envelope_shape(&frame, false);
@@ -1191,6 +1236,261 @@ fn help_and_version_require_no_db_and_create_no_file() {
             dir.path().display()
         );
     }
+}
+
+#[test]
+fn read_commands_refuse_a_missing_store_instead_of_creating_one() {
+    // M2P-2：读命令过去会静默新建一个空库，于是 `--db <typo>` 得到"干净的零命中"
+    // 外加一个新文件——最容易的静默失败。现在报 not_found（exit 4），消息里给出
+    // 路径本身与该跑的 `sync --discover` 全命令，且磁盘上不留任何文件。
+    let dir = tempfile::tempdir().expect("tempdir");
+    let missing = dir.path().join("typo.db");
+    let missing_s = missing.to_string_lossy().into_owned();
+
+    for args in [
+        vec!["search", "hello"],
+        vec!["status"],
+        vec!["list"],
+        vec!["context", "ses_v1_ffffffffffffffffffffffffffffffff"],
+    ] {
+        let out = run(&missing_s, &args);
+        assert_eq!(
+            out.status.code(),
+            Some(4),
+            "{args:?} 应以 not_found(4) 失败: {}",
+            stdout(&out)
+        );
+        let frame = parse_first_line(&out);
+        assert_envelope_shape(&frame, false);
+        assert_eq!(frame["error"]["code"], "not_found", "{args:?}: {frame}");
+        let message = frame["error"]["message"].as_str().unwrap_or_default();
+        // 首次运行消息必须自带路径与可直接复制的建库命令。
+        assert!(
+            message.contains(&missing_s),
+            "{args:?} 消息应点名库路径: {message}"
+        );
+        assert!(
+            message.contains("sync --discover"),
+            "{args:?} 消息应给出 sync --discover: {message}"
+        );
+        assert!(
+            message.contains("--db"),
+            "{args:?} 显式 --db 时建库命令必须带上同一路径: {message}"
+        );
+        assert!(
+            !missing.exists(),
+            "{args:?} 不得新建库文件: {}",
+            missing.display()
+        );
+    }
+}
+
+#[test]
+fn write_commands_create_the_store_parent_directory() {
+    // M2P-3：默认库落在平台数据目录下，而那个目录在首次写入前并不存在。
+    // 写路径负责建出父目录，而不是让 SQLite 报 catalog_error 反过来怪路径写法。
+    let dir = tempfile::tempdir().expect("tempdir");
+    let nested = dir.path().join("deep").join("nested").join("store.db");
+    let nested_s = nested.to_string_lossy().into_owned();
+    assert!(!nested.parent().expect("parent").exists());
+
+    let out = run(&nested_s, &["index", "d1", "parent directory creation"]);
+    assert!(
+        out.status.success(),
+        "index 应自动建出父目录: {}",
+        stdout(&out)
+    );
+    assert!(nested.exists(), "库文件应落在新建的目录里");
+}
+
+#[test]
+fn asg_db_env_var_supplies_the_store_path() {
+    // M2P-3：`$ASG_DB` 是 `--db` 之外的覆盖项（优先级低于 --db、高于默认路径）。
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("from-env.db");
+    let db_s = db.to_string_lossy().into_owned();
+
+    // 写命令经环境变量拿到路径并建库。
+    let out = Command::new(BIN)
+        .env("ASG_DB", &db_s)
+        .args(["--robot", "index", "e1", "env var store path"])
+        .output()
+        .expect("spawn");
+    assert!(out.status.success(), "index via ASG_DB: {}", stdout(&out));
+    assert!(db.exists(), "ASG_DB 指向的库应被建出");
+
+    // 读命令在同一环境变量下命中同一个库。
+    let out = Command::new(BIN)
+        .env("ASG_DB", &db_s)
+        .args(["--robot", "search", "env"])
+        .output()
+        .expect("spawn");
+    assert!(out.status.success(), "search via ASG_DB: {}", stdout(&out));
+    let frame = parse_first_line(&out);
+    assert_envelope_shape(&frame, true);
+    assert_eq!(
+        frame["data"]["hits"].as_array().map(Vec::len),
+        Some(1),
+        "{frame}"
+    );
+
+    // `--db` 优先于环境变量：指向一个不存在的库时报 not_found 而非回落到 ASG_DB。
+    let other = dir.path().join("explicit-wins.db");
+    let other_s = other.to_string_lossy().into_owned();
+    let out = Command::new(BIN)
+        .env("ASG_DB", &db_s)
+        .args(["--db", &other_s, "--robot", "search", "env"])
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(4), "{}", stdout(&out));
+    let frame = parse_first_line(&out);
+    assert_eq!(frame["error"]["code"], "not_found", "{frame}");
+    assert!(
+        frame["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains(&other_s)),
+        "--db 必须胜过 ASG_DB: {frame}"
+    );
+}
+
+#[test]
+fn unknown_subcommand_lists_every_known_command_and_suggests_the_closest() {
+    // M2P-8：可用命令表由 known_subcommand 的同一常量派生，过去那份手写副本漏了
+    // 7 个命令（`handof` 会被告知 handoff 不是可用命令）。
+    let out = run_bare(&["--robot", "handof", "q"]);
+    assert_eq!(out.status.code(), Some(2), "{}", stdout(&out));
+    let frame = parse_first_line(&out);
+    assert_envelope_shape(&frame, false);
+    assert_eq!(frame["error"]["code"], "invalid_request", "{frame}");
+    let message = frame["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("Did you mean `handoff`?"),
+        "应给出 did-you-mean: {message}"
+    );
+    // 每个真实子命令都必须出现在列表里——曾漏掉的 7 个逐个点名。
+    for command in [
+        "handoff",
+        "resume",
+        "hook",
+        "serve",
+        "providers",
+        "model",
+        "get-session-resume",
+    ] {
+        assert!(
+            message.contains(command),
+            "可用命令表漏了 {command}: {message}"
+        );
+    }
+    // 未知命令的判定发生在打开存储之前：不得因为缺库而报 not_found。
+    assert!(
+        !message.contains("no store at"),
+        "未知子命令不应先报缺库: {message}"
+    );
+}
+
+#[test]
+fn empty_catalog_names_sync_discover_in_search_list_and_status() {
+    // M2P-4：全新库上 search→`no hits`、list→`catalog is empty`、status→`entities: 0`
+    // 一次都没说出唯一正确的下一步动作。三条命令现在都点名 `sync --discover`。
+    let (_dir, db) = temp_db("empty-catalog-hint");
+    create_empty_store(&db);
+
+    for args in [vec!["search", "anything"], vec!["list"], vec!["status"]] {
+        let out = run_human(&db, &args);
+        assert!(out.status.success(), "{args:?}: {}", stdout(&out));
+        let text = stdout(&out);
+        assert!(
+            text.contains("sync --discover"),
+            "{args:?} 应点名 sync --discover: {text}"
+        );
+        // 提示必须是可直接复制的整条命令：显式 --db 时要带上同一路径。
+        assert!(
+            text.contains(&format!("asg --db {db} sync --discover")),
+            "{args:?} 提示应是可执行全命令: {text}"
+        );
+    }
+
+    // 换个错的建议不该再出现在空库上。
+    let text = stdout(&run_human(&db, &["search", "anything"]));
+    assert!(
+        !text.contains("试试更短或更少的关键词"),
+        "空库不应建议换关键词: {text}"
+    );
+
+    // 非空库不得谎报为空：有内容后 search 无命中仍是"换关键词"那条路径。
+    let out = run(&db, &["index", "e1", "content that exists"]);
+    assert!(out.status.success(), "index failed: {}", stdout(&out));
+    let text = stdout(&run_human(&db, &["search", "nothingmatchesthis"]));
+    assert!(
+        !text.contains("the catalog is empty"),
+        "非空库上零命中不得报成空索引: {text}"
+    );
+    assert!(text.contains("no hits"), "{text}");
+}
+
+#[test]
+fn human_search_table_session_id_feeds_context_directly() {
+    // M2P-1：表格 Session ID 列过去填 provider 原生 id，喂给 context 会得到
+    // `not a valid session id` exit 2——help 承诺的 search→show→context 数据流
+    // 在 human 输出上根本走不通。现在该列是 canonical `ses_v1_…`，照抄即通。
+    let (dir, db) = temp_db("table-id-feeds-context");
+    let fixture = dir.path().join("table.jsonl");
+    std::fs::write(
+        &fixture,
+        concat!(
+            r#"{"type":"user","uuid":"aa000000-0000-4000-8000-000000000001","sessionId":"aa000000-0000-4000-8000-000000000002","timestamp":"2026-07-26T01:00:00.000Z","message":{"role":"user","content":"tablepivot query text"}}"#,
+            "\n",
+        ),
+    )
+    .expect("write fixture");
+    let fixture_path = fixture.to_string_lossy().into_owned();
+    let out = run(&db, &["ingest", &fixture_path]);
+    assert!(out.status.success(), "ingest failed: {}", stdout(&out));
+
+    let out = run_human(&db, &["search", "tablepivot"]);
+    assert!(out.status.success(), "search failed: {}", stdout(&out));
+    let text = stdout(&out);
+
+    // 从表格末列抓出 id——正是用户会复制的那一段。
+    let table_id = text
+        .lines()
+        .filter(|line| line.contains('|'))
+        .filter_map(|line| line.rsplit('|').next())
+        .map(str::trim)
+        .find(|cell| cell.starts_with("ses_v1_"))
+        .unwrap_or_else(|| panic!("表格末列应是 canonical ses_v1_ id: {text}"));
+
+    // provider 原生 id（源文件里的 sessionId）绝不能是被渲染的那个值。
+    assert_ne!(
+        table_id, "aa000000-0000-4000-8000-000000000002",
+        "Session ID 列不得填 provider 原生 id: {text}"
+    );
+
+    // 契约点：照抄表格里的 id 直接跑 context 必须成功。
+    let out = run(&db, &["context", table_id]);
+    assert!(
+        out.status.success(),
+        "照抄表格 id 跑 context 应成功，得到: {}",
+        stdout(&out)
+    );
+    let frame = parse_first_line(&out);
+    assert_envelope_shape(&frame, true);
+    assert_eq!(frame["data"]["session_id"], table_id, "{frame}");
+
+    // 同一个 id 也必须能喂给 get-session-resume（双 id 规则的另一半）。
+    let out = run(&db, &["get-session-resume", table_id]);
+    assert!(
+        out.status.success(),
+        "get-session-resume 应接受同一个 id: {}",
+        stdout(&out)
+    );
+
+    // 表格下方给出可直接执行的下一步命令。
+    assert!(
+        text.contains("Next:") && text.contains("context "),
+        "表格下方应打印建议命令: {text}"
+    );
 }
 
 #[test]
@@ -2128,6 +2428,7 @@ fn robot_envelope_shape_on_error() {
 #[test]
 fn robot_flag_produces_same_json_envelope() {
     let (_dir, db) = temp_db("env-robot");
+    create_empty_store(&db);
     let out = Command::new(BIN)
         .args(["--db", &db, "--robot", "status"])
         .output()
@@ -2141,6 +2442,7 @@ fn robot_flag_produces_same_json_envelope() {
 #[test]
 fn output_json_flag_produces_well_formed_envelope() {
     let (_dir, db) = temp_db("env-json");
+    create_empty_store(&db);
     let out = Command::new(BIN)
         .args(["--db", &db, "--output", "json", "status"])
         .output()
@@ -2534,6 +2836,7 @@ fn resume_yes_missing_provider_binary_returns_structured_error() {
 #[test]
 fn resume_unavailable_session_reports_reason_without_command() {
     let (dir, db) = temp_db("resume-unavailable");
+    create_empty_store(&db);
     // 空库上任何 session 都无 resume 声明 → available:false + reason。
     let out = run(&db, &["resume", "ses_v1_00000000000000000000000000"]);
     assert!(out.status.success(), "resume failed: {}", stdout(&out));
@@ -2676,6 +2979,7 @@ fn handoff_redacts_secrets_in_evidence() {
 #[test]
 fn jsonl_output_is_one_complete_frame_per_line() {
     let (_dir, db) = temp_db("env-jsonl");
+    create_empty_store(&db);
     let out = Command::new(BIN)
         .args(["--db", &db, "--output", "jsonl", "status"])
         .output()
@@ -3714,6 +4018,7 @@ fn jsonl_sync_emits_progress_frames_then_single_response() {
 #[test]
 fn request_id_echoes_verbatim_and_invalid_is_rejected() {
     let (_dir, db) = temp_db("request-id");
+    create_empty_store(&db);
     let out = Command::new(BIN)
         .args([
             "--db",
@@ -4034,6 +4339,7 @@ fn control_characters_in_query_are_invalid_request() {
     // NUL 本身的边界拒绝由 application 层单元测试覆盖
     // （search_rejects_control_characters_before_index_query）。
     let (_dir, db) = temp_db("nul-query");
+    create_empty_store(&db);
     for query in ["a\tb", "a\nb"] {
         let out = run(&db, &["search", query]);
         assert_eq!(
@@ -5266,6 +5572,7 @@ fn sync_extracts_codex_function_call_activities() {
 #[test]
 fn search_facet_flag_validation_is_explicit() {
     let (_dir, db) = temp_db("sync-act-flags");
+    create_empty_store(&db);
     // 互斥组合是用法错误（exit 2）。
     let out = run(&db, &["search", "q", "--main-only", "--subagent-only"]);
     assert_eq!(out.status.code(), Some(2), "{}", stdout(&out));

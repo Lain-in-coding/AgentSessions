@@ -51,6 +51,24 @@ fn run_cli(db: &Path, args: &[&str]) -> Output {
         .expect("failed to spawn agent-session-grep binary")
 }
 
+/// 库不存在时先建出一个空库（已迁移、零实体）。
+///
+/// `mcp` 是只读入口，而读命令不再新建库（M2P-2）——这与 MCP 的实际契约一致：
+/// server 要求 `--db` 指向已存在的库。只验证协议层语义（handshake、参数校验、
+/// 错误码映射）的用例不 ingest 任何夹具，因此在这里补上最小前置状态；
+/// 已 ingest 过夹具的用例走 no-op 分支，数据不受影响。
+fn ensure_store(db: &Path) {
+    if db.exists() {
+        return;
+    }
+    let out = run_cli(db, &["index", "rebuild"]);
+    assert!(
+        out.status.success(),
+        "创建空库失败: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
 /// 跑一个完整 MCP stdio 会话：逐行写入 → 关 stdin（EOF）→ 收全 stdout。
 ///
 /// 两条契约在此执行：EOF 后服务器必须干净停机 exit 0（design §0.8）；
@@ -61,6 +79,7 @@ fn mcp_session_raw(db: &Path, lines: &[&str]) -> Vec<Value> {
 
 /// 同 [`mcp_session_raw`]，额外返回 stderr 全文（隐私回归守卫用）。
 fn mcp_session_raw_stderr(db: &Path, lines: &[&str]) -> (Vec<Value>, String) {
+    ensure_store(db);
     let mut child = Command::new(BIN)
         .arg("--db")
         .arg(db)
