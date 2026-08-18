@@ -209,6 +209,7 @@ fn search_msg(response: AppResponse) -> Msg {
             truncation,
             retrieval_mode: _,
             fallback_warning: _,
+            time_filter_excluded: _,
         } => {
             let hits = hits
                 .into_iter()

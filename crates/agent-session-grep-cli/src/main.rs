@@ -3894,6 +3894,7 @@ fn render(
             truncation,
             retrieval_mode: effective_mode,
             fallback_warning,
+            time_filter_excluded,
         } => {
             let outcome = outcome_of(&truncation);
             let page = protocol::Page {
@@ -3903,6 +3904,14 @@ fn render(
             let mut warnings = Vec::new();
             if let Some(warning) = fallback_warning {
                 warnings.push(warning);
+            }
+            // D11（宽容但报数）：时间窗把无时间戳的记录静默排除了，如实报数并
+            // 给出下一步命令。0（无时间窗或无排除）时不发 warning，输出字节不变。
+            if time_filter_excluded > 0 {
+                warnings.push(format!(
+                    "time filter excluded {time_filter_excluded} records with no timestamp; \
+                     re-run without --since/--until to see them"
+                ));
             }
             let data = serde_json::json!({
                 "retrieval_mode": effective_mode.as_str(),
