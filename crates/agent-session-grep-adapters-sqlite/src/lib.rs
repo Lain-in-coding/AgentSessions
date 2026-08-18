@@ -7178,6 +7178,30 @@ mod filtered_query_tests {
     }
 
     #[test]
+    fn null_timestamp_rows_are_excluded_by_every_time_window() {
+        // Defect pin: `asg_instant_sort_key(...) >= ?` is false for NULL in SQL,
+        // so a message without a parseable timestamp cannot satisfy ANY window —
+        // not even one that spans every other row. NULL timestamps are a
+        // permanent, correct state (aider has only a run-level header time; codex
+        // deliberately does not propagate its replay envelope time), so the row
+        // stays silently missing until the exclusion is reported.
+        let fixture = filter_fixture();
+        let null_ts = fixture.null_ts.as_str().to_string();
+        let unfiltered = search_filtered(&fixture.store, "shared-token", &SearchFilters::default());
+        assert!(unfiltered.contains(&null_ts), "{unfiltered:?}");
+
+        // A window wide enough to admit all four timestamped rows still drops it.
+        let everything = SearchFilters {
+            providers: Vec::new(),
+            since: Some(instant(0)),
+            until: Some(instant(4_000_000_000)),
+        };
+        let hits = search_filtered(&fixture.store, "shared-token", &everything);
+        assert_eq!(hits.len(), 4, "{hits:?}");
+        assert!(!hits.contains(&null_ts), "{hits:?}");
+    }
+
+    #[test]
     fn provider_and_time_dimensions_are_anded() {
         let fixture = filter_fixture();
         let filters = SearchFilters {
