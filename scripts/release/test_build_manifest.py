@@ -37,6 +37,7 @@ class BuildManifestTests(unittest.TestCase):
             "LICENSE-APACHE",
             "CHANGELOG.md",
             "SECURITY.md",
+            "NOTICE",
         ):
             (self.workspace / name).write_text(f"synthetic {name}\n", encoding="utf-8")
         self.binary = self.workspace / "agent-session-grep"
@@ -153,6 +154,7 @@ class BuildManifestTests(unittest.TestCase):
             "LICENSE-APACHE",
             "CHANGELOG.md",
             "SECURITY.md",
+            "NOTICE",
             "THIRD-PARTY-DEPENDENCIES.json",
             "THIRD-PARTY-DEPENDENCIES.csv",
         }
