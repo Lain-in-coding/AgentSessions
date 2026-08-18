@@ -597,7 +597,52 @@ fn provider_matrix_data() -> serde_json::Value {
             maturity_target: ProviderMaturity::target_for(&capability.provider_id),
         })
         .collect::<Vec<_>>();
-    serde_json::json!({ "providers": providers })
+    // `semantic` 是对 frozen v1.1 envelope 的加法键（Robot 消费方一次命令即可
+    // 同时发现能力矩阵与语义检索事实）；`data` 对 providers 无 schema 约束。
+    serde_json::json!({
+        "providers": providers,
+        "semantic": semantic_capability_data(),
+    })
+}
+
+/// 语义检索构建事实（`providers` 的 `semantic` 键，`model status` 同一诚实模式）。
+///
+/// - `feature`：编译进 semantic-candle 时为 "semantic-candle"，默认构建为 null。
+/// - `default_model`：恒为诚实默认向量化器 id（bigram-hash，非语义模型）。
+/// - `runtime`：编译进 semantic-candle 时为本地 Candle E5 运行时的稳定标识
+///   "candle-e5-local"，默认构建为 null。这是构建事实，不是安装事实：E5
+///   bundle 是否已通过校验缓存在本地，由 `model status` 报告。
+fn semantic_capability_data() -> serde_json::Value {
+    use agent_session_grep_application::embedding::BIGRAM_HASH_MODEL_ID;
+    #[cfg(feature = "semantic-candle")]
+    {
+        serde_json::json!({
+            "feature": "semantic-candle",
+            "default_model": BIGRAM_HASH_MODEL_ID,
+            "runtime": "candle-e5-local",
+        })
+    }
+    #[cfg(not(feature = "semantic-candle"))]
+    {
+        serde_json::json!({
+            "feature": null,
+            "default_model": BIGRAM_HASH_MODEL_ID,
+            "runtime": null,
+        })
+    }
+}
+
+/// `doctor` 的构建事实：semantic-candle 编译进二进制时报告 true，默认构建
+/// 报告 null（与 `model status` 的 `feature: null` 诚实模式一致）。
+fn semantic_feature_flag() -> serde_json::Value {
+    #[cfg(feature = "semantic-candle")]
+    {
+        serde_json::json!(true)
+    }
+    #[cfg(not(feature = "semantic-candle"))]
+    {
+        serde_json::json!(null)
+    }
 }
 
 fn providers(
@@ -1208,6 +1253,11 @@ fn doctor(
             "db": "not-checked",
             "schema": null,
             "offline": offline,
+            // 构建事实：semantic-candle 是否编译进本二进制（默认构建为 null）。
+            "semantic_feature": semantic_feature_flag(),
+            // schema v12 事实：tool_activities/tool_activity_membership 表随
+            // 本二进制管理的每个 catalog 落库，未指定 --db 也成立。
+            "tool_activity_storage": true,
             // 新手会误以为 db: not-checked 是自检失败（10 角色体验测试缺陷）。
             // 加一行白话提示，说明如何真正校验。
             "hint": "未指定数据库：以上仅检查了环境。运行 doctor --db <path> 可校验数据库与 schema。",
@@ -1226,6 +1276,9 @@ fn doctor(
                 "db": "ok",
                 "schema": schema,
                 "offline": offline,
+                "semantic_feature": semantic_feature_flag(),
+                // 打开的库已被迁移到本二进制的 schema v12，工具活动存储存在。
+                "tool_activity_storage": true,
                 "generation": generation,
                 "interrupted_batches": interrupted,
             })
@@ -4085,6 +4138,55 @@ mod tests {
     #[test]
     fn provider_data_root_rejects_unknown_provider() {
         assert!(provider_data_root("unknown-provider").is_none());
+    }
+
+    #[test]
+    fn provider_matrix_data_adds_semantic_surface_without_touching_rows() {
+        let data = provider_matrix_data();
+        // 加法键：data 只有 providers（原样 16 行）与 semantic 两个键。
+        assert_eq!(data.as_object().unwrap().len(), 2);
+        assert_eq!(
+            data["providers"].as_array().unwrap().len(),
+            ProviderCapabilityMatrix::current().providers.len()
+        );
+        let semantic = &data["semantic"];
+        // 键集跨构建稳定。
+        let keys = semantic
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            keys,
+            ["default_model", "feature", "runtime"]
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>()
+        );
+        // 诚实默认向量化器事实：任何构建都是 bigram-hash-v1。
+        assert_eq!(
+            semantic["default_model"],
+            agent_session_grep_application::embedding::BIGRAM_HASH_MODEL_ID
+        );
+        // feature/runtime 严格跟随 cfg(feature = "semantic-candle")：
+        // 默认构建断言 null 形状，feature 构建断言稳定标识（CI 两种构建都会跑到）。
+        if cfg!(feature = "semantic-candle") {
+            assert_eq!(semantic["feature"], "semantic-candle");
+            assert_eq!(semantic["runtime"], "candle-e5-local");
+        } else {
+            assert!(semantic["feature"].is_null());
+            assert!(semantic["runtime"].is_null());
+        }
+    }
+
+    #[test]
+    fn doctor_semantic_feature_flag_tracks_build() {
+        let flag = semantic_feature_flag();
+        if cfg!(feature = "semantic-candle") {
+            assert_eq!(flag, serde_json::json!(true));
+        } else {
+            assert!(flag.is_null());
+        }
     }
 
     #[test]

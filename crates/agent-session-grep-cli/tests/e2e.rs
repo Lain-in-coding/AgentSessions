@@ -2093,6 +2093,13 @@ fn doctor_envelope_shape_has_meta_generation_null() {
     assert_eq!(frame["command"], "doctor");
     // doctor has no generation context
     assert!(frame["meta"]["generation"].is_null() || frame["meta"]["generation"].is_number());
+    // 构建事实与 schema v12 事实（addition keys on the doctor data）。
+    assert_eq!(frame["data"]["tool_activity_storage"], true);
+    if cfg!(feature = "semantic-candle") {
+        assert_eq!(frame["data"]["semantic_feature"], true);
+    } else {
+        assert!(frame["data"]["semantic_feature"].is_null());
+    }
 }
 
 // ─── config paths ──────────────────────────────────────────────────────────
@@ -2131,6 +2138,25 @@ fn providers_robot_output_is_a_stable_matrix_envelope() {
     assert_eq!(frame["redaction"]["status"], "none");
     assert_eq!(frame["page"]["next_cursor"], serde_json::Value::Null);
     assert_eq!(frame["page"]["has_more"], false);
+
+    // 加法键：`semantic` 反映构建的语义检索事实，键集跨构建稳定。
+    let semantic = &frame["data"]["semantic"];
+    assert_eq!(
+        semantic.as_object().unwrap().len(),
+        3,
+        "semantic 键集稳定: {semantic}"
+    );
+    assert_eq!(
+        semantic["default_model"],
+        agent_session_grep_application::embedding::BIGRAM_HASH_MODEL_ID
+    );
+    if cfg!(feature = "semantic-candle") {
+        assert_eq!(semantic["feature"], "semantic-candle");
+        assert_eq!(semantic["runtime"], "candle-e5-local");
+    } else {
+        assert!(semantic["feature"].is_null(), "{semantic}");
+        assert!(semantic["runtime"].is_null(), "{semantic}");
+    }
 
     let matrix = ProviderCapabilityMatrix::current();
     let rows = frame["data"]["providers"]
