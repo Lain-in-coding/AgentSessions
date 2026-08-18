@@ -350,9 +350,8 @@ cc-switch、claude-code-history-viewer —— 已逐个读源码/配置默认值
 **静默隐藏可召回的历史**;而对同一字段做**加权**则优雅降级 ——
 null 只是没有加分。**这是决定性的架构理由。**
 
-还有一条具体的:本仓库现在就跑在
-`C:\AgentSessions\.claude\worktrees\public-release-audit` ——
-一个与主 checkout **不共享任何路径前缀**的 git worktree。
+还有一条具体的:本仓库现在就跑在一个与主 checkout
+**不共享任何路径前缀**的 git worktree 里。
 Recall 的 skill 文档正好记录了路径前缀作用域在这类情况下的失败。
 
 **量级参考(sessiongrep,本项目最接近的结构同类:Rust + SQLite/FTS5 +
