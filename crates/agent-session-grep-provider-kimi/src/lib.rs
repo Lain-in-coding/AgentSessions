@@ -66,6 +66,7 @@ impl ProviderAdapter for KimiCodeAdapter {
                 "context.append_loop_event records (step/tool events) are not yet parsed",
                 "session id is rarely carried in wire.jsonl; session_native_id is usually left unset",
                 "per-message timestamps are not extracted",
+                "context.append_message records carry no per-message native id, so message identity is reconstructed document-scoped by the ingestion layer (Unstable)",
             ],
         )
     }
@@ -231,7 +232,14 @@ impl ProviderAdapter for KimiCodeAdapter {
 
             sink.emit_message(MessageEvent {
                 seq,
-                native_id: &format!("kimi-msg-{seq}"),
+                // `context.append_message` records carry no message id. A
+                // synthetic `kimi-msg-{seq}` would collide across documents
+                // because seq restarts at 0 in every wire.jsonl, so the first
+                // message of every session would share one id and the storage
+                // merge would silently drop all but one payload. Emit an empty
+                // native_id so the ingestion layer derives a document-scoped id
+                // from [provider_id, variant, document_id, seq].
+                native_id: "",
                 parent_native_id: None,
                 role,
                 text: &text,
