@@ -123,8 +123,8 @@ semantic evidence.
 
 ## Verification status (2026-08-18)
 
-**Real multilingual-e5-small inference HAS been verified in this
-environment.** The pinned weights (`model.safetensors`, 470,641,600 bytes,
+Real multilingual-e5-small inference has been verified on the maintainer's
+development machine. The pinned weights (`model.safetensors`, 470,641,600 bytes,
 SHA-256 `1a55775f53449dac10a2bcbc312469fac40b96d53198c407081a831f81c98477`)
 were obtained out of band (via the public HF mirror), hash-verified against the
 pinned digest recorded in the model-options research, imported with
@@ -137,16 +137,22 @@ end to end with a `--features semantic-candle` release binary:
   report's `model_labeling.is_real_embedding_model` is `true` and the backend
   is the pinned Candle model id, not `bigram-hash-v1`).
 - `scripts/evidence/semantic_benchmark.py run --profile gate-real` produced a
-  validating report: semantic recall@k tracked at/below lexical on the frozen
-  corpus with zero fallback queries; semantic p50/p95 latency per query was on
-  the order of seconds for one-shot CLI processes because each invocation pays
+  validating report: on the frozen corpus (200 sessions / 2,000 messages / 100
+  gold queries) semantic recall@k came out at or slightly above lexical —
+  recall@5 0.720 vs 0.705, recall@10 0.755 vs 0.750, recall@20 0.775 vs 0.750,
+  with hybrid at 0.735 / 0.755 / 0.775 — and zero fallback queries. The margin
+  is about two percentage points, which is why semantic stays opt-in rather
+  than becoming the default. Semantic p50/p95 latency per query was on the
+  order of seconds for one-shot CLI processes because each invocation pays
   the ~470MB model load — long-lived entry points (MCP/TUI/serve) amortize
   this via the in-process `load_cached` model cache. The amortized latency is
   verified by `scripts/evidence/semantic_mcp_latency.py`, which keeps the
   encoder resident in an `asg mcp` process and issues 10 `search_sessions`
-  calls with `mode: "semantic"`: p50 16.6 ms / p95 21.0 ms per query (real
-  Candle E5 inference, not the lexical fallback), versus the ~3 s one-shot
-  CLI path. `gate.promotion_claim`
+  calls with `mode: "semantic"`: p50 16.6 ms / p95 21.0 ms per query
+  (**n=10 queries over a 10-message synthetic corpus, single machine** — a
+  smoke-scale amortization probe, not a benchmark result), against real
+  Candle E5 inference rather than the lexical fallback, versus the ~3 s
+  one-shot CLI path. `gate.promotion_claim`
   remains `none`, `lexical_stays_default` remains `true`, `maturity` stays
   `beta`, and thresholds remain pending: this run records real evidence but
   does not promote anything.
