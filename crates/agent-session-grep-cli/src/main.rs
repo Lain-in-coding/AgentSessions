@@ -1832,6 +1832,7 @@ fn dispatch(
                 }
                 sync_discover(store, mode == protocol::OutputMode::Jsonl, request_id)?
             } else {
+                no_flag_like_positional(&args[1..], "sync <file>... | sync --discover")?;
                 sync_files(
                     store,
                     &args[1..],
@@ -4476,6 +4477,24 @@ fn no_extra_args(rest: &[String], expected: usize, usage: &str) -> Result<(), Cl
     Ok(())
 }
 
+/// 变长位置参数（`sync <file>...`）不能用 `no_extra_args` 收口——路径数量本就
+/// 不定。但把 `-` 开头的 token 当路径会产生一个**指向错误方向的诊断**：文件打
+/// 不开报 `source_io`「确认源文件路径存在且可读」，而路径其实存在可读，真因是
+/// 那个 flag 不存在。用户会去查权限、查盘符、查转义。
+///
+/// 因此位置参数里出现 `-` 开头的 token 一律报 `invalid_request` 并回显该 token。
+/// 单独的 `-`（stdin 惯例）不在此列：它是合法的位置参数形态，不是拼错的 flag。
+fn no_flag_like_positional(args: &[String], usage: &str) -> Result<(), CliError> {
+    for arg in args {
+        if arg.starts_with('-') && arg != "-" {
+            return Err(CliError::usage(format!(
+                "unknown flag {arg}; usage: {usage}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5022,6 +5041,26 @@ mod tests {
             rest,
             vec!["status".to_string(), "--db".to_string(), "x".to_string(),]
         );
+    }
+
+    #[test]
+    fn flag_like_positionals_name_the_flag_instead_of_blaming_the_path() {
+        // 变长位置参数（`sync <file>...`）若把 flag 当路径，用户会拿到
+        // `source_io`「确认源文件路径存在且可读」——而路径其实存在可读。
+        let usage = "sync <file>... | sync --discover";
+        let err = no_flag_like_positional(&["--provider".into(), "a.jsonl".into()], usage)
+            .expect_err("a flag-like positional must be rejected");
+        assert!(
+            err.0.message.contains("--provider"),
+            "the message must name the offending flag: {}",
+            err.0.message
+        );
+        assert_eq!(err.0.code, CanonicalCode::InvalidRequest);
+
+        // 真正的路径不受影响，`-`（stdin 惯例）也是合法位置参数。
+        assert!(no_flag_like_positional(&["a.jsonl".into(), "b.jsonl".into()], usage).is_ok());
+        assert!(no_flag_like_positional(&["-".into()], usage).is_ok());
+        assert!(no_flag_like_positional(&[], usage).is_ok());
     }
 
     #[test]
