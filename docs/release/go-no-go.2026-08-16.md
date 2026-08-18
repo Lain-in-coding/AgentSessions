@@ -125,13 +125,12 @@ certified — currently 0 Beta. **Not release-ready per provider gate.**
    branch protection; ADR signing/owner decisions.
 4. **macOS**: rehearsal not run (external CI-billing blocker).
 5. **Known deferred**: real local semantic model **weights delivery + recall
-   benchmark gate** (the optional `semantic-candle` runtime and offline
-   `model import` path are now implemented; default builds stay bigram-hash /
-   lexical-only and must not be marketed as semantic). Context enrichment
-   beyond handoff tool_activity projection, TUI facet controls, Robot
-   capability UI, retention/cleanup policy remain explicitly deferred. The
-   current default `bigram-hash-v1` vectorizer remains honestly labeled
-   fuzzy-lexical, not semantic.
+   benchmark gate** (the optional `semantic-candle` runtime and the offline
+   `model import` / `model status` path are now implemented; default builds
+   stay bigram-hash / lexical-only and must not be marketed as semantic).
+   Robot capability UI and ToolActivity retention/cleanup policy remain
+   explicitly deferred. The current default `bigram-hash-v1` vectorizer
+   remains honestly labeled fuzzy-lexical, not semantic.
 
 Closed since this draft's original date: P0-1 privacy scrub, P0-6 bounded
 ingestion, handoff determinism/budget/redaction, resume first-run preview,
@@ -155,6 +154,15 @@ tracked paths (0 findings); 16-row capability-matrix drift test; tracked
 generated gate manifest untracked per out/README contract; THREAT-MODEL gains
 serve-LAN/hook/model-download/embedding-API attack surfaces; roadmap phase
 snapshot refreshed to `NOT_READY_EXTERNAL_BLOCKERS`.
+
+Closed by the post-release-gap wave (pushed to `main` at `f7e2a49`): optional
+`semantic-candle` backend + offline `model import`/`model status` (default
+build stays lexical-only, never downloads); handoff packs project catalog
+`tool_activity` and authoritative `role`/`is_sidechain` facts; TUI search
+facet controls (`m` sidechain / `k` tool-kind); context responses project
+`tool_activities`; provider Beta readiness ledger
+(`docs/product/PROVIDER-BETA-READINESS.md`) separates local from external
+promotion blockers.
 
 ---
 

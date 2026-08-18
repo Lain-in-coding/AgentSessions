@@ -29,10 +29,11 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   command is unverified report `available:false` rather than a fabricated
   command.
 - `search --mode lexical|semantic|hybrid` — retrieval mode selection. The
-  current vector mode uses bigram hashes for fuzzy lexical matching, not a
+  default vector mode uses bigram hashes for fuzzy lexical matching, not a
   semantic model; hybrid combines lexical and vector rankings with RRF.
   Semantic and hybrid metrics remain informational and carry no release
-  threshold or quality claim.
+  threshold or quality claim. A real local semantic backend is available
+  through the optional `semantic-candle` cargo feature (off by default).
 - `hook <session-start|user-prompt-submit>` CLI subcommand — Claude Code hook
   integration, disabled by default. Reads the hook payload from stdin and emits
   the `hookSpecificOutput.additionalContext` contract; nothing is injected
@@ -84,6 +85,29 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   for the canonical search operation — Web launches a real loopback `serve`
   process and TUI drives `--snapshot-json`. An unimplemented entry point fails
   the harness instead of being recorded as a skip.
+- Optional local semantic backend (`semantic-candle` cargo feature, default
+  off): Candle 0.10 + pinned
+  `intfloat-multilingual-e5-small@614241f6-candle-f32-meanpool-l2-qpass-v1`
+  (384 dims, mean pooling, L2, `query:`/`passage:` prefixes). `model import
+  --dir <bundle>` verifies every declared SHA-256 and atomically publishes the
+  bundle into the local model cache (never downloads); `model status` reports
+  whether the default E5 bundle is imported. Default builds stay
+  bigram-hash / lexical-only, and missing weights keep the explicit
+  `lexical_fallback` behavior. See `docs/operations/SEMANTIC-MODEL-BUNDLE.md`.
+- Handoff packs project authoritative per-message facts: each mainline entry
+  now carries `role` and `is_sidechain` (missing facts render `unknown` /
+  `false`, never fabricated), and the pack carries the catalog `tool_activity`
+  list for its hit messages (`handoff-pack/v1` schema updated).
+- TUI search facet controls: `m` cycles the sidechain facet
+  (include → main-only → subagent-only) and `k` cycles the tool-kind facet
+  (any → file → command → web → query → unknown) with an empty input,
+  reissuing the search through the same `SearchFacets` contract as CLI/MCP.
+- Context responses (`context` CLI, `get_session_context` MCP) project
+  `tool_activities` for the assembled messages via the ContextGraphStore batch
+  read; empty when nothing is stored, never fabricated.
+- Provider Beta readiness ledger (`docs/product/PROVIDER-BETA-READINESS.md`):
+  per-provider local vs external Beta blockers, so no provider is promoted
+  from code existence alone.
 
 ### Fixed
 

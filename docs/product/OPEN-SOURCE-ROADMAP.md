@@ -11,7 +11,7 @@
 
 ## 0.1 2026-08-17 阶段交接快照
 
-本阶段（provider evidence / release-gate integration / release-gap 收口）已完成并推送到 `main`，阶段主体提交为 `8de7312`（ToolActivity/schema-v12 落地），2026-08-17 收口 wave 追加 Robot facets schema、Web/MCP provider 一致性、16 行矩阵漂移守护、privacy 扫描强化、CI Python 套件接线等本地修复；这表示“当前阶段的集成工作完成”，不表示项目已经满足公开发布门。
+本阶段（provider evidence / release-gate integration / release-gap 收口）已完成并推送到 `main`，阶段主体提交为 `8de7312`（ToolActivity/schema-v12 落地），2026-08-17 收口 wave 追加 Robot facets schema、Web/MCP provider 一致性、16 行矩阵漂移守护、privacy 扫描强化、CI Python 套件接线等本地修复；2026-08-17/18 后续 wave（HEAD `f7e2a49`）再追加：可选 `semantic-candle` 本地 Candle E5 后端 + `model import`/`model status` 离线模型缓存、handoff pack `tool_activity` 与权威 `role`/`is_sidechain` 投影、TUI 搜索分面控件（`m` sidechain / `k` tool-kind）、context 响应 `tool_activities` 投影、Provider Beta readiness 台账（`PROVIDER-BETA-READINESS.md`）；这表示“当前阶段的集成工作完成”，不表示项目已经满足公开发布门。
 
 ### 已完成并验证
 
@@ -30,7 +30,8 @@
 - Semantic 默认路径仍是 `bigram-hash-v1` fuzzy lexical vectorizer。可选
   `semantic-candle` feature 已落地：本地 Candle + pinned
   `intfloat-multilingual-e5-small@614241f6-candle-f32-meanpool-l2-qpass-v1`，
-  通过 `asg model import --dir <bundle>` 离线导入（永不联网）；未导入时
+  通过 `asg model import --dir <bundle>` 离线导入（校验 SHA-256，永不联网）、
+  `asg model status` 校验导入状态；未导入时
   semantic/hybrid 仍显式 `lexical_fallback`。默认 `cargo install` / release
   构建不启用该 feature，不得把 bigram-hash 宣传为真实语义模型。
 - GitHub hosted CI 当前因 account billing/spending-limit 在首步前失败；这属于 External，不得改代码伪造跨平台认证。仓库仍保持 PRIVATE，公开/tag/release/签名与 owner governance 由后续 owner 决定。
@@ -59,7 +60,7 @@
 |---|---|---|
 | Evidence-first | 每条结果带 source span 可回溯原文;handoff pack 原文/推断分栏 | 无人做到 pack 级证据契约 |
 | 身份与一致性 | StableId 三级 + durable outbox + CAS generation + 失败不删除 | hstry 的 UUID v5 最接近但无 outbox |
-| CJK 一等公民 | bigram 索引 + 中文语义模型 benchmark 待落地后锁定(当前向量模式为 bigram-hash fuzzy-lexical,非真实语义模型) | 竞品基本无中文分词处理 |
+| CJK 一等公民 | bigram 索引 + 可选 `semantic-candle` 本地 E5 后端(feature-gated、默认 off、离线导入) + 中文语义模型 benchmark 待落地后锁定(默认向量模式为 bigram-hash fuzzy-lexical,非真实语义模型) | 竞品基本无中文分词处理 |
 | 诚实能力矩阵 | certified/GA/beta/experimental/unsupported 分级,证据晋级,禁止跨级宣传 | 多数项目虚标 provider 数 |
 | 零遥测可验证 | 代码级禁止 + CI 静态检查 + 全局 `--offline` flag（fail-closed）+ `tests/network_egress.rs` 零 HTTP client / 唯一 loopback socket 断言 | 无人做到可验证 |
 | 跨边界默认脱敏 | Web/Handoff/MCP/Robot 默认脱敏,CLI/TUI 本地不脱敏 | agentsview 有 secret 扫描但非分层边界 |

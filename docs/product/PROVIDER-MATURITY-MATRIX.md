@@ -3,7 +3,7 @@
 > 对外可见的 Provider 状态清单，是 `0.1.0`（首个计划公开版本，`Cargo.toml`）的公开状态记录。
 > - 术语与晋级证据要求见 `../architecture/RFC-0002-provider-adapter-contract.md` §6。
 > - 本文件是**当前实现状态**的事实记录，不是承诺；晋级必须有证据，不由代码存在自动推断。
-> - 最后更新：2026-08-16（16-provider evidence wave，`08-15-sixteen-provider-evidence-wave`）
+> - 最后更新：2026-08-18（16-provider evidence wave + semantic-candle/handoff/context/TUI 投影 wave，HEAD `f7e2a49`）
 > - 权威数据源：`crates/agent-session-grep-ports/src/capability.rs` 的
 >   `ProviderCapabilityMatrix::current()`；本表与其保持一致，不一致以 capability.rs 为准。
 > - Beta 本地/外部缺口分账见 `PROVIDER-BETA-READINESS.md`（不得仅凭代码存在晋级）。
@@ -63,7 +63,7 @@ target。
 | discover | `native`（claude-code/codex）；`unsupported`（其余） | 仅 claude-code/codex 注册了 discovery root；antigravity/opencode 已加入 `provider_data_root` |
 | resume | `derived`（claude-code/codex/pi/grok）；`unknown`（opencode/kimi/qoder/codebuddy/hermes/antigravity/cursor）；`unsupported`（aider/cline/openclaw） | 未核验的 resume 命令一律不设默认值 |
 | context / handoff / incremental | `unsupported` 或 `unknown` | 属后续全能力链任务（`08-15-structured-activity-context-facets`），不在本任务范围 |
-| tool_activity | `partial`（claude-code/codex/aider，schema v12 `tool_activities` 落库）；`unknown`（deepseek-harness/zcode，deferred）；`unsupported`（其余 11 个已实现 provider） | CLI `--tool-kind`/`--tool-name`/`--main-only`/`--subagent-only`/`--include-sidechain` 与 MCP 同名参数已落地 |
+| tool_activity | `partial`（claude-code/codex/aider，schema v12 `tool_activities` 落库）；`unknown`（deepseek-harness/zcode，deferred）；`unsupported`（其余 11 个已实现 provider） | CLI `--tool-kind`/`--tool-name`/`--main-only`/`--subagent-only`/`--include-sidechain`、MCP 同名参数与 TUI 分面键（`m` sidechain / `k` tool-kind）已落地；handoff pack 投影 `tool_activity` + 权威 `role`/`is_sidechain`，context 响应投影 `tool_activities` |
 | source_span | `native`（claude/codex/grok/pi/kimi/openclaw/qoder/codebuddy）；`derived`（aider）；`unsupported`（opencode/hermes/antigravity/cursor/cline） | SQLite/目录名身份/单文档 JSON 类 provider 无文件内字节 span；cline 的数组下标 pseudo-span 已移除并如实降级为 unsupported |
 
 ### 逐 provider 明细见 capability.rs（单源权威）

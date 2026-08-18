@@ -67,6 +67,12 @@ asg resume <session-id>
 asg handoff "how did we configure the database?"
 ```
 
+Retrieval is lexical by default (FTS5 with CJK bigram support); the default
+vector mode is an honest bigram-hash fuzzy-lexical matcher, not a semantic
+model. An optional local semantic backend (Candle + multilingual-e5-small)
+exists behind the `semantic-candle` cargo feature — off by default and
+offline-only (`asg model import --dir <bundle>` / `asg model status`).
+
 See [Install and upgrade](docs/operations/INSTALL-AND-UPGRADE.md) for custom
 prefixes, persistent PATH setup, upgrades, and safe uninstall.
 
