@@ -1071,7 +1071,7 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   **验收**:agent 运行中跑 discover 能成功入库并正确报告部分性;
   不留 `writer.lock`。
 
-- [ ] **M2P-11 `index <id-fact> <text>` 开发后门出现在用户 help 里**
+- [x] **M2P-11 `index <id-fact> <text>` 开发后门出现在用户 help 里**
   `main.rs:958` 在面向用户的 `--help` 里公布了这个直写入口,而且真的能用 ——
   等于邀请用户破坏自己的真实库。
   **修法**:从用户 help 移除(保留命令供测试用,或加 `--force-dev` 门)。
@@ -1128,7 +1128,7 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
 
 ### M2 — 性能(D2/D3/D4,四个瓶颈全修)
 
-- [ ] **M2-1 合成语料生成器扩到 10 万条(D5)**
+- [x] **M2-1 合成语料生成器扩到 10 万条(D5)**
   扩展现有生成器,产出 10 万消息 / 5 千 session / 6 provider 的确定性语料。
   必须:固定种子、可复算 SHA-256、CRLF 归一化(已有
   `normalized_tree_hash` 先例)、长度分布与 CJK 比例贴近真实观察。
@@ -1631,6 +1631,8 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
 
 | 日期 | 任务 | 结论 | commit |
 |---|---|---|---|
+| 2026-08-19 | **M2P-11 `index` 直写后门加门** | 先实测确认它**真的能用**:往库里写任意文本、`search` 立刻能搜到,而它就登在用户 `--help` 里 —— 等于邀请用户破坏自己的真实历史(写进去的东西无源文件、无 provenance,`index rebuild` 会忠实重投影)。现在需显式 `--force-dev`,拒绝时指向 `sync --discover`;三处 help(顶层 COMMANDS、`index --help`、模块头)全部撤下。15 个 e2e 测试用它造数据 —— 它们不是编码了错误行为(后门本就该留给测试),所以走一个新的 `seed()` 辅助函数集中补 flag,而不是把 flag 抄 15 遍。四个用例实测:无门拒绝且指向 sync / 顶层 help 无痕 / 子命令 help 无痕 / 带门仍可写且可搜 | `5a1d52e` |
+| 2026-08-19 | **M2-1 十万条确定性合成语料** | 发布门的每条性能阀值都写在 10 万条上,而树里最大语料只有 2000 条 —— 阀值 harness、增量同步、存储放大三项都无从测量。**语料不入库**(约 49 MB,可由生成器 + 种子完全重建),入库的是生成器 + 26 个常驻测试 + 冻结清单(CRLF 归一化树哈希 + 逐 provider 计数)。确定性来自逐 session 独立播种,所以一个 session 的字节不依赖语料规模或写入顺序。**我独立复算复验**:重新生成得 `65cc08e9…`,与冻结清单逐位一致;摄入 100,000 emitted / 0 skipped / 100,000 placements、catalog 110,000(10 万消息 + 5 千 session + 5 千 document,零去重塌陷)—— 这同时证明 M2P-14 的修复在 10 万条规模上成立。我自己也写了一版生成器,发现 agent 版本更完备(它刻意避开了 pi/qoder/codebuddy 的歧义陷阱,我撞上了才知道)后弃用自己的 | `4c46802`..`2892783` 共 5 个 |
 | 2026-08-19 | **M2P 首次运行:M2P-1/2/3/4/6/8 + M2P-15** | 用户头一分钟就会撞到的六条已修。**M2P-2 最重要**:读命令过去在 `--db` 打错时会**静默建一个 233 KB 的空库并报"无结果"** —— 打错一个字母得到"干净的无结果",毫无警告;现在报 `not_found` 且不留文件(实测确认)。M2P-3 存储路径改为 `--db` > `$ASG_DB` > `<data>/asg.db`,零配置可用。M2P-1 human 表格改渲染规范 `ses_v1_` id,并有测试**像用户那样**从表格里抓 id 再喂给 `context`。M2P-15(我自己发现并自己修的)`sync` 把未识别 flag 当路径,再拿 `source_io`「确认源文件路径存在且可读」怪路径 —— 路径明明存在可读;现在报 `invalid_request` 并回显该 flag,`-`(stdin 惯例)仍合法,真正缺文件仍报 `source_io`。**计划里"给 `source_io` 的 details 加路径"那条建议是错的,已否决**:`protocol.rs:253` 明确写了 SourceIo 细节被扣留正因为它可能含绝对 transcript 路径,加上去会违反代码自己在执行的隐私约束。顺带修了 `render_human_error` 无条件追加通用指引的问题 —— 库不存在时它会在正确的下一步命令后面再补一句"确认实体 ID 是否正确(运行 list 可浏览)",既答错问题又推荐一条同样需要库的命令 | `8d0d43b` `e801a59` `3d8cf91` `89a058c` `0dfaf19` `568472c` `4243f98` |
 | 2026-08-19 | **M2P-14 合成 id 碰撞(11 个 provider,比预估多 7 个)** | 缺陷面比登记时大:除 cline/grok/kimi/aider,还有 hermes/pi/qoder/openclaw/codebuddy/cursor/antigravity。**antigravity 最严重** —— 它把 `step_index` 当持久 id 直传,于是**每一份** transcript 的第一步都声明 id `"0"`,连 provider 前缀都没有。cursor 的代码注释还写着 id 是按序号派生的"与 cline/codebuddy/qoder adapter 相同" —— 缺陷在树里被当成可复制的范式记录着。11 个 provider 现改为 emit 空 `native_id`,由 CLI 的 `[provider, variant, document_id, seq]` 派生文档作用域 id。**fixture 源字节零改动**(BLAKE3 pin 全部仍匹配),只有 `expected.json` 里的 `native_id` 值变了 —— 这正是 golden 应有的行为。副产物:去掉 antigravity 的 id 用法后 `StepRecord.step_index` 成死代码被 clippy 抓到(probe 判别改读原始 JSON 值),已删字段并注明为何刻意缺席。**我独立端到端复验**:两份互不相关的 pi transcript 各含一条消息 0,sync 报 2 条,两条的标记词各搜各中(修复前第二条静默消失),派生 id 是两个不同的 `msg_v1_<hex>` | `d01f47e`..`8387387` 共 11 个 |
 | 2026-08-19 | **M0 全 20 项闭合** | 剩余两条清掉:14 处发布文件把治理状态挂在**不发布**的架构审查文档上(读者被指向打不开的记录),改为指向各文件自己已记录的 `approver`,只有一处真属 ADR-0001 才引 ADR;裸「本机」在发布文档里会被读成对**读者**机器的断言,provenance 站点统一改「维护者开发机」。刻意保留四处(ADR-0004/0009 的 local-first 隐私声明、RFC-0001、探针脚本自己的输出)—— 那里「本机」确实指读者的机器,改了会把隐私声明反转 | `c1e2a88` `33f1194` `9f738a9` |
