@@ -181,6 +181,17 @@ pub trait ContextGraphStore {
         message_ids: &[StableId],
     ) -> PortResult<Vec<(StableId, Option<SourcePlacement>)>>;
 
+    /// Batch-load tool activities for the given message wire ids.
+    ///
+    /// Default empty: stores without a tool_activities projection contribute
+    /// nothing. SQLite implements the real batch read.
+    fn tool_activities_for_messages(
+        &self,
+        _message_ids: &[StableId],
+    ) -> PortResult<Vec<serde_json::Value>> {
+        Ok(Vec::new())
+    }
+
     fn context_stats(&self) -> PortResult<ContextStats>;
 }
 
@@ -662,6 +673,13 @@ impl<T: ContextGraphStore + ?Sized> ContextGraphStore for &T {
         message_ids: &[StableId],
     ) -> PortResult<Vec<(StableId, Option<SourcePlacement>)>> {
         (**self).source_placements_of(message_ids)
+    }
+
+    fn tool_activities_for_messages(
+        &self,
+        message_ids: &[StableId],
+    ) -> PortResult<Vec<serde_json::Value>> {
+        (**self).tool_activities_for_messages(message_ids)
     }
 
     fn context_stats(&self) -> PortResult<ContextStats> {

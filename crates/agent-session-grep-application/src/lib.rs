@@ -350,6 +350,9 @@ pub enum AppResponse {
         messages: Vec<ContextMessage>,
         /// 与 `messages` 对齐装配的证据区间（可能被 `max_evidence_spans` 截短）。
         evidence: Vec<EvidenceSpanDto>,
+        /// Tool activities for messages in this context (schema v12 projection).
+        /// Empty when none are stored; never fabricated.
+        tool_activities: Vec<serde_json::Value>,
         /// Requested and effective structural response levels.
         requested_level: ContextLevel,
         effective_level: ContextLevel,
@@ -2197,6 +2200,15 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore, 
             session,
             branch_leaf,
             branch_leaf_placement_id,
+            tool_activities: {
+                let ids: Vec<StableId> = messages
+                    .iter()
+                    .filter_map(|m| StableId::from_wire(&m.message_id))
+                    .collect();
+                self.catalog
+                    .tool_activities_for_messages(&ids)
+                    .unwrap_or_default()
+            },
             messages,
             evidence,
             requested_level,

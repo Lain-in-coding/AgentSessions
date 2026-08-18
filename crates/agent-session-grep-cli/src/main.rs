@@ -3905,6 +3905,7 @@ fn render(
             branch_leaf_placement_id,
             messages,
             evidence,
+            tool_activities,
             requested_level,
             effective_level,
             talks,
@@ -3934,6 +3935,7 @@ fn render(
                 "session": session,
                 "branch_leaf": branch_leaf,
                 "branch_leaf_placement_id": branch_leaf_placement_id,
+                "tool_activities": tool_activities,
                 "messages": messages
                     .into_iter()
                     .map(|message| serde_json::json!({
@@ -4361,6 +4363,7 @@ mod tests {
             branch_leaf_placement_id: None,
             messages: Vec::new(),
             evidence,
+            tool_activities: Vec::new(),
             requested_level: ContextLevel::Raw,
             effective_level: ContextLevel::Raw,
             talks: Vec::new(),

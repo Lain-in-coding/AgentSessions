@@ -5980,6 +5980,15 @@ impl ContextGraphStore for SqliteStore {
             .collect()
     }
 
+    fn tool_activities_for_messages(
+        &self,
+        message_ids: &[StableId],
+    ) -> PortResult<Vec<serde_json::Value>> {
+        // Delegate to the inherent method so CLI/MCP and the trait path share one
+        // SQL implementation.
+        SqliteStore::tool_activities_for_messages(self, message_ids)
+    }
+
     fn context_stats(&self) -> PortResult<ContextStats> {
         let conn = self.conn.borrow();
         let placements: i64 = conn
