@@ -6672,7 +6672,7 @@ impl SemanticIndex for SqliteStore {
         // 第一层（有界召回）：拿到查询原文就用既有 FTS 路径取候选集。候选不足
         // 时 `None`，第二层退回全量精确打分——见 SEMANTIC_CANDIDATE_FLOOR。
         let candidates = match self.semantic_candidate_query.borrow().as_deref() {
-            Some(text) => Self::semantic_candidate_wires(&conn, text)?,
+            Some(text) => Self::semantic_candidate_wires(&conn, text, limit)?,
             None => None,
         };
 
@@ -6754,20 +6754,31 @@ impl SemanticIndex for SqliteStore {
 impl SqliteStore {
     /// 分层语义检索的第一层：用查询原文经 FTS 召回有界候选 wire id 集。
     ///
-    /// 返回 `None` 表示"不要用候选集"——调用方必须退回全量精确打分。三种情况：
+    /// 返回 `None` 表示"不要用候选集"——调用方必须退回全量精确打分。四种情况：
     ///
     /// 1. 查询词经 FTS 安全化后为空（全标点/全空白），无词可召回；
     /// 2. 候选数为 0 —— 查询词在语料里字面不出现。这恰是 semantic 最该发挥
     ///    作用的场景（paraphrase / 跨语言 / 同义改写），若就此返回空结果，
     ///    semantic 检索会静默退化成 lexical 检索；
     /// 3. 候选数低于 [`SEMANTIC_CANDIDATE_FLOOR`] 且未被 `LIMIT` 截断 ——
-    ///    字面邻域已被完整枚举且很小，语义邻域几乎必然更大。
+    ///    字面邻域已被完整枚举且很小，语义邻域几乎必然更大；
+    /// 4. 候选数不足调用方要的 `limit` —— 分页要求"钉住排序内的 offset 续读"，
+    ///    候选集填不满请求窗口就会把后续页截断（Application 用超取
+    ///    `offset + page + 1` 表达翻页，`limit` 可远大于一页）。此时必须全量。
     ///
     /// 只有候选集足够大（说明字面信号本身已经足够丰富，top-k 几乎必然落在其中）
     /// 才走分层。变换与 [`SearchIndex::query_filtered`] 完全同一套
     /// （`bigram_cjk` → `safe_fts_query`），因此候选召回机制与 lexical 检索、
     /// hybrid 的 lexical 分支逐字节一致，不是第二套并行实现。
-    fn semantic_candidate_wires(conn: &Connection, query: &str) -> PortResult<Option<Vec<String>>> {
+    fn semantic_candidate_wires(
+        conn: &Connection,
+        query: &str,
+        limit: usize,
+    ) -> PortResult<Option<Vec<String>>> {
+        // 请求窗口本身就超过候选上限时，候选集不可能填满它：直接全量。
+        if limit > SEMANTIC_CANDIDATE_LIMIT {
+            return Ok(None);
+        }
         let safe_query = safe_fts_query(&bigram_cjk(query));
         if safe_query.is_empty() {
             return Ok(None);
@@ -6792,8 +6803,9 @@ impl SqliteStore {
         for row in rows {
             wires.push(row.map_err(backend)?);
         }
-        // 未被 LIMIT 截断且过小 → 字面邻域已完整枚举，不足以代表语义邻域。
-        if wires.len() < SEMANTIC_CANDIDATE_FLOOR && wires.len() < SEMANTIC_CANDIDATE_LIMIT {
+        // 过小 → 字面邻域已完整枚举，不足以代表语义邻域；填不满请求窗口 → 会
+        // 截断分页。两者都退回全量精确打分。
+        if wires.len() < SEMANTIC_CANDIDATE_FLOOR.max(limit) {
             return Ok(None);
         }
         Ok(Some(wires))
@@ -6814,7 +6826,11 @@ impl SqliteStore {
 /// 解析后的 id 完全等价。
 struct SemanticTopK {
     limit: usize,
+    /// 候选缓冲。只在超过 [`Self::capacity`] 时才排序裁剪一次，故均摊 O(n)。
     scored: Vec<(f32, String)>,
+    /// 已裁剪过至少一次后的第 k 名（分数, wire）。`None` 表示"还没满，全收"。
+    /// 有了它才能在不排序的情况下判断一行是否连第 k 名都比不过。
+    threshold: Option<(f32, String)>,
 }
 
 impl SemanticTopK {
@@ -6822,6 +6838,36 @@ impl SemanticTopK {
         Self {
             limit,
             scored: Vec::new(),
+            threshold: None,
+        }
+    }
+
+    /// 缓冲上限：`2 * limit`（至少 limit+1）。到顶才排序裁剪一次。
+    ///
+    /// 不能每收一行就排一次：`limit` 由 Application 的翻页超取决定，可以远大于
+    /// 一页，逐行排序会退化成 O(n · k log k)——比历史实现的"全收再排一次"
+    /// （O(n log n)）更慢。`limit` 大到缓冲永远不满时，本收集器的行为就正好
+    /// 退回历史实现：收完在 `into_hits` 里排一次。
+    fn capacity(&self) -> usize {
+        self.limit
+            .saturating_mul(2)
+            .max(self.limit.saturating_add(1))
+    }
+
+    /// 相似度降序；同分按 wire id 升序，保证分页顺序确定（与 FTS 路径的
+    /// bm25+id tiebreak 同一约定）。
+    fn cmp_hits(a: &(f32, String), b: &(f32, String)) -> std::cmp::Ordering {
+        b.0.partial_cmp(&a.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.1.cmp(&b.1))
+    }
+
+    /// 排序、裁到 `limit`、把第 k 名记为新阈值（阈值只会变严）。
+    fn prune(&mut self) {
+        self.scored.sort_by(Self::cmp_hits);
+        self.scored.truncate(self.limit);
+        if self.scored.len() >= self.limit {
+            self.threshold = self.scored.last().cloned();
         }
     }
 
@@ -6839,11 +6885,9 @@ impl SemanticTopK {
             return Ok(());
         };
 
-        // 分数不足且已满时直接丢弃，省掉 wire 复制与插入。等分仍要纳入：
+        // 比不过第 k 名就直接丢弃，省掉 wire 复制与插入。等分仍要比 wire：
         // tiebreak 是 wire id 升序，同分的更小 id 必须能挤掉已在榜的更大 id。
-        if self.scored.len() >= self.limit
-            && let Some((worst, worst_wire)) = self.scored.last()
-        {
+        if let Some((worst, worst_wire)) = &self.threshold {
             if score < *worst {
                 return Ok(());
             }
@@ -6856,14 +6900,9 @@ impl SemanticTopK {
         }
 
         self.scored.push((score, row.get(0).map_err(backend)?));
-        // 相似度降序；同分按 wire id 升序，保证分页顺序确定（与 FTS 路径的
-        // bm25+id tiebreak 同一约定）。
-        self.scored.sort_by(|a, b| {
-            b.0.partial_cmp(&a.0)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.1.cmp(&b.1))
-        });
-        self.scored.truncate(self.limit);
+        if self.scored.len() >= self.capacity() {
+            self.prune();
+        }
         Ok(())
     }
 
@@ -6872,7 +6911,9 @@ impl SemanticTopK {
     /// 身份优先取 `fts_ids` 的保真 `id_json`（含 kind+stability）；缺失回退
     /// wire（降级为 Unstable，与 rebuild 同一约定）。两者都拿不到的行丢弃
     /// ——与历史行为一致。
-    fn into_hits(self, conn: &Connection) -> PortResult<Vec<SearchHit>> {
+    fn into_hits(mut self, conn: &Connection) -> PortResult<Vec<SearchHit>> {
+        // 缓冲里可能还留着未裁剪的候选：定序与裁剪在这里收口。
+        self.prune();
         if self.scored.is_empty() {
             return Ok(Vec::new());
         }
@@ -7802,18 +7843,90 @@ mod tests {
         let store = SqliteStore::open_in_memory().unwrap();
         store.set_semantic_model("model-a");
         let conn = store.conn.borrow();
-        let wires = SqliteStore::semantic_candidate_wires(&conn, "absent").unwrap();
+        let wires = SqliteStore::semantic_candidate_wires(&conn, "absent", 20).unwrap();
         drop(conn);
         // Nothing indexed yet: no candidates, so the fallback signal is None.
         assert!(wires.is_none());
 
         seed_semantic_corpus(&store, SEMANTIC_CANDIDATE_FLOOR + 4, "saturating");
         let conn = store.conn.borrow();
-        let wires = SqliteStore::semantic_candidate_wires(&conn, "saturating")
+        let wires = SqliteStore::semantic_candidate_wires(&conn, "saturating", 20)
             .unwrap()
             .expect("a saturated literal neighbourhood is used as the candidate set");
         assert!(wires.len() <= SEMANTIC_CANDIDATE_LIMIT);
         assert_eq!(wires.len(), SEMANTIC_CANDIDATE_FLOOR + 4);
+    }
+
+    #[test]
+    fn candidate_set_is_declined_when_it_cannot_fill_the_requested_window() {
+        // Pagination reads an offset window inside the pinned order, so the
+        // Application over-fetches `offset + page + 1`. A candidate set that
+        // cannot fill that window would truncate later pages: decline it.
+        let store = SqliteStore::open_in_memory().unwrap();
+        store.set_semantic_model("model-a");
+        let corpus = SEMANTIC_CANDIDATE_FLOOR + 4;
+        seed_semantic_corpus(&store, corpus, "windowtoken");
+        let conn = store.conn.borrow();
+        // A window the candidate set covers: tiering is allowed.
+        assert!(
+            SqliteStore::semantic_candidate_wires(&conn, "windowtoken", corpus - 1)
+                .unwrap()
+                .is_some()
+        );
+        // A window wider than the candidate set: decline, score everything.
+        assert!(
+            SqliteStore::semantic_candidate_wires(&conn, "windowtoken", corpus + 1)
+                .unwrap()
+                .is_none()
+        );
+        // A window wider than the candidate ceiling: decline without even
+        // running the FTS query.
+        assert!(
+            SqliteStore::semantic_candidate_wires(
+                &conn,
+                "windowtoken",
+                SEMANTIC_CANDIDATE_LIMIT + 1
+            )
+            .unwrap()
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn bounded_top_k_pruning_agrees_with_a_brute_force_ranking() {
+        // The collector prunes against a running k-th-place threshold instead of
+        // sorting every row. That is only sound if the surviving order equals a
+        // brute-force sort of every score, including across several prune
+        // rounds and with limits both below and above the buffer capacity.
+        let store = SqliteStore::open_in_memory().unwrap();
+        store.set_semantic_model("model-a");
+        let corpus = 500usize;
+        let mut expected: Vec<(f32, String)> = Vec::new();
+        let query = fixture_vector(99, 8);
+        for index in 0..corpus {
+            let id = sid(IdKind::Message, format!("brute-{index}").as_bytes());
+            let vector = fixture_vector(index as u64 + 1, 8);
+            store.index(&id, "brutetoken body").unwrap();
+            store.index_embedding(&id, &vector).unwrap();
+            let score = cosine_similarity_le_blob(&query, &f32_slice_to_bytes(&vector)).unwrap();
+            expected.push((score, id.as_str().to_string()));
+        }
+        expected.sort_by(SemanticTopK::cmp_hits);
+
+        for limit in [1usize, 3, 20, 499, 500, 501] {
+            store.set_semantic_candidate_query("");
+            let hits = store.query_semantic(&query, limit).unwrap();
+            let want = limit.min(corpus);
+            assert_eq!(hits.len(), want, "limit={limit}");
+            for (rank, hit) in hits.iter().enumerate() {
+                assert_eq!(
+                    hit.id.as_str(),
+                    expected[rank].1,
+                    "rank {rank} diverged from brute force at limit={limit}"
+                );
+                assert_eq!(hit.score, expected[rank].0, "rank {rank} score diverged");
+            }
+        }
     }
 
     #[test]
