@@ -27,8 +27,8 @@ use agent_session_grep_adapters_sqlite::{
 };
 use agent_session_grep_application::{
     App, AppError, AppRequest, AppResponse, ContextLevel, ResponseBudget, StagedBatch, Truncation,
-    evidence::Precision, handoff_pack::HandoffInput, parse_relative_search_instant,
-    parse_search_instant, select_and_stage_source,
+    evidence::Precision, handoff_pack::HandoffInput, is_unrecognized_source,
+    parse_relative_search_instant, parse_search_instant, select_and_stage_source,
 };
 use agent_session_grep_domain::{
     ContextPolicy, DomainError, EvidenceSpan, IdKind, MessageEdge, MessagePlacement,
@@ -3160,9 +3160,13 @@ fn provider_registry() -> Vec<Box<dyn ProviderAdapter>> {
 /// 空源保留整源清空/tombstone 语义；其它源的每次 probe/parse 都由 source
 /// 重新打开 bounded reader（JSONL 逐行 / 整档格式按 manifest 上限），生产路径
 /// 绝不把完整 transcript 变成 Vec（RFC-0002 §7）。
+///
+/// 返回 `AppError` 而非 `CliError`：调用方需要区分"没有 provider 认领这个文件"
+/// （discover 可跳过，见 [`SyncContext::skip_unrecognized_sources`]）与真正的
+/// 失败，而 `CliError` 已把分类拍平成协议错误。`?` 仍可直接用于 `CliError` 上下文。
 fn stage_with_source(
     source: &dyn agent_session_grep_ports::ReadOnlySource,
-) -> Result<(StagedBatch, String), CliError> {
+) -> Result<(StagedBatch, String), AppError> {
     if source.is_empty() {
         return Ok((
             StagedBatch {
@@ -3182,7 +3186,7 @@ fn stage_with_source(
     }
     let registry = provider_registry();
     let refs: Vec<&dyn ProviderAdapter> = registry.iter().map(|a| a.as_ref()).collect();
-    select_and_stage_source(&refs, source).map_err(Into::into)
+    select_and_stage_source(&refs, source)
 }
 
 struct StagedMessageEntity {
@@ -3517,6 +3521,7 @@ fn sync_discover(
                 relation_recovery_paths,
                 incomplete_paths,
                 discovered_provider_ids,
+                skip_unrecognized_sources: true,
             },
             true,
             progress,
@@ -4029,6 +4034,14 @@ struct SyncContext {
     incomplete_paths: BTreeSet<String>,
     /// discover 归属表：源路径 → provider id；落入 `source_scans.provider_id`。
     discovered_provider_ids: BTreeMap<String, String>,
+    /// 无 provider 认领（或 variant 歧义）的源是否跳过而非中止整轮。
+    ///
+    /// discover 自己枚举 provider 数据根，用户没有点名任何一个文件；根下混进一个
+    /// 非 transcript 文件（编辑器备份、半截日志、别的工具的产物）过去会让整轮
+    /// `sync --discover` 以 exit 2 结束、0 条消息入库——一个坏文件掀翻整轮
+    /// （M2P-5）。行级破损早已是"跳过、计数、末尾报告、绝不中止"（D11），文件级
+    /// 现在与之对齐。显式 `sync <file>` 保持报错：路径是用户亲手给的。
+    skip_unrecognized_sources: bool,
 }
 
 /// `sync_files` / `sync_discover` 共享的核心流程。
@@ -4047,6 +4060,7 @@ fn sync_files_inner(
     let relation_recovery_paths = &ctx.relation_recovery_paths;
     let incomplete_paths = &ctx.incomplete_paths;
     let discovered_provider_ids = &ctx.discovered_provider_ids;
+    let skip_unrecognized_sources = ctx.skip_unrecognized_sources;
     if paths.is_empty() && synthetic_batches.is_empty() && !allow_empty {
         return Err(CliError::usage("sync <file>... requires at least one file"));
     }
@@ -4055,6 +4069,7 @@ fn sync_files_inner(
     let mut message_count = 0usize;
     let mut skipped_count = 0usize;
     let mut retained_count = 0usize;
+    let mut unrecognized_count = 0usize;
     let mut diagnostic_count = 0usize;
     let mut diagnostics = Vec::new();
 
@@ -4076,6 +4091,7 @@ fn sync_files_inner(
         // 空文件（0 字节）不能走指纹跳过：它必须作为"整源清空"批次提交
         // 以 tombstone 旧消息；跳过会退化成空批 no-op，丢失 tombstone 语义。
         let mut retained = false;
+        let mut unrecognized = false;
         let (staged, variant) = if !source.is_empty()
             && cached_fp.as_deref() == Some(snap.fingerprint.as_str())
             && !relation_recovery_paths.contains(path)
@@ -4107,26 +4123,49 @@ fn sync_files_inner(
             diagnostic_count += 1;
             (None, None)
         } else {
-            let (staged, variant) = stage_with_source(&source)?;
-            (Some(staged), Some(variant))
+            match stage_with_source(&source) {
+                Ok((staged, variant)) => (Some(staged), Some(variant)),
+                // 文件级宽容（M2P-5）：源不被任何 provider 认领，或 variant 歧义
+                // （repo 原则：歧义拒绝，绝不猜）。两者都是关于这一个文件的判定，
+                // 不是整轮的失败——跳过、计数，末尾经既有 diagnostics/warnings
+                // 通道如实报告，与行级 skip 同一条通道。
+                Err(error) if skip_unrecognized_sources && is_unrecognized_source(&error) => {
+                    unrecognized = true;
+                    unrecognized_count += 1;
+                    diagnostics.push(format!(
+                        "source {} of {}: not a recognized agent transcript, skipped \
+                         (nothing was indexed from it)",
+                        index + 1,
+                        paths.len()
+                    ));
+                    diagnostic_count += 1;
+                    (None, None)
+                }
+                Err(error) => return Err(error.into()),
+            }
         };
         if progress {
             // 措辞如实区分三种路径：指纹命中只是 checked（未 parse），
             // 走完整解析的才是 scanned，截断尾 retain 是 kept——不得谎报
             // 缓存命中的源为 "staged (0 messages)"。
-            let message = match (&staged, retained) {
-                (Some(staged), _) => format!(
+            let message = match (&staged, retained, unrecognized) {
+                (Some(staged), _, _) => format!(
                     "scanned source {}/{} ({} messages)",
                     index + 1,
                     paths.len(),
                     staged.messages.len()
                 ),
-                (None, true) => format!(
+                (None, true, _) => format!(
                     "retained source {}/{} (truncated tail — keeping previous index)",
                     index + 1,
                     paths.len()
                 ),
-                (None, false) => {
+                (None, _, true) => format!(
+                    "skipped source {}/{} (not a recognized agent transcript)",
+                    index + 1,
+                    paths.len()
+                ),
+                (None, false, false) => {
                     format!("checked source {}/{} (unchanged)", index + 1, paths.len())
                 }
             };
@@ -4151,7 +4190,10 @@ fn sync_files_inner(
                 source.relation_complete = false;
             }
             sources.push(source);
-        } else if let Some(provider_id) = discovered_provider_ids.get(path) {
+        } else if let Some(provider_id) = discovered_provider_ids.get(path)
+            && !unrecognized
+        {
+            // 跳过的文件没有 source 行可回填，也不该被登记成某 provider 的源。
             provider_id_backfills.push((path.clone(), provider_id.clone()));
         }
         snapshots.push((path_ref.to_path_buf(), snap));
@@ -4175,6 +4217,15 @@ fn sync_files_inner(
     // 计入 unchanged（与 emitted 同单位：消息数）。截断尾被 retain 的源既不
     // 解析也不提交，单列 `retained`（源数），其诊断进 warnings 通道。
     let committed = if changed { message_count } else { 0 };
+    // 文件级跳过与行级 skip 走同一条 warnings 通道（D11：宽容但报数）。逐源
+    // 诊断已在 diagnostics 里；再加一条汇总，让"这轮少收了几个文件"一眼可见。
+    if unrecognized_count > 0 {
+        diagnostics.push(format!(
+            "{unrecognized_count} discovered file(s) were not recognized as agent transcripts \
+             and were skipped; everything else in this run was indexed normally"
+        ));
+        diagnostic_count += 1;
+    }
     let warnings = diagnostic_warnings(diagnostics.iter().map(String::as_str), diagnostic_count);
     let source_count = paths.len() + synthetic_batches.len();
     Ok((
@@ -4186,6 +4237,7 @@ fn sync_files_inner(
             "unchanged": if changed { unchanged_messages } else { message_count + unchanged_messages },
             "retained": retained_count,
             "skipped": skipped_count,
+            "unrecognized": unrecognized_count,
             "diagnostics": diagnostic_count,
             "generation": generation,
         }),

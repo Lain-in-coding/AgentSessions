@@ -11,9 +11,10 @@ use agent_session_grep_domain::{
 use agent_session_grep_ports::{
     CanonicalEventSink, CatalogEntry, CatalogStore, Confidence, ContextGraphStore, MessageEvent,
     NoResumeClaims, NoSemanticIndex, ParseReport, PortError, PortResult, ProbeResult,
-    ProviderAdapter, ProviderError, ReadOnlySource, ResumeClaimsStore, RetrievalMode, SearchFacets,
-    SearchFilters, SearchHit, SearchIndex, SearchInstant, SearchQuery, SemanticIndex,
-    SessionResumeMetadata, ToolActivityEvent,
+    ProviderAdapter, ProviderError, ReadOnlySource, ResumeClaimsStore, RetrievalMode,
+    SQLITE_MAGIC_HEADER, SearchFacets, SearchFilters, SearchHit, SearchIndex, SearchInstant,
+    SearchQuery, SemanticIndex, SessionResumeMetadata, SourceFormatFamily, ToolActivityEvent,
+    read_source_head, source_format_family_for,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -501,15 +502,76 @@ fn staged_batch(sink: StagingSink, report: ParseReport) -> StagedBatch {
     }
 }
 
+/// Stable classification prefix for "no adapter claims this source".
+///
+/// Shared by the two construction sites below and by
+/// [`is_unrecognized_source`], so the predicate cannot drift away from the
+/// message it recognizes.
+pub const UNRECOGNIZED_SOURCE_MESSAGE: &str = "no provider recognized this source";
+
+/// Stable classification prefix for "several adapters matched equally well".
+pub const AMBIGUOUS_SOURCE_MESSAGE: &str = "ambiguous provider selection";
+
+/// True when `error` means "this file is not a source we can ingest" — either no
+/// adapter claimed it, or several claimed it equally and ambiguity is refused
+/// rather than guessed.
+///
+/// Both are *source-level* verdicts about one file, not failures of the run, so
+/// a caller that walked a directory it did not choose (`sync --discover`) can
+/// skip the file and keep going. A caller that was handed the path explicitly
+/// still treats them as errors.
+pub fn is_unrecognized_source(error: &AppError) -> bool {
+    let AppError::Domain(DomainError::InvalidRequest(message)) = error else {
+        return false;
+    };
+    message.starts_with(UNRECOGNIZED_SOURCE_MESSAGE)
+        || message.starts_with(AMBIGUOUS_SOURCE_MESSAGE)
+}
+
+/// Build the "nothing claimed this source" error, attaching a probe diagnostic
+/// only when it is about this source's own format family.
+///
+/// Adapters are probed in registry order and the *last* failure used to be
+/// appended verbatim. The registry ends with the SQLite-backed adapters, so
+/// every unrecognized text file was reported as
+/// `not a SQLite database (missing magic header)` — an internal probe detail
+/// that names the wrong format and gives the user nothing to act on. Filtering
+/// by family keeps the diagnostics that locate a repair (a JSONL adapter
+/// naming the offending lines) and drops the ones that answer a question the
+/// user never asked.
+fn unrecognized_source_error(
+    family: SourceFormatFamily,
+    probe_failures: &[(SourceFormatFamily, ProviderError)],
+) -> AppError {
+    let relevant = probe_failures
+        .iter()
+        .filter(|(probe_family, _)| *probe_family == family)
+        .map(|(_, error)| error)
+        .next_back();
+    // `AmbiguousVariant` 的内层文本是 adapter 写给用户的判定（常带行号与修复
+    // 方向）；`ambiguous or unknown variant:` 这层 Display 前缀是内部分级词汇，
+    // 不外泄。其余变体（过大 / IO）本身就是用户可行动的事实，照原样带出。
+    let detail = match relevant {
+        Some(ProviderError::AmbiguousVariant(message)) => format!(": {message}"),
+        Some(error) => format!(": {error}"),
+        None => String::new(),
+    };
+    DomainError::InvalidRequest(format!(
+        "{UNRECOGNIZED_SOURCE_MESSAGE}{detail}. Supported transcript formats are listed by \
+         `agent-session-grep providers`; if this file is not an agent transcript, leave it out"
+    ))
+    .into()
+}
+
 /// 从多个 provider adapter 中选出匹配的那个，再 stage（RFC-0002 §3 provider 选择）。
 ///
 /// 对每个 adapter 调 `probe`：跳过报错或 ambiguous 的（不是候选）；在剩余候选里
 /// 取置信度最高的（Confirmed > High > Low）。若并列最高有多个不同 variant，视为
 /// 无法区分，拒绝（不做"猜一个"）。选中后用该 adapter stage。
 ///
-/// 无任何候选 → `InvalidRequest`（没有 provider 认领此源）。若存在 probe
-/// 报错的 adapter，错误消息追加最后一个 probe 错误的细节——provider 的拒绝
-/// 诊断自带行号定位与修复方向（PRD R2.2），绝不裸报"没有 provider 认领"。
+/// 无任何候选 → `InvalidRequest`（没有 provider 认领此源）。probe 报错的 adapter
+/// 若与本源同属一个格式家族，其诊断自带行号定位与修复方向（PRD R2.2）会被附上；
+/// 异家族的 probe 内部细节不外泄（见 [`unrecognized_source_error`]）。
 /// 组合根（CLI）持有具体 adapter 清单，本函数只负责与格式无关的选择编排。
 pub fn select_and_stage(
     adapters: &[&dyn ProviderAdapter],
@@ -527,16 +589,14 @@ pub fn select_and_stage(
 
     let mut best: Option<(u8, usize, ProbeResult)> = None; // (rank, adapter index, probe)
     let mut tie = false;
-    // 最后一个 probe 报错（PRD R2.2）：全部 adapter 拒绝时，把错误自带的行号
-    // 定位与修复方向带给调用方——绝不裸报 "no provider recognized this source"。
-    // probe 错误只由源字节内容派生（provider 看不到路径），消息即诊断本身。
-    let mut last_probe_error: Option<ProviderError> = None;
+    // probe 报错按格式家族留存：只有与本源同家族的诊断可以外泄给用户。
+    let mut probe_failures: Vec<(SourceFormatFamily, ProviderError)> = Vec::new();
     for (idx, adapter) in adapters.iter().enumerate() {
         // probe 报错的 adapter 不是候选——它明确表示"这不是我的格式"。
         let probe = match adapter.probe(bytes) {
             Ok(probe) => probe,
             Err(error) => {
-                last_probe_error = Some(error);
+                probe_failures.push((source_format_family_for(adapter.provider_id()), error));
                 continue;
             }
         };
@@ -558,15 +618,11 @@ pub fn select_and_stage(
     }
 
     let (_, idx, probe) = best.ok_or_else(|| {
-        let detail = match last_probe_error {
-            Some(error) => format!("; last probe failure: {error}"),
-            None => String::new(),
-        };
-        DomainError::InvalidRequest(format!("no provider recognized this source{detail}"))
+        unrecognized_source_error(SourceFormatFamily::of_head(bytes), &probe_failures)
     })?;
     if tie {
         return Err(DomainError::InvalidRequest(format!(
-            "ambiguous provider selection: multiple variants matched with equal confidence \
+            "{AMBIGUOUS_SOURCE_MESSAGE}: multiple variants matched with equal confidence \
              (one candidate was {})",
             probe.variant_id
         ))
@@ -597,12 +653,12 @@ pub fn select_and_stage_source(
 
     let mut best: Option<(u8, usize, ProbeResult)> = None; // (rank, adapter index, probe)
     let mut tie = false;
-    let mut last_probe_error: Option<ProviderError> = None;
+    let mut probe_failures: Vec<(SourceFormatFamily, ProviderError)> = Vec::new();
     for (idx, adapter) in adapters.iter().enumerate() {
         let probe = match adapter.probe_source(source) {
             Ok(probe) => probe,
             Err(error) => {
-                last_probe_error = Some(error);
+                probe_failures.push((source_format_family_for(adapter.provider_id()), error));
                 continue;
             }
         };
@@ -623,15 +679,13 @@ pub fn select_and_stage_source(
     }
 
     let (_, idx, probe) = best.ok_or_else(|| {
-        let detail = match last_probe_error {
-            Some(error) => format!("; last probe failure: {error}"),
-            None => String::new(),
-        };
-        DomainError::InvalidRequest(format!("no provider recognized this source{detail}"))
+        // 家族判定只看源开头的签名字节，不整读（SQLite 整读上限 128 MiB）。
+        let head = read_source_head(source, SQLITE_MAGIC_HEADER.len()).unwrap_or_default();
+        unrecognized_source_error(SourceFormatFamily::of_head(&head), &probe_failures)
     })?;
     if tie {
         return Err(DomainError::InvalidRequest(format!(
-            "ambiguous provider selection: multiple variants matched with equal confidence \
+            "{AMBIGUOUS_SOURCE_MESSAGE}: multiple variants matched with equal confidence \
              (one candidate was {})",
             probe.variant_id
         ))
@@ -5729,10 +5783,108 @@ mod tests {
             err,
             AppError::Domain(DomainError::InvalidRequest(_))
         ));
-        assert_eq!(
-            err.to_string(),
-            "invalid request: no provider recognized this source",
-            "无 probe 错误时消息必须保持原样"
+        let message = err.to_string();
+        // 没有任何 probe 报错 → 不得凭空拼接 probe 细节（旧断言用整串相等表达
+        // 这一点；现在分类前缀之后恒有可行动的下一步，故改为断言"分类前缀 +
+        // 无 probe 细节"这两件事本身，约束未放松）。
+        assert!(
+            message.starts_with("invalid request: no provider recognized this source."),
+            "分类前缀后不得出现 probe 细节: {message}"
+        );
+        assert!(
+            !message.contains("ambiguous or unknown variant"),
+            "不得外泄 probe 内部分级词汇: {message}"
+        );
+        // D11 可行动性：消息必须给出下一步，而不是只说"没人认领"。
+        assert!(
+            message.contains("agent-session-grep providers"),
+            "必须给出可行动的下一步: {message}"
+        );
+    }
+
+    #[test]
+    fn text_source_rejection_never_blames_a_sqlite_adapter() {
+        // M2P-5：adapter 按注册顺序 probe，注册表以 SQLite 家族（opencode/cursor）
+        // 收尾，于是任何无人认领的文本文件都被解释成 "not a SQLite database
+        // (missing magic header)"——点错格式，且是 probe 内部细节。现在只有与本源
+        // 同家族的诊断可以外泄。
+        struct SqliteFamilyRejecter;
+        impl ProviderAdapter for SqliteFamilyRejecter {
+            fn provider_id(&self) -> &str {
+                // 家族由 provider id 中心化派生；cursor 属 SQLite 家族。
+                "cursor"
+            }
+            fn manifest(&self) -> agent_session_grep_ports::AdapterManifest {
+                agent_session_grep_ports::manifest_for(self.provider_id(), None, &[])
+            }
+            fn probe(
+                &self,
+                _bytes: &[u8],
+            ) -> Result<agent_session_grep_ports::ProbeResult, ProviderError> {
+                Err(ProviderError::AmbiguousVariant(
+                    "not a SQLite database (missing magic header)".into(),
+                ))
+            }
+            fn parse(
+                &self,
+                _bytes: &[u8],
+                _sink: &mut dyn CanonicalEventSink,
+            ) -> Result<agent_session_grep_ports::ParseReport, ProviderError> {
+                Ok(agent_session_grep_ports::ParseReport::default())
+            }
+        }
+        struct TextFamilyRejecter;
+        impl ProviderAdapter for TextFamilyRejecter {
+            fn provider_id(&self) -> &str {
+                "claude-code"
+            }
+            fn manifest(&self) -> agent_session_grep_ports::AdapterManifest {
+                agent_session_grep_ports::manifest_for(self.provider_id(), None, &[])
+            }
+            fn probe(
+                &self,
+                _bytes: &[u8],
+            ) -> Result<agent_session_grep_ports::ProbeResult, ProviderError> {
+                Err(ProviderError::AmbiguousVariant(
+                    "第 1 行不是有效 JSON。请修复或删除这些行后重试".into(),
+                ))
+            }
+            fn parse(
+                &self,
+                _bytes: &[u8],
+                _sink: &mut dyn CanonicalEventSink,
+            ) -> Result<agent_session_grep_ports::ParseReport, ProviderError> {
+                Ok(agent_session_grep_ports::ParseReport::default())
+            }
+        }
+        // 文本源 + SQLite adapter 排在最后（复现注册表顺序）。
+        let refs: Vec<&dyn ProviderAdapter> = vec![&TextFamilyRejecter, &SqliteFamilyRejecter];
+        let message = select_and_stage(&refs, b"this is not json at all")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            !message.contains("SQLite"),
+            "文本源的拒绝理由不得点名 SQLite: {message}"
+        );
+        assert!(
+            message.contains("第 1 行"),
+            "同家族 adapter 的行号诊断必须保留: {message}"
+        );
+
+        // 反向：真的是 SQLite 头的源，则该由 SQLite 家族解释，文本家族的行号
+        // 诊断与它无关。
+        let mut sqlite_head = agent_session_grep_ports::SQLITE_MAGIC_HEADER.to_vec();
+        sqlite_head.extend_from_slice(b"trailing bytes");
+        let message = select_and_stage(&refs, &sqlite_head)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            message.contains("not a SQLite database"),
+            "SQLite 源应由 SQLite 家族解释: {message}"
+        );
+        assert!(
+            !message.contains("第 1 行"),
+            "异家族的行号诊断不得外泄: {message}"
         );
     }
 
