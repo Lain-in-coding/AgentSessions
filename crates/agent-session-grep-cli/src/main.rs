@@ -26,19 +26,20 @@ use agent_session_grep_adapters_sqlite::{
     SourceActivity, SourceBatch, SqliteStore, capture, open_snapshot_source, verify_snapshot,
 };
 use agent_session_grep_application::{
-    App, AppError, AppRequest, AppResponse, ContextLevel, ResponseBudget, StagedBatch, Truncation,
-    evidence::Precision, handoff_pack::HandoffInput, is_unrecognized_source,
-    parse_relative_search_instant, parse_search_instant, select_and_stage_source,
+    App, AppError, AppRequest, AppResponse, ContextLevel, ResponseBudget, SourceRejection,
+    StagedBatch, Truncation, evidence::Precision, handoff_pack::HandoffInput,
+    parse_relative_search_instant, parse_search_instant, select_and_stage_source, source_rejection,
 };
 use agent_session_grep_domain::{
     ContextPolicy, DomainError, EvidenceSpan, IdKind, MessageEdge, MessagePlacement,
     MessageRelation, SessionIdentityNamespace, Stability, StableId,
 };
 use agent_session_grep_ports::{
-    ParseReport, ProviderAdapter, ProviderSessionObservation, ReadOnlySource, RedactionStatus,
-    ResumeClaimsStore, RetrievalMode, SearchFacets, SearchFilters, SearchInstant, SearchProvider,
-    SidechainFacet, SourceResumeClaim,
+    Confidence, ParseReport, ProviderAdapter, ProviderSessionObservation, ReadOnlySource,
+    RedactionStatus, ResumeClaimsStore, RetrievalMode, SearchFacets, SearchFilters, SearchInstant,
+    SearchProvider, SidechainFacet, SourceFormatFamily, SourceResumeClaim,
     capability::{ProviderCapability, ProviderCapabilityMatrix, ProviderMaturity},
+    source_format_family_for,
 };
 use agent_session_grep_provider_aider::AiderAdapter;
 use agent_session_grep_provider_antigravity::AntigravityAdapter;
@@ -988,7 +989,7 @@ USAGE:
 COMMANDS:
     ingest <file>          解析原始 .jsonl 文件并入库（只读源）
     sync <file>...          原子扫描多个 .jsonl 文件；无变化时不生成新 generation
-    sync --discover          自动发现各 provider 数据根下的 .jsonl 源并同步（只读源）
+    sync --discover          自动发现各 provider 数据根下的源并同步（只读源）
     index <id-fact> <text> 直接写入一条 catalog + 索引（切片期写入入口）
     index rebuild          从权威 catalog 全量重投影 FTS 索引（维护命令）
     index embeddings       从权威 catalog 构建语义向量索引（semantic/hybrid 检索前置）
@@ -1294,12 +1295,13 @@ fn subcommand_help_text(cmd: &str) -> &'static str {
                      示例：agent-session-grep --db <path> status"
         }
         "sync" => {
-            "sync <file>...：原子扫描一个或多个 .jsonl 文件入库；无变化不写库。\n\
-                   sync --discover：自动发现各 provider 数据根（~/.claude/projects、~/.codex/sessions）下的 .jsonl 源并同步。\n\
+            "sync <file>...：原子扫描一个或多个 transcript 文件入库；无变化不写库。\n\
+                   sync --discover：自动发现各 provider 数据根（~/.claude/projects、~/.codex/sessions 等）下的源并同步；\n\
+                   \u{20}  是不是源由各 provider 自己的 probe 判定，不按扩展名（SQLite/JSON/Markdown transcript 同样能被发现）。\n\
                    示例：agent-session-grep --db <path> --robot sync 会话.jsonl\n\
                    示例：agent-session-grep --db <path> sync --discover\n\
                    约束：单个 transcript 文件应只包含一个会话；检测到多个 sessionId 时仍归属首个会话，并在 warnings 报告。\n\
-                   提示：只接受 .jsonl 文件，不接受目录；--discover 会递归扫描 provider 数据根。"
+                   提示：不接受目录；--discover 会递归扫描 provider 数据根，无法归属的文件跳过并计数。"
         }
         "ingest" => {
             "ingest <file>：解析单个 .jsonl 文件入库。\n\
@@ -3282,14 +3284,91 @@ fn source_path_identity(path: &str) -> String {
     normalized
 }
 
-/// 递归遍历 `root`，收集所有 `.jsonl` 文件路径（正斜杠归一）。
+/// 发现期 probe 采样上限：每个候选文件最多读这么多前缀字节。
+///
+/// 只为回答"这看起来是不是某个 provider 的 transcript"，不做权威判定——权威
+/// 判定在 sync 阶段由 `stage_with_source` 对完整快照重做。取 64 KiB：足够覆盖
+/// 各 JSONL adapter 的取样窗口（前若干条记录），又不会让遍历一棵大目录树变成
+/// 整树整读（`capture` 会为指纹整读文件，发现期绝不能用它）。
+const DISCOVERY_PROBE_HEAD_BYTES: usize = 64 * 1024;
+
+/// 读取文件前缀用于发现期 probe，并把截断位置对齐到安全边界。
+///
+/// 截断的尾巴会切坏最后一条记录/多字节字符：先退到最后一个换行符（行式格式
+/// 因此只看到完整记录），没有换行符时退到合法 UTF-8 边界（Markdown/JSON 整档
+/// adapter 的 probe 会先做 UTF-8 校验）。
+fn read_discovery_head(path: &std::path::Path) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let file = std::fs::File::open(path).ok()?;
+    let mut head = Vec::new();
+    file.take(DISCOVERY_PROBE_HEAD_BYTES as u64 + 1)
+        .read_to_end(&mut head)
+        .ok()?;
+    if head.len() <= DISCOVERY_PROBE_HEAD_BYTES {
+        return Some(head);
+    }
+    head.truncate(DISCOVERY_PROBE_HEAD_BYTES);
+    if let Some(last_newline) = head.iter().rposition(|byte| *byte == b'\n') {
+        head.truncate(last_newline + 1);
+        return Some(head);
+    }
+    while !head.is_empty() && std::str::from_utf8(&head).is_err() {
+        head.pop();
+    }
+    Some(head)
+}
+
+/// 发现期判定：这个文件是否值得当作候选源交给 sync。
+///
+/// 先按签名字节定家族（SQLite magic header vs 文本），只把文件交给同家族的
+/// adapter probe——异家族的 probe 要么无意义，要么昂贵（SQLite 的
+/// `probe_source` 会整读到 128 MiB 上限）。家族判定不会漏掉真源：每个 SQLite
+/// 数据库都以 magic header 开头，而 JSONL / 整档 JSON / Markdown transcript 都是
+/// UTF-8 文本、不可能以该 header 开头。
+///
+/// SQLite 家族只按 magic header 收下：文件是不是真的 opencode/cursor 库，由
+/// sync 阶段的权威 probe 判定，判错的代价是一次 skip 计数而非整轮失败。
+/// 文本家族要求至少一个同家族 adapter 给出非 Ambiguous 的候选置信度；歧义
+/// （多个 variant 同分）依然被收下，好让 sync 如实报"歧义拒绝"而不是静默丢弃。
+fn is_discovery_candidate(path: &std::path::Path, adapters: &[&dyn ProviderAdapter]) -> bool {
+    let Some(head) = read_discovery_head(path) else {
+        return false;
+    };
+    if head.is_empty() {
+        // 空文件保留整源清空/tombstone 语义：曾入库的源被清空必须被看见。
+        return true;
+    }
+    if SourceFormatFamily::of_head(&head) == SourceFormatFamily::Sqlite {
+        return true;
+    }
+    adapters
+        .iter()
+        .filter(|adapter| {
+            source_format_family_for(adapter.provider_id()) == SourceFormatFamily::Text
+        })
+        .any(|adapter| {
+            adapter
+                .probe(&head)
+                .is_ok_and(|probe| probe.confidence != Confidence::Ambiguous)
+        })
+}
+
+/// 递归遍历 `root`，收集候选源文件路径（正斜杠归一）。
 ///
 /// 返回 `(paths, complete)`：`complete = false` 表示遍历中途遇到不可读目录
 /// （权限错误等），此时返回已收集到的路径并标记不完整——调用方据此对受影响
 /// provider 的源设置 `relation_complete = false`，从而不推导 tombstone（R2）。
 ///
-/// 不跟随符号链接（避免循环 / 越出数据根）；不读取文件内容，只枚举路径。
-fn discover_provider_sources(root: &std::path::Path) -> (Vec<String>, bool) {
+/// 候选判定由 provider 自己的 probe 回答（见 [`is_discovery_candidate`]），不按
+/// 扩展名硬编码：`.jsonl` 过滤会让 SQLite（`opencode.db`、`state.vscdb`）、整档
+/// JSON（hermes/cline）与 Markdown（aider）这些真实 transcript 永远发现不到，
+/// 那些 provider 于是在零配置路径上不可达（M2P-7）。
+///
+/// 不跟随符号链接（避免循环 / 越出数据根）。
+fn discover_provider_sources(
+    root: &std::path::Path,
+    adapters: &[&dyn ProviderAdapter],
+) -> (Vec<String>, bool) {
     let mut paths = Vec::new();
     let mut complete = true;
     let root_type = match std::fs::symlink_metadata(root) {
@@ -3330,9 +3409,7 @@ fn discover_provider_sources(root: &std::path::Path) -> (Vec<String>, bool) {
             }
             if file_type.is_dir() {
                 stack.push(path);
-            } else if file_type.is_file()
-                && path.extension().and_then(|e| e.to_str()) == Some("jsonl")
-            {
+            } else if file_type.is_file() && is_discovery_candidate(&path, adapters) {
                 paths.push(source_path_identity(&path.to_string_lossy()));
             }
         }
@@ -3391,7 +3468,11 @@ fn sync_discover(
     let mut overall_complete = true;
     // 每个 provider 的 (provider_id, discovered_paths, complete)
     let mut per_provider: Vec<(String, Vec<String>, bool)> = Vec::new();
-    for adapter in provider_registry() {
+    // 候选判定要问所有 adapter 的 probe（源在哪个 root 下不代表它属于那个
+    // provider——用户可能把 transcript 放错，或一个 root 下混着多种格式）。
+    let registry = provider_registry();
+    let adapter_refs: Vec<&dyn ProviderAdapter> = registry.iter().map(|a| a.as_ref()).collect();
+    for adapter in &registry {
         let pid = adapter.provider_id().to_string();
         let Some(root) = provider_data_root(&pid) else {
             // 两种不同原因：该 provider 根本没注册 discovery root（只能手动
@@ -3426,7 +3507,7 @@ fn sync_discover(
             });
             continue;
         }
-        let (paths, complete) = discover_provider_sources(&root);
+        let (paths, complete) = discover_provider_sources(&root, &adapter_refs);
         overall_complete = overall_complete && complete;
         per_provider.push((pid.clone(), paths.clone(), complete));
         let found = paths.len();
@@ -4125,19 +4206,31 @@ fn sync_files_inner(
         } else {
             match stage_with_source(&source) {
                 Ok((staged, variant)) => (Some(staged), Some(variant)),
-                // 文件级宽容（M2P-5）：源不被任何 provider 认领，或 variant 歧义
-                // （repo 原则：歧义拒绝，绝不猜）。两者都是关于这一个文件的判定，
-                // 不是整轮的失败——跳过、计数，末尾经既有 diagnostics/warnings
-                // 通道如实报告，与行级 skip 同一条通道。
-                Err(error) if skip_unrecognized_sources && is_unrecognized_source(&error) => {
+                // 文件级宽容（M2P-5）：源不被任何 provider 认领，或多个 provider
+                // 同分而歧义（repo 原则：歧义拒绝，绝不猜）。两者都是关于这一个
+                // 文件的判定，不是整轮的失败——跳过、计数，末尾经既有
+                // diagnostics/warnings 通道如实报告，与行级 skip 同一条通道。
+                Err(error) if skip_unrecognized_sources && source_rejection(&error).is_some() => {
+                    let reason = source_rejection(&error).expect("checked by guard");
                     unrecognized = true;
                     unrecognized_count += 1;
-                    diagnostics.push(format!(
-                        "source {} of {}: not a recognized agent transcript, skipped \
-                         (nothing was indexed from it)",
-                        index + 1,
-                        paths.len()
-                    ));
+                    diagnostics.push(match reason {
+                        SourceRejection::Unclaimed => format!(
+                            "source {} of {}: not a recognized agent transcript, skipped \
+                             (nothing was indexed from it)",
+                            index + 1,
+                            paths.len()
+                        ),
+                        // 歧义源确实被认领了，只是无法唯一归属——措辞不能说
+                        // "不是 transcript"，那会把用户引向错误的方向。
+                        SourceRejection::Ambiguous => format!(
+                            "source {} of {}: matched more than one provider format equally \
+                             well, skipped rather than guessed; sync this file explicitly to \
+                             see which formats collided",
+                            index + 1,
+                            paths.len()
+                        ),
+                    });
                     diagnostic_count += 1;
                     (None, None)
                 }
@@ -4221,7 +4314,7 @@ fn sync_files_inner(
     // 诊断已在 diagnostics 里；再加一条汇总，让"这轮少收了几个文件"一眼可见。
     if unrecognized_count > 0 {
         diagnostics.push(format!(
-            "{unrecognized_count} discovered file(s) were not recognized as agent transcripts \
+            "{unrecognized_count} discovered file(s) could not be attributed to a provider \
              and were skipped; everything else in this run was indexed normally"
         ));
         diagnostic_count += 1;
@@ -4644,17 +4737,53 @@ mod tests {
         }
     }
 
+    /// 一行合法 claude-code transcript，用于发现期 probe 判定。
+    #[cfg(test)]
+    fn discovery_test_transcript() -> String {
+        format!(
+            "{}\n",
+            concat!(
+                r#"{"type":"user","uuid":"d1c00000-0000-4000-8000-000000000001","#,
+                r#""parentUuid":null,"sessionId":"d1c00000-0000-4000-8000-000000000002","#,
+                r#""timestamp":"2026-08-14T01:00:00.000Z","#,
+                r#""message":{"role":"user","content":"discovery fixture"}}"#,
+            )
+        )
+    }
+
     #[test]
-    fn discover_provider_sources_collects_jsonl_files() {
+    fn discover_provider_sources_collects_recognized_transcripts_recursively() {
+        // 判定改由 provider probe 回答（M2P-7），不再看扩展名：真 transcript 收下，
+        // 同目录下的非 transcript 文件（哪怕叫 .jsonl）不收。
         let dir = tempfile::tempdir().unwrap();
         let nested = dir.path().join("nested");
         std::fs::create_dir_all(&nested).unwrap();
-        std::fs::write(nested.join("one.jsonl"), b"fixture").unwrap();
+        std::fs::write(nested.join("one.jsonl"), discovery_test_transcript()).unwrap();
         std::fs::write(nested.join("two.txt"), b"not a source").unwrap();
-        let (paths, complete) = discover_provider_sources(dir.path());
+        // 扩展名对了但内容不是 transcript：旧的 `.jsonl` 过滤会收下它。
+        std::fs::write(nested.join("decoy.jsonl"), b"not a source either").unwrap();
+        let registry = provider_registry();
+        let refs: Vec<&dyn ProviderAdapter> = registry.iter().map(|a| a.as_ref()).collect();
+        let (paths, complete) = discover_provider_sources(dir.path(), &refs);
         assert!(complete);
-        assert_eq!(paths.len(), 1);
-        assert!(paths[0].ends_with("nested/one.jsonl"));
+        assert_eq!(paths.len(), 1, "{paths:?}");
+        assert!(paths[0].ends_with("nested/one.jsonl"), "{paths:?}");
+    }
+
+    #[test]
+    fn discover_provider_sources_collects_sqlite_transcripts() {
+        // `.jsonl` 过滤让 SQLite 源（opencode.db / state.vscdb）在零配置路径上
+        // 永远不可达（M2P-7）。magic header 即家族签名，权威判定留给 sync。
+        let dir = tempfile::tempdir().unwrap();
+        let mut sqlite_bytes = agent_session_grep_ports::SQLITE_MAGIC_HEADER.to_vec();
+        sqlite_bytes.extend_from_slice(&[0_u8; 64]);
+        std::fs::write(dir.path().join("opencode.db"), &sqlite_bytes).unwrap();
+        let registry = provider_registry();
+        let refs: Vec<&dyn ProviderAdapter> = registry.iter().map(|a| a.as_ref()).collect();
+        let (paths, complete) = discover_provider_sources(dir.path(), &refs);
+        assert!(complete);
+        assert_eq!(paths.len(), 1, "{paths:?}");
+        assert!(paths[0].ends_with("opencode.db"), "{paths:?}");
     }
 
     #[cfg(unix)]
@@ -4663,11 +4792,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let real_root = dir.path().join("real-root");
         std::fs::create_dir(&real_root).unwrap();
-        std::fs::write(real_root.join("hidden.jsonl"), b"fixture").unwrap();
+        std::fs::write(real_root.join("hidden.jsonl"), discovery_test_transcript()).unwrap();
         let linked_root = dir.path().join("linked-root");
         std::os::unix::fs::symlink(&real_root, &linked_root).unwrap();
 
-        let (paths, complete) = discover_provider_sources(&linked_root);
+        let registry = provider_registry();
+        let refs: Vec<&dyn ProviderAdapter> = registry.iter().map(|a| a.as_ref()).collect();
+        let (paths, complete) = discover_provider_sources(&linked_root, &refs);
         assert!(paths.is_empty());
         assert!(!complete);
     }

@@ -504,28 +504,41 @@ fn staged_batch(sink: StagingSink, report: ParseReport) -> StagedBatch {
 
 /// Stable classification prefix for "no adapter claims this source".
 ///
-/// Shared by the two construction sites below and by
-/// [`is_unrecognized_source`], so the predicate cannot drift away from the
-/// message it recognizes.
+/// Shared by the two construction sites below and by [`source_rejection`], so
+/// the predicate cannot drift away from the message it recognizes.
 pub const UNRECOGNIZED_SOURCE_MESSAGE: &str = "no provider recognized this source";
 
 /// Stable classification prefix for "several adapters matched equally well".
 pub const AMBIGUOUS_SOURCE_MESSAGE: &str = "ambiguous provider selection";
 
-/// True when `error` means "this file is not a source we can ingest" — either no
-/// adapter claimed it, or several claimed it equally and ambiguity is refused
-/// rather than guessed.
+/// Why a single source was rejected at selection time.
 ///
 /// Both are *source-level* verdicts about one file, not failures of the run, so
 /// a caller that walked a directory it did not choose (`sync --discover`) can
 /// skip the file and keep going. A caller that was handed the path explicitly
-/// still treats them as errors.
-pub fn is_unrecognized_source(error: &AppError) -> bool {
+/// still treats them as errors. They need different words, though: telling a
+/// user that a real transcript "is not a recognized transcript" when several
+/// adapters actually claimed it would send them after the wrong problem.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceRejection {
+    /// No adapter claimed the source.
+    Unclaimed,
+    /// Several adapters claimed it equally well; ambiguity is refused, never guessed.
+    Ambiguous,
+}
+
+/// Classify `error` as a source-level rejection, if it is one.
+pub fn source_rejection(error: &AppError) -> Option<SourceRejection> {
     let AppError::Domain(DomainError::InvalidRequest(message)) = error else {
-        return false;
+        return None;
     };
-    message.starts_with(UNRECOGNIZED_SOURCE_MESSAGE)
-        || message.starts_with(AMBIGUOUS_SOURCE_MESSAGE)
+    if message.starts_with(UNRECOGNIZED_SOURCE_MESSAGE) {
+        Some(SourceRejection::Unclaimed)
+    } else if message.starts_with(AMBIGUOUS_SOURCE_MESSAGE) {
+        Some(SourceRejection::Ambiguous)
+    } else {
+        None
+    }
 }
 
 /// Build the "nothing claimed this source" error, attaching a probe diagnostic
