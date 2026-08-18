@@ -141,7 +141,12 @@ end to end with a `--features semantic-candle` release binary:
   corpus with zero fallback queries; semantic p50/p95 latency per query was on
   the order of seconds for one-shot CLI processes because each invocation pays
   the ~470MB model load — long-lived entry points (MCP/TUI/serve) amortize
-  this via the in-process `load_cached` model cache. `gate.promotion_claim`
+  this via the in-process `load_cached` model cache. The amortized latency is
+  verified by `scripts/evidence/semantic_mcp_latency.py`, which keeps the
+  encoder resident in an `asg mcp` process and issues 10 `search_sessions`
+  calls with `mode: "semantic"`: p50 16.6 ms / p95 21.0 ms per query (real
+  Candle E5 inference, not the lexical fallback), versus the ~3 s one-shot
+  CLI path. `gate.promotion_claim`
   remains `none`, `lexical_stays_default` remains `true`, `maturity` stays
   `beta`, and thresholds remain pending: this run records real evidence but
   does not promote anything.
