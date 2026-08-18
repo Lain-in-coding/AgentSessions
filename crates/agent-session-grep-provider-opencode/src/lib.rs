@@ -73,7 +73,9 @@ impl ProviderAdapter for OpenCodeAdapter {
         matched.push("SQLite magic header detected".into());
 
         // Open read-only and check for OpenCode tables.
-        let conn = open_readonly_from_bytes(bytes)
+        // _temp_db drops after conn: the guard deletes the temp file once the
+        // connection is closed (Windows cannot delete an open file).
+        let (conn, _temp_db) = open_readonly_from_bytes(bytes)
             .map_err(|e| ProviderError::StructuralFatal(format!("failed to open SQLite: {e}")))?;
 
         // Check for OpenCode-specific tables: session, message, part.
@@ -114,7 +116,9 @@ impl ProviderAdapter for OpenCodeAdapter {
     ) -> Result<ParseReport, ProviderError> {
         let mut report = ParseReport::default();
 
-        let conn = open_readonly_from_bytes(bytes)
+        // _temp_db drops after conn (see probe): the temp file is deleted once
+        // the connection is closed.
+        let (conn, _temp_db) = open_readonly_from_bytes(bytes)
             .map_err(|e| ProviderError::StructuralFatal(format!("failed to open SQLite: {e}")))?;
 
         // Query messages with their session and role.
@@ -235,20 +239,42 @@ impl ProviderAdapter for OpenCodeAdapter {
     }
 }
 
+/// Process-unique suffix for temp file names: pid + atomic counter.
+///
+/// Wall-clock nanoseconds alone can collide across parallel test threads when
+/// the OS clock granularity is coarse (two `SystemTime::now()` calls within one
+/// tick), and `File::create` would silently truncate the other thread's DB.
+fn temp_file_suffix() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    format!(
+        "{}-{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
+/// Deletes the temp SQLite file when dropped. Must be dropped AFTER the
+/// `Connection` (Windows cannot delete an open file), so callers bind it in a
+/// tuple pattern after the connection: `let (conn, _temp) = ...`.
+struct TempDbGuard {
+    path: std::path::PathBuf,
+}
+
+impl Drop for TempDbGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
 /// Open a SQLite database from bytes, read-only.
 ///
 /// Writes bytes to a temp file, opens with SQLITE_OPEN_READONLY + busy_timeout,
-/// and returns the connection. The temp file is not cleaned up here (it will
-/// be removed by the OS when the temp dir is cleaned).
-fn open_readonly_from_bytes(bytes: &[u8]) -> Result<Connection, String> {
+/// and returns the connection plus a guard that deletes the temp file when the
+/// connection has been dropped.
+fn open_readonly_from_bytes(bytes: &[u8]) -> Result<(Connection, TempDbGuard), String> {
     let temp_dir = std::env::temp_dir();
-    let temp_path = temp_dir.join(format!(
-        "asg-opencode-{}.db",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
+    let temp_path = temp_dir.join(format!("asg-opencode-{}.db", temp_file_suffix()));
     let mut file = std::fs::File::create(&temp_path).map_err(|e| e.to_string())?;
     file.write_all(bytes).map_err(|e| e.to_string())?;
     file.sync_all().map_err(|e| e.to_string())?;
@@ -262,12 +288,7 @@ fn open_readonly_from_bytes(bytes: &[u8]) -> Result<Connection, String> {
     conn.busy_timeout(std::time::Duration::from_secs(1))
         .map_err(|e| e.to_string())?;
 
-    // Best-effort cleanup: remove temp file after connection drops.
-    // We can't easily do this in Rust without RAII, so we leave it for OS.
-    // In production, a NamedTempFile from the tempfile crate would be better.
-    let _ = temp_path; // keep path alive for conn
-
-    Ok(conn)
+    Ok((conn, TempDbGuard { path: temp_path }))
 }
 
 /// Check if a table exists in the database.
@@ -358,13 +379,7 @@ mod tests {
         .unwrap();
 
         // Serialize the in-memory DB to bytes via backup.
-        let temp_path = std::env::temp_dir().join(format!(
-            "asg-test-{}.db",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
+        let temp_path = std::env::temp_dir().join(format!("asg-test-{}.db", temp_file_suffix()));
         conn.execute_batch(&format!("VACUUM INTO '{}'", temp_path.display()))
             .unwrap();
         drop(conn);
