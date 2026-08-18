@@ -5,7 +5,7 @@
 > - decision_id: SPIKE-search-backend
 > - title: 全文检索引擎 ADR-0001 对照证据
 > - status: **Executed（初步证据已产出，待 approver 审阅）**
-> - owner: （待指派）
+> - owner: QIN
 > - approver: 项目最终验收人
 > - due_milestone: R0 Feasibility / Contract Gate
 > - deadline: （R0 timebox 内，见下方 timebox）
@@ -97,7 +97,9 @@
 
 ## 8. Evidence 产出物
 
-- `spikes/search-backend/fts5/`、`spikes/search-backend/tantivy/`：两个最小探针；
-- `spikes/search-backend/report.md`：填满 §5 测量表；
-- `spikes/search-backend/selection-gate.md`：硬门勾选 + 评分表 + go/no-go 结论；
+- `spikes/search-backend/src/fts5.rs`、`spikes/search-backend/src/tantivy_be.rs`：两个最小探针
+  （共用 `src/analyzer.rs` 的 backend-neutral analyzer 与 `src/corpus.rs` 的合成语料生成器，
+  由 `src/main.rs` 驱动）；
+- `spikes/search-backend/EVIDENCE.md`：实测环境、§5 测量结果与硬门/评分讨论，
+  以及本卡 §6 的 go/no-go 结论输入;
 - 将证据链接回 ADR-0001；状态变更由 R0 Architecture Review 记录。
