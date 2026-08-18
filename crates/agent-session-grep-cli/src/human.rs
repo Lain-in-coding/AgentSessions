@@ -599,11 +599,17 @@ fn empty_catalog_next_command(data: &Value) -> Option<&str> {
 /// `sync`/`ingest`：字段统计 + 一句人话总结。unchanged 是消息条数而非文件数，
 /// 新手会把 882 读成文件数而困惑（10 角色体验测试缺陷）；这里显式标注单位，
 /// 并给出"新增/无变化"的结论行。
+///
+/// `sync --discover` 的 per-provider 报告在此展开（M2P-6）：过去 CLI 真的算出了
+/// 每个 adapter 的 `{id, found, removed, complete, root_state}`，而渲染器从不读
+/// `data.discovery`，用户因此不知道扫了哪些 provider、哪些根不存在、
+/// 哪些根本不支持自动发现。
 fn render_sync(data: &Value) -> Vec<String> {
     let num = |key: &str| number_text(data, key);
     let mut lines = vec![
         format!("sources: {}（本次扫描的源文件数）", num("sources")),
         format!("emitted: {}（本次新解析的消息条数）", num("emitted")),
+        format!("committed: {}（本次实际入库的消息条数）", num("committed")),
         format!(
             "unchanged: {}（未变化的已有消息条数，不是文件数）",
             num("unchanged")
@@ -611,12 +617,72 @@ fn render_sync(data: &Value) -> Vec<String> {
         format!("skipped: {}（因格式无法入库的消息条数）", num("skipped")),
         format!("generation: {}（当前入库代次）", num("generation")),
     ];
-    let unchanged = data.get("unchanged").and_then(Value::as_u64);
-    let emitted = data.get("emitted").and_then(Value::as_u64);
-    match (emitted, unchanged) {
-        (Some(0), Some(_)) => lines.push("总结：没有新增消息（源文件未变化）。".into()),
-        (Some(e), Some(_)) => lines.push(format!("总结：新增 {e} 条消息。")),
-        _ => {}
+    lines.extend(render_discovery(data));
+    // 结论行以 committed（实际入库数）为准，不能用 emitted：源文件有跳过行时
+    // emitted > 0 而 committed == 0，旧实现会对什么都没提交的重跑谎报"新增 N 条"
+    // ——而真实 transcript 带跳过行正是常态。committed 缺失时不编造结论。
+    match data.get("committed").and_then(Value::as_u64) {
+        Some(0) => lines.push("总结：没有新增消息（源文件未变化）。".into()),
+        Some(count) => lines.push(format!("总结：新增 {count} 条消息。")),
+        None => {}
+    }
+    lines
+}
+
+/// `sync --discover` 的 per-provider 覆盖面报告（每 provider 一行）。
+///
+/// 非 discover 的 `sync <file>` 响应没有 `discovery` 字段，返回空。
+fn render_discovery(data: &Value) -> Vec<String> {
+    let Some(discovery) = data.get("discovery") else {
+        return Vec::new();
+    };
+    let providers = discovery
+        .get("providers")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    if providers.is_empty() {
+        return Vec::new();
+    }
+    let complete = discovery.get("complete").and_then(Value::as_bool);
+    let mut lines = vec![format!(
+        "discovery: 扫描了 {} 个 provider{}",
+        providers.len(),
+        match complete {
+            Some(false) => "（扫描不完整——本轮不推导 tombstone）",
+            _ => "",
+        }
+    )];
+    for provider in providers {
+        let id = provider
+            .get("id")
+            .and_then(Value::as_str)
+            .map(sanitize)
+            .unwrap_or_else(|| MISSING.into());
+        let found = provider.get("found").and_then(Value::as_u64).unwrap_or(0);
+        let removed = provider.get("removed").and_then(Value::as_u64).unwrap_or(0);
+        let scan_complete = provider.get("complete").and_then(Value::as_bool);
+        let detail = match provider.get("root_state").and_then(Value::as_str) {
+            // 不支持自动发现时必须说出替代动作，否则用户只看到 found: 0。
+            Some("unsupported") => {
+                "no discovery root — pass transcripts explicitly: asg sync <file>...".to_string()
+            }
+            Some("home_unresolved") => {
+                "cannot resolve your home directory — discovery skipped".to_string()
+            }
+            Some("missing") => "data root not present — nothing to scan".to_string(),
+            _ => {
+                let mut detail = format!("{found} source(s) found");
+                if removed > 0 {
+                    detail.push_str(&format!(", {removed} removed"));
+                }
+                if scan_complete == Some(false) {
+                    detail.push_str(" (scan incomplete)");
+                }
+                detail
+            }
+        };
+        lines.push(format!("  {id}: {detail}"));
     }
     lines
 }
@@ -1654,6 +1720,93 @@ mod tests {
     }
 
     #[test]
+    fn sync_summary_branches_on_committed_not_emitted() {
+        // M2P-6：源文件有跳过行时 emitted > 0 而 committed == 0。旧实现按 emitted
+        // 分支，于是什么都没提交的重跑照样打印"新增 N 条消息"——而真实 transcript
+        // 带跳过行正是常态。结论行必须以 committed 为准。
+        let noop_rerun = json!({
+            "sources": 1,
+            "emitted": 5,
+            "committed": 0,
+            "unchanged": 5,
+            "skipped": 2,
+            "generation": 7,
+        });
+        let lines = render_success("sync", Outcome::Success, &noop_rerun, &Page::default());
+        assert!(
+            lines.contains(&"总结：没有新增消息（源文件未变化）。".to_string()),
+            "no-op 重跑必须报告无新增: {lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|line| line.contains("新增 5 条")),
+            "不得按 emitted 谎报新增: {lines:?}"
+        );
+        // committed 缺失时不编造结论行。
+        let no_committed = json!({ "sources": 1, "emitted": 5, "unchanged": 0, "generation": 1 });
+        let lines = render_success("sync", Outcome::Success, &no_committed, &Page::default());
+        assert!(
+            !lines.iter().any(|line| line.starts_with("总结：")),
+            "committed 缺失时不应有结论行: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn sync_discover_reports_every_provider_with_its_root_state() {
+        // M2P-6：CLI 一直算出 per-provider 报告，渲染器从不读它。四种 root_state
+        // 必须各有可辨认的说法，且"不支持自动发现"要说出替代动作。
+        let data = json!({
+            "sources": 1,
+            "emitted": 2,
+            "committed": 2,
+            "unchanged": 0,
+            "skipped": 0,
+            "generation": 3,
+            "discovery": {
+                "complete": false,
+                "providers": [
+                    { "id": "claude-code", "found": 12, "removed": 1, "complete": true,
+                      "root_state": "scanned" },
+                    { "id": "codex", "found": 0, "removed": 0, "complete": false,
+                      "root_state": "missing" },
+                    { "id": "aider", "found": 0, "removed": 0, "complete": false,
+                      "root_state": "unsupported" },
+                    { "id": "opencode", "found": 3, "removed": 0, "complete": false,
+                      "root_state": "scanned" },
+                ]
+            }
+        });
+        let lines = render_success("sync", Outcome::Success, &data, &Page::default());
+        let text = lines.join("\n");
+        assert!(text.contains("discovery: 扫描了 4 个 provider"), "{text}");
+        assert!(text.contains("扫描不完整"), "整体不完整必须说出来: {text}");
+        // 已扫描：报计数，removed 非零时一并报出。
+        assert!(
+            text.contains("claude-code: 12 source(s) found, 1 removed"),
+            "{text}"
+        );
+        // 根不存在 vs 不支持自动发现必须可区分。
+        assert!(text.contains("codex: data root not present"), "{text}");
+        assert!(
+            text.contains(
+                "aider: no discovery root — pass transcripts explicitly: asg sync <file>"
+            ),
+            "不支持自动发现时必须给出手动路径: {text}"
+        );
+        // per-provider 的部分扫描单独标注。
+        assert!(
+            text.contains("opencode: 3 source(s) found (scan incomplete)"),
+            "{text}"
+        );
+        // 非 discover 的普通 sync 不得凭空出现 discovery 段。
+        let plain = json!({ "sources": 1, "emitted": 1, "committed": 1, "generation": 1 });
+        let lines = render_success("sync", Outcome::Success, &plain, &Page::default());
+        assert!(
+            !lines.iter().any(|line| line.starts_with("discovery:")),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
     fn sync_renders_field_stats_with_unit_annotations() {
         let data = json!({
             "sources": 2,
@@ -1671,10 +1824,11 @@ mod tests {
             [
                 "sources: 2（本次扫描的源文件数）",
                 "emitted: 3（本次新解析的消息条数）",
+                "committed: 10（本次实际入库的消息条数）",
                 "unchanged: 7（未变化的已有消息条数，不是文件数）",
                 "skipped: 0（因格式无法入库的消息条数）",
                 "generation: 4（当前入库代次）",
-                "总结：新增 3 条消息。",
+                "总结：新增 10 条消息。",
             ]
         );
         let data = json!({

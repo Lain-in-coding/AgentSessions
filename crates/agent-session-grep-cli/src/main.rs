@@ -3225,19 +3225,27 @@ fn installation_namespace(path: &str, provider_id: &str) -> String {
 /// - `codex` → `~/.codex/sessions`
 /// - 未知 provider → `None`
 fn provider_data_root(provider_id: &str) -> Option<std::path::PathBuf> {
-    let sub = match provider_id {
-        "claude-code" => ".claude/projects",
-        "codex" => ".codex/sessions",
-        "openclaw" => ".openclaw/agents",
-        "tencent-codebuddy" => ".codebuddy/projects",
-        "antigravity" => ".gemini/antigravity-cli/brain",
-        "opencode" => ".local/share/opencode",
-        _ => return None,
-    };
+    let sub = provider_root_subpath(provider_id)?;
     let home = std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(std::path::PathBuf::from)?;
     Some(home.join(sub))
+}
+
+/// 某 provider 在 home 下的规范化 transcript 子路径；未注册 root 的 provider 返回
+/// `None`。与 [`provider_data_root`] 分开，是为了让 discover 报告能区分
+/// "该 provider 不支持自动发现" 与 "home 解析失败"——两者过去都塌成
+/// `found: 0, complete: false`，用户无从判断该不该手动传文件（M2P-6）。
+fn provider_root_subpath(provider_id: &str) -> Option<&'static str> {
+    match provider_id {
+        "claude-code" => Some(".claude/projects"),
+        "codex" => Some(".codex/sessions"),
+        "openclaw" => Some(".openclaw/agents"),
+        "tencent-codebuddy" => Some(".codebuddy/projects"),
+        "antigravity" => Some(".gemini/antigravity-cli/brain"),
+        "opencode" => Some(".local/share/opencode"),
+        _ => None,
+    }
 }
 
 fn source_path_identity(path: &str) -> String {
@@ -3318,6 +3326,32 @@ struct ProviderDiscovery {
     found: usize,
     removed: usize,
     complete: bool,
+    root_state: RootState,
+}
+
+/// 某 provider 数据根的状态。`found: 0 + complete: false` 过去把三种完全不同的
+/// 情况塌成同一个形状，human 输出因此无法告诉用户该不该手动传文件（M2P-6）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RootState {
+    /// 该 provider 未注册 discovery root：只能显式 `sync <file>`。
+    Unsupported,
+    /// 注册了 root 但当前用户 home 无法解析。
+    HomeUnresolved,
+    /// root 已注册但磁盘上不存在（provider 未安装或从未跑过）。
+    Missing,
+    /// root 存在且已扫描（是否完整看 `complete`）。
+    Scanned,
+}
+
+impl RootState {
+    fn as_str(self) -> &'static str {
+        match self {
+            RootState::Unsupported => "unsupported",
+            RootState::HomeUnresolved => "home_unresolved",
+            RootState::Missing => "missing",
+            RootState::Scanned => "scanned",
+        }
+    }
 }
 
 /// 执行 `sync --discover`：遍历所有已知 provider 的数据根，收集 `.jsonl` 源，
@@ -3339,7 +3373,13 @@ fn sync_discover(
     for adapter in provider_registry() {
         let pid = adapter.provider_id().to_string();
         let Some(root) = provider_data_root(&pid) else {
-            // 无法解析当前用户 home：该 provider 的根扫描不完整，不能 tombstone。
+            // 两种不同原因：该 provider 根本没注册 discovery root（只能手动
+            // `sync <file>`），或注册了但 home 解析失败。两者都不能 tombstone。
+            let root_state = if provider_root_subpath(&pid).is_none() {
+                RootState::Unsupported
+            } else {
+                RootState::HomeUnresolved
+            };
             overall_complete = false;
             per_provider.push((pid.clone(), Vec::new(), false));
             providers_out.push(ProviderDiscovery {
@@ -3347,6 +3387,7 @@ fn sync_discover(
                 found: 0,
                 removed: 0,
                 complete: false,
+                root_state,
             });
             continue;
         };
@@ -3360,6 +3401,7 @@ fn sync_discover(
                 found: 0,
                 removed: 0,
                 complete: false,
+                root_state: RootState::Missing,
             });
             continue;
         }
@@ -3376,6 +3418,7 @@ fn sync_discover(
             found,
             removed: 0, // diff 后回填
             complete,
+            root_state: RootState::Scanned,
         });
     }
     // dedup all_paths preserving order
@@ -3472,6 +3515,9 @@ fn sync_discover(
                 "found": p.found,
                 "removed": p.removed,
                 "complete": p.complete,
+                // 追加字段（M2P-6）：human 渲染器据此区分"未注册 root"、"root 不存在"、
+                // "已扫描"，从而在不支持自动发现时告诉用户该手动传什么。
+                "root_state": p.root_state.as_str(),
             })
         })
         .collect();
