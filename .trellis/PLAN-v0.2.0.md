@@ -861,6 +861,49 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   加 did-you-mean。
   **验收**:列表与 `known_subcommand` 一致(加测试守护)。
 
+- [ ] **M2P-16 四个 provider 的 JSONL 形状互相歧义 → 合法文件被整体拒绝
+  (2026-08-19 我在建 10 万条语料时实测撞上)**
+  一个最朴素的两行文件:
+  ```
+  {"type":"session","id":"amb-1","cwd":"/work/placeholder"}
+  {"type":"message","message":{"role":"user","content":"..."}}
+  ```
+  实测 `sync` 直接拒绝、退出 2:
+  ```
+  invalid_request: ambiguous provider selection: multiple variants matched
+  with equal confidence (one candidate was pi/session-jsonl-v1)
+  ```
+  `pi` / `openclaw` / `qoder` / `tencent-codebuddy` 的 golden fixture 形状
+  近乎相同(都是 `{"type":"session"|"session_meta"} + {"type":"message"|role}`),
+  probe 无法区分 → 等confidence 歧义。
+  **注意这不是 bug 而是设计**:RFC-0002 明确要求歧义一律 `AmbiguousVariant`
+  拒绝,不做低置信度猜测 —— 拒绝比猜错好。但**后果是真的**:
+  - 这四个 provider 的真实 transcript 若形状落在交集里,用户无法 sync,
+    而错误消息只说"多个 variant 等置信度匹配",不告诉用户能做什么。
+  - 它同时封死了为这四个 provider 造合成语料的路 —— M2-1 的 agent 正因此
+    刻意避开了它们(它预判到了,我没有,我撞上了才知道)。
+  **修法方向**(需要先看真实样本再定,不要凭空改 probe):
+  (a) 给 `sync` 加 `--provider <id>` 显式消歧(目前 sync **不接受**该 flag,
+      见 M2P-15);(b) 让 probe 用各 provider 独有的次级信号提高置信度;
+  (c) 至少把错误消息改成可行动的:列出候选 variant 并说明如何指定。
+  **依赖**:(a) 与 M1 的真实样本采集互为前提 —— 真实文件到手才知道形状交集
+  在实际数据上多大。
+  **验收**:这四个 provider 的真实样本能被 sync;或错误消息给出消歧命令。
+
+- [ ] **M2P-17 `sync` 不接受目录 + Windows 命令行上限 → 大语料无法一次同步
+  (2026-08-19 实测)**
+  `sync` 只收显式文件列表(`sync <file>...`,help 明写"不接受目录"),
+  于是 5000 个源文件的路径展开后**超过 Windows 32 KB 命令行上限**,
+  PowerShell 直接报「文件名或扩展名太长」,进程根本没启动。
+  `real_data_regression.py` 和新的 `synthetic_corpus.py` 都各自实现了
+  24 KB 分批来绕过它 —— **两个 harness 重复实现同一个 workaround,
+  说明缺口在工具而不在脚本**。
+  `--discover` 能绕过(路径由发现填充),但它只扫 provider 数据根,
+  对"我有一堆导出的 transcript 在某个目录"这个场景无解。
+  **修法**:加 `--from-file <list>`(每行一个路径,ripgrep/xargs 惯例)
+  或让 `sync` 接受目录并递归。前者更小且与现有"不接受目录"的显式设计一致。
+  **验收**:5000 个源文件可一条命令同步,不需调用方分批。
+
 - [ ] **M2P-9 `--provider` 只接受 16 个中的 3 个**
   `main.rs:2434`(以及 `mcp.rs:888` 的 enum)只认
   `claude|claude-code|codex`,而 `asg providers` 列 16 行。实测
