@@ -6172,33 +6172,17 @@ impl ContextGraphStore for SqliteStore {
     }
 }
 
-impl SqliteStore {
-    /// 把 Session 元数据命中（`session_fts MATCH`）并进既有消息命中列表。
-    ///
-    /// 查询侧先做与消息路径同一的 CJK bigram 前置变换 + 字面量化；候选按
-    /// `bm25(session_fts)` 排序后取前 `limit` 条。每条命中以"首个非系统
-    /// 消息"作代表（保既有 SearchHit 形状，不臆造 id）；无非系统消息的
-    /// Session（metadata-only）直接以 canonical Session 身份返回。已由匹配
-    /// 非系统消息代表过的 Session 被排除（R3 去重），系统/developer 消息
-    /// 单独命中不得压制 metadata-only Session。
-    fn append_session_metadata_hits(
-        conn: &Connection,
-        safe_query: &str,
-        filters: &agent_session_grep_ports::SearchFilters,
-        message_wires: &[String],
-        limit: usize,
-        hits: &mut Vec<SearchHit>,
-    ) -> PortResult<()> {
-        if limit == 0 {
-            return Ok(());
-        }
-        let mut sql = String::from(
-            "SELECT
-                 COALESCE(
-                     (SELECT fi.id_json
-                        FROM fts_ids fi
-                      WHERE fi.wire_id = (
-                          SELECT representative.message_id
+/// Session 元数据命中的身份对：`(代表消息或 Session 的 id_json, 代表消息 wire)`。
+/// 两者都可缺失——metadata-only session 无代表消息，`fts_ids` 边车被清空时无
+/// `id_json`（回退 `from_wire`，降级为 Unstable）。
+type SessionMetadataIdentity = (Option<String>, Option<String>);
+
+/// Session 的代表消息：源顺序最前的非 system/developer 消息（相关子查询，
+/// 关联 `sfi.session_wire`）。R2 的系统噪声约定与 Application 侧一致。
+///
+/// 抽成常量因为身份解析要用它两次（`COALESCE` 的第一支与代表 wire 本身），
+/// 两份必须逐字符相同，否则 `id_json` 与 wire 会指向不同的消息。
+const REPRESENTATIVE_MESSAGE_SUBQUERY: &str = "(SELECT representative.message_id
                             FROM message_placements representative
                             JOIN catalog representative_message
                               ON representative_message.id = representative.message_id
@@ -6214,49 +6198,62 @@ impl SqliteStore {
                            ORDER BY representative.document_id,
                                     representative.source_ordinal,
                                     representative.placement_id
-                           LIMIT 1
-                      )),
-                     (SELECT fi.id_json
-                        FROM fts_ids fi
-                       WHERE fi.wire_id = sfi.session_wire)
-                 ),
-                 (SELECT representative.message_id
-                    FROM message_placements representative
-                    JOIN catalog representative_message
-                      ON representative_message.id = representative.message_id
-                   WHERE representative.session_id = sfi.session_wire
-                     AND COALESCE(
-                             CASE WHEN json_valid(representative_message.payload)
-                                  THEN json_extract(representative_message.payload, '$.role') END,
-                             ''
-                         ) NOT IN ('system', 'developer')
-                   ORDER BY representative.document_id,
-                            representative.source_ordinal,
-                            representative.placement_id
-                   LIMIT 1),
-                 sfi.session_wire,
-                 bm25(session_fts)
+                           LIMIT 1)";
+
+impl SqliteStore {
+    /// 把 Session 元数据命中（`session_fts MATCH`）并进既有消息命中列表。
+    ///
+    /// 查询侧先做与消息路径同一的 CJK bigram 前置变换 + 字面量化；候选按
+    /// `bm25(session_fts)` 排序后取前 `limit` 条。每条命中以"首个非系统
+    /// 消息"作代表（保既有 SearchHit 形状，不臆造 id）；无非系统消息的
+    /// Session（metadata-only）直接以 canonical Session 身份返回。已由匹配
+    /// 非系统消息代表过的 Session 被排除（R3 去重），系统/developer 消息
+    /// 单独命中不得压制 metadata-only Session。
+    ///
+    /// 分三步走，与语义路径同一手法（[`SemanticTopK::into_hits`]：身份只对
+    /// 存活的 top-k 解析）。历史实现把"代表消息"与"去重"都写成单条 SQL 里的
+    /// 相关子查询，而 `ORDER BY bm25 LIMIT` 需要把**每条候选行的整个 SELECT
+    /// 列表**物化进 sorter：一个常见词在 100k 语料上匹配 823 个 session，于是
+    /// 823 次代表消息子查询 + 823 × `limit` 次去重子查询全都白跑，实测 31 ms。
+    /// 现在：
+    ///
+    /// 1. 一条查询算出该排除的 session 集合（按 `message_placements.message_id`
+    ///    走索引，至多 `limit` 个入参）；
+    /// 2. 只取 `session_wire` + `bm25` 排序取前 `limit`（sorter 里只有两个便宜列）；
+    /// 3. 只为存活的至多 `limit` 条解析代表消息与身份。
+    ///
+    /// 结果集与排序**逐条不变**：第 1 步的集合与历史那串 `NOT EXISTS` 逻辑等价
+    /// （session S 被排除 ⟺ 存在某个命中 wire 在 S 里有非系统 placement），排除
+    /// 发生在 LIMIT 之前，故窗口仍然只切已过滤的钉住排序。
+    fn append_session_metadata_hits(
+        conn: &Connection,
+        safe_query: &str,
+        filters: &agent_session_grep_ports::SearchFilters,
+        message_wires: &[String],
+        limit: usize,
+        hits: &mut Vec<SearchHit>,
+    ) -> PortResult<()> {
+        if limit == 0 {
+            return Ok(());
+        }
+        // 1) R3 去重集合：已由匹配非系统消息代表过的 session。
+        let excluded_sessions = Self::sessions_represented_by_messages(conn, message_wires)?;
+
+        // 2) 有界召回：只排序 session_wire + bm25 两列。
+        let mut sql = String::from(
+            "SELECT sfi.session_wire, bm25(session_fts)
              FROM session_fts
              JOIN session_fts_ids sfi ON sfi.session_wire = session_fts.session_wire
              WHERE session_fts MATCH ?1",
         );
         let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(safe_query.to_string())];
-        for message_wire in message_wires {
-            sql.push_str(
-                " AND NOT EXISTS (
-                SELECT 1 FROM message_placements excluded_placement
-                JOIN catalog excluded_message
-                  ON excluded_message.id = excluded_placement.message_id
-                WHERE excluded_placement.session_id = sfi.session_wire
-                  AND excluded_placement.message_id = ?
-                  AND COALESCE(
-                          CASE WHEN json_valid(excluded_message.payload)
-                               THEN json_extract(excluded_message.payload, '$.role') END,
-                          ''
-                      ) NOT IN ('system', 'developer')
-            )",
-            );
-            params.push(Box::new(message_wire.clone()));
+        if !excluded_sessions.is_empty() {
+            sql.push_str(" AND sfi.session_wire NOT IN (");
+            sql.push_str(&in_placeholders(excluded_sessions.len()));
+            sql.push(')');
+            for session in &excluded_sessions {
+                params.push(Box::new(session.clone()));
+            }
         }
         if !filters.providers.is_empty() || filters.since.is_some() || filters.until.is_some() {
             sql.push_str(
@@ -6301,20 +6298,34 @@ impl SqliteStore {
         sql.push_str(" ORDER BY bm25(session_fts), sfi.session_wire LIMIT ?");
         params.push(Box::new(limit as i64));
 
-        let mut stmt = conn.prepare(&sql).map_err(backend)?;
-        let params_ref: Vec<&dyn rusqlite::ToSql> =
-            params.iter().map(std::convert::AsRef::as_ref).collect();
-        let rows = stmt
-            .query_map(&*params_ref, |row| {
-                let id_json: Option<String> = row.get(0)?;
-                let message_wire: Option<String> = row.get(1)?;
-                let session_wire: String = row.get(2)?;
-                let bm25: f64 = row.get(3)?;
-                Ok((id_json, message_wire, session_wire, bm25))
-            })
-            .map_err(backend)?;
-        for row in rows {
-            let (id_json, message_wire, session_wire, bm25) = row.map_err(backend)?;
+        let ranked: Vec<(String, f64)> = {
+            let mut stmt = conn.prepare(&sql).map_err(backend)?;
+            let params_ref: Vec<&dyn rusqlite::ToSql> =
+                params.iter().map(std::convert::AsRef::as_ref).collect();
+            let rows = stmt
+                .query_map(&*params_ref, |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
+                })
+                .map_err(backend)?;
+            let mut collected = Vec::new();
+            for row in rows {
+                collected.push(row.map_err(backend)?);
+            }
+            collected
+        };
+        if ranked.is_empty() {
+            return Ok(());
+        }
+
+        // 3) 只为存活的 top-k 解析代表消息与身份。
+        let session_wires: Vec<&str> = ranked.iter().map(|(wire, _)| wire.as_str()).collect();
+        let identities = Self::session_metadata_identities(conn, &session_wires)?;
+
+        for (session_wire, bm25) in ranked {
+            let (id_json, message_wire) = identities
+                .get(&session_wire)
+                .cloned()
+                .unwrap_or((None, None));
             let id = match id_json {
                 Some(json) => serde_json::from_str(&json).map_err(backend)?,
                 None => message_wire
@@ -6339,6 +6350,100 @@ impl SqliteStore {
             });
         }
         Ok(())
+    }
+
+    /// R3 去重集合：`message_wires` 中任一非 system/developer 消息所在的 session。
+    ///
+    /// 等价于历史实现里每个 wire 一条 `NOT EXISTS` 相关子查询的合集，但只查一次
+    /// （按 `message_placements.message_id` 走索引），而不是为每条候选 session 行
+    /// 重跑 `message_wires.len()` 次。
+    fn sessions_represented_by_messages(
+        conn: &Connection,
+        message_wires: &[String],
+    ) -> PortResult<Vec<String>> {
+        if message_wires.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut sessions = BTreeSet::new();
+        for chunk in chunk_ids(message_wires) {
+            let placeholders = in_placeholders(chunk.len());
+            let mut stmt = conn
+                .prepare(&format!(
+                    "SELECT DISTINCT representing_placement.session_id
+                       FROM message_placements representing_placement
+                       JOIN catalog representing_message
+                         ON representing_message.id = representing_placement.message_id
+                      WHERE representing_placement.message_id IN ({placeholders})
+                        AND COALESCE(
+                                CASE WHEN json_valid(representing_message.payload)
+                                     THEN json_extract(representing_message.payload, '$.role') END,
+                                ''
+                            ) NOT IN ('system', 'developer')"
+                ))
+                .map_err(backend)?;
+            let params: Vec<&dyn rusqlite::ToSql> = chunk
+                .iter()
+                .map(|wire| wire as &dyn rusqlite::ToSql)
+                .collect();
+            let rows = stmt
+                .query_map(&*params, |row| row.get::<_, String>(0))
+                .map_err(backend)?;
+            for row in rows {
+                sessions.insert(row.map_err(backend)?);
+            }
+        }
+        Ok(sessions.into_iter().collect())
+    }
+
+    /// 为存活的 session 命中解析 `(id_json, representative_message_wire)`。
+    ///
+    /// 代表消息 = 该 session 里源顺序最前的非 system/developer 消息；身份优先取
+    /// 它在 `fts_ids` 里的保真 `id_json`，metadata-only session（无非系统消息）
+    /// 回退到 canonical Session 自身的 `id_json`。与历史单条 SQL 里的
+    /// `COALESCE(...)` 子查询逐字符同构，只是现在只为至多 `limit` 条求值。
+    fn session_metadata_identities(
+        conn: &Connection,
+        session_wires: &[&str],
+    ) -> PortResult<BTreeMap<String, SessionMetadataIdentity>> {
+        let mut resolved = BTreeMap::new();
+        for chunk in chunk_ids(session_wires) {
+            let placeholders = in_placeholders(chunk.len());
+            let mut stmt = conn
+                .prepare(&format!(
+                    "SELECT
+                         sfi.session_wire,
+                         COALESCE(
+                             (SELECT fi.id_json
+                                FROM fts_ids fi
+                               WHERE fi.wire_id = {REPRESENTATIVE_MESSAGE_SUBQUERY}),
+                             (SELECT fi.id_json
+                                FROM fts_ids fi
+                               WHERE fi.wire_id = sfi.session_wire)
+                         ),
+                         {REPRESENTATIVE_MESSAGE_SUBQUERY}
+                     FROM session_fts_ids sfi
+                     WHERE sfi.session_wire IN ({placeholders})"
+                ))
+                .map_err(backend)?;
+            let params: Vec<&dyn rusqlite::ToSql> = chunk
+                .iter()
+                .map(|wire| wire as &dyn rusqlite::ToSql)
+                .collect();
+            let rows = stmt
+                .query_map(&*params, |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                })
+                .map_err(backend)?;
+            for row in rows {
+                let (session_wire, id_json, message_wire) = row.map_err(backend)?;
+                resolved.insert(session_wire, (id_json, message_wire));
+            }
+        }
+        Ok(resolved)
     }
 }
 
@@ -6370,16 +6475,31 @@ impl SearchIndex for SqliteStore {
         }
         let filters = query.filters;
         if filters.is_empty() {
-            // 无 filter：保持原有 SQL 形状逐字节不变，结果与排序与旧路径一致。
+            // 无 filter：结果集与排序与旧路径逐条一致，只是先用 bm25 截断把
+            // sorter 要物化的行数压到"可能进 top-k"的那几十条（见
+            // [`Self::bm25_cutoff`]）。
+            let cutoff = Self::bm25_cutoff(&conn, "fts", &safe_query, limit)?;
             let mut hits = {
-                let mut stmt = conn
-                    .prepare(
+                let sql = match cutoff {
+                    Some(_) => {
+                        "SELECT id, bm25(fts) FROM fts
+                         WHERE fts MATCH ?1 AND bm25(fts) <= ?3
+                         ORDER BY bm25(fts), id LIMIT ?2"
+                    }
+                    None => {
                         "SELECT id, bm25(fts) FROM fts WHERE fts MATCH ?1
-                         ORDER BY bm25(fts), id LIMIT ?2",
-                    )
-                    .map_err(backend)?;
+                         ORDER BY bm25(fts), id LIMIT ?2"
+                    }
+                };
+                let mut params: Vec<&dyn rusqlite::ToSql> = vec![&safe_query];
+                let limit_param = limit as i64;
+                params.push(&limit_param);
+                if let Some(cutoff) = &cutoff {
+                    params.push(cutoff);
+                }
+                let mut stmt = conn.prepare(sql).map_err(backend)?;
                 let rows = stmt
-                    .query_map(rusqlite::params![&safe_query, limit as i64], |row| {
+                    .query_map(&*params, |row| {
                         let id_json: String = row.get(0)?;
                         let bm25: f64 = row.get(1)?;
                         Ok((id_json, bm25))
@@ -6718,6 +6838,50 @@ impl SemanticIndex for SqliteStore {
 }
 
 impl SqliteStore {
+    /// 第 `limit` 名的 `bm25` 分值——把"钉住排序 + LIMIT"压成有界物化的前置探针。
+    ///
+    /// `SELECT id, bm25(fts) ... ORDER BY bm25(fts), id LIMIT k` 里的 `id` 是
+    /// fts5 的内容列：`ORDER BY` 带上它，SQLite 就必须为**每条命中行**把 fts5
+    /// 内容行（`id` 与整段 `text` 同一条记录）读出来塞进临时 B 树排序。100k 语料
+    /// 上一个常见词命中 16k 行，这一步实测 47 ms；同一查询只取 `rowid` 只要
+    /// 7 ms，可见代价全在"为终将被 LIMIT 丢弃的行读内容"。
+    ///
+    /// 与语义路径同一手法（见 [`Self::semantic_candidate_wires`]：先有界召回，
+    /// 身份只对存活的 top-k 解析）：先用一条**不取任何内容列**的探针拿到第 k 名的
+    /// bm25，再把 `AND bm25(fts) <= ?` 叠回主查询。
+    ///
+    /// 结果集与排序**逐条不变**：top-k 里的每一行的 bm25 必然 `<=` 第 k 名的
+    /// bm25，所以截断不可能丢掉本该入选的行；等于第 k 名的行全部保留，`id`
+    /// tiebreak 仍在它们之间照旧裁决。实测 100k 语料上 7 个基准查询的返回行
+    /// （id 与分值）与旧 SQL 完全相同。
+    ///
+    /// 命中行不足 `limit` 时返回 `None`——此时无行可截，调用方走原 SQL。
+    ///
+    /// 只用于**无 filter/facet** 的路径。带谓词时探针必须重复同一套谓词才正确，
+    /// 而那些谓词（`fts_ids.id_json = f.id` 的 EXISTS 探针）本身就要读 `f.id`，
+    /// 探针不再便宜，收益归零。
+    fn bm25_cutoff(
+        conn: &Connection,
+        table: &str,
+        safe_query: &str,
+        limit: usize,
+    ) -> PortResult<Option<f64>> {
+        if limit == 0 {
+            return Ok(None);
+        }
+        let sql = format!(
+            "SELECT bm25({table}) FROM {table} WHERE {table} MATCH ?1
+             ORDER BY bm25({table}) LIMIT 1 OFFSET ?2"
+        );
+        conn.query_row(
+            &sql,
+            rusqlite::params![safe_query, (limit - 1) as i64],
+            |row| row.get::<_, f64>(0),
+        )
+        .optional()
+        .map_err(backend)
+    }
+
     /// 分层语义检索的第一层：用查询原文经 FTS 召回有界候选 wire id 集。
     ///
     /// 返回 `None` 表示"不要用候选集"——调用方必须退回全量精确打分。四种情况：
@@ -8210,6 +8374,227 @@ mod tests {
     }
 
     #[test]
+    fn bm25_cutoff_probe_reads_no_content_column() {
+        // Regression guard for the cost this whole probe exists to avoid, in the
+        // same spirit as `candidate_rerank_query_plan_uses_the_wire_id_primary_key`:
+        // the wrong shape here is correct-but-slow and no behavioural test would
+        // notice. `id` is an fts5 content column, so naming it in `ORDER BY`
+        // makes SQLite read the whole fts5 content record (`id` plus the entire
+        // `text`) for every matching row just to feed the sorter — 47 ms against
+        // 7 ms on the frozen 100k corpus for a term matching 16k rows. The probe
+        // must therefore mention no content column at all, and the main query
+        // must carry the cutoff predicate that keeps the sorter bounded.
+        let store = SqliteStore::open_in_memory().unwrap();
+        for index in 0..40 {
+            let id = sid(IdKind::Message, format!("cutoff-{index}").as_bytes());
+            store.index(&id, "cutofftoken body").unwrap();
+        }
+
+        let mut cutoff = None;
+        let traced = traced_sql(&store, || {
+            let conn = store.conn.borrow();
+            cutoff = SqliteStore::bm25_cutoff(&conn, "fts", "\"cutofftoken\"", 5).unwrap();
+        });
+        let cutoff = cutoff.expect("40 rows match, so a 5th-best score exists");
+        let probe = traced
+            .iter()
+            .find(|sql| sql.contains("bm25(fts)"))
+            .expect("the probe statement must be traced");
+        assert!(
+            !probe.contains(" id") && !probe.contains("id,") && !probe.contains("text"),
+            "the cutoff probe must not touch an fts5 content column; that read is \
+             exactly the cost it exists to skip. Traced: {probe}"
+        );
+
+        // Every row the LIMIT could keep scores at or better than the k-th, so
+        // the predicate cannot drop a row that belonged in the window.
+        let conn = store.conn.borrow();
+        let kept: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM fts WHERE fts MATCH ?1 AND bm25(fts) <= ?2",
+                rusqlite::params!["\"cutofftoken\"", cutoff],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            kept >= 5,
+            "cutoff must admit at least the requested window, kept {kept}"
+        );
+    }
+
+    #[test]
+    fn bm25_cutoff_declines_when_fewer_rows_match_than_requested() {
+        // Fewer matches than `limit` means nothing can be cut; the caller must
+        // fall back to the plain query rather than filter against a bogus score.
+        let store = SqliteStore::open_in_memory().unwrap();
+        for index in 0..3 {
+            let id = sid(IdKind::Message, format!("scarce-{index}").as_bytes());
+            store.index(&id, "scarcetoken body").unwrap();
+        }
+        let conn = store.conn.borrow();
+        assert!(
+            SqliteStore::bm25_cutoff(&conn, "fts", "\"scarcetoken\"", 10)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            SqliteStore::bm25_cutoff(&conn, "fts", "\"scarcetoken\"", 3)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            SqliteStore::bm25_cutoff(&conn, "fts", "\"scarcetoken\"", 0)
+                .unwrap()
+                .is_none(),
+            "limit 0 has no k-th place"
+        );
+    }
+
+    #[test]
+    fn session_metadata_ranking_plan_carries_no_correlated_subquery() {
+        // Same class of guard. The ranking statement feeds `ORDER BY bm25 LIMIT`,
+        // and SQLite materializes the full SELECT list of every candidate row
+        // into the sorter — so a correlated subquery in that list runs once per
+        // candidate, not once per returned row. A common term matched 823
+        // sessions on the frozen 100k corpus, which is where the 31 ms went.
+        // Representative-message and dedup work now happens outside this
+        // statement, so its plan must contain no correlated subquery at all.
+        let store = SqliteStore::open_in_memory().unwrap();
+        let session = sid(IdKind::Session, b"plan-session");
+        let document = sid(IdKind::Document, b"plan-document");
+        let message = sid(IdKind::Message, b"plan-message");
+        let batch = SourceBatch {
+            source_path: "plan-source.jsonl".into(),
+            entries: vec![
+                entity_entry(&session),
+                typed_document_entry(&document),
+                typed_message_entry(&message, "plantoken body"),
+            ],
+            placements: vec![placement(
+                &session,
+                &document,
+                &message,
+                0,
+                false,
+                Some((0, 5)),
+            )],
+            edges: Vec::new(),
+            activities: Vec::new(),
+            relation_complete: true,
+            len_bytes: None,
+            fingerprint: None,
+            provider_id: None,
+            resume_claim: None,
+        };
+        store
+            .commit_source_batches_if_changed(std::slice::from_ref(&batch))
+            .unwrap();
+
+        let conn = store.conn.borrow();
+        let mut stmt = conn
+            .prepare(
+                "EXPLAIN QUERY PLAN
+                 SELECT sfi.session_wire, bm25(session_fts)
+                 FROM session_fts
+                 JOIN session_fts_ids sfi ON sfi.session_wire = session_fts.session_wire
+                 WHERE session_fts MATCH ?1
+                 ORDER BY bm25(session_fts), sfi.session_wire LIMIT ?2",
+            )
+            .unwrap();
+        let plan = stmt
+            .query_map(rusqlite::params!["\"plantoken\"", 11i64], |row| {
+                row.get::<_, String>(3)
+            })
+            .unwrap()
+            .map(Result::unwrap)
+            .collect::<Vec<_>>()
+            .join(" | ");
+        assert!(
+            !plan.contains("CORRELATED"),
+            "session ranking must not evaluate a correlated subquery per candidate \
+             row; representative and dedup resolution belong outside it. Got: {plan}"
+        );
+        assert!(
+            !plan.contains("message_placements"),
+            "session ranking must not reach into message_placements per candidate \
+             row: {plan}"
+        );
+    }
+
+    #[test]
+    fn session_metadata_statement_count_is_bounded_regardless_of_matching_sessions() {
+        // The dedup set and identity resolution are now chunked batch queries,
+        // so the statement count must stay flat as more sessions match. The old
+        // shape was a single statement whose per-row subqueries scaled with the
+        // candidate count — invisible to a statement counter but not to a plan
+        // assertion (above); this test pins the complementary property that
+        // splitting the work did not reintroduce an N+1.
+        let measure = |sessions: usize, label: &str| -> usize {
+            let store = SqliteStore::open_in_memory().unwrap();
+            let batches: Vec<SourceBatch> = (0..sessions)
+                .map(|index| {
+                    let session = sid(
+                        IdKind::Session,
+                        format!("{label}-session-{index}").as_bytes(),
+                    );
+                    let document = sid(
+                        IdKind::Document,
+                        format!("{label}-document-{index}").as_bytes(),
+                    );
+                    let message = sid(
+                        IdKind::Message,
+                        format!("{label}-message-{index}").as_bytes(),
+                    );
+                    SourceBatch {
+                        source_path: format!("{label}-{index}.jsonl"),
+                        entries: vec![
+                            entity_entry(&session),
+                            typed_document_entry(&document),
+                            typed_message_entry(&message, "counttoken body"),
+                        ],
+                        placements: vec![placement(
+                            &session,
+                            &document,
+                            &message,
+                            0,
+                            false,
+                            Some((0, 5)),
+                        )],
+                        edges: Vec::new(),
+                        activities: Vec::new(),
+                        relation_complete: true,
+                        len_bytes: None,
+                        fingerprint: None,
+                        provider_id: None,
+                        resume_claim: Some(SourceResumeClaim {
+                            provider_id: "synthetic".into(),
+                            session_id: session.as_str().into(),
+                            provider_session_id: Some(format!("counttoken-native-{index}")),
+                            provider_session_id_state: "resolved".into(),
+                            original_working_directory: None,
+                            original_working_directory_state: "unavailable".into(),
+                            pair_observed: true,
+                        }),
+                    }
+                })
+                .collect();
+            store.commit_source_batches_if_changed(&batches).unwrap();
+            counted_statements(&store, || store.query("counttoken", 10).unwrap())
+        };
+        let few = measure(20, "few");
+        let many = measure(400, "many");
+        assert_eq!(
+            few, many,
+            "a search must issue the same number of statements whether 20 or 400 \
+             sessions match: {few} -> {many}"
+        );
+        assert!(
+            many <= 8,
+            "a default search should stay within a handful of statements, got {many}"
+        );
+    }
+
+    #[test]
     fn f32_blob_round_trips_and_rejects_width_mismatch() {
         let values = [1.5f32, -2.25, 0.0];
         let bytes = f32_slice_to_bytes(&values);
@@ -8610,6 +8995,36 @@ mod tests {
 
     thread_local! {
         static TRACED_STATEMENTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        /// `traced_sql` 的收集缓冲：trace 回调必须是裸 fn 指针，无法捕获环境。
+        static TRACED_SQL: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// 在该 store 的连接上挂 `SQLITE_TRACE_STMT` 钩子执行 `run`，返回期间执行的
+    /// 用户层 SQL 原文（SQLite 内部语句以 `--` 开头，不收）。
+    pub(crate) fn traced_sql<R>(store: &SqliteStore, run: impl FnOnce() -> R) -> Vec<String> {
+        TRACED_SQL.with(|cell| cell.borrow_mut().clear());
+        {
+            let conn = store.conn.borrow();
+            conn.trace_v2(
+                rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
+                Some(collect_user_statement),
+            );
+        }
+        let result = run();
+        {
+            let conn = store.conn.borrow();
+            conn.trace_v2(rusqlite::trace::TraceEventCodes::empty(), None);
+        }
+        let _ = result;
+        TRACED_SQL.with(|cell| cell.borrow().clone())
+    }
+
+    fn collect_user_statement(event: rusqlite::trace::TraceEvent<'_>) {
+        if let rusqlite::trace::TraceEvent::Stmt(_stmt, sql) = event
+            && !sql.starts_with("--")
+        {
+            TRACED_SQL.with(|cell| cell.borrow_mut().push(sql.to_string()));
+        }
     }
 
     /// 在该 store 的连接上挂 `SQLITE_TRACE_STMT` 钩子执行 `run`,返回期间执行的
