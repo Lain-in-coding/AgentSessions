@@ -84,11 +84,3 @@
 - **大语料**：100k session / 50GB 趋势需后续专项压测。
 
 这些限制不否定已测数据，但禁止把本汇总表述为跨平台通过或正式 Accepted。
-
----
-
-## 附录：R0 执行期发现的本机环境约束
-
-- **本机安全软件对部分文档静默删除**：起草 R0 文档时，`EXTERNAL-READINESS-GATE.md`（大写、含 signing/credential/notarization/OIDC/Authenticode 等词）多次在写入后被静默删除，改用全小写连字符文件名 `external-readiness-gate.md` 后稳定持久。推断为本机安全软件基于文件名/内容启发式误判。
-- **影响**：这印证了 `docs/product/SLI-AND-BENCHMARK-FORMAT.md` 要求记录 `antivirus_state` 的必要性；Windows 构建、签名和安装验证必须在受控、可复现且记录安全软件状态的环境执行。
-- **对 External Readiness Gate 的意义**：签名/公证凭据相关流程需在 CI 或专用发布主机验证；本 spike 未验证真实凭据。

@@ -1,4 +1,4 @@
-# agent-session-grep 0.2 性能基线
+# agent-session-grep 性能基线
 
 > 状态：初始可复现基线，不是正式 SLO；正式阈值只能在固定基准环境和标准 corpus 上冻结。
 > 采集方式：`cargo test -p agent-session-grep-cli --test e2e perf_baseline_100_messages_index_and_search -- --nocapture`
@@ -24,8 +24,10 @@
 一次 Windows 开发机运行通过：
 
 - Windows 记录型 smoke 示例：100 条消息独立索引 **1912 ms**、单次全文查询
-  **16 ms**（历史观测，不作为当前阈值）。
-- 普通 CI 只验证功能并输出本机观测值，不使用固定墙钟断言；跨环境结果不可直接比较。
+  **16 ms**（维护者开发机上的历史观测，语料为该测试生成的 100 条合成消息，
+  不作为当前阈值）。
+- 普通 CI 只验证功能并输出该次运行所在机器的观测值，不使用固定墙钟断言；
+  跨环境结果不可直接比较。
 
 ## 解释与限制
 
@@ -71,19 +73,21 @@
 ## 2026-08-13 post-optimization（性能修复实测）
 
 > 2026-08-10 ~ 08-12 的性能修复（见下列条目）
-> 已在本机真实语料与隔离测量中验证。下列数字是本机实测观测值，仍是本地
-> 证据锚点，不是正式 SLO。
+> 已在维护者开发机的真实语料与隔离测量中验证。下列数字是该机器上的实测观测值，
+> 仍是本地证据锚点，不是正式 SLO。语料为维护者本人的私有 transcript（约 1.25 GB、
+> 1,328–1,340 个源文件），既不入库也不上传，因此**读者无法复核这些加速比**；
+> 它们记录的是同一机器、同一语料上修复前后的相对变化。
 
 - **FTS 删除优化（fts_rowid 边车）**：`fts_ids` 边车新增 `fts_rowid` 列，
   每次 FTS 行的清除/删除从"按内容列匹配的全表扫描"改为经边车 `wire_id`
-  主键取 rowid 的 O(1) 定位（无 fts 行时按 NULL 无操作）。32 MB 单文件在
-  非空库上的首扫从 **16.5 s → 2.79 s**；非空库重扫同一目录从 **25.3 s →
-  2.87 s**。
+  主键取 rowid 的 O(1) 定位（无 fts 行时按 NULL 无操作）。在上述私有语料的
+  非空库上，单个 32 MB 源文件的首扫从 **16.5 s → 2.79 s**；对同一目录的
+  非空库重扫从 **25.3 s → 2.87 s**。
 - **unchanged re-sync**：fingerprint skip + early no-op 检查让内容未变的源
-  集合重同步跳过整个批处理，实测 **0.089 s**，不推进 generation、不失效
-  游标。
-- **rebuild**：`index rebuild` 经 `fts_rowid` 边车删除后重投影，8,990
-  entities 实测 **0.71 s**。
+  集合重同步跳过整个批处理，同一私有语料上实测 **0.089 s**，不推进 generation、
+  不失效游标。
+- **rebuild**：`index rebuild` 经 `fts_rowid` 边车删除后重投影，同一语料的
+  8,990 entities 实测 **0.71 s**。
 - **batch-scoped 提交与完整性检查**：完整性检查与提交按批作用域执行，并
   消除相关读路径的 N+1。
 - **prepared statements**：批量写入路径复用 prepared statements，减少重复
@@ -94,6 +98,7 @@
 这些修复叠加后，全量授权真实语料回归已从小时级收敛到分钟级：连续两次全量
 运行（1,328 / 1,330 源，~1.25 GB）的生成时间仅相隔约 35 分钟
 （v3 `2026-08-12T23:51:23Z`、v4 `2026-08-13T00:26:57Z`），v4 由改名后的
-`agent-session-grep` 二进制执行且六条不变量全绿；此前同一语料的慢批现象
-（batch 级 10-40 分钟）不再出现。记录见
+`agent-session-grep` 二进制执行，且当时定义的六条不变量全绿（不变量集合以
+`scripts/evidence/real_data_regression.py` 的 `INVARIANT_IDS` 为准，现为七条）；
+此前同一语料的慢批现象（batch 级 10-40 分钟）不再出现。记录见
 `docs/evidence/integration-beta/real-data-regression.md`。

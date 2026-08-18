@@ -5,6 +5,11 @@
 >
 > - status: **Draft** evidence accounting; no governance record is marked
 >   Accepted by this bundle.
+> - commit reachability: `88d86f4` is a pre-release development commit in the
+>   maintainer's development history, which is not part of the published
+>   repository history. The directory name pins *when* the measurements were
+>   taken; a public reader cannot resolve that SHA. The committed report files in
+>   this directory are the reviewable artifact.
 > - interpretation: every number here is a local evidence anchor. None of it is
 >   a formal SLO, minimum-OS certification, architecture certification, or
 >   release certification.
@@ -16,7 +21,7 @@
 
 | Evidence | Environment | Result | Reproduce |
 |---|---|---|---|
-| Full benchmark | Windows 11, `x86_64-pc-windows-msvc`, rustc 1.97.1, SQLite 3.53.2, 22 logical CPUs, 31.5 GB RAM, Samsung NVMe SSD, NTFS, Defender real-time on | Strengthened validator passes; startup 20+20, search/show/get 100 each, sync workloads 3 each | `python scripts/evidence/core_beta_benchmark.py run --profile full --workspace . --output-dir evidence-output --expected-commit 88d86f44a0f8d4d0261aaddddb99524514e57d7b --disk "Samsung NVMe SSD" --filesystem NTFS --antivirus-state "Windows Defender real-time protection enabled" --sqlite-version 3.53.2 --sqlite-version-source "same-commit sqlite-snapshot-wal rusqlite::version(); workspace and spike lock rusqlite 0.40.1/libsqlite3-sys 0.38.1"` |
+| Full benchmark | Windows 11, `x86_64-pc-windows-msvc`, rustc 1.97.1, SQLite 3.53.2, 22 logical CPUs, 31.5 GB RAM, NVMe SSD, NTFS, Defender real-time on | Strengthened validator passes; startup 20+20, search/show/get 100 each, sync workloads 3 each | `python scripts/evidence/core_beta_benchmark.py run --profile full --workspace . --output-dir evidence-output --expected-commit 88d86f44a0f8d4d0261aaddddb99524514e57d7b --disk "NVMe SSD" --filesystem NTFS --antivirus-state "Windows Defender real-time protection enabled" --sqlite-version 3.53.2 --sqlite-version-source "same-commit sqlite-snapshot-wal rusqlite::version(); workspace and spike lock rusqlite 0.40.1/libsqlite3-sys 0.38.1"` |
 | Production SQLite process evidence (Windows) | Windows x64, rustc 1.97.1 | 56 adapter unit tests + 4 process tests pass after independent-review fixes | `cargo test -p agent-session-grep-adapters-sqlite --all-targets` |
 | Linux build/test/smoke | WSL2 Ubuntu 22.04, glibc 2.35, kernel 6.6.87.2, x86_64, rustc/cargo 1.97.1 | locked release CLI build, direct `--version` and robot `config paths` smoke, and full workspace tests pass | see `linux-wsl2-build-test-smoke.txt` |
 | WAL snapshot feasibility | Windows x64, SQLite 3.53.2 | A/B/C/D pass; assertion failure exits nonzero | `cargo run --locked --release --manifest-path spikes/sqlite-snapshot-wal/Cargo.toml` |
