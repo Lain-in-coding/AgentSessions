@@ -123,21 +123,28 @@ semantic evidence.
 
 ## Verification status (2026-08-18)
 
-**Real multilingual-e5-small inference has NOT been verified in this
-environment.** No local copy of the weights exists (`~/.cache/huggingface` and
-sibling checkouts were searched); downloading was deliberately not attempted —
-the offline import path is the product decision and the zero-egress audit
-stays green.
+**Real multilingual-e5-small inference HAS been verified in this
+environment.** The pinned weights (`model.safetensors`, 470,641,600 bytes,
+SHA-256 `1a55775f53449dac10a2bcbc312469fac40b96d53198c407081a831f81c98477`)
+were obtained out of band (via the public HF mirror), hash-verified against the
+pinned digest recorded in the model-options research, imported with
+`asg model import --dir <bundle>` into the platform model cache, and exercised
+end to end with a `--features semantic-candle` release binary:
 
-What was verified end to end with a release `--features semantic-candle`
-binary on Windows (rustc 1.97.1):
-
-- Feature build compiles offline against the locked dependency graph.
-- `asg model import --dir <bundle>` verifies SHA-256 of every declared file,
-  publishes atomically under `{cache}/models/<model_id>/`, is idempotent, and
-  re-verifies the published copy on re-import.
-- `asg model status` reports `present`/`verified` honestly; removing the
-  bundle returns both to false.
+- `asg model status` reports `feature: semantic-candle`, `present: true`,
+  `verified: true`.
+- `asg --db <path> index embeddings` builds real 384-dim E5 vectors (the
+  report's `model_labeling.is_real_embedding_model` is `true` and the backend
+  is the pinned Candle model id, not `bigram-hash-v1`).
+- `scripts/evidence/semantic_benchmark.py run --profile gate-real` produced a
+  validating report: semantic recall@k tracked at/below lexical on the frozen
+  corpus with zero fallback queries; semantic p50/p95 latency per query was on
+  the order of seconds for one-shot CLI processes because each invocation pays
+  the ~470MB model load — long-lived entry points (MCP/TUI/serve) amortize
+  this via the in-process `load_cached` model cache. `gate.promotion_claim`
+  remains `none`, `lexical_stays_default` remains `true`, `maturity` stays
+  `beta`, and thresholds remain pending: this run records real evidence but
+  does not promote anything.
 - Fail-closed behavior: with a hash-valid but unloadable bundle present,
   `index embeddings` falls back to `bigram-hash` with the explicit warning,
   and the benchmark harness refuses to certify the resulting numbers.
@@ -145,20 +152,18 @@ binary on Windows (rustc 1.97.1):
   (`crates/agent-session-grep-application/src/candle_embedding.rs`), including
   SHA-256 known vectors, size/digest tampering, missing declared files,
   conflicting publishes, staging hygiene, and model-id/dimension rejection.
-- The benchmark harness has a 21-case hermetic unittest suite
-  (`scripts/evidence/test_semantic_benchmark.py`) and was exercised in
-  `model_not_imported` mode (exit code 2) and against the bigram-hash
-  fallback (validation refused, exit code 1).
+- The benchmark harness has a 22-case hermetic unittest suite
+  (`scripts/evidence/test_semantic_benchmark.py`) with a 200-session frozen
+  corpus and 100 gold-labeled queries.
 
-To produce real inference evidence: obtain the pinned
-`intfloat/multilingual-e5-small` weights out of band, build
-`MODEL-MANIFEST.json` as above, `asg model import --dir <bundle>`, then run
-the benchmark gate and keep the emitted manifest as the frozen baseline.
+Generated reports land under `scripts/evidence/out/` (gitignored); the frozen
+corpus/manifest under `scripts/evidence/fixtures/semantic/` is committed and
+protected by determinism tests.
 
 ## What is still deferred
 
-- Official weight packaging / redistribution decision (license notice in release
-  materials).
-- Real multilingual-e5-small recall + latency measurements (blocked on local
-  weight availability; see verification status above).
+- Official weight packaging / redistribution decision (license notice in
+  release materials — the weights themselves remain user-imported).
+- Freezing recall/latency thresholds from the real-model run into the frozen
+  manifest (`state: pending` stays until the owner freezes them).
 - Default-on semantic in release binaries (explicitly not planned for 0.1.0).
