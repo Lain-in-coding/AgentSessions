@@ -18,12 +18,65 @@
 >   Each run below is reported with the invariant count it actually evaluated;
 >   the counts are not retroactively restated.
 
+## Synthetic 100k-message run (2026-08-19) — seven invariants, full coverage
+
+A separate run on the deterministic synthetic corpus
+(`scripts/evidence/synthetic_corpus.py`, 100,000 messages / 5,000 sessions /
+6 providers / 48.6 MiB). This is **not** a substitute for the authorized
+real-corpus runs recorded below — a synthetic corpus cannot surface the format
+irregularities real transcripts carry. It is recorded because it is the first
+run at the scale every release threshold is stated at, and because it exposed
+two harness defects that the real-corpus runs could not have revealed.
+
+| Aggregate | Value |
+|---|---|
+| sources | 5,000 |
+| emitted records | 100,000 |
+| skipped | 0 |
+| persisted source-placement claims | 100,000 |
+| de-duplicated `msg_v1_` entities | 100,000 |
+| sessions | 5,000 (0 failed, 0 zero-placement) |
+| spans | 43,894 total — 43,019 byte-precise, 875 declared-absent |
+| rebuild | catalog 110,000 → 110,000, ids match, 5 sampled terms match |
+| sources unchanged | 5,000 of 5,000 |
+| outcome | **passed**, harness exit 0, 440 s |
+
+Reproduce with a generated corpus (the corpus itself is never committed):
+
+```
+python scripts/evidence/synthetic_corpus.py generate
+python scripts/evidence/real_data_regression.py \
+    --binary target/release/agent-session-grep \
+    --sources evidence-output/synthetic-corpus-100k/corpus
+```
+
+**Two harness defects this run exposed**, both fixed before the numbers above
+were taken:
+
+1. `collect_sources` kept only `.jsonl`, so 3,675 of 5,000 files were collected
+   and the harness still reported every invariant green — **a quarter of the
+   corpus silently excluded by a report that read as full coverage.** Candidacy
+   is now an explicit short exclusion list rather than an allow-list of
+   transcript extensions, so a provider format nobody anticipated reaches the
+   tool instead of vanishing.
+2. With full coverage restored, `INV-SPAN-COVERAGE` failed: 875 spans were not
+   byte-precise. Those 875 are exactly the cline (450) and hermes (425)
+   documents, both declaring `source_span: Unsupported` because a whole-JSON
+   document has no in-file byte range. `Precision::Unknown` is the documented
+   correct value for that case, so the invariant had been demanding something
+   untrue. It now requires at least one byte-precise span, rejects any tier
+   outside the contract, and reports the declared-absent count with its reason.
+
+The 875 declared-absent spans are therefore an honest capability limit, not a
+regression; they are reported rather than hidden so the number stays auditable.
+
 ## Method
 
 The harness built a throwaway temporary data root, ingested the authorized
 Claude Code and Codex corpus through the real release binary in `--robot` mode,
 and was configured to evaluate the six invariants then defined. Sources remained
 read-only.
+
 
 The generated report matched the exact closed aggregate key sets. A raw-value
 scan found no Windows, Unix-home, or UNC paths, UUIDs, or complete stable entity
