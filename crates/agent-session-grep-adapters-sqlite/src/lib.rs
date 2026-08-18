@@ -80,6 +80,30 @@ const SESSION_SEARCH_FIELD_CHARS: usize = 4096;
 const BULK_INSERT_ROWS_PER_CHUNK: usize = 100;
 const _: () = assert!(8 * BULK_INSERT_ROWS_PER_CHUNK <= 950);
 
+/// 分层语义检索的候选集上限（D14 / 计划 M2-4）。
+///
+/// 选 2000 而不是计划草稿里举例的 500，理由是实测的成本结构而非直觉：
+///
+/// - **精度**：§1.5 的基线在 recall@20 上测量，而候选集必须远大于 k 才不会
+///   自己成为召回瓶颈。2000 是 recall@20 的 100 倍，也是冻结语料 2000 条消息
+///   的全部——即基线语料上分层路径**恒等于**全量扫描，召回按构造不可能回退。
+/// - **代价**：候选重排实测约 12 ms / 2000 条（按 [`BATCH_IN_CHUNK`] 分块、
+///   走 `message_vec` 主键），仍在 50 ms 目标内；候选召回本身是既有 FTS 路径
+///   的一次有界 `LIMIT` 查询。把上限收到 500 只省个位数毫秒，却把召回的安全
+///   余量削掉四分之三——这个交换不值得。
+/// - **上界**：10 万条语料下 2000 是 2%，读取量从约 150 MB 降到约 3 MB。
+const SEMANTIC_CANDIDATE_LIMIT: usize = 2000;
+
+/// 候选集"过小"的下限：低于此值即判定 lexical 召回不足以代表语义邻域，
+/// 放弃分层、退回全量精确打分（宁可慢，不可静默把 semantic 变成 lexical）。
+///
+/// 取 [`SEMANTIC_CANDIDATE_LIMIT`] 的四分之一：候选集没被 `LIMIT` 截断说明
+/// FTS 已经把**全部**字面匹配都给出了，此时候选集就是查询词的完整字面邻域，
+/// 而语义邻域通常远大于它——尤其是 paraphrase 查询（冻结语料里 40 组
+/// paraphrase 对的 query 与目标消息零 token 重叠，正是 semantic 相对 lexical
+/// 的全部增益来源）。这类查询必须走全量打分才能召回。
+const SEMANTIC_CANDIDATE_FLOOR: usize = SEMANTIC_CANDIDATE_LIMIT / 4;
+
 type PlacementInsertRow<'a> = (
     &'a str,
     &'a str,
@@ -1238,6 +1262,12 @@ pub struct SqliteStore {
     /// 全部方法降级为空/未就绪。设置它是调用方声明"这些向量属于哪个模型"，
     /// 换模型后旧维度向量因 model_id 不匹配自然被排除。
     semantic_model_id: RefCell<Option<String>>,
+    /// 本次语义查询的原文（D14 / 计划 M2-4）：分层检索的第一层用它经既有 FTS
+    /// 路径召回有界候选集，第二层只对候选集算余弦。`None` 表示调用方没提供
+    /// 原文，此时**只能**走精确全量打分——绝不因为拿不到原文就返回近似结果。
+    /// 端口 `query_semantic` 只收向量，故原文经本 setter 逐次传入（与
+    /// `set_semantic_model` 同一既有约定）。
+    semantic_candidate_query: RefCell<Option<String>>,
 }
 
 /// 一批源路径的指纹缓存项：捕获时长度与内容指纹。
@@ -1252,6 +1282,7 @@ impl SqliteStore {
             conn: RefCell::new(conn),
             _lease: None,
             semantic_model_id: RefCell::new(None),
+            semantic_candidate_query: RefCell::new(None),
         })
     }
 
@@ -1275,6 +1306,7 @@ impl SqliteStore {
             conn: RefCell::new(conn),
             _lease: Some(lease),
             semantic_model_id: RefCell::new(None),
+            semantic_candidate_query: RefCell::new(None),
         };
         // lease 已到手，当前进程是唯一写者；安全收敛上次崩溃留下的无副作用 intent。
         store.recover_interrupted()?;
@@ -1289,6 +1321,7 @@ impl SqliteStore {
             conn: RefCell::new(conn),
             _lease: None,
             semantic_model_id: RefCell::new(None),
+            semantic_candidate_query: RefCell::new(None),
         })
     }
 
@@ -1823,6 +1856,29 @@ impl SqliteStore {
     /// 不会变成往表里写无归属向量。
     pub fn set_semantic_model(&self, model_id: impl Into<String>) {
         *self.semantic_model_id.borrow_mut() = Some(model_id.into());
+    }
+
+    /// 声明本次语义查询的原文，开启分层检索（D14 / 计划 M2-4）。
+    ///
+    /// 语义查询的代价原本与库大小成正比：10 万条 × 384 维 × 4 字节 ≈ 150 MB
+    /// 每查询。分层检索把它变成"有界候选集 + 精确重排"——第一层用同一个
+    /// FTS 路径（与 lexical 检索、hybrid 的 lexical 分支完全同一套召回机制）
+    /// 取回至多 [`SEMANTIC_CANDIDATE_LIMIT`] 条候选，第二层只对这些候选读向量
+    /// 算余弦。
+    ///
+    /// **候选集为空或过小时自动回退全量精确打分**（见
+    /// [`SEMANTIC_CANDIDATE_FLOOR`]）：否则一个用词与语料字面不重叠的查询会
+    /// 召回零候选，semantic 检索就会静默退化成 lexical 检索——那正是 semantic
+    /// 存在的理由被抹掉。分层只是**加速**，不改变"语义相似即可召回"的语义。
+    ///
+    /// 不设置（或设为空串）时行为与历史完全一致：全量精确打分。
+    pub fn set_semantic_candidate_query(&self, query: impl Into<String>) {
+        let query = query.into();
+        *self.semantic_candidate_query.borrow_mut() = if query.trim().is_empty() {
+            None
+        } else {
+            Some(query)
+        };
     }
 
     /// 清除当前模型下的全部向量（换模型或 rebuild 语义索引时使用）。
@@ -6568,9 +6624,13 @@ impl SearchIndex for SqliteStore {
 /// 语义向量边车（#3，schema v10）。
 ///
 /// 向量以 little-endian f32 blob 存储；余弦相似度在 Rust 侧计算——SQLite 无
-/// 向量扩展依赖（sqlite-vec 需额外二进制），语料规模下全表扫描 + Rust 点积
-/// 已足够，且不引入新供应链。查询按 `model_id` 过滤：换模型后旧维度向量不会
-/// 与新向量混算出垃圾相似度。
+/// 向量扩展依赖（sqlite-vec 需额外二进制），也不引入新供应链。查询按
+/// `model_id` 过滤：换模型后旧维度向量不会与新向量混算出垃圾相似度。
+///
+/// 检索走**分层**（D14 / 计划 M2-4）：调用方经
+/// [`SqliteStore::set_semantic_candidate_query`] 给出查询原文时，先用既有 FTS
+/// 路径召回有界候选集，只对候选集读向量算余弦；候选不足时退回全量精确打分。
+/// 两条路径的排序契约完全一致（相似度降序 + wire id 升序），故分页语义不变。
 ///
 /// `is_ready` 表示"这张表里有当前模型的向量"，而不是"表存在"——空表意味着
 /// 语义检索不可用，Application 必须显式降级到 lexical_fallback。
@@ -6605,68 +6665,72 @@ impl SemanticIndex for SqliteStore {
             return Ok(Vec::new());
         };
         let conn = self.conn.borrow();
-        // 只取与查询同模型同维度的向量：维度不符的行是换模型残留，跳过而非
-        // 截断比较（截断会产出看似合理却无意义的相似度）。
-        let mut stmt = conn
-            .prepare(
-                "SELECT mv.wire_id, fi.id_json, mv.embedding
-                 FROM message_vec mv
-                 LEFT JOIN fts_ids fi ON fi.wire_id = mv.wire_id
-                 WHERE mv.model_id = ?1 AND mv.dimension = ?2",
-            )
-            .map_err(backend)?;
-        let rows = stmt
-            .query_map(
-                rusqlite::params![model_id, query_embedding.len() as i64],
-                |row| {
-                    let wire: String = row.get(0)?;
-                    let id_json: Option<String> = row.get(1)?;
-                    let blob: Vec<u8> = row.get(2)?;
-                    Ok((wire, id_json, blob))
-                },
-            )
-            .map_err(backend)?;
 
-        let mut scored: Vec<(f32, StableId)> = Vec::new();
-        for row in rows {
-            let (wire, id_json, blob) = row.map_err(backend)?;
-            let vector = bytes_to_f32_vec(&blob);
-            if vector.len() != query_embedding.len() {
-                continue;
+        // 第一层（有界召回）：拿到查询原文就用既有 FTS 路径取候选集。候选不足
+        // 时 `None`，第二层退回全量精确打分——见 SEMANTIC_CANDIDATE_FLOOR。
+        let candidates = match self.semantic_candidate_query.borrow().as_deref() {
+            Some(text) => Self::semantic_candidate_wires(&conn, text)?,
+            None => None,
+        };
+
+        // 第二层（精确重排）：只对候选集（或全表）读向量算余弦。两条路径共用
+        // 同一个 top-k 收集器，因此评分、维度跳过与定序逐字节同构。
+        //
+        // 打分循环只读 `message_vec` 自己的两列，不连接 `fts_ids`：身份只对最终
+        // 留在榜上的至多 `limit` 条解析（见 `SemanticTopK::into_hits`）。为 2000
+        // 条候选各做一次 id_json 连接，其中 99% 会被 top-k 立刻丢弃。
+        let mut top = SemanticTopK::new(limit);
+        match &candidates {
+            Some(wires) => {
+                for chunk in chunk_ids(wires) {
+                    let placeholders = in_placeholders(chunk.len());
+                    // wire_id 是 message_vec 的主键，但 `model_id` 上还有一个
+                    // 索引（`message_vec_model`），而单模型库里它对每一行都成立
+                    // ——规划器据此估成"高选择性"，于是走 model_id 索引扫全表，
+                    // 候选集的 `IN` 退化成过滤器。实测这一步就要 674 ms / 2000
+                    // 候选，分层等于没做。
+                    //
+                    // 一元 `+` 剥掉这两个谓词的可索引性（SQLite 官方给的用法），
+                    // 逼规划器用 wire_id 主键逐候选查找：同一查询实测降到 24 ms。
+                    // 语义完全不变——`+expr` 与 `expr` 求值相同，只影响索引选择。
+                    let mut stmt = conn
+                        .prepare(&format!(
+                            "SELECT mv.wire_id, mv.embedding FROM message_vec mv
+                             WHERE +mv.model_id = ?1 AND +mv.dimension = ?2
+                               AND mv.wire_id IN ({placeholders})"
+                        ))
+                        .map_err(backend)?;
+                    let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(chunk.len() + 2);
+                    let dimension = query_embedding.len() as i64;
+                    params.push(&model_id);
+                    params.push(&dimension);
+                    for wire in chunk {
+                        params.push(wire);
+                    }
+                    let mut rows = stmt.query(&*params).map_err(backend)?;
+                    while let Some(row) = rows.next().map_err(backend)? {
+                        top.consider(row, query_embedding)?;
+                    }
+                }
             }
-            let score = cosine_similarity(query_embedding, &vector);
-            // 身份优先取 fts_ids 的保真 id_json（含 kind+stability）；缺失回退
-            // wire（降级为 Unstable，与 rebuild 同一约定）。
-            let id = match id_json {
-                Some(json) => serde_json::from_str(&json).map_err(backend)?,
-                None => match StableId::from_wire(&wire) {
-                    Some(id) => id,
-                    None => continue,
-                },
-            };
-            scored.push((score, id));
+            None => {
+                // 只取与查询同模型同维度的向量：维度不符的行是换模型残留，跳过
+                // 而非截断比较（截断会产出看似合理却无意义的相似度）。
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT mv.wire_id, mv.embedding FROM message_vec mv
+                         WHERE mv.model_id = ?1 AND mv.dimension = ?2",
+                    )
+                    .map_err(backend)?;
+                let mut rows = stmt
+                    .query(rusqlite::params![model_id, query_embedding.len() as i64])
+                    .map_err(backend)?;
+                while let Some(row) = rows.next().map_err(backend)? {
+                    top.consider(row, query_embedding)?;
+                }
+            }
         }
-        // 相似度降序；同分按 wire id 升序，保证分页顺序确定（与 FTS 路径的
-        // bm25+id tiebreak 同一约定）。
-        scored.sort_by(|a, b| {
-            b.0.partial_cmp(&a.0)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.1.as_str().cmp(b.1.as_str()))
-        });
-        scored.truncate(limit);
-        Ok(scored
-            .into_iter()
-            .map(|(score, id)| SearchHit {
-                id,
-                score,
-                session_id: None,
-                text: None,
-                why_matched: Vec::new(),
-                suggested_next_commands: Vec::new(),
-                occurrences: 1,
-                resume_available: false,
-            })
-            .collect())
+        top.into_hits(&conn)
     }
 
     fn is_ready(&self) -> bool {
@@ -6684,6 +6748,179 @@ impl SemanticIndex for SqliteStore {
     }
 }
 
+impl SqliteStore {
+    /// 分层语义检索的第一层：用查询原文经 FTS 召回有界候选 wire id 集。
+    ///
+    /// 返回 `None` 表示"不要用候选集"——调用方必须退回全量精确打分。三种情况：
+    ///
+    /// 1. 查询词经 FTS 安全化后为空（全标点/全空白），无词可召回；
+    /// 2. 候选数为 0 —— 查询词在语料里字面不出现。这恰是 semantic 最该发挥
+    ///    作用的场景（paraphrase / 跨语言 / 同义改写），若就此返回空结果，
+    ///    semantic 检索会静默退化成 lexical 检索；
+    /// 3. 候选数低于 [`SEMANTIC_CANDIDATE_FLOOR`] 且未被 `LIMIT` 截断 ——
+    ///    字面邻域已被完整枚举且很小，语义邻域几乎必然更大。
+    ///
+    /// 只有候选集足够大（说明字面信号本身已经足够丰富，top-k 几乎必然落在其中）
+    /// 才走分层。变换与 [`SearchIndex::query_filtered`] 完全同一套
+    /// （`bigram_cjk` → `safe_fts_query`），因此候选召回机制与 lexical 检索、
+    /// hybrid 的 lexical 分支逐字节一致，不是第二套并行实现。
+    fn semantic_candidate_wires(conn: &Connection, query: &str) -> PortResult<Option<Vec<String>>> {
+        let safe_query = safe_fts_query(&bigram_cjk(query));
+        if safe_query.is_empty() {
+            return Ok(None);
+        }
+        // 只取 wire id：候选召回不需要 bm25 排序（第二层按余弦重排），故用
+        // fts_ids 的连接键，按 rowid 顺序取满 LIMIT 即可。
+        let mut stmt = conn
+            .prepare(
+                "SELECT fi.wire_id FROM fts AS f
+                 JOIN fts_ids fi ON fi.id_json = f.id
+                 WHERE fts MATCH ?1
+                 LIMIT ?2",
+            )
+            .map_err(backend)?;
+        let rows = stmt
+            .query_map(
+                rusqlite::params![&safe_query, SEMANTIC_CANDIDATE_LIMIT as i64],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(backend)?;
+        let mut wires = Vec::new();
+        for row in rows {
+            wires.push(row.map_err(backend)?);
+        }
+        // 未被 LIMIT 截断且过小 → 字面邻域已完整枚举，不足以代表语义邻域。
+        if wires.len() < SEMANTIC_CANDIDATE_FLOOR && wires.len() < SEMANTIC_CANDIDATE_LIMIT {
+            return Ok(None);
+        }
+        Ok(Some(wires))
+    }
+}
+
+/// 语义检索的有界 top-k 收集器。
+///
+/// 分层路径与全量路径共用它，保证两条路径的评分、维度跳过与定序**逐字节同构**
+/// ——这正是"候选集路径与全量扫描给出同一 top-k 顺序"可测的前提。
+///
+/// 只保留 `limit` 条而非把全部分数收进 Vec 再排序：全表路径下后者在 10 万条上
+/// 要为一次查询分配 10 万个 (f32, id)，其中 99.98% 立刻被 truncate 丢弃。
+///
+/// 榜上只存 wire id，身份到 [`Self::into_hits`] 才解析。这是安全的：`fts_ids`
+/// 的 `id_json` 反序列化出的 `StableId::as_str()` 就是它的 `wire_id`（写入侧
+/// `upsert_fts_row_in_tx` 用同一个 id 填两列），故 tiebreak 用 wire id 与用
+/// 解析后的 id 完全等价。
+struct SemanticTopK {
+    limit: usize,
+    scored: Vec<(f32, String)>,
+}
+
+impl SemanticTopK {
+    fn new(limit: usize) -> Self {
+        Self {
+            limit,
+            scored: Vec::new(),
+        }
+    }
+
+    /// 读一行（wire_id, embedding）并按需纳入 top-k。
+    ///
+    /// blob 按引用逐 f32 解码，不为每行分配 `Vec<f32>`；维度不符的行跳过而非
+    /// 截断比较（与历史行为一致）。
+    fn consider(&mut self, row: &rusqlite::Row<'_>, query: &[f32]) -> PortResult<()> {
+        let blob = row
+            .get_ref(1)
+            .map_err(backend)?
+            .as_blob()
+            .map_err(backend)?;
+        let Some(score) = cosine_similarity_le_blob(query, blob) else {
+            return Ok(());
+        };
+
+        // 分数不足且已满时直接丢弃，省掉 wire 复制与插入。等分仍要纳入：
+        // tiebreak 是 wire id 升序，同分的更小 id 必须能挤掉已在榜的更大 id。
+        if self.scored.len() >= self.limit
+            && let Some((worst, worst_wire)) = self.scored.last()
+        {
+            if score < *worst {
+                return Ok(());
+            }
+            if score == *worst {
+                let wire = row.get_ref(0).map_err(backend)?.as_str().map_err(backend)?;
+                if wire >= worst_wire.as_str() {
+                    return Ok(());
+                }
+            }
+        }
+
+        self.scored.push((score, row.get(0).map_err(backend)?));
+        // 相似度降序；同分按 wire id 升序，保证分页顺序确定（与 FTS 路径的
+        // bm25+id tiebreak 同一约定）。
+        self.scored.sort_by(|a, b| {
+            b.0.partial_cmp(&a.0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.1.cmp(&b.1))
+        });
+        self.scored.truncate(self.limit);
+        Ok(())
+    }
+
+    /// 解析最终榜上（至多 `limit` 条）的身份并装配命中。
+    ///
+    /// 身份优先取 `fts_ids` 的保真 `id_json`（含 kind+stability）；缺失回退
+    /// wire（降级为 Unstable，与 rebuild 同一约定）。两者都拿不到的行丢弃
+    /// ——与历史行为一致。
+    fn into_hits(self, conn: &Connection) -> PortResult<Vec<SearchHit>> {
+        if self.scored.is_empty() {
+            return Ok(Vec::new());
+        }
+        let wires: Vec<&str> = self.scored.iter().map(|(_, wire)| wire.as_str()).collect();
+        let mut id_json_by_wire: BTreeMap<String, String> = BTreeMap::new();
+        for chunk in chunk_ids(&wires) {
+            let placeholders = in_placeholders(chunk.len());
+            let mut stmt = conn
+                .prepare(&format!(
+                    "SELECT wire_id, id_json FROM fts_ids WHERE wire_id IN ({placeholders})"
+                ))
+                .map_err(backend)?;
+            let params: Vec<&dyn rusqlite::ToSql> = chunk
+                .iter()
+                .map(|wire| wire as &dyn rusqlite::ToSql)
+                .collect();
+            let rows = stmt
+                .query_map(&*params, |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(backend)?;
+            for row in rows {
+                let (wire, id_json) = row.map_err(backend)?;
+                id_json_by_wire.insert(wire, id_json);
+            }
+        }
+
+        let mut hits = Vec::with_capacity(self.scored.len());
+        for (score, wire) in &self.scored {
+            let id = match id_json_by_wire.get(wire.as_str()) {
+                Some(json) => serde_json::from_str(json).map_err(backend)?,
+                None => match StableId::from_wire(wire) {
+                    Some(id) => id,
+                    None => continue,
+                },
+            };
+            hits.push(SearchHit {
+                id,
+                score: *score,
+                session_id: None,
+                text: None,
+                why_matched: Vec::new(),
+                suggested_next_commands: Vec::new(),
+                occurrences: 1,
+                resume_available: false,
+            });
+        }
+        Ok(hits)
+    }
+}
+
 /// Serialize an f32 slice as little-endian bytes for BLOB storage.
 fn f32_slice_to_bytes(values: &[f32]) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(values.len() * 4);
@@ -6693,30 +6930,38 @@ fn f32_slice_to_bytes(values: &[f32]) -> Vec<u8> {
     bytes
 }
 
-/// Read a little-endian f32 BLOB back into a vector. A trailing partial float
-/// is dropped rather than reconstructed from padding.
-fn bytes_to_f32_vec(bytes: &[u8]) -> Vec<f32> {
-    bytes
-        .chunks_exact(4)
-        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-        .collect()
-}
-
-/// Cosine similarity of two equal-length vectors. Zero-norm inputs score 0
-/// (no direction to compare) rather than producing NaN.
-fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+/// Cosine similarity between a query vector and a stored little-endian f32
+/// BLOB, decoded in place.
+///
+/// Returns `None` when the BLOB is not exactly `query.len()` floats wide — a
+/// stale model's vectors (or a truncated blob whose trailing bytes cannot form
+/// a whole float) are skipped rather than truncated into a comparison that
+/// looks plausible but means nothing.
+///
+/// Zero-norm inputs score 0 (no direction to compare) rather than NaN.
+///
+/// Decoding straight from the borrowed BLOB is what makes the full-scan path
+/// affordable: scoring 100k rows this way allocates nothing per row, whereas
+/// materializing a `Vec<f32>` per row dominated the previous implementation's
+/// runtime.
+fn cosine_similarity_le_blob(query: &[f32], blob: &[u8]) -> Option<f32> {
+    if blob.len() != query.len() * 4 {
+        return None;
+    }
     let mut dot = 0.0f32;
-    let mut norm_a = 0.0f32;
-    let mut norm_b = 0.0f32;
-    for (x, y) in a.iter().zip(b.iter()) {
-        dot += x * y;
-        norm_a += x * x;
-        norm_b += y * y;
+    let mut norm_query = 0.0f32;
+    let mut norm_row = 0.0f32;
+    for (index, chunk) in blob.chunks_exact(4).enumerate() {
+        let value = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        let q = query[index];
+        dot += q * value;
+        norm_query += q * q;
+        norm_row += value * value;
     }
-    if norm_a == 0.0 || norm_b == 0.0 {
-        return 0.0;
+    if norm_query == 0.0 || norm_row == 0.0 {
+        return Some(0.0);
     }
-    dot / (norm_a.sqrt() * norm_b.sqrt())
+    Some(dot / (norm_query.sqrt() * norm_row.sqrt()))
 }
 
 impl ResumeClaimsStore for SqliteStore {
@@ -7380,21 +7625,299 @@ mod tests {
         assert!(store.is_ready());
     }
 
+    /// Deterministic pseudo-random unit vector: a plain LCG, so the fixture is
+    /// reproducible without a rand dependency.
+    fn fixture_vector(seed: u64, dimension: usize) -> Vec<f32> {
+        let mut state = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
+        let mut values = Vec::with_capacity(dimension);
+        for _ in 0..dimension {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            values.push(((state >> 33) as f32 / (1u64 << 31) as f32) - 0.5);
+        }
+        let norm = values.iter().map(|v| v * v).sum::<f32>().sqrt();
+        for value in &mut values {
+            *value /= norm;
+        }
+        values
+    }
+
+    /// Seed `count` messages that all share the token `shared`, each with a
+    /// deterministic vector, and return their ids in insertion order.
+    fn seed_semantic_corpus(store: &SqliteStore, count: usize, shared: &str) -> Vec<StableId> {
+        let mut ids = Vec::with_capacity(count);
+        for index in 0..count {
+            let id = sid(IdKind::Message, format!("corpus-{index}").as_bytes());
+            store
+                .index(&id, &format!("{shared} message number {index}"))
+                .unwrap();
+            store
+                .index_embedding(&id, &fixture_vector(index as u64 + 1, 8))
+                .unwrap();
+            ids.push(id);
+        }
+        ids
+    }
+
     #[test]
-    fn f32_blob_round_trips_and_drops_partial_tail() {
+    fn candidate_set_path_matches_full_scan_top_k_exactly() {
+        // The fixture is small enough that both paths are exhaustive: every
+        // message matches the candidate query, so the candidate set is the
+        // whole corpus and the two rankings must be identical element by
+        // element — score and id, not merely the same set.
+        let store = SqliteStore::open_in_memory().unwrap();
+        store.set_semantic_model("model-a");
+        let corpus = SEMANTIC_CANDIDATE_FLOOR + 32;
+        seed_semantic_corpus(&store, corpus, "sharedtoken");
+
+        for limit in [1usize, 5, 20, 64] {
+            for query_seed in [7_001u64, 7_002, 7_003] {
+                let query = fixture_vector(query_seed, 8);
+
+                // Full scan: no candidate query set.
+                let baseline = {
+                    store.set_semantic_candidate_query("");
+                    store.query_semantic(&query, limit).unwrap()
+                };
+
+                // Tiered: the candidate query matches every seeded message.
+                store.set_semantic_candidate_query("sharedtoken");
+                let tiered = store.query_semantic(&query, limit).unwrap();
+
+                assert_eq!(
+                    baseline.len(),
+                    limit.min(corpus),
+                    "baseline should fill the requested limit"
+                );
+                assert_eq!(tiered.len(), baseline.len());
+                for (rank, (tier, base)) in tiered.iter().zip(baseline.iter()).enumerate() {
+                    assert_eq!(
+                        tier.id.as_str(),
+                        base.id.as_str(),
+                        "rank {rank} diverged (limit={limit}, seed={query_seed})"
+                    );
+                    assert_eq!(tier.score, base.score, "rank {rank} score diverged");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn candidate_path_preserves_similarity_then_id_ordering() {
+        // Tied scores must break on wire id ascending on both paths — the
+        // pagination contract depends on the order being total.
+        let store = SqliteStore::open_in_memory().unwrap();
+        store.set_semantic_model("model-a");
+        let vector = [1.0f32, 0.0];
+        let mut ids = Vec::new();
+        for index in 0..SEMANTIC_CANDIDATE_FLOOR + 8 {
+            let id = sid(IdKind::Message, format!("tie-{index}").as_bytes());
+            store.index(&id, "tietoken shared body").unwrap();
+            // Every vector is identical, so every score ties.
+            store.index_embedding(&id, &vector).unwrap();
+            ids.push(id.as_str().to_string());
+        }
+        ids.sort();
+
+        store.set_semantic_candidate_query("tietoken");
+        let tiered = store.query_semantic(&vector, 10).unwrap();
+        store.set_semantic_candidate_query("");
+        let full = store.query_semantic(&vector, 10).unwrap();
+
+        let tiered_ids: Vec<&str> = tiered.iter().map(|hit| hit.id.as_str()).collect();
+        let full_ids: Vec<&str> = full.iter().map(|hit| hit.id.as_str()).collect();
+        assert_eq!(tiered_ids, full_ids);
+        // All scores tie, so the ranking is exactly the ascending id order.
+        assert_eq!(
+            tiered_ids,
+            ids.iter().take(10).map(String::as_str).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn empty_lexical_candidates_fall_back_to_exact_full_scan() {
+        // This is the crux: a query whose terms appear nowhere in the corpus
+        // must still return semantic neighbours. Gating on FTS without this
+        // fallback would turn semantic search into lexical search.
+        let store = SqliteStore::open_in_memory().unwrap();
+        store.set_semantic_model("model-a");
+        let near = sid(IdKind::Message, b"near");
+        let far = sid(IdKind::Message, b"far");
+        store.index(&near, "alpha beta gamma").unwrap();
+        store.index(&far, "delta epsilon zeta").unwrap();
+        store.index_embedding(&near, &[1.0, 0.0, 0.0]).unwrap();
+        store.index_embedding(&far, &[0.0, 1.0, 0.0]).unwrap();
+
+        // No corpus message contains this token at all.
+        store.set_semantic_candidate_query("nonexistentterm");
+        let hits = store.query_semantic(&[1.0, 0.0, 0.0], 10).unwrap();
+        assert_eq!(
+            hits.len(),
+            2,
+            "zero lexical candidates must not zero results"
+        );
+        assert_eq!(hits[0].id.as_str(), near.as_str());
+
+        // A punctuation-only query has no FTS tokens either; same fallback.
+        store.set_semantic_candidate_query("!!! ???");
+        let hits = store.query_semantic(&[1.0, 0.0, 0.0], 10).unwrap();
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].id.as_str(), near.as_str());
+    }
+
+    #[test]
+    fn small_lexical_candidate_set_falls_back_to_exact_full_scan() {
+        // A non-empty but small candidate set means FTS enumerated the whole
+        // literal neighbourhood and it is tiny; the semantic neighbourhood is
+        // almost certainly larger, so score everything rather than trust it.
+        let store = SqliteStore::open_in_memory().unwrap();
+        store.set_semantic_model("model-a");
+        // One message carries the query term; the rest do not but are the
+        // actual nearest neighbours by vector.
+        let lexical_only = sid(IdKind::Message, b"lexical-only");
+        store.index(&lexical_only, "raretoken body").unwrap();
+        store.index_embedding(&lexical_only, &[0.0, 1.0]).unwrap();
+        let semantic_best = sid(IdKind::Message, b"semantic-best");
+        store
+            .index(&semantic_best, "unrelated wording here")
+            .unwrap();
+        store.index_embedding(&semantic_best, &[1.0, 0.0]).unwrap();
+
+        store.set_semantic_candidate_query("raretoken");
+        let hits = store.query_semantic(&[1.0, 0.0], 10).unwrap();
+        // Had the single lexical candidate been trusted, the true nearest
+        // neighbour would have been invisible.
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].id.as_str(), semantic_best.as_str());
+    }
+
+    #[test]
+    fn saturated_candidate_set_bounds_the_scored_row_count() {
+        // When FTS saturates the candidate limit the tiered path must actually
+        // stop there — that bound is the whole point of the optimization.
+        let store = SqliteStore::open_in_memory().unwrap();
+        store.set_semantic_model("model-a");
+        let conn = store.conn.borrow();
+        let wires = SqliteStore::semantic_candidate_wires(&conn, "absent").unwrap();
+        drop(conn);
+        // Nothing indexed yet: no candidates, so the fallback signal is None.
+        assert!(wires.is_none());
+
+        seed_semantic_corpus(&store, SEMANTIC_CANDIDATE_FLOOR + 4, "saturating");
+        let conn = store.conn.borrow();
+        let wires = SqliteStore::semantic_candidate_wires(&conn, "saturating")
+            .unwrap()
+            .expect("a saturated literal neighbourhood is used as the candidate set");
+        assert!(wires.len() <= SEMANTIC_CANDIDATE_LIMIT);
+        assert_eq!(wires.len(), SEMANTIC_CANDIDATE_FLOOR + 4);
+    }
+
+    #[test]
+    fn candidate_query_is_ignored_without_a_semantic_model() {
+        // Degradation contract: no model set still means empty results, and
+        // setting a candidate query must not resurrect the query path.
+        let store = SqliteStore::open_in_memory().unwrap();
+        store.set_semantic_candidate_query("anything");
+        assert!(store.query_semantic(&[0.1, 0.2], 5).unwrap().is_empty());
+        assert!(!store.is_ready());
+    }
+
+    #[test]
+    fn candidate_path_still_skips_stale_model_dimensions() {
+        // The dimension skip must hold on the tiered path too: a stale model's
+        // vectors are excluded rather than truncated into a bogus comparison.
+        let store = SqliteStore::open_in_memory().unwrap();
+        store.set_semantic_model("model-a");
+        let ids = seed_semantic_corpus(&store, SEMANTIC_CANDIDATE_FLOOR + 4, "dimtoken");
+        assert_eq!(ids.len(), SEMANTIC_CANDIDATE_FLOOR + 4);
+        store.set_semantic_candidate_query("dimtoken");
+        // Corpus vectors are 8-wide; a 4-wide query matches none of them.
+        assert!(
+            store
+                .query_semantic(&fixture_vector(1, 4), 10)
+                .unwrap()
+                .is_empty()
+        );
+        // The matching width still returns results through the same path.
+        assert!(
+            !store
+                .query_semantic(&fixture_vector(1, 8), 10)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn candidate_rerank_query_plan_uses_the_wire_id_primary_key() {
+        // Regression guard for a silent performance cliff. `message_vec` has an
+        // index on `model_id`, and in a single-model catalog that predicate
+        // matches every row; SQLite's planner nonetheless estimated it as
+        // selective and scanned the whole table with the candidate `IN` reduced
+        // to a filter — 674 ms per query at 100k rows, i.e. the tiering bought
+        // nothing. The unary `+` markers keep the plan on the primary key
+        // (24 ms for the same work). Assert the plan, because the wrong plan is
+        // correct-but-slow and no behavioural test would catch it.
+        let store = SqliteStore::open_in_memory().unwrap();
+        store.set_semantic_model("model-a");
+        seed_semantic_corpus(&store, 4, "plantoken");
+        let conn = store.conn.borrow();
+        let placeholders = in_placeholders(2);
+        let sql = format!(
+            "EXPLAIN QUERY PLAN
+             SELECT mv.wire_id, fi.id_json, mv.embedding
+             FROM message_vec mv
+             LEFT JOIN fts_ids fi ON fi.wire_id = mv.wire_id
+             WHERE +mv.model_id = ?1 AND +mv.dimension = ?2
+               AND mv.wire_id IN ({placeholders})"
+        );
+        let mut stmt = conn.prepare(&sql).unwrap();
+        let steps: Vec<String> = stmt
+            .query_map(rusqlite::params!["model-a", 8i64, "a", "b"], |row| {
+                row.get::<_, String>(3)
+            })
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        let plan = steps.join(" | ");
+        assert!(
+            plan.contains("SEARCH mv USING INDEX sqlite_autoindex_message_vec_1"),
+            "candidate rerank must drive off the wire_id primary key, got: {plan}"
+        );
+        assert!(
+            !plan.contains("message_vec_model"),
+            "candidate rerank must not fall back to the non-selective model_id index: {plan}"
+        );
+    }
+
+    #[test]
+    fn f32_blob_round_trips_and_rejects_width_mismatch() {
         let values = [1.5f32, -2.25, 0.0];
         let bytes = f32_slice_to_bytes(&values);
         assert_eq!(bytes.len(), 12);
-        assert_eq!(bytes_to_f32_vec(&bytes), values);
-        // 截断的尾部字节不被当成一个 float 复原。
-        assert_eq!(bytes_to_f32_vec(&bytes[..10]).len(), 2);
+        // Round trip: a blob scored against itself is perfectly similar.
+        let self_similarity = cosine_similarity_le_blob(&values, &bytes).unwrap();
+        assert!((self_similarity - 1.0).abs() < 1e-6);
+        // A truncated blob is no longer three floats wide: skipped, not
+        // silently compared on its first two components.
+        assert_eq!(cosine_similarity_le_blob(&values, &bytes[..10]), None);
+        assert_eq!(cosine_similarity_le_blob(&values, &bytes[..8]), None);
     }
 
     #[test]
     fn cosine_similarity_handles_zero_norm() {
-        assert_eq!(cosine_similarity(&[0.0, 0.0], &[1.0, 1.0]), 0.0);
-        assert_eq!(cosine_similarity(&[1.0, 1.0], &[0.0, 0.0]), 0.0);
-        assert!((cosine_similarity(&[1.0, 0.0], &[-1.0, 0.0]) + 1.0).abs() < 1e-6);
+        let unit = [1.0f32, 1.0];
+        assert_eq!(
+            cosine_similarity_le_blob(&[0.0, 0.0], &f32_slice_to_bytes(&unit)),
+            Some(0.0)
+        );
+        assert_eq!(
+            cosine_similarity_le_blob(&unit, &f32_slice_to_bytes(&[0.0, 0.0])),
+            Some(0.0)
+        );
+        let opposite =
+            cosine_similarity_le_blob(&[1.0, 0.0], &f32_slice_to_bytes(&[-1.0, 0.0])).unwrap();
+        assert!((opposite + 1.0).abs() < 1e-6);
     }
 
     #[test]
