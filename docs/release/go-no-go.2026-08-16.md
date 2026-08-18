@@ -122,15 +122,26 @@ certified — currently 0 Beta. **Not release-ready per provider gate.**
    REUSE reuse-matrix approval + SBOM certification decision remain owner-signed.
 2. **Provider maturity**: 0 Beta; Claude/Codex not certified against the PRD
    gate — remains below the ≥5 Beta requirement.
-3. **External**: GitHub Actions billing; PRIVATE→public switch (Option-A public
-   tree exporter `scripts/release/export_public_tree.py` is ready and current-tree
-   privacy gates are green), tag, GitHub Release; Authenticode/notarization/cosign;
-   branch protection; ADR signing/owner decisions.
+3. **External**: GitHub Actions billing; ~~PRIVATE→public switch, tag, GitHub
+   Release~~ — **closed 2026-08-18**: the clean public tree was exported via
+   `scripts/release/export_public_tree.py` (privacy scan 0 findings, internal
+   coordination records excluded), pushed to a **public** repo
+   `qin-devs/agent-session-grep` (`main`), and `v0.1.0` tag + GitHub Release
+   published (https://github.com/qin-devs/agent-session-grep/releases/tag/v0.1.0).
+   The private `qin-devs/AgentSessions` repo remains the development source of
+   truth. Still open: Authenticode/notarization/cosign; branch protection; ADR
+   signing/owner decisions.
 4. **macOS**: rehearsal not run (external CI-billing blocker).
 5. **Known deferred**: real local semantic model **weights delivery + recall
-   benchmark gate** (the optional `semantic-candle` runtime and the offline
-   `model import` / `model status` path are now implemented; default builds
-   stay bigram-hash / lexical-only and must not be marketed as semantic).
+   benchmark gate** — the optional `semantic-candle` runtime, the offline
+   `model import` / `model status` path, **real E5 inference verification**
+   (pinned weights imported, recall benchmark validates with semantic ≥ lexical
+   on the frozen corpus), and **amortized MCP latency** (p50 16.6 ms / p95 21.0 ms
+   per query with the encoder resident via `load_cached`) are now landed and
+   recorded in `docs/operations/SEMANTIC-MODEL-BUNDLE.md`. Default builds stay
+   bigram-hash / lexical-only and must not be marketed as semantic. Still
+   deferred: official weight redistribution packaging, frozen recall/latency
+   threshold signing, default-on semantic (not planned for 0.1.0).
    Robot capability UI and ToolActivity retention/cleanup policy remain
    explicitly deferred. The current default `bigram-hash-v1` vectorizer
    remains honestly labeled fuzzy-lexical, not semantic.
