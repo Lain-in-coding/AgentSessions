@@ -339,8 +339,9 @@ python scripts/evidence/open_source_gate_benchmark.py validate-report \
   scripts/evidence/out/gate-manifest-rehearsal.json
 ```
 
-Run the full Gate D benchmark suite against the rehearsal corpus. Verify all
-six invariants pass. Refresh the benchmark report with this run's numbers,
+Run the full Gate D benchmark suite against the rehearsal corpus. Verify every
+invariant defined by `scripts/evidence/real_data_regression.py`
+(`INVARIANT_IDS`) passes. Refresh the benchmark report with this run's numbers,
 recording the measured commit in the external rehearsal evidence; do not
 commit the generated manifest from `scripts/evidence/out/`.
 
@@ -386,8 +387,7 @@ untouched (install must not delete user data).
 
 ## 15. Go/No-Go report
 
-Fill in `docs/release/go-no-go.template.md` (or a generated non-template draft
-derived from it) with:
+Record a Go/No-Go report for the rehearsal with:
 
 - All run ids and their pass/fail verdicts
 - Residual risk list
@@ -395,11 +395,9 @@ derived from it) with:
 - Privacy / performance / materials check results
 - Owner sign-off block
 
-The current draft is `docs/release/go-no-go.2026-08-16.md` (No-Go: local
-P0/external gates remain open). Submit to owner for the final public-release
-decision. On Windows the local rehearsal evidence (including any WSL Linux
-rehearsal) is recorded in aggregate — environment, commit, and hashes only,
-with no personal paths.
+Submit it to the owner for the final public-release decision. On Windows the
+local rehearsal evidence (including any WSL Linux rehearsal) is recorded in
+aggregate — environment, commit, and hashes only, with no personal paths.
 
 ---
 
