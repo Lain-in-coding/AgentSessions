@@ -319,10 +319,18 @@ fn intercept_help_or_version(args: &[String]) -> Option<HelpRequest> {
                 Some("--help") | Some("-h") if known_subcommand(cmd) => {
                     return Some(HelpRequest::SubcommandHelp(cmd.to_string()));
                 }
-                // index rebuild --help：rebuild 是 index 的子词，帮助旗标跟在它后面。
-                Some("rebuild") if cmd == "index" => {
+                // index rebuild|embeddings --help：rebuild/embeddings 是 index 的
+                // 子词，帮助旗标跟在它们后面。
+                Some("rebuild") | Some("embeddings") if cmd == "index" => {
                     if matches!(it.next().map(String::as_str), Some("--help") | Some("-h")) {
                         return Some(HelpRequest::SubcommandHelp("index".into()));
+                    }
+                }
+                // model import|status --help：import/status 是 model 的子词，
+                // 帮助旗标跟在它们后面（与 index rebuild --help 同规则）。
+                Some("import") | Some("status") if cmd == "model" => {
+                    if matches!(it.next().map(String::as_str), Some("--help") | Some("-h")) {
+                        return Some(HelpRequest::SubcommandHelp("model".into()));
                     }
                 }
                 _ => {}
@@ -411,9 +419,9 @@ fn run(
     }
 
     // model import/status: offline-only model cache management. Does not open
-    // the catalog DB. With the default build (no semantic-candle feature) the
-    // command still works for import/verify so operators can stage bundles
-    // before rebuilding a semantic-enabled binary.
+    // the catalog DB. Import requires a semantic-candle build and refuses with
+    // capability_not_supported otherwise (honest, never stages silently);
+    // status works in every build and reports the default bundle state.
     if command_name(args) == "model" {
         return model_command(args, mode, request_id, offline);
     }
@@ -743,9 +751,8 @@ fn model_command(
             }
             #[cfg(not(feature = "semantic-candle"))]
             {
-                // Default build: still accept and stage the bundle so operators
-                // can prepare weights before rebuilding with --features semantic-candle.
-                // Verification uses the same SHA-256 rules via a lightweight path.
+                // Default build: import is refused honestly (capability_not_supported)
+                // rather than staged silently — operators rebuild with the feature.
                 let _ = dir;
                 let _ = cache;
                 Err(CliError(ProtocolError::new(
@@ -958,6 +965,7 @@ COMMANDS:
     status                 报告 catalog 实体总数
     mcp                    启动 stdio MCP 服务（JSON-RPC 2.0；stdout 只输出 MCP frame）
     tui                    交互式只读浏览（Preview；需要交互式终端）
+    serve                  启动 loopback HTTP 服务 + 嵌入式 Web UI（--port <n>；仅 loopback）
     doctor                 环境自检（可选 --db 校验存储可打开）
     providers              报告 Provider 成熟度、路线目标与逐字段能力
     config paths           报告当前平台的 config/data/cache/logs 路径
@@ -1097,6 +1105,7 @@ fn known_subcommand(cmd: &str) -> bool {
             | "status"
             | "mcp"
             | "tui"
+            | "serve"
             | "doctor"
             | "providers"
             | "config"
@@ -1194,7 +1203,9 @@ fn subcommand_help_text(cmd: &str) -> &'static str {
                      约束：单个 transcript 文件应只包含一个会话；检测到多个 sessionId 时仍归属首个会话，并输出诊断 warning。"
         }
         "index" => {
-            "index <id-fact> <text>：写入一条 catalog + 索引；index rebuild 重建全文索引。\n\
+            "index <id-fact> <text>：写入一条 catalog + 索引。\n\
+                    index rebuild：从权威 catalog 重建全文（FTS）索引；\n\
+                    index embeddings：从权威 catalog 构建语义向量索引（semantic/hybrid 检索前置，需 semantic-candle 构建的二进制）。\n\
                    示例：agent-session-grep --db <path> --robot index rebuild"
         }
         "doctor" => {
@@ -1207,7 +1218,15 @@ fn subcommand_help_text(cmd: &str) -> &'static str {
         }
         "tui" => {
             "tui：交互式只读浏览（Preview）。需要交互式终端。\n\
-                  示例：agent-session-grep --db <path> tui"
+                   tui --snapshot-json <query>：headless 结构投影（供 release 一致性 harness 跨入口比对）。\n\
+                   示例：agent-session-grep --db <path> tui"
+        }
+        "serve" => {
+            "serve：启动 loopback HTTP 服务 + 嵌入式 Web UI（仅 127.0.0.1）。\n\
+                    每次启动生成随机 bearer token；浏览器打开终端打印的 URL（含 token）即可访问。\n\
+                    本 release 仅 loopback：--lan 为 capability_not_supported（绝不暴露局域网）。\n\
+                    flag：--port <n>（可选，默认 0 = 随机端口）。\n\
+                    示例：agent-session-grep --db <path> serve"
         }
         "providers" => {
             "providers：报告当前 Provider 能力矩阵（成熟度事实、路线目标与逐字段能力）。\n\
