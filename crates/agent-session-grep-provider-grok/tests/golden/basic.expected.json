@@ -13,7 +13,7 @@
         "start": 0
       },
       "text": "hello world",
-      "timestamp": null
+      "timestamp": "2026-01-01T00:00:00Z"
     },
     {
       "is_sidechain": false,
@@ -26,7 +26,7 @@
         "start": 281
       },
       "text": "part1\npart2",
-      "timestamp": null
+      "timestamp": "2026-01-01T00:00:01Z"
     },
     {
       "is_sidechain": false,

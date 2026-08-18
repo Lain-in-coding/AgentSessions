@@ -125,6 +125,7 @@ dependencies = [
 name = "agent-session-grep-provider-cline"
 version = "0.1.0"
 dependencies = [
+ "agent-session-grep-application",
  "agent-session-grep-domain",
  "agent-session-grep-ports",
  "agent-session-grep-testkit",
@@ -173,6 +174,7 @@ dependencies = [
 name = "agent-session-grep-provider-grok"
 version = "0.1.0"
 dependencies = [
+ "agent-session-grep-application",
  "agent-session-grep-domain",
  "agent-session-grep-ports",
  "agent-session-grep-testkit",

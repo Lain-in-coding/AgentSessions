@@ -13,5 +13,8 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
+# Golden test parses emitted timestamps with the production search-filter
+# parser. The application crate depends on no provider crate, so no cycle.
+agent-session-grep-application = { path = "../agent-session-grep-application" }
 agent-session-grep-testkit = { path = "../agent-session-grep-testkit" }
 blake3 = { workspace = true }
