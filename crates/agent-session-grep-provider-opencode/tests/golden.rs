@@ -8,6 +8,7 @@
 //! span round-trip 标记 N/A。只读契约由 `assert_read_only` 守护——adapter 把
 //! 字节写到临时文件并以 `SQLITE_OPEN_READONLY` 打开，绝不改写源。
 
+use agent_session_grep_application::parse_search_instant;
 use agent_session_grep_ports::{
     CanonicalEventSink, Confidence, MessageEvent, ParseReport, ProviderAdapter,
 };
@@ -168,6 +169,35 @@ fn golden_messages_carry_no_byte_span() {
         messages.iter().all(|m| m.span.is_none()),
         "opencode 不应归因字节 span（N/A）"
     );
+}
+
+/// 时间过滤回归：`--since`/`--until` 下推为 `sort_key >= ?`，而 NULL 比较恒假——
+/// 一旦 adapter 不产出 timestamp，opencode 会被每一次时间窗查询静默排除。此测试
+/// 用生产解析器 `parse_search_instant` 解析每条 emitted timestamp，并断言其落在
+/// fixture 的合成窗口内（即 `--since`/`--until` 会命中这些消息）。
+#[test]
+fn golden_timestamps_fall_inside_search_window() {
+    let expected = read_expected();
+    let bytes = read_fixture_verified(&expected);
+    let (_, messages) = parse_fixture(&bytes);
+    assert!(!messages.is_empty(), "golden fixture must emit messages");
+
+    let since = parse_search_instant("2026-02-14T09:00:00Z").expect("window lower bound parses");
+    let until = parse_search_instant("2026-02-14T10:00:00Z").expect("window upper bound parses");
+
+    for message in &messages {
+        let raw = message
+            .timestamp
+            .as_deref()
+            .unwrap_or_else(|| panic!("message {} must carry a timestamp", message.native_id));
+        let instant = parse_search_instant(raw).unwrap_or_else(|| {
+            panic!("timestamp {raw} must parse with the production search filter parser")
+        });
+        assert!(
+            instant.sort_key() >= since.sort_key() && instant.sort_key() <= until.sort_key(),
+            "timestamp {raw} 落在时间窗之外——`--since`/`--until` 会漏掉该消息"
+        );
+    }
 }
 
 /// 手动再生辅助：

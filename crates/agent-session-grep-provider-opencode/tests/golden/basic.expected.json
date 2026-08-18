@@ -1,6 +1,6 @@
 {
   "committed": 3,
-  "fixture_blake3": "2668cbd406801399ff026c5d9c33c7ce9f5713d941b2554dd79d1263933cf8c4",
+  "fixture_blake3": "1280a6b1ab1482ba27b81b8f50323bf275babb644dd42cfad96a8061541337b7",
   "messages": [
     {
       "is_sidechain": false,
@@ -10,7 +10,7 @@
       "seq": 0,
       "span": null,
       "text": "hello world\n中文 second line",
-      "timestamp": null
+      "timestamp": "2026-02-14T09:15:00.000Z"
     },
     {
       "is_sidechain": false,
@@ -20,7 +20,7 @@
       "seq": 1,
       "span": null,
       "text": "hi there",
-      "timestamp": null
+      "timestamp": "2026-02-14T09:15:04.250Z"
     },
     {
       "is_sidechain": false,
@@ -30,7 +30,7 @@
       "seq": 2,
       "span": null,
       "text": "final user question",
-      "timestamp": null
+      "timestamp": "2026-02-14T09:17:30.750Z"
     }
   ],
   "session_native_id": "ses_1",
