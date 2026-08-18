@@ -2,7 +2,7 @@
 
 > 交接对象：**完全不了解本项目的 Agent**。请按顺序阅读：§0 先读 → §1–§7 建立全景 → §8 确认已完成（避免重做）→ §9 是你要继续推进的工作 → §10 协作规则 → §11 第一步行动 → §12 附录速查。
 >
-> 交接时点：2026-08-17；权威 HEAD：`dc704df`（origin/main 已同步）；产品版本 0.1.0（未发布，仓库仍 PRIVATE）。
+> 交接时点：2026-08-18；权威 HEAD：`f7e2a49`（origin/main 已同步）；产品版本 0.1.0（未发布，仓库仍 PRIVATE）。
 >
 > 一次更新的交接入口：`.trellis/tasks/08-15-final-integration-release-rehearsal/research/2026-08-17-ultimate-handoff.md`（本文件）。上一份交接：同目录 `2026-08-16-codex-handoff-report.md`；更早的全量审计：`2026-08-16-final-open-source-audit.md`。
 
@@ -11,8 +11,8 @@
 ## 0. TL;DR（两分钟版）
 
 - **这是什么**：`agent-session-grep`（CLI 别名 `asg`）是一个 Rust 写的本地优先 AI coding-agent 会话历史搜索引擎。16 个主流 AI 编程工具（Claude Code、Codex、Grok Build、Pi、Hermes、Cline、Aider 等）把会话写在不同目录、不同格式；本工具把它们归一成 canonical 模型，提供全文检索、resume（继续会话）与 handoff（交接包），从 CLI、MCP、Robot、TUI、Web 五个入口一致暴露能力。
-- **当前状态一句话**：2026-08-17 发布收口 wave 已全部完成并推送到 origin/main（`dc704df`），本地全部质量门绿（fmt/clippy/workspace 测试、Python 套件、verify-release 10/10、五入口一致性 harness、安装 gate、cargo deny、隐私扫描 0 findings）；**发表公开不是"代码缺陷"而是 owner 与外部资源决定**（GitHub Actions billing、PRIVATE→public、签名/审计签署等，见 §9.2）。
-- **还没做的最大一块（本地可做）**：真实本地语义模型（`semantic-candle` + pinned `multilingual-e5-small`），当前 `bigram-hash-v1` 只是诚实标注的 fuzzy-lexical vectorizer（§9.1-1）。做它之前不得在任何宣传口径里称"语义搜索"。
+- **当前状态一句话**：2026-08-17 发布收口 wave 已全部完成并推送到 origin/main（`dc704df`），随后 2026-08-17/18 后续 wave（可选 `semantic-candle` 后端 + `model import`/`model status`、handoff `tool_activity`/`role`/`is_sidechain` 投影、TUI 分面控件、context `tool_activities`、Beta readiness 台账）已推送到 `f7e2a49`；本地全部质量门绿（fmt/clippy/workspace 测试、Python 套件、verify-release 10/10、五入口一致性 harness、安装 gate、cargo deny、隐私扫描 0 findings）；**发表公开不是"代码缺陷"而是 owner 与外部资源决定**（GitHub Actions billing、PRIVATE→public、签名/审计签署等，见 §9.2）。
+- **还没做的最大一块（本地可做）**：语义模型的 **weights 分发决策与 frozen benchmark 门**——可选 `semantic-candle` runtime（本地 Candle + pinned `multilingual-e5-small`，默认 off）与离线 `model import`/`model status` 已落地；当前默认 `bigram-hash-v1` 仍是诚实标注的 fuzzy-lexical vectorizer（§9.1-1）。benchmark 达标前不得在任何宣传口径里称"语义搜索"。
 - **新 Agent 第一步**：见 §11——先验证环境与全门，再决定从 §9.1 里选任务。
 
 ---
@@ -158,7 +158,7 @@ skills/agent-session-grep/SKILL.md   # 面向用户/agent 的能力文档（与 
 ### 3.3 检索链
 
 - lexical：FTS5 bm25 + CJK bigram transform（`application/src/cjk.rs`，ADR-0007/0008）。
-- semantic/hybrid（当前为占位）：`bigram-hash-v1`（384 维、BLAKE3 哈希 + bigram 累积、L2 归一、`query:`/`passage:` 前缀对齐 E5 约定），**明确 NOT semantic**（`embedding.rs` 头注释 + 测试 + verify-release 均守护这一诚实标签）；RRF k=60 融合（`hybrid.rs`，参考 ctx idea-only）。
+- semantic/hybrid：默认 `bigram-hash-v1`（384 维、BLAKE3 哈希 + bigram 累积、L2 归一、`query:`/`passage:` 前缀对齐 E5 约定），**明确 NOT semantic**（`embedding.rs` 头注释 + 测试 + verify-release 均守护这一诚实标签）；可选 `semantic-candle` feature（默认 off）加载本地 Candle E5（新 model_id、`model import` 离线导入，未导入时显式 `lexical_fallback`）；RRF k=60 融合（`hybrid.rs`，参考 ctx idea-only）。
 - 排序：score desc + id tiebreak 钉住全序；group_by_session 时按 session 折叠并带 `occurrences`。
 
 ---
@@ -188,7 +188,7 @@ skills/agent-session-grep/SKILL.md   # 面向用户/agent 的能力文档（与 
 
 ### 5.1 CLI / Robot
 
-- 命令集（SKILL.md 有完整表）：`search <query>`、`handoff <query>`、`get-session-resume <id>`、`get-message <id>`、`list [limit]`、`context <id>`、`get <id>`、`show <id>`、`status`、`providers`、`sync --discover`、`doctor`、`mcp`、`hook <event>`、`index rebuild`；全局：`--db <path>`、`--robot`、`--output human|json|jsonl`、`--request-id`、`--offline`、`--no-color`。
+- 命令集（SKILL.md 有完整表）：`search <query>`、`handoff <query>`、`get-session-resume <id>`、`get-message <id>`、`list [limit]`、`context <id>`、`get <id>`、`show <id>`、`status`、`providers`、`sync --discover`、`doctor`、`mcp`、`hook <event>`、`index rebuild`、`model import|status`；全局：`--db <path>`、`--robot`、`--output human|json|jsonl`、`--request-id`、`--offline`、`--no-color`。
 - search 过滤/分面：`--provider`（接受 `claude|claude-code`、`codex`，Web/MCP 已统一 canonical alias）、`--since/--until`、`--mode lexical|semantic|hybrid`、`--max-items`、`--cursor`、`--include-system`、`--group-by-session`、分面 `--main-only`/`--subagent-only`/`--include-sidechain`/`--tool-kind file|command|web|query|unknown`/`--tool-name <name>`。
 - **Robot envelope v1.1**（`schemas/robot/v1.1/envelope.schema.json`，`protocol::SCHEMA_VERSION="1.1"`）：success/error/progress/diagnostic 四帧；success 必带 `schema_version/frame_type/command/request_id/ok/outcome/data/retrieval_mode/redaction/warnings/page/meta`；search 帧 `data=$searchData`（hits/generation/truncation + **可选 facets echo**——2026-08-17 新增并已被 protocol 测试守护）；`--robot` 是确定性主路径。
 - error catalog：`schemas/robot/v1/error-catalog.json`（权威 13 码 + internal；protocol 测试断言 schema/runtime 集一致）；常见 exit：0 成功、2 usage、4 not_found、6 catalog_error、7 capability_not_supported、9 schema_incompatible、10 partial/截断；help/version 恒 exit 0 且走 envelope（ADR-0006）。
@@ -204,7 +204,7 @@ skills/agent-session-grep/SKILL.md   # 面向用户/agent 的能力文档（与 
 
 ### 5.3 TUI
 
-- ratatui 0.29 + crossterm；五入口之一，facet 控件**有意 deferred**（`SearchFacets::default()` 注释说明）。
+- ratatui 0.29 + crossterm；五入口之一，搜索屏 facet 控件已落地：`m` 循环 sidechain 分面（include→main-only→subagent-only）、`k` 循环 tool-kind 分面（any→file→command→web→query→unknown），输入框为空时生效，经同一 `SearchFacets` 契约重发搜索（core.rs 含单测）。
 - 无头投影：`crates/agent-session-grep-cli/src/tui/mod.rs::snapshot_search(store, query)` 输出 `{outcome, data.hits[].id, page.has_more/next_cursor, warnings}`，`--snapshot-json` 标志（已被 is_known_flag_name 与测试覆盖）。
 
 ### 5.4 Web（loopback serve）
@@ -298,6 +298,8 @@ origin/main `8de7312` → `dc704df` 共 26 个提交，按组列出（每组含�
 7. **矩阵与文档**：`provider_matrix.rs` 新增 16 行全量漂移测试 `matrix_rows_match_capability_matrix_all_sixteen`（文档↔capability.rs 两侧同守）；矩阵文档 resume 行修正（grok=Derived、opencode=Unknown）；INSTALL-AND-UPGRADE/rebuild runbook 迁移说明更新到 v11→v12；CONTRACT 文档 MCP 工具 9 个；`OPEN-SOURCE-ROADMAP.md` §0.1 快照刷新为 `NOT_READY_EXTERNAL_BLOCKERS`；`THREAT-MODEL.md` 四攻击面；`go-no-go.2026-08-16.md` 记录 wave 闭合、移除过时的"benchmark 缺陷"条目；`COMPETITOR-COMPARISON.md` 与 `SKILL.md` 同步 MCP 16 行/五入口一致/3 别名口径。
 8. **Evidence/privacy/工程**：`scripts/evidence/out/gate-manifest-gate.json` 解除跟踪 + gitignore（违反 out/README 契约的遗留）；`privacy_scan.py` 删除硬编码操作者用户名与 EXCLUDED_PREFIXES（现在扫全部 tracked 文本，新增两个测试）；三个 spike crate 补 `[workspace]`（嵌套 worktree 下 `cargo metadata --locked` 失败修复）；公开树导出器（§6.3）。
 
+9. **2026-08-17/18 后续 wave**（`590e6cf` → HEAD `f7e2a49`）：可选 `semantic-candle` 后端（Cargo feature 默认 off；Candle 0.10 + pinned E5、`model import --dir <bundle>` 校验 SHA-256 原子发布 / `model status`，**永不联网**，未导入显式 `lexical_fallback`；`docs/operations/SEMANTIC-MODEL-BUNDLE.md`）；handoff pack 投影 catalog `tool_activity` + 权威 `role`/`is_sidechain`（`handoff-pack/v1` schema 更新）；TUI 搜索分面控件（`m` sidechain / `k` tool-kind）；context 响应投影 `tool_activities`（`ContextGraphStore::tool_activities_for_messages` 批量读取）；`PROVIDER-BETA-READINESS.md` Beta 晋级台账。
+
 **验证记住**：全套门 §7.1 在 `dc704df` 实测全绿后才推送；origin/main 与 HEAD 一致。
 
 ---
@@ -306,15 +308,12 @@ origin/main `8de7312` → `dc704df` 共 26 个提交，按组列出（每组含�
 
 ### 9.1 仓库本地可做（按优先级）
 
-1. **真实本地语义模型（最大缺口，登顶差异化的核心）**——任务 `08-15-semantic-hybrid-local-retrieval`（prd.md + design.md 完整规划）与调研 `08-15-open-source-product-roadmap/research/2026-08-16-embedding-model-options.md`（已锁定模型/feature/分发策略）。要点：
-   - 实现栈：`candle-core/candle-nn/candle-transformers 0.10` + `tokenizers` + safetensors；模型 `intfloat/multilingual-e5-small@614241f6...`（384 维、mean pooling、L2、`query:`/`passage:` 前缀）；本机 Cargo 缓存已有 candle-core 0.10.2，参考实现 `<reference-src>/Github_src/Recall/src/embedding.rs`（MIT，可借鉴）。
-   - Cargo feature 名 `semantic-candle`，**默认 off**；`cargo install` 默认保持纯 lexical。
-   - 模型获取两入口且网络隔离：`model import --dir <bundle>`（全离线、校验 pinned manifest/SHA-256/license）与 `model install multilingual-e5-small`（**唯一允许联网的命令**、先打印 repo/revision/size/license、staging+hash+atomic rename）；search/sync/index/model load 永不联网；`--offline` 下不可用 → 显式 `lexical_fallback`。
-   - `EmbeddingModel`/`SemanticIndex`/`EmbeddingManifest`/`message_vec`（model_id 隔离）/RRF 融合/`lexical_fallback` 全部已就位；可选 Candle 后端与 offline import 已落地（feature `semantic-candle`）；新实现用**新 model_id**（`intfloat-multilingual-e5-small@614241f6-candle-f32-meanpool-l2-qpass-v1`），旧 bigram rows 自动 inert。
-   - 门槛：frozen benchmark（CJK/英文/代码 recall + p50/p95 + 体积）达标前 maturity 保持 beta、lexical 保持默认；不得只凭"能跑"升级宣传。相应更新 `PROVIDER-MATURITY-MATRIX`、`COMPETITOR-COMPARISON`、`verify-release.py` 的 semantic 检查。
+1. **真实本地语义模型（部分落地——语义 runtime + 离线 import 已实现；剩余 weights 分发与 benchmark 门）**——任务 `08-15-semantic-hybrid-local-retrieval`（prd.md + design.md 完整规划）与调研 `08-15-open-source-product-roadmap/research/2026-08-16-embedding-model-options.md`（已锁定模型/feature/分发策略）。要点：
+   - 已落地（`590e6cf`，HEAD `f7e2a49`）：实现栈 `candle-core/candle-nn/candle-transformers 0.10` + `tokenizers` + safetensors（参考实现 `<reference-src>/Github_src/Recall/src/embedding.rs`，MIT）；Cargo feature `semantic-candle` **默认 off**（`cargo install` 默认保持纯 lexical）；模型 `intfloat/multilingual-e5-small@614241f6...`（384 维、mean pooling、L2、`query:`/`passage:` 前缀），**新 model_id** `intfloat-multilingual-e5-small@614241f6-candle-f32-meanpool-l2-qpass-v1`（旧 bigram rows 自动 inert）；`model import --dir <bundle>`（全离线、校验 pinned manifest/每文件 SHA-256、staging + atomic publish）与 `model status`；search/sync/index/model load 永不联网，未导入/缺失 → 显式 `lexical_fallback`（不静默）。
+   - 剩余子项（按序）：a) `model install multilingual-e5-small`——设计中的**唯一允许联网**下载入口（先打印 repo/revision/size/license、staging+hash+atomic rename）**未实现**，当前 import/status 均离线；b) weights 官方打包/再分发决策 + license 通知（`docs/operations/SEMANTIC-MODEL-BUNDLE.md`「What is still deferred」）；c) frozen benchmark 门（CJK/英文/代码 recall + p50/p95 + 体积）——达标前 maturity 不晋级、lexical 保持默认、不得宣称语义质量优势；d) benchmark 达标后更新 `verify-release.py` 的 semantic 检查（`COMPETITOR-COMPARISON`/`PROVIDER-MATURITY-MATRIX`/`OPEN-SOURCE-ROADMAP` 等文档口径已随本 wave 同步）。
 2. **Provider 晋级证据推进**：14 个 Experimental→Beta 需跨 target named CI run（billing 解锁后）+ owner 决策；仓库内可先行的是把每个 provider 的"Beta 本地缺口 vs 外部缺口"结构化到 `AdapterManifest`/矩阵文档（避免"机制存在=证据存在"的误判），并补齐 context/handoff/incremental 覆盖（对 partial 的 claude-code/codex/aider 尤其）。
-3. **context 工具活动富化（handoff 已投影）**：schema v12 已有 tool_activities；handoff pack 现已批量投影 `tool_activity`。context 视图仍不投影 sidechain/tool activity（任务 `08-15-evidence-handoff-pack` 后续）。需加 context 侧批量读取、预算/脱敏、golden/契约测试。
-4. **TUI facet 控件 + Robot capability UI**：CLI/MCP 已有 facets，TUI `SearchFacets::default()` 是显式 deferred；加控件后更新五入口 harness。
+3. **context 工具活动富化（部分落地——tool_activity 投影已实现）**：schema v12 已有 tool_activities；handoff pack 已投影 `tool_activity` + 权威 `role`/`is_sidechain`（`64c6e6d`/`6114ff5`）；context 响应（CLI `context` / MCP `get_session_context`）现已经 `ContextGraphStore::tool_activities_for_messages` 批量投影 `tool_activities`（空则不臆造，`1503712`）。剩余子项：context 侧 tool_activity 的预算/脱敏契约与 golden 测试覆盖（当前走既有 JSON 边界脱敏与 max_bytes 截断，无专项 golden）。
+4. **TUI facet 控件（已落地）+ Robot capability UI（仍 deferred）**：TUI 搜索屏 `m` 循环 sidechain 分面、`k` 循环 tool-kind 分面（输入框为空时生效），经同一 `SearchFacets` 契约重发搜索（`6114ff5`，core.rs 含单测，五入口 harness 已覆盖）。剩余子项：Robot capability UI 仍未实现。
 5. **ToolActivity retention/cleanup 策略**：表/索引已有，生命周期策略 deferred（WriterLease/CAS 下安全修剪 + 审计 + rebuild 不变量测试）。
 6. **provider-scoped session identity 迁移**：`08-15-unified-release-contract/design.md` §Deferred 的 `ses_v2` wire ids + `installation_namespaces` registry + `id_alias` TTL + backfill（RFC-0001 §5.1 open debt）——最大的剩余本地 feature。
 7. **语义模型相关附属**：frozen corpus/query manifest、benchmark SLI 报告、`model install/import` 测试矩阵。
@@ -357,7 +356,7 @@ origin/main `8de7312` → `dc704df` 共 26 个提交，按组列出（每组含�
 4. 读四个文件建立心智模型：`CLAUDE.md`、`docs/product/OPEN-SOURCE-ROADMAP.md`、`docs/product/PROVIDER-MATURITY-MATRIX.md`、`crates/agent-session-grep-ports/src/capability.rs`（矩阵单源）。
 5. 读 `crates/agent-session-grep-cli/src/main.rs` 的 dispatch 与 `crates/agent-session-grep-application/src/lib.rs` 的 App 入口，理解五个入口共享 ADT。
 6. 用 `cargo run -q -p agent-session-grep-cli -- --db <临时> search test`（或 `--robot`）各跑一条，感受 envelope 形状。
-7. 再从 §9.1 选一个任务开工（推荐 semantic weights/benchmark 或 context 富化），按 §10 纪律提交。
+7. 再从 §9.1 选一个任务开工（推荐 semantic weights/benchmark 收尾或 provider 晋级证据），按 §10 纪律提交。
 
 ## 12. 附录：速查
 

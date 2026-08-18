@@ -85,15 +85,16 @@ loop:
 
 | command | purpose |
 | --- | --- |
-| `search "<query>"` | full-text search over messages; hits carry canonical `session_id`, `resume_available`, and bounded `text`; plain-text keywords only — FTS operators (`AND`/`OR`/`NEAR`, quotes, `*`) match literally, there is no advanced query language (ADR-0003). Facets (all optional): `--main-only`, `--subagent-only` (mutually exclusive), `--include-sidechain` (the default), `--tool-kind` (`file`/`command`/`web`/`query`/`unknown`), `--tool-name <name>` (exact match) |
-| `handoff "<query>"` | assemble a deterministic handoff pack (`handoff-pack/v1`) from search hits; verbatim evidence and inference stay separated, no LLM call, dry-run only; budgets `--max-evidence` (default 20), `--max-tokens` (8000), `--max-bytes` (2000000) |
+| `search "<query>"` | full-text search over messages; hits carry canonical `session_id`, `resume_available`, and bounded `text`; plain-text keywords only — FTS operators (`AND`/`OR`/`NEAR`, quotes, `*`) match literally, there is no advanced query language (ADR-0003). Facets (all optional): `--main-only`, `--subagent-only` (mutually exclusive), `--include-sidechain` (the default), `--tool-kind` (`file`/`command`/`web`/`query`/`unknown`), `--tool-name <name>` (exact match). In the TUI, `m` cycles the sidechain facet and `k` cycles the tool-kind facet (with an empty input box) |
+| `handoff "<query>"` | assemble a deterministic handoff pack (`handoff-pack/v1`) from search hits; verbatim evidence and inference stay separated, no LLM call, dry-run only; each mainline entry carries authoritative `role`/`is_sidechain` facts and the pack carries the catalog `tool_activity` list; budgets `--max-evidence` (default 20), `--max-tokens` (8000), `--max-bytes` (2000000) |
 | `get-session-resume <session-id>` | resolve fixed-shape read-only Resume Metadata for a canonical `ses_v1_*` id; returns nullable Provider-native Session ID and Original Working Directory, never a command or Source path |
 | `get-message <message-id>` | return one message and bounded mainline neighbors; use `--session` when a shared Message belongs to multiple Sessions |
 | `list <limit>` | page catalog entities in stable id order |
-| `context <session-id>` | assemble one session branch with evidence spans |
+| `context <session-id>` | assemble one session branch with evidence spans and projected `tool_activities` |
 | `get <wire-id>` | raw stored payload of one entity |
 | `show <wire-id>` | structured entity view (role, text, parent, session, span) |
 | `status` | catalog entity count and active generation |
+| `model import --dir <bundle>` / `model status` | offline model-cache management (never networks): `import` verifies the bundle manifest and every declared SHA-256, then publishes into the local model cache (requires a `--features semantic-candle` binary); `status` reports whether the default E5 bundle is imported. Default builds stay lexical-only (bigram-hash fuzzy-lexical) |
 | `providers` | report the 16-row provider capability matrix: 14 implemented (all experimental) + 2 deferred unsupported (`deepseek-harness`, `zcode`), with per-field capabilities |
 | `sync --discover` | scan the registered provider data roots (`claude-code`, `codex`, `openclaw`, `tencent-codebuddy`, `antigravity`, `opencode`) and sync every `.jsonl` transcript found; read-only on provider files; the response reports per-provider `found`/`removed` counts and scan completeness — never file paths |
 | `doctor` | health: db, schema, generation, interrupted_batches |
@@ -136,11 +137,11 @@ Run the same binary as a stdio MCP server (tools only, sequential, read-only):
 | tool | when to use |
 | --- | --- |
 | `search_sessions` | full-text query; params: `query` (required), `limit`, `cursor`, `max_items`, `max_bytes`; optional `providers` (`claude`/`claude-code`/`codex`), `since`/`until`, `include_system`, `group_by_session`; facets `sidechain` (`include`/`main_only`/`subagent_only`), `tool_kind` (`file`/`command`/`web`/`query`/`unknown`), `tool_name`; each hit includes canonical `session_id` and `resume_available`; non-default facets are echoed in `data.facets` |
-| `get_session_context` | pull one session branch: `session_id` (required, canonical `ses_v1_...`), `policy` (`mainline` or `full`), `level` (`raw`/`talks`/`sessions`), `max_messages`, `max_bytes` |
+| `get_session_context` | pull one session branch: `session_id` (required, canonical `ses_v1_...`), `policy` (`mainline` or `full`), `level` (`raw`/`talks`/`sessions`), `max_messages`, `max_bytes`; the response includes projected `tool_activities` for the assembled messages |
 | `get_session_resume` | resolve fixed-shape Resume Metadata from a canonical `session_id`; nullable `provider_session_id` and `original_working_directory`; never returns a command or Source path |
 | `get_message` | return one Message and bounded mainline neighbors; params include canonical `message_id`, optional canonical `session_id`, `around`, and budgets |
 | `list_sessions` | page Session entities only in stable canonical-id order |
-| `generate_handoff` | assemble a deterministic handoff pack (`handoff-pack/v1`) for a query: search hits become evidence spans with authoritative source locators; budgets `max_evidence`/`max_tokens`/`max_bytes` are enforced and cross-boundary redaction is on by default (ADR-0009); truncation is reported as `outcome: partial` |
+| `generate_handoff` | assemble a deterministic handoff pack (`handoff-pack/v1`) for a query: search hits become evidence spans with authoritative source locators, mainline entries carry `role`/`is_sidechain` facts, and the pack carries the catalog `tool_activity` list; budgets `max_evidence`/`max_tokens`/`max_bytes` are enforced and cross-boundary redaction is on by default (ADR-0009); truncation is reported as `outcome: partial` |
 | `list_providers` | return the complete 16-row capability matrix from the same source as CLI `providers`: 14 implemented rows with `ingestible: true` and 2 deferred unsupported rows (`deepseek-harness`, `zcode`) with `ingestible: false`; each row includes `id`, `variant`, current `maturity`, and `maturity_target` |
 | `get_status` | catalog count and active generation |
 | `doctor` | health probe: `db: "ok"`, schema, generation, interrupted batches |
