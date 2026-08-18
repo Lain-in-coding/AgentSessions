@@ -63,7 +63,7 @@ target。
 | discover | `native`（claude-code/codex）；`unsupported`（其余） | 仅 claude-code/codex 注册了 discovery root；antigravity/opencode 已加入 `provider_data_root` |
 | resume | `derived`（claude-code/codex/pi/grok）；`unknown`（opencode/kimi/qoder/codebuddy/hermes/antigravity/cursor）；`unsupported`（aider/cline/openclaw） | 未核验的 resume 命令一律不设默认值 |
 | context / handoff / incremental | `unsupported` 或 `unknown` | 属后续全能力链工作，尚未逐 provider 评估 |
-| tool_activity | `partial`（claude-code/codex/aider，schema v12 `tool_activities` 落库）；`unknown`（deepseek-harness/zcode，deferred）；`unsupported`（其余 11 个已实现 provider） | CLI `--tool-kind`/`--tool-name`/`--main-only`/`--subagent-only`/`--include-sidechain`、MCP 同名参数与 TUI 分面键（`m` sidechain / `k` tool-kind）已落地；handoff pack 投影 `tool_activity` + 权威 `role`/`is_sidechain`，context 响应投影 `tool_activities` |
+| tool_activity | `partial`（claude-code/codex，schema v12 `tool_activities` 落库）；`unknown`（deepseek-harness/zcode，deferred）；`unsupported`（其余 12 个已实现 provider，含 aider——它把 blockquote 工具输出折叠进 assistant 文本，零 `emit_activity`） | CLI `--tool-kind`/`--tool-name`/`--main-only`/`--subagent-only`/`--include-sidechain`、MCP 同名参数与 TUI 分面键（`m` sidechain / `k` tool-kind）已落地；handoff pack 投影 `tool_activity` + 权威 `role`/`is_sidechain`，context 响应投影 `tool_activities`。声明由 `cli/tests/capability_behaviour.rs` 的行为断言守护：声明非 `unsupported` 必须能在证据输入上真的 emit 活动 |
 | source_span | `native`（claude/codex/grok/pi/kimi/openclaw/qoder/codebuddy）；`derived`（aider）；`unsupported`（opencode/hermes/antigravity/cursor/cline） | SQLite/目录名身份/单文档 JSON 类 provider 无文件内字节 span；cline 的数组下标 pseudo-span 已移除并如实降级为 unsupported |
 
 ### 逐 provider 明细见 capability.rs（单源权威）
