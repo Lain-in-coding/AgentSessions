@@ -48,23 +48,25 @@ agent-session-grep --version
 asg --version
 ```
 
-Then use either command name:
+Then use either command name. Every data command needs the store path
+(`--db`); run `asg config paths` to see the default data location on your
+platform:
 
 ```bash
 # Index your Claude Code + Codex sessions
-asg sync --discover
+asg --db <db-path> sync --discover
 
 # Search across all providers
-asg search "authentication refactor"
+asg --db <db-path> search "authentication refactor"
 
 # Get session context
-asg context <session-id>
+asg --db <db-path> context <session-id>
 
 # Preview the resume command for a session (dry-run; --yes to execute)
-asg resume <session-id>
+asg --db <db-path> resume <session-id>
 
 # Generate a handoff pack for another agent
-asg handoff "how did we configure the database?"
+asg --db <db-path> handoff "how did we configure the database?"
 ```
 
 Retrieval is lexical by default (FTS5 with CJK bigram support); the default
