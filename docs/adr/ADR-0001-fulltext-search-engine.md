@@ -5,7 +5,7 @@
 > - decision_id: ADR-fulltext-engine
 > - title: 全文检索引擎选型
 > - status: **Proposed（基于 R0 spike 初步证据，待 approver 接受）**
-> - owner: （待指派）
+> - owner: QIN
 > - approver: 项目最终验收人
 > - due_milestone: R0 Feasibility / Contract Gate
 > - evidence_path: `spikes/search-backend/EVIDENCE.md`、`spikes/R0-EVIDENCE-SUMMARY.md`

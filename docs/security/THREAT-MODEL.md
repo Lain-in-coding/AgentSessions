@@ -5,7 +5,7 @@
 > - decision_id: SEC-THREAT-MODEL
 > - title: 威胁模型与隐私策略
 > - status: **Draft**（待 R0 评审）
-> - owner: （待指派）
+> - owner: QIN
 > - approver: 项目最终验收人
 > - due_milestone: R0 Feasibility / Contract Gate
 > - evidence_path: `docs/security/THREAT-MODEL.md`；相关实测见 `spikes/source-snapshot/`、`spikes/data-root-locking/`

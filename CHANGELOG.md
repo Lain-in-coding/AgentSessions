@@ -74,9 +74,6 @@ First public release. Everything below shipped in `0.1.0`.
 - Resume execution contract: the first run forces a preview acknowledgement
   before any real spawn, the provider binary is preflighted, and a drift test
   keeps the capability matrix and the resume command builder aligned.
-- `scripts/evidence/privacy_scan.py`: scans tracked text for personal or
-  machine-specific absolute paths, alongside
-  `docs/operations/PUBLIC-HISTORY-SCRUB.md` for the history decision.
 - `scripts/verify-release.py` expanded to 10 checks (binary/version, sync,
   lexical search, get, context, resume metadata and dry-run, deterministic
   handoff, semantic/hybrid effective modes, hook default-off, provider matrix).

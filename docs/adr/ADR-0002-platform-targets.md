@@ -3,7 +3,7 @@
 > 治理记录
 > - decision_id: ADR-0002
 > - status: **Proposed**（待 R0 Accepted）
-> - owner: （待指派）  approver: 项目最终验收人
+> - owner: QIN  approver: 项目最终验收人
 > - due_milestone: R0
 > - evidence_path: `spikes/cross-platform-packaging/`、`docs/adr/ADR-0002-platform-targets.md`、`docs/operations/core-beta-evidence-matrix.md`
 >

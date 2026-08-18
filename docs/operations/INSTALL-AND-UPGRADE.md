@@ -142,7 +142,7 @@ pwsh -File scripts/install/uninstall.ps1
 ```
 
 ```sh
-sh scripts/install/uninstall.sh
+bash scripts/install/uninstall.sh
 ```
 
 Uninstall deletes only the two managed command files (`agent-session-grep.exe`

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""agent-session-grep benchmark harness (#9).
+"""agent-session-grep benchmark harness.
 
 Runs discovery coverage, parse loss, and search latency benchmarks against
 a local asg binary, producing a JSON report per SLI-AND-BENCHMARK-FORMAT.md.

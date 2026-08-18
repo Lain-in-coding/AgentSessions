@@ -74,7 +74,7 @@ Kiro、Amazon Q、Goose、Crush、llm、Zed、Trae 这类把会话存在表里�
 这使运行时列名候选解析（`PRAGMA table_info` + 候选名映射）成为可行的适配层：
 适配层负责把不同 provider 的列映射到统一语义位置，身份计算只看映射结果。
 
-这一点不是假设。本机 Zed 的真实 schema 就带着漂移痕迹：
+这一点不是假设。维护者开发机上 Zed 的真实 schema 就带着漂移痕迹：
 
 ```sql
 CREATE TABLE threads (
@@ -105,11 +105,11 @@ WAL 模式下只读事务拿到一个一致读点：读事务内多次采样得�
 
 - macOS 未复测。Windows 与 Linux(WSL2) 已各跑全部十条断言、均退出 0，
   `data_version` 与 WAL 行为在这两个平台一致；`aarch64-apple-darwin`
-  与真机 macOS 上的行为未取得证据（本机无 macOS，属 externally_blocked）。
-- 未在**有数据的**真实 provider 库上实测。本机只有 Zed 与 OpenCode，
-  ForgeCode / Kiro / Amazon Q / Goose / Crush / Cursor 均不存在；
-  Zed 的 `threads` 表为 0 行。因此 H 的 schema 真实性有证据（见上），
-  但真实数据量下的行为没有。J 的规模数字来自合成的 5000 行库。
+  与真机 macOS 上的行为未取得证据（维护者的开发机无 macOS，属 externally_blocked）。
+- 未在**有数据的**真实 provider 库上实测。维护者的开发机上只有 Zed 与 OpenCode
+  两个 SQLite 型 provider 的数据库可供只读探测，其中 Zed 的 `threads` 表为 0 行。
+  因此 H 的 schema 真实性有证据（见上），但真实数据量下的行为没有。J 的规模数字
+  来自合成的 5000 行库。
 - 未验证压缩 BLOB 载荷。Zed 的会话正文存在 `data BLOB` 列，
   按其实现为压缩字节。行级指纹对不透明字节同样成立，
   但"解压后再规范化"这一层的成本与失败模式未测。
@@ -128,44 +128,15 @@ WAL 模式下只读事务拿到一个一致读点：读事务内多次采样得�
 `source_fs.rs` 的 capture/verify。属于 0.3 及以后的设计决策，
 需要独立 ADR，本 spike 只提供可行性证据，不作决定。
 
-## 与 CCHV 的对照
+## 生态观察（中性陈述，非规格）
 
-`jhlee0409/claude-code-history-viewer`（MIT，v1.22.0）支持 28 个 provider，
-其中多个为 SQLite 存储。它对本问题的处理方式是**绕过**而非解决：
-为无文件路径的会话合成 URL（`kiro://{key}`、`cline://{base}:{cwd}`、
-`copilot://{base64}`），并在 `commands/stats/cache.rs` 中明确记录该选择的代价：
-
-> "Provider (non-Claude) stats paths are not cached: their session paths are
-> virtual (`opencode://` …) and carry no `(size, mtime)` identity."
-
-即：合成 URL 让它能快速接入大量 provider，但这些 provider 因此无法获得
-`(size, mtime)` 身份，也就无法做缓存与增量刷新。CCHV 每次启动全量重扫，
-并从文件大小估算消息数以让全量扫描可承受。
-
-本 spike 的行级身份方案给出了另一条路：SQLite 源同样可以获得稳定、
-细粒度、内容可验证的身份，从而支持增量与持久索引。这是本项目相对
-CCHV 的技术差异点所在——但代价是每个 provider 的接入成本更高。
-
-## CCHV provider 存储分档（观察快照，非规格）
-
-> 以下是对 CCHV 公开源码的机械分类，**截至 v1.22.0 / 推送 2026-07-23**。
-> 数字会随上游版本变化；不得当作本项目的 provider 支持承诺或验收数字。
-> 判定依据：源文件是否调用 `Connection::open` / `rusqlite`，以及是否构造合成 URL。
-
-`ProviderId` 枚举共 **28** 个用户可见 provider（`src-tauri/src/providers/mod.rs`）。
-按存储形态粗分：
-
-| 档位 | 约数 | 接入本项目的前置条件 | 代表 |
-|---|---|---|---|
-| 文件型（jsonl / 整文件 JSON） | ~17 | 现有文件级 `SourceSnapshot` 即可 | gemini、qwen、aider、kimi、copilot、continue、openhands、pi、vibe、codebuddy、antigravity… |
-| SQLite 型 | ~11 | 需要行级身份 + 运行时列名适配 | zed、cursor、cline、trae、kiro、crush、forgecode、amazon_q、goose、llm、opencode |
-| 混合型 | 1 | 文件级为主，SQLite 为辅 | codex（本仓库已支持） |
-
-实测信号摘要（临时下载 CCHV `providers/*.rs` 后 grep，下载物已删除）：
-
-- 真正 `Connection::open` 的文件：zed、trae、cursor、cline、kiro、crush、forgecode、amazon_q、goose、llm、codex、opencode。
-- 使用 `PRAGMA table_info` 做运行时列适配的只有 **zed** 与 **forgecode**；其余 SQLite provider 为硬编码列序。本项目若做通用适配层，不能指望从 CCHV 抄到现成层。
-- 合成 URL scheme 已观察到：`codex://`、`cursor://`、`cline://`、`kiro://`、`opencode://`、`forgecode://`、`gemini://`、`aider://`、`kimi://`、`vscode://`。合成路径是 CCHV 无法做增量的根因（见上一节引用）。
+以 SQLite 为存储的会话工具存在多种身份策略。一种常见做法是为没有文件路径的
+会话合成虚拟 URL；这类标识便于快速接入多个 provider，但因为不携带
+`(size, mtime)` 或内容指纹，无法支撑缓存与增量刷新，实践上会退化为每次启动
+全量重扫。本 spike 的行级身份方案是另一条路：SQLite 源同样可以获得稳定、
+细粒度、内容可验证的身份，从而支持增量与持久索引，代价是每个 provider 的
+接入成本更高。以上是对可行方案空间的中性描述，不对任何具体第三方项目作
+优劣判定，也不构成本项目的 provider 支持承诺。
 
 ### 对本项目推进顺序的建议（仍是建议，不是决策）
 
@@ -176,5 +147,4 @@ CCHV 的技术差异点所在——但代价是每个 provider 的接入成本�
 ### 交接注意
 
 - 本文件与 `src/` 探针代码同属可丢弃 spike；清理 spike 前须先把**耐久结论**写入 ADR，否则链接会断。
-- 不得把本节的"~17 / ~11 / 28"写进任何验收标准；那些是对手某版本的观察。
 - 生产代码未改：`crates/` 保持原样。

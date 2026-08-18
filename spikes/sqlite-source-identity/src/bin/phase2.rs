@@ -54,8 +54,8 @@ fn fingerprint_parts(parts: &[&[u8]]) -> String {
 
 /// 运行时列解析：从候选名中挑第一个真实存在的列。
 ///
-/// CCHV 对 ForgeCode 用的就是这个思路（`PRAGMA table_info` + 列名候选），
-/// 本 spike 验证它能否与行级身份组合，使身份在 schema 漂移下保持稳定。
+/// 这是 SQLite 型工具处理 schema 漂移的常见思路（`PRAGMA table_info` + 列名
+/// 候选）；本 spike 验证它能否与行级身份组合，使身份在 schema 漂移下保持稳定。
 fn table_columns(conn: &Connection, table: &str) -> Result<Vec<String>> {
     let mut stmt = conn.prepare(&format!("PRAGMA table_info(\"{table}\")"))?;
     let cols = stmt

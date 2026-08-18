@@ -45,6 +45,33 @@ class PublicTreeExportTests(unittest.TestCase):
             # spikes/ ships: the ADRs and RFCs cite its EVIDENCE.md files.
             self.assertEqual(paths, ["README.md", "spikes/probe/EVIDENCE.md", "src/lib.rs"])
 
+    def test_tracked_paths_exclude_exact_files_without_their_directories(self) -> None:
+        """Each excluded file drops out while its siblings still ship."""
+        with tempfile.TemporaryDirectory() as temp_name:
+            repo = Path(temp_name)
+            import subprocess
+
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            subprocess.run(["git", "-C", str(repo), "config", "user.email", "test@example.invalid"], check=True)
+            subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test"], check=True)
+            siblings = [
+                "scripts/evidence/core_beta_benchmark.py",
+                "scripts/release/build-manifest.py",
+                "docs/release/rehearsal-runbook.md",
+                "docs/operations/INSTALL-AND-UPGRADE.md",
+                "docs/architecture/RFC-0001.md",
+            ]
+            for relative in [*export_public_tree.EXCLUDED_FILES, *siblings]:
+                path = repo / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(relative, encoding="utf-8")
+            subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+            subprocess.run(["git", "-C", str(repo), "commit", "-qm", "fixture"], check=True)
+            paths = export_public_tree.tracked_paths(repo, "HEAD")
+            for excluded in export_public_tree.EXCLUDED_FILES:
+                self.assertNotIn(excluded, paths)
+            self.assertEqual(sorted(paths), sorted(siblings))
+
     def test_scan_export_uses_the_public_profile(self) -> None:
         # An internal tracker reference is invisible to the default profile but
         # must fail the export, so the exporter has to select `public`.
@@ -58,11 +85,27 @@ class PublicTreeExportTests(unittest.TestCase):
             (destination / "notes.md").write_text("no internal refs\n", encoding="utf-8")
             self.assertEqual(export_public_tree.scan_export(repo_root, destination), 0)
 
+    def test_scan_export_exempts_no_file(self) -> None:
+        """A manifest-named file inside the export is scanned like any other.
+
+        The exporter used to skip its own manifest, which made the only file it
+        wrote the only file it never checked. The manifest now lands outside the
+        destination, so nothing under it is exempt.
+        """
+        repo_root = Path(__file__).resolve().parents[2]
+        with tempfile.TemporaryDirectory() as temp_name:
+            destination = Path(temp_name)
+            (destination / export_public_tree.MANIFEST_NAME).write_text(
+                f'{{"note": "see .{TRACKER}/tasks/x/prd.md"}}\n', encoding="utf-8"
+            )
+            self.assertEqual(export_public_tree.scan_export(repo_root, destination), 1)
+
     def test_export_manifest_is_sorted_and_path_free(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             root = Path(temp_name)
             repo = root / "repo"
             destination = root / "public"
+            manifest_path = root / export_public_tree.MANIFEST_NAME
             import subprocess
 
             subprocess.run(["git", "init", "-q", str(repo)], check=True)
@@ -73,11 +116,58 @@ class PublicTreeExportTests(unittest.TestCase):
             subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
             subprocess.run(["git", "-C", str(repo), "commit", "-qm", "fixture"], check=True)
             commit = export_public_tree.git(repo, "rev-parse", "HEAD")
-            manifest = export_public_tree.export_tree(repo, destination, commit)
+            manifest = export_public_tree.export_tree(
+                repo, destination, commit, manifest_path
+            )
             self.assertEqual([entry["path"] for entry in manifest["files"]], ["a.txt", "b.txt"])
-            parsed = json.loads((destination / export_public_tree.MANIFEST_NAME).read_text(encoding="utf-8"))
+            parsed = json.loads(manifest_path.read_text(encoding="utf-8"))
             self.assertEqual(parsed["source_commit"], commit)
             self.assertNotIn(str(root), json.dumps(parsed))
+
+    def test_manifest_is_never_written_into_the_export(self) -> None:
+        """The manifest stays a local artifact, so the tree cannot ship it."""
+        with tempfile.TemporaryDirectory() as temp_name:
+            root = Path(temp_name)
+            repo = root / "repo"
+            destination = root / "public"
+            manifest_path = root / export_public_tree.MANIFEST_NAME
+            import subprocess
+
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            subprocess.run(["git", "-C", str(repo), "config", "user.email", "test@example.invalid"], check=True)
+            subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test"], check=True)
+            (repo / "a.txt").write_text("a", encoding="utf-8")
+            subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+            subprocess.run(["git", "-C", str(repo), "commit", "-qm", "fixture"], check=True)
+            commit = export_public_tree.git(repo, "rev-parse", "HEAD")
+            export_public_tree.export_tree(repo, destination, commit, manifest_path)
+            self.assertTrue(manifest_path.is_file())
+            self.assertEqual(
+                [path.name for path in destination.rglob("*") if path.is_file()],
+                ["a.txt"],
+            )
+
+    def test_export_refuses_a_manifest_inside_the_destination(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            root = Path(temp_name)
+            repo = root / "repo"
+            destination = root / "public"
+            import subprocess
+
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            subprocess.run(["git", "-C", str(repo), "config", "user.email", "test@example.invalid"], check=True)
+            subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test"], check=True)
+            (repo / "a.txt").write_text("a", encoding="utf-8")
+            subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+            subprocess.run(["git", "-C", str(repo), "commit", "-qm", "fixture"], check=True)
+            commit = export_public_tree.git(repo, "rev-parse", "HEAD")
+            with self.assertRaises(ValueError):
+                export_public_tree.export_tree(
+                    repo,
+                    destination,
+                    commit,
+                    destination / export_public_tree.MANIFEST_NAME,
+                )
 
 
 if __name__ == "__main__":

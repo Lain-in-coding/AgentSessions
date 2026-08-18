@@ -5,7 +5,7 @@
 > - decision_id: ADR-0009
 > - title: 会话恢复信息采用双 ID 与渐进披露
 > - status: **Accepted（2026-08-14 契约冻结并进入实施；实现完成后由验收人确认）**
-> - owner: （待指派）
+> - owner: QIN
 > - approver: 项目最终验收人
 > - due_milestone: post-0.3
 > - evidence_path: RFC-0001 §3.2/§5；CC-Switch `f748f3a` Session Manager 对读；Claude Code `--resume` 官方文档；本轮 Provider/协议/隐私对抗审查

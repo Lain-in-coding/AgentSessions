@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""agent-session-grep release verification script (#10).
+"""agent-session-grep release verification script.
 
 Runs a bounded synthetic end-to-end release check against an already-built
 binary: binary/version → sync → lexical search → get → context → resume
@@ -243,7 +243,7 @@ def main() -> int:
     # only for the first check (verify_build uses its own tempdir), so pin the
     # absolute binary path before any check can chdir or rely on cwd.
     binary = str(Path(args.asg).expanduser().resolve())
-    print("agent-session-grep release verification (#10)")
+    print("agent-session-grep release verification")
     print("=" * 50)
     print("Serve/Web is intentionally excluded: use the dedicated serve smoke.")
 

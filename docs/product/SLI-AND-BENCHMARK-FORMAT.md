@@ -4,7 +4,7 @@
 >
 > - decision_id: DOC-SLI-BENCHMARK
 > - status: **Draft**（待 R0 评审）
-> - owner: （待指派）
+> - owner: QIN
 > - approver: 项目最终验收人
 > - due_milestone: R0 Feasibility / Contract Gate
 > - evidence_path: `docs/product/SLI-AND-BENCHMARK-FORMAT.md` + `spikes/*/EVIDENCE.md`
@@ -52,6 +52,11 @@ sqlite_version   = <sqlite3 version()>
 ```
 
 未记录上述字段的性能数字不得进入 SLO 冻结决策，也不得作为 Release 阻断依据。
+
+`antivirus_state` 是必填项而非可选补充：实时扫描会拦截并改写 Windows 上的
+文件读写时序，因此同一 commit 在开/关实时保护的两台机器上可以给出不可比的
+I/O 与索引数字。Windows 构建、签名与安装验证必须在受控、可复现且记录了
+安全软件状态的环境执行。
 
 ### 2.1 可复现 Core/Beta 报告契约
 

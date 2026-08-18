@@ -5,7 +5,7 @@
 > - decision_id: ADR-0005
 > - title: 缺失实体统一 exit 4 not_found
 > - status: **Proposed（2026-08-13 UX review fix round）**
-> - owner: （待指派）
+> - owner: QIN
 > - approver: 项目最终验收人
 > - due_milestone: R0
 > - evidence_path: `schemas/robot/v1/error-catalog.json`；`scripts/install/smoke.ps1` / `smoke.sh`

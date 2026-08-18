@@ -5,7 +5,7 @@
 > - decision_id: ADR-0007
 > - title: CJK 检索索引期 bigram 预处理
 > - status: **Proposed（2026-08-13 下轮规划，owner 裁定）**
-> - owner: （待指派）
+> - owner: QIN
 > - approver: 项目最终验收人
 > - due_milestone: R0
 > - evidence_path: 5 路体验/审查实证（ux-newbie/ux-search/ux-mcp/review-features 中文召回 8-33%）；ADR-0001 §后果
