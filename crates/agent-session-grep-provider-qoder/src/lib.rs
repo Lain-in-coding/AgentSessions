@@ -91,6 +91,7 @@ impl ProviderAdapter for QoderAdapter {
             &[
                 "identity fields are matched leniently from session_meta (session_id/cwd)",
                 "non-conversational records (progress/tool_use/tool_result) are skipped",
+                "the format carries no per-message native id, so message identity is reconstructed document-scoped by the ingestion layer (Unstable)",
             ],
         )
     }
@@ -308,7 +309,15 @@ impl ProviderAdapter for QoderAdapter {
                         .or(rec.timestamp.as_deref().filter(|s| !s.trim().is_empty()));
                     sink.emit_message(MessageEvent {
                         seq,
-                        native_id: &format!("qoder-msg-{seq}"),
+                        // The format carries no per-message native id. A
+                        // synthetic `qoder-msg-{seq}` would collide across
+                        // documents because seq restarts at 0 in every file, so
+                        // the first message of every session would share one id
+                        // and the storage merge would silently drop all but one
+                        // payload. Emit an empty native_id so the ingestion layer
+                        // derives a document-scoped id from
+                        // [provider_id, variant, document_id, seq].
+                        native_id: "",
                         parent_native_id: None,
                         role,
                         text: &text,
