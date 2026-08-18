@@ -929,6 +929,33 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   (CLI e2e 若断言了,provider agent 改不了那些测试 → 需要单独一轮)。
   **验收**:两个不同文件的同序号消息都能被搜到;有回归测试。
 
+- [ ] **M2P-15 `sync` 把任何未识别的 flag 当成文件路径,再拿 `source_io` 怪路径
+  (2026-08-19 实测新发现)**
+  实测三次,全部复现:
+  ```
+  asg --db <db> sync --provider claude-code <existing readable file>
+  → error [source_io]: 源文件无法读取
+     下一步:确认源文件路径存在且可读
+  → exit 5
+  ```
+  同一个文件去掉 `--provider` 立刻成功入库 40 条。换成完全臆造的
+  `--bogus-flag` 也是同一条 `source_io`。Robot JSON 里同样是
+  `{"code":"source_io","message":"源文件无法读取","details":{}}`。
+  **为什么这条比"参数名写错了"严重**:诊断把用户**指向错误的方向**。
+  路径明明存在且可读,工具却让你去检查路径 —— 用户会去查权限、查盘符、
+  查转义,而真正的原因是那个 flag 不存在。`details` 是空的,连它到底
+  试图打开哪个"文件"都不说。这与 M2P-3 的 `catalog_error` 反过来怪路径
+  写法是同一个失败模式:**用错误的错误码,把人送去错误的地方。**
+  根因:`sync` 的位置参数收集把所有剩余 token 当路径,不校验 `-`/`--` 前缀。
+  `--provider` 确实不是 `sync` 的参数(它接受 `<file>...` 与 `--discover`),
+  所以拒绝是对的,**错的是拒绝的方式**。
+  **修法**:`sync` 的位置参数遇到 `-` 开头的 token 时报 `invalid_request`,
+  消息里回显那个 token 并给出 `sync --help` 的合法形态。同时给 `source_io`
+  的 `details` 加上它实际尝试打开的路径 —— 空 `details` 让这类错误无法自查。
+  ⚠️ 顺带核查其他子命令有没有同一个模式(位置参数不校验前缀)。
+  **验收**:未识别 flag 报 `invalid_request` 且消息含该 flag 本身;
+  `source_io` 的 details 含被尝试的路径。
+
 - [x] **M2P-13 `aider` 的 `tool_activity: Partial` 是假声明** — 已完成
   `c1356cb`(声明)+ `2fc1d3e`(两份 ledger)。
   `capability.rs` 降为 `Unsupported` 并写明理由;
