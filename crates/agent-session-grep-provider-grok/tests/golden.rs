@@ -5,6 +5,7 @@
 //! Beta 认证的可复核证据。fixture 为纯合成数据，来源与覆盖点见
 //! `tests/golden/PROVENANCE.md`。
 
+use agent_session_grep_application::parse_search_instant;
 use agent_session_grep_ports::{
     CanonicalEventSink, Confidence, MessageEvent, ParseReport, ProviderAdapter,
 };
@@ -257,6 +258,48 @@ fn distinct_documents_do_not_collide_on_seq_zero() {
 
     // 文本仍然可区分，证明两条消息是不同 payload 而非同一条。
     assert_ne!(messages_a[0].text, messages_b[0].text);
+}
+
+/// 时间过滤回归：`--since`/`--until` 下推为 `sort_key >= ?`，而 NULL 比较恒假——
+/// 没有 timestamp 的消息会被每一次时间窗查询静默排除。此测试用**生产**解析器
+/// `parse_search_instant` 解析每条 emitted timestamp，并断言其落在 fixture 的
+/// 合成窗口内（即 `--since`/`--until` 会命中这些消息）。只断言"非 None"是不够的：
+/// 一个过滤器无法解析的字符串也能通过那种断言。
+#[test]
+fn golden_timestamps_fall_inside_search_window() {
+    let expected = read_expected();
+    let bytes = read_fixture_verified(&expected);
+    let (_, messages) = parse_fixture(&bytes);
+    assert!(!messages.is_empty(), "golden fixture must emit messages");
+
+    let since = parse_search_instant("2026-01-01T00:00:00Z").expect("window lower bound parses");
+    let until = parse_search_instant("2026-01-01T01:00:00Z").expect("window upper bound parses");
+
+    let mut timestamped = 0_usize;
+    for message in &messages {
+        let Some(raw) = message.timestamp.as_deref() else {
+            continue;
+        };
+        assert!(
+            !raw.trim().is_empty(),
+            "seq {} 的 timestamp 是空串——应当为 None",
+            message.seq
+        );
+        let instant = parse_search_instant(raw).unwrap_or_else(|| {
+            panic!("timestamp {raw} must parse with the production search filter parser")
+        });
+        assert!(
+            instant.sort_key() >= since.sort_key() && instant.sort_key() <= until.sort_key(),
+            "timestamp {raw} 落在时间窗之外——`--since`/`--until` 会漏掉该消息"
+        );
+        timestamped += 1;
+    }
+    // fixture 前三行带 envelope timestamp（归并成 2 条消息），其余 chunk 没有：
+    // 钉住数量，避免"全部为 None"时本测试空转通过。
+    assert_eq!(
+        timestamped, 2,
+        "fixture 应恰有 2 条带 timestamp 的消息（其余诚实地为 None）"
+    );
 }
 
 /// 手动再生辅助：fixture 合法变更（PROVENANCE.md 的 fixture_revision 递增）后，

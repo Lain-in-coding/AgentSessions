@@ -52,9 +52,13 @@ impl Default for GrokBuildAdapter {
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct UpdateRecord {
+    /// ACP envelope write time. Deliberately `Value`, not `String`: Grok writes
+    /// this as an RFC3339 string, but a numeric epoch is also observed in the
+    /// wild, and with `Option<String>` a numeric value fails the *whole
+    /// record's* deserialization — the line is counted as invalid JSON and
+    /// silently skipped, losing the message as well as its time.
     #[serde(default)]
-    #[allow(dead_code)]
-    timestamp: Option<String>,
+    timestamp: Option<serde_json::Value>,
     #[serde(default)]
     params: Option<UpdateParams>,
 }
@@ -104,7 +108,7 @@ impl ProviderAdapter for GrokBuildAdapter {
             Some(1),
             &[
                 "chunk grouping reconstructs roles; the ACP update stream carries no per-message native id, so message identity is reconstructed document-scoped by the ingestion layer (Unstable)",
-                "per-message timestamps are not extracted (always None)",
+                "per-message timestamps come from the first chunk of each grouped message (the ACP `timestamp` envelope field, already RFC3339 — this is the message's creation time, not a replay time); chunks without a usable value carry no timestamp",
                 "session identity falls back to the first ACP promptId seen, not a durable session id",
             ],
         )
@@ -236,6 +240,11 @@ impl ProviderAdapter for GrokBuildAdapter {
         let mut message_spans: Vec<Option<(u64, u64)>> = Vec::new();
         // First span seen for each message (evidence start).
         let mut message_first_spans: Vec<Option<(u64, u64)>> = Vec::new();
+        // Creation time of each reconstructed message: the timestamp of the
+        // chunk that opened it. A grouped message is written as many chunks and
+        // only the first one marks when the message began, so later chunks must
+        // not overwrite it.
+        let mut message_timestamps: Vec<Option<String>> = Vec::new();
         // Session id candidates extracted from records (rare in updates.jsonl).
         let mut session_ids: Vec<String> = Vec::new();
 
@@ -262,8 +271,9 @@ impl ProviderAdapter for GrokBuildAdapter {
                 }
             };
 
-            // Collect timestamp for session observation (not per-message yet).
-            // Timestamp enrichment is a future hook; left intentionally absent.
+            // Envelope write time of this chunk; for the chunk that opens a
+            // message this is the message's creation time.
+            let record_timestamp = grok_timestamp(record.timestamp.as_ref());
 
             let UpdateParams { update, meta } = record.params.unwrap_or_default();
             let update = update.unwrap_or_default();
@@ -308,6 +318,7 @@ impl ProviderAdapter for GrokBuildAdapter {
                     messages.push((true, text));
                     message_spans.push(Some((start, end)));
                     message_first_spans.push(Some((start, end)));
+                    message_timestamps.push(record_timestamp);
                     pending_user = Some((prompt_index, msg_idx));
                 }
                 "agent_message_chunk" => {
@@ -327,6 +338,7 @@ impl ProviderAdapter for GrokBuildAdapter {
                     messages.push((false, text));
                     message_spans.push(Some((start, end)));
                     message_first_spans.push(Some((start, end)));
+                    message_timestamps.push(record_timestamp);
                     pending_agent = Some((prompt_id.clone(), msg_idx));
                 }
                 "rewind_marker" => {
@@ -337,6 +349,7 @@ impl ProviderAdapter for GrokBuildAdapter {
                         user_message_indices.truncate(target as usize);
                         message_spans.truncate(msg_idx);
                         message_first_spans.truncate(msg_idx);
+                        message_timestamps.truncate(msg_idx);
                         pending_user = None;
                         pending_agent = None;
                     }
@@ -370,7 +383,7 @@ impl ProviderAdapter for GrokBuildAdapter {
                 parent_native_id: None,
                 role,
                 text,
-                timestamp: None,
+                timestamp: message_timestamps.get(idx).and_then(Option::as_deref),
                 is_sidechain: false,
                 span,
             })
@@ -397,6 +410,21 @@ impl ProviderAdapter for GrokBuildAdapter {
 
         Ok(report)
     }
+}
+
+/// Normalize the ACP envelope `timestamp` into a search-filterable instant.
+///
+/// Grok writes an RFC3339 string, which the search time filter already accepts,
+/// so the common path passes it through verbatim without conversion. A numeric
+/// value is also observed; it is rejected here rather than rendered, because the
+/// millis-vs-seconds ambiguity cannot be resolved from the value alone without
+/// guessing an epoch scale, and a wrong guess would place the message decades
+/// away from its real time. Widening the field to `Value` still matters: it
+/// keeps a numeric timestamp from failing the whole record's deserialization,
+/// which previously dropped the message text too.
+fn grok_timestamp(value: Option<&serde_json::Value>) -> Option<String> {
+    let text = value?.as_str()?.trim();
+    (!text.is_empty()).then(|| text.to_string())
 }
 
 /// Extract plain text from a Grok content value.
@@ -527,5 +555,97 @@ mod tests {
         let mut sink = CountSink { count: 0 };
         let report = adapter.parse(fixture.as_bytes(), &mut sink).unwrap();
         assert_eq!(report.committed, 1);
+    }
+
+    #[derive(Default)]
+    struct TimestampSink {
+        timestamps: Vec<Option<String>>,
+    }
+    impl CanonicalEventSink for TimestampSink {
+        fn emit_message(
+            &mut self,
+            event: MessageEvent<'_>,
+        ) -> agent_session_grep_ports::PortResult<()> {
+            self.timestamps.push(event.timestamp.map(str::to_string));
+            Ok(())
+        }
+    }
+
+    fn parsed_timestamps(fixture: &str) -> (ParseReport, Vec<Option<String>>) {
+        let mut sink = TimestampSink::default();
+        let report = GrokBuildAdapter::new()
+            .parse(fixture.as_bytes(), &mut sink)
+            .unwrap();
+        (report, sink.timestamps)
+    }
+
+    #[test]
+    fn grouped_message_carries_the_timestamp_of_its_first_chunk() {
+        // Two user chunks group into one message: the message began at the first
+        // chunk's time, so the later chunk must not overwrite it.
+        let fixture = r#"{"timestamp":"2026-01-01T00:00:00Z","params":{"update":{"sessionUpdate":"user_message_chunk","content":"hello "},"_meta":{"promptIndex":0}}}
+{"timestamp":"2026-01-01T00:00:09Z","params":{"update":{"sessionUpdate":"user_message_chunk","content":"world"},"_meta":{"promptIndex":0}}}
+{"timestamp":"2026-01-01T00:00:11Z","params":{"update":{"sessionUpdate":"agent_message_chunk","content":"hi there"},"_meta":{"promptId":"p1"}}}
+"#;
+        let (report, timestamps) = parsed_timestamps(fixture);
+        assert_eq!(report.committed, 2);
+        assert_eq!(
+            timestamps,
+            vec![
+                Some("2026-01-01T00:00:00Z".to_string()),
+                Some("2026-01-01T00:00:11Z".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn rewind_discards_the_timestamps_of_truncated_messages() {
+        // The timestamp column must stay index-aligned with `messages` after a
+        // rewind, or a surviving message would inherit a discarded one's time.
+        let fixture = r#"{"timestamp":"2026-01-01T00:00:00Z","params":{"update":{"sessionUpdate":"user_message_chunk","content":"msg0"},"_meta":{"promptIndex":0}}}
+{"timestamp":"2026-01-01T00:00:01Z","params":{"update":{"sessionUpdate":"user_message_chunk","content":"msg1"},"_meta":{"promptIndex":1}}}
+{"params":{"update":{"sessionUpdate":"rewind_marker","targetPromptIndex":0}}}
+{"timestamp":"2026-01-01T00:00:05Z","params":{"update":{"sessionUpdate":"agent_message_chunk","content":"after rewind"},"_meta":{"promptId":"p1"}}}
+"#;
+        let (report, timestamps) = parsed_timestamps(fixture);
+        assert_eq!(report.committed, 1);
+        assert_eq!(timestamps, vec![Some("2026-01-01T00:00:05Z".to_string())]);
+    }
+
+    #[test]
+    fn numeric_timestamp_no_longer_drops_the_whole_record() {
+        // Regression: with `timestamp: Option<String>` a numeric value failed the
+        // record's deserialization, so the line was counted as invalid JSON and
+        // the message text was lost along with its time.
+        let fixture = r#"{"timestamp":1767225660000,"params":{"update":{"sessionUpdate":"user_message_chunk","content":"kept"},"_meta":{"promptIndex":0}}}
+"#;
+        let (report, timestamps) = parsed_timestamps(fixture);
+        assert_eq!(report.committed, 1, "the message must survive");
+        assert_eq!(
+            report.skipped, 0,
+            "a numeric timestamp is not a broken line"
+        );
+        // The epoch scale (seconds vs milliseconds) cannot be resolved from the
+        // value alone, so no instant is claimed — but nothing is fabricated and
+        // the text is retained.
+        assert_eq!(timestamps, vec![None]);
+    }
+
+    #[test]
+    fn unusable_timestamp_stays_none_and_is_never_an_empty_string() {
+        for raw in [
+            r#""timestamp":"","#,
+            r#""timestamp":"   ","#,
+            r#""timestamp":null,"#,
+            "",
+        ] {
+            let fixture = format!(
+                r#"{{{raw}"params":{{"update":{{"sessionUpdate":"user_message_chunk","content":"m"}},"_meta":{{"promptIndex":0}}}}}}
+"#
+            );
+            let (report, timestamps) = parsed_timestamps(&fixture);
+            assert_eq!(report.committed, 1, "case: {raw}");
+            assert_eq!(timestamps, vec![None], "case: {raw}");
+        }
     }
 }
