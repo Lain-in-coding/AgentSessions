@@ -1399,11 +1399,16 @@ fn status_doctor_and_providers_return_real_data() {
         .expect("data.catalog_count");
     assert!(catalog_count >= 1, "{status}");
 
-    // doctor：真实打开的库 → db:ok，干净库无待收敛 intent。
+    // doctor：真实打开的库 → db:ok，干净库无待收敛 intent、无孤儿投影行。
     let doctor = &frame_by_id(&frames, 3)["result"]["structuredContent"];
     assert_eq!(doctor["data"]["db"], "ok", "{doctor}");
     assert!(doctor["data"]["generation"].is_number(), "{doctor}");
     assert_eq!(doctor["data"]["interrupted_batches"], 0, "{doctor}");
+    assert_eq!(doctor["data"]["orphaned_tool_activities"], 0, "{doctor}");
+    assert_eq!(
+        doctor["data"]["orphaned_activity_memberships"], 0,
+        "{doctor}"
+    );
 
     // list_providers：真实枚举组合根注册表，两个已支持 provider 必在。
     let providers = &frame_by_id(&frames, 4)["result"]["structuredContent"];

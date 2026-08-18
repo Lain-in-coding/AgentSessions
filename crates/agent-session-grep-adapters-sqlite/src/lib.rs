@@ -1936,6 +1936,108 @@ impl SqliteStore {
         Ok(out)
     }
 
+    /// v12 工具活动投影的孤儿扫描（只读，doctor/维护证据）：
+    /// 返回 `(孤儿活动行数, 孤儿成员行数)`。
+    ///
+    /// - 孤儿活动：`tool_activities` 行没有对应的 catalog 消息行。活动是消息
+    ///   的投影，消息退役时其活动由 claims 推导同事务删除（见
+    ///   [`commit_source_batches_if_changed`]）；残余行是投影漂移证据。
+    /// - 孤儿成员：`tool_activity_membership` 行指向不存在的活动（悬空 claim）。
+    ///
+    /// 两类行都无法再从 catalog 重建，是确定性修剪
+    /// （[`purge_orphaned_activities`](Self::purge_orphaned_activities)）的输入。
+    pub fn orphaned_activity_counts(&self) -> PortResult<(u64, u64)> {
+        let conn = self.conn.borrow();
+        let activities: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM tool_activities ta
+                 WHERE NOT EXISTS (
+                     SELECT 1 FROM catalog c WHERE c.id = ta.message_id
+                 )",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(backend)?;
+        let memberships: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM tool_activity_membership m
+                 WHERE NOT EXISTS (
+                     SELECT 1 FROM tool_activities ta
+                     WHERE ta.activity_id = m.activity_id
+                 )",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(backend)?;
+        Ok((
+            u64::try_from(activities).map_err(backend)?,
+            u64::try_from(memberships).map_err(backend)?,
+        ))
+    }
+
+    /// 确定性修剪孤儿工具活动行（v12 保留策略的维护路径）。
+    ///
+    /// 活动是 catalog 的投影：正常写入路径里，source 退役与消息 tombstone 会
+    /// 在同一事务内推导并删除其活动与 claim；本方法只删除漂移残余——没有
+    /// catalog 消息的活动行、指向不存在活动的成员行——绝不触碰仍锚定在
+    /// catalog 消息上的活动及其合法 claim，也不触碰 catalog/FTS/session 元数据。
+    ///
+    /// 与 [`rebuild_index`](Self::rebuild_index) 同一 writer 纪律：durable
+    /// intent（CAS base generation）→ 单事务校验 + 删除 + 推进 generation +
+    /// activate，outbox 行即本次维护操作的审计记录。返回 `(删除活动行数,
+    /// 删除成员行数)`——成员行数含随孤儿活动删除而级联清除的 claim。无孤儿时
+    /// 不写库（返回 `(0, 0)`，generation 不动）——修剪是收敛操作，空跑不
+    /// 产生 journal churn。
+    pub fn purge_orphaned_activities(&self) -> PortResult<(u64, u64)> {
+        let (activities, memberships) = self.orphaned_activity_counts()?;
+        if activities == 0 && memberships == 0 {
+            return Ok((0, 0));
+        }
+        // 空变更集的 durable intent：与 rebuild 同一条 CAS 前置条件
+        // （active_generation == base），防止并发写者抢先推进后误修剪。
+        let pending = self.begin_index_batch(&[], &[])?;
+        let mut conn = self.conn.borrow_mut();
+        let tx = conn.transaction().map_err(backend)?;
+        Self::verify_pending_in_tx(&tx, &pending, &[], &[], &RelationManifests::default())?;
+        // 确定性删除：谓词自包含，只删事务时刻仍然悬空的行（与扫描同一谓词）。
+        // 先删孤儿活动行，再清悬空 claim——claim 的悬空定义是"指向不存在的
+        // 活动"，第二个语句同时覆盖预先悬空的 claim 与刚删活动的 claim；
+        // 反序会在删除活动后留下新悬空 claim。
+        let removed_activities = tx
+            .execute(
+                "DELETE FROM tool_activities
+                 WHERE NOT EXISTS (
+                     SELECT 1 FROM catalog c WHERE c.id = tool_activities.message_id
+                 )",
+                [],
+            )
+            .map_err(backend)?;
+        let removed_memberships = tx
+            .execute(
+                "DELETE FROM tool_activity_membership
+                 WHERE activity_id NOT IN (SELECT activity_id FROM tool_activities)",
+                [],
+            )
+            .map_err(backend)?;
+        tx.execute(
+            "UPDATE store_metadata SET active_generation = ?1 WHERE singleton = 1",
+            [pending.target_generation as i64],
+        )
+        .map_err(backend)?;
+        tx.execute(
+            "UPDATE index_batches
+             SET state = 'activated', durable_point = 'activated', committed_at_ms = ?2
+             WHERE operation_id = ?1",
+            rusqlite::params![pending.operation_id, unix_ms()?],
+        )
+        .map_err(backend)?;
+        tx.commit().map_err(backend)?;
+        Ok((
+            u64::try_from(removed_activities).map_err(backend)?,
+            u64::try_from(removed_memberships).map_err(backend)?,
+        ))
+    }
+
     /// 当前存储读回的 schema 版本（供 doctor/诊断）。
     pub fn schema_version(&self) -> PortResult<i64> {
         self.conn
@@ -13974,6 +14076,264 @@ mod tests {
             .commit_source_batches_if_changed(&[source])
             .unwrap_err();
         assert!(matches!(error, PortError::Backend(_)));
+    }
+
+    // ---- 工具活动保留策略（v12）：source 退役级联 + 孤儿扫描/修剪 ----
+
+    #[test]
+    fn source_removal_clears_activities_and_membership_in_same_transaction() {
+        // 保留策略核心不变量（级联验证）：source 退役（空完整 scan）时，
+        // 其活动的 tool_activities 行与 tool_activity_membership 行在同一
+        // 提交内消失——投影行绝不比 catalog 事实活得更久，无需事后清理。
+        let store = SqliteStore::open_in_memory().unwrap();
+        let message = sid(IdKind::Message, b"retire-activity");
+        let full = tool_activity_batch(
+            "retire-activity.jsonl",
+            &message,
+            "Bash",
+            "command",
+            Some("ls"),
+            "success",
+        );
+        assert!(store.commit_source_batches_if_changed(&[full]).unwrap());
+        assert_eq!(activity_rows(&store).len(), 1);
+        {
+            let conn = store.conn.borrow();
+            let claims: i64 = conn
+                .query_row("SELECT COUNT(*) FROM tool_activity_membership", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(claims, 1, "活动行必须有对应 claim");
+        }
+
+        let empty = SourceBatch {
+            source_path: "retire-activity.jsonl".into(),
+            entries: Vec::new(),
+            placements: Vec::new(),
+            edges: Vec::new(),
+            activities: Vec::new(),
+            relation_complete: true,
+            len_bytes: Some(0),
+            fingerprint: Some("empty".into()),
+            provider_id: None,
+            resume_claim: None,
+        };
+        assert!(store.commit_source_batches_if_changed(&[empty]).unwrap());
+        assert!(store.get(&message).unwrap().is_none(), "消息随 source 退役");
+        assert!(
+            activity_rows(&store).is_empty(),
+            "活动行必须与消息在同一提交内删除"
+        );
+        {
+            let conn = store.conn.borrow();
+            let claims: i64 = conn
+                .query_row("SELECT COUNT(*) FROM tool_activity_membership", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(claims, 0, "成员行必须与 source 在同一提交内删除");
+        }
+        assert_eq!(
+            store.orphaned_activity_counts().unwrap(),
+            (0, 0),
+            "级联后的库无孤儿行"
+        );
+    }
+
+    #[test]
+    fn orphaned_activity_scan_reports_activity_whose_message_was_removed() {
+        // 漂移状态可通过公共 API 达到：完整重扫退役了消息但仍观察其活动
+        // （不一致的 source 投影）→ 活动行与 claim 留存、锚点悬空。
+        // 扫描必须报出，修剪必须可确定性清除。
+        let store = SqliteStore::open_in_memory().unwrap();
+        let message = sid(IdKind::Message, b"orphan-msg");
+        let first = tool_activity_batch("orphan.jsonl", &message, "Read", "file", None, "success");
+        assert!(store.commit_source_batches_if_changed(&[first]).unwrap());
+
+        let mut second =
+            tool_activity_batch("orphan.jsonl", &message, "Read", "file", None, "success");
+        second.entries = Vec::new();
+        second.fingerprint = Some("rescan-fp".into());
+        assert!(store.commit_source_batches_if_changed(&[second]).unwrap());
+        assert!(store.get(&message).unwrap().is_none(), "消息已退役");
+        assert_eq!(activity_rows(&store).len(), 1, "活动行仍在（锚点悬空）");
+        let (activities, memberships) = store.orphaned_activity_counts().unwrap();
+        assert_eq!(activities, 1, "悬空活动是孤儿");
+        assert_eq!(memberships, 0, "活动行还在，其 claim 不算孤儿");
+    }
+
+    #[test]
+    fn orphaned_membership_scan_reports_dangling_claim() {
+        // 指向不存在活动的成员行（悬空 claim）：写路径同事务保证无法产生，
+        // 只能由裸批/历史漂移造成；直接 SQL 构造并验证扫描报出。
+        let store = SqliteStore::open_in_memory().unwrap();
+        {
+            let conn = store.conn.borrow();
+            conn.execute(
+                "INSERT INTO tool_activity_membership(source_path, activity_id)
+                 VALUES('ghost.jsonl', 'act_v1_deadbeefdeadbeef')",
+                [],
+            )
+            .unwrap();
+        }
+        let (activities, memberships) = store.orphaned_activity_counts().unwrap();
+        assert_eq!(activities, 0);
+        assert_eq!(memberships, 1);
+    }
+
+    #[test]
+    fn purge_orphaned_activities_removes_only_dangling_projection_rows() {
+        // 修剪只删悬空行：合法活动、合法 claim、catalog 全部原样保留。
+        let store = SqliteStore::open_in_memory().unwrap();
+        let live_msg = sid(IdKind::Message, b"live-msg");
+        let live = tool_activity_batch(
+            "live.jsonl",
+            &live_msg,
+            "Bash",
+            "command",
+            Some("ls"),
+            "success",
+        );
+        assert!(store.commit_source_batches_if_changed(&[live]).unwrap());
+
+        // 孤儿活动：消息退役、活动留存（见 orphaned_activity_scan_*）。
+        let orphan_msg = sid(IdKind::Message, b"purge-orphan-msg");
+        let orphaned =
+            tool_activity_batch("orphan.jsonl", &orphan_msg, "Read", "file", None, "success");
+        assert!(store.commit_source_batches_if_changed(&[orphaned]).unwrap());
+        let mut rescan =
+            tool_activity_batch("orphan.jsonl", &orphan_msg, "Read", "file", None, "success");
+        rescan.entries = Vec::new();
+        rescan.fingerprint = Some("rescan-fp".into());
+        assert!(store.commit_source_batches_if_changed(&[rescan]).unwrap());
+
+        // 孤儿成员：指向不存在活动的 claim。
+        {
+            let conn = store.conn.borrow();
+            conn.execute(
+                "INSERT INTO tool_activity_membership(source_path, activity_id)
+                 VALUES('ghost.jsonl', 'act_v1_deadbeefdeadbeef')",
+                [],
+            )
+            .unwrap();
+        }
+        assert_eq!(store.orphaned_activity_counts().unwrap(), (1, 1));
+
+        let generation_before = store.active_generation().unwrap();
+        let (removed_activities, removed_memberships) = store.purge_orphaned_activities().unwrap();
+        // 成员行删除数含孤儿活动的 claim 级联：orphan.jsonl 对已删活动的
+        // claim 随修剪一并清除，加预悬空的 ghost claim 共 2 行。
+        assert_eq!((removed_activities, removed_memberships), (1, 2));
+        assert_eq!(
+            store.orphaned_activity_counts().unwrap(),
+            (0, 0),
+            "修剪后无孤儿行"
+        );
+        // 合法投影原样保留。
+        let rows = activity_rows(&store);
+        assert_eq!(rows.len(), 1, "合法活动行必须保留");
+        assert_eq!(rows[0].0, live_msg.as_str());
+        {
+            let conn = store.conn.borrow();
+            let live_claims: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM tool_activity_membership
+                     WHERE source_path = 'live.jsonl'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(live_claims, 1, "合法 claim 必须保留");
+        }
+        assert_eq!(
+            store.active_generation().unwrap(),
+            generation_before + 1,
+            "修剪走 rebuild 同款 generation 纪律：恰好推进一次"
+        );
+
+        // 幂等收敛：无孤儿时修剪是 no-op，不再推进 generation。
+        let (again_activities, again_memberships) = store.purge_orphaned_activities().unwrap();
+        assert_eq!((again_activities, again_memberships), (0, 0));
+        assert_eq!(
+            store.active_generation().unwrap(),
+            generation_before + 1,
+            "空跑修剪不得产生 generation churn"
+        );
+    }
+
+    #[test]
+    fn purge_leaves_catalog_fts_and_search_projections_unchanged() {
+        // 修剪的不变量：除悬空投影行外，catalog、消息 FTS、session 元数据
+        // 投影、合法 claim 逐行不变——修剪绝不能借机改写权威数据。
+        let store = SqliteStore::open_in_memory().unwrap();
+        let session = sid(IdKind::Session, b"invariant-session");
+        let document = sid(IdKind::Document, b"invariant-document");
+        let message = sid(IdKind::Message, b"invariant-message");
+        let full = source_batch(
+            "invariant.jsonl",
+            vec![
+                entity_entry(&session),
+                typed_document_entry(&document),
+                typed_message_entry(&message, "invariant searchable body"),
+            ],
+            vec![placement(&session, &document, &message, 0, false, None)],
+            Vec::new(),
+            true,
+        );
+        assert!(store.commit_source_batches_if_changed(&[full]).unwrap());
+        assert!(store.query("invariant", 10).unwrap().len() == 1);
+
+        // 孤儿活动（锚点悬空）+ 孤儿成员（claim 悬空）。
+        {
+            let conn = store.conn.borrow();
+            conn.execute(
+                "INSERT INTO tool_activities(
+                     activity_id, message_id, kind, actor, name, target, status
+                 ) VALUES('act_v1_orphan', 'msg_v1_deadbeefdeadbeef',
+                          'command', 'main', 'Ghost', NULL, 'success')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO tool_activity_membership(source_path, activity_id)
+                 VALUES('ghost.jsonl', 'act_v1_ghostclaim')",
+                [],
+            )
+            .unwrap();
+        }
+        let catalog_before = store.list(usize::MAX).unwrap();
+        let session_fts_snapshot = |store: &SqliteStore| -> Vec<(String, String)> {
+            let conn = store.conn.borrow();
+            let mut stmt = conn
+                .prepare("SELECT session_wire, text FROM session_fts ORDER BY session_wire")
+                .unwrap();
+            stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+        };
+        let session_fts_before = session_fts_snapshot(&store);
+        assert!(!session_fts_before.is_empty(), "session 元数据投影必须有行");
+
+        let (removed_activities, removed_memberships) = store.purge_orphaned_activities().unwrap();
+        assert_eq!((removed_activities, removed_memberships), (1, 1));
+
+        // catalog 逐行不变（权威数据）。
+        assert_eq!(store.list(usize::MAX).unwrap(), catalog_before);
+        // 消息 FTS 不变：既有查询仍命中且仅命中同一集合。
+        assert_eq!(store.query("invariant", 10).unwrap().len(), 1);
+        assert!(store.query("Ghost", 10).unwrap().is_empty());
+        // session 元数据投影逐行不变。
+        let session_fts_after = session_fts_snapshot(&store);
+        assert_eq!(session_fts_after, session_fts_before);
+        assert_eq!(
+            store.orphaned_activity_counts().unwrap(),
+            (0, 0),
+            "修剪后无孤儿行"
+        );
     }
 
     // ---- 活动 facet 查询（v12）----

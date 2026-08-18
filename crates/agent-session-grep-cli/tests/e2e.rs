@@ -1227,6 +1227,86 @@ fn doctor_with_db_reports_generation_and_recovery_evidence() {
         "干净库不应有待收敛 intent: {}",
         stdout(&out)
     );
+    // 工具活动保留策略证据：干净库无孤儿投影行。
+    assert_eq!(
+        frame["data"]["orphaned_tool_activities"],
+        0,
+        "干净库不应有孤儿活动行: {}",
+        stdout(&out)
+    );
+    assert_eq!(
+        frame["data"]["orphaned_activity_memberships"],
+        0,
+        "干净库不应有孤儿成员行: {}",
+        stdout(&out)
+    );
+}
+
+#[test]
+fn doctor_reports_orphaned_tool_activities_and_purge_removes_them() {
+    // 工具活动保留策略端到端：doctor 报出孤儿投影行（活动锚点悬空 / claim
+    // 悬空），`index purge-activities` 确定性修剪且不触碰 catalog/FTS。
+    let (_dir, db) = temp_db("purge-activities");
+    let out = run(&db, &["index", "d1", "purge evidence content"]);
+    assert!(out.status.success());
+
+    // 写路径同事务保证无法产生孤儿行：直接 SQL 构造漂移状态（模拟
+    // 裸批/历史遗留），然后闭合 db。
+    {
+        let conn = Connection::open(&db).expect("open db for orphan fixture");
+        conn.execute(
+            "INSERT INTO tool_activities(
+                 activity_id, message_id, kind, actor, name, target, status
+             ) VALUES('act_v1_orphan', 'msg_v1_deadbeefdeadbeef',
+                      'command', 'main', 'Ghost', NULL, 'success')",
+            [],
+        )
+        .expect("insert orphan activity");
+        conn.execute(
+            "INSERT INTO tool_activity_membership(source_path, activity_id)
+             VALUES('ghost.jsonl', 'act_v1_ghostclaim')",
+            [],
+        )
+        .expect("insert orphan membership");
+    }
+
+    // doctor 如实报出两类孤儿行。
+    let out = run(&db, &["doctor"]);
+    assert!(out.status.success(), "doctor failed: {}", stdout(&out));
+    let frame = parse_first_line(&out);
+    assert_envelope_shape(&frame, true);
+    assert_eq!(frame["data"]["orphaned_tool_activities"], 1, "{frame}");
+    assert_eq!(frame["data"]["orphaned_activity_memberships"], 1, "{frame}");
+
+    // 修剪：删除两类孤儿行各 1，generation 恰好推进一次。
+    let out = run(&db, &["index", "purge-activities"]);
+    assert!(out.status.success(), "purge failed: {}", stdout(&out));
+    let frame = parse_first_line(&out);
+    assert_envelope_shape(&frame, true);
+    assert_eq!(frame["data"]["removed_activities"], 1, "{frame}");
+    assert_eq!(frame["data"]["removed_memberships"], 1, "{frame}");
+    assert_eq!(frame["data"]["generation"], 2, "{frame}");
+
+    // 修剪后 doctor 归零；catalog/FTS 原样（搜索仍命中同一内容）。
+    let out = run(&db, &["doctor"]);
+    let frame = parse_first_line(&out);
+    assert_eq!(frame["data"]["orphaned_tool_activities"], 0, "{frame}");
+    assert_eq!(frame["data"]["orphaned_activity_memberships"], 0, "{frame}");
+    let out = run(&db, &["search", "evidence"]);
+    assert!(out.status.success(), "search failed: {}", stdout(&out));
+    let frame = parse_first_line(&out);
+    assert_eq!(
+        frame["data"]["hits"].as_array().map(Vec::len),
+        Some(1),
+        "{frame}"
+    );
+
+    // 幂等收敛：无孤儿时空跑不推进 generation（无 journal churn）。
+    let out = run(&db, &["index", "purge-activities"]);
+    let frame = parse_first_line(&out);
+    assert_eq!(frame["data"]["removed_activities"], 0, "{frame}");
+    assert_eq!(frame["data"]["removed_memberships"], 0, "{frame}");
+    assert_eq!(frame["data"]["generation"], 2, "{frame}");
 }
 
 #[test]

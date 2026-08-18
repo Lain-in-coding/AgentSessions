@@ -944,6 +944,7 @@ COMMANDS:
     index <id-fact> <text> 直接写入一条 catalog + 索引（切片期写入入口）
     index rebuild          从权威 catalog 全量重投影 FTS 索引（维护命令）
     index embeddings       从权威 catalog 构建语义向量索引（semantic/hybrid 检索前置）
+    index purge-activities 修剪孤儿工具活动行（无 catalog 消息的活动/悬空 claim；维护命令）
     search <query>         全文检索，按相关性降序返回命中（支持分页/预算/过滤 flag）
     handoff <query>        检索并为查询生成 handoff pack（原文证据 + 建议命令；dry-run）
     get-message <msg-id>   返回命中消息及其同会话主线邻居（--session/--around）
@@ -1270,6 +1271,11 @@ fn doctor(
             let interrupted = store
                 .interrupted_batch_count()
                 .map_err(ProtocolError::from)?;
+            // 工具活动保留策略证据（v12）：孤儿投影行计数。>0 时用
+            // `index purge-activities` 确定性修剪（catalog/FTS 不受影响）。
+            let (orphaned_tool_activities, orphaned_activity_memberships) = store
+                .orphaned_activity_counts()
+                .map_err(ProtocolError::from)?;
             serde_json::json!({
                 "tool": env!("CARGO_PKG_NAME"),
                 "version": env!("CARGO_PKG_VERSION"),
@@ -1281,6 +1287,8 @@ fn doctor(
                 "tool_activity_storage": true,
                 "generation": generation,
                 "interrupted_batches": interrupted,
+                "orphaned_tool_activities": orphaned_tool_activities,
+                "orphaned_activity_memberships": orphaned_activity_memberships,
             })
         }
     };
@@ -1551,6 +1559,27 @@ fn dispatch(
                     data,
                     protocol::Page::default(),
                     warnings,
+                ))
+            } else if rest.get(1).map(String::as_str) == Some("purge-activities") {
+                // 工具活动保留策略（v12）的维护命令：确定性修剪孤儿活动行
+                // （无 catalog 消息的活动、指向不存在活动的 claim）。与
+                // `index rebuild` 同一 writer lease/CAS 纪律；无孤儿时不写库。
+                // 活动行是 catalog 的投影，修剪绝不触碰 catalog/FTS。
+                no_extra_args(rest, 1, "index purge-activities")?;
+                let (removed_activities, removed_memberships) = store
+                    .purge_orphaned_activities()
+                    .map_err(ProtocolError::from)?;
+                let generation = store.active_generation().map_err(ProtocolError::from)?;
+                Ok((
+                    "index.purge-activities",
+                    protocol::Outcome::Success,
+                    serde_json::json!({
+                        "removed_activities": removed_activities,
+                        "removed_memberships": removed_memberships,
+                        "generation": generation,
+                    }),
+                    protocol::Page::default(),
+                    Vec::new(),
                 ))
             } else {
                 no_extra_args(rest, 2, "index <id-fact> <text>")?;

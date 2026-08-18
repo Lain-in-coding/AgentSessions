@@ -724,6 +724,8 @@ impl McpServer<'_> {
         let schema = self.store.schema_version().map_err(business)?;
         let generation = self.store.active_generation().map_err(business)?;
         let interrupted = self.store.interrupted_batch_count().map_err(business)?;
+        let (orphaned_tool_activities, orphaned_activity_memberships) =
+            self.store.orphaned_activity_counts().map_err(business)?;
         Ok(success_payload(
             Outcome::Success,
             json!({
@@ -733,6 +735,8 @@ impl McpServer<'_> {
                 "schema": schema,
                 "generation": generation,
                 "interrupted_batches": interrupted,
+                "orphaned_tool_activities": orphaned_tool_activities,
+                "orphaned_activity_memberships": orphaned_activity_memberships,
             }),
             &protocol::Page::default(),
             &[],
@@ -2681,6 +2685,8 @@ mod tests {
         assert!(data["schema"].is_number());
         assert!(data["generation"].is_number());
         assert_eq!(data["interrupted_batches"], 0);
+        assert_eq!(data["orphaned_tool_activities"], 0);
+        assert_eq!(data["orphaned_activity_memberships"], 0);
     }
 
     #[test]
