@@ -514,7 +514,7 @@ fn run(
     // catalog 与 index 是同一个 SqliteStore；App 泛型接受同一实例的两次移动，
     // 故这里克隆一个连接语义上的第二把手不可行——改为让 App 持有单一 store。
     let (command, outcome, mut data, page, warnings) =
-        dispatch(&store, &db, &rest, mode, request_id, offline)?;
+        dispatch(&store, &db, db_origin, &rest, mode, request_id, offline)?;
     if mode == protocol::OutputMode::Human {
         attach_empty_catalog_hint(&store, command, &mut data, &db, db_origin)?;
     }
@@ -1694,6 +1694,7 @@ fn offline_capability_gate(offline: bool, capability: &str) -> Result<(), CliErr
 fn dispatch(
     store: &SqliteStore,
     db: &str,
+    db_origin: DbOrigin,
     rest: &[String],
     mode: protocol::OutputMode,
     request_id: Option<&str>,
@@ -2004,7 +2005,7 @@ fn dispatch(
             };
             let (outcome, mut data, page, warnings) = render(response);
             if mode == protocol::OutputMode::Human {
-                attach_session_resume_rows(store, &mut data)?;
+                attach_session_resume_rows(store, &mut data, db, db_origin)?;
             }
             // Robot/机器面如实回显本次应用的 facet（默认值不回显——输出字节不变）。
             if !facets.is_default() {
@@ -3010,9 +3011,19 @@ fn attach_empty_catalog_hint(
 /// 日期取该 Session 最近活动 timestamp 的 `YYYY-MM-DD`（批量一次查询，无 N+1）；
 /// 标题取当前页中该 Session 的最高相关度命中 `text`——标题跟随搜索排序，
 /// 与“相关度优先”不变量一致。两者缺失渲染为 `—`。
+///
+/// Session ID 列渲染 **canonical `ses_v1_…`**（M2P-1）。此前填的是
+/// `provider_session_id`（provider 原生 id），而 `context`/`show`/
+/// `get-session-resume` 只认 canonical id——照抄表格里的 id 会得到
+/// `not a valid session id` exit 2，等于把 help 承诺的
+/// "search → show → context" 数据流在 human 输出上截断。
+/// canonical id 才是 catalog 身份（ADR-0009 / `CONTEXT.md` 双 id 规则），
+/// provider 原生 id 只在 `resume` / `get-session-resume` 的输出里出现。
 fn attach_session_resume_rows(
     store: &SqliteStore,
     data: &mut serde_json::Value,
+    db: &str,
+    origin: DbOrigin,
 ) -> Result<(), CliError> {
     let Some(hits) = data.get("hits").and_then(serde_json::Value::as_array) else {
         return Ok(());
@@ -3049,14 +3060,60 @@ fn attach_session_resume_rows(
                 "provider": metadata.provider_id,
                 "title": title,
                 "working_directory": metadata.original_working_directory,
-                "session_id": metadata.provider_session_id,
+                // canonical id：`context`/`show`/`get-session-resume` 唯一接受的形状。
+                // provider 原生 id 不进表格——需要它的 resume 场景由
+                // `resume <canonical>` / `get-session-resume <canonical>` 解析。
+                "session_id": session_wire,
             })
         })
         .collect();
+    // 表格下方的下一步命令（M2P-1）：canonical id 已在 robot envelope 的
+    // suggested_next_commands 里拼成完整命令，human 模式此前从不打印它。
+    // 显式 `--db` 时补上同一路径，否则复制出来的命令会指向默认库。
+    let next_commands = human_next_commands(hits, db, origin);
     if let Some(object) = data.as_object_mut() {
         object.insert("session_resume_rows".into(), serde_json::Value::Array(rows));
+        if !next_commands.is_empty() {
+            object.insert(
+                "suggested_next_commands_human".into(),
+                serde_json::json!(next_commands),
+            );
+        }
     }
     Ok(())
+}
+
+/// 取当前页最相关命中的建议命令，并按需插入 `--db <path>`。
+///
+/// Application 生成的命令以 `agent-session-grep` 开头且不带 `--db`（对默认库正确）。
+/// 调用方给了显式 `--db` 时必须把同一路径补进去——否则提示会指向另一个库。
+fn human_next_commands(hits: &[serde_json::Value], db: &str, origin: DbOrigin) -> Vec<String> {
+    let prefix = db_flag_prefix(db, origin);
+    hits.iter()
+        .filter_map(|hit| {
+            hit.get("suggested_next_commands")
+                .and_then(serde_json::Value::as_array)
+        })
+        .find(|commands| !commands.is_empty())
+        .map(|commands| {
+            commands
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(|command| insert_db_flag(command, &prefix))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// 在建议命令的二进制名之后插入 `--db <path> `（前缀为空时原样返回）。
+fn insert_db_flag(command: &str, prefix: &str) -> String {
+    if prefix.is_empty() {
+        return command.to_string();
+    }
+    match command.split_once(' ') {
+        Some((binary, rest)) => format!("{binary} {prefix}{rest}"),
+        None => command.to_string(),
+    }
 }
 
 /// 组合根持有的 provider adapter 清单。ingest/sync 用它 probe-select，
@@ -5480,6 +5537,7 @@ mod tests {
         let (command, outcome, data, _, _) = dispatch(
             &store,
             "test.db",
+            DbOrigin::Flag,
             &["search".into(), "foo".into()],
             protocol::OutputMode::Json,
             None,
@@ -5494,6 +5552,7 @@ mod tests {
         let error = dispatch(
             &store,
             "test.db",
+            DbOrigin::Flag,
             &["sync".into(), dir.clone()],
             protocol::OutputMode::Json,
             None,
@@ -5582,6 +5641,7 @@ mod tests {
             let error = dispatch(
                 &store,
                 "test.db",
+                DbOrigin::Flag,
                 &[cmd.into(), wire.into()],
                 protocol::OutputMode::Human,
                 None,
@@ -5606,6 +5666,7 @@ mod tests {
         let error = dispatch(
             &store,
             "test.db",
+            DbOrigin::Flag,
             &["sync".into(), dir_str.clone()],
             protocol::OutputMode::Json,
             None,
@@ -5631,6 +5692,7 @@ mod tests {
         let error = dispatch(
             &store,
             "test.db",
+            DbOrigin::Flag,
             &["sync".into(), "--discover".into(), "--bogus".into()],
             protocol::OutputMode::Json,
             None,
@@ -5662,6 +5724,7 @@ mod tests {
         let (command, outcome, data, _, _) = dispatch(
             &store,
             "test.db",
+            DbOrigin::Flag,
             &[
                 "search".into(),
                 "foo".into(),

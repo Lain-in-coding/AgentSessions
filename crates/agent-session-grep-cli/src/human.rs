@@ -330,10 +330,30 @@ fn render_search(data: &Value) -> Vec<String> {
                     .to_string(),
             })
             .collect();
-        return render_session_resume_table(&rows)
+        let mut lines: Vec<String> = render_session_resume_table(&rows)
             .lines()
             .map(str::to_string)
             .collect();
+        // 表格下方给出可直接执行的下一步命令（M2P-1）：Session ID 列是 canonical
+        // `ses_v1_…`，这些命令用的是同一个 id，照抄即通。
+        let commands = data
+            .get("suggested_next_commands_human")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let commands: Vec<&str> = commands
+            .iter()
+            .filter_map(Value::as_str)
+            .filter(|command| !command.is_empty())
+            .collect();
+        if !commands.is_empty() {
+            lines.push(String::new());
+            lines.push("Next:".into());
+            for command in commands {
+                lines.push(format!("  {}", sanitize(command)));
+            }
+        }
+        return lines;
     }
     let hits = data
         .get("hits")
@@ -709,6 +729,10 @@ pub struct SessionResumeTableRow {
     pub provider: String,
     pub title: Option<String>,
     pub working_directory: Option<String>,
+    /// Canonical `ses_v1_…`——catalog 身份，`context`/`show`/`get-session-resume`
+    /// 唯一接受的形状（M2P-1：此列过去填的是 provider 原生 id，喂给 context 会被拒）。
+    /// provider 原生 id 不进本表：需要它的场景（resume）由 `resume <canonical>` 与
+    /// `get-session-resume <canonical>` 从同一个 canonical id 解析出来。
     pub session_id: String,
 }
 
@@ -736,6 +760,8 @@ struct PreparedResumeRow {
 /// 渲染一组会话 Resume 元数据为横向表格（ADR-0009）：
 /// `日期 | Provider | 会话标题 | 工作目录 | Session ID`。
 ///
+/// - Session ID 列是 canonical `ses_v1_…`——可直接复制给 `context`/`show`/
+///   `get-session-resume`（M2P-1）。
 /// - Provider 与 Session ID 永不截断；标题超长尾部省略（`…`）、工作目录超长
 ///   中间折叠（如 `C:/…/agent-session-grep`）；缺失值统一渲染 `—`；
 ///   newline/tab 清洗为空格；CJK 按显示宽度 2 对齐。

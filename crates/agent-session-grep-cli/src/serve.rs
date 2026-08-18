@@ -747,6 +747,10 @@ pub fn route_request(
     match crate::dispatch(
         store,
         db,
+        // serve 只输出 JSON envelope，而 DbOrigin 只影响 human 模式的提示文案
+        // （是否要在建议命令里带 `--db <path>`）。serve 启动时 db 路径已解析完毕，
+        // 按显式路径处理即可——这里的取值不会出现在任何响应里。
+        crate::DbOrigin::Flag,
         &args,
         crate::protocol::OutputMode::Json,
         None,
