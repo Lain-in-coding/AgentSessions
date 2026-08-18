@@ -166,10 +166,40 @@ provider 只有合成 fixture,格式来自同类项目的格式证据,**未经�
 
 | 项 | 状态 | 影响 |
 |---|---|---|
-| GitHub Actions | **全线阻塞**:所有 job 5 秒内 0 步失败,账户级 "recent account payments have failed" | 无法自动防性能回退、无法跨平台测试、release 流水线无成功 named run |
+| GitHub Actions | **全线阻塞**:所有 job 5 秒内 0 步失败,账户级 "recent account payments have failed **or your spending limit needs to be increased**" | 无法自动防性能回退、无法跨平台测试、release 流水线无成功 named run |
 | macOS 干净环境演练 | 未跑(owner 在 Windows 11) | 三平台演练不完整 |
 | 代码签名/公证/cosign | 无凭据 | 无签名二进制 |
 | 12 个 provider 真实样本 | 未收集 | provider 无法诚实升 Beta |
+
+#### 1.9.1 CI 阻塞的真实根因(已查实,与三个假设都不同)
+
+**不是封号、不是中国网络、不是账号问题 —— 是两个仓库都是 private,
+GitHub Free 私有仓库的 2,000 min/月 配额被烧穿了。**
+
+按官方倍率(Linux 1x / Windows 2x / macOS **10x**)加总两个仓库所有 run:
+
+| 仓库 | Linux | Windows(×2) | macOS(×10) | 计费等效 |
+|---|---:|---:|---:|---:|
+| `agent-session-grep` | 134.6 | 238.9 | **3,134** | 3,508 min |
+| `AgentSessions` | 258.9 | 628.4 | **3,001** | 3,889 min |
+| 合计 | | | | **≈7,397 min** |
+
+配额 2,000 min/月,**超了 3.7 倍。macOS 占 83%**(10 倍倍率)。
+时间线吻合:最后一次成功 run `2026-08-18T06:47:41Z`(core-beta-evidence
+四平台全绿),第一次 0-step 失败 `2026-08-18T12:20:19Z`。
+
+**解法:public 仓库的标准 runner 免费且无限。** 官方文档原文:
+"Use of the standard GitHub-hosted runners is **free and unlimited on
+public repositories**"。2025-12 定价变更公告重申
+"Runner usage in public repositories will remain free"。
+额外红利:public 仓库拿到 **4-core/16GB** 机器(private 只有 2-core/8GB),
+CI 更快。
+
+**即:owner 本来的发布计划本身就解锁了 CI。** 这条与 D1 完全同向。
+
+**并发墙仍在**(Free plan):20 并发 job、**5 并发 macOS**、
+256 matrix job per run。当前 `ci.yml` 与 `core-beta-evidence.yml`
+各自都开三平台/四目标 matrix,叠加会撞 macOS 上限 —— 见 M2C-3。
 
 ## 2. 已锁定决策(owner 在 2026-08-18 拷问中逐条确认 —— 不要重开)
 
@@ -205,12 +235,34 @@ provider 只有合成 fixture,格式来自同类项目的格式证据,**未经�
   每条结果显示来源项目**,收窄用 `--project`。正在调研 13 个同类项目与
   atuin 的实际做法(atuin 有 session/directory/host/global 循环过滤模式,
   且默认档位改过 —— 那个改动方向是最强信号)。调研回来后确认再落 ADR。
-- **Q9 CI 方案** — owner 问了三件事:能否注册多个 GitHub 账号(需查 ToS 与
-  封号风险)、CI 是否必须绑一个账号(**关键:公开仓库的 Actions 分钟数是否免费
-  无限 —— 若是,则转公开本身就解锁了 CI**)、能否从 linux.do 论坛买 CI
-  (需评估凭据泄露与供应链风险)。调研中。
 - **provider 真实样本获取路径** — 16 个 provider 逐个给"自己生成/花钱买/
   拿不到"的判定与操作步骤。调研中。
+- **M4-11 文档语言方针** — 用户可见输出全改英文 / 双语 / 明确中文优先。
+  选第一个是最大的一次改写。
+
+### 2.2 CI 决策(已查实,D22-D25)
+
+| # | 决策 | 依据 |
+|---|---|---|
+| D22 | **不注册第二个 GitHub 账号。** ToS B.3 明文 "you may not have more than one free Account";Additional Product Terms → Actions 写明滥用可致 "suspension or termination of your GitHub account"。**而且根本解决不了问题** —— 官方:"Minutes usage is charged to **the repository owner**",新账号只有整体搬仓库才有用,那等于放弃已准备公开的身份。**高风险 + 零收益。** | owner 问过,答案是不要 |
+| D23 | **不用 linux.do 或任何第三方的 CI 账号/runner。** runner registration token 等价于代码执行权 + 仓库写权限:对方能拿到 `GITHUB_TOKEN`、所有 secrets、以及构建产物的完整控制权 —— 对一个别人会 `cargo install` 的项目是教科书级供应链投毒入口。linux.do 社区规则第一条自己就写"勿外借、买卖账号"。同样零收益。 | owner 问过,答案是强烈反对 |
+| D24 | **public 仓库上绝不挂 self-hosted runner。** GitHub secure-use 官方原文:"self-hosted runners should **almost never** be used for public repositories, because any user can open pull requests against the repository and compromise the environment"。Legit Security 扫到 43,803 个公开仓库这么干,Sysdig 记录了 Shai-Hulud 用这条路径植入后门的真实案例。owner 的 Windows 11 主机上有真实 transcript 与 `.claude` 配置,不能暴露。 | 安全红线 |
+| D25 | **CI 解法 = 转 public(免费无限)+ 砍 PR 上的 macOS job + Actions budget 设 $5 兜底。** 预期成本 $0,耗时 1 小时内,且与 D1 完全同向。 | 见 §1.9.1 |
+
+**替代平台已全部评估过,没有一个能提供 "免费 + 三平台 + 含 macOS" 的组合**:
+Cirrus CI **已停服**(2026-06-01,Cirrus Labs 加入 OpenAI);Travis OSS 免费层
+2020 年就没了;GitLab CI Free 只有 400 min/月(macOS 6-12x 倍率,等于没有);
+CircleCI 的 OSS 额度**只覆盖 Linux/Arm/Docker,不含 macOS**;
+Codeberg CI 官方明确"不跑专有操作系统,不会支持 Windows";
+自建 Forgejo/Woodpecker 换来运维成本且 macOS 仍无解。
+
+**macOS 无 Mac 的选项**(万一将来脱离 GitHub):public 仓库 GitHub-hosted
+macOS **$0**(`macos-15-intel` + `macos-15` M1 已在 workflow 里配好且历史跑绿过);
+Scaleway Mac mini M1 €0.11/hr 但**最低租 24h**(Apple 授权限制)→ 单次最少
+≈€2.6,整月 ≈€79;MacStadium $109/月起。偶发使用的经济学很清楚。
+
+⚠️ **自建 runner 免费是"被推迟"不是"被取消"** —— GitHub changelog 明说
+control plane 免费 "not sustainable long term",别把长期架构押在上面。
 
 ## 3. 发布门(全部为真才把仓库转 PUBLIC 并发 v0.2.0)
 
@@ -240,9 +292,15 @@ ADR/REUSE 正式签字、SBOM 认证。
 
 ## 4. 里程碑与任务
 
-顺序按 D16:**M0 → M1 → M2P → M2 → M3 → M4 → M5**。M0 可与 M1 并行(纯清理);
-M2P 是"首次运行正确性",属正确性范畴,可与 M1 并行,**必须早于 M2**
-(优化一个新用户跑不通的流程没有意义)。
+顺序按 D16:**M0 → M1 → M2P → M2C → M2 → M3 → M4 → M5**。
+M0 可与 M1 并行(纯清理);M2P 是"首次运行正确性",属正确性范畴,
+可与 M1 并行,**必须早于 M2**(优化一个新用户跑不通的流程没有意义)。
+M2C 是 CI 解锁,**M2-2 的阀值要绑 CI 就得先有 CI**;但 M2C-2 依赖 M5-5
+转 public,而转 public 又要求发布门全绿 —— 所以实际执行顺序是:
+先做 M2C-1(budget 兜底)与 M2C-3(砍 macOS matrix),
+M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
+若 M2C-1 也走不通(加不了支付方式),M2 的阀值先在本地跑并记录为
+`locally_verified`,转 public 后再升 `ci_verified`。
 每个任务独立成 worktree + 分支,完成后合回 `main`(私有仓库)。
 
 ---
@@ -597,7 +655,55 @@ M2P 是"首次运行正确性",属正确性范畴,可与 M1 并行,**必须早�
   **修法**:从用户 help 移除(保留命令供测试用,或加 `--force-dev` 门)。
   **验收**:`--help` 不再公布;误用有防护。
 
-<!-- M2-ANCHOR -->
+---
+
+### M2C — CI 解锁(D25,**M2 的前置**:阀值要绑 CI 就得先有 CI)
+
+> 根因见 §1.9.1:不是封号,是私有仓库 2,000 min/月 配额被 macOS 的 10 倍
+> 倍率烧穿。public 仓库标准 runner 免费无限。
+
+- [ ] **M2C-1 Actions budget 从 $0 调到 $5(兜底,5 分钟)**
+  $0 预算 + "stop usage" 是硬停机制,这是**立即解锁**开关,也是 public
+  方案万一不生效时的兜底。public 仓库用量走 100% 折扣,不会真扣钱。
+  前提:账上有可用支付方式。owner 在中国,如果加不了国际卡这条走不通 ——
+  那就只能靠 M2C-2 + 走 GitHub Support 清 billing flag
+  (community discussion #184661 的当事人联系 support 后 flag 被清掉)。
+  **验收**:budget > $0;推一个一步 workflow 验证能跑起来。
+
+- [ ] **M2C-2 转 public 后验证 CI 解锁(依赖 M5-5)**
+  ⚠️ **顺序硬约束:必须先完成公开树导出与隐私核验,再转 public。**
+  转 public 是**不可逆的暴露**(fork / 缓存 / 第三方镜像),
+  且 `AgentSessions` 私有仓库有 344 个 run 的历史。
+  转 public 后先推一个一步 workflow 验证解锁,再谈跑完整 matrix。
+  **诚实风险**:少数案例(community discussions #184077、#188932、#180456)
+  报告 billing lock 在 public 仓库上也没解开且拖了数月 —— 但那些是另一句
+  更硬的报错("account is locked due to a billing issue"),
+  owner 拿到的是 spending-limit 那句;#183940 里同样报错的用户把 spending
+  limit 从 $0 调到 >$0 后立刻恢复。
+  **验收**:public 仓库上一个 workflow 真实跑完并绿。
+
+- [ ] **M2C-3 砍 PR 上的 macOS job(即便免费了也该做)**
+  macOS 占历史消耗 83%,且 Free plan 有 **5 并发 macOS job 上限**。
+  当前 `ci.yml` 和 `core-beta-evidence.yml` **各自**都开了三平台/四目标
+  matrix,两个 workflow 叠加会顶到并发墙。
+  改:macOS 只在 tag / push-to-main 上跑,PR 只跑 Linux + Windows。
+  **验收**:PR 触发的 job 数下降;matrix 不撞并发上限。
+
+- [ ] **M2C-4 转 public 后开启 fork PR 审批**
+  当前 `default_workflow_permissions: read` /
+  `can_approve_pull_request_reviews: false` 已是安全默认,**保持住**。
+  另外把 "Approval for running fork pull request workflows" 设为需要审批。
+  **验收**:fork PR 不会未经审批就跑 workflow。
+
+- [ ] **M2C-5 四个动作的阀值接进 CI(D3,依赖 M2C-2 与 M2-2)**
+  M2-2 产出的 harness 接进 workflow,阀值不过就 fail。
+  注意 artifact **只留 7 天**,`ci_verified` 的可复核性天然弱于
+  `locally_verified` —— 继续保持
+  `core-beta-evidence-matrix.md` 里那个状态词区分。
+  **验收**:性能回退能被 CI 自动拦住。
+
+---
+
 ### M2 — 性能(D2/D3/D4,四个瓶颈全修)
 
 - [ ] **M2-1 合成语料生成器扩到 10 万条(D5)**
@@ -843,6 +949,9 @@ M2P 是"首次运行正确性",属正确性范畴,可与 M1 并行,**必须早�
 - [ ] **M5-5 仓库转 PUBLIC**
   `gh repo edit qin-devs/agent-session-grep --visibility public --accept-visibility-change-consequences`
   **这是唯一需要 owner 明确点头的动作 —— 不要自主执行。**
+  ⚠️ **不可逆**:转 public 后 fork / 缓存 / 第三方镜像会永久留存内容。
+  前置:M5-1 发布门全绿 + M5-2 对抗性审计无 P0/P1 + M5-3 公开树导出干净。
+  转完立刻做 M2C-2(验证 CI 解锁)与 M2C-4(fork PR 审批)。
   **验收**:owner 确认后执行并验证 `visibility: PUBLIC`。
 
 ## 5. 关键坑与约束(踩过的,别再踩)
@@ -901,10 +1010,10 @@ M2P 是"首次运行正确性",属正确性范畴,可与 M1 并行,**必须早�
 - [ ] **provider 真实样本获取路径表** — 16 个 provider 的
   "自己生成/花钱买/拿不到"判定 + 逐个操作步骤 + 工时估算。
   填入后 M1-3 才能执行。
-- [ ] **CI 方案结论** — 多账号 ToS 风险、公开仓库是否免费无限分钟数
-  (若是则转公开本身解锁 CI)、自建 runner 的公开仓库安全风险、
-  linux.do 买 CI 的风险评估、macOS CI 的现价选项。
-  填入后 M2-2 的"绑进 CI"才有落点。
+- [x] **CI 方案结论** — 已回报并落地为 D22-D25 与 M2C-1..5。
+  根因不是封号也不是中国网络:私有仓库 2,000 min/月 配额被 macOS 的
+  10 倍倍率烧穿(两天 7,397 计费分钟,超 3.7 倍)。
+  **public 仓库标准 runner 免费无限 —— 转公开本身就是解法。**
 - [ ] **搜索作用域惯例调研** — 13 个同类项目 + atuin/mcfly/zoxide 的默认
   作用域与演变。填入后 M3-3 才能落 ADR。
 - [ ] **功能缺口完整清单** — 填入 M3-4。
@@ -918,7 +1027,8 @@ M2P 是"首次运行正确性",属正确性范畴,可与 M1 并行,**必须早�
 
 | 日期 | 任务 | 结论 | commit |
 |---|---|---|---|
-| 2026-08-18 | 文档/UX 审计 | 用真实二进制实测发现 11 条首次运行 P0/P1 功能缺陷(落为 M2P)+ 11 条文档缺口(落为 M4);最严重:human search 输出的 session id 喂给 context 会被拒、读命令打错路径静默建空库 | — |
+| 2026-08-18 | CI 调研 | 根因查实:不是封号/中国网络,是私有仓库 2000 min/月 配额被 macOS 10x 倍率烧穿(两天 7397 计费分钟)。public 仓库 runner 免费无限 → 转公开本身即解法。多账号与借用第三方 CI 均否决(ToS + 供应链风险 + 零收益) | — |
+| 2026-08-18 | 文档/UX 审计 | 用真实二进制实测发现 11 条首次运行 P0/P1 功能缺陷(落为 M2P)+ 11 条文档缺口(落为 M4);最严重:human search 输出的 session id 喂给 context 会被拒、读命令打错路径静默建空库 | `eeea337` |
 | 2026-08-18 | 规划 | 本文件建立;owner 拷问确认 D1-D21 共 21 条决策 | `af26bb6` |
 | 2026-08-18 | 发布后审计 | 发现内部过程泄漏(5 CRITICAL + 11 HIGH)与 3 处许可违规,已修;仓库转回 PRIVATE | `ff0838a` |
 | 2026-08-18 | v0.1.0 | tag + Release 发布(公开仓库,随后转回 PRIVATE) | `55648d6` |
