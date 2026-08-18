@@ -6172,6 +6172,11 @@ impl ContextGraphStore for SqliteStore {
     }
 }
 
+/// Session 元数据命中的身份对：`(代表消息或 Session 的 id_json, 代表消息 wire)`。
+/// 两者都可缺失——metadata-only session 无代表消息，`fts_ids` 边车被清空时无
+/// `id_json`（回退 `from_wire`，降级为 Unstable）。
+type SessionMetadataIdentity = (Option<String>, Option<String>);
+
 /// Session 的代表消息：源顺序最前的非 system/developer 消息（相关子查询，
 /// 关联 `sfi.session_wire`）。R2 的系统噪声约定与 Application 侧一致。
 ///
@@ -6399,7 +6404,7 @@ impl SqliteStore {
     fn session_metadata_identities(
         conn: &Connection,
         session_wires: &[&str],
-    ) -> PortResult<BTreeMap<String, (Option<String>, Option<String>)>> {
+    ) -> PortResult<BTreeMap<String, SessionMetadataIdentity>> {
         let mut resolved = BTreeMap::new();
         for chunk in chunk_ids(session_wires) {
             let placeholders = in_placeholders(chunk.len());
@@ -8369,6 +8374,227 @@ mod tests {
     }
 
     #[test]
+    fn bm25_cutoff_probe_reads_no_content_column() {
+        // Regression guard for the cost this whole probe exists to avoid, in the
+        // same spirit as `candidate_rerank_query_plan_uses_the_wire_id_primary_key`:
+        // the wrong shape here is correct-but-slow and no behavioural test would
+        // notice. `id` is an fts5 content column, so naming it in `ORDER BY`
+        // makes SQLite read the whole fts5 content record (`id` plus the entire
+        // `text`) for every matching row just to feed the sorter — 47 ms against
+        // 7 ms on the frozen 100k corpus for a term matching 16k rows. The probe
+        // must therefore mention no content column at all, and the main query
+        // must carry the cutoff predicate that keeps the sorter bounded.
+        let store = SqliteStore::open_in_memory().unwrap();
+        for index in 0..40 {
+            let id = sid(IdKind::Message, format!("cutoff-{index}").as_bytes());
+            store.index(&id, "cutofftoken body").unwrap();
+        }
+
+        let mut cutoff = None;
+        let traced = traced_sql(&store, || {
+            let conn = store.conn.borrow();
+            cutoff = SqliteStore::bm25_cutoff(&conn, "fts", "\"cutofftoken\"", 5).unwrap();
+        });
+        let cutoff = cutoff.expect("40 rows match, so a 5th-best score exists");
+        let probe = traced
+            .iter()
+            .find(|sql| sql.contains("bm25(fts)"))
+            .expect("the probe statement must be traced");
+        assert!(
+            !probe.contains(" id") && !probe.contains("id,") && !probe.contains("text"),
+            "the cutoff probe must not touch an fts5 content column; that read is \
+             exactly the cost it exists to skip. Traced: {probe}"
+        );
+
+        // Every row the LIMIT could keep scores at or better than the k-th, so
+        // the predicate cannot drop a row that belonged in the window.
+        let conn = store.conn.borrow();
+        let kept: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM fts WHERE fts MATCH ?1 AND bm25(fts) <= ?2",
+                rusqlite::params!["\"cutofftoken\"", cutoff],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            kept >= 5,
+            "cutoff must admit at least the requested window, kept {kept}"
+        );
+    }
+
+    #[test]
+    fn bm25_cutoff_declines_when_fewer_rows_match_than_requested() {
+        // Fewer matches than `limit` means nothing can be cut; the caller must
+        // fall back to the plain query rather than filter against a bogus score.
+        let store = SqliteStore::open_in_memory().unwrap();
+        for index in 0..3 {
+            let id = sid(IdKind::Message, format!("scarce-{index}").as_bytes());
+            store.index(&id, "scarcetoken body").unwrap();
+        }
+        let conn = store.conn.borrow();
+        assert!(
+            SqliteStore::bm25_cutoff(&conn, "fts", "\"scarcetoken\"", 10)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            SqliteStore::bm25_cutoff(&conn, "fts", "\"scarcetoken\"", 3)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            SqliteStore::bm25_cutoff(&conn, "fts", "\"scarcetoken\"", 0)
+                .unwrap()
+                .is_none(),
+            "limit 0 has no k-th place"
+        );
+    }
+
+    #[test]
+    fn session_metadata_ranking_plan_carries_no_correlated_subquery() {
+        // Same class of guard. The ranking statement feeds `ORDER BY bm25 LIMIT`,
+        // and SQLite materializes the full SELECT list of every candidate row
+        // into the sorter — so a correlated subquery in that list runs once per
+        // candidate, not once per returned row. A common term matched 823
+        // sessions on the frozen 100k corpus, which is where the 31 ms went.
+        // Representative-message and dedup work now happens outside this
+        // statement, so its plan must contain no correlated subquery at all.
+        let store = SqliteStore::open_in_memory().unwrap();
+        let session = sid(IdKind::Session, b"plan-session");
+        let document = sid(IdKind::Document, b"plan-document");
+        let message = sid(IdKind::Message, b"plan-message");
+        let batch = SourceBatch {
+            source_path: "plan-source.jsonl".into(),
+            entries: vec![
+                entity_entry(&session),
+                typed_document_entry(&document),
+                typed_message_entry(&message, "plantoken body"),
+            ],
+            placements: vec![placement(
+                &session,
+                &document,
+                &message,
+                0,
+                false,
+                Some((0, 5)),
+            )],
+            edges: Vec::new(),
+            activities: Vec::new(),
+            relation_complete: true,
+            len_bytes: None,
+            fingerprint: None,
+            provider_id: None,
+            resume_claim: None,
+        };
+        store
+            .commit_source_batches_if_changed(std::slice::from_ref(&batch))
+            .unwrap();
+
+        let conn = store.conn.borrow();
+        let mut stmt = conn
+            .prepare(
+                "EXPLAIN QUERY PLAN
+                 SELECT sfi.session_wire, bm25(session_fts)
+                 FROM session_fts
+                 JOIN session_fts_ids sfi ON sfi.session_wire = session_fts.session_wire
+                 WHERE session_fts MATCH ?1
+                 ORDER BY bm25(session_fts), sfi.session_wire LIMIT ?2",
+            )
+            .unwrap();
+        let plan = stmt
+            .query_map(rusqlite::params!["\"plantoken\"", 11i64], |row| {
+                row.get::<_, String>(3)
+            })
+            .unwrap()
+            .map(Result::unwrap)
+            .collect::<Vec<_>>()
+            .join(" | ");
+        assert!(
+            !plan.contains("CORRELATED"),
+            "session ranking must not evaluate a correlated subquery per candidate \
+             row; representative and dedup resolution belong outside it. Got: {plan}"
+        );
+        assert!(
+            !plan.contains("message_placements"),
+            "session ranking must not reach into message_placements per candidate \
+             row: {plan}"
+        );
+    }
+
+    #[test]
+    fn session_metadata_statement_count_is_bounded_regardless_of_matching_sessions() {
+        // The dedup set and identity resolution are now chunked batch queries,
+        // so the statement count must stay flat as more sessions match. The old
+        // shape was a single statement whose per-row subqueries scaled with the
+        // candidate count — invisible to a statement counter but not to a plan
+        // assertion (above); this test pins the complementary property that
+        // splitting the work did not reintroduce an N+1.
+        let measure = |sessions: usize, label: &str| -> usize {
+            let store = SqliteStore::open_in_memory().unwrap();
+            let batches: Vec<SourceBatch> = (0..sessions)
+                .map(|index| {
+                    let session = sid(
+                        IdKind::Session,
+                        format!("{label}-session-{index}").as_bytes(),
+                    );
+                    let document = sid(
+                        IdKind::Document,
+                        format!("{label}-document-{index}").as_bytes(),
+                    );
+                    let message = sid(
+                        IdKind::Message,
+                        format!("{label}-message-{index}").as_bytes(),
+                    );
+                    SourceBatch {
+                        source_path: format!("{label}-{index}.jsonl"),
+                        entries: vec![
+                            entity_entry(&session),
+                            typed_document_entry(&document),
+                            typed_message_entry(&message, "counttoken body"),
+                        ],
+                        placements: vec![placement(
+                            &session,
+                            &document,
+                            &message,
+                            0,
+                            false,
+                            Some((0, 5)),
+                        )],
+                        edges: Vec::new(),
+                        activities: Vec::new(),
+                        relation_complete: true,
+                        len_bytes: None,
+                        fingerprint: None,
+                        provider_id: None,
+                        resume_claim: Some(SourceResumeClaim {
+                            provider_id: "synthetic".into(),
+                            session_id: session.as_str().into(),
+                            provider_session_id: Some(format!("counttoken-native-{index}")),
+                            provider_session_id_state: "resolved".into(),
+                            original_working_directory: None,
+                            original_working_directory_state: "unavailable".into(),
+                            pair_observed: true,
+                        }),
+                    }
+                })
+                .collect();
+            store.commit_source_batches_if_changed(&batches).unwrap();
+            counted_statements(&store, || store.query("counttoken", 10).unwrap())
+        };
+        let few = measure(20, "few");
+        let many = measure(400, "many");
+        assert_eq!(
+            few, many,
+            "a search must issue the same number of statements whether 20 or 400 \
+             sessions match: {few} -> {many}"
+        );
+        assert!(
+            many <= 8,
+            "a default search should stay within a handful of statements, got {many}"
+        );
+    }
+
+    #[test]
     fn f32_blob_round_trips_and_rejects_width_mismatch() {
         let values = [1.5f32, -2.25, 0.0];
         let bytes = f32_slice_to_bytes(&values);
@@ -8769,6 +8995,36 @@ mod tests {
 
     thread_local! {
         static TRACED_STATEMENTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        /// `traced_sql` 的收集缓冲：trace 回调必须是裸 fn 指针，无法捕获环境。
+        static TRACED_SQL: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// 在该 store 的连接上挂 `SQLITE_TRACE_STMT` 钩子执行 `run`，返回期间执行的
+    /// 用户层 SQL 原文（SQLite 内部语句以 `--` 开头，不收）。
+    pub(crate) fn traced_sql<R>(store: &SqliteStore, run: impl FnOnce() -> R) -> Vec<String> {
+        TRACED_SQL.with(|cell| cell.borrow_mut().clear());
+        {
+            let conn = store.conn.borrow();
+            conn.trace_v2(
+                rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
+                Some(collect_user_statement),
+            );
+        }
+        let result = run();
+        {
+            let conn = store.conn.borrow();
+            conn.trace_v2(rusqlite::trace::TraceEventCodes::empty(), None);
+        }
+        let _ = result;
+        TRACED_SQL.with(|cell| cell.borrow().clone())
+    }
+
+    fn collect_user_statement(event: rusqlite::trace::TraceEvent<'_>) {
+        if let rusqlite::trace::TraceEvent::Stmt(_stmt, sql) = event
+            && !sql.starts_with("--")
+        {
+            TRACED_SQL.with(|cell| cell.borrow_mut().push(sql.to_string()));
+        }
     }
 
     /// 在该 store 的连接上挂 `SQLITE_TRACE_STMT` 钩子执行 `run`,返回期间执行的
