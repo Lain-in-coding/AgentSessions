@@ -842,7 +842,7 @@ fn negotiate_version(requested: Option<&str>) -> &'static str {
     LATEST_PROTOCOL_VERSION
 }
 
-/// tools/list catalog: the eight MCP tools exposed by this build. Schema and
+/// tools/list catalog: the nine MCP tools exposed by this build. Schema and
 /// code-side validation remain aligned (`additionalProperties: false`).
 fn tool_catalog() -> Value {
     json!([
