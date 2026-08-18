@@ -240,7 +240,9 @@ ADR/REUSE 正式签字、SBOM 认证。
 
 ## 4. 里程碑与任务
 
-顺序按 D16:**M0 → M1 → M2 → M3 → M4 → M5**。M0 可与 M1 并行(纯清理)。
+顺序按 D16:**M0 → M1 → M2P → M2 → M3 → M4 → M5**。M0 可与 M1 并行(纯清理);
+M2P 是"首次运行正确性",属正确性范畴,可与 M1 并行,**必须早于 M2**
+(优化一个新用户跑不通的流程没有意义)。
 每个任务独立成 worktree + 分支,完成后合回 `main`(私有仓库)。
 
 ---
@@ -471,6 +473,131 @@ ADR/REUSE 正式签字、SBOM 认证。
 
 ---
 
+### M2P — 首次运行正确性(**审计新发现,优先级高于 M2,与 M1 并行**)
+
+> 文档/UX 审计用真实二进制在一次性伪 HOME 下逐条验证,发现五个 **P0**:
+> 它们不是文档问题,是**新用户第一次用就会被静默坑到**的功能缺陷。
+> 每条都有实测复现记录,不是推断。
+
+- [ ] **M2P-1 human 模式 search 输出的 Session ID 不可用(最伤信任)**
+  `human.rs:712-751` 的"Session ID"列填的是
+  `metadata.provider_session_id`(`main.rs:2854` 的 `attach_session_resume_rows`),
+  是 **provider 原生 id**;而 `context` / `show` / `get-session-resume` 全部
+  只认规范 id。实测:把表格里的 id 复制给 `context` →
+  `error [invalid_request]: not a valid session id`,退出 2。
+  而 `main.rs:947` 的 help 文本明确承诺
+  "search 返回命中消息 → show &lt;msg_id&gt; → context &lt;ses_id&gt;" ——
+  **这条被文档化的数据流从 human 输出出发根本走不通**。
+  规范 `ses_v1_...` 其实已经在 robot envelope 里(`suggested_next_commands`
+  连完整命令都拼好了),只是 human 模式从不显示。
+  `CONTEXT.md:228-236` 记录了双 id 规则,human 渲染器静默违反了它。
+  **修法**:human 表格渲染规范 `ses_v1_…`(或两列都给),并在表格下方打印
+  已算好的 `suggested_next_commands`。
+  **验收**:照抄 human 输出的 id 能直接跑通 `context`/`show`。
+
+- [ ] **M2P-2 读命令在路径打错时静默新建空库**
+  实测 `asg --db &lt;typo&gt;.db search hello` → `no hits`,退出 **0**,
+  并创建了一个 233 KB 的新库。search 是所有人第一个敲的命令,
+  打错一个字母就得到"干净的无结果",毫无警告。**这是最可能的静默失败。**
+  **修法**:读命令不建库;库不存在时报 `not_found`,消息里给出路径本身
+  和该跑的 `sync --discover` 完整命令。
+  **验收**:对不存在的库跑 search 报错且不留文件。
+
+- [ ] **M2P-3 `--db` 无默认值、无环境变量、config.toml 是死路(补强 D8/M3-1)**
+  `asg config paths` 打印 `config: .../AgentSessions/config.toml`
+  (`main.rs:871,887,911,927`),但**全仓库没有任何代码读这个文件** ——
+  grep 只命中这四处路径拼装。也没有 `ASG_DB` 之类环境变量。
+  更糟:`config paths` 报告的 data 目录**工具自己不会创建**,实测
+  `asg --db &lt;data&gt;\asg.db status` → `[catalog_error] 数据库内部错误`,
+  错误还反过来怪你路径写法;`mkdir` 之后同一命令立刻成功。
+  **修法**(按价值排序):(a) `--db` 默认 `&lt;data&gt;/asg.db` 且自动创建父目录;
+  (b) 支持 `ASG_DB`;(c) config.toml 要么真读要么别打印。
+  **验收**:全新环境 `asg search "x"` 无参数可跑;`config paths` 不撒谎。
+
+- [ ] **M2P-4 空库死胡同:三条命令都不提 `sync --discover`**
+  `search` → `no hits`(`human.rs:344-346`)、`list` → `catalog is empty`
+  (`human.rs:391`)、`status` → `entities: 0`。全新库上唯一正确的下一步动作
+  **一次都没被说出来**。
+  **修法**:`catalog_count == 0` 时打印
+  "索引为空 — 运行:asg --db &lt;path&gt; sync --discover"。
+  **验收**:三条命令在空库上都给出该提示。
+
+- [ ] **M2P-5 一个坏 `.jsonl` 让整个 discover 退出 2**
+  实测:放一个非法 jsonl 进 `~/.claude/projects/`,`sync --discover` 报
+  `no provider recognized this source; ...not a SQLite database (missing
+  magic header)` 并**整轮退出 2,零消息入库**。既泄漏 probe 内部细节,
+  又拿 SQLite 报错去怪一个文本文件。注意:**逐行**损坏已经按 D11 宽容处理了,
+  缺的是**逐源文件**的宽容。
+  **修法**:单个源无法识别时可恢复跳过 + 警告计数,与行级处理对齐。
+  **验收**:目录里混入垃圾文件后 discover 仍退出 0 并报告跳过数。
+
+- [ ] **M2P-6 `sync --discover` 的 per-provider 报告在 human 模式被丢弃**
+  `main.rs:3212-3232` 真的算出了 14 个 adapter 的
+  `{id, found, removed, complete}` 和 `discovery.complete`,但
+  `human.rs:551-571` 的 `render_sync` 从不读 `data.discovery`。
+  用户因此不知道扫了哪些 provider、哪些根不存在、扫描是否不完整。
+  更糟:`render_sync:565-567` 按 `emitted` 而非 `committed` 分支,
+  导致什么都没提交的重跑仍打印"总结:新增 5 条消息"——
+  这个 bug 只在源文件有跳过行时触发,**而真实 transcript 正是常态**。
+  **修法**:打印每 provider 一行(found / 根不存在 / discovery 不支持时
+  提示手动传什么文件),摘要改按 `committed` 分支。
+  **验收**:human 输出能看出扫描覆盖面;no-op 重跑不谎报新增。
+
+- [ ] **M2P-7 discover 只认 `.jsonl` 扩展名 → 6 个已注册根里有的永远找不到**
+  `discover_provider_sources`(`main.rs:3049-3051`)只收扩展名恰好是
+  `jsonl` 的文件。实测:把真实 `opencode.db` 放到它注册的根
+  `~/.local/share/opencode/`,得到 `{"complete":true,"found":0,"id":"opencode"}`
+  和 `entities: 0` —— **报告成功却永远找不到**,因为 OpenCode 是 SQLite 格式。
+  另外 14 个已实现 provider 中 **8 个根本没有 discovery 根**
+  (aider、grok-build、pi、qoder、kimi-code、cline、hermes、cursor),
+  `capability.rs` 对此是诚实的(`discover: Unsupported`),但
+  `README.md:89-106` 的表格把 14 个都列成 Experimental 且**没有 discovery 列**,
+  于是 Cursor 用户跑 `sync --discover` 得到退出 0 + 空索引,
+  无从得知必须手动传 `state.vscdb`。手动 `sync` 这些格式是能用的(已验证
+  `.md`/`.json`/`.db` 显式命名时都能入库)。
+  **修法**:discover 按 provider 声明的格式收文件(不只 jsonl);
+  README provider 表加 discovery 列(与 M4-2 合并做)。
+  **验收**:opencode 的 `.db` 能被 discover 找到;README 表有 discovery 列。
+
+- [ ] **M2P-8 unknown-subcommand 列表过时**
+  `main.rs:2347-2366` 的可用命令列表漏了 `handoff`、`resume`、`hook`、
+  `serve`、`providers`、`model`、`get-session-resume`。实测
+  `asg --db x handof q` 会声称 `handoff` 不是可用命令。
+  **修法**:从 `known_subcommand`(`main.rs:1096`)派生这个列表,让它无法漂移;
+  加 did-you-mean。
+  **验收**:列表与 `known_subcommand` 一致(加测试守护)。
+
+- [ ] **M2P-9 `--provider` 只接受 16 个中的 3 个**
+  `main.rs:2434`(以及 `mcp.rs:888` 的 enum)只认
+  `claude|claude-code|codex`,而 `asg providers` 列 16 行。实测
+  `search Rust --provider aider` 报 `unknown provider: aider`,
+  **即使 aider 的数据就在索引里且可被搜到**。
+  **修法**:扩到 `providers` 打印的规范 id 全集;或在 help 与 README 明写限制。
+  **验收**:能按任一已实现 provider 过滤,或限制被文档化。
+
+- [ ] **M2P-10 真实机器上首次 discover 三次失败(记录,可能需设计决策)**
+  在 owner 真实 home 上实测:第一次 35 秒后退出 5
+  `source_changed: len 37466709 -> 37478177`;第二次退出 6
+  `catalog_error`(路径其实没问题);第三次又是退出 5。
+  **零消息入库,三种不同错误,还在目录里留下 `writer.lock`。**
+  根因:agent 正在跑时 transcript 一直在长,快照校验必然失败 ——
+  这在真实环境里**无法靠重试赢**。
+  `rebuild-and-migration-runbook.md:163-179` 正确解释了这两个码,
+  但 README 从不链接它,CLI 输出也不指向它。
+  **修法方向**(需决策):允许"读到快照点为止"的部分成功
+  (记录已处理到的 offset,下次增量续上),而不是整轮失败;
+  或提供 `--allow-growing-sources` 显式接受部分读取。
+  与 D11 的宽容精神一致。
+  **验收**:agent 运行中跑 discover 能成功入库并正确报告部分性;
+  不留 `writer.lock`。
+
+- [ ] **M2P-11 `index <id-fact> <text>` 开发后门出现在用户 help 里**
+  `main.rs:958` 在面向用户的 `--help` 里公布了这个直写入口,而且真的能用 ——
+  等于邀请用户破坏自己的真实库。
+  **修法**:从用户 help 移除(保留命令供测试用,或加 `--force-dev` 门)。
+  **验收**:`--help` 不再公布;误用有防护。
+
+<!-- M2-ANCHOR -->
 ### M2 — 性能(D2/D3/D4,四个瓶颈全修)
 
 - [ ] **M2-1 合成语料生成器扩到 10 万条(D5)**
@@ -534,8 +661,8 @@ ADR/REUSE 正式签字、SBOM 认证。
 - [ ] **M3-1 `--db` 默认路径(D8)**
   默认落到平台数据目录(`asg config paths` 已能算出),`--db` 降为覆盖项。
   严格对齐 ripgrep/gh/atuin 的零配置习惯:装完就能用,不需要先读文档。
-  旧命令(显式 `--db`)必须全兼容。
-  **验收**:`asg search "x"` 在全新环境无参数可跑;所有现存测试仍绿。
+  旧命令(显式 `--db`)必须全兼容。**与 M2P-3 是同一件事,合并做。**
+  **验收**:全新环境 `asg search "x"` 无参数可跑;所有现存测试仍绿。
 
 - [ ] **M3-2 数据生命周期三维度(D12)**
   - `asg prune --before <date>` — 按时间
@@ -572,37 +699,121 @@ ADR/REUSE 正式签字、SBOM 认证。
   **验收**:表与 `capability.rs` 一致(考虑加漂移测试)。
 
 - [ ] **M4-3 故障排查手册**
-  覆盖:找不到 provider、库为空、transcript 解析失败、路径错、
-  权限问题、DB 锁、索引中断后如何继续。每条给具体命令。
+  新建 `docs/operations/TROUBLESHOOTING.md` 并从 README 链接。
+  **按用户真实看到的字符串编排索引**(实测得来的原文):
+  `需要数据库参数 --db`、`数据库内部错误 (exit 6)`、
+  `source_changed (exit 5)`(含"停掉正在跑的 agent 或接受部分运行")、
+  `no provider recognized this source`、`not a valid session id`、
+  `no hits on a fresh store`、`writer_busy`、`schema_incompatible`、
+  `ambiguous provider selection`。从它链到
+  `rebuild-and-migration-runbook.md`(那里已正确解释了
+  `writer_busy`/`source_changed`/游标错误,但 README 从不链接它)。
+  当前全仓库 grep `troubleshoot|常见问题|FAQ` **零命中**。
   **验收**:每个错误消息在手册里能找到对应条目。
 
 - [ ] **M4-4 MCP 客户端接入实例**
-  给具体客户端(Claude Code、Claude Desktop、其他 MCP 客户端)的真实
-  config JSON、9 个工具的说明与参数、可照抄的调用示例。
-  这可能是本工具最有价值的入口。
-  **验收**:照抄 config 能接上;每个工具有示例。
+  仓库里**唯一**一份 MCP config JSON 在
+  `skills/agent-session-grep/SKILL.md:126-135` —— 而这个文件既没被 README
+  链接也没被 CONTRIBUTING 链接,躺在 MCP 用户永远不会看的 `skills/` 下。
+  `docs/` 里 `mcpServers` 零命中。`README.md:7-8` 把 MCP 列为头号入口,
+  之后再也不提。
+  要给:Claude Code(`claude mcp add` 命令行)、Claude Desktop
+  (`claude_desktop_config.json` 的具体路径)、Cursor/Cline/Zed 各自配法;
+  9 个工具逐个说明;一对真实的 `tools/call` 请求/响应;
+  明确写出 **`--db` 必须已存在**(`asg mcp` 无 `--db` 直接报错退出);
+  以及**必须定期重跑 `sync --discover` 保持索引新鲜**(MCP server 是只读的,
+  没有 `asg watch`,索引不更新 agent 就在搜过期快照 —— 现在没有任何文档提这件事)。
+  从 README 链接 `SKILL.md`(它是仓库里最好的集成文档,12 KB,却无人能找到)。
+  **验收**:照抄 config 能接上;每个工具有示例;新鲜度问题被说明。
 
 - [ ] **M4-5 完整 CLI reference**
   每个子命令、每个 flag、退出码表(14 码 error catalog 对齐)、
   Robot JSON schema 指引。
-  **验收**:与 `--help` 和 schema 一致。
+  已知 help 里**完全没出现**的真实 flag:`--mode`(只在 search 子命令 help 里)、
+  `--no-color`(`main.rs:1345` 真的接受,任何地方都没文档)、`--dir`、
+  `--snapshot-json`、`--lan`、`--decay-days`、`--max-evidence`、
+  `--yes`(只在 resume 那行内联提到)。
+  退出码表(`main.rs:1027-1028`)只列了 0 和 10 就说"其余见 error catalog",
+  而那个文件(`schemas/robot/v1/error-catalog.json`)help 里从没点名、
+  README 也没链接 —— 撞上退出 6 或 9 的用户无路可循。
+  **验收**:与 `--help` 和 schema 一致;退出码表完整。
 
 - [ ] **M4-6 产品内 UX(G12)**
   - 每条错误消息给下一步可执行命令(现在很多只说"失败了")
   - 首次运行向导:检测到哪些 provider、建议第一条命令
-  - `asg doctor` 改成引导式诊断,不只是打印状态
-  - shell 补全(bash/zsh/fish/PowerShell)
-  - `--help` 可跳读、术语与文档一致
+  - `asg doctor` 改成引导式诊断。当前它只查存储侧健康
+    (`schema`/`generation`/`interrupted_batches`/孤儿计数,这些是好的),
+    但**新用户最常问的它一个都不查**:provider 根有哪些、各根找到几个文件
+    (这是"为什么 discover 什么都没找到"的头号问题)、`--db` 父目录是否存在
+    可写、entity 数量(才能提示"库是空的,跑 sync --discover")、
+    `asg` 与 `agent-session-grep` 版本是否一致、安装目录是否在 PATH。
+    另:本地 `semantic_feature: true` 与 `README.md:78-80`("默认关闭")矛盾,
+    因为本地二进制是带 `--features semantic-candle` 编的 —— 要说明哪个权威。
+  - shell 补全(bash/zsh/fish/PowerShell)。当前**零补全**:无 `clap_complete`、
+    无 `completions/` 目录、无 `asg completions <shell>`。本项目手写参数解析,
+    补全要从头写,但覆盖 21 个子命令 + 约 30 个 flag 的静态补全文件是半天工作量,
+    而且**它直接缓解 `--db` 路径手敲的痛**。
+  - man page(当前无 roff、无 `.1`、无生成器)
+  - `--help` 里的 usage 行全部写 `agent-session-grep`,**即使以 `asg` 调用**;
+    version 行是 `agent-session-grep-cli 0.1.0`(crate 名,带用户不认识的
+    `-cli` 后缀)。README 主推 `asg` 这个名字。要按实际调用名显示。
+  - `README.md:56` 说跑 `asg config paths`,`INSTALL-AND-UPGRADE.md:44`
+    说跑 `agent-session-grep --robot config paths` —— 统一。
   **验收**:人工走一遍新用户路径无卡点。
 
 - [ ] **M4-7 真实录屏演示**
   asciinema 或 GIF,60 秒内展示:装、索引、搜到三周前的东西、resume。
+  当前**零视觉资产**(无 `.cast`、无 GIF、无截图),而项目有 TUI 和内嵌
+  Web UI 两个纯视觉价值面。
   **验收**:README 顶部可见。
 
 - [ ] **M4-8 全部过时/矛盾声明清理(G13)**
   M0 已修一批,这里做最终一遍:七条不变量、Gate D 状态、
   discover 一致性、版本陈述、semantic 方向、error catalog 码数。
+  另需修:**ADR-0009 编号重复**
+  (`ADR-0009-cross-boundary-output-redaction.md` 与
+  `ADR-0009-session-resume-metadata.md` 撞号)。
   **验收**:交叉检查脚本或人工清单确认零矛盾。
+
+- [ ] **M4-9 `serve` / `tui` / `hook` 三个已发布入口零用户文档**
+  五个宣传入口里有三个没有任何面向用户的文档:
+  - `serve`(loopback HTTP + Web UI):grep 全仓库只在 ADR/roadmap/go-no-go
+    和 rehearsal runbook 里出现过。它打印
+    `asg serve: open http://127.0.0.1:<port>/?token=<32-hex>` 和
+    `loopback-only; LAN mode is capability_not_supported` ——
+    token-in-URL 模型需要解释,值得原文照录。
+  - `tui`:键位(`m` 切 sidechain facet、`k` 切 tool-kind、`f` 切 policy,
+    见 `tui/core.rs:647-694`)只在 `SKILL.md:88` 和源码里有。
+  - `hook`:Claude Code hook 集成只在
+    `subcommand_help_text`(`main.rs:1171-1178`)和 `THREAT-MODEL.md:88` 里。
+  **验收**:三个入口各有用户文档;TUI 有演示录屏。
+
+- [ ] **M4-10 `docs/` 索引与内部治理文档隔离**
+  当前**没有 `docs/README.md` 或 `docs/index.md`**(已核实不存在),
+  40 个 `docs/` 文件里 **35 个只能靠浏览目录树发现** —— README 只链了 5 个。
+  写一张表(受众 / 状态 / 一句话用途)。
+  同时:M0 已排除若干内部治理文档,剩下仍在公开树里的(各 ADR、RFC、
+  contracts draft、evidence matrix、REUSE audit、SLI format、
+  external-readiness-gate 等)应移到 `docs/internal/` 并加一行说明
+  "这些是历史过程记录,不是产品状态"。
+  另:`migration-v5-to-v6.md` / `migration-v6-to-v7.md` 自己被
+  `INSTALL-AND-UPGRADE.md:132-134` 标为"historical",而当前 schema 是 v12 ——
+  要么删要么明确标注。
+  **验收**:README → docs 索引 → 任一文档三跳可达;内部文档有隔离标注。
+
+- [ ] **M4-11 项目文档语言方针**
+  当前分裂:所有根文档与 operations runbook **0% CJK**,而每份治理文档
+  13-31% CJK(`ADR-0007` 30.7%、`THREAT-MODEL.md` 26.3%),
+  `--help` 91 行里 **69 行含 CJK**,`human.rs` 有 220 行含 CJK 的用户可见文本
+  (`需要数据库参数`、`数据库内部错误`、`下一步:`、`本次扫描的源文件数`、
+  `会话标题`、`工作目录`、`dry-run:未执行。加 --yes 实际恢复。`)。
+  **一个 README/CHANGELOG/SECURITY/INSTALL 全英文的公开仓库,主帮助界面
+  却约 75% 中文 —— 非中文读者无法使用主帮助面。**
+  项目任何地方都没有关于文档语言的声明。
+  **需 owner 决策**:(a) 用户可见输出与 help 全改英文,中文文档留在
+  `docs/zh/`;(b) 双语,README 明确说明并两份都发;(c) 明确中文优先并在
+  README 顶部说明。选 (a) 是最大的一次改写。
+  **验收**:方针写进 README/CONTRIBUTING;用户可见文本与方针一致。
 
 ---
 
@@ -614,7 +825,9 @@ ADR/REUSE 正式签字、SBOM 认证。
 
 - [ ] **M5-2 最终对抗性审计**
   重跑本轮用过的多路审计:真实数据泄漏、内部过程泄漏、许可证归属、
-  语义性内部叙述、断链、自相矛盾、过度声明。
+  语义性内部叙述、断链、自相矛盾、过度声明,**外加一次真实二进制的
+  新用户首次运行验证**(本轮就是这样发现 M2P 那 11 条的 —— 只读文档
+  发现不了它们)。
   **验收**:无 P0/P1 findings。
 
 - [ ] **M5-3 公开树导出与推送(D17)**
@@ -695,14 +908,18 @@ ADR/REUSE 正式签字、SBOM 认证。
 - [ ] **搜索作用域惯例调研** — 13 个同类项目 + atuin/mcfly/zoxide 的默认
   作用域与演变。填入后 M3-3 才能落 ADR。
 - [ ] **功能缺口完整清单** — 填入 M3-4。
-- [ ] **文档/UX 缺口完整清单** — 补充 M4。
-- [ ] **性能审计完整报告** — 补充 M2(§1.3/1.7 已有主要结论)。
+- [x] **文档/UX 缺口完整清单** — 已回报并落地为 M2P-1..11 与 M4-1..11。
+  关键方法论:该审计**用真实二进制在一次性伪 HOME 下逐条实测**,
+  这才发现了 11 条只读文档发现不了的功能缺陷。后续审计沿用这个做法。
+- [ ] **性能审计完整报告** — 补充 M2(§1.3/1.7 已有主要结论;
+  上一个 agent 中途 API 失败,已重启)。
 
 ## 7. 进度日志(每完成一个任务追加一行,最新在最上)
 
 | 日期 | 任务 | 结论 | commit |
 |---|---|---|---|
-| 2026-08-18 | 规划 | 本文件建立;owner 拷问确认 D1-D21 共 21 条决策 | — |
+| 2026-08-18 | 文档/UX 审计 | 用真实二进制实测发现 11 条首次运行 P0/P1 功能缺陷(落为 M2P)+ 11 条文档缺口(落为 M4);最严重:human search 输出的 session id 喂给 context 会被拒、读命令打错路径静默建空库 | — |
+| 2026-08-18 | 规划 | 本文件建立;owner 拷问确认 D1-D21 共 21 条决策 | `af26bb6` |
 | 2026-08-18 | 发布后审计 | 发现内部过程泄漏(5 CRITICAL + 11 HIGH)与 3 处许可违规,已修;仓库转回 PRIVATE | `ff0838a` |
 | 2026-08-18 | v0.1.0 | tag + Release 发布(公开仓库,随后转回 PRIVATE) | `55648d6` |
 
