@@ -928,7 +928,7 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   或让 `sync` 接受目录并递归。前者更小且与现有"不接受目录"的显式设计一致。
   **验收**:5000 个源文件可一条命令同步,不需调用方分批。
 
-- [ ] **M2P-9 `--provider` 只接受 16 个中的 3 个**
+- [x] **M2P-9 `--provider` 只接受 16 个中的 3 个**
   `main.rs:2434`(以及 `mcp.rs:888` 的 enum)只认
   `claude|claude-code|codex`,而 `asg providers` 列 16 行。实测
   `search Rust --provider aider` 报 `unknown provider: aider`,
@@ -1696,6 +1696,7 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
 
 | 日期 | 任务 | 结论 | commit |
 |---|---|---|---|
+| 2026-08-19 | **M2P-9 `--provider` 改由能力矩阵校验** | 按前一条已定的修法落地:`enum SearchProvider { Claude, Codex }` 换成 newtype over `String`,合法性交给 `ProviderCapabilityMatrix::current()` 且只接受 `search: Native` 的 provider。**enum 本来就是多余的** —— SQL 下推只用 `as_str()` 拼 `IN (?,?)`,存储层不关心有几个 provider;那份 enum 只是类型系统里一份手抄的矩阵副本,没有任何机制强制它同步。usage 提示改为从同一判据枚举,所以提示与校验不可能漂移(实测提示已列出全部 14 个)。落地时两个真实摩擦:(a) `as_str()` 不再是 `&'static str`,SQL 参数需 `.to_string()` 拥有一份;(b) 19 处测试用 `SearchProvider::Claude` 变体,加 `claude_code()`/`codex()` 两个便捷构造子(刻意只给这两个 —— 它们是唯一有真实语料回归的,任意 provider 走被校验的 `parse`)。**我独立端到端复验五条**:按 tencent-codebuddy 过滤命中它的消息(此前被拒);无数据的 provider 返回 0 命中而非报错;`claude` 别名仍解析;deferred 的 zcode 仍被拒(它 `search: Unknown` —— 矩阵在起作用);不存在的 provider 仍被拒。**Web 层如预测般自动继承**:`/api/search?provider=tencent-codebuddy` 从 HTTP 400 变成 200 + 1 命中,零额外改动 | `434f36a` |
 | 2026-08-19 | **M2P-5 + M2P-7 discover 宽容化与格式感知** | **M2P-5**:`--discover` 走的是用户没点名的目录,所以一个非 transcript 文件(编辑器备份、写一半的日志、别的工具的输出)就让整轮退出 2、零消息入库。现改为跳过并计数,与 D11 对损坏行的既有处理对齐;显式 `sync <file>` 仍然失败 —— 那是用户自己点的路径。误导性诊断另有根因:`last_probe_error` 报的是**最后一个** probe 的失败,而 registry 以 SQLite 的 Cursor adapter 结尾,于是每个不认识的文本文件都被怪成"缺 SQLite magic header";现按源自身的 format family 过滤 probe 失败。**M2P-7**:候选文件按 `.jsonl` 扩展名收,于是 opencode(根已注册、格式是 SQLite)永远 `found=0` 却报 `complete=true` —— 而 complete 正是 tombstone 差分的依据。现读 64 KiB 头按签名分类,只把源交给同族 adapter;实测 300 个垃圾文件 + 3 个真源 = 105 ms。**歧义的处置已明确决策**:`AmbiguousVariant` 也是跳过并计数而非致命,措辞单列 —— 拒绝猜测的原则不变,变的只是波及面;把用户真实的 pi/openclaw transcript 说成"不是可识别的 transcript"会把人送去查错误的问题。**我独立端到端复验四条**:1 好 + 2 垃圾 → 退出 0、好的那条可搜;歧义源 → 退出 0、`unrecognized=1`、warning 说"匹配了多个格式,跳过而非猜测,显式 sync 这个文件可看到哪些格式冲突";显式 sync 垃圾文件仍退出 2;错误消息里再无 SQLite 字样 | `cf7b48a` `e70426f` `6a1d83f` |
 | 2026-08-19 | **M2P-11 `index` 直写后门加门** | 先实测确认它**真的能用**:往库里写任意文本、`search` 立刻能搜到,而它就登在用户 `--help` 里 —— 等于邀请用户破坏自己的真实历史(写进去的东西无源文件、无 provenance,`index rebuild` 会忠实重投影)。现在需显式 `--force-dev`,拒绝时指向 `sync --discover`;三处 help(顶层 COMMANDS、`index --help`、模块头)全部撤下。15 个 e2e 测试用它造数据 —— 它们不是编码了错误行为(后门本就该留给测试),所以走一个新的 `seed()` 辅助函数集中补 flag,而不是把 flag 抄 15 遍。四个用例实测:无门拒绝且指向 sync / 顶层 help 无痕 / 子命令 help 无痕 / 带门仍可写且可搜 | `5a1d52e` |
 | 2026-08-19 | **M2-1 十万条确定性合成语料** | 发布门的每条性能阀值都写在 10 万条上,而树里最大语料只有 2000 条 —— 阀值 harness、增量同步、存储放大三项都无从测量。**语料不入库**(约 49 MB,可由生成器 + 种子完全重建),入库的是生成器 + 26 个常驻测试 + 冻结清单(CRLF 归一化树哈希 + 逐 provider 计数)。确定性来自逐 session 独立播种,所以一个 session 的字节不依赖语料规模或写入顺序。**我独立复算复验**:重新生成得 `65cc08e9…`,与冻结清单逐位一致;摄入 100,000 emitted / 0 skipped / 100,000 placements、catalog 110,000(10 万消息 + 5 千 session + 5 千 document,零去重塌陷)—— 这同时证明 M2P-14 的修复在 10 万条规模上成立。我自己也写了一版生成器,发现 agent 版本更完备(它刻意避开了 pi/qoder/codebuddy 的歧义陷阱,我撞上了才知道)后弃用自己的 | `4c46802`..`2892783` 共 5 个 |
