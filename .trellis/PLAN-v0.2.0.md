@@ -61,6 +61,9 @@ SQLite schema 版本 `SCHEMA_VERSION = 12`。
 
 ### 1.3 性能实测(已提交的证据,不是估算)
 
+> **⚠️ 2026-08-19:10 万条实测已到手,推翻了本节多处基于 4000 条的推断。
+> 先读 §1.3.1,那才是当前权威数字;下面的 4000 条表保留作纵向对照。**
+
 来源 `docs/evidence/core-beta/88d86f4/core-beta-benchmark-full.md`,
 **语料仅 4000 条合成消息**,Windows x86_64:
 
@@ -83,7 +86,58 @@ SQLite schema 版本 `SCHEMA_VERSION = 12`。
 
 `recovery` 标记 `not_implemented`(无 fault-injection 入口,不宣称恢复耗时)。
 
+### 1.3.1 十万条实测(2026-08-19,**当前权威**,四条阀值三条失败)
+
+语料 = `scripts/evidence/synthetic_corpus.py` 的冻结 10 万条(5,000 session /
+6 provider / 48.6 MiB),harness = `scripts/evidence/performance_gate_benchmark.py`。
+**我独立重跑复验过,四个数字全部吻合**(括号内是 agent 首次运行值):
+
+| 动作 | 实测 | 阀值 | 判定 |
+|---|---:|---:|---|
+| 首次全量索引 | **0.707**(0.697)MiB/s | ≥ 3.5 | **FAIL —— 差 5.0 倍** |
+| 增量同步(无变化) | **963.19**(963)ms | ≤ 1000 | **PASS**(仅剩 37 ms 余量) |
+| 搜索 p95 | **96.03**(95.8)ms,n=100 | ≤ 50 | **FAIL —— 1.9 倍** |
+| MCP 单次调用 p95 | **85.23**(86.5)ms,n=100 | ≤ 50 | **FAIL —— 1.7 倍** |
+
+**这组数字推翻了原有的三处判断:**
+
+1. **原以为会失败的那条通过了,原以为宽裕的两条失败了。** §1.7 瓶颈 #4
+   (noop sync 1.5 s @4000)推断"10 万条下线性放大" —— **没有线性放大**,
+   实测 963 ms 通过。而 §2 把 MCP 那条写成"已实测 21 ms,守住",搜索也被当成
+   宽裕项 —— **两条都以约 1.8 倍失败**。
+   → **M2-3 / M2-5 / M2-6 的优化目标需要重排**:它们瞄准的正是唯一通过的那条。
+   (但 963 ms 只剩 37 ms 余量,轻微回退就会翻盘,所以不能直接放弃。)
+
+2. **§1.4 的 "MCP p50 16.6 / p95 21.0 ms" 在默认构建下不可复现。**
+   默认构建 `model status` 报 `feature: null, present: false`,向量后端是
+   `bigram-hash-v1` —— **没有编码器可以常驻,阀值的"编码器常驻"前提根本不成立**。
+   那组 21 ms 来自 semantic-candle 构建 + **10 条消息**语料(n=10);
+   10 万条下常驻进程实测 85 ms。每个 `mcp_*` metric 现在自带
+   `encoder_resident`、实际后端与作用域说明,不再让读者跨节交叉引用才发现
+   数字的含义比阀值措辞窄。
+
+3. **搜索 p95 的大头是进程启动。** `cli_process_overhead_p50_ms` = **21.7 ms**
+   (裸 `status` 调用)。96 ms 里约 22 ms 与查询无关。一次性 CLI 想达
+   50 ms p95 只剩约 28 ms 预算 —— 这条阀值放在常驻 MCP 路径上才诚实,
+   而它在那里也以 85 ms 失败。
+
+**另两个实测事实**:
+- `store_size_ratio` = **9.49 倍**(不含向量索引;含向量索引 13.6 倍)。
+  §1.7 记的 5.11 倍是 4000 条下的值,10 万条下放大比本身在变大。
+- **"单次 sync"实际是 27 个进程**:5,000 条路径超出命令行上限,harness 分 27 批。
+  所以 963 ms 里很大一部分是 27 × 约 36 ms 的进程启动,不是扫描工作。
+  (这正是 M2P-17 `--from-file` 要解决的问题 —— 该 flag 已落地,
+  harness 尚未改用它。)
+
+**CI 可行性**:全量 372 s 不适合逐 PR,但其中 285 s 是只喂 informational
+metric 的 embeddings 构建。`--skip-embeddings` 在**完整 10 万条规模**下门住
+四条阀值,耗时 **79 s**(我实测 81.9 s),判定完全相同 —— 这是建议的逐 PR 子集;
+全量放 nightly / 发布前。
+
 ### 1.4 MCP amortized 语义延迟(已实测)
+
+> ⚠️ 见 §1.3.1 第 2 条:这组数字的前提(编码器常驻)在默认构建下不成立,
+> 且语料只有 10 条消息。10 万条下常驻进程实测 p95 **85 ms**。
 
 `scripts/evidence/semantic_mcp_latency.py`:编码器常驻 MCP 进程时
 p50 **16.6 ms** / p95 **21.0 ms**(10 次查询),对比单次 CLI 冷启动约 **3 秒**
@@ -134,8 +188,13 @@ message / 231 session,**七条全 PASS**,harness 退出 0,报告仅含聚合数�
 |---|---|---|---|
 | 1 | `adapters-sqlite/src/lib.rs:6613-6618` `query_semantic` | **全表扇描**:`SELECT ... FROM message_vec WHERE model_id=?1 AND dimension=?2`,无候选集过滤,全部向量读进 Rust 算余弦 | 每次查询读 10万×384×4 ≈ **150 MB** |
 | 2 | 全仓库 | **ingestion 完全单线程**。`grep thread::spawn` 只在 `serve.rs` 命中,解析路径零并行 | 0.566 MB/s 的主因;多核未利用 |
-| 3 | `adapters-sqlite/src/lib.rs:1365` | FTS5 是**普通表非 external-content**:`fts5(id UNINDEXED, text)`,文本在 catalog 和 fts 各存一份 | 存储放大 5.11 倍的直接来源 |
-| 4 | noop sync 1.5 秒 | 无变化重扫仍要 1.5 秒(4000 条) | 10 万条下线性放大,交互式使用不可接受 |
+| 3 | `adapters-sqlite/src/lib.rs:1365` | FTS5 是**普通表非 external-content**:`fts5(id UNINDEXED, text)`,文本在 catalog 和 fts 各存一份 | 存储放大 5.11 倍的直接来源;**10 万条实测放大到 9.49 倍**(§1.3.1) |
+| 4 | noop sync 1.5 秒 | 无变化重扫仍要 1.5 秒(4000 条) | ~~10 万条下线性放大~~ —— **这条推断已被实测推翻**:10 万条实测 963 ms,**通过** 1 s 阀值(§1.3.1)。它没有线性放大,而且余量只剩 37 ms |
+
+**⚠️ 优先级已按 §1.3.1 实测重排。** 上表按"读代码推断的严重度"排序,而实测
+判定是:瓶颈 #2(吞吐 0.707 MiB/s,差 5 倍)是唯一**既确认失败又差距最大**的;
+瓶颈 #4 **通过**;搜索与 MCP 延迟(不在上表内,原被当成宽裕项)**各以约 1.8 倍
+失败**,且其中约 22 ms 是进程启动而非查询工作。动手前先读 §1.3.1。
 
 **已完成的优化(别重复做)**:`fts_rowid` 边车让 FTS 删除从全表扫描降到 O(1)
 (32 MB 文件首扫 16.5s → 2.79s,非空库重扫 25.3s → 2.87s);unchanged re-sync
@@ -1199,7 +1258,7 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   `normalized_tree_hash` 先例)、长度分布与 CJK 比例贴近真实观察。
   **验收**:两次生成哈希一致;可进 CI。
 
-- [ ] **M2-2 四个动作的阀值 harness(D3)**
+- [x] **M2-2 四个动作的阀值 harness(D3)**
   扩展 `open_source_gate_benchmark.py`,把四个动作都变成带阀值的门:
   | 动作 | 阀值 | 依据 |
   |---|---|---|
@@ -1696,6 +1755,7 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
 
 | 日期 | 任务 | 结论 | commit |
 |---|---|---|---|
+| 2026-08-19 | **M2-2 四个动作的阀值 harness** | 四条性能阀值第一次真正门住东西(此前 `core_beta_benchmark.py` 测了数字但自己声明"不是 SLO 不是发布认证",而正确性 gate 只有 recall/parse-loss/discovery/resume 四条)。**10 万条实测三条失败,且失败的不是计划预测的那条**:吞吐 0.707 MiB/s(差 5.0 倍)FAIL、noop sync 963 ms **PASS**、搜索 p95 96.03 ms(1.9 倍)FAIL、MCP p95 85.23 ms(1.7 倍)FAIL。**我独立重跑复验,四个数字全部吻合**(0.707/963.19/96.03/85.23 对 agent 的 0.697/963/95.8/86.5),耗时 81.9 s 对其 79.1 s。三处推翻已写入 §1.3.1 并回改 §1.7 的瓶颈表:(a) 瓶颈 #4"线性放大"的推断是错的,它通过了,但只剩 37 ms 余量;(b) §1.4 的 21 ms 在默认构建下**不可复现** —— 默认构建 `present: false`、后端是 bigram-hash,"编码器常驻"这个阀值前提根本不成立,那 21 ms 来自 semantic-candle 构建 + **10 条**语料;(c) 搜索 96 ms 里约 22 ms 是进程启动(`cli_process_overhead_p50_ms` 实测 21.7 ms),一次性 CLI 想达 50 ms 只剩 28 ms 预算。放在 sibling 脚本而非扩展正确性 gate,理由过硬:后者的 `validate_manifest` 断言 metric 集合**完全相等**,折进去会让已发出的每份正确性 manifest 失效。`--skip-embeddings` 在完整规模下门住四条阀值仅需 79 s(285 s 的 embeddings 构建只喂 informational metric)—— 建议逐 PR 用它,全量放 nightly | `9a11dc2`..`9d4efa1` 共 5 个 |
 | 2026-08-19 | **M2P-17 `sync --from-file`** | 加 `--from-file <清单>`(每行一个路径,空行与 `#` 注释忽略),按 ripgrep/xargs 惯例。**实测对照**:600 个真实 transcript 的路径展开成 **35,291 个字符**,PowerShell 直接拒绝启动进程(「文件名或扩展名太长」)—— 命令行方式**连进程都起不来**;同一批经 `--from-file` 是 600 sources / 600 emitted / 600 committed / 0 skipped / **0.5 秒**。刻意**不做** glob 展开与引号解析:清单存在的意义就是绕开 shell 分词,含空格的路径必须原样保留,否则清单自己又要处理引号,缺口等于没补。清单读不到报 `invalid_request` 并点名该 flag 而非 `source_io` —— "你给错了 `--from-file` 路径"与"transcript 读不到"的下一步动作不同,不能塌成同一个码;空清单明确报错而非静默成功;与 `--discover` 及多余位置参数互斥。**六个用例全部实测通过**。注:这条缺口此前由调用方各自绕过 —— `real_data_regression.py` 与 `synthetic_corpus.py` 都写了自己的 24 KB 分批,同一个 workaround 写两遍,正是"缺的是工具能力而非脚本技巧"的证据 | `d60d582` |
 | 2026-08-19 | **M2P-9 `--provider` 改由能力矩阵校验** | 按前一条已定的修法落地:`enum SearchProvider { Claude, Codex }` 换成 newtype over `String`,合法性交给 `ProviderCapabilityMatrix::current()` 且只接受 `search: Native` 的 provider。**enum 本来就是多余的** —— SQL 下推只用 `as_str()` 拼 `IN (?,?)`,存储层不关心有几个 provider;那份 enum 只是类型系统里一份手抄的矩阵副本,没有任何机制强制它同步。usage 提示改为从同一判据枚举,所以提示与校验不可能漂移(实测提示已列出全部 14 个)。落地时两个真实摩擦:(a) `as_str()` 不再是 `&'static str`,SQL 参数需 `.to_string()` 拥有一份;(b) 19 处测试用 `SearchProvider::Claude` 变体,加 `claude_code()`/`codex()` 两个便捷构造子(刻意只给这两个 —— 它们是唯一有真实语料回归的,任意 provider 走被校验的 `parse`)。**我独立端到端复验五条**:按 tencent-codebuddy 过滤命中它的消息(此前被拒);无数据的 provider 返回 0 命中而非报错;`claude` 别名仍解析;deferred 的 zcode 仍被拒(它 `search: Unknown` —— 矩阵在起作用);不存在的 provider 仍被拒。**Web 层如预测般自动继承**:`/api/search?provider=tencent-codebuddy` 从 HTTP 400 变成 200 + 1 命中,零额外改动 | `434f36a` |
 | 2026-08-19 | **M2P-5 + M2P-7 discover 宽容化与格式感知** | **M2P-5**:`--discover` 走的是用户没点名的目录,所以一个非 transcript 文件(编辑器备份、写一半的日志、别的工具的输出)就让整轮退出 2、零消息入库。现改为跳过并计数,与 D11 对损坏行的既有处理对齐;显式 `sync <file>` 仍然失败 —— 那是用户自己点的路径。误导性诊断另有根因:`last_probe_error` 报的是**最后一个** probe 的失败,而 registry 以 SQLite 的 Cursor adapter 结尾,于是每个不认识的文本文件都被怪成"缺 SQLite magic header";现按源自身的 format family 过滤 probe 失败。**M2P-7**:候选文件按 `.jsonl` 扩展名收,于是 opencode(根已注册、格式是 SQLite)永远 `found=0` 却报 `complete=true` —— 而 complete 正是 tombstone 差分的依据。现读 64 KiB 头按签名分类,只把源交给同族 adapter;实测 300 个垃圾文件 + 3 个真源 = 105 ms。**歧义的处置已明确决策**:`AmbiguousVariant` 也是跳过并计数而非致命,措辞单列 —— 拒绝猜测的原则不变,变的只是波及面;把用户真实的 pi/openclaw transcript 说成"不是可识别的 transcript"会把人送去查错误的问题。**我独立端到端复验四条**:1 好 + 2 垃圾 → 退出 0、好的那条可搜;歧义源 → 退出 0、`unrecognized=1`、warning 说"匹配了多个格式,跳过而非猜测,显式 sync 这个文件可看到哪些格式冲突";显式 sync 垃圾文件仍退出 2;错误消息里再无 SQLite 字样 | `cf7b48a` `e70426f` `6a1d83f` |
