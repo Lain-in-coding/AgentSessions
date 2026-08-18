@@ -50,6 +50,7 @@ impl ProviderAdapter for AiderAdapter {
                 "spans are derived approximations (block start + text length), not byte-exact line slices",
                 "tool/edit blockquote output is folded into assistant text",
                 "session identity is the first `# aider chat started at` header timestamp",
+                "the markdown chat log carries no per-message native id, so message identity is reconstructed document-scoped by the ingestion layer (Unstable)",
             ],
         )
     }
@@ -152,7 +153,14 @@ impl ProviderAdapter for AiderAdapter {
             let end = *start + text.len() as u64;
             sink.emit_message(MessageEvent {
                 seq: *seq,
-                native_id: &format!("aider-msg-{seq}"),
+                // The markdown chat log has no message ids. A synthetic
+                // `aider-msg-{seq}` would collide across documents because seq
+                // restarts at 0 in every .aider.chat.history.md, so the first
+                // message of every log would share one id and the storage merge
+                // would silently drop all but one payload. Emit an empty
+                // native_id so the ingestion layer derives a document-scoped id
+                // from [provider_id, variant, document_id, seq].
+                native_id: "",
                 parent_native_id: None,
                 role,
                 text: text.trim(),
