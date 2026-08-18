@@ -4241,6 +4241,43 @@ enum PrepareOutcome {
     Unrecognized(SourceRejection),
 }
 
+/// Opt-in per-phase timing for a sync run, written to stderr.
+///
+/// Set `ASG_SYNC_TRACE=1` to see where a sync's wall time actually goes.
+/// Modeled on fast-resume's `FAST_RESUME_TRACE_REFRESH` (`src/refresh.rs`,
+/// MIT License, Copyright (c) 2025 Stanislas Lange): an env probe gates
+/// `eprintln!` timings around each phase, so an unset variable costs one
+/// `var_os` per sync — not per source — and stdout stays a clean protocol
+/// stream (diagnostics belong on stderr, never in the envelope).
+///
+/// This exists because the first attempt at this function's performance
+/// problem guessed wrong: parallelizing the parse phase moved full-corpus
+/// throughput by under 10%, which only became obvious once each phase was
+/// timed separately. Keep the trace so the next person measures instead of
+/// guessing.
+#[derive(Clone, Copy)]
+struct SyncTrace(bool);
+
+impl SyncTrace {
+    fn from_env() -> Self {
+        SyncTrace(std::env::var_os("ASG_SYNC_TRACE").is_some())
+    }
+
+    /// Report `label`'s duration since `mark` and return a fresh mark for the
+    /// next phase. Returns the new instant even when tracing is off so callers
+    /// chain phases identically in both modes.
+    fn phase(self, label: &str, mark: std::time::Instant) -> std::time::Instant {
+        let now = std::time::Instant::now();
+        if self.0 {
+            eprintln!(
+                "asg-sync-trace: {label} {:.1}ms",
+                now.duration_since(mark).as_secs_f64() * 1000.0
+            );
+        }
+        now
+    }
+}
+
 /// Run `work` over `0..len` across the machine's cores, funneling each result
 /// back over a channel, and return the results in **index order**.
 ///
@@ -4272,11 +4309,7 @@ enum PrepareOutcome {
 /// No `store` is in scope by construction, which is how the single-writer rule
 /// (`adapters-sqlite/src/lease.rs`) survives the fan-out: parsing goes wide,
 /// SQLite stays single-threaded in the caller.
-fn parallel_map_indexed<T, W, R>(
-    len: usize,
-    work: W,
-    mut on_ready: R,
-) -> Result<Vec<T>, CliError>
+fn parallel_map_indexed<T, W, R>(len: usize, work: W, mut on_ready: R) -> Result<Vec<T>, CliError>
 where
     T: Send,
     W: Fn(usize) -> Result<T, CliError> + Send + Sync,
@@ -4463,9 +4496,11 @@ fn sync_files_inner(
     let mut diagnostic_count = 0usize;
     let mut diagnostics = Vec::new();
 
-    // 指纹缓存：capture 后先与已存指纹比对，未变化的源跳过重复解析
-    // （parse 是大语料重扫的主导成本）。指纹缓存缺失/不匹配才走完整路径。
+    // 指纹缓存：capture 后先与已存指纹比对，未变化的源跳过重复解析。
+    // 指纹缓存缺失/不匹配才走完整路径。
     // 两次 store 读取都在 fan-out 之前完成，之后的准备阶段不再触碰连接。
+    let trace = SyncTrace::from_env();
+    let mark = std::time::Instant::now();
     let cached = store
         .source_fingerprints(paths)
         .map_err(ProtocolError::from)?;
@@ -4474,10 +4509,11 @@ fn sync_files_inner(
     let unchanged_counts = store
         .source_message_counts(paths)
         .map_err(ProtocolError::from)?;
+    let mark = trace.phase("store_read", mark);
 
     // 准备阶段跨核并行；提交阶段单线程（SQLite 单写者，见 lease.rs）。
-    // 每个源的 capture(BLAKE3) + probe/parse + id 派生互不相干，是本函数的
-    // 主导成本；顺序由 parallel_map_indexed 还原为 path 顺序。
+    // 每个源的 capture(BLAKE3) + probe/parse + id 派生互不相干；
+    // 顺序由 parallel_map_indexed 还原为 path 顺序。
     let registry = provider_registry();
     let refs: Vec<&dyn ProviderAdapter> = registry.iter().map(|a| a.as_ref()).collect();
     let prepared = parallel_map_indexed(
@@ -4518,6 +4554,7 @@ fn sync_files_inner(
             protocol::write_stdout_line(&protocol::progress_frame("sync", &message, request_id));
         },
     )?;
+    let mark = trace.phase("prepare", mark);
 
     // 提交前复核：所有源都完成 staging 之后才 verify，保持 RFC-0002 §4 的
     // "staged 全部就绪 → 复核 → 单事务提交" 顺序。复核本身是每源独立的
@@ -4534,6 +4571,7 @@ fn sync_files_inner(
         },
         |_, _: &()| {},
     )?;
+    let mark = trace.phase("verify", mark);
 
     // 单写者路径：按 path 顺序归并计数、诊断与批次。顺序由
     // parallel_map_indexed 保证，与线程完成顺序无关。
@@ -4595,6 +4633,7 @@ fn sync_files_inner(
 
     // discover 合成的空批（已删除源的 tombstone）追加进提交批次。
     sources.extend(synthetic_batches.iter().cloned());
+    let mark = trace.phase("merge", mark);
 
     let changed = store
         .commit_source_batches_if_changed(&sources)
@@ -4603,6 +4642,7 @@ fn sync_files_inner(
         .backfill_source_provider_ids(&provider_id_backfills)
         .map_err(ProtocolError::from)?;
     let generation = store.active_generation().map_err(ProtocolError::from)?;
+    trace.phase("commit", mark);
     // `emitted` 只统计本次实际解析的消息；指纹缓存命中的源按已存消息数
     // 计入 unchanged（与 emitted 同单位：消息数）。截断尾被 retain 的源既不
     // 解析也不提交，单列 `retained`（源数），其诊断进 warnings 通道。
