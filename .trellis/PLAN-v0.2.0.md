@@ -682,6 +682,14 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   **验收**:该 provider 的真实运行 emitted == persisted 或差额有明确解释。
 
 - [ ] **M1-5 反推合成 golden fixture(D9)**
+  ⚠️ **已知待补(M1-13 发现)**:`provider-codex/tests/golden/basic.jsonl`
+  **零个** `custom_tool_call` / `function_call_output` 记录,所以它无法见证
+  codex 声明的 tool-activity pairing 能力(提取是真实现了的,
+  见 `emit_paired_activity`/`emit_unpaired_activity`)。
+  当前由 `capability_behaviour.rs` 的具名补充样本承载证据 ——
+  **扩 fixture 后必须删掉那条登记项**(有测试守着,登记项过期会失败)。
+  fixture 是 BLAKE3 pin + `expected.json`,改动要同步重算并更新 PROVENANCE。
+  同类可查:claude 的 fixture 也没有 `tool_use`/`tool_result` 块。
   按真实样本观察到的**形状**手写一份合成 fixture(虚构项目代号、假 UUID、
   占位路径),配 `PROVENANCE.md` 说明它模仿的真实结构与固定种子/BLAKE3 哈希。
   用 insta 快照(D13)固定归一化结果。
@@ -883,7 +891,14 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   **真修法**:为 codex/grok/kimi/opencode/cline 提取时间戳。
   **验收**:时间过滤要么覆盖全部 provider,要么明确告知被排除的数量。
 
-- [ ] **M2P-13 `aider` 的 `tool_activity: Partial` 是假声明**
+- [x] **M2P-13 `aider` 的 `tool_activity: Partial` 是假声明** — 已完成
+  `c1356cb`(声明)+ `2fc1d3e`(两份 ledger)。
+  `capability.rs` 降为 `Unsupported` 并写明理由;
+  `PROVIDER-BETA-READINESS.md:39` 的 `partial → missing`;
+  `PROVIDER-MATURITY-MATRIX.md:66` 的 per-capability 汇总行也列着 aider
+  在 `partial` 下(第二处漂移,agent 没碰到但下一步就会撞上),同步修正。
+  由 M1-13 的行为断言守护,今后同类假声明会在证据层失败而不是在
+  "文档与声明一致地假"这层通过。
   `capability.rs:143` 声明 `Partial`,`PROVIDER-BETA-READINESS.md:39` 记 `partial`,
   但 `provider-aider/src/lib.rs` 里**零个 `emit_activity` 调用** ——
   它的 blockquote 工具输出被折进 assistant 文本(`:219-229`)。
@@ -894,7 +909,22 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   并加行为断言(见 M1-13)。
   **验收**:声明与代码行为一致。
 
-- [ ] **M1-13 加"声明 vs 行为"断言(结构性,防止矩阵自我认证)**
+- [x] **M1-13 加"声明 vs 行为"断言(结构性,防止矩阵自我认证)** — 已完成
+  `e4f836f` + `c1356cb` + `2fc1d3e`。落在
+  `crates/agent-session-grep-cli/tests/capability_behaviour.rs`,
+  用 `include_bytes!` 绑定 14 个 provider 的 committed golden fixture
+  (fixture 改名会变成编译错误而不是静默跳过测试)。四条断言:
+  `tool_activity` 双向(声明 Unsupported ⟹ 零活动;声明其他 ⟹ 必须真 emit);
+  `source_span` 单向(捕过度声明,低报留给证据驱动升级,遵 RFC-0002 §6);
+  覆盖面守护(新增 provider 漏加会失败);以及补充样本登记表的自净测试。
+  已修 `aider.tool_activity: Partial → Unsupported`(grep 确认零 `emit_activity`)。
+  已自证断言会咬:临时把 `openclaw.tool_activity` 与 `cline.source_span`
+  改成过度声明,两条都如期失败,已回滚。
+  **副产物发现**:codex 的 golden fixture **零个** `custom_tool_call` /
+  `function_call_output` 记录,所以它无法见证自己声明的 pairing 能力 ——
+  但 codex 的提取是真实现了的(`emit_paired_activity`/`emit_unpaired_activity`
+  + 单元测试覆盖),降级会变成假低报。已用具名补充样本承载证据,
+  真正的修法是扩 codex golden fixture(见 M1-5)。
   当前两个测试:漂移测试比对 `capability.rs` ↔ markdown 文档,
   manifest 测试比对 manifest ↔ ledger 列。**没有任何测试比对声明 ↔ 实际行为。**
   这就是 `aider: tool_activity = Partial` 能在全绿 CI 下存活的原因 ——
@@ -1475,6 +1505,7 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
 
 | 日期 | 任务 | 结论 | commit |
 |---|---|---|---|
+| 2026-08-19 | **M1-13 + M2P-13(首个实施任务)** | 行为断言落地(`capability_behaviour.rs`,4 条断言含覆盖面守护),**矩阵不再能自我认证**;修 aider 假声明 `Partial→Unsupported` 及两份 ledger 的同步漂移。已自证断言会咬(临时把 openclaw/cline 改成过度声明,两条如期失败)。副产物:codex golden fixture 缺 tool-call 记录,无法见证自己声明的能力(提取是真实现的)→ 已登记进 M1-5 | `e4f836f` `c1356cb` `2fc1d3e` |
 | 2026-08-18 | 功能缺口审计 | v0.1.0 发布门 12 条:3 满足 / 7 部分 / 2 未满足,且 3 条本地不可能满足 → 门已重写(§3)。最大缺口:五个入口都答不了"我昨天干了什么"(无任何 recency 排序);`--since` 静默丢弃 Codex 全部历史;catalog 层完全无删除路径;矩阵只比对声明↔文档不比对声明↔行为,所以 `aider: tool_activity=Partial` 假声明能过全绿 CI | — |
 | 2026-08-18 | 搜索作用域调研 | 14/14 同类工具默认全库,零个默认当前项目;agf 试过项目默认并撤回两次(原因是"不可见"非加权本身),claude-historian 从按项目扫描改为无上限跨项目,Recall 把 current-repo 默认做出来后关掉,atuin 四年未改 global 默认。决策 D26 落定:全库默认 + 加性同项目加权 + 双侧显示来源 | `d706e46` |
 | 2026-08-18 | provider 样本调研 | 推翻两个 deferred 前提:zcode 与 deepseek-harness 本机都有真实 transcript(dsh 的 home 是 `~/.dsh` 不是 `~/.deepseek`)。发现 opencode probe 会误认 zcode DB(真实 AmbiguousVariant)、qoder 路径三方不一致、hermes 声明的格式已被上游停用。12 个可一小时内自建,grok-build/cursor 拿不到 | `42b5936` |
