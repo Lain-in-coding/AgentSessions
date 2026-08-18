@@ -16,6 +16,61 @@ pub enum StreamingSupport {
     BoundedWholeSource,
 }
 
+/// The on-disk shape of a provider's transcript source.
+///
+/// Derived centrally from the provider id (the format is a property of the
+/// provider, not of an adapter instance). Two call sites need it:
+///
+/// * Source selection, so a text transcript is never *explained* by a SQLite
+///   adapter's rejection. Adapter registry order used to decide which probe
+///   failure reached the user, so a malformed `.jsonl` was reported as
+///   "not a SQLite database (missing magic header)" — the last adapter to
+///   refuse, not a relevant one.
+/// * Discovery, so a candidate file is only offered to adapters whose family
+///   matches its signature (a whole-source SQLite probe reads up to 128 MiB;
+///   handing every walked file to it would be pathological).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceFormatFamily {
+    /// UTF-8 text: line-delimited JSON, whole JSON documents, Markdown.
+    Text,
+    /// A SQLite database file, identified by its magic header.
+    Sqlite,
+}
+
+/// Magic header shared by every SQLite database file.
+pub const SQLITE_MAGIC_HEADER: &[u8] = b"SQLite format 3\0";
+
+impl SourceFormatFamily {
+    /// Classify a source from its leading bytes.
+    ///
+    /// Only the SQLite magic header is a positive binary signature; every other
+    /// input is treated as text. This cannot misclassify a real transcript:
+    /// every supported non-SQLite variant (JSONL, whole JSON document,
+    /// Markdown) is UTF-8 text, and every SQLite database begins with the
+    /// magic header — so a `Text` verdict never hides a database, and a
+    /// `Sqlite` verdict never hides a text transcript.
+    pub fn of_head(head: &[u8]) -> Self {
+        if head.starts_with(SQLITE_MAGIC_HEADER) {
+            Self::Sqlite
+        } else {
+            Self::Text
+        }
+    }
+}
+
+/// Source format family for a provider id.
+///
+/// Unlike [`manifest_for`] this never panics on an unknown id: it is consulted
+/// on error paths and in tests that use fake adapters, where refusing to answer
+/// would be worse than defaulting to the text family.
+pub fn source_format_family_for(provider_id: &str) -> SourceFormatFamily {
+    match provider_id {
+        "opencode" | "cursor" => SourceFormatFamily::Sqlite,
+        _ => SourceFormatFamily::Text,
+    }
+}
+
 /// Maximum one-line/record allocation for streaming text adapters (8 MiB).
 pub const STREAM_RECORD_MAX_BYTES: u64 = 8 * 1024 * 1024;
 /// Maximum complete JSON-family (JSON array / JSONL fallback) or Markdown

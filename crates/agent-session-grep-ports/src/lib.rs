@@ -1275,6 +1275,32 @@ impl<'a> BoundedLineReader<'a> {
     }
 }
 
+/// Read at most `limit` leading bytes from a source.
+///
+/// Used to classify a source's [`crate::SourceFormatFamily`] from its signature
+/// without the whole-source read a `BoundedWholeSource` probe would perform.
+/// A short source simply yields fewer bytes; that is not an error.
+pub fn read_source_head(
+    source: &dyn ReadOnlySource,
+    limit: usize,
+) -> Result<Vec<u8>, ProviderError> {
+    use std::io::Read;
+    let mut reader = source.open().map_err(provider_io)?;
+    let mut head = vec![0_u8; limit];
+    let mut filled = 0_usize;
+    while filled < limit {
+        let read = reader
+            .read(&mut head[filled..])
+            .map_err(|error| ProviderError::Io(error.to_string()))?;
+        if read == 0 {
+            break;
+        }
+        filled += read;
+    }
+    head.truncate(filled);
+    Ok(head)
+}
+
 /// Visit a line-delimited source without retaining more than one bounded
 /// record. `visit` is called synchronously per record; the borrowed `bytes`
 /// slice is only valid for the duration of the call.
@@ -1402,8 +1428,9 @@ pub mod handoff;
 pub mod manifest;
 
 pub use manifest::{
-    AdapterManifest, JSON_FAMILY_MAX_SOURCE_BYTES, SQLITE_MAX_SOURCE_BYTES,
-    STREAM_RECORD_MAX_BYTES, StreamingSupport, manifest_for,
+    AdapterManifest, JSON_FAMILY_MAX_SOURCE_BYTES, SQLITE_MAGIC_HEADER, SQLITE_MAX_SOURCE_BYTES,
+    STREAM_RECORD_MAX_BYTES, SourceFormatFamily, StreamingSupport, manifest_for,
+    source_format_family_for,
 };
 
 #[cfg(test)]
