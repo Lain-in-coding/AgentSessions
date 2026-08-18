@@ -9,13 +9,13 @@
 > - due_milestone: R0 Feasibility / Contract Gate
 > - evidence_path: `spikes/sqlite-snapshot-wal/`（探针代码 + 本文件）
 >
-> 本 Spike 是可丢弃探针，不进入 `crates/` 生产源码树，不形成正式 API/迁移承诺。是否归档与证据是否采信由 R0 Architecture Review 决定。
+> 本 Spike 是可丢弃探针，不进入 `crates/` 生产源码树，不形成正式 API/迁移承诺。是否归档与证据是否采信由 approver 决定。
 
 ---
 
 ## 1. 目的
 
-为以下条款在 **Windows** 上提供实测证据；是否成为正式约束由对应 ADR/Contract 与 R0 Architecture Review 决定：
+为以下条款在 **Windows** 上提供实测证据；是否成为正式约束由对应 ADR/Contract 的 approver 决定：
 
 - 历史 Plan §9.1：WAL 库的一致快照方法；
 - 历史 Plan §6.5：不可变 Generation Bundle（旧 generation 在新写入期间仍可只读打开）；
