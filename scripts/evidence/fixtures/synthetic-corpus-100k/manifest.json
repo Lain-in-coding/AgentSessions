@@ -1,0 +1,183 @@
+{
+  "schema_version": "agent-session-grep.synthetic-corpus-manifest/v1",
+  "corpus_version": "1",
+  "seed": 20260819,
+  "generator": "scripts/evidence/synthetic_corpus.py",
+  "provenance": {
+    "kind": "deterministic_synthetic",
+    "contains_real_transcripts": false,
+    "templates": "all prose, code and identifiers are hand-authored inside scripts/evidence/synthetic_corpus.py; no provider transcript content, path or identity is copied"
+  },
+  "corpus": {
+    "session_count": 5000,
+    "message_count": 100000,
+    "file_count": 5000,
+    "total_bytes": 51115978,
+    "providers": {
+      "aider": {
+        "sessions": 450,
+        "messages": 9242,
+        "bytes": 2818544
+      },
+      "claude-code": {
+        "sessions": 2000,
+        "messages": 41185,
+        "bytes": 26046146
+      },
+      "cline": {
+        "sessions": 450,
+        "messages": 9004,
+        "bytes": 3418036
+      },
+      "codex": {
+        "sessions": 1250,
+        "messages": 24211,
+        "bytes": 12125071
+      },
+      "hermes": {
+        "sessions": 425,
+        "messages": 8250,
+        "bytes": 3372577
+      },
+      "kimi": {
+        "sessions": 425,
+        "messages": 8108,
+        "bytes": 3335604
+      }
+    },
+    "session_messages": {
+      "min": 4,
+      "max": 95,
+      "mean": 20.0
+    },
+    "fixture_hash": "1ea91b034bda850028f2eb5ca0addca6d8e8f433752aebde10d74feb3b12922a",
+    "hash_algorithm": "sha256",
+    "hash_normalization": "crlf_to_lf"
+  },
+  "distribution": {
+    "session_length_cdf": [
+      [
+        0.1,
+        4,
+        7
+      ],
+      [
+        0.35,
+        7,
+        12
+      ],
+      [
+        0.65,
+        12,
+        20
+      ],
+      [
+        0.85,
+        20,
+        30
+      ],
+      [
+        0.97,
+        30,
+        56
+      ],
+      [
+        1.0,
+        56,
+        96
+      ]
+    ],
+    "body_length_cdf": [
+      [
+        0.1,
+        24,
+        37
+      ],
+      [
+        0.25,
+        37,
+        39
+      ],
+      [
+        0.5,
+        39,
+        94
+      ],
+      [
+        0.75,
+        94,
+        107
+      ],
+      [
+        0.9,
+        107,
+        141
+      ],
+      [
+        0.99,
+        141,
+        216
+      ],
+      [
+        1.0,
+        216,
+        355
+      ]
+    ],
+    "message_class_mix": [
+      [
+        "body",
+        0.9,
+        0,
+        0
+      ],
+      [
+        "medium",
+        0.09,
+        300,
+        2000
+      ],
+      [
+        "long",
+        0.01,
+        2000,
+        8000
+      ]
+    ],
+    "language_mix_target": {
+      "zh": 0.44,
+      "en": 0.35,
+      "code": 0.21
+    },
+    "provider_share": {
+      "aider": 0.09,
+      "claude-code": 0.4,
+      "cline": 0.09,
+      "codex": 0.25,
+      "hermes": 0.085,
+      "kimi": 0.085
+    },
+    "anchor": "body length quantiles and language mix are taken from the only corpus measured inside this repository, the frozen semantic corpus at scripts/evidence/fixtures/semantic/corpus (n=2000); the medium/long classes are a deliberate addition because that corpus carries no tool output or stack traces"
+  },
+  "measured": {
+    "message_text_chars": {
+      "count": 100000,
+      "min": 23,
+      "p10": 54,
+      "p25": 66,
+      "p50": 115,
+      "p75": 144,
+      "p90": 327,
+      "p99": 2017,
+      "max": 7998,
+      "mean": 223.645
+    },
+    "cjk_char_ratio": 0.138959,
+    "total_text_chars": 22364549,
+    "language_mix": {
+      "code": 20772,
+      "en": 35103,
+      "zh": 44125
+    }
+  }
+}

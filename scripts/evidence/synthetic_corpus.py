@@ -24,9 +24,15 @@ library.
 
 Commands::
 
-    synthetic_corpus.py generate --output-dir DIR [--sessions N] [--messages M]
-    synthetic_corpus.py verify   --output-dir DIR
-    synthetic_corpus.py ingest   --output-dir DIR [--binary PATH]
+    synthetic_corpus.py generate [--output-dir DIR] [--sessions N] [--messages M]
+    synthetic_corpus.py verify   [--output-dir DIR]
+    synthetic_corpus.py ingest   [--output-dir DIR] [--binary PATH]
+
+The corpus is ~50 MB and is never committed: the default output directory sits
+under the gitignored ``evidence-output/``. What is committed is this generator,
+its test, and the frozen manifest at
+``scripts/evidence/fixtures/synthetic-corpus-100k/manifest.json`` that pins the
+expected tree hash and counts.
 """
 
 from __future__ import annotations
@@ -46,6 +52,14 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
 
 SCHEMA_VERSION = "agent-session-grep.synthetic-corpus-manifest/v1"
+
+# The frozen manifest: the committed contract for the (uncommitted) corpus.
+MANIFEST_PATH = (
+    Path(__file__).resolve().parent / "fixtures" / "synthetic-corpus-100k" / "manifest.json"
+)
+# Default output directory, relative to the workspace root. `evidence-output/`
+# is gitignored, so a generated corpus can never be committed by accident.
+DEFAULT_OUTPUT_DIR = Path("evidence-output") / "synthetic-corpus-100k"
 
 # ---------------------------------------------------------------------------
 # Frozen generator parameters. Changing any of these changes the corpus and
@@ -791,9 +805,20 @@ def corpus_files(corpus_dir: Path) -> list[Path]:
     )
 
 
+def load_frozen_manifest() -> dict[str, Any]:
+    """Load the committed manifest that pins the corpus contract."""
+    return json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+
+
 def verify_corpus(output_dir: Path) -> dict[str, Any]:
-    """Recompute the hash and counts of an on-disk corpus against its manifest."""
+    """Recompute the hash and counts of an on-disk corpus.
+
+    The corpus is checked against the manifest written beside it and, when the
+    scale matches, against the frozen committed manifest. A drift in either is
+    a problem, never a warning.
+    """
     manifest = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
+    frozen = load_frozen_manifest()
     corpus_dir = output_dir / "corpus"
     files = corpus_files(corpus_dir)
     expected = manifest["corpus"]
@@ -803,11 +828,22 @@ def verify_corpus(output_dir: Path) -> dict[str, Any]:
     actual_hash = normalized_tree_hash(files, corpus_dir)
     if actual_hash != expected["fixture_hash"]:
         problems.append(f"fixture hash {actual_hash} != manifest {expected['fixture_hash']}")
+    same_scale = (
+        expected["session_count"] == frozen["corpus"]["session_count"]
+        and expected["message_count"] == frozen["corpus"]["message_count"]
+    )
+    if same_scale and actual_hash != frozen["corpus"]["fixture_hash"]:
+        problems.append(
+            f"fixture hash {actual_hash} != frozen manifest "
+            f"{frozen['corpus']['fixture_hash']}; regenerate or bump corpus_version"
+        )
     return {
         "output_dir": str(output_dir),
         "file_count": len(files),
         "fixture_hash": actual_hash,
         "manifest_fixture_hash": expected["fixture_hash"],
+        "frozen_manifest_fixture_hash": frozen["corpus"]["fixture_hash"],
+        "checked_against_frozen_manifest": same_scale,
         "message_count": expected["message_count"],
         "session_count": expected["session_count"],
         "problems": problems,
@@ -868,6 +904,14 @@ def chunk_paths(paths: Sequence[Path], budget: int = 24_000) -> list[list[str]]:
     return batches
 
 
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def ingest_corpus(
     output_dir: Path, workspace: Path, binary_override: str | None
 ) -> dict[str, Any]:
@@ -902,22 +946,24 @@ def ingest_corpus(
             path.stat().st_size for path in Path(scratch).glob("corpus.db*") if path.is_file()
         )
     expected = manifest["corpus"]["message_count"]
+    claims = int(status_data.get("source_placement_claims", 0))
     return {
-        "binary": str(binary),
+        # The binary is identified by name and digest, never by absolute path:
+        # a local checkout path is machine information the reports must not carry.
+        "binary_name": binary.name,
+        "binary_sha256": sha256_file(binary),
         "sources": len(files),
         "expected_messages": expected,
         "emitted": emitted,
         "skipped": skipped,
         "unchanged": unchanged,
-        "source_placement_claims": int(status_data.get("source_placement_claims", 0)),
+        "source_placement_claims": claims,
         "placements": int(status_data.get("placements", 0)),
         "catalog_count": int(status_data.get("catalog_count", 0)),
         "sync_seconds": round(sync_seconds, 3),
         "store_bytes": db_bytes,
         "warnings": len(warnings),
-        "matches": emitted == expected
-        and skipped == 0
-        and int(status_data.get("source_placement_claims", 0)) == expected,
+        "matches": emitted == expected and skipped == 0 and claims == expected,
     }
 
 
@@ -942,19 +988,24 @@ def build_parser() -> argparse.ArgumentParser:
     generate = sub.add_parser("generate", help="write the corpus and its manifest")
     generate.add_argument(
         "--output-dir",
-        required=True,
-        help="destination directory; the corpus lands in <dir>/corpus",
+        default=None,
+        help=(
+            "destination directory; the corpus lands in <dir>/corpus "
+            f"(default: <workspace>/{DEFAULT_OUTPUT_DIR.as_posix()}, gitignored)"
+        ),
     )
     generate.add_argument("--sessions", type=int, default=DEFAULT_SESSIONS)
     generate.add_argument("--messages", type=int, default=DEFAULT_MESSAGES)
 
-    verify = sub.add_parser("verify", help="recheck an on-disk corpus against its manifest")
-    verify.add_argument("--output-dir", required=True)
+    verify = sub.add_parser(
+        "verify", help="recheck an on-disk corpus against its manifest and the frozen one"
+    )
+    verify.add_argument("--output-dir", default=None)
 
     ingest = sub.add_parser(
         "ingest", help="sync the corpus with the real binary and compare counts"
     )
-    ingest.add_argument("--output-dir", required=True)
+    ingest.add_argument("--output-dir", default=None)
     ingest.add_argument("--binary", default=None, help="prebuilt release binary to use")
     return parser
 
@@ -962,7 +1013,11 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     workspace = Path(args.workspace).expanduser().resolve()
-    output_dir = Path(args.output_dir).expanduser().resolve()
+    output_dir = (
+        Path(args.output_dir).expanduser().resolve()
+        if args.output_dir
+        else workspace / DEFAULT_OUTPUT_DIR
+    )
     if args.command == "generate":
         output_dir.mkdir(parents=True, exist_ok=True)
         manifest = generate_corpus(output_dir, args.sessions, args.messages)
