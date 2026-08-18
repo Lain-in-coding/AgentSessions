@@ -7,11 +7,10 @@ still parse as the format its adapter probes for, and the message count a
 renderer writes must equal the count the manifest claims, because a downstream
 gate that ingests this corpus compares emitted against expected.
 
-Everything here runs in-process at a small scale and always runs; no compiled
-binary and no real transcript is involved. The full 100,000-message contract is
-re-checked on demand with `synthetic_corpus.py verify`, and additionally by the
-regeneration test below when SYNTHETIC_CORPUS_FULL_REGEN=1 is set (it writes
-~50 MB and takes several seconds, so it is not part of the default run).
+Everything here runs in-process; no compiled binary and no real transcript is
+involved. Most tests work at a small scale, and one regenerates the full
+100,000-message corpus into a temporary directory to pin the committed manifest
+(a few seconds, ~50 MB; SYNTHETIC_CORPUS_SKIP_FULL_REGEN=1 opts out).
 """
 
 import importlib.util
@@ -289,15 +288,26 @@ class PrivacyTests(unittest.TestCase):
         self.assertEqual(findings, [])
 
 
-@unittest.skipUnless(
-    os.environ.get("SYNTHETIC_CORPUS_FULL_REGEN") == "1",
-    "set SYNTHETIC_CORPUS_FULL_REGEN=1 to regenerate the full ~50 MB corpus",
+@unittest.skipIf(
+    os.environ.get("SYNTHETIC_CORPUS_SKIP_FULL_REGEN") == "1",
+    "full regeneration skipped by request",
 )
 class FullScaleRegenerationTests(unittest.TestCase):
-    def test_full_regeneration_reproduces_the_frozen_hash(self) -> None:
+    """Pins the committed manifest to the generator at full scale.
+
+    This writes ~50 MB into a temporary directory and takes a few seconds; it
+    runs by default because a frozen contract nobody re-derives rots. Set
+    SYNTHETIC_CORPUS_SKIP_FULL_REGEN=1 on a filesystem where that is too
+    expensive.
+    """
+
+    def test_full_regeneration_reproduces_the_frozen_manifest(self) -> None:
         frozen = SC.load_frozen_manifest()
         with tempfile.TemporaryDirectory() as name:
             manifest = SC.generate_corpus(Path(name))
+            self.assertEqual(
+                manifest["corpus"]["fixture_hash"], frozen["corpus"]["fixture_hash"]
+            )
             self.assertEqual(manifest, frozen)
 
 
