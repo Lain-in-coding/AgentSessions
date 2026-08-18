@@ -853,6 +853,30 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   README provider 表加 discovery 列(与 M4-2 合并做)。
   **验收**:opencode 的 `.db` 能被 discover 找到;README 表有 discovery 列。
 
+  **2026-08-19 实测基线(在假 HOME 上,给修复前后做对照)**:
+  同时放 `.claude/projects/proj/a.jsonl` 与
+  `.hermes/sessions/session_h-s1.json`,`sync --discover` 只找到 **1 个**源
+  (claude-code),hermes 那个 JSON 完全不在视野内。
+  逐 provider 报告(M2P-6 新加的,很有用)把两种零结果**分开**了:
+  ```
+  claude-code  found=1 complete=true  root_state=scanned
+  codex/openclaw/codebuddy/antigravity/opencode  root_state=missing     ← 有根，磁盘上没有
+  aider/grok/pi/qoder/kimi/cline/hermes/cursor   root_state=unsupported ← 压根没注册根
+  ```
+  → **这重新划分了 M2P-7 的范围,它其实是两个不同的缺口**:
+  (a) **扩展名过滤**:只影响 `root_state=missing` 那 5 个里的 opencode
+      —— 它的根注册了、格式是 SQLite,所以永远 `found=0`。
+      这条是纯 bug,按 provider 声明的格式收文件即可。
+  (b) **8 个 provider 连根都没有**(`root_state=unsupported`)。
+      这**不是 bug**:`capability.rs` 的 `discover: Unsupported` 是诚实的,
+      而且这 8 个里有几个的真实路径本来就未核实(见 §1.8.1 的 qoder 三方
+      路径不一致、hermes 上游已停用该格式)。**乱填一个根比不填更糟** ——
+      会让 `found=0` 从"我不找"变成"我找了但没有",掩盖路径其实是错的。
+      这条要等 M1 真实样本落地后逐个补,不能凭猜。
+  所以验收拆成两条:(a) opencode 的 `.db` 能被 discover 找到;
+  (b) `root_state` 三态(scanned/missing/unsupported)对用户可见且 README
+  provider 表有 discovery 列 —— 让"我不找"和"我找了没有"永远分得开。
+
 - [x] **M2P-8 unknown-subcommand 列表过时**
   `main.rs:2347-2366` 的可用命令列表漏了 `handoff`、`resume`、`hook`、
   `serve`、`providers`、`model`、`get-session-resume`。实测
