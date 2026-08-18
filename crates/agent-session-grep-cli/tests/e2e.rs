@@ -1430,6 +1430,70 @@ fn empty_catalog_names_sync_discover_in_search_list_and_status() {
 }
 
 #[test]
+fn human_search_table_session_id_feeds_context_directly() {
+    // M2P-1：表格 Session ID 列过去填 provider 原生 id，喂给 context 会得到
+    // `not a valid session id` exit 2——help 承诺的 search→show→context 数据流
+    // 在 human 输出上根本走不通。现在该列是 canonical `ses_v1_…`，照抄即通。
+    let (dir, db) = temp_db("table-id-feeds-context");
+    let fixture = dir.path().join("table.jsonl");
+    std::fs::write(
+        &fixture,
+        concat!(
+            r#"{"type":"user","uuid":"aa000000-0000-4000-8000-000000000001","sessionId":"aa000000-0000-4000-8000-000000000002","timestamp":"2026-07-26T01:00:00.000Z","message":{"role":"user","content":"tablepivot query text"}}"#,
+            "\n",
+        ),
+    )
+    .expect("write fixture");
+    let fixture_path = fixture.to_string_lossy().into_owned();
+    let out = run(&db, &["ingest", &fixture_path]);
+    assert!(out.status.success(), "ingest failed: {}", stdout(&out));
+
+    let out = run_human(&db, &["search", "tablepivot"]);
+    assert!(out.status.success(), "search failed: {}", stdout(&out));
+    let text = stdout(&out);
+
+    // 从表格末列抓出 id——正是用户会复制的那一段。
+    let table_id = text
+        .lines()
+        .filter(|line| line.contains('|'))
+        .filter_map(|line| line.rsplit('|').next())
+        .map(str::trim)
+        .find(|cell| cell.starts_with("ses_v1_"))
+        .unwrap_or_else(|| panic!("表格末列应是 canonical ses_v1_ id: {text}"));
+
+    // provider 原生 id（源文件里的 sessionId）绝不能是被渲染的那个值。
+    assert_ne!(
+        table_id, "aa000000-0000-4000-8000-000000000002",
+        "Session ID 列不得填 provider 原生 id: {text}"
+    );
+
+    // 契约点：照抄表格里的 id 直接跑 context 必须成功。
+    let out = run(&db, &["context", table_id]);
+    assert!(
+        out.status.success(),
+        "照抄表格 id 跑 context 应成功，得到: {}",
+        stdout(&out)
+    );
+    let frame = parse_first_line(&out);
+    assert_envelope_shape(&frame, true);
+    assert_eq!(frame["data"]["session_id"], table_id, "{frame}");
+
+    // 同一个 id 也必须能喂给 get-session-resume（双 id 规则的另一半）。
+    let out = run(&db, &["get-session-resume", table_id]);
+    assert!(
+        out.status.success(),
+        "get-session-resume 应接受同一个 id: {}",
+        stdout(&out)
+    );
+
+    // 表格下方给出可直接执行的下一步命令。
+    assert!(
+        text.contains("Next:") && text.contains("context "),
+        "表格下方应打印建议命令: {text}"
+    );
+}
+
+#[test]
 fn doctor_reports_ok_without_db() {
     let out = run_bare(&["--robot", "doctor"]);
     assert!(out.status.success());
