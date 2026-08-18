@@ -46,7 +46,7 @@ agent-session-grep 将 Windows x64、Linux x64、macOS x64/ARM64 作为 v1.0 正
 ## 后果
 
 - 普通 PR 质量门继续由 `.github/workflows/ci.yml` 承担；专用证据矩阵由 `.github/workflows/core-beta-evidence.yml` 配置 Windows x64、Ubuntu GNU x64、macOS Intel 与 macOS ARM64 的 release build、直接二进制 smoke、现有 SQLite adapter 测试和存储 feasibility spikes。
-- 本机（Windows x64）已有 release 干净构建 spike 证据；其余平台行以及新工作流中的所有 job 在没有成功 run URL/下载产物前均仅为 `ci_configured_only`，不是已通过结论。
+- 维护者开发机（Windows x64）已有 release 干净构建 spike 证据；其余平台行以及新工作流中的所有 job 在没有成功 run URL/下载产物前均仅为 `ci_configured_only`，不是已通过结论。
 - Ubuntu 22.04 hosted runner 不认证 glibc 2.31；`MACOSX_DEPLOYMENT_TARGET=12.0` 不认证在 macOS 12 上实际运行；Windows job 的静态 CRT 构建也不替代 Windows 10 clean-machine 测试。
 - Linux musl、glibc 2.31 基线、macOS 12 runtime、Windows 签名、macOS 签名/公证仍需额外基础设施。完整分类与证据 ID 见 `docs/operations/core-beta-evidence-matrix.md`。
 

@@ -58,7 +58,7 @@
 
 - spike 用独特 beacon 词，能证明 analyzer 公平性与词法等价，但**测不出排序质量差异**（需带噪声竞争文档的分级相关性）；
 - 规模只到 20k 文档；正式 Selection Gate 需在标准语料（100k session / 10M event）与全部正式 target 上复测；
-- 未跑 macOS/Linux target（本机仅 windows-msvc），跨平台构建硬门留待 CI/External Readiness。
+- 未跑 macOS/Linux target（维护者开发机仅 windows-msvc），跨平台构建硬门留待 CI/External Readiness。
 
 ## 复审触发条件
 
