@@ -773,7 +773,7 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
 > 它们不是文档问题,是**新用户第一次用就会被静默坑到**的功能缺陷。
 > 每条都有实测复现记录,不是推断。
 
-- [ ] **M2P-1 human 模式 search 输出的 Session ID 不可用(最伤信任)**
+- [x] **M2P-1 human 模式 search 输出的 Session ID 不可用(最伤信任)**
   `human.rs:712-751` 的"Session ID"列填的是
   `metadata.provider_session_id`(`main.rs:2854` 的 `attach_session_resume_rows`),
   是 **provider 原生 id**;而 `context` / `show` / `get-session-resume` 全部
@@ -789,7 +789,7 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   已算好的 `suggested_next_commands`。
   **验收**:照抄 human 输出的 id 能直接跑通 `context`/`show`。
 
-- [ ] **M2P-2 读命令在路径打错时静默新建空库**
+- [x] **M2P-2 读命令在路径打错时静默新建空库**
   实测 `asg --db &lt;typo&gt;.db search hello` → `no hits`,退出 **0**,
   并创建了一个 233 KB 的新库。search 是所有人第一个敲的命令,
   打错一个字母就得到"干净的无结果",毫无警告。**这是最可能的静默失败。**
@@ -797,7 +797,7 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   和该跑的 `sync --discover` 完整命令。
   **验收**:对不存在的库跑 search 报错且不留文件。
 
-- [ ] **M2P-3 `--db` 无默认值、无环境变量、config.toml 是死路(补强 D8/M3-1)**
+- [x] **M2P-3 `--db` 无默认值、无环境变量、config.toml 是死路(补强 D8/M3-1)**
   `asg config paths` 打印 `config: .../AgentSessions/config.toml`
   (`main.rs:871,887,911,927`),但**全仓库没有任何代码读这个文件** ——
   grep 只命中这四处路径拼装。也没有 `ASG_DB` 之类环境变量。
@@ -808,7 +808,7 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   (b) 支持 `ASG_DB`;(c) config.toml 要么真读要么别打印。
   **验收**:全新环境 `asg search "x"` 无参数可跑;`config paths` 不撒谎。
 
-- [ ] **M2P-4 空库死胡同:三条命令都不提 `sync --discover`**
+- [x] **M2P-4 空库死胡同:三条命令都不提 `sync --discover`**
   `search` → `no hits`(`human.rs:344-346`)、`list` → `catalog is empty`
   (`human.rs:391`)、`status` → `entities: 0`。全新库上唯一正确的下一步动作
   **一次都没被说出来**。
@@ -825,7 +825,7 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   **修法**:单个源无法识别时可恢复跳过 + 警告计数,与行级处理对齐。
   **验收**:目录里混入垃圾文件后 discover 仍退出 0 并报告跳过数。
 
-- [ ] **M2P-6 `sync --discover` 的 per-provider 报告在 human 模式被丢弃**
+- [x] **M2P-6 `sync --discover` 的 per-provider 报告在 human 模式被丢弃**
   `main.rs:3212-3232` 真的算出了 14 个 adapter 的
   `{id, found, removed, complete}` 和 `discovery.complete`,但
   `human.rs:551-571` 的 `render_sync` 从不读 `data.discovery`。
@@ -853,7 +853,7 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   README provider 表加 discovery 列(与 M4-2 合并做)。
   **验收**:opencode 的 `.db` 能被 discover 找到;README 表有 discovery 列。
 
-- [ ] **M2P-8 unknown-subcommand 列表过时**
+- [x] **M2P-8 unknown-subcommand 列表过时**
   `main.rs:2347-2366` 的可用命令列表漏了 `handoff`、`resume`、`hook`、
   `serve`、`providers`、`model`、`get-session-resume`。实测
   `asg --db x handof q` 会声称 `handoff` 不是可用命令。
@@ -939,7 +939,7 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   (CLI e2e 若断言了,provider agent 改不了那些测试 → 需要单独一轮)。
   **验收**:两个不同文件的同序号消息都能被搜到;有回归测试。
 
-- [ ] **M2P-15 `sync` 把任何未识别的 flag 当成文件路径,再拿 `source_io` 怪路径
+- [x] **M2P-15 `sync` 把任何未识别的 flag 当成文件路径,再拿 `source_io` 怪路径
   (2026-08-19 实测新发现)**
   实测三次,全部复现:
   ```
@@ -1588,6 +1588,7 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
 
 | 日期 | 任务 | 结论 | commit |
 |---|---|---|---|
+| 2026-08-19 | **M2P 首次运行:M2P-1/2/3/4/6/8 + M2P-15** | 用户头一分钟就会撞到的六条已修。**M2P-2 最重要**:读命令过去在 `--db` 打错时会**静默建一个 233 KB 的空库并报"无结果"** —— 打错一个字母得到"干净的无结果",毫无警告;现在报 `not_found` 且不留文件(实测确认)。M2P-3 存储路径改为 `--db` > `$ASG_DB` > `<data>/asg.db`,零配置可用。M2P-1 human 表格改渲染规范 `ses_v1_` id,并有测试**像用户那样**从表格里抓 id 再喂给 `context`。M2P-15(我自己发现并自己修的)`sync` 把未识别 flag 当路径,再拿 `source_io`「确认源文件路径存在且可读」怪路径 —— 路径明明存在可读;现在报 `invalid_request` 并回显该 flag,`-`(stdin 惯例)仍合法,真正缺文件仍报 `source_io`。**计划里"给 `source_io` 的 details 加路径"那条建议是错的,已否决**:`protocol.rs:253` 明确写了 SourceIo 细节被扣留正因为它可能含绝对 transcript 路径,加上去会违反代码自己在执行的隐私约束。顺带修了 `render_human_error` 无条件追加通用指引的问题 —— 库不存在时它会在正确的下一步命令后面再补一句"确认实体 ID 是否正确(运行 list 可浏览)",既答错问题又推荐一条同样需要库的命令 | `8d0d43b` `e801a59` `3d8cf91` `89a058c` `0dfaf19` `568472c` `4243f98` |
 | 2026-08-19 | **M2P-14 合成 id 碰撞(11 个 provider,比预估多 7 个)** | 缺陷面比登记时大:除 cline/grok/kimi/aider,还有 hermes/pi/qoder/openclaw/codebuddy/cursor/antigravity。**antigravity 最严重** —— 它把 `step_index` 当持久 id 直传,于是**每一份** transcript 的第一步都声明 id `"0"`,连 provider 前缀都没有。cursor 的代码注释还写着 id 是按序号派生的"与 cline/codebuddy/qoder adapter 相同" —— 缺陷在树里被当成可复制的范式记录着。11 个 provider 现改为 emit 空 `native_id`,由 CLI 的 `[provider, variant, document_id, seq]` 派生文档作用域 id。**fixture 源字节零改动**(BLAKE3 pin 全部仍匹配),只有 `expected.json` 里的 `native_id` 值变了 —— 这正是 golden 应有的行为。副产物:去掉 antigravity 的 id 用法后 `StepRecord.step_index` 成死代码被 clippy 抓到(probe 判别改读原始 JSON 值),已删字段并注明为何刻意缺席。**我独立端到端复验**:两份互不相关的 pi transcript 各含一条消息 0,sync 报 2 条,两条的标记词各搜各中(修复前第二条静默消失),派生 id 是两个不同的 `msg_v1_<hex>` | `d01f47e`..`8387387` 共 11 个 |
 | 2026-08-19 | **M0 全 20 项闭合** | 剩余两条清掉:14 处发布文件把治理状态挂在**不发布**的架构审查文档上(读者被指向打不开的记录),改为指向各文件自己已记录的 `approver`,只有一处真属 ADR-0001 才引 ADR;裸「本机」在发布文档里会被读成对**读者**机器的断言,provenance 站点统一改「维护者开发机」。刻意保留四处(ADR-0004/0009 的 local-first 隐私声明、RFC-0001、探针脚本自己的输出)—— 那里「本机」确实指读者的机器,改了会把隐私声明反转 | `c1e2a88` `33f1194` `9f738a9` |
 | 2026-08-19 | **M2-4 分层语义检索 + 生产接线** | 语义打分改为「有界候选集 + 精确重排」:候选集经与 lexical 完全同一套 FTS 路径召回至多 2000 条,只对候选读向量算余弦。10 万条 × 384 维实测 p50 895.6→24.6 ms、p95 1111.2→26.6 ms(达标 ≤50 ms);候选集为空/过小(<500)时**回退全量精确打分**,因为实测 100 条 gold query 字面最多只命中 8 条(中位 2),不回退会正好抹掉 paraphrase 召回——语义检索存在的唯一理由。踩坑:SQLite 选了非选择性的 `message_vec_model` 索引全表扫,分层白做(674 ms),两个谓词加一元 `+` 强制走主键(674→24 ms),已用查询计划断言锁住(选错计划是"结果正确但慢",行为测试抓不到)。recall 与 §1.5 基线逐位一致。**接线**:`query_semantic` 端口只收 `(embedding, limit)` 无查询原文,故分层路径在生产里是死的(仍走 147 ms 回退);已在 `main.rs`/`mcp.rs` 两处 search 入口逐请求设置候选原文(不能只设一次,否则上一次的原文会筛这一次的候选集),索引构建路径无查询不设。**我独立端到端复验**:查询词完全不在语料里时仍返回 5 条命中 —— 若候选为空时没回退,结果会是 0 命中(即静默退化成 lexical) | `1c4d633` `8e17e81` `2adf345` |
