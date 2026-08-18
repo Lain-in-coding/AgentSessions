@@ -33,6 +33,7 @@ also verify the committed fixtures still equal the generator output).
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import platform
@@ -44,7 +45,7 @@ import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 # Reuse the frozen helpers from the core harness so every evidence report in
 # this repo shares the same measurement plumbing.
@@ -58,6 +59,25 @@ from core_beta_benchmark import (  # noqa: E402
     sha256_file,
     tree_hash,
 )
+
+
+def normalized_tree_hash(paths: Iterable[Path], root: Path) -> str:
+    """CRLF-normalized fixture hash.
+
+    Git's Windows checkout may rewrite the committed corpus line endings, so
+    hashing raw bytes makes the frozen manifest platform-dependent. The frozen
+    contract is the logical content; both the generator and the verifier hash
+    CRLF-normalized bytes so the same manifest validates on LF and CRLF
+    checkouts alike.
+    """
+    digest = hashlib.sha256()
+    for path in sorted(paths, key=lambda item: item.relative_to(root).as_posix()):
+        relative = path.relative_to(root).as_posix().encode("utf-8")
+        digest.update(relative)
+        digest.update(b"\0")
+        digest.update(path.read_bytes().replace(b"\r\n", b"\n"))
+        digest.update(b"\0")
+    return digest.hexdigest()
 
 SCHEMA_VERSION = "agent-session-grep.semantic-benchmark-report/v1"
 MANIFEST_SCHEMA_VERSION = "agent-session-grep.semantic-benchmark-manifest/v1"
@@ -1164,7 +1184,7 @@ def generate_corpus(output_dir: Path) -> dict[str, Any]:
                 "near_duplicate_pairs": N_DUPLICATE_PAIRS,
                 "paraphrase_pairs": N_PARAPHRASE_PAIRS,
             },
-            "fixture_hash": tree_hash(corpus_files, corpus_dir),
+            "fixture_hash": normalized_tree_hash(corpus_files, corpus_dir),
             "hash_algorithm": "sha256",
         },
         "plants": plants,
@@ -1500,7 +1520,7 @@ def run_benchmark(args: argparse.Namespace) -> Path:
     files = corpus_files()
     if len(files) != N_SESSIONS:
         raise RuntimeError(f"committed corpus holds {len(files)} files, expected {N_SESSIONS}")
-    fixture_hash = tree_hash(files, CORPUS_DIR)
+    fixture_hash = normalized_tree_hash(files, CORPUS_DIR)
     if fixture_hash != manifest["corpus"]["fixture_hash"]:
         raise RuntimeError(
             "committed corpus does not match the frozen manifest fixture_hash; "
