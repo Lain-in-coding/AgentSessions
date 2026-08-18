@@ -26,8 +26,9 @@ use agent_session_grep_domain::{
 };
 use agent_session_grep_ports::{
     CatalogEntry, CatalogStore, ContextGraphStore, ContextStats, MessageContextCandidate,
-    PortError, PortResult, ResumeClaimsStore, SearchFacets, SearchHit, SearchIndex, SearchQuery,
-    SemanticIndex, SessionResumeMetadata, SidechainFacet, SourcePlacement, SourceResumeClaim,
+    PortError, PortResult, ResumeClaimsStore, SearchFacets, SearchHit, SearchIndex, SearchProvider,
+    SearchQuery, SemanticIndex, SessionResumeMetadata, SidechainFacet, SourcePlacement,
+    SourceResumeClaim,
 };
 use rusqlite::{Connection, OptionalExtension};
 use std::any::Any;
@@ -6361,26 +6362,7 @@ impl SearchIndex for SqliteStore {
              WHERE fts MATCH ?1",
         );
         let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(safe_query.clone())];
-        if !filters.providers.is_empty() {
-            let mut clause = String::from(
-                " AND EXISTS (
-                     SELECT 1 FROM message_placements mp
-                     JOIN catalog doc ON doc.id = mp.document_id
-                     WHERE mp.message_id = (
-                         SELECT wire_id FROM fts_ids WHERE id_json = f.id
-                     )
-                     AND json_extract(doc.payload, '$.provider') IN (",
-            );
-            for (index, provider) in filters.providers.iter().enumerate() {
-                if index > 0 {
-                    clause.push(',');
-                }
-                clause.push('?');
-                params.push(Box::new(provider.as_str()));
-            }
-            clause.push_str("))");
-            sql.push_str(&clause);
-        }
+        push_provider_predicate(&mut sql, &mut params, &filters.providers);
         if filters.since.is_some() || filters.until.is_some() {
             sql.push_str(
                 " AND EXISTS (
@@ -6463,26 +6445,7 @@ impl SearchIndex for SqliteStore {
              WHERE fts MATCH ?1",
         );
         let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(safe_query)];
-        if !query.filters.providers.is_empty() {
-            let mut clause = String::from(
-                " AND EXISTS (
-                     SELECT 1 FROM message_placements mp
-                     JOIN catalog doc ON doc.id = mp.document_id
-                     WHERE mp.message_id = (
-                         SELECT wire_id FROM fts_ids WHERE id_json = f.id
-                     )
-                     AND json_extract(doc.payload, '$.provider') IN (",
-            );
-            for (index, provider) in query.filters.providers.iter().enumerate() {
-                if index > 0 {
-                    clause.push(',');
-                }
-                clause.push('?');
-                params.push(Box::new(provider.as_str()));
-            }
-            clause.push_str("))");
-            sql.push_str(&clause);
-        }
+        push_provider_predicate(&mut sql, &mut params, &query.filters.providers);
         if query.filters.since.is_some() || query.filters.until.is_some() {
             sql.push_str(
                 " AND EXISTS (
@@ -6505,49 +6468,7 @@ impl SearchIndex for SqliteStore {
             }
             sql.push(')');
         }
-        match facets.sidechain {
-            SidechainFacet::Include => {}
-            SidechainFacet::MainOnly => {
-                sql.push_str(
-                    " AND NOT EXISTS(
-                         SELECT 1 FROM fts_ids fi2
-                         JOIN message_placements mp ON mp.message_id = fi2.wire_id
-                         WHERE fi2.id_json = f.id AND mp.is_sidechain = 1
-                     )",
-                );
-            }
-            SidechainFacet::SubagentOnly => {
-                sql.push_str(
-                    " AND EXISTS(
-                         SELECT 1 FROM fts_ids fi2
-                         JOIN message_placements mp ON mp.message_id = fi2.wire_id
-                         WHERE fi2.id_json = f.id AND mp.is_sidechain = 1
-                     )",
-                );
-            }
-        }
-        if let Some(kind) = &facets.tool_kind {
-            params.push(Box::new(kind.clone()));
-            let index = params.len();
-            sql.push_str(&format!(
-                " AND EXISTS(
-                     SELECT 1 FROM fts_ids fi2
-                     JOIN tool_activities ta ON ta.message_id = fi2.wire_id
-                     WHERE fi2.id_json = f.id AND ta.kind = ?{index}
-                 )",
-            ));
-        }
-        if let Some(name) = &facets.tool_name {
-            params.push(Box::new(name.clone()));
-            let index = params.len();
-            sql.push_str(&format!(
-                " AND EXISTS(
-                     SELECT 1 FROM fts_ids fi2
-                     JOIN tool_activities ta ON ta.message_id = fi2.wire_id
-                     WHERE fi2.id_json = f.id AND ta.name = ?{index}
-                 )",
-            ));
-        }
+        push_facet_predicates(&mut sql, &mut params, facets);
         sql.push_str(" ORDER BY bm25(fts), f.id LIMIT ?");
         params.push(Box::new(limit as i64));
 
@@ -6562,6 +6483,51 @@ impl SearchIndex for SqliteStore {
             })
             .map_err(backend)?;
         collect_hits(rows)
+    }
+
+    /// D11（宽容但报数）：报出时间窗因缺时间戳而排除的消息条数。
+    ///
+    /// 与 [`Self::query_faceted`] 同一候选集（同一 FTS MATCH + 同一 provider /
+    /// facet 谓词），只把时间谓词换成"任何窗口都不可能纳入"的判定：该消息没有
+    /// 任何可解析时间戳（`asg_instant_sort_key` → NULL，SQL 里 NULL 对每个比较
+    /// 都为假）。这是真查一次的精确计数，不抽样、不估算，也不是忽略其它 filter
+    /// 的整表计数（那会高报排除量）。无时间窗时不查库、直接返回 0。
+    fn count_time_filter_excluded(
+        &self,
+        query: SearchQuery<'_>,
+        facets: &SearchFacets,
+    ) -> PortResult<u64> {
+        if query.filters.since.is_none() && query.filters.until.is_none() {
+            return Ok(0);
+        }
+        let safe_query = safe_fts_query(&bigram_cjk(query.text));
+        if safe_query.is_empty() {
+            return Ok(0);
+        }
+        let conn = self.conn.borrow();
+        let mut sql = String::from(
+            "SELECT COUNT(*) FROM fts AS f
+             WHERE fts MATCH ?1
+               AND NOT EXISTS (
+                   SELECT 1 FROM catalog msg
+                   WHERE msg.id = (
+                       SELECT wire_id FROM fts_ids WHERE id_json = f.id
+                   )
+                   AND asg_instant_sort_key(
+                           json_extract(msg.payload, '$.timestamp')
+                       ) IS NOT NULL
+               )",
+        );
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(safe_query)];
+        push_provider_predicate(&mut sql, &mut params, &query.filters.providers);
+        push_facet_predicates(&mut sql, &mut params, facets);
+
+        let params_ref: Vec<&dyn rusqlite::ToSql> =
+            params.iter().map(std::convert::AsRef::as_ref).collect();
+        let excluded: i64 = conn
+            .query_row(&sql, &*params_ref, |row| row.get(0))
+            .map_err(backend)?;
+        u64::try_from(excluded).map_err(backend)
     }
 }
 
@@ -6864,6 +6830,93 @@ where
     Ok(hits)
 }
 
+/// Push the provider dimension (OR over normalized ids) onto a message-search
+/// predicate chain built over `fts AS f`.
+///
+/// Shared by every message-level query so the time-exclusion count in
+/// [`SearchIndex::count_time_filter_excluded`] applies byte-identical non-time
+/// predicates — a count under looser predicates would overstate the exclusion.
+fn push_provider_predicate(
+    sql: &mut String,
+    params: &mut Vec<Box<dyn rusqlite::ToSql>>,
+    providers: &[SearchProvider],
+) {
+    if providers.is_empty() {
+        return;
+    }
+    let mut clause = String::from(
+        " AND EXISTS (
+                     SELECT 1 FROM message_placements mp
+                     JOIN catalog doc ON doc.id = mp.document_id
+                     WHERE mp.message_id = (
+                         SELECT wire_id FROM fts_ids WHERE id_json = f.id
+                     )
+                     AND json_extract(doc.payload, '$.provider') IN (",
+    );
+    for (index, provider) in providers.iter().enumerate() {
+        if index > 0 {
+            clause.push(',');
+        }
+        clause.push('?');
+        params.push(Box::new(provider.as_str()));
+    }
+    clause.push_str("))");
+    sql.push_str(&clause);
+}
+
+/// Push the facet dimension (sidechain / tool kind / tool name) onto a
+/// message-search predicate chain built over `fts AS f`. Same sharing rationale
+/// as [`push_provider_predicate`].
+fn push_facet_predicates(
+    sql: &mut String,
+    params: &mut Vec<Box<dyn rusqlite::ToSql>>,
+    facets: &SearchFacets,
+) {
+    match facets.sidechain {
+        SidechainFacet::Include => {}
+        SidechainFacet::MainOnly => {
+            sql.push_str(
+                " AND NOT EXISTS(
+                         SELECT 1 FROM fts_ids fi2
+                         JOIN message_placements mp ON mp.message_id = fi2.wire_id
+                         WHERE fi2.id_json = f.id AND mp.is_sidechain = 1
+                     )",
+            );
+        }
+        SidechainFacet::SubagentOnly => {
+            sql.push_str(
+                " AND EXISTS(
+                         SELECT 1 FROM fts_ids fi2
+                         JOIN message_placements mp ON mp.message_id = fi2.wire_id
+                         WHERE fi2.id_json = f.id AND mp.is_sidechain = 1
+                     )",
+            );
+        }
+    }
+    if let Some(kind) = &facets.tool_kind {
+        params.push(Box::new(kind.clone()));
+        let index = params.len();
+        sql.push_str(&format!(
+            " AND EXISTS(
+                     SELECT 1 FROM fts_ids fi2
+                     JOIN tool_activities ta ON ta.message_id = fi2.wire_id
+                     WHERE fi2.id_json = f.id AND ta.kind = ?{index}
+                 )",
+        ));
+    }
+    if let Some(name) = &facets.tool_name {
+        params.push(Box::new(name.clone()));
+        let index = params.len();
+        sql.push_str(&format!(
+            " AND EXISTS(
+                     SELECT 1 FROM fts_ids fi2
+                     JOIN tool_activities ta ON ta.message_id = fi2.wire_id
+                     WHERE fi2.id_json = f.id AND ta.name = ?{index}
+                 )",
+        ));
+    }
+}
+
 /// 把用户搜索词转成 FTS5 安全查询：按空白分词，每个词用双引号包裹成短语查询，
 /// 引号内的 FTS 保留字符（`: . - ( ) { } [ ] "`）按字面量匹配。
 ///
@@ -6923,6 +6976,21 @@ mod filtered_query_tests {
         hits.into_iter()
             .map(|hit| hit.id.as_str().to_string())
             .collect()
+    }
+
+    fn count_excluded(store: &SqliteStore, text: &str, filters: &SearchFilters) -> u64 {
+        count_excluded_faceted(store, text, filters, &SearchFacets::default())
+    }
+
+    fn count_excluded_faceted(
+        store: &SqliteStore,
+        text: &str,
+        filters: &SearchFilters,
+        facets: &SearchFacets,
+    ) -> u64 {
+        store
+            .count_time_filter_excluded(SearchQuery { text, filters }, facets)
+            .unwrap()
     }
 
     #[test]
@@ -7199,6 +7267,115 @@ mod filtered_query_tests {
         let hits = search_filtered(&fixture.store, "shared-token", &everything);
         assert_eq!(hits.len(), 4, "{hits:?}");
         assert!(!hits.contains(&null_ts), "{hits:?}");
+    }
+
+    #[test]
+    fn time_filter_excluded_count_reports_null_timestamp_rows() {
+        // D11: the window stays permissive-by-report — the excluded row is still
+        // excluded, but the count is a real query over the same candidate set.
+        let fixture = filter_fixture();
+        let window = SearchFilters {
+            providers: Vec::new(),
+            since: Some(instant(1_785_196_800)), // 2026-07-28T00:00:00Z
+            until: Some(instant(1_786_320_000)), // 2026-08-10T00:00:00Z
+        };
+        let hits = search_filtered(&fixture.store, "shared-token", &window);
+        assert!(!hits.contains(&fixture.null_ts.as_str().to_string()));
+        assert_eq!(count_excluded(&fixture.store, "shared-token", &window), 1);
+
+        // A window's bounds cannot change the count: NULL fails every one.
+        for bounds in [
+            (Some(instant(1_785_196_800)), None),
+            (None, Some(instant(1_786_320_000))),
+            (Some(instant(0)), Some(instant(4_000_000_000))),
+        ] {
+            let filters = SearchFilters {
+                providers: Vec::new(),
+                since: bounds.0,
+                until: bounds.1,
+            };
+            assert_eq!(
+                count_excluded(&fixture.store, "shared-token", &filters),
+                1,
+                "{bounds:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn time_filter_excluded_count_respects_the_other_active_filters() {
+        // Overstating is the failure mode to avoid: a NULL-timestamp row that a
+        // non-time predicate already excluded is not an exclusion the time
+        // window caused. The fixture's only NULL row is a codex row with no
+        // sidechain placement and no tool activity.
+        let fixture = filter_fixture();
+        let window = (Some(instant(1_785_196_800)), Some(instant(1_786_320_000)));
+        let claude_only = SearchFilters {
+            providers: vec![SearchProvider::Claude],
+            since: window.0,
+            until: window.1,
+        };
+        assert_eq!(
+            count_excluded(&fixture.store, "shared-token", &claude_only),
+            0
+        );
+        let codex_only = SearchFilters {
+            providers: vec![SearchProvider::Codex],
+            since: window.0,
+            until: window.1,
+        };
+        assert_eq!(
+            count_excluded(&fixture.store, "shared-token", &codex_only),
+            1
+        );
+
+        // Facets narrow the candidate set the same way.
+        let all = SearchFilters {
+            providers: Vec::new(),
+            since: window.0,
+            until: window.1,
+        };
+        let subagent_only = SearchFacets {
+            sidechain: SidechainFacet::SubagentOnly,
+            ..SearchFacets::default()
+        };
+        assert_eq!(
+            count_excluded_faceted(&fixture.store, "shared-token", &all, &subagent_only),
+            0
+        );
+        let tool_named = SearchFacets {
+            tool_name: Some("Read".into()),
+            ..SearchFacets::default()
+        };
+        assert_eq!(
+            count_excluded_faceted(&fixture.store, "shared-token", &all, &tool_named),
+            0
+        );
+
+        // A query that matches nothing counts nothing.
+        assert_eq!(count_excluded(&fixture.store, "absent-token", &all), 0);
+    }
+
+    #[test]
+    fn no_time_window_counts_no_exclusion_and_issues_no_query() {
+        // Requirement: with no time window there is nothing to report, and the
+        // count must not cost a statement (byte-identical output, same cost).
+        let fixture = filter_fixture();
+        let mut counted = 0;
+        let statements = counted_statements(&fixture.store, || {
+            counted = count_excluded(&fixture.store, "shared-token", &SearchFilters::default());
+        });
+        assert_eq!(counted, 0);
+        assert_eq!(statements, 0, "no window must not query the database");
+
+        let provider_only = SearchFilters {
+            providers: vec![SearchProvider::Codex],
+            ..SearchFilters::default()
+        };
+        assert_eq!(
+            count_excluded(&fixture.store, "shared-token", &provider_only),
+            0
+        );
     }
 
     #[test]
