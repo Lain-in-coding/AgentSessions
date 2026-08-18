@@ -391,6 +391,14 @@ control plane 免费 "not sustainable long term",别把长期架构押在上面�
 
 ## 3. 发布门(全部为真才把仓库转 PUBLIC 并发 v0.2.0)
 
+⚠️ **v0.1.0 是在自己的发布门没关闭的情况下发出去的。**
+功能缺口审计逐条核了 `OPEN-SOURCE-ROADMAP.md:92-97` 的 12 条原始条件:
+**3 条满足、7 条部分满足、2 条未满足**。而且其中 3 条(Claude/Codex certified、
+≥5 Beta、三平台演练)**在本地根本不可能满足** —— 这就是
+`OPEN-SOURCE-ROADMAP.md:28` 记着 `NOT_READY_EXTERNAL_BLOCKERS`
+而 `CHANGELOG.md:7` / `README.md:11` 同时宣布"首次公开发布"的原因。
+**下面这套门是重写过的:每条都本地可验证,不含无法关闭的条件。**
+
 逐条可验证,不留主观判断:
 
 | 门 | 判据 | 验证命令/证据 |
@@ -407,13 +415,35 @@ control plane 免费 "not sustainable long term",别把长期架构押在上面�
 | G10 | 公开树 public-profile 隐私扫描 0 findings | `privacy_scan.py --profile public`(经导出器) |
 | G11 | 文档:quickstart 可照抄执行、每 provider 有"记录在哪/解析不了什么"表、故障排查手册、MCP 客户端接入实例、CLI reference 完整 | `M4` 交付 + 人工走一遍 |
 | G12 | 产品内 UX:零配置可用、每条错误给下一步命令、首次运行向导、shell 补全 | `M4` 交付 |
-| G13 | 无过时/自相矛盾声明(含"六条 vs 七条"、Gate D pending、discover 声明与实现不一致) | `M4` 交付 |
+| G13 | 无过时/自相矛盾声明(含"六条 vs 七条"、Gate D pending、discover 声明与实现不一致、`aider: tool_activity=Partial` 假声明、MCP 注释说"八个工具"实为九个、ADR-0009 撞号、roadmap 的 `NOT_READY` 判定 vs README 的"已发布") | `M4` 交付 |
 | G14 | Windows + Linux 完整验证;macOS 诚实标注 | 本地 + WSL2 执行记录 |
 | G15 | 全部质量门绿 | §0 第 5 条的七条命令 |
+| G16 | **每个声明的能力都有一条行为断言**(不再让矩阵自我认证) | `M1-13` 交付 |
+| G17 | **五个入口都能答"我最近干了什么"**(recency 浏览) | `M3-4` 交付 |
+| G18 | **时间过滤要么覆盖全 provider,要么明确告知排除数量** | `M2P-12` 交付 |
 
 **明确不阻塞公开**(诚实标注 + 建 issue 跟踪即可):macOS 干净环境演练、
 代码签名/公证/cosign、12 个 provider 全部升 Beta、分支保护、
-ADR/REUSE 正式签字、SBOM 认证。
+ADR/REUSE 正式签字、SBOM 认证、session diff、丰富查询语法
+(ADR-0003 刻意撤掉的,不推翻)、`ses_v2_` 身份迁移(除了 M3-16 那条
+Windows 大小写缺陷)、snapshot API、`recovery_time_ms` 测量。
+
+### 3.1 v0.1.0 发布门核验结果(存档,说明为何要重写门)
+
+| # | 原条件 | 判定 | 关键证据 |
+|---|---|---|---|
+| 1 | 16 provider 证据齐 | 部分 | 16 行存在、14 有 golden,但字段级为假:`context` 与 `handoff` 对全部 14 个是 `Unsupported`;`AdapterManifest.last_certified_targets` 对每个 provider 硬编码为空(`manifest.rs:117`) |
+| 2 | Claude/Codex certified | **未满足** | 两者都是 `Experimental`,且有测试**强制**没有任何行高于 Experimental(`capability.rs:400-414`) |
+| 3 | ≥5 主流 beta/GA | **未满足** | 0 Beta |
+| 4 | semantic+benchmark | 部分 | 真实 E5 已验证,但阈值未冻结;`verify-release.py:192` 仍断言 `model_id == "bigram-hash-v1"` 是**期望的发布行为** |
+| 5 | handoff-pack/v1 | **满足** | schema + 字节确定性 e2e 齐 |
+| 6 | Web UI parity | 部分,**比报告承认的更差** | Web 侧**完全没有 facet 控件**(无 sidechain / tool_kind / tool_name),而 CLI、MCP、TUI 都有;无 list/browse、无 get-message;且下拉框 16 选项里 13 个返回 HTTP 400 |
+| 7 | 零遥测可验证 | 满足(静态) | 依赖禁令 + socket 断言;干净环境抓包从未跑过(已诚实记录) |
+| 8 | 跨边界脱敏 | 代码满足,治理未签 | ADR-0009 状态是 `Proposed` 而非 `Accepted` |
+| 9 | Hook 默认关闭 | **满足** | `enabled: false` + verify-release 断言 |
+| 10 | 三平台安装 | 部分 | 脚本与 3-OS CI job 存在,但 `ci_configured_only` 无具名成功 run |
+| 11 | benchmark/文档/对比表一致 | 部分 | Gate D 复核 pending;而且门自己的 `discovery_coverage ≥ 0.95` **只种了 claude+codex 的 fixture** —— 它测的是 14 个里的 2 个,**永远不会因另外 12 个而失败** |
+| 12 | 三平台演练通过 | **未满足** | macOS 未跑 |
 
 ## 4. 里程碑与任务
 
@@ -830,8 +860,53 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   `claude|claude-code|codex`,而 `asg providers` 列 16 行。实测
   `search Rust --provider aider` 报 `unknown provider: aider`,
   **即使 aider 的数据就在索引里且可被搜到**。
-  **修法**:扩到 `providers` 打印的规范 id 全集;或在 help 与 README 明写限制。
-  **验收**:能按任一已实现 provider 过滤,或限制被文档化。
+  根因在类型层:`enum SearchProvider { Claude, Codex }`(`ports/src/lib.rs:200-203`)。
+  ⚠️ **Web UI 更糟**:provider 下拉框从全部 16 行矩阵填充
+  (`web/index.html:166-176`),但 `/api/search?provider=` 只接受那 3 个
+  (`serve.rs:792`)→ **16 个选项里 13 个返回 HTTP 400 `invalid_request`**。
+  这是唯一图形界面上前 30 秒就能看见的缺陷。
+  **修法**:扩到 `providers` 打印的规范 id 全集(要动 `SearchProvider` 类型);
+  或在 help、README 与 Web 下拉框三处同时明写限制。
+  **验收**:能按任一已实现 provider 过滤,或限制在三处一致地被文档化。
+
+- [ ] **M2P-12 `--since`/`--until` 静默丢弃无时间戳 provider(接近正确性 bug)**
+  时间过滤下推是 `asg_instant_sort_key(...) >= ?`,而 **NULL 对任何比较都失败**
+  (`adapters-sqlite/src/lib.rs:6395-6405`,注释在 `:6360-6361`)。
+  无条件 emit `timestamp: None` 的 provider:**codex**(`provider-codex/src/lib.rs:715`)、
+  grok(`:364`)、kimi(`:238`)、aider(`:159`)、opencode(`:217`);
+  cline 把数字时间戳转成空串(`provider-cline/src/lib.rs:181-185`),也解析成 NULL。
+  → **用户跑 `--since 1w`,Codex 全部历史无声消失。**
+  help 文本(`main.rs:988-989`)承诺时间过滤且无任何限定说明。
+  同一原因导致 human search 表格的日期列对 Codex 永远是 `—`
+  (`latest_activity_ymd_for_sessions`,`adapters-sqlite/src/lib.rs:6808-6843`)。
+  **静默给错答案比报错更糟,这违反本项目自己的原则。**
+  **最低诚实修法**:`warnings` 里写明"N 条消息因缺时间戳被排除";
+  **真修法**:为 codex/grok/kimi/opencode/cline 提取时间戳。
+  **验收**:时间过滤要么覆盖全部 provider,要么明确告知被排除的数量。
+
+- [ ] **M2P-13 `aider` 的 `tool_activity: Partial` 是假声明**
+  `capability.rs:143` 声明 `Partial`,`PROVIDER-BETA-READINESS.md:39` 记 `partial`,
+  但 `provider-aider/src/lib.rs` 里**零个 `emit_activity` 调用** ——
+  它的 blockquote 工具输出被折进 assistant 文本(`:219-229`)。
+  **aider 根本不产出任何 tool activity。**
+  之所以能过 CI:16 行漂移测试(`provider_matrix.rs:311-345`)只比对
+  矩阵与**文档**,从不比对 adapter 的**实际行为**。
+  **修法**:要么真做 aider 的 activity 提取,要么把声明降为 `Unsupported`。
+  并加行为断言(见 M1-13)。
+  **验收**:声明与代码行为一致。
+
+- [ ] **M1-13 加"声明 vs 行为"断言(结构性,防止矩阵自我认证)**
+  当前两个测试:漂移测试比对 `capability.rs` ↔ markdown 文档,
+  manifest 测试比对 manifest ↔ ledger 列。**没有任何测试比对声明 ↔ 实际行为。**
+  这就是 `aider: tool_activity = Partial` 能在全绿 CI 下存活的原因 ——
+  **矩阵变成了自我认证的文档而不是证据。**
+  加至少一条按能力的行为断言,例如:
+  "若 `tool_activity != Unsupported`,解析该 provider 的 golden fixture
+  必须 emit ≥1 个 activity";
+  "若 `source_span != Unsupported`,必须产出带字节精度的 span";
+  "若 `resume != Unsupported`,builder 必须产出命令"(这条已有,
+  见 `resume.rs:321-345`,是好的先例)。
+  **验收**:每个声明的能力都有一条行为断言守着。
 
 - [ ] **M2P-10 真实机器上首次 discover 三次失败(记录,可能需设计决策)**
   在 owner 真实 home 上实测:第一次 35 秒后退出 5
@@ -1003,10 +1078,150 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   **验收**:ADR 落地;实现与 ADR 一致;human 与 robot 都显示来源项目;
   加权在工作目录未解析时无副作用。
 
-- [ ] **M3-4 审计列出的其余功能缺口**
-  待功能缺口审计 agent 回报后填充。已知方向:过滤维度、输出格式、
-  多项目处理、导出、session diff。按 D15 全部补齐。
-  **验收**:逐项有测试。
+- [ ] **M3-4 recency 浏览:五个入口都答不了"我昨天干了什么"(最高优先)**
+  全仓库只有两种排序:`SORT_WIRE_ID_ASC` 与 `SORT_SCORE_DESC`
+  (`application/src/lib.rs:37-40`)。`list` 是 `ORDER BY id ASC` 对一个
+  **BLAKE3 摘要**排序(`adapters-sqlite/src/lib.rs:2065-2068`)——
+  等于随机顺序;而且它把 message/session/document 混在一起
+  (`main.rs:2294` 传 `sessions_only: false`,CLI 没有 `--sessions` flag,
+  尽管 MCP 的 `list_sessions` 有)。没有 `--sort recency`、没有
+  `sessions --recent`、没有"最近 10 个会话"。TUI 开局是空查询框且空输入
+  回车是 no-op(`tui/core.rs:304-307`);Web UI 显示
+  "Type a query to inspect the catalog"(`web/index.html:112`)。
+  → **用户做的第一件事("我昨天/上周干了什么")在五个入口全都做不到。**
+  这是"搜索引擎"与"可用的历史工具"之间的差别。
+  **修法便宜**:按已存在的时间戳投影排序
+  (`adapters-sqlite/src/lib.rs:6808` 已有 `latest_activity_ymd_for_sessions`)。
+  依赖 M2P-12(时间戳提取)才能覆盖全 provider。
+  **任何文档都没承认这个缺口。**
+  **验收**:五个入口都能无查询词列出最近会话。
+
+- [ ] **M3-5 删除/保留:目前完全没有删除路径(隐私义务,非选配)**
+  唯一的清理命令是 `index purge-activities`,而它**只删孤儿** tool-activity 行
+  (`main.rs:1589-1609`)。**没有** `forget <session>`、
+  **没有** `prune --older-than`、**没有** `vacuum`、**没有**保留配置。
+  catalog 行只能靠 tombstone 消失,而 tombstone 要求源文件消失**并且**
+  跑一次完整的 `sync --discover`(`main.rs:3146-3176`)。
+  → 索引了一个后来删掉的仓库、或误入了一份私密 transcript,
+  **没有任何受支持的方式移除它**。
+  `INSTALL-AND-UPGRADE.md:155-156` 让用户手动删整个 data root。
+  对一个 local-first、以隐私为卖点的工具,"你索引了不该索引的东西"
+  必须有比"手动删掉整个数据目录"更好的答案。
+  **这是 D12 的落点,与 M3-2 是同一件事** —— M3-2 写了命令形状,
+  这里记录为什么它是 must-fix 而不是 nice-to-have。
+  文档只承认了 D9("ToolActivity retention/cleanup"),
+  **更大的缺口(catalog 层完全无法删除)哪里都没承认。**
+  **验收**:见 M3-2。
+
+- [ ] **M3-6 `config.toml` 被宣传但从不被读取(与 M2P-3 同源)**
+  `config paths` 在四个平台都报告 `config.toml` 路径
+  (`main.rs:871,887,911,927`),但**依赖图里没有任何 TOML 解析器**
+  (`Cargo.lock` 里零个 `toml` 条目),也没有任何代码读那个文件。
+  `HookConfig` 被记为"stored in config"(`hooks.rs:26-29`)
+  但实际只能靠 flag(`main.rs:2184-2197`)。
+  → **本项目没有任何形式的持久化配置**:存不了默认 db、
+  存不了默认 provider 过滤、存不了 hook 开关、存不了脱敏偏好。
+  **修法**:要么真实现配置读取(需加 TOML 依赖,或用更简单的 KV 格式
+  避免加依赖),要么停止打印这个路径。
+  **验收**:`config paths` 不撒谎;若实现则至少默认 db 与 hook 开关可持久化。
+
+- [ ] **M3-7 无导出、无非 JSON 输出格式**
+  只有 `--output human|json|jsonl`(`main.rs:1014`)。
+  没有 `--format markdown`、没有剪贴板、没有输出到文件。
+  handoff pack 要么是 JSON(`main.rs:1987`)要么是有损的 human 摘要
+  (`human.rs:185-298`);想把一个会话粘给另一个 agent,得自己后处理 JSON。
+  `SKILL.md:104` 还明确告诉消费者永远不要解析 human 模式。
+  **修法**:加 `--format markdown`(handoff 与 context 最需要)。
+  **验收**:handoff 与 context 能直接产出可粘贴的 markdown。
+
+- [ ] **M3-8 搜索缺 role / 路径 / 排除项过滤**
+  `safe_fts_query` 给每个 token 加引号(`adapters-sqlite/src/lib.rs:6885-6904`),
+  ADR-0003 刻意移除了 phrase/boolean/`NEAR`/prefix 语法(`ADR-0003:15,29-31`)——
+  **这个取舍对首发是站得住的,不要推翻**。
+  但 ADR 承认的是语法移除,**没有承认**缺失的是:
+  `role:` 限定(现在只有二元的 `--include-system`)、文件/路径搜索、
+  `-exclude` 排除项。**没有办法只搜 assistant 消息。**
+  **修法**:`role` 限定优先(最常用),`--exclude` 次之;
+  不要重新引入 ADR-0003 撤掉的语法。
+  **验收**:能只搜某个 role;能排除词。
+
+- [ ] **M3-9 命中处无一步到位的上下文窗口**
+  `search` 返回有界前缀片段(`application/src/lib.rs:887-889`,
+  human 预览截断到 120 字符,`human.rs:18`),**无匹配高亮、无周边行**。
+  想看匹配在上下文里的样子要第二条命令(`show`)和第三条
+  (`get-message --around` / `context`)。
+  `why_matched` 列出哪些词匹配了但不说匹配在哪
+  (`application/src/lib.rs:896-902`)。
+  **修法**:加匹配高亮 + 可选的周边行(`--context N`)。
+  **验收**:一条命令能看到命中在上下文中的位置。
+
+- [ ] **M3-10 无统计:用户答不出"我到底有多少历史、来自哪里"**
+  `status` 只有四个计数器(`main.rs:4109-4114`)。
+  没有按 provider 计数、没有日期直方图、没有 top 工具、没有会话大小分布。
+  `doctor` 只查健康(`main.rs:1305-1318`)。
+  **修法**:`status --detail` 或 `stats` 子命令:按 provider / 按月 / 按项目。
+  **验收**:一条命令能看到历史的构成。
+
+- [ ] **M3-11 增量更新的人机工程(MCP 侧最痛)**
+  `sync` 全手动 —— 无 watcher、无 daemon、无搜索时自动同步、无 `notify`。
+  **MCP 是只读的且没有 sync/refresh 工具**(`mcp.rs:343-366`),
+  所以 MCP 客户端的索引会一直过期,直到人在另一个终端手动跑 `sync`。
+  `sync --discover` 只覆盖 14 个里的 6 个且只认 `.jsonl`;
+  显式 `sync <file>` 要求用户知道每个 provider 的磁盘布局,
+  而且拒绝目录并提示"在你的 shell 里展开文件列表"
+  (`main.rs:3672-3677`)—— **在 Windows 上这相当不友好**。
+  写者持排他 lease(`main.rs:430-439`),所以长时间 `sync` 会阻塞其他写入。
+  **修法**:MCP 加一个 refresh/sync 工具(最高价值,一行改动级别的收益);
+  `sync` 接受目录(Windows 友好);discover 覆盖非 jsonl(见 M2P-7)。
+  **验收**:MCP 客户端能自己触发刷新;`sync <dir>` 可用。
+
+- [ ] **M3-12 `--offline` 目前是稳定的 no-op**
+  `const NETWORK_REQUIRING_SUBCOMMANDS: &[&str] = &[]`(`main.rs:1550`)——
+  注册表是空的,所以 `--offline` 今天什么也不 fail-close。
+  这不是缺陷(默认构建本来就零出网),但**文档把它说成一个生效的门**。
+  **修法**:要么把真正需要网络的路径注册进去(目前只有 `model import`
+  的下载路径,而那个路径不存在),要么把它文档化为
+  "未来网络能力的前置门,当前默认构建无网络能力所以无操作"。
+  **验收**:`--offline` 的语义与实现一致。
+
+- [ ] **M3-13 死代码清理:`activity.rs` 整个文件无生产调用者**
+  `application/src/activity.rs`(14.9 KB)的 `extract_activities`、
+  `filter_by_kind`、`filter_by_status`、`file_targets`、`command_targets`
+  **零生产调用者**(全仓库搜索确认);实际走的是
+  `ports::infer_tool_activity_kind`(`ports/src/lib.rs:440-449`)。
+  **修法**:删除,或接进生产路径(如果它确实比现用的实现更好)。
+  **验收**:无死代码;若保留则有调用者。
+
+- [ ] **M3-14 handoff pack 的两个字段永远是空**
+  `provenance: None` 恒真(`handoff_pack.rs:236`),
+  `inference: Vec::new()` 恒真(`:233`)。
+  而 handoff-pack/v1 的卖点之一就是 **evidence/inference 分栏**。
+  同类:`metadata_provider_permission_hint` 对每个 provider 都返回 `None`
+  (`resume.rs:151-153`),CLI 无条件报 `permission_mode_verified: false`
+  (`main.rs:2099`);`ContextGraphStore::tool_activities_for_messages`
+  的默认实现返回空(`ports/src/lib.rs:190-193`)。
+  **修法**:要么填充这些字段,要么从 schema 与文档里移除承诺。
+  **验收**:schema 承诺的字段都有真实内容,或承诺被撤回。
+
+- [ ] **M3-15 D13 运行时守卫:data root 与 source root 重叠无检查**
+  `THREAT-MODEL.md:49` 自己写明:"尚未实现运行时代码守卫",
+  只靠文档和安装器默认值缓解。
+  → 一个配错的 `--db` 落在 `~/.claude/projects` 里,
+  **会把本工具自己的写入放进它承诺永不触碰的目录**。
+  小、本地、且保护的是整个产品赖以成立的那条不变量
+  (provider 源只读)。
+  **修法**:open 时检查 data/cache/log 路径与任一已注册 source root 的
+  包含关系,重叠则拒绝并给出改法。
+  **验收**:重叠时 fail-closed;有测试。
+
+- [ ] **M3-16 `ses_v2_` 身份迁移里的 Windows 路径大小写缺陷(潜在,Windows 是主目标)**
+  `domain/src/ids.rs:624-629` 记录了一个**已知活跃缺陷**:
+  生产的 `installation_namespace` 缺少 Windows 路径大小写归一化。
+  → 同一个安装的会话身份会**按盘符大小写静默分裂**。
+  D10(provider-scoped identity,schema v13)整体是正确 deferred 的,
+  但这条缺陷因为 Windows 是主平台,值得单独提前修。
+  **修法**:归一化 Windows 路径大小写;加回归测试。
+  **验收**:同一路径不同大小写产出同一 namespace。
 
 ---
 
@@ -1240,7 +1455,14 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   **撤回两次**(排序加权 + cwd 预填),声明原因都是"不可见"。
   atuin 四年没改过 `global` 默认。本项目的架构理由更硬:
   项目信号字段对很多会话合法为 null。
-- [ ] **功能缺口完整清单** — 填入 M3-4。
+- [x] **功能缺口完整清单** — 已回报并落地为 M3-4..16、M2P-12/13、M1-13、
+  G16-G18,以及 §3 的门重写与 §3.1 的 v0.1.0 门核验存档。
+  **头号发现:五个入口都答不了"我昨天干了什么"** —— 全仓库只有
+  按 BLAKE3 摘要排序和按分数排序两种,没有任何 recency 排序。
+  **次严重:`--since` 静默丢弃 Codex 全部历史**(NULL 时间戳对比较恒假)。
+  **结构性:矩阵是自我认证的文档而不是证据** —— 漂移测试只比对
+  声明↔文档,从不比对声明↔行为,所以 `aider: tool_activity=Partial`
+  这种假声明能在全绿 CI 下存活。
 - [x] **文档/UX 缺口完整清单** — 已回报并落地为 M2P-1..11 与 M4-1..11。
   关键方法论:该审计**用真实二进制在一次性伪 HOME 下逐条实测**,
   这才发现了 11 条只读文档发现不了的功能缺陷。后续审计沿用这个做法。
@@ -1251,7 +1473,8 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
 
 | 日期 | 任务 | 结论 | commit |
 |---|---|---|---|
-| 2026-08-18 | 搜索作用域调研 | 14/14 同类工具默认全库,零个默认当前项目;agf 试过项目默认并撤回两次(原因是"不可见"非加权本身),claude-historian 从按项目扫描改为无上限跨项目,Recall 把 current-repo 默认做出来后关掉,atuin 四年未改 global 默认。决策 D26 落定:全库默认 + 加性同项目加权 + 双侧显示来源 | — |
+| 2026-08-18 | 功能缺口审计 | v0.1.0 发布门 12 条:3 满足 / 7 部分 / 2 未满足,且 3 条本地不可能满足 → 门已重写(§3)。最大缺口:五个入口都答不了"我昨天干了什么"(无任何 recency 排序);`--since` 静默丢弃 Codex 全部历史;catalog 层完全无删除路径;矩阵只比对声明↔文档不比对声明↔行为,所以 `aider: tool_activity=Partial` 假声明能过全绿 CI | — |
+| 2026-08-18 | 搜索作用域调研 | 14/14 同类工具默认全库,零个默认当前项目;agf 试过项目默认并撤回两次(原因是"不可见"非加权本身),claude-historian 从按项目扫描改为无上限跨项目,Recall 把 current-repo 默认做出来后关掉,atuin 四年未改 global 默认。决策 D26 落定:全库默认 + 加性同项目加权 + 双侧显示来源 | `d706e46` |
 | 2026-08-18 | provider 样本调研 | 推翻两个 deferred 前提:zcode 与 deepseek-harness 本机都有真实 transcript(dsh 的 home 是 `~/.dsh` 不是 `~/.deepseek`)。发现 opencode probe 会误认 zcode DB(真实 AmbiguousVariant)、qoder 路径三方不一致、hermes 声明的格式已被上游停用。12 个可一小时内自建,grok-build/cursor 拿不到 | `42b5936` |
 | 2026-08-18 | CI 调研 | 根因查实:不是封号/中国网络,是私有仓库 2000 min/月 配额被 macOS 10x 倍率烧穿(两天 7397 计费分钟)。public 仓库 runner 免费无限 → 转公开本身即解法。多账号与借用第三方 CI 均否决(ToS + 供应链风险 + 零收益) | `f4df823` |
 | 2026-08-18 | 文档/UX 审计 | 用真实二进制实测发现 11 条首次运行 P0/P1 功能缺陷(落为 M2P)+ 11 条文档缺口(落为 M4);最严重:human search 输出的 session id 喂给 context 会被拒、读命令打错路径静默建空库 | `eeea337` |
