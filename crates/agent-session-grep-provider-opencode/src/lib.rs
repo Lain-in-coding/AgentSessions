@@ -54,7 +54,7 @@ impl ProviderAdapter for OpenCodeAdapter {
             &[
                 "SQLite source has no byte spans; messages are attributed without source offsets",
                 "only text parts with role user/assistant are committed; tool/other parts are ignored",
-                "per-message timestamps are not extracted",
+                "per-message timestamps come from `message.time_created` (epoch milliseconds); rows whose value is missing, non-positive, or out of range carry no timestamp",
             ],
         )
     }
@@ -168,16 +168,19 @@ impl ProviderAdapter for OpenCodeAdapter {
         let mut session_ids: Vec<String> = Vec::new();
 
         if let Ok(mut stmt) = conn.prepare(
-            "SELECT id, session_id, json_extract(data, '$.role') \
+            "SELECT id, session_id, json_extract(data, '$.role'), time_created \
              FROM message ORDER BY time_created ASC",
         ) && let Ok(rows) = stmt.query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?, // message id
                 row.get::<_, String>(1)?, // session_id
                 row.get::<_, String>(2)?, // role
+                // Unexpected column types must not drop the message: the
+                // timestamp is optional, the text is not.
+                row.get::<_, Option<i64>>(3).ok().flatten(), // time_created (epoch ms)
             ))
         }) {
-            for (msg_id, sess_id, role) in rows.filter_map(Result::ok) {
+            for (msg_id, sess_id, role, time_created) in rows.filter_map(Result::ok) {
                 if !matches!(role.as_str(), "user" | "assistant") {
                     continue;
                 }
@@ -214,7 +217,9 @@ impl ProviderAdapter for OpenCodeAdapter {
                     parent_native_id: None,
                     role: &role,
                     text: &text,
-                    timestamp: None,
+                    timestamp: time_created
+                        .and_then(rfc3339_utc_from_epoch_millis)
+                        .as_deref(),
                     is_sidechain: false,
                     span: None, // SQLite doesn't have byte spans
                 })
@@ -237,6 +242,60 @@ impl ProviderAdapter for OpenCodeAdapter {
 
         Ok(report)
     }
+}
+
+/// Upper sanity bound for `message.time_created`: 9999-12-31T23:59:59.999Z in
+/// epoch milliseconds. Beyond this the year no longer fits RFC3339's four-digit
+/// field, so the value is treated as corrupt rather than reformatted.
+const MAX_EPOCH_MILLIS: i64 = 253_402_300_799_999;
+
+/// Format an epoch-millisecond instant as an RFC3339 UTC timestamp.
+///
+/// OpenCode stores `message.time_created` as epoch milliseconds. The search
+/// time filter (`parse_search_instant` in the application crate) only accepts a
+/// timezone-qualified RFC3339 string, so the integer must be rendered here or
+/// the message is silently excluded from every `--since` / `--until` query.
+///
+/// Non-positive and out-of-range values yield `None`: an absent timestamp is
+/// honest, a fabricated 1970 one is not. The workspace has no date/time
+/// dependency, so the civil-date conversion is done inline.
+fn rfc3339_utc_from_epoch_millis(millis: i64) -> Option<String> {
+    if millis <= 0 || millis > MAX_EPOCH_MILLIS {
+        return None;
+    }
+    let seconds = millis.div_euclid(1_000);
+    let subsecond_millis = millis.rem_euclid(1_000);
+    let (year, month, day) = civil_from_days(seconds.div_euclid(86_400));
+    let second_of_day = seconds.rem_euclid(86_400);
+    let (hour, minute, second) = (
+        second_of_day / 3_600,
+        (second_of_day % 3_600) / 60,
+        second_of_day % 60,
+    );
+    Some(format!(
+        "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{subsecond_millis:03}Z"
+    ))
+}
+
+/// Civil date for a count of days since 1970-01-01 (Howard Hinnant's
+/// `civil_from_days`) — the inverse of `days_from_civil`, which the application
+/// crate uses to parse the filter bounds these timestamps are compared against.
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let shifted = days + 719_468;
+    let era = shifted.div_euclid(146_097);
+    let day_of_era = shifted - era * 146_097; // [0, 146096]
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365; // [0, 399]
+    let year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100); // [0, 365]
+    let shifted_month = (5 * day_of_year + 2) / 153; // [0, 11]
+    let day = (day_of_year - (153 * shifted_month + 2) / 5 + 1) as u32; // [1, 31]
+    let month = if shifted_month < 10 {
+        shifted_month + 3
+    } else {
+        shifted_month - 9
+    }; // [1, 12]
+    (if month <= 2 { year + 1 } else { year }, month as u32, day)
 }
 
 /// Process-unique suffix for temp file names: pid + atomic counter.
@@ -344,23 +403,65 @@ mod tests {
         let adapter = OpenCodeAdapter::new();
         let db_bytes = create_test_opencode_db();
 
+        #[derive(Default)]
         struct CountSink {
             count: usize,
+            timestamps: Vec<Option<String>>,
         }
         impl CanonicalEventSink for CountSink {
             fn emit_message(
                 &mut self,
-                _event: MessageEvent<'_>,
+                event: MessageEvent<'_>,
             ) -> agent_session_grep_ports::PortResult<()> {
                 self.count += 1;
+                self.timestamps.push(event.timestamp.map(str::to_string));
                 Ok(())
             }
         }
 
-        let mut sink = CountSink { count: 0 };
+        let mut sink = CountSink::default();
         let report = adapter.parse(&db_bytes, &mut sink).unwrap();
         assert_eq!(report.committed, 2);
+        assert_eq!(sink.count, 2);
         assert!(report.session_native_id.is_some());
+        // `message.time_created` (epoch ms) must reach the sink as RFC3339 UTC.
+        assert_eq!(
+            sink.timestamps,
+            vec![
+                Some("2026-02-14T09:15:00.000Z".to_string()),
+                Some("2026-02-14T09:15:04.250Z".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn epoch_millis_render_as_rfc3339_utc() {
+        assert_eq!(
+            rfc3339_utc_from_epoch_millis(1_771_060_504_250).as_deref(),
+            Some("2026-02-14T09:15:04.250Z")
+        );
+        // Leap day: civil_from_days must agree with days_from_civil.
+        assert_eq!(
+            rfc3339_utc_from_epoch_millis(951_782_400_000).as_deref(),
+            Some("2000-02-29T00:00:00.000Z")
+        );
+        assert_eq!(
+            rfc3339_utc_from_epoch_millis(1).as_deref(),
+            Some("1970-01-01T00:00:00.001Z")
+        );
+        assert_eq!(
+            rfc3339_utc_from_epoch_millis(MAX_EPOCH_MILLIS).as_deref(),
+            Some("9999-12-31T23:59:59.999Z")
+        );
+    }
+
+    #[test]
+    fn non_positive_or_absurd_epoch_millis_yield_no_timestamp() {
+        // Better no timestamp than a fabricated one.
+        assert!(rfc3339_utc_from_epoch_millis(0).is_none());
+        assert!(rfc3339_utc_from_epoch_millis(-1).is_none());
+        assert!(rfc3339_utc_from_epoch_millis(MAX_EPOCH_MILLIS + 1).is_none());
+        assert!(rfc3339_utc_from_epoch_millis(i64::MAX).is_none());
     }
 
     /// Create a test OpenCode SQLite database in memory and return its bytes.
@@ -370,11 +471,11 @@ mod tests {
             "CREATE TABLE session (id TEXT PRIMARY KEY, title TEXT, directory TEXT, time_created INTEGER, time_updated INTEGER);
              CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, data TEXT, time_created INTEGER);
              CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, data TEXT, time_created INTEGER);
-             INSERT INTO session VALUES ('ses_1', 'test', '/work', 1, 2);
-             INSERT INTO message VALUES ('msg_1', 'ses_1', '{\"role\":\"user\"}', 1);
-             INSERT INTO message VALUES ('msg_2', 'ses_1', '{\"role\":\"assistant\"}', 2);
-             INSERT INTO part VALUES ('part_1', 'msg_1', '{\"type\":\"text\",\"text\":\"hello world\"}', 1);
-             INSERT INTO part VALUES ('part_2', 'msg_2', '{\"type\":\"text\",\"text\":\"hi there\"}', 2);",
+             INSERT INTO session VALUES ('ses_1', 'test', '/work', 1771060499000, 1771060800000);
+             INSERT INTO message VALUES ('msg_1', 'ses_1', '{\"role\":\"user\"}', 1771060500000);
+             INSERT INTO message VALUES ('msg_2', 'ses_1', '{\"role\":\"assistant\"}', 1771060504250);
+             INSERT INTO part VALUES ('part_1', 'msg_1', '{\"type\":\"text\",\"text\":\"hello world\"}', 1771060500000);
+             INSERT INTO part VALUES ('part_2', 'msg_2', '{\"type\":\"text\",\"text\":\"hi there\"}', 1771060504250);",
         )
         .unwrap();
 
