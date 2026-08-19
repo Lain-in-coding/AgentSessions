@@ -668,6 +668,11 @@ fn render_discovery(data: &Value) -> Vec<String> {
         return Vec::new();
     }
     let complete = discovery.get("complete").and_then(Value::as_bool);
+    // `--all` 的展开开关由 CLI 放进 data（纯呈现提示，不影响 providers 矩阵）。
+    let expand_all = discovery
+        .get("expand_all")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let mut lines = vec![format!(
         "discovery: 扫描了 {} 个 provider{}",
         providers.len(),
@@ -708,11 +713,20 @@ fn render_discovery(data: &Value) -> Vec<String> {
                 detail
             }
         };
-        // home 解析失败与 scan 不完整都是异常，绝不折叠。
-        let uneventful = matches!(root_state, Some("unsupported") | Some("missing"))
+        // 折叠判据只看"这一行有没有可行动信息"。
+        //
+        // ⚠️ 这里刻意**不看** `complete`:实测(伪 HOME,一个 provider)
+        // `unsupported`/`missing` 的行**全都是** `complete: false` ——
+        // 该字段的含义是"本轮不能据此推导 tombstone",不是"扫描出错"。
+        // 第一版把它当成异常信号,于是 14 行一行都没折叠掉。
+        // 整体的 `complete: false` 已经在上面的表头里说了一次,不必每行重复。
+        //
+        // `home_unresolved` 不在折叠集合内:那是真的出了问题(算不出 home),
+        // 且它影响的是**所有** provider,必须直说。
+        let uneventful = !expand_all
+            && matches!(root_state, Some("unsupported") | Some("missing"))
             && found == 0
-            && removed == 0
-            && scan_complete != Some(false);
+            && removed == 0;
         if uneventful {
             quiet.push(id);
         } else {
@@ -1835,14 +1849,24 @@ mod tests {
             text.contains("claude-code: 12 source(s) found, 1 removed"),
             "{text}"
         );
-        // 根不存在 vs 不支持自动发现必须可区分。
-        assert!(text.contains("codex: data root not present"), "{text}");
+        // 根不存在 vs 不支持自动发现必须可区分——**在展开时**。
+        // 两者都无发现、无 removed,所以默认折叠(M3-17);展开后的措辞由
+        // 下面的 `discovery_expands_folded_providers_on_request` 断言。
         assert!(
-            text.contains(
-                "aider: no discovery root — pass transcripts explicitly: asg sync <file>"
-            ),
-            "不支持自动发现时必须给出手动路径: {text}"
+            !text.contains("codex: data root not present"),
+            "无发现的 provider 默认应折叠: {text}"
         );
+        assert!(
+            !text.contains("aider: no discovery root"),
+            "无发现的 provider 默认应折叠: {text}"
+        );
+        // 折叠必须留下计数与展开办法,不能静默消失。
+        assert!(
+            text.contains("另有 2 个 provider 未检测到数据"),
+            "折叠必须报计数: {text}"
+        );
+        assert!(text.contains("codex") && text.contains("aider"), "{text}");
+        assert!(text.contains("--all"), "折叠必须给出展开办法: {text}");
         // per-provider 的部分扫描单独标注。
         assert!(
             text.contains("opencode: 3 source(s) found (scan incomplete)"),
@@ -1854,6 +1878,75 @@ mod tests {
         assert!(
             !lines.iter().any(|line| line.starts_with("discovery:")),
             "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn discovery_expands_folded_providers_on_request() {
+        // `--all` 把折叠掉的行原样展开（措辞与折叠前一致），并且不再出现折叠汇总。
+        let providers = json!([
+            { "id": "claude-code", "found": 1, "removed": 0, "complete": true,
+              "root_state": "scanned" },
+            { "id": "codex", "found": 0, "removed": 0, "complete": false,
+              "root_state": "missing" },
+            { "id": "aider", "found": 0, "removed": 0, "complete": false,
+              "root_state": "unsupported" },
+        ]);
+        let expanded = json!({
+            "sources": 1, "committed": 1, "generation": 1,
+            "discovery": { "complete": false, "providers": providers, "expand_all": true }
+        });
+        let text = render_success("sync", Outcome::Success, &expanded, &Page::default()).join("\n");
+        assert!(text.contains("codex: data root not present"), "{text}");
+        assert!(
+            text.contains("aider: no discovery root — pass transcripts explicitly"),
+            "展开后必须给出手动路径: {text}"
+        );
+        assert!(!text.contains("另有"), "--all 下不应再出现折叠汇总: {text}");
+    }
+
+    #[test]
+    fn discovery_never_folds_a_provider_with_findings_or_trouble() {
+        // 折叠的边界:有发现、有 removed、或 home 算不出来的行必须留下。
+        //
+        // ⚠️ 每行的 `complete: false` **不是**留下的理由:实测里
+        // `unsupported`/`missing` 全部带 `complete: false`(含义是"本轮不能
+        // 推导 tombstone"而非"扫描出错")。第一版把它当异常,结果一行都没折叠。
+        let data = json!({
+            "sources": 1,
+            "committed": 1,
+            "generation": 1,
+            "discovery": {
+                "complete": false,
+                "providers": [
+                    // 有发现 → 留下。
+                    { "id": "claude-code", "found": 2, "removed": 0, "complete": true,
+                      "root_state": "scanned" },
+                    // root 不存在但有 removed（源消失了）→ 留下:影响 tombstone。
+                    { "id": "codex", "found": 0, "removed": 3, "complete": false,
+                      "root_state": "missing" },
+                    // home 算不出来 → 留下:这是真故障,且影响所有 provider。
+                    { "id": "openclaw", "found": 0, "removed": 0, "complete": false,
+                      "root_state": "home_unresolved" },
+                    // 无发现、无 removed → 折叠。
+                    { "id": "pi", "found": 0, "removed": 0, "complete": false,
+                      "root_state": "unsupported" },
+                ]
+            }
+        });
+        let text = render_success("sync", Outcome::Success, &data, &Page::default()).join("\n");
+        assert!(text.contains("claude-code: 2 source(s) found"), "{text}");
+        assert!(
+            text.contains("codex: data root not present"),
+            "removed 非零必须留下: {text}"
+        );
+        assert!(
+            text.contains("openclaw: cannot resolve your home directory"),
+            "home 故障绝不折叠: {text}"
+        );
+        assert!(
+            text.contains("另有 1 个 provider 未检测到数据"),
+            "只应折叠 pi: {text}"
         );
     }
 

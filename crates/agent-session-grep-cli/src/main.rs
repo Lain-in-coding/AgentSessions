@@ -1934,6 +1934,9 @@ fn dispatch(
                 Some(id) => Some(validated_sync_provider(&id)?),
                 None => None,
             };
+            // 渐进式披露的展开开关（M3-17）：human 输出默认折叠"未检测到数据"的
+            // provider。纯呈现，不改变 JSON 里的 providers 矩阵。
+            let expand_all = take_bool_flag(&mut args, "--all");
             let (data, warnings) = if discover {
                 // --discover 不接受额外参数（路径由发现填充）。未知 flag 也不能
                 // 静默忽略，否则拼写错误会伪装成成功的空发现。
@@ -1954,7 +1957,7 @@ fn dispatch(
                          provider conflicts with it",
                     ));
                 }
-                sync_discover(store, SyncProgress::for_mode(mode), request_id)?
+                sync_discover(store, SyncProgress::for_mode(mode), request_id, expand_all)?
             } else if let Some(list_path) = from_file {
                 // 5000 个源文件的路径展开后超过 Windows 的命令行长度上限，进程根本
                 // 起不来。`--from-file` 收一份每行一个路径的清单（ripgrep/xargs
@@ -1966,6 +1969,12 @@ fn dispatch(
                 if args.len() > 1 {
                     return Err(CliError::usage(
                         "sync --from-file <list> takes no extra paths: every path comes from the list file",
+                    ));
+                }
+                if expand_all {
+                    return Err(CliError::usage(
+                        "sync --all only applies to sync --discover: it expands the \
+                         per-provider discovery report",
                     ));
                 }
                 let paths = read_source_list(&list_path)?;
@@ -1982,6 +1991,14 @@ fn dispatch(
                     request_id,
                 )?
             } else {
+                // `--all` 只对 discover 的 provider 覆盖面报告有意义。静默忽略会让
+                // 用户以为自己要到了全量输出，所以显式拒绝。
+                if expand_all {
+                    return Err(CliError::usage(
+                        "sync --all only applies to sync --discover: it expands the \
+                         per-provider discovery report",
+                    ));
+                }
                 no_flag_like_positional(
                     &args[1..],
                     "sync <file>... | sync --discover | sync --provider <id> <file>...",
@@ -3666,6 +3683,7 @@ fn sync_discover(
     store: &SqliteStore,
     progress: SyncProgress,
     request_id: Option<&str>,
+    expand_all: bool,
 ) -> Result<(serde_json::Value, Vec<String>), CliError> {
     let mut all_paths: Vec<String> = Vec::new();
     let mut providers_out: Vec<ProviderDiscovery> = Vec::new();
@@ -3836,6 +3854,10 @@ fn sync_discover(
             serde_json::json!({
                 "complete": overall_complete,
                 "providers": providers_json,
+                // 纯呈现提示（M3-17）：human 渲染器默认折叠"未检测到数据"的
+                // provider，`--all` 要求全部展开。**不影响 providers 数组本身** ——
+                // 机器消费者始终拿到完整矩阵，契约禁止 CLI 与机器面分叉。
+                "expand_all": expand_all,
             }),
         );
     }
