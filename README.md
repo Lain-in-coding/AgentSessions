@@ -88,6 +88,11 @@ that `--discover` cannot find.
 `serve`, `tui`, and `hook` are documented in
 [serve, tui, and hook](docs/guide/serve-tui-hook.md).
 
+Full documentation is indexed in [docs/README.md](docs/README.md), which lists
+every document with its audience and separates product documentation from
+governance records (ADRs, RFCs, evidence) — the latter record how a decision was
+made at a point in time and are not a statement of current behaviour.
+
 ## Providers
 
 Currently implemented (14/16 planned; 2 deferred — no transcript evidence):
