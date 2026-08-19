@@ -977,6 +977,15 @@ fn search_query_digest(
         .map(|provider| provider.as_str())
         .collect::<Vec<_>>()
         .join(",");
+    let roles = filters
+        .roles
+        .iter()
+        .map(|role| role.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
+    let projects = filters.projects.join("\u{1f}");
+    let exclude_projects = filters.exclude_projects.join("\u{1f}");
+    let exclude_terms = filters.exclude_terms.join("\u{1f}");
     let since = filters
         .since
         .map(|instant| format!("{}:{}", instant.unix_seconds, instant.nanosecond))
@@ -986,11 +995,15 @@ fn search_query_digest(
         .map(|instant| format!("{}:{}", instant.unix_seconds, instant.nanosecond))
         .unwrap_or_default();
     cursor::digest_query(&format!(
-        "search-filter-v1\0{}\0providers={}\0since={}\0until={}\0include_system={}\0group_by_session={}\0facets={}",
+        "search-filter-v2\0{}\0providers={}\0roles={}\0since={}\0until={}\0projects={}\0exclude_projects={}\0exclude_terms={}\0include_system={}\0group_by_session={}\0facets={}",
         query,
         providers,
+        roles,
         since,
         until,
+        projects,
+        exclude_projects,
+        exclude_terms,
         include_system,
         group_by_session,
         facets.canonical_binding(),

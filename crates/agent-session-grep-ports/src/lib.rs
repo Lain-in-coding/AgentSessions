@@ -307,27 +307,76 @@ impl SearchInstant {
     }
 }
 
+/// A canonical message role accepted by the structured search filter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum SearchRole {
+    User,
+    Assistant,
+    System,
+    Developer,
+    Tool,
+}
+
+impl SearchRole {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Assistant => "assistant",
+            Self::System => "system",
+            Self::Developer => "developer",
+            Self::Tool => "tool",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "user" => Some(Self::User),
+            "assistant" => Some(Self::Assistant),
+            "system" => Some(Self::System),
+            "developer" => Some(Self::Developer),
+            "tool" => Some(Self::Tool),
+            _ => None,
+        }
+    }
+}
+
 /// Backend-independent, normalized metadata predicates for a search query.
 ///
-/// `providers` is a canonical sorted set at the Application boundary. Provider
-/// entries are ORed; provider and time dimensions are ANDed. Time is a
-/// half-open UTC interval `[since, until)`.
+/// Providers and roles are canonical sorted sets at the Application boundary;
+/// entries within either dimension are ORed and dimensions are ANDed. Time is
+/// a half-open UTC interval `[since, until)`. Project paths constrain only
+/// trustworthy resolved Original Working Directory claims, never transcript
+/// source paths. Exclusion terms are structured literal terms, not FTS syntax.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SearchFilters {
     pub providers: Vec<SearchProvider>,
+    pub roles: Vec<SearchRole>,
     pub since: Option<SearchInstant>,
     pub until: Option<SearchInstant>,
+    pub projects: Vec<String>,
+    pub exclude_projects: Vec<String>,
+    pub exclude_terms: Vec<String>,
 }
 
 impl SearchFilters {
     pub const EMPTY: Self = Self {
         providers: Vec::new(),
+        roles: Vec::new(),
         since: None,
         until: None,
+        projects: Vec::new(),
+        exclude_projects: Vec::new(),
+        exclude_terms: Vec::new(),
     };
 
     pub fn is_empty(&self) -> bool {
-        self.providers.is_empty() && self.since.is_none() && self.until.is_none()
+        self.providers.is_empty()
+            && self.roles.is_empty()
+            && self.since.is_none()
+            && self.until.is_none()
+            && self.projects.is_empty()
+            && self.exclude_projects.is_empty()
+            && self.exclude_terms.is_empty()
     }
 }
 
@@ -372,6 +421,15 @@ pub struct SearchHit {
     /// [`ResumeClaimsStore::resume_of`] 批量装配。`false` 仅表示该会话
     /// 没有可恢复的 Provider 元数据，绝不表示历史不可检索。
     pub resume_available: bool,
+    /// Provider attribution derived from the same fail-closed Resume claims as
+    /// project attribution. Unknown/conflicting claims remain `None`.
+    pub provider_id: Option<String>,
+    /// Trustworthy resolved Original Working Directory. Human surfaces may show
+    /// this local path; cross-boundary surfaces must project only `project_name`.
+    pub working_directory: Option<String>,
+    /// Safe final path component for Robot/MCP/Web attribution. `None` is an
+    /// explicit unknown/redacted shape and never falls back to a source path.
+    pub project_name: Option<String>,
 }
 
 /// 检索模式：标识本次搜索结果使用哪种匹配策略（wire 字符串见 [`RetrievalMode::as_str`]）。
