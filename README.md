@@ -149,16 +149,23 @@ domain ← ports ← application ← adapters
 
 ## Language policy
 
-English is the language of every user-visible surface: `--help`, error
-messages, warnings, and all documentation under the repository root. New
-user-visible strings are written in English, without exception.
+English is the target language for every user-visible surface: `--help`, error
+messages, warnings, human-mode output, and all documentation under the
+repository root. Every newly added user-visible string is written in English.
 
-Some existing internal text is still Chinese — code comments, historical
-governance documents under `docs/` and `.trellis/`, and test assertion
-messages. That text is deliberately left in place rather than mass-translated,
-because a sweeping rewrite would conflict with every open change and buys a
-reader nothing: none of it is printed by the binary. It converges as those
-files are touched for other reasons.
+The existing surface has not converged there yet, and it is worth knowing
+before you run the tool: the per-subcommand help bodies (`asg search --help`,
+`asg sync --help`, and the rest) are still Chinese, parts of the top-level
+`--help` are, and human-mode output carries Chinese column headers and
+annotations (for example the `sync` counter labels and the search result
+table). Some documents under `docs/` are Chinese as well — including the
+provider maturity matrix and the performance baseline, not only the historical
+governance records.
+
+That text is converted as those surfaces are touched for other reasons rather
+than in one sweeping rewrite, which would conflict with every open change.
+Machine surfaces are unaffected: canonical error codes, JSON field names, and
+other protocol identifiers are wire surface and are never translated.
 
 ## License
 
