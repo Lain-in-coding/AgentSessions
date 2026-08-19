@@ -628,9 +628,24 @@ fn render_sync(data: &Value) -> Vec<String> {
     lines
 }
 
-/// `sync --discover` 的 per-provider 覆盖面报告（每 provider 一行）。
+/// `sync --discover` 的 per-provider 覆盖面报告。
 ///
 /// 非 discover 的 `sync <file>` 响应没有 `discovery` 字段，返回空。
+///
+/// **渐进式披露(M3-17)**:仓库支持 16 个 provider,而用户通常只装 1–3 个。
+/// 逐个列出会让一个只装了 Claude Code 的用户读到 13 行"你没装这个"——真正
+/// 有信息量的那一行被噪声埋掉。所以默认只展开**值得看的**行,其余折叠成一句
+/// 计数并给出展开办法。
+///
+/// 折叠的判据是"这一行有没有可行动信息",不是"有没有找到文件":
+/// - **有发现**(found > 0)→ 展开:这是本次工作的实际来源。
+/// - **异常**(home 解析失败、扫描不完整、有 removed)→ 展开:这些影响
+///   tombstone 推导与结果完整性,折叠掉会把问题藏起来。
+/// - **root 不存在 / 不支持自动发现**且一切正常 → 折叠:对没装该 provider
+///   的用户这只是噪声。
+///
+/// 注意本函数只作用于**人类版式**。`--robot`/JSON 始终携带完整矩阵——机器
+/// 消费者需要全量,且契约禁止 CLI 与机器面分叉。
 fn render_discovery(data: &Value) -> Vec<String> {
     let Some(discovery) = data.get("discovery") else {
         return Vec::new();
@@ -652,6 +667,8 @@ fn render_discovery(data: &Value) -> Vec<String> {
             _ => "",
         }
     )];
+    // 折叠的那些 provider：只记 id，末尾汇总成一行。
+    let mut quiet: Vec<String> = Vec::new();
     for provider in providers {
         let id = provider
             .get("id")
@@ -661,7 +678,8 @@ fn render_discovery(data: &Value) -> Vec<String> {
         let found = provider.get("found").and_then(Value::as_u64).unwrap_or(0);
         let removed = provider.get("removed").and_then(Value::as_u64).unwrap_or(0);
         let scan_complete = provider.get("complete").and_then(Value::as_bool);
-        let detail = match provider.get("root_state").and_then(Value::as_str) {
+        let root_state = provider.get("root_state").and_then(Value::as_str);
+        let detail = match root_state {
             // 不支持自动发现时必须说出替代动作，否则用户只看到 found: 0。
             Some("unsupported") => {
                 "no discovery root — pass transcripts explicitly: asg sync <file>...".to_string()
@@ -681,7 +699,23 @@ fn render_discovery(data: &Value) -> Vec<String> {
                 detail
             }
         };
-        lines.push(format!("  {id}: {detail}"));
+        // home 解析失败与 scan 不完整都是异常，绝不折叠。
+        let uneventful = matches!(root_state, Some("unsupported") | Some("missing"))
+            && found == 0
+            && removed == 0
+            && scan_complete != Some(false);
+        if uneventful {
+            quiet.push(id);
+        } else {
+            lines.push(format!("  {id}: {detail}"));
+        }
+    }
+    if !quiet.is_empty() {
+        lines.push(format!(
+            "  （另有 {} 个 provider 未检测到数据：{}。用 --all 查看每个的状态）",
+            quiet.len(),
+            quiet.join("、")
+        ));
     }
     lines
 }
