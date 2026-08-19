@@ -31,7 +31,7 @@ Legend for local columns: `ok` = present with tests; `partial` = present with kn
 | pi | ok | ok | ok (native) | missing | derived | missing | no tool_activity/incremental |
 | hermes | ok | ok | missing | missing | unknown | missing | JSON doc; no span; **targets a layout upstream discontinued** (`state.db` is now canonical; `~/.hermes/sessions/` no longer written) — new sessions produce nothing readable |
 | cursor | ok | ok | missing | missing | unknown | missing | multi-gen format layering pending |
-| kimi-code | ok | ok | ok (native) | missing | unknown | missing | loop events not parsed |
+| kimi-code | ok | ok | ok (native) | missing | unknown | missing | only context.append_message parsed; loop events (where tool activity lives), metadata/config.update/turn.prompt/usage.record skipped |
 | openclaw | ok | ok | ok (native) | missing | unsupported | missing | resume intentionally unsupported |
 | qoder | ok | ok | ok (native) | missing | unknown | missing | non-dialogue records skipped |
 | tencent-codebuddy | ok | ok | ok (native) | missing | unknown | missing | extension variant pending |
