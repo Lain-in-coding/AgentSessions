@@ -16,7 +16,21 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        # macOS runs on push-to-main and workflow_dispatch, not on every PR.
+        # macOS is 83% of this repo's historical Actions consumption (10x billing
+        # multiplier) and the Free plan caps concurrent macOS jobs at 5, which
+        # this matrix plus core-beta-evidence's four-target matrix exceeds on its
+        # own. Linux and Windows cover every shipped target except Darwin, and
+        # Darwin still runs on main and on every release build.
+        #
+        # The selection has to happen here rather than in a job-level `if`: the
+        # `matrix` context is not available to `jobs.<id>.if` (only github,
+        # needs, vars and inputs are), so a matrix-based job condition silently
+        # evaluates against an empty value and never skips anything.
+        os: >-
+          ${{ fromJSON(github.event_name == 'pull_request'
+          && '["ubuntu-latest","windows-latest"]'
+          || '["ubuntu-latest","windows-latest","macos-latest"]') }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
@@ -73,7 +87,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        # Same PR/main split as the test job above, for the same reason.
+        os: >-
+          ${{ fromJSON(github.event_name == 'pull_request'
+          && '["ubuntu-latest","windows-latest"]'
+          || '["ubuntu-latest","windows-latest","macos-latest"]') }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
