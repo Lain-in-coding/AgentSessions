@@ -1068,6 +1068,47 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   在实际数据上多大。
   **验收**:这四个 provider 的真实样本能被 sync;或错误消息给出消歧命令。
 
+  ---
+
+  **⚠️ 2026-08-19 深夜复测:比原先记录的严重得多,而且不必等真实样本。**
+  逐个把**已提交的 golden fixture** 喂给 `sync`(排除 `expected.json`),
+  12 个 provider 里 **3 个连自己的 fixture 都同步不了**:
+
+  | provider | 结果 | 说明 |
+  |---|---|---|
+  | **codex** | **AMBIGUOUS** | **旗舰 provider,有真实语料回归,`discover: Native`** |
+  | **pi** | **AMBIGUOUS** | |
+  | **openclaw** | **AMBIGUOUS** | 报的候选是 `pi/session-jsonl-v1` |
+  | 其余 9 个 | ok | claude/kimi/qoder/codebuddy/grok/aider/cline/hermes/antigravity |
+
+  **三条修正原记录的判断:**
+  1. **codex 在受影响名单里,而原记录没提它。** 原记录说是
+     `pi`/`openclaw`/`qoder`/`codebuddy` 四个。实测 qoder 与 codebuddy
+     **能过**,而 **codex 不能** —— 一个有真实语料回归、`discover: Native`、
+     被当作旗舰的 provider,**其提交在仓库里的 golden fixture 无法被自己的
+     工具同步**。这不是"合成 fixture 太简陋"能解释的。
+  2. **不必等真实样本。** 原记录写"修法需要先看真实样本"。不需要 ——
+     仓库里已有的 fixture 就足以复现,而且这些 fixture 是各 provider
+     格式证据的权威载体。真实样本能告诉我们交集在实际数据上多大,
+     但**修 probe 的判据现在就有**。
+  3. **错误消息本身是第二个缺陷**:它只报**一个**候选
+     (`one candidate was ...`),不说和谁撞了。用户拿到这条消息无法自查,
+     连"哪两个 provider 需要消歧"都不知道。
+     → 这条**独立可修且必须修**:歧义错误必须列出**全部**候选 variant。
+
+  **为什么这条现在是发布阻塞而非可延后**:`sync --discover` 会遇到并跳过
+  这些源(M2P-5 让它跳过并计数而非整轮失败),所以用户的 codex 历史会被
+  **静默跳过**并只在 warning 里出现一个计数。旗舰 provider 的历史进不了索引,
+  而工具报的是"成功"。
+
+  **可立即执行的修法(不依赖 M1)**:
+  (a) 歧义错误列出全部候选 —— 纯诊断改进,零风险;
+  (b) 给 `sync` 加 `--provider <id>` 显式消歧(`--provider` 已在 M2P-9 打通了
+      矩阵校验,复用即可);
+  (c) 逐个查 codex/pi/openclaw 的 probe 为何与他人等分,用各自独有的
+      **必需**字段提高置信度 —— codex 有 `payload.type`/`session_meta` 封套,
+      pi 有 `type:"session"` header,openclaw 是 v3 header;三者本应可区分。
+
 - [x] **M2P-17 `sync` 不接受目录 + Windows 命令行上限 → 大语料无法一次同步
   (2026-08-19 实测)**
   `sync` 只收显式文件列表(`sync <file>...`,help 明写"不接受目录"),
