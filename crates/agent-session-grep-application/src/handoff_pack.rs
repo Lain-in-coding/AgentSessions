@@ -291,9 +291,24 @@ pub fn generate_deterministic(input: HandoffInput<'_>) -> HandoffPack {
             overall,
             per_session,
         },
-        // Project caller-supplied activities (already redacted at source when
-        // needed). Empty when the catalog has no tool_activities for these hits.
-        tool_activity: input.tool_activities.to_vec(),
+        // Tool activities carry a `target` taken verbatim from the provider's
+        // tool input, which for file tools is an absolute filesystem path. The
+        // pack is a cross-boundary surface (ADR-0009), and ADR-0004 confines
+        // unredacted content to human CLI/TUI output, so an absolute path must
+        // not travel in it. Observed leak before this projection:
+        // `"target":"C:\\...\\project\\README.md"`.
+        //
+        // The path is reduced to its final component rather than dropped: the
+        // filename is the part that makes an activity legible ("it edited
+        // README.md"), while the directory chain is what identifies the machine
+        // and the user. Non-path targets (a shell command, a query, a URL) are
+        // left alone — they are not location data and truncating them would
+        // destroy the evidence value.
+        tool_activity: input
+            .tool_activities
+            .iter()
+            .map(|activity| redact_activity_target(activity.clone()))
+            .collect(),
         source_locators: Vec::new(),
     };
 
@@ -471,6 +486,54 @@ fn single_session_provenance(matched: &[MatchedSession]) -> Option<Provenance> {
         provider_id: only.provider_id.clone(),
         session_id: Some(only.session_id.clone()),
     })
+}
+
+/// Reduce a tool activity's `target` to its final path component when it is a
+/// filesystem path; leave every other target untouched.
+///
+/// The `target` is copied verbatim from the provider's recorded tool input, so a
+/// file tool contributes an absolute path. The handoff pack is cross-boundary
+/// output (ADR-0009) while ADR-0004 keeps unredacted content to human CLI/TUI,
+/// so the directory chain — which names the machine, the user and unrelated
+/// projects — must not travel in it.
+///
+/// Only values that actually look like a path are touched, and the test
+/// `activity_targets_that_are_not_paths_survive_untouched` pins that: a shell
+/// command, a search query or a URL is evidence, not location data, and
+/// truncating it would destroy its value while protecting nothing.
+fn redact_activity_target(mut activity: serde_json::Value) -> serde_json::Value {
+    let Some(object) = activity.as_object_mut() else {
+        return activity;
+    };
+    let Some(target) = object.get("target").and_then(serde_json::Value::as_str) else {
+        return activity;
+    };
+    if let Some(basename) = path_basename(target) {
+        object.insert("target".into(), serde_json::Value::String(basename));
+    }
+    activity
+}
+
+/// The final component of `target`, or `None` when it does not look like a path.
+///
+/// "Looks like a path" is deliberately narrow: a Windows drive prefix (`C:\`,
+/// `c:/`), a UNC prefix (`\\`), or a POSIX absolute path (`/…`). A bare relative
+/// name is left alone because it carries no directory information to remove, and
+/// a string that merely contains a slash (a URL, `a/b` inside a command line) is
+/// not treated as a path — guessing there would mangle commands.
+fn path_basename(target: &str) -> Option<String> {
+    let bytes = target.as_bytes();
+    let windows_drive = bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/');
+    let unc = target.starts_with("\\\\");
+    let posix_absolute = target.starts_with('/');
+    if !(windows_drive || unc || posix_absolute) {
+        return None;
+    }
+    let last = target.rsplit(['/', '\\']).find(|part| !part.is_empty())?;
+    Some(last.to_string())
 }
 
 /// time_window 投影：filters 的 since/until（半开区间 `[since, until)`）。
@@ -1033,6 +1096,90 @@ mod tests {
         assert_no_path_keys(&json);
         let text = serde_json::to_string(&pack).unwrap();
         assert!(!text.contains(".jsonl"), "transcript path leaked: {text}");
+    }
+
+    /// 上面那条测试**漏掉了一个真实泄漏**，原因值得记住：它只拒绝**键名**含
+    /// "path" 的字段与字面 `.jsonl`，而 `tool_activity[].target` 的键名叫
+    /// "target"、值是绝对路径；更关键的是它的 fixture **根本没有 tool activity**
+    /// （`EMPTY_ACT`），所以那个数组永远是空的，测试看不到任何东西。
+    ///
+    /// 实测泄漏样本：`"target":"C:\\...\\project\\README.md"`。
+    #[test]
+    fn tool_activity_target_never_carries_an_absolute_path() {
+        let hits = vec![hit("msg_v1_aaa", 1.0, "hello world")];
+        let locs = locations(&hits);
+        let activities = vec![
+            serde_json::json!({
+                "activity_id": "act-1", "message_id": "msg_v1_aaa", "kind": "file",
+                "actor": "assistant", "name": "Read", "status": "success",
+                "target": "C:\\placeholder\\project\\README.md",
+            }),
+            serde_json::json!({
+                "activity_id": "act-2", "message_id": "msg_v1_aaa", "kind": "file",
+                "actor": "assistant", "name": "Edit", "status": "success",
+                "target": "/placeholder/project/src/lib.rs",
+            }),
+            serde_json::json!({
+                "activity_id": "act-3", "message_id": "msg_v1_aaa", "kind": "file",
+                "actor": "assistant", "name": "Read", "status": "success",
+                "target": "\\\\server\\share\\notes.md",
+            }),
+        ];
+        let mut input = default_input(&hits, &locs);
+        input.tool_activities = &activities;
+        let pack = generate_deterministic(input);
+
+        let targets: Vec<&str> = pack
+            .tool_activity
+            .iter()
+            .filter_map(|a| a.get("target").and_then(serde_json::Value::as_str))
+            .collect();
+        assert_eq!(targets, vec!["README.md", "lib.rs", "notes.md"]);
+
+        // 序列化后整包不得残留目录链——机器名/用户名/无关项目都在里面。
+        let text = serde_json::to_string(&pack).unwrap();
+        for leaked in ["placeholder", "server", "share", "src"] {
+            assert!(
+                !text.contains(leaked),
+                "directory chain leaked ({leaked}): {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn activity_targets_that_are_not_paths_survive_untouched() {
+        // 只处理"确实像路径"的值。命令/查询/URL 是证据而非位置信息，
+        // 截断它们既保护不了任何东西，又会毁掉证据价值。
+        let hits = vec![hit("msg_v1_aaa", 1.0, "hello world")];
+        let locs = locations(&hits);
+        let activities = vec![
+            serde_json::json!({ "name": "Bash", "target": "cargo test --workspace" }),
+            serde_json::json!({ "name": "Grep", "target": "fn main" }),
+            serde_json::json!({ "name": "WebFetch", "target": "https://example.invalid/a/b" }),
+            serde_json::json!({ "name": "Read", "target": "relative/notes.md" }),
+            serde_json::json!({ "name": "Task", "target": serde_json::Value::Null }),
+            serde_json::json!({ "name": "NoTarget" }),
+        ];
+        let mut input = default_input(&hits, &locs);
+        input.tool_activities = &activities;
+        let pack = generate_deterministic(input);
+
+        let targets: Vec<Option<&str>> = pack
+            .tool_activity
+            .iter()
+            .map(|a| a.get("target").and_then(serde_json::Value::as_str))
+            .collect();
+        assert_eq!(
+            targets,
+            vec![
+                Some("cargo test --workspace"),
+                Some("fn main"),
+                Some("https://example.invalid/a/b"),
+                Some("relative/notes.md"),
+                None,
+                None,
+            ]
+        );
     }
 
     fn assert_no_path_keys(value: &serde_json::Value) {
