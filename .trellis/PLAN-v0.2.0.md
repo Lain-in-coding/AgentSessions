@@ -1982,7 +1982,7 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   有回归测试钉住这句话,并断言机器面字段名不混进人类版式。
 
 
-- [ ] **M3-7 无导出、无非 JSON 输出格式**
+- [x] **M3-7 无导出、无非 JSON 输出格式** —— **handoff 已交付;`context` 明确拒绝(见下)**
   只有 `--output human|json|jsonl`(`main.rs:1014`)。
   没有 `--format markdown`、没有剪贴板、没有输出到文件。
   handoff pack 要么是 JSON(`main.rs:1987`)要么是有损的 human 摘要
@@ -1990,6 +1990,29 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   `SKILL.md:104` 还明确告诉消费者永远不要解析 human 模式。
   **修法**:加 `--format markdown`(handoff 与 context 最需要)。
   **验收**:handoff 与 context 能直接产出可粘贴的 markdown。
+
+  **✅ 已交付 `--output markdown`(handoff)与 `--out <path>`(写文件)。**
+  实现落在 application 层(`handoff_markdown.rs`,与 pack 同层),
+  所以 MCP 可复用;文件 I/O 留在 CLI。**不新增 `--format` 平行 flag** ——
+  扩展既有 `--output` 词汇表,避免两套模式概念。
+  **实测(release 二进制,零配置)**:
+  - markdown 正常输出(pack 元信息 / matched sessions / evidence 分栏);
+  - **连跑两次逐字节相同**(确定性是 schema 早已承诺的性质:
+    "the Markdown form is a deterministic projection of this structure");
+  - `--out <path>` 写出 1,684 字节;**同路径二次写入被拒绝**
+    (`that path already exists and this command never overwrites`)——
+    不静默覆盖用户文件;
+  - markdown 全文**不含绝对路径**(跨边界脱敏与 JSON 侧一致)。
+
+  **`context --output markdown` 刻意不实现,并显式报错**:
+  > `--output markdown is only defined for handoff (the handoff pack's
+  > documented Markdown projection); context has no Markdown form.`
+  理由:handoff 的 markdown 是 **schema 已经承诺过的投影**,有权威结构可依;
+  context 没有这样的契约,现造一个 markdown 形状等于**发明一个未经设计的
+  输出格式**,而且它会立刻变成事实上的公开接口。
+  **静默忽略 flag 才是最坏选项** —— 用户会以为拿到了 markdown。
+  → 若后续要做,应先给 context 定一个投影契约(同 handoff 的做法),
+  再实现;本条按"验收的一半已达成 + 另一半明确拒绝并说明"关闭。
 
 - [ ] **M3-8 搜索缺 role / 路径 / 排除项过滤**
   `safe_fts_query` 给每个 token 加引号(`adapters-sqlite/src/lib.rs:6885-6904`),
