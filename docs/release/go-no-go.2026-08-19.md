@@ -280,5 +280,153 @@ branch; after the fix the exported directory contains only
 
 ---
 
-_Sections for G3/G4 (§2), G5, G11–G15 follow as they are executed._
+## 2. Performance final check (G3 and G4)
+
+Both gates read the same harness. Two corpora were generated and each was
+measured twice, per the plan's "two consistent runs" rule.
+
+| Corpus | bytes/message | `fixture_hash` matches frozen manifest | Harness verdict |
+|---|---:|---|---|
+| Frozen gated corpus, `--body-scale 1.0` | 509 | yes (`65cc08e9…`) | scored |
+| Real-density corpus, `--body-scale 25.66` | 7,002 | no, by design (`bb9f31f9…`) | `gate.pass = null` |
+
+Corpus generation and integrity:
+
+```
+python scripts/evidence/synthetic_corpus.py generate --output-dir evidence-output/synthetic-corpus-100k
+python scripts/evidence/synthetic_corpus.py verify   --output-dir evidence-output/synthetic-corpus-100k
+```
+
+`verify` exit 0, with `fixture_hash`, `manifest_fixture_hash` and
+`frozen_manifest_fixture_hash` all equal to
+`65cc08e90dbf7fd406c96ee51cb658d3c36a909ca5c229a308da0b58b4d8c457` and
+`checked_against_frozen_manifest: true`. The gated corpus is bit-reproducible on
+this host.
+
+### Measured results
+
+```
+python scripts/evidence/performance_gate_benchmark.py run \
+  --binary target/release/asg.exe \
+  --corpus-dir evidence-output/synthetic-corpus-100k --output-dir evidence-output/g3-perf
+python scripts/evidence/performance_gate_benchmark.py run \
+  --binary target/release/asg.exe \
+  --corpus-dir evidence-output/synthetic-corpus-dense --output-dir evidence-output/g4-dense --skip-embeddings
+```
+
+| Metric | Threshold | Gated corpus run 1 / run 2 | Real-density run 1 / run 2 |
+|---|---|---|---|
+| `initial_index_throughput_mib_s` | ≥ 3.5 | **1.324 / 1.574 — FAIL** | **7.432 / 7.638 — over threshold, but not scored** |
+| `noop_sync_latency_ms` | ≤ 1000 | 836.2 / 693.5 — pass | 769.0 / 796.6 — over-threshold: no |
+| `search_latency_p95_ms` | ≤ 50 | 37.5 / 31.4 — pass | **114.6 / 118.3 — 2.3× over threshold** |
+| `mcp_single_call_latency_p95_ms` | ≤ 50 | 18.0 / 16.4 — pass | **82.1 / 88.2 — 1.7× over threshold** |
+| `initial_index_messages_per_s` | (informational) | 2,726 / 3,240 | 1,113 / 1,144 |
+| `store_size_ratio` | (informational) | 12.63 / 9.27 | 3.553 / 3.553 |
+| `cli_process_overhead_p50_ms` | (informational) | 23.3 / 22.1 | 21.1 / 23.4 |
+
+Harness verdict lines, verbatim from the manifests:
+
+- gated corpus, both runs:
+  `{"pass": false, "failures": ["initial_index_throughput_mib_s"], "deferred": []}`
+- real-density corpus, both runs:
+  `{"pass": null, "failures": [], "deferred": ["initial_index_throughput_mib_s",
+  "mcp_single_call_latency_p95_ms", "noop_sync_latency_ms",
+  "search_latency_p95_ms"]}`, every metric carrying
+  `state: off_frozen_corpus_contract`
+
+### G3 verdict — **fail**
+
+Three of the four thresholds pass on the frozen gated corpus; the fourth,
+`initial_index_throughput_mib_s`, fails at 1.324 and 1.574 MiB/s against 3.5,
+reproducibly across two runs. `gate.pass = false` is the harness's own verdict,
+not an interpretation. The second half of G3 — "thresholds bound into
+automation" — is satisfied: the thresholds live in
+`PERFORMANCE_THRESHOLDS` in the harness, each with a recorded origin, and the
+validator refuses a manifest that claims threshold scale while carrying a
+non-frozen `body_scale`, so the density knob cannot be used to launder a pass.
+
+Note on the sibling correctness gate that G3's evidence column names:
+
+```
+python scripts/evidence/open_source_gate_benchmark.py run --binary target/release/asg.exe \
+  --output-dir evidence-output/g3-correctness
+```
+
+Exit 0, `gate: {"pass": true, "failures": [], "deferred": []}`, with
+`lexical_recall_at_10` 1.0 (≥ 0.95), `parse_loss_ratio` 0.0 (≤ 0.05),
+`discovery_coverage` 1.0 (≥ 0.95) and `resume_handoff_success` 1.0 (= 1.0). That
+gate carries no performance threshold at all, so it does not answer G3's own
+wording ("four actions on the 100,000-message corpus"); it is recorded here
+because the plan's evidence column names it. Its `discovery_coverage` figure
+also still rests on a fixture set seeded for `claude` and `codex` only, so it
+cannot fail because of the other twelve adapters.
+
+### G4 verdict — **`locally_verified` at real density; the gated-corpus number does not answer this gate**
+
+G4 asks whether a first full index of 1 GiB completes within 5 minutes. Both
+numbers, and which one answers the question:
+
+- **Real transcript density (7,002 bytes/message, 2.4% off the 7,174 measured on
+  a real corpus): 7.432 and 7.638 MiB/s → 1 GiB in 2.23–2.30 minutes.**
+  This is the number that answers G4, because 1 GiB of real transcript is about
+  150,000 messages, not the 2.1 million that 1 GiB of the gated corpus would be.
+- Gated synthetic density (509 bytes/message): 1.324 and 1.574 MiB/s → 1 GiB in
+  10.85–12.89 minutes. Same binary, same host. The entire difference is corpus
+  density: cost was measured to be roughly half per-message and half per-byte, so
+  a corpus with 14× more messages per byte does 14× more per-message work for the
+  same byte count.
+
+So: the requirement is met at the density real users have, with roughly 2.2×
+headroom, and it is missed by 2.5–3.4× on a corpus that is not representative of
+real input. **This is not a clean pass and it is not a blocking fail.** It is a
+measurement whose verdict depends on a corpus property that the gated corpus gets
+wrong, and the gated corpus is what the automation scores.
+
+Two constraints on how far this evidence can be taken:
+
+1. The real-density measurement carries `gate.pass = null` and every metric
+   `state: off_frozen_corpus_contract`. Per the harness's own contract that is
+   **`not_verified`, not `pass`** — an unscored measurement, deliberately, so
+   that a density variant can never be presented as a gate result.
+2. It is a *projection*: 7.43 MiB/s measured over a 668 MiB corpus, extrapolated
+   linearly to 1 GiB. No 1 GiB corpus was indexed end to end in this run.
+
+### New finding: the density argument cuts both ways
+
+The plan's §1.3.6 examined density only for throughput. Measuring all four
+thresholds at real density shows something it does not record:
+
+**At real transcript density, `search_latency_p95_ms` is 114.6/118.3 ms against
+a 50 ms threshold and `mcp_single_call_latency_p95_ms` is 82.1/88.2 ms against
+50 ms.** Both pass comfortably on the gated corpus (31–37 ms and 16–18 ms) and
+both are 1.7–2.3× over threshold at the density that G4's own reasoning says is
+the representative one. Roughly 21–23 ms of the search figure is process launch
+(`cli_process_overhead_p50_ms`), so the query work itself is around 90 ms.
+
+This matters for the pending decision to re-cut the gated corpus at real
+density: doing so would move `initial_index_throughput_mib_s` from fail to pass
+and simultaneously move `search_latency_p95_ms` and
+`mcp_single_call_latency_p95_ms` from pass to fail. The number of failing
+thresholds would go from one to two. Whichever corpus is chosen, the gate is not
+clean on it, and choosing the corpus that makes throughput pass is not a net
+improvement in the release position. Recorded here so that re-cutting the corpus
+is not mistaken for closing the performance gate.
+
+**Residual performance risks**:
+
+1. `initial_index_throughput_mib_s` fails the gated corpus reproducibly; no
+   scored corpus exists on which all four thresholds pass.
+2. Search and MCP p95 exceed their thresholds at real density — measured here,
+   not previously recorded.
+3. `store_size_ratio` is 9.3–12.6× on the gated corpus and 3.55× at real
+   density. Real users see roughly 3.6×, but there is no stated ceiling, so
+   neither figure gates anything.
+4. `embeddings_index_build_ms` was 326,734 ms (5.4 min) for 100k messages. It is
+   informational and semantic retrieval is opt-in, but it is a real cost for
+   anyone who enables it.
+5. All of the above is one Windows host. No Linux or macOS performance figure was
+   produced.
+
+---
+
 
