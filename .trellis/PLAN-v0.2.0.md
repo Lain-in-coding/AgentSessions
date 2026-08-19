@@ -215,6 +215,118 @@ batch 22  files= 17  commit= 1548ms   ← 文件少 10 倍,耗时仍是 1.9 倍
 所以剩余开销由**写入与 FTS** 主导。3.5 MiB/s 需要的是那一层的改动
 (批量写入策略 / FTS 插入路径),不是继续收敛读。
 
+#### 1.3.4 写路径实测 + **3.5 MiB/s 在当前设计下不可达(2026-08-19,已合并)**
+
+先加 `ASG_COMMIT_TRACE=1` 拿到**事务内逐步耗时**(此前全是推断)。
+100k 语料 / 29 个 sync 进程 / 67.0 s 基线:
+
+| 步骤 | ms | 备注 |
+|---|---:|---|
+| `tx.commit_fsync` | 13280 | SQLite 自身提交 |
+| `tx.alias_regen` | 11623 | |
+| `tx.placement_edge_upsert` | 7743 | |
+| `catalog_state_reads` | 5730 | 六次全表读 |
+| `tx.fts_upsert` | 4642 | FTS5 |
+| `manifest_validate` | 4199 | **结果被丢弃** |
+| `tx.source_replacements` | 3131 | |
+| `tx.session_fts_rebuild` | 2594 | |
+| `begin_intent` | 2610 | 重算同一个 manifest |
+| `tx.affected_sessions` | 1706 | 20 万次单 id 查询 |
+
+**这份测量又杀掉两个推断假设**:FTS 插入早已批量、只占 9%;
+`source_batches_are_current` 在 ingest 路径只花 **3 ms**(遇到第一个新实体就
+短路),所以"六次读发生两次"这个猜想在此路径上不成立。
+→ §1.7 的警告再次得到印证:**没测过的瓶颈条目一律当推断看待。**
+
+**三处改动,各自配对测量**:
+1. `page_size=16384` / `cache_size=-262144` / `temp_store=MEMORY`
+   —— 事务是**缓存受限**而非 I/O 策略受限:2 MiB 缓存装不下
+   `message_placements` 的四个索引内部页。**67.0 → 43.3 s**。
+   `synchronous` 未动,耐久性中立;已存库保持原 page size(非空库上该
+   pragma 是 no-op),实测旧 4 KiB 库仍能打开、过 `integrity_check`、可写、
+   可 no-op 重同步。
+2. 去掉重复计算:`batch_manifest` 连算两次(第一次结果丢弃)、
+   `collect_message_sessions` 被以单元素切片调用 20 万次、alias regen 每轮
+   把同一 payload 从 catalog 读两次。**43.3 → 37.5 s**。
+3. 去掉五个全表 loader 的多余 `ORDER BY`(按声明的 PRIMARY KEY 排序会让
+   SQLite 走 PK 索引再逐行按 rowid 取回,而目的地 `BTreeMap` 本来就会重新
+   排序)。**37.5 → 33.5 s**。
+
+**官方 harness,各跑两次(遵守 §1.3.3 的两次一致规则)**:
+
+| | run 1 | run 2 |
+|---|---:|---:|
+| 改前(`2fbb700`) | 0.73 | 0.61 MiB/s |
+| 改后 | **1.36** | **1.26** MiB/s |
+
+≈**1.96x**,仍 FAIL 3.5。顺带改善:`noop_sync_latency_ms` 1069.0/905.1
+(第一次**曾超**1000 ms 阀值)→ **909.6/805.5**(两次都过);
+`search_latency_p95_ms` 143.9/45.2 → 42.8/37.6;`store_size_ratio` 9.51 → 9.27。
+
+**正确性**:Gate D 7/7;**输出逐字节相同** —— 七张表加 `source_scans`
+(减 `scanned_at_ms`)的 SHA-256,两次独立 sync 之间相同,**且与改动前的
+二进制全部 8 个摘要相同**;tombstone 数字与基线一致。
+
+**耐久性没有动,而且这是测出来的决定**:实测 `synchronous=NORMAL`
+反而**更慢**(36.7 s vs 33.5 s)—— 256 MiB 缓存下提交耗时由**写约 17 MiB
+WAL 帧**主导,省掉的那一次 fsync 是舍入误差。开关做了、测了、然后删了,
+**不留一个拿保证换零收益的旋钮**。
+
+**⚠️ 结论:3.5 MiB/s 靠调优此设计不可达。**
+只把"真正写入本存储要保存的事实"那些步骤相加
+(`catalog_upsert` 0.20 + `fts_upsert` 2.74 + `placement_edge_upsert` 1.80 +
+`source_replacements` 0.95 + `commit_fsync` 7.15 = 12.8 s),
+再加任何提交都省不掉的开销(parse、verify、29 次进程启动 ≈ 3.9 s)
+= **16.7 s ≈ 3.0 MiB/s**。这是把 durable intent、claimer 图、alias 重生成、
+session 元数据投影与全部完整性校验**全部压到零**之后的天花板 —— **低于 3.5**。
+
+两处结构性成本(已写进源码注释留给后续):
+- **提交前的读是 O(catalog) per commit**,于是全量 ingest 是 O(n²/batch)。
+  它们为了让 tombstone 推导安全而载入整张 claimer 图。`IN` 分块作用域
+  已实测更慢;正解是**不再需要每批次拿整张图**(例如维护一个 claimer 计数
+  列),而不是换个方式去查它。
+- **每条消息 payload 每次提交被写两遍** —— `catalog_upsert` 插入后,
+  `alias_regen` 又读回来重写以拼入 `session`/`spans`/`parent`/`is_sidechain`。
+  这些别名派生自同一批次内存里已有的 placement 与 edge,**在插入前投影**、
+  只对被另一个源同时认领的实体回退到 read-modify-write,就能把一次全 catalog
+  重写从热路径上摘掉。
+
+→ **D4 的 3.5 MiB/s 阀值需要一个决定**:要么接受它在 0.2 不可达并把阀值
+改成有依据的值(实测天花板 3.0,当前 1.36),要么把上面两处结构性改动
+排进 0.3。**不能继续把一个已证明不可达的阀值挂在发布门上**(§3 G4)。
+
+#### 1.3.5 ⚠️ 先别动阀值:**受门语料的密度比真实语料低 14 倍**(待验证假设)
+
+在改阀值之前必须先排除一个可能:**我们可能一直在测一个比 D4 实际要求
+苛刻得多的东西。**
+
+| 语料 | 文件 | 字节 | 消息 | **字节/消息** |
+|---|---:|---:|---:|---:|
+| 受门合成语料(100k) | 5,000 | 50,920,199 | 100,000 | **509** |
+| 真实冻结语料 | 1,242 | 1,177,479,794 | 164,136 | **7,174** |
+
+**相差 14.1 倍。** 而 §1.3.4 的逐步测量显示提交成本几乎全部是**按条**发生的
+(`placement_edge_upsert`、`fts_upsert`、`catalog_upsert`、`affected_sessions`
+的 20 万次查询)——**没有一项与消息字节数成正比**。
+
+**假设**:若成本确实按条而非按字节,那么同样的每条成本在真实语料上会得到
+约 14 倍的 MiB/s,因为分子(字节)大了 14 倍而分母(条数×每条成本)不变。
+1.36 MiB/s × 14 ≈ 19 MiB/s —— **远超 3.5**。
+
+**这不是用来搪塞阀值的说辞,是一个可判定的实验**:
+固定消息条数、把消息体长度提到真实语料的密度(约 7 KB/条),重测 MiB/s。
+- 若 MiB/s 显著上升 → **阀值没问题,受门语料选错了**。
+  D4 说的是"1 GiB 语料 5 分钟",而 1 GiB 的**真实**语料只有约 15 万条消息,
+  不是合成语料那样的 210 万条。修法是让受门语料的密度贴合真实分布,
+  而不是降低阀值。
+- 若 MiB/s 基本不变 → 成本确实按字节,§1.3.4 的天花板论证成立,
+  按上一条改阀值。
+
+**在这个实验有结果之前,不要改 `PERFORMANCE_THRESHOLDS`。**
+把阀值调到刚好能过是本仓库明令禁止的
+(`performance_gate_benchmark.py:84-85`:"a threshold tuned to fit a
+measurement gates nothing")。
+
 
 
 ### 1.4 MCP amortized 语义延迟(已实测)
