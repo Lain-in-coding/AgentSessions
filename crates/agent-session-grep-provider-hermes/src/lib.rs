@@ -1,13 +1,33 @@
 //! Hermes agent provider adapter.
 //!
 //! Parses Hermes session transcripts from `~/.hermes/sessions/session_<id>.json`
-//! (canonical format: full transcript + metadata; sibling `<id>.jsonl` files
-//! hold only partial recent state and are ignored). The top level carries
-//! `session_id`, `session_start`, and a `messages` array of
+//! (full transcript + metadata; sibling `<id>.jsonl` files hold only partial
+//! recent state and are ignored). The top level carries `session_id`,
+//! `session_start`, and a `messages` array of
 //! `{role, content, reasoning?, timestamp?, tool_call_id?, tool_calls?}`.
 //!
 //! Format evidence: hstry (MIT) `adapters/hermes/adapter.ts` @88b78b1. Field
 //! shapes and the per-message extraction are adapted from hstry under MIT.
+//!
+//! # This variant targets a HISTORICAL layout that upstream has discontinued
+//!
+//! `hermes/session-json-v1` reads per-session files under
+//! `~/.hermes/sessions/`. Upstream no longer produces them. Hermes' own
+//! documentation states that `~/.hermes/state.db` — SQLite with FTS5, holding
+//! the full message history — is the canonical session store, and that
+//! per-session files left in `~/.hermes/sessions/` are leftovers from before
+//! that change which are "no longer written or read by Hermes"
+//! (<https://hermes-agent.nousresearch.com/docs/user-guide/sessions>).
+//!
+//! The practical consequence, stated plainly: **creating a new Hermes session
+//! today produces nothing this adapter can read.** This variant is useful only
+//! for files retained from an older installation.
+//!
+//! Supporting current Hermes needs a separate `state.db` variant. That is
+//! deliberately **not** claimed here: there is no `state.db` on the maintainer's
+//! machine (`~/.hermes` holds only `config.yaml` and `skills/` — no
+//! `sessions/` directory either), so its schema has not been observed and
+//! declaring support would be a capability claim with no evidence behind it.
 
 use agent_session_grep_ports::MetadataResolution;
 use agent_session_grep_ports::{
@@ -70,6 +90,8 @@ impl ProviderAdapter for OpenHermesAdapter {
             self.provider_id(),
             Some(1),
             &[
+                "this variant reads a HISTORICAL layout: upstream Hermes has made `~/.hermes/state.db` (SQLite + FTS5) the canonical session store and states that per-session files under `~/.hermes/sessions/` are no longer written or read, so a newly created session produces nothing this adapter can read",
+                "the current `state.db` store is NOT supported (no sample observed, schema unverified); only files retained from an older installation are parseable",
                 "sibling <id>.jsonl files (partial recent state) are ignored; only session_<id>.json is parsed",
                 "no byte spans (whole-file JSON); message timestamps fall back to session_start when absent",
                 "message objects carry no native id (only their array position), so message identity is reconstructed document-scoped by the ingestion layer (Unstable)",

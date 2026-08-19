@@ -31,7 +31,7 @@
 | Antigravity | `antigravity` | `antigravity/transcript-jsonl-v1` | **Experimental** | 维护者开发机真实格式核验（2026-08-15）：`brain/<uuid>/.system_generated/logs/transcript.jsonl`；identity 在目录名，文件内无 session id 字段 + golden（`tests/golden.rs`） |
 | OpenCode | `opencode` | `opencode/sqlite-v1` | **Experimental** | `opencode.db` SQLite（session/message/part 表），只读打开（SQLITE_OPEN_READONLY + busy_timeout）+ golden（`tests/golden.rs`） |
 | Pi | `pi` | `pi/session-jsonl-v1` | **Experimental** | session JSONL（`type:session` header + message）+ golden（`tests/golden.rs`） |
-| Hermes | `hermes` | `hermes/session-json-v1` | **Experimental** | `~/.hermes/sessions/session_<id>.json`（session_id/messages），hstry@88b78b1 (MIT) 格式证据 + golden（`tests/golden.rs`） |
+| Hermes | `hermes` | `hermes/session-json-v1` | **Experimental** | `~/.hermes/sessions/session_<id>.json`（session_id/messages），hstry@88b78b1 (MIT) 格式证据 + golden（`tests/golden.rs`）。⚠️ **该布局上游已停用**：Hermes 官方文档说 `~/.hermes/state.db`（SQLite + FTS5）才是权威 session store，`~/.hermes/sessions/` 下的旧文件"no longer written or read"，即**新建会话产不出本 adapter 能读的文件**；`state.db` variant 未实现也未声明（无样本、schema 未观察） |
 | Cursor | `cursor` | `cursor/vscdb-chat-v1` | **Experimental** | `state.vscdb` SQLite KV（ItemTable `chatdata`/`prompts` key），hstry@88b78b1 (MIT) 格式证据，多代格式分层待补 + golden（`tests/golden.rs`） |
 | Kimi Code | `kimi-code` | `kimi-code/wire-jsonl-v1` | **Experimental** | wire.jsonl（`context.append_message`）+ golden（`tests/golden.rs`） |
 | OpenClaw | `openclaw` | `openclaw/session-jsonl-v3` | **Experimental** | v3 JSONL header + message records，维护者开发机仅 config 无 transcript 样本 + golden（`tests/golden.rs`） |
@@ -89,7 +89,7 @@ manifest 均已填真实限制，见各 `crates/agent-session-grep-provider-*/sr
 - **Antigravity**：文件内无 session id 字段（identity 在 `brain/<uuid>` 目录名），parse 时 `session_native_id`/`provider_session_id` 如实留缺；`SYSTEM`/`CONVERSATION_HISTORY` 与工具活动步骤永不为消息；`span` 用字节区间。
 - **OpenCode**：SQLite 源无字节 span；只提交 `text` part 且角色为 user/assistant；逐消息时间戳未抽取。
 - **Pi**：`session_info`/`compaction`/`custom_message` 等非对话类型跳过；无 native 消息 id（合成 `pi-msg-{seq}`）。
-- **Hermes**：`session_<id>.json` 为主格式；同目录 `<id>.jsonl` 仅含部分近期状态，忽略；无字节 span，消息时间戳缺失时回退 `session_start`。
+- **Hermes**：`session_<id>.json` 为本 variant 解析的格式；同目录 `<id>.jsonl` 仅含部分近期状态，忽略；无字节 span，消息时间戳缺失时回退 `session_start`。⚠️ **上游已把权威 store 换成 `~/.hermes/state.db`（SQLite + FTS5）**，`~/.hermes/sessions/` 下的按会话文件"不再写也不再读"（官方文档：`hermes-agent.nousresearch.com/docs/user-guide/sessions`）。故本 variant 只对**旧装机残留文件**有效；`state.db` variant 未实现，也不声明支持（本机 `~/.hermes` 只有 `config.yaml` 与 `skills/`，无 `state.db`、无 `sessions/`，schema 未观察）。
 - **Cursor**：`state.vscdb` 为 chatdata/prompts 两 key 的多代格式，版本分层待补；SQLite 无字节 span；无 native 消息 id（合成 `cursor-msg-{seq}`）。
 - **Kimi Code**：`context.append_loop_event`（step/tool 事件）暂未解析；wire.jsonl 罕见携带 session id，通常留缺；逐消息时间戳未抽取。
 - **OpenClaw**：resume 有意不支持（gateway-managed）；无 native 消息 id（合成 `openclaw-msg-{seq}`）。

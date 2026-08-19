@@ -29,7 +29,7 @@ Legend for local columns: `ok` = present with tests; `partial` = present with kn
 | antigravity | ok | ok | missing | missing | unknown | missing | no in-file session id; no span/incremental |
 | opencode | ok | ok | missing | missing | unknown | missing | SQLite source; no span/resume template |
 | pi | ok | ok | ok (native) | missing | derived | missing | no tool_activity/incremental |
-| hermes | ok | ok | missing | missing | unknown | missing | JSON doc; no span |
+| hermes | ok | ok | missing | missing | unknown | missing | JSON doc; no span; **targets a layout upstream discontinued** (`state.db` is now canonical; `~/.hermes/sessions/` no longer written) — new sessions produce nothing readable |
 | cursor | ok | ok | missing | missing | unknown | missing | multi-gen format layering pending |
 | kimi-code | ok | ok | ok (native) | missing | unknown | missing | loop events not parsed |
 | openclaw | ok | ok | ok (native) | missing | unsupported | missing | resume intentionally unsupported |
