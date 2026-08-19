@@ -68,6 +68,7 @@ EXCLUDED_FILES = (
     "scripts/release/export_public_tree.py",
     "scripts/release/test_export_public_tree.py",
     "docs/release/go-no-go.2026-08-16.md",
+    "docs/release/go-no-go.2026-08-19.md",
     "docs/release/go-no-go.template.md",
     "docs/operations/PUBLIC-HISTORY-SCRUB.md",
     "docs/architecture/R0-ARCHITECTURE-REVIEW.md",
