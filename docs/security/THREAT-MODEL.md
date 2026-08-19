@@ -46,7 +46,7 @@
 ## 4. 强制控制清单
 
 - Provider 仅通过 `ReadOnlySourceFs` 访问；
-- Data/Cache/Log 与任一 Source Root 重叠的拒绝策略：**尚未实现运行时代码守卫**（2026-08-17 审计确认）；当前以文档与安装器默认路径分离缓解，实现前不得宣称有此强制；
+- Data/Cache/Log 与任一 Source Root 重叠的拒绝策略：**已实现运行时守卫**（2026-08-19）。`reject_store_inside_source_root` 在 `resolve_store_path` 之后执行，覆盖每个子命令：库路径严格位于任一已注册 provider source root 内部时 fail-closed（`invalid_request`），错误点名 provider 与 root。判定为纯词法前缀包含、不触碰文件系统——守卫必须在库尚未创建时就生效，故不依赖 canonicalize；symlink 绕过由「默认不跟随 symlink/junction/reparse」那条独立控制覆盖，不在本守卫范围内。root 的祖先路径不算重叠（默认库位于 home 下，必须放行）；
 - 默认不跟随 symlink/junction/reparse point；防 `..`、Windows ADS/设备路径、UNC 绕过；
 - 单行/字段/payload/嵌套深度/文件数/消息数上限；bounded channel + 流式；
 - 参数化 SQL，禁用 extension loading；

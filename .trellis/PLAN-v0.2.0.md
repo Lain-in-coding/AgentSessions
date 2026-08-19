@@ -1717,11 +1717,22 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
 
 ### M3 — 功能补齐(D15 全部补齐,D12 数据生命周期)
 
-- [ ] **M3-1 `--db` 默认路径(D8)**
+- [x] **M3-1 `--db` 默认路径(D8)** —— **实测已实现,本条记录已过时(2026-08-19 核实)**
   默认落到平台数据目录(`asg config paths` 已能算出),`--db` 降为覆盖项。
   严格对齐 ripgrep/gh/atuin 的零配置习惯:装完就能用,不需要先读文档。
   旧命令(显式 `--db`)必须全兼容。**与 M2P-3 是同一件事,合并做。**
   **验收**:全新环境 `asg search "x"` 无参数可跑;所有现存测试仍绿。
+
+  **✅ 已满足,无需改动。** `resolve_store_path`(`main.rs:1600-1618`)的
+  优先级是 `--db` → `ASG_DB` 环境变量 → 平台数据目录下的默认库,
+  三态由 `DbOrigin` 区分(提示里是否带 `--db` 前缀就靠它)。
+  **实测(release 二进制,伪 HOME + 伪 LOCALAPPDATA,全程不传 `--db`)**:
+  `sync --discover` 入库 3 条、`search "hello"` 正常出结果、
+  `config paths` 打印出默认 data/cache/logs 位置。
+  → **M4-1 的"依赖 M3-1"前提已不存在**,quickstart 可以直接写零配置三步。
+  ⚠️ 注意 `config paths` 的 `config` 一项仍指向真实 `APPDATA`
+  (只有 data/cache/logs 跟随 `LOCALAPPDATA`)—— 这是 Windows 目录语义,
+  不是缺陷,但写文档时不要声称"所有路径都随 HOME 重定向"。
 
 - [ ] **M3-2 数据生命周期三维度(D12)**
   - `asg prune --before <date>` — 按时间
@@ -1913,7 +1924,7 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   **修法**:要么填充这些字段,要么从 schema 与文档里移除承诺。
   **验收**:schema 承诺的字段都有真实内容,或承诺被撤回。
 
-- [ ] **M3-15 D13 运行时守卫:data root 与 source root 重叠无检查**
+- [x] **M3-15 D13 运行时守卫:data root 与 source root 重叠无检查** —— **已实现(`76260de`)**
   `THREAT-MODEL.md:49` 自己写明:"尚未实现运行时代码守卫",
   只靠文档和安装器默认值缓解。
   → 一个配错的 `--db` 落在 `~/.claude/projects` 里,
@@ -1923,6 +1934,24 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   **修法**:open 时检查 data/cache/log 路径与任一已注册 source root 的
   包含关系,重叠则拒绝并给出改法。
   **验收**:重叠时 fail-closed;有测试。
+
+  **✅ 已落在 `resolve_store_path` 之后(`reject_store_inside_source_root`)**,
+  所以**每个命令都过这道门**,不是只 sync。
+  比危害描述更进一步的一点:那个目录随后**会被 `sync --discover` 扫描**,
+  于是工具开始把自己的 SQLite/WAL 当成待索引的源 —— 不只是"写进了不该写的
+  目录",而是会自我污染索引。错误消息里明说了这一点。
+  **设计选择(已写进代码注释)**:判定是**纯词法**前缀包含,**不碰文件系统** ——
+  守卫必须在库还不存在时就生效(写路径随后会 `create_dir_all`),
+  所以不能依赖 `canonicalize`。代价:symlink 绕过不在本守卫覆盖内
+  (「默认不跟随 symlink」是另一条独立控制项,不重复实现)。
+  只在**严格位于** root 内部时拒绝:root 的祖先合法(否则默认库落在 home 下
+  会被误拒)、`.claude` 本身合法(root 是 `.claude/projects`)、
+  `projects-backup` 不算 `projects` 的内部路径。
+  **实测(release 二进制,伪 HOME)**:库指向 `.claude/projects/index.db` →
+  `invalid_request` 并点名 provider 与 root,**且被拒的那次运行在受保护目录里
+  没留下任何文件**;库指向 home 下其它路径 → 正常同步。
+  Windows 反斜杠写法与盘符小写写法都有回归断言。
+  → **`THREAT-MODEL.md:49` 那句"尚未实现"现在可以改了**(留给 M4-8 统一清理)。
 
 - [ ] **M3-16 `ses_v2_` 身份迁移里的 Windows 路径大小写缺陷(潜在,Windows 是主目标)**
   `domain/src/ids.rs:624-629` 记录了一个**已知活跃缺陷**:
