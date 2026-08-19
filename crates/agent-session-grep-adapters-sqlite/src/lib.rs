@@ -6111,6 +6111,45 @@ impl CatalogStore for SqliteStore {
         Self::list_filtered(&self.conn, Some(IdKind::Session), limit)
     }
 
+    /// Recency 浏览的排序投影（M3-4）：一条聚合查询给出全部会话的最近活动
+    /// 时间戳并排序，绝不逐会话查询（N+1）。
+    ///
+    /// `latest` 是会话内消息 payload `$.timestamp` 的 `MAX()`；catalog 的
+    /// canonical message payload 契约保证该字段是 JSON 字符串或 null，故
+    /// `MAX()` 是同类型（TEXT）比较。`ORDER BY latest IS NULL` 把"provider
+    /// 没给时间"的会话按 0/1 推到末尾（SQLite 的 `DESC` 会把 NULL 排在最前，
+    /// 那等于让缺时间的会话冒充最新），`c.id ASC` 收尾使排序为全序。
+    fn sessions_by_recency(&self, limit: usize) -> PortResult<Vec<(StableId, Option<String>)>> {
+        let conn = self.conn.borrow();
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT c.id, MAX(json_extract(m.payload, '$.timestamp')) AS latest
+                   FROM catalog c
+                   LEFT JOIN message_placements mp ON mp.session_id = c.id
+                   LEFT JOIN catalog m ON m.id = mp.message_id
+                  WHERE c.id LIKE '{}%'
+                  GROUP BY c.id
+                  ORDER BY latest IS NULL ASC, latest DESC, c.id ASC
+                  LIMIT ?1",
+                IdKind::Session.prefix()
+            ))
+            .map_err(backend)?;
+        let rows = stmt
+            .query_map([limit as i64], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+            })
+            .map_err(backend)?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (wire, latest) = row.map_err(backend)?;
+            let id = StableId::from_wire(&wire).ok_or_else(|| {
+                PortError::Backend("catalog contains an invalid entity id".into())
+            })?;
+            out.push((id, latest));
+        }
+        Ok(out)
+    }
+
     fn count(&self) -> PortResult<u64> {
         let conn = self.conn.borrow();
         let count: i64 = conn
@@ -14057,6 +14096,201 @@ mod tests {
         assert!(all[0].id.as_str() < all[1].id.as_str());
         let one = store.list(1).unwrap();
         assert_eq!(one.len(), 1);
+    }
+
+    /// 一条带指定时间戳的消息 entry（`None` = provider 没给时间戳，payload 里
+    /// 显式为 null——recency 排序必须能区分"没有时间"与"很早"）。
+    fn dated_message_entry(
+        id: &StableId,
+        text: &str,
+        timestamp: Option<&str>,
+    ) -> (StableId, Vec<u8>, String) {
+        (
+            id.clone(),
+            serde_json::json!({
+                "role": "user",
+                "text": text,
+                "timestamp": timestamp,
+                "parent": null,
+                "parent_native_id": null,
+                "is_sidechain": false,
+                "session": null,
+                "sessions": [],
+                "span": null,
+                "spans": [],
+            })
+            .to_string()
+            .into_bytes(),
+            text.to_string(),
+        )
+    }
+
+    /// 建三个会话，并让 recency 顺序与 wire id 顺序**必然不同**：
+    /// wire id 升序的第 2 个会话最新、第 3 个最旧、第 1 个没有时间戳。
+    /// 返回 wire id 升序的三个会话 id。
+    fn commit_recency_corpus(store: &SqliteStore) -> Vec<StableId> {
+        let mut sessions = vec![
+            sid(IdKind::Session, b"recency-a"),
+            sid(IdKind::Session, b"recency-b"),
+            sid(IdKind::Session, b"recency-c"),
+        ];
+        sessions.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        // (会话下标, 各消息时间戳)
+        let plan: [(usize, Vec<Option<&str>>); 3] = [
+            (0, vec![None]),
+            (
+                1,
+                vec![Some("2026-08-12T08:00:00Z"), Some("2026-08-18T21:30:00Z")],
+            ),
+            (2, vec![Some("2026-08-10T00:00:00Z")]),
+        ];
+        for (index, timestamps) in plan {
+            let session = sessions[index].clone();
+            let document = sid(IdKind::Document, format!("recency-doc-{index}").as_bytes());
+            let mut entries = vec![typed_document_entry(&document)];
+            let mut placements = Vec::new();
+            let mut members = Vec::new();
+            for (ordinal, timestamp) in timestamps.iter().enumerate() {
+                let message = sid(
+                    IdKind::Message,
+                    format!("recency-msg-{index}-{ordinal}").as_bytes(),
+                );
+                entries.push(dated_message_entry(
+                    &message,
+                    &format!("recency body {index} {ordinal}"),
+                    *timestamp,
+                ));
+                placements.push(placement(
+                    &session,
+                    &document,
+                    &message,
+                    ordinal as u32,
+                    false,
+                    Some((0, 4)),
+                ));
+                members.push(message.as_str().to_string());
+            }
+            let member_refs: Vec<&str> = members.iter().map(String::as_str).collect();
+            entries.push((
+                session.clone(),
+                session_payload(document.as_str(), &member_refs),
+                String::new(),
+            ));
+            let source = source_batch(
+                &format!("recency-{index}.jsonl"),
+                entries,
+                placements,
+                Vec::new(),
+                true,
+            );
+            store
+                .commit_source_batches_if_changed(std::slice::from_ref(&source))
+                .unwrap();
+        }
+        sessions
+    }
+
+    #[test]
+    fn sessions_by_recency_orders_by_newest_message_and_keeps_undated_sessions_last() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let sessions = commit_recency_corpus(&store);
+        let rows = store.sessions_by_recency(10).unwrap();
+        let got: Vec<(&str, Option<&str>)> = rows
+            .iter()
+            .map(|(id, latest)| (id.as_str(), latest.as_deref()))
+            .collect();
+        // 会话内取 MAX：第二个会话的最新消息（08-18）胜过它自己的 08-12。
+        // 没有任何带时间戳消息的会话保留在结果里、排在末尾、值为 None。
+        assert_eq!(
+            got,
+            vec![
+                (sessions[1].as_str(), Some("2026-08-18T21:30:00Z")),
+                (sessions[2].as_str(), Some("2026-08-10T00:00:00Z")),
+                (sessions[0].as_str(), None),
+            ]
+        );
+        // 与 wire id 升序（`list_sessions` 的钉住排序）确实是两个不同的顺序。
+        let listed = store.list_sessions(10).unwrap();
+        let wire_order: Vec<&str> = listed.iter().map(|entry| entry.id.as_str()).collect();
+        assert_eq!(
+            wire_order,
+            vec![
+                sessions[0].as_str(),
+                sessions[1].as_str(),
+                sessions[2].as_str()
+            ]
+        );
+        assert_ne!(
+            got.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            wire_order
+        );
+        // LIMIT 作用在排序之后：最近的两条。
+        let top = store.sessions_by_recency(2).unwrap();
+        assert_eq!(
+            top.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(),
+            vec![sessions[1].as_str(), sessions[2].as_str()]
+        );
+    }
+
+    #[test]
+    fn sessions_by_recency_breaks_ties_by_wire_id() {
+        // 同一时间戳、以及全部无时间戳的组内都必须是确定顺序（wire id 升序），
+        // 否则 cursor 的 offset 语义在两页之间会漂移。
+        let store = SqliteStore::open_in_memory().unwrap();
+        let mut tied = [
+            sid(IdKind::Session, b"tie-a"),
+            sid(IdKind::Session, b"tie-b"),
+        ];
+        tied.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        let mut undated = [
+            sid(IdKind::Session, b"undated-a"),
+            sid(IdKind::Session, b"undated-b"),
+        ];
+        undated.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        for (index, (session, timestamp)) in tied
+            .iter()
+            .map(|session| (session, Some("2026-08-14T12:00:00Z")))
+            .chain(undated.iter().map(|session| (session, None)))
+            .enumerate()
+        {
+            let document = sid(IdKind::Document, format!("tie-doc-{index}").as_bytes());
+            let message = sid(IdKind::Message, format!("tie-msg-{index}").as_bytes());
+            let source = source_batch(
+                &format!("tie-{index}.jsonl"),
+                vec![
+                    dated_message_entry(&message, &format!("tie body {index}"), timestamp),
+                    (
+                        session.clone(),
+                        session_payload(document.as_str(), &[message.as_str()]),
+                        String::new(),
+                    ),
+                    typed_document_entry(&document),
+                ],
+                vec![placement(
+                    session,
+                    &document,
+                    &message,
+                    0,
+                    false,
+                    Some((0, 4)),
+                )],
+                Vec::new(),
+                true,
+            );
+            store
+                .commit_source_batches_if_changed(std::slice::from_ref(&source))
+                .unwrap();
+        }
+        let rows = store.sessions_by_recency(10).unwrap();
+        assert_eq!(
+            rows.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(),
+            vec![
+                tied[0].as_str(),
+                tied[1].as_str(),
+                undated[0].as_str(),
+                undated[1].as_str()
+            ]
+        );
     }
 
     #[test]

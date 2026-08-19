@@ -15,7 +15,7 @@ use crate::protocol::{self, CanonicalCode, Outcome, ProtocolError};
 use crate::{CliError, canonical_search_provider, provider_registry, render, store_ref};
 use agent_session_grep_adapters_sqlite::SqliteStore;
 use agent_session_grep_application::{
-    App, AppRequest, AppResponse, ContextLevel, ResponseBudget,
+    App, AppRequest, AppResponse, ContextLevel, ListSort, ResponseBudget,
     handoff_pack::{HandoffInput, resolve_source_locations},
     parse_search_instant,
 };
@@ -649,11 +649,23 @@ impl McpServer<'_> {
     }
 
     fn tool_list(&self, args: &Map<String, Value>) -> Result<Value, ToolError> {
-        reject_unknown_keys(args, &["limit", "cursor", "max_items", "max_bytes"])?;
+        reject_unknown_keys(args, &["limit", "cursor", "max_items", "max_bytes", "sort"])?;
         let limit = opt_usize(args, "limit")?;
         let cursor = opt_str(args, "cursor")?;
         let max_items = opt_usize(args, "max_items")?;
         let max_bytes = opt_usize(args, "max_bytes")?;
+        // 排序维度（M3-4）：默认保持 wire-id 升序（既有调用方的稳定分页不变），
+        // `recency` 回答"我最近干了什么"。取值非法在协议层 -32602，不漏到 App 层。
+        let sort = match opt_str(args, "sort")?.as_deref() {
+            None | Some("id") => ListSort::WireIdAsc,
+            Some("recency") => ListSort::RecencyDesc,
+            Some(other) => {
+                return Err(ToolError::Params(format!(
+                    "sort must be id|recency: {}",
+                    bounded(other)
+                )));
+            }
+        };
         // 与 search_sessions 同层（R4，Minor-7）：limit/max_items/max_bytes 低于
         // 下限在协议层 -32602，不得漏到 App 层变 isError 业务帧。
         reject_below_floor(limit, "limit", 1)?;
@@ -664,6 +676,7 @@ impl McpServer<'_> {
             cursor,
             budget: budget_with(max_items, max_bytes, None),
             sessions_only: true,
+            sort,
         })
     }
 
@@ -1042,9 +1055,12 @@ fn tool_catalog() -> Value {
         },
         {
             "name": "list_sessions",
-            "description": "Page Session entities (ses_v1_) in stable wire-id order. \
-                Documents and messages are not returned (competitor-borrowings R1.3); \
-                only session entities are listed.",
+            "description": "Page Session entities (ses_v1_). Documents and messages are not \
+                returned (competitor-borrowings R1.3); only session entities are listed. \
+                sort=id (default) is stable wire-id order; sort=recency answers \
+                \"what was I working on recently?\" — newest last activity first, with \
+                sessions whose provider reports no timestamp last. Each entry carries the \
+                sort key as latest_activity (null when unknown).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1058,6 +1074,13 @@ fn tool_catalog() -> Value {
                         "maxLength": 512,
                         "description": "Continuation token from the previous page's \
                             page.next_cursor."
+                    },
+                    "sort": {
+                        "type": "string",
+                        "enum": ["id", "recency"],
+                        "description": "Sort dimension; defaults to id (stable wire-id order). \
+                            A cursor is bound to the sort it was issued under and is rejected \
+                            if replayed under the other one."
                     },
                     "max_items": {
                         "type": "integer",

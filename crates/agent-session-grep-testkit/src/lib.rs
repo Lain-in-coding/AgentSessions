@@ -234,6 +234,37 @@ impl CatalogStore for InMemoryStore {
         self.list_by_kind(Some(IdKind::Session), limit)
     }
 
+    /// 与 SQLite 同语义的 recency 投影：最近活动取该会话 graph 内消息
+    /// `timestamp` 的词法最大值；没有任何带时间戳消息的会话保留在结果里、
+    /// 排在末尾（`None`），组内按 wire id 升序。
+    fn sessions_by_recency(&self, limit: usize) -> PortResult<Vec<(StableId, Option<String>)>> {
+        let graphs = self.graphs.borrow();
+        let mut rows: Vec<(StableId, Option<String>)> = self
+            .list_by_kind(Some(IdKind::Session), usize::MAX)?
+            .into_iter()
+            .map(|entry| {
+                let latest = graphs.get(entry.id.as_str()).and_then(|graph| {
+                    graph
+                        .messages
+                        .iter()
+                        .filter_map(|message| message.timestamp.clone())
+                        .max()
+                });
+                (entry.id, latest)
+            })
+            .collect();
+        // 键：有时间戳者在前（false < true），时间戳降序，wire id 升序收尾。
+        rows.sort_by(|left, right| {
+            left.1
+                .is_none()
+                .cmp(&right.1.is_none())
+                .then_with(|| right.1.cmp(&left.1))
+                .then_with(|| left.0.as_str().cmp(right.0.as_str()))
+        });
+        rows.truncate(limit);
+        Ok(rows)
+    }
+
     fn count(&self) -> PortResult<u64> {
         Ok(self.catalog.borrow().len() as u64)
     }

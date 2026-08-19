@@ -301,34 +301,7 @@ fn render_handoff(data: &Value) -> Vec<String> {
 /// 若命中有正文预览（human 渲染前由 CLI 附加）则追加一行缩进的片段；
 /// 零命中给措辞 `no hits` 并提示换词。
 fn render_search(data: &Value) -> Vec<String> {
-    if let Some(rows) = data.get("session_resume_rows").and_then(Value::as_array)
-        && !rows.is_empty()
-    {
-        let rows: Vec<SessionResumeTableRow> = rows
-            .iter()
-            .map(|row| SessionResumeTableRow {
-                date_ymd: row
-                    .get("date")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string(),
-                provider: row
-                    .get("provider")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string(),
-                title: row.get("title").and_then(Value::as_str).map(str::to_string),
-                working_directory: row
-                    .get("working_directory")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
-                session_id: row
-                    .get("session_id")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string(),
-            })
-            .collect();
+    if let Some(rows) = session_resume_rows(data) {
         let mut lines: Vec<String> = render_session_resume_table(&rows)
             .lines()
             .map(str::to_string)
@@ -403,9 +376,54 @@ fn render_search(data: &Value) -> Vec<String> {
     lines
 }
 
+/// 解析 main.rs 附加的 `session_resume_rows`（human 专用投影）为表格行。
+/// 缺失或空数组返回 `None`——调用方据此回落到各命令自己的默认版式。
+fn session_resume_rows(data: &Value) -> Option<Vec<SessionResumeTableRow>> {
+    let rows = data.get("session_resume_rows").and_then(Value::as_array)?;
+    if rows.is_empty() {
+        return None;
+    }
+    Some(
+        rows.iter()
+            .map(|row| SessionResumeTableRow {
+                date_ymd: row
+                    .get("date")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                provider: row
+                    .get("provider")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                title: row.get("title").and_then(Value::as_str).map(str::to_string),
+                working_directory: row
+                    .get("working_directory")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                session_id: row
+                    .get("session_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+            })
+            .collect(),
+    )
+}
+
 /// `list`：头行 `N entrie(s) (generation G)` + 每条 `  <id>  <payload 预览>`；
 /// 零条目给措辞 `catalog is empty`。
+///
+/// 本页全是会话实体时（`list --sessions`），main.rs 会附加 human 专用的
+/// `session_resume_rows`，此时改用与 search 相同的会话表格：
+/// `--sort recency` 的第一行就是最近一次活动，"我昨天干了什么"由此可答。
 fn render_list(data: &Value) -> Vec<String> {
+    if let Some(rows) = session_resume_rows(data) {
+        return render_session_resume_table(&rows)
+            .lines()
+            .map(str::to_string)
+            .collect();
+    }
     let entries = data
         .get("entries")
         .and_then(Value::as_array)

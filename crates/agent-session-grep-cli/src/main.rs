@@ -29,8 +29,8 @@ use agent_session_grep_adapters_sqlite::{
     SourceActivity, SourceBatch, SqliteStore, capture, open_snapshot_source, verify_snapshot,
 };
 use agent_session_grep_application::{
-    App, AppError, AppRequest, AppResponse, ContextLevel, ResponseBudget, SourceRejection,
-    StagedBatch, Truncation, evidence::Precision, handoff_pack::HandoffInput,
+    App, AppError, AppRequest, AppResponse, ContextLevel, ListSort, ResponseBudget,
+    SourceRejection, StagedBatch, Truncation, evidence::Precision, handoff_pack::HandoffInput,
     parse_relative_search_instant, parse_search_instant, select_and_stage_source, source_rejection,
 };
 use agent_session_grep_domain::{
@@ -2561,6 +2561,18 @@ fn dispatch(
             let cursor = extract_flag(&mut args, "--cursor")?;
             let max_items = extract_flag(&mut args, "--max-items")?;
             let max_bytes = extract_flag(&mut args, "--max-bytes")?;
+            // `--sessions` 与 MCP `list_sessions` 同语义（只列 `ses_v1_*` 实体），
+            // 不发明第二套语义；`--sort recency` 是"我昨天干了什么"的排序维度。
+            let sessions_only = take_bool_flag(&mut args, "--sessions");
+            let sort = match extract_flag(&mut args, "--sort")?.as_deref() {
+                None | Some("id") => ListSort::WireIdAsc,
+                Some("recency") => ListSort::RecencyDesc,
+                Some(other) => {
+                    return Err(CliError::usage(format!(
+                        "--sort must be id|recency, got {other}"
+                    )));
+                }
+            };
             let budget = budget_from_flags(max_items.as_deref(), max_bytes.as_deref(), None)?;
             no_extra_args(&args, 1, "list [limit]")?;
             let limit = args
@@ -2578,9 +2590,17 @@ fn dispatch(
                 limit,
                 cursor,
                 budget,
-                sessions_only: false,
+                sessions_only,
+                sort,
             })?;
-            let (outcome, data, page, warnings) = render(response);
+            let (outcome, mut data, page, warnings) = render(response);
+            // Human 侧的会话表格投影（provider / 工作目录）：与 search 的
+            // `session_resume_rows` 同一惯例，只在 human 模式附加——Robot/MCP/Web
+            // 的协议形状与字节闸由 Application 单一决定，前端不得在闸后加料。
+            // 排序键本身（`latest_activity`）在所有模式的 entries 里都可见。
+            if mode == protocol::OutputMode::Human {
+                attach_session_list_rows(store, &mut data)?;
+            }
             Ok(("list", outcome, data, page, warnings))
         }
         // context：装配一个会话的分支消息链 + 证据区间（CONTRACT §1-2）。
@@ -3210,6 +3230,58 @@ fn attach_session_resume_rows(
                 serde_json::json!(next_commands),
             );
         }
+    }
+    Ok(())
+}
+
+/// Human `list` 的会话表格投影（M3-4）：对本页的 Session 实体批量解析
+/// Resume Metadata（provider / 原始工作目录），日期直接取 Application 已经
+/// 算出并计入字节闸的排序键 `latest_activity`。
+///
+/// 只在 Human 模式附加（与 `attach_session_resume_rows` 同一惯例）：
+/// Robot/MCP/Web 的协议形状与字节预算由 Application 单一决定。
+/// 一次 `resume_of` 批量查询，无 N+1；本页没有会话实体则什么都不做。
+fn attach_session_list_rows(
+    store: &SqliteStore,
+    data: &mut serde_json::Value,
+) -> Result<(), CliError> {
+    let Some(entries) = data.get("entries").and_then(serde_json::Value::as_array) else {
+        return Ok(());
+    };
+    let sessions: Vec<(StableId, Option<String>)> = entries
+        .iter()
+        .filter_map(|entry| {
+            let wire = entry.get("id").and_then(serde_json::Value::as_str)?;
+            let id = StableId::from_wire(wire).filter(|id| id.kind() == IdKind::Session)?;
+            let latest = entry
+                .get("latest_activity")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string);
+            Some((id, latest))
+        })
+        .collect();
+    if sessions.is_empty() {
+        return Ok(());
+    }
+    let ids: Vec<StableId> = sessions.iter().map(|(id, _)| id.clone()).collect();
+    let metadata = store.resume_of(&ids).map_err(ProtocolError::from)?;
+    let rows: Vec<serde_json::Value> = sessions
+        .iter()
+        .zip(metadata.iter())
+        .map(|((id, latest), metadata)| {
+            serde_json::json!({
+                // 日期取排序键前 10 字符（YYYY-MM-DD）；provider 没给时间戳时保持 null，
+                // 不编造时刻——human 渲染成破折号。
+                "date": latest.as_ref().and_then(|value| value.get(..10)),
+                "provider": metadata.provider_id,
+                "title": serde_json::Value::Null,
+                "working_directory": metadata.original_working_directory,
+                "session_id": id.as_str(),
+            })
+        })
+        .collect();
+    if let Some(object) = data.as_object_mut() {
+        object.insert("session_resume_rows".into(), serde_json::Value::Array(rows));
     }
     Ok(())
 }
@@ -4951,6 +5023,10 @@ fn render(
                     .map(|entry| serde_json::json!({
                         "id": entry.id.as_str(),
                         "payload": String::from_utf8_lossy(&entry.payload),
+                        // 排序键必须可见：`--sort recency` 的依据是这个时间戳。
+                        // null 有两种诚实含义——wire-id 排序不做时间投影，
+                        // 或该会话没有任何带时间戳的消息。
+                        "latest_activity": entry.latest_activity,
                     }))
                     .collect::<Vec<_>>(),
                 "generation": generation,
