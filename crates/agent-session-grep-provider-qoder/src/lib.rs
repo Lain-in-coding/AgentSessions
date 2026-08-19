@@ -162,7 +162,21 @@ impl ProviderAdapter for QoderAdapter {
                         .and_then(serde_json::Value::as_str)
                         .unwrap_or("");
                     match t {
-                        "session_meta" => session_meta += 1,
+                        // Qoder 的 session_meta 把身份字段放在**顶层**
+                        // （`session_id`/`cwd` 与 `type` 同级）。Codex 的
+                        // rollout 也有 `type:"session_meta"`，但它把一切包在
+                        // `payload` 里 —— 只看 `type` 会与 codex 等分置信度，
+                        // 实测导致 codex 自己的 golden fixture 无法被 sync
+                        // （M2P-16）。所以此处要求顶层身份字段:这是两种格式
+                        // 的结构性差异，不是启发式猜测。
+                        "session_meta" => {
+                            let payload_wrapped = v.get("payload").is_some_and(serde_json::Value::is_object);
+                            let top_level_identity = v.get("session_id").is_some()
+                                || v.get("cwd").is_some();
+                            if top_level_identity && !payload_wrapped {
+                                session_meta += 1;
+                            }
+                        }
                         "user" | "assistant" => {
                             conversational += 1;
                         }
