@@ -157,6 +157,62 @@ fn chunk_ids<T: AsRef<str>>(ids: &[T]) -> Vec<&[T]> {
 ///
 /// Same shape as `SyncTrace`: one `var_os` per process, `eprintln!` to stderr
 /// so stdout stays a clean protocol stream.
+///
+/// # Where a first ingest's time actually goes
+///
+/// Measured with this tracer on the 100,000-message / 5,000-file / 48.6 MiB
+/// synthetic corpus, after the page-cache sizing, the deduplication of
+/// recomputed work, and the removal of the redundant sorts. 29 `sync`
+/// processes, 33.5 s wall, 1.45 MiB/s:
+///
+/// ```text
+/// inside the write transaction              20.1 s
+///   tx.commit_fsync          7.15 s   SQLite's own commit
+///   tx.alias_regen           4.24 s   rebuild flat alias fields
+///   tx.fts_upsert            2.74 s   FTS5 insertion
+///   tx.placement_edge_upsert 1.80 s   4 indexes + 1 unique constraint per row
+///   tx.verify_pending        1.13 s   re-derive the manifest, compare to intent
+///   tx.session_fts_rebuild   1.00 s   session metadata projection
+///   tx.source_replacements   0.95 s   membership/claim/scan rows
+///   tx.verify_integrity      0.48 s
+///   tx.affected_sessions     0.30 s
+///   tx.catalog_upsert        0.20 s
+/// before the transaction                    8.9 s
+///   catalog_state_reads      3.79 s   6 whole-table loads for the claimer graph
+///   manifest_validate        3.26 s   canonicalize + digest the batch
+///   begin_intent             0.74 s   write the durable intent
+///   merge_prepare            0.61 s
+///   identity_metadata_check  0.38 s
+/// outside commit                            3.9 s   parse, verify, 29 process launches
+/// ```
+///
+/// # Why 3.5 MiB/s is not reachable by tuning this design
+///
+/// Add up only the steps that *write the facts the store exists to hold* —
+/// catalog rows, FTS rows, placement/edge rows, membership rows, and SQLite's
+/// commit — plus the work no commit can avoid (parsing the transcripts, and 29
+/// process launches). That is 12.8 s + 3.9 s ≈ 16.7 s, i.e. **≈ 3.0 MiB/s**.
+///
+/// That figure is the ceiling with *every* derived-state step driven to zero:
+/// no durable intent, no claimer graph, no alias regeneration, no session
+/// metadata projection, and no integrity verification. It is below the 3.5
+/// MiB/s threshold. Reaching the threshold therefore needs a design change, not
+/// a tuning pass. The two structural costs to aim at:
+///
+/// * **The pre-commit reads are O(catalog) per commit, so a full ingest is
+///   O(n²/batch).** They load whole-table membership and relation state to
+///   answer "who else claims this entity", which is what makes tombstone
+///   derivation safe. Scoping them with `IN`-chunk lookups was tried and
+///   measured *slower* than the sequential scan; the fix is to stop needing
+///   the whole graph per batch (e.g. a maintained claimer-count column), not
+///   to look it up differently.
+/// * **Every message payload is written twice per commit** — once by
+///   `tx.catalog_upsert`, then again by `tx.alias_regen`, which reads the row
+///   back, splices in `session`/`spans`/`parent`/`is_sidechain`, and updates it.
+///   Those aliases are derived from the placements and edges in the same batch.
+///   Projecting them before the insert, and falling back to the read-modify-write
+///   only for entities some *other* source also claims, would remove a full
+///   rewrite of the catalog from the hot path.
 #[derive(Clone, Copy)]
 struct CommitTrace(bool);
 
