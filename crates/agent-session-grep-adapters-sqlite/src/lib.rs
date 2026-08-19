@@ -2268,7 +2268,8 @@ impl SqliteStore {
         ))
     }
 
-    /// 回收 freelist：`VACUUM` 整库重写，把已分配未使用的页交还给文件系统。
+    /// 回收空间并抹掉被删内容的物理残留：FTS5 `optimize` + `VACUUM` 整库重写 +
+    /// WAL 截断。
     ///
     /// 实测(10 万条真库)：537.8 MB → 444.7 MB，回收 93 MB(17.3%)，其中
     /// freelist 占 80.1 MB。这是纯粹的空间回收 —— **不改 schema、不改任何行、
@@ -2284,11 +2285,34 @@ impl SqliteStore {
     /// 返回 `(before_bytes, after_bytes)`。调用方据此如实报告回收量，
     /// 而不是宣称一个未测量的比例。
     ///
+    /// **为什么 `VACUUM` 之前必须先 FTS5 `optimize`（M3-5 的隐私要求）**：
+    /// FTS5 删除一行时不会从既有 segment 里抹掉 term，只写一条 delete marker，
+    /// 被删的 token 会留在 `fts_data` 的 segment blob 里直到 segment 合并。
+    /// 实测（本仓库 e2e）：删掉一个会话后 `fts MATCH '"<token>"'` 已返回 0 行，
+    /// 但库文件里仍能逐字找到该 token 4 次；只跑 `VACUUM` 降到 4 次（因为 term
+    /// 还在活页里，VACUUM 会忠实地把它抄进新文件），只跑 `optimize` 也仍是 4 次
+    /// （旧 segment 变成 freelist 页但字节没走），**两步都跑才降到 0**。
+    /// 对一个以隐私为卖点的工具，"你要求忘记的词还留在索引文件里"就是缺陷，
+    /// 所以 optimize 是本命令的组成部分而不是可选项。
+    ///
+    /// 收尾 `wal_checkpoint(TRUNCATE)`：WAL 里留着 VACUUM 前的页镜像，
+    /// 不截断就等于把刚才抹掉的字节又留在了 `-wal` 边车里。
+    ///
     /// `VACUUM` 不能在事务里执行(SQLite 限制)，故此处不开事务。
     pub fn compact(&self) -> PortResult<(u64, u64)> {
         let before = self.file_bytes()?;
         let conn = self.conn.borrow();
+        // `optimize` 是 FTS5 的特殊 INSERT 命令：把全部 segment 合并成一个，
+        // 过程中丢弃 delete marker 与不再出现的 term。两张 FTS 表都要做——
+        // `session_fts` 同样索引正文派生的 title-like 字段。
+        conn.execute_batch(
+            "INSERT INTO fts(fts) VALUES('optimize');
+             INSERT INTO session_fts(session_fts) VALUES('optimize');",
+        )
+        .map_err(backend)?;
         conn.execute_batch("VACUUM").map_err(backend)?;
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .map_err(backend)?;
         drop(conn);
         let after = self.file_bytes()?;
         Ok((before, after))
@@ -17133,5 +17157,90 @@ mod tests {
         // 每个 fixture 源贡献 1 session + 1 document + 1 message。
         let expected_removed = plan.messages + plan.sessions.len() as u64 + 1;
         assert_eq!(before - after, expected_removed);
+    }
+
+    /// 删除后的**文件级**残留：`forget` + `index compact` 之后，被删的词不得再
+    /// 逐字出现在库文件里。
+    ///
+    /// 这条守卫的由来：FTS5 删除只写 delete marker，被删 token 留在既有 segment
+    /// 的 blob 里。逻辑查询（`fts MATCH`）已经返回 0 行，但 `strings` 级别还能
+    /// 把它读出来——对一个以隐私为卖点的工具，那不是"部分完成"而是缺陷。
+    /// 断言按顺序覆盖三个阶段：删除后逻辑不可见、只 VACUUM 不够、
+    /// optimize + VACUUM 之后字节归零。
+    #[test]
+    fn compact_removes_the_deleted_text_from_the_database_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("residue.db");
+        let db_path = path.to_string_lossy().into_owned();
+        // 词元要足够独特，避免与 schema/SQL 文本或另一条 fixture 撞车。
+        const SECRET: &str = "zzqxsecrettoken";
+        let file_occurrences = |db_path: &str| -> usize {
+            let mut total = 0;
+            for suffix in ["", "-wal"] {
+                let candidate = format!("{db_path}{suffix}");
+                if let Ok(bytes) = std::fs::read(&candidate) {
+                    total += bytes
+                        .windows(SECRET.len())
+                        .filter(|window| *window == SECRET.as_bytes())
+                        .count();
+                }
+            }
+            total
+        };
+
+        let store = SqliteStore::open(&db_path).unwrap();
+        let session = sid(IdKind::Session, b"residue-ses");
+        let document = sid(IdKind::Document, b"residue-doc");
+        let message = sid(IdKind::Message, b"residue-msg");
+        let populated = SourceBatch {
+            source_path: "residue.jsonl".into(),
+            entries: vec![
+                entity_entry(&session),
+                typed_document_entry(&document),
+                typed_message_entry(&message, SECRET),
+            ],
+            placements: vec![placement(&session, &document, &message, 0, false, None)],
+            edges: Vec::new(),
+            activities: Vec::new(),
+            relation_complete: true,
+            len_bytes: Some(32),
+            fingerprint: Some("residue-fp".into()),
+            provider_id: Some("synthetic".into()),
+            resume_claim: None,
+        };
+        store
+            .commit_source_batches_if_changed(std::slice::from_ref(&populated))
+            .unwrap();
+        assert_eq!(store.query(SECRET, 10).unwrap().len(), 1);
+
+        let plan = store.plan_forget(&["residue.jsonl".to_string()]).unwrap();
+        assert!(store.execute_forget(&plan).unwrap());
+        // 逻辑面：两条检索路径都查不到。
+        assert!(store.query(SECRET, 10).unwrap().is_empty());
+        {
+            let conn = store.conn.borrow();
+            let matched: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM fts WHERE fts MATCH ?1",
+                    [format!("\"{SECRET}\"")],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(matched, 0);
+        }
+        // 文件面：删除本身不抹字节——这正是必须跑 compact 的理由。
+        assert!(
+            file_occurrences(&db_path) > 0,
+            "前提失效：本测试要守卫的正是删除后仍残留字节这件事"
+        );
+
+        let (_, _) = store.compact().unwrap();
+        assert_eq!(
+            file_occurrences(&db_path),
+            0,
+            "index compact 之后，被删除的词不得再逐字出现在库文件里"
+        );
+        // compact 不改变逻辑内容。
+        assert_eq!(store.count().unwrap(), 0);
     }
 }
