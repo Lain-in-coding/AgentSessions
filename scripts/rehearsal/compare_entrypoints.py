@@ -52,11 +52,21 @@ IMPLEMENTED_ENTRY_POINTS = ENTRY_POINTS
 #: The fixed query projection shared by every entry point.
 CANONICAL_OPERATIONS: Dict[str, Sequence[str]] = {
     "search": ("data.hits[*].id", "page.has_more", "outcome"),
+    # Recency browse (M3-4): every entry point must be able to answer "what was
+    # I working on?" with no query term, in the same order, exposing the same
+    # sort key. `latest_activity` is a provider-reported timestamp string, not
+    # message text, so it is safe to compare.
+    "recent_sessions": (
+        "data.entries[*].id",
+        "data.entries[*].latest_activity",
+        "page.has_more",
+        "outcome",
+    ),
 }
 
-#: A synthetic Claude Code JSONL fixture. Two messages, both containing the
-#: canonical search token ``rehearsaltoken``. Privacy-safe: no real paths,
-#: ids, or identities — every value below is synthetic.
+#: A synthetic Claude Code JSONL fixture. Two messages in the first session
+#: contain the canonical search token ``rehearsaltoken``. Privacy-safe: no real
+#: paths, ids, or identities — every value below is synthetic.
 FIXTURE_LINES = [
     '{"type":"user","uuid":"a1aaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa01",'
     '"parentUuid":null,"sessionId":"b2bbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb01",'
@@ -68,12 +78,35 @@ FIXTURE_LINES = [
     '"timestamp":"2026-08-15T00:00:01.000Z",'
     '"message":{"role":"assistant","content":"rehearsaltoken alpha answer"}}',
 ]
+
+#: A second synthetic session in its own file (one transcript file carries one
+#: session). Its activity is *later* than the first session's and it does not
+#: contain the canonical search token, so the recency ordering is non-trivial
+#: while the search projection stays unchanged.
+SECOND_FIXTURE_LINES = [
+    '{"type":"user","uuid":"a1aaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa03",'
+    '"parentUuid":null,"sessionId":"b2bbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb02",'
+    '"timestamp":"2026-08-16T00:00:00.000Z",'
+    '"message":{"role":"user","content":"beta follow-up work"}}',
+]
 #: Canonical query and page size shared by every entry point, so results are
 #: comparable (a divergent default limit would produce a false divergence).
 #: Page size 20 matches the CLI default limit, the MCP limit default, the Web
 #: projection budget, and the TUI search page limit.
 CANONICAL_QUERY = "rehearsaltoken"
 CANONICAL_PAGE_SIZE = 20
+
+#: The recency-browse command shared by the CLI, Robot and Web entry points.
+#: The Web route expands to exactly this argument vector, and MCP/TUI reach the
+#: same Application use case, so no entry point can define its own ordering.
+RECENT_SESSIONS_ARGS = (
+    "list",
+    "--sessions",
+    "--sort",
+    "recency",
+    "--max-items",
+    str(CANONICAL_PAGE_SIZE),
+)
 
 
 class HarnessError(Exception):
@@ -99,6 +132,13 @@ def write_fixture(dir_path: Path) -> Path:
     """Write the synthetic JSONL fixture. Returns its path."""
     fixture = dir_path / "rehearsal-fixture.jsonl"
     fixture.write_text("\n".join(FIXTURE_LINES) + "\n", encoding="utf-8")
+    return fixture
+
+
+def write_second_fixture(dir_path: Path) -> Path:
+    """Write the second synthetic session (its own file). Returns its path."""
+    fixture = dir_path / "rehearsal-fixture-2.jsonl"
+    fixture.write_text("\n".join(SECOND_FIXTURE_LINES) + "\n", encoding="utf-8")
     return fixture
 
 
@@ -158,26 +198,29 @@ def cli_run_operation(
     binary: str, db: str, op: str
 ) -> Dict[str, Any]:
     """Run one canonical operation through the CLI (--output json) entry point."""
-    if op != "search":
+    if op == "search":
+        args: Sequence[str] = [
+            "search", CANONICAL_QUERY, "--max-items", str(CANONICAL_PAGE_SIZE),
+        ]
+    elif op == "recent_sessions":
+        args = RECENT_SESSIONS_ARGS
+    else:
         raise HarnessError(f"unknown canonical operation for CLI: {op}")
-    frame = run_cli_json(
-        binary,
-        db,
-        ["search", CANONICAL_QUERY, "--max-items", str(CANONICAL_PAGE_SIZE)],
-    )
+    frame = run_cli_json(binary, db, args)
     return strip_robot_envelope(frame)
 
 
 def robot_run_operation(binary: str, db: str, op: str) -> Dict[str, Any]:
     """Run the same command through the explicit ``--robot`` entry point."""
-    if op != "search":
+    if op == "search":
+        args: Sequence[str] = [
+            "search", CANONICAL_QUERY, "--max-items", str(CANONICAL_PAGE_SIZE),
+        ]
+    elif op == "recent_sessions":
+        args = RECENT_SESSIONS_ARGS
+    else:
         raise HarnessError(f"unknown canonical operation for Robot: {op}")
-    frame = run_cli_json(
-        binary,
-        db,
-        ["search", CANONICAL_QUERY, "--max-items", str(CANONICAL_PAGE_SIZE)],
-        robot=True,
-    )
+    frame = run_cli_json(binary, db, args, robot=True)
     return strip_robot_envelope(frame)
 
 
@@ -252,10 +295,17 @@ def mcp_run_operation(
     binary: str, db: str, op: str
 ) -> Dict[str, Any]:
     """Run one canonical operation through the MCP JSON-RPC entry point."""
-    if op != "search":
+    if op == "search":
+        tool_name = "search_sessions"
+        arguments: Dict[str, Any] = {
+            "query": CANONICAL_QUERY,
+            "max_items": CANONICAL_PAGE_SIZE,
+        }
+    elif op == "recent_sessions":
+        tool_name = "list_sessions"
+        arguments = {"sort": "recency", "max_items": CANONICAL_PAGE_SIZE}
+    else:
         raise HarnessError(f"unknown canonical operation for MCP: {op}")
-    tool_name = "search_sessions"
-    arguments = {"query": CANONICAL_QUERY, "max_items": CANONICAL_PAGE_SIZE}
     call = json.dumps(
         {
             "jsonrpc": "2.0",
@@ -273,10 +323,21 @@ def mcp_run_operation(
 
 
 def tui_run_operation(binary: str, db: str, op: str) -> Dict[str, Any]:
-    """Run the TUI's headless Application-backed projection."""
-    if op != "search":
+    """Run the TUI's headless Application-backed projection.
+
+    An empty ``--snapshot-json`` argument reproduces the reducer decision the
+    interactive Search screen makes on Enter with an empty query: browse recent
+    sessions. The TUI carries one list in its model, so its rows arrive under
+    ``data.hits``; this adapter renames the container to the list contract's
+    ``data.entries`` (transport normalization only — no value is changed).
+    """
+    if op == "search":
+        return run_cli_json(binary, db, ["tui", "--snapshot-json", CANONICAL_QUERY])
+    if op != "recent_sessions":
         raise HarnessError(f"unknown canonical operation for TUI: {op}")
-    return run_cli_json(binary, db, ["tui", "--snapshot-json", CANONICAL_QUERY])
+    payload = run_cli_json(binary, db, ["tui", "--snapshot-json", ""])
+    rows = payload.get("data", {}).get("hits", [])
+    return {**payload, "data": {"entries": rows}}
 
 
 # ─── Web / HTTP adapter ──────────────────────────────────────────────────────
@@ -341,18 +402,18 @@ def web_get(base_url: str, path: str, token: str) -> Dict[str, Any]:
 
 def web_run_operation(binary: str, db: str, op: str) -> Dict[str, Any]:
     """Exercise the real loopback Web API and return its shared projection."""
-    if op != "search":
+    if op == "search":
+        path = f"/api/projection/search?q={urllib.parse.quote(CANONICAL_QUERY)}"
+    elif op == "recent_sessions":
+        path = f"/api/sessions?limit={CANONICAL_PAGE_SIZE}"
+    else:
         raise HarnessError(f"unknown canonical operation for Web: {op}")
     proc, ready_url = _serve_url(binary, db)
     try:
         parsed = urllib.parse.urlsplit(ready_url)
         base_url = f"{parsed.scheme}://{parsed.netloc}"
         token = urllib.parse.parse_qs(parsed.query)["token"][0]
-        payload = web_get(
-            base_url,
-            f"/api/projection/search?q={urllib.parse.quote(CANONICAL_QUERY)}",
-            token,
-        )
+        payload = web_get(base_url, path, token)
         return payload
     finally:
         proc.terminate()
@@ -517,6 +578,9 @@ def run_all(
     db = str(db_path)
     fixture = write_fixture(workdir)
     ingest_fixture(binary, db, fixture)
+    # A second session (own file, later activity) makes the recency ordering
+    # observable rather than a single-row tautology.
+    ingest_fixture(binary, db, write_second_fixture(workdir))
 
     per_op: List[Dict[str, Any]] = []
     for op in CANONICAL_OPERATIONS:

@@ -733,6 +733,7 @@ pub fn route_request(
             | "/api/status"
             | "/api/search"
             | "/api/projection/search"
+            | "/api/sessions"
             | "/api/context"
             | "/api/handoff"
             | "/api/providers"
@@ -802,6 +803,19 @@ fn request_args(req: &HttpRequest) -> Result<Vec<String>, HttpResponse> {
             if value("group_by_session").as_deref() == Some("true") {
                 args.push("--group-by-session".to_string());
             }
+            Ok(args)
+        }
+        // Recency 浏览（M3-4）：与 CLI `list --sessions --sort recency` 逐字同一
+        // 命令，Web 不另起一套语义；`cursor` 原样回传（令牌绑定排序维度）。
+        "/api/sessions" => {
+            let mut args = vec![
+                "list".to_string(),
+                "--sessions".to_string(),
+                "--sort".to_string(),
+                "recency".to_string(),
+            ];
+            append_value_flag(&mut args, "--max-items", value("limit"));
+            append_value_flag(&mut args, "--cursor", value("cursor"));
             Ok(args)
         }
         "/api/context" => {
@@ -1082,6 +1096,7 @@ mod tests {
             "/api/status",
             "/api/providers",
             "/api/search?q=needle&mode=lexical&limit=20",
+            "/api/sessions?limit=20",
             "/api/handoff?q=needle",
         ] {
             let response = route_request(
@@ -1247,6 +1262,7 @@ mod tests {
             "/health",
             "/api/providers",
             "/api/search",
+            "/api/sessions",
             "/api/show",
             "/api/context",
             "/api/handoff",
@@ -1254,6 +1270,29 @@ mod tests {
         ] {
             assert!(WEB_UI_HTML.contains(endpoint), "missing {endpoint}");
         }
+    }
+
+    #[test]
+    fn sessions_route_is_the_cli_recency_list_verbatim() {
+        // Web 不另起一套排序语义：`/api/sessions` 展开成的参数就是 CLI 的
+        // `list --sessions --sort recency`（同一 dispatch、同一 Application 用例）。
+        let request = authorized("GET", "/api/sessions?limit=5&cursor=tok");
+        let Ok(args) = request_args(&request) else {
+            panic!("/api/sessions must map to CLI args");
+        };
+        assert_eq!(
+            args,
+            vec![
+                "list",
+                "--sessions",
+                "--sort",
+                "recency",
+                "--max-items",
+                "5",
+                "--cursor",
+                "tok"
+            ]
+        );
     }
 
     #[test]

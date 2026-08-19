@@ -5168,9 +5168,31 @@ fn run_with_home(db: &str, home: &str, args: &[&str]) -> Output {
         .expect("failed to spawn agent-session-grep binary")
 }
 
+/// 以隔离 HOME 运行 CLI（human 模式），验证人类渲染（表格）。
+fn run_human_with_home(db: &str, home: &str, args: &[&str]) -> Output {
+    let mut cmd = Command::new(BIN);
+    cmd.arg("--db").arg(db).args(args);
+    cmd.env("HOME", home);
+    cmd.env("USERPROFILE", home);
+    cmd.output()
+        .expect("failed to spawn agent-session-grep binary")
+}
+
 fn claude_fixture(content: &str) -> String {
     format!(
         r#"{{"type":"user","uuid":"d1c00000-0000-4000-8000-000000000001","parentUuid":null,"sessionId":"d1c00000-0000-4000-8000-000000000002","timestamp":"2026-08-14T01:00:00.000Z","message":{{"role":"user","content":{content}}}}}"#
+    )
+}
+
+/// 一条独立会话的 Claude fixture：`slot` 决定 uuid/sessionId（互不相同），
+/// `timestamp` 为 `None` 时整个字段缺席——即"provider 没给消息时间戳"。
+fn claude_fixture_session(slot: u8, content: &str, timestamp: Option<&str>) -> String {
+    let time_field = match timestamp {
+        Some(value) => format!(r#""timestamp":"{value}","#),
+        None => String::new(),
+    };
+    format!(
+        r#"{{"type":"user","uuid":"d1c0000{slot}-0000-4000-8000-00000000000a","parentUuid":null,"sessionId":"d1c0000{slot}-0000-4000-8000-00000000000b",{time_field}"message":{{"role":"user","content":{content}}}}}"#
     )
 }
 
@@ -6103,4 +6125,158 @@ fn forget_human_output_names_the_sessions_and_the_undo_path() {
         text.contains("index compact"),
         "human 输出必须指出删完要 compact：{text}"
     );
+}
+
+/// 三条会话（Claude fixture，工作目录相同、时间戳两两不同），外加一个
+/// 完全不带消息时间戳的会话——验证 recency 排序、"没时间戳的会话排末尾且
+/// 值保持 null"、以及续读令牌绑定排序维度。
+#[test]
+fn recency_list_sorts_by_newest_activity_and_rejects_cross_sort_cursor() {
+    let (home_dir, home) = discover_env();
+    let (_db_dir, db) = temp_db("recency-list");
+    let proj = home_dir.path().join(".claude").join("projects").join("p1");
+    std::fs::create_dir_all(&proj).expect("create claude proj dir");
+
+    // 依次写入三个会话文件；wire id 是 BLAKE3 摘要，与其写入顺序/时间无关，
+    // 因此"recency 顺序"与"默认 wire id 顺序"在此必然是不同的序列。
+    for (name, content) in [
+        (
+            "old.jsonl",
+            claude_fixture_session(1, "\"older work\"", Some("2026-08-10T09:00:00.000Z")),
+        ),
+        (
+            "new.jsonl",
+            claude_fixture_session(2, "\"freshest work\"", Some("2026-08-18T21:30:00.000Z")),
+        ),
+        (
+            "mid.jsonl",
+            claude_fixture_session(3, "\"middle work\"", Some("2026-08-14T12:00:00.000Z")),
+        ),
+        (
+            "undated.jsonl",
+            claude_fixture_session(4, "\"no message timestamps\"", None),
+        ),
+    ] {
+        std::fs::write(proj.join(name), format!("{content}\n")).expect("write fixture");
+    }
+    let out = run_with_home(&db, &home, &["sync", "--discover"]);
+    assert!(out.status.success(), "sync failed: {}", stdout(&out));
+    assert_eq!(
+        parse_first_line(&out)["outcome"],
+        "success",
+        "{}",
+        stdout(&out)
+    );
+
+    // --robot recency：最新活动在前，无时间戳的会话在最后且 latest_activity 为 null。
+    let frame = parse_first_line(&run_with_home(
+        &db,
+        &home,
+        &["list", "--sessions", "--sort", "recency"],
+    ));
+    let entries = frame["data"]["entries"].as_array().expect("entries");
+    assert_eq!(entries.len(), 4, "{frame}");
+    // provider-native 时间戳逐字保留（含毫秒精度，不做归一化）。
+    assert_eq!(
+        entries[0]["latest_activity"], "2026-08-18T21:30:00.000Z",
+        "{frame}"
+    );
+    assert_eq!(
+        entries[1]["latest_activity"], "2026-08-14T12:00:00.000Z",
+        "{frame}"
+    );
+    assert_eq!(
+        entries[2]["latest_activity"], "2026-08-10T09:00:00.000Z",
+        "{frame}"
+    );
+    assert_eq!(
+        entries[3]["latest_activity"],
+        serde_json::Value::Null,
+        "{frame}"
+    );
+    // 无时间戳的会话没有被丢弃，只是排到末尾。
+    assert!(
+        entries[3]["id"].as_str().unwrap().starts_with("ses_v1_"),
+        "{frame}"
+    );
+
+    // 默认排序（wire id）仍然可达且可续读——排序维度没有砍掉任何一条老路径。
+    let default_frame = parse_first_line(&run_with_home(&db, &home, &["list", "--sessions"]));
+    assert_eq!(
+        default_frame["data"]["entries"].as_array().unwrap().len(),
+        4,
+        "{default_frame}"
+    );
+
+    // recency 分页：第二页续读拿到剩下的记录，无重无漏。
+    let p1 = parse_first_line(&run_with_home(
+        &db,
+        &home,
+        &[
+            "list",
+            "--sessions",
+            "--sort",
+            "recency",
+            "--max-items",
+            "2",
+        ],
+    ));
+    let cursor = p1["page"]["next_cursor"]
+        .as_str()
+        .expect("must page")
+        .to_string();
+    let p2 = parse_first_line(&run_with_home(
+        &db,
+        &home,
+        &[
+            "list",
+            "--sessions",
+            "--sort",
+            "recency",
+            "--max-items",
+            "2",
+            "--cursor",
+            &cursor,
+        ],
+    ));
+    let ids: Vec<&str> = p1["data"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .chain(p2["data"]["entries"].as_array().unwrap().iter())
+        .map(|e| e["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids.len(), 4, "{p1} {p2}");
+
+    // 同一批令牌换排序维度续读 → 显式拒绝（绝不静默在另一个顺序上切片）。
+    let bad = parse_first_line(&run_with_home(
+        &db,
+        &home,
+        &[
+            "list",
+            "--sessions",
+            "--max-items",
+            "2",
+            "--cursor",
+            &cursor,
+        ],
+    ));
+    assert_eq!(bad["ok"], false, "{bad}");
+    assert_eq!(bad["error"]["code"], "cursor_invalid", "{bad}");
+    assert!(
+        bad["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("different sort order"),
+        "{bad}"
+    );
+
+    // human 渲染：recency 表格第一行日期是 08-18，无时间戳的会话日期为破折号。
+    let human = run_human_with_home(&db, &home, &["list", "--sessions", "--sort", "recency"]);
+    let h = stdout(&human);
+    assert!(h.contains("2026-08-18"), "{h}");
+    assert!(h.contains("2026-08-14"), "{h}");
+    assert!(h.contains("—"), "{h}");
+    // human 表格的 Session ID 列是 canonical 形状，可直接复制给 context/show。
+    assert!(h.contains("ses_v1_"), "{h}");
 }

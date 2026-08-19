@@ -29,8 +29,8 @@ use agent_session_grep_adapters_sqlite::{
     SourceActivity, SourceBatch, SqliteStore, capture, open_snapshot_source, verify_snapshot,
 };
 use agent_session_grep_application::{
-    App, AppError, AppRequest, AppResponse, ContextLevel, ResponseBudget, SourceRejection,
-    StagedBatch, Truncation, evidence::Precision, handoff_pack::HandoffInput,
+    App, AppError, AppRequest, AppResponse, ContextLevel, ListSort, ResponseBudget,
+    SourceRejection, StagedBatch, Truncation, evidence::Precision, handoff_pack::HandoffInput,
     parse_relative_search_instant, parse_search_instant, select_and_stage_source, source_rejection,
 };
 use agent_session_grep_domain::{
@@ -485,7 +485,8 @@ fn run(
     // tui：交互式只读浏览（Preview）。同 mcp 一样接管终端，不走 dispatch/
     // emit_result；输出模式 flag 对其无意义（design §0.6）。
     // `tui --snapshot-json <query>` 是无终端的 headless 结构投影，供 release
-    // 一致性 harness 复用同一 Application 搜索路径做跨入口比对。
+    // 一致性 harness 复用同一 Application 路径做跨入口比对；`<query>` 为空串
+    // 即 recency 浏览（与交互屏空查询回车同一 reducer 决策）。
     if rest.first().map(String::as_str) == Some("tui") {
         let mut tui_args = rest[1..].to_vec();
         let snapshot_query = extract_flag(&mut tui_args, "--snapshot-json")?;
@@ -495,7 +496,7 @@ fn run(
                     "tui --snapshot-json <query> takes no additional arguments",
                 ));
             }
-            let snapshot = tui::snapshot_search(&store, query)?;
+            let snapshot = tui::snapshot(&store, query)?;
             protocol::write_stdout_line(&snapshot.to_string());
             return Ok(protocol::Outcome::Success);
         }
@@ -1012,7 +1013,7 @@ COMMANDS:
     hook <event>           Claude Code hook integration (off by default; only --enable injects history)
     get <wire-id>          return the raw payload for an entity id
     show <wire-id>         return an entity normalised for reading (role/text shape)
-    list [limit]           list catalog entities in stable order (default 20; paging/budget flags)
+    list [limit]           list catalog entities (default 20; `--sessions --sort recency` = most recent sessions)
     context <ses-id>       assemble session context: branch message chain + evidence spans
     status                 report the total catalog entity count
     mcp                    serve MCP over stdio (JSON-RPC 2.0; stdout carries MCP frames only)
@@ -1027,6 +1028,14 @@ PAGINATION / BUDGET (search, list):
     --cursor <token>       continuation token from the previous envelope's `page.next_cursor`
     --max-items <n>        page size cap (also the response item budget)
     --max-bytes <n>        response byte budget (minimum 4096)
+
+LIST:
+    --sessions             只列会话实体（与 MCP `list_sessions` 同语义）
+    --sort id|recency      排序维度（默认 id：wire id 升序，稳定但与时间无关）。
+                           recency = 会话最近活动降序（回答「我昨天干了什么」），
+                           只对会话有定义，需与 --sessions 同用；provider 没给
+                           时间戳的会话排在末尾，日期显示为 —，绝不编造时刻。
+                           续读令牌绑定排序维度：换了 --sort 的旧令牌会被拒绝。
 
 FILTER (search):
     --provider <id>        restrict to a provider (repeatable; values OR together). Run `providers` for the ids
@@ -1293,9 +1302,11 @@ fn subcommand_help_text(cmd: &str) -> &'static str {
                    从 search 命中或 show 输出里的 session 字段，可继续用 context 展开会话。"
         }
         "list" => {
-            "list [limit]：按稳定序列出实体（默认 20）。\n\
+            "list [limit]：列出 catalog 实体（默认 20）。\n\
                    示例：agent-session-grep --db <path> list 50\n\
-                   flag（放子命令后）：--cursor <token> 翻页"
+                   示例（我最近干了什么）：agent-session-grep --db <path> list --sessions --sort recency 10\n\
+                   flag（放子命令后）：--sessions 只列会话、--sort id|recency 排序维度、--cursor <token> 翻页\n\
+                   recency 只对会话有定义；provider 没给时间戳的会话排末尾（日期为 —）。"
         }
         "context" => {
             "context <ses-id>：装配一个会话的完整上下文（消息链 + 证据区间）。\n\
@@ -1519,6 +1530,8 @@ fn is_known_flag_name(token: &str) -> bool {
             | "--project"
             | "--readmit"
             | "--list"
+            | "--sessions"
+            | "--sort"
     )
 }
 
@@ -2727,6 +2740,18 @@ fn dispatch(
             let cursor = extract_flag(&mut args, "--cursor")?;
             let max_items = extract_flag(&mut args, "--max-items")?;
             let max_bytes = extract_flag(&mut args, "--max-bytes")?;
+            // `--sessions` 与 MCP `list_sessions` 同语义（只列 `ses_v1_*` 实体），
+            // 不发明第二套语义；`--sort recency` 是"我昨天干了什么"的排序维度。
+            let sessions_only = take_bool_flag(&mut args, "--sessions");
+            let sort = match extract_flag(&mut args, "--sort")?.as_deref() {
+                None | Some("id") => ListSort::WireIdAsc,
+                Some("recency") => ListSort::RecencyDesc,
+                Some(other) => {
+                    return Err(CliError::usage(format!(
+                        "--sort must be id|recency, got {other}"
+                    )));
+                }
+            };
             let budget = budget_from_flags(max_items.as_deref(), max_bytes.as_deref(), None)?;
             no_extra_args(&args, 1, "list [limit]")?;
             let limit = args
@@ -2744,9 +2769,17 @@ fn dispatch(
                 limit,
                 cursor,
                 budget,
-                sessions_only: false,
+                sessions_only,
+                sort,
             })?;
-            let (outcome, data, page, warnings) = render(response);
+            let (outcome, mut data, page, warnings) = render(response);
+            // Human 侧的会话表格投影（provider / 工作目录）：与 search 的
+            // `session_resume_rows` 同一惯例，只在 human 模式附加——Robot/MCP/Web
+            // 的协议形状与字节闸由 Application 单一决定，前端不得在闸后加料。
+            // 排序键本身（`latest_activity`）在所有模式的 entries 里都可见。
+            if mode == protocol::OutputMode::Human {
+                attach_session_list_rows(store, &mut data)?;
+            }
             Ok(("list", outcome, data, page, warnings))
         }
         // context：装配一个会话的分支消息链 + 证据区间（CONTRACT §1-2）。
@@ -3744,6 +3777,59 @@ fn attach_session_resume_rows(
                 serde_json::json!(next_commands),
             );
         }
+    }
+    Ok(())
+}
+
+/// Human `list` 的会话表格投影（M3-4）：对本页的 Session 实体批量解析
+/// Resume Metadata（provider / 原始工作目录）与最近活动日期。
+///
+/// 日期用与 search 表格同一个投影（`latest_activity_ymd_for_sessions`），
+/// 因此两张表的日期列语义完全一致，且与 `--sort` 无关——wire-id 排序下会话
+/// 依然有真实日期，只是行序与时间无关。缺时间戳的会话渲染 `—`，不编造时刻。
+///
+/// 只在 Human 模式附加（与 `attach_session_resume_rows` 同一惯例）：
+/// Robot/MCP/Web 的协议形状与字节预算由 Application 单一决定；排序键本身
+/// 在所有模式的 `entries[].latest_activity` 里可见。
+/// 两次批量查询，无 N+1；本页没有会话实体则什么都不做。
+fn attach_session_list_rows(
+    store: &SqliteStore,
+    data: &mut serde_json::Value,
+) -> Result<(), CliError> {
+    let Some(entries) = data.get("entries").and_then(serde_json::Value::as_array) else {
+        return Ok(());
+    };
+    let ids: Vec<StableId> = entries
+        .iter()
+        .filter_map(|entry| {
+            let wire = entry.get("id").and_then(serde_json::Value::as_str)?;
+            StableId::from_wire(wire).filter(|id| id.kind() == IdKind::Session)
+        })
+        .collect();
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let metadata = store.resume_of(&ids).map_err(ProtocolError::from)?;
+    let latest_ymd = store
+        .latest_activity_ymd_for_sessions(&ids)
+        .map_err(ProtocolError::from)?;
+    let rows: Vec<serde_json::Value> = ids
+        .iter()
+        .zip(metadata.iter())
+        .map(|(id, metadata)| {
+            serde_json::json!({
+                "date": latest_ymd.get(id.as_str()),
+                "provider": metadata.provider_id,
+                // 会话标题需要"该会话第一条用户消息"的投影，目前没有这个端口；
+                // 与其猜一个标题，不如留空（human 渲染成 —）。
+                "title": serde_json::Value::Null,
+                "working_directory": metadata.original_working_directory,
+                "session_id": id.as_str(),
+            })
+        })
+        .collect();
+    if let Some(object) = data.as_object_mut() {
+        object.insert("session_resume_rows".into(), serde_json::Value::Array(rows));
     }
     Ok(())
 }
@@ -5512,6 +5598,10 @@ fn render(
                     .map(|entry| serde_json::json!({
                         "id": entry.id.as_str(),
                         "payload": String::from_utf8_lossy(&entry.payload),
+                        // 排序键必须可见：`--sort recency` 的依据是这个时间戳。
+                        // null 有两种诚实含义——wire-id 排序不做时间投影，
+                        // 或该会话没有任何带时间戳的消息。
+                        "latest_activity": entry.latest_activity,
                     }))
                     .collect::<Vec<_>>(),
                 "generation": generation,

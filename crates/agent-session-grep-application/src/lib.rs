@@ -9,12 +9,12 @@ use agent_session_grep_domain::{
     ToolActivity, select_full, select_mainline,
 };
 use agent_session_grep_ports::{
-    CanonicalEventSink, CatalogEntry, CatalogStore, Confidence, ContextGraphStore, MessageEvent,
-    NoResumeClaims, NoSemanticIndex, ParseReport, PortError, PortResult, ProbeResult,
-    ProviderAdapter, ProviderError, ReadOnlySource, ResumeClaimsStore, RetrievalMode,
-    SQLITE_MAGIC_HEADER, SearchFacets, SearchFilters, SearchHit, SearchIndex, SearchInstant,
-    SearchQuery, SemanticIndex, SessionResumeMetadata, SourceFormatFamily, ToolActivityEvent,
-    read_source_head, source_format_family_for,
+    CanonicalEventSink, CatalogStore, Confidence, ContextGraphStore, MessageEvent, NoResumeClaims,
+    NoSemanticIndex, ParseReport, PortError, PortResult, ProbeResult, ProviderAdapter,
+    ProviderError, ReadOnlySource, ResumeClaimsStore, RetrievalMode, SQLITE_MAGIC_HEADER,
+    SearchFacets, SearchFilters, SearchHit, SearchIndex, SearchInstant, SearchQuery, SemanticIndex,
+    SessionResumeMetadata, SourceFormatFamily, ToolActivityEvent, read_source_head,
+    source_format_family_for,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -38,6 +38,8 @@ pub use evidence::EvidenceSpanDto;
 pub const SORT_WIRE_ID_ASC: &str = "wire_id_asc";
 /// 排序方案标识：检索结果的钉住排序（bm25 降序 + id tiebreak，全序确定）。
 pub const SORT_SCORE_DESC: &str = "score_desc";
+/// 排序方案标识：会话最近活动降序（recency 浏览；缺时间戳者末尾 + wire id 收尾）。
+pub const SORT_RECENCY_DESC: &str = "recency_desc";
 
 /// Cursor 结果集判别器（resume-protocol-prerequisites R2）：`list` 全部实体。
 pub const RESULT_SET_ALL: &str = "all";
@@ -46,6 +48,11 @@ pub const RESULT_SET_SESSIONS_ONLY: &str = "sessions_only";
 
 /// `resume_available` 恒序列化进 searchHit 的字节开销（`, "resume_available":false`）。
 const RESUME_AVAILABLE_FIELD_BYTES: usize = 24;
+
+/// `list` 一条 JSON 条目的固定结构开销：
+/// `{"id":,"payload":,"latest_activity":}` 的键名、引号、逗号与花括号
+/// （三个值各自的序列化长度另算）。
+const LIST_ENTRY_ENVELOPE_BYTES: usize = 37;
 
 /// clamp 前从 `max_response_bytes` 扣除的 envelope 预留（budget.rs 声明预留是调用方义务）。
 /// 预算下限 4096 保证扣除后仍为正。
@@ -144,6 +151,32 @@ pub enum AppError {
     MessageAmbiguous(#[from] MessageAmbiguity),
 }
 
+/// 列表用例的排序维度（唯一真源；前端只映射，不各自定义排序语义）。
+///
+/// 两个维度都是**全序**，因此都能安全承载 cursor 的 offset 语义；
+/// [`ListSort::digest`] 把维度绑进令牌，跨排序复用令牌显式失败
+/// （见 [`cursor::verify`]，绝不静默从第一页继续）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ListSort {
+    /// wire id 升序：wire id 是 BLAKE3 摘要，与时间无关（对用户等于随机顺序），
+    /// 但**稳定**——依赖稳定分页的调用方保持默认走这里。
+    #[default]
+    WireIdAsc,
+    /// 会话最近活动降序（recency 浏览）：缺时间戳的会话排在末尾，
+    /// 见 [`agent_session_grep_ports::CatalogStore::sessions_by_recency`]。
+    RecencyDesc,
+}
+
+impl ListSort {
+    /// 绑进 cursor 的排序方案标识。
+    pub fn digest(self) -> &'static str {
+        match self {
+            Self::WireIdAsc => SORT_WIRE_ID_ASC,
+            Self::RecencyDesc => SORT_RECENCY_DESC,
+        }
+    }
+}
+
 /// 应用层请求 ADT：所有前端的统一入口。
 ///
 /// 每个变体是一个用例。前端负责解析各自语法后构造本枚举，
@@ -192,6 +225,9 @@ pub enum AppRequest {
         /// 不再被 doc/msg 实体淹没）。过滤在存储层做，offset/limit 分页语义
         /// 保持作用在过滤后的集合上。
         sessions_only: bool,
+        /// 排序维度（M3-4）：默认 wire id 升序；`RecencyDesc` 是"我昨天干了
+        /// 什么"的排序，只对会话有定义，因此要求 `sessions_only`。
+        sort: ListSort,
     },
     /// 会话上下文装配：按策略选取分支，返回消息链与证据区间（CONTRACT §1-2）。
     Context {
@@ -306,6 +342,19 @@ pub struct MessageWindow {
     pub generation: u64,
 }
 
+/// 一条列表条目：catalog 实体 + 当前排序维度下可见的排序键。
+///
+/// `latest_activity` 只有 recency 排序会填：**排序键必须能被看见**，否则
+/// "按最近活动排序"在输出里无从验证。`None` 有两种诚实含义——wire-id
+/// 排序（本维度不做时间投影）或该会话没有任何带时间戳的消息；两者都不编造时刻。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListEntry {
+    pub id: StableId,
+    pub payload: Vec<u8>,
+    /// 会话内消息时间戳的词法最大值（provider-native ISO-8601，逐字保留）。
+    pub latest_activity: Option<String>,
+}
+
 /// 应用层结果 ADT：前端据此渲染，不再回到 domain/ports 类型。
 #[derive(Debug, Clone, PartialEq)]
 #[allow(clippy::large_enum_variant)]
@@ -337,7 +386,7 @@ pub enum AppResponse {
     Show { payload: Option<Vec<u8>> },
     /// 稳定排序后的 Catalog 条目（wire id 升序）。
     List {
-        entries: Vec<CatalogEntry>,
+        entries: Vec<ListEntry>,
         next_cursor: Option<String>,
         generation: u64,
         truncation: Truncation,
@@ -1976,15 +2025,30 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore, 
                 cursor: token,
                 budget,
                 sessions_only,
+                sort,
             } => {
                 if limit == 0 {
                     return Err(DomainError::InvalidRequest("limit must be > 0".into()).into());
                 }
+                if sort == ListSort::RecencyDesc && !sessions_only {
+                    // recency 只对会话有定义：document 实体没有任何时间戳，
+                    // message 的时间戳是另一个粒度。与其把三种实体按一个
+                    // 编造出来的规则混排，不如显式拒绝并给出可照抄的命令。
+                    return Err(DomainError::InvalidRequest(
+                        "recency sort is defined for sessions only; \
+                         request sessions_only (CLI: `list --sessions --sort recency`)"
+                            .into(),
+                    )
+                    .into());
+                }
                 budget.validate().map_err(AppError::from)?;
                 let generation = self.catalog.active_generation()?;
-                // list 无查询串；令牌以空串摘要 + wire_id_asc 排序标识绑定用例；
+                // list 无查询串；令牌以空串摘要 + 排序维度标识绑定用例；
                 // result_set 判别器把 `list` 与 `list_sessions` 的续读序列隔开。
+                // 排序维度进 sort_digest：recency 令牌不能在 wire-id 序列上续读，
+                // 反之亦然（cursor::verify 显式拒绝）。
                 let query_digest = cursor::digest_query("");
+                let sort_digest = sort.digest();
                 let result_set = if sessions_only {
                     RESULT_SET_SESSIONS_ONLY
                 } else {
@@ -1994,7 +2058,7 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore, 
                     token.as_deref(),
                     generation,
                     &query_digest,
-                    SORT_WIRE_ID_ASC,
+                    sort_digest,
                     Some(result_set),
                 )?;
 
@@ -2007,27 +2071,68 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore, 
                     .saturating_add(page as u64)
                     .saturating_add(1)
                     .min(MAX_FETCH_WINDOW);
-                let fetched = if sessions_only {
-                    self.catalog.list_sessions(fetch as usize)?
-                } else {
-                    self.catalog.list(fetch as usize)?
+                let skip = usize::try_from(offset).unwrap_or(usize::MAX);
+                let (fetched_len, slice) = match sort {
+                    ListSort::WireIdAsc => {
+                        let fetched = if sessions_only {
+                            self.catalog.list_sessions(fetch as usize)?
+                        } else {
+                            self.catalog.list(fetch as usize)?
+                        };
+                        let fetched_len = fetched.len() as u64;
+                        let slice: Vec<ListEntry> = fetched
+                            .into_iter()
+                            .skip(skip)
+                            .take(page)
+                            .map(|entry| ListEntry {
+                                id: entry.id,
+                                payload: entry.payload,
+                                // 本维度不做时间投影：不填一个"看起来像事实"的值。
+                                latest_activity: None,
+                            })
+                            .collect();
+                        (fetched_len, slice)
+                    }
+                    ListSort::RecencyDesc => {
+                        let ordered = self.catalog.sessions_by_recency(fetch as usize)?;
+                        let fetched_len = ordered.len() as u64;
+                        let window: Vec<(StableId, Option<String>)> =
+                            ordered.into_iter().skip(skip).take(page).collect();
+                        // 一次批量取本页 payload（分块 IN，无 N+1）。
+                        let ids: Vec<StableId> = window.iter().map(|(id, _)| id.clone()).collect();
+                        let payloads = self.catalog.get_many(&ids)?;
+                        let mut slice = Vec::with_capacity(window.len());
+                        for ((id, latest_activity), (_, payload)) in
+                            window.into_iter().zip(payloads)
+                        {
+                            let payload = payload.ok_or_else(|| {
+                                DomainError::InvariantViolation(
+                                    "recency list referenced a session missing from the catalog"
+                                        .into(),
+                                )
+                            })?;
+                            slice.push(ListEntry {
+                                id,
+                                payload,
+                                latest_activity,
+                            });
+                        }
+                        (fetched_len, slice)
+                    }
                 };
-                let fetched_len = fetched.len() as u64;
-                let slice: Vec<CatalogEntry> = fetched
-                    .into_iter()
-                    .skip(usize::try_from(offset).unwrap_or(usize::MAX))
-                    .take(page)
-                    .collect();
                 let net_bytes = budget
                     .max_response_bytes
                     .saturating_sub(ENVELOPE_RESERVE_BYTES);
                 let (entries, truncation, _) =
                     budget::clamp_items(slice, page, net_bytes, |entry| {
-                        // 最终 JSON 形态 `{"id":"<id>","payload":"<lossy utf-8>"}`：
-                        // id 按转义计长，payload 按序列化后长度计（不是原始字节数）。
+                        // 最终 JSON 形态
+                        // `{"id":"<id>","payload":"<lossy utf-8>","latest_activity":<str|null>}`：
+                        // id 按转义计长，payload 按序列化后长度计（不是原始字节数），
+                        // 排序键按其序列化形态计（null 为 4 字节）。
                         json_string_len(entry.id.as_str())
                             + lossy_payload_json_len(&entry.payload)
-                            + 18
+                            + entry.latest_activity.as_deref().map_or(4, json_string_len)
+                            + LIST_ENTRY_ENVELOPE_BYTES
                     });
                 let consumed = offset + entries.len() as u64;
                 // A truncated page with zero kept entries means the first
@@ -2040,7 +2145,7 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore, 
                     has_more,
                     generation,
                     &query_digest,
-                    SORT_WIRE_ID_ASC,
+                    sort_digest,
                     Some(result_set),
                     consumed,
                 );
@@ -2560,8 +2665,8 @@ mod tests {
     };
     use agent_session_grep_ports::SourcePlacement;
     use agent_session_grep_ports::{
-        ContextStats, MessageContextCandidate as PortMessageContextCandidate, PortResult,
-        SidechainFacet, SourceSnapshot,
+        CatalogEntry, ContextStats, MessageContextCandidate as PortMessageContextCandidate,
+        PortResult, SidechainFacet, SourceSnapshot,
     };
     use agent_session_grep_testkit::FakeProvider;
 
@@ -2604,6 +2709,14 @@ mod tests {
         }
         fn list_sessions(&self, limit: usize) -> PortResult<Vec<CatalogEntry>> {
             self.list_mock(Some(IdKind::Session), limit)
+        }
+        fn sessions_by_recency(&self, limit: usize) -> PortResult<Vec<(StableId, Option<String>)>> {
+            // 这个 double 只喂 list 的接线测试：一条会话，provider 没给时间戳。
+            Ok(self
+                .list_mock(Some(IdKind::Session), limit)?
+                .into_iter()
+                .map(|entry| (entry.id, None))
+                .collect())
         }
         fn count(&self) -> PortResult<u64> {
             Ok(1)
@@ -2939,6 +3052,7 @@ mod tests {
             cursor: None,
             budget: ResponseBudget::default(),
             sessions_only: false,
+            sort: ListSort::WireIdAsc,
         });
         assert!(matches!(r, Ok(AppResponse::List { entries, .. }) if entries.len() == 1));
     }
@@ -2950,6 +3064,7 @@ mod tests {
             cursor: None,
             budget: ResponseBudget::default(),
             sessions_only: true,
+            sort: ListSort::WireIdAsc,
         });
         assert!(
             matches!(r, Ok(AppResponse::List { entries, .. }) if entries.iter().all(|e| e.id.kind() == IdKind::Session))
@@ -2964,6 +3079,7 @@ mod tests {
                 cursor: None,
                 budget: ResponseBudget::default(),
                 sessions_only: false,
+                sort: ListSort::WireIdAsc,
             })
             .unwrap_err();
         assert!(matches!(
@@ -3062,6 +3178,9 @@ mod tests {
         map: std::collections::BTreeMap<String, Vec<u8>>,
         generation: std::cell::Cell<u64>,
         session_of: std::collections::BTreeMap<String, String>,
+        /// 会话 wire id → 最近活动时间戳；未登记的会话即"provider 没给时间戳"，
+        /// 与 SQLite 的 `sessions_by_recency` 语义一致（排在末尾、值为 None）。
+        latest_activity: std::collections::BTreeMap<String, String>,
     }
     impl MapCatalog {
         fn new(generation: u64) -> Self {
@@ -3069,6 +3188,7 @@ mod tests {
                 map: Default::default(),
                 generation: std::cell::Cell::new(generation),
                 session_of: Default::default(),
+                latest_activity: Default::default(),
             }
         }
         fn insert(&mut self, id: &StableId, payload: impl Into<Vec<u8>>) {
@@ -3079,6 +3199,10 @@ mod tests {
                 message_id.as_str().to_string(),
                 session_id.as_str().to_string(),
             );
+        }
+        fn set_latest_activity(&mut self, session_id: &StableId, timestamp: &str) {
+            self.latest_activity
+                .insert(session_id.as_str().to_string(), timestamp.to_string());
         }
     }
     impl CatalogStore for MapCatalog {
@@ -3119,6 +3243,29 @@ mod tests {
                     payload: v.clone(),
                 })
                 .collect())
+        }
+        fn sessions_by_recency(&self, limit: usize) -> PortResult<Vec<(StableId, Option<String>)>> {
+            let mut rows: Vec<(StableId, Option<String>)> = self
+                .map
+                .keys()
+                .filter(|k| k.starts_with("ses_v1_"))
+                .map(|k| {
+                    (
+                        StableId::from_wire(k).expect("map keys are wire ids"),
+                        self.latest_activity.get(k).cloned(),
+                    )
+                })
+                .collect();
+            // 与 SQLite `ORDER BY latest IS NULL ASC, latest DESC, id ASC` 同序。
+            rows.sort_by(|left, right| {
+                left.1
+                    .is_none()
+                    .cmp(&right.1.is_none())
+                    .then_with(|| right.1.cmp(&left.1))
+                    .then_with(|| left.0.as_str().cmp(right.0.as_str()))
+            });
+            rows.truncate(limit);
+            Ok(rows)
         }
         fn count(&self) -> PortResult<u64> {
             Ok(self.map.len() as u64)
@@ -3970,6 +4117,7 @@ mod tests {
                 cursor: None,
                 budget: ResponseBudget::default(),
                 sessions_only: false,
+                sort: ListSort::WireIdAsc,
             })
             .unwrap();
         let AppResponse::List {
@@ -3987,6 +4135,7 @@ mod tests {
                 cursor: next_cursor,
                 budget: ResponseBudget::default(),
                 sessions_only: false,
+                sort: ListSort::WireIdAsc,
             })
             .unwrap();
         let AppResponse::List {
@@ -4037,6 +4186,7 @@ mod tests {
                     ..Default::default()
                 },
                 sessions_only: false,
+                sort: ListSort::WireIdAsc,
             })
             .unwrap();
         let AppResponse::List {
@@ -4053,6 +4203,206 @@ mod tests {
             truncation.reason.as_deref(),
             Some(budget::TRUNCATION_MAX_RESPONSE_BYTES)
         );
+    }
+
+    // ---- recency 浏览（M3-4）----
+
+    /// 三个会话：两个有时间戳、一个没有。构造顺序与期望顺序都不等于 wire id 序，
+    /// 因此断言真的在验证排序维度，而不是碰巧命中默认序。
+    fn recency_catalog() -> MapCatalog {
+        let mut cat = MapCatalog::new(7);
+        let older = StableId::native(IdKind::Session, "recency-older");
+        let newer = StableId::native(IdKind::Session, "recency-newer");
+        let undated = StableId::native(IdKind::Session, "recency-undated");
+        for id in [&older, &newer, &undated] {
+            cat.insert(id, b"{}".to_vec());
+        }
+        cat.set_latest_activity(&older, "2026-08-17T09:00:00Z");
+        cat.set_latest_activity(&newer, "2026-08-18T21:30:00Z");
+        cat
+    }
+
+    fn recency_request(cursor: Option<String>, limit: usize) -> AppRequest {
+        AppRequest::List {
+            limit,
+            cursor,
+            budget: ResponseBudget::default(),
+            sessions_only: true,
+            sort: ListSort::RecencyDesc,
+        }
+    }
+
+    #[test]
+    fn list_recency_sorts_newest_first_and_keeps_timestampless_sessions_last() {
+        let cat = recency_catalog();
+        let app = App::with_clock(&cat, FakeIndex, clock_t0);
+        let AppResponse::List { entries, .. } = app.handle(recency_request(None, 10)).unwrap()
+        else {
+            panic!("expected List response");
+        };
+        let order: Vec<(String, Option<String>)> = entries
+            .iter()
+            .map(|entry| (entry.id.as_str().to_string(), entry.latest_activity.clone()))
+            .collect();
+        let expected: Vec<(String, Option<String>)> = vec![
+            (
+                StableId::native(IdKind::Session, "recency-newer")
+                    .as_str()
+                    .to_string(),
+                Some("2026-08-18T21:30:00Z".to_string()),
+            ),
+            (
+                StableId::native(IdKind::Session, "recency-older")
+                    .as_str()
+                    .to_string(),
+                Some("2026-08-17T09:00:00Z".to_string()),
+            ),
+            // 缺时间戳的会话既不被丢弃、也不冒充最新：排在末尾且值为 null。
+            (
+                StableId::native(IdKind::Session, "recency-undated")
+                    .as_str()
+                    .to_string(),
+                None,
+            ),
+        ];
+        assert_eq!(order, expected);
+    }
+
+    #[test]
+    fn list_recency_pages_partition_the_recency_order() {
+        let cat = recency_catalog();
+        let app = App::with_clock(&cat, FakeIndex, clock_t0);
+        let AppResponse::List {
+            entries,
+            next_cursor,
+            ..
+        } = app.handle(recency_request(None, 2)).unwrap()
+        else {
+            panic!("expected List response");
+        };
+        assert_eq!(entries.len(), 2);
+        let token = next_cursor.expect("recency list must page");
+        let AppResponse::List {
+            entries: page2,
+            next_cursor: next2,
+            ..
+        } = app.handle(recency_request(Some(token), 2)).unwrap()
+        else {
+            panic!("expected List response");
+        };
+        assert_eq!(page2.len(), 1);
+        assert!(next2.is_none());
+        // 两页拼接 = 完整 recency 序，无重无漏（第二页正是缺时间戳的那条）。
+        let joined: Vec<Option<&str>> = entries
+            .iter()
+            .chain(page2.iter())
+            .map(|entry| entry.latest_activity.as_deref())
+            .collect();
+        assert_eq!(
+            joined,
+            vec![
+                Some("2026-08-18T21:30:00Z"),
+                Some("2026-08-17T09:00:00Z"),
+                None
+            ]
+        );
+    }
+
+    #[test]
+    fn list_cursor_rejects_sort_dimension_mismatch() {
+        // 排序维度绑进 sort_digest：recency 令牌不得在 wire-id 序列上续读，
+        // 反之亦然——否则第二页会按另一个顺序切片，静默返回错的记录。
+        let cat = recency_catalog();
+        let app = App::with_clock(&cat, FakeIndex, clock_t0);
+        let wire_id_request = |cursor: Option<String>| AppRequest::List {
+            limit: 2,
+            cursor,
+            budget: ResponseBudget::default(),
+            sessions_only: true,
+            sort: ListSort::WireIdAsc,
+        };
+
+        let AppResponse::List { next_cursor, .. } = app.handle(recency_request(None, 2)).unwrap()
+        else {
+            panic!("expected List response");
+        };
+        let recency_token = next_cursor.expect("recency list must page");
+        let err = app
+            .handle(wire_id_request(Some(recency_token)))
+            .unwrap_err();
+        assert!(
+            matches!(err, AppError::Cursor(cursor::CursorError::Invalid(_))),
+            "{err}"
+        );
+        assert!(err.to_string().contains("different sort order"), "{err}");
+
+        let AppResponse::List { next_cursor, .. } = app.handle(wire_id_request(None)).unwrap()
+        else {
+            panic!("expected List response");
+        };
+        let wire_token = next_cursor.expect("wire-id list must page");
+        let err = app
+            .handle(recency_request(Some(wire_token), 2))
+            .unwrap_err();
+        assert!(
+            matches!(err, AppError::Cursor(cursor::CursorError::Invalid(_))),
+            "{err}"
+        );
+        assert!(err.to_string().contains("different sort order"), "{err}");
+    }
+
+    #[test]
+    fn list_recency_requires_sessions_only_and_names_the_command() {
+        let cat = recency_catalog();
+        let app = App::with_clock(&cat, FakeIndex, clock_t0);
+        let err = app
+            .handle(AppRequest::List {
+                limit: 10,
+                cursor: None,
+                budget: ResponseBudget::default(),
+                sessions_only: false,
+                sort: ListSort::RecencyDesc,
+            })
+            .unwrap_err();
+        assert!(
+            matches!(err, AppError::Domain(DomainError::InvalidRequest(_))),
+            "{err}"
+        );
+        // 错误必须给出可照抄的下一步命令，而不是只说"不支持"。
+        assert!(
+            err.to_string().contains("list --sessions --sort recency"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn list_wire_id_sort_reports_no_activity_projection() {
+        // wire-id 维度不做时间投影：`latest_activity` 保持 None，而不是填一个
+        // 看起来像事实的值。
+        let cat = recency_catalog();
+        let app = App::with_clock(&cat, FakeIndex, clock_t0);
+        let AppResponse::List { entries, .. } = app
+            .handle(AppRequest::List {
+                limit: 10,
+                cursor: None,
+                budget: ResponseBudget::default(),
+                sessions_only: true,
+                sort: ListSort::WireIdAsc,
+            })
+            .unwrap()
+        else {
+            panic!("expected List response");
+        };
+        assert_eq!(entries.len(), 3);
+        assert!(entries.iter().all(|entry| entry.latest_activity.is_none()));
+    }
+
+    #[test]
+    fn list_sort_digests_are_distinct_and_stable() {
+        assert_eq!(ListSort::WireIdAsc.digest(), SORT_WIRE_ID_ASC);
+        assert_eq!(ListSort::RecencyDesc.digest(), SORT_RECENCY_DESC);
+        assert_ne!(ListSort::WireIdAsc.digest(), ListSort::RecencyDesc.digest());
+        assert_eq!(ListSort::default(), ListSort::WireIdAsc);
     }
 
     // ---- context 装配 ----
@@ -4118,6 +4468,10 @@ mod tests {
 
         fn list_sessions(&self, limit: usize) -> PortResult<Vec<CatalogEntry>> {
             self.catalog.list_sessions(limit)
+        }
+
+        fn sessions_by_recency(&self, limit: usize) -> PortResult<Vec<(StableId, Option<String>)>> {
+            self.catalog.sessions_by_recency(limit)
         }
 
         fn count(&self) -> PortResult<u64> {
@@ -6340,6 +6694,7 @@ mod tests {
             cursor,
             budget: ResponseBudget::default(),
             sessions_only,
+            sort: ListSort::WireIdAsc,
         };
         let AppResponse::List { next_cursor, .. } = app.handle(list_req(None, false)).unwrap()
         else {

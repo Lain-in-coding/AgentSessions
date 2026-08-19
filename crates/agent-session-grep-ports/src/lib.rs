@@ -111,6 +111,21 @@ pub trait CatalogStore {
     /// 的结果并让 cursor 错位（competitor-borrowings R1.3）。
     fn list_sessions(&self, limit: usize) -> PortResult<Vec<CatalogEntry>>;
 
+    /// 按"最近活动"降序返回最多 `limit` 个 Session 的 `(会话 id, 最近活动时间戳)`。
+    ///
+    /// 最近活动 = 该会话内全部消息 payload `$.timestamp` 的**词法最大值**，
+    /// provider-native ISO-8601 字符串逐字保留（不做时区归一；词法比较对
+    /// `YYYY-MM-DDT…Z` 形状等价于时间序）。
+    ///
+    /// **没有任何带时间戳消息的会话不被丢弃**：`None` 表示"provider 没给时间"，
+    /// 这类会话排在全部有时间戳的会话之后——绝不为了排序编造时刻。同一时间戳
+    /// 内、以及全部 `None` 之间按 wire id 升序，使排序为全序（cursor 续读的
+    /// offset 语义要求确定顺序）。
+    ///
+    /// 只返回 id + 排序键：payload 由调用方按页 [`CatalogStore::get_many`]
+    /// 批量取回。实现必须一条查询完成聚合，不得逐会话查询（N+1）。
+    fn sessions_by_recency(&self, limit: usize) -> PortResult<Vec<(StableId, Option<String>)>>;
+
     /// Catalog 当前实体总数（status/doctor 使用）。
     fn count(&self) -> PortResult<u64>;
 
@@ -723,6 +738,9 @@ impl<T: CatalogStore + ?Sized> CatalogStore for &T {
     }
     fn list_sessions(&self, limit: usize) -> PortResult<Vec<CatalogEntry>> {
         (**self).list_sessions(limit)
+    }
+    fn sessions_by_recency(&self, limit: usize) -> PortResult<Vec<(StableId, Option<String>)>> {
+        (**self).sessions_by_recency(limit)
     }
     fn count(&self) -> PortResult<u64> {
         (**self).count()
