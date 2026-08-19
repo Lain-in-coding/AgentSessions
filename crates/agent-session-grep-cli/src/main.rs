@@ -2987,16 +2987,18 @@ fn emit_forget_plan(
     let plan = store
         .plan_forget(source_paths)
         .map_err(ProtocolError::from)?;
-    let named: BTreeSet<&str> = requested
-        .unwrap_or_default()
-        .iter()
-        .map(String::as_str)
-        .collect();
-    let collateral: Vec<&String> = plan
-        .sessions
-        .iter()
-        .filter(|wire| !named.contains(wire.as_str()))
-        .collect();
+    // 连带删除只在"用户点名了具体会话"时才有意义：`--project` / `--provider`
+    // 选的是整个维度，维度内的每个会话都是用户要求的，不是意外附带的。
+    let collateral: Vec<&String> = match requested {
+        Some(ids) => {
+            let named: BTreeSet<&str> = ids.iter().map(String::as_str).collect();
+            plan.sessions
+                .iter()
+                .filter(|wire| !named.contains(wire.as_str()))
+                .collect()
+        }
+        None => Vec::new(),
+    };
     let executed = if plan.is_empty() {
         warnings.push("没有匹配的已索引内容，未做任何改动。".to_string());
         false
@@ -3011,7 +3013,7 @@ fn emit_forget_plan(
         ));
         false
     };
-    if executed && !requested.is_some_and(|ids| ids.is_empty()) {
+    if executed {
         warnings.push(
             "已删除。源 transcript 文件未被触碰，已登记抑制，后续 sync 不会把它们索引回来\
              （用 forget --list 查看，forget --readmit <path> 撤销）。\
