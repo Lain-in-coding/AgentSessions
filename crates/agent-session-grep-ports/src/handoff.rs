@@ -24,6 +24,11 @@ pub struct HandoffPack {
     pub matched_sessions: Vec<MatchedSession>,
     pub mainline: Vec<MainlineEntry>,
     pub evidence: Vec<EvidenceEntry>,
+    /// 推断摘要。**在 `generation_mode: Deterministic` 下恒为空** —— 该模式
+    /// 不调用任何模型，因此没有任何可推断的内容，空列表是唯一诚实的取值
+    /// （不是"待填充"）。当前所有发布构建只产出 Deterministic 模式，所以
+    /// 实际发出的 pack 里这个列表总是空的。非空只可能来自把
+    /// `generation_mode` 标为 `LocalLlm` 的本地模型生成器，而仓库尚未提供。
     pub inference: Vec<InferenceEntry>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target: Option<HandoffTarget>,
@@ -36,6 +41,10 @@ pub struct HandoffPack {
     pub redaction: RedactionStatus,
     pub confidence: PackConfidence,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// 产出证据的那些消息的结构化工具活动（store schema v12 的 `tool_activities`
+    /// 投影，由调用方经 [`crate::ContextGraphStore::tool_activities_for_messages`]
+    /// 批量解析后传入）。这些消息没有活动记录时为空并从 JSON 中省略
+    /// （v12 之前建的库、或本来就没有工具调用的会话）。
     pub tool_activity: Vec<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub source_locators: Vec<SourceLocator>,
@@ -62,8 +71,11 @@ pub struct TimeWindow {
     pub until: Option<String>,
 }
 
-/// Pack 的出处：目标 provider/session。搜索型 pack 无单一会话/提供商时保持
-/// `None`（honest，绝不臆造）；会话型 handoff 由后续 slice 填充。
+/// Pack 的出处：pack 来自的那个 provider/session。
+///
+/// 只在**恰好一个会话命中**时填充：那时两个值都是已持有的事实。跨多个会话的
+/// 搜索型 pack 确实没有单一出处，保持 `None`（绝不臆造）。`provider_id` 取自
+/// 该会话的 resume claim；store 没有 claim 时省略——报会话、不猜 provider。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Provenance {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -103,6 +115,8 @@ pub struct HandoffTarget {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct MatchedSession {
     pub session_id: String,
+    /// store 的 resume claim 为该会话认领的 provider。无 claim（claim 之前建的
+    /// 行、冲突 claim）时为 `None` 并从 JSON 省略——绝不猜。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -139,6 +153,12 @@ pub struct EvidenceEntry {
 }
 
 /// 推断摘要：local LLM 或 deterministic 派生，永远标记 inference。
+///
+/// 注意：目前仓库内没有任何生产路径构造本类型 —— 默认生成器是
+/// [`GenerationMode::Deterministic`]（不调用模型），因此
+/// [`HandoffPack::inference`] 恒为空。本类型是 `local_llm` 模式的契约占位，
+/// 存在的意义是保证真的接上本地模型时 evidence/inference 分栏在类型层面
+/// 已经强制成立（见 `evidence_and_inference_types_are_distinct`）。
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct InferenceEntry {
     pub kind: InferenceKind,

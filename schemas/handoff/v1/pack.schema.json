@@ -91,7 +91,7 @@
     },
     "inference": {
       "type": "array",
-      "description": "LLM-generated or derived summaries. Every entry MUST be marked inference; never placed in evidence.",
+      "description": "LLM-generated or derived summaries. Every entry MUST be marked inference; never placed in evidence. ALWAYS EMPTY when generation_mode is \"deterministic\", which is the only mode current builds emit: no model is called, so there is nothing to infer. A non-empty list requires a local-LLM generator that marks generation_mode \"local_llm\"; no released build ships one. Consumers must not treat an empty inference list as a missing summary.",
       "items": { "$ref": "#/$defs/inferenceEntry" },
       "maxItems": 500
     },
@@ -121,7 +121,7 @@
     "provenance": {
       "type": ["object", "null"],
       "additionalProperties": false,
-      "description": "Pack provenance: target provider/session. Search-based packs have no single session/provider and stay null (never fabricated).",
+      "description": "Pack provenance: the single provider/session the pack came from. Present only when exactly one session matched the query; absent when zero or several matched, because a multi-session pack genuinely has no single origin. provider_id comes from that session's stored resume claim and is omitted when the store holds no claim for it — the session is reported without the provider, never with a guessed one.",
       "properties": {
         "provider_id": { "type": ["string", "null"], "maxLength": 64 },
         "session_id": {
@@ -132,7 +132,7 @@
     },
     "tool_activity": {
       "type": "array",
-      "description": "Structured tool activity relevant to the matched sessions (optional projection).",
+      "description": "Structured tool activity for the messages that produced the evidence, read from the catalog tool_activities projection (store schema v12). Omitted when those messages have no recorded activity — for example a store built before v12, or a session with no tool calls.",
       "items": { "type": "object" },
       "maxItems": 500
     },
@@ -153,7 +153,11 @@
           "type": "string",
           "pattern": "^ses_v1_[A-Za-z0-9]+$"
         },
-        "provider_id": { "type": "string", "maxLength": 64 },
+        "provider_id": {
+          "type": "string",
+          "maxLength": 64,
+          "description": "Provider the store's resume claim attributes this session to. Omitted when the store holds no claim for it (pre-claim rows, conflicting claims) — never guessed."
+        },
         "title": { "type": ["string", "null"] },
         "relevance_score": { "type": "number", "minimum": 0, "maximum": 1 },
         "occurrences": { "type": "integer", "minimum": 1 }

@@ -2283,6 +2283,21 @@ fn dispatch(
                     }
                 })
                 .collect();
+            // Provider attribution for exactly the matched sessions: one
+            // batched claims read (no N+1). The pack never queries storage.
+            let session_ids =
+                agent_session_grep_application::handoff_pack::matched_session_ids(&hits);
+            let session_providers: Vec<_> = store
+                .resume_of(&session_ids)
+                .map_err(|e| CliError(e.into()))?
+                .into_iter()
+                .map(
+                    |metadata| agent_session_grep_application::handoff_pack::SessionProvider {
+                        session_id: metadata.session_id.as_str().to_string(),
+                        provider_id: metadata.provider_id,
+                    },
+                )
+                .collect();
             let pack = agent_session_grep_application::handoff_pack::generate_deterministic(
                 HandoffInput {
                     query_terms: std::slice::from_ref(&query),
@@ -2304,6 +2319,7 @@ fn dispatch(
                     source_locations: &source_locations,
                     tool_activities: &tool_activities,
                     message_facts: &message_facts,
+                    session_providers: &session_providers,
                     catalog_generation: generation,
                     max_tokens: max_tokens_n as u64,
                     max_bytes: max_bytes_n as u64,
