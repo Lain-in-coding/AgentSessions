@@ -3278,7 +3278,16 @@ impl SqliteStore {
                 .collect(),
         };
 
-        batch_manifest(&upserts, &deletes, &relations)?;
+        // Canonicalizing the batch validates it (duplicate ids, upsert/delete
+        // overlap, relation manifest shape) *and* produces the durable intent's
+        // digest and JSON. Both are wanted, so build it once and hand it to the
+        // intent write: this used to be two identical calls back to back, and
+        // the second was pure recomputation — the traced cost of the discarded
+        // first call was 4.0 s of a 43 s ingest, because it re-serializes every
+        // placement, edge, activity and source membership in the batch and
+        // re-hashes every payload. Nothing between here and the intent write
+        // touches the catalog, so one call is exact.
+        let manifest = batch_manifest(&upserts, &deletes, &relations)?;
         let mark = trace.step("manifest_validate", mark);
         self.ensure_stored_identity_metadata_matches(&upserts)?;
         let mark = trace.step("identity_metadata_check", mark);
@@ -3287,7 +3296,7 @@ impl SqliteStore {
         }
         let mark = trace.step("source_batches_are_current", mark);
 
-        let pending = self.begin_index_batch_with_relations(&upserts, &deletes, &relations)?;
+        let pending = self.begin_index_batch_from_manifest(manifest)?;
         let mark = trace.step("begin_intent", mark);
         self.commit_index_batch_with_relations(&pending, &upserts, &deletes, &relations)?;
         trace.step("commit_tx", mark);
@@ -4015,6 +4024,16 @@ impl SqliteStore {
             }
         }
 
+        // One statement pair for the whole loop rather than one per entity:
+        // this body runs once per regenerated entity (~105,000 times over a
+        // 100k-message ingest), and `query_row`/`execute` re-prepare their SQL
+        // on every call.
+        let mut read_payload = tx
+            .prepare("SELECT payload FROM catalog WHERE id = ?1")
+            .map_err(backend)?;
+        let mut write_payload = tx
+            .prepare("UPDATE catalog SET payload = ?2 WHERE id = ?1")
+            .map_err(backend)?;
         for entity_id in fully_complete_entities {
             let Some(id) = StableId::from_wire(&entity_id) else {
                 return Err(PortError::Backend(
@@ -4024,15 +4043,11 @@ impl SqliteStore {
             if !matches!(id.kind(), IdKind::Message | IdKind::Session) {
                 continue;
             }
-            let payload: Option<Vec<u8>> = tx
-                .query_row(
-                    "SELECT payload FROM catalog WHERE id = ?1",
-                    [&entity_id],
-                    |row| row.get(0),
-                )
+            let stored: Option<Vec<u8>> = read_payload
+                .query_row([&entity_id], |row| row.get(0))
                 .optional()
                 .map_err(backend)?;
-            let Some(payload) = payload else {
+            let Some(payload) = stored else {
                 continue;
             };
             let mut map = match serde_json::from_slice::<serde_json::Value>(&payload) {
@@ -4176,24 +4191,18 @@ impl SqliteStore {
                 _ => unreachable!(),
             }
 
-            let payload = serde_json::to_vec(&serde_json::Value::Object(map)).map_err(backend)?;
+            let rebuilt = serde_json::to_vec(&serde_json::Value::Object(map)).map_err(backend)?;
             // Skip the write when the rebuilt aliases equal the stored bytes:
             // regeneration must not rewrite the catalog (and inflate the WAL)
-            // on every commit once aliases are stable.
-            let stored: Option<Vec<u8>> = tx
-                .query_row(
-                    "SELECT payload FROM catalog WHERE id = ?1",
-                    [&entity_id],
-                    |row| row.get(0),
-                )
-                .optional()
-                .map_err(backend)?;
-            if stored.as_deref() != Some(payload.as_slice()) {
-                tx.execute(
-                    "UPDATE catalog SET payload = ?2 WHERE id = ?1",
-                    rusqlite::params![entity_id, payload],
-                )
-                .map_err(backend)?;
+            // on every commit once aliases are stable. `payload` is those
+            // stored bytes — it was read from `catalog` at the top of this
+            // iteration and nothing has written this id since, so comparing
+            // against it is exactly what re-reading the row would answer, one
+            // index lookup cheaper per entity.
+            if rebuilt != payload {
+                write_payload
+                    .execute(rusqlite::params![entity_id, rebuilt])
+                    .map_err(backend)?;
             }
         }
         Ok(())
@@ -4426,6 +4435,18 @@ impl SqliteStore {
         deletes: &[StableId],
         relations: &RelationManifests,
     ) -> PortResult<PendingIndexBatch> {
+        self.begin_index_batch_from_manifest(batch_manifest(upserts, deletes, relations)?)
+    }
+
+    /// Write the durable intent for an already-canonicalized batch.
+    ///
+    /// Split out so callers that must canonicalize the batch anyway (to validate
+    /// it before deciding to commit) do not pay for a second identical
+    /// canonicalization here.
+    fn begin_index_batch_from_manifest(
+        &self,
+        manifest: CanonicalBatchManifest,
+    ) -> PortResult<PendingIndexBatch> {
         let base = self.active_generation()?;
         let target = base
             .checked_add(1)
@@ -4433,7 +4454,6 @@ impl SqliteStore {
         let target_sql = i64::try_from(target).map_err(backend)?;
         let base_sql = i64::try_from(base).map_err(backend)?;
         let op = operation_id()?;
-        let manifest = batch_manifest(upserts, deletes, relations)?;
         let upsert_json = serde_json::to_string(&manifest.upsert_ids).map_err(backend)?;
         let delete_json = serde_json::to_string(&manifest.delete_ids).map_err(backend)?;
         let conn = self.conn.borrow();
@@ -4863,19 +4883,22 @@ impl SqliteStore {
         // 逐个重建其 `session_fts` 行（删除按 rowid 经边车定位，重插新投影）。
         // 覆盖 upsert/delete 实体、placement 变动（含移动归属的旧主）、以及
         // source replacement 的旧 placement 与 claim 行——与写入路径同事务。
+        //
+        // Message ids are gathered first and looked up in one chunked pass.
+        // They used to be resolved one id per call, which meant one
+        // format!-built SQL string and one sqlite3_prepare per upserted message
+        // *and* per upserted placement — 200,000 prepares over a 100k-message
+        // ingest to answer a question `collect_message_sessions` already
+        // answers in `BATCH_IN_CHUNK`-sized batches. Set union is associative,
+        // so batching is exact.
         let mut affected_sessions = BTreeSet::new();
+        let mut session_lookup_messages: Vec<String> = Vec::new();
         for id in upserts.iter().map(|(id, _, _)| id).chain(deletes.iter()) {
             match id.kind() {
                 IdKind::Session => {
                     affected_sessions.insert(id.as_str().to_string());
                 }
-                IdKind::Message => {
-                    Self::collect_message_sessions(
-                        &tx,
-                        &[id.as_str().to_string()],
-                        &mut affected_sessions,
-                    )?;
-                }
+                IdKind::Message => session_lookup_messages.push(id.as_str().to_string()),
                 IdKind::Document => {}
                 IdKind::Source => {}
             }
@@ -4893,13 +4916,12 @@ impl SqliteStore {
                 // read its old owner before the INSERT ... ON CONFLICT update.
                 old_placement_ids.push(placement.id.as_str().to_string());
                 affected_sessions.insert(placement.session_id.as_str().to_string());
-                Self::collect_message_sessions(
-                    &tx,
-                    &[placement.message_id.as_str().to_string()],
-                    &mut affected_sessions,
-                )?;
+                session_lookup_messages.push(placement.message_id.as_str().to_string());
             }
         }
+        session_lookup_messages.sort_unstable();
+        session_lookup_messages.dedup();
+        Self::collect_message_sessions(&tx, &session_lookup_messages, &mut affected_sessions)?;
         for source in &relations.source_replacements {
             source_paths.push(source.source_path.clone());
             if let Some(claim) = &source.resume_claim {
@@ -5140,135 +5162,165 @@ impl SqliteStore {
         }
         mark = trace.step("tx.activity_upsert", mark);
 
-        for source in &relations.source_replacements {
-            tx.execute(
-                "DELETE FROM source_membership WHERE source_path = ?1",
-                [&source.source_path],
-            )
-            .map_err(backend)?;
-            // 每源成员行可能上千，多行批量插入（同 hstry bulk_insert 模式，
-            // 3 列 × 100 行 = 300 参数）。
-            const _: () = assert!(3 * BULK_INSERT_ROWS_PER_CHUNK <= 950);
-            for chunk in source.entity_memberships.chunks(BULK_INSERT_ROWS_PER_CHUNK) {
-                let sql = format!(
-                    "INSERT INTO source_membership(source_path, message_id, document_id)
-                     VALUES {}",
-                    multi_row_values(chunk.len(), 3)
-                );
-                let params: Vec<&dyn rusqlite::ToSql> = chunk
-                    .iter()
-                    .flat_map(|membership| {
-                        let c0: &dyn rusqlite::ToSql = &source.source_path;
-                        let c1: &dyn rusqlite::ToSql = &membership.entity_id;
-                        let c2: &dyn rusqlite::ToSql = &membership.document_id;
-                        [c0, c1, c2]
-                    })
-                    .collect();
-                tx.execute(&sql, rusqlite::params_from_iter(params))
-                    .map_err(backend)?;
-            }
-            tx.execute(
-                "DELETE FROM source_placement_membership WHERE source_path = ?1",
-                [&source.source_path],
-            )
-            .map_err(backend)?;
-            const _: () = assert!(2 * BULK_INSERT_ROWS_PER_CHUNK <= 950);
-            for chunk in source.placement_ids.chunks(BULK_INSERT_ROWS_PER_CHUNK) {
-                let sql = format!(
-                    "INSERT INTO source_placement_membership(source_path, placement_id)
-                     VALUES {}",
-                    multi_row_values(chunk.len(), 2)
-                );
-                let rows: Vec<String> = chunk
-                    .iter()
-                    .map(|placement_id| placement_id.as_str().to_string())
-                    .collect();
-                let params: Vec<&dyn rusqlite::ToSql> = rows
-                    .iter()
-                    .flat_map(|placement_id| {
-                        let c0: &dyn rusqlite::ToSql = &source.source_path;
-                        let c1: &dyn rusqlite::ToSql = placement_id;
-                        [c0, c1]
-                    })
-                    .collect();
-                tx.execute(&sql, rusqlite::params_from_iter(params))
-                    .map_err(backend)?;
-            }
-            // 工具活动成员（v12）：与 placement 同一生命周期——先清旧声明，
-            // 本批带活动才写新行；无活动即清除（source 不再观察/移除）。
-            tx.execute(
-                "DELETE FROM tool_activity_membership WHERE source_path = ?1",
-                [&source.source_path],
-            )
-            .map_err(backend)?;
-            for activity_id in &source.activity_ids {
-                tx.execute(
+        // Every fixed-SQL statement in this loop uses `prepare_cached`: the loop
+        // body runs once per source in the batch (~180 per commit, 5,000 per
+        // full ingest) and `tx.execute` re-prepares its SQL on each call. Only
+        // the multi-row VALUES inserts stay on `execute`, because their SQL text
+        // varies with the chunk's row count and so cannot be reused.
+        {
+            let mut delete_entity_claims = tx
+                .prepare("DELETE FROM source_membership WHERE source_path = ?1")
+                .map_err(backend)?;
+            let mut delete_placement_claims = tx
+                .prepare("DELETE FROM source_placement_membership WHERE source_path = ?1")
+                .map_err(backend)?;
+            let mut delete_activity_claims = tx
+                .prepare("DELETE FROM tool_activity_membership WHERE source_path = ?1")
+                .map_err(backend)?;
+            let mut insert_activity_claim = tx
+                .prepare(
                     "INSERT INTO tool_activity_membership(source_path, activity_id)
                      VALUES(?1, ?2)",
-                    rusqlite::params![&source.source_path, activity_id],
                 )
                 .map_err(backend)?;
-            }
-            tx.execute(
-                "INSERT INTO source_scans(source_path, scanned_at_ms, len_bytes, fingerprint, provider_id)
-                 VALUES(?1, ?2, ?3, ?4, ?5)
-                 ON CONFLICT(source_path) DO UPDATE SET
-                     scanned_at_ms = excluded.scanned_at_ms,
-                     len_bytes = excluded.len_bytes,
-                     fingerprint = excluded.fingerprint,
-                     provider_id = COALESCE(excluded.provider_id, source_scans.provider_id)",
-                rusqlite::params![
-                    &source.source_path,
-                    unix_ms()?,
-                    source.len_bytes,
-                    source.fingerprint,
-                    source.provider_id,
-                ],
-            )
-            .map_err(backend)?;
-            if source.relation_complete {
-                tx.execute(
+            let mut upsert_scan = tx
+                .prepare(
+                    "INSERT INTO source_scans(
+                         source_path, scanned_at_ms, len_bytes, fingerprint, provider_id
+                     ) VALUES(?1, ?2, ?3, ?4, ?5)
+                     ON CONFLICT(source_path) DO UPDATE SET
+                         scanned_at_ms = excluded.scanned_at_ms,
+                         len_bytes = excluded.len_bytes,
+                         fingerprint = excluded.fingerprint,
+                         provider_id = COALESCE(
+                             excluded.provider_id, source_scans.provider_id
+                         )",
+                )
+                .map_err(backend)?;
+            let mut upsert_relation_scan = tx
+                .prepare(
                     "INSERT INTO source_relation_scans(source_path, relation_schema_version)
                      VALUES(?1, ?2)
                      ON CONFLICT(source_path) DO UPDATE SET
                          relation_schema_version = excluded.relation_schema_version",
-                    rusqlite::params![&source.source_path, RELATION_SCHEMA_VERSION],
                 )
                 .map_err(backend)?;
-            } else {
-                tx.execute(
-                    "DELETE FROM source_relation_scans WHERE source_path = ?1",
-                    [&source.source_path],
-                )
+            let mut delete_relation_scan = tx
+                .prepare("DELETE FROM source_relation_scans WHERE source_path = ?1")
                 .map_err(backend)?;
-            }
-            // Source-scoped Resume Metadata 声明（ADR-0009）：随 source replacement
-            // 同事务原子替换——先清旧声明，本批带声明才写新行；无声明
-            // （source 不再观察/移除）即清除，绝不残留旧声明。
-            tx.execute(
-                "DELETE FROM source_session_resume_claims WHERE source_path = ?1",
-                [&source.source_path],
-            )
-            .map_err(backend)?;
-            if let Some(claim) = &source.resume_claim {
-                tx.execute(
+            let mut delete_resume_claim = tx
+                .prepare("DELETE FROM source_session_resume_claims WHERE source_path = ?1")
+                .map_err(backend)?;
+            let mut insert_resume_claim = tx
+                .prepare(
                     "INSERT INTO source_session_resume_claims(
                          source_path, session_id, provider_id, provider_session_id,
                          provider_session_id_state, original_working_directory,
                          original_working_directory_state, pair_observed
                      ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                    rusqlite::params![
-                        &source.source_path,
-                        &claim.session_id,
-                        &claim.provider_id,
-                        &claim.provider_session_id,
-                        &claim.provider_session_id_state,
-                        &claim.original_working_directory,
-                        &claim.original_working_directory_state,
-                        i64::from(claim.pair_observed),
-                    ],
                 )
                 .map_err(backend)?;
+            for source in &relations.source_replacements {
+                delete_entity_claims
+                    .execute([&source.source_path])
+                    .map_err(backend)?;
+                // 每源成员行可能上千，多行批量插入（同 hstry bulk_insert 模式，
+                // 3 列 × 100 行 = 300 参数）。
+                const _: () = assert!(3 * BULK_INSERT_ROWS_PER_CHUNK <= 950);
+                for chunk in source.entity_memberships.chunks(BULK_INSERT_ROWS_PER_CHUNK) {
+                    let sql = format!(
+                        "INSERT INTO source_membership(source_path, message_id, document_id)
+                         VALUES {}",
+                        multi_row_values(chunk.len(), 3)
+                    );
+                    let params: Vec<&dyn rusqlite::ToSql> = chunk
+                        .iter()
+                        .flat_map(|membership| {
+                            let c0: &dyn rusqlite::ToSql = &source.source_path;
+                            let c1: &dyn rusqlite::ToSql = &membership.entity_id;
+                            let c2: &dyn rusqlite::ToSql = &membership.document_id;
+                            [c0, c1, c2]
+                        })
+                        .collect();
+                    tx.execute(&sql, rusqlite::params_from_iter(params))
+                        .map_err(backend)?;
+                }
+                delete_placement_claims
+                    .execute([&source.source_path])
+                    .map_err(backend)?;
+                const _: () = assert!(2 * BULK_INSERT_ROWS_PER_CHUNK <= 950);
+                for chunk in source.placement_ids.chunks(BULK_INSERT_ROWS_PER_CHUNK) {
+                    let sql = format!(
+                        "INSERT INTO source_placement_membership(source_path, placement_id)
+                         VALUES {}",
+                        multi_row_values(chunk.len(), 2)
+                    );
+                    let rows: Vec<String> = chunk
+                        .iter()
+                        .map(|placement_id| placement_id.as_str().to_string())
+                        .collect();
+                    let params: Vec<&dyn rusqlite::ToSql> = rows
+                        .iter()
+                        .flat_map(|placement_id| {
+                            let c0: &dyn rusqlite::ToSql = &source.source_path;
+                            let c1: &dyn rusqlite::ToSql = placement_id;
+                            [c0, c1]
+                        })
+                        .collect();
+                    tx.execute(&sql, rusqlite::params_from_iter(params))
+                        .map_err(backend)?;
+                }
+                // 工具活动成员（v12）：与 placement 同一生命周期——先清旧声明，
+                // 本批带活动才写新行；无活动即清除（source 不再观察/移除）。
+                delete_activity_claims
+                    .execute([&source.source_path])
+                    .map_err(backend)?;
+                for activity_id in &source.activity_ids {
+                    insert_activity_claim
+                        .execute(rusqlite::params![&source.source_path, activity_id])
+                        .map_err(backend)?;
+                }
+                upsert_scan
+                    .execute(rusqlite::params![
+                        &source.source_path,
+                        unix_ms()?,
+                        source.len_bytes,
+                        source.fingerprint,
+                        source.provider_id,
+                    ])
+                    .map_err(backend)?;
+                if source.relation_complete {
+                    upsert_relation_scan
+                        .execute(rusqlite::params![
+                            &source.source_path,
+                            RELATION_SCHEMA_VERSION
+                        ])
+                        .map_err(backend)?;
+                } else {
+                    delete_relation_scan
+                        .execute([&source.source_path])
+                        .map_err(backend)?;
+                }
+                // Source-scoped Resume Metadata 声明（ADR-0009）：随 source replacement
+                // 同事务原子替换——先清旧声明，本批带声明才写新行；无声明
+                // （source 不再观察/移除）即清除，绝不残留旧声明。
+                delete_resume_claim
+                    .execute([&source.source_path])
+                    .map_err(backend)?;
+                if let Some(claim) = &source.resume_claim {
+                    insert_resume_claim
+                        .execute(rusqlite::params![
+                            &source.source_path,
+                            &claim.session_id,
+                            &claim.provider_id,
+                            &claim.provider_session_id,
+                            &claim.provider_session_id_state,
+                            &claim.original_working_directory,
+                            &claim.original_working_directory_state,
+                            i64::from(claim.pair_observed),
+                        ])
+                        .map_err(backend)?;
+                }
             }
         }
 
