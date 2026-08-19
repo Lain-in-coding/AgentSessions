@@ -66,7 +66,12 @@ adapters know *how*. Depends on `agentsessions-domain` and
   `precision: unknown`.
 - Pagination model — offset inside cursor claims over a PINNED total order
   (search: bm25 + id tiebreak = `SORT_SCORE_DESC`; list: wire id ASC =
-  `SORT_WIRE_ID_ASC`). Ports have no offset parameter: `handle` over-fetches
+  `SORT_WIRE_ID_ASC`; recency browse: newest session activity DESC, sessions
+  without a provider timestamp last, wire id ASC tiebreak = `SORT_RECENCY_DESC`,
+  selected by `ListSort` on `AppRequest::List` and only valid with
+  `sessions_only`). The sort identifier is bound into the cursor, so a token
+  issued under one sort is rejected under another. Ports have no offset
+  parameter: `handle` over-fetches
   `offset + page + 1` (sentinel for has_more) and slices. Any cursor failure is
   an explicit error — never a silent restart from page one.
 - Context assembly loads one typed `SessionContextGraph` through

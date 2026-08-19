@@ -167,6 +167,14 @@ text, opaque Session payload, diagnostics, progress, or errors.
   `MAX(json_extract(catalog.payload, '$.timestamp'))` per canonical Session,
   truncated to `YYYY-MM-DD`, for the Human table 日期 column. No port/DTO/schema
   change; Robot/MCP output is unaffected (Human-mode only projection).
+- **Recency ordering**: `sessions_by_recency` (port `CatalogStore`) is one
+  aggregate statement — `LEFT JOIN message_placements` + the same `MAX(...)`
+  projection, `ORDER BY latest IS NULL ASC, latest DESC, c.id ASC LIMIT ?`.
+  Never one query per session. The full timestamp (not the truncated date)
+  crosses the port so the sort key is comparable and displayable; sessions whose
+  provider reports no timestamp are ordered last with `None`, never dropped and
+  never given an invented time. Lexical comparison assumes the canonical
+  `YYYY-MM-DDT…Z` shape the message payload contract stores.
 
 ## Session metadata search projection (schema v11)
 
