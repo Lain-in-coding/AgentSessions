@@ -32,7 +32,7 @@ h1 { margin: 8px 0 0; font: 650 clamp(1.8rem, 4vw, 3.6rem)/0.95 var(--sans); let
 .status { min-width: 15rem; padding: 12px 14px; border: 1px solid var(--line); background: var(--panel); color: var(--muted); font: 0.78rem/1.35 var(--mono); }
 .status.ok { color: var(--signal); border-color: var(--signal-dim); }
 .status.error { color: var(--danger); }
-.toolbar { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; gap: 10px; margin: 24px 0 14px; }
+.toolbar { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto auto; gap: 10px; margin: 24px 0 14px; }
 input, select, button { border: 1px solid var(--line); border-radius: 3px; color: var(--ink); background: var(--panel); font: inherit; }
 input, select { min-height: 40px; padding: 0 11px; }
 input:focus-visible, select:focus-visible, button:focus-visible { outline: 2px solid var(--signal); outline-offset: 2px; }
@@ -99,6 +99,7 @@ pre { max-height: 20rem; overflow: auto; padding: 13px; border: 1px solid var(--
       </select>
       <select id="provider" aria-label="Provider"><option value="">All providers</option></select>
       <button id="searchButton" class="primary" type="button">Search</button>
+      <button id="recentButton" class="quiet" type="button">Recent sessions</button>
     </div>
     <div class="filters">
       <label>Page size <input id="limit" type="number" value="20" min="1" max="100"></label>
@@ -108,8 +109,8 @@ pre { max-height: 20rem; overflow: auto; padding: 13px; border: 1px solid var(--
   </section>
 
   <div class="rule"></div>
-  <div class="meta-row"><span id="resultMeta">Waiting for a query.</span><span id="retrievalMode" class="retrieval"></span></div>
-  <section id="results" class="results" aria-live="polite"><div class="empty">Type a query to inspect the catalog.</div></section>
+  <div class="meta-row"><span id="resultMeta">Loading recent sessions…</span><span id="retrievalMode" class="retrieval"></span></div>
+  <section id="results" class="results" aria-live="polite"><div class="empty">Loading recent sessions…</div></section>
   <div class="actions"><button id="loadMore" class="quiet" type="button" disabled>Load next page</button><button id="handoff" class="quiet" type="button" disabled>Preview handoff pack</button></div>
 
   <section id="contextPanel" aria-label="Session context">
@@ -132,6 +133,9 @@ const authHeaders = {'Authorization': 'Bearer ' + token};
 let activeSession = '';
 let nextCursor = null;
 let lastQuery = '';
+// Which use case issued nextCursor. A cursor is bound to its sort dimension,
+// so "Load next page" has to return it to the same endpoint.
+let listing = 'sessions';
 
 function payload(body) { return body && body.data ? body.data : (body || {}); }
 function setStatus(text, kind) {
@@ -161,6 +165,9 @@ async function init() {
     const status = payload(statusBody);
     setStatus('Connected · generation ' + (status.generation == null ? '?' : status.generation), 'ok');
     await loadProviders();
+    // The first question a user has is "what was I working on?", so the page
+    // lands on recent sessions instead of an empty prompt.
+    await loadRecent();
   } catch (error) { setStatus('Unavailable · ' + error.message, 'error'); }
 }
 async function loadProviders() {
@@ -191,12 +198,36 @@ async function doSearch(cursor) {
     const body = await api('/api/search?' + queryParams(cursor));
     const data = payload(body);
     renderHits(data.hits || [], Boolean(cursor));
+    listing = 'search';
     nextCursor = (body.page && body.page.next_cursor) || null;
     document.getElementById('loadMore').disabled = !nextCursor;
     text(document.getElementById('retrievalMode'), 'retrieval_mode: ' + (data.retrieval_mode || 'lexical'));
     text(document.getElementById('resultMeta'), (data.hits || []).length + ' hits · generation ' + (data.generation == null ? '?' : data.generation));
     document.getElementById('handoff').disabled = false;
   } catch (error) { renderError(error.message); }
+}
+// Recent sessions: `list --sessions --sort recency` over the same dispatch the
+// CLI uses. Newest last activity first; sessions whose provider reported no
+// timestamp come last and render their date as a dash — never invented.
+async function loadRecent(cursor) {
+  if (!cursor) clear(document.getElementById('results'));
+  try {
+    const params = new URLSearchParams({limit: document.getElementById('limit').value});
+    if (cursor) params.set('cursor', cursor);
+    const body = await api('/api/sessions?' + params);
+    const data = payload(body);
+    const entries = data.entries || [];
+    renderSessions(entries, Boolean(cursor));
+    listing = 'sessions';
+    nextCursor = (body.page && body.page.next_cursor) || null;
+    document.getElementById('loadMore').disabled = !nextCursor;
+    text(document.getElementById('retrievalMode'), 'sort: recency');
+    text(document.getElementById('resultMeta'), entries.length + ' sessions · generation ' + (data.generation == null ? '?' : data.generation));
+  } catch (error) { renderError(error.message); }
+}
+function loadNextPage() {
+  if (!nextCursor) return;
+  if (listing === 'sessions') { loadRecent(nextCursor); } else { doSearch(nextCursor); }
 }
 function renderError(message) {
   const node = document.createElement('div'); node.className = 'empty'; text(node, 'The catalog could not answer: ' + message); clear(document.getElementById('results')); document.getElementById('results').appendChild(node);
@@ -213,6 +244,22 @@ function renderHits(hits, append) {
     const body = document.createElement('div'); body.className = 'hit-text'; text(body, hit.text || '');
     card.append(head, body);
     if (hit.session_id) { const session = document.createElement('div'); session.className = 'hit-session'; text(session, 'session · ' + hit.session_id); card.appendChild(session); }
+    results.appendChild(card);
+  }
+}
+// A recency row is a session, so the card opens its context directly. The
+// sort key (last activity) is shown where a search card shows its score;
+// `null` renders as a dash rather than a guessed time.
+function renderSessions(entries, append) {
+  const results = document.getElementById('results');
+  if (!append) clear(results);
+  if (!entries.length && !append) { const empty = document.createElement('div'); empty.className = 'empty'; text(empty, 'No sessions indexed yet. Run: asg sync --discover'); results.appendChild(empty); return; }
+  for (const entry of entries) {
+    const card = button('', 'hit', () => loadContext(entry.id || ''));
+    const head = document.createElement('div'); head.className = 'hit-head';
+    const id = document.createElement('span'); text(id, entry.id || 'unknown');
+    const last = document.createElement('span'); last.className = 'hit-score'; text(last, entry.latest_activity || '—'); head.append(id, last);
+    card.append(head);
     results.appendChild(card);
   }
 }
@@ -252,8 +299,9 @@ async function previewHandoff() {
   try { showPreview(payload(await api('/api/handoff?q=' + encodeURIComponent(lastQuery)))); } catch (error) { showPreview({error: error.message}); }
 }
 document.getElementById('searchButton').addEventListener('click', () => doSearch());
-document.getElementById('query').addEventListener('keydown', event => { if (event.key === 'Enter') doSearch(); });
-document.getElementById('loadMore').addEventListener('click', () => doSearch(nextCursor));
+document.getElementById('recentButton').addEventListener('click', () => loadRecent());
+document.getElementById('query').addEventListener('keydown', event => { if (event.key === 'Enter') { if (document.getElementById('query').value.trim()) { doSearch(); } else { loadRecent(); } } });
+document.getElementById('loadMore').addEventListener('click', loadNextPage);
 document.getElementById('handoff').addEventListener('click', previewHandoff);
 document.getElementById('refreshContext').addEventListener('click', refreshContext);
 document.getElementById('resumePreview').addEventListener('click', previewResume);
