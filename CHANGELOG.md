@@ -24,6 +24,15 @@ assets. Everything below shipped in `0.1.0`.
   uninstall are idempotent and refuse unrelated aliases.
 - `handoff <query>` CLI subcommand — deterministic handoff-pack/v1 generation
   with evidence/inference separation and budget truncation.
+- `--output markdown` — the handoff pack's Markdown projection, which the pack
+  schema had always declared ("JSON is authoritative; the Markdown form is a
+  deterministic projection of this structure"). Byte-reproducible for a given
+  generation/query/budget. Defined only for `handoff`; every other command
+  refuses the mode instead of falling back, and it cannot be combined with
+  `--robot`.
+- `--out <path>` — write a command's result payload to a file instead of stdout.
+  Never overwrites an existing path (which also means it never follows a symlink
+  at the target); a failed run leaves no file. Refused for `mcp`, `tui`, `serve`.
 - `resume <session-id>` CLI subcommand — dry-run by default (prints the
   provider command, original working directory, and permission mode);
   `--yes` spawns the provider in that directory. Providers whose resume

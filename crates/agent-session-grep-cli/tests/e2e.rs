@@ -3081,6 +3081,236 @@ fn handoff_redacts_secrets_in_evidence() {
     assert!(data["redaction"]["redacted_count"].as_u64().unwrap_or(0) >= 1);
 }
 
+/// M3-7：`--output markdown` 在真实二进制上产出 handoff pack 的 Markdown 投影，
+/// 并且同一 pack 两次运行逐字节一致（Markdown 的确定性建立在 pack 的确定性上）。
+#[test]
+fn handoff_markdown_output_is_byte_deterministic_across_runs() {
+    let (dir, db) = temp_db("handoff-md");
+    let (fixture_path, _, _) = write_context_fixture(dir.path());
+    let ingest = run(&db, &["ingest", &fixture_path]);
+    assert!(
+        ingest.status.success(),
+        "ingest failed: {}",
+        stdout(&ingest)
+    );
+
+    let first = Command::new(BIN)
+        .args(["--db", &db, "--output", "markdown", "handoff", "ctx"])
+        .output()
+        .expect("spawn");
+    assert!(
+        first.status.success(),
+        "markdown handoff: {}",
+        stdout(&first)
+    );
+    let second = Command::new(BIN)
+        .args(["--db", &db, "--output", "markdown", "handoff", "ctx"])
+        .output()
+        .expect("spawn");
+    assert!(second.status.success());
+    assert_eq!(
+        first.stdout, second.stdout,
+        "markdown projection must be byte-identical across runs"
+    );
+
+    let markdown = stdout(&first);
+    assert!(markdown.starts_with("# Handoff pack "), "{markdown}");
+    for section in ["## Matched sessions", "## Evidence", "## Inference"] {
+        assert!(markdown.contains(section), "missing {section}:\n{markdown}");
+    }
+    // Markdown 是人类面投影，不得掺入协议 envelope 的字段名。
+    for envelope_key in [
+        "\"schema_version\"",
+        "\"frame_type\"",
+        "\"request_id\"",
+        "\"ok\":",
+    ] {
+        assert!(
+            !markdown.contains(envelope_key),
+            "envelope key {envelope_key} leaked into markdown:\n{markdown}"
+        );
+    }
+    // 同一 pack 的 pack_id 在 json 面与 markdown 面必须是同一个值（同源投影）。
+    let json = parse_first_line(&run(&db, &["handoff", "ctx"]));
+    let pack_id = json["data"]["pack_id"].as_str().expect("pack_id");
+    assert!(markdown.contains(pack_id), "{markdown}");
+}
+
+/// `--output markdown` 只对 handoff 有定义：别的命令必须显式拒绝
+/// （invalid_request / exit 2），不得静默退回 human 或 json。
+#[test]
+fn markdown_output_is_refused_for_commands_without_a_projection() {
+    let (_dir, db) = temp_db("md-refuse");
+    create_empty_store(&db);
+    for command in [
+        vec!["status"],
+        vec!["search", "anything"],
+        vec!["list"],
+        vec!["providers"],
+        vec!["doctor"],
+        vec!["config", "paths"],
+    ] {
+        let mut args = vec!["--db", &db, "--output", "markdown"];
+        args.extend(command.iter().copied());
+        let out = Command::new(BIN).args(&args).output().expect("spawn");
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "{command:?} must refuse markdown: {}",
+            stdout(&out)
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("invalid_request") && stderr.contains("only defined for handoff"),
+            "{command:?} refusal must name the reason: {stderr}"
+        );
+        assert!(
+            stdout(&out).is_empty(),
+            "{command:?} must not emit a payload"
+        );
+    }
+}
+
+/// M3-7：`--out <path>` 把结果载荷写进文件；stdout 保持空，完成诊断走 stderr。
+/// 已存在的路径永不被覆盖，失败的运行不留下文件。
+#[test]
+fn out_flag_writes_payload_to_a_file_and_never_overwrites() {
+    let (dir, db) = temp_db("out-flag");
+    let (fixture_path, _, _) = write_context_fixture(dir.path());
+    let ingest = run(&db, &["ingest", &fixture_path]);
+    assert!(
+        ingest.status.success(),
+        "ingest failed: {}",
+        stdout(&ingest)
+    );
+    let target = dir.path().join("pack.md");
+    let target_str = target.to_string_lossy().into_owned();
+
+    let out = Command::new(BIN)
+        .args([
+            "--db",
+            &db,
+            "--output",
+            "markdown",
+            "--out",
+            &target_str,
+            "handoff",
+            "ctx",
+        ])
+        .output()
+        .expect("spawn");
+    assert!(out.status.success(), "--out failed: {}", stdout(&out));
+    assert!(
+        stdout(&out).is_empty(),
+        "payload went to the file, so stdout must stay empty: {}",
+        stdout(&out)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("wrote "), "completion diagnostic: {stderr}");
+    let written = std::fs::read_to_string(&target).expect("file written");
+    assert!(written.starts_with("# Handoff pack "), "{written}");
+
+    // 文件内容与 stdout 版本逐字节相同（`--out` 只换落点，不换字节）。
+    let piped = Command::new(BIN)
+        .args(["--db", &db, "--output", "markdown", "handoff", "ctx"])
+        .output()
+        .expect("spawn");
+    assert_eq!(piped.stdout, written.as_bytes());
+
+    // 重跑同一路径：拒绝覆盖（exit 2），已有内容不变。
+    let again = Command::new(BIN)
+        .args([
+            "--db",
+            &db,
+            "--output",
+            "markdown",
+            "--out",
+            &target_str,
+            "handoff",
+            "ctx",
+        ])
+        .output()
+        .expect("spawn");
+    assert_eq!(again.status.code(), Some(2), "overwrite must be refused");
+    assert!(
+        String::from_utf8_lossy(&again.stderr).contains("never overwrites"),
+        "{}",
+        String::from_utf8_lossy(&again.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&target).expect("still readable"),
+        written
+    );
+
+    // 失败的命令不留下文件（错误面与不给 --out 时一致）。
+    let missing = dir.path().join("never-created.json");
+    let failed = Command::new(BIN)
+        .args([
+            "--db",
+            &db,
+            "--robot",
+            "--out",
+            &missing.to_string_lossy(),
+            "get",
+            "not-a-valid-id",
+        ])
+        .output()
+        .expect("spawn");
+    assert!(!failed.status.success());
+    assert!(
+        !missing.exists(),
+        "a failed run must not leave a partial file"
+    );
+    // 错误 envelope 仍在 stdout 上（契约 §6 不因 --out 改变）。
+    assert_eq!(parse_first_line(&failed)["ok"], false);
+}
+
+/// `--out` 对 json 面同样有效：机器调用方也能直接落盘一份 envelope。
+#[test]
+fn out_flag_also_exports_the_robot_envelope() {
+    let (dir, db) = temp_db("out-json");
+    create_empty_store(&db);
+    let target = dir.path().join("status.json");
+    let out = Command::new(BIN)
+        .args([
+            "--db",
+            &db,
+            "--robot",
+            "--out",
+            &target.to_string_lossy(),
+            "status",
+        ])
+        .output()
+        .expect("spawn");
+    assert!(out.status.success(), "{}", stdout(&out));
+    assert!(stdout(&out).is_empty());
+    let written = std::fs::read_to_string(&target).expect("file written");
+    let frame: serde_json::Value =
+        serde_json::from_str(written.trim_end()).expect("valid envelope");
+    assert_envelope_shape(&frame, true);
+}
+
+/// 整段接管 stdout 的命令没有一次性载荷可写，`--out` 对它们是用法错误。
+#[test]
+fn out_flag_is_refused_for_stdout_owning_commands() {
+    let (dir, db) = temp_db("out-refuse");
+    create_empty_store(&db);
+    for command in ["mcp", "tui", "serve"] {
+        let target = dir.path().join(format!("{command}.out"));
+        let out = Command::new(BIN)
+            .args(["--db", &db, "--out", &target.to_string_lossy(), command])
+            .output()
+            .expect("spawn");
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "{command} must refuse --out: {}",
+            stdout(&out)
+        );
+        assert!(!target.exists(), "{command} must not create the file");
+    }
+}
+
 #[test]
 fn jsonl_output_is_one_complete_frame_per_line() {
     let (_dir, db) = temp_db("env-jsonl");

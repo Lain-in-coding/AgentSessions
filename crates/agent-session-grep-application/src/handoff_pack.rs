@@ -1182,6 +1182,164 @@ mod tests {
         );
     }
 
+    /// A pack built from a fixture that actually exercises the risky fields:
+    /// three absolute-path tool targets (Windows drive, POSIX, UNC), a secret in
+    /// the evidence text, and a provider-attributed session. The JSON privacy
+    /// test above originally missed a real leak because its fixture had **no**
+    /// tool activity at all; the Markdown projection must not be pinned by that
+    /// same blind fixture.
+    fn pack_with_risky_fields() -> HandoffPack {
+        let hits = vec![hit(
+            "msg_v1_aaa",
+            1.0,
+            "deploy key sk-ant-api03-1234567890abcdef then read the file",
+        )];
+        let locs = locations(&hits);
+        let activities = vec![
+            serde_json::json!({
+                "activity_id": "act-1", "message_id": "msg_v1_aaa", "kind": "file",
+                "actor": "assistant", "name": "Read", "status": "success",
+                "target": "C:\\placeholder\\project\\README.md",
+            }),
+            serde_json::json!({
+                "activity_id": "act-2", "message_id": "msg_v1_aaa", "kind": "file",
+                "actor": "assistant", "name": "Edit", "status": "success",
+                "target": "/placeholder/project/src/lib.rs",
+            }),
+            serde_json::json!({
+                "activity_id": "act-3", "message_id": "msg_v1_aaa", "kind": "file",
+                "actor": "assistant", "name": "Read", "status": "success",
+                "target": "\\\\server\\share\\notes.md",
+            }),
+            serde_json::json!({
+                "activity_id": "act-4", "message_id": "msg_v1_aaa", "kind": "file",
+                "actor": "assistant", "name": "Read", "status": "success",
+                "target": "/placeholder/project/session.jsonl",
+            }),
+        ];
+        let providers = vec![SessionProvider {
+            session_id: "ses_v1_abc".to_string(),
+            provider_id: Some("claude-code".to_string()),
+        }];
+        let mut input = default_input(&hits, &locs);
+        input.tool_activities = &activities;
+        input.session_providers = &providers;
+        generate_deterministic(input)
+    }
+
+    /// 隐私契约（Markdown 面）：投影不得泄漏 JSON 没有泄漏的东西。
+    ///
+    /// 与上面那条 JSON 测试同一教训——fixture 必须**真的**带上有风险的字段，
+    /// 否则断言看不到任何东西。这里的 fixture 覆盖三种绝对路径形态、一条
+    /// transcript 路径与一个密钥。
+    #[test]
+    fn markdown_projection_leaks_no_path_or_secret() {
+        let pack = pack_with_risky_fields();
+        let markdown = crate::handoff_markdown::render(&pack);
+
+        // 目录链、机器名/共享名一律不得出现。
+        for leaked in ["placeholder", "server", "share", "src", "sk-ant-"] {
+            assert!(
+                !markdown.contains(leaked),
+                "markdown leaked {leaked}:\n{markdown}"
+            );
+        }
+        // 也不得出现任何"绝对路径形状"：盘符前缀、UNC 前缀、POSIX 绝对路径段。
+        assert!(!markdown.contains("\\\\"), "UNC prefix in:\n{markdown}");
+        assert!(
+            !markdown.lines().any(line_has_windows_drive_path),
+            "windows drive path in:\n{markdown}"
+        );
+        // transcript 文件名只以裸 basename 出现，前面不带任何分隔符。
+        //
+        // 这里刻意**不**照抄 JSON 那条测试的 `!contains(".jsonl")` 全盘禁令：
+        // 一个裸 `session.jsonl` 不是 raw transcript path —— 威胁模型禁的是目录
+        // 链（机器名、用户名、无关项目），而它已经被 `redact_activity_target`
+        // 去掉了。文件名本身是有价值的证据（"它读了 session.jsonl"），删掉它
+        // 保护不了任何东西。JSON 那条全盘禁令之所以还没被这一点绊倒，只是因为
+        // 它的 fixture 根本没有 tool activity，触不到这个分支。
+        assert!(markdown.contains("session.jsonl"), "{markdown}");
+        assert!(
+            !markdown.contains("/session.jsonl") && !markdown.contains("\\session.jsonl"),
+            "transcript path (not just its name) leaked:\n{markdown}"
+        );
+        // basename 仍在——工具活动因此仍然可读。
+        for kept in ["README.md", "lib.rs", "notes.md"] {
+            assert!(markdown.contains(kept), "markdown dropped {kept}");
+        }
+        // 密钥已被生成器替换，Markdown 渲染的是替换后的文本。
+        assert!(markdown.contains("[redacted:api_key]"), "{markdown}");
+    }
+
+    /// Markdown 面的字段集不得超出 JSON 面：逐个字符串值检查它在 pack JSON 里
+    /// 也存在（basename 化后的 target 亦然）。这条比"黑名单几个已知泄漏"更强，
+    /// 因为它不依赖我们事先猜到泄漏长什么样。
+    #[test]
+    fn markdown_shows_no_string_value_absent_from_the_json() {
+        let pack = pack_with_risky_fields();
+        let markdown = crate::handoff_markdown::render(&pack);
+        let json = serde_json::to_string(&pack).unwrap();
+        for value in collect_strings(&serde_json::to_value(&pack).unwrap()) {
+            // 只检查"足够独特"的值：短标记（role、status、枚举）会与散文撞车。
+            if value.len() < 8 {
+                continue;
+            }
+            if markdown.contains(&value) {
+                assert!(
+                    json.contains(&value),
+                    "markdown shows {value:?} which the JSON does not"
+                );
+            }
+        }
+    }
+
+    /// Markdown 的确定性由 pack 的确定性驱动：同一 generation/query/budget 下
+    /// 两次独立生成 → 同一 pack → 同一 Markdown 字节。
+    #[test]
+    fn markdown_is_byte_reproducible_across_independent_generations() {
+        let first = crate::handoff_markdown::render(&pack_with_risky_fields());
+        let second = crate::handoff_markdown::render(&pack_with_risky_fields());
+        assert_eq!(first.as_bytes(), second.as_bytes());
+        assert!(!first.contains('\r'), "CRLF would make this platform-bound");
+    }
+
+    /// 一个 pack 的 JSON round-trip 后渲染出的 Markdown 与直接渲染完全一致。
+    /// CLI 的 markdown 模式正是走 JSON → pack → Markdown 这条路，这条测试钉住
+    /// 两条路不分叉（"JSON is authoritative" 的可执行形式）。
+    #[test]
+    fn markdown_from_serialized_pack_matches_markdown_from_the_pack() {
+        let pack = pack_with_risky_fields();
+        let direct = crate::handoff_markdown::render(&pack);
+        let json = serde_json::to_value(&pack).unwrap();
+        let round_tripped: HandoffPack = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            crate::handoff_markdown::render(&round_tripped).as_bytes(),
+            direct.as_bytes()
+        );
+    }
+
+    /// `[A-Za-z]:[\\/]` —— Windows 绝对路径的形状。
+    fn line_has_windows_drive_path(line: &str) -> bool {
+        let bytes = line.as_bytes();
+        bytes
+            .windows(3)
+            .any(|w| w[0].is_ascii_alphabetic() && w[1] == b':' && (w[2] == b'\\' || w[2] == b'/'))
+    }
+
+    fn collect_strings(value: &serde_json::Value) -> Vec<String> {
+        let mut out = Vec::new();
+        fn walk(value: &serde_json::Value, out: &mut Vec<String>) {
+            match value {
+                serde_json::Value::String(s) => out.push(s.clone()),
+                serde_json::Value::Array(items) => items.iter().for_each(|v| walk(v, out)),
+                serde_json::Value::Object(map) => map.values().for_each(|v| walk(v, out)),
+                _ => {}
+            }
+        }
+        walk(value, &mut out);
+        out
+    }
+
     fn assert_no_path_keys(value: &serde_json::Value) {
         match value {
             serde_json::Value::Object(map) => {
