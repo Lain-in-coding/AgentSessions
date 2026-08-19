@@ -214,8 +214,12 @@ Behaviour worth knowing before you rely on it:
   `available: false` with an `unavailable_reason`. That is a success, not an
   error: history stays searchable even when it cannot be resumed. No command is
   ever invented.
-- `permission_mode_verified` is always `false` — the metadata does not carry a
-  real permission mode, and the tool will not claim otherwise.
+- `permission_mode` is always `null` and `permission_mode_verified` is always
+  `false`, for every provider. That is the policy, not a gap: resume never adds
+  a permission flag of its own, and the read-only resume metadata does not carry
+  the provider's real approval mode, so the tool will not claim to have checked
+  it. Read `permission_mode: null` as "no permission flag was added", not as
+  "confirmed to run in the default mode".
 
 ### `hook <event>`
 

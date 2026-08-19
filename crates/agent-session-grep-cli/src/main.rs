@@ -2397,9 +2397,12 @@ fn dispatch(
                 },
                 "working_directory": preview.descriptor.working_directory,
                 "permission_mode": preview.descriptor.permission_mode,
-                // 诚实口径：permission mode 恒未核验（metadata/配置不携带真实
-                // 模式），如实标注，绝不宣称已校验（audit P1-2）。
-                "permission_mode_verified": false,
+                // 恒 false，且是策略而非缺口：我们不加任何权限 flag，也不宣称
+                // 核验过 provider 会用什么权限模式（只读 Resume Metadata 里
+                // 没有这个事实）。理由与消费口径见
+                // `resume::RESUME_PERMISSION_MODE_VERIFIED`。
+                "permission_mode_verified":
+                    agent_session_grep_application::resume::RESUME_PERMISSION_MODE_VERIFIED,
                 "unavailable_reason": preview.unavailable_reason,
                 "executed": false,
             });
