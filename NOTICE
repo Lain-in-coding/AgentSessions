@@ -23,10 +23,10 @@ adapted carry the following attributions:
 | Source project | License | Used for | Classification |
 |---|---|---|---|
 | ctx (ctxrs) | Apache-2.0 | WAL PRAGMA group, doctor integrity_check; CJK bigram tokenization (adapted); hybrid RRF k=60 reference (adapted) | direct-copy / adapt |
-| agf | MIT | bounded reader (read_head_tail / char_prefix); shell quoting / PowerShell wrapper | direct-copy |
+| agf | MIT | bounded reader (read_head_tail / char_prefix); shell quoting / PowerShell wrapper; parallel worker-per-unit scan funneled back over a channel (adapted as the bounded sync parse pool in `crates/agent-session-grep-cli/src/main.rs`) | direct-copy / adapt |
 | sessiongrep | Apache-2.0 | two-stage retrieval shape: FTS recall of bm25-ranked candidates, then rerank in Rust (adapted) | adapt |
 | Recall (samzong) | MIT | tool-activity target priority chain (adapted); Candle E5 embedding pipeline shape (adapted: BertModel + mean pooling + L2 + query:/passage: prefixes) | adapt |
-| fast-resume | MIT | jsonl_health source classification (adapted, retains upstream copyright line in code); opencode schema queries; pi/grok/kimi extraction approach | adapt |
+| fast-resume | MIT | jsonl_health source classification (adapted, retains upstream copyright line in code); opencode schema queries; pi/grok/kimi extraction approach; drop-original-sender channel drain and env-gated phase tracing (adapted as `ASG_SYNC_TRACE`) | adapt |
 | hstry | MIT | hermes session JSON shapes and per-message extraction; transactional migration runner concepts | adapt |
 | memex | MIT | layered-dedup UNIQUE-constraint design (adapted as the placement constraint `UNIQUE(session_id, document_id, source_ordinal)`) | adapt |
 | agentsview | MIT | aider line-prefix role reconstruction | adapt |

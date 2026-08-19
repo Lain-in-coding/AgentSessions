@@ -5002,6 +5002,85 @@ mod tests {
     use agent_session_grep_application::{EvidenceSpanDto, StagedMessage};
     use agent_session_grep_ports::ParseReport;
 
+    /// `parallel_map_indexed` must return results in index order and invoke
+    /// `on_ready` in index order, no matter which worker finishes first.
+    ///
+    /// This is the property the whole parallel sync path rests on: message
+    /// identity for providers that emit an empty `native_id` is derived per
+    /// document, so if completion order ever leaked into the writer's view of
+    /// the batch, ids and "source N of M" diagnostics would shift between runs.
+    /// Reversed sleeps make completion order the exact opposite of index order,
+    /// so an implementation that forwarded results as they landed would fail.
+    #[test]
+    fn parallel_map_indexed_restores_index_order_despite_completion_order() {
+        let len = 24;
+        let ready = std::sync::Mutex::new(Vec::new());
+        let out = parallel_map_indexed(
+            len,
+            |index| {
+                // Later indices finish first.
+                std::thread::sleep(std::time::Duration::from_millis(((len - index) * 2) as u64));
+                Ok(index * 10)
+            },
+            |index, value: &usize| ready.lock().unwrap().push((index, *value)),
+        )
+        .expect("no unit fails");
+
+        let expected: Vec<usize> = (0..len).map(|index| index * 10).collect();
+        assert_eq!(out, expected, "results must come back in index order");
+        let expected_ready: Vec<(usize, usize)> =
+            (0..len).map(|index| (index, index * 10)).collect();
+        assert_eq!(
+            *ready.lock().unwrap(),
+            expected_ready,
+            "on_ready must fire in index order, not completion order"
+        );
+    }
+
+    /// The lowest-index failure must win, matching a serial loop's early return,
+    /// so the same corpus always reports the same first error.
+    #[test]
+    fn parallel_map_indexed_reports_the_lowest_index_error() {
+        // Index 3 and index 9 both fail; index 9 finishes first.
+        let result = parallel_map_indexed(
+            16,
+            |index| {
+                if index == 9 {
+                    return Err(CliError::usage("late failure"));
+                }
+                if index == 3 {
+                    std::thread::sleep(std::time::Duration::from_millis(40));
+                    return Err(CliError::usage("early failure"));
+                }
+                Ok(index)
+            },
+            |_, _: &usize| {},
+        );
+        let error = result.expect_err("two units fail");
+        assert!(
+            error.0.message.contains("early failure"),
+            "expected the lowest-index error, got {:?}",
+            error.0.message
+        );
+    }
+
+    /// A single unit takes the inline path; it must still behave identically.
+    #[test]
+    fn parallel_map_indexed_handles_zero_and_one_unit() {
+        let empty = parallel_map_indexed(0, |_| Ok(1usize), |_, _: &usize| {}).unwrap();
+        assert!(empty.is_empty());
+
+        let ready = std::sync::Mutex::new(Vec::new());
+        let one = parallel_map_indexed(
+            1,
+            |index| Ok(index + 7),
+            |index, value: &usize| ready.lock().unwrap().push((index, *value)),
+        )
+        .unwrap();
+        assert_eq!(one, vec![7]);
+        assert_eq!(*ready.lock().unwrap(), vec![(0usize, 7usize)]);
+    }
+
     fn staged_batch(
         messages: Vec<StagedMessage>,
         skipped: usize,
