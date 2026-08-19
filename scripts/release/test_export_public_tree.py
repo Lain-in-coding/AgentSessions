@@ -72,6 +72,42 @@ class PublicTreeExportTests(unittest.TestCase):
                 self.assertNotIn(excluded, paths)
             self.assertEqual(sorted(paths), sorted(siblings))
 
+    def test_every_dated_go_no_go_record_is_excluded(self) -> None:
+        """A go/no-go record is excluded by date prefix, not by being listed.
+
+        The exclusion list previously named one dated record explicitly, so every
+        later rehearsal would have published its own decision draft. The failure
+        is silent -- the export succeeds and the internal record ships -- so the
+        rule is pinned here rather than relying on someone remembering to extend
+        a list.
+        """
+        with tempfile.TemporaryDirectory() as temp_name:
+            repo = Path(temp_name)
+            import subprocess
+
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            subprocess.run(
+                ["git", "-C", str(repo), "config", "user.email", "test@example.invalid"],
+                check=True,
+            )
+            subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test"], check=True)
+            dated = [
+                "docs/release/go-no-go.2026-08-16.md",
+                "docs/release/go-no-go.2026-08-19.md",
+                "docs/release/go-no-go.2031-12-31.md",
+            ]
+            keep = ["docs/release/rehearsal-runbook.md"]
+            for relative in [*dated, *keep]:
+                path = repo / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(relative, encoding="utf-8")
+            subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+            subprocess.run(["git", "-C", str(repo), "commit", "-qm", "fixture"], check=True)
+            paths = export_public_tree.tracked_paths(repo, "HEAD")
+            for record in dated:
+                self.assertNotIn(record, paths, f"dated record shipped: {record}")
+            self.assertEqual(paths, keep)
+
     def test_scan_export_uses_the_public_profile(self) -> None:
         # An internal tracker reference is invisible to the default profile but
         # must fail the export, so the exporter has to select `public`.

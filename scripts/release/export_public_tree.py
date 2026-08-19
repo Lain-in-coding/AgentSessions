@@ -62,16 +62,23 @@ EXCLUDED_PREFIXES = (
 # sign-off block, a history-rewrite runbook that does not apply to the published
 # history, and an architecture review whose own body records itself as not
 # approved.
+#
+# Dated go/no-go records are matched by prefix rather than listed individually.
+# The list previously named `go-no-go.2026-08-16.md` explicitly, which meant
+# every later record would have shipped by default -- the exclusion would decay
+# silently each time a release was rehearsed, and the failure mode is publishing
+# an internal decision draft, not a build error.
 EXCLUDED_FILES = (
     "scripts/evidence/privacy_scan.py",
     "scripts/evidence/test_privacy_scan.py",
     "scripts/release/export_public_tree.py",
     "scripts/release/test_export_public_tree.py",
-    "docs/release/go-no-go.2026-08-16.md",
     "docs/release/go-no-go.template.md",
     "docs/operations/PUBLIC-HISTORY-SCRUB.md",
     "docs/architecture/R0-ARCHITECTURE-REVIEW.md",
 )
+# Individually-dated internal records: any `docs/release/go-no-go.<date>.md`.
+EXCLUDED_FILE_PREFIXES = ("docs/release/go-no-go.2",)
 MANIFEST_NAME = "PUBLIC-TREE-MANIFEST.json"
 
 
@@ -96,7 +103,9 @@ def tracked_paths(repo: Path, commit: str) -> list[str]:
     return [
         path
         for path in raw
-        if not path.startswith(EXCLUDED_PREFIXES) and path not in EXCLUDED_FILES
+        if not path.startswith(EXCLUDED_PREFIXES)
+        and path not in EXCLUDED_FILES
+        and not path.startswith(EXCLUDED_FILE_PREFIXES)
     ]
 
 
@@ -147,6 +156,7 @@ def export_tree(
         "source_commit": commit,
         "excluded_prefixes": list(EXCLUDED_PREFIXES),
         "excluded_files": list(EXCLUDED_FILES),
+        "excluded_file_prefixes": list(EXCLUDED_FILE_PREFIXES),
         "file_count": len(files),
         "files": files,
     }
