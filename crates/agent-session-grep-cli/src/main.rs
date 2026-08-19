@@ -1303,9 +1303,12 @@ fn subcommand_help_text(cmd: &str) -> &'static str {
                    \u{20}  源很多时用它——几千个路径展开后会超出命令行长度上限。\n\
                    sync --discover：自动发现各 provider 数据根（~/.claude/projects、~/.codex/sessions 等）下的源并同步；\n\
                    \u{20}  是不是源由各 provider 自己的 probe 判定，不按扩展名（SQLite/JSON/Markdown transcript 同样能被发现）。\n\
+                   sync --provider <id> <file>...：点名 provider 消歧。少数 provider 的磁盘格式彼此同形\n\
+                   \u{20}  （如 pi 与 openclaw），probe 只能判定同分而拒绝归属；此时用它指明。\n\
                    示例：agent-session-grep --db <path> --robot sync 会话.jsonl\n\
                    示例：agent-session-grep --db <path> sync --from-file sources.txt\n\
                    示例：agent-session-grep --db <path> sync --discover\n\
+                   示例：agent-session-grep --db <path> sync --provider pi 会话.jsonl\n\
                    约束：单个 transcript 文件应只包含一个会话；检测到多个 sessionId 时仍归属首个会话，并在 warnings 报告。\n\
                    提示：不接受目录；--discover 会递归扫描 provider 数据根，无法归属的文件跳过并计数。"
         }
@@ -1873,6 +1876,14 @@ fn dispatch(
             let mut args = rest.to_vec();
             let discover = take_bool_flag(&mut args, "--discover");
             let from_file = extract_flag(&mut args, "--from-file")?;
+            // 显式消歧（M2P-16）：pi 与 openclaw 的磁盘格式同形，任何内容 probe
+            // 都区分不了它们。discover 有 root 上下文可用，显式 `sync <file>`
+            // 没有——那时用户点名是唯一证据。歧义错误让用户"name the provider
+            // explicitly"，这个 flag 就是它承诺的那条出路。
+            let sync_provider = match extract_flag(&mut args, "--provider")? {
+                Some(id) => Some(validated_sync_provider(&id)?),
+                None => None,
+            };
             let (data, warnings) = if discover {
                 // --discover 不接受额外参数（路径由发现填充）。未知 flag 也不能
                 // 静默忽略，否则拼写错误会伪装成成功的空发现。
@@ -1884,6 +1895,12 @@ fn dispatch(
                 if args.len() > 1 {
                     return Err(CliError::usage(
                         "sync --discover 不接受路径或额外 flag；路径由 provider 数据根自动发现",
+                    ));
+                }
+                if sync_provider.is_some() {
+                    return Err(CliError::usage(
+                        "sync --discover 与 --provider 互斥：discover 从每个 provider 的数据根\
+                         推断归属，点名单个 provider 会与它冲突",
                     ));
                 }
                 sync_discover(store, SyncProgress::for_mode(mode), request_id)?
@@ -1906,10 +1923,25 @@ fn dispatch(
                         "sync --from-file: {list_path} 里没有任何路径（空行与 # 注释会被忽略）"
                     )));
                 }
-                sync_files(store, &paths, SyncProgress::for_mode(mode), request_id)?
+                sync_files(
+                    store,
+                    &paths,
+                    sync_provider.as_deref(),
+                    SyncProgress::for_mode(mode),
+                    request_id,
+                )?
             } else {
-                no_flag_like_positional(&args[1..], "sync <file>... | sync --discover")?;
-                sync_files(store, &args[1..], SyncProgress::for_mode(mode), request_id)?
+                no_flag_like_positional(
+                    &args[1..],
+                    "sync <file>... | sync --discover | sync --provider <id> <file>...",
+                )?;
+                sync_files(
+                    store,
+                    &args[1..],
+                    sync_provider.as_deref(),
+                    SyncProgress::for_mode(mode),
+                    request_id,
+                )?
             };
             Ok((
                 "sync",
@@ -3251,7 +3283,7 @@ fn stage_with_source(
 ) -> Result<(StagedBatch, String), AppError> {
     let registry = provider_registry();
     let refs: Vec<&dyn ProviderAdapter> = registry.iter().map(|a| a.as_ref()).collect();
-    stage_with_registry(&refs, source)
+    stage_with_registry(&refs, source, None)
 }
 
 /// [`stage_with_source`] against a caller-owned adapter registry.
@@ -3260,9 +3292,14 @@ fn stage_with_source(
 /// borrowed slice across parse threads instead of re-boxing the whole registry
 /// per file. `ProviderAdapter: Send + Sync`, so `&[&dyn ProviderAdapter]` is
 /// safe to hand to every worker.
+///
+/// `provider_hint` 是 discover 记下的"此源来自哪个 provider 的数据根"。它只在
+/// 内容 probe 同分、无法区分时用于消歧（见 `choose_probed_candidate`）。手动
+/// `sync <file>` 没有 root 上下文，传 `None`。
 fn stage_with_registry(
     registry: &[&dyn ProviderAdapter],
     source: &dyn agent_session_grep_ports::ReadOnlySource,
+    provider_hint: Option<&str>,
 ) -> Result<(StagedBatch, String), AppError> {
     if source.is_empty() {
         return Ok((
@@ -3281,7 +3318,7 @@ fn stage_with_registry(
             "empty".into(),
         ));
     }
-    select_and_stage_source(registry, source)
+    select_and_stage_source(registry, source, provider_hint)
 }
 
 struct StagedMessageEntity {
@@ -4154,6 +4191,7 @@ fn jsonl_health(
 fn sync_files(
     store: &SqliteStore,
     paths: &[String],
+    provider: Option<&str>,
     progress: SyncProgress,
     request_id: Option<&str>,
 ) -> Result<(serde_json::Value, Vec<String>), CliError> {
@@ -4183,14 +4221,21 @@ fn sync_files(
             unique.push(path);
         }
     }
-    sync_files_inner(
-        store,
-        &unique,
-        &SyncContext::default(),
-        false,
-        progress,
-        request_id,
-    )
+    // `--provider` 是显式消歧输入：内容同形的 provider（pi/openclaw）在没有
+    // discover root 上下文时无法归属，此时用户点名即唯一证据。走与 discover
+    // 相同的通道（`discovered_provider_ids`），所以只在同分时生效——点错名字
+    // 不会把一个格式硬塞给另一个 provider。
+    let ctx = match provider {
+        Some(id) => SyncContext {
+            discovered_provider_ids: unique
+                .iter()
+                .map(|path| (path.clone(), id.to_string()))
+                .collect(),
+            ..SyncContext::default()
+        },
+        None => SyncContext::default(),
+    };
+    sync_files_inner(store, &unique, &ctx, false, progress, request_id)
 }
 
 /// `sync_files_inner` 的 discover 扩展上下文：plain sync 全部为空，`sync --discover`
@@ -4216,6 +4261,24 @@ struct SyncContext {
     /// （M2P-5）。行级破损早已是"跳过、计数、末尾报告、绝不中止"（D11），文件级
     /// 现在与之对齐。显式 `sync <file>` 保持报错：路径是用户亲手给的。
     skip_unrecognized_sources: bool,
+}
+
+/// 校验 `sync --provider <id>`：必须是注册表里真实存在的 provider。
+///
+/// 权威是 [`provider_registry`] 而非能力矩阵：矩阵含两个 deferred provider
+/// （没有 adapter），点名它们只会得到"没人认领"这种误导性错误。这里只接受
+/// 真正能 probe 的那些 id，并把全部可选值列进错误消息（R2.2 可行动性）。
+fn validated_sync_provider(id: &str) -> Result<String, CliError> {
+    let registry = provider_registry();
+    if registry.iter().any(|a| a.provider_id() == id) {
+        return Ok(id.to_string());
+    }
+    let mut ids: Vec<&str> = registry.iter().map(|a| a.provider_id()).collect();
+    ids.sort_unstable();
+    Err(CliError::usage(format!(
+        "sync --provider: unknown provider {id}; expected one of {}",
+        ids.join("|")
+    )))
 }
 
 /// `sync_files` / `sync_discover` 共享的核心流程。
@@ -4450,7 +4513,10 @@ fn prepare_one(
         });
     }
 
-    let (staged, variant) = match stage_with_registry(registry, &source) {
+    // discover 记下的 root 归属。同时是消歧输入（pi/openclaw 这类内容同形的
+    // provider 只有 root 能区分）与归属成功后的标签。
+    let discovered_provider = ctx.discovered_provider_ids.get(path).map(String::as_str);
+    let (staged, variant) = match stage_with_registry(registry, &source, discovered_provider) {
         Ok(staged) => staged,
         // 文件级宽容（M2P-5）：源不被任何 provider 认领，或多个 provider
         // 同分而歧义（repo 原则：歧义拒绝，绝不猜）。两者都是关于这一个
@@ -4475,7 +4541,7 @@ fn prepare_one(
         &variant,
         &snapshot.fingerprint,
         snapshot.len,
-        ctx.discovered_provider_ids.get(path).map(String::as_str),
+        discovered_provider,
     )?;
     if ctx.incomplete_providers.contains(&provider) {
         batch.relation_complete = false;
@@ -5807,6 +5873,24 @@ mod tests {
                 "b.jsonl".to_string(),
                 "c.jsonl".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn sync_provider_flag_accepts_only_registered_adapters() {
+        // 权威是 provider_registry：能力矩阵里那两个 deferred provider 没有
+        // adapter，点名它们只会换来"没人认领"这种误导性错误。
+        assert_eq!(validated_sync_provider("pi").unwrap(), "pi");
+        assert_eq!(validated_sync_provider("openclaw").unwrap(), "openclaw");
+
+        let err = validated_sync_provider("not-a-provider")
+            .expect_err("未注册的 provider 必须拒绝，绝不静默忽略");
+        assert_eq!(err.0.code, CanonicalCode::InvalidRequest);
+        // R2.2 可行动性：必须列出可选值，否则用户只能猜。
+        assert!(
+            err.0.message.contains("pi") && err.0.message.contains("openclaw"),
+            "错误消息必须列出全部可选 provider: {}",
+            err.0.message
         );
     }
 

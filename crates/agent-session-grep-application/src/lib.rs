@@ -590,20 +590,7 @@ pub fn select_and_stage(
     adapters: &[&dyn ProviderAdapter],
     bytes: &[u8],
 ) -> Result<StagedBatch, AppError> {
-    // 置信度排序键：越大越可信；ambiguous 不参与。
-    fn rank(c: Confidence) -> Option<u8> {
-        match c {
-            Confidence::Confirmed => Some(3),
-            Confidence::High => Some(2),
-            Confidence::Low => Some(1),
-            Confidence::Ambiguous => None,
-        }
-    }
-
-    let mut best: Option<(u8, usize, ProbeResult)> = None; // (rank, adapter index, probe)
-    // 并列的全部 variant id。此前只有一个 bool `tie`，于是错误消息只能说
-    // "one candidate was X" —— 用户拿到它无法自查,连和谁撞了都不知道。
-    let mut tied: Vec<String> = Vec::new();
+    let mut candidates: Vec<(u8, usize, ProbeResult)> = Vec::new();
     // probe 报错按格式家族留存：只有与本源同家族的诊断可以外泄给用户。
     let mut probe_failures: Vec<(SourceFormatFamily, ProviderError)> = Vec::new();
     for (idx, adapter) in adapters.iter().enumerate() {
@@ -615,35 +602,75 @@ pub fn select_and_stage(
                 continue;
             }
         };
-        let Some(r) = rank(probe.confidence) else {
-            continue;
-        };
-        match &best {
-            Some((best_rank, _, best_probe)) => {
-                if r > *best_rank {
-                    // 更高置信度胜出，先前记录的并列作废。
-                    best = Some((r, idx, probe));
-                    tied.clear();
-                } else if r == *best_rank && probe.variant_id != best_probe.variant_id {
-                    // 同等置信度、不同 variant——无法区分，记下双方。
-                    if tied.is_empty() {
-                        tied.push(best_probe.variant_id.clone());
-                    }
-                    tied.push(probe.variant_id.clone());
-                }
-            }
-            None => best = Some((r, idx, probe)),
+        if let Some(r) = confidence_rank(probe.confidence) {
+            candidates.push((r, idx, probe));
         }
     }
 
-    let (_, idx, probe) = best.ok_or_else(|| {
+    let (idx, probe) = choose_probed_candidate(adapters, candidates, None)?.ok_or_else(|| {
         unrecognized_source_error(SourceFormatFamily::of_head(bytes), &probe_failures)
     })?;
-    if !tied.is_empty() {
-        return Err(ambiguous_source_error(&tied).into());
-    }
     // 复用选中时的 probe 结果，不再对同一字节第二次 probe。
     stage_probed(adapters[idx], bytes, probe)
+}
+
+/// 置信度排序键：越大越可信；ambiguous 不参与候选。
+fn confidence_rank(c: Confidence) -> Option<u8> {
+    match c {
+        Confidence::Confirmed => Some(3),
+        Confidence::High => Some(2),
+        Confidence::Low => Some(1),
+        Confidence::Ambiguous => None,
+    }
+}
+
+/// 在 probe 候选中选出唯一胜者；同分不同 variant 时按 `provider_hint` 消歧。
+///
+/// 取置信度最高的一组；若组内只有一个 variant，直接胜出。若有多个 variant，
+/// 内容本身已无法区分它们 —— 此时**唯一**可用的证据是 `provider_hint`：
+/// discover 阶段记下的"这个文件来自哪个 provider 的数据根"。命中同分候选之一
+/// 即由它胜出。
+///
+/// 这不是"猜一个"（RFC-0002 宁拒不猜的边界）：root 是独立于文件内容的外部
+/// 事实。pi 与 openclaw 的磁盘格式确实是同一形状（openclaw adapter 自己的
+/// 文档就这么写），所以任何内容 probe 都区分不了它们，而目录归属可以。
+/// 没有 hint（手动 `sync <file>`）或 hint 不在同分候选里时仍然拒绝。
+///
+/// `Ok(None)` 表示没有任何候选；调用方据此构造 unrecognized 错误（它需要
+/// 家族信息，本函数拿不到）。
+fn choose_probed_candidate(
+    adapters: &[&dyn ProviderAdapter],
+    candidates: Vec<(u8, usize, ProbeResult)>,
+    provider_hint: Option<&str>,
+) -> Result<Option<(usize, ProbeResult)>, DomainError> {
+    let Some(max_rank) = candidates.iter().map(|(r, _, _)| *r).max() else {
+        return Ok(None);
+    };
+    let mut top: Vec<(usize, ProbeResult)> = candidates
+        .into_iter()
+        .filter(|(r, _, _)| *r == max_rank)
+        .map(|(_, idx, probe)| (idx, probe))
+        .collect();
+
+    let mut distinct: Vec<&str> = top.iter().map(|(_, p)| p.variant_id.as_str()).collect();
+    distinct.sort_unstable();
+    distinct.dedup();
+    if distinct.len() <= 1 {
+        return Ok(Some(top.swap_remove(0)));
+    }
+
+    if let Some(hint) = provider_hint {
+        // registry 里 provider_id 唯一、每个 adapter 只出一个候选，所以命中
+        // 至多一个。0 命中说明 root 与同分候选无关，仍属无法区分。
+        if let Some(pos) = top
+            .iter()
+            .position(|(idx, _)| adapters[*idx].provider_id() == hint)
+        {
+            return Ok(Some(top.swap_remove(pos)));
+        }
+    }
+
+    Err(ambiguous_source_error(&distinct, provider_hint))
 }
 
 /// 歧义错误:列出**全部**并列 variant 并给出消歧办法。
@@ -651,14 +678,25 @@ pub fn select_and_stage(
 /// 此前只报一个候选(`one candidate was X`),用户既不知道和谁撞了,也不知道
 /// 下一步能做什么 —— 而 `AmbiguousVariant` 是刻意的拒绝(RFC-0002:宁拒不猜),
 /// 所以这条消息是用户唯一的线索,必须自足。
-fn ambiguous_source_error(tied: &[String]) -> DomainError {
-    let mut variants: Vec<&str> = tied.iter().map(String::as_str).collect();
+fn ambiguous_source_error(tied: &[&str], provider_hint: Option<&str>) -> DomainError {
+    let mut variants: Vec<&str> = tied.to_vec();
     variants.sort_unstable();
     variants.dedup();
+    // 有 hint 却走到这里，说明它指向的 provider 根本不在同分候选中——
+    // 这是个独立的事实，不说出来用户会以为 hint 没生效。措辞保持中立：
+    // hint 可能来自 discover 的 root 归属，也可能来自显式 `--provider`。
+    let hint_note = match provider_hint {
+        Some(hint) => format!(
+            "; {hint} was named as the expected provider, but {hint} is not among \
+             the tied candidates"
+        ),
+        None => String::new(),
+    };
     DomainError::InvalidRequest(format!(
         "{AMBIGUOUS_SOURCE_MESSAGE}: {} variants matched with equal confidence \
-         ({}); this source's shape is not distinctive enough to attribute, so it \
-         is refused rather than guessed. Name the provider explicitly to resolve it",
+         ({}){hint_note}; this source's shape is not distinctive enough to attribute, \
+         so it is refused rather than guessed. Re-run with `sync --provider <id> <file>` \
+         to name the provider explicitly",
         variants.len(),
         variants.join(", ")
     ))
@@ -669,22 +707,16 @@ fn ambiguous_source_error(tied: &[String]) -> DomainError {
 /// Same selection rules as [`select_and_stage`], but every probe/parse opens a
 /// fresh bounded reader, so no source-sized byte buffer crosses the application
 /// boundary. Returns `(staged, selected variant_id)`.
+///
+/// `provider_hint` is the provider whose data root this source was discovered
+/// under, when that is known. It is consulted **only** to break a tie between
+/// otherwise indistinguishable candidates — see [`choose_probed_candidate`].
 pub fn select_and_stage_source(
     adapters: &[&dyn ProviderAdapter],
     source: &dyn ReadOnlySource,
+    provider_hint: Option<&str>,
 ) -> Result<(StagedBatch, String), AppError> {
-    // 置信度排序键：越大越可信；ambiguous 不参与。
-    fn rank(c: Confidence) -> Option<u8> {
-        match c {
-            Confidence::Confirmed => Some(3),
-            Confidence::High => Some(2),
-            Confidence::Low => Some(1),
-            Confidence::Ambiguous => None,
-        }
-    }
-
-    let mut best: Option<(u8, usize, ProbeResult)> = None; // (rank, adapter index, probe)
-    let mut tied: Vec<String> = Vec::new();
+    let mut candidates: Vec<(u8, usize, ProbeResult)> = Vec::new();
     let mut probe_failures: Vec<(SourceFormatFamily, ProviderError)> = Vec::new();
     for (idx, adapter) in adapters.iter().enumerate() {
         let probe = match adapter.probe_source(source) {
@@ -694,33 +726,17 @@ pub fn select_and_stage_source(
                 continue;
             }
         };
-        let Some(r) = rank(probe.confidence) else {
-            continue;
-        };
-        match &best {
-            Some((best_rank, _, best_probe)) => {
-                if r > *best_rank {
-                    best = Some((r, idx, probe));
-                    tied.clear();
-                } else if r == *best_rank && probe.variant_id != best_probe.variant_id {
-                    if tied.is_empty() {
-                        tied.push(best_probe.variant_id.clone());
-                    }
-                    tied.push(probe.variant_id.clone());
-                }
-            }
-            None => best = Some((r, idx, probe)),
+        if let Some(r) = confidence_rank(probe.confidence) {
+            candidates.push((r, idx, probe));
         }
     }
 
-    let (_, idx, probe) = best.ok_or_else(|| {
-        // 家族判定只看源开头的签名字节，不整读（SQLite 整读上限 128 MiB）。
-        let head = read_source_head(source, SQLITE_MAGIC_HEADER.len()).unwrap_or_default();
-        unrecognized_source_error(SourceFormatFamily::of_head(&head), &probe_failures)
-    })?;
-    if !tied.is_empty() {
-        return Err(ambiguous_source_error(&tied).into());
-    }
+    let (idx, probe) =
+        choose_probed_candidate(adapters, candidates, provider_hint)?.ok_or_else(|| {
+            // 家族判定只看源开头的签名字节，不整读（SQLite 整读上限 128 MiB）。
+            let head = read_source_head(source, SQLITE_MAGIC_HEADER.len()).unwrap_or_default();
+            unrecognized_source_error(SourceFormatFamily::of_head(&head), &probe_failures)
+        })?;
     let variant = probe.variant_id.clone();
     let staged = stage_source_probed(adapters[idx], source, probe)?;
     Ok((staged, variant))
@@ -5832,6 +5848,115 @@ mod tests {
         );
     }
 
+    /// 内容同形的两个 provider（如 pi 与 openclaw）：probe 必然同分。
+    struct SameShape {
+        id: &'static str,
+    }
+    impl ProviderAdapter for SameShape {
+        fn provider_id(&self) -> &str {
+            self.id
+        }
+        fn manifest(&self) -> agent_session_grep_ports::AdapterManifest {
+            agent_session_grep_ports::manifest_for(self.provider_id(), None, &[])
+        }
+        fn probe(
+            &self,
+            _bytes: &[u8],
+        ) -> Result<agent_session_grep_ports::ProbeResult, ProviderError> {
+            Ok(agent_session_grep_ports::ProbeResult {
+                variant_id: format!("{}/session-jsonl-v1", self.id),
+                confidence: Confidence::High,
+                matched_evidence: Vec::new(),
+                unmatched_evidence: Vec::new(),
+            })
+        }
+        fn parse(
+            &self,
+            _bytes: &[u8],
+            sink: &mut dyn CanonicalEventSink,
+        ) -> Result<agent_session_grep_ports::ParseReport, ProviderError> {
+            sink.emit_message(agent_session_grep_ports::MessageEvent {
+                seq: 0,
+                native_id: self.id,
+                parent_native_id: None,
+                role: "user",
+                text: "hi",
+                timestamp: None,
+                is_sidechain: false,
+                span: None,
+            })
+            .map_err(|e| ProviderError::Io(e.to_string()))?;
+            Ok(agent_session_grep_ports::ParseReport {
+                committed: 1,
+                ..Default::default()
+            })
+        }
+        // record-stream 家族要求显式实现；本 fake 不看字节，直接委派。
+        fn parse_source(
+            &self,
+            _source: &dyn agent_session_grep_ports::ReadOnlySource,
+            sink: &mut dyn CanonicalEventSink,
+        ) -> Result<agent_session_grep_ports::ParseReport, ProviderError> {
+            self.parse(&[], sink)
+        }
+    }
+
+    #[test]
+    fn discovery_root_breaks_a_tie_between_indistinguishable_providers() {
+        // M2P-16：pi 与 openclaw 的磁盘格式确实同形（openclaw adapter 自己的文档
+        // 就这么写），任何内容 probe 都区分不了。此时 discover 记下的 root 归属是
+        // 唯一可用证据——它独立于文件内容，不是"猜一个"。
+        let pi = SameShape { id: "pi" };
+        let openclaw = SameShape { id: "openclaw" };
+        let refs: Vec<&dyn ProviderAdapter> = vec![&pi, &openclaw];
+        let source = agent_session_grep_ports::SliceSource::new(b"{}");
+
+        let (_, variant) =
+            select_and_stage_source(&refs, &source, Some("openclaw")).expect("root 归属必须能消歧");
+        assert_eq!(variant, "openclaw/session-jsonl-v1");
+
+        // 反向同样成立：胜者由 root 决定，不受注册顺序影响。
+        let (_, variant) =
+            select_and_stage_source(&refs, &source, Some("pi")).expect("root 归属必须能消歧");
+        assert_eq!(variant, "pi/session-jsonl-v1");
+    }
+
+    #[test]
+    fn tie_without_a_root_hint_is_still_refused() {
+        // 手动 `sync <file>` 没有 root 上下文。消歧证据缺席时必须回到拒绝，
+        // 绝不因为"多数情况下是 X"而挑一个（RFC-0002 宁拒不猜）。
+        let pi = SameShape { id: "pi" };
+        let openclaw = SameShape { id: "openclaw" };
+        let refs: Vec<&dyn ProviderAdapter> = vec![&pi, &openclaw];
+        let source = agent_session_grep_ports::SliceSource::new(b"{}");
+
+        let err = select_and_stage_source(&refs, &source, None).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("pi/session-jsonl-v1")
+                && message.contains("openclaw/session-jsonl-v1"),
+            "必须列出全部并列 variant: {message}"
+        );
+    }
+
+    #[test]
+    fn a_provider_hint_outside_the_tie_refuses_and_says_so() {
+        // root 指向的 provider 不在同分候选里（用户把 transcript 放错目录，或
+        // `--provider` 点错名）：仍然拒绝，且必须说明 hint 为何没起作用——
+        // 否则用户会以为消歧失效了。
+        let pi = SameShape { id: "pi" };
+        let openclaw = SameShape { id: "openclaw" };
+        let refs: Vec<&dyn ProviderAdapter> = vec![&pi, &openclaw];
+        let source = agent_session_grep_ports::SliceSource::new(b"{}");
+
+        let err = select_and_stage_source(&refs, &source, Some("claude-code")).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("claude-code") && message.contains("not among the tied candidates"),
+            "必须说明 provider 提示为何未生效: {message}"
+        );
+    }
+
     #[test]
     fn text_source_rejection_never_blames_a_sqlite_adapter() {
         // M2P-5：adapter 按注册顺序 probe，注册表以 SQLite 家族（opencode/cursor）
@@ -5969,7 +6094,7 @@ mod tests {
         // 生产路径：probe/parse 都从只读 source 重新打开，返回 (staged, variant)。
         let source = agent_session_grep_ports::SliceSource::new(b"{}");
         let refs: Vec<&dyn ProviderAdapter> = vec![&SourceFake];
-        let (staged, variant) = select_and_stage_source(&refs, &source).unwrap();
+        let (staged, variant) = select_and_stage_source(&refs, &source, None).unwrap();
         assert_eq!(variant, "cline/fake-v1");
         assert_eq!(staged.messages.len(), 1);
         assert_eq!(staged.messages[0].text, "hi");
@@ -5983,7 +6108,7 @@ mod tests {
         let big = vec![b'x'; (agent_session_grep_ports::JSON_FAMILY_MAX_SOURCE_BYTES as usize) + 1];
         let source = agent_session_grep_ports::SliceSource::new(&big);
         let refs: Vec<&dyn ProviderAdapter> = vec![&SourceFake];
-        let err = select_and_stage_source(&refs, &source).unwrap_err();
+        let err = select_and_stage_source(&refs, &source, None).unwrap_err();
         // probe 失败按既有选择语义跳过该 adapter，但最后 probe 错误细节（含
         // 受测上限）必须透出，绝不 OOM、绝不静默截断。
         assert!(matches!(

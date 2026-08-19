@@ -1039,8 +1039,8 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   加 did-you-mean。
   **验收**:列表与 `known_subcommand` 一致(加测试守护)。
 
-- [ ] **M2P-16 四个 provider 的 JSONL 形状互相歧义 → 合法文件被整体拒绝
-  (2026-08-19 我在建 10 万条语料时实测撞上)**
+- [x] **M2P-16 四个 provider 的 JSONL 形状互相歧义 → 合法文件被整体拒绝
+  (2026-08-19 我在建 10 万条语料时实测撞上;同日闭合)**
   一个最朴素的两行文件:
   ```
   {"type":"session","id":"amb-1","cwd":"/work/placeholder"}
@@ -1108,6 +1108,76 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   (c) 逐个查 codex/pi/openclaw 的 probe 为何与他人等分,用各自独有的
       **必需**字段提高置信度 —— codex 有 `payload.type`/`session_meta` 封套,
       pi 有 `type:"session"` header,openclaw 是 v3 header;三者本应可区分。
+
+  ---
+
+  **✅ 2026-08-19 已修一半,并查明另一半的性质(重要:不是同类问题)**
+
+  **(a) 已完成** `eba0ab2`:歧义错误现在列出全部并列 variant。这个改动立刻
+  自证价值 —— 新消息暴露出真实碰撞对是
+  **codex ↔ qoder** 与 **pi ↔ openclaw**,而旧消息只报第一个候选,
+  这正是原记录把受影响 provider 记错成四个的原因。
+
+  **codex ↔ qoder:已修**(见下一条 commit)。根因是 qoder 的 probe 只看
+  `type == "session_meta"` 就计数,而 codex 的 rollout **也有**
+  `{"type":"session_meta"}` —— 区别在 codex 把身份包在 `payload` 对象里,
+  qoder 把 `session_id`/`cwd` 放在**顶层**。这是结构性差异,不是启发式:
+  qoder 现在要求顶层身份字段且不得有 `payload` 封套。修完 codex 与 qoder
+  的 fixture 都能同步。
+
+  **pi ↔ openclaw:性质不同,不能靠 probe 修。**
+  两份 fixture 的前四行**逐字节相同**,唯一差异是 pi 多一条 `compaction` 记录。
+  而 openclaw adapter 自己的文档就写着(`provider-openclaw/src/lib.rs:15-16`):
+  > "The type-based dispatch and content extraction **follow the same v3 JSONL
+  > shape as the Pi adapter**"
+
+  **也就是说这两个 provider 在磁盘上的格式确实是同一个形状** ——
+  `{type:session,id,cwd,timestamp}` + `{type:message,message:{role,content}}`。
+  **没有任何内容 probe 能区分它们,因为没有内容差异可区分。**
+  唯一的区分信号是**目录根**:`~/.pi/...` 对
+  `~/.openclaw/agents/<agent>/sessions/`(或 `~/.clawdbot`/`OPENCLAW_STATE_DIR`)。
+
+  **关键发现:root 提示已经存在,但用错了地方。**
+  `discover` 已经在 `discovered_provider_ids` 里记下了每个文件来自哪个 root
+  (`main.rs:3608`),但这个提示只在**归属成功之后**用于打标签
+  (`main.rs:4478` 传给 `staged_to_source_with_provider`)——
+  **它从不参与 probe**。所以一个歧义文件在提示能帮上忙之前就已经被拒了。
+  → **正确修法**:把 root 提示作为**消歧输入**下推到选择逻辑
+  (root 已确定 provider 时,同分候选里优先该 provider),而不是等归属完再贴标签。
+  这也顺带解决显式 `sync <file>` 的情形:用户手动传单个文件时没有 root 上下文,
+  所以仍需 (b) 的 `--provider` 显式消歧。
+  **不要试图给 pi/openclaw 造"独有字段"** —— 那会是凭空发明格式差异,
+  正是本仓库反复撤回过的那类无证据声明。
+
+  ---
+
+  **✅ 2026-08-19 全部闭合。三处改动,全部有实测证据。**
+
+  1. **codex ↔ qoder**(`a12ef29`):qoder probe 要求顶层身份字段且无 `payload`
+     封套。两边 fixture 都能归属。
+  2. **provider hint 下推为消歧输入**:`select_and_stage_source` 新增
+     `provider_hint` 参数,`choose_probed_candidate` 在同分且多 variant 时
+     用它选出胜者。discover 路径传 `discovered_provider_ids`(root 归属),
+     此前该值只在归属**之后**用于打标签,从不参与判定。
+  3. **`sync --provider <id> <file>...`**:显式 `sync` 没有 root 上下文,
+     用户点名即唯一证据。走同一条 hint 通道,所以只在同分时生效 ——
+     点错名字不会把一个格式硬塞给另一个 provider(实测:
+     `--provider claude-code` 传 pi fixture 仍然拒绝,并说明 claude-code
+     不在并列候选里)。校验权威是 `provider_registry` 而非能力矩阵:
+     矩阵含两个 deferred provider(无 adapter),点名它们只会换来
+     "没人认领"这种误导性错误。
+
+  **实测(release 二进制,伪 HOME)**:
+  - `sync --discover` 在 `~/.openclaw/agents/main/sessions/` 下发现 openclaw
+    fixture 并入库 3 条消息,归属 `openclaw/session-jsonl-v3`。**此前整份文件
+    被 skip-and-count 静默跳过。**
+  - `sync --provider pi <pi fixture>` 入库 3 条,归属 `pi/session-jsonl-v1`;
+    不带 flag 仍按 RFC-0002 拒绝(证据缺席即拒绝,不猜)。
+  - `sync --provider bogus` 列出全部 14 个可选 id。
+
+  **仍然成立的边界**:pi 没有注册 discovery root,所以它只能走显式
+  `sync --provider pi <file>`。这不是缺陷 —— pi 的磁盘位置本仓库没有证据,
+  凭空注册一个 root 才是无证据声明。
 
 - [x] **M2P-17 `sync` 不接受目录 + Windows 命令行上限 → 大语料无法一次同步
   (2026-08-19 实测)**
