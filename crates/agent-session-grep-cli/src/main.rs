@@ -112,26 +112,29 @@ fn main() {
             std::process::exit(err.code.exit_code());
         }
     };
+    // `--out <path>`：把本次结果载荷写到文件而不是 stdout。取值校验失败是用法
+    // 错误（exit 2），不静默退回 stdout——那会让用户以为文件已经写好了。
+    let sink = match extract_out_flag(&args) {
+        Ok(sink) => sink,
+        Err(CliError(err)) => {
+            emit_startup_error(&command, mode, &err, None);
+            std::process::exit(err.code.exit_code());
+        }
+    };
     // --request-id：robot 调用方的关联 id。非法值是用法错误（exit 2），
     // 不静默替换为生成 id——那会让调用方以为关联成功。
     let request_id = match extract_request_id(&args) {
         Ok(id) => id,
         Err(message) => {
             let err = ProtocolError::new(CanonicalCode::InvalidRequest, message);
-            match mode {
-                protocol::OutputMode::Human => {
-                    render_human_error(&err);
-                }
-                protocol::OutputMode::Json | protocol::OutputMode::Jsonl => {
-                    protocol::write_stdout_line(&protocol::error_envelope(&command, &err, None));
-                }
-            }
+            emit_startup_error(&command, mode, &err, None);
             std::process::exit(err.code.exit_code());
         }
     };
     match run(
         &args,
         mode,
+        &sink,
         request_id.as_deref(),
         extract_offline_flag(&args),
     ) {
@@ -140,19 +143,27 @@ fn main() {
         Ok(protocol::Outcome::Partial) => std::process::exit(10),
         Err(CliError(err)) => {
             // 错误 envelope 只写 stdout 一个对象；进程级诊断（人类模式）走 stderr。
-            match mode {
-                protocol::OutputMode::Human => {
-                    render_human_error(&err);
-                }
-                protocol::OutputMode::Json | protocol::OutputMode::Jsonl => {
-                    protocol::write_stdout_line(&protocol::error_envelope(
-                        &command,
-                        &err,
-                        request_id.as_deref(),
-                    ));
-                }
-            }
+            emit_startup_error(&command, mode, &err, request_id.as_deref());
             std::process::exit(err.code.exit_code());
+        }
+    }
+}
+
+/// 失败路径的统一出口。错误绝不写进 `--out` 目标文件：失败的命令必须不留下
+/// 半个产物，而调用方在 stdout/stderr 上看到的错误面与没给 `--out` 时一致。
+/// Markdown 模式的错误按人类面渲染——它本身就是人类面投影。
+fn emit_startup_error(
+    command: &str,
+    mode: protocol::OutputMode,
+    err: &ProtocolError,
+    request_id: Option<&str>,
+) {
+    match mode {
+        protocol::OutputMode::Human | protocol::OutputMode::Markdown => {
+            render_human_error(err);
+        }
+        protocol::OutputMode::Json | protocol::OutputMode::Jsonl => {
+            protocol::write_stdout_line(&protocol::error_envelope(command, err, request_id));
         }
     }
 }
@@ -224,9 +235,9 @@ fn extract_offline_flag(args: &[String]) -> bool {
         }
         // 其它带值 flag 跳过其取值，避免把取值误当命令名。
         match a.as_str() {
-            "--db" | "--output" | "--request-id" | "--cursor" | "--max-items" | "--max-bytes"
-            | "--max-messages" | "--policy" | "--level" | "--provider" | "--since" | "--until"
-            | "--session" | "--around" => {
+            "--db" | "--out" | "--output" | "--request-id" | "--cursor" | "--max-items"
+            | "--max-bytes" | "--max-messages" | "--policy" | "--level" | "--provider"
+            | "--since" | "--until" | "--session" | "--around" | "--tool-kind" | "--tool-name" => {
                 it.next();
             }
             _ => {}
@@ -269,9 +280,10 @@ fn extract_request_id(args: &[String]) -> Result<Option<String>, String> {
         }
         // 其它带值 flag 跳过其取值，避免把取值误当位置参数提前终止扫描。
         match a.as_str() {
-            "--db" | "--output" | "--cursor" | "--max-items" | "--max-bytes" | "--max-messages"
-            | "--max-evidence" | "--max-tokens" | "--policy" | "--level" | "--provider"
-            | "--since" | "--until" | "--session" | "--around" | "--tool-kind" | "--tool-name" => {
+            "--db" | "--out" | "--output" | "--cursor" | "--max-items" | "--max-bytes"
+            | "--max-messages" | "--max-evidence" | "--max-tokens" | "--policy" | "--level"
+            | "--provider" | "--since" | "--until" | "--session" | "--around" | "--tool-kind"
+            | "--tool-name" => {
                 it.next();
             }
             _ => {}
@@ -290,10 +302,10 @@ fn command_name(args: &[String]) -> String {
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
-            "--db" | "--output" | "--cursor" | "--max-items" | "--max-bytes" | "--max-messages"
-            | "--max-evidence" | "--max-tokens" | "--policy" | "--level" | "--request-id"
-            | "--provider" | "--since" | "--until" | "--session" | "--around" | "--tool-kind"
-            | "--tool-name" => {
+            "--db" | "--out" | "--output" | "--cursor" | "--max-items" | "--max-bytes"
+            | "--max-messages" | "--max-evidence" | "--max-tokens" | "--policy" | "--level"
+            | "--request-id" | "--provider" | "--since" | "--until" | "--session" | "--around"
+            | "--tool-kind" | "--tool-name" => {
                 it.next(); // 消费其取值
             }
             "--robot" | "--no-color" | "--help" | "-h" | "--version" | "-V" | "--discover"
@@ -361,10 +373,10 @@ fn intercept_help_or_version(args: &[String]) -> Option<HelpRequest> {
             // 裸 flag（无取值）不改变拦截判定：--robot/--no-color/--offline 等同理。
             "--robot" | "--no-color" | "--discover" | "--offline" => {}
             // 带值 flag 跳过其取值，避免把取值误当命令名。
-            "--db" | "--output" | "--request-id" | "--cursor" | "--max-items" | "--max-bytes"
-            | "--max-messages" | "--max-evidence" | "--max-tokens" | "--policy" | "--level"
-            | "--provider" | "--since" | "--until" | "--session" | "--around" | "--tool-kind"
-            | "--tool-name" => {
+            "--db" | "--out" | "--output" | "--request-id" | "--cursor" | "--max-items"
+            | "--max-bytes" | "--max-messages" | "--max-evidence" | "--max-tokens" | "--policy"
+            | "--level" | "--provider" | "--since" | "--until" | "--session" | "--around"
+            | "--tool-kind" | "--tool-name" => {
                 it.next();
             }
             _ => {}
@@ -382,6 +394,7 @@ fn intercept_help_or_version(args: &[String]) -> Option<HelpRequest> {
 fn run(
     args: &[String],
     mode: protocol::OutputMode,
+    sink: &protocol::PayloadSink,
     request_id: Option<&str>,
     offline: bool,
 ) -> Result<protocol::Outcome, CliError> {
@@ -397,26 +410,46 @@ fn run(
     // 命令名紧跟位时。
     if let Some(intercept) = intercept_help_or_version(args) {
         match intercept {
-            HelpRequest::TopLevelHelp => emit_help("help", &help_text(), mode, request_id),
+            HelpRequest::TopLevelHelp => emit_help("help", &help_text(), mode, sink, request_id)?,
             HelpRequest::TopLevelVersion => emit_version(
                 "version",
                 &format!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")),
                 mode,
+                sink,
                 request_id,
-            ),
+            )?,
             HelpRequest::SubcommandHelp(cmd) => {
-                emit_help(&cmd, subcommand_help_text(&cmd), mode, request_id);
+                emit_help(&cmd, subcommand_help_text(&cmd), mode, sink, request_id)?;
             }
         }
         return Ok(protocol::Outcome::Success);
     }
+    // `--output markdown` 只对 `handoff` 有定义：Markdown 是 handoff pack
+    // schema 承诺的那一个投影，别的命令没有这样的投影。其它命令下拒绝而不是
+    // 静默退回 human——静默换协议正是契约禁止的那种分叉。
+    if mode == protocol::OutputMode::Markdown && command_name(args) != "handoff" {
+        return Err(CliError::usage(format!(
+            "--output markdown is only defined for handoff (the handoff pack's documented \
+             Markdown projection); {} has no Markdown form. Use --output human|json|jsonl.",
+            command_name(args)
+        )));
+    }
+    // 整段接管 stdout 的命令（MCP framing / TUI 屏幕 / HTTP 服务）没有"一次性
+    // 结果载荷"可以写进文件，`--out` 对它们无意义。
+    if sink.is_file() && matches!(command_name(args).as_str(), "mcp" | "tui" | "serve") {
+        return Err(CliError::usage(format!(
+            "--out <path> is not available for {}: that command owns stdout for its whole run \
+             and has no single result payload to write",
+            command_name(args)
+        )));
+    }
     if command_name(args) == "doctor" {
-        return doctor(args, mode, request_id, offline);
+        return doctor(args, mode, sink, request_id, offline);
     }
     if command_name(args) == "config" {
         let positionals = bare_positionals(args);
         if positionals == ["config".to_string(), "paths".to_string()] {
-            return config_paths(mode, request_id);
+            return config_paths(mode, sink, request_id);
         }
         if positionals.first().map(String::as_str) == Some("config") && positionals.len() > 2 {
             return Err(CliError::usage(
@@ -432,7 +465,7 @@ fn run(
         if bare_positionals(args).len() > 1 {
             return Err(CliError::usage("providers takes no positional arguments"));
         }
-        return providers(mode, request_id);
+        return providers(mode, sink, request_id);
     }
 
     // model import/status: offline-only model cache management. Does not open
@@ -440,7 +473,7 @@ fn run(
     // capability_not_supported otherwise (honest, never stages silently);
     // status works in every build and reports the default bundle state.
     if command_name(args) == "model" {
-        return model_command(args, mode, request_id, offline);
+        return model_command(args, mode, sink, request_id, offline);
     }
 
     let (db_flag, rest) = parse_db_flag(args)?;
@@ -554,6 +587,7 @@ fn run(
     emit_result(
         command,
         mode,
+        sink,
         outcome,
         data,
         duration_ms,
@@ -561,17 +595,20 @@ fn run(
         &warnings,
         request_id,
         retrieval_mode,
-    );
+    )?;
     Ok(outcome)
 }
 
 /// 成功结果的统一出口（contract §6 truth table）：
 /// Human → 渲染器文本行走 stdout、warnings 走 stderr（无 envelope）；
-/// Json/Jsonl → 单个 success envelope。所有 stdout 写入都经 pipe-safe 通道。
+/// Json/Jsonl → 单个 success envelope；
+/// Markdown → handoff pack 的确定性 Markdown 投影（人类面，warnings 走 stderr）。
+/// 载荷落点由 `sink` 决定（默认 stdout，`--out <path>` 写文件）。
 #[allow(clippy::too_many_arguments)]
 fn emit_result(
     command: &str,
     mode: protocol::OutputMode,
+    sink: &protocol::PayloadSink,
     outcome: protocol::Outcome,
     data: serde_json::Value,
     duration_ms: u64,
@@ -579,15 +616,34 @@ fn emit_result(
     warnings: &[String],
     request_id: Option<&str>,
     retrieval_mode: RetrievalMode,
-) {
+) -> Result<(), CliError> {
     match mode {
         protocol::OutputMode::Human => {
             for warning in warnings {
                 eprintln!("warning: {warning}");
             }
-            for line in human::render_success(command, outcome, &data, page) {
-                protocol::write_stdout_line(&line);
+            sink.write_lines(&human::render_success(command, outcome, &data, page))?;
+        }
+        protocol::OutputMode::Markdown => {
+            for warning in warnings {
+                eprintln!("warning: {warning}");
             }
+            // Markdown 的定义是"JSON pack 的确定性投影"，所以这里从 json 模式
+            // 会发出的**同一个** value 反序列化回 pack 再渲染 —— 两个面因此不可能
+            // 分叉。`run` 已把 Markdown 限定在 handoff，故这里必是一个 pack；
+            // 反序列化失败是实现 bug（internal），不是用户输入问题。
+            let pack: agent_session_grep_ports::handoff::HandoffPack = serde_json::from_value(data)
+                .map_err(|error| {
+                    CliError(ProtocolError::new(
+                        CanonicalCode::Internal,
+                        format!(
+                            "--output markdown: {command} payload is not a handoff pack: {error}"
+                        ),
+                    ))
+                })?;
+            sink.write_verbatim(&agent_session_grep_application::handoff_markdown::render(
+                &pack,
+            ))?;
         }
         protocol::OutputMode::Json | protocol::OutputMode::Jsonl => {
             // ADR-0009: machine/cross-boundary output is redacted by default.
@@ -610,7 +666,7 @@ fn emit_result(
                 redaction.redacted_count += warning_redactions;
                 redaction.status = agent_session_grep_ports::RedactionState::Applied;
             }
-            protocol::write_stdout_line(&protocol::success_envelope(
+            sink.write_lines(&[protocol::success_envelope(
                 command,
                 outcome,
                 redacted_data,
@@ -620,9 +676,10 @@ fn emit_result(
                 request_id,
                 retrieval_mode,
                 &redaction,
-            ));
+            )])?;
         }
     }
+    Ok(())
 }
 
 #[derive(serde::Serialize)]
@@ -695,11 +752,13 @@ fn semantic_feature_flag() -> serde_json::Value {
 
 fn providers(
     mode: protocol::OutputMode,
+    sink: &protocol::PayloadSink,
     request_id: Option<&str>,
 ) -> Result<protocol::Outcome, CliError> {
     emit_result(
         "providers",
         mode,
+        sink,
         protocol::Outcome::Success,
         provider_matrix_data(),
         0,
@@ -707,12 +766,13 @@ fn providers(
         &[],
         request_id,
         RetrievalMode::Lexical,
-    );
+    )?;
     Ok(protocol::Outcome::Success)
 }
 
 fn config_paths(
     mode: protocol::OutputMode,
+    sink: &protocol::PayloadSink,
     request_id: Option<&str>,
 ) -> Result<protocol::Outcome, CliError> {
     let mut paths = platform_paths()?;
@@ -726,6 +786,7 @@ fn config_paths(
     emit_result(
         "config.paths",
         mode,
+        sink,
         protocol::Outcome::Success,
         paths,
         0,
@@ -733,7 +794,7 @@ fn config_paths(
         &[],
         request_id,
         RetrievalMode::Lexical,
-    );
+    )?;
     Ok(protocol::Outcome::Success)
 }
 
@@ -745,6 +806,7 @@ fn config_paths(
 fn model_command(
     args: &[String],
     mode: protocol::OutputMode,
+    sink: &protocol::PayloadSink,
     request_id: Option<&str>,
     offline: bool,
 ) -> Result<protocol::Outcome, CliError> {
@@ -779,6 +841,7 @@ fn model_command(
                 emit_result(
                     "model.import",
                     mode,
+                    sink,
                     protocol::Outcome::Success,
                     serde_json::json!({
                         "imported": true,
@@ -793,7 +856,7 @@ fn model_command(
                     &[],
                     request_id,
                     RetrievalMode::Lexical,
-                );
+                )?;
                 Ok(protocol::Outcome::Success)
             }
             #[cfg(not(feature = "semantic-candle"))]
@@ -844,6 +907,7 @@ fn model_command(
                 emit_result(
                     "model.status",
                     mode,
+                    sink,
                     protocol::Outcome::Success,
                     serde_json::json!({
                         "feature": "semantic-candle",
@@ -856,7 +920,7 @@ fn model_command(
                     &[],
                     request_id,
                     RetrievalMode::Lexical,
-                );
+                )?;
                 Ok(protocol::Outcome::Success)
             }
             #[cfg(not(feature = "semantic-candle"))]
@@ -865,6 +929,7 @@ fn model_command(
                 emit_result(
                     "model.status",
                     mode,
+                    sink,
                     protocol::Outcome::Success,
                     serde_json::json!({
                         "feature": null,
@@ -880,7 +945,7 @@ fn model_command(
                     &[],
                     request_id,
                     RetrievalMode::Lexical,
-                );
+                )?;
                 Ok(protocol::Outcome::Success)
             }
         }
@@ -1075,6 +1140,13 @@ GLOBAL (global flags go before the command name; subcommand flags such as --max-
                            (override with $ASG_DB; `config paths` prints the data dir).
                            Read commands never create a store; write commands do.
     --output human|json|jsonl  output mode (default human: readable text; json/jsonl are protocol envelopes)
+    --output markdown      handoff only: the handoff pack's documented Markdown projection.
+                           Deterministic — the same pack always renders the same bytes.
+                           Cannot be combined with --robot (that conflict is an error)
+    --out <path>           write this command's result payload to <path> instead of stdout.
+                           Never overwrites: an existing path (file, directory or symlink)
+                           is an error, so delete it or pick another name. Diagnostics and
+                           errors still go to stderr/stdout, so a failed run leaves no file
     --robot                same as --output json, no colour, no progress (stdout carries protocol only)
     --request-id <id>      correlation id for robot callers, echoed verbatim in every frame (A-Za-z0-9._:-, 1-128 chars)
     --offline              refuse any explicit operation that would need the network (fail-closed). Every command runs locally today, so this is a stable explicit mode; doctor/hook report it honestly
@@ -1097,46 +1169,65 @@ EXIT CODES:
 /// 帮助/版本统一出口（ADR-0006）：human 逐行打印文本到 stdout；json/jsonl/robot
 /// 输出单个 success envelope（jsonl 即单帧），`--request-id` 原样回显。所有
 /// help 路径都发生在 --db 解析与存储打开之前，无任何文件副作用。
-fn emit_help(command: &str, text: &str, mode: protocol::OutputMode, request_id: Option<&str>) {
+fn emit_help(
+    command: &str,
+    text: &str,
+    mode: protocol::OutputMode,
+    sink: &protocol::PayloadSink,
+    request_id: Option<&str>,
+) -> Result<(), CliError> {
     emit_help_payload(
         command,
         serde_json::json!({ "help_text": text }),
         text,
         mode,
+        sink,
         request_id,
-    );
+    )
 }
 
 /// 版本统一出口：与 [`emit_help`] 同构，版本串放进 `data.version`。
-fn emit_version(command: &str, text: &str, mode: protocol::OutputMode, request_id: Option<&str>) {
+fn emit_version(
+    command: &str,
+    text: &str,
+    mode: protocol::OutputMode,
+    sink: &protocol::PayloadSink,
+    request_id: Option<&str>,
+) -> Result<(), CliError> {
     emit_help_payload(
         command,
         serde_json::json!({ "version": text }),
         text,
         mode,
+        sink,
         request_id,
-    );
+    )
 }
 
-/// [`emit_help`] / [`emit_version`] 的公共实现。stdout 写入统一走
-/// [`protocol::write_stdout_line`]（EPIPE 静默 exit 0，CONTRACT §6）。
+/// [`emit_help`] / [`emit_version`] 的公共实现。载荷落点由 `sink` 决定；stdout
+/// 分支仍走 pipe-safe 通道（EPIPE 静默 exit 0，CONTRACT §6）。
+///
+/// Markdown 模式与 human 同形：ADR-0006 要求 `--help`/`--version` 在**任何**
+/// 输出模式下恒 exit 0，而帮助文本不是 handoff pack，没有 pack 投影可言——
+/// 原样打印文本是唯一既满足 exit 0 又不伪造投影的做法。
 fn emit_help_payload(
     command: &str,
     data: serde_json::Value,
     text: &str,
     mode: protocol::OutputMode,
+    sink: &protocol::PayloadSink,
     request_id: Option<&str>,
-) {
+) -> Result<(), CliError> {
     match mode {
-        protocol::OutputMode::Human => {
-            for line in text.lines() {
-                protocol::write_stdout_line(line);
-            }
+        protocol::OutputMode::Human | protocol::OutputMode::Markdown => {
+            let lines: Vec<String> = text.lines().map(str::to_string).collect();
+            sink.write_lines(&lines)?;
         }
         protocol::OutputMode::Json | protocol::OutputMode::Jsonl => {
-            protocol::write_stdout_line(&help_envelope(command, data, request_id));
+            sink.write_lines(&[help_envelope(command, data, request_id)])?;
         }
     }
+    Ok(())
 }
 
 /// 机器模式下 help/version 的 envelope（json/jsonl 同形：单个 success envelope，
@@ -1425,6 +1516,7 @@ fn subcommand_help_text(cmd: &str) -> &'static str {
 fn doctor(
     args: &[String],
     mode: protocol::OutputMode,
+    sink: &protocol::PayloadSink,
     request_id: Option<&str>,
     offline: bool,
 ) -> Result<protocol::Outcome, CliError> {
@@ -1486,6 +1578,7 @@ fn doctor(
     emit_result(
         "doctor",
         mode,
+        sink,
         protocol::Outcome::Success,
         data,
         duration_ms,
@@ -1493,7 +1586,7 @@ fn doctor(
         &[],
         request_id,
         RetrievalMode::Lexical,
-    );
+    )?;
     Ok(protocol::Outcome::Success)
 }
 
@@ -1503,6 +1596,7 @@ fn is_known_flag_name(token: &str) -> bool {
     matches!(
         token,
         "--db"
+            | "--out"
             | "--output"
             | "--request-id"
             | "--robot"
@@ -1587,7 +1681,7 @@ fn extract_db_flag_impl(args: &[String], prefix_only: bool) -> Result<Option<Str
             db = Some(value.clone());
         }
         match a.as_str() {
-            "--output" | "--request-id" | "--cursor" | "--max-items" | "--max-bytes"
+            "--out" | "--output" | "--request-id" | "--cursor" | "--max-items" | "--max-bytes"
             | "--max-messages" | "--max-evidence" | "--max-tokens" | "--policy" | "--level"
             | "--provider" | "--since" | "--until" | "--session" | "--around" | "--tool-kind"
             | "--tool-name" => {
@@ -1597,6 +1691,55 @@ fn extract_db_flag_impl(args: &[String], prefix_only: bool) -> Result<Option<Str
         }
     }
     Ok(db)
+}
+
+/// 从前缀位置抽出 `--out <path>`；缺省 [`protocol::PayloadSink::Stdout`]。
+///
+/// 与 `--db` 同一套取值守卫：缺值、取值是已知 flag 名（`--out --robot` 会造出
+/// 名为 `--robot` 的文件）、空路径、重复出现都是用法错误（R8.1/R8.2）。
+///
+/// 覆盖语义在 [`protocol::PayloadSink::write_verbatim`]：目标路径已存在时直接
+/// 报错，不覆盖、也不跟随符号链接。这里只解析，不碰文件系统——`--help` 之类
+/// 的路径不该因为解析 `--out` 就产生文件副作用。
+fn extract_out_flag(args: &[String]) -> Result<protocol::PayloadSink, CliError> {
+    let mut path: Option<String> = None;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if !a.starts_with('-') {
+            break; // 已到命令名：之后的 token 不当全局 flag 解析
+        }
+        if a == "--out" {
+            let value = it
+                .next()
+                .ok_or_else(|| CliError::usage("--out requires a path"))?;
+            if is_known_flag_name(value) {
+                return Err(CliError::usage(format!(
+                    "--out requires a path (got flag {value})"
+                )));
+            }
+            if value.is_empty() {
+                return Err(CliError::usage("--out requires a non-empty path"));
+            }
+            if path.is_some() {
+                return Err(CliError::usage("duplicate --out flag"));
+            }
+            path = Some(value.clone());
+            continue;
+        }
+        match a.as_str() {
+            "--db" | "--output" | "--request-id" | "--cursor" | "--max-items" | "--max-bytes"
+            | "--max-messages" | "--max-evidence" | "--max-tokens" | "--policy" | "--level"
+            | "--provider" | "--since" | "--until" | "--session" | "--around" | "--tool-kind"
+            | "--tool-name" => {
+                it.next();
+            }
+            _ => {}
+        }
+    }
+    Ok(match path {
+        Some(path) => protocol::PayloadSink::File(std::path::PathBuf::from(path)),
+        None => protocol::PayloadSink::Stdout,
+    })
 }
 
 /// 从 `--db <path>` 抽出数据库路径，返回其余参数。
@@ -1621,7 +1764,7 @@ fn parse_db_flag(args: &[String]) -> Result<(Option<String>, Vec<String>), CliEr
             continue;
         }
         match a.as_str() {
-            "--db" | "--output" | "--request-id" => {
+            "--db" | "--out" | "--output" | "--request-id" => {
                 it.next(); // 消费其取值（--db 取值已由 extract_db_flag 校验）
             }
             "--robot" | "--no-color" | "--help" | "-h" | "--version" | "-V" | "--discover"
@@ -1790,10 +1933,10 @@ fn bare_positionals(args: &[String]) -> Vec<String> {
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
-            "--db" | "--output" | "--request-id" | "--cursor" | "--max-items" | "--max-bytes"
-            | "--max-messages" | "--max-evidence" | "--max-tokens" | "--policy" | "--level"
-            | "--provider" | "--since" | "--until" | "--session" | "--around" | "--tool-kind"
-            | "--tool-name" => {
+            "--db" | "--out" | "--output" | "--request-id" | "--cursor" | "--max-items"
+            | "--max-bytes" | "--max-messages" | "--max-evidence" | "--max-tokens" | "--policy"
+            | "--level" | "--provider" | "--since" | "--until" | "--session" | "--around"
+            | "--tool-kind" | "--tool-name" => {
                 it.next(); // 消费其取值
             }
             "--robot" | "--no-color" | "--help" | "-h" | "--version" | "-V" | "--discover"
@@ -5252,6 +5395,11 @@ impl SyncProgress {
             protocol::OutputMode::Jsonl => Self::JsonlFrames,
             protocol::OutputMode::Human => Self::HumanStderr,
             protocol::OutputMode::Json => Self::Silent,
+            // Markdown 只对 `handoff` 有定义（`run` 里就拒绝了别的命令），
+            // 所以 sync 在这个模式下不可达；即便将来放开，Markdown 载荷是
+            // 一份确定性投影，往里插进度会毁掉字节可复现性 —— Silent 是唯一
+            // 安全的默认。
+            protocol::OutputMode::Markdown => Self::Silent,
         }
     }
 
@@ -7082,11 +7230,21 @@ mod tests {
     fn subcommand_help_works_without_db() {
         // run() 在拦截阶段就返回，不进入 parse_db_flag / 存储打开（R3.1：help
         // 无需 --db，且不创建任何文件）。
-        assert!(run(&["--help".into()], protocol::OutputMode::Human, None, false).is_ok());
+        assert!(
+            run(
+                &["--help".into()],
+                protocol::OutputMode::Human,
+                &protocol::PayloadSink::Stdout,
+                None,
+                false
+            )
+            .is_ok()
+        );
         assert!(
             run(
                 &["--version".into()],
                 protocol::OutputMode::Human,
+                &protocol::PayloadSink::Stdout,
                 None,
                 false
             )
@@ -7096,6 +7254,7 @@ mod tests {
             run(
                 &["search".into(), "--help".into()],
                 protocol::OutputMode::Human,
+                &protocol::PayloadSink::Stdout,
                 None,
                 false
             )
@@ -7105,6 +7264,7 @@ mod tests {
             run(
                 &["index".into(), "rebuild".into(), "--help".into()],
                 protocol::OutputMode::Human,
+                &protocol::PayloadSink::Stdout,
                 None,
                 false
             )
@@ -7115,6 +7275,7 @@ mod tests {
             run(
                 &["--robot".into(), "--help".into()],
                 protocol::OutputMode::Json,
+                &protocol::PayloadSink::Stdout,
                 None,
                 false
             )
@@ -7209,6 +7370,7 @@ mod tests {
             doctor(
                 &["doctor".into(), "--bogus".into()],
                 protocol::OutputMode::Human,
+                &protocol::PayloadSink::Stdout,
                 None,
                 false
             )
@@ -7219,6 +7381,7 @@ mod tests {
             doctor(
                 &["doctor".into(), "--db".into(), "--robot".into()],
                 protocol::OutputMode::Human,
+                &protocol::PayloadSink::Stdout,
                 None,
                 false
             )
@@ -7234,6 +7397,7 @@ mod tests {
                     "b.db".into()
                 ],
                 protocol::OutputMode::Human,
+                &protocol::PayloadSink::Stdout,
                 None,
                 false
             )
@@ -7243,6 +7407,7 @@ mod tests {
             doctor(
                 &["doctor".into(), "--db".into()],
                 protocol::OutputMode::Human,
+                &protocol::PayloadSink::Stdout,
                 None,
                 false
             )
@@ -7253,6 +7418,7 @@ mod tests {
             run(
                 &["config".into(), "paths".into(), "--bogus".into()],
                 protocol::OutputMode::Human,
+                &protocol::PayloadSink::Stdout,
                 None,
                 false
             )
@@ -7267,6 +7433,7 @@ mod tests {
                     "--bogus".into()
                 ],
                 protocol::OutputMode::Json,
+                &protocol::PayloadSink::Stdout,
                 None,
                 false
             )
@@ -7429,12 +7596,22 @@ mod tests {
     fn doctor_accepts_offline_without_error() {
         // doctor 在 --offline 下照常自检（offline 是稳定显式模式，不新增错误路径）；
         // offline 字段由 emit_result 输出，unit 层只验证成功与诊断字段存在性。
-        assert!(doctor(&["doctor".into()], protocol::OutputMode::Human, None, true).is_ok());
+        assert!(
+            doctor(
+                &["doctor".into()],
+                protocol::OutputMode::Human,
+                &protocol::PayloadSink::Stdout,
+                None,
+                true
+            )
+            .is_ok()
+        );
         // 与不带 --db 的默认 doctor 等价，offline 不改变退出语义。
         assert!(
             doctor(
                 &["--offline".into(), "doctor".into()],
                 protocol::OutputMode::Human,
+                &protocol::PayloadSink::Stdout,
                 None,
                 true
             )
