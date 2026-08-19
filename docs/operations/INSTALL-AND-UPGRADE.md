@@ -129,11 +129,61 @@ asg --version
 ```
 
 An upgraded binary may need to migrate an existing data root on first open.
-Migration is automatic and transactional; the latest v11 → v12 step adds the
-`tool_activities` projection (the v5 → v6 and v6 → v7 steps in
-`migration-v5-to-v6.md` and `migration-v6-to-v7.md` are historical). An
-older binary refuses to open a newer store with `schema_incompatible` (exit
-9) rather than downgrading it.
+Migration is automatic and transactional; the latest v12 → v13 step adds the
+`forgotten_sources` suppression table used by `forget` and `prune` (the v5 → v6
+and v6 → v7 steps in `migration-v5-to-v6.md` and `migration-v6-to-v7.md` are
+historical). An older binary refuses to open a newer store with
+`schema_incompatible` (exit 9) rather than downgrading it.
+
+## Removing indexed history
+
+Deletion operates on the **index only**. Provider transcripts are read-only:
+no command in this tool modifies, moves, or deletes a source file.
+
+```sh
+# One session. Both forms print exactly what would go; --yes executes.
+agent-session-grep forget <ses-id>
+agent-session-grep forget <ses-id> --yes
+
+# Everything under one working directory (a client project, a departed repo).
+agent-session-grep forget --project /path/to/project --yes
+
+# Everything last active before a date (half-open: strictly before).
+agent-session-grep prune --before 2026-01-01 --yes
+
+# Everything from one provider.
+agent-session-grep prune --provider codex --yes
+
+# Then reclaim the space and erase the physical residue.
+agent-session-grep index compact
+```
+
+Five things to know before you run it:
+
+- **Every form defaults to dry-run.** The listing you read is the set that
+  `--yes` removes. The same shape works under `--robot`; there is no prompt to
+  answer, so a machine caller uses the identical two-step flow.
+- **`index compact` is not optional.** FTS5 deletion writes a delete marker
+  rather than rewriting existing segments, so until you compact, a deleted term
+  is still byte-readable inside the database file even though `search` returns
+  nothing. `index compact` runs FTS5 `optimize`, then `VACUUM`, then truncates
+  the WAL. It takes an exclusive lock and needs temporary space roughly the size
+  of the database.
+- **Deletion is source-scoped.** A session sharing a transcript file with
+  another session takes it along; the dry-run lists those under
+  `collateral_sessions`.
+- **A forgotten source is not re-indexed.** Because the transcript is still on
+  disk, the path is recorded and every index entry point — `sync <file>`,
+  `sync --from-file`, `sync --discover` — skips it and reports
+  `forgotten_skipped`. `forget --list` shows the list; `forget --readmit <path>`
+  undoes one entry so the source can be indexed again from its file.
+- **`prune --before` never guesses at age.** Sessions whose messages carry no
+  timestamp are counted and reported in `warnings`, not deleted. Remove those
+  with `forget <ses-id>`.
+
+Deletion is not exposed over MCP. The tool surface stays read-only: an
+agent-callable irreversible delete over content the tool itself ingested from
+untrusted transcripts is a footgun, and `mcp` holds no writer lease.
 
 ## Uninstall
 
@@ -152,7 +202,8 @@ your data root. Running it when neither command is installed reports "not
 installed" and exits 0, so it is safe to repeat. If `asg` no longer matches the
 managed copy/link, uninstall refuses to remove it.
 
-Your config, data, cache, and logs survive uninstall. To remove them, delete
+Your config, data, cache, and logs survive uninstall. To remove indexed history
+selectively, use `forget` / `prune` above. To remove everything, delete
 the paths reported by `agent-session-grep --robot config paths` yourself — the
 scripts will not do it for you.
 
