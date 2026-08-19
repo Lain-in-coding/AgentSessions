@@ -2,9 +2,25 @@
 //!
 //! Parses Kimi's wire.jsonl format: each line carries a `type` discriminator.
 //! `context.append_message` records wrap `message.role` (user/assistant) and
-//! `message.content`. `context.append_loop_event` records carry step/tool
-//! events (step.begin/content.part/tool.call/tool.result/step.end) — this
-//! initial implementation handles append_message; loop events are deferred.
+//! `message.content`.
+//!
+//! **Only `context.append_message` is parsed; every other record type is
+//! skipped.** The known others are `context.append_loop_event` (step/tool
+//! events: step.begin/content.part/tool.call/tool.result/step.end),
+//! `metadata`, `config.update`, `turn.prompt`, and `usage.record`.
+//!
+//! The skipped loop events are where Kimi's tool activity lives, which is why
+//! this provider declares `tool_activity: Unsupported` — the declaration
+//! matches the adapter rather than the format's potential. Extracting them
+//! would require raising that declaration, and
+//! `cli/tests/capability_behaviour.rs` then demands a real emission as
+//! evidence. It is deliberately not attempted here: no Kimi installation is
+//! available on this machine (`~/.kimi-code` does not exist), and the only
+//! loop event in the golden fixture is a bare `step.begin` carrying just
+//! `type` and `uuid`, so the nesting of a `tool.call`'s name, arguments, and
+//! result has not been observed. Implementing against a guessed shape is the
+//! failure mode this repo has already had to retract twice; the prerequisite
+//! is a real sample.
 //!
 //! Format evidence: fast-resume (MIT) `src/adapters/kimi.rs`. The message
 //! extraction is adapted from fast-resume under its MIT license.
@@ -68,7 +84,8 @@ impl ProviderAdapter for KimiCodeAdapter {
             self.provider_id(),
             Some(1),
             &[
-                "context.append_loop_event records (step/tool events) are not yet parsed",
+                "only context.append_message records are parsed; all other record types are skipped, including context.append_loop_event (step/tool events), metadata, config.update, turn.prompt and usage.record",
+                "the skipped loop events are where tool activity lives, so no tool activity is extracted and tool_activity is declared Unsupported; extracting it needs a real sample first (the golden fixture's only loop event is a bare step.begin, so a tool.call's shape is unobserved)",
                 "session id is rarely carried in wire.jsonl; session_native_id is usually left unset",
                 "per-message timestamps come from the record-level `time` field (epoch milliseconds); records whose value is missing, non-positive, or out of range carry no timestamp",
                 "context.append_message records carry no per-message native id, so message identity is reconstructed document-scoped by the ingestion layer (Unstable)",

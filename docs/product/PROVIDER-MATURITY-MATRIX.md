@@ -31,11 +31,11 @@
 | Antigravity | `antigravity` | `antigravity/transcript-jsonl-v1` | **Experimental** | 维护者开发机真实格式核验（2026-08-15）：`brain/<uuid>/.system_generated/logs/transcript.jsonl`；identity 在目录名，文件内无 session id 字段 + golden（`tests/golden.rs`） |
 | OpenCode | `opencode` | `opencode/sqlite-v1` | **Experimental** | `opencode.db` SQLite（session/message/part 表），只读打开（SQLITE_OPEN_READONLY + busy_timeout）+ golden（`tests/golden.rs`） |
 | Pi | `pi` | `pi/session-jsonl-v1` | **Experimental** | session JSONL（`type:session` header + message）+ golden（`tests/golden.rs`） |
-| Hermes | `hermes` | `hermes/session-json-v1` | **Experimental** | `~/.hermes/sessions/session_<id>.json`（session_id/messages），hstry@88b78b1 (MIT) 格式证据 + golden（`tests/golden.rs`） |
+| Hermes | `hermes` | `hermes/session-json-v1` | **Experimental** | `~/.hermes/sessions/session_<id>.json`（session_id/messages），hstry@88b78b1 (MIT) 格式证据 + golden（`tests/golden.rs`）。⚠️ **该布局上游已停用**：Hermes 官方文档说 `~/.hermes/state.db`（SQLite + FTS5）才是权威 session store，`~/.hermes/sessions/` 下的旧文件"no longer written or read"，即**新建会话产不出本 adapter 能读的文件**；`state.db` variant 未实现也未声明（无样本、schema 未观察） |
 | Cursor | `cursor` | `cursor/vscdb-chat-v1` | **Experimental** | `state.vscdb` SQLite KV（ItemTable `chatdata`/`prompts` key），hstry@88b78b1 (MIT) 格式证据，多代格式分层待补 + golden（`tests/golden.rs`） |
 | Kimi Code | `kimi-code` | `kimi-code/wire-jsonl-v1` | **Experimental** | wire.jsonl（`context.append_message`）+ golden（`tests/golden.rs`） |
 | OpenClaw | `openclaw` | `openclaw/session-jsonl-v3` | **Experimental** | v3 JSONL header + message records，维护者开发机仅 config 无 transcript 样本 + golden（`tests/golden.rs`） |
-| Qoder | `qoder` | `qoder/transcript-jsonl-v1` | **Experimental** | JSONL（`session_meta` + `type:user/assistant`），官方路径已实现 + golden（`tests/golden.rs`） |
+| Qoder | `qoder` | `qoder/transcript-jsonl-v1` | **Experimental** | JSONL（`session_meta` + `type:user/assistant`）+ golden（`tests/golden.rs`）；针对 **CLI** 产物，源根具体层级未核实（见下方逐 provider 明细），**IDE** 的纯文本 conversation-history 不在本 variant 覆盖内 |
 | Tencent CodeBuddy | `tencent-codebuddy` | `tencent-codebuddy/cli-jsonl-v1` | **Experimental** | CLI OpenAI-style JSONL（`role`/`content`/`sessionId`），extension variant 待分层 + golden（`tests/golden.rs`） |
 | Cline | `cline` | `cline/api-conversation-history-v1` | **Experimental** | `api_conversation_history.json` JSON family + golden（`tests/golden.rs`） |
 | Aider | `aider` | `aider/chat-history-md-v1` | **Experimental** | Markdown chat history（`#### ` user prompts），`.aider.chat.history.md` 为候选 root 待核验 + golden（`tests/golden.rs`） |
@@ -60,7 +60,7 @@ target。
 | probe | `native` | 全部 14 个 adapter 均有 probe，歧义一律 `AmbiguousVariant` 拒绝（不低置信度猜测） |
 | parse | `native` | 全部 14 个 adapter 均 streaming 到 `CanonicalEventSink` |
 | search | `native` | 统一经 canonical 索引检索 |
-| discover | `native`（claude-code/codex）；`unsupported`（其余） | 仅 claude-code/codex 注册了 discovery root；antigravity/opencode 已加入 `provider_data_root` |
+| discover | `native`（claude-code/codex/openclaw/tencent-codebuddy/antigravity/opencode）；`unsupported`（其余 8 个） | 这 6 个在 `provider_root_subpath` 注册了 discovery root，`sync --discover` 会真的扫（实测：伪 HOME 下每个 root 种一份 golden fixture，六个全部 `root_state=scanned found=1`）；其余只能显式 `sync <file>`。声明与注册表的一对一由 `cli` 的 `matrix_discover_claim_matches_registered_roots` 双向断言守护。注意本字段（有没有注册 root）与 discover 报告的 `root_state` 三态（`scanned` / `missing` = 注册了但磁盘上没有 / `unsupported` = 没注册）是两个不同问题：`native` + `missing`（provider 没装）自洽 |
 | resume | `derived`（claude-code/codex/pi/grok）；`unknown`（opencode/kimi/qoder/codebuddy/hermes/antigravity/cursor）；`unsupported`（aider/cline/openclaw） | 未核验的 resume 命令一律不设默认值 |
 | context / handoff / incremental | `unsupported` 或 `unknown` | 属后续全能力链工作，尚未逐 provider 评估 |
 | tool_activity | `partial`（claude-code/codex，schema v12 `tool_activities` 落库）；`unknown`（deepseek-harness/zcode，deferred）；`unsupported`（其余 12 个已实现 provider，含 aider——它把 blockquote 工具输出折叠进 assistant 文本，零 `emit_activity`） | CLI `--tool-kind`/`--tool-name`/`--main-only`/`--subagent-only`/`--include-sidechain`、MCP 同名参数与 TUI 分面键（`m` sidechain / `k` tool-kind）已落地；handoff pack 投影 `tool_activity` + 权威 `role`/`is_sidechain`，context 响应投影 `tool_activities`。声明由 `cli/tests/capability_behaviour.rs` 的行为断言守护：声明非 `unsupported` 必须能在证据输入上真的 emit 活动 |
@@ -89,11 +89,11 @@ manifest 均已填真实限制，见各 `crates/agent-session-grep-provider-*/sr
 - **Antigravity**：文件内无 session id 字段（identity 在 `brain/<uuid>` 目录名），parse 时 `session_native_id`/`provider_session_id` 如实留缺；`SYSTEM`/`CONVERSATION_HISTORY` 与工具活动步骤永不为消息；`span` 用字节区间。
 - **OpenCode**：SQLite 源无字节 span；只提交 `text` part 且角色为 user/assistant；逐消息时间戳未抽取。
 - **Pi**：`session_info`/`compaction`/`custom_message` 等非对话类型跳过；无 native 消息 id（合成 `pi-msg-{seq}`）。
-- **Hermes**：`session_<id>.json` 为主格式；同目录 `<id>.jsonl` 仅含部分近期状态，忽略；无字节 span，消息时间戳缺失时回退 `session_start`。
+- **Hermes**：`session_<id>.json` 为本 variant 解析的格式；同目录 `<id>.jsonl` 仅含部分近期状态，忽略；无字节 span，消息时间戳缺失时回退 `session_start`。⚠️ **上游已把权威 store 换成 `~/.hermes/state.db`（SQLite + FTS5）**，`~/.hermes/sessions/` 下的按会话文件"不再写也不再读"（官方文档：`hermes-agent.nousresearch.com/docs/user-guide/sessions`）。故本 variant 只对**旧装机残留文件**有效；`state.db` variant 未实现，也不声明支持（本机 `~/.hermes` 只有 `config.yaml` 与 `skills/`，无 `state.db`、无 `sessions/`，schema 未观察）。
 - **Cursor**：`state.vscdb` 为 chatdata/prompts 两 key 的多代格式，版本分层待补；SQLite 无字节 span；无 native 消息 id（合成 `cursor-msg-{seq}`）。
-- **Kimi Code**：`context.append_loop_event`（step/tool 事件）暂未解析；wire.jsonl 罕见携带 session id，通常留缺；逐消息时间戳未抽取。
+- **Kimi Code**：**只解析 `context.append_message`，其余记录类型全部跳过**——已知的还有 `context.append_loop_event`（step/tool 事件）、`metadata`、`config.update`、`turn.prompt`、`usage.record`；wire.jsonl 罕见携带 session id，通常留缺。工具活动就在被跳过的 loop event 里，故 `tool_activity` 如实声明 `unsupported`；要实现抽取需先拿到真实样本（golden fixture 里唯一的 loop event 是只有 `type`+`uuid` 的 `step.begin`，`tool.call` 的嵌套形状未观察），且抽取后必须同步升声明并由 `capability_behaviour.rs` 的行为断言验收。逐消息时间戳已从记录级 `time`（epoch 毫秒）透传。
 - **OpenClaw**：resume 有意不支持（gateway-managed）；无 native 消息 id（合成 `openclaw-msg-{seq}`）。
-- **Qoder**：身份字段（session_id/cwd）从 `session_meta` lenient 匹配；`progress`/`tool_use`/`tool_result` 非对话记录跳过。
+- **Qoder**：身份字段（session_id/cwd）从 `session_meta` lenient 匹配；`progress`/`tool_use`/`tool_result` 非对话记录跳过。目标是 **CLI** 的 transcript JSONL（`~/.qoder/projects/<project>/`；是否还有一层 `transcript/` 未核实——ctx 矩阵与 Qoder CLI 官方文档口径不一致，需真实 `qodercli` 运行才能定，全仓库统一按不带该段书写）。**IDE** 另一套产物（`~/.qoder/cache/projects/<project>-<hash>/conversation-history/<id>.txt`）实测为纯文本而非 JSONL，当前 variant 读不了，需要新 variant 才能支持。
 - **Tencent CodeBuddy**：根启动关键字用户消息（content 恰为 `"code"`）被过滤；无 cwd pair 观察（无独立 cwd 头记录）；无 native 消息 id（合成 `codebuddy-msg-{seq}`）。
 - **Cline**：JSON 数组文件内无 session id，`session_native_id` 留缺；无字节 span（数组下标 pseudo-span 已移除）；无 native 消息 id（合成 `cline-msg-{seq}`）。
 - **Aider**：span 为派生近似（块起始行 + 文本长度），非逐字节整行切片；blockquote 工具/编辑输出并入助手正文；会话身份为首个 run 头时间戳。

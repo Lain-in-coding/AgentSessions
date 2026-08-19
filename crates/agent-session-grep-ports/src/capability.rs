@@ -74,6 +74,18 @@ pub struct ProviderCapability {
     /// 当前成熟度（事实，非目标）。
     pub maturity: ProviderMaturity,
     /// 发现源目录的能力。
+    ///
+    /// `Native` 当且仅当该 provider 在 CLI 的 `provider_root_subpath` 里注册了
+    /// discovery root——即 `sync --discover` 会真的去扫它。`Unsupported` 表示
+    /// 未注册 root，只能显式 `sync <file>`。
+    ///
+    /// 注意这与 discover 报告里的 `root_state` 三态是两个不同的问题：本字段回答
+    /// "有没有注册 root"，`root_state` 回答"这次扫描发生了什么"
+    /// （`scanned` / `missing` = 注册了但磁盘上没有 / `unsupported` = 没注册 root）。
+    /// 所以 `discover: Native` + `root_state: missing`（provider 没装）是自洽的，
+    /// 而 `discover: Unsupported` 必然对应 `root_state: unsupported`。
+    /// 两者的一致性由 `cli` 的
+    /// `matrix_discover_claim_matches_registered_roots` 断言守护。
     pub discover: CapabilityLevel,
     /// Probe 能力。
     pub probe: CapabilityLevel,
@@ -244,7 +256,10 @@ impl ProviderCapabilityMatrix {
                     provider_id: "openclaw".into(),
                     variant_id: "openclaw/session-jsonl-v3".into(),
                     maturity: ProviderMaturity::Experimental,
-                    discover: CapabilityLevel::Unsupported,
+                    // `~/.openclaw/agents` 已注册为 discovery root；实测在伪 HOME 下
+                    // 种入 golden fixture，`sync --discover` 报 root_state=scanned
+                    // found=1。
+                    discover: CapabilityLevel::Native,
                     probe: CapabilityLevel::Native,
                     parse: CapabilityLevel::Native,
                     search: CapabilityLevel::Native,
@@ -259,7 +274,9 @@ impl ProviderCapabilityMatrix {
                     provider_id: "tencent-codebuddy".into(),
                     variant_id: "tencent-codebuddy/cli-jsonl-v1".into(),
                     maturity: ProviderMaturity::Experimental,
-                    discover: CapabilityLevel::Unsupported,
+                    // `~/.codebuddy/projects` 已注册为 discovery root（实测
+                    // root_state=scanned found=1）。
+                    discover: CapabilityLevel::Native,
                     probe: CapabilityLevel::Native,
                     parse: CapabilityLevel::Native,
                     search: CapabilityLevel::Native,
@@ -274,7 +291,9 @@ impl ProviderCapabilityMatrix {
                     provider_id: "opencode".into(),
                     variant_id: "opencode/sqlite-v1".into(),
                     maturity: ProviderMaturity::Experimental,
-                    discover: CapabilityLevel::Unsupported,
+                    // `~/.local/share/opencode` 已注册为 discovery root；SQLite 源
+                    // 按 magic header 收下（实测 root_state=scanned found=1）。
+                    discover: CapabilityLevel::Native,
                     probe: CapabilityLevel::Native,
                     parse: CapabilityLevel::Native,
                     search: CapabilityLevel::Native,
@@ -321,7 +340,9 @@ impl ProviderCapabilityMatrix {
                     provider_id: "antigravity".into(),
                     variant_id: "antigravity/transcript-jsonl-v1".into(),
                     maturity: ProviderMaturity::Experimental,
-                    discover: CapabilityLevel::Unsupported,
+                    // `~/.gemini/antigravity-cli/brain` 已注册为 discovery root
+                    // （实测 root_state=scanned found=1）。
+                    discover: CapabilityLevel::Native,
                     probe: CapabilityLevel::Native,
                     parse: CapabilityLevel::Native,
                     search: CapabilityLevel::Native,

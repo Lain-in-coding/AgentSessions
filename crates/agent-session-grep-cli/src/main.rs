@@ -5170,6 +5170,53 @@ mod tests {
         assert!(provider_data_root("unknown-provider").is_none());
     }
 
+    /// `discover` 声明与实际注册的 root 必须一对一（M1-8）。
+    ///
+    /// 这条缺失时矩阵给 claude-code/codex 之外的四个已注册 provider
+    /// （openclaw / tencent-codebuddy / antigravity / opencode）报
+    /// `discover: Unsupported`，而 `sync --discover` 其实一直在扫它们的 root。
+    /// 实测（伪 HOME 下每个 root 种一份 golden fixture）六个 root 全部
+    /// `root_state=scanned found=1`，所以假的是声明那一侧。
+    ///
+    /// 双向断言：漏声明（注册了 root 却报 Unsupported）与过度声明
+    /// （声明 Native 却没注册 root）都会失败。
+    #[test]
+    fn matrix_discover_claim_matches_registered_roots() {
+        use agent_session_grep_ports::capability::CapabilityLevel;
+        for capability in &ProviderCapabilityMatrix::current().providers {
+            let registered = provider_root_subpath(&capability.provider_id).is_some();
+            let claims_native = capability.discover == CapabilityLevel::Native;
+            assert_eq!(
+                claims_native, registered,
+                "provider {}: discover={:?} but provider_root_subpath registered={registered}. \
+                 `discover: Native` 当且仅当注册了 discovery root——要么注册 root，\
+                 要么把声明改成 Unsupported，不要让矩阵自我认证。",
+                capability.provider_id, capability.discover
+            );
+        }
+    }
+
+    /// 未注册 root 的 provider 必须声明 `discover: Unsupported` 而不是 `Unknown`：
+    /// "没有 root" 是已确定的事实，不是待评估项。deferred provider
+    /// （无 transcript 证据）例外——它们整行都是 `Unknown`。
+    #[test]
+    fn unregistered_providers_declare_discover_unsupported() {
+        use agent_session_grep_ports::capability::CapabilityLevel;
+        for capability in &ProviderCapabilityMatrix::current().providers {
+            if capability.maturity == ProviderMaturity::Unsupported
+                || provider_root_subpath(&capability.provider_id).is_some()
+            {
+                continue;
+            }
+            assert_eq!(
+                capability.discover,
+                CapabilityLevel::Unsupported,
+                "provider {}: 未注册 discovery root 的已实现 provider 应声明 Unsupported",
+                capability.provider_id
+            );
+        }
+    }
+
     #[test]
     fn provider_matrix_data_adds_semantic_surface_without_touching_rows() {
         let data = provider_matrix_data();
