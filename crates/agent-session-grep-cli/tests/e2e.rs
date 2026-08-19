@@ -5748,6 +5748,22 @@ fn a_forgotten_source_is_not_resurrected_by_sync_discover() {
         0
     );
 
+    // `ingest <file>` 是第三条索引入口，同样不得绕过抑制。
+    let out = run_with_home(&db, &home, &["ingest", &path]);
+    assert!(out.status.success(), "{}", stdout(&out));
+    let frame = parse_first_line(&out);
+    assert_eq!(frame["command"], "ingest", "{frame}");
+    assert_eq!(frame["data"]["forgotten_skipped"], 1, "{frame}");
+    let out = run_with_home(&db, &home, &["search", "zzalphaforgettoken"]);
+    assert_eq!(
+        parse_first_line(&out)["data"]["hits"]
+            .as_array()
+            .expect("hits")
+            .len(),
+        0,
+        "ingest 不得绕过抑制门"
+    );
+
     // `--readmit` 是唯一的撤销路径：撤销后同一个源可以再次被索引。
     let out = run_with_home(&db, &home, &["forget", "--list"]);
     let frame = parse_first_line(&out);

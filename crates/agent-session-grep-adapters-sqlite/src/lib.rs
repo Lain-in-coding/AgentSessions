@@ -8118,6 +8118,12 @@ impl SqliteStore {
         //
         // 用 `json_each` 逐项比对 `source_path` 而不是对整串做 LIKE：路径里的
         // 反斜杠在 JSON 里是转义的，字符串匹配会漏掉 Windows 风格路径。
+        //
+        // 一整行连坐：若该批同时提交了其它源，它们的审计记录也随行消失。这是
+        // 刻意的取舍——只改写 JSON 剔掉一项会让 `operation_digest` 与 manifest
+        // 不再对应（digest 是按 canonical manifest 算的），而 digest 与 manifest
+        // 的一致性正是这张表存在的意义。宁可少一条已激活批次的审计，也不留下
+        // 用户要求忘记的项目路径。
         tx.execute(
             "DELETE FROM index_batches
              WHERE state IN ('activated', 'aborted', 'superseded')

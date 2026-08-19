@@ -1901,10 +1901,39 @@ fn dispatch(
         // ingest 打通 ingestion→storage→search 全链路：读取原始 .jsonl →
         // provider.probe 判定 variant → provider.parse 流式产出 Canonical 消息 →
         // 每条写 catalog + FTS 索引。文件严格只读（RFC-0002 §7）。
+        // 与 sync 一样必须经过抑制门：`forget` 之后，没有任何索引入口能把
+        // 已忘记的源带回来——否则一条绕过 sync 的路径就是一次悄然复活。
         "ingest" => {
             no_extra_args(rest, 1, "ingest <file>")?;
-            let path = arg(rest, 1, "ingest <file>")?;
-            let (data, warnings) = ingest_file(store, path)?;
+            // 与 sync 同一条路径归一（`source_path_identity`）：抑制表存的是归一后
+            // 的路径，用户手打的反斜杠/大写盘符若不归一就会绕过这道门。
+            let path = source_path_identity(arg(rest, 1, "ingest <file>")?);
+            let (allowed, skipped) = store
+                .partition_suppressed(std::slice::from_ref(&path))
+                .map_err(ProtocolError::from)?;
+            if allowed.is_empty() {
+                return Ok((
+                    "ingest",
+                    protocol::Outcome::Success,
+                    serde_json::json!({
+                        "sources": 0,
+                        "emitted": 0,
+                        "messages": 0,
+                        "committed": 0,
+                        "unchanged": 0,
+                        "skipped": 0,
+                        "forgotten_skipped": skipped.len(),
+                        "generation": store.active_generation().map_err(ProtocolError::from)?,
+                    }),
+                    protocol::Page::default(),
+                    vec![format!(
+                        "source is on the forgotten list (asg forget); its transcript is \
+                         untouched on disk. Run `forget --list` to see it or \
+                         `forget --readmit <path>` to index it again"
+                    )],
+                ));
+            }
+            let (data, warnings) = ingest_file(store, &allowed[0])?;
             Ok((
                 "ingest",
                 protocol::Outcome::Success,
@@ -2744,6 +2773,9 @@ fn forget_command(
             return Err(CliError::usage(USAGE));
         }
         no_extra_args(&args, 0, "forget --readmit <source-path>")?;
+        // 同一条路径归一：抑制表存归一后的路径，用户手打反斜杠/大写盘符时
+        // 不归一会得到一句"该路径当前未被抑制"，而它其实就在清单里。
+        let path = source_path_identity(&path);
         let restored = store.readmit_source(&path).map_err(ProtocolError::from)?;
         let mut warnings = Vec::new();
         if restored {
