@@ -16,12 +16,12 @@ use crate::{CliError, canonical_search_provider, provider_registry, render, stor
 use agent_session_grep_adapters_sqlite::SqliteStore;
 use agent_session_grep_application::{
     App, AppRequest, AppResponse, ContextLevel, ResponseBudget,
-    handoff_pack::{HandoffInput, resolve_source_locations},
+    handoff_pack::{HandoffInput, matched_session_ids, resolve_source_locations},
     parse_search_instant,
 };
 use agent_session_grep_domain::{ContextPolicy, IdKind, StableId};
 use agent_session_grep_ports::{
-    RetrievalMode, SearchFacets, SearchFilters, SidechainFacet,
+    ResumeClaimsStore, RetrievalMode, SearchFacets, SearchFilters, SidechainFacet,
     capability::{ProviderCapabilityMatrix, ProviderMaturity},
     handoff::HandoffFilters,
 };
@@ -750,6 +750,22 @@ impl McpServer<'_> {
                 }
             })
             .collect();
+        // Provider attribution for exactly the matched sessions: one batched
+        // claims read (no N+1), identical to CLI `handoff` — the contract
+        // forbids CLI/MCP divergence.
+        let session_ids = matched_session_ids(&hits);
+        let session_providers: Vec<_> = self
+            .store
+            .resume_of(&session_ids)
+            .map_err(business)?
+            .into_iter()
+            .map(
+                |metadata| agent_session_grep_application::handoff_pack::SessionProvider {
+                    session_id: metadata.session_id.as_str().to_string(),
+                    provider_id: metadata.provider_id,
+                },
+            )
+            .collect();
         let pack =
             agent_session_grep_application::handoff_pack::generate_deterministic(HandoffInput {
                 query_terms: std::slice::from_ref(&query),
@@ -771,6 +787,7 @@ impl McpServer<'_> {
                 source_locations: &source_locations,
                 tool_activities: &tool_activities,
                 message_facts: &message_facts,
+                session_providers: &session_providers,
                 catalog_generation: generation,
                 max_tokens: max_tokens as u64,
                 max_bytes: max_bytes as u64,

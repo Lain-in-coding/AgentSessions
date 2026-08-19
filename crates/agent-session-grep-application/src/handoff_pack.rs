@@ -25,9 +25,9 @@
 use agent_session_grep_domain::StableId;
 use agent_session_grep_ports::handoff::{
     ConfidenceLevel, EvidenceEntry, GenerationMode, HandoffBudget, HandoffFilters, HandoffPack,
-    HandoffQuery, HandoffTarget, MainlineEntry, MatchedSession, PackConfidence, RedactionMode,
-    RedactionState, RedactionStatus, RetrievalMode, SessionConfidence, SourceLocator, TimeWindow,
-    TruncationReason, TruncationStatus,
+    HandoffQuery, HandoffTarget, MainlineEntry, MatchedSession, PackConfidence, Provenance,
+    RedactionMode, RedactionState, RedactionStatus, RetrievalMode, SessionConfidence,
+    SourceLocator, TimeWindow, TruncationReason, TruncationStatus,
 };
 use agent_session_grep_ports::{ContextGraphStore, PortResult, SearchHit};
 
@@ -77,6 +77,10 @@ pub struct HandoffInput<'a> {
     /// Optional per-message role/sidechain facts, keyed by message wire id.
     /// Missing entries render as role=`unknown`, is_sidechain=`false`.
     pub message_facts: &'a [MessageFact],
+    /// Pre-resolved provider attribution for the matched sessions
+    /// (see [`SessionProvider`] and [`matched_session_ids`]). Sessions absent
+    /// from this list, or present with `provider_id: None`, report no provider.
+    pub session_providers: &'a [SessionProvider],
     pub catalog_generation: u64,
     pub max_tokens: u64,
     pub max_bytes: u64,
@@ -92,6 +96,21 @@ pub struct MessageFact {
     pub is_sidechain: bool,
 }
 
+/// Provider attribution for one matched session, resolved by the caller.
+///
+/// The caller batches these through
+/// [`agent_session_grep_ports::ResumeClaimsStore::resume_of`] over
+/// [`matched_session_ids`] — one chunked read, no N+1 — because the pack never
+/// queries storage itself. `provider_id` is `None` when the store holds no
+/// resume claim for that session (legacy rows, conflicting claims): the pack
+/// then reports no provider rather than guessing one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionProvider {
+    /// Canonical session wire id (`ses_v1_*`).
+    pub session_id: String,
+    pub provider_id: Option<String>,
+}
+
 /// 确定性 pack 装配时间基点：2026-08-16T00:00:00Z。`created_at =
 /// PACK_TIME_BASE_UNIX + catalog_generation`，保证同 generation/query/budget 下
 /// 字节可复现（PRD Q50），且随 generation 单调推进。
@@ -105,11 +124,23 @@ const PACK_TIME_BASE_UNIX: u64 = 1_786_838_400;
 ///   reason 与被丢弃的 locator；
 /// - 证据文本默认经共享脱敏引擎（ADR-0009），`redaction` 如实反映；
 /// - `source_document_id`/span 来自调用方传入的权威 placement，无 placement 的
-///   命中不进证据（never fabricated）。
+///   命中不进证据（never fabricated）；
+/// - `provenance` 只在恰好一个会话命中时填充（见 [`single_session_provenance`]）。
 pub fn generate_deterministic(input: HandoffInput<'_>) -> HandoffPack {
     let created_at = created_at_from_generation(input.catalog_generation);
     let pack_id = derive_pack_id(&input);
-    let matched_sessions = build_matched_sessions(input.hits);
+    let providers: std::collections::BTreeMap<&str, &str> = input
+        .session_providers
+        .iter()
+        .filter_map(|entry| {
+            entry
+                .provider_id
+                .as_deref()
+                .map(|provider| (entry.session_id.as_str(), provider))
+        })
+        .collect();
+    let matched_sessions = build_matched_sessions(input.hits, &providers);
+    let provenance = single_session_provenance(&matched_sessions);
 
     // 候选证据：redact 原文 → 附权威 source locator。无 source document 的命中
     // 直接排除（设计 D2：cursor-less entries excluded，绝不臆造文档身份）。
@@ -239,7 +270,7 @@ pub fn generate_deterministic(input: HandoffInput<'_>) -> HandoffPack {
         inference: Vec::new(),
         target: input.target.clone(),
         time_window: time_window_from_filters(&input.filters),
-        provenance: None, // 搜索型 pack 无单一会话/提供商，honest：不臆造
+        provenance,
         budget: HandoffBudget {
             max_tokens: input.max_tokens,
             max_bytes: input.max_bytes,
@@ -365,29 +396,57 @@ impl Candidate {
     }
 }
 
+/// 命中归属的 hit 会话身份，仅当 wire 可解析为合法 Session 时返回（never
+/// fabricated）。`StableId::from_wire` 原样保留 wire 字符串，因此
+/// `as_str()` 与 provider 传来的 wire 逐字节相同。
+fn hit_session_id(hit: &SearchHit) -> Option<StableId> {
+    let wire = hit.session_id.as_deref()?;
+    StableId::from_wire(wire).filter(|id| id.kind() == agent_session_grep_domain::IdKind::Session)
+}
+
+/// 命中涉及的去重会话身份，保留首次出现顺序。
+///
+/// 与 pack 自己的 `matched_sessions` 同一套校验与顺序，公开出来是为了让调用方
+/// 就着这批（且仅这批）会话做一次批量 provider 解析
+/// （见 [`SessionProvider`]），而不必重抄这条规则。
+pub fn matched_session_ids(hits: &[SearchHit]) -> Vec<StableId> {
+    let mut sessions: Vec<StableId> = Vec::new();
+    for hit in hits {
+        let Some(session) = hit_session_id(hit) else {
+            continue;
+        };
+        if !sessions
+            .iter()
+            .any(|seen| seen.as_str() == session.as_str())
+        {
+            sessions.push(session);
+        }
+    }
+    sessions
+}
+
 /// matched sessions：按命中归属会话去重（ADR-0008 wire id），保留首次出现顺序。
 /// 会话 id 必须可解析为 Session 实体，否则该命中不计入（never fabricated）。
-fn build_matched_sessions(hits: &[SearchHit]) -> Vec<MatchedSession> {
+/// `providers` 是调用方批量解析好的 `session wire -> provider id`；查不到的会话
+/// 保持 `provider_id: None`。
+fn build_matched_sessions(
+    hits: &[SearchHit],
+    providers: &std::collections::BTreeMap<&str, &str>,
+) -> Vec<MatchedSession> {
     let mut seen: Vec<String> = Vec::new();
     let mut sessions: Vec<MatchedSession> = Vec::new();
     for hit in hits {
-        let Some(session_wire) = hit.session_id.as_deref() else {
+        let Some(session) = hit_session_id(hit) else {
             continue;
         };
-        // 校验 wire 可解析为合法 Session 身份；只用原始 wire 字符串（不臆造）。
-        let Some(session) = StableId::from_wire(session_wire) else {
-            continue;
-        };
-        if session.kind() != agent_session_grep_domain::IdKind::Session {
-            continue;
-        }
+        let session_wire = session.as_str();
         match seen.iter().position(|s| s == session_wire) {
             Some(pos) => sessions[pos].occurrences += 1,
             None => {
                 seen.push(session_wire.to_string());
                 sessions.push(MatchedSession {
                     session_id: session_wire.to_string(),
-                    provider_id: None,
+                    provider_id: providers.get(session_wire).map(|p| (*p).to_string()),
                     title: None,
                     relevance_score: hit.score as f64,
                     occurrences: 1,
@@ -396,6 +455,22 @@ fn build_matched_sessions(hits: &[SearchHit]) -> Vec<MatchedSession> {
         }
     }
     sessions
+}
+
+/// Pack provenance：只有恰好一个会话命中时才是可知的事实。
+///
+/// 跨多个会话的搜索型 pack 确实没有单一出处，那里 `None` 仍是诚实答案。但恰好
+/// 一个会话时两个值都是我们已经持有的事实——会话 wire id，以及 store 的 resume
+/// claim 为它认领的 provider——此时留 `None` 是漏报，不是诚实。store 没有该会话
+/// 的 claim 时 `provider_id` 保持 `None`：报出会话、不猜 provider。
+fn single_session_provenance(matched: &[MatchedSession]) -> Option<Provenance> {
+    let [only] = matched else {
+        return None;
+    };
+    Some(Provenance {
+        provider_id: only.provider_id.clone(),
+        session_id: Some(only.session_id.clone()),
+    })
 }
 
 /// time_window 投影：filters 的 since/until（半开区间 `[since, until)`）。
@@ -549,6 +624,7 @@ mod tests {
         static EMPTY: Vec<String> = Vec::new();
         static EMPTY_ACT: Vec<serde_json::Value> = Vec::new();
         static EMPTY_FACTS: Vec<MessageFact> = Vec::new();
+        static EMPTY_PROVIDERS: Vec<SessionProvider> = Vec::new();
         HandoffInput {
             query_terms: &EMPTY,
             retrieval_mode: RetrievalMode::Lexical,
@@ -557,6 +633,7 @@ mod tests {
             source_locations,
             tool_activities: &EMPTY_ACT,
             message_facts: &EMPTY_FACTS,
+            session_providers: &EMPTY_PROVIDERS,
             catalog_generation: 1,
             max_tokens: 10000,
             max_bytes: 1_000_000,
@@ -756,6 +833,163 @@ mod tests {
             pack.matched_sessions[0].session_id
         );
         assert_eq!(pack.matched_sessions[0].occurrences, 2);
+    }
+
+    /// 恰好一个会话命中 → provenance 是可知事实，必须填充（含 provider）。
+    #[test]
+    fn single_matched_session_populates_provenance() {
+        let hits = vec![hit("msg_v1_aaa", 1.0, "text1")];
+        let locs = locations(&hits);
+        let providers = vec![SessionProvider {
+            session_id: "ses_v1_abc".to_string(),
+            provider_id: Some("claude-code".to_string()),
+        }];
+        let mut input = default_input(&hits, &locs);
+        input.session_providers = &providers;
+        let pack = generate_deterministic(input);
+        let provenance = pack.provenance.expect("single session has a provenance");
+        assert_eq!(provenance.session_id.as_deref(), Some("ses_v1_abc"));
+        assert_eq!(provenance.provider_id.as_deref(), Some("claude-code"));
+        assert_eq!(
+            pack.matched_sessions[0].provider_id.as_deref(),
+            Some("claude-code")
+        );
+    }
+
+    /// 多会话命中 → 确实没有单一出处，provenance 保持 None（原判断成立）。
+    #[test]
+    fn multiple_matched_sessions_leave_provenance_absent() {
+        let mut a = hit("msg_v1_aaa", 1.0, "text1");
+        let mut b = hit("msg_v1_bbb", 0.8, "text2");
+        a.session_id = Some("ses_v1_s1".to_string());
+        b.session_id = Some("ses_v1_s2".to_string());
+        let hits = vec![a, b];
+        let locs = locations(&hits);
+        let providers = vec![
+            SessionProvider {
+                session_id: "ses_v1_s1".to_string(),
+                provider_id: Some("claude-code".to_string()),
+            },
+            SessionProvider {
+                session_id: "ses_v1_s2".to_string(),
+                provider_id: Some("codex".to_string()),
+            },
+        ];
+        let mut input = default_input(&hits, &locs);
+        input.session_providers = &providers;
+        let pack = generate_deterministic(input);
+        assert!(pack.provenance.is_none(), "{:?}", pack.provenance);
+        // 每个 matched session 仍如实带自己的 provider。
+        assert_eq!(
+            pack.matched_sessions[0].provider_id.as_deref(),
+            Some("claude-code")
+        );
+        assert_eq!(
+            pack.matched_sessions[1].provider_id.as_deref(),
+            Some("codex")
+        );
+        let json = serde_json::to_value(&pack).unwrap();
+        assert!(json.get("provenance").is_none(), "{json}");
+    }
+
+    /// 零会话命中 → 无出处可报。
+    #[test]
+    fn no_matched_session_leaves_provenance_absent() {
+        let pack = generate(&[]);
+        assert!(pack.provenance.is_none());
+    }
+
+    /// 查不到 claim 时报会话、不猜 provider（never fabricated）。
+    #[test]
+    fn missing_provider_claim_reports_session_without_provider() {
+        let hits = vec![hit("msg_v1_aaa", 1.0, "text1")];
+        let pack = generate(&hits); // 空 session_providers = claim 缺失
+        let provenance = pack.provenance.clone().expect("session id is knowable");
+        assert_eq!(provenance.session_id.as_deref(), Some("ses_v1_abc"));
+        assert!(provenance.provider_id.is_none());
+        assert!(pack.matched_sessions[0].provider_id.is_none());
+        // provider_id 缺失时从 JSON 中省略，不发出空串。
+        let json = serde_json::to_value(&pack).unwrap();
+        assert!(json["provenance"].get("provider_id").is_none(), "{json}");
+    }
+
+    /// provenance 进入 pack 内容字节，但不进 pack_id（pack_id 只由
+    /// generation/query/filters/budget 派生）。
+    #[test]
+    fn provenance_does_not_change_pack_id() {
+        let hits = vec![hit("msg_v1_aaa", 1.0, "text1")];
+        let locs = locations(&hits);
+        let providers = vec![SessionProvider {
+            session_id: "ses_v1_abc".to_string(),
+            provider_id: Some("claude-code".to_string()),
+        }];
+        let without = generate_deterministic(default_input(&hits, &locs));
+        let mut input = default_input(&hits, &locs);
+        input.session_providers = &providers;
+        let with = generate_deterministic(input);
+        assert_eq!(without.pack_id, with.pack_id);
+        assert_eq!(without.created_at, with.created_at);
+        assert_ne!(without.provenance, with.provenance);
+    }
+
+    /// 同一批输入两次生成仍字节一致（determinism 契约不因 provenance 改变）。
+    #[test]
+    fn provenance_is_byte_reproducible() {
+        let hits = vec![hit("msg_v1_aaa", 1.0, "text1")];
+        let locs = locations(&hits);
+        let providers = vec![SessionProvider {
+            session_id: "ses_v1_abc".to_string(),
+            provider_id: Some("claude-code".to_string()),
+        }];
+        let mut first = default_input(&hits, &locs);
+        first.session_providers = &providers;
+        let mut second = default_input(&hits, &locs);
+        second.session_providers = &providers;
+        let a = generate_deterministic(first);
+        let b = generate_deterministic(second);
+        assert_eq!(
+            serde_json::to_string(&a).unwrap(),
+            serde_json::to_string(&b).unwrap()
+        );
+        // used_bytes 仍与内容口径自洽（provenance 计入内容）。
+        assert_eq!(a.budget.used_bytes, content_bytes(&a));
+    }
+
+    /// `matched_session_ids` 与 pack 自己的 matched_sessions 同序同集合，
+    /// 调用方据此批量解析 provider（无 N+1、无规则重抄）。
+    #[test]
+    fn matched_session_ids_match_the_pack_projection() {
+        let mut a = hit("msg_v1_aaa", 1.0, "text1");
+        let mut b = hit("msg_v1_bbb", 0.8, "text2");
+        let mut c = hit("msg_v1_ccc", 0.5, "text3");
+        a.session_id = Some("ses_v1_s2".to_string());
+        b.session_id = Some("ses_v1_s1".to_string());
+        c.session_id = Some("ses_v1_s2".to_string());
+        let hits = vec![a, b, c];
+        let ids: Vec<String> = matched_session_ids(&hits)
+            .iter()
+            .map(|id| id.as_str().to_string())
+            .collect();
+        let pack = generate(&hits);
+        let matched: Vec<String> = pack
+            .matched_sessions
+            .iter()
+            .map(|s| s.session_id.clone())
+            .collect();
+        assert_eq!(ids, matched);
+        assert_eq!(ids, vec!["ses_v1_s2", "ses_v1_s1"]);
+    }
+
+    /// 非法/缺失会话 wire 不进 matched_session_ids（never fabricated）。
+    #[test]
+    fn matched_session_ids_reject_non_session_wires() {
+        let mut a = hit("msg_v1_aaa", 1.0, "text1");
+        let mut b = hit("msg_v1_bbb", 0.8, "text2");
+        let mut c = hit("msg_v1_ccc", 0.5, "text3");
+        a.session_id = None;
+        b.session_id = Some("msg_v1_notasession".to_string());
+        c.session_id = Some("garbage".to_string());
+        assert!(matched_session_ids(&[a, b, c]).is_empty());
     }
 
     #[test]

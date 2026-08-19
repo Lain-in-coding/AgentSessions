@@ -71,8 +71,11 @@ pub struct TimeWindow {
     pub until: Option<String>,
 }
 
-/// Pack 的出处：目标 provider/session。搜索型 pack 无单一会话/提供商时保持
-/// `None`（honest，绝不臆造）；会话型 handoff 由后续 slice 填充。
+/// Pack 的出处：pack 来自的那个 provider/session。
+///
+/// 只在**恰好一个会话命中**时填充：那时两个值都是已持有的事实。跨多个会话的
+/// 搜索型 pack 确实没有单一出处，保持 `None`（绝不臆造）。`provider_id` 取自
+/// 该会话的 resume claim；store 没有 claim 时省略——报会话、不猜 provider。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Provenance {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -112,6 +115,8 @@ pub struct HandoffTarget {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct MatchedSession {
     pub session_id: String,
+    /// store 的 resume claim 为该会话认领的 provider。无 claim（claim 之前建的
+    /// 行、冲突 claim）时为 `None` 并从 JSON 省略——绝不猜。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -121,7 +121,7 @@
     "provenance": {
       "type": ["object", "null"],
       "additionalProperties": false,
-      "description": "Pack provenance: target provider/session. Search-based packs have no single session/provider and stay null (never fabricated).",
+      "description": "Pack provenance: the single provider/session the pack came from. Present only when exactly one session matched the query; absent when zero or several matched, because a multi-session pack genuinely has no single origin. provider_id comes from that session's stored resume claim and is omitted when the store holds no claim for it — the session is reported without the provider, never with a guessed one.",
       "properties": {
         "provider_id": { "type": ["string", "null"], "maxLength": 64 },
         "session_id": {
@@ -153,7 +153,11 @@
           "type": "string",
           "pattern": "^ses_v1_[A-Za-z0-9]+$"
         },
-        "provider_id": { "type": "string", "maxLength": 64 },
+        "provider_id": {
+          "type": "string",
+          "maxLength": 64,
+          "description": "Provider the store's resume claim attributes this session to. Omitted when the store holds no claim for it (pre-claim rows, conflicting claims) — never guessed."
+        },
         "title": { "type": ["string", "null"] },
         "relevance_score": { "type": "number", "minimum": 0, "maximum": 1 },
         "occurrences": { "type": "integer", "minimum": 1 }
