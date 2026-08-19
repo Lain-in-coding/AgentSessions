@@ -1,7 +1,8 @@
 # Documentation index
 
-Start here. Every document under `docs/` is listed below with its audience and
-what it is for, so nothing is discoverable only by browsing the tree.
+Start here. Every document published in this directory is listed below with its
+audience and what it is for, so nothing is discoverable only by browsing the
+tree.
 
 Two audiences are mixed in this directory, and the difference matters:
 
@@ -50,12 +51,11 @@ For maintainers running releases and regressions, not needed to use the tool.
 | [operations/rebuild-and-migration-runbook.md](operations/rebuild-and-migration-runbook.md) | Rebuilding an index and migrating a data root |
 | [operations/REAL-DATA-REGRESSION.md](operations/REAL-DATA-REGRESSION.md) | Running the real-corpus regression harness |
 | [operations/SEMANTIC-MODEL-BUNDLE.md](operations/SEMANTIC-MODEL-BUNDLE.md) | Importing the optional local semantic model bundle |
-| [operations/PUBLIC-HISTORY-SCRUB.md](operations/PUBLIC-HISTORY-SCRUB.md) | Preparing a public tree from private history |
 | [operations/REUSE-LICENSE-AUDIT.md](operations/REUSE-LICENSE-AUDIT.md) | Third-party licence audit procedure |
 | [operations/core-beta-evidence-matrix.md](operations/core-beta-evidence-matrix.md) | Which evidence claims are locally vs CI verified |
 | [operations/external-readiness-gate.md](operations/external-readiness-gate.md) | External readiness checklist |
-| [operations/migration-v5-to-v6.md](operations/migration-v5-to-v6.md) | **Historical.** Superseded — the store schema is now v12 |
-| [operations/migration-v6-to-v7.md](operations/migration-v6-to-v7.md) | **Historical.** Superseded — the store schema is now v12 |
+| [operations/migration-v5-to-v6.md](operations/migration-v5-to-v6.md) | **Historical.** Superseded — the store schema is now v13 |
+| [operations/migration-v6-to-v7.md](operations/migration-v6-to-v7.md) | **Historical.** Superseded — the store schema is now v13 |
 
 ## Governance records — history, not current state
 
@@ -67,7 +67,6 @@ Read the caveat at the top of this file before citing anything below.
 |---|---|
 | [architecture/RFC-0001-canonical-model-and-stable-id.md](architecture/RFC-0001-canonical-model-and-stable-id.md) | The canonical model and stable identity scheme |
 | [architecture/RFC-0002-provider-adapter-contract.md](architecture/RFC-0002-provider-adapter-contract.md) | The provider adapter contract, including refuse-rather-than-guess |
-| [architecture/R0-ARCHITECTURE-REVIEW.md](architecture/R0-ARCHITECTURE-REVIEW.md) | The initial architecture review |
 | [contracts/CONTRACT-cli-robot-mcp-draft.md](contracts/CONTRACT-cli-robot-mcp-draft.md) | The CLI / Robot / MCP surface contract (draft) |
 
 **Decision records.** Numbered ADRs in decision order.
@@ -100,7 +99,5 @@ a given commit or date. Superseded by later measurements rather than edited.
 | [evidence/core-beta/88d86f4/core-beta-benchmark-full.md](evidence/core-beta/88d86f4/core-beta-benchmark-full.md) | Full benchmark run at that commit |
 | [evidence/integration-beta/real-data-regression.md](evidence/integration-beta/real-data-regression.md) | Real-corpus regression runs, including harness defects found |
 | [release/rehearsal-runbook.md](release/rehearsal-runbook.md) | The release rehearsal procedure |
-| [release/go-no-go.template.md](release/go-no-go.template.md) | Go/no-go decision template |
-| [release/go-no-go.2026-08-16.md](release/go-no-go.2026-08-16.md) | The go/no-go record dated 2026-08-16 |
 | [product/SLI-AND-BENCHMARK-FORMAT.md](product/SLI-AND-BENCHMARK-FORMAT.md) | The benchmark and SLI reporting format |
 | [security/FIXTURE-REDACTION-POLICY.md](security/FIXTURE-REDACTION-POLICY.md) | How test fixtures are redacted |
