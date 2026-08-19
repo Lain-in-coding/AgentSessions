@@ -3961,24 +3961,38 @@ fn jsonl_sync_emits_progress_frames_then_single_response() {
         .map(|line| serde_json::from_str(line).unwrap_or_else(|e| panic!("bad frame: {e}\n{line}")))
         .collect();
     // 逐源 progress + 收尾 response，每行一个完整 frame（contract §4）。
-    assert_eq!(frames.len(), 3, "2 progress + 1 response: {text}");
+    // 逐源 progress + 提交阶段 progress + 收尾 response，每行一个完整 frame
+    // （contract §4）。提交那条是刻意加的：提交实测占首次索引 98.2% 的耗时，
+    // 且代价随 catalog 增长，所以进入它之前必须先说一声。
+    assert_eq!(
+        frames.len(),
+        4,
+        "2 per-source progress + 1 commit progress + 1 response: {text}"
+    );
     assert_eq!(frames[0]["frame_type"], "progress");
     assert_eq!(frames[1]["frame_type"], "progress");
+    assert_eq!(frames[2]["frame_type"], "progress");
     assert!(
         frames[0]["message"]
             .as_str()
             .is_some_and(|m| m.contains("scanned")),
         "{text}"
     );
-    for frame in &frames[..2] {
+    assert!(
+        frames[2]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("committing")),
+        "the commit phase must announce itself before the slow write: {text}"
+    );
+    for frame in &frames[..3] {
         let message = frame["message"].as_str().expect("progress message");
         assert!(
             paths.iter().all(|path| !message.contains(path)),
             "progress must not disclose source paths: {message}"
         );
     }
-    assert_eq!(frames[2]["frame_type"], "response");
-    assert_eq!(frames[2]["command"], "sync");
+    assert_eq!(frames[3]["frame_type"], "response");
+    assert_eq!(frames[3]["command"], "sync");
 
     // 指纹缓存命中（重扫同一批源）：措辞如实切换为 checked/unchanged，
     // 不得谎报 "staged (0 messages)"（Minor-4）。

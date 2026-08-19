@@ -1859,7 +1859,7 @@ fn dispatch(
                         "sync --discover 不接受路径或额外 flag；路径由 provider 数据根自动发现",
                     ));
                 }
-                sync_discover(store, mode == protocol::OutputMode::Jsonl, request_id)?
+                sync_discover(store, SyncProgress::for_mode(mode), request_id)?
             } else if let Some(list_path) = from_file {
                 // 5000 个源文件的路径展开后超过 Windows 的命令行长度上限，进程根本
                 // 起不来。`--from-file` 收一份每行一个路径的清单（ripgrep/xargs
@@ -1879,20 +1879,10 @@ fn dispatch(
                         "sync --from-file: {list_path} 里没有任何路径（空行与 # 注释会被忽略）"
                     )));
                 }
-                sync_files(
-                    store,
-                    &paths,
-                    mode == protocol::OutputMode::Jsonl,
-                    request_id,
-                )?
+                sync_files(store, &paths, SyncProgress::for_mode(mode), request_id)?
             } else {
                 no_flag_like_positional(&args[1..], "sync <file>... | sync --discover")?;
-                sync_files(
-                    store,
-                    &args[1..],
-                    mode == protocol::OutputMode::Jsonl,
-                    request_id,
-                )?
+                sync_files(store, &args[1..], SyncProgress::for_mode(mode), request_id)?
             };
             Ok((
                 "sync",
@@ -3535,7 +3525,7 @@ impl RootState {
 /// 隐私：结果只报计数与 provider id，绝不包含绝对 transcript 路径。
 fn sync_discover(
     store: &SqliteStore,
-    progress: bool,
+    progress: SyncProgress,
     request_id: Option<&str>,
 ) -> Result<(serde_json::Value, Vec<String>), CliError> {
     let mut all_paths: Vec<String> = Vec::new();
@@ -4137,7 +4127,7 @@ fn jsonl_health(
 fn sync_files(
     store: &SqliteStore,
     paths: &[String],
-    progress: bool,
+    progress: SyncProgress,
     request_id: Option<&str>,
 ) -> Result<(serde_json::Value, Vec<String>), CliError> {
     if paths.is_empty() {
@@ -4476,12 +4466,55 @@ fn prepare_one(
     })
 }
 
+/// 同步进度的呈现方式。
+///
+/// 三态而非 bool:jsonl 走版本化协议 frame(stdout),human 走 stderr 单行,
+/// `--robot`/json 完全静默。契约 §6 明确"进程诊断永远走 stderr",而 §4 只禁
+/// `--robot` 的 progress —— 所以 human 模式在 stderr 上报进度是合规的,且
+/// **stdout 字节不变**(既有断言 stdout 版式的测试不会受影响)。
+///
+/// 为什么需要它:首次全量索引在真实语料上要跑几分钟,而 human 模式此前
+/// 全程零输出 —— 用户无法区分"正在工作"与"卡死了"。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SyncProgress {
+    /// 不报进度(`--robot` 与 json 单 envelope 模式)。
+    Silent,
+    /// stderr 单行文本,给人看。
+    HumanStderr,
+    /// stdout 版本化 progress frame,给程序看。
+    JsonlFrames,
+}
+
+impl SyncProgress {
+    /// `--robot` 在上游已被归一为 [`protocol::OutputMode::Json`](protocol::OutputMode),
+    /// 所以这里只看 mode 就够 —— Json 一律静默,同时覆盖 `--robot` 与
+    /// `--output json` 两条路径(两者都只允许单个 envelope,插入进度会破坏它)。
+    fn for_mode(mode: protocol::OutputMode) -> Self {
+        match mode {
+            protocol::OutputMode::Jsonl => Self::JsonlFrames,
+            protocol::OutputMode::Human => Self::HumanStderr,
+            protocol::OutputMode::Json => Self::Silent,
+        }
+    }
+
+    /// 报一条进度。`message` 已由调用方按四种路径如实措辞。
+    fn emit(self, message: &str, request_id: Option<&str>) {
+        match self {
+            Self::Silent => {}
+            Self::HumanStderr => eprintln!("asg sync: {message}"),
+            Self::JsonlFrames => {
+                protocol::write_stdout_line(&protocol::progress_frame("sync", message, request_id));
+            }
+        }
+    }
+}
+
 fn sync_files_inner(
     store: &SqliteStore,
     paths: &[String],
     ctx: &SyncContext,
     allow_empty: bool,
-    progress: bool,
+    progress: SyncProgress,
     request_id: Option<&str>,
 ) -> Result<(serde_json::Value, Vec<String>), CliError> {
     let synthetic_batches = &ctx.synthetic_batches;
@@ -4520,7 +4553,7 @@ fn sync_files_inner(
         paths.len(),
         |index| prepare_one(&paths[index], &refs, ctx, &cached, &unchanged_counts),
         |index, prepared: &PreparedSource| {
-            if !progress {
+            if progress == SyncProgress::Silent {
                 return;
             }
             // 措辞如实区分四种路径：指纹命中只是 checked（未 parse），
@@ -4551,7 +4584,7 @@ fn sync_files_inner(
                     format!("checked source {}/{} (unchanged)", index + 1, total)
                 }
             };
-            protocol::write_stdout_line(&protocol::progress_frame("sync", &message, request_id));
+            progress.emit(&message, request_id);
         },
     )?;
     let mark = trace.phase("prepare", mark);
@@ -4634,6 +4667,20 @@ fn sync_files_inner(
     // discover 合成的空批（已删除源的 tombstone）追加进提交批次。
     sources.extend(synthetic_batches.iter().cloned());
     let mark = trace.phase("merge", mark);
+
+    // 提交是首次索引里最慢的一步（实测占 98.2%，且代价随 catalog 增长），
+    // 所以进入它之前先说一声——否则 human 模式会在这里静默数分钟，用户无法
+    // 区分"正在写库"和"卡死了"。
+    //
+    // 空批次不报："committing 0 source(s)" 会宣告一件不会发生的事——全部源都
+    // 指纹命中时根本没有提交要做。报数为 0 的进度比不报更糟，它让读者以为
+    // 写库发生过。
+    if !sources.is_empty() {
+        progress.emit(
+            &format!("committing {} source(s) to the store", sources.len()),
+            request_id,
+        );
+    }
 
     let changed = store
         .commit_source_batches_if_changed(&sources)
