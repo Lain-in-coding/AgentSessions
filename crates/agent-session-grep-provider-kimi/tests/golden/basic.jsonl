@@ -1,5 +1,5 @@
-{"type":"context.append_message","message":{"role":"user","content":"hello world"}}
-{"type":"context.append_message","message":{"role":"assistant","content":[{"text":"part1"},{"text":"part2"}]}}
+{"type":"context.append_message","time":1771060500000,"message":{"role":"user","content":"hello world"}}
+{"type":"context.append_message","time":1771060504250,"message":{"role":"assistant","content":[{"text":"part1"},{"text":"part2"}]}}
 {"type":"context.append_loop_event","event":{"type":"step.begin","uuid":"evt-1"}}
 {"type":"context.append_message","message":{"role":"system","content":"system prompt"}}
 not json at all

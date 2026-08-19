@@ -1,6 +1,6 @@
 {
   "committed": 2,
-  "fixture_blake3": "ad708d7bbcf1f4be7d3318d725493bc93b84f9fcd18352b9d61abc8eb2c81185",
+  "fixture_blake3": "c321505195fa6bff926934226671d6d6cafe48c25f5f24dbeb0134e754659994",
   "messages": [
     {
       "is_sidechain": false,
@@ -9,11 +9,11 @@
       "role": "user",
       "seq": 0,
       "span": {
-        "end": 83,
+        "end": 104,
         "start": 0
       },
       "text": "hello world",
-      "timestamp": null
+      "timestamp": "2026-02-14T09:15:00.000Z"
     },
     {
       "is_sidechain": false,
@@ -22,11 +22,11 @@
       "role": "assistant",
       "seq": 1,
       "span": {
-        "end": 194,
-        "start": 84
+        "end": 236,
+        "start": 105
       },
       "text": "part1\npart2",
-      "timestamp": null
+      "timestamp": "2026-02-14T09:15:04.250Z"
     }
   ],
   "session_native_id": null,

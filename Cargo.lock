@@ -198,6 +198,7 @@ dependencies = [
 name = "agent-session-grep-provider-kimi"
 version = "0.1.0"
 dependencies = [
+ "agent-session-grep-application",
  "agent-session-grep-domain",
  "agent-session-grep-ports",
  "agent-session-grep-testkit",

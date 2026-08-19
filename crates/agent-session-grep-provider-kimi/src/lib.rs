@@ -12,7 +12,7 @@
 use agent_session_grep_ports::MetadataResolution;
 use agent_session_grep_ports::{
     AdapterManifest, CanonicalEventSink, Confidence, MessageEvent, ParseReport, ProbeResult,
-    ProviderAdapter, ProviderError, manifest_for,
+    ProviderAdapter, ProviderError, manifest_for, rfc3339_utc_from_epoch_millis,
 };
 
 /// Variant id surfaced in probe results.
@@ -41,6 +41,11 @@ impl Default for KimiCodeAdapter {
 struct WireRecord {
     #[serde(default)]
     r#type: String,
+    /// Record time in epoch milliseconds. Deliberately `Value`, not `i64`: a
+    /// string or float in real data would otherwise fail the whole record's
+    /// deserialization and the line would be skipped, losing the message too.
+    #[serde(default)]
+    time: Option<serde_json::Value>,
     #[serde(default)]
     message: Option<WireMessage>,
 }
@@ -65,7 +70,7 @@ impl ProviderAdapter for KimiCodeAdapter {
             &[
                 "context.append_loop_event records (step/tool events) are not yet parsed",
                 "session id is rarely carried in wire.jsonl; session_native_id is usually left unset",
-                "per-message timestamps are not extracted",
+                "per-message timestamps come from the record-level `time` field (epoch milliseconds); records whose value is missing, non-positive, or out of range carry no timestamp",
                 "context.append_message records carry no per-message native id, so message identity is reconstructed document-scoped by the ingestion layer (Unstable)",
             ],
         )
@@ -230,6 +235,22 @@ impl ProviderAdapter for KimiCodeAdapter {
                 continue;
             }
 
+            // The record-level `time` is epoch milliseconds. Render it as
+            // RFC3339 UTC rather than passing the integer through:
+            // `parse_search_instant` rejects a value with no timezone suffix, so
+            // an unrendered epoch would be dropped by every time-window filter —
+            // which is the whole defect this propagation exists to fix.
+            //
+            // Only a clean positive integer in range yields a timestamp. A
+            // string or float cannot be safely disambiguated from millis here,
+            // and guessing a scale would fabricate an instant; those carry no
+            // timestamp instead, matching the opencode and cline contract.
+            let timestamp = rec
+                .time
+                .as_ref()
+                .and_then(serde_json::Value::as_i64)
+                .and_then(rfc3339_utc_from_epoch_millis);
+
             sink.emit_message(MessageEvent {
                 seq,
                 // `context.append_message` records carry no message id. A
@@ -243,7 +264,7 @@ impl ProviderAdapter for KimiCodeAdapter {
                 parent_native_id: None,
                 role,
                 text: &text,
-                timestamp: None,
+                timestamp: timestamp.as_deref(),
                 is_sidechain: false,
                 span: Some((start, end)),
             })
