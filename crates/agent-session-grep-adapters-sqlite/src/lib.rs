@@ -145,6 +145,114 @@ fn chunk_ids<T: AsRef<str>>(ids: &[T]) -> Vec<&[T]> {
     ids.chunks(BATCH_IN_CHUNK).collect()
 }
 
+/// Opt-in per-step timing *inside* a commit, written to stderr.
+///
+/// The CLI's `ASG_SYNC_TRACE` (`cli/src/main.rs`) showed commit dominating a
+/// first ingest but stopped at the boundary of this crate, so three separate
+/// attempts at the ingest-throughput problem picked their target by reasoning
+/// rather than measurement — and all three picked wrong (parse parallelism:
+/// 1.6% of the run; scoping the catalog reads: slower than the scan it
+/// replaced). `ASG_COMMIT_TRACE=1` breaks the commit itself down so the next
+/// change is aimed at a measured step.
+///
+/// Same shape as `SyncTrace`: one `var_os` per process, `eprintln!` to stderr
+/// so stdout stays a clean protocol stream.
+///
+/// # Where a first ingest's time actually goes
+///
+/// Measured with this tracer on the 100,000-message / 5,000-file / 48.6 MiB
+/// synthetic corpus, after the page-cache sizing, the deduplication of
+/// recomputed work, and the removal of the redundant sorts. 29 `sync`
+/// processes, 33.5 s wall, 1.45 MiB/s:
+///
+/// ```text
+/// inside the write transaction              20.1 s
+///   tx.commit_fsync          7.15 s   SQLite's own commit
+///   tx.alias_regen           4.24 s   rebuild flat alias fields
+///   tx.fts_upsert            2.74 s   FTS5 insertion
+///   tx.placement_edge_upsert 1.80 s   4 indexes + 1 unique constraint per row
+///   tx.verify_pending        1.13 s   re-derive the manifest, compare to intent
+///   tx.session_fts_rebuild   1.00 s   session metadata projection
+///   tx.source_replacements   0.95 s   membership/claim/scan rows
+///   tx.verify_integrity      0.48 s
+///   tx.affected_sessions     0.30 s
+///   tx.catalog_upsert        0.20 s
+/// before the transaction                    8.9 s
+///   catalog_state_reads      3.79 s   6 whole-table loads for the claimer graph
+///   manifest_validate        3.26 s   canonicalize + digest the batch
+///   begin_intent             0.74 s   write the durable intent
+///   merge_prepare            0.61 s
+///   identity_metadata_check  0.38 s
+/// outside commit                            3.9 s   parse, verify, 29 process launches
+/// ```
+///
+/// # Why 3.5 MiB/s is not reachable by tuning this design
+///
+/// Add up only the steps that *write the facts the store exists to hold* —
+/// catalog rows, FTS rows, placement/edge rows, membership rows, and SQLite's
+/// commit — plus the work no commit can avoid (parsing the transcripts, and 29
+/// process launches). That is 12.8 s + 3.9 s ≈ 16.7 s, i.e. **≈ 3.0 MiB/s**.
+///
+/// That figure is the ceiling with *every* derived-state step driven to zero:
+/// no durable intent, no claimer graph, no alias regeneration, no session
+/// metadata projection, and no integrity verification. It is below the 3.5
+/// MiB/s threshold. Reaching the threshold therefore needs a design change, not
+/// a tuning pass. The two structural costs to aim at:
+///
+/// * **The pre-commit reads are O(catalog) per commit, so a full ingest is
+///   O(n²/batch).** They load whole-table membership and relation state to
+///   answer "who else claims this entity", which is what makes tombstone
+///   derivation safe. Scoping them with `IN`-chunk lookups was tried and
+///   measured *slower* than the sequential scan; the fix is to stop needing
+///   the whole graph per batch (e.g. a maintained claimer-count column), not
+///   to look it up differently.
+/// * **Every message payload is written twice per commit** — once by
+///   `tx.catalog_upsert`, then again by `tx.alias_regen`, which reads the row
+///   back, splices in `session`/`spans`/`parent`/`is_sidechain`, and updates it.
+///   Those aliases are derived from the placements and edges in the same batch.
+///   Projecting them before the insert, and falling back to the read-modify-write
+///   only for entities some *other* source also claims, would remove a full
+///   rewrite of the catalog from the hot path.
+#[derive(Clone, Copy)]
+struct CommitTrace(bool);
+
+impl CommitTrace {
+    fn from_env() -> Self {
+        CommitTrace(std::env::var_os("ASG_COMMIT_TRACE").is_some())
+    }
+
+    /// Report `label`'s duration since `mark` and return a fresh mark. Returns
+    /// the new instant even when tracing is off so callers chain identically.
+    fn step(self, label: &str, mark: std::time::Instant) -> std::time::Instant {
+        let now = std::time::Instant::now();
+        if self.0 {
+            eprintln!(
+                "asg-commit-trace: {label} {:.1}ms",
+                now.duration_since(mark).as_secs_f64() * 1000.0
+            );
+        }
+        now
+    }
+}
+
+/// Opt-in `synchronous=NORMAL` for a bulk ingest. **Measured, and not taken.**
+///
+/// This is the obvious speed-for-durability trade on a write-heavy path, so it
+/// was measured rather than assumed: a full 5,000-file ingest of the 100k
+/// synthetic corpus took 36.7 s with `synchronous=NORMAL` against 33.5 s with
+/// the default `FULL`, on the same machine state. It is not slower *because* of
+/// `NORMAL` — that is inside this machine's run-to-run noise — but it is
+/// certainly not faster, and the reason is visible in the commit trace: with a
+/// 256 MiB page cache the transaction's dirty pages are not spilled early, so
+/// SQLite's commit step is dominated by *writing* ~17 MiB of WAL frames, and the
+/// single fsync that `NORMAL` would skip is a rounding error next to it.
+///
+/// So the knob buys nothing and is deliberately absent. If someone reaches for
+/// it again: `FULL` and `NORMAL` differ only in whether the WAL is fsynced
+/// before a commit returns — neither can corrupt the catalog, because WAL frames
+/// are checksummed and a torn frame is discarded during recovery — but `NORMAL`
+/// can lose transactions that already reported success, and this catalog is the
+/// only copy of its derived facts.
 fn unix_ms() -> PortResult<i64> {
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1398,9 +1506,38 @@ impl SqliteStore {
     ///
     /// WAL journal 模式的 PRAGMA 初始化复制自 ctx（ctxrs，Apache-2.0）的
     /// catalog 初始化。
+    ///
+    /// The three pragmas around it are **durability-neutral by construction** —
+    /// none of them changes when or whether SQLite fsyncs, so the durable-intent
+    /// state machine (`begin_index_batch_with_relations` → single commit → CAS
+    /// activate) and the writer lease keep exactly the guarantees they had.
+    /// They were chosen because a measured commit trace (`ASG_COMMIT_TRACE=1`)
+    /// on the 100k-message synthetic corpus showed the write transaction paying
+    /// for cache misses, not for I/O policy:
+    ///
+    /// * `page_size = 16384`. Message payloads and FTS5 segment blobs are the
+    ///   bulk of this catalog and routinely exceed the 4 KiB default, so the
+    ///   default forces overflow-page chains on rows that fit in one 16 KiB
+    ///   page. Set before `journal_mode=WAL` because WAL mode freezes the page
+    ///   size, and silently ignored on a catalog that already has content — so
+    ///   existing data roots keep their page size and need no migration.
+    /// * `cache_size = -262144` (256 MiB, negative = KiB rather than pages).
+    ///   The default 2 MiB page cache cannot hold the b-tree interior nodes of
+    ///   `message_placements`' four indexes, so a commit that inserts ~3,500
+    ///   placements re-reads interior pages from disk for nearly every row and
+    ///   spills dirty pages into the WAL mid-transaction.
+    /// * `temp_store = MEMORY`. The `UNIQUE(session_id, document_id,
+    ///   source_ordinal)` constraint and the session-metadata `ORDER BY` build
+    ///   transient sorters; keeping them off disk avoids a second file's worth
+    ///   of write traffic inside the write transaction.
     fn init(conn: &Connection) -> PortResult<()> {
-        conn.execute_batch("PRAGMA journal_mode=WAL;")
-            .map_err(backend)?;
+        conn.execute_batch(
+            "PRAGMA page_size=16384;
+             PRAGMA journal_mode=WAL;
+             PRAGMA cache_size=-262144;
+             PRAGMA temp_store=MEMORY;",
+        )
+        .map_err(backend)?;
         Self::migrate(conn)?;
         Self::register_scalar_functions(conn)
     }
@@ -2690,9 +2827,12 @@ impl SqliteStore {
         // claims, scans), skip all of it and report no generation change.
         // The per-batch cost is then proportional to the batch, not the
         // catalog — this is what makes an unchanged re-sync fast.
+        let trace = CommitTrace::from_env();
+        let mark = std::time::Instant::now();
         if self.sources_are_current(&ordered_sources)? {
             return Ok(false);
         }
+        let mark = trace.step("sources_are_current", mark);
 
         let scanned_paths: BTreeSet<String> = paths.into_iter().map(str::to_string).collect();
         let current_entities_by_source = self.source_entity_membership_state()?;
@@ -2701,6 +2841,7 @@ impl SqliteStore {
         let stored_placements = self.stored_placements()?;
         let stored_edges = self.stored_edges()?;
         let stored_activities = self.stored_activities()?;
+        let mark = trace.step("catalog_state_reads", mark);
 
         let mut merged = BTreeMap::<String, (StableId, Vec<u8>, String)>::new();
         let mut observed_placements = BTreeMap::<String, MessagePlacement>::new();
@@ -2938,6 +3079,7 @@ impl SqliteStore {
             .into_iter()
             .filter_map(|(id, payload)| payload.map(|payload| (id.as_str().to_string(), payload)))
             .collect();
+        let mark = trace.step("merge_prepare", mark);
 
         for (id, payload, text) in merged.values_mut() {
             let Some(stored) = stored_by_id.get(id.as_str()) else {
@@ -3210,14 +3352,28 @@ impl SqliteStore {
                 .collect(),
         };
 
-        batch_manifest(&upserts, &deletes, &relations)?;
+        // Canonicalizing the batch validates it (duplicate ids, upsert/delete
+        // overlap, relation manifest shape) *and* produces the durable intent's
+        // digest and JSON. Both are wanted, so build it once and hand it to the
+        // intent write: this used to be two identical calls back to back, and
+        // the second was pure recomputation — the traced cost of the discarded
+        // first call was 4.0 s of a 43 s ingest, because it re-serializes every
+        // placement, edge, activity and source membership in the batch and
+        // re-hashes every payload. Nothing between here and the intent write
+        // touches the catalog, so one call is exact.
+        let manifest = batch_manifest(&upserts, &deletes, &relations)?;
+        let mark = trace.step("manifest_validate", mark);
         self.ensure_stored_identity_metadata_matches(&upserts)?;
+        let mark = trace.step("identity_metadata_check", mark);
         if self.source_batches_are_current(&upserts, &relations)? {
             return Ok(false);
         }
+        let mark = trace.step("source_batches_are_current", mark);
 
-        let pending = self.begin_index_batch_with_relations(&upserts, &deletes, &relations)?;
+        let pending = self.begin_index_batch_from_manifest(manifest)?;
+        let mark = trace.step("begin_intent", mark);
         self.commit_index_batch_with_relations(&pending, &upserts, &deletes, &relations)?;
+        trace.step("commit_tx", mark);
         Ok(true)
     }
 
@@ -3555,6 +3711,17 @@ impl SqliteStore {
         Ok(true)
     }
 
+    /// Whole-table membership and relation state, keyed for lookup.
+    ///
+    /// None of these five loaders carries an `ORDER BY`, deliberately. Every one
+    /// of them funnels its rows into a `BTreeMap`/`BTreeSet`, which imposes key
+    /// order itself, and every source table's key is a declared PRIMARY KEY, so
+    /// no two rows can collide on that key and "which row wins" never depends on
+    /// arrival order. Asking SQLite to sort by the key instead makes it walk the
+    /// PK index and fetch each row by rowid — 100,000 random page reads over a
+    /// 100k-message catalog where a sequential table scan answers the same
+    /// question. The sort was measurably the more expensive half of the
+    /// pre-commit read phase.
     fn source_entity_membership_state(
         &self,
     ) -> PortResult<BTreeMap<String, BTreeMap<String, Option<String>>>> {
@@ -3562,7 +3729,7 @@ impl SqliteStore {
         let mut stmt = conn
             .prepare(
                 "SELECT source_path, message_id, document_id
-                 FROM source_membership ORDER BY source_path, message_id",
+                 FROM source_membership",
             )
             .map_err(backend)?;
         let rows = stmt
@@ -3600,7 +3767,7 @@ impl SqliteStore {
         let mut stmt = conn
             .prepare(
                 "SELECT source_path, placement_id
-                 FROM source_placement_membership ORDER BY source_path, placement_id",
+                 FROM source_placement_membership",
             )
             .map_err(backend)?;
         let rows = stmt
@@ -3624,8 +3791,7 @@ impl SqliteStore {
     fn stored_placements_from(conn: &Connection) -> PortResult<BTreeMap<String, StoredPlacement>> {
         let mut stmt = conn
             .prepare(&format!(
-                "SELECT {PLACEMENT_COLUMNS}
-                 FROM message_placements ORDER BY placement_id"
+                "SELECT {PLACEMENT_COLUMNS} FROM message_placements"
             ))
             .map_err(backend)?;
         let rows = stmt.query_map([], placement_row).map_err(backend)?;
@@ -3644,10 +3810,7 @@ impl SqliteStore {
 
     fn stored_edges_from(conn: &Connection) -> PortResult<BTreeMap<String, StoredEdge>> {
         let mut stmt = conn
-            .prepare(&format!(
-                "SELECT {EDGE_COLUMNS}
-                 FROM message_edges ORDER BY child_placement_id"
-            ))
+            .prepare(&format!("SELECT {EDGE_COLUMNS} FROM message_edges"))
             .map_err(backend)?;
         let rows = stmt.query_map([], edge_row).map_err(backend)?;
         let mut edges = BTreeMap::new();
@@ -3667,7 +3830,7 @@ impl SqliteStore {
         let mut stmt = conn
             .prepare(
                 "SELECT activity_id, message_id, kind, actor, name, target, status
-                 FROM tool_activities ORDER BY activity_id",
+                 FROM tool_activities",
             )
             .map_err(backend)?;
         let rows = stmt
@@ -3700,7 +3863,7 @@ impl SqliteStore {
         let mut stmt = conn
             .prepare(
                 "SELECT source_path, activity_id
-                 FROM tool_activity_membership ORDER BY source_path, activity_id",
+                 FROM tool_activity_membership",
             )
             .map_err(backend)?;
         let rows = stmt
@@ -3942,6 +4105,16 @@ impl SqliteStore {
             }
         }
 
+        // One statement pair for the whole loop rather than one per entity:
+        // this body runs once per regenerated entity (~105,000 times over a
+        // 100k-message ingest), and `query_row`/`execute` re-prepare their SQL
+        // on every call.
+        let mut read_payload = tx
+            .prepare("SELECT payload FROM catalog WHERE id = ?1")
+            .map_err(backend)?;
+        let mut write_payload = tx
+            .prepare("UPDATE catalog SET payload = ?2 WHERE id = ?1")
+            .map_err(backend)?;
         for entity_id in fully_complete_entities {
             let Some(id) = StableId::from_wire(&entity_id) else {
                 return Err(PortError::Backend(
@@ -3951,15 +4124,11 @@ impl SqliteStore {
             if !matches!(id.kind(), IdKind::Message | IdKind::Session) {
                 continue;
             }
-            let payload: Option<Vec<u8>> = tx
-                .query_row(
-                    "SELECT payload FROM catalog WHERE id = ?1",
-                    [&entity_id],
-                    |row| row.get(0),
-                )
+            let stored: Option<Vec<u8>> = read_payload
+                .query_row([&entity_id], |row| row.get(0))
                 .optional()
                 .map_err(backend)?;
-            let Some(payload) = payload else {
+            let Some(payload) = stored else {
                 continue;
             };
             let mut map = match serde_json::from_slice::<serde_json::Value>(&payload) {
@@ -4103,24 +4272,18 @@ impl SqliteStore {
                 _ => unreachable!(),
             }
 
-            let payload = serde_json::to_vec(&serde_json::Value::Object(map)).map_err(backend)?;
+            let rebuilt = serde_json::to_vec(&serde_json::Value::Object(map)).map_err(backend)?;
             // Skip the write when the rebuilt aliases equal the stored bytes:
             // regeneration must not rewrite the catalog (and inflate the WAL)
-            // on every commit once aliases are stable.
-            let stored: Option<Vec<u8>> = tx
-                .query_row(
-                    "SELECT payload FROM catalog WHERE id = ?1",
-                    [&entity_id],
-                    |row| row.get(0),
-                )
-                .optional()
-                .map_err(backend)?;
-            if stored.as_deref() != Some(payload.as_slice()) {
-                tx.execute(
-                    "UPDATE catalog SET payload = ?2 WHERE id = ?1",
-                    rusqlite::params![entity_id, payload],
-                )
-                .map_err(backend)?;
+            // on every commit once aliases are stable. `payload` is those
+            // stored bytes — it was read from `catalog` at the top of this
+            // iteration and nothing has written this id since, so comparing
+            // against it is exactly what re-reading the row would answer, one
+            // index lookup cheaper per entity.
+            if rebuilt != payload {
+                write_payload
+                    .execute(rusqlite::params![entity_id, rebuilt])
+                    .map_err(backend)?;
             }
         }
         Ok(())
@@ -4353,6 +4516,18 @@ impl SqliteStore {
         deletes: &[StableId],
         relations: &RelationManifests,
     ) -> PortResult<PendingIndexBatch> {
+        self.begin_index_batch_from_manifest(batch_manifest(upserts, deletes, relations)?)
+    }
+
+    /// Write the durable intent for an already-canonicalized batch.
+    ///
+    /// Split out so callers that must canonicalize the batch anyway (to validate
+    /// it before deciding to commit) do not pay for a second identical
+    /// canonicalization here.
+    fn begin_index_batch_from_manifest(
+        &self,
+        manifest: CanonicalBatchManifest,
+    ) -> PortResult<PendingIndexBatch> {
         let base = self.active_generation()?;
         let target = base
             .checked_add(1)
@@ -4360,7 +4535,6 @@ impl SqliteStore {
         let target_sql = i64::try_from(target).map_err(backend)?;
         let base_sql = i64::try_from(base).map_err(backend)?;
         let op = operation_id()?;
-        let manifest = batch_manifest(upserts, deletes, relations)?;
         let upsert_json = serde_json::to_string(&manifest.upsert_ids).map_err(backend)?;
         let delete_json = serde_json::to_string(&manifest.delete_ids).map_err(backend)?;
         let conn = self.conn.borrow();
@@ -4779,27 +4953,33 @@ impl SqliteStore {
         deletes: &[StableId],
         relations: &RelationManifests,
     ) -> PortResult<()> {
+        let trace = CommitTrace::from_env();
+        let mut mark = std::time::Instant::now();
         let mut conn = self.conn.borrow_mut();
         let tx = conn.transaction().map_err(backend)?;
         Self::verify_pending_in_tx(&tx, pending, upserts, deletes, relations)?;
+        mark = trace.step("tx.verify_pending", mark);
 
         // Session 元数据投影（schema v11）：收集本批触碰的 Session，提交末尾
         // 逐个重建其 `session_fts` 行（删除按 rowid 经边车定位，重插新投影）。
         // 覆盖 upsert/delete 实体、placement 变动（含移动归属的旧主）、以及
         // source replacement 的旧 placement 与 claim 行——与写入路径同事务。
+        //
+        // Message ids are gathered first and looked up in one chunked pass.
+        // They used to be resolved one id per call, which meant one
+        // format!-built SQL string and one sqlite3_prepare per upserted message
+        // *and* per upserted placement — 200,000 prepares over a 100k-message
+        // ingest to answer a question `collect_message_sessions` already
+        // answers in `BATCH_IN_CHUNK`-sized batches. Set union is associative,
+        // so batching is exact.
         let mut affected_sessions = BTreeSet::new();
+        let mut session_lookup_messages: Vec<String> = Vec::new();
         for id in upserts.iter().map(|(id, _, _)| id).chain(deletes.iter()) {
             match id.kind() {
                 IdKind::Session => {
                     affected_sessions.insert(id.as_str().to_string());
                 }
-                IdKind::Message => {
-                    Self::collect_message_sessions(
-                        &tx,
-                        &[id.as_str().to_string()],
-                        &mut affected_sessions,
-                    )?;
-                }
+                IdKind::Message => session_lookup_messages.push(id.as_str().to_string()),
                 IdKind::Document => {}
                 IdKind::Source => {}
             }
@@ -4817,13 +4997,12 @@ impl SqliteStore {
                 // read its old owner before the INSERT ... ON CONFLICT update.
                 old_placement_ids.push(placement.id.as_str().to_string());
                 affected_sessions.insert(placement.session_id.as_str().to_string());
-                Self::collect_message_sessions(
-                    &tx,
-                    &[placement.message_id.as_str().to_string()],
-                    &mut affected_sessions,
-                )?;
+                session_lookup_messages.push(placement.message_id.as_str().to_string());
             }
         }
+        session_lookup_messages.sort_unstable();
+        session_lookup_messages.dedup();
+        Self::collect_message_sessions(&tx, &session_lookup_messages, &mut affected_sessions)?;
         for source in &relations.source_replacements {
             source_paths.push(source.source_path.clone());
             if let Some(claim) = &source.resume_claim {
@@ -4844,6 +5023,7 @@ impl SqliteStore {
         }
         Self::collect_placement_sessions(&tx, &old_placement_ids, &mut affected_sessions)?;
         Self::collect_resume_claim_sessions(&tx, &source_paths, &mut affected_sessions)?;
+        mark = trace.step("tx.affected_sessions", mark);
 
         // 批量写入：同一事务内以多行 VALUES 语句替代逐行 prepared execute
         // （借鉴 hstry bulk_insert_messages_in_tx，MIT，
@@ -4876,7 +5056,9 @@ impl SqliteStore {
             }
             // fts 行与 fts_ids 身份边车的批量维护（含按 rowid 的旧行删除）：
             // 与逐行路径同语义，rowid 显式分配（见 batch_upsert_fts_in_tx）。
+            mark = trace.step("tx.catalog_upsert", mark);
             Self::batch_upsert_fts_in_tx(&tx, upserts)?;
+            mark = trace.step("tx.fts_upsert", mark);
             for chunk in deletes.chunks(BULK_INSERT_ROWS_PER_CHUNK) {
                 let ids: Vec<&str> = chunk.iter().map(|id| id.as_str()).collect();
                 let placeholders = in_placeholders(ids.len());
@@ -4902,6 +5084,7 @@ impl SqliteStore {
                 .map_err(backend)?;
             }
         }
+        mark = trace.step("tx.catalog_delete", mark);
 
         for delete in &relations.relation_deletes {
             match delete {
@@ -4928,6 +5111,7 @@ impl SqliteStore {
                 }
             }
         }
+        mark = trace.step("tx.relation_delete", mark);
         // 关系行 upsert：多行批量（借鉴 hstry bulk_insert_messages_in_tx，MIT，
         // hstry/crates/hstry-core/src/db.rs:2990）。message_placements 8 列 ×
         // 100 行 = 800 参数，message_edges 4 列 × 100 行 = 400 参数，均低于
@@ -5027,6 +5211,7 @@ impl SqliteStore {
                     .map_err(backend)?;
             }
         }
+        mark = trace.step("tx.placement_edge_upsert", mark);
 
         // 工具活动 upsert（v12）：逐行 upsert。活动行是内容寻址的（activity_id），
         // 同一事实跨源去重；行数由工具调用数决定，量级远小于 placements/edges。
@@ -5056,136 +5241,167 @@ impl SqliteStore {
                 .map_err(backend)?;
             }
         }
+        mark = trace.step("tx.activity_upsert", mark);
 
-        for source in &relations.source_replacements {
-            tx.execute(
-                "DELETE FROM source_membership WHERE source_path = ?1",
-                [&source.source_path],
-            )
-            .map_err(backend)?;
-            // 每源成员行可能上千，多行批量插入（同 hstry bulk_insert 模式，
-            // 3 列 × 100 行 = 300 参数）。
-            const _: () = assert!(3 * BULK_INSERT_ROWS_PER_CHUNK <= 950);
-            for chunk in source.entity_memberships.chunks(BULK_INSERT_ROWS_PER_CHUNK) {
-                let sql = format!(
-                    "INSERT INTO source_membership(source_path, message_id, document_id)
-                     VALUES {}",
-                    multi_row_values(chunk.len(), 3)
-                );
-                let params: Vec<&dyn rusqlite::ToSql> = chunk
-                    .iter()
-                    .flat_map(|membership| {
-                        let c0: &dyn rusqlite::ToSql = &source.source_path;
-                        let c1: &dyn rusqlite::ToSql = &membership.entity_id;
-                        let c2: &dyn rusqlite::ToSql = &membership.document_id;
-                        [c0, c1, c2]
-                    })
-                    .collect();
-                tx.execute(&sql, rusqlite::params_from_iter(params))
-                    .map_err(backend)?;
-            }
-            tx.execute(
-                "DELETE FROM source_placement_membership WHERE source_path = ?1",
-                [&source.source_path],
-            )
-            .map_err(backend)?;
-            const _: () = assert!(2 * BULK_INSERT_ROWS_PER_CHUNK <= 950);
-            for chunk in source.placement_ids.chunks(BULK_INSERT_ROWS_PER_CHUNK) {
-                let sql = format!(
-                    "INSERT INTO source_placement_membership(source_path, placement_id)
-                     VALUES {}",
-                    multi_row_values(chunk.len(), 2)
-                );
-                let rows: Vec<String> = chunk
-                    .iter()
-                    .map(|placement_id| placement_id.as_str().to_string())
-                    .collect();
-                let params: Vec<&dyn rusqlite::ToSql> = rows
-                    .iter()
-                    .flat_map(|placement_id| {
-                        let c0: &dyn rusqlite::ToSql = &source.source_path;
-                        let c1: &dyn rusqlite::ToSql = placement_id;
-                        [c0, c1]
-                    })
-                    .collect();
-                tx.execute(&sql, rusqlite::params_from_iter(params))
-                    .map_err(backend)?;
-            }
-            // 工具活动成员（v12）：与 placement 同一生命周期——先清旧声明，
-            // 本批带活动才写新行；无活动即清除（source 不再观察/移除）。
-            tx.execute(
-                "DELETE FROM tool_activity_membership WHERE source_path = ?1",
-                [&source.source_path],
-            )
-            .map_err(backend)?;
-            for activity_id in &source.activity_ids {
-                tx.execute(
+        // Every fixed-SQL statement in this loop uses `prepare_cached`: the loop
+        // body runs once per source in the batch (~180 per commit, 5,000 per
+        // full ingest) and `tx.execute` re-prepares its SQL on each call. Only
+        // the multi-row VALUES inserts stay on `execute`, because their SQL text
+        // varies with the chunk's row count and so cannot be reused.
+        {
+            let mut delete_entity_claims = tx
+                .prepare("DELETE FROM source_membership WHERE source_path = ?1")
+                .map_err(backend)?;
+            let mut delete_placement_claims = tx
+                .prepare("DELETE FROM source_placement_membership WHERE source_path = ?1")
+                .map_err(backend)?;
+            let mut delete_activity_claims = tx
+                .prepare("DELETE FROM tool_activity_membership WHERE source_path = ?1")
+                .map_err(backend)?;
+            let mut insert_activity_claim = tx
+                .prepare(
                     "INSERT INTO tool_activity_membership(source_path, activity_id)
                      VALUES(?1, ?2)",
-                    rusqlite::params![&source.source_path, activity_id],
                 )
                 .map_err(backend)?;
-            }
-            tx.execute(
-                "INSERT INTO source_scans(source_path, scanned_at_ms, len_bytes, fingerprint, provider_id)
-                 VALUES(?1, ?2, ?3, ?4, ?5)
-                 ON CONFLICT(source_path) DO UPDATE SET
-                     scanned_at_ms = excluded.scanned_at_ms,
-                     len_bytes = excluded.len_bytes,
-                     fingerprint = excluded.fingerprint,
-                     provider_id = COALESCE(excluded.provider_id, source_scans.provider_id)",
-                rusqlite::params![
-                    &source.source_path,
-                    unix_ms()?,
-                    source.len_bytes,
-                    source.fingerprint,
-                    source.provider_id,
-                ],
-            )
-            .map_err(backend)?;
-            if source.relation_complete {
-                tx.execute(
+            let mut upsert_scan = tx
+                .prepare(
+                    "INSERT INTO source_scans(
+                         source_path, scanned_at_ms, len_bytes, fingerprint, provider_id
+                     ) VALUES(?1, ?2, ?3, ?4, ?5)
+                     ON CONFLICT(source_path) DO UPDATE SET
+                         scanned_at_ms = excluded.scanned_at_ms,
+                         len_bytes = excluded.len_bytes,
+                         fingerprint = excluded.fingerprint,
+                         provider_id = COALESCE(
+                             excluded.provider_id, source_scans.provider_id
+                         )",
+                )
+                .map_err(backend)?;
+            let mut upsert_relation_scan = tx
+                .prepare(
                     "INSERT INTO source_relation_scans(source_path, relation_schema_version)
                      VALUES(?1, ?2)
                      ON CONFLICT(source_path) DO UPDATE SET
                          relation_schema_version = excluded.relation_schema_version",
-                    rusqlite::params![&source.source_path, RELATION_SCHEMA_VERSION],
                 )
                 .map_err(backend)?;
-            } else {
-                tx.execute(
-                    "DELETE FROM source_relation_scans WHERE source_path = ?1",
-                    [&source.source_path],
-                )
+            let mut delete_relation_scan = tx
+                .prepare("DELETE FROM source_relation_scans WHERE source_path = ?1")
                 .map_err(backend)?;
-            }
-            // Source-scoped Resume Metadata 声明（ADR-0009）：随 source replacement
-            // 同事务原子替换——先清旧声明，本批带声明才写新行；无声明
-            // （source 不再观察/移除）即清除，绝不残留旧声明。
-            tx.execute(
-                "DELETE FROM source_session_resume_claims WHERE source_path = ?1",
-                [&source.source_path],
-            )
-            .map_err(backend)?;
-            if let Some(claim) = &source.resume_claim {
-                tx.execute(
+            let mut delete_resume_claim = tx
+                .prepare("DELETE FROM source_session_resume_claims WHERE source_path = ?1")
+                .map_err(backend)?;
+            let mut insert_resume_claim = tx
+                .prepare(
                     "INSERT INTO source_session_resume_claims(
                          source_path, session_id, provider_id, provider_session_id,
                          provider_session_id_state, original_working_directory,
                          original_working_directory_state, pair_observed
                      ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                    rusqlite::params![
-                        &source.source_path,
-                        &claim.session_id,
-                        &claim.provider_id,
-                        &claim.provider_session_id,
-                        &claim.provider_session_id_state,
-                        &claim.original_working_directory,
-                        &claim.original_working_directory_state,
-                        i64::from(claim.pair_observed),
-                    ],
                 )
                 .map_err(backend)?;
+            for source in &relations.source_replacements {
+                delete_entity_claims
+                    .execute([&source.source_path])
+                    .map_err(backend)?;
+                // 每源成员行可能上千，多行批量插入（同 hstry bulk_insert 模式，
+                // 3 列 × 100 行 = 300 参数）。
+                const _: () = assert!(3 * BULK_INSERT_ROWS_PER_CHUNK <= 950);
+                for chunk in source.entity_memberships.chunks(BULK_INSERT_ROWS_PER_CHUNK) {
+                    let sql = format!(
+                        "INSERT INTO source_membership(source_path, message_id, document_id)
+                         VALUES {}",
+                        multi_row_values(chunk.len(), 3)
+                    );
+                    let params: Vec<&dyn rusqlite::ToSql> = chunk
+                        .iter()
+                        .flat_map(|membership| {
+                            let c0: &dyn rusqlite::ToSql = &source.source_path;
+                            let c1: &dyn rusqlite::ToSql = &membership.entity_id;
+                            let c2: &dyn rusqlite::ToSql = &membership.document_id;
+                            [c0, c1, c2]
+                        })
+                        .collect();
+                    tx.execute(&sql, rusqlite::params_from_iter(params))
+                        .map_err(backend)?;
+                }
+                delete_placement_claims
+                    .execute([&source.source_path])
+                    .map_err(backend)?;
+                const _: () = assert!(2 * BULK_INSERT_ROWS_PER_CHUNK <= 950);
+                for chunk in source.placement_ids.chunks(BULK_INSERT_ROWS_PER_CHUNK) {
+                    let sql = format!(
+                        "INSERT INTO source_placement_membership(source_path, placement_id)
+                         VALUES {}",
+                        multi_row_values(chunk.len(), 2)
+                    );
+                    let rows: Vec<String> = chunk
+                        .iter()
+                        .map(|placement_id| placement_id.as_str().to_string())
+                        .collect();
+                    let params: Vec<&dyn rusqlite::ToSql> = rows
+                        .iter()
+                        .flat_map(|placement_id| {
+                            let c0: &dyn rusqlite::ToSql = &source.source_path;
+                            let c1: &dyn rusqlite::ToSql = placement_id;
+                            [c0, c1]
+                        })
+                        .collect();
+                    tx.execute(&sql, rusqlite::params_from_iter(params))
+                        .map_err(backend)?;
+                }
+                // 工具活动成员（v12）：与 placement 同一生命周期——先清旧声明，
+                // 本批带活动才写新行；无活动即清除（source 不再观察/移除）。
+                delete_activity_claims
+                    .execute([&source.source_path])
+                    .map_err(backend)?;
+                for activity_id in &source.activity_ids {
+                    insert_activity_claim
+                        .execute(rusqlite::params![&source.source_path, activity_id])
+                        .map_err(backend)?;
+                }
+                upsert_scan
+                    .execute(rusqlite::params![
+                        &source.source_path,
+                        unix_ms()?,
+                        source.len_bytes,
+                        source.fingerprint,
+                        source.provider_id,
+                    ])
+                    .map_err(backend)?;
+                if source.relation_complete {
+                    upsert_relation_scan
+                        .execute(rusqlite::params![
+                            &source.source_path,
+                            RELATION_SCHEMA_VERSION
+                        ])
+                        .map_err(backend)?;
+                } else {
+                    delete_relation_scan
+                        .execute([&source.source_path])
+                        .map_err(backend)?;
+                }
+                // Source-scoped Resume Metadata 声明（ADR-0009）：随 source replacement
+                // 同事务原子替换——先清旧声明，本批带声明才写新行；无声明
+                // （source 不再观察/移除）即清除，绝不残留旧声明。
+                delete_resume_claim
+                    .execute([&source.source_path])
+                    .map_err(backend)?;
+                if let Some(claim) = &source.resume_claim {
+                    insert_resume_claim
+                        .execute(rusqlite::params![
+                            &source.source_path,
+                            &claim.session_id,
+                            &claim.provider_id,
+                            &claim.provider_session_id,
+                            &claim.provider_session_id_state,
+                            &claim.original_working_directory,
+                            &claim.original_working_directory_state,
+                            i64::from(claim.pair_observed),
+                        ])
+                        .map_err(backend)?;
+                }
             }
         }
 
@@ -5194,10 +5410,17 @@ impl SqliteStore {
             .iter()
             .map(|replacement| replacement.source_path.clone())
             .collect();
+        mark = trace.step("tx.source_replacements", mark);
         Self::regenerate_compatibility_aliases_in_tx(&tx, &batch_sources)?;
+        mark = trace.step("tx.alias_regen", mark);
+        let affected_session_count = affected_sessions.len();
         for session_wire in affected_sessions {
             Self::rebuild_session_search_row_in_tx(&tx, &session_wire)?;
         }
+        if trace.0 {
+            eprintln!("asg-commit-trace: tx.session_rows_n {affected_session_count}");
+        }
+        mark = trace.step("tx.session_fts_rebuild", mark);
 
         // 本批触碰的关系行：只校验这些 id 的引用完整性。
         let mut touched_placements: Vec<String> = Vec::new();
@@ -5240,6 +5463,7 @@ impl SqliteStore {
             &touched_edges,
             &touched_claims,
         )?;
+        mark = trace.step("tx.verify_integrity", mark);
         // B1 路径（裸 commit_batch/commit_index_batch）只删 catalog 实体、不维护
         // v7 关系行：被删实体若仍被 message_placements/message_edges 引用，会留下
         // 悬空引用，必须在此拒绝（B2 路径的删除按 claimer 推导，天然无悬空）。
@@ -5258,7 +5482,9 @@ impl SqliteStore {
         )
         .map_err(backend)?;
 
+        let mark = trace.step("tx.activate", mark);
         tx.commit().map_err(backend)?;
+        trace.step("tx.commit_fsync", mark);
         Ok(())
     }
 
