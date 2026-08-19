@@ -51,8 +51,29 @@ pub fn render_success(command: &str, outcome: Outcome, data: &Value, page: &Page
         "config.paths" => {
             // config paths 报告的是"默认位置"，未用到就不会创建；新手照着找会扑空
             // （10 角色体验测试缺陷）。加一句说明，结构本身保持稳定。
-            let mut lines = kv_lines(data);
-            lines.push("说明：以上是默认位置，未创建过的目录表示尚未使用，属正常。".into());
+            //
+            // `config_is_read` 是给机器面的布尔字段，人类版式里由下面那句话表达，
+            // 不再作为一行 `config_is_read: false` 混在路径列表中间。
+            let mut filtered = data.clone();
+            if let Some(obj) = filtered.as_object_mut() {
+                obj.remove("config_is_read");
+            }
+            let mut lines = kv_lines(&filtered);
+            lines.push(
+                "Note: these are default locations. A directory that does not exist yet simply \
+                 has not been used."
+                    .into(),
+            );
+            // M3-6：`config` 那一行是**保留路径**，当前没有任何代码读它
+            // （依赖图里没有 TOML 解析器，全仓库零处读取 config.toml）。
+            // 不加说明就是在宣传一个不存在的功能：用户会去写那个文件然后
+            // 困惑为什么没生效。宁可如实标注，也不为一个尚未实现的功能引入依赖。
+            lines.push(
+                "Note: `config` is a reserved path. This build reads no configuration file -- \
+                 every setting comes from flags and environment variables. Writing a file there \
+                 has no effect."
+                    .into(),
+            );
             lines
         }
         _ => kv_lines(data),
@@ -1231,6 +1252,37 @@ mod tests {
             next_cursor: Some(token.into()),
             has_more: true,
         }
+    }
+
+    #[test]
+    fn config_paths_says_the_config_file_is_never_read() {
+        // M3-6：四个平台分支都打印 `config.toml` 路径，但依赖图里没有 TOML
+        // 解析器、全仓库零处读它。不声明就是在宣传一个不存在的功能 ——
+        // 用户会去写那个文件，然后困惑为什么没生效。
+        let data = json!({
+            "config": "/placeholder/config/agentsessions/config.toml",
+            "data": "/placeholder/data/agentsessions",
+            "cache": "/placeholder/cache/agentsessions",
+            "logs": "/placeholder/data/agentsessions/logs",
+            "config_is_read": false,
+        });
+        let text =
+            render_success("config.paths", Outcome::Success, &data, &Page::default()).join("\n");
+        // 路径本身仍要报告：它是保留位置，不是虚构的。
+        assert!(text.contains("config.toml"), "{text}");
+        assert!(
+            text.contains("reserved path") && text.contains("reads no configuration file"),
+            "必须说明配置文件当前不被读取: {text}"
+        );
+        assert!(
+            text.contains("has no effect"),
+            "必须说明写那个文件不会生效: {text}"
+        );
+        // 机器面的布尔字段不该作为一行裸 kv 混进人类版式的路径列表。
+        assert!(
+            !text.contains("config_is_read"),
+            "human 版式不应暴露机器面字段名: {text}"
+        );
     }
 
     #[test]

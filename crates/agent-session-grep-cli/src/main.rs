@@ -715,7 +715,14 @@ fn config_paths(
     mode: protocol::OutputMode,
     request_id: Option<&str>,
 ) -> Result<protocol::Outcome, CliError> {
-    let paths = platform_paths()?;
+    let mut paths = platform_paths()?;
+    // M3-6：`config` 是**保留路径**——这个构建里没有任何代码读配置文件
+    // （依赖图无 TOML 解析器，全仓库零处读 config.toml）。机器面也必须说出
+    // 这件事，否则一个自动化调用方会以为写那个文件能改变行为。
+    // 与 human 版式同源，不分叉。
+    if let Some(obj) = paths.as_object_mut() {
+        obj.insert("config_is_read".into(), serde_json::json!(false));
+    }
     emit_result(
         "config.paths",
         mode,
