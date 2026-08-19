@@ -11,6 +11,10 @@ reading the source alone.
 
 - Flags and exit codes: [CLI reference](../reference/cli.md)
 - Error messages: [troubleshooting](troubleshooting.md)
+- Deeper agent-facing integration notes:
+  [`skills/agent-session-grep/SKILL.md`](../../skills/agent-session-grep/SKILL.md)
+  — written for an agent consuming this tool, it goes further than this page on
+  the two-ID contract, cursor lifecycle, and per-tool output shapes.
 
 ## Before you configure a client
 
@@ -120,19 +124,32 @@ project. Same shape:
 
 ## Cline
 
-Open the MCP servers pane in the Cline sidebar, choose to edit the configuration
-file (`cline_mcp_settings.json`), and add the same `mcpServers` entry:
+Open the MCP servers pane in the Cline sidebar, open the **Configure** tab, and
+click **Configure MCP Servers**. That opens `cline_mcp_settings.json`:
+
+| Platform | Path |
+| --- | --- |
+| macOS | `~/Library/Application Support/Code/User/globalStorage/saoudrizwan.claude-dev/settings/cline_mcp_settings.json` |
+| Windows | `%APPDATA%\Code\User\globalStorage\saoudrizwan.claude-dev\settings\cline_mcp_settings.json` |
+
+Cline's standalone CLI reads `~/.cline/mcp.json` instead. Either way the entry is
+the same `mcpServers` shape:
 
 ```json
 {
   "mcpServers": {
     "agent-session-grep": {
       "command": "agent-session-grep",
-      "args": ["--db", "/path/to/asg.db", "mcp"]
+      "args": ["--db", "/path/to/asg.db", "mcp"],
+      "disabled": false,
+      "autoApprove": ["search_sessions", "get_session_context", "get_status"]
     }
   }
 }
 ```
+
+`autoApprove` is optional. Every tool here is read-only and touches only the one
+store named in `--db`, so auto-approving the read tools is a reasonable default.
 
 ## Zed
 
@@ -240,6 +257,34 @@ once as `structuredContent`):
 Every successful tool result has the same envelope shape:
 `{ outcome, data, warnings, page }`.
 
+### Verify it by hand before configuring a client
+
+Worth doing once: it separates "the server is broken" from "the client
+configuration is wrong". Pipe the three lines in and expect three response lines
+and a clean exit — the server shuts down on stdin EOF.
+
+```
+# macOS / Linux
+printf '%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"probe","version":"0"}}}' \
+  '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"get_status","arguments":{}}}' \
+  | agent-session-grep --db /path/to/asg.db mcp
+```
+
+```powershell
+# Windows PowerShell
+@(
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"probe","version":"0"}}}'
+  '{"jsonrpc":"2.0","method":"notifications/initialized"}'
+  '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"get_status","arguments":{}}}'
+) | & "C:\path\to\agent-session-grep.exe" --db "C:\path\to\asg.db" mcp
+```
+
+A `get_status` result with a nonzero `catalog_count` means the binary, the store,
+and the protocol path are all sound, and anything still wrong is in the client
+configuration.
+
 ### How failures are reported
 
 The server splits failures into two layers deliberately, and a client needs to
@@ -256,6 +301,13 @@ malformed `id`, and `-32601` for an unknown method. Echoed values in error
 messages are truncated at 128 characters, so a huge bad argument cannot inflate
 the error frame.
 
+This server implements the tools capability only. The served methods are
+`initialize`, `ping`, `tools/list`, `tools/call`, and
+`notifications/initialized`, plus `notifications/cancelled` as a best-effort
+no-op. `resources/list` and `prompts/list` both return `-32601 method not
+found` — that is expected, not a misconfiguration, and a client that treats a
+missing resources capability as fatal will need its own handling.
+
 ## Keeping the index fresh
 
 **This is the part with no automation.** There is no `watch` command, and the MCP
@@ -270,6 +322,25 @@ options:
 - Manually, before a session where history matters.
 - A scheduled task or cron job, for example every 15 minutes or hourly.
 - A shell alias or hook that syncs before you start your agent.
+
+Concretely, hourly:
+
+```
+# macOS / Linux — crontab -e
+0 * * * * /usr/local/bin/agent-session-grep --db /path/to/asg.db --robot sync --discover
+```
+
+```powershell
+# Windows — Task Scheduler
+$action  = New-ScheduledTaskAction -Execute "C:\path\to\agent-session-grep.exe" `
+                                   -Argument "--db C:\path\to\asg.db --robot sync --discover"
+$trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) `
+                                    -RepetitionInterval (New-TimeSpan -Hours 1)
+Register-ScheduledTask -TaskName "agent-session-grep sync" -Action $action -Trigger $trigger
+```
+
+Use `--robot` in a schedule so the output is a single parseable envelope, and use
+an absolute path to the binary — a scheduler's `PATH` is not your shell's.
 
 Two operational facts that make this cheap and safe to over-schedule:
 
@@ -319,7 +390,11 @@ coding history:
 - **Requests are sequential** in this version. `notifications/cancelled` is
   accepted but is a best-effort no-op.
 
-## One known divergence
+## Known divergences
+
+Verified against this build. These are defects here, not in your client.
+
+### The declared `providers` enum is stale and unenforced
 
 `search_sessions` and `generate_handoff` declare their `providers` argument as
 `enum: ["claude", "claude-code", "codex"]` with `maxItems: 2`. The running server
@@ -337,3 +412,20 @@ The accurate list is the CLI's: `claude` (an alias for `claude-code`), plus
 `tencent-codebuddy`. A strict client that validates arguments against the
 declared schema before sending will reject provider filters the server would
 have honored.
+
+### `generate_handoff` redacts its own budget numbers
+
+In the response, `data.budget.max_tokens` and `data.budget.used_tokens` come back
+as the string `"[redacted]"`. The redaction ruleset matches any key whose name
+contains `token`, and these two are caught by it even though they are plain
+integers, not secrets. A caller cannot read back the token budget it just set,
+and a client that expects a number there will fail to parse the field.
+
+`max_bytes`, `used_bytes`, and `max_evidence` in the same object are unaffected,
+so use `used_bytes` against `max_bytes` if you need to see how close a pack came
+to its ceiling.
+
+### `serverInfo.version` reports the crate version
+
+The handshake returns `"version": "0.1.0"`, which is the crate version rather
+than the release version. Do not use it for feature detection.
