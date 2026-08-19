@@ -170,9 +170,10 @@ impl ProviderAdapter for QoderAdapter {
                         // （M2P-16）。所以此处要求顶层身份字段:这是两种格式
                         // 的结构性差异，不是启发式猜测。
                         "session_meta" => {
-                            let payload_wrapped = v.get("payload").is_some_and(serde_json::Value::is_object);
-                            let top_level_identity = v.get("session_id").is_some()
-                                || v.get("cwd").is_some();
+                            let payload_wrapped =
+                                v.get("payload").is_some_and(serde_json::Value::is_object);
+                            let top_level_identity =
+                                v.get("session_id").is_some() || v.get("cwd").is_some();
                             if top_level_identity && !payload_wrapped {
                                 session_meta += 1;
                             }
