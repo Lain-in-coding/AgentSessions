@@ -3,8 +3,11 @@
 //! Assembles a `HandoffPack` from search hits, authoritative source placements,
 //! and catalog data. The default generator is fully deterministic — no LLM
 //! calls, no wall-clock reads. Evidence (original text spans) and inference
-//! (derived summaries) are strictly separated. Pack is preview-only: `asg`
-//! emits the pack and suggested commands, never injects into another agent.
+//! (derived summaries) are strictly separated; because this generator calls no
+//! model, `inference` is always empty here and the split is enforced only so
+//! that a future local-LLM generator cannot smuggle summaries into evidence.
+//! Pack is preview-only: `asg` emits the pack and suggested commands, never
+//! injects into another agent.
 //!
 //! Determinism contract (PRD Q50): the same catalog generation + query +
 //! budget always yields a byte-identical pack. `created_at` is derived from the
@@ -230,7 +233,10 @@ pub fn generate_deterministic(input: HandoffInput<'_>) -> HandoffPack {
         matched_sessions,
         mainline,
         evidence,
-        inference: Vec::new(), // deterministic default: no LLM inference
+        // Deterministic mode calls no model, so there is nothing to infer:
+        // an empty list is the only truthful value, not a placeholder.
+        // See `HandoffPack::inference` for the full contract.
+        inference: Vec::new(),
         target: input.target.clone(),
         time_window: time_window_from_filters(&input.filters),
         provenance: None, // 搜索型 pack 无单一会话/提供商，honest：不臆造

@@ -186,8 +186,11 @@ pub trait ContextGraphStore {
 
     /// Batch-load tool activities for the given message wire ids.
     ///
-    /// Default empty: stores without a tool_activities projection contribute
-    /// nothing. SQLite implements the real batch read.
+    /// The default returns empty as a trait convenience for stores that have no
+    /// `tool_activities` projection (the in-memory testkit store, test fakes).
+    /// It is not the production path: the SQLite adapter overrides this with the
+    /// real chunked batch read, so `handoff` and `context` do get activities
+    /// whenever the store was built at schema v12 or later.
     fn tool_activities_for_messages(
         &self,
         _message_ids: &[StableId],

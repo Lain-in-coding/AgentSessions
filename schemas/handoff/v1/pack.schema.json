@@ -91,7 +91,7 @@
     },
     "inference": {
       "type": "array",
-      "description": "LLM-generated or derived summaries. Every entry MUST be marked inference; never placed in evidence.",
+      "description": "LLM-generated or derived summaries. Every entry MUST be marked inference; never placed in evidence. ALWAYS EMPTY when generation_mode is \"deterministic\", which is the only mode current builds emit: no model is called, so there is nothing to infer. A non-empty list requires a local-LLM generator that marks generation_mode \"local_llm\"; no released build ships one. Consumers must not treat an empty inference list as a missing summary.",
       "items": { "$ref": "#/$defs/inferenceEntry" },
       "maxItems": 500
     },
@@ -132,7 +132,7 @@
     },
     "tool_activity": {
       "type": "array",
-      "description": "Structured tool activity relevant to the matched sessions (optional projection).",
+      "description": "Structured tool activity for the messages that produced the evidence, read from the catalog tool_activities projection (store schema v12). Omitted when those messages have no recorded activity — for example a store built before v12, or a session with no tool calls.",
       "items": { "type": "object" },
       "maxItems": 500
     },
