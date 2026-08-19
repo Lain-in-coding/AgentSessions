@@ -177,6 +177,46 @@ batch 22  files= 17  commit= 1548ms   ← 文件少 10 倍,耗时仍是 1.9 倍
 
 
 
+### 1.3.3 alias regeneration 收敛后实测(2026-08-19 深夜,**当前权威**)
+
+合并 alias regeneration 批内收敛(`af9f1c9`)后我连跑两次:
+
+| 动作 | 第一次 | 第二次 | 阀值 | 判定 |
+|---|---:|---:|---:|---|
+| 首次全量索引 | 0.762 | 0.692 MiB/s | ≥ 3.5 | **仍 FAIL** |
+| 增量同步(无变化) | **1058.9** | 863.7 ms | ≤ 1000 | **两次不一致** |
+| 搜索 p95 | 49.1 | 35.1 ms | ≤ 50 | PASS |
+| MCP p95 | 27.7 | 21.5 ms | ≤ 50 | PASS |
+| `cli_process_overhead_p50_ms` | **30.9** | 26.7 ms | (informational) | ← 噪声指示器 |
+
+**⚠️ 这台机器的测量噪声已经大到能翻转判定,必须记下来:**
+第一次 noop 1058.9 ms **超阀值**、第二次 863.7 ms 通过 —— 同一个二进制、同一
+语料。同期 `cli_process_overhead_p50_ms`(裸 `status` 调用,纯进程启动)
+从 21.7 ms 涨到 30.9 ms 再回落到 26.7 ms,**这就是噪声源**:整机负载
+(当时有多个 cargo/agent 在跑)。
+**教训:单次 gate 运行不足以判定阀值附近的指标。** noop 的余量本来就只有
+一两百毫秒,而进程启动开销的抖动就有 ±9 ms × 27 批 ≈ ±240 ms —— 足以单独
+翻转它。
+→ **给后续 agent 的规则:noop 与搜索这两条贴近阀值的指标,必须连跑两次取
+一致结果;不一致就说明当时机器负载不可信,不要据此声称回归或改进。**
+(这也是为什么 peer agent 报的 0.999 与 0.881 是同一个二进制 —— 它明确
+说了"信比值不信绝对值",那是对的。)
+
+**吞吐的下一步在哪里(peer 的实测结论,可直接采信)**:
+六条 commit 读的收敛**已实现并已回退** —— 实测它不是瓶颈(0.732 → 0.678
+带索引 / 0.723 不带),且它需要的 `source_membership(message_id)` 索引在写
+路径上要付约 6%,而 id-scoped `IN` 分块在批次覆盖大部分 catalog 时比一次顺序
+扫描更慢,反而把 noop 拖过阀值。**一个正确但零收益、还拖垮受门指标的改动
+不值得留下** —— 这个判断是对的。
+真正的平方项在更深一层:`regenerate_compatibility_aliases_in_tx` 每次提交在
+**写事务内**发四条无过滤扫描,并对全 catalog 的 placement 重建两个排序索引。
+收敛它得到 +35%(配对测量 0.653 → 0.881)。
+**剩下的差距不在 alias**:peer 实测**完全跳过** alias regen 也只到 0.96 MiB/s,
+所以剩余开销由**写入与 FTS** 主导。3.5 MiB/s 需要的是那一层的改动
+(批量写入策略 / FTS 插入路径),不是继续收敛读。
+
+
+
 ### 1.4 MCP amortized 语义延迟(已实测)
 
 > ⚠️ 见 §1.3.1 第 2 条:这组数字的前提(编码器常驻)在默认构建下不成立,
@@ -832,7 +872,7 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   目标 ≥5 个 + Claude/Codex。达不到的诚实留 `Experimental`。
   **验收**:漂移测试绿;矩阵与代码一致。
 
-- [ ] **M1-8 修 discover 声明与实现不一致(§1.8)**
+- [x] **M1-8 修 discover 声明与实现不一致(§1.8)**
   `capability.rs` 只给 claude-code/codex 声明 `discover: Native`,
   但 `main.rs:2972-2985` 实际支持 6 个。要么升那四个的声明,要么
   把矩阵注释改成解释"注册了 root ≠ discovery 能力已认证"。
@@ -840,7 +880,7 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   又说"antigravity/opencode 已加入")必须改。
   **验收**:三处(代码、矩阵、SKILL.md)一致。
 
-- [ ] **M1-9 修 opencode↔zcode probe 冲突(真实 `AmbiguousVariant` 缺陷)**
+- [x] **M1-9 修 opencode↔zcode probe 冲突(真实 `AmbiguousVariant` 缺陷)**
   实测:opencode adapter 的三条 SQL 对 zcode 的 `db.sqlite` **全部成功**,
   所以 `opencode/sqlite-v1` 会把 zcode DB 认成 opencode。
   按 zcode 独有列判别:`session.task_type`/`title_source`/`trace_id`/
@@ -849,7 +889,7 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   **收紧 opencode 的 probe 让它显式拒绝 zcode**,并新增 zcode adapter。
   **验收**:两个真实 DB 各被正确识别;probe 冲突有回归测试。
 
-- [ ] **M1-10 修 qoder 路径三方不一致**
+- [x] **M1-10 修 qoder 路径三方不一致**
   adapter 与文档写 `~/.qoder/projects/<project>/transcript/*.jsonl`;
   官方文档写 `~/.qoder/projects/<项目>/*.jsonl` + `state.json`
   (**没有 `transcript/` 这一段**);而本机装的 Qoder IDE 1.106.3 实际写
@@ -860,7 +900,7 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   M1-3 第 3 步拿到 ground truth 时一并修。
   **验收**:路径与格式与真实观察一致;CLI 与 IDE 两条路径都被记录。
 
-- [ ] **M1-11 hermes 声明的格式已停用(需决策)**
+- [x] **M1-11 hermes 声明的格式已停用(需决策)**
   上游文档明确:`~/.hermes/state.db`(SQLite + FTS5,WAL)是权威格式,
   **"replaces the earlier per-session JSONL file approach"**;
   遗留在 `~/.hermes/sessions/` 的 `.jsonl` **"no longer written or read"**。
@@ -871,7 +911,7 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   **决策**:新增 `hermes/state-db-v1` variant,还是撤回 hermes 声明。
   **验收**:声明与上游现实一致。
 
-- [ ] **M1-12 kimi wire.jsonl 未处理的记录类型**
+- [x] **M1-12 kimi wire.jsonl 未处理的记录类型**
   `deja-vu`(MIT,644★)的 kimi fixture 覆盖 14 条记录 / 6 种类型
   (`metadata`、`config.update`、`turn.prompt`、`context.append_message`、
   `context.append_loop_event`、`usage.record`),是本项目 golden fixture
@@ -1418,7 +1458,7 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   **G5 本身仍依赖 M1-2**(真实冻结快照尚未建立);上述合成语料试跑
   不能替代它,只是提前暴露了 harness 缺陷。
 
-- [ ] **M2-9 回收 freelist(实测免费的 17%,由 M2-5 的测量发现)**
+- [x] **M2-9 回收 freelist(实测免费的 17%,由 M2-5 的测量发现)** —— **已实现** index compact(af30de)。1,500 源库实测 180.1 → 148.1 MB,回收 31.9 MB(17.7%),search 命中数与 generation 前后一致。刻意做成显式维护命令而非 sync 尾步(VACUUM 整库重写 + 排他锁 + 需等量临时空间);报 before/after/reclaimed 三个字节数而不报比例 —— 回收量取决于删除历史,比例会被读成保证
   10 万条真库实测:537.8 MB 里有 **80.1 MB 是 freelist** —— 已向 OS 申请
   但当前未使用的页。`VACUUM` 实测把库从 **537.8 MB 降到 444.7 MB**
   (回收 93 MB,17.3%),**零 schema 改动、零查询语义变化**。
