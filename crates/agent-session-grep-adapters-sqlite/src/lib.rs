@@ -1749,6 +1749,9 @@ impl SqliteStore {
         if current < 12 {
             Self::migrate_v11_to_v12(conn)?;
         }
+        if current < 13 {
+            Self::migrate_v12_to_v13(conn)?;
+        }
         // 不随 user_version 门控：旧 v7 库（本列存在前建成的）打开时同样需要。
         Self::ensure_fts_ids_rowid(conn)?;
         Ok(())
@@ -2055,6 +2058,31 @@ impl SqliteStore {
              CREATE INDEX IF NOT EXISTS tool_activity_membership_activity
              ON tool_activity_membership(activity_id);
              PRAGMA user_version = 12;",
+        )
+        .map_err(backend)?;
+        tx.commit().map_err(backend)
+    }
+
+    /// v12→v13：`forgotten_sources` 抑制表（M3-2 / M3-5）。
+    ///
+    /// `forget`/`prune` 删除的是索引，**永不触碰 provider 源文件**。源文件仍在
+    /// 磁盘上时，下一次 `sync --discover` 会重新发现它并把内容原样索引回来——
+    /// 那会让"删除"变成一次日程性的复活。本表记录用户明确要求忘记的源路径，
+    /// discovery 与显式 sync 都跳过它，直到用户 `forget --readmit <path>`
+    /// 主动撤销。
+    ///
+    /// 存的是明文路径：抑制判定必须能与 discovery 报出的路径逐字比较，而且
+    /// `forget --list` 要能告诉用户当前抑制了什么。库里本来就按设计存着
+    /// `source_scans`/`source_membership` 的绝对源路径，本表不新增暴露面。
+    fn migrate_v12_to_v13(conn: &Connection) -> PortResult<()> {
+        let tx = conn.unchecked_transaction().map_err(backend)?;
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS forgotten_sources (
+                 source_path     TEXT PRIMARY KEY,
+                 provider_id     TEXT,
+                 forgotten_at_ms INTEGER NOT NULL
+             );
+             PRAGMA user_version = 13;",
         )
         .map_err(backend)?;
         tx.commit().map_err(backend)
@@ -6044,7 +6072,11 @@ const RELATION_SCHEMA_VERSION: i64 = 7;
 /// 观察投影，content-addressed activity_id 跨 source 去重，生命周期镜像
 /// `message_placements`（complete-scan replace、incomplete-scan union、
 /// claims tombstone）；随 rebuild 或后续 source 提交填充。
-pub const SCHEMA_VERSION: i64 = 12;
+///
+/// v13：新增 `forgotten_sources`——用户明确要求忘记的源路径抑制表（M3-2/M3-5）。
+/// 删除只作用于索引，源文件永远只读；抑制表使 discovery 与显式 sync 不会在
+/// 源文件仍在磁盘上时把已删内容重新索引回来。旧库迁移后表为空，语义与历史一致。
+pub const SCHEMA_VERSION: i64 = 13;
 
 impl CatalogStore for SqliteStore {
     fn get(&self, id: &StableId) -> PortResult<Option<Vec<u8>>> {
@@ -7705,6 +7737,410 @@ impl SqliteStore {
         Ok(out)
     }
 }
+
+/// 一个索引删除目标：删除以 **source 为单位**。
+///
+/// 索引里没有"只属于一个会话"的层：`source_membership` /
+/// `source_placement_membership` / `tool_activity_membership` 全部以 source 为
+/// 声明者，删除语义（"这个源不再声明任何东西"）也定义在 source 上。会话维度
+/// 的删除因此是"会话 → 声明它的源 → 那些源声明的全部会话"这条闭包，
+/// [`ForgetPlan`] 把闭包的连带部分显式列出来，绝不悄悄多删。
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ForgetSource {
+    pub source_path: String,
+    pub provider_id: Option<String>,
+}
+
+/// `forget` / `prune` 的确定性预览：执行前后用同一组查询推导，dry-run 打印的
+/// 就是即将发生的事。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ForgetPlan {
+    /// 将被清空的源（索引层），按路径升序。
+    pub sources: Vec<ForgetSource>,
+    /// 将被完整移除的 canonical Session wire。
+    pub sessions: Vec<String>,
+    /// 被本次删除触碰、但仍被其它源声明因而**不会**消失的 Session wire。
+    /// 显式报出来：否则用户会以为它们也被忘记了。
+    pub partial_sessions: Vec<String>,
+    /// 将被删除的 catalog 消息实体数。
+    pub messages: u64,
+    /// 将被删除的工具活动行数。
+    pub activities: u64,
+}
+
+impl ForgetPlan {
+    /// 计划是否会改变任何东西。空计划下 [`SqliteStore::execute_forget`] 不写库。
+    pub fn is_empty(&self) -> bool {
+        self.sources.is_empty()
+    }
+}
+
+/// 索引删除（M3-2 / M3-5）。
+///
+/// **provider 源文件永远只读**：本模块的每一条语句都只作用于 catalog 与它的
+/// 投影表，没有任何路径会 unlink、改写或移动 transcript。
+impl SqliteStore {
+    /// 把目标源路径灌进 per-connection 临时表，供集合查询连接。
+    ///
+    /// 目标集可以有几千个路径（`prune --before` 覆盖数月历史），直接拼 `IN (...)`
+    /// 会撞上 SQLite 的 999 变量上限，而"排除目标集"的 `NOT EXISTS` 谓词无法按
+    /// chunk 分解——只有把集合物化成一张表才能既正确又有界。
+    fn stage_forget_targets(conn: &Connection, source_paths: &[String]) -> PortResult<()> {
+        conn.execute_batch(
+            "CREATE TEMP TABLE IF NOT EXISTS forget_targets (
+                 source_path TEXT PRIMARY KEY
+             );
+             DELETE FROM forget_targets;",
+        )
+        .map_err(backend)?;
+        let mut insert = conn
+            .prepare("INSERT OR IGNORE INTO forget_targets(source_path) VALUES(?1)")
+            .map_err(backend)?;
+        for path in source_paths {
+            insert.execute([path]).map_err(backend)?;
+        }
+        Ok(())
+    }
+
+    /// 声明了这些 Session 的源路径（会话维度删除的第一步）。
+    ///
+    /// 两条来源取并集：placement 声明（会话的消息落在哪些源里）与实体声明
+    /// （`source_membership` 直接声明 Session wire——覆盖没有 placement 的空会话）。
+    pub fn source_paths_for_sessions(&self, session_wires: &[String]) -> PortResult<Vec<String>> {
+        if session_wires.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.conn.borrow();
+        let wires: Vec<&str> = session_wires.iter().map(String::as_str).collect();
+        let mut out = BTreeSet::new();
+        for chunk in chunk_ids(&wires) {
+            let placeholders = in_placeholders(chunk.len());
+            let sql = format!(
+                "SELECT spm.source_path
+                 FROM message_placements mp
+                 JOIN source_placement_membership spm
+                   ON spm.placement_id = mp.placement_id
+                 WHERE mp.session_id IN ({placeholders})
+                 UNION
+                 SELECT sm.source_path
+                 FROM source_membership sm
+                 WHERE sm.message_id IN ({placeholders})"
+            );
+            let params: Vec<&str> = chunk.iter().copied().chain(chunk.iter().copied()).collect();
+            let mut stmt = conn.prepare(&sql).map_err(backend)?;
+            let rows = stmt
+                .query_map(rusqlite::params_from_iter(params), |row| {
+                    row.get::<_, String>(0)
+                })
+                .map_err(backend)?;
+            for row in rows {
+                out.insert(row.map_err(backend)?);
+            }
+        }
+        Ok(out.into_iter().collect())
+    }
+
+    /// 最近活动早于 `ymd`（`YYYY-MM-DD`，不含该日）的 Session wire，
+    /// 外加**无法按时间归类**的会话数。
+    ///
+    /// 时间取会话内全部消息 payload `timestamp` 的词法最大值——与
+    /// [`latest_activity_ymd_for_sessions`](Self::latest_activity_ymd_for_sessions)
+    /// 同一个来源。一条 timestamp 都没有的会话不参与比较，也**绝不**被当作"很旧"
+    /// 而删掉（"我们不知道它多老"不是"它足够老"）；这类会话计数返回给调用方，
+    /// 由它如实告知用户 prune 覆盖不到它们。
+    pub fn session_wires_last_active_before(&self, ymd: &str) -> PortResult<(Vec<String>, u64)> {
+        let conn = self.conn.borrow();
+        let mut stmt = conn
+            .prepare(
+                "SELECT c.id,
+                        (SELECT MAX(json_extract(m.payload, '$.timestamp'))
+                         FROM message_placements mp
+                         JOIN catalog m ON m.id = mp.message_id
+                         WHERE mp.session_id = c.id) AS latest
+                 FROM catalog c
+                 WHERE c.id LIKE 'ses_v1_%'
+                 ORDER BY c.id",
+            )
+            .map_err(backend)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+            })
+            .map_err(backend)?;
+        let mut selected = Vec::new();
+        let mut undatable = 0u64;
+        for row in rows {
+            let (wire, latest) = row.map_err(backend)?;
+            match latest {
+                Some(timestamp) if timestamp.as_str() < ymd => selected.push(wire),
+                Some(_) => {}
+                None => undatable += 1,
+            }
+        }
+        Ok((selected, undatable))
+    }
+
+    /// 源路径 → resolved Original Working Directory（ADR-0009 resume 声明）。
+    ///
+    /// 只返回 `resolved` 的声明：`missing`/`ambiguous` 的会话没有可信的项目归属，
+    /// 按项目删除时**不能**猜。调用方据此如实报告"有多少源无法归属项目"。
+    pub fn source_working_directories(&self) -> PortResult<Vec<(String, Option<String>)>> {
+        let conn = self.conn.borrow();
+        let mut stmt = conn
+            .prepare(
+                "SELECT s.source_path, MAX(c.original_working_directory)
+                 FROM source_scans s
+                 LEFT JOIN source_session_resume_claims c
+                        ON c.source_path = s.source_path
+                       AND c.original_working_directory_state = 'resolved'
+                 GROUP BY s.source_path
+                 ORDER BY s.source_path",
+            )
+            .map_err(backend)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+            })
+            .map_err(backend)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(backend)?);
+        }
+        Ok(out)
+    }
+
+    /// 为一组目标源路径推导删除计划。已被抑制（此前忘记过）的路径自动排除，
+    /// 使 `forget` 幂等且不产生空 generation churn。
+    pub fn plan_forget(&self, source_paths: &[String]) -> PortResult<ForgetPlan> {
+        let known: BTreeMap<String, Option<String>> = {
+            let conn = self.conn.borrow();
+            let mut stmt = conn
+                .prepare("SELECT source_path, provider_id FROM source_scans")
+                .map_err(backend)?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+                })
+                .map_err(backend)?;
+            let mut map = BTreeMap::new();
+            for row in rows {
+                let (path, provider) = row.map_err(backend)?;
+                map.insert(path, provider);
+            }
+            map
+        };
+        let mut targets: Vec<ForgetSource> = Vec::new();
+        for path in source_paths {
+            if let Some(provider_id) = known.get(path) {
+                targets.push(ForgetSource {
+                    source_path: path.clone(),
+                    provider_id: provider_id.clone(),
+                });
+            }
+        }
+        targets.sort();
+        targets.dedup();
+        if targets.is_empty() {
+            return Ok(ForgetPlan::default());
+        }
+
+        let paths: Vec<String> = targets
+            .iter()
+            .map(|target| target.source_path.clone())
+            .collect();
+        let conn = self.conn.borrow();
+        Self::stage_forget_targets(&conn, &paths)?;
+        // 会被完整移除的实体 = 目标源声明的实体中，没有任何**非目标**源仍在
+        // 声明的那些。这与 `commit_source_batches_if_changed` 推导 tombstone 的
+        // 判据逐字同构（"final_entity_claimers 里没有它"），所以预览与执行不会分叉。
+        let sessions = Self::forget_wires(&conn, "ses_v1_%", true)?;
+        let partial_sessions = Self::forget_wires(&conn, "ses_v1_%", false)?;
+        let messages =
+            u64::try_from(Self::forget_wires(&conn, "msg_v1_%", true)?.len()).map_err(backend)?;
+        let activities: i64 = conn
+            .query_row(
+                "SELECT COUNT(DISTINCT m.activity_id)
+                 FROM tool_activity_membership m
+                 JOIN forget_targets ft ON ft.source_path = m.source_path
+                 WHERE NOT EXISTS (
+                     SELECT 1 FROM tool_activity_membership o
+                     WHERE o.activity_id = m.activity_id
+                       AND o.source_path NOT IN (SELECT source_path FROM forget_targets)
+                 )",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(backend)?;
+        Ok(ForgetPlan {
+            sources: targets,
+            sessions,
+            partial_sessions,
+            messages,
+            activities: u64::try_from(activities).map_err(backend)?,
+        })
+    }
+
+    /// 目标源声明的、匹配 `wire_prefix` 的实体 wire：`exclusive = true` 取
+    /// "没有非目标源再声明"的（会消失），`false` 取"仍被别处声明"的（会存活）。
+    fn forget_wires(
+        conn: &Connection,
+        wire_prefix: &str,
+        exclusive: bool,
+    ) -> PortResult<Vec<String>> {
+        let negate = if exclusive { "NOT EXISTS" } else { "EXISTS" };
+        let sql = format!(
+            "SELECT DISTINCT sm.message_id
+             FROM source_membership sm
+             JOIN forget_targets ft ON ft.source_path = sm.source_path
+             WHERE sm.message_id LIKE ?1
+               AND {negate} (
+                   SELECT 1 FROM source_membership o
+                   WHERE o.message_id = sm.message_id
+                     AND o.source_path NOT IN (SELECT source_path FROM forget_targets)
+               )
+             ORDER BY sm.message_id"
+        );
+        let mut stmt = conn.prepare(&sql).map_err(backend)?;
+        let rows = stmt
+            .query_map([wire_prefix], |row| row.get::<_, String>(0))
+            .map_err(backend)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(backend)?);
+        }
+        Ok(out)
+    }
+
+    /// 执行一份删除计划：清空目标源的索引声明，然后登记抑制。
+    ///
+    /// 删除本体走**既有** tombstone 路径——每个目标源提交一个
+    /// `relation_complete = true` 的空 [`SourceBatch`]，由
+    /// [`commit_source_batches_if_changed`](Self::commit_source_batches_if_changed)
+    /// 在单事务里推导并删除 catalog 实体、`fts`/`fts_ids`、`message_vec`、
+    /// placements/edges、tool activities、resume claims、session 元数据投影与
+    /// 兼容别名，并推进 generation。复用而不是另写一套删除 SQL：另写一套就必然
+    /// 有一张表被忘掉，而漏掉的那张表里留着的正是用户要求删除的正文。
+    ///
+    /// 抑制登记在删除**之后**、另一个事务里。顺序是刻意的：中途崩溃只可能留下
+    /// "已删除但未抑制"（重跑 `forget` 即补上，且下一次 sync 会如实把源报为重新
+    /// 发现），绝不会留下"已抑制但未删除"——那会让用户以为内容没了而它还在。
+    ///
+    /// 返回索引是否真的改变（空计划或全部已抑制时为 `false`，不写库）。
+    pub fn execute_forget(&self, plan: &ForgetPlan) -> PortResult<bool> {
+        if plan.is_empty() {
+            return Ok(false);
+        }
+        let batches: Vec<SourceBatch> = plan
+            .sources
+            .iter()
+            .map(|target| SourceBatch {
+                source_path: target.source_path.clone(),
+                entries: Vec::new(),
+                placements: Vec::new(),
+                edges: Vec::new(),
+                activities: Vec::new(),
+                relation_complete: true,
+                len_bytes: None,
+                fingerprint: None,
+                provider_id: target.provider_id.clone(),
+                resume_claim: None,
+            })
+            .collect();
+        let changed = self.commit_source_batches_if_changed(&batches)?;
+        let now = unix_ms()?;
+        let mut conn = self.conn.borrow_mut();
+        let tx = conn.transaction().map_err(backend)?;
+        for target in &plan.sources {
+            // scan 记录一起清掉：留着它，`sync --discover` 的 prior-path diff 会
+            // 每次都把这个源报成"本次未发现 → removed"，永远报一个已经处理完的
+            // 差异。抑制表接管"这个路径被忘记过"这件事的记录。
+            tx.execute(
+                "DELETE FROM source_scans WHERE source_path = ?1",
+                [&target.source_path],
+            )
+            .map_err(backend)?;
+            tx.execute(
+                "DELETE FROM source_relation_scans WHERE source_path = ?1",
+                [&target.source_path],
+            )
+            .map_err(backend)?;
+            tx.execute(
+                "INSERT INTO forgotten_sources(source_path, provider_id, forgotten_at_ms)
+                 VALUES(?1, ?2, ?3)
+                 ON CONFLICT(source_path) DO UPDATE SET
+                     provider_id = COALESCE(excluded.provider_id, forgotten_sources.provider_id),
+                     forgotten_at_ms = excluded.forgotten_at_ms",
+                rusqlite::params![&target.source_path, &target.provider_id, now],
+            )
+            .map_err(backend)?;
+        }
+        tx.commit().map_err(backend)?;
+        Ok(changed)
+    }
+
+    /// 当前被抑制的源：`(source_path, provider_id, forgotten_at_ms)`，按路径升序。
+    pub fn suppressed_sources(&self) -> PortResult<Vec<(String, Option<String>, i64)>> {
+        let conn = self.conn.borrow();
+        let mut stmt = conn
+            .prepare(
+                "SELECT source_path, provider_id, forgotten_at_ms
+                 FROM forgotten_sources ORDER BY source_path",
+            )
+            .map_err(backend)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })
+            .map_err(backend)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(backend)?);
+        }
+        Ok(out)
+    }
+
+    /// 撤销一条抑制，让该源可以再次被索引。返回是否真的有一条被撤销。
+    ///
+    /// 没有这条逃生舱，`forget` 就是不可逆的——而"想重新索引一个自己忘记过的源"
+    /// 唯一的出路会退回"删掉整个数据目录"，也就是本命令要修掉的那个答案。
+    pub fn readmit_source(&self, source_path: &str) -> PortResult<bool> {
+        let conn = self.conn.borrow();
+        let removed = conn
+            .execute(
+                "DELETE FROM forgotten_sources WHERE source_path = ?1",
+                [source_path],
+            )
+            .map_err(backend)?;
+        Ok(removed > 0)
+    }
+
+    /// 从候选源路径里剔除被抑制的，返回 `(可索引的, 被跳过的)`。
+    ///
+    /// discovery 与显式 sync 共用同一判据：抑制是索引入口的统一门，不是 discover
+    /// 的特例——否则 `sync <已忘记的文件>` 会绕过它把内容原样带回来。
+    pub fn partition_suppressed(&self, paths: &[String]) -> PortResult<(Vec<String>, Vec<String>)> {
+        if paths.is_empty() {
+            return Ok((Vec::new(), Vec::new()));
+        }
+        let suppressed: BTreeSet<String> = self
+            .suppressed_sources()
+            .map(|rows| rows.into_iter().map(|(path, _, _)| path).collect())?;
+        let mut allowed = Vec::with_capacity(paths.len());
+        let mut skipped = Vec::new();
+        for path in paths {
+            if suppressed.contains(path) {
+                skipped.push(path.clone());
+            } else {
+                allowed.push(path.clone());
+            }
+        }
+        Ok((allowed, skipped))
+    }
+}
 fn collect_hits<F>(rows: rusqlite::MappedRows<'_, F>) -> PortResult<Vec<SearchHit>>
 where
     F: FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<(String, f64)>,
@@ -9116,7 +9552,7 @@ mod tests {
     fn schema_v10_creates_message_vec_table() {
         let store = SqliteStore::open_in_memory().unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 12);
+        assert_eq!(SCHEMA_VERSION, 13);
         let conn = store.conn.borrow();
         let count: i64 = conn
             .query_row(
@@ -16429,5 +16865,273 @@ mod tests {
             .unwrap();
         assert_eq!(count, 1);
         drop(conn);
+    }
+
+    // ---- 索引删除（M3-2 / M3-5）----
+
+    /// 一个源 = 一个会话 + 一个文档 + n 条消息，消息带指定 `YYYY-MM-DD` 时间戳。
+    fn forget_fixture_source(label: &str, ymd: Option<&str>) -> SourceBatch {
+        let session = sid(IdKind::Session, format!("{label}-ses").as_bytes());
+        let document = sid(IdKind::Document, format!("{label}-doc").as_bytes());
+        let message = sid(IdKind::Message, format!("{label}-msg").as_bytes());
+        let payload = serde_json::json!({
+            "role": "user",
+            "text": format!("{label} body"),
+            "timestamp": ymd.map(|day| format!("{day}T09:00:00Z")),
+            "parent": null,
+            "parent_native_id": null,
+            "is_sidechain": false,
+            "session": session.as_str(),
+            "sessions": [session.as_str()],
+            "span": null,
+            "spans": [],
+        })
+        .to_string()
+        .into_bytes();
+        SourceBatch {
+            source_path: format!("{label}.jsonl"),
+            entries: vec![
+                entity_entry(&session),
+                typed_document_entry(&document),
+                (message.clone(), payload, format!("{label} body")),
+            ],
+            placements: vec![placement(&session, &document, &message, 0, false, None)],
+            edges: Vec::new(),
+            activities: Vec::new(),
+            relation_complete: true,
+            len_bytes: Some(64),
+            fingerprint: Some(format!("{label}-fp")),
+            provider_id: Some("synthetic".into()),
+            resume_claim: None,
+        }
+    }
+
+    fn forget_fixture_session(label: &str) -> StableId {
+        sid(IdKind::Session, format!("{label}-ses").as_bytes())
+    }
+
+    /// 完整删除：catalog、FTS、session 元数据投影、向量、活动、placement、
+    /// membership、scan 记录全部为该源清零；同库另一个会话完全不受影响。
+    #[test]
+    fn forget_clears_every_derived_projection_for_the_targeted_source() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        store.set_semantic_model("test-model");
+        let secret = forget_fixture_source("secret", Some("2026-01-02"));
+        let keep = forget_fixture_source("keep", Some("2026-01-03"));
+        store
+            .commit_source_batches_if_changed(&[secret.clone(), keep.clone()])
+            .unwrap();
+        let secret_message = sid(IdKind::Message, b"secret-msg");
+        store
+            .index_embedding(&secret_message, &[1.0, 0.0, 0.0])
+            .unwrap();
+        assert_eq!(store.query("secret", 10).unwrap().len(), 1);
+
+        let plan = store.plan_forget(&["secret.jsonl".to_string()]).unwrap();
+        assert_eq!(
+            plan.sessions,
+            vec![forget_fixture_session("secret").as_str().to_string()]
+        );
+        assert!(plan.partial_sessions.is_empty());
+        assert_eq!(plan.messages, 1);
+        assert!(store.execute_forget(&plan).unwrap());
+
+        // 搜索面：词法与语义两条路径都必须查不到。
+        assert!(store.query("secret", 10).unwrap().is_empty());
+        assert!(
+            store
+                .query_semantic(&[1.0, 0.0, 0.0], 10)
+                .unwrap()
+                .is_empty()
+        );
+        // 存储面：逐表核对，不留任何派生正文。
+        let conn = store.conn.borrow();
+        let residue = |sql: &str| -> i64 { conn.query_row(sql, [], |row| row.get(0)).unwrap() };
+        assert_eq!(
+            residue("SELECT COUNT(*) FROM fts WHERE text LIKE '%secret%'"),
+            0
+        );
+        assert_eq!(
+            residue(
+                "SELECT COUNT(*) FROM catalog WHERE id LIKE '%' AND payload LIKE '%secret body%'"
+            ),
+            0
+        );
+        assert_eq!(residue("SELECT COUNT(*) FROM message_vec"), 0);
+        assert_eq!(
+            residue("SELECT COUNT(*) FROM source_membership WHERE source_path = 'secret.jsonl'"),
+            0
+        );
+        assert_eq!(
+            residue(
+                "SELECT COUNT(*) FROM source_placement_membership
+                 WHERE source_path = 'secret.jsonl'"
+            ),
+            0
+        );
+        assert_eq!(
+            residue("SELECT COUNT(*) FROM source_scans WHERE source_path = 'secret.jsonl'"),
+            0
+        );
+        assert_eq!(
+            residue(
+                "SELECT COUNT(*) FROM session_fts_ids
+                 WHERE session_wire NOT IN (SELECT id FROM catalog)"
+            ),
+            0
+        );
+        drop(conn);
+        // 另一个会话原样保留。
+        assert_eq!(store.query("keep", 10).unwrap().len(), 1);
+    }
+
+    /// 删除以 source 为单位：同一个源里的第二个会话会被连带删除，
+    /// 而计划必须把它**显式列出来**，用户不会被悄悄多删。
+    #[test]
+    fn plan_forget_lists_collateral_sessions_sharing_the_source() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let session_a = sid(IdKind::Session, b"shared-a");
+        let session_b = sid(IdKind::Session, b"shared-b");
+        let document = sid(IdKind::Document, b"shared-doc");
+        let message_a = sid(IdKind::Message, b"shared-msg-a");
+        let message_b = sid(IdKind::Message, b"shared-msg-b");
+        let batch = SourceBatch {
+            source_path: "shared.jsonl".into(),
+            entries: vec![
+                entity_entry(&session_a),
+                entity_entry(&session_b),
+                typed_document_entry(&document),
+                typed_message_entry(&message_a, "alpha body"),
+                typed_message_entry(&message_b, "beta body"),
+            ],
+            placements: vec![
+                placement(&session_a, &document, &message_a, 0, false, None),
+                placement(&session_b, &document, &message_b, 1, false, None),
+            ],
+            edges: Vec::new(),
+            activities: Vec::new(),
+            relation_complete: true,
+            len_bytes: Some(64),
+            fingerprint: Some("shared-fp".into()),
+            provider_id: Some("synthetic".into()),
+            resume_claim: None,
+        };
+        store
+            .commit_source_batches_if_changed(std::slice::from_ref(&batch))
+            .unwrap();
+
+        let sources = store
+            .source_paths_for_sessions(&[session_a.as_str().to_string()])
+            .unwrap();
+        assert_eq!(sources, vec!["shared.jsonl".to_string()]);
+        let plan = store.plan_forget(&sources).unwrap();
+        let mut expected = vec![
+            session_a.as_str().to_string(),
+            session_b.as_str().to_string(),
+        ];
+        expected.sort();
+        assert_eq!(
+            plan.sessions, expected,
+            "同源的第二个会话必须出现在计划里，而不是执行时才被删掉"
+        );
+        assert_eq!(plan.messages, 2);
+    }
+
+    /// 无时间戳的会话不参与按时间 prune，也不被当作"足够旧"删掉——
+    /// 它被单独计数，由调用方如实告知用户。
+    #[test]
+    fn prune_by_age_selects_only_datable_sessions_and_counts_the_rest() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let old = forget_fixture_source("old", Some("2025-11-01"));
+        let recent = forget_fixture_source("recent", Some("2026-06-01"));
+        let undated = forget_fixture_source("undated", None);
+        store
+            .commit_source_batches_if_changed(&[old, recent, undated])
+            .unwrap();
+
+        let (selected, undatable) = store
+            .session_wires_last_active_before("2026-01-01")
+            .unwrap();
+        assert_eq!(
+            selected,
+            vec![forget_fixture_session("old").as_str().to_string()]
+        );
+        assert_eq!(undatable, 1, "无时间戳的会话必须被计数而不是被删除");
+
+        // 边界：`--before` 是半开的，恰好落在该日的会话不被选中。
+        let (boundary, _) = store
+            .session_wires_last_active_before("2025-11-01")
+            .unwrap();
+        assert!(boundary.is_empty());
+    }
+
+    /// 忘记一个源后，源文件仍在磁盘上时它必须被抑制；`readmit` 是唯一的撤销路径。
+    #[test]
+    fn forget_suppresses_the_source_until_it_is_readmitted() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let source = forget_fixture_source("suppressed", Some("2026-02-02"));
+        store
+            .commit_source_batches_if_changed(std::slice::from_ref(&source))
+            .unwrap();
+        let plan = store
+            .plan_forget(&["suppressed.jsonl".to_string()])
+            .unwrap();
+        assert!(store.execute_forget(&plan).unwrap());
+
+        let suppressed = store.suppressed_sources().unwrap();
+        assert_eq!(suppressed.len(), 1);
+        assert_eq!(suppressed[0].0, "suppressed.jsonl");
+        assert_eq!(suppressed[0].1.as_deref(), Some("synthetic"));
+        let (allowed, skipped) = store
+            .partition_suppressed(&["suppressed.jsonl".to_string(), "other.jsonl".to_string()])
+            .unwrap();
+        assert_eq!(allowed, vec!["other.jsonl".to_string()]);
+        assert_eq!(skipped, vec!["suppressed.jsonl".to_string()]);
+
+        // 抑制期间重新提交同一个源的完整批次会被入口层拒之门外；抑制解除后可再索引。
+        assert!(store.readmit_source("suppressed.jsonl").unwrap());
+        assert!(!store.readmit_source("suppressed.jsonl").unwrap());
+        assert!(store.suppressed_sources().unwrap().is_empty());
+        store
+            .commit_source_batches_if_changed(std::slice::from_ref(&source))
+            .unwrap();
+        assert_eq!(store.query("suppressed", 10).unwrap().len(), 1);
+    }
+
+    /// 已抑制的源不再进入计划：`forget` 重跑是幂等的，不产生空 generation churn。
+    #[test]
+    fn forget_is_idempotent_and_does_not_rewrite_the_index() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let source = forget_fixture_source("twice", Some("2026-03-03"));
+        store
+            .commit_source_batches_if_changed(std::slice::from_ref(&source))
+            .unwrap();
+        let plan = store.plan_forget(&["twice.jsonl".to_string()]).unwrap();
+        assert!(store.execute_forget(&plan).unwrap());
+        let generation = store.active_generation().unwrap();
+
+        let again = store.plan_forget(&["twice.jsonl".to_string()]).unwrap();
+        assert!(again.is_empty(), "已删除的源不得再次出现在计划里");
+        assert!(!store.execute_forget(&again).unwrap());
+        assert_eq!(store.active_generation().unwrap(), generation);
+    }
+
+    /// 计划里的计数就是实际删掉的行数——预览与执行不允许分叉。
+    #[test]
+    fn plan_forget_counts_match_the_observed_catalog_delta() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        store
+            .commit_source_batches_if_changed(&[
+                forget_fixture_source("delta-a", Some("2026-04-04")),
+                forget_fixture_source("delta-b", Some("2026-04-05")),
+            ])
+            .unwrap();
+        let before = store.count().unwrap();
+        let plan = store.plan_forget(&["delta-a.jsonl".to_string()]).unwrap();
+        store.execute_forget(&plan).unwrap();
+        let after = store.count().unwrap();
+        // 每个 fixture 源贡献 1 session + 1 document + 1 message。
+        let expected_removed = plan.messages + plan.sessions.len() as u64 + 1;
+        assert_eq!(before - after, expected_removed);
     }
 }
