@@ -93,26 +93,88 @@ fn redact_secret_value(value: serde_json::Value, count: &mut u64) -> serde_json:
 }
 
 /// Check if a JSON key name indicates a secret field.
+///
+/// Matching is by **key segment**, not substring. A substring rule fired on our
+/// own protocol: `max_tokens` and `used_tokens` are declared integers in the
+/// handoff pack budget, and `lower.contains("token")` rewrote both to the string
+/// `"[redacted]"` — a published-schema violation and a corrupted budget in every
+/// machine consumer, with no secret involved.
+///
+/// Two distinctions make the narrower rule principled rather than a patch for
+/// one field. First, a credential is named in the singular (`token`,
+/// `access_token`); the plural `tokens` is a count. Second, a `token` segment
+/// paired with a counting word (`token_count`, `tokenCount`) is also a count.
+/// Everything that actually names a credential still matches — see
+/// `credential_key_names_still_redact_across_separator_styles`.
 fn is_secret_key(key: &str) -> bool {
-    let lower = key.to_ascii_lowercase();
-    const SECRET_KEY_FRAGMENTS: &[&str] = &[
-        "api_key",
-        "apikey",
-        "api-key",
+    // Single segments that name a credential on their own.
+    const SECRET_TERMS: &[&str] = &[
         "secret",
         "password",
         "passwd",
         "token",
-        "access_key",
-        "accesskey",
-        "private_key",
-        "privatekey",
         "credential",
-        "auth_token",
+        "credentials",
         "authorization",
         "bearer",
+        "apikey",
     ];
-    SECRET_KEY_FRAGMENTS.iter().any(|frag| lower.contains(frag))
+    // Adjacent segment pairs that name a credential together (`api_key`,
+    // `apiKey`, `access-key`, …). Kept separate from the single-segment list so
+    // a bare `key` — common and rarely a secret on its own — does not match.
+    const SECRET_PAIRS: &[&str] = &[
+        "apikey",
+        "accesskey",
+        "privatekey",
+        "secretkey",
+        "authtoken",
+        "apitoken",
+        "accesstoken",
+        "refreshtoken",
+        "sessiontoken",
+    ];
+    // Words that turn an adjacent credential noun into a quantity. `used_tokens`
+    // is caught by the plural rule; `token_count` needs this one.
+    const COUNTING_WORDS: &[&str] = &["count", "counts", "total", "totals", "limit", "limits"];
+
+    let segments = key_segments(key);
+    let counted = segments
+        .iter()
+        .any(|s| COUNTING_WORDS.contains(&s.as_str()));
+    if !counted && segments.iter().any(|s| SECRET_TERMS.contains(&s.as_str())) {
+        return true;
+    }
+    segments.windows(2).any(|pair| {
+        let joined = format!("{}{}", pair[0], pair[1]);
+        SECRET_PAIRS.contains(&joined.as_str())
+    })
+}
+
+/// Split a JSON key into lowercase alphanumeric segments, breaking on both
+/// punctuation (`api_key`, `api-key`) and camelCase boundaries (`apiKey`).
+fn key_segments(key: &str) -> Vec<String> {
+    let mut segments = Vec::new();
+    let mut current = String::new();
+    let mut prev_lower = false;
+    for ch in key.chars() {
+        if !ch.is_alphanumeric() {
+            if !current.is_empty() {
+                segments.push(std::mem::take(&mut current));
+            }
+            prev_lower = false;
+            continue;
+        }
+        // camelCase boundary: a lowercase/digit run followed by an uppercase.
+        if ch.is_uppercase() && prev_lower && !current.is_empty() {
+            segments.push(std::mem::take(&mut current));
+        }
+        prev_lower = ch.is_lowercase() || ch.is_numeric();
+        current.extend(ch.to_lowercase());
+    }
+    if !current.is_empty() {
+        segments.push(current);
+    }
+    segments
 }
 
 /// Redact a plain string (non-JSON) for warning/error channels.
@@ -300,5 +362,87 @@ mod tests {
         let (redacted, status) = redact_value(val);
         assert_eq!(redacted["api_key"], "");
         assert_eq!(status.redacted_count, 0);
+    }
+
+    #[test]
+    fn token_count_fields_are_not_treated_as_secrets() {
+        // 回归：`lower.contains("token")` 把 handoff budget 里声明为 integer 的
+        // `max_tokens`/`used_tokens` 改写成字符串 `"[redacted]"` —— 既违反已发布
+        // schema，也让每个机器消费者读到损坏的预算，而且根本没有秘密涉及。
+        // 复数 `tokens` 是计数，单数 `token` 才是凭据名。
+        let val = serde_json::json!({
+            "budget": {"max_tokens": 8000, "used_tokens": 123, "max_bytes": 2_000_000},
+            "used_token_count": 7,
+        });
+        let (redacted, status) = redact_value(val);
+        assert_eq!(redacted["budget"]["max_tokens"], 8000);
+        assert_eq!(redacted["budget"]["used_tokens"], 123);
+        assert_eq!(redacted["used_token_count"], 7);
+        assert_eq!(status.redacted_count, 0, "计数字段不得触发脱敏");
+    }
+
+    #[test]
+    fn credential_key_names_still_redact_across_separator_styles() {
+        // 收窄成按段匹配后，凭据字段仍必须全部命中——包括 camelCase。
+        for key in [
+            "token",
+            "auth_token",
+            "authToken",
+            "access_token",
+            "refreshToken",
+            "api_key",
+            "apiKey",
+            "api-key",
+            "access_key",
+            "private_key",
+            "privateKey",
+            "secret",
+            "client_secret",
+            "password",
+            "passwd",
+            "credential",
+            "credentials",
+            "authorization",
+            "bearer",
+        ] {
+            let val = serde_json::json!({ key: "any-value-here" });
+            let (redacted, status) = redact_value(val);
+            assert_eq!(redacted[key], "[redacted]", "must redact key {key}");
+            assert_eq!(status.redacted_count, 1, "must count once for {key}");
+        }
+    }
+
+    #[test]
+    fn ordinary_keys_are_not_redacted_by_name() {
+        // 按段匹配的另一半：普通字段不得因为"含有"某个片段而被误伤。
+        // `key` 单独出现太常见（`session_key`/`sort_key`/`key` 本身），
+        // 只在与 api/access/private/secret 相邻时才算凭据。
+        for key in [
+            "max_tokens",
+            "used_tokens",
+            "token_count",
+            "tokens",
+            "key",
+            "sort_key",
+            "keyword",
+            "keywords",
+            "secretary_note",
+            "authorized_users",
+            "bearing",
+        ] {
+            let val = serde_json::json!({ key: "plain value" });
+            let (redacted, status) = redact_value(val);
+            assert_eq!(redacted[key], "plain value", "must not redact key {key}");
+            assert_eq!(status.redacted_count, 0, "must not count for {key}");
+        }
+    }
+
+    #[test]
+    fn key_segments_splits_on_punctuation_and_camel_case() {
+        assert_eq!(key_segments("max_tokens"), vec!["max", "tokens"]);
+        assert_eq!(key_segments("apiKey"), vec!["api", "key"]);
+        assert_eq!(key_segments("api-key"), vec!["api", "key"]);
+        assert_eq!(key_segments("HTTPToken"), vec!["httptoken"]);
+        assert_eq!(key_segments("refreshToken2"), vec!["refresh", "token2"]);
     }
 }
