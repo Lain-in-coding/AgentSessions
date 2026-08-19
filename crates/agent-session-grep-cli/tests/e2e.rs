@@ -2953,6 +2953,101 @@ fn handoff_budget_truncation_reports_partial_and_exit_10() {
     assert_eq!(parse_first_line(&ok)["outcome"], "success");
 }
 
+/// M3-14：真实二进制路径下 provenance 只在恰好一个会话命中时出现，且带上该
+/// 会话的 provider。守的是 CLI 侧的接线（Application 单测无法覆盖调用方是否
+/// 真的做了那次批量 claims 解析）。
+#[test]
+fn handoff_provenance_present_for_one_session_absent_for_many() {
+    let (dir, db) = temp_db("handoff-provenance");
+    // 两个不同 provider 的会话：一条只命中 claude 会话的词，一条命中两个的词。
+    let claude = dir.path().join("claude.jsonl");
+    std::fs::write(
+        &claude,
+        serde_json::json!({
+            "type": "user",
+            "uuid": "a1000000-0000-4000-8000-000000000001",
+            "parentUuid": null,
+            "sessionId": "a1111111-2222-4333-8444-555555555555",
+            "timestamp": "2026-07-26T01:00:00.000Z",
+            "message": { "role": "user", "content": "alpha shared marker" },
+        })
+        .to_string(),
+    )
+    .expect("write claude fixture");
+    let codex = dir.path().join("rollout-codex.jsonl");
+    std::fs::write(
+        &codex,
+        format!(
+            "{}\n{}\n",
+            serde_json::json!({
+                "timestamp": "2026-07-26T02:00:00.000Z",
+                "type": "session_meta",
+                "payload": {
+                    "session_id": "0198bbbb-cccc-7ddd-8eee-ffff00001111",
+                    "cwd": "/workspace/fixture",
+                    "originator": "codex_cli_rs",
+                    "cli_version": "0.0.0-fixture",
+                },
+            }),
+            serde_json::json!({
+                "timestamp": "2026-07-26T02:00:01.000Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "id": "msg-prov-0001",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "beta shared marker" }],
+                },
+            }),
+        ),
+    )
+    .expect("write codex fixture");
+    for path in [&claude, &codex] {
+        let ingest = run(&db, &["ingest", &path.to_string_lossy()]);
+        assert!(
+            ingest.status.success(),
+            "ingest failed: {}",
+            stdout(&ingest)
+        );
+    }
+
+    // 恰好一个会话命中 → provenance 填充，provider 来自 store 的 resume claim。
+    let one = run(&db, &["handoff", "alpha"]);
+    assert!(one.status.success(), "handoff failed: {}", stdout(&one));
+    let one = parse_first_line(&one);
+    let matched = one["data"]["matched_sessions"]
+        .as_array()
+        .expect("matched_sessions array");
+    assert_eq!(matched.len(), 1, "{one}");
+    assert_eq!(matched[0]["provider_id"], "claude-code", "{one}");
+    let provenance = &one["data"]["provenance"];
+    assert_eq!(provenance["provider_id"], "claude-code", "{one}");
+    assert_eq!(
+        provenance["session_id"], matched[0]["session_id"],
+        "provenance session must be the matched one: {one}"
+    );
+
+    // 多个会话命中 → 确实无单一出处，provenance 整个字段缺席（不是空对象）。
+    let many = run(&db, &["handoff", "marker"]);
+    assert!(many.status.success(), "handoff failed: {}", stdout(&many));
+    let many = parse_first_line(&many);
+    let matched = many["data"]["matched_sessions"]
+        .as_array()
+        .expect("matched_sessions array");
+    assert_eq!(matched.len(), 2, "{many}");
+    assert!(
+        many["data"].get("provenance").is_none(),
+        "multi-session pack must omit provenance: {many}"
+    );
+    // 但每个 matched session 仍如实带自己的 provider（去重后仍是两个 provider）。
+    let providers: Vec<&str> = matched
+        .iter()
+        .filter_map(|s| s["provider_id"].as_str())
+        .collect();
+    assert!(providers.contains(&"claude-code"), "{many}");
+    assert!(providers.contains(&"codex"), "{many}");
+}
+
 #[test]
 fn handoff_redacts_secrets_in_evidence() {
     let (dir, db) = temp_db("handoff-redact");

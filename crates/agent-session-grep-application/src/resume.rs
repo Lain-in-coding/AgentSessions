@@ -22,7 +22,11 @@ pub struct ResumeDescriptor {
     /// Original working directory to restore (if known).
     pub working_directory: Option<String>,
     /// Permission/approval mode flag (e.g. `--dangerously-skip-permissions`).
-    /// `None` means default (no yolo/auto mode).
+    ///
+    /// **Always `None` in this build**, for every provider — see
+    /// [`RESUME_PERMISSION_MODE_VERIFIED`] for why. It is `Option` rather than
+    /// removed because the value carries a real assurance: the resume command
+    /// this descriptor describes contains no permission flag.
     pub permission_mode: Option<String>,
 }
 
@@ -111,19 +115,16 @@ pub fn build_resume_descriptor(metadata: &SessionResumeMetadata) -> ResumePrevie
         }
     };
 
-    let mut full_args = args.clone();
-    if let Some(mode) = &metadata_provider_permission_hint(provider_id) {
-        full_args.push(mode.clone());
-    }
-
-    let command_string = format_command(binary, &full_args, &metadata.original_working_directory);
+    let command_string = format_command(binary, &args, &metadata.original_working_directory);
 
     ResumePreview {
         descriptor: ResumeDescriptor {
             provider_binary: binary.to_string(),
-            args: full_args,
+            args,
             working_directory: metadata.original_working_directory.clone(),
-            permission_mode: metadata_provider_permission_hint(provider_id),
+            // Never a permission flag — the policy, not a gap. See
+            // `RESUME_PERMISSION_MODE_VERIFIED`.
+            permission_mode: None,
         },
         command_string,
         available: true,
@@ -143,14 +144,24 @@ fn format_command(binary: &str, args: &[String], cwd: &Option<String>) -> String
     }
 }
 
-/// Provider-specific permission mode hint (none by default — user must opt-in).
-/// Returns `None` for all providers: resume never auto-carries yolo/full-auto.
+/// 恒为 `false`：本工具从不核验被恢复会话的权限/审批模式。
 ///
-/// 诚实口径：permission mode 目前恒未核验（metadata/配置均不携带真实模式），
-/// 由 CLI 层在 preview 中如实标注 `permission_mode_verified: false`，不编造。
-fn metadata_provider_permission_hint(_provider_id: &str) -> Option<String> {
-    None
-}
+/// 这是**策略，不是待补的功能**。`ResumeDescriptor` 里
+/// [`ResumeDescriptor::permission_mode`] 恒为 `None` —— resume 绝不自动带
+/// yolo/full-auto flag —— 而"没带 flag"不等于"已核验目标 provider 会用什么
+/// 权限模式"：provider 的实际审批策略由它自己的配置决定，本工具的只读
+/// Resume Metadata（ADR-0009：provider session id + original working
+/// directory）里没有它，因此任何"已核验"的说法都会是编造。
+///
+/// 消费方据此可以明确读到：`permission_mode: null` 意为"我们没有加任何权限
+/// flag"，而不是"我们确认它跑在默认模式"。真的接上核验能力时把这个常量翻成
+/// 计算值即可，`human.rs` 的渲染分支已经为 `true` 备好措辞。
+///
+/// 曾经这里还有一个 `metadata_provider_permission_hint(provider_id)` 函数，
+/// 形状是"按 provider 查权限模式"，实现是忽略参数直接返回 `None`——一个宣称
+/// 存在而并不存在的能力。连同它那条恒不成立的 `if let Some(mode)` 追加参数
+/// 分支一并删除：常量比假查表诚实。
+pub const RESUME_PERMISSION_MODE_VERIFIED: bool = false;
 
 /// 首次 resume 强制预览的持久标记（PRD Q24 / audit P1-2）。
 ///
@@ -271,6 +282,30 @@ mod tests {
         let preview = build_resume_descriptor(&m);
         // Resume never auto-carries yolo/full-auto — user must opt-in.
         assert!(preview.descriptor.permission_mode.is_none());
+        // 而且命令参数里绝不出现任何权限 flag：只有 provider 的 resume 参数。
+        assert_eq!(preview.descriptor.args, vec!["--resume", "abc"]);
+        assert!(
+            !preview.command_string.contains("dangerous")
+                && !preview.command_string.contains("permission")
+                && !preview.command_string.contains("full-auto"),
+            "command must carry no permission flag: {}",
+            preview.command_string
+        );
+    }
+
+    /// 与 `permission_mode` 恒 None 配套的公开口径：没有任何 provider 会拿到
+    /// 权限 flag（M3-14）。`permission_mode_verified` 恒 false 的机器面断言在
+    /// `agent-session-grep-cli/tests/e2e.rs`。
+    #[test]
+    fn permission_mode_is_never_claimed_verified() {
+        for provider in ["claude-code", "codex", "pi", "grok-build"] {
+            let m = metadata(provider, true, "sid", None);
+            let preview = build_resume_descriptor(&m);
+            assert!(
+                preview.descriptor.permission_mode.is_none(),
+                "{provider} must not carry a permission mode"
+            );
+        }
     }
 
     #[test]

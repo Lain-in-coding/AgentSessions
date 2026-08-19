@@ -125,6 +125,14 @@ Search, then assemble a deterministic handoff pack (`handoff-pack/v1`). Verbatim
 evidence and inference stay in separate sections. No LLM call, and nothing is
 injected into any agent — it prints the pack and stops.
 
+Because no model is called, `inference` is **always an empty array**: the
+separation is a structural guarantee that a future summarizer cannot write into
+`evidence`, not a promise of summary content. `provenance` is present only when
+exactly one session matched — a pack spanning several sessions has no single
+origin, so the field is omitted rather than guessed. Each entry in
+`matched_sessions` carries its own `provider_id` either way, omitted when the
+store holds no resume claim for that session.
+
 | Flag | Value | Default |
 | --- | --- | --- |
 | `--max-evidence <n>` | integer | 20 |
@@ -214,8 +222,12 @@ Behaviour worth knowing before you rely on it:
   `available: false` with an `unavailable_reason`. That is a success, not an
   error: history stays searchable even when it cannot be resumed. No command is
   ever invented.
-- `permission_mode_verified` is always `false` — the metadata does not carry a
-  real permission mode, and the tool will not claim otherwise.
+- `permission_mode` is always `null` and `permission_mode_verified` is always
+  `false`, for every provider. That is the policy, not a gap: resume never adds
+  a permission flag of its own, and the read-only resume metadata does not carry
+  the provider's real approval mode, so the tool will not claim to have checked
+  it. Read `permission_mode: null` as "no permission flag was added", not as
+  "confirmed to run in the default mode".
 
 ### `hook <event>`
 
