@@ -168,7 +168,7 @@ fn main() {
 fn render_human_error(err: &ProtocolError) {
     eprintln!("error [{}]: {}", err.code.as_str(), err.message);
     if !message_states_next_step(&err.message) {
-        eprintln!("下一步：{}", err.code.operator_action());
+        eprintln!("Next step: {}", err.code.operator_action());
     }
 }
 
@@ -522,7 +522,7 @@ fn run(
             .as_deref()
             .map(|v| {
                 v.parse::<u16>()
-                    .map_err(|_| CliError::usage("--port 需要 0-65535 的整数"))
+                    .map_err(|_| CliError::usage("--port requires an integer in 0-65535"))
             })
             .transpose()?
             .unwrap_or(0);
@@ -1400,7 +1400,7 @@ fn doctor(
             "tool_activity_storage": true,
             // 新手会误以为 db: not-checked 是自检失败（10 角色体验测试缺陷）。
             // 加一行白话提示，说明如何真正校验。
-            "hint": "未指定数据库：以上仅检查了环境。运行 doctor --db <path> 可校验数据库与 schema。",
+            "hint": "no --db given: the checks above cover the environment only. Run doctor --db <path> to verify the store and its schema.",
         }),
         Some(path) => {
             let store = SqliteStore::open(&path).map_err(ProtocolError::from)?;
@@ -1885,9 +1885,10 @@ fn dispatch(
                 let mut args = rest.to_vec();
                 if !take_bool_flag(&mut args, "--force-dev") {
                     return Err(CliError::usage(
-                        "index <id-fact> <text> 是开发直写入口，会绕过 provider 解析\
-                         把无来源的内容写进权威 catalog；确实要用请加 --force-dev。\
-                         要建立索引请用：sync --discover",
+                        "index <id-fact> <text> is a development direct-write entry point: it \
+                         bypasses provider parsing and puts content with no provenance into the \
+                         authoritative catalog. Add --force-dev if you really mean it. To build \
+                         an index, run: sync --discover",
                     ));
                 }
                 no_extra_args(&args, 2, "index <id-fact> <text> --force-dev")?;
@@ -1938,18 +1939,19 @@ fn dispatch(
                 // 静默忽略，否则拼写错误会伪装成成功的空发现。
                 if from_file.is_some() {
                     return Err(CliError::usage(
-                        "sync --discover 与 --from-file 互斥：前者从 provider 数据根发现路径，后者从清单读路径",
+                        "sync --discover and --from-file are mutually exclusive: --discover finds paths under the provider data roots, --from-file reads them from a list",
                     ));
                 }
                 if args.len() > 1 {
                     return Err(CliError::usage(
-                        "sync --discover 不接受路径或额外 flag；路径由 provider 数据根自动发现",
+                        "sync --discover takes no paths and no extra flags; paths come from the provider data roots",
                     ));
                 }
                 if sync_provider.is_some() {
                     return Err(CliError::usage(
-                        "sync --discover 与 --provider 互斥：discover 从每个 provider 的数据根\
-                         推断归属，点名单个 provider 会与它冲突",
+                        "sync --discover and --provider are mutually exclusive: discover infers \
+                         ownership from each provider's own data root, so naming a single \
+                         provider conflicts with it",
                     ));
                 }
                 sync_discover(store, SyncProgress::for_mode(mode), request_id)?
@@ -1963,13 +1965,13 @@ fn dispatch(
                 // 写两遍，说明缺的是工具能力而不是脚本技巧。
                 if args.len() > 1 {
                     return Err(CliError::usage(
-                        "sync --from-file <list> 不接受额外路径：路径全部来自清单文件",
+                        "sync --from-file <list> takes no extra paths: every path comes from the list file",
                     ));
                 }
                 let paths = read_source_list(&list_path)?;
                 if paths.is_empty() {
                     return Err(CliError::usage(format!(
-                        "sync --from-file: {list_path} 里没有任何路径（空行与 # 注释会被忽略）"
+                        "sync --from-file: {list_path} contains no paths (blank lines and # comments are ignored)"
                     )));
                 }
                 sync_files(
@@ -2240,7 +2242,7 @@ fn dispatch(
                 .as_deref()
                 .map(|v| {
                     v.parse::<usize>()
-                        .map_err(|_| CliError::usage("--max-evidence 需要正整数"))
+                        .map_err(|_| CliError::usage("--max-evidence requires a positive integer"))
                 })
                 .transpose()?
                 .unwrap_or(20);
@@ -2248,7 +2250,7 @@ fn dispatch(
                 .as_deref()
                 .map(|v| {
                     v.parse::<usize>()
-                        .map_err(|_| CliError::usage("--max-tokens 需要正整数"))
+                        .map_err(|_| CliError::usage("--max-tokens requires a positive integer"))
                 })
                 .transpose()?
                 .unwrap_or(8000);
@@ -2256,7 +2258,7 @@ fn dispatch(
                 .as_deref()
                 .map(|v| {
                     v.parse::<usize>()
-                        .map_err(|_| CliError::usage("--max-bytes 需要正整数"))
+                        .map_err(|_| CliError::usage("--max-bytes requires a positive integer"))
                 })
                 .transpose()?
                 .unwrap_or(2_000_000);
@@ -2476,14 +2478,14 @@ fn dispatch(
                         if confirmed {
                             data["first_run_preview"] = serde_json::json!(true);
                             warnings.push(
-                                "首次使用 resume：已强制预览未执行。再次运行 resume --yes <session-id> 确认后才会真正执行。"
+                                "first resume: preview was forced and nothing was executed. Run resume --yes <session-id> again to confirm before it really runs."
                                     .to_string(),
                             );
                         }
                     }
                     Err(error) => {
                         warnings.push(format!(
-                            "resume: 首次预览标记写入失败（将继续强制预览）：{error}"
+                            "resume: could not write the first-preview marker (preview stays forced): {error}"
                         ));
                     }
                 }
@@ -2499,7 +2501,10 @@ fn dispatch(
                 execute_resume(&preview.descriptor)?;
                 data["executed"] = serde_json::json!(true);
             } else {
-                warnings.push("dry-run：未执行。确认命令无误后加 --yes 实际恢复会话。".to_string());
+                warnings.push(
+                    "dry-run: nothing was executed. Check the command, then add --yes to really resume the session."
+                        .to_string(),
+                );
             }
             Ok((
                 "resume",
@@ -2528,8 +2533,9 @@ fn dispatch(
             let max_tokens = max_tokens_flag
                 .as_deref()
                 .map(|v| {
-                    v.parse::<u64>()
-                        .map_err(|_| CliError::usage("--max-tokens 需要非负整数"))
+                    v.parse::<u64>().map_err(|_| {
+                        CliError::usage("--max-tokens requires a non-negative integer")
+                    })
                 })
                 .transpose()?
                 .unwrap_or(2000);
@@ -2540,8 +2546,9 @@ fn dispatch(
                 decay_days: decay_days
                     .as_deref()
                     .map(|v| {
-                        v.parse::<u32>()
-                            .map_err(|_| CliError::usage("--decay-days 需要非负整数"))
+                        v.parse::<u32>().map_err(|_| {
+                            CliError::usage("--decay-days requires a non-negative integer")
+                        })
                     })
                     .transpose()?
                     .unwrap_or(0),
@@ -4271,8 +4278,9 @@ fn sync_files(
     for path in paths {
         if std::path::Path::new(path).is_dir() {
             return Err(CliError::usage(
-                "sync 接受一个或多个 .jsonl 文件，不接受目录；\
-                 需要同步整个目录时，请用你的 shell 展开文件列表，把文件逐个传给 sync",
+                "sync takes one or more transcript files, not a directory; to sync a whole \
+                 directory, expand the file list with your shell and pass the files to sync \
+                 one by one",
             ));
         }
     }
@@ -5191,7 +5199,9 @@ fn read_source_list(path: &str) -> Result<Vec<String>, CliError> {
     let text = std::fs::read_to_string(path).map_err(|error| {
         // 清单本身读不到是用法错误（用户给错了 --from-file 的路径），不是
         // source_io——后者指 transcript 源读不到，两者的下一步动作不同。
-        CliError::usage(format!("sync --from-file: 无法读取清单 {path}: {error}"))
+        CliError::usage(format!(
+            "sync --from-file: cannot read the list {path}: {error}"
+        ))
     })?;
     Ok(text
         .lines()
