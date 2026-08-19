@@ -25,8 +25,26 @@ library.
 Commands::
 
     synthetic_corpus.py generate [--output-dir DIR] [--sessions N] [--messages M]
+                                 [--body-scale FACTOR]
     synthetic_corpus.py verify   [--output-dir DIR]
     synthetic_corpus.py ingest   [--output-dir DIR] [--binary PATH]
+
+``--body-scale`` is the one opt-in that changes message *density* — bytes per
+message — while holding the message count, the provider mix, the language mix
+and the session-length distribution fixed. It exists because the gated corpus
+carries ~509 bytes per message while a real transcript corpus measures ~7,174,
+and a throughput figure in MiB/s is only comparable between two corpora of the
+same density. Any value other than 1.0 produces a corpus that is deliberately
+*not* the frozen contract: its hash is not compared against the frozen manifest
+and the performance gate refuses to return a verdict on it.
+
+One honest caveat on "holding the mixes fixed": per-session message counts and
+provider assignment are drawn from their own RNGs, so they are *identical* at
+every scale. The language of one message is drawn from the same
+:data:`LANGUAGE_MIX`, but from the per-session RNG that text assembly also
+draws from, and a longer body consumes more draws — so the language mix is
+preserved in distribution, not message for message. The achieved mix is
+measured into the manifest at every scale rather than assumed.
 
 The corpus is ~50 MB and is never committed: the default output directory sits
 under the gitignored ``evidence-output/``. What is committed is this generator,
@@ -69,6 +87,9 @@ SEED = 20260819
 CORPUS_VERSION = "1"
 DEFAULT_SESSIONS = 5_000
 DEFAULT_MESSAGES = 100_000
+# Body-length multiplier. 1.0 is the frozen corpus; any other value is an
+# explicitly opted-into density variant (see the module docstring).
+DEFAULT_BODY_SCALE = 1.0
 
 # Epoch for every synthetic timestamp. Fixed so no wall clock is ever read.
 EPOCH = datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
@@ -326,6 +347,20 @@ def sample_log_uniform(rng: random.Random, low: int, high: int) -> int:
     return int(math.exp(rng.uniform(math.log(low), math.log(high))))
 
 
+def scale_length(length: int, body_scale: float) -> int:
+    """Apply the body-length multiplier, consuming no randomness.
+
+    Kept separate from the samplers so the RNG draw sequence is identical at
+    every scale: only the sampled value is stretched, never the number of draws
+    it took to obtain it.
+    """
+    if body_scale <= 0:
+        raise ValueError("body_scale must be positive")
+    if body_scale == 1.0:
+        return length
+    return max(1, int(round(length * body_scale)))
+
+
 def pick_weighted(rng: random.Random, options: Sequence[tuple[str, float]]) -> str:
     u = rng.random()
     cumulative = 0.0
@@ -439,26 +474,38 @@ def build_text(rng: random.Random, language: str, target: int, single_line: bool
     return text
 
 
-def message_target_length(rng: random.Random) -> int:
-    """Sample one message's target character length from the class mix."""
+def message_target_length(rng: random.Random, body_scale: float = DEFAULT_BODY_SCALE) -> int:
+    """Sample one message's target character length from the class mix.
+
+    ``body_scale`` multiplies the sampled length *after* the draw, so the RNG
+    consumption of this function is identical at every scale and a scale of 1.0
+    reproduces the frozen corpus byte for byte. Scaling the result rather than
+    the bucket bounds also keeps the shape of the distribution — the class mix
+    and the body quantiles are stretched, never reshaped.
+    """
     u = rng.random()
     cumulative = 0.0
     for name, probability, low, high in MESSAGE_CLASS_MIX:
         cumulative += probability
         if u <= cumulative:
             if name == "body":
-                return sample_cdf(rng, BODY_LENGTH_CDF)
-            return sample_log_uniform(rng, low, high)
-    return sample_cdf(rng, BODY_LENGTH_CDF)
+                return scale_length(sample_cdf(rng, BODY_LENGTH_CDF), body_scale)
+            return scale_length(sample_log_uniform(rng, low, high), body_scale)
+    return scale_length(sample_cdf(rng, BODY_LENGTH_CDF), body_scale)
 
 
-def build_session_messages(index: int, count: int, single_line: bool) -> list[dict[str, Any]]:
+def build_session_messages(
+    index: int,
+    count: int,
+    single_line: bool,
+    body_scale: float = DEFAULT_BODY_SCALE,
+) -> list[dict[str, Any]]:
     """Build one session's messages: alternating roles, mixed languages."""
     rng = seeded_rng("content", index)
     messages: list[dict[str, Any]] = []
     for seq in range(count):
         language = pick_weighted(rng, LANGUAGE_MIX)
-        target = message_target_length(rng)
+        target = message_target_length(rng, body_scale)
         messages.append(
             {
                 "seq": seq,
@@ -714,7 +761,10 @@ def measure(lengths: list[int], cjk_chars: int, total_chars: int, languages: dic
 # Generation.
 # ---------------------------------------------------------------------------
 def generate_corpus(
-    output_dir: Path, sessions: int = DEFAULT_SESSIONS, messages: int = DEFAULT_MESSAGES
+    output_dir: Path,
+    sessions: int = DEFAULT_SESSIONS,
+    messages: int = DEFAULT_MESSAGES,
+    body_scale: float = DEFAULT_BODY_SCALE,
 ) -> dict[str, Any]:
     """Write the corpus and its manifest under ``output_dir``; return manifest."""
     corpus_dir = output_dir / "corpus"
@@ -730,7 +780,7 @@ def generate_corpus(
 
     for index, provider in enumerate(assignment):
         session_messages = build_session_messages(
-            index, counts[index], provider in SINGLE_LINE_PROVIDERS
+            index, counts[index], provider in SINGLE_LINE_PROVIDERS, body_scale
         )
         text = RENDERERS[provider](index, session_messages)
         directory = corpus_dir / provider
@@ -752,6 +802,8 @@ def generate_corpus(
             cjk_chars += cjk_count(body)
             languages[message["language"]] = languages.get(message["language"], 0) + 1
 
+    total_bytes = sum(stats["bytes"] for stats in per_provider.values())
+    message_total = sum(counts)
     manifest = {
         "schema_version": SCHEMA_VERSION,
         "corpus_version": CORPUS_VERSION,
@@ -768,9 +820,13 @@ def generate_corpus(
         },
         "corpus": {
             "session_count": sessions,
-            "message_count": sum(counts),
+            "message_count": message_total,
             "file_count": len(written),
-            "total_bytes": sum(stats["bytes"] for stats in per_provider.values()),
+            "total_bytes": total_bytes,
+            "body_scale": body_scale,
+            "bytes_per_message": (
+                round(total_bytes / message_total, 3) if message_total else 0.0
+            ),
             "providers": dict(sorted(per_provider.items())),
             "session_messages": {
                 "min": min(counts),
@@ -822,8 +878,10 @@ def verify_corpus(output_dir: Path) -> dict[str, Any]:
     """Recompute the hash and counts of an on-disk corpus.
 
     The corpus is checked against the manifest written beside it and, when the
-    scale matches, against the frozen committed manifest. A drift in either is
-    a problem, never a warning.
+    scale *and* the density match the frozen contract, against the frozen
+    committed manifest. A drift in either is a problem, never a warning. A
+    deliberate density variant (``--body-scale`` other than 1.0) is a different
+    corpus by construction, so it is only checked against its own manifest.
     """
     manifest = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
     frozen = load_frozen_manifest()
@@ -836,9 +894,11 @@ def verify_corpus(output_dir: Path) -> dict[str, Any]:
     actual_hash = normalized_tree_hash(files, corpus_dir)
     if actual_hash != expected["fixture_hash"]:
         problems.append(f"fixture hash {actual_hash} != manifest {expected['fixture_hash']}")
+    body_scale = expected.get("body_scale", DEFAULT_BODY_SCALE)
     same_scale = (
         expected["session_count"] == frozen["corpus"]["session_count"]
         and expected["message_count"] == frozen["corpus"]["message_count"]
+        and body_scale == frozen["corpus"].get("body_scale", DEFAULT_BODY_SCALE)
     )
     if same_scale and actual_hash != frozen["corpus"]["fixture_hash"]:
         problems.append(
@@ -854,6 +914,8 @@ def verify_corpus(output_dir: Path) -> dict[str, Any]:
         "checked_against_frozen_manifest": same_scale,
         "message_count": expected["message_count"],
         "session_count": expected["session_count"],
+        "body_scale": body_scale,
+        "bytes_per_message": expected.get("bytes_per_message"),
         "problems": problems,
     }
 
@@ -1004,6 +1066,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     generate.add_argument("--sessions", type=int, default=DEFAULT_SESSIONS)
     generate.add_argument("--messages", type=int, default=DEFAULT_MESSAGES)
+    generate.add_argument(
+        "--body-scale",
+        type=float,
+        default=DEFAULT_BODY_SCALE,
+        help=(
+            "multiply every message body length by this factor, holding the "
+            "message count, provider mix, language mix and session-length "
+            "distribution fixed. 1.0 (default) is the frozen corpus at ~509 "
+            "bytes/message; ~24.5 lands near the ~7,174 bytes/message measured "
+            "on a real transcript corpus. Any value other than 1.0 is a density "
+            "variant: it is not the frozen contract and the performance gate "
+            "will refuse to score a verdict on it"
+        ),
+    )
 
     verify = sub.add_parser(
         "verify", help="recheck an on-disk corpus against its manifest and the frozen one"
@@ -1028,7 +1104,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     if args.command == "generate":
         output_dir.mkdir(parents=True, exist_ok=True)
-        manifest = generate_corpus(output_dir, args.sessions, args.messages)
+        manifest = generate_corpus(
+            output_dir, args.sessions, args.messages, args.body_scale
+        )
         print(json.dumps(manifest, ensure_ascii=False, indent=2))
         return 0
     if args.command == "verify":

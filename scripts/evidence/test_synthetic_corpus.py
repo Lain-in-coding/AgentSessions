@@ -156,6 +156,92 @@ class SamplingTests(unittest.TestCase):
         self.assertNotIn("\n", text)
 
 
+class BodyScaleTests(unittest.TestCase):
+    """The density knob: bodies stretch, everything else holds still."""
+
+    def test_scale_of_one_consumes_the_same_randomness(self) -> None:
+        """A default-scale run must be indistinguishable from no knob at all."""
+        for index in range(50):
+            plain = SC.message_target_length(SC.seeded_rng("scale-test", index))
+            explicit = SC.message_target_length(SC.seeded_rng("scale-test", index), 1.0)
+            self.assertEqual(plain, explicit)
+
+    def test_scale_multiplies_the_sampled_length(self) -> None:
+        self.assertEqual(SC.scale_length(100, 1.0), 100)
+        self.assertEqual(SC.scale_length(100, 24.5), 2_450)
+        self.assertEqual(SC.scale_length(1, 0.25), 1, "a body never scales away to nothing")
+        with self.assertRaises(ValueError):
+            SC.scale_length(100, 0.0)
+
+    def test_scaled_targets_stay_proportional_to_the_baseline(self) -> None:
+        """Same draws, same shape: only the magnitude moves."""
+        baseline = [
+            SC.message_target_length(SC.seeded_rng("scale-shape", index))
+            for index in range(400)
+        ]
+        scaled = [
+            SC.message_target_length(SC.seeded_rng("scale-shape", index), 10.0)
+            for index in range(400)
+        ]
+        for plain, big in zip(baseline, scaled):
+            self.assertEqual(big, max(1, round(plain * 10.0)))
+
+    def test_dense_corpus_keeps_counts_and_mixes_but_raises_density(self) -> None:
+        with tempfile.TemporaryDirectory() as sparse_dir, tempfile.TemporaryDirectory() as dense_dir:
+            sparse = SC.generate_corpus(Path(sparse_dir), TEST_SESSIONS, TEST_MESSAGES)
+            dense = SC.generate_corpus(Path(dense_dir), TEST_SESSIONS, TEST_MESSAGES, 24.5)
+            for key in ("session_count", "message_count", "file_count"):
+                self.assertEqual(sparse["corpus"][key], dense["corpus"][key])
+            self.assertEqual(
+                {name: stats["messages"] for name, stats in sparse["corpus"]["providers"].items()},
+                {name: stats["messages"] for name, stats in dense["corpus"]["providers"].items()},
+                "provider message mix must survive a density change",
+            )
+            self.assertEqual(
+                sparse["measured"]["language_mix"].keys(),
+                dense["measured"]["language_mix"].keys(),
+            )
+            # Language is drawn from the same LANGUAGE_MIX at every scale, but the
+            # per-session RNG is shared with text assembly, and assembling a
+            # longer body consumes more draws. So the mix is preserved in
+            # distribution, not message for message; the achieved mix is measured
+            # in the manifest rather than assumed. Tolerance is sampling noise at
+            # this scale, and it shrinks as the message count grows.
+            for language, target in SC.LANGUAGE_MIX:
+                sparse_share = sparse["measured"]["language_mix"][language] / TEST_MESSAGES
+                dense_share = dense["measured"]["language_mix"][language] / TEST_MESSAGES
+                self.assertAlmostEqual(sparse_share, target, delta=0.02)
+                self.assertAlmostEqual(dense_share, target, delta=0.02)
+            self.assertEqual(
+                sparse["corpus"]["session_messages"], dense["corpus"]["session_messages"]
+            )
+            self.assertEqual(sparse["corpus"]["body_scale"], 1.0)
+            self.assertEqual(dense["corpus"]["body_scale"], 24.5)
+            self.assertGreater(
+                dense["corpus"]["bytes_per_message"],
+                10 * sparse["corpus"]["bytes_per_message"],
+            )
+            self.assertNotEqual(
+                sparse["corpus"]["fixture_hash"], dense["corpus"]["fixture_hash"]
+            )
+
+    def test_dense_corpus_is_deterministic(self) -> None:
+        with tempfile.TemporaryDirectory() as first, tempfile.TemporaryDirectory() as second:
+            left = SC.generate_corpus(Path(first), 60, 900, 12.0)
+            right = SC.generate_corpus(Path(second), 60, 900, 12.0)
+            self.assertEqual(left, right)
+
+    def test_density_variant_is_not_checked_against_the_frozen_manifest(self) -> None:
+        """A variant at frozen scale must not be mistaken for the frozen corpus."""
+        with tempfile.TemporaryDirectory() as name:
+            output = Path(name)
+            SC.generate_corpus(output, 60, 900, 8.0)
+            result = SC.verify_corpus(output)
+            self.assertEqual(result["problems"], [])
+            self.assertFalse(result["checked_against_frozen_manifest"])
+            self.assertEqual(result["body_scale"], 8.0)
+
+
 class RendererTests(unittest.TestCase):
     def _messages(self, count: int, single_line: bool = False) -> list:
         return SC.build_session_messages(3, count, single_line)
@@ -231,6 +317,12 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(len(corpus["fixture_hash"]), 64)
         self.assertEqual(corpus["hash_algorithm"], "sha256")
         self.assertEqual(corpus["hash_normalization"], "crlf_to_lf")
+        self.assertEqual(corpus["body_scale"], SC.DEFAULT_BODY_SCALE)
+        self.assertAlmostEqual(
+            corpus["bytes_per_message"],
+            corpus["total_bytes"] / corpus["message_count"],
+            places=3,
+        )
         self.assertEqual(set(corpus["providers"]), set(SC.RENDERERS))
         self.assertEqual(
             sum(stats["sessions"] for stats in corpus["providers"].values()),
