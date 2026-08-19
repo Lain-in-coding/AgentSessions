@@ -32,11 +32,18 @@
 
 ## 编码的真实格式知识（仅字段名与封套形状，无真实内容）
 
-来自 Qoder transcript JSONL（`~/.qoder/projects/<project>/transcript/*.jsonl`）的
+来自 Qoder **CLI** transcript JSONL（`~/.qoder/projects/<project>/`，路径口径见
+`src/lib.rs` 顶部说明——`transcript/` 这一段未核实，本仓库统一按不带该段书写）的
 格式观察，仅复用结构：`type:"session_meta"` 头（`session_id`/`cwd` 容错匹配）、
 `type:"user"`/`type:"assistant"` 记录其 `type` 即角色、`message.content` 为正文；
 `progress`/`tool_use`/`tool_result` 非对话。身份字段 lenient 匹配（顶层或嵌套
 `session_meta` 对象）。
+
+注意本 fixture 模仿的是 **CLI 的 JSONL**。Qoder **IDE** 另有一套产物
+（`~/.qoder/cache/projects/<project>-<hash>/conversation-history/<id>.txt`），
+实测为**纯文本而非 JSONL**（`--- Request: <uuid> ---` 分隔、裸 `user:`/`assistant:`
+角色行、`<communication>`/`<user_query>`/`<think>` 标签块），
+当前 variant 读不了它，也没有为它构造 fixture。
 
 ## 脱敏与合规声明
 

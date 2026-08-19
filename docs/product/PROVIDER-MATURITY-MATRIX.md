@@ -35,7 +35,7 @@
 | Cursor | `cursor` | `cursor/vscdb-chat-v1` | **Experimental** | `state.vscdb` SQLite KV（ItemTable `chatdata`/`prompts` key），hstry@88b78b1 (MIT) 格式证据，多代格式分层待补 + golden（`tests/golden.rs`） |
 | Kimi Code | `kimi-code` | `kimi-code/wire-jsonl-v1` | **Experimental** | wire.jsonl（`context.append_message`）+ golden（`tests/golden.rs`） |
 | OpenClaw | `openclaw` | `openclaw/session-jsonl-v3` | **Experimental** | v3 JSONL header + message records，维护者开发机仅 config 无 transcript 样本 + golden（`tests/golden.rs`） |
-| Qoder | `qoder` | `qoder/transcript-jsonl-v1` | **Experimental** | JSONL（`session_meta` + `type:user/assistant`），官方路径已实现 + golden（`tests/golden.rs`） |
+| Qoder | `qoder` | `qoder/transcript-jsonl-v1` | **Experimental** | JSONL（`session_meta` + `type:user/assistant`）+ golden（`tests/golden.rs`）；针对 **CLI** 产物，源根具体层级未核实（见下方逐 provider 明细），**IDE** 的纯文本 conversation-history 不在本 variant 覆盖内 |
 | Tencent CodeBuddy | `tencent-codebuddy` | `tencent-codebuddy/cli-jsonl-v1` | **Experimental** | CLI OpenAI-style JSONL（`role`/`content`/`sessionId`），extension variant 待分层 + golden（`tests/golden.rs`） |
 | Cline | `cline` | `cline/api-conversation-history-v1` | **Experimental** | `api_conversation_history.json` JSON family + golden（`tests/golden.rs`） |
 | Aider | `aider` | `aider/chat-history-md-v1` | **Experimental** | Markdown chat history（`#### ` user prompts），`.aider.chat.history.md` 为候选 root 待核验 + golden（`tests/golden.rs`） |
@@ -93,7 +93,7 @@ manifest 均已填真实限制，见各 `crates/agent-session-grep-provider-*/sr
 - **Cursor**：`state.vscdb` 为 chatdata/prompts 两 key 的多代格式，版本分层待补；SQLite 无字节 span；无 native 消息 id（合成 `cursor-msg-{seq}`）。
 - **Kimi Code**：`context.append_loop_event`（step/tool 事件）暂未解析；wire.jsonl 罕见携带 session id，通常留缺；逐消息时间戳未抽取。
 - **OpenClaw**：resume 有意不支持（gateway-managed）；无 native 消息 id（合成 `openclaw-msg-{seq}`）。
-- **Qoder**：身份字段（session_id/cwd）从 `session_meta` lenient 匹配；`progress`/`tool_use`/`tool_result` 非对话记录跳过。
+- **Qoder**：身份字段（session_id/cwd）从 `session_meta` lenient 匹配；`progress`/`tool_use`/`tool_result` 非对话记录跳过。目标是 **CLI** 的 transcript JSONL（`~/.qoder/projects/<project>/`；是否还有一层 `transcript/` 未核实——ctx 矩阵与 Qoder CLI 官方文档口径不一致，需真实 `qodercli` 运行才能定，全仓库统一按不带该段书写）。**IDE** 另一套产物（`~/.qoder/cache/projects/<project>-<hash>/conversation-history/<id>.txt`）实测为纯文本而非 JSONL，当前 variant 读不了，需要新 variant 才能支持。
 - **Tencent CodeBuddy**：根启动关键字用户消息（content 恰为 `"code"`）被过滤；无 cwd pair 观察（无独立 cwd 头记录）；无 native 消息 id（合成 `codebuddy-msg-{seq}`）。
 - **Cline**：JSON 数组文件内无 session id，`session_native_id` 留缺；无字节 span（数组下标 pseudo-span 已移除）；无 native 消息 id（合成 `cline-msg-{seq}`）。
 - **Aider**：span 为派生近似（块起始行 + 文本长度），非逐字节整行切片；blockquote 工具/编辑输出并入助手正文；会话身份为首个 run 头时间戳。

@@ -7,11 +7,38 @@
 //! `message.content` body; `progress` / `tool_use` / `tool_result` are
 //! non-conversational and skipped by the canonical adapter.
 //!
-//! Format evidence: ctx (Apache-2.0) `provider-support-matrix.json` — source
-//! root `~/.qoder/projects/<project>/transcript/*.jsonl`, record types
-//! `session_meta`/`user`/`assistant`/`progress`/`tool_use`/`tool_result`.
+//! Format evidence: ctx (Apache-2.0) `provider-support-matrix.json` — record
+//! types `session_meta`/`user`/`assistant`/`progress`/`tool_use`/`tool_result`.
 //! Identity fields are extracted from `session_meta` (fixture-derived;
 //! `session_id`/`cwd` keys are matched leniently).
+//!
+//! # Source root: one stated path, and what is actually verified
+//!
+//! This adapter targets Qoder's **CLI** transcript JSONL under
+//! `~/.qoder/projects/<project>/`. That is the single path this crate states;
+//! it is deliberately written without a `transcript/` segment.
+//!
+//! The segment is genuinely unresolved and cannot be settled locally:
+//! ctx's matrix records `~/.qoder/projects/<project>/transcript/*.jsonl`, while
+//! Qoder's own CLI documentation describes `~/.qoder/projects/<project>/*.jsonl`
+//! alongside a `state.json` and no `transcript/` level. Deciding between them
+//! needs a real `qodercli` run (the CLI is not installed here and installing it
+//! requires an account), so rather than let two spellings sit in different files
+//! this crate states the shorter one and records the disagreement here. Neither
+//! spelling affects behaviour today: `qoder` registers **no** discovery root
+//! (see the CLI's `provider_root_subpath`), so sources only ever arrive through
+//! an explicit `sync <file>` and the path is documentation, not code.
+//!
+//! What *is* verified by measurement is a **different, unsupported layout**. The
+//! Qoder IDE (1.106.3) writes conversation history to
+//! `~/.qoder/cache/projects/<project>-<hash>/conversation-history/<id>.txt`, and
+//! those files are **plain text, not JSONL**: blank-line separated, with
+//! `--- Request: <uuid> ---` delimiters, bare `user:` / `assistant:` role lines,
+//! and `<communication>` / `<user_query>` / `<think>` tag blocks. Confirmed on
+//! two real files on this machine; there is no `.jsonl` anywhere under
+//! `~/.qoder`, and `~/.qoder/projects` does not exist. This adapter's
+//! JSONL variant therefore **cannot** read the IDE cache — a separate variant
+//! would be required, and claiming otherwise would be a false capability.
 
 use agent_session_grep_ports::MetadataResolution;
 use agent_session_grep_ports::{
@@ -91,6 +118,8 @@ impl ProviderAdapter for QoderAdapter {
                 "identity fields are matched leniently from session_meta (session_id/cwd)",
                 "non-conversational records (progress/tool_use/tool_result) are skipped",
                 "the format carries no per-message native id, so message identity is reconstructed document-scoped by the ingestion layer (Unstable)",
+                "targets the CLI transcript JSONL under `~/.qoder/projects/<project>/`; whether transcripts sit directly there or under a `transcript/` subdirectory is unverified (ctx's matrix and Qoder's CLI docs disagree) and needs a real qodercli run to settle",
+                "the Qoder IDE's `~/.qoder/cache/projects/<project>-<hash>/conversation-history/<id>.txt` is plain text, not JSONL (verified on real files), and is NOT readable by this variant",
             ],
         )
     }
