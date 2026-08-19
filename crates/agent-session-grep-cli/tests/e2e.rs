@@ -5852,6 +5852,142 @@ fn forget_and_prune_reject_malformed_scopes() {
     assert!(stdout(&out).contains("msg_v1_"), "{}", stdout(&out));
 }
 
+/// `forget --project`：按 resolved Original Working Directory 命中该目录及其子目录。
+///
+/// `forget_env` 的两个 fixture 分别落在 `/work/projolder` 与 `/work/projnewer`，
+/// 所以本用例同时守住"前缀不得误伤"：`/work/proj` 不是 `/work/projolder` 的父目录。
+#[test]
+fn forget_project_matches_the_directory_and_its_children_only() {
+    let (_home_dir, home, _db_dir, db) = forget_env("forget-project");
+
+    // 不是父目录关系：`/work/proj` 不得命中 `/work/projolder`。
+    let out = run_with_home(&db, &home, &["forget", "--project", "/work/proj"]);
+    assert!(out.status.success(), "{}", stdout(&out));
+    let frame = parse_first_line(&out);
+    assert_eq!(
+        frame["data"]["sessions_removed"], 0,
+        "前缀匹配必须按目录边界，不得做子串匹配：{frame}"
+    );
+
+    let out = run_with_home(&db, &home, &["forget", "--project", "/work/projolder"]);
+    let frame = parse_first_line(&out);
+    assert_eq!(frame["data"]["scope"]["dimension"], "project", "{frame}");
+    assert_eq!(frame["data"]["sessions_removed"], 1, "{frame}");
+    // 维度选择里不存在"连带"：整个维度都是用户点名的。
+    assert_eq!(
+        frame["data"]["collateral_sessions"]
+            .as_array()
+            .expect("collateral")
+            .len(),
+        0,
+        "{frame}"
+    );
+
+    let out = run_with_home(
+        &db,
+        &home,
+        &["forget", "--project", "/work/projolder", "--yes"],
+    );
+    assert_eq!(parse_first_line(&out)["data"]["executed"], true);
+    let out = run_with_home(&db, &home, &["search", "zzalphaforgettoken"]);
+    assert_eq!(
+        parse_first_line(&out)["data"]["hits"]
+            .as_array()
+            .expect("hits")
+            .len(),
+        0
+    );
+    let out = run_with_home(&db, &home, &["search", "zzbetakepttoken"]);
+    assert!(stdout(&out).contains("msg_v1_"), "{}", stdout(&out));
+}
+
+/// `prune --provider`：删除一个 provider 的全部会话，其它 provider 不受影响。
+#[test]
+fn prune_provider_removes_only_that_providers_sessions() {
+    let (home_dir, home) = discover_env();
+    let (_db_dir, db) = temp_db("prune-provider");
+    let claude_dir = home_dir.path().join(".claude").join("projects").join("cc");
+    std::fs::create_dir_all(&claude_dir).expect("create claude dir");
+    std::fs::write(
+        claude_dir.join("s.jsonl"),
+        format!("{}\n", claude_fixture("\"zzclaudeprovtoken body\"")),
+    )
+    .expect("write claude fixture");
+    std::fs::write(
+        home_dir
+            .path()
+            .join(".codex")
+            .join("sessions")
+            .join("s.jsonl"),
+        format!("{}\n", codex_fixture("\"zzcodexprovtoken body\"")),
+    )
+    .expect("write codex fixture");
+    let out = run_with_home(&db, &home, &["sync", "--discover"]);
+    assert!(out.status.success(), "seed: {}", stdout(&out));
+
+    let out = run_with_home(&db, &home, &["prune", "--provider", "codex", "--yes"]);
+    assert!(out.status.success(), "{}", stdout(&out));
+    let frame = parse_first_line(&out);
+    assert_eq!(frame["data"]["scope"]["provider"], "codex", "{frame}");
+    assert_eq!(frame["data"]["executed"], true, "{frame}");
+    assert_eq!(frame["data"]["sessions_removed"], 1, "{frame}");
+
+    let out = run_with_home(&db, &home, &["search", "zzcodexprovtoken"]);
+    assert_eq!(
+        parse_first_line(&out)["data"]["hits"]
+            .as_array()
+            .expect("hits")
+            .len(),
+        0
+    );
+    let out = run_with_home(&db, &home, &["search", "zzclaudeprovtoken"]);
+    assert!(
+        stdout(&out).contains("msg_v1_"),
+        "另一个 provider 必须保留：{}",
+        stdout(&out)
+    );
+}
+
+/// 删除后 `doctor` 报告一致、`index compact` 回收空间、`index rebuild` 不复活。
+///
+/// M3-2 的三条验收标准里的后两条。rebuild 从权威 catalog 全量重投影，所以
+/// "rebuild 后不复活"等价于"catalog 里真的没了"——它是删除彻底性的独立证据。
+#[test]
+fn after_deletion_doctor_is_consistent_and_rebuild_does_not_resurrect() {
+    let (_home_dir, home, _db_dir, db) = forget_env("forget-doctor");
+    let session = session_wire_for(&db, &home, "zzalphaforgettoken");
+    let out = run_with_home(&db, &home, &["forget", &session, "--yes"]);
+    assert!(out.status.success(), "{}", stdout(&out));
+
+    let out = run_with_home(&db, &home, &["index", "compact"]);
+    assert!(out.status.success(), "{}", stdout(&out));
+    let frame = parse_first_line(&out);
+    assert_eq!(frame["command"], "index.compact", "{frame}");
+
+    let out = run_with_home(&db, &home, &["doctor"]);
+    assert!(out.status.success(), "{}", stdout(&out));
+    let frame = parse_first_line(&out);
+    assert_eq!(frame["data"]["db"], "ok", "{frame}");
+    assert_eq!(frame["data"]["schema"], 13, "{frame}");
+    assert_eq!(frame["data"]["interrupted_batches"], 0, "{frame}");
+    assert_eq!(frame["data"]["orphaned_tool_activities"], 0, "{frame}");
+    assert_eq!(frame["data"]["orphaned_activity_memberships"], 0, "{frame}");
+
+    let out = run_with_home(&db, &home, &["index", "rebuild"]);
+    assert!(out.status.success(), "{}", stdout(&out));
+    let out = run_with_home(&db, &home, &["search", "zzalphaforgettoken"]);
+    assert_eq!(
+        parse_first_line(&out)["data"]["hits"]
+            .as_array()
+            .expect("hits")
+            .len(),
+        0,
+        "index rebuild 从权威 catalog 重投影，绝不能让被删内容复活"
+    );
+    let out = run_with_home(&db, &home, &["search", "zzbetakepttoken"]);
+    assert!(stdout(&out).contains("msg_v1_"), "{}", stdout(&out));
+}
+
 /// human 模式必须把"将删什么"说清楚，而不是只回一个计数。
 #[test]
 fn forget_human_output_names_the_sessions_and_the_undo_path() {
