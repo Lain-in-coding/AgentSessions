@@ -975,16 +975,16 @@ fn platform_paths_impl() -> Result<serde_json::Value, CliError> {
 fn help_text() -> String {
     format!(
         "{name} {version}
-AI coding-agent history search engine（本地 AI 编程会话历史搜索）。
+AI coding-agent session history search engine (local, read-only, offline).
 
-快速上手（新手从这里开始）:
-    agent-session-grep sync --discover              扫描各 provider 数据根建立索引
-    agent-session-grep search 关键词                 搜索历史会话
-    agent-session-grep show <命中ID>                 看一条命中的正文
-    agent-session-grep context <会话ID>              展开一个会话的上下文
-    agent-session-grep config paths                 查看数据默认放哪里
-    agent-session-grep providers                    查看 Provider 成熟度与能力
-数据流：search 返回命中消息 → show <msg_id> 看正文 → context <ses_id> 看整个会话。
+QUICKSTART (start here):
+    agent-session-grep sync --discover              index every provider data root
+    agent-session-grep search <keyword>             search your session history
+    agent-session-grep show <hit-id>                read the body of one hit
+    agent-session-grep context <session-id>         expand one whole session
+    agent-session-grep config paths                 see where data is stored
+    agent-session-grep providers                    see provider maturity and capabilities
+Data flow: search returns matching messages -> show <msg_id> reads one body -> context <ses_id> reads the whole session.
 
 USAGE:
     agent-session-grep [--db <path>] <COMMAND> [ARGS]
@@ -992,82 +992,82 @@ USAGE:
     agent-session-grep --help | --version
 
 COMMANDS:
-    ingest <file>          解析原始 .jsonl 文件并入库（只读源）
-    sync <file>...          原子扫描多个 .jsonl 文件；无变化时不生成新 generation
-    sync --discover          自动发现各 provider 数据根下的源并同步（只读源）
-    index rebuild          从权威 catalog 全量重投影 FTS 索引（维护命令）
-    index compact          回收 freelist（VACUUM；显式维护命令，持排他锁）
-    index embeddings       从权威 catalog 构建语义向量索引（semantic/hybrid 检索前置）
-    index purge-activities 修剪孤儿工具活动行（无 catalog 消息的活动/悬空 claim；维护命令）
-    search <query>         全文检索，按相关性降序返回命中（支持分页/预算/过滤 flag）
-    handoff <query>        检索并为查询生成 handoff pack（原文证据 + 建议命令；dry-run）
-    get-message <msg-id>   返回命中消息及其同会话主线邻居（--session/--around）
-    get-session-resume <ses-id> 返回只读 Resume Metadata（Provider Session ID / Original Working Directory）
-    resume <ses-id>        预览恢复命令（默认 dry-run；--yes 才实际执行）
-    hook <event>           Claude Code Hook 集成（默认关闭；--enable 才注入历史）
-    get <wire-id>          按实体 id 取回原始 payload
-    show <wire-id>         按实体 id 取回并归一化展示（role/text 结构）
-    list [limit]           稳定排序列出 catalog 实体（默认 20；支持分页/预算 flag）
-    context <ses-id>       装配会话上下文：分支消息链 + 证据区间
-    status                 报告 catalog 实体总数
-    mcp                    启动 stdio MCP 服务（JSON-RPC 2.0；stdout 只输出 MCP frame）
-    tui                    交互式只读浏览（Preview；需要交互式终端）
-    serve                  启动 loopback HTTP 服务 + 嵌入式 Web UI（--port <n>；仅 loopback）
-    doctor                 环境自检（可选 --db 校验存储可打开）
-    providers              报告 Provider 成熟度、路线目标与逐字段能力
-    config paths           报告当前平台的 config/data/cache/logs 路径
-    model import|status    本地 embedding 模型缓存（永不联网；import 需 semantic-candle 构建）
+    ingest <file>          parse one raw transcript file into the store (source stays read-only)
+    sync <file>...         atomically scan one or more transcripts; no new generation when nothing changed
+    sync --discover        discover and sync sources under every provider data root (sources stay read-only)
+    index rebuild          reproject the whole FTS index from the authoritative catalog (maintenance)
+    index compact          reclaim the freelist (VACUUM; explicit maintenance, holds an exclusive lock)
+    index embeddings       build the semantic vector index from the catalog (required by semantic/hybrid)
+    index purge-activities prune orphan tool-activity rows (activities with no catalog message; maintenance)
+    search <query>         full-text search, hits ranked by relevance (supports paging/budget/filter flags)
+    handoff <query>        search and build a handoff pack (verbatim evidence + suggested commands; dry-run)
+    get-message <msg-id>   return one message plus its mainline neighbours (--session/--around)
+    get-session-resume <ses-id> return read-only resume metadata (provider session id / original working directory)
+    resume <ses-id>        preview the resume command (dry-run by default; only --yes executes)
+    hook <event>           Claude Code hook integration (off by default; only --enable injects history)
+    get <wire-id>          return the raw payload for an entity id
+    show <wire-id>         return an entity normalised for reading (role/text shape)
+    list [limit]           list catalog entities in stable order (default 20; paging/budget flags)
+    context <ses-id>       assemble session context: branch message chain + evidence spans
+    status                 report the total catalog entity count
+    mcp                    serve MCP over stdio (JSON-RPC 2.0; stdout carries MCP frames only)
+    tui                    interactive read-only browsing (preview; needs an interactive terminal)
+    serve                  loopback HTTP server + embedded web UI (--port <n>; loopback only)
+    doctor                 environment self-check (with --db, verify the store opens)
+    providers              report provider maturity, roadmap target, and per-field capabilities
+    config paths           report this platform's config/data/cache/logs paths
+    model import|status    local embedding model cache (never networked; import needs a semantic-candle build)
 
 PAGINATION / BUDGET (search, list):
-    --cursor <token>       上一页 envelope `page.next_cursor` 的续读令牌
-    --max-items <n>        页大小上限（同时作为响应条目预算）
-    --max-bytes <n>        响应字节预算（最低 4096）
+    --cursor <token>       continuation token from the previous envelope's `page.next_cursor`
+    --max-items <n>        page size cap (also the response item budget)
+    --max-bytes <n>        response byte budget (minimum 4096)
 
 FILTER (search):
-    --provider claude|claude-code|codex  限定 provider（可重复，多个取值按 OR 合并）
-    --since <time>         起始时间（含）；RFC3339/ISO-8601 绝对值或 1h/1d/1w 相对量
-    --until <time>         结束时间（不含）；语法同 --since
-    --include-system       默认排除 system/developer 角色消息；加此旗标恢复
-    --group-by-session     按会话归并：每会话保留最高分命中并附 occurrences 计数
+    --provider <id>        restrict to a provider (repeatable; values OR together). Run `providers` for the ids
+    --since <time>         window start, inclusive; RFC3339/ISO-8601 absolute or 1h/1d/1w relative
+    --until <time>         window end, exclusive; same syntax as --since
+    --include-system       system/developer role messages are excluded by default; this flag restores them
+    --group-by-session     collapse per session: keep the top-scoring hit and attach an occurrences count
 
-FACETS (search，结构化过滤；默认不过滤，输出与旧版一致):
-    --main-only            只看主线消息（排除 sidechain）
-    --subagent-only        只看 subagent（sidechain）消息；与 --main-only 互斥
-    --include-sidechain    显式包含 sidechain（默认值；不与上述两者并用）
-    --tool-kind <kind>     只保留做过 file|command|web|query|unknown 工具调用的消息
-    --tool-name <name>     只保留用过该工具（逐字相等）的消息
+FACETS (search; structured filters, nothing filtered by default, output unchanged):
+    --main-only            mainline messages only (excludes sidechains)
+    --subagent-only        subagent (sidechain) messages only; mutually exclusive with --main-only
+    --include-sidechain    include sidechains explicitly (the default; not for use with the two above)
+    --tool-kind <kind>     keep only messages that made a file|command|web|query|unknown tool call
+    --tool-name <name>     keep only messages that used this tool (exact match)
 
 GET MESSAGE:
-    --session <ses-id>     共享消息的所属会话；有歧义时必须指定
-    --around <n>           主线两侧各返回 n 条邻居（默认 0，仅锚点）
-    --max-items <n>        返回消息条数预算
-    --max-bytes <n>        响应字节预算（最低 4096）
+    --session <ses-id>     owning session of a shared message; required when ambiguous
+    --around <n>           return n mainline neighbours on each side (default 0, anchor only)
+    --max-items <n>        returned message count budget
+    --max-bytes <n>        response byte budget (minimum 4096)
 
 CONTEXT:
-    --policy mainline|full 分支策略（默认 mainline：排除 sidechain 沿 parent 链）
-    --level raw|talks|sessions 结构层级（默认 raw：纯消息链；talks 按用户消息分组；sessions 结构概览）
-    --max-messages <n>     消息条数预算
-    --max-bytes <n>        响应字节预算
+    --policy mainline|full branch policy (default mainline: follow the parent chain, exclude sidechains)
+    --level raw|talks|sessions structural level (default raw: plain message chain; talks groups by user message; sessions is an overview)
+    --max-messages <n>     message count budget
+    --max-bytes <n>        response byte budget
 
-GLOBAL（全局 flag 放在命令名之前；子命令 flag 如 --max-items 放在命令名之后）:
+GLOBAL (global flags go before the command name; subcommand flags such as --max-items go after it):
     --db <path>            SQLite store path. Optional: defaults to <data dir>/asg.db
                            (override with $ASG_DB; `config paths` prints the data dir).
                            Read commands never create a store; write commands do.
-    --output human|json|jsonl  输出模式（默认 human：人类可读文本；json/jsonl 为协议 envelope）
-    --robot                等价 --output json，无颜色/进度（stdout 只输出协议）
-    --request-id <id>      robot 调用方关联 id，原样回显于每个 frame（A-Za-z0-9._:- 计 1-128 字符）
-    --offline              拒绝任何需要联网的显式操作（fail-closed；当前所有命令本地执行，本 flag 是稳定显式模式，doctor/hook 会如实上报）
-    -h, --help             打印本帮助
-    -V, --version          打印版本
+    --output human|json|jsonl  output mode (default human: readable text; json/jsonl are protocol envelopes)
+    --robot                same as --output json, no colour, no progress (stdout carries protocol only)
+    --request-id <id>      correlation id for robot callers, echoed verbatim in every frame (A-Za-z0-9._:-, 1-128 chars)
+    --offline              refuse any explicit operation that would need the network (fail-closed). Every command runs locally today, so this is a stable explicit mode; doctor/hook report it honestly
+    -h, --help             print this help
+    -V, --version          print the version
 
-术语速记:
-    generation       第 N 次入库（数据每更新一次 +1）
-    cursor           翻页令牌（结果多于一页时用来取下一页）
-    wire-id          实体 ID（msg_v1_ 消息 / ses_v1_ 会话 / doc_v1_ 文档）
-    score            相关度分数（越高越相关，按分数降序排列）
+GLOSSARY (bilingual quick reference):
+    generation       Nth commit into the store, +1 per data update（入库代次）
+    cursor           page token, used to fetch the next page（翻页令牌）
+    wire-id          entity id (msg_v1_ message / ses_v1_ session / doc_v1_ document)（实体 ID）
+    score            relevance score, higher is more relevant, sorted descending（相关度分数）
 
 EXIT CODES:
-    0 成功；10 部分成功（预算截断，结果可用但不完整）；其余见 error catalog",
+    0 success; 10 partial success (budget truncation: results usable but incomplete); see the error catalog for the rest",
         name = env!("CARGO_PKG_NAME"),
         version = env!("CARGO_PKG_VERSION"),
     )
