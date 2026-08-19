@@ -7901,8 +7901,49 @@ mod filtered_query_tests {
             "claude rows must be excluded before LIMIT"
         );
         assert_eq!(
-            statements, 2,
-            "filtered message and session metadata candidates each use one prepared statement"
+            statements, 3,
+            "the filtered path uses a fixed three statements: the bm25 cutoff \
+             probe, the filtered message query, and the session metadata \
+             candidates. The count must stay constant as rows grow — that is \
+             what this guard is for. A count that scales with result size means \
+             an N+1 crept back in."
+        );
+    }
+
+    #[test]
+    fn filtered_statement_count_does_not_grow_with_matching_rows() {
+        // The sibling test pins the count at 3, but a constant on one fixture
+        // cannot distinguish "fixed cost" from "N+1 that happens to be 3 here".
+        // This measures the same path at two very different row counts: if the
+        // count is the same, the cost is structural rather than per-row.
+        let counts: Vec<usize> = [4_usize, 120]
+            .iter()
+            .map(|rows| {
+                let store = SqliteStore::open_in_memory().unwrap();
+                for index in 0..*rows {
+                    let id = sid(IdKind::Message, format!("scale-{index}").as_bytes());
+                    store.index(&id, "scaletoken body").unwrap();
+                }
+                let filters = SearchFilters::default();
+                counted_statements(&store, || {
+                    store
+                        .query_filtered(
+                            SearchQuery {
+                                text: "scaletoken",
+                                filters: &filters,
+                            },
+                            10,
+                        )
+                        .unwrap();
+                })
+            })
+            .collect();
+
+        assert_eq!(
+            counts[0], counts[1],
+            "statement count must not depend on how many rows match \
+             (4 rows -> {}, 120 rows -> {})",
+            counts[0], counts[1]
         );
     }
 
