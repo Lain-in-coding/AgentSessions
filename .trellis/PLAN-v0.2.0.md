@@ -1801,15 +1801,27 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   (只有 data/cache/logs 跟随 `LOCALAPPDATA`)—— 这是 Windows 目录语义,
   不是缺陷,但写文档时不要声称"所有路径都随 HOME 重定向"。
 
-- [ ] **M3-2 数据生命周期三维度(D12)**
-  - `asg prune --before <date>` — 按时间
-  - `asg forget --project <path>` — 按项目(离职/交接/敏感客户项目整体抹除)
-  - `asg prune --provider <id>` — 按 provider
-  - `asg forget <session-id>` — 单会话(粒度最细,删误入的敏感会话)
-  - `asg uninstall --purge` — 连数据一起删
+- [x] **M3-2 数据生命周期三维度(D12)** —— **四个维度已交付,第五个未做(merge `1e357d4`)**
+  - [x] `asg prune --before <date>` — 按时间
+  - [x] `asg forget --project <path>` — 按项目(离职/交接/敏感客户项目整体抹除)
+  - [x] `asg prune --provider <id>` — 按 provider
+  - [x] `asg forget <session-id>` — 单会话(粒度最细,删误入的敏感会话)
+  - [ ] `asg uninstall --purge` — 连数据一起删 —— **未做**:二进制里没有
+        `uninstall` 子命令,卸载由 `scripts/install/uninstall.*` 承担且按设计
+        不碰 data root。为复制安装器职责新增一个破坏性子命令是独立任务。
   全部默认 dry-run 打印将删除什么,`--yes` 才执行。删除必须同时清
   catalog、fts、fts_ids 边车、message_vec、tool_activities 等所有表。
   **验收**:每个维度有测试;删除后 `doctor` 报告一致;rebuild 后不复活。
+
+  **⚠️ 上面这句枚举读起来完整,实际漏了两处**(详见 M3-5 的字节级审计):
+  漏了 **FTS5 的 segment 残留**(delete marker 不重写 segment,
+  `VACUUM` 与 `optimize` **各自单独都不够**)与
+  **`index_batches` outbox 日志**(逐字保留了 `forget --project` 想抹掉的路径)。
+  → **教训**:"要清哪些表"的清单不能靠读 schema 列举,
+  必须**直接数原始文件字节**才知道有没有残留。
+  额外发现 `message_vec` 在**既有** tombstone 路径上就没被清理 ——
+  不是新命令引入的缺陷,而是这次审计才暴露出来的老问题。
+
 
 - [ ] **M3-3 搜索作用域:全库默认 + 同项目加权 + 每条显示来源(D26)**
   调研已闭环,结论明确,见 §2.3。落一份 ADR 再实现。
@@ -1852,15 +1864,54 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   **任何文档都没承认这个缺口。**
   **验收**:五个入口都能无查询词列出最近会话。
 
-- [ ] **M3-5 删除/保留:目前完全没有删除路径(隐私义务,非选配)**
+- [x] **M3-5 删除/保留:目前完全没有删除路径(隐私义务,非选配)** —— **已实现(merge `1e357d4`)**
   唯一的清理命令是 `index purge-activities`,而它**只删孤儿** tool-activity 行
   (`main.rs:1589-1609`)。**没有** `forget <session>`、
-  **没有** `prune --older-than`、**没有** `vacuum`、**没有**保留配置。
+  **没有** `prune --older-than`、~~**没有** `vacuum`~~(**记录过时**:
+  `index compact` 早在 M2-9 就已实现)、**没有**保留配置。
   catalog 行只能靠 tombstone 消失,而 tombstone 要求源文件消失**并且**
   跑一次完整的 `sync --discover`(`main.rs:3146-3176`)。
   → 索引了一个后来删掉的仓库、或误入了一份私密 transcript,
   **没有任何受支持的方式移除它**。
   `INSTALL-AND-UPGRADE.md:155-156` 让用户手动删整个 data root。
+
+  **✅ 已交付**:`forget <ses-id>` / `forget --project <路径>` /
+  `forget --list|--readmit` / `prune --before <日期>` / `prune --provider <id>`,
+  全部**默认 dry-run**,`--yes` 才执行。schema 升到 **v13**(新增
+  `forgotten_sources` 抑制表)。
+
+  **⚠️ 字节级审计揪出三个真实泄漏(都已修),其中两个不在原记录的枚举里**:
+  1. **`message_vec` 从来没在 tombstone 时清理** —— 这是**既有删除路径就有的
+     缺陷**,不只是新命令的问题:`query_semantic` 只读 `message_vec` 自己的列,
+     所以它仍会给已删除消息打分并返回其 wire id。
+  2. **`index compact` 原本不足以让删除内容不可读** —— FTS5 删除只写
+     delete marker,不重写 segment。实测:单跑 `VACUUM` 仍留 4 处、
+     单跑 FTS5 `optimize` 也仍留 4 处,**只有两者都做**才归零。
+     现在 `compact` = `optimize` → `VACUUM` → `wal_checkpoint(TRUNCATE)`。
+  3. **outbox 日志 `index_batches.source_replacements_json` 逐字保留了项目路径**
+     (ADR-0009 resume claim 里的 `original_working_directory`),
+     于是 `forget --project <敏感客户>` 之后那个客户的目录名还在库里。
+
+  **我自己独立复验(release 二进制,伪 HOME,直接数 `.db` 原始字节)**:
+  ```
+  forget 前:            5 处
+  forget 后 / compact 前: 7 处   ← 反而变多(delete marker)
+  compact 后:            0 处
+  ```
+  **这个 5→7→0 正是问题与修法的证据**:光 `forget` 不但没抹掉,计数还上升;
+  必须跟一次 `index compact`。所以 dry-run 的警告里明写了这一步 —— 用户不跑
+  compact 就以为删干净了,是本条最容易踩的坑。
+  另外复验:`search` 归零、源 transcript 逐字保留、
+  `sync --discover` **不复活**(报 `forgotten list` 跳过并给出 `--readmit` 出路)。
+
+  **未做(如实记录,不当已完成)**:M3-2 列的 `asg uninstall --purge` **没实现** ——
+  二进制里根本没有 `uninstall` 子命令(卸载是 `scripts/install/uninstall.*`,
+  且按设计不碰 data root)。为复制安装器职责而新增一个破坏性子命令是另一件事,
+  宁可标注也不塞 stub。
+  **`forget --project` 的适用面比名字听起来窄**:项目归属只能来自
+  `resolved` 状态的 Original Working Directory claim;`missing`/`ambiguous`
+  的源没有可信项目,被排除并在 `warnings` 里报数 —— 不猜。
+
   对一个 local-first、以隐私为卖点的工具,"你索引了不该索引的东西"
   必须有比"手动删掉整个数据目录"更好的答案。
   **这是 D12 的落点,与 M3-2 是同一件事** —— M3-2 写了命令形状,
