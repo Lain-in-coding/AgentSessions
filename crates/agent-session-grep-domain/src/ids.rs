@@ -628,8 +628,14 @@ mod tests {
     /// provider data-root marker) plus the Windows path-case normalization
     /// the migration adds (`windows` lowercases the whole key; non-Windows
     /// keeps the spelling). Production `installation_namespace` in
-    /// `crates/agent-session-grep-cli/src/main.rs` lacks the normalization
-    /// today — that is the known debt this mirror fixes ahead of time.
+    /// `crates/agent-session-grep-cli/src/main.rs` now folds the Windows
+    /// drive letter (one shared normalization with `source_path_identity`),
+    /// which closes the silent identity split between `C:` and `c:`
+    /// spellings of one installation. Whole-key lowercasing stays exclusive
+    /// to this mirror on purpose: it changes every already-stored Windows
+    /// `ses_v1_` session id, so it may only ship together with the `ses_v2_`
+    /// prefix and the `id_alias` rewrite — RFC-0001 §5, "an id-algorithm
+    /// upgrade uses a new namespace and never silently changes old ids".
     fn namespace_key(path: &str, provider_id: &str, windows: bool) -> String {
         let folded = path.replace('\\', "/");
         let normalized = if windows {

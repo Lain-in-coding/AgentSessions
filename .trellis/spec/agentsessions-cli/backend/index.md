@@ -184,9 +184,13 @@ Before proposing a commit for this crate:
   namespace) before hashing (`StableId::native_session_scoped`). The
   composition-root `installation_namespace` derives the namespace from the
   provider data-root prefix path (`.claude`/`.codex`) or, for unknown
-  providers, the source's parent directory. Known RFC-0001 §5.1 debt: this
-  derives from absolute path and lacks a persisted registry, `id_alias` table,
-  and path case normalization; relocation does not preserve Session identity.
+  providers, the source's parent directory. The Windows drive letter is folded
+  to lower case (one shared normalization with `source_path_identity`), so two
+  case spellings of one installation cannot split its Session identity.
+  Known RFC-0001 §5.1 debt: this still derives from absolute path and lacks a
+  persisted registry, an `id_alias` table, and whole-key path case folding
+  (that one changes stored `ses_v1_` ids, so it ships with `ses_v2_` only);
+  relocation does not preserve Session identity.
   The domain layer is correct; the gap is composition-root only.
 - **Human session table (2026-08-14).** Human search renders a frozen
   five-column table: `日期 | Provider | 会话标题 | 工作目录 | Session ID`.

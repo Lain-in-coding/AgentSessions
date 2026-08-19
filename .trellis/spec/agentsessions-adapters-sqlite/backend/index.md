@@ -207,10 +207,12 @@ metadata. It is a derived projection like the message `fts`, populated from
 
 `installation_namespace` derives from absolute path and lacks: a persisted
 `installation_namespaces` registry, an `id_alias(old_id, new_id)` table with
-TTL, Windows path-case normalization, and resume claims keyed by
-`(namespace_registry_id, session_id)`. Relocation does not preserve Session
-identity. The domain layer (`StableId::native_session_scoped`,
-`SessionIdentityNamespace`) is correct; the gap is composition-root only.
+TTL, whole-key Windows path-case folding (the drive letter is already folded;
+widening it changes stored `ses_v1_` ids, so it ships with `ses_v2_` only), and
+resume claims keyed by `(namespace_registry_id, session_id)`. Relocation does
+not preserve Session identity. The domain layer
+(`StableId::native_session_scoped`, `SessionIdentityNamespace`) is correct; the
+gap is composition-root only.
 
 ---
 
