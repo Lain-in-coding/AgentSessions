@@ -3637,6 +3637,17 @@ impl SqliteStore {
         Ok(true)
     }
 
+    /// Whole-table membership and relation state, keyed for lookup.
+    ///
+    /// None of these five loaders carries an `ORDER BY`, deliberately. Every one
+    /// of them funnels its rows into a `BTreeMap`/`BTreeSet`, which imposes key
+    /// order itself, and every source table's key is a declared PRIMARY KEY, so
+    /// no two rows can collide on that key and "which row wins" never depends on
+    /// arrival order. Asking SQLite to sort by the key instead makes it walk the
+    /// PK index and fetch each row by rowid — 100,000 random page reads over a
+    /// 100k-message catalog where a sequential table scan answers the same
+    /// question. The sort was measurably the more expensive half of the
+    /// pre-commit read phase.
     fn source_entity_membership_state(
         &self,
     ) -> PortResult<BTreeMap<String, BTreeMap<String, Option<String>>>> {
@@ -3644,7 +3655,7 @@ impl SqliteStore {
         let mut stmt = conn
             .prepare(
                 "SELECT source_path, message_id, document_id
-                 FROM source_membership ORDER BY source_path, message_id",
+                 FROM source_membership",
             )
             .map_err(backend)?;
         let rows = stmt
@@ -3682,7 +3693,7 @@ impl SqliteStore {
         let mut stmt = conn
             .prepare(
                 "SELECT source_path, placement_id
-                 FROM source_placement_membership ORDER BY source_path, placement_id",
+                 FROM source_placement_membership",
             )
             .map_err(backend)?;
         let rows = stmt
@@ -3706,8 +3717,7 @@ impl SqliteStore {
     fn stored_placements_from(conn: &Connection) -> PortResult<BTreeMap<String, StoredPlacement>> {
         let mut stmt = conn
             .prepare(&format!(
-                "SELECT {PLACEMENT_COLUMNS}
-                 FROM message_placements ORDER BY placement_id"
+                "SELECT {PLACEMENT_COLUMNS} FROM message_placements"
             ))
             .map_err(backend)?;
         let rows = stmt.query_map([], placement_row).map_err(backend)?;
@@ -3726,10 +3736,7 @@ impl SqliteStore {
 
     fn stored_edges_from(conn: &Connection) -> PortResult<BTreeMap<String, StoredEdge>> {
         let mut stmt = conn
-            .prepare(&format!(
-                "SELECT {EDGE_COLUMNS}
-                 FROM message_edges ORDER BY child_placement_id"
-            ))
+            .prepare(&format!("SELECT {EDGE_COLUMNS} FROM message_edges"))
             .map_err(backend)?;
         let rows = stmt.query_map([], edge_row).map_err(backend)?;
         let mut edges = BTreeMap::new();
@@ -3749,7 +3756,7 @@ impl SqliteStore {
         let mut stmt = conn
             .prepare(
                 "SELECT activity_id, message_id, kind, actor, name, target, status
-                 FROM tool_activities ORDER BY activity_id",
+                 FROM tool_activities",
             )
             .map_err(backend)?;
         let rows = stmt
@@ -3782,7 +3789,7 @@ impl SqliteStore {
         let mut stmt = conn
             .prepare(
                 "SELECT source_path, activity_id
-                 FROM tool_activity_membership ORDER BY source_path, activity_id",
+                 FROM tool_activity_membership",
             )
             .map_err(backend)?;
         let rows = stmt
