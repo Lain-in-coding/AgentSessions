@@ -9,12 +9,12 @@ use agent_session_grep_domain::{
     ToolActivity, select_full, select_mainline,
 };
 use agent_session_grep_ports::{
-    CanonicalEventSink, CatalogStore, Confidence, ContextGraphStore, MessageEvent, NoResumeClaims,
-    NoSemanticIndex, ParseReport, PortError, PortResult, ProbeResult, ProviderAdapter,
-    ProviderError, ReadOnlySource, ResumeClaimsStore, RetrievalMode, SQLITE_MAGIC_HEADER,
-    SearchFacets, SearchFilters, SearchHit, SearchIndex, SearchInstant, SearchQuery, SemanticIndex,
-    SessionResumeMetadata, SourceFormatFamily, ToolActivityEvent, read_source_head,
-    source_format_family_for,
+    CanonicalEventSink, CatalogStore, Confidence, ContextGraphStore, HistoryStats, MessageEvent,
+    NoResumeClaims, NoSemanticIndex, ParseReport, PortError, PortResult, ProbeResult,
+    ProviderAdapter, ProviderError, ReadOnlySource, ResumeClaimsStore, RetrievalMode,
+    SQLITE_MAGIC_HEADER, SearchFacets, SearchFilters, SearchHit, SearchIndex, SearchInstant,
+    SearchQuery, SemanticIndex, SessionResumeMetadata, SourceFormatFamily, ToolActivityEvent,
+    read_source_head, source_format_family_for,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -251,6 +251,8 @@ pub enum AppRequest {
     GetSessionResume { session_id: StableId },
     /// 返回当前 Catalog 统计状态。
     Status,
+    /// 返回历史构成统计（provider / month / project / session size）。
+    Stats,
 }
 
 /// Detail level for a context response. `Raw` is the compatibility default.
@@ -436,6 +438,16 @@ pub enum AppResponse {
         active_generation: u64,
         placements: u64,
         source_placement_claims: u64,
+    },
+    /// 历史构成普查（M3-10）：库里有什么、来自哪里。
+    ///
+    /// 各维度的桶原样透传端口 DTO——Application 不做排序或合并，那是存储层
+    /// 冻结的契约（见 [`agent_session_grep_ports::HistoryStats`]）。项目维度的
+    /// 路径是本机绝对路径：human 面可按 ADR-0004 显示，跨边界面必须按 ADR-0009
+    /// 只投影 basename（由 CLI 渲染层负责）。
+    Stats {
+        stats: HistoryStats,
+        active_generation: u64,
     },
 }
 
@@ -2290,6 +2302,10 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore, 
                     source_placement_claims: context_stats.source_placement_claims,
                 })
             }
+            AppRequest::Stats => Ok(AppResponse::Stats {
+                stats: self.catalog.history_stats()?,
+                active_generation: self.catalog.active_generation()?,
+            }),
         }
     }
 

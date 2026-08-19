@@ -6228,26 +6228,31 @@ impl CatalogStore for SqliteStore {
         SqliteStore::active_generation(self)
     }
 
-    /// 历史构成普查（M3-10）：三条聚合查询，绝不逐会话查询（N+1）。
+    /// 历史构成普查（M3-10）：固定条数的聚合查询，绝不逐会话查询（N+1）。
     ///
-    /// 第一条一次扫过 placement 表，给出每个会话的 provider、去重消息数与
+    /// 一条查询一次扫过 placement 表，给出每个会话的 provider、去重消息数与
     /// 消息时间戳的词法最大值——四个维度里的三个（provider / 月 / 会话规模）
-    /// 都从这一遍派生，成本与 `sessions_by_recency` 同级。第二条数 Message
-    /// 实体总数；第三条读 resume 声明表（每源一行，远小于 placement 表）取
-    /// 项目归属。
+    /// 都从这一遍派生，成本与 `sessions_by_recency` 同级。另有三条常量级
+    /// 计数（Message / Document 实体总数、tool activity 总数）与一条读 resume
+    /// 声明表（每源一行，远小于 placement 表）的项目归属聚合。
     ///
     /// 三处"归不出值"一律落 unknown 桶，绝不推断：
     /// - 会话没有任何 placement，或其文档没有 provider 字段 → 无 provider；
     ///   `provider_variants != 1` 同样落 unknown（同一会话被声明了互相冲突的
     ///   provider 时不挑一个当权威）。
     /// - 会话内没有任何带时间戳的消息 → 无月份。
-    /// - 没有 `resolved` 的 Original Working Directory 声明（或多个 source 给出
-    ///   互相冲突的目录）→ 无项目。判据与 `forget --project` 逐字一致，
-    ///   两条命令因此对"哪些会话属于某项目"给出同一答案。
+    /// - 没有可信的 Original Working Directory 声明（`resolved` 且
+    ///   `pair_observed`，与 `resume_metadata_from_claim` 同一判据），或多个
+    ///   source 给出互相冲突的目录 → 无项目。项目维度另外把 unknown 拆成
+    ///   "无声明"与"ambiguous"两个计数，使读者能区分"没记录"与"记录互相矛盾"。
     fn history_stats(&self) -> PortResult<HistoryStats> {
         let conn = self.conn.borrow();
 
-        let projects = {
+        // 项目归属只认与 resume 输出同一条判据的声明：`resolved` 且 pair-observed
+        // （cwd 必须与 Provider Session ID 同批观察到，见 ADR-0009）。同一会话
+        // 出现多个不同目录即 ambiguous——不按 source 路径或行序挑一个。
+        let mut project_of_session: BTreeMap<String, Option<String>> = BTreeMap::new();
+        {
             let mut stmt = conn
                 .prepare(
                     "SELECT session_id,
@@ -6256,6 +6261,7 @@ impl CatalogStore for SqliteStore {
                        FROM source_session_resume_claims
                       WHERE original_working_directory_state = 'resolved'
                         AND original_working_directory IS NOT NULL
+                        AND pair_observed = 1
                       GROUP BY session_id",
                 )
                 .map_err(backend)?;
@@ -6268,30 +6274,41 @@ impl CatalogStore for SqliteStore {
                     ))
                 })
                 .map_err(backend)?;
-            let mut map: BTreeMap<String, Option<String>> = BTreeMap::new();
             for row in rows {
                 let (session, project, variants) = row.map_err(backend)?;
-                map.insert(session, if variants == 1 { project } else { None });
+                project_of_session.insert(session, if variants == 1 { project } else { None });
             }
-            map
-        };
+        }
 
-        let total_messages: i64 = conn
-            .query_row(
-                &format!(
-                    "SELECT COUNT(*) FROM catalog WHERE id LIKE '{}%'",
-                    IdKind::Message.prefix()
-                ),
-                [],
-                |row| row.get(0),
-            )
-            .map_err(backend)?;
+        let entity_total = |kind: IdKind| -> PortResult<u64> {
+            let count: i64 = conn
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) FROM catalog WHERE id LIKE '{}%'",
+                        kind.prefix()
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(backend)?;
+            u64::try_from(count).map_err(backend)
+        };
+        let total_messages = entity_total(IdKind::Message)?;
+        let total_documents = entity_total(IdKind::Document)?;
+        let total_tool_activities: u64 = {
+            let count: i64 = conn
+                .query_row("SELECT COUNT(*) FROM tool_activities", [], |row| row.get(0))
+                .map_err(backend)?;
+            u64::try_from(count).map_err(backend)?
+        };
 
         let mut total_sessions = 0u64;
         let mut by_provider = BucketTally::default();
         let mut by_month = BucketTally::default();
         let mut by_project = BucketTally::default();
         let mut by_size = BucketTally::default();
+        let mut project_unknown_sessions = 0u64;
+        let mut project_ambiguous_sessions = 0u64;
         {
             let mut stmt = conn
                 .prepare(&format!(
@@ -6333,17 +6350,34 @@ impl CatalogStore for SqliteStore {
                 by_provider.add(provider, messages);
                 // `YYYY-MM`：短于 7 字符的时间串无法定位到某个月，落 unknown。
                 by_month.add(latest.as_deref().and_then(|t| t.get(..7)), messages);
-                by_project.add(projects.get(&session).and_then(Option::as_deref), messages);
+                // 三态：有可信目录 / 声明互相冲突（ambiguous）/ 没有声明。
+                // 后两者都进 unknown 桶，但分别计数——"没记录"与"记录矛盾"
+                // 对用户是两件不同的事。
+                match project_of_session.get(&session) {
+                    Some(Some(project)) => by_project.add(Some(project.as_str()), messages),
+                    Some(None) => {
+                        project_ambiguous_sessions += 1;
+                        by_project.add(None, messages);
+                    }
+                    None => {
+                        project_unknown_sessions += 1;
+                        by_project.add(None, messages);
+                    }
+                }
                 by_size.add(Some(session_size_bucket(messages)), messages);
             }
         }
 
         Ok(HistoryStats {
             total_sessions,
-            total_messages: u64::try_from(total_messages).map_err(backend)?,
+            total_messages,
+            total_documents,
+            total_tool_activities,
             by_provider: by_provider.by_volume(),
             by_month: by_month.by_key(),
             by_project: by_project.by_volume(),
+            project_unknown_sessions,
+            project_ambiguous_sessions,
             by_session_size: by_size.into_fixed_order(SESSION_SIZE_BUCKETS),
         })
     }
@@ -7103,6 +7137,9 @@ impl SqliteStore {
                 suggested_next_commands: Vec::new(),
                 occurrences: 1,
                 resume_available: false,
+                provider_id: None,
+                working_directory: None,
+                project_name: None,
             });
         }
         Ok(())
@@ -7845,6 +7882,9 @@ impl SemanticTopK {
                 suggested_next_commands: Vec::new(),
                 occurrences: 1,
                 resume_available: false,
+                provider_id: None,
+                working_directory: None,
+                project_name: None,
             });
         }
         Ok(hits)
@@ -8478,6 +8518,9 @@ where
             suggested_next_commands: Vec::new(),
             occurrences: 1,
             resume_available: false,
+            provider_id: None,
+            working_directory: None,
+            project_name: None,
         });
     }
     Ok(hits)

@@ -118,17 +118,26 @@ pub struct HistoryStats {
     pub total_sessions: u64,
     /// catalog 里 Message 实体总数（去重后的实体计数，与 placement 数无关）。
     pub total_messages: u64,
+    /// catalog 里 Document 实体总数（去重后的实体计数）。
+    pub total_documents: u64,
+    /// tool_activities 投影中的活动总数（按 activity_id 去重）。
+    pub total_tool_activities: u64,
     /// 按 provider：会话数降序，同数按 provider id 升序，unknown 桶置末。
     pub by_provider: Vec<HistoryBucket>,
     /// 按月（`YYYY-MM`，取自会话内消息时间戳的词法最大值前 7 字符）：
     /// 月份升序（直方图按时间读），unknown 桶置末。
     pub by_month: Vec<HistoryBucket>,
-    /// 按项目（`resolved` 的 Original Working Directory 声明）：会话数降序，
-    /// 同数按路径升序，unknown 桶置末。
+    /// 按项目（`resolved` 且 `pair_observed` 的 Original Working Directory 声明）：
+    /// 会话数降序，同数按路径升序，unknown 桶置末。unknown 桶包含没有可信声明的
+    /// 会话以及 ambiguous 会话；[`project_ambiguous_sessions`] 单独拆出后者。
     ///
     /// 值是本机绝对路径——库里最具识别性的数据。跨边界输出（Robot/MCP/Web）
     /// 必须按 ADR-0009 削减，只有本机 human 输出可按 ADR-0004 原样显示。
     pub by_project: Vec<HistoryBucket>,
+    /// 没有可信 resolved Original Working Directory 声明的会话数。
+    pub project_unknown_sessions: u64,
+    /// 同一 Session 有多个不同可信 resolved Original Working Directory 声明的会话数。
+    pub project_ambiguous_sessions: u64,
     /// 按会话规模（每会话消息数分档）：档位固定升序，无 unknown 桶
     /// （每个会话的消息数恒为已知值，可以是 0）。
     pub by_session_size: Vec<HistoryBucket>,
