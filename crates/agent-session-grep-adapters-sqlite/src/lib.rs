@@ -179,6 +179,24 @@ impl CommitTrace {
     }
 }
 
+/// Opt-in `synchronous=NORMAL` for a bulk ingest. **Measured, and not taken.**
+///
+/// This is the obvious speed-for-durability trade on a write-heavy path, so it
+/// was measured rather than assumed: a full 5,000-file ingest of the 100k
+/// synthetic corpus took 36.7 s with `synchronous=NORMAL` against 33.5 s with
+/// the default `FULL`, on the same machine state. It is not slower *because* of
+/// `NORMAL` — that is inside this machine's run-to-run noise — but it is
+/// certainly not faster, and the reason is visible in the commit trace: with a
+/// 256 MiB page cache the transaction's dirty pages are not spilled early, so
+/// SQLite's commit step is dominated by *writing* ~17 MiB of WAL frames, and the
+/// single fsync that `NORMAL` would skip is a rounding error next to it.
+///
+/// So the knob buys nothing and is deliberately absent. If someone reaches for
+/// it again: `FULL` and `NORMAL` differ only in whether the WAL is fsynced
+/// before a commit returns — neither can corrupt the catalog, because WAL frames
+/// are checksummed and a torn frame is discarded during recovery — but `NORMAL`
+/// can lose transactions that already reported success, and this catalog is the
+/// only copy of its derived facts.
 fn unix_ms() -> PortResult<i64> {
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
