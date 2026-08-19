@@ -1171,6 +1171,83 @@ mod tests {
         assert!(parse_output_mode(&["--robot".into(), "--output".into(), "yaml".into()]).is_err());
     }
 
+    /// `markdown` 是既有 `--output` 词表的第四个取值，走同一条解析规则。
+    #[test]
+    fn output_mode_accepts_markdown_and_skips_out_flag_value() {
+        assert_eq!(
+            parse_output_mode(&["--output".into(), "markdown".into()]),
+            Ok(OutputMode::Markdown)
+        );
+        // `--out <path>` 是带值 flag：它的取值不得把后面的 --output 挡在扫描外。
+        assert_eq!(
+            parse_output_mode(&[
+                "--out".into(),
+                "pack.md".into(),
+                "--output".into(),
+                "markdown".into()
+            ]),
+            Ok(OutputMode::Markdown)
+        );
+        // 取值恰好写成 "markdown" 也不会被误当模式。
+        assert_eq!(
+            parse_output_mode(&["--out".into(), "markdown".into(), "handoff".into()]),
+            Ok(OutputMode::Human)
+        );
+    }
+
+    /// `--robot` 与 `--output` 的既有冲突规则让 markdown 永远不可能在 `--robot`
+    /// 下发出——契约禁止 robot 面出现人类面投影，这条不靠新增检查兜住，靠既有
+    /// 规则天然成立。
+    #[test]
+    fn robot_can_never_emit_markdown() {
+        assert!(
+            parse_output_mode(&["--robot".into(), "--output".into(), "markdown".into()]).is_err()
+        );
+        assert!(
+            parse_output_mode(&["--output".into(), "markdown".into(), "--robot".into()]).is_err()
+        );
+    }
+
+    #[test]
+    fn payload_sink_writes_a_file_and_never_overwrites() {
+        let dir = std::env::temp_dir().join(format!("asg-sink-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("payload.md");
+        let sink = PayloadSink::File(path.clone());
+        assert!(sink.is_file());
+        sink.write_verbatim("# heading\n\nbody\n").expect("write");
+        assert_eq!(
+            std::fs::read(&path).expect("read back"),
+            b"# heading\n\nbody\n"
+        );
+        // 第二次写同一路径必须失败，且不得改动已有内容。
+        let error = sink
+            .write_verbatim("clobbered\n")
+            .expect_err("existing path must be refused");
+        assert_eq!(error.code, CanonicalCode::InvalidRequest);
+        assert_eq!(
+            std::fs::read(&path).expect("read back"),
+            b"# heading\n\nbody\n"
+        );
+        // 目录同样是"已存在的路径"，不会被当作可写目标。
+        let dir_sink = PayloadSink::File(dir.clone());
+        assert!(dir_sink.write_verbatim("x").is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `write_lines` 与历史逐行 stdout 路径逐字节相同：`\n` 连接 + 末尾 `\n`。
+    #[test]
+    fn payload_sink_write_lines_matches_the_historical_byte_shape() {
+        let dir = std::env::temp_dir().join(format!("asg-sink-lines-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("lines.txt");
+        PayloadSink::File(path.clone())
+            .write_lines(&["a".to_string(), "b".to_string()])
+            .expect("write");
+        assert_eq!(std::fs::read(&path).expect("read back"), b"a\nb\n");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn output_mode_rejects_conflicting_or_duplicate_flags() {
         // --robot 与 --output 冲突（无论取值）：用法错误，不静默 first-wins。
