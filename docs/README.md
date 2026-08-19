@@ -1,7 +1,8 @@
 # Documentation index
 
-Start here. Every document under `docs/` is listed below with its audience and
-what it is for, so nothing is discoverable only by browsing the tree.
+Start here. Every document published in this directory is listed below with its
+audience and what it is for, so nothing is discoverable only by browsing the
+tree.
 
 Two audiences are mixed in this directory, and the difference matters:
 
@@ -53,8 +54,8 @@ For maintainers running releases and regressions, not needed to use the tool.
 | [operations/REUSE-LICENSE-AUDIT.md](operations/REUSE-LICENSE-AUDIT.md) | Third-party licence audit procedure |
 | [operations/core-beta-evidence-matrix.md](operations/core-beta-evidence-matrix.md) | Which evidence claims are locally vs CI verified |
 | [operations/external-readiness-gate.md](operations/external-readiness-gate.md) | External readiness checklist |
-| [operations/migration-v5-to-v6.md](operations/migration-v5-to-v6.md) | **Historical.** Superseded — the store schema is now v12 |
-| [operations/migration-v6-to-v7.md](operations/migration-v6-to-v7.md) | **Historical.** Superseded — the store schema is now v12 |
+| [operations/migration-v5-to-v6.md](operations/migration-v5-to-v6.md) | **Historical.** Superseded — the store schema is now v13 |
+| [operations/migration-v6-to-v7.md](operations/migration-v6-to-v7.md) | **Historical.** Superseded — the store schema is now v13 |
 
 ## Governance records — history, not current state
 
