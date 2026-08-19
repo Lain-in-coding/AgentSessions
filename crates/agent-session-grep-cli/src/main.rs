@@ -1006,7 +1006,7 @@ COMMANDS:
     hook <event>           Claude Code Hook 集成（默认关闭；--enable 才注入历史）
     get <wire-id>          按实体 id 取回原始 payload
     show <wire-id>         按实体 id 取回并归一化展示（role/text 结构）
-    list [limit]           稳定排序列出 catalog 实体（默认 20；支持分页/预算 flag）
+    list [limit]           列出 catalog 实体（默认 20；`--sessions --sort recency` = 最近的会话）
     context <ses-id>       装配会话上下文：分支消息链 + 证据区间
     status                 报告 catalog 实体总数
     mcp                    启动 stdio MCP 服务（JSON-RPC 2.0；stdout 只输出 MCP frame）
@@ -1021,6 +1021,14 @@ PAGINATION / BUDGET (search, list):
     --cursor <token>       上一页 envelope `page.next_cursor` 的续读令牌
     --max-items <n>        页大小上限（同时作为响应条目预算）
     --max-bytes <n>        响应字节预算（最低 4096）
+
+LIST:
+    --sessions             只列会话实体（与 MCP `list_sessions` 同语义）
+    --sort id|recency      排序维度（默认 id：wire id 升序，稳定但与时间无关）。
+                           recency = 会话最近活动降序（回答「我昨天干了什么」），
+                           只对会话有定义，需与 --sessions 同用；provider 没给
+                           时间戳的会话排在末尾，日期显示为 —，绝不编造时刻。
+                           续读令牌绑定排序维度：换了 --sort 的旧令牌会被拒绝。
 
 FILTER (search):
     --provider claude|claude-code|codex  限定 provider（可重复，多个取值按 OR 合并）
@@ -1285,9 +1293,11 @@ fn subcommand_help_text(cmd: &str) -> &'static str {
                    从 search 命中或 show 输出里的 session 字段，可继续用 context 展开会话。"
         }
         "list" => {
-            "list [limit]：按稳定序列出实体（默认 20）。\n\
+            "list [limit]：列出 catalog 实体（默认 20）。\n\
                    示例：agent-session-grep --db <path> list 50\n\
-                   flag（放子命令后）：--cursor <token> 翻页"
+                   示例（我最近干了什么）：agent-session-grep --db <path> list --sessions --sort recency 10\n\
+                   flag（放子命令后）：--sessions 只列会话、--sort id|recency 排序维度、--cursor <token> 翻页\n\
+                   recency 只对会话有定义；provider 没给时间戳的会话排末尾（日期为 —）。"
         }
         "context" => {
             "context <ses-id>：装配一个会话的完整上下文（消息链 + 证据区间）。\n\
@@ -1480,6 +1490,8 @@ fn is_known_flag_name(token: &str) -> bool {
             | "--include-sidechain"
             | "--tool-kind"
             | "--tool-name"
+            | "--sessions"
+            | "--sort"
     )
 }
 
@@ -3236,12 +3248,16 @@ fn attach_session_resume_rows(
 }
 
 /// Human `list` 的会话表格投影（M3-4）：对本页的 Session 实体批量解析
-/// Resume Metadata（provider / 原始工作目录），日期直接取 Application 已经
-/// 算出并计入字节闸的排序键 `latest_activity`。
+/// Resume Metadata（provider / 原始工作目录）与最近活动日期。
+///
+/// 日期用与 search 表格同一个投影（`latest_activity_ymd_for_sessions`），
+/// 因此两张表的日期列语义完全一致，且与 `--sort` 无关——wire-id 排序下会话
+/// 依然有真实日期，只是行序与时间无关。缺时间戳的会话渲染 `—`，不编造时刻。
 ///
 /// 只在 Human 模式附加（与 `attach_session_resume_rows` 同一惯例）：
-/// Robot/MCP/Web 的协议形状与字节预算由 Application 单一决定。
-/// 一次 `resume_of` 批量查询，无 N+1；本页没有会话实体则什么都不做。
+/// Robot/MCP/Web 的协议形状与字节预算由 Application 单一决定；排序键本身
+/// 在所有模式的 `entries[].latest_activity` 里可见。
+/// 两次批量查询，无 N+1；本页没有会话实体则什么都不做。
 fn attach_session_list_rows(
     store: &SqliteStore,
     data: &mut serde_json::Value,
@@ -3249,32 +3265,29 @@ fn attach_session_list_rows(
     let Some(entries) = data.get("entries").and_then(serde_json::Value::as_array) else {
         return Ok(());
     };
-    let sessions: Vec<(StableId, Option<String>)> = entries
+    let ids: Vec<StableId> = entries
         .iter()
         .filter_map(|entry| {
             let wire = entry.get("id").and_then(serde_json::Value::as_str)?;
-            let id = StableId::from_wire(wire).filter(|id| id.kind() == IdKind::Session)?;
-            let latest = entry
-                .get("latest_activity")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_string);
-            Some((id, latest))
+            StableId::from_wire(wire).filter(|id| id.kind() == IdKind::Session)
         })
         .collect();
-    if sessions.is_empty() {
+    if ids.is_empty() {
         return Ok(());
     }
-    let ids: Vec<StableId> = sessions.iter().map(|(id, _)| id.clone()).collect();
     let metadata = store.resume_of(&ids).map_err(ProtocolError::from)?;
-    let rows: Vec<serde_json::Value> = sessions
+    let latest_ymd = store
+        .latest_activity_ymd_for_sessions(&ids)
+        .map_err(ProtocolError::from)?;
+    let rows: Vec<serde_json::Value> = ids
         .iter()
         .zip(metadata.iter())
-        .map(|((id, latest), metadata)| {
+        .map(|(id, metadata)| {
             serde_json::json!({
-                // 日期取排序键前 10 字符（YYYY-MM-DD）；provider 没给时间戳时保持 null，
-                // 不编造时刻——human 渲染成破折号。
-                "date": latest.as_ref().and_then(|value| value.get(..10)),
+                "date": latest_ymd.get(id.as_str()),
                 "provider": metadata.provider_id,
+                // 会话标题需要"该会话第一条用户消息"的投影，目前没有这个端口；
+                // 与其猜一个标题，不如留空（human 渲染成 —）。
                 "title": serde_json::Value::Null,
                 "working_directory": metadata.original_working_directory,
                 "session_id": id.as_str(),
