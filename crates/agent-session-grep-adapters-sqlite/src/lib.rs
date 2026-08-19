@@ -8072,8 +8072,14 @@ impl SqliteStore {
             .collect();
         let changed = self.commit_source_batches_if_changed(&batches)?;
         let now = unix_ms()?;
+        let paths: Vec<String> = plan
+            .sources
+            .iter()
+            .map(|target| target.source_path.clone())
+            .collect();
         let mut conn = self.conn.borrow_mut();
         let tx = conn.transaction().map_err(backend)?;
+        Self::stage_forget_targets(&tx, &paths)?;
         for target in &plan.sources {
             // scan 记录一起清掉：留着它，`sync --discover` 的 prior-path diff 会
             // 每次都把这个源报成"本次未发现 → removed"，永远报一个已经处理完的
@@ -8098,6 +8104,34 @@ impl SqliteStore {
             )
             .map_err(backend)?;
         }
+        // durable outbox 的历史行也带着被忘记内容的派生事实：
+        // `source_replacements_json` 里存着该源的 resume 声明，其中的
+        // `original_working_directory` 就是项目路径——`forget --project <敏感客户>`
+        // 之后那个客户名仍留在库里，等于删除没删干净。
+        //
+        // 只删**终态**行（`activated`/`aborted`/`superseded`）且 generation 严格
+        // 早于当前活动 generation：崩溃恢复只看 `building`
+        // （[`recover_interrupted`] / [`interrupted_batch_count`]），CAS 前置读
+        // `store_metadata.active_generation` 而不是 journal，所以终态行在激活之后
+        // 只是审计记录，没有操作语义。当前 generation 的那一行保留——它记录的正是
+        // 本次删除本身，且只含源路径（已由抑制表按设计持久化），不含正文或声明。
+        //
+        // 用 `json_each` 逐项比对 `source_path` 而不是对整串做 LIKE：路径里的
+        // 反斜杠在 JSON 里是转义的，字符串匹配会漏掉 Windows 风格路径。
+        tx.execute(
+            "DELETE FROM index_batches
+             WHERE state IN ('activated', 'aborted', 'superseded')
+               AND target_generation < (
+                   SELECT active_generation FROM store_metadata WHERE singleton = 1
+               )
+               AND EXISTS (
+                   SELECT 1 FROM json_each(index_batches.source_replacements_json) je
+                   WHERE json_extract(je.value, '$.source_path')
+                         IN (SELECT source_path FROM forget_targets)
+               )",
+            [],
+        )
+        .map_err(backend)?;
         tx.commit().map_err(backend)?;
         Ok(changed)
     }
@@ -17157,6 +17191,88 @@ mod tests {
         // 每个 fixture 源贡献 1 session + 1 document + 1 message。
         let expected_removed = plan.messages + plan.sessions.len() as u64 + 1;
         assert_eq!(before - after, expected_removed);
+    }
+
+    /// durable outbox 的历史行也要跟着走：它的 `source_replacements_json` 存着
+    /// 被忘记源的 resume 声明，其中 `original_working_directory` 就是项目路径。
+    ///
+    /// 回归守卫。此前 `forget --project <敏感客户>` 之后，那个客户目录名仍能在
+    /// `index_batches` 里逐字读到——删除对搜索面是干净的，对库文件不是。
+    /// 只删终态且早于当前 generation 的行：崩溃恢复只看 `building` 状态行。
+    #[test]
+    fn forget_scrubs_the_outbox_journal_of_the_forgotten_working_directory() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let session = sid(IdKind::Session, b"journal-ses");
+        let document = sid(IdKind::Document, b"journal-doc");
+        let message = sid(IdKind::Message, b"journal-msg");
+        const PROJECT: &str = "/work/zzqxclientdir";
+        let batch = SourceBatch {
+            source_path: "journal.jsonl".into(),
+            entries: vec![
+                entity_entry(&session),
+                typed_document_entry(&document),
+                typed_message_entry(&message, "journal body"),
+            ],
+            placements: vec![placement(&session, &document, &message, 0, false, None)],
+            edges: Vec::new(),
+            activities: Vec::new(),
+            relation_complete: true,
+            len_bytes: Some(16),
+            fingerprint: Some("journal-fp".into()),
+            provider_id: Some("synthetic".into()),
+            resume_claim: Some(SourceResumeClaim {
+                provider_id: "synthetic".into(),
+                session_id: session.as_str().to_string(),
+                provider_session_id: Some("native-1".into()),
+                provider_session_id_state: "resolved".into(),
+                original_working_directory: Some(PROJECT.into()),
+                original_working_directory_state: "resolved".into(),
+                pair_observed: true,
+            }),
+        };
+        store
+            .commit_source_batches_if_changed(std::slice::from_ref(&batch))
+            .unwrap();
+        let journal_hits = |store: &SqliteStore| -> i64 {
+            store
+                .conn
+                .borrow()
+                .query_row(
+                    "SELECT COUNT(*) FROM index_batches
+                     WHERE source_replacements_json LIKE '%' || ?1 || '%'",
+                    [PROJECT],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(journal_hits(&store), 1, "前提：声明先落进了 outbox");
+
+        // 项目维度确实能按 resolved 工作目录找到这个源。
+        let directories = store.source_working_directories().unwrap();
+        assert_eq!(
+            directories,
+            vec![("journal.jsonl".to_string(), Some(PROJECT.to_string()))]
+        );
+
+        let plan = store.plan_forget(&["journal.jsonl".to_string()]).unwrap();
+        assert!(store.execute_forget(&plan).unwrap());
+        assert_eq!(
+            journal_hits(&store),
+            0,
+            "被忘记源的工作目录不得留在 outbox journal 里"
+        );
+        // 当前 generation 的那条记录（本次删除本身）仍在，中断恢复语义不变。
+        let terminal: i64 = store
+            .conn
+            .borrow()
+            .query_row(
+                "SELECT COUNT(*) FROM index_batches WHERE state = 'activated'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(terminal, 1);
+        assert_eq!(store.interrupted_batch_count().unwrap(), 0);
     }
 
     /// 删除后的**文件级**残留：`forget` + `index compact` 之后，被删的词不得再
