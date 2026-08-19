@@ -1084,7 +1084,7 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   (它在同文件加 `read_source_head` / `SourceFormatFamily`),等其合并后再动,
   否则必冲突。
 
-- [ ] **M2P-12 `--since`/`--until` 静默丢弃无时间戳 provider(接近正确性 bug)**
+- [x] **M2P-12 `--since`/`--until` 静默丢弃无时间戳 provider(接近正确性 bug)**
   时间过滤下推是 `asg_instant_sort_key(...) >= ?`,而 **NULL 对任何比较都失败**
   (`adapters-sqlite/src/lib.rs:6395-6405`)。
   **静默给错答案比报错更糟,这违反本项目自己的原则。**
