@@ -54,6 +54,21 @@ commit, collaboration, and quality standards below remain in force.
     co-authors, "Generated with ..." footers, or command transcripts to commit
     messages.
 
+## Language policy
+
+16. Every user-visible string is English: `--help` and subcommand help, error
+    messages, warnings, human-mode output, and documentation under the
+    repository root. A pull request that adds a non-English user-visible string
+    will be asked to change it.
+17. Existing Chinese text in code comments, historical governance documents
+    (`docs/`, `.trellis/`), and test assertion messages is **not**
+    mass-translated. None of it reaches the user, and a sweeping rewrite would
+    conflict with every open change. Translate such text only when you are
+    already editing the surrounding lines for another reason.
+18. Canonical error codes, JSON field names, and other protocol identifiers are
+    wire surface, not prose. Never translate or rename them; only the
+    human-facing message and next-step guidance change.
+
 ## Destructive operation policy
 
 Destructive Git and filesystem commands — `git reset --hard`, `git clean -fd`,
