@@ -168,7 +168,7 @@ fn main() {
 fn render_human_error(err: &ProtocolError) {
     eprintln!("error [{}]: {}", err.code.as_str(), err.message);
     if !message_states_next_step(&err.message) {
-        eprintln!("下一步：{}", err.code.operator_action());
+        eprintln!("Next step: {}", err.code.operator_action());
     }
 }
 
@@ -522,7 +522,7 @@ fn run(
             .as_deref()
             .map(|v| {
                 v.parse::<u16>()
-                    .map_err(|_| CliError::usage("--port 需要 0-65535 的整数"))
+                    .map_err(|_| CliError::usage("--port requires an integer in 0-65535"))
             })
             .transpose()?
             .unwrap_or(0);
@@ -975,16 +975,16 @@ fn platform_paths_impl() -> Result<serde_json::Value, CliError> {
 fn help_text() -> String {
     format!(
         "{name} {version}
-AI coding-agent history search engine（本地 AI 编程会话历史搜索）。
+AI coding-agent session history search engine (local, read-only, offline).
 
-快速上手（新手从这里开始）:
-    agent-session-grep sync --discover              扫描各 provider 数据根建立索引
-    agent-session-grep search 关键词                 搜索历史会话
-    agent-session-grep show <命中ID>                 看一条命中的正文
-    agent-session-grep context <会话ID>              展开一个会话的上下文
-    agent-session-grep config paths                 查看数据默认放哪里
-    agent-session-grep providers                    查看 Provider 成熟度与能力
-数据流：search 返回命中消息 → show <msg_id> 看正文 → context <ses_id> 看整个会话。
+QUICKSTART (start here):
+    agent-session-grep sync --discover              index every provider data root
+    agent-session-grep search <keyword>             search your session history
+    agent-session-grep show <hit-id>                read the body of one hit
+    agent-session-grep context <session-id>         expand one whole session
+    agent-session-grep config paths                 see where data is stored
+    agent-session-grep providers                    see provider maturity and capabilities
+Data flow: search returns matching messages -> show <msg_id> reads one body -> context <ses_id> reads the whole session.
 
 USAGE:
     agent-session-grep [--db <path>] <COMMAND> [ARGS]
@@ -992,82 +992,82 @@ USAGE:
     agent-session-grep --help | --version
 
 COMMANDS:
-    ingest <file>          解析原始 .jsonl 文件并入库（只读源）
-    sync <file>...          原子扫描多个 .jsonl 文件；无变化时不生成新 generation
-    sync --discover          自动发现各 provider 数据根下的源并同步（只读源）
-    index rebuild          从权威 catalog 全量重投影 FTS 索引（维护命令）
-    index compact          回收 freelist（VACUUM；显式维护命令，持排他锁）
-    index embeddings       从权威 catalog 构建语义向量索引（semantic/hybrid 检索前置）
-    index purge-activities 修剪孤儿工具活动行（无 catalog 消息的活动/悬空 claim；维护命令）
-    search <query>         全文检索，按相关性降序返回命中（支持分页/预算/过滤 flag）
-    handoff <query>        检索并为查询生成 handoff pack（原文证据 + 建议命令；dry-run）
-    get-message <msg-id>   返回命中消息及其同会话主线邻居（--session/--around）
-    get-session-resume <ses-id> 返回只读 Resume Metadata（Provider Session ID / Original Working Directory）
-    resume <ses-id>        预览恢复命令（默认 dry-run；--yes 才实际执行）
-    hook <event>           Claude Code Hook 集成（默认关闭；--enable 才注入历史）
-    get <wire-id>          按实体 id 取回原始 payload
-    show <wire-id>         按实体 id 取回并归一化展示（role/text 结构）
-    list [limit]           稳定排序列出 catalog 实体（默认 20；支持分页/预算 flag）
-    context <ses-id>       装配会话上下文：分支消息链 + 证据区间
-    status                 报告 catalog 实体总数
-    mcp                    启动 stdio MCP 服务（JSON-RPC 2.0；stdout 只输出 MCP frame）
-    tui                    交互式只读浏览（Preview；需要交互式终端）
-    serve                  启动 loopback HTTP 服务 + 嵌入式 Web UI（--port <n>；仅 loopback）
-    doctor                 环境自检（可选 --db 校验存储可打开）
-    providers              报告 Provider 成熟度、路线目标与逐字段能力
-    config paths           报告当前平台的 config/data/cache/logs 路径
-    model import|status    本地 embedding 模型缓存（永不联网；import 需 semantic-candle 构建）
+    ingest <file>          parse one raw transcript file into the store (source stays read-only)
+    sync <file>...         atomically scan one or more transcripts; no new generation when nothing changed
+    sync --discover        discover and sync sources under every provider data root (sources stay read-only)
+    index rebuild          reproject the whole FTS index from the authoritative catalog (maintenance)
+    index compact          reclaim the freelist (VACUUM; explicit maintenance, holds an exclusive lock)
+    index embeddings       build the semantic vector index from the catalog (required by semantic/hybrid)
+    index purge-activities prune orphan tool-activity rows (activities with no catalog message; maintenance)
+    search <query>         full-text search, hits ranked by relevance (supports paging/budget/filter flags)
+    handoff <query>        search and build a handoff pack (verbatim evidence + suggested commands; dry-run)
+    get-message <msg-id>   return one message plus its mainline neighbours (--session/--around)
+    get-session-resume <ses-id> return read-only resume metadata (provider session id / original working directory)
+    resume <ses-id>        preview the resume command (dry-run by default; only --yes executes)
+    hook <event>           Claude Code hook integration (off by default; only --enable injects history)
+    get <wire-id>          return the raw payload for an entity id
+    show <wire-id>         return an entity normalised for reading (role/text shape)
+    list [limit]           list catalog entities in stable order (default 20; paging/budget flags)
+    context <ses-id>       assemble session context: branch message chain + evidence spans
+    status                 report the total catalog entity count
+    mcp                    serve MCP over stdio (JSON-RPC 2.0; stdout carries MCP frames only)
+    tui                    interactive read-only browsing (preview; needs an interactive terminal)
+    serve                  loopback HTTP server + embedded web UI (--port <n>; loopback only)
+    doctor                 environment self-check (with --db, verify the store opens)
+    providers              report provider maturity, roadmap target, and per-field capabilities
+    config paths           report this platform's config/data/cache/logs paths
+    model import|status    local embedding model cache (never networked; import needs a semantic-candle build)
 
 PAGINATION / BUDGET (search, list):
-    --cursor <token>       上一页 envelope `page.next_cursor` 的续读令牌
-    --max-items <n>        页大小上限（同时作为响应条目预算）
-    --max-bytes <n>        响应字节预算（最低 4096）
+    --cursor <token>       continuation token from the previous envelope's `page.next_cursor`
+    --max-items <n>        page size cap (also the response item budget)
+    --max-bytes <n>        response byte budget (minimum 4096)
 
 FILTER (search):
-    --provider claude|claude-code|codex  限定 provider（可重复，多个取值按 OR 合并）
-    --since <time>         起始时间（含）；RFC3339/ISO-8601 绝对值或 1h/1d/1w 相对量
-    --until <time>         结束时间（不含）；语法同 --since
-    --include-system       默认排除 system/developer 角色消息；加此旗标恢复
-    --group-by-session     按会话归并：每会话保留最高分命中并附 occurrences 计数
+    --provider <id>        restrict to a provider (repeatable; values OR together). Run `providers` for the ids
+    --since <time>         window start, inclusive; RFC3339/ISO-8601 absolute or 1h/1d/1w relative
+    --until <time>         window end, exclusive; same syntax as --since
+    --include-system       system/developer role messages are excluded by default; this flag restores them
+    --group-by-session     collapse per session: keep the top-scoring hit and attach an occurrences count
 
-FACETS (search，结构化过滤；默认不过滤，输出与旧版一致):
-    --main-only            只看主线消息（排除 sidechain）
-    --subagent-only        只看 subagent（sidechain）消息；与 --main-only 互斥
-    --include-sidechain    显式包含 sidechain（默认值；不与上述两者并用）
-    --tool-kind <kind>     只保留做过 file|command|web|query|unknown 工具调用的消息
-    --tool-name <name>     只保留用过该工具（逐字相等）的消息
+FACETS (search; structured filters, nothing filtered by default, output unchanged):
+    --main-only            mainline messages only (excludes sidechains)
+    --subagent-only        subagent (sidechain) messages only; mutually exclusive with --main-only
+    --include-sidechain    include sidechains explicitly (the default; not for use with the two above)
+    --tool-kind <kind>     keep only messages that made a file|command|web|query|unknown tool call
+    --tool-name <name>     keep only messages that used this tool (exact match)
 
 GET MESSAGE:
-    --session <ses-id>     共享消息的所属会话；有歧义时必须指定
-    --around <n>           主线两侧各返回 n 条邻居（默认 0，仅锚点）
-    --max-items <n>        返回消息条数预算
-    --max-bytes <n>        响应字节预算（最低 4096）
+    --session <ses-id>     owning session of a shared message; required when ambiguous
+    --around <n>           return n mainline neighbours on each side (default 0, anchor only)
+    --max-items <n>        returned message count budget
+    --max-bytes <n>        response byte budget (minimum 4096)
 
 CONTEXT:
-    --policy mainline|full 分支策略（默认 mainline：排除 sidechain 沿 parent 链）
-    --level raw|talks|sessions 结构层级（默认 raw：纯消息链；talks 按用户消息分组；sessions 结构概览）
-    --max-messages <n>     消息条数预算
-    --max-bytes <n>        响应字节预算
+    --policy mainline|full branch policy (default mainline: follow the parent chain, exclude sidechains)
+    --level raw|talks|sessions structural level (default raw: plain message chain; talks groups by user message; sessions is an overview)
+    --max-messages <n>     message count budget
+    --max-bytes <n>        response byte budget
 
-GLOBAL（全局 flag 放在命令名之前；子命令 flag 如 --max-items 放在命令名之后）:
+GLOBAL (global flags go before the command name; subcommand flags such as --max-items go after it):
     --db <path>            SQLite store path. Optional: defaults to <data dir>/asg.db
                            (override with $ASG_DB; `config paths` prints the data dir).
                            Read commands never create a store; write commands do.
-    --output human|json|jsonl  输出模式（默认 human：人类可读文本；json/jsonl 为协议 envelope）
-    --robot                等价 --output json，无颜色/进度（stdout 只输出协议）
-    --request-id <id>      robot 调用方关联 id，原样回显于每个 frame（A-Za-z0-9._:- 计 1-128 字符）
-    --offline              拒绝任何需要联网的显式操作（fail-closed；当前所有命令本地执行，本 flag 是稳定显式模式，doctor/hook 会如实上报）
-    -h, --help             打印本帮助
-    -V, --version          打印版本
+    --output human|json|jsonl  output mode (default human: readable text; json/jsonl are protocol envelopes)
+    --robot                same as --output json, no colour, no progress (stdout carries protocol only)
+    --request-id <id>      correlation id for robot callers, echoed verbatim in every frame (A-Za-z0-9._:-, 1-128 chars)
+    --offline              refuse any explicit operation that would need the network (fail-closed). Every command runs locally today, so this is a stable explicit mode; doctor/hook report it honestly
+    -h, --help             print this help
+    -V, --version          print the version
 
-术语速记:
-    generation       第 N 次入库（数据每更新一次 +1）
-    cursor           翻页令牌（结果多于一页时用来取下一页）
-    wire-id          实体 ID（msg_v1_ 消息 / ses_v1_ 会话 / doc_v1_ 文档）
-    score            相关度分数（越高越相关，按分数降序排列）
+GLOSSARY (bilingual quick reference):
+    generation       Nth commit into the store, +1 per data update（入库代次）
+    cursor           page token, used to fetch the next page（翻页令牌）
+    wire-id          entity id (msg_v1_ message / ses_v1_ session / doc_v1_ document)（实体 ID）
+    score            relevance score, higher is more relevant, sorted descending（相关度分数）
 
 EXIT CODES:
-    0 成功；10 部分成功（预算截断，结果可用但不完整）；其余见 error catalog",
+    0 success; 10 partial success (budget truncation: results usable but incomplete); see the error catalog for the rest",
         name = env!("CARGO_PKG_NAME"),
         version = env!("CARGO_PKG_VERSION"),
     )
@@ -1400,7 +1400,7 @@ fn doctor(
             "tool_activity_storage": true,
             // 新手会误以为 db: not-checked 是自检失败（10 角色体验测试缺陷）。
             // 加一行白话提示，说明如何真正校验。
-            "hint": "未指定数据库：以上仅检查了环境。运行 doctor --db <path> 可校验数据库与 schema。",
+            "hint": "no --db given: the checks above cover the environment only. Run doctor --db <path> to verify the store and its schema.",
         }),
         Some(path) => {
             let store = SqliteStore::open(&path).map_err(ProtocolError::from)?;
@@ -1885,9 +1885,10 @@ fn dispatch(
                 let mut args = rest.to_vec();
                 if !take_bool_flag(&mut args, "--force-dev") {
                     return Err(CliError::usage(
-                        "index <id-fact> <text> 是开发直写入口，会绕过 provider 解析\
-                         把无来源的内容写进权威 catalog；确实要用请加 --force-dev。\
-                         要建立索引请用：sync --discover",
+                        "index <id-fact> <text> is a development direct-write entry point: it \
+                         bypasses provider parsing and puts content with no provenance into the \
+                         authoritative catalog. Add --force-dev if you really mean it. To build \
+                         an index, run: sync --discover",
                     ));
                 }
                 no_extra_args(&args, 2, "index <id-fact> <text> --force-dev")?;
@@ -1938,18 +1939,19 @@ fn dispatch(
                 // 静默忽略，否则拼写错误会伪装成成功的空发现。
                 if from_file.is_some() {
                     return Err(CliError::usage(
-                        "sync --discover 与 --from-file 互斥：前者从 provider 数据根发现路径，后者从清单读路径",
+                        "sync --discover and --from-file are mutually exclusive: --discover finds paths under the provider data roots, --from-file reads them from a list",
                     ));
                 }
                 if args.len() > 1 {
                     return Err(CliError::usage(
-                        "sync --discover 不接受路径或额外 flag；路径由 provider 数据根自动发现",
+                        "sync --discover takes no paths and no extra flags; paths come from the provider data roots",
                     ));
                 }
                 if sync_provider.is_some() {
                     return Err(CliError::usage(
-                        "sync --discover 与 --provider 互斥：discover 从每个 provider 的数据根\
-                         推断归属，点名单个 provider 会与它冲突",
+                        "sync --discover and --provider are mutually exclusive: discover infers \
+                         ownership from each provider's own data root, so naming a single \
+                         provider conflicts with it",
                     ));
                 }
                 sync_discover(store, SyncProgress::for_mode(mode), request_id)?
@@ -1963,13 +1965,13 @@ fn dispatch(
                 // 写两遍，说明缺的是工具能力而不是脚本技巧。
                 if args.len() > 1 {
                     return Err(CliError::usage(
-                        "sync --from-file <list> 不接受额外路径：路径全部来自清单文件",
+                        "sync --from-file <list> takes no extra paths: every path comes from the list file",
                     ));
                 }
                 let paths = read_source_list(&list_path)?;
                 if paths.is_empty() {
                     return Err(CliError::usage(format!(
-                        "sync --from-file: {list_path} 里没有任何路径（空行与 # 注释会被忽略）"
+                        "sync --from-file: {list_path} contains no paths (blank lines and # comments are ignored)"
                     )));
                 }
                 sync_files(
@@ -2240,7 +2242,7 @@ fn dispatch(
                 .as_deref()
                 .map(|v| {
                     v.parse::<usize>()
-                        .map_err(|_| CliError::usage("--max-evidence 需要正整数"))
+                        .map_err(|_| CliError::usage("--max-evidence requires a positive integer"))
                 })
                 .transpose()?
                 .unwrap_or(20);
@@ -2248,7 +2250,7 @@ fn dispatch(
                 .as_deref()
                 .map(|v| {
                     v.parse::<usize>()
-                        .map_err(|_| CliError::usage("--max-tokens 需要正整数"))
+                        .map_err(|_| CliError::usage("--max-tokens requires a positive integer"))
                 })
                 .transpose()?
                 .unwrap_or(8000);
@@ -2256,7 +2258,7 @@ fn dispatch(
                 .as_deref()
                 .map(|v| {
                     v.parse::<usize>()
-                        .map_err(|_| CliError::usage("--max-bytes 需要正整数"))
+                        .map_err(|_| CliError::usage("--max-bytes requires a positive integer"))
                 })
                 .transpose()?
                 .unwrap_or(2_000_000);
@@ -2479,14 +2481,14 @@ fn dispatch(
                         if confirmed {
                             data["first_run_preview"] = serde_json::json!(true);
                             warnings.push(
-                                "首次使用 resume：已强制预览未执行。再次运行 resume --yes <session-id> 确认后才会真正执行。"
+                                "first resume: preview was forced and nothing was executed. Run resume --yes <session-id> again to confirm before it really runs."
                                     .to_string(),
                             );
                         }
                     }
                     Err(error) => {
                         warnings.push(format!(
-                            "resume: 首次预览标记写入失败（将继续强制预览）：{error}"
+                            "resume: could not write the first-preview marker (preview stays forced): {error}"
                         ));
                     }
                 }
@@ -2502,7 +2504,10 @@ fn dispatch(
                 execute_resume(&preview.descriptor)?;
                 data["executed"] = serde_json::json!(true);
             } else {
-                warnings.push("dry-run：未执行。确认命令无误后加 --yes 实际恢复会话。".to_string());
+                warnings.push(
+                    "dry-run: nothing was executed. Check the command, then add --yes to really resume the session."
+                        .to_string(),
+                );
             }
             Ok((
                 "resume",
@@ -2531,8 +2536,9 @@ fn dispatch(
             let max_tokens = max_tokens_flag
                 .as_deref()
                 .map(|v| {
-                    v.parse::<u64>()
-                        .map_err(|_| CliError::usage("--max-tokens 需要非负整数"))
+                    v.parse::<u64>().map_err(|_| {
+                        CliError::usage("--max-tokens requires a non-negative integer")
+                    })
                 })
                 .transpose()?
                 .unwrap_or(2000);
@@ -2543,8 +2549,9 @@ fn dispatch(
                 decay_days: decay_days
                     .as_deref()
                     .map(|v| {
-                        v.parse::<u32>()
-                            .map_err(|_| CliError::usage("--decay-days 需要非负整数"))
+                        v.parse::<u32>().map_err(|_| {
+                            CliError::usage("--decay-days requires a non-negative integer")
+                        })
                     })
                     .transpose()?
                     .unwrap_or(0),
@@ -4274,8 +4281,9 @@ fn sync_files(
     for path in paths {
         if std::path::Path::new(path).is_dir() {
             return Err(CliError::usage(
-                "sync 接受一个或多个 .jsonl 文件，不接受目录；\
-                 需要同步整个目录时，请用你的 shell 展开文件列表，把文件逐个传给 sync",
+                "sync takes one or more transcript files, not a directory; to sync a whole \
+                 directory, expand the file list with your shell and pass the files to sync \
+                 one by one",
             ));
         }
     }
@@ -5194,7 +5202,9 @@ fn read_source_list(path: &str) -> Result<Vec<String>, CliError> {
     let text = std::fs::read_to_string(path).map_err(|error| {
         // 清单本身读不到是用法错误（用户给错了 --from-file 的路径），不是
         // source_io——后者指 transcript 源读不到，两者的下一步动作不同。
-        CliError::usage(format!("sync --from-file: 无法读取清单 {path}: {error}"))
+        CliError::usage(format!(
+            "sync --from-file: cannot read the list {path}: {error}"
+        ))
     })?;
     Ok(text
         .lines()

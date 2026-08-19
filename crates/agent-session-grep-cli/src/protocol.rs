@@ -130,30 +130,44 @@ impl CanonicalCode {
     /// （robot/json 模式保持稳定 code，指引留给调用方）。
     pub fn operator_action(self) -> &'static str {
         match self {
-            CanonicalCode::InvalidRequest => "检查命令与参数写法，运行 --help 查看完整用法",
-            CanonicalCode::NotFound => "确认实体 ID 是否正确（运行 list 可浏览可用实体）",
-            CanonicalCode::SourceIo => "确认源文件路径存在且可读",
+            CanonicalCode::InvalidRequest => {
+                "Check the command and flag spelling; run --help for full usage"
+            }
+            CanonicalCode::NotFound => {
+                "Check the entity id (run `list` to browse the available entities)"
+            }
+            CanonicalCode::SourceIo => "Check that the source file exists and is readable",
             CanonicalCode::SourceChanged => {
-                "源文件正在被写入（例如 Claude Code 正在记录当前会话），稍等后重试"
+                "The source file is being written right now (for example Claude Code is recording the current session); wait, then retry"
             }
-            CanonicalCode::SnapshotFailed => "快照校验失败：检查源文件元数据与文件系统健康状态",
+            CanonicalCode::SnapshotFailed => {
+                "Snapshot verification failed: check the source file metadata and the filesystem health"
+            }
             CanonicalCode::CatalogError => {
-                "数据库打开/读取失败：检查 --db 路径是否正确（路径末尾不要带斜杠），可运行 doctor --db <path> 自检"
+                "Cannot open or read the store: check that the --db path is correct (no trailing slash), and run doctor --db <path> to self-check"
             }
-            CanonicalCode::ProviderError => "该文件不是可识别的 transcript 格式，或文件已被破坏",
+            CanonicalCode::ProviderError => {
+                "This file is not a recognised transcript format, or it is corrupt"
+            }
             CanonicalCode::CapabilityNotSupported => {
-                "该能力当前不可用：--offline 下拒绝需要联网的操作，或该 provider 未声明此能力"
+                "That capability is unavailable: under --offline any operation needing the network is refused, or the provider does not declare it"
             }
             CanonicalCode::WriterBusy => {
-                "另一个进程正在写入数据库，等待其结束（或结束残留的 agent-session-grep 进程）后重试"
+                "Another process is writing the store; wait for it to finish (or end a leftover agent-session-grep process), then retry"
             }
             CanonicalCode::SchemaIncompatible => {
-                "数据库版本与当前程序不兼容：升级程序，或对旧库重新执行完整同步"
+                "The store version does not match this build: upgrade the binary, or run a full sync again against the old store"
             }
-            CanonicalCode::CursorInvalid => "游标无效：丢弃该游标，从第一页重新执行查询",
-            CanonicalCode::CursorExpired => "游标已过期：重新执行查询以获得新的游标",
-            CanonicalCode::GenerationMismatch => "索引已推进：请从第一页重新执行查询",
-            CanonicalCode::Internal => "内部错误：请记录完整输出并反馈",
+            CanonicalCode::CursorInvalid => {
+                "Invalid cursor: discard it and run the query again from the first page"
+            }
+            CanonicalCode::CursorExpired => {
+                "The cursor expired: run the query again to obtain a fresh one"
+            }
+            CanonicalCode::GenerationMismatch => {
+                "The index advanced: run the query again from the first page"
+            }
+            CanonicalCode::Internal => "Internal error: record the full output and report it",
         }
     }
 }
@@ -524,7 +538,7 @@ mod tests {
         // catalog cursor_invalid: "Discard the cursor and rerun the query from the start."
         let invalid = CanonicalCode::CursorInvalid.operator_action();
         assert!(
-            invalid.contains("丢弃") && invalid.contains("重新"),
+            invalid.contains("discard") && invalid.contains("again"),
             "{invalid}"
         );
         assert!(
@@ -534,25 +548,25 @@ mod tests {
 
         // catalog cursor_expired: "Rerun the query to obtain a fresh cursor."
         let expired = CanonicalCode::CursorExpired.operator_action();
-        assert!(expired.contains("重新执行查询"), "{expired}");
+        assert!(expired.contains("run the query again"), "{expired}");
 
         // catalog snapshot_failed: "Inspect source metadata and filesystem health."（非重试）
         let snapshot = CanonicalCode::SnapshotFailed.operator_action();
         assert!(
-            snapshot.contains("文件系统") || snapshot.contains("源文件"),
+            snapshot.contains("filesystem") || snapshot.contains("source file"),
             "{snapshot}"
         );
         assert!(
-            !snapshot.contains("重试"),
+            !snapshot.contains("retry"),
             "snapshot_failed 不可重试: {snapshot}"
         );
 
         // catalog generation_mismatch: "The index advanced; rerun the query against the
         // new generation."（不是 schema 不兼容）
         let generation = CanonicalCode::GenerationMismatch.operator_action();
-        assert!(generation.contains("重新执行查询"), "{generation}");
+        assert!(generation.contains("run the query again"), "{generation}");
         assert!(
-            !generation.contains("升级") && !generation.contains("不兼容"),
+            !generation.contains("upgrade") && !generation.contains("does not match"),
             "generation_mismatch 不是 schema 不兼容: {generation}"
         );
     }

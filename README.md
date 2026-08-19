@@ -147,6 +147,19 @@ domain ← ports ← application ← adapters
 - **Honest maturity**: providers are graded certified/GA/beta/experimental/
   unsupported — never inflated
 
+## Language policy
+
+English is the language of every user-visible surface: `--help`, error
+messages, warnings, and all documentation under the repository root. New
+user-visible strings are written in English, without exception.
+
+Some existing internal text is still Chinese — code comments, historical
+governance documents under `docs/` and `.trellis/`, and test assertion
+messages. That text is deliberately left in place rather than mass-translated,
+because a sweeping rewrite would conflict with every open change and buys a
+reader nothing: none of it is printed by the binary. It converges as those
+files are touched for other reasons.
+
 ## License
 
 MIT OR Apache-2.0
