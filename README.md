@@ -80,7 +80,13 @@ exists behind the `semantic-candle` cargo feature — off by default and
 offline-only (`asg model import --dir <bundle>` / `asg model status`).
 
 See [Install and upgrade](docs/operations/INSTALL-AND-UPGRADE.md) for custom
-prefixes, persistent PATH setup, upgrades, and safe uninstall.
+prefixes, persistent PATH setup, upgrades, and safe uninstall, and the
+[Quickstart guide](docs/guide/quickstart.md) for a step-by-step walkthrough with
+real output, the default store location per platform, and how to sync providers
+that `--discover` cannot find.
+
+`serve`, `tui`, and `hook` are documented in
+[serve, tui, and hook](docs/guide/serve-tui-hook.md).
 
 ## Providers
 
@@ -105,7 +111,9 @@ Currently implemented (14/16 planned; 2 deferred — no transcript evidence):
 | DeepSeek Harness | Deferred | — (no transcript evidence yet) |
 | ZCode | Deferred | — (no transcript evidence yet) |
 
-See [Provider Maturity Matrix](docs/product/PROVIDER-MATURITY-MATRIX.md) for
+See [Providers](docs/guide/providers.md) for where each provider keeps its
+transcripts on disk, which ones `sync --discover` can find, and what each
+adapter cannot parse. See [Provider Maturity Matrix](docs/product/PROVIDER-MATURITY-MATRIX.md) for
 the full 16-provider roadmap and capability details.
 
 ## Architecture

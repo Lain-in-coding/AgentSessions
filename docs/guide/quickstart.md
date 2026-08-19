@@ -127,9 +127,13 @@ Next:
   agent-session-grep context ses_v1_0a80b66abbc6156bd38ea6b99e84a5b1
 ```
 
-Search returns matching *messages*, ranked by relevance. Every hit prints the
-next commands to run, with the real IDs filled in — you can copy them straight
-from the terminal.
+Search matches individual *messages*, ranked by relevance, but the human table
+shows **one row per session** — the title column is the highest-scoring hit in
+that session. Two matching messages in one session therefore produce one row.
+`--output json` returns every message hit separately if you need them all.
+
+Every result prints the next commands to run with the real IDs already filled
+in, so you can copy them straight from the terminal.
 
 The data flow is three steps: `search` finds a message, `show` prints that one
 message in full, `context` expands the session around it.
