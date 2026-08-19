@@ -17,25 +17,38 @@ GATE = importlib.util.module_from_spec(GATE_SPEC)
 GATE_SPEC.loader.exec_module(GATE)
 
 
-def corpus_block(at_threshold_scale: bool = True, messages: int | None = None) -> dict:
+def corpus_block(
+    at_threshold_scale: bool = True,
+    messages: int | None = None,
+    body_scale: float = 1.0,
+) -> dict:
     count = messages if messages is not None else PERF.DEFAULT_MESSAGES
+    source_bytes = 50_920_199
     return {
         "id": f"synthetic-corpus-{count}",
         "contains_real_transcripts": False,
         "message_count": count,
         "session_count": 5000,
-        "source_bytes": 50_920_199,
+        "source_bytes": source_bytes,
+        "body_scale": body_scale,
+        "bytes_per_message": round(source_bytes / count, 3),
         "at_threshold_scale": at_threshold_scale,
     }
 
 
-def reference_block(at_threshold_scale: bool = True, messages: int | None = None) -> dict:
-    block = corpus_block(at_threshold_scale, messages)
+def reference_block(
+    at_threshold_scale: bool = True,
+    messages: int | None = None,
+    body_scale: float = 1.0,
+) -> dict:
+    block = corpus_block(at_threshold_scale, messages, body_scale)
     return {
         "id": block["id"],
         "message_count": block["message_count"],
         "session_count": block["session_count"],
         "source_bytes": block["source_bytes"],
+        "bytes_per_message": block["bytes_per_message"],
+        "body_scale": block["body_scale"],
         "at_threshold_scale": block["at_threshold_scale"],
     }
 
@@ -43,7 +56,7 @@ def reference_block(at_threshold_scale: bool = True, messages: int | None = None
 def manifest_with(metrics: list[dict], *, at_threshold_scale: bool = True, profile: str = "full") -> dict:
     thresholded = [m for m in metrics if m["name"] in PERF.PERFORMANCE_THRESHOLDS]
     failures = sorted(m["name"] for m in thresholded if m["pass"] is False)
-    deferred = sorted(m["name"] for m in thresholded if m["state"] == PERF.STATE_BELOW_SCALE)
+    deferred = sorted(m["name"] for m in thresholded if m["state"] in PERF.NO_VERDICT_STATES)
     return {
         "schema_version": PERF.PERFORMANCE_SCHEMA_VERSION,
         "profile": profile,
@@ -60,10 +73,13 @@ def manifest_with(metrics: list[dict], *, at_threshold_scale: bool = True, profi
     }
 
 
-def passing_metrics(at_threshold_scale: bool = True) -> list[dict]:
+def passing_metrics(
+    at_threshold_scale: bool = True, state: str | None = None
+) -> list[dict]:
     """Every schema metric, all thresholded ones passing."""
-    state = PERF.STATE_MEASURED if at_threshold_scale else PERF.STATE_BELOW_SCALE
-    reason = None if at_threshold_scale else "below the scale the thresholds are stated at"
+    if state is None:
+        state = PERF.STATE_MEASURED if at_threshold_scale else PERF.STATE_BELOW_SCALE
+    reason = None if at_threshold_scale else "not the corpus the thresholds are stated on"
     messages = None if at_threshold_scale else 6_000
     reference = reference_block(at_threshold_scale, messages)
     mcp_detail = {
@@ -182,6 +198,48 @@ class ThroughputTests(unittest.TestCase):
     def test_zero_elapsed_is_rejected(self) -> None:
         with self.assertRaises(ValueError):
             PERF.throughput_mib_s(1024, 0.0)
+
+    def test_messages_per_second_is_density_invariant(self) -> None:
+        # Same message count, same elapsed time, whatever the bytes: this figure
+        # is what makes two corpora of different density comparable.
+        self.assertAlmostEqual(PERF.throughput_messages_s(100_000, 10_000.0), 10_000.0)
+        with self.assertRaises(ValueError):
+            PERF.throughput_messages_s(100, 0.0)
+
+
+class RequirementProjectionTests(unittest.TestCase):
+    """The 1 GiB / 5 minute requirement the MiB/s threshold stands in for."""
+
+    def test_message_count_in_a_gib_follows_the_density(self) -> None:
+        sparse = PERF.requirement_projection(509.202, 1_000.0)
+        dense = PERF.requirement_projection(7_174.0, 1_000.0)
+        self.assertAlmostEqual(
+            sparse["messages_in_one_gib_at_this_density"], 2_108_675.583, delta=0.01
+        )
+        self.assertAlmostEqual(
+            dense["messages_in_one_gib_at_this_density"], 149_671.289, delta=0.01
+        )
+        # Same measured rate, 14x fewer messages to do: 14x less wall clock.
+        self.assertAlmostEqual(
+            sparse["projected_minutes_for_one_gib"]
+            / dense["projected_minutes_for_one_gib"],
+            7_174.0 / 509.202,
+            places=3,
+        )
+
+    def test_verdict_is_the_five_minute_comparison_and_nothing_else(self) -> None:
+        fast = PERF.requirement_projection(7_174.0, 1_000.0)
+        slow = PERF.requirement_projection(509.202, 1_000.0)
+        self.assertIs(fast["projection_meets_the_requirement"], True)
+        self.assertIs(slow["projection_meets_the_requirement"], False)
+        self.assertEqual(fast["minutes_allowed"], 5.0)
+        self.assertIn("not a gate verdict", fast["note"])
+
+    def test_degenerate_inputs_are_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            PERF.requirement_projection(0.0, 100.0)
+        with self.assertRaises(ValueError):
+            PERF.requirement_projection(509.0, 0.0)
 
 
 class MetricEntryTests(unittest.TestCase):
@@ -348,6 +406,38 @@ class ValidatorTests(unittest.TestCase):
         manifest["corpus"] = dict(manifest["corpus"], message_count=4_000)
         for entry in manifest["metrics"]:
             entry["corpus"] = dict(entry["corpus"], message_count=4_000)
+        with self.assertRaises(ValueError):
+            self.validate(manifest)
+
+    def test_rejects_a_threshold_scale_claim_on_a_density_variant(self) -> None:
+        # A density variant carries the right message count and different bytes.
+        # MiB/s depends on both, so a verdict may only be claimed on the frozen
+        # density; message count alone must not be enough to unlock one.
+        manifest = manifest_with(passing_metrics())
+        manifest["corpus"] = dict(manifest["corpus"], body_scale=24.5)
+        with self.assertRaises(ValueError):
+            self.validate(manifest)
+
+    def test_accepts_an_off_contract_density_run_with_no_verdict(self) -> None:
+        metrics = passing_metrics(False, state=PERF.STATE_OFF_CONTRACT)
+        for entry in metrics:
+            entry["corpus"] = reference_block(False, PERF.DEFAULT_MESSAGES, 24.5)
+        manifest = manifest_with(metrics, at_threshold_scale=False)
+        manifest["corpus"] = corpus_block(False, PERF.DEFAULT_MESSAGES, 24.5)
+        result = self.validate(manifest)
+        self.assertIsNone(result["gate"]["pass"])
+        self.assertEqual(
+            result["gate"]["deferred"], sorted(PERF.PERFORMANCE_THRESHOLDS)
+        )
+
+    def test_rejects_an_off_contract_metric_that_still_claims_a_verdict(self) -> None:
+        metrics = passing_metrics(False, state=PERF.STATE_OFF_CONTRACT)
+        for entry in metrics:
+            entry["corpus"] = reference_block(False, PERF.DEFAULT_MESSAGES, 24.5)
+            if entry["name"] == "initial_index_throughput_mib_s":
+                entry["pass"] = True
+        manifest = manifest_with(metrics, at_threshold_scale=False)
+        manifest["corpus"] = corpus_block(False, PERF.DEFAULT_MESSAGES, 24.5)
         with self.assertRaises(ValueError):
             self.validate(manifest)
 

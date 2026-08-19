@@ -71,6 +71,7 @@ from open_source_gate_benchmark import (  # noqa: E402
 )
 from semantic_mcp_latency import FALLBACK_BACKEND, measure_tool_calls  # noqa: E402
 from synthetic_corpus import (  # noqa: E402
+    DEFAULT_BODY_SCALE,
     DEFAULT_MESSAGES,
     DEFAULT_OUTPUT_DIR,
     DEFAULT_SESSIONS,
@@ -143,6 +144,14 @@ PERFORMANCE_INFORMATIONAL_METRICS: dict[str, str] = {
         "process launch plus query work, and this separates the two so a reader "
         "can see how much of search_latency_p95_ms is not query time."
     ),
+    "initial_index_messages_per_s": (
+        "the same initial-index pass as initial_index_throughput_mib_s, divided by "
+        "messages instead of bytes. Un-thresholded because the owner stated the "
+        "requirement in bytes, but recorded because it is the density-invariant "
+        "figure: commit cost was measured to be almost entirely per message, so "
+        "MiB/s moves with corpus density while this does not. Comparing two "
+        "corpora of different density is only meaningful through this number."
+    ),
     "store_size_ratio": (
         "store bytes divided by corpus source bytes; recorded for comparability "
         "because the owner has stated no storage-amplification ceiling."
@@ -178,6 +187,14 @@ DROPPED_QUERIES: tuple[dict[str, str], ...] = (
 # States a threshold metric may carry.
 STATE_MEASURED = "measured"
 STATE_BELOW_SCALE = "below_threshold_scale"
+# The corpus holds the right message count but is not the frozen corpus the
+# thresholds are stated on — currently only reachable by generating a deliberate
+# density variant (`synthetic_corpus.py generate --body-scale`). The values are
+# measured and recorded; a verdict is not, because the threshold was never stated
+# against this corpus.
+STATE_OFF_CONTRACT = "off_frozen_corpus_contract"
+# Every state in which a thresholded metric records a value but no verdict.
+NO_VERDICT_STATES = frozenset({STATE_BELOW_SCALE, STATE_OFF_CONTRACT})
 # Informational metrics only: the run deliberately did not measure this. The
 # value stays null rather than being estimated.
 STATE_NOT_MEASURED = "not_measured"
@@ -209,18 +226,74 @@ def throughput_mib_s(source_bytes: int, elapsed_ms: float) -> float:
     return rounded(source_bytes / (1024 * 1024) / (elapsed_ms / 1000.0))
 
 
+def throughput_messages_s(messages: int, elapsed_ms: float) -> float:
+    """Messages/s over ``messages`` ingested in ``elapsed_ms``.
+
+    The density-invariant companion to :func:`throughput_mib_s`: the commit
+    transaction was measured to price nearly every step per message, so this is
+    the figure that is comparable between corpora of different densities.
+    """
+    if elapsed_ms <= 0:
+        raise ValueError("elapsed_ms must be positive to derive a throughput")
+    return rounded(messages / (elapsed_ms / 1000.0))
+
+
+def requirement_projection(
+    bytes_per_message: float, messages_per_s: float, minutes_allowed: float = 5.0
+) -> dict[str, Any]:
+    """Project the owner's "1 GiB in <= 5 minutes" onto one measured rate.
+
+    The threshold is stated in MiB/s only as a proxy for this: how long a 1 GiB
+    corpus takes. A 1 GiB corpus is a *count* of messages that depends entirely
+    on the corpus density, so the projection has to carry the density it assumed.
+    This is a projection, never a gate verdict -- ``gate.pass`` ignores it.
+    """
+    if bytes_per_message <= 0:
+        raise ValueError("bytes_per_message must be positive")
+    if messages_per_s <= 0:
+        raise ValueError("messages_per_s must be positive")
+    messages_in_a_gib = 1024**3 / bytes_per_message
+    minutes = messages_in_a_gib / messages_per_s / 60.0
+    return {
+        "requirement": (
+            f"1 GiB of source transcripts indexed in <= {minutes_allowed} minutes, the "
+            f"origin of the {PERFORMANCE_THRESHOLDS['initial_index_throughput_mib_s']} "
+            f"MiB/s threshold"
+        ),
+        "assumed_bytes_per_message": rounded(bytes_per_message),
+        "messages_in_one_gib_at_this_density": rounded(messages_in_a_gib),
+        "measured_messages_per_s": rounded(messages_per_s),
+        "projected_minutes_for_one_gib": rounded(minutes),
+        "minutes_allowed": minutes_allowed,
+        "projection_meets_the_requirement": minutes <= minutes_allowed,
+        "note": (
+            "a projection from this run's measured messages/s onto this corpus's "
+            "density, not a measured 1 GiB ingest and not a gate verdict"
+        ),
+    }
+
+
 def corpus_descriptor(manifest: dict[str, Any], at_threshold_scale: bool) -> dict[str, Any]:
     """Full corpus identity block for the manifest header."""
     corpus = manifest["corpus"]
+    message_count = corpus["message_count"]
+    total_bytes = corpus["total_bytes"]
     return {
-        "id": f"synthetic-corpus-{corpus['message_count']}",
+        "id": f"synthetic-corpus-{message_count}",
         "generator": "scripts/evidence/synthetic_corpus.py",
         "kind": "deterministic_synthetic_multi_provider",
         "contains_real_transcripts": False,
-        "message_count": corpus["message_count"],
+        "message_count": message_count,
         "session_count": corpus["session_count"],
         "file_count": corpus["file_count"],
-        "source_bytes": corpus["total_bytes"],
+        "source_bytes": total_bytes,
+        # Density, recorded because MiB/s is not comparable across densities:
+        # the same per-message cost yields a different MiB/s on a denser corpus.
+        "body_scale": corpus.get("body_scale", 1.0),
+        "bytes_per_message": corpus.get(
+            "bytes_per_message",
+            round(total_bytes / message_count, 3) if message_count else 0.0,
+        ),
         "providers": sorted(corpus["providers"]),
         "fixture_hash": corpus["fixture_hash"],
         "hash_algorithm": corpus.get("hash_algorithm", "sha256"),
@@ -235,13 +308,17 @@ def corpus_ref(descriptor: dict[str, Any]) -> dict[str, Any]:
     A latency figure without its corpus and n is misleading, and this repository
     already had to retrofit exactly that onto its semantic latency numbers. Each
     metric therefore names its corpus inline rather than relying on the reader to
-    scroll to the header.
+    scroll to the header. ``bytes_per_message`` is part of that identity: a
+    throughput in MiB/s read without the corpus density is not comparable to any
+    other throughput figure.
     """
     return {
         "id": descriptor["id"],
         "message_count": descriptor["message_count"],
         "session_count": descriptor["session_count"],
         "source_bytes": descriptor["source_bytes"],
+        "bytes_per_message": descriptor["bytes_per_message"],
+        "body_scale": descriptor["body_scale"],
         "at_threshold_scale": descriptor["at_threshold_scale"],
     }
 
@@ -280,8 +357,8 @@ def performance_metric(
         if state == STATE_MEASURED:
             pass_flag = evaluate(name, float(value))
         else:
-            # Below the scale the threshold is stated at, a verdict would be a
-            # fabrication. The value is still recorded.
+            # Off the corpus the threshold is stated on — smaller, or a different
+            # density — a verdict would be a fabrication. The value is still recorded.
             pass_flag = None
     else:
         raise ValueError(f"{name}: not a known performance metric")
@@ -395,8 +472,6 @@ def run_performance_gate(args: argparse.Namespace) -> Path:
         else workspace / DEFAULT_OUTPUT_DIR
     )
     profile = PROFILES[args.profile]
-    at_threshold_scale = args.profile == "full"
-
     commit = command_text(["git", "rev-parse", "HEAD"], workspace) or "not_recorded"
     binary = resolve_binary(workspace, args)
     binary_provenance = (
@@ -419,7 +494,15 @@ def run_performance_gate(args: argparse.Namespace) -> Path:
             f"profile {args.profile!r} expects {profile['messages']}; regenerate the "
             f"corpus or pick the matching profile"
         )
-    if at_threshold_scale:
+    # A density variant carries the right message count but different bytes, so it
+    # is not the corpus the thresholds were stated against. Detecting it from the
+    # corpus manifest rather than from a harness flag is deliberate: a variant can
+    # only be produced by explicitly passing --body-scale, and the harness then
+    # cannot be talked into scoring a verdict on it.
+    body_scale = corpus_manifest["corpus"].get("body_scale", DEFAULT_BODY_SCALE)
+    on_frozen_contract = args.profile == "full" and body_scale == DEFAULT_BODY_SCALE
+    at_threshold_scale = on_frozen_contract
+    if on_frozen_contract:
         # A gate verdict is only meaningful against the frozen contract.
         frozen = load_frozen_manifest()
         if corpus_manifest["corpus"]["fixture_hash"] != frozen["corpus"]["fixture_hash"]:
@@ -448,6 +531,7 @@ def run_performance_gate(args: argparse.Namespace) -> Path:
                 f"a throughput figure over a partial ingest would be meaningless"
             )
         throughput = throughput_mib_s(descriptor["source_bytes"], initial["total_ms"])
+        messages_per_s = throughput_messages_s(initial["emitted"], initial["total_ms"])
 
         # ---- 2. incremental sync, nothing changed ----------------------------
         mark = time.perf_counter()
@@ -553,16 +637,30 @@ def run_performance_gate(args: argparse.Namespace) -> Path:
     store_ratio = (
         rounded(store_bytes / descriptor["source_bytes"]) if descriptor["source_bytes"] else None
     )
-    state = STATE_MEASURED if at_threshold_scale else STATE_BELOW_SCALE
-    below_scale_reason = (
-        None
-        if at_threshold_scale
-        else (
+    if on_frozen_contract:
+        state = STATE_MEASURED
+        no_verdict_reason = None
+    elif args.profile != "full":
+        state = STATE_BELOW_SCALE
+        no_verdict_reason = (
             f"profile {args.profile!r} runs {actual_messages} messages; every threshold "
             f"in this gate is stated at {DEFAULT_MESSAGES}. A verdict at a smaller scale "
             f"would manufacture a pass, so the value is recorded without one."
         )
-    )
+    else:
+        state = STATE_OFF_CONTRACT
+        frozen_bpm = load_frozen_manifest()["corpus"]["bytes_per_message"]
+        no_verdict_reason = (
+            f"the corpus holds the stated {actual_messages} messages but was generated "
+            f"with --body-scale {body_scale} "
+            f"({descriptor['bytes_per_message']} bytes/message against the frozen "
+            f"corpus's {frozen_bpm}). The thresholds were stated against the frozen "
+            f"corpus, so this run measures a density variant and records values "
+            f"without a verdict. initial_index_messages_per_s is the density-invariant "
+            f"figure to compare across the two."
+        )
+
+    projection = requirement_projection(descriptor["bytes_per_message"], messages_per_s)
 
     metrics: list[dict[str, Any]] = [
         performance_metric(
@@ -574,7 +672,7 @@ def run_performance_gate(args: argparse.Namespace) -> Path:
             sample_count=1,
             sample_unit="full-corpus pass",
             state=state,
-            reason=below_scale_reason,
+            reason=no_verdict_reason,
             detail={
                 "total_ms": initial["total_ms"],
                 "source_bytes": descriptor["source_bytes"],
@@ -583,10 +681,15 @@ def run_performance_gate(args: argparse.Namespace) -> Path:
                 "unrecognized": initial["unrecognized"],
                 "command_line_batches": initial["batches"],
                 "per_batch_ms": initial["per_batch_ms"],
+                "messages_per_s": messages_per_s,
+                "bytes_per_message": descriptor["bytes_per_message"],
+                "requirement_projection": projection,
                 "note": (
                     "one pass is N processes because 5,000 source paths exceed the "
                     "OS command-line limit; the metric is the whole pass, which is "
-                    "what a user waits for"
+                    "what a user waits for. MiB/s is a function of corpus density: "
+                    "the same per-message cost reads as a different MiB/s on a corpus "
+                    "with larger messages, so messages_per_s is carried alongside it"
                 ),
             },
         ),
@@ -599,7 +702,7 @@ def run_performance_gate(args: argparse.Namespace) -> Path:
             sample_count=len(noop_totals),
             sample_unit="full-corpus no-op pass",
             state=state,
-            reason=below_scale_reason,
+            reason=no_verdict_reason,
             detail={
                 "value_is": "p50 of the per-pass totals",
                 "raw_pass_totals_ms": noop_totals,
@@ -619,7 +722,7 @@ def run_performance_gate(args: argparse.Namespace) -> Path:
             sample_count=search_stats["count"],
             sample_unit="search invocation",
             state=state,
-            reason=below_scale_reason,
+            reason=no_verdict_reason,
             detail={
                 "p50_ms": search_stats["p50"],
                 "queries": list(SEARCH_QUERIES),
@@ -642,7 +745,7 @@ def run_performance_gate(args: argparse.Namespace) -> Path:
             sample_count=len(mcp_lexical),
             sample_unit="tools/call",
             state=state,
-            reason=below_scale_reason,
+            reason=no_verdict_reason,
             detail={
                 "p50_ms": mcp_lexical_p50,
                 "mode": "lexical",
@@ -725,6 +828,23 @@ def run_performance_gate(args: argparse.Namespace) -> Path:
             detail={"p95_ms": overhead_stats["p95"]},
         ),
         performance_metric(
+            "initial_index_messages_per_s",
+            "messages/s",
+            messages_per_s,
+            action="the same initial full index pass, divided by messages instead of bytes",
+            corpus=reference,
+            sample_count=1,
+            sample_unit="full-corpus pass",
+            detail={
+                "total_ms": initial["total_ms"],
+                "emitted": initial["emitted"],
+                "bytes_per_message": descriptor["bytes_per_message"],
+                "body_scale": descriptor["body_scale"],
+                "paired_mib_s": throughput,
+                "requirement_projection": projection,
+            },
+        ),
+        performance_metric(
             "store_size_ratio",
             "ratio",
             store_ratio,
@@ -741,7 +861,7 @@ def run_performance_gate(args: argparse.Namespace) -> Path:
 
     thresholded = [m for m in metrics if m["name"] in PERFORMANCE_THRESHOLDS]
     failures = sorted(m["name"] for m in thresholded if m["pass"] is False)
-    deferred = sorted(m["name"] for m in thresholded if m["state"] == STATE_BELOW_SCALE)
+    deferred = sorted(m["name"] for m in thresholded if m["state"] in NO_VERDICT_STATES)
     gate_pass = None if deferred else not failures
 
     total_wall_s = rounded(time.perf_counter() - started_wall)
@@ -788,7 +908,9 @@ def run_performance_gate(args: argparse.Namespace) -> Path:
     manifest["ci_viability"] = ci_viability(
         total_wall_s, phases, descriptor, args.skip_embeddings
     )
-    manifest["limitations"] = limitations(vectorizer, binary_provenance, at_threshold_scale)
+    manifest["limitations"] = limitations(
+        vectorizer, binary_provenance, at_threshold_scale, no_verdict_reason
+    )
 
     manifest_path = output_dir / f"performance-gate-manifest-{args.profile}.json"
     manifest_path.write_text(
@@ -871,7 +993,10 @@ def ci_viability(
 
 
 def limitations(
-    vectorizer: dict[str, Any], provenance: str, at_threshold_scale: bool
+    vectorizer: dict[str, Any],
+    provenance: str,
+    at_threshold_scale: bool,
+    no_verdict_reason: str | None = None,
 ) -> list[str]:
     items = [
         "These are local measurements on one machine, not multi-host certification.",
@@ -897,8 +1022,11 @@ def limitations(
         )
     if not at_threshold_scale:
         items.append(
-            "This run is below the scale every threshold is stated at, so it carries "
-            "no gate verdict."
+            no_verdict_reason
+            or (
+                "This run is not on the corpus every threshold is stated against, so it "
+                "carries no gate verdict."
+            )
         )
     return items
 
@@ -923,6 +1051,16 @@ def validate_performance_manifest(path: Path) -> dict[str, Any]:
         raise ValueError(
             f"corpus claims threshold scale but holds {corpus.get('message_count')!r} "
             f"messages, not {DEFAULT_MESSAGES}"
+        )
+    # Message count alone does not identify the thresholded corpus: a density
+    # variant carries the same count and different bytes, and MiB/s is a function
+    # of both. A verdict may only be claimed on the frozen density.
+    body_scale = corpus.get("body_scale", DEFAULT_BODY_SCALE)
+    if at_threshold_scale and body_scale != DEFAULT_BODY_SCALE:
+        raise ValueError(
+            f"corpus claims threshold scale but was generated with body_scale "
+            f"{body_scale!r}; the thresholds are stated against the frozen corpus at "
+            f"body_scale {DEFAULT_BODY_SCALE}"
         )
     metrics = manifest.get("metrics")
     if not isinstance(metrics, list) or not metrics:
@@ -992,28 +1130,28 @@ def validate_performance_manifest(path: Path) -> dict[str, Any]:
         state = entry.get("state")
         if state == STATE_MEASURED:
             if not at_threshold_scale:
-                raise ValueError(f"{name}: measured verdict below threshold scale")
+                raise ValueError(f"{name}: measured verdict off the thresholded corpus")
             if entry.get("pass") is not evaluate(name, float(entry["value"])):
                 raise ValueError(f"{name}: pass flag disagrees with the recorded value")
-        elif state == STATE_BELOW_SCALE:
+        elif state in NO_VERDICT_STATES:
             if at_threshold_scale:
-                raise ValueError(f"{name}: below_threshold_scale at threshold scale")
+                raise ValueError(f"{name}: {state} claimed on the thresholded corpus")
             if entry.get("pass") is not None:
-                raise ValueError(f"{name}: below-scale metrics must carry a null pass")
+                raise ValueError(f"{name}: no-verdict metrics must carry a null pass")
             if not entry.get("reason"):
-                raise ValueError(f"{name}: below-scale metrics must record a reason")
+                raise ValueError(f"{name}: no-verdict metrics must record a reason")
         else:
             raise ValueError(f"{name}: unknown state {state!r}")
     gate = manifest.get("gate", {})
     thresholded = [m for m in metrics if m["name"] in PERFORMANCE_THRESHOLDS]
     expected_failures = sorted(m["name"] for m in thresholded if m["pass"] is False)
     expected_deferred = sorted(
-        m["name"] for m in thresholded if m["state"] == STATE_BELOW_SCALE
+        m["name"] for m in thresholded if m["state"] in NO_VERDICT_STATES
     )
     if gate.get("failures") != expected_failures:
         raise ValueError("gate.failures does not match the measured pass flags")
     if gate.get("deferred") != expected_deferred:
-        raise ValueError("gate.deferred does not match the below-scale metrics")
+        raise ValueError("gate.deferred does not match the no-verdict metrics")
     expected_pass = None if expected_deferred else not expected_failures
     if gate.get("pass") != expected_pass:
         raise ValueError(f"gate.pass {gate.get('pass')!r} inconsistent with the metrics")

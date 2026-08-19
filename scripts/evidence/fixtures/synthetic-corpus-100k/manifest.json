@@ -13,6 +13,8 @@
     "message_count": 100000,
     "file_count": 5000,
     "total_bytes": 50920199,
+    "body_scale": 1.0,
+    "bytes_per_message": 509.202,
     "providers": {
       "aider": {
         "sessions": 450,
