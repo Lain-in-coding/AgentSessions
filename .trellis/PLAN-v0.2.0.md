@@ -1846,7 +1846,7 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   **验收**:ADR 落地;实现与 ADR 一致;human 与 robot 都显示来源项目;
   加权在工作目录未解析时无副作用。
 
-- [ ] **M3-4 recency 浏览:五个入口都答不了"我昨天干了什么"(最高优先)**
+- [x] **M3-4 recency 浏览:五个入口都答不了"我昨天干了什么"(最高优先)** —— **已交付**
   全仓库只有两种排序:`SORT_WIRE_ID_ASC` 与 `SORT_SCORE_DESC`
   (`application/src/lib.rs:37-40`)。`list` 是 `ORDER BY id ASC` 对一个
   **BLAKE3 摘要**排序(`adapters-sqlite/src/lib.rs:2065-2068`)——
@@ -1859,10 +1859,49 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   → **用户做的第一件事("我昨天/上周干了什么")在五个入口全都做不到。**
   这是"搜索引擎"与"可用的历史工具"之间的差别。
   **修法便宜**:按已存在的时间戳投影排序
-  (`adapters-sqlite/src/lib.rs:6808` 已有 `latest_activity_ymd_for_sessions`)。
+  (~~`adapters-sqlite/src/lib.rs:6808`~~ **实际 `:7661`**,
+  已有 `latest_activity_ymd_for_sessions`)。
   依赖 M2P-12(时间戳提取)才能覆盖全 provider。
   **任何文档都没承认这个缺口。**
   **验收**:五个入口都能无查询词列出最近会话。
+
+  **✅ 已交付(merge `a334345` + 后续)**:新增 `ListSort::{WireIdAsc, RecencyDesc}`
+  与 `SORT_RECENCY_DESC`;摘要序仍是默认且处处可达(`--sort id`)。
+  端口新增 `CatalogStore::sessions_by_recency` 只返回 id + 排序键,
+  页内 payload 由 application 一次批量 `get_many` 取 —— 无 N+1。
+  排序键 `latest_activity` 在所有机器面可见并计入字节预算。
+
+  **五个入口全部实测通过**,且 `compare_entrypoints.py` 新增 `recent_sessions`
+  跨 cli/mcp/robot/web/tui 比对:`overall_verdict: consistent`,零分歧。
+
+  **两处原记录不准(已核实)**:
+  1. **"修法便宜:按已存在的投影排序"低估了。**
+     `latest_activity_ymd_for_sessions` **不能复用**:它需要先给出会话集合
+     (而 recency 必须排完全表才知道 top N),且它截断到 `YYYY-MM-DD` ——
+     太粗无法用于排序,其文档也明写"仅供 human 展示"。必须另写一个聚合。
+  2. **"依赖 M2P-12"对正确性不成立。** 无时间戳的 provider 今天就被诚实处理:
+     排在末尾、`latest_activity: null`、human/TUI/Web 显示 `—`。
+     M2P-12 只影响**有多少会话能进入有日期那一组**。
+
+  **一个关键实现细节值得留意**:`ORDER BY latest IS NULL ASC` 是刻意的 ——
+  裸 `latest DESC` 在 SQLite 里会把 NULL 排**最前**,
+  于是**没有时间戳的会话会冒充成最新的**。实测确认无日期会话排末尾。
+  并列与整个无日期组都按 wire id 决胜,所以顺序是全序,
+  游标 offset 在每一页含义一致。
+
+  **游标绑定已实测**:recency 下发的游标拿到 `--sort id` 重放 →
+  exit 2 `cursor_invalid`("cursor was issued for a different sort order");
+  同一游标在 `--sort recency` 下正常续读第二页。
+  `ListSort::digest()` 进入令牌,与 `(generation, query_digest, result_set)` 并列。
+
+  **⚠️ 诚实的代价(已记入 adapter spec,不要当免费)**:一页 recency 的开销与
+  **placement 表规模**成正比而非页大小。11 万实体库实测每进程
+  **约 0.49–0.54 s**,而同一页 wire-id 序约 0.018–0.022 s。
+  交互可用,但便宜的正解是**物化一个 per-session `latest_activity` 列**,
+  不是把查询写得更宽。
+  另:会话标题仍是 `—` —— 需要"本会话首条用户消息"投影,现无端口暴露;
+  宁可留空也不臆造(工作目录列承担"哪个项目"的信号)。
+
 
 - [x] **M3-5 删除/保留:目前完全没有删除路径(隐私义务,非选配)** —— **已实现(merge `1e357d4`)**
   唯一的清理命令是 `index purge-activities`,而它**只删孤儿** tool-activity 行
