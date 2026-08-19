@@ -2880,6 +2880,9 @@ mod tests {
                 suggested_next_commands: Vec::new(),
                 occurrences: 1,
                 resume_available: false,
+                provider_id: None,
+                working_directory: None,
+                project_name: None,
             }])
         }
     }
@@ -3244,6 +3247,9 @@ mod tests {
                     suggested_next_commands: Vec::new(),
                     occurrences: 1,
                     resume_available: false,
+                    provider_id: None,
+                    working_directory: None,
+                    project_name: None,
                 })
                 .collect())
         }
@@ -3272,6 +3278,9 @@ mod tests {
                     suggested_next_commands: Vec::new(),
                     occurrences: 1,
                     resume_available: false,
+                    provider_id: None,
+                    working_directory: None,
+                    project_name: None,
                 })
                 .collect())
         }
@@ -4003,6 +4012,7 @@ mod tests {
                         providers: Vec::new(),
                         since: Some(since),
                         until: Some(until),
+                        ..SearchFilters::default()
                     },
                 ))
                 .expect_err("since >= until must be rejected");
@@ -4022,6 +4032,7 @@ mod tests {
             providers: vec![SearchProvider::codex(), SearchProvider::claude_code()],
             since: Some(seconds_instant(1_000)),
             until: None,
+            ..SearchFilters::default()
         };
         let (_, next, _, _) = hits_of(
             app.handle(filtered_search_req("q", 2, None, issued_filters))
@@ -4035,6 +4046,7 @@ mod tests {
             ],
             since: Some(seconds_instant(1_000)),
             until: None,
+            ..SearchFilters::default()
         };
         assert!(
             app.handle(filtered_search_req(
@@ -4050,6 +4062,7 @@ mod tests {
             providers: Vec::new(),
             since: Some(seconds_instant(2_000)),
             until: None,
+            ..SearchFilters::default()
         };
         let err = app
             .handle(filtered_search_req("q", 2, next.clone(), mutated))
@@ -4075,6 +4088,7 @@ mod tests {
                     providers: vec![SearchProvider::claude_code()],
                     since: None,
                     until: None,
+                    ..SearchFilters::default()
                 },
             ))
             .unwrap_err();

@@ -8912,6 +8912,7 @@ mod filtered_query_tests {
             providers: Vec::new(),
             since: Some(instant(1_785_196_800)), // 2026-07-28T00:00:00Z
             until: Some(instant(1_786_320_000)), // 2026-08-10T00:00:00Z
+            ..SearchFilters::default()
         };
         let mut hits = search_filtered(&fixture.store, "shared-token", &window);
         hits.sort();
@@ -8927,6 +8928,7 @@ mod filtered_query_tests {
             providers: Vec::new(),
             since: Some(instant(1_785_196_800)),
             until: None,
+            ..SearchFilters::default()
         };
         let hits = search_filtered(&fixture.store, "shared-token", &since_only);
         assert_eq!(hits.len(), 3);
@@ -8937,6 +8939,7 @@ mod filtered_query_tests {
             providers: Vec::new(),
             since: None,
             until: Some(instant(1_786_320_000)),
+            ..SearchFilters::default()
         };
         let hits = search_filtered(&fixture.store, "shared-token", &until_only);
         assert_eq!(hits.len(), 3);
@@ -8961,6 +8964,7 @@ mod filtered_query_tests {
             providers: Vec::new(),
             since: Some(instant(0)),
             until: Some(instant(4_000_000_000)),
+            ..SearchFilters::default()
         };
         let hits = search_filtered(&fixture.store, "shared-token", &everything);
         assert_eq!(hits.len(), 4, "{hits:?}");
@@ -8976,6 +8980,7 @@ mod filtered_query_tests {
             providers: Vec::new(),
             since: Some(instant(1_785_196_800)), // 2026-07-28T00:00:00Z
             until: Some(instant(1_786_320_000)), // 2026-08-10T00:00:00Z
+            ..SearchFilters::default()
         };
         let hits = search_filtered(&fixture.store, "shared-token", &window);
         assert!(!hits.contains(&fixture.null_ts.as_str().to_string()));
@@ -8991,6 +8996,7 @@ mod filtered_query_tests {
                 providers: Vec::new(),
                 since: bounds.0,
                 until: bounds.1,
+                ..SearchFilters::default()
             };
             assert_eq!(
                 count_excluded(&fixture.store, "shared-token", &filters),
@@ -9012,6 +9018,7 @@ mod filtered_query_tests {
             providers: vec![SearchProvider::claude_code()],
             since: window.0,
             until: window.1,
+            ..SearchFilters::default()
         };
         assert_eq!(
             count_excluded(&fixture.store, "shared-token", &claude_only),
@@ -9021,6 +9028,7 @@ mod filtered_query_tests {
             providers: vec![SearchProvider::codex()],
             since: window.0,
             until: window.1,
+            ..SearchFilters::default()
         };
         assert_eq!(
             count_excluded(&fixture.store, "shared-token", &codex_only),
@@ -9032,6 +9040,7 @@ mod filtered_query_tests {
             providers: Vec::new(),
             since: window.0,
             until: window.1,
+            ..SearchFilters::default()
         };
         let subagent_only = SearchFacets {
             sidechain: SidechainFacet::SubagentOnly,
@@ -9083,6 +9092,7 @@ mod filtered_query_tests {
             providers: vec![SearchProvider::codex()],
             since: Some(instant(1_785_196_800)),
             until: Some(instant(1_786_320_000)),
+            ..SearchFilters::default()
         };
         let hits = search_filtered(&fixture.store, "shared-token", &filters);
         assert_eq!(hits, vec![fixture.codex_mid.as_str().to_string()]);
@@ -9095,12 +9105,14 @@ mod filtered_query_tests {
             providers: vec![SearchProvider::claude_code()],
             since: Some(instant(1_786_320_000)), // late window: codex only
             until: None,
+            ..SearchFilters::default()
         };
         assert!(search_filtered(&fixture.store, "shared-token", &no_provider_overlap).is_empty());
         let empty_window = SearchFilters {
             providers: Vec::new(),
             since: Some(instant(1_800_000_000)),
             until: Some(instant(1_800_100_000)),
+            ..SearchFilters::default()
         };
         assert!(search_filtered(&fixture.store, "shared-token", &empty_window).is_empty());
     }
