@@ -601,7 +601,9 @@ pub fn select_and_stage(
     }
 
     let mut best: Option<(u8, usize, ProbeResult)> = None; // (rank, adapter index, probe)
-    let mut tie = false;
+    // 并列的全部 variant id。此前只有一个 bool `tie`，于是错误消息只能说
+    // "one candidate was X" —— 用户拿到它无法自查,连和谁撞了都不知道。
+    let mut tied: Vec<String> = Vec::new();
     // probe 报错按格式家族留存：只有与本源同家族的诊断可以外泄给用户。
     let mut probe_failures: Vec<(SourceFormatFamily, ProviderError)> = Vec::new();
     for (idx, adapter) in adapters.iter().enumerate() {
@@ -619,11 +621,15 @@ pub fn select_and_stage(
         match &best {
             Some((best_rank, _, best_probe)) => {
                 if r > *best_rank {
+                    // 更高置信度胜出，先前记录的并列作废。
                     best = Some((r, idx, probe));
-                    tie = false;
+                    tied.clear();
                 } else if r == *best_rank && probe.variant_id != best_probe.variant_id {
-                    // 同等置信度、不同 variant——无法区分，标记歧义。
-                    tie = true;
+                    // 同等置信度、不同 variant——无法区分，记下双方。
+                    if tied.is_empty() {
+                        tied.push(best_probe.variant_id.clone());
+                    }
+                    tied.push(probe.variant_id.clone());
                 }
             }
             None => best = Some((r, idx, probe)),
@@ -633,16 +639,29 @@ pub fn select_and_stage(
     let (_, idx, probe) = best.ok_or_else(|| {
         unrecognized_source_error(SourceFormatFamily::of_head(bytes), &probe_failures)
     })?;
-    if tie {
-        return Err(DomainError::InvalidRequest(format!(
-            "{AMBIGUOUS_SOURCE_MESSAGE}: multiple variants matched with equal confidence \
-             (one candidate was {})",
-            probe.variant_id
-        ))
-        .into());
+    if !tied.is_empty() {
+        return Err(ambiguous_source_error(&tied).into());
     }
     // 复用选中时的 probe 结果，不再对同一字节第二次 probe。
     stage_probed(adapters[idx], bytes, probe)
+}
+
+/// 歧义错误:列出**全部**并列 variant 并给出消歧办法。
+///
+/// 此前只报一个候选(`one candidate was X`),用户既不知道和谁撞了,也不知道
+/// 下一步能做什么 —— 而 `AmbiguousVariant` 是刻意的拒绝(RFC-0002:宁拒不猜),
+/// 所以这条消息是用户唯一的线索,必须自足。
+fn ambiguous_source_error(tied: &[String]) -> DomainError {
+    let mut variants: Vec<&str> = tied.iter().map(String::as_str).collect();
+    variants.sort_unstable();
+    variants.dedup();
+    DomainError::InvalidRequest(format!(
+        "{AMBIGUOUS_SOURCE_MESSAGE}: {} variants matched with equal confidence \
+         ({}); this source's shape is not distinctive enough to attribute, so it \
+         is refused rather than guessed. Name the provider explicitly to resolve it",
+        variants.len(),
+        variants.join(", ")
+    ))
 }
 
 /// Select and stage a repeatable read-only source (RFC-0002 §7 bounded ingest).
@@ -665,7 +684,7 @@ pub fn select_and_stage_source(
     }
 
     let mut best: Option<(u8, usize, ProbeResult)> = None; // (rank, adapter index, probe)
-    let mut tie = false;
+    let mut tied: Vec<String> = Vec::new();
     let mut probe_failures: Vec<(SourceFormatFamily, ProviderError)> = Vec::new();
     for (idx, adapter) in adapters.iter().enumerate() {
         let probe = match adapter.probe_source(source) {
@@ -682,9 +701,12 @@ pub fn select_and_stage_source(
             Some((best_rank, _, best_probe)) => {
                 if r > *best_rank {
                     best = Some((r, idx, probe));
-                    tie = false;
+                    tied.clear();
                 } else if r == *best_rank && probe.variant_id != best_probe.variant_id {
-                    tie = true;
+                    if tied.is_empty() {
+                        tied.push(best_probe.variant_id.clone());
+                    }
+                    tied.push(probe.variant_id.clone());
                 }
             }
             None => best = Some((r, idx, probe)),
@@ -696,13 +718,8 @@ pub fn select_and_stage_source(
         let head = read_source_head(source, SQLITE_MAGIC_HEADER.len()).unwrap_or_default();
         unrecognized_source_error(SourceFormatFamily::of_head(&head), &probe_failures)
     })?;
-    if tie {
-        return Err(DomainError::InvalidRequest(format!(
-            "{AMBIGUOUS_SOURCE_MESSAGE}: multiple variants matched with equal confidence \
-             (one candidate was {})",
-            probe.variant_id
-        ))
-        .into());
+    if !tied.is_empty() {
+        return Err(ambiguous_source_error(&tied).into());
     }
     let variant = probe.variant_id.clone();
     let staged = stage_source_probed(adapters[idx], source, probe)?;
