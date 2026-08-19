@@ -1959,7 +1959,7 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   **更大的缺口(catalog 层完全无法删除)哪里都没承认。**
   **验收**:见 M3-2。
 
-- [ ] **M3-6 `config.toml` 被宣传但从不被读取(与 M2P-3 同源)**
+- [x] **M3-6 `config.toml` 被宣传但从不被读取(与 M2P-3 同源)** —— **已如实标注(`d564d02`)**
   `config paths` 在四个平台都报告 `config.toml` 路径
   (`main.rs:871,887,911,927`),但**依赖图里没有任何 TOML 解析器**
   (`Cargo.lock` 里零个 `toml` 条目),也没有任何代码读那个文件。
@@ -1970,6 +1970,17 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   **修法**:要么真实现配置读取(需加 TOML 依赖,或用更简单的 KV 格式
   避免加依赖),要么停止打印这个路径。
   **验收**:`config paths` 不撒谎;若实现则至少默认 db 与 hook 开关可持久化。
+
+  **✅ 选"如实标注",不实现。** 复验:`Cargo.lock` 零个 toml 条目、
+  全仓库零处读 `config.toml`(两项都实测确认)。
+  为让这个路径"变真"而引入 TOML 依赖 = 造一个没人要的功能;
+  诚实的做法是停止暗示它生效。
+  human 面加一句 "`config` is a reserved path. This build reads no
+  configuration file … Writing a file there has no effect.";
+  机器面加 `config_is_read: false`(自动化调用方同样需要这个事实,
+  且契约禁止两面分叉)。路径本身仍报告 —— 它是保留位置,不是虚构。
+  有回归测试钉住这句话,并断言机器面字段名不混进人类版式。
+
 
 - [ ] **M3-7 无导出、无非 JSON 输出格式**
   只有 `--output human|json|jsonl`(`main.rs:1014`)。
@@ -2129,7 +2140,7 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   Windows 反斜杠写法与盘符小写写法都有回归断言。
   → **`THREAT-MODEL.md:49` 那句"尚未实现"现在可以改了**(留给 M4-8 统一清理)。
 
-- [ ] **M3-16 `ses_v2_` 身份迁移里的 Windows 路径大小写缺陷(潜在,Windows 是主目标)**
+- [x] **M3-16 `ses_v2_` 身份迁移里的 Windows 路径大小写缺陷(潜在,Windows 是主目标)** —— **已修(`5d3debc`)**
   `domain/src/ids.rs:624-629` 记录了一个**已知活跃缺陷**:
   生产的 `installation_namespace` 缺少 Windows 路径大小写归一化。
   → 同一个安装的会话身份会**按盘符大小写静默分裂**。
@@ -2138,8 +2149,54 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   **修法**:归一化 Windows 路径大小写;加回归测试。
   **验收**:同一路径不同大小写产出同一 namespace。
 
-- [ ] **M3-17 16 provider 的成本在哪里:渐进式披露该用在输出层,不是加载层
-  (2026-08-19 owner 提问 + 我实测)**
+  **✅ 已修,作用域刻意只到盘符。**
+  根因比原记录更具体:**两条 ingest 入口本就不一致** ——
+  `sync`/`sync --discover` 走 `source_path_identity`(盘符已折小写),
+  而 `ingest` 收用户原样输入。于是同一安装分成两族 `ses_v1_` 会话 id。
+  归一化收敛成一份共享实现 `normalized_path_case`,两处共用,不留第二套规则。
+  **为什么不折整条路径**(NTFS 全路径大小写不敏感):那会改变既有 store 里
+  **每一个** Windows 会话的 `ses_v1_` id —— 只能与 provider-scoped identity
+  迁移(`ses_v2_` + `id_alias`,schema v13,已 deferred)一起发布,
+  依据 RFC-0001 §5「ID 算法升级使用新 namespace,不静默改变旧 ID」。
+  平台行为显式可测:`installation_namespace_on(path, provider, windows: bool)`,
+  `cfg!(windows)` 只出现在生产 wrapper 里,两个平台的行为在任一平台上都能断言。
+  回归测试同时钉住"不同盘符仍是不同安装"(归一化不得把 C: 与 D: 合并)。
+
+- [x] **handoff pack 违反自己发布的 schema + `tool_activity[].target` 泄漏绝对路径**
+  (2026-08-19 我用 `jsonschema` 校验真实 pack 时发现;`07e85db` 已修)
+  真实 pack 对 `schemas/handoff/v1/pack.schema.json` **五处不通过** ——
+  也就是说**任何按我们自己发布的 schema 做校验的消费者都会拒收我们的输出**。
+  1. `budget/max_tokens`、`budget/used_tokens` 被写成字符串 `"[redacted]"`
+     —— 脱敏规则按子串匹配 "token",把声明为 integer 的预算字段改成了字符串
+     (已由 `fe7c4f4` 修:改为按 key 分段匹配,单数 `token` 是凭据、
+     复数 `tokens` 与 `token_count` 是计数)。
+  2. `evidence/0/message_id`、`mainline/0/message_id` 不匹配
+     `^msg_v1_[A-Za-z0-9]+$` —— **schema 错了,不是 id 错了**:
+     native id 逐字沿用 provider 自己的标识符(`StableId::native` 只剥控制字符),
+     而 Claude Code 的消息 id 是 UUID,天然带连字符。八处 id pattern 统一放宽为
+     `[A-Za-z0-9._:-]`(与本来就允许这些字符的 `pack_id` pattern 一致)。
+  3. `matched_sessions/0/relevance_score` 声明 `maximum: 1`,实测 1.221。
+     **去掉上界,不做归一化** —— BM25 分数只在同一结果集内相互可比,
+     缩放到 0..1 是**发明一个后端并不提供的量纲**。字段描述现在明写
+     "不可跨查询比较、不可对固定阈值比较"。
+  **另外修掉一个隐私泄漏**:`tool_activity[].target` 把**绝对文件系统路径**
+  带进跨边界输出(实测 `"target":"C:\\...\\project\\README.md"`)。
+  pack 不是人类输出,所以适用 ADR-0009 而非 ADR-0004。
+  路径型 target 归约为**末段文件名**:文件名才是让活动可读的部分
+  ("它读了 README.md"),目录链才是标识机器与用户的部分;
+  非路径 target(shell 命令 / 查询 / URL)**原样保留** ——
+  它们是证据,截断毫无保护收益。
+  **既有隐私测试为何抓不到(值得记住)**:它只拒绝**键名**含 "path" 的字段,
+  而该字段叫 `target`;更要紧的是它的 fixture **根本没有 tool activity**
+  (`EMPTY_ACT`),那个数组永远是空的。已换成带 Windows/POSIX/UNC 三种路径的
+  fixture,并加一条"非路径 target 不得被改"的对照测试;
+  **并实测确认:把归约逻辑去掉后新测试会失败**(不是空转的测试)。
+  **实测**:命中携带 Read 活动的 pack 输出 `target: "README.md"`,
+  序列化全文不含那个目录名,且 **pack 通过 schema 校验**。
+
+
+- [x] **M3-17 16 provider 的成本在哪里:渐进式披露该用在输出层,不是加载层
+  (2026-08-19 owner 提问 + 我实测;折叠已实现)**
 
   **owner 的顾虑**:用户通常只装 1–3 个 agent,全量加载 16 个 provider
   是否白占性能、是否该做渐进式披露?
@@ -2193,17 +2250,17 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
 
 ### M4 — 文档与 UX(G11/G12/G13)
 
-- [ ] **M4-1 quickstart 可照抄执行**
+- [x] **M4-1 quickstart 可照抄执行**
   按 M3-1 的零配置改造重写:装完 → `asg sync --discover` → `asg search "x"`,
   三步能跑通,无未声明前置条件。每步给真实输出示例。
   **验收**:在全新环境照抄执行成功。
 
-- [ ] **M4-2 每 provider 的"你的记录在哪 / 我们解析不了什么"表**
+- [x] **M4-2 每 provider 的"你的记录在哪 / 我们解析不了什么"表**
   逐 provider:transcript 默认路径(三平台)、格式、已验证到什么程度、
   `known_limitations`、resume 是否可用。这是 local-first 工具最该有的表。
   **验收**:表与 `capability.rs` 一致(考虑加漂移测试)。
 
-- [ ] **M4-3 故障排查手册**
+- [x] **M4-3 故障排查手册**
   新建 `docs/operations/TROUBLESHOOTING.md` 并从 README 链接。
   **按用户真实看到的字符串编排索引**(实测得来的原文):
   `需要数据库参数 --db`、`数据库内部错误 (exit 6)`、
@@ -2216,7 +2273,7 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   当前全仓库 grep `troubleshoot|常见问题|FAQ` **零命中**。
   **验收**:每个错误消息在手册里能找到对应条目。
 
-- [ ] **M4-4 MCP 客户端接入实例**
+- [x] **M4-4 MCP 客户端接入实例**
   仓库里**唯一**一份 MCP config JSON 在
   `skills/agent-session-grep/SKILL.md:126-135` —— 而这个文件既没被 README
   链接也没被 CONTRIBUTING 链接,躺在 MCP 用户永远不会看的 `skills/` 下。
@@ -2231,7 +2288,7 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   从 README 链接 `SKILL.md`(它是仓库里最好的集成文档,12 KB,却无人能找到)。
   **验收**:照抄 config 能接上;每个工具有示例;新鲜度问题被说明。
 
-- [ ] **M4-5 完整 CLI reference**
+- [x] **M4-5 完整 CLI reference**
   每个子命令、每个 flag、退出码表(14 码 error catalog 对齐)、
   Robot JSON schema 指引。
   已知 help 里**完全没出现**的真实 flag:`--mode`(只在 search 子命令 help 里)、
@@ -2280,7 +2337,7 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   `ADR-0009-session-resume-metadata.md` 撞号)。
   **验收**:交叉检查脚本或人工清单确认零矛盾。
 
-- [ ] **M4-9 `serve` / `tui` / `hook` 三个已发布入口零用户文档**
+- [x] **M4-9 `serve` / `tui` / `hook` 三个已发布入口零用户文档**
   五个宣传入口里有三个没有任何面向用户的文档:
   - `serve`(loopback HTTP + Web UI):grep 全仓库只在 ADR/roadmap/go-no-go
     和 rehearsal runbook 里出现过。它打印
