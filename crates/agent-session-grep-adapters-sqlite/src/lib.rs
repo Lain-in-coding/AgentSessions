@@ -5082,6 +5082,16 @@ impl SqliteStore {
                     rusqlite::params_from_iter(ids.iter().copied()),
                 )
                 .map_err(backend)?;
+                // 语义向量（v10）与 `fts` 同级：都是消息正文的可重建投影。实体
+                // 删除必须在同一事务里清除它，否则一条被 tombstone 的消息仍以
+                // embedding 的形式留在库里——对以隐私为卖点的本地工具，派生正文
+                // 残留与正文残留同罪，而且 `query_semantic` 只读 `message_vec`
+                // 自己的两列，残留向量会继续被打分并以 wire id 命中。
+                tx.execute(
+                    &format!("DELETE FROM message_vec WHERE wire_id IN ({placeholders})"),
+                    rusqlite::params_from_iter(ids.iter().copied()),
+                )
+                .map_err(backend)?;
             }
         }
         mark = trace.step("tx.catalog_delete", mark);
@@ -13878,6 +13888,68 @@ mod tests {
             .unwrap();
         assert_eq!(store.count().unwrap(), 0);
         assert!(store.query("disappear", 10).unwrap().is_empty());
+    }
+
+    /// 语义向量是消息正文的派生投影：tombstone 必须同事务清除它。
+    ///
+    /// 回归守卫。此前删除路径只清 `catalog`/`fts`/`fts_ids`，`message_vec` 行
+    /// 留在库里——被删消息的 embedding 仍可被 `query_semantic` 打分并以 wire id
+    /// 命中，等于"删除"只是把正文换成了它的向量表示。
+    #[test]
+    fn tombstone_also_removes_the_derived_embedding() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        store.set_semantic_model("test-model");
+        let id = sid(IdKind::Message, b"embedded-then-forgotten");
+        let populated = SourceBatch {
+            source_path: "embedded".into(),
+            placements: Vec::new(),
+            edges: Vec::new(),
+            activities: Vec::new(),
+            relation_complete: true,
+            len_bytes: None,
+            fingerprint: None,
+            provider_id: None,
+            resume_claim: None,
+            entries: vec![(id.clone(), b"p".to_vec(), "private secret".into())],
+        };
+        store
+            .commit_source_batches_if_changed(std::slice::from_ref(&populated))
+            .unwrap();
+        store.index_embedding(&id, &[1.0, 0.0, 0.0]).unwrap();
+        assert!(store.is_ready());
+        assert_eq!(
+            store
+                .query_semantic(&[1.0, 0.0, 0.0], 10)
+                .unwrap()
+                .into_iter()
+                .map(|hit| hit.id)
+                .collect::<Vec<_>>(),
+            vec![id.clone()],
+        );
+
+        let empty = SourceBatch {
+            entries: Vec::new(),
+            ..populated
+        };
+        store
+            .commit_source_batches_if_changed(std::slice::from_ref(&empty))
+            .unwrap();
+
+        assert_eq!(store.count().unwrap(), 0);
+        assert!(store.query("secret", 10).unwrap().is_empty());
+        assert!(
+            store
+                .query_semantic(&[1.0, 0.0, 0.0], 10)
+                .unwrap()
+                .is_empty(),
+            "被 tombstone 的消息不得再以 embedding 形式被语义检索命中"
+        );
+        let residue: i64 = store
+            .conn
+            .borrow()
+            .query_row("SELECT COUNT(*) FROM message_vec", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(residue, 0, "message_vec 不得残留已删除消息的向量");
     }
 
     #[test]
