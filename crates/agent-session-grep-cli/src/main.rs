@@ -454,6 +454,8 @@ fn run(
         Some(_) => {}
     }
     let (db, db_origin) = resolve_store_path(db_flag)?;
+    // D13：库路径不得落在任何 provider 源目录内部（威胁模型 §4 的只读不变量）。
+    reject_store_inside_source_root(&db)?;
     // 写入子命令抢 data-root writer lease；读路径不抢，允许多读者并发。
     let writes = rest
         .first()
@@ -1615,6 +1617,53 @@ fn resolve_store_path(flag: Option<String>) -> Result<(String, DbOrigin), CliErr
         .ok_or_else(|| CliError::usage("cannot resolve the platform data directory"))?;
     let path = std::path::Path::new(data).join(DEFAULT_DB_FILE_NAME);
     Ok((path.to_string_lossy().into_owned(), DbOrigin::Default))
+}
+
+/// D13 运行时守卫：拒绝落在任一 provider source root 内部的 store 路径。
+///
+/// 本工具赖以成立的不变量是 **provider 源只读**（威胁模型 §4）。一个配错的
+/// `--db`（或环境变量）落在 `~/.claude/projects` 里，会把本工具自己的 SQLite
+/// 写入（外加 WAL/shm 侧文件）放进它承诺永不触碰的目录——这不是理论风险：
+/// 那个目录随后会被 `sync --discover` 扫描，于是工具开始把自己的输出当成
+/// 待索引的源。此前只靠文档与安装器默认路径分离缓解,威胁模型
+/// (`THREAT-MODEL.md:49`)自己标注"尚未实现运行时代码守卫"。
+///
+/// 判定是**纯词法**的前缀包含,不碰文件系统:守卫必须在库还不存在时就生效
+/// (写路径会 `create_dir_all` 把父目录建出来),所以不能依赖 canonicalize。
+/// 代价是符号链接绕过不在本守卫覆盖范围内——默认不跟随 symlink 是另一条独立
+/// 控制项,不在此重复实现。
+///
+/// 只在库路径**严格位于** root 内部时拒绝；root 自身或其祖先（例如
+/// `~/.claude` 本身、或 home）不算重叠——否则默认库落在 home 下就会被误拒。
+fn reject_store_inside_source_root(db: &str) -> Result<(), CliError> {
+    let db_norm = source_path_identity(db);
+    for provider in provider_registry() {
+        let Some(root) = provider_data_root(provider.provider_id()) else {
+            continue;
+        };
+        let root_norm = source_path_identity(&root.to_string_lossy());
+        // 前缀比较补一个分隔符，避免 `.../projects-backup` 被当成
+        // `.../projects` 的内部路径。
+        let prefix = if root_norm.ends_with('/') {
+            root_norm.clone()
+        } else {
+            format!("{root_norm}/")
+        };
+        if db_norm.starts_with(&prefix) {
+            return Err(CliError::usage(format!(
+                "refusing to open the index inside {}'s transcript directory ({}). \
+                 Provider transcripts are read-only, and this tool would write its \
+                 database plus WAL side files there -- which `sync --discover` would \
+                 then rescan as if they were transcripts. Point --db (or {}) at a \
+                 path outside every provider data root, or omit it to use the \
+                 platform data directory",
+                provider.provider_id(),
+                root_norm,
+                DB_ENV_VAR
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// 命令行前缀：默认/环境变量解析出的库无需 `--db`，显式 `--db` 的提示必须带上
@@ -5261,6 +5310,98 @@ mod tests {
     #[test]
     fn provider_data_root_rejects_unknown_provider() {
         assert!(provider_data_root("unknown-provider").is_none());
+    }
+
+    /// D13 守卫：库落在 provider 源目录内部必须 fail-closed。
+    ///
+    /// 这条保护的是整个产品赖以成立的不变量（provider 源只读）。守卫此前不存在，
+    /// 威胁模型自己标注为"尚未实现运行时代码守卫"。
+    ///
+    /// 本测试改 `HOME`/`USERPROFILE` 进程环境，所以串行执行（`#[serial]` 不可用
+    /// 时靠单个测试函数内顺序断言，避免与其它读 HOME 的测试并发交错）。
+    #[test]
+    fn store_inside_a_provider_source_root_is_refused() {
+        // 伪 home：不落盘（守卫是纯词法判定，不碰文件系统）。
+        let fake_home = if cfg!(windows) {
+            "C:/fake-home-d13"
+        } else {
+            "/fake-home-d13"
+        };
+        let prior_home = std::env::var_os("HOME");
+        let prior_profile = std::env::var_os("USERPROFILE");
+        // SAFETY: 单线程测试内改环境后立即恢复；本进程无其它线程并发读 HOME。
+        unsafe {
+            std::env::set_var("HOME", fake_home);
+            std::env::set_var("USERPROFILE", fake_home);
+        }
+
+        // 内部路径 → 拒绝，且消息点名 provider 与 root。
+        let inside = format!("{fake_home}/.claude/projects/index.db");
+        let err = reject_store_inside_source_root(&inside)
+            .expect_err("落在 provider 源目录内部的库必须拒绝");
+        assert_eq!(err.0.code, CanonicalCode::InvalidRequest);
+        assert!(
+            err.0.message.contains("claude-code"),
+            "必须点名是哪个 provider 的目录: {}",
+            err.0.message
+        );
+        assert!(
+            err.0.message.contains("read-only"),
+            "必须说明为何拒绝（源只读）: {}",
+            err.0.message
+        );
+
+        // 更深的嵌套同样拒绝。
+        let deep = format!("{fake_home}/.claude/projects/a/b/c/index.db");
+        assert!(reject_store_inside_source_root(&deep).is_err());
+
+        // root 自身的祖先不算重叠：默认库落在 home 下，绝不能被误拒。
+        let sibling = format!("{fake_home}/.local/share/agent-session-grep/index.db");
+        assert!(
+            reject_store_inside_source_root(&sibling).is_ok(),
+            "home 下的正常数据目录不得被误拒"
+        );
+        assert!(reject_store_inside_source_root(&format!("{fake_home}/index.db")).is_ok());
+        // `.claude` 本身不是 source root（root 是 `.claude/projects`）。
+        assert!(reject_store_inside_source_root(&format!("{fake_home}/.claude/index.db")).is_ok());
+
+        // 前缀相邻但不同的目录不得被误判成内部路径。
+        let adjacent = format!("{fake_home}/.claude/projects-backup/index.db");
+        assert!(
+            reject_store_inside_source_root(&adjacent).is_ok(),
+            "projects-backup 不是 projects 的内部路径"
+        );
+
+        // 其它已注册 root 同样生效（不是只硬编码 claude-code）。
+        let codex = format!("{fake_home}/.codex/sessions/index.db");
+        let err = reject_store_inside_source_root(&codex).expect_err("codex root 同样必须拒绝");
+        assert!(err.0.message.contains("codex"), "{}", err.0.message);
+
+        // Windows 上盘符大小写与反斜杠都要归一化后再比。
+        if cfg!(windows) {
+            let backslashes = r"C:\fake-home-d13\.claude\projects\index.db";
+            assert!(
+                reject_store_inside_source_root(backslashes).is_err(),
+                "反斜杠写法必须同样被拦"
+            );
+            let lower_drive = "c:/fake-home-d13/.claude/projects/index.db";
+            assert!(
+                reject_store_inside_source_root(lower_drive).is_err(),
+                "盘符小写写法必须同样被拦"
+            );
+        }
+
+        // SAFETY: 恢复原环境，见上。
+        unsafe {
+            match prior_home {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+            match prior_profile {
+                Some(value) => std::env::set_var("USERPROFILE", value),
+                None => std::env::remove_var("USERPROFILE"),
+            }
+        }
     }
 
     /// `discover` 声明与实际注册的 root 必须一对一（M1-8）。
