@@ -4,10 +4,13 @@ All notable changes to agent-session-grep are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.1.0] — 2026-08-18
+## [Unreleased]
 
-First tagged release (`v0.1.0`), source only — the Release carries no binary
-assets. Everything below shipped in `0.1.0`.
+The repository is still private and no GitHub tag or Release has been created
+for this worktree. The `0.1.0` version in `Cargo.toml` is the current package
+version, not evidence of a published release. This section records the current
+candidate changes; it will become a dated version section only after the owner
+creates the corresponding tag and Release.
 
 ### Added
 
