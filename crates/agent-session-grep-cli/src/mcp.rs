@@ -1931,6 +1931,51 @@ mod tests {
         }
     }
 
+    /// 索引删除**刻意不经 MCP 暴露**（M3-2 / M3-5 的设计决定）。
+    ///
+    /// 三条独立理由，任一条都足够：
+    /// 1. 合同 §8 冻结了这 9 个只读工具，并明确"不提供任意文件读取、SQL 或
+    ///    命令执行"；破坏性工具不在其中。
+    /// 2. `mcp` 不在 CLI 的写入子命令列表里，因此它拿到的 store 没有 data-root
+    ///    writer lease。经 MCP 删除等于绕过单写者纪律。
+    /// 3. 本工具索引的正是**不受信任的** transcript 正文，而 MCP 的调用者是
+    ///    LLM。一个 agent 可调用的不可撤销删除，把 prompt injection 变成
+    ///    "让模型忘掉证据"的现成路径。`--yes` 只有在人类敲下时才是同意。
+    ///
+    /// 因此删除只在 CLI（含 `--robot`）提供：机器调用方拿到的是 dry-run 默认 +
+    /// 显式 `--yes`，而不是一个工具名。
+    #[test]
+    fn deletion_is_not_reachable_through_mcp() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = open_store(&dir);
+        let mut server = ready(&store);
+        let listed = respond(&mut server, &request(6, "tools/list", json!({})));
+        let names: Vec<String> = listed["result"]["tools"]
+            .as_array()
+            .expect("tools array")
+            .iter()
+            .map(|tool| tool["name"].as_str().expect("tool name").to_string())
+            .collect();
+        for forbidden in ["forget", "prune", "delete_session", "compact"] {
+            assert!(
+                !names.iter().any(|name| name == forbidden),
+                "MCP 不得暴露破坏性工具：{forbidden}"
+            );
+            let called = respond(
+                &mut server,
+                &request(
+                    7,
+                    "tools/call",
+                    json!({ "name": forbidden, "arguments": {} }),
+                ),
+            );
+            assert_eq!(
+                called["error"]["code"], INVALID_PARAMS,
+                "{forbidden} 必须以 unknown tool 拒绝"
+            );
+        }
+    }
+
     #[test]
     fn generate_handoff_tool_returns_deterministic_pack_with_evidence() {
         let dir = tempfile::tempdir().expect("tempdir");

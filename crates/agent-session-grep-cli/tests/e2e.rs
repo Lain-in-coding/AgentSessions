@@ -5611,3 +5611,249 @@ fn search_facet_flag_validation_is_explicit() {
         stdout(&out)
     );
 }
+
+// ─── forget / prune（索引删除，M3-2 / M3-5）─────────────────────────────────
+
+/// 在隔离 HOME 里造两个 Claude Code 源，各自一个会话，时间戳不同。
+/// 返回 `(home_dir, home, db, alpha_path, beta_path)`。
+fn forget_env(tag: &str) -> (tempfile::TempDir, String, tempfile::TempDir, String) {
+    let (home_dir, home) = discover_env();
+    let (db_dir, db) = temp_db(tag);
+    let projects = home_dir.path().join(".claude").join("projects");
+    for (name, uuid_tail, day, text) in [
+        ("older", "1", "2025-11-01", "zzalphaforgettoken alpha body"),
+        ("newer", "2", "2026-06-01", "zzbetakepttoken beta body"),
+    ] {
+        let dir = projects.join(name);
+        std::fs::create_dir_all(&dir).expect("create project dir");
+        let line = format!(
+            r#"{{"type":"user","uuid":"d1c0000{uuid_tail}-0000-4000-8000-00000000000{uuid_tail}","parentUuid":null,"sessionId":"d1c0000{uuid_tail}-0000-4000-8000-00000000010{uuid_tail}","cwd":"/work/proj{name}","timestamp":"{day}T01:00:00.000Z","message":{{"role":"user","content":"{text}"}}}}"#
+        );
+        std::fs::write(dir.join("s.jsonl"), format!("{line}\n")).expect("write fixture");
+    }
+    let out = run_with_home(&db, &home, &["sync", "--discover"]);
+    assert!(out.status.success(), "seed sync: {}", stdout(&out));
+    (home_dir, home, db_dir, db)
+}
+
+fn session_wire_for(db: &str, home: &str, token: &str) -> String {
+    let out = run_with_home(db, home, &["search", token]);
+    let frame = parse_first_line(&out);
+    frame["data"]["hits"][0]["session_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no session for {token}: {frame}"))
+        .to_string()
+}
+
+/// `forget <ses-id>` 默认只预览：库不变、内容仍可检索。`--yes` 才真删。
+#[test]
+fn forget_session_is_dry_run_until_yes_and_then_removes_the_content() {
+    let (_home_dir, home, _db_dir, db) = forget_env("forget-session");
+    let session = session_wire_for(&db, &home, "zzalphaforgettoken");
+
+    let out = run_with_home(&db, &home, &["forget", &session]);
+    assert!(out.status.success(), "dry-run: {}", stdout(&out));
+    let frame = parse_first_line(&out);
+    assert_envelope_shape(&frame, true);
+    assert_eq!(frame["command"], "forget", "{frame}");
+    assert_eq!(frame["data"]["executed"], false, "{frame}");
+    assert_eq!(frame["data"]["sessions_removed"], 1, "{frame}");
+    assert_eq!(frame["data"]["messages"], 1, "{frame}");
+    assert!(
+        !frame["warnings"].as_array().expect("warnings").is_empty(),
+        "dry-run 必须给出一条明确的未执行提示：{frame}"
+    );
+    // 预览绝不泄露源路径（与 sync --discover 同一隐私口径）。
+    let blob = stdout(&out);
+    assert!(
+        !blob.contains("projects/older") && !blob.contains("s.jsonl"),
+        "forget 预览不得泄露 transcript 路径：{blob}"
+    );
+    // 还在。
+    let out = run_with_home(&db, &home, &["search", "zzalphaforgettoken"]);
+    assert!(stdout(&out).contains("msg_v1_"), "{}", stdout(&out));
+
+    let out = run_with_home(&db, &home, &["forget", &session, "--yes"]);
+    assert!(out.status.success(), "execute: {}", stdout(&out));
+    let frame = parse_first_line(&out);
+    assert_eq!(frame["data"]["executed"], true, "{frame}");
+
+    // 词法检索面：查不到。
+    let out = run_with_home(&db, &home, &["search", "zzalphaforgettoken"]);
+    let frame = parse_first_line(&out);
+    assert_eq!(
+        frame["data"]["hits"].as_array().expect("hits").len(),
+        0,
+        "被忘记的内容不得再被检索到：{frame}"
+    );
+    // 会话与消息实体都不存在（exit 4 / not_found）。
+    let out = run_with_home(&db, &home, &["get", &session]);
+    assert_eq!(out.status.code(), Some(4), "{}", stdout(&out));
+    // 对照组不受影响。
+    let out = run_with_home(&db, &home, &["search", "zzbetakepttoken"]);
+    assert!(stdout(&out).contains("msg_v1_"), "{}", stdout(&out));
+}
+
+/// 源文件仍在磁盘上时，`sync --discover` 不得把被忘记的内容重新索引回来。
+#[test]
+fn a_forgotten_source_is_not_resurrected_by_sync_discover() {
+    let (home_dir, home, _db_dir, db) = forget_env("forget-resurrect");
+    let session = session_wire_for(&db, &home, "zzalphaforgettoken");
+    let source = home_dir
+        .path()
+        .join(".claude")
+        .join("projects")
+        .join("older")
+        .join("s.jsonl");
+    let before = std::fs::read(&source).expect("read source before");
+
+    let out = run_with_home(&db, &home, &["forget", &session, "--yes"]);
+    assert!(out.status.success(), "{}", stdout(&out));
+
+    // 源文件严格只读：字节一致，文件仍在。
+    assert!(source.is_file(), "forget 绝不删除源 transcript");
+    assert_eq!(
+        std::fs::read(&source).expect("read source after"),
+        before,
+        "forget 绝不修改源 transcript"
+    );
+
+    let out = run_with_home(&db, &home, &["sync", "--discover"]);
+    assert!(out.status.success(), "{}", stdout(&out));
+    let frame = parse_first_line(&out);
+    assert_eq!(
+        frame["data"]["forgotten_skipped"], 1,
+        "被抑制的源必须如实报数：{frame}"
+    );
+    let out = run_with_home(&db, &home, &["search", "zzalphaforgettoken"]);
+    let frame = parse_first_line(&out);
+    assert_eq!(
+        frame["data"]["hits"].as_array().expect("hits").len(),
+        0,
+        "源文件仍在磁盘上也不得复活被忘记的内容：{frame}"
+    );
+
+    // 显式 `sync <file>` 同样被同一道门挡住（不是 discover 的特例）。
+    let path = source.to_string_lossy().into_owned();
+    let out = run_with_home(&db, &home, &["sync", &path]);
+    assert!(out.status.success(), "{}", stdout(&out));
+    let frame = parse_first_line(&out);
+    assert_eq!(frame["data"]["forgotten_skipped"], 1, "{frame}");
+    let out = run_with_home(&db, &home, &["search", "zzalphaforgettoken"]);
+    assert_eq!(
+        parse_first_line(&out)["data"]["hits"]
+            .as_array()
+            .expect("hits")
+            .len(),
+        0
+    );
+
+    // `--readmit` 是唯一的撤销路径：撤销后同一个源可以再次被索引。
+    let out = run_with_home(&db, &home, &["forget", "--list"]);
+    let frame = parse_first_line(&out);
+    assert_eq!(frame["data"]["suppressed"], 1, "{frame}");
+    let listed = frame["data"]["sources"][0]["source_path"]
+        .as_str()
+        .expect("listed path")
+        .to_string();
+    let out = run_with_home(&db, &home, &["forget", "--readmit", &listed]);
+    assert_eq!(parse_first_line(&out)["data"]["readmitted"], true);
+    let out = run_with_home(&db, &home, &["sync", "--discover"]);
+    assert!(out.status.success(), "{}", stdout(&out));
+    let out = run_with_home(&db, &home, &["search", "zzalphaforgettoken"]);
+    assert!(
+        stdout(&out).contains("msg_v1_"),
+        "readmit 之后源必须能被重新索引：{}",
+        stdout(&out)
+    );
+}
+
+/// `prune --before` 按时间选取，`--yes` 才执行；无时间戳的会话不被删除。
+#[test]
+fn prune_before_removes_only_older_sessions() {
+    let (_home_dir, home, _db_dir, db) = forget_env("prune-before");
+
+    let out = run_with_home(&db, &home, &["prune", "--before", "2026-01-01"]);
+    assert!(out.status.success(), "{}", stdout(&out));
+    let frame = parse_first_line(&out);
+    assert_eq!(frame["command"], "prune", "{frame}");
+    assert_eq!(frame["data"]["executed"], false, "{frame}");
+    assert_eq!(frame["data"]["sessions_removed"], 1, "{frame}");
+    assert_eq!(frame["data"]["scope"]["before"], "2026-01-01", "{frame}");
+
+    let out = run_with_home(&db, &home, &["prune", "--before", "2026-01-01", "--yes"]);
+    assert!(out.status.success(), "{}", stdout(&out));
+    assert_eq!(parse_first_line(&out)["data"]["executed"], true);
+
+    let out = run_with_home(&db, &home, &["search", "zzalphaforgettoken"]);
+    assert_eq!(
+        parse_first_line(&out)["data"]["hits"]
+            .as_array()
+            .expect("hits")
+            .len(),
+        0
+    );
+    let out = run_with_home(&db, &home, &["search", "zzbetakepttoken"]);
+    assert!(
+        stdout(&out).contains("msg_v1_"),
+        "较新的会话必须保留：{}",
+        stdout(&out)
+    );
+}
+
+/// 破坏性命令的取值校验一律 fail-closed：少打两位日期不得静默变成删掉一整年。
+#[test]
+fn forget_and_prune_reject_malformed_scopes() {
+    let (_home_dir, home, _db_dir, db) = forget_env("forget-validation");
+    for args in [
+        vec!["prune", "--before", "2026"],
+        vec!["prune", "--before", "2026-01"],
+        vec!["prune", "--before", "yesterday"],
+        vec!["prune", "--provider", "not-a-provider"],
+        // 维度必须恰好一个。
+        vec!["prune"],
+        vec!["prune", "--before", "2026-01-01", "--provider", "codex"],
+        vec!["forget"],
+        vec!["forget", "not-a-session-id"],
+    ] {
+        let out = run_with_home(&db, &home, &args);
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "{args:?} 必须是用法错误：{}",
+            stdout(&out)
+        );
+    }
+    // 不存在的会话是 not_found（exit 4），不是"成功删了 0 个"。
+    let out = run_with_home(
+        &db,
+        &home,
+        &["forget", "ses_v1_00000000000000000000000000000000", "--yes"],
+    );
+    assert_eq!(out.status.code(), Some(4), "{}", stdout(&out));
+    // 库仍完整。
+    let out = run_with_home(&db, &home, &["search", "zzalphaforgettoken"]);
+    assert!(stdout(&out).contains("msg_v1_"), "{}", stdout(&out));
+}
+
+/// human 模式必须把"将删什么"说清楚，而不是只回一个计数。
+#[test]
+fn forget_human_output_names_the_sessions_and_the_undo_path() {
+    let (_home_dir, home, _db_dir, db) = forget_env("forget-human");
+    let session = session_wire_for(&db, &home, "zzalphaforgettoken");
+    let out = Command::new(BIN)
+        .arg("--db")
+        .arg(&db)
+        .args(["forget", &session])
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .output()
+        .expect("spawn");
+    let text = format!("{}{}", stdout(&out), String::from_utf8_lossy(&out.stderr));
+    assert!(text.contains("dry-run"), "{text}");
+    assert!(text.contains(&session), "human 输出必须点名会话：{text}");
+    assert!(
+        text.contains("index compact"),
+        "human 输出必须指出删完要 compact：{text}"
+    );
+}
