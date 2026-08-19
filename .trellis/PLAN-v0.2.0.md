@@ -1344,13 +1344,41 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   不回退就会把 paraphrase 召回抹平成 lexical。裸迭代 10 万行 `message_vec`
   本身就要 ~150 ms,所以有界候选是达标的**必要**条件而非优化选项。
 
-- [ ] **M2-5 存储放大治理(瓶颈 #3)**
-  评估 FTS5 改 external-content(`content=` 指向 catalog),消除文本双存。
-  这是 5.11 倍放大的直接来源。注意:external-content 需要维护触发器,
-  且与现有 `fts_rowid` 边车、rebuild 路径、generation 机制都要对齐 ——
-  **改动面大,先写 spike 验证再动生产代码**。若评估后风险大于收益,
-  记录理由并只做增量优化(比如只索引不存原文的字段)。
-  **验收**:放大比下降且七条不变量全绿;或有明确的不做决定 + 理由。
+- [x] **M2-5 存储放大治理(瓶颈 #3)** —— **实测后决定不做 external-content**
+  原计划:评估 FTS5 改 external-content(`content=` 指向 catalog),消除文本双存。
+  **验收允许"明确的不做决定 + 理由",本条走这一条。**
+
+  **2026-08-19 实测(10 万条真库,537.8 MB),推翻了"文本双存是主因"的前提:**
+
+  | 项 | 大小 | 说明 |
+  |---|---:|---|
+  | `catalog.payload` | 71.5 MB | 权威正文 + JSON 封套 |
+  | **`fts_content`** | **26.2 MB** | **文本的第二份拷贝 —— external-content 唯一能省的就是这个** |
+  | `fts_data` | 21.4 MB | FTS5 倒排索引,**external-content 一分不省** |
+  | `source_membership` | 17.6 MB | |
+  | `message_placements` | 14.8 MB | |
+  | `fts_ids.id_json` | 13.3 MB | |
+  | 逻辑数据合计 | 167.5 MB | |
+  | **B-tree / 索引开销** | **277.2 MB** | **占整库 52%,是真正的大头** |
+  | freelist(已分配未使用) | 80.1 MB | |
+
+  **三条结论:**
+  1. **文本双存只占 26.2 MB / 537.8 MB = 4.9%。** 就算 external-content 完美
+     работает,整库也只从 537.8 MB 降到约 511 MB —— 换来的是触发器维护、
+     与 `fts_rowid` 边车/rebuild/generation 三套机制对齐、以及 FTS5
+     external-content 特有的"content 与索引不同步则查询静默出错"风险。
+     **收益 4.9%,风险涉及七条不变量里的多条 —— 不做。**
+  2. **真正的大头是 B-tree/索引开销(277 MB, 52%)**,根因是 **wire id 是
+     43 字节字符串**(`msg_v1_` + 36 字符 UUID),而它作为主键/外键在
+     catalog、fts_ids(两个唯一索引)、message_placements(四列 + 三个索引)、
+     source_membership、message_edges 里反复出现。真要降体积,方向是
+     **给 wire id 配一个整型 rowid 内部键**,外部 API 仍暴露 wire id ——
+     但这会动 RFC-0001 的身份契约,属于 0.3 的架构级改动,不是 0.2 的优化。
+  3. **免费的 17%:`VACUUM` 实测把 537.8 MB 降到 444.7 MB**(回收 93 MB
+     freelist),零 schema 改动、零风险。已登记为 M2-9。
+
+  **`store_size_ratio` 阀值本身没有被 gate 门住**(它是 informational),
+  所以本条不阻塞发布。
 
 - [x] **M2-6 增量同步优化(瓶颈 #4)** —— **已达标**:658 ms vs 1000 ms 阀值,余量从 37 ms 扩到 342 ms(并行 BLAKE3 capture 带来的,见 §1.3.2)
   4000 条无变化重扫 1.5 s,10 万条会线性放大。现有 fingerprint skip 实测
@@ -1389,6 +1417,26 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   否则下一次静默漏文件仍然抓不到。
   **G5 本身仍依赖 M1-2**(真实冻结快照尚未建立);上述合成语料试跑
   不能替代它,只是提前暴露了 harness 缺陷。
+
+- [ ] **M2-9 回收 freelist(实测免费的 17%,由 M2-5 的测量发现)**
+  10 万条真库实测:537.8 MB 里有 **80.1 MB 是 freelist** —— 已向 OS 申请
+  但当前未使用的页。`VACUUM` 实测把库从 **537.8 MB 降到 444.7 MB**
+  (回收 93 MB,17.3%),**零 schema 改动、零查询语义变化**。
+  这是整个 M2 里性价比最高的一项:比 external-content 省的 26.2 MB 多三倍,
+  而风险几乎为零。
+  **注意几件事,不要无脑加 `VACUUM`**:
+  - `VACUUM` 需要约等于库大小的临时空间,且**整库重写**,10 万条上耗时可观 ——
+    不能放在每次 sync 之后。
+  - 它拿排他锁,与 writer lease 语义要对齐(lease 已保证单写者,但 VACUUM
+    期间读也会被阻塞)。
+  - `PRAGMA auto_vacuum=INCREMENTAL` + 定期 `incremental_vacuum` 是更平滑的
+    替代,但 auto_vacuum **只能在建库时或 VACUUM 时设定**,存量库需要迁移。
+  **修法方向**:给 `index` 加一条显式的 `index compact`(或 `vacuum`)维护
+  子命令,由用户/定时任务决定何时付这个代价,而不是隐式塞进 sync;
+  文档里写明"何时该跑、要多少临时空间"。
+  **验收**:有显式命令可回收 freelist;实测回收量与耗时记录在案;
+  七条不变量在 compact 后全绿(尤其 `INV-REBUILD-STABLE` 与
+  `INV-SOURCES-UNCHANGED`)。
 
 ---
 
