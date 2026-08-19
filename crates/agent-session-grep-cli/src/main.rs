@@ -3980,7 +3980,25 @@ struct StagedMessageEntity {
 /// 数据根（`.claude` / `.codex`）的完整路径，使同一安装下的 transcript
 /// 共享 namespace、不同安装分离。手动 ingest 的 Source 若不在已知数据根下，
 /// 以其共同父目录作为未知安装边界，避免同一 Session 分散在多个文件时被拆开。
+///
+/// Windows 路径大小写不敏感：同一安装写成 `C:\...` 与 `c:\...` 必须落在同一
+/// namespace，否则该安装的会话身份会按盘符大小写静默分裂（`ingest` 收原样
+/// 用户输入，`sync` 走 [`source_path_identity`]，两条入口曾因此分家）。
+/// 归一化与 [`source_path_identity`] 共用 [`normalized_path_case`]，不引入
+/// 第二套规则。
+///
+/// **作用域刻意只到盘符**：整键 ASCII 小写（NTFS 全路径大小写不敏感）会改变
+/// 既有 store 里每个 Windows 会话的 `ses_v1_` id，只能与 provider-scoped
+/// identity 迁移（`ses_v2_` + `id_alias`，schema v13，deferred）一起发布 ——
+/// RFC-0001 §5「ID 算法升级使用新 namespace，不静默改变旧 ID」。
 fn installation_namespace(path: &str, provider_id: &str) -> String {
+    installation_namespace_on(path, provider_id, cfg!(windows))
+}
+
+/// [`installation_namespace`] 的平台显式形式：`windows` 由调用方给出，
+/// 使两个平台的行为在任一平台上都可断言（`cfg!` 只出现在 wrapper 里）。
+fn installation_namespace_on(path: &str, provider_id: &str, windows: bool) -> String {
+    let path = normalized_path_case(path, windows);
     let marker = match provider_id {
         "claude-code" => ".claude",
         "codex" => ".codex",
@@ -4033,7 +4051,17 @@ fn provider_root_subpath(provider_id: &str) -> Option<&'static str> {
 }
 
 fn source_path_identity(path: &str) -> String {
-    if !cfg!(windows) {
+    normalized_path_case(path, cfg!(windows))
+}
+
+/// Windows 路径大小写/分隔符归一化：`\` 折成 `/`，ASCII 大写盘符折成小写。
+///
+/// 非 Windows 平台路径大小写敏感且 `C:` 无位置含义，原样返回。`windows` 显式
+/// 传参而不是在此直接读 `cfg!`，让两个平台的行为在任一平台上都可测。
+///
+/// 只折盘符，不折其余路径段：见 [`installation_namespace`] 关于身份变更的说明。
+fn normalized_path_case(path: &str, windows: bool) -> String {
+    if !windows {
         return path.to_string();
     }
     let mut normalized = path.replace('\\', "/");
@@ -6206,6 +6234,109 @@ mod tests {
         assert_ne!(
             installation_namespace("C:/fixtures/head.jsonl", "synthetic"),
             installation_namespace("D:/other/head.jsonl", "synthetic")
+        );
+    }
+
+    /// Windows 下同一安装的两种拼写（盘符大小写 + 分隔符）必须同 namespace。
+    /// 这是身份分裂缺陷的回归点：`ingest C:\...` 与 `sync`（走
+    /// `source_path_identity`，盘符已小写）曾派生两族会话 id。
+    #[test]
+    fn installation_namespace_folds_windows_drive_case() {
+        let upper = installation_namespace_on(
+            "C:\\profiles\\one\\.claude\\projects\\a.jsonl",
+            "claude-code",
+            true,
+        );
+        let lower = installation_namespace_on(
+            "c:/profiles/one/.claude/projects/a.jsonl",
+            "claude-code",
+            true,
+        );
+        assert_eq!(upper, lower);
+        assert_eq!(upper, "claude-code:c:/profiles/one/.claude");
+        // 不同盘符仍是不同安装（归一化不得把它们合并）。
+        assert_ne!(
+            upper,
+            installation_namespace_on(
+                "D:/profiles/one/.claude/projects/a.jsonl",
+                "claude-code",
+                true
+            )
+        );
+    }
+
+    /// 非 Windows 路径大小写敏感：两种拼写是两个位置，归一化不得越界合并。
+    #[test]
+    fn installation_namespace_keeps_case_outside_windows() {
+        assert_ne!(
+            installation_namespace_on(
+                "C:/profiles/one/.claude/projects/a.jsonl",
+                "claude-code",
+                false
+            ),
+            installation_namespace_on(
+                "c:/profiles/one/.claude/projects/a.jsonl",
+                "claude-code",
+                false
+            )
+        );
+    }
+
+    /// 盘符以外的路径段刻意**不**折大小写：整键小写会改变既有 store 里每个
+    /// Windows 会话的 `ses_v1_` id，属 `ses_v2_` + `id_alias` 迁移的范围
+    /// （RFC-0001 §5：ID 算法升级不得静默改变旧 ID）。放宽此断言即是有意扩大
+    /// 作用域，必须连带迁移一起做。
+    #[test]
+    fn installation_namespace_folds_only_the_drive_letter() {
+        assert_ne!(
+            installation_namespace_on(
+                "c:/profiles/One/.claude/projects/a.jsonl",
+                "claude-code",
+                true
+            ),
+            installation_namespace_on(
+                "c:/profiles/one/.claude/projects/a.jsonl",
+                "claude-code",
+                true
+            )
+        );
+    }
+
+    /// 生产 wrapper 真的接了平台门：宿主平台上按该平台的语义断言。
+    #[test]
+    fn installation_namespace_case_gate_follows_host_platform() {
+        let upper =
+            installation_namespace("C:/profiles/one/.claude/projects/a.jsonl", "claude-code");
+        let lower =
+            installation_namespace("c:/profiles/one/.claude/projects/a.jsonl", "claude-code");
+        if cfg!(windows) {
+            assert_eq!(upper, lower);
+        } else {
+            assert_ne!(upper, lower);
+        }
+    }
+
+    /// `installation_namespace` 与 `source_path_identity` 共用同一套归一化，
+    /// 不存在第二套规则。
+    #[test]
+    fn normalized_path_case_shared_by_both_identity_paths() {
+        assert_eq!(
+            normalized_path_case("C:\\profiles\\one\\a.jsonl", true),
+            "c:/profiles/one/a.jsonl"
+        );
+        assert_eq!(
+            normalized_path_case("C:\\profiles\\one\\a.jsonl", false),
+            "C:\\profiles\\one\\a.jsonl"
+        );
+        // 已小写盘符与 UNC/相对路径不被改写（除分隔符折叠）。
+        assert_eq!(normalized_path_case("c:/x/a.jsonl", true), "c:/x/a.jsonl");
+        assert_eq!(
+            normalized_path_case("\\\\server\\share\\a.jsonl", true),
+            "//server/share/a.jsonl"
+        );
+        assert_eq!(
+            normalized_path_case("profiles/a.jsonl", true),
+            "profiles/a.jsonl"
         );
     }
 
