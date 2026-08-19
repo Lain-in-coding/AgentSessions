@@ -46,6 +46,7 @@ pub fn render_success(command: &str, outcome: Outcome, data: &Value, page: &Page
         "ingest" => render_ingest(data),
         "handoff" => render_handoff(data),
         "resume" => render_resume(data),
+        "forget" | "prune" => render_forget(data),
         "providers" => render_providers(data),
         "config.paths" => {
             // config paths 报告的是"默认位置"，未用到就不会创建；新手照着找会扑空
@@ -771,8 +772,112 @@ fn render_ingest(data: &Value) -> Vec<String> {
     lines
 }
 
-/// 截断与续页提示行。`data.truncation` 为权威；元数据缺失但 outcome 已声明
-/// partial 时仍以 `?` 占位暴露截断事实。续页行要求 has_more 且携带令牌。
+/// `forget` / `prune`：把删除计划渲染成"要删什么、删了没有"两件事。
+///
+/// dry-run 与已执行用同一张表，只有第一行的动词不同——用户读到的清单与
+/// `--yes` 之后真正删掉的东西逐字对应。连带删除的会话单独一行列出：删除以
+/// source 为单位，共用同一源文件的其它会话会一起消失，这件事不能藏在 JSON 里。
+fn render_forget(data: &Value) -> Vec<String> {
+    match data.get("mode").and_then(Value::as_str) {
+        Some("list") => {
+            let sources = data
+                .get("sources")
+                .and_then(Value::as_array)
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            if sources.is_empty() {
+                return vec!["forgotten sources: 0（抑制清单为空）".into()];
+            }
+            let mut lines = vec![format!("forgotten sources: {}", sources.len())];
+            for source in sources {
+                let path = source
+                    .get("source_path")
+                    .and_then(Value::as_str)
+                    .map(sanitize)
+                    .unwrap_or_else(|| MISSING.into());
+                let provider = source
+                    .get("provider_id")
+                    .and_then(Value::as_str)
+                    .map(sanitize)
+                    .unwrap_or_else(|| MISSING.into());
+                lines.push(format!("  {path}  provider={provider}"));
+            }
+            lines.push("撤销：forget --readmit <上面的源路径>（下次 sync 会重新索引它）".into());
+            return lines;
+        }
+        Some("readmit") => {
+            let restored = data
+                .get("readmitted")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            return vec![format!("readmitted: {restored}")];
+        }
+        _ => {}
+    }
+
+    let executed = data
+        .get("executed")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let count = |key: &str| data.get(key).and_then(Value::as_u64).unwrap_or(0);
+    let wires = |key: &str| -> Vec<String> {
+        data.get(key)
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(sanitize)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let mut lines = Vec::new();
+    lines.push(if executed {
+        "已从索引中删除（不可撤销）：".into()
+    } else {
+        "将从索引中删除（dry-run，尚未执行）：".into()
+    });
+    if let Some(scope) = data.get("scope") {
+        lines.push(format!("  scope: {}", sanitize(&scope.to_string())));
+    }
+    lines.push(format!(
+        "  sessions: {}  messages: {}  tool_activities: {}  sources: {}",
+        count("sessions_removed"),
+        count("messages"),
+        count("activities"),
+        count("sources"),
+    ));
+    for wire in wires("sessions") {
+        lines.push(format!("  - {wire}"));
+    }
+    let collateral = wires("collateral_sessions");
+    if !collateral.is_empty() {
+        lines.push(format!(
+            "  连带删除（与目标会话共用同一源文件，共 {}）：",
+            collateral.len()
+        ));
+        for wire in collateral {
+            lines.push(format!("  * {wire}"));
+        }
+    }
+    let surviving = wires("surviving_sessions");
+    if !surviving.is_empty() {
+        lines.push(format!(
+            "  保留（仍被其它源声明，不会消失，共 {}）：",
+            surviving.len()
+        ));
+        for wire in surviving {
+            lines.push(format!("  = {wire}"));
+        }
+    }
+    if let Some(generation) = data.get("generation").and_then(Value::as_u64) {
+        lines.push(format!("  generation: {generation}"));
+    }
+    lines
+}
+
+/// 截断与续页提示行。`data.truncation` 为权威；元数据缺失但 outcome 已声明/// partial 时仍以 `?` 占位暴露截断事实。续页行要求 has_more 且携带令牌。
 fn push_footer(lines: &mut Vec<String>, outcome: Outcome, data: &Value, page: &Page) {
     let truncation = data.get("truncation");
     let truncated = truncation

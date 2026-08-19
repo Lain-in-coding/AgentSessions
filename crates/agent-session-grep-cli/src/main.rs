@@ -459,7 +459,7 @@ fn run(
     // 写入子命令抢 data-root writer lease；读路径不抢，允许多读者并发。
     let writes = rest
         .first()
-        .map(|c| matches!(c.as_str(), "index" | "ingest" | "sync"))
+        .map(|c| matches!(c.as_str(), "index" | "ingest" | "sync" | "forget" | "prune"))
         .unwrap_or(false);
     let store = if writes {
         // 写路径负责把 data root 建出来：默认库落在平台数据目录下，而那个目录
@@ -996,9 +996,14 @@ COMMANDS:
     sync <file>...         atomically scan one or more transcripts; no new generation when nothing changed
     sync --discover        discover and sync sources under every provider data root (sources stay read-only)
     index rebuild          reproject the whole FTS index from the authoritative catalog (maintenance)
-    index compact          reclaim the freelist (VACUUM; explicit maintenance, holds an exclusive lock)
+    index compact          reclaim the freelist and erase deletion residue (FTS5 optimize + VACUUM; exclusive lock)
     index embeddings       build the semantic vector index from the catalog (required by semantic/hybrid)
     index purge-activities prune orphan tool-activity rows (activities with no catalog message; maintenance)
+    forget <ses-id>        forget one session from the index (dry-run by default; only --yes deletes; sources stay read-only)
+    forget --project <path> forget every session under one project directory (dry-run by default)
+    forget --list|--readmit <source-path>  show or undo the forgotten-source suppression list
+    prune --before <date>  forget every session whose last activity predates the date (YYYY-MM-DD; dry-run by default)
+    prune --provider <id>  forget every session belonging to one provider (dry-run by default)
     search <query>         full-text search, hits ranked by relevance (supports paging/budget/filter flags)
     handoff <query>        search and build a handoff pack (verbatim evidence + suggested commands; dry-run)
     get-message <msg-id>   return one message plus its mainline neighbours (--session/--around)
@@ -1142,6 +1147,8 @@ const KNOWN_SUBCOMMANDS: &[&str] = &[
     "ingest",
     "sync",
     "index",
+    "forget",
+    "prune",
     "search",
     "handoff",
     "get-message",
@@ -1299,6 +1306,31 @@ fn subcommand_help_text(cmd: &str) -> &'static str {
             "status：报告当前库的实体总数与 generation。\n\
                      示例：agent-session-grep --db <path> status"
         }
+        "forget" => {
+            "forget <ses-id>：把一个会话从索引里删除（不可撤销）。\n\
+                   示例：agent-session-grep --db <path> forget ses_v1_...        # dry-run，只打印将删除什么\n\
+                   示例：agent-session-grep --db <path> forget ses_v1_... --yes  # 实际删除\n\
+                   forget --project <目录>：删除该目录（及其子目录）下的全部会话。\n\
+                   \u{20}  项目归属来自 resolved Original Working Directory 声明；无声明的源不在范围内并如实计数。\n\
+                   forget --list：列出被抑制（已忘记）的源路径。\n\
+                   forget --readmit <源路径>：撤销一条抑制，让该源可被重新索引。\n\
+                   删除只作用于索引：catalog、FTS、session 元数据投影、语义向量、\n\
+                   \u{20}  工具活动、placement/edge、resume 声明与兼容别名在同一事务里一起清除。\n\
+                   **provider 源 transcript 文件永远只读**——本命令不会修改、移动或删除任何源文件。\n\
+                   删除以 source 为单位：与目标会话共用同一源文件的其它会话会被连带删除，\n\
+                   \u{20}  dry-run 会把它们列在 collateral_sessions 里。\n\
+                   源文件仍在磁盘上时，该路径会被登记进抑制清单，后续 sync/--discover 不会把它索引回来。\n\
+                   删完跑 index compact 回收磁盘页——否则被删正文仍留在 freelist 页里。"
+        }
+        "prune" => {
+            "prune --before <YYYY-MM-DD>：删除最近活动早于该日（不含该日）的全部会话。\n\
+                   示例：agent-session-grep --db <path> prune --before 2026-01-01        # dry-run\n\
+                   示例：agent-session-grep --db <path> prune --before 2026-01-01 --yes  # 实际删除\n\
+                   prune --provider <id>：删除某个 provider 的全部会话。\n\
+                   时间取会话内消息 timestamp 的最大值；**没有 timestamp 的会话不会被删除**，\n\
+                   \u{20}  但会被计数并在 warnings 里如实报出（用 forget <ses-id> 逐个处理）。\n\
+                   其余语义与 forget 完全相同（dry-run 默认、源文件只读、抑制清单、index compact）。"
+        }
         "sync" => {
             "sync <file>...：原子扫描一个或多个 transcript 文件入库；无变化不写库。\n\
                    sync --from-file <清单>：从清单文件读路径（每行一个，空行与 # 注释忽略）。\n\
@@ -1323,7 +1355,8 @@ fn subcommand_help_text(cmd: &str) -> &'static str {
             "index rebuild：从权威 catalog 重建全文（FTS）索引；\n\
                     index embeddings：从权威 catalog 构建语义向量索引（semantic/hybrid 检索前置，需 semantic-candle 构建的二进制）。\n\
                     index purge-activities：修剪孤儿工具活动行（维护命令）。\n\
-                    index compact：回收 freelist（VACUUM 整库重写）。实测 10 万条库回收约 17%。\n\
+                    index compact：回收 freelist 并抹掉删除残留（FTS5 optimize + VACUUM 整库重写 + WAL 截断）。实测 10 万条库回收约 17%。\n\
+                   \u{20}  forget/prune 之后**必须**跑它：FTS5 删除只写 delete marker，被删的词在此之前仍能从库文件里逐字读出。\n\
                    \u{20}  刻意不塞进 sync：它持排他锁、需要约等于库大小的临时空间，何时付这个代价由你决定。\n\
                    建立索引请用 sync --discover，不要用 index 直写。\n\
                    示例：agent-session-grep --db <path> --robot index rebuild"
@@ -1481,6 +1514,11 @@ fn is_known_flag_name(token: &str) -> bool {
             | "--include-sidechain"
             | "--tool-kind"
             | "--tool-name"
+            | "--yes"
+            | "--before"
+            | "--project"
+            | "--readmit"
+            | "--list"
     )
 }
 
@@ -1830,8 +1868,15 @@ fn dispatch(
                     warnings,
                 ))
             } else if rest.get(1).map(String::as_str) == Some("compact") {
-                // freelist 回收（M2-9）：`VACUUM` 整库重写，把已分配未使用的页
-                // 交还文件系统。实测 10 万条真库回收 17.3%（537.8 → 444.7 MB）。
+                // freelist 回收 + 删除残留清理（M2-9 / M3-5）：FTS5 `optimize`
+                // 合并 segment 丢掉 delete marker，`VACUUM` 整库重写把已分配
+                // 未使用的页交还文件系统，收尾截断 WAL。实测 10 万条真库
+                // VACUUM 回收 17.3%（537.8 → 444.7 MB）。
+                //
+                // 为什么 optimize 是组成部分而不是可选项：FTS5 删除只写 delete
+                // marker，被删 token 留在既有 segment 里——`forget` 之后
+                // `fts MATCH` 已返回 0 行，但库文件里仍能逐字读到那个词。
+                // 单跑 VACUUM 或单跑 optimize 都不够，两步都跑才归零。
                 //
                 // 刻意是显式命令而非 sync 的隐式尾步：VACUUM 持排他锁并需要约等于
                 // 库大小的临时空间，塞进 sync 会把几百毫秒的增量同步变成几十秒的
@@ -1906,10 +1951,39 @@ fn dispatch(
         // ingest 打通 ingestion→storage→search 全链路：读取原始 .jsonl →
         // provider.probe 判定 variant → provider.parse 流式产出 Canonical 消息 →
         // 每条写 catalog + FTS 索引。文件严格只读（RFC-0002 §7）。
+        // 与 sync 一样必须经过抑制门：`forget` 之后，没有任何索引入口能把
+        // 已忘记的源带回来——否则一条绕过 sync 的路径就是一次悄然复活。
         "ingest" => {
             no_extra_args(rest, 1, "ingest <file>")?;
-            let path = arg(rest, 1, "ingest <file>")?;
-            let (data, warnings) = ingest_file(store, path)?;
+            // 与 sync 同一条路径归一（`source_path_identity`）：抑制表存的是归一后
+            // 的路径，用户手打的反斜杠/大写盘符若不归一就会绕过这道门。
+            let path = source_path_identity(arg(rest, 1, "ingest <file>")?);
+            let (allowed, skipped) = store
+                .partition_suppressed(std::slice::from_ref(&path))
+                .map_err(ProtocolError::from)?;
+            if allowed.is_empty() {
+                return Ok((
+                    "ingest",
+                    protocol::Outcome::Success,
+                    serde_json::json!({
+                        "sources": 0,
+                        "emitted": 0,
+                        "messages": 0,
+                        "committed": 0,
+                        "unchanged": 0,
+                        "skipped": 0,
+                        "forgotten_skipped": skipped.len(),
+                        "generation": store.active_generation().map_err(ProtocolError::from)?,
+                    }),
+                    protocol::Page::default(),
+                    vec![format!(
+                        "source is on the forgotten list (asg forget); its transcript is \
+                         untouched on disk. Run `forget --list` to see it or \
+                         `forget --readmit <path>` to index it again"
+                    )],
+                ));
+            }
+            let (data, warnings) = ingest_file(store, &allowed[0])?;
             Ok((
                 "ingest",
                 protocol::Outcome::Success,
@@ -2722,8 +2796,376 @@ fn dispatch(
             let (outcome, data, page, warnings) = render(response);
             Ok(("status", outcome, data, page, warnings))
         }
+        // 索引删除（M3-2 / M3-5）：`forget` 按会话/项目，`prune` 按时间/provider。
+        // 两者都默认 dry-run，`--yes` 才执行；删除只作用于索引，provider 源文件
+        // 永远只读。
+        "forget" => forget_command(store, rest),
+        "prune" => prune_command(store, rest),
         other => Err(unknown_subcommand_error(other)),
     }
+}
+
+/// `forget`：按会话 id 或项目目录忘记索引内容；另有 `--list` / `--readmit`
+/// 两条抑制管理形态。
+fn forget_command(
+    store: &SqliteStore,
+    rest: &[String],
+) -> Result<
+    (
+        &'static str,
+        protocol::Outcome,
+        serde_json::Value,
+        protocol::Page,
+        Vec<String>,
+    ),
+    CliError,
+> {
+    const USAGE: &str = "forget <ses-id> | forget --project <path> | forget --list | \
+                         forget --readmit <source-path>";
+    let mut args = rest.to_vec();
+    let confirmed = take_bool_flag(&mut args, "--yes");
+    let list = take_bool_flag(&mut args, "--list");
+    let readmit = extract_flag(&mut args, "--readmit")?;
+    let project = extract_flag(&mut args, "--project")?;
+
+    if list {
+        if readmit.is_some() || project.is_some() {
+            return Err(CliError::usage(USAGE));
+        }
+        no_extra_args(&args, 0, "forget --list")?;
+        // 抑制清单是唯一如实报告源路径的删除输出：撤销必须能点名一个路径，
+        // 用户不知道抑制了什么就无法撤销。路径是用户本机的，且它们本来就
+        // 由 `source_scans` 按设计持久化。
+        let rows = store.suppressed_sources().map_err(ProtocolError::from)?;
+        let entries: Vec<serde_json::Value> = rows
+            .iter()
+            .map(|(path, provider, at_ms)| {
+                serde_json::json!({
+                    "source_path": path,
+                    "provider_id": provider,
+                    "forgotten_at_ms": at_ms,
+                })
+            })
+            .collect();
+        return Ok((
+            "forget",
+            protocol::Outcome::Success,
+            serde_json::json!({
+                "mode": "list",
+                "suppressed": entries.len(),
+                "sources": entries,
+            }),
+            protocol::Page::default(),
+            Vec::new(),
+        ));
+    }
+
+    if let Some(path) = readmit {
+        if project.is_some() {
+            return Err(CliError::usage(USAGE));
+        }
+        no_extra_args(&args, 0, "forget --readmit <source-path>")?;
+        // 同一条路径归一：抑制表存归一后的路径，用户手打反斜杠/大写盘符时
+        // 不归一会得到一句"该路径当前未被抑制"，而它其实就在清单里。
+        let path = source_path_identity(&path);
+        let restored = store.readmit_source(&path).map_err(ProtocolError::from)?;
+        let mut warnings = Vec::new();
+        if restored {
+            warnings.push(
+                "已撤销抑制：下一次 sync 会重新索引该源。这不会恢复此前删除的索引行，\
+                 而是从源文件重新解析。"
+                    .to_string(),
+            );
+        } else {
+            warnings.push("该路径当前未被抑制，未做任何改动。".to_string());
+        }
+        return Ok((
+            "forget",
+            protocol::Outcome::Success,
+            serde_json::json!({
+                "mode": "readmit",
+                "readmitted": restored,
+            }),
+            protocol::Page::default(),
+            warnings,
+        ));
+    }
+
+    let positionals = &args[1..];
+    match (project.as_deref(), positionals.len()) {
+        (Some(project), 0) => {
+            let (paths, unattributed) = project_source_paths(store, project)?;
+            let mut warnings = Vec::new();
+            if unattributed > 0 {
+                // 项目归属来自 ADR-0009 的 resume 声明（resolved Original Working
+                // Directory）。声明缺失/歧义的源没有可信项目归属，绝不猜——
+                // 如实报出有多少源不在本次判定范围内。
+                warnings.push(format!(
+                    "{unattributed} 个已索引源没有 resolved 工作目录声明，无法按项目归属，\
+                     本次不在删除范围内。用 forget <ses-id> 逐个处理。"
+                ));
+            }
+            let scope = serde_json::json!({ "dimension": "project" });
+            emit_forget_plan(store, "forget", scope, &paths, None, confirmed, warnings)
+        }
+        (None, 1) => {
+            let wire = arg(&args, 1, USAGE)?;
+            let id = StableId::from_wire(wire)
+                .filter(|id| id.kind() == IdKind::Session)
+                .ok_or_else(|| CliError::usage(format!("not a valid session id: {wire}")))?;
+            let requested = vec![id.as_str().to_string()];
+            let paths = store
+                .source_paths_for_sessions(&requested)
+                .map_err(ProtocolError::from)?;
+            if paths.is_empty() {
+                return Err(CliError(ProtocolError::new(
+                    CanonicalCode::NotFound,
+                    "session not found in this index",
+                )));
+            }
+            let scope = serde_json::json!({ "dimension": "session" });
+            emit_forget_plan(
+                store,
+                "forget",
+                scope,
+                &paths,
+                Some(&requested),
+                confirmed,
+                Vec::new(),
+            )
+        }
+        _ => Err(CliError::usage(USAGE)),
+    }
+}
+
+/// `prune`：按时间或 provider 忘记索引内容。
+fn prune_command(
+    store: &SqliteStore,
+    rest: &[String],
+) -> Result<
+    (
+        &'static str,
+        protocol::Outcome,
+        serde_json::Value,
+        protocol::Page,
+        Vec<String>,
+    ),
+    CliError,
+> {
+    const USAGE: &str = "prune --before <YYYY-MM-DD> | prune --provider <id>";
+    let mut args = rest.to_vec();
+    let confirmed = take_bool_flag(&mut args, "--yes");
+    let before = extract_flag(&mut args, "--before")?;
+    let provider = extract_flag(&mut args, "--provider")?;
+    no_extra_args(&args, 0, USAGE)?;
+
+    match (before.as_deref(), provider.as_deref()) {
+        (Some(day), None) => {
+            let day = normalized_prune_date(day)?;
+            let (sessions, undatable) = store
+                .session_wires_last_active_before(&day)
+                .map_err(ProtocolError::from)?;
+            let mut warnings = Vec::new();
+            if undatable > 0 {
+                // "不知道它多老"不是"它足够老"：无 timestamp 的会话不被删除，
+                // 但用户必须知道 prune 覆盖不到它们，否则会以为库已按时间清干净。
+                warnings.push(format!(
+                    "{undatable} 个会话的消息没有 timestamp，无法按时间归类，未被选中。\
+                     用 forget <ses-id> 逐个处理。"
+                ));
+            }
+            let paths = store
+                .source_paths_for_sessions(&sessions)
+                .map_err(ProtocolError::from)?;
+            let scope = serde_json::json!({ "dimension": "before", "before": day });
+            emit_forget_plan(
+                store,
+                "prune",
+                scope,
+                &paths,
+                Some(&sessions),
+                confirmed,
+                warnings,
+            )
+        }
+        (None, Some(provider)) => {
+            let canonical = canonical_prune_provider(provider)?;
+            let paths = store
+                .source_paths_for_provider(&canonical)
+                .map_err(ProtocolError::from)?;
+            let scope = serde_json::json!({ "dimension": "provider", "provider": canonical });
+            emit_forget_plan(store, "prune", scope, &paths, None, confirmed, Vec::new())
+        }
+        _ => Err(CliError::usage(USAGE)),
+    }
+}
+
+/// `--before <YYYY-MM-DD>` 校验。半开语义：早于该日（不含该日）的会话被选中。
+///
+/// 只接受完整日期。接受 `2026` 或 `2026-01` 会让"少打两位"静默变成删掉整年，
+/// 对不可撤销的操作不做这种宽容。
+fn normalized_prune_date(value: &str) -> Result<String, CliError> {
+    let bytes = value.as_bytes();
+    let shaped = bytes.len() == 10
+        && bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| matches!(index, 4 | 7) || byte.is_ascii_digit());
+    if !shaped {
+        return Err(CliError::usage(format!(
+            "--before expects a full YYYY-MM-DD date, got: {value}"
+        )));
+    }
+    Ok(value.to_string())
+}
+
+/// `prune --provider <id>` 的 provider 校验：只接受已注册 adapter 的 canonical id。
+///
+/// 不复用 `--provider` 的检索别名表：那张表按 `SearchProvider` 收窄，而 prune
+/// 的目标是 `source_scans.provider_id`，取值域是 provider registry。写错一个 id
+/// 会静默删除零个源（看起来"成功"），所以未知取值一律是用法错误。
+fn canonical_prune_provider(value: &str) -> Result<String, CliError> {
+    let registry = provider_registry();
+    let mut ids: Vec<&str> = registry
+        .iter()
+        .map(|adapter| adapter.provider_id())
+        .collect();
+    ids.sort_unstable();
+    if ids.contains(&value) {
+        return Ok(value.to_string());
+    }
+    Err(CliError::usage(format!(
+        "unknown provider: {value} (expected {})",
+        ids.join("|")
+    )))
+}
+
+/// 项目维度的目标源：resolved Original Working Directory 落在 `project` 之下。
+///
+/// 返回 `(目标源路径, 无法归属项目的已索引源数量)`。路径比较把分隔符归一为 `/`
+/// 并忽略大小写（Windows 上同一目录常以两种写法出现），只在完全相等或
+/// `project/` 前缀时命中——不做子串匹配，`/work/app` 不得命中 `/work/app-secret`。
+fn project_source_paths(
+    store: &SqliteStore,
+    project: &str,
+) -> Result<(Vec<String>, usize), CliError> {
+    let needle = normalize_project_path(project);
+    if needle.is_empty() {
+        return Err(CliError::usage("--project requires a directory path"));
+    }
+    let rows = store
+        .source_working_directories()
+        .map_err(ProtocolError::from)?;
+    let mut paths = Vec::new();
+    let mut unattributed = 0usize;
+    for (source_path, working_directory) in rows {
+        match working_directory {
+            None => unattributed += 1,
+            Some(directory) => {
+                let candidate = normalize_project_path(&directory);
+                if candidate == needle || candidate.starts_with(&format!("{needle}/")) {
+                    paths.push(source_path);
+                }
+            }
+        }
+    }
+    Ok((paths, unattributed))
+}
+
+fn normalize_project_path(value: &str) -> String {
+    value
+        .replace('\\', "/")
+        .trim_end_matches('/')
+        .to_lowercase()
+}
+
+/// 删除计划的统一出口：dry-run 打印将删除什么，`--yes` 才执行。
+///
+/// `requested` 是用户点名的会话（会话/时间维度有，项目/provider 维度为 None）。
+/// 计划里出现而 `requested` 里没有的会话是**连带删除**——它们与点名会话共用同一个
+/// 源文件，而删除以 source 为单位。显式列出来是这条命令不吓人的前提。
+///
+/// 输出不含源路径（与 `sync --discover` 同一隐私口径）；需要路径的只有
+/// `forget --list` / `--readmit`，它们是抑制管理而非删除。
+#[allow(clippy::type_complexity)]
+fn emit_forget_plan(
+    store: &SqliteStore,
+    command: &'static str,
+    scope: serde_json::Value,
+    source_paths: &[String],
+    requested: Option<&[String]>,
+    confirmed: bool,
+    mut warnings: Vec<String>,
+) -> Result<
+    (
+        &'static str,
+        protocol::Outcome,
+        serde_json::Value,
+        protocol::Page,
+        Vec<String>,
+    ),
+    CliError,
+> {
+    let plan = store
+        .plan_forget(source_paths)
+        .map_err(ProtocolError::from)?;
+    // 连带删除只在"用户点名了具体会话"时才有意义：`--project` / `--provider`
+    // 选的是整个维度，维度内的每个会话都是用户要求的，不是意外附带的。
+    let collateral: Vec<&String> = match requested {
+        Some(ids) => {
+            let named: BTreeSet<&str> = ids.iter().map(String::as_str).collect();
+            plan.sessions
+                .iter()
+                .filter(|wire| !named.contains(wire.as_str()))
+                .collect()
+        }
+        None => Vec::new(),
+    };
+    let executed = if plan.is_empty() {
+        warnings.push("没有匹配的已索引内容，未做任何改动。".to_string());
+        false
+    } else if confirmed {
+        store.execute_forget(&plan).map_err(ProtocolError::from)?
+    } else {
+        warnings.push(format!(
+            "dry-run：未删除任何内容。确认以上清单后加 --yes 执行（不可撤销）。\
+             执行后必须再跑一次 `index compact`：FTS5 删除只写 delete marker，\
+             在 compact 之前被删的词仍能从库文件里逐字读出。\
+             源 transcript 文件不会被修改或删除；{command} 只作用于索引。"
+        ));
+        false
+    };
+    if executed {
+        warnings.push(
+            "已删除。源 transcript 文件未被触碰，已登记抑制，后续 sync 不会把它们索引回来\
+             （用 forget --list 查看，forget --readmit <path> 撤销）。\
+             现在跑 `index compact`：在它跑完之前，被删的词仍能从库文件里逐字读出。"
+                .to_string(),
+        );
+    }
+    let generation = store.active_generation().map_err(ProtocolError::from)?;
+    Ok((
+        command,
+        protocol::Outcome::Success,
+        serde_json::json!({
+            "scope": scope,
+            "sources": plan.sources.len(),
+            "sessions": plan.sessions,
+            "sessions_removed": plan.sessions.len(),
+            // 用户没点名、但因为共用源文件而被连带删除的会话。
+            "collateral_sessions": collateral,
+            // 被触碰但仍被其它源声明，因此**不会**消失的会话。
+            "surviving_sessions": plan.partial_sessions,
+            "messages": plan.messages,
+            "activities": plan.activities,
+            "executed": executed,
+            "generation": generation,
+        }),
+        protocol::Page::default(),
+        warnings,
+    ))
 }
 
 /// 从参数向量中取走一个带值 flag；不在场返回 `None`，在场缺值是用法错误。
@@ -4712,6 +5154,15 @@ fn sync_files_inner(
     if paths.is_empty() && synthetic_batches.is_empty() && !allow_empty {
         return Err(CliError::usage("sync <file>... requires at least one file"));
     }
+    // 抑制门（M3-5）：用户 `forget` 过的源不得被重新索引。这是**所有**索引入口的
+    // 同一道门——`sync <file>`、`sync --from-file`、`sync --discover` 都汇流到这里，
+    // 所以没有哪条路径能绕过它把已删内容原样带回来。删除只作用于索引，源文件仍在
+    // 磁盘上，因此"不再索引它"必须是一条持久决定，而不是每次 sync 后重新出现。
+    let (allowed_paths, forgotten_skipped) = store
+        .partition_suppressed(paths)
+        .map_err(ProtocolError::from)?;
+    let forgotten_count = forgotten_skipped.len();
+    let paths: &[String] = &allowed_paths;
     let mut sources = Vec::with_capacity(paths.len() + synthetic_batches.len());
     let mut message_count = 0usize;
     let mut skipped_count = 0usize;
@@ -4894,6 +5345,16 @@ fn sync_files_inner(
         ));
         diagnostic_count += 1;
     }
+    // 抑制跳过走同一条 warnings 通道：静默跳过会让"我明明 sync 了这个文件却搜不到"
+    // 变成一个无从诊断的谜。措辞里带上撤销命令。
+    if forgotten_count > 0 {
+        diagnostics.push(format!(
+            "{forgotten_count} source(s) were skipped because they are on the forgotten list \
+             (asg forget); their transcripts are untouched on disk. Run `forget --list` to see \
+             them or `forget --readmit <path>` to index one again"
+        ));
+        diagnostic_count += 1;
+    }
     let warnings = diagnostic_warnings(diagnostics.iter().map(String::as_str), diagnostic_count);
     let source_count = paths.len() + synthetic_batches.len();
     Ok((
@@ -4906,6 +5367,8 @@ fn sync_files_inner(
             "retained": retained_count,
             "skipped": skipped_count,
             "unrecognized": unrecognized_count,
+            // 因为被 `forget` 抑制而未索引的源数（M3-5）。
+            "forgotten_skipped": forgotten_count,
             "diagnostics": diagnostic_count,
             "generation": generation,
         }),
