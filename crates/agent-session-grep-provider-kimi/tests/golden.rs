@@ -244,6 +244,39 @@ fn distinct_documents_do_not_collide_on_seq_zero() {
     assert_ne!(messages_a[0].text, messages_b[0].text);
 }
 
+/// 时间戳必须能被**生产**的时间过滤解析器读懂并落在预期窗口内。
+///
+/// 只断言"非 null"是不够的：一个过滤器读不懂的字符串同样非 null，而 `--since`
+/// 下推是 `asg_instant_sort_key(...) >= ?`，NULL 与不可解析值都会让该消息被静默
+/// 排除——正是这条传播要修的缺陷。所以这里走 `parse_search_instant` 并比较
+/// `sort_key()`，与 opencode 的同名测试同一形状。
+#[test]
+fn golden_timestamps_fall_inside_search_window() {
+    use agent_session_grep_application::parse_search_instant;
+
+    let expected = read_expected();
+    let bytes = read_fixture_verified(&expected);
+    let (_, messages) = parse_fixture(&bytes);
+    assert!(!messages.is_empty(), "golden fixture must emit messages");
+
+    let since = parse_search_instant("2026-02-14T09:00:00Z").expect("window lower bound parses");
+    let until = parse_search_instant("2026-02-14T10:00:00Z").expect("window upper bound parses");
+
+    for (index, message) in messages.iter().enumerate() {
+        let raw = message
+            .timestamp
+            .as_deref()
+            .unwrap_or_else(|| panic!("message at seq {index} must carry a timestamp"));
+        let instant = parse_search_instant(raw).unwrap_or_else(|| {
+            panic!("timestamp {raw} must parse with the production search filter parser")
+        });
+        assert!(
+            instant.sort_key() >= since.sort_key() && instant.sort_key() <= until.sort_key(),
+            "timestamp {raw} 落在时间窗之外——`--since`/`--until` 会漏掉该消息"
+        );
+    }
+}
+
 /// 手动再生辅助：
 /// ```text
 /// cargo test -p agent-session-grep-provider-kimi --test golden -- --ignored --nocapture

@@ -6,6 +6,9 @@
 //! 分层依赖不变量：domain ← ports ← application ← adapters。
 
 pub mod redact;
+pub mod time;
+
+pub use time::{MAX_EPOCH_MILLIS, rfc3339_utc_from_epoch_millis};
 
 use agent_session_grep_domain::{
     DomainError, DomainResult, PlacementId, SessionContextGraph, StableId, ToolActivity,
