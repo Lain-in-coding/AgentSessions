@@ -1041,7 +1041,7 @@ fn assemble_search_hit(
         payload.and_then(|bytes| serde_json::from_slice::<serde_json::Value>(bytes).ok());
     hit.text = full_text
         .as_deref()
-        .map(|text| text.chars().take(max_snippet_chars).collect());
+        .map(|text| snippet_around_match(text, max_snippet_chars, query_terms));
     // 保留 adapter 提供的 canonical session_id（Session 元数据命中自带归属
     // 会话）；否则才用 placement 解析的归属会话回填。metadata-only Session
     // 命中无 placement，session_of 返回 None，不得把既有值覆盖成 None。
@@ -1056,6 +1056,65 @@ fn assemble_search_hit(
         hit.text.as_deref(),
     );
     hit.suggested_next_commands = guidance::suggested_next_commands(hit);
+}
+
+/// A bounded snippet that contains the first matching term, not a blind prefix.
+///
+/// The snippet used to be `text.chars().take(n)`, so a match past character `n`
+/// was simply invisible: a hit whose term appeared at character 216 rendered as
+/// the first 120 characters of unrelated lead-in, and the user could not tell
+/// why the hit matched at all (M3-9). Answering that required two more commands.
+///
+/// The window is centred on the first term occurrence and clamped to the text,
+/// so a match near either end still yields a full-width window. Elision markers
+/// are added only on the side actually cut, which keeps a short text byte-identical
+/// to the old prefix behaviour.
+///
+/// Matching is case-insensitive to mirror the FTS behaviour that produced the hit.
+/// When no term is located — the match came from a payload field other than
+/// `text`, or from CJK bigram tokenisation that does not align to a literal
+/// substring — this falls back to the prefix, which is the old behaviour and is
+/// never worse.
+fn snippet_around_match(text: &str, max_chars: usize, query_terms: &[String]) -> String {
+    let total: usize = text.chars().count();
+    if total <= max_chars || max_chars == 0 {
+        return text.chars().take(max_chars).collect();
+    }
+
+    // Character offset of the earliest term hit. `to_lowercase` can change byte
+    // length, so search and index in chars rather than bytes throughout.
+    let lower: Vec<char> = text.chars().flat_map(char::to_lowercase).collect();
+    let haystack: String = lower.iter().collect();
+    let match_char = query_terms
+        .iter()
+        .filter(|term| !term.is_empty())
+        .filter_map(|term| {
+            let needle = term.to_lowercase();
+            haystack
+                .find(&needle)
+                .map(|byte| haystack[..byte].chars().count())
+        })
+        .min();
+
+    let Some(at) = match_char else {
+        return text.chars().take(max_chars).collect();
+    };
+
+    // Centre the window, then clamp. Clamping after centring is what keeps a
+    // match at either extreme from producing a half-width window.
+    let half = max_chars / 2;
+    let start = at.saturating_sub(half).min(total.saturating_sub(max_chars));
+    let end = (start + max_chars).min(total);
+
+    let mut out = String::new();
+    if start > 0 {
+        out.push('…');
+    }
+    out.extend(text.chars().skip(start).take(end - start));
+    if end < total {
+        out.push('…');
+    }
+    out
 }
 
 /// 检索命中在 `max_response_bytes` 闸内的序列化字节估算（与 CLI 渲染对齐）：
@@ -3651,8 +3710,86 @@ mod tests {
         else {
             panic!("expected Search response");
         };
-        assert_eq!(hits[0].text.as_deref(), Some("xxxxxxxx"));
+        // M3-9 起摘要窗口以首个命中词为中心。此测试的窗口只有 8 字符,装不下
+        // 完整的 `needle`,但**命中位置不再不可见**:旧行为盲取前缀,得到纯填充
+        // `"xxxxxxxx"`(命中词毫无踪影);现在窗口移到命中处,显示出词的开头。
+        // 要保住的性质没变:`why_matched` 必须报出超出显示宽度的命中词。
+        let snippet = hits[0].text.as_deref().expect("snippet present");
+        assert!(
+            snippet.contains("need"),
+            "窗口必须移到命中处并显示命中词开头(而非纯前缀): {snippet:?}"
+        );
+        assert!(
+            snippet.starts_with('…'),
+            "命中落在前缀之外,左侧被裁时必须有省略标记: {snippet:?}"
+        );
+        assert_ne!(snippet, "xxxxxxxx", "不得再盲取前缀");
         assert_eq!(hits[0].why_matched, vec!["needle"]);
+    }
+
+    #[test]
+    fn snippet_window_centres_on_the_match_and_clamps_at_both_ends() {
+        // M3-9 的核心：命中词落在窗口外时,用户看不出为什么命中。
+        let terms = vec!["needle".to_string()];
+
+        // 中段命中 → 两侧都裁,两侧都有省略号,且命中词可见。
+        let mid = format!("{}needle{}", "a".repeat(300), "b".repeat(300));
+        let s = snippet_around_match(&mid, 40, &terms);
+        assert!(s.contains("needle"), "{s}");
+        assert!(s.starts_with('…') && s.ends_with('…'), "{s}");
+        assert_eq!(s.chars().count(), 42, "40 字窗口 + 两个省略号: {s}");
+
+        // 开头命中 → 左侧无需裁,不加左省略号,窗口仍是满宽。
+        let head = format!("needle{}", "b".repeat(300));
+        let s = snippet_around_match(&head, 40, &terms);
+        assert!(s.starts_with("needle"), "{s}");
+        assert!(!s.starts_with('…') && s.ends_with('…'), "{s}");
+
+        // 结尾命中 → 右侧无需裁;窗口向左扩展保持满宽(clamp 在居中之后)。
+        let tail = format!("{}needle", "a".repeat(300));
+        let s = snippet_around_match(&tail, 40, &terms);
+        assert!(s.contains("needle"), "{s}");
+        assert!(s.starts_with('…') && !s.ends_with('…'), "{s}");
+        assert_eq!(s.chars().count(), 41, "窗口应保持满宽而非半宽: {s}");
+
+        // 文本短于窗口 → 原样返回,不加任何标记(与旧前缀行为逐字相同)。
+        assert_eq!(
+            snippet_around_match("short needle", 40, &terms),
+            "short needle"
+        );
+
+        // 大小写不敏感(与产生该命中的 FTS 行为一致)。
+        let upper = format!("{}NEEDLE{}", "a".repeat(300), "b".repeat(300));
+        assert!(snippet_around_match(&upper, 40, &terms).contains("NEEDLE"));
+    }
+
+    #[test]
+    fn snippet_falls_back_to_prefix_when_no_term_is_located() {
+        // 命中来自 `text` 之外的 payload 字段,或 CJK bigram 分词不对应字面子串时
+        // 定位不到词 —— 回落到前缀,即旧行为,绝不比原来差,也绝不 panic。
+        let text = "a".repeat(300);
+        assert_eq!(
+            snippet_around_match(&text, 10, &["needle".to_string()]),
+            "a".repeat(10)
+        );
+        assert_eq!(snippet_around_match(&text, 10, &[]), "a".repeat(10));
+        // 空 term 不得被当成"在位置 0 命中"。
+        assert_eq!(
+            snippet_around_match(&text, 10, &[String::new()]),
+            "a".repeat(10)
+        );
+    }
+
+    #[test]
+    fn snippet_window_is_char_safe_on_multibyte_text() {
+        // 按字符而非字节切,多字节文本不得被切坏(to_lowercase 还会改变字节长度)。
+        let terms = vec!["找到".to_string()];
+        let text = format!("{}找到{}", "文".repeat(200), "字".repeat(200));
+        let s = snippet_around_match(&text, 20, &terms);
+        assert!(s.contains("找到"), "{s}");
+        assert_eq!(s.chars().count(), 22, "{s}");
+        // 往返 UTF-8 校验：切点没有落在字符中间。
+        assert_eq!(String::from_utf8(s.clone().into_bytes()).unwrap(), s);
     }
 
     #[test]
