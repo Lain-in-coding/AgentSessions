@@ -85,6 +85,55 @@ pub struct CatalogEntry {
     pub payload: Vec<u8>,
 }
 
+/// 历史构成普查（M3-10）的一个分桶：某个维度取值及其计数。
+///
+/// `key` 为 `None` 即**显式的 unknown 桶**：该维度的值无法在不猜测的前提下
+/// 得出（会话内没有任何带时间戳的消息 → 无法归入某个月；没有 `resolved` 的
+/// Original Working Directory 声明 → 无项目归属；没有任何 placement → 无
+/// provider 归属）。unknown 桶永不被丢弃、永不被推断出一个值：某个维度上
+/// 全部桶（含 unknown）的 `sessions` 之和恒等于 [`HistoryStats::total_sessions`]。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryBucket {
+    /// 维度取值；`None` 是 unknown 桶（见类型文档）。
+    pub key: Option<String>,
+    /// 落入本桶的 Session 数。
+    pub sessions: u64,
+    /// 落入本桶的这些 Session 内**去重后**的消息数。
+    ///
+    /// 归属以 Session 为单位，因此同一条消息若同时被两个分属不同桶的 Session
+    /// placement，则在两个桶里各计一次——各桶 `messages` 之和可以大于
+    /// [`HistoryStats::total_messages`]（后者是 catalog 里消息实体的总数）。
+    /// 这是定义，不是估算。
+    pub messages: u64,
+}
+
+/// 历史构成普查（M3-10）：回答"我到底有多少历史、来自哪里"。
+///
+/// 与 status 的健康计数器分开：status 是 O(1) 的"库健不健康"，本结构是一次
+/// 与 placement 表规模成正比的普查（"库里有什么"）。四个维度各自是一组
+/// [`HistoryBucket`]，含义与排序在字段文档里冻结。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HistoryStats {
+    /// catalog 里 Session 实体总数。每个维度的桶（含 unknown）之和等于它。
+    pub total_sessions: u64,
+    /// catalog 里 Message 实体总数（去重后的实体计数，与 placement 数无关）。
+    pub total_messages: u64,
+    /// 按 provider：会话数降序，同数按 provider id 升序，unknown 桶置末。
+    pub by_provider: Vec<HistoryBucket>,
+    /// 按月（`YYYY-MM`，取自会话内消息时间戳的词法最大值前 7 字符）：
+    /// 月份升序（直方图按时间读），unknown 桶置末。
+    pub by_month: Vec<HistoryBucket>,
+    /// 按项目（`resolved` 的 Original Working Directory 声明）：会话数降序，
+    /// 同数按路径升序，unknown 桶置末。
+    ///
+    /// 值是本机绝对路径——库里最具识别性的数据。跨边界输出（Robot/MCP/Web）
+    /// 必须按 ADR-0009 削减，只有本机 human 输出可按 ADR-0004 原样显示。
+    pub by_project: Vec<HistoryBucket>,
+    /// 按会话规模（每会话消息数分档）：档位固定升序，无 unknown 桶
+    /// （每个会话的消息数恒为已知值，可以是 0）。
+    pub by_session_size: Vec<HistoryBucket>,
+}
+
 /// 目录存储端口：规范化实体的持久化目录（对应 SQLite catalog）。
 ///
 /// 只暴露按 StableId 存取及稳定排序列表；全文查询能力由 SearchIndex 承担。
@@ -128,6 +177,20 @@ pub trait CatalogStore {
 
     /// Catalog 当前实体总数（status/doctor 使用）。
     fn count(&self) -> PortResult<u64>;
+
+    /// 一次普查出历史的构成（M3-10）：按 provider / 月 / 项目 / 会话规模分桶。
+    ///
+    /// 实现必须以固定条数的聚合查询完成（不得逐会话查询），并按
+    /// [`HistoryStats`] 各字段文档冻结的顺序返回桶。缺值一律进各维度的
+    /// unknown 桶，绝不丢弃、绝不推断。
+    ///
+    /// 默认实现返回空普查，仅为没有 placement/provider 投影的测试替身
+    /// （in-memory testkit、application 的 fake catalog）提供 trait 便利——
+    /// 它不是生产路径：SqliteStore 覆盖为真实聚合。与
+    /// [`ContextGraphStore::tool_activities_for_messages`] 同一约定。
+    fn history_stats(&self) -> PortResult<HistoryStats> {
+        Ok(HistoryStats::default())
+    }
 
     /// 当前对外可见的不可变 generation。`0` 表示尚未激活任何写批次。
     fn active_generation(&self) -> PortResult<u64>;
@@ -802,6 +865,9 @@ impl<T: CatalogStore + ?Sized> CatalogStore for &T {
     }
     fn count(&self) -> PortResult<u64> {
         (**self).count()
+    }
+    fn history_stats(&self) -> PortResult<HistoryStats> {
+        (**self).history_stats()
     }
     fn active_generation(&self) -> PortResult<u64> {
         (**self).active_generation()
