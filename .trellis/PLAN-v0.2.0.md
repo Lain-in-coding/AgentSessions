@@ -1853,14 +1853,33 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   `sync` 接受目录(Windows 友好);discover 覆盖非 jsonl(见 M2P-7)。
   **验收**:MCP 客户端能自己触发刷新;`sync <dir>` 可用。
 
-- [ ] **M3-12 `--offline` 目前是稳定的 no-op**
-  `const NETWORK_REQUIRING_SUBCOMMANDS: &[&str] = &[]`(`main.rs:1550`)——
+- [x] **M3-12 `--offline` 目前是稳定的 no-op** —— **已修文档(`bfe4bc9`)**
+  `const NETWORK_REQUIRING_SUBCOMMANDS: &[&str] = &[]`(**实际在 `main.rs:1744`**)——
   注册表是空的,所以 `--offline` 今天什么也不 fail-close。
   这不是缺陷(默认构建本来就零出网),但**文档把它说成一个生效的门**。
   **修法**:要么把真正需要网络的路径注册进去(目前只有 `model import`
   的下载路径,而那个路径不存在),要么把它文档化为
   "未来网络能力的前置门,当前默认构建无网络能力所以无操作"。
   **验收**:`--offline` 的语义与实现一致。
+
+  **✅ 选后者(改文档,不动代码)。** 代码里的注释本来就是诚实的
+  (`main.rs:1740-1743` 明写"当前没有任何子命令需要联网,列表为空"),
+  **偏差只在对外文档**:
+  - `README.md:127-131` 与 `SECURITY.md:30` 都写成
+    "refuses / rejects **any** network-requiring capability",单独读就是一个
+    生效的门 —— 用户去验证会发现什么都没拦。已改成"standing fail-closed
+    gate for any **future** capability;当前不改变任何行为"。
+  - `docs/release/rehearsal-runbook.md:300` 让操作员"验证零出网**除显式模型
+    下载外**" —— 默认构建里没有任何下载路径,**这条例外恰好会放过抓包想抓的
+    那一个发现**。已删除该例外。
+  - `CHANGELOG.md:54` 与 runbook 开头本来就写的是 "future network-dependent
+    capability",无需改。
+  - `docs/reference/cli.md` 与 `skills/.../SKILL.md` 的措辞也已经是诚实的。
+
+  **实测证据**(release 二进制):`doctor --offline` 的 `offline` 字段为 `true`,
+  而 `--offline` 下 `sync` 与 `search` 全部正常完成 —— 这正是"当前什么也不拦"
+  的证据。`cargo tree -p agent-session-grep-cli -e normal` 无
+  reqwest/hyper/ureq/curl/isahc/surf。
 
 - [x] **M3-13 死代码清理:`activity.rs` 整个文件无生产调用者** —— **已删(`1a05104`)**
   `application/src/activity.rs`(14.9 KB)的 `extract_activities`、
