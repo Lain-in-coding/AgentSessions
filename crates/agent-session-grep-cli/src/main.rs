@@ -3257,7 +3257,11 @@ fn attach_session_resume_rows(
 /// 只在 Human 模式附加（与 `attach_session_resume_rows` 同一惯例）：
 /// Robot/MCP/Web 的协议形状与字节预算由 Application 单一决定；排序键本身
 /// 在所有模式的 `entries[].latest_activity` 里可见。
-/// 两次批量查询，无 N+1；本页没有会话实体则什么都不做。
+/// 两次批量查询，无 N+1。
+///
+/// **只在整页都是会话实体时附加**（即 `list --sessions`）：human 渲染器用这张
+/// 表**替换**条目清单，若混合页里只要有一个会话就替换，就会把同页的
+/// message/document 条目从 human 输出里抹掉。
 fn attach_session_list_rows(
     store: &SqliteStore,
     data: &mut serde_json::Value,
@@ -3272,7 +3276,7 @@ fn attach_session_list_rows(
             StableId::from_wire(wire).filter(|id| id.kind() == IdKind::Session)
         })
         .collect();
-    if ids.is_empty() {
+    if ids.is_empty() || ids.len() != entries.len() {
         return Ok(());
     }
     let metadata = store.resume_of(&ids).map_err(ProtocolError::from)?;

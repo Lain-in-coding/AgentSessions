@@ -5787,3 +5787,53 @@ fn recency_list_sorts_by_newest_activity_and_rejects_cross_sort_cursor() {
     // human 表格的 Session ID 列是 canonical 形状，可直接复制给 context/show。
     assert!(h.contains("ses_v1_"), "{h}");
 }
+
+/// 混合页（message/document/session 同页）的 human 输出必须仍然逐条列出全部
+/// 实体：会话表格只在整页都是会话时替换清单，否则同页的非会话条目会被抹掉。
+#[test]
+fn human_list_keeps_non_session_entities_on_a_mixed_page() {
+    let (home_dir, home) = discover_env();
+    let (_db_dir, db) = temp_db("mixed-list");
+    let proj = home_dir.path().join(".claude").join("projects").join("p1");
+    std::fs::create_dir_all(&proj).expect("create claude proj dir");
+    std::fs::write(
+        proj.join("mixed.jsonl"),
+        format!(
+            "{}\n",
+            claude_fixture_session(7, "\"mixed page body\"", Some("2026-08-13T04:00:00.000Z"))
+        ),
+    )
+    .expect("write fixture");
+    let out = run_with_home(&db, &home, &["sync", "--discover"]);
+    assert!(out.status.success(), "sync failed: {}", stdout(&out));
+
+    // 一个 transcript = 1 message + 1 session + 1 document。
+    let frame = parse_first_line(&run_with_home(&db, &home, &["list", "20"]));
+    let kinds: Vec<&str> = frame["data"]["entries"]
+        .as_array()
+        .expect("entries")
+        .iter()
+        .map(|entry| &entry["id"].as_str().expect("id")[..7])
+        .collect();
+    assert!(kinds.contains(&"msg_v1_"), "{frame}");
+    assert!(kinds.contains(&"ses_v1_"), "{frame}");
+    assert!(kinds.contains(&"doc_v1_"), "{frame}");
+
+    let human = stdout(&run_human_with_home(&db, &home, &["list", "20"]));
+    assert!(human.contains("msg_v1_"), "message entity dropped: {human}");
+    assert!(
+        human.contains("doc_v1_"),
+        "document entity dropped: {human}"
+    );
+    assert!(human.contains("ses_v1_"), "session entity dropped: {human}");
+    // 混合页不切换成会话表格版式（`Session ID` 只出现在表格表头）。
+    assert!(!human.contains("Session ID"), "{human}");
+
+    // 整页都是会话时才用表格。
+    let sessions_only = stdout(&run_human_with_home(
+        &db,
+        &home,
+        &["list", "--sessions", "20"],
+    ));
+    assert!(sessions_only.contains("Session ID"), "{sessions_only}");
+}
