@@ -64,8 +64,9 @@ directory; read commands do not, so any number of readers can run concurrently.
 | Flag | Value | Effect |
 | --- | --- | --- |
 | `--db <path>` | filesystem path | Store path. Optional; see [Store resolution](#store-resolution). Empty string, a missing value, a value that is itself a known flag name, and a repeated `--db` are all usage errors. |
-| `--output <mode>` | `human` \| `json` \| `jsonl` | Output mode. Default `human`. `json` emits one envelope; `jsonl` emits one complete frame per line and may emit `frame_type: "progress"` frames during long `sync` runs. |
-| `--robot` | — | Equivalent to `--output json`. Cannot be combined with `--output` (conflict is a usage error). |
+| `--output <mode>` | `human` \| `json` \| `jsonl` \| `markdown` | Output mode. Default `human`. `json` emits one envelope; `jsonl` emits one complete frame per line and may emit `frame_type: "progress"` frames during long `sync` runs. `markdown` is defined **only for `handoff`** — see [`handoff`](#handoff-query); every other command refuses it with `invalid_request` / exit 2 rather than silently falling back. |
+| `--out <path>` | filesystem path | Write this command's result payload to `<path>` instead of stdout, then report `wrote <n> bytes to <path>` on stderr. **Never overwrites**: an existing path — file, directory or symlink — is `invalid_request` / exit 2, so delete it or choose another name. The bytes are identical to what stdout would have received. Errors and warnings keep their normal channels, so a failed run leaves no file. Refused for `mcp`, `tui` and `serve`, which own stdout for their whole run. A missing value, a value that is itself a known flag name, and a repeated `--out` are usage errors. |
+| `--robot` | — | Equivalent to `--output json`. Cannot be combined with `--output` (conflict is a usage error), so `--robot` can never emit `markdown`. |
 | `--request-id <id>` | `[A-Za-z0-9._:-]{1,128}` | Correlation id echoed verbatim in every frame. An invalid value is a usage error rather than being silently replaced. |
 | `--offline` | — | Fail-closed refusal of any operation that would need the network. No current command needs the network, so this changes no behaviour today; `doctor` and `hook` report it honestly in their `offline` field. |
 | `--no-color` | — | **Accepted and ignored.** The parser recognizes the token so it does not become a command name, but no code path reads it. Human output emits no ANSI sequences in the first place. |
@@ -143,6 +144,30 @@ store holds no resume claim for that session.
 
 Budget truncation is reported as `outcome: partial` and **exit 10**, never as
 success.
+
+#### Markdown projection
+
+`--output markdown` renders the same pack as a Markdown document. The pack
+schema has always declared that *JSON is authoritative; the Markdown form is a
+deterministic projection of this structure*, and this is that projection:
+
+```
+agent-session-grep --output markdown handoff "<query>" --out pack.md
+```
+
+- **Deterministic.** The renderer is a pure function of the pack — no clock
+  read, no locale, no map iteration — and the pack itself is byte-reproducible
+  for a given generation/query/budget. The same query against the same
+  generation therefore produces byte-identical Markdown, including line endings
+  (always `\n`).
+- **Same content, not more.** It is rendered from exactly the value `--output
+  json` would emit, so the two surfaces cannot drift apart. Evidence text is
+  already redacted and `tool_activity[].target` is already reduced to a
+  basename; the projection adds no field and reads no filesystem state.
+- **Human-facing.** `--output markdown` cannot be combined with `--robot`.
+  Machine callers should read the JSON, which stays authoritative.
+- **Only `handoff`.** No other command's payload has a documented Markdown
+  form, so no other command accepts the mode.
 
 ### `get-message <message-id>`
 
