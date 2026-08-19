@@ -1424,7 +1424,7 @@ fn empty_catalog_names_sync_discover_in_search_list_and_status() {
     // 换个错的建议不该再出现在空库上。
     let text = stdout(&run_human(&db, &["search", "anything"]));
     assert!(
-        !text.contains("试试更短或更少的关键词"),
+        !text.contains("try a shorter query"),
         "空库不应建议换关键词: {text}"
     );
 

@@ -132,9 +132,11 @@ fn render_resume(data: &Value) -> Vec<String> {
             .get("unavailable_reason")
             .and_then(Value::as_str)
             .map(sanitize)
-            .unwrap_or_else(|| "未记录原因".into());
-        lines.push(format!("不可恢复：{reason}"));
-        lines.push("说明：历史仍可检索，只是无法原地恢复。".into());
+            .unwrap_or_else(|| "no reason recorded".into());
+        lines.push(format!("not resumable: {reason}"));
+        lines.push(
+            "Note: the history is still searchable; only in-place resume is unavailable.".into(),
+        );
         return lines;
     }
 
@@ -143,9 +145,9 @@ fn render_resume(data: &Value) -> Vec<String> {
         .and_then(Value::as_str)
         .map(sanitize)
         .unwrap_or_else(|| "?".into());
-    lines.push(format!("命令：{command}"));
+    lines.push(format!("command: {command}"));
     if let Some(dir) = data.get("working_directory").and_then(Value::as_str) {
-        lines.push(format!("工作目录：{}", sanitize(dir)));
+        lines.push(format!("working directory: {}", sanitize(dir)));
     }
     // 权限模式恒如实标注：未核验时明示"未核验"，绝不静默省略（audit P1-2）。
     let permission_mode = data
@@ -157,24 +159,29 @@ fn render_resume(data: &Value) -> Vec<String> {
         .and_then(Value::as_bool)
         .unwrap_or(false);
     match permission_mode {
-        Some(mode) => lines.push(format!("权限模式：{}", mode)),
-        None if permission_verified => lines.push("权限模式：默认（无 yolo/full-auto）".into()),
-        None => lines.push("权限模式：未核验（默认不带，不自动加 yolo/full-auto）".into()),
+        Some(mode) => lines.push(format!("permission mode: {}", mode)),
+        None if permission_verified => {
+            lines.push("permission mode: default (no yolo/full-auto)".into())
+        }
+        None => lines.push(
+            "permission mode: not verified (nothing is passed; yolo/full-auto is never added)"
+                .into(),
+        ),
     }
     let executed = data
         .get("executed")
         .and_then(Value::as_bool)
         .unwrap_or(false);
     if executed {
-        lines.push("已执行：provider 进程已启动并退出。".into());
+        lines.push("executed: the provider process started and exited.".into());
     } else if data
         .get("first_run_preview")
         .and_then(Value::as_bool)
         .unwrap_or(false)
     {
-        lines.push("首次使用：已强制预览未执行（--yes 已被忽略）。再次运行 resume --yes 确认后才会真正执行。".into());
+        lines.push("first use: preview was forced and nothing ran (--yes was ignored). Run resume --yes again to confirm before it really executes.".into());
     } else {
-        lines.push("dry-run：未执行。加 --yes 实际恢复。".into());
+        lines.push("dry-run: nothing ran. Add --yes to really resume.".into());
     }
     lines
 }
@@ -366,7 +373,7 @@ fn render_search(data: &Value) -> Vec<String> {
         }
         return vec![
             "no hits".into(),
-            "提示：试试更短或更少的关键词（如只搜一个词）。".into(),
+            "Hint: try a shorter query, or fewer words (a single word often works).".into(),
         ];
     }
     let mut lines = vec![format!(
@@ -487,7 +494,9 @@ fn render_show(data: &Value) -> Vec<String> {
             ];
             // 会话引用未知时 `context <session>` 提示无从执行，不渲染。
             if session.is_some() {
-                lines.push("用 context <session> 展开这个会话的完整上下文。".into());
+                lines.push(
+                    "Run `context <session>` to expand the full context of this session.".into(),
+                );
             }
             lines
         }
@@ -735,7 +744,7 @@ fn push_footer(lines: &mut Vec<String>, outcome: Outcome, data: &Value, page: &P
         // 新手会把超长 cursor 误判为报错或结果只有一页（10 角色体验测试缺陷）。
         // 明确告知"还有结果"并给出可直接复制的完整命令。
         lines.push(
-            "还有更多结果：复制下面这行追加 --cursor 即可翻页（cursor 约 15 分钟有效）".into(),
+            "More results: append the --cursor line below to your command to page (a cursor is valid for about 15 minutes)".into(),
         );
         lines.push(format!("  --cursor {token}"));
     }
@@ -1117,10 +1126,10 @@ mod tests {
             lines,
             [
                 "session ses_v1_aaa  (provider claude-code)",
-                "命令：(cd /home/u/proj && claude --resume abc-123)",
-                "工作目录：/home/u/proj",
-                "权限模式：未核验（默认不带，不自动加 yolo/full-auto）",
-                "dry-run：未执行。加 --yes 实际恢复。",
+                "command: (cd /home/u/proj && claude --resume abc-123)",
+                "working directory: /home/u/proj",
+                "permission mode: not verified (nothing is passed; yolo/full-auto is never added)",
+                "dry-run: nothing ran. Add --yes to really resume.",
             ]
         );
     }
@@ -1143,11 +1152,11 @@ mod tests {
         assert!(
             lines
                 .iter()
-                .any(|l| l.starts_with("首次使用：已强制预览未执行")),
+                .any(|l| l.starts_with("first use: preview was forced and nothing ran")),
             "{lines:?}"
         );
         assert!(
-            lines.iter().any(|l| l.contains("--yes 已被忽略")),
+            lines.iter().any(|l| l.contains("--yes was ignored")),
             "{lines:?}"
         );
     }
@@ -1169,8 +1178,8 @@ mod tests {
             lines,
             [
                 "session ses_v1_bbb  (provider —)",
-                "不可恢复：no resume metadata claims",
-                "说明：历史仍可检索，只是无法原地恢复。",
+                "not resumable: no resume metadata claims",
+                "Note: the history is still searchable; only in-place resume is unavailable.",
             ]
         );
     }
@@ -1191,12 +1200,12 @@ mod tests {
         assert!(
             lines
                 .iter()
-                .any(|l| l == "已执行：provider 进程已启动并退出。")
+                .any(|l| l == "executed: the provider process started and exited.")
         );
         assert!(
             lines
                 .iter()
-                .any(|l| l == "权限模式：--dangerously-bypass-approvals-and-sandbox")
+                .any(|l| l == "permission mode: --dangerously-bypass-approvals-and-sandbox")
         );
     }
 
@@ -1290,7 +1299,10 @@ mod tests {
         let lines = render_success("search", Outcome::Success, &data, &Page::default());
         assert_eq!(
             lines,
-            ["no hits", "提示：试试更短或更少的关键词（如只搜一个词）。",]
+            [
+                "no hits",
+                "Hint: try a shorter query, or fewer words (a single word often works).",
+            ]
         );
     }
 
@@ -1308,7 +1320,7 @@ mod tests {
                 "1 hit(s) (generation 3)",
                 "  1. msg_v1_aaaa  score 2.00",
                 "truncated: max_items",
-                "还有更多结果：复制下面这行追加 --cursor 即可翻页（cursor 约 15 分钟有效）",
+                "More results: append the --cursor line below to your command to page (a cursor is valid for about 15 minutes)",
                 "  --cursor tok.abc",
             ]
         );
@@ -1381,7 +1393,10 @@ mod tests {
         };
         assert_eq!(
             render_success("search", Outcome::Success, &data, &page),
-            ["no hits", "提示：试试更短或更少的关键词（如只搜一个词）。",]
+            [
+                "no hits",
+                "Hint: try a shorter query, or fewer words (a single word often works).",
+            ]
         );
         // 有令牌但 has_more=false：同样不给续页行。
         let page = Page {
@@ -1390,7 +1405,10 @@ mod tests {
         };
         assert_eq!(
             render_success("search", Outcome::Success, &data, &page),
-            ["no hits", "提示：试试更短或更少的关键词（如只搜一个词）。",]
+            [
+                "no hits",
+                "Hint: try a shorter query, or fewer words (a single word often works).",
+            ]
         );
     }
 
@@ -1406,7 +1424,7 @@ mod tests {
             lines,
             [
                 "no hits",
-                "提示：试试更短或更少的关键词（如只搜一个词）。",
+                "Hint: try a shorter query, or fewer words (a single word often works).",
                 "truncated: ?"
             ]
         );
@@ -1485,7 +1503,7 @@ mod tests {
                 "timestamp: 2026-07-28T00:00:00Z",
                 "session: ses_v1_abc",
                 "text: hello",
-                "用 context <session> 展开这个会话的完整上下文。",
+                "Run `context <session>` to expand the full context of this session.",
             ]
         );
     }
