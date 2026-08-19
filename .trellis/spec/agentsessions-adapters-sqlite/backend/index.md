@@ -175,6 +175,13 @@ text, opaque Session payload, diagnostics, progress, or errors.
   provider reports no timestamp are ordered last with `None`, never dropped and
   never given an invented time. Lexical comparison assumes the canonical
   `YYYY-MM-DDT…Z` shape the message payload contract stores.
+  Cost is proportional to the placement table, not to the page size: measured
+  on this Windows dev machine over a 110,000-entity store (5,000 sessions /
+  100,000 messages, synthetic 6-provider corpus), one `list --sessions --sort
+  recency --max-items 20` process took ~0.49-0.54 s wall clock versus ~0.02 s
+  for the same page in wire-id order. Acceptable for an interactive listing;
+  if it has to get cheaper, materialize a per-session `latest_activity` column
+  on write rather than widening this query.
 
 ## Session metadata search projection (schema v11)
 
