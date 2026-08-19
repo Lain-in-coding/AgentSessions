@@ -23,6 +23,45 @@ const VARIANT_ID: &str = "opencode/sqlite-v1";
 /// SQLite magic header: every SQLite database starts with "SQLite format 3\0".
 const SQLITE_MAGIC: &[u8] = b"SQLite format 3\0";
 
+/// OpenCode's migration bookkeeping table (Drizzle-managed schema).
+const OPENCODE_MIGRATION_TABLE: &str = "__drizzle_migrations";
+
+/// zcode's migration bookkeeping table.
+///
+/// zcode's CLI database (`~/.zcode/cli/db/db.sqlite`) is a **fork of OpenCode's
+/// schema**, so it is not merely similar — it answers every question this
+/// adapter used to ask. Measured against a real zcode 3.7.7 database and a real
+/// `opencode.db` side by side:
+///
+/// * `session` / `message` / `part` all exist in both, so the table-presence
+///   test alone reports `Confirmed` for zcode;
+/// * all three of this adapter's parse queries succeed on zcode and return
+///   *plausible* rows (20 sessions, 51 text parts, 121 messages, roles exactly
+///   `user`/`assistant`);
+/// * both formats put the role at `$.role` and text parts at
+///   `$.type == 'text'` / `$.text`.
+///
+/// The failure mode was therefore **silent, not loud**: claiming a zcode
+/// database produced clean-looking transcripts attributed to the wrong
+/// provider, never a parse error. That is why the probe has to discriminate
+/// here rather than let `parse` discover the problem.
+///
+/// The discriminator is the migration table name, which is a lineage
+/// fingerprint: zcode uses `schema_migration`, OpenCode uses
+/// `__drizzle_migrations`. Distinguishing columns (zcode's
+/// `session.task_type` / `title_source` / `trace_id`, or its extra
+/// `message.sequence` / `part.sequence`) were rejected as the primary signal
+/// because either product may add a column in a later version, whereas the
+/// migration-table name identifies the schema's ancestry.
+///
+/// **Do not "tighten" this into a positive `__drizzle_migrations` requirement.**
+/// The committed golden fixture (`tests/golden/basic.db`) contains neither
+/// migration table — only `session`, `message`, and `part` — so demanding a
+/// positive OpenCode marker would reject this adapter's own golden. Declining
+/// when the zcode fingerprint is present is the only form that both fixes the
+/// collision and keeps the fixture honest.
+const ZCODE_MIGRATION_TABLE: &str = "schema_migration";
+
 /// OpenCode adapter: parses `opencode.db` (SQLite: session/message/part).
 ///
 /// The adapter writes the byte stream to a temp file and opens it read-only.
@@ -55,6 +94,7 @@ impl ProviderAdapter for OpenCodeAdapter {
                 "SQLite source has no byte spans; messages are attributed without source offsets",
                 "only text parts with role user/assistant are committed; tool/other parts are ignored",
                 "per-message timestamps come from `message.time_created` (epoch milliseconds); rows whose value is missing, non-positive, or out of range carry no timestamp",
+                "zcode's CLI database forks this schema (same session/message/part tables, same `$.role` and `$.type`='text'/`$.text` shapes); the probe refuses it on the `schema_migration` vs `__drizzle_migrations` fingerprint rather than attributing it to opencode",
             ],
         )
     }
@@ -82,6 +122,20 @@ impl ProviderAdapter for OpenCodeAdapter {
         let has_session = table_exists(&conn, "session");
         let has_message = table_exists(&conn, "message");
         let has_part = table_exists(&conn, "part");
+
+        // Refuse a zcode database before any table-presence test can claim it:
+        // zcode forked this schema, so `session`/`message`/`part` are all
+        // present and the queries all succeed. See `ZCODE_MIGRATION_TABLE`.
+        if table_exists(&conn, ZCODE_MIGRATION_TABLE)
+            && !table_exists(&conn, OPENCODE_MIGRATION_TABLE)
+        {
+            return Err(ProviderError::AmbiguousVariant(format!(
+                "database carries the `{ZCODE_MIGRATION_TABLE}` migration table and no \
+                 `{OPENCODE_MIGRATION_TABLE}`, which fingerprints zcode's fork of the OpenCode \
+                 schema — session/message/part are present in both, so this adapter refuses \
+                 rather than attribute a zcode transcript to opencode"
+            )));
+        }
 
         if !has_session {
             return Err(ProviderError::AmbiguousVariant(
@@ -345,6 +399,45 @@ mod tests {
     }
 
     #[test]
+    fn probe_refuses_zcode_fork_database() {
+        // The real collision (measured against zcode 3.7.7's
+        // `~/.zcode/cli/db/db.sqlite`): session/message/part all exist, so the
+        // table-presence test reports Confirmed and every parse query returns
+        // plausible rows. Attribution must be refused, not guessed.
+        let adapter = OpenCodeAdapter::new();
+        let db_bytes = create_test_zcode_db();
+        let error = adapter
+            .probe(&db_bytes)
+            .expect_err("a zcode database must not be claimed as opencode");
+        assert!(
+            matches!(error, ProviderError::AmbiguousVariant(_)),
+            "expected AmbiguousVariant, got {error:?}"
+        );
+    }
+
+    #[test]
+    fn probe_still_confirms_opencode_when_its_own_migration_table_is_present() {
+        // A real `opencode.db` carries `__drizzle_migrations`. The zcode guard
+        // must not make the genuine article ambiguous.
+        let adapter = OpenCodeAdapter::new();
+        let db_bytes = create_test_opencode_db_with_migrations();
+        let result = adapter.probe(&db_bytes).unwrap();
+        assert_eq!(result.confidence, Confidence::Confirmed);
+    }
+
+    #[test]
+    fn probe_confirms_golden_fixture_without_either_migration_table() {
+        // Pins the reason the guard is written as a negative test: the committed
+        // golden has neither migration table, so a positive
+        // `__drizzle_migrations` requirement would reject this adapter's own
+        // fixture. If someone "tightens" the probe, this fails.
+        let adapter = OpenCodeAdapter::new();
+        let db_bytes = include_bytes!("../tests/golden/basic.db");
+        let result = adapter.probe(db_bytes).unwrap();
+        assert_eq!(result.confidence, Confidence::Confirmed);
+    }
+
+    #[test]
     fn parse_extracts_messages_from_opencode_db() {
         let adapter = OpenCodeAdapter::new();
         let db_bytes = create_test_opencode_db();
@@ -401,6 +494,57 @@ mod tests {
         assert!(rfc3339_utc_from_epoch_millis(0).is_none());
         assert!(rfc3339_utc_from_epoch_millis(-1).is_none());
         assert!(rfc3339_utc_from_epoch_millis(i64::MAX).is_none());
+    }
+
+    /// Serialize an in-memory database built from `sql` to on-disk bytes.
+    fn db_bytes_from_sql(sql: &str) -> Vec<u8> {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(sql).unwrap();
+        let temp_path = std::env::temp_dir().join(format!("asg-test-{}.db", temp_file_suffix()));
+        conn.execute_batch(&format!("VACUUM INTO '{}'", temp_path.display()))
+            .unwrap();
+        drop(conn);
+        let bytes = std::fs::read(&temp_path).unwrap();
+        let _ = std::fs::remove_file(&temp_path);
+        bytes
+    }
+
+    /// A zcode CLI database: OpenCode's forked schema plus zcode's own
+    /// `schema_migration` bookkeeping table and `sequence` columns.
+    ///
+    /// Column list and `data` shapes transcribed from a real zcode 3.7.7
+    /// `~/.zcode/cli/db/db.sqlite`. The point of the fixture is that everything
+    /// this adapter reads is present and well-formed — the role is at `$.role`,
+    /// text parts are `$.type == 'text'` with the text at `$.text` — so only the
+    /// migration-table fingerprint separates it from OpenCode.
+    fn create_test_zcode_db() -> Vec<u8> {
+        db_bytes_from_sql(
+            "CREATE TABLE schema_migration (version INTEGER PRIMARY KEY, applied_at INTEGER);
+             CREATE TABLE session (id TEXT PRIMARY KEY, project_id TEXT, workspace_id TEXT, parent_id TEXT, slug TEXT, directory TEXT, path TEXT, title TEXT, version TEXT, time_created INTEGER, time_updated INTEGER, task_type TEXT, title_source TEXT, title_message_id TEXT, time_title_updated INTEGER, trace_id TEXT);
+             CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT, sequence INTEGER);
+             CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT, sequence INTEGER);
+             INSERT INTO schema_migration VALUES (42, 1771060000000);
+             INSERT INTO session (id, directory, title, time_created) VALUES ('ses_z1', '/zwork', 'zcode session', 1771060499000);
+             INSERT INTO message (id, session_id, time_created, data, sequence) VALUES ('zmsg_1', 'ses_z1', 1771060500000, '{\"role\":\"user\"}', 1);
+             INSERT INTO message (id, session_id, time_created, data, sequence) VALUES ('zmsg_2', 'ses_z1', 1771060504250, '{\"role\":\"assistant\"}', 2);
+             INSERT INTO part (id, message_id, session_id, time_created, data, sequence) VALUES ('zpart_1', 'zmsg_1', 'ses_z1', 1771060500000, '{\"type\":\"text\",\"text\":\"hello from zcode\",\"time\":{\"start\":1771060500000}}', 1);
+             INSERT INTO part (id, message_id, session_id, time_created, data, sequence) VALUES ('zpart_2', 'zmsg_2', 'ses_z1', 1771060504250, '{\"type\":\"text\",\"text\":\"reply from zcode\",\"time\":{\"start\":1771060504250}}', 2);",
+        )
+    }
+
+    /// An OpenCode database that carries `__drizzle_migrations`, as a real
+    /// `opencode.db` does.
+    fn create_test_opencode_db_with_migrations() -> Vec<u8> {
+        db_bytes_from_sql(
+            "CREATE TABLE __drizzle_migrations (id INTEGER PRIMARY KEY, hash TEXT, created_at INTEGER);
+             CREATE TABLE session (id TEXT PRIMARY KEY, title TEXT, directory TEXT, time_created INTEGER, time_updated INTEGER);
+             CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, data TEXT, time_created INTEGER);
+             CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, data TEXT, time_created INTEGER);
+             INSERT INTO __drizzle_migrations VALUES (1, 'deadbeef', 1771060000000);
+             INSERT INTO session VALUES ('ses_1', 'test', '/work', 1771060499000, 1771060800000);
+             INSERT INTO message VALUES ('msg_1', 'ses_1', '{\"role\":\"user\"}', 1771060500000);
+             INSERT INTO part VALUES ('part_1', 'msg_1', '{\"type\":\"text\",\"text\":\"hello world\"}', 1771060500000);",
+        )
     }
 
     /// Create a test OpenCode SQLite database in memory and return its bytes.
