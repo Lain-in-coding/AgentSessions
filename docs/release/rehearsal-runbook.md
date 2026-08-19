@@ -297,9 +297,14 @@ loopback `TcpListener` — enforced by `tests/network_egress.rs` and the
 `security-audit` workflow step.
 
 1. Run the full rehearsal with network capture active (Wireshark / tcpdump /
-   `netstat`). Verify zero outbound connections except explicit model downloads.
+   `netstat`). Verify zero outbound connections. There is no exception to this
+   in the default build: no command downloads anything, so any outbound packet
+   is a finding.
 2. Run `agent-session-grep --offline` through all core commands. All must
-   succeed without network.
+   succeed without network. Note this confirms the flag is inert rather than
+   confirming an active gate — no current capability requires the network, so
+   there is nothing for `--offline` to refuse. Its purpose is to make a future
+   network capability fail closed by default.
 
 ### 10.2 Redaction spot-check
 

@@ -27,7 +27,7 @@ or email the maintainers directly. You can expect:
 | Human CLI / TUI | Local output. Session content is shown unredacted (ADR-0004). |
 | Robot JSON/JSONL, MCP, HTTP API, Web UI, Handoff Pack | Cross-boundary outputs. Secret-shaped values (AWS keys, GitHub PATs, OpenAI/Anthropic/xAI keys, Bearer tokens, PEM private keys) and secret-named JSON fields are redacted with `[redacted:...]` markers (ADR-0009). |
 | HTTP serve | Loopback-only (Host check), random bearer token per invocation, no TLS, GET-only. Do not expose the port to a network. |
-| Offline mode | Global `--offline` flag rejects any network-requiring capability (`capability_not_supported`); the default build has no HTTP client dependency and the only socket is serve's loopback `TcpListener` (static test + CI step). |
+| Offline mode | The default build has no HTTP client dependency and the only socket is serve's loopback `TcpListener` (static test + CI step). The global `--offline` flag is a standing fail-closed gate: any capability that would need the network is refused with `capability_not_supported`. No current command needs the network, so the flag changes no behaviour today — it exists so that a future network capability cannot ship without passing the gate. |
 | Provider transcripts | Read-only. Real user session data is never modified, uploaded, or committed. |
 
 Redaction is a conservative, pattern-based ruleset (see
