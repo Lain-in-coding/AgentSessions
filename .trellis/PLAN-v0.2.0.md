@@ -1667,12 +1667,31 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   另外把 "Approval for running fork pull request workflows" 设为需要审批。
   **验收**:fork PR 不会未经审批就跑 workflow。
 
-- [ ] **M2C-5 四个动作的阀值接进 CI(D3,依赖 M2C-2 与 M2-2)**
+- [x] **M2C-5 四个动作的阀值接进 CI(D3,依赖 M2C-2 与 M2-2)** —— **workflow 已接入(`8eacdf8`)**
   M2-2 产出的 harness 接进 workflow,阀值不过就 fail。
   注意 artifact **只留 7 天**,`ci_verified` 的可复核性天然弱于
   `locally_verified` —— 继续保持
   `core-beta-evidence-matrix.md` 里那个状态词区分。
   **验收**:性能回退能被 CI 自动拦住。
+
+  **✅ 已接入,但要如实读它的含义。**
+  发现的真问题:`core-beta-evidence.yml` 一直只跑 smoke benchmark 与
+  open-source gate,**从来没有执行 `performance_gate_benchmark.py`** ——
+  也就是说四条发布阈值此前**完全没有被自动化拦住过**,M2-2 交付的门只在本地跑。
+  现在新增独立 job(Windows x64,20 分钟上限),harness 自己的单测 + `run --profile full`
+  + `validate-report` 三步串起来,阈值不过即 job 失败。
+  **两个刻意的设计选择**:
+  1. **不塞进四平台 matrix**:这是单机计时测量,四个 runner 会产出四份互不可比的
+     判定,还把 macOS 分钟数乘四(macOS 计费 10x,见 M2C-3)。
+  2. **`--skip-embeddings`**:向量构建在 372 秒全程里占 285 秒,且只喂
+     informational 指标;跳过后四条受门阈值约 87 秒可测。
+  **⚠️ 未验证部分(不许当成已通过)**:CI 因 billing 仍被锁,
+  **这个 job 从未在 GitHub runner 上真实跑过**,所以它现在是
+  `not_verified` 而非 `ci_verified` —— workflow 配置不等于运行通过
+  (这正是 `core-beta-evidence-matrix.md` 那个状态词区分要防的事)。
+  并且按 §1.3.7,**当前没有任何语料能让四条阈值同时通过**,所以这个 job
+  一旦真跑起来,预期就是失败(吞吐在受门语料上 FAIL)。
+  **它的价值是"回归能被拦住",不是"性能已达标"。**
 
 ---
 
