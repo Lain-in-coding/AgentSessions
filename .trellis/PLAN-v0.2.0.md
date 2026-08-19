@@ -1913,7 +1913,7 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   删掉后 workspace 编译与测试全绿(这正是"确实无人可达"的证据);
   测试数 198 → 187,少掉的 11 条全是该模块自己的测试。
 
-- [ ] **M3-14 handoff pack 的两个字段永远是空**
+- [x] **M3-14 handoff pack 的两个字段永远是空** —— **已修(merge `worktree-agent-a2f5cfd37e9528719`)**
   `provenance: None` 恒真(`handoff_pack.rs:236`),
   `inference: Vec::new()` 恒真(`:233`)。
   而 handoff-pack/v1 的卖点之一就是 **evidence/inference 分栏**。
@@ -1923,6 +1923,25 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   的默认实现返回空(`ports/src/lib.rs:190-193`)。
   **修法**:要么填充这些字段,要么从 schema 与文档里移除承诺。
   **验收**:schema 承诺的字段都有真实内容,或承诺被撤回。
+
+  **✅ 两类分别处理,不是一刀切"都填上"**:
+  - **`provenance` 与 `MatchedSession.provider_id`:填充。**
+    原注释说"搜索型 pack 无单一会话/提供商,honest:不臆造" ——
+    **这个理由只在命中多个会话时成立**。恰好命中一个会话时,provider 与
+    session 都是已持有的事实,`None` 是**少报**而不是诚实。
+    provider 取自 store 的 resume claim(`source_session_resume_claims`);
+    没有 claim 时省略 provider、仍报 session —— 报事实,不猜。
+    **实测(release 二进制,零配置)**:单会话查询得到
+    `{"provider_id":"openclaw","session_id":"ses_v1_..."}`,此前恒为 `null`。
+  - **`inference: Vec::new()`:保留,改文档。** `generation_mode` 是
+    `Deterministic`(不调用任何模型),所以**确实没有任何可推断内容**,
+    空列表是唯一诚实取值,不是"待填充"。缺陷在**承诺的措辞**:
+    schema 与类型文档现在明写"Deterministic 下恒为空;非空只可能来自
+    尚未提供的 local-llm 生成器"。`InferenceEntry` 作为契约占位保留,
+    保证真接上本地模型时 evidence/inference 分栏在类型层面已强制成立。
+  - `tool_activity` 同样补了文档:v12 之前建的库或本就无工具调用的会话为空。
+  **schema 未升版**:改动全是新增可选字段与文档,`HandoffPack::SCHEMA_VERSION`
+  无需移动;pack 的字节可复现性(`derive_pack_id`)未受影响。
 
 - [x] **M3-15 D13 运行时守卫:data root 与 source root 重叠无检查** —— **已实现(`76260de`)**
   `THREAT-MODEL.md:49` 自己写明:"尚未实现运行时代码守卫",
