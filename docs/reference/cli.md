@@ -125,6 +125,14 @@ Search, then assemble a deterministic handoff pack (`handoff-pack/v1`). Verbatim
 evidence and inference stay in separate sections. No LLM call, and nothing is
 injected into any agent — it prints the pack and stops.
 
+Because no model is called, `inference` is **always an empty array**: the
+separation is a structural guarantee that a future summarizer cannot write into
+`evidence`, not a promise of summary content. `provenance` is present only when
+exactly one session matched — a pack spanning several sessions has no single
+origin, so the field is omitted rather than guessed. Each entry in
+`matched_sessions` carries its own `provider_id` either way, omitted when the
+store holds no resume claim for that session.
+
 | Flag | Value | Default |
 | --- | --- | --- |
 | `--max-evidence <n>` | integer | 20 |
