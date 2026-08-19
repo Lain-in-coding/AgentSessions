@@ -88,6 +88,9 @@ SQLite schema 版本 `SCHEMA_VERSION = 12`。
 
 ### 1.3.1 十万条实测(2026-08-19,**当前权威**,四条阀值三条失败)
 
+> **⚠️ 本节的判定已被后续优化改写。当前状态见 §1.3.2 —— 四条里三条已通过,
+> 只剩吞吐一条。下表保留为优化前的基线。**
+
 语料 = `scripts/evidence/synthetic_corpus.py` 的冻结 10 万条(5,000 session /
 6 provider / 48.6 MiB),harness = `scripts/evidence/performance_gate_benchmark.py`。
 **我独立重跑复验过,四个数字全部吻合**(括号内是 agent 首次运行值):
@@ -134,10 +137,51 @@ metric 的 embeddings 构建。`--skip-embeddings` 在**完整 10 万条规模**
 四条阀值,耗时 **79 s**(我实测 81.9 s),判定完全相同 —— 这是建议的逐 PR 子集;
 全量放 nightly / 发布前。
 
+### 1.3.2 优化后实测(2026-08-19 晚,**当前权威**,四条只剩一条失败)
+
+同一 harness、同一冻结语料,合并三轮优化后我亲自重跑(70.7 s):
+
+| 动作 | 优化前 | **优化后** | 阀值 | 判定 |
+|---|---:|---:|---:|---|
+| 首次全量索引 | 0.707 | **0.751** MiB/s | ≥ 3.5 | **仍 FAIL(差 4.7 倍)** |
+| 增量同步(无变化) | 963 | **658** ms | ≤ 1000 | **PASS**(余量 37 → 342 ms) |
+| 搜索 p95 | 96.03 | **31.55** ms | ≤ 50 | **PASS**(原 1.9 倍超标) |
+| MCP 单次调用 p95 | 85.23 | **20.55** ms | ≤ 50 | **PASS**(原 1.7 倍超标) |
+
+`gate.pass = false`,`failures = ['initial_index_throughput_mib_s']` —— **唯一
+未过的是吞吐**。
+
+**搜索与 MCP 的 3 倍改善来自同一处**:把 lexical top-k 的物化收敛到"只为
+存活者付代价",与之前修 semantic 全表扇描是同一形状。踩坑记录在
+`bm25_cutoff_probe_reads_no_content_column` 测试的注释里:`id` 是 fts5 content
+column,在 `ORDER BY` 里提它会让 SQLite 为每个匹配行读出整条 content 记录
+(`id` + 全部 `text`)只为喂 sorter —— 10 万条语料下一个命中 1.6 万行的词
+从 7 ms 变成 47 ms。这类"结果正确但慢"的缺陷行为测试抓不到,故用查询计划断言锁住。
+
+**吞吐的真正瓶颈已定位(这是 §1.7 瓶颈 #2 被推翻后的正确答案)**:
+分阶段 trace 显示 **commit 占 98.2%**(38,400 ms / 39,131 ms),parse 仅 1.6%。
+且 **代价是 catalog 大小的平方,不是批大小的线性**:
+```
+batch  1  files=167  commit=  833ms
+batch 22  files= 17  commit= 1548ms   ← 文件少 10 倍,耗时仍是 1.9 倍
+```
+根因:`commit_source_batches_if_changed` 每次调用发六条**无 WHERE 的全表扫描**
+(`source_entity_membership_state`、`source_placement_membership_state`、
+`source_activity_membership_state`、`stored_placements`、`stored_edges`、
+`stored_activities`),于是每批都把整个正在增长的 catalog 重新读进 BTreeMap。
+代码注释自己承认了 O(whole catalog),并加了 no-op 快路径来规避 ——
+但首次索引时每批都是变更,所以每批都全额付费。
+**已派 agent 修**:把这六条读收敛到批内 sources。难点在于跨源 claim/tombstone
+推导确实需要非局部知识(一条消息可被多源 claim;tombstone 靠"claim 消失"推导),
+不能简单加 `WHERE source_id IN (batch)`。
+
+
+
 ### 1.4 MCP amortized 语义延迟(已实测)
 
 > ⚠️ 见 §1.3.1 第 2 条:这组数字的前提(编码器常驻)在默认构建下不成立,
-> 且语料只有 10 条消息。10 万条下常驻进程实测 p95 **85 ms**。
+> 且语料只有 10 条消息。10 万条常驻进程实测:优化前 p95 85 ms,
+> 优化后 **20.55 ms**(§1.3.2)。
 
 `scripts/evidence/semantic_mcp_latency.py`:编码器常驻 MCP 进程时
 p50 **16.6 ms** / p95 **21.0 ms**(10 次查询),对比单次 CLI 冷启动约 **3 秒**
