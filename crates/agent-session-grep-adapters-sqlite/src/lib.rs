@@ -1432,9 +1432,38 @@ impl SqliteStore {
     ///
     /// WAL journal 模式的 PRAGMA 初始化复制自 ctx（ctxrs，Apache-2.0）的
     /// catalog 初始化。
+    ///
+    /// The three pragmas around it are **durability-neutral by construction** —
+    /// none of them changes when or whether SQLite fsyncs, so the durable-intent
+    /// state machine (`begin_index_batch_with_relations` → single commit → CAS
+    /// activate) and the writer lease keep exactly the guarantees they had.
+    /// They were chosen because a measured commit trace (`ASG_COMMIT_TRACE=1`)
+    /// on the 100k-message synthetic corpus showed the write transaction paying
+    /// for cache misses, not for I/O policy:
+    ///
+    /// * `page_size = 16384`. Message payloads and FTS5 segment blobs are the
+    ///   bulk of this catalog and routinely exceed the 4 KiB default, so the
+    ///   default forces overflow-page chains on rows that fit in one 16 KiB
+    ///   page. Set before `journal_mode=WAL` because WAL mode freezes the page
+    ///   size, and silently ignored on a catalog that already has content — so
+    ///   existing data roots keep their page size and need no migration.
+    /// * `cache_size = -262144` (256 MiB, negative = KiB rather than pages).
+    ///   The default 2 MiB page cache cannot hold the b-tree interior nodes of
+    ///   `message_placements`' four indexes, so a commit that inserts ~3,500
+    ///   placements re-reads interior pages from disk for nearly every row and
+    ///   spills dirty pages into the WAL mid-transaction.
+    /// * `temp_store = MEMORY`. The `UNIQUE(session_id, document_id,
+    ///   source_ordinal)` constraint and the session-metadata `ORDER BY` build
+    ///   transient sorters; keeping them off disk avoids a second file's worth
+    ///   of write traffic inside the write transaction.
     fn init(conn: &Connection) -> PortResult<()> {
-        conn.execute_batch("PRAGMA journal_mode=WAL;")
-            .map_err(backend)?;
+        conn.execute_batch(
+            "PRAGMA page_size=16384;
+             PRAGMA journal_mode=WAL;
+             PRAGMA cache_size=-262144;
+             PRAGMA temp_store=MEMORY;",
+        )
+        .map_err(backend)?;
         Self::migrate(conn)?;
         Self::register_scalar_functions(conn)
     }
