@@ -145,6 +145,40 @@ fn chunk_ids<T: AsRef<str>>(ids: &[T]) -> Vec<&[T]> {
     ids.chunks(BATCH_IN_CHUNK).collect()
 }
 
+/// Opt-in per-step timing *inside* a commit, written to stderr.
+///
+/// The CLI's `ASG_SYNC_TRACE` (`cli/src/main.rs`) showed commit dominating a
+/// first ingest but stopped at the boundary of this crate, so three separate
+/// attempts at the ingest-throughput problem picked their target by reasoning
+/// rather than measurement — and all three picked wrong (parse parallelism:
+/// 1.6% of the run; scoping the catalog reads: slower than the scan it
+/// replaced). `ASG_COMMIT_TRACE=1` breaks the commit itself down so the next
+/// change is aimed at a measured step.
+///
+/// Same shape as `SyncTrace`: one `var_os` per process, `eprintln!` to stderr
+/// so stdout stays a clean protocol stream.
+#[derive(Clone, Copy)]
+struct CommitTrace(bool);
+
+impl CommitTrace {
+    fn from_env() -> Self {
+        CommitTrace(std::env::var_os("ASG_COMMIT_TRACE").is_some())
+    }
+
+    /// Report `label`'s duration since `mark` and return a fresh mark. Returns
+    /// the new instant even when tracing is off so callers chain identically.
+    fn step(self, label: &str, mark: std::time::Instant) -> std::time::Instant {
+        let now = std::time::Instant::now();
+        if self.0 {
+            eprintln!(
+                "asg-commit-trace: {label} {:.1}ms",
+                now.duration_since(mark).as_secs_f64() * 1000.0
+            );
+        }
+        now
+    }
+}
+
 fn unix_ms() -> PortResult<i64> {
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2690,9 +2724,12 @@ impl SqliteStore {
         // claims, scans), skip all of it and report no generation change.
         // The per-batch cost is then proportional to the batch, not the
         // catalog — this is what makes an unchanged re-sync fast.
+        let trace = CommitTrace::from_env();
+        let mark = std::time::Instant::now();
         if self.sources_are_current(&ordered_sources)? {
             return Ok(false);
         }
+        let mark = trace.step("sources_are_current", mark);
 
         let scanned_paths: BTreeSet<String> = paths.into_iter().map(str::to_string).collect();
         let current_entities_by_source = self.source_entity_membership_state()?;
@@ -2701,6 +2738,7 @@ impl SqliteStore {
         let stored_placements = self.stored_placements()?;
         let stored_edges = self.stored_edges()?;
         let stored_activities = self.stored_activities()?;
+        let mark = trace.step("catalog_state_reads", mark);
 
         let mut merged = BTreeMap::<String, (StableId, Vec<u8>, String)>::new();
         let mut observed_placements = BTreeMap::<String, MessagePlacement>::new();
@@ -2938,6 +2976,7 @@ impl SqliteStore {
             .into_iter()
             .filter_map(|(id, payload)| payload.map(|payload| (id.as_str().to_string(), payload)))
             .collect();
+        let mark = trace.step("merge_prepare", mark);
 
         for (id, payload, text) in merged.values_mut() {
             let Some(stored) = stored_by_id.get(id.as_str()) else {
@@ -3211,13 +3250,18 @@ impl SqliteStore {
         };
 
         batch_manifest(&upserts, &deletes, &relations)?;
+        let mark = trace.step("manifest_validate", mark);
         self.ensure_stored_identity_metadata_matches(&upserts)?;
+        let mark = trace.step("identity_metadata_check", mark);
         if self.source_batches_are_current(&upserts, &relations)? {
             return Ok(false);
         }
+        let mark = trace.step("source_batches_are_current", mark);
 
         let pending = self.begin_index_batch_with_relations(&upserts, &deletes, &relations)?;
+        let mark = trace.step("begin_intent", mark);
         self.commit_index_batch_with_relations(&pending, &upserts, &deletes, &relations)?;
+        trace.step("commit_tx", mark);
         Ok(true)
     }
 
@@ -4779,9 +4823,12 @@ impl SqliteStore {
         deletes: &[StableId],
         relations: &RelationManifests,
     ) -> PortResult<()> {
+        let trace = CommitTrace::from_env();
+        let mut mark = std::time::Instant::now();
         let mut conn = self.conn.borrow_mut();
         let tx = conn.transaction().map_err(backend)?;
         Self::verify_pending_in_tx(&tx, pending, upserts, deletes, relations)?;
+        mark = trace.step("tx.verify_pending", mark);
 
         // Session 元数据投影（schema v11）：收集本批触碰的 Session，提交末尾
         // 逐个重建其 `session_fts` 行（删除按 rowid 经边车定位，重插新投影）。
@@ -4844,6 +4891,7 @@ impl SqliteStore {
         }
         Self::collect_placement_sessions(&tx, &old_placement_ids, &mut affected_sessions)?;
         Self::collect_resume_claim_sessions(&tx, &source_paths, &mut affected_sessions)?;
+        mark = trace.step("tx.affected_sessions", mark);
 
         // 批量写入：同一事务内以多行 VALUES 语句替代逐行 prepared execute
         // （借鉴 hstry bulk_insert_messages_in_tx，MIT，
@@ -4876,7 +4924,9 @@ impl SqliteStore {
             }
             // fts 行与 fts_ids 身份边车的批量维护（含按 rowid 的旧行删除）：
             // 与逐行路径同语义，rowid 显式分配（见 batch_upsert_fts_in_tx）。
+            mark = trace.step("tx.catalog_upsert", mark);
             Self::batch_upsert_fts_in_tx(&tx, upserts)?;
+            mark = trace.step("tx.fts_upsert", mark);
             for chunk in deletes.chunks(BULK_INSERT_ROWS_PER_CHUNK) {
                 let ids: Vec<&str> = chunk.iter().map(|id| id.as_str()).collect();
                 let placeholders = in_placeholders(ids.len());
@@ -4902,6 +4952,7 @@ impl SqliteStore {
                 .map_err(backend)?;
             }
         }
+        mark = trace.step("tx.catalog_delete", mark);
 
         for delete in &relations.relation_deletes {
             match delete {
@@ -4928,6 +4979,7 @@ impl SqliteStore {
                 }
             }
         }
+        mark = trace.step("tx.relation_delete", mark);
         // 关系行 upsert：多行批量（借鉴 hstry bulk_insert_messages_in_tx，MIT，
         // hstry/crates/hstry-core/src/db.rs:2990）。message_placements 8 列 ×
         // 100 行 = 800 参数，message_edges 4 列 × 100 行 = 400 参数，均低于
@@ -5027,6 +5079,7 @@ impl SqliteStore {
                     .map_err(backend)?;
             }
         }
+        mark = trace.step("tx.placement_edge_upsert", mark);
 
         // 工具活动 upsert（v12）：逐行 upsert。活动行是内容寻址的（activity_id），
         // 同一事实跨源去重；行数由工具调用数决定，量级远小于 placements/edges。
@@ -5056,6 +5109,7 @@ impl SqliteStore {
                 .map_err(backend)?;
             }
         }
+        mark = trace.step("tx.activity_upsert", mark);
 
         for source in &relations.source_replacements {
             tx.execute(
@@ -5194,10 +5248,17 @@ impl SqliteStore {
             .iter()
             .map(|replacement| replacement.source_path.clone())
             .collect();
+        mark = trace.step("tx.source_replacements", mark);
         Self::regenerate_compatibility_aliases_in_tx(&tx, &batch_sources)?;
+        mark = trace.step("tx.alias_regen", mark);
+        let affected_session_count = affected_sessions.len();
         for session_wire in affected_sessions {
             Self::rebuild_session_search_row_in_tx(&tx, &session_wire)?;
         }
+        if trace.0 {
+            eprintln!("asg-commit-trace: tx.session_rows_n {affected_session_count}");
+        }
+        mark = trace.step("tx.session_fts_rebuild", mark);
 
         // 本批触碰的关系行：只校验这些 id 的引用完整性。
         let mut touched_placements: Vec<String> = Vec::new();
@@ -5240,6 +5301,7 @@ impl SqliteStore {
             &touched_edges,
             &touched_claims,
         )?;
+        mark = trace.step("tx.verify_integrity", mark);
         // B1 路径（裸 commit_batch/commit_index_batch）只删 catalog 实体、不维护
         // v7 关系行：被删实体若仍被 message_placements/message_edges 引用，会留下
         // 悬空引用，必须在此拒绝（B2 路径的删除按 claimer 推导，天然无悬空）。
@@ -5258,7 +5320,9 @@ impl SqliteStore {
         )
         .map_err(backend)?;
 
+        let mark = trace.step("tx.activate", mark);
         tx.commit().map_err(backend)?;
+        trace.step("tx.commit_fsync", mark);
         Ok(())
     }
 
