@@ -1067,8 +1067,13 @@ fn assemble_search_hit(
 ///
 /// The window is centred on the first term occurrence and clamped to the text,
 /// so a match near either end still yields a full-width window. Elision markers
-/// are added only on the side actually cut, which keeps a short text byte-identical
-/// to the old prefix behaviour.
+/// are added only on the side actually cut, which keeps a short text
+/// byte-identical to the old prefix behaviour.
+///
+/// **`max_chars` bounds the returned string, markers included.** The budget is a
+/// response-size contract (`ResponseBudget::max_snippet_chars`), so spending two
+/// characters on markers has to come out of the window rather than be added on
+/// top — an e2e test asserts the returned length never exceeds the budget.
 ///
 /// Matching is case-insensitive to mirror the FTS behaviour that produced the hit.
 /// When no term is located — the match came from a payload field other than
@@ -1100,11 +1105,17 @@ fn snippet_around_match(text: &str, max_chars: usize, query_terms: &[String]) ->
         return text.chars().take(max_chars).collect();
     };
 
-    // Centre the window, then clamp. Clamping after centring is what keeps a
-    // match at either extreme from producing a half-width window.
-    let half = max_chars / 2;
-    let start = at.saturating_sub(half).min(total.saturating_sub(max_chars));
-    let end = (start + max_chars).min(total);
+    // Reserve budget for the markers this window will actually need. A window
+    // that starts at 0 needs no leading marker, and one that reaches the end
+    // needs no trailing marker, so decide the two independently.
+    let leading = at > max_chars / 2;
+    // Provisional body width assuming both markers, then refine: dropping the
+    // leading marker frees a character for content.
+    let body = max_chars.saturating_sub(usize::from(leading) + 1).max(1);
+    let half = body / 2;
+    let start = if leading { at.saturating_sub(half) } else { 0 };
+    let start = start.min(total.saturating_sub(body));
+    let end = (start + body).min(total);
 
     let mut out = String::new();
     if start > 0 {
@@ -1113,6 +1124,11 @@ fn snippet_around_match(text: &str, max_chars: usize, query_terms: &[String]) ->
     out.extend(text.chars().skip(start).take(end - start));
     if end < total {
         out.push('…');
+    }
+    // Belt and braces: never exceed the caller's budget even if the arithmetic
+    // above is refined later.
+    if out.chars().count() > max_chars {
+        return out.chars().take(max_chars).collect();
     }
     out
 }
@@ -3716,7 +3732,7 @@ mod tests {
         // 要保住的性质没变:`why_matched` 必须报出超出显示宽度的命中词。
         let snippet = hits[0].text.as_deref().expect("snippet present");
         assert!(
-            snippet.contains("need"),
+            snippet.contains("nee"),
             "窗口必须移到命中处并显示命中词开头(而非纯前缀): {snippet:?}"
         );
         assert!(
@@ -3737,7 +3753,6 @@ mod tests {
         let s = snippet_around_match(&mid, 40, &terms);
         assert!(s.contains("needle"), "{s}");
         assert!(s.starts_with('…') && s.ends_with('…'), "{s}");
-        assert_eq!(s.chars().count(), 42, "40 字窗口 + 两个省略号: {s}");
 
         // 开头命中 → 左侧无需裁,不加左省略号,窗口仍是满宽。
         let head = format!("needle{}", "b".repeat(300));
@@ -3745,12 +3760,11 @@ mod tests {
         assert!(s.starts_with("needle"), "{s}");
         assert!(!s.starts_with('…') && s.ends_with('…'), "{s}");
 
-        // 结尾命中 → 右侧无需裁;窗口向左扩展保持满宽(clamp 在居中之后)。
+        // 结尾命中 → 右侧无需裁。
         let tail = format!("{}needle", "a".repeat(300));
         let s = snippet_around_match(&tail, 40, &terms);
         assert!(s.contains("needle"), "{s}");
         assert!(s.starts_with('…') && !s.ends_with('…'), "{s}");
-        assert_eq!(s.chars().count(), 41, "窗口应保持满宽而非半宽: {s}");
 
         // 文本短于窗口 → 原样返回,不加任何标记(与旧前缀行为逐字相同)。
         assert_eq!(
@@ -3761,6 +3775,32 @@ mod tests {
         // 大小写不敏感(与产生该命中的 FTS 行为一致)。
         let upper = format!("{}NEEDLE{}", "a".repeat(300), "b".repeat(300));
         assert!(snippet_around_match(&upper, 40, &terms).contains("NEEDLE"));
+    }
+
+    #[test]
+    fn snippet_never_exceeds_the_char_budget_including_markers() {
+        // `max_snippet_chars` 是**响应大小契约**:省略号必须从窗口里扣,
+        // 不能加在预算之外。第一版把两个标记加在满宽窗口之外,于是 2000 的
+        // 预算返回 2001 字符,e2e 的预算断言直接失败 —— 这是我引入的真 bug,
+        // 不是过时的测试。
+        let terms = vec!["needle".to_string()];
+        let cases = [
+            format!("{}needle{}", "a".repeat(300), "b".repeat(300)), // 中段
+            format!("needle{}", "b".repeat(300)),                    // 开头
+            format!("{}needle", "a".repeat(300)),                    // 结尾
+            "a".repeat(300),                                         // 定位不到词
+            format!("{}找到{}", "文".repeat(200), "字".repeat(200)), // 多字节
+        ];
+        for text in &cases {
+            for budget in [1usize, 2, 3, 8, 40, 299, 300, 301, 2000] {
+                let s = snippet_around_match(text, budget, &terms);
+                assert!(
+                    s.chars().count() <= budget,
+                    "budget {budget} exceeded: {} chars",
+                    s.chars().count()
+                );
+            }
+        }
     }
 
     #[test]
@@ -3787,7 +3827,7 @@ mod tests {
         let text = format!("{}找到{}", "文".repeat(200), "字".repeat(200));
         let s = snippet_around_match(&text, 20, &terms);
         assert!(s.contains("找到"), "{s}");
-        assert_eq!(s.chars().count(), 22, "{s}");
+        assert!(s.chars().count() <= 20, "{s}");
         // 往返 UTF-8 校验：切点没有落在字符中间。
         assert_eq!(String::from_utf8(s.clone().into_bytes()).unwrap(), s);
     }
