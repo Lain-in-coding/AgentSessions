@@ -2420,6 +2420,29 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   公开仓库(注意:私有仓库的旧历史不推,从本轮起的干净 commit 开始)。
   **验收**:public-profile 扫描 0 findings;公开仓库历史真实且干净。
 
+  **✅ 导出侧已全绿实测(2026-08-19,`34748ab`)—— 剩下的只有"推送"本身。**
+  `python scripts/release/export_public_tree.py --destination <tmp>`:
+  **488 个文件导出成功,public-profile 隐私扫描 0 findings**(扫描是导出流程
+  自带的一步,失败会直接退出)。
+  对导出树的独立复验(不信脚本自述,逐项自己查):
+  - `.trellis/`、两份 go/no-go(含模板)、`PUBLIC-HISTORY-SCRUB.md`、
+    `R0-ARCHITECTURE-REVIEW.md`、以及发布工具本身(exporter + privacy_scan)
+    **全部不在导出树里**;
+  - 导出树 **`cargo fmt --check` 干净、`cargo build --workspace` 成功、
+    `cargo test --workspace` 全过**(209 + 204 + 其余全绿)——
+    也就是说公开树是一个自洽可构建的仓库,不是缺文件的残骸;
+  - 导出树内 **`docs/**` 全部 markdown 链接可解析,零坏链**。
+
+  **⚠️ 顺手修掉一个会静默复发的发布缺陷(`19649cf`)**:
+  排除清单**逐个文件名**列出了 `go-no-go.2026-08-16.md`,
+  于是**此后每一次彩排产出的 go/no-go 记录都会默认被发布出去** ——
+  而且失败是静默的(导出成功、内部决策草稿进了公开仓库)。
+  改为按日期前缀排除(`docs/release/go-no-go.2`),并加回归测试;
+  **实测把前缀规则去掉后该测试会失败**,不是空转测试。
+  同时修掉我自己写的 docs 索引里 **4 条指向不发布文件的死链**
+  (模板、两份记录、scrub runbook、架构评审)——
+  那 4 条链接在公开树里必然是坏的。
+
 - [ ] **M5-4 CHANGELOG 0.2.0 段 + tag + Release**
   按 D19 发 `v0.2.0`。Release notes 必须诚实列出仍存的限制
   (macOS 未验证、无签名二进制、未升 Beta 的 provider)。
