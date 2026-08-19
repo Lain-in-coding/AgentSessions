@@ -483,7 +483,8 @@ fn run(
     // tui：交互式只读浏览（Preview）。同 mcp 一样接管终端，不走 dispatch/
     // emit_result；输出模式 flag 对其无意义（design §0.6）。
     // `tui --snapshot-json <query>` 是无终端的 headless 结构投影，供 release
-    // 一致性 harness 复用同一 Application 搜索路径做跨入口比对。
+    // 一致性 harness 复用同一 Application 路径做跨入口比对；`<query>` 为空串
+    // 即 recency 浏览（与交互屏空查询回车同一 reducer 决策）。
     if rest.first().map(String::as_str) == Some("tui") {
         let mut tui_args = rest[1..].to_vec();
         let snapshot_query = extract_flag(&mut tui_args, "--snapshot-json")?;
@@ -493,7 +494,7 @@ fn run(
                     "tui --snapshot-json <query> takes no additional arguments",
                 ));
             }
-            let snapshot = tui::snapshot_search(&store, query)?;
+            let snapshot = tui::snapshot(&store, query)?;
             protocol::write_stdout_line(&snapshot.to_string());
             return Ok(protocol::Outcome::Success);
         }

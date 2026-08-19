@@ -115,9 +115,13 @@ pub(crate) enum KeyInput {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct SearchHitView {
     pub id: String,
-    pub score: f32,
+    /// 相关度分数；recency 浏览的行没有分数，此时为 `None`（不填 0 冒充分数）。
+    pub score: Option<f32>,
     pub session_id: Option<String>,
     pub resume_available: bool,
+    /// 会话最近活动时间戳（recency 浏览的排序键）；检索命中或 provider
+    /// 没给时间戳时为 `None`。
+    pub latest_activity: Option<String>,
 }
 
 /// 一页检索结果的平数据投影（glue 从 `AppResponse::Search` 构造）。
@@ -132,6 +136,10 @@ pub(crate) struct SearchPage {
     pub generation: u64,
     pub truncated: bool,
     pub truncation_reason: Option<String>,
+    /// 本页是否来自 recency 浏览（`list --sessions --sort recency` 的同一用例）。
+    /// 决定续页发哪个 Effect、以及 Enter 打开的是消息还是会话——**cursor
+    /// 是按排序维度签发的，两种列表的令牌不可互换**（Application 会拒绝）。
+    pub browse: bool,
 }
 
 /// 固定形状的只读 Resume Metadata 纯 UI 投影。字段缺失保持 `None`，不猜测。
@@ -191,6 +199,9 @@ pub(crate) struct Model {
     pub tool_kind: ToolKindMode,
     /// 最近一次错误或提示（如 `no hits`）；渲染进状态行，不弹窗、不退出。
     pub status: Option<String>,
+    /// 当前 Results 列表是 recency 浏览（会话）而不是检索命中（消息）。
+    /// 空查询回车即进入；决定续页 Effect 与 Enter 的打开语义。
+    pub browse: bool,
     /// 最近一次加载的截断事实（PARTIAL 渲染依据），来自 App 响应。
     pub truncated: bool,
     pub truncation_reason: Option<String>,
@@ -217,6 +228,7 @@ impl Default for Model {
             sidechain: SidechainMode::Include,
             tool_kind: ToolKindMode::Any,
             status: None,
+            browse: false,
             truncated: false,
             truncation_reason: None,
             warnings: Vec::new(),
@@ -247,6 +259,9 @@ pub(crate) enum Effect {
         cursor: Option<String>,
         facets: SearchFacets,
     },
+    /// Recency 浏览（M3-4）：无查询词列出最近会话（`list --sessions --sort
+    /// recency` 的同一 Application 用例）。`cursor` 同样是 App 原样回传的令牌。
+    ListRecentSessions { cursor: Option<String> },
     /// 命中→distinct Session candidates 解析 + 上下文装配。
     ResolveAndLoadContext {
         hit_id: String,
@@ -300,25 +315,18 @@ fn handle_key(mut model: Model, key: KeyInput) -> (Model, Option<Effect>) {
                 model.input.pop();
                 (model, None)
             }
-            // 空白查询不提交（与 App 的 empty-query 校验对齐，省一次必败请求）。
+            // 空查询不再是 no-op（M3-4）：它是"我最近干了什么"——按最近活动
+            // 列出会话。要检索就打字，要浏览就直接回车。
             KeyInput::Enter => {
                 if model.input.trim().is_empty() {
-                    return (model, None);
+                    model.query.clear();
+                    model.browse = true;
+                    begin_new_listing(&mut model);
+                    return (model, Some(Effect::ListRecentSessions { cursor: None }));
                 }
                 model.query = model.input.clone();
-                model.hits.clear();
-                model.selected = 0;
-                model.next_cursor = None;
-                model.has_more = false;
-                model.page_note = None;
-                model.status = None;
-                model.truncated = false;
-                model.truncation_reason = None;
-                model.warnings.clear();
-                // 新查询是一次全新浏览：旧的 ContextView/Resume Metadata 不得残留到
-                // 下次进入 Context 屏（Minor-11）。
-                model.context = None;
-                model.resume = None;
+                model.browse = false;
+                begin_new_listing(&mut model);
                 let effect = Effect::Search {
                     query: model.query.clone(),
                     cursor: None,
@@ -346,6 +354,15 @@ fn handle_key(mut model: Model, key: KeyInput) -> (Model, Option<Effect>) {
                 (model, None)
             }
             KeyInput::Enter => match model.hits.get(model.selected) {
+                // Recency 浏览的行本身就是会话：直接装配上下文。检索命中是消息，
+                // 仍需先解析归属会话（可能歧义）——两种语义不混用。
+                Some(hit) if model.browse => {
+                    let effect = Effect::LoadContext {
+                        session_id: hit.id.clone(),
+                        policy: model.policy,
+                    };
+                    (model, Some(effect))
+                }
                 Some(hit) => {
                     let effect = Effect::ResolveAndLoadContext {
                         hit_id: hit.id.clone(),
@@ -356,7 +373,14 @@ fn handle_key(mut model: Model, key: KeyInput) -> (Model, Option<Effect>) {
                 None => (model, None),
             },
             // 翻页 = 把 App 发行的令牌原样回传；无令牌即无下一页，no-op。
+            // 令牌绑定了排序维度，因此必须回到发行它的那个用例。
             KeyInput::Char('n') => match model.next_cursor.clone() {
+                Some(cursor) if model.has_more && model.browse => {
+                    let effect = Effect::ListRecentSessions {
+                        cursor: Some(cursor),
+                    };
+                    (model, Some(effect))
+                }
                 Some(cursor) if model.has_more => {
                     let effect = Effect::Search {
                         query: model.query.clone(),
@@ -461,12 +485,33 @@ fn handle_key(mut model: Model, key: KeyInput) -> (Model, Option<Effect>) {
     }
 }
 
+/// 一次全新列表（新查询或新 recency 浏览）的状态复位。
+///
+/// 旧的 ContextView/Resume Metadata 不得残留到下次进入 Context 屏（Minor-11）；
+/// 续读令牌与截断事实同样清空——新列表要用新令牌。
+fn begin_new_listing(model: &mut Model) {
+    model.hits.clear();
+    model.selected = 0;
+    model.next_cursor = None;
+    model.has_more = false;
+    model.page_note = None;
+    model.status = None;
+    model.truncated = false;
+    model.truncation_reason = None;
+    model.warnings.clear();
+    model.context = None;
+    model.resume = None;
+}
+
 /// 命中加载：追加语义（design §0.7）。首页从空表开始（提交时已清空），
 /// 追加页把选中行跳到本页首行；追加页为空（no-op 页）时选中行保持原位置
 /// 不回跳（Minor-10）；空结果如实报 `no hits`，界面保持可用。
 fn search_loaded(mut model: Model, page: SearchPage) -> (Model, Option<Effect>) {
     let prev = model.hits.len();
     let added = page.hits.len();
+    // 页自带来源标记：browse 页与检索页的续读令牌不可互换，Model 必须跟随
+    // 实际加载到的那一种（否则 `n` 会把令牌送回错的用例并被 App 拒绝）。
+    model.browse = page.browse;
     model.hits.extend(page.hits);
     let len = model.hits.len();
     model.selected = if len == 0 {
@@ -488,7 +533,13 @@ fn search_loaded(mut model: Model, page: SearchPage) -> (Model, Option<Effect>) 
         None
     };
     model.status = if len == 0 {
-        Some("no hits".to_string())
+        // 空 catalog 与"这个查询没命中"是两回事，但 core 看不到 catalog 计数；
+        // 措辞按实际用例区分，不谎称"没搜到"。
+        Some(if page.browse {
+            "no sessions".to_string()
+        } else {
+            "no hits".to_string()
+        })
     } else {
         None
     };
@@ -560,6 +611,9 @@ fn max_scroll(model: &Model) -> usize {
 
 /// 命中列表行：选中行前缀 `> `，其余两空格对齐；Session 与 Resume
 /// 可用性只展示 Application 已返回的结构化事实。
+///
+/// Recency 浏览的行没有相关度分数，展示的是排序键（最近活动时间戳）；
+/// provider 没给时间戳时渲染 `—`，绝不填一个看起来像时间的值。
 pub(crate) fn hit_lines(model: &Model) -> Vec<String> {
     model
         .hits
@@ -567,12 +621,20 @@ pub(crate) fn hit_lines(model: &Model) -> Vec<String> {
         .enumerate()
         .map(|(i, hit)| {
             let prefix = if i == model.selected { "> " } else { "  " };
-            let session = hit.session_id.as_deref().unwrap_or("—");
             let resume = if hit.resume_available { "yes" } else { "no" };
-            format!(
-                "{prefix}{}  score {:.3}  session {session}  resume {resume}",
-                hit.id, hit.score
-            )
+            match hit.score {
+                Some(score) => {
+                    let session = hit.session_id.as_deref().unwrap_or("—");
+                    format!(
+                        "{prefix}{}  score {score:.3}  session {session}  resume {resume}",
+                        hit.id
+                    )
+                }
+                None => {
+                    let last = hit.latest_activity.as_deref().unwrap_or("—");
+                    format!("{prefix}{}  last {last}  resume {resume}", hit.id)
+                }
+            }
         })
         .collect()
 }
@@ -663,7 +725,7 @@ pub(crate) fn status_line(model: &Model) -> String {
 pub(crate) fn title_line(model: &Model) -> String {
     match model.screen {
         Screen::Search => format!(
-            "Search - Enter: run  Esc: clear/quit  m: sidechain={}  k: tool={}",
+            "Search - Enter: run (empty = recent sessions)  Esc: clear/quit  m: sidechain={}  k: tool={}",
             model.sidechain.as_str(),
             model.tool_kind.as_str()
         ),
@@ -674,6 +736,12 @@ pub(crate) fn title_line(model: &Model) -> String {
                 .as_deref()
                 .map(|n| format!("  [{n}]"))
                 .unwrap_or_default();
+            if model.browse {
+                return format!(
+                    "Recent sessions - {} listed  newest activity first{more}{note}  Enter: open  Esc: back  q: quit",
+                    model.hits.len()
+                );
+            }
             format!(
                 "Results - {} hits  sidechain={} tool={}{more}{note}  Enter: open  m/k: facets  Esc: back  q: quit",
                 model.hits.len(),
@@ -718,9 +786,10 @@ mod tests {
     fn hit(id: &str, score: f32) -> SearchHitView {
         SearchHitView {
             id: id.to_string(),
-            score,
+            score: Some(score),
             session_id: None,
             resume_available: false,
+            latest_activity: None,
         }
     }
 
@@ -732,6 +801,29 @@ mod tests {
             generation: 7,
             truncated: false,
             truncation_reason: None,
+            browse: false,
+        }
+    }
+
+    /// recency 浏览的一页：行是会话，没有分数，带排序键（`None` = provider 没给时间）。
+    fn browse_page(rows: &[(&str, Option<&str>)], cursor: Option<&str>) -> SearchPage {
+        SearchPage {
+            hits: rows
+                .iter()
+                .map(|(id, latest)| SearchHitView {
+                    id: (*id).to_string(),
+                    score: None,
+                    session_id: Some((*id).to_string()),
+                    resume_available: false,
+                    latest_activity: latest.map(str::to_string),
+                })
+                .collect(),
+            next_cursor: cursor.map(str::to_string),
+            has_more: cursor.is_some(),
+            generation: 7,
+            truncated: false,
+            truncation_reason: None,
+            browse: true,
         }
     }
 
@@ -786,14 +878,89 @@ mod tests {
     }
 
     #[test]
-    fn enter_on_empty_input_is_noop() {
+    fn enter_on_empty_input_browses_recent_sessions() {
+        // 空查询回车曾是 no-op —— TUI 因此答不了"我昨天干了什么"（M3-4）。
         let (model, effect) = key(Model::default(), KeyInput::Enter);
-        assert!(effect.is_none());
-        assert_eq!(model.screen, Screen::Search);
-        // 纯空白同样不提交（App 会拒绝空查询，这里不发必败请求）。
+        assert_eq!(effect, Some(Effect::ListRecentSessions { cursor: None }));
+        assert!(model.browse);
+        assert!(model.query.is_empty());
+        assert_eq!(model.screen, Screen::Search); // 换屏由加载结果驱动
+        // 纯空白等同空查询：同样是浏览，而不是发一个必败的空检索。
         let (model, effect) = key(typed(Model::default(), "   "), KeyInput::Enter);
-        assert!(effect.is_none());
-        assert_eq!(model.input, "   ");
+        assert_eq!(effect, Some(Effect::ListRecentSessions { cursor: None }));
+        assert!(model.browse);
+    }
+
+    #[test]
+    fn browse_page_next_page_returns_the_recency_cursor_to_the_recency_use_case() {
+        // 令牌绑定排序维度：把 recency 令牌送进 Search 会被 Application 拒绝，
+        // 所以 `n` 必须回到发行它的那个用例。
+        let (model, _) = key(Model::default(), KeyInput::Enter);
+        let (model, _) = update(
+            model,
+            Msg::SearchLoaded(browse_page(
+                &[("ses_v1_a", Some("2026-08-18T21:30:00Z"))],
+                Some("browse-token"),
+            )),
+        );
+        assert_eq!(model.screen, Screen::Results);
+        assert!(model.browse);
+        let (_, effect) = key(model, KeyInput::Char('n'));
+        assert_eq!(
+            effect,
+            Some(Effect::ListRecentSessions {
+                cursor: Some("browse-token".into())
+            })
+        );
+    }
+
+    #[test]
+    fn browse_row_opens_the_session_directly() {
+        // 浏览行本身就是会话：不走"命中→归属会话"解析（那是消息的语义）。
+        let (model, _) = key(Model::default(), KeyInput::Enter);
+        let (model, _) = update(
+            model,
+            Msg::SearchLoaded(browse_page(&[("ses_v1_a", None)], None)),
+        );
+        let (_, effect) = key(model, KeyInput::Enter);
+        assert_eq!(
+            effect,
+            Some(Effect::LoadContext {
+                session_id: "ses_v1_a".into(),
+                policy: ContextPolicy::Mainline,
+            })
+        );
+    }
+
+    #[test]
+    fn browse_lines_show_the_sort_key_and_never_invent_a_time() {
+        let (model, _) = key(Model::default(), KeyInput::Enter);
+        let (model, _) = update(
+            model,
+            Msg::SearchLoaded(browse_page(
+                &[
+                    ("ses_v1_dated", Some("2026-08-18T21:30:00Z")),
+                    ("ses_v1_undated", None),
+                ],
+                None,
+            )),
+        );
+        let lines = hit_lines(&model);
+        assert_eq!(
+            lines,
+            vec![
+                "> ses_v1_dated  last 2026-08-18T21:30:00Z  resume no",
+                "  ses_v1_undated  last —  resume no",
+            ]
+        );
+        assert!(title_line(&model).starts_with("Recent sessions - 2 listed"));
+    }
+
+    #[test]
+    fn empty_browse_page_says_no_sessions_not_no_hits() {
+        let (model, _) = key(Model::default(), KeyInput::Enter);
+        let (model, _) = update(model, Msg::SearchLoaded(browse_page(&[], None)));
+        assert_eq!(model.status.as_deref(), Some("no sessions"));
     }
 
     #[test]
@@ -850,9 +1017,10 @@ mod tests {
         let mut loaded = page(&[], None);
         loaded.hits = vec![SearchHitView {
             id: "msg_v1_resumable".to_string(),
-            score: 2.0,
+            score: Some(2.0),
             session_id: Some("ses_v1_resumable".to_string()),
             resume_available: true,
+            latest_activity: None,
         }];
 
         let (model, effect) = update(submitted("rust"), Msg::SearchLoaded(loaded));
@@ -1078,9 +1246,10 @@ mod tests {
             query: "rust".into(),
             hits: vec![SearchHitView {
                 id: "msg_v1_a".into(),
-                score: 1.0,
+                score: Some(1.0),
                 session_id: Some("ses_v1_s".into()),
                 resume_available: false,
+                latest_activity: None,
             }],
             ..Model::default()
         };
@@ -1225,9 +1394,10 @@ mod tests {
         let mut model = results(&[], None);
         model.hits = vec![SearchHitView {
             id: "msg_v1_a".to_string(),
-            score: 2.0,
+            score: Some(2.0),
             session_id: Some("ses_v1_a".to_string()),
             resume_available: true,
+            latest_activity: None,
         }];
 
         let lines = hit_lines(&model);

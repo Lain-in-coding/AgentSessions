@@ -23,7 +23,7 @@ use crate::tui::core::{context_lines, hit_lines, resume_lines, status_line, titl
 use crate::{CliError, render, store_ref};
 use agent_session_grep_adapters_sqlite::SqliteStore;
 use agent_session_grep_application::{
-    App, AppError, AppRequest, AppResponse, ContextLevel, ResponseBudget,
+    App, AppError, AppRequest, AppResponse, ContextLevel, ListSort, ResponseBudget,
 };
 use agent_session_grep_domain::{ContextPolicy, StableId};
 use agent_session_grep_ports::{ResumeClaimsStore, SearchFilters};
@@ -65,22 +65,25 @@ pub(crate) fn run(store: &SqliteStore) -> Result<Outcome, CliError> {
 
 /// Headless structural projection for the release consistency harness.
 ///
-/// This does not automate a terminal. It drives the same [`Effect::Search`]
-/// path as the interactive reducer (shared Application projection) and
-/// serializes only the stable fields used by the cross-entry-point
-/// comparison: `outcome`, `data.hits[].id`, `page.has_more`, `page.next_cursor`.
-pub(crate) fn snapshot_search(
-    store: &SqliteStore,
-    query: String,
-) -> Result<serde_json::Value, CliError> {
-    match execute(
-        store,
+/// This does not automate a terminal. It drives the same reducer decision the
+/// interactive Search screen makes on Enter — a non-empty query runs
+/// [`Effect::Search`], an empty query browses recent sessions via
+/// [`Effect::ListRecentSessions`] — and serializes only the stable fields used
+/// by the cross-entry-point comparison: `outcome`, `data.hits[].id`,
+/// `page.has_more`, `page.next_cursor`. Recency rows also carry
+/// `latest_activity` so the sort key is inspectable, `null` when the provider
+/// reported no timestamp.
+pub(crate) fn snapshot(store: &SqliteStore, query: String) -> Result<serde_json::Value, CliError> {
+    let effect = if query.trim().is_empty() {
+        Effect::ListRecentSessions { cursor: None }
+    } else {
         Effect::Search {
             query,
             cursor: None,
             facets: agent_session_grep_ports::SearchFacets::default(),
-        },
-    ) {
+        }
+    };
+    match execute(store, effect) {
         Msg::SearchLoaded(page) => {
             let outcome = if page.truncated { "partial" } else { "success" };
             Ok(serde_json::json!({
@@ -88,6 +91,7 @@ pub(crate) fn snapshot_search(
                 "data": {
                     "hits": page.hits.into_iter().map(|hit| serde_json::json!({
                         "id": hit.id,
+                        "latest_activity": hit.latest_activity,
                     })).collect::<Vec<_>>(),
                 },
                 "page": {
@@ -97,11 +101,11 @@ pub(crate) fn snapshot_search(
                 "warnings": [],
             }))
         }
-        Msg::EffectFailed(message) => Err(CliError::usage(format!(
-            "tui snapshot search failed: {message}"
-        ))),
+        Msg::EffectFailed(message) => {
+            Err(CliError::usage(format!("tui snapshot failed: {message}")))
+        }
         _ => Err(CliError::usage(
-            "tui snapshot search received an unexpected projection",
+            "tui snapshot received an unexpected projection",
         )),
     }
 }
@@ -193,6 +197,21 @@ fn execute(store: &SqliteStore, effect: Effect) -> Msg {
                 Err(error) => failed(error),
             }
         }
+        Effect::ListRecentSessions { cursor } => {
+            let request = AppRequest::List {
+                limit: SEARCH_PAGE_LIMIT,
+                cursor,
+                budget: ResponseBudget::default(),
+                // 与 CLI `list --sessions --sort recency` 和 MCP
+                // `list_sessions(sort=recency)` 是同一个用例，排序规则零复制。
+                sessions_only: true,
+                sort: ListSort::RecencyDesc,
+            };
+            match app.handle(request) {
+                Ok(response) => recent_sessions_msg(store, response),
+                Err(error) => failed(error),
+            }
+        }
         Effect::ResolveAndLoadContext { hit_id, policy } => resolve_and_load(&app, &hit_id, policy),
         Effect::LoadContext { session_id, policy } => load_context(&app, &session_id, policy),
         Effect::LoadResumeMetadata { session_id } => load_resume_metadata(&app, &session_id),
@@ -215,9 +234,10 @@ fn search_msg(response: AppResponse) -> Msg {
                 .into_iter()
                 .map(|hit| SearchHitView {
                     id: hit.id.as_str().to_string(),
-                    score: hit.score,
+                    score: Some(hit.score),
                     session_id: hit.session_id,
                     resume_available: hit.resume_available,
+                    latest_activity: None,
                 })
                 .collect();
             Msg::SearchLoaded(SearchPage {
@@ -227,9 +247,59 @@ fn search_msg(response: AppResponse) -> Msg {
                 generation,
                 truncated: truncation.truncated,
                 truncation_reason: truncation.reason,
+                browse: false,
             })
         }
         _ => internal("unexpected response for search"),
+    }
+}
+
+/// `AppResponse::List`（recency 排序）→ 同一页投影。
+///
+/// 会话行没有相关度分数（`score: None`），展示的是 Application 给出的排序键。
+/// Resume 可用性对本页会话**一次批量解析**（与 main.rs 的 human 会话表格同一
+/// 惯例），不逐会话查询。
+fn recent_sessions_msg(store: &SqliteStore, response: AppResponse) -> Msg {
+    match response {
+        AppResponse::List {
+            entries,
+            next_cursor,
+            generation,
+            truncation,
+        } => {
+            let ids: Vec<StableId> = entries.iter().map(|entry| entry.id.clone()).collect();
+            let metadata = match store.resume_of(&ids) {
+                Ok(metadata) => metadata,
+                Err(error) => return failed(AppError::Port(error)),
+            };
+            let availability: HashMap<String, bool> = metadata
+                .iter()
+                .map(|meta| (meta.session_id.as_str().to_string(), meta.resume_available))
+                .collect();
+            let hits = entries
+                .into_iter()
+                .map(|entry| {
+                    let wire = entry.id.as_str().to_string();
+                    SearchHitView {
+                        resume_available: availability.get(&wire).copied().unwrap_or(false),
+                        session_id: Some(wire.clone()),
+                        id: wire,
+                        score: None,
+                        latest_activity: entry.latest_activity,
+                    }
+                })
+                .collect();
+            Msg::SearchLoaded(SearchPage {
+                hits,
+                has_more: next_cursor.is_some(),
+                next_cursor,
+                generation,
+                truncated: truncation.truncated,
+                truncation_reason: truncation.reason,
+                browse: true,
+            })
+        }
+        _ => internal("unexpected response for recent sessions"),
     }
 }
 
