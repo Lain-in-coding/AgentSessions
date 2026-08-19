@@ -1862,13 +1862,26 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   "未来网络能力的前置门,当前默认构建无网络能力所以无操作"。
   **验收**:`--offline` 的语义与实现一致。
 
-- [ ] **M3-13 死代码清理:`activity.rs` 整个文件无生产调用者**
+- [x] **M3-13 死代码清理:`activity.rs` 整个文件无生产调用者** —— **已删(`1a05104`)**
   `application/src/activity.rs`(14.9 KB)的 `extract_activities`、
   `filter_by_kind`、`filter_by_status`、`file_targets`、`command_targets`
   **零生产调用者**(全仓库搜索确认);实际走的是
-  `ports::infer_tool_activity_kind`(`ports/src/lib.rs:440-449`)。
+  `ports::infer_tool_activity_kind`(**实际在 `ports/src/lib.rs:492`,
+  原记录的 440-449 已过时**)。
   **修法**:删除,或接进生产路径(如果它确实比现用的实现更好)。
   **验收**:无死代码;若保留则有调用者。
+
+  **✅ 选择删除,理由是两者在原则上冲突**(不是"没人用所以删"这么简单):
+  生产路径 `ports::build_tool_activity` 是**刻意 fail-closed** 的 ——
+  未知工具名 → `kind = Unknown` **且** `target = None`,且**从不推断 status**
+  (`ports/src/lib.rs:505-529`)。
+  而这个死模块**处处在猜**:工具名缺失时默认成 `"unknown"`
+  (`:119`)、无法识别的一律归为 `ToolCall`(`:203`)、
+  **靠在结果前 200 字符里子串匹配 "error"/"failed"/"exception" 来判定失败**
+  (`:225`)。把它接进生产等于把本仓库明确拒绝做的推断给发出去。
+  → **删除是唯一与既有原则一致的选项。**
+  删掉后 workspace 编译与测试全绿(这正是"确实无人可达"的证据);
+  测试数 198 → 187,少掉的 11 条全是该模块自己的测试。
 
 - [ ] **M3-14 handoff pack 的两个字段永远是空**
   `provenance: None` 恒真(`handoff_pack.rs:236`),
