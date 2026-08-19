@@ -1089,13 +1089,55 @@ mod tests {
 
     #[test]
     fn serialized_pack_has_no_path_keys_or_jsonl_paths() {
-        // 隐私契约：pack 序列化不含任何 path 型 key 或 transcript 路径字符串。
+        // 隐私契约：pack 序列化不含任何 path 型 key 或 transcript **路径**。
+        //
+        // ⚠️ 这条断言曾是 `!text.contains(".jsonl")`,是个**潜在的假绿**:
+        // 它只因为这个 fixture 没有 tool activity 才通过。真实会话读过一个
+        // transcript 文件时,`tool_activity[].target` 会合法地留下**裸文件名**
+        // `session.jsonl`(目录链已按 ADR-0009 归约掉),于是那条 blanket 断言
+        // 会把一个正确的行为报成泄漏 —— 测试自己会先坏掉。
+        //
+        // 要保的性质是"**没有目录链**",不是"没有文件名":目录链才标识机器、
+        // 用户与无关项目;裸文件名是有用的证据。所以断言改为拒绝带分隔符的
+        // transcript 路径,并另有 fixture 覆盖真实 activity(见下两条测试)。
         let hits = vec![hit("msg_v1_aaa", 1.0, "hello world")];
         let pack = generate(&hits);
         let json = serde_json::to_value(&pack).unwrap();
         assert_no_path_keys(&json);
         let text = serde_json::to_string(&pack).unwrap();
-        assert!(!text.contains(".jsonl"), "transcript path leaked: {text}");
+        for leaked in ["/", "\\\\", "\\"] {
+            let probe = format!("{leaked}session.jsonl");
+            assert!(
+                !text.contains(&probe),
+                "transcript path with a directory chain leaked ({probe}): {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_transcript_basename_survives_but_its_directory_chain_does_not() {
+        // 证明上面那条断言原本的 blanket `.jsonl` 形式是个假绿:真实会话读过
+        // transcript 时,归约后的裸文件名**合法保留**,而带目录的形式必须消失。
+        // 两半都钉住,所以将来谁把 blanket 规则加回来会立刻失败。
+        let hits = vec![hit("msg_v1_aaa", 1.0, "hello world")];
+        let locs = locations(&hits);
+        let activities = vec![serde_json::json!({
+            "name": "Read",
+            "target": "/placeholder-private-dir/projects/session.jsonl",
+        })];
+        let mut input = default_input(&hits, &locs);
+        input.tool_activities = &activities;
+        let pack = generate_deterministic(input);
+        let text = serde_json::to_string(&pack).unwrap();
+
+        assert!(
+            text.contains("session.jsonl"),
+            "裸文件名是有用证据,不应被删掉: {text}"
+        );
+        assert!(
+            !text.contains("placeholder-private-dir") && !text.contains("/session.jsonl"),
+            "目录链必须消失: {text}"
+        );
     }
 
     /// 上面那条测试**漏掉了一个真实泄漏**，原因值得记住：它只拒绝**键名**含
