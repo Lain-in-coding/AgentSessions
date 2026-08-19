@@ -26,6 +26,7 @@ pub mod cursor;
 pub mod embedding;
 pub mod evidence;
 pub mod guidance;
+pub mod handoff_markdown;
 pub mod handoff_pack;
 pub mod hybrid;
 pub mod resume;

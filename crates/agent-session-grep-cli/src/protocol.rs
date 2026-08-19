@@ -37,6 +37,11 @@ pub enum OutputMode {
     Json,
     /// 每行一个完整协议 frame。
     Jsonl,
+    /// Handoff pack 的 Markdown 投影（`schemas/handoff/v1/pack.schema.json`
+    /// 声明的 deterministic projection）。人类面输出：`stdout` 只承载 Markdown
+    /// 文档本身，诊断仍走 stderr。只有 `handoff` 有这个投影，其它命令按
+    /// `invalid_request` 拒绝——不静默降级成另一种模式。
+    Markdown,
 }
 
 /// `schemas/robot/v1/error-catalog.json` 中错误目录的实现子集。
@@ -276,12 +281,13 @@ impl From<PortError> for ProtocolError {
     }
 }
 
-/// 从参数中解析输出模式：`--robot` 等价稳定 JSON；`--output human|json|jsonl`。
+/// 从参数中解析输出模式：`--robot` 等价稳定 JSON；`--output human|json|jsonl|markdown`。
 ///
 /// `--robot` 优先级最高（等价 `--output json` + 无色 + 无进度）。缺省为 Human。
 /// 未知或缺少 `--output` 值属于请求错误，不能静默降级为另一种协议；
 /// `--output` 与 `--robot` 互相冲突、同类 flag 重复出现同样是请求错误，
-/// 不允许静默 first-wins（R8.2）。
+/// 不允许静默 first-wins（R8.2）。`markdown` 因此也永远不可能与 `--robot`
+/// 同时生效——两者组合在这里就被拒绝。
 ///
 /// flag 只在前缀位置识别：扫描在第一个裸参数（命令名）处停止，命令名之后的
 /// token 一律不当 flag——否则 `search --robot` 这类"查询文本恰等于 flag 名"
@@ -308,8 +314,9 @@ pub fn parse_output_mode(args: &[String]) -> Result<OutputMode, String> {
                     Some("human") => OutputMode::Human,
                     Some("json") => OutputMode::Json,
                     Some("jsonl") => OutputMode::Jsonl,
+                    Some("markdown") => OutputMode::Markdown,
                     Some(value) => return Err(format!("unsupported output mode: {value}")),
-                    None => return Err("--output requires human|json|jsonl".into()),
+                    None => return Err("--output requires human|json|jsonl|markdown".into()),
                 };
                 if chosen.is_some() {
                     return Err(
@@ -323,7 +330,7 @@ pub fn parse_output_mode(args: &[String]) -> Result<OutputMode, String> {
             // 列表必须与 main.rs 各前缀扫描器（extract_request_id/command_name/
             // intercept_help_or_version/extract_db_flag_impl）保持一致，漏掉一个
             // 会让它的取值把后面的 --robot/--output 挡在扫描之外。
-            "--db" | "--request-id" | "--cursor" | "--max-items" | "--max-bytes"
+            "--db" | "--out" | "--request-id" | "--cursor" | "--max-items" | "--max-bytes"
             | "--max-messages" | "--max-evidence" | "--max-tokens" | "--policy" | "--level"
             | "--provider" | "--since" | "--until" | "--session" | "--around" | "--tool-kind"
             | "--tool-name" => {
@@ -333,6 +340,87 @@ pub fn parse_output_mode(args: &[String]) -> Result<OutputMode, String> {
         }
     }
     Ok(chosen.unwrap_or(OutputMode::Human))
+}
+
+/// 主输出（primary payload）的落点：默认 stdout，`--out <path>` 改写到文件。
+///
+/// 只有"本次命令的结果载荷"受影响——错误 envelope、warning 与进程诊断依旧按
+/// CONTRACT §6 分别走 stdout/stderr，所以失败的命令不会留下半个文件。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PayloadSink {
+    Stdout,
+    /// 写入这个路径。**永不覆盖**已存在的路径。
+    File(std::path::PathBuf),
+}
+
+impl PayloadSink {
+    /// 是否重定向到文件（用于拒绝那些整段接管 stdout 的命令）。
+    pub fn is_file(&self) -> bool {
+        matches!(self, PayloadSink::File(_))
+    }
+
+    /// 写出逐行载荷。行以 `\n` 连接并以 `\n` 结尾——与历史上的逐行 stdout
+    /// 路径逐字节相同。
+    pub fn write_lines(&self, lines: &[String]) -> Result<(), ProtocolError> {
+        let mut payload = String::new();
+        for line in lines {
+            payload.push_str(line);
+            payload.push('\n');
+        }
+        self.write_verbatim(&payload)
+    }
+
+    /// 写出已渲染好的载荷，逐字节原样输出。
+    ///
+    /// Markdown 投影的字节本身就是契约（同一 pack 必须产出同一字节），所以这里
+    /// 不做任何换行归一或重排。
+    pub fn write_verbatim(&self, payload: &str) -> Result<(), ProtocolError> {
+        match self {
+            PayloadSink::Stdout => {
+                write_stdout_bytes(payload.as_bytes());
+                Ok(())
+            }
+            PayloadSink::File(path) => {
+                // `create_new` 同时挡掉两件事：覆盖已有文件，以及跟随符号链接
+                // 写到链接目标去（O_EXCL 对已存在的链接——包括悬空链接——直接
+                // 失败，不解析目标）。因此没有"静默 clobber"，也没有
+                // symlink-follow 写入。
+                let mut file = match std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(path)
+                {
+                    Ok(file) => file,
+                    Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+                        return Err(ProtocolError::new(
+                            CanonicalCode::InvalidRequest,
+                            format!(
+                                "--out {}: that path already exists and this command never overwrites; delete it or choose another path",
+                                path.display()
+                            ),
+                        ));
+                    }
+                    Err(error) => {
+                        return Err(ProtocolError::new(
+                            CanonicalCode::SourceIo,
+                            format!("--out {}: cannot create the file: {error}", path.display()),
+                        ));
+                    }
+                };
+                file.write_all(payload.as_bytes())
+                    .and_then(|()| file.flush())
+                    .map_err(|error| {
+                        ProtocolError::new(
+                            CanonicalCode::SourceIo,
+                            format!("--out {}: cannot write the file: {error}", path.display()),
+                        )
+                    })?;
+                // 完成诊断走 stderr（CONTRACT §6），stdout 保持只承载协议数据。
+                eprintln!("wrote {} bytes to {}", payload.len(), path.display());
+                Ok(())
+            }
+        }
+    }
 }
 
 /// request_id 语义：调用方提供（`--request-id`）则逐字回显；缺省生成 `cli-<pid>-<millis>`。
@@ -478,12 +566,18 @@ fn stream_frame(
 /// 其余写失败归 source_io 类 → stderr 一行诊断 + exit 5。
 /// 逐行 flush 是必须的：块缓冲下 EPIPE 只在冲刷时暴露，且 jsonl 进度帧要求实时可见。
 pub fn write_stdout_line(line: &str) {
+    let mut payload = String::with_capacity(line.len() + 1);
+    payload.push_str(line);
+    payload.push('\n');
+    write_stdout_bytes(payload.as_bytes());
+}
+
+/// stdout 写入的唯一实现：EPIPE 静默 exit 0（下游 `head`/`less` 提前关闭不是
+/// 错误），其它 I/O 失败按 `source_io` exit 5 上报。
+fn write_stdout_bytes(bytes: &[u8]) {
     let stdout = std::io::stdout();
     let mut handle = stdout.lock();
-    let result = handle
-        .write_all(line.as_bytes())
-        .and_then(|()| handle.write_all(b"\n"))
-        .and_then(|()| handle.flush());
+    let result = handle.write_all(bytes).and_then(|()| handle.flush());
     if let Err(error) = result {
         if error.kind() == ErrorKind::BrokenPipe {
             std::process::exit(0);
