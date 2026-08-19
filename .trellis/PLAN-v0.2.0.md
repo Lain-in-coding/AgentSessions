@@ -1546,12 +1546,24 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   limit 从 $0 调到 >$0 后立刻恢复。
   **验收**:public 仓库上一个 workflow 真实跑完并绿。
 
-- [ ] **M2C-3 砍 PR 上的 macOS job(即便免费了也该做)**
+- [x] **M2C-3 砍 PR 上的 macOS job(即便免费了也该做)** —— **已做(`63583ae`)**
   macOS 占历史消耗 83%,且 Free plan 有 **5 并发 macOS job 上限**。
   当前 `ci.yml` 和 `core-beta-evidence.yml` **各自**都开了三平台/四目标
   matrix,两个 workflow 叠加会顶到并发墙。
   改:macOS 只在 tag / push-to-main 上跑,PR 只跑 Linux + Windows。
   **验收**:PR 触发的 job 数下降;matrix 不撞并发上限。
+
+  **✅ 实测(用脚本对两个分支各自求值,不靠肉眼看 YAML)**:
+  PR **10 → 6 个 job,macOS 归零**;push-to-main 仍是完整的 3 + 4。
+
+  **⚠️ 踩坑(差点写出一个看起来对、实际永不生效的条件)**:
+  第一版把筛选写在 **job 级 `if:`** 上(`if: ... || !matrix.darwin`)。
+  查 GitHub 官方 contexts 文档后确认:**`jobs.<id>.if` 拿不到 `matrix` 上下文**
+  (该处只有 `github` / `needs` / `vars` / `inputs`)。
+  于是 `matrix.darwin` 求值为空 → 条件恒真 → **macOS 照跑,而 diff 看着像修好了**。
+  正解是把选择放在 `strategy.matrix` 里用 `fromJSON(github.event_name == ...)`
+  ——`github` 在那里是可用的。
+  **教训**:YAML 改完能解析 ≠ 语义正确;条件类改动必须对两个分支分别求值验证。
 
 - [ ] **M2C-4 转 public 后开启 fork PR 审批**
   当前 `default_workflow_permissions: read` /
