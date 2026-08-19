@@ -19,12 +19,17 @@ Human mode prints two lines to stderr:
 
 ```
 error [<canonical_code>]: <message>
-下一步：<generic next step for that code>
+Next step: <generic next step for that code>
 ```
 
-The `下一步:` line is a generic per-code fallback and is **omitted** when the
+The `Next step:` line is a generic per-code fallback and is **omitted** when the
 message already contains a runnable `asg` or `agent-session-grep` command — in
-that case the message itself is the next step.
+that case the message itself is the next step. For `invalid_request`, by far the
+most common code, the fallback is always the same line:
+
+```
+Next step: Check the command and flag spelling; run --help for full usage
+```
 
 Machine mode (`--robot`, `--output json`, `--output jsonl`) prints a single
 error envelope on stdout with a stable `error.code` and `error.retryable`. Script
@@ -35,11 +40,11 @@ wording.
 
 | What you saw | What it means | What to do |
 | --- | --- | --- |
-| `no hits` followed by `提示：试试更短或更少的关键词（如只搜一个词）。` | The query ran; the index simply contains no match. Exit 0. | Try a shorter query or a single word. Search is plain-text and lexical by default — it does not stem, expand synonyms, or infer meaning. |
+| `no hits` followed by `Hint: try a shorter query, or fewer words (a single word often works).` | The query ran; the index simply contains no match. Exit 0. | Try a shorter query or a single word. Search is plain-text and lexical by default — it does not stem, expand synonyms, or infer meaning. |
 | `the catalog is empty (nothing has been indexed yet)` followed by `Next: asg …sync --discover` | The store exists but has never been populated, so *every* query would return nothing. Exit 0. | Run the command on the `Next:` line verbatim. |
-| `catalog is empty` (from `list`) | Same condition, seen from `list`. Exit 0. | Same. |
-| `The catalog is empty — run: asg …sync --discover` (from `status`) | Same condition, seen from `status`. Exit 0. | Same. |
-| `db: not-checked` with `hint: 未指定数据库…` (from `doctor`) | `doctor` was run without `--db`, so it only checked build facts. This is **not** a failed self-check. | Run `agent-session-grep doctor --db <path>` to actually validate a store and its schema. |
+| The same two lines from `list` | Same condition, seen from `list`. `list` prints the identical pair, not a shorter variant. Exit 0. | Same. |
+| `The catalog is empty — run: asg …sync --discover` (from `status`, after the `entities: 0` / `generation: N` lines) | Same condition, seen from `status`. Exit 0. | Same. |
+| `db: not-checked` with `hint: no --db given: the checks above cover the environment only. Run doctor --db <path> to verify the store and its schema.` (from `doctor`) | `doctor` was run without `--db`, so it only checked build facts. This is **not** a failed self-check. `schema` is reported as `null` in this mode. | Run `agent-session-grep doctor --db <path>` to actually validate a store and its schema. |
 | `available: false` with an `unavailable_reason` (from `resume`) | This session's provider has no verified resume command. Exit 0 — history stays searchable even when it cannot be resumed. | Use `get-session-resume` to read `provider_session_id`, then run the provider's own resume flow yourself. The tool will not invent a command. |
 | `retrieval_mode: lexical_fallback` plus a warning | You asked for `--mode semantic` or `--mode hybrid` but the vector index is not built, so the query ran lexically. It is reported rather than silently substituted. | Run `agent-session-grep --db <path> index embeddings`, then retry. |
 
@@ -55,9 +60,9 @@ wording.
 | `duplicate --db flag` | `--db` given twice. There is no last-wins. | Give it once. |
 | `--request-id must match ^[A-Za-z0-9._:-]+$ (1..=128 chars), got "…"` | Invalid correlation id. It is rejected rather than silently replaced, because a substituted id would look like successful correlation. | Use only `A-Za-z0-9._:-`, 1 to 128 characters. |
 | `unsupported output mode: xml` | `--output` got a value outside `human\|json\|jsonl`. | Use one of the three. |
-| `conflicting output flags: --robot cannot be combined with --output` | Both were given. | Pick one; `--robot` is exactly `--output json`. |
-| `missing subcommand.` plus the full command list | No command name on the line. | Pick a command from the printed list. |
-| `unknown subcommand: handof` plus `Did you mean \`handoff\`?` | Typo. The suggestion comes from edit distance and is omitted when nothing is close enough — no guessing. | Use the suggested name, or pick from the printed list. |
+| `duplicate output flags: --output cannot be repeated or combined with --robot` | Both were given, or `--output` was repeated. | Pick one; `--robot` is exactly `--output json`. Note this message arrives as a **JSON error envelope on stdout**, not as a human `error [...]` line, because `--robot` has already taken effect by the time the conflict is detected. |
+| `missing subcommand.` then `Available commands: …` then `Run \`--help\` for full usage.` | No command name on the line. | Pick a command from the printed list. |
+| `unknown subcommand: handof` then `Did you mean \`handoff\`?` then the same `Available commands:` list | Typo. The suggestion comes from edit distance and is omitted when nothing is close enough — no guessing. | Use the suggested name, or pick from the printed list. |
 | `doctor takes no positional arguments` / `mcp takes no positional arguments` / `serve takes no positional arguments` / `tui takes no positional arguments` / `providers takes no positional arguments` | An extra token, including an unknown `--`-prefixed one. Unknown flags are counted as stray positionals on purpose, so a typo cannot be silently discarded and reported as success. | Remove the extra token. |
 | `config paths is the only supported config command` / `config paths takes no additional arguments` | Any other `config` subcommand. | Use `config paths`. |
 
@@ -76,7 +81,7 @@ wording.
 | --- | --- | --- |
 | `unknown provider: <value> (expected claude\|aider\|antigravity\|claude-code\|cline\|codex\|cursor\|grok-build\|hermes\|kimi-code\|openclaw\|opencode\|pi\|qoder\|tencent-codebuddy)` | An unrecognized `search --provider` / `hook --provider` value. The accepted list is derived from the capability matrix, so it is always current. | Copy a value from the printed list. `claude` is an alias for `claude-code`. Note that `search --help` still advertises only `claude\|claude-code\|codex` — the error message is the accurate list. |
 | `sync --provider: unknown provider <value>; expected one of aider\|antigravity\|claude-code\|cline\|codex\|cursor\|grok-build\|hermes\|kimi-code\|openclaw\|opencode\|pi\|qoder\|tencent-codebuddy` | An unrecognized `sync --provider` value. This list is adapter ids only — no `claude` alias. | Use `claude-code`, not `claude`. |
-| `no provider recognized this source[: <detail>]. Supported transcript formats are listed by \`agent-session-grep providers\`; if this file is not an agent transcript, leave it out` | No adapter claimed the file. When a `<detail>` is present it comes from an adapter in the *same* format family as the file, so it usually names the offending line. | Run `agent-session-grep providers` to see supported formats. If the file is not an agent transcript, exclude it. If it should be recognized, the `<detail>` is the repair hint — a JSONL adapter will name the bad line numbers. |
+| `invalid request: no provider recognized this source[: <detail>]. Supported transcript formats are listed by \`agent-session-grep providers\`; if this file is not an agent transcript, leave it out` | No adapter claimed the file. When a `<detail>` is present it comes from an adapter in the *same* format family as the file, so it usually names the offending line. | Run `agent-session-grep providers` to see supported formats. If the file is not an agent transcript, exclude it. If it should be recognized, the `<detail>` is the repair hint — a JSONL adapter will name the bad line numbers. **Note** the message body redundantly restates `invalid request:` after the `error [invalid_request]:` prefix, so the full line reads `error [invalid_request]: invalid request: no provider recognized…`. Cosmetic, but do not treat the doubling as a sign of a different error. |
 | `ambiguous provider selection: N variants matched with equal confidence (<list>); this source's shape is not distinctive enough to attribute, so it is refused rather than guessed. Re-run with \`sync --provider <id> <file>\` to name the provider explicitly` | Several adapters matched equally well. Some providers genuinely share an on-disk shape (for example `pi` and `openclaw`), so no content probe can separate them. Refusal is deliberate. | Re-run with `sync --provider <id> <file>` naming the correct provider. If the message also says `<id> was named as the expected provider, but <id> is not among the tied candidates`, then the provider you named is not one of the tied ones — pick one from the listed variants. |
 
 ### Facets, budgets, and modes
@@ -91,9 +96,9 @@ wording.
 | `--level must be raw\|talks\|sessions, got <value>` | Bad `context --level`. | Use one of the three. |
 | `response budget too small: max_response_bytes = <n> is below the floor 4096` | `--max-bytes` under 4096. | Use 4096 or more. |
 | `--max-items must be a non-negative integer` / `--max-bytes …` / `--max-messages …` | Non-numeric value. | Supply an integer. |
-| `--max-evidence 需要正整数` / `--max-tokens 需要正整数` / `--max-bytes 需要正整数` (from `handoff`) | Non-numeric value on a `handoff` budget flag. | Supply a positive integer. |
-| `--max-tokens 需要非负整数` / `--decay-days 需要非负整数` (from `hook`) | Non-numeric value on a `hook` flag. | Supply a non-negative integer. |
-| `--port 需要 0-65535 的整数` (from `serve`) | Bad port. | Use 0 (random free port) through 65535. |
+| `--max-evidence requires a positive integer` / `--max-tokens requires a positive integer` / `--max-bytes requires a positive integer` (from `handoff`) | Non-numeric or zero value on a `handoff` budget flag. | Supply a positive integer. |
+| `--max-tokens requires a non-negative integer` / `--decay-days requires a non-negative integer` (from `hook`) | Non-numeric value on a `hook` flag. | Supply a non-negative integer. |
+| `--port requires an integer in 0-65535` (from `serve`) | Bad port — non-numeric, or numeric but out of range (`--port 99999` gives the same message). | Use 0 (random free port) through 65535. |
 | `--since must be an RFC3339/ISO-8601 timestamp or a compact duration (1h\|1d\|1w), got "…"` (also for `--until`) | Unparseable time bound. | Use an absolute timestamp with offset such as `2026-08-01T00:00:00Z`, or a compact duration `1h` / `1d` / `1w`. Over MCP, compact durations are rejected — the protocol carries no clock reference, so only absolute timestamps are accepted there. |
 | `--around must be a non-negative integer` | Bad `get-message --around`. | Supply 0 or more. |
 | `list [limit]: limit must be an integer` | Non-numeric positional limit. | Supply an integer. |
@@ -114,12 +119,12 @@ re-run the query from page one. Never retry the same token.
 
 | What you saw | Fix |
 | --- | --- |
-| `sync --discover 与 --from-file 互斥：…` | Use one. `--discover` finds paths from provider roots; `--from-file` reads them from a manifest. |
-| `sync --discover 不接受路径或额外 flag；路径由 provider 数据根自动发现` | Drop the paths and the extra flags. |
-| `sync --discover 与 --provider 互斥：…` | `--discover` infers attribution from each provider's root, which conflicts with naming a single provider. |
-| `sync --from-file <list> 不接受额外路径：路径全部来自清单文件` | Put every path in the manifest. |
-| `sync --from-file: <path> 里没有任何路径（空行与 # 注释会被忽略）` | The manifest is empty or entirely blank lines and comments. Add one path per line. |
-| `index <id-fact> <text> 是开发直写入口，…确实要用请加 --force-dev。要建立索引请用：sync --discover` | You invoked the developer-only direct-write form of `index`. Do not use it on a real store — what it writes has no source and no provenance. Use `sync --discover`. |
+| `sync --discover and --from-file are mutually exclusive: --discover finds paths under the provider data roots, --from-file reads them from a list` | Use one. |
+| `sync --discover takes no paths and no extra flags; paths come from the provider data roots` | Drop the paths and the extra flags. The one flag `--discover` does accept is `--all`, which expands the folded per-provider report. |
+| `sync --discover and --provider are mutually exclusive: discover infers ownership from each provider's own data root, so naming a single provider conflicts with it` | Drop one. To name a provider, pass paths explicitly: `sync --provider <id> <file>...`. |
+| `sync --from-file <list> takes no extra paths: every path comes from the list file` | Put every path in the manifest. |
+| `sync --from-file: <path> contains no paths (blank lines and # comments are ignored)` | The manifest is empty or entirely blank lines and comments. Add one path per line. |
+| `index <id-fact> <text> is a development direct-write entry point: it bypasses provider parsing and puts content with no provenance into the authoritative catalog. Add --force-dev if you really mean it. To build an index, run: sync --discover` | You invoked the developer-only direct-write form of `index`. Do not use it on a real store — what it writes has no source and no provenance. Use `sync --discover`. |
 
 ### Entry-point availability
 
@@ -237,10 +242,16 @@ script that treats any nonzero exit as failure will mis-handle this: check for
 
 ## Exit 70 — `internal`
 
-`内部错误：请记录完整输出并反馈` — an invariant was violated, which is a defect
-signal rather than a usage problem. Capture the full output, including the
-`--robot` envelope, and open an issue. The envelope is redaction-applied by
-default, but read it before attaching it.
+There is no fixed message here: the message is whatever invariant was violated,
+which is a defect signal rather than a usage problem. The generic next-step line
+is the constant part:
+
+```
+Next step: Internal error: record the full output and report it
+```
+
+Capture the full output, including the `--robot` envelope, and open an issue. The
+envelope is redaction-applied by default, but read it before attaching it.
 
 ## `sync --discover` found nothing
 
