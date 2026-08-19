@@ -167,6 +167,21 @@ text, opaque Session payload, diagnostics, progress, or errors.
   `MAX(json_extract(catalog.payload, '$.timestamp'))` per canonical Session,
   truncated to `YYYY-MM-DD`, for the Human table 日期 column. No port/DTO/schema
   change; Robot/MCP output is unaffected (Human-mode only projection).
+- **Recency ordering**: `sessions_by_recency` (port `CatalogStore`) is one
+  aggregate statement — `LEFT JOIN message_placements` + the same `MAX(...)`
+  projection, `ORDER BY latest IS NULL ASC, latest DESC, c.id ASC LIMIT ?`.
+  Never one query per session. The full timestamp (not the truncated date)
+  crosses the port so the sort key is comparable and displayable; sessions whose
+  provider reports no timestamp are ordered last with `None`, never dropped and
+  never given an invented time. Lexical comparison assumes the canonical
+  `YYYY-MM-DDT…Z` shape the message payload contract stores.
+  Cost is proportional to the placement table, not to the page size: measured
+  on this Windows dev machine over a 110,000-entity store (5,000 sessions /
+  100,000 messages, synthetic 6-provider corpus), one `list --sessions --sort
+  recency --max-items 20` process took ~0.49-0.54 s wall clock versus ~0.02 s
+  for the same page in wire-id order. Acceptable for an interactive listing;
+  if it has to get cheaper, materialize a per-session `latest_activity` column
+  on write rather than widening this query.
 
 ## Session metadata search projection (schema v11)
 

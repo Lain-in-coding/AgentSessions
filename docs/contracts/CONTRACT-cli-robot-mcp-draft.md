@@ -60,6 +60,7 @@ Exit Code(权威码表为 `schemas/robot/v1/error-catalog.json`,以该文件的 
 ## 7. Cursor 生命周期（无状态保留模型）
 
 - Cursor 自包含并签名: contract_major/generation/issued_at_ms/expires_at_ms/query_digest/sort_digest/offset/result_set。`list` 与 `list_sessions` 的 result_set 判别器互斥——跨结果集复用 cursor 显式拒绝，绝不静默从第一页继续。
+- sort_digest 是排序维度的判别器：`score_desc`（search）、`wire_id_asc`（list 默认）、`recency_desc`（`list --sessions --sort recency` / `list_sessions(sort=recency)`）。**换了排序维度的 cursor 一律显式拒绝**——否则第二页会在另一个顺序上按同一 offset 切片，静默返回错的记录。三种排序都是全序（recency 以「缺时间戳者置末 + wire id 收尾」补齐），offset 语义在页与页之间稳定。
 - 系统不登记活动 Cursor；GC 按 activation + max_cursor_ttl + clock_skew 保留旧 generation。
 - generation 回收/协议不兼容/签名失败/超 TTL → 明确 cursor_expired*，绝不静默从第一页继续。
 - 已由 sqlite-snapshot-wal spike 验证：旧 generation 快照在新写入期间可只读打开，支撑分页 pinning。
@@ -68,6 +69,7 @@ Exit Code(权威码表为 `schemas/robot/v1/error-catalog.json`,以该文件的 
 
 tools: search_sessions / get_session_context / get_session_resume / get_message / list_sessions / generate_handoff / list_providers / get_status / doctor
 - `get_session_resume`（ADR-0009，只读 Resume Metadata）：入参 canonical `ses_v1_*`，返回固定可空字段（provider_id / provider_session_id / original_working_directory / resume_available / unavailable_reason）；绝不构造或执行 shell 命令、绝不返回 transcript/source path。
+- `list_sessions`：`sort` 取 `id`（默认，wire id 升序）或 `recency`（会话最近活动降序，回答「我最近干了什么」）。每条 entry 带 `latest_activity`（provider-native 时间戳字符串，逐字保留）；provider 没给时间戳的会话排在末尾且该字段为 `null`——不丢弃、不编造。CLI 侧的等价命令是 `list --sessions --sort recency`，Web 的 `/api/sessions` 展开为同一命令。
 - `generate_handoff`：为查询组装 deterministic handoff pack（handoff-pack/v1）——证据带权威 source locator、预算（max_evidence/max_tokens/max_bytes）真实裁剪、默认跨边界脱敏（ADR-0009）；截断如实报 outcome partial。
 - 固定并测试 protocol version、capability negotiation、tool schema、错误映射、取消、超时、shutdown。
 - handler 只校验协议 + 映射 ADT，不复制搜索/分支/分页/预算规则。
