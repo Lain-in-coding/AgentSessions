@@ -8,12 +8,12 @@ message graphs, then serves full-text retrieval, resume, and handoff through
 CLI, MCP, Robot, TUI, and loopback Web UI surfaces — all sharing one
 Application ADT.
 
-**Release status:** `0.1.0` is the first public release, matching the Cargo
-workspace version. Provider adapters are Experimental maturity and the optional
-semantic backend carries no quality claim — see
+**Release status:** `0.1.0`, matching the Cargo workspace version. This is the
+first tagged release, and it publishes source only — the GitHub Release carries
+no binary assets, and no signed or notarized binaries are published. Provider
+adapters are Experimental maturity and the optional semantic backend carries no
+quality claim — see
 [`docs/product/PROVIDER-MATURITY-MATRIX.md`](docs/product/PROVIDER-MATURITY-MATRIX.md).
-Release archives are built from source; no signed or notarized binaries are
-published yet.
 
 ## Why?
 
