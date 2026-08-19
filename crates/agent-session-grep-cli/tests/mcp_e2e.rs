@@ -1983,3 +1983,132 @@ fn search_sessions_facet_params_filter_and_validate() {
     let error = &frame_by_id(&frames, 4)["error"];
     assert_eq!(error["code"], -32602, "{error}");
 }
+
+// ─── recency 浏览（M3-4）：list_sessions 的排序维度 ─────────────────────────
+
+#[test]
+fn list_sessions_recency_sort_orders_by_newest_activity_and_binds_the_cursor() {
+    let (dir, db) = temp_db("mcp-list-recency");
+    // 两个会话，时间戳一新一旧；再加一个 provider 完全没给消息时间戳的会话。
+    for (name, session, timestamp) in [
+        (
+            "older.jsonl",
+            "sess-older",
+            Some("2026-08-10T09:00:00.000Z"),
+        ),
+        (
+            "newer.jsonl",
+            "sess-newer",
+            Some("2026-08-18T21:30:00.000Z"),
+        ),
+        ("undated.jsonl", "sess-undated", None),
+    ] {
+        let time_field = match timestamp {
+            Some(value) => format!(r#""timestamp":"{value}","#),
+            None => String::new(),
+        };
+        let fixture = dir.path().join(name);
+        std::fs::write(
+            &fixture,
+            format!(
+                r#"{{"type":"user","uuid":"{session}-1","parentUuid":null,"sessionId":"{session}",{time_field}"message":{{"role":"user","content":"recency corpus body"}}}}
+"#
+            ),
+        )
+        .expect("write fixture");
+        let path = fixture.to_string_lossy().into_owned();
+        let out = run_cli(&db, &["sync", &path]);
+        assert!(out.status.success(), "seed sync: {}", stdout(&out));
+    }
+
+    let frames = mcp_session(
+        &db,
+        &[
+            initialize_request(1, "2025-06-18"),
+            initialized_notification(),
+            tool_call(2, "list_sessions", json!({ "sort": "recency" })),
+            tool_call(3, "list_sessions", json!({ "sort": "recency", "limit": 1 })),
+            tool_call(4, "list_sessions", json!({ "sort": "bogus" })),
+        ],
+    );
+
+    // recency：最新在前；没有任何带时间戳消息的会话排末尾且 latest_activity 为 null。
+    let result = &frame_by_id(&frames, 2)["result"];
+    assert_eq!(result["isError"], false, "{result}");
+    let entries = result["structuredContent"]["data"]["entries"]
+        .as_array()
+        .expect("entries");
+    assert_eq!(entries.len(), 3, "{result}");
+    assert_eq!(
+        entries[0]["latest_activity"], "2026-08-18T21:30:00.000Z",
+        "{result}"
+    );
+    assert_eq!(
+        entries[1]["latest_activity"], "2026-08-10T09:00:00.000Z",
+        "{result}"
+    );
+    assert_eq!(
+        entries[2]["latest_activity"],
+        serde_json::Value::Null,
+        "{result}"
+    );
+
+    // 令牌绑定排序维度：recency 的第一页令牌不能在默认（wire id）序列上续读。
+    let paged = &frame_by_id(&frames, 3)["result"];
+    let cursor = paged["structuredContent"]["page"]["next_cursor"]
+        .as_str()
+        .expect("recency page must issue a cursor")
+        .to_string();
+    let frames = mcp_session(
+        &db,
+        &[
+            initialize_request(1, "2025-06-18"),
+            initialized_notification(),
+            tool_call(
+                2,
+                "list_sessions",
+                json!({ "cursor": cursor.clone(), "limit": 1 }),
+            ),
+            tool_call(
+                3,
+                "list_sessions",
+                json!({ "sort": "recency", "cursor": cursor, "limit": 1 }),
+            ),
+        ],
+    );
+    let rejected = &frame_by_id(&frames, 2)["result"];
+    assert_eq!(rejected["isError"], true, "{rejected}");
+    assert!(
+        rejected["structuredContent"]["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("different sort order"),
+        "{rejected}"
+    );
+    // 同一个令牌回到 recency 用例则正常续读第二页。
+    let resumed = &frame_by_id(&frames, 3)["result"];
+    assert_eq!(resumed["isError"], false, "{resumed}");
+    assert_eq!(
+        resumed["structuredContent"]["data"]["entries"][0]["latest_activity"],
+        "2026-08-10T09:00:00.000Z",
+        "{resumed}"
+    );
+
+    // 非法 sort 在协议层 -32602，不漏到 App 层变业务帧。
+    let bad_frames = frames_of_bad_sort(&db);
+    let bad = frame_by_id(&bad_frames, 4);
+    assert!(bad["result"].is_null(), "{bad}");
+    assert_eq!(bad["error"]["code"], -32602, "{bad}");
+}
+
+/// 单独跑一遍非法 sort 的会话（保持上面的断言块只读一次 frames）。
+fn frames_of_bad_sort(db: &Path) -> Vec<Value> {
+    mcp_session(
+        db,
+        &[
+            initialize_request(1, "2025-06-18"),
+            initialized_notification(),
+            tool_call(4, "list_sessions", json!({ "sort": "bogus" })),
+        ],
+    )
+}
