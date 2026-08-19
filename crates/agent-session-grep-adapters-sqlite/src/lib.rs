@@ -1629,6 +1629,9 @@ impl SqliteStore {
         if current < 12 {
             Self::migrate_v11_to_v12(conn)?;
         }
+        if current < 13 {
+            Self::migrate_v12_to_v13(conn)?;
+        }
         // 不随 user_version 门控：旧 v7 库（本列存在前建成的）打开时同样需要。
         Self::ensure_fts_ids_rowid(conn)?;
         Ok(())
@@ -1940,7 +1943,25 @@ impl SqliteStore {
         tx.commit().map_err(backend)
     }
 
-    /// 声明语义向量归属的模型 id（#3）。未设置时 `SemanticIndex` 全部方法
+    /// v13：为 `source_membership(message_id)` 建索引。
+    ///
+    /// 提交路径改为按 id 读取"还有谁声明这个实体"（[`Self::claimers_for_ids`]）
+    /// 而不再整表载入 membership。`source_membership` 主键是
+    /// (source_path, message_id)，按 message_id 过滤没有可用索引——不建这个索引
+    /// 就是把一次整表扫描换成每个分块一次整表扫描，反而更慢。
+    /// 只依赖 v4 起就存在的 `source_membership` 表，v4..=12 的库都能干净执行，
+    /// 与并行 schema 分支合并安全。
+    fn migrate_v12_to_v13(conn: &Connection) -> PortResult<()> {
+        let tx = conn.unchecked_transaction().map_err(backend)?;
+        tx.execute_batch(
+            "CREATE INDEX IF NOT EXISTS source_membership_message
+             ON source_membership(message_id);
+             PRAGMA user_version = 13;",
+        )
+        .map_err(backend)?;
+        tx.commit().map_err(backend)
+    }
+
     /// 视为未配置：`is_ready` 为 false、查询返回空、写入报错——这样"忘了配模型"
     /// 不会变成往表里写无归属向量。
     pub fn set_semantic_model(&self, model_id: impl Into<String>) {
@@ -3694,6 +3715,7 @@ impl SqliteStore {
         )
     }
 
+    #[cfg(test)]
     fn stored_placements(&self) -> PortResult<BTreeMap<String, StoredPlacement>> {
         let conn = self.conn.borrow();
         Self::stored_placements_from(&conn)
@@ -3750,6 +3772,7 @@ impl SqliteStore {
         Ok(placements)
     }
 
+    #[cfg(test)]
     fn stored_edges(&self) -> PortResult<BTreeMap<String, StoredEdge>> {
         let conn = self.conn.borrow();
         Self::stored_edges_from(&conn)
@@ -3794,28 +3817,6 @@ impl SqliteStore {
         Ok(edges)
     }
 
-    fn stored_activities(&self) -> PortResult<BTreeMap<String, StoredActivity>> {
-        let conn = self.conn.borrow();
-        Self::stored_activities_from(&conn)
-    }
-
-    fn stored_activities_from(conn: &Connection) -> PortResult<BTreeMap<String, StoredActivity>> {
-        let mut stmt = conn
-            .prepare(&format!(
-                "SELECT {ACTIVITY_COLUMNS}
-                 FROM tool_activities ORDER BY activity_id"
-            ))
-            .map_err(backend)?;
-        let rows = stmt.query_map([], activity_row).map_err(backend)?;
-        let mut activities = BTreeMap::new();
-        for row in rows {
-            let (activity_id, mut activity) = row.map_err(backend)?;
-            activity.activity_id = activity_id.clone();
-            activities.insert(activity_id, activity);
-        }
-        Ok(activities)
-    }
-
     /// Stored activities for `ids` only.
     fn stored_activities_for_ids(
         &self,
@@ -3857,27 +3858,6 @@ impl SqliteStore {
             "activity_id",
             source_paths,
         )
-    }
-
-    fn source_activity_membership_state(&self) -> PortResult<BTreeMap<String, BTreeSet<String>>> {
-        let conn = self.conn.borrow();
-        let mut stmt = conn
-            .prepare(
-                "SELECT source_path, activity_id
-                 FROM tool_activity_membership ORDER BY source_path, activity_id",
-            )
-            .map_err(backend)?;
-        let rows = stmt
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })
-            .map_err(backend)?;
-        let mut state = BTreeMap::<String, BTreeSet<String>>::new();
-        for row in rows {
-            let (source_path, activity_id) = row.map_err(backend)?;
-            state.entry(source_path).or_default().insert(activity_id);
-        }
-        Ok(state)
     }
 
     fn regenerate_compatibility_aliases_in_tx(
@@ -5863,7 +5843,7 @@ const RELATION_SCHEMA_VERSION: i64 = 7;
 /// 观察投影，content-addressed activity_id 跨 source 去重，生命周期镜像
 /// `message_placements`（complete-scan replace、incomplete-scan union、
 /// claims tombstone）；随 rebuild 或后续 source 提交填充。
-pub const SCHEMA_VERSION: i64 = 12;
+pub const SCHEMA_VERSION: i64 = 13;
 
 impl CatalogStore for SqliteStore {
     fn get(&self, id: &StableId) -> PortResult<Option<Vec<u8>>> {
@@ -8935,7 +8915,7 @@ mod tests {
     fn schema_v10_creates_message_vec_table() {
         let store = SqliteStore::open_in_memory().unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 12);
+        assert_eq!(SCHEMA_VERSION, 13);
         let conn = store.conn.borrow();
         let count: i64 = conn
             .query_row(
