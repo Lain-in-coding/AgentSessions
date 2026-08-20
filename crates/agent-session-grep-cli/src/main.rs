@@ -1585,11 +1585,33 @@ fn doctor(
     // --robot 当路径（会造出同名文件），重复 --db 是用法错误（R8.1/R8.2）。
     // doctor 的 --db 允许在命令名之后（`doctor [--db <path>]`），故整串扫描。
     let db_opt = extract_db_flag_anywhere(args)?;
+    // `--db` 缺席时按与其它读命令**同一条**优先级链找库：`$ASG_DB` > 平台默认。
+    // 过去 doctor 只看 `--db`，于是设了 `$ASG_DB` 的用户会看到
+    // `db: not-checked` —— 全仓库唯一一个不认这个环境变量的命令，
+    // 偏偏是那个专职"检查我的库"的命令（status/search 都认）。
+    //
+    // 只在库**已经存在**时才打开：读命令绝不建库（D8），
+    // 而 `SqliteStore::open` 会建。所以这里先探路径是否存在，
+    // 不存在就如实报"没有库可查"并指出该往哪看，而不是凭空造一个空库
+    // 让用户以为自检通过了。
+    let (resolved_db, db_origin) = match &db_opt {
+        Some(path) => (path.clone(), DbOrigin::Flag),
+        None => resolve_store_path(None)?,
+    };
+    let db_to_check = if db_opt.is_some() || std::path::Path::new(&resolved_db).exists() {
+        Some(resolved_db.clone())
+    } else {
+        None
+    };
     // 引导式检查（M4-6）：存储侧健康之外，把"新手最常卡住的地方"逐项查出来并
     // 各带一条可执行的下一步。检查跑在打开存储之前——库打不开时它们恰恰是最
     // 需要被看到的那几条（provider 根在哪、库该落在哪）。
+    //
+    // 传**原始 flag**（不是解析后的路径）：store_location_check 自己会再走
+    // 一遍 resolve_store_path 以报告来源（--db / $ASG_DB / 平台默认），
+    // 喂它解析后的路径会让来源恒为 "--db" —— 明明没给 --db 却这么说。
     let mut checks = environment_checks(db_opt.as_deref(), offline);
-    let data = match db_opt {
+    let data = match db_to_check {
         None => serde_json::json!({
             "tool": env!("CARGO_PKG_NAME"),
             // `tool` 是包身份（crate 名），不是用户敲的命令名。两者都报出来，
@@ -1605,8 +1627,17 @@ fn doctor(
             // 本二进制管理的每个 catalog 落库，未指定 --db 也成立。
             "tool_activity_storage": true,
             // 新手会误以为 db: not-checked 是自检失败（10 角色体验测试缺陷）。
-            // 加一行白话提示，说明如何真正校验。
-            "hint": "no --db given: the checks above cover the environment only. Run doctor --db <path> to verify the store and its schema.",
+            // 加一行白话提示，说明如何真正校验。说清"我找过哪里"——
+            // 光说"给个 --db"会让已经设了 $ASG_DB 的人以为自己设错了。
+            "hint": format!(
+                "no store exists yet at {resolved_db}{}. The checks above cover the environment only; run `{} sync --discover` to build one.",
+                match db_origin {
+                    DbOrigin::Flag => " (from --db)",
+                    DbOrigin::Env => " (from $ASG_DB)",
+                    DbOrigin::Default => " (default store path)",
+                },
+                invocation::name()
+            ),
             "checks": doctor_checks_json(&checks),
         }),
         Some(path) => {

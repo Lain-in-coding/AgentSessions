@@ -1516,13 +1516,88 @@ fn human_search_table_session_id_feeds_context_directly() {
 
 #[test]
 fn doctor_reports_ok_without_db() {
-    let out = run_bare(&["--robot", "doctor"]);
+    // `doctor` 现在会按 `$ASG_DB` > 平台默认 找库（与 status/search 同一条链），
+    // 所以"不给 --db"的结果取决于**机器上有没有库**，不能再硬断言 `not-checked`
+    // ——开发机上恰好有默认库时那个断言会失败，而失败的是测试的前提不是产品。
+    // 用一个隔离的 HOME/LOCALAPPDATA 把平台默认路径指到空目录，
+    // 这样"没有库"是被构造出来的事实，不是碰巧成立的环境。
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = Command::new(BIN)
+        .env_remove("ASG_DB")
+        .env("HOME", dir.path())
+        .env("USERPROFILE", dir.path())
+        .env("LOCALAPPDATA", dir.path().join("AppData").join("Local"))
+        .env("XDG_DATA_HOME", dir.path().join("share"))
+        .args(["--robot", "doctor"])
+        .output()
+        .expect("failed to spawn agent-session-grep binary");
     assert!(out.status.success());
     let s = stdout(&out);
     assert!(s.contains("\"ok\":true"), "doctor 应报告 ok:true: {s}");
     assert!(
         s.contains("\"db\":\"not-checked\""),
-        "无 --db 时应标记未校验: {s}"
+        "隔离环境里没有库，应标记未校验: {s}"
+    );
+    // 读命令不建库：自检不得为了"有东西可查"而造出一个空库。
+    let frame = parse_first_line(&out);
+    let hint = frame["data"]["hint"].as_str().unwrap_or_default();
+    assert!(
+        hint.contains("sync --discover"),
+        "没库时必须告诉用户怎么建: {hint}"
+    );
+}
+
+/// `doctor` 必须与其它读命令共用同一条 store-path 优先级链：`$ASG_DB` 也算。
+///
+/// 过去它只看 `--db`，于是设了 `$ASG_DB` 的用户在**唯一一个专职"检查我的库"**
+/// 的命令上拿到 `db: not-checked`，而同样不带 `--db` 的 `status` / `search`
+/// 却正常读到了那个库。两个方向都钉住：
+/// 1. 环境变量指向一个**存在**的库 → 真的去查它（`db: ok` + schema）；
+/// 2. 环境变量指向一个**不存在**的库 → 如实说没库、并说出找过哪里，
+///    且**绝不把库建出来**（读命令不建库，D8；`SqliteStore::open` 会建，
+///    所以这条容易被写错成"顺手造一个空库然后报 ok"）。
+#[test]
+fn doctor_honours_the_store_path_env_var() {
+    let (dir, db) = temp_db("doctor-env");
+    let out = seed(&db, "d-env", "doctor env content");
+    assert!(out.status.success(), "seed failed: {}", stdout(&out));
+
+    let out = Command::new(BIN)
+        .args(["--robot", "doctor"])
+        .env("ASG_DB", &db)
+        .current_dir(dir.path())
+        .output()
+        .expect("run doctor");
+    assert!(out.status.success(), "doctor failed: {}", stdout(&out));
+    let frame = parse_first_line(&out);
+    assert_eq!(
+        frame["data"]["db"], "ok",
+        "$ASG_DB 指向的库必须被真的检查: {frame}"
+    );
+    assert!(
+        frame["data"]["schema"].is_number(),
+        "查到库就该报 schema: {frame}"
+    );
+
+    // 不存在的库：如实报告，且不得建库。
+    let missing = dir.path().join("no-such-store.db");
+    let out = Command::new(BIN)
+        .args(["--robot", "doctor"])
+        .env("ASG_DB", &missing)
+        .current_dir(dir.path())
+        .output()
+        .expect("run doctor");
+    assert!(out.status.success(), "doctor failed: {}", stdout(&out));
+    let frame = parse_first_line(&out);
+    assert_eq!(frame["data"]["db"], "not-checked", "{frame}");
+    let hint = frame["data"]["hint"].as_str().unwrap_or_default();
+    assert!(
+        hint.contains("ASG_DB"),
+        "提示必须说出它找过哪里，否则设了环境变量的人会以为自己设错了: {hint}"
+    );
+    assert!(
+        !missing.exists(),
+        "doctor 是读命令，绝不能把库建出来（否则空库会被报成自检通过）"
     );
 }
 
