@@ -191,6 +191,9 @@ fn execute(store: &SqliteStore, effect: Effect) -> Msg {
                 group_by_session: false,
                 mode: agent_session_grep_ports::RetrievalMode::Lexical,
                 query_embedding: None,
+                // The TUI hit list renders id/score/session only — no snippet —
+                // so a line window would be assembled and then thrown away.
+                context_lines: None,
             };
             match app.handle(request) {
                 Ok(response) => search_msg(response),
@@ -229,6 +232,7 @@ fn search_msg(response: AppResponse) -> Msg {
             retrieval_mode: _,
             fallback_warning: _,
             time_filter_excluded: _,
+            context_lines: _,
         } => {
             let hits = hits
                 .into_iter()
@@ -521,6 +525,7 @@ mod tests {
                 provider_id: None,
                 working_directory: None,
                 project_name: None,
+                match_ranges: Vec::new(),
             }],
             next_cursor: None,
             generation: 7,
@@ -531,6 +536,7 @@ mod tests {
             retrieval_mode: agent_session_grep_ports::RetrievalMode::Lexical,
             fallback_warning: None,
             time_filter_excluded: 0,
+            context_lines: None,
         };
 
         let Msg::SearchLoaded(page) = search_msg(response) else {

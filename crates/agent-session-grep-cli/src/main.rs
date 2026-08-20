@@ -2904,6 +2904,17 @@ fn dispatch(
             let include_sidechain = take_bool_flag(&mut args, "--include-sidechain");
             let tool_kind = extract_flag(&mut args, "--tool-kind")?;
             let tool_name = extract_flag(&mut args, "--tool-name")?;
+            // M3-9 命中处上下文窗口：`--context N` 把 snippet 从"以命中为中心的
+            // 字符窗口"换成"命中所在行 ± N 整行"的连续区域，语义与 grep/rg 的
+            // `-C N` 一致。未给该 flag 时行为与既有版本逐字节相同。
+            let context_lines = match extract_flag(&mut args, "--context")? {
+                None => None,
+                Some(value) => Some(value.parse::<usize>().map_err(|_| {
+                    CliError::usage(format!(
+                        "--context requires a non-negative integer, got {value:?}"
+                    ))
+                })?),
+            };
             let app = App::with_resume(store_ref(store), store_ref(store), store_ref(store));
             let filters = search_filters_from_flags(
                 &providers,
@@ -2977,6 +2988,7 @@ fn dispatch(
                     group_by_session,
                     mode: retrieval_mode,
                     query_embedding: None,
+                    context_lines,
                 })?
             } else {
                 // Prefer a verified local Candle E5 bundle when the binary was
@@ -3047,6 +3059,7 @@ fn dispatch(
                     group_by_session,
                     mode: retrieval_mode,
                     query_embedding: Some(query_embedding),
+                    context_lines,
                 })?
             };
             let (outcome, mut data, page, warnings) = render(response);
@@ -3106,6 +3119,9 @@ fn dispatch(
                 group_by_session: false,
                 mode: RetrievalMode::Lexical,
                 query_embedding: None,
+                // handoff 组装自己的证据段（带权威 source locator），不走 search
+                // 的 snippet 投影，所以不请求行上下文窗口。
+                context_lines: None,
             })?;
             let (hits, generation) = match &response {
                 AppResponse::Search {
@@ -3460,6 +3476,8 @@ fn dispatch(
                         group_by_session: true,
                         mode: RetrievalMode::Lexical,
                         query_embedding: None,
+                        // Hook 注入的是一行一条的紧凑摘要，行窗会把它撑成多行。
+                        context_lines: None,
                     })?;
                     let AppResponse::Search { hits, .. } = response else {
                         return Err(CliError::usage("hook: unexpected search response"));
@@ -6413,6 +6431,7 @@ fn render(
             retrieval_mode: effective_mode,
             fallback_warning,
             time_filter_excluded,
+            context_lines,
         } => {
             let outcome = outcome_of(&truncation);
             let page = protocol::Page {
@@ -6431,7 +6450,7 @@ fn render(
                      re-run without --since/--until to see them"
                 ));
             }
-            let data = serde_json::json!({
+            let mut data = serde_json::json!({
                 "retrieval_mode": effective_mode.as_str(),
                 "hits": hits
                     .into_iter()
@@ -6462,12 +6481,30 @@ fn render(
                         }
                         // resume_available（ADR-0009）：恒序列化，schema 1.1 声明。
                         json["resume_available"] = serde_json::json!(hit.resume_available);
+                        // M3-9 高亮偏移：**只带偏移，不带标记**。`text` 在每个入口
+                        // 都保持逐字原文，永不夹 ANSI 或 markup（CONTRACT §4：
+                        // robot 只承载协议）。空集合省略键，默认输出字节不变。
+                        if !hit.match_ranges.is_empty() {
+                            json["match_ranges"] = serde_json::Value::Array(
+                                hit.match_ranges
+                                    .iter()
+                                    .map(|(start, end)| serde_json::json!([start, end]))
+                                    .collect(),
+                            );
+                        }
                         json
                     })
                     .collect::<Vec<_>>(),
                 "generation": generation,
                 "truncation": truncation_json(&truncation),
             });
+            // 生效的行上下文窗口如实回显（与 facets 同一约定：默认不回显，
+            // 输出字节不变）。human 渲染器也据此切换到 grep 式的行视图。
+            if let Some(lines) = context_lines
+                && let Some(object) = data.as_object_mut()
+            {
+                object.insert("context_lines".into(), serde_json::json!(lines));
+            }
             (outcome, data, page, warnings)
         }
         AppResponse::Get { payload } => (
@@ -8911,6 +8948,7 @@ mod tests {
                     provider_id: None,
                     working_directory: None,
                     project_name: None,
+                    match_ranges: Vec::new(),
                 },
                 agent_session_grep_ports::SearchHit {
                     id: StableId::from_wire("msg_v1_bbbb").expect("valid id"),
@@ -8924,6 +8962,7 @@ mod tests {
                     provider_id: None,
                     working_directory: None,
                     project_name: None,
+                    match_ranges: Vec::new(),
                 },
             ],
             next_cursor: None,
@@ -8935,6 +8974,7 @@ mod tests {
             retrieval_mode: RetrievalMode::Lexical,
             fallback_warning: None,
             time_filter_excluded: 0,
+            context_lines: None,
         };
         let (_, data, _, _) = render(response);
         assert_eq!(data["hits"][0]["session_id"], "ses_v1_aaaa");
@@ -8972,6 +9012,7 @@ mod tests {
                 provider_id: None,
                 working_directory: None,
                 project_name: None,
+                match_ranges: Vec::new(),
             }],
             next_cursor: None,
             generation: 3,
@@ -8982,6 +9023,7 @@ mod tests {
             retrieval_mode: RetrievalMode::Lexical,
             fallback_warning: None,
             time_filter_excluded: 0,
+            context_lines: None,
         };
         let (_, data, _, _) = render(response);
         let hit = &data["hits"][0];
@@ -9013,6 +9055,7 @@ mod tests {
                 provider_id: None,
                 working_directory: None,
                 project_name: None,
+                match_ranges: Vec::new(),
             }],
             next_cursor: None,
             generation: 3,
@@ -9023,6 +9066,7 @@ mod tests {
             retrieval_mode: RetrievalMode::Lexical,
             fallback_warning: None,
             time_filter_excluded: 0,
+            context_lines: None,
         };
         let (_, data, _, _) = render(response);
         let hit = &data["hits"][0];

@@ -384,6 +384,7 @@ impl McpServer<'_> {
                 "tool_kind",
                 "tool_name",
                 "mode",
+                "context",
             ],
         )?;
         let query = required_str(args, "query")?;
@@ -435,6 +436,10 @@ impl McpServer<'_> {
             )));
         }
         let tool_name = opt_str(args, "tool_name")?;
+        // M3-9 行上下文窗口：与 CLI `search --context N` 同一语义、同一
+        // Application 参数。这是既有 `search_sessions` 的一个入参，不是第十个
+        // 工具——MCP 工具集在合同 §8 冻结为九个。
+        let context_lines = opt_usize(args, "context")?;
         let facets = SearchFacets {
             sidechain,
             tool_kind,
@@ -511,6 +516,7 @@ impl McpServer<'_> {
             group_by_session,
             mode,
             query_embedding,
+            context_lines,
         })?;
         // CLI（Robot）search 在非默认 facet 时回显 data.facets；MCP 必须一致，
         // 否则同一能力在两个入口呈现不同契约（audit P1-5）。
@@ -732,6 +738,8 @@ impl McpServer<'_> {
             group_by_session: false,
             mode: RetrievalMode::Lexical,
             query_embedding: None,
+            // generate_handoff 用 pack 的证据段，不用 search 的 snippet 投影。
+            context_lines: None,
         });
         let (hits, generation) = match response {
             Ok(AppResponse::Search {

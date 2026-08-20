@@ -315,6 +315,7 @@ impl SearchIndex for InMemoryStore {
                 provider_id: None,
                 working_directory: None,
                 project_name: None,
+                match_ranges: Vec::new(),
             })
             .collect();
         // 与 SQLite 的全序一致：score 降序，同分按 id 升序（全 1.0 时退化为
