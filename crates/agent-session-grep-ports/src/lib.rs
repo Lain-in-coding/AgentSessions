@@ -510,6 +510,24 @@ pub struct SearchHit {
     /// Safe final path component for Robot/MCP/Web attribution. `None` is an
     /// explicit unknown/redacted shape and never falls back to a source path.
     pub project_name: Option<String>,
+    /// Where each matched term sits inside [`SearchHit::text`] (M3-9), as
+    /// half-open `[start, end)` offsets in **chars** — the same unit as
+    /// `max_snippet_chars`, not bytes and not UTF-16 units.
+    ///
+    /// This is highlight *metadata*, deliberately separate from the text: the
+    /// snippet stays the verbatim transcript bytes on every surface, and no
+    /// entry point ever injects ANSI escapes or markup into `text`. Human
+    /// surfaces render the emphasis; machine surfaces get the offsets and decide
+    /// for themselves.
+    ///
+    /// One range per distinct matched term (the earliest occurrence inside the
+    /// window), so the list is bounded by the same `MAX_WHY_MATCHED` cap that
+    /// bounds [`SearchHit::why_matched`] and never needs a silent cut.
+    /// Overlapping ranges are merged, so a range marks *where to emphasise*
+    /// rather than which term matched — `why_matched` carries the terms.
+    /// Empty when the match could not be located literally (non-`text` payload,
+    /// or CJK bigram tokenisation that does not align to a substring).
+    pub match_ranges: Vec<(usize, usize)>,
 }
 
 /// 检索模式：标识本次搜索结果使用哪种匹配策略（wire 字符串见 [`RetrievalMode::as_str`]）。

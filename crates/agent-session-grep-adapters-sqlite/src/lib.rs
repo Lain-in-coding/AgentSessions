@@ -7150,6 +7150,7 @@ impl SqliteStore {
                 provider_id: None,
                 working_directory: None,
                 project_name: None,
+                match_ranges: Vec::new(),
             });
         }
         Ok(())
@@ -7895,6 +7896,7 @@ impl SemanticTopK {
                 provider_id: None,
                 working_directory: None,
                 project_name: None,
+                match_ranges: Vec::new(),
             });
         }
         Ok(hits)
@@ -8531,6 +8533,7 @@ where
             provider_id: None,
             working_directory: None,
             project_name: None,
+            match_ranges: Vec::new(),
         });
     }
     Ok(hits)
