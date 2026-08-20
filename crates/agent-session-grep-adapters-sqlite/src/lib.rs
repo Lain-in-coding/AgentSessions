@@ -1200,10 +1200,10 @@ fn stored_activity_from(
     activity: &ToolActivity,
 ) -> PortResult<StoredActivity> {
     activity.validate().map_err(|error| {
-        PortError::Backend(format!("tool activity violates domain invariants: {error}"))
+        PortError::Invariant(format!("tool activity violates domain invariants: {error}"))
     })?;
     if message_id.kind() != IdKind::Message {
-        return Err(PortError::Backend(
+        return Err(PortError::Invariant(
             "tool activity message anchor has the wrong kind".into(),
         ));
     }
@@ -3021,7 +3021,7 @@ impl SqliteStore {
                 match source_activities.get(&stored.activity_id) {
                     Some(existing) if existing != &stored => {
                         // 同 id 却不同形 → 派生输入与存储字段脱节，是实现缺陷。
-                        return Err(PortError::Backend(format!(
+                        return Err(PortError::Invariant(format!(
                             "activity {} derives one id from two different rows",
                             stored.activity_id
                         )));
@@ -3033,7 +3033,7 @@ impl SqliteStore {
                 }
                 if let Some(existing) = observed_activities.get(&stored.activity_id) {
                     if existing != &stored {
-                        return Err(PortError::Backend(format!(
+                        return Err(PortError::Invariant(format!(
                             "activity {} has conflicting projections across sources",
                             stored.activity_id
                         )));
@@ -17242,7 +17242,9 @@ mod tests {
         let error = store
             .commit_source_batches_if_changed(&[source])
             .unwrap_err();
-        assert!(matches!(error, PortError::Backend(_)));
+        // 锚点类型错是缺陷信号，不是数据库故障：必须是 Invariant（协议层 internal），
+        // 否则用户拿到的指引是"检查 --db 路径、跑 doctor"。
+        assert!(matches!(error, PortError::Invariant(_)), "got {error:?}");
     }
 
     // ---- 工具活动保留策略（v12）：source 退役级联 + 孤儿扫描/修剪 ----

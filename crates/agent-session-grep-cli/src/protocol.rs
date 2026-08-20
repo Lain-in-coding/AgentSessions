@@ -270,6 +270,9 @@ impl From<PortError> for ProtocolError {
     fn from(e: PortError) -> Self {
         let code = match &e {
             PortError::Backend(_) => CanonicalCode::CatalogError,
+            // 不变量违反是缺陷信号：catalog_error 的 operator_action（"检查 --db
+            // 路径、跑 doctor"）对它完全无效，必须走 internal（exit 70）。
+            PortError::Invariant(_) => CanonicalCode::Internal,
             PortError::SourceIo(_) => CanonicalCode::SourceIo,
             PortError::SchemaIncompatible(_) => CanonicalCode::SchemaIncompatible,
             PortError::NotFound(_) => CanonicalCode::NotFound,
@@ -277,10 +280,12 @@ impl From<PortError> for ProtocolError {
             PortError::WriterBusy(_) => CanonicalCode::WriterBusy,
         };
         // R4.3：Backend、SourceIo 携带后端/文件系统原始细节，绝不进入用户可见
-        // message（其中 SourceIo 可能包含绝对 transcript 路径）。其余变体已验证
+        // message（其中 SourceIo 可能包含绝对 transcript 路径）。Invariant 按
+        // error catalog 的 `internal: redaction=full` 同样整条替换。其余变体已验证
         // 不携带路径/ID（静态文案或数值），保持原样。
         let message = match &e {
             PortError::Backend(_) => "数据库内部错误".to_string(),
+            PortError::Invariant(_) => "内部不变量违反".to_string(),
             PortError::SourceIo(_) => "源文件无法读取".to_string(),
             _ => e.to_string(),
         };
@@ -744,6 +749,24 @@ mod tests {
         assert_eq!(e.message, "数据库内部错误");
         assert!(!e.message.contains("unterminated"));
         assert!(!e.message.contains("backend failure"));
+    }
+
+    #[test]
+    fn invariant_port_error_is_internal_not_catalog_error() {
+        // 回归 M1-15：不变量违反曾经被报成 catalog_error，于是用户拿到
+        // "数据库内部错误" + "检查 --db 路径、跑 doctor" —— 与故障无关的指引。
+        let e: ProtocolError =
+            PortError::Invariant("activity act_v1_0123456789abcdef derives one id".into()).into();
+        assert_eq!(e.code, CanonicalCode::Internal);
+        assert_eq!(e.code.exit_code(), 70);
+        assert!(!e.code.retryable());
+        assert_eq!(e.message, "内部不变量违反");
+        assert!(!e.message.contains("act_v1_"));
+        let action = e.code.operator_action();
+        assert!(
+            !action.contains("--db") && !action.contains("doctor"),
+            "internal 不得把用户引向数据库自检: {action}"
+        );
     }
 
     #[test]
