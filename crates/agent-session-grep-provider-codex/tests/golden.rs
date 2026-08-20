@@ -6,7 +6,11 @@
 //! 指纹。若 git 换行转换或编辑器改写了字节，先在指纹断言处响亮失败，
 //! 而不是留到后面变成难懂的 span 错位。
 
-use agent_session_grep_ports::{CanonicalEventSink, Confidence, MessageEvent, ProviderAdapter};
+use agent_session_grep_domain::{ToolActivity, ToolActivityActor, ToolActivityKind};
+use agent_session_grep_ports::{
+    CanonicalEventSink, Confidence, MessageEvent, ProviderAdapter, ToolActivityEvent,
+    ToolActivityStatus,
+};
 use agent_session_grep_provider_codex::CodexAdapter;
 use agent_session_grep_testkit::assert_read_only;
 use serde_json::{Value, json};
@@ -16,6 +20,7 @@ use std::path::PathBuf;
 #[derive(Default)]
 struct CollectingSink {
     messages: Vec<Captured>,
+    activities: Vec<CapturedActivity>,
 }
 struct Captured {
     seq: u32,
@@ -26,6 +31,11 @@ struct Captured {
     timestamp: Option<String>,
     is_sidechain: bool,
     span: Option<(u64, u64)>,
+}
+/// 拍平的活动快照（anchor + 完整事实），供工具活动断言。
+struct CapturedActivity {
+    message_native_id: String,
+    activity: ToolActivity,
 }
 impl CanonicalEventSink for CollectingSink {
     fn emit_message(
@@ -41,6 +51,17 @@ impl CanonicalEventSink for CollectingSink {
             timestamp: event.timestamp.map(str::to_string),
             is_sidechain: event.is_sidechain,
             span: event.span,
+        });
+        Ok(())
+    }
+
+    fn emit_activity(
+        &mut self,
+        event: ToolActivityEvent<'_>,
+    ) -> agent_session_grep_ports::PortResult<()> {
+        self.activities.push(CapturedActivity {
+            message_native_id: event.message_native_id.to_string(),
+            activity: event.activity,
         });
         Ok(())
     }
@@ -115,7 +136,8 @@ fn parse_never_mutates_source_bytes() {
 
 #[test]
 fn golden_provenance_revision_matches_manifest() {
-    assert_eq!(CodexAdapter::new().manifest().fixture_revision, Some(1));
+    // revision 2 起 fixture 内含工具调用记录（见 PROVENANCE.md 的变更历史）。
+    assert_eq!(CodexAdapter::new().manifest().fixture_revision, Some(2));
 }
 
 #[test]

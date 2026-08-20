@@ -376,7 +376,7 @@ impl ProviderAdapter for CodexAdapter {
     fn manifest(&self) -> AdapterManifest {
         manifest_for(
             self.provider_id(),
-            Some(1),
+            Some(2),
             &[
                 "tool activity extraction is partial",
                 "turn_context metadata is not surfaced as canonical messages",
@@ -775,7 +775,7 @@ mod tests {
         assert_eq!(manifest.capabilities.provider_id, adapter.provider_id());
         assert_eq!(manifest.capabilities.variant_id, VARIANT_ID);
         assert!(manifest.last_certified_targets.is_empty());
-        assert_eq!(manifest.fixture_revision, Some(1));
+        assert_eq!(manifest.fixture_revision, Some(2));
     }
 
     /// 收集 emit 的消息事件，供断言解析结果（含 native 身份/时间）。

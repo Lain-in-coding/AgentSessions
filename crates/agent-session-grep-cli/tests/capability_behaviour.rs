@@ -232,27 +232,15 @@ fn behaviour_subjects_cover_every_implemented_provider() {
 /// assistant text — can never be laundered through this list. Its only effect
 /// is to name, in code, which golden fixtures still owe tool-call coverage.
 ///
-/// `codex`: `provider-codex/tests/golden/basic.jsonl` has no
-/// `custom_tool_call` / `function_call_output` pair, so the pairing path
-/// (provider-codex/src/lib.rs `emit_paired_activity`) is never reached. The
-/// adapter's own unit tests do cover it; the golden fixture is the gap.
-fn supplementary_activity_sample(provider_id: &str) -> Option<&'static [u8]> {
-    match provider_id {
-        "codex" => Some(
-            concat!(
-                r#"{"timestamp":"2026-07-26T08:00:00.000Z","type":"session_meta","payload":{"session_id":"0198aaaa-bbbb-7ccc-8ddd-eeeeffff0002","cwd":"/workspace/fixture-project"}}"#,
-                "\n",
-                r#"{"timestamp":"2026-07-26T08:00:01.000Z","type":"response_item","payload":{"type":"message","id":"msg-act-0001","role":"user","content":[{"type":"input_text","text":"run the tests"}]}}"#,
-                "\n",
-                r#"{"timestamp":"2026-07-26T08:00:02.000Z","type":"response_item","payload":{"type":"custom_tool_call","id":"call-act-0001","tool_call_id":"call-act-0001","name":"shell","arguments":"{\"command\":\"cargo test\"}"}}"#,
-                "\n",
-                r#"{"timestamp":"2026-07-26T08:00:03.000Z","type":"response_item","payload":{"type":"function_call_output","id":"out-act-0001","call_id":"call-act-0001","output":"ok"}}"#,
-                "\n",
-            )
-            .as_bytes(),
-        ),
-        _ => None,
-    }
+/// The list is currently empty: `codex` was the last entry, and its golden
+/// fixture now carries a paired and an unpaired `custom_tool_call`
+/// (fixture_revision 2), so the golden itself witnesses the pairing path. Keep
+/// the hook rather than the entry — a future provider whose real format puts
+/// tool calls out of reach of a minimal golden can register here, and
+/// `supplementary_activity_samples_are_all_still_needed` will delete it again
+/// as soon as the golden covers them.
+fn supplementary_activity_sample(_provider_id: &str) -> Option<&'static [u8]> {
+    None
 }
 
 #[test]
