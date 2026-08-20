@@ -1069,12 +1069,34 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   xAI / Cursor 的付费通道。
   **验收**:每个采集到的 provider 在 §7 记录"已采集 + 落点 + 采集方式"。
 
-- [ ] **M1-4 逐 provider 解析无损验证(D9)**
+- [ ] **M1-4 逐 provider 解析无损验证(D9)** —— **2026-08-20 首轮已跑,见下表**
   对每个有真实样本的 provider:用真实文件跑 sync,验证
   session/message/父子链/时间戳/角色全部正确;记录 emitted vs persisted;
   跳过的行按 D11 计数上报。发现的缺口写进 `capability.rs` 的
   `known_limitations`。
   **验收**:该 provider 的真实运行 emitted == persisted 或差额有明确解释。
+
+  **首轮实测结果(本机真实语料,2026-08-20)**:
+
+  | Provider | 真实文件 | 结果 | 入库消息 | skipped |
+  |---|---:|---|---:|---:|
+  | claude-code | 1,838 | ⚠️ 5 份触发 M1-15 | 301,584 | 0 |
+  | codex | 151 | ❌ 整批失败(M1-15) | 0 | — |
+  | antigravity | 40 | ✅ 全过 | 1,350 | 0 |
+  | pi | 7 | ❌ 无法归属(M1-14) | 0 | — |
+  | zcode | — | 未跑(无 adapter,见 M1-3 第 2 步) | — | — |
+
+  **这一轮的价值不在"通过率",而在于它一次就暴露了两个真实缺陷**
+  (M1-14 pi 不可达、M1-15 活动 id 撞车),
+  **而这两个缺陷在全部合成 fixture 上都是绿的** ——
+  这正是 D9 坚持"必须拿真实语料验证"的理由。
+  ⚠️ **antigravity 的 40 条 diagnostic 是良性信息**
+  ("session identity lives in the brain/<uuid> directory name"),不是错误。
+  ⚠️ **`real_data_regression.py` 不能直接喂 provider 根目录**:
+  它按"排除已知非 transcript 后缀"收集候选,antigravity 根下 1,419 个文件里
+  只有 40 个是 `transcript.jsonl`,其余 1,376 个被送进 sync 后整轮报
+  `invalid_request`(exit 2)。上表的数字是**按真实 transcript 文件**跑的。
+  这本身是 harness 的一个待改进点,不是 provider 缺陷。
 
 - [ ] **M1-5 反推合成 golden fixture(D9)**
   ⚠️ **已知待补(M1-13 发现)**:`provider-codex/tests/golden/basic.jsonl`
@@ -1208,6 +1230,25 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   **验收**:合成的"两条同名未配对调用"能入库;
   151 份真实 codex rollout 整批 sync 成功;
   回归测试直接断言这个最小三行组合,而不是绕过它。
+
+  ⚠️ **同一症状也出现在 claude-code,但触发形状不同(2026-08-20 实测)。**
+  跑完整 claude-code 语料(**1,838 份真实 transcript**)时:
+  **19 个批次里 18 个成功,共入库 301,584 条消息、skipped 0** ——
+  唯一失败的批次里有 **5 份文件**各自单独 sync 也报 `catalog_error`。
+  对其中一份二分到 **第 93 行**(前 92 行成功,含第 93 行即失败)。
+  该行是一条 `type: "user"` 消息,`message.content` 里有**两个
+  `tool_result` block**,但**两个 `tool_use_id` 是不同的**
+  (`toolu_bdrk_01HPbu…` / `toolu_bdrk_01Y5v3…`),
+  并且该行还带 `toolUseResult` / `sourceToolAssistantUUID` / `sessionKind`
+  等字段。
+  **我照这个形状写的合成复现(一条消息两个不同 id 的 `tool_result`)
+  却成功入库** —— 所以 claude-code 这一支的触发条件**尚未定位**,
+  不能假定与 codex 那支同因。**已知边界**:
+  - 不是重复 `uuid`(全文件 0 个重复)
+  - 不是"同一消息上同名 `tool_use`"(全文件 0 对)
+  - 触发点在第 93 行,且需要前 92 行的累积状态(单独喂第 93 行不复现)
+  **影响量级(已实测)**:1,838 份里 5 份中招 ≈ 0.27%,
+  但因为整批失败,这 5 份会拖垮同批的另外 95 份。
 
 - [ ] **M1-14 pi 在真实数据上完全不可达(2026-08-20 实测发现,两个独立缺陷)**
   跑 M1-4 时对本机 7 份**真实** pi transcript 实测,结论:
