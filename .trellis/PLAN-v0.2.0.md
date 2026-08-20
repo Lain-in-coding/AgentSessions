@@ -1086,6 +1086,23 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   那样真实回归也会被同一个动作掩盖过去。
   **验收**:连续 5 次 `cargo test --workspace` 全绿,无需重跑。
 
+  **⚠️ 实际有三条不是两条,第三条至今未定根因(`249e5ac` 只修掉两条半)**:
+  - ✅ **slowloris**:绝对 250 ms 改成"快请求早于慢连接的 read timeout 返回" ——
+    这才是要证的性质(与慢连接解耦),且与机器快慢无关。
+  - ✅ **`environment_checks`**:断言曾要求下一步含 `invocation::name()`,
+    而 `cargo test` 下 argv[0] 是测试二进制;偏偏
+    `(长名在 PATH、短名不在)` 那一支的措辞只提发布名 → 假红。
+    改为"点名任一用户敲得出来的名字"。顺带把测试名里的
+    `_on_this_machine` 去掉 —— 它读真实机器状态这件事本身就是缺陷。
+  - ⚠️ **`consistency_report_all_five_entry_points_agree` 根因未定。**
+    我先假设是超时(serve ready 10 s / web GET 5 s)并调大,**改完仍然复现**,
+    所以那个假设是错的、已推翻。真实 traceback 落在
+    `web_get` 的 `urllib.request.urlopen`,但**底层异常类型没抓到** ——
+    连抓 5 轮全绿,复现率约 1/4~1/12,没能在有 instrumentation 的那一轮命中。
+    已把 stdout 一并打进断言消息(原先只有 stderr),下次红的时候能直接读出
+    是 `ConnectionReset` / `URLError` / 还是 HTTP 非 200。
+    **不要把它当"已修"** —— 它只是被调大的超时掩盖了一部分概率。
+
 - [ ] **M1-2 冻结真实语料快照(D7)**
   把当前 provider 数据根整体拷到 `evidence-input/frozen-corpus-2026-08-<dd>/`,
   记录清单(文件数、总字节、每文件 SHA-256)到**同目录**的清单文件
