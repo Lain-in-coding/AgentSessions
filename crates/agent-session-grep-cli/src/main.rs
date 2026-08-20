@@ -7049,13 +7049,13 @@ mod tests {
     fn path_attribution_resolves_registered_roots_on_both_platforms() {
         for windows in [true, false] {
             assert_eq!(
-                provider_hint_from_path_on("/home/dev/.pi/agent/sessions/s.jsonl", windows),
+                provider_hint_from_path_on("/workspace/fixture-home/.pi/agent/sessions/s.jsonl", windows),
                 Some("pi"),
                 "windows={windows}"
             );
             assert_eq!(
                 provider_hint_from_path_on(
-                    "/home/dev/.openclaw/agents/main/sessions/s.jsonl",
+                    "/workspace/fixture-home/.openclaw/agents/main/sessions/s.jsonl",
                     windows
                 ),
                 Some("openclaw"),
@@ -7070,7 +7070,7 @@ mod tests {
         }
         // Windows 分隔符与盘符大小写都归一（与 source_path_identity 同一规则）。
         assert_eq!(
-            provider_hint_from_path_on(r"C:\Users\dev\.pi\agent\sessions\s.jsonl", true),
+            provider_hint_from_path_on(r"C:\placeholder\fixture-home\.pi\agent\sessions\s.jsonl", true),
             Some("pi")
         );
     }
@@ -7083,7 +7083,7 @@ mod tests {
     #[test]
     fn every_registered_root_is_attributable_by_path() {
         for (provider_id, subpath) in PROVIDER_ROOTS {
-            let path = format!("/home/dev/{subpath}/nested/transcript.jsonl");
+            let path = format!("/workspace/fixture-home/{subpath}/nested/transcript.jsonl");
             assert_eq!(
                 provider_hint_from_path_on(&path, false),
                 Some(*provider_id),
