@@ -2973,10 +2973,38 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   (模板、两份记录、scrub runbook、架构评审)——
   那 4 条链接在公开树里必然是坏的。
 
+  **✅ 2026-08-20 在当前 HEAD(`93902ca`)上重跑导出并独立复验,仍全绿**:
+  **492 个文件**(比 8-19 那次多 4 个,与期间新增的文档/脚本数吻合),
+  public-profile 扫描 0 findings。逐项自查(不信脚本自述):
+  - **不该发布的都不在**:`.trellis/`、`docs/release/go-no-go.2026-08-19.md`、
+    `privacy_scan.py`、`export_public_tree.py`、`.claude/`、`.mcp.json` 全部缺席;
+  - **该有的都在**:`README.md`、`CHANGELOG.md`、`LICENSE-MIT` +
+    `LICENSE-APACHE`(⚠️ 注意本项目**没有**单个 `LICENSE` 文件,
+    是双许可两份文件,`Cargo.toml` 的 `license = "MIT OR Apache-2.0"` 与之一致)、
+    `Cargo.toml`、`crates/`、`docs/adr/`、安装器、`spikes/`;
+  - **导出树是自洽可构建的仓库**:在导出目录里 `cargo build --workspace`
+    与 `cargo test --workspace` **全过(1,728 passed / 0 failed)**,
+    与主仓同样的数字 —— 不是缺文件的残骸;
+  - manifest 里逐条 grep 也没有任何应排除文件漏网。
+  **剩下的确实只有"推送"本身**,而那一步依赖 M5-5(仓库还是私有的)。
+  ⚠️ **推送前必须重跑一次导出**:manifest 钉的是 `source_commit`,
+  用旧导出推送等于发布一个与 tag 不符的树。
+
 - [ ] **M5-4 CHANGELOG 0.2.0 段 + tag + Release**
   按 D19 发 `v0.2.0`。Release notes 必须诚实列出仍存的限制
   (macOS 未验证、无签名二进制、未升 Beta 的 provider)。
   **验收**:tag 指向正确 commit;Release 非 draft。
+
+  **✅ CHANGELOG 那一半已写(`93902ca`)**,含一个专门的
+  **`### Known limitations`** 章节 —— 把"用户装完才会发现"的事提前讲清:
+  16 个 provider 里只有 4 个(claude-code / codex / antigravity / pi)
+  经真实语料验证、2 个需付费第三方通道才能验、
+  **没有任何一份语料能让四个性能阈值同时通过**、
+  antigravity 第二份 transcript 半接受且丢一行、
+  归一化同形的两次工具调用被合并、MCP 只读无 refresh、macOS 未验证。
+  **⏸ tag 与 Release 未做,且不该现在做**:仓库仍是私有,
+  在私有仓库上打 `v0.2.0` 再转 public,会让第一个公开 tag 指向一段
+  外人看不到、也无法复核的历史。**顺序必须是 M5-5 → 打 tag → 发 Release。**
 
 - [ ] **M5-5 仓库转 PUBLIC**
   `gh repo edit qin-devs/agent-session-grep --visibility public --accept-visibility-change-consequences`
