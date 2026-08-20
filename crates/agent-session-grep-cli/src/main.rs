@@ -19,6 +19,7 @@
 
 mod hooks;
 mod human;
+mod invocation;
 mod mcp;
 mod protocol;
 mod redaction;
@@ -186,8 +187,17 @@ fn render_human_error(err: &ProtocolError) {
 
 /// 错误消息是否已自带可执行的下一步命令。判据是消息里出现了本二进制的调用
 /// 形态——只有构造方明确写了完整命令时才成立，不做模糊猜测。
+///
+/// 两个 `[[bin]]` 名与本次实际调用名都算（M4-6）：以第三个名字（重命名的副本）
+/// 调用时，消息里的命令仍以规范名书写，判据不能因此漏判而追加一条错的通用指引。
 fn message_states_next_step(message: &str) -> bool {
-    message.contains("asg ") || message.contains("agent-session-grep ")
+    [
+        invocation::DEFAULT_NAME,
+        CANONICAL_BIN_NAME,
+        invocation::name(),
+    ]
+    .iter()
+    .any(|name| message.contains(&format!("{name} ")))
 }
 
 /// Convert provider parse diagnostics into bounded public warnings. Diagnostics
@@ -414,13 +424,15 @@ fn run(
             HelpRequest::TopLevelHelp => emit_help("help", &help_text(), mode, sink, request_id)?,
             HelpRequest::TopLevelVersion => emit_version(
                 "version",
-                &format!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")),
+                // crate 名（`agent-session-grep-cli`）不是命令名：`-cli` 后缀
+                // 是工作区内部的 crate 命名，用户从未敲过它（M4-6）。
+                &format!("{} {}", invocation::name(), env!("CARGO_PKG_VERSION")),
                 mode,
                 sink,
                 request_id,
             )?,
             HelpRequest::SubcommandHelp(cmd) => {
-                emit_help(&cmd, subcommand_help_text(&cmd), mode, sink, request_id)?;
+                emit_help(&cmd, &subcommand_help_text(&cmd), mode, sink, request_id)?;
             }
         }
         return Ok(protocol::Outcome::Success);
@@ -1046,24 +1058,29 @@ fn platform_paths_impl() -> Result<serde_json::Value, CliError> {
 
 /// 顶层帮助文本。与 --version 一样走协议出口：裸 println! 会在下游提前关管道时
 /// panic（exit 101 + stderr 污染），违反 CONTRACT §6 的 EPIPE 静默 exit 0。
+///
+/// 头行与所有 usage/quickstart 行都用**本次实际调用名**（M4-6）。过去它们一律
+/// 写 `agent-session-grep`，头行还写 crate 名 `agent-session-grep-cli`——以
+/// `asg` 调用时用户读到的每一行都是另一个名字，而头行那个名字根本不是命令。
 fn help_text() -> String {
+    let name = invocation::name();
     format!(
         "{name} {version}
 AI coding-agent session history search engine (local, read-only, offline).
 
 QUICKSTART (start here):
-    agent-session-grep sync --discover              index every provider data root
-    agent-session-grep search <keyword>             search your session history
-    agent-session-grep show <hit-id>                read the body of one hit
-    agent-session-grep context <session-id>         expand one whole session
-    agent-session-grep config paths                 see where data is stored
-    agent-session-grep providers                    see provider maturity and capabilities
+    {name} sync --discover              index every provider data root
+    {name} search <keyword>             search your session history
+    {name} show <hit-id>                read the body of one hit
+    {name} context <session-id>         expand one whole session
+    {name} config paths                 see where data is stored
+    {name} providers                    see provider maturity and capabilities
 Data flow: search returns matching messages -> show <msg_id> reads one body -> context <ses_id> reads the whole session.
 
 USAGE:
-    agent-session-grep [--db <path>] <COMMAND> [ARGS]
-    agent-session-grep doctor [--db <path>]
-    agent-session-grep --help | --version
+    {name} [--db <path>] <COMMAND> [ARGS]
+    {name} doctor [--db <path>]
+    {name} --help | --version
 
 COMMANDS:
     ingest <file>          parse one raw transcript file into the store (source stays read-only)
@@ -1163,7 +1180,6 @@ GLOSSARY (bilingual quick reference):
 
 EXIT CODES:
     0 success; 10 partial success (budget truncation: results usable but incomplete); see the error catalog for the rest",
-        name = env!("CARGO_PKG_NAME"),
         version = env!("CARGO_PKG_VERSION"),
     )
 }
@@ -1343,7 +1359,32 @@ fn missing_subcommand_error() -> CliError {
 /// 子命令级帮助文本：渲染该命令的签名、flag 与一个真实示例。由 help/version
 /// 提前拦截阶段（ADR-0006）在 `<cmd> --help|-h`（含 `index rebuild --help`）时
 /// 触发——顶层 --help 只给全局概览，子命令帮助给单命令的用法。
-fn subcommand_help_text(cmd: &str) -> &'static str {
+///
+/// 模板里的示例一律以 [`CANONICAL_BIN_NAME`] 书写，渲染时替换为**本次实际调用
+/// 名**（M4-6）。用一次替换而不是把 30 个模板改成 `format!`：模板是长多行字面
+/// 量，`{}` 化会把每个 flag 说明行都变成需要转义的插值串，而调用名在整份文本
+/// 里只有"这条命令怎么敲"这一种含义，替换不会误伤别的语义。
+fn subcommand_help_text(cmd: &str) -> String {
+    retarget_invocation_name(subcommand_help_template(cmd))
+}
+
+/// 把逐字写着 [`CANONICAL_BIN_NAME`] 的建议命令改写为本次调用名。
+///
+/// 调用名等于规范名时是恒等变换（`String` 分配是 help/建议命令这种一次性输出
+/// 路径上可忽略的成本，换来的是唯一一处名字改写逻辑）。
+fn retarget_invocation_name(text: &str) -> String {
+    let name = invocation::name();
+    if name == CANONICAL_BIN_NAME {
+        return text.to_string();
+    }
+    text.replace(CANONICAL_BIN_NAME, name)
+}
+
+/// 两个 `[[bin]]` 目标里的长名，也是所有帮助模板与 Application 生成的建议命令
+/// 逐字使用的那个名字。crate 名（`agent-session-grep-cli`）不是命令名。
+const CANONICAL_BIN_NAME: &str = "agent-session-grep";
+
+fn subcommand_help_template(cmd: &str) -> &'static str {
     match cmd {
         "search" => {
             "search <query>：全文检索历史会话，按相关性降序返回命中。\n\
@@ -1523,7 +1564,9 @@ fn subcommand_help_text(cmd: &str) -> &'static str {
     }
 }
 
-/// doctor：最小环境自检。报告版本；若给了 --db，尝试打开存储并报告 schema。
+/// doctor：引导式环境自检（M4-6）。报告版本；若给了 --db，尝试打开存储并报告
+/// schema。每个未通过的检查都带一条可执行的下一步（见 `doctor_checks`）。
+///
 /// `offline` 作为诊断字段原样上报（design D5）：`--offline` 是稳定显式模式，
 /// 当前没有任何命令需要联网，doctor 如实反映调用方声明的 offline 意图。
 fn doctor(
@@ -1542,9 +1585,16 @@ fn doctor(
     // --robot 当路径（会造出同名文件），重复 --db 是用法错误（R8.1/R8.2）。
     // doctor 的 --db 允许在命令名之后（`doctor [--db <path>]`），故整串扫描。
     let db_opt = extract_db_flag_anywhere(args)?;
+    // 引导式检查（M4-6）：存储侧健康之外，把"新手最常卡住的地方"逐项查出来并
+    // 各带一条可执行的下一步。检查跑在打开存储之前——库打不开时它们恰恰是最
+    // 需要被看到的那几条（provider 根在哪、库该落在哪）。
+    let mut checks = environment_checks(db_opt.as_deref(), offline);
     let data = match db_opt {
         None => serde_json::json!({
             "tool": env!("CARGO_PKG_NAME"),
+            // `tool` 是包身份（crate 名），不是用户敲的命令名。两者都报出来，
+            // 免得读到 `agent-session-grep-cli` 的人去敲那个不存在的命令（M4-6）。
+            "invoked_as": invocation::name(),
             "version": env!("CARGO_PKG_VERSION"),
             "db": "not-checked",
             "schema": null,
@@ -1557,6 +1607,7 @@ fn doctor(
             // 新手会误以为 db: not-checked 是自检失败（10 角色体验测试缺陷）。
             // 加一行白话提示，说明如何真正校验。
             "hint": "no --db given: the checks above cover the environment only. Run doctor --db <path> to verify the store and its schema.",
+            "checks": doctor_checks_json(&checks),
         }),
         Some(path) => {
             let store = SqliteStore::open(&path).map_err(ProtocolError::from)?;
@@ -1571,8 +1622,17 @@ fn doctor(
             let (orphaned_tool_activities, orphaned_activity_memberships) = store
                 .orphaned_activity_counts()
                 .map_err(ProtocolError::from)?;
+            // 库开得成之后才能问的三件事：库里有没有东西（"为什么 search 零命中"
+            // 的头号原因）、有没有中断的批次、有没有孤儿投影行。
+            checks.extend(store_checks(
+                &store,
+                &path,
+                interrupted,
+                orphaned_tool_activities + orphaned_activity_memberships,
+            )?);
             serde_json::json!({
                 "tool": env!("CARGO_PKG_NAME"),
+                "invoked_as": invocation::name(),
                 "version": env!("CARGO_PKG_VERSION"),
                 "db": "ok",
                 "schema": schema,
@@ -1584,6 +1644,7 @@ fn doctor(
                 "interrupted_batches": interrupted,
                 "orphaned_tool_activities": orphaned_tool_activities,
                 "orphaned_activity_memberships": orphaned_activity_memberships,
+                "checks": doctor_checks_json(&checks),
             })
         }
     };
@@ -1601,6 +1662,513 @@ fn doctor(
         RetrievalMode::Lexical,
     )?;
     Ok(protocol::Outcome::Success)
+}
+
+/// 一条 doctor 检查的结论（M4-6）。
+///
+/// `next_step` 是这次改动的全部要点：doctor 过去只报事实（`schema: 12`、
+/// `interrupted_batches: 0`），把"那我现在该干什么"留给读过源码的人。语气与
+/// 标准照 [`protocol::CanonicalCode::operator_action`]——面向一个没读过源码、
+/// 刚装完就卡住的人，给命令而不是给概念。
+struct DoctorCheck {
+    /// 稳定的检查名（机器面按它定位，勿改既有值）。
+    name: &'static str,
+    status: DoctorStatus,
+    /// 查到的事实，一句话。绝不含真实用户名/主机名之外的推断。
+    detail: String,
+    /// 未通过时的下一步。`Ok` 恒为 `None`——通过的检查不该给建议，那只是噪音。
+    next_step: Option<String>,
+}
+
+impl DoctorCheck {
+    fn ok(name: &'static str, detail: impl Into<String>) -> Self {
+        DoctorCheck {
+            name,
+            status: DoctorStatus::Ok,
+            detail: detail.into(),
+            next_step: None,
+        }
+    }
+
+    fn warn(name: &'static str, detail: impl Into<String>, next_step: impl Into<String>) -> Self {
+        DoctorCheck {
+            name,
+            status: DoctorStatus::Warn,
+            detail: detail.into(),
+            next_step: Some(next_step.into()),
+        }
+    }
+
+    fn fail(name: &'static str, detail: impl Into<String>, next_step: impl Into<String>) -> Self {
+        DoctorCheck {
+            name,
+            status: DoctorStatus::Fail,
+            detail: detail.into(),
+            next_step: Some(next_step.into()),
+        }
+    }
+}
+
+/// 检查结论的三档。`warn` 与 `fail` 的区别是"现在能不能用"：
+/// warn = 能用但会踩坑，fail = 这条路现在走不通。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DoctorStatus {
+    Ok,
+    Warn,
+    Fail,
+}
+
+impl DoctorStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            DoctorStatus::Ok => "ok",
+            DoctorStatus::Warn => "warn",
+            DoctorStatus::Fail => "fail",
+        }
+    }
+}
+
+/// 检查清单的协议投影：数组保持构造顺序（人类与机器读到同一顺序），
+/// `next_step` 为空时省略键（通过的检查不带空字段）。
+fn doctor_checks_json(checks: &[DoctorCheck]) -> serde_json::Value {
+    serde_json::Value::Array(
+        checks
+            .iter()
+            .map(|check| {
+                let mut object = serde_json::json!({
+                    "name": check.name,
+                    "status": check.status.as_str(),
+                    "detail": check.detail,
+                });
+                if let Some(next_step) = &check.next_step {
+                    object["next_step"] = serde_json::json!(next_step);
+                }
+                object
+            })
+            .collect(),
+    )
+}
+
+/// 不需要打开存储就能做的检查：provider 数据根、库路径落点、两个 `[[bin]]`
+/// 名的安装状态、semantic 后端的权威事实。
+fn environment_checks(db_flag: Option<&str>, offline: bool) -> Vec<DoctorCheck> {
+    let mut checks = vec![provider_roots_check()];
+    checks.push(store_location_check(db_flag));
+    checks.push(installed_names_check());
+    checks.push(semantic_backend_check());
+    if offline {
+        checks.push(DoctorCheck::ok(
+            "offline",
+            "--offline was requested; every command in this build already runs locally, \
+             so nothing is refused by it",
+        ));
+    }
+    checks
+}
+
+/// provider 数据根检查：注册了几个根、磁盘上存在几个、各存在的根下有多少文件。
+///
+/// "为什么 `sync --discover` 什么都没找到"是新手第一问，而过去 doctor 一个字
+/// 都没提数据根。根本不存在（provider 没装过）与根存在但为空是两个完全不同的
+/// 处境，给的下一步也不同。
+fn provider_roots_check() -> DoctorCheck {
+    let mut present: Vec<String> = Vec::new();
+    let mut registered = 0usize;
+    let mut total_files = 0usize;
+    for provider in provider_registry() {
+        let id = provider.provider_id().to_string();
+        if provider_root_subpath(&id).is_none() {
+            continue; // 该 provider 不支持自动发现，不该算进"根缺失"
+        }
+        registered += 1;
+        let Some(root) = provider_data_root(&id) else {
+            continue; // home 解析失败：由下面的 registered/present 计数如实反映
+        };
+        if !root.is_dir() {
+            continue;
+        }
+        let files = count_files_bounded(&root);
+        total_files += files.count;
+        present.push(format!(
+            "{id}={}{}",
+            files.count,
+            if files.hit_cap { "+" } else { "" }
+        ));
+    }
+    let detail = format!(
+        "{}/{} discoverable provider data roots exist on this machine; \
+         files under them: {}",
+        present.len(),
+        registered,
+        if present.is_empty() {
+            "none".to_string()
+        } else {
+            present.join(" ")
+        }
+    );
+    let name = invocation::name();
+    if present.is_empty() {
+        return DoctorCheck::fail(
+            "provider_roots",
+            detail,
+            format!(
+                "No provider data root exists under your home directory, so `{name} sync \
+                 --discover` has nothing to scan. Either use one of the supported agents first, \
+                 or index a transcript you already have with `{name} sync <file>`. \
+                 Run `{name} providers` for the supported list."
+            ),
+        );
+    }
+    if total_files == 0 {
+        return DoctorCheck::warn(
+            "provider_roots",
+            detail,
+            format!(
+                "The provider data roots exist but contain no files yet, so `{name} sync \
+                 --discover` will index nothing. Have a session with one of those agents \
+                 first, then re-run it."
+            ),
+        );
+    }
+    DoctorCheck::ok("provider_roots", detail)
+}
+
+/// 有界的文件计数结果。`hit_cap` 为真时 `count` 是下界而非精确值。
+struct BoundedFileCount {
+    count: usize,
+    hit_cap: bool,
+}
+
+/// 数据根遍历的访问上限。doctor 必须几十毫秒内跑完：一棵几万文件的
+/// `~/.claude/projects` 不该让自检变成一次全树遍历。到达上限即停并如实标注
+/// （`hit_cap`），绝不把下界当精确值报出去。
+const DOCTOR_FILE_SCAN_CAP: usize = 2000;
+
+/// 统计 `root` 下的普通文件数，访问量到 [`DOCTOR_FILE_SCAN_CAP`] 即止。
+///
+/// 只数文件，不做 provider probe：probe 每个候选要读 64 KiB，而这里要回答的
+/// 问题是"根里到底有没有东西"，不是"其中几个是可识别的 transcript"（后者由
+/// `sync --discover` 自己的 per-provider 报告回答）。不跟随符号链接，与
+/// [`discover_provider_sources`] 同一口径。
+fn count_files_bounded(root: &std::path::Path) -> BoundedFileCount {
+    let mut count = 0usize;
+    let mut visited = 0usize;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            visited += 1;
+            if visited > DOCTOR_FILE_SCAN_CAP {
+                return BoundedFileCount {
+                    count,
+                    hit_cap: true,
+                };
+            }
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_symlink() {
+                continue;
+            }
+            if file_type.is_dir() {
+                stack.push(entry.path());
+            } else if file_type.is_file() {
+                count += 1;
+            }
+        }
+    }
+    BoundedFileCount {
+        count,
+        hit_cap: false,
+    }
+}
+
+/// 库路径落点检查：本次会用哪个路径、其父目录存在吗、真的可写吗。
+///
+/// "写命令报 catalog_error"最常见的原因就是父目录不可写（只读挂载、权限、
+/// 打错的 `--db`），而这在打开存储之前完全可以查出来。
+fn store_location_check(db_flag: Option<&str>) -> DoctorCheck {
+    let name = invocation::name();
+    let (path, origin) = match resolve_store_path(db_flag.map(str::to_string)) {
+        Ok(resolved) => resolved,
+        Err(error) => {
+            return DoctorCheck::fail(
+                "store_location",
+                format!("cannot resolve a store path: {}", error.0.message),
+                format!(
+                    "Pass an explicit path with `{name} --db <path> doctor`, or set ${DB_ENV_VAR}."
+                ),
+            );
+        }
+    };
+    let source = match origin {
+        DbOrigin::Flag => "--db",
+        DbOrigin::Env => DB_ENV_VAR,
+        DbOrigin::Default => "platform data directory",
+    };
+    let Some(parent) = std::path::Path::new(&path)
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    else {
+        // 相对裸文件名：父目录是当前工作目录，写入权限由 shell 的位置决定。
+        return DoctorCheck::ok(
+            "store_location",
+            format!("store path {path} (from {source}), relative to the current directory"),
+        );
+    };
+    if !parent.is_dir() {
+        // 缺父目录本身不是错误：写命令会建它。但读命令会因缺库报 not_found，
+        // 而新手会把那条 not_found 读成"工具坏了"。
+        return DoctorCheck::warn(
+            "store_location",
+            format!(
+                "store path {path} (from {source}); its parent directory {} does not exist yet",
+                parent.display()
+            ),
+            format!(
+                "Nothing is indexed yet -- read commands will report not_found until it is. \
+                 Run `{}` to create the store and index your history.",
+                sync_discover_command(&path, origin)
+            ),
+        );
+    }
+    match probe_directory_writable(parent) {
+        Ok(()) => DoctorCheck::ok(
+            "store_location",
+            format!("store path {path} (from {source}); parent directory exists and is writable"),
+        ),
+        Err(error) => DoctorCheck::fail(
+            "store_location",
+            format!(
+                "store path {path} (from {source}); parent directory {} is not writable: {error}",
+                parent.display()
+            ),
+            format!(
+                "Write commands will fail here. Point --db (or ${DB_ENV_VAR}) at a writable \
+                 directory, or fix the permissions on that one. Run `{name} config paths` \
+                 to see the default location."
+            ),
+        ),
+    }
+}
+
+/// 目录可写性的真实探测：建一个唯一命名的空文件再删掉。
+///
+/// 不用 `metadata().permissions().readonly()`——那在 Windows 上对目录无意义，
+/// 在 Unix 上也不反映挂载只读与 ACL。探测只发生在**本工具自己的库目录**（绝不
+/// 是 provider 数据根，那是只读不变量），文件名带进程 id 以免并发 doctor 互撞，
+/// 成功与失败路径都会清理。
+fn probe_directory_writable(dir: &std::path::Path) -> Result<(), std::io::Error> {
+    let probe = dir.join(format!(".asg-doctor-write-probe-{}", std::process::id()));
+    let result = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)
+        .map(|_| ());
+    let _ = std::fs::remove_file(&probe);
+    result
+}
+
+/// 两个 `[[bin]]` 名的安装状态检查。
+///
+/// 只装上一个名字是真实且常见的处境（手动 `cargo install` 只拿到 default-run
+/// 那个，或旧版本留下一个陈旧副本）。用户照着文档敲另一个名字就会得到
+/// "command not found"，而那看起来完全不像"安装不全"。
+///
+/// 不去 spawn 任一二进制比版本号：doctor 不该执行 PATH 上一个只是名字对得上的
+/// 陌生程序。改为比文件大小——两个名字来自同一次构建时必然同尺寸（拷贝或
+/// 硬链接），尺寸不同就一定是两次不同的构建，这个判断无需执行任何东西。
+fn installed_names_check() -> DoctorCheck {
+    let long = which_on_path(CANONICAL_BIN_NAME);
+    let short = which_on_path(invocation::DEFAULT_NAME);
+    let name = invocation::name();
+    match (&long, &short) {
+        (None, None) => DoctorCheck::warn(
+            "installed_names",
+            format!(
+                "neither `{CANONICAL_BIN_NAME}` nor `{}` is on PATH",
+                invocation::DEFAULT_NAME
+            ),
+            format!(
+                "You are running this binary by path, so the documented commands \
+                 (`{} ...`) will not resolve in a new shell. Add its directory to PATH, \
+                 or use the installer under scripts/install.",
+                invocation::DEFAULT_NAME
+            ),
+        ),
+        (Some(_), None) => DoctorCheck::warn(
+            "installed_names",
+            format!(
+                "`{CANONICAL_BIN_NAME}` is on PATH but `{}` is not",
+                invocation::DEFAULT_NAME
+            ),
+            format!(
+                "The docs and README use the short name `{}`; those commands will fail with \
+                 \"command not found\". Re-run the installer, or copy the binary next to it \
+                 under that name.",
+                invocation::DEFAULT_NAME
+            ),
+        ),
+        (None, Some(_)) => DoctorCheck::warn(
+            "installed_names",
+            format!(
+                "`{}` is on PATH but `{CANONICAL_BIN_NAME}` is not",
+                invocation::DEFAULT_NAME
+            ),
+            format!(
+                "Anything that spells out the long name `{CANONICAL_BIN_NAME}` (MCP host \
+                 configs, older docs) will fail with \"command not found\". Re-run the \
+                 installer, or copy the binary next to it under that name."
+            ),
+        ),
+        (Some(long_path), Some(short_path)) => {
+            let long_len = std::fs::metadata(long_path).map(|meta| meta.len()).ok();
+            let short_len = std::fs::metadata(short_path).map(|meta| meta.len()).ok();
+            if let (Some(a), Some(b)) = (long_len, short_len)
+                && a != b
+            {
+                return DoctorCheck::warn(
+                    "installed_names",
+                    format!(
+                        "`{CANONICAL_BIN_NAME}` and `{}` are both on PATH but differ in size \
+                         ({a} vs {b} bytes), so they are two different builds",
+                        invocation::DEFAULT_NAME
+                    ),
+                    format!(
+                        "One of them is stale, so the two names behave differently. Check each \
+                         with `{CANONICAL_BIN_NAME} --version` and `{} --version`, then \
+                         re-run the installer to replace the old one.",
+                        invocation::DEFAULT_NAME
+                    ),
+                );
+            }
+            DoctorCheck::ok(
+                "installed_names",
+                format!(
+                    "both `{CANONICAL_BIN_NAME}` and `{}` resolve on PATH (invoked as `{name}`)",
+                    invocation::DEFAULT_NAME
+                ),
+            )
+        }
+    }
+}
+
+/// 在 PATH 上解析一个命令名，命中返回其路径。
+///
+/// Windows 上按 `PATHEXT` 逐个后缀试（`asg` 实际落地为 `asg.exe`）；缺
+/// `PATHEXT` 时退回 `.EXE`。不执行任何东西，只看文件是否存在。
+fn which_on_path(command: &str) -> Option<std::path::PathBuf> {
+    let path_var = std::env::var_os("PATH")?;
+    let extensions: Vec<String> = if cfg!(windows) {
+        let raw = std::env::var("PATHEXT").unwrap_or_else(|_| ".EXE".to_string());
+        std::iter::once(String::new())
+            .chain(
+                raw.split(';')
+                    .map(str::trim)
+                    .filter(|ext| !ext.is_empty())
+                    .map(str::to_string),
+            )
+            .collect()
+    } else {
+        vec![String::new()]
+    };
+    for dir in std::env::split_paths(&path_var) {
+        if dir.as_os_str().is_empty() {
+            continue;
+        }
+        for extension in &extensions {
+            let candidate = dir.join(format!("{command}{extension}"));
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+/// semantic 后端检查：本二进制到底有没有编译进 semantic-candle。
+///
+/// 这条检查存在是因为一个真实的矛盾：本地二进制常是带 `--features
+/// semantic-candle` 编出来的，于是 doctor 报 `semantic_feature: true`，而 README
+/// 说"默认关闭"。两句都对，说的是不同的东西——README 说的是发布默认，doctor
+/// 说的是**手里这个二进制**。权威归属必须写明，否则用户只能猜。
+fn semantic_backend_check() -> DoctorCheck {
+    let name = invocation::name();
+    if semantic_feature_flag() == serde_json::json!(true) {
+        return DoctorCheck::ok(
+            "semantic_backend",
+            "this binary was built with --features semantic-candle, so `--mode \
+             semantic|hybrid` has a real backend. The build is authoritative here: the \
+             documented default is off, and this is not a default build",
+        );
+    }
+    DoctorCheck::ok(
+        "semantic_backend",
+        format!(
+            "this is a default build: no semantic backend is compiled in, so `--mode \
+             semantic|hybrid` reports retrieval_mode=lexical_fallback rather than \
+             degrading silently. Lexical search (`{name} search <keyword>`) is unaffected"
+        ),
+    )
+}
+
+/// 只有库打开之后才能做的检查：库是不是空的、有没有中断批次、有没有孤儿行。
+fn store_checks(
+    store: &SqliteStore,
+    db: &str,
+    interrupted: u64,
+    orphaned: u64,
+) -> Result<Vec<DoctorCheck>, CliError> {
+    let entities =
+        agent_session_grep_ports::CatalogStore::count(store).map_err(ProtocolError::from)?;
+    let name = invocation::name();
+    let mut checks = Vec::new();
+    checks.push(if entities == 0 {
+        DoctorCheck::warn(
+            "catalog_entities",
+            "the store opens cleanly but holds 0 entities",
+            format!(
+                "An empty index is why `{name} search` returns no hits and `{name} list` \
+                 shows nothing. Run `{}` to index your history.",
+                // 库已由显式 --db 指定（store_checks 只在那条分支被调用）。
+                sync_discover_command(db, DbOrigin::Flag)
+            ),
+        )
+    } else {
+        DoctorCheck::ok(
+            "catalog_entities",
+            format!("{entities} entities in the catalog"),
+        )
+    });
+    checks.push(if interrupted > 0 {
+        DoctorCheck::warn(
+            "interrupted_batches",
+            format!("{interrupted} write batch(es) did not converge"),
+            format!(
+                "A previous write was cut short (process killed, machine lost power). The \
+                 catalog stays consistent, but those messages are not indexed. Re-run the \
+                 same `{name} sync` command; it is idempotent and will finish the batch."
+            ),
+        )
+    } else {
+        DoctorCheck::ok("interrupted_batches", "no unconverged write batches")
+    });
+    checks.push(if orphaned > 0 {
+        DoctorCheck::warn(
+            "orphaned_tool_activities",
+            format!("{orphaned} orphan tool-activity row(s) left behind by a deletion"),
+            format!(
+                "These are projection rows whose message is gone; they waste space but change \
+                 no result. Run `{name} --db {db} index purge-activities` to prune them \
+                 deterministically."
+            ),
+        )
+    } else {
+        DoctorCheck::ok("orphaned_tool_activities", "no orphan tool-activity rows")
+    });
+    Ok(checks)
 }
 
 /// 已知 flag 名全集（前缀位置可出现的旗标）。取值守卫用它拒绝 `--db --robot`
@@ -1890,8 +2458,14 @@ fn db_flag_prefix(db: &str, origin: DbOrigin) -> String {
 }
 
 /// 空库/缺库时该跑的那条命令（提示里逐字给出，用户可直接复制）。
+/// 二进制名用本次实际调用名（M4-6）——以 `agent-session-grep` 调用的用户不该
+/// 被告知去敲 `asg`。
 fn sync_discover_command(db: &str, origin: DbOrigin) -> String {
-    format!("asg {}sync --discover", db_flag_prefix(db, origin))
+    format!(
+        "{} {}sync --discover",
+        invocation::name(),
+        db_flag_prefix(db, origin)
+    )
 }
 
 /// 写路径的 data root 兜底创建。默认库位于平台数据目录，首次写入前该目录不存在。
@@ -4033,8 +4607,15 @@ fn attach_session_list_rows(
 
 /// 取当前页最相关命中的建议命令，并按需插入 `--db <path>`。
 ///
-/// Application 生成的命令以 `agent-session-grep` 开头且不带 `--db`（对默认库正确）。
-/// 调用方给了显式 `--db` 时必须把同一路径补进去——否则提示会指向另一个库。
+/// Application 生成的命令以 [`CANONICAL_BIN_NAME`] 开头且不带 `--db`（对默认库
+/// 正确）。这里做两件改写：补上显式 `--db` 的同一路径（否则提示会指向另一个
+/// 库），以及把二进制名换成本次实际调用名（M4-6）。
+///
+/// 只改人类面：`suggested_next_commands` 在 robot envelope / MCP / Web 里是协议
+/// 字段，其字节由 Application 单一决定，schema
+/// （`schemas/robot/v1.1/envelope.schema.json`）与跨入口一致性 harness 都以那份
+/// 输出为准。Application 层拿不到 argv[0]，也不该拿——它不知道自己被哪个进程名
+/// 调用。人类面是唯一"有一个真实调用名可言"的出口。
 fn human_next_commands(hits: &[serde_json::Value], db: &str, origin: DbOrigin) -> Vec<String> {
     let prefix = db_flag_prefix(db, origin);
     hits.iter()
@@ -4047,7 +4628,7 @@ fn human_next_commands(hits: &[serde_json::Value], db: &str, origin: DbOrigin) -
             commands
                 .iter()
                 .filter_map(serde_json::Value::as_str)
-                .map(|command| insert_db_flag(command, &prefix))
+                .map(|command| retarget_invocation_name(&insert_db_flag(command, &prefix)))
                 .collect()
         })
         .unwrap_or_default()
@@ -6452,6 +7033,216 @@ mod tests {
         }
     }
 
+    // ---- 引导式 doctor（M4-6）----
+
+    /// 每条未通过的检查都必须带一条可执行的下一步，通过的检查必须**不带**。
+    ///
+    /// 这是 M4-6 的核心断言：doctor 过去只报事实。反向那半同样重要——给通过的
+    /// 检查也挂建议就是噪音，读者会学会跳过整个 CHECKS 段。
+    #[test]
+    fn failing_doctor_checks_carry_a_next_step_and_passing_ones_do_not() {
+        let checks = [
+            DoctorCheck::ok("passing", "fact"),
+            DoctorCheck::warn("degraded", "fact", "run something"),
+            DoctorCheck::fail("broken", "fact", "run something else"),
+        ];
+        for check in &checks {
+            match check.status {
+                DoctorStatus::Ok => assert!(
+                    check.next_step.is_none(),
+                    "{}: 通过的检查不该给建议",
+                    check.name
+                ),
+                DoctorStatus::Warn | DoctorStatus::Fail => {
+                    let next_step = check
+                        .next_step
+                        .as_deref()
+                        .unwrap_or_else(|| panic!("{}: 未通过的检查必须给下一步", check.name));
+                    assert!(!next_step.trim().is_empty(), "{}", check.name);
+                }
+            }
+        }
+        // 协议投影：next_step 缺失时省略键，不发空字符串。
+        let json = doctor_checks_json(&checks);
+        let array = json.as_array().expect("checks 是数组");
+        assert_eq!(array.len(), 3);
+        assert!(array[0].get("next_step").is_none(), "{}", array[0]);
+        assert_eq!(array[1]["status"], "warn");
+        assert_eq!(array[1]["next_step"], "run something");
+        assert_eq!(array[2]["status"], "fail");
+    }
+
+    /// 真实环境上跑完整检查清单：每条都有名字与事实，未通过的都有下一步，
+    /// 且下一步是可执行命令而不是概念解释（照
+    /// [`protocol::CanonicalCode::operator_action`] 的标准）。
+    #[test]
+    fn environment_checks_are_actionable_on_this_machine() {
+        let checks = environment_checks(None, false);
+        assert!(
+            checks.iter().any(|c| c.name == "provider_roots"),
+            "必须查 provider 数据根——'为什么 discover 什么都没找到'是新手第一问"
+        );
+        assert!(checks.iter().any(|c| c.name == "store_location"));
+        assert!(checks.iter().any(|c| c.name == "installed_names"));
+        assert!(checks.iter().any(|c| c.name == "semantic_backend"));
+        for check in &checks {
+            assert!(!check.detail.trim().is_empty(), "{}", check.name);
+            if let Some(next_step) = &check.next_step {
+                // 下一步必须点名一条真命令：只说"配置有问题"帮不了任何人。
+                assert!(
+                    next_step.contains(invocation::name()) || next_step.contains("PATH"),
+                    "{}: 下一步应给可执行命令: {next_step}",
+                    check.name
+                );
+            }
+        }
+        // `--offline` 会追加一条如实的说明（不是失败）。
+        let offline = environment_checks(None, true);
+        let check = offline
+            .iter()
+            .find(|c| c.name == "offline")
+            .expect("--offline 应被如实上报");
+        assert_eq!(check.status, DoctorStatus::Ok);
+        assert!(check.next_step.is_none());
+    }
+
+    /// 缺失的父目录是 warn 而非 fail（写命令会建它），且下一步就是那条建索引的
+    /// 全命令；不可解析/不可写才是 fail。
+    #[test]
+    fn store_location_check_separates_missing_parent_from_unwritable_parent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("not-created-yet").join("asg.db");
+        let check = store_location_check(Some(&missing.to_string_lossy()));
+        assert_eq!(check.status, DoctorStatus::Warn, "{}", check.detail);
+        let next_step = check.next_step.expect("必须给下一步");
+        assert!(next_step.contains("sync --discover"), "{next_step}");
+        // 检查本身无副作用：绝不为了自检把目录造出来。
+        assert!(!missing.parent().expect("has parent").exists());
+
+        // 存在且可写的父目录是 ok，且不留探测残留。
+        let existing = dir.path().join("asg.db");
+        let check = store_location_check(Some(&existing.to_string_lossy()));
+        assert_eq!(check.status, DoctorStatus::Ok, "{}", check.detail);
+        assert!(check.next_step.is_none());
+        let residue: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("readable")
+            .flatten()
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .contains("doctor-write-probe")
+            })
+            .collect();
+        assert!(residue.is_empty(), "可写性探测必须清理自己的临时文件");
+    }
+
+    /// 有界文件计数：到达上限即停并如实标注，不把下界当精确值。
+    #[test]
+    fn bounded_file_count_is_exact_below_the_cap_and_marked_at_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let empty = count_files_bounded(dir.path());
+        assert_eq!(empty.count, 0);
+        assert!(!empty.hit_cap);
+
+        // 嵌套一层，确认递归与"只数文件不数目录"。
+        let nested = dir.path().join("child");
+        std::fs::create_dir(&nested).expect("mkdir");
+        for index in 0..3 {
+            std::fs::write(nested.join(format!("f{index}")), b"x").expect("write");
+        }
+        let counted = count_files_bounded(dir.path());
+        assert_eq!(counted.count, 3, "目录本身不计入文件数");
+        assert!(!counted.hit_cap);
+
+        // 不存在的根不 panic，报 0。
+        let absent = count_files_bounded(&dir.path().join("absent"));
+        assert_eq!(absent.count, 0);
+    }
+
+    /// PATH 解析不执行任何东西，且对空/缺失 PATH 段不 panic。
+    #[test]
+    fn which_on_path_finds_a_real_file_without_executing_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let name = "asg-doctor-which-probe";
+        let file_name = if cfg!(windows) {
+            format!("{name}.EXE")
+        } else {
+            name.to_string()
+        };
+        std::fs::write(dir.path().join(&file_name), b"not a real executable").expect("write");
+        // PATH 里混入空段与不存在的目录：两者都不得导致 panic 或误命中。
+        let joined = std::env::join_paths([
+            std::path::PathBuf::new(),
+            dir.path().join("absent"),
+            dir.path().to_path_buf(),
+        ])
+        .expect("join_paths");
+        // 单线程内改环境变量：本测试不并发读 PATH。
+        let previous = std::env::var_os("PATH");
+        unsafe { std::env::set_var("PATH", &joined) };
+        let found = which_on_path(name);
+        let missing = which_on_path("asg-doctor-definitely-not-installed");
+        match previous {
+            Some(value) => unsafe { std::env::set_var("PATH", value) },
+            None => unsafe { std::env::remove_var("PATH") },
+        }
+        assert_eq!(
+            found.as_deref(),
+            Some(dir.path().join(&file_name).as_path())
+        );
+        assert!(missing.is_none());
+    }
+
+    /// 库侧检查：空库是 warn 且点名 `sync --discover`，非空库是 ok。
+    #[test]
+    fn store_checks_name_sync_discover_on_an_empty_catalog() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("checks.db").to_string_lossy().into_owned();
+        let store = SqliteStore::open(&db).expect("open");
+        let checks = store_checks(&store, &db, 0, 0).expect("checks");
+        let empty = checks
+            .iter()
+            .find(|c| c.name == "catalog_entities")
+            .expect("必须查实体数——空库是 search 零命中的头号原因");
+        assert_eq!(empty.status, DoctorStatus::Warn);
+        let next_step = empty.next_step.as_deref().expect("空库必须给下一步");
+        assert!(next_step.contains("sync --discover"), "{next_step}");
+        assert!(
+            next_step.contains(&db),
+            "下一步应带上同一个库路径: {next_step}"
+        );
+
+        // 中断批次与孤儿行 >0 时各自给出确定性的修复命令。
+        let degraded = store_checks(&store, &db, 2, 5).expect("checks");
+        let interrupted = degraded
+            .iter()
+            .find(|c| c.name == "interrupted_batches")
+            .expect("interrupted_batches");
+        assert_eq!(interrupted.status, DoctorStatus::Warn);
+        assert!(
+            interrupted
+                .next_step
+                .as_deref()
+                .is_some_and(|step| step.contains("sync")),
+            "{interrupted:?}",
+            interrupted = interrupted.next_step
+        );
+        let orphans = degraded
+            .iter()
+            .find(|c| c.name == "orphaned_tool_activities")
+            .expect("orphaned_tool_activities");
+        assert_eq!(orphans.status, DoctorStatus::Warn);
+        assert!(
+            orphans
+                .next_step
+                .as_deref()
+                .is_some_and(|step| step.contains("index purge-activities")),
+            "{:?}",
+            orphans.next_step
+        );
+    }
+
     /// 未注册 root 的 provider 必须声明 `discover: Unsupported` 而不是 `Unknown`：
     /// "没有 root" 是已确定的事实，不是待评估项。deferred provider
     /// （无 transcript 证据）例外——它们整行都是 `Unknown`。
@@ -7035,13 +7826,16 @@ mod tests {
         assert_eq!(db_flag_prefix("x.db", DbOrigin::Default), "");
         assert_eq!(db_flag_prefix("x.db", DbOrigin::Env), "");
         assert_eq!(db_flag_prefix("x.db", DbOrigin::Flag), "--db x.db ");
+        // 建议命令的二进制名是本次实际调用名（M4-6），不是某个硬编码的名字：
+        // 断言按调用名拼期望值，两个 `[[bin]]` 名下都必须成立。
+        let name = invocation::name();
         assert_eq!(
             sync_discover_command("x.db", DbOrigin::Default),
-            "asg sync --discover"
+            format!("{name} sync --discover")
         );
         assert_eq!(
             sync_discover_command("x.db", DbOrigin::Flag),
-            "asg --db x.db sync --discover"
+            format!("{name} --db x.db sync --discover")
         );
     }
 
@@ -7056,7 +7850,14 @@ mod tests {
         assert_eq!(error.0.code, CanonicalCode::NotFound);
         assert_eq!(error.0.code.exit_code(), 4);
         assert!(error.0.message.contains(&missing_s), "{}", error.0.message);
-        assert!(error.0.message.contains("asg --db"), "{}", error.0.message);
+        assert!(
+            error
+                .0
+                .message
+                .contains(&format!("{} --db", invocation::name())),
+            "{}",
+            error.0.message
+        );
         assert!(
             error.0.message.contains("sync --discover"),
             "{}",

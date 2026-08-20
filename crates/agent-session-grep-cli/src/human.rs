@@ -1,7 +1,7 @@
 //! Human 渲染器：把成功结果投影为人类可读文本行（无 envelope、无颜色）。
 //!
-//! search/list/get/show/context/status/providers 各有专属版式，sync 与 ingest 各有统计
-//! 版式，其余命令（index/index.rebuild/doctor/config.paths 及未知命令）共用
+//! search/list/get/show/context/status/providers/doctor 各有专属版式，sync 与 ingest
+//! 各有统计版式，其余命令（index/index.rebuild/config.paths 及未知命令）共用
 //! 同一条排序 `key: value` 兜底路径。约束：无颜色、无新依赖；任何输入不
 //! panic——缺失或异常字段降级为 `?` 占位或空态措辞；每个返回元素都是单行
 //! 可打印文本，无尾随空行。
@@ -49,6 +49,7 @@ pub fn render_success(command: &str, outcome: Outcome, data: &Value, page: &Page
         "resume" => render_resume(data),
         "forget" | "prune" => render_forget(data),
         "providers" => render_providers(data),
+        "doctor" => render_doctor(data),
         "config.paths" => {
             // config paths 报告的是"默认位置"，未用到就不会创建；新手照着找会扑空
             // （10 角色体验测试缺陷）。加一句说明，结构本身保持稳定。
@@ -79,6 +80,53 @@ pub fn render_success(command: &str, outcome: Outcome, data: &Value, page: &Page
         }
         _ => kv_lines(data),
     }
+}
+
+/// `doctor`：先按既有 `key: value` 版式报事实，再逐条列出引导式检查（M4-6）。
+///
+/// 通过的检查只占一行（`ok  <name>  <detail>`），未通过的检查追加一行缩进的
+/// `-> <next_step>`——doctor 过去只报事实，把"那我该干什么"留给读过源码的人。
+///
+/// 事实行保持原样（`checks` 键从 kv 兜底里摘掉，否则会渲染成一行巨大的 JSON），
+/// 因此没有 `checks` 的旧响应（以及机器面）版式完全不变。
+fn render_doctor(data: &Value) -> Vec<String> {
+    let mut facts = data.clone();
+    let checks = facts
+        .as_object_mut()
+        .and_then(|object| object.remove("checks"))
+        .unwrap_or(Value::Null);
+    let mut lines = kv_lines(&facts);
+    let checks = checks.as_array().map(Vec::as_slice).unwrap_or_default();
+    if checks.is_empty() {
+        return lines;
+    }
+    let field = |check: &Value, key: &str| {
+        check
+            .get(key)
+            .and_then(Value::as_str)
+            .map(sanitize)
+            .unwrap_or_default()
+    };
+    lines.push(String::new());
+    lines.push("CHECKS:".into());
+    for check in checks {
+        let status = field(check, "status");
+        let status = if status.is_empty() {
+            "?".into()
+        } else {
+            status
+        };
+        lines.push(format!(
+            "  {status:<4} {}  {}",
+            field(check, "name"),
+            field(check, "detail")
+        ));
+        let next_step = field(check, "next_step");
+        if !next_step.is_empty() {
+            lines.push(format!("       -> {next_step}"));
+        }
+    }
+    lines
 }
 
 /// `providers`：每个 provider 用两行展示成熟度/路线目标及完整逐字段能力。
@@ -2214,6 +2262,50 @@ mod tests {
                 "tool: agent-session-grep",
                 "version: 0.1.0",
             ]
+        );
+    }
+
+    /// 引导式 doctor（M4-6）：事实行版式不变，`checks` 单独成段，未通过的检查
+    /// 各带一行缩进的下一步。`checks` 绝不落进 kv 兜底（否则是一行巨大 JSON）。
+    #[test]
+    fn doctor_renders_checks_as_a_section_with_next_steps() {
+        let data = json!({
+            "db": "ok",
+            "schema": 13,
+            "checks": [
+                { "name": "provider_roots", "status": "ok", "detail": "2/6 roots exist" },
+                {
+                    "name": "catalog_entities",
+                    "status": "warn",
+                    "detail": "0 entities",
+                    "next_step": "Run `asg sync --discover` to index your history.",
+                },
+            ],
+        });
+        let lines = render_success("doctor", Outcome::Success, &data, &Page::default());
+        assert_eq!(
+            lines,
+            [
+                "db: ok",
+                "schema: 13",
+                "",
+                "CHECKS:",
+                "  ok   provider_roots  2/6 roots exist",
+                "  warn catalog_entities  0 entities",
+                "       -> Run `asg sync --discover` to index your history.",
+            ]
+        );
+        // 通过的检查不留空的下一步行。
+        assert_eq!(lines.iter().filter(|line| line.contains("->")).count(), 1);
+    }
+
+    /// 没有 `checks` 的响应（旧库、机器面）版式与本改动前逐字节相同。
+    #[test]
+    fn doctor_without_checks_renders_exactly_as_before() {
+        let data = json!({ "db": "not-checked", "schema": null });
+        assert_eq!(
+            render_success("doctor", Outcome::Success, &data, &Page::default()),
+            ["db: not-checked", "schema: null"]
         );
     }
 
