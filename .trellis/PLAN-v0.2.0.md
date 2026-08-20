@@ -1149,6 +1149,54 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   **收紧 opencode 的 probe 让它显式拒绝 zcode**,并新增 zcode adapter。
   **验收**:两个真实 DB 各被正确识别;probe 冲突有回归测试。
 
+- [ ] **M1-14 pi 在真实数据上完全不可达(2026-08-20 实测发现,两个独立缺陷)**
+  跑 M1-4 时对本机 7 份**真实** pi transcript 实测,结论:
+  **pi 目前无法通过任何自动路径入库。** 两个缺陷叠加:
+
+  **缺陷 A:pi 没有注册 discovery root。**
+  `provider_root_subpath()`(`main.rs:4227-4237`)只有 6 个 provider,
+  **pi 不在其中** → `sync --discover` 报 `root_state: "unsupported"`、
+  `found: 0`,而 `~/.pi/agent/sessions/` 明明有 7 份真实 transcript。
+  (§1.8.1 的 Tier A 表早已记录这个路径存在,声明侧却没跟上。)
+
+  **缺陷 B:pi 与 openclaw 的 probe 在真实数据上必然同分平票。**
+  手动 `sync <file>` 7/7 全部被拒:
+  `ambiguous provider selection: 2 variants matched with equal confidence
+  (openclaw/session-jsonl-v3, pi/session-jsonl-v1)`。
+  **根因不是"两家格式真的一样"那么简单** —— 两个 probe 都只采样
+  **前 8 条非空行**(`SAMPLE_LINE_LIMIT = 8`),而真实 pi 文件的头 8 行是
+  `session` + 7 条 `model_change`,**一条 `message` 都没有**
+  (整份文件的实际构成:44 `model_change` / 30 `message` / 1 `session` /
+  1 `thinking_level_change`)。于是两边都拿不到
+  "`conversational > 0 && session_headers > 0`" 这个 `Confirmed` 条件,
+  双双退回 `High` → 平票。
+  **两家的合成 fixture 都是"session 紧跟 message"的理想形状,所以单元测试
+  全绿而真实数据全败** —— 这正是 M1-4 存在的理由。
+
+  **已确认可用的证据(说明 adapter 本身没坏)**:
+  `sync --provider pi <file>` **成功入库 18 条消息** ——
+  解析是对的,坏的是"怎么认出它是 pi"这一层。
+
+  **修法(两个都要,缺一不可)**:
+  1. 给 pi 注册 root `.pi/agent/sessions`(缺陷 A)。这同时也解决大部分
+     缺陷 B:`--discover` 会带 `provider_hint`,而
+     `choose_probed_candidate()` 已经支持用 root 归属打破平票
+     (`application/src/lib.rs:709-741`)。
+  2. **仍要修 probe**:光靠 hint 会让手动 `sync <file>` 永远拒绝真实 pi 文件。
+     可用的真实判别据(已实测,7/7 一致):**pi 的 session 头带
+     `version: 3` 字段**(`{type,version,id,timestamp,cwd}`),
+     而两个 probe **都没读 `version`**。
+     ⚠️ 但要先确认 openclaw 真实文件的头是否也带 `version` ——
+     本机没有 openclaw 真实样本(root `missing`),
+     **在拿到 openclaw ground truth 之前不要单方面把 `version` 当成 pi 独占**,
+     否则只是把误判方向调了个头。
+  3. 扩两家的 probe 采样窗口,或让采样"跳过非会话记录直到看到 message" ——
+     8 行窗口对真实文件太窄这件事本身就是缺陷,与平票是两回事。
+  **验收**:`sync --discover` 能发现并入库真实 pi transcript;
+  手动 `sync <file>`(无 `--provider`)不再对真实 pi 文件报 ambiguous;
+  回归测试用**真实观察到的记录顺序**(session + 一串 model_change 在前,
+  message 在后)构造合成 fixture,而不是理想顺序。
+
 - [x] **M1-10 修 qoder 路径三方不一致**
   adapter 与文档写 `~/.qoder/projects/<project>/transcript/*.jsonl`;
   官方文档写 `~/.qoder/projects/<项目>/*.jsonl` + `state.json`
