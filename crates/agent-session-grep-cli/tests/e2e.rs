@@ -1514,6 +1514,86 @@ fn human_search_table_session_id_feeds_context_directly() {
     );
 }
 
+/// `sync <dir>` 按 provider probe 展开成候选文件（M3-11）。
+///
+/// 过去它拒绝目录并让用户"在你的 shell 里展开文件列表"——在 PowerShell 上那是
+/// 一句 `Get-ChildItem -Recurse | ForEach-Object`，而**这个工具自己**在
+/// `sync --discover` 里就在做同一件遍历。把已有能力推给用户手抄不是设计。
+///
+/// 三件事一起钉住：
+/// 1. 目录被递归展开，子目录里的 transcript 也进得来；
+/// 2. 展开走 provider probe 而不是扩展名 —— 目录里混着的非 transcript 文件
+///    （README、日志）被跳过而不是让整轮失败；
+/// 3. 一个**没有任何**可识别 transcript 的目录是用法错误，不是"成功同步 0 条"
+///    ——后者会让用户以为路径给对了。
+#[test]
+fn sync_expands_a_directory_into_recognised_transcripts() {
+    let (dir, db) = temp_db("sync-dir");
+    let root = dir.path().join("corpus");
+    let nested = root.join("nested");
+    std::fs::create_dir_all(&nested).expect("create corpus tree");
+
+    let line = |uuid: &str, text: &str| {
+        format!(
+            r#"{{"type":"user","uuid":"{uuid}","parentUuid":null,"sessionId":"b2bbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb99","timestamp":"2026-01-01T00:00:00.000Z","message":{{"role":"user","content":"{text}"}}}}"#
+        )
+    };
+    std::fs::write(
+        root.join("top.jsonl"),
+        line("a1aaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa91", "dirsync top level") + "\n",
+    )
+    .expect("write top transcript");
+    std::fs::write(
+        nested.join("deep.jsonl"),
+        line(
+            "a1aaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa92",
+            "dirsync nested level",
+        ) + "\n",
+    )
+    .expect("write nested transcript");
+    // 非 transcript：probe 不认它，必须被跳过而不是让整轮失败。
+    std::fs::write(root.join("NOTES.txt"), "not a transcript at all\n").expect("write noise");
+
+    let root_s = root.to_string_lossy().into_owned();
+    let out = run(&db, &["sync", &root_s]);
+    assert!(out.status.success(), "sync <dir> failed: {}", stdout(&out));
+    let frame = parse_first_line(&out);
+    assert_eq!(
+        frame["data"]["sources"], 2,
+        "两份 transcript 都该被展开，噪声文件不计入: {frame}"
+    );
+    assert_eq!(frame["data"]["committed"], 2, "{frame}");
+
+    // 两条都真的可搜索（展开不是只报了个数字）。
+    for term in ["dirsync", "nested"] {
+        let out = run(&db, &["search", term]);
+        assert!(
+            stdout(&out).contains("msg_v1_"),
+            "term `{term}` 应命中: {}",
+            stdout(&out)
+        );
+    }
+
+    // 空目录（无可识别 transcript）是用法错误，不是"成功同步 0 条"。
+    let empty = dir.path().join("empty");
+    std::fs::create_dir_all(&empty).expect("create empty dir");
+    std::fs::write(empty.join("README.md"), "# nothing here\n").expect("write readme");
+    let out = run(&db, &["sync", &empty.to_string_lossy()]);
+    assert_eq!(out.status.code(), Some(2), "{}", stdout(&out));
+    let frame = parse_first_line(&out);
+    assert_eq!(frame["error"]["code"], "invalid_request", "{frame}");
+    let message = frame["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("providers"),
+        "错误必须给出下一步（怎么知道支持哪些格式）: {message}"
+    );
+    // 隐私：错误消息不回显用户的目录布局。
+    assert!(
+        !message.contains("empty") && !message.contains(&*empty.to_string_lossy()),
+        "错误消息不得带路径: {message}"
+    );
+}
+
 #[test]
 fn doctor_reports_ok_without_db() {
     // `doctor` 现在会按 `$ASG_DB` > 平台默认 找库（与 status/search 同一条链），

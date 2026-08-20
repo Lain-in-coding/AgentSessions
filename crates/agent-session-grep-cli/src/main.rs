@@ -1084,7 +1084,7 @@ USAGE:
 
 COMMANDS:
     ingest <file>          parse one raw transcript file into the store (source stays read-only)
-    sync <file>...         atomically scan one or more transcripts; no new generation when nothing changed
+    sync <path>...         atomically scan transcripts; a directory is expanded recursively. No new generation when nothing changed
     sync --discover        discover and sync sources under every provider data root (sources stay read-only)
     index rebuild          reproject the whole FTS index from the authoritative catalog (maintenance)
     index compact          reclaim the freelist and erase deletion residue (FTS5 optimize + VACUUM; exclusive lock)
@@ -1496,7 +1496,9 @@ fn subcommand_help_template(cmd: &str) -> &'static str {
                    其余语义与 forget 完全相同（dry-run 默认、源文件只读、抑制清单、index compact）。"
         }
         "sync" => {
-            "sync <file>...：原子扫描一个或多个 transcript 文件入库；无变化不写库。\n\
+            "sync <path>...：原子扫描 transcript 入库；无变化不写库。\n\
+                   \u{20}  目录会被递归展开（候选由各 provider 的 probe 判定，不按扩展名），\n\
+                   \u{20}  所以不必先在 shell 里手动展开文件列表。\n\
                    sync --from-file <清单>：从清单文件读路径（每行一个，空行与 # 注释忽略）。\n\
                    \u{20}  源很多时用它——几千个路径展开后会超出命令行长度上限。\n\
                    sync --discover：自动发现各 provider 数据根（~/.claude/projects、~/.codex/sessions 等）下的源并同步；\n\
@@ -5715,20 +5717,45 @@ fn sync_files(
     if paths.is_empty() {
         return Err(CliError::usage("sync <file>... requires at least one file"));
     }
-    // 新手第一本能是给 sync 传整个目录；目录不是 .jsonl 文件，捕获要读它时会
-    // 报"拒绝访问 (os error 5)"，误导新手去折腾权限/杀毒（10 角色体验测试缺陷）。
-    // 这里显式拦截并给出正确用法。消息不带路径（隐私：用户目录布局不外泄），
-    // 展开示例保持平台中立（不给 PowerShell-only 的 Get-ChildItem 例子，R2.2）。
-    // discover 路径不走此 guard——它已经枚举了文件而非目录。
+    // 目录参数按 provider probe 展开成候选文件（M3-11）。
+    //
+    // 过去这里直接拒绝目录并让用户"在你的 shell 里展开文件列表" —— 那在
+    // PowerShell 上要写 `Get-ChildItem -Recurse | ForEach-Object ...`,
+    // 而**这个工具自己**在 `sync --discover` 里已经做了完全一样的遍历。
+    // 让用户手抄一遍工具已有的能力,是把实现细节推给用户。
+    //
+    // 展开用与 discover 同一条通道(`discover_provider_sources`),所以候选判定
+    // 由 provider 自己的 probe 回答,不按扩展名硬编码 —— 否则 SQLite
+    // (`opencode.db`)、整档 JSON、Markdown 这些真实 transcript 会被漏掉。
+    // 遍历不完整(权限错误)时如实拒绝而不是静默少同步:显式 `sync <dir>` 的
+    // 用户点名了这个目录,少了几个文件必须被看见。
+    let mut expanded: Vec<String> = Vec::with_capacity(paths.len());
+    let dir_registry = provider_registry();
+    let dir_adapters: Vec<&dyn ProviderAdapter> = dir_registry.iter().map(|a| a.as_ref()).collect();
     for path in paths {
-        if std::path::Path::new(path).is_dir() {
+        let as_path = std::path::Path::new(path);
+        if !as_path.is_dir() {
+            expanded.push(path.clone());
+            continue;
+        }
+        let (found, complete) = discover_provider_sources(as_path, &dir_adapters);
+        if !complete {
+            // 消息不带路径(隐私:用户目录布局不外泄,与下方 guard 同一约定)。
             return Err(CliError::usage(
-                "sync takes one or more transcript files, not a directory; to sync a whole \
-                 directory, expand the file list with your shell and pass the files to sync \
-                 one by one",
+                "sync could not read every subdirectory of that directory, so it would \
+                 silently index only part of it; fix the permissions, or pass the \
+                 transcript files explicitly",
             ));
         }
+        if found.is_empty() {
+            return Err(CliError::usage(
+                "no transcript files were recognised under that directory; run `providers` \
+                 to see the supported formats, or pass a transcript file directly",
+            ));
+        }
+        expanded.extend(found);
     }
+    let paths: &[String] = &expanded;
     // 重复路径去重（保持出现顺序）：同一文件列两次是书写冗余而非两个源；
     // 不去重会让 store 层把同一路径当两个 source batch 提交而判 catalog_error
     // （exit 6）——sync 幂等语义下应提前归一为单个源。
