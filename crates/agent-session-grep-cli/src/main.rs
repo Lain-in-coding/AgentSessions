@@ -4225,15 +4225,69 @@ fn provider_data_root(provider_id: &str) -> Option<std::path::PathBuf> {
 /// "该 provider 不支持自动发现" 与 "home 解析失败"——两者过去都塌成
 /// `found: 0, complete: false`，用户无从判断该不该手动传文件（M2P-6）。
 fn provider_root_subpath(provider_id: &str) -> Option<&'static str> {
-    match provider_id {
-        "claude-code" => Some(".claude/projects"),
-        "codex" => Some(".codex/sessions"),
-        "openclaw" => Some(".openclaw/agents"),
-        "tencent-codebuddy" => Some(".codebuddy/projects"),
-        "antigravity" => Some(".gemini/antigravity-cli/brain"),
-        "opencode" => Some(".local/share/opencode"),
-        _ => None,
+    PROVIDER_ROOTS
+        .iter()
+        .find(|(id, _)| *id == provider_id)
+        .map(|(_, subpath)| *subpath)
+}
+
+/// 全部已注册的 discovery root：`(provider_id, home 相对子路径)`。
+///
+/// 这张表是 root 归属的单一权威，[`provider_root_subpath`] 与
+/// [`provider_hint_from_path`] 都从它读——前者回答"这个 provider 的 root 在哪"，
+/// 后者回答"这个路径属于哪个 provider"，两个方向必须同源，否则
+/// `--discover` 与手动 `sync <file>` 会对同一份文件给出不同归属。
+const PROVIDER_ROOTS: &[(&str, &str)] = &[
+    ("claude-code", ".claude/projects"),
+    ("codex", ".codex/sessions"),
+    ("openclaw", ".openclaw/agents"),
+    ("pi", ".pi/agent/sessions"),
+    ("tencent-codebuddy", ".codebuddy/projects"),
+    ("antigravity", ".gemini/antigravity-cli/brain"),
+    ("opencode", ".local/share/opencode"),
+];
+
+/// 源路径落在某个已注册 discovery root 之下时，返回该 root 的 provider id。
+///
+/// pi 与 openclaw 的磁盘格式是同一形状：两家真实 session header 都是
+/// `{type, version: 3, id, timestamp, cwd}`，都以一串 `model_change` /
+/// `thinking_level_change` 开场（openclaw 侧证据：jazzyalex/agent-sessions
+/// 的 stage0 openclaw fixture 与 kenn-io/agentsview 的 openclaw 解析测试，
+/// 两家 MIT，header 均为 `version: 3`）。所以**没有任何内容字段能区分它们**,
+/// `version` 尤其不能——它两家都有。`choose_probed_candidate` 只能靠 root
+/// 归属这个独立于文件内容的外部事实消歧。
+///
+/// `--discover` 一直握着这个事实，手动 `sync <file>` 过去把它丢掉了：同一份
+/// transcript 用 `--discover` 能入库、用完整路径点名反而被判 ambiguous。这里
+/// 把路径这一侧补齐，让两条入口用同一类证据。
+///
+/// 语义与其它 hint 一致：只在 probe 同分时生效，不会把某个格式硬塞给不认它的
+/// provider（见 `choose_probed_candidate`）。
+fn provider_hint_from_path(path: &str) -> Option<&'static str> {
+    provider_hint_from_path_on(path, cfg!(windows))
+}
+
+/// [`provider_hint_from_path`] 的平台显式形式：`windows` 由调用方给出，使两个
+/// 平台的行为在任一平台上都可断言（与 [`installation_namespace_on`] 同一纪律）。
+///
+/// 按路径段（而非字符串前缀）匹配，且不解析 home：重定位过的 home、相对路径、
+/// 以及 `--discover` 之外的任何入口都能命中同一 root。多个 root 同时命中时取
+/// 段数最长的那个，避免短 root 抢走长 root 的路径。
+fn provider_hint_from_path_on(path: &str, windows: bool) -> Option<&'static str> {
+    let path = normalized_path_case(path, windows);
+    let segments: Vec<&str> = path.split(['/', '\\']).filter(|s| !s.is_empty()).collect();
+    let mut best: Option<(usize, &'static str)> = None;
+    for (provider_id, subpath) in PROVIDER_ROOTS {
+        let root: Vec<&str> = subpath.split('/').filter(|s| !s.is_empty()).collect();
+        if segments
+            .windows(root.len())
+            .any(|window| window == root.as_slice())
+            && best.is_none_or(|(len, _)| root.len() > len)
+        {
+            best = Some((root.len(), provider_id));
+        }
     }
+    best.map(|(_, provider_id)| provider_id)
 }
 
 fn source_path_identity(path: &str) -> String {
@@ -5073,18 +5127,25 @@ fn sync_files(
         }
     }
     // `--provider` 是显式消歧输入：内容同形的 provider（pi/openclaw）在没有
-    // discover root 上下文时无法归属，此时用户点名即唯一证据。走与 discover
+    // root 上下文时无法归属，此时用户点名即唯一证据。走与 discover
     // 相同的通道（`discovered_provider_ids`），所以只在同分时生效——点错名字
     // 不会把一个格式硬塞给另一个 provider。
-    let ctx = match provider {
-        Some(id) => SyncContext {
-            discovered_provider_ids: unique
-                .iter()
-                .map(|path| (path.clone(), id.to_string()))
-                .collect(),
-            ..SyncContext::default()
-        },
-        None => SyncContext::default(),
+    //
+    // 没点名时退回按路径归属（`provider_hint_from_path`）：源落在某个已注册
+    // discovery root 之下是与 discover 同一类的外部事实，没有理由只在
+    // `--discover` 那条入口才采信它。
+    let ctx = SyncContext {
+        discovered_provider_ids: unique
+            .iter()
+            .filter_map(|path| {
+                let attributed = match provider {
+                    Some(id) => Some(id),
+                    None => provider_hint_from_path(path),
+                };
+                attributed.map(|id| (path.clone(), id.to_string()))
+            })
+            .collect(),
+        ..SyncContext::default()
     };
     sync_files_inner(store, &unique, &ctx, false, progress, request_id)
 }
@@ -6307,7 +6368,7 @@ mod tests {
     /// 这条缺失时矩阵给 claude-code/codex 之外的四个已注册 provider
     /// （openclaw / tencent-codebuddy / antigravity / opencode）报
     /// `discover: Unsupported`，而 `sync --discover` 其实一直在扫它们的 root。
-    /// 实测（伪 HOME 下每个 root 种一份 golden fixture）六个 root 全部
+    /// 实测（伪 HOME 下每个 root 种一份 golden fixture）每个 root 全部
     /// `root_state=scanned found=1`，所以假的是声明那一侧。
     ///
     /// 双向断言：漏声明（注册了 root 却报 Unsupported）与过度声明
@@ -6324,6 +6385,69 @@ mod tests {
                  `discover: Native` 当且仅当注册了 discovery root——要么注册 root，\
                  要么把声明改成 Unsupported，不要让矩阵自我认证。",
                 capability.provider_id, capability.discover
+            );
+        }
+    }
+
+    /// pi 的 discovery root 必须保持注册（M1-14 回归）。
+    ///
+    /// 漏注册时 `sync --discover` 对 `~/.pi/agent/sessions` 报
+    /// `root_state: unsupported`、`found: 0`，而 root 下确有 transcript ——
+    /// 与 openclaw 同形导致的手动 `sync` ambiguous 叠加后，pi 没有任何自动入库
+    /// 路径。上面的双向断言只保证"声明与注册一致"，两边一起改回 Unsupported
+    /// 仍然自洽，所以这条单独钉住路径本身。
+    #[test]
+    fn pi_registers_its_discovery_root() {
+        assert_eq!(provider_root_subpath("pi"), Some(".pi/agent/sessions"));
+    }
+
+    /// 路径归属：源落在已注册 root 之下时能认出 provider，两个平台一致。
+    ///
+    /// 这是手动 `sync <file>` 打破 pi/openclaw 同分平票的唯一证据——两家真实
+    /// header 都带 `version: 3`，内容侧无可用判别据。
+    #[test]
+    fn path_attribution_resolves_registered_roots_on_both_platforms() {
+        for windows in [true, false] {
+            assert_eq!(
+                provider_hint_from_path_on("/home/dev/.pi/agent/sessions/s.jsonl", windows),
+                Some("pi"),
+                "windows={windows}"
+            );
+            assert_eq!(
+                provider_hint_from_path_on(
+                    "/home/dev/.openclaw/agents/main/sessions/s.jsonl",
+                    windows
+                ),
+                Some("openclaw"),
+                "windows={windows}"
+            );
+            // root 之外的路径没有归属：hint 缺席时同分仍然拒绝，不猜。
+            assert_eq!(
+                provider_hint_from_path_on("/tmp/downloaded/s.jsonl", windows),
+                None,
+                "windows={windows}"
+            );
+        }
+        // Windows 分隔符与盘符大小写都归一（与 source_path_identity 同一规则）。
+        assert_eq!(
+            provider_hint_from_path_on(r"C:\Users\dev\.pi\agent\sessions\s.jsonl", true),
+            Some("pi")
+        );
+    }
+
+    /// 每个已注册 root 的路径都能被反向认回它自己的 provider。
+    ///
+    /// `provider_root_subpath` 与 `provider_hint_from_path` 是同一张表的两个
+    /// 方向；任一方向漏掉一个 provider，`--discover` 与手动 `sync` 就会对同一份
+    /// 文件给出不同归属。
+    #[test]
+    fn every_registered_root_is_attributable_by_path() {
+        for (provider_id, subpath) in PROVIDER_ROOTS {
+            let path = format!("/home/dev/{subpath}/nested/transcript.jsonl");
+            assert_eq!(
+                provider_hint_from_path_on(&path, false),
+                Some(*provider_id),
+                "root `{subpath}` 未能反向归属到 `{provider_id}`"
             );
         }
     }

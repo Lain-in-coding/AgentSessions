@@ -266,20 +266,21 @@ you which one you hit:
 | `home_unresolved` | The root is registered but neither `$HOME` nor `%USERPROFILE%` could be resolved. | Set one of those environment variables. |
 | `scanned` | The root was walked. Check `found` and `complete`. | If `found: 0`, the directory holds no file any adapter claims. |
 
-Only **6** of the 14 ingestible providers register a discovery root:
+Only **7** of the 14 ingestible providers register a discovery root:
 
 | Provider | Root |
 | --- | --- |
 | `claude-code` | `~/.claude/projects` |
 | `codex` | `~/.codex/sessions` |
 | `openclaw` | `~/.openclaw/agents` |
+| `pi` | `~/.pi/agent/sessions` |
 | `tencent-codebuddy` | `~/.codebuddy/projects` |
 | `antigravity` | `~/.gemini/antigravity-cli/brain` |
 | `opencode` | `~/.local/share/opencode` |
 
-`aider`, `cline`, `cursor`, `grok-build`, `hermes`, `kimi-code`, `pi`, and
-`qoder` report `unsupported` and must be synced by path. If you were expecting
-one of those to appear automatically, that is the reason.
+`aider`, `cline`, `cursor`, `grok-build`, `hermes`, `kimi-code`, and `qoder`
+report `unsupported` and must be synced by path. If you were expecting one of
+those to appear automatically, that is the reason.
 
 Files that no adapter can attribute are skipped and counted, never guessed at,
 so a nonzero skip count alongside `found > 0` is normal in a mixed directory.

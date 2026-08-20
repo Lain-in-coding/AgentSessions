@@ -295,7 +295,7 @@ aider antigravity claude-code cline codex cursor grok-build hermes
 kimi-code openclaw opencode pi qoder tencent-codebuddy
 ```
 
-Only **6** of those register a discovery root, so `sync --discover` can only
+Only **7** of those register a discovery root, so `sync --discover` can only
 find sources for these:
 
 | Provider | Data root |
@@ -303,12 +303,13 @@ find sources for these:
 | `claude-code` | `~/.claude/projects` |
 | `codex` | `~/.codex/sessions` |
 | `openclaw` | `~/.openclaw/agents` |
+| `pi` | `~/.pi/agent/sessions` |
 | `tencent-codebuddy` | `~/.codebuddy/projects` |
 | `antigravity` | `~/.gemini/antigravity-cli/brain` |
 | `opencode` | `~/.local/share/opencode` |
 
-The other eight (`aider`, `cline`, `cursor`, `grok-build`, `hermes`,
-`kimi-code`, `pi`, `qoder`) have no root registered and report
+The other seven (`aider`, `cline`, `cursor`, `grok-build`, `hermes`,
+`kimi-code`, `qoder`) have no root registered and report
 `root_state: "unsupported"` in the discover report — they must be synced by
 explicit path. Per-provider `root_state` is one of `unsupported`,
 `home_unresolved`, `missing`, or `scanned`.
