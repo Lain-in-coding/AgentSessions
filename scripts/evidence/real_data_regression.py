@@ -768,6 +768,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         if not os.path.isfile(args.binary):
             raise HarnessError(f"--binary does not exist: {args.binary}")
+        # Resolve to absolute: `isfile` accepts a cwd-relative path but Windows
+        # CreateProcess does not resolve one the way a shell does, so a relative
+        # --binary otherwise failed with a bare WinError 2 traceback.
+        binary = os.path.abspath(args.binary)
         if not args.sources:
             raise HarnessError("--sources is required (directory or transcript file)")
         sources = collect_sources(args.sources)
@@ -779,12 +783,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         )
         if args.dry_run:
             print(f"regression: dry run: no file written")
-            print(f"regression: would exercise {os.path.basename(args.binary)}")
+            print(f"regression: would exercise {os.path.basename(binary)}")
             print(f"regression: would ingest {len(sources)} candidate source files")
             print(f"regression: would write {out}")
             return 0
 
-        report = run_regression(args.binary, sources)
+        report = run_regression(binary, sources)
         problems = validate_report(report)
         if problems:
             raise HarnessError("generated report is malformed: " + "; ".join(problems))
