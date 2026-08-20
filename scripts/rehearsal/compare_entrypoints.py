@@ -38,7 +38,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, List, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 #: Report schema version. Bump when the report shape changes.
 REPORT_SCHEMA_VERSION = "agent-session-grep.entrypoint-consistency/v1"
@@ -54,6 +54,13 @@ ENTRY_POINTS = ("cli", "mcp", "robot", "web", "tui")
 #: slow start is not a consistency defect; a server that never comes up is, and
 #: that still fails here.
 SERVE_READY_TIMEOUT_S = 60
+
+#: Attempts per Web GET before giving up, and the pause between them.
+#:
+#: Only a server-issued 408 is retried (see `web_get`); every other status fails
+#: on the first attempt so a real defect cannot be retried into looking healthy.
+WEB_GET_ATTEMPTS = 3
+WEB_GET_RETRY_BACKOFF_S = 0.5
 
 #: All five declared entry points are exercised by this harness.
 IMPLEMENTED_ENTRY_POINTS = ENTRY_POINTS
@@ -402,20 +409,57 @@ def _serve_url(binary: str, db: str) -> Tuple[subprocess.Popen[str], str]:
 
 
 def web_get(base_url: str, path: str, token: str) -> Dict[str, Any]:
+    """GET one Web API route, retrying only transient loopback congestion.
+
+    A saturated machine can stall the client mid-request long enough for the
+    server's 15s read timeout to fire, and `serve` then correctly answers
+    **408 Request Timeout**; the same overload also shows up as the connection
+    being dropped mid-exchange (`ConnectionError`, e.g. WinError 10053). Both are
+    congestion, not the entry points disagreeing, so retrying is the honest
+    response — failing the consistency report on either reported a
+    contradiction that did not exist.
+
+    Reproduced by running six harness instances concurrently: one returned
+    `HTTP Error 408` on `/api/sessions`, and after that was retried another
+    surfaced `ConnectionAbortedError`. Note the first hypothesis — that the
+    *client* timeouts were too small — was wrong: raising them changed nothing,
+    because the timeout that fires belongs to the server.
+
+    Anything else still fails on the first attempt: a 401/403/500 or malformed
+    JSON is a real defect and must not be retried into looking healthy.
+    """
     request = urllib.request.Request(
         f"{base_url}{path}",
         headers={"Authorization": f"Bearer {token}", "Host": "127.0.0.1"},
     )
-    try:
-        # Same reasoning as SERVE_READY_TIMEOUT_S: under a saturated machine a
-        # loopback request can take seconds, and slowness here is not the
-        # property under test (cross-entry-point agreement is).
-        with urllib.request.urlopen(request, timeout=SERVE_READY_TIMEOUT_S) as response:
-            if response.status != 200:
-                raise HarnessError(f"Web GET {path} returned HTTP {response.status}")
-            return json.loads(response.read().decode("utf-8"))
-    except (urllib.error.URLError, json.JSONDecodeError) as exc:
-        raise HarnessError(f"Web GET {path} failed: {exc}") from exc
+    last_error: Optional[BaseException] = None
+    for attempt in range(WEB_GET_ATTEMPTS):
+        try:
+            with urllib.request.urlopen(
+                request, timeout=SERVE_READY_TIMEOUT_S
+            ) as response:
+                if response.status != 200:
+                    raise HarnessError(
+                        f"Web GET {path} returned HTTP {response.status}"
+                    )
+                return json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            if exc.code != 408:
+                raise HarnessError(f"Web GET {path} failed: {exc}") from exc
+            last_error = exc
+        except (ConnectionError, TimeoutError) as exc:
+            # Connection reset/aborted mid-exchange, or the socket timing out:
+            # congestion again, distinguishable from a refused connection
+            # (which is URLError below and means the server is not there).
+            last_error = exc
+        except (urllib.error.URLError, json.JSONDecodeError) as exc:
+            raise HarnessError(f"Web GET {path} failed: {exc}") from exc
+        if attempt + 1 < WEB_GET_ATTEMPTS:
+            time.sleep(WEB_GET_RETRY_BACKOFF_S)
+    raise HarnessError(
+        f"Web GET {path} kept failing transiently across {WEB_GET_ATTEMPTS} "
+        f"attempts: {last_error!r}"
+    )
 
 
 def web_run_operation(binary: str, db: str, op: str) -> Dict[str, Any]:
