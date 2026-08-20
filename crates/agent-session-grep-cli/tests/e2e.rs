@@ -6155,6 +6155,53 @@ fn sync_extracts_codex_function_call_activities() {
 }
 
 #[test]
+fn sync_indexes_two_unpaired_same_named_codex_tool_calls() {
+    // 回归 M1-15（最小合成复现，三条记录 + 头）：同一条助理消息上两条同名
+    // `exec` 调用，都没有配对的 `function_call_output`。`exec` 的 arguments 里
+    // `command` 是数组，target 提取只接受字符串 → 两条都是 target=None、
+    // status=unknown，于是派生出同一个 activity_id。
+    //
+    // 修复前：提交层把批内同 id 当 fail-closed 错误，整批 sync 报 catalog_error
+    // (exit 6) 且零条入库；由于 sync 整轮 all-or-nothing，一份这样的 rollout
+    // 会让同一轮里其余全部源都无法入库。
+    let (dir, db) = temp_db("sync-act-codex-unpaired");
+    let fixture = dir.path().join("codex-unpaired.jsonl");
+    std::fs::write(
+        &fixture,
+        concat!(
+            r#"{"timestamp":"2026-08-15T00:00:00.000Z","type":"session_meta","payload":{"session_id":"sess-dup"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-08-15T00:00:01.000Z","type":"response_item","payload":{"type":"message","id":"msg_dup1","role":"assistant","content":[{"type":"output_text","text":"launching two probes"}]}}"#,
+            "\n",
+            r#"{"timestamp":"2026-08-15T00:00:02.000Z","type":"response_item","payload":{"type":"custom_tool_call","id":"call_dup1","tool_call_id":"call_dup1","name":"exec","arguments":"{\"command\":[\"bash\",\"-lc\",\"cargo build\"]}"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-08-15T00:00:03.000Z","type":"response_item","payload":{"type":"custom_tool_call","id":"call_dup2","tool_call_id":"call_dup2","name":"exec","arguments":"{\"command\":[\"bash\",\"-lc\",\"cargo test\"]}"}}"#,
+            "\n",
+        ),
+    )
+    .expect("write codex unpaired fixture");
+    let path = fixture.to_string_lossy().into_owned();
+
+    let out = run(&db, &["sync", &path]);
+    assert!(
+        out.status.success(),
+        "两条同名未配对调用不得让整批 sync 失败: exit={:?} {}",
+        out.status.code(),
+        stdout(&out)
+    );
+    let frame = parse_first_line(&out);
+    assert_eq!(frame["data"]["emitted"], 1, "frame={frame}");
+    assert_eq!(frame["data"]["messages"], 1, "frame={frame}");
+
+    // 折叠后仍保留一条可检索的活动事实，锚在发出调用的助理消息上。
+    let out = run(&db, &["search", "probes", "--tool-name", "exec"]);
+    let frame = parse_first_line(&out);
+    let hits = frame["data"]["hits"].as_array().expect("hits");
+    assert_eq!(hits.len(), 1, "frame={frame}");
+    assert_eq!(hits[0]["id"], native_msg_wire("msg_dup1"), "frame={frame}");
+}
+
+#[test]
 fn search_facet_flag_validation_is_explicit() {
     let (_dir, db) = temp_db("sync-act-flags");
     create_empty_store(&db);
