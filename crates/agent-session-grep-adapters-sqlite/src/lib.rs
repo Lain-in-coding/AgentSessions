@@ -15157,17 +15157,41 @@ mod tests {
     /// - `stats-c`：provider `claude-code`，唯一一条消息没有时间戳 → 月份 unknown；
     /// - `stats-d`：没有任何 placement → provider / 月份 / 项目三者皆 unknown。
     fn commit_history_stats_corpus(store: &SqliteStore) {
-        let plan: [(&str, &str, Vec<Option<&str>>, Option<&str>); 3] = [
-            (
-                "stats-a",
-                "claude-code",
-                vec![Some("2026-07-02T09:00:00Z"), Some("2026-07-19T18:00:00Z")],
-                Some("C:/placeholder/project-a"),
-            ),
-            ("stats-b", "codex", vec![Some("2026-08-05T11:00:00Z")], None),
-            ("stats-c", "claude-code", vec![None], None),
+        /// 一条普查语料会话的构成。用命名结构而非四元组:四元组里两个
+        /// `Option<&str>` 相邻,位置写错不会被类型系统发现。
+        struct StatsSession {
+            name: &'static str,
+            provider: &'static str,
+            timestamps: Vec<Option<&'static str>>,
+            project: Option<&'static str>,
+        }
+        let plan = [
+            StatsSession {
+                name: "stats-a",
+                provider: "claude-code",
+                timestamps: vec![Some("2026-07-02T09:00:00Z"), Some("2026-07-19T18:00:00Z")],
+                project: Some("C:/placeholder/project-a"),
+            },
+            StatsSession {
+                name: "stats-b",
+                provider: "codex",
+                timestamps: vec![Some("2026-08-05T11:00:00Z")],
+                project: None,
+            },
+            StatsSession {
+                name: "stats-c",
+                provider: "claude-code",
+                timestamps: vec![None],
+                project: None,
+            },
         ];
-        for (name, provider, timestamps, project) in plan {
+        for StatsSession {
+            name,
+            provider,
+            timestamps,
+            project,
+        } in plan
+        {
             let session = sid(IdKind::Session, name.as_bytes());
             let document = sid(IdKind::Document, format!("{name}-doc").as_bytes());
             let mut entries = vec![provider_document_entry(&document, provider)];

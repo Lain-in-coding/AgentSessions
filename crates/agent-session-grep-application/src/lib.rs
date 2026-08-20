@@ -182,6 +182,13 @@ impl ListSort {
 ///
 /// 每个变体是一个用例。前端负责解析各自语法后构造本枚举，
 /// 从而保证 CLI / Robot / MCP / TUI 行为一致（见 CONTRACT-cli-robot-mcp-draft）。
+///
+/// `Search` 变体比其余变体大得多（约 347 vs 112 字节），因为 M3-3/M3-8 把
+/// provider / role / project / exclude 四组过滤维度都放进了 `SearchFilters`。
+/// 这里**刻意不 box**：`AppRequest` 每次请求只构造一个、立即被 `handle` 消费，
+/// 不进集合也不排队，所以枚举大小不影响任何热路径；而 box 化会给 21 处调用点
+/// 加上一层间接，把"前端直接构造用例"这个本层最重要的可读性换成一次分配。
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum AppRequest {
     /// 全文检索：按查询串返回命中列表（分页 + 预算）。

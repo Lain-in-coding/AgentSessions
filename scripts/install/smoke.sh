@@ -201,6 +201,21 @@ assert_envelope 'status' 0 \
     'f["data"]["catalog_count"] >= 5'
 pass 'status reports at least 5 catalog entities'
 
+# 5b. stats reports the history composition. Every dimension names its unknown
+#     bucket explicitly, and the machine surface must not carry an absolute
+#     project path (ADR-0009: basename only off the local human surface).
+run_robot stats
+assert_envelope 'stats' 0 \
+    'f["ok"] is True' \
+    'f["data"]["total_sessions"] >= 1' \
+    'f["data"]["total_messages"] >= 3' \
+    'sum(b["sessions"] for b in f["data"]["by_provider"]) == f["data"]["total_sessions"]' \
+    'sum(b["sessions"] for b in f["data"]["by_month"]) == f["data"]["total_sessions"]' \
+    'sum(b["sessions"] for b in f["data"]["by_project"]) == f["data"]["total_sessions"]' \
+    'any(b["key"] is None for b in f["data"]["by_project"])' \
+    'all(b["key"] is None or ("/" not in b["key"] and "\\\\" not in b["key"]) for b in f["data"]["by_project"])'
+pass 'stats reports totals, explicit unknown buckets, and path-free project keys'
+
 # 6. get the id search just returned.
 run_robot get "$hit_id"
 assert_envelope 'get' 0 \

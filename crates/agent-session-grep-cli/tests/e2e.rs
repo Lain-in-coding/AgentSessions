@@ -4255,6 +4255,211 @@ fn human_context_renders_chain_and_partial_exits_10() {
     );
 }
 
+// ─── stats（历史构成普查，M3-10）────────────────────────────────────────────
+
+/// 在隔离 HOME 里造一个多 provider 语料，覆盖普查的三种"归不出值"：
+/// - claude-code 的 `dated`：有时间戳、有 `cwd`（项目已归属）；
+/// - claude-code 的 `undated`：无时间戳、无 `cwd`（月份与项目双 unknown）；
+/// - codex 的一个会话：另一个 provider，验证 per-provider 分桶。
+fn stats_env(tag: &str) -> (tempfile::TempDir, String, tempfile::TempDir, String) {
+    let (home_dir, home) = discover_env();
+    let (db_dir, db) = temp_db(tag);
+    let projects = home_dir.path().join(".claude").join("projects");
+
+    let dated = projects.join("dated");
+    std::fs::create_dir_all(&dated).expect("create dated project dir");
+    std::fs::write(
+        dated.join("s.jsonl"),
+        format!(
+            "{}\n",
+            concat!(
+                r#"{"type":"user","uuid":"d1c00011-0000-4000-8000-000000000011","#,
+                r#""parentUuid":null,"sessionId":"d1c00011-0000-4000-8000-000000000111","#,
+                r#""cwd":"/work/statsproject","timestamp":"2026-07-02T09:00:00.000Z","#,
+                r#""message":{"role":"user","content":"zzstatsdated body"}}"#,
+            )
+        ),
+    )
+    .expect("write dated fixture");
+
+    // 无 timestamp、无 cwd：既进 unknown 月份桶，也进项目 unknown 计数。
+    let undated = projects.join("undated");
+    std::fs::create_dir_all(&undated).expect("create undated project dir");
+    std::fs::write(
+        undated.join("s.jsonl"),
+        format!(
+            "{}\n",
+            concat!(
+                r#"{"type":"user","uuid":"d1c00012-0000-4000-8000-000000000012","#,
+                r#""parentUuid":null,"sessionId":"d1c00012-0000-4000-8000-000000000112","#,
+                r#""message":{"role":"user","content":"zzstatsundated body"}}"#,
+            )
+        ),
+    )
+    .expect("write undated fixture");
+
+    let codex_dir = home_dir.path().join(".codex").join("sessions");
+    std::fs::write(
+        codex_dir.join("r1.jsonl"),
+        format!("{}\n", codex_fixture("\"zzstatscodex body\"")),
+    )
+    .expect("write codex fixture");
+
+    let out = run_with_home(&db, &home, &["sync", "--discover"]);
+    assert!(out.status.success(), "seed sync: {}", stdout(&out));
+    (home_dir, home, db_dir, db)
+}
+
+/// 每个维度的桶（含 unknown）之和必须等于会话总数，且 unknown 桶恒被列出——
+/// 一个静默省略 unknown 的普查会把"归不出值的会话"变成看不见的差额。
+#[test]
+fn stats_reports_totals_and_explicit_unknown_buckets() {
+    let (_home_dir, home, _db_dir, db) = stats_env("stats-unknown");
+
+    let out = run_with_home(&db, &home, &["stats"]);
+    assert!(out.status.success(), "stats failed: {}", stdout(&out));
+    let frame = parse_first_line(&out);
+    assert_envelope_shape(&frame, true);
+    assert_eq!(frame["command"], "stats", "{frame}");
+    let data = &frame["data"];
+
+    assert_eq!(data["total_sessions"], 3, "{frame}");
+    assert_eq!(data["total_messages"], 3, "{frame}");
+    assert_eq!(data["total_documents"], 3, "{frame}");
+    assert!(data["total_tool_activities"].is_number(), "{frame}");
+
+    let sum = |key: &str| -> u64 {
+        data[key]
+            .as_array()
+            .unwrap_or_else(|| panic!("{key} must be an array: {frame}"))
+            .iter()
+            .map(|bucket| bucket["sessions"].as_u64().expect("sessions is a number"))
+            .sum()
+    };
+    for dimension in ["by_provider", "by_month", "by_project", "by_session_size"] {
+        assert_eq!(
+            sum(dimension),
+            3,
+            "{dimension} buckets must sum to the session total: {frame}"
+        );
+    }
+
+    // 每个可缺值的维度都显式列出 unknown 桶（key: null），绝不省略。
+    for dimension in ["by_provider", "by_month", "by_project"] {
+        let buckets = data[dimension].as_array().expect("buckets");
+        assert!(
+            buckets.iter().any(|bucket| bucket["key"].is_null()),
+            "{dimension} must name its unknown bucket explicitly: {frame}"
+        );
+    }
+
+    // 两个 provider 各一个会话被归属；月份维度里无时间戳会话进 unknown。
+    let provider_ids: Vec<Option<&str>> = data["by_provider"]
+        .as_array()
+        .expect("by_provider")
+        .iter()
+        .map(|bucket| bucket["key"].as_str())
+        .collect();
+    assert!(
+        provider_ids.contains(&Some("claude-code")) && provider_ids.contains(&Some("codex")),
+        "both providers must be attributed: {frame}"
+    );
+    let unknown_month = data["by_month"]
+        .as_array()
+        .expect("by_month")
+        .iter()
+        .find(|bucket| bucket["key"].is_null())
+        .expect("unknown month bucket");
+    // 两个会话没有可用的消息时间戳：claude 的 undated fixture 整个字段缺席，
+    // codex 则**刻意不传播** rollout envelope 时间（那是重放写入时刻，不是消息
+    // 创作时刻，见 M2P-12）。两者都必须落进显式的 unknown 桶而不是被丢掉。
+    assert_eq!(
+        unknown_month["sessions"], 2,
+        "sessions with no per-message timestamp must land in the unknown-time bucket: {frame}"
+    );
+    let dated_month = data["by_month"]
+        .as_array()
+        .expect("by_month")
+        .iter()
+        .find(|bucket| bucket["key"] == "2026-07")
+        .expect("2026-07 bucket");
+    assert_eq!(dated_month["sessions"], 1, "{frame}");
+
+    // 项目归属只来自 resolved 声明；没有声明的会话单独计数，与 ambiguous 分开。
+    assert_eq!(data["project_unknown_sessions"], 2, "{frame}");
+    assert_eq!(data["project_ambiguous_sessions"], 0, "{frame}");
+}
+
+/// 跨边界输出（robot/json）只给项目目录的最后一段；human 面按 ADR-0004
+/// 显示完整本机路径。
+#[test]
+fn stats_project_paths_are_local_only_and_machine_output_is_basename() {
+    let (_home_dir, home, _db_dir, db) = stats_env("stats-privacy");
+
+    let out = run_with_home(&db, &home, &["stats"]);
+    assert!(out.status.success(), "robot stats: {}", stdout(&out));
+    let blob = stdout(&out);
+    assert!(
+        blob.contains("statsproject"),
+        "machine output keeps the project basename: {blob}"
+    );
+    assert!(
+        !blob.contains("/work/statsproject") && !blob.contains("\\work\\statsproject"),
+        "machine output must not expose the absolute project path: {blob}"
+    );
+
+    let out = run_human_with_home(&db, &home, &["stats"]);
+    assert!(out.status.success(), "human stats: {}", stdout(&out));
+    let human = stdout(&out);
+    assert!(
+        human.contains("/work/statsproject"),
+        "human output may show the full local project directory: {human}"
+    );
+    assert!(
+        human.contains("sessions: 3") && human.contains("messages: 3"),
+        "human totals: {human}"
+    );
+    assert!(
+        human.contains("project unknown sessions: 2")
+            && human.contains("project ambiguous sessions: 0"),
+        "human output must state unknown/ambiguous project counts: {human}"
+    );
+    assert!(
+        !human.contains("schema_version"),
+        "no envelope in human mode: {human}"
+    );
+}
+
+#[test]
+fn stats_on_an_empty_store_still_names_the_unknown_buckets() {
+    let (_dir, db) = temp_db("stats-empty");
+    create_empty_store(&db);
+
+    let out = run(&db, &["stats"]);
+    assert!(
+        out.status.success(),
+        "stats on empty store: {}",
+        stdout(&out)
+    );
+    let frame = parse_first_line(&out);
+    let data = &frame["data"];
+    assert_eq!(data["total_sessions"], 0, "{frame}");
+    assert_eq!(data["total_messages"], 0, "{frame}");
+    assert_eq!(data["total_documents"], 0, "{frame}");
+    assert_eq!(data["total_tool_activities"], 0, "{frame}");
+    for dimension in ["by_provider", "by_month", "by_project"] {
+        let buckets = data[dimension].as_array().expect("buckets");
+        assert_eq!(buckets.len(), 1, "{dimension}: {frame}");
+        assert!(buckets[0]["key"].is_null(), "{dimension}: {frame}");
+        assert_eq!(buckets[0]["sessions"], 0, "{dimension}: {frame}");
+    }
+    assert_eq!(
+        data["by_session_size"].as_array().expect("sizes").len(),
+        0,
+        "{frame}"
+    );
+}
+
 #[test]
 fn jsonl_sync_emits_progress_frames_then_single_response() {
     let (dir, db) = temp_db("jsonl-progress");
