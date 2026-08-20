@@ -483,6 +483,18 @@ message / 231 session,**七条全 PASS**,harness 退出 0,报告仅含聚合数�
 **规则:本表每一行都是读代码得出的推断,在有配对实测之前不得当作事实引用,
 也不得据此声称某项优化"应该"有效。** 四次里没有一次推断是全对的。
 
+**⚠️ 第五条(2026-08-20,这条不是读码推断,而是我的流程失误):
+我在合并 `5ddfb2c` 时声称"本地闸门全绿(212 + 225 + 290 + 141)",
+但 `5ddfb2c` 上 `cargo test --workspace` 实际是**红的** ——
+`search_byte_budget_truncates_but_keeps_session_context_in_hits` 失败。
+在干净 worktree 上 checkout `5ddfb2c` 单跑该用例复现确认,
+所以不是环境问题,是我合并前没有真的把 workspace 跑完就下了结论。**
+根因是我自己的 M3-9 改动:snippet 从 `chars().take(n)` 改成以命中为中心后,
+窗口不从正文开头起时会带前导 `…`,于是"摘要是正文字面前缀"这条断言失效。
+**教训:"闸门全绿"必须是一次完整 `cargo test --workspace` 的实际输出,
+不能由分包结果拼凑;改了投影逻辑就要想到谁在断言那个投影的形状。**
+已修:`33bb459`(断言改为"去标记后是连续子串且含命中词")。
+
 **⚠️ 优先级已按 §1.3.1 实测重排。** 上表按"读代码推断的严重度"排序,而实测
 判定是:瓶颈 #2(吞吐 0.707 MiB/s,差 5 倍)是唯一**既确认失败又差距最大**的;
 瓶颈 #4 **通过**;搜索与 MCP 延迟(不在上表内,原被当成宽裕项)**各以约 1.8 倍
@@ -1645,17 +1657,21 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   这正是 owner 在真实机器上遇到的现象。
 
   **拆成两半,一半现在就修,一半留给 owner 决策**:
-  - **(a) 错误分类 —— 是缺陷,不需要决策,现在修。**
-    misclassification 与仓库自己的 `error-catalog.json`、自己的
-    `retryable()` 表、自己的 runbook 三处都矛盾;把上面三块接上即可。
-  - **(b) 部分成功 / offset 续传 —— 是设计变更,需要 owner 决策,不擅自做。**
+  - **✅ (a) 错误分类 —— 已修(`672cc1c`)。**
+    把三块接上并把 mapper 导出成 `provider_error_from_port`,让九个 adapter
+    开源点在**一处**分类,而不是各自 `ProviderError::Io(e.to_string())`
+    再把分类丢一遍。**实测复现脚本确认**:
+    `exit 5` / `source_changed` / `retryable: true` /
+    `"source changed during read: len 2725690 -> 2764390"`,
+    与 error-catalog 和 runbook 一致;稳定源的 happy path 不受影响
+    (40 committed, generation 1)。
+  - **⏸ (b) 部分成功 / offset 续传 —— 需 owner 决策,不擅自做。**
     "按快照点提交有效前缀、记录 offset、下次增量续上"会改变
     `sync` 的原子性承诺(当前是 all-or-nothing per source),
     涉及 RFC-0002 的 ParseReport 语义,不是一个 bugfix 能覆盖的范围。
-  **修正后的验收**:
-  (a) 撞上正在写的源时 exit 5 + `source_changed` + `retryable: true`,
-      与 runbook 和 error-catalog 一致;
-  (b) 待决策。
+    **现状对用户的实际影响**:agent 正在写的那一个源本轮失败,
+    但**同轮其他源照常入库**;等 agent 停笔后重跑即可补上,
+    且现在错误明确告诉用户"等一下重试"。
   (`writer.lock` 的存在不作为失败判据。)
 
 - [x] **M2P-11 `index <id-fact> <text>` 开发后门出现在用户 help 里**
