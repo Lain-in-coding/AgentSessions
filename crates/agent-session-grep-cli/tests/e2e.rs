@@ -5211,9 +5211,18 @@ fn search_byte_budget_truncates_but_keeps_session_context_in_hits() {
             text.chars().count() <= 2000,
             "text 摘要不得超过 max_snippet_chars: {hit}"
         );
+        // M3-9 起摘要以命中为中心，被裁掉的一侧带 `…` 标记，所以不再必然是
+        // 正文的字面前缀。真正的契约是：去掉标记后仍是正文的**连续子串**
+        // （逐字证据，不改写、不拼接），且必须含命中词。
+        let core = text.trim_matches('…');
+        assert!(!core.is_empty(), "{hit}");
         assert!(
-            body_a.starts_with(text) || body_b.starts_with(text),
-            "摘要应是正文前缀: {hit}"
+            body_a.contains(core) || body_b.contains(core),
+            "摘要去标记后应是正文的连续子串: {hit}"
+        );
+        assert!(
+            core.contains("widgets"),
+            "以命中为中心的摘要必须含命中词: {hit}"
         );
     }
 }
