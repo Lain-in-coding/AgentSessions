@@ -19,6 +19,7 @@
 
 mod hooks;
 mod human;
+mod invocation;
 mod mcp;
 mod protocol;
 mod redaction;
@@ -186,8 +187,17 @@ fn render_human_error(err: &ProtocolError) {
 
 /// 错误消息是否已自带可执行的下一步命令。判据是消息里出现了本二进制的调用
 /// 形态——只有构造方明确写了完整命令时才成立，不做模糊猜测。
+///
+/// 两个 `[[bin]]` 名与本次实际调用名都算（M4-6）：以第三个名字（重命名的副本）
+/// 调用时，消息里的命令仍以规范名书写，判据不能因此漏判而追加一条错的通用指引。
 fn message_states_next_step(message: &str) -> bool {
-    message.contains("asg ") || message.contains("agent-session-grep ")
+    [
+        invocation::DEFAULT_NAME,
+        CANONICAL_BIN_NAME,
+        invocation::name(),
+    ]
+    .iter()
+    .any(|name| message.contains(&format!("{name} ")))
 }
 
 /// Convert provider parse diagnostics into bounded public warnings. Diagnostics
@@ -414,13 +424,15 @@ fn run(
             HelpRequest::TopLevelHelp => emit_help("help", &help_text(), mode, sink, request_id)?,
             HelpRequest::TopLevelVersion => emit_version(
                 "version",
-                &format!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")),
+                // crate 名（`agent-session-grep-cli`）不是命令名：`-cli` 后缀
+                // 是工作区内部的 crate 命名，用户从未敲过它（M4-6）。
+                &format!("{} {}", invocation::name(), env!("CARGO_PKG_VERSION")),
                 mode,
                 sink,
                 request_id,
             )?,
             HelpRequest::SubcommandHelp(cmd) => {
-                emit_help(&cmd, subcommand_help_text(&cmd), mode, sink, request_id)?;
+                emit_help(&cmd, &subcommand_help_text(&cmd), mode, sink, request_id)?;
             }
         }
         return Ok(protocol::Outcome::Success);
@@ -1046,24 +1058,29 @@ fn platform_paths_impl() -> Result<serde_json::Value, CliError> {
 
 /// 顶层帮助文本。与 --version 一样走协议出口：裸 println! 会在下游提前关管道时
 /// panic（exit 101 + stderr 污染），违反 CONTRACT §6 的 EPIPE 静默 exit 0。
+///
+/// 头行与所有 usage/quickstart 行都用**本次实际调用名**（M4-6）。过去它们一律
+/// 写 `agent-session-grep`，头行还写 crate 名 `agent-session-grep-cli`——以
+/// `asg` 调用时用户读到的每一行都是另一个名字，而头行那个名字根本不是命令。
 fn help_text() -> String {
+    let name = invocation::name();
     format!(
         "{name} {version}
 AI coding-agent session history search engine (local, read-only, offline).
 
 QUICKSTART (start here):
-    agent-session-grep sync --discover              index every provider data root
-    agent-session-grep search <keyword>             search your session history
-    agent-session-grep show <hit-id>                read the body of one hit
-    agent-session-grep context <session-id>         expand one whole session
-    agent-session-grep config paths                 see where data is stored
-    agent-session-grep providers                    see provider maturity and capabilities
+    {name} sync --discover              index every provider data root
+    {name} search <keyword>             search your session history
+    {name} show <hit-id>                read the body of one hit
+    {name} context <session-id>         expand one whole session
+    {name} config paths                 see where data is stored
+    {name} providers                    see provider maturity and capabilities
 Data flow: search returns matching messages -> show <msg_id> reads one body -> context <ses_id> reads the whole session.
 
 USAGE:
-    agent-session-grep [--db <path>] <COMMAND> [ARGS]
-    agent-session-grep doctor [--db <path>]
-    agent-session-grep --help | --version
+    {name} [--db <path>] <COMMAND> [ARGS]
+    {name} doctor [--db <path>]
+    {name} --help | --version
 
 COMMANDS:
     ingest <file>          parse one raw transcript file into the store (source stays read-only)
@@ -1163,7 +1180,6 @@ GLOSSARY (bilingual quick reference):
 
 EXIT CODES:
     0 success; 10 partial success (budget truncation: results usable but incomplete); see the error catalog for the rest",
-        name = env!("CARGO_PKG_NAME"),
         version = env!("CARGO_PKG_VERSION"),
     )
 }
@@ -1343,7 +1359,32 @@ fn missing_subcommand_error() -> CliError {
 /// 子命令级帮助文本：渲染该命令的签名、flag 与一个真实示例。由 help/version
 /// 提前拦截阶段（ADR-0006）在 `<cmd> --help|-h`（含 `index rebuild --help`）时
 /// 触发——顶层 --help 只给全局概览，子命令帮助给单命令的用法。
-fn subcommand_help_text(cmd: &str) -> &'static str {
+///
+/// 模板里的示例一律以 [`CANONICAL_BIN_NAME`] 书写，渲染时替换为**本次实际调用
+/// 名**（M4-6）。用一次替换而不是把 30 个模板改成 `format!`：模板是长多行字面
+/// 量，`{}` 化会把每个 flag 说明行都变成需要转义的插值串，而调用名在整份文本
+/// 里只有"这条命令怎么敲"这一种含义，替换不会误伤别的语义。
+fn subcommand_help_text(cmd: &str) -> String {
+    retarget_invocation_name(subcommand_help_template(cmd))
+}
+
+/// 把逐字写着 [`CANONICAL_BIN_NAME`] 的建议命令改写为本次调用名。
+///
+/// 调用名等于规范名时是恒等变换（`String` 分配是 help/建议命令这种一次性输出
+/// 路径上可忽略的成本，换来的是唯一一处名字改写逻辑）。
+fn retarget_invocation_name(text: &str) -> String {
+    let name = invocation::name();
+    if name == CANONICAL_BIN_NAME {
+        return text.to_string();
+    }
+    text.replace(CANONICAL_BIN_NAME, name)
+}
+
+/// 两个 `[[bin]]` 目标里的长名，也是所有帮助模板与 Application 生成的建议命令
+/// 逐字使用的那个名字。crate 名（`agent-session-grep-cli`）不是命令名。
+const CANONICAL_BIN_NAME: &str = "agent-session-grep";
+
+fn subcommand_help_template(cmd: &str) -> &'static str {
     match cmd {
         "search" => {
             "search <query>：全文检索历史会话，按相关性降序返回命中。\n\
@@ -1523,7 +1564,9 @@ fn subcommand_help_text(cmd: &str) -> &'static str {
     }
 }
 
-/// doctor：最小环境自检。报告版本；若给了 --db，尝试打开存储并报告 schema。
+/// doctor：引导式环境自检（M4-6）。报告版本；若给了 --db，尝试打开存储并报告
+/// schema。每个未通过的检查都带一条可执行的下一步（见 `doctor_checks`）。
+///
 /// `offline` 作为诊断字段原样上报（design D5）：`--offline` 是稳定显式模式，
 /// 当前没有任何命令需要联网，doctor 如实反映调用方声明的 offline 意图。
 fn doctor(
@@ -1890,8 +1933,14 @@ fn db_flag_prefix(db: &str, origin: DbOrigin) -> String {
 }
 
 /// 空库/缺库时该跑的那条命令（提示里逐字给出，用户可直接复制）。
+/// 二进制名用本次实际调用名（M4-6）——以 `agent-session-grep` 调用的用户不该
+/// 被告知去敲 `asg`。
 fn sync_discover_command(db: &str, origin: DbOrigin) -> String {
-    format!("asg {}sync --discover", db_flag_prefix(db, origin))
+    format!(
+        "{} {}sync --discover",
+        invocation::name(),
+        db_flag_prefix(db, origin)
+    )
 }
 
 /// 写路径的 data root 兜底创建。默认库位于平台数据目录，首次写入前该目录不存在。
@@ -4033,8 +4082,15 @@ fn attach_session_list_rows(
 
 /// 取当前页最相关命中的建议命令，并按需插入 `--db <path>`。
 ///
-/// Application 生成的命令以 `agent-session-grep` 开头且不带 `--db`（对默认库正确）。
-/// 调用方给了显式 `--db` 时必须把同一路径补进去——否则提示会指向另一个库。
+/// Application 生成的命令以 [`CANONICAL_BIN_NAME`] 开头且不带 `--db`（对默认库
+/// 正确）。这里做两件改写：补上显式 `--db` 的同一路径（否则提示会指向另一个
+/// 库），以及把二进制名换成本次实际调用名（M4-6）。
+///
+/// 只改人类面：`suggested_next_commands` 在 robot envelope / MCP / Web 里是协议
+/// 字段，其字节由 Application 单一决定，schema
+/// （`schemas/robot/v1.1/envelope.schema.json`）与跨入口一致性 harness 都以那份
+/// 输出为准。Application 层拿不到 argv[0]，也不该拿——它不知道自己被哪个进程名
+/// 调用。人类面是唯一"有一个真实调用名可言"的出口。
 fn human_next_commands(hits: &[serde_json::Value], db: &str, origin: DbOrigin) -> Vec<String> {
     let prefix = db_flag_prefix(db, origin);
     hits.iter()
@@ -4047,7 +4103,7 @@ fn human_next_commands(hits: &[serde_json::Value], db: &str, origin: DbOrigin) -
             commands
                 .iter()
                 .filter_map(serde_json::Value::as_str)
-                .map(|command| insert_db_flag(command, &prefix))
+                .map(|command| retarget_invocation_name(&insert_db_flag(command, &prefix)))
                 .collect()
         })
         .unwrap_or_default()
@@ -6911,13 +6967,16 @@ mod tests {
         assert_eq!(db_flag_prefix("x.db", DbOrigin::Default), "");
         assert_eq!(db_flag_prefix("x.db", DbOrigin::Env), "");
         assert_eq!(db_flag_prefix("x.db", DbOrigin::Flag), "--db x.db ");
+        // 建议命令的二进制名是本次实际调用名（M4-6），不是某个硬编码的名字：
+        // 断言按调用名拼期望值，两个 `[[bin]]` 名下都必须成立。
+        let name = invocation::name();
         assert_eq!(
             sync_discover_command("x.db", DbOrigin::Default),
-            "asg sync --discover"
+            format!("{name} sync --discover")
         );
         assert_eq!(
             sync_discover_command("x.db", DbOrigin::Flag),
-            "asg --db x.db sync --discover"
+            format!("{name} --db x.db sync --discover")
         );
     }
 
@@ -6932,7 +6991,14 @@ mod tests {
         assert_eq!(error.0.code, CanonicalCode::NotFound);
         assert_eq!(error.0.code.exit_code(), 4);
         assert!(error.0.message.contains(&missing_s), "{}", error.0.message);
-        assert!(error.0.message.contains("asg --db"), "{}", error.0.message);
+        assert!(
+            error
+                .0
+                .message
+                .contains(&format!("{} --db", invocation::name())),
+            "{}",
+            error.0.message
+        );
         assert!(
             error.0.message.contains("sync --discover"),
             "{}",

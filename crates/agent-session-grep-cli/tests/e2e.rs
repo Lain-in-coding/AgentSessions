@@ -12,6 +12,16 @@ use std::process::{Command, Output, Stdio};
 /// 刚构建出的 `agent-session-grep` 二进制的绝对路径（由 Cargo 在编译期注入）。
 const BIN: &str = env!("CARGO_BIN_EXE_agent-session-grep");
 
+/// 被测二进制的调用名（M4-6）：帮助文本与建议命令都以此回显，故断言按它拼
+/// 期望值，而不是硬编码某一个 `[[bin]]` 名。
+fn invoked_name() -> String {
+    Path::new(BIN)
+        .file_stem()
+        .expect("binary has a file name")
+        .to_string_lossy()
+        .into_owned()
+}
+
 /// 在给定 db 上以 robot 协议模式跑一次 CLI，返回完整输出。
 /// 功能性测试统一断言稳定 JSON envelope；human 版式走 [`run_human`]。
 fn run(db: &str, args: &[&str]) -> Output {
@@ -1414,9 +1424,10 @@ fn empty_catalog_names_sync_discover_in_search_list_and_status() {
             text.contains("sync --discover"),
             "{args:?} 应点名 sync --discover: {text}"
         );
-        // 提示必须是可直接复制的整条命令：显式 --db 时要带上同一路径。
+        // 提示必须是可直接复制的整条命令：显式 --db 时要带上同一路径，
+        // 二进制名是本次实际调用名（M4-6），从 BIN 的文件名派生而非硬编码。
         assert!(
-            text.contains(&format!("asg --db {db} sync --discover")),
+            text.contains(&format!("{} --db {db} sync --discover", invoked_name())),
             "{args:?} 提示应是可执行全命令: {text}"
         );
     }
