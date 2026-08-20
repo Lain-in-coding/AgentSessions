@@ -17177,7 +17177,7 @@ mod tests {
         };
         assert!(
             store
-                .commit_source_batches_if_changed(&[source.clone()])
+                .commit_source_batches_if_changed(std::slice::from_ref(&source))
                 .unwrap(),
             "两条同名未配对调用必须能入库"
         );
