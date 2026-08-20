@@ -1149,7 +1149,7 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   **收紧 opencode 的 probe 让它显式拒绝 zcode**,并新增 zcode adapter。
   **验收**:两个真实 DB 各被正确识别;probe 冲突有回归测试。
 
-- [ ] **M1-14 pi 在真实数据上完全不可达(2026-08-20 实测发现,两个独立缺陷)**
+- [x] **M1-14 pi 在真实数据上完全不可达(2026-08-20 实测发现,两个独立缺陷)**
   跑 M1-4 时对本机 7 份**真实** pi transcript 实测,结论:
   **pi 目前无法通过任何自动路径入库。** 两个缺陷叠加:
 
@@ -1183,19 +1183,46 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
      `choose_probed_candidate()` 已经支持用 root 归属打破平票
      (`application/src/lib.rs:709-741`)。
   2. **仍要修 probe**:光靠 hint 会让手动 `sync <file>` 永远拒绝真实 pi 文件。
-     可用的真实判别据(已实测,7/7 一致):**pi 的 session 头带
-     `version: 3` 字段**(`{type,version,id,timestamp,cwd}`),
-     而两个 probe **都没读 `version`**。
-     ⚠️ 但要先确认 openclaw 真实文件的头是否也带 `version` ——
-     本机没有 openclaw 真实样本(root `missing`),
-     **在拿到 openclaw ground truth 之前不要单方面把 `version` 当成 pi 独占**,
-     否则只是把误判方向调了个头。
+     ~~可用的真实判别据:pi 的 session 头带 `version: 3`,而两个 probe
+     都没读 `version`。~~
+     ❌ **此设想已被证据否决(2026-08-20 实施时查证)。openclaw 真实 header
+     同样带 `version: 3`**,两个独立 MIT 来源交叉验证:
+     `agent-sessions`(jazzyalex,MIT)的 openclaw stage0 fixture
+     `Resources/Fixtures/stage0/agents/openclaw/{small,large,schema_drift}.jsonl`
+     首行均为 `{"type":"session","id":...,"version":3,"timestamp":...,"cwd":...}`;
+     `agentsview`(kenn-io,MIT)的 `internal/parser/openclaw_test.go` 13 处
+     header 也全是 `version:3`。而且 openclaw 的第 2 行同样是 `model_change`,
+     `thinking_level_change`/`compaction`/`custom_message` 也都有 ——
+     **两家是同一 v3 树形格式,字段集完全重合,没有任何内容字段能区分**。
+     (另有 `ctx`/`AgentRecall` 的 openclaw fixture 写 `version: 1`,但四家
+     parser **都不读这个字段**,那是无约束的作者随手取值;无论 1 还是 3,
+     "`version` 不是 pi 独占"这个结论都成立。)
+     → **实际修法**:改用 **root 归属**这个独立于文件内容的外部事实。
+     `--discover` 本就握着它,手动 `sync <file>` 过去把它丢掉了 ——
+     新增 `provider_hint_from_path()`,源路径落在已注册 root 之下时给出
+     hint,与 `provider_root_subpath()` 共用同一张 `PROVIDER_ROOTS` 表
+     (两个方向不会漂移,有测试钉住)。root 之外的文件(复制走的、下载的)
+     仍然照旧拒绝,不猜;`--provider` 仍是点名手段。
   3. 扩两家的 probe 采样窗口,或让采样"跳过非会话记录直到看到 message" ——
      8 行窗口对真实文件太窄这件事本身就是缺陷,与平票是两回事。
+     → 已实施:`SAMPLE_LINE_LIMIT = 8` 改为 `SCAN_LINE_LIMIT = 64`,且
+     **看到 header + 对话消息即停**,常见文件仍只读几行(RFC-0002 §7 有界)。
+     实测最深的一份真实文件首条 message 在第 9 行 —— 恰好卡在旧窗口外一行。
+     注意:窗口修好后两家**双双升到 `Confirmed`,仍是平票** ——
+     它单独并不能解决缺陷 B,必须与第 2 条的 root 归属合用。
   **验收**:`sync --discover` 能发现并入库真实 pi transcript;
   手动 `sync <file>`(无 `--provider`)不再对真实 pi 文件报 ambiguous;
   回归测试用**真实观察到的记录顺序**(session + 一串 model_change 在前,
   message 在后)构造合成 fixture,而不是理想顺序。
+  **实测结果(分支 `m114-pi-reachable`,基线二进制对照)**:
+  before —— `--discover` 报 `root_state=unsupported found=0`、
+  `sources=0 committed=0`,裸 `sync` 7/7 ambiguous exit 2;
+  after —— `root_state=scanned found=7 complete=true`、
+  `sources=7 committed=60 skipped=0`,裸 `sync` 7/7 exit 0(18/3/28/3/3/4/1)。
+  归属方向已验证:`search --provider pi` 有命中、`--provider openclaw` 零命中。
+  `cargo test --workspace` 一次完整运行 1427 passed / 0 failed。
+  **遗留**:本机无 openclaw 安装(root `missing`),openclaw 侧结论建立在
+  第三方 fixture/parser 上,不是活体抓取;真实 openclaw 端到端未验证。
 
 - [x] **M1-10 修 qoder 路径三方不一致**
   adapter 与文档写 `~/.qoder/projects/<project>/transcript/*.jsonl`;
