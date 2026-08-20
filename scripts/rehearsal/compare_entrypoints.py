@@ -46,6 +46,15 @@ REPORT_SCHEMA_VERSION = "agent-session-grep.entrypoint-consistency/v1"
 #: The five entry points the release rehearsal must eventually cover.
 ENTRY_POINTS = ("cli", "mcp", "robot", "web", "tui")
 
+#: Seconds to wait for `serve` to print its ready banner.
+#:
+#: Deliberately generous: this measures process-start latency, not throughput.
+#: The consistency test runs inside `cargo test --workspace`, where the machine
+#: is already saturated, and a 10s budget produced random red runs (M1-16). A
+#: slow start is not a consistency defect; a server that never comes up is, and
+#: that still fails here.
+SERVE_READY_TIMEOUT_S = 60
+
 #: All five declared entry points are exercised by this harness.
 IMPLEMENTED_ENTRY_POINTS = ENTRY_POINTS
 
@@ -363,7 +372,13 @@ def _serve_url(binary: str, db: str) -> Tuple[subprocess.Popen[str], str]:
             lines.put(line.rstrip())
 
     threading.Thread(target=collect_stderr, daemon=True).start()
-    deadline = time.monotonic() + 10
+    # Wait generously for the ready banner. This is process-start latency, not a
+    # performance assertion: when this script runs from `cargo test --workspace`
+    # the machine is already saturated by the rest of the suite, and a 10s budget
+    # made the consistency test go red at random (M1-16). A slow start is not a
+    # consistency defect, so give it room and fail only when serve truly never
+    # comes up.
+    deadline = time.monotonic() + SERVE_READY_TIMEOUT_S
     address = token = None
     while time.monotonic() < deadline:
         try:
@@ -392,7 +407,10 @@ def web_get(base_url: str, path: str, token: str) -> Dict[str, Any]:
         headers={"Authorization": f"Bearer {token}", "Host": "127.0.0.1"},
     )
     try:
-        with urllib.request.urlopen(request, timeout=5) as response:
+        # Same reasoning as SERVE_READY_TIMEOUT_S: under a saturated machine a
+        # loopback request can take seconds, and slowness here is not the
+        # property under test (cross-entry-point agreement is).
+        with urllib.request.urlopen(request, timeout=SERVE_READY_TIMEOUT_S) as response:
             if response.status != 200:
                 raise HarnessError(f"Web GET {path} returned HTTP {response.status}")
             return json.loads(response.read().decode("utf-8"))

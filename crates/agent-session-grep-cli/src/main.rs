@@ -7104,11 +7104,21 @@ mod tests {
         assert_eq!(array[2]["status"], "fail");
     }
 
-    /// 真实环境上跑完整检查清单：每条都有名字与事实，未通过的都有下一步，
-    /// 且下一步是可执行命令而不是概念解释（照
+    /// 完整检查清单：每条都有名字与事实，未通过的都有下一步,
+    /// 且下一步是可执行的东西而不是概念解释（照
     /// [`protocol::CanonicalCode::operator_action`] 的标准）。
+    ///
+    /// **不读真实机器状态**：`installed_names` 的取值取决于开发机 PATH 上装了
+    /// 哪几个名字，而 `provider_roots` 取决于装过哪些 agent —— 这两者都会随机器
+    /// 变化。所以断言只覆盖"每条检查的形状"这个与环境无关的性质，逐分支的具体
+    /// 措辞由 `installed_names_check_covers_every_path_combination` 用受控输入验。
+    ///
+    /// 曾经这条断言要求下一步必须含 `invocation::name()` 或 `PATH`：在
+    /// `cargo test` 下 argv[0] 是测试二进制，而 `(long on PATH, short missing)`
+    /// 那一支的措辞既不含测试名也不含 `PATH`，于是这条在部分机器上随机变红
+    /// （M1-16）。判据改为"点名了某个真实可敲的命令名"，与谁在跑无关。
     #[test]
-    fn environment_checks_are_actionable_on_this_machine() {
+    fn environment_checks_are_actionable() {
         let checks = environment_checks(None, false);
         assert!(
             checks.iter().any(|c| c.name == "provider_roots"),
@@ -7120,9 +7130,14 @@ mod tests {
         for check in &checks {
             assert!(!check.detail.trim().is_empty(), "{}", check.name);
             if let Some(next_step) = &check.next_step {
-                // 下一步必须点名一条真命令：只说"配置有问题"帮不了任何人。
+                // 下一步必须点名一条真能敲的命令（或 PATH 这个可操作的对象）：
+                // 只说"配置有问题"帮不了任何人。名字取两个发布名之一或本次调用名——
+                // 三者都是用户敲得出来的东西。
                 assert!(
-                    next_step.contains(invocation::name()) || next_step.contains("PATH"),
+                    next_step.contains(CANONICAL_BIN_NAME)
+                        || next_step.contains(invocation::DEFAULT_NAME)
+                        || next_step.contains(invocation::name())
+                        || next_step.contains("PATH"),
                     "{}: 下一步应给可执行命令: {next_step}",
                     check.name
                 );
