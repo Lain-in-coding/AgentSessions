@@ -1606,7 +1606,56 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   → **这条不是缺陷,删掉它反而会引入 Windows 上的竞态。**
   M2P-10 真正要解的只剩 `source_changed` 那一半:agent 正在写时 transcript
   一直在长,快照校验必然失败,重试赢不了。
-  **修正后的验收**:agent 运行中跑 discover 能入库并如实报告部分性。
+
+  ⚠️ **2026-08-20 我用可复现脚本实测,结论比原记录更糟:退出码是 7 不是 5。**
+  复现方式(不碰任何真实语料):写一份 4,000 条的 transcript,启动
+  `sync --discover`,同时后台线程持续追加。实测输出:
+  ```
+  exit code: 7
+  {"code":"provider_error","message":"io failure: source snapshot changed:
+   len 2686990 -> 2725690","retryable":false}
+  ```
+  **两个新事实**:
+  1. **退出码 7(`provider_error`)而非记录里的 5(`source_changed`)。**
+  2. **`retryable: false`** —— 对一个"重试就能赢"的竞态,协议却告诉调用方
+     不要重试(`protocol.rs:128` 明明把 `SourceChanged` 列为可重试)。
+
+  **根因(读码确认,不是猜):分类在两处被丢掉,而且正确的枚举变体已经存在、
+  只是从未被接线。**
+  1. `ports/src/lib.rs:1323-1325` 的 `provider_io()` 把**所有** `PortError`
+     一律压成 `ProviderError::Io(error.to_string())`。
+     `SnapshotChanged` 的分类在这里蒸发,只剩 `io failure:` 前缀 + 原文。
+  2. `protocol.rs:256-260` 的 `From<ProviderError> for ProtocolError` 是
+     **无 match 的一刀切**:任何 `ProviderError` → `CanonicalCode::ProviderError`。
+     即使第 1 步保住了分类,这里也会再抹一次。
+  3. `ProviderError::SourceChangedDuringRead`(`ports/src/lib.rs:1006`)
+     **定义了但全仓库零构造点** —— 语义位置留好了,没人往里放东西。
+
+  → 所以这不是"要新设计一个错误码",而是**把已有的三块接上**:
+  `PortError::SnapshotChanged` → `ProviderError::SourceChangedDuringRead`
+  → `CanonicalCode::SourceChanged`(exit 5, `retryable: true`)。
+
+  **已存在的一半解法**(读代码确认):`prepare_source` 里已有
+  `JsonlHealth::Invalid → PrepareOutcome::Retained` 分支
+  (`main.rs:5313-5322`),agent 正在写的**已索引**源会被 Retain 而不是失败。
+  **缺口正是首次索引**:`cached_fp.is_some()` 这个条件把新源排除在外,
+  注释说它"落到下面走既有 recoverable-skip",但实测证明它走到了
+  `read_verified` 的快照校验并整轮失败。
+  → **首次 discover 撞上正在写的 transcript = 整轮失败、零消息入库**,
+  这正是 owner 在真实机器上遇到的现象。
+
+  **拆成两半,一半现在就修,一半留给 owner 决策**:
+  - **(a) 错误分类 —— 是缺陷,不需要决策,现在修。**
+    misclassification 与仓库自己的 `error-catalog.json`、自己的
+    `retryable()` 表、自己的 runbook 三处都矛盾;把上面三块接上即可。
+  - **(b) 部分成功 / offset 续传 —— 是设计变更,需要 owner 决策,不擅自做。**
+    "按快照点提交有效前缀、记录 offset、下次增量续上"会改变
+    `sync` 的原子性承诺(当前是 all-or-nothing per source),
+    涉及 RFC-0002 的 ParseReport 语义,不是一个 bugfix 能覆盖的范围。
+  **修正后的验收**:
+  (a) 撞上正在写的源时 exit 5 + `source_changed` + `retryable: true`,
+      与 runbook 和 error-catalog 一致;
+  (b) 待决策。
   (`writer.lock` 的存在不作为失败判据。)
 
 - [x] **M2P-11 `index <id-fact> <text>` 开发后门出现在用户 help 里**
@@ -2100,12 +2149,28 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   **未做(不伪装完成)**:高亮与 `--context N` 周边行尚未新增;当前交付的是
   "一条命令可见命中附近证据",不是完整 diff-aware context window。
 
-- [ ] **M3-10 无统计:用户答不出"我到底有多少历史、来自哪里"**
+- [x] **M3-10 无统计:用户答不出"我到底有多少历史、来自哪里"** —— **已交付 `stats`(`5ddfb2c`)**
   `status` 只有四个计数器(`main.rs:4109-4114`)。
   没有按 provider 计数、没有日期直方图、没有 top 工具、没有会话大小分布。
   `doctor` 只查健康(`main.rs:1305-1318`)。
   **修法**:`status --detail` 或 `stats` 子命令:按 provider / 按月 / 按项目。
   **验收**:一条命令能看到历史的构成。
+
+  **✅ 选独立 `stats` 子命令而非 `status --detail`**:`status` 回答"我的索引健康吗",
+  `stats` 回答"我的索引里有什么",两个问题的读者和使用时机都不同。
+  四个维度全部落地:per provider、per month、per project、session size 分布。
+  **"不知道"一律显式成桶**(`—` 行 + `project_unknown_sessions` /
+  `project_ambiguous_sessions` 两个计数):无消息时间戳的会话进 month unknown、
+  无 resolved Original Working Directory 声明的会话进 project unknown ——
+  **不静默丢弃、不推断**,否则总数会对不上。
+
+  **实测(release 二进制,零配置,claude-code + codex 双 provider 库)**:
+  human 面输出 sessions/messages/documents/tool activities/generation 五个总量
+  加四张分组表;`—` 行如实出现。
+  **隐私分面(ADR-0004 vs ADR-0009)实测确认**:human 面显示完整项目目录
+  (`C:\placeholder\project`),而 `--robot` 面**只给 basename**
+  (`{"key":"fixture-project"}` / `{"key":"project"}`,unknown 为 `null`)——
+  跨边界面不带绝对路径,与刚修掉的 `tool_activity[].target` 泄漏同一条原则。
 
 - [ ] **M3-11 增量更新的人机工程(MCP 侧最痛)**
   `sync` 全手动 —— 无 watcher、无 daemon、无搜索时自动同步、无 `notify`。
