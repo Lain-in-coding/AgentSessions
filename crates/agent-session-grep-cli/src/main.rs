@@ -1121,12 +1121,13 @@ PAGINATION / BUDGET (search, list):
     --max-bytes <n>        response byte budget (minimum 4096)
 
 LIST:
-    --sessions             只列会话实体（与 MCP `list_sessions` 同语义）
-    --sort id|recency      排序维度（默认 id：wire id 升序，稳定但与时间无关）。
-                           recency = 会话最近活动降序（回答「我昨天干了什么」），
-                           只对会话有定义，需与 --sessions 同用；provider 没给
-                           时间戳的会话排在末尾，日期显示为 —，绝不编造时刻。
-                           续读令牌绑定排序维度：换了 --sort 的旧令牌会被拒绝。
+    --sessions             list session entities only (same semantics as MCP `list_sessions`)
+    --sort id|recency      sort dimension (default id: wire id ascending — stable but unrelated to time).
+                           recency = most recent session activity first (answers `what did I do yesterday`).
+                           Defined for sessions only, so it requires --sessions. Sessions whose provider
+                           supplied no timestamp sort last and show their date as —; a time is never invented.
+                           A continuation token is bound to its sort dimension: a token from a different
+                           --sort is rejected rather than silently re-sorted.
 
 FILTER (search):
     --provider <id>        restrict to a provider (repeatable; values OR together). Run `providers` for the ids
