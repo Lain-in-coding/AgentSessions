@@ -495,6 +495,20 @@ message / 231 session,**七条全 PASS**,harness 退出 0,报告仅含聚合数�
 不能由分包结果拼凑;改了投影逻辑就要想到谁在断言那个投影的形状。**
 已修:`33bb459`(断言改为"去标记后是连续子串且含命中词")。
 
+**⚠️ 第六条(2026-08-20,竞态测量的方法论错误 —— 差点造出一个假的绿灯):**
+修完 M2P-10 的分类后,我用单次复现脚本验证"exit 5 通过",本来打算就此收工。
+**但对修复前的二进制做反向对照(negative control)时,它也"通过"了。**
+连跑 6 次修复前的二进制:**exit 7 三次、exit 5 三次** ——
+漂移可以从两个地方冒出来(adapter 的 read,或提交前的 verify),
+**哪一个先输掉竞态每次都不一样**,而只有前者在修复前会误分类。
+→ **单次运行的守卫在这里毫无鉴别力:它有约一半概率给已知坏的二进制盖绿章。**
+**规则:凡是测竞态/时序的守卫,必须(1)多次试跑并要求每次都对,
+(2)对已知坏的版本做反向对照证明它真的会红,
+(3)把"竞态根本没发生"单独报成 `not_reproduced` 而不是算通过。**
+落地:`scripts/evidence/growing_source_repro.py` 默认 6 试次,任一误分类即红;
+实测修复后 6/6 干净,修复前抓出 3 次误分类(`ae80790`)。
+**如果我没做那次反向对照,这条修复会带着一个永远不会亮的红灯合进去。**
+
 **⚠️ 优先级已按 §1.3.1 实测重排。** 上表按"读代码推断的严重度"排序,而实测
 判定是:瓶颈 #2(吞吐 0.707 MiB/s,差 5 倍)是唯一**既确认失败又差距最大**的;
 瓶颈 #4 **通过**;搜索与 MCP 延迟(不在上表内,原被当成宽裕项)**各以约 1.8 倍
@@ -999,7 +1013,7 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
 **为什么先做这个**:解析错了的话性能数字没意义 —— 优化一个会丢消息的索引器
 是白干。而真实样本可能推翻 schema 假设,越早知道越好。
 
-- [ ] **M1-1 建立隔离样本工作区(D6)**
+- [x] **M1-1 建立隔离样本工作区(D6)** —— **已交付 `a5c25d0`**
   在仓库外或 gitignored 路径下建 `evidence-input/real-samples/<provider>/`,
   写一份 `README`(**不进仓库**)说明:样本永不 `git add`、永不上传、
   只用于本地定位。`.gitignore` 加规则确保误 add 会被拦。
@@ -1018,6 +1032,14 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   `parentUuid isSidechain sessionId` 也**零命中** ——
   真实 claude/codex transcript 基本没人公开提交。
   **验收**:`git status` 在放入样本后仍干净;`git check-ignore` 确认命中。
+
+  **✅ 实测确认(不是"加了规则就算数")**:在 `evidence-input/real-samples/`
+  下放一个文件后 —— `git check-ignore -v` 命中 `.gitignore:30:/evidence-input/`、
+  `git status --short` 干净、`git add <该文件>` 被**拒绝**并提示需 `-f`。
+  三条验收全过。规则连同"为什么"一起写进 `.gitignore` 注释:
+  这些是第三方 PII,且多个上游仓库**无 license**(不授予任何再分发权),
+  冻结快照与其 SHA-256 清单也放这里 —— 清单跟着它描述的字节走,不进仓库。
+  **未做**:`README` 与实际样本采集属 M1-2/M1-3,本条只交付"误 add 会被拦"这层保险。
 
 - [ ] **M1-2 冻结真实语料快照(D7)**
   把当前 provider 数据根整体拷到 `evidence-input/frozen-corpus-2026-08-<dd>/`,
@@ -1080,11 +1102,29 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   `GliteTech/glite-english-audit`(Apache-2.0,每场景一份 `opencode.db.sql`)。
   **验收**:golden 测试进 `cargo test --workspace`;真实样本不进仓库。
 
-- [ ] **M1-6 解析容错改造(D11)**
+- [x] **M1-6 解析容错改造(D11)** —— **读码+实测确认:已实现,本条无需新工作**
   损坏/截断/未知字段行:跳过并计数,结束时输出
   "skipped N lines (use --verbose for detail)",默认不中断。
   真实会话文件常有写到一半的尾行(agent 正在跑或进程被杀)。
   **验收**:构造截断文件的测试;sync 仍退出 0 并正确报告跳过数。
+
+  **✅ 三条验收全部已被现有实现与测试满足**(2026-08-20 逐条核对):
+  - **跳过并计数**:`staged.report.skipped` 进 sync/ingest 响应;
+    human 面渲染 `skipped: N（因格式无法入库的消息条数）`
+    (`human.rs:714`)、`diagnostics: N（解析诊断条数）`(`human.rs:851`)。
+  - **默认不中断 + 退出 0**:两条 e2e 覆盖两种情形 ——
+    `sync_truncated_tail_retains_previous_index_without_churn`(**已索引**过的源
+    带截断尾 → Retain,不重 parse/不推进 generation/不 tombstone)与
+    `sync_new_truncated_source_parses_valid_prefix_recoverably`(**新**源带截断尾
+    → 有效前缀照常提交可搜索,截断行计 `skipped: 1` + `diagnostics: 1`)。
+  - **诊断有界**:`diagnostic_warnings()`(`main.rs:196`)按条数与字符双重截断,
+    超出部分折成 "N additional provider diagnostics omitted" ——
+    坏文件不会用几万条诊断淹掉输出。
+  **与原文的唯一差异**:实现没有 `--verbose` 开关,而是把有界诊断直接放进
+  `warnings[]`(robot 面)与 human 面的 diagnostics 计数。
+  **这个差异不补**:契约 §4 规定 `--robot` 不得有额外通道,
+  加一个只影响 human 面的 `--verbose` 会让两面的证据量不一致;
+  真要看全部诊断,`--output json` 已经给了。
 
 - [ ] **M1-7 provider 升 Beta(G2)**
   达到 D9 标准的 provider 在 `capability.rs` 升 `Beta`,同步
