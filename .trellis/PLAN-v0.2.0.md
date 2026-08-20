@@ -1115,11 +1115,31 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   这正是 D9 坚持"必须拿真实语料验证"的理由。
   ⚠️ **antigravity 的 40 条 diagnostic 是良性信息**
   ("session identity lives in the brain/<uuid> directory name"),不是错误。
-  ⚠️ **`real_data_regression.py` 不能直接喂 provider 根目录**:
-  它按"排除已知非 transcript 后缀"收集候选,antigravity 根下 1,419 个文件里
-  只有 40 个是 `transcript.jsonl`,其余 1,376 个被送进 sync 后整轮报
-  `invalid_request`(exit 2)。上表的数字是**按真实 transcript 文件**跑的。
-  这本身是 harness 的一个待改进点,不是 provider 缺陷。
+  ⚠️ **`real_data_regression.py` 不能直接喂 provider 根目录** ——
+  **已修(`3c40c50`)**:它按"排除已知非 transcript 后缀"收集候选,
+  antigravity 根下 1,419 个文件里只有 40 个是 `transcript.jsonl`,
+  其余被送进 sync 后整轮报 `invalid_request`(exit 2)、报告零覆盖。
+  修法:只在"没有 provider 认领这个源"这一条拒绝上逐文件重试,
+  并把拒绝数计进 `INV-SYNC-OK`;其他任何失败仍然致命,
+  以免把真实缺陷混进 unrecognized 计数。
+  修后同一个根报 **2,716 条 emitted / 1,257 个未被认领**,不再整轮失败。
+
+  🔍 **修完 harness 后立刻发现一个新事实:antigravity 有第二种 transcript 文件。**
+  逐个试跑那 1,379 个非 `transcript.jsonl` 文件,**119 个被某个 probe 接受**,
+  其中 **40 个是 `transcript_full.jsonl`**(与 `transcript.jsonl` 一一对应)。
+  它的记录类型与 `transcript.jsonl` **完全不同** ——
+  `PLANNER_RESPONSE` / `SEARCH_WEB` / `VIEW_FILE` / `LIST_DIRECTORY` /
+  `CHECKPOINT` / `CONVERSATION_HISTORY` / `USER_INPUT`(实测 34 行的一份),
+  而且 **sync 它会产生 `skipped: 1`** —— 这就是 `INV-NO-PARSE-LOSS` 失败的来源
+  (该断言要求 `skipped == 0`,是合理的严格)。
+  **待办**:决定 `transcript_full.jsonl` 是
+  (a) 应当支持的第二个 variant(它显然含 planner/工具轨迹,信息量更大)、
+  (b) 应当被 discovery 明确排除(避免重复索引同一会话)。
+  **现状是最糟的第三种:probe 半接受、解析半成功、还静默丢一行。**
+  ⚠️ 另外 **119 - 40 = 79 个文件也被 probe 接受**,里面包括 `agent.md`、
+  `read.json`、`config`、`HEAD`、`index`(git 内部文件)——
+  **这些明显不是 transcript 却通过了 probe**,属于 probe 过宽的独立问题,
+  与 M1-14 的 8 行采样窗口是同一类毛病。
 
 - [ ] **M1-5 反推合成 golden fixture(D9)**
   ⚠️ **已知待补(M1-13 发现)**:`provider-codex/tests/golden/basic.jsonl`
