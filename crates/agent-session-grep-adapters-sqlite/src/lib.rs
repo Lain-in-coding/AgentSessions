@@ -25,10 +25,10 @@ use agent_session_grep_domain::{
     Role, SessionContextGraph, SourceDocument, StableId, ToolActivity,
 };
 use agent_session_grep_ports::{
-    CatalogEntry, CatalogStore, ContextGraphStore, ContextStats, MessageContextCandidate,
-    PortError, PortResult, ResumeClaimsStore, SearchFacets, SearchHit, SearchIndex, SearchProvider,
-    SearchQuery, SemanticIndex, SessionResumeMetadata, SidechainFacet, SourcePlacement,
-    SourceResumeClaim,
+    CatalogEntry, CatalogStore, ContextGraphStore, ContextStats, HistoryBucket, HistoryStats,
+    MessageContextCandidate, PortError, PortResult, ResumeClaimsStore, SearchFacets, SearchHit,
+    SearchIndex, SearchProvider, SearchQuery, SemanticIndex, SessionResumeMetadata, SidechainFacet,
+    SourcePlacement, SourceResumeClaim,
 };
 use rusqlite::{Connection, OptionalExtension};
 use std::any::Any;
@@ -6227,6 +6227,254 @@ impl CatalogStore for SqliteStore {
     fn active_generation(&self) -> PortResult<u64> {
         SqliteStore::active_generation(self)
     }
+
+    /// 历史构成普查（M3-10）：固定条数的聚合查询，绝不逐会话查询（N+1）。
+    ///
+    /// 一条查询一次扫过 placement 表，给出每个会话的 provider、去重消息数与
+    /// 消息时间戳的词法最大值——四个维度里的三个（provider / 月 / 会话规模）
+    /// 都从这一遍派生，成本与 `sessions_by_recency` 同级。另有三条常量级
+    /// 计数（Message / Document 实体总数、tool activity 总数）与一条读 resume
+    /// 声明表（每源一行，远小于 placement 表）的项目归属聚合。
+    ///
+    /// 三处"归不出值"一律落 unknown 桶，绝不推断：
+    /// - 会话没有任何 placement，或其文档没有 provider 字段 → 无 provider；
+    ///   `provider_variants != 1` 同样落 unknown（同一会话被声明了互相冲突的
+    ///   provider 时不挑一个当权威）。
+    /// - 会话内没有任何带时间戳的消息 → 无月份。
+    /// - 没有可信的 Original Working Directory 声明（`resolved` 且
+    ///   `pair_observed`，与 `resume_metadata_from_claim` 同一判据），或多个
+    ///   source 给出互相冲突的目录 → 无项目。项目维度另外把 unknown 拆成
+    ///   "无声明"与"ambiguous"两个计数，使读者能区分"没记录"与"记录互相矛盾"。
+    fn history_stats(&self) -> PortResult<HistoryStats> {
+        let conn = self.conn.borrow();
+
+        // 项目归属只认与 resume 输出同一条判据的声明：`resolved` 且 pair-observed
+        // （cwd 必须与 Provider Session ID 同批观察到，见 ADR-0009）。同一会话
+        // 出现多个不同目录即 ambiguous——不按 source 路径或行序挑一个。
+        let mut project_of_session: BTreeMap<String, Option<String>> = BTreeMap::new();
+        {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT session_id,
+                            MIN(original_working_directory)            AS project,
+                            COUNT(DISTINCT original_working_directory) AS variants
+                       FROM source_session_resume_claims
+                      WHERE original_working_directory_state = 'resolved'
+                        AND original_working_directory IS NOT NULL
+                        AND pair_observed = 1
+                      GROUP BY session_id",
+                )
+                .map_err(backend)?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                })
+                .map_err(backend)?;
+            for row in rows {
+                let (session, project, variants) = row.map_err(backend)?;
+                project_of_session.insert(session, if variants == 1 { project } else { None });
+            }
+        }
+
+        let entity_total = |kind: IdKind| -> PortResult<u64> {
+            let count: i64 = conn
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) FROM catalog WHERE id LIKE '{}%'",
+                        kind.prefix()
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(backend)?;
+            u64::try_from(count).map_err(backend)
+        };
+        let total_messages = entity_total(IdKind::Message)?;
+        let total_documents = entity_total(IdKind::Document)?;
+        let total_tool_activities: u64 = {
+            let count: i64 = conn
+                .query_row("SELECT COUNT(*) FROM tool_activities", [], |row| row.get(0))
+                .map_err(backend)?;
+            u64::try_from(count).map_err(backend)?
+        };
+
+        let mut total_sessions = 0u64;
+        let mut by_provider = BucketTally::default();
+        let mut by_month = BucketTally::default();
+        let mut by_project = BucketTally::default();
+        let mut by_size = BucketTally::default();
+        let mut project_unknown_sessions = 0u64;
+        let mut project_ambiguous_sessions = 0u64;
+        {
+            let mut stmt = conn
+                .prepare(&format!(
+                    "SELECT c.id,
+                            MIN(json_extract(d.payload, '$.provider'))            AS provider,
+                            COUNT(DISTINCT json_extract(d.payload, '$.provider')) AS provider_variants,
+                            COUNT(DISTINCT mp.message_id)                         AS messages,
+                            MAX(json_extract(m.payload, '$.timestamp'))           AS latest
+                       FROM catalog c
+                       LEFT JOIN message_placements mp ON mp.session_id = c.id
+                       LEFT JOIN catalog d ON d.id = mp.document_id
+                       LEFT JOIN catalog m ON m.id = mp.message_id
+                      WHERE c.id LIKE '{}%'
+                      GROUP BY c.id",
+                    IdKind::Session.prefix()
+                ))
+                .map_err(backend)?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                    ))
+                })
+                .map_err(backend)?;
+            for row in rows {
+                let (session, provider, provider_variants, messages, latest) =
+                    row.map_err(backend)?;
+                let messages = u64::try_from(messages).map_err(backend)?;
+                total_sessions += 1;
+                let provider = if provider_variants == 1 {
+                    provider.as_deref()
+                } else {
+                    None
+                };
+                by_provider.add(provider, messages);
+                // `YYYY-MM`：短于 7 字符的时间串无法定位到某个月，落 unknown。
+                by_month.add(latest.as_deref().and_then(|t| t.get(..7)), messages);
+                // 三态：有可信目录 / 声明互相冲突（ambiguous）/ 没有声明。
+                // 后两者都进 unknown 桶，但分别计数——"没记录"与"记录矛盾"
+                // 对用户是两件不同的事。
+                match project_of_session.get(&session) {
+                    Some(Some(project)) => by_project.add(Some(project.as_str()), messages),
+                    Some(None) => {
+                        project_ambiguous_sessions += 1;
+                        by_project.add(None, messages);
+                    }
+                    None => {
+                        project_unknown_sessions += 1;
+                        by_project.add(None, messages);
+                    }
+                }
+                by_size.add(Some(session_size_bucket(messages)), messages);
+            }
+        }
+
+        Ok(HistoryStats {
+            total_sessions,
+            total_messages,
+            total_documents,
+            total_tool_activities,
+            by_provider: by_provider.by_volume(),
+            by_month: by_month.by_key(),
+            by_project: by_project.by_volume(),
+            project_unknown_sessions,
+            project_ambiguous_sessions,
+            by_session_size: by_size.into_fixed_order(SESSION_SIZE_BUCKETS),
+        })
+    }
+}
+
+/// 会话规模的固定档位，升序；[`session_size_bucket`] 只返回其中之一。
+const SESSION_SIZE_BUCKETS: &[&str] = &["0", "1", "2-9", "10-49", "50-199", "200+"];
+
+/// 一个会话的消息数落在哪个档位。档位边界是展示约定，取值本身恒为已知，
+/// 因此这个维度没有 unknown 桶。
+fn session_size_bucket(messages: u64) -> &'static str {
+    match messages {
+        0 => "0",
+        1 => "1",
+        2..=9 => "2-9",
+        10..=49 => "10-49",
+        50..=199 => "50-199",
+        _ => "200+",
+    }
+}
+
+/// 分桶累加器：已知取值按键聚合，unknown 单独计数。
+///
+/// unknown 不参与键排序（`None` 排在哪里是任意的），而是在输出时恒定置末并
+/// **恒被输出，即使计数为 0**——一个静默省略 unknown 桶的普查会把"归不出值
+/// 的会话"变成看不见的差额，读者无法自证各桶之和等于会话总数。
+#[derive(Default)]
+struct BucketTally {
+    known: BTreeMap<String, (u64, u64)>,
+    unknown: (u64, u64),
+}
+
+impl BucketTally {
+    fn add(&mut self, key: Option<&str>, messages: u64) {
+        let slot = match key {
+            Some(key) => self.known.entry(key.to_string()).or_default(),
+            None => &mut self.unknown,
+        };
+        slot.0 += 1;
+        slot.1 += messages;
+    }
+
+    /// 会话数降序 → 键升序，unknown 置末。
+    fn by_volume(self) -> Vec<HistoryBucket> {
+        let mut buckets: Vec<HistoryBucket> = self
+            .known
+            .into_iter()
+            .map(|(key, (sessions, messages))| HistoryBucket {
+                key: Some(key),
+                sessions,
+                messages,
+            })
+            .collect();
+        buckets.sort_by(|a, b| b.sessions.cmp(&a.sessions).then_with(|| a.key.cmp(&b.key)));
+        buckets.push(HistoryBucket {
+            key: None,
+            sessions: self.unknown.0,
+            messages: self.unknown.1,
+        });
+        buckets
+    }
+
+    /// 键升序（时间维度要按时间读），unknown 置末。
+    fn by_key(self) -> Vec<HistoryBucket> {
+        let mut buckets: Vec<HistoryBucket> = self
+            .known
+            .into_iter()
+            .map(|(key, (sessions, messages))| HistoryBucket {
+                key: Some(key),
+                sessions,
+                messages,
+            })
+            .collect();
+        buckets.push(HistoryBucket {
+            key: None,
+            sessions: self.unknown.0,
+            messages: self.unknown.1,
+        });
+        buckets
+    }
+
+    /// 按给定档位顺序输出非空桶；该维度无 unknown 概念，故不输出 unknown 桶。
+    fn into_fixed_order(self, order: &[&str]) -> Vec<HistoryBucket> {
+        debug_assert_eq!(self.unknown, (0, 0), "size dimension has no unknown bucket");
+        order
+            .iter()
+            .filter_map(|label| {
+                self.known
+                    .get(*label)
+                    .map(|(sessions, messages)| HistoryBucket {
+                        key: Some((*label).to_string()),
+                        sessions: *sessions,
+                        messages: *messages,
+                    })
+            })
+            .collect()
+    }
 }
 
 impl ContextGraphStore for SqliteStore {
@@ -6889,6 +7137,9 @@ impl SqliteStore {
                 suggested_next_commands: Vec::new(),
                 occurrences: 1,
                 resume_available: false,
+                provider_id: None,
+                working_directory: None,
+                project_name: None,
             });
         }
         Ok(())
@@ -7631,6 +7882,9 @@ impl SemanticTopK {
                 suggested_next_commands: Vec::new(),
                 occurrences: 1,
                 resume_available: false,
+                provider_id: None,
+                working_directory: None,
+                project_name: None,
             });
         }
         Ok(hits)
@@ -8264,6 +8518,9 @@ where
             suggested_next_commands: Vec::new(),
             occurrences: 1,
             resume_available: false,
+            provider_id: None,
+            working_directory: None,
+            project_name: None,
         });
     }
     Ok(hits)
@@ -8655,6 +8912,7 @@ mod filtered_query_tests {
             providers: Vec::new(),
             since: Some(instant(1_785_196_800)), // 2026-07-28T00:00:00Z
             until: Some(instant(1_786_320_000)), // 2026-08-10T00:00:00Z
+            ..SearchFilters::default()
         };
         let mut hits = search_filtered(&fixture.store, "shared-token", &window);
         hits.sort();
@@ -8670,6 +8928,7 @@ mod filtered_query_tests {
             providers: Vec::new(),
             since: Some(instant(1_785_196_800)),
             until: None,
+            ..SearchFilters::default()
         };
         let hits = search_filtered(&fixture.store, "shared-token", &since_only);
         assert_eq!(hits.len(), 3);
@@ -8680,6 +8939,7 @@ mod filtered_query_tests {
             providers: Vec::new(),
             since: None,
             until: Some(instant(1_786_320_000)),
+            ..SearchFilters::default()
         };
         let hits = search_filtered(&fixture.store, "shared-token", &until_only);
         assert_eq!(hits.len(), 3);
@@ -8704,6 +8964,7 @@ mod filtered_query_tests {
             providers: Vec::new(),
             since: Some(instant(0)),
             until: Some(instant(4_000_000_000)),
+            ..SearchFilters::default()
         };
         let hits = search_filtered(&fixture.store, "shared-token", &everything);
         assert_eq!(hits.len(), 4, "{hits:?}");
@@ -8719,6 +8980,7 @@ mod filtered_query_tests {
             providers: Vec::new(),
             since: Some(instant(1_785_196_800)), // 2026-07-28T00:00:00Z
             until: Some(instant(1_786_320_000)), // 2026-08-10T00:00:00Z
+            ..SearchFilters::default()
         };
         let hits = search_filtered(&fixture.store, "shared-token", &window);
         assert!(!hits.contains(&fixture.null_ts.as_str().to_string()));
@@ -8734,6 +8996,7 @@ mod filtered_query_tests {
                 providers: Vec::new(),
                 since: bounds.0,
                 until: bounds.1,
+                ..SearchFilters::default()
             };
             assert_eq!(
                 count_excluded(&fixture.store, "shared-token", &filters),
@@ -8755,6 +9018,7 @@ mod filtered_query_tests {
             providers: vec![SearchProvider::claude_code()],
             since: window.0,
             until: window.1,
+            ..SearchFilters::default()
         };
         assert_eq!(
             count_excluded(&fixture.store, "shared-token", &claude_only),
@@ -8764,6 +9028,7 @@ mod filtered_query_tests {
             providers: vec![SearchProvider::codex()],
             since: window.0,
             until: window.1,
+            ..SearchFilters::default()
         };
         assert_eq!(
             count_excluded(&fixture.store, "shared-token", &codex_only),
@@ -8775,6 +9040,7 @@ mod filtered_query_tests {
             providers: Vec::new(),
             since: window.0,
             until: window.1,
+            ..SearchFilters::default()
         };
         let subagent_only = SearchFacets {
             sidechain: SidechainFacet::SubagentOnly,
@@ -8826,6 +9092,7 @@ mod filtered_query_tests {
             providers: vec![SearchProvider::codex()],
             since: Some(instant(1_785_196_800)),
             until: Some(instant(1_786_320_000)),
+            ..SearchFilters::default()
         };
         let hits = search_filtered(&fixture.store, "shared-token", &filters);
         assert_eq!(hits, vec![fixture.codex_mid.as_str().to_string()]);
@@ -8838,12 +9105,14 @@ mod filtered_query_tests {
             providers: vec![SearchProvider::claude_code()],
             since: Some(instant(1_786_320_000)), // late window: codex only
             until: None,
+            ..SearchFilters::default()
         };
         assert!(search_filtered(&fixture.store, "shared-token", &no_provider_overlap).is_empty());
         let empty_window = SearchFilters {
             providers: Vec::new(),
             since: Some(instant(1_800_000_000)),
             until: Some(instant(1_800_100_000)),
+            ..SearchFilters::default()
         };
         assert!(search_filtered(&fixture.store, "shared-token", &empty_window).is_empty());
     }
@@ -14863,6 +15132,229 @@ mod tests {
                 undated[1].as_str()
             ]
         );
+    }
+
+    /// 一个带指定 provider 的文档 entry（provider 维度的唯一权威来源）。
+    fn provider_document_entry(id: &StableId, provider: &str) -> (StableId, Vec<u8>, String) {
+        (
+            id.clone(),
+            serde_json::json!({
+                "provider": provider,
+                "variant": format!("{provider}/jsonl-v1"),
+                "fingerprint": "0123456789abcdef",
+                "len": 128,
+            })
+            .to_string()
+            .into_bytes(),
+            String::new(),
+        )
+    }
+
+    /// 历史普查语料：四个会话覆盖三个 unknown 成因各一次。
+    ///
+    /// - `stats-a`：provider `claude-code`，两条 2026-07 的消息，项目已 resolved；
+    /// - `stats-b`：provider `codex`，一条 2026-08 的消息，无项目声明；
+    /// - `stats-c`：provider `claude-code`，唯一一条消息没有时间戳 → 月份 unknown；
+    /// - `stats-d`：没有任何 placement → provider / 月份 / 项目三者皆 unknown。
+    fn commit_history_stats_corpus(store: &SqliteStore) {
+        /// 一条普查语料会话的构成。用命名结构而非四元组:四元组里两个
+        /// `Option<&str>` 相邻,位置写错不会被类型系统发现。
+        struct StatsSession {
+            name: &'static str,
+            provider: &'static str,
+            timestamps: Vec<Option<&'static str>>,
+            project: Option<&'static str>,
+        }
+        let plan = [
+            StatsSession {
+                name: "stats-a",
+                provider: "claude-code",
+                timestamps: vec![Some("2026-07-02T09:00:00Z"), Some("2026-07-19T18:00:00Z")],
+                project: Some("C:/placeholder/project-a"),
+            },
+            StatsSession {
+                name: "stats-b",
+                provider: "codex",
+                timestamps: vec![Some("2026-08-05T11:00:00Z")],
+                project: None,
+            },
+            StatsSession {
+                name: "stats-c",
+                provider: "claude-code",
+                timestamps: vec![None],
+                project: None,
+            },
+        ];
+        for StatsSession {
+            name,
+            provider,
+            timestamps,
+            project,
+        } in plan
+        {
+            let session = sid(IdKind::Session, name.as_bytes());
+            let document = sid(IdKind::Document, format!("{name}-doc").as_bytes());
+            let mut entries = vec![provider_document_entry(&document, provider)];
+            let mut placements = Vec::new();
+            let mut members = Vec::new();
+            for (ordinal, timestamp) in timestamps.iter().enumerate() {
+                let message = sid(IdKind::Message, format!("{name}-msg-{ordinal}").as_bytes());
+                entries.push(dated_message_entry(
+                    &message,
+                    &format!("{name} body {ordinal}"),
+                    *timestamp,
+                ));
+                placements.push(placement(
+                    &session,
+                    &document,
+                    &message,
+                    ordinal as u32,
+                    false,
+                    Some((0, 4)),
+                ));
+                members.push(message.as_str().to_string());
+            }
+            let member_refs: Vec<&str> = members.iter().map(String::as_str).collect();
+            entries.push((
+                session.clone(),
+                session_payload(document.as_str(), &member_refs),
+                String::new(),
+            ));
+            let mut source = source_batch(
+                &format!("{name}.jsonl"),
+                entries,
+                placements,
+                Vec::new(),
+                true,
+            );
+            source.resume_claim = Some(SourceResumeClaim {
+                provider_id: provider.into(),
+                session_id: session.as_str().into(),
+                provider_session_id: Some(format!("native-{name}")),
+                provider_session_id_state: "resolved".into(),
+                original_working_directory: project.map(str::to_string),
+                original_working_directory_state: if project.is_some() {
+                    "resolved".into()
+                } else {
+                    "missing".into()
+                },
+                pair_observed: project.is_some(),
+            });
+            store
+                .commit_source_batches_if_changed(std::slice::from_ref(&source))
+                .unwrap();
+        }
+        // 无 placement 的会话（metadata-only）：三个维度同时 unknown。
+        let orphan = sid(IdKind::Session, b"stats-d");
+        let source = source_batch(
+            "stats-d.jsonl",
+            vec![(orphan.clone(), session_payload("", &[]), String::new())],
+            Vec::new(),
+            Vec::new(),
+            true,
+        );
+        store
+            .commit_source_batches_if_changed(std::slice::from_ref(&source))
+            .unwrap();
+    }
+
+    /// 每个维度的桶（含 unknown）之和恒等于会话总数——普查不会静默丢掉
+    /// 归不出值的会话。
+    #[test]
+    fn history_stats_buckets_always_sum_to_the_session_total() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        commit_history_stats_corpus(&store);
+        let stats = CatalogStore::history_stats(&store).unwrap();
+        assert_eq!(stats.total_sessions, 4);
+        assert_eq!(stats.total_messages, 4);
+        for dimension in [
+            &stats.by_provider,
+            &stats.by_month,
+            &stats.by_project,
+            &stats.by_session_size,
+        ] {
+            let summed: u64 = dimension.iter().map(|bucket| bucket.sessions).sum();
+            assert_eq!(
+                summed, stats.total_sessions,
+                "bucket sessions must sum to the session total: {dimension:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn history_stats_reports_every_unknown_bucket_explicitly() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        commit_history_stats_corpus(&store);
+        let stats = CatalogStore::history_stats(&store).unwrap();
+
+        // provider：会话数降序（claude-code 2 > codex 1），unknown 置末。
+        let providers: Vec<(Option<&str>, u64, u64)> = stats
+            .by_provider
+            .iter()
+            .map(|b| (b.key.as_deref(), b.sessions, b.messages))
+            .collect();
+        assert_eq!(
+            providers,
+            vec![
+                (Some("claude-code"), 2, 3),
+                (Some("codex"), 1, 1),
+                (None, 1, 0),
+            ]
+        );
+
+        // 月份：键升序（直方图按时间读），没有任何带时间戳消息的会话进 unknown。
+        let months: Vec<(Option<&str>, u64)> = stats
+            .by_month
+            .iter()
+            .map(|b| (b.key.as_deref(), b.sessions))
+            .collect();
+        assert_eq!(
+            months,
+            vec![(Some("2026-07"), 1), (Some("2026-08"), 1), (None, 2)]
+        );
+
+        // 项目：只有 resolved 的 Original Working Directory 才算归属。
+        let projects: Vec<(Option<&str>, u64)> = stats
+            .by_project
+            .iter()
+            .map(|b| (b.key.as_deref(), b.sessions))
+            .collect();
+        assert_eq!(
+            projects,
+            vec![(Some("C:/placeholder/project-a"), 1), (None, 3)]
+        );
+
+        // 会话规模：固定档位升序，只输出非空档；该维度没有 unknown 桶。
+        let sizes: Vec<(Option<&str>, u64)> = stats
+            .by_session_size
+            .iter()
+            .map(|b| (b.key.as_deref(), b.sessions))
+            .collect();
+        assert_eq!(
+            sizes,
+            vec![(Some("0"), 1), (Some("1"), 2), (Some("2-9"), 1)]
+        );
+    }
+
+    /// 空库上普查也返回全部 unknown 桶（计数 0），不是空对象——读者能自证
+    /// 维度存在且被检查过。
+    #[test]
+    fn history_stats_on_an_empty_store_still_names_the_unknown_buckets() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let stats = CatalogStore::history_stats(&store).unwrap();
+        assert_eq!(stats.total_sessions, 0);
+        assert_eq!(stats.total_messages, 0);
+        for dimension in [&stats.by_provider, &stats.by_month, &stats.by_project] {
+            assert_eq!(
+                dimension
+                    .iter()
+                    .map(|b| b.key.as_deref())
+                    .collect::<Vec<_>>(),
+                vec![None]
+            );
+            assert_eq!(dimension[0].sessions, 0);
+        }
+        assert!(stats.by_session_size.is_empty());
     }
 
     #[test]

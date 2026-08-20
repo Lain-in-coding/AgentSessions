@@ -9,12 +9,12 @@ use agent_session_grep_domain::{
     ToolActivity, select_full, select_mainline,
 };
 use agent_session_grep_ports::{
-    CanonicalEventSink, CatalogStore, Confidence, ContextGraphStore, MessageEvent, NoResumeClaims,
-    NoSemanticIndex, ParseReport, PortError, PortResult, ProbeResult, ProviderAdapter,
-    ProviderError, ReadOnlySource, ResumeClaimsStore, RetrievalMode, SQLITE_MAGIC_HEADER,
-    SearchFacets, SearchFilters, SearchHit, SearchIndex, SearchInstant, SearchQuery, SemanticIndex,
-    SessionResumeMetadata, SourceFormatFamily, ToolActivityEvent, read_source_head,
-    source_format_family_for,
+    CanonicalEventSink, CatalogStore, Confidence, ContextGraphStore, HistoryStats, MessageEvent,
+    NoResumeClaims, NoSemanticIndex, ParseReport, PortError, PortResult, ProbeResult,
+    ProviderAdapter, ProviderError, ReadOnlySource, ResumeClaimsStore, RetrievalMode,
+    SQLITE_MAGIC_HEADER, SearchFacets, SearchFilters, SearchHit, SearchIndex, SearchInstant,
+    SearchQuery, SemanticIndex, SessionResumeMetadata, SourceFormatFamily, ToolActivityEvent,
+    read_source_head, source_format_family_for,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -182,6 +182,13 @@ impl ListSort {
 ///
 /// 每个变体是一个用例。前端负责解析各自语法后构造本枚举，
 /// 从而保证 CLI / Robot / MCP / TUI 行为一致（见 CONTRACT-cli-robot-mcp-draft）。
+///
+/// `Search` 变体比其余变体大得多（约 347 vs 112 字节），因为 M3-3/M3-8 把
+/// provider / role / project / exclude 四组过滤维度都放进了 `SearchFilters`。
+/// 这里**刻意不 box**：`AppRequest` 每次请求只构造一个、立即被 `handle` 消费，
+/// 不进集合也不排队，所以枚举大小不影响任何热路径；而 box 化会给 21 处调用点
+/// 加上一层间接，把"前端直接构造用例"这个本层最重要的可读性换成一次分配。
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum AppRequest {
     /// 全文检索：按查询串返回命中列表（分页 + 预算）。
@@ -251,6 +258,8 @@ pub enum AppRequest {
     GetSessionResume { session_id: StableId },
     /// 返回当前 Catalog 统计状态。
     Status,
+    /// 返回历史构成统计（provider / month / project / session size）。
+    Stats,
 }
 
 /// Detail level for a context response. `Raw` is the compatibility default.
@@ -436,6 +445,16 @@ pub enum AppResponse {
         active_generation: u64,
         placements: u64,
         source_placement_claims: u64,
+    },
+    /// 历史构成普查（M3-10）：库里有什么、来自哪里。
+    ///
+    /// 各维度的桶原样透传端口 DTO——Application 不做排序或合并，那是存储层
+    /// 冻结的契约（见 [`agent_session_grep_ports::HistoryStats`]）。项目维度的
+    /// 路径是本机绝对路径：human 面可按 ADR-0004 显示，跨边界面必须按 ADR-0009
+    /// 只投影 basename（由 CLI 渲染层负责）。
+    Stats {
+        stats: HistoryStats,
+        active_generation: u64,
     },
 }
 
@@ -977,6 +996,15 @@ fn search_query_digest(
         .map(|provider| provider.as_str())
         .collect::<Vec<_>>()
         .join(",");
+    let roles = filters
+        .roles
+        .iter()
+        .map(|role| role.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
+    let projects = filters.projects.join("\u{1f}");
+    let exclude_projects = filters.exclude_projects.join("\u{1f}");
+    let exclude_terms = filters.exclude_terms.join("\u{1f}");
     let since = filters
         .since
         .map(|instant| format!("{}:{}", instant.unix_seconds, instant.nanosecond))
@@ -986,11 +1014,15 @@ fn search_query_digest(
         .map(|instant| format!("{}:{}", instant.unix_seconds, instant.nanosecond))
         .unwrap_or_default();
     cursor::digest_query(&format!(
-        "search-filter-v1\0{}\0providers={}\0since={}\0until={}\0include_system={}\0group_by_session={}\0facets={}",
+        "search-filter-v2\0{}\0providers={}\0roles={}\0since={}\0until={}\0projects={}\0exclude_projects={}\0exclude_terms={}\0include_system={}\0group_by_session={}\0facets={}",
         query,
         providers,
+        roles,
         since,
         until,
+        projects,
+        exclude_projects,
+        exclude_terms,
         include_system,
         group_by_session,
         facets.canonical_binding(),
@@ -2277,6 +2309,10 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore, 
                     source_placement_claims: context_stats.source_placement_claims,
                 })
             }
+            AppRequest::Stats => Ok(AppResponse::Stats {
+                stats: self.catalog.history_stats()?,
+                active_generation: self.catalog.active_generation()?,
+            }),
         }
     }
 
@@ -2851,6 +2887,9 @@ mod tests {
                 suggested_next_commands: Vec::new(),
                 occurrences: 1,
                 resume_available: false,
+                provider_id: None,
+                working_directory: None,
+                project_name: None,
             }])
         }
     }
@@ -3215,6 +3254,9 @@ mod tests {
                     suggested_next_commands: Vec::new(),
                     occurrences: 1,
                     resume_available: false,
+                    provider_id: None,
+                    working_directory: None,
+                    project_name: None,
                 })
                 .collect())
         }
@@ -3243,6 +3285,9 @@ mod tests {
                     suggested_next_commands: Vec::new(),
                     occurrences: 1,
                     resume_available: false,
+                    provider_id: None,
+                    working_directory: None,
+                    project_name: None,
                 })
                 .collect())
         }
@@ -3974,6 +4019,7 @@ mod tests {
                         providers: Vec::new(),
                         since: Some(since),
                         until: Some(until),
+                        ..SearchFilters::default()
                     },
                 ))
                 .expect_err("since >= until must be rejected");
@@ -3993,6 +4039,7 @@ mod tests {
             providers: vec![SearchProvider::codex(), SearchProvider::claude_code()],
             since: Some(seconds_instant(1_000)),
             until: None,
+            ..SearchFilters::default()
         };
         let (_, next, _, _) = hits_of(
             app.handle(filtered_search_req("q", 2, None, issued_filters))
@@ -4006,6 +4053,7 @@ mod tests {
             ],
             since: Some(seconds_instant(1_000)),
             until: None,
+            ..SearchFilters::default()
         };
         assert!(
             app.handle(filtered_search_req(
@@ -4021,6 +4069,7 @@ mod tests {
             providers: Vec::new(),
             since: Some(seconds_instant(2_000)),
             until: None,
+            ..SearchFilters::default()
         };
         let err = app
             .handle(filtered_search_req("q", 2, next.clone(), mutated))
@@ -4046,6 +4095,7 @@ mod tests {
                     providers: vec![SearchProvider::claude_code()],
                     since: None,
                     until: None,
+                    ..SearchFilters::default()
                 },
             ))
             .unwrap_err();

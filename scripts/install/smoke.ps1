@@ -186,6 +186,22 @@ Assert-That ($r.Code -eq 0) 'status exits 0' "exit=$($r.Code) stdout=$($r.Text)"
 $count = if ($null -ne $r.Frame) { [int]$r.Frame.data.catalog_count } else { -1 }
 Assert-That ($count -ge 5) 'status reports data.catalog_count >= 5' "catalog_count=$count"
 
+# 6b. stats: history composition. Buckets must sum to the session total (no
+# silently dropped sessions), the unknown project bucket is always named, and the
+# machine surface never carries an absolute project path (ADR-0009).
+$r = Invoke-Robot @('--db', $db, '--robot', 'stats')
+Assert-That ($r.Code -eq 0) 'stats exits 0' "exit=$($r.Code) stdout=$($r.Text)"
+$stats = $r.Frame.data
+Assert-That ($null -ne $stats -and [int]$stats.total_sessions -ge 1) 'stats reports data.total_sessions >= 1' $r.Text
+Assert-That ($null -ne $stats -and [int]$stats.total_messages -ge 3) 'stats reports data.total_messages >= 3' $r.Text
+foreach ($dimension in @('by_provider', 'by_month', 'by_project')) {
+    $summed = ($stats.$dimension | Measure-Object -Property sessions -Sum).Sum
+    Assert-That ([int]$summed -eq [int]$stats.total_sessions) "stats $dimension buckets sum to total_sessions" "$dimension=$summed total=$($stats.total_sessions)"
+}
+Assert-That (@($stats.by_project | Where-Object { $null -eq $_.key }).Count -ge 1) 'stats names the unknown project bucket explicitly' $r.Text
+$leakedProject = @($stats.by_project | Where-Object { $null -ne $_.key -and ($_.key -match '[/\\]') })
+Assert-That ($leakedProject.Count -eq 0) 'stats machine output carries no absolute project path' $r.Text
+
 # 7. get on a well-formed but absent id: exit 4 with a not_found envelope
 # (ADR-0005; the message is generic and never echoes the wire id).
 $r = Invoke-Robot @('--db', $db, '--robot', 'get', 'ses_v1_nope')

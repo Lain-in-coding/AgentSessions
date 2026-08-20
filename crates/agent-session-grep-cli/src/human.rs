@@ -42,6 +42,7 @@ pub fn render_success(command: &str, outcome: Outcome, data: &Value, page: &Page
         "get" => render_get(data),
         "show" => render_show(data),
         "status" => render_status(data),
+        "stats" => render_stats(data),
         "sync" => render_sync(data),
         "ingest" => render_ingest(data),
         "handoff" => render_handoff(data),
@@ -610,6 +611,54 @@ fn render_context(data: &Value) -> Vec<String> {
         Some(evidence) => lines.push(format!("evidence: {} span(s)", evidence.len())),
         None => lines.push("evidence: ? span(s)".into()),
     }
+    lines
+}
+
+/// `stats`：历史构成普查的可扫描 human 投影。项目目录按 ADR-0004
+/// 原样显示；unknown / ambiguous 计数单独列出，避免把"无记录"误读成"无冲突"。
+fn render_stats(data: &Value) -> Vec<String> {
+    let number = |key: &str| number_text(data, key);
+    let bucket_lines = |label: &str, key: &str, project: bool| {
+        let buckets = data
+            .get(key)
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let mut lines = vec![format!("{label}:")];
+        for bucket in buckets {
+            let value = bucket.get("key").and_then(Value::as_str).unwrap_or(MISSING);
+            let sessions = bucket.get("sessions").and_then(Value::as_u64).unwrap_or(0);
+            let messages = bucket.get("messages").and_then(Value::as_u64).unwrap_or(0);
+            let suffix = if project && value != MISSING {
+                " (resolved Original Working Directory)"
+            } else {
+                ""
+            };
+            lines.push(format!(
+                "  {value}: sessions={sessions} messages={messages}{suffix}"
+            ));
+        }
+        lines
+    };
+    let mut lines = vec![
+        format!("sessions: {}", number("total_sessions")),
+        format!("messages: {}", number("total_messages")),
+        format!("documents: {}", number("total_documents")),
+        format!("tool activities: {}", number("total_tool_activities")),
+        format!("generation: {}", number("generation")),
+    ];
+    lines.extend(bucket_lines("by provider", "by_provider", false));
+    lines.extend(bucket_lines("by month", "by_month", false));
+    lines.extend(bucket_lines("by project", "by_project", true));
+    lines.push(format!(
+        "project unknown sessions: {}",
+        number("project_unknown_sessions")
+    ));
+    lines.push(format!(
+        "project ambiguous sessions: {}",
+        number("project_ambiguous_sessions")
+    ));
+    lines.extend(bucket_lines("by session size", "by_session_size", false));
     lines
 }
 

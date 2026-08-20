@@ -312,6 +312,9 @@ impl SearchIndex for InMemoryStore {
                 suggested_next_commands: Vec::new(),
                 occurrences: 1,
                 resume_available: false,
+                provider_id: None,
+                working_directory: None,
+                project_name: None,
             })
             .collect();
         // 与 SQLite 的全序一致：score 降序，同分按 id 升序（全 1.0 时退化为

@@ -38,9 +38,10 @@ use agent_session_grep_domain::{
     MessageRelation, SessionIdentityNamespace, Stability, StableId,
 };
 use agent_session_grep_ports::{
-    Confidence, ParseReport, ProviderAdapter, ProviderSessionObservation, ReadOnlySource,
-    RedactionStatus, ResumeClaimsStore, RetrievalMode, SearchFacets, SearchFilters, SearchInstant,
-    SearchProvider, SidechainFacet, SourceFormatFamily, SourceResumeClaim,
+    Confidence, HistoryBucket, HistoryStats, ParseReport, ProviderAdapter,
+    ProviderSessionObservation, ReadOnlySource, RedactionStatus, ResumeClaimsStore, RetrievalMode,
+    SearchFacets, SearchFilters, SearchInstant, SearchProvider, SidechainFacet, SourceFormatFamily,
+    SourceResumeClaim,
     capability::{ProviderCapability, ProviderCapabilityMatrix, ProviderMaturity},
     source_format_family_for,
 };
@@ -1088,6 +1089,7 @@ COMMANDS:
     list [limit]           list catalog entities (default 20; `--sessions --sort recency` = most recent sessions)
     context <ses-id>       assemble session context: branch message chain + evidence spans
     status                 report the total catalog entity count
+    stats                  report what the history is made of (per provider / month / project / session size)
     mcp                    serve MCP over stdio (JSON-RPC 2.0; stdout carries MCP frames only)
     tui                    interactive read-only browsing (preview; needs an interactive terminal)
     serve                  loopback HTTP server + embedded web UI (--port <n>; loopback only)
@@ -1267,6 +1269,7 @@ const KNOWN_SUBCOMMANDS: &[&str] = &[
     "list",
     "context",
     "status",
+    "stats",
     "mcp",
     "tui",
     "serve",
@@ -1414,6 +1417,16 @@ fn subcommand_help_text(cmd: &str) -> &'static str {
         "status" => {
             "status：报告当前库的实体总数与 generation。\n\
                      示例：agent-session-grep --db <path> status"
+        }
+        "stats" => {
+            "stats：报告历史的构成——总量（会话/消息/文档/工具活动）、按 provider、\n\
+                     按月（含显式的 unknown 时间桶）、按项目、按会话规模。\n\
+                     示例：agent-session-grep --db <path> stats\n\
+                     项目归属只来自 resolved 且 pair-observed 的 Original Working Directory 声明；\n\
+                     \u{20}  没有声明的会话与声明互相冲突（ambiguous）的会话分别计数，绝不猜。\n\
+                     human 模式显示完整项目目录（ADR-0004）；json/jsonl/--robot 是跨边界输出，\n\
+                     \u{20}  只给项目目录的最后一段（ADR-0009），不导出绝对路径。\n\
+                     与 status 分开：status 是 O(1) 健康计数器，stats 的成本与 placement 表规模成正比。"
         }
         "forget" => {
             "forget <ses-id>：把一个会话从索引里删除（不可撤销）。\n\
@@ -2978,6 +2991,36 @@ fn dispatch(
             let response = app.handle(AppRequest::Status)?;
             let (outcome, data, page, warnings) = render(response);
             Ok(("status", outcome, data, page, warnings))
+        }
+        // 历史构成普查（M3-10）：与 status 的健康计数器分开。status 回答"库健不
+        // 健康"（O(1) 计数器），stats 回答"库里有什么、来自哪里"（一次与
+        // placement 表规模成正比的聚合）。做成独立子命令而非 `status --detail`：
+        // status 被脚本与 doctor 当廉价探针用，给它加一个按语料规模变贵的旗标，
+        // 会让同一命令的成本取决于旗标，是个容易踩到的陷阱。
+        "stats" => {
+            no_extra_args(rest, 0, "stats")?;
+            let app = App::with_resume(store_ref(store), store_ref(store), store_ref(store));
+            let response = app.handle(AppRequest::Stats)?;
+            // ADR-0004/ADR-0009：项目目录是库里最具识别性的数据。本机 human 面按
+            // ADR-0004 显示完整路径；Json/Jsonl（含 --robot）是跨边界面，只给
+            // basename。默认（`render`）已是机器安全形态，human 面显式重投影——
+            // 反过来做（先出全路径再删）会让任何漏掉那一步的新出口默认泄漏。
+            let (outcome, data, page, warnings) = match (&response, mode) {
+                (
+                    AppResponse::Stats {
+                        stats,
+                        active_generation,
+                    },
+                    protocol::OutputMode::Human,
+                ) => (
+                    protocol::Outcome::Success,
+                    history_stats_json(stats, *active_generation, true),
+                    protocol::Page::default(),
+                    Vec::new(),
+                ),
+                _ => render(response),
+            };
+            Ok(("stats", outcome, data, page, warnings))
         }
         // 索引删除（M3-2 / M3-5）：`forget` 按会话/项目，`prune` 按时间/provider。
         // 两者都默认 dry-run，`--yes` 才执行；删除只作用于索引，provider 源文件
@@ -5902,7 +5945,71 @@ fn render(
             protocol::Page::default(),
             Vec::new(),
         ),
+        AppResponse::Stats {
+            stats,
+            active_generation,
+        } => (
+            protocol::Outcome::Success,
+            // Machine-safe by default: any surface that projects this arm without
+            // opting into the local human view gets basenames, never absolute paths.
+            history_stats_json(&stats, active_generation, false),
+            protocol::Page::default(),
+            Vec::new(),
+        ),
     }
+}
+
+/// Render the aggregate stats payload. The adapter owns bucket semantics and
+/// ordering; the CLI only serializes DTOs and applies the output-boundary
+/// projection for project paths.
+///
+/// `human_projects` is the ADR-0004 local-human exception: the full local
+/// project directory is shown only on the human CLI surface. Every other
+/// surface (Json/Jsonl/Robot, and any future machine consumer of this arm) gets
+/// the basename projection required by ADR-0009.
+fn history_stats_json(
+    stats: &HistoryStats,
+    active_generation: u64,
+    human_projects: bool,
+) -> serde_json::Value {
+    let bucket_json = |bucket: &HistoryBucket, project: bool| {
+        let key = if project && !human_projects {
+            bucket.key.as_deref().and_then(project_basename)
+        } else {
+            bucket.key.clone()
+        };
+        serde_json::json!({
+            "key": key,
+            "sessions": bucket.sessions,
+            "messages": bucket.messages,
+        })
+    };
+    serde_json::json!({
+        "total_sessions": stats.total_sessions,
+        "total_messages": stats.total_messages,
+        "total_documents": stats.total_documents,
+        "total_tool_activities": stats.total_tool_activities,
+        "by_provider": stats.by_provider.iter().map(|b| bucket_json(b, false)).collect::<Vec<_>>(),
+        "by_month": stats.by_month.iter().map(|b| bucket_json(b, false)).collect::<Vec<_>>(),
+        "by_project": stats.by_project.iter().map(|b| bucket_json(b, true)).collect::<Vec<_>>(),
+        "project_unknown_sessions": stats.project_unknown_sessions,
+        "project_ambiguous_sessions": stats.project_ambiguous_sessions,
+        "by_session_size": stats.by_session_size.iter().map(|b| bucket_json(b, false)).collect::<Vec<_>>(),
+        "generation": active_generation,
+    })
+}
+
+/// Project path projection for machine/cross-boundary outputs. A resolved cwd
+/// claim is trustworthy enough to count, but its absolute path is not safe to
+/// export; basename is the least identifying useful label. Empty/odd paths stay
+/// unknown rather than falling back to source paths.
+fn project_basename(path: &str) -> Option<String> {
+    let trimmed = path.trim_end_matches(['/', '\\']);
+    trimmed
+        .rsplit(['/', '\\'])
+        .find(|part| !part.is_empty())
+        .map(str::to_string)
+        .filter(|part| !part.is_empty() && part != "." && part != "..")
 }
 
 fn outcome_of(truncation: &Truncation) -> protocol::Outcome {
@@ -7796,6 +7903,9 @@ mod tests {
                     suggested_next_commands: Vec::new(),
                     occurrences: 1,
                     resume_available: false,
+                    provider_id: None,
+                    working_directory: None,
+                    project_name: None,
                 },
                 agent_session_grep_ports::SearchHit {
                     id: StableId::from_wire("msg_v1_bbbb").expect("valid id"),
@@ -7806,6 +7916,9 @@ mod tests {
                     suggested_next_commands: Vec::new(),
                     occurrences: 1,
                     resume_available: false,
+                    provider_id: None,
+                    working_directory: None,
+                    project_name: None,
                 },
             ],
             next_cursor: None,
@@ -7851,6 +7964,9 @@ mod tests {
                 ],
                 occurrences: 1,
                 resume_available: false,
+                provider_id: None,
+                working_directory: None,
+                project_name: None,
             }],
             next_cursor: None,
             generation: 3,
@@ -7889,6 +8005,9 @@ mod tests {
                 suggested_next_commands: Vec::new(),
                 occurrences: 1,
                 resume_available: false,
+                provider_id: None,
+                working_directory: None,
+                project_name: None,
             }],
             next_cursor: None,
             generation: 3,

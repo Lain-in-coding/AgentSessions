@@ -175,6 +175,9 @@ mod tests {
             suggested_next_commands: Vec::new(),
             occurrences: 1,
             resume_available: false,
+            provider_id: None,
+            working_directory: None,
+            project_name: None,
         }
     }
 
