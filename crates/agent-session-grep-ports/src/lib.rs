@@ -1320,8 +1320,19 @@ impl ReadOnlySource for SliceSource<'_> {
 }
 
 /// 端口错误 → provider 错误（携带稳定分类，细节由端口层日志承担）。
+///
+/// 快照漂移必须保留它自己的变体：调用方据此判断"等一下重试就能赢"，
+/// 压成 `Io` 会让协议层报成不可重试的 provider_error。adapter 打开源时
+/// 一律走这里，不要各自 `ProviderError::Io(e.to_string())`——那会重新丢掉分类。
+pub fn provider_error_from_port(error: PortError) -> ProviderError {
+    match error {
+        PortError::SnapshotChanged(detail) => ProviderError::SourceChangedDuringRead(detail),
+        other => ProviderError::Io(other.to_string()),
+    }
+}
+
 fn provider_io(error: PortError) -> ProviderError {
-    ProviderError::Io(error.to_string())
+    provider_error_from_port(error)
 }
 
 /// Read a whole source into a byte buffer bounded by `max_source_size`.

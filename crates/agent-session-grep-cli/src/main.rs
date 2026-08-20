@@ -4996,7 +4996,7 @@ fn jsonl_health(
     snapshot: &agent_session_grep_ports::SourceSnapshot,
 ) -> Result<JsonlHealth, agent_session_grep_ports::ProviderError> {
     let source = open_snapshot_source(path, snapshot)
-        .map_err(|error| agent_session_grep_ports::ProviderError::Io(error.to_string()))?;
+        .map_err(agent_session_grep_ports::provider_error_from_port)?;
     let mut valid_rows = 0usize;
     let mut malformed_rows = 0usize;
     let mut valid_after_last_malformed = false;

@@ -544,7 +544,7 @@ impl ProviderAdapter for CodexAdapter {
             source,
             agent_session_grep_ports::STREAM_RECORD_MAX_BYTES,
         )
-        .map_err(|e| ProviderError::Io(e.to_string()))?;
+        .map_err(agent_session_grep_ports::provider_error_from_port)?;
 
         let mut report = ParseReport::default();
         // 本文件出现的全部非空 session id（单文件=单会话契约的检测输入）。

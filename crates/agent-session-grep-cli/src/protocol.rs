@@ -255,7 +255,14 @@ impl From<AppError> for ProtocolError {
 
 impl From<ProviderError> for ProtocolError {
     fn from(error: ProviderError) -> Self {
-        ProtocolError::new(CanonicalCode::ProviderError, error.to_string())
+        // 快照漂移不是"格式不认识"：它是可重试的竞态，必须走 source_changed
+        // (exit 5, retryable) 而不是 provider_error (exit 7, 不可重试)，
+        // 否则 error-catalog 的 operator_action 会指错方向。
+        let code = match &error {
+            ProviderError::SourceChangedDuringRead(_) => CanonicalCode::SourceChanged,
+            _ => CanonicalCode::ProviderError,
+        };
+        ProtocolError::new(code, error.to_string())
     }
 }
 
@@ -685,6 +692,38 @@ mod tests {
 
         let e: ProtocolError = PortError::SchemaIncompatible("newer schema".into()).into();
         assert_eq!(e.code, CanonicalCode::SchemaIncompatible);
+    }
+
+    /// 快照漂移经 provider 层上抛后，仍必须落在 source_changed（exit 5，可重试）。
+    /// 回归 M2P-10：曾被 `provider_io` 压成 `Io`，再被无 match 的
+    /// `From<ProviderError>` 报成 provider_error（exit 7，不可重试）。
+    #[test]
+    fn snapshot_drift_stays_retryable_through_provider_layer() {
+        let provider_error = agent_session_grep_ports::provider_error_from_port(
+            PortError::SnapshotChanged("len 2686990 -> 2725690".into()),
+        );
+        assert!(matches!(
+            provider_error,
+            ProviderError::SourceChangedDuringRead(_)
+        ));
+
+        let e: ProtocolError = provider_error.into();
+        assert_eq!(e.code, CanonicalCode::SourceChanged);
+        assert_eq!(e.code.exit_code(), 5);
+        assert!(
+            e.code.retryable(),
+            "a growing transcript is won by retrying, so the envelope must say so"
+        );
+    }
+
+    /// 非漂移的端口错误不受影响，仍是 provider_error。
+    #[test]
+    fn other_port_errors_still_map_to_provider_error() {
+        let e: ProtocolError =
+            agent_session_grep_ports::provider_error_from_port(PortError::Backend("disk".into()))
+                .into();
+        assert_eq!(e.code, CanonicalCode::ProviderError);
+        assert_eq!(e.code.exit_code(), 7);
     }
 
     #[test]
