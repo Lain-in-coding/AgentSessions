@@ -2541,6 +2541,27 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   `sync` 接受目录(Windows 友好);discover 覆盖非 jsonl(见 M2P-7)。
   **验收**:MCP 客户端能自己触发刷新;`sync <dir>` 可用。
 
+  **✅ `sync <dir>` 已交付(`e41ed98`)**:目录被递归展开,候选由各 provider 的
+  probe 判定(复用 `discover_provider_sources`,不按扩展名)——
+  所以目录下的 SQLite 库 / 整档 JSON / Markdown transcript 同样能被找到。
+  **两条拒绝保持显式,不静默降级**:
+  子目录读不动 → 整轮拒绝(点名了目录的人不该悄悄拿到部分索引);
+  目录里没有任何可识别 transcript → 用法错误并指向 `providers`,
+  而不是"成功同步 0 条"(后者会让用户以为路径给对了)。
+  实测真实 Claude Code 项目目录:1 源 / 3 条消息;错误消息不带路径。
+  ⚠️ **原记录里"discover 只覆盖 6 个且只认 `.jsonl`"已过时** ——
+  discover 早已改为按 head 探测家族 + probe 判定(`is_discovery_candidate`),
+  且 pi 的 root 也已在 M1-14 补上。
+
+  **⏸ MCP refresh 工具未做,需 owner 决策(不是"没时间做")**:
+  MCP 面被契约冻结在**九个只读工具**。加第十个工具、或让某个只读工具产生写
+  副作用,两者都改变对外契约 —— 前者破坏"九个"这个已公布的事实,
+  后者更糟(名字说只读,行为会写库并拿排他 lease)。
+  这是接口承诺问题,不该由我单方面决定。
+  **可选方向(供决策)**:(a) 加第十个显式命名的写工具并同步契约文档;
+  (b) 保持只读,靠 CLI 侧 watcher/daemon 让库自动新鲜,MCP 什么都不用改;
+  (c) 不做,在文档里写明"MCP 是只读视图,刷新由 CLI 负责"。
+
 - [x] **M3-12 `--offline` 目前是稳定的 no-op** —— **已修文档(`bfe4bc9`)**
   `const NETWORK_REQUIRING_SUBCOMMANDS: &[&str] = &[]`(**实际在 `main.rs:1744`**)——
   注册表是空的,所以 `--offline` 今天什么也不 fail-close。
