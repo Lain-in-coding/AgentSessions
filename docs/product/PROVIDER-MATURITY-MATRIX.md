@@ -159,7 +159,8 @@ manifest 均已填真实限制，见各 `crates/agent-session-grep-provider-*/sr
    关联实现/跨边界证据；在此之前不得把该条划掉或宣称 Accepted。
 7. `AdapterManifest` 结构化声明——**已闭合实现，晋级证据仍待认证**：
    `ProviderAdapter::manifest()` 与 owned `AdapterManifest` 已落地，14 个 provider
-   显式实现；14 个已实现 provider 均有 golden fixture，`fixture_revision=1`，
+   显式实现；14 个已实现 provider 均有 golden fixture（codex 为 `fixture_revision=2`，
+   其余为 `fixture_revision=1`），
    `known_limitations` 已从空数组填上真实限制（见上文「已知限制」），
    `last_certified_targets` 均为空，等待 named successful cross-target run 后填写。
 8. 只读约束的运行时断言——**已闭合**：全部 14 个已实现 provider 的 golden 测试通过
