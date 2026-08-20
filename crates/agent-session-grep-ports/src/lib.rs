@@ -26,6 +26,14 @@ pub enum PortError {
     #[error("backend failure: {0}")]
     Backend(String),
 
+    /// 端口实现自身的不变量被违反——bug 信号，不是存储或 IO 故障。
+    ///
+    /// 与 `Backend` 分开的理由是 operator_action 完全不同：`Backend` 映射
+    /// `catalog_error`，指引用户"检查 --db 路径、跑 doctor"；而不变量违反不是
+    /// 用户能修的，也与数据库无关，必须落在 `internal`（exit 70，报缺陷）。
+    #[error("invariant violation: {0}")]
+    Invariant(String),
+
     /// 源文件读取或快照元数据 I/O 故障。
     #[error("source I/O failure: {0}")]
     SourceIo(String),
@@ -975,6 +983,7 @@ pub fn ensure_readable(
 fn port_error_kind(error: &PortError) -> &'static str {
     match error {
         PortError::Backend(_) => "backend",
+        PortError::Invariant(_) => "invariant",
         PortError::SourceIo(_) => "source_io",
         PortError::SchemaIncompatible(_) => "schema_incompatible",
         PortError::NotFound(_) => "not_found",

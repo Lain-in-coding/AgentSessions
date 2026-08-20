@@ -1200,10 +1200,10 @@ fn stored_activity_from(
     activity: &ToolActivity,
 ) -> PortResult<StoredActivity> {
     activity.validate().map_err(|error| {
-        PortError::Backend(format!("tool activity violates domain invariants: {error}"))
+        PortError::Invariant(format!("tool activity violates domain invariants: {error}"))
     })?;
     if message_id.kind() != IdKind::Message {
-        return Err(PortError::Backend(
+        return Err(PortError::Invariant(
             "tool activity message anchor has the wrong kind".into(),
         ));
     }
@@ -3007,23 +3007,33 @@ impl SqliteStore {
             };
             final_placement_ids.extend(source_placements.keys().cloned());
 
-            // 工具活动（v12）：派生活动 id、校验锚点/重复，跨源事实冲突拒绝。
-            let mut source_activities = BTreeMap::new();
+            // 工具活动（v12）：派生活动 id、校验锚点，跨源事实冲突拒绝。
+            //
+            // 批内同 id 折叠而非报错：`activity_id_for` 的输入恰好是 StoredActivity
+            // 的全部字段（`call_id` 不参与派生），所以同一批里派生出同一 id 的两条
+            // 记录在每个存储字段上都同形，保留一条对存储行无损。真实语料里"同一条
+            // 消息上两条同名且都未配对 output 的工具调用"是常态，不是可修复的故障；
+            // 曾经在这里拒绝整批，一份中招的 rollout 会让整轮 sync 零条入库。
+            let mut source_activities: BTreeMap<String, StoredActivity> = BTreeMap::new();
             for source_activity in &source.activities {
                 let stored =
                     stored_activity_from(&source_activity.message_id, &source_activity.activity)?;
-                if source_activities
-                    .insert(stored.activity_id.clone(), stored.clone())
-                    .is_some()
-                {
-                    return Err(PortError::Backend(format!(
-                        "source batch contains duplicate activity ids ({})",
-                        stored.activity_id
-                    )));
+                match source_activities.get(&stored.activity_id) {
+                    Some(existing) if existing != &stored => {
+                        // 同 id 却不同形 → 派生输入与存储字段脱节，是实现缺陷。
+                        return Err(PortError::Invariant(format!(
+                            "activity {} derives one id from two different rows",
+                            stored.activity_id
+                        )));
+                    }
+                    Some(_) => {}
+                    None => {
+                        source_activities.insert(stored.activity_id.clone(), stored.clone());
+                    }
                 }
                 if let Some(existing) = observed_activities.get(&stored.activity_id) {
                     if existing != &stored {
-                        return Err(PortError::Backend(format!(
+                        return Err(PortError::Invariant(format!(
                             "activity {} has conflicting projections across sources",
                             stored.activity_id
                         )));
@@ -17133,6 +17143,90 @@ mod tests {
         assert!(targets.contains(&Some("ls")) && targets.contains(&Some("ls -la")));
     }
 
+    /// 回归 M1-15：同一条消息上两条**同名、未配对**的工具调用（真实 codex
+    /// rollout 里的常态：两条 `custom_tool_call` 都没有对应的 output）归一化后
+    /// 派生出同一个 `activity_id`——`call_id` 不参与派生。这曾经让整批 `sync`
+    /// 直接失败（151 份真实 rollout → 0 条入库）。批内同 id 必须折叠成一条，
+    /// 而不是拒绝整批。
+    #[test]
+    fn two_unpaired_same_named_calls_on_one_message_collapse_into_one_row() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let message = sid(IdKind::Message, b"dup-derived-act");
+        let call = |name: &str| SourceActivity {
+            message_id: message.clone(),
+            activity: ToolActivity {
+                kind: ToolActivityKind::Command,
+                actor: ToolActivityActor::Main,
+                name: name.into(),
+                // 未配对 → 没有 output 可解析出 target/status。
+                target: None,
+                status: ToolActivityStatus::Unknown,
+            },
+        };
+        let source = SourceBatch {
+            source_path: "unpaired-calls.jsonl".into(),
+            entries: vec![entity_entry(&message)],
+            placements: Vec::new(),
+            edges: Vec::new(),
+            activities: vec![call("exec"), call("exec")],
+            relation_complete: true,
+            len_bytes: Some(1),
+            fingerprint: Some("unpaired-fp".into()),
+            provider_id: None,
+            resume_claim: None,
+        };
+        assert!(
+            store
+                .commit_source_batches_if_changed(std::slice::from_ref(&source))
+                .unwrap(),
+            "两条同名未配对调用必须能入库"
+        );
+        let rows = activity_rows(&store);
+        assert_eq!(rows.len(), 1, "同 id 折叠成一条");
+        assert_eq!(rows[0].3, "exec");
+        assert_eq!(rows[0].4, None);
+        assert_eq!(rows[0].5, "unknown");
+
+        // 折叠不破坏 no-op 判定：同一批重放不得再次改写。
+        assert!(!store.commit_source_batches_if_changed(&[source]).unwrap());
+        assert_eq!(activity_rows(&store).len(), 1);
+    }
+
+    /// 对照组：把第二条的 `name` 换掉 → 两个不同的 `activity_id`，两行并存。
+    /// （M1-15 的判据是"归一化后同形"，不是"两条工具调用"。）
+    #[test]
+    fn two_unpaired_differently_named_calls_on_one_message_stay_two_rows() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let message = sid(IdKind::Message, b"distinct-derived-act");
+        let call = |name: &str| SourceActivity {
+            message_id: message.clone(),
+            activity: ToolActivity {
+                kind: ToolActivityKind::Command,
+                actor: ToolActivityActor::Main,
+                name: name.into(),
+                target: None,
+                status: ToolActivityStatus::Unknown,
+            },
+        };
+        let source = SourceBatch {
+            source_path: "distinct-calls.jsonl".into(),
+            entries: vec![entity_entry(&message)],
+            placements: Vec::new(),
+            edges: Vec::new(),
+            activities: vec![call("exec"), call("apply_patch")],
+            relation_complete: true,
+            len_bytes: Some(1),
+            fingerprint: Some("distinct-fp".into()),
+            provider_id: None,
+            resume_claim: None,
+        };
+        assert!(store.commit_source_batches_if_changed(&[source]).unwrap());
+        let rows = activity_rows(&store);
+        assert_eq!(rows.len(), 2);
+        let names: Vec<&str> = rows.iter().map(|row| row.3.as_str()).collect();
+        assert!(names.contains(&"exec") && names.contains(&"apply_patch"));
+    }
+
     #[test]
     fn activity_anchored_to_non_message_is_rejected() {
         let store = SqliteStore::open_in_memory().unwrap();
@@ -17148,7 +17242,9 @@ mod tests {
         let error = store
             .commit_source_batches_if_changed(&[source])
             .unwrap_err();
-        assert!(matches!(error, PortError::Backend(_)));
+        // 锚点类型错是缺陷信号，不是数据库故障：必须是 Invariant（协议层 internal），
+        // 否则用户拿到的指引是"检查 --db 路径、跑 doctor"。
+        assert!(matches!(error, PortError::Invariant(_)), "got {error:?}");
     }
 
     // ---- 工具活动保留策略（v12）：source 退役级联 + 孤儿扫描/修剪 ----
