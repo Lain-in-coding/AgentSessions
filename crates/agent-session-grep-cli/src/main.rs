@@ -249,7 +249,7 @@ fn extract_offline_flag(args: &[String]) -> bool {
             "--db" | "--out" | "--output" | "--request-id" | "--cursor" | "--max-items"
             | "--max-bytes" | "--max-messages" | "--policy" | "--level" | "--provider"
             | "--since" | "--until" | "--session" | "--around" | "--tool-kind" | "--tool-name"
-            | "--role" | "--exclude" => {
+            | "--role" | "--exclude" | "--project" | "--exclude-project" => {
                 it.next();
             }
             _ => {}
@@ -295,7 +295,7 @@ fn extract_request_id(args: &[String]) -> Result<Option<String>, String> {
             "--db" | "--out" | "--output" | "--cursor" | "--max-items" | "--max-bytes"
             | "--max-messages" | "--max-evidence" | "--max-tokens" | "--policy" | "--level"
             | "--provider" | "--since" | "--until" | "--session" | "--around" | "--tool-kind"
-            | "--tool-name" | "--role" | "--exclude" => {
+            | "--tool-name" | "--role" | "--exclude" | "--project" | "--exclude-project" => {
                 it.next();
             }
             _ => {}
@@ -317,7 +317,8 @@ fn command_name(args: &[String]) -> String {
             "--db" | "--out" | "--output" | "--cursor" | "--max-items" | "--max-bytes"
             | "--max-messages" | "--max-evidence" | "--max-tokens" | "--policy" | "--level"
             | "--request-id" | "--provider" | "--since" | "--until" | "--session" | "--around"
-            | "--tool-kind" | "--tool-name" | "--role" | "--exclude" => {
+            | "--tool-kind" | "--tool-name" | "--role" | "--exclude" | "--project"
+            | "--exclude-project" => {
                 it.next(); // 消费其取值
             }
             "--robot" | "--no-color" | "--help" | "-h" | "--version" | "-V" | "--discover"
@@ -388,7 +389,8 @@ fn intercept_help_or_version(args: &[String]) -> Option<HelpRequest> {
             "--db" | "--out" | "--output" | "--request-id" | "--cursor" | "--max-items"
             | "--max-bytes" | "--max-messages" | "--max-evidence" | "--max-tokens" | "--policy"
             | "--level" | "--provider" | "--since" | "--until" | "--session" | "--around"
-            | "--tool-kind" | "--tool-name" | "--role" | "--exclude" => {
+            | "--tool-kind" | "--tool-name" | "--role" | "--exclude" | "--project"
+            | "--exclude-project" => {
                 it.next();
             }
             _ => {}
@@ -1132,6 +1134,8 @@ LIST:
 
 FILTER (search):
     --provider <id>        restrict to a provider (repeatable; values OR together). Run `providers` for the ids
+    --project <path-or-name> include trusted project paths or names (repeatable; values OR together)
+    --exclude-project <path-or-name> exclude trusted project paths or names (repeatable)
     --role <role>          keep only user|assistant|system|developer|tool messages (repeatable; values OR together)
     --exclude <term>       drop messages containing this term (repeatable; a message matching any term is dropped)
     --since <time>         window start, inclusive; RFC3339/ISO-8601 absolute or 1h/1d/1w relative
@@ -2257,6 +2261,7 @@ fn is_known_flag_name(token: &str) -> bool {
             | "--yes"
             | "--before"
             | "--project"
+            | "--exclude-project"
             | "--readmit"
             | "--list"
             | "--sessions"
@@ -2312,7 +2317,7 @@ fn extract_db_flag_impl(args: &[String], prefix_only: bool) -> Result<Option<Str
             "--out" | "--output" | "--request-id" | "--cursor" | "--max-items" | "--max-bytes"
             | "--max-messages" | "--max-evidence" | "--max-tokens" | "--policy" | "--level"
             | "--provider" | "--since" | "--until" | "--session" | "--around" | "--tool-kind"
-            | "--tool-name" | "--role" | "--exclude" => {
+            | "--tool-name" | "--role" | "--exclude" | "--project" | "--exclude-project" => {
                 it.next();
             }
             _ => {}
@@ -2358,7 +2363,7 @@ fn extract_out_flag(args: &[String]) -> Result<protocol::PayloadSink, CliError> 
             "--db" | "--output" | "--request-id" | "--cursor" | "--max-items" | "--max-bytes"
             | "--max-messages" | "--max-evidence" | "--max-tokens" | "--policy" | "--level"
             | "--provider" | "--since" | "--until" | "--session" | "--around" | "--tool-kind"
-            | "--tool-name" | "--role" | "--exclude" => {
+            | "--tool-name" | "--role" | "--exclude" | "--project" | "--exclude-project" => {
                 it.next();
             }
             _ => {}
@@ -2570,7 +2575,8 @@ fn bare_positionals(args: &[String]) -> Vec<String> {
             "--db" | "--out" | "--output" | "--request-id" | "--cursor" | "--max-items"
             | "--max-bytes" | "--max-messages" | "--max-evidence" | "--max-tokens" | "--policy"
             | "--level" | "--provider" | "--since" | "--until" | "--session" | "--around"
-            | "--tool-kind" | "--tool-name" | "--role" | "--exclude" => {
+            | "--tool-kind" | "--tool-name" | "--role" | "--exclude" | "--project"
+            | "--exclude-project" => {
                 it.next(); // 消费其取值
             }
             "--robot" | "--no-color" | "--help" | "-h" | "--version" | "-V" | "--discover"
@@ -2896,6 +2902,8 @@ fn dispatch(
             let max_items = extract_flag(&mut args, "--max-items")?;
             let max_bytes = extract_flag(&mut args, "--max-bytes")?;
             let providers = extract_repeated_flag(&mut args, "--provider")?;
+            let projects = extract_repeated_flag(&mut args, "--project")?;
+            let exclude_projects = extract_repeated_flag(&mut args, "--exclude-project")?;
             let roles = extract_repeated_flag(&mut args, "--role")?;
             let exclude_terms = extract_repeated_flag(&mut args, "--exclude")?;
             let since = extract_flag(&mut args, "--since")?;
@@ -2935,6 +2943,8 @@ fn dispatch(
                 &providers,
                 &roles,
                 &exclude_terms,
+                &projects,
+                &exclude_projects,
                 since.as_deref(),
                 until.as_deref(),
                 app.now_ms(),
@@ -3108,6 +3118,8 @@ fn dispatch(
             let app = App::with_resume(store_ref(store), store_ref(store), store_ref(store));
             let filters = search_filters_from_flags(
                 &providers,
+                &[],
+                &[],
                 &[],
                 &[],
                 since.as_deref(),
@@ -4083,10 +4095,13 @@ fn take_bool_flag(args: &mut Vec<String>, name: &str) -> bool {
 ///
 /// `exclude_terms` 原样透传：它是**用户给的字面词**，这里没有可校验的闭集，
 /// 空串/控制字符由 Application 边界统一拒绝（与查询串同一条规则）。
+#[allow(clippy::too_many_arguments)]
 fn search_filters_from_flags(
     providers: &[String],
     roles: &[String],
     exclude_terms: &[String],
+    projects: &[String],
+    exclude_projects: &[String],
     since: Option<&str>,
     until: Option<&str>,
     now_ms: i64,
@@ -4108,6 +4123,8 @@ fn search_filters_from_flags(
         })?);
     }
     filters.exclude_terms = exclude_terms.to_vec();
+    filters.projects = projects.to_vec();
+    filters.exclude_projects = exclude_projects.to_vec();
     filters.since = parse_time_flag("--since", since, now_ms)?;
     filters.until = parse_time_flag("--until", until, now_ms)?;
     Ok(filters)
@@ -6493,7 +6510,7 @@ fn render(
                 "hits": hits
                     .into_iter()
                     .map(|hit| {
-                        // search-match-guidance：guidance 为追加字段——空集合时
+                        // search-match-guidance: guidance 为追加字段——空集合时
                         // 整个键省略，与既有机器人输出字节兼容。
                         let mut json = serde_json::json!({
                             "id": hit.id.as_str(),
@@ -6505,6 +6522,12 @@ fn render(
                             "session_id": hit.session_id,
                             "text": hit.text,
                         });
+                        if let Some(provider_id) = hit.provider_id {
+                            json["provider_id"] = serde_json::Value::String(provider_id);
+                        }
+                        if let Some(project_name) = hit.project_name {
+                            json["project_name"] = serde_json::Value::String(project_name);
+                        }
                         if !hit.why_matched.is_empty() {
                             json["why_matched"] = serde_json::json!(hit.why_matched);
                         }
@@ -8999,6 +9022,8 @@ mod tests {
             &[],
             &["assistant".to_string(), "tool".to_string()],
             &["noise".to_string()],
+            &[],
+            &[],
             None,
             None,
             0,
@@ -9011,8 +9036,17 @@ mod tests {
         );
         assert_eq!(filters.exclude_terms, vec!["noise".to_string()]);
 
-        let error = search_filters_from_flags(&[], &["Assistant".to_string()], &[], None, None, 0)
-            .expect_err("role values are case-sensitive canonical ids");
+        let error = search_filters_from_flags(
+            &[],
+            &["Assistant".to_string()],
+            &[],
+            &[],
+            &[],
+            None,
+            None,
+            0,
+        )
+        .expect_err("role values are case-sensitive canonical ids");
         let rendered = format!("{:?}", error.0);
         assert!(
             rendered.contains(ROLE_VALUE_HINT),

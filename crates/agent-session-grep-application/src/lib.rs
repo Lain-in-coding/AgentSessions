@@ -992,6 +992,36 @@ pub fn parse_relative_search_instant(value: &str, now_ms: i64) -> Option<SearchI
     Some(SearchInstant::from_unix_millis(now_ms.checked_sub(delta)?))
 }
 
+fn normalize_project_scope(value: &str) -> Result<String, DomainError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(DomainError::InvalidRequest(
+            "project scope must not be empty".into(),
+        ));
+    }
+    if trimmed.chars().any(char::is_control) {
+        return Err(DomainError::InvalidRequest(
+            "project scope contains control characters".into(),
+        ));
+    }
+    let normalized = trimmed
+        .replace('\\', "/")
+        .trim_end_matches('/')
+        .to_lowercase();
+    if normalized.is_empty() {
+        return Err(DomainError::InvalidRequest(
+            "project scope must not be empty".into(),
+        ));
+    }
+    Ok(normalized)
+}
+
+fn project_basename(path: &str) -> Option<String> {
+    path.trim_end_matches(['/', '\\'])
+        .rsplit(['/', '\\'])
+        .find(|part| !part.is_empty())
+        .map(str::to_string)
+}
 fn search_query_digest(
     query: &str,
     filters: &SearchFilters,
@@ -1969,8 +1999,8 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore, 
 
     /// Resume 可用性批量装配（ADR-0009）：收集本页所有携带 `session_id` 的
     /// 命中，一次 `resume_of` 解析（分块 IN，无 N+1），按 wire id 映射回
-    /// `hit.resume_available`。`session_id` 缺失或 wire 无效的命中保持 `false`
-    /// ——可用性缺失绝不影响历史可检索。
+    /// `hit.resume_available` 与可信项目归属。`session_id` 缺失或 wire 无效的命中
+    /// 保持 false/unknown——可用性缺失绝不影响历史可检索。
     fn assemble_resume_availability(&self, hits: &mut [SearchHit]) -> PortResult<()> {
         if hits.is_empty() {
             return Ok(());
@@ -1988,16 +2018,24 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore, 
             return Ok(());
         }
         let metadata = self.resume.resume_of(&ids)?;
-        let availability: HashMap<&str, bool> = metadata
+        let metadata_by_session: HashMap<&str, &SessionResumeMetadata> = metadata
             .iter()
-            .map(|meta| (meta.session_id.as_str(), meta.resume_available))
+            .map(|meta| (meta.session_id.as_str(), meta))
             .collect();
         for hit in hits.iter_mut() {
-            if let Some(wire) = hit.session_id.as_deref()
-                && let Some(available) = availability.get(wire)
-            {
-                hit.resume_available = *available;
-            }
+            let Some(wire) = hit.session_id.as_deref() else {
+                continue;
+            };
+            let Some(meta) = metadata_by_session.get(wire) else {
+                continue;
+            };
+            hit.resume_available = meta.resume_available;
+            hit.provider_id = meta.provider_id.clone();
+            hit.working_directory = meta.original_working_directory.clone();
+            hit.project_name = meta
+                .original_working_directory
+                .as_deref()
+                .and_then(project_basename);
         }
         Ok(())
     }
@@ -2038,6 +2076,16 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore, 
                 }
                 filters.providers.sort_unstable();
                 filters.providers.dedup();
+                for project in &mut filters.projects {
+                    *project = normalize_project_scope(project)?;
+                }
+                filters.projects.sort_unstable();
+                filters.projects.dedup();
+                for project in &mut filters.exclude_projects {
+                    *project = normalize_project_scope(project)?;
+                }
+                filters.exclude_projects.sort_unstable();
+                filters.exclude_projects.dedup();
                 // Roles and exclusion terms are sets: a caller that names the
                 // same one twice, or names two in the other order, must get the
                 // same cursor digest as well as the same rows.
@@ -2103,6 +2151,11 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore, 
                 // 检索模式（#3）：semantic/hybrid 需要已就绪的语义索引与调用方
                 // 提供的查询向量；任一缺失时显式降级为 lexical_fallback + warning
                 // （PRD Q54：禁止静默切换）。
+                let project_scope_active =
+                    !filters.projects.is_empty() || !filters.exclude_projects.is_empty();
+                // Project predicates currently live in the lexical SQLite query path.
+                // Until the semantic port accepts metadata predicates, explicit
+                // project scope must degrade visibly rather than silently widening.
                 let (mut scanned, fallback_warning) = if mode == RetrievalMode::Lexical {
                     (
                         self.index.query_faceted(
@@ -2114,6 +2167,22 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore, 
                             &facets,
                         )?,
                         None,
+                    )
+                } else if project_scope_active {
+                    let warning = Some(format!(
+                        "project-scoped {} search fell back to lexical because semantic metadata filtering is unavailable",
+                        mode.as_str()
+                    ));
+                    (
+                        self.index.query_faceted(
+                            SearchQuery {
+                                text: &query,
+                                filters: &filters,
+                            },
+                            scan as usize,
+                            &facets,
+                        )?,
+                        warning,
                     )
                 } else if self.semantic.is_ready()
                     && let Some(query_embedding) = query_embedding.as_deref()
@@ -4367,6 +4436,8 @@ mod tests {
             providers: vec![SearchProvider::codex(), SearchProvider::claude_code()],
             since: Some(seconds_instant(1_000)),
             until: None,
+            projects: vec!["C:\\work\\app".into(), "app".into()],
+            exclude_projects: vec!["secret".into()],
             ..SearchFilters::default()
         };
         let (_, next, _, _) = hits_of(
@@ -4381,6 +4452,8 @@ mod tests {
             ],
             since: Some(seconds_instant(1_000)),
             until: None,
+            projects: vec!["app".into(), "c:/work/app".into(), "app".into()],
+            exclude_projects: vec!["secret".into(), "secret".into()],
             ..SearchFilters::default()
         };
         assert!(
@@ -4392,6 +4465,17 @@ mod tests {
             ))
             .is_ok()
         );
+        let project_mutated = SearchFilters {
+            projects: vec!["other".into()],
+            exclude_projects: vec!["secret".into()],
+            providers: vec![SearchProvider::codex(), SearchProvider::claude_code()],
+            since: Some(seconds_instant(1_000)),
+            ..SearchFilters::default()
+        };
+        assert!(matches!(
+            app.handle(filtered_search_req("q", 2, next.clone(), project_mutated)),
+            Err(AppError::Cursor(cursor::CursorError::Invalid(_)))
+        ));
 
         let mutated = SearchFilters {
             providers: Vec::new(),

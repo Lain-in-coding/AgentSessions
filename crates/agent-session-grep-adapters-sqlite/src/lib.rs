@@ -791,14 +791,15 @@ fn stored_resume_claim(
 fn resume_metadata_from_claim(id: &StableId, claim: &StoredResumeClaim) -> SessionResumeMetadata {
     let available =
         claim.provider_session_id_state == "resolved" && claim.provider_session_id.is_some();
-    let (provider_session_id, original_working_directory, unavailable_reason) = if available {
-        let directory =
-            if claim.original_working_directory_state == "resolved" && claim.pair_observed {
-                claim.original_working_directory.clone()
-            } else {
-                None
-            };
-        (claim.provider_session_id.clone(), directory, None)
+    let provider_session_id = available
+        .then(|| claim.provider_session_id.clone())
+        .flatten();
+    let original_working_directory = (claim.original_working_directory_state == "resolved"
+        && claim.pair_observed)
+        .then(|| claim.original_working_directory.clone())
+        .flatten();
+    let unavailable_reason = if available {
+        None
     } else {
         let reason = match claim.provider_session_id_state.as_str() {
             "missing" => "provider session id not observed",
@@ -806,7 +807,7 @@ fn resume_metadata_from_claim(id: &StableId, claim: &StoredResumeClaim) -> Sessi
             "resolved" => "provider session id value missing",
             _ => "provider session id state unresolved",
         };
-        (None, None, Some(reason.into()))
+        Some(reason.into())
     };
     SessionResumeMetadata {
         session_id: id.clone(),
@@ -7080,7 +7081,7 @@ impl SqliteStore {
                         sql.push(',');
                     }
                     sql.push('?');
-                    params.push(Box::new(provider.as_str()));
+                    params.push(Box::new(provider.as_str().to_string()));
                 }
                 sql.push(')');
             }
@@ -7098,6 +7099,27 @@ impl SqliteStore {
                 );
                 params.push(Box::new(until.sort_key().to_vec()));
             }
+            sql.push(')');
+        }
+        if !filters.projects.is_empty() {
+            sql.push_str(" AND ");
+            append_session_project_match(
+                &mut sql,
+                &mut params,
+                "sfi.session_wire",
+                &filters.projects,
+                "metadata_project",
+            );
+        }
+        if !filters.exclude_projects.is_empty() {
+            sql.push_str(" AND NOT (");
+            append_session_project_match(
+                &mut sql,
+                &mut params,
+                "sfi.session_wire",
+                &filters.exclude_projects,
+                "metadata_excluded_project",
+            );
             sql.push(')');
         }
         sql.push_str(" ORDER BY bm25(session_fts), sfi.session_wire LIMIT ?");
@@ -7355,6 +7377,13 @@ impl SearchIndex for SqliteStore {
         let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(safe_query.clone())];
         push_provider_predicate(&mut sql, &mut params, &filters.providers);
         push_role_predicate(&mut sql, &mut params, &filters.roles);
+        push_message_project_predicate(
+            &mut sql,
+            &mut params,
+            "(SELECT wire_id FROM fts_ids WHERE id_json = f.id)",
+            &filters.projects,
+            &filters.exclude_projects,
+        );
         if filters.since.is_some() || filters.until.is_some() {
             sql.push_str(
                 " AND EXISTS (
@@ -7439,6 +7468,13 @@ impl SearchIndex for SqliteStore {
         let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(safe_query)];
         push_provider_predicate(&mut sql, &mut params, &query.filters.providers);
         push_role_predicate(&mut sql, &mut params, &query.filters.roles);
+        push_message_project_predicate(
+            &mut sql,
+            &mut params,
+            "(SELECT wire_id FROM fts_ids WHERE id_json = f.id)",
+            &query.filters.projects,
+            &query.filters.exclude_projects,
+        );
         if query.filters.since.is_some() || query.filters.until.is_some() {
             sql.push_str(
                 " AND EXISTS (
@@ -7515,6 +7551,13 @@ impl SearchIndex for SqliteStore {
         let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(safe_query)];
         push_provider_predicate(&mut sql, &mut params, &query.filters.providers);
         push_role_predicate(&mut sql, &mut params, &query.filters.roles);
+        push_message_project_predicate(
+            &mut sql,
+            &mut params,
+            "(SELECT wire_id FROM fts_ids WHERE id_json = f.id)",
+            &query.filters.projects,
+            &query.filters.exclude_projects,
+        );
         push_facet_predicates(&mut sql, &mut params, facets);
 
         let params_ref: Vec<&dyn rusqlite::ToSql> =
@@ -8551,9 +8594,133 @@ where
     Ok(hits)
 }
 
-/// Push the provider dimension (OR over normalized ids) onto a message-search
-/// predicate chain built over `fts AS f`.
+/// Append a project-name/path match against one trusted resume-claim row.
 ///
+/// The value is normalized by Application, so SQL compares slash-normalized,
+/// case-folded paths. A term with a separator matches the exact directory or
+/// a descendant; a separator-free term also matches the final path component.
+fn push_project_term_match(
+    sql: &mut String,
+    params: &mut Vec<Box<dyn rusqlite::ToSql>>,
+    claim_alias: &str,
+    projects: &[String],
+) {
+    let path = format!("lower(replace({claim_alias}.original_working_directory, char(92), '/'))");
+    sql.push('(');
+    for (index, project) in projects.iter().enumerate() {
+        if index > 0 {
+            sql.push_str(" OR ");
+        }
+        sql.push_str(&format!(
+            "({path} = ? OR (substr({path}, 1, length(?) + 1) = ? || '/')"
+        ));
+        params.push(Box::new(project.clone()));
+        params.push(Box::new(project.clone()));
+        params.push(Box::new(project.clone()));
+        if !project.contains('/') {
+            sql.push_str(&format!(
+                " OR (substr({path}, -length(?)) = ? AND
+                 (length({path}) = length(?) OR
+                  substr({path}, length({path}) - length(?), 1) = '/'))"
+            ));
+            params.push(Box::new(project.clone()));
+            params.push(Box::new(project.clone()));
+            params.push(Box::new(project.clone()));
+            params.push(Box::new(project.clone()));
+        }
+        sql.push(')');
+    }
+    sql.push(')');
+}
+
+/// Append one fail-closed project-match expression for a session expression.
+fn append_session_project_match(
+    sql: &mut String,
+    params: &mut Vec<Box<dyn rusqlite::ToSql>>,
+    session_expr: &str,
+    projects: &[String],
+    alias: &str,
+) {
+    sql.push_str(&format!(
+        "EXISTS (SELECT 1 FROM source_session_resume_claims {alias}
+         WHERE {alias}.session_id = {session_expr}
+           AND {alias}.original_working_directory_state = 'resolved'
+           AND {alias}.original_working_directory IS NOT NULL
+           AND {alias}.pair_observed = 1
+           AND "
+    ));
+    push_project_term_match(sql, params, alias, projects);
+    sql.push_str(&format!(
+        " AND NOT EXISTS (
+             SELECT 1 FROM source_session_resume_claims {alias}_a
+             JOIN source_session_resume_claims {alias}_b
+               ON {alias}_a.session_id = {alias}_b.session_id
+              AND {alias}_a.source_path < {alias}_b.source_path
+            WHERE {alias}_a.session_id = {session_expr}
+              AND ({alias}_a.provider_id IS NOT {alias}_b.provider_id
+                OR {alias}_a.provider_session_id IS NOT {alias}_b.provider_session_id
+                OR {alias}_a.provider_session_id_state IS NOT {alias}_b.provider_session_id_state
+                OR {alias}_a.original_working_directory IS NOT {alias}_b.original_working_directory
+                OR {alias}_a.original_working_directory_state IS NOT {alias}_b.original_working_directory_state
+                OR {alias}_a.pair_observed IS NOT {alias}_b.pair_observed)
+         )"
+    ));
+    sql.push(')');
+}
+
+/// Push a fail-closed positive project constraint for a session expression.
+fn push_session_project_predicate(
+    sql: &mut String,
+    params: &mut Vec<Box<dyn rusqlite::ToSql>>,
+    session_expr: &str,
+    projects: &[String],
+    alias: &str,
+) {
+    if projects.is_empty() {
+        return;
+    }
+    sql.push_str(" AND ");
+    append_session_project_match(sql, params, session_expr, projects, alias);
+}
+
+/// Push project predicates for a message row by resolving its placed sessions.
+fn push_message_project_predicate(
+    sql: &mut String,
+    params: &mut Vec<Box<dyn rusqlite::ToSql>>,
+    message_expr: &str,
+    projects: &[String],
+    exclude_projects: &[String],
+) {
+    if projects.is_empty() && exclude_projects.is_empty() {
+        return;
+    }
+    if !projects.is_empty() {
+        sql.push_str(" AND EXISTS (SELECT 1 FROM message_placements project_placement WHERE project_placement.message_id = ");
+        sql.push_str(message_expr);
+        push_session_project_predicate(
+            sql,
+            params,
+            "project_placement.session_id",
+            projects,
+            "message_project",
+        );
+        sql.push(')');
+    }
+    if !exclude_projects.is_empty() {
+        sql.push_str(" AND NOT EXISTS (SELECT 1 FROM message_placements excluded_project_placement WHERE excluded_project_placement.message_id = ");
+        sql.push_str(message_expr);
+        sql.push_str(" AND ");
+        append_session_project_match(
+            sql,
+            params,
+            "excluded_project_placement.session_id",
+            exclude_projects,
+            "message_excluded_project",
+        );
+        sql.push(')');
+    }
+}
+
 /// Shared by every message-level query so the time-exclusion count in
 /// [`SearchIndex::count_time_filter_excluded`] applies byte-identical non-time
 /// predicates — a count under looser predicates would overstate the exclusion.
@@ -8957,6 +9124,102 @@ mod filtered_query_tests {
             codex_late,
             null_ts,
         }
+    }
+
+    #[test]
+    fn project_filters_use_trusted_claims_and_respect_path_boundaries() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let session_a = sid(IdKind::Session, b"project-session-a");
+        let session_b = sid(IdKind::Session, b"project-session-b");
+        let session_unknown = sid(IdKind::Session, b"project-session-unknown");
+        let doc = sid(IdKind::Document, b"project-doc");
+        let a = sid(IdKind::Message, b"project-message-a");
+        let b = sid(IdKind::Message, b"project-message-b");
+        let unknown = sid(IdKind::Message, b"project-message-unknown");
+        let message = |id: &StableId| {
+            (
+                id.clone(),
+                serde_json::json!({
+                    "role": "user", "text": "project-token", "timestamp": null,
+                    "parent": null, "parent_native_id": null, "is_sidechain": false,
+                    "session": null, "sessions": [], "span": null, "spans": []
+                })
+                .to_string()
+                .into_bytes(),
+                "project-token".to_string(),
+            )
+        };
+        let entries = vec![
+            entity_entry(&session_a),
+            entity_entry(&session_b),
+            entity_entry(&session_unknown),
+            entity_entry(&doc),
+            message(&a),
+            message(&b),
+            message(&unknown),
+        ];
+        let placements = vec![
+            placement(&session_a, &doc, &a, 0, false, Some((0, 1))),
+            placement(&session_b, &doc, &b, 1, false, Some((0, 1))),
+            placement(&session_unknown, &doc, &unknown, 2, false, Some((0, 1))),
+        ];
+        let mut source_a = source_batch(
+            "project-a.jsonl",
+            entries.clone(),
+            placements.clone(),
+            Vec::new(),
+            true,
+        );
+        source_a.entries = entries.clone();
+        source_a.placements = vec![placements[0].clone()];
+        source_a.resume_claim = Some(SourceResumeClaim {
+            provider_id: "codex".into(),
+            session_id: session_a.as_str().into(),
+            provider_session_id: Some("native-a".into()),
+            provider_session_id_state: "resolved".into(),
+            original_working_directory: Some("C:/work/app".into()),
+            original_working_directory_state: "resolved".into(),
+            pair_observed: true,
+        });
+        let mut source_b = source_batch(
+            "project-b.jsonl",
+            entries,
+            vec![placements[1].clone(), placements[2].clone()],
+            Vec::new(),
+            true,
+        );
+        source_b.resume_claim = Some(SourceResumeClaim {
+            provider_id: "codex".into(),
+            session_id: session_b.as_str().into(),
+            provider_session_id: Some("native-b".into()),
+            provider_session_id_state: "resolved".into(),
+            original_working_directory: Some("C:/work/app-secret".into()),
+            original_working_directory_state: "resolved".into(),
+            pair_observed: true,
+        });
+        store
+            .commit_source_batches_if_changed(&[source_a, source_b])
+            .unwrap();
+        let by_name = SearchFilters {
+            projects: vec!["app".into()],
+            ..SearchFilters::default()
+        };
+        let hits = search_filtered(&store, "project-token", &by_name);
+        assert_eq!(hits, vec![a.as_str().to_string()]);
+        let excluded = SearchFilters {
+            exclude_projects: vec!["app-secret".into()],
+            ..SearchFilters::default()
+        };
+        let hits = search_filtered(&store, "project-token", &excluded);
+        assert!(hits.contains(&a.as_str().to_string()), "{hits:?}");
+        assert!(
+            hits.contains(&unknown.as_str().to_string()),
+            "unattributed rows are not positively excluded: {hits:?}"
+        );
+        assert!(
+            !hits.contains(&b.as_str().to_string()),
+            "excluded project still matched: {hits:?}"
+        );
     }
 
     #[test]

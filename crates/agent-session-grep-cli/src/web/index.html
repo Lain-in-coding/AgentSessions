@@ -112,6 +112,8 @@ pre { max-height: 20rem; overflow: auto; padding: 13px; border: 1px solid var(--
     <div class="filters">
       <label>Page size <input id="limit" type="number" value="20" min="1" max="100"></label>
       <label>Exclude term <input id="exclude" type="search" placeholder="drop hits containing…" autocomplete="off"></label>
+      <label>Project <input id="project" type="search" placeholder="path or name" autocomplete="off"></label>
+      <label>Exclude project <input id="excludeProject" type="search" placeholder="path or name" autocomplete="off"></label>
       <label><input id="includeSystem" type="checkbox"> Include system messages</label>
       <label><input id="groupBySession" type="checkbox"> Group by session</label>
     </div>
@@ -200,6 +202,10 @@ function queryParams(cursor) {
   if (role) params.append('role', role);
   const exclude = document.getElementById('exclude').value.trim();
   if (exclude) params.append('exclude', exclude);
+  const project = document.getElementById('project').value.trim();
+  if (project) params.append('project', project);
+  const excludeProject = document.getElementById('excludeProject').value.trim();
+  if (excludeProject) params.append('exclude_project', excludeProject);
   if (cursor) params.set('cursor', cursor);
   if (document.getElementById('includeSystem').checked) params.set('include_system', 'true');
   if (document.getElementById('groupBySession').checked) params.set('group_by_session', 'true');
@@ -259,6 +265,7 @@ function renderHits(hits, append) {
     const body = document.createElement('div'); body.className = 'hit-text'; text(body, hit.text || '');
     card.append(head, body);
     if (hit.session_id) { const session = document.createElement('div'); session.className = 'hit-session'; text(session, 'session · ' + hit.session_id); card.appendChild(session); }
+    if (hit.project_name) { const project = document.createElement('div'); project.className = 'hit-session'; text(project, 'project · ' + hit.project_name); card.appendChild(project); }
     results.appendChild(card);
   }
 }

@@ -84,6 +84,7 @@ Read the caveat at the top of this file before citing anything below.
 | [0009](adr/ADR-0009-cross-boundary-output-redaction.md) | Cross-boundary output redaction by default |
 | [0009](adr/ADR-0009-session-resume-metadata.md) | Session resume metadata: dual IDs and progressive disclosure |
 | [0010](adr/ADR-0010-provider-maturity-rollback.md) | Provider maturity rollback |
+| [0011](adr/ADR-0011-project-scoped-search.md) | Trusted project-scoped search |
 
 > **Known defect:** two distinct ADRs were both numbered 0009. Cite them by
 > filename, never by number alone. Renumbering would break existing references

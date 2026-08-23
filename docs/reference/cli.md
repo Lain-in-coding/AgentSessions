@@ -95,6 +95,8 @@ summary, and `suggested_next_commands`.
 | `--max-bytes <n>` | integer | — | Response byte budget. Floor 4096; below it is a usage error. |
 | `--cursor <token>` | token | — | Continuation token from the previous page's `page.next_cursor`. |
 | `--provider <id>` | provider id | all | Repeatable; multiple values are OR-ed. |
+| `--project <path-or-name>` | trusted project path or final name | all | Repeatable; values are OR-ed. Paths match exact descendants; names match trusted working-directory basenames. |
+| `--exclude-project <path-or-name>` | trusted project path or final name | — | Repeatable; removes hits with a matching trusted project claim. Missing or ambiguous claims are not guessed. |
 | `--role <role>` | `user` \| `assistant` \| `system` \| `developer` \| `tool` | all | Repeatable; multiple values are OR-ed. Keeps only messages whose canonical payload carries one of these roles. |
 | `--exclude <term>` | string | — | Repeatable. Drops any hit containing the term; a hit matching *any* term is dropped. Whole-term match, tokenized exactly like the query. |
 | `--since <time>` | RFC3339/ISO-8601 or `1h`/`1d`/`1w` | — | Inclusive lower bound. |

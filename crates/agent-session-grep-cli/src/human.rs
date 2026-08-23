@@ -437,6 +437,11 @@ fn render_search(data: &Value) -> Vec<String> {
             .map(|score| format!("{score:.2}"))
             .unwrap_or_else(|| "?".into());
         lines.push(format!("  {}. {id}  score {score}", index + 1));
+        if let Some(project) = hit.get("project_name").and_then(Value::as_str)
+            && !project.is_empty()
+        {
+            lines.push(format!("     project · {}", sanitize(project)));
+        }
         // 正文预览：命中是否有用一瞥即知。取不到 preview 的命中不补行。
         // ADR-0008 后摘要统一由命中对象的 `text` 字段承载（application 装配，
         // 按 max_snippet_chars 截前缀）；`snippet` 是旧字段名，为兼容旧形状

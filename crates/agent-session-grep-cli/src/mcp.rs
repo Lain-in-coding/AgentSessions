@@ -376,6 +376,8 @@ impl McpServer<'_> {
                 "max_items",
                 "max_bytes",
                 "providers",
+                "projects",
+                "exclude_projects",
                 "roles",
                 "exclude_terms",
                 "since",
@@ -931,6 +933,18 @@ fn tool_catalog() -> Value {
                         "items": { "type": "string", "enum": ["claude", "claude-code", "codex"] },
                         "description": "Restrict hits to these providers (OR). Omitted matches all providers."
                     },
+                    "projects": {
+                        "type": "array",
+                        "maxItems": 16,
+                        "items": { "type": "string", "maxLength": 1024 },
+                        "description": "Restrict hits to trusted project paths or names (OR)."
+                    },
+                    "exclude_projects": {
+                        "type": "array",
+                        "maxItems": 16,
+                        "items": { "type": "string", "maxLength": 1024 },
+                        "description": "Exclude hits attributed to trusted project paths or names."
+                    },
                     "roles": {
                         "type": "array",
                         "maxItems": 5,
@@ -1411,6 +1425,27 @@ fn opt_filters(args: &Map<String, Value>) -> Result<SearchFilters, ToolError> {
                         bounded(provider)
                     ))
                 })?);
+        }
+    }
+    for (key, target) in [
+        ("projects", &mut filters.projects),
+        ("exclude_projects", &mut filters.exclude_projects),
+    ] {
+        if let Some(value) = args.get(key) {
+            let Value::Array(entries) = value else {
+                return Err(ToolError::Params(format!("{key} must be an array")));
+            };
+            for entry in entries {
+                let Some(project) = entry.as_str() else {
+                    return Err(ToolError::Params(format!("{key} entries must be strings")));
+                };
+                if project.chars().count() > 1024 {
+                    return Err(ToolError::Params(format!(
+                        "{key} entries exceed the maximum length of 1024 characters"
+                    )));
+                }
+                target.push(project.to_string());
+            }
         }
     }
     if let Some(value) = args.get("roles") {
@@ -2269,6 +2304,8 @@ mod tests {
 
         let valid = json!({
             "providers": ["codex", "claude", "claude-code"],
+            "projects": ["C:/work/app", "app"],
+            "exclude_projects": ["secret"],
             "since": "2026-08-01T00:00:00Z",
             "until": "2026-08-02T00:00:00+00:00"
         });
@@ -2282,6 +2319,11 @@ mod tests {
                 SearchProvider::claude_code()
             ]
         );
+        assert_eq!(
+            filters.projects,
+            vec!["C:/work/app".to_string(), "app".to_string()]
+        );
+        assert_eq!(filters.exclude_projects, vec!["secret".to_string()]);
         assert!(filters.since.is_some());
         assert!(filters.until.is_some());
         assert!(filters.since < filters.until);

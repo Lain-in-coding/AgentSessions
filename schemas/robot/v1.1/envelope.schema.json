@@ -39,6 +39,16 @@
         "resume_available": {
           "type": "boolean",
           "description": "Whether Resume Metadata is available for the hit's session (ADR-0009). false only means no resumable provider metadata exists; the history stays searchable."
+        },
+        "provider_id": {
+          "type": ["string", "null"],
+          "maxLength": 64,
+          "description": "Provider attribution from a trusted resume claim."
+        },
+        "project_name": {
+          "type": ["string", "null"],
+          "maxLength": 255,
+          "description": "Final project path component from a trusted working-directory claim; never a source path."
         }
       }
     },

@@ -817,6 +817,12 @@ fn request_args(req: &HttpRequest) -> Result<Vec<String>, HttpResponse> {
             append_value_flag(&mut args, "--max-items", value("limit"));
             append_value_flag(&mut args, "--cursor", value("cursor"));
             append_value_flag(&mut args, "--provider", value("provider"));
+            for project in req.query_params("project") {
+                append_value_flag(&mut args, "--project", Some(project));
+            }
+            for project in req.query_params("exclude_project") {
+                append_value_flag(&mut args, "--exclude-project", Some(project));
+            }
             for role in req.query_params("role") {
                 append_value_flag(&mut args, "--role", Some(role));
             }
@@ -1320,7 +1326,7 @@ mod tests {
         // narrower question here than it does in the terminal.
         let request = authorized(
             "GET",
-            "/api/search?q=needle&role=assistant&role=tool&exclude=noise&exclude=draft",
+            "/api/search?q=needle&project=app&exclude_project=secret&role=assistant&role=tool&exclude=noise&exclude=draft",
         );
         let Ok(args) = request_args(&request) else {
             panic!("/api/search must map to CLI args");
@@ -1330,6 +1336,10 @@ mod tests {
             vec![
                 "search",
                 "needle",
+                "--project",
+                "app",
+                "--exclude-project",
+                "secret",
                 "--role",
                 "assistant",
                 "--role",

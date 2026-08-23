@@ -2276,28 +2276,14 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   不是新命令引入的缺陷,而是这次审计才暴露出来的老问题。
 
 
-- [ ] **M3-3 搜索作用域:全库默认 + 同项目加权 + 每条显示来源(D26)**
-  调研已闭环,结论明确,见 §2.3。落一份 ADR 再实现。
-  **具体形状**:
-  - 默认作用域:**全库**。不加新的默认过滤,**不做 `--all` 逃生舱**。
-  - 新增 `--project <path-or-name>` 显式收窄(`SearchFilters` 加一个维度,
-    对解析出的工作目录做前缀/子串匹配,对齐 ctx 的 `--workspace` 与
-    sessiongrep 的 `--path`)。同时加 `--exclude-project`(agentsview 有,
-    用户会要)。
-  - 加**加性**同项目加权:cwd → git toplevel 解析,**量级要明显低于
-    精确文本相关性**。做成 config key 默认开(照 sessiongrep 的
-    `prefer_current_repo`),工作目录无法解析时自动变成 no-op。
-    CLI 与 **MCP 两条路径都要应用** —— agent 问"这个项目"时收益最大。
-    ⚠️ **不要用乘性加权** —— 会压过文本相关性。
-  - 每条结果在 **human 与 robot 两侧**都显示来源项目,并在 header 里
-    写明生效的作用域(例如 `scope: global (this project boosted)`)。
-  - **robot/MCP 侧的 project 字段没做好之前,不要上线加权** ——
-    否则会精确复刻 agf 的 bug。
-  - 暂不做循环过滤模式 UI:atuin 的 ctrl-r 循环之所以成立,是因为它是
-    常开的交互式 TUI 且有常驻单字符指示器;一次性 CLI 用
-    `--project` + 可见的 scope 行就能拿到同样收益,成本低得多。
-  **验收**:ADR 落地;实现与 ADR 一致;human 与 robot 都显示来源项目;
-  加权在工作目录未解析时无副作用。
+- [~] **M3-3 搜索作用域:全库默认 + 显式项目过滤 + 每条显示来源(D26)**
+  调研已闭环,ADR-0011 已落地。当前候选已交付 `--project <path-or-name>` /
+  `--exclude-project`，并在 CLI/Robot/MCP/Web/嵌入式 UI 复用同一 `SearchFilters`。
+  项目归属只来自 resolved + pair-observed Original Working Directory claims；SQL
+  在 `LIMIT` 前过滤消息与 metadata-only session，cursor 绑定规范化作用域，跨边界
+  只投影安全 basename。semantic/hybrid 带显式项目作用域时如实退回 lexical，
+  不静默绕过 metadata predicate。未交付的是同项目 additive boost 与 TUI 项目
+  控件，二者必须另行设计/测量后才能声称完成。
 
 - [x] **M3-4 recency 浏览:五个入口都答不了"我昨天干了什么"(最高优先)** —— **已交付**
   全仓库只有两种排序:`SORT_WIRE_ID_ASC` 与 `SORT_SCORE_DESC`
