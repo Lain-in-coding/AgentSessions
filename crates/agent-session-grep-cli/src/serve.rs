@@ -342,6 +342,28 @@ impl HttpRequest {
         }
         None
     }
+
+    /// Every occurrence of a repeated query-string parameter, in wire order.
+    ///
+    /// The dimensions the CLI accepts repeatedly (`--role`, `--exclude`) have to
+    /// be repeatable here too, otherwise the loopback surface answers a narrower
+    /// question than the same request on the command line — the CLI/Web fork the
+    /// entry-point consistency harness exists to catch.
+    pub fn query_params(&self, name: &str) -> Vec<String> {
+        let Some((_, query)) = self.path.split_once('?') else {
+            return Vec::new();
+        };
+        query
+            .split('&')
+            .filter_map(|pair| {
+                let (raw_key, raw_value) = pair.split_once('=').unwrap_or((pair, ""));
+                (percent_decode(raw_key).as_deref() == Some(name))
+                    .then(|| percent_decode(raw_value))
+                    .flatten()
+            })
+            .filter(|value| !value.is_empty())
+            .collect()
+    }
 }
 
 fn percent_decode(value: &str) -> Option<String> {
@@ -795,6 +817,12 @@ fn request_args(req: &HttpRequest) -> Result<Vec<String>, HttpResponse> {
             append_value_flag(&mut args, "--max-items", value("limit"));
             append_value_flag(&mut args, "--cursor", value("cursor"));
             append_value_flag(&mut args, "--provider", value("provider"));
+            for role in req.query_params("role") {
+                append_value_flag(&mut args, "--role", Some(role));
+            }
+            for term in req.query_params("exclude") {
+                append_value_flag(&mut args, "--exclude", Some(term));
+            }
             append_value_flag(&mut args, "--since", value("since"));
             append_value_flag(&mut args, "--until", value("until"));
             if value("include_system").as_deref() == Some("true") {
@@ -1283,6 +1311,52 @@ mod tests {
         ] {
             assert!(WEB_UI_HTML.contains(endpoint), "missing {endpoint}");
         }
+    }
+
+    #[test]
+    fn search_route_expands_repeated_role_and_exclude_params() {
+        // `--role`/`--exclude` are repeatable on the command line, so the HTTP
+        // surface has to accept repeated keys — otherwise the same request asks a
+        // narrower question here than it does in the terminal.
+        let request = authorized(
+            "GET",
+            "/api/search?q=needle&role=assistant&role=tool&exclude=noise&exclude=draft",
+        );
+        let Ok(args) = request_args(&request) else {
+            panic!("/api/search must map to CLI args");
+        };
+        assert_eq!(
+            args,
+            vec![
+                "search",
+                "needle",
+                "--role",
+                "assistant",
+                "--role",
+                "tool",
+                "--exclude",
+                "noise",
+                "--exclude",
+                "draft",
+            ]
+        );
+
+        // Absent parameters add nothing: an unfiltered request is byte-identical
+        // to what it produced before these dimensions existed.
+        let plain = authorized("GET", "/api/search?q=needle");
+        let Ok(args) = request_args(&plain) else {
+            panic!("/api/search must map to CLI args");
+        };
+        assert_eq!(args, vec!["search", "needle"]);
+
+        // An empty value is not a filter. `role=` must not become `--role ""`,
+        // which would fail as an unknown role and turn a blank form field into an
+        // error the user cannot explain.
+        let blank = authorized("GET", "/api/search?q=needle&role=&exclude=");
+        let Ok(args) = request_args(&blank) else {
+            panic!("/api/search must map to CLI args");
+        };
+        assert_eq!(args, vec!["search", "needle"]);
     }
 
     #[test]

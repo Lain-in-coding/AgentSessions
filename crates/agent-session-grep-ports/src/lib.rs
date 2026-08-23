@@ -427,6 +427,17 @@ impl SearchRole {
 /// a half-open UTC interval `[since, until)`. Project paths constrain only
 /// trustworthy resolved Original Working Directory claims, never transcript
 /// source paths. Exclusion terms are structured literal terms, not FTS syntax.
+///
+/// Two consequences a caller has to know about, because they are not derivable
+/// from the field names:
+///
+/// - A non-empty `roles` set is an explicit allowlist and therefore supersedes
+///   the request-level `include_system` default (which otherwise drops
+///   `system`/`developer`). Without that, asking for `system` would always
+///   return nothing.
+/// - A non-empty `roles` set also suppresses Session-metadata recall: role is a
+///   message-level fact and a Session entity has none, so the only honest
+///   answer is to return messages.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SearchFilters {
     pub providers: Vec<SearchProvider>,

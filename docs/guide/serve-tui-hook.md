@@ -73,7 +73,7 @@ per-route special-casing.
 | `/health` | Store liveness, via the same projection as `status`. |
 | `/api/status` | Entity count and generation. |
 | `/api/providers` | The provider capability matrix. |
-| `/api/search?q=<query>` | Search hits. |
+| `/api/search?q=<query>` | Search hits. Optional `provider`, `since`, `until`, `include_system`, `group_by_session`, plus repeatable `role` and `exclude` (for example `?q=retry&role=assistant&exclude=backoff`) — each maps to the identically named CLI flag. |
 | `/api/context` | A session's assembled context. |
 | `/api/show?id=<wire-id>` or `/api/show/<wire-id>` | One entity, normalized. |
 | `/api/resume?session=<ses-id>` or `/api/resume/<ses-id>` | Resume **preview** only. |

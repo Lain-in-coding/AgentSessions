@@ -6038,6 +6038,153 @@ const CLAUDE_TOOL_FIXTURE: &str = r#"{"type":"user","uuid":"u-1","sessionId":"se
 {"type":"assistant","uuid":"a-2","parentUuid":"r-1","sessionId":"sess-tools","isSidechain":true,"message":{"role":"assistant","content":[{"type":"text","text":"checking the file"},{"type":"tool_use","id":"toolu_2","name":"Read","input":{"file_path":"src/main.rs"}}]}}
 {"type":"user","uuid":"r-2","parentUuid":"a-2","sessionId":"sess-tools","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_2","content":"read the file contents","is_error":false}]}}"#;
 
+/// Claude synthetic fixture: one message per role, all sharing a query token.
+/// One assistant message carries an extra token so exclusion has something to
+/// remove without removing the whole role.
+const CLAUDE_ROLE_FIXTURE: &str = r#"{"type":"user","uuid":"ru-1","sessionId":"sess-roles","message":{"role":"user","content":"rolequery from the operator"}}
+{"type":"assistant","uuid":"ra-1","parentUuid":"ru-1","sessionId":"sess-roles","message":{"role":"assistant","content":[{"type":"text","text":"rolequery answered by the model"}]}}
+{"type":"assistant","uuid":"ra-2","parentUuid":"ru-1","sessionId":"sess-roles","message":{"role":"assistant","content":[{"type":"text","text":"rolequery answered with dropme marker"}]}}
+{"type":"system","uuid":"rs-1","sessionId":"sess-roles","message":{"role":"system","content":"rolequery harness preamble"}}"#;
+
+fn sorted_hit_ids(frame: &serde_json::Value) -> Vec<String> {
+    let mut ids = hit_ids(frame);
+    ids.sort();
+    ids
+}
+
+#[test]
+fn search_role_filter_selects_one_role_at_a_time() {
+    let (dir, db) = temp_db("search-roles");
+    let fixture = dir.path().join("claude-roles.jsonl");
+    std::fs::write(&fixture, CLAUDE_ROLE_FIXTURE).expect("write fixture");
+    let path = fixture.to_string_lossy().into_owned();
+
+    let out = run(&db, &["sync", &path]);
+    assert!(out.status.success(), "sync failed: {}", stdout(&out));
+    assert!(stdout(&out).contains("\"messages\":4"), "{}", stdout(&out));
+
+    // Baseline: nothing filtered by default. The system message is still absent
+    // because of the pre-existing include_system default, not because of --role.
+    let baseline = sorted_hit_ids(&parse_first_line(&run(&db, &["search", "rolequery"])));
+    let mut expected = vec![
+        native_msg_wire("ru-1"),
+        native_msg_wire("ra-1"),
+        native_msg_wire("ra-2"),
+    ];
+    expected.sort();
+    assert_eq!(baseline, expected, "unfiltered search must be unchanged");
+
+    // M3-8's headline gap: search only the assistant's own messages.
+    let assistants = sorted_hit_ids(&parse_first_line(&run(
+        &db,
+        &["search", "rolequery", "--role", "assistant"],
+    )));
+    let mut expected = vec![native_msg_wire("ra-1"), native_msg_wire("ra-2")];
+    expected.sort();
+    assert_eq!(assistants, expected);
+
+    let users = sorted_hit_ids(&parse_first_line(&run(
+        &db,
+        &["search", "rolequery", "--role", "user"],
+    )));
+    assert_eq!(users, vec![native_msg_wire("ru-1")]);
+
+    // Repeated --role ORs within the dimension.
+    let both = sorted_hit_ids(&parse_first_line(&run(
+        &db,
+        &[
+            "search",
+            "rolequery",
+            "--role",
+            "user",
+            "--role",
+            "assistant",
+        ],
+    )));
+    let mut expected = vec![
+        native_msg_wire("ru-1"),
+        native_msg_wire("ra-1"),
+        native_msg_wire("ra-2"),
+    ];
+    expected.sort();
+    assert_eq!(both, expected);
+
+    // Asking for system needs no second flag: the explicit allowlist supersedes
+    // the include_system default that removed it from the baseline above.
+    let systems = sorted_hit_ids(&parse_first_line(&run(
+        &db,
+        &["search", "rolequery", "--role", "system"],
+    )));
+    assert_eq!(systems, vec![native_msg_wire("rs-1")]);
+}
+
+#[test]
+fn search_exclude_drops_hits_containing_the_term() {
+    let (dir, db) = temp_db("search-exclude");
+    let fixture = dir.path().join("claude-roles.jsonl");
+    std::fs::write(&fixture, CLAUDE_ROLE_FIXTURE).expect("write fixture");
+    let path = fixture.to_string_lossy().into_owned();
+    assert!(run(&db, &["sync", &path]).status.success());
+
+    let kept = sorted_hit_ids(&parse_first_line(&run(
+        &db,
+        &["search", "rolequery", "--exclude", "dropme"],
+    )));
+    let mut expected = vec![native_msg_wire("ru-1"), native_msg_wire("ra-1")];
+    expected.sort();
+    assert_eq!(kept, expected, "only the message with the term is removed");
+
+    // Composes with --role: one dimension does not disable the other.
+    let kept = sorted_hit_ids(&parse_first_line(&run(
+        &db,
+        &[
+            "search",
+            "rolequery",
+            "--role",
+            "assistant",
+            "--exclude",
+            "dropme",
+        ],
+    )));
+    assert_eq!(kept, vec![native_msg_wire("ra-1")]);
+
+    // Repeated --exclude ORs: a hit matching any term is dropped.
+    let kept = sorted_hit_ids(&parse_first_line(&run(
+        &db,
+        &[
+            "search",
+            "rolequery",
+            "--exclude",
+            "dropme",
+            "--exclude",
+            "operator",
+        ],
+    )));
+    assert_eq!(kept, vec![native_msg_wire("ra-1")]);
+}
+
+#[test]
+fn search_rejects_an_unknown_role_and_publishes_the_accepted_values() {
+    let (dir, db) = temp_db("search-role-usage");
+    let fixture = dir.path().join("claude-roles.jsonl");
+    std::fs::write(&fixture, CLAUDE_ROLE_FIXTURE).expect("write fixture");
+    assert!(
+        run(&db, &["sync", &fixture.to_string_lossy()])
+            .status
+            .success()
+    );
+
+    let out = run(&db, &["search", "anything", "--role", "operator"]);
+    assert_eq!(out.status.code(), Some(2), "{}", stdout(&out));
+    let frame = parse_first_line(&out);
+    let message = frame["error"]["message"].as_str().unwrap_or_default();
+    assert!(message.contains("operator"), "{frame}");
+    assert!(
+        message.contains("user|assistant|system|developer|tool"),
+        "the error must publish the accepted values: {frame}"
+    );
+}
+
 #[test]
 fn sync_indexes_tool_activities_and_search_facets_filter_them() {
     let (dir, db) = temp_db("sync-act");

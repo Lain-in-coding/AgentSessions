@@ -345,7 +345,7 @@ pub fn parse_output_mode(args: &[String]) -> Result<OutputMode, String> {
             "--db" | "--out" | "--request-id" | "--cursor" | "--max-items" | "--max-bytes"
             | "--max-messages" | "--max-evidence" | "--max-tokens" | "--policy" | "--level"
             | "--provider" | "--since" | "--until" | "--session" | "--around" | "--tool-kind"
-            | "--tool-name" => {
+            | "--tool-name" | "--role" | "--exclude" => {
                 it.next();
             }
             _ => {}
@@ -1409,18 +1409,25 @@ mod tests {
     }
 
     #[test]
-    fn value_flag_skip_lists_cover_tool_facets_across_all_scanners() {
+    fn value_flag_skip_lists_cover_search_filters_across_all_scanners() {
         // parse_output_mode 上方的注释要求带值 flag 列表与 main.rs 各前缀
-        // 扫描器保持一致。此测试把 main.rs 源 include 进来，逐扫描器断言
-        // --tool-kind/--tool-name 都在跳过列表里——上次 drift 正是漏掉它们。
+        // 扫描器保持一致。此测试把 main.rs 源 include 进来，逐扫描器断言每个
+        // search 侧带值 flag 都在跳过列表里——上次 drift 正是漏掉 --tool-kind/
+        // --tool-name，而 --role/--exclude 是同一形状的新入口。
+        //
+        // 漏掉一个的后果不是报错而是误判：`asg --db x --role user search q` 里
+        // 那个 `user` 会被当成命令名/位置参数。
         let main_src = include_str!("main.rs");
         let scanners = [
+            "fn extract_offline_flag",
             "fn extract_request_id",
             "fn command_name",
             "fn intercept_help_or_version",
             "fn extract_db_flag_impl",
+            "fn extract_out_flag",
             "fn bare_positionals",
         ];
+        let flags = ["--tool-kind", "--tool-name", "--role", "--exclude"];
         for scanner in scanners {
             let start = main_src
                 .find(scanner)
@@ -1430,9 +1437,24 @@ mod tests {
                 .map(|offset| start + offset)
                 .unwrap_or(main_src.len());
             let body = &main_src[start..end];
+            for flag in flags {
+                assert!(
+                    body.contains(&format!("\"{flag}\"")),
+                    "{scanner} value-skip list missing {flag}"
+                );
+            }
+        }
+        // 本层自己那份列表同理（注释里点名要与上面保持一致）。
+        let own = include_str!("protocol.rs");
+        let start = own.find("fn parse_output_mode").expect("parse_output_mode");
+        let end = own[start..]
+            .find("\n}\n")
+            .map(|offset| start + offset)
+            .unwrap_or(own.len());
+        for flag in flags {
             assert!(
-                body.contains("\"--tool-kind\"") && body.contains("\"--tool-name\""),
-                "{scanner} value-skip list missing --tool-kind/--tool-name"
+                own[start..end].contains(&format!("\"{flag}\"")),
+                "parse_output_mode value-skip list missing {flag}"
             );
         }
     }

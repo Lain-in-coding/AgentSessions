@@ -1851,6 +1851,27 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore, 
                 }
                 filters.providers.sort_unstable();
                 filters.providers.dedup();
+                // Roles and exclusion terms are sets: a caller that names the
+                // same one twice, or names two in the other order, must get the
+                // same cursor digest as well as the same rows.
+                filters.roles.sort_unstable();
+                filters.roles.dedup();
+                for term in &filters.exclude_terms {
+                    if term.chars().any(char::is_control) {
+                        return Err(DomainError::InvalidRequest(
+                            "exclusion term contains control characters".into(),
+                        )
+                        .into());
+                    }
+                    if term.trim().is_empty() {
+                        return Err(DomainError::InvalidRequest(
+                            "exclusion term must not be empty".into(),
+                        )
+                        .into());
+                    }
+                }
+                filters.exclude_terms.sort();
+                filters.exclude_terms.dedup();
                 if let (Some(since), Some(until)) = (filters.since, filters.until)
                     && since >= until
                 {
@@ -1977,7 +1998,13 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore, 
                 // `include_system` 显式恢复。过滤先于 offset 切片，cursor 位置因此
                 // 指向"非系统"序列。判定需整窗 payload（分块批量取，无 N+1）；扫描
                 // 窗内系统噪声饱和时可能提前终止分页（边界行为，见 GROUP_SCAN_FACTOR）。
-                if !include_system {
+                //
+                // 显式 `filters.roles` 关掉这层默认策略：它是一条**已下推到 SQL**
+                // 的白名单，扫描窗里只剩被点名的那些 role。再叠一层默认噪声过滤会
+                // 让 `--role system` 恒定返回空——用户点名要的东西被一条他没要求的
+                // 默认规则悄悄减掉。跳过这里绝不会放宽结果集：SQL 谓词已经把范围
+                // 收在白名单内。
+                if !include_system && filters.roles.is_empty() {
                     let scanned_ids: Vec<StableId> =
                         scanned.iter().map(|hit| hit.id.clone()).collect();
                     let scanned_payloads = self.catalog.get_many(&scanned_ids)?;
@@ -3652,6 +3679,84 @@ mod tests {
     }
 
     #[test]
+    fn search_role_filter_supersedes_the_system_noise_default() {
+        // M3-8: `--role system` must return system messages without also being
+        // told `--include-system`. The store predicate has already narrowed the
+        // window to the named roles, so re-applying the default noise policy here
+        // would subtract exactly what the caller asked for and always answer
+        // "no hits" — a silently empty answer to a well-formed request.
+        use agent_session_grep_ports::SearchRole;
+
+        let mut cat = MapCatalog::new(7);
+        cat.insert(
+            &hit_id("hit00"),
+            serde_json::json!({ "role": "system", "text": "needle" })
+                .to_string()
+                .into_bytes(),
+        );
+        let index = FixedHits(vec![hit_id("hit00")]);
+        let app = App::with_clock(cat, index, clock_t0);
+        let request = filtered_search_req(
+            "needle",
+            10,
+            None,
+            SearchFilters {
+                roles: vec![SearchRole::System],
+                ..SearchFilters::default()
+            },
+        );
+        let AppResponse::Search { hits, .. } = app.handle(request).unwrap() else {
+            panic!("expected Search response");
+        };
+        assert_eq!(hits.len(), 1, "include_system must not be re-applied");
+        assert_eq!(hits[0].id, hit_id("hit00"));
+    }
+
+    #[test]
+    fn search_without_a_role_filter_still_drops_system_noise() {
+        // The escape hatch above is scoped to an explicit role allowlist: with no
+        // roles named, the default noise policy is untouched.
+        let mut cat = MapCatalog::new(7);
+        cat.insert(
+            &hit_id("hit00"),
+            serde_json::json!({ "role": "system", "text": "needle" })
+                .to_string()
+                .into_bytes(),
+        );
+        let index = FixedHits(vec![hit_id("hit00")]);
+        let app = App::with_clock(cat, index, clock_t0);
+        let AppResponse::Search { hits, .. } = app.handle(search_req("needle", 10, None)).unwrap()
+        else {
+            panic!("expected Search response");
+        };
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn search_rejects_unusable_exclusion_terms() {
+        // Same boundary rule the query string gets: control characters are
+        // rejected rather than stripped (stripping splices tokens together), and
+        // a blank term is a request the caller cannot have meant.
+        for term in ["", "   ", "no\u{0}ise", "line\nbreak"] {
+            let err = app()
+                .handle(filtered_search_req(
+                    "needle",
+                    5,
+                    None,
+                    SearchFilters {
+                        exclude_terms: vec![term.to_string()],
+                        ..SearchFilters::default()
+                    },
+                ))
+                .expect_err("unusable exclusion term must be rejected");
+            assert!(
+                matches!(err, AppError::Domain(DomainError::InvalidRequest(_))),
+                "{term:?} -> {err:?}"
+            );
+        }
+    }
+
+    #[test]
     fn search_group_by_session_collapses_with_occurrences() {
         // R3 归并：每会话保留最高分命中（钉住顺序中的首个），occurrences 为该
         // 会话在扫描窗内的命中数；无归属（None）命中自成单例组。
@@ -4095,6 +4200,110 @@ mod tests {
                     providers: vec![SearchProvider::claude_code()],
                     since: None,
                     until: None,
+                    ..SearchFilters::default()
+                },
+            ))
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            AppError::Cursor(cursor::CursorError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn search_cursor_is_bound_to_roles_and_exclusion_terms() {
+        // A cursor is bound to its query shape. Adding a filter dimension means a
+        // token minted under a different role set or a different exclusion set has
+        // to be rejected — re-filtering it would hand back a page whose offset was
+        // computed against a different ordering.
+        use agent_session_grep_ports::SearchRole;
+
+        let app = App::with_clock(FakeCatalog, PagedIndex { n: 5 }, clock_t0);
+        let issued = SearchFilters {
+            roles: vec![SearchRole::Tool, SearchRole::Assistant],
+            exclude_terms: vec!["beta".to_string(), "alpha".to_string()],
+            ..SearchFilters::default()
+        };
+        let (_, next, _, _) = hits_of(
+            app.handle(filtered_search_req("q", 2, None, issued))
+                .unwrap(),
+        );
+
+        // Same sets, different order and with a duplicate: normalization makes
+        // these the same query, so the token still reads.
+        let normalized_equivalent = SearchFilters {
+            roles: vec![
+                SearchRole::Assistant,
+                SearchRole::Tool,
+                SearchRole::Assistant,
+            ],
+            exclude_terms: vec!["alpha".to_string(), "beta".to_string(), "alpha".to_string()],
+            ..SearchFilters::default()
+        };
+        assert!(
+            app.handle(filtered_search_req(
+                "q",
+                2,
+                next.clone(),
+                normalized_equivalent
+            ))
+            .is_ok()
+        );
+
+        // Every mutation of either dimension invalidates the token, including
+        // dropping it entirely (the unfiltered digest is a different shape).
+        use agent_session_grep_ports::SearchRole as Role;
+        let mutations = [
+            SearchFilters {
+                roles: vec![Role::Tool],
+                exclude_terms: vec!["alpha".to_string(), "beta".to_string()],
+                ..SearchFilters::default()
+            },
+            SearchFilters {
+                roles: vec![Role::Tool, Role::Assistant, Role::User],
+                exclude_terms: vec!["alpha".to_string(), "beta".to_string()],
+                ..SearchFilters::default()
+            },
+            SearchFilters {
+                roles: vec![Role::Tool, Role::Assistant],
+                exclude_terms: vec!["alpha".to_string()],
+                ..SearchFilters::default()
+            },
+            SearchFilters {
+                roles: vec![Role::Tool, Role::Assistant],
+                exclude_terms: vec!["alpha".to_string(), "gamma".to_string()],
+                ..SearchFilters::default()
+            },
+            SearchFilters {
+                roles: vec![Role::Tool, Role::Assistant],
+                ..SearchFilters::default()
+            },
+        ];
+        for mutated in mutations {
+            let err = app
+                .handle(filtered_search_req("q", 2, next.clone(), mutated.clone()))
+                .unwrap_err();
+            assert!(
+                matches!(err, AppError::Cursor(cursor::CursorError::Invalid(_))),
+                "{mutated:?} accepted a cursor from a different filter set"
+            );
+        }
+        let err = app.handle(search_req("q", 2, next)).unwrap_err();
+        assert!(matches!(
+            err,
+            AppError::Cursor(cursor::CursorError::Invalid(_))
+        ));
+
+        // And the reverse direction: an unfiltered token cannot be replayed with a
+        // role or exclusion filter bolted on.
+        let (_, plain_next, _, _) = hits_of(app.handle(search_req("q", 2, None)).unwrap());
+        let err = app
+            .handle(filtered_search_req(
+                "q",
+                2,
+                plain_next,
+                SearchFilters {
+                    roles: vec![Role::User],
                     ..SearchFilters::default()
                 },
             ))

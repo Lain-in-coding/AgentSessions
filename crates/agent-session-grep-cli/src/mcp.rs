@@ -21,7 +21,7 @@ use agent_session_grep_application::{
 };
 use agent_session_grep_domain::{ContextPolicy, IdKind, StableId};
 use agent_session_grep_ports::{
-    ResumeClaimsStore, RetrievalMode, SearchFacets, SearchFilters, SidechainFacet,
+    ResumeClaimsStore, RetrievalMode, SearchFacets, SearchFilters, SearchRole, SidechainFacet,
     capability::{ProviderCapabilityMatrix, ProviderMaturity},
     handoff::HandoffFilters,
 };
@@ -376,6 +376,8 @@ impl McpServer<'_> {
                 "max_items",
                 "max_bytes",
                 "providers",
+                "roles",
+                "exclude_terms",
                 "since",
                 "until",
                 "include_system",
@@ -921,6 +923,25 @@ fn tool_catalog() -> Value {
                         "items": { "type": "string", "enum": ["claude", "claude-code", "codex"] },
                         "description": "Restrict hits to these providers (OR). Omitted matches all providers."
                     },
+                    "roles": {
+                        "type": "array",
+                        "maxItems": 5,
+                        "items": {
+                            "type": "string",
+                            "enum": ["user", "assistant", "system", "developer", "tool"]
+                        },
+                        "description": "Restrict hits to these message roles (OR). Omitted \
+                            matches all roles. An explicit list supersedes include_system, so \
+                            [\"system\"] needs no second parameter; while it is set only \
+                            messages are returned, because a session has no role of its own."
+                    },
+                    "exclude_terms": {
+                        "type": "array",
+                        "maxItems": 16,
+                        "items": { "type": "string", "maxLength": 256 },
+                        "description": "Drop hits containing any of these terms. Whole-term \
+                            match, tokenized exactly like query; not query syntax."
+                    },
                     "since": {
                         "type": "string",
                         "maxLength": 64,
@@ -1355,10 +1376,12 @@ fn validate_string_length(key: &str, value: &str) -> Result<(), ToolError> {
     Ok(())
 }
 
-/// 检索过滤参数（design §3）：providers 别名数组（OR 语义）+ 绝对 ISO-8601
-/// 的 since/until（半开区间 [since, until)，边界比较由 Application 统一执行）。
+/// 检索过滤参数（design §3）：providers 别名数组（OR 语义）+ roles 闭集数组
+/// （OR 语义）+ exclude_terms 字面词数组 + 绝对 ISO-8601 的 since/until
+/// （半开区间 [since, until)，边界比较由 Application 统一执行）。
 /// provider 值经 [`crate::canonical_search_provider`] 归一（canonical id 与
-/// 历史别名），与 CLI `--provider` 同一套取值。
+/// 历史别名），与 CLI `--provider` 同一套取值；role 值走
+/// [`SearchRole::parse`]，与 CLI `--role` 同一闭集。
 /// MCP 只接受绝对时间：紧凑相对量（"1h"）没有声明的时钟基准，属非法参数。
 fn opt_filters(args: &Map<String, Value>) -> Result<SearchFilters, ToolError> {
     let mut filters = SearchFilters::default();
@@ -1380,6 +1403,41 @@ fn opt_filters(args: &Map<String, Value>) -> Result<SearchFilters, ToolError> {
                         bounded(provider)
                     ))
                 })?);
+        }
+    }
+    if let Some(value) = args.get("roles") {
+        let Value::Array(entries) = value else {
+            return Err(ToolError::Params("roles must be an array".into()));
+        };
+        for entry in entries {
+            let Some(role) = entry.as_str() else {
+                return Err(ToolError::Params("roles entries must be strings".into()));
+            };
+            filters.roles.push(SearchRole::parse(role).ok_or_else(|| {
+                ToolError::Params(format!(
+                    "roles must contain only user|assistant|system|developer|tool, got {}",
+                    bounded(role)
+                ))
+            })?);
+        }
+    }
+    if let Some(value) = args.get("exclude_terms") {
+        let Value::Array(entries) = value else {
+            return Err(ToolError::Params("exclude_terms must be an array".into()));
+        };
+        for entry in entries {
+            let Some(term) = entry.as_str() else {
+                return Err(ToolError::Params(
+                    "exclude_terms entries must be strings".into(),
+                ));
+            };
+            // 与 `query` 同一条长度上限规则：数组项不经 opt_str，必须在此显式量。
+            if term.chars().count() > 256 {
+                return Err(ToolError::Params(
+                    "exclude_terms entries exceed the maximum length of 256 characters".into(),
+                ));
+            }
+            filters.exclude_terms.push(term.to_string());
         }
     }
     filters.since = opt_instant(args, "since")?;
