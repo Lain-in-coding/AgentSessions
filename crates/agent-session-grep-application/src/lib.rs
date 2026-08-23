@@ -219,6 +219,14 @@ pub enum AppRequest {
         /// 查询文本的 embedding（调用方经 EmbeddingModel 生成，Application
         /// 保持模型无关）。`Semantic`/`Hybrid` 模式必须提供；缺失即降级。
         query_embedding: Option<Vec<f32>>,
+        /// 命中处的行上下文窗口（M3-9，grep 的 `-C N`）：`Some(n)` 时 snippet
+        /// 取"命中所在行 ± n 整行"的**连续**区域；`None`（默认）保持既有的
+        /// 以命中为中心的字符窗口，输出字节不变。
+        ///
+        /// 与 `get-message --around n` 不是同一个轴：那个取的是会话主线上的
+        /// **邻居消息**，这个取的是命中消息正文内的**邻居行**。两者可组合，
+        /// 不可互相替代，所以没有复用它的机器。
+        context_lines: Option<usize>,
     },
     /// 按稳定 ID 取回单个实体的原始负载。
     Get { id: StableId },
@@ -389,6 +397,10 @@ pub enum AppResponse {
         /// `[since, until)` 窗口。0 表示无时间窗或无排除——前端此时不得发
         /// warning（输出字节不变）。
         time_filter_excluded: u64,
+        /// 生效的行上下文窗口（M3-9）：原样回显请求里的 `context_lines`，让
+        /// **所有**入口在同一个 render 投影里拿到它，而不是各自记住自己传了
+        /// 什么。`None` 时该键整个省略，默认输出字节不变。
+        context_lines: Option<usize>,
     },
     /// 单个实体的原始负载；`None` 表示未找到。
     Get { payload: Option<Vec<u8>> },
@@ -1055,7 +1067,8 @@ fn assemble_search_hit(
     session: Option<&StableId>,
     max_snippet_chars: usize,
     query_terms: &[String],
-) {
+    context_lines: Option<usize>,
+) -> bool {
     let full_text = payload.and_then(|bytes| {
         let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
             return None;
@@ -1071,9 +1084,23 @@ fn assemble_search_hit(
     // 之后的真实命中——guidance design §2）。
     let payload_value =
         payload.and_then(|bytes| serde_json::from_slice::<serde_json::Value>(bytes).ok());
-    hit.text = full_text
+    let mut context_clipped = false;
+    hit.text = full_text.as_deref().map(|text| match context_lines {
+        Some(lines) => {
+            let (snippet, clipped) =
+                line_context_snippet(text, max_snippet_chars, query_terms, lines);
+            context_clipped = clipped;
+            snippet
+        }
+        None => snippet_around_match(text, max_snippet_chars, query_terms),
+    });
+    // 高亮偏移在**最终 snippet 上**求得，所以它天然与 `…` 标记、行窗裁剪对齐；
+    // 绝不用原文偏移去指一个已经被裁过的字符串。
+    hit.match_ranges = hit
+        .text
         .as_deref()
-        .map(|text| snippet_around_match(text, max_snippet_chars, query_terms));
+        .map(|snippet| match_ranges_in(snippet, query_terms))
+        .unwrap_or_default();
     // 保留 adapter 提供的 canonical session_id（Session 元数据命中自带归属
     // 会话）；否则才用 placement 解析的归属会话回填。metadata-only Session
     // 命中无 placement，session_of 返回 None，不得把既有值覆盖成 None。
@@ -1088,6 +1115,147 @@ fn assemble_search_hit(
         hit.text.as_deref(),
     );
     hit.suggested_next_commands = guidance::suggested_next_commands(hit);
+    context_clipped
+}
+
+/// Character offset of the earliest query-term occurrence, case-insensitively.
+///
+/// `to_lowercase` can change byte length, so the search and the returned index
+/// are both in chars. `None` means no term is literally present — the hit came
+/// from a payload field other than `text`, or from CJK bigram tokenisation that
+/// does not align to a literal substring.
+fn first_match_char(text: &str, query_terms: &[String]) -> Option<usize> {
+    let lower: Vec<char> = text.chars().flat_map(char::to_lowercase).collect();
+    let haystack: String = lower.iter().collect();
+    query_terms
+        .iter()
+        .filter(|term| !term.is_empty())
+        .filter_map(|term| {
+            let needle = term.to_lowercase();
+            haystack
+                .find(&needle)
+                .map(|byte| haystack[..byte].chars().count())
+        })
+        .min()
+}
+
+/// Highlight offsets for `snippet`: the earliest occurrence of each distinct
+/// query term, as half-open `[start, end)` char ranges, sorted and merged.
+///
+/// Bounded by construction — `query_terms` is already capped at
+/// `guidance::MAX_WHY_MATCHED`, so there is no list to cut silently. Ranges are
+/// derived from the snippet actually returned, never from the full body, so an
+/// offset can never point past the end of the string a consumer receives.
+///
+/// Reported in chars rather than bytes so the unit matches `max_snippet_chars`
+/// and stays meaningful to consumers that do not index UTF-8 by byte.
+fn match_ranges_in(snippet: &str, query_terms: &[String]) -> Vec<(usize, usize)> {
+    // `to_lowercase` may map one char to several, which would shift every offset
+    // after it. Fold per char and keep a char-to-char index map instead.
+    let folded: Vec<String> = snippet
+        .chars()
+        .map(|c| c.to_lowercase().collect::<String>())
+        .collect();
+    let haystack: String = folded.concat();
+    // Byte offset in `haystack` → char index in `snippet`.
+    let mut byte_to_char: Vec<(usize, usize)> = Vec::with_capacity(folded.len());
+    let mut byte = 0usize;
+    for (index, piece) in folded.iter().enumerate() {
+        byte_to_char.push((byte, index));
+        byte += piece.len();
+    }
+    let char_at = |byte_offset: usize| -> Option<usize> {
+        byte_to_char
+            .binary_search_by_key(&byte_offset, |(b, _)| *b)
+            .ok()
+            .map(|slot| byte_to_char[slot].1)
+    };
+
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    for term in query_terms.iter().filter(|term| !term.is_empty()) {
+        let needle = term.to_lowercase();
+        let Some(found) = haystack.find(&needle) else {
+            continue;
+        };
+        // A term may start mid-way through a multi-char case fold; such a match
+        // has no honest char boundary to point at, so it is skipped rather than
+        // rounded to a neighbouring char.
+        let Some(start) = char_at(found) else {
+            continue;
+        };
+        let Some(end) = char_at(found + needle.len())
+            .or_else(|| (found + needle.len() == haystack.len()).then_some(byte_to_char.len()))
+        else {
+            continue;
+        };
+        if end > start {
+            ranges.push((start, end));
+        }
+    }
+    ranges.sort_unstable();
+    // Merge overlapping/touching ranges so a consumer can emphasise each range
+    // independently without double-wrapping a character.
+    let mut merged: Vec<(usize, usize)> = Vec::with_capacity(ranges.len());
+    for (start, end) in ranges {
+        match merged.last_mut() {
+            Some(last) if start <= last.1 => last.1 = last.1.max(end),
+            _ => merged.push((start, end)),
+        }
+    }
+    merged
+}
+
+/// A contiguous line window around the match: the matched line plus
+/// `context_lines` whole lines on each side, grep's `-C N` (M3-9).
+///
+/// Returns `(snippet, clipped)`. The window is a **contiguous region of the
+/// source** — line separators included, nothing reordered or stitched — because
+/// the value claim of this tool is that it shows real transcript bytes.
+///
+/// `clipped` is true when the requested window did not fit `max_snippet_chars`
+/// and had to be narrowed. The caller reports that as `outcome: partial`: an
+/// explicitly requested region delivered only in part is a partial result, not
+/// a success with an ellipsis in it.
+///
+/// With no literally locatable term there is no line to centre on, so this
+/// falls back to [`snippet_around_match`] — the same fallback the default path
+/// uses, and never worse than it.
+fn line_context_snippet(
+    text: &str,
+    max_chars: usize,
+    query_terms: &[String],
+    context_lines: usize,
+) -> (String, bool) {
+    let Some(at) = first_match_char(text, query_terms) else {
+        return (snippet_around_match(text, max_chars, query_terms), false);
+    };
+    // Line starts in char offsets. `\r` stays inside the line: it is a source
+    // byte, and the human renderer already folds control chars for display.
+    let chars: Vec<char> = text.chars().collect();
+    let mut line_starts: Vec<usize> = vec![0];
+    for (index, ch) in chars.iter().enumerate() {
+        if *ch == '\n' {
+            line_starts.push(index + 1);
+        }
+    }
+    let hit_line = line_starts.partition_point(|start| *start <= at).max(1) - 1;
+    let first_line = hit_line.saturating_sub(context_lines);
+    let last_line = (hit_line + context_lines).min(line_starts.len() - 1);
+    let start = line_starts[first_line];
+    let end = line_starts
+        .get(last_line + 1)
+        .map(|next| next - 1) // drop the trailing newline of the last kept line
+        .unwrap_or(chars.len());
+
+    if end.saturating_sub(start) <= max_chars {
+        return (chars[start..end].iter().collect(), false);
+    }
+    // The window overflows the snippet budget. Narrow it around the match
+    // instead of taking its head, so the match stays visible, and tell the
+    // caller the requested window was not delivered in full. A sub-window of a
+    // contiguous region is still contiguous, so the evidence stays verbatim.
+    let region: String = chars[start..end].iter().collect();
+    (snippet_around_match(&region, max_chars, query_terms), true)
 }
 
 /// A bounded snippet that contains the first matching term, not a blind prefix.
@@ -1120,20 +1288,7 @@ fn snippet_around_match(text: &str, max_chars: usize, query_terms: &[String]) ->
 
     // Character offset of the earliest term hit. `to_lowercase` can change byte
     // length, so search and index in chars rather than bytes throughout.
-    let lower: Vec<char> = text.chars().flat_map(char::to_lowercase).collect();
-    let haystack: String = lower.iter().collect();
-    let match_char = query_terms
-        .iter()
-        .filter(|term| !term.is_empty())
-        .filter_map(|term| {
-            let needle = term.to_lowercase();
-            haystack
-                .find(&needle)
-                .map(|byte| haystack[..byte].chars().count())
-        })
-        .min();
-
-    let Some(at) = match_char else {
+    let Some(at) = first_match_char(text, query_terms) else {
         return text.chars().take(max_chars).collect();
     };
 
@@ -1165,6 +1320,23 @@ fn snippet_around_match(text: &str, max_chars: usize, query_terms: &[String]) ->
     out
 }
 
+/// Flip the response-level truncation flag when a requested `--context N` line
+/// window did not fit `max_snippet_chars` (M3-9).
+///
+/// The item and byte gates win when they also fired: they decided how many hits
+/// came back, and raising `max_snippet_chars` would not bring those hits back.
+/// Only called with hits that survived clamping, so the report never describes a
+/// hit the caller cannot see.
+fn note_context_clipped(truncation: &mut Truncation, clipped: bool) {
+    if !clipped {
+        return;
+    }
+    truncation.truncated = true;
+    if truncation.reason.is_none() {
+        truncation.reason = Some(budget::TRUNCATION_MAX_SNIPPET_CHARS.to_string());
+    }
+}
+
 /// 检索命中在 `max_response_bytes` 闸内的序列化字节估算（与 CLI 渲染对齐）：
 /// id + session_id + text + guidance；`occurrences` 仅当 >1（归并模式）时计入，
 /// 与序列化器"occurrences == 1 时省略该键"的约定一致。
@@ -1194,6 +1366,19 @@ fn search_hit_charge(hit: &SearchHit) -> usize {
     } else {
         0
     };
+    // `match_ranges` 是渲染产物，同样受字节闸约束（snippet 不是免费内容，
+    // 它的高亮偏移也不是）。`[[12,18],[40,46]]` 形状：两个十进制数 + 逗号 +
+    // 方括号，键名与外层括号 16 字节。
+    let match_ranges_len = if hit.match_ranges.is_empty() {
+        0
+    } else {
+        hit.match_ranges
+            .iter()
+            .map(|(start, end)| start.to_string().len() + end.to_string().len() + 4)
+            .sum::<usize>()
+            + hit.match_ranges.len()
+            + 16
+    };
     json_string_len(hit.id.as_str())
         + hit
             .session_id
@@ -1203,6 +1388,7 @@ fn search_hit_charge(hit: &SearchHit) -> usize {
         + why_matched_len
         + suggested_len
         + occurrences_len
+        + match_ranges_len
         + RESUME_AVAILABLE_FIELD_BYTES
         + 32
 }
@@ -1831,6 +2017,7 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore, 
                 group_by_session,
                 mode,
                 query_embedding,
+                context_lines,
             } => {
                 if limit == 0 {
                     return Err(DomainError::InvalidRequest("limit must be > 0".into()).into());
@@ -1851,6 +2038,27 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore, 
                 }
                 filters.providers.sort_unstable();
                 filters.providers.dedup();
+                // Roles and exclusion terms are sets: a caller that names the
+                // same one twice, or names two in the other order, must get the
+                // same cursor digest as well as the same rows.
+                filters.roles.sort_unstable();
+                filters.roles.dedup();
+                for term in &filters.exclude_terms {
+                    if term.chars().any(char::is_control) {
+                        return Err(DomainError::InvalidRequest(
+                            "exclusion term contains control characters".into(),
+                        )
+                        .into());
+                    }
+                    if term.trim().is_empty() {
+                        return Err(DomainError::InvalidRequest(
+                            "exclusion term must not be empty".into(),
+                        )
+                        .into());
+                    }
+                }
+                filters.exclude_terms.sort();
+                filters.exclude_terms.dedup();
                 if let (Some(since), Some(until)) = (filters.since, filters.until)
                     && since >= until
                 {
@@ -1977,7 +2185,13 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore, 
                 // `include_system` 显式恢复。过滤先于 offset 切片，cursor 位置因此
                 // 指向"非系统"序列。判定需整窗 payload（分块批量取，无 N+1）；扫描
                 // 窗内系统噪声饱和时可能提前终止分页（边界行为，见 GROUP_SCAN_FACTOR）。
-                if !include_system {
+                //
+                // 显式 `filters.roles` 关掉这层默认策略：它是一条**已下推到 SQL**
+                // 的白名单，扫描窗里只剩被点名的那些 role。再叠一层默认噪声过滤会
+                // 让 `--role system` 恒定返回空——用户点名要的东西被一条他没要求的
+                // 默认规则悄悄减掉。跳过这里绝不会放宽结果集：SQL 谓词已经把范围
+                // 收在白名单内。
+                if !include_system && filters.roles.is_empty() {
                     let scanned_ids: Vec<StableId> =
                         scanned.iter().map(|hit| hit.id.clone()).collect();
                     let scanned_payloads = self.catalog.get_many(&scanned_ids)?;
@@ -1998,45 +2212,55 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore, 
                     let sessions = self.catalog.session_of(&ids)?;
                     let max_snippet_chars = budget.max_snippet_chars;
                     let query_terms = guidance::literal_terms(&query);
-                    let mut assembled = scanned;
-                    for (hit, ((_id, payload), (_mid, session))) in
+                    // 命中与"它的行窗是否被预算裁过"成对流动：clamp 之后才知道哪些
+                    // 命中留在响应里，而截断只应报**留下来的**那些的事实。
+                    let mut assembled: Vec<(SearchHit, bool)> =
+                        scanned.into_iter().map(|hit| (hit, false)).collect();
+                    for ((hit, clipped), ((_id, payload), (_mid, session))) in
                         assembled.iter_mut().zip(payloads.into_iter().zip(sessions))
                     {
-                        assemble_search_hit(
+                        *clipped = assemble_search_hit(
                             hit,
                             payload.as_deref(),
                             session.as_ref(),
                             max_snippet_chars,
                             &query_terms,
+                            context_lines,
                         );
                     }
-                    let mut grouped: Vec<SearchHit> = Vec::new();
+                    let mut grouped: Vec<(SearchHit, bool)> = Vec::new();
                     let mut group_index: HashMap<String, usize> = HashMap::new();
-                    for hit in assembled {
+                    for (hit, clipped) in assembled {
                         let key = hit
                             .session_id
                             .clone()
                             .unwrap_or_else(|| hit.id.as_str().to_string());
                         match group_index.get(&key).copied() {
-                            Some(index) => grouped[index].occurrences += 1,
+                            Some(index) => grouped[index].0.occurrences += 1,
                             None => {
                                 group_index.insert(key, grouped.len());
-                                grouped.push(hit);
+                                grouped.push((hit, clipped));
                             }
                         }
                     }
-                    let grouped_kept: Vec<SearchHit> = grouped
+                    let grouped_kept: Vec<(SearchHit, bool)> = grouped
                         .into_iter()
                         .skip(usize::try_from(offset).unwrap_or(usize::MAX))
                         .take(page + 1)
                         .collect();
                     let has_more = grouped_kept.len() > page;
-                    let slice: Vec<SearchHit> = grouped_kept.into_iter().take(page).collect();
+                    let slice: Vec<(SearchHit, bool)> =
+                        grouped_kept.into_iter().take(page).collect();
                     let net_bytes = budget
                         .max_response_bytes
                         .saturating_sub(ENVELOPE_RESERVE_BYTES);
-                    let (mut hits, truncation, _) =
-                        budget::clamp_items(slice, page, net_bytes, search_hit_charge);
+                    let (kept, mut truncation, _) =
+                        budget::clamp_items(slice, page, net_bytes, |(hit, _)| {
+                            search_hit_charge(hit)
+                        });
+                    let context_clipped = kept.iter().any(|(_, clipped)| *clipped);
+                    let mut hits: Vec<SearchHit> = kept.into_iter().map(|(hit, _)| hit).collect();
+                    note_context_clipped(&mut truncation, context_clipped);
                     // Resume 可用性（ADR-0009）：只对保留的命中批量解析一次（无 N+1）。
                     self.assemble_resume_availability(&mut hits)?;
                     let consumed = offset + hits.len() as u64;
@@ -2059,6 +2283,7 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore, 
                         retrieval_mode: response_mode,
                         fallback_warning: response_warning,
                         time_filter_excluded,
+                        context_lines,
                     });
                 }
 
@@ -2079,23 +2304,30 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore, 
                 let sessions = self.catalog.session_of(&ids)?;
                 let max_snippet_chars = budget.max_snippet_chars;
                 let query_terms = guidance::literal_terms(&query);
-                let mut hits = slice;
-                for (hit, ((_id, payload), (_mid, session))) in
-                    hits.iter_mut().zip(payloads.into_iter().zip(sessions))
+                let mut assembled: Vec<(SearchHit, bool)> =
+                    slice.into_iter().map(|hit| (hit, false)).collect();
+                for ((hit, clipped), ((_id, payload), (_mid, session))) in
+                    assembled.iter_mut().zip(payloads.into_iter().zip(sessions))
                 {
-                    assemble_search_hit(
+                    *clipped = assemble_search_hit(
                         hit,
                         payload.as_deref(),
                         session.as_ref(),
                         max_snippet_chars,
                         &query_terms,
+                        context_lines,
                     );
                 }
                 let net_bytes = budget
                     .max_response_bytes
                     .saturating_sub(ENVELOPE_RESERVE_BYTES);
-                let (mut hits, truncation, _) =
-                    budget::clamp_items(hits, page, net_bytes, search_hit_charge);
+                let (kept, mut truncation, _) =
+                    budget::clamp_items(assembled, page, net_bytes, |(hit, _)| {
+                        search_hit_charge(hit)
+                    });
+                let context_clipped = kept.iter().any(|(_, clipped)| *clipped);
+                let mut hits: Vec<SearchHit> = kept.into_iter().map(|(hit, _)| hit).collect();
+                note_context_clipped(&mut truncation, context_clipped);
                 // Resume 可用性（ADR-0009）：只对保留的命中批量解析一次（无 N+1）。
                 self.assemble_resume_availability(&mut hits)?;
                 let consumed = offset + hits.len() as u64;
@@ -2118,6 +2350,7 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore, 
                     retrieval_mode: response_mode,
                     fallback_warning: response_warning,
                     time_filter_excluded,
+                    context_lines,
                 })
             }
             AppRequest::Get { id } => {
@@ -2890,6 +3123,7 @@ mod tests {
                 provider_id: None,
                 working_directory: None,
                 project_name: None,
+                match_ranges: Vec::new(),
             }])
         }
     }
@@ -2917,6 +3151,7 @@ mod tests {
             group_by_session: false,
             mode: RetrievalMode::Lexical,
             query_embedding: None,
+            context_lines: None,
         });
         assert!(matches!(r, Ok(AppResponse::Search { hits, .. }) if hits.len() == 1));
     }
@@ -2934,6 +3169,7 @@ mod tests {
             group_by_session: false,
             mode: RetrievalMode::Lexical,
             query_embedding: None,
+            context_lines: None,
         });
         assert!(matches!(
             r.unwrap_err(),
@@ -2954,6 +3190,7 @@ mod tests {
             group_by_session: false,
             mode: RetrievalMode::Lexical,
             query_embedding: None,
+            context_lines: None,
         });
         assert!(matches!(
             r.unwrap_err(),
@@ -3053,6 +3290,7 @@ mod tests {
                 group_by_session: false,
                 mode: RetrievalMode::Lexical,
                 query_embedding: None,
+                context_lines: None,
             })
             .unwrap();
         let AppResponse::Search { hits, .. } = resp else {
@@ -3116,6 +3354,7 @@ mod tests {
                 group_by_session: false,
                 mode: RetrievalMode::Lexical,
                 query_embedding: None,
+                context_lines: None,
             })
             .unwrap();
         let (ids, _, _, truncation) = hits_of(resp);
@@ -3257,6 +3496,7 @@ mod tests {
                     provider_id: None,
                     working_directory: None,
                     project_name: None,
+                    match_ranges: Vec::new(),
                 })
                 .collect())
         }
@@ -3288,6 +3528,7 @@ mod tests {
                     provider_id: None,
                     working_directory: None,
                     project_name: None,
+                    match_ranges: Vec::new(),
                 })
                 .collect())
         }
@@ -3446,6 +3687,7 @@ mod tests {
             group_by_session: false,
             mode: RetrievalMode::Lexical,
             query_embedding: None,
+            context_lines: None,
         }
     }
 
@@ -3467,6 +3709,7 @@ mod tests {
             group_by_session: false,
             mode: RetrievalMode::Lexical,
             query_embedding: None,
+            context_lines: None,
         }
     }
 
@@ -3524,6 +3767,7 @@ mod tests {
                     group_by_session: false,
                     mode,
                     query_embedding: Some(vec![0.1f32; 384]),
+                    context_lines: None,
                 })
                 .unwrap();
             let AppResponse::Search {
@@ -3569,6 +3813,7 @@ mod tests {
                 group_by_session: false,
                 mode: RetrievalMode::Lexical,
                 query_embedding: None,
+                context_lines: None,
             })
             .unwrap()
         else {
@@ -3642,6 +3887,7 @@ mod tests {
                 group_by_session: false,
                 mode: RetrievalMode::Lexical,
                 query_embedding: None,
+                context_lines: None,
             })
             .unwrap()
         else {
@@ -3649,6 +3895,84 @@ mod tests {
         };
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, hit_id("hit00"));
+    }
+
+    #[test]
+    fn search_role_filter_supersedes_the_system_noise_default() {
+        // M3-8: `--role system` must return system messages without also being
+        // told `--include-system`. The store predicate has already narrowed the
+        // window to the named roles, so re-applying the default noise policy here
+        // would subtract exactly what the caller asked for and always answer
+        // "no hits" — a silently empty answer to a well-formed request.
+        use agent_session_grep_ports::SearchRole;
+
+        let mut cat = MapCatalog::new(7);
+        cat.insert(
+            &hit_id("hit00"),
+            serde_json::json!({ "role": "system", "text": "needle" })
+                .to_string()
+                .into_bytes(),
+        );
+        let index = FixedHits(vec![hit_id("hit00")]);
+        let app = App::with_clock(cat, index, clock_t0);
+        let request = filtered_search_req(
+            "needle",
+            10,
+            None,
+            SearchFilters {
+                roles: vec![SearchRole::System],
+                ..SearchFilters::default()
+            },
+        );
+        let AppResponse::Search { hits, .. } = app.handle(request).unwrap() else {
+            panic!("expected Search response");
+        };
+        assert_eq!(hits.len(), 1, "include_system must not be re-applied");
+        assert_eq!(hits[0].id, hit_id("hit00"));
+    }
+
+    #[test]
+    fn search_without_a_role_filter_still_drops_system_noise() {
+        // The escape hatch above is scoped to an explicit role allowlist: with no
+        // roles named, the default noise policy is untouched.
+        let mut cat = MapCatalog::new(7);
+        cat.insert(
+            &hit_id("hit00"),
+            serde_json::json!({ "role": "system", "text": "needle" })
+                .to_string()
+                .into_bytes(),
+        );
+        let index = FixedHits(vec![hit_id("hit00")]);
+        let app = App::with_clock(cat, index, clock_t0);
+        let AppResponse::Search { hits, .. } = app.handle(search_req("needle", 10, None)).unwrap()
+        else {
+            panic!("expected Search response");
+        };
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn search_rejects_unusable_exclusion_terms() {
+        // Same boundary rule the query string gets: control characters are
+        // rejected rather than stripped (stripping splices tokens together), and
+        // a blank term is a request the caller cannot have meant.
+        for term in ["", "   ", "no\u{0}ise", "line\nbreak"] {
+            let err = app()
+                .handle(filtered_search_req(
+                    "needle",
+                    5,
+                    None,
+                    SearchFilters {
+                        exclude_terms: vec![term.to_string()],
+                        ..SearchFilters::default()
+                    },
+                ))
+                .expect_err("unusable exclusion term must be rejected");
+            assert!(
+                matches!(err, AppError::Domain(DomainError::InvalidRequest(_))),
+                "{term:?} -> {err:?}"
+            );
+        }
     }
 
     #[test]
@@ -3696,6 +4020,7 @@ mod tests {
                 group_by_session: true,
                 mode: RetrievalMode::Lexical,
                 query_embedding: None,
+                context_lines: None,
             })
             .unwrap()
         else {
@@ -3766,6 +4091,7 @@ mod tests {
                 group_by_session: false,
                 mode: RetrievalMode::Lexical,
                 query_embedding: None,
+                context_lines: None,
             })
             .unwrap()
         else {
@@ -3903,6 +4229,7 @@ mod tests {
                 group_by_session: false,
                 mode: RetrievalMode::Lexical,
                 query_embedding: None,
+                context_lines: None,
             })
             .unwrap();
         let (kept, next, _, truncation) = hits_of(response);
@@ -3994,6 +4321,7 @@ mod tests {
             group_by_session: false,
             mode: RetrievalMode::Lexical,
             query_embedding: None,
+            context_lines: None,
         }
     }
 
@@ -4106,6 +4434,110 @@ mod tests {
     }
 
     #[test]
+    fn search_cursor_is_bound_to_roles_and_exclusion_terms() {
+        // A cursor is bound to its query shape. Adding a filter dimension means a
+        // token minted under a different role set or a different exclusion set has
+        // to be rejected — re-filtering it would hand back a page whose offset was
+        // computed against a different ordering.
+        use agent_session_grep_ports::SearchRole;
+
+        let app = App::with_clock(FakeCatalog, PagedIndex { n: 5 }, clock_t0);
+        let issued = SearchFilters {
+            roles: vec![SearchRole::Tool, SearchRole::Assistant],
+            exclude_terms: vec!["beta".to_string(), "alpha".to_string()],
+            ..SearchFilters::default()
+        };
+        let (_, next, _, _) = hits_of(
+            app.handle(filtered_search_req("q", 2, None, issued))
+                .unwrap(),
+        );
+
+        // Same sets, different order and with a duplicate: normalization makes
+        // these the same query, so the token still reads.
+        let normalized_equivalent = SearchFilters {
+            roles: vec![
+                SearchRole::Assistant,
+                SearchRole::Tool,
+                SearchRole::Assistant,
+            ],
+            exclude_terms: vec!["alpha".to_string(), "beta".to_string(), "alpha".to_string()],
+            ..SearchFilters::default()
+        };
+        assert!(
+            app.handle(filtered_search_req(
+                "q",
+                2,
+                next.clone(),
+                normalized_equivalent
+            ))
+            .is_ok()
+        );
+
+        // Every mutation of either dimension invalidates the token, including
+        // dropping it entirely (the unfiltered digest is a different shape).
+        use agent_session_grep_ports::SearchRole as Role;
+        let mutations = [
+            SearchFilters {
+                roles: vec![Role::Tool],
+                exclude_terms: vec!["alpha".to_string(), "beta".to_string()],
+                ..SearchFilters::default()
+            },
+            SearchFilters {
+                roles: vec![Role::Tool, Role::Assistant, Role::User],
+                exclude_terms: vec!["alpha".to_string(), "beta".to_string()],
+                ..SearchFilters::default()
+            },
+            SearchFilters {
+                roles: vec![Role::Tool, Role::Assistant],
+                exclude_terms: vec!["alpha".to_string()],
+                ..SearchFilters::default()
+            },
+            SearchFilters {
+                roles: vec![Role::Tool, Role::Assistant],
+                exclude_terms: vec!["alpha".to_string(), "gamma".to_string()],
+                ..SearchFilters::default()
+            },
+            SearchFilters {
+                roles: vec![Role::Tool, Role::Assistant],
+                ..SearchFilters::default()
+            },
+        ];
+        for mutated in mutations {
+            let err = app
+                .handle(filtered_search_req("q", 2, next.clone(), mutated.clone()))
+                .unwrap_err();
+            assert!(
+                matches!(err, AppError::Cursor(cursor::CursorError::Invalid(_))),
+                "{mutated:?} accepted a cursor from a different filter set"
+            );
+        }
+        let err = app.handle(search_req("q", 2, next)).unwrap_err();
+        assert!(matches!(
+            err,
+            AppError::Cursor(cursor::CursorError::Invalid(_))
+        ));
+
+        // And the reverse direction: an unfiltered token cannot be replayed with a
+        // role or exclusion filter bolted on.
+        let (_, plain_next, _, _) = hits_of(app.handle(search_req("q", 2, None)).unwrap());
+        let err = app
+            .handle(filtered_search_req(
+                "q",
+                2,
+                plain_next,
+                SearchFilters {
+                    roles: vec![Role::User],
+                    ..SearchFilters::default()
+                },
+            ))
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            AppError::Cursor(cursor::CursorError::Invalid(_))
+        ));
+    }
+
+    #[test]
     fn parse_search_instant_normalizes_offsets_and_compact_time() {
         let z = parse_search_instant("2026-07-28T12:00:00Z").unwrap();
         for parsed in [
@@ -4163,6 +4595,7 @@ mod tests {
                 retrieval_mode: _,
                 fallback_warning: _,
                 time_filter_excluded: _,
+                context_lines: _,
             } => (
                 hits.iter().map(|h| h.id.as_str().to_string()).collect(),
                 next_cursor,
@@ -4282,6 +4715,7 @@ mod tests {
                 group_by_session: false,
                 mode: RetrievalMode::Lexical,
                 query_embedding: None,
+                context_lines: None,
             })
             .unwrap();
         let (ids, next, _, truncation) = hits_of(resp);
@@ -4323,6 +4757,7 @@ mod tests {
                 group_by_session: false,
                 mode: RetrievalMode::Lexical,
                 query_embedding: None,
+                context_lines: None,
             })
             .unwrap_err();
         assert!(
@@ -6872,6 +7307,7 @@ mod tests {
                 group_by_session: true,
                 mode: RetrievalMode::Lexical,
                 query_embedding: None,
+                context_lines: None,
             })
             .unwrap()
         else {

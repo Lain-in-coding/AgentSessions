@@ -1720,6 +1720,120 @@ fn search_sessions_rejects_unknown_provider_and_compact_durations() {
 }
 
 #[test]
+fn search_sessions_schema_publishes_role_and_exclusion_filters() {
+    // The nine-tool contract is frozen, so a new filter dimension has to arrive
+    // as input-schema properties on the existing tool. A client that reads only
+    // the schema must be able to discover them.
+    let (_dir, db) = temp_db("mcp-role-schema");
+    let frames = mcp_session(
+        &db,
+        &[
+            initialize_request(1, "2025-06-18"),
+            initialized_notification(),
+            json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }),
+        ],
+    );
+    let tools = frame_by_id(&frames, 2)["result"]["tools"]
+        .as_array()
+        .expect("tools");
+    assert_eq!(tools.len(), 9, "the tool contract must stay at nine tools");
+    let search = tools
+        .iter()
+        .find(|tool| tool["name"] == "search_sessions")
+        .expect("search_sessions tool");
+    let properties = &search["inputSchema"]["properties"];
+    assert_eq!(properties["roles"]["type"], "array", "{search}");
+    assert_eq!(
+        properties["roles"]["items"]["enum"],
+        json!(["user", "assistant", "system", "developer", "tool"]),
+        "{search}"
+    );
+    assert_eq!(properties["exclude_terms"]["type"], "array", "{search}");
+    assert_eq!(
+        properties["exclude_terms"]["items"]["maxLength"], 256,
+        "array items bypass the scalar length guard, so the bound lives here"
+    );
+    assert_eq!(
+        search["inputSchema"]["additionalProperties"],
+        json!(false),
+        "{search}"
+    );
+}
+
+#[test]
+fn search_sessions_filters_by_role_and_exclusion() {
+    let (_dir, db) = filter_db("mcp-role-search");
+    let (assistants, without_codex) = two_searches(
+        &db,
+        json!({ "query": "mcpfilter", "roles": ["assistant"] }),
+        json!({ "query": "mcpfilter", "exclude_terms": ["codex"] }),
+    );
+    assert_eq!(hit_texts(&assistants), vec!["mcpfilter mid note"]);
+    let kept = hit_texts(&without_codex);
+    assert_eq!(kept.len(), 2, "{kept:?}");
+    assert!(!kept.iter().any(|text| text.contains("codex")), "{kept:?}");
+
+    let (users, both_dimensions) = two_searches(
+        &db,
+        json!({ "query": "mcpfilter", "roles": ["user"] }),
+        json!({ "query": "mcpfilter", "roles": ["user"], "exclude_terms": ["early"] }),
+    );
+    assert_eq!(hit_texts(&users).len(), 2, "two user-role messages");
+    assert_eq!(hit_texts(&both_dimensions), vec!["mcpfilter codex note"]);
+}
+
+#[test]
+fn search_sessions_rejects_unusable_role_and_exclusion_values() {
+    let (_dir, db) = filter_db("mcp-role-invalid");
+    let frames = mcp_session(
+        &db,
+        &[
+            initialize_request(1, "2025-06-18"),
+            initialized_notification(),
+            tool_call(
+                2,
+                "search_sessions",
+                json!({ "query": "mcpfilter", "roles": ["operator"] }),
+            ),
+            tool_call(
+                3,
+                "search_sessions",
+                json!({ "query": "mcpfilter", "roles": "assistant" }),
+            ),
+            tool_call(
+                4,
+                "search_sessions",
+                json!({ "query": "mcpfilter", "roles": [1] }),
+            ),
+            tool_call(
+                5,
+                "search_sessions",
+                json!({ "query": "mcpfilter", "exclude_terms": "codex" }),
+            ),
+            tool_call(
+                6,
+                "search_sessions",
+                json!({ "query": "mcpfilter", "exclude_terms": [""] }),
+            ),
+        ],
+    );
+    for id in [2, 3, 4, 5] {
+        let frame = frame_by_id(&frames, id);
+        assert_eq!(frame["error"]["code"], -32602, "{frame}");
+        assert_eq!(frame["error"]["data"]["canonical_code"], "invalid_request");
+    }
+    // A blank exclusion term is well-formed JSON against the schema, so it is
+    // rejected one layer in — at the Application boundary, exactly where
+    // `since >= until` is. That makes it a business error, not a params error.
+    let frame = frame_by_id(&frames, 6);
+    assert_eq!(frame["result"]["isError"], true, "{frame}");
+    assert_eq!(
+        frame["result"]["structuredContent"]["error"]["canonical_code"], "invalid_request",
+        "{frame}"
+    );
+}
+
+#[test]
 fn search_sessions_rejects_inverted_time_range_as_business_error() {
     let (_dir, db) = filter_db("mcp-filter-range");
     let frames = mcp_session(

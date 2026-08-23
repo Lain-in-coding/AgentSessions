@@ -202,8 +202,11 @@ mod tests {
     ];
 
     fn fixture_revision(provider_id: &str) -> Option<u32> {
-        // All 14 implemented providers carry a golden fixture (revision 1);
-        // the two deferred providers (deepseek-harness/zcode) are not in this list.
+        // All 14 implemented providers carry a golden fixture; the two deferred
+        // providers (deepseek-harness/zcode) are not in this list. The revision
+        // simulated here only exercises `manifest_for` plumbing — each adapter's
+        // real revision comes from its own fixture PROVENANCE.md and is asserted
+        // against the ledger in cli/tests/provider_matrix.rs.
         match provider_id {
             "claude-code" | "codex" | "grok-build" | "antigravity" | "opencode" | "pi"
             | "hermes" | "cursor" | "kimi-code" | "openclaw" | "qoder" | "tencent-codebuddy"

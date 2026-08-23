@@ -31,7 +31,7 @@ Per `docs/operations/core-beta-evidence-matrix.md`:
 | Field | Value |
 |---|---|
 | OS | Windows 11 (10.0.22631), x86_64 |
-| Branch | `worktree-agent-a24728f9d894f8c51`, fast-forwarded to the audit branch tip |
+| Branch | audit branch tip (fast-forwarded before the rehearsal) |
 | Verified commit | `d27e8d4` (audit tip) + two commits made during this run |
 | Rust binary | `target/release/asg.exe`, default features (no `semantic-candle`) |
 | Python | 3.10.11 |
@@ -438,7 +438,7 @@ pass. This addendum records reruns after the fixes made during the same release
 rehearsal. It does not overwrite the historical measurements.
 
 - **Current verified tip**: `a584ae3` plus the merge commits after it. The working
-  branch is `worktree-public-release-audit`; no public-visibility change was made.
+  verified source branch is the audit branch tip; no public-visibility change was made.
 - **G10 re-run**: `python scripts/release/export_public_tree.py --destination <tmp>`
   exited 0, exported 489 files, and reported 0 privacy findings. Independent
   checks found no `.trellis`, dated go-no-go record, release template,

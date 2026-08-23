@@ -6,7 +6,12 @@
 //! 指纹。若 git 换行转换或编辑器改写了字节，先在指纹断言处响亮失败，
 //! 而不是留到后面变成难懂的 span 错位。
 
-use agent_session_grep_ports::{CanonicalEventSink, Confidence, MessageEvent, ProviderAdapter};
+use agent_session_grep_domain::{
+    ToolActivity, ToolActivityActor, ToolActivityKind, ToolActivityStatus,
+};
+use agent_session_grep_ports::{
+    CanonicalEventSink, Confidence, MessageEvent, ProviderAdapter, ToolActivityEvent,
+};
 use agent_session_grep_provider_codex::CodexAdapter;
 use agent_session_grep_testkit::assert_read_only;
 use serde_json::{Value, json};
@@ -16,6 +21,7 @@ use std::path::PathBuf;
 #[derive(Default)]
 struct CollectingSink {
     messages: Vec<Captured>,
+    activities: Vec<CapturedActivity>,
 }
 struct Captured {
     seq: u32,
@@ -26,6 +32,11 @@ struct Captured {
     timestamp: Option<String>,
     is_sidechain: bool,
     span: Option<(u64, u64)>,
+}
+/// 拍平的活动快照（anchor + 完整事实），供工具活动断言。
+struct CapturedActivity {
+    message_native_id: String,
+    activity: ToolActivity,
 }
 impl CanonicalEventSink for CollectingSink {
     fn emit_message(
@@ -41,6 +52,17 @@ impl CanonicalEventSink for CollectingSink {
             timestamp: event.timestamp.map(str::to_string),
             is_sidechain: event.is_sidechain,
             span: event.span,
+        });
+        Ok(())
+    }
+
+    fn emit_activity(
+        &mut self,
+        event: ToolActivityEvent<'_>,
+    ) -> agent_session_grep_ports::PortResult<()> {
+        self.activities.push(CapturedActivity {
+            message_native_id: event.message_native_id.to_string(),
+            activity: event.activity,
         });
         Ok(())
     }
@@ -90,6 +112,70 @@ fn parse_to_canonical_json(bytes: &[u8]) -> Value {
     })
 }
 
+/// fixture 必须同时见证**已配对**与**未配对**两条工具活动路径。
+///
+/// `capability_behaviour.rs` 的矩阵守卫只断言"活动数 > 0",那不足以证明配对逻辑
+/// 被走到:一条孤立的调用就能让它通过,而 `emit_paired_activity` 仍然从未执行。
+/// fixture revision 2 之所以加记录，就是为了让 golden 自己承载这份证据
+/// （原先靠 `capability_behaviour.rs` 里一份具名补充样本，那条登记项已删除）。
+///
+/// 判据取 `status`：配对成功的调用带其 output 的结果状态，未配对的调用只能是
+/// `Unknown`——provider 没给出结果，绝不替它编一个。
+#[test]
+fn golden_fixture_witnesses_paired_and_unpaired_tool_activity() {
+    let mut sink = CollectingSink::default();
+    CodexAdapter::new()
+        .parse(&read_fixture_bytes(), &mut sink)
+        .expect("golden fixture must parse");
+
+    assert!(
+        !sink.activities.is_empty(),
+        "fixture revision 2 起必须产出工具活动，否则矩阵声明无行为证据"
+    );
+    for captured in &sink.activities {
+        assert!(
+            !captured.message_native_id.is_empty(),
+            "每条活动必须锚在一条消息上: {:?}",
+            captured.activity
+        );
+        assert_eq!(
+            captured.activity.kind,
+            ToolActivityKind::Command,
+            "本 fixture 的调用都是 shell 命令: {:?}",
+            captured.activity
+        );
+        assert_eq!(captured.activity.actor, ToolActivityActor::Main);
+    }
+
+    let paired = sink
+        .activities
+        .iter()
+        .filter(|c| c.activity.status != ToolActivityStatus::Unknown)
+        .count();
+    let unpaired = sink
+        .activities
+        .iter()
+        .filter(|c| c.activity.status == ToolActivityStatus::Unknown)
+        .count();
+    assert!(
+        paired > 0,
+        "没有任何调用带上 output 的结果状态 —— emit_paired_activity 从未被走到: {:?}",
+        sink.activities
+            .iter()
+            .map(|c| c.activity.status)
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        unpaired > 0,
+        "没有任何未配对调用 —— emit_unpaired_activity 从未被走到，而真实 rollout 里\
+         agent 被打断留下悬空调用是常态: {:?}",
+        sink.activities
+            .iter()
+            .map(|c| c.activity.status)
+            .collect::<Vec<_>>()
+    );
+}
+
 #[test]
 fn probe_never_mutates_source_bytes() {
     let bytes = read_fixture_bytes();
@@ -115,7 +201,8 @@ fn parse_never_mutates_source_bytes() {
 
 #[test]
 fn golden_provenance_revision_matches_manifest() {
-    assert_eq!(CodexAdapter::new().manifest().fixture_revision, Some(1));
+    // revision 2 起 fixture 内含工具调用记录（见 PROVENANCE.md 的变更历史）。
+    assert_eq!(CodexAdapter::new().manifest().fixture_revision, Some(2));
 }
 
 #[test]

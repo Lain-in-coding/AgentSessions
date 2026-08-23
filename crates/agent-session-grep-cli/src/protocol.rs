@@ -255,7 +255,14 @@ impl From<AppError> for ProtocolError {
 
 impl From<ProviderError> for ProtocolError {
     fn from(error: ProviderError) -> Self {
-        ProtocolError::new(CanonicalCode::ProviderError, error.to_string())
+        // 快照漂移不是"格式不认识"：它是可重试的竞态，必须走 source_changed
+        // (exit 5, retryable) 而不是 provider_error (exit 7, 不可重试)，
+        // 否则 error-catalog 的 operator_action 会指错方向。
+        let code = match &error {
+            ProviderError::SourceChangedDuringRead(_) => CanonicalCode::SourceChanged,
+            _ => CanonicalCode::ProviderError,
+        };
+        ProtocolError::new(code, error.to_string())
     }
 }
 
@@ -263,6 +270,9 @@ impl From<PortError> for ProtocolError {
     fn from(e: PortError) -> Self {
         let code = match &e {
             PortError::Backend(_) => CanonicalCode::CatalogError,
+            // 不变量违反是缺陷信号：catalog_error 的 operator_action（"检查 --db
+            // 路径、跑 doctor"）对它完全无效，必须走 internal（exit 70）。
+            PortError::Invariant(_) => CanonicalCode::Internal,
             PortError::SourceIo(_) => CanonicalCode::SourceIo,
             PortError::SchemaIncompatible(_) => CanonicalCode::SchemaIncompatible,
             PortError::NotFound(_) => CanonicalCode::NotFound,
@@ -270,10 +280,12 @@ impl From<PortError> for ProtocolError {
             PortError::WriterBusy(_) => CanonicalCode::WriterBusy,
         };
         // R4.3：Backend、SourceIo 携带后端/文件系统原始细节，绝不进入用户可见
-        // message（其中 SourceIo 可能包含绝对 transcript 路径）。其余变体已验证
+        // message（其中 SourceIo 可能包含绝对 transcript 路径）。Invariant 按
+        // error catalog 的 `internal: redaction=full` 同样整条替换。其余变体已验证
         // 不携带路径/ID（静态文案或数值），保持原样。
         let message = match &e {
             PortError::Backend(_) => "数据库内部错误".to_string(),
+            PortError::Invariant(_) => "内部不变量违反".to_string(),
             PortError::SourceIo(_) => "源文件无法读取".to_string(),
             _ => e.to_string(),
         };
@@ -333,7 +345,7 @@ pub fn parse_output_mode(args: &[String]) -> Result<OutputMode, String> {
             "--db" | "--out" | "--request-id" | "--cursor" | "--max-items" | "--max-bytes"
             | "--max-messages" | "--max-evidence" | "--max-tokens" | "--policy" | "--level"
             | "--provider" | "--since" | "--until" | "--session" | "--around" | "--tool-kind"
-            | "--tool-name" => {
+            | "--tool-name" | "--role" | "--exclude" => {
                 it.next();
             }
             _ => {}
@@ -687,6 +699,38 @@ mod tests {
         assert_eq!(e.code, CanonicalCode::SchemaIncompatible);
     }
 
+    /// 快照漂移经 provider 层上抛后，仍必须落在 source_changed（exit 5，可重试）。
+    /// 回归 M2P-10：曾被 `provider_io` 压成 `Io`，再被无 match 的
+    /// `From<ProviderError>` 报成 provider_error（exit 7，不可重试）。
+    #[test]
+    fn snapshot_drift_stays_retryable_through_provider_layer() {
+        let provider_error = agent_session_grep_ports::provider_error_from_port(
+            PortError::SnapshotChanged("len 2686990 -> 2725690".into()),
+        );
+        assert!(matches!(
+            provider_error,
+            ProviderError::SourceChangedDuringRead(_)
+        ));
+
+        let e: ProtocolError = provider_error.into();
+        assert_eq!(e.code, CanonicalCode::SourceChanged);
+        assert_eq!(e.code.exit_code(), 5);
+        assert!(
+            e.code.retryable(),
+            "a growing transcript is won by retrying, so the envelope must say so"
+        );
+    }
+
+    /// 非漂移的端口错误不受影响，仍是 provider_error。
+    #[test]
+    fn other_port_errors_still_map_to_provider_error() {
+        let e: ProtocolError =
+            agent_session_grep_ports::provider_error_from_port(PortError::Backend("disk".into()))
+                .into();
+        assert_eq!(e.code, CanonicalCode::ProviderError);
+        assert_eq!(e.code.exit_code(), 7);
+    }
+
     #[test]
     fn source_io_error_masks_source_path_in_message() {
         let e: ProtocolError =
@@ -705,6 +749,24 @@ mod tests {
         assert_eq!(e.message, "数据库内部错误");
         assert!(!e.message.contains("unterminated"));
         assert!(!e.message.contains("backend failure"));
+    }
+
+    #[test]
+    fn invariant_port_error_is_internal_not_catalog_error() {
+        // 回归 M1-15：不变量违反曾经被报成 catalog_error，于是用户拿到
+        // "数据库内部错误" + "检查 --db 路径、跑 doctor" —— 与故障无关的指引。
+        let e: ProtocolError =
+            PortError::Invariant("activity act_v1_0123456789abcdef derives one id".into()).into();
+        assert_eq!(e.code, CanonicalCode::Internal);
+        assert_eq!(e.code.exit_code(), 70);
+        assert!(!e.code.retryable());
+        assert_eq!(e.message, "内部不变量违反");
+        assert!(!e.message.contains("act_v1_"));
+        let action = e.code.operator_action();
+        assert!(
+            !action.contains("--db") && !action.contains("doctor"),
+            "internal 不得把用户引向数据库自检: {action}"
+        );
     }
 
     #[test]
@@ -1347,18 +1409,25 @@ mod tests {
     }
 
     #[test]
-    fn value_flag_skip_lists_cover_tool_facets_across_all_scanners() {
+    fn value_flag_skip_lists_cover_search_filters_across_all_scanners() {
         // parse_output_mode 上方的注释要求带值 flag 列表与 main.rs 各前缀
-        // 扫描器保持一致。此测试把 main.rs 源 include 进来，逐扫描器断言
-        // --tool-kind/--tool-name 都在跳过列表里——上次 drift 正是漏掉它们。
+        // 扫描器保持一致。此测试把 main.rs 源 include 进来，逐扫描器断言每个
+        // search 侧带值 flag 都在跳过列表里——上次 drift 正是漏掉 --tool-kind/
+        // --tool-name，而 --role/--exclude 是同一形状的新入口。
+        //
+        // 漏掉一个的后果不是报错而是误判：`asg --db x --role user search q` 里
+        // 那个 `user` 会被当成命令名/位置参数。
         let main_src = include_str!("main.rs");
         let scanners = [
+            "fn extract_offline_flag",
             "fn extract_request_id",
             "fn command_name",
             "fn intercept_help_or_version",
             "fn extract_db_flag_impl",
+            "fn extract_out_flag",
             "fn bare_positionals",
         ];
+        let flags = ["--tool-kind", "--tool-name", "--role", "--exclude"];
         for scanner in scanners {
             let start = main_src
                 .find(scanner)
@@ -1368,9 +1437,24 @@ mod tests {
                 .map(|offset| start + offset)
                 .unwrap_or(main_src.len());
             let body = &main_src[start..end];
+            for flag in flags {
+                assert!(
+                    body.contains(&format!("\"{flag}\"")),
+                    "{scanner} value-skip list missing {flag}"
+                );
+            }
+        }
+        // 本层自己那份列表同理（注释里点名要与上面保持一致）。
+        let own = include_str!("protocol.rs");
+        let start = own.find("fn parse_output_mode").expect("parse_output_mode");
+        let end = own[start..]
+            .find("\n}\n")
+            .map(|offset| start + offset)
+            .unwrap_or(own.len());
+        for flag in flags {
             assert!(
-                body.contains("\"--tool-kind\"") && body.contains("\"--tool-name\""),
-                "{scanner} value-skip list missing --tool-kind/--tool-name"
+                own[start..end].contains(&format!("\"{flag}\"")),
+                "parse_output_mode value-skip list missing {flag}"
             );
         }
     }

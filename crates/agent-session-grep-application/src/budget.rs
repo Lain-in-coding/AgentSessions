@@ -36,6 +36,13 @@ pub const TRUNCATION_MAX_RESPONSE_BYTES: &str = "max_response_bytes";
 pub const TRUNCATION_MAX_MESSAGES: &str = "max_messages";
 /// 截断原因：证据条数被 `max_evidence_spans` 截住（context 用例）。
 pub const TRUNCATION_MAX_EVIDENCE_SPANS: &str = "max_evidence_spans";
+/// 截断原因：显式请求的 `--context N` 行窗放不进 `max_snippet_chars`（M3-9）。
+///
+/// 默认 snippet 路径**不**报这条：`max_snippet_chars` 本来就把 snippet 定义成
+/// 有界预览，被裁的一侧带 `…` 标记，那是它的契约。而 `--context N` 是调用方
+/// 点名要的一段具体证据区域——给不全就是部分成功，必须走 partial/exit 10，
+/// 不能只靠一个省略号糊过去。
+pub const TRUNCATION_MAX_SNIPPET_CHARS: &str = "max_snippet_chars";
 
 /// 版本化响应预算（CONTRACT §3）：所有入口（CLI/Robot/MCP）共用同一组限额语义。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

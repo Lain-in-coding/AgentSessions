@@ -19,6 +19,16 @@ target-*/
 # not scratch databases — re-include them from the `*.db` rule above.
 !crates/*/tests/golden/*.db
 
+# Real provider transcripts used for local parse/probe verification (M1-1).
+# These are third-party PII: another person's prompts, absolute paths, usernames,
+# and occasionally credential-shaped output. They are read-only evidence for
+# local runs only — never committed, never redistributed, never quoted in docs
+# or commit messages. Several upstream repositories carry no licence at all,
+# which grants no redistribution right whatsoever.
+# Frozen corpus snapshots and their SHA-256 manifests live here too, so the
+# manifest stays beside the bytes it describes rather than in the repository.
+/evidence-input/
+
 # Generated local benchmark evidence (reports may contain machine details)
 /evidence-output/
 # Generated gate/install manifests (reproducible by re-running the harnesses;

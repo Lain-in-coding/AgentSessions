@@ -222,7 +222,7 @@ impl ProviderAdapter for GrokBuildAdapter {
             source,
             agent_session_grep_ports::STREAM_RECORD_MAX_BYTES,
         )
-        .map_err(|e| ProviderError::Io(e.to_string()))?;
+        .map_err(agent_session_grep_ports::provider_error_from_port)?;
 
         let mut report = ParseReport::default();
         let mut seq: u32 = 0;

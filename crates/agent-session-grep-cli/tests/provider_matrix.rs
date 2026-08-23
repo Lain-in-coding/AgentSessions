@@ -228,11 +228,24 @@ fn beta_ledger_ids(section: &str) -> Vec<String> {
         .collect()
 }
 
+/// 每个 provider 的 golden fixture revision，来源是各自 `tests/golden/PROVENANCE.md`
+/// 的 `fixture_revision`。逐 provider 列出而非统一常量：fixture 合法变更必须递增
+/// 该 provider 的 revision（见 `docs/security/FIXTURE-REDACTION-POLICY.md`），
+/// 所以此处的值必须跟着动，伪造的 revision 仍会在调用处失败。
+fn expected_fixture_revision(provider_id: &str) -> u32 {
+    match provider_id {
+        // revision 2：fixture 追加工具调用记录以见证 tool-activity 配对。
+        "codex" => 2,
+        _ => 1,
+    }
+}
+
 #[test]
 fn beta_readiness_manifests_match_ledger_evidence_columns() {
     // ledger 的本地列（golden / local Beta blockers）与全局 blocker 必须与真实
-    // adapter manifest 一致：golden fixture revision 1、无跨平台认证 target、
-    // maturity=Experimental、known_limitations 非空。manifest() 经由 manifest_for
+    // adapter manifest 一致：每个 provider 都声明一个 PROVENANCE.md 背书的 golden
+    // fixture revision、无跨平台认证 target、maturity=Experimental、
+    // known_limitations 非空。manifest() 经由 manifest_for
     // 携带各 adapter 自己的声明，因此空限制声明/伪造 revision 会在此失败。
     let ledger_rows = beta_ledger_rows("Per-provider local readiness");
     let ledger_implemented: Vec<&str> = ledger_rows.iter().map(|row| row[0].as_str()).collect();
@@ -250,8 +263,8 @@ fn beta_readiness_manifests_match_ledger_evidence_columns() {
         let id = manifest.provider_id.as_str();
         assert_eq!(
             manifest.fixture_revision,
-            Some(1),
-            "{id}: golden fixture revision 必须为 Some(1)"
+            Some(expected_fixture_revision(id)),
+            "{id}: golden fixture revision 必须与该 provider 的 PROVENANCE.md 一致"
         );
         assert!(
             manifest.last_certified_targets.is_empty(),

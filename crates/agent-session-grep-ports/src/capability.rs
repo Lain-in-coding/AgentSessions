@@ -211,7 +211,12 @@ impl ProviderCapabilityMatrix {
                     provider_id: "pi".into(),
                     variant_id: "pi/session-jsonl-v1".into(),
                     maturity: ProviderMaturity::Experimental,
-                    discover: CapabilityLevel::Unsupported,
+                    // `~/.pi/agent/sessions` 已注册为 discovery root。此前漏注册
+                    // 使 pi 在真实数据上完全不可达：`sync --discover` 报
+                    // `root_state: unsupported`、`found: 0`，而 root 下确有
+                    // transcript；手动 `sync <file>` 又因与 openclaw 同形而判
+                    // ambiguous，两条入口同时堵死（M1-14）。
+                    discover: CapabilityLevel::Native,
                     probe: CapabilityLevel::Native,
                     parse: CapabilityLevel::Native,
                     search: CapabilityLevel::Native,

@@ -174,6 +174,8 @@ All of these go *after* the `search` subcommand:
 | Flag | Effect |
 |---|---|
 | `--provider <id>` | Restrict to a provider. Repeatable; multiple values are OR-ed. |
+| `--role <role>` | Only `user`, `assistant`, `system`, `developer`, or `tool` messages. Repeatable; multiple values are OR-ed. |
+| `--exclude <term>` | Drop hits containing the term. Repeatable; a hit matching any term is dropped. |
 | `--since <t>` / `--until <t>` | Half-open time window `[since, until)`. Absolute RFC3339, or relative `1h` / `1d` / `1w`. |
 | `--group-by-session` | Collapse to one best hit per session, with an `occurrences` count. |
 | `--main-only` | Main-line messages only, excluding subagent sidechains. |
@@ -182,6 +184,19 @@ All of these go *after* the `search` subcommand:
 | `--tool-name <name>` | Only messages that used exactly this tool name. |
 | `--include-system` | Include `system`/`developer` messages, which are excluded by default. |
 | `--max-items <n>` / `--max-bytes <n>` / `--cursor <token>` | Page size, byte budget, and the continuation token from a previous page. |
+
+Nothing is filtered unless you ask. Two useful combinations:
+
+```bash
+# What did the assistant actually say about the retry logic?
+agent-session-grep search "retry" --role assistant
+
+# Same question, minus the noisy thread you already read.
+agent-session-grep search "retry" --role assistant --exclude backoff
+```
+
+`--role system` needs no `--include-system`: naming a role explicitly overrides
+the default that hides system noise.
 
 Exit code `10` means partial success: a budget truncated the response, so the
 results are usable but incomplete.

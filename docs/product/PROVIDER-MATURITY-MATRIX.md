@@ -60,7 +60,7 @@ target。
 | probe | `native` | 全部 14 个 adapter 均有 probe，歧义一律 `AmbiguousVariant` 拒绝（不低置信度猜测） |
 | parse | `native` | 全部 14 个 adapter 均 streaming 到 `CanonicalEventSink` |
 | search | `native` | 统一经 canonical 索引检索 |
-| discover | `native`（claude-code/codex/openclaw/tencent-codebuddy/antigravity/opencode）；`unsupported`（其余 8 个） | 这 6 个在 `provider_root_subpath` 注册了 discovery root，`sync --discover` 会真的扫（实测：伪 HOME 下每个 root 种一份 golden fixture，六个全部 `root_state=scanned found=1`）；其余只能显式 `sync <file>`。声明与注册表的一对一由 `cli` 的 `matrix_discover_claim_matches_registered_roots` 双向断言守护。注意本字段（有没有注册 root）与 discover 报告的 `root_state` 三态（`scanned` / `missing` = 注册了但磁盘上没有 / `unsupported` = 没注册）是两个不同问题：`native` + `missing`（provider 没装）自洽 |
+| discover | `native`（claude-code/codex/openclaw/pi/tencent-codebuddy/antigravity/opencode）；`unsupported`（其余 7 个） | 这 7 个在 `provider_root_subpath` 注册了 discovery root，`sync --discover` 会真的扫（实测：伪 HOME 下每个 root 种一份 golden fixture，全部 `root_state=scanned found=1`）；其余只能显式 `sync <file>`。声明与注册表的一对一由 `cli` 的 `matrix_discover_claim_matches_registered_roots` 双向断言守护。pi 的 root（`~/.pi/agent/sessions`）此前漏注册，使 pi 在真实数据上完全不可达（`--discover` 报 `unsupported`、手动 `sync` 因与 openclaw 同形报 ambiguous，两条路同时堵死），M1-14 补齐并由 `pi_registers_its_discovery_root` 钉住。注意本字段（有没有注册 root）与 discover 报告的 `root_state` 三态（`scanned` / `missing` = 注册了但磁盘上没有 / `unsupported` = 没注册）是两个不同问题：`native` + `missing`（provider 没装）自洽 |
 | resume | `derived`（claude-code/codex/pi/grok）；`unknown`（opencode/kimi/qoder/codebuddy/hermes/antigravity/cursor）；`unsupported`（aider/cline/openclaw） | 未核验的 resume 命令一律不设默认值 |
 | context / handoff / incremental | `unsupported` 或 `unknown` | 属后续全能力链工作，尚未逐 provider 评估 |
 | tool_activity | `partial`（claude-code/codex，schema v12 `tool_activities` 落库）；`unknown`（deepseek-harness/zcode，deferred）；`unsupported`（其余 12 个已实现 provider，含 aider——它把 blockquote 工具输出折叠进 assistant 文本，零 `emit_activity`） | CLI `--tool-kind`/`--tool-name`/`--main-only`/`--subagent-only`/`--include-sidechain`、MCP 同名参数与 TUI 分面键（`m` sidechain / `k` tool-kind）已落地；handoff pack 投影 `tool_activity` + 权威 `role`/`is_sidechain`，context 响应投影 `tool_activities`。声明由 `cli/tests/capability_behaviour.rs` 的行为断言守护：声明非 `unsupported` 必须能在证据输入上真的 emit 活动 |
@@ -159,7 +159,8 @@ manifest 均已填真实限制，见各 `crates/agent-session-grep-provider-*/sr
    关联实现/跨边界证据；在此之前不得把该条划掉或宣称 Accepted。
 7. `AdapterManifest` 结构化声明——**已闭合实现，晋级证据仍待认证**：
    `ProviderAdapter::manifest()` 与 owned `AdapterManifest` 已落地，14 个 provider
-   显式实现；14 个已实现 provider 均有 golden fixture，`fixture_revision=1`，
+   显式实现；14 个已实现 provider 均有 golden fixture（codex 为 `fixture_revision=2`，
+   其余为 `fixture_revision=1`），
    `known_limitations` 已从空数组填上真实限制（见上文「已知限制」），
    `last_certified_targets` 均为空，等待 named successful cross-target run 后填写。
 8. 只读约束的运行时断言——**已闭合**：全部 14 个已实现 provider 的 golden 测试通过

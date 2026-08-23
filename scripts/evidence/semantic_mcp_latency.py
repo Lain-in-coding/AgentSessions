@@ -192,7 +192,10 @@ def vector_backend(binary: str, db: Path) -> dict[str, Any]:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    binary = args.binary
+    # Resolve to absolute: Windows CreateProcess does not resolve a cwd-relative
+    # path the way a shell does, so a relative --binary would fail with a bare
+    # WinError 2 rather than a usable message.
+    binary = str(Path(args.binary).expanduser().resolve())
     override_db = Path(args.db) if args.db else None
     queries = [
         "ferroflux invalidate_stale",

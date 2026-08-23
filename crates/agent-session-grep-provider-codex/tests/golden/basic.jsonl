@@ -7,3 +7,7 @@
 {"timestamp":"2026-07-26T08:00:03.000Z","type":"event_msg","payload":{"type":"agent_message","message":"跨度以字节计，end 排他。\nCJK 与 emoji ✅ 均按 UTF-8 字节计算。"}}
 {"timestamp":"2026-07-26T08:00:04.000Z","type":"response_item","payload":{"type":"message","id":"msg-fx-0003","role":"user","content":[{"type":"input_text","text":"这一行是故意截断的损坏记录
 {"timestamp":"2026-07-26T08:00:05.000Z","type":"response_item","payload":{"type":"message","id":"msg-fx-0004","role":"user","content":[{"type":"input_text","text":"再确认一次：event_msg 镜像不会被重复计数 😀"}]}}
+{"timestamp":"2026-07-26T08:00:06.000Z","type":"response_item","payload":{"type":"message","id":"msg-fx-0005","role":"assistant","content":[{"type":"output_text","text":"先跑一次测试，再补一次格式化。"}]}}
+{"timestamp":"2026-07-26T08:00:07.000Z","type":"response_item","payload":{"type":"custom_tool_call","id":"call-fx-0001","tool_call_id":"call-fx-0001","name":"shell","arguments":"{\"command\":\"cargo test --workspace\"}"}}
+{"timestamp":"2026-07-26T08:00:08.000Z","type":"response_item","payload":{"type":"function_call_output","id":"out-fx-0001","call_id":"call-fx-0001","output":"test result: ok. 42 passed","is_error":false}}
+{"timestamp":"2026-07-26T08:00:09.000Z","type":"response_item","payload":{"type":"custom_tool_call","id":"call-fx-0002","tool_call_id":"call-fx-0002","name":"shell","arguments":{"command":"cargo fmt --all"}}}

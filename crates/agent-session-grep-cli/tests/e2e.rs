@@ -12,6 +12,16 @@ use std::process::{Command, Output, Stdio};
 /// 刚构建出的 `agent-session-grep` 二进制的绝对路径（由 Cargo 在编译期注入）。
 const BIN: &str = env!("CARGO_BIN_EXE_agent-session-grep");
 
+/// 被测二进制的调用名（M4-6）：帮助文本与建议命令都以此回显，故断言按它拼
+/// 期望值，而不是硬编码某一个 `[[bin]]` 名。
+fn invoked_name() -> String {
+    Path::new(BIN)
+        .file_stem()
+        .expect("binary has a file name")
+        .to_string_lossy()
+        .into_owned()
+}
+
 /// 在给定 db 上以 robot 协议模式跑一次 CLI，返回完整输出。
 /// 功能性测试统一断言稳定 JSON envelope；human 版式走 [`run_human`]。
 fn run(db: &str, args: &[&str]) -> Output {
@@ -1414,9 +1424,10 @@ fn empty_catalog_names_sync_discover_in_search_list_and_status() {
             text.contains("sync --discover"),
             "{args:?} 应点名 sync --discover: {text}"
         );
-        // 提示必须是可直接复制的整条命令：显式 --db 时要带上同一路径。
+        // 提示必须是可直接复制的整条命令：显式 --db 时要带上同一路径，
+        // 二进制名是本次实际调用名（M4-6），从 BIN 的文件名派生而非硬编码。
         assert!(
-            text.contains(&format!("asg --db {db} sync --discover")),
+            text.contains(&format!("{} --db {db} sync --discover", invoked_name())),
             "{args:?} 提示应是可执行全命令: {text}"
         );
     }
@@ -1503,15 +1514,170 @@ fn human_search_table_session_id_feeds_context_directly() {
     );
 }
 
+/// `sync <dir>` 按 provider probe 展开成候选文件（M3-11）。
+///
+/// 过去它拒绝目录并让用户"在你的 shell 里展开文件列表"——在 PowerShell 上那是
+/// 一句 `Get-ChildItem -Recurse | ForEach-Object`，而**这个工具自己**在
+/// `sync --discover` 里就在做同一件遍历。把已有能力推给用户手抄不是设计。
+///
+/// 三件事一起钉住：
+/// 1. 目录被递归展开，子目录里的 transcript 也进得来；
+/// 2. 展开走 provider probe 而不是扩展名 —— 目录里混着的非 transcript 文件
+///    （README、日志）被跳过而不是让整轮失败；
+/// 3. 一个**没有任何**可识别 transcript 的目录是用法错误，不是"成功同步 0 条"
+///    ——后者会让用户以为路径给对了。
+#[test]
+fn sync_expands_a_directory_into_recognised_transcripts() {
+    let (dir, db) = temp_db("sync-dir");
+    let root = dir.path().join("corpus");
+    let nested = root.join("nested");
+    std::fs::create_dir_all(&nested).expect("create corpus tree");
+
+    let line = |uuid: &str, text: &str| {
+        format!(
+            r#"{{"type":"user","uuid":"{uuid}","parentUuid":null,"sessionId":"b2bbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb99","timestamp":"2026-01-01T00:00:00.000Z","message":{{"role":"user","content":"{text}"}}}}"#
+        )
+    };
+    std::fs::write(
+        root.join("top.jsonl"),
+        line("a1aaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa91", "dirsync top level") + "\n",
+    )
+    .expect("write top transcript");
+    std::fs::write(
+        nested.join("deep.jsonl"),
+        line(
+            "a1aaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa92",
+            "dirsync nested level",
+        ) + "\n",
+    )
+    .expect("write nested transcript");
+    // 非 transcript：probe 不认它，必须被跳过而不是让整轮失败。
+    std::fs::write(root.join("NOTES.txt"), "not a transcript at all\n").expect("write noise");
+
+    let root_s = root.to_string_lossy().into_owned();
+    let out = run(&db, &["sync", &root_s]);
+    assert!(out.status.success(), "sync <dir> failed: {}", stdout(&out));
+    let frame = parse_first_line(&out);
+    assert_eq!(
+        frame["data"]["sources"], 2,
+        "两份 transcript 都该被展开，噪声文件不计入: {frame}"
+    );
+    assert_eq!(frame["data"]["committed"], 2, "{frame}");
+
+    // 两条都真的可搜索（展开不是只报了个数字）。
+    for term in ["dirsync", "nested"] {
+        let out = run(&db, &["search", term]);
+        assert!(
+            stdout(&out).contains("msg_v1_"),
+            "term `{term}` 应命中: {}",
+            stdout(&out)
+        );
+    }
+
+    // 空目录（无可识别 transcript）是用法错误，不是"成功同步 0 条"。
+    let empty = dir.path().join("empty");
+    std::fs::create_dir_all(&empty).expect("create empty dir");
+    std::fs::write(empty.join("README.md"), "# nothing here\n").expect("write readme");
+    let out = run(&db, &["sync", &empty.to_string_lossy()]);
+    assert_eq!(out.status.code(), Some(2), "{}", stdout(&out));
+    let frame = parse_first_line(&out);
+    assert_eq!(frame["error"]["code"], "invalid_request", "{frame}");
+    let message = frame["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("providers"),
+        "错误必须给出下一步（怎么知道支持哪些格式）: {message}"
+    );
+    // 隐私：错误消息不回显用户的目录布局。
+    assert!(
+        !message.contains("empty") && !message.contains(&*empty.to_string_lossy()),
+        "错误消息不得带路径: {message}"
+    );
+}
+
 #[test]
 fn doctor_reports_ok_without_db() {
-    let out = run_bare(&["--robot", "doctor"]);
+    // `doctor` 现在会按 `$ASG_DB` > 平台默认 找库（与 status/search 同一条链），
+    // 所以"不给 --db"的结果取决于**机器上有没有库**，不能再硬断言 `not-checked`
+    // ——开发机上恰好有默认库时那个断言会失败，而失败的是测试的前提不是产品。
+    // 用一个隔离的 HOME/LOCALAPPDATA 把平台默认路径指到空目录，
+    // 这样"没有库"是被构造出来的事实，不是碰巧成立的环境。
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = Command::new(BIN)
+        .env_remove("ASG_DB")
+        .env("HOME", dir.path())
+        .env("USERPROFILE", dir.path())
+        .env("LOCALAPPDATA", dir.path().join("AppData").join("Local"))
+        .env("XDG_DATA_HOME", dir.path().join("share"))
+        .args(["--robot", "doctor"])
+        .output()
+        .expect("failed to spawn agent-session-grep binary");
     assert!(out.status.success());
     let s = stdout(&out);
     assert!(s.contains("\"ok\":true"), "doctor 应报告 ok:true: {s}");
     assert!(
         s.contains("\"db\":\"not-checked\""),
-        "无 --db 时应标记未校验: {s}"
+        "隔离环境里没有库，应标记未校验: {s}"
+    );
+    // 读命令不建库：自检不得为了"有东西可查"而造出一个空库。
+    let frame = parse_first_line(&out);
+    let hint = frame["data"]["hint"].as_str().unwrap_or_default();
+    assert!(
+        hint.contains("sync --discover"),
+        "没库时必须告诉用户怎么建: {hint}"
+    );
+}
+
+/// `doctor` 必须与其它读命令共用同一条 store-path 优先级链：`$ASG_DB` 也算。
+///
+/// 过去它只看 `--db`，于是设了 `$ASG_DB` 的用户在**唯一一个专职"检查我的库"**
+/// 的命令上拿到 `db: not-checked`，而同样不带 `--db` 的 `status` / `search`
+/// 却正常读到了那个库。两个方向都钉住：
+/// 1. 环境变量指向一个**存在**的库 → 真的去查它（`db: ok` + schema）；
+/// 2. 环境变量指向一个**不存在**的库 → 如实说没库、并说出找过哪里，
+///    且**绝不把库建出来**（读命令不建库，D8；`SqliteStore::open` 会建，
+///    所以这条容易被写错成"顺手造一个空库然后报 ok"）。
+#[test]
+fn doctor_honours_the_store_path_env_var() {
+    let (dir, db) = temp_db("doctor-env");
+    let out = seed(&db, "d-env", "doctor env content");
+    assert!(out.status.success(), "seed failed: {}", stdout(&out));
+
+    let out = Command::new(BIN)
+        .args(["--robot", "doctor"])
+        .env("ASG_DB", &db)
+        .current_dir(dir.path())
+        .output()
+        .expect("run doctor");
+    assert!(out.status.success(), "doctor failed: {}", stdout(&out));
+    let frame = parse_first_line(&out);
+    assert_eq!(
+        frame["data"]["db"], "ok",
+        "$ASG_DB 指向的库必须被真的检查: {frame}"
+    );
+    assert!(
+        frame["data"]["schema"].is_number(),
+        "查到库就该报 schema: {frame}"
+    );
+
+    // 不存在的库：如实报告，且不得建库。
+    let missing = dir.path().join("no-such-store.db");
+    let out = Command::new(BIN)
+        .args(["--robot", "doctor"])
+        .env("ASG_DB", &missing)
+        .current_dir(dir.path())
+        .output()
+        .expect("run doctor");
+    assert!(out.status.success(), "doctor failed: {}", stdout(&out));
+    let frame = parse_first_line(&out);
+    assert_eq!(frame["data"]["db"], "not-checked", "{frame}");
+    let hint = frame["data"]["hint"].as_str().unwrap_or_default();
+    assert!(
+        hint.contains("ASG_DB"),
+        "提示必须说出它找过哪里，否则设了环境变量的人会以为自己设错了: {hint}"
+    );
+    assert!(
+        !missing.exists(),
+        "doctor 是读命令，绝不能把库建出来（否则空库会被报成自检通过）"
     );
 }
 
@@ -5211,9 +5377,18 @@ fn search_byte_budget_truncates_but_keeps_session_context_in_hits() {
             text.chars().count() <= 2000,
             "text 摘要不得超过 max_snippet_chars: {hit}"
         );
+        // M3-9 起摘要以命中为中心，被裁掉的一侧带 `…` 标记，所以不再必然是
+        // 正文的字面前缀。真正的契约是：去掉标记后仍是正文的**连续子串**
+        // （逐字证据，不改写、不拼接），且必须含命中词。
+        let core = text.trim_matches('…');
+        assert!(!core.is_empty(), "{hit}");
         assert!(
-            body_a.starts_with(text) || body_b.starts_with(text),
-            "摘要应是正文前缀: {hit}"
+            body_a.contains(core) || body_b.contains(core),
+            "摘要去标记后应是正文的连续子串: {hit}"
+        );
+        assert!(
+            core.contains("widgets"),
+            "以命中为中心的摘要必须含命中词: {hit}"
         );
     }
 }
@@ -5943,6 +6118,153 @@ const CLAUDE_TOOL_FIXTURE: &str = r#"{"type":"user","uuid":"u-1","sessionId":"se
 {"type":"assistant","uuid":"a-2","parentUuid":"r-1","sessionId":"sess-tools","isSidechain":true,"message":{"role":"assistant","content":[{"type":"text","text":"checking the file"},{"type":"tool_use","id":"toolu_2","name":"Read","input":{"file_path":"src/main.rs"}}]}}
 {"type":"user","uuid":"r-2","parentUuid":"a-2","sessionId":"sess-tools","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_2","content":"read the file contents","is_error":false}]}}"#;
 
+/// Claude synthetic fixture: one message per role, all sharing a query token.
+/// One assistant message carries an extra token so exclusion has something to
+/// remove without removing the whole role.
+const CLAUDE_ROLE_FIXTURE: &str = r#"{"type":"user","uuid":"ru-1","sessionId":"sess-roles","message":{"role":"user","content":"rolequery from the operator"}}
+{"type":"assistant","uuid":"ra-1","parentUuid":"ru-1","sessionId":"sess-roles","message":{"role":"assistant","content":[{"type":"text","text":"rolequery answered by the model"}]}}
+{"type":"assistant","uuid":"ra-2","parentUuid":"ru-1","sessionId":"sess-roles","message":{"role":"assistant","content":[{"type":"text","text":"rolequery answered with dropme marker"}]}}
+{"type":"system","uuid":"rs-1","sessionId":"sess-roles","message":{"role":"system","content":"rolequery harness preamble"}}"#;
+
+fn sorted_hit_ids(frame: &serde_json::Value) -> Vec<String> {
+    let mut ids = hit_ids(frame);
+    ids.sort();
+    ids
+}
+
+#[test]
+fn search_role_filter_selects_one_role_at_a_time() {
+    let (dir, db) = temp_db("search-roles");
+    let fixture = dir.path().join("claude-roles.jsonl");
+    std::fs::write(&fixture, CLAUDE_ROLE_FIXTURE).expect("write fixture");
+    let path = fixture.to_string_lossy().into_owned();
+
+    let out = run(&db, &["sync", &path]);
+    assert!(out.status.success(), "sync failed: {}", stdout(&out));
+    assert!(stdout(&out).contains("\"messages\":4"), "{}", stdout(&out));
+
+    // Baseline: nothing filtered by default. The system message is still absent
+    // because of the pre-existing include_system default, not because of --role.
+    let baseline = sorted_hit_ids(&parse_first_line(&run(&db, &["search", "rolequery"])));
+    let mut expected = vec![
+        native_msg_wire("ru-1"),
+        native_msg_wire("ra-1"),
+        native_msg_wire("ra-2"),
+    ];
+    expected.sort();
+    assert_eq!(baseline, expected, "unfiltered search must be unchanged");
+
+    // M3-8's headline gap: search only the assistant's own messages.
+    let assistants = sorted_hit_ids(&parse_first_line(&run(
+        &db,
+        &["search", "rolequery", "--role", "assistant"],
+    )));
+    let mut expected = vec![native_msg_wire("ra-1"), native_msg_wire("ra-2")];
+    expected.sort();
+    assert_eq!(assistants, expected);
+
+    let users = sorted_hit_ids(&parse_first_line(&run(
+        &db,
+        &["search", "rolequery", "--role", "user"],
+    )));
+    assert_eq!(users, vec![native_msg_wire("ru-1")]);
+
+    // Repeated --role ORs within the dimension.
+    let both = sorted_hit_ids(&parse_first_line(&run(
+        &db,
+        &[
+            "search",
+            "rolequery",
+            "--role",
+            "user",
+            "--role",
+            "assistant",
+        ],
+    )));
+    let mut expected = vec![
+        native_msg_wire("ru-1"),
+        native_msg_wire("ra-1"),
+        native_msg_wire("ra-2"),
+    ];
+    expected.sort();
+    assert_eq!(both, expected);
+
+    // Asking for system needs no second flag: the explicit allowlist supersedes
+    // the include_system default that removed it from the baseline above.
+    let systems = sorted_hit_ids(&parse_first_line(&run(
+        &db,
+        &["search", "rolequery", "--role", "system"],
+    )));
+    assert_eq!(systems, vec![native_msg_wire("rs-1")]);
+}
+
+#[test]
+fn search_exclude_drops_hits_containing_the_term() {
+    let (dir, db) = temp_db("search-exclude");
+    let fixture = dir.path().join("claude-roles.jsonl");
+    std::fs::write(&fixture, CLAUDE_ROLE_FIXTURE).expect("write fixture");
+    let path = fixture.to_string_lossy().into_owned();
+    assert!(run(&db, &["sync", &path]).status.success());
+
+    let kept = sorted_hit_ids(&parse_first_line(&run(
+        &db,
+        &["search", "rolequery", "--exclude", "dropme"],
+    )));
+    let mut expected = vec![native_msg_wire("ru-1"), native_msg_wire("ra-1")];
+    expected.sort();
+    assert_eq!(kept, expected, "only the message with the term is removed");
+
+    // Composes with --role: one dimension does not disable the other.
+    let kept = sorted_hit_ids(&parse_first_line(&run(
+        &db,
+        &[
+            "search",
+            "rolequery",
+            "--role",
+            "assistant",
+            "--exclude",
+            "dropme",
+        ],
+    )));
+    assert_eq!(kept, vec![native_msg_wire("ra-1")]);
+
+    // Repeated --exclude ORs: a hit matching any term is dropped.
+    let kept = sorted_hit_ids(&parse_first_line(&run(
+        &db,
+        &[
+            "search",
+            "rolequery",
+            "--exclude",
+            "dropme",
+            "--exclude",
+            "operator",
+        ],
+    )));
+    assert_eq!(kept, vec![native_msg_wire("ra-1")]);
+}
+
+#[test]
+fn search_rejects_an_unknown_role_and_publishes_the_accepted_values() {
+    let (dir, db) = temp_db("search-role-usage");
+    let fixture = dir.path().join("claude-roles.jsonl");
+    std::fs::write(&fixture, CLAUDE_ROLE_FIXTURE).expect("write fixture");
+    assert!(
+        run(&db, &["sync", &fixture.to_string_lossy()])
+            .status
+            .success()
+    );
+
+    let out = run(&db, &["search", "anything", "--role", "operator"]);
+    assert_eq!(out.status.code(), Some(2), "{}", stdout(&out));
+    let frame = parse_first_line(&out);
+    let message = frame["error"]["message"].as_str().unwrap_or_default();
+    assert!(message.contains("operator"), "{frame}");
+    assert!(
+        message.contains("user|assistant|system|developer|tool"),
+        "the error must publish the accepted values: {frame}"
+    );
+}
+
 #[test]
 fn sync_indexes_tool_activities_and_search_facets_filter_them() {
     let (dir, db) = temp_db("sync-act");
@@ -6143,6 +6465,53 @@ fn sync_extracts_codex_function_call_activities() {
         1,
         "{frame}"
     );
+}
+
+#[test]
+fn sync_indexes_two_unpaired_same_named_codex_tool_calls() {
+    // 回归 M1-15（最小合成复现，三条记录 + 头）：同一条助理消息上两条同名
+    // `exec` 调用，都没有配对的 `function_call_output`。`exec` 的 arguments 里
+    // `command` 是数组，target 提取只接受字符串 → 两条都是 target=None、
+    // status=unknown，于是派生出同一个 activity_id。
+    //
+    // 修复前：提交层把批内同 id 当 fail-closed 错误，整批 sync 报 catalog_error
+    // (exit 6) 且零条入库；由于 sync 整轮 all-or-nothing，一份这样的 rollout
+    // 会让同一轮里其余全部源都无法入库。
+    let (dir, db) = temp_db("sync-act-codex-unpaired");
+    let fixture = dir.path().join("codex-unpaired.jsonl");
+    std::fs::write(
+        &fixture,
+        concat!(
+            r#"{"timestamp":"2026-08-15T00:00:00.000Z","type":"session_meta","payload":{"session_id":"sess-dup"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-08-15T00:00:01.000Z","type":"response_item","payload":{"type":"message","id":"msg_dup1","role":"assistant","content":[{"type":"output_text","text":"launching two probes"}]}}"#,
+            "\n",
+            r#"{"timestamp":"2026-08-15T00:00:02.000Z","type":"response_item","payload":{"type":"custom_tool_call","id":"call_dup1","tool_call_id":"call_dup1","name":"exec","arguments":"{\"command\":[\"bash\",\"-lc\",\"cargo build\"]}"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-08-15T00:00:03.000Z","type":"response_item","payload":{"type":"custom_tool_call","id":"call_dup2","tool_call_id":"call_dup2","name":"exec","arguments":"{\"command\":[\"bash\",\"-lc\",\"cargo test\"]}"}}"#,
+            "\n",
+        ),
+    )
+    .expect("write codex unpaired fixture");
+    let path = fixture.to_string_lossy().into_owned();
+
+    let out = run(&db, &["sync", &path]);
+    assert!(
+        out.status.success(),
+        "两条同名未配对调用不得让整批 sync 失败: exit={:?} {}",
+        out.status.code(),
+        stdout(&out)
+    );
+    let frame = parse_first_line(&out);
+    assert_eq!(frame["data"]["emitted"], 1, "frame={frame}");
+    assert_eq!(frame["data"]["messages"], 1, "frame={frame}");
+
+    // 折叠后仍保留一条可检索的活动事实，锚在发出调用的助理消息上。
+    let out = run(&db, &["search", "probes", "--tool-name", "exec"]);
+    let frame = parse_first_line(&out);
+    let hits = frame["data"]["hits"].as_array().expect("hits");
+    assert_eq!(hits.len(), 1, "frame={frame}");
+    assert_eq!(hits[0]["id"], native_msg_wire("msg_dup1"), "frame={frame}");
 }
 
 #[test]

@@ -26,6 +26,14 @@ pub enum PortError {
     #[error("backend failure: {0}")]
     Backend(String),
 
+    /// 端口实现自身的不变量被违反——bug 信号，不是存储或 IO 故障。
+    ///
+    /// 与 `Backend` 分开的理由是 operator_action 完全不同：`Backend` 映射
+    /// `catalog_error`，指引用户"检查 --db 路径、跑 doctor"；而不变量违反不是
+    /// 用户能修的，也与数据库无关，必须落在 `internal`（exit 70，报缺陷）。
+    #[error("invariant violation: {0}")]
+    Invariant(String),
+
     /// 源文件读取或快照元数据 I/O 故障。
     #[error("source I/O failure: {0}")]
     SourceIo(String),
@@ -419,6 +427,17 @@ impl SearchRole {
 /// a half-open UTC interval `[since, until)`. Project paths constrain only
 /// trustworthy resolved Original Working Directory claims, never transcript
 /// source paths. Exclusion terms are structured literal terms, not FTS syntax.
+///
+/// Two consequences a caller has to know about, because they are not derivable
+/// from the field names:
+///
+/// - A non-empty `roles` set is an explicit allowlist and therefore supersedes
+///   the request-level `include_system` default (which otherwise drops
+///   `system`/`developer`). Without that, asking for `system` would always
+///   return nothing.
+/// - A non-empty `roles` set also suppresses Session-metadata recall: role is a
+///   message-level fact and a Session entity has none, so the only honest
+///   answer is to return messages.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SearchFilters {
     pub providers: Vec<SearchProvider>,
@@ -502,6 +521,24 @@ pub struct SearchHit {
     /// Safe final path component for Robot/MCP/Web attribution. `None` is an
     /// explicit unknown/redacted shape and never falls back to a source path.
     pub project_name: Option<String>,
+    /// Where each matched term sits inside [`SearchHit::text`] (M3-9), as
+    /// half-open `[start, end)` offsets in **chars** — the same unit as
+    /// `max_snippet_chars`, not bytes and not UTF-16 units.
+    ///
+    /// This is highlight *metadata*, deliberately separate from the text: the
+    /// snippet stays the verbatim transcript bytes on every surface, and no
+    /// entry point ever injects ANSI escapes or markup into `text`. Human
+    /// surfaces render the emphasis; machine surfaces get the offsets and decide
+    /// for themselves.
+    ///
+    /// One range per distinct matched term (the earliest occurrence inside the
+    /// window), so the list is bounded by the same `MAX_WHY_MATCHED` cap that
+    /// bounds [`SearchHit::why_matched`] and never needs a silent cut.
+    /// Overlapping ranges are merged, so a range marks *where to emphasise*
+    /// rather than which term matched — `why_matched` carries the terms.
+    /// Empty when the match could not be located literally (non-`text` payload,
+    /// or CJK bigram tokenisation that does not align to a substring).
+    pub match_ranges: Vec<(usize, usize)>,
 }
 
 /// 检索模式：标识本次搜索结果使用哪种匹配策略（wire 字符串见 [`RetrievalMode::as_str`]）。
@@ -975,6 +1012,7 @@ pub fn ensure_readable(
 fn port_error_kind(error: &PortError) -> &'static str {
     match error {
         PortError::Backend(_) => "backend",
+        PortError::Invariant(_) => "invariant",
         PortError::SourceIo(_) => "source_io",
         PortError::SchemaIncompatible(_) => "schema_incompatible",
         PortError::NotFound(_) => "not_found",
@@ -1320,8 +1358,19 @@ impl ReadOnlySource for SliceSource<'_> {
 }
 
 /// 端口错误 → provider 错误（携带稳定分类，细节由端口层日志承担）。
+///
+/// 快照漂移必须保留它自己的变体：调用方据此判断"等一下重试就能赢"，
+/// 压成 `Io` 会让协议层报成不可重试的 provider_error。adapter 打开源时
+/// 一律走这里，不要各自 `ProviderError::Io(e.to_string())`——那会重新丢掉分类。
+pub fn provider_error_from_port(error: PortError) -> ProviderError {
+    match error {
+        PortError::SnapshotChanged(detail) => ProviderError::SourceChangedDuringRead(detail),
+        other => ProviderError::Io(other.to_string()),
+    }
+}
+
 fn provider_io(error: PortError) -> ProviderError {
-    ProviderError::Io(error.to_string())
+    provider_error_from_port(error)
 }
 
 /// Read a whole source into a byte buffer bounded by `max_source_size`.

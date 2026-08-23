@@ -18,8 +18,20 @@ use agent_session_grep_ports::{
 /// Variant id surfaced in probe results.
 const VARIANT_ID: &str = "pi/session-jsonl-v1";
 
-/// Number of non-blank lines to sample during probe (bounded, RFC-0002 §7).
-const SAMPLE_LINE_LIMIT: usize = 8;
+/// Upper bound on non-blank lines scanned during probe (RFC-0002 §7: the probe
+/// is bounded and never reads the whole file).
+///
+/// The scan stops as soon as a session header and a conversational message have
+/// both been seen, so a typical transcript costs only a handful of lines; this
+/// cap only binds when the first message sits unusually deep.
+///
+/// A real pi session opens with the `session` header followed by a run of
+/// `model_change` / `thinking_level_change` records, so the first `message` can
+/// sit past the first several lines. The previous limit of 8 lines closed the
+/// window before that evidence was in hand — the probe then returned `High`
+/// instead of `Confirmed` on every real transcript, while the synthetic fixture
+/// (message immediately after the header) passed.
+const SCAN_LINE_LIMIT: usize = 64;
 
 /// Pi coding agent adapter: parses session JSONL with `type`-discriminated records.
 pub struct PiAdapter;
@@ -88,29 +100,21 @@ impl ProviderAdapter for PiAdapter {
         let mut matched = Vec::new();
         let mut unmatched = Vec::new();
 
-        let mut sample: Vec<(usize, &str)> = Vec::new();
-        for (idx, line) in text.lines().enumerate() {
-            if line.trim().is_empty() {
-                continue;
-            }
-            if sample.len() == SAMPLE_LINE_LIMIT {
-                break;
-            }
-            sample.push((idx + 1, line));
-        }
-
-        if sample.is_empty() {
-            return Err(ProviderError::AmbiguousVariant(
-                "empty input: no non-blank lines to probe".into(),
-            ));
-        }
-
+        let mut scanned = 0usize;
         let mut json_lines = 0usize;
         let mut session_headers = 0usize;
         let mut message_records = 0usize;
         let mut conversational = 0usize;
 
-        for &(line_no, line) in &sample {
+        for (idx, line) in text.lines().enumerate() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            if scanned == SCAN_LINE_LIMIT {
+                break;
+            }
+            scanned += 1;
+            let line_no = idx + 1;
             match serde_json::from_str::<serde_json::Value>(line) {
                 Ok(v) => {
                     json_lines += 1;
@@ -136,12 +140,22 @@ impl ProviderAdapter for PiAdapter {
                     unmatched.push(format!("line {line_no}: not valid JSON"));
                 }
             }
+            // The `Confirmed` condition below is satisfied; further lines cannot
+            // change the verdict, so stop rather than scan to the cap.
+            if conversational > 0 && session_headers > 0 {
+                break;
+            }
+        }
+
+        if scanned == 0 {
+            return Err(ProviderError::AmbiguousVariant(
+                "empty input: no non-blank lines to probe".into(),
+            ));
         }
 
         if json_lines == 0 {
             return Err(ProviderError::AmbiguousVariant(format!(
-                "no JSON lines parsed in {0} sampled lines",
-                sample.len()
+                "no JSON lines parsed in {scanned} sampled lines"
             )));
         }
 
@@ -198,7 +212,7 @@ impl ProviderAdapter for PiAdapter {
             source,
             agent_session_grep_ports::STREAM_RECORD_MAX_BYTES,
         )
-        .map_err(|e| ProviderError::Io(e.to_string()))?;
+        .map_err(agent_session_grep_ports::provider_error_from_port)?;
 
         let mut report = ParseReport::default();
         let mut seq: u32 = 0;
@@ -398,6 +412,66 @@ mod tests {
         let adapter = PiAdapter::new();
         let fixture = "{\"foo\":1}\n{\"bar\":2}\n";
         assert!(adapter.probe(fixture.as_bytes()).is_err());
+    }
+
+    /// Regression (M1-14): a real pi transcript does not put a message right
+    /// after the header. It opens with the `session` header, then a run of
+    /// `model_change` / `thinking_level_change` records, and the first `message`
+    /// lands past line 8 — measured at non-blank line 9 on the deepest of seven
+    /// real transcripts. The old 8-line probe window closed before any message
+    /// was seen, so the probe returned `High` instead of `Confirmed` and tied
+    /// with the shape-identical openclaw adapter, which made every real pi file
+    /// unattributable. The fixture below is synthetic but reproduces that
+    /// observed record order; the ideal order is covered separately by
+    /// `probe_confirms_pi_session_jsonl` and proves nothing about this defect.
+    #[test]
+    fn probe_confirms_when_meta_records_precede_first_message() {
+        let adapter = PiAdapter::new();
+        let mut fixture = String::from(
+            r#"{"type":"session","version":3,"id":"sess-1","timestamp":"2026-01-01T00:00:00Z","cwd":"/work"}
+{"type":"thinking_level_change","id":"t1","thinkingLevel":"off"}
+"#,
+        );
+        // Enough meta records to push the first message past the old 8-line cap.
+        for i in 0..12 {
+            fixture.push_str(&format!(
+                "{{\"type\":\"model_change\",\"id\":\"m{i}\",\"modelId\":\"model-{i}\"}}\n"
+            ));
+        }
+        fixture.push_str(
+            r#"{"type":"message","message":{"role":"user","content":"hello"}}
+{"type":"message","message":{"role":"assistant","content":"hi there"}}
+"#,
+        );
+        let result = adapter.probe(fixture.as_bytes()).unwrap();
+        assert_eq!(result.variant_id, VARIANT_ID);
+        assert_eq!(
+            result.confidence,
+            Confidence::Confirmed,
+            "a real-order pi transcript must reach Confirmed, not tie at High"
+        );
+    }
+
+    /// The probe stays bounded (RFC-0002 §7): a file whose first message sits
+    /// beyond the scan cap does not get read to the end, so it can only reach
+    /// `High`. This is the honest ceiling of a bounded probe — asserting it keeps
+    /// a later "just widen the window again" change from quietly becoming an
+    /// unbounded read.
+    #[test]
+    fn probe_stays_bounded_when_first_message_is_beyond_scan_limit() {
+        let adapter = PiAdapter::new();
+        let mut fixture = String::from(
+            r#"{"type":"session","version":3,"id":"sess-1","timestamp":"2026-01-01T00:00:00Z","cwd":"/work"}
+"#,
+        );
+        for i in 0..SCAN_LINE_LIMIT {
+            fixture.push_str(&format!(
+                "{{\"type\":\"model_change\",\"id\":\"m{i}\",\"modelId\":\"model-{i}\"}}\n"
+            ));
+        }
+        fixture.push_str(r#"{"type":"message","message":{"role":"user","content":"hello"}}"#);
+        let result = adapter.probe(fixture.as_bytes()).unwrap();
+        assert_eq!(result.confidence, Confidence::High);
     }
 
     #[test]

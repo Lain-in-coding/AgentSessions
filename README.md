@@ -52,26 +52,33 @@ agent-session-grep --version
 asg --version
 ```
 
-Then use either command name. Every data command needs the store path
-(`--db`); run `asg config paths` to see the default data location on your
-platform:
+Then use either command name. No configuration is needed: the store lives at a
+per-platform default path, which `asg config paths` prints. Pass `--db <path>`
+(or set `$ASG_DB`) only when you want a store somewhere else.
 
 ```bash
-# Index your Claude Code + Codex sessions
-asg --db <db-path> sync --discover
+# Index every provider data root found on this machine
+asg sync --discover
 
 # Search across all providers
-asg --db <db-path> search "authentication refactor"
+asg search "authentication refactor"
 
 # Get session context
-asg --db <db-path> context <session-id>
+asg context <session-id>
 
 # Preview the resume command for a session (dry-run; --yes to execute)
-asg --db <db-path> resume <session-id>
+asg resume <session-id>
 
 # Generate a handoff pack for another agent
-asg --db <db-path> handoff "how did we configure the database?"
+asg handoff "how did we configure the database?"
+
+# Check your environment and store; each failing check names a next step
+asg doctor
 ```
+
+Precedence for the store path is `--db <path>` > `$ASG_DB` > the platform
+default. Read commands never create a store, so a mistyped `--db` is reported as
+a missing store rather than silently answering from a new empty one.
 
 Retrieval is lexical by default (FTS5 with CJK bigram support); the default
 vector mode is an honest bigram-hash fuzzy-lexical matcher, not a semantic

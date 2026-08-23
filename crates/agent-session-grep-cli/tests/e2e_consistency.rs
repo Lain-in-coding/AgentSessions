@@ -63,9 +63,10 @@ fn consistency_report_all_five_entry_points_agree() {
     let out = run_script(&["--binary", BIN, "--json"]);
     let code = out.status.code().unwrap_or(-1);
     let stderr_text = stderr(&out);
+    let stdout_text = stdout(&out);
     assert!(
         out.status.success(),
-        "compare_entrypoints.py must exit 0, got {code}\nstderr: {stderr_text}"
+        "compare_entrypoints.py must exit 0, got {code}\nstderr: {stderr_text}\nstdout: {stdout_text}"
     );
 
     let report: serde_json::Value =

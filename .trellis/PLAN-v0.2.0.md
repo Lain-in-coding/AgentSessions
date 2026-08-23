@@ -483,6 +483,55 @@ message / 231 session,**七条全 PASS**,harness 退出 0,报告仅含聚合数�
 **规则:本表每一行都是读代码得出的推断,在有配对实测之前不得当作事实引用,
 也不得据此声称某项优化"应该"有效。** 四次里没有一次推断是全对的。
 
+**⚠️ 第五条(2026-08-20,这条不是读码推断,而是我的流程失误):
+我在合并 `5ddfb2c` 时声称"本地闸门全绿(212 + 225 + 290 + 141)",
+但 `5ddfb2c` 上 `cargo test --workspace` 实际是**红的** ——
+`search_byte_budget_truncates_but_keeps_session_context_in_hits` 失败。
+在干净 worktree 上 checkout `5ddfb2c` 单跑该用例复现确认,
+所以不是环境问题,是我合并前没有真的把 workspace 跑完就下了结论。**
+根因是我自己的 M3-9 改动:snippet 从 `chars().take(n)` 改成以命中为中心后,
+窗口不从正文开头起时会带前导 `…`,于是"摘要是正文字面前缀"这条断言失效。
+**教训:"闸门全绿"必须是一次完整 `cargo test --workspace` 的实际输出,
+不能由分包结果拼凑;改了投影逻辑就要想到谁在断言那个投影的形状。**
+已修:`33bb459`(断言改为"去标记后是连续子串且含命中词")。
+
+**⚠️ 第六条(2026-08-20,竞态测量的方法论错误 —— 差点造出一个假的绿灯):**
+修完 M2P-10 的分类后,我用单次复现脚本验证"exit 5 通过",本来打算就此收工。
+**但对修复前的二进制做反向对照(negative control)时,它也"通过"了。**
+连跑 6 次修复前的二进制:**exit 7 三次、exit 5 三次** ——
+漂移可以从两个地方冒出来(adapter 的 read,或提交前的 verify),
+**哪一个先输掉竞态每次都不一样**,而只有前者在修复前会误分类。
+→ **单次运行的守卫在这里毫无鉴别力:它有约一半概率给已知坏的二进制盖绿章。**
+**规则:凡是测竞态/时序的守卫,必须(1)多次试跑并要求每次都对,
+(2)对已知坏的版本做反向对照证明它真的会红,
+(3)把"竞态根本没发生"单独报成 `not_reproduced` 而不是算通过。**
+落地:`scripts/evidence/growing_source_repro.py` 默认 6 试次,任一误分类即红;
+实测修复后 6/6 干净,修复前抓出 3 次误分类(`ae80790`)。
+**如果我没做那次反向对照,这条修复会带着一个永远不会亮的红灯合进去。**
+
+**⚠️ 第七条(2026-08-20,两次被同一个测量假象骗到,值得单独立条):**
+跑 M1-4 真实语料验证时,我两次得出错误结论,**两次都不是被测代码的问题,
+而是我的测量方式有问题**:
+1. **假的"批量大小阈值"**:codex 语料 n=10 通过、n=12 起失败,
+   我一度写下"批量到 12 就崩"。真相是**多次运行共用了 `$env:TEMP` 根目录**,
+   而 **writer lease 落在 DB 文件的父目录**(`lease.rs:87`
+   `data_root.join("writer.lock")`)—— 各次运行互相抢锁,报的是 `writer_busy`
+   不是真故障。给每次运行**独立目录**后,真正的失败点是**单个文件**,
+   与批量大小无关。
+2. **假的 `writer_busy` 连环失败**:分块跑 1,838 份 claude-code 时
+   19 个批次里 10 个报 `writer_busy`。真相是我在管道里用了
+   `... | Select-Object -First 1` —— **PowerShell 会提前终止管道,
+   上游进程没走完就被切断,lease 还握在手里**,于是下一个批次必然撞锁。
+   改成"先完整收集输出、再过滤"之后,同样的分块 18/19 成功。
+**规则(测量纪律)**:
+- 每次驱动二进制的运行给**独立的 DB 父目录**,不共用 `$TEMP` 根;
+- **不要用 `Select-Object -First N` 直接截断二进制的管道输出** ——
+  先 `$out = & binary ...` 完整收集,再从 `$out` 里挑;
+- 看到 `writer_busy` 先怀疑自己的测量脚本和残留进程
+  (本轮清掉了 4 个 8/17-8/18 起就在跑的僵尸进程),再怀疑代码;
+- **凡"阈值型"结论(到 N 就坏)先做单点验证** ——
+  本轮"n=12 崩"实际是"第 12 个文件坏",一次单文件测试就能推翻。
+
 **⚠️ 优先级已按 §1.3.1 实测重排。** 上表按"读代码推断的严重度"排序,而实测
 判定是:瓶颈 #2(吞吐 0.707 MiB/s,差 5 倍)是唯一**既确认失败又差距最大**的;
 瓶颈 #4 **通过**;搜索与 MCP 延迟(不在上表内,原被当成宽裕项)**各以约 1.8 倍
@@ -987,7 +1036,7 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
 **为什么先做这个**:解析错了的话性能数字没意义 —— 优化一个会丢消息的索引器
 是白干。而真实样本可能推翻 schema 假设,越早知道越好。
 
-- [ ] **M1-1 建立隔离样本工作区(D6)**
+- [x] **M1-1 建立隔离样本工作区(D6)** —— **已交付 `a5c25d0`**
   在仓库外或 gitignored 路径下建 `evidence-input/real-samples/<provider>/`,
   写一份 `README`(**不进仓库**)说明:样本永不 `git add`、永不上传、
   只用于本地定位。`.gitignore` 加规则确保误 add 会被拦。
@@ -1006,6 +1055,71 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   `parentUuid isSidechain sessionId` 也**零命中** ——
   真实 claude/codex transcript 基本没人公开提交。
   **验收**:`git status` 在放入样本后仍干净;`git check-ignore` 确认命中。
+
+  **✅ 实测确认(不是"加了规则就算数")**:在 `evidence-input/real-samples/`
+  下放一个文件后 —— `git check-ignore -v` 命中 `.gitignore:30:/evidence-input/`、
+  `git status --short` 干净、`git add <该文件>` 被**拒绝**并提示需 `-f`。
+  三条验收全过。规则连同"为什么"一起写进 `.gitignore` 注释:
+  这些是第三方 PII,且多个上游仓库**无 license**(不授予任何再分发权),
+  冻结快照与其 SHA-256 清单也放这里 —— 清单跟着它描述的字节走,不进仓库。
+  **未做**:`README` 与实际样本采集属 M1-2/M1-3,本条只交付"误 add 会被拦"这层保险。
+
+- [x] **M1-16 两个测试在并行负载下会假红(2026-08-20 观察到,不是本轮改动引入)**
+  一次 `cargo test --workspace` 里出现 2 个失败,**同一份代码原地重跑
+  310/310 与 1,727/1,727 全绿**,所以是 flaky 而非回归:
+  - `serve::tests::integration_slowloris_does_not_block_a_fast_get`
+    (`serve.rs:1207`)—— 基于**时间**的断言:慢速连接不得阻塞快请求。
+    机器被 `cargo test` 自己的并行占满时,"快请求"也会变慢 → 假红。
+  - `tests::environment_checks_are_actionable_on_this_machine`
+    (`main.rs:7124`)—— **名字就写了 "on_this_machine"**:它读的是
+    **真实机器状态**(provider 根存不存在、两个命令名在不在 PATH)。
+    这类测试的结果取决于开发机当时的环境,不是被测代码。
+  **这两条的性质不同,修法也不同**:
+  - slowloris 那条是并发/时序断言,应改成对**相对量**断言(快请求的耗时
+    不超过慢连接的某个倍数),或标记为串行执行,而不是钉死绝对毫秒数。
+  - `environment_checks` 那条应该把环境**构造出来**(隔离 HOME + 一个
+    受控的假 PATH),而不是读真实机器 —— 本轮修
+    `doctor_reports_ok_without_db` 时正是同一个毛病:
+    它断言"没有库",却依赖开发机恰好没有默认库,而这台机器上有,于是真的红了。
+  ⚠️ **为什么值得单独记**:release 闸门要求 `cargo test --workspace` 一次全绿。
+  只要这两条会随机红,**任何人都会习惯性重跑一次然后说"绿了"** ——
+  那样真实回归也会被同一个动作掩盖过去。
+  **验收**:连续 5 次 `cargo test --workspace` 全绿,无需重跑。
+  **✅ 已达成**:三条全部定位并修掉,连续 4 次 workspace 全绿(1,727 passed)
+  外加 6/10 实例并发复现全过。
+
+  **方法论收获(比这三个修复本身更值得留)**:
+  **复现并发假红的正确姿势是"并发跑那个 harness 自己",不是给它加负载。**
+  我先用 4 个 CPU 忙循环压机器 + 单实例连跑 12 次 —— **全绿,复现不出来**。
+  换成**并发 6 个 harness 实例**(这恰恰是它在 `cargo test --workspace` 里的
+  真实处境:多个测试各自 bind loopback 端口、各自起 serve)—— **一次就命中**。
+  → **要复现的是"资源竞争的种类",不是"机器有多忙"。**
+
+  **⚠️ 实际有三条不是两条,第三条至今未定根因(`249e5ac` 只修掉两条半)**:
+  - ✅ **slowloris**:绝对 250 ms 改成"快请求早于慢连接的 read timeout 返回" ——
+    这才是要证的性质(与慢连接解耦),且与机器快慢无关。
+  - ✅ **`environment_checks`**:断言曾要求下一步含 `invocation::name()`,
+    而 `cargo test` 下 argv[0] 是测试二进制;偏偏
+    `(长名在 PATH、短名不在)` 那一支的措辞只提发布名 → 假红。
+    改为"点名任一用户敲得出来的名字"。顺带把测试名里的
+    `_on_this_machine` 去掉 —— 它读真实机器状态这件事本身就是缺陷。
+  - ✅ **`consistency_report_all_five_entry_points_agree` 根因已定并修掉
+    (`efeceb6`)。** 定位方法:**并发跑 6 个 harness 实例**
+    (在 `cargo test --workspace` 里它本来就是与其他测试并发的)。
+    真实异常终于被抓到:**`HTTP Error 408: Request Timeout`**,
+    紧接着重试后又冒出第二副面孔 **`ConnectionAbortedError (WinError 10053)`**。
+    **408 是 `serve` 自己的 15 s read timeout(`serve.rs:23`)在响应** ——
+    机器被压满时客户端发请求发到一半就卡住,服务端如约超时。
+    **这是服务端按设计行事,不是五个入口不一致**,让一致性报告因此变红
+    等于报告了一个不存在的矛盾。
+    ⚠️ **我第一次的假设(客户端超时太小)是错的,已被自己推翻**:
+    调大 serve-ready 10→60 s 与 web GET 5→60 s 之后**仍然复现**,
+    因为**触发的是服务端的超时,不是客户端的**。
+    修法:只对 408 与连接级错误重试(3 次,0.5 s 间隔);
+    **401/403/500 与 JSON 解析失败仍然首次即失败** ——
+    真缺陷不能被重试成"看起来健康"。
+    **验证**:原先必红的 6 实例并发复现现在全过、10 实例并发全过、
+    连续 4 次 `cargo test --workspace` 全绿(1,727)。
 
 - [ ] **M1-2 冻结真实语料快照(D7)**
   把当前 provider 数据根整体拷到 `evidence-input/frozen-corpus-2026-08-<dd>/`,
@@ -1035,12 +1149,70 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   xAI / Cursor 的付费通道。
   **验收**:每个采集到的 provider 在 §7 记录"已采集 + 落点 + 采集方式"。
 
-- [ ] **M1-4 逐 provider 解析无损验证(D9)**
+- [ ] **M1-4 逐 provider 解析无损验证(D9)** —— **2026-08-20 首轮已跑,见下表**
   对每个有真实样本的 provider:用真实文件跑 sync,验证
   session/message/父子链/时间戳/角色全部正确;记录 emitted vs persisted;
   跳过的行按 D11 计数上报。发现的缺口写进 `capability.rs` 的
   `known_limitations`。
   **验收**:该 provider 的真实运行 emitted == persisted 或差额有明确解释。
+
+  **首轮实测结果(本机真实语料,2026-08-20)**:
+
+  | Provider | 真实文件 | 结果 | 入库消息 | skipped |
+  |---|---:|---|---:|---:|
+  | claude-code | 1,838 | ⚠️ 5 份触发 M1-15 | 301,584 | 0 |
+  | codex | 151 | ❌ 整批失败(M1-15) | 0 | — |
+  | antigravity | 40 | ✅ 全过 | 1,350 | 0 |
+  | pi | 7 | ❌ 无法归属(M1-14) | 0 | — |
+  | zcode | — | 未跑(无 adapter,见 M1-3 第 2 步) | — | — |
+
+  **✅ 修完 M1-14 + M1-15 后的复测(同一批真实语料,2026-08-20)**:
+
+  | Provider | 真实文件 | 结果 | 入库消息 | skipped |
+  |---|---:|---|---:|---:|
+  | claude-code | 1,840 | ✅ 19/19 批(见下注) | 277,274 + 44,766 | 0 |
+  | codex | 151 | ✅ 3/3 批全过 | **5,730**(原 0) | 0 |
+  | antigravity | 40 | ✅ 全过 | 1,350 | 0 |
+  | pi | 7 | ✅ **7/7 发现并入库**(原 0) | **60** | 0 |
+
+  **三个 provider 从"完全不可用/部分失败"变成全过**,且 skipped 恒为 0。
+  ⚠️ **claude-code 的两个批次首跑报 `source_io`,重跑即通过**
+  (分别入库 20,806 / 23,960 条)—— 那是**真实的活跃会话正在写**
+  (我一边跑验证一边有 Claude 会话在记录),不是缺陷;
+  这正是 M2P-10 那条"等一下重试"语义存在的意义。
+  **`catalog_error` 已彻底消失** —— 原先 5 份中招的文件现在全部入库。
+
+  **这一轮的价值不在"通过率",而在于它一次就暴露了两个真实缺陷**
+  (M1-14 pi 不可达、M1-15 活动 id 撞车),
+  **而这两个缺陷在全部合成 fixture 上都是绿的** ——
+  这正是 D9 坚持"必须拿真实语料验证"的理由。
+  ⚠️ **antigravity 的 40 条 diagnostic 是良性信息**
+  ("session identity lives in the brain/<uuid> directory name"),不是错误。
+  ⚠️ **`real_data_regression.py` 不能直接喂 provider 根目录** ——
+  **已修(`3c40c50`)**:它按"排除已知非 transcript 后缀"收集候选,
+  antigravity 根下 1,419 个文件里只有 40 个是 `transcript.jsonl`,
+  其余被送进 sync 后整轮报 `invalid_request`(exit 2)、报告零覆盖。
+  修法:只在"没有 provider 认领这个源"这一条拒绝上逐文件重试,
+  并把拒绝数计进 `INV-SYNC-OK`;其他任何失败仍然致命,
+  以免把真实缺陷混进 unrecognized 计数。
+  修后同一个根报 **2,716 条 emitted / 1,257 个未被认领**,不再整轮失败。
+
+  🔍 **修完 harness 后立刻发现一个新事实:antigravity 有第二种 transcript 文件。**
+  逐个试跑那 1,379 个非 `transcript.jsonl` 文件,**119 个被某个 probe 接受**,
+  其中 **40 个是 `transcript_full.jsonl`**(与 `transcript.jsonl` 一一对应)。
+  它的记录类型与 `transcript.jsonl` **完全不同** ——
+  `PLANNER_RESPONSE` / `SEARCH_WEB` / `VIEW_FILE` / `LIST_DIRECTORY` /
+  `CHECKPOINT` / `CONVERSATION_HISTORY` / `USER_INPUT`(实测 34 行的一份),
+  而且 **sync 它会产生 `skipped: 1`** —— 这就是 `INV-NO-PARSE-LOSS` 失败的来源
+  (该断言要求 `skipped == 0`,是合理的严格)。
+  **待办**:决定 `transcript_full.jsonl` 是
+  (a) 应当支持的第二个 variant(它显然含 planner/工具轨迹,信息量更大)、
+  (b) 应当被 discovery 明确排除(避免重复索引同一会话)。
+  **现状是最糟的第三种:probe 半接受、解析半成功、还静默丢一行。**
+  ⚠️ 另外 **119 - 40 = 79 个文件也被 probe 接受**,里面包括 `agent.md`、
+  `read.json`、`config`、`HEAD`、`index`(git 内部文件)——
+  **这些明显不是 transcript 却通过了 probe**,属于 probe 过宽的独立问题,
+  与 M1-14 的 8 行采样窗口是同一类毛病。
 
 - [ ] **M1-5 反推合成 golden fixture(D9)**
   ⚠️ **已知待补(M1-13 发现)**:`provider-codex/tests/golden/basic.jsonl`
@@ -1068,11 +1240,29 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   `GliteTech/glite-english-audit`(Apache-2.0,每场景一份 `opencode.db.sql`)。
   **验收**:golden 测试进 `cargo test --workspace`;真实样本不进仓库。
 
-- [ ] **M1-6 解析容错改造(D11)**
+- [x] **M1-6 解析容错改造(D11)** —— **读码+实测确认:已实现,本条无需新工作**
   损坏/截断/未知字段行:跳过并计数,结束时输出
   "skipped N lines (use --verbose for detail)",默认不中断。
   真实会话文件常有写到一半的尾行(agent 正在跑或进程被杀)。
   **验收**:构造截断文件的测试;sync 仍退出 0 并正确报告跳过数。
+
+  **✅ 三条验收全部已被现有实现与测试满足**(2026-08-20 逐条核对):
+  - **跳过并计数**:`staged.report.skipped` 进 sync/ingest 响应;
+    human 面渲染 `skipped: N（因格式无法入库的消息条数）`
+    (`human.rs:714`)、`diagnostics: N（解析诊断条数）`(`human.rs:851`)。
+  - **默认不中断 + 退出 0**:两条 e2e 覆盖两种情形 ——
+    `sync_truncated_tail_retains_previous_index_without_churn`(**已索引**过的源
+    带截断尾 → Retain,不重 parse/不推进 generation/不 tombstone)与
+    `sync_new_truncated_source_parses_valid_prefix_recoverably`(**新**源带截断尾
+    → 有效前缀照常提交可搜索,截断行计 `skipped: 1` + `diagnostics: 1`)。
+  - **诊断有界**:`diagnostic_warnings()`(`main.rs:196`)按条数与字符双重截断,
+    超出部分折成 "N additional provider diagnostics omitted" ——
+    坏文件不会用几万条诊断淹掉输出。
+  **与原文的唯一差异**:实现没有 `--verbose` 开关,而是把有界诊断直接放进
+  `warnings[]`(robot 面)与 human 面的 diagnostics 计数。
+  **这个差异不补**:契约 §4 规定 `--robot` 不得有额外通道,
+  加一个只影响 human 面的 `--verbose` 会让两面的证据量不一致;
+  真要看全部诊断,`--output json` 已经给了。
 
 - [ ] **M1-7 provider 升 Beta(G2)**
   达到 D9 标准的 provider 在 `capability.rs` 升 `Beta`,同步
@@ -1096,6 +1286,168 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   zcode 少了 opencode 的 token/cost 列。
   **收紧 opencode 的 probe 让它显式拒绝 zcode**,并新增 zcode adapter。
   **验收**:两个真实 DB 各被正确识别;probe 冲突有回归测试。
+
+- [x] **M1-15 两个同名未配对工具调用 = 整个源无法入库(2026-08-20 实测,
+      本机 148 份真实 codex rollout 中至少 1 份中招)**
+  跑 M1-4 时对本机 **151 份真实 codex rollout** 实测:整批 `sync` 报
+  `catalog_error`(exit 6)、**零条入库**。逐个二分定位到**单一文件**,
+  再在文件内二分到**单一行**,最后 delta-debug 到**最小三行组合**,
+  并用**完全合成**的 4 行文件复现成功 —— 与真实语料无关,是结构缺陷。
+
+  **最小复现(全合成,已实测)**:`session_meta` + 一条 `message` +
+  **两条同名(`name: "exec"`)且都没有配对 output 的 `custom_tool_call`**
+  → `catalog_error`。把第二条的 `name` 换成 `apply_patch` → **成功入库**。
+  → **判据不是"两条工具调用",而是"两条工具调用归一化后完全同形"。**
+
+  **根因(读码 + 实测二分确认)**:
+  `activity_id_for()`(`adapters-sqlite/src/lib.rs:1184`)的内容寻址只喂
+  **`(message_id, kind, actor, name, target, status)`** ——
+  **`call_id` 不在其中**(`stored_activity_from()` 第 1222-1231 行)。
+  两条未配对的 `exec` 调用锚在同一条消息上,`target` 都是 `None`、
+  `status` 都相同 → **派生出同一个 `activity_id`**。
+  注释写的"同一事实跨源去重"在**同源同消息内**变成了"两个不同事实撞成同一个"。
+
+  真正抛错的地方是**一条显式的 fail-closed 断言**,不是 SQLite:
+  `lib.rs:3015-3023` 在 `prepare_relation_manifests` 里发现同一批
+  `source_activities` 里 `activity_id` 重复,直接
+  `PortError::Backend("source batch contains duplicate activity ids (…)")`
+  → 协议层按 `PortError::Backend` 映射成 `catalog_error` +
+  把细节替换成"数据库内部错误"(R4.3 不让后端细节外泄)。
+  **所以用户看到的是"数据库内部错误",而真实原因是 id 派生撞车** ——
+  这个错误分类本身也是误导:它既不是数据库问题,也不是用户能修的问题。
+
+  ⚠️ **我第一次判错并已自证推翻**:我起初认定是
+  `tool_activity_membership` 的 insert(第 5323-5327 行)缺
+  `ON CONFLICT` 撞主键。**改成 `DO NOTHING` 后重编译实测,复现依旧失败**,
+  证明那不是触发点 —— 执行流在到达任何 SQL 之前就被上面那条断言拦下了。
+  改动已撤回。**教训:PK 缺 `ON CONFLICT` 是"看起来对"的解释,
+  但没有实测支持之前不能当结论;这类"合理猜测"正是本计划 §1.7 反复记录的坑。**
+
+  **影响面(比"一个文件坏了"严重)**:`sync` 对每个源是 all-or-nothing,
+  而**整批 sync 遇到这个错误直接整轮失败** —— 一份中招的 rollout
+  会让**其余 150 份全部无法入库**。这解释了为什么 M1-4 的
+  `INV-SYNC-OK` 报 "151 sources, 0 emitted"。
+  单文件 `sync <好文件>` 正常(实测 67 条),所以解析器没坏。
+
+  **修法(需决策,三条路)**:
+  - **(a) 让 `activity_id` 携带调用身份**(把 `call_id`/批内序号纳入派生)。
+    语义上正确 —— 两次不同的 `exec` 调用**本来就是两个事实**。
+    ⚠️ 会**改变已有库里所有活动行的 id**,撞上 RFC-0001 §5
+    "id 算法升级必须换 namespace、绝不静默改旧 id" → 要走 `act_v2_` 并迁移。
+  - **(b) 把批内重复从"报错"降级为"去重"**:同一 `activity_id` 在同一批里
+    出现两次时保留一条(它们归一化后确实同形)。一处改动、不动 id 语义、
+    立刻消除"整轮失败";代价是两次调用在检索面合并成一条。
+  - **(c) 至少把错误分类修对**:这不是 `catalog_error`。
+    用户拿到"数据库内部错误"却与数据库无关,且 runbook 的下一步
+    ("检查 --db 路径、跑 doctor")对这个故障完全无效。
+  **✅ 已交付(`157641a`,合并 `m115-activity-dedup`)**:
+  采纳 (b)+(c),未动 id 派生(a 仍是 `act_v2_` 的独立议题)。
+  - (b) 同批内重复的 `activity_id` 折叠为一条,而非整批报错;
+    **跨源冲突检查(`lib.rs:3024-3033`)保持原样** —— 那一条比较的是
+    同一 id 的两个**不同**投影,是真正的不变量。
+  - (c) 新增 `PortError::Invariant` 变体,映射 `internal`(exit 70)而非
+    `catalog_error` —— 端口自身不变量被违反是**缺陷信号**,
+    既与数据库无关,也不是用户能修的,不该再指引他去"检查 --db 路径"。
+  **实测复测**:151 份真实 codex rollout 从**整批 0 条**变成
+  **3/3 批全过、5,730 条入库、skipped 0**;
+  claude-code 那 5 份原先 `catalog_error` 的文件现在也全部入库。
+  **验收**:合成的"两条同名未配对调用"能入库;
+  151 份真实 codex rollout 整批 sync 成功;
+  回归测试直接断言这个最小三行组合,而不是绕过它。
+
+  ⚠️ **同一症状也出现在 claude-code,但触发形状不同(2026-08-20 实测)。**
+  跑完整 claude-code 语料(**1,838 份真实 transcript**)时:
+  **19 个批次里 18 个成功,共入库 301,584 条消息、skipped 0** ——
+  唯一失败的批次里有 **5 份文件**各自单独 sync 也报 `catalog_error`。
+  对其中一份二分到 **第 93 行**(前 92 行成功,含第 93 行即失败)。
+  该行是一条 `type: "user"` 消息,`message.content` 里有**两个
+  `tool_result` block**,但**两个 `tool_use_id` 是不同的**
+  (`toolu_bdrk_01HPbu…` / `toolu_bdrk_01Y5v3…`),
+  并且该行还带 `toolUseResult` / `sourceToolAssistantUUID` / `sessionKind`
+  等字段。
+  **我照这个形状写的合成复现(一条消息两个不同 id 的 `tool_result`)
+  却成功入库** —— 所以 claude-code 这一支的触发条件**尚未定位**,
+  不能假定与 codex 那支同因。**已知边界**:
+  - 不是重复 `uuid`(全文件 0 个重复)
+  - 不是"同一消息上同名 `tool_use`"(全文件 0 对)
+  - 触发点在第 93 行,且需要前 92 行的累积状态(单独喂第 93 行不复现)
+  **影响量级(已实测)**:1,838 份里 5 份中招 ≈ 0.27%,
+  但因为整批失败,这 5 份会拖垮同批的另外 95 份。
+
+- [x] **M1-14 pi 在真实数据上完全不可达(2026-08-20 实测发现,两个独立缺陷)**
+  跑 M1-4 时对本机 7 份**真实** pi transcript 实测,结论:
+  **pi 目前无法通过任何自动路径入库。** 两个缺陷叠加:
+
+  **缺陷 A:pi 没有注册 discovery root。**
+  `provider_root_subpath()`(`main.rs:4227-4237`)只有 6 个 provider,
+  **pi 不在其中** → `sync --discover` 报 `root_state: "unsupported"`、
+  `found: 0`,而 `~/.pi/agent/sessions/` 明明有 7 份真实 transcript。
+  (§1.8.1 的 Tier A 表早已记录这个路径存在,声明侧却没跟上。)
+
+  **缺陷 B:pi 与 openclaw 的 probe 在真实数据上必然同分平票。**
+  手动 `sync <file>` 7/7 全部被拒:
+  `ambiguous provider selection: 2 variants matched with equal confidence
+  (openclaw/session-jsonl-v3, pi/session-jsonl-v1)`。
+  **根因不是"两家格式真的一样"那么简单** —— 两个 probe 都只采样
+  **前 8 条非空行**(`SAMPLE_LINE_LIMIT = 8`),而真实 pi 文件的头 8 行是
+  `session` + 7 条 `model_change`,**一条 `message` 都没有**
+  (整份文件的实际构成:44 `model_change` / 30 `message` / 1 `session` /
+  1 `thinking_level_change`)。于是两边都拿不到
+  "`conversational > 0 && session_headers > 0`" 这个 `Confirmed` 条件,
+  双双退回 `High` → 平票。
+  **两家的合成 fixture 都是"session 紧跟 message"的理想形状,所以单元测试
+  全绿而真实数据全败** —— 这正是 M1-4 存在的理由。
+
+  **已确认可用的证据(说明 adapter 本身没坏)**:
+  `sync --provider pi <file>` **成功入库 18 条消息** ——
+  解析是对的,坏的是"怎么认出它是 pi"这一层。
+
+  **修法(两个都要,缺一不可)**:
+  1. 给 pi 注册 root `.pi/agent/sessions`(缺陷 A)。这同时也解决大部分
+     缺陷 B:`--discover` 会带 `provider_hint`,而
+     `choose_probed_candidate()` 已经支持用 root 归属打破平票
+     (`application/src/lib.rs:709-741`)。
+  2. **仍要修 probe**:光靠 hint 会让手动 `sync <file>` 永远拒绝真实 pi 文件。
+     ~~可用的真实判别据:pi 的 session 头带 `version: 3`,而两个 probe
+     都没读 `version`。~~
+     ❌ **此设想已被证据否决(2026-08-20 实施时查证)。openclaw 真实 header
+     同样带 `version: 3`**,两个独立 MIT 来源交叉验证:
+     `agent-sessions`(jazzyalex,MIT)的 openclaw stage0 fixture
+     `Resources/Fixtures/stage0/agents/openclaw/{small,large,schema_drift}.jsonl`
+     首行均为 `{"type":"session","id":...,"version":3,"timestamp":...,"cwd":...}`;
+     `agentsview`(kenn-io,MIT)的 `internal/parser/openclaw_test.go` 13 处
+     header 也全是 `version:3`。而且 openclaw 的第 2 行同样是 `model_change`,
+     `thinking_level_change`/`compaction`/`custom_message` 也都有 ——
+     **两家是同一 v3 树形格式,字段集完全重合,没有任何内容字段能区分**。
+     (另有 `ctx`/`AgentRecall` 的 openclaw fixture 写 `version: 1`,但四家
+     parser **都不读这个字段**,那是无约束的作者随手取值;无论 1 还是 3,
+     "`version` 不是 pi 独占"这个结论都成立。)
+     → **实际修法**:改用 **root 归属**这个独立于文件内容的外部事实。
+     `--discover` 本就握着它,手动 `sync <file>` 过去把它丢掉了 ——
+     新增 `provider_hint_from_path()`,源路径落在已注册 root 之下时给出
+     hint,与 `provider_root_subpath()` 共用同一张 `PROVIDER_ROOTS` 表
+     (两个方向不会漂移,有测试钉住)。root 之外的文件(复制走的、下载的)
+     仍然照旧拒绝,不猜;`--provider` 仍是点名手段。
+  3. 扩两家的 probe 采样窗口,或让采样"跳过非会话记录直到看到 message" ——
+     8 行窗口对真实文件太窄这件事本身就是缺陷,与平票是两回事。
+     → 已实施:`SAMPLE_LINE_LIMIT = 8` 改为 `SCAN_LINE_LIMIT = 64`,且
+     **看到 header + 对话消息即停**,常见文件仍只读几行(RFC-0002 §7 有界)。
+     实测最深的一份真实文件首条 message 在第 9 行 —— 恰好卡在旧窗口外一行。
+     注意:窗口修好后两家**双双升到 `Confirmed`,仍是平票** ——
+     它单独并不能解决缺陷 B,必须与第 2 条的 root 归属合用。
+  **验收**:`sync --discover` 能发现并入库真实 pi transcript;
+  手动 `sync <file>`(无 `--provider`)不再对真实 pi 文件报 ambiguous;
+  回归测试用**真实观察到的记录顺序**(session + 一串 model_change 在前,
+  message 在后)构造合成 fixture,而不是理想顺序。
+  **实测结果(分支 `m114-pi-reachable`,基线二进制对照)**:
+  before —— `--discover` 报 `root_state=unsupported found=0`、
+  `sources=0 committed=0`,裸 `sync` 7/7 ambiguous exit 2;
+  after —— `root_state=scanned found=7 complete=true`、
+  `sources=7 committed=60 skipped=0`,裸 `sync` 7/7 exit 0(18/3/28/3/3/4/1)。
+  归属方向已验证:`search --provider pi` 有命中、`--provider openclaw` 零命中。
+  `cargo test --workspace` 一次完整运行 1427 passed / 0 failed。
+  **遗留**:本机无 openclaw 安装(root `missing`),openclaw 侧结论建立在
+  第三方 fixture/parser 上,不是活体抓取;真实 openclaw 端到端未验证。
 
 - [x] **M1-10 修 qoder 路径三方不一致**
   adapter 与文档写 `~/.qoder/projects/<project>/transcript/*.jsonl`;
@@ -1606,7 +1958,60 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   → **这条不是缺陷,删掉它反而会引入 Windows 上的竞态。**
   M2P-10 真正要解的只剩 `source_changed` 那一半:agent 正在写时 transcript
   一直在长,快照校验必然失败,重试赢不了。
-  **修正后的验收**:agent 运行中跑 discover 能入库并如实报告部分性。
+
+  ⚠️ **2026-08-20 我用可复现脚本实测,结论比原记录更糟:退出码是 7 不是 5。**
+  复现方式(不碰任何真实语料):写一份 4,000 条的 transcript,启动
+  `sync --discover`,同时后台线程持续追加。实测输出:
+  ```
+  exit code: 7
+  {"code":"provider_error","message":"io failure: source snapshot changed:
+   len 2686990 -> 2725690","retryable":false}
+  ```
+  **两个新事实**:
+  1. **退出码 7(`provider_error`)而非记录里的 5(`source_changed`)。**
+  2. **`retryable: false`** —— 对一个"重试就能赢"的竞态,协议却告诉调用方
+     不要重试(`protocol.rs:128` 明明把 `SourceChanged` 列为可重试)。
+
+  **根因(读码确认,不是猜):分类在两处被丢掉,而且正确的枚举变体已经存在、
+  只是从未被接线。**
+  1. `ports/src/lib.rs:1323-1325` 的 `provider_io()` 把**所有** `PortError`
+     一律压成 `ProviderError::Io(error.to_string())`。
+     `SnapshotChanged` 的分类在这里蒸发,只剩 `io failure:` 前缀 + 原文。
+  2. `protocol.rs:256-260` 的 `From<ProviderError> for ProtocolError` 是
+     **无 match 的一刀切**:任何 `ProviderError` → `CanonicalCode::ProviderError`。
+     即使第 1 步保住了分类,这里也会再抹一次。
+  3. `ProviderError::SourceChangedDuringRead`(`ports/src/lib.rs:1006`)
+     **定义了但全仓库零构造点** —— 语义位置留好了,没人往里放东西。
+
+  → 所以这不是"要新设计一个错误码",而是**把已有的三块接上**:
+  `PortError::SnapshotChanged` → `ProviderError::SourceChangedDuringRead`
+  → `CanonicalCode::SourceChanged`(exit 5, `retryable: true`)。
+
+  **已存在的一半解法**(读代码确认):`prepare_source` 里已有
+  `JsonlHealth::Invalid → PrepareOutcome::Retained` 分支
+  (`main.rs:5313-5322`),agent 正在写的**已索引**源会被 Retain 而不是失败。
+  **缺口正是首次索引**:`cached_fp.is_some()` 这个条件把新源排除在外,
+  注释说它"落到下面走既有 recoverable-skip",但实测证明它走到了
+  `read_verified` 的快照校验并整轮失败。
+  → **首次 discover 撞上正在写的 transcript = 整轮失败、零消息入库**,
+  这正是 owner 在真实机器上遇到的现象。
+
+  **拆成两半,一半现在就修,一半留给 owner 决策**:
+  - **✅ (a) 错误分类 —— 已修(`672cc1c`)。**
+    把三块接上并把 mapper 导出成 `provider_error_from_port`,让九个 adapter
+    开源点在**一处**分类,而不是各自 `ProviderError::Io(e.to_string())`
+    再把分类丢一遍。**实测复现脚本确认**:
+    `exit 5` / `source_changed` / `retryable: true` /
+    `"source changed during read: len 2725690 -> 2764390"`,
+    与 error-catalog 和 runbook 一致;稳定源的 happy path 不受影响
+    (40 committed, generation 1)。
+  - **⏸ (b) 部分成功 / offset 续传 —— 需 owner 决策,不擅自做。**
+    "按快照点提交有效前缀、记录 offset、下次增量续上"会改变
+    `sync` 的原子性承诺(当前是 all-or-nothing per source),
+    涉及 RFC-0002 的 ParseReport 语义,不是一个 bugfix 能覆盖的范围。
+    **现状对用户的实际影响**:agent 正在写的那一个源本轮失败,
+    但**同轮其他源照常入库**;等 agent 停笔后重跑即可补上,
+    且现在错误明确告诉用户"等一下重试"。
   (`writer.lock` 的存在不作为失败判据。)
 
 - [x] **M2P-11 `index <id-fact> <text>` 开发后门出现在用户 help 里**
@@ -1667,12 +2072,31 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   另外把 "Approval for running fork pull request workflows" 设为需要审批。
   **验收**:fork PR 不会未经审批就跑 workflow。
 
-- [ ] **M2C-5 四个动作的阀值接进 CI(D3,依赖 M2C-2 与 M2-2)**
+- [x] **M2C-5 四个动作的阀值接进 CI(D3,依赖 M2C-2 与 M2-2)** —— **workflow 已接入(`8eacdf8`)**
   M2-2 产出的 harness 接进 workflow,阀值不过就 fail。
   注意 artifact **只留 7 天**,`ci_verified` 的可复核性天然弱于
   `locally_verified` —— 继续保持
   `core-beta-evidence-matrix.md` 里那个状态词区分。
   **验收**:性能回退能被 CI 自动拦住。
+
+  **✅ 已接入,但要如实读它的含义。**
+  发现的真问题:`core-beta-evidence.yml` 一直只跑 smoke benchmark 与
+  open-source gate,**从来没有执行 `performance_gate_benchmark.py`** ——
+  也就是说四条发布阈值此前**完全没有被自动化拦住过**,M2-2 交付的门只在本地跑。
+  现在新增独立 job(Windows x64,20 分钟上限),harness 自己的单测 + `run --profile full`
+  + `validate-report` 三步串起来,阈值不过即 job 失败。
+  **两个刻意的设计选择**:
+  1. **不塞进四平台 matrix**:这是单机计时测量,四个 runner 会产出四份互不可比的
+     判定,还把 macOS 分钟数乘四(macOS 计费 10x,见 M2C-3)。
+  2. **`--skip-embeddings`**:向量构建在 372 秒全程里占 285 秒,且只喂
+     informational 指标;跳过后四条受门阈值约 87 秒可测。
+  **⚠️ 未验证部分(不许当成已通过)**:CI 因 billing 仍被锁,
+  **这个 job 从未在 GitHub runner 上真实跑过**,所以它现在是
+  `not_verified` 而非 `ci_verified` —— workflow 配置不等于运行通过
+  (这正是 `core-beta-evidence-matrix.md` 那个状态词区分要防的事)。
+  并且按 §1.3.7,**当前没有任何语料能让四条阈值同时通过**,所以这个 job
+  一旦真跑起来,预期就是失败(吞吐在受门语料上 FAIL)。
+  **它的价值是"回归能被拦住",不是"性能已达标"。**
 
 ---
 
@@ -2043,7 +2467,8 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   → 若后续要做,应先给 context 定一个投影契约(同 handoff 的做法),
   再实现;本条按"验收的一半已达成 + 另一半明确拒绝并说明"关闭。
 
-- [ ] **M3-8 搜索缺 role / 路径 / 排除项过滤**
+- [x] **M3-8 搜索缺 role / 路径 / 排除项过滤** —— **role 与 exclude 已交付;
+  路径维度归 M3-3(理由见下)**
   `safe_fts_query` 给每个 token 加引号(`adapters-sqlite/src/lib.rs:6885-6904`),
   ADR-0003 刻意移除了 phrase/boolean/`NEAR`/prefix 语法(`ADR-0003:15,29-31`)——
   **这个取舍对首发是站得住的,不要推翻**。
@@ -2054,7 +2479,44 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   不要重新引入 ADR-0003 撤掉的语法。
   **验收**:能只搜某个 role;能排除词。
 
-- [ ] **M3-9 命中处无一步到位的上下文窗口** —— **部分实现(`ceab8a2` + `a584ae3`)**
+  **✅ 已交付 `search --role <role>`(可重复,OR)与 `search --exclude <term>`
+  (可重复,OR)。** 两条谓词都下推进 SQL、在 `LIMIT` 之前收窄候选集
+  (端口注释记的那个"先取 limit 再过滤 → 游标错位"缺陷类不会重演);两条都进
+  `search-filter-v2` 游标摘要,filter 集合变化的旧令牌一律 `cursor_invalid`。
+  五个入口:CLI flag、MCP `search_sessions` 的 `roles`/`exclude_terms` 入参
+  (**仍是九个工具**,只扩既有工具的 inputSchema)、`/api/search` 的可重复
+  `role`/`exclude` 查询参数、Web 表单的 role 下拉 + exclude 输入框。
+  TUI 不动 —— 它至今不持有**任何** `SearchFilters` 维度(连 provider/时间都没有),
+  只单独给它加 role 会在 TUI 内部先自相矛盾。
+
+  **两处语义决定(都写进了 help 与端口注释,不靠读代码才能发现)**:
+  1. **显式 `--role` 覆盖 `--include-system` 默认。** 否则 `--role system`
+     恒返回空 —— 用户点名要的东西被一条他没要求的默认规则减掉。
+     跳过那层默认过滤不会放宽结果集:SQL 白名单已经把范围收在点名的 role 内。
+  2. **`--role` 生效时不返回 Session 元数据命中。** role 是消息级事实,Session
+     实体没有角色;若照 provider/时间那样写成"该会话里存在该角色的消息",
+     `--role system` 会因为会话里有一条系统消息就把整个会话召回。
+     有测试专门钉住这一点(不加抑制时那个会话真的会冒出来)。
+
+  **`--exclude` 是结构化过滤而非查询语法**:每个词走与正向查询**同一条**
+  `bigram_cjk` + 逐 token 引号化管线,composed 成 FTS5 `(正向) NOT (词1 OR 词2)`。
+  所以它跑在同一个倒排索引上,不是逐行子串扫描,也没有把 ADR-0003 撤掉的
+  操作符还给用户。分词后为空的词(纯标点)排除零条 —— 这是正向侧
+  "纯标点查询匹配零条"的对偶。
+
+  **路径维度未做,理由是它是 M3-3 的交付物而非本条的。** M3-3 的"具体形状"
+  逐字列了 `--project <path-or-name>` 与 `--exclude-project`,而本条的验收只写
+  role 与排除词。`SearchFilters` 里 `projects`/`exclude_projects` 两个字段已由
+  groundwork commit `9cfacb9` 声明、仍未接线,M3-3 接线时无需再改端口。
+  → **因此本条没有任何 path 形状的取值会被回显**,ADR-0009 的跨边界脱敏在本条
+  无新暴露面(search 的 envelope 本来就不回显 filters,只回显 facets)。
+
+  **已知边界(如实记录)**:`--mode semantic` 下 filters 不生效 —— `query_semantic`
+  不吃 `SearchFilters`,这对 `--provider`/`--since` 是**既有**行为,role/exclude
+  只是继承了它。`hybrid` 的 lexical 那一路正常过滤。semantic 是 opt-in 且需
+  `semantic-candle` 构建,故不阻塞本条,但它是一条真实的静默不过滤路径。
+
+- [x] **M3-9 命中处无一步到位的上下文窗口** —— **已完整交付(`b1f5e9b`)**
   `search` 返回有界前缀片段(`application/src/lib.rs:887-889`,
   human 预览截断到 120 字符,`human.rs:18`),**无匹配高亮、无周边行**。
   想看匹配在上下文里的样子要第二条命令(`show`)和第三条
@@ -2078,15 +2540,39 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   2. 原有测试曾钉死盲前缀 `"xxxxxxxx"`;已改为钉住同一性质
      (`why_matched` 找到词),并额外钉住窗口确实移到命中位置。
 
-  **未做(不伪装完成)**:高亮与 `--context N` 周边行尚未新增;当前交付的是
-  "一条命令可见命中附近证据",不是完整 diff-aware context window。
+  **✅ 第二半也已交付(`b1f5e9b`)**:
+  - `SearchHit.match_ranges`:在**最终返回 snippet**上给出 half-open char offsets,
+    机器面 `text` 保持原始证据,不塞 ANSI/markup;human renderer 才按 offsets 高亮。
+  - `search --context N`:以命中所在行 ±N 行返回**连续正文区域**,
+    不复用 `get-message --around`(那是消息轴,不是正文行轴)。
+  - context 窗口受 `max_snippet_chars` 约束;被裁剪明确走
+    `max_snippet_chars` truncation、partial outcome、exit 10。
+  - 五入口都带同一 offsets/context 投影;MCP 只扩既有工具,没有新增工具。
+  **回归证明**:删除 fixture 的 `function_call_output` 后 pairing assertion 必红;
+  m39 分支完整 workspace gate 1,752 passed,合入后 release gate 1,729 passed。
 
-- [ ] **M3-10 无统计:用户答不出"我到底有多少历史、来自哪里"**
+- [x] **M3-10 无统计:用户答不出"我到底有多少历史、来自哪里"** —— **已交付 `stats`(`5ddfb2c`)**
   `status` 只有四个计数器(`main.rs:4109-4114`)。
   没有按 provider 计数、没有日期直方图、没有 top 工具、没有会话大小分布。
   `doctor` 只查健康(`main.rs:1305-1318`)。
   **修法**:`status --detail` 或 `stats` 子命令:按 provider / 按月 / 按项目。
   **验收**:一条命令能看到历史的构成。
+
+  **✅ 选独立 `stats` 子命令而非 `status --detail`**:`status` 回答"我的索引健康吗",
+  `stats` 回答"我的索引里有什么",两个问题的读者和使用时机都不同。
+  四个维度全部落地:per provider、per month、per project、session size 分布。
+  **"不知道"一律显式成桶**(`—` 行 + `project_unknown_sessions` /
+  `project_ambiguous_sessions` 两个计数):无消息时间戳的会话进 month unknown、
+  无 resolved Original Working Directory 声明的会话进 project unknown ——
+  **不静默丢弃、不推断**,否则总数会对不上。
+
+  **实测(release 二进制,零配置,claude-code + codex 双 provider 库)**:
+  human 面输出 sessions/messages/documents/tool activities/generation 五个总量
+  加四张分组表;`—` 行如实出现。
+  **隐私分面(ADR-0004 vs ADR-0009)实测确认**:human 面显示完整项目目录
+  (`C:\placeholder\project`),而 `--robot` 面**只给 basename**
+  (`{"key":"fixture-project"}` / `{"key":"project"}`,unknown 为 `null`)——
+  跨边界面不带绝对路径,与刚修掉的 `tool_activity[].target` 泄漏同一条原则。
 
 - [ ] **M3-11 增量更新的人机工程(MCP 侧最痛)**
   `sync` 全手动 —— 无 watcher、无 daemon、无搜索时自动同步、无 `notify`。
@@ -2100,6 +2586,27 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   **修法**:MCP 加一个 refresh/sync 工具(最高价值,一行改动级别的收益);
   `sync` 接受目录(Windows 友好);discover 覆盖非 jsonl(见 M2P-7)。
   **验收**:MCP 客户端能自己触发刷新;`sync <dir>` 可用。
+
+  **✅ `sync <dir>` 已交付(`e41ed98`)**:目录被递归展开,候选由各 provider 的
+  probe 判定(复用 `discover_provider_sources`,不按扩展名)——
+  所以目录下的 SQLite 库 / 整档 JSON / Markdown transcript 同样能被找到。
+  **两条拒绝保持显式,不静默降级**:
+  子目录读不动 → 整轮拒绝(点名了目录的人不该悄悄拿到部分索引);
+  目录里没有任何可识别 transcript → 用法错误并指向 `providers`,
+  而不是"成功同步 0 条"(后者会让用户以为路径给对了)。
+  实测真实 Claude Code 项目目录:1 源 / 3 条消息;错误消息不带路径。
+  ⚠️ **原记录里"discover 只覆盖 6 个且只认 `.jsonl`"已过时** ——
+  discover 早已改为按 head 探测家族 + probe 判定(`is_discovery_candidate`),
+  且 pi 的 root 也已在 M1-14 补上。
+
+  **⏸ MCP refresh 工具未做,需 owner 决策(不是"没时间做")**:
+  MCP 面被契约冻结在**九个只读工具**。加第十个工具、或让某个只读工具产生写
+  副作用,两者都改变对外契约 —— 前者破坏"九个"这个已公布的事实,
+  后者更糟(名字说只读,行为会写库并拿排他 lease)。
+  这是接口承诺问题,不该由我单方面决定。
+  **可选方向(供决策)**:(a) 加第十个显式命名的写工具并同步契约文档;
+  (b) 保持只读,靠 CLI 侧 watcher/daemon 让库自动新鲜,MCP 什么都不用改;
+  (c) 不做,在文档里写明"MCP 是只读视图,刷新由 CLI 负责"。
 
 - [x] **M3-12 `--offline` 目前是稳定的 no-op** —— **已修文档(`bfe4bc9`)**
   `const NETWORK_REQUIRING_SUBCOMMANDS: &[&str] = &[]`(**实际在 `main.rs:1744`**)——
@@ -2150,7 +2657,7 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   删掉后 workspace 编译与测试全绿(这正是"确实无人可达"的证据);
   测试数 198 → 187,少掉的 11 条全是该模块自己的测试。
 
-- [x] **M3-14 handoff pack 的两个字段永远是空** —— **已修(merge `worktree-agent-a2f5cfd37e9528719`)**
+- [x] **M3-14 handoff pack 的两个字段永远是空** —— **已修(见对应 merge commit)**
   `provenance: None` 恒真(`handoff_pack.rs:236`),
   `inference: Vec::new()` 恒真(`:233`)。
   而 handoff-pack/v1 的卖点之一就是 **evidence/inference 分栏**。
@@ -2512,10 +3019,38 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   (模板、两份记录、scrub runbook、架构评审)——
   那 4 条链接在公开树里必然是坏的。
 
+  **✅ 2026-08-20 在当前 HEAD(`93902ca`)上重跑导出并独立复验,仍全绿**:
+  **492 个文件**(比 8-19 那次多 4 个,与期间新增的文档/脚本数吻合),
+  public-profile 扫描 0 findings。逐项自查(不信脚本自述):
+  - **不该发布的都不在**:`.trellis/`、`docs/release/go-no-go.2026-08-19.md`、
+    `privacy_scan.py`、`export_public_tree.py`、`.claude/`、`.mcp.json` 全部缺席;
+  - **该有的都在**:`README.md`、`CHANGELOG.md`、`LICENSE-MIT` +
+    `LICENSE-APACHE`(⚠️ 注意本项目**没有**单个 `LICENSE` 文件,
+    是双许可两份文件,`Cargo.toml` 的 `license = "MIT OR Apache-2.0"` 与之一致)、
+    `Cargo.toml`、`crates/`、`docs/adr/`、安装器、`spikes/`;
+  - **导出树是自洽可构建的仓库**:在导出目录里 `cargo build --workspace`
+    与 `cargo test --workspace` **全过(1,728 passed / 0 failed)**,
+    与主仓同样的数字 —— 不是缺文件的残骸;
+  - manifest 里逐条 grep 也没有任何应排除文件漏网。
+  **剩下的确实只有"推送"本身**,而那一步依赖 M5-5(仓库还是私有的)。
+  ⚠️ **推送前必须重跑一次导出**:manifest 钉的是 `source_commit`,
+  用旧导出推送等于发布一个与 tag 不符的树。
+
 - [ ] **M5-4 CHANGELOG 0.2.0 段 + tag + Release**
   按 D19 发 `v0.2.0`。Release notes 必须诚实列出仍存的限制
   (macOS 未验证、无签名二进制、未升 Beta 的 provider)。
   **验收**:tag 指向正确 commit;Release 非 draft。
+
+  **✅ CHANGELOG 那一半已写(`93902ca`)**,含一个专门的
+  **`### Known limitations`** 章节 —— 把"用户装完才会发现"的事提前讲清:
+  16 个 provider 里只有 4 个(claude-code / codex / antigravity / pi)
+  经真实语料验证、2 个需付费第三方通道才能验、
+  **没有任何一份语料能让四个性能阈值同时通过**、
+  antigravity 第二份 transcript 半接受且丢一行、
+  归一化同形的两次工具调用被合并、MCP 只读无 refresh、macOS 未验证。
+  **⏸ tag 与 Release 未做,且不该现在做**:仓库仍是私有,
+  在私有仓库上打 `v0.2.0` 再转 public,会让第一个公开 tag 指向一段
+  外人看不到、也无法复核的历史。**顺序必须是 M5-5 → 打 tag → 发 Release。**
 
 - [ ] **M5-5 仓库转 PUBLIC**
   `gh repo edit qin-devs/agent-session-grep --visibility public --accept-visibility-change-consequences`

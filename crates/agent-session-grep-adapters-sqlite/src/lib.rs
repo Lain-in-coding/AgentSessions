@@ -27,8 +27,8 @@ use agent_session_grep_domain::{
 use agent_session_grep_ports::{
     CatalogEntry, CatalogStore, ContextGraphStore, ContextStats, HistoryBucket, HistoryStats,
     MessageContextCandidate, PortError, PortResult, ResumeClaimsStore, SearchFacets, SearchHit,
-    SearchIndex, SearchProvider, SearchQuery, SemanticIndex, SessionResumeMetadata, SidechainFacet,
-    SourcePlacement, SourceResumeClaim,
+    SearchIndex, SearchProvider, SearchQuery, SearchRole, SemanticIndex, SessionResumeMetadata,
+    SidechainFacet, SourcePlacement, SourceResumeClaim,
 };
 use rusqlite::{Connection, OptionalExtension};
 use std::any::Any;
@@ -1200,10 +1200,10 @@ fn stored_activity_from(
     activity: &ToolActivity,
 ) -> PortResult<StoredActivity> {
     activity.validate().map_err(|error| {
-        PortError::Backend(format!("tool activity violates domain invariants: {error}"))
+        PortError::Invariant(format!("tool activity violates domain invariants: {error}"))
     })?;
     if message_id.kind() != IdKind::Message {
-        return Err(PortError::Backend(
+        return Err(PortError::Invariant(
             "tool activity message anchor has the wrong kind".into(),
         ));
     }
@@ -3007,23 +3007,33 @@ impl SqliteStore {
             };
             final_placement_ids.extend(source_placements.keys().cloned());
 
-            // 工具活动（v12）：派生活动 id、校验锚点/重复，跨源事实冲突拒绝。
-            let mut source_activities = BTreeMap::new();
+            // 工具活动（v12）：派生活动 id、校验锚点，跨源事实冲突拒绝。
+            //
+            // 批内同 id 折叠而非报错：`activity_id_for` 的输入恰好是 StoredActivity
+            // 的全部字段（`call_id` 不参与派生），所以同一批里派生出同一 id 的两条
+            // 记录在每个存储字段上都同形，保留一条对存储行无损。真实语料里"同一条
+            // 消息上两条同名且都未配对 output 的工具调用"是常态，不是可修复的故障；
+            // 曾经在这里拒绝整批，一份中招的 rollout 会让整轮 sync 零条入库。
+            let mut source_activities: BTreeMap<String, StoredActivity> = BTreeMap::new();
             for source_activity in &source.activities {
                 let stored =
                     stored_activity_from(&source_activity.message_id, &source_activity.activity)?;
-                if source_activities
-                    .insert(stored.activity_id.clone(), stored.clone())
-                    .is_some()
-                {
-                    return Err(PortError::Backend(format!(
-                        "source batch contains duplicate activity ids ({})",
-                        stored.activity_id
-                    )));
+                match source_activities.get(&stored.activity_id) {
+                    Some(existing) if existing != &stored => {
+                        // 同 id 却不同形 → 派生输入与存储字段脱节，是实现缺陷。
+                        return Err(PortError::Invariant(format!(
+                            "activity {} derives one id from two different rows",
+                            stored.activity_id
+                        )));
+                    }
+                    Some(_) => {}
+                    None => {
+                        source_activities.insert(stored.activity_id.clone(), stored.clone());
+                    }
                 }
                 if let Some(existing) = observed_activities.get(&stored.activity_id) {
                     if existing != &stored {
-                        return Err(PortError::Backend(format!(
+                        return Err(PortError::Invariant(format!(
                             "activity {} has conflicting projections across sources",
                             stored.activity_id
                         )));
@@ -7015,6 +7025,11 @@ impl SqliteStore {
     /// 结果集与排序**逐条不变**：第 1 步的集合与历史那串 `NOT EXISTS` 逻辑等价
     /// （session S 被排除 ⟺ 存在某个命中 wire 在 S 里有非系统 placement），排除
     /// 发生在 LIMIT 之前，故窗口仍然只切已过滤的钉住排序。
+    ///
+    /// 角色过滤（`filters.roles` 非空）时本步整体跳过：role 是**消息级**事实，
+    /// Session 实体没有角色。若照 provider/时间那样改写成"该 session 里存在某条
+    /// 该角色的消息"，`--role system` 会因为会话里有一条系统消息就把整个会话
+    /// 召回，那是与过滤器措辞不符的答案。宁可只回消息，也不回一个不满足谓词的实体。
     fn append_session_metadata_hits(
         conn: &Connection,
         safe_query: &str,
@@ -7023,7 +7038,7 @@ impl SqliteStore {
         limit: usize,
         hits: &mut Vec<SearchHit>,
     ) -> PortResult<()> {
-        if limit == 0 {
+        if limit == 0 || !filters.roles.is_empty() {
             return Ok(());
         }
         // 1) R3 去重集合：已由匹配非系统消息代表过的 session。
@@ -7140,6 +7155,7 @@ impl SqliteStore {
                 provider_id: None,
                 working_directory: None,
                 project_name: None,
+                match_ranges: Vec::new(),
             });
         }
         Ok(())
@@ -7261,12 +7277,12 @@ impl SearchIndex for SqliteStore {
         // MATCH 会泄漏 `fts5: syntax error near "."` 之类的底层报错（10 角色
         // 体验测试缺陷）。把每个词用引号包裹成短语查询，保留词内特殊字符的字面
         // 含义，同时保持原来的空格 AND 语义。
-        let safe_query = safe_fts_query(&bigram_cjk(query.text));
+        let filters = query.filters;
+        let safe_query = fts_match_expression(query.text, &filters.exclude_terms);
         if safe_query.is_empty() {
             // 空查询（全标点/空白）无词可查：返回空而非让 FTS5 报语法错误。
             return Ok(Vec::new());
         }
-        let filters = query.filters;
         if filters.is_empty() {
             // 无 filter：结果集与排序与旧路径逐条一致，只是先用 bm25 截断把
             // sorter 要物化的行数压到"可能进 top-k"的那几十条（见
@@ -7326,15 +7342,19 @@ impl SearchIndex for SqliteStore {
         // "no such column"），故查询与 bm25 用裸表名，其余列引用走别名。
         //
         // provider 维度（OR）：任一 placement 的 source document payload
-        // `provider` 命中规范化 id 集合。时间维度（AND，[since, until) 半开）：
-        // 消息自身 catalog payload 的 `timestamp`（权威事实源，Codex 现代的
-        // null 与任何无法解析的值经 asg_instant_sort_key → NULL 而被排除）。
+        // `provider` 命中规范化 id 集合。role 维度（OR）：消息自身 catalog payload
+        // 的 `role`。exclusion 维度已经在 `safe_query` 里成为 MATCH 表达式的一部分
+        // （FTS5 `NOT`），因此和正向查询走同一个倒排索引，不额外扫任何行。
+        // 时间维度（AND，[since, until) 半开）：消息自身 catalog payload 的
+        // `timestamp`（权威事实源，Codex 现代的 null 与任何无法解析的值经
+        // asg_instant_sort_key → NULL 而被排除）。
         let mut sql = String::from(
             "SELECT f.id, bm25(fts) FROM fts AS f
              WHERE fts MATCH ?1",
         );
         let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(safe_query.clone())];
         push_provider_predicate(&mut sql, &mut params, &filters.providers);
+        push_role_predicate(&mut sql, &mut params, &filters.roles);
         if filters.since.is_some() || filters.until.is_some() {
             sql.push_str(
                 " AND EXISTS (
@@ -7403,7 +7423,7 @@ impl SearchIndex for SqliteStore {
             return self.query_filtered(query, limit);
         }
         let conn = self.conn.borrow();
-        let safe_query = safe_fts_query(&bigram_cjk(query.text));
+        let safe_query = fts_match_expression(query.text, &query.filters.exclude_terms);
         if safe_query.is_empty() {
             return Ok(Vec::new());
         }
@@ -7418,6 +7438,7 @@ impl SearchIndex for SqliteStore {
         );
         let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(safe_query)];
         push_provider_predicate(&mut sql, &mut params, &query.filters.providers);
+        push_role_predicate(&mut sql, &mut params, &query.filters.roles);
         if query.filters.since.is_some() || query.filters.until.is_some() {
             sql.push_str(
                 " AND EXISTS (
@@ -7459,11 +7480,12 @@ impl SearchIndex for SqliteStore {
 
     /// D11（宽容但报数）：报出时间窗因缺时间戳而排除的消息条数。
     ///
-    /// 与 [`Self::query_faceted`] 同一候选集（同一 FTS MATCH + 同一 provider /
-    /// facet 谓词），只把时间谓词换成"任何窗口都不可能纳入"的判定：该消息没有
-    /// 任何可解析时间戳（`asg_instant_sort_key` → NULL，SQL 里 NULL 对每个比较
-    /// 都为假）。这是真查一次的精确计数，不抽样、不估算，也不是忽略其它 filter
-    /// 的整表计数（那会高报排除量）。无时间窗时不查库、直接返回 0。
+    /// 与 [`Self::query_faceted`] 同一候选集（同一 FTS MATCH 表达式——排除词已在
+    /// 其中——外加同一 provider / role / facet 谓词），只把时间谓词换成"任何窗口都
+    /// 不可能纳入"的判定：该消息没有任何可解析时间戳（`asg_instant_sort_key` →
+    /// NULL，SQL 里 NULL 对每个比较都为假）。这是真查一次的精确计数，不抽样、
+    /// 不估算，也不是忽略其它 filter 的整表计数（那会高报排除量）。
+    /// 无时间窗时不查库、直接返回 0。
     fn count_time_filter_excluded(
         &self,
         query: SearchQuery<'_>,
@@ -7472,7 +7494,7 @@ impl SearchIndex for SqliteStore {
         if query.filters.since.is_none() && query.filters.until.is_none() {
             return Ok(0);
         }
-        let safe_query = safe_fts_query(&bigram_cjk(query.text));
+        let safe_query = fts_match_expression(query.text, &query.filters.exclude_terms);
         if safe_query.is_empty() {
             return Ok(0);
         }
@@ -7492,6 +7514,7 @@ impl SearchIndex for SqliteStore {
         );
         let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(safe_query)];
         push_provider_predicate(&mut sql, &mut params, &query.filters.providers);
+        push_role_predicate(&mut sql, &mut params, &query.filters.roles);
         push_facet_predicates(&mut sql, &mut params, facets);
 
         let params_ref: Vec<&dyn rusqlite::ToSql> =
@@ -7885,6 +7908,7 @@ impl SemanticTopK {
                 provider_id: None,
                 working_directory: None,
                 project_name: None,
+                match_ranges: Vec::new(),
             });
         }
         Ok(hits)
@@ -8521,6 +8545,7 @@ where
             provider_id: None,
             working_directory: None,
             project_name: None,
+            match_ranges: Vec::new(),
         });
     }
     Ok(hits)
@@ -8557,6 +8582,47 @@ fn push_provider_predicate(
         // `as_str` 借用自 provider（不再是 `&'static str`），而参数要活到语句执行，
         // 故在此拥有一份。
         params.push(Box::new(provider.as_str().to_string()));
+    }
+    clause.push_str("))");
+    sql.push_str(&clause);
+}
+
+/// Push the role dimension (OR over canonical roles) onto a message-search
+/// predicate chain built over `fts AS f`.
+///
+/// The role lives on the message's own canonical payload, so this is the same
+/// single-row lookup the time predicate does — `fts_ids.id_json` is UNIQUE and
+/// `catalog.id` is the primary key, so no scan is introduced. Same sharing
+/// rationale as [`push_provider_predicate`]: the exclusion count in
+/// [`SearchIndex::count_time_filter_excluded`] must apply byte-identical
+/// non-time predicates.
+///
+/// A payload that is not valid JSON, or carries no `role`, matches no role and
+/// is therefore excluded whenever a role set is given — an explicit allowlist
+/// never falls back to "keep it anyway".
+fn push_role_predicate(
+    sql: &mut String,
+    params: &mut Vec<Box<dyn rusqlite::ToSql>>,
+    roles: &[SearchRole],
+) {
+    if roles.is_empty() {
+        return;
+    }
+    let mut clause = String::from(
+        " AND EXISTS (
+                     SELECT 1 FROM catalog role_msg
+                     WHERE role_msg.id = (
+                         SELECT wire_id FROM fts_ids WHERE id_json = f.id
+                     )
+                     AND CASE WHEN json_valid(role_msg.payload)
+                              THEN json_extract(role_msg.payload, '$.role') END IN (",
+    );
+    for (index, role) in roles.iter().enumerate() {
+        if index > 0 {
+            clause.push(',');
+        }
+        clause.push('?');
+        params.push(Box::new(role.as_str()));
     }
     clause.push_str("))");
     sql.push_str(&clause);
@@ -8649,6 +8715,38 @@ fn safe_fts_query(query: &str) -> String {
         }
     }
     words.join(" ")
+}
+
+/// Build the FTS5 MATCH expression for one search: the literalized user query
+/// minus every structured exclusion term.
+///
+/// Both sides go through the same `bigram_cjk` + [`safe_fts_query`] pipeline, so
+/// `exclude_terms` is a *term-level* predicate in the language the index already
+/// speaks. That keeps exclusion on the inverted index instead of a row-by-row
+/// substring scan, and it keeps ADR-0003's decision intact: the user never types
+/// FTS syntax, the operator is composed here from a structured filter.
+///
+/// Both operands are parenthesized so the meaning does not depend on FTS5
+/// operator precedence between the implicit AND of adjacent phrases and `NOT`.
+///
+/// An exclusion term that tokenizes to nothing (all punctuation) excludes
+/// nothing. That is the exact dual of the positive side, where a
+/// punctuation-only query matches nothing: a term the index cannot represent
+/// appears in no document, so no document is removed for containing it.
+fn fts_match_expression(text: &str, exclude_terms: &[String]) -> String {
+    let positive = safe_fts_query(&bigram_cjk(text));
+    if positive.is_empty() {
+        return String::new();
+    }
+    let excluded: Vec<String> = exclude_terms
+        .iter()
+        .map(|term| safe_fts_query(&bigram_cjk(term)))
+        .filter(|term| !term.is_empty())
+        .collect();
+    if excluded.is_empty() {
+        return positive;
+    }
+    format!("({positive}) NOT ({})", excluded.join(" OR "))
 }
 
 #[cfg(test)]
@@ -9199,6 +9297,520 @@ mod filtered_query_tests {
             "statement count must not depend on how many rows match \
              (4 rows -> {}, 120 rows -> {})",
             counts[0], counts[1]
+        );
+    }
+
+    /// One session whose messages differ only by `role`, plus a role-less
+    /// legacy row and a row carrying an extra token to exclude.
+    ///
+    /// `metatoken` appears only in the user message, which makes it the
+    /// session's `first_user_text` and therefore also the Session metadata FTS
+    /// text — that is what lets the role/metadata interaction be observed.
+    struct RoleFixture {
+        store: SqliteStore,
+        user: StableId,
+        assistant: StableId,
+        system: StableId,
+        tool: StableId,
+        roleless: StableId,
+        assistant_noisy: StableId,
+    }
+
+    fn role_fixture() -> RoleFixture {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let session = sid(IdKind::Session, b"role-session");
+        let doc = sid(IdKind::Document, b"role-doc");
+        let user = sid(IdKind::Message, b"role-user");
+        let assistant = sid(IdKind::Message, b"role-assistant");
+        let system = sid(IdKind::Message, b"role-system");
+        let tool = sid(IdKind::Message, b"role-tool");
+        let roleless = sid(IdKind::Message, b"role-none");
+        let assistant_noisy = sid(IdKind::Message, b"role-assistant-noisy");
+
+        let message_entry = |id: &StableId, role: Option<&str>, text: &str| {
+            let role = match role {
+                Some(value) => serde_json::Value::String(value.to_string()),
+                None => serde_json::Value::Null,
+            };
+            (
+                id.clone(),
+                serde_json::json!({
+                    "role": role,
+                    "text": text,
+                    "timestamp": "2026-08-01T00:00:00Z",
+                    "parent": null,
+                    "parent_native_id": null,
+                    "is_sidechain": false,
+                    "session": null,
+                    "sessions": [],
+                    "span": null,
+                    "spans": [],
+                })
+                .to_string()
+                .into_bytes(),
+                text.to_string(),
+            )
+        };
+        let document_entry = (
+            doc.clone(),
+            serde_json::json!({
+                "provider": "claude-code",
+                "variant": "claude-code/synthetic-v1",
+                "page_ref": {
+                    "source_fingerprint": null,
+                    "document_ordinal": 0,
+                    "first_line": 0,
+                    "last_line": 0,
+                    "byte_range": [0, 0],
+                },
+                "len": 128,
+            })
+            .to_string()
+            .into_bytes(),
+            String::new(),
+        );
+
+        let entries = vec![
+            entity_entry(&session),
+            document_entry,
+            message_entry(&user, Some("user"), "metatoken asked the question"),
+            message_entry(&assistant, Some("assistant"), "roletoken model answer"),
+            message_entry(&system, Some("system"), "roletoken harness preamble"),
+            message_entry(&tool, Some("tool"), "roletoken tool output"),
+            message_entry(&roleless, None, "roletoken legacy row"),
+            message_entry(
+                &assistant_noisy,
+                Some("assistant"),
+                "roletoken answer with dropme marker",
+            ),
+        ];
+        let mut ordinal = 0_u32;
+        let mut next = |message: &StableId| {
+            let placement = placement(&session, &doc, message, ordinal, false, Some((0, 4)));
+            ordinal += 1;
+            placement
+        };
+        let placements = vec![
+            next(&user),
+            next(&assistant),
+            next(&system),
+            next(&tool),
+            next(&roleless),
+            next(&assistant_noisy),
+        ];
+        let source = source_batch("role-fixture.jsonl", entries, placements, Vec::new(), true);
+        store
+            .commit_source_batches_if_changed(std::slice::from_ref(&source))
+            .unwrap();
+        RoleFixture {
+            store,
+            user,
+            assistant,
+            system,
+            tool,
+            roleless,
+            assistant_noisy,
+        }
+    }
+
+    fn role_filters(roles: &[SearchRole]) -> SearchFilters {
+        SearchFilters {
+            roles: roles.to_vec(),
+            ..SearchFilters::default()
+        }
+    }
+
+    #[test]
+    fn role_filter_keeps_only_the_named_roles() {
+        let fixture = role_fixture();
+        let all = search_filtered(&fixture.store, "roletoken", &SearchFilters::default());
+        assert_eq!(all.len(), 5, "{all:?}");
+
+        let mut assistants = search_filtered(
+            &fixture.store,
+            "roletoken",
+            &role_filters(&[SearchRole::Assistant]),
+        );
+        assistants.sort();
+        let mut expected = vec![
+            fixture.assistant.as_str().to_string(),
+            fixture.assistant_noisy.as_str().to_string(),
+        ];
+        expected.sort();
+        assert_eq!(assistants, expected, "only assistant rows survive");
+
+        // The whole point of M3-8: system is reachable as a positive selection,
+        // not only as the thing a boolean flag stops suppressing.
+        let systems = search_filtered(
+            &fixture.store,
+            "roletoken",
+            &role_filters(&[SearchRole::System]),
+        );
+        assert_eq!(systems, vec![fixture.system.as_str().to_string()]);
+
+        let tools = search_filtered(
+            &fixture.store,
+            "roletoken",
+            &role_filters(&[SearchRole::Tool]),
+        );
+        assert_eq!(tools, vec![fixture.tool.as_str().to_string()]);
+    }
+
+    #[test]
+    fn role_entries_or_together_and_a_missing_role_never_matches() {
+        let fixture = role_fixture();
+        let mut both = search_filtered(
+            &fixture.store,
+            "roletoken",
+            &role_filters(&[SearchRole::System, SearchRole::Tool]),
+        );
+        both.sort();
+        let mut expected = vec![
+            fixture.system.as_str().to_string(),
+            fixture.tool.as_str().to_string(),
+        ];
+        expected.sort();
+        assert_eq!(both, expected, "roles OR within the dimension");
+
+        // A payload with `role: null` satisfies no role. An explicit allowlist
+        // must not quietly keep rows it cannot classify — the row is still
+        // reachable with no role filter at all.
+        let roleless = fixture.roleless.as_str().to_string();
+        for role in [
+            SearchRole::User,
+            SearchRole::Assistant,
+            SearchRole::System,
+            SearchRole::Developer,
+            SearchRole::Tool,
+        ] {
+            let hits = search_filtered(&fixture.store, "roletoken", &role_filters(&[role]));
+            assert!(!hits.contains(&roleless), "{role:?} kept a role-less row");
+        }
+        let unfiltered = search_filtered(&fixture.store, "roletoken", &SearchFilters::default());
+        assert!(unfiltered.contains(&roleless));
+    }
+
+    #[test]
+    fn role_and_provider_dimensions_are_anded() {
+        let fixture = role_fixture();
+        let matching = SearchFilters {
+            providers: vec![SearchProvider::claude_code()],
+            roles: vec![SearchRole::System],
+            ..SearchFilters::default()
+        };
+        assert_eq!(
+            search_filtered(&fixture.store, "roletoken", &matching),
+            vec![fixture.system.as_str().to_string()]
+        );
+        let conflicting = SearchFilters {
+            providers: vec![SearchProvider::codex()],
+            roles: vec![SearchRole::System],
+            ..SearchFilters::default()
+        };
+        assert!(
+            search_filtered(&fixture.store, "roletoken", &conflicting).is_empty(),
+            "dimensions AND: the fixture has no codex system row"
+        );
+    }
+
+    #[test]
+    fn role_filter_returns_no_session_metadata_hit() {
+        // `metatoken` lives only in the user message, so it is also the Session
+        // metadata text. Unfiltered, the message represents the session (R3
+        // dedup) and the session itself is not returned separately.
+        let fixture = role_fixture();
+        let unfiltered = search_filtered(&fixture.store, "metatoken", &SearchFilters::default());
+        assert_eq!(unfiltered, vec![fixture.user.as_str().to_string()]);
+
+        // With `--role system` the message side matches nothing. If Session
+        // metadata recall still ran, the dedup set would now be empty and the
+        // session would surface — an entity that satisfies no role, returned
+        // by a query whose only filter is a role. Suppressing recall is what
+        // keeps that from happening.
+        let hits = search_filtered(
+            &fixture.store,
+            "metatoken",
+            &role_filters(&[SearchRole::System]),
+        );
+        assert!(hits.is_empty(), "{hits:?}");
+    }
+
+    #[test]
+    fn exclude_term_drops_messages_that_contain_it() {
+        let fixture = role_fixture();
+        let filters = SearchFilters {
+            exclude_terms: vec!["dropme".to_string()],
+            ..SearchFilters::default()
+        };
+        let hits = search_filtered(&fixture.store, "roletoken", &filters);
+        assert!(
+            !hits.contains(&fixture.assistant_noisy.as_str().to_string()),
+            "{hits:?}"
+        );
+        assert_eq!(hits.len(), 4, "only the noisy row is removed: {hits:?}");
+        assert!(hits.contains(&fixture.assistant.as_str().to_string()));
+    }
+
+    #[test]
+    fn exclude_terms_or_together_and_compose_with_role() {
+        let fixture = role_fixture();
+        let two_terms = SearchFilters {
+            exclude_terms: vec!["dropme".to_string(), "preamble".to_string()],
+            ..SearchFilters::default()
+        };
+        let mut hits = search_filtered(&fixture.store, "roletoken", &two_terms);
+        hits.sort();
+        let mut expected = vec![
+            fixture.assistant.as_str().to_string(),
+            fixture.tool.as_str().to_string(),
+            fixture.roleless.as_str().to_string(),
+        ];
+        expected.sort();
+        assert_eq!(hits, expected, "a hit matching any term is dropped");
+
+        let with_role = SearchFilters {
+            roles: vec![SearchRole::Assistant],
+            exclude_terms: vec!["dropme".to_string()],
+            ..SearchFilters::default()
+        };
+        assert_eq!(
+            search_filtered(&fixture.store, "roletoken", &with_role),
+            vec![fixture.assistant.as_str().to_string()]
+        );
+    }
+
+    #[test]
+    fn exclusion_does_not_leak_into_the_positive_term_semantics() {
+        // Regression guard for the composed MATCH expression: excluding a term
+        // must remove documents, never turn the query itself into an OR or let
+        // `NOT` bind to only the last phrase of a multi-word query.
+        let fixture = role_fixture();
+        let filters = SearchFilters {
+            exclude_terms: vec!["dropme".to_string()],
+            ..SearchFilters::default()
+        };
+        // Two-word query: both words are required before exclusion applies.
+        let hits = search_filtered(&fixture.store, "roletoken preamble", &filters);
+        assert_eq!(hits, vec![fixture.system.as_str().to_string()], "{hits:?}");
+
+        // Excluding a term the query itself requires yields nothing rather than
+        // silently widening to the remaining word.
+        let self_excluding = SearchFilters {
+            exclude_terms: vec!["preamble".to_string()],
+            ..SearchFilters::default()
+        };
+        assert!(search_filtered(&fixture.store, "roletoken preamble", &self_excluding).is_empty());
+    }
+
+    #[test]
+    fn punctuation_only_exclusion_term_excludes_nothing() {
+        // The dual of a punctuation-only query matching nothing: a term the
+        // tokenizer cannot represent appears in no document, so no document is
+        // removed. It must not become an FTS5 syntax error either.
+        let fixture = role_fixture();
+        let filters = SearchFilters {
+            exclude_terms: vec!["...".to_string(), "!!".to_string()],
+            ..SearchFilters::default()
+        };
+        assert_eq!(
+            search_filtered(&fixture.store, "roletoken", &filters),
+            search_filtered(&fixture.store, "roletoken", &SearchFilters::default())
+        );
+    }
+
+    #[test]
+    fn role_and_exclusion_are_pushed_down_before_limit() {
+        // Same contract the provider/time pushdown test pins: the predicate must
+        // constrain the candidate set inside the prepared statement, so a page
+        // smaller than the match count still returns only rows that satisfy the
+        // filter — and the statement count stays fixed as rows grow.
+        let fixture = role_fixture();
+        let filters = SearchFilters {
+            roles: vec![SearchRole::Assistant],
+            exclude_terms: vec!["dropme".to_string()],
+            ..SearchFilters::default()
+        };
+        let mut hits = Vec::new();
+        let statements = counted_statements(&fixture.store, || {
+            hits = fixture
+                .store
+                .query_filtered(
+                    SearchQuery {
+                        text: "roletoken",
+                        filters: &filters,
+                    },
+                    1,
+                )
+                .unwrap();
+        });
+        assert_eq!(
+            hits.iter().map(|hit| hit.id.as_str()).collect::<Vec<_>>(),
+            vec![fixture.assistant.as_str()],
+            "LIMIT 1 must cut the already-filtered ordering"
+        );
+        assert_eq!(
+            statements, 1,
+            "one prepared statement: the filtered message query. A role filter \
+             skips both the bm25 cutoff probe (filtered path) and Session \
+             metadata recall, so no extra statement appears."
+        );
+    }
+
+    #[test]
+    fn time_filter_excluded_count_respects_role_and_exclusion_predicates() {
+        // The count must run under byte-identical non-time predicates. A row
+        // that a role or exclusion predicate already removed is not an exclusion
+        // the time window caused — counting it would overstate the report.
+        let store = SqliteStore::open_in_memory().unwrap();
+        let session = sid(IdKind::Session, b"count-session");
+        let doc = sid(IdKind::Document, b"count-doc");
+        let untimed_assistant = sid(IdKind::Message, b"count-untimed-assistant");
+        let untimed_system = sid(IdKind::Message, b"count-untimed-system");
+        let untimed_noisy = sid(IdKind::Message, b"count-untimed-noisy");
+        let message_entry = |id: &StableId, role: &str, text: &str| {
+            (
+                id.clone(),
+                serde_json::json!({
+                    "role": role,
+                    "text": text,
+                    "timestamp": null,
+                    "parent": null,
+                    "parent_native_id": null,
+                    "is_sidechain": false,
+                    "session": null,
+                    "sessions": [],
+                    "span": null,
+                    "spans": [],
+                })
+                .to_string()
+                .into_bytes(),
+                text.to_string(),
+            )
+        };
+        let entries = vec![
+            entity_entry(&session),
+            (
+                doc.clone(),
+                serde_json::json!({
+                    "provider": "claude-code",
+                    "variant": "claude-code/synthetic-v1",
+                    "page_ref": {
+                        "source_fingerprint": null,
+                        "document_ordinal": 0,
+                        "first_line": 0,
+                        "last_line": 0,
+                        "byte_range": [0, 0],
+                    },
+                    "len": 128,
+                })
+                .to_string()
+                .into_bytes(),
+                String::new(),
+            ),
+            message_entry(&untimed_assistant, "assistant", "counttoken answer"),
+            message_entry(&untimed_system, "system", "counttoken preamble"),
+            message_entry(&untimed_noisy, "assistant", "counttoken dropme answer"),
+        ];
+        let mut ordinal = 0_u32;
+        let mut next = |message: &StableId| {
+            let placement = placement(&session, &doc, message, ordinal, false, Some((0, 4)));
+            ordinal += 1;
+            placement
+        };
+        let placements = vec![
+            next(&untimed_assistant),
+            next(&untimed_system),
+            next(&untimed_noisy),
+        ];
+        let source = source_batch("count-fixture.jsonl", entries, placements, Vec::new(), true);
+        store
+            .commit_source_batches_if_changed(std::slice::from_ref(&source))
+            .unwrap();
+
+        let window = (Some(instant(0)), Some(instant(4_000_000_000)));
+        let all = SearchFilters {
+            since: window.0,
+            until: window.1,
+            ..SearchFilters::default()
+        };
+        assert_eq!(count_excluded(&store, "counttoken", &all), 3);
+
+        let assistants_only = SearchFilters {
+            roles: vec![SearchRole::Assistant],
+            since: window.0,
+            until: window.1,
+            ..SearchFilters::default()
+        };
+        assert_eq!(count_excluded(&store, "counttoken", &assistants_only), 2);
+
+        let assistants_without_noise = SearchFilters {
+            roles: vec![SearchRole::Assistant],
+            exclude_terms: vec!["dropme".to_string()],
+            since: window.0,
+            until: window.1,
+            ..SearchFilters::default()
+        };
+        assert_eq!(
+            count_excluded(&store, "counttoken", &assistants_without_noise),
+            1
+        );
+    }
+
+    #[test]
+    fn faceted_path_applies_role_and_exclusion_too() {
+        // query_faceted is a separate SQL builder; a predicate added to only one
+        // of the two builders is a filter that silently stops working the moment
+        // a facet is combined with it.
+        let fixture = role_fixture();
+        let facets = SearchFacets {
+            sidechain: SidechainFacet::MainOnly,
+            ..SearchFacets::default()
+        };
+        let filters = SearchFilters {
+            roles: vec![SearchRole::Assistant],
+            exclude_terms: vec!["dropme".to_string()],
+            ..SearchFilters::default()
+        };
+        let hits = fixture
+            .store
+            .query_faceted(
+                SearchQuery {
+                    text: "roletoken",
+                    filters: &filters,
+                },
+                100,
+                &facets,
+            )
+            .unwrap();
+        assert_eq!(
+            hits.iter().map(|hit| hit.id.as_str()).collect::<Vec<_>>(),
+            vec![fixture.assistant.as_str()]
+        );
+    }
+
+    #[test]
+    fn match_expression_composes_exclusion_without_touching_the_plain_case() {
+        // No exclusion terms must leave the expression byte-identical to the
+        // historical `safe_fts_query(bigram_cjk(..))` output — that is what keeps
+        // unfiltered SQL and its plan unchanged.
+        assert_eq!(
+            fts_match_expression("hello world", &[]),
+            safe_fts_query(&bigram_cjk("hello world"))
+        );
+        assert_eq!(
+            fts_match_expression("hello", &["noise".to_string()]),
+            "(\"hello\") NOT (\"noise\")"
+        );
+        assert_eq!(
+            fts_match_expression("hello", &["a".to_string(), "b".to_string()]),
+            "(\"hello\") NOT (\"a\" OR \"b\")"
+        );
+        // Empty positive side short-circuits before any exclusion is composed.
+        assert!(fts_match_expression("...", &["noise".to_string()]).is_empty());
+        // A term that tokenizes to nothing drops out of the composition.
+        assert_eq!(
+            fts_match_expression("hello", &["...".to_string()]),
+            "\"hello\""
         );
     }
 
@@ -17133,6 +17745,90 @@ mod tests {
         assert!(targets.contains(&Some("ls")) && targets.contains(&Some("ls -la")));
     }
 
+    /// 回归 M1-15：同一条消息上两条**同名、未配对**的工具调用（真实 codex
+    /// rollout 里的常态：两条 `custom_tool_call` 都没有对应的 output）归一化后
+    /// 派生出同一个 `activity_id`——`call_id` 不参与派生。这曾经让整批 `sync`
+    /// 直接失败（151 份真实 rollout → 0 条入库）。批内同 id 必须折叠成一条，
+    /// 而不是拒绝整批。
+    #[test]
+    fn two_unpaired_same_named_calls_on_one_message_collapse_into_one_row() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let message = sid(IdKind::Message, b"dup-derived-act");
+        let call = |name: &str| SourceActivity {
+            message_id: message.clone(),
+            activity: ToolActivity {
+                kind: ToolActivityKind::Command,
+                actor: ToolActivityActor::Main,
+                name: name.into(),
+                // 未配对 → 没有 output 可解析出 target/status。
+                target: None,
+                status: ToolActivityStatus::Unknown,
+            },
+        };
+        let source = SourceBatch {
+            source_path: "unpaired-calls.jsonl".into(),
+            entries: vec![entity_entry(&message)],
+            placements: Vec::new(),
+            edges: Vec::new(),
+            activities: vec![call("exec"), call("exec")],
+            relation_complete: true,
+            len_bytes: Some(1),
+            fingerprint: Some("unpaired-fp".into()),
+            provider_id: None,
+            resume_claim: None,
+        };
+        assert!(
+            store
+                .commit_source_batches_if_changed(std::slice::from_ref(&source))
+                .unwrap(),
+            "两条同名未配对调用必须能入库"
+        );
+        let rows = activity_rows(&store);
+        assert_eq!(rows.len(), 1, "同 id 折叠成一条");
+        assert_eq!(rows[0].3, "exec");
+        assert_eq!(rows[0].4, None);
+        assert_eq!(rows[0].5, "unknown");
+
+        // 折叠不破坏 no-op 判定：同一批重放不得再次改写。
+        assert!(!store.commit_source_batches_if_changed(&[source]).unwrap());
+        assert_eq!(activity_rows(&store).len(), 1);
+    }
+
+    /// 对照组：把第二条的 `name` 换掉 → 两个不同的 `activity_id`，两行并存。
+    /// （M1-15 的判据是"归一化后同形"，不是"两条工具调用"。）
+    #[test]
+    fn two_unpaired_differently_named_calls_on_one_message_stay_two_rows() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let message = sid(IdKind::Message, b"distinct-derived-act");
+        let call = |name: &str| SourceActivity {
+            message_id: message.clone(),
+            activity: ToolActivity {
+                kind: ToolActivityKind::Command,
+                actor: ToolActivityActor::Main,
+                name: name.into(),
+                target: None,
+                status: ToolActivityStatus::Unknown,
+            },
+        };
+        let source = SourceBatch {
+            source_path: "distinct-calls.jsonl".into(),
+            entries: vec![entity_entry(&message)],
+            placements: Vec::new(),
+            edges: Vec::new(),
+            activities: vec![call("exec"), call("apply_patch")],
+            relation_complete: true,
+            len_bytes: Some(1),
+            fingerprint: Some("distinct-fp".into()),
+            provider_id: None,
+            resume_claim: None,
+        };
+        assert!(store.commit_source_batches_if_changed(&[source]).unwrap());
+        let rows = activity_rows(&store);
+        assert_eq!(rows.len(), 2);
+        let names: Vec<&str> = rows.iter().map(|row| row.3.as_str()).collect();
+        assert!(names.contains(&"exec") && names.contains(&"apply_patch"));
+    }
+
     #[test]
     fn activity_anchored_to_non_message_is_rejected() {
         let store = SqliteStore::open_in_memory().unwrap();
@@ -17148,7 +17844,9 @@ mod tests {
         let error = store
             .commit_source_batches_if_changed(&[source])
             .unwrap_err();
-        assert!(matches!(error, PortError::Backend(_)));
+        // 锚点类型错是缺陷信号，不是数据库故障：必须是 Invariant（协议层 internal），
+        // 否则用户拿到的指引是"检查 --db 路径、跑 doctor"。
+        assert!(matches!(error, PortError::Invariant(_)), "got {error:?}");
     }
 
     // ---- 工具活动保留策略（v12）：source 退役级联 + 孤儿扫描/修剪 ----

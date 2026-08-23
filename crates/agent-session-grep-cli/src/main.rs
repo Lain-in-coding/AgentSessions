@@ -19,6 +19,7 @@
 
 mod hooks;
 mod human;
+mod invocation;
 mod mcp;
 mod protocol;
 mod redaction;
@@ -40,8 +41,8 @@ use agent_session_grep_domain::{
 use agent_session_grep_ports::{
     Confidence, HistoryBucket, HistoryStats, ParseReport, ProviderAdapter,
     ProviderSessionObservation, ReadOnlySource, RedactionStatus, ResumeClaimsStore, RetrievalMode,
-    SearchFacets, SearchFilters, SearchInstant, SearchProvider, SidechainFacet, SourceFormatFamily,
-    SourceResumeClaim,
+    SearchFacets, SearchFilters, SearchInstant, SearchProvider, SearchRole, SidechainFacet,
+    SourceFormatFamily, SourceResumeClaim,
     capability::{ProviderCapability, ProviderCapabilityMatrix, ProviderMaturity},
     source_format_family_for,
 };
@@ -186,8 +187,17 @@ fn render_human_error(err: &ProtocolError) {
 
 /// 错误消息是否已自带可执行的下一步命令。判据是消息里出现了本二进制的调用
 /// 形态——只有构造方明确写了完整命令时才成立，不做模糊猜测。
+///
+/// 两个 `[[bin]]` 名与本次实际调用名都算（M4-6）：以第三个名字（重命名的副本）
+/// 调用时，消息里的命令仍以规范名书写，判据不能因此漏判而追加一条错的通用指引。
 fn message_states_next_step(message: &str) -> bool {
-    message.contains("asg ") || message.contains("agent-session-grep ")
+    [
+        invocation::DEFAULT_NAME,
+        CANONICAL_BIN_NAME,
+        invocation::name(),
+    ]
+    .iter()
+    .any(|name| message.contains(&format!("{name} ")))
 }
 
 /// Convert provider parse diagnostics into bounded public warnings. Diagnostics
@@ -238,7 +248,8 @@ fn extract_offline_flag(args: &[String]) -> bool {
         match a.as_str() {
             "--db" | "--out" | "--output" | "--request-id" | "--cursor" | "--max-items"
             | "--max-bytes" | "--max-messages" | "--policy" | "--level" | "--provider"
-            | "--since" | "--until" | "--session" | "--around" | "--tool-kind" | "--tool-name" => {
+            | "--since" | "--until" | "--session" | "--around" | "--tool-kind" | "--tool-name"
+            | "--role" | "--exclude" => {
                 it.next();
             }
             _ => {}
@@ -284,7 +295,7 @@ fn extract_request_id(args: &[String]) -> Result<Option<String>, String> {
             "--db" | "--out" | "--output" | "--cursor" | "--max-items" | "--max-bytes"
             | "--max-messages" | "--max-evidence" | "--max-tokens" | "--policy" | "--level"
             | "--provider" | "--since" | "--until" | "--session" | "--around" | "--tool-kind"
-            | "--tool-name" => {
+            | "--tool-name" | "--role" | "--exclude" => {
                 it.next();
             }
             _ => {}
@@ -306,7 +317,7 @@ fn command_name(args: &[String]) -> String {
             "--db" | "--out" | "--output" | "--cursor" | "--max-items" | "--max-bytes"
             | "--max-messages" | "--max-evidence" | "--max-tokens" | "--policy" | "--level"
             | "--request-id" | "--provider" | "--since" | "--until" | "--session" | "--around"
-            | "--tool-kind" | "--tool-name" => {
+            | "--tool-kind" | "--tool-name" | "--role" | "--exclude" => {
                 it.next(); // 消费其取值
             }
             "--robot" | "--no-color" | "--help" | "-h" | "--version" | "-V" | "--discover"
@@ -377,7 +388,7 @@ fn intercept_help_or_version(args: &[String]) -> Option<HelpRequest> {
             "--db" | "--out" | "--output" | "--request-id" | "--cursor" | "--max-items"
             | "--max-bytes" | "--max-messages" | "--max-evidence" | "--max-tokens" | "--policy"
             | "--level" | "--provider" | "--since" | "--until" | "--session" | "--around"
-            | "--tool-kind" | "--tool-name" => {
+            | "--tool-kind" | "--tool-name" | "--role" | "--exclude" => {
                 it.next();
             }
             _ => {}
@@ -414,13 +425,15 @@ fn run(
             HelpRequest::TopLevelHelp => emit_help("help", &help_text(), mode, sink, request_id)?,
             HelpRequest::TopLevelVersion => emit_version(
                 "version",
-                &format!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")),
+                // crate 名（`agent-session-grep-cli`）不是命令名：`-cli` 后缀
+                // 是工作区内部的 crate 命名，用户从未敲过它（M4-6）。
+                &format!("{} {}", invocation::name(), env!("CARGO_PKG_VERSION")),
                 mode,
                 sink,
                 request_id,
             )?,
             HelpRequest::SubcommandHelp(cmd) => {
-                emit_help(&cmd, subcommand_help_text(&cmd), mode, sink, request_id)?;
+                emit_help(&cmd, &subcommand_help_text(&cmd), mode, sink, request_id)?;
             }
         }
         return Ok(protocol::Outcome::Success);
@@ -1046,28 +1059,33 @@ fn platform_paths_impl() -> Result<serde_json::Value, CliError> {
 
 /// 顶层帮助文本。与 --version 一样走协议出口：裸 println! 会在下游提前关管道时
 /// panic（exit 101 + stderr 污染），违反 CONTRACT §6 的 EPIPE 静默 exit 0。
+///
+/// 头行与所有 usage/quickstart 行都用**本次实际调用名**（M4-6）。过去它们一律
+/// 写 `agent-session-grep`，头行还写 crate 名 `agent-session-grep-cli`——以
+/// `asg` 调用时用户读到的每一行都是另一个名字，而头行那个名字根本不是命令。
 fn help_text() -> String {
+    let name = invocation::name();
     format!(
         "{name} {version}
 AI coding-agent session history search engine (local, read-only, offline).
 
 QUICKSTART (start here):
-    agent-session-grep sync --discover              index every provider data root
-    agent-session-grep search <keyword>             search your session history
-    agent-session-grep show <hit-id>                read the body of one hit
-    agent-session-grep context <session-id>         expand one whole session
-    agent-session-grep config paths                 see where data is stored
-    agent-session-grep providers                    see provider maturity and capabilities
+    {name} sync --discover              index every provider data root
+    {name} search <keyword>             search your session history
+    {name} show <hit-id>                read the body of one hit
+    {name} context <session-id>         expand one whole session
+    {name} config paths                 see where data is stored
+    {name} providers                    see provider maturity and capabilities
 Data flow: search returns matching messages -> show <msg_id> reads one body -> context <ses_id> reads the whole session.
 
 USAGE:
-    agent-session-grep [--db <path>] <COMMAND> [ARGS]
-    agent-session-grep doctor [--db <path>]
-    agent-session-grep --help | --version
+    {name} [--db <path>] <COMMAND> [ARGS]
+    {name} doctor [--db <path>]
+    {name} --help | --version
 
 COMMANDS:
     ingest <file>          parse one raw transcript file into the store (source stays read-only)
-    sync <file>...         atomically scan one or more transcripts; no new generation when nothing changed
+    sync <path>...         atomically scan transcripts; a directory is expanded recursively. No new generation when nothing changed
     sync --discover        discover and sync sources under every provider data root (sources stay read-only)
     index rebuild          reproject the whole FTS index from the authoritative catalog (maintenance)
     index compact          reclaim the freelist and erase deletion residue (FTS5 optimize + VACUUM; exclusive lock)
@@ -1104,19 +1122,27 @@ PAGINATION / BUDGET (search, list):
     --max-bytes <n>        response byte budget (minimum 4096)
 
 LIST:
-    --sessions             只列会话实体（与 MCP `list_sessions` 同语义）
-    --sort id|recency      排序维度（默认 id：wire id 升序，稳定但与时间无关）。
-                           recency = 会话最近活动降序（回答「我昨天干了什么」），
-                           只对会话有定义，需与 --sessions 同用；provider 没给
-                           时间戳的会话排在末尾，日期显示为 —，绝不编造时刻。
-                           续读令牌绑定排序维度：换了 --sort 的旧令牌会被拒绝。
+    --sessions             list session entities only (same semantics as MCP `list_sessions`)
+    --sort id|recency      sort dimension (default id: wire id ascending — stable but unrelated to time).
+                           recency = most recent session activity first (answers `what did I do yesterday`).
+                           Defined for sessions only, so it requires --sessions. Sessions whose provider
+                           supplied no timestamp sort last and show their date as —; a time is never invented.
+                           A continuation token is bound to its sort dimension: a token from a different
+                           --sort is rejected rather than silently re-sorted.
 
 FILTER (search):
     --provider <id>        restrict to a provider (repeatable; values OR together). Run `providers` for the ids
+    --role <role>          keep only user|assistant|system|developer|tool messages (repeatable; values OR together)
+    --exclude <term>       drop messages containing this term (repeatable; a message matching any term is dropped)
     --since <time>         window start, inclusive; RFC3339/ISO-8601 absolute or 1h/1d/1w relative
     --until <time>         window end, exclusive; same syntax as --since
     --include-system       system/developer role messages are excluded by default; this flag restores them
     --group-by-session     collapse per session: keep the top-scoring hit and attach an occurrences count
+
+    An explicit --role list supersedes the --include-system default, so `--role system` needs no second flag.
+    While a --role filter is active only messages are returned; a session has no role of its own.
+    --exclude matches whole terms, tokenized exactly like the query. It is not a query operator:
+    the query language stays operator-free (ADR-0003).
 
 FACETS (search; structured filters, nothing filtered by default, output unchanged):
     --main-only            mainline messages only (excludes sidechains)
@@ -1163,7 +1189,6 @@ GLOSSARY (bilingual quick reference):
 
 EXIT CODES:
     0 success; 10 partial success (budget truncation: results usable but incomplete); see the error catalog for the rest",
-        name = env!("CARGO_PKG_NAME"),
         version = env!("CARGO_PKG_VERSION"),
     )
 }
@@ -1343,7 +1368,32 @@ fn missing_subcommand_error() -> CliError {
 /// 子命令级帮助文本：渲染该命令的签名、flag 与一个真实示例。由 help/version
 /// 提前拦截阶段（ADR-0006）在 `<cmd> --help|-h`（含 `index rebuild --help`）时
 /// 触发——顶层 --help 只给全局概览，子命令帮助给单命令的用法。
-fn subcommand_help_text(cmd: &str) -> &'static str {
+///
+/// 模板里的示例一律以 [`CANONICAL_BIN_NAME`] 书写，渲染时替换为**本次实际调用
+/// 名**（M4-6）。用一次替换而不是把 30 个模板改成 `format!`：模板是长多行字面
+/// 量，`{}` 化会把每个 flag 说明行都变成需要转义的插值串，而调用名在整份文本
+/// 里只有"这条命令怎么敲"这一种含义，替换不会误伤别的语义。
+fn subcommand_help_text(cmd: &str) -> String {
+    retarget_invocation_name(subcommand_help_template(cmd))
+}
+
+/// 把逐字写着 [`CANONICAL_BIN_NAME`] 的建议命令改写为本次调用名。
+///
+/// 调用名等于规范名时是恒等变换（`String` 分配是 help/建议命令这种一次性输出
+/// 路径上可忽略的成本，换来的是唯一一处名字改写逻辑）。
+fn retarget_invocation_name(text: &str) -> String {
+    let name = invocation::name();
+    if name == CANONICAL_BIN_NAME {
+        return text.to_string();
+    }
+    text.replace(CANONICAL_BIN_NAME, name)
+}
+
+/// 两个 `[[bin]]` 目标里的长名，也是所有帮助模板与 Application 生成的建议命令
+/// 逐字使用的那个名字。crate 名（`agent-session-grep-cli`）不是命令名。
+const CANONICAL_BIN_NAME: &str = "agent-session-grep";
+
+fn subcommand_help_template(cmd: &str) -> &'static str {
     match cmd {
         "search" => {
             "search <query>：全文检索历史会话，按相关性降序返回命中。\n\
@@ -1355,7 +1405,10 @@ fn subcommand_help_text(cmd: &str) -> &'static str {
                      --include-system（默认排除 system/developer 角色消息）、--group-by-session（按会话归并并附 occurrences）；\n\
                      结构化过滤：--main-only 只看主线（排除 sidechain）、--subagent-only 只看 subagent 消息、\n\
                      --tool-kind file|command|web|query|unknown 只保留做过该种工具调用的消息、\n\
-                     --tool-name <名字> 只保留用过该工具（逐字相等）的消息（--main-only 与 --subagent-only 互斥）"
+                     --tool-name <名字> 只保留用过该工具（逐字相等）的消息（--main-only 与 --subagent-only 互斥）\n\
+                     --role user|assistant|system|developer|tool keeps only those roles (repeatable, ORed); an\n\
+                     explicit --role supersedes the --include-system default and returns messages only.\n\
+                     --exclude <term> drops messages containing that term (repeatable, whole-term match)."
         }
         "get-message" => {
             "get-message <msg-id>：返回一个消息及其同会话主线邻居。\n\
@@ -1454,7 +1507,9 @@ fn subcommand_help_text(cmd: &str) -> &'static str {
                    其余语义与 forget 完全相同（dry-run 默认、源文件只读、抑制清单、index compact）。"
         }
         "sync" => {
-            "sync <file>...：原子扫描一个或多个 transcript 文件入库；无变化不写库。\n\
+            "sync <path>...：原子扫描 transcript 入库；无变化不写库。\n\
+                   \u{20}  目录会被递归展开（候选由各 provider 的 probe 判定，不按扩展名），\n\
+                   \u{20}  所以不必先在 shell 里手动展开文件列表。\n\
                    sync --from-file <清单>：从清单文件读路径（每行一个，空行与 # 注释忽略）。\n\
                    \u{20}  源很多时用它——几千个路径展开后会超出命令行长度上限。\n\
                    sync --discover：自动发现各 provider 数据根（~/.claude/projects、~/.codex/sessions 等）下的源并同步；\n\
@@ -1523,7 +1578,9 @@ fn subcommand_help_text(cmd: &str) -> &'static str {
     }
 }
 
-/// doctor：最小环境自检。报告版本；若给了 --db，尝试打开存储并报告 schema。
+/// doctor：引导式环境自检（M4-6）。报告版本；若给了 --db，尝试打开存储并报告
+/// schema。每个未通过的检查都带一条可执行的下一步（见 `doctor_checks`）。
+///
 /// `offline` 作为诊断字段原样上报（design D5）：`--offline` 是稳定显式模式，
 /// 当前没有任何命令需要联网，doctor 如实反映调用方声明的 offline 意图。
 fn doctor(
@@ -1542,9 +1599,38 @@ fn doctor(
     // --robot 当路径（会造出同名文件），重复 --db 是用法错误（R8.1/R8.2）。
     // doctor 的 --db 允许在命令名之后（`doctor [--db <path>]`），故整串扫描。
     let db_opt = extract_db_flag_anywhere(args)?;
-    let data = match db_opt {
+    // `--db` 缺席时按与其它读命令**同一条**优先级链找库：`$ASG_DB` > 平台默认。
+    // 过去 doctor 只看 `--db`，于是设了 `$ASG_DB` 的用户会看到
+    // `db: not-checked` —— 全仓库唯一一个不认这个环境变量的命令，
+    // 偏偏是那个专职"检查我的库"的命令（status/search 都认）。
+    //
+    // 只在库**已经存在**时才打开：读命令绝不建库（D8），
+    // 而 `SqliteStore::open` 会建。所以这里先探路径是否存在，
+    // 不存在就如实报"没有库可查"并指出该往哪看，而不是凭空造一个空库
+    // 让用户以为自检通过了。
+    let (resolved_db, db_origin) = match &db_opt {
+        Some(path) => (path.clone(), DbOrigin::Flag),
+        None => resolve_store_path(None)?,
+    };
+    let db_to_check = if db_opt.is_some() || std::path::Path::new(&resolved_db).exists() {
+        Some(resolved_db.clone())
+    } else {
+        None
+    };
+    // 引导式检查（M4-6）：存储侧健康之外，把"新手最常卡住的地方"逐项查出来并
+    // 各带一条可执行的下一步。检查跑在打开存储之前——库打不开时它们恰恰是最
+    // 需要被看到的那几条（provider 根在哪、库该落在哪）。
+    //
+    // 传**原始 flag**（不是解析后的路径）：store_location_check 自己会再走
+    // 一遍 resolve_store_path 以报告来源（--db / $ASG_DB / 平台默认），
+    // 喂它解析后的路径会让来源恒为 "--db" —— 明明没给 --db 却这么说。
+    let mut checks = environment_checks(db_opt.as_deref(), offline);
+    let data = match db_to_check {
         None => serde_json::json!({
             "tool": env!("CARGO_PKG_NAME"),
+            // `tool` 是包身份（crate 名），不是用户敲的命令名。两者都报出来，
+            // 免得读到 `agent-session-grep-cli` 的人去敲那个不存在的命令（M4-6）。
+            "invoked_as": invocation::name(),
             "version": env!("CARGO_PKG_VERSION"),
             "db": "not-checked",
             "schema": null,
@@ -1555,8 +1641,18 @@ fn doctor(
             // 本二进制管理的每个 catalog 落库，未指定 --db 也成立。
             "tool_activity_storage": true,
             // 新手会误以为 db: not-checked 是自检失败（10 角色体验测试缺陷）。
-            // 加一行白话提示，说明如何真正校验。
-            "hint": "no --db given: the checks above cover the environment only. Run doctor --db <path> to verify the store and its schema.",
+            // 加一行白话提示，说明如何真正校验。说清"我找过哪里"——
+            // 光说"给个 --db"会让已经设了 $ASG_DB 的人以为自己设错了。
+            "hint": format!(
+                "no store exists yet at {resolved_db}{}. The checks above cover the environment only; run `{} sync --discover` to build one.",
+                match db_origin {
+                    DbOrigin::Flag => " (from --db)",
+                    DbOrigin::Env => " (from $ASG_DB)",
+                    DbOrigin::Default => " (default store path)",
+                },
+                invocation::name()
+            ),
+            "checks": doctor_checks_json(&checks),
         }),
         Some(path) => {
             let store = SqliteStore::open(&path).map_err(ProtocolError::from)?;
@@ -1571,8 +1667,17 @@ fn doctor(
             let (orphaned_tool_activities, orphaned_activity_memberships) = store
                 .orphaned_activity_counts()
                 .map_err(ProtocolError::from)?;
+            // 库开得成之后才能问的三件事：库里有没有东西（"为什么 search 零命中"
+            // 的头号原因）、有没有中断的批次、有没有孤儿投影行。
+            checks.extend(store_checks(
+                &store,
+                &path,
+                interrupted,
+                orphaned_tool_activities + orphaned_activity_memberships,
+            )?);
             serde_json::json!({
                 "tool": env!("CARGO_PKG_NAME"),
+                "invoked_as": invocation::name(),
                 "version": env!("CARGO_PKG_VERSION"),
                 "db": "ok",
                 "schema": schema,
@@ -1584,6 +1689,7 @@ fn doctor(
                 "interrupted_batches": interrupted,
                 "orphaned_tool_activities": orphaned_tool_activities,
                 "orphaned_activity_memberships": orphaned_activity_memberships,
+                "checks": doctor_checks_json(&checks),
             })
         }
     };
@@ -1601,6 +1707,513 @@ fn doctor(
         RetrievalMode::Lexical,
     )?;
     Ok(protocol::Outcome::Success)
+}
+
+/// 一条 doctor 检查的结论（M4-6）。
+///
+/// `next_step` 是这次改动的全部要点：doctor 过去只报事实（`schema: 12`、
+/// `interrupted_batches: 0`），把"那我现在该干什么"留给读过源码的人。语气与
+/// 标准照 [`protocol::CanonicalCode::operator_action`]——面向一个没读过源码、
+/// 刚装完就卡住的人，给命令而不是给概念。
+struct DoctorCheck {
+    /// 稳定的检查名（机器面按它定位，勿改既有值）。
+    name: &'static str,
+    status: DoctorStatus,
+    /// 查到的事实，一句话。绝不含真实用户名/主机名之外的推断。
+    detail: String,
+    /// 未通过时的下一步。`Ok` 恒为 `None`——通过的检查不该给建议，那只是噪音。
+    next_step: Option<String>,
+}
+
+impl DoctorCheck {
+    fn ok(name: &'static str, detail: impl Into<String>) -> Self {
+        DoctorCheck {
+            name,
+            status: DoctorStatus::Ok,
+            detail: detail.into(),
+            next_step: None,
+        }
+    }
+
+    fn warn(name: &'static str, detail: impl Into<String>, next_step: impl Into<String>) -> Self {
+        DoctorCheck {
+            name,
+            status: DoctorStatus::Warn,
+            detail: detail.into(),
+            next_step: Some(next_step.into()),
+        }
+    }
+
+    fn fail(name: &'static str, detail: impl Into<String>, next_step: impl Into<String>) -> Self {
+        DoctorCheck {
+            name,
+            status: DoctorStatus::Fail,
+            detail: detail.into(),
+            next_step: Some(next_step.into()),
+        }
+    }
+}
+
+/// 检查结论的三档。`warn` 与 `fail` 的区别是"现在能不能用"：
+/// warn = 能用但会踩坑，fail = 这条路现在走不通。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DoctorStatus {
+    Ok,
+    Warn,
+    Fail,
+}
+
+impl DoctorStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            DoctorStatus::Ok => "ok",
+            DoctorStatus::Warn => "warn",
+            DoctorStatus::Fail => "fail",
+        }
+    }
+}
+
+/// 检查清单的协议投影：数组保持构造顺序（人类与机器读到同一顺序），
+/// `next_step` 为空时省略键（通过的检查不带空字段）。
+fn doctor_checks_json(checks: &[DoctorCheck]) -> serde_json::Value {
+    serde_json::Value::Array(
+        checks
+            .iter()
+            .map(|check| {
+                let mut object = serde_json::json!({
+                    "name": check.name,
+                    "status": check.status.as_str(),
+                    "detail": check.detail,
+                });
+                if let Some(next_step) = &check.next_step {
+                    object["next_step"] = serde_json::json!(next_step);
+                }
+                object
+            })
+            .collect(),
+    )
+}
+
+/// 不需要打开存储就能做的检查：provider 数据根、库路径落点、两个 `[[bin]]`
+/// 名的安装状态、semantic 后端的权威事实。
+fn environment_checks(db_flag: Option<&str>, offline: bool) -> Vec<DoctorCheck> {
+    let mut checks = vec![provider_roots_check()];
+    checks.push(store_location_check(db_flag));
+    checks.push(installed_names_check());
+    checks.push(semantic_backend_check());
+    if offline {
+        checks.push(DoctorCheck::ok(
+            "offline",
+            "--offline was requested; every command in this build already runs locally, \
+             so nothing is refused by it",
+        ));
+    }
+    checks
+}
+
+/// provider 数据根检查：注册了几个根、磁盘上存在几个、各存在的根下有多少文件。
+///
+/// "为什么 `sync --discover` 什么都没找到"是新手第一问，而过去 doctor 一个字
+/// 都没提数据根。根本不存在（provider 没装过）与根存在但为空是两个完全不同的
+/// 处境，给的下一步也不同。
+fn provider_roots_check() -> DoctorCheck {
+    let mut present: Vec<String> = Vec::new();
+    let mut registered = 0usize;
+    let mut total_files = 0usize;
+    for provider in provider_registry() {
+        let id = provider.provider_id().to_string();
+        if provider_root_subpath(&id).is_none() {
+            continue; // 该 provider 不支持自动发现，不该算进"根缺失"
+        }
+        registered += 1;
+        let Some(root) = provider_data_root(&id) else {
+            continue; // home 解析失败：由下面的 registered/present 计数如实反映
+        };
+        if !root.is_dir() {
+            continue;
+        }
+        let files = count_files_bounded(&root);
+        total_files += files.count;
+        present.push(format!(
+            "{id}={}{}",
+            files.count,
+            if files.hit_cap { "+" } else { "" }
+        ));
+    }
+    let detail = format!(
+        "{}/{} discoverable provider data roots exist on this machine; \
+         files under them: {}",
+        present.len(),
+        registered,
+        if present.is_empty() {
+            "none".to_string()
+        } else {
+            present.join(" ")
+        }
+    );
+    let name = invocation::name();
+    if present.is_empty() {
+        return DoctorCheck::fail(
+            "provider_roots",
+            detail,
+            format!(
+                "No provider data root exists under your home directory, so `{name} sync \
+                 --discover` has nothing to scan. Either use one of the supported agents first, \
+                 or index a transcript you already have with `{name} sync <file>`. \
+                 Run `{name} providers` for the supported list."
+            ),
+        );
+    }
+    if total_files == 0 {
+        return DoctorCheck::warn(
+            "provider_roots",
+            detail,
+            format!(
+                "The provider data roots exist but contain no files yet, so `{name} sync \
+                 --discover` will index nothing. Have a session with one of those agents \
+                 first, then re-run it."
+            ),
+        );
+    }
+    DoctorCheck::ok("provider_roots", detail)
+}
+
+/// 有界的文件计数结果。`hit_cap` 为真时 `count` 是下界而非精确值。
+struct BoundedFileCount {
+    count: usize,
+    hit_cap: bool,
+}
+
+/// 数据根遍历的访问上限。doctor 必须几十毫秒内跑完：一棵几万文件的
+/// `~/.claude/projects` 不该让自检变成一次全树遍历。到达上限即停并如实标注
+/// （`hit_cap`），绝不把下界当精确值报出去。
+const DOCTOR_FILE_SCAN_CAP: usize = 2000;
+
+/// 统计 `root` 下的普通文件数，访问量到 [`DOCTOR_FILE_SCAN_CAP`] 即止。
+///
+/// 只数文件，不做 provider probe：probe 每个候选要读 64 KiB，而这里要回答的
+/// 问题是"根里到底有没有东西"，不是"其中几个是可识别的 transcript"（后者由
+/// `sync --discover` 自己的 per-provider 报告回答）。不跟随符号链接，与
+/// [`discover_provider_sources`] 同一口径。
+fn count_files_bounded(root: &std::path::Path) -> BoundedFileCount {
+    let mut count = 0usize;
+    let mut visited = 0usize;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            visited += 1;
+            if visited > DOCTOR_FILE_SCAN_CAP {
+                return BoundedFileCount {
+                    count,
+                    hit_cap: true,
+                };
+            }
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_symlink() {
+                continue;
+            }
+            if file_type.is_dir() {
+                stack.push(entry.path());
+            } else if file_type.is_file() {
+                count += 1;
+            }
+        }
+    }
+    BoundedFileCount {
+        count,
+        hit_cap: false,
+    }
+}
+
+/// 库路径落点检查：本次会用哪个路径、其父目录存在吗、真的可写吗。
+///
+/// "写命令报 catalog_error"最常见的原因就是父目录不可写（只读挂载、权限、
+/// 打错的 `--db`），而这在打开存储之前完全可以查出来。
+fn store_location_check(db_flag: Option<&str>) -> DoctorCheck {
+    let name = invocation::name();
+    let (path, origin) = match resolve_store_path(db_flag.map(str::to_string)) {
+        Ok(resolved) => resolved,
+        Err(error) => {
+            return DoctorCheck::fail(
+                "store_location",
+                format!("cannot resolve a store path: {}", error.0.message),
+                format!(
+                    "Pass an explicit path with `{name} --db <path> doctor`, or set ${DB_ENV_VAR}."
+                ),
+            );
+        }
+    };
+    let source = match origin {
+        DbOrigin::Flag => "--db",
+        DbOrigin::Env => DB_ENV_VAR,
+        DbOrigin::Default => "platform data directory",
+    };
+    let Some(parent) = std::path::Path::new(&path)
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    else {
+        // 相对裸文件名：父目录是当前工作目录，写入权限由 shell 的位置决定。
+        return DoctorCheck::ok(
+            "store_location",
+            format!("store path {path} (from {source}), relative to the current directory"),
+        );
+    };
+    if !parent.is_dir() {
+        // 缺父目录本身不是错误：写命令会建它。但读命令会因缺库报 not_found，
+        // 而新手会把那条 not_found 读成"工具坏了"。
+        return DoctorCheck::warn(
+            "store_location",
+            format!(
+                "store path {path} (from {source}); its parent directory {} does not exist yet",
+                parent.display()
+            ),
+            format!(
+                "Nothing is indexed yet -- read commands will report not_found until it is. \
+                 Run `{}` to create the store and index your history.",
+                sync_discover_command(&path, origin)
+            ),
+        );
+    }
+    match probe_directory_writable(parent) {
+        Ok(()) => DoctorCheck::ok(
+            "store_location",
+            format!("store path {path} (from {source}); parent directory exists and is writable"),
+        ),
+        Err(error) => DoctorCheck::fail(
+            "store_location",
+            format!(
+                "store path {path} (from {source}); parent directory {} is not writable: {error}",
+                parent.display()
+            ),
+            format!(
+                "Write commands will fail here. Point --db (or ${DB_ENV_VAR}) at a writable \
+                 directory, or fix the permissions on that one. Run `{name} config paths` \
+                 to see the default location."
+            ),
+        ),
+    }
+}
+
+/// 目录可写性的真实探测：建一个唯一命名的空文件再删掉。
+///
+/// 不用 `metadata().permissions().readonly()`——那在 Windows 上对目录无意义，
+/// 在 Unix 上也不反映挂载只读与 ACL。探测只发生在**本工具自己的库目录**（绝不
+/// 是 provider 数据根，那是只读不变量），文件名带进程 id 以免并发 doctor 互撞，
+/// 成功与失败路径都会清理。
+fn probe_directory_writable(dir: &std::path::Path) -> Result<(), std::io::Error> {
+    let probe = dir.join(format!(".asg-doctor-write-probe-{}", std::process::id()));
+    let result = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)
+        .map(|_| ());
+    let _ = std::fs::remove_file(&probe);
+    result
+}
+
+/// 两个 `[[bin]]` 名的安装状态检查。
+///
+/// 只装上一个名字是真实且常见的处境（手动 `cargo install` 只拿到 default-run
+/// 那个，或旧版本留下一个陈旧副本）。用户照着文档敲另一个名字就会得到
+/// "command not found"，而那看起来完全不像"安装不全"。
+///
+/// 不去 spawn 任一二进制比版本号：doctor 不该执行 PATH 上一个只是名字对得上的
+/// 陌生程序。改为比文件大小——两个名字来自同一次构建时必然同尺寸（拷贝或
+/// 硬链接），尺寸不同就一定是两次不同的构建，这个判断无需执行任何东西。
+fn installed_names_check() -> DoctorCheck {
+    let long = which_on_path(CANONICAL_BIN_NAME);
+    let short = which_on_path(invocation::DEFAULT_NAME);
+    let name = invocation::name();
+    match (&long, &short) {
+        (None, None) => DoctorCheck::warn(
+            "installed_names",
+            format!(
+                "neither `{CANONICAL_BIN_NAME}` nor `{}` is on PATH",
+                invocation::DEFAULT_NAME
+            ),
+            format!(
+                "You are running this binary by path, so the documented commands \
+                 (`{} ...`) will not resolve in a new shell. Add its directory to PATH, \
+                 or use the installer under scripts/install.",
+                invocation::DEFAULT_NAME
+            ),
+        ),
+        (Some(_), None) => DoctorCheck::warn(
+            "installed_names",
+            format!(
+                "`{CANONICAL_BIN_NAME}` is on PATH but `{}` is not",
+                invocation::DEFAULT_NAME
+            ),
+            format!(
+                "The docs and README use the short name `{}`; those commands will fail with \
+                 \"command not found\". Re-run the installer, or copy the binary next to it \
+                 under that name.",
+                invocation::DEFAULT_NAME
+            ),
+        ),
+        (None, Some(_)) => DoctorCheck::warn(
+            "installed_names",
+            format!(
+                "`{}` is on PATH but `{CANONICAL_BIN_NAME}` is not",
+                invocation::DEFAULT_NAME
+            ),
+            format!(
+                "Anything that spells out the long name `{CANONICAL_BIN_NAME}` (MCP host \
+                 configs, older docs) will fail with \"command not found\". Re-run the \
+                 installer, or copy the binary next to it under that name."
+            ),
+        ),
+        (Some(long_path), Some(short_path)) => {
+            let long_len = std::fs::metadata(long_path).map(|meta| meta.len()).ok();
+            let short_len = std::fs::metadata(short_path).map(|meta| meta.len()).ok();
+            if let (Some(a), Some(b)) = (long_len, short_len)
+                && a != b
+            {
+                return DoctorCheck::warn(
+                    "installed_names",
+                    format!(
+                        "`{CANONICAL_BIN_NAME}` and `{}` are both on PATH but differ in size \
+                         ({a} vs {b} bytes), so they are two different builds",
+                        invocation::DEFAULT_NAME
+                    ),
+                    format!(
+                        "One of them is stale, so the two names behave differently. Check each \
+                         with `{CANONICAL_BIN_NAME} --version` and `{} --version`, then \
+                         re-run the installer to replace the old one.",
+                        invocation::DEFAULT_NAME
+                    ),
+                );
+            }
+            DoctorCheck::ok(
+                "installed_names",
+                format!(
+                    "both `{CANONICAL_BIN_NAME}` and `{}` resolve on PATH (invoked as `{name}`)",
+                    invocation::DEFAULT_NAME
+                ),
+            )
+        }
+    }
+}
+
+/// 在 PATH 上解析一个命令名，命中返回其路径。
+///
+/// Windows 上按 `PATHEXT` 逐个后缀试（`asg` 实际落地为 `asg.exe`）；缺
+/// `PATHEXT` 时退回 `.EXE`。不执行任何东西，只看文件是否存在。
+fn which_on_path(command: &str) -> Option<std::path::PathBuf> {
+    let path_var = std::env::var_os("PATH")?;
+    let extensions: Vec<String> = if cfg!(windows) {
+        let raw = std::env::var("PATHEXT").unwrap_or_else(|_| ".EXE".to_string());
+        std::iter::once(String::new())
+            .chain(
+                raw.split(';')
+                    .map(str::trim)
+                    .filter(|ext| !ext.is_empty())
+                    .map(str::to_string),
+            )
+            .collect()
+    } else {
+        vec![String::new()]
+    };
+    for dir in std::env::split_paths(&path_var) {
+        if dir.as_os_str().is_empty() {
+            continue;
+        }
+        for extension in &extensions {
+            let candidate = dir.join(format!("{command}{extension}"));
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+/// semantic 后端检查：本二进制到底有没有编译进 semantic-candle。
+///
+/// 这条检查存在是因为一个真实的矛盾：本地二进制常是带 `--features
+/// semantic-candle` 编出来的，于是 doctor 报 `semantic_feature: true`，而 README
+/// 说"默认关闭"。两句都对，说的是不同的东西——README 说的是发布默认，doctor
+/// 说的是**手里这个二进制**。权威归属必须写明，否则用户只能猜。
+fn semantic_backend_check() -> DoctorCheck {
+    let name = invocation::name();
+    if semantic_feature_flag() == serde_json::json!(true) {
+        return DoctorCheck::ok(
+            "semantic_backend",
+            "this binary was built with --features semantic-candle, so `--mode \
+             semantic|hybrid` has a real backend. The build is authoritative here: the \
+             documented default is off, and this is not a default build",
+        );
+    }
+    DoctorCheck::ok(
+        "semantic_backend",
+        format!(
+            "this is a default build: no semantic backend is compiled in, so `--mode \
+             semantic|hybrid` reports retrieval_mode=lexical_fallback rather than \
+             degrading silently. Lexical search (`{name} search <keyword>`) is unaffected"
+        ),
+    )
+}
+
+/// 只有库打开之后才能做的检查：库是不是空的、有没有中断批次、有没有孤儿行。
+fn store_checks(
+    store: &SqliteStore,
+    db: &str,
+    interrupted: u64,
+    orphaned: u64,
+) -> Result<Vec<DoctorCheck>, CliError> {
+    let entities =
+        agent_session_grep_ports::CatalogStore::count(store).map_err(ProtocolError::from)?;
+    let name = invocation::name();
+    let mut checks = Vec::new();
+    checks.push(if entities == 0 {
+        DoctorCheck::warn(
+            "catalog_entities",
+            "the store opens cleanly but holds 0 entities",
+            format!(
+                "An empty index is why `{name} search` returns no hits and `{name} list` \
+                 shows nothing. Run `{}` to index your history.",
+                // 库已由显式 --db 指定（store_checks 只在那条分支被调用）。
+                sync_discover_command(db, DbOrigin::Flag)
+            ),
+        )
+    } else {
+        DoctorCheck::ok(
+            "catalog_entities",
+            format!("{entities} entities in the catalog"),
+        )
+    });
+    checks.push(if interrupted > 0 {
+        DoctorCheck::warn(
+            "interrupted_batches",
+            format!("{interrupted} write batch(es) did not converge"),
+            format!(
+                "A previous write was cut short (process killed, machine lost power). The \
+                 catalog stays consistent, but those messages are not indexed. Re-run the \
+                 same `{name} sync` command; it is idempotent and will finish the batch."
+            ),
+        )
+    } else {
+        DoctorCheck::ok("interrupted_batches", "no unconverged write batches")
+    });
+    checks.push(if orphaned > 0 {
+        DoctorCheck::warn(
+            "orphaned_tool_activities",
+            format!("{orphaned} orphan tool-activity row(s) left behind by a deletion"),
+            format!(
+                "These are projection rows whose message is gone; they waste space but change \
+                 no result. Run `{name} --db {db} index purge-activities` to prune them \
+                 deterministically."
+            ),
+        )
+    } else {
+        DoctorCheck::ok("orphaned_tool_activities", "no orphan tool-activity rows")
+    });
+    Ok(checks)
 }
 
 /// 已知 flag 名全集（前缀位置可出现的旗标）。取值守卫用它拒绝 `--db --robot`
@@ -1639,6 +2252,8 @@ fn is_known_flag_name(token: &str) -> bool {
             | "--include-sidechain"
             | "--tool-kind"
             | "--tool-name"
+            | "--role"
+            | "--exclude"
             | "--yes"
             | "--before"
             | "--project"
@@ -1697,7 +2312,7 @@ fn extract_db_flag_impl(args: &[String], prefix_only: bool) -> Result<Option<Str
             "--out" | "--output" | "--request-id" | "--cursor" | "--max-items" | "--max-bytes"
             | "--max-messages" | "--max-evidence" | "--max-tokens" | "--policy" | "--level"
             | "--provider" | "--since" | "--until" | "--session" | "--around" | "--tool-kind"
-            | "--tool-name" => {
+            | "--tool-name" | "--role" | "--exclude" => {
                 it.next();
             }
             _ => {}
@@ -1743,7 +2358,7 @@ fn extract_out_flag(args: &[String]) -> Result<protocol::PayloadSink, CliError> 
             "--db" | "--output" | "--request-id" | "--cursor" | "--max-items" | "--max-bytes"
             | "--max-messages" | "--max-evidence" | "--max-tokens" | "--policy" | "--level"
             | "--provider" | "--since" | "--until" | "--session" | "--around" | "--tool-kind"
-            | "--tool-name" => {
+            | "--tool-name" | "--role" | "--exclude" => {
                 it.next();
             }
             _ => {}
@@ -1890,8 +2505,14 @@ fn db_flag_prefix(db: &str, origin: DbOrigin) -> String {
 }
 
 /// 空库/缺库时该跑的那条命令（提示里逐字给出，用户可直接复制）。
+/// 二进制名用本次实际调用名（M4-6）——以 `agent-session-grep` 调用的用户不该
+/// 被告知去敲 `asg`。
 fn sync_discover_command(db: &str, origin: DbOrigin) -> String {
-    format!("asg {}sync --discover", db_flag_prefix(db, origin))
+    format!(
+        "{} {}sync --discover",
+        invocation::name(),
+        db_flag_prefix(db, origin)
+    )
 }
 
 /// 写路径的 data root 兜底创建。默认库位于平台数据目录，首次写入前该目录不存在。
@@ -1949,7 +2570,7 @@ fn bare_positionals(args: &[String]) -> Vec<String> {
             "--db" | "--out" | "--output" | "--request-id" | "--cursor" | "--max-items"
             | "--max-bytes" | "--max-messages" | "--max-evidence" | "--max-tokens" | "--policy"
             | "--level" | "--provider" | "--since" | "--until" | "--session" | "--around"
-            | "--tool-kind" | "--tool-name" => {
+            | "--tool-kind" | "--tool-name" | "--role" | "--exclude" => {
                 it.next(); // 消费其取值
             }
             "--robot" | "--no-color" | "--help" | "-h" | "--version" | "-V" | "--discover"
@@ -2275,6 +2896,8 @@ fn dispatch(
             let max_items = extract_flag(&mut args, "--max-items")?;
             let max_bytes = extract_flag(&mut args, "--max-bytes")?;
             let providers = extract_repeated_flag(&mut args, "--provider")?;
+            let roles = extract_repeated_flag(&mut args, "--role")?;
+            let exclude_terms = extract_repeated_flag(&mut args, "--exclude")?;
             let since = extract_flag(&mut args, "--since")?;
             let until = extract_flag(&mut args, "--until")?;
             let include_system = take_bool_flag(&mut args, "--include-system");
@@ -2296,9 +2919,22 @@ fn dispatch(
             let include_sidechain = take_bool_flag(&mut args, "--include-sidechain");
             let tool_kind = extract_flag(&mut args, "--tool-kind")?;
             let tool_name = extract_flag(&mut args, "--tool-name")?;
+            // M3-9 命中处上下文窗口：`--context N` 把 snippet 从"以命中为中心的
+            // 字符窗口"换成"命中所在行 ± N 整行"的连续区域，语义与 grep/rg 的
+            // `-C N` 一致。未给该 flag 时行为与既有版本逐字节相同。
+            let context_lines = match extract_flag(&mut args, "--context")? {
+                None => None,
+                Some(value) => Some(value.parse::<usize>().map_err(|_| {
+                    CliError::usage(format!(
+                        "--context requires a non-negative integer, got {value:?}"
+                    ))
+                })?),
+            };
             let app = App::with_resume(store_ref(store), store_ref(store), store_ref(store));
             let filters = search_filters_from_flags(
                 &providers,
+                &roles,
+                &exclude_terms,
                 since.as_deref(),
                 until.as_deref(),
                 app.now_ms(),
@@ -2369,6 +3005,7 @@ fn dispatch(
                     group_by_session,
                     mode: retrieval_mode,
                     query_embedding: None,
+                    context_lines,
                 })?
             } else {
                 // Prefer a verified local Candle E5 bundle when the binary was
@@ -2439,6 +3076,7 @@ fn dispatch(
                     group_by_session,
                     mode: retrieval_mode,
                     query_embedding: Some(query_embedding),
+                    context_lines,
                 })?
             };
             let (outcome, mut data, page, warnings) = render(response);
@@ -2470,6 +3108,8 @@ fn dispatch(
             let app = App::with_resume(store_ref(store), store_ref(store), store_ref(store));
             let filters = search_filters_from_flags(
                 &providers,
+                &[],
+                &[],
                 since.as_deref(),
                 until.as_deref(),
                 app.now_ms(),
@@ -2498,6 +3138,9 @@ fn dispatch(
                 group_by_session: false,
                 mode: RetrievalMode::Lexical,
                 query_embedding: None,
+                // handoff 组装自己的证据段（带权威 source locator），不走 search
+                // 的 snippet 投影，所以不请求行上下文窗口。
+                context_lines: None,
             })?;
             let (hits, generation) = match &response {
                 AppResponse::Search {
@@ -2852,6 +3495,8 @@ fn dispatch(
                         group_by_session: true,
                         mode: RetrievalMode::Lexical,
                         query_embedding: None,
+                        // Hook 注入的是一行一条的紧凑摘要，行窗会把它撑成多行。
+                        context_lines: None,
                     })?;
                     let AppResponse::Search { hits, .. } = response else {
                         return Err(CliError::usage("hook: unexpected search response"));
@@ -3432,11 +4077,16 @@ fn take_bool_flag(args: &mut Vec<String>, name: &str) -> bool {
     }
 }
 
-/// CLI 检索过滤参数归一化：provider 别名 → 规范 id；时间值接受 RFC3339/ISO-8601
-/// 绝对时间或 `1h|1d|1w` 紧凑相对量（相对量以注入的 application 时钟 `now_ms`
-/// 为基准，全程同一时钟源）。取值非法是用法错误（exit 2）。
+/// CLI 检索过滤参数归一化：provider 别名 → 规范 id；role → 闭集枚举；时间值接受
+/// RFC3339/ISO-8601 绝对时间或 `1h|1d|1w` 紧凑相对量（相对量以注入的 application
+/// 时钟 `now_ms` 为基准，全程同一时钟源）。取值非法是用法错误（exit 2）。
+///
+/// `exclude_terms` 原样透传：它是**用户给的字面词**，这里没有可校验的闭集，
+/// 空串/控制字符由 Application 边界统一拒绝（与查询串同一条规则）。
 fn search_filters_from_flags(
     providers: &[String],
+    roles: &[String],
+    exclude_terms: &[String],
     since: Option<&str>,
     until: Option<&str>,
     now_ms: i64,
@@ -3450,10 +4100,24 @@ fn search_filters_from_flags(
                 CliError::usage(format!("unknown provider: {provider} (expected {hint})"))
             })?);
     }
+    for role in roles {
+        filters.roles.push(SearchRole::parse(role).ok_or_else(|| {
+            CliError::usage(format!(
+                "--role must be one of {ROLE_VALUE_HINT}, got {role}"
+            ))
+        })?);
+    }
+    filters.exclude_terms = exclude_terms.to_vec();
     filters.since = parse_time_flag("--since", since, now_ms)?;
     filters.until = parse_time_flag("--until", until, now_ms)?;
     Ok(filters)
 }
+
+/// Accepted `--role` values, rendered in the role usage error and in `--help`.
+///
+/// 闭集写在一处：`SearchRole::parse` 是判据，这条提示是它的人类投影，两者
+/// 必须同时改（有测试钉住每个列出的取值都能被解析）。
+const ROLE_VALUE_HINT: &str = "user|assistant|system|developer|tool";
 
 /// Accepted `--provider` values, rendered in every provider usage error.
 ///
@@ -4033,8 +4697,15 @@ fn attach_session_list_rows(
 
 /// 取当前页最相关命中的建议命令，并按需插入 `--db <path>`。
 ///
-/// Application 生成的命令以 `agent-session-grep` 开头且不带 `--db`（对默认库正确）。
-/// 调用方给了显式 `--db` 时必须把同一路径补进去——否则提示会指向另一个库。
+/// Application 生成的命令以 [`CANONICAL_BIN_NAME`] 开头且不带 `--db`（对默认库
+/// 正确）。这里做两件改写：补上显式 `--db` 的同一路径（否则提示会指向另一个
+/// 库），以及把二进制名换成本次实际调用名（M4-6）。
+///
+/// 只改人类面：`suggested_next_commands` 在 robot envelope / MCP / Web 里是协议
+/// 字段，其字节由 Application 单一决定，schema
+/// （`schemas/robot/v1.1/envelope.schema.json`）与跨入口一致性 harness 都以那份
+/// 输出为准。Application 层拿不到 argv[0]，也不该拿——它不知道自己被哪个进程名
+/// 调用。人类面是唯一"有一个真实调用名可言"的出口。
 fn human_next_commands(hits: &[serde_json::Value], db: &str, origin: DbOrigin) -> Vec<String> {
     let prefix = db_flag_prefix(db, origin);
     hits.iter()
@@ -4047,7 +4718,7 @@ fn human_next_commands(hits: &[serde_json::Value], db: &str, origin: DbOrigin) -
             commands
                 .iter()
                 .filter_map(serde_json::Value::as_str)
-                .map(|command| insert_db_flag(command, &prefix))
+                .map(|command| retarget_invocation_name(&insert_db_flag(command, &prefix)))
                 .collect()
         })
         .unwrap_or_default()
@@ -4225,15 +4896,69 @@ fn provider_data_root(provider_id: &str) -> Option<std::path::PathBuf> {
 /// "该 provider 不支持自动发现" 与 "home 解析失败"——两者过去都塌成
 /// `found: 0, complete: false`，用户无从判断该不该手动传文件（M2P-6）。
 fn provider_root_subpath(provider_id: &str) -> Option<&'static str> {
-    match provider_id {
-        "claude-code" => Some(".claude/projects"),
-        "codex" => Some(".codex/sessions"),
-        "openclaw" => Some(".openclaw/agents"),
-        "tencent-codebuddy" => Some(".codebuddy/projects"),
-        "antigravity" => Some(".gemini/antigravity-cli/brain"),
-        "opencode" => Some(".local/share/opencode"),
-        _ => None,
+    PROVIDER_ROOTS
+        .iter()
+        .find(|(id, _)| *id == provider_id)
+        .map(|(_, subpath)| *subpath)
+}
+
+/// 全部已注册的 discovery root：`(provider_id, home 相对子路径)`。
+///
+/// 这张表是 root 归属的单一权威，[`provider_root_subpath`] 与
+/// [`provider_hint_from_path`] 都从它读——前者回答"这个 provider 的 root 在哪"，
+/// 后者回答"这个路径属于哪个 provider"，两个方向必须同源，否则
+/// `--discover` 与手动 `sync <file>` 会对同一份文件给出不同归属。
+const PROVIDER_ROOTS: &[(&str, &str)] = &[
+    ("claude-code", ".claude/projects"),
+    ("codex", ".codex/sessions"),
+    ("openclaw", ".openclaw/agents"),
+    ("pi", ".pi/agent/sessions"),
+    ("tencent-codebuddy", ".codebuddy/projects"),
+    ("antigravity", ".gemini/antigravity-cli/brain"),
+    ("opencode", ".local/share/opencode"),
+];
+
+/// 源路径落在某个已注册 discovery root 之下时，返回该 root 的 provider id。
+///
+/// pi 与 openclaw 的磁盘格式是同一形状：两家真实 session header 都是
+/// `{type, version: 3, id, timestamp, cwd}`，都以一串 `model_change` /
+/// `thinking_level_change` 开场（openclaw 侧证据：jazzyalex/agent-sessions
+/// 的 stage0 openclaw fixture 与 kenn-io/agentsview 的 openclaw 解析测试，
+/// 两家 MIT，header 均为 `version: 3`）。所以**没有任何内容字段能区分它们**,
+/// `version` 尤其不能——它两家都有。`choose_probed_candidate` 只能靠 root
+/// 归属这个独立于文件内容的外部事实消歧。
+///
+/// `--discover` 一直握着这个事实，手动 `sync <file>` 过去把它丢掉了：同一份
+/// transcript 用 `--discover` 能入库、用完整路径点名反而被判 ambiguous。这里
+/// 把路径这一侧补齐，让两条入口用同一类证据。
+///
+/// 语义与其它 hint 一致：只在 probe 同分时生效，不会把某个格式硬塞给不认它的
+/// provider（见 `choose_probed_candidate`）。
+fn provider_hint_from_path(path: &str) -> Option<&'static str> {
+    provider_hint_from_path_on(path, cfg!(windows))
+}
+
+/// [`provider_hint_from_path`] 的平台显式形式：`windows` 由调用方给出，使两个
+/// 平台的行为在任一平台上都可断言（与 [`installation_namespace_on`] 同一纪律）。
+///
+/// 按路径段（而非字符串前缀）匹配，且不解析 home：重定位过的 home、相对路径、
+/// 以及 `--discover` 之外的任何入口都能命中同一 root。多个 root 同时命中时取
+/// 段数最长的那个，避免短 root 抢走长 root 的路径。
+fn provider_hint_from_path_on(path: &str, windows: bool) -> Option<&'static str> {
+    let path = normalized_path_case(path, windows);
+    let segments: Vec<&str> = path.split(['/', '\\']).filter(|s| !s.is_empty()).collect();
+    let mut best: Option<(usize, &'static str)> = None;
+    for (provider_id, subpath) in PROVIDER_ROOTS {
+        let root: Vec<&str> = subpath.split('/').filter(|s| !s.is_empty()).collect();
+        if segments
+            .windows(root.len())
+            .any(|window| window == root.as_slice())
+            && best.is_none_or(|(len, _)| root.len() > len)
+        {
+            best = Some((root.len(), provider_id));
+        }
     }
+    best.map(|(_, provider_id)| provider_id)
 }
 
 fn source_path_identity(path: &str) -> String {
@@ -4996,7 +5721,7 @@ fn jsonl_health(
     snapshot: &agent_session_grep_ports::SourceSnapshot,
 ) -> Result<JsonlHealth, agent_session_grep_ports::ProviderError> {
     let source = open_snapshot_source(path, snapshot)
-        .map_err(|error| agent_session_grep_ports::ProviderError::Io(error.to_string()))?;
+        .map_err(agent_session_grep_ports::provider_error_from_port)?;
     let mut valid_rows = 0usize;
     let mut malformed_rows = 0usize;
     let mut valid_after_last_malformed = false;
@@ -5048,20 +5773,45 @@ fn sync_files(
     if paths.is_empty() {
         return Err(CliError::usage("sync <file>... requires at least one file"));
     }
-    // 新手第一本能是给 sync 传整个目录；目录不是 .jsonl 文件，捕获要读它时会
-    // 报"拒绝访问 (os error 5)"，误导新手去折腾权限/杀毒（10 角色体验测试缺陷）。
-    // 这里显式拦截并给出正确用法。消息不带路径（隐私：用户目录布局不外泄），
-    // 展开示例保持平台中立（不给 PowerShell-only 的 Get-ChildItem 例子，R2.2）。
-    // discover 路径不走此 guard——它已经枚举了文件而非目录。
+    // 目录参数按 provider probe 展开成候选文件（M3-11）。
+    //
+    // 过去这里直接拒绝目录并让用户"在你的 shell 里展开文件列表" —— 那在
+    // PowerShell 上要写 `Get-ChildItem -Recurse | ForEach-Object ...`,
+    // 而**这个工具自己**在 `sync --discover` 里已经做了完全一样的遍历。
+    // 让用户手抄一遍工具已有的能力,是把实现细节推给用户。
+    //
+    // 展开用与 discover 同一条通道(`discover_provider_sources`),所以候选判定
+    // 由 provider 自己的 probe 回答,不按扩展名硬编码 —— 否则 SQLite
+    // (`opencode.db`)、整档 JSON、Markdown 这些真实 transcript 会被漏掉。
+    // 遍历不完整(权限错误)时如实拒绝而不是静默少同步:显式 `sync <dir>` 的
+    // 用户点名了这个目录,少了几个文件必须被看见。
+    let mut expanded: Vec<String> = Vec::with_capacity(paths.len());
+    let dir_registry = provider_registry();
+    let dir_adapters: Vec<&dyn ProviderAdapter> = dir_registry.iter().map(|a| a.as_ref()).collect();
     for path in paths {
-        if std::path::Path::new(path).is_dir() {
+        let as_path = std::path::Path::new(path);
+        if !as_path.is_dir() {
+            expanded.push(path.clone());
+            continue;
+        }
+        let (found, complete) = discover_provider_sources(as_path, &dir_adapters);
+        if !complete {
+            // 消息不带路径(隐私:用户目录布局不外泄,与下方 guard 同一约定)。
             return Err(CliError::usage(
-                "sync takes one or more transcript files, not a directory; to sync a whole \
-                 directory, expand the file list with your shell and pass the files to sync \
-                 one by one",
+                "sync could not read every subdirectory of that directory, so it would \
+                 silently index only part of it; fix the permissions, or pass the \
+                 transcript files explicitly",
             ));
         }
+        if found.is_empty() {
+            return Err(CliError::usage(
+                "no transcript files were recognised under that directory; run `providers` \
+                 to see the supported formats, or pass a transcript file directly",
+            ));
+        }
+        expanded.extend(found);
     }
+    let paths: &[String] = &expanded;
     // 重复路径去重（保持出现顺序）：同一文件列两次是书写冗余而非两个源；
     // 不去重会让 store 层把同一路径当两个 source batch 提交而判 catalog_error
     // （exit 6）——sync 幂等语义下应提前归一为单个源。
@@ -5073,18 +5823,25 @@ fn sync_files(
         }
     }
     // `--provider` 是显式消歧输入：内容同形的 provider（pi/openclaw）在没有
-    // discover root 上下文时无法归属，此时用户点名即唯一证据。走与 discover
+    // root 上下文时无法归属，此时用户点名即唯一证据。走与 discover
     // 相同的通道（`discovered_provider_ids`），所以只在同分时生效——点错名字
     // 不会把一个格式硬塞给另一个 provider。
-    let ctx = match provider {
-        Some(id) => SyncContext {
-            discovered_provider_ids: unique
-                .iter()
-                .map(|path| (path.clone(), id.to_string()))
-                .collect(),
-            ..SyncContext::default()
-        },
-        None => SyncContext::default(),
+    //
+    // 没点名时退回按路径归属（`provider_hint_from_path`）：源落在某个已注册
+    // discovery root 之下是与 discover 同一类的外部事实，没有理由只在
+    // `--discover` 那条入口才采信它。
+    let ctx = SyncContext {
+        discovered_provider_ids: unique
+            .iter()
+            .filter_map(|path| {
+                let attributed = match provider {
+                    Some(id) => Some(id),
+                    None => provider_hint_from_path(path),
+                };
+                attributed.map(|id| (path.clone(), id.to_string()))
+            })
+            .collect(),
+        ..SyncContext::default()
     };
     sync_files_inner(store, &unique, &ctx, false, progress, request_id)
 }
@@ -5712,6 +6469,7 @@ fn render(
             retrieval_mode: effective_mode,
             fallback_warning,
             time_filter_excluded,
+            context_lines,
         } => {
             let outcome = outcome_of(&truncation);
             let page = protocol::Page {
@@ -5730,7 +6488,7 @@ fn render(
                      re-run without --since/--until to see them"
                 ));
             }
-            let data = serde_json::json!({
+            let mut data = serde_json::json!({
                 "retrieval_mode": effective_mode.as_str(),
                 "hits": hits
                     .into_iter()
@@ -5761,12 +6519,30 @@ fn render(
                         }
                         // resume_available（ADR-0009）：恒序列化，schema 1.1 声明。
                         json["resume_available"] = serde_json::json!(hit.resume_available);
+                        // M3-9 高亮偏移：**只带偏移，不带标记**。`text` 在每个入口
+                        // 都保持逐字原文，永不夹 ANSI 或 markup（CONTRACT §4：
+                        // robot 只承载协议）。空集合省略键，默认输出字节不变。
+                        if !hit.match_ranges.is_empty() {
+                            json["match_ranges"] = serde_json::Value::Array(
+                                hit.match_ranges
+                                    .iter()
+                                    .map(|(start, end)| serde_json::json!([start, end]))
+                                    .collect(),
+                            );
+                        }
                         json
                     })
                     .collect::<Vec<_>>(),
                 "generation": generation,
                 "truncation": truncation_json(&truncation),
             });
+            // 生效的行上下文窗口如实回显（与 facets 同一约定：默认不回显，
+            // 输出字节不变）。human 渲染器也据此切换到 grep 式的行视图。
+            if let Some(lines) = context_lines
+                && let Some(object) = data.as_object_mut()
+            {
+                object.insert("context_lines".into(), serde_json::json!(lines));
+            }
             (outcome, data, page, warnings)
         }
         AppResponse::Get { payload } => (
@@ -6307,7 +7083,7 @@ mod tests {
     /// 这条缺失时矩阵给 claude-code/codex 之外的四个已注册 provider
     /// （openclaw / tencent-codebuddy / antigravity / opencode）报
     /// `discover: Unsupported`，而 `sync --discover` 其实一直在扫它们的 root。
-    /// 实测（伪 HOME 下每个 root 种一份 golden fixture）六个 root 全部
+    /// 实测（伪 HOME 下每个 root 种一份 golden fixture）每个 root 全部
     /// `root_state=scanned found=1`，所以假的是声明那一侧。
     ///
     /// 双向断言：漏声明（注册了 root 却报 Unsupported）与过度声明
@@ -6326,6 +7102,300 @@ mod tests {
                 capability.provider_id, capability.discover
             );
         }
+    }
+
+    /// pi 的 discovery root 必须保持注册（M1-14 回归）。
+    ///
+    /// 漏注册时 `sync --discover` 对 `~/.pi/agent/sessions` 报
+    /// `root_state: unsupported`、`found: 0`，而 root 下确有 transcript ——
+    /// 与 openclaw 同形导致的手动 `sync` ambiguous 叠加后，pi 没有任何自动入库
+    /// 路径。上面的双向断言只保证"声明与注册一致"，两边一起改回 Unsupported
+    /// 仍然自洽，所以这条单独钉住路径本身。
+    #[test]
+    fn pi_registers_its_discovery_root() {
+        assert_eq!(provider_root_subpath("pi"), Some(".pi/agent/sessions"));
+    }
+
+    /// 路径归属：源落在已注册 root 之下时能认出 provider，两个平台一致。
+    ///
+    /// 这是手动 `sync <file>` 打破 pi/openclaw 同分平票的唯一证据——两家真实
+    /// header 都带 `version: 3`，内容侧无可用判别据。
+    #[test]
+    fn path_attribution_resolves_registered_roots_on_both_platforms() {
+        for windows in [true, false] {
+            assert_eq!(
+                provider_hint_from_path_on(
+                    "/workspace/fixture-home/.pi/agent/sessions/s.jsonl",
+                    windows
+                ),
+                Some("pi"),
+                "windows={windows}"
+            );
+            assert_eq!(
+                provider_hint_from_path_on(
+                    "/workspace/fixture-home/.openclaw/agents/main/sessions/s.jsonl",
+                    windows
+                ),
+                Some("openclaw"),
+                "windows={windows}"
+            );
+            // root 之外的路径没有归属：hint 缺席时同分仍然拒绝，不猜。
+            assert_eq!(
+                provider_hint_from_path_on("/tmp/downloaded/s.jsonl", windows),
+                None,
+                "windows={windows}"
+            );
+        }
+        // Windows 分隔符与盘符大小写都归一（与 source_path_identity 同一规则）。
+        assert_eq!(
+            provider_hint_from_path_on(
+                r"C:\placeholder\fixture-home\.pi\agent\sessions\s.jsonl",
+                true
+            ),
+            Some("pi")
+        );
+    }
+
+    /// 每个已注册 root 的路径都能被反向认回它自己的 provider。
+    ///
+    /// `provider_root_subpath` 与 `provider_hint_from_path` 是同一张表的两个
+    /// 方向；任一方向漏掉一个 provider，`--discover` 与手动 `sync` 就会对同一份
+    /// 文件给出不同归属。
+    #[test]
+    fn every_registered_root_is_attributable_by_path() {
+        for (provider_id, subpath) in PROVIDER_ROOTS {
+            let path = format!("/workspace/fixture-home/{subpath}/nested/transcript.jsonl");
+            assert_eq!(
+                provider_hint_from_path_on(&path, false),
+                Some(*provider_id),
+                "root `{subpath}` 未能反向归属到 `{provider_id}`"
+            );
+        }
+    }
+
+    // ---- 引导式 doctor（M4-6）----
+
+    /// 每条未通过的检查都必须带一条可执行的下一步，通过的检查必须**不带**。
+    ///
+    /// 这是 M4-6 的核心断言：doctor 过去只报事实。反向那半同样重要——给通过的
+    /// 检查也挂建议就是噪音，读者会学会跳过整个 CHECKS 段。
+    #[test]
+    fn failing_doctor_checks_carry_a_next_step_and_passing_ones_do_not() {
+        let checks = [
+            DoctorCheck::ok("passing", "fact"),
+            DoctorCheck::warn("degraded", "fact", "run something"),
+            DoctorCheck::fail("broken", "fact", "run something else"),
+        ];
+        for check in &checks {
+            match check.status {
+                DoctorStatus::Ok => assert!(
+                    check.next_step.is_none(),
+                    "{}: 通过的检查不该给建议",
+                    check.name
+                ),
+                DoctorStatus::Warn | DoctorStatus::Fail => {
+                    let next_step = check
+                        .next_step
+                        .as_deref()
+                        .unwrap_or_else(|| panic!("{}: 未通过的检查必须给下一步", check.name));
+                    assert!(!next_step.trim().is_empty(), "{}", check.name);
+                }
+            }
+        }
+        // 协议投影：next_step 缺失时省略键，不发空字符串。
+        let json = doctor_checks_json(&checks);
+        let array = json.as_array().expect("checks 是数组");
+        assert_eq!(array.len(), 3);
+        assert!(array[0].get("next_step").is_none(), "{}", array[0]);
+        assert_eq!(array[1]["status"], "warn");
+        assert_eq!(array[1]["next_step"], "run something");
+        assert_eq!(array[2]["status"], "fail");
+    }
+
+    /// 完整检查清单：每条都有名字与事实，未通过的都有下一步,
+    /// 且下一步是可执行的东西而不是概念解释（照
+    /// [`protocol::CanonicalCode::operator_action`] 的标准）。
+    ///
+    /// **不读真实机器状态**：`installed_names` 的取值取决于开发机 PATH 上装了
+    /// 哪几个名字，而 `provider_roots` 取决于装过哪些 agent —— 这两者都会随机器
+    /// 变化。所以断言只覆盖"每条检查的形状"这个与环境无关的性质，逐分支的具体
+    /// 措辞由 `installed_names_check_covers_every_path_combination` 用受控输入验。
+    ///
+    /// 曾经这条断言要求下一步必须含 `invocation::name()` 或 `PATH`：在
+    /// `cargo test` 下 argv[0] 是测试二进制，而 `(long on PATH, short missing)`
+    /// 那一支的措辞既不含测试名也不含 `PATH`，于是这条在部分机器上随机变红
+    /// （M1-16）。判据改为"点名了某个真实可敲的命令名"，与谁在跑无关。
+    #[test]
+    fn environment_checks_are_actionable() {
+        let checks = environment_checks(None, false);
+        assert!(
+            checks.iter().any(|c| c.name == "provider_roots"),
+            "必须查 provider 数据根——'为什么 discover 什么都没找到'是新手第一问"
+        );
+        assert!(checks.iter().any(|c| c.name == "store_location"));
+        assert!(checks.iter().any(|c| c.name == "installed_names"));
+        assert!(checks.iter().any(|c| c.name == "semantic_backend"));
+        for check in &checks {
+            assert!(!check.detail.trim().is_empty(), "{}", check.name);
+            if let Some(next_step) = &check.next_step {
+                // 下一步必须点名一条真能敲的命令（或 PATH 这个可操作的对象）：
+                // 只说"配置有问题"帮不了任何人。名字取两个发布名之一或本次调用名——
+                // 三者都是用户敲得出来的东西。
+                assert!(
+                    next_step.contains(CANONICAL_BIN_NAME)
+                        || next_step.contains(invocation::DEFAULT_NAME)
+                        || next_step.contains(invocation::name())
+                        || next_step.contains("PATH"),
+                    "{}: 下一步应给可执行命令: {next_step}",
+                    check.name
+                );
+            }
+        }
+        // `--offline` 会追加一条如实的说明（不是失败）。
+        let offline = environment_checks(None, true);
+        let check = offline
+            .iter()
+            .find(|c| c.name == "offline")
+            .expect("--offline 应被如实上报");
+        assert_eq!(check.status, DoctorStatus::Ok);
+        assert!(check.next_step.is_none());
+    }
+
+    /// 缺失的父目录是 warn 而非 fail（写命令会建它），且下一步就是那条建索引的
+    /// 全命令；不可解析/不可写才是 fail。
+    #[test]
+    fn store_location_check_separates_missing_parent_from_unwritable_parent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("not-created-yet").join("asg.db");
+        let check = store_location_check(Some(&missing.to_string_lossy()));
+        assert_eq!(check.status, DoctorStatus::Warn, "{}", check.detail);
+        let next_step = check.next_step.expect("必须给下一步");
+        assert!(next_step.contains("sync --discover"), "{next_step}");
+        // 检查本身无副作用：绝不为了自检把目录造出来。
+        assert!(!missing.parent().expect("has parent").exists());
+
+        // 存在且可写的父目录是 ok，且不留探测残留。
+        let existing = dir.path().join("asg.db");
+        let check = store_location_check(Some(&existing.to_string_lossy()));
+        assert_eq!(check.status, DoctorStatus::Ok, "{}", check.detail);
+        assert!(check.next_step.is_none());
+        let residue: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("readable")
+            .flatten()
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .contains("doctor-write-probe")
+            })
+            .collect();
+        assert!(residue.is_empty(), "可写性探测必须清理自己的临时文件");
+    }
+
+    /// 有界文件计数：到达上限即停并如实标注，不把下界当精确值。
+    #[test]
+    fn bounded_file_count_is_exact_below_the_cap_and_marked_at_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let empty = count_files_bounded(dir.path());
+        assert_eq!(empty.count, 0);
+        assert!(!empty.hit_cap);
+
+        // 嵌套一层，确认递归与"只数文件不数目录"。
+        let nested = dir.path().join("child");
+        std::fs::create_dir(&nested).expect("mkdir");
+        for index in 0..3 {
+            std::fs::write(nested.join(format!("f{index}")), b"x").expect("write");
+        }
+        let counted = count_files_bounded(dir.path());
+        assert_eq!(counted.count, 3, "目录本身不计入文件数");
+        assert!(!counted.hit_cap);
+
+        // 不存在的根不 panic，报 0。
+        let absent = count_files_bounded(&dir.path().join("absent"));
+        assert_eq!(absent.count, 0);
+    }
+
+    /// PATH 解析不执行任何东西，且对空/缺失 PATH 段不 panic。
+    #[test]
+    fn which_on_path_finds_a_real_file_without_executing_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let name = "asg-doctor-which-probe";
+        let file_name = if cfg!(windows) {
+            format!("{name}.EXE")
+        } else {
+            name.to_string()
+        };
+        std::fs::write(dir.path().join(&file_name), b"not a real executable").expect("write");
+        // PATH 里混入空段与不存在的目录：两者都不得导致 panic 或误命中。
+        let joined = std::env::join_paths([
+            std::path::PathBuf::new(),
+            dir.path().join("absent"),
+            dir.path().to_path_buf(),
+        ])
+        .expect("join_paths");
+        // 单线程内改环境变量：本测试不并发读 PATH。
+        let previous = std::env::var_os("PATH");
+        unsafe { std::env::set_var("PATH", &joined) };
+        let found = which_on_path(name);
+        let missing = which_on_path("asg-doctor-definitely-not-installed");
+        match previous {
+            Some(value) => unsafe { std::env::set_var("PATH", value) },
+            None => unsafe { std::env::remove_var("PATH") },
+        }
+        assert_eq!(
+            found.as_deref(),
+            Some(dir.path().join(&file_name).as_path())
+        );
+        assert!(missing.is_none());
+    }
+
+    /// 库侧检查：空库是 warn 且点名 `sync --discover`，非空库是 ok。
+    #[test]
+    fn store_checks_name_sync_discover_on_an_empty_catalog() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("checks.db").to_string_lossy().into_owned();
+        let store = SqliteStore::open(&db).expect("open");
+        let checks = store_checks(&store, &db, 0, 0).expect("checks");
+        let empty = checks
+            .iter()
+            .find(|c| c.name == "catalog_entities")
+            .expect("必须查实体数——空库是 search 零命中的头号原因");
+        assert_eq!(empty.status, DoctorStatus::Warn);
+        let next_step = empty.next_step.as_deref().expect("空库必须给下一步");
+        assert!(next_step.contains("sync --discover"), "{next_step}");
+        assert!(
+            next_step.contains(&db),
+            "下一步应带上同一个库路径: {next_step}"
+        );
+
+        // 中断批次与孤儿行 >0 时各自给出确定性的修复命令。
+        let degraded = store_checks(&store, &db, 2, 5).expect("checks");
+        let interrupted = degraded
+            .iter()
+            .find(|c| c.name == "interrupted_batches")
+            .expect("interrupted_batches");
+        assert_eq!(interrupted.status, DoctorStatus::Warn);
+        assert!(
+            interrupted
+                .next_step
+                .as_deref()
+                .is_some_and(|step| step.contains("sync")),
+            "{interrupted:?}",
+            interrupted = interrupted.next_step
+        );
+        let orphans = degraded
+            .iter()
+            .find(|c| c.name == "orphaned_tool_activities")
+            .expect("orphaned_tool_activities");
+        assert_eq!(orphans.status, DoctorStatus::Warn);
+        assert!(
+            orphans
+                .next_step
+                .as_deref()
+                .is_some_and(|step| step.contains("index purge-activities")),
+            "{:?}",
+            orphans.next_step
+        );
     }
 
     /// 未注册 root 的 provider 必须声明 `discover: Unsupported` 而不是 `Unknown`：
@@ -6911,13 +7981,16 @@ mod tests {
         assert_eq!(db_flag_prefix("x.db", DbOrigin::Default), "");
         assert_eq!(db_flag_prefix("x.db", DbOrigin::Env), "");
         assert_eq!(db_flag_prefix("x.db", DbOrigin::Flag), "--db x.db ");
+        // 建议命令的二进制名是本次实际调用名（M4-6），不是某个硬编码的名字：
+        // 断言按调用名拼期望值，两个 `[[bin]]` 名下都必须成立。
+        let name = invocation::name();
         assert_eq!(
             sync_discover_command("x.db", DbOrigin::Default),
-            "asg sync --discover"
+            format!("{name} sync --discover")
         );
         assert_eq!(
             sync_discover_command("x.db", DbOrigin::Flag),
-            "asg --db x.db sync --discover"
+            format!("{name} --db x.db sync --discover")
         );
     }
 
@@ -6932,7 +8005,14 @@ mod tests {
         assert_eq!(error.0.code, CanonicalCode::NotFound);
         assert_eq!(error.0.code.exit_code(), 4);
         assert!(error.0.message.contains(&missing_s), "{}", error.0.message);
-        assert!(error.0.message.contains("asg --db"), "{}", error.0.message);
+        assert!(
+            error
+                .0
+                .message
+                .contains(&format!("{} --db", invocation::name())),
+            "{}",
+            error.0.message
+        );
         assert!(
             error.0.message.contains("sync --discover"),
             "{}",
@@ -7888,6 +8968,115 @@ mod tests {
     }
 
     #[test]
+    fn role_value_hint_lists_exactly_the_parseable_roles() {
+        // 提示串是闭集的人类投影。写死一份名单迟早会与 `SearchRole::parse`
+        // 分叉，而这条提示是用户唯一能看到的合法取值来源，所以两侧对钉。
+        for value in ROLE_VALUE_HINT.split('|') {
+            assert!(
+                SearchRole::parse(value).is_some(),
+                "--help advertises {value} but SearchRole::parse rejects it"
+            );
+        }
+        for role in [
+            SearchRole::User,
+            SearchRole::Assistant,
+            SearchRole::System,
+            SearchRole::Developer,
+            SearchRole::Tool,
+        ] {
+            assert!(
+                ROLE_VALUE_HINT
+                    .split('|')
+                    .any(|value| value == role.as_str()),
+                "{role:?} is accepted but never advertised"
+            );
+        }
+    }
+
+    #[test]
+    fn search_filters_from_flags_normalizes_roles_and_passes_terms_through() {
+        let filters = search_filters_from_flags(
+            &[],
+            &["assistant".to_string(), "tool".to_string()],
+            &["noise".to_string()],
+            None,
+            None,
+            0,
+        )
+        .expect("valid role and exclusion values");
+        assert_eq!(
+            filters.roles,
+            vec![SearchRole::Assistant, SearchRole::Tool],
+            "role order is preserved here; the Application normalizes the set"
+        );
+        assert_eq!(filters.exclude_terms, vec!["noise".to_string()]);
+
+        let error = search_filters_from_flags(&[], &["Assistant".to_string()], &[], None, None, 0)
+            .expect_err("role values are case-sensitive canonical ids");
+        let rendered = format!("{:?}", error.0);
+        assert!(
+            rendered.contains(ROLE_VALUE_HINT),
+            "the usage error must publish the accepted values: {rendered}"
+        );
+    }
+
+    #[test]
+    fn search_dispatch_accepts_role_and_exclude_flags_on_empty_store() {
+        // 与 R2/R3 那条同一形状的守护：新 flag 必须被 search 的位置参数校验
+        // 认作合法命令级 flag，而不是当成多余的查询词。
+        let store = SqliteStore::open_in_memory().expect("in-memory store opens");
+        let (command, outcome, data, _, _) = dispatch(
+            &store,
+            "test.db",
+            DbOrigin::Flag,
+            &[
+                "search".into(),
+                "foo".into(),
+                "--role".into(),
+                "assistant".into(),
+                "--role".into(),
+                "tool".into(),
+                "--exclude".into(),
+                "noise".into(),
+            ],
+            protocol::OutputMode::Json,
+            None,
+            false,
+        )
+        .expect("search with role/exclude flags must succeed");
+        assert_eq!(command, "search");
+        assert_eq!(outcome, protocol::Outcome::Success);
+        assert_eq!(data["hits"].as_array().expect("hits").len(), 0);
+    }
+
+    #[test]
+    fn search_dispatch_rejects_an_unknown_role_with_a_usage_error() {
+        let store = SqliteStore::open_in_memory().expect("in-memory store opens");
+        let error = dispatch(
+            &store,
+            "test.db",
+            DbOrigin::Flag,
+            &[
+                "search".into(),
+                "foo".into(),
+                "--role".into(),
+                "bogus".into(),
+            ],
+            protocol::OutputMode::Json,
+            None,
+            false,
+        )
+        .expect_err("unknown role must not be silently ignored");
+        assert_eq!(error.0.code, protocol::CanonicalCode::InvalidRequest);
+        assert!(error.0.message.contains("bogus"), "{:?}", error.0.message);
+        assert!(
+            error.0.message.contains(ROLE_VALUE_HINT),
+            "{:?}",
+            error.0.message
+        );
+    }
+
+    #[test]
     fn render_search_emits_session_context_fields() {
         // SearchHit.session_id/text 由 application 装配（批量 session_of +
         // 批量取 payload 截取摘要）；render 原样投影——Some → 字符串，
@@ -7906,6 +9095,7 @@ mod tests {
                     provider_id: None,
                     working_directory: None,
                     project_name: None,
+                    match_ranges: Vec::new(),
                 },
                 agent_session_grep_ports::SearchHit {
                     id: StableId::from_wire("msg_v1_bbbb").expect("valid id"),
@@ -7919,6 +9109,7 @@ mod tests {
                     provider_id: None,
                     working_directory: None,
                     project_name: None,
+                    match_ranges: Vec::new(),
                 },
             ],
             next_cursor: None,
@@ -7930,6 +9121,7 @@ mod tests {
             retrieval_mode: RetrievalMode::Lexical,
             fallback_warning: None,
             time_filter_excluded: 0,
+            context_lines: None,
         };
         let (_, data, _, _) = render(response);
         assert_eq!(data["hits"][0]["session_id"], "ses_v1_aaaa");
@@ -7967,6 +9159,7 @@ mod tests {
                 provider_id: None,
                 working_directory: None,
                 project_name: None,
+                match_ranges: Vec::new(),
             }],
             next_cursor: None,
             generation: 3,
@@ -7977,6 +9170,7 @@ mod tests {
             retrieval_mode: RetrievalMode::Lexical,
             fallback_warning: None,
             time_filter_excluded: 0,
+            context_lines: None,
         };
         let (_, data, _, _) = render(response);
         let hit = &data["hits"][0];
@@ -8008,6 +9202,7 @@ mod tests {
                 provider_id: None,
                 working_directory: None,
                 project_name: None,
+                match_ranges: Vec::new(),
             }],
             next_cursor: None,
             generation: 3,
@@ -8018,6 +9213,7 @@ mod tests {
             retrieval_mode: RetrievalMode::Lexical,
             fallback_warning: None,
             time_filter_excluded: 0,
+            context_lines: None,
         };
         let (_, data, _, _) = render(response);
         let hit = &data["hits"][0];

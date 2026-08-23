@@ -413,6 +413,48 @@ def page_catalog(binary: str, db: str) -> List[Dict[str, Any]]:
             return entries
 
 
+def _is_unrecognized_source_refusal(code: int, envelope: Dict[str, Any]) -> bool:
+    """Did this chunk fail only because some file is not a transcript?
+
+    Explicit ``sync`` refuses a source no provider recognises, and that refusal
+    fails the whole chunk. Matched on the stable canonical code plus the
+    documented refusal wording, so an unrelated ``invalid_request`` (a bad flag,
+    a malformed id) is still treated as a real failure.
+    """
+    if code == 0 or envelope.get("ok") is True:
+        return False
+    error = envelope.get("error")
+    if not isinstance(error, dict) or error.get("code") != "invalid_request":
+        return False
+    return "no provider recognized this source" in str(error.get("message", ""))
+
+
+def _sync_chunk_individually(
+    binary: str, db: str, chunk: Sequence[str]
+) -> Tuple[int, int, int, bool]:
+    """Sync a chunk one source at a time.
+
+    Returns ``(emitted, skipped, unrecognized, failed)``. ``failed`` is True only
+    when a source fails for a reason other than not being a transcript — those
+    are real defects and must not be absorbed into the unrecognized count.
+    """
+    emitted = 0
+    skipped = 0
+    unrecognized = 0
+    for source in chunk:
+        code, envelope = run_cli(binary, db, ["sync", source])
+        if code == 0 and envelope.get("ok") is True:
+            data = envelope.get("data", {})
+            emitted += int(data.get("emitted", 0))
+            skipped += int(data.get("skipped", 0))
+            continue
+        if _is_unrecognized_source_refusal(code, envelope):
+            unrecognized += 1
+            continue
+        return emitted, skipped, unrecognized, True
+    return emitted, skipped, unrecognized, False
+
+
 def run_regression(binary: str, sources: Sequence[str]) -> Dict[str, Any]:
     """Execute the full regression against a throwaway data root."""
     version = binary_version(binary)
@@ -438,6 +480,7 @@ def run_regression(binary: str, sources: Sequence[str]) -> Dict[str, Any]:
         sync_ok = True
         reported_emitted = 0
         reported_skipped = 0
+        unrecognized_sources = 0
         last_code = 0
         last_ok: Any = True
         for chunk in _chunk_sources(sources):
@@ -455,6 +498,29 @@ def run_regression(binary: str, sources: Sequence[str]) -> Dict[str, Any]:
                     last_ok = sync.get("ok")
                     if last_code == 0 and last_ok is True:
                         break
+            if _is_unrecognized_source_refusal(last_code, sync):
+                # A provider data root holds far more than transcripts: pointing
+                # `--sources` at one collects icons, state files and caches, and
+                # explicit `sync` refuses a file no provider recognises, failing
+                # the whole chunk. Measured on this machine: an antigravity root
+                # yields 1,419 files of which 40 are transcripts, so the run died
+                # with invalid_request and reported zero coverage — the same
+                # "reads as full coverage while excluding most of the corpus"
+                # defect this harness exists to avoid, just inverted.
+                #
+                # Fall back to one source at a time for this chunk so the
+                # recognised transcripts are still exercised, and count the
+                # refusals rather than hiding them.
+                recovered_emitted, recovered_skipped, refused, failed = (
+                    _sync_chunk_individually(binary, db, chunk)
+                )
+                reported_emitted += recovered_emitted
+                reported_skipped += recovered_skipped
+                unrecognized_sources += refused
+                if failed:
+                    sync_ok = False
+                    break
+                continue
             if last_code != 0 or last_ok is not True:
                 sync_ok = False
                 break
@@ -467,7 +533,8 @@ def run_regression(binary: str, sources: Sequence[str]) -> Dict[str, Any]:
                 sync_ok and reported_emitted > 0,
                 f"exit {code}, ok={last_ok}, "
                 f"{len(sources)} sources, {reported_emitted} emitted records, "
-                f"{reported_skipped} skipped",
+                f"{reported_skipped} skipped, "
+                f"{unrecognized_sources} not recognised by any provider",
             )
         )
         if not sync_ok:
@@ -768,6 +835,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         if not os.path.isfile(args.binary):
             raise HarnessError(f"--binary does not exist: {args.binary}")
+        # Resolve to absolute: `isfile` accepts a cwd-relative path but Windows
+        # CreateProcess does not resolve one the way a shell does, so a relative
+        # --binary otherwise failed with a bare WinError 2 traceback.
+        binary = os.path.abspath(args.binary)
         if not args.sources:
             raise HarnessError("--sources is required (directory or transcript file)")
         sources = collect_sources(args.sources)
@@ -779,12 +850,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         )
         if args.dry_run:
             print(f"regression: dry run: no file written")
-            print(f"regression: would exercise {os.path.basename(args.binary)}")
+            print(f"regression: would exercise {os.path.basename(binary)}")
             print(f"regression: would ingest {len(sources)} candidate source files")
             print(f"regression: would write {out}")
             return 0
 
-        report = run_regression(args.binary, sources)
+        report = run_regression(binary, sources)
         problems = validate_report(report)
         if problems:
             raise HarnessError("generated report is malformed: " + "; ".join(problems))

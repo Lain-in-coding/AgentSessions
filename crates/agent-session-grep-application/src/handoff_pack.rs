@@ -664,6 +664,7 @@ mod tests {
             provider_id: None,
             working_directory: None,
             project_name: None,
+            match_ranges: Vec::new(),
         }
     }
 

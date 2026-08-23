@@ -92,6 +92,9 @@ wording.
 | `--include-sidechain conflicts with --main-only` / `--include-sidechain conflicts with --subagent-only` | `--include-sidechain` is the default, so combining it with a narrowing facet is contradictory. | Drop `--include-sidechain`. |
 | `--mode must be lexical\|semantic\|hybrid, got <value>` | Bad `--mode`. | Use one of the three. |
 | `--tool-kind must be one of file\|command\|web\|query\|unknown, got <value>` | Bad `--tool-kind`. The set is closed. | Use one of the five. `unknown` means tools outside the known set. |
+| `--role must be one of user\|assistant\|system\|developer\|tool, got <value>` | Bad `--role`. The set is closed and case-sensitive. | Use one of the five, lowercase. Repeat the flag to accept more than one role. |
+| `invalid request: exclusion term must not be empty` | `--exclude ""` (often a blank form field). | Drop the flag, or give it a term. |
+| `invalid request: exclusion term contains control characters` | A newline or NUL inside `--exclude`. | Pass a single term; control characters are rejected, not stripped, because stripping would splice tokens together. |
 | `--policy must be mainline\|full, got <value>` | Bad `context --policy`. | Use `mainline` or `full`. |
 | `--level must be raw\|talks\|sessions, got <value>` | Bad `context --level`. | Use one of the three. |
 | `response budget too small: max_response_bytes = <n> is below the floor 4096` | `--max-bytes` under 4096. | Use 4096 or more. |
@@ -266,20 +269,21 @@ you which one you hit:
 | `home_unresolved` | The root is registered but neither `$HOME` nor `%USERPROFILE%` could be resolved. | Set one of those environment variables. |
 | `scanned` | The root was walked. Check `found` and `complete`. | If `found: 0`, the directory holds no file any adapter claims. |
 
-Only **6** of the 14 ingestible providers register a discovery root:
+Only **7** of the 14 ingestible providers register a discovery root:
 
 | Provider | Root |
 | --- | --- |
 | `claude-code` | `~/.claude/projects` |
 | `codex` | `~/.codex/sessions` |
 | `openclaw` | `~/.openclaw/agents` |
+| `pi` | `~/.pi/agent/sessions` |
 | `tencent-codebuddy` | `~/.codebuddy/projects` |
 | `antigravity` | `~/.gemini/antigravity-cli/brain` |
 | `opencode` | `~/.local/share/opencode` |
 
-`aider`, `cline`, `cursor`, `grok-build`, `hermes`, `kimi-code`, `pi`, and
-`qoder` report `unsupported` and must be synced by path. If you were expecting
-one of those to appear automatically, that is the reason.
+`aider`, `cline`, `cursor`, `grok-build`, `hermes`, `kimi-code`, and `qoder`
+report `unsupported` and must be synced by path. If you were expecting one of
+those to appear automatically, that is the reason.
 
 Files that no adapter can attribute are skipped and counted, never guessed at,
 so a nonzero skip count alongside `found > 0` is normal in a mixed directory.

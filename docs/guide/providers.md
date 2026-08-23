@@ -21,7 +21,7 @@ The authoritative sources for this page are
 
 ### Providers `sync --discover` scans
 
-Six adapters register a discovery root, so `asg sync --discover` finds them
+Seven adapters register a discovery root, so `asg sync --discover` finds them
 with no arguments. The root is the *same home-relative subpath on all three
 platforms* — the code joins your home directory to the subpath with no
 per-platform branching. Home is `$HOME`, falling back to `%USERPROFILE%` on
@@ -32,6 +32,7 @@ Windows.
 | Claude Code | `claude-code` | `.claude/projects` |
 | Codex | `codex` | `.codex/sessions` |
 | OpenClaw | `openclaw` | `.openclaw/agents` |
+| Pi | `pi` | `.pi/agent/sessions` |
 | Tencent CodeBuddy | `tencent-codebuddy` | `.codebuddy/projects` |
 | Antigravity | `antigravity` | `.gemini/antigravity-cli/brain` |
 | OpenCode | `opencode` | `.local/share/opencode` |
@@ -51,7 +52,7 @@ Markdown chat logs are all discoverable.
 
 ### Providers you must point at explicitly
 
-The other eight adapters register no discovery root. `sync --discover` will
+The other seven adapters register no discovery root. `sync --discover` will
 never find them — it says so per provider, in these words:
 
 ```
@@ -73,7 +74,6 @@ in the adapter source, it is repeated here with its confidence stated.
 | Provider | `provider_id` | What to point `sync` at | Location evidence |
 |---|---|---|---|
 | Grok Build | `grok-build` | `updates.jsonl` (ACP `session/update` stream; written per session next to a `summary.json`) | Directory not documented in this repo. |
-| Pi | `pi` | Session JSONL (`type:"session"` header line, then `type:"message"` lines) | Not documented in this repo. |
 | Kimi Code | `kimi-code` | `wire.jsonl` | Only `~/.kimi-code` is named in the adapter, as a directory that did not exist on the machine where the adapter was written. The transcript's location inside it is unverified. |
 | Qoder | `qoder` | CLI transcript JSONL | Adapter targets `~/.qoder/projects/<project>/`, but records that whether files sit directly there or under a `transcript/` subdirectory is **unverified** — the reference matrix and Qoder's own CLI docs disagree, and settling it needs a real `qodercli` run. |
 | Cline | `cline` | `api_conversation_history.json` | Adapter documents `~/.cline/data/tasks/*/`. |
@@ -81,8 +81,22 @@ in the adapter source, it is repeated here with its confidence stated.
 | Cursor | `cursor` | `state.vscdb` (the VS Code `workspaceStorage` SQLite KV file) | Directory not documented in this repo. |
 | Aider | `aider` | `.aider.chat.history.md` | Filename only; the directory it is written to is recorded as an unverified candidate. |
 
-Some of these formats are byte-shaped alike. When two adapters `probe` a file
-with equal confidence, `sync` **refuses the file rather than guessing**:
+Some of these formats are byte-shaped alike. Pi and OpenClaw are the real case:
+both open with a `{"type":"session","version":3,...}` header followed by a run of
+`model_change` records, so **no field in the file distinguishes them** — not even
+`version`, which both carry as `3`.
+
+What breaks the tie is where the file came from, which is evidence from outside
+the file. A transcript sitting under a registered discovery root is attributed to
+that root's provider, whether `--discover` enumerated it or you passed the path
+yourself:
+
+```bash
+asg sync ~/.pi/agent/sessions/<agent>/<session>.jsonl   # attributed to pi
+```
+
+A file with no root to place it — copied to `/tmp`, downloaded, piped out of a
+backup — has no such evidence, and `sync` **refuses it rather than guessing**:
 
 ```
 $ asg sync session.jsonl
@@ -98,8 +112,7 @@ Exit code is `2`. Break the tie yourself:
 asg sync --provider pi session.jsonl
 ```
 
-Pi and OpenClaw genuinely collide this way. Naming the provider is the intended
-fix, not a workaround.
+Naming the provider is the intended fix for a rootless file, not a workaround.
 
 ## Capabilities
 
@@ -117,7 +130,7 @@ should script against.
 | `claude-code` | experimental → certified | native | native | derived | partial | native | native | native |
 | `codex` | experimental → certified | native | native | derived | partial | native | native | native |
 | `grok-build` | experimental → beta | unsupported | native | derived | unsupported | native | unsupported | unsupported |
-| `pi` | experimental → beta | unsupported | native | derived | unsupported | native | unsupported | unsupported |
+| `pi` | experimental → beta | native | native | derived | unsupported | native | unsupported | unsupported |
 | `openclaw` | experimental → beta | native | native | unsupported | unsupported | native | unsupported | unsupported |
 | `tencent-codebuddy` | experimental → beta | native | native | unknown | unsupported | native | unsupported | unsupported |
 | `antigravity` | experimental → beta | native | native | unknown | unsupported | unsupported | unsupported | unsupported |

@@ -1,6 +1,6 @@
 {
-  "committed": 3,
-  "fixture_blake3": "f0a5321fe749e3035e87af6f678837451cc93071ce5bc9f77fe54b8d5ea727b1",
+  "committed": 4,
+  "fixture_blake3": "ba7c01defcf296e81b5b01392f03daafc2a80a42ac1ec28e18fe830882c3dbcf",
   "messages": [
     {
       "is_sidechain": false,
@@ -39,6 +39,19 @@
         "start": 1623
       },
       "text": "再确认一次：event_msg 镜像不会被重复计数 😀",
+      "timestamp": null
+    },
+    {
+      "is_sidechain": false,
+      "native_id": "msg-fx-0005",
+      "parent_native_id": null,
+      "role": "assistant",
+      "seq": 3,
+      "span": {
+        "end": 2073,
+        "start": 1853
+      },
+      "text": "先跑一次测试，再补一次格式化。",
       "timestamp": null
     }
   ],
