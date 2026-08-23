@@ -41,8 +41,8 @@ use agent_session_grep_domain::{
 use agent_session_grep_ports::{
     Confidence, HistoryBucket, HistoryStats, ParseReport, ProviderAdapter,
     ProviderSessionObservation, ReadOnlySource, RedactionStatus, ResumeClaimsStore, RetrievalMode,
-    SearchFacets, SearchFilters, SearchInstant, SearchProvider, SidechainFacet, SourceFormatFamily,
-    SourceResumeClaim,
+    SearchFacets, SearchFilters, SearchInstant, SearchProvider, SearchRole, SidechainFacet,
+    SourceFormatFamily, SourceResumeClaim,
     capability::{ProviderCapability, ProviderCapabilityMatrix, ProviderMaturity},
     source_format_family_for,
 };
@@ -248,7 +248,8 @@ fn extract_offline_flag(args: &[String]) -> bool {
         match a.as_str() {
             "--db" | "--out" | "--output" | "--request-id" | "--cursor" | "--max-items"
             | "--max-bytes" | "--max-messages" | "--policy" | "--level" | "--provider"
-            | "--since" | "--until" | "--session" | "--around" | "--tool-kind" | "--tool-name" => {
+            | "--since" | "--until" | "--session" | "--around" | "--tool-kind" | "--tool-name"
+            | "--role" | "--exclude" => {
                 it.next();
             }
             _ => {}
@@ -294,7 +295,7 @@ fn extract_request_id(args: &[String]) -> Result<Option<String>, String> {
             "--db" | "--out" | "--output" | "--cursor" | "--max-items" | "--max-bytes"
             | "--max-messages" | "--max-evidence" | "--max-tokens" | "--policy" | "--level"
             | "--provider" | "--since" | "--until" | "--session" | "--around" | "--tool-kind"
-            | "--tool-name" => {
+            | "--tool-name" | "--role" | "--exclude" => {
                 it.next();
             }
             _ => {}
@@ -316,7 +317,7 @@ fn command_name(args: &[String]) -> String {
             "--db" | "--out" | "--output" | "--cursor" | "--max-items" | "--max-bytes"
             | "--max-messages" | "--max-evidence" | "--max-tokens" | "--policy" | "--level"
             | "--request-id" | "--provider" | "--since" | "--until" | "--session" | "--around"
-            | "--tool-kind" | "--tool-name" => {
+            | "--tool-kind" | "--tool-name" | "--role" | "--exclude" => {
                 it.next(); // 消费其取值
             }
             "--robot" | "--no-color" | "--help" | "-h" | "--version" | "-V" | "--discover"
@@ -387,7 +388,7 @@ fn intercept_help_or_version(args: &[String]) -> Option<HelpRequest> {
             "--db" | "--out" | "--output" | "--request-id" | "--cursor" | "--max-items"
             | "--max-bytes" | "--max-messages" | "--max-evidence" | "--max-tokens" | "--policy"
             | "--level" | "--provider" | "--since" | "--until" | "--session" | "--around"
-            | "--tool-kind" | "--tool-name" => {
+            | "--tool-kind" | "--tool-name" | "--role" | "--exclude" => {
                 it.next();
             }
             _ => {}
@@ -1131,10 +1132,17 @@ LIST:
 
 FILTER (search):
     --provider <id>        restrict to a provider (repeatable; values OR together). Run `providers` for the ids
+    --role <role>          keep only user|assistant|system|developer|tool messages (repeatable; values OR together)
+    --exclude <term>       drop messages containing this term (repeatable; a message matching any term is dropped)
     --since <time>         window start, inclusive; RFC3339/ISO-8601 absolute or 1h/1d/1w relative
     --until <time>         window end, exclusive; same syntax as --since
     --include-system       system/developer role messages are excluded by default; this flag restores them
     --group-by-session     collapse per session: keep the top-scoring hit and attach an occurrences count
+
+    An explicit --role list supersedes the --include-system default, so `--role system` needs no second flag.
+    While a --role filter is active only messages are returned; a session has no role of its own.
+    --exclude matches whole terms, tokenized exactly like the query. It is not a query operator:
+    the query language stays operator-free (ADR-0003).
 
 FACETS (search; structured filters, nothing filtered by default, output unchanged):
     --main-only            mainline messages only (excludes sidechains)
@@ -1397,7 +1405,10 @@ fn subcommand_help_template(cmd: &str) -> &'static str {
                      --include-system（默认排除 system/developer 角色消息）、--group-by-session（按会话归并并附 occurrences）；\n\
                      结构化过滤：--main-only 只看主线（排除 sidechain）、--subagent-only 只看 subagent 消息、\n\
                      --tool-kind file|command|web|query|unknown 只保留做过该种工具调用的消息、\n\
-                     --tool-name <名字> 只保留用过该工具（逐字相等）的消息（--main-only 与 --subagent-only 互斥）"
+                     --tool-name <名字> 只保留用过该工具（逐字相等）的消息（--main-only 与 --subagent-only 互斥）\n\
+                     --role user|assistant|system|developer|tool keeps only those roles (repeatable, ORed); an\n\
+                     explicit --role supersedes the --include-system default and returns messages only.\n\
+                     --exclude <term> drops messages containing that term (repeatable, whole-term match)."
         }
         "get-message" => {
             "get-message <msg-id>：返回一个消息及其同会话主线邻居。\n\
@@ -2241,6 +2252,8 @@ fn is_known_flag_name(token: &str) -> bool {
             | "--include-sidechain"
             | "--tool-kind"
             | "--tool-name"
+            | "--role"
+            | "--exclude"
             | "--yes"
             | "--before"
             | "--project"
@@ -2299,7 +2312,7 @@ fn extract_db_flag_impl(args: &[String], prefix_only: bool) -> Result<Option<Str
             "--out" | "--output" | "--request-id" | "--cursor" | "--max-items" | "--max-bytes"
             | "--max-messages" | "--max-evidence" | "--max-tokens" | "--policy" | "--level"
             | "--provider" | "--since" | "--until" | "--session" | "--around" | "--tool-kind"
-            | "--tool-name" => {
+            | "--tool-name" | "--role" | "--exclude" => {
                 it.next();
             }
             _ => {}
@@ -2345,7 +2358,7 @@ fn extract_out_flag(args: &[String]) -> Result<protocol::PayloadSink, CliError> 
             "--db" | "--output" | "--request-id" | "--cursor" | "--max-items" | "--max-bytes"
             | "--max-messages" | "--max-evidence" | "--max-tokens" | "--policy" | "--level"
             | "--provider" | "--since" | "--until" | "--session" | "--around" | "--tool-kind"
-            | "--tool-name" => {
+            | "--tool-name" | "--role" | "--exclude" => {
                 it.next();
             }
             _ => {}
@@ -2557,7 +2570,7 @@ fn bare_positionals(args: &[String]) -> Vec<String> {
             "--db" | "--out" | "--output" | "--request-id" | "--cursor" | "--max-items"
             | "--max-bytes" | "--max-messages" | "--max-evidence" | "--max-tokens" | "--policy"
             | "--level" | "--provider" | "--since" | "--until" | "--session" | "--around"
-            | "--tool-kind" | "--tool-name" => {
+            | "--tool-kind" | "--tool-name" | "--role" | "--exclude" => {
                 it.next(); // 消费其取值
             }
             "--robot" | "--no-color" | "--help" | "-h" | "--version" | "-V" | "--discover"
@@ -2883,6 +2896,8 @@ fn dispatch(
             let max_items = extract_flag(&mut args, "--max-items")?;
             let max_bytes = extract_flag(&mut args, "--max-bytes")?;
             let providers = extract_repeated_flag(&mut args, "--provider")?;
+            let roles = extract_repeated_flag(&mut args, "--role")?;
+            let exclude_terms = extract_repeated_flag(&mut args, "--exclude")?;
             let since = extract_flag(&mut args, "--since")?;
             let until = extract_flag(&mut args, "--until")?;
             let include_system = take_bool_flag(&mut args, "--include-system");
@@ -2918,6 +2933,8 @@ fn dispatch(
             let app = App::with_resume(store_ref(store), store_ref(store), store_ref(store));
             let filters = search_filters_from_flags(
                 &providers,
+                &roles,
+                &exclude_terms,
                 since.as_deref(),
                 until.as_deref(),
                 app.now_ms(),
@@ -3091,6 +3108,8 @@ fn dispatch(
             let app = App::with_resume(store_ref(store), store_ref(store), store_ref(store));
             let filters = search_filters_from_flags(
                 &providers,
+                &[],
+                &[],
                 since.as_deref(),
                 until.as_deref(),
                 app.now_ms(),
@@ -4058,11 +4077,16 @@ fn take_bool_flag(args: &mut Vec<String>, name: &str) -> bool {
     }
 }
 
-/// CLI 检索过滤参数归一化：provider 别名 → 规范 id；时间值接受 RFC3339/ISO-8601
-/// 绝对时间或 `1h|1d|1w` 紧凑相对量（相对量以注入的 application 时钟 `now_ms`
-/// 为基准，全程同一时钟源）。取值非法是用法错误（exit 2）。
+/// CLI 检索过滤参数归一化：provider 别名 → 规范 id；role → 闭集枚举；时间值接受
+/// RFC3339/ISO-8601 绝对时间或 `1h|1d|1w` 紧凑相对量（相对量以注入的 application
+/// 时钟 `now_ms` 为基准，全程同一时钟源）。取值非法是用法错误（exit 2）。
+///
+/// `exclude_terms` 原样透传：它是**用户给的字面词**，这里没有可校验的闭集，
+/// 空串/控制字符由 Application 边界统一拒绝（与查询串同一条规则）。
 fn search_filters_from_flags(
     providers: &[String],
+    roles: &[String],
+    exclude_terms: &[String],
     since: Option<&str>,
     until: Option<&str>,
     now_ms: i64,
@@ -4076,10 +4100,24 @@ fn search_filters_from_flags(
                 CliError::usage(format!("unknown provider: {provider} (expected {hint})"))
             })?);
     }
+    for role in roles {
+        filters.roles.push(SearchRole::parse(role).ok_or_else(|| {
+            CliError::usage(format!(
+                "--role must be one of {ROLE_VALUE_HINT}, got {role}"
+            ))
+        })?);
+    }
+    filters.exclude_terms = exclude_terms.to_vec();
     filters.since = parse_time_flag("--since", since, now_ms)?;
     filters.until = parse_time_flag("--until", until, now_ms)?;
     Ok(filters)
 }
+
+/// Accepted `--role` values, rendered in the role usage error and in `--help`.
+///
+/// 闭集写在一处：`SearchRole::parse` 是判据，这条提示是它的人类投影，两者
+/// 必须同时改（有测试钉住每个列出的取值都能被解析）。
+const ROLE_VALUE_HINT: &str = "user|assistant|system|developer|tool";
 
 /// Accepted `--provider` values, rendered in every provider usage error.
 ///
@@ -8927,6 +8965,115 @@ mod tests {
         assert_eq!(command, "search");
         assert_eq!(outcome, protocol::Outcome::Success);
         assert_eq!(data["hits"].as_array().expect("hits").len(), 0);
+    }
+
+    #[test]
+    fn role_value_hint_lists_exactly_the_parseable_roles() {
+        // 提示串是闭集的人类投影。写死一份名单迟早会与 `SearchRole::parse`
+        // 分叉，而这条提示是用户唯一能看到的合法取值来源，所以两侧对钉。
+        for value in ROLE_VALUE_HINT.split('|') {
+            assert!(
+                SearchRole::parse(value).is_some(),
+                "--help advertises {value} but SearchRole::parse rejects it"
+            );
+        }
+        for role in [
+            SearchRole::User,
+            SearchRole::Assistant,
+            SearchRole::System,
+            SearchRole::Developer,
+            SearchRole::Tool,
+        ] {
+            assert!(
+                ROLE_VALUE_HINT
+                    .split('|')
+                    .any(|value| value == role.as_str()),
+                "{role:?} is accepted but never advertised"
+            );
+        }
+    }
+
+    #[test]
+    fn search_filters_from_flags_normalizes_roles_and_passes_terms_through() {
+        let filters = search_filters_from_flags(
+            &[],
+            &["assistant".to_string(), "tool".to_string()],
+            &["noise".to_string()],
+            None,
+            None,
+            0,
+        )
+        .expect("valid role and exclusion values");
+        assert_eq!(
+            filters.roles,
+            vec![SearchRole::Assistant, SearchRole::Tool],
+            "role order is preserved here; the Application normalizes the set"
+        );
+        assert_eq!(filters.exclude_terms, vec!["noise".to_string()]);
+
+        let error = search_filters_from_flags(&[], &["Assistant".to_string()], &[], None, None, 0)
+            .expect_err("role values are case-sensitive canonical ids");
+        let rendered = format!("{:?}", error.0);
+        assert!(
+            rendered.contains(ROLE_VALUE_HINT),
+            "the usage error must publish the accepted values: {rendered}"
+        );
+    }
+
+    #[test]
+    fn search_dispatch_accepts_role_and_exclude_flags_on_empty_store() {
+        // 与 R2/R3 那条同一形状的守护：新 flag 必须被 search 的位置参数校验
+        // 认作合法命令级 flag，而不是当成多余的查询词。
+        let store = SqliteStore::open_in_memory().expect("in-memory store opens");
+        let (command, outcome, data, _, _) = dispatch(
+            &store,
+            "test.db",
+            DbOrigin::Flag,
+            &[
+                "search".into(),
+                "foo".into(),
+                "--role".into(),
+                "assistant".into(),
+                "--role".into(),
+                "tool".into(),
+                "--exclude".into(),
+                "noise".into(),
+            ],
+            protocol::OutputMode::Json,
+            None,
+            false,
+        )
+        .expect("search with role/exclude flags must succeed");
+        assert_eq!(command, "search");
+        assert_eq!(outcome, protocol::Outcome::Success);
+        assert_eq!(data["hits"].as_array().expect("hits").len(), 0);
+    }
+
+    #[test]
+    fn search_dispatch_rejects_an_unknown_role_with_a_usage_error() {
+        let store = SqliteStore::open_in_memory().expect("in-memory store opens");
+        let error = dispatch(
+            &store,
+            "test.db",
+            DbOrigin::Flag,
+            &[
+                "search".into(),
+                "foo".into(),
+                "--role".into(),
+                "bogus".into(),
+            ],
+            protocol::OutputMode::Json,
+            None,
+            false,
+        )
+        .expect_err("unknown role must not be silently ignored");
+        assert_eq!(error.0.code, protocol::CanonicalCode::InvalidRequest);
+        assert!(error.0.message.contains("bogus"), "{:?}", error.0.message);
+        assert!(
+            error.0.message.contains(ROLE_VALUE_HINT),
+            "{:?}",
+            error.0.message
+        );
     }
 
     #[test]

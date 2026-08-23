@@ -2467,7 +2467,8 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   → 若后续要做,应先给 context 定一个投影契约(同 handoff 的做法),
   再实现;本条按"验收的一半已达成 + 另一半明确拒绝并说明"关闭。
 
-- [ ] **M3-8 搜索缺 role / 路径 / 排除项过滤**
+- [x] **M3-8 搜索缺 role / 路径 / 排除项过滤** —— **role 与 exclude 已交付;
+  路径维度归 M3-3(理由见下)**
   `safe_fts_query` 给每个 token 加引号(`adapters-sqlite/src/lib.rs:6885-6904`),
   ADR-0003 刻意移除了 phrase/boolean/`NEAR`/prefix 语法(`ADR-0003:15,29-31`)——
   **这个取舍对首发是站得住的,不要推翻**。
@@ -2477,6 +2478,43 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   **修法**:`role` 限定优先(最常用),`--exclude` 次之;
   不要重新引入 ADR-0003 撤掉的语法。
   **验收**:能只搜某个 role;能排除词。
+
+  **✅ 已交付 `search --role <role>`(可重复,OR)与 `search --exclude <term>`
+  (可重复,OR)。** 两条谓词都下推进 SQL、在 `LIMIT` 之前收窄候选集
+  (端口注释记的那个"先取 limit 再过滤 → 游标错位"缺陷类不会重演);两条都进
+  `search-filter-v2` 游标摘要,filter 集合变化的旧令牌一律 `cursor_invalid`。
+  五个入口:CLI flag、MCP `search_sessions` 的 `roles`/`exclude_terms` 入参
+  (**仍是九个工具**,只扩既有工具的 inputSchema)、`/api/search` 的可重复
+  `role`/`exclude` 查询参数、Web 表单的 role 下拉 + exclude 输入框。
+  TUI 不动 —— 它至今不持有**任何** `SearchFilters` 维度(连 provider/时间都没有),
+  只单独给它加 role 会在 TUI 内部先自相矛盾。
+
+  **两处语义决定(都写进了 help 与端口注释,不靠读代码才能发现)**:
+  1. **显式 `--role` 覆盖 `--include-system` 默认。** 否则 `--role system`
+     恒返回空 —— 用户点名要的东西被一条他没要求的默认规则减掉。
+     跳过那层默认过滤不会放宽结果集:SQL 白名单已经把范围收在点名的 role 内。
+  2. **`--role` 生效时不返回 Session 元数据命中。** role 是消息级事实,Session
+     实体没有角色;若照 provider/时间那样写成"该会话里存在该角色的消息",
+     `--role system` 会因为会话里有一条系统消息就把整个会话召回。
+     有测试专门钉住这一点(不加抑制时那个会话真的会冒出来)。
+
+  **`--exclude` 是结构化过滤而非查询语法**:每个词走与正向查询**同一条**
+  `bigram_cjk` + 逐 token 引号化管线,composed 成 FTS5 `(正向) NOT (词1 OR 词2)`。
+  所以它跑在同一个倒排索引上,不是逐行子串扫描,也没有把 ADR-0003 撤掉的
+  操作符还给用户。分词后为空的词(纯标点)排除零条 —— 这是正向侧
+  "纯标点查询匹配零条"的对偶。
+
+  **路径维度未做,理由是它是 M3-3 的交付物而非本条的。** M3-3 的"具体形状"
+  逐字列了 `--project <path-or-name>` 与 `--exclude-project`,而本条的验收只写
+  role 与排除词。`SearchFilters` 里 `projects`/`exclude_projects` 两个字段已由
+  groundwork commit `9cfacb9` 声明、仍未接线,M3-3 接线时无需再改端口。
+  → **因此本条没有任何 path 形状的取值会被回显**,ADR-0009 的跨边界脱敏在本条
+  无新暴露面(search 的 envelope 本来就不回显 filters,只回显 facets)。
+
+  **已知边界(如实记录)**:`--mode semantic` 下 filters 不生效 —— `query_semantic`
+  不吃 `SearchFilters`,这对 `--provider`/`--since` 是**既有**行为,role/exclude
+  只是继承了它。`hybrid` 的 lexical 那一路正常过滤。semantic 是 opt-in 且需
+  `semantic-candle` 构建,故不阻塞本条,但它是一条真实的静默不过滤路径。
 
 - [ ] **M3-9 命中处无一步到位的上下文窗口** —— **部分实现(`ceab8a2` + `a584ae3`)**
   `search` 返回有界前缀片段(`application/src/lib.rs:887-889`,

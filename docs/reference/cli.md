@@ -95,6 +95,8 @@ summary, and `suggested_next_commands`.
 | `--max-bytes <n>` | integer | — | Response byte budget. Floor 4096; below it is a usage error. |
 | `--cursor <token>` | token | — | Continuation token from the previous page's `page.next_cursor`. |
 | `--provider <id>` | provider id | all | Repeatable; multiple values are OR-ed. |
+| `--role <role>` | `user` \| `assistant` \| `system` \| `developer` \| `tool` | all | Repeatable; multiple values are OR-ed. Keeps only messages whose canonical payload carries one of these roles. |
+| `--exclude <term>` | string | — | Repeatable. Drops any hit containing the term; a hit matching *any* term is dropped. Whole-term match, tokenized exactly like the query. |
 | `--since <time>` | RFC3339/ISO-8601 or `1h`/`1d`/`1w` | — | Inclusive lower bound. |
 | `--until <time>` | same as `--since` | — | Exclusive upper bound; interval is half-open `[since, until)`. |
 | `--mode <mode>` | `lexical` \| `semantic` \| `hybrid` | `lexical` | `semantic`/`hybrid` require `index embeddings`. If the vector index is not ready the response reports `retrieval_mode=lexical_fallback` with a warning; it never degrades silently. |
@@ -115,10 +117,28 @@ hermes kimi-code openclaw opencode pi qoder tencent-codebuddy
 ```
 
 `claude` is a historical alias for `claude-code`. An unrecognized value is a
-usage error that prints the whole accepted list.
+usage error that prints the whole accepted list. `--role` behaves the same way:
+an unrecognized role is a usage error listing the five accepted values.
+
+Two things about `--role` that the table cannot show:
+
+- An explicit `--role` list supersedes the `--include-system` default. `--role
+  system` returns system messages on its own; you do not have to add
+  `--include-system` as well.
+- While a `--role` filter is active the response contains messages only. Session
+  metadata matches are suppressed, because a session has no role of its own and
+  returning one would answer with an entity the filter does not describe.
+
+`--exclude` is a structured filter, not query syntax. The query language stays
+operator-free (ADR-0003) — you never type `NOT` or `-term` into the query. A term
+that the tokenizer cannot represent (punctuation only) excludes nothing, which is
+the dual of a punctuation-only query matching nothing.
 
 Non-default facets are echoed back in `data.facets`; when every facet is at its
-default, nothing is added, so existing output bytes are unchanged.
+default, nothing is added, so existing output bytes are unchanged. Filters
+(including `--role` and `--exclude`) are not echoed; they are bound into the
+continuation token instead, so a cursor issued under one filter set is rejected
+rather than silently replayed under another.
 
 ### `handoff <query>`
 

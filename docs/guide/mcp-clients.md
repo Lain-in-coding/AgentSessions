@@ -181,7 +181,7 @@ than ignored.
 
 | Tool | Required arguments | Optional arguments |
 | --- | --- | --- |
-| `search_sessions` | `query` (≤4096 chars) | `limit` (default 20), `cursor`, `max_items`, `max_bytes` (≥4096), `providers`, `since`, `until`, `include_system`, `group_by_session`, `sidechain` (`include`/`main_only`/`subagent_only`), `tool_kind` (`file`/`command`/`web`/`query`/`unknown`), `tool_name`, `mode` (`lexical`/`semantic`/`hybrid`) |
+| `search_sessions` | `query` (≤4096 chars) | `limit` (default 20), `cursor`, `max_items`, `max_bytes` (≥4096), `providers`, `roles` (`user`/`assistant`/`system`/`developer`/`tool`), `exclude_terms` (≤16 terms, ≤256 chars each), `since`, `until`, `include_system`, `group_by_session`, `sidechain` (`include`/`main_only`/`subagent_only`), `tool_kind` (`file`/`command`/`web`/`query`/`unknown`), `tool_name`, `mode` (`lexical`/`semantic`/`hybrid`) |
 | `get_session_context` | `session_id` (`ses_v1_…`) | `policy` (`mainline`/`full`), `level` (`raw`/`talks`/`sessions`), `max_messages`, `max_bytes` |
 | `get_session_resume` | `session_id` | — |
 | `get_message` | `message_id` (`msg_v1_…`) | `session_id`, `around` (default 0), `max_items`, `max_bytes` |
@@ -199,6 +199,15 @@ Notes that matter when you write agent instructions around these:
   `get_session_context` (the whole branch).
 - **`list_sessions` returns only session entities**, in stable wire-id order.
   Messages and documents are not listed.
+- **`roles` supersedes `include_system`, and narrows results to messages.**
+  `roles: ["system"]` returns system messages without also setting
+  `include_system: true` — an explicit allowlist is a stronger statement than the
+  default that hides noise. While `roles` is set, session-metadata matches are
+  suppressed: a session has no role, so returning one would answer with an entity
+  the filter does not describe.
+- **`exclude_terms` is a filter, not query syntax.** Each term is tokenized the
+  same way `query` is, and a hit matching any term is dropped. Do not put `NOT`
+  or `-term` in `query`; the query language has no operators (ADR-0003).
 - **`since` and `until` accept absolute ISO-8601 timestamps only** over MCP, for
   example `2026-08-01T00:00:00Z`. The compact `1h`/`1d`/`1w` durations the CLI
   accepts are rejected here: the protocol carries no shared clock reference. The

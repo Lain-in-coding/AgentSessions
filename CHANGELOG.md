@@ -14,6 +14,20 @@ creates the corresponding tag and Release.
 
 ### Added
 
+- `search --role <role>` and `search --exclude <term>` — the two structured
+  search dimensions the query language deliberately does not carry. `--role`
+  accepts `user`, `assistant`, `system`, `developer`, or `tool`; both flags are
+  repeatable and values within a dimension are OR-ed. An explicit `--role` list
+  supersedes the `--include-system` default (so `--role system` needs no second
+  flag) and narrows the response to messages, because a session carries no role.
+  `--exclude` is a whole-term filter tokenized exactly like the query, not a
+  query operator — the query language stays operator-free (ADR-0003). Both
+  predicates are pushed into SQL before `LIMIT`, and both are bound into the
+  continuation token, so a cursor issued under one filter set is rejected rather
+  than replayed under another. Reachable from every entry point: `roles` and
+  `exclude_terms` on the existing `search_sessions` MCP tool (still nine tools),
+  repeatable `role`/`exclude` query parameters on `/api/search`, and a role
+  selector plus an exclude field in the embedded web UI.
 - 16-provider capability matrix (`agent-session-grep-ports`) with deferred
   provider rows (`deepseek-harness`, `zcode`) and per-provider maturity grading.
 - Provider adapters for the 14 implemented, Experimental providers:

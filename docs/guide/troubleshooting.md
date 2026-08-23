@@ -92,6 +92,9 @@ wording.
 | `--include-sidechain conflicts with --main-only` / `--include-sidechain conflicts with --subagent-only` | `--include-sidechain` is the default, so combining it with a narrowing facet is contradictory. | Drop `--include-sidechain`. |
 | `--mode must be lexical\|semantic\|hybrid, got <value>` | Bad `--mode`. | Use one of the three. |
 | `--tool-kind must be one of file\|command\|web\|query\|unknown, got <value>` | Bad `--tool-kind`. The set is closed. | Use one of the five. `unknown` means tools outside the known set. |
+| `--role must be one of user\|assistant\|system\|developer\|tool, got <value>` | Bad `--role`. The set is closed and case-sensitive. | Use one of the five, lowercase. Repeat the flag to accept more than one role. |
+| `invalid request: exclusion term must not be empty` | `--exclude ""` (often a blank form field). | Drop the flag, or give it a term. |
+| `invalid request: exclusion term contains control characters` | A newline or NUL inside `--exclude`. | Pass a single term; control characters are rejected, not stripped, because stripping would splice tokens together. |
 | `--policy must be mainline\|full, got <value>` | Bad `context --policy`. | Use `mainline` or `full`. |
 | `--level must be raw\|talks\|sessions, got <value>` | Bad `context --level`. | Use one of the three. |
 | `response budget too small: max_response_bytes = <n> is below the floor 4096` | `--max-bytes` under 4096. | Use 4096 or more. |
