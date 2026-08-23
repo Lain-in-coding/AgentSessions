@@ -2516,7 +2516,7 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   只是继承了它。`hybrid` 的 lexical 那一路正常过滤。semantic 是 opt-in 且需
   `semantic-candle` 构建,故不阻塞本条,但它是一条真实的静默不过滤路径。
 
-- [ ] **M3-9 命中处无一步到位的上下文窗口** —— **部分实现(`ceab8a2` + `a584ae3`)**
+- [x] **M3-9 命中处无一步到位的上下文窗口** —— **已完整交付(`b1f5e9b`)**
   `search` 返回有界前缀片段(`application/src/lib.rs:887-889`,
   human 预览截断到 120 字符,`human.rs:18`),**无匹配高亮、无周边行**。
   想看匹配在上下文里的样子要第二条命令(`show`)和第三条
@@ -2540,8 +2540,16 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   2. 原有测试曾钉死盲前缀 `"xxxxxxxx"`;已改为钉住同一性质
      (`why_matched` 找到词),并额外钉住窗口确实移到命中位置。
 
-  **未做(不伪装完成)**:高亮与 `--context N` 周边行尚未新增;当前交付的是
-  "一条命令可见命中附近证据",不是完整 diff-aware context window。
+  **✅ 第二半也已交付(`b1f5e9b`)**:
+  - `SearchHit.match_ranges`:在**最终返回 snippet**上给出 half-open char offsets,
+    机器面 `text` 保持原始证据,不塞 ANSI/markup;human renderer 才按 offsets 高亮。
+  - `search --context N`:以命中所在行 ±N 行返回**连续正文区域**,
+    不复用 `get-message --around`(那是消息轴,不是正文行轴)。
+  - context 窗口受 `max_snippet_chars` 约束;被裁剪明确走
+    `max_snippet_chars` truncation、partial outcome、exit 10。
+  - 五入口都带同一 offsets/context 投影;MCP 只扩既有工具,没有新增工具。
+  **回归证明**:删除 fixture 的 `function_call_output` 后 pairing assertion 必红;
+  m39 分支完整 workspace gate 1,752 passed,合入后 release gate 1,729 passed。
 
 - [x] **M3-10 无统计:用户答不出"我到底有多少历史、来自哪里"** —— **已交付 `stats`(`5ddfb2c`)**
   `status` 只有四个计数器(`main.rs:4109-4114`)。
@@ -2649,7 +2657,7 @@ M2C-2/4/5 在 M5-5 转 public 之后立刻补上。
   删掉后 workspace 编译与测试全绿(这正是"确实无人可达"的证据);
   测试数 198 → 187,少掉的 11 条全是该模块自己的测试。
 
-- [x] **M3-14 handoff pack 的两个字段永远是空** —— **已修(merge `worktree-agent-a2f5cfd37e9528719`)**
+- [x] **M3-14 handoff pack 的两个字段永远是空** —— **已修(见对应 merge commit)**
   `provenance: None` 恒真(`handoff_pack.rs:236`),
   `inference: Vec::new()` 恒真(`:233`)。
   而 handoff-pack/v1 的卖点之一就是 **evidence/inference 分栏**。
