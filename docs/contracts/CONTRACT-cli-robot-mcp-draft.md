@@ -32,6 +32,11 @@ SessionId/MessageId/BranchId/CursorToken 为带类型和协议版本的 opaque �
 { max_response_bytes, max_items, max_snippet_chars, max_messages, max_evidence_spans }
 - max_response_bytes 是最终序列化字节硬门；排序后再截断；保留 envelope/error/generation；
 - 返回结构化 truncation{reason} + next_cursor；预算过小返回校验错误，不输出无效 JSON。
+- truncation.reason 词汇表：`max_items` / `max_response_bytes` / `max_messages` /
+  `max_evidence_spans` / `max_snippet_chars`。最后一条只由**显式请求**的
+  `search --context N` 行窗放不下时触发（M3-9）——默认 snippet 路径按定义就是
+  有界预览，被裁的一侧带 `…`，不报截断；而调用方点名一段区域时只给一部分，
+  是部分成功，走 partial/exit 10。
 
 ## 4. JSON Envelope
 
@@ -68,6 +73,7 @@ Exit Code(权威码表为 `schemas/robot/v1/error-catalog.json`,以该文件的 
 ## 8. MCP 契约
 
 tools: search_sessions / get_session_context / get_session_resume / get_message / list_sessions / generate_handoff / list_providers / get_status / doctor
+- `search_sessions` 的 `context`（M3-9，可选整数 ≥0）：命中 `text` 换成"命中行 ± N 整行"的连续区域，与 CLI `search --context N` 同一 Application 参数。高亮一律走 `match_ranges`（char 偏移），`text` 永不夹标记 —— §4「robot 只承载协议」对 MCP 同样成立。**这是既有工具的入参，不是第十个工具**：本节九个工具是冻结集合。这条与 `get_message` 的 `around` 是两个轴（行 vs 消息），互不替代。
 - `get_session_resume`（ADR-0009，只读 Resume Metadata）：入参 canonical `ses_v1_*`，返回固定可空字段（provider_id / provider_session_id / original_working_directory / resume_available / unavailable_reason）；绝不构造或执行 shell 命令、绝不返回 transcript/source path。
 - `list_sessions`：`sort` 取 `id`（默认，wire id 升序）或 `recency`（会话最近活动降序，回答「我最近干了什么」）。每条 entry 带 `latest_activity`（provider-native 时间戳字符串，逐字保留）；provider 没给时间戳的会话排在末尾且该字段为 `null`——不丢弃、不编造。CLI 侧的等价命令是 `list --sessions --sort recency`，Web 的 `/api/sessions` 展开为同一命令。
 - `generate_handoff`：为查询组装 deterministic handoff pack（handoff-pack/v1）——证据带权威 source locator、预算（max_evidence/max_tokens/max_bytes）真实裁剪、默认跨边界脱敏（ADR-0009）；截断如实报 outcome partial。

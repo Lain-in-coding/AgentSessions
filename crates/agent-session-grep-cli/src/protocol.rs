@@ -345,7 +345,7 @@ pub fn parse_output_mode(args: &[String]) -> Result<OutputMode, String> {
             "--db" | "--out" | "--request-id" | "--cursor" | "--max-items" | "--max-bytes"
             | "--max-messages" | "--max-evidence" | "--max-tokens" | "--policy" | "--level"
             | "--provider" | "--since" | "--until" | "--session" | "--around" | "--tool-kind"
-            | "--tool-name" => {
+            | "--tool-name" | "--context" => {
                 it.next();
             }
             _ => {}
@@ -1177,6 +1177,21 @@ mod tests {
             schema["$defs"]["searchHit"]["properties"]["resume_available"]["type"],
             "boolean"
         );
+        // M3-9 追加字段：match_ranges 是 char 偏移对，条数上限与 why_matched 同源
+        // （两者都由同一批查询词元派生）；context_lines 是行窗回显。
+        let match_ranges = &schema["$defs"]["searchHit"]["properties"]["match_ranges"];
+        assert_eq!(match_ranges["type"], "array");
+        assert_eq!(match_ranges["maxItems"], 8);
+        assert_eq!(match_ranges["items"]["minItems"], 2);
+        assert_eq!(match_ranges["items"]["maxItems"], 2);
+        assert_eq!(
+            schema["$defs"]["searchData"]["properties"]["context_lines"]["type"],
+            "integer"
+        );
+        assert_eq!(
+            schema["$defs"]["searchData"]["properties"]["context_lines"]["minimum"],
+            0
+        );
         // frame 词汇表：response/error/progress/diagnostic 四种，全部挂在顶层 oneOf。
         // 冻结断言：1.0 保持发布时原样。测试内不能跑 git，改为显式结构断言——
         // 1.0 的 searchHit 不得包含 v1.1 才引入的 occurrences/resume_available。
@@ -1197,6 +1212,16 @@ mod tests {
         assert!(
             frozen_hit.get("resume_available").is_none(),
             "1.0 must stay frozen: no resume_available"
+        );
+        assert!(
+            frozen_hit.get("match_ranges").is_none(),
+            "1.0 must stay frozen: no match_ranges"
+        );
+        assert!(
+            frozen["$defs"]["searchData"]["properties"]
+                .get("context_lines")
+                .is_none(),
+            "1.0 must stay frozen: no context_lines"
         );
         let one_of = schema["oneOf"]
             .as_array()

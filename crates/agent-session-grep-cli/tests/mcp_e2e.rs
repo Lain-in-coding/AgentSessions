@@ -1489,6 +1489,72 @@ fn mcp_search_hits_carry_why_matched_and_suggestions() {
     );
 }
 
+fn write_multiline_hit_fixture(dir: &Path) -> String {
+    let line = serde_json::json!({
+        "type": "user",
+        "uuid": "eeee5555-6666-4777-8888-99990000aaaa",
+        "sessionId": "fedc5432-1098-4dcb-8a98-bbccddeeff00",
+        "message": {
+            "role": "user",
+            "content": "line zero\nline one\nthe ctx needle sits here\nline three\nline four",
+        },
+    })
+    .to_string();
+    let fixture = dir.join("mcp-multiline.jsonl");
+    std::fs::write(&fixture, format!("{line}\n")).expect("write fixture");
+    fixture.to_string_lossy().into_owned()
+}
+
+#[test]
+fn search_sessions_context_argument_matches_the_cli_line_window() {
+    // M3-9：MCP 的行窗是既有 `search_sessions` 的一个入参（合同 §8 的九个工具
+    // 是冻结集合，不加第十个），语义与 CLI `search --context N` 完全一致：
+    // 连续的整行区域 + 单独承载的 char 偏移，`text` 里不夹任何标记。
+    let (dir, db) = temp_db("mcp-context-window");
+    let fixture_path = write_multiline_hit_fixture(dir.path());
+    let out = run_cli(&db, &["ingest", &fixture_path]);
+    assert!(out.status.success(), "ingest failed: {}", stdout(&out));
+
+    let frames = mcp_session(
+        &db,
+        &[
+            initialize_request(1, "2025-06-18"),
+            initialized_notification(),
+            tool_call(
+                2,
+                "search_sessions",
+                json!({ "query": "needle", "context": 1 }),
+            ),
+            tool_call(3, "search_sessions", json!({ "query": "needle" })),
+            tool_call(
+                4,
+                "search_sessions",
+                json!({ "query": "needle", "context": "one" }),
+            ),
+        ],
+    );
+
+    let windowed = &frame_by_id(&frames, 2)["result"]["structuredContent"]["data"];
+    assert_eq!(windowed["context_lines"], 1, "{windowed}");
+    let hit = &windowed["hits"][0];
+    let text = hit["text"].as_str().expect("hit text");
+    assert_eq!(text, "line one\nthe ctx needle sits here\nline three");
+    let ranges = hit["match_ranges"].as_array().expect("match_ranges");
+    let start = ranges[0][0].as_u64().expect("start") as usize;
+    let end = ranges[0][1].as_u64().expect("end") as usize;
+    let chars: Vec<char> = text.chars().collect();
+    assert_eq!(chars[start..end].iter().collect::<String>(), "needle");
+    assert!(!text.contains('\u{1b}'), "MCP 的 text 不得夹标记: {text:?}");
+
+    // 不给 context 时既不回显该键、也保持既有的字符窗口摘要。
+    let plain = &frame_by_id(&frames, 3)["result"]["structuredContent"]["data"];
+    assert!(plain.get("context_lines").is_none(), "{plain}");
+
+    // 非整数取值是协议层校验失败（-32602），不是静默忽略。
+    let error = &frame_by_id(&frames, 4)["error"];
+    assert_eq!(error["code"], -32602, "{error}");
+}
+
 fn write_long_hits_fixture(dir: &Path) -> (String, String) {
     let body_a = format!("widgets in the attic{}", "x".repeat(2000));
     let body_b = format!("widgets reply{}", "y".repeat(2000));
@@ -1654,6 +1720,9 @@ fn search_sessions_schema_publishes_provider_and_time_filters() {
     );
     assert_eq!(properties["since"]["type"], "string", "{search}");
     assert_eq!(properties["until"]["type"], "string", "{search}");
+    // M3-9 行窗必须在**已发布的** tool schema 里声明，而不是只在运行时接受。
+    assert_eq!(properties["context"]["type"], "integer", "{search}");
+    assert_eq!(properties["context"]["minimum"], 0, "{search}");
 }
 
 #[test]

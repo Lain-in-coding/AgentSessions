@@ -53,7 +53,11 @@ button:disabled { opacity: 0.42; cursor: not-allowed; }
 .hit:hover { border-color: var(--signal-dim); transform: translateX(3px); }
 .hit-head { display: flex; justify-content: space-between; gap: 16px; color: var(--muted); font: 0.74rem var(--mono); }
 .hit-score { color: var(--signal); }
-.hit-text { margin-top: 9px; color: var(--ink); line-height: 1.55; }
+.hit-text { margin-top: 9px; color: var(--ink); line-height: 1.55; white-space: pre-wrap; }
+/* Match emphasis for the server's match_ranges. A `--context n` hit is several
+   real lines, hence pre-wrap above: collapsing them would run the matched line
+   into its neighbours and destroy the thing the window was requested for. */
+.hit-text mark { background: none; color: var(--signal); font-weight: 600; }
 .hit-session { margin-top: 9px; color: var(--muted); font: 0.76rem var(--mono); }
 .empty { padding: 38px 16px; border: 1px dashed var(--line); color: var(--muted); text-align: center; }
 .actions { display: flex; flex-wrap: wrap; gap: 9px; margin-top: 16px; }
@@ -103,6 +107,7 @@ pre { max-height: 20rem; overflow: auto; padding: 13px; border: 1px solid var(--
     </div>
     <div class="filters">
       <label>Page size <input id="limit" type="number" value="20" min="1" max="100"></label>
+      <label>Context lines <input id="context" type="number" min="0" max="20" placeholder="off"></label>
       <label><input id="includeSystem" type="checkbox"> Include system messages</label>
       <label><input id="groupBySession" type="checkbox"> Group by session</label>
     </div>
@@ -145,6 +150,30 @@ function setStatus(text, kind) {
 }
 function clear(node) { node.replaceChildren(); }
 function text(node, value) { node.textContent = value == null ? '' : String(value); }
+// Match highlighting from the server's match_ranges (M3-9): the envelope carries
+// offsets, never markup, so the hit text stays verbatim transcript content and
+// this is the only place that decides how emphasis looks. Offsets are half-open
+// [start, end) in Unicode code points, so slice code points — JS string indices
+// are UTF-16 units and would cut an astral character in half. Every fragment is
+// a text node; nothing here builds markup from response data.
+function highlight(node, value, ranges) {
+  const source = value == null ? '' : String(value);
+  if (!Array.isArray(ranges) || !ranges.length) { text(node, source); return; }
+  const points = Array.from(source);
+  const fragments = [];
+  let cursor = 0;
+  for (const range of ranges) {
+    if (!Array.isArray(range) || range.length < 2) continue;
+    const start = Number(range[0]); const end = Number(range[1]);
+    if (!Number.isInteger(start) || !Number.isInteger(end)) continue;
+    if (start < cursor || end <= start || end > points.length) continue;
+    if (start > cursor) fragments.push(document.createTextNode(points.slice(cursor, start).join('')));
+    const mark = document.createElement('mark'); mark.textContent = points.slice(start, end).join(''); fragments.push(mark);
+    cursor = end;
+  }
+  if (cursor < points.length) fragments.push(document.createTextNode(points.slice(cursor).join('')));
+  node.replaceChildren(...fragments);
+}
 function button(label, className, onClick) {
   const node = document.createElement('button');
   node.type = 'button'; node.className = className || 'quiet'; node.textContent = label; node.addEventListener('click', onClick); return node;
@@ -185,6 +214,10 @@ function queryParams(cursor) {
   const params = new URLSearchParams({q: lastQuery, mode: document.getElementById('mode').value, limit: document.getElementById('limit').value});
   const provider = document.getElementById('provider').value;
   if (provider) params.set('provider', provider);
+  // Empty means "no window requested", which is not the same as 0 (the matched
+  // line alone), so an untouched field must not send a value at all.
+  const context = document.getElementById('context').value.trim();
+  if (context !== '') params.set('context', context);
   if (cursor) params.set('cursor', cursor);
   if (document.getElementById('includeSystem').checked) params.set('include_system', 'true');
   if (document.getElementById('groupBySession').checked) params.set('group_by_session', 'true');
@@ -241,7 +274,7 @@ function renderHits(hits, append) {
     const head = document.createElement('div'); head.className = 'hit-head';
     const id = document.createElement('span'); text(id, hit.id || 'unknown');
     const score = document.createElement('span'); score.className = 'hit-score'; text(score, Number(hit.score || 0).toFixed(3)); head.append(id, score);
-    const body = document.createElement('div'); body.className = 'hit-text'; text(body, hit.text || '');
+    const body = document.createElement('div'); body.className = 'hit-text'; highlight(body, hit.text || '', hit.match_ranges);
     card.append(head, body);
     if (hit.session_id) { const session = document.createElement('div'); session.className = 'hit-session'; text(session, 'session · ' + hit.session_id); card.appendChild(session); }
     results.appendChild(card);

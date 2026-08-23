@@ -384,6 +384,10 @@ fn render_search(data: &Value) -> Vec<String> {
             .lines()
             .map(str::to_string)
             .collect();
+        // `--context N` 的命中块接在表格之后（M3-9）：表格是归属面（日期 /
+        // provider / 项目 / canonical id，D26 要求每条结果说清来自哪里），命中块
+        // 是证据面。不给 flag 时这一段整个不出现，默认输出逐字节不变。
+        lines.extend(match_context_block(data));
         // 表格下方给出可直接执行的下一步命令（M2P-1）：Session ID 列是 canonical
         // `ses_v1_…`，这些命令用的是同一个 id，照抄即通。
         let commands = data
@@ -425,6 +429,7 @@ fn render_search(data: &Value) -> Vec<String> {
         hits.len(),
         number_text(data, "generation")
     )];
+    let context_lines = requested_context_lines(data);
     for (index, hit) in hits.iter().enumerate() {
         let id = hit
             .get("id")
@@ -437,6 +442,11 @@ fn render_search(data: &Value) -> Vec<String> {
             .map(|score| format!("{score:.2}"))
             .unwrap_or_else(|| "?".into());
         lines.push(format!("  {}. {id}  score {score}", index + 1));
+        // `--context N`：整个行窗代替单行预览。两者都印会把同一段正文说两遍。
+        if context_lines.is_some() {
+            lines.extend(hit_context_body(hit));
+            continue;
+        }
         // 正文预览：命中是否有用一瞥即知。取不到 preview 的命中不补行。
         // ADR-0008 后摘要统一由命中对象的 `text` 字段承载（application 装配，
         // 按 max_snippet_chars 截前缀）；`snippet` 是旧字段名，为兼容旧形状
@@ -452,6 +462,149 @@ fn render_search(data: &Value) -> Vec<String> {
         }
     }
     lines
+}
+
+/// 本次响应生效的行上下文窗口（`data.context_lines`，由 Application 回显）。
+///
+/// 缺键即未请求 —— human 渲染器不自己决定要不要行视图，它只投影 Application
+/// 说了什么，与 `facets` 的回显约定一致。
+fn requested_context_lines(data: &Value) -> Option<u64> {
+    data.get("context_lines").and_then(Value::as_u64)
+}
+
+/// `search --context N` 的命中块（M3-9）：接在会话表格之后，一条命中一段。
+///
+/// 表格回答"这条历史来自哪里"，命中块回答"命中长什么样、在哪一行"。未请求行
+/// 窗、或本页没有任何可展示正文时返回空 —— 不留一个空标题。
+fn match_context_block(data: &Value) -> Vec<String> {
+    let Some(context_lines) = requested_context_lines(data) else {
+        return Vec::new();
+    };
+    let hits = data
+        .get("hits")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let mut blocks: Vec<String> = Vec::new();
+    for (index, hit) in hits.iter().enumerate() {
+        let body = hit_context_body(hit);
+        if body.is_empty() {
+            continue;
+        }
+        let id = hit
+            .get("id")
+            .and_then(Value::as_str)
+            .map(sanitize)
+            .unwrap_or_else(|| "?".into());
+        let score = hit
+            .get("score")
+            .and_then(Value::as_f64)
+            .map(|score| format!("{score:.2}"))
+            .unwrap_or_else(|| "?".into());
+        let mut head = format!("  {}. {id}  score {score}", index + 1);
+        if let Some(session) = hit.get("session_id").and_then(Value::as_str) {
+            head.push_str(&format!("  session {}", sanitize(session)));
+        }
+        blocks.push(head);
+        blocks.extend(body);
+    }
+    if blocks.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = vec![String::new(), format!("Matches (context {context_lines}):")];
+    lines.append(&mut blocks);
+    lines
+}
+
+/// 一条命中的正文行（M3-9），grep 的行前缀约定：`>` 是命中行，`|` 是上下文行。
+///
+/// 命中行下面再补一行 `^` 指向 `match_ranges` 报出的每一段。三件事值得说清：
+///
+/// - **正文逐字打印，不插标记。** `^` 在**另一行**上，所以屏幕上看到的仍然是
+///   原始 transcript 字节；机器面拿到的是同一段文本加偏移，两面不会分叉。
+/// - **没有颜色。** 本模块的契约是无颜色输出（见模块头），所以高亮用 ASCII
+///   记号而不是 ANSI —— 管道、重定向、`NO_COLOR`、非 TTY 下表现完全一致，
+///   不需要探测终端，也就不存在探测错的可能。
+/// - **对齐假定不折行**，与会话表格同一政策（超宽交给终端换行）。CJK 按两列
+///   计宽（[`display_width`]），所以中文命中行的 `^` 也落在字上。
+fn hit_context_body(hit: &Value) -> Vec<String> {
+    let Some(text) = hit
+        .get("snippet")
+        .or_else(|| hit.get("text"))
+        .and_then(Value::as_str)
+    else {
+        return Vec::new();
+    };
+    if text.is_empty() {
+        return Vec::new();
+    }
+    let ranges = match_ranges_of(hit);
+    let mut lines = Vec::new();
+    // `match_ranges` 是整段 snippet 的 char 偏移；逐行换算成行内偏移。查询串在
+    // Application 边界就拒绝控制字符，所以词元不可能跨行，一段 range 只属于一行。
+    let mut consumed = 0usize;
+    for raw in text.split('\n') {
+        let width = raw.chars().count();
+        let inline: Vec<(usize, usize)> = ranges
+            .iter()
+            .filter_map(|(start, end)| {
+                let start = start.checked_sub(consumed)?;
+                (start < width).then(|| (start, (end - consumed).min(width)))
+            })
+            .filter(|(start, end)| end > start)
+            .collect();
+        let shown = preview(raw, usize::MAX);
+        lines.push(format!(
+            "     {} {shown}",
+            if inline.is_empty() { '|' } else { '>' }
+        ));
+        if let Some(carets) = caret_line(&shown, &inline) {
+            lines.push(carets);
+        }
+        consumed += width + 1; // +1：`split` 吃掉的那个换行符
+    }
+    lines
+}
+
+/// 命中对象上的 `match_ranges`（`[[start, end), …]`，char 偏移）。
+///
+/// 形状不合预期的条目直接丢弃而不是当成 0 —— 指错地方的记号比没有记号更糟。
+fn match_ranges_of(hit: &Value) -> Vec<(usize, usize)> {
+    hit.get("match_ranges")
+        .and_then(Value::as_array)
+        .map(|ranges| {
+            ranges
+                .iter()
+                .filter_map(|range| {
+                    let pair = range.as_array()?;
+                    let start = usize::try_from(pair.first()?.as_u64()?).ok()?;
+                    let end = usize::try_from(pair.get(1)?.as_u64()?).ok()?;
+                    (end > start).then_some((start, end))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// `^` 记号行，缩进与正文行的 `     > ` 前缀（7 列）对齐。
+fn caret_line(shown: &str, inline: &[(usize, usize)]) -> Option<String> {
+    if inline.is_empty() {
+        return None;
+    }
+    let chars: Vec<char> = shown.chars().collect();
+    let mut marks = String::new();
+    let mut cursor = 0usize;
+    for (start, end) in inline {
+        if *start < cursor || *end > chars.len() {
+            continue;
+        }
+        let gap: String = chars[cursor..*start].iter().collect();
+        marks.push_str(&" ".repeat(display_width(&gap)));
+        let span: String = chars[*start..*end].iter().collect();
+        marks.push_str(&"^".repeat(display_width(&span).max(1)));
+        cursor = *end;
+    }
+    (!marks.trim_end().is_empty()).then(|| format!("       {marks}"))
 }
 
 /// 解析 main.rs 附加的 `session_resume_rows`（human 专用投影）为表格行。
@@ -1697,6 +1850,153 @@ mod tests {
             lines,
             ["1 hit(s) (generation 3)", "  1. msg_v1_aaaa  score 2.00",]
         );
+    }
+
+    #[test]
+    fn context_window_marks_the_matched_line_and_points_at_the_match() {
+        // M3-9：`--context N` 下正文按行打印，`>` 标命中行、`|` 标上下文行，
+        // `^` 在**下一行**指向 match_ranges —— 正文本身逐字不动，没有标记插进去。
+        let data = json!({
+            "hits": [{
+                "id": "msg_v1_aaaa",
+                "score": 2.0,
+                "text": "line before\nthe needle is here\nline after",
+                "match_ranges": [[16, 22]],
+            }],
+            "generation": 3,
+            "context_lines": 1,
+            "truncation": { "truncated": false, "reason": null },
+        });
+        let lines = render_success("search", Outcome::Success, &data, &Page::default());
+        assert_eq!(
+            lines,
+            [
+                "1 hit(s) (generation 3)",
+                "  1. msg_v1_aaaa  score 2.00",
+                "     | line before",
+                "     > the needle is here",
+                "           ^^^^^^",
+                "     | line after",
+            ]
+        );
+        // 记号行不含任何 ANSI 转义：无颜色是本模块的契约，所以管道/非 TTY/
+        // NO_COLOR 下的字节完全一样，不需要探测终端。
+        assert!(lines.iter().all(|line| !line.contains('\u{1b}')));
+    }
+
+    #[test]
+    fn context_window_caret_follows_display_width_on_cjk() {
+        // CJK 按两列计宽，否则中文命中行的 `^` 会左移一半。
+        let data = json!({
+            "hits": [{
+                "id": "msg_v1_aaaa",
+                "score": 1.0,
+                "text": "前缀文字 找到 尾巴",
+                "match_ranges": [[5, 7]],
+            }],
+            "generation": 1,
+            "context_lines": 0,
+            "truncation": { "truncated": false, "reason": null },
+        });
+        let lines = render_success("search", Outcome::Success, &data, &Page::default());
+        assert_eq!(lines[2], "     > 前缀文字 找到 尾巴");
+        // 四个 CJK 字（8 列）+ 一个空格 = 9 列缩进，命中两字 = 4 个记号。
+        assert_eq!(
+            lines[3],
+            format!("       {}{}", " ".repeat(9), "^".repeat(4))
+        );
+    }
+
+    #[test]
+    fn search_without_context_window_keeps_the_single_preview_line() {
+        // 未请求行窗时输出逐字不变：既没有 `Matches:` 段，也没有行前缀，
+        // 即使命中带 match_ranges（高亮偏移默认就在）。
+        let data = json!({
+            "hits": [{
+                "id": "msg_v1_aaaa",
+                "score": 2.0,
+                "text": "the needle is here",
+                "match_ranges": [[4, 10]],
+            }],
+            "generation": 3,
+            "truncation": { "truncated": false, "reason": null },
+        });
+        let lines = render_success("search", Outcome::Success, &data, &Page::default());
+        assert_eq!(
+            lines,
+            [
+                "1 hit(s) (generation 3)",
+                "  1. msg_v1_aaaa  score 2.00",
+                "     the needle is here",
+            ]
+        );
+    }
+
+    #[test]
+    fn context_window_ignores_unusable_match_ranges_rather_than_misplacing_marks() {
+        // 形状不对/越界的 range 直接丢弃 —— 指错地方的记号比没有记号更糟。
+        let data = json!({
+            "hits": [{
+                "id": "msg_v1_aaaa",
+                "score": 1.0,
+                "text": "short line",
+                "match_ranges": [[900, 999], [3, 3], ["x", 2], [2]],
+            }],
+            "generation": 1,
+            "context_lines": 0,
+            "truncation": { "truncated": false, "reason": null },
+        });
+        let lines = render_success("search", Outcome::Success, &data, &Page::default());
+        assert_eq!(
+            lines,
+            [
+                "1 hit(s) (generation 1)",
+                "  1. msg_v1_aaaa  score 1.00",
+                "     | short line",
+            ]
+        );
+    }
+
+    #[test]
+    fn context_window_block_follows_the_session_table() {
+        // human search 的默认版式是会话表格（M2P-1）；行窗块接在表格之后，
+        // 表格继续承担"这条历史来自哪里"（D26），块承担"命中长什么样"。
+        let data = json!({
+            "hits": [{
+                "id": "msg_v1_aaaa",
+                "score": 2.0,
+                "session_id": "ses_v1_bbbb",
+                "text": "the needle is here",
+                "match_ranges": [[4, 10]],
+            }],
+            "generation": 3,
+            "context_lines": 0,
+            "session_resume_rows": [{
+                "date": "2026-07-26",
+                "provider": "claude-code",
+                "title": "the needle is here",
+                "working_directory": null,
+                "session_id": "ses_v1_bbbb",
+            }],
+            "truncation": { "truncated": false, "reason": null },
+        });
+        let lines = render_success("search", Outcome::Success, &data, &Page::default());
+        let table_rows = lines
+            .iter()
+            .position(|line| line.is_empty())
+            .expect("table is followed by a blank line before the match block");
+        assert!(
+            lines[..table_rows]
+                .iter()
+                .any(|line| line.contains("Session ID"))
+        );
+        assert_eq!(lines[table_rows + 1], "Matches (context 0):");
+        assert_eq!(
+            lines[table_rows + 2],
+            "  1. msg_v1_aaaa  score 2.00  session ses_v1_bbbb"
+        );
+        assert_eq!(lines[table_rows + 3], "     > the needle is here");
+        assert_eq!(lines[table_rows + 4], "           ^^^^^^");
     }
 
     #[test]

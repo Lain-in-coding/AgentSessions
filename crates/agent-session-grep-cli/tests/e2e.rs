@@ -5209,6 +5209,147 @@ fn write_session_hits_fixture(dir: &Path, long: bool) -> (String, String, String
     )
 }
 
+/// 一条多行正文的 claude-code fixture，用于 M3-9 的行窗用例。
+///
+/// 返回 `(fixture 路径, 消息 wire id, 正文)`。正文里只有第三行含命中词，所以
+/// "取到的窗口是不是正确的那几行"是可断言的性质，而不是肉眼看着像。
+fn write_multiline_body_fixture(dir: &Path, filler_line: &str) -> (String, String, String) {
+    let body =
+        format!("line zero\nline one\nthe {filler_line} needle sits here\nline three\nline four");
+    let line = serde_json::json!({
+        "type": "user",
+        "uuid": "cccc3333-4444-4555-8666-777788889999",
+        "sessionId": "dcba4321-8765-4cba-8fed-ffeeddccbbaa",
+        "message": { "role": "user", "content": body },
+    })
+    .to_string();
+    let fixture = dir.join("multiline-body.jsonl");
+    std::fs::write(&fixture, format!("{line}\n")).expect("write fixture");
+    (
+        fixture.to_string_lossy().into_owned(),
+        "msg_v1_cccc3333-4444-4555-8666-777788889999".into(),
+        body,
+    )
+}
+
+#[test]
+fn search_context_window_is_contiguous_and_carries_char_offsets() {
+    // M3-9：`--context N` 的窗口必须是正文的**连续**区域（逐字证据，不改写、
+    // 不拼接），而高亮以 `match_ranges` 的 char 偏移单独承载 —— `text` 里
+    // 永不出现标记（CONTRACT §4：robot 只承载协议）。
+    let (dir, db) = temp_db("context-window");
+    let (fixture_path, message_wire, body) = write_multiline_body_fixture(dir.path(), "quick");
+    let out = run(&db, &["ingest", &fixture_path]);
+    assert!(out.status.success(), "ingest failed: {}", stdout(&out));
+
+    let out = run(&db, &["search", "needle", "--context", "1"]);
+    assert!(out.status.success(), "search failed: {}", stdout(&out));
+    let frame = parse_first_line(&out);
+    assert_envelope_shape(&frame, true);
+    assert_eq!(
+        frame["outcome"], "success",
+        "窗口装得下就不报 partial: {frame}"
+    );
+    assert_eq!(
+        frame["data"]["context_lines"], 1,
+        "生效窗口必须回显: {frame}"
+    );
+    let hit = &frame["data"]["hits"][0];
+    assert_eq!(hit["id"], message_wire, "{frame}");
+
+    let text = hit["text"].as_str().expect("hit text");
+    assert_eq!(
+        text, "line one\nthe quick needle sits here\nline three",
+        "窗口必须是命中行 ± 1 整行"
+    );
+    assert!(body.contains(text), "窗口必须是正文的连续子串: {text:?}");
+
+    // 偏移落在 `text` 内，且指的就是命中词本身。
+    let ranges = hit["match_ranges"].as_array().expect("match_ranges");
+    assert_eq!(ranges.len(), 1, "{hit}");
+    let start = ranges[0][0].as_u64().expect("start") as usize;
+    let end = ranges[0][1].as_u64().expect("end") as usize;
+    let chars: Vec<char> = text.chars().collect();
+    assert!(end <= chars.len(), "偏移不得越过 text 末尾: {hit}");
+    assert_eq!(chars[start..end].iter().collect::<String>(), "needle");
+    // `text` 里没有任何标记：ANSI 转义、`<mark>`、`**` 都不该出现。
+    assert!(!text.contains('\u{1b}'), "{text:?}");
+    assert!(!text.contains("<mark"), "{text:?}");
+
+    // human 面把同一份事实画成 grep 版式：`>` 命中行、`|` 上下文行、`^` 指向命中。
+    let human = stdout(&run_human(&db, &["search", "needle", "--context", "1"]));
+    assert!(human.contains("Matches (context 1):"), "{human}");
+    assert!(human.contains("     | line one"), "{human}");
+    assert!(
+        human.contains("     > the quick needle sits here"),
+        "{human}"
+    );
+    assert!(human.contains("^^^^^^"), "{human}");
+    assert!(!human.contains('\u{1b}'), "human 版式无颜色: {human}");
+}
+
+#[test]
+fn search_context_window_over_budget_reports_partial_instead_of_trimming() {
+    // 预算装不下点名的行窗时：收窄到命中附近、如实报 truncation + exit 10。
+    // 默认 snippet 路径在同一预算下**不**报截断 —— 两者语义不同，见 CONTRACT §3。
+    // CLI 只暴露 items/bytes 两个预算旋钮，所以这里用一条超过默认
+    // `max_snippet_chars`（2000）的命中行来触发同一条路径。
+    let (dir, db) = temp_db("context-window-budget");
+    let filler = "z".repeat(2500);
+    let (fixture_path, _, body) = write_multiline_body_fixture(dir.path(), &filler);
+    let out = run(&db, &["ingest", &fixture_path]);
+    assert!(out.status.success(), "ingest failed: {}", stdout(&out));
+
+    let out = run(&db, &["search", "needle", "--context", "1"]);
+    assert_eq!(
+        out.status.code(),
+        Some(10),
+        "点名的行窗放不下时必须 exit 10（partial）: {}",
+        stdout(&out)
+    );
+    let frame = parse_first_line(&out);
+    assert_envelope_shape(&frame, true);
+    assert_eq!(frame["outcome"], "partial", "{frame}");
+    assert_eq!(frame["data"]["truncation"]["truncated"], true, "{frame}");
+    assert_eq!(
+        frame["data"]["truncation"]["reason"], "max_snippet_chars",
+        "截断原因必须点名是 snippet 字符预算: {frame}"
+    );
+    let text = frame["data"]["hits"][0]["text"].as_str().expect("hit text");
+    assert!(text.chars().count() <= 2000, "{}", text.chars().count());
+    assert!(text.contains("needle"), "收窄后命中仍须可见");
+    let core = text.trim_matches('…');
+    assert!(body.contains(core), "去标记后仍须是正文的连续子串");
+
+    // 同一条命中，不给 --context 时既不报截断也不 exit 10（既有行为不变）。
+    let out = run(&db, &["search", "needle"]);
+    assert!(out.status.success(), "{}", stdout(&out));
+    let frame = parse_first_line(&out);
+    assert_eq!(frame["data"]["truncation"]["truncated"], false, "{frame}");
+    assert!(
+        frame["data"].get("context_lines").is_none(),
+        "未请求行窗时不得回显该键（默认输出字节不变）: {frame}"
+    );
+}
+
+#[test]
+fn search_rejects_a_non_numeric_context_window() {
+    let (dir, db) = temp_db("context-window-usage");
+    let (fixture_path, _, _) = write_multiline_body_fixture(dir.path(), "quick");
+    assert!(run(&db, &["ingest", &fixture_path]).status.success());
+    let out = run(&db, &["search", "needle", "--context", "abc"]);
+    assert_eq!(out.status.code(), Some(2), "{}", stdout(&out));
+    let frame = parse_first_line(&out);
+    assert_envelope_shape(&frame, false);
+    assert_eq!(frame["error"]["code"], "invalid_request", "{frame}");
+    assert!(
+        frame["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("--context")),
+        "错误消息必须点名那个 flag: {frame}"
+    );
+}
+
 #[test]
 fn search_robot_hits_carry_session_id_and_text() {
     // R4/ADR-0008：robot 搜索命中携带 session_id（所属会话 wire id）与 text

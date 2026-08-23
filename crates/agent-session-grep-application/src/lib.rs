@@ -1120,23 +1120,19 @@ fn assemble_search_hit(
 
 /// Character offset of the earliest query-term occurrence, case-insensitively.
 ///
-/// `to_lowercase` can change byte length, so the search and the returned index
-/// are both in chars. `None` means no term is literally present — the hit came
-/// from a payload field other than `text`, or from CJK bigram tokenisation that
-/// does not align to a literal substring.
+/// `None` means no term is literally present — the hit came from a payload field
+/// other than `text`, or from CJK bigram tokenisation that does not align to a
+/// literal substring.
+///
+/// Derived from [`match_ranges_in`] rather than a second scan, so "where the
+/// window centres" and "where the highlight points" can never disagree. That
+/// also makes the offset a true char index into `text`: a case fold that maps one
+/// char to several (`İ` → `i̇`) used to shift every later offset, which for a line
+/// window could pick the neighbouring line.
 fn first_match_char(text: &str, query_terms: &[String]) -> Option<usize> {
-    let lower: Vec<char> = text.chars().flat_map(char::to_lowercase).collect();
-    let haystack: String = lower.iter().collect();
-    query_terms
-        .iter()
-        .filter(|term| !term.is_empty())
-        .filter_map(|term| {
-            let needle = term.to_lowercase();
-            haystack
-                .find(&needle)
-                .map(|byte| haystack[..byte].chars().count())
-        })
-        .min()
+    match_ranges_in(text, query_terms)
+        .first()
+        .map(|(start, _)| *start)
 }
 
 /// Highlight offsets for `snippet`: the earliest occurrence of each distinct
@@ -4096,6 +4092,182 @@ mod tests {
         assert!(s.chars().count() <= 20, "{s}");
         // 往返 UTF-8 校验：切点没有落在字符中间。
         assert_eq!(String::from_utf8(s.clone().into_bytes()).unwrap(), s);
+    }
+
+    #[test]
+    fn match_ranges_point_at_the_terms_inside_the_returned_snippet() {
+        // M3-9 高亮：偏移是**返回的 snippet** 的 char 偏移,不是原文的 ——
+        // 否则窗口一旦左裁(前面多一个 `…`)每个偏移都会错位。
+        let terms = vec!["needle".to_string(), "hay".to_string()];
+        let text = format!("{}hay needle tail", "a".repeat(300));
+        let snippet = snippet_around_match(&text, 40, &terms);
+        let chars: Vec<char> = snippet.chars().collect();
+        let ranges = match_ranges_in(&snippet, &terms);
+        assert!(!ranges.is_empty(), "{snippet:?}");
+        for (start, end) in &ranges {
+            let span: String = chars[*start..*end].iter().collect();
+            assert!(
+                span.eq_ignore_ascii_case("needle") || span.eq_ignore_ascii_case("hay"),
+                "range {start}..{end} points at {span:?} in {snippet:?}"
+            );
+        }
+        // 升序且互不重叠,消费者可以逐段套记号而不会把同一个字符包两次。
+        for pair in ranges.windows(2) {
+            assert!(
+                pair[0].1 <= pair[1].0,
+                "ranges must not overlap: {ranges:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn match_ranges_are_case_insensitive_char_offsets_and_empty_when_absent() {
+        // 大小写不敏感(与产生命中的 FTS 一致);CJK 前缀不得把偏移按字节算。
+        let upper = "prefix NEEDLE tail";
+        let ranges = match_ranges_in(upper, &["needle".to_string()]);
+        assert_eq!(ranges, vec![(7, 13)]);
+        let chars: Vec<char> = "中文中文NEEDLE".chars().collect();
+        let ranges = match_ranges_in("中文中文NEEDLE", &["needle".to_string()]);
+        assert_eq!(ranges, vec![(4, 10)], "偏移必须按字符计,不按字节");
+        assert_eq!(chars[4..10].iter().collect::<String>(), "NEEDLE");
+        // 定位不到就空,不给一个"可能在 0"的偏移。
+        assert!(match_ranges_in("no term here", &["needle".to_string()]).is_empty());
+        assert!(match_ranges_in("anything", &[String::new()]).is_empty());
+        assert!(match_ranges_in("anything", &[]).is_empty());
+    }
+
+    #[test]
+    fn match_offsets_survive_a_case_fold_that_lengthens_the_text() {
+        // `İ`(U+0130)的小写是两个 char。按折叠后的字符数报偏移会让它之后的
+        // 每个偏移都左移 —— 在行窗上这会挑错一行,所以定位与高亮共用同一套
+        // char 索引映射。
+        let text = "İ\nabc needle";
+        let ranges = match_ranges_in(text, &["needle".to_string()]);
+        let chars: Vec<char> = text.chars().collect();
+        assert_eq!(ranges.len(), 1, "{ranges:?}");
+        assert_eq!(
+            chars[ranges[0].0..ranges[0].1].iter().collect::<String>(),
+            "needle"
+        );
+        // 行窗必须挑中真正的命中行,而不是被折叠位移带到上一行。
+        let (window, _) = line_context_snippet(text, 2000, &["needle".to_string()], 0);
+        assert_eq!(window, "abc needle");
+    }
+
+    #[test]
+    fn line_context_window_is_a_contiguous_region_of_whole_lines() {
+        // 逐字证据：行窗必须是原文的**连续**区域,不是拼接出来的摘录。
+        let terms = vec!["needle".to_string()];
+        let text = "l0\nl1\nl2 needle here\nl3\nl4";
+        let (window, clipped) = line_context_snippet(text, 2000, &terms, 1);
+        assert!(!clipped);
+        assert_eq!(window, "l1\nl2 needle here\nl3");
+        assert!(text.contains(&window), "窗口必须是原文连续子串: {window:?}");
+
+        // N=0 → 只有命中行。
+        let (window, clipped) = line_context_snippet(text, 2000, &terms, 0);
+        assert!(!clipped);
+        assert_eq!(window, "l2 needle here");
+
+        // N 超出两端 → 收缩到文本边界,不越界也不补空行。
+        let (window, clipped) = line_context_snippet(text, 2000, &terms, 9);
+        assert!(!clipped);
+        assert_eq!(window, text);
+
+        // 命中在首行/末行 → 该侧无邻居可给,另一侧照常。
+        let (window, _) = line_context_snippet("needle\nb\nc", 2000, &terms, 1);
+        assert_eq!(window, "needle\nb");
+        let (window, _) = line_context_snippet("a\nb\nneedle", 2000, &terms, 1);
+        assert_eq!(window, "b\nneedle");
+    }
+
+    #[test]
+    fn line_context_window_reports_when_the_budget_narrows_it() {
+        // 预算装不下点名的区域时:窗口收窄到命中附近(命中仍可见)、返回 clipped,
+        // 由调用方报 partial —— 不静默裁掉。
+        let terms = vec!["needle".to_string()];
+        let long = format!("{}needle{}", "a".repeat(300), "b".repeat(300));
+        let text = format!("head\n{long}\ntail");
+        let (window, clipped) = line_context_snippet(&text, 40, &terms, 1);
+        assert!(clipped, "点名的行窗放不下时必须如实报告");
+        assert!(window.chars().count() <= 40, "{window:?}");
+        assert!(window.contains("needle"), "收窄后命中仍须可见: {window:?}");
+        // 去掉标记后仍是原文的连续子串（逐字证据,不改写、不拼接）。
+        let core = window.trim_matches('…');
+        assert!(text.contains(core), "{window:?}");
+
+        // 装得下就不报 —— clipped 不得变成"只要给了 --context 就报 partial"。
+        let (_, clipped) = line_context_snippet("a\nneedle\nb", 40, &terms, 1);
+        assert!(!clipped);
+    }
+
+    #[test]
+    fn line_context_window_falls_back_when_no_term_is_located() {
+        // 定位不到字面词就没有"命中行"可言(命中来自 text 之外的字段,或 CJK
+        // bigram 不对齐)。回落到既有的字符窗口,并且不谎报截断。
+        let text = "alpha\nbeta\ngamma";
+        let (window, clipped) = line_context_snippet(text, 2000, &["needle".to_string()], 1);
+        assert!(!clipped);
+        assert_eq!(window, snippet_around_match(text, 2000, &["needle".into()]));
+    }
+
+    #[test]
+    fn search_context_window_reports_partial_when_the_budget_narrows_it() {
+        // 端到端：`--context` 的裁剪必须变成响应级 truncation(前端据此报
+        // partial / exit 10),而默认 snippet 路径的裁剪不报。
+        let mut cat = MapCatalog::new(7);
+        let long = format!("{}needle{}", "a".repeat(300), "b".repeat(300));
+        cat.insert(
+            &hit_id("hit00"),
+            serde_json::json!({ "text": format!("head\n{long}\ntail") })
+                .to_string()
+                .into_bytes(),
+        );
+        let request = |context_lines| AppRequest::Search {
+            query: "needle".into(),
+            filters: SearchFilters::default(),
+            facets: SearchFacets::default(),
+            limit: 10,
+            cursor: None,
+            budget: ResponseBudget {
+                max_snippet_chars: 40,
+                ..Default::default()
+            },
+            include_system: false,
+            group_by_session: false,
+            mode: RetrievalMode::Lexical,
+            query_embedding: None,
+            context_lines,
+        };
+        let app = App::with_clock(cat, PagedIndex { n: 1 }, clock_t0);
+        let AppResponse::Search {
+            truncation,
+            hits,
+            context_lines,
+            ..
+        } = app.handle(request(Some(1))).unwrap()
+        else {
+            panic!("expected Search response");
+        };
+        assert!(truncation.truncated);
+        assert_eq!(
+            truncation.reason.as_deref(),
+            Some(budget::TRUNCATION_MAX_SNIPPET_CHARS)
+        );
+        assert_eq!(context_lines, Some(1), "生效窗口必须回显给每个入口");
+        assert!(!hits[0].match_ranges.is_empty(), "收窄后仍要给出高亮偏移");
+
+        // 同一预算、同一正文,不给 --context 时不得报截断（既有行为不变）。
+        let AppResponse::Search {
+            truncation,
+            context_lines,
+            ..
+        } = app.handle(request(None)).unwrap()
+        else {
+            panic!("expected Search response");
+        };
+        assert!(!truncation.truncated, "默认 snippet 路径不报截断");
+        assert_eq!(context_lines, None);
     }
 
     #[test]

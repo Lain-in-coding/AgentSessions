@@ -14,6 +14,20 @@ creates the corresponding tag and Release.
 
 ### Added
 
+- `search --context <n>` — the matched line plus n whole lines on each side, as
+  one contiguous region of the message body (grep's `-C n`). Human output marks
+  the matched line with `>`, context lines with `|`, and points `^` at each
+  match; machine output instead carries `match_ranges`, half-open `[start, end)`
+  offsets in Unicode chars into the hit's `text`, so the evidence itself is never
+  marked up. Highlight offsets are present by default; only the line window needs
+  the flag. A window that does not fit `max_snippet_chars` is narrowed around the
+  match and reported as `outcome: partial` with truncation reason
+  `max_snippet_chars` and exit 10, never trimmed in silence. Redaction drops the
+  offsets for any hit whose text it rewrote, because offsets into a rewritten
+  string point at the wrong place. Available on CLI, Robot JSON, MCP
+  (`search_sessions.context` — an argument on the existing tool, not a tenth
+  tool) and the Web UI. These are neighbouring *lines* of one message;
+  `get-message --around <n>` remains the way to get neighbouring *messages*.
 - 16-provider capability matrix (`agent-session-grep-ports`) with deferred
   provider rows (`deepseek-harness`, `zcode`) and per-provider maturity grading.
 - Provider adapters for the 14 implemented, Experimental providers:

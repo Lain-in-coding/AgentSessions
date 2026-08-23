@@ -977,6 +977,20 @@ fn tool_catalog() -> Value {
                             require the vector index (`index embeddings`); when it is \
                             not ready the response honestly reports \
                             retrieval_mode=lexical_fallback with a warning."
+                    },
+                    "context": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "Match context, like grep -C n: make each hit's text \
+                            the matched line plus n whole lines on each side, as one \
+                            contiguous region of the message body. Omitted keeps the \
+                            match-centred character window. A window that does not fit the \
+                            snippet budget is narrowed around the match and reported as \
+                            outcome=partial rather than trimmed in silence. Highlighting \
+                            always travels as match_ranges (char offsets into text); the \
+                            text itself is never marked up. These are neighbouring *lines* \
+                            of one message — for neighbouring *messages*, use get_message \
+                            with around."
                     }
                 },
                 "required": ["query"],

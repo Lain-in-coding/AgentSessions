@@ -248,7 +248,8 @@ fn extract_offline_flag(args: &[String]) -> bool {
         match a.as_str() {
             "--db" | "--out" | "--output" | "--request-id" | "--cursor" | "--max-items"
             | "--max-bytes" | "--max-messages" | "--policy" | "--level" | "--provider"
-            | "--since" | "--until" | "--session" | "--around" | "--tool-kind" | "--tool-name" => {
+            | "--since" | "--until" | "--session" | "--around" | "--tool-kind" | "--tool-name"
+            | "--context" => {
                 it.next();
             }
             _ => {}
@@ -294,7 +295,7 @@ fn extract_request_id(args: &[String]) -> Result<Option<String>, String> {
             "--db" | "--out" | "--output" | "--cursor" | "--max-items" | "--max-bytes"
             | "--max-messages" | "--max-evidence" | "--max-tokens" | "--policy" | "--level"
             | "--provider" | "--since" | "--until" | "--session" | "--around" | "--tool-kind"
-            | "--tool-name" => {
+            | "--tool-name" | "--context" => {
                 it.next();
             }
             _ => {}
@@ -316,7 +317,7 @@ fn command_name(args: &[String]) -> String {
             "--db" | "--out" | "--output" | "--cursor" | "--max-items" | "--max-bytes"
             | "--max-messages" | "--max-evidence" | "--max-tokens" | "--policy" | "--level"
             | "--request-id" | "--provider" | "--since" | "--until" | "--session" | "--around"
-            | "--tool-kind" | "--tool-name" => {
+            | "--tool-kind" | "--tool-name" | "--context" => {
                 it.next(); // 消费其取值
             }
             "--robot" | "--no-color" | "--help" | "-h" | "--version" | "-V" | "--discover"
@@ -387,7 +388,7 @@ fn intercept_help_or_version(args: &[String]) -> Option<HelpRequest> {
             "--db" | "--out" | "--output" | "--request-id" | "--cursor" | "--max-items"
             | "--max-bytes" | "--max-messages" | "--max-evidence" | "--max-tokens" | "--policy"
             | "--level" | "--provider" | "--since" | "--until" | "--session" | "--around"
-            | "--tool-kind" | "--tool-name" => {
+            | "--tool-kind" | "--tool-name" | "--context" => {
                 it.next();
             }
             _ => {}
@@ -1142,6 +1143,17 @@ FACETS (search; structured filters, nothing filtered by default, output unchange
     --include-sidechain    include sidechains explicitly (the default; not for use with the two above)
     --tool-kind <kind>     keep only messages that made a file|command|web|query|unknown tool call
     --tool-name <name>     keep only messages that used this tool (exact match)
+
+MATCH CONTEXT (search):
+    --context <n>          show the matched line plus n whole lines on each side, like grep -C n.
+                           The window is one contiguous region of the message body; a `>` marks the
+                           matched line, `|` a context line, and `^` under it points at each match.
+                           A window that does not fit the snippet budget is narrowed around the
+                           match and reported as partial (exit 10) rather than trimmed in silence.
+                           Machine modes carry `match_ranges` (char offsets into `text`) instead:
+                           the text itself is never marked up.
+                           Neighbouring *lines* of one message — for neighbouring *messages*, see
+                           `get-message --around <n>`.
 
 GET MESSAGE:
     --session <ses-id>     owning session of a shared message; required when ambiguous
@@ -2239,6 +2251,7 @@ fn is_known_flag_name(token: &str) -> bool {
             | "--include-sidechain"
             | "--tool-kind"
             | "--tool-name"
+            | "--context"
             | "--yes"
             | "--before"
             | "--project"
@@ -2297,7 +2310,7 @@ fn extract_db_flag_impl(args: &[String], prefix_only: bool) -> Result<Option<Str
             "--out" | "--output" | "--request-id" | "--cursor" | "--max-items" | "--max-bytes"
             | "--max-messages" | "--max-evidence" | "--max-tokens" | "--policy" | "--level"
             | "--provider" | "--since" | "--until" | "--session" | "--around" | "--tool-kind"
-            | "--tool-name" => {
+            | "--tool-name" | "--context" => {
                 it.next();
             }
             _ => {}
@@ -2343,7 +2356,7 @@ fn extract_out_flag(args: &[String]) -> Result<protocol::PayloadSink, CliError> 
             "--db" | "--output" | "--request-id" | "--cursor" | "--max-items" | "--max-bytes"
             | "--max-messages" | "--max-evidence" | "--max-tokens" | "--policy" | "--level"
             | "--provider" | "--since" | "--until" | "--session" | "--around" | "--tool-kind"
-            | "--tool-name" => {
+            | "--tool-name" | "--context" => {
                 it.next();
             }
             _ => {}
@@ -2555,7 +2568,7 @@ fn bare_positionals(args: &[String]) -> Vec<String> {
             "--db" | "--out" | "--output" | "--request-id" | "--cursor" | "--max-items"
             | "--max-bytes" | "--max-messages" | "--max-evidence" | "--max-tokens" | "--policy"
             | "--level" | "--provider" | "--since" | "--until" | "--session" | "--around"
-            | "--tool-kind" | "--tool-name" => {
+            | "--tool-kind" | "--tool-name" | "--context" => {
                 it.next(); // 消费其取值
             }
             "--robot" | "--no-color" | "--help" | "-h" | "--version" | "-V" | "--discover"

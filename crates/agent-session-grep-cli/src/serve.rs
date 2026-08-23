@@ -797,6 +797,9 @@ fn request_args(req: &HttpRequest) -> Result<Vec<String>, HttpResponse> {
             append_value_flag(&mut args, "--provider", value("provider"));
             append_value_flag(&mut args, "--since", value("since"));
             append_value_flag(&mut args, "--until", value("until"));
+            // M3-9 行上下文窗口：与 CLI `search --context N` 逐字同一个 flag，
+            // Web 不另起一套语义（取值校验也因此落在同一处）。
+            append_value_flag(&mut args, "--context", value("context"));
             if value("include_system").as_deref() == Some("true") {
                 args.push("--include-system".to_string());
             }
@@ -1270,7 +1273,12 @@ mod tests {
     fn embedded_ui_is_offline_and_uses_safe_dom_projection() {
         assert!(!WEB_UI_HTML.contains("http://"));
         assert!(!WEB_UI_HTML.contains("https://"));
+        // Response data reaches the DOM only as text nodes and element children.
+        // The M3-9 highlight path builds <mark> elements from `match_ranges`, so
+        // the markup-from-data escape hatches stay closed by assertion.
         assert!(!WEB_UI_HTML.contains("innerHTML"));
+        assert!(!WEB_UI_HTML.contains("outerHTML"));
+        assert!(!WEB_UI_HTML.contains("insertAdjacentHTML"));
         for endpoint in [
             "/health",
             "/api/providers",
@@ -1306,6 +1314,23 @@ mod tests {
                 "tok"
             ]
         );
+    }
+
+    #[test]
+    fn search_route_passes_the_context_window_to_the_cli_flag() {
+        // M3-9：`?context=` 展开成 CLI 的 `--context`，所以取值校验（非整数 →
+        // invalid_request）只有一处实现，Web 不另起一套。
+        let request = authorized("GET", "/api/search?q=needle&context=2");
+        let Ok(args) = request_args(&request) else {
+            panic!("/api/search must map to CLI args");
+        };
+        assert_eq!(args, vec!["search", "needle", "--context", "2"]);
+        // 空取值等于"没请求行窗"，不得变成 `--context ` 这种空参数。
+        let request = authorized("GET", "/api/search?q=needle&context=");
+        let Ok(args) = request_args(&request) else {
+            panic!("/api/search must map to CLI args");
+        };
+        assert_eq!(args, vec!["search", "needle"]);
     }
 
     #[test]

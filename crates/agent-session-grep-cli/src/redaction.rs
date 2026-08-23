@@ -61,6 +61,13 @@ fn redact_value_inner(value: serde_json::Value, count: &mut u64) -> serde_json::
                 .collect(),
         ),
         serde_json::Value::Object(map) => {
+            // `match_ranges` 是 `text` 的字符偏移（M3-9）。脱敏会把命中的 span
+            // 换成长度不同的标记、或整串换成一个标记，偏移随即失效 —— 指错位置
+            // 的高亮比没有高亮更糟，所以 `text` 一旦被改写就连同偏移一起丢掉。
+            let text_before = map
+                .get("text")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string);
             let mut new_map = serde_json::Map::with_capacity(map.len());
             for (key, val) in map {
                 // Redact values; also check if the key itself signals a secret
@@ -71,6 +78,10 @@ fn redact_value_inner(value: serde_json::Value, count: &mut u64) -> serde_json::
                     redact_value_inner(val, count)
                 };
                 new_map.insert(key, redacted_val);
+            }
+            let text_after = new_map.get("text").and_then(serde_json::Value::as_str);
+            if text_before.is_some() && text_before.as_deref() != text_after {
+                new_map.remove("match_ranges");
             }
             serde_json::Value::Object(new_map)
         }
@@ -279,6 +290,30 @@ mod tests {
         assert_eq!(redacted["hits"][0]["text"], "[redacted:api_key]");
         assert_eq!(redacted["hits"][1]["text"], "normal message");
         assert_eq!(status.redacted_count, 1);
+    }
+
+    #[test]
+    fn rewriting_text_drops_its_match_ranges_but_keeps_untouched_ones() {
+        // M3-9：`match_ranges` 是 `text` 的字符偏移。脱敏把命中 span 换成长度
+        // 不同的标记，偏移随即指向别处 —— 指错地方的高亮比没有高亮更糟，所以
+        // `text` 被改写的那条命中连偏移一起丢掉，没被改写的原样保留。
+        let val = serde_json::json!({
+            "hits": [
+                {"text": "leaked sk-ant-api03-1234567890abcdef here", "match_ranges": [[7, 13]]},
+                {"text": "clean needle here", "match_ranges": [[6, 12]]}
+            ]
+        });
+        let (redacted, status) = redact_value(val);
+        assert_eq!(status.status, RedactionState::Applied);
+        assert!(
+            redacted["hits"][0].get("match_ranges").is_none(),
+            "改写过的 text 不得再带偏移: {}",
+            redacted["hits"][0]
+        );
+        assert_eq!(
+            redacted["hits"][1]["match_ranges"],
+            serde_json::json!([[6, 12]])
+        );
     }
 
     #[test]

@@ -39,6 +39,17 @@
         "resume_available": {
           "type": "boolean",
           "description": "Whether Resume Metadata is available for the hit's session (ADR-0009). false only means no resumable provider metadata exists; the history stays searchable."
+        },
+        "match_ranges": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": { "type": "integer", "minimum": 0 },
+            "minItems": 2,
+            "maxItems": 2
+          },
+          "maxItems": 8,
+          "description": "Where each matched term sits inside text, as half-open [start, end) offsets in Unicode chars (the same unit as max_snippet_chars — not bytes, not UTF-16 units). Highlight metadata kept separate from the evidence: text is always verbatim transcript content and never carries ANSI escapes or markup. One merged range per distinct matched term, so the list is bounded by the same cap as why_matched. Omitted when no term could be located literally, and dropped entirely when redaction rewrote text, because offsets into a rewritten string point at the wrong place."
         }
       }
     },
@@ -62,7 +73,12 @@
         },
         "generation": { "type": "integer", "minimum": 0 },
         "truncation": { "$ref": "#/$defs/truncation" },
-        "facets": { "$ref": "#/$defs/searchFacets" }
+        "facets": { "$ref": "#/$defs/searchFacets" },
+        "context_lines": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "The line context window applied to every hit's text, echoed as requested (grep's -C n). Omitted entirely when no window was requested, so default output bytes are unchanged. Present means each text is the matched line plus this many whole lines on each side, taken as one contiguous region of the message body."
+        }
       }
     },
     "searchFacets": {

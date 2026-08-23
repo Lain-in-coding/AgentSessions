@@ -105,6 +105,46 @@ summary, and `suggested_next_commands`.
 | `--include-sidechain` | — | on | Explicitly request the default. Conflicts with `--main-only` and with `--subagent-only`. **Not mentioned in `search --help`.** |
 | `--tool-kind <kind>` | `file` \| `command` \| `web` \| `query` \| `unknown` | — | Keep only messages carrying a tool activity of this kind. |
 | `--tool-name <name>` | string | — | Keep only messages carrying a tool activity with this exact name (byte equality). |
+| `--context <n>` | integer | — | The matched line plus n whole lines on each side, like `grep -C n`. See below. |
+
+#### Match context and highlighting
+
+`--context <n>` replaces the match-centred character snippet with a **line**
+window: the line the match sits on, plus `n` whole lines before and after. The
+window is one contiguous region of the message body — nothing is reordered or
+stitched together — so what you read is still verbatim transcript content.
+
+Human output prefixes the matched line with `>`, context lines with `|`, and
+adds a `^` row beneath the matched line pointing at each match. The markers sit
+on their own row rather than inside the text, and they are ASCII rather than
+colour, so piping, redirecting, `NO_COLOR` and a non-TTY all produce identical
+bytes — there is no terminal to detect and therefore nothing to detect wrongly.
+
+Machine modes never receive markers. They get `match_ranges` on each hit:
+half-open `[start, end)` offsets **in Unicode chars** (the same unit as
+`max_snippet_chars`, not bytes and not UTF-16 units) into that hit's `text`. One
+merged range per distinct matched term, bounded by the same cap as `why_matched`.
+The key is omitted when no term could be located literally — a payload matched
+through a field other than `text`, or CJK bigram tokenisation that does not align
+to a substring — and it is dropped entirely for any hit whose `text` redaction
+rewrote, since offsets into a rewritten string point at the wrong place.
+Highlight offsets need no flag; only the line window does.
+
+If the requested window does not fit `max_snippet_chars`, it is narrowed around
+the match and the response reports `truncation.reason = "max_snippet_chars"`,
+`outcome: partial` and **exit 10**. The default snippet path reports nothing,
+because `max_snippet_chars` defines it as a bounded preview whose cut side is
+marked with `…`; `--context n` is a caller naming a region, so handing back only
+part of it is a partial result.
+
+`data.context_lines` echoes the window that was applied, and is omitted when no
+window was requested, so default output bytes are unchanged.
+
+The same window is available as `context` on the MCP `search_sessions` tool (an
+argument on the existing tool — the MCP surface stays at nine tools) and as
+`?context=n` on `/api/search`, where the Web UI renders the offsets as `<mark>`
+emphasis. This is a window over neighbouring **lines of one message**; for
+neighbouring **messages** in a session, use `get-message --around <n>`.
 
 Accepted `--provider` values are derived from the capability matrix, not
 hard-coded. As of this build:
