@@ -302,7 +302,7 @@ when nothing changed. Sources are opened read-only.
 
 | Form / flag | Meaning |
 | --- | --- |
-| `sync <file>...` | Explicit paths. Directories are rejected. |
+| `sync <path>...` | Explicit files or directories. A directory is expanded recursively; each candidate is accepted only when a provider probe claims it. |
 | `sync --from-file <list>` | Read paths from a manifest, one per line; blank lines and `#` comments are ignored. Use this when several thousand paths would blow past the command-line length limit. Mutually exclusive with `--discover`; extra positional paths are rejected; an empty manifest is a usage error. |
 | `sync --discover` | Walk each provider's data root and sync what it finds. Accepts no paths and no other flags. Mutually exclusive with `--from-file` and with `--provider`. |
 | `sync --provider <id> <file>...` | Name the provider explicitly to break a tie. Needed when two adapters' on-disk formats are the same shape (for example `pi` and `openclaw`), where content probing can only report a tie and refuses to guess. |

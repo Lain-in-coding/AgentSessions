@@ -76,6 +76,11 @@ EXCLUDED_FILES = (
     "docs/release/go-no-go.template.md",
     "docs/operations/PUBLIC-HISTORY-SCRUB.md",
     "docs/architecture/R0-ARCHITECTURE-REVIEW.md",
+    # Repository-private agent instructions and domain/process notes. These are
+    # tracked for the development checkout but are not product documentation.
+    "AGENTS.md",
+    "CLAUDE.md",
+    "CONTEXT.md",
 )
 # Individually-dated internal records: any `docs/release/go-no-go.<date>.md`.
 EXCLUDED_FILE_PREFIXES = ("docs/release/go-no-go.2",)

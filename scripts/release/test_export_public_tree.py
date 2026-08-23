@@ -35,6 +35,9 @@ class PublicTreeExportTests(unittest.TestCase):
                 "scripts/evidence/out/report.json",
                 "spikes/probe/EVIDENCE.md",
                 "src/lib.rs",
+                "AGENTS.md",
+                "CLAUDE.md",
+                "CONTEXT.md",
             ]:
                 path = repo / relative
                 path.parent.mkdir(parents=True, exist_ok=True)

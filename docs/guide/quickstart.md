@@ -219,7 +219,8 @@ asg sync --provider pi path/to/session.jsonl
 
 Use `--from-file` once you have more than a few hundred paths; a shell glob
 that expands to thousands of arguments will hit the command-line length limit.
-`sync` does not accept directories — only files, or `--discover`.
+A `sync` path may also be a directory: it is expanded recursively and each
+candidate is accepted only when a provider probe claims it.
 
 Two constraints worth knowing: a transcript file should contain exactly one
 session (if several `sessionId`s are found, everything is attributed to the
@@ -236,16 +237,18 @@ interrupted_batches: 0
 offline: false
 orphaned_activity_memberships: 0
 orphaned_tool_activities: 0
-schema: 12
+schema: 13
 semantic_feature: null
 tool: agent-session-grep-cli
 tool_activity_storage: true
 version: 0.1.0
 ```
 
-`doctor` validates the store and reports the schema version only when you pass
-`--db <path>` explicitly. Without it you get an environment-only check with
-`db: not-checked`, even if `$ASG_DB` is set.
+`doctor` resolves the store using `--db <path>` > `$ASG_DB` > the platform
+default. If the resolved store exists, it validates that store and reports its
+schema; if no store exists yet, it reports `db: not-checked` / `schema: null`
+and gives the `sync --discover` command that will create it. It never creates a
+store during a read-only check.
 
 ## Where to go next
 

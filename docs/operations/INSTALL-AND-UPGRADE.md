@@ -99,7 +99,12 @@ agent-session-grep doctor
 agent-session-grep --robot config paths
 ```
 
-`doctor` without `--db` checks only the environment: it reports the tool name and version, plus `db: not-checked` / `schema: null`, and prints an actionable hint pointing at `doctor --db <path>`. Only the db/schema validation is skipped; no data root is touched. To also check that a store opens, pass a path:
+`doctor` resolves the store in the same order as other read commands:
+`--db <path>` > `$ASG_DB` > the platform default. If the resolved store
+already exists, it opens it read-only and reports its schema and health; if no
+store exists yet, it reports `db: not-checked` / `schema: null` and tells you to
+run `sync --discover`. It never creates a store. To check a specific store,
+pass its path explicitly:
 
 ```
 agent-session-grep --robot doctor --db C:/data/example.db
