@@ -7049,7 +7049,10 @@ mod tests {
     fn path_attribution_resolves_registered_roots_on_both_platforms() {
         for windows in [true, false] {
             assert_eq!(
-                provider_hint_from_path_on("/workspace/fixture-home/.pi/agent/sessions/s.jsonl", windows),
+                provider_hint_from_path_on(
+                    "/workspace/fixture-home/.pi/agent/sessions/s.jsonl",
+                    windows
+                ),
                 Some("pi"),
                 "windows={windows}"
             );
@@ -7070,7 +7073,10 @@ mod tests {
         }
         // Windows 分隔符与盘符大小写都归一（与 source_path_identity 同一规则）。
         assert_eq!(
-            provider_hint_from_path_on(r"C:\placeholder\fixture-home\.pi\agent\sessions\s.jsonl", true),
+            provider_hint_from_path_on(
+                r"C:\placeholder\fixture-home\.pi\agent\sessions\s.jsonl",
+                true
+            ),
             Some("pi")
         );
     }
