@@ -8611,15 +8611,16 @@ fn push_project_term_match(
         if index > 0 {
             sql.push_str(" OR ");
         }
-        sql.push_str(&format!(
-            "({path} = ? OR (substr({path}, 1, length(?) + 1) = ? || '/')"
-        ));
-        params.push(Box::new(project.clone()));
-        params.push(Box::new(project.clone()));
-        params.push(Box::new(project.clone()));
-        if !project.contains('/') {
+        if project.contains('/') {
             sql.push_str(&format!(
-                " OR (substr({path}, -length(?)) = ? AND
+                "({path} = ? OR (substr({path}, 1, length(?) + 1) = ? || '/'))"
+            ));
+            params.push(Box::new(project.clone()));
+            params.push(Box::new(project.clone()));
+            params.push(Box::new(project.clone()));
+        } else {
+            sql.push_str(&format!(
+                "(substr({path}, -length(?)) = ? AND
                  (length({path}) = length(?) OR
                   substr({path}, length({path}) - length(?), 1) = '/'))"
             ));
@@ -8628,7 +8629,6 @@ fn push_project_term_match(
             params.push(Box::new(project.clone()));
             params.push(Box::new(project.clone()));
         }
-        sql.push(')');
     }
     sql.push(')');
 }
