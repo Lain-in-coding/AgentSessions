@@ -81,10 +81,24 @@ fn redact_value_inner(value: serde_json::Value, count: &mut u64) -> serde_json::
 /// When the key name signals a secret, replace the entire value with a
 /// redaction marker (even if the value is non-string, e.g. a number or null).
 /// Empty strings and null are left as-is (no secret to leak).
+///
+/// For non-empty string values, first try the value-pattern engine: if the
+/// value matches a known secret shape, keep its specific marker (e.g.
+/// `[redacted:api_key]`) so the audit type is preserved. Only fall back to the
+/// generic `[redacted]` when the key name is the sole signal.
 fn redact_secret_value(value: serde_json::Value, count: &mut u64) -> serde_json::Value {
     match &value {
         serde_json::Value::String(s) if s.is_empty() => value,
         serde_json::Value::Null => value,
+        serde_json::Value::String(s) => {
+            if let Some(redacted) = agent_session_grep_ports::redact::redact_string(s) {
+                *count += 1;
+                serde_json::Value::String(redacted)
+            } else {
+                *count += 1;
+                serde_json::Value::String("[redacted]".into())
+            }
+        }
         _ => {
             *count += 1;
             serde_json::Value::String("[redacted]".into())
@@ -112,7 +126,22 @@ fn is_secret_key(key: &str) -> bool {
         "authorization",
         "bearer",
     ];
-    SECRET_KEY_FRAGMENTS.iter().any(|frag| lower.contains(frag))
+    if SECRET_KEY_FRAGMENTS.iter().any(|frag| lower.contains(frag)) {
+        return true;
+    }
+    // Bare "...key" / "key..." names (e.g. STRIPE_RESTRICTED_KEY, signing_key,
+    // encryption_key) carry secrets often enough to redact — but only when the
+    // name is not explicitly public. Public-key-like fields are excluded so a
+    // genuine public key is not silently blanked.
+    const PUBLIC_KEY_HINTS: &[&str] = &[
+        "public", "primary", "foreign", "unique", "count", "index", "name", "sort",
+    ];
+    let has_key = lower.ends_with("_key")
+        || lower.starts_with("key_")
+        || lower == "key"
+        || lower.contains("_key_")
+        || lower.contains("-key-");
+    has_key && !PUBLIC_KEY_HINTS.iter().any(|hint| lower.contains(hint))
 }
 
 /// Redact a plain string (non-JSON) for warning/error channels.
@@ -174,7 +203,10 @@ mod tests {
     fn redacts_github_pat() {
         let val = serde_json::json!({"token": "ghp_1234567890abcdefghijklmnopqrstuvwxyz"});
         let (redacted, status) = redact_value(val);
-        assert_eq!(redacted["token"], "[redacted]");
+        // Key name "token" signals a secret; the value also matches the GitHub
+        // PAT shape, so the specific marker is preserved rather than the bare
+        // [redacted] fallback.
+        assert_eq!(redacted["token"], "[redacted:github_token]");
         assert_eq!(status.redacted_count, 1);
     }
 
@@ -300,5 +332,59 @@ mod tests {
         let (redacted, status) = redact_value(val);
         assert_eq!(redacted["api_key"], "");
         assert_eq!(status.redacted_count, 0);
+    }
+
+    #[test]
+    fn redacts_bare_secret_key_named_value() {
+        // A secret-shaped value under a non-"secret/token" key name is still
+        // caught by the value pattern (H1 fix — Slack/Stripe/etc. prefixes).
+        let val = serde_json::json!({"STRIPE_RESTRICTED_KEY": "rk_live_abcdef1234567890xyz"});
+        let (redacted, status) = redact_value(val);
+        assert_eq!(redacted["STRIPE_RESTRICTED_KEY"], "[redacted:stripe_key]");
+        assert_eq!(status.redacted_count, 1);
+    }
+
+    #[test]
+    fn redacts_non_secret_named_bare_key_value() {
+        // A bare "key"-named field whose value does not match any value
+        // pattern is still redacted by key name, but only for non-public keys.
+        let val = serde_json::json!({"signing_key": "some-opaque-value-here"});
+        let (redacted, status) = redact_value(val);
+        assert_eq!(redacted["signing_key"], "[redacted]");
+        assert_eq!(status.redacted_count, 1);
+    }
+
+    #[test]
+    fn does_not_redact_public_key_named_fields() {
+        let val = serde_json::json!({
+            "public_key": "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----",
+            "primary_key": "id",
+            "unique_key": "uuid"
+        });
+        let (redacted, status) = redact_value(val);
+        assert_eq!(
+            redacted["public_key"],
+            "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----"
+        );
+        assert_eq!(redacted["primary_key"], "id");
+        assert_eq!(redacted["unique_key"], "uuid");
+        assert_eq!(status.redacted_count, 0);
+    }
+
+    #[test]
+    fn redacts_slack_token_value() {
+        let val = serde_json::json!({"text": "xoxb-1234567890-abcdef"});
+        let (redacted, status) = redact_value(val);
+        assert_eq!(redacted["text"], "[redacted:slack_token]");
+        assert_eq!(status.redacted_count, 1);
+    }
+
+    #[test]
+    fn redacts_bare_jwt_value() {
+        let jwt = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
+        let val = serde_json::json!({"auth": jwt});
+        let (redacted, status) = redact_value(val);
+        assert_eq!(redacted["auth"], "[redacted:jwt]");
+        assert_eq!(status.redacted_count, 1);
     }
 }
