@@ -3233,6 +3233,35 @@ fn sync_discover(
     Ok((data, warnings))
 }
 
+/// 派生一条消息的稳定 id：native id 优先，缺失回退 document-scoped 派生。
+///
+/// 消息实体与工具活动锚点必须用同一规则，否则 anchor 解析会指向不存在的实体。
+/// 回退事实刻意 path-free（provider + variant + document id + seq），因此源文件
+/// 移动位置不改变 id；但 seq 会随 provider 记录过滤规则变化而漂移，故只能标
+/// `Unstable`，不承诺跨运行稳定。
+fn derive_message_id(
+    native_id: &str,
+    seq: u32,
+    provider_id: &str,
+    variant: &str,
+    document_wire: &str,
+) -> StableId {
+    if native_id.trim().is_empty() {
+        StableId::derive(
+            IdKind::Message,
+            Stability::Unstable,
+            &[
+                provider_id.as_bytes(),
+                variant.as_bytes(),
+                document_wire.as_bytes(),
+                &seq.to_le_bytes(),
+            ],
+        )
+    } else {
+        StableId::native(IdKind::Message, native_id)
+    }
+}
+
 fn staged_to_source(
     path: &str,
     staged: &StagedBatch,
@@ -3314,20 +3343,13 @@ fn staged_to_source_with_provider(
             )
             .into());
         }
-        let id = if message.native_id.trim().is_empty() {
-            StableId::derive(
-                IdKind::Message,
-                Stability::Unstable,
-                &[
-                    provider_id.as_bytes(),
-                    variant.as_bytes(),
-                    document_id.as_str().as_bytes(),
-                    &message.seq.to_le_bytes(),
-                ],
-            )
-        } else {
-            StableId::native(IdKind::Message, &message.native_id)
-        };
+        let id = derive_message_id(
+            &message.native_id,
+            message.seq,
+            provider_id,
+            variant,
+            document_id.as_str(),
+        );
         let span = message.span.map(|(start, end)| EvidenceSpan { start, end });
         let placement = MessagePlacement::new(
             session_id.clone(),
@@ -3489,6 +3511,12 @@ fn staged_to_source_with_provider(
     // 缺省回退派生）；锚点消息未被 emit（skipped/非对话）→ 活动丢弃，绝不臆造。
     let mut activities = Vec::new();
     for staged_activity in &staged.activities {
+        // 空锚点 id 无法标识任何一条消息：`find` 会无差别命中首条同样缺 native id
+        // 的消息，把活动挂到错误的消息上。缺 native id 的 provider 不发 activity，
+        // 故此处 fail-closed 丢弃，绝不猜锚点。
+        if staged_activity.message_native_id.trim().is_empty() {
+            continue;
+        }
         let Some(anchor) = staged
             .messages
             .iter()
@@ -3496,20 +3524,13 @@ fn staged_to_source_with_provider(
         else {
             continue;
         };
-        let id = if anchor.native_id.trim().is_empty() {
-            StableId::derive(
-                IdKind::Message,
-                Stability::Unstable,
-                &[
-                    provider_id.as_bytes(),
-                    variant.as_bytes(),
-                    document_wire.as_bytes(),
-                    &anchor.seq.to_le_bytes(),
-                ],
-            )
-        } else {
-            StableId::native(IdKind::Message, &anchor.native_id)
-        };
+        let id = derive_message_id(
+            &anchor.native_id,
+            anchor.seq,
+            provider_id,
+            variant,
+            &document_wire,
+        );
         activities.push(SourceActivity {
             message_id: id,
             activity: staged_activity.activity.clone(),

@@ -978,7 +978,13 @@ pub struct MessageEvent<'a> {
     /// 会话内单调序号，从 0 起（只对成功产出的对话消息递增）。
     pub seq: u32,
     /// provider-native 消息 id（如 Claude Code 的 `uuid`）。空串表示 provider 未提供，
-    /// 此时 sink 应回退到 reconstructed 派生（path+seq）。
+    /// 此时 sink 必须自行派生，且不得声称 `Stability::Native`。
+    ///
+    /// 空串是显式契约而非疏漏：provider 绝不编造形如 `<provider>-msg-{seq}` 的
+    /// 假 id——那会把纯序号伪装成持久身份。composition root 的回退用
+    /// document-scoped path-free facts（provider、variant、document id、seq）派生
+    /// `Stability::Unstable`，因为 seq 会随 provider 记录过滤规则变化而漂移，
+    /// 不能承诺跨运行稳定。
     pub native_id: &'a str,
     /// 父消息的 native id（threading 边）。`None` 表示根消息或 provider 未提供。
     pub parent_native_id: Option<&'a str>,
