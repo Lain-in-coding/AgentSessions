@@ -2960,25 +2960,33 @@ fn installation_namespace(path: &str, provider_id: &str) -> String {
     format!("{provider_id}:{parent}")
 }
 
+/// `sync --discover` 的 provider → home 相对数据根映射表（唯一来源）。
+///
+/// 一个 provider 出现在此表 ⟺ `capability.rs` 的 `discover` 列必须非
+/// `Unsupported`；`discover_roots_match_capability_discover_claims` 双向守护该
+/// 等价关系。注意 [`discover_provider_sources`] 只收集 `.jsonl`，因此把
+/// SQLite-only provider（opencode / cursor）登记进此表并不能让它被发现——
+/// 登记前先确认该 root 下的源确实是 JSONL。
+const PROVIDER_DISCOVERY_ROOTS: &[(&str, &str)] = &[
+    ("claude-code", ".claude/projects"),
+    ("codex", ".codex/sessions"),
+    ("openclaw", ".openclaw/agents"),
+    ("tencent-codebuddy", ".codebuddy/projects"),
+    ("antigravity", ".gemini/antigravity-cli/brain"),
+];
+
 /// 解析当前用户 home 目录下某 provider 的规范化 transcript 数据根。
 ///
 /// 与 [`installation_namespace`] 复用同一组 marker 常量（`.claude` / `.codex`）。
 /// home 目录优先取 `HOME`（Unix），回退 `USERPROFILE`（Windows）；两者都缺失返回
 /// `None`，调用方应跳过该 provider 的发现（R4：不猜路径）。
 ///
-/// - `claude-code` → `~/.claude/projects`
-/// - `codex` → `~/.codex/sessions`
-/// - 未知 provider → `None`
+/// 映射表见 [`PROVIDER_DISCOVERY_ROOTS`]；未登记的 provider 返回 `None`。
 fn provider_data_root(provider_id: &str) -> Option<std::path::PathBuf> {
-    let sub = match provider_id {
-        "claude-code" => ".claude/projects",
-        "codex" => ".codex/sessions",
-        "openclaw" => ".openclaw/agents",
-        "tencent-codebuddy" => ".codebuddy/projects",
-        "antigravity" => ".gemini/antigravity-cli/brain",
-        "opencode" => ".local/share/opencode",
-        _ => return None,
-    };
+    let sub = PROVIDER_DISCOVERY_ROOTS
+        .iter()
+        .find(|(id, _)| *id == provider_id)
+        .map(|(_, sub)| *sub)?;
     let home = std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(std::path::PathBuf::from)?;
@@ -4176,6 +4184,7 @@ mod tests {
     use super::*;
     use agent_session_grep_application::{EvidenceSpanDto, StagedMessage};
     use agent_session_grep_ports::ParseReport;
+    use agent_session_grep_ports::capability::CapabilityLevel;
 
     fn staged_batch(
         messages: Vec<StagedMessage>,
@@ -4217,6 +4226,72 @@ mod tests {
     #[test]
     fn provider_data_root_rejects_unknown_provider() {
         assert!(provider_data_root("unknown-provider").is_none());
+    }
+
+    #[test]
+    fn discover_roots_match_capability_discover_claims() {
+        // capability.rs 的 `discover` 列此前无任何测试把声明对照真实布线，
+        // 已漏过 3 个少报（openclaw/tencent-codebuddy/antigravity 有 root 却记
+        // Unsupported）。这里双向锁定：登记进 PROVIDER_DISCOVERY_ROOTS ⟺ 声明非
+        // Unsupported。`sync --discover` 遍历整个 registry 并对每个 provider 调
+        // provider_data_root，所以这张表就是运行期的发现能力事实。
+        let matrix = ProviderCapabilityMatrix::current();
+        let wired: BTreeSet<&str> = PROVIDER_DISCOVERY_ROOTS.iter().map(|(id, _)| *id).collect();
+        assert_eq!(
+            wired.len(),
+            PROVIDER_DISCOVERY_ROOTS.len(),
+            "PROVIDER_DISCOVERY_ROOTS 不得有重复 provider id"
+        );
+
+        for provider in &matrix.providers {
+            let id = provider.provider_id.as_str();
+            let claims_discover = provider.discover != CapabilityLevel::Unsupported
+                && provider.discover != CapabilityLevel::Unknown;
+            assert_eq!(
+                claims_discover,
+                wired.contains(id),
+                "{id}: capability.rs discover={:?} 与 PROVIDER_DISCOVERY_ROOTS 登记状态\
+                 （{}）不一致——有 root 就不能记 Unsupported，无 root 就不能宣称可发现",
+                provider.discover,
+                if wired.contains(id) {
+                    "已登记"
+                } else {
+                    "未登记"
+                },
+            );
+        }
+
+        // 登记的 root 必须是 home 相对路径（provider_data_root 直接 join 到 home），
+        // 绝对路径或上跳会越出用户数据根。
+        for (id, sub) in PROVIDER_DISCOVERY_ROOTS {
+            let path = std::path::Path::new(sub);
+            assert!(
+                path.is_relative(),
+                "{id}: 发现根必须是 home 相对路径，实际 `{sub}`"
+            );
+            assert!(
+                !sub.contains(".."),
+                "{id}: 发现根不得包含 `..`，实际 `{sub}`"
+            );
+        }
+    }
+
+    #[test]
+    fn sqlite_only_providers_are_never_registered_as_discoverable() {
+        // discover_provider_sources 只收集 `.jsonl`。SQLite-only provider
+        // （opencode `opencode.db` / cursor `state.vscdb`）即便登记了 root，完整
+        // 扫描也会返回 0 条路径。真正的危险在 tombstone：sync_discover 对
+        // "完整扫描" 的 provider 会把已存路径 diff 成空批删除索引，所以把
+        // SQLite-only provider 登记进表会让一次 discover 抹掉它此前的索引。
+        // 支持它们必须先扩展 discover_provider_sources 的扩展名过滤。
+        for id in ["opencode", "cursor"] {
+            assert!(
+                provider_data_root(id).is_none(),
+                "{id} 的源是 SQLite 而非 JSONL；登记发现根会让完整扫描返回 0 条\
+                 路径并 tombstone 已索引内容——需先让 discover_provider_sources \
+                 识别该扩展名"
+            );
+        }
     }
 
     #[test]
