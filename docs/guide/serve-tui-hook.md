@@ -108,8 +108,15 @@ The UI page is served with a restrictive `Content-Security-Policy` including
 ## `tui` — interactive read-only browser
 
 ```
-$ asg --db <path> tui
+$ asg --db <path> tui [--project <path-or-name>] [--exclude-project <path-or-name>]
 ```
+
+Both project flags are repeatable. Included values are OR-ed; exclusions remove
+matching trusted project claims. They constrain searches and stay active across
+facet changes and pagination. A blank query still opens the global recent-session
+browser because the Application list operation has no project-filter dimension.
+The title always shows the active search scope, and result rows show the trusted
+project name or `—` when attribution is unavailable.
 
 Requires a real terminal. In a pipe or in CI it refuses:
 
@@ -130,7 +137,7 @@ between them with Enter (deeper) and Esc (back).
 | any | `Ctrl+C` | Quit immediately |
 | Search | printable chars | Type into the query box |
 | Search | `Backspace` | Delete a character |
-| Search | `Enter` | Run the query (a blank query is not submitted) |
+| Search | `Enter` | Run the query; a blank query browses recent sessions globally |
 | Search | `Esc` | Clear the box, or quit if it is already empty |
 | Search | `m` | Cycle the sidechain facet — **only when the box is empty** |
 | Search | `k` | Cycle the tool-kind facet — **only when the box is empty** |
@@ -163,15 +170,16 @@ out every other provider's messages.
 ### Headless snapshot
 
 ```
-$ asg --db <path> tui --snapshot-json "migration"
-{"data":{"hits":[{"id":"msg_v1_...0003"},{"id":"msg_v1_...0001"}]},"outcome":"success","page":{"has_more":false,"next_cursor":null},"warnings":[]}
+$ asg --db <path> tui --project workspace --snapshot-json "migration"
+{"data":{"hits":[{"id":"msg_v1_...0003","latest_activity":null,"project_name":"workspace"}]} ,"outcome":"success","page":{"has_more":false,"next_cursor":null},"warnings":[]}
 ```
 
-This runs the same reducer path as the interactive UI and serializes only the
-stable fields — `outcome`, `data.hits[].id`, `page.has_more`,
-`page.next_cursor`. It exists so a release harness can prove the TUI, the CLI,
-and the web UI agree; it is not a general-purpose query interface. Use
-`--robot search` for that.
+This runs the same reducer path as the interactive UI. The projection contains
+`outcome`, `data.hits[].id`, `data.hits[].latest_activity`,
+`data.hits[].project_name`, `page.has_more`, and `page.next_cursor`. The project
+flags use the same semantics as interactive searches. It exists so a release
+harness can prove the TUI, the CLI, and the web UI agree; it is not a
+general-purpose query interface. Use `--robot search` for that.
 
 ## `hook` — Claude Code integration
 

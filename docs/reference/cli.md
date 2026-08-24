@@ -431,7 +431,13 @@ without one it fails with `tui requires an interactive terminal`.
 
 | Flag | Effect |
 | --- | --- |
-| `--snapshot-json <query>` | Headless structural projection of a search, printed as a single JSON line. Used by the release consistency harness to compare entry points. Accepts no other arguments. Not listed in `--help`. |
+| `--project <path-or-name>` | Restrict searches to trusted project paths or final names. Repeatable; values are OR-ed. Preserved across facet changes and pagination. |
+| `--exclude-project <path-or-name>` | Exclude matching trusted project paths or final names. Repeatable and fail-closed when attribution is missing or ambiguous. |
+| `--snapshot-json <query>` | Headless structural projection of a search, printed as a single JSON line. Used by the release consistency harness to compare entry points. May be combined with project flags; accepts no additional positional arguments. Not listed in `--help`. |
+
+Project flags apply to non-empty searches. A blank query opens the global
+recent-session browser because the Application list operation has no project
+filter dimension.
 
 ### `serve`
 

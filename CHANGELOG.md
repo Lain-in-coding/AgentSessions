@@ -28,7 +28,12 @@ creates the corresponding tag and Release.
   `exclude_terms` on the existing `search_sessions` MCP tool (still nine tools),
   repeatable `role`/`exclude` query parameters on `/api/search`, and a role
   selector plus an exclude field in the embedded web UI.
-- `search --project <path-or-name>` and `--exclude-project` — trusted project scope filters using resolved, pair-observed working-directory claims; path/name matching is fail-closed, pushed before `LIMIT`, cursor-bound, and exposed safely across CLI, MCP, Web, Robot, and the embedded UI. See ADR-0011.- 16-provider capability matrix (`agent-session-grep-ports`) with deferred
+- `search --project <path-or-name>` and `--exclude-project` — trusted project
+  scope filters using resolved, pair-observed working-directory claims;
+  path/name matching is fail-closed, pushed before `LIMIT`, cursor-bound, and
+  exposed safely across CLI, MCP, Web, Robot, embedded UI, and TUI searches.
+  See ADR-0011.
+- 16-provider capability matrix (`agent-session-grep-ports`) with deferred
   provider rows (`deepseek-harness`, `zcode`) and per-provider maturity grading.
 - Provider adapters for the 14 implemented, Experimental providers:
   `claude-code`, `codex`, `grok-build`, `antigravity`, `opencode`, `pi`,

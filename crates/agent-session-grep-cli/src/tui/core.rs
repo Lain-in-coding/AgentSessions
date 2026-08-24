@@ -7,7 +7,7 @@
 //! 命中→会话解析全部通过 Effect 交回 Application ADT，本层只持有 UI 状态。
 
 use agent_session_grep_domain::ContextPolicy;
-use agent_session_grep_ports::{SearchFacets, SidechainFacet};
+use agent_session_grep_ports::{SearchFacets, SearchFilters, SidechainFacet};
 
 /// 三屏状态机（PRD R2）：Search（输入）→ Results(命中列表) → Context（消息链）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,6 +119,8 @@ pub(crate) struct SearchHitView {
     pub score: Option<f32>,
     pub session_id: Option<String>,
     pub resume_available: bool,
+    /// Privacy-safe final project path component from a trusted claim.
+    pub project_name: Option<String>,
     /// 会话最近活动时间戳（recency 浏览的排序键）；检索命中或 provider
     /// 没给时间戳时为 `None`。
     pub latest_activity: Option<String>,
@@ -202,12 +204,23 @@ pub(crate) struct Model {
     /// 当前 Results 列表是 recency 浏览（会话）而不是检索命中（消息）。
     /// 空查询回车即进入；决定续页 Effect 与 Enter 的打开语义。
     pub browse: bool,
+    /// 当前搜索的显式项目作用域；空值表示全局。
+    pub filters: SearchFilters,
     /// 最近一次加载的截断事实（PARTIAL 渲染依据），来自 App 响应。
     pub truncated: bool,
     pub truncation_reason: Option<String>,
     pub warnings: Vec<String>,
     pub quit: bool,
     pub generation: u64,
+}
+
+impl Model {
+    pub(crate) fn with_filters(filters: SearchFilters) -> Self {
+        Self {
+            filters,
+            ..Self::default()
+        }
+    }
 }
 
 impl Default for Model {
@@ -229,6 +242,7 @@ impl Default for Model {
             tool_kind: ToolKindMode::Any,
             status: None,
             browse: false,
+            filters: SearchFilters::default(),
             truncated: false,
             truncation_reason: None,
             warnings: Vec::new(),
@@ -258,6 +272,7 @@ pub(crate) enum Effect {
         query: String,
         cursor: Option<String>,
         facets: SearchFacets,
+        filters: Box<SearchFilters>,
     },
     /// Recency 浏览（M3-4）：无查询词列出最近会话（`list --sessions --sort
     /// recency` 的同一 Application 用例）。`cursor` 同样是 App 原样回传的令牌。
@@ -331,6 +346,7 @@ fn handle_key(mut model: Model, key: KeyInput) -> (Model, Option<Effect>) {
                     query: model.query.clone(),
                     cursor: None,
                     facets: model.search_facets(),
+                    filters: Box::new(model.filters.clone()),
                 };
                 (model, Some(effect))
             }
@@ -386,6 +402,7 @@ fn handle_key(mut model: Model, key: KeyInput) -> (Model, Option<Effect>) {
                         query: model.query.clone(),
                         cursor: Some(cursor),
                         facets: model.search_facets(),
+                        filters: Box::new(model.filters.clone()),
                     };
                     (model, Some(effect))
                 }
@@ -407,6 +424,7 @@ fn handle_key(mut model: Model, key: KeyInput) -> (Model, Option<Effect>) {
                     query: model.query.clone(),
                     cursor: None,
                     facets: model.search_facets(),
+                    filters: Box::new(model.filters.clone()),
                 };
                 (model, Some(effect))
             }
@@ -425,6 +443,7 @@ fn handle_key(mut model: Model, key: KeyInput) -> (Model, Option<Effect>) {
                     query: model.query.clone(),
                     cursor: None,
                     facets: model.search_facets(),
+                    filters: Box::new(model.filters.clone()),
                 };
                 (model, Some(effect))
             }
@@ -622,11 +641,12 @@ pub(crate) fn hit_lines(model: &Model) -> Vec<String> {
         .map(|(i, hit)| {
             let prefix = if i == model.selected { "> " } else { "  " };
             let resume = if hit.resume_available { "yes" } else { "no" };
+            let project = hit.project_name.as_deref().unwrap_or("—");
             match hit.score {
                 Some(score) => {
                     let session = hit.session_id.as_deref().unwrap_or("—");
                     format!(
-                        "{prefix}{}  score {score:.3}  session {session}  resume {resume}",
+                        "{prefix}{}  score {score:.3}  project {project}  session {session}  resume {resume}",
                         hit.id
                     )
                 }
@@ -721,11 +741,27 @@ pub(crate) fn status_line(model: &Model) -> String {
     parts.join(" | ")
 }
 
+fn scope_label(filters: &SearchFilters) -> String {
+    let mut parts = Vec::new();
+    if !filters.projects.is_empty() {
+        parts.push(format!("project={}", filters.projects.join(",")));
+    }
+    if !filters.exclude_projects.is_empty() {
+        parts.push(format!("exclude={}", filters.exclude_projects.join(",")));
+    }
+    if parts.is_empty() {
+        "global".to_string()
+    } else {
+        parts.join(" ")
+    }
+}
+
 /// 标题行：当前屏 + 键位提示 + 诚实的分页/策略事实。
 pub(crate) fn title_line(model: &Model) -> String {
     match model.screen {
         Screen::Search => format!(
-            "Search - Enter: run (empty = recent sessions)  Esc: clear/quit  m: sidechain={}  k: tool={}",
+            "Search - scope={}  Enter: run (empty = recent sessions)  Esc: clear/quit  m: sidechain={}  k: tool={}",
+            scope_label(&model.filters),
             model.sidechain.as_str(),
             model.tool_kind.as_str()
         ),
@@ -743,7 +779,8 @@ pub(crate) fn title_line(model: &Model) -> String {
                 );
             }
             format!(
-                "Results - {} hits  sidechain={} tool={}{more}{note}  Enter: open  m/k: facets  Esc: back  q: quit",
+                "Results - scope={}  {} hits  sidechain={} tool={}{more}{note}  Enter: open  m/k: facets  Esc: back  q: quit",
+                scope_label(&model.filters),
                 model.hits.len(),
                 model.sidechain.as_str(),
                 model.tool_kind.as_str()
@@ -789,6 +826,7 @@ mod tests {
             score: Some(score),
             session_id: None,
             resume_available: false,
+            project_name: None,
             latest_activity: None,
         }
     }
@@ -815,6 +853,7 @@ mod tests {
                     score: None,
                     session_id: Some((*id).to_string()),
                     resume_available: false,
+                    project_name: None,
                     latest_activity: latest.map(str::to_string),
                 })
                 .collect(),
@@ -976,6 +1015,7 @@ mod tests {
                 query: "rust".to_string(),
                 cursor: None,
                 facets: SearchFacets::default(),
+                filters: Box::new(SearchFilters::default()),
             })
         );
         assert!(model.hits.is_empty());
@@ -1020,6 +1060,7 @@ mod tests {
             score: Some(2.0),
             session_id: Some("ses_v1_resumable".to_string()),
             resume_available: true,
+            project_name: Some("example".to_string()),
             latest_activity: None,
         }];
 
@@ -1032,6 +1073,7 @@ mod tests {
             Some("ses_v1_resumable")
         );
         assert!(model.hits[0].resume_available);
+        assert_eq!(model.hits[0].project_name.as_deref(), Some("example"));
     }
 
     #[test]
@@ -1061,6 +1103,7 @@ mod tests {
                 query: "rust".to_string(),
                 cursor: Some("tok1".to_string()),
                 facets: SearchFacets::default(),
+                filters: Box::new(SearchFilters::default()),
             })
         );
     }
@@ -1099,6 +1142,7 @@ mod tests {
                 query: "rust".to_string(),
                 cursor: Some("tok1".to_string()),
                 facets: SearchFacets::default(),
+                filters: Box::new(SearchFilters::default()),
             })
         );
         let (model, _) = update(model, Msg::SearchLoaded(page(&[], None)));
@@ -1249,6 +1293,7 @@ mod tests {
                 score: Some(1.0),
                 session_id: Some("ses_v1_s".into()),
                 resume_available: false,
+                project_name: None,
                 latest_activity: None,
             }],
             ..Model::default()
@@ -1265,6 +1310,7 @@ mod tests {
                     tool_kind: None,
                     tool_name: None,
                 },
+                filters: Box::new(SearchFilters::default()),
             })
         );
         assert!(model.hits.is_empty(), "facet cycle clears prior hits");
@@ -1280,6 +1326,45 @@ mod tests {
         let title = title_line(&model);
         assert!(title.contains("sidechain=main"), "{title}");
         assert!(title.contains("tool=command"), "{title}");
+    }
+
+    #[test]
+    fn project_scope_is_preserved_across_search_and_pagination() {
+        let filters = SearchFilters {
+            projects: vec!["workspace".to_string()],
+            exclude_projects: vec!["scratch".to_string()],
+            ..SearchFilters::default()
+        };
+        let model = typed(Model::with_filters(filters.clone()), "rust");
+        let (model, effect) = key(model, KeyInput::Enter);
+        assert_eq!(
+            effect,
+            Some(Effect::Search {
+                query: "rust".to_string(),
+                cursor: None,
+                facets: SearchFacets::default(),
+                filters: Box::new(filters.clone()),
+            })
+        );
+        let search_title = title_line(&model);
+        assert!(search_title.contains("scope=project=workspace exclude=scratch"));
+
+        let (model, _) = update(
+            model,
+            Msg::SearchLoaded(page(&[("msg_v1_a", 1.0)], Some("tok1"))),
+        );
+        let results_title = title_line(&model);
+        assert!(results_title.contains("scope=project=workspace exclude=scratch"));
+        let (_, effect) = key(model, KeyInput::Char('n'));
+        assert_eq!(
+            effect,
+            Some(Effect::Search {
+                query: "rust".to_string(),
+                cursor: Some("tok1".to_string()),
+                facets: SearchFacets::default(),
+                filters: Box::new(filters),
+            })
+        );
     }
 
     #[test]
@@ -1397,6 +1482,7 @@ mod tests {
             score: Some(2.0),
             session_id: Some("ses_v1_a".to_string()),
             resume_available: true,
+            project_name: Some("example".to_string()),
             latest_activity: None,
         }];
 
@@ -1404,7 +1490,7 @@ mod tests {
 
         assert_eq!(
             lines,
-            vec!["> msg_v1_a  score 2.000  session ses_v1_a  resume yes"]
+            vec!["> msg_v1_a  score 2.000  project example  session ses_v1_a  resume yes"]
         );
     }
 

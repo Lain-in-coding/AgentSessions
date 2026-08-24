@@ -39,11 +39,20 @@ use std::time::Duration;
 /// 检索页大小：与 main.rs `search` 无 `--max-items` 时的保守默认一致。
 const SEARCH_PAGE_LIMIT: usize = 20;
 
+/// 取路径最后一段（与 Application `project_basename` 同一规则）：尾斜杠剥除
+/// 后按 `/` `\` 切分取第一个非空段。recency 浏览行用它投射项目归属。
+fn basename(path: &str) -> Option<String> {
+    path.trim_end_matches(['/', '\\'])
+        .rsplit(['/', '\\'])
+        .find(|part| !part.is_empty())
+        .map(str::to_string)
+}
+
 /// 在已打开的只读 store 上运行交互式 TUI，直到用户退出。
 ///
 /// 终端恢复覆盖全部路径：正常退出与错误路径由本函数显式 restore，
 /// panic 路径由 `ratatui::try_init` 安装的 panic hook 兜底。
-pub(crate) fn run(store: &SqliteStore) -> Result<Outcome, CliError> {
+pub(crate) fn run(store: &SqliteStore, filters: SearchFilters) -> Result<Outcome, CliError> {
     if !std::io::stdout().is_terminal() {
         return Err(CliError::usage("tui requires an interactive terminal"));
     }
@@ -57,7 +66,7 @@ pub(crate) fn run(store: &SqliteStore) -> Result<Outcome, CliError> {
             format!("cannot initialize terminal: {error}"),
         )
     })?;
-    let result = event_loop(&mut terminal, store);
+    let result = event_loop(&mut terminal, store, filters);
     ratatui::restore();
     result?;
     Ok(Outcome::Success)
@@ -73,7 +82,11 @@ pub(crate) fn run(store: &SqliteStore) -> Result<Outcome, CliError> {
 /// `page.has_more`, `page.next_cursor`. Recency rows also carry
 /// `latest_activity` so the sort key is inspectable, `null` when the provider
 /// reported no timestamp.
-pub(crate) fn snapshot(store: &SqliteStore, query: String) -> Result<serde_json::Value, CliError> {
+pub(crate) fn snapshot(
+    store: &SqliteStore,
+    query: String,
+    filters: SearchFilters,
+) -> Result<serde_json::Value, CliError> {
     let effect = if query.trim().is_empty() {
         Effect::ListRecentSessions { cursor: None }
     } else {
@@ -81,6 +94,7 @@ pub(crate) fn snapshot(store: &SqliteStore, query: String) -> Result<serde_json:
             query,
             cursor: None,
             facets: agent_session_grep_ports::SearchFacets::default(),
+            filters: Box::new(filters),
         }
     };
     match execute(store, effect) {
@@ -92,6 +106,7 @@ pub(crate) fn snapshot(store: &SqliteStore, query: String) -> Result<serde_json:
                     "hits": page.hits.into_iter().map(|hit| serde_json::json!({
                         "id": hit.id,
                         "latest_activity": hit.latest_activity,
+                        "project_name": hit.project_name,
                     })).collect::<Vec<_>>(),
                 },
                 "page": {
@@ -114,8 +129,9 @@ pub(crate) fn snapshot(store: &SqliteStore, query: String) -> Result<serde_json:
 fn event_loop(
     terminal: &mut ratatui::DefaultTerminal,
     store: &SqliteStore,
+    filters: SearchFilters,
 ) -> Result<(), CliError> {
-    let mut model = Model::default();
+    let mut model = Model::with_filters(filters);
     loop {
         if let Err(error) = terminal.draw(|frame| draw(frame, &model)) {
             return Err(term_io(error));
@@ -178,10 +194,11 @@ fn execute(store: &SqliteStore, effect: Effect) -> Msg {
             query,
             cursor,
             facets,
+            filters,
         } => {
             let request = AppRequest::Search {
                 query,
-                filters: SearchFilters::default(),
+                filters: *filters,
                 limit: SEARCH_PAGE_LIMIT,
                 cursor,
                 budget: ResponseBudget::default(),
@@ -241,6 +258,7 @@ fn search_msg(response: AppResponse) -> Msg {
                     score: Some(hit.score),
                     session_id: hit.session_id,
                     resume_available: hit.resume_available,
+                    project_name: hit.project_name,
                     latest_activity: None,
                 })
                 .collect();
@@ -280,12 +298,24 @@ fn recent_sessions_msg(store: &SqliteStore, response: AppResponse) -> Msg {
                 .iter()
                 .map(|meta| (meta.session_id.as_str().to_string(), meta.resume_available))
                 .collect();
+            let project_names: HashMap<String, Option<String>> = metadata
+                .iter()
+                .map(|meta| {
+                    (
+                        meta.session_id.as_str().to_string(),
+                        meta.original_working_directory
+                            .as_deref()
+                            .and_then(basename),
+                    )
+                })
+                .collect();
             let hits = entries
                 .into_iter()
                 .map(|entry| {
                     let wire = entry.id.as_str().to_string();
                     SearchHitView {
                         resume_available: availability.get(&wire).copied().unwrap_or(false),
+                        project_name: project_names.get(&wire).and_then(Clone::clone),
                         session_id: Some(wire.clone()),
                         id: wire,
                         score: None,
@@ -507,6 +537,16 @@ mod tests {
     }
 
     #[test]
+    fn basename_handles_unix_and_windows_project_paths() {
+        assert_eq!(basename("/workspace/example/"), Some("example".to_string()));
+        assert_eq!(
+            basename("C:\\workspace\\example\\"),
+            Some("example".to_string())
+        );
+        assert_eq!(basename("///"), None);
+    }
+
+    #[test]
     fn search_msg_projects_resume_availability_without_source_data() {
         let response = AppResponse::Search {
             hits: vec![agent_session_grep_ports::SearchHit {
@@ -524,7 +564,7 @@ mod tests {
                 resume_available: true,
                 provider_id: None,
                 working_directory: None,
-                project_name: None,
+                project_name: Some("example".to_string()),
                 match_ranges: Vec::new(),
             }],
             next_cursor: None,
@@ -546,6 +586,7 @@ mod tests {
         assert_eq!(page.hits.len(), 1);
         assert!(page.hits[0].resume_available);
         assert!(page.hits[0].session_id.is_some());
+        assert_eq!(page.hits[0].project_name.as_deref(), Some("example"));
     }
 
     #[test]

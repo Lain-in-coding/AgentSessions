@@ -539,20 +539,26 @@ fn run(
     if rest.first().map(String::as_str) == Some("tui") {
         let mut tui_args = rest[1..].to_vec();
         let snapshot_query = extract_flag(&mut tui_args, "--snapshot-json")?;
+        // project scope 与 search 入口共用同一组 flag（ADR-0011）：可重复、
+        // 空值即报错，交由 search_filters_from_flags 校验后随 Model 传入。
+        let projects = extract_repeated_flag(&mut tui_args, "--project")?;
+        let exclude_projects = extract_repeated_flag(&mut tui_args, "--exclude-project")?;
+        let filters =
+            search_filters_from_flags(&[], &[], &[], &projects, &exclude_projects, None, None, 0)?;
         if let Some(query) = snapshot_query {
             if !tui_args.is_empty() {
                 return Err(CliError::usage(
                     "tui --snapshot-json <query> takes no additional arguments",
                 ));
             }
-            let snapshot = tui::snapshot(&store, query)?;
+            let snapshot = tui::snapshot(&store, query, filters)?;
             protocol::write_stdout_line(&snapshot.to_string());
             return Ok(protocol::Outcome::Success);
         }
         if !tui_args.is_empty() {
             return Err(CliError::usage("tui takes no positional arguments"));
         }
-        return tui::run(&store);
+        return tui::run(&store, filters);
     }
     // serve：loopback HTTP + 嵌入式 Web UI。同样接管（长期运行），不走
     // dispatch/emit_result；--output/--robot 无意义。`--port <n>` 可选（默认 0 = 随机端口）。
@@ -1552,8 +1558,9 @@ fn subcommand_help_template(cmd: &str) -> &'static str {
         }
         "tui" => {
             "tui：交互式只读浏览（Preview）。需要交互式终端。\n\
+                   flag：--project <path-or-name>、--exclude-project <path-or-name>（均可重复；仅作用于检索）。\n\
                    tui --snapshot-json <query>：headless 结构投影（供 release 一致性 harness 跨入口比对）。\n\
-                   示例：agent-session-grep --db <path> tui"
+                   示例：agent-session-grep --db <path> tui --project <path-or-name>"
         }
         "serve" => {
             "serve：启动 loopback HTTP 服务 + 嵌入式 Web UI（仅 127.0.0.1）。\n\
