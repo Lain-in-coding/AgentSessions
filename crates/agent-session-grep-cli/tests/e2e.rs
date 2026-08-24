@@ -5043,6 +5043,80 @@ fn sync_discover_separates_pi_and_openclaw_by_canonical_root() {
 }
 
 #[test]
+fn explicit_sync_resolves_pi_and_openclaw_by_canonical_root() {
+    // 同一缺陷的第二条入口。`sync --discover` 的 hint 来自逐根扫描，显式
+    // `sync <file>` 没有扫描结果，修复前 hint 恒为 None → 全 registry probe →
+    // pi/openclaw 必然 tie → 用户点名同步自己的 pi transcript 时被整源拒绝，
+    // 且错误信息（"ambiguous provider selection"）无法自助解决。
+    //
+    // 现在两条入口共用同一张 root 表（正向 provider→root 供 discover，反向
+    // path→provider 供显式 sync），因此对同一个文件得到同一个 provider。
+    let (home_dir, home) = discover_env();
+    let (_db_dir, db) = temp_db("explicit-sync-twins");
+    let shared_bytes = pi_fixture("explicit twin marker");
+
+    let pi_dir = home_dir
+        .path()
+        .join(".pi")
+        .join("agent")
+        .join("sessions")
+        .join("--work--");
+    std::fs::create_dir_all(&pi_dir).expect("create pi sessions root");
+    let pi_file = pi_dir.join("pi-explicit.jsonl");
+    std::fs::write(&pi_file, &shared_bytes).expect("write pi fixture");
+
+    let openclaw_dir = home_dir
+        .path()
+        .join(".openclaw")
+        .join("agents")
+        .join("main")
+        .join("sessions");
+    std::fs::create_dir_all(&openclaw_dir).expect("create openclaw sessions root");
+    let claw_file = openclaw_dir.join("claw-explicit.jsonl");
+    std::fs::write(&claw_file, &shared_bytes).expect("write openclaw fixture");
+
+    // 逐个显式同步：两者都必须成功（修复前均为 exit 2 invalid_request）。
+    for path in [&pi_file, &claw_file] {
+        let out = run_with_home(&db, &home, &["sync", &path.to_string_lossy()]);
+        assert!(
+            out.status.success(),
+            "explicit sync of a canonical-root source must succeed: {}",
+            stdout(&out)
+        );
+    }
+
+    // 两个源各归其主、各自成会话——与 discover 路径的结论一致。
+    let out = run_with_home(&db, &home, &["search", "explicit"]);
+    let frame = parse_first_line(&out);
+    let hits = frame["data"]["hits"]
+        .as_array()
+        .unwrap_or_else(|| panic!("search must succeed with hits: {frame}"));
+    assert_eq!(hits.len(), 2, "两个显式同步的源必须都入索引: {frame}");
+    let sessions: std::collections::BTreeSet<&str> = hits
+        .iter()
+        .filter_map(|hit| hit["session_id"].as_str())
+        .collect();
+    assert_eq!(sessions.len(), 2, "两个源必须分属不同会话: {frame}");
+
+    // 反面：同一段字节放在任何登记根之外时没有路径事实可依，tie 拒绝必须保留
+    // ——那是诚实行为，不得靠猜测绕过（此断言防止将来有人给 hint 加"猜第一个
+    // 匹配的 adapter"式兜底）。
+    let loose = home_dir.path().join("exported-copy.jsonl");
+    std::fs::write(&loose, &shared_bytes).expect("write loose copy");
+    let out = run_with_home(&db, &home, &["sync", &loose.to_string_lossy()]);
+    assert!(
+        !out.status.success(),
+        "登记根之外的歧义源必须仍被拒绝，不得猜 provider: {}",
+        stdout(&out)
+    );
+    assert!(
+        stdout(&out).contains("ambiguous provider selection"),
+        "拒绝原因必须仍是 ambiguous provider selection: {}",
+        stdout(&out)
+    );
+}
+
+#[test]
 fn sync_discover_re_runs_converge() {
     let (home_dir, home) = discover_env();
     let (_db_dir, db) = temp_db("discover-converge");

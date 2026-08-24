@@ -122,8 +122,9 @@ certified — currently 0 Beta. **Not release-ready per provider gate.**
 | 10 | openclaw / tencent-codebuddy / antigravity declared `discover: Unsupported` while `provider_data_root` wires a discovery root for each — the same under-claim class as row 9, on the last unguarded capability column | P1 | closed | 68665a7 |
 | 11 | Both SQLite adapters leaked their temp database copy on every probe/parse: cursor returned a bare `Connection` with no cleanup guard, and opencode returned the guard beside the connection in a tuple (which drops the guard *first*, so the unlink ran while the file was still open and Windows refused it) | P1 | closed | 2a1f062 |
 | 12 | `sync --discover` hard-coded a `.jsonl` extension filter, so a SQLite-sourced provider could never be auto-discovered even with a real data root — and registering one anyway would have made a *complete* scan return zero paths and tombstone that provider's previously indexed sources | P1 | closed | this task |
-| 13 | `pi` and `openclaw` share one byte-identical v3 JSONL format, so both probes returned `Confirmed` and whole-registry selection always hit the tie branch: every source under either root was rejected as `ambiguous provider selection` and could not be indexed at all — pi's own golden fixture included | P1 | closed | this task |
-| 13 | pi and openclaw transcripts are the *same* v3 JSONL format with no in-content discriminator, so both adapters probe `Confirmed` on the same bytes and whole-registry selection always hit the ambiguity tie — every source under `~/.pi` or `~/.openclaw` was unindexable, including pi's own golden fixture | P1 | closed | this task |
+| 13 | pi and openclaw transcripts are the *same* v3 JSONL format with no in-content discriminator, so both adapters probe `Confirmed` on the same bytes and whole-registry selection always hit the ambiguity tie — every source under `~/.pi` or `~/.openclaw` was unindexable, including pi's own golden fixture | P1 | closed | 82f0f26 |
+| 14 | Row 13's fix only reached `sync --discover`, which carries a scanned provider identity. Explicit `sync <file>` and `ingest <file>` still probed the whole registry, so naming a pi or openclaw transcript by path — the natural first move for a new user, and the only way to index a source outside a canonical root — still failed with the same `ambiguous provider selection` error | P1 | closed | this task |
+| 15 | `qoder`'s probe counted any record whose top-level `type` is `session_meta` as its own header, but every Codex rollout record is a `{timestamp, type, payload}` envelope whose first line is exactly that. Codex degrades `Confirmed`→`High` on a tolerated broken line (its own golden fixture has one), so both adapters returned `High` and a real Codex rollout with any damaged line was rejected as ambiguous rather than indexed as Codex | P1 | closed | this task |
 
 ---
 
@@ -270,6 +271,58 @@ regression test pins the invariant in its strongest form: identical bytes
 written under both roots must each index to their own provider, as two distinct
 messages in two distinct sessions. Mutation-verified by disabling the narrowing,
 which reproduced the original `ambiguous provider selection` failure verbatim.
+
+Closed 2026-08-25 (§6 rows 14–15, this task): row 13's fix was incomplete, and
+finding the rest of it required a guard rather than another accident.
+
+Row 14 is that incompleteness. The hint reached staging only through
+`sync --discover`, which owns a scanned path→provider table; explicit
+`sync <file>` and `ingest <file>` passed `None` and still went to the whole
+registry, so pointing either command at a real transcript under `~/.pi` failed
+with the same `ambiguous provider selection` the discovery path had just been
+taught to avoid. The earlier reasoning — that explicit invocation has no path
+fact — was simply wrong: the path is right there in the argument, and
+`PROVIDER_DISCOVERY_ROOTS` already knows which provider owns it. The new
+`provider_for_source_path` reads that same table in reverse (path → provider),
+so both entry points now resolve one file to one provider and the two cannot
+diverge. Matching is per path segment after `source_path_identity` normalization,
+so `.pi/agent/sessions-backup` does not match `.pi/agent/sessions`; a path that
+*is* a registered root, rather than under one, is not a source and does not
+match. The reverse lookup deliberately does **not** write
+`source_scans.provider_id`: that column's tombstone diff means "this row came
+from a complete root+extension enumeration", and populating it from an explicit
+sync would let the next complete discovery scan synthesize an empty batch for,
+say, a hand-renamed `foo.jsonl.bak` and erase it. Verified end to end against a
+real pi transcript and a real openclaw transcript: both index under their
+canonical roots, while the same bytes copied outside every registered root still
+receive the honest tie rejection.
+
+Row 15 came from the guard added alongside it. Rather than wait for the next
+format twin to surface as a user-visible failure,
+`ambiguous_formats_are_always_separable_by_a_registered_root` probes each
+implemented provider's real golden fixture against the whole registry and
+requires that either exactly one variant holds top confidence, or every tied
+claimant has a registered canonical root. On its first run it failed on the
+codex fixture, claimed jointly by `codex` and `qoder`: qoder counted any record
+whose top-level `type` is `session_meta` as its own header, and every Codex
+rollout line is a `{timestamp, type, payload}` envelope whose first line is
+exactly that. Codex's own fixture contains a deliberately broken line that
+degrades it from `Confirmed` to `High`, qoder also reported `High`, and the tie
+branch would have rejected the source. Since `qoder` has no registered
+discovery root, no path fact could have rescued it — a genuine shippable defect,
+found by the guard within seconds of its existence. The discriminator is
+structural: a Qoder header carries identity at the top level or in a
+`session_meta` object and never has `payload`, so a `session_meta` record
+carrying `payload` is now counted as a Codex envelope and recorded in
+`unmatched_evidence`. The paired test
+`pi_and_openclaw_fixtures_are_mutually_indistinguishable_by_content` anchors the
+premise the root-based fix rests on, and will fail if either format ever gains a
+discriminator — which would be welcome, but must be reflected in the reasoning
+that justifies the narrowing. A coverage test keeps `TWIN_FIXTURES` in step with
+the capability matrix, so a new provider cannot be added without being checked
+against the existing ones; whole-file SQLite sources are excluded by name, since
+their probes key on magic bytes and table structure rather than competing for
+the same JSONL records.
 
 Closed by the 2026-08-17 release-gap wave (post-draft audit fixes, pushed to
 `main` at `ed57a9a`): Robot v1.1 `searchData.facets` schema echo + protocol

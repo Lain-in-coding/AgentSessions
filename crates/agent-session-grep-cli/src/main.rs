@@ -2889,10 +2889,11 @@ fn provider_registry() -> Vec<Box<dyn ProviderAdapter>> {
 /// 重新打开 bounded reader（JSONL 逐行 / 整档格式按 manifest 上限），生产路径
 /// 绝不把完整 transcript 变成 Vec（RFC-0002 §7）。
 ///
-/// `provider_hint` 是**规范根派生**的 provider 身份，只有 `sync --discover` 能提供
-/// （它按 [`PROVIDER_DISCOVERY_ROOTS`] 逐根扫描，故每条路径的 provider 是扫描事实
-/// 而非猜测）。给出时候选集收缩到该 provider 的 adapter，probe 仍照常执行——身份来自
-/// 路径，格式判定仍来自内容。
+/// `provider_hint` 是**规范根派生**的 provider 身份：路径落在某个
+/// [`PROVIDER_DISCOVERY_ROOTS`] 登记根之下时，该路径的 provider 是布局事实而非猜测。
+/// `sync --discover` 由逐根扫描直接得到它，显式 `sync <file>` / `ingest <file>` 由
+/// [`provider_for_source_path`] 反查同一张表得到。给出时候选集收缩到该 provider 的
+/// adapter，probe 仍照常执行——身份来自路径，格式判定仍来自内容。
 ///
 /// 这一收缩是必需的，不是优化：pi 与 openclaw 的 transcript 是**同一种** v3 JSONL
 /// （`{type:session,...}` 头 + `{type:message,message:{role,content}}`，见
@@ -2901,8 +2902,8 @@ fn provider_registry() -> Vec<Box<dyn ProviderAdapter>> {
 /// 必然命中 `select_and_stage_source` 的 tie 分支并拒绝整个源——`~/.pi` 与
 /// `~/.openclaw` 下的源在修复前一律无法索引。歧义只能由路径消解。
 ///
-/// 未登记发现根的 provider（显式 `sync <file>` / `ingest`）没有路径事实可用，
-/// 仍走全 registry probe：那里的 tie 拒绝是诚实行为，不得靠猜测绕过。
+/// 路径不在任何登记根之下（临时目录、导出的副本、未登记 provider）时没有路径事实
+/// 可用，仍走全 registry probe：那里的 tie 拒绝是诚实行为，不得靠猜测绕过。
 fn stage_with_source(
     source: &dyn agent_session_grep_ports::ReadOnlySource,
     provider_hint: Option<&str>,
@@ -3030,6 +3031,57 @@ fn provider_discovery_target(provider_id: &str) -> Option<(std::path::PathBuf, &
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(std::path::PathBuf::from)?;
     Some((home.join(sub), extension))
+}
+
+/// 反查一条源路径所属的 provider：路径落在某个 [`PROVIDER_DISCOVERY_ROOTS`] 登记根
+/// 之下时返回该 provider id。
+///
+/// 与 [`provider_discovery_target`] 是同一张表的两个方向——正向（provider → root）供
+/// `sync --discover` 逐根扫描，反向（path → provider）供显式 `sync <file>` /
+/// `ingest <file>`。两者共用一张表，因此不会出现"discover 认得这条路径、显式 sync 不
+/// 认得"的分裂。
+///
+/// 比较在 [`source_path_identity`] 归一之后进行（Windows 反斜杠 → 正斜杠、盘符小写），
+/// 并按路径分段而非字符串前缀匹配：`.pi/agent/sessions` 不得匹配到
+/// `.pi/agent/sessions-backup`。root 不存在于磁盘上也照常匹配——这里判定的是路径归属
+/// 这一布局事实，不是文件可读性。
+///
+/// 多个 root 同时匹配时取最长（分段最多）的那个，使将来登记嵌套根不会静默取错。
+///
+/// 只看 root 归属，**不要求**扩展名与该 provider 登记的扩展名一致：显式 `sync <file>`
+/// 是用户点名的意图，`~/.pi/.../foo.jsonl.bak` 这类改过名的真实 transcript 应当照常
+/// 索引，而不是因为撞上 pi/openclaw 的 tie 被整源拒绝。
+///
+/// 返回值只用于收缩 probe 候选集，**不**写入 `source_scans.provider_id`——后者的
+/// tombstone diff 语义要求该行确实来自一次"按 root + 扩展名枚举"的完整扫描
+/// （见 [`sync_discover`]）。若显式 sync 也写入 provider_id，上面那个 `.bak`
+/// 路径就会在下一次完整 discover 扫描中因未被重新发现而被合成空批抹掉。
+fn provider_for_source_path(path: &str) -> Option<&'static str> {
+    let normalized = source_path_identity(path);
+    let segments: Vec<&str> = normalized
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    let mut best: Option<(usize, &'static str)> = None;
+    for (id, sub, _) in PROVIDER_DISCOVERY_ROOTS {
+        let root_segments: Vec<&str> = sub.split('/').filter(|s| !s.is_empty()).collect();
+        if root_segments.is_empty() {
+            continue;
+        }
+        // root 是 home 相对的，源路径是绝对的，因此在任意位置对齐分段窗口即可
+        // （同时天然支持非默认 home / 测试用 HOME 覆盖）。窗口之后必须还有分段：
+        // 路径恰好停在 root 上时它是数据根目录本身，不是根下的某个源。
+        let matched = segments
+            .windows(root_segments.len())
+            .enumerate()
+            .any(|(start, window)| {
+                window == root_segments.as_slice() && start + root_segments.len() < segments.len()
+            });
+        if matched && best.is_none_or(|(len, _)| root_segments.len() > len) {
+            best = Some((root_segments.len(), id));
+        }
+    }
+    best.map(|(_, id)| id)
 }
 
 fn source_path_identity(path: &str) -> String {
@@ -3617,8 +3669,9 @@ fn ingest_file(
     let source = open_snapshot_source(path_ref, &snap).map_err(ProtocolError::from)?;
 
     // 2) probe-select + stage：每个 probe/parse 都从只读 source 重新打开 bounded reader。
-    //    显式 ingest 没有规范根事实可用，走全 registry probe（见 stage_with_source）。
-    let (staged, variant) = stage_with_source(&source, None)?;
+    //    路径落在某个登记根之下时该归属是布局事实，按 root 表反查后收缩候选集
+    //    （见 stage_with_source）；否则为 None，走全 registry probe。
+    let (staged, variant) = stage_with_source(&source, provider_for_source_path(path))?;
 
     // 3) 提交前复核：源在 stage 期间被改写则拒绝提交（RFC-0002 §4）。
     verify_snapshot(path_ref, &snap).map_err(ProtocolError::from)?;
@@ -3859,12 +3912,16 @@ fn sync_files_inner(
             diagnostic_count += 1;
             (None, None)
         } else {
-            // discover 扫描出的路径带规范根派生的 provider 身份；显式 sync 的路径
-            // 没有该事实（hint 为 None），照常全 registry probe。
-            let (staged, variant) = stage_with_source(
-                &source,
-                discovered_provider_ids.get(path).map(String::as_str),
-            )?;
+            // provider 身份优先取 discover 的扫描事实；显式 sync 没有扫描结果，
+            // 则按同一张 root 表反查路径归属（见 provider_for_source_path）。两条
+            // 入口因此对同一个文件得到同一个 provider——不再出现 discover 能索引、
+            // 显式 sync 撞 tie 的分裂。路径不在任何登记根下时仍为 None，走全
+            // registry probe。
+            let hint = discovered_provider_ids
+                .get(path)
+                .map(String::as_str)
+                .or_else(|| provider_for_source_path(path));
+            let (staged, variant) = stage_with_source(&source, hint)?;
             (Some(staged), Some(variant))
         };
         if progress {
@@ -4343,6 +4400,238 @@ mod tests {
             provider_discovery_target("cursor").is_none(),
             "cursor 的 workspaceStorage 布局尚无本机证据；登记错误的 root 会让完整\
              扫描返回 0 条路径并 tombstone 已索引内容"
+        );
+    }
+
+    /// 各已实现 provider 的 pinned golden fixture 字节（编译期内联）。
+    ///
+    /// 用真实 fixture 而非手写样本：twin 守卫要判定的是"真实 transcript 字节能否被
+    /// 单一 provider 认领"，手写样本可能碰巧带上真实格式里没有的判别位。
+    /// SQLite 源（opencode/cursor 的 `.db`）不含在内——它们的 probe 走整档打开，
+    /// 与 JSONL 记录流不构成同格式歧义。
+    const TWIN_FIXTURES: &[(&str, &[u8])] = &[
+        (
+            "aider",
+            include_bytes!("../../agent-session-grep-provider-aider/tests/golden/basic.md"),
+        ),
+        (
+            "antigravity",
+            include_bytes!(
+                "../../agent-session-grep-provider-antigravity/tests/golden/basic.jsonl"
+            ),
+        ),
+        (
+            "claude-code",
+            include_bytes!("../../agent-session-grep-provider-claude/tests/golden/basic.jsonl"),
+        ),
+        (
+            "cline",
+            include_bytes!("../../agent-session-grep-provider-cline/tests/golden/basic.json"),
+        ),
+        (
+            "codex",
+            include_bytes!("../../agent-session-grep-provider-codex/tests/golden/basic.jsonl"),
+        ),
+        (
+            "grok-build",
+            include_bytes!("../../agent-session-grep-provider-grok/tests/golden/basic.jsonl"),
+        ),
+        (
+            "hermes",
+            include_bytes!("../../agent-session-grep-provider-hermes/tests/golden/basic.json"),
+        ),
+        (
+            "kimi-code",
+            include_bytes!("../../agent-session-grep-provider-kimi/tests/golden/basic.jsonl"),
+        ),
+        (
+            "openclaw",
+            include_bytes!("../../agent-session-grep-provider-openclaw/tests/golden/basic.jsonl"),
+        ),
+        (
+            "pi",
+            include_bytes!("../../agent-session-grep-provider-pi/tests/golden/basic.jsonl"),
+        ),
+        (
+            "qoder",
+            include_bytes!("../../agent-session-grep-provider-qoder/tests/golden/basic.jsonl"),
+        ),
+        (
+            "tencent-codebuddy",
+            include_bytes!("../../agent-session-grep-provider-codebuddy/tests/golden/basic.jsonl"),
+        ),
+    ];
+
+    /// 对一份字节跑全 registry probe，返回并列最高置信度的 variant 集合。
+    ///
+    /// 复刻 `select_and_stage_source` 的排序规则（Confirmed>High>Low，Ambiguous
+    /// 不参与），因此"返回多于一个 variant" ⟺ 生产路径会命中 tie 分支并整源拒绝。
+    fn top_confidence_variants(bytes: &[u8]) -> Vec<String> {
+        fn rank(c: agent_session_grep_ports::Confidence) -> Option<u8> {
+            use agent_session_grep_ports::Confidence;
+            match c {
+                Confidence::Confirmed => Some(3),
+                Confidence::High => Some(2),
+                Confidence::Low => Some(1),
+                Confidence::Ambiguous => None,
+            }
+        }
+        let source = agent_session_grep_ports::SliceSource::new(bytes);
+        let mut best: Option<u8> = None;
+        let mut variants: Vec<String> = Vec::new();
+        for adapter in provider_registry() {
+            let Ok(probe) = adapter.probe_source(&source) else {
+                continue;
+            };
+            let Some(r) = rank(probe.confidence) else {
+                continue;
+            };
+            match best {
+                Some(best_rank) if r < best_rank => {}
+                Some(best_rank) if r == best_rank => {
+                    if !variants.contains(&probe.variant_id) {
+                        variants.push(probe.variant_id);
+                    }
+                }
+                _ => {
+                    best = Some(r);
+                    variants = vec![probe.variant_id];
+                }
+            }
+        }
+        variants
+    }
+
+    #[test]
+    fn twin_fixture_table_covers_every_record_stream_provider() {
+        // 新增 provider 而未登记 fixture 时立即失败，否则下面的 twin 守卫会静默
+        // 漏检新来者——pi/openclaw 的碰撞正是"没人对照过"才活到运行期的。
+        let matrix = ProviderCapabilityMatrix::current();
+        let covered: BTreeSet<&str> = TWIN_FIXTURES.iter().map(|(id, _)| *id).collect();
+        assert_eq!(
+            covered.len(),
+            TWIN_FIXTURES.len(),
+            "TWIN_FIXTURES 不得有重复 provider id"
+        );
+        // 整档 SQLite 源单列：probe 靠 magic header + 表结构，不与 JSONL 争同一字节。
+        let whole_file_sqlite: BTreeSet<&str> = ["opencode", "cursor"].into_iter().collect();
+        let implemented: BTreeSet<&str> = matrix
+            .providers
+            .iter()
+            .filter(|p| p.maturity != ProviderMaturity::Unsupported)
+            .map(|p| p.provider_id.as_str())
+            .filter(|id| !whole_file_sqlite.contains(id))
+            .collect();
+        assert_eq!(
+            covered, implemented,
+            "TWIN_FIXTURES 必须恰好覆盖除整档 SQLite 源外的全部已实现 provider"
+        );
+    }
+
+    #[test]
+    fn ambiguous_formats_are_always_separable_by_a_registered_root() {
+        // 本仓库已经踩过一次：pi 与 openclaw 是同一种 v3 JSONL，两者 probe 同为
+        // Confirmed，`select_and_stage_source` 因此命中 tie 分支拒绝整个源——两个
+        // provider 的**任何**源都无法索引，而唯一的既有信号是运行期报错。
+        //
+        // 这条断言把不变量前移到编译-测试期：对每份真实 golden fixture，要么全
+        // registry probe 只有一个最高置信度 variant（内容自带判别位），要么所有
+        // 并列者都在 PROVIDER_DISCOVERY_ROOTS 里登记了各自的规范根（歧义可由路径
+        // 消解）。两者都不满足即为可发布缺陷：那些源既无法靠内容区分，也没有路径
+        // 事实可依。
+        let wired: BTreeSet<&str> = PROVIDER_DISCOVERY_ROOTS
+            .iter()
+            .map(|(id, _, _)| *id)
+            .collect();
+        for (provider_id, bytes) in TWIN_FIXTURES {
+            let variants = top_confidence_variants(bytes);
+            assert!(
+                !variants.is_empty(),
+                "{provider_id}: golden fixture 必须至少被一个 adapter 认领"
+            );
+            if variants.len() == 1 {
+                continue;
+            }
+            // 并列：每个并列 provider 都必须有登记根，否则其源不可索引。
+            let claimants: Vec<&str> = variants
+                .iter()
+                .map(|v| v.split('/').next().unwrap_or(v))
+                .collect();
+            for claimant in &claimants {
+                assert!(
+                    wired.contains(claimant),
+                    "{provider_id} 的 fixture 被 {claimants:?} 并列认领（生产路径会\
+                     整源拒绝），但 `{claimant}` 未登记规范根——该 provider 的源\
+                     既无法靠内容区分也无路径事实可依，属可发布缺陷"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pi_and_openclaw_fixtures_are_mutually_indistinguishable_by_content() {
+        // 正向锚定上面那条守卫的现实前提：这两个 provider 的真实 fixture 确实互相
+        // 被对方 Confirmed 认领。若将来任一方的格式引入判别位而使二者可分，此断言
+        // 失败——那是好事，但需要同步更新 stage_with_source 的文档依据。
+        for provider_id in ["pi", "openclaw"] {
+            let bytes = TWIN_FIXTURES
+                .iter()
+                .find(|(id, _)| *id == provider_id)
+                .expect("TWIN_FIXTURES 必须含 pi/openclaw")
+                .1;
+            let variants = top_confidence_variants(bytes);
+            let claimants: BTreeSet<&str> = variants
+                .iter()
+                .map(|v| v.split('/').next().unwrap_or(v))
+                .collect();
+            assert!(
+                claimants.contains("pi") && claimants.contains("openclaw"),
+                "{provider_id} 的 fixture 应同时被 pi 与 openclaw 认领，实际 {claimants:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn provider_for_source_path_resolves_registered_roots() {
+        // 正向：登记根下的路径归属该 provider（两个 twin 各自解析正确即为修复本身）。
+        assert_eq!(
+            provider_for_source_path("C:/Users/x/.pi/agent/sessions/--work--/one.jsonl"),
+            Some("pi")
+        );
+        assert_eq!(
+            provider_for_source_path("C:/Users/x/.openclaw/agents/main/sessions/one.jsonl"),
+            Some("openclaw")
+        );
+        // Windows 反斜杠与大写盘符经 source_path_identity 归一后同样匹配。
+        assert_eq!(
+            provider_for_source_path(r"C:\Users\x\.pi\agent\sessions\--work--\one.jsonl"),
+            Some("pi")
+        );
+        // 非默认 home（测试用 HOME 覆盖、多用户 profile）也匹配：按分段窗口对齐，
+        // 不依赖 home 前缀。
+        assert_eq!(
+            provider_for_source_path("/tmp/fake-home/.pi/agent/sessions/x/one.jsonl"),
+            Some("pi")
+        );
+    }
+
+    #[test]
+    fn provider_for_source_path_rejects_non_root_paths() {
+        // 未登记根 / 任意目录 → None，走全 registry probe（不猜身份）。
+        assert_eq!(provider_for_source_path("C:/tmp/export/one.jsonl"), None);
+        assert_eq!(
+            provider_for_source_path("C:/Users/x/.cursor/sessions/one.jsonl"),
+            None
+        );
+        // 分段匹配而非字符串前缀：`sessions-backup` 不是 `sessions`。
+        assert_eq!(
+            provider_for_source_path("C:/Users/x/.pi/agent/sessions-backup/one.jsonl"),
+            None
+        );
+        // 路径就是 root 自身（目录）→ 不算归属。
+        assert_eq!(
+            provider_for_source_path("C:/Users/x/.pi/agent/sessions"),
+            None
         );
     }
 
