@@ -3019,6 +3019,20 @@ const PROVIDER_DISCOVERY_ROOTS: &[(&str, &str, &str)] = &[
     // `session_<id>.json`（完整 transcript + metadata），同目录的 `<id>.jsonl`
     // 只存部分近期状态，上游明确忽略；精确扩展名匹配天然把它们排除。
     ("hermes", ".hermes/sessions", "json"),
+    // Grok Build 与 Kimi Code 的根同样来自各自 adapter 所移植的上游 fast-resume
+    // （`src/config.rs`）：`grok_sessions_dir()` = `~/.grok/sessions`，
+    // `kimi_sessions_dir()` = `~/.kimi-code/sessions`。两者都还支持 `GROK_HOME` /
+    // `KIMI_CODE_HOME` 覆盖，本表只登记 home 相对的默认根——环境变量覆盖时该
+    // provider 的扫描会是"根不存在"从而 partial（绝不 tombstone），比猜测更诚实。
+    //
+    // 两个根的源都是 `.jsonl`，但都与同目录的其他文件混放：Grok 每个 session 目录
+    // 是 `updates.jsonl` + `summary.json`，Kimi 是 `wire.jsonl` + `state.json`，
+    // 根下另有 `session_index.jsonl`。精确扩展名匹配排除 `.json` 旁文件；
+    // `session_index.jsonl` 确实是 `.jsonl`，会被交给 probe——它不含
+    // `context.append_message` 记录，adapter 如实 `AmbiguousVariant` 拒绝，
+    // 这正是 probe 该做的判定，不是可以靠猜文件名绕过的事。
+    ("grok-build", ".grok/sessions", "jsonl"),
+    ("kimi-code", ".kimi-code/sessions", "jsonl"),
 ];
 
 /// 解析当前用户 home 目录下某 provider 的规范化 transcript 数据根。

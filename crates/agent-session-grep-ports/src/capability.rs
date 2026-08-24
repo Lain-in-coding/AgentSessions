@@ -181,7 +181,8 @@ impl ProviderCapabilityMatrix {
                     provider_id: "grok-build".into(),
                     variant_id: "grok-build/acp-updates-v1".into(),
                     maturity: ProviderMaturity::Experimental,
-                    discover: CapabilityLevel::Unsupported,
+                    // `PROVIDER_DISCOVERY_ROOTS` 注册 `~/.grok/sessions`（JSONL 源）。
+                    discover: CapabilityLevel::Native,
                     probe: CapabilityLevel::Native,
                     parse: CapabilityLevel::Native,
                     search: CapabilityLevel::Native,
@@ -215,7 +216,8 @@ impl ProviderCapabilityMatrix {
                     provider_id: "kimi-code".into(),
                     variant_id: "kimi-code/wire-jsonl-v1".into(),
                     maturity: ProviderMaturity::Experimental,
-                    discover: CapabilityLevel::Unsupported,
+                    // `PROVIDER_DISCOVERY_ROOTS` 注册 `~/.kimi-code/sessions`（JSONL 源）。
+                    discover: CapabilityLevel::Native,
                     probe: CapabilityLevel::Native,
                     parse: CapabilityLevel::Native,
                     search: CapabilityLevel::Native,
