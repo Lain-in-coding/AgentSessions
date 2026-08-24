@@ -258,6 +258,11 @@ impl From<PortError> for ProtocolError {
             PortError::SourceIo(_) => "源文件无法读取".to_string(),
             _ => e.to_string(),
         };
+        // 掩码后原始细节即丢失，`catalog_error` 在现场无从诊断。ASG_DEBUG_ERRORS=1
+        // 时把细节写 stderr（永不进 stdout envelope，不影响协议契约）。
+        if std::env::var_os("ASG_DEBUG_ERRORS").is_some() {
+            eprintln!("debug [{}]: {e}", code.as_str());
+        }
         ProtocolError::new(code, message)
     }
 }

@@ -405,12 +405,16 @@ def run_regression(binary: str, sources: Sequence[str]) -> Dict[str, Any]:
         for chunk in _chunk_sources(sources):
             last_code, sync = run_cli(binary, db, ["sync", *chunk])
             last_ok = sync.get("ok")
-            if (last_code == 5 and not last_ok) or (
+            if (last_code in (5, 6) and not last_ok) or (
                 last_code == 0 and last_ok is not True
             ):
-                # A source in the chunk was written during the sync (a live
-                # session appending). Wait for it to settle and retry; a
-                # persistent change is a real failure, not a skip.
+                # Exit 5: a source in the chunk was written during the sync (a
+                # live session appending). Exit 6: the writer lease from the
+                # previous chunk has not been released yet — the corpus is
+                # chunked, so each chunk opens its own writer and a large
+                # preceding chunk can still be finalizing. Both are transient;
+                # wait for it to settle and retry. A persistent failure is a
+                # real failure, not a skip.
                 for _attempt in range(SYNC_CHANGED_RETRIES):
                     time.sleep(SYNC_CHANGED_BACKOFF_S)
                     last_code, sync = run_cli(binary, db, ["sync", *chunk])
