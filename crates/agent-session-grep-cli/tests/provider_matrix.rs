@@ -636,3 +636,118 @@ fn beta_readiness_ledger_capability_columns_match_capability_matrix() {
         }
     }
 }
+
+// ---- README.md provider 表防漂移 ----
+
+/// README 原文（相对本源文件路径）。README 是访客读到的第一份能力声明，
+/// 却是手写表格；这里把它纳入同一条漂移纪律。
+const README: &str = include_str!("../../../README.md");
+
+/// 解析 README "## Providers" 小节的表格数据行：`(Provider 名, Status, Format)`。
+/// 表头与分隔行跳过；小节之外的表格不收集。
+fn readme_provider_rows() -> Vec<(String, String, String)> {
+    let mut rows = Vec::new();
+    let mut in_section = false;
+    for line in README.lines() {
+        if line.starts_with("## ") {
+            in_section = line.trim() == "## Providers";
+            continue;
+        }
+        if !in_section || !line.starts_with('|') {
+            continue;
+        }
+        let cells: Vec<&str> = line
+            .trim_matches('|')
+            .split('|')
+            .map(|cell| cell.trim())
+            .collect();
+        if cells.len() < 3 || cells[0] == "Provider" || cells[1].starts_with("---") {
+            continue;
+        }
+        rows.push((
+            cells[0].to_string(),
+            cells[1].to_string(),
+            cells[2].to_string(),
+        ));
+    }
+    rows
+}
+
+#[test]
+fn readme_provider_table_matches_capability_matrix_maturity() {
+    // README 的 Status 列必须与 capability.rs 的 maturity 一致，且行数与
+    // 16 行权威矩阵相同。任一侧增删 provider 或提级而未同步 README，立即失败——
+    // 对外第一眼看到的表格不能比内部台账更乐观。
+    let matrix = ProviderCapabilityMatrix::current();
+    let rows = readme_provider_rows();
+    assert_eq!(
+        rows.len(),
+        matrix.providers.len(),
+        "README Providers 表应有 {} 行（与 capability.rs 一致），实际 {} 行",
+        matrix.providers.len(),
+        rows.len()
+    );
+
+    // capability.rs 的 provider_id 不是 README 的展示名（README 用 "Claude Code"、
+    // "Tencent CodeBuddy" 等人读名称），因此按 maturity 计数比对：README 不得
+    // 出现比矩阵更高的等级，也不得少记 deferred 行。
+    let matrix_experimental = matrix
+        .providers
+        .iter()
+        .filter(|p| p.maturity == ProviderMaturity::Experimental)
+        .count();
+    let matrix_deferred = matrix
+        .providers
+        .iter()
+        .filter(|p| p.maturity == ProviderMaturity::Unsupported)
+        .count();
+    let readme_experimental = rows
+        .iter()
+        .filter(|(_, status, _)| status == "Experimental")
+        .count();
+    let readme_deferred = rows
+        .iter()
+        .filter(|(_, status, _)| status == "Deferred")
+        .count();
+    assert_eq!(
+        readme_experimental, matrix_experimental,
+        "README 的 Experimental 行数与 capability.rs 漂移"
+    );
+    assert_eq!(
+        readme_deferred, matrix_deferred,
+        "README 的 Deferred 行数与 capability.rs 漂移"
+    );
+
+    // 诚实门：只要还没有 provider 晋级，README 不得出现 Beta/GA/Certified 字样。
+    let has_promoted = matrix.providers.iter().any(|p| {
+        p.maturity != ProviderMaturity::Experimental && p.maturity != ProviderMaturity::Unsupported
+    });
+    if !has_promoted {
+        for (name, status, _) in &rows {
+            assert!(
+                status == "Experimental" || status == "Deferred",
+                "README provider `{name}` 声明为 `{status}`，但 capability.rs 尚无任何晋级 provider"
+            );
+        }
+    }
+}
+
+#[test]
+fn readme_implemented_provider_count_matches_capability_matrix() {
+    // README 正文写着 "Currently implemented (14/16 planned; 2 deferred ...)"。
+    // 这两个数字必须由 capability.rs 推出，而不是手写后忘记更新。
+    let matrix = ProviderCapabilityMatrix::current();
+    let implemented = matrix
+        .providers
+        .iter()
+        .filter(|p| p.maturity != ProviderMaturity::Unsupported)
+        .count();
+    let total = matrix.providers.len();
+    let deferred = total - implemented;
+    let expected =
+        format!("Currently implemented ({implemented}/{total} planned; {deferred} deferred");
+    assert!(
+        README.contains(&expected),
+        "README 的实现计数与 capability.rs 漂移，应包含 `{expected}`"
+    );
+}
