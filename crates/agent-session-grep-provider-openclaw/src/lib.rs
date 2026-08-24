@@ -82,7 +82,7 @@ impl ProviderAdapter for OpenClawAdapter {
             Some(1),
             &[
                 "resume is intentionally unsupported (gateway-managed)",
-                "native message ids are not preserved (synthetic openclaw-msg-{seq})",
+                "native message ids are not preserved (ids are derived, not native)",
             ],
         )
     }

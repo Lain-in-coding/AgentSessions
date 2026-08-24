@@ -103,7 +103,7 @@ impl ProviderAdapter for GrokBuildAdapter {
             self.provider_id(),
             Some(1),
             &[
-                "chunk grouping reconstructs roles; no per-message native ids (synthetic grok-msg-{seq})",
+                "chunk grouping reconstructs roles; no per-message native ids (ids are derived, not native)",
                 "per-message timestamps are not extracted (always None)",
                 "session identity falls back to the first ACP promptId seen, not a durable session id",
             ],

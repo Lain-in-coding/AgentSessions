@@ -75,7 +75,7 @@ impl ProviderAdapter for PiAdapter {
             Some(1),
             &[
                 "non-conversational types (session_info/compaction/custom_message) are skipped",
-                "native message ids are not preserved (synthetic pi-msg-{seq})",
+                "native message ids are not preserved (ids are derived, not native)",
             ],
         )
     }

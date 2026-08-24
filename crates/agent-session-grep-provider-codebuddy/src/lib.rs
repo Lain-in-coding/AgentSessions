@@ -80,7 +80,7 @@ impl ProviderAdapter for CodeBuddyAdapter {
             &[
                 "the root startup-keyword user message (content: \"code\") is filtered out",
                 "no working-directory pair observation (no separate cwd-bearing header record)",
-                "native message ids are not preserved (synthetic codebuddy-msg-{seq})",
+                "native message ids are not preserved (ids are derived, not native)",
             ],
         )
     }

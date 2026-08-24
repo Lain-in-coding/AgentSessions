@@ -107,7 +107,7 @@ impl ProviderAdapter for CursorAdapter {
             &[
                 "SQLite source has no byte spans",
                 "chatdata/prompts are multi-generation formats; version layering is not yet implemented",
-                "native message ids are not preserved (synthetic cursor-msg-{seq})",
+                "native message ids are not preserved (ids are derived, not native)",
             ],
         )
     }

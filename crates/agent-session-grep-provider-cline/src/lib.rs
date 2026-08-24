@@ -55,7 +55,7 @@ impl ProviderAdapter for ClineAdapter {
             Some(1),
             &[
                 "no session id in the JSON array file; session_native_id is left unset",
-                "no byte spans (whole-file JSON array); native message ids are not preserved (synthetic cline-msg-{seq})",
+                "no byte spans (whole-file JSON array); native message ids are not preserved (ids are derived, not native)",
             ],
         )
     }
