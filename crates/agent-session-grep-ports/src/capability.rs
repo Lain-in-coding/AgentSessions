@@ -133,6 +133,14 @@ impl ProviderCapabilityMatrix {
                     provider_id: "aider".into(),
                     variant_id: "aider/chat-history-md-v1".into(),
                     maturity: ProviderMaturity::Experimental,
+                    // `PROVIDER_DISCOVERY_ROOTS` 按构造是 home 相对的单根表，而
+                    // aider 的 canonical 源是**每个 repo 各一份**的
+                    // `<repo>/.aider.chat.history.md`——home 下没有汇总目录可登记。
+                    // 本 adapter 所引上游 agentsview 也不是查表：它从任意用户给定
+                    // 根递归找该文件名，并显式跳过 macOS 受保护的一级 home 目录
+                    // （`aiderProtectedHomeDirs`）。这是"结构上不适用本表"，不是
+                    // "根未知"：真要支持得先有 repo 集合来源（workspace 列表），
+                    // 属独立任务。当前经显式 `sync <file>` 路径完整可用。
                     discover: CapabilityLevel::Unsupported,
                     probe: CapabilityLevel::Native,
                     parse: CapabilityLevel::Native,
@@ -359,6 +367,17 @@ impl ProviderCapabilityMatrix {
                     provider_id: "cursor".into(),
                     variant_id: "cursor/vscdb-chat-v1".into(),
                     maturity: ProviderMaturity::Experimental,
+                    // 本 adapter 的面是 VS Code workspaceStorage 的 `state.vscdb`
+                    // （`ItemTable` KV + chatdata/prompts 键），其 workspaceStorage
+                    // 布局无本机证据，不猜路径。
+                    //
+                    // 另有一个**看似可登记但实则错位**的根：fast-resume 的
+                    // `cursor_chats_dir()` = `~/.cursor/chats`，下面是
+                    // `<id>/store.db`。那是 Cursor **CLI** 的库，schema 为
+                    // `meta`/`blobs` 两张 KV 表，没有 `ItemTable`——本 adapter 的
+                    // probe 会一律 `AmbiguousVariant` 拒绝。登记它只会让扫描
+                    // "完整地"收下一批注定解析失败的源，并对外宣称 discover 可用，
+                    // 比留 unsupported 更不诚实。该面需要独立的 CLI variant，未实现。
                     discover: CapabilityLevel::Unsupported,
                     probe: CapabilityLevel::Native,
                     parse: CapabilityLevel::Native,
