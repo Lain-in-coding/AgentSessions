@@ -62,6 +62,8 @@ performance number is claimed.
 | LICENSE present and correct | pass | MIT + Apache-2.0, REUSE audit pending owner signing |
 | Third-party attributions complete | **pass (factual NOTICE landed)** | `NOTICE` now ships in every release archive; approval of the reuse matrix remains owner-signed (REUSE audit Draft) |
 | Fixture provenance documented | pass | synthetic gate fixtures, license + redaction recorded |
+| Community health files complete | **pass** | `CODE_OF_CONDUCT.md` (Contributor Covenant 2.1, CC BY 4.0 attribution recorded in `NOTICE`) landed at `9932df9`; GitHub community profile now resolves code_of_conduct, contributing, license, readme, pull_request_template. `issue_template` reports `null` because both templates use the newer issue-**forms** schema (`.github/ISSUE_TEMPLATE/*.yml`), which that API field does not report; both forms parse and carry name/description/labels/title/body |
+| Public-tree export dry run | **pass** | `scripts/release/export_public_tree.py` on `9932df9`: 484 files exported, 0 `.trellis/` internal records (406 tracked internally, all excluded), every community-health/license file present, exported-tree privacy scan clean |
 
 **Residual materials risks**: factual `NOTICE` + machine-readable third-party
 inventory now land in every archive; the REUSE reuse-matrix approval and any
