@@ -2644,19 +2644,25 @@ impl SqliteStore {
             };
             final_placement_ids.extend(source_placements.keys().cloned());
 
-            // 工具活动（v12）：派生活动 id、校验锚点/重复，跨源事实冲突拒绝。
+            // 工具活动（v12）：派生活动 id、校验锚点，跨源事实冲突拒绝。
             let mut source_activities = BTreeMap::new();
             for source_activity in &source.activities {
                 let stored =
                     stored_activity_from(&source_activity.message_id, &source_activity.activity)?;
-                if source_activities
-                    .insert(stored.activity_id.clone(), stored.clone())
-                    .is_some()
-                {
-                    return Err(PortError::Backend(format!(
-                        "source batch contains duplicate activity ids ({})",
-                        stored.activity_id
-                    )));
+                // 活动 id 对全部事实内容寻址（activity_id_for），所以同 id 蕴含同事实：
+                // 一条消息里两次完全相同的工具调用（同 kind/actor/name/target/status，
+                // 例如连续读同一文件、或 target 截断后相同）本就是同一检索面事实的
+                // 重复观察，按 id 去重而非当作冲突——这与跨源副本走同一去重规则。
+                // 仅当同 id 行事实不同（哈希碰撞或派生逻辑漂移）才 fail-closed。
+                if let Some(existing) = source_activities.get(&stored.activity_id) {
+                    if existing != &stored {
+                        return Err(PortError::Backend(format!(
+                            "activity {} has conflicting facts within one source",
+                            stored.activity_id
+                        )));
+                    }
+                } else {
+                    source_activities.insert(stored.activity_id.clone(), stored.clone());
                 }
                 if let Some(existing) = observed_activities.get(&stored.activity_id) {
                     if existing != &stored {
@@ -13837,6 +13843,43 @@ mod tests {
         second.fingerprint = Some("changed-fingerprint".into());
         assert!(store.commit_source_batches_if_changed(&[second]).unwrap());
         assert_eq!(activity_rows(&store).len(), 1);
+    }
+
+    #[test]
+    fn repeated_identical_activity_in_one_source_dedupes_instead_of_failing() {
+        // 真实 transcript 回归：一条消息里两次完全相同的工具调用（同
+        // kind/actor/name/target/status，例如连续读同一文件，或长 target 截断后
+        // 相同）派生同一内容寻址 id。这是同一检索面事实的重复观察，必须按 id
+        // 去重；此前批校验把它当作 duplicate activity ids 拒绝，导致整批 sync
+        // 以 catalog_error（exit 6）失败。
+        let store = SqliteStore::open_in_memory().unwrap();
+        let message = sid(IdKind::Message, b"activity-dup");
+        let mut source = tool_activity_batch(
+            "dup.jsonl",
+            &message,
+            "Read",
+            "file",
+            Some("src/lib.rs"),
+            "success",
+        );
+        let repeated = source.activities[0].clone();
+        source.activities.push(repeated);
+        assert!(store.commit_source_batches_if_changed(&[source]).unwrap());
+        let rows = activity_rows(&store);
+        assert_eq!(rows.len(), 1, "重复观察折叠为一行");
+        assert_eq!(rows[0].3, "Read");
+        assert_eq!(rows[0].4.as_deref(), Some("src/lib.rs"));
+        // claim 也只有一条：activity_ids 由去重后的集合派生。
+        let claims: i64 = store
+            .conn
+            .borrow()
+            .query_row(
+                "SELECT COUNT(*) FROM tool_activity_membership WHERE source_path = 'dup.jsonl'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(claims, 1);
     }
 
     #[test]
