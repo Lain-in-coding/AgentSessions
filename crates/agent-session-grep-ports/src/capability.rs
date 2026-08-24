@@ -303,7 +303,11 @@ impl ProviderCapabilityMatrix {
                     provider_id: "cline".into(),
                     variant_id: "cline/api-conversation-history-v1".into(),
                     maturity: ProviderMaturity::Experimental,
-                    discover: CapabilityLevel::Unsupported,
+                    // `PROVIDER_DISCOVERY_ROOTS` 注册 `~/.cline/data/tasks`（扩展名
+                    // `json`）：ctx 的 history_locations 与其 fixture 布局一致地把
+                    // task 目录放在该根下。同目录的三个旁文件都不是 role 数组，
+                    // 本 adapter 的 probe 如实拒绝，故登记该根不会误收。
+                    discover: CapabilityLevel::Native,
                     probe: CapabilityLevel::Native,
                     parse: CapabilityLevel::Native,
                     search: CapabilityLevel::Native,

@@ -3046,6 +3046,25 @@ const PROVIDER_DISCOVERY_ROOTS: &[(&str, &str, &str)] = &[
     // 交给 probe，纯噪音。root 不存在时扫描为 partial（绝不 tombstone），因此
     // 只装了 IDE、没有 CLI transcript 树的机器上登记它也是安全的。
     ("qoder", ".qoder/projects", "jsonl"),
+    // Cline 的 task 目录根来自 ctx 的 provider-support-matrix：
+    // `~/.cline/data/tasks/*/{api_conversation_history.json, ui_messages.json,
+    // context_history.json, task_metadata.json}`，ctx 的 fixture 就按这个形状铺
+    // （`cline/data/tasks/cline-task-1/` 下四个文件齐全）。本 adapter 只解析
+    // `api_conversation_history.json`（顶层 JSON 数组，元素带 `role`）。
+    //
+    // 扩展名 `json` 会把同目录另外三个旁文件也交给 probe，这是安全的而非漏洞：
+    // 三者顶层都是 object 而不是数组（`ui_messages.json` = {type,say,text,ts}，
+    // `context_history.json` = {context}，`task_metadata.json` =
+    // {taskId,createdAt,...}），probe 第一道 `value.as_array()` 判定就以
+    // `AmbiguousVariant` 拒绝。`data/state/taskHistory.json` 同理（object）。
+    // 也就是说 probe 自己有能力区分这一面，不需要靠猜文件名过滤。
+    //
+    // 另一处 ctx 记录的位置是 VS Code 扩展的 globalStorage
+    // （`saoudrizwan.claude-dev/tasks/*/`），它在 `AppData/Roaming/Code/User` 下
+    // 而非 home 相对的稳定路径，且随 VS Code 变体（Code/Code - Insiders/VSCodium）
+    // 漂移；本表只登记 `~/.cline/data/tasks` 这一条自证的 home 相对根，
+    // 不猜 globalStorage。CLINE_DATA_DIR / CLINE_DIR 环境变量覆盖同样不猜。
+    ("cline", ".cline/data/tasks", "json"),
 ];
 
 /// 解析当前用户 home 目录下某 provider 的规范化 transcript 数据根。

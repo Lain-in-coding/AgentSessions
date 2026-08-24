@@ -36,7 +36,7 @@ Legend for local columns: `ok` = present with tests; `partial` = present with kn
 | openclaw | ok | ok | native | ok (native) | missing | unsupported | missing | resume intentionally unsupported |
 | qoder | ok | ok | native | ok (native) | missing | unknown | missing | discovery covers the transcript-JSONL surface only (the Electron SQLite store is a separate, unimplemented surface); non-dialogue records skipped |
 | tencent-codebuddy | ok | ok | native | ok (native) | missing | unknown | missing | extension variant pending |
-| cline | ok | ok | missing | missing | missing | unsupported | missing | no session id / span; no discovery root |
+| cline | ok | ok | native | missing | missing | unsupported | missing | no session id / span; discovery covers the `~/.cline/data/tasks` tree only (the VS Code extension `globalStorage` tree is not home-relative and is not registered) |
 | aider | ok | ok | missing | derived | missing | unsupported | missing | approximate spans; no resume; no discovery root; no tool_activity (blockquote tool output is folded into assistant text, no structured call/result records) |
 
 ## Deferred providers (not Beta candidates)
