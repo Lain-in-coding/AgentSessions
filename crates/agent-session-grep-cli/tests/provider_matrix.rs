@@ -535,6 +535,60 @@ fn claude_tool_activity_claim_is_backed_by_observed_emissions() {
     }
 }
 
+/// 一段最小 Codex rollout：assistant 消息（提供锚点）+ 配对的
+/// `custom_tool_call` / `function_call_output`。codex 的 golden fixture 只有
+/// `session_meta` + `message`，不触发 activity，故这里用测试局部输入驱动——它
+/// 不是 golden fixture，无需 `fixture_revision` 递增。
+const CODEX_TOOL_ROLLOUT: &str = concat!(
+    r#"{"timestamp":"2026-07-26T08:00:00.000Z","type":"session_meta","payload":{"session_id":"0198aaaa-bbbb-7ccc-8ddd-eeeeffff0002"}}"#,
+    "\n",
+    r#"{"timestamp":"2026-07-26T08:00:01.000Z","type":"response_item","payload":{"type":"message","id":"msg-tool-anchor","role":"assistant","content":[{"type":"output_text","text":"checking the sandbox"}]}}"#,
+    "\n",
+    r#"{"timestamp":"2026-07-26T08:00:02.000Z","type":"response_item","payload":{"type":"custom_tool_call","id":"call_probe","tool_call_id":"call_probe","name":"shell","arguments":"{\"command\":\"cat config.toml\"}"}}"#,
+    "\n",
+    r#"{"timestamp":"2026-07-26T08:00:03.000Z","type":"response_item","payload":{"type":"function_call_output","id":"fco_probe","call_id":"call_probe","output":"policy = \"safe\"","is_error":false}}"#,
+    "\n",
+);
+
+#[test]
+fn codex_tool_activity_claim_is_backed_by_observed_emissions() {
+    // 正向验证（与 claude-code 对称）：codex 声明 tool_activity 可用，其 adapter
+    // 必须真的经 `emit_activity` 发出活动，且活动锚点非空（否则被 staging 丢弃）。
+    // codex 的 golden fixture 不含工具记录，若无本断言，删掉 adapter 的
+    // `custom_tool_call` / `function_call_output` 配对逻辑不会有任何测试失败在
+    // capability 层面报警——这正是 aider 虚报能存活的同一类缺口。
+    let matrix = ProviderCapabilityMatrix::current();
+    let codex_cap = matrix
+        .providers
+        .iter()
+        .find(|p| p.provider_id == "codex")
+        .expect("capability.rs 必须有 codex 行");
+    assert_ne!(
+        codex_cap.tool_activity,
+        CapabilityLevel::Unsupported,
+        "codex adapter 会配对发出 activity，声明不得为 Unsupported"
+    );
+
+    let (_, sink) = agent_session_grep_testkit::golden::parse_golden(
+        &CodexAdapter::new(),
+        CODEX_TOOL_ROLLOUT.as_bytes(),
+    );
+    assert_eq!(
+        sink.activities.len(),
+        1,
+        "配对的 custom_tool_call/function_call_output 必须恰好产出一条 activity"
+    );
+    let activity = &sink.activities[0];
+    assert!(
+        !activity.message_native_id.trim().is_empty(),
+        "codex 发出的活动必须带非空锚点 native id，否则会被 staging 丢弃"
+    );
+    assert_eq!(
+        activity.message_native_id, "msg-tool-anchor",
+        "活动必须锚定到发出调用前最近 emit 的助理消息"
+    );
+}
+
 #[test]
 fn beta_readiness_ledger_capability_columns_match_capability_matrix() {
     // ledger 本地能力列（source_span/tool_activity/resume/incremental）必须与
