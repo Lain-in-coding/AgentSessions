@@ -2888,8 +2888,24 @@ fn provider_registry() -> Vec<Box<dyn ProviderAdapter>> {
 /// 空源保留整源清空/tombstone 语义；其它源的每次 probe/parse 都由 source
 /// 重新打开 bounded reader（JSONL 逐行 / 整档格式按 manifest 上限），生产路径
 /// 绝不把完整 transcript 变成 Vec（RFC-0002 §7）。
+///
+/// `provider_hint` 是**规范根派生**的 provider 身份，只有 `sync --discover` 能提供
+/// （它按 [`PROVIDER_DISCOVERY_ROOTS`] 逐根扫描，故每条路径的 provider 是扫描事实
+/// 而非猜测）。给出时候选集收缩到该 provider 的 adapter，probe 仍照常执行——身份来自
+/// 路径，格式判定仍来自内容。
+///
+/// 这一收缩是必需的，不是优化：pi 与 openclaw 的 transcript 是**同一种** v3 JSONL
+/// （`{type:session,...}` 头 + `{type:message,message:{role,content}}`，见
+/// provider-openclaw 模块文档"the same v3 JSONL shape as the Pi adapter"），两者
+/// probe 同为 `Confirmed`，内容里没有任何可区分的判别位。全 registry probe 因此
+/// 必然命中 `select_and_stage_source` 的 tie 分支并拒绝整个源——`~/.pi` 与
+/// `~/.openclaw` 下的源在修复前一律无法索引。歧义只能由路径消解。
+///
+/// 未登记发现根的 provider（显式 `sync <file>` / `ingest`）没有路径事实可用，
+/// 仍走全 registry probe：那里的 tie 拒绝是诚实行为，不得靠猜测绕过。
 fn stage_with_source(
     source: &dyn agent_session_grep_ports::ReadOnlySource,
+    provider_hint: Option<&str>,
 ) -> Result<(StagedBatch, String), CliError> {
     if source.is_empty() {
         return Ok((
@@ -2909,7 +2925,17 @@ fn stage_with_source(
         ));
     }
     let registry = provider_registry();
-    let refs: Vec<&dyn ProviderAdapter> = registry.iter().map(|a| a.as_ref()).collect();
+    let refs: Vec<&dyn ProviderAdapter> = match provider_hint {
+        // 路径事实存在：只让该 provider 的 adapter 参与。命中 0 个 adapter 时
+        // 不静默退回全 registry——那会让 hint 形同虚设，且退回后仍会撞上同一
+        // tie。此处的空候选集由 select_and_stage_source 报"无 provider 认领"。
+        Some(pid) => registry
+            .iter()
+            .filter(|a| a.provider_id() == pid)
+            .map(|a| a.as_ref())
+            .collect(),
+        None => registry.iter().map(|a| a.as_ref()).collect(),
+    };
     select_and_stage_source(&refs, source).map_err(Into::into)
 }
 
@@ -2982,6 +3008,9 @@ const PROVIDER_DISCOVERY_ROOTS: &[(&str, &str, &str)] = &[
     // 它们排除；实测忽略 WAL 不会少读任何行（session/message/part 计数与带
     // WAL 打开完全一致），所以只收 `.db` 是完整的。
     ("opencode", ".local/share/opencode", "db"),
+    // Pi 的 transcript 按 cwd 编码分子目录（`sessions/<encoded-cwd>/*.jsonl`），
+    // 递归扫描天然覆盖；本机该 root 下 7 个文件全为 `.jsonl`，无其他扩展名混杂。
+    ("pi", ".pi/agent/sessions", "jsonl"),
 ];
 
 /// 解析当前用户 home 目录下某 provider 的规范化 transcript 数据根。
@@ -3588,7 +3617,8 @@ fn ingest_file(
     let source = open_snapshot_source(path_ref, &snap).map_err(ProtocolError::from)?;
 
     // 2) probe-select + stage：每个 probe/parse 都从只读 source 重新打开 bounded reader。
-    let (staged, variant) = stage_with_source(&source)?;
+    //    显式 ingest 没有规范根事实可用，走全 registry probe（见 stage_with_source）。
+    let (staged, variant) = stage_with_source(&source, None)?;
 
     // 3) 提交前复核：源在 stage 期间被改写则拒绝提交（RFC-0002 §4）。
     verify_snapshot(path_ref, &snap).map_err(ProtocolError::from)?;
@@ -3829,7 +3859,12 @@ fn sync_files_inner(
             diagnostic_count += 1;
             (None, None)
         } else {
-            let (staged, variant) = stage_with_source(&source)?;
+            // discover 扫描出的路径带规范根派生的 provider 身份；显式 sync 的路径
+            // 没有该事实（hint 为 None），照常全 registry probe。
+            let (staged, variant) = stage_with_source(
+                &source,
+                discovered_provider_ids.get(path).map(String::as_str),
+            )?;
             (Some(staged), Some(variant))
         };
         if progress {

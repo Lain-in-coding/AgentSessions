@@ -60,7 +60,7 @@ target。
 | probe | `native` | 全部 14 个 adapter 均有 probe，歧义一律 `AmbiguousVariant` 拒绝（不低置信度猜测） |
 | parse | `native` | 全部 14 个 adapter 均 streaming 到 `CanonicalEventSink` |
 | search | `native` | 统一经 canonical 索引检索 |
-| discover | `native`（claude-code/codex/openclaw/tencent-codebuddy/antigravity/opencode）；`unsupported`（其余） | `PROVIDER_DISCOVERY_ROOTS` 逐 provider 登记 (root, 扩展名)：JSONL provider 收 `jsonl`，opencode 的源是单个 SQLite `opencode.db` 故收 `db`（`-wal`/`-shm` 旁文件的 extension 不是 `db`，精确匹配天然排除）。cursor 同为 SQLite 源但 workspaceStorage 布局无本机证据，不猜路径故留 unsupported |
+| discover | `native`（claude-code/codex/openclaw/tencent-codebuddy/antigravity/opencode/pi）；`unsupported`（其余） | `PROVIDER_DISCOVERY_ROOTS` 逐 provider 登记 (root, 扩展名)：JSONL provider 收 `jsonl`，opencode 的源是单个 SQLite `opencode.db` 故收 `db`（`-wal`/`-shm` 旁文件的 extension 不是 `db`，精确匹配天然排除）。pi 的 root 为 `~/.pi/agent/sessions/<encoded-cwd>/`，逐层递归即可命中。cursor 同为 SQLite 源但 workspaceStorage 布局无本机证据，不猜路径故留 unsupported |
 | resume | `derived`（claude-code/codex/pi/grok）；`unknown`（opencode/kimi/qoder/codebuddy/hermes/antigravity/cursor）；`unsupported`（aider/cline/openclaw） | 未核验的 resume 命令一律不设默认值 |
 | context / handoff / incremental | `unsupported` 或 `unknown` | 属后续全能力链任务（`08-15-structured-activity-context-facets`），不在本任务范围 |
 | tool_activity | `partial`（claude-code/codex，schema v12 `tool_activities` 落库）；`unknown`（deepseek-harness/zcode，deferred）；`unsupported`（其余 12 个已实现 provider，含 aider） | CLI `--tool-kind`/`--tool-name`/`--main-only`/`--subagent-only`/`--include-sidechain`、MCP 同名参数与 TUI 分面键（`m` sidechain / `k` tool-kind）已落地；handoff pack 投影 `tool_activity` + 权威 `role`/`is_sidechain`，context 响应投影 `tool_activities` |

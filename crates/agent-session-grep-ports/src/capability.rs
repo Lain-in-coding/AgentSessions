@@ -198,7 +198,9 @@ impl ProviderCapabilityMatrix {
                     provider_id: "pi".into(),
                     variant_id: "pi/session-jsonl-v1".into(),
                     maturity: ProviderMaturity::Experimental,
-                    discover: CapabilityLevel::Unsupported,
+                    // `PROVIDER_DISCOVERY_ROOTS` 注册 `~/.pi/agent/sessions`（JSONL 源，
+                    // 按 cwd 编码分子目录，递归扫描覆盖）。
+                    discover: CapabilityLevel::Native,
                     probe: CapabilityLevel::Native,
                     parse: CapabilityLevel::Native,
                     search: CapabilityLevel::Native,

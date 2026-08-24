@@ -122,6 +122,8 @@ certified — currently 0 Beta. **Not release-ready per provider gate.**
 | 10 | openclaw / tencent-codebuddy / antigravity declared `discover: Unsupported` while `provider_data_root` wires a discovery root for each — the same under-claim class as row 9, on the last unguarded capability column | P1 | closed | 68665a7 |
 | 11 | Both SQLite adapters leaked their temp database copy on every probe/parse: cursor returned a bare `Connection` with no cleanup guard, and opencode returned the guard beside the connection in a tuple (which drops the guard *first*, so the unlink ran while the file was still open and Windows refused it) | P1 | closed | 2a1f062 |
 | 12 | `sync --discover` hard-coded a `.jsonl` extension filter, so a SQLite-sourced provider could never be auto-discovered even with a real data root — and registering one anyway would have made a *complete* scan return zero paths and tombstone that provider's previously indexed sources | P1 | closed | this task |
+| 13 | `pi` and `openclaw` share one byte-identical v3 JSONL format, so both probes returned `Confirmed` and whole-registry selection always hit the tie branch: every source under either root was rejected as `ambiguous provider selection` and could not be indexed at all — pi's own golden fixture included | P1 | closed | this task |
+| 13 | pi and openclaw transcripts are the *same* v3 JSONL format with no in-content discriminator, so both adapters probe `Confirmed` on the same bytes and whole-registry selection always hit the ambiguity tie — every source under `~/.pi` or `~/.openclaw` was unindexable, including pi's own golden fixture | P1 | closed | this task |
 
 ---
 
@@ -221,6 +223,53 @@ would both pick `asg-cursor-0-parse.db` and `File::create` would truncate the
 other's database mid-parse — the same flake `opencode` fixed for itself in
 `861240e`. Each adapter now has a unit test pinning the unlink and, for cursor,
 the pid scoping.
+
+Closed 2026-08-25 (§6 rows 12–13, this task): extending `sync --discover` beyond
+`.jsonl` surfaced two further defects in the same path.
+
+Row 12 was the extension filter itself. `discover_provider_sources` matched a
+hard-coded `.jsonl`, so a provider whose source is a database could never be
+auto-discovered — and registering its root anyway would have been actively
+destructive, because `sync_discover` synthesizes empty tombstone batches for
+prior paths a *complete* scan did not rediscover, so a complete-but-empty scan
+erases that provider's index. The extension is now a per-provider column in
+`PROVIDER_DISCOVERY_ROOTS` returned from the same lookup as the root, so a caller
+structurally cannot pair a root with the wrong extension. `opencode`
+(`~/.local/share/opencode`, `db`) and `pi` (`~/.pi/agent/sessions`, `jsonl`) are
+now registered on verified local evidence; `cursor` stays unregistered because
+its `workspaceStorage` layout is unverified on any development machine (R4: do
+not guess paths, and here guessing costs the index). Exact-extension matching
+also excludes the `-wal`/`-shm` sidecars by construction, since
+`Path::extension()` yields `db-wal`/`db-shm` for those. Ignoring the WAL loses
+no rows: measured `session 10/10, message 261/261, part 886/886` against the
+live database with and without the sidecars. Mutation-verified in both
+directions — a wrong extension and an unregistered row each produced a targeted
+failure, and the wrong-extension run reproduced the tombstone hazard exactly
+(`complete: true` with `found: 0`).
+
+Row 13 was found by that registration and is the more serious of the two:
+`pi` and `openclaw` transcripts are the *same* format. Both are v3 session JSONL
+(`{type:session,...}` header plus `{type:message,message:{role,content}}`), which
+the openclaw adapter's own module documentation states outright ("the same v3
+JSONL shape as the Pi adapter"). Both probes return `Confirmed` on identical
+bytes and no discriminator exists in the content, so whole-registry probing
+always hit the tie branch in `select_and_stage_source` and rejected the source
+with `ambiguous provider selection`. Every source under `~/.pi` and
+`~/.openclaw` was therefore unindexable — including pi's own golden fixture,
+confirmed by running it through the CLI. This predates the discovery work: the
+openclaw root was already registered, so `sync --discover` would have failed the
+same way on any machine that had one. Content cannot resolve this ambiguity, so
+the canonical root does: `sync --discover` now passes the root-derived provider
+as a hint and staging narrows the candidate set to that provider's adapter,
+while the probe still runs — identity comes from the path, format judgement
+still from the bytes. The hint is deliberately unavailable to explicit
+`sync <file>` / `ingest`, where no path fact exists and the tie rejection is the
+honest answer; an empty candidate set is reported as "no provider recognized
+this source" rather than silently falling back to the whole registry. The
+regression test pins the invariant in its strongest form: identical bytes
+written under both roots must each index to their own provider, as two distinct
+messages in two distinct sessions. Mutation-verified by disabling the narrowing,
+which reproduced the original `ambiguous provider selection` failure verbatim.
 
 Closed by the 2026-08-17 release-gap wave (post-draft audit fixes, pushed to
 `main` at `ed57a9a`): Robot v1.1 `searchData.facets` schema echo + protocol

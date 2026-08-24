@@ -4903,6 +4903,145 @@ fn sync_discover_finds_sqlite_sourced_opencode() {
     );
 }
 
+fn pi_fixture(text: &str) -> String {
+    // Pi 的 session JSONL：`type:"session"` 头行携带身份，`type:"message"` 携带
+    // 嵌套 `message.role`（见 provider-pi 的 golden `basic.jsonl`）。
+    format!(
+        "{}\n{}\n",
+        r#"{"type":"session","id":"sess-discover-pi","cwd":"/work","timestamp":"2026-08-14T03:00:00Z"}"#,
+        format_args!(
+            r#"{{"type":"message","message":{{"role":"user","content":{}}}}}"#,
+            serde_json::Value::String(text.to_string())
+        )
+    )
+}
+
+#[test]
+fn sync_discover_finds_pi_sessions_under_encoded_cwd_dirs() {
+    // pi 的 transcript 落在 `~/.pi/agent/sessions/<encoded-cwd>/*.jsonl`——比
+    // claude/codex 多一层按 cwd 编码的目录。发现是递归的，所以这一层不需要特殊
+    // 处理；本测试端到端锁定该嵌套确实被走到，避免日后有人把遍历改成单层。
+    let (home_dir, home) = discover_env();
+    let (_db_dir, db) = temp_db("discover-pi");
+    let encoded_cwd = home_dir
+        .path()
+        .join(".pi")
+        .join("agent")
+        .join("sessions")
+        .join("--work--proj--");
+    std::fs::create_dir_all(&encoded_cwd).expect("create pi sessions root");
+    std::fs::write(
+        encoded_cwd.join("20260814T030000_sess-discover-pi.jsonl"),
+        pi_fixture("discover pi hello"),
+    )
+    .expect("write pi fixture");
+
+    let out = run_with_home(&db, &home, &["sync", "--discover"]);
+    assert!(
+        out.status.success(),
+        "sync --discover failed: {}",
+        stdout(&out)
+    );
+    let frame = parse_first_line(&out);
+    let pi = frame["data"]["discovery"]["providers"]
+        .as_array()
+        .expect("providers")
+        .iter()
+        .find(|provider| provider["id"] == "pi")
+        .expect("pi in discovery");
+    assert_eq!(pi["found"], 1, "{frame}");
+    assert_eq!(pi["complete"], true, "{frame}");
+
+    let out = run_with_home(&db, &home, &["search", "pi"]);
+    assert!(
+        stdout(&out).contains("msg_v1_"),
+        "discovered pi source must be searchable: {}",
+        stdout(&out)
+    );
+}
+
+#[test]
+fn sync_discover_separates_pi_and_openclaw_by_canonical_root() {
+    // 回归（真缺陷）：pi 与 openclaw 的 transcript 是**同一种** v3 JSONL——
+    // `{type:session,...}` 头 + `{type:message,message:{role,content}}`。两个
+    // adapter 的 probe 对同一段字节都返回 `Confirmed`，内容里没有任何判别位，
+    // 于是全 registry probe 必然命中 `select_and_stage_source` 的 tie 分支，
+    // 整个源被 `ambiguous provider selection` 拒绝：修复前 `~/.pi` 与
+    // `~/.openclaw` 下的源一律无法索引（pi 自带 golden fixture 亦然）。
+    //
+    // 现在 `sync --discover` 把规范根派生的 provider 作为 hint 传给 staging，
+    // 候选集收缩到该 provider 的 adapter。本测试把这条不变量钉在最强的形式上：
+    // **同一份字节**分别落在两个根下，必须各归其主，且都能被索引。
+    let (home_dir, home) = discover_env();
+    let (_db_dir, db) = temp_db("discover-pi-openclaw");
+    let shared_bytes = pi_fixture("ambiguous shape marker");
+
+    let pi_dir = home_dir
+        .path()
+        .join(".pi")
+        .join("agent")
+        .join("sessions")
+        .join("--work--");
+    std::fs::create_dir_all(&pi_dir).expect("create pi sessions root");
+    std::fs::write(pi_dir.join("pi-one.jsonl"), &shared_bytes).expect("write pi fixture");
+
+    let openclaw_dir = home_dir
+        .path()
+        .join(".openclaw")
+        .join("agents")
+        .join("main")
+        .join("sessions");
+    std::fs::create_dir_all(&openclaw_dir).expect("create openclaw sessions root");
+    std::fs::write(openclaw_dir.join("claw-one.jsonl"), &shared_bytes)
+        .expect("write openclaw fixture");
+
+    let out = run_with_home(&db, &home, &["sync", "--discover"]);
+    assert!(
+        out.status.success(),
+        "identical bytes under two roots must both index: {}",
+        stdout(&out)
+    );
+    let frame = parse_first_line(&out);
+    let providers = frame["data"]["discovery"]["providers"]
+        .as_array()
+        .expect("providers");
+    for id in ["pi", "openclaw"] {
+        let row = providers
+            .iter()
+            .find(|provider| provider["id"] == id)
+            .unwrap_or_else(|| panic!("{id} in discovery: {frame}"));
+        assert_eq!(row["found"], 1, "{id} must find its own source: {frame}");
+        assert_eq!(row["complete"], true, "{id}: {frame}");
+    }
+
+    // 两个源都进了索引，且是两条独立消息：id 回退事实含 provider，所以同一段
+    // 字节在两个 provider 下派生出不同 stable id（不会互相塌缩成一条）。修复前
+    // 这里是 0 条——两个源都被 ambiguous 拒绝。
+    // `run_with_home` 已带 --robot；再加 --output 会被拒为重复输出标志。
+    let out = run_with_home(&db, &home, &["search", "ambiguous"]);
+    let frame = parse_first_line(&out);
+    let hits = frame["data"]["hits"]
+        .as_array()
+        .unwrap_or_else(|| panic!("search must succeed with hits: {frame}"));
+    assert_eq!(
+        hits.len(),
+        2,
+        "同字节的两个源必须各自入索引（pi + openclaw 各一条）: {frame}"
+    );
+    let ids: std::collections::BTreeSet<&str> =
+        hits.iter().filter_map(|hit| hit["id"].as_str()).collect();
+    assert_eq!(
+        ids.len(),
+        2,
+        "两条消息的 stable id 必须不同（派生事实含 provider）: {frame}"
+    );
+    let sessions: std::collections::BTreeSet<&str> = hits
+        .iter()
+        .filter_map(|hit| hit["session_id"].as_str())
+        .collect();
+    assert_eq!(sessions.len(), 2, "两个源必须分属不同会话: {frame}");
+}
+
 #[test]
 fn sync_discover_re_runs_converge() {
     let (home_dir, home) = discover_env();
