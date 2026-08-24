@@ -119,6 +119,7 @@ certified — currently 0 Beta. **Not release-ready per provider gate.**
 | 7 | serve token generator not CSPRNG | P0 | closed | 0630971 |
 | 8 | aider declared `tool_activity: Partial` but the adapter never calls `emit_activity` and emits empty `native_id` (fail-closed anchor drop) | P1 | closed | 8704ac9 |
 | 9 | antigravity declared `source_span: Unsupported` while the adapter emits byte-exact spans asserted by its golden test | P1 | closed | 7434092 |
+| 10 | openclaw / tencent-codebuddy / antigravity declared `discover: Unsupported` while `provider_data_root` wires a discovery root for each — the same under-claim class as row 9, on the last unguarded capability column | P1 | closed | 68665a7 |
 
 ---
 
@@ -179,6 +180,29 @@ and confirming a targeted failure. Note `codex` declares `tool_activity: Partial
 on adapter evidence (three `emit_activity` call sites) while its golden fixture
 contains no tool records — the claim is real but fixture-unexercised, so the
 anchoring test is the binding guard rather than an emission count.
+
+Closed 2026-08-25 (`discover` column, `main` at `68665a7`): §6 row 10 plus the
+last unguarded capability column. `discover` was the only column whose claims
+had no code-side guard after the `source_span` / `tool_activity` wave above, and
+it held three under-claims. The provider→root wiring is now a single named table
+(`PROVIDER_DISCOVERY_ROOTS` in `crates/agent-session-grep-cli/src/main.rs`) and
+`discover_roots_match_capability_discover_claims` asserts the equivalence in both
+directions: registered in the table ⟺ `capability.rs` declares a usable
+`discover` level. Mutation-verified in both directions (re-injected under-claim
+and a fabricated over-claim each produced a targeted failure naming the provider).
+
+A second guard, `sqlite_only_providers_are_never_registered_as_discoverable`,
+records a real hazard found while auditing this column: `discover_provider_sources`
+collects only `.jsonl`, while `sync_discover` synthesizes empty tombstone batches
+for prior paths a *complete* scan did not rediscover. Registering a SQLite-only
+provider (`opencode` → `opencode.db`, `cursor` → `state.vscdb`) would therefore
+make one `sync --discover` scan complete-but-empty and tombstone that provider's
+previously indexed sources. The current code is safe — the diff only considers
+rows whose `source_scans.provider_id` is non-NULL, and explicit `sync <file>`
+always leaves it NULL, so today no `.db` source is reachable by the diff — but the
+hazard becomes live the moment someone adds the root without extending the
+extension filter, so `opencode` correctly stays `discover: Unsupported` and the
+test pins the reason.
 
 Closed by the 2026-08-17 release-gap wave (post-draft audit fixes, pushed to
 `main` at `ed57a9a`): Robot v1.1 `searchData.facets` schema echo + protocol
