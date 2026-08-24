@@ -36,7 +36,7 @@ Legend for local columns: `ok` = present with tests; `partial` = present with kn
 | qoder | ok | ok | ok (native) | missing | unknown | missing | non-dialogue records skipped |
 | tencent-codebuddy | ok | ok | ok (native) | missing | unknown | missing | extension variant pending |
 | cline | ok | ok | missing | missing | unsupported | missing | no session id / span |
-| aider | ok | ok | derived | partial | unsupported | missing | approximate spans; no resume |
+| aider | ok | ok | derived | missing | unsupported | missing | approximate spans; no resume; no tool_activity (blockquote tool output is folded into assistant text, no structured call/result records) |
 
 ## Deferred providers (not Beta candidates)
 

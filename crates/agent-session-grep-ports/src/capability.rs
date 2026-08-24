@@ -140,7 +140,10 @@ impl ProviderCapabilityMatrix {
                     context: CapabilityLevel::Unsupported,
                     resume: CapabilityLevel::Unsupported,
                     handoff: CapabilityLevel::Unsupported,
-                    tool_activity: CapabilityLevel::Partial,
+                    // adapter 从不调用 `emit_activity`（零调用点），且消息以空
+                    // native id 上报——composition root 对空锚点 fail-closed 丢弃，
+                    // 故即便未来 emit 也无法附着。如实降级为 unsupported。
+                    tool_activity: CapabilityLevel::Unsupported,
                     source_span: CapabilityLevel::Derived,
                     incremental: CapabilityLevel::Unsupported,
                 },
