@@ -591,14 +591,14 @@ fn codex_tool_activity_claim_is_backed_by_observed_emissions() {
 
 #[test]
 fn beta_readiness_ledger_capability_columns_match_capability_matrix() {
-    // ledger 本地能力列（source_span/tool_activity/resume/incremental）必须与
-    // capability.rs 权威行一致；golden/read-only 列由 manifest 测试覆盖。
+    // ledger 本地能力列（discover/source_span/tool_activity/resume/incremental）
+    // 必须与 capability.rs 权威行一致；golden/read-only 列由 manifest 测试覆盖。
     let matrix = ProviderCapabilityMatrix::current();
     let rows = beta_ledger_rows("Per-provider local readiness");
     assert_eq!(rows.len(), 14, "ledger 实现表应恰有 14 行");
 
-    // 列序：provider_id | golden | read-only | source_span | tool_activity
-    // | resume | incremental | local Beta blockers。
+    // 列序：provider_id | golden | read-only | discover | source_span
+    // | tool_activity | resume | incremental | local Beta blockers。
     for cap in matrix
         .providers
         .iter()
@@ -610,16 +610,17 @@ fn beta_readiness_ledger_capability_columns_match_capability_matrix() {
             .unwrap_or_else(|| panic!("ledger 缺少 provider `{}` 的行", cap.provider_id));
         assert_eq!(
             row.len(),
-            8,
-            "{}: ledger 行应恰有 8 列，实际 {} 列",
+            9,
+            "{}: ledger 行应恰有 9 列，实际 {} 列",
             cap.provider_id,
             row.len()
         );
         for (column, column_name, expected) in [
-            (3usize, "source_span", cap.source_span),
-            (4usize, "tool_activity", cap.tool_activity),
-            (5usize, "resume", cap.resume),
-            (6usize, "incremental", cap.incremental),
+            (3usize, "discover", cap.discover),
+            (4usize, "source_span", cap.source_span),
+            (5usize, "tool_activity", cap.tool_activity),
+            (6usize, "resume", cap.resume),
+            (7usize, "incremental", cap.incremental),
         ] {
             let actual = beta_ledger_cell_to_level(&row[column]).unwrap_or_else(|| {
                 panic!(

@@ -7,7 +7,8 @@
 > repository-local gaps from external/owner gates. Do not promote from this
 > file alone.
 
-Last updated: 2026-08-17 (HEAD after semantic-candle + handoff tool_activity).
+Last updated: 2026-08-25 (HEAD after the capability-claim honesty wave; adds the
+`discover` column, which was previously absent and therefore unguarded).
 
 ## Global external blockers (apply to every promotion)
 
@@ -21,22 +22,22 @@ Last updated: 2026-08-17 (HEAD after semantic-candle + handoff tool_activity).
 
 Legend for local columns: `ok` = present with tests; `partial` = present with known holes; `missing` = not implemented / unsupported in capability matrix.
 
-| provider_id | golden | read-only | source_span | tool_activity | resume | incremental | local Beta blockers (beyond global) |
-|---|---|---|---|---|---|---|---|
-| claude-code | ok | ok | ok (native) | partial | derived | native | richer tool-call extraction; owner promotion still required |
-| codex | ok | ok | ok (native) | partial | derived | native | richer tool-call extraction; owner promotion still required |
-| grok-build | ok | ok | ok (native) | missing | derived | missing | no incremental/tool_activity; synthetic msg ids |
-| antigravity | ok | ok | ok (native) | missing | unknown | missing | no in-file session id; no tool_activity/incremental |
-| opencode | ok | ok | missing | missing | unknown | missing | SQLite source; no span/resume template |
-| pi | ok | ok | ok (native) | missing | derived | missing | no tool_activity/incremental |
-| hermes | ok | ok | missing | missing | unknown | missing | JSON doc; no span |
-| cursor | ok | ok | missing | missing | unknown | missing | multi-gen format layering pending |
-| kimi-code | ok | ok | ok (native) | missing | unknown | missing | loop events not parsed |
-| openclaw | ok | ok | ok (native) | missing | unsupported | missing | resume intentionally unsupported |
-| qoder | ok | ok | ok (native) | missing | unknown | missing | non-dialogue records skipped |
-| tencent-codebuddy | ok | ok | ok (native) | missing | unknown | missing | extension variant pending |
-| cline | ok | ok | missing | missing | unsupported | missing | no session id / span |
-| aider | ok | ok | derived | missing | unsupported | missing | approximate spans; no resume; no tool_activity (blockquote tool output is folded into assistant text, no structured call/result records) |
+| provider_id | golden | read-only | discover | source_span | tool_activity | resume | incremental | local Beta blockers (beyond global) |
+|---|---|---|---|---|---|---|---|---|
+| claude-code | ok | ok | native | ok (native) | partial | derived | native | richer tool-call extraction; owner promotion still required |
+| codex | ok | ok | native | ok (native) | partial | derived | native | richer tool-call extraction; owner promotion still required |
+| grok-build | ok | ok | missing | ok (native) | missing | derived | missing | no discovery root; no incremental/tool_activity; synthetic msg ids |
+| antigravity | ok | ok | native | ok (native) | missing | unknown | missing | no in-file session id; no tool_activity/incremental |
+| opencode | ok | ok | missing | missing | missing | unknown | missing | SQLite source: discovery collects `.jsonl` only, so no root is registered; no span/resume template |
+| pi | ok | ok | missing | ok (native) | missing | derived | missing | no discovery root; no tool_activity/incremental |
+| hermes | ok | ok | missing | missing | missing | unknown | missing | JSON doc; no span; no discovery root |
+| cursor | ok | ok | missing | missing | missing | unknown | missing | SQLite source: discovery collects `.jsonl` only; multi-gen format layering pending |
+| kimi-code | ok | ok | missing | ok (native) | missing | unknown | missing | no discovery root; loop events not parsed |
+| openclaw | ok | ok | native | ok (native) | missing | unsupported | missing | resume intentionally unsupported |
+| qoder | ok | ok | missing | ok (native) | missing | unknown | missing | no discovery root; non-dialogue records skipped |
+| tencent-codebuddy | ok | ok | native | ok (native) | missing | unknown | missing | extension variant pending |
+| cline | ok | ok | missing | missing | missing | unsupported | missing | no session id / span; no discovery root |
+| aider | ok | ok | missing | derived | missing | unsupported | missing | approximate spans; no resume; no discovery root; no tool_activity (blockquote tool output is folded into assistant text, no structured call/result records) |
 
 ## Deferred providers (not Beta candidates)
 
