@@ -30,7 +30,7 @@ Legend for local columns: `ok` = present with tests; `partial` = present with kn
 | antigravity | ok | ok | native | ok (native) | missing | unknown | missing | no in-file session id; no tool_activity/incremental |
 | opencode | ok | ok | native | missing | missing | unknown | missing | no span (SQLite source has no in-file byte offsets); no resume template |
 | pi | ok | ok | native | ok (native) | missing | derived | missing | no tool_activity/incremental |
-| hermes | ok | ok | missing | missing | missing | unknown | missing | JSON doc; no span; no discovery root |
+| hermes | ok | ok | native | missing | missing | unknown | missing | JSON doc; no span; SQLite `state.db` surface not parsed |
 | cursor | ok | ok | missing | missing | missing | unknown | missing | no discovery root (the `workspaceStorage` layout is unverified on any dev machine, and guessing it would tombstone the index); no span; multi-gen format layering pending |
 | kimi-code | ok | ok | missing | ok (native) | missing | unknown | missing | no discovery root; loop events not parsed |
 | openclaw | ok | ok | native | ok (native) | missing | unsupported | missing | resume intentionally unsupported |

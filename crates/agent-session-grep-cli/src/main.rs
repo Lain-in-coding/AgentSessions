@@ -3012,6 +3012,13 @@ const PROVIDER_DISCOVERY_ROOTS: &[(&str, &str, &str)] = &[
     // Pi 的 transcript 按 cwd 编码分子目录（`sessions/<encoded-cwd>/*.jsonl`），
     // 递归扫描天然覆盖；本机该 root 下 7 个文件全为 `.jsonl`，无其他扩展名混杂。
     ("pi", ".pi/agent/sessions", "jsonl"),
+    // Hermes 的根来自本 adapter 所移植的上游 hstry：其 hermes adapter 把
+    // `join(homedir(), '.hermes', 'sessions')` 硬编码为 DEFAULT_HERMES_PATH，并用
+    // `isUnderCanonicalRoot` 做纵深防御——即上游自己把这个根当作规范根强制执行，
+    // 不是文档里的一句描述。扩展名取 `json` 而非 `jsonl`：canonical 源是
+    // `session_<id>.json`（完整 transcript + metadata），同目录的 `<id>.jsonl`
+    // 只存部分近期状态，上游明确忽略；精确扩展名匹配天然把它们排除。
+    ("hermes", ".hermes/sessions", "json"),
 ];
 
 /// 解析当前用户 home 目录下某 provider 的规范化 transcript 数据根。

@@ -313,7 +313,10 @@ impl ProviderCapabilityMatrix {
                     provider_id: "hermes".into(),
                     variant_id: "hermes/session-json-v1".into(),
                     maturity: ProviderMaturity::Experimental,
-                    discover: CapabilityLevel::Unsupported,
+                    // `PROVIDER_DISCOVERY_ROOTS` 注册 `~/.hermes/sessions`（扩展名
+                    // `json`）：该 root 由 adapter 所引 hstry 上游硬编码并自证归属，
+                    // 不是本机推测。
+                    discover: CapabilityLevel::Native,
                     probe: CapabilityLevel::Native,
                     parse: CapabilityLevel::Native,
                     search: CapabilityLevel::Native,
