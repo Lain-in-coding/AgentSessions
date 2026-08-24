@@ -26,7 +26,7 @@ Legend for local columns: `ok` = present with tests; `partial` = present with kn
 | claude-code | ok | ok | ok (native) | partial | derived | native | richer tool-call extraction; owner promotion still required |
 | codex | ok | ok | ok (native) | partial | derived | native | richer tool-call extraction; owner promotion still required |
 | grok-build | ok | ok | ok (native) | missing | derived | missing | no incremental/tool_activity; synthetic msg ids |
-| antigravity | ok | ok | missing | missing | unknown | missing | no in-file session id; no span/incremental |
+| antigravity | ok | ok | ok (native) | missing | unknown | missing | no in-file session id; no tool_activity/incremental |
 | opencode | ok | ok | missing | missing | unknown | missing | SQLite source; no span/resume template |
 | pi | ok | ok | ok (native) | missing | derived | missing | no tool_activity/incremental |
 | hermes | ok | ok | missing | missing | unknown | missing | JSON doc; no span |

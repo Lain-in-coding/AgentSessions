@@ -64,7 +64,7 @@ target。
 | resume | `derived`（claude-code/codex/pi/grok）；`unknown`（opencode/kimi/qoder/codebuddy/hermes/antigravity/cursor）；`unsupported`（aider/cline/openclaw） | 未核验的 resume 命令一律不设默认值 |
 | context / handoff / incremental | `unsupported` 或 `unknown` | 属后续全能力链任务（`08-15-structured-activity-context-facets`），不在本任务范围 |
 | tool_activity | `partial`（claude-code/codex，schema v12 `tool_activities` 落库）；`unknown`（deepseek-harness/zcode，deferred）；`unsupported`（其余 12 个已实现 provider，含 aider） | CLI `--tool-kind`/`--tool-name`/`--main-only`/`--subagent-only`/`--include-sidechain`、MCP 同名参数与 TUI 分面键（`m` sidechain / `k` tool-kind）已落地；handoff pack 投影 `tool_activity` + 权威 `role`/`is_sidechain`，context 响应投影 `tool_activities` |
-| source_span | `native`（claude/codex/grok/pi/kimi/openclaw/qoder/codebuddy）；`derived`（aider）；`unsupported`（opencode/hermes/antigravity/cursor/cline） | SQLite/目录名身份/单文档 JSON 类 provider 无文件内字节 span；cline 的数组下标 pseudo-span 已移除并如实降级为 unsupported |
+| source_span | `native`（claude/codex/grok/pi/kimi/openclaw/qoder/codebuddy/antigravity）；`derived`（aider）；`unsupported`（opencode/hermes/cursor/cline） | SQLite/单文档 JSON 类 provider 无文件内字节 span；cline 的数组下标 pseudo-span 已移除并如实降级为 unsupported。antigravity 虽无文件内 session id（身份在目录名），但 transcript 为行式 JSONL，逐消息 span 为真实字节区间并由 golden 测试 `golden_spans_slice_back_to_exact_source_lines` 逐字节校验 |
 
 ### 逐 provider 明细见 capability.rs（单源权威）
 

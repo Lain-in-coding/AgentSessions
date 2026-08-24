@@ -328,7 +328,10 @@ impl ProviderCapabilityMatrix {
                     resume: CapabilityLevel::Unknown,
                     handoff: CapabilityLevel::Unsupported,
                     tool_activity: CapabilityLevel::Unsupported,
-                    source_span: CapabilityLevel::Unsupported,
+                    // 行式 JSONL：adapter 逐记录发 `span: Some((start, end))`，
+                    // golden `golden_spans_slice_back_to_exact_source_lines`
+                    // 逐字节校验切片。此前记为 unsupported 与代码相反。
+                    source_span: CapabilityLevel::Native,
                     incremental: CapabilityLevel::Unsupported,
                 },
                 ProviderCapability {
