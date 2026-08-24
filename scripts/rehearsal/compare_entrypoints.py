@@ -128,7 +128,10 @@ def run_cli_json(
             f"CLI failed (exit {proc.returncode}): {' '.join(args)}\n"
             f"stderr: {proc.stderr.strip()}"
         )
-    line = proc.stdout.strip().splitlines()[0] if proc.stdout.strip() else ""
+    # 按 "\n" 切，不用 str.splitlines()：后者还会在 U+2028/U+2029/U+0085 处断行，
+    # 而 JSON 允许这些字符不转义地出现在字符串里，真实 transcript 也确实带。
+    # 那样切出来的是 JSON 片段，解析必然失败（见 real_data_regression.run_cli）。
+    line = proc.stdout.strip().split("\n")[0] if proc.stdout.strip() else ""
     if not line:
         raise HarnessError(f"CLI produced no JSON output for: {' '.join(args)}")
     try:

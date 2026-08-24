@@ -98,8 +98,12 @@ def run_cli(binary: str, db: str, args: Sequence[str]) -> Tuple[int, Dict[str, A
             f"{args[0] if args else '<no command>'} produced no stdout "
             f"(exit {completed.returncode})"
         )
+    # Split on "\n" only, never ``str.splitlines()``: the latter also breaks on
+    # U+2028/U+2029/U+0085, which JSON permits unescaped inside strings. A real
+    # transcript containing one of them would make the last "line" a fragment
+    # and turn valid output into a bogus protocol violation.
     try:
-        envelope = json.loads(stdout.splitlines()[-1])
+        envelope = json.loads(stdout.split("\n")[-1])
     except json.JSONDecodeError as error:
         raise HarnessError(
             f"{args[0] if args else '<no command>'} stdout is not a JSON "
