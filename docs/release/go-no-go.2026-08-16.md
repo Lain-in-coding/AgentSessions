@@ -117,6 +117,8 @@ certified — currently 0 Beta. **Not release-ready per provider gate.**
 | 5 | Web/JSON boundary leaked secrets (round 3) | P0 | closed | b1060d4 |
 | 6 | handoff created_at invalid timestamp | P0 | closed | 8cc165e |
 | 7 | serve token generator not CSPRNG | P0 | closed | 0630971 |
+| 8 | aider declared `tool_activity: Partial` but the adapter never calls `emit_activity` and emits empty `native_id` (fail-closed anchor drop) | P1 | closed | 8704ac9 |
+| 9 | antigravity declared `source_span: Unsupported` while the adapter emits byte-exact spans asserted by its golden test | P1 | closed | 7434092 |
 
 ---
 
@@ -132,10 +134,15 @@ certified — currently 0 Beta. **Not release-ready per provider gate.**
    spend/billing), not a repository or code defect: on the same tree the local
    equivalents of every blocked job are green (`cargo fmt --all --check`,
    `cargo clippy --workspace --all-targets -D warnings`,
-   `cargo test --workspace` 1496 passed / 0 failed / 15 ignored across 64
-   suites, and `cargo deny check` advisories+bans+licenses+sources all ok).
-   Only the owner can lift the billing block, so `last_certified_targets`
-   stays empty and the cross-target evidence rows stay `ci_configured_only`.
+   `cargo test --workspace` 1500 passed / 0 failed / 15 ignored, and
+   `cargo deny check` advisories+bans+licenses+sources all ok).
+   Re-confirmed 2026-08-25 on the newest run (`32767597854`,
+   `2026-08-24T19:20:34Z`): all four cross-target jobs (Windows MSVC,
+   Ubuntu 22.04 GNU x64, macOS Intel x64, macOS Apple Silicon ARM64) report
+   `failure` with `runner_name: ""` and `steps: 0`, each completing 4–5 s
+   after start — no step ever executes. Only the owner can lift the billing
+   block, so `last_certified_targets` stays empty and the cross-target
+   evidence rows stay `ci_configured_only`.
 2. **Provider maturity**: 0 Beta; Claude/Codex not certified against the PRD
    gate — remains below the ≥5 Beta requirement.
 3. **External**: GitHub Actions billing; PRIVATE→public switch (Option-A public
@@ -156,6 +163,22 @@ ingestion, handoff determinism/budget/redaction, resume first-run preview,
 `--offline` + hook provider/time filters, ToolActivity search facets + schema
 v12, serve hardening, P0-5 release rehearsal (verify-release 10/10, five-entry
 consistency harness all-direct).
+
+Closed 2026-08-25 (capability-claim honesty wave, `main` at `2a32ada`): the two
+capability over/under-claims in §6 rows 8–9, plus the drift-guard gap that let
+them land. `capability.rs` claims were previously cross-checked only against
+documentation (three doc↔matrix tests) and, for the `resume` column, against the
+real command builder; `source_span` and `tool_activity` had no code-side guard at
+all. `crates/agent-session-grep-cli/tests/provider_matrix.rs` now asserts both
+columns against each provider's pinned golden output: a declared span capability
+must match span presence in `basic.expected.json` (all 14 providers), and a
+`tool_activity` claim is rejected when every pinned message carries an empty
+`native_id`, since `main.rs:3517` fail-closed discards activities whose anchor is
+empty. Both new tests were mutation-verified by re-introducing each original bug
+and confirming a targeted failure. Note `codex` declares `tool_activity: Partial`
+on adapter evidence (three `emit_activity` call sites) while its golden fixture
+contains no tool records — the claim is real but fixture-unexercised, so the
+anchoring test is the binding guard rather than an emission count.
 
 Closed by the 2026-08-17 release-gap wave (post-draft audit fixes, pushed to
 `main` at `ed57a9a`): Robot v1.1 `searchData.facets` schema echo + protocol
