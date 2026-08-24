@@ -120,6 +120,7 @@ certified — currently 0 Beta. **Not release-ready per provider gate.**
 | 8 | aider declared `tool_activity: Partial` but the adapter never calls `emit_activity` and emits empty `native_id` (fail-closed anchor drop) | P1 | closed | 8704ac9 |
 | 9 | antigravity declared `source_span: Unsupported` while the adapter emits byte-exact spans asserted by its golden test | P1 | closed | 7434092 |
 | 10 | openclaw / tencent-codebuddy / antigravity declared `discover: Unsupported` while `provider_data_root` wires a discovery root for each — the same under-claim class as row 9, on the last unguarded capability column | P1 | closed | 68665a7 |
+| 11 | Both SQLite adapters leaked their temp database copy on every probe/parse: cursor returned a bare `Connection` with no cleanup guard, and opencode returned the guard beside the connection in a tuple (which drops the guard *first*, so the unlink ran while the file was still open and Windows refused it) | P1 | closed | 2a1f062 |
 
 ---
 
@@ -203,6 +204,26 @@ always leaves it NULL, so today no `.db` source is reachable by the diff — but
 hazard becomes live the moment someone adds the root without extending the
 extension filter, so `opencode` correctly stays `discover: Unsupported` and the
 test pins the reason.
+
+Closed 2026-08-25 (§6 row 11, `main` at `2a1f062`): auditing that same SQLite
+read path surfaced a resource leak in both SQLite adapters. Each writes the
+source bytes to a temp copy because rusqlite needs a path, and neither deleted it:
+`cursor` returned a bare `Connection` with no guard at all, and `opencode` had a
+guard but handed it back beside the connection as `let (conn, _temp_db) = ...` —
+Rust drops the *later* tuple binding first, so the unlink ran while SQLite still
+held the handle, Windows refused the delete, and `let _ = remove_file(...)`
+discarded the error. Measured on the development machine before the fix: 2115
+orphaned files, 65.9 MB, accumulating since 2026-08-16. Both adapters now return a
+single `TempDb` struct whose field order (`conn` before `_guard`) makes the
+sequence correct, since struct fields drop in declaration order; the load-bearing
+ordering is stated at the definition. Verified by re-running both suites and
+observing zero new temp files, where the previous run added one per parse. A third
+defect found in the same pass: `cursor`'s `temp_db_path` documented "process id +
+atomic counter" but interpolated only the counter, so two concurrent processes
+would both pick `asg-cursor-0-parse.db` and `File::create` would truncate the
+other's database mid-parse — the same flake `opencode` fixed for itself in
+`861240e`. Each adapter now has a unit test pinning the unlink and, for cursor,
+the pid scoping.
 
 Closed by the 2026-08-17 release-gap wave (post-draft audit fixes, pushed to
 `main` at `ed57a9a`): Robot v1.1 `searchData.facets` schema echo + protocol
