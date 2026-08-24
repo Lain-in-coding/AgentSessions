@@ -124,10 +124,12 @@ impl ProviderAdapter for CursorAdapter {
         }
         matched.push("SQLite magic header detected".into());
 
-        // Open read-only and check for the VS Code ItemTable KV table.
-        let conn = open_readonly_from_bytes(bytes)
+        // Open read-only and check for the VS Code ItemTable KV table. `db`
+        // unlinks the temp copy when it goes out of scope (see `TempDb`).
+        let db = open_readonly_from_bytes(bytes)
             .map_err(|e| ProviderError::StructuralFatal(format!("failed to open SQLite: {e}")))?;
-        if !table_exists(&conn, "ItemTable") {
+        let conn = &db.conn;
+        if !table_exists(conn, "ItemTable") {
             return Err(ProviderError::AmbiguousVariant(
                 "no `ItemTable` table found — not a Cursor state database".into(),
             ));
@@ -135,8 +137,8 @@ impl ProviderAdapter for CursorAdapter {
         matched.push("ItemTable found".into());
 
         // Cursor chat history lives under either of two ItemTable keys.
-        let has_chat_data = key_exists(&conn, CHAT_DATA_KEY);
-        let has_prompts = key_exists(&conn, PROMPTS_KEY);
+        let has_chat_data = key_exists(conn, CHAT_DATA_KEY);
+        let has_prompts = key_exists(conn, PROMPTS_KEY);
         if !has_chat_data && !has_prompts {
             return Err(ProviderError::AmbiguousVariant(
                 "ItemTable has neither the Cursor chatdata nor prompts key".into(),
@@ -162,15 +164,17 @@ impl ProviderAdapter for CursorAdapter {
         bytes: &[u8],
         sink: &mut dyn CanonicalEventSink,
     ) -> Result<ParseReport, ProviderError> {
-        let conn = open_readonly_from_bytes(bytes)
+        // `db` unlinks the temp copy when it goes out of scope (see `TempDb`).
+        let db = open_readonly_from_bytes(bytes)
             .map_err(|e| ProviderError::StructuralFatal(format!("failed to open SQLite: {e}")))?;
+        let conn = &db.conn;
 
         let mut report = ParseReport::default();
         let mut seq: u32 = 0;
         let mut session_count = 0usize;
 
         // Chat tabs first, then the flat prompts history (hstry order).
-        match read_key(&conn, CHAT_DATA_KEY) {
+        match read_key(conn, CHAT_DATA_KEY) {
             Ok(Some(value)) if !value.trim().is_empty() => {
                 parse_chat_data(&value, sink, &mut report, &mut seq, &mut session_count)?;
             }
@@ -182,7 +186,7 @@ impl ProviderAdapter for CursorAdapter {
                     .push(format!("failed to read chatdata value: {e}"));
             }
         }
-        match read_key(&conn, PROMPTS_KEY) {
+        match read_key(conn, PROMPTS_KEY) {
             Ok(Some(value)) if !value.trim().is_empty() => {
                 parse_prompts(&value, sink, &mut report, &mut seq, &mut session_count)?;
             }
@@ -395,37 +399,78 @@ fn emit_message(
     Ok(())
 }
 
+/// Deletes the temp SQLite file when dropped. Only ever held by [`TempDb`],
+/// which guarantees the connection is closed first.
+struct TempDbGuard {
+    path: std::path::PathBuf,
+}
+
+impl Drop for TempDbGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// A read-only connection over a temp copy of the source bytes, bundled with the
+/// guard that unlinks that copy.
+///
+/// **Field order is load-bearing.** Struct fields drop in declaration order, so
+/// `conn` closes the database before `_guard` unlinks the file. Windows refuses
+/// to delete a file that is still open and `remove_file`'s error is discarded, so
+/// the reverse order leaks every temp copy silently. A tuple binding
+/// (`let (conn, guard) = ...`) drops the *later* binding first — i.e. the guard
+/// while the connection is still open — which is exactly the broken order this
+/// struct exists to prevent.
+struct TempDb {
+    conn: Connection,
+    _guard: TempDbGuard,
+}
+
+impl TempDb {
+    /// Path of the temp copy backing this connection.
+    #[cfg(test)]
+    fn temp_path(&self) -> &std::path::Path {
+        &self._guard.path
+    }
+}
+
 /// Open a SQLite database from bytes, read-only.
 ///
 /// Writes bytes to a temp file, opens with SQLITE_OPEN_READONLY + busy_timeout,
-/// and returns the connection. The temp file is removed by the OS.
-fn open_readonly_from_bytes(bytes: &[u8]) -> Result<Connection, String> {
+/// and returns a [`TempDb`] that deletes the temp copy once it goes out of scope.
+fn open_readonly_from_bytes(bytes: &[u8]) -> Result<TempDb, String> {
     let temp_path = temp_db_path("parse");
     let mut file = std::fs::File::create(&temp_path).map_err(|e| e.to_string())?;
     file.write_all(bytes).map_err(|e| e.to_string())?;
     file.sync_all().map_err(|e| e.to_string())?;
     drop(file);
 
+    let guard = TempDbGuard { path: temp_path };
     let conn = Connection::open_with_flags(
-        &temp_path,
+        &guard.path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
     .map_err(|e| e.to_string())?;
     conn.busy_timeout(std::time::Duration::from_secs(1))
         .map_err(|e| e.to_string())?;
 
-    // Best-effort cleanup: the temp file is left for the OS.
-    let _ = temp_path; // keep path alive for conn
-
-    Ok(conn)
+    Ok(TempDb {
+        conn,
+        _guard: guard,
+    })
 }
 
 /// Unique temp file path for a purpose: process id + atomic counter prevent
 /// concurrent parses (and parallel tests) from colliding on the same name.
+///
+/// The pid is load-bearing: the counter alone restarts at 0 in every process, so
+/// two concurrent `asg` runs would both pick `asg-cursor-0-parse.db` and
+/// `File::create` would truncate the other's copy mid-parse.
 fn temp_db_path(tag: &str) -> std::path::PathBuf {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     std::env::temp_dir().join(format!(
-        "asg-cursor-{}-{tag}.db",
+        "asg-cursor-{}-{}-{tag}.db",
+        std::process::id(),
         COUNTER.fetch_add(1, Ordering::Relaxed)
     ))
 }
@@ -472,6 +517,38 @@ mod tests {
         assert_eq!(manifest.capabilities.variant_id, VARIANT_ID);
         assert!(manifest.last_certified_targets.is_empty());
         assert_eq!(manifest.fixture_revision, Some(1));
+    }
+
+    #[test]
+    fn temp_copy_is_unlinked_once_the_connection_goes_out_of_scope() {
+        // Regression: this adapter used to return the bare `Connection` with no
+        // guard at all, so every probe/parse left its temp copy in the temp dir.
+        // `TempDb`'s field order is what makes the unlink run after the database
+        // is closed; this test fails if the pairing is ever unbundled again.
+        let db_bytes = create_cursor_db(None, Some("[]"));
+        let leaked_path = {
+            let db = open_readonly_from_bytes(&db_bytes).unwrap();
+            let path = db.temp_path().to_path_buf();
+            assert!(path.exists(), "temp copy must exist while the db is open");
+            path
+        };
+        assert!(
+            !leaked_path.exists(),
+            "temp copy must be unlinked after the connection is dropped"
+        );
+    }
+
+    #[test]
+    fn temp_paths_are_scoped_to_this_process() {
+        // The name must carry the pid: two concurrent processes both starting at
+        // counter 0 would otherwise pick `asg-cursor-0-parse.db` and
+        // `File::create` would truncate the other process's database mid-parse.
+        let path = temp_db_path("parse");
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        assert!(
+            name.contains(&format!("asg-cursor-{}-", std::process::id())),
+            "temp file name must be scoped by pid, got `{name}`"
+        );
     }
 
     /// Records (seq, role, text, timestamp) of every emitted message.

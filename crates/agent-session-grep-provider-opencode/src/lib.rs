@@ -72,16 +72,16 @@ impl ProviderAdapter for OpenCodeAdapter {
 
         matched.push("SQLite magic header detected".into());
 
-        // Open read-only and check for OpenCode tables.
-        // _temp_db drops after conn: the guard deletes the temp file once the
-        // connection is closed (Windows cannot delete an open file).
-        let (conn, _temp_db) = open_readonly_from_bytes(bytes)
+        // Open read-only and check for OpenCode tables. `db` unlinks the temp
+        // copy when it goes out of scope (see `TempDb`).
+        let db = open_readonly_from_bytes(bytes)
             .map_err(|e| ProviderError::StructuralFatal(format!("failed to open SQLite: {e}")))?;
+        let conn = &db.conn;
 
         // Check for OpenCode-specific tables: session, message, part.
-        let has_session = table_exists(&conn, "session");
-        let has_message = table_exists(&conn, "message");
-        let has_part = table_exists(&conn, "part");
+        let has_session = table_exists(conn, "session");
+        let has_message = table_exists(conn, "message");
+        let has_part = table_exists(conn, "part");
 
         if !has_session {
             return Err(ProviderError::AmbiguousVariant(
@@ -116,10 +116,10 @@ impl ProviderAdapter for OpenCodeAdapter {
     ) -> Result<ParseReport, ProviderError> {
         let mut report = ParseReport::default();
 
-        // _temp_db drops after conn (see probe): the temp file is deleted once
-        // the connection is closed.
-        let (conn, _temp_db) = open_readonly_from_bytes(bytes)
+        // `db` unlinks the temp copy when it goes out of scope (see `TempDb`).
+        let db = open_readonly_from_bytes(bytes)
             .map_err(|e| ProviderError::StructuralFatal(format!("failed to open SQLite: {e}")))?;
+        let conn = &db.conn;
 
         // Query messages with their session and role.
         // Schema (from fast-resume):
@@ -254,9 +254,8 @@ fn temp_file_suffix() -> String {
     )
 }
 
-/// Deletes the temp SQLite file when dropped. Must be dropped AFTER the
-/// `Connection` (Windows cannot delete an open file), so callers bind it in a
-/// tuple pattern after the connection: `let (conn, _temp) = ...`.
+/// Deletes the temp SQLite file when dropped. Only ever held by [`TempDb`],
+/// which guarantees the connection is closed first.
 struct TempDbGuard {
     path: std::path::PathBuf,
 }
@@ -267,12 +266,34 @@ impl Drop for TempDbGuard {
     }
 }
 
+/// A read-only connection over a temp copy of the source bytes, bundled with the
+/// guard that unlinks that copy.
+///
+/// **Field order is load-bearing.** Struct fields drop in declaration order, so
+/// `conn` closes the database before `_guard` unlinks the file. Windows refuses
+/// to delete a file that is still open and `remove_file`'s error is discarded, so
+/// the reverse order leaks every temp copy silently. A tuple binding
+/// (`let (conn, guard) = ...`) drops the *later* binding first — i.e. the guard
+/// while the connection is still open — which is exactly the broken order this
+/// struct exists to prevent.
+struct TempDb {
+    conn: Connection,
+    _guard: TempDbGuard,
+}
+
+impl TempDb {
+    /// Path of the temp copy backing this connection.
+    #[cfg(test)]
+    fn temp_path(&self) -> &std::path::Path {
+        &self._guard.path
+    }
+}
+
 /// Open a SQLite database from bytes, read-only.
 ///
 /// Writes bytes to a temp file, opens with SQLITE_OPEN_READONLY + busy_timeout,
-/// and returns the connection plus a guard that deletes the temp file when the
-/// connection has been dropped.
-fn open_readonly_from_bytes(bytes: &[u8]) -> Result<(Connection, TempDbGuard), String> {
+/// and returns a [`TempDb`] that deletes the temp copy once it goes out of scope.
+fn open_readonly_from_bytes(bytes: &[u8]) -> Result<TempDb, String> {
     let temp_dir = std::env::temp_dir();
     let temp_path = temp_dir.join(format!("asg-opencode-{}.db", temp_file_suffix()));
     let mut file = std::fs::File::create(&temp_path).map_err(|e| e.to_string())?;
@@ -280,15 +301,19 @@ fn open_readonly_from_bytes(bytes: &[u8]) -> Result<(Connection, TempDbGuard), S
     file.sync_all().map_err(|e| e.to_string())?;
     drop(file);
 
+    let guard = TempDbGuard { path: temp_path };
     let conn = Connection::open_with_flags(
-        &temp_path,
+        &guard.path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
     .map_err(|e| e.to_string())?;
     conn.busy_timeout(std::time::Duration::from_secs(1))
         .map_err(|e| e.to_string())?;
 
-    Ok((conn, TempDbGuard { path: temp_path }))
+    Ok(TempDb {
+        conn,
+        _guard: guard,
+    })
 }
 
 /// Check if a table exists in the database.
@@ -314,6 +339,27 @@ mod tests {
         assert_eq!(manifest.capabilities.variant_id, VARIANT_ID);
         assert!(manifest.last_certified_targets.is_empty());
         assert_eq!(manifest.fixture_revision, Some(1));
+    }
+
+    #[test]
+    fn temp_copy_is_unlinked_once_the_connection_goes_out_of_scope() {
+        // Regression: the guard used to be returned next to the connection in a
+        // tuple, and a tuple binding drops the *later* binding first — so the
+        // unlink ran while SQLite still held the file open. Windows refuses that
+        // delete and `remove_file`'s error is discarded, so every parse silently
+        // leaked its temp copy. `TempDb`'s field order fixes the sequence; this
+        // test fails if the pairing is ever unbundled again.
+        let db_bytes = create_test_opencode_db();
+        let leaked_path = {
+            let db = open_readonly_from_bytes(&db_bytes).unwrap();
+            let path = db.temp_path().to_path_buf();
+            assert!(path.exists(), "temp copy must exist while the db is open");
+            path
+        };
+        assert!(
+            !leaked_path.exists(),
+            "temp copy must be unlinked after the connection is dropped"
+        );
     }
 
     #[test]
