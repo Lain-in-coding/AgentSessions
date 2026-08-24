@@ -308,7 +308,7 @@ impl ProviderAdapter for QoderAdapter {
                         .or(rec.timestamp.as_deref().filter(|s| !s.trim().is_empty()));
                     sink.emit_message(MessageEvent {
                         seq,
-                        native_id: &format!("qoder-msg-{seq}"),
+                        native_id: "",
                         parent_native_id: None,
                         role,
                         text: &text,

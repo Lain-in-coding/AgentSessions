@@ -53,8 +53,6 @@ impl Default for AntigravityAdapter {
 #[derive(serde::Deserialize)]
 struct StepRecord {
     #[serde(default)]
-    step_index: Option<u64>,
-    #[serde(default)]
     source: Option<String>,
     #[serde(default)]
     r#type: Option<String>,
@@ -240,14 +238,14 @@ impl ProviderAdapter for AntigravityAdapter {
             };
 
             let timestamp = rec.created_at.as_deref().filter(|t| is_rfc3339(t));
-            let native_id = match rec.step_index {
-                Some(i) => i.to_string(),
-                None => format!("antigravity-msg-{seq}"),
-            };
+            // `native_id` is empty: antigravity step_index is a per-file
+            // ordinal, not a durable cross-document id, so a synthetic value
+            // would collide across documents. The composition root derives a
+            // document-scoped id instead.
 
             sink.emit_message(MessageEvent {
                 seq,
-                native_id: &native_id,
+                native_id: "",
                 parent_native_id: None,
                 role,
                 text,
@@ -418,11 +416,11 @@ mod tests {
         assert_eq!(report.committed, 2);
         assert_eq!(sink.events.len(), 2);
         assert_eq!(sink.events[0].0, 0);
-        assert_eq!(sink.events[0].1, "0");
+        assert_eq!(sink.events[0].1, "");
         assert_eq!(sink.events[0].2, "user");
         assert_eq!(sink.events[0].3, "build the project");
         assert_eq!(sink.events[1].0, 1);
-        assert_eq!(sink.events[1].1, "2");
+        assert_eq!(sink.events[1].1, "");
         assert_eq!(sink.events[1].2, "assistant");
         assert_eq!(sink.events[1].3, "plan accepted");
         // SYSTEM steps never surface as user/assistant.

@@ -353,12 +353,16 @@ impl ProviderAdapter for GrokBuildAdapter {
         }
 
         // Emit reconstructed messages in order.
+        // `native_id` is empty: grok transcripts carry no durable per-message
+        // id, so the composition root derives a document-scoped id instead of
+        // adopting a synthetic `<provider>-msg-{seq}` that would collide
+        // across documents.
         for (idx, (is_user, text)) in messages.iter().enumerate() {
             let role = if *is_user { "user" } else { "assistant" };
             let span = message_first_spans.get(idx).copied().flatten();
             sink.emit_message(MessageEvent {
                 seq,
-                native_id: &format!("grok-msg-{seq}"),
+                native_id: "",
                 parent_native_id: None,
                 role,
                 text,

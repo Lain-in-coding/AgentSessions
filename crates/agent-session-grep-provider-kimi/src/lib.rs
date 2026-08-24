@@ -231,7 +231,7 @@ impl ProviderAdapter for KimiCodeAdapter {
 
             sink.emit_message(MessageEvent {
                 seq,
-                native_id: &format!("kimi-msg-{seq}"),
+                native_id: "",
                 parent_native_id: None,
                 role,
                 text: &text,

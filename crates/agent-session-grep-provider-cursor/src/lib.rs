@@ -381,7 +381,7 @@ fn emit_message(
 ) -> Result<(), ProviderError> {
     sink.emit_message(MessageEvent {
         seq: *seq,
-        native_id: &format!("cursor-msg-{}", *seq),
+        native_id: "",
         parent_native_id: None,
         role,
         text,

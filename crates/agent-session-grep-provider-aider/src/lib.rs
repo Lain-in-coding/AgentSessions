@@ -152,7 +152,7 @@ impl ProviderAdapter for AiderAdapter {
             let end = *start + text.len() as u64;
             sink.emit_message(MessageEvent {
                 seq: *seq,
-                native_id: &format!("aider-msg-{seq}"),
+                native_id: "",
                 parent_native_id: None,
                 role,
                 text: text.trim(),
