@@ -13,6 +13,30 @@
 //! `session_meta`/`user`/`assistant`/`progress`/`tool_use`/`tool_result`.
 //! Identity fields are extracted from `session_meta` (fixture-derived;
 //! `session_id`/`cwd` keys are matched leniently).
+//!
+//! # Scope: Qoder writes history to two unrelated surfaces
+//!
+//! This adapter covers **only** the transcript JSONL tree above. Qoder's
+//! Electron IDE keeps a second, entirely different history store — a SQLite DB
+//! at `%APPDATA%/Qoder/SharedClientCache/cache/db/local.db` with
+//! `chat_session(session_id, session_title, project_uri, gmt_create, …)`,
+//! `chat_message(id, session_id, request_id, role, content, …)`, and
+//! `chat_record(request_id, session_id, question, answer, summary, …)`. That
+//! schema is the Lingma one (Qoder is Alibaba's rebrand of the Lingma product
+//! line, and `ctx` imports it under its `lingma_sqlite` source format from
+//! `~/.lingma/vscode/sharedClientCache/cache/db/local.db`); `ctx` likewise
+//! keeps the two rows separate and records "does not parse Qoder VS Code /
+//! Electron state databases" against its Qoder JSONL row.
+//!
+//! The split is why `qoder` has no [`PROVIDER_DISCOVERY_ROOTS`] entry: a
+//! discovery root is a (root, extension) pair, and the two surfaces share
+//! neither. Registering the JSONL root on a machine that only has the SQLite
+//! store would make the scan *complete and empty*, which is precisely the
+//! shape that tombstones an entire provider's index. Adding SQLite support
+//! means a second variant (`qoder/sqlite-v1`, modeled on `opencode/sqlite-v1`)
+//! plus its own root — not a widened extension filter on this one.
+//!
+//! [`PROVIDER_DISCOVERY_ROOTS`]: ../../agent_session_grep_cli/index.html
 
 use agent_session_grep_ports::MetadataResolution;
 use agent_session_grep_ports::{
@@ -91,6 +115,9 @@ impl ProviderAdapter for QoderAdapter {
             &[
                 "identity fields are matched leniently from session_meta (session_id/cwd)",
                 "non-conversational records (progress/tool_use/tool_result) are skipped",
+                "only the transcript JSONL surface is parsed; the Qoder IDE's Electron \
+                 SQLite store (chat_session/chat_message/chat_record) is a different \
+                 format and is not read",
             ],
         )
     }
