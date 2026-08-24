@@ -31,6 +31,7 @@ adapted carry the following attributions:
 | agentsview | MIT | aider line-prefix role reconstruction | adapt |
 | claude-historian-mcp | MIT | codex/claude prefilter (skip non-dialogue records) | adapt |
 | AgentRecall | MIT | codebuddy idea-level filter; agent-sessions index-time redaction idea | adapt / idea-only |
+| Contributor Covenant | CC BY 4.0 | `CODE_OF_CONDUCT.md` text (adapted, v2.1) | adapt |
 
 Where upstream code comments carry a specific copyright line (for example the
 fast-resume adaptation in `crates/agent-session-grep-cli/src/main.rs`), that
