@@ -56,6 +56,7 @@ dependencies = [
  "agent-session-grep-provider-opencode",
  "agent-session-grep-provider-pi",
  "agent-session-grep-provider-qoder",
+ "agent-session-grep-testkit",
  "crossterm",
  "getrandom 0.4.3",
  "ratatui",

@@ -307,6 +307,234 @@ fn beta_readiness_ledger_lists_exactly_implemented_and_deferred_ids() {
     );
 }
 
+// ---- capability.rs ↔ adapter 真实行为 防漂移 ----
+//
+// 此前 `resume` 列有 `application::resume` 里的
+// `capability_matrix_resume_level_matches_builder_support` 守护（枚举全部 provider
+// 双向断言），而 `source_span` / `tool_activity` 两列只有"文档 ↔ capability.rs"的
+// 一致性测试，没有任何测试把声明对照 adapter 的真实输出。这个缺口已漏过两个真实
+// 缺陷：aider 虚报 `tool_activity: Partial`（crate 内 0 个 `emit_activity`），
+// antigravity 少报 `source_span: Unsupported`（实际发出经 golden 校验的字节 span）。
+// 下面三个测试把这条关系补成可执行断言。
+
+/// 每个已实现 provider 的 pinned golden 期望输出（编译期内联，不依赖运行时路径）。
+///
+/// 这些文件是各 adapter 真实 parse 结果的 pinned 投影（`golden::canonical_json`
+/// 逐字段写出 native_id / span），因此可以当作"adapter 实际发出了什么"的可复核
+/// 证据，用来交叉验证 capability.rs 的声明。
+const PINNED_GOLDEN: &[(&str, &str)] = &[
+    (
+        "aider",
+        include_str!("../../agent-session-grep-provider-aider/tests/golden/basic.expected.json"),
+    ),
+    (
+        "antigravity",
+        include_str!(
+            "../../agent-session-grep-provider-antigravity/tests/golden/basic.expected.json"
+        ),
+    ),
+    (
+        "claude-code",
+        include_str!("../../agent-session-grep-provider-claude/tests/golden/basic.expected.json"),
+    ),
+    (
+        "cline",
+        include_str!("../../agent-session-grep-provider-cline/tests/golden/basic.expected.json"),
+    ),
+    (
+        "codex",
+        include_str!("../../agent-session-grep-provider-codex/tests/golden/basic.expected.json"),
+    ),
+    (
+        "cursor",
+        include_str!("../../agent-session-grep-provider-cursor/tests/golden/basic.expected.json"),
+    ),
+    (
+        "grok-build",
+        include_str!("../../agent-session-grep-provider-grok/tests/golden/basic.expected.json"),
+    ),
+    (
+        "hermes",
+        include_str!("../../agent-session-grep-provider-hermes/tests/golden/basic.expected.json"),
+    ),
+    (
+        "kimi-code",
+        include_str!("../../agent-session-grep-provider-kimi/tests/golden/basic.expected.json"),
+    ),
+    (
+        "openclaw",
+        include_str!("../../agent-session-grep-provider-openclaw/tests/golden/basic.expected.json"),
+    ),
+    (
+        "opencode",
+        include_str!("../../agent-session-grep-provider-opencode/tests/golden/basic.expected.json"),
+    ),
+    (
+        "pi",
+        include_str!("../../agent-session-grep-provider-pi/tests/golden/basic.expected.json"),
+    ),
+    (
+        "qoder",
+        include_str!("../../agent-session-grep-provider-qoder/tests/golden/basic.expected.json"),
+    ),
+    (
+        "tencent-codebuddy",
+        include_str!(
+            "../../agent-session-grep-provider-codebuddy/tests/golden/basic.expected.json"
+        ),
+    ),
+];
+
+/// Claude Code 的 golden fixture 字节（唯一一个真正携带 tool_use/tool_result 的
+/// fixture；codex 的 fixture 只有 session_meta + message，不触发 activity）。
+const CLAUDE_GOLDEN_FIXTURE: &[u8] =
+    include_bytes!("../../agent-session-grep-provider-claude/tests/golden/basic.jsonl");
+
+/// 取某 provider 的 pinned golden 消息数组。
+fn pinned_messages(provider_id: &str) -> Vec<serde_json::Value> {
+    let raw = PINNED_GOLDEN
+        .iter()
+        .find(|(id, _)| *id == provider_id)
+        .unwrap_or_else(|| panic!("PINNED_GOLDEN 缺少 provider `{provider_id}`"))
+        .1;
+    let doc: serde_json::Value =
+        serde_json::from_str(raw).expect("basic.expected.json must be valid JSON");
+    doc["messages"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{provider_id}: expected.json 缺少 messages 数组"))
+        .clone()
+}
+
+#[test]
+fn pinned_golden_table_covers_exactly_the_implemented_providers() {
+    // 新增/删除 provider 而未同步本表时立即失败，避免下面两个断言静默漏检。
+    let matrix = ProviderCapabilityMatrix::current();
+    let mut implemented: Vec<String> = matrix
+        .providers
+        .iter()
+        .filter(|p| p.maturity != ProviderMaturity::Unsupported)
+        .map(|p| p.provider_id.clone())
+        .collect();
+    let mut covered: Vec<String> = PINNED_GOLDEN
+        .iter()
+        .map(|(id, _)| (*id).to_string())
+        .collect();
+    implemented.sort_unstable();
+    covered.sort_unstable();
+    assert_eq!(
+        covered, implemented,
+        "PINNED_GOLDEN 必须恰好覆盖 capability.rs 的 14 个已实现 provider"
+    );
+}
+
+#[test]
+fn capability_source_span_claim_matches_pinned_golden_span_presence() {
+    // `source_span` 声明必须与 adapter 真实发出的 span 一致：声明可归因
+    // （Native/Derived/Partial）则 pinned 输出里每条消息都必须带 span；声明
+    // Unsupported 则每条消息的 span 必须为 null。antigravity 少报就是被这条抓住的
+    // 那类缺陷（它的 golden 里 4 条消息全部带经字节校验的 span，却声明 Unsupported）。
+    let matrix = ProviderCapabilityMatrix::current();
+    for cap in matrix
+        .providers
+        .iter()
+        .filter(|p| p.maturity != ProviderMaturity::Unsupported)
+    {
+        let messages = pinned_messages(&cap.provider_id);
+        assert!(
+            !messages.is_empty(),
+            "{}: golden fixture 必须至少发出一条消息",
+            cap.provider_id
+        );
+        let with_span = messages.iter().filter(|m| !m["span"].is_null()).count();
+        let total = messages.len();
+        match cap.source_span {
+            CapabilityLevel::Native | CapabilityLevel::Derived | CapabilityLevel::Partial => {
+                assert_eq!(
+                    with_span, total,
+                    "{}: capability.rs 声明 source_span={:?}，但 pinned golden 里只有 {with_span}/{total} 条消息带 span",
+                    cap.provider_id, cap.source_span
+                );
+            }
+            CapabilityLevel::Unsupported => {
+                assert_eq!(
+                    with_span, 0,
+                    "{}: capability.rs 声明 source_span=Unsupported，但 pinned golden 里有 {with_span}/{total} 条消息带 span（少报）",
+                    cap.provider_id
+                );
+            }
+            CapabilityLevel::Unknown => panic!(
+                "{}: 已实现 provider 的 source_span 不得为 Unknown",
+                cap.provider_id
+            ),
+        }
+    }
+}
+
+#[test]
+fn capability_tool_activity_claim_respects_fail_closed_anchoring() {
+    // 活动锚定是 fail-closed 的：CLI staging 会丢弃 `message_native_id` 为空的活动
+    // （否则会错挂到第一条同样空 id 的消息上）。因此"pinned golden 里所有消息的
+    // native_id 都为空"的 provider 结构上不可能支持 tool_activity——声明必须是
+    // Unsupported。aider 虚报 `Partial` 正是违反了这条（它 crate 内 0 个
+    // `emit_activity`，且 native_id 恒为空）。
+    let matrix = ProviderCapabilityMatrix::current();
+    for cap in matrix
+        .providers
+        .iter()
+        .filter(|p| p.maturity != ProviderMaturity::Unsupported)
+    {
+        let messages = pinned_messages(&cap.provider_id);
+        let anchorable = messages
+            .iter()
+            .filter(|m| !m["native_id"].as_str().unwrap_or("").trim().is_empty())
+            .count();
+        if anchorable == 0 {
+            assert_eq!(
+                cap.tool_activity,
+                CapabilityLevel::Unsupported,
+                "{}: pinned golden 里所有消息 native_id 均为空，活动无法锚定（会被 staging 丢弃），\
+                 tool_activity 只能声明 Unsupported，实际声明 {:?}",
+                cap.provider_id,
+                cap.tool_activity
+            );
+        }
+    }
+}
+
+#[test]
+fn claude_tool_activity_claim_is_backed_by_observed_emissions() {
+    // 正向验证：claude-code 声明 tool_activity 可用，其 golden fixture 必须真的
+    // 经 `emit_activity` 发出活动，且每条活动都带可锚定（非空）的 native id。
+    // 这是唯一一个 fixture 覆盖 tool_use/tool_result 的 provider——codex 同样声明
+    // Partial，但其 fixture 只有 session_meta + message，故只能靠上面的锚定断言守护。
+    let matrix = ProviderCapabilityMatrix::current();
+    let claude_cap = matrix
+        .providers
+        .iter()
+        .find(|p| p.provider_id == "claude-code")
+        .expect("capability.rs 必须有 claude-code 行");
+    assert_ne!(
+        claude_cap.tool_activity,
+        CapabilityLevel::Unsupported,
+        "claude-code 的 golden fixture 会发出 activity，声明不得为 Unsupported"
+    );
+
+    let (_, sink) = agent_session_grep_testkit::golden::parse_golden(
+        &ClaudeCodeAdapter::new(),
+        CLAUDE_GOLDEN_FIXTURE,
+    );
+    assert!(
+        !sink.activities.is_empty(),
+        "claude-code golden fixture 必须至少发出一条 tool activity"
+    );
+    for activity in &sink.activities {
+        assert!(
+            !activity.message_native_id.trim().is_empty(),
+            "claude-code 发出的活动必须带非空锚点 native id，否则会被 staging 丢弃"
+        );
+    }
+}
+
 #[test]
 fn beta_readiness_ledger_capability_columns_match_capability_matrix() {
     // ledger 本地能力列（source_span/tool_activity/resume/incremental）必须与

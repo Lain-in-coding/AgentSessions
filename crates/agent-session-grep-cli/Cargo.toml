@@ -58,3 +58,6 @@ getrandom = "0.4"
 # 统一把 cache/ffi-sqlite-wasm-rs 重新拉回来。
 rusqlite = { version = "0.40", default-features = false, features = ["bundled"] }
 tempfile = "3"
+# provider_matrix 的 capability↔adapter 漂移测试需要全字段捕获 sink
+# (emit_activity 观测),与各 provider golden 测试同一份脚手架。
+agent-session-grep-testkit = { path = "../agent-session-grep-testkit" }
