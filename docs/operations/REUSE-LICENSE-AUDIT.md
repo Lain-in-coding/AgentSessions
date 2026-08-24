@@ -46,11 +46,11 @@
 | ctx | 单调 user_version 迁移 + events 去重索引 + sha256 前缀 checkpoint | adapt | Catalog 迁移与增量索引实现 | — |
 | ctx | CJK bigram 分词（scriptgram） | adapt | `../adr/ADR-0001-fulltext-search-engine.md` | — |
 | ctx | 只读 SQL 沙箱 raw_sql.rs | idea-only（MCP 不暴露 SQL） | `../contracts/CONTRACT-cli-robot-mcp-draft.md` §8 | — |
-| agf (MIT) | bounded reader（read_head_tail/char_prefix） | direct-copy | `../architecture/RFC-0002-provider-adapter-contract.md` §7；`../security/THREAT-MODEL.md` | 保留 MIT 声明 |
-| agf | shell quoting / PowerShell 包装 | direct-copy | CLI 入口实现 | 保留 MIT 声明 |
+| agf (MIT) | bounded reader（read_head_tail/char_prefix） | idea-only | `../architecture/RFC-0002-provider-adapter-contract.md` §7；`../security/THREAT-MODEL.md` | 无上游代码落地（源码审计零命中），无 attribution 义务 |
+| agf | shell quoting / PowerShell 包装 | idea-only | CLI 入口实现 | 无上游代码落地（源码审计零命中），无 attribution 义务 |
 | Recall (MIT) | FTS5 external-content + 触发器 | adapt | `../adr/ADR-0001-fulltext-search-engine.md` | — |
 | Recall | RRF k=60、目录子树过滤、迁移幂等骨架、JSONL roundtrip | adapt | Search、Catalog 迁移与 CLI contract 测试 | — |
-| sessiongrep (Apache-2.0) | 纯函数 find_repo_root/extract_text/highlight/timeline/escape | direct-copy | Provider discovery 与 Search 展示实现 | 保留版权头 |
+| sessiongrep (Apache-2.0) | 纯函数 find_repo_root/extract_text/highlight/timeline/escape | idea-only | Provider discovery 与 Search 展示实现 | 无上游代码落地（源码审计零命中），无 attribution 义务 |
 | sessiongrep | 两段式检索（FTS 召回→Rust 重排） | adapt | `../adr/ADR-0001-fulltext-search-engine.md` | — |
 | sessiongrep | 全 crates.io 无 vendored 供应链基线 | idea-only（模板） | 发布与供应链审计 | — |
 | hstry (MIT) | 事务化 migration runner、source-scoped purge、peek bundle | adapt | Catalog 迁移与 `../contracts/CONTRACT-cli-robot-mcp-draft.md` §7 | — |
