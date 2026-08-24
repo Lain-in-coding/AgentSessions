@@ -98,19 +98,27 @@
 parity、零遥测可验证、跨边界脱敏、Hook 默认关闭、三平台安装、
 benchmark/文档/对比表一致、三平台演练通过。
 
-## 5. 竞品事实基线(2026-08-15 精读结论,13 个外部项目)
+## 5. 竞品事实基线(2026-08-15 精读结论,13 个外部项目/12 个可引用)
 
-当前仓库已保存并核验的外部参考项目为:
-`ctx`、`cass`、`agentsview`、`AgentRecall`、`agent-sessions`、`agf`、
+当前仓库已保存并核验的外部参考项目共 **13 个**:
+`ctx`、`agentsview`、`AgentRecall`、`agent-sessions`、`agf`、
 `cc-switch`、`claude-historian-mcp`、`fast-resume`、`hstry`、`memex`、
 `Recall`、`sessiongrep`、`coding_agent_session_search`。
-其中 13 个可自由引用,是对比表与 benchmark 基线的合法来源;
-`cass` 因其 LICENSE 含 restricted-party rider,仅限 clean-room 思路,
-计入名单但不计入可引用对比基线——因此”13 个外部项目”指可自由引用集,
-名单共 14 项是”13 可引用 + 1 clean-room-only”,两者不矛盾。
+其中 **12 个**可自由引用,是对比表与 benchmark 基线的合法来源;
+`coding_agent_session_search` 因其 LICENSE 含 restricted-party rider,
+仅限 clean-room 思路,计入名单但不计入可引用对比基线。因此名单共
+13 项 = 「12 可引用 + 1 clean-room-only」,对外口径「12 个外部项目」
+指可自由引用集,与 `COMPETITOR-COMPARISON.md` 的口径说明一致。
+
+`cass` 是 `coding_agent_session_search` 的简称,两个名字指同一个仓库
+(`Dicklesworthstone/coding_agent_session_search`,固定 commit 见
+`../operations/REUSE-LICENSE-AUDIT.md`);本节其余各处沿用简称 `cass`。
+本文此前把两个名字并列成 14 项名单并据此算出「13 可引用」,是同一项目
+被计了两次,已按去重后的 13/12 更正。
+
 发布前 benchmark 必须逐项给出来源、commit/version 和可复现命令;
-若要继续使用”15 个外部项目”宣传口径,必须先补齐两项独立外部基线,
-否则统一改称”13 个外部项目”。
+不得使用「15 个外部项目」宣传口径——可引用集只有 12 个,要达到 15 需再
+补齐三项独立外部基线,在那之前统一改称「12 个外部项目」。
 
 - provider 覆盖:ctx 40+、agentsview 40+、AgentRecall 16、hstry 16、
   fast-resume 12、Recall 11、agent-sessions 10、agf 8、cc-switch 7、
@@ -119,9 +127,10 @@ benchmark/文档/对比表一致、三平台演练通过。
 - 检索:纯 FTS5 系(sessiongrep/agent-sessions)、FTS+模糊(fast-resume)、
   hybrid RRF(ctx/cass/Recall/agentsview/memex)、fuzzy(agf)、零存储全扫
   (claude-historian-mcp)。
-- 深度精读报告(15 份:13 份外部项目 + 2 份本项目文档,2026-08-14
-  生成)仅作为本地研究输入,不纳入公开树;cass 因 clean-room 边界不产
-  deep-read 报告。公开的 provider 格式结论落在对应 `.trellis/tasks/`
+- 深度精读报告(14 份:12 份可引用外部项目各一份 + 2 份本项目文档,
+  2026-08-14 生成)仅作为本地研究输入,不纳入公开树;cass 因 clean-room
+  边界不产 deep-read 报告,因此外部报告数等于可引用集大小(12)而非名单
+  大小(13)。公开的 provider 格式结论落在对应 `.trellis/tasks/`
   research 记录中。
 - 法律红线:cass LICENSE 含 rider,仅 clean-room 思路;REUSE-LICENSE-AUDIT
   维护 direct-copy/adapt/idea-only/reject 边界。
