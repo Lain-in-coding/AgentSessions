@@ -124,6 +124,7 @@ impl ProviderAdapter for QoderAdapter {
         let mut session_meta = 0usize;
         let mut conversational = 0usize;
 
+        let mut codex_envelopes = 0usize;
         for &(line_no, line) in &sample {
             match serde_json::from_str::<serde_json::Value>(line) {
                 Ok(v) => {
@@ -132,7 +133,17 @@ impl ProviderAdapter for QoderAdapter {
                         .get("type")
                         .and_then(serde_json::Value::as_str)
                         .unwrap_or("");
+                    // `session_meta` 这个 type 名并非 Qoder 独有：Codex rollout 的
+                    // 每条记录都是 `{timestamp, type, payload}` 封套，其首行同样是
+                    // 顶层 `type:"session_meta"`。Qoder 的 session_meta 把身份字段放
+                    // 在顶层或 `session_meta` 对象里，从不带 `payload`——因此
+                    // `payload` 的存在就是"这是 Codex 封套而非 Qoder 头"的判别位。
+                    // 不区分会让 Qoder 对 Codex rollout 报 High：codex 自身遇到容忍
+                    // 范围内的坏行时会从 Confirmed 降到 High，两者并列即触发
+                    // `select_and_stage_source` 的 tie 分支拒绝整个源。
+                    let codex_enveloped = v.get("payload").is_some();
                     match t {
+                        "session_meta" if codex_enveloped => codex_envelopes += 1,
                         "session_meta" => session_meta += 1,
                         "user" | "assistant" => {
                             conversational += 1;
@@ -145,6 +156,12 @@ impl ProviderAdapter for QoderAdapter {
                     unmatched.push(format!("line {line_no}: not valid JSON"));
                 }
             }
+        }
+        if codex_envelopes > 0 {
+            unmatched.push(format!(
+                "{codex_envelopes} session_meta record(s) carry a `payload` envelope \
+                 (Codex rollout shape, not Qoder)"
+            ));
         }
 
         if json_lines == 0 {
@@ -419,6 +436,27 @@ mod tests {
         let adapter = QoderAdapter::new();
         let fixture = "{\"foo\":1}\n{\"bar\":2}\n";
         assert!(adapter.probe(fixture.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn probe_rejects_codex_rollout_envelopes() {
+        // `session_meta` 这个 type 名不是 Qoder 独有：Codex rollout 的每条记录都是
+        // `{timestamp, type, payload}` 封套，首行同样是顶层 `type:"session_meta"`。
+        // 若不看 `payload` 判别位，Qoder 会对 Codex rollout 报 High；codex 自身在
+        // 容忍范围内的坏行下会从 Confirmed 降到 High，两者并列即触发
+        // `select_and_stage_source` 的 tie 分支拒绝整个源——codex 的真实 golden
+        // fixture 恰好含一条故意截断的记录，因此这不是理论风险。
+        let adapter = QoderAdapter::new();
+        let rollout = concat!(
+            r#"{"timestamp":"2026-07-26T08:00:00.000Z","type":"session_meta","payload":{"session_id":"s-1","cwd":"/work"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-07-26T08:00:01.000Z","type":"response_item","payload":{"type":"message","id":"m-1","role":"user","content":[{"type":"input_text","text":"hi"}]}}"#,
+            "\n",
+        );
+        assert!(
+            adapter.probe(rollout.as_bytes()).is_err(),
+            "带 payload 封套的 session_meta 是 Codex rollout，Qoder 必须拒绝认领"
+        );
     }
 
     #[test]
