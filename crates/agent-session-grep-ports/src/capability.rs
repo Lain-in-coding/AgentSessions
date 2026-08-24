@@ -232,7 +232,10 @@ impl ProviderCapabilityMatrix {
                     provider_id: "qoder".into(),
                     variant_id: "qoder/transcript-jsonl-v1".into(),
                     maturity: ProviderMaturity::Experimental,
-                    discover: CapabilityLevel::Unsupported,
+                    // `PROVIDER_DISCOVERY_ROOTS` 注册 `~/.qoder/projects`（transcript
+                    // JSONL 树）。该 root 只覆盖官方 transcript 面，不含 Qoder
+                    // Electron 端的 SQLite 会话库（见 adapter 模块文档）。
+                    discover: CapabilityLevel::Native,
                     probe: CapabilityLevel::Native,
                     parse: CapabilityLevel::Native,
                     search: CapabilityLevel::Native,

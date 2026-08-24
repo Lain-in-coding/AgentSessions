@@ -3033,6 +3033,19 @@ const PROVIDER_DISCOVERY_ROOTS: &[(&str, &str, &str)] = &[
     // 这正是 probe 该做的判定，不是可以靠猜文件名绕过的事。
     ("grok-build", ".grok/sessions", "jsonl"),
     ("kimi-code", ".kimi-code/sessions", "jsonl"),
+    // Qoder 有两个互不相干的会话面，本 adapter 只认第一个：
+    //   1. 官方 transcript JSONL 树 `~/.qoder/projects/<project>/transcript/*.jsonl`
+    //      —— provider-qoder 解析的就是它（ctx 的 `qoder_transcript_jsonl_tree` 行
+    //      同样只实现这一面，并显式声明不解析 Electron 状态库）；
+    //   2. Qoder IDE（VS Code fork）的 Electron SQLite 库
+    //      `AppData/Roaming/Qoder/SharedClientCache/cache/db/local.db`
+    //      （`chat_session`/`chat_message`/`chat_record` 表，与 Lingma 同构）。
+    // 只登记第 (1) 面的根：adapter 能解析的就是这一面，登记它不会让扫描收到
+    // 解析不了的源。第 (2) 面需要一个独立的 SQLite variant，未实现故不登记——
+    // 若把 `.qoder` 整体登记为根，`extensions/` 下成百上千个 `.json` 会被当成源
+    // 交给 probe，纯噪音。root 不存在时扫描为 partial（绝不 tombstone），因此
+    // 只装了 IDE、没有 CLI transcript 树的机器上登记它也是安全的。
+    ("qoder", ".qoder/projects", "jsonl"),
 ];
 
 /// 解析当前用户 home 目录下某 provider 的规范化 transcript 数据根。
