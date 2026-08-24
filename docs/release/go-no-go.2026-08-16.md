@@ -43,9 +43,12 @@
 
 | Check | Status | Evidence |
 |---|---|---|
-| Gate D invariants (all six) | **pending** | runbook §11 remains pending; Gate D benchmark suite not yet run against the rehearsal corpus |
+| Gate D invariants (all seven) | **pass** | v10 authorized full-corpus run `2026-08-24T17:22:18Z`: 1,900 sources / 2,222,889,692 bytes, 326,100 emitted, 0 skipped, all seven invariants pass, harness exit 0 (`docs/evidence/integration-beta/real-data-regression.md`) |
 
-**Residual performance risks**: none measured; Gate D evidence outstanding.
+**Residual performance risks**: the Gate D correctness invariants now pass on
+the full authorized corpus, including `INV-SOURCES-UNCHANGED`. Throughput and
+latency benchmarking against the rehearsal corpus is still not run, so no
+performance number is claimed.
 
 ---
 
@@ -120,6 +123,17 @@ certified — currently 0 Beta. **Not release-ready per provider gate.**
 1. **P0-4**: release pipeline configured but never a named successful run; CI
    billing blocks all jobs; factual NOTICE landed and ships in archives;
    REUSE reuse-matrix approval + SBOM certification decision remain owner-signed.
+   Observed 2026-08-24: every workflow on the three most recent `main` heads
+   (`3388344`, `0edd4e7`, `13b879c`) reports `failure` within ~3 s with an empty
+   `runner_name` and zero executed steps — no runner is ever assigned, and no
+   job log exists to download. That signature is account-level (Actions
+   spend/billing), not a repository or code defect: on the same tree the local
+   equivalents of every blocked job are green (`cargo fmt --all --check`,
+   `cargo clippy --workspace --all-targets -D warnings`,
+   `cargo test --workspace` 1496 passed / 0 failed / 15 ignored across 64
+   suites, and `cargo deny check` advisories+bans+licenses+sources all ok).
+   Only the owner can lift the billing block, so `last_certified_targets`
+   stays empty and the cross-target evidence rows stay `ci_configured_only`.
 2. **Provider maturity**: 0 Beta; Claude/Codex not certified against the PRD
    gate — remains below the ≥5 Beta requirement.
 3. **External**: GitHub Actions billing; PRIVATE→public switch (Option-A public
