@@ -2960,19 +2960,28 @@ fn installation_namespace(path: &str, provider_id: &str) -> String {
     format!("{provider_id}:{parent}")
 }
 
-/// `sync --discover` 的 provider → home 相对数据根映射表（唯一来源）。
+/// `sync --discover` 的 provider → (home 相对数据根, 源文件扩展名) 映射表（唯一来源）。
 ///
 /// 一个 provider 出现在此表 ⟺ `capability.rs` 的 `discover` 列必须非
 /// `Unsupported`；`discover_roots_match_capability_discover_claims` 双向守护该
-/// 等价关系。注意 [`discover_provider_sources`] 只收集 `.jsonl`，因此把
-/// SQLite-only provider（opencode / cursor）登记进此表并不能让它被发现——
-/// 登记前先确认该 root 下的源确实是 JSONL。
-const PROVIDER_DISCOVERY_ROOTS: &[(&str, &str)] = &[
-    ("claude-code", ".claude/projects"),
-    ("codex", ".codex/sessions"),
-    ("openclaw", ".openclaw/agents"),
-    ("tencent-codebuddy", ".codebuddy/projects"),
-    ("antigravity", ".gemini/antigravity-cli/brain"),
+/// 等价关系。
+///
+/// 扩展名（精确匹配，不含点）是 per-provider 事实，不是全局常量：JSONL
+/// transcript 用 `jsonl`，opencode 的源是 SQLite 故用 `db`。登记前必须确认该 root
+/// 下的源确实是这个扩展名——[`sync_discover`] 会把"完整扫描"未重新发现的已存路径
+/// diff 成空批 tombstone，扩展名写错会让扫描完整但为空，从而抹掉该 provider 此前
+/// 的索引。
+const PROVIDER_DISCOVERY_ROOTS: &[(&str, &str, &str)] = &[
+    ("claude-code", ".claude/projects", "jsonl"),
+    ("codex", ".codex/sessions", "jsonl"),
+    ("openclaw", ".openclaw/agents", "jsonl"),
+    ("tencent-codebuddy", ".codebuddy/projects", "jsonl"),
+    ("antigravity", ".gemini/antigravity-cli/brain", "jsonl"),
+    // OpenCode 的源是单个 SQLite DB。`opencode.db-wal` / `-shm` 旁文件的
+    // extension 是 `db-wal` / `db-shm`（最后一个点之后），精确匹配 `db` 天然把
+    // 它们排除；实测忽略 WAL 不会少读任何行（session/message/part 计数与带
+    // WAL 打开完全一致），所以只收 `.db` 是完整的。
+    ("opencode", ".local/share/opencode", "db"),
 ];
 
 /// 解析当前用户 home 目录下某 provider 的规范化 transcript 数据根。
@@ -2981,16 +2990,17 @@ const PROVIDER_DISCOVERY_ROOTS: &[(&str, &str)] = &[
 /// home 目录优先取 `HOME`（Unix），回退 `USERPROFILE`（Windows）；两者都缺失返回
 /// `None`，调用方应跳过该 provider 的发现（R4：不猜路径）。
 ///
-/// 映射表见 [`PROVIDER_DISCOVERY_ROOTS`]；未登记的 provider 返回 `None`。
-fn provider_data_root(provider_id: &str) -> Option<std::path::PathBuf> {
-    let sub = PROVIDER_DISCOVERY_ROOTS
+/// 映射表见 [`PROVIDER_DISCOVERY_ROOTS`]；未登记的 provider 返回 `None`。返回值
+/// 同时带上该 provider 源文件的扩展名，调用方无需再查表（也就无从写出与 root
+/// 不匹配的扩展名）。
+fn provider_discovery_target(provider_id: &str) -> Option<(std::path::PathBuf, &'static str)> {
+    let (_, sub, extension) = PROVIDER_DISCOVERY_ROOTS
         .iter()
-        .find(|(id, _)| *id == provider_id)
-        .map(|(_, sub)| *sub)?;
+        .find(|(id, _, _)| *id == provider_id)?;
     let home = std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(std::path::PathBuf::from)?;
-    Some(home.join(sub))
+    Some((home.join(sub), extension))
 }
 
 fn source_path_identity(path: &str) -> String {
@@ -3006,14 +3016,14 @@ fn source_path_identity(path: &str) -> String {
     normalized
 }
 
-/// 递归遍历 `root`，收集所有 `.jsonl` 文件路径（正斜杠归一）。
+/// 递归遍历 `root`，收集扩展名恰为 `extension`（不含点）的文件路径（正斜杠归一）。
 ///
 /// 返回 `(paths, complete)`：`complete = false` 表示遍历中途遇到不可读目录
 /// （权限错误等），此时返回已收集到的路径并标记不完整——调用方据此对受影响
 /// provider 的源设置 `relation_complete = false`，从而不推导 tombstone（R2）。
 ///
 /// 不跟随符号链接（避免循环 / 越出数据根）；不读取文件内容，只枚举路径。
-fn discover_provider_sources(root: &std::path::Path) -> (Vec<String>, bool) {
+fn discover_provider_sources(root: &std::path::Path, extension: &str) -> (Vec<String>, bool) {
     let mut paths = Vec::new();
     let mut complete = true;
     let root_type = match std::fs::symlink_metadata(root) {
@@ -3055,7 +3065,7 @@ fn discover_provider_sources(root: &std::path::Path) -> (Vec<String>, bool) {
             if file_type.is_dir() {
                 stack.push(path);
             } else if file_type.is_file()
-                && path.extension().and_then(|e| e.to_str()) == Some("jsonl")
+                && path.extension().and_then(|e| e.to_str()) == Some(extension)
             {
                 paths.push(source_path_identity(&path.to_string_lossy()));
             }
@@ -3073,8 +3083,8 @@ struct ProviderDiscovery {
     complete: bool,
 }
 
-/// 执行 `sync --discover`：遍历所有已知 provider 的数据根，收集 `.jsonl` 源，
-/// diff 已存路径合成空批 tombstone（仅完整扫描时），并把发现的路径与合成批
+/// 执行 `sync --discover`：遍历所有已知 provider 的数据根，按各自登记的扩展名收集
+/// 源文件，diff 已存路径合成空批 tombstone（仅完整扫描时），并把发现的路径与合成批
 /// 一起交给 [`sync_files`] 的核心流程。
 ///
 /// 隐私：结果只报计数与 provider id，绝不包含绝对 transcript 路径。
@@ -3091,8 +3101,9 @@ fn sync_discover(
     let mut per_provider: Vec<(String, Vec<String>, bool)> = Vec::new();
     for adapter in provider_registry() {
         let pid = adapter.provider_id().to_string();
-        let Some(root) = provider_data_root(&pid) else {
-            // 无法解析当前用户 home：该 provider 的根扫描不完整，不能 tombstone。
+        let Some((root, extension)) = provider_discovery_target(&pid) else {
+            // 未登记发现根，或无法解析当前用户 home：该 provider 的根扫描不完整，
+            // 不能 tombstone。
             overall_complete = false;
             per_provider.push((pid.clone(), Vec::new(), false));
             providers_out.push(ProviderDiscovery {
@@ -3116,7 +3127,7 @@ fn sync_discover(
             });
             continue;
         }
-        let (paths, complete) = discover_provider_sources(&root);
+        let (paths, complete) = discover_provider_sources(&root, extension);
         overall_complete = overall_complete && complete;
         per_provider.push((pid.clone(), paths.clone(), complete));
         let found = paths.len();
@@ -4224,8 +4235,8 @@ mod tests {
     }
 
     #[test]
-    fn provider_data_root_rejects_unknown_provider() {
-        assert!(provider_data_root("unknown-provider").is_none());
+    fn provider_discovery_target_rejects_unknown_provider() {
+        assert!(provider_discovery_target("unknown-provider").is_none());
     }
 
     #[test]
@@ -4234,9 +4245,12 @@ mod tests {
         // 已漏过 3 个少报（openclaw/tencent-codebuddy/antigravity 有 root 却记
         // Unsupported）。这里双向锁定：登记进 PROVIDER_DISCOVERY_ROOTS ⟺ 声明非
         // Unsupported。`sync --discover` 遍历整个 registry 并对每个 provider 调
-        // provider_data_root，所以这张表就是运行期的发现能力事实。
+        // provider_discovery_target，所以这张表就是运行期的发现能力事实。
         let matrix = ProviderCapabilityMatrix::current();
-        let wired: BTreeSet<&str> = PROVIDER_DISCOVERY_ROOTS.iter().map(|(id, _)| *id).collect();
+        let wired: BTreeSet<&str> = PROVIDER_DISCOVERY_ROOTS
+            .iter()
+            .map(|(id, _, _)| *id)
+            .collect();
         assert_eq!(
             wired.len(),
             PROVIDER_DISCOVERY_ROOTS.len(),
@@ -4261,9 +4275,10 @@ mod tests {
             );
         }
 
-        // 登记的 root 必须是 home 相对路径（provider_data_root 直接 join 到 home），
-        // 绝对路径或上跳会越出用户数据根。
-        for (id, sub) in PROVIDER_DISCOVERY_ROOTS {
+        // 登记的 root 必须是 home 相对路径（provider_discovery_target 直接 join 到
+        // home），绝对路径或上跳会越出用户数据根。扩展名必须是不含点的裸扩展名，
+        // 因为 `Path::extension()` 返回的就是不含点的形式，写成 `.db` 永不匹配。
+        for (id, sub, extension) in PROVIDER_DISCOVERY_ROOTS {
             let path = std::path::Path::new(sub);
             assert!(
                 path.is_relative(),
@@ -4273,25 +4288,27 @@ mod tests {
                 !sub.contains(".."),
                 "{id}: 发现根不得包含 `..`，实际 `{sub}`"
             );
+            assert!(
+                !extension.is_empty() && !extension.starts_with('.'),
+                "{id}: 扩展名必须是不含点的裸扩展名（如 `jsonl`/`db`），实际 `{extension}`"
+            );
         }
     }
 
     #[test]
-    fn sqlite_only_providers_are_never_registered_as_discoverable() {
-        // discover_provider_sources 只收集 `.jsonl`。SQLite-only provider
-        // （opencode `opencode.db` / cursor `state.vscdb`）即便登记了 root，完整
-        // 扫描也会返回 0 条路径。真正的危险在 tombstone：sync_discover 对
-        // "完整扫描" 的 provider 会把已存路径 diff 成空批删除索引，所以把
-        // SQLite-only provider 登记进表会让一次 discover 抹掉它此前的索引。
-        // 支持它们必须先扩展 discover_provider_sources 的扩展名过滤。
-        for id in ["opencode", "cursor"] {
-            assert!(
-                provider_data_root(id).is_none(),
-                "{id} 的源是 SQLite 而非 JSONL；登记发现根会让完整扫描返回 0 条\
-                 路径并 tombstone 已索引内容——需先让 discover_provider_sources \
-                 识别该扩展名"
-            );
-        }
+    fn cursor_is_not_registered_as_discoverable() {
+        // cursor 的源是 VS Code workspaceStorage 下的 `state.vscdb`，路径形如
+        // `AppData/Roaming/<Cursor 变体>/User/workspaceStorage/<hash>/state.vscdb`
+        // —— 既非 home 直接相对（Windows 有 Roaming 层，macOS/Linux 布局不同），
+        // 也非单一 root，本机实测 `~/.cursor` 与 Roaming/Cursor 均不存在，无法确认
+        // 真实布局。R4：不猜路径。tombstone 风险使猜错的代价是抹掉已索引内容：
+        // sync_discover 对"完整扫描"的 provider 会把已存路径 diff 成空批删除索引，
+        // 所以 root 写错会让扫描完整但为空。等拿到真实布局证据再登记。
+        assert!(
+            provider_discovery_target("cursor").is_none(),
+            "cursor 的 workspaceStorage 布局尚无本机证据；登记错误的 root 会让完整\
+             扫描返回 0 条路径并 tombstone 已索引内容"
+        );
     }
 
     #[test]
@@ -4350,10 +4367,39 @@ mod tests {
         std::fs::create_dir_all(&nested).unwrap();
         std::fs::write(nested.join("one.jsonl"), b"fixture").unwrap();
         std::fs::write(nested.join("two.txt"), b"not a source").unwrap();
-        let (paths, complete) = discover_provider_sources(dir.path());
+        let (paths, complete) = discover_provider_sources(dir.path(), "jsonl");
         assert!(complete);
         assert_eq!(paths.len(), 1);
         assert!(paths[0].ends_with("nested/one.jsonl"));
+    }
+
+    #[test]
+    fn discover_provider_sources_collects_sqlite_db_without_wal_sidecars() {
+        // opencode 的源是单个 `.db`。旁文件 `opencode.db-wal` / `-shm` 的
+        // extension 是 `db-wal` / `db-shm`，精确匹配把它们排除——否则每个 sidecar
+        // 都会被当成一个源交给 probe（非 SQLite magic → 报错噪音）。
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("opencode.db"), b"fixture").unwrap();
+        std::fs::write(dir.path().join("opencode.db-wal"), b"fixture").unwrap();
+        std::fs::write(dir.path().join("opencode.db-shm"), b"fixture").unwrap();
+        std::fs::write(dir.path().join("notes.jsonl"), b"fixture").unwrap();
+
+        let (paths, complete) = discover_provider_sources(dir.path(), "db");
+        assert!(complete);
+        assert_eq!(paths.len(), 1, "只应收到 opencode.db，实际 {paths:?}");
+        assert!(paths[0].ends_with("opencode.db"));
+    }
+
+    #[test]
+    fn discover_provider_sources_extension_filter_is_exact() {
+        // 扩展名比对是精确相等而非后缀包含：`jsonl` 不得收走 `.json`，
+        // `db` 不得收走 `.dbx`。
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.json"), b"fixture").unwrap();
+        std::fs::write(dir.path().join("b.dbx"), b"fixture").unwrap();
+
+        assert!(discover_provider_sources(dir.path(), "jsonl").0.is_empty());
+        assert!(discover_provider_sources(dir.path(), "db").0.is_empty());
     }
 
     #[cfg(unix)]
@@ -4366,7 +4412,7 @@ mod tests {
         let linked_root = dir.path().join("linked-root");
         std::os::unix::fs::symlink(&real_root, &linked_root).unwrap();
 
-        let (paths, complete) = discover_provider_sources(&linked_root);
+        let (paths, complete) = discover_provider_sources(&linked_root, "jsonl");
         assert!(paths.is_empty());
         assert!(!complete);
     }

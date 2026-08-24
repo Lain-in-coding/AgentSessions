@@ -4724,7 +4724,7 @@ fn mcp_frames(db: &str, inputs: &[serde_json::Value]) -> Vec<serde_json::Value> 
 fn discover_env() -> (tempfile::TempDir, String) {
     let dir = tempfile::tempdir().expect("tempdir for discover home");
     let home = dir.path().to_string_lossy().into_owned();
-    // provider_data_root 读 HOME（Unix）/ USERPROFILE（Windows）。
+    // provider_discovery_target 读 HOME（Unix）/ USERPROFILE（Windows）。
     std::fs::create_dir_all(dir.path().join(".claude").join("projects"))
         .expect("create claude projects root");
     std::fs::create_dir_all(dir.path().join(".codex").join("sessions"))
@@ -4736,7 +4736,7 @@ fn discover_env() -> (tempfile::TempDir, String) {
 fn run_with_home(db: &str, home: &str, args: &[&str]) -> Output {
     let mut cmd = Command::new(BIN);
     cmd.arg("--db").arg(db).arg("--robot").args(args);
-    // 两个变量都设，避免平台/继承差异导致 provider_data_root 解析到真实 home。
+    // 两个变量都设，避免平台/继承差异导致 provider_discovery_target 解析到真实 home。
     cmd.env("HOME", home);
     cmd.env("USERPROFILE", home);
     cmd.output()
@@ -4826,6 +4826,79 @@ fn sync_discover_finds_and_syncs_provider_sources() {
     assert!(
         stdout(&out).contains("msg_v1_"),
         "codex search: {}",
+        stdout(&out)
+    );
+}
+
+/// 写一个最小 OpenCode `opencode.db`（session/message/part 三表），布局与
+/// provider adapter 的 probe/parse 期望一致。
+fn write_opencode_db(path: &std::path::Path, text: &str) {
+    let conn = Connection::open(path).expect("create opencode fixture db");
+    conn.execute_batch(
+        "CREATE TABLE session (id TEXT PRIMARY KEY, title TEXT, directory TEXT, time_created INTEGER, time_updated INTEGER);
+         CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, data TEXT, time_created INTEGER);
+         CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, data TEXT, time_created INTEGER);
+         INSERT INTO session VALUES ('ses_disc', 'discover', '/work', 1, 2);
+         INSERT INTO message VALUES ('msg_disc', 'ses_disc', '{\"role\":\"user\"}', 1);",
+    )
+    .expect("create opencode fixture schema");
+    conn.execute(
+        "INSERT INTO part VALUES ('part_disc', 'msg_disc', json_object('type', 'text', 'text', ?1), 1)",
+        rusqlite::params![text],
+    )
+    .expect("insert opencode fixture part");
+    conn.close().expect("close opencode fixture db");
+}
+
+#[test]
+fn sync_discover_finds_sqlite_sourced_opencode() {
+    // 回归：发现曾硬编码只收 `.jsonl`，opencode 的源是单个 SQLite
+    // `opencode.db`，于是扫描永远零命中——有 root 却永不可发现。扩展名现在是
+    // per-provider 列，这个测试从 CLI 外部端到端锁定：真 SQLite 源被发现、索引、
+    // 可检索，且 `-wal`/`-shm` 旁文件不被当成源（它们的 extension 是
+    // `db-wal`/`db-shm`，精确匹配天然排除）。
+    let (home_dir, home) = discover_env();
+    let (_db_dir, db) = temp_db("discover-opencode");
+    let opencode_root = home_dir
+        .path()
+        .join(".local")
+        .join("share")
+        .join("opencode");
+    std::fs::create_dir_all(&opencode_root).expect("create opencode root");
+    write_opencode_db(
+        &opencode_root.join("opencode.db"),
+        "discover opencode hello",
+    );
+    // 旁文件用非 SQLite 内容：若被误当成源，probe 会失败并让 provider 报错，
+    // 断言 found == 1 就会挂。
+    std::fs::write(opencode_root.join("opencode.db-wal"), b"not a database")
+        .expect("write wal sidecar");
+    std::fs::write(opencode_root.join("opencode.db-shm"), b"not a database")
+        .expect("write shm sidecar");
+
+    let out = run_with_home(&db, &home, &["sync", "--discover"]);
+    assert!(
+        out.status.success(),
+        "sync --discover failed: {}",
+        stdout(&out)
+    );
+    let frame = parse_first_line(&out);
+    let opencode = frame["data"]["discovery"]["providers"]
+        .as_array()
+        .expect("providers")
+        .iter()
+        .find(|provider| provider["id"] == "opencode")
+        .expect("opencode in discovery");
+    assert_eq!(
+        opencode["found"], 1,
+        "只应发现 opencode.db 自身，不含 -wal/-shm: {frame}"
+    );
+    assert_eq!(opencode["complete"], true, "{frame}");
+
+    let out = run_with_home(&db, &home, &["search", "opencode"]);
+    assert!(
+        stdout(&out).contains("msg_v1_"),
+        "discovered opencode source must be searchable: {}",
         stdout(&out)
     );
 }

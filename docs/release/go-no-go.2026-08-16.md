@@ -121,6 +121,7 @@ certified — currently 0 Beta. **Not release-ready per provider gate.**
 | 9 | antigravity declared `source_span: Unsupported` while the adapter emits byte-exact spans asserted by its golden test | P1 | closed | 7434092 |
 | 10 | openclaw / tencent-codebuddy / antigravity declared `discover: Unsupported` while `provider_data_root` wires a discovery root for each — the same under-claim class as row 9, on the last unguarded capability column | P1 | closed | 68665a7 |
 | 11 | Both SQLite adapters leaked their temp database copy on every probe/parse: cursor returned a bare `Connection` with no cleanup guard, and opencode returned the guard beside the connection in a tuple (which drops the guard *first*, so the unlink ran while the file was still open and Windows refused it) | P1 | closed | 2a1f062 |
+| 12 | `sync --discover` hard-coded a `.jsonl` extension filter, so a SQLite-sourced provider could never be auto-discovered even with a real data root — and registering one anyway would have made a *complete* scan return zero paths and tombstone that provider's previously indexed sources | P1 | closed | this task |
 
 ---
 
@@ -192,18 +193,14 @@ directions: registered in the table ⟺ `capability.rs` declares a usable
 `discover` level. Mutation-verified in both directions (re-injected under-claim
 and a fabricated over-claim each produced a targeted failure naming the provider).
 
-A second guard, `sqlite_only_providers_are_never_registered_as_discoverable`,
-records a real hazard found while auditing this column: `discover_provider_sources`
-collects only `.jsonl`, while `sync_discover` synthesizes empty tombstone batches
-for prior paths a *complete* scan did not rediscover. Registering a SQLite-only
-provider (`opencode` → `opencode.db`, `cursor` → `state.vscdb`) would therefore
-make one `sync --discover` scan complete-but-empty and tombstone that provider's
-previously indexed sources. The current code is safe — the diff only considers
-rows whose `source_scans.provider_id` is non-NULL, and explicit `sync <file>`
-always leaves it NULL, so today no `.db` source is reachable by the diff — but the
-hazard becomes live the moment someone adds the root without extending the
-extension filter, so `opencode` correctly stays `discover: Unsupported` and the
-test pins the reason.
+Auditing that column also surfaced the hazard behind §6 row 12:
+`discover_provider_sources` collected only `.jsonl`, while `sync_discover`
+synthesizes empty tombstone batches for prior paths a *complete* scan did not
+rediscover. Registering a SQLite-sourced provider without extending the filter
+would therefore make one `sync --discover` scan complete-but-empty and tombstone
+that provider's previously indexed sources. The wave above deliberately left
+`opencode` unregistered for that reason and pinned the hazard in a test; row 12
+closes the underlying gap so the capability no longer has to be withheld.
 
 Closed 2026-08-25 (§6 row 11, `main` at `2a1f062`): auditing that same SQLite
 read path surfaced a resource leak in both SQLite adapters. Each writes the

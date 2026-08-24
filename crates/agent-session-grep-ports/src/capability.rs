@@ -243,7 +243,7 @@ impl ProviderCapabilityMatrix {
                     provider_id: "openclaw".into(),
                     variant_id: "openclaw/session-jsonl-v3".into(),
                     maturity: ProviderMaturity::Experimental,
-                    // `provider_data_root` 注册 `~/.openclaw/agents`，JSONL 源可被
+                    // `PROVIDER_DISCOVERY_ROOTS` 注册 `~/.openclaw/agents`，JSONL 源可被
                     // discover 扫描收集；此前记为 unsupported 与代码相反。
                     discover: CapabilityLevel::Native,
                     probe: CapabilityLevel::Native,
@@ -260,7 +260,7 @@ impl ProviderCapabilityMatrix {
                     provider_id: "tencent-codebuddy".into(),
                     variant_id: "tencent-codebuddy/cli-jsonl-v1".into(),
                     maturity: ProviderMaturity::Experimental,
-                    // `provider_data_root` 注册 `~/.codebuddy/projects`（JSONL 源）。
+                    // `PROVIDER_DISCOVERY_ROOTS` 注册 `~/.codebuddy/projects`（JSONL 源）。
                     discover: CapabilityLevel::Native,
                     probe: CapabilityLevel::Native,
                     parse: CapabilityLevel::Native,
@@ -276,10 +276,10 @@ impl ProviderCapabilityMatrix {
                     provider_id: "opencode".into(),
                     variant_id: "opencode/sqlite-v1".into(),
                     maturity: ProviderMaturity::Experimental,
-                    // `provider_data_root` 注册了 `~/.local/share/opencode`，但
-                    // `discover_provider_sources` 只收集 `.jsonl`，而本 provider 的源是
-                    // SQLite `opencode.db`——扫描永远返回零路径，故如实记 unsupported。
-                    discover: CapabilityLevel::Unsupported,
+                    // `PROVIDER_DISCOVERY_ROOTS` 注册 `~/.local/share/opencode` 并声明
+                    // 扩展名 `db`：源是单个 SQLite `opencode.db`，`-wal`/`-shm` 旁文件的
+                    // extension 不是 `db`，精确匹配天然排除。
+                    discover: CapabilityLevel::Native,
                     probe: CapabilityLevel::Native,
                     parse: CapabilityLevel::Native,
                     search: CapabilityLevel::Native,
@@ -326,7 +326,7 @@ impl ProviderCapabilityMatrix {
                     provider_id: "antigravity".into(),
                     variant_id: "antigravity/transcript-jsonl-v1".into(),
                     maturity: ProviderMaturity::Experimental,
-                    // `provider_data_root` 注册 `~/.gemini/antigravity-cli/brain`（JSONL 源）。
+                    // `PROVIDER_DISCOVERY_ROOTS` 注册 `~/.gemini/antigravity-cli/brain`（JSONL 源）。
                     discover: CapabilityLevel::Native,
                     probe: CapabilityLevel::Native,
                     parse: CapabilityLevel::Native,
