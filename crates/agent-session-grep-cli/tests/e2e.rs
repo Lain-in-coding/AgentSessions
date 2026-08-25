@@ -5566,3 +5566,202 @@ fn search_facet_flag_validation_is_explicit() {
         stdout(&out)
     );
 }
+
+// ---- `incremental` 能力列 ↔ 真实 resync 行为 防漂移 ----
+
+/// 每个已实现 provider 的 pinned golden 源文件（相对本 crate 目录）。
+///
+/// 与 `provider_matrix.rs` 的 `PINNED_GOLDEN`（expected.json）互补：这里要的是
+/// **输入字节**，因为增量判定的对象是源文件本身。
+const GOLDEN_SOURCES: &[(&str, &str)] = &[
+    (
+        "aider",
+        "../agent-session-grep-provider-aider/tests/golden/basic.md",
+    ),
+    (
+        "antigravity",
+        "../agent-session-grep-provider-antigravity/tests/golden/basic.jsonl",
+    ),
+    (
+        "claude-code",
+        "../agent-session-grep-provider-claude/tests/golden/basic.jsonl",
+    ),
+    (
+        "cline",
+        "../agent-session-grep-provider-cline/tests/golden/basic.json",
+    ),
+    (
+        "codex",
+        "../agent-session-grep-provider-codex/tests/golden/basic.jsonl",
+    ),
+    (
+        "cursor",
+        "../agent-session-grep-provider-cursor/tests/golden/basic.db",
+    ),
+    (
+        "grok-build",
+        "../agent-session-grep-provider-grok/tests/golden/basic.jsonl",
+    ),
+    (
+        "hermes",
+        "../agent-session-grep-provider-hermes/tests/golden/basic.json",
+    ),
+    (
+        "kimi-code",
+        "../agent-session-grep-provider-kimi/tests/golden/basic.jsonl",
+    ),
+    (
+        "openclaw",
+        "../agent-session-grep-provider-openclaw/tests/golden/basic.jsonl",
+    ),
+    (
+        "opencode",
+        "../agent-session-grep-provider-opencode/tests/golden/basic.db",
+    ),
+    (
+        "pi",
+        "../agent-session-grep-provider-pi/tests/golden/basic.jsonl",
+    ),
+    (
+        "qoder",
+        "../agent-session-grep-provider-qoder/tests/golden/basic.jsonl",
+    ),
+    (
+        "tencent-codebuddy",
+        "../agent-session-grep-provider-codebuddy/tests/golden/basic.jsonl",
+    ),
+];
+
+/// `incremental` 声明必须与真实 resync 行为一致（逐 provider 用其 pinned golden
+/// 源实测）。
+///
+/// 起因：capability.rs 曾只给 claude-code / codex 声明 `incremental: Native`，
+/// 其余 12 个已实现 provider 一律 `Unsupported`，而增量判定完全在
+/// composition root + store 层：`sync` 先读 `source_scans` 的
+/// `(len_bytes, fingerprint)` 缓存，与当次快照的 BLAKE3 指纹比对，相同则**跳过
+/// parse**（`unchanged` 上报已存消息数），再由
+/// `commit_source_batches_if_changed` 做内容级 no-op 判定、不推进 generation。
+/// 这条链上没有任何 per-provider 分支，adapter 也不参与——`incremental` 因此
+/// 只取决于"源是否有稳定字节身份"，对全部 14 个已实现 provider 一致成立。
+/// 此前的 `Unsupported` 是少报，本测试把它钉成可执行断言。
+///
+/// 断言形态与既有 `sync_commits_then_reports_unchanged_on_resync`（claude）/
+/// `..._codex` 同构，只是覆盖全部 14 个 provider 的真实 golden 源：
+/// 首次 sync 提交 N 条并推进 generation，二次 sync `committed=0` /
+/// `unchanged=N` / generation 不变。
+#[test]
+fn capability_incremental_claim_matches_real_resync_for_every_provider() {
+    use agent_session_grep_ports::capability::{
+        CapabilityLevel, ProviderCapabilityMatrix, ProviderMaturity,
+    };
+
+    let matrix = ProviderCapabilityMatrix::current();
+    let implemented: Vec<_> = matrix
+        .providers
+        .iter()
+        .filter(|p| p.maturity != ProviderMaturity::Unsupported)
+        .collect();
+    assert_eq!(implemented.len(), 14, "已实现 provider 应为 14 个");
+    let mut covered: Vec<&str> = GOLDEN_SOURCES.iter().map(|(id, _)| *id).collect();
+    let mut expected: Vec<&str> = implemented.iter().map(|p| p.provider_id.as_str()).collect();
+    covered.sort_unstable();
+    expected.sort_unstable();
+    assert_eq!(
+        covered, expected,
+        "GOLDEN_SOURCES 必须恰好覆盖 capability.rs 的 14 个已实现 provider"
+    );
+
+    for cap in implemented {
+        let relative = GOLDEN_SOURCES
+            .iter()
+            .find(|(id, _)| *id == cap.provider_id)
+            .expect("covered above")
+            .1;
+        let golden = Path::new(env!("CARGO_MANIFEST_DIR")).join(relative);
+        let provider_id = cap.provider_id.as_str();
+
+        // 每个 provider 独立 db + 独立源副本：pi/openclaw 是同格式孪生，必须
+        // 放在各自的登记根下才能定身份（见
+        // `explicit_sync_resolves_twin_formats_by_registered_root`）。这里用
+        // `<tmp>/<home-relative-root>/basic.<ext>` 复刻该布局。
+        let (dir, db) = temp_db(&format!("incr-{provider_id}"));
+        let root_relative = match provider_id {
+            "pi" => Some(".pi/agent/sessions"),
+            "openclaw" => Some(".openclaw/agents"),
+            _ => None,
+        };
+        let staged = match root_relative {
+            Some(root) => dir.path().join(root),
+            None => dir.path().to_path_buf(),
+        };
+        std::fs::create_dir_all(&staged).expect("create staging root");
+        let file_name = golden.file_name().expect("golden file name");
+        let source = staged.join(file_name);
+        std::fs::copy(&golden, &source).expect("copy golden source");
+        let path = source.to_string_lossy().into_owned();
+
+        // 首次 sync：提交 N 条消息，generation 推进到 1。
+        let out = run(&db, &["sync", &path]);
+        assert!(
+            out.status.success(),
+            "{provider_id}: 首次 sync 必须成功: {}",
+            stdout(&out)
+        );
+        let first = parse_first_line(&out);
+        let committed = first["data"]["committed"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("{provider_id}: committed 必须是数字: {first}"));
+        assert!(
+            committed > 0,
+            "{provider_id}: 首次 sync 必须提交消息（golden 源非空）: {first}"
+        );
+        let generation = first["data"]["generation"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("{provider_id}: generation 必须是数字: {first}"));
+
+        // 二次 sync 同一字节：指纹命中 → 跳过 parse → 内容级 no-op。
+        let out = run(&db, &["sync", &path]);
+        assert!(
+            out.status.success(),
+            "{provider_id}: resync 必须成功: {}",
+            stdout(&out)
+        );
+        let second = parse_first_line(&out);
+        let resync_committed = second["data"]["committed"].as_u64();
+        let unchanged = second["data"]["unchanged"].as_u64();
+        let resync_generation = second["data"]["generation"].as_u64();
+
+        match cap.incremental {
+            CapabilityLevel::Native | CapabilityLevel::Derived | CapabilityLevel::Partial => {
+                assert_eq!(
+                    resync_committed,
+                    Some(0),
+                    "{provider_id}: capability.rs 声明 incremental={:?}，但未变化的 resync \
+                     仍提交了消息（虚报）: {second}",
+                    cap.incremental
+                );
+                assert_eq!(
+                    unchanged,
+                    Some(committed),
+                    "{provider_id}: resync 必须把已存消息如实计入 unchanged: {second}"
+                );
+                assert_eq!(
+                    resync_generation,
+                    Some(generation),
+                    "{provider_id}: 未变化的 resync 不得推进 generation: {second}"
+                );
+            }
+            CapabilityLevel::Unsupported => {
+                assert_ne!(
+                    resync_committed,
+                    Some(0),
+                    "{provider_id}: capability.rs 声明 incremental=Unsupported，但未变化的 \
+                     resync 实测是 committed=0 的 no-op（少报，增量其实可用）: {second}"
+                );
+            }
+            CapabilityLevel::Unknown => {
+                panic!("{provider_id}: 已实现 provider 的 incremental 不得为 Unknown")
+            }
+        }
+    }
+}

@@ -64,7 +64,7 @@ target。
 | resume | `derived`（claude-code/codex/pi/grok）；`unknown`（opencode/kimi/qoder/codebuddy/hermes/antigravity/cursor）；`unsupported`（aider/cline/openclaw） | 未核验的 resume 命令一律不设默认值 |
 | context | `native`（claude-code）；`unsupported`（其余 13 个已实现 provider） | 上下文图靠 `message_edges` 的父指针拼装（`mainline` 逐边上溯），而边只能来自 adapter 发出的 `parent_native_id`——没有父指针就没有边，`context` 只能如实记 unsupported。仅 claude-code 的 JSONL 带 `parentUuid`；codex rollout 是线性序列、adapter 硬编码 `parent_native_id: None`（模块文档：不编造上层可推断的线性链），此前误记 `native` 已由 `capability_context_claim_matches_pinned_golden_parent_links` 抓出并更正 |
 | handoff | `derived`（全部 14 个已实现 provider）；`unknown`（deepseek-harness/zcode，deferred） | handoff 不是 per-provider 特性：`generate_deterministic` 只消费 `SearchHit` + 权威 source placement，`provenance` 与 `matched_sessions[].provider_id` 一律 `None`（搜索型 pack 无单一提供商，不臆造），全流程不读 provider 身份、无 per-provider 分支。故"能否装出带原文证据的 pack"只取决于消息是否落库并带 source placement——`parse` 可用即成立。此前全列 `unsupported` 是少报：`asg handoff` 是已发布命令，对 codex（JSONL）、aider（markdown 且 native_id 恒空）、opencode（SQLite）三种结构迥异的真实 golden 源实测均产出 `confidence: high` 的带证据 pack。由 `handoff_pack_generation_is_provider_independent` 守护（逐 provider 身份走生成器，装配结果必须逐字段一致） |
-| incremental | `native`（claude-code/codex）；`unsupported`（其余 12 个已实现 provider）；`unknown`（deferred 2 个） | 仅 claude-code/codex 有 resync/增量同步的 e2e 覆盖；其余 provider 未验证，如实不宣传 |
+| incremental | `derived`（全部 14 个已实现 provider）；`unknown`（deferred 2 个） | 与 handoff 同理，incremental 也不是 per-provider 特性：判定链全在 composition root + store 层——`sync` 先读 `source_scans` 的 `(len_bytes, fingerprint)` 缓存与当次快照的 BLAKE3 指纹比对，相同则**跳过 parse**（`unchanged` 上报已存消息数），再由 `commit_source_batches_if_changed` 做内容级 no-op 判定、不推进 `generation`。这条链上没有任何 per-provider 分支，adapter 也不参与。故一律 `derived`（由源字节确定性派生，而非 provider 原生提供）。此前 claude-code/codex 记 `native`、其余 12 个记 `unsupported` 都不准：前者把 store 层能力误记为 provider 原生，后者是少报——12 个 provider 的真实 golden 源实测 resync 均为 `committed=0` / `unchanged=N` / generation 不变。由 e2e `capability_incremental_claim_matches_real_resync_for_every_provider` 逐 provider 实测守护；claude-code/codex 另有 append/shrink/空源 tombstone 的专项 resync e2e，那是测试深度而非更高的能力档位 |
 | tool_activity | `partial`（claude-code/codex，schema v12 `tool_activities` 落库）；`unknown`（deepseek-harness/zcode，deferred）；`unsupported`（其余 12 个已实现 provider，含 aider） | CLI `--tool-kind`/`--tool-name`/`--main-only`/`--subagent-only`/`--include-sidechain`、MCP 同名参数与 TUI 分面键（`m` sidechain / `k` tool-kind）已落地；handoff pack 投影 `tool_activity` + 权威 `role`/`is_sidechain`，context 响应投影 `tool_activities` |
 | source_span | `native`（claude/codex/grok/pi/kimi/openclaw/qoder/codebuddy/antigravity）；`derived`（aider）；`unsupported`（opencode/hermes/cursor/cline） | SQLite/单文档 JSON 类 provider 无文件内字节 span；cline 的数组下标 pseudo-span 已移除并如实降级为 unsupported。antigravity 虽无文件内 session id（身份在目录名），但 transcript 为行式 JSONL，逐消息 span 为真实字节区间并由 golden 测试 `golden_spans_slice_back_to_exact_source_lines` 逐字节校验 |
 
@@ -162,7 +162,9 @@ manifest 均已填真实限制，见各 `crates/agent-session-grep-provider-*/sr
    只读打开路径）；真实回归 harness 新增 `INV-SOURCES-UNCHANGED`，以聚合
    checksum 计数验证扫描不改源且不泄露路径。
 9. Codex 增量的直接证据——**已闭合**：新增 Codex 重 sync 幂等、源收缩 tombstone、
-   空源 tombstone 三项合成 e2e，直接支撑 `incremental: native`。
+   空源 tombstone 三项合成 e2e。注意这三项证明的是 store 层增量链在 Codex 源上
+   的行为深度，不是 provider 原生能力——`incremental` 现已如实记为全 14 个
+   provider 一律 `derived`（理由见上表该行）。
 
 审计依据：`.trellis/tasks/08-15-sixteen-provider-evidence-wave/research/beta-promotion-audit.md`
 （2026-08-16，逐项只读核查，含每项的 file:line 与测试名）。

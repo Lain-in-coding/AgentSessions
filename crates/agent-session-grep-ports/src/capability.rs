@@ -104,7 +104,22 @@ pub struct ProviderCapability {
     pub tool_activity: CapabilityLevel,
     /// Source span 精度。
     pub source_span: CapabilityLevel,
-    /// 增量同步能力。
+    /// 增量同步能力（未变化的源 resync 是否为 no-op）。
+    ///
+    /// 诚实口径：与 [`Self::handoff`] 同理，`incremental` 也不是 per-provider
+    /// 特性。判定链全在 composition root + store 层：`sync` 先读 `source_scans`
+    /// 的 `(len_bytes, fingerprint)` 缓存，与当次快照的 BLAKE3 指纹比对，相同则
+    /// **跳过 parse**（`unchanged` 上报已存消息数），再由
+    /// `commit_source_batches_if_changed` 做内容级 no-op 判定、不推进 generation。
+    /// 这条链上没有任何 per-provider 分支，adapter 也不参与。
+    ///
+    /// 故 14 个已实现 provider 一律 `Derived`——由源字节确定性派生，而非 provider
+    /// 原生提供。此前 claude-code/codex 记 `Native`、其余 12 个记 `Unsupported`
+    /// 都不准：前者把 store 层能力误记为 provider 原生，后者是少报（12 个
+    /// provider 的真实 golden 源实测 resync 均为 `committed=0` /
+    /// `unchanged=N` / generation 不变）。由 e2e
+    /// `capability_incremental_claim_matches_real_resync_for_every_provider`
+    /// 逐 provider 实测守护。
     pub incremental: CapabilityLevel,
 }
 
@@ -166,7 +181,7 @@ impl ProviderCapabilityMatrix {
                     // 故即便未来 emit 也无法附着。如实降级为 unsupported。
                     tool_activity: CapabilityLevel::Unsupported,
                     source_span: CapabilityLevel::Derived,
-                    incremental: CapabilityLevel::Unsupported,
+                    incremental: CapabilityLevel::Derived,
                 },
                 ProviderCapability {
                     provider_id: "claude-code".into(),
@@ -181,7 +196,7 @@ impl ProviderCapabilityMatrix {
                     handoff: CapabilityLevel::Derived,
                     tool_activity: CapabilityLevel::Partial,
                     source_span: CapabilityLevel::Native,
-                    incremental: CapabilityLevel::Native,
+                    incremental: CapabilityLevel::Derived,
                 },
                 ProviderCapability {
                     provider_id: "codex".into(),
@@ -202,7 +217,7 @@ impl ProviderCapabilityMatrix {
                     handoff: CapabilityLevel::Derived,
                     tool_activity: CapabilityLevel::Partial,
                     source_span: CapabilityLevel::Native,
-                    incremental: CapabilityLevel::Native,
+                    incremental: CapabilityLevel::Derived,
                 },
                 ProviderCapability {
                     provider_id: "grok-build".into(),
@@ -220,7 +235,7 @@ impl ProviderCapabilityMatrix {
                     handoff: CapabilityLevel::Derived,
                     tool_activity: CapabilityLevel::Unsupported,
                     source_span: CapabilityLevel::Native,
-                    incremental: CapabilityLevel::Unsupported,
+                    incremental: CapabilityLevel::Derived,
                 },
                 ProviderCapability {
                     provider_id: "pi".into(),
@@ -237,7 +252,7 @@ impl ProviderCapabilityMatrix {
                     handoff: CapabilityLevel::Derived,
                     tool_activity: CapabilityLevel::Unsupported,
                     source_span: CapabilityLevel::Native,
-                    incremental: CapabilityLevel::Unsupported,
+                    incremental: CapabilityLevel::Derived,
                 },
                 ProviderCapability {
                     provider_id: "kimi-code".into(),
@@ -253,7 +268,7 @@ impl ProviderCapabilityMatrix {
                     handoff: CapabilityLevel::Derived,
                     tool_activity: CapabilityLevel::Unsupported,
                     source_span: CapabilityLevel::Native,
-                    incremental: CapabilityLevel::Unsupported,
+                    incremental: CapabilityLevel::Derived,
                 },
                 ProviderCapability {
                     provider_id: "qoder".into(),
@@ -271,7 +286,7 @@ impl ProviderCapabilityMatrix {
                     handoff: CapabilityLevel::Derived,
                     tool_activity: CapabilityLevel::Unsupported,
                     source_span: CapabilityLevel::Native,
-                    incremental: CapabilityLevel::Unsupported,
+                    incremental: CapabilityLevel::Derived,
                 },
                 ProviderCapability {
                     provider_id: "openclaw".into(),
@@ -288,7 +303,7 @@ impl ProviderCapabilityMatrix {
                     handoff: CapabilityLevel::Derived,
                     tool_activity: CapabilityLevel::Unsupported,
                     source_span: CapabilityLevel::Native,
-                    incremental: CapabilityLevel::Unsupported,
+                    incremental: CapabilityLevel::Derived,
                 },
                 ProviderCapability {
                     provider_id: "tencent-codebuddy".into(),
@@ -304,7 +319,7 @@ impl ProviderCapabilityMatrix {
                     handoff: CapabilityLevel::Derived,
                     tool_activity: CapabilityLevel::Unsupported,
                     source_span: CapabilityLevel::Native,
-                    incremental: CapabilityLevel::Unsupported,
+                    incremental: CapabilityLevel::Derived,
                 },
                 ProviderCapability {
                     provider_id: "opencode".into(),
@@ -324,7 +339,7 @@ impl ProviderCapabilityMatrix {
                     handoff: CapabilityLevel::Derived,
                     tool_activity: CapabilityLevel::Unsupported,
                     source_span: CapabilityLevel::Unsupported,
-                    incremental: CapabilityLevel::Unsupported,
+                    incremental: CapabilityLevel::Derived,
                 },
                 ProviderCapability {
                     provider_id: "cline".into(),
@@ -343,7 +358,7 @@ impl ProviderCapabilityMatrix {
                     handoff: CapabilityLevel::Derived,
                     tool_activity: CapabilityLevel::Unsupported,
                     source_span: CapabilityLevel::Unsupported,
-                    incremental: CapabilityLevel::Unsupported,
+                    incremental: CapabilityLevel::Derived,
                 },
                 ProviderCapability {
                     provider_id: "hermes".into(),
@@ -361,7 +376,7 @@ impl ProviderCapabilityMatrix {
                     handoff: CapabilityLevel::Derived,
                     tool_activity: CapabilityLevel::Unsupported,
                     source_span: CapabilityLevel::Unsupported,
-                    incremental: CapabilityLevel::Unsupported,
+                    incremental: CapabilityLevel::Derived,
                 },
                 ProviderCapability {
                     provider_id: "antigravity".into(),
@@ -380,7 +395,7 @@ impl ProviderCapabilityMatrix {
                     // golden `golden_spans_slice_back_to_exact_source_lines`
                     // 逐字节校验切片。此前记为 unsupported 与代码相反。
                     source_span: CapabilityLevel::Native,
-                    incremental: CapabilityLevel::Unsupported,
+                    incremental: CapabilityLevel::Derived,
                 },
                 ProviderCapability {
                     provider_id: "cursor".into(),
@@ -406,7 +421,7 @@ impl ProviderCapabilityMatrix {
                     handoff: CapabilityLevel::Derived,
                     tool_activity: CapabilityLevel::Unsupported,
                     source_span: CapabilityLevel::Unsupported,
-                    incremental: CapabilityLevel::Unsupported,
+                    incremental: CapabilityLevel::Derived,
                 },
                 ProviderCapability {
                     provider_id: "deepseek-harness".into(),
