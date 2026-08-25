@@ -35,7 +35,7 @@ Legend for local columns: `ok` = present with tests; `partial` = present with kn
 | hermes | ok | ok | ok | native | missing | missing | unknown | derived | JSON doc; no span; SQLite `state.db` surface not parsed |
 | cursor | ok | ok | ok | missing | missing | missing | unknown | derived | no discovery root: the adapter parses the VS Code `workspaceStorage/*/state.vscdb` ItemTable surface, whose per-workspace hash directories sit under a platform-specific application-data path, not a home-relative root this table can express; `~/.cursor/chats/<id>/store.db` is the separate Cursor CLI `meta`/`blobs` schema, which this adapter's probe rejects. No span; multi-gen format layering pending |
 | kimi-code | ok | ok | ok | native | ok (native) | missing | unknown | derived | loop events not parsed |
-| openclaw | ok | ok | ok | native | ok (native) | missing | unsupported | derived | resume intentionally unsupported |
+| openclaw | ok | ok | ok | native | ok (native) | missing | unsupported | derived | resume intentionally unsupported; format carries no structured tool-call records — tool_activity honestly Unsupported |
 | qoder | ok | ok | ok | native | ok (native) | missing | unknown | derived | discovery covers the transcript-JSONL surface only (the Electron SQLite store is a separate, unimplemented surface); non-dialogue records skipped |
 | tencent-codebuddy | ok | ok | ok | native | ok (native) | missing | unknown | derived | extension variant pending |
 | cline | ok | ok | ok | native | missing | missing | unsupported | derived | no session id / span; discovery covers the `~/.cline/data/tasks` tree only (the VS Code extension `globalStorage` tree is not home-relative and is not registered) |
