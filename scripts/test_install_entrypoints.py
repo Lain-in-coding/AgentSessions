@@ -34,6 +34,12 @@ class InstallEntrypointTests(unittest.TestCase):
         self.assertTrue(CANONICAL_PS1.exists())
 
     @unittest.skipUnless(shutil.which("bash"), "bash is required for the shell forwarding smoke test")
+    @unittest.skipIf(
+        os.name == "nt",
+        "Windows shell forwarding goes through install.ps1 (covered by the "
+        "PowerShell test below); bash forwarding exercises the Unix entrypoint "
+        "and is covered on the Linux CI runner, where paths are natively POSIX.",
+    )
     def test_root_shell_forwards_all_arguments_to_canonical_script(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             temp = Path(temp_name)
