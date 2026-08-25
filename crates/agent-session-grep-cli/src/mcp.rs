@@ -1892,6 +1892,59 @@ mod tests {
         assert_eq!(v["error"]["code"], -32601);
     }
 
+    /// CONTRACT 原文：MCP 工具集的公开声明来源。
+    const CONTRACT_SOURCE: &str =
+        include_str!("../../../docs/contracts/CONTRACT-cli-robot-mcp-draft.md");
+
+    /// 从 CONTRACT §8 的 `tools: a / b / c` 行解析出被声明的工具名。
+    fn contract_declared_tools() -> Vec<String> {
+        CONTRACT_SOURCE
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("tools:"))
+            .map(|rest| {
+                rest.split('/')
+                    .map(|name| name.trim().trim_matches('`').to_string())
+                    .filter(|name| !name.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn contract_declared_mcp_tools_match_the_real_catalog() {
+        // `tools_list_exposes_exactly_the_nine_contract_tools` 把真实 catalog 钉在
+        // 一份手抄数组上——改 CONTRACT 文档不会让任何测试失败，改代码也不会迫使
+        // 文档同步。这与 handoff/incremental 少报同一类缺口：一致性只存在于人的
+        // 记忆里。这里把文档本身作为输入解析，双向对齐真实注册表。
+        let declared = contract_declared_tools();
+        assert_eq!(
+            declared.len(),
+            9,
+            "CONTRACT §8 的 tools 行解析出 {} 个工具名，解析逻辑或文档格式可能变了：{declared:?}",
+            declared.len()
+        );
+
+        let catalog = tool_catalog();
+        let mut real: Vec<String> = catalog
+            .as_array()
+            .expect("tool catalog must be an array")
+            .iter()
+            .map(|tool| {
+                tool["name"]
+                    .as_str()
+                    .expect("tool name must be a string")
+                    .to_string()
+            })
+            .collect();
+        let mut documented = declared;
+        real.sort();
+        documented.sort();
+        assert_eq!(
+            documented, real,
+            "CONTRACT §8 声明的 MCP 工具集与真实注册表漂移——两侧必须同时改"
+        );
+    }
+
     #[test]
     fn tools_list_exposes_exactly_the_nine_contract_tools() {
         let dir = tempfile::tempdir().expect("tempdir");
