@@ -2266,6 +2266,7 @@ fn providers_robot_output_is_a_stable_matrix_envelope() {
         "search",
         "source_span",
         "tool_activity",
+        "usage",
         "variant_id",
     ]
     .into_iter()
@@ -6015,4 +6016,99 @@ fn capability_search_claim_matches_real_retrieval_for_every_provider() {
             }
         }
     }
+}
+
+// ---- usage 维度端到端：ingest → status（schema v15 投影）----
+
+#[test]
+fn ingest_claude_usage_flows_into_status_totals() {
+    let (dir, db) = temp_db("usage-e2e-claude");
+    // 合成 claude JSONL：两条 assistant 各带 message.usage（合成数字，非真实数据）。
+    let fixture = dir.path().join("usage-claude.jsonl");
+    std::fs::write(
+        &fixture,
+        concat!(
+            r#"{"type":"user","uuid":"55111111-1111-4111-8111-111111111111","sessionId":"usage-aaaa-bbbb-cccc-dddd","message":{"role":"user","content":"how many tokens?"}}"#,
+            "\n",
+            r#"{"type":"assistant","uuid":"55222222-2222-4222-8222-222222222222","sessionId":"usage-aaaa-bbbb-cccc-dddd","message":{"role":"assistant","content":[{"type":"text","text":"answer one"}],"usage":{"input_tokens":100,"output_tokens":50,"cache_read_input_tokens":30,"cache_creation_input_tokens":20}}}"#,
+            "\n",
+            r#"{"type":"user","uuid":"55333333-3333-4333-8333-333333333333","sessionId":"usage-aaaa-bbbb-cccc-dddd","message":{"role":"user","content":"again?"}}"#,
+            "\n",
+            r#"{"type":"assistant","uuid":"55444444-4444-4444-8444-444444444444","sessionId":"usage-aaaa-bbbb-cccc-dddd","message":{"role":"assistant","content":[{"type":"text","text":"answer two"}],"usage":{"input_tokens":8,"output_tokens":3,"cache_read_input_tokens":2}}}"#,
+            "\n",
+        ),
+    )
+    .expect("write fixture");
+    let fixture_path = fixture.to_string_lossy().into_owned();
+
+    let out = run(&db, &["ingest", &fixture_path]);
+    assert!(out.status.success(), "ingest failed: {}", stdout(&out));
+    assert_eq!(parse_first_line(&out)["data"]["skipped"], 0);
+
+    let out = run(&db, &["status"]);
+    assert!(out.status.success(), "status failed: {}", stdout(&out));
+    let frame = parse_first_line(&out);
+    let usage = &frame["data"]["usage"];
+    assert!(
+        usage.is_object(),
+        "usage 投影必须出现在 status data 里: {frame}"
+    );
+    assert_eq!(usage["sessions"], 1);
+    assert_eq!(usage["input_tokens"], 108);
+    assert_eq!(usage["output_tokens"], 53);
+    assert_eq!(usage["cache_read_tokens"], 32);
+    assert_eq!(usage["cache_write_tokens"], 20);
+    assert_eq!(usage["reasoning_tokens"], 0);
+    assert_eq!(usage["observed_events"], 2);
+    assert_eq!(usage["derived_events"], 0);
+
+    // 重 ingest 同一文件：usage 投影参与 no-op，计数不翻倍。
+    let out = run(&db, &["ingest", &fixture_path]);
+    assert!(out.status.success(), "re-ingest failed: {}", stdout(&out));
+    assert_eq!(parse_first_line(&out)["data"]["committed"], 0);
+    let out = run(&db, &["status"]);
+    let frame = parse_first_line(&out);
+    assert_eq!(
+        frame["data"]["usage"]["input_tokens"], 108,
+        "no-op 重 ingest 不得翻倍"
+    );
+    assert_eq!(frame["data"]["usage"]["observed_events"], 2);
+}
+
+#[test]
+fn ingest_codex_usage_flows_into_status_as_derived_totals() {
+    let (dir, db) = temp_db("usage-e2e-codex");
+    let fixture = dir.path().join("usage-codex.jsonl");
+    std::fs::write(
+        &fixture,
+        concat!(
+            r#"{"timestamp":"t1","type":"session_meta","payload":{"session_id":"usage-codex-aaaa-bbbb"}}"#,
+            "\n",
+            r#"{"timestamp":"t2","type":"response_item","payload":{"type":"message","id":"msg-cu-1","role":"user","content":[{"type":"input_text","text":"count my tokens"}]}}"#,
+            "\n",
+            r#"{"timestamp":"t3","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3,"reasoning_output_tokens":1}}}}"#,
+            "\n",
+            r#"{"timestamp":"t4","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":15,"cached_input_tokens":3,"output_tokens":5,"reasoning_output_tokens":1},"last_token_usage":{"input_tokens":5,"cached_input_tokens":1,"output_tokens":2,"reasoning_output_tokens":0}}}}"#,
+            "\n",
+        ),
+    )
+    .expect("write fixture");
+    let fixture_path = fixture.to_string_lossy().into_owned();
+
+    let out = run(&db, &["ingest", &fixture_path]);
+    assert!(out.status.success(), "ingest failed: {}", stdout(&out));
+    assert_eq!(parse_first_line(&out)["data"]["skipped"], 0);
+
+    let out = run(&db, &["status"]);
+    assert!(out.status.success(), "status failed: {}", stdout(&out));
+    let frame = parse_first_line(&out);
+    let usage = &frame["data"]["usage"];
+    assert_eq!(usage["sessions"], 1);
+    // 首条：total（input 10−2=8）；第二条：last（5−1=4）。
+    assert_eq!(usage["input_tokens"], 12);
+    assert_eq!(usage["output_tokens"], 5);
+    assert_eq!(usage["cache_read_tokens"], 3);
+    assert_eq!(usage["reasoning_tokens"], 1);
+    assert_eq!(usage["observed_events"], 0);
+    assert_eq!(usage["derived_events"], 2);
 }

@@ -10,6 +10,7 @@
 //! `manifest()` → `manifest_for`）必须与 ledger 的本地列和全局 blocker 一致，且
 //! ledger 必须恰好列出 capability.rs 的 14 个已实现 + 2 个 deferred provider。
 
+use agent_session_grep_domain::TokenSource;
 use agent_session_grep_ports::Confidence;
 use agent_session_grep_ports::ProviderAdapter;
 use agent_session_grep_ports::capability::{
@@ -680,6 +681,124 @@ fn codex_tool_activity_claim_is_backed_by_observed_emissions() {
     );
 }
 
+// ---- capability.rs `usage` 列 ↔ adapter 真实行为 防漂移 ----
+//
+// `usage` 是 v15 新增列：claude-code 声明 Native（assistant 记录自带
+// `message.usage`），codex 声明 Derived（token_count 累计量转增量）。同
+// source_span/tool_activity 的纪律：声明必须由 adapter 真实 emit 反证，
+// 两个方向都要堵——虚报（声称提取却没 emit）与少报（emit 了却写 Unsupported）。
+
+/// 合成 Claude Code usage 输入（测试局部输入，非 golden fixture，无需
+/// fixture_revision 递增）：assistant 记录带 `message.usage` 四桶 + uuid 锚点。
+const CLAUDE_USAGE_TRANSCRIPT: &str = concat!(
+    r#"{"type":"user","uuid":"u-1","sessionId":"sess-usage","message":{"role":"user","content":"hi"}}"#,
+    "\n",
+    r#"{"type":"assistant","uuid":"a-1","parentUuid":"u-1","sessionId":"sess-usage","message":{"role":"assistant","content":[{"type":"text","text":"answer"}],"usage":{"input_tokens":100,"output_tokens":50,"cache_read_input_tokens":30,"cache_creation_input_tokens":20}}}"#,
+    "\n",
+);
+
+/// 合成 Codex usage 输入：两条 token_count 累计事件（第二条对第一条取增量）。
+const CODEX_USAGE_ROLLOUT: &str = concat!(
+    r#"{"timestamp":"t1","type":"session_meta","payload":{"session_id":"sess-usage-codex"}}"#,
+    "\n",
+    r#"{"timestamp":"t2","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3,"reasoning_output_tokens":1}}}}"#,
+    "\n",
+    r#"{"timestamp":"t3","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":15,"cached_input_tokens":3,"output_tokens":5,"reasoning_output_tokens":1}}}}"#,
+    "\n",
+);
+
+#[test]
+fn claude_usage_claim_is_backed_by_observed_emissions() {
+    // 正向验证：claude-code 声明 usage=Native，其 adapter 必须真的经
+    // `emit_usage` 发出 Observed 事件，且锚点非空（否则被 staging 丢弃）。
+    let matrix = ProviderCapabilityMatrix::current();
+    let cap = matrix
+        .providers
+        .iter()
+        .find(|p| p.provider_id == "claude-code")
+        .expect("capability.rs 必须有 claude-code 行");
+    assert_eq!(cap.usage, CapabilityLevel::Native);
+
+    let (_, sink) = agent_session_grep_testkit::golden::parse_golden(
+        &ClaudeCodeAdapter::new(),
+        CLAUDE_USAGE_TRANSCRIPT.as_bytes(),
+    );
+    assert_eq!(
+        sink.usages.len(),
+        1,
+        "带 message.usage 的 assistant 记录必须产出一条 usage"
+    );
+    let usage = &sink.usages[0];
+    assert_eq!(usage.message_native_id, "a-1", "usage 必须锚定该记录 uuid");
+    assert_eq!(usage.usage.token_source, TokenSource::Observed);
+    assert_eq!(usage.usage.input_tokens, 100);
+    assert_eq!(usage.usage.output_tokens, 50);
+    assert_eq!(usage.usage.cache_read_tokens, 30);
+    assert_eq!(usage.usage.cache_write_tokens, 20);
+}
+
+#[test]
+fn codex_usage_claim_is_backed_by_derived_emissions() {
+    // 正向验证：codex 声明 usage=Derived，其 adapter 必须真的从 token_count
+    // 累计量派生增量事件（session 级：锚点为空串是契约，不是缺陷）。
+    let matrix = ProviderCapabilityMatrix::current();
+    let cap = matrix
+        .providers
+        .iter()
+        .find(|p| p.provider_id == "codex")
+        .expect("capability.rs 必须有 codex 行");
+    assert_eq!(cap.usage, CapabilityLevel::Derived);
+
+    let (_, sink) = agent_session_grep_testkit::golden::parse_golden(
+        &CodexAdapter::new(),
+        CODEX_USAGE_ROLLOUT.as_bytes(),
+    );
+    assert_eq!(sink.usages.len(), 2, "两条累计事件必须派生两条增量");
+    for usage in &sink.usages {
+        assert_eq!(
+            usage.message_native_id, "",
+            "token_count 不关联具体消息，锚点必须为空串（session 级观察）"
+        );
+        assert_eq!(usage.usage.token_source, TokenSource::Derived);
+    }
+    // 首条：total 本身（input 10 − cached 2 = 8）；第二条：单调差（5 − 1 = 4）。
+    assert_eq!(sink.usages[0].usage.input_tokens, 8);
+    assert_eq!(sink.usages[0].usage.cache_read_tokens, 2);
+    assert_eq!(sink.usages[0].usage.output_tokens, 3);
+    assert_eq!(sink.usages[1].usage.input_tokens, 4);
+    assert_eq!(sink.usages[1].usage.cache_read_tokens, 1);
+    assert_eq!(sink.usages[1].usage.output_tokens, 2);
+}
+
+#[test]
+fn capability_usage_unsupported_claim_is_not_an_under_claim() {
+    // 少报方向守护：声明 Unsupported 的已实现 provider 对自己的 golden fixture
+    // 实测不得发出任何 usage 事件——adapter 若开始提取 usage 而不升级声明，
+    // 这里会立即失败（与 tool_activity 少报守护同一纪律）。
+    let matrix = ProviderCapabilityMatrix::current();
+
+    for (adapter, fixture) in &implemented_adapters_with_fixtures() {
+        let provider_id = adapter.provider_id();
+        let cap = matrix
+            .providers
+            .iter()
+            .find(|p| p.provider_id == provider_id)
+            .unwrap_or_else(|| panic!("capability.rs 缺少 provider `{provider_id}`"));
+        if cap.usage != CapabilityLevel::Unsupported {
+            continue;
+        }
+        let mut sink = agent_session_grep_testkit::golden::CapturingSink::default();
+        let _ = adapter.parse(fixture, &mut sink);
+        assert_eq!(
+            sink.usages.len(),
+            0,
+            "{provider_id}: capability.rs 声明 usage=Unsupported，但对自己的 golden \
+             实测发出了 {} 条 usage 事件（少报）——声明必须升级",
+            sink.usages.len()
+        );
+    }
+}
+
 #[test]
 fn beta_readiness_ledger_capability_columns_match_capability_matrix() {
     // ledger 本地能力列（discover/source_span/tool_activity/resume/incremental）
@@ -1333,6 +1452,11 @@ const CAPABILITY_BEHAVIOR_GUARDS: &[(&str, &str, &str)] = &[
     (
         "tool_activity",
         "capability_tool_activity_claim_respects_fail_closed_anchoring",
+        GUARD_SOURCE_THIS,
+    ),
+    (
+        "usage",
+        "claude_usage_claim_is_backed_by_observed_emissions",
         GUARD_SOURCE_THIS,
     ),
     (

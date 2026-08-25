@@ -6,14 +6,14 @@
 
 use agent_session_grep_domain::{
     ContextPolicy, DomainError, IdKind, Message, MessagePlacement, Role, SourceDocument, StableId,
-    ToolActivity, select_full, select_mainline,
+    ToolActivity, UsageObservation, select_full, select_mainline,
 };
 use agent_session_grep_ports::{
     CanonicalEventSink, CatalogEntry, CatalogStore, Confidence, ContextGraphStore, MessageEvent,
     NoResumeClaims, NoSemanticIndex, ParseReport, PortError, PortResult, ProbeResult,
     ProviderAdapter, ProviderError, ReadOnlySource, ResumeClaimsStore, RetrievalMode, SearchFacets,
     SearchFilters, SearchHit, SearchIndex, SearchInstant, SearchQuery, SemanticIndex,
-    SessionResumeMetadata, ToolActivityEvent,
+    SessionResumeMetadata, ToolActivityEvent, UsageEvent, UsageTotals,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -400,6 +400,8 @@ pub enum AppResponse {
         active_generation: u64,
         placements: u64,
         source_placement_claims: u64,
+        /// 全库 token 用量聚合；`None` = 存储无 usage 投影。
+        usage: Option<UsageTotals>,
     },
 }
 
@@ -436,6 +438,16 @@ pub struct StagedActivity {
     pub activity: ToolActivity,
 }
 
+/// 一次 staging 中缓冲的 token 用量观察（usage 维度）。
+///
+/// `message_native_id` 为空串表示 session 级观察（如 Codex `token_count`），
+/// 由调用方挂到本批会话上；非空时调用方按消息锚点解析，失败即丢弃。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StagedUsage {
+    pub message_native_id: String,
+    pub usage: UsageObservation,
+}
+
 /// 一次 staging 的完整产物：缓冲消息 + provider 的完整解析报告。
 ///
 /// 会话 native id 的唯一权威来源是 [`ParseReport::session_native_id`]。
@@ -444,6 +456,8 @@ pub struct StagedBatch {
     pub messages: Vec<StagedMessage>,
     /// 工具活动观察（设计 R1-R6；provider 未声明工具活动时为空）。
     pub activities: Vec<StagedActivity>,
+    /// token 用量观察（usage 维度；provider 未声明用量时为空）。
+    pub usage_events: Vec<StagedUsage>,
     /// Authoritative provider parse accounting and diagnostics.
     pub report: ParseReport,
     /// Deprecated compatibility shim: the CLI composition root still
@@ -510,6 +524,7 @@ fn staged_batch(sink: StagingSink, report: ParseReport) -> StagedBatch {
     StagedBatch {
         messages: sink.buffered,
         activities: sink.activities,
+        usage_events: sink.usage_events,
         report,
         session_native_id,
     }
@@ -661,6 +676,7 @@ pub fn select_and_stage_source(
 struct StagingSink {
     buffered: Vec<StagedMessage>,
     activities: Vec<StagedActivity>,
+    usage_events: Vec<StagedUsage>,
 }
 
 impl CanonicalEventSink for StagingSink {
@@ -682,6 +698,14 @@ impl CanonicalEventSink for StagingSink {
         self.activities.push(StagedActivity {
             message_native_id: event.message_native_id.to_string(),
             activity: event.activity,
+        });
+        Ok(())
+    }
+
+    fn emit_usage(&mut self, event: UsageEvent<'_>) -> PortResult<()> {
+        self.usage_events.push(StagedUsage {
+            message_native_id: event.message_native_id.to_string(),
+            usage: event.usage,
         });
         Ok(())
     }
@@ -2063,11 +2087,13 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore, 
                 let catalog_count = self.catalog.count()?;
                 let active_generation = self.catalog.active_generation()?;
                 let context_stats = self.catalog.context_stats()?;
+                let usage = self.catalog.usage_totals()?;
                 Ok(AppResponse::Status {
                     catalog_count,
                     active_generation,
                     placements: context_stats.placements,
                     source_placement_claims: context_stats.source_placement_claims,
+                    usage,
                 })
             }
         }
@@ -3010,6 +3036,7 @@ mod tests {
                 active_generation: 7,
                 placements: 2,
                 source_placement_claims: 3,
+                usage: None,
             })
         ));
     }

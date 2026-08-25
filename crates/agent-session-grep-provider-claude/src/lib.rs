@@ -5,11 +5,13 @@
 //! `{"type":"user"|"assistant"|..., "message":{"role":..,"content":..}}`。
 //! adapter 只做格式隔离，绝不接触存储 / 检索 / UI（RFC-0002 §7）。
 
-use agent_session_grep_domain::{ToolActivityActor, ToolActivityStatus};
+use agent_session_grep_domain::{
+    TokenSource, ToolActivityActor, ToolActivityStatus, UsageObservation,
+};
 use agent_session_grep_ports::{
     AdapterManifest, CanonicalEventSink, Confidence, MessageEvent, MetadataResolution, ParseReport,
-    ProbeResult, ProviderAdapter, ProviderError, ToolActivityEvent, build_tool_activity,
-    manifest_for,
+    ProbeResult, ProviderAdapter, ProviderError, ToolActivityEvent, UsageEvent,
+    build_tool_activity, manifest_for,
 };
 use serde::{Deserialize, de::IgnoredAny};
 
@@ -25,6 +27,12 @@ const SAMPLE_BROKEN_TOLERANCE: usize = 3;
 const BAD_LINE_LIST_LIMIT: usize = 5;
 /// 多会话诊断中列出的 session id 条数上限（bounded detail）。
 const SESSION_ID_LIST_LIMIT: usize = 3;
+
+/// `message.usage` 的 bucket 键名（provider 原始字段名，逐字匹配，不猜别名）。
+const USAGE_KEY_INPUT: &str = "input_tokens";
+const USAGE_KEY_OUTPUT: &str = "output_tokens";
+const USAGE_KEY_CACHE_READ: &str = "cache_read_input_tokens";
+const USAGE_KEY_CACHE_WRITE: &str = "cache_creation_input_tokens";
 
 // Adapted from claude-historian-mcp/src/parser.ts:74-92 (MIT): inspect cheap
 // JSONL markers before invoking serde. Keep this predicate conservative: an
@@ -226,6 +234,11 @@ struct RawMessage {
     /// content 可能是字符串，也可能是 content-block 数组——用 untagged 兼容。
     #[serde(default)]
     content: RawContent,
+    /// assistant 记录自带的 token 用量（`message.usage`，provider 原生给出）。
+    /// 保持 `serde_json::Value` 原样：字段形状异常时只丢 usage 事件，绝不
+    /// 拖垮整条消息的反序列化（fail-closed 在提取侧，不在行解析侧）。
+    #[serde(default)]
+    usage: Option<serde_json::Value>,
 }
 
 /// Claude 的 content 字段有两种形态：纯字符串或 block 数组。
@@ -444,6 +457,30 @@ fn emit_unpaired_activity(
     sink.emit_activity(ToolActivityEvent {
         message_native_id: &call.caller_uuid,
         activity,
+    })
+}
+
+/// 从 `message.usage` 提取用量观察（Observed）。
+///
+/// 只认 provider 明确给出的非负整数；缺失 bucket 记 0（Recall
+/// `claude_code.rs` 同语义——usage 对象存在即该消息有用量事实），负值或
+/// 非整数 → 整条事件 fail-closed 跳过（绝不 clamp、绝不编造）。Claude Code
+/// 的 usage 不单独记录 reasoning bucket，恒为 0。
+fn extract_usage(usage: &serde_json::Value) -> Option<UsageObservation> {
+    let object = usage.as_object()?;
+    let bucket = |key: &str| -> Option<u64> {
+        match object.get(key) {
+            None => Some(0),
+            Some(value) => value.as_u64(),
+        }
+    };
+    Some(UsageObservation {
+        input_tokens: bucket(USAGE_KEY_INPUT)?,
+        output_tokens: bucket(USAGE_KEY_OUTPUT)?,
+        cache_read_tokens: bucket(USAGE_KEY_CACHE_READ)?,
+        cache_write_tokens: bucket(USAGE_KEY_CACHE_WRITE)?,
+        reasoning_tokens: 0,
+        token_source: TokenSource::Observed,
     })
 }
 
@@ -929,6 +966,19 @@ impl ProviderAdapter for ClaudeCodeAdapter {
                 emit_paired_activity(sink, &call, is_error, &rec.uuid)
                     .map_err(|e| ProviderError::StructuralFatal(e.to_string()))?;
             }
+
+            // usage 观察（usage 维度）：assistant 记录自带 `message.usage` 时
+            // 锚定本记录 uuid emit。usage 对象存在但字段异常（负值/非整数）→
+            // extract_usage 返回 None，事件静默丢弃（消息本身不受影响）。
+            if role == "assistant"
+                && let Some(usage) = msg.usage.as_ref().and_then(extract_usage)
+            {
+                sink.emit_usage(UsageEvent {
+                    message_native_id: &rec.uuid,
+                    usage,
+                })
+                .map_err(|e| ProviderError::StructuralFatal(e.to_string()))?;
+            }
         }
 
         // 文件末尾仍未配对的调用：以 Unknown 状态如实上报（设计 R4.3）。
@@ -989,6 +1039,7 @@ mod tests {
     struct CollectingSink {
         messages: Vec<Captured>,
         activities: Vec<CapturedActivity>,
+        usages: Vec<CapturedUsage>,
     }
     /// 拍平的事件快照（`MessageEvent` 借用输入，测试侧需拥有所有权）。
     struct Captured {
@@ -1005,6 +1056,11 @@ mod tests {
     struct CapturedActivity {
         message_native_id: String,
         activity: ToolActivity,
+    }
+    /// 拍平的用量快照（anchor + 完整事实）。
+    struct CapturedUsage {
+        message_native_id: String,
+        usage: UsageObservation,
     }
     impl CanonicalEventSink for CollectingSink {
         fn emit_message(
@@ -1031,6 +1087,17 @@ mod tests {
             self.activities.push(CapturedActivity {
                 message_native_id: event.message_native_id.to_string(),
                 activity: event.activity,
+            });
+            Ok(())
+        }
+
+        fn emit_usage(
+            &mut self,
+            event: UsageEvent<'_>,
+        ) -> agent_session_grep_ports::PortResult<()> {
+            self.usages.push(CapturedUsage {
+                message_native_id: event.message_native_id.to_string(),
+                usage: event.usage,
             });
             Ok(())
         }
@@ -2252,5 +2319,149 @@ mod tests {
         assert_eq!(activities[0].activity.kind, ToolActivityKind::Unknown);
         assert_eq!(activities[0].activity.target, None);
         assert_eq!(activities[0].activity.status, ToolActivityStatus::Success);
+    }
+
+    // ===== usage 维度：assistant 记录的 `message.usage`（Observed）=====
+
+    fn parse_usage_records(records: &[serde_json::Value]) -> (usize, Vec<CapturedUsage>) {
+        let input = records
+            .iter()
+            .map(serde_json::to_string)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("serialize synthetic records")
+            .join("\n");
+        let mut sink = CollectingSink::default();
+        ClaudeCodeAdapter::new()
+            .parse(input.as_bytes(), &mut sink)
+            .expect("parse synthetic transcript");
+        (sink.messages.len(), sink.usages)
+    }
+
+    fn assistant_with_usage(uuid: &str, usage: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "type": "assistant",
+            "uuid": uuid,
+            "parentUuid": null,
+            "sessionId": "sess-usage",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "answer"}],
+                "usage": usage,
+            },
+        })
+    }
+
+    #[test]
+    fn parse_extracts_observed_usage_from_assistant_records() {
+        // 四桶逐键提取；锚定记录 uuid；Observed 来源（provider 原生逐消息给出）。
+        let (messages, usages) = parse_usage_records(&[assistant_with_usage(
+            "a-usage",
+            serde_json::json!({
+                "input_tokens": 100,
+                "output_tokens": 50,
+                "cache_read_input_tokens": 30,
+                "cache_creation_input_tokens": 20,
+            }),
+        )]);
+        assert_eq!(messages, 1);
+        assert_eq!(usages.len(), 1);
+        let captured = &usages[0];
+        assert_eq!(captured.message_native_id, "a-usage");
+        assert_eq!(captured.usage.input_tokens, 100);
+        assert_eq!(captured.usage.output_tokens, 50);
+        assert_eq!(captured.usage.cache_read_tokens, 30);
+        assert_eq!(captured.usage.cache_write_tokens, 20);
+        assert_eq!(
+            captured.usage.reasoning_tokens, 0,
+            "Claude usage 无 reasoning 桶"
+        );
+        assert_eq!(captured.usage.token_source, TokenSource::Observed);
+    }
+
+    #[test]
+    fn parse_usage_missing_buckets_are_zero() {
+        // 缺失桶记 0（usage 对象存在即该消息有用量事实）；全缺 = 全零事件保留。
+        let (_, usages) = parse_usage_records(&[assistant_with_usage(
+            "a-partial",
+            serde_json::json!({ "output_tokens": 7 }),
+        )]);
+        assert_eq!(usages.len(), 1);
+        assert_eq!(usages[0].usage.input_tokens, 0);
+        assert_eq!(usages[0].usage.output_tokens, 7);
+        assert_eq!(usages[0].usage.cache_read_tokens, 0);
+        assert_eq!(usages[0].usage.cache_write_tokens, 0);
+    }
+
+    #[test]
+    fn parse_usage_without_usage_object_emits_nothing() {
+        let (_, usages) = parse_usage_records(&[assistant(
+            "a-plain",
+            false,
+            serde_json::json!([
+                {"type": "text", "text": "no usage here"},
+            ]),
+        )]);
+        assert!(usages.is_empty());
+    }
+
+    #[test]
+    fn parse_usage_on_user_records_is_ignored() {
+        // usage 只出现在 assistant 记录上；user 记录即便误带 usage 也不提取
+        // （Recall claude_code.rs 同语义：只在 assistant 角色上提取）。
+        let (_, usages) = parse_usage_records(&[serde_json::json!({
+            "type": "user",
+            "uuid": "u-usage",
+            "parentUuid": null,
+            "sessionId": "sess-usage",
+            "message": {
+                "role": "user",
+                "content": "hi",
+                "usage": {"input_tokens": 100, "output_tokens": 50},
+            },
+        })]);
+        assert!(usages.is_empty());
+    }
+
+    #[test]
+    fn parse_usage_with_negative_or_malformed_buckets_is_dropped() {
+        // 负值/非整数：fail-closed 丢弃整条事件（消息本身不受影响），
+        // 绝不 clamp、绝不编造。
+        let (messages, usages) = parse_usage_records(&[
+            assistant_with_usage(
+                "a-neg",
+                serde_json::json!({"input_tokens": -1, "output_tokens": 50}),
+            ),
+            assistant_with_usage(
+                "a-str",
+                serde_json::json!({"input_tokens": "hundred", "output_tokens": 50}),
+            ),
+            assistant_with_usage(
+                "a-ok",
+                serde_json::json!({"input_tokens": 10, "output_tokens": 5}),
+            ),
+        ]);
+        assert_eq!(messages, 3, "usage 字段异常不得拖垮消息");
+        assert_eq!(usages.len(), 1);
+        assert_eq!(usages[0].message_native_id, "a-ok");
+        assert_eq!(usages[0].usage.input_tokens, 10);
+    }
+
+    #[test]
+    fn parse_usage_on_sidechain_assistant_is_anchored_to_its_record() {
+        // sidechain 记录同样按自己的 uuid 锚定（不因 isSidechain 丢弃事实）。
+        let (_, usages) = parse_usage_records(&[serde_json::json!({
+            "type": "assistant",
+            "uuid": "a-side",
+            "parentUuid": null,
+            "sessionId": "sess-usage",
+            "isSidechain": true,
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "sub answer"}],
+                "usage": {"input_tokens": 3, "output_tokens": 2},
+            },
+        })]);
+        assert_eq!(usages.len(), 1);
+        assert_eq!(usages[0].message_native_id, "a-side");
     }
 }

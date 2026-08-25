@@ -538,6 +538,7 @@ mod tests {
             placements,
             edges: Vec::new(),
             activities: Vec::new(),
+            usage_events: Vec::new(),
             relation_complete: true,
             len_bytes: None,
             fingerprint: None,

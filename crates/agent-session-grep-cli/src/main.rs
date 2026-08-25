@@ -23,7 +23,7 @@ mod serve;
 mod tui;
 
 use agent_session_grep_adapters_sqlite::{
-    PARSER_SEMANTIC_VERSION, SourceActivity, SourceBatch, SqliteStore, capture,
+    PARSER_SEMANTIC_VERSION, SourceActivity, SourceBatch, SourceUsage, SqliteStore, capture,
     open_snapshot_source, verify_snapshot,
 };
 use agent_session_grep_application::{
@@ -1286,6 +1286,9 @@ fn doctor(
             // schema v12 事实：tool_activities/tool_activity_membership 表随
             // 本二进制管理的每个 catalog 落库，未指定 --db 也成立。
             "tool_activity_storage": true,
+            // schema v15 事实：usage_events/usage_event_membership 表同上述
+            // 落库（未指定 --db 也成立）。
+            "usage_storage": true,
             // 新手会误以为 db: not-checked 是自检失败（10 角色体验测试缺陷）。
             // 加一行白话提示，说明如何真正校验。
             "hint": "未指定数据库：以上仅检查了环境。运行 doctor --db <path> 可校验数据库与 schema。",
@@ -1303,6 +1306,10 @@ fn doctor(
             let (orphaned_tool_activities, orphaned_activity_memberships) = store
                 .orphaned_activity_counts()
                 .map_err(ProtocolError::from)?;
+            // usage 投影保留策略证据（v15）：孤儿投影行计数；同一修剪命令
+            // `index purge-activities` 同事务清理。
+            let (orphaned_usage_events, orphaned_usage_memberships) =
+                store.orphaned_usage_counts().map_err(ProtocolError::from)?;
             serde_json::json!({
                 "tool": env!("CARGO_PKG_NAME"),
                 "version": env!("CARGO_PKG_VERSION"),
@@ -1312,10 +1319,14 @@ fn doctor(
                 "semantic_feature": semantic_feature_flag(),
                 // 打开的库已被迁移到本二进制的 schema v12，工具活动存储存在。
                 "tool_activity_storage": true,
+                // schema v15：usage 投影存在。
+                "usage_storage": true,
                 "generation": generation,
                 "interrupted_batches": interrupted,
                 "orphaned_tool_activities": orphaned_tool_activities,
                 "orphaned_activity_memberships": orphaned_activity_memberships,
+                "orphaned_usage_events": orphaned_usage_events,
+                "orphaned_usage_memberships": orphaned_usage_memberships,
             })
         }
     };
@@ -2947,6 +2958,7 @@ fn stage_with_source(
             StagedBatch {
                 messages: Vec::new(),
                 activities: Vec::new(),
+                usage_events: Vec::new(),
                 report: ParseReport {
                     committed: 0,
                     skipped: 0,
@@ -3350,6 +3362,7 @@ fn sync_discover(
                     placements: Vec::new(),
                     edges: Vec::new(),
                     activities: Vec::new(),
+                    usage_events: Vec::new(),
                     relation_complete: true,
                     len_bytes: None,
                     fingerprint: None,
@@ -3701,6 +3714,8 @@ fn staged_to_source_with_provider(
         ))
     };
 
+    // session_id 随后 move 进 entries；usage 事件挂会话锚点，先留一份克隆。
+    let session_wire = session_id.clone();
     entries.push((session_id, session_payload.into_bytes(), String::new()));
     let document_wire = document_id.as_str().to_string();
     entries.push((document_id, document_payload.into_bytes(), String::new()));
@@ -3736,12 +3751,43 @@ fn staged_to_source_with_provider(
         });
     }
 
+    // token 用量事件锚点解析（usage 维度）：message_native_id 非空时按与消息
+    // 实体去重一致的规则解析本批稳定消息 id；空串是 session 级观察（如 Codex
+    // token_count），message_id 记 None。锚点消息未被 emit → 事件丢弃，绝不臆造。
+    let mut usage_events = Vec::new();
+    for staged_usage in &staged.usage_events {
+        let message_id = if staged_usage.message_native_id.trim().is_empty() {
+            None
+        } else {
+            let Some(anchor) = staged
+                .messages
+                .iter()
+                .find(|message| message.native_id == staged_usage.message_native_id)
+            else {
+                continue;
+            };
+            Some(derive_message_id(
+                &anchor.native_id,
+                anchor.seq,
+                provider_id,
+                variant,
+                &document_wire,
+            ))
+        };
+        usage_events.push(SourceUsage {
+            session_id: session_wire.clone(),
+            message_id,
+            usage: staged_usage.usage.clone(),
+        });
+    }
+
     Ok(SourceBatch {
         source_path: path.to_string(),
         entries,
         placements,
         edges,
         activities,
+        usage_events,
         relation_complete: staged.report.skipped == 0,
         len_bytes: Some(source_len as i64),
         fingerprint: Some(fingerprint.to_string()),
@@ -4378,6 +4424,7 @@ fn render(
             active_generation,
             placements,
             source_placement_claims,
+            usage,
         } => (
             protocol::Outcome::Success,
             serde_json::json!({
@@ -4385,6 +4432,17 @@ fn render(
                 "generation": active_generation,
                 "placements": placements,
                 "source_placement_claims": source_placement_claims,
+                // usage 维度（None = 存储无 usage 投影，不渲染该键）。
+                "usage": usage.map(|totals| serde_json::json!({
+                    "sessions": totals.sessions,
+                    "input_tokens": totals.input_tokens,
+                    "output_tokens": totals.output_tokens,
+                    "cache_read_tokens": totals.cache_read_tokens,
+                    "cache_write_tokens": totals.cache_write_tokens,
+                    "reasoning_tokens": totals.reasoning_tokens,
+                    "observed_events": totals.observed_events,
+                    "derived_events": totals.derived_events,
+                })),
             }),
             protocol::Page::default(),
             Vec::new(),
@@ -4440,6 +4498,7 @@ mod tests {
         StagedBatch {
             messages,
             activities: Vec::new(),
+            usage_events: Vec::new(),
             session_native_id: Some(session_native_id.into()),
             report: ParseReport {
                 committed,

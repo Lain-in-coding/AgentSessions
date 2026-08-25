@@ -10,6 +10,30 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Token usage tracking (usage dimension, schema v15 `usage_events` +
+  `usage_event_membership` projection): only numbers the provider format
+  explicitly gives are recorded — never estimated from text length or any
+  other proxy. `claude-code` extracts observed per-message `message.usage`
+  (input/output/cache_read/cache_write, anchored to the assistant record's
+  uuid); `codex` derives per-event increments from `event_msg/token_count`
+  cumulative totals under monotonic validation (98% stale-regression guard,
+  fork-child inherited baseline absorbed, per Recall's derivation rules).
+  Session-level events (no message anchor) are stored with a NULL message id —
+  anchors are never invented. A stored row means "the provider reported
+  usage" (coverage marker: absence of rows means unknown, not zero).
+- `status` reports usage totals (`usage.sessions` + five bucket sums +
+  observed/derived event counts); zero-session usage is reported as "no
+  usage facts", distinct from a missing projection. `doctor` reports
+  `usage_storage: true` and orphaned usage projection counts, purged by
+  `index purge-activities` in the same transaction.
+- Per-provider `usage` capability column (capability matrix + robot
+  `providers` envelope): `claude-code` Native, `codex` Derived; the other 12
+  implemented providers honestly report Unsupported with per-format evidence
+  comments (pi/kimi-code/tencent-codebuddy/cline/opencode/cursor/grok-build
+  formats carry usage fields but their adapters lack per-message native ids
+  or field parsing; aider/hermes/antigravity/openclaw/qoder formats carry no
+  usage facts).
+
 - 16-provider capability matrix (`agent-session-grep-ports`) with deferred
   provider rows (`deepseek-harness`, `zcode`) and per-provider maturity grading.
 - Provider adapters for the 14 implemented, Experimental providers:

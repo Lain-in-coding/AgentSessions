@@ -545,12 +545,30 @@ fn render_context(data: &Value) -> Vec<String> {
     lines
 }
 
-/// `status`：`entities: N` + `generation: G` 两行。
+/// `status`：`entities: N` + `generation: G` 两行；usage 投影存在时追加一行
+/// 用量汇总（覆盖标记：无 usage 行 = 库中没有任何 provider 用量事实）。
 fn render_status(data: &Value) -> Vec<String> {
-    vec![
+    let mut lines = vec![
         format!("entities: {}", number_text(data, "catalog_count")),
         format!("generation: {}", number_text(data, "generation")),
-    ]
+    ];
+    if let Some(usage) = data.get("usage") {
+        let sessions = usage.get("sessions").and_then(Value::as_u64).unwrap_or(0);
+        if sessions == 0 {
+            lines.push("usage: 无 provider 用量记录（0 个会话携带 usage 事实）".into());
+        } else {
+            let sum = |key: &str| usage.get(key).and_then(Value::as_u64).unwrap_or(0);
+            lines.push(format!(
+                "usage: {} 个会话 input {} output {} cache_read {}（derived {} 事件）",
+                sessions,
+                sum("input_tokens"),
+                sum("output_tokens"),
+                sum("cache_read_tokens"),
+                sum("derived_events"),
+            ));
+        }
+    }
+    lines
 }
 
 /// `sync`/`ingest`：字段统计 + 一句人话总结。unchanged 是消息条数而非文件数，
@@ -1599,6 +1617,59 @@ mod tests {
         let data = json!({ "catalog_count": 5, "generation": 2 });
         let lines = render_success("status", Outcome::Success, &data, &Page::default());
         assert_eq!(lines, ["entities: 5", "generation: 2"]);
+    }
+
+    #[test]
+    fn status_renders_usage_line_when_projection_present() {
+        // usage 投影存在且有事实时追加汇总行；sessions==0 是"无事实"（未知），
+        // 不是"用量为零"——两种措辞必须区分。
+        let data = json!({
+            "catalog_count": 5,
+            "generation": 2,
+            "usage": {
+                "sessions": 2,
+                "input_tokens": 108,
+                "output_tokens": 53,
+                "cache_read_tokens": 32,
+                "cache_write_tokens": 20,
+                "reasoning_tokens": 1,
+                "observed_events": 1,
+                "derived_events": 1,
+            },
+        });
+        let lines = render_success("status", Outcome::Success, &data, &Page::default());
+        assert_eq!(
+            lines,
+            [
+                "entities: 5",
+                "generation: 2",
+                "usage: 2 个会话 input 108 output 53 cache_read 32（derived 1 事件）",
+            ]
+        );
+
+        let empty = json!({
+            "catalog_count": 5,
+            "generation": 2,
+            "usage": {
+                "sessions": 0,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cache_read_tokens": 0,
+                "cache_write_tokens": 0,
+                "reasoning_tokens": 0,
+                "observed_events": 0,
+                "derived_events": 0,
+            },
+        });
+        let lines = render_success("status", Outcome::Success, &empty, &Page::default());
+        assert_eq!(
+            lines,
+            [
+                "entities: 5",
+                "generation: 2",
+                "usage: 无 provider 用量记录（0 个会话携带 usage 事实）",
+            ]
+        );
     }
 
     #[test]

@@ -18,11 +18,13 @@
 //!
 //! adapter 只做格式隔离，绝不接触存储 / 检索 / UI（RFC-0002 §7）。
 
-use agent_session_grep_domain::{ToolActivityActor, ToolActivityStatus};
+use agent_session_grep_domain::{
+    TokenSource, ToolActivityActor, ToolActivityStatus, UsageObservation,
+};
 use agent_session_grep_ports::{
     AdapterManifest, CanonicalEventSink, Confidence, MessageEvent, MetadataResolution, ParseReport,
-    ProbeResult, ProviderAdapter, ProviderError, ToolActivityEvent, build_tool_activity,
-    manifest_for,
+    ProbeResult, ProviderAdapter, ProviderError, ToolActivityEvent, UsageEvent,
+    build_tool_activity, manifest_for,
 };
 use serde::{Deserialize, de::IgnoredAny};
 
@@ -38,6 +40,20 @@ const SAMPLE_BROKEN_TOLERANCE: usize = 3;
 const BAD_LINE_LIST_LIMIT: usize = 5;
 /// 多会话诊断中列出的 session id 条数上限（bounded detail）。
 const SESSION_ID_LIST_LIMIT: usize = 3;
+
+/// `token_count` 累计量的 bucket 键名（provider 原始字段名，逐字匹配）。
+const USAGE_KEY_INPUT: &str = "input_tokens";
+const USAGE_KEY_OUTPUT: &str = "output_tokens";
+const USAGE_KEY_CACHED: &str = "cached_input_tokens";
+const USAGE_KEY_CACHE_READ_ALT: &str = "cache_read_input_tokens";
+const USAGE_KEY_REASONING: &str = "reasoning_output_tokens";
+/// 累计对象与增量对象的键名（`info` 内）。
+const USAGE_KEY_TOTAL: &str = "total_token_usage";
+const USAGE_KEY_LAST: &str = "last_token_usage";
+/// stale 回归判定的 98% 阈值：当前总量回退但仍 ≥ 前一总量的 98% 时，
+/// 视为过期重报（Recall codex.rs `looks_like_stale_regression` 同阈值），
+/// 整条事件跳过——绝不把回退差当负增量、也不编造一个补数。
+const STALE_REGRESSION_PERCENT: i64 = 98;
 
 // Adapted from claude-historian-mcp/src/parser.ts:74-92 (MIT): inspect cheap
 // JSONL markers before invoking serde. Unknown or ambiguous lines remain parse
@@ -151,7 +167,10 @@ fn codex_line_may_need_deserialize(line: &[u8]) -> bool {
         return true;
     }
 
-    const IGNORED_TYPES: [&[u8]; 4] = [b"event_msg", b"turn_context", b"world_state", b"compacted"];
+    // `event_msg` 不在忽略表：其 `token_count` 子类承载会话累计 token 用量
+    // （usage 维度的唯一事实来源），必须反序列化后按 payload 类型分派；
+    // 其余 event_msg 镜像（user_message/agent_message）在解析循环里静默略过。
+    const IGNORED_TYPES: [&[u8]; 3] = [b"turn_context", b"world_state", b"compacted"];
     !markers
         .kind
         .is_some_and(|kind| IGNORED_TYPES.contains(&kind))
@@ -239,6 +258,16 @@ struct RawPayload {
     /// `function_call_output` 的失败标记；缺失视为 false（成功）。
     #[serde(default, rename = "is_error")]
     is_error: bool,
+    /// `event_msg/token_count` 的用量载荷（`info`：total_token_usage +
+    /// last_token_usage 两对象）。保持 `serde_json::Value` 原样：字段形状
+    /// 异常时只丢 usage 事件，绝不拖垮整行（fail-closed 在提取侧）。
+    #[serde(default)]
+    info: Option<serde_json::Value>,
+    /// fork 子会话的来源标记（仅 `session_meta` 的 payload 携带）：存在时
+    /// 本文件的 token_count 累计量继承自父会话，首条 token_count 是继承基线
+    /// 而非本会话用量——必须跳过，否则把父会话历史算到子会话头上。
+    #[serde(default, rename = "forked_from_id")]
+    forked_from_id: Option<String>,
 }
 
 impl RawPayload {
@@ -283,6 +312,193 @@ impl RawPayload {
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_string),
             _ => None,
+        }
+    }
+}
+
+/// token_count 的四桶用量（`total_token_usage` / `last_token_usage` 同形）。
+///
+/// i64 内部承载：减法/饱和运算绝不 panic；负值在 `from_usage` 即 fail-closed
+/// 拒绝（provider 给的负数不是事实）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CodexUsageTotals {
+    input: i64,
+    output: i64,
+    cached: i64,
+    reasoning: i64,
+}
+
+impl CodexUsageTotals {
+    /// 从 usage JSON 对象解析四桶；缺桶记 0（Recall codex.rs 同语义），
+    /// 负值/非整数 → `None`（整个对象拒绝）。全零 → `None`（无事实）。
+    fn from_usage(value: &serde_json::Value) -> Option<Self> {
+        let object = value.as_object()?;
+        let bucket = |key: &str| -> Option<i64> {
+            match object.get(key) {
+                None => Some(0),
+                Some(v) => v.as_i64().filter(|n| *n >= 0),
+            }
+        };
+        let input = bucket(USAGE_KEY_INPUT)?;
+        let output = bucket(USAGE_KEY_OUTPUT)?;
+        // 两个候选键（cached_input_tokens / cache_read_input_tokens）取大者，
+        // 与 Recall codex.rs `CodexUsageTotals::from_usage` 同语义。
+        let cached = bucket(USAGE_KEY_CACHED)?.max(bucket(USAGE_KEY_CACHE_READ_ALT)?);
+        let reasoning = bucket(USAGE_KEY_REASONING)?;
+        if input == 0 && output == 0 && cached == 0 && reasoning == 0 {
+            return None;
+        }
+        Some(Self {
+            input,
+            output,
+            cached,
+            reasoning,
+        })
+    }
+
+    /// 单调校验下的增量：任一桶回退 → `None`（绝不产生负增量，绝不编造补数）。
+    fn delta_from(self, previous: Self) -> Option<Self> {
+        if self.input < previous.input
+            || self.output < previous.output
+            || self.cached < previous.cached
+            || self.reasoning < previous.reasoning
+        {
+            return None;
+        }
+        Some(Self {
+            input: self.input - previous.input,
+            output: self.output - previous.output,
+            cached: self.cached - previous.cached,
+            reasoning: self.reasoning - previous.reasoning,
+        })
+    }
+
+    fn total(self) -> i64 {
+        self.input
+            .saturating_add(self.output)
+            .saturating_add(self.cached)
+            .saturating_add(self.reasoning)
+    }
+
+    /// 过期重报判定（Recall codex.rs `looks_like_stale_regression` 同阈值）：
+    /// 总量回退但幅度 < 2%（98% 阈值）或 < 两个 turn 的量级 → 视为 stale。
+    fn looks_like_stale_regression(self, previous: Self, last: Self) -> bool {
+        let previous_total = previous.total();
+        let current_total = self.total();
+        let last_total = last.total();
+        if previous_total <= 0 || current_total <= 0 || last_total <= 0 {
+            return false;
+        }
+        current_total.saturating_mul(100) >= previous_total.saturating_mul(STALE_REGRESSION_PERCENT)
+            || current_total.saturating_add(last_total.saturating_mul(2)) >= previous_total
+    }
+
+    /// 四桶 → 观察（Recall 同语义）：cached 记入 cache_read，input 减去与
+    /// cached 的重叠部分；Codex 不单独记录 cache 写入，恒为 0。
+    fn to_observation(self, source: TokenSource) -> UsageObservation {
+        let cache_read_tokens = self.cached.min(self.input).max(0) as u64;
+        UsageObservation {
+            input_tokens: self.input.saturating_sub(cache_read_tokens as i64).max(0) as u64,
+            output_tokens: self.output.max(0) as u64,
+            cache_read_tokens,
+            cache_write_tokens: 0,
+            reasoning_tokens: self.reasoning.max(0) as u64,
+            token_source: source,
+        }
+    }
+}
+
+/// token_count 增量推导状态（usage 维度）：跨事件携带、只读源外的唯一状态。
+#[derive(Default)]
+struct CodexUsageState {
+    /// 最近一次接受的累计总量（单调基准）。
+    previous_totals: Option<CodexUsageTotals>,
+    /// fork 子会话：下一条 token_count 是继承自父会话的基线，只吸收不 emit。
+    fork_baseline_pending: bool,
+}
+
+impl CodexUsageState {
+    /// 记录 fork 子会话标记（`session_meta.forked_from_id` 存在时调用）。
+    fn mark_forked(&mut self) {
+        self.fork_baseline_pending = true;
+    }
+
+    /// 从一条 token_count 的 `info` 派生出本事件的增量观察（Derived）。
+    ///
+    /// 规则（Recall codex.rs `extract_codex_usage_event` 同构）：
+    ///
+    /// 1. fork 基线待吸收 → 吸收 total（或 last）为基准，不 emit——把父会话
+    ///    历史算到子会话头上就是编造；
+    /// 2. total 与基准相等 → 无新用量，跳过；
+    /// 3. provider 给出 `last_token_usage` → 直接用（provider 自报的逐 turn
+    ///    增量），同时把 total 吸收为下一基准；
+    /// 4. 无 last → total − 基准，单调校验（任一桶回退即弃）；
+    /// 5. 回退但命中 98% stale 判定 → 过期重报，跳过（基准保持不动）；
+    /// 6. 首条事件（无基准）→ 用 last，或 total（首个累计即首个增量）。
+    fn derive(&mut self, info: &serde_json::Value) -> Option<UsageObservation> {
+        let total = info
+            .get(USAGE_KEY_TOTAL)
+            .and_then(CodexUsageTotals::from_usage);
+        let last = info
+            .get(USAGE_KEY_LAST)
+            .and_then(CodexUsageTotals::from_usage);
+
+        if self.fork_baseline_pending {
+            // 继承基线：子会话尚未跑任何 turn，这条累计是父会话历史。
+            self.fork_baseline_pending = false;
+            self.previous_totals = total.or(last).or(self.previous_totals);
+            return None;
+        }
+
+        match (total, last, self.previous_totals) {
+            (Some(total), Some(last), Some(previous)) => {
+                if total == previous {
+                    return None;
+                }
+                if total.delta_from(previous).is_none()
+                    && total.looks_like_stale_regression(previous, last)
+                {
+                    return None;
+                }
+                self.previous_totals = Some(total);
+                Some(last.to_observation(TokenSource::Derived))
+            }
+            (Some(total), Some(last), None) => {
+                self.previous_totals = Some(total);
+                Some(last.to_observation(TokenSource::Derived))
+            }
+            (Some(total), None, Some(previous)) => {
+                if total == previous {
+                    return None;
+                }
+                let delta = total.delta_from(previous)?;
+                self.previous_totals = Some(total);
+                Some(delta.to_observation(TokenSource::Derived))
+            }
+            (Some(total), None, None) => {
+                self.previous_totals = Some(total);
+                Some(total.to_observation(TokenSource::Derived))
+            }
+            (None, Some(last), Some(previous)) => {
+                // 无累计总量：last 是逐 turn 增量；基准保守累加（Recall 同），
+                // 使后续 total 的回归判定仍有意义。
+                self.previous_totals = Some(Self::saturating_add(previous, last));
+                Some(last.to_observation(TokenSource::Derived))
+            }
+            (None, Some(last), None) => {
+                self.previous_totals = Some(last);
+                Some(last.to_observation(TokenSource::Derived))
+            }
+            (None, None, _) => None,
+        }
+    }
+
+    fn saturating_add(left: CodexUsageTotals, right: CodexUsageTotals) -> CodexUsageTotals {
+        CodexUsageTotals {
+            input: left.input.saturating_add(right.input),
+            output: left.output.saturating_add(right.output),
+            cached: left.cached.saturating_add(right.cached),
+            reasoning: left.reasoning.saturating_add(right.reasoning),
         }
     }
 }
@@ -586,6 +802,8 @@ impl ProviderAdapter for CodexAdapter {
         // 最近一次成功 emit 的消息 native id——custom_tool_call 的活动锚点
         // （设计 R5.2：Codex 无显式 call→message 指针，取发出调用的助理消息）。
         let mut last_emitted_native_id: Option<String> = None;
+        // token_count 累计量的增量推导状态（usage 维度）。
+        let mut usage_state = CodexUsageState::default();
 
         while let Some(line) = lines.next_record()? {
             // 行负载已由 BoundedLineReader 剥离 \n/\r 与首行 BOM，span 仍以
@@ -653,6 +871,37 @@ impl ProviderAdapter for CodexAdapter {
                             MetadataResolution::Resolved(cwd.trim().to_string());
                         report.session_observation.pair_observed = true;
                     }
+                }
+                // fork 子会话（subagent）：本文件 token_count 的累计量继承自
+                // 父会话，下一条 token_count 是继承基线——标记吸收，绝不把
+                // 父会话历史 emit 成子会话用量。
+                if rec
+                    .payload
+                    .as_ref()
+                    .and_then(|p| p.forked_from_id.as_deref())
+                    .is_some_and(|id| !id.trim().is_empty())
+                {
+                    usage_state.mark_forked();
+                }
+                continue;
+            }
+
+            // event_msg/token_count：会话累计 token 用量（usage 维度的唯一
+            // 事实来源）。派生为增量事件（session 级：token_count 不关联
+            // 具体消息，message_native_id 为空串——绝不臆造锚点）。其余
+            // event_msg 镜像（user_message/agent_message）落回下面的
+            // `!= response_item` 分支静默略过（不重复计数）。
+            if rec.r#type == "event_msg" {
+                if let Some(payload) = &rec.payload
+                    && payload.r#type == "token_count"
+                    && let Some(info) = payload.info.as_ref()
+                    && let Some(usage) = usage_state.derive(info)
+                {
+                    sink.emit_usage(UsageEvent {
+                        message_native_id: "",
+                        usage,
+                    })
+                    .map_err(|e| ProviderError::StructuralFatal(e.to_string()))?;
                 }
                 continue;
             }
@@ -826,6 +1075,7 @@ mod tests {
     struct CollectingSink {
         messages: Vec<Captured>,
         activities: Vec<CapturedActivity>,
+        usages: Vec<CapturedUsage>,
     }
     struct Captured {
         seq: u32,
@@ -841,6 +1091,11 @@ mod tests {
     struct CapturedActivity {
         message_native_id: String,
         activity: ToolActivity,
+    }
+    /// 拍平的用量快照（anchor + 完整事实）。
+    struct CapturedUsage {
+        message_native_id: String,
+        usage: UsageObservation,
     }
     impl CanonicalEventSink for CollectingSink {
         fn emit_message(
@@ -867,6 +1122,17 @@ mod tests {
             self.activities.push(CapturedActivity {
                 message_native_id: event.message_native_id.to_string(),
                 activity: event.activity,
+            });
+            Ok(())
+        }
+
+        fn emit_usage(
+            &mut self,
+            event: UsageEvent<'_>,
+        ) -> agent_session_grep_ports::PortResult<()> {
+            self.usages.push(CapturedUsage {
+                message_native_id: event.message_native_id.to_string(),
+                usage: event.usage,
             });
             Ok(())
         }
@@ -1575,7 +1841,9 @@ mod tests {
     fn prefilter_skips_non_conversational_envelope_lines_without_counting_them() {
         // Known non-conversational envelopes should be skipped by the prefilter
         // before serde is invoked, so they do not enter skipped/diagnostics.
-        let noise = r#"{"timestamp":"2026-07-19T23:40:00.000Z","type":"event_msg","payload":{"type":"token_count","count":1}}"#;
+        // `event_msg` is deliberately NOT in this set anymore: its token_count
+        // 子类承载 usage 事实（见 prefilter_token_count_lines_must_deserialize）。
+        let noise = r#"{"timestamp":"2026-07-19T23:40:00.000Z","type":"turn_context","payload":{"type":"turn_context","count":1}}"#;
         assert!(!codex_line_may_need_deserialize(noise.as_bytes()));
         let mut input = String::new();
         for _ in 0..10_000 {
@@ -1595,6 +1863,19 @@ mod tests {
         assert_eq!(report.skipped, 0);
         assert_eq!(sink.messages.len(), 1);
         assert_eq!(sink.messages[0].text, "kept");
+    }
+
+    #[test]
+    fn prefilter_token_count_lines_must_deserialize() {
+        // usage 维度契约：event_msg/token_count 承载会话累计用量，prefilter
+        // 必须放行给 serde（否则 usage 事实被静默丢弃）；world_state 等仍跳过。
+        let token_count = r#"{"timestamp":"t","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1}}}}"#;
+        assert!(codex_line_may_need_deserialize(token_count.as_bytes()));
+        let world_state =
+            r#"{"timestamp":"t","type":"world_state","payload":{"type":"world_state"}}"#;
+        assert!(!codex_line_may_need_deserialize(world_state.as_bytes()));
+        let mirror = r#"{"timestamp":"t","type":"event_msg","payload":{"type":"agent_message","message":"mirror"}}"#;
+        assert!(codex_line_may_need_deserialize(mirror.as_bytes()));
     }
 
     #[test]
@@ -1623,7 +1904,9 @@ mod tests {
         let nested = r#"{"timestamp":"t","type":"future-record","payload":{"type":"event_msg"}}"#;
         assert!(codex_line_may_need_deserialize(nested.as_bytes()));
 
-        let broken = r#"{"timestamp":"t","type":"event_msg","payload":{"type":"token_count"}"#;
+        // 破损的已知忽略封套（turn_context）：prefilter 拒绝 → serde 报错 →
+        // record_recoverable skip（token_count 破损行同理，见 event_msg 放行）。
+        let broken = r#"{"timestamp":"t","type":"turn_context","payload":{"type":"token_count"}"#;
         assert!(!codex_line_may_need_deserialize(broken.as_bytes()));
         let mut sink = CollectingSink::default();
         let report = CodexAdapter::new()
@@ -1869,5 +2152,238 @@ mod tests {
             })),
         ]);
         assert!(activities.is_empty(), "不透明调用不得产出活动");
+    }
+
+    // ===== usage 维度：token_count 累计量 → 增量推导（Derived）=====
+
+    fn parse_usage_records(
+        records: &[serde_json::Value],
+    ) -> (usize, Vec<CapturedUsage>, ParseReport) {
+        let input = records
+            .iter()
+            .map(serde_json::to_string)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("serialize synthetic rollout")
+            .join("\n");
+        let mut sink = CollectingSink::default();
+        let report = CodexAdapter::new()
+            .parse(input.as_bytes(), &mut sink)
+            .expect("parse synthetic rollout");
+        (sink.messages.len(), sink.usages, report)
+    }
+
+    fn token_count(info: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "timestamp": "2026-08-15T00:00:00.000Z",
+            "type": "event_msg",
+            "payload": {"type": "token_count", "info": info},
+        })
+    }
+
+    fn usage_obj(input: i64, cached: i64, output: i64, reasoning: i64) -> serde_json::Value {
+        serde_json::json!({
+            "input_tokens": input,
+            "cached_input_tokens": cached,
+            "output_tokens": output,
+            "reasoning_output_tokens": reasoning,
+        })
+    }
+
+    #[test]
+    fn parse_derives_usage_preferring_last_token_usage() {
+        // provider 给出 last_token_usage 时直接用（逐 turn 自报增量），
+        // 同时把 total 吸收为下一基准；cached 拆进 cache_read，input 去重叠。
+        let (messages, usages, report) = parse_usage_records(&[
+            token_count(serde_json::json!({
+                "total_token_usage": usage_obj(10, 2, 3, 1),
+                "last_token_usage": usage_obj(10, 2, 3, 1),
+            })),
+            token_count(serde_json::json!({
+                "total_token_usage": usage_obj(15, 3, 5, 1),
+                "last_token_usage": usage_obj(5, 1, 2, 0),
+            })),
+        ]);
+        assert_eq!(report.skipped, 0);
+        assert_eq!(messages, 0, "token_count 不产生对话消息");
+        assert_eq!(usages.len(), 2);
+        let first = &usages[0];
+        assert_eq!(first.message_native_id, "", "session 级观察：锚点为空串");
+        assert_eq!(first.usage.input_tokens, 8);
+        assert_eq!(first.usage.cache_read_tokens, 2);
+        assert_eq!(first.usage.output_tokens, 3);
+        assert_eq!(first.usage.reasoning_tokens, 1);
+        assert_eq!(first.usage.token_source, TokenSource::Derived);
+        let second = &usages[1];
+        assert_eq!(second.usage.input_tokens, 4);
+        assert_eq!(second.usage.cache_read_tokens, 1);
+        assert_eq!(second.usage.output_tokens, 2);
+        assert_eq!(second.usage.reasoning_tokens, 0);
+    }
+
+    #[test]
+    fn parse_derives_usage_delta_when_last_absent() {
+        // 无 last：首条事件用 total 本身，后续取单调差。
+        let (_, usages, _) = parse_usage_records(&[
+            token_count(serde_json::json!({
+                "total_token_usage": usage_obj(10, 2, 3, 1),
+            })),
+            token_count(serde_json::json!({
+                "total_token_usage": usage_obj(15, 3, 5, 1),
+            })),
+        ]);
+        assert_eq!(usages.len(), 2);
+        assert_eq!(usages[0].usage.input_tokens, 8);
+        assert_eq!(usages[0].usage.output_tokens, 3);
+        assert_eq!(usages[1].usage.input_tokens, 4, "5 - 1(cached) = 4");
+        assert_eq!(usages[1].usage.cache_read_tokens, 1);
+        assert_eq!(usages[1].usage.output_tokens, 2);
+    }
+
+    #[test]
+    fn parse_skips_stale_regression_within_two_percent() {
+        // 总量回退但 ≥ 前一总量的 98%：过期重报，跳过且基准不动。
+        let (_, usages, _) = parse_usage_records(&[
+            token_count(serde_json::json!({
+                "total_token_usage": usage_obj(1000, 0, 200, 0),
+                "last_token_usage": usage_obj(1000, 0, 200, 0),
+            })),
+            token_count(serde_json::json!({
+                "total_token_usage": usage_obj(990, 0, 200, 0),
+                "last_token_usage": usage_obj(5, 0, 2, 0),
+            })),
+            token_count(serde_json::json!({
+                "total_token_usage": usage_obj(1005, 0, 205, 0),
+                "last_token_usage": usage_obj(15, 0, 5, 0),
+            })),
+        ]);
+        assert_eq!(usages.len(), 2, "回退 <2% 的过期重报必须被跳过");
+        assert_eq!(usages[1].usage.input_tokens, 15);
+        assert_eq!(usages[1].usage.output_tokens, 5);
+    }
+
+    #[test]
+    fn parse_uses_last_on_regression_without_stale_signal() {
+        // 总量大幅回退但不命中 stale 判定（无 last 兜底的差不足以解释）：
+        // 用 provider 自报的 last，并把回退后的 total 吸收为基准。
+        let (_, usages, _) = parse_usage_records(&[
+            token_count(serde_json::json!({
+                "total_token_usage": usage_obj(1000, 0, 200, 0),
+                "last_token_usage": usage_obj(1000, 0, 200, 0),
+            })),
+            token_count(serde_json::json!({
+                "total_token_usage": usage_obj(400, 0, 100, 0),
+                "last_token_usage": usage_obj(30, 0, 5, 0),
+            })),
+        ]);
+        assert_eq!(usages.len(), 2);
+        assert_eq!(usages[1].usage.input_tokens, 30);
+        assert_eq!(usages[1].usage.output_tokens, 5);
+    }
+
+    #[test]
+    fn parse_skips_fork_child_inherited_baseline() {
+        // fork 子会话：首条 token_count 是继承自父会话的累计基线，只吸收
+        // 不 emit——把父会话历史算到子会话头上就是编造。
+        let (_, usages, _) = parse_usage_records(&[
+            serde_json::json!({
+                "timestamp": "t",
+                "type": "session_meta",
+                "payload": {"session_id": "child", "forked_from_id": "parent"},
+            }),
+            token_count(serde_json::json!({
+                "total_token_usage": usage_obj(116000, 114000, 1000, 0),
+                "last_token_usage": usage_obj(73000, 72000, 500, 0),
+            })),
+            token_count(serde_json::json!({
+                "total_token_usage": usage_obj(117500, 115000, 1200, 50),
+                "last_token_usage": usage_obj(1500, 1000, 200, 50),
+            })),
+        ]);
+        assert_eq!(usages.len(), 1, "继承基线不得产生事件");
+        assert_eq!(usages[0].usage.input_tokens, 500);
+        assert_eq!(usages[0].usage.cache_read_tokens, 1000);
+        assert_eq!(usages[0].usage.output_tokens, 200);
+        assert_eq!(usages[0].usage.reasoning_tokens, 50);
+    }
+
+    #[test]
+    fn parse_skips_zero_delta_token_count() {
+        // total 与基准相等：无新用量，跳过。
+        let (_, usages, _) = parse_usage_records(&[
+            token_count(serde_json::json!({
+                "total_token_usage": usage_obj(10, 2, 3, 1),
+            })),
+            token_count(serde_json::json!({
+                "total_token_usage": usage_obj(10, 2, 3, 1),
+            })),
+        ]);
+        assert_eq!(usages.len(), 1);
+    }
+
+    #[test]
+    fn parse_drops_usage_with_negative_or_malformed_buckets() {
+        // 负值/非整数桶：fail-closed 丢弃整条事件，绝不 clamp、绝不编造。
+        let (_, usages, report) = parse_usage_records(&[
+            token_count(serde_json::json!({
+                "total_token_usage": {
+                    "input_tokens": -1,
+                    "output_tokens": 3,
+                },
+            })),
+            token_count(serde_json::json!({
+                "total_token_usage": {"input_tokens": "ten", "output_tokens": 3},
+            })),
+            token_count(serde_json::json!({
+                "total_token_usage": usage_obj(10, 2, 3, 1),
+            })),
+        ]);
+        assert_eq!(usages.len(), 1);
+        assert_eq!(usages[0].usage.input_tokens, 8);
+        assert_eq!(report.skipped, 0, "usage 事件丢弃不得计入 skipped");
+    }
+
+    #[test]
+    fn parse_usage_event_without_info_is_ignored() {
+        let (_, usages, report) = parse_usage_records(&[serde_json::json!({
+            "timestamp": "t",
+            "type": "event_msg",
+            "payload": {"type": "token_count", "count": 1},
+        })]);
+        assert!(usages.is_empty());
+        assert_eq!(report.skipped, 0);
+    }
+
+    #[test]
+    fn parse_usage_accepts_cache_read_input_tokens_alias() {
+        // cached_input_tokens 与 cache_read_input_tokens 两个候选键取大者。
+        let (_, usages, _) = parse_usage_records(&[token_count(serde_json::json!({
+            "total_token_usage": {
+                "input_tokens": 10,
+                "cache_read_input_tokens": 2,
+                "output_tokens": 3,
+            },
+        }))]);
+        assert_eq!(usages.len(), 1);
+        assert_eq!(usages[0].usage.cache_read_tokens, 2);
+        assert_eq!(usages[0].usage.input_tokens, 8);
+    }
+
+    #[test]
+    fn parse_usage_state_does_not_leak_across_files() {
+        // 每次 parse 独立推导：同一输入两次解析结果一致（状态随 parse 生命周期）。
+        let records = [
+            token_count(serde_json::json!({
+                "total_token_usage": usage_obj(10, 2, 3, 1),
+            })),
+            token_count(serde_json::json!({
+                "total_token_usage": usage_obj(15, 3, 5, 1),
+            })),
+        ];
+        let (_, first, _) = parse_usage_records(&records);
+        let (_, second, _) = parse_usage_records(&records);
+        assert_eq!(first.len(), second.len());
+        for (left, right) in first.iter().zip(&second) {
+            assert_eq!(left.usage, right.usage);
+        }
     }
 }

@@ -102,6 +102,9 @@ pub struct ProviderCapability {
     pub handoff: CapabilityLevel,
     /// 工具活动提取能力。
     pub tool_activity: CapabilityLevel,
+    /// Token 用量提取能力（usage 维度：只记录 provider 格式明确给出的数字，
+    /// 累计量转增量必须单调校验，绝不按文本长度等代理估算）。
+    pub usage: CapabilityLevel,
     /// Source span 精度。
     pub source_span: CapabilityLevel,
     /// 增量同步能力（未变化的源 resync 是否为 no-op）。
@@ -138,6 +141,7 @@ impl ProviderCapability {
             resume: CapabilityLevel::Unknown,
             handoff: CapabilityLevel::Unknown,
             tool_activity: CapabilityLevel::Unknown,
+            usage: CapabilityLevel::Unknown,
             source_span: CapabilityLevel::Unknown,
             incremental: CapabilityLevel::Unknown,
         }
@@ -180,6 +184,9 @@ impl ProviderCapabilityMatrix {
                     // native id 上报——composition root 对空锚点 fail-closed 丢弃，
                     // 故即便未来 emit 也无法附着。如实降级为 unsupported。
                     tool_activity: CapabilityLevel::Unsupported,
+                    // Markdown chat history 没有任何 token 用量记录（aider 的
+                    // 模型统计不在 `.aider.chat.history.md` 内），格式无此概念。
+                    usage: CapabilityLevel::Unsupported,
                     source_span: CapabilityLevel::Derived,
                     incremental: CapabilityLevel::Derived,
                 },
@@ -195,6 +202,10 @@ impl ProviderCapabilityMatrix {
                     resume: CapabilityLevel::Derived,
                     handoff: CapabilityLevel::Derived,
                     tool_activity: CapabilityLevel::Partial,
+                    // assistant 记录自带 `message.usage`（input/output/
+                    // cache_read/cache_creation 四桶，provider 原生逐消息给出），
+                    // adapter 按记录 uuid 锚定提取——Observed，不推算。
+                    usage: CapabilityLevel::Native,
                     source_span: CapabilityLevel::Native,
                     incremental: CapabilityLevel::Derived,
                 },
@@ -216,6 +227,11 @@ impl ProviderCapabilityMatrix {
                     resume: CapabilityLevel::Derived,
                     handoff: CapabilityLevel::Derived,
                     tool_activity: CapabilityLevel::Partial,
+                    // rollout 的 `event_msg/token_count` 只给累计总量
+                    // （total_token_usage/last_token_usage），adapter 用单调校验
+                    // + stale 回归判定把累计量转成增量事件（session 级锚定）——
+                    // Derived，回归即丢弃、绝不编造。
+                    usage: CapabilityLevel::Derived,
                     source_span: CapabilityLevel::Native,
                     incremental: CapabilityLevel::Derived,
                 },
@@ -239,6 +255,10 @@ impl ProviderCapabilityMatrix {
                     // prompt 级分组键）——消息以空 native id 上报，活动无法锚定
                     // （staging fail-closed 丢弃）。如实保持 Unsupported。
                     tool_activity: CapabilityLevel::Unsupported,
+                    // ACP 流确有 `_meta.totalTokens`（chunk 级累计，格式事实，
+                    // 见 grok-build-reference 研究），但 adapter 当前不解析该字段
+                    // 且消息无 per-message native id——本切片不宣称 usage 能力。
+                    usage: CapabilityLevel::Unsupported,
                     source_span: CapabilityLevel::Native,
                     incremental: CapabilityLevel::Derived,
                 },
@@ -260,6 +280,11 @@ impl ProviderCapabilityMatrix {
                     // native id 上报——既无事实可提取也无法锚定。如实保持
                     // Unsupported（钉住测试见 crate golden.rs）。
                     tool_activity: CapabilityLevel::Unsupported,
+                    // 格式确有 `message.usage`（input/output/total_tokens，证据：
+                    // ctx provider-history fixture `pi-session.jsonl`），但消息以
+                    // 空 native id 上报——usage 事件无法锚定（fail-closed 丢弃）。
+                    // 待 adapter 提供消息身份后再提取。
+                    usage: CapabilityLevel::Unsupported,
                     source_span: CapabilityLevel::Native,
                     incremental: CapabilityLevel::Derived,
                 },
@@ -285,6 +310,12 @@ impl ProviderCapabilityMatrix {
                     // 且 append_message 记录无 per-message native id——活动无法
                     // 锚定（staging fail-closed 丢弃）。如实保持 Unsupported。
                     tool_activity: CapabilityLevel::Unsupported,
+                    // wire.jsonl 确有 `usage.record` 行（{model, usage:{input_tokens,
+                    // output_tokens}}，证据：ctx provider-history fixture
+                    // `kimi-code-cli/.../wire.jsonl`），但它是 model 级请求记录、
+                    // 不关联消息，且本切片只解析 append_message——待 loop 事件
+                    // 切片落地后再提取。
+                    usage: CapabilityLevel::Unsupported,
                     source_span: CapabilityLevel::Native,
                     incremental: CapabilityLevel::Derived,
                 },
@@ -311,6 +342,11 @@ impl ProviderCapabilityMatrix {
                     // native id——活动无法锚定（staging fail-closed 丢弃）。
                     // 如实保持 Unsupported。
                     tool_activity: CapabilityLevel::Unsupported,
+                    // transcript 记录（session_meta/user/assistant/progress/
+                    // tool_use/tool_result）无任何 token 用量字段证据（ctx
+                    // provider-history fixture `qoder-session-1.jsonl` 全文无
+                    // usage/token 键）——格式无此概念。
+                    usage: CapabilityLevel::Unsupported,
                     source_span: CapabilityLevel::Native,
                     incremental: CapabilityLevel::Derived,
                 },
@@ -332,6 +368,9 @@ impl ProviderCapabilityMatrix {
                     // native id 上报——如实保持 Unsupported（钉住测试见 crate
                     // golden.rs）。
                     tool_activity: CapabilityLevel::Unsupported,
+                    // 文档化的 v3 格式知识（session/message 记录）不含 token
+                    // 用量字段——格式无此概念。
+                    usage: CapabilityLevel::Unsupported,
                     source_span: CapabilityLevel::Native,
                     incremental: CapabilityLevel::Derived,
                 },
@@ -357,6 +396,11 @@ impl ProviderCapabilityMatrix {
                     // 且消息以空 native id 上报——如实保持 Unsupported（钉住测试
                     // 见 crate golden.rs）。
                     tool_activity: CapabilityLevel::Unsupported,
+                    // CLI JSONL 的 assistant 记录确有内嵌 `message.usage`
+                    // （input/output/total_tokens，证据：ctx native_real_shapes
+                    // 真实形态测试），但消息以空 native id 上报——usage 事件无法
+                    // 锚定（fail-closed 丢弃）。待 adapter 提供消息身份后再提取。
+                    usage: CapabilityLevel::Unsupported,
                     source_span: CapabilityLevel::Native,
                     incremental: CapabilityLevel::Derived,
                 },
@@ -381,6 +425,11 @@ impl ProviderCapabilityMatrix {
                     resume: CapabilityLevel::Derived,
                     handoff: CapabilityLevel::Derived,
                     tool_activity: CapabilityLevel::Unsupported,
+                    // opencode.db 的 message 行 data JSON 确有 `tokens`
+                    // {input, output, reasoning}（证据：hstry opencode adapter
+                    // 读取同一列聚合 tokensIn/tokensOut），但本 adapter 当前只
+                    // 查询对话字段——待切片读取 data 列后再提取。
+                    usage: CapabilityLevel::Unsupported,
                     source_span: CapabilityLevel::Unsupported,
                     incremental: CapabilityLevel::Derived,
                 },
@@ -400,6 +449,11 @@ impl ProviderCapabilityMatrix {
                     resume: CapabilityLevel::Unsupported,
                     handoff: CapabilityLevel::Derived,
                     tool_activity: CapabilityLevel::Unsupported,
+                    // api_conversation_history 的 assistant 消息确有 `usage`
+                    // 字段（证据：ctx task_json provider 读取 `.get("usage")`），
+                    // 但消息无 per-message native id——usage 事件无法锚定
+                    // （fail-closed 丢弃）。待 adapter 提供消息身份后再提取。
+                    usage: CapabilityLevel::Unsupported,
                     source_span: CapabilityLevel::Unsupported,
                     incremental: CapabilityLevel::Derived,
                 },
@@ -426,6 +480,10 @@ impl ProviderCapabilityMatrix {
                     resume: CapabilityLevel::Unknown,
                     handoff: CapabilityLevel::Derived,
                     tool_activity: CapabilityLevel::Unsupported,
+                    // 文档化的 session JSON 消息形态（{role, content, reasoning?,
+                    // timestamp?, tool_call_id?, tool_calls?}）不含 token 用量
+                    // 字段；hstry 上游同样不提取——格式无此概念。
+                    usage: CapabilityLevel::Unsupported,
                     source_span: CapabilityLevel::Unsupported,
                     incremental: CapabilityLevel::Derived,
                 },
@@ -452,6 +510,10 @@ impl ProviderCapabilityMatrix {
                     // 值会碰撞），消息以空 native id 上报——活动无法锚定
                     // （staging fail-closed 丢弃）。如实保持 Unsupported。
                     tool_activity: CapabilityLevel::Unsupported,
+                    // transcript.jsonl step 记录无 token 用量字段证据（ctx
+                    // provider-history fixture `transcript_full.jsonl` 全文无
+                    // usage/token 键）——格式无此概念。
+                    usage: CapabilityLevel::Unsupported,
                     // 行式 JSONL：adapter 逐记录发 `span: Some((start, end))`，
                     // golden `golden_spans_slice_back_to_exact_source_lines`
                     // 逐字节校验切片。此前记为 unsupported 与代码相反。
@@ -485,6 +547,11 @@ impl ProviderCapabilityMatrix {
                     resume: CapabilityLevel::Unknown,
                     handoff: CapabilityLevel::Derived,
                     tool_activity: CapabilityLevel::Unsupported,
+                    // chatdata 确有 bubble `tokenCount` {inputTokens, outputTokens}
+                    // 与 composer 级 `promptTokenBreakdown`（证据：Recall
+                    // cursor.rs 读取同一 chatdata 面），但本 adapter 当前只读
+                    // type/text/timing——待切片读取用量字段后再提取。
+                    usage: CapabilityLevel::Unsupported,
                     source_span: CapabilityLevel::Unsupported,
                     incremental: CapabilityLevel::Derived,
                 },
@@ -500,6 +567,7 @@ impl ProviderCapabilityMatrix {
                     resume: CapabilityLevel::Unknown,
                     handoff: CapabilityLevel::Unknown,
                     tool_activity: CapabilityLevel::Unknown,
+                    usage: CapabilityLevel::Unknown,
                     source_span: CapabilityLevel::Unknown,
                     incremental: CapabilityLevel::Unknown,
                 },
@@ -515,6 +583,7 @@ impl ProviderCapabilityMatrix {
                     resume: CapabilityLevel::Unknown,
                     handoff: CapabilityLevel::Unknown,
                     tool_activity: CapabilityLevel::Unknown,
+                    usage: CapabilityLevel::Unknown,
                     source_span: CapabilityLevel::Unknown,
                     incremental: CapabilityLevel::Unknown,
                 },
@@ -625,6 +694,44 @@ mod tests {
             "matrix must list all 16 providers (evidence wave 08-15), got {}",
             m.providers.len()
         );
+    }
+
+    #[test]
+    fn usage_capability_levels_match_the_extraction_slice() {
+        let m = ProviderCapabilityMatrix::current();
+        // claude-code：assistant 记录自带 message.usage（provider 原生逐消息）。
+        assert_eq!(
+            m.find("claude-code").unwrap().usage,
+            CapabilityLevel::Native
+        );
+        // codex：token_count 累计量经单调校验转为增量（Derived）。
+        assert_eq!(m.find("codex").unwrap().usage, CapabilityLevel::Derived);
+        // 其余 12 个已实现 provider：本切片不宣称 usage 能力（诚实不宣传；
+        // 格式有无用量事实见各行的注释证据）。
+        for id in [
+            "aider",
+            "grok-build",
+            "antigravity",
+            "opencode",
+            "pi",
+            "hermes",
+            "cursor",
+            "kimi-code",
+            "openclaw",
+            "qoder",
+            "tencent-codebuddy",
+            "cline",
+        ] {
+            assert_eq!(
+                m.find(id).unwrap().usage,
+                CapabilityLevel::Unsupported,
+                "{id}"
+            );
+        }
+        // deferred：未评估。
+        for id in ["deepseek-harness", "zcode"] {
+            assert_eq!(m.find(id).unwrap().usage, CapabilityLevel::Unknown, "{id}");
+        }
     }
 
     #[test]

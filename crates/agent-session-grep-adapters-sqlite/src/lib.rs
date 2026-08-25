@@ -23,12 +23,13 @@ pub use source_fs::{
 use agent_session_grep_application::{bounded_index_text, fts_tokens_cjk, parse_search_instant};
 use agent_session_grep_domain::{
     EvidenceSpan, IdKind, Message, MessageEdge, MessagePlacement, MessageRelation, PlacementId,
-    Role, SessionContextGraph, SourceDocument, StableId, ToolActivity,
+    Role, SessionContextGraph, SourceDocument, StableId, ToolActivity, UsageObservation,
 };
 use agent_session_grep_ports::{
     CatalogEntry, CatalogStore, ContextGraphStore, ContextStats, MessageContextCandidate,
     PortError, PortResult, ResumeClaimsStore, SearchFacets, SearchHit, SearchIndex, SearchQuery,
     SemanticIndex, SessionResumeMetadata, SidechainFacet, SourcePlacement, SourceResumeClaim,
+    UsageTotals,
 };
 use rusqlite::{Connection, OptionalExtension};
 use std::any::Any;
@@ -60,6 +61,19 @@ fn backend<E: std::fmt::Display + 'static>(e: E) -> PortError {
     } else {
         PortError::Backend(e.to_string())
     }
+}
+
+/// 把一行里的非负 INTEGER 列读成 u64（schema CHECK 约束保证非负；
+/// 损坏行 fail-closed 报错，绝不静默 wrap——usage 五桶专用）。
+fn row_u64(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<u64> {
+    let value: i64 = row.get(index)?;
+    u64::try_from(value).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            index,
+            rusqlite::types::Type::Integer,
+            Box::new(error),
+        )
+    })
 }
 
 static NEXT_OPERATION_ID: AtomicU64 = AtomicU64::new(0);
@@ -461,6 +475,7 @@ enum RelationUpsertManifest {
     Placement(MessagePlacement),
     Edge(MessageEdge),
     Activity(StoredActivity),
+    Usage(StoredUsage),
 }
 
 impl RelationUpsertManifest {
@@ -469,6 +484,7 @@ impl RelationUpsertManifest {
             Self::Placement(placement) => format!("placement:{}", placement.id.as_str()),
             Self::Edge(edge) => format!("edge:{}", edge.child_placement_id.as_str()),
             Self::Activity(activity) => format!("activity:{}", activity.activity_id),
+            Self::Usage(usage) => format!("usage:{}", usage.usage_id),
         }
     }
 
@@ -494,6 +510,20 @@ impl RelationUpsertManifest {
                     "status": activity.status,
                 },
             }),
+            Self::Usage(usage) => serde_json::json!({
+                "kind": "usage_event",
+                "usage": {
+                    "usage_id": usage.usage_id,
+                    "session_id": usage.session_id,
+                    "message_id": usage.message_id,
+                    "input_tokens": usage.input_tokens,
+                    "output_tokens": usage.output_tokens,
+                    "cache_read_tokens": usage.cache_read_tokens,
+                    "cache_write_tokens": usage.cache_write_tokens,
+                    "reasoning_tokens": usage.reasoning_tokens,
+                    "token_source": usage.token_source,
+                },
+            }),
         }
     }
 }
@@ -504,6 +534,7 @@ enum RelationDeleteManifest {
     Placement(PlacementId),
     Edge(PlacementId),
     Activity(String),
+    Usage(String),
 }
 
 impl RelationDeleteManifest {
@@ -512,6 +543,7 @@ impl RelationDeleteManifest {
             Self::Placement(id) => format!("placement:{}", id.as_str()),
             Self::Edge(id) => format!("edge:{}", id.as_str()),
             Self::Activity(activity_id) => format!("activity:{activity_id}"),
+            Self::Usage(usage_id) => format!("usage:{usage_id}"),
         }
     }
 
@@ -528,6 +560,10 @@ impl RelationDeleteManifest {
             Self::Activity(activity_id) => serde_json::json!({
                 "kind": "tool_activity",
                 "activity_id": activity_id,
+            }),
+            Self::Usage(usage_id) => serde_json::json!({
+                "kind": "usage_event",
+                "usage_id": usage_id,
             }),
         }
     }
@@ -557,6 +593,8 @@ struct SourceReplacementManifest {
     placement_ids: Vec<PlacementId>,
     /// 该源声明的工具活动 id（v12；按 activity_id 排序去重）。
     activity_ids: Vec<String>,
+    /// 该源声明的 token 用量事件 id（v15；按 usage_id 排序去重）。
+    usage_ids: Vec<String>,
     relation_complete: bool,
     /// 捕获时源字节长度与内容指纹（source-scan 指纹缓存）。
     len_bytes: Option<i64>,
@@ -580,11 +618,14 @@ impl SourceReplacementManifest {
         placement_ids.sort();
         let mut activity_ids = self.activity_ids.clone();
         activity_ids.sort();
+        let mut usage_ids = self.usage_ids.clone();
+        usage_ids.sort();
         serde_json::json!({
             "source_path": self.source_path,
             "entity_memberships": entity_memberships,
             "placement_ids": placement_ids,
             "activity_ids": activity_ids,
+            "usage_ids": usage_ids,
             "relation_complete": self.relation_complete,
             "len_bytes": self.len_bytes,
             "fingerprint": self.fingerprint,
@@ -710,9 +751,10 @@ impl RelationManifests {
                     validate_placement(placement)?;
                 }
                 RelationUpsertManifest::Edge(edge) => validate_edge(edge)?,
-                // StoredActivity 在构造（stored_activity_from）时已完成
-                // 领域校验与边界截断；此处只做清单结构校验（键唯一等）。
-                RelationUpsertManifest::Activity(_) => {}
+                // StoredActivity/StoredUsage 在构造（stored_activity_from /
+                // stored_usage_from）时已完成领域校验与边界截断；此处只做清单
+                // 结构校验（键唯一等）。
+                RelationUpsertManifest::Activity(_) | RelationUpsertManifest::Usage(_) => {}
             }
         }
         let mut upsert_keys: Vec<_> = self
@@ -1001,6 +1043,12 @@ pub struct SourceBatch {
     /// 活动锚定在 `message_id` 上；同一活动事实 + 同一锚点在不同源里派生同一
     /// activity_id（跨源副本去重，claims 计数决定行生命周期）。
     pub activities: Vec<SourceActivity>,
+    /// 本次 source scan 观察到的全部 token 用量事件（v15 投影；默认为空）。
+    ///
+    /// 事件锚定在 `session_id` 上（`message_id` 可空：provider 逐消息给用量时
+    /// 挂消息，session 级累计事件挂会话）。同一事实 + 同一锚点跨源派生同一
+    /// usage_id（去重，claims 计数决定行生命周期）。
+    pub usage_events: Vec<SourceUsage>,
     /// 该 source 是否完成了零 skipped 的 relation scan。
     ///
     /// B1 不提交 completeness marker；B2 将据此替换或撤销 marker。
@@ -1022,6 +1070,103 @@ pub struct SourceBatch {
 pub struct SourceActivity {
     pub message_id: StableId,
     pub activity: ToolActivity,
+}
+
+/// 一条锚定在稳定会话上的 token 用量事件（v15）。
+///
+/// `message_id` 为 `None` 表示 session 级观察（如 Codex `token_count` 累计
+/// 事件没有消息关联）；`Some` 表示 provider 逐消息给出（如 Claude Code 的
+/// `message.usage` 锚在 assistant 记录上）。绝不臆造锚点。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceUsage {
+    pub session_id: StableId,
+    pub message_id: Option<StableId>,
+    pub usage: UsageObservation,
+}
+
+/// `usage_events` 表行 + 用量 id 的存储视图。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StoredUsage {
+    usage_id: String,
+    session_id: String,
+    message_id: Option<String>,
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_read_tokens: u64,
+    cache_write_tokens: u64,
+    reasoning_tokens: u64,
+    token_source: String,
+}
+
+impl StoredUsage {
+    fn matches(&self, other: &StoredUsage) -> bool {
+        self.session_id == other.session_id
+            && self.message_id == other.message_id
+            && self.input_tokens == other.input_tokens
+            && self.output_tokens == other.output_tokens
+            && self.cache_read_tokens == other.cache_read_tokens
+            && self.cache_write_tokens == other.cache_write_tokens
+            && self.reasoning_tokens == other.reasoning_tokens
+            && self.token_source == other.token_source
+    }
+}
+
+/// 内容寻址的用量 id：`use_v1_<hex16(blake3("usage-event-v1" || …))>`。
+///
+/// 同一 (session_id, message_id, 五桶, token_source) 派生同一 id——跨源副本
+/// 天然去重；message_id 为 None 时以空串参与哈希（与 Some("") 无歧义）。
+fn usage_id_for(session_id: &str, message_id: Option<&str>, usage: &UsageObservation) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"usage-event-v1");
+    hasher.update(session_id.as_bytes());
+    hasher.update(&[0]);
+    hasher.update(message_id.unwrap_or("").as_bytes());
+    hasher.update(&[0]);
+    for bucket in [
+        usage.input_tokens,
+        usage.output_tokens,
+        usage.cache_read_tokens,
+        usage.cache_write_tokens,
+        usage.reasoning_tokens,
+    ] {
+        hasher.update(&bucket.to_le_bytes());
+        hasher.update(&[0]);
+    }
+    hasher.update(usage.token_source.as_str().as_bytes());
+    let hex = hasher.finalize().to_hex();
+    format!("use_v1_{}", &hex.as_str()[..16])
+}
+
+/// 把领域用量观察规范化为存储行（fail-closed：锚点种类校验）。
+fn stored_usage_from(
+    session_id: &StableId,
+    message_id: Option<&StableId>,
+    usage: &UsageObservation,
+) -> PortResult<StoredUsage> {
+    if session_id.kind() != IdKind::Session {
+        return Err(PortError::Backend(
+            "usage event session anchor has the wrong kind".into(),
+        ));
+    }
+    if let Some(message_id) = message_id
+        && message_id.kind() != IdKind::Message
+    {
+        return Err(PortError::Backend(
+            "usage event message anchor has the wrong kind".into(),
+        ));
+    }
+    let row = StoredUsage {
+        usage_id: usage_id_for(session_id.as_str(), message_id.map(StableId::as_str), usage),
+        session_id: session_id.as_str().to_string(),
+        message_id: message_id.map(|id| id.as_str().to_string()),
+        input_tokens: usage.input_tokens,
+        output_tokens: usage.output_tokens,
+        cache_read_tokens: usage.cache_read_tokens,
+        cache_write_tokens: usage.cache_write_tokens,
+        reasoning_tokens: usage.reasoning_tokens,
+        token_source: usage.token_source.as_str().to_string(),
+    };
+    Ok(row)
 }
 
 /// `tool_activities` 表行 + 活动 id 的存储视图。
@@ -1156,6 +1301,7 @@ struct PreparedSource {
     prior_entity_memberships: BTreeMap<String, Option<String>>,
     prior_placement_ids: BTreeSet<String>,
     prior_activity_ids: BTreeSet<String>,
+    prior_usage_ids: BTreeSet<String>,
     observed_placements: BTreeMap<String, MessagePlacement>,
     observed_edges: BTreeMap<String, MessageEdge>,
     replacement: SourceReplacementManifest,
@@ -1531,6 +1677,9 @@ impl SqliteStore {
         }
         if current < 14 {
             Self::migrate_v13_to_v14(conn)?;
+        }
+        if current < 15 {
+            Self::migrate_v14_to_v15(conn)?;
         }
         // 不随 user_version 门控：旧 v7 库（本列存在前建成的）打开时同样需要。
         Self::ensure_fts_ids_rowid(conn)?;
@@ -1924,6 +2073,58 @@ impl SqliteStore {
         tx.commit().map_err(backend)
     }
 
+    /// Add the v15 token-usage projection in one explicit transaction
+    /// (additive, non-destructive).
+    ///
+    /// `usage_events` stores typed token-usage observations anchored to stable
+    /// session wire ids (`message_id` nullable：provider 逐消息给出时挂消息，
+    /// session 级累计事件挂会话）；`usage_event_membership` records per-source
+    /// claims so the lifecycle mirrors `tool_activities`（complete-scan replace,
+    /// incomplete-scan union, tombstone via claims）。五桶非负、`token_source`
+    /// 只允许 observed/derived（覆盖标记：行存在 = provider 报过用量，真 0 与
+    /// 未知可区分）。步骤只依赖 v7+ 表，在 v7..=14 的任意 catalog 上都能干净
+    /// 运行——与并行 schema 分支 merge-safe。`user_version = 15` 与 DDL 同事务。
+    fn migrate_v14_to_v15(conn: &Connection) -> PortResult<()> {
+        Self::migrate_v14_to_v15_inner(conn, false)
+    }
+
+    fn migrate_v14_to_v15_inner(conn: &Connection, inject_failure: bool) -> PortResult<()> {
+        let tx = conn.unchecked_transaction().map_err(backend)?;
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS usage_events (
+                 usage_id           TEXT PRIMARY KEY,
+                 session_id         TEXT NOT NULL,
+                 message_id         TEXT,
+                 input_tokens       INTEGER NOT NULL CHECK(input_tokens >= 0),
+                 output_tokens      INTEGER NOT NULL CHECK(output_tokens >= 0),
+                 cache_read_tokens  INTEGER NOT NULL CHECK(cache_read_tokens >= 0),
+                 cache_write_tokens INTEGER NOT NULL CHECK(cache_write_tokens >= 0),
+                 reasoning_tokens   INTEGER NOT NULL CHECK(reasoning_tokens >= 0),
+                 token_source       TEXT NOT NULL
+                     CHECK(token_source IN ('observed', 'derived'))
+             );
+             CREATE INDEX IF NOT EXISTS usage_events_session ON usage_events(session_id);
+             CREATE INDEX IF NOT EXISTS usage_events_message ON usage_events(message_id);
+             CREATE TABLE IF NOT EXISTS usage_event_membership (
+                 source_path TEXT NOT NULL,
+                 usage_id    TEXT NOT NULL,
+                 PRIMARY KEY(source_path, usage_id)
+             );
+             CREATE INDEX IF NOT EXISTS usage_event_membership_usage
+             ON usage_event_membership(usage_id);
+             PRAGMA user_version = 15;",
+        )
+        .map_err(backend)?;
+
+        if inject_failure {
+            return Err(PortError::Backend(
+                "injected v14-to-v15 migration failure".into(),
+            ));
+        }
+
+        tx.commit().map_err(backend)
+    }
+
     /// 声明语义向量归属的模型 id（#3）。未设置时 `SemanticIndex` 全部方法
     /// 视为未配置：`is_ready` 为 false、查询返回空、写入报错——这样"忘了配模型"
     /// 不会变成往表里写无归属向量。
@@ -2042,6 +2243,64 @@ impl SqliteStore {
         Ok(out)
     }
 
+    /// 全库 token 用量聚合（usage 维度只读投影，status 展示用）。
+    ///
+    /// 覆盖标记原则：`sessions == 0` 表示库中没有任何 usage 事实（未知），
+    /// 而不是"用量为零"——真 0 与未知必须可区分（agentsview has_*_tokens
+    /// 同义）。事件计数按 token_source 分列（observed/derived）。
+    pub fn usage_totals(&self) -> PortResult<Option<UsageTotals>> {
+        let conn = self.conn.borrow();
+        // usage_events 表只在 v15 迁移后存在；无投影返回 None（诚实区分
+        // "无投影"与"有投影但零事实"）。
+        let has_table: bool = conn
+            .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='usage_events'")
+            .map_err(backend)?
+            .query_row([], |_| Ok(true))
+            .optional()
+            .map_err(backend)?
+            .unwrap_or(false);
+        if !has_table {
+            return Ok(None);
+        }
+        let totals: (i64, i64, i64, i64, i64, i64, i64, i64) = conn
+            .query_row(
+                "SELECT COUNT(DISTINCT session_id),
+                        COALESCE(SUM(input_tokens), 0),
+                        COALESCE(SUM(output_tokens), 0),
+                        COALESCE(SUM(cache_read_tokens), 0),
+                        COALESCE(SUM(cache_write_tokens), 0),
+                        COALESCE(SUM(reasoning_tokens), 0),
+                        COALESCE(SUM(CASE WHEN token_source = 'observed' THEN 1 ELSE 0 END), 0),
+                        COALESCE(SUM(CASE WHEN token_source = 'derived' THEN 1 ELSE 0 END), 0)
+                 FROM usage_events",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                    ))
+                },
+            )
+            .map_err(backend)?;
+        let to_u64 = |value: i64| u64::try_from(value.max(0)).map_err(backend);
+        Ok(Some(UsageTotals {
+            sessions: to_u64(totals.0)?,
+            input_tokens: to_u64(totals.1)?,
+            output_tokens: to_u64(totals.2)?,
+            cache_read_tokens: to_u64(totals.3)?,
+            cache_write_tokens: to_u64(totals.4)?,
+            reasoning_tokens: to_u64(totals.5)?,
+            observed_events: to_u64(totals.6)?,
+            derived_events: to_u64(totals.7)?,
+        }))
+    }
+
     /// v12 工具活动投影的孤儿扫描（只读，doctor/维护证据）：
     /// 返回 `(孤儿活动行数, 孤儿成员行数)`。
     ///
@@ -2081,6 +2340,42 @@ impl SqliteStore {
         ))
     }
 
+    /// v15 usage 投影的孤儿扫描（只读，doctor/维护证据）：
+    /// 返回 `(孤儿用量行数, 孤儿成员行数)`。
+    ///
+    /// - 孤儿用量：`usage_events` 行没有对应的 catalog 会话行。用量是会话
+    ///   的投影，会话退役时其事件由 claims 推导同事务删除；残余行是投影
+    ///   漂移证据。
+    /// - 孤儿成员：`usage_event_membership` 行指向不存在的事件（悬空 claim）。
+    pub fn orphaned_usage_counts(&self) -> PortResult<(u64, u64)> {
+        let conn = self.conn.borrow();
+        let events: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM usage_events ue
+                 WHERE NOT EXISTS (
+                     SELECT 1 FROM catalog c WHERE c.id = ue.session_id
+                 )",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(backend)?;
+        let memberships: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM usage_event_membership m
+                 WHERE NOT EXISTS (
+                     SELECT 1 FROM usage_events ue
+                     WHERE ue.usage_id = m.usage_id
+                 )",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(backend)?;
+        Ok((
+            u64::try_from(events).map_err(backend)?,
+            u64::try_from(memberships).map_err(backend)?,
+        ))
+    }
+
     /// 确定性修剪孤儿工具活动行（v12 保留策略的维护路径）。
     ///
     /// 活动是 catalog 的投影：正常写入路径里，source 退役与消息 tombstone 会
@@ -2094,9 +2389,20 @@ impl SqliteStore {
     /// 删除成员行数)`——成员行数含随孤儿活动删除而级联清除的 claim。无孤儿时
     /// 不写库（返回 `(0, 0)`，generation 不动）——修剪是收敛操作，空跑不
     /// 产生 journal churn。
+    ///
+    /// v15 起同事务一并修剪孤儿 usage 投影行（会话退役后的漂移残余，同一
+    /// 维护语义）：删除没有 catalog 会话的 `usage_events` 行与悬空
+    /// `usage_event_membership` claim。返回值仍只报告活动行数（对外契约
+    /// 不变）；usage 修剪结果经 [`orphaned_usage_counts`](Self::orphaned_usage_counts)
+    /// 复核。
     pub fn purge_orphaned_activities(&self) -> PortResult<(u64, u64)> {
         let (activities, memberships) = self.orphaned_activity_counts()?;
-        if activities == 0 && memberships == 0 {
+        let (orphaned_usages, orphaned_usage_memberships) = self.orphaned_usage_counts()?;
+        if activities == 0
+            && memberships == 0
+            && orphaned_usages == 0
+            && orphaned_usage_memberships == 0
+        {
             return Ok((0, 0));
         }
         // 空变更集的 durable intent：与 rebuild 同一条 CAS 前置条件
@@ -2125,6 +2431,23 @@ impl SqliteStore {
                 [],
             )
             .map_err(backend)?;
+        // v15 usage 投影修剪：先删没有 catalog 会话的事件行，再清悬空 claim
+        // （与活动同一顺序语义——先删事件行，claim 的悬空定义才会同时覆盖
+        // 预先悬空与刚删行的 claim）。
+        tx.execute(
+            "DELETE FROM usage_events
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM catalog c WHERE c.id = usage_events.session_id
+             )",
+            [],
+        )
+        .map_err(backend)?;
+        tx.execute(
+            "DELETE FROM usage_event_membership
+             WHERE usage_id NOT IN (SELECT usage_id FROM usage_events)",
+            [],
+        )
+        .map_err(backend)?;
         tx.execute(
             "UPDATE store_metadata SET active_generation = ?1 WHERE singleton = 1",
             [pending.target_generation as i64],
@@ -2636,14 +2959,17 @@ impl SqliteStore {
         let current_entities_by_source = self.source_entity_membership_state()?;
         let current_placements_by_source = self.source_placement_membership_state()?;
         let current_activities_by_source = self.source_activity_membership_state()?;
+        let current_usages_by_source = self.source_usage_membership_state()?;
         let stored_placements = self.stored_placements()?;
         let stored_edges = self.stored_edges()?;
         let stored_activities = self.stored_activities()?;
+        let stored_usages = self.stored_usages()?;
 
         let mut merged = BTreeMap::<String, (StableId, Vec<u8>, String)>::new();
         let mut observed_placements = BTreeMap::<String, MessagePlacement>::new();
         let mut observed_edges = BTreeMap::<String, MessageEdge>::new();
         let mut observed_activities = BTreeMap::<String, StoredActivity>::new();
+        let mut observed_usages = BTreeMap::<String, StoredUsage>::new();
         let mut prepared_sources = BTreeMap::<String, PreparedSource>::new();
 
         for source in ordered_sources {
@@ -2794,6 +3120,48 @@ impl SqliteStore {
             };
             final_activity_ids.extend(source_activities.keys().cloned());
 
+            // token 用量事件（v15）：派生活用 id、校验锚点，跨源事实冲突拒绝。
+            // 事件行对 (session, message, 五桶, source) 内容寻址，同 id 即同事实；
+            // 仅当同 id 行事实不同（哈希碰撞或派生逻辑漂移）才 fail-closed。
+            let mut source_usages = BTreeMap::new();
+            for source_usage in &source.usage_events {
+                let stored = stored_usage_from(
+                    &source_usage.session_id,
+                    source_usage.message_id.as_ref(),
+                    &source_usage.usage,
+                )?;
+                if let Some(existing) = source_usages.get(&stored.usage_id) {
+                    if existing != &stored {
+                        return Err(PortError::Backend(format!(
+                            "usage event {} has conflicting facts within one source",
+                            stored.usage_id
+                        )));
+                    }
+                } else {
+                    source_usages.insert(stored.usage_id.clone(), stored.clone());
+                }
+                if let Some(existing) = observed_usages.get(&stored.usage_id) {
+                    if existing != &stored {
+                        return Err(PortError::Backend(format!(
+                            "usage event {} has conflicting projections across sources",
+                            stored.usage_id
+                        )));
+                    }
+                } else {
+                    observed_usages.insert(stored.usage_id.clone(), stored);
+                }
+            }
+            let prior_usage_ids = current_usages_by_source
+                .get(&source.source_path)
+                .cloned()
+                .unwrap_or_default();
+            let mut final_usage_ids = if source.relation_complete {
+                BTreeSet::new()
+            } else {
+                prior_usage_ids.clone()
+            };
+            final_usage_ids.extend(source_usages.keys().cloned());
+
             let replacement = SourceReplacementManifest {
                 source_path: source.source_path.clone(),
                 entity_memberships: final_entities
@@ -2812,6 +3180,7 @@ impl SqliteStore {
                     })
                     .collect::<PortResult<Vec<_>>>()?,
                 activity_ids: final_activity_ids.into_iter().collect(),
+                usage_ids: final_usage_ids.into_iter().collect(),
                 relation_complete: source.relation_complete,
                 len_bytes: source.len_bytes,
                 fingerprint: source.fingerprint.clone(),
@@ -2825,6 +3194,7 @@ impl SqliteStore {
                     prior_entity_memberships,
                     prior_placement_ids,
                     prior_activity_ids,
+                    prior_usage_ids,
                     observed_placements: source_placements,
                     observed_edges: source_edges,
                     replacement,
@@ -2964,10 +3334,31 @@ impl SqliteStore {
                     .insert(source_path.clone());
             }
         }
+        let mut final_usage_claimers = BTreeMap::<String, BTreeSet<String>>::new();
+        for (source_path, usage_ids) in &current_usages_by_source {
+            if scanned_paths.contains(source_path) {
+                continue;
+            }
+            for usage_id in usage_ids {
+                final_usage_claimers
+                    .entry(usage_id.clone())
+                    .or_default()
+                    .insert(source_path.clone());
+            }
+        }
+        for (source_path, prepared) in &prepared_sources {
+            for usage_id in &prepared.replacement.usage_ids {
+                final_usage_claimers
+                    .entry(usage_id.clone())
+                    .or_default()
+                    .insert(source_path.clone());
+            }
+        }
 
         let mut deletes = BTreeMap::new();
         let mut placement_delete_ids = BTreeSet::new();
         let mut activity_delete_ids = BTreeSet::new();
+        let mut usage_delete_ids = BTreeSet::new();
         // 失败/不完整扫描不变量（与 fast-resume `failed_incremental_scan` 同一
         // 原则：任何 IO/解析/目录错误都不删除已索引内容）：relation_complete=false
         // 的源绝不推导 tombstone——"这次没看到"不是"已被删除"，只有完整成功的
@@ -3021,6 +3412,21 @@ impl SqliteStore {
                     && stored_activities.contains_key(prior)
                 {
                     activity_delete_ids.insert(prior.clone());
+                }
+            }
+
+            let final_usage_ids: BTreeSet<&str> = prepared
+                .replacement
+                .usage_ids
+                .iter()
+                .map(String::as_str)
+                .collect();
+            for prior in &prepared.prior_usage_ids {
+                if !final_usage_ids.contains(prior.as_str())
+                    && !final_usage_claimers.contains_key(prior)
+                    && stored_usages.contains_key(prior)
+                {
+                    usage_delete_ids.insert(prior.clone());
                 }
             }
         }
@@ -3125,6 +3531,11 @@ impl SqliteStore {
                         .into_values()
                         .map(RelationUpsertManifest::Activity),
                 )
+                .chain(
+                    observed_usages
+                        .into_values()
+                        .map(RelationUpsertManifest::Usage),
+                )
                 .collect(),
             relation_deletes: edge_delete_ids
                 .into_iter()
@@ -3146,6 +3557,11 @@ impl SqliteStore {
                     activity_delete_ids
                         .into_iter()
                         .map(|id| Ok(RelationDeleteManifest::Activity(id))),
+                )
+                .chain(
+                    usage_delete_ids
+                        .into_iter()
+                        .map(|id| Ok(RelationDeleteManifest::Usage(id))),
                 )
                 .collect::<PortResult<Vec<_>>>()?,
             source_replacements: prepared_sources
@@ -3480,6 +3896,83 @@ impl SqliteStore {
                     return Ok(false);
                 }
             }
+            // Usage-event claims for this source only（v15）。
+            let mut stmt = conn
+                .prepare(
+                    "SELECT usage_id FROM usage_event_membership
+                     WHERE source_path = ?1 ORDER BY usage_id",
+                )
+                .map_err(backend)?;
+            let rows = stmt
+                .query_map([&source.source_path], |row| row.get::<_, String>(0))
+                .map_err(backend)?;
+            let stored_usage_claims: BTreeSet<String> =
+                rows.collect::<Result<_, _>>().map_err(backend)?;
+            let expected_usage_claims: BTreeSet<String> = source
+                .usage_events
+                .iter()
+                .map(|source_usage| {
+                    stored_usage_from(
+                        &source_usage.session_id,
+                        source_usage.message_id.as_ref(),
+                        &source_usage.usage,
+                    )
+                    .map(|stored| stored.usage_id)
+                })
+                .collect::<PortResult<BTreeSet<_>>>()?;
+            if stored_usage_claims != expected_usage_claims {
+                return Ok(false);
+            }
+            // Stored usage rows for this source's ids (batched, chunked).
+            let mut stored_usage_rows: BTreeMap<String, StoredUsage> = BTreeMap::new();
+            let usage_ids: Vec<String> = expected_usage_claims.into_iter().collect();
+            for chunk in chunk_ids(&usage_ids) {
+                let placeholders = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+                let mut stmt = conn
+                    .prepare(&format!(
+                        "SELECT usage_id, session_id, message_id, input_tokens, output_tokens,
+                                cache_read_tokens, cache_write_tokens, reasoning_tokens,
+                                token_source
+                         FROM usage_events WHERE usage_id IN ({placeholders})"
+                    ))
+                    .map_err(backend)?;
+                let rows = stmt
+                    .query_map(rusqlite::params_from_iter(chunk.iter()), |row| {
+                        let id: String = row.get(0)?;
+                        Ok((
+                            id.clone(),
+                            StoredUsage {
+                                usage_id: id,
+                                session_id: row.get(1)?,
+                                message_id: row.get(2)?,
+                                input_tokens: row_u64(row, 3)?,
+                                output_tokens: row_u64(row, 4)?,
+                                cache_read_tokens: row_u64(row, 5)?,
+                                cache_write_tokens: row_u64(row, 6)?,
+                                reasoning_tokens: row_u64(row, 7)?,
+                                token_source: row.get(8)?,
+                            },
+                        ))
+                    })
+                    .map_err(backend)?;
+                for row in rows {
+                    let (id, stored) = row.map_err(backend)?;
+                    stored_usage_rows.insert(id, stored);
+                }
+            }
+            for source_usage in &source.usage_events {
+                let expected = stored_usage_from(
+                    &source_usage.session_id,
+                    source_usage.message_id.as_ref(),
+                    &source_usage.usage,
+                )?;
+                if !stored_usage_rows
+                    .get(&expected.usage_id)
+                    .is_some_and(|stored| stored.matches(&expected))
+                {
+                    return Ok(false);
+                }
+            }
             // Completeness marker (scan record already checked at loop head).
             let complete: bool = conn
                 .query_row(
@@ -3694,6 +4187,67 @@ impl SqliteStore {
             activities.insert(activity_id, activity);
         }
         Ok(activities)
+    }
+
+    fn stored_usages(&self) -> PortResult<BTreeMap<String, StoredUsage>> {
+        let conn = self.conn.borrow();
+        Self::stored_usages_from(&conn)
+    }
+
+    fn stored_usages_from(conn: &Connection) -> PortResult<BTreeMap<String, StoredUsage>> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT usage_id, session_id, message_id, input_tokens, output_tokens,
+                        cache_read_tokens, cache_write_tokens, reasoning_tokens, token_source
+                 FROM usage_events ORDER BY usage_id",
+            )
+            .map_err(backend)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    StoredUsage {
+                        usage_id: String::new(), // 键即 id，行内不重复承载
+                        session_id: row.get(1)?,
+                        message_id: row.get(2)?,
+                        input_tokens: row_u64(row, 3)?,
+                        output_tokens: row_u64(row, 4)?,
+                        cache_read_tokens: row_u64(row, 5)?,
+                        cache_write_tokens: row_u64(row, 6)?,
+                        reasoning_tokens: row_u64(row, 7)?,
+                        token_source: row.get(8)?,
+                    },
+                ))
+            })
+            .map_err(backend)?;
+        let mut usages = BTreeMap::new();
+        for row in rows {
+            let (usage_id, mut usage) = row.map_err(backend)?;
+            usage.usage_id = usage_id.clone();
+            usages.insert(usage_id, usage);
+        }
+        Ok(usages)
+    }
+
+    fn source_usage_membership_state(&self) -> PortResult<BTreeMap<String, BTreeSet<String>>> {
+        let conn = self.conn.borrow();
+        let mut stmt = conn
+            .prepare(
+                "SELECT source_path, usage_id
+                 FROM usage_event_membership ORDER BY source_path, usage_id",
+            )
+            .map_err(backend)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(backend)?;
+        let mut state = BTreeMap::<String, BTreeSet<String>>::new();
+        for row in rows {
+            let (source_path, usage_id) = row.map_err(backend)?;
+            state.entry(source_path).or_default().insert(usage_id);
+        }
+        Ok(state)
     }
 
     fn source_activity_membership_state(&self) -> PortResult<BTreeMap<String, BTreeSet<String>>> {
@@ -4049,6 +4603,7 @@ impl SqliteStore {
         let stored_placements = self.stored_placements()?;
         let stored_edges = self.stored_edges()?;
         let stored_activities = self.stored_activities()?;
+        let stored_usages = self.stored_usages()?;
         for upsert in &relations.relation_upserts {
             let current = match upsert {
                 RelationUpsertManifest::Placement(placement) => stored_placements
@@ -4060,6 +4615,9 @@ impl SqliteStore {
                 RelationUpsertManifest::Activity(activity) => stored_activities
                     .get(&activity.activity_id)
                     .is_some_and(|stored| stored.matches(activity)),
+                RelationUpsertManifest::Usage(usage) => stored_usages
+                    .get(&usage.usage_id)
+                    .is_some_and(|stored| stored.matches(usage)),
             };
             if !current {
                 return Ok(false);
@@ -4074,6 +4632,7 @@ impl SqliteStore {
                 RelationDeleteManifest::Activity(activity_id) => {
                     stored_activities.contains_key(activity_id)
                 }
+                RelationDeleteManifest::Usage(usage_id) => stored_usages.contains_key(usage_id),
             };
             if exists {
                 return Ok(false);
@@ -4083,6 +4642,7 @@ impl SqliteStore {
         let entity_state = self.source_entity_membership_state()?;
         let placement_state = self.source_placement_membership_state()?;
         let activity_state = self.source_activity_membership_state()?;
+        let usage_state = self.source_usage_membership_state()?;
         let conn = self.conn.borrow();
         for replacement in &relations.source_replacements {
             let expected_entities: BTreeMap<String, Option<String>> = replacement
@@ -4118,6 +4678,16 @@ impl SqliteStore {
                 .cloned()
                 .unwrap_or_default()
                 != expected_activity_ids
+            {
+                return Ok(false);
+            }
+            let expected_usage_ids: BTreeSet<String> =
+                replacement.usage_ids.iter().cloned().collect();
+            if usage_state
+                .get(&replacement.source_path)
+                .cloned()
+                .unwrap_or_default()
+                != expected_usage_ids
             {
                 return Ok(false);
             }
@@ -4849,6 +5419,10 @@ impl SqliteStore {
                     )
                     .map_err(backend)?;
                 }
+                RelationDeleteManifest::Usage(usage_id) => {
+                    tx.execute("DELETE FROM usage_events WHERE usage_id = ?1", [usage_id])
+                        .map_err(backend)?;
+                }
             }
         }
         // 关系行 upsert：多行批量（借鉴 hstry bulk_insert_messages_in_tx，MIT，
@@ -4980,6 +5554,40 @@ impl SqliteStore {
             }
         }
 
+        // token 用量事件 upsert（v15）：逐行 upsert。事件行内容寻址
+        // （usage_id），同一事实跨源去重。
+        for upsert in &relations.relation_upserts {
+            if let RelationUpsertManifest::Usage(usage) = upsert {
+                tx.execute(
+                    "INSERT INTO usage_events(
+                         usage_id, session_id, message_id, input_tokens, output_tokens,
+                         cache_read_tokens, cache_write_tokens, reasoning_tokens, token_source
+                     ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                     ON CONFLICT(usage_id) DO UPDATE SET
+                         session_id = excluded.session_id,
+                         message_id = excluded.message_id,
+                         input_tokens = excluded.input_tokens,
+                         output_tokens = excluded.output_tokens,
+                         cache_read_tokens = excluded.cache_read_tokens,
+                         cache_write_tokens = excluded.cache_write_tokens,
+                         reasoning_tokens = excluded.reasoning_tokens,
+                         token_source = excluded.token_source",
+                    rusqlite::params![
+                        usage.usage_id,
+                        usage.session_id,
+                        usage.message_id,
+                        i64::try_from(usage.input_tokens).map_err(backend)?,
+                        i64::try_from(usage.output_tokens).map_err(backend)?,
+                        i64::try_from(usage.cache_read_tokens).map_err(backend)?,
+                        i64::try_from(usage.cache_write_tokens).map_err(backend)?,
+                        i64::try_from(usage.reasoning_tokens).map_err(backend)?,
+                        usage.token_source,
+                    ],
+                )
+                .map_err(backend)?;
+            }
+        }
+
         for source in &relations.source_replacements {
             tx.execute(
                 "DELETE FROM source_membership WHERE source_path = ?1",
@@ -5046,6 +5654,21 @@ impl SqliteStore {
                     "INSERT INTO tool_activity_membership(source_path, activity_id)
                      VALUES(?1, ?2)",
                     rusqlite::params![&source.source_path, activity_id],
+                )
+                .map_err(backend)?;
+            }
+            // token 用量事件成员（v15）：与活动同一生命周期——先清旧声明，
+            // 本批带用量才写新行；无用量的 source 即清除其旧声明。
+            tx.execute(
+                "DELETE FROM usage_event_membership WHERE source_path = ?1",
+                [&source.source_path],
+            )
+            .map_err(backend)?;
+            for usage_id in &source.usage_ids {
+                tx.execute(
+                    "INSERT INTO usage_event_membership(source_path, usage_id)
+                     VALUES(?1, ?2)",
+                    rusqlite::params![&source.source_path, usage_id],
                 )
                 .map_err(backend)?;
             }
@@ -5147,8 +5770,9 @@ impl SqliteStore {
                 RelationUpsertManifest::Edge(edge) => {
                     touched_edges.push(edge.child_placement_id.as_str().to_string());
                 }
-                // 工具活动不参与 placement/edge 引用完整性校验（独立表）。
-                RelationUpsertManifest::Activity(_) => {}
+                // 工具活动/用量事件不参与 placement/edge 引用完整性校验
+                // （独立表）。
+                RelationUpsertManifest::Activity(_) | RelationUpsertManifest::Usage(_) => {}
             }
         }
         for delete in &relations.relation_deletes {
@@ -5159,7 +5783,7 @@ impl SqliteStore {
                 RelationDeleteManifest::Edge(id) => {
                     touched_edges.push(id.as_str().to_string());
                 }
-                RelationDeleteManifest::Activity(_) => {}
+                RelationDeleteManifest::Activity(_) | RelationDeleteManifest::Usage(_) => {}
             }
         }
         Self::verify_relational_integrity_in_tx(
@@ -5767,7 +6391,7 @@ pub const PARSER_SEMANTIC_VERSION: u32 = 1;
 /// 解析语义升级后版本落后的源即使字节未变也会 targeted backfill（重跑
 /// parse + commit）。旧行 DEFAULT 0 保证迁移后第一次 sync 自动 backfill；
 /// 新库在 v5 建表 DDL 已带本列（v9 provider_id 同一模式）。
-pub const SCHEMA_VERSION: i64 = 14;
+pub const SCHEMA_VERSION: i64 = 15;
 
 impl CatalogStore for SqliteStore {
     fn get(&self, id: &StableId) -> PortResult<Option<Vec<u8>>> {
@@ -5883,6 +6507,11 @@ impl CatalogStore for SqliteStore {
             .query_row("SELECT COUNT(*) FROM catalog", [], |row| row.get(0))
             .map_err(backend)?;
         u64::try_from(count).map_err(backend)
+    }
+
+    fn usage_totals(&self) -> PortResult<Option<UsageTotals>> {
+        // 委托给 inherent 实现（同一方法体；覆盖默认 None）。
+        SqliteStore::usage_totals(self)
     }
 
     fn active_generation(&self) -> PortResult<u64> {
@@ -7546,8 +8175,8 @@ mod filtered_query_tests {
 mod tests {
     use super::*;
     use agent_session_grep_domain::{
-        EvidenceSpan, IdKind, MessageRelation, Stability, ToolActivity, ToolActivityActor,
-        ToolActivityKind, ToolActivityStatus,
+        EvidenceSpan, IdKind, MessageRelation, Stability, TokenSource, ToolActivity,
+        ToolActivityActor, ToolActivityKind, ToolActivityStatus,
     };
     use agent_session_grep_ports::SearchFilters;
 
@@ -7664,7 +8293,7 @@ mod tests {
     fn schema_v10_creates_message_vec_table() {
         let store = SqliteStore::open_in_memory().unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 14);
+        assert_eq!(SCHEMA_VERSION, 15);
         let conn = store.conn.borrow();
         let count: i64 = conn
             .query_row(
@@ -7983,6 +8612,7 @@ mod tests {
             placements,
             edges,
             activities: Vec::new(),
+            usage_events: Vec::new(),
             relation_complete,
             len_bytes: None,
             fingerprint: None,
@@ -10449,6 +11079,7 @@ mod tests {
             placements: Vec::new(),
             edges: Vec::new(),
             activities: Vec::new(),
+            usage_events: Vec::new(),
             relation_complete: true,
             len_bytes: None,
             fingerprint: None,
@@ -10551,6 +11182,7 @@ mod tests {
             placements: Vec::new(),
             edges: Vec::new(),
             activities: Vec::new(),
+            usage_events: Vec::new(),
             relation_complete: true,
             len_bytes: None,
             fingerprint: None,
@@ -10670,6 +11302,7 @@ mod tests {
             placements: Vec::new(),
             edges: Vec::new(),
             activities: Vec::new(),
+            usage_events: Vec::new(),
             relation_complete: true,
             len_bytes: None,
             fingerprint: None,
@@ -10693,6 +11326,7 @@ mod tests {
             placements: Vec::new(),
             edges: Vec::new(),
             activities: Vec::new(),
+            usage_events: Vec::new(),
             relation_complete: true,
             len_bytes: None,
             fingerprint: None,
@@ -10720,6 +11354,7 @@ mod tests {
             placements: Vec::new(),
             edges: Vec::new(),
             activities: Vec::new(),
+            usage_events: Vec::new(),
             relation_complete: true,
             len_bytes: None,
             fingerprint: None,
@@ -10849,6 +11484,7 @@ mod tests {
             placements: Vec::new(),
             edges: Vec::new(),
             activities: Vec::new(),
+            usage_events: Vec::new(),
             relation_complete: true,
             len_bytes: None,
             fingerprint: None,
@@ -10899,6 +11535,7 @@ mod tests {
             placements: Vec::new(),
             edges: Vec::new(),
             activities: Vec::new(),
+            usage_events: Vec::new(),
             relation_complete: true,
             len_bytes: None,
             fingerprint: None,
@@ -10946,6 +11583,7 @@ mod tests {
             placements: Vec::new(),
             edges: Vec::new(),
             activities: Vec::new(),
+            usage_events: Vec::new(),
             relation_complete: true,
             len_bytes: None,
             fingerprint: None,
@@ -10977,6 +11615,7 @@ mod tests {
             placements: Vec::new(),
             edges: Vec::new(),
             activities: Vec::new(),
+            usage_events: Vec::new(),
             relation_complete: true,
             len_bytes: None,
             fingerprint: None,
@@ -11005,6 +11644,7 @@ mod tests {
                 placements: Vec::new(),
                 edges: Vec::new(),
                 activities: Vec::new(),
+                usage_events: Vec::new(),
                 relation_complete: true,
                 len_bytes: None,
                 fingerprint: None,
@@ -11020,6 +11660,7 @@ mod tests {
                 placements: Vec::new(),
                 edges: Vec::new(),
                 activities: Vec::new(),
+                usage_events: Vec::new(),
                 relation_complete: true,
                 len_bytes: None,
                 fingerprint: None,
@@ -11039,6 +11680,7 @@ mod tests {
             placements: Vec::new(),
             edges: Vec::new(),
             activities: Vec::new(),
+            usage_events: Vec::new(),
             relation_complete: true,
             len_bytes: None,
             fingerprint: None,
@@ -11103,6 +11745,7 @@ mod tests {
                 placements: Vec::new(),
                 edges: Vec::new(),
                 activities: Vec::new(),
+                usage_events: Vec::new(),
                 relation_complete: true,
                 len_bytes: None,
                 fingerprint: None,
@@ -11123,6 +11766,7 @@ mod tests {
                 placements: Vec::new(),
                 edges: Vec::new(),
                 activities: Vec::new(),
+                usage_events: Vec::new(),
                 relation_complete: true,
                 len_bytes: None,
                 fingerprint: None,
@@ -11169,6 +11813,7 @@ mod tests {
             placements: Vec::new(),
             edges: Vec::new(),
             activities: Vec::new(),
+            usage_events: Vec::new(),
             relation_complete: true,
             len_bytes: None,
             fingerprint: None,
@@ -11195,6 +11840,7 @@ mod tests {
             placements: Vec::new(),
             edges: Vec::new(),
             activities: Vec::new(),
+            usage_events: Vec::new(),
             relation_complete: true,
             len_bytes: None,
             fingerprint: None,
@@ -11240,6 +11886,7 @@ mod tests {
                 placements: Vec::new(),
                 edges: Vec::new(),
                 activities: Vec::new(),
+                usage_events: Vec::new(),
                 relation_complete: true,
                 len_bytes: None,
                 fingerprint: None,
@@ -11260,6 +11907,7 @@ mod tests {
                 placements: Vec::new(),
                 edges: Vec::new(),
                 activities: Vec::new(),
+                usage_events: Vec::new(),
                 relation_complete: true,
                 len_bytes: None,
                 fingerprint: None,
@@ -11307,6 +11955,7 @@ mod tests {
             placements: Vec::new(),
             edges: Vec::new(),
             activities: Vec::new(),
+            usage_events: Vec::new(),
             relation_complete: true,
             len_bytes: None,
             fingerprint: None,
@@ -11329,6 +11978,7 @@ mod tests {
             placements: Vec::new(),
             edges: Vec::new(),
             activities: Vec::new(),
+            usage_events: Vec::new(),
             relation_complete: true,
             len_bytes: None,
             fingerprint: None,
@@ -11370,6 +12020,7 @@ mod tests {
                 placements: Vec::new(),
                 edges: Vec::new(),
                 activities: Vec::new(),
+                usage_events: Vec::new(),
                 relation_complete: true,
                 len_bytes: None,
                 fingerprint: None,
@@ -11382,6 +12033,7 @@ mod tests {
                 placements: Vec::new(),
                 edges: Vec::new(),
                 activities: Vec::new(),
+                usage_events: Vec::new(),
                 relation_complete: true,
                 len_bytes: None,
                 fingerprint: None,
@@ -11464,6 +12116,7 @@ mod tests {
                 placements: Vec::new(),
                 edges: Vec::new(),
                 activities: Vec::new(),
+                usage_events: Vec::new(),
                 relation_complete: true,
                 len_bytes: None,
                 fingerprint: None,
@@ -11476,6 +12129,7 @@ mod tests {
                 placements: Vec::new(),
                 edges: Vec::new(),
                 activities: Vec::new(),
+                usage_events: Vec::new(),
                 relation_complete: true,
                 len_bytes: None,
                 fingerprint: None,
@@ -11523,6 +12177,7 @@ mod tests {
                 placements: Vec::new(),
                 edges: Vec::new(),
                 activities: Vec::new(),
+                usage_events: Vec::new(),
                 relation_complete: true,
                 len_bytes: None,
                 fingerprint: None,
@@ -11535,6 +12190,7 @@ mod tests {
                 placements: Vec::new(),
                 edges: Vec::new(),
                 activities: Vec::new(),
+                usage_events: Vec::new(),
                 relation_complete: true,
                 len_bytes: None,
                 fingerprint: None,
@@ -11569,6 +12225,7 @@ mod tests {
                 placements: Vec::new(),
                 edges: Vec::new(),
                 activities: Vec::new(),
+                usage_events: Vec::new(),
                 relation_complete: true,
                 len_bytes: None,
                 fingerprint: None,
@@ -11585,6 +12242,7 @@ mod tests {
                 placements: Vec::new(),
                 edges: Vec::new(),
                 activities: Vec::new(),
+                usage_events: Vec::new(),
                 relation_complete: true,
                 len_bytes: None,
                 fingerprint: None,
@@ -11632,6 +12290,7 @@ mod tests {
                 placements: Vec::new(),
                 edges: Vec::new(),
                 activities: Vec::new(),
+                usage_events: Vec::new(),
                 relation_complete: true,
                 len_bytes: None,
                 fingerprint: None,
@@ -11648,6 +12307,7 @@ mod tests {
                 placements: Vec::new(),
                 edges: Vec::new(),
                 activities: Vec::new(),
+                usage_events: Vec::new(),
                 relation_complete: true,
                 len_bytes: None,
                 fingerprint: None,
@@ -11692,6 +12352,7 @@ mod tests {
                 placements: Vec::new(),
                 edges: Vec::new(),
                 activities: Vec::new(),
+                usage_events: Vec::new(),
                 relation_complete: true,
                 len_bytes: None,
                 fingerprint: None,
@@ -11708,6 +12369,7 @@ mod tests {
                 placements: Vec::new(),
                 edges: Vec::new(),
                 activities: Vec::new(),
+                usage_events: Vec::new(),
                 relation_complete: true,
                 len_bytes: None,
                 fingerprint: None,
@@ -11753,6 +12415,7 @@ mod tests {
                 placements: Vec::new(),
                 edges: Vec::new(),
                 activities: Vec::new(),
+                usage_events: Vec::new(),
                 relation_complete: true,
                 len_bytes: None,
                 fingerprint: None,
@@ -11769,6 +12432,7 @@ mod tests {
                 placements: Vec::new(),
                 edges: Vec::new(),
                 activities: Vec::new(),
+                usage_events: Vec::new(),
                 relation_complete: true,
                 len_bytes: None,
                 fingerprint: None,
@@ -11827,6 +12491,7 @@ mod tests {
             placements: Vec::new(),
             edges: Vec::new(),
             activities: Vec::new(),
+            usage_events: Vec::new(),
             relation_complete: true,
             len_bytes: None,
             fingerprint: None,
@@ -11850,6 +12515,7 @@ mod tests {
             placements: Vec::new(),
             edges: Vec::new(),
             activities: Vec::new(),
+            usage_events: Vec::new(),
             relation_complete: true,
             len_bytes: None,
             fingerprint: None,
@@ -11895,6 +12561,7 @@ mod tests {
             placements: Vec::new(),
             edges: Vec::new(),
             activities: Vec::new(),
+            usage_events: Vec::new(),
             relation_complete: true,
             len_bytes: Some(10),
             fingerprint: Some(fingerprint.to_string()),
@@ -11947,6 +12614,7 @@ mod tests {
             placements: Vec::new(),
             edges: Vec::new(),
             activities: Vec::new(),
+            usage_events: Vec::new(),
             relation_complete: true,
             len_bytes: Some(10),
             fingerprint: Some("aaa".to_string()),
@@ -12142,6 +12810,7 @@ mod tests {
             placements: Vec::new(),
             edges: Vec::new(),
             activities: Vec::new(),
+            usage_events: Vec::new(),
             relation_complete: true,
             len_bytes: None,
             fingerprint: None,
@@ -12219,6 +12888,7 @@ mod tests {
             placements: Vec::new(),
             edges: Vec::new(),
             activities: Vec::new(),
+            usage_events: Vec::new(),
             relation_complete: true,
             len_bytes: None,
             fingerprint: None,
@@ -12240,6 +12910,7 @@ mod tests {
             placements: Vec::new(),
             edges: Vec::new(),
             activities: Vec::new(),
+            usage_events: Vec::new(),
             relation_complete: true,
             len_bytes: None,
             fingerprint: None,
@@ -12276,6 +12947,7 @@ mod tests {
                 placements: Vec::new(),
                 edges: Vec::new(),
                 activities: Vec::new(),
+                usage_events: Vec::new(),
                 relation_complete: true,
                 len_bytes: None,
                 fingerprint: None,
@@ -12288,6 +12960,7 @@ mod tests {
                 placements: Vec::new(),
                 edges: Vec::new(),
                 activities: Vec::new(),
+                usage_events: Vec::new(),
                 relation_complete: true,
                 len_bytes: None,
                 fingerprint: None,
@@ -12303,6 +12976,7 @@ mod tests {
                 placements: Vec::new(),
                 edges: Vec::new(),
                 activities: Vec::new(),
+                usage_events: Vec::new(),
                 relation_complete: true,
                 len_bytes: None,
                 fingerprint: None,
@@ -12315,6 +12989,7 @@ mod tests {
                 placements: Vec::new(),
                 edges: Vec::new(),
                 activities: Vec::new(),
+                usage_events: Vec::new(),
                 relation_complete: true,
                 len_bytes: None,
                 fingerprint: None,
@@ -12338,6 +13013,7 @@ mod tests {
             placements: Vec::new(),
             edges: Vec::new(),
             activities: Vec::new(),
+            usage_events: Vec::new(),
             relation_complete: true,
             len_bytes: None,
             fingerprint: None,
@@ -12355,6 +13031,7 @@ mod tests {
                 placements: Vec::new(),
                 edges: Vec::new(),
                 activities: Vec::new(),
+                usage_events: Vec::new(),
                 relation_complete: true,
                 len_bytes: None,
                 fingerprint: None,
@@ -12367,6 +13044,7 @@ mod tests {
                 placements: Vec::new(),
                 edges: Vec::new(),
                 activities: Vec::new(),
+                usage_events: Vec::new(),
                 relation_complete: true,
                 len_bytes: None,
                 fingerprint: None,
@@ -12406,6 +13084,7 @@ mod tests {
                     placements: Vec::new(),
                     edges: Vec::new(),
                     activities: Vec::new(),
+                    usage_events: Vec::new(),
                     relation_complete: true,
                     len_bytes: None,
                     fingerprint: None,
@@ -12421,6 +13100,7 @@ mod tests {
                     placements: Vec::new(),
                     edges: Vec::new(),
                     activities: Vec::new(),
+                    usage_events: Vec::new(),
                     relation_complete: true,
                     len_bytes: None,
                     fingerprint: None,
@@ -12437,6 +13117,7 @@ mod tests {
                     placements: Vec::new(),
                     edges: Vec::new(),
                     activities: Vec::new(),
+                    usage_events: Vec::new(),
                     relation_complete: true,
                     len_bytes: None,
                     fingerprint: None,
@@ -12449,6 +13130,7 @@ mod tests {
                     placements: Vec::new(),
                     edges: Vec::new(),
                     activities: Vec::new(),
+                    usage_events: Vec::new(),
                     relation_complete: true,
                     len_bytes: None,
                     fingerprint: None,
@@ -12461,6 +13143,7 @@ mod tests {
                     placements: Vec::new(),
                     edges: Vec::new(),
                     activities: Vec::new(),
+                    usage_events: Vec::new(),
                     relation_complete: true,
                     len_bytes: None,
                     fingerprint: None,
@@ -12501,6 +13184,7 @@ mod tests {
             placements: Vec::new(),
             edges: Vec::new(),
             activities: Vec::new(),
+            usage_events: Vec::new(),
             relation_complete: true,
             len_bytes: None,
             fingerprint: None,
@@ -12516,6 +13200,7 @@ mod tests {
             placements: Vec::new(),
             edges: Vec::new(),
             activities: Vec::new(),
+            usage_events: Vec::new(),
             relation_complete: true,
             len_bytes: None,
             fingerprint: None,
@@ -12539,6 +13224,7 @@ mod tests {
                 placements: Vec::new(),
                 edges: Vec::new(),
                 activities: Vec::new(),
+                usage_events: Vec::new(),
                 relation_complete: true,
                 len_bytes: None,
                 fingerprint: None,
@@ -12551,6 +13237,7 @@ mod tests {
                 placements: Vec::new(),
                 edges: Vec::new(),
                 activities: Vec::new(),
+                usage_events: Vec::new(),
                 relation_complete: true,
                 len_bytes: None,
                 fingerprint: None,
@@ -12575,6 +13262,7 @@ mod tests {
             placements: Vec::new(),
             edges: Vec::new(),
             activities: Vec::new(),
+            usage_events: Vec::new(),
             relation_complete: true,
             len_bytes: None,
             fingerprint: None,
@@ -12609,6 +13297,7 @@ mod tests {
                 placements: Vec::new(),
                 edges: Vec::new(),
                 activities: Vec::new(),
+                usage_events: Vec::new(),
                 relation_complete: true,
                 len_bytes: None,
                 fingerprint: None,
@@ -12621,6 +13310,7 @@ mod tests {
                 placements: Vec::new(),
                 edges: Vec::new(),
                 activities: Vec::new(),
+                usage_events: Vec::new(),
                 relation_complete: true,
                 len_bytes: None,
                 fingerprint: None,
@@ -12648,6 +13338,7 @@ mod tests {
             placements: Vec::new(),
             edges: Vec::new(),
             activities: Vec::new(),
+            usage_events: Vec::new(),
             relation_complete: true,
             len_bytes: None,
             fingerprint: None,
@@ -12667,6 +13358,7 @@ mod tests {
             placements: Vec::new(),
             edges: Vec::new(),
             activities: Vec::new(),
+            usage_events: Vec::new(),
             relation_complete: true,
             len_bytes: None,
             fingerprint: None,
@@ -12815,6 +13507,7 @@ mod tests {
                 entity_memberships: Vec::new(),
                 placement_ids: Vec::new(),
                 activity_ids: Vec::new(),
+                usage_ids: Vec::new(),
                 relation_complete: true,
                 len_bytes: None,
                 fingerprint: None,
@@ -13374,6 +14067,7 @@ mod tests {
             )],
             edges: Vec::new(),
             activities: Vec::new(),
+            usage_events: Vec::new(),
             relation_complete: true,
             len_bytes: None,
             fingerprint: None,
@@ -13514,6 +14208,7 @@ mod tests {
             ],
             edges: Vec::new(),
             activities: Vec::new(),
+            usage_events: Vec::new(),
             relation_complete: true,
             len_bytes: None,
             fingerprint: None,
@@ -13568,6 +14263,7 @@ mod tests {
             )],
             edges: Vec::new(),
             activities: Vec::new(),
+            usage_events: Vec::new(),
             relation_complete: true,
             len_bytes: None,
             fingerprint: None,
@@ -13623,6 +14319,7 @@ mod tests {
             ],
             edges: Vec::new(),
             activities: Vec::new(),
+            usage_events: Vec::new(),
             relation_complete: true,
             len_bytes: None,
             fingerprint: None,
@@ -13838,6 +14535,110 @@ mod tests {
     }
 
     #[test]
+    fn v14_catalog_migrates_to_v15_adding_usage_projection() {
+        // 旧库迁到 v15 后 usage_events / usage_event_membership 表存在且为空；
+        // usage_totals 返回 Some（有投影）且 sessions == 0——覆盖标记：
+        // "有投影但零事实" 与 "无投影（None）" 必须可区分。
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v14.db");
+        let p = path.to_string_lossy().into_owned();
+        {
+            let conn = rusqlite::Connection::open(&p).unwrap();
+            create_v6_schema(&conn);
+            SqliteStore::migrate_v6_to_v7(&conn).unwrap();
+            SqliteStore::migrate_v7_to_v8(&conn).unwrap();
+            SqliteStore::migrate_v8_to_v9(&conn).unwrap();
+            SqliteStore::migrate_v9_to_v10(&conn).unwrap();
+            SqliteStore::migrate_v10_to_v11(&conn).unwrap();
+            SqliteStore::migrate_v11_to_v12(&conn).unwrap();
+            SqliteStore::migrate_v12_to_v13(&conn).unwrap();
+            SqliteStore::migrate_v13_to_v14(&conn).unwrap();
+            let table_exists: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master
+                     WHERE type = 'table' AND name = 'usage_events'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(table_exists, 0, "v14 尚无 usage_events 表");
+        }
+        // 重新打开：触发 v14→v15 迁移。
+        let store = SqliteStore::open(&p).unwrap();
+        assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
+        let conn = store.conn.borrow();
+        for table in ["usage_events", "usage_event_membership"] {
+            let table_exists: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master
+                     WHERE type = 'table' AND name = ?1",
+                    [table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(table_exists, 1, "{table} 必须随 v15 迁移创建");
+        }
+        let totals = store.usage_totals().unwrap();
+        assert_eq!(
+            totals.map(|t| t.sessions),
+            Some(0),
+            "有投影但零事实必须是 Some(sessions=0)，不是 None"
+        );
+    }
+
+    #[test]
+    fn injected_v14_to_v15_failure_rolls_back_schema_and_version() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        create_v6_schema(&conn);
+        SqliteStore::migrate_v6_to_v7(&conn).unwrap();
+        SqliteStore::migrate_v7_to_v8(&conn).unwrap();
+        SqliteStore::migrate_v8_to_v9(&conn).unwrap();
+        SqliteStore::migrate_v9_to_v10(&conn).unwrap();
+        SqliteStore::migrate_v10_to_v11(&conn).unwrap();
+        SqliteStore::migrate_v11_to_v12(&conn).unwrap();
+        SqliteStore::migrate_v12_to_v13(&conn).unwrap();
+        SqliteStore::migrate_v13_to_v14(&conn).unwrap();
+
+        let err = SqliteStore::migrate_v14_to_v15_inner(&conn, true).unwrap_err();
+        assert!(
+            matches!(err, PortError::Backend(message) if message.contains("injected v14-to-v15"))
+        );
+        assert!(conn.is_autocommit());
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 14);
+        let table_exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'table' AND name = 'usage_events'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(table_exists, 0);
+    }
+
+    #[test]
+    fn usage_token_source_check_constraint_rejects_unknown_kinds() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let conn = store.conn.borrow();
+        let err = conn
+            .execute(
+                "INSERT INTO usage_events(
+                     usage_id, session_id, input_tokens, output_tokens,
+                     cache_read_tokens, cache_write_tokens, reasoning_tokens, token_source
+                 ) VALUES('use_x', 'ses_x', 1, 0, 0, 0, 0, 'estimated')",
+                [],
+            )
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("CHECK"),
+            "token_source 闭集外取值必须被 CHECK 拒绝: {err}"
+        );
+    }
+
+    #[test]
     fn fresh_schema_creates_source_scans_with_parser_version_column() {
         // 新库 v5 建表 DDL 直接带 parser_version 列（v9 provider_id 同一模式），
         // v14 迁移对新库短路，不再补 ALTER。
@@ -13886,6 +14687,7 @@ mod tests {
             )],
             edges: Vec::new(),
             activities: Vec::new(),
+            usage_events: Vec::new(),
             relation_complete: true,
             len_bytes: None,
             fingerprint: None,
@@ -13992,6 +14794,7 @@ mod tests {
             placements: Vec::new(),
             edges: Vec::new(),
             activities: Vec::new(),
+            usage_events: Vec::new(),
             relation_complete: true,
             len_bytes: None,
             fingerprint: None,
@@ -14038,6 +14841,7 @@ mod tests {
             placements: vec![placement(&session, &document, &message, 0, false, None)],
             edges: Vec::new(),
             activities: Vec::new(),
+            usage_events: Vec::new(),
             relation_complete: true,
             len_bytes: None,
             fingerprint: None,
@@ -14093,6 +14897,7 @@ mod tests {
             placements: Vec::new(),
             edges: Vec::new(),
             activities: Vec::new(),
+            usage_events: Vec::new(),
             relation_complete: true,
             len_bytes: Some(7),
             fingerprint: Some("fp-claude".into()),
@@ -14116,6 +14921,7 @@ mod tests {
             placements: Vec::new(),
             edges: Vec::new(),
             activities: Vec::new(),
+            usage_events: Vec::new(),
             relation_complete: true,
             len_bytes: Some(6),
             fingerprint: Some("fp-codex".into()),
@@ -14160,6 +14966,7 @@ mod tests {
             placements: Vec::new(),
             edges: Vec::new(),
             activities: Vec::new(),
+            usage_events: Vec::new(),
             relation_complete: true,
             len_bytes: Some(7),
             fingerprint: Some("backfill-fp".into()),
@@ -14214,6 +15021,7 @@ mod tests {
             placements: Vec::new(),
             edges: Vec::new(),
             activities: Vec::new(),
+            usage_events: Vec::new(),
             relation_complete: true,
             len_bytes: Some(7),
             fingerprint: Some("backfill-fp".into()),
@@ -14247,6 +15055,7 @@ mod tests {
             placements: Vec::new(),
             edges: Vec::new(),
             activities: Vec::new(),
+            usage_events: Vec::new(),
             relation_complete: true,
             len_bytes: Some(7),
             fingerprint: Some("recovery-fp".into()),
@@ -14275,6 +15084,7 @@ mod tests {
             placements: Vec::new(),
             edges: Vec::new(),
             activities: Vec::new(),
+            usage_events: Vec::new(),
             relation_complete: false,
             len_bytes: Some(7),
             fingerprint: Some("recovery-incomplete-fp".into()),
@@ -14312,6 +15122,7 @@ mod tests {
             placements: Vec::new(),
             edges: Vec::new(),
             activities: Vec::new(),
+            usage_events: Vec::new(),
             relation_complete: true,
             len_bytes: None,
             fingerprint: None,
@@ -14694,6 +15505,7 @@ mod tests {
                     },
                 },
             }],
+            usage_events: Vec::new(),
             relation_complete: true,
             len_bytes: Some(1),
             fingerprint: Some(source_path.into()),
@@ -14858,6 +15670,7 @@ mod tests {
                 placements: Vec::new(),
                 edges: Vec::new(),
                 activities,
+                usage_events: Vec::new(),
                 relation_complete: true,
                 len_bytes: Some(1),
                 fingerprint: Some("rescan-fp".into()),
@@ -14909,6 +15722,7 @@ mod tests {
                 placements: Vec::new(),
                 edges: Vec::new(),
                 activities,
+                usage_events: Vec::new(),
                 relation_complete: complete,
                 len_bytes: Some(1),
                 fingerprint: Some("inc-fp".into()),
@@ -14984,6 +15798,7 @@ mod tests {
             placements: Vec::new(),
             edges: Vec::new(),
             activities: Vec::new(),
+            usage_events: Vec::new(),
             relation_complete: true,
             len_bytes: Some(0),
             fingerprint: Some("empty-a".into()),
@@ -15000,6 +15815,7 @@ mod tests {
             placements: Vec::new(),
             edges: Vec::new(),
             activities: Vec::new(),
+            usage_events: Vec::new(),
             relation_complete: true,
             len_bytes: Some(0),
             fingerprint: Some("empty-b".into()),
@@ -15100,6 +15916,7 @@ mod tests {
             placements: Vec::new(),
             edges: Vec::new(),
             activities: Vec::new(),
+            usage_events: Vec::new(),
             relation_complete: true,
             len_bytes: Some(0),
             fingerprint: Some("empty".into()),
@@ -15369,6 +16186,7 @@ mod tests {
                 placements: Vec::new(),
                 edges: Vec::new(),
                 activities,
+                usage_events: Vec::new(),
                 relation_complete: true,
                 len_bytes: Some(1),
                 fingerprint: Some("facet-two-fp".into()),
@@ -15477,6 +16295,7 @@ mod tests {
             placements: vec![main_placement, side_placement],
             edges: Vec::new(),
             activities: Vec::new(),
+            usage_events: Vec::new(),
             relation_complete: true,
             len_bytes: Some(1),
             fingerprint: Some("facet-sidechain-fp".into()),
@@ -15569,5 +16388,340 @@ mod tests {
             .unwrap();
         assert_eq!(count, 1);
         drop(conn);
+    }
+
+    // ---- token 用量事件（v15）：提交/去重/tombstone/聚合/孤儿 ----
+
+    fn usage_obs(
+        input: u64,
+        output: u64,
+        cache_read: u64,
+        cache_write: u64,
+        reasoning: u64,
+        source: TokenSource,
+    ) -> UsageObservation {
+        UsageObservation {
+            input_tokens: input,
+            output_tokens: output,
+            cache_read_tokens: cache_read,
+            cache_write_tokens: cache_write,
+            reasoning_tokens: reasoning,
+            token_source: source,
+        }
+    }
+
+    fn usage_batch(
+        source_path: &str,
+        session_id: &StableId,
+        entries: Vec<(StableId, Vec<u8>, String)>,
+        message_id: Option<&StableId>,
+        usage: UsageObservation,
+    ) -> SourceBatch {
+        SourceBatch {
+            source_path: source_path.into(),
+            entries,
+            placements: Vec::new(),
+            edges: Vec::new(),
+            activities: Vec::new(),
+            usage_events: vec![SourceUsage {
+                session_id: session_id.clone(),
+                message_id: message_id.cloned(),
+                usage,
+            }],
+            relation_complete: true,
+            len_bytes: Some(1),
+            fingerprint: Some(source_path.into()),
+            provider_id: None,
+            resume_claim: None,
+        }
+    }
+
+    struct UsageRow {
+        session_id: String,
+        message_id: Option<String>,
+        input: i64,
+        output: i64,
+        cache_read: i64,
+        cache_write: i64,
+        reasoning: i64,
+        token_source: String,
+    }
+
+    fn usage_rows(store: &SqliteStore) -> Vec<UsageRow> {
+        store
+            .conn
+            .borrow()
+            .prepare(
+                "SELECT session_id, message_id, input_tokens, output_tokens,
+                        cache_read_tokens, cache_write_tokens, reasoning_tokens, token_source
+                 FROM usage_events ORDER BY usage_id",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok(UsageRow {
+                    session_id: row.get(0)?,
+                    message_id: row.get(1)?,
+                    input: row.get(2)?,
+                    output: row.get(3)?,
+                    cache_read: row.get(4)?,
+                    cache_write: row.get(5)?,
+                    reasoning: row.get(6)?,
+                    token_source: row.get(7)?,
+                })
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    }
+
+    #[test]
+    fn commit_usage_events_stores_anchored_and_session_scoped_rows() {
+        // 消息锚定事件（Claude Code message.usage 形态）与 session 级事件
+        // （Codex token_count 形态，message_id NULL）同表共存；五桶逐列。
+        let store = SqliteStore::open_in_memory().unwrap();
+        let session = sid(IdKind::Session, b"usage-session");
+        let message = sid(IdKind::Message, b"usage-message");
+        let entries = vec![entity_entry(&session), entity_entry(&message)];
+        let anchored = usage_batch(
+            "claude.jsonl",
+            &session,
+            entries.clone(),
+            Some(&message),
+            usage_obs(100, 50, 30, 20, 0, TokenSource::Observed),
+        );
+        let session_scoped = usage_batch(
+            "codex.jsonl",
+            &session,
+            entries,
+            None,
+            usage_obs(8, 3, 2, 0, 1, TokenSource::Derived),
+        );
+        assert!(
+            store
+                .commit_source_batches_if_changed(&[anchored, session_scoped])
+                .unwrap()
+        );
+
+        let rows = usage_rows(&store);
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().any(|row| {
+            row.session_id == session.as_str()
+                && row.message_id.as_deref() == Some(message.as_str())
+                && row.input == 100
+                && row.output == 50
+                && row.cache_read == 30
+                && row.cache_write == 20
+                && row.reasoning == 0
+                && row.token_source == "observed"
+        }));
+        assert!(rows.iter().any(|row| {
+            row.session_id == session.as_str()
+                && row.message_id.is_none()
+                && row.input == 8
+                && row.reasoning == 1
+                && row.token_source == "derived"
+        }));
+
+        // 聚合：会话数 1，五桶求和，事件按来源分列。
+        let totals = store.usage_totals().unwrap().expect("v15 投影必须存在");
+        assert_eq!(totals.sessions, 1);
+        assert_eq!(totals.input_tokens, 108);
+        assert_eq!(totals.output_tokens, 53);
+        assert_eq!(totals.cache_read_tokens, 32);
+        assert_eq!(totals.cache_write_tokens, 20);
+        assert_eq!(totals.reasoning_tokens, 1);
+        assert_eq!(totals.observed_events, 1);
+        assert_eq!(totals.derived_events, 1);
+    }
+
+    #[test]
+    fn commit_usage_events_dedupes_across_sources() {
+        // 同一事实跨两个源（副本文件）：内容寻址 id 去重为一行，claims 计数 2。
+        let store = SqliteStore::open_in_memory().unwrap();
+        let session = sid(IdKind::Session, b"usage-dedup-session");
+        let entries = vec![entity_entry(&session)];
+        let first = usage_batch(
+            "copy-a.jsonl",
+            &session,
+            entries.clone(),
+            None,
+            usage_obs(8, 3, 2, 0, 1, TokenSource::Derived),
+        );
+        let second = usage_batch(
+            "copy-b.jsonl",
+            &session,
+            entries,
+            None,
+            usage_obs(8, 3, 2, 0, 1, TokenSource::Derived),
+        );
+        assert!(
+            store
+                .commit_source_batches_if_changed(&[first, second])
+                .unwrap()
+        );
+        assert_eq!(usage_rows(&store).len(), 1, "跨源副本必须去重为一行");
+        let claims: i64 = store
+            .conn
+            .borrow()
+            .query_row("SELECT COUNT(*) FROM usage_event_membership", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(claims, 2);
+    }
+
+    #[test]
+    fn commit_usage_events_noop_resync_reports_unchanged() {
+        // 同批重放：usage 投影参与 no-op 判定，返回 false 且不推进 generation。
+        let store = SqliteStore::open_in_memory().unwrap();
+        let session = sid(IdKind::Session, b"usage-noop-session");
+        let entries = vec![entity_entry(&session)];
+        let batch = usage_batch(
+            "noop.jsonl",
+            &session,
+            entries,
+            None,
+            usage_obs(8, 3, 2, 0, 1, TokenSource::Derived),
+        );
+        assert!(
+            store
+                .commit_source_batches_if_changed(std::slice::from_ref(&batch))
+                .unwrap()
+        );
+        let generation = store.active_generation().unwrap();
+        assert!(
+            !store.commit_source_batches_if_changed(&[batch]).unwrap(),
+            "字节未变的源必须 no-op"
+        );
+        assert_eq!(store.active_generation().unwrap(), generation);
+        assert_eq!(usage_rows(&store).len(), 1);
+    }
+
+    #[test]
+    fn commit_usage_events_tombstones_when_source_rescan_drops_them() {
+        // 完整重扫不再观察该用量事件 → claim 移除 → 无其它 claimer → 行删除。
+        let store = SqliteStore::open_in_memory().unwrap();
+        let session = sid(IdKind::Session, b"usage-tomb-session");
+        let entries = vec![entity_entry(&session)];
+        let with_usage = usage_batch(
+            "tomb.jsonl",
+            &session,
+            entries.clone(),
+            None,
+            usage_obs(8, 3, 2, 0, 1, TokenSource::Derived),
+        );
+        assert!(
+            store
+                .commit_source_batches_if_changed(&[with_usage])
+                .unwrap()
+        );
+        assert_eq!(usage_rows(&store).len(), 1);
+
+        let without_usage = SourceBatch {
+            source_path: "tomb.jsonl".into(),
+            entries,
+            placements: Vec::new(),
+            edges: Vec::new(),
+            activities: Vec::new(),
+            usage_events: Vec::new(),
+            relation_complete: true,
+            len_bytes: Some(2),
+            fingerprint: Some("tomb.jsonl-v2".into()),
+            provider_id: None,
+            resume_claim: None,
+        };
+        assert!(
+            store
+                .commit_source_batches_if_changed(&[without_usage])
+                .unwrap()
+        );
+        assert!(usage_rows(&store).is_empty(), "无 claimer 的事件行必须退役");
+        let totals = store.usage_totals().unwrap().expect("投影仍在");
+        assert_eq!(totals.sessions, 0, "退役后回到零事实（未知 ≠ 零行）");
+    }
+
+    #[test]
+    fn commit_usage_events_rejects_wrong_kind_anchors() {
+        // 会话锚点必须是 Session 种类、消息锚点必须是 Message 种类——fail-closed。
+        let store = SqliteStore::open_in_memory().unwrap();
+        let message = sid(IdKind::Message, b"usage-bad-anchor");
+        let batch = usage_batch(
+            "bad-anchor.jsonl",
+            &message, // 错误：不是 Session 种类
+            vec![entity_entry(&message)],
+            None,
+            usage_obs(8, 3, 2, 0, 1, TokenSource::Derived),
+        );
+        let err = store
+            .commit_source_batches_if_changed(&[batch])
+            .unwrap_err();
+        assert!(
+            matches!(&err, PortError::Backend(message) if message.contains("wrong kind")),
+            "got {err:?}"
+        );
+
+        let session = sid(IdKind::Session, b"usage-bad-message-anchor");
+        let batch = usage_batch(
+            "bad-anchor-2.jsonl",
+            &session,
+            vec![entity_entry(&session)],
+            Some(&session), // 错误：消息锚点是 Session 种类
+            usage_obs(8, 3, 2, 0, 1, TokenSource::Derived),
+        );
+        let err = store
+            .commit_source_batches_if_changed(&[batch])
+            .unwrap_err();
+        assert!(
+            matches!(&err, PortError::Backend(message) if message.contains("wrong kind")),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn orphaned_usage_counts_and_purge_remove_drift_rows() {
+        // 会话退役后的漂移残余：孤儿事件行（无 catalog 会话）+ 悬空 claim；
+        // `index purge-activities` 同事务清理，绝不触碰仍锚定的合法行。
+        let store = SqliteStore::open_in_memory().unwrap();
+        let session = sid(IdKind::Session, b"usage-orphan-session");
+        let entries = vec![entity_entry(&session)];
+        let batch = usage_batch(
+            "orphan.jsonl",
+            &session,
+            entries,
+            None,
+            usage_obs(8, 3, 2, 0, 1, TokenSource::Derived),
+        );
+        assert!(store.commit_source_batches_if_changed(&[batch]).unwrap());
+        {
+            let conn = store.conn.borrow();
+            conn.execute(
+                "INSERT INTO usage_events(
+                     usage_id, session_id, input_tokens, output_tokens,
+                     cache_read_tokens, cache_write_tokens, reasoning_tokens, token_source
+                 ) VALUES('use_v1_orphan', 'ses_v1_deadbeefdeadbeef', 1, 1, 0, 0, 0, 'derived')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO usage_event_membership(source_path, usage_id)
+                 VALUES('ghost.jsonl', 'use_v1_ghostclaim')",
+                [],
+            )
+            .unwrap();
+        }
+        assert_eq!(store.orphaned_usage_counts().unwrap(), (1, 1));
+
+        let (removed_activities, removed_memberships) = store.purge_orphaned_activities().unwrap();
+        assert_eq!((removed_activities, removed_memberships), (0, 0));
+        assert_eq!(
+            store.orphaned_usage_counts().unwrap(),
+            (0, 0),
+            "修剪后 usage 孤儿行清零"
+        );
+        // 合法行不受影响。
+        assert_eq!(usage_rows(&store).len(), 1);
+        let totals = store.usage_totals().unwrap().unwrap();
+        assert_eq!(totals.sessions, 1);
+        assert_eq!(totals.input_tokens, 8);
     }
 }
