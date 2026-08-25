@@ -23,7 +23,8 @@ mod serve;
 mod tui;
 
 use agent_session_grep_adapters_sqlite::{
-    SourceActivity, SourceBatch, SqliteStore, capture, open_snapshot_source, verify_snapshot,
+    PARSER_SEMANTIC_VERSION, SourceActivity, SourceBatch, SqliteStore, capture,
+    open_snapshot_source, verify_snapshot,
 };
 use agent_session_grep_application::{
     App, AppError, AppRequest, AppResponse, ContextLevel, ResponseBudget, StagedBatch, Truncation,
@@ -3958,12 +3959,21 @@ fn sync_files_inner(
         let path_ref = std::path::Path::new(path);
         let snap = capture(path_ref).map_err(ProtocolError::from)?;
         let source = open_snapshot_source(path_ref, &snap).map_err(ProtocolError::from)?;
-        let cached_fp = cached.get(path).and_then(|(_, fp)| fp.clone());
+        let cached_scan = cached.get(path);
+        let cached_fp = cached_scan.and_then(|(_, fp, _)| fp.clone());
+        // 解析语义版本参与 unchanged 判定（借鉴 Recall 的 parser_version 增量
+        // 同步）：字节未变但已存版本落后于 PARSER_SEMANTIC_VERSION 的源必须
+        // 重解析（targeted backfill），而不是滞留旧解析结果直到手动 rebuild
+        // 或源文件变化。
+        let cached_version = cached_scan.map(|(_, _, version)| *version);
+        let version_stale = cached_fp.as_deref() == Some(snap.fingerprint.as_str())
+            && cached_version != Some(i64::from(PARSER_SEMANTIC_VERSION));
         // 空文件（0 字节）不能走指纹跳过：它必须作为"整源清空"批次提交
         // 以 tombstone 旧消息；跳过会退化成空批 no-op，丢失 tombstone 语义。
         let mut retained = false;
         let (staged, variant) = if !source.is_empty()
             && cached_fp.as_deref() == Some(snap.fingerprint.as_str())
+            && !version_stale
             && !relation_recovery_paths.contains(path)
             && !incomplete_paths.contains(path)
         {
@@ -3993,6 +4003,19 @@ fn sync_files_inner(
             diagnostic_count += 1;
             (None, None)
         } else {
+            if version_stale {
+                // 解析语义升级（PARSER_SEMANTIC_VERSION 递增）：字节未变但已存
+                // 解析版本落后——targeted backfill，重解析 + 提交写回当前版本。
+                diagnostics.push(format!(
+                    "source {} of {}: parser semantics upgraded (stored parser_version {}, \
+                     current {}) — re-parsing unchanged bytes to backfill",
+                    index + 1,
+                    paths.len(),
+                    cached_version.unwrap_or(0),
+                    PARSER_SEMANTIC_VERSION,
+                ));
+                diagnostic_count += 1;
+            }
             // provider 身份优先取 discover 的扫描事实；显式 sync 没有扫描结果，
             // 则按同一张 root 表反查路径归属（见 provider_for_source_path）。两条
             // 入口因此对同一个文件得到同一个 provider——不再出现 discover 能索引、

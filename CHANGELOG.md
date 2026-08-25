@@ -55,6 +55,16 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   projection maintained in the same transaction as the session FTS rows, and
   title bytes are charged to the `max_response_bytes` gate like peek bytes.
   The human list renderer shows the title instead of the raw payload preview.
+- Parser-semantic version in `sync` unchanged detection (borrowed from
+  Recall's parser-version incremental sync): schema v14 adds
+  `source_scans.parser_version` (migration default `0`), and the unchanged
+  judgment now compares `(len_bytes, fingerprint, parser_version)` against
+  the binary's `PARSER_SEMANTIC_VERSION` constant. When parsing semantics
+  change (the constant is bumped), sources with unchanged bytes are
+  re-parsed once on the next `sync` — targeted backfill, with the reparse
+  reason reported through the sync warnings channel — instead of keeping
+  stale parsed content until a manual `index rebuild` or a source-file
+  change. No full rebuild is required.
 - Cross-boundary output redaction (ADR-0009): Robot JSON/JSONL, MCP, HTTP API,
   Handoff Pack, and Web UI redact standalone and prose-embedded secrets
   (AWS keys, GitHub PATs, OpenAI/Anthropic/xAI keys, Bearer tokens, PEM

@@ -1245,7 +1245,16 @@ pub struct SqliteStore {
 }
 
 /// 一批源路径的指纹缓存项：捕获时长度与内容指纹。
-pub type SourceFingerprint = (Option<i64>, Option<String>);
+/// 一条 source-scan 指纹缓存行：`(len_bytes, fingerprint, parser_version)`。
+///
+/// parser_version 是解析语义版本（[`PARSER_SEMANTIC_VERSION`] 的存储镜像）：
+/// CLI 的 unchanged 判定必须三者同时匹配——版本落后即视为需要重解析，
+/// 否则解析逻辑升级后源文件未变化的库永远不重解析。
+pub type SourceFingerprint = (Option<i64>, Option<String>, i64);
+
+/// 一条 `source_scans` 行的 current 判定视图：
+/// `(len_bytes, fingerprint, provider_id, parser_version)`。
+type StoredSourceScan = (Option<i64>, Option<String>, Option<String>, i64);
 
 impl SqliteStore {
     /// 只读打开（不抢 writer lease）。供 search/get/doctor 等读路径。
@@ -1463,7 +1472,8 @@ impl SqliteStore {
                      scanned_at_ms INTEGER NOT NULL,
                      len_bytes     INTEGER,
                      fingerprint   TEXT,
-                     provider_id   TEXT
+                     provider_id   TEXT,
+                     parser_version INTEGER NOT NULL DEFAULT 0
                  );",
             )
             .map_err(backend)?;
@@ -1513,6 +1523,9 @@ impl SqliteStore {
         }
         if current < 13 {
             Self::migrate_v12_to_v13(conn)?;
+        }
+        if current < 14 {
+            Self::migrate_v13_to_v14(conn)?;
         }
         // 不随 user_version 门控：旧 v7 库（本列存在前建成的）打开时同样需要。
         Self::ensure_fts_ids_rowid(conn)?;
@@ -1857,6 +1870,55 @@ impl SqliteStore {
         tx.commit().map_err(backend)
     }
 
+    /// Add the v14 `parser_version` column to `source_scans` (additive,
+    /// non-destructive).
+    ///
+    /// 借鉴 Recall 的 parser_version 增量同步（usage/event parser_version
+    /// 三层判断）：任何改变已索引内容的解析语义升级都递增
+    /// [`PARSER_SEMANTIC_VERSION`]，sync 的 unchanged 判定把存储的
+    /// parser_version 纳入比较——版本落后的源即使字节未变也走 targeted
+    /// backfill（重跑 parse + commit），不再依赖手动 `index rebuild` 或源
+    /// 文件变化。旧行 DEFAULT 0——0 永不等于当前版本（≥1），因此迁移后
+    /// 第一次 sync 自动 backfill 全部已扫源。列存在即无害：未升级的 v13
+    /// 代码路径忽略它。新库在 v5 建表 DDL 已带本列（v9 provider_id 同一
+    /// 模式），此处短路只对齐 user_version。`user_version = 14` 与 DDL
+    /// 同事务。
+    fn migrate_v13_to_v14(conn: &Connection) -> PortResult<()> {
+        Self::migrate_v13_to_v14_inner(conn, false)
+    }
+
+    fn migrate_v13_to_v14_inner(conn: &Connection, inject_failure: bool) -> PortResult<()> {
+        let has_parser_version = conn
+            .prepare("PRAGMA table_info(source_scans)")
+            .map_err(backend)?
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(backend)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(backend)?
+            .iter()
+            .any(|name| name == "parser_version");
+        if has_parser_version {
+            // 已有列（新库建表时已带或本迁移重跑）；只对齐 user_version。
+            conn.execute_batch("PRAGMA user_version = 14;")
+                .map_err(backend)?;
+            return Ok(());
+        }
+        let tx = conn.unchecked_transaction().map_err(backend)?;
+        tx.execute_batch(
+            "ALTER TABLE source_scans ADD COLUMN parser_version INTEGER NOT NULL DEFAULT 0;
+             PRAGMA user_version = 14;",
+        )
+        .map_err(backend)?;
+
+        if inject_failure {
+            return Err(PortError::Backend(
+                "injected v13-to-v14 migration failure".into(),
+            ));
+        }
+
+        tx.commit().map_err(backend)
+    }
+
     /// 声明语义向量归属的模型 id（#3）。未设置时 `SemanticIndex` 全部方法
     /// 视为未配置：`is_ready` 为 false、查询返回空、写入报错——这样"忘了配模型"
     /// 不会变成往表里写无归属向量。
@@ -2122,11 +2184,12 @@ impl SqliteStore {
         Ok(entries)
     }
 
-    /// 读取一批源路径的指纹缓存（source_scans 的 len/fingerprint 列）。
+    /// 读取一批源路径的指纹缓存（source_scans 的 len/fingerprint 列 +
+    /// parser_version）。
     ///
-    /// 返回 `path -> (len_bytes, fingerprint)`；从未扫描过的源不在 map 中。
-    /// CLI 用它跳过未变化源的重复解析（capture 后先比指纹，相同则不再
-    /// parse，直接按 no-op 处理）。
+    /// 返回 `path -> (len_bytes, fingerprint, parser_version)`；从未扫描过的
+    /// 源不在 map 中。CLI 用它跳过未变化源的重复解析（capture 后先比指纹与
+    /// 解析语义版本，相同则不再 parse，直接按 no-op 处理）。
     pub fn source_fingerprints(
         &self,
         paths: &[String],
@@ -2136,9 +2199,10 @@ impl SqliteStore {
         for path in paths {
             let row: Option<SourceFingerprint> = conn
                 .query_row(
-                    "SELECT len_bytes, fingerprint FROM source_scans WHERE source_path = ?1",
+                    "SELECT len_bytes, fingerprint, parser_version
+                     FROM source_scans WHERE source_path = ?1",
                     [path],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                 )
                 .optional()
                 .map_err(backend)?;
@@ -3108,16 +3172,18 @@ impl SqliteStore {
             // A source that has never been scanned cannot be current; skip the
             // per-entity queries (which dominate on first ingest of an
             // empty catalog) and go straight to the heavy path.
-            let stored_scan: Option<(Option<i64>, Option<String>, Option<String>)> = conn
+            let stored_scan: Option<StoredSourceScan> = conn
                 .query_row(
-                    "SELECT len_bytes, fingerprint, provider_id
+                    "SELECT len_bytes, fingerprint, provider_id, parser_version
                      FROM source_scans WHERE source_path = ?1",
                     [&source.source_path],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
                 )
                 .optional()
                 .map_err(backend)?;
-            let Some((stored_len, stored_fingerprint, stored_provider_id)) = stored_scan else {
+            let Some((stored_len, stored_fingerprint, stored_provider_id, stored_parser_version)) =
+                stored_scan
+            else {
                 return Ok(false);
             };
             // 指纹缓存参与 current 判定：len/fingerprint 任一变说明源字节已变而
@@ -3126,6 +3192,13 @@ impl SqliteStore {
             if source.len_bytes != stored_len
                 || source.fingerprint.as_deref() != stored_fingerprint.as_deref()
             {
+                return Ok(false);
+            }
+            // 解析语义版本参与 current 判定（借鉴 Recall 的 parser_version 增量
+            // 同步）：版本落后说明本二进制解析语义已升级，字节未变也必须走提交
+            // 路径重写 source_scans（targeted backfill）——否则重解析结果与库
+            // 一致时 no-op 短路会让版本永不收敛、每次 sync 都重复解析。
+            if stored_parser_version != i64::from(PARSER_SEMANTIC_VERSION) {
                 return Ok(false);
             }
             // provider_id 回填同样参与 current 判定：discover 发现的源可能携带
@@ -4043,16 +4116,18 @@ impl SqliteStore {
             {
                 return Ok(false);
             }
-            let stored_scan: Option<(Option<i64>, Option<String>, Option<String>)> = conn
+            let stored_scan: Option<StoredSourceScan> = conn
                 .query_row(
-                    "SELECT len_bytes, fingerprint, provider_id
+                    "SELECT len_bytes, fingerprint, provider_id, parser_version
                      FROM source_scans WHERE source_path = ?1",
                     [&replacement.source_path],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
                 )
                 .optional()
                 .map_err(backend)?;
-            let Some((stored_len, stored_fingerprint, stored_provider_id)) = stored_scan else {
+            let Some((stored_len, stored_fingerprint, stored_provider_id, stored_parser_version)) =
+                stored_scan
+            else {
                 return Ok(false);
             };
             // 与 sources_are_current 同口径：指纹缓存参与 no-op 判定。字节已变而
@@ -4060,6 +4135,11 @@ impl SqliteStore {
             if replacement.len_bytes != stored_len
                 || replacement.fingerprint.as_deref() != stored_fingerprint.as_deref()
             {
+                return Ok(false);
+            }
+            // 与 sources_are_current 同口径：解析语义版本落后（升级后未
+            // backfill）同样必须走提交路径写回当前版本，否则版本永不收敛。
+            if stored_parser_version != i64::from(PARSER_SEMANTIC_VERSION) {
                 return Ok(false);
             }
             if let Some(incoming_provider_id) = replacement.provider_id.as_deref()
@@ -4965,19 +5045,24 @@ impl SqliteStore {
                 .map_err(backend)?;
             }
             tx.execute(
-                "INSERT INTO source_scans(source_path, scanned_at_ms, len_bytes, fingerprint, provider_id)
-                 VALUES(?1, ?2, ?3, ?4, ?5)
+                "INSERT INTO source_scans(
+                     source_path, scanned_at_ms, len_bytes, fingerprint, provider_id,
+                     parser_version
+                 )
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6)
                  ON CONFLICT(source_path) DO UPDATE SET
                      scanned_at_ms = excluded.scanned_at_ms,
                      len_bytes = excluded.len_bytes,
                      fingerprint = excluded.fingerprint,
-                     provider_id = COALESCE(excluded.provider_id, source_scans.provider_id)",
+                     provider_id = COALESCE(excluded.provider_id, source_scans.provider_id),
+                     parser_version = excluded.parser_version",
                 rusqlite::params![
                     &source.source_path,
                     unix_ms()?,
                     source.len_bytes,
                     source.fingerprint,
                     source.provider_id,
+                    i64::from(PARSER_SEMANTIC_VERSION),
                 ],
             )
             .map_err(backend)?;
@@ -5624,6 +5709,17 @@ impl SqliteStore {
 /// Resume-claim schema changes do not change relation completeness semantics.
 const RELATION_SCHEMA_VERSION: i64 = 7;
 
+/// 解析语义版本：任何改变已索引内容的解析语义升级都必须 +1（provider 解析层
+/// 变化——如噪声过滤规则、字符串形态支持、投影字段语义——都属于；纯 schema
+/// 结构变化不在此列，那走 [`SCHEMA_VERSION`] 迁移）。
+///
+/// 借鉴 Recall 的 parser_version 增量同步（usage/event parser_version 三层
+/// 判断）：sync 的 unchanged 判定把 `source_scans.parser_version` 纳入比较，
+/// 已存版本落后于该常量的源即使字节未变也走 targeted backfill（重跑 parse +
+/// commit），并在重新 commit 时写回当前版本。单测（lib.rs
+/// `stale_parser_version_forces_reparse_and_converges`）锁住该语义。
+pub const PARSER_SEMANTIC_VERSION: u32 = 1;
+
 /// 当前 catalog schema 版本。每次结构变更 +1 并在 [`SqliteStore::migrate`] 追加步骤。
 ///
 /// v8：新增 `source_session_resume_claims`（ADR-0009）——source-scoped Resume
@@ -5652,7 +5748,14 @@ const RELATION_SCHEMA_VERSION: i64 = 7;
 /// user 消息（provider parse 层噪声过滤后第一条非空 user 文本，≤80 字符
 /// char 边界截断）；无候选 → 无行。与 `session_fts` 同一重建批次，随
 /// affected-session 提交与 rebuild 同事务维护；旧库迁到 v13 后表为空。
-pub const SCHEMA_VERSION: i64 = 13;
+///
+/// v14：`source_scans` 增加 `parser_version INTEGER NOT NULL DEFAULT 0`
+/// 列——解析语义版本（见 [`PARSER_SEMANTIC_VERSION`]，借鉴 Recall 的
+/// parser_version 增量同步）。sync 的 unchanged 判定把该列纳入比较：
+/// 解析语义升级后版本落后的源即使字节未变也会 targeted backfill（重跑
+/// parse + commit）。旧行 DEFAULT 0 保证迁移后第一次 sync 自动 backfill；
+/// 新库在 v5 建表 DDL 已带本列（v9 provider_id 同一模式）。
+pub const SCHEMA_VERSION: i64 = 14;
 
 impl CatalogStore for SqliteStore {
     fn get(&self, id: &StableId) -> PortResult<Option<Vec<u8>>> {
@@ -7549,7 +7652,7 @@ mod tests {
     fn schema_v10_creates_message_vec_table() {
         let store = SqliteStore::open_in_memory().unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 13);
+        assert_eq!(SCHEMA_VERSION, 14);
         let conn = store.conn.borrow();
         let count: i64 = conn
             .query_row(
@@ -11744,7 +11847,75 @@ mod tests {
             .unwrap();
         assert_eq!(
             fingerprints.get("fingerprint.jsonl"),
-            Some(&(Some(10), Some("bbb".to_string())))
+            Some(&(
+                Some(10),
+                Some("bbb".to_string()),
+                i64::from(PARSER_SEMANTIC_VERSION)
+            ))
+        );
+    }
+
+    #[test]
+    fn stale_parser_version_forces_reparse_and_converges() {
+        // 借鉴 Recall 的 parser_version 增量同步：解析语义升级
+        // （PARSER_SEMANTIC_VERSION 递增）后，字节未变的源也必须 targeted
+        // backfill（重跑 parse + commit），而不是滞留旧解析结果直到手动
+        // `index rebuild` 或源文件变化。回归场景：旧库已存行版本落后、
+        // len/fingerprint 完全相同——旧逻辑判 unchanged 永不复解析。
+        let store = SqliteStore::open_in_memory().unwrap();
+        let a = sid(IdKind::Message, b"parser-version-msg");
+        let source = SourceBatch {
+            source_path: "parser-version.jsonl".into(),
+            placements: Vec::new(),
+            edges: Vec::new(),
+            activities: Vec::new(),
+            relation_complete: true,
+            len_bytes: Some(10),
+            fingerprint: Some("aaa".to_string()),
+            provider_id: None,
+            resume_claim: None,
+            entries: vec![(a.clone(), b"payload".to_vec(), "same text".into())],
+        };
+        assert!(
+            store
+                .commit_source_batches_if_changed(std::slice::from_ref(&source))
+                .unwrap()
+        );
+        // 模拟解析语义升级后的旧库：把已存行的 parser_version 拨回旧值（0），
+        // 字节与内容均未变（len/fingerprint 相同）。
+        {
+            let conn = store.conn.borrow();
+            conn.execute(
+                "UPDATE source_scans SET parser_version = 0
+                 WHERE source_path = 'parser-version.jsonl'",
+                [],
+            )
+            .unwrap();
+        }
+        // 版本落后 + 字节未变：必须走提交路径重写 source_scans（targeted
+        // backfill），否则重解析结果与库一致时 no-op 短路会让版本永不收敛。
+        assert!(
+            store
+                .commit_source_batches_if_changed(std::slice::from_ref(&source))
+                .unwrap(),
+            "stale parser_version must force a re-scan commit even with unchanged bytes"
+        );
+        // 版本已写回当前值 → 再次重同步是 no-op，缓存收敛（零 churn）。
+        assert!(
+            !store
+                .commit_source_batches_if_changed(std::slice::from_ref(&source))
+                .unwrap()
+        );
+        let caches = store
+            .source_fingerprints(&["parser-version.jsonl".to_string()])
+            .unwrap();
+        assert_eq!(
+            caches.get("parser-version.jsonl"),
+            Some(&(
+                Some(10),
+                Some("aaa".to_string()),
+                i64::from(PARSER_SEMANTIC_VERSION)
+            ))
         );
     }
 
@@ -13490,6 +13661,119 @@ mod tests {
             )
             .unwrap();
         assert_eq!(table_exists, 0);
+    }
+
+    #[test]
+    fn v13_catalog_migrates_to_v14_adding_parser_version_column() {
+        // 旧库迁到 v14 后 source_scans 带 parser_version 列，既有行 DEFAULT 0
+        // ——0 永不等于当前 PARSER_SEMANTIC_VERSION（≥1），因此迁移后第一次
+        // sync 自动 targeted backfill 全部已扫源，无需手动 rebuild。
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v13.db");
+        let p = path.to_string_lossy().into_owned();
+        {
+            let conn = rusqlite::Connection::open(&p).unwrap();
+            create_v6_schema(&conn);
+            SqliteStore::migrate_v6_to_v7(&conn).unwrap();
+            SqliteStore::migrate_v7_to_v8(&conn).unwrap();
+            SqliteStore::migrate_v8_to_v9(&conn).unwrap();
+            SqliteStore::migrate_v9_to_v10(&conn).unwrap();
+            SqliteStore::migrate_v10_to_v11(&conn).unwrap();
+            SqliteStore::migrate_v11_to_v12(&conn).unwrap();
+            SqliteStore::migrate_v12_to_v13(&conn).unwrap();
+            conn.execute(
+                "INSERT INTO source_scans(source_path, scanned_at_ms, len_bytes, fingerprint)
+                 VALUES('legacy.jsonl', 1, 100, 'ff')",
+                [],
+            )
+            .unwrap();
+            let version: i64 = conn
+                .query_row("PRAGMA user_version", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(version, 13);
+            let has_parser_version: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('source_scans')
+                     WHERE name = 'parser_version'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(has_parser_version, 0, "v13 尚无 parser_version 列");
+        }
+        // 重新打开：触发 v13→v14 迁移。
+        let store = SqliteStore::open(&p).unwrap();
+        assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
+        let conn = store.conn.borrow();
+        let has_parser_version: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('source_scans')
+                 WHERE name = 'parser_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(has_parser_version, 1);
+        let stored_version: i64 = conn
+            .query_row(
+                "SELECT parser_version FROM source_scans WHERE source_path = 'legacy.jsonl'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            stored_version, 0,
+            "迁移后旧行 parser_version 必须为 DEFAULT 0，驱动下次 sync 自动 backfill"
+        );
+    }
+
+    #[test]
+    fn injected_v13_to_v14_failure_rolls_back_schema_and_version() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        create_v6_schema(&conn);
+        SqliteStore::migrate_v6_to_v7(&conn).unwrap();
+        SqliteStore::migrate_v7_to_v8(&conn).unwrap();
+        SqliteStore::migrate_v8_to_v9(&conn).unwrap();
+        SqliteStore::migrate_v9_to_v10(&conn).unwrap();
+        SqliteStore::migrate_v10_to_v11(&conn).unwrap();
+        SqliteStore::migrate_v11_to_v12(&conn).unwrap();
+        SqliteStore::migrate_v12_to_v13(&conn).unwrap();
+
+        let err = SqliteStore::migrate_v13_to_v14_inner(&conn, true).unwrap_err();
+        assert!(
+            matches!(err, PortError::Backend(message) if message.contains("injected v13-to-v14"))
+        );
+        assert!(conn.is_autocommit());
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 13);
+        let has_parser_version: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('source_scans')
+                 WHERE name = 'parser_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(has_parser_version, 0);
+    }
+
+    #[test]
+    fn fresh_schema_creates_source_scans_with_parser_version_column() {
+        // 新库 v5 建表 DDL 直接带 parser_version 列（v9 provider_id 同一模式），
+        // v14 迁移对新库短路，不再补 ALTER。
+        let store = SqliteStore::open_in_memory().unwrap();
+        let conn = store.conn.borrow();
+        let has_parser_version: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('source_scans')
+                 WHERE name = 'parser_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(has_parser_version, 1);
     }
 
     #[test]
