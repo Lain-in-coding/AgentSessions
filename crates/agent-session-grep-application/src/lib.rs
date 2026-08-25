@@ -28,11 +28,13 @@ pub mod evidence;
 pub mod guidance;
 pub mod handoff_pack;
 pub mod hybrid;
+pub mod peek;
 pub mod resume;
 
 pub use budget::{ResponseBudget, Truncation};
 pub use cjk::bigram_cjk;
 pub use evidence::EvidenceSpanDto;
+pub use peek::SessionPeek;
 
 /// 排序方案标识：catalog 列表的钉住排序（wire id 升序，见 sqlite `ORDER BY id ASC`）。
 pub const SORT_WIRE_ID_ASC: &str = "wire_id_asc";
@@ -332,6 +334,10 @@ pub enum AppResponse {
     /// 稳定排序后的 Catalog 条目（wire id 升序）。
     List {
         entries: Vec<CatalogEntry>,
+        /// 与 `entries` 逐位对齐的 Peek 预览（#7）：`sessions_only` 列表的每个
+        /// 会话条目一个 `Some`，普通 `list` 全为 `None`。预览字节计入
+        /// `max_response_bytes` 字节闸，绝不免费越闸。
+        peeks: Vec<Option<SessionPeek>>,
         next_cursor: Option<String>,
         generation: u64,
         truncation: Truncation,
@@ -1891,17 +1897,35 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore, 
                     .skip(usize::try_from(offset).unwrap_or(usize::MAX))
                     .take(page)
                     .collect();
+                // Peek 预览（#7）：sessions_only 列表在每条会话条目上附 1 KiB 级
+                // 分诊预览。预览字节计入同一字节闸——`max_response_bytes` 是最终
+                // 序列化硬门（CONTRACT §3），预览不是免费内容。
+                let peeks: Vec<Option<SessionPeek>> = if sessions_only {
+                    self.build_session_peeks(&slice)?
+                } else {
+                    slice.iter().map(|_| None).collect()
+                };
                 let net_bytes = budget
                     .max_response_bytes
                     .saturating_sub(ENVELOPE_RESERVE_BYTES);
-                let (entries, truncation, _) =
-                    budget::clamp_items(slice, page, net_bytes, |entry| {
-                        // 最终 JSON 形态 `{"id":"<id>","payload":"<lossy utf-8>"}`：
-                        // id 按转义计长，payload 按序列化后长度计（不是原始字节数）。
+                let paired: Vec<(CatalogEntry, Option<SessionPeek>)> =
+                    slice.into_iter().zip(peeks).collect();
+                let (paired, truncation, _) =
+                    budget::clamp_items(paired, page, net_bytes, |(entry, peek)| {
+                        // 最终 JSON 形态 `{"id":"<id>","payload":"<lossy utf-8>"}`
+                        // （sessions_only 时附加 `,"peek":{...}`）：
+                        // id 按转义计长，payload 按序列化后长度计（不是原始字节数），
+                        // peek 按实际序列化长度计 + `,"peek":` 前缀 8 字节。
                         json_string_len(entry.id.as_str())
                             + lossy_payload_json_len(&entry.payload)
                             + 18
+                            + peek
+                                .as_ref()
+                                .map(|peek| peek::PEEK_ENTRY_OVERHEAD_BYTES + peek.json_len())
+                                .unwrap_or(0)
                     });
+                let (entries, peeks): (Vec<CatalogEntry>, Vec<Option<SessionPeek>>) =
+                    paired.into_iter().unzip();
                 let consumed = offset + entries.len() as u64;
                 // A truncated page with zero kept entries means the first
                 // entity already exceeds the byte budget: the next cursor
@@ -1919,6 +1943,7 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore, 
                 );
                 Ok(AppResponse::List {
                     entries,
+                    peeks,
                     next_cursor,
                     generation,
                     truncation,
@@ -1970,6 +1995,53 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore, 
                 })
             }
         }
+    }
+
+    /// `list_sessions` 的 Peek 预览（#7）：按会话 payload 的 `messages` 数组
+    /// 抽取成员 id，整页一次批量读（[`CatalogStore::get_many`]，绝不 N+1），
+    /// 再交给 [`peek::build_session_peek`] 派生首/尾用户消息。
+    ///
+    /// 预览是派生数据：payload 不可解析、`messages` 缺失、成员 id 非法时
+    /// 降级为全 null 字段，绝不拖垮列表本身。
+    fn build_session_peeks(
+        &self,
+        slice: &[CatalogEntry],
+    ) -> Result<Vec<Option<SessionPeek>>, AppError> {
+        let mut member_lists: Vec<Vec<StableId>> = Vec::with_capacity(slice.len());
+        for entry in slice {
+            let mut members = Vec::new();
+            if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&entry.payload) {
+                if let Some(ids) = value.get("messages").and_then(serde_json::Value::as_array) {
+                    members = ids
+                        .iter()
+                        .filter_map(|id| id.as_str().and_then(StableId::from_wire))
+                        .collect();
+                }
+            }
+            member_lists.push(members);
+        }
+        let all_ids: Vec<StableId> = member_lists.iter().flatten().cloned().collect();
+        let fetched = self.catalog.get_many(&all_ids)?;
+        let mut payload_by_id: HashMap<&str, Option<&[u8]>> = HashMap::with_capacity(fetched.len());
+        for (id, payload) in &fetched {
+            // 同一条消息可属多个会话：get_many 保序重复返回同一 payload，
+            // 索引取首次出现即可。
+            payload_by_id
+                .entry(id.as_str())
+                .or_insert(payload.as_deref());
+        }
+        let peeks = slice
+            .iter()
+            .zip(&member_lists)
+            .map(|(_, members)| {
+                Some(peek::build_session_peek(
+                    members
+                        .iter()
+                        .map(|id| payload_by_id.get(id.as_str()).copied().flatten()),
+                ))
+            })
+            .collect();
+        Ok(peeks)
     }
 
     /// 会话上下文装配（CONTRACT §1-2）：
@@ -3925,6 +3997,85 @@ mod tests {
             truncation.reason.as_deref(),
             Some(budget::TRUNCATION_MAX_RESPONSE_BYTES)
         );
+    }
+
+    #[test]
+    fn list_sessions_byte_gate_counts_peek_serialized_bytes() {
+        // peek 是渲染产物，不是免费内容（#7）：字节闸必须按 peek 的实际序列化
+        // 长度计费。每条会话条目 ≈ id(41) + 会话 payload(73) + 骨架(18) +
+        // `,"peek":`(8) + peek(~1002，宽字符被字节闸压到 1 KiB 内) ≈ 1142；
+        // 净预算 3072（4096 - envelope 预留 1024）只容 2 条，第三条必须被截。
+        let mut cat = MapCatalog::new(7);
+        let user_text = "🦀".repeat(1000);
+        for tag in ["sa", "sb", "sc", "sd"] {
+            let session =
+                StableId::derive(IdKind::Session, Stability::Reconstructed, &[tag.as_bytes()]);
+            let message =
+                StableId::derive(IdKind::Message, Stability::Reconstructed, &[tag.as_bytes()]);
+            cat.insert(
+                &message,
+                serde_json::json!({ "role": "user", "text": user_text })
+                    .to_string()
+                    .into_bytes(),
+            );
+            cat.insert(
+                &session,
+                serde_json::json!({ "documents": [], "messages": [message.as_str()] })
+                    .to_string()
+                    .into_bytes(),
+            );
+        }
+        let app = App::with_clock(&cat, FakeIndex, clock_t0);
+        let resp = app
+            .handle(AppRequest::List {
+                limit: 10,
+                cursor: None,
+                budget: ResponseBudget {
+                    max_response_bytes: budget::MIN_RESPONSE_BYTES,
+                    ..Default::default()
+                },
+                sessions_only: true,
+            })
+            .unwrap();
+        let AppResponse::List {
+            entries,
+            peeks,
+            truncation,
+            ..
+        } = resp
+        else {
+            panic!("expected List response");
+        };
+        assert_eq!(entries.len(), peeks.len(), "peeks must align with entries");
+        assert_eq!(entries.len(), 2, "3072 net bytes fit two peeked sessions");
+        assert_eq!(
+            truncation.reason.as_deref(),
+            Some(budget::TRUNCATION_MAX_RESPONSE_BYTES)
+        );
+        for peek in peeks.iter().flatten() {
+            assert!(peek.json_len() <= peek::PEEK_MAX_BYTES);
+        }
+        // 未截断的对照：宽松预算下四条全保留，且每条都带 peek。
+        let resp = app
+            .handle(AppRequest::List {
+                limit: 10,
+                cursor: None,
+                budget: ResponseBudget::default(),
+                sessions_only: true,
+            })
+            .unwrap();
+        let AppResponse::List {
+            entries,
+            peeks,
+            truncation,
+            ..
+        } = resp
+        else {
+            panic!("expected List response");
+        };
+        assert_eq!(entries.len(), 4);
+        assert!(peeks.iter().all(Option::is_some));
+        assert!(!truncation.truncated);
     }
 
     // ---- context 装配 ----

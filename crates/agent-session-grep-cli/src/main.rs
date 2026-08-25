@@ -4172,6 +4172,7 @@ fn render(
         ),
         AppResponse::List {
             entries,
+            peeks,
             next_cursor,
             generation,
             truncation,
@@ -4181,13 +4182,22 @@ fn render(
                 has_more: next_cursor.is_some(),
                 next_cursor,
             };
+            // Peek（#7）与条目逐位对齐是 Application 的不变量；render 只投影。
+            debug_assert_eq!(peeks.len(), entries.len(), "peeks must align with entries");
             let data = serde_json::json!({
                 "entries": entries
                     .into_iter()
-                    .map(|entry| serde_json::json!({
-                        "id": entry.id.as_str(),
-                        "payload": String::from_utf8_lossy(&entry.payload),
-                    }))
+                    .zip(peeks)
+                    .map(|(entry, peek)| {
+                        let mut value = serde_json::json!({
+                            "id": entry.id.as_str(),
+                            "payload": String::from_utf8_lossy(&entry.payload),
+                        });
+                        if let Some(peek) = peek {
+                            value["peek"] = serde_json::json!(peek);
+                        }
+                        value
+                    })
                     .collect::<Vec<_>>(),
                 "generation": generation,
                 "truncation": truncation_json(&truncation),

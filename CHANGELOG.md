@@ -41,6 +41,11 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `serve --port <n>` CLI subcommand — loopback HTTP server (random bearer
   token, Host loopback check, embedded Web UI, JSON API).
 - MCP tools: `search_sessions`, `get_session_context`, `get_session_resume`, `get_message`, `list_sessions`, `generate_handoff`, `list_providers`, `get_status`, and `doctor` (9 total).
+- `list_sessions` Peek Bundle (borrowed from hstry): every session entry
+  carries a `peek` object with `first_user_text` / `last_user_text` (≤200
+  chars each, char-boundary truncation; null without user messages), capped at
+  1 KiB serialized per session with the cap and over-limit truncation guarded
+  by tests. Peek bytes are charged to the `max_response_bytes` gate.
 - Cross-boundary output redaction (ADR-0009): Robot JSON/JSONL, MCP, HTTP API,
   Handoff Pack, and Web UI redact standalone and prose-embedded secrets
   (AWS keys, GitHub PATs, OpenAI/Anthropic/xAI keys, Bearer tokens, PEM
