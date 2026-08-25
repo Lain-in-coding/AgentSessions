@@ -584,6 +584,31 @@ facet controls (`m` sidechain / `k` tool-kind); context responses project
 (`docs/product/PROVIDER-BETA-READINESS.md`) separates local from external
 promotion blockers.
 
+Closed 2026-08-25 (release-hardening wave, `main` at `8f5a6b1`): three code
+review Mediums closed — robot/JSON error envelopes now run the shared
+redaction engine and `ProviderError::Io` masks source paths per the R4.3
+rule; the entry-point consistency e2e skips when no Python interpreter
+exists instead of panicking; CI gains a dedicated
+`--features semantic-candle` test step so the candle module is compiled and
+tested on every run. Seeded randomized property suites
+(`tests/properties.rs`) now cover **all 14 implemented providers**,
+mirroring the previous claude-code/codex-only coverage — §5's "randomized
+property tests still only Claude/Codex" statement is superseded; the Beta
+readiness ledger gains a `property` column guarded in both directions
+against each suite's existence. The resume command matrix was extended with
+upstream-evidenced commands for `antigravity` (`agy --conversation <id>`),
+`opencode` (`opencode <directory> --session <id>`), `kimi-code`
+(`kimi --session <id>`), and `tencent-codebuddy`
+(`codebuddy --resume <id>`); `hermes`/`qoder`/`cursor` stay unknown with
+recorded reasons. A seven-provider tool_activity honesty review found four
+formats carrying structured tool records but no per-message native id to
+anchor and three carrying none — all seven honestly stay `Unsupported`,
+pinned by golden-corpus drift tests. Local gate green throughout,
+`verify-release.py` 10/10, `cargo deny` advisories/bans/licenses/sources all
+ok. §5's provider-evidence table and §7.2's 0-Beta statement remain
+historical records of the 08-16 state; current per-provider status is
+tracked in `docs/product/PROVIDER-BETA-READINESS.md`.
+
 ---
 
 ## 8. Recommendation
