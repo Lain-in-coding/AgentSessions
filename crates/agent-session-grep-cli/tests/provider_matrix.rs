@@ -688,7 +688,7 @@ fn beta_readiness_ledger_capability_columns_match_capability_matrix() {
     let rows = beta_ledger_rows("Per-provider local readiness");
     assert_eq!(rows.len(), 14, "ledger 实现表应恰有 14 行");
 
-    // 列序：provider_id | golden | read-only | discover | source_span
+    // 列序：provider_id | golden | read-only | property | discover | source_span
     // | tool_activity | resume | incremental | local Beta blockers。
     for cap in matrix
         .providers
@@ -701,17 +701,17 @@ fn beta_readiness_ledger_capability_columns_match_capability_matrix() {
             .unwrap_or_else(|| panic!("ledger 缺少 provider `{}` 的行", cap.provider_id));
         assert_eq!(
             row.len(),
-            9,
-            "{}: ledger 行应恰有 9 列，实际 {} 列",
+            10,
+            "{}: ledger 行应恰有 10 列，实际 {} 列",
             cap.provider_id,
             row.len()
         );
         for (column, column_name, expected) in [
-            (3usize, "discover", cap.discover),
-            (4usize, "source_span", cap.source_span),
-            (5usize, "tool_activity", cap.tool_activity),
-            (6usize, "resume", cap.resume),
-            (7usize, "incremental", cap.incremental),
+            (4usize, "discover", cap.discover),
+            (5usize, "source_span", cap.source_span),
+            (6usize, "tool_activity", cap.tool_activity),
+            (7usize, "resume", cap.resume),
+            (8usize, "incremental", cap.incremental),
         ] {
             let actual = beta_ledger_cell_to_level(&row[column]).unwrap_or_else(|| {
                 panic!(
@@ -726,6 +726,59 @@ fn beta_readiness_ledger_capability_columns_match_capability_matrix() {
             );
         }
     }
+}
+
+/// ledger 的 provider_id → crate 目录名映射：三个 provider 的 crate 目录与
+/// provider_id 不同（历史命名），其余同名。
+fn provider_crate_dir(provider_id: &str) -> &str {
+    match provider_id {
+        "claude-code" => "claude",
+        "grok-build" => "grok",
+        "kimi-code" => "kimi",
+        "tencent-codebuddy" => "codebuddy",
+        other => other,
+    }
+}
+
+#[test]
+fn beta_readiness_property_column_matches_properties_test_existence() {
+    // ledger 的 `property` 列声明"seeded 随机化 property 套件"
+    // （`crates/agent-session-grep-provider-<dir>/tests/properties.rs`）是否存在。
+    // 与 golden/read-only 两列同一纪律：证据列不得人工填写而不被反证——
+    // 声明 ok 却没有文件 = 虚报覆盖；文件存在却声明 missing = 少报。
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("必须能从 crate 目录上溯到仓库根")
+        .to_path_buf();
+    let rows = beta_ledger_rows("Per-provider local readiness");
+    assert_eq!(rows.len(), 14, "ledger 实现表应恰有 14 行");
+    let mut checked = 0usize;
+    for row in &rows {
+        let provider_id = &row[0];
+        let cell = &row[3];
+        let path = repo_root
+            .join("crates")
+            .join(format!(
+                "agent-session-grep-provider-{}",
+                provider_crate_dir(provider_id)
+            ))
+            .join("tests/properties.rs");
+        let exists = path.is_file();
+        match cell.as_str() {
+            "ok" => assert!(
+                exists,
+                "{provider_id}: ledger property 列声明 ok 但 `{path:?}` 不存在（虚报覆盖）"
+            ),
+            "missing" => assert!(
+                !exists,
+                "{provider_id}: `{path:?}` 已存在但 ledger property 列仍为 missing（少报）"
+            ),
+            other => panic!("{provider_id}: property 列取值 `{other}` 非法（只能 ok/missing）"),
+        }
+        checked += 1;
+    }
+    assert_eq!(checked, 14, "必须逐一核对 14 行的 property 列");
 }
 
 // ---- README.md provider 表防漂移 ----
