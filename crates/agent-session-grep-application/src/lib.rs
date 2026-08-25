@@ -31,11 +31,13 @@ pub mod hybrid;
 pub mod peek;
 pub mod ranking;
 pub mod resume;
+pub mod retention;
 
 pub use budget::{ResponseBudget, Truncation};
 pub use cjk::{bigram_cjk, fts_tokens_cjk};
 pub use evidence::EvidenceSpanDto;
 pub use peek::SessionPeek;
+pub use retention::{MESSAGE_FTS_MAX_CHARS, bounded_index_text};
 
 /// 排序方案标识：catalog 列表的钉住排序（wire id 升序，见 sqlite `ORDER BY id ASC`）。
 pub const SORT_WIRE_ID_ASC: &str = "wire_id_asc";

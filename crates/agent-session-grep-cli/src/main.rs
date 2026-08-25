@@ -27,8 +27,8 @@ use agent_session_grep_adapters_sqlite::{
 };
 use agent_session_grep_application::{
     App, AppError, AppRequest, AppResponse, ContextLevel, ResponseBudget, StagedBatch, Truncation,
-    evidence::Precision, handoff_pack::HandoffInput, parse_relative_search_instant,
-    parse_search_instant, select_and_stage_source,
+    bounded_index_text, evidence::Precision, handoff_pack::HandoffInput,
+    parse_relative_search_instant, parse_search_instant, select_and_stage_source,
 };
 use agent_session_grep_domain::{
     ContextPolicy, DomainError, EvidenceSpan, IdKind, MessageEdge, MessagePlacement,
@@ -2784,7 +2784,12 @@ fn message_id(fact: &str) -> StableId {
 /// 写入一条：派生 id → durable outbox → 原子提交 catalog + FTS + generation。
 fn index_one(store: &SqliteStore, fact: &str, text: &str) -> Result<serde_json::Value, CliError> {
     let id = message_id(fact);
-    let entries = [(id.clone(), text.as_bytes().to_vec(), text.to_string())];
+    // FTS 投影有界（借鉴清单 #3，与 ingest/sync 入口同一截断）。
+    let entries = [(
+        id.clone(),
+        text.as_bytes().to_vec(),
+        bounded_index_text(text),
+    )];
     store.commit_batch(&entries).map_err(ProtocolError::from)?;
     let generation = store.active_generation().map_err(ProtocolError::from)?;
     Ok(serde_json::json!({
@@ -3655,7 +3660,10 @@ fn staged_to_source_with_provider(
         })
         .to_string()
         .into_bytes();
-        entries.push((entity.id, payload, entity.text));
+        // FTS 投影有界（借鉴清单 #3）：text 元素截断到 MESSAGE_FTS_MAX_CHARS，
+        // 与索引侧/重投影侧同一上限，current 判定两侧才比较同一有界文本；
+        // payload 保留 provider 原文全文（Catalog 不在索引期改写原文）。
+        entries.push((entity.id, payload, bounded_index_text(&entity.text)));
     }
 
     let session_payload = serde_json::json!({
@@ -5044,6 +5052,47 @@ mod tests {
         )
         .unwrap();
         assert!(!source.relation_complete);
+    }
+
+    #[test]
+    fn staged_to_source_caps_fts_text_but_keeps_full_payload() {
+        // 借鉴清单 #3：entry 的 FTS text 元素截断到 MESSAGE_FTS_MAX_CHARS（与
+        // 索引侧同一常量），而 catalog payload 保留 provider 原文全文
+        // （THREAT-MODEL：Catalog 不在索引期改写原文）。入口截断保证 current
+        // 判定两侧比较同一有界文本，重同步幂等不被截断破坏。
+        let full = format!(
+            "visible-head {}",
+            "f".repeat(agent_session_grep_application::MESSAGE_FTS_MAX_CHARS)
+        );
+        let mut message = staged_message(0, "long-native", (0, 4));
+        message.text = full.clone();
+        let staged = staged_batch(vec![message], 0, "session-1");
+        let source = staged_to_source(
+            "synthetic.jsonl",
+            &staged,
+            "synthetic",
+            "synthetic/jsonl-v1",
+            "fingerprint",
+            8,
+        )
+        .unwrap();
+
+        let entry = source
+            .entries
+            .iter()
+            .find(|(id, _, _)| id.kind() == IdKind::Message)
+            .unwrap();
+        assert_eq!(
+            entry.2.chars().count(),
+            agent_session_grep_application::MESSAGE_FTS_MAX_CHARS,
+            "entry FTS text 必须截断到索引侧同一上限"
+        );
+        let payload: serde_json::Value = serde_json::from_slice(&entry.1).unwrap();
+        assert_eq!(
+            payload["text"].as_str().unwrap(),
+            full,
+            "payload 必须保留 provider 原文全文"
+        );
     }
 
     #[test]

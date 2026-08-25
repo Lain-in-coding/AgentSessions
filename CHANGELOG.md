@@ -202,6 +202,21 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   tokens via `index rebuild` (no schema change). `bigram_cjk` stays bigram-
   only and remains the guidance evidence source.
 
+### Changed
+
+- Message FTS body retention (borrowing list #3, ctx text-retention policy):
+  a message's searchable projection is now bounded to 16 000 characters
+  (`application::retention::MESSAGE_FTS_MAX_CHARS`, char-boundary truncation)
+  at the index write paths, the payload-reprojection path
+  (`searchable_text` — rebuild/merge/put), and the ingest entry construction.
+  The catalog payload keeps the full provider text (ADR-0004/THREAT-MODEL:
+  the catalog never rewrites source text), so `get-message` and context views
+  are unchanged; only the FTS index volume is bounded. The same cap applies
+  on every path so current-detection compares the same bounded text and
+  idempotent re-sync still reports no change. Existing databases converge
+  automatically: an oversized row is rewritten (bounded) on its next sync;
+  `index rebuild` re-projects the whole index from the catalog.
+
 ### Fixed
 
 - serve query-string routing: `/api/search?q=...` no longer 404s.
