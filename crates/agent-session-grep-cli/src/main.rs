@@ -5360,6 +5360,67 @@ mod tests {
         assert!(help_text().contains("index rebuild"));
     }
 
+    /// README 原文：Quickstart 是访客照抄的第一组命令，却是手写的。
+    const README_SOURCE: &str = include_str!("../../../README.md");
+
+    #[test]
+    fn readme_documented_commands_are_all_dispatchable() {
+        // 与能力列同一条纪律，往上挪一层：README 的 Quickstart 命令此前没有任何
+        // 测试对照真实命令表。命令改名/下线后 README 会静默变成谎言，而它正是
+        // 新用户照抄的那几行——文档漂移在这里的代价是"开箱即错"。
+        //
+        // 做法：从 README 的 fenced 代码块里抽出所有 `asg`/`agent-session-grep`
+        // 调用行，取其子命令 token（跳过 `--flag` 与其值占位符），要求每个都在
+        // KNOWN_COMMANDS 里。KNOWN_COMMANDS 已由
+        // `intercept_subcommand_help_for_every_known_command` 与
+        // `every_known_subcommand_has_help_text` 钉在真实 dispatch 上，故这里
+        // 传递地锚定到真实行为，而不是另一份手抄表。
+        let mut in_fence = false;
+        let mut documented: std::collections::BTreeSet<String> = Default::default();
+        for line in README_SOURCE.lines() {
+            if line.trim_start().starts_with("```") {
+                in_fence = !in_fence;
+                continue;
+            }
+            if !in_fence {
+                continue;
+            }
+            let trimmed = line.trim();
+            let rest = trimmed
+                .strip_prefix("asg ")
+                .or_else(|| trimmed.strip_prefix("agent-session-grep "));
+            let Some(rest) = rest else { continue };
+            // 第一个不以 `-` 开头、且不是前一个 flag 的值占位符的 token 即子命令。
+            let mut expect_flag_value = false;
+            for token in rest.split_whitespace() {
+                if token.starts_with('-') {
+                    // `--db <path>` 形式的 flag 带值；`--discover` 不带。
+                    expect_flag_value = !token.contains('=');
+                    continue;
+                }
+                if expect_flag_value {
+                    expect_flag_value = false;
+                    continue;
+                }
+                documented.insert(token.to_string());
+                break;
+            }
+        }
+
+        assert!(
+            documented.len() >= 5,
+            "README Quickstart 解析出的命令过少（{}），解析逻辑可能失效：{documented:?}",
+            documented.len()
+        );
+        for cmd in &documented {
+            assert!(
+                KNOWN_COMMANDS.contains(&cmd.as_str()),
+                "README 记录的命令 `{cmd}` 不在 KNOWN_COMMANDS 里——命令已改名/下线，\
+                 而 README 是新用户照抄的第一组命令"
+            );
+        }
+    }
+
     #[test]
     fn machine_mode_help_is_a_success_envelope() {
         let envelope = help_envelope(
