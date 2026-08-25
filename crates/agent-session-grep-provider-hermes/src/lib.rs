@@ -403,4 +403,29 @@ mod tests {
             MetadataResolution::Missing
         );
     }
+
+    #[test]
+    fn parse_passes_noise_shaped_user_text_through_verbatim() {
+        // 钉住测试：Hermes session JSON 没有 system-reminder / AGENTS.md /
+        // 环境上下文等注入概念（系统层走 role:"system"，已被角色门跳过）。
+        // 形似噪声的 user 文本必须逐字透传，防止将来把别家格式的过滤规则
+        // 盲目搬来造成 silent drift。
+        let adapter = OpenHermesAdapter::new();
+        let fixture = r##"{
+          "session_id": "hermes-sess-noise",
+          "messages": [
+            {"role": "user", "content": "<system-reminder>reminder text</system-reminder>"},
+            {"role": "user", "content": "# AGENTS.md instructions"}
+          ]
+        }"##;
+        let mut sink = CapturingSink::default();
+        let report = adapter.parse(fixture.as_bytes(), &mut sink).unwrap();
+        assert_eq!(report.committed, 2);
+        assert_eq!(report.skipped, 0);
+        assert_eq!(
+            sink.events[0].text,
+            "<system-reminder>reminder text</system-reminder>"
+        );
+        assert_eq!(sink.events[1].text, "# AGENTS.md instructions");
+    }
 }

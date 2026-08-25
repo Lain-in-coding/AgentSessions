@@ -152,6 +152,21 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `Unsupported` in the capability matrix, with the reason recorded in the
   Beta readiness ledger and pinned by new golden-corpus drift tests in each
   provider crate.
+- Pseudo-user noise filtering in the provider parse layer: `claude-code`
+  skips harness-injected user-role records by explicit envelope shape only
+  (`<system-reminder>`, `<local-command-caveat>`/`Caveat:`, exact
+  `[Request interrupted by user]` markers, empty-arg `<command-name>`
+  envelopes, `<local-command-stdout>`/`<local-command-stderr>`,
+  `<bash-input>`/`<bash-stdout>`/`<bash-stderr>`,
+  `<user-prompt-submit-hook>`, `<task-notification>`, and whole-line
+  `[Image: …]` isMeta image references — every rule cites its format
+  evidence), and `codex` skips `# AGENTS.md` title and
+  `<environment_context>` user injections (cc-switch rollout evidence).
+  Filtered records count into `ParseReport.skipped` with a diagnostic and
+  never enter the index; command envelopes carrying user arguments stay.
+  The twelve formats without such injection shapes gain pinning tests
+  asserting verbatim passthrough of noise-shaped user text, so a filter
+  borrowed from another format cannot land silently.
 
 ### Fixed
 

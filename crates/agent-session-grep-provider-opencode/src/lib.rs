@@ -433,4 +433,56 @@ mod tests {
         let _ = std::fs::remove_file(&temp_path);
         bytes
     }
+
+    #[test]
+    fn parse_passes_noise_shaped_user_text_through_verbatim() {
+        // 钉住测试：OpenCode SQLite 没有 system-reminder / AGENTS.md /
+        // 环境上下文等注入概念（message/part 的 text 就是消息原文；part 查询
+        // 只按 `type='text'` 过滤块类型，不检查文本形状）。形似噪声的文本必须
+        // 逐字透传，防止将来把别家格式的过滤规则盲目搬来造成 silent drift。
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session (id TEXT PRIMARY KEY, title TEXT, directory TEXT, time_created INTEGER, time_updated INTEGER);
+             CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, data TEXT, time_created INTEGER);
+             CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, data TEXT, time_created INTEGER);
+             INSERT INTO session VALUES ('ses_1', 'test', '/work', 1, 2);
+             INSERT INTO message VALUES ('msg_1', 'ses_1', '{\"role\":\"user\"}', 1);
+             INSERT INTO message VALUES ('msg_2', 'ses_1', '{\"role\":\"user\"}', 2);
+             INSERT INTO part VALUES ('part_1', 'msg_1', '{\"type\":\"text\",\"text\":\"<system-reminder>reminder text</system-reminder>\"}', 1);
+             INSERT INTO part VALUES ('part_2', 'msg_2', '{\"type\":\"text\",\"text\":\"# AGENTS.md instructions\"}', 2);",
+        )
+        .unwrap();
+        let temp_path = std::env::temp_dir().join(format!("asg-test-{}.db", temp_file_suffix()));
+        conn.execute_batch(&format!("VACUUM INTO '{}'", temp_path.display()))
+            .unwrap();
+        drop(conn);
+        let db_bytes = std::fs::read(&temp_path).unwrap();
+        let _ = std::fs::remove_file(&temp_path);
+
+        struct TextSink {
+            texts: Vec<String>,
+        }
+        impl CanonicalEventSink for TextSink {
+            fn emit_message(
+                &mut self,
+                event: MessageEvent<'_>,
+            ) -> agent_session_grep_ports::PortResult<()> {
+                self.texts.push(event.text.to_string());
+                Ok(())
+            }
+        }
+
+        let adapter = OpenCodeAdapter::new();
+        let mut sink = TextSink { texts: Vec::new() };
+        let report = adapter.parse(&db_bytes, &mut sink).unwrap();
+        assert_eq!(report.committed, 2);
+        assert_eq!(report.skipped, 0);
+        assert_eq!(
+            sink.texts,
+            vec![
+                "<system-reminder>reminder text</system-reminder>".to_string(),
+                "# AGENTS.md instructions".to_string(),
+            ]
+        );
+    }
 }
