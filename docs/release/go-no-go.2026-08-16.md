@@ -96,10 +96,17 @@ the comparison to the search contract rather than weakening it to skipped.
 
 | Provider | Tier | Evidence | Notes |
 |---|---|---|---|
-| Claude Code | experimental | golden + byte-assert round-trip (243d7d5) | certified target, not reached |
-| Codex | experimental | incremental resync/tombstone e2e (432744f) | certified target, not reached |
-| 12 others | experimental | manifest entries, no external golden | `known_limitations` incomplete |
+| Claude Code | experimental | golden + byte-assert round-trip (243d7d5); observed `emit_activity` emissions | certified target, not reached |
+| Codex | experimental | incremental resync/tombstone e2e (432744f); observed `emit_activity` emissions | certified target, not reached |
+| 12 others | experimental | golden fixture + `PROVENANCE.md` (`fixture_revision=1`) each; real probe/parse/search/incremental behavior asserted per provider (see notes) | `known_limitations` non-empty for all 14 (guarded); randomized property tests still only Claude/Codex |
 | deepseek-harness, zcode | unsupported | deferred, no transcript evidence | — |
+
+All 14 implemented providers now carry executable claim-vs-behavior evidence, not
+just manifest entries: every capability column has a registered behavior guard
+(`CAPABILITY_BEHAVIOR_GUARDS` in `crates/agent-session-grep-cli/tests/provider_matrix.rs`),
+and `every_capability_column_has_a_behavior_guard` fails if a column is added
+without one. What the 12 still lack relative to Claude/Codex is randomized
+property coverage, not baseline evidence.
 
 Provider matrix `providers` reports 16 rows; PRD requires ≥5 Beta + Claude/Codex
 certified — currently 0 Beta. **Not release-ready per provider gate.**
@@ -127,6 +134,8 @@ certified — currently 0 Beta. **Not release-ready per provider gate.**
 | 15 | `qoder`'s probe counted any record whose top-level `type` is `session_meta` as its own header, but every Codex rollout record is a `{timestamp, type, payload}` envelope whose first line is exactly that. Codex degrades `Confirmed`→`High` on a tolerated broken line (its own golden fixture has one), so both adapters returned `High` and a real Codex rollout with any damaged line was rejected as ambiguous rather than indexed as Codex | P1 | closed | this task |
 | 16 | `codex` declared `context: Native` while its adapter hard-codes `parent_native_id: None` — Codex rollout is a linear sequence with no threading edges, so no `message_edges` row can ever exist for it and `context` had nothing to walk. Found by the guard added for it: `context` was the last column falsifiable from pinned golden output that had none | P1 | closed | this task |
 | 17 | `handoff` was declared `Unsupported` for all 14 implemented providers and `incremental` was declared `Native` for two and `Unsupported` for the other twelve — but neither is a per-provider capability. `handoff_pack::generate_deterministic` reads no provider identity, and incremental judgement lives entirely in the composition root plus the store's fingerprint cache. Both columns had only a doc↔`capability.rs` consistency guard, never a claim-vs-behavior one, so twelve providers under-claimed a shipped command (`asg handoff`) and a shipped behavior (no-op resync) while two mislabeled a store-layer capability as provider-native | P1 | closed | this task |
+| 18 | Three release-facing documents cited implementation evidence that nothing verified, so each could silently decay into a false claim: the MCP CONTRACT §8 tool list was pinned only against a hand-copied array in the test (editing the doc failed nothing, editing the catalog forced no doc update); ADR-0010 §1's evidence table still described golden fixtures as a Claude/Codex-only path and `AdapterManifest` as unimplemented, though all 14 providers carry goldens at `fixture_revision=1` and `manifest_for` has shipped; and this ledger's provider row still called `known_limitations` incomplete. All three now read their cited source through `include_str!` and fail on drift in either direction | P1 | closed | this task |
+| 19 | The `tool_activity` guard was one-directional: it rejected a provider claiming support with no anchorable messages, but never rejected one that really emits activities while declaring `Unsupported`. Every other capability column already had both directions, so adding `emit_activity` to any of the twelve `Unsupported` adapters would have gone unnoticed — the exact asymmetry that let rows 16 and 17 through | P1 | closed | this task |
 
 ---
 
@@ -396,6 +405,62 @@ test coverage, not a higher capability tier. Mutation-verified in both
 directions on the incremental guard: restoring `Unsupported` for aider fails it
 (exit 101), and downgrading a row to `Unknown` fails it too, with `capability.rs`
 restored byte-identical (hash-checked) after each.
+
+Closed 2026-08-25 (§6 row 18, `main` at `5cc6f4d` through `f1214cd`): with row 17
+closed, the remaining question was not "which column is wrong" but "which claim
+could go wrong without failing anything". Three columns — `probe`, `parse`,
+`search` — were `Native` across all 14 providers with no behavioral guard, so
+`capability_probe_claim_matches_real_probe_on_own_golden`,
+`capability_parse_claim_matches_real_parse_on_own_golden`, and
+`capability_search_claim_matches_real_retrieval_for_every_provider` now run each
+adapter against its own golden bytes. Probe requires `Ok`, a non-`Ambiguous`
+confidence (RFC-0002 §3 makes ambiguity a refusal, so an ambiguous probe is a
+probe that failed), a `variant_id` matching `capability.rs` verbatim — a probe
+reporting a different variant means registry selection would mount the wrong
+adapter — and non-empty `matched_evidence`. Parse requires `Ok`, `committed > 0`,
+`sink.messages.len() == report.committed`, and non-empty text on every message,
+since a message counted as committed but carrying nothing would claim to have
+indexed something unretrievable. Search queries a token taken from each
+provider's own golden text rather than a fixed keyword, which would otherwise
+fail on the non-English fixtures. All three claims held; each was
+mutation-verified by faking an `Unsupported` on aider and watching the guard
+report the real contradicting behavior.
+
+Two structural gaps closed alongside them. First, the discipline itself was
+unenforceable: nothing stopped a fifteenth capability column from shipping with a
+declaration and no behavioral guard, which is exactly how rows 16 and 17 became
+possible. `every_capability_column_has_a_behavior_guard` parses the
+`CapabilityLevel` fields out of `capability.rs` source (rather than a hand-copied
+list, which would drift the same way) and requires each one to appear in
+`CAPABILITY_BEHAVIOR_GUARDS` — column, guard test name, and the `include_str!`'d
+file that must actually contain it. A new column now fails the build until it has
+executable counter-evidence. Second, the `tool_activity` guard was one-directional:
+it caught a provider claiming support it could not anchor, but would never fail a
+provider that really emits activities while declaring `Unsupported` — the precise
+asymmetry behind rows 16 and 17.
+`capability_tool_activity_unsupported_claim_is_not_an_under_claim` closes it by
+parsing each `Unsupported` provider's own golden and requiring zero anchorable
+activities; mutating claude-code (a real emitter) to `Unsupported` now fails.
+`resume`, checked during the same sweep, was already bidirectional — it asserts
+`(resume == Derived) == builder_supports`, an iff that fails either way.
+
+The same audit found three documentation claims that had drifted stale rather
+than wrong-at-birth, all in the over-cautious direction. ADR-0010 §1's evidence
+table still described golden fixtures as a Claude/Codex-only path and
+`AdapterManifest` as unimplemented, when all 14 providers carry goldens with
+`fixture_revision=1` and shipped manifests declaring non-empty
+`known_limitations`; §5 of this report described the other twelve as having "no
+external golden" and incomplete limitations for the same reason. Both now state
+the verified position. Because that ADR cites specific test and constant names as
+its evidence, `adr_0010_cited_evidence_exists_in_source_and_is_actually_cited`
+now checks both directions — each cited name must exist in the source file it
+claims, and must still be cited by the ADR — so a rename cannot silently turn a
+governance record into an assertion. The same treatment went to the MCP tool
+catalog, whose nine-tool contract had been pinned to a hand-copied array:
+`contract_declared_mcp_tools_match_the_real_catalog` parses the CONTRACT document
+itself and compares it against the live registry. Local gate green throughout at
+1508 tests, `cargo fmt --all --check` and
+`cargo clippy --workspace --all-targets -D warnings` both clean.
 
 Closed by the 2026-08-17 release-gap wave (post-draft audit fixes, pushed to
 `main` at `ed57a9a`): Robot v1.1 `searchData.facets` schema echo + protocol
