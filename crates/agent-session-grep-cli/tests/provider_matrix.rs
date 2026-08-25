@@ -503,6 +503,43 @@ fn capability_tool_activity_claim_respects_fail_closed_anchoring() {
 }
 
 #[test]
+fn capability_tool_activity_unsupported_claim_is_not_an_under_claim() {
+    // 上面那条只堵虚报（锚不住却声称支持）。少报方向此前没有守护：某个 adapter
+    // 真的开始 `emit_activity` 了，而 capability.rs 仍写 Unsupported，不会有任何
+    // 测试失败——这正是 handoff 与 incremental 两次少报的成因（一致性守护只保证
+    // 文档与代码互相同意，不保证同意的值为真）。
+    //
+    // 这里对每个声明 Unsupported 的已实现 provider 跑真实 parse，若它对自己的
+    // golden 实际发出了可锚定的活动，则声明为假。
+    let matrix = ProviderCapabilityMatrix::current();
+
+    for (adapter, fixture) in &implemented_adapters_with_fixtures() {
+        let provider_id = adapter.provider_id();
+        let cap = matrix
+            .providers
+            .iter()
+            .find(|p| p.provider_id == provider_id)
+            .unwrap_or_else(|| panic!("capability.rs 缺少 provider `{provider_id}`"));
+        if cap.tool_activity != CapabilityLevel::Unsupported {
+            continue;
+        }
+
+        let mut sink = agent_session_grep_testkit::golden::CapturingSink::default();
+        let _ = adapter.parse(fixture, &mut sink);
+        let anchored = sink
+            .activities
+            .iter()
+            .filter(|a| !a.message_native_id.trim().is_empty())
+            .count();
+        assert_eq!(
+            anchored, 0,
+            "{provider_id}: capability.rs 声明 tool_activity=Unsupported，但对自己的 golden \
+             实测发出了 {anchored} 条可锚定活动（少报）——声明必须升到 Partial/Native"
+        );
+    }
+}
+
+#[test]
 fn claude_tool_activity_claim_is_backed_by_observed_emissions() {
     // 正向验证：claude-code 声明 tool_activity 可用，其 golden fixture 必须真的
     // 经 `emit_activity` 发出活动，且每条活动都带可锚定（非空）的 native id。
