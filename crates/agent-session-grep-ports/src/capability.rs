@@ -293,6 +293,10 @@ impl ProviderCapabilityMatrix {
                     context: CapabilityLevel::Unsupported,
                     resume: CapabilityLevel::Unknown,
                     handoff: CapabilityLevel::Derived,
+                    // transcript 确有 `tool_use`/`tool_result` 记录类型（当前作为
+                    // 非对话记录跳过），但 user/assistant 记录无 per-message
+                    // native id——活动无法锚定（staging fail-closed 丢弃）。
+                    // 如实保持 Unsupported。
                     tool_activity: CapabilityLevel::Unsupported,
                     source_span: CapabilityLevel::Native,
                     incremental: CapabilityLevel::Derived,

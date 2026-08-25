@@ -125,6 +125,35 @@ fn golden_spans_slice_back_to_exact_source_lines() {
     }
 }
 
+#[test]
+fn tool_activity_stays_unsupported_because_activities_cannot_anchor() {
+    // 双向钉住 tool_activity=Unsupported 的诚实性：
+    // 1) 语料确含文档化的结构化工具记录（`tool_use`/`tool_result` 记录类型，
+    //    adapter 作为非对话记录跳过）——格式有工具记录，不是"格式无记录"；
+    // 2) 所有消息以空 native id 上报（user/assistant 记录无 per-message id），
+    //    且 adapter 零 activity 输出——per RFC-0002 R5.3 + staging fail-closed，
+    //    活动根本无法锚定，Unsupported 是唯一诚实声明。
+    // 未来若格式获得 per-message id，本测试的断言会失败，强制重评 capability。
+    let expected = golden::read_expected(EXPECTED_PATH);
+    let bytes = golden::read_fixture_verified(FIXTURE_PATH, &expected);
+    let (report, sink) = parse_fixture(&bytes);
+    assert!(report.committed > 0, "fixture must exercise message output");
+    assert!(
+        sink.activities.is_empty(),
+        "adapter 不得发出无法锚定的 activity（空 native id 会被 staging fail-closed 丢弃）"
+    );
+    assert!(
+        !sink.messages.is_empty() && sink.messages.iter().all(|m| m.native_id.trim().is_empty()),
+        "golden 消息全部以空 native id 上报——若未来带上 per-message id，\
+         capability.rs 的 tool_activity 声明必须重新评估"
+    );
+    let text = std::str::from_utf8(&bytes).expect("fixture is UTF-8");
+    assert!(
+        text.contains("\"tool_use\"") && text.contains("\"tool_result\""),
+        "golden 语料必须保留文档化的 tool_use/tool_result 工具记录形状（如实承认格式有工具记录）"
+    );
+}
+
 /// 手动再生辅助：
 /// ```text
 /// cargo test -p agent-session-grep-provider-qoder --test golden -- --ignored --nocapture
