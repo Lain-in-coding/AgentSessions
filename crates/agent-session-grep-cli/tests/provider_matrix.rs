@@ -1638,3 +1638,86 @@ fn root_docs_cited_repo_paths_all_resolve() {
         "只核对到 {checked} 条被引用路径，抽取逻辑可能失效"
     );
 }
+
+#[test]
+fn every_adapter_leaves_its_source_directory_untouched_through_probe_and_parse() {
+    // RFC-0002 §7 与 ADR-0010 §2 触发条件 3 把"只读"列为硬契约：扫描/解析绝不
+    // 修改、删除、移动或锁定上游源。既有证据只到 golden 的 `fixture_blake3`，
+    // 那钉的是"fixture 没被 git 改坏"，不是"parse 没动过源"。
+    //
+    // 只断言入参切片没变是同义反复：`probe`/`parse` 都只收 `&[u8]`，类型系统已经
+    // 排除了原地改写。真实风险在文件系统——两个 SQLite adapter（opencode/cursor）
+    // 会把源拷进临时文件再只读打开，§6 row 11 的临时副本泄漏就出在这条路径上；
+    // 若哪天有人改成就地打开源文件、或在源目录旁落下 `-wal`/`-shm`/`.bak`，
+    // 现有测试全都不会失败。
+    //
+    // 因此这里把每个 provider 的 golden 字节写进一个独立临时目录，跑真实
+    // probe + parse，再要求该目录的完整快照（文件名 + 全部字节）逐项不变：
+    // 源内容不得改写，且不得新增或删除任何兄弟文件。
+    let matrix = ProviderCapabilityMatrix::current();
+    let mut checked = 0usize;
+
+    /// 目录快照：相对文件名 → 完整字节，递归收集。
+    ///
+    /// 直接存字节而不是摘要：fixture 都是 KiB 量级，逐字节比较比引入 blake3
+    /// dev-dependency 更直接，且失配时能看出是内容变了还是文件增删。
+    fn snapshot(dir: &std::path::Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+        let mut out = std::collections::BTreeMap::new();
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(current) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&current) else {
+                continue;
+            };
+            for entry in entries.filter_map(Result::ok) {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                let Ok(bytes) = std::fs::read(&path) else {
+                    continue;
+                };
+                let key = path
+                    .strip_prefix(dir)
+                    .unwrap_or(&path)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                out.insert(key, bytes);
+            }
+        }
+        out
+    }
+
+    for (adapter, fixture) in &implemented_adapters_with_fixtures() {
+        let provider_id = adapter.provider_id();
+        assert!(
+            matrix
+                .providers
+                .iter()
+                .any(|p| p.provider_id == provider_id),
+            "{provider_id}: capability.rs 缺少该 provider"
+        );
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = dir.path().join("source.bin");
+        std::fs::write(&source, fixture).expect("write source");
+        let before = snapshot(dir.path());
+        assert_eq!(before.len(), 1, "{provider_id}: 初始目录应只有源文件");
+
+        // 真实调用两条读路径；返回值不参与断言（虚报/少报由别的守护负责），
+        // 这里只问一件事：源目录有没有被动过。
+        let _ = adapter.probe(fixture);
+        let mut sink = agent_session_grep_testkit::golden::CapturingSink::default();
+        let _ = adapter.parse(fixture, &mut sink);
+
+        let after = snapshot(dir.path());
+        assert_eq!(
+            after, before,
+            "{provider_id}: probe/parse 之后源目录发生变化——只读契约被破坏\
+             （内容改写，或落下了 -wal/-shm/临时副本之类的兄弟文件）"
+        );
+        checked += 1;
+    }
+
+    assert_eq!(checked, 14, "必须逐一核对 14 个已实现 adapter 的只读契约");
+}
