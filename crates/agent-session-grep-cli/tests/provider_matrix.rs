@@ -1013,6 +1013,152 @@ fn capability_parse_claim_matches_real_parse_on_own_golden() {
     }
 }
 
+// ---- 能力列必须都有"声明 ↔ 真实行为"守护（元守护）----
+
+/// `capability.rs` 原文：用来从 `ProviderCapability` 结构体里解析出真实的能力列
+/// 集合，而不是在测试里手抄一份列名。
+const CAPABILITY_SOURCE: &str = include_str!("../../agent-session-grep-ports/src/capability.rs");
+
+/// 各能力列的守护测试所在源文件原文。守护分散在四个 crate 里（就近于被守护的
+/// 行为），故这里逐个 include。
+const GUARD_SOURCE_THIS: &str = include_str!("provider_matrix.rs");
+const GUARD_SOURCE_E2E: &str = include_str!("e2e.rs");
+const GUARD_SOURCE_MAIN: &str = include_str!("../src/main.rs");
+const GUARD_SOURCE_RESUME: &str =
+    include_str!("../../agent-session-grep-application/src/resume.rs");
+const GUARD_SOURCE_HANDOFF: &str =
+    include_str!("../../agent-session-grep-application/src/handoff_pack.rs");
+
+/// 每个能力列 → 把该列声明对照真实行为的守护测试名 + 该测试所在文件原文。
+///
+/// 这张表是"每列都必须有可执行反证"这条纪律的落地：新增能力列时，
+/// [`every_capability_column_has_a_behavior_guard`] 会因为列名不在表里而失败，
+/// 迫使新列先有守护再上线。
+const CAPABILITY_BEHAVIOR_GUARDS: &[(&str, &str, &str)] = &[
+    (
+        "discover",
+        "discover_roots_match_capability_discover_claims",
+        GUARD_SOURCE_MAIN,
+    ),
+    (
+        "probe",
+        "capability_probe_claim_matches_real_probe_on_own_golden",
+        GUARD_SOURCE_THIS,
+    ),
+    (
+        "parse",
+        "capability_parse_claim_matches_real_parse_on_own_golden",
+        GUARD_SOURCE_THIS,
+    ),
+    (
+        "search",
+        "capability_search_claim_matches_real_retrieval_for_every_provider",
+        GUARD_SOURCE_E2E,
+    ),
+    (
+        "context",
+        "capability_context_claim_matches_pinned_golden_parent_links",
+        GUARD_SOURCE_THIS,
+    ),
+    (
+        "resume",
+        "capability_matrix_resume_level_matches_builder_support",
+        GUARD_SOURCE_RESUME,
+    ),
+    (
+        "handoff",
+        "handoff_pack_generation_is_provider_independent",
+        GUARD_SOURCE_HANDOFF,
+    ),
+    (
+        "tool_activity",
+        "capability_tool_activity_claim_respects_fail_closed_anchoring",
+        GUARD_SOURCE_THIS,
+    ),
+    (
+        "source_span",
+        "capability_source_span_claim_matches_pinned_golden_span_presence",
+        GUARD_SOURCE_THIS,
+    ),
+    (
+        "incremental",
+        "capability_incremental_claim_matches_real_resync_for_every_provider",
+        GUARD_SOURCE_E2E,
+    ),
+];
+
+/// 从 `capability.rs` 的 `ProviderCapability` 结构体里解析出所有 `CapabilityLevel`
+/// 类型的字段名（即能力列）。`provider_id`/`variant_id`/`maturity` 不是能力列，
+/// 类型不同故天然排除。
+fn capability_column_names() -> Vec<String> {
+    let mut names = Vec::new();
+    let mut in_struct = false;
+    for line in CAPABILITY_SOURCE.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("pub struct ProviderCapability") {
+            in_struct = true;
+            continue;
+        }
+        if in_struct {
+            if trimmed == "}" {
+                break;
+            }
+            if let Some(rest) = trimmed.strip_prefix("pub ")
+                && let Some(name) = rest.strip_suffix(": CapabilityLevel,")
+            {
+                names.push(name.to_string());
+            }
+        }
+    }
+    names
+}
+
+#[test]
+fn every_capability_column_has_a_behavior_guard() {
+    // 这条纪律是从两次真实缺陷里长出来的：`handoff` 与 `incremental` 曾各有
+    // 文档↔capability.rs 的一致性守护，却没有任何测试把声明对照真实行为——
+    // 一致性守护只保证三份文件互相同意，不保证同意的那个值为真。结果两列都
+    // 少报（handoff 全 14 行记 Unsupported，而 `asg handoff` 是已发布命令；
+    // incremental 12 行记 Unsupported，而未变化的 resync 实测是 no-op）。
+    //
+    // 因此：能力列集合从 capability.rs 结构体解析（不手抄），每列都必须在
+    // CAPABILITY_BEHAVIOR_GUARDS 里登记一个真实存在的守护测试。新增第 11 列
+    // 会在此失败，直到它也有可执行反证。
+    let columns = capability_column_names();
+    assert!(
+        columns.len() >= 10,
+        "从 capability.rs 解析出的能力列只有 {} 个，解析逻辑可能失效：{columns:?}",
+        columns.len()
+    );
+
+    let mut guarded: Vec<&str> = CAPABILITY_BEHAVIOR_GUARDS
+        .iter()
+        .map(|(column, _, _)| *column)
+        .collect();
+    guarded.sort_unstable();
+    let mut declared: Vec<&str> = columns.iter().map(String::as_str).collect();
+    declared.sort_unstable();
+    assert_eq!(
+        guarded, declared,
+        "CAPABILITY_BEHAVIOR_GUARDS 必须恰好覆盖 capability.rs 的能力列——\
+         新增列必须同时新增把声明对照真实行为的守护测试"
+    );
+
+    // 登记的守护测试必须真实存在于所声明的源文件里（防止改名/删除后表变成谎言）。
+    for (column, guard, source) in CAPABILITY_BEHAVIOR_GUARDS {
+        let needle = format!("fn {guard}(");
+        assert!(
+            source.contains(&needle),
+            "能力列 `{column}` 登记的守护测试 `{guard}` 在其声明的源文件里找不到——\
+             守护被改名或删除后本表即失效"
+        );
+        assert!(
+            source.contains("#[test]"),
+            "能力列 `{column}` 的守护源文件必须含测试标注"
+        );
+    }
+}
+
 #[test]
 fn readme_implemented_provider_count_matches_capability_matrix() {
     // README 正文写着 "Currently implemented (14/16 planned; 2 deferred ...)"。
