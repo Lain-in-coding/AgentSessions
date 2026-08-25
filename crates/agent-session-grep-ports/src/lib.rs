@@ -131,6 +131,14 @@ pub trait CatalogStore {
 
     /// 当前对外可见的不可变 generation。`0` 表示尚未激活任何写批次。
     fn active_generation(&self) -> PortResult<u64>;
+
+    /// 全库 repo 身份聚合（schema v16 只读投影；status 展示用）。
+    ///
+    /// 返回 `(repo_slug, sessions)` 列表；无 repo 投影的存储返回空列表
+    /// （未知 ≠ 零）。默认空实现。
+    fn repo_totals(&self) -> PortResult<Vec<RepoTotals>> {
+        Ok(Vec::new())
+    }
 }
 
 /// One distinct Session that contains placements for a stable Message.
@@ -177,6 +185,15 @@ pub struct UsageTotals {
     /// 事件数按来源分列（observed = provider 逐事件给出，derived = 累计量派生）。
     pub observed_events: u64,
     pub derived_events: u64,
+}
+
+/// 单仓库会话聚合（schema v16 `session_repo_slugs` 只读投影；status 展示用）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoTotals {
+    /// 三段 repo slug（`host/owner/name`）——投影只存 slug，绝不落绝对路径。
+    pub repo_slug: String,
+    /// 派生到该 slug 的会话数。
+    pub sessions: u64,
 }
 
 /// Backend-independent read capability for contextual Message relations.
@@ -277,12 +294,15 @@ impl SearchInstant {
 ///
 /// `providers` is a canonical sorted set at the Application boundary. Provider
 /// entries are ORed; provider and time dimensions are ANDed. Time is a
-/// half-open UTC interval `[since, until)`.
+/// half-open UTC interval `[since, until)`. `repo` (schema v16) is an exact
+/// match on the privacy-safe `host/owner/name` repo slug derived from the
+/// session's pair-observed working directory; `None` = no repo restriction.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SearchFilters {
     pub providers: Vec<SearchProvider>,
     pub since: Option<SearchInstant>,
     pub until: Option<SearchInstant>,
+    pub repo: Option<String>,
 }
 
 impl SearchFilters {
@@ -290,10 +310,14 @@ impl SearchFilters {
         providers: Vec::new(),
         since: None,
         until: None,
+        repo: None,
     };
 
     pub fn is_empty(&self) -> bool {
-        self.providers.is_empty() && self.since.is_none() && self.until.is_none()
+        self.providers.is_empty()
+            && self.since.is_none()
+            && self.until.is_none()
+            && self.repo.is_none()
     }
 }
 
@@ -688,6 +712,9 @@ impl<T: CatalogStore + ?Sized> CatalogStore for &T {
     }
     fn usage_totals(&self) -> PortResult<Option<UsageTotals>> {
         (**self).usage_totals()
+    }
+    fn repo_totals(&self) -> PortResult<Vec<RepoTotals>> {
+        (**self).repo_totals()
     }
     fn active_generation(&self) -> PortResult<u64> {
         (**self).active_generation()
@@ -1673,6 +1700,11 @@ mod tests {
             ..SearchFilters::default()
         };
         assert!(!until_only.is_empty());
+        let repo_only = SearchFilters {
+            repo: Some("github.com/owner/name".into()),
+            ..SearchFilters::default()
+        };
+        assert!(!repo_only.is_empty());
     }
 
     struct FakeContextStore {

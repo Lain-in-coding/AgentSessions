@@ -10,6 +10,20 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Repo identity (schema v16 `session_repo_slugs` projection): sessions are
+  grouped by the `host/owner/name` slug derived from their pair-observed
+  working directory via local git detection (`git rev-parse --show-toplevel`
+  + `remote get-url origin`, cached per directory — Recall's repo identity
+  and sessiongrep's `find_repo_root` patterns). Only the three-segment slug
+  is stored — absolute paths never enter the projection (privacy contract).
+  A stored row means detection succeeded; no row means unknown (honest
+  degradation — directories that no longer exist, non-git directories, or
+  remotes without `origin` are never guessed). The projection rebuilds in
+  the same transaction as `session_fts` (affected-session commits and
+  `index rebuild`), and is removed with its session. `search --repo <slug>`
+  filters hits to sessions of that repo; `status` reports per-repo session
+  counts (`repos` key, sessions desc + slug asc). Detection failures never
+  fail sync or index.
 - Token usage tracking (usage dimension, schema v15 `usage_events` +
   `usage_event_membership` projection): only numbers the provider format
   explicitly gives are recorded — never estimated from text length or any

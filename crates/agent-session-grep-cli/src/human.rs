@@ -546,7 +546,8 @@ fn render_context(data: &Value) -> Vec<String> {
 }
 
 /// `status`：`entities: N` + `generation: G` 两行；usage 投影存在时追加一行
-/// 用量汇总（覆盖标记：无 usage 行 = 库中没有任何 provider 用量事实）。
+/// 用量汇总（覆盖标记：无 usage 行 = 库中没有任何 provider 用量事实）；
+/// repos 键存在时追加仓库聚合（空列表 = 无 repo 身份记录，未知 ≠ 零）。
 fn render_status(data: &Value) -> Vec<String> {
     let mut lines = vec![
         format!("entities: {}", number_text(data, "catalog_count")),
@@ -566,6 +567,18 @@ fn render_status(data: &Value) -> Vec<String> {
                 sum("cache_read_tokens"),
                 sum("derived_events"),
             ));
+        }
+    }
+    if let Some(repos) = data.get("repos").and_then(Value::as_array) {
+        if repos.is_empty() {
+            lines.push("repos: 无仓库身份记录（0 个会话派生 repo slug）".into());
+        } else {
+            lines.push(format!("repos: {} 个仓库", repos.len()));
+            for repo in repos {
+                let slug = repo.get("repo_slug").and_then(Value::as_str).unwrap_or("");
+                let sessions = repo.get("sessions").and_then(Value::as_u64).unwrap_or(0);
+                lines.push(format!("  {slug}  {sessions} 个会话"));
+            }
         }
     }
     lines
@@ -1676,6 +1689,41 @@ mod tests {
     fn status_missing_fields_degrade_to_placeholders() {
         let lines = render_success("status", Outcome::Success, &json!({}), &Page::default());
         assert_eq!(lines, ["entities: ?", "generation: ?"]);
+    }
+
+    #[test]
+    fn status_renders_repo_aggregation_lines() {
+        // 有 repo 事实：每仓库一行（slug + 会话数），顺序与后端聚合一致。
+        let data = json!({
+            "catalog_count": 5,
+            "generation": 2,
+            "repos": [
+                {"repo_slug": "github.com/o/shared", "sessions": 2},
+                {"repo_slug": "github.com/o/solo", "sessions": 1},
+            ],
+        });
+        let lines = render_success("status", Outcome::Success, &data, &Page::default());
+        assert_eq!(
+            lines,
+            [
+                "entities: 5",
+                "generation: 2",
+                "repos: 2 个仓库",
+                "  github.com/o/shared  2 个会话",
+                "  github.com/o/solo  1 个会话",
+            ]
+        );
+        // 空列表 = 无 repo 身份记录（未知 ≠ 零）。
+        let empty = json!({ "catalog_count": 5, "generation": 2, "repos": [] });
+        let lines = render_success("status", Outcome::Success, &empty, &Page::default());
+        assert_eq!(
+            lines,
+            [
+                "entities: 5",
+                "generation: 2",
+                "repos: 无仓库身份记录（0 个会话派生 repo slug）",
+            ]
+        );
     }
 
     #[test]

@@ -1388,13 +1388,19 @@ fn list_and_status_report_catalog_contents() {
 }
 
 fn codex_incremental_fixture(session_id: &str, messages: &[(&str, &str, &str)]) -> String {
+    codex_fixture_with_cwd(session_id, "/workspace/synthetic-codex-fixture", messages)
+}
+
+/// 与 [`codex_incremental_fixture`] 同构，但 cwd 由调用方指定——repo identity
+/// 测试把 session_meta 的 cwd 指向真实临时 git 仓库，驱动 sync 期的 git 检测。
+fn codex_fixture_with_cwd(session_id: &str, cwd: &str, messages: &[(&str, &str, &str)]) -> String {
     let mut lines = vec![
         serde_json::json!({
             "timestamp": "2026-08-15T03:00:00.000Z",
             "type": "session_meta",
             "payload": {
                 "session_id": session_id,
-                "cwd": "/workspace/synthetic-codex-fixture",
+                "cwd": cwd,
             },
         })
         .to_string(),
@@ -1420,6 +1426,27 @@ fn codex_incremental_fixture(session_id: &str, messages: &[(&str, &str, &str)]) 
         );
     }
     format!("{}\n", lines.join("\n"))
+}
+
+/// 在临时目录里建一个带 origin 远端的最小 git 仓库（repo identity e2e 用）。
+/// 空仓库无需提交，`rev-parse --show-toplevel` 与 `remote get-url origin`
+/// 即可生效；路径在运行时生成，永不进入 tracked 文本。
+fn init_git_repo_with_origin(dir: &Path, name: &str, url: &str) -> std::path::PathBuf {
+    let repo = dir.join(name);
+    std::fs::create_dir_all(&repo).unwrap();
+    let init = Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&repo)
+        .status()
+        .expect("spawn git init");
+    assert!(init.success(), "git init failed");
+    let add = Command::new("git")
+        .args(["remote", "add", "origin", url])
+        .current_dir(&repo)
+        .status()
+        .expect("spawn git remote add");
+    assert!(add.success(), "git remote add failed");
+    repo
 }
 
 #[test]
@@ -1589,6 +1616,130 @@ fn search_by_working_directory_returns_session() {
     assert!(
         !stdout(&out).contains("msg_v1_"),
         "source path must never be searchable: {}",
+        stdout(&out)
+    );
+}
+
+#[test]
+fn search_repo_filter_returns_only_matching_sessions() {
+    // repo identity（schema v16）：sync 期对本机 git 仓库检测派生的
+    // host/owner/name slug，--repo 逐字等值过滤；无仓库身份的会话与其它
+    // slug 诚实排除（不猜）。
+    let (dir, db) = temp_db("repo-filter");
+    let repo = init_git_repo_with_origin(
+        dir.path(),
+        "repo-app",
+        "https://github.com/synthetic-owner/synthetic-repo.git",
+    );
+    let fixture = dir.path().join("rollout-repo-filter.jsonl");
+    std::fs::write(
+        &fixture,
+        codex_fixture_with_cwd(
+            "repo-filter-session",
+            &repo.to_string_lossy(),
+            &[("repo_user_message", "user", "repo filter body")],
+        ),
+    )
+    .expect("write codex fixture");
+    let path = fixture.to_string_lossy().into_owned();
+
+    let out = run(&db, &["sync", &path]);
+    assert!(out.status.success(), "sync failed: {}", stdout(&out));
+
+    // 命中：slug 相等返回该会话消息，且不泄漏绝对路径。
+    let out = run(
+        &db,
+        &[
+            "search",
+            "--repo",
+            "github.com/synthetic-owner/synthetic-repo",
+            "filter",
+        ],
+    );
+    assert!(out.status.success(), "search failed: {}", stdout(&out));
+    let s = stdout(&out);
+    assert!(
+        s.contains("msg_v1_"),
+        "repo filter should match the synced session: {s}"
+    );
+    assert!(
+        !s.contains(repo.to_string_lossy().as_ref()),
+        "absolute repo path must never leak into output: {s}"
+    );
+
+    // 不命中：其它 slug 诚实空页。
+    let out = run(
+        &db,
+        &["search", "--repo", "github.com/other/other", "filter"],
+    );
+    assert!(out.status.success(), "search failed: {}", stdout(&out));
+    assert!(
+        !stdout(&out).contains("msg_v1_"),
+        "other slug must not match: {}",
+        stdout(&out)
+    );
+}
+
+#[test]
+fn status_reports_repo_aggregation() {
+    // status 按 repo 聚合（会话数降序、slug 升序 tiebreak）。
+    let (dir, db) = temp_db("repo-status");
+    let repo_a = init_git_repo_with_origin(dir.path(), "repo-a", "https://github.com/o/alpha.git");
+    let repo_b = init_git_repo_with_origin(dir.path(), "repo-b", "https://github.com/o/beta.git");
+    let fixture_a = dir.path().join("rollout-repo-status-a.jsonl");
+    std::fs::write(
+        &fixture_a,
+        codex_fixture_with_cwd(
+            "repo-status-session-a",
+            &repo_a.to_string_lossy(),
+            &[("repo_status_a", "user", "repo status alpha body")],
+        ),
+    )
+    .expect("write codex fixture a");
+    let out = run(&db, &["sync", &fixture_a.to_string_lossy()]);
+    assert!(out.status.success(), "sync a failed: {}", stdout(&out));
+    let fixture_b = dir.path().join("rollout-repo-status-b.jsonl");
+    std::fs::write(
+        &fixture_b,
+        codex_fixture_with_cwd(
+            "repo-status-session-b",
+            &repo_b.to_string_lossy(),
+            &[("repo_status_b", "user", "repo status beta body")],
+        ),
+    )
+    .expect("write codex fixture b");
+    let out = run(&db, &["sync", &fixture_b.to_string_lossy()]);
+    assert!(out.status.success(), "sync b failed: {}", stdout(&out));
+
+    let out = run(&db, &["status"]);
+    assert!(out.status.success(), "status failed: {}", stdout(&out));
+    let first = parse_first_line(&out);
+    let repos = first["data"]["repos"]
+        .as_array()
+        .expect("repos must be an array");
+    assert_eq!(repos.len(), 2, "{first}");
+    let slugs: Vec<&str> = repos
+        .iter()
+        .map(|r| r["repo_slug"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        slugs,
+        vec!["github.com/o/alpha", "github.com/o/beta"],
+        "same session count must tiebreak by slug asc: {first}"
+    );
+    for repo in repos {
+        assert_eq!(repo["sessions"].as_u64(), Some(1), "{first}");
+    }
+}
+
+#[test]
+fn search_repo_flag_requires_value() {
+    let (_dir, db) = temp_db("repo-flag-value");
+    let out = run(&db, &["search", "anything", "--repo"]);
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "missing --repo value must be a usage error: {}",
         stdout(&out)
     );
 }

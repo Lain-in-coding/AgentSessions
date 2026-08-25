@@ -11,8 +11,8 @@ use agent_session_grep_domain::{
 use agent_session_grep_ports::{
     CanonicalEventSink, CatalogEntry, CatalogStore, Confidence, ContextGraphStore, MessageEvent,
     NoResumeClaims, NoSemanticIndex, ParseReport, PortError, PortResult, ProbeResult,
-    ProviderAdapter, ProviderError, ReadOnlySource, ResumeClaimsStore, RetrievalMode, SearchFacets,
-    SearchFilters, SearchHit, SearchIndex, SearchInstant, SearchQuery, SemanticIndex,
+    ProviderAdapter, ProviderError, ReadOnlySource, RepoTotals, ResumeClaimsStore, RetrievalMode,
+    SearchFacets, SearchFilters, SearchHit, SearchIndex, SearchInstant, SearchQuery, SemanticIndex,
     SessionResumeMetadata, ToolActivityEvent, UsageEvent, UsageTotals,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -402,6 +402,8 @@ pub enum AppResponse {
         source_placement_claims: u64,
         /// 全库 token 用量聚合；`None` = 存储无 usage 投影。
         usage: Option<UsageTotals>,
+        /// 全库 repo 身份聚合（schema v16）；空列表 = 无 repo 事实（未知 ≠ 零）。
+        repos: Vec<RepoTotals>,
     },
 }
 
@@ -874,12 +876,14 @@ fn search_query_digest(
         .until
         .map(|instant| format!("{}:{}", instant.unix_seconds, instant.nanosecond))
         .unwrap_or_default();
+    let repo = filters.repo.as_deref().unwrap_or_default();
     cursor::digest_query(&format!(
-        "search-filter-v1\0{}\0providers={}\0since={}\0until={}\0include_system={}\0group_by_session={}\0facets={}",
+        "search-filter-v1\0{}\0providers={}\0since={}\0until={}\0repo={}\0include_system={}\0group_by_session={}\0facets={}",
         query,
         providers,
         since,
         until,
+        repo,
         include_system,
         group_by_session,
         facets.canonical_binding(),
@@ -2088,12 +2092,14 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore, 
                 let active_generation = self.catalog.active_generation()?;
                 let context_stats = self.catalog.context_stats()?;
                 let usage = self.catalog.usage_totals()?;
+                let repos = self.catalog.repo_totals()?;
                 Ok(AppResponse::Status {
                     catalog_count,
                     active_generation,
                     placements: context_stats.placements,
                     source_placement_claims: context_stats.source_placement_claims,
                     usage,
+                    repos,
                 })
             }
         }
@@ -3037,7 +3043,8 @@ mod tests {
                 placements: 2,
                 source_placement_claims: 3,
                 usage: None,
-            })
+                repos,
+            }) if repos.is_empty()
         ));
     }
 
@@ -3906,6 +3913,7 @@ mod tests {
                         providers: Vec::new(),
                         since: Some(since),
                         until: Some(until),
+                        repo: None,
                     },
                 ))
                 .expect_err("since >= until must be rejected");
@@ -3925,6 +3933,7 @@ mod tests {
             providers: vec![SearchProvider::Codex, SearchProvider::Claude],
             since: Some(seconds_instant(1_000)),
             until: None,
+            repo: None,
         };
         let (_, next, _, _) = hits_of(
             app.handle(filtered_search_req("q", 2, None, issued_filters))
@@ -3938,6 +3947,7 @@ mod tests {
             ],
             since: Some(seconds_instant(1_000)),
             until: None,
+            repo: None,
         };
         assert!(
             app.handle(filtered_search_req(
@@ -3953,9 +3963,26 @@ mod tests {
             providers: Vec::new(),
             since: Some(seconds_instant(2_000)),
             until: None,
+            repo: None,
         };
         let err = app
             .handle(filtered_search_req("q", 2, next.clone(), mutated))
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            AppError::Cursor(cursor::CursorError::Invalid(_))
+        ));
+
+        // repo 维度同样绑定进 digest：同 query 同 provider/time、不同 repo
+        // 的旧令牌必须失效（schema v16）。
+        let mutated_repo = SearchFilters {
+            providers: vec![SearchProvider::Codex, SearchProvider::Claude],
+            since: Some(seconds_instant(1_000)),
+            until: None,
+            repo: Some("github.com/o/app".into()),
+        };
+        let err = app
+            .handle(filtered_search_req("q", 2, next.clone(), mutated_repo))
             .unwrap_err();
         assert!(matches!(
             err,
@@ -3978,6 +4005,7 @@ mod tests {
                     providers: vec![SearchProvider::Claude],
                     since: None,
                     until: None,
+                    repo: None,
                 },
             ))
             .unwrap_err();

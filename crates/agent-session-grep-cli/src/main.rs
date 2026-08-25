@@ -19,6 +19,7 @@ mod human;
 mod mcp;
 mod protocol;
 mod redaction;
+mod repo_identity;
 mod serve;
 mod tui;
 
@@ -210,7 +211,7 @@ fn extract_offline_flag(args: &[String]) -> bool {
         match a.as_str() {
             "--db" | "--output" | "--request-id" | "--cursor" | "--max-items" | "--max-bytes"
             | "--max-messages" | "--policy" | "--level" | "--provider" | "--since" | "--until"
-            | "--session" | "--around" => {
+            | "--repo" | "--session" | "--around" => {
                 it.next();
             }
             _ => {}
@@ -255,7 +256,8 @@ fn extract_request_id(args: &[String]) -> Result<Option<String>, String> {
         match a.as_str() {
             "--db" | "--output" | "--cursor" | "--max-items" | "--max-bytes" | "--max-messages"
             | "--max-evidence" | "--max-tokens" | "--policy" | "--level" | "--provider"
-            | "--since" | "--until" | "--session" | "--around" | "--tool-kind" | "--tool-name" => {
+            | "--since" | "--until" | "--repo" | "--session" | "--around" | "--tool-kind"
+            | "--tool-name" => {
                 it.next();
             }
             _ => {}
@@ -276,8 +278,8 @@ fn command_name(args: &[String]) -> String {
         match a.as_str() {
             "--db" | "--output" | "--cursor" | "--max-items" | "--max-bytes" | "--max-messages"
             | "--max-evidence" | "--max-tokens" | "--policy" | "--level" | "--request-id"
-            | "--provider" | "--since" | "--until" | "--session" | "--around" | "--tool-kind"
-            | "--tool-name" => {
+            | "--provider" | "--since" | "--until" | "--repo" | "--session" | "--around"
+            | "--tool-kind" | "--tool-name" => {
                 it.next(); // 消费其取值
             }
             "--robot" | "--no-color" | "--help" | "-h" | "--version" | "-V" | "--discover"
@@ -347,8 +349,8 @@ fn intercept_help_or_version(args: &[String]) -> Option<HelpRequest> {
             // 带值 flag 跳过其取值，避免把取值误当命令名。
             "--db" | "--output" | "--request-id" | "--cursor" | "--max-items" | "--max-bytes"
             | "--max-messages" | "--max-evidence" | "--max-tokens" | "--policy" | "--level"
-            | "--provider" | "--since" | "--until" | "--session" | "--around" | "--tool-kind"
-            | "--tool-name" => {
+            | "--provider" | "--since" | "--until" | "--repo" | "--session" | "--around"
+            | "--tool-kind" | "--tool-name" => {
                 it.next();
             }
             _ => {}
@@ -439,6 +441,12 @@ fn run(
         SqliteStore::open(&db)
     }
     .map_err(ProtocolError::from)?;
+    if writes {
+        // repo identity（schema v16）：写路径注入真实 git 解析器（Recall
+        // 同款 rev-parse + remote get-url）。检测失败一律 None（诚实降级），
+        // 绝不阻塞 sync/index——git 不可用只是少一维投影。
+        store.set_repo_slug_resolver(Box::new(repo_identity::GitRepoSlugResolver::default()));
+    }
     // mcp：stdio JSON-RPC 服务接管整个 stdout（MCP framing 即协议），不走
     // dispatch/emit_result；--output/--robot/--request-id 对其无意义（design §0.6）。
     if rest.first().map(String::as_str) == Some("mcp") {
@@ -988,6 +996,8 @@ FILTER (search):
     --provider claude|claude-code|codex  限定 provider（可重复，多个取值按 OR 合并）
     --since <time>         起始时间（含）；RFC3339/ISO-8601 绝对值或 1h/1d/1w 相对量
     --until <time>         结束时间（不含）；语法同 --since
+    --repo <slug>          限定会话仓库（host/owner/name 三段 slug，逐字相等；
+                           与 status 的 repos 清单一致；无仓库身份的会话被排除）
     --include-system       默认排除 system/developer 角色消息；加此旗标恢复
     --group-by-session     按会话归并：每会话保留最高分命中并附 occurrences 计数
 
@@ -1130,7 +1140,8 @@ fn subcommand_help_text(cmd: &str) -> &'static str {
             "search <query>：全文检索历史会话，按相关性降序返回命中。\n\
                      示例：agent-session-grep --db <path> search 配置备份\n\
                      flag（放子命令后）：--max-items <n> 页大小、--cursor <token> 翻页、--max-bytes <n> 预算；\n\
-                     过滤：--provider claude|claude-code|codex（可重复，OR）、--since/--until <RFC3339 或 1h|1d|1w>（半开区间 [since, until)）；\n\
+                     过滤：--provider claude|claude-code|codex（可重复，OR）、--since/--until <RFC3339 或 1h|1d|1w>（半开区间 [since, until)）、\n\
+                     --repo <host/owner/name>（会话仓库 slug，逐字相等；与 status 的 repos 清单一致）；\n\
                      检索模式：--mode lexical|semantic|hybrid（默认 lexical）。semantic/hybrid 需先跑 `index embeddings`；\n\
                      向量索引未就绪时结果标注 retrieval_mode=lexical_fallback 并给出 warning，绝不静默降级；\n\
                      --include-system（默认排除 system/developer 角色消息）、--group-by-session（按会话归并并附 occurrences）；\n\
@@ -1370,6 +1381,7 @@ fn is_known_flag_name(token: &str) -> bool {
             | "--provider"
             | "--since"
             | "--until"
+            | "--repo"
             | "--session"
             | "--around"
             | "--snapshot-json"
@@ -1687,6 +1699,7 @@ fn dispatch(
             let providers = extract_repeated_flag(&mut args, "--provider")?;
             let since = extract_flag(&mut args, "--since")?;
             let until = extract_flag(&mut args, "--until")?;
+            let repo = extract_flag(&mut args, "--repo")?;
             let include_system = take_bool_flag(&mut args, "--include-system");
             let group_by_session = take_bool_flag(&mut args, "--group-by-session");
             // #3 检索模式：--mode lexical|semantic|hybrid；默认 lexical。
@@ -1711,6 +1724,7 @@ fn dispatch(
                 &providers,
                 since.as_deref(),
                 until.as_deref(),
+                repo.as_deref(),
                 app.now_ms(),
             )?;
             let budget = budget_from_flags(max_items.as_deref(), max_bytes.as_deref(), None)?;
@@ -1874,6 +1888,7 @@ fn dispatch(
                 &providers,
                 since.as_deref(),
                 until.as_deref(),
+                None,
                 app.now_ms(),
             )?;
             no_extra_args(&args, 1, "handoff <query>")?;
@@ -2419,6 +2434,7 @@ fn search_filters_from_flags(
     providers: &[String],
     since: Option<&str>,
     until: Option<&str>,
+    repo: Option<&str>,
     now_ms: i64,
 ) -> Result<SearchFilters, CliError> {
     let mut filters = SearchFilters::default();
@@ -2433,6 +2449,15 @@ fn search_filters_from_flags(
     }
     filters.since = parse_time_flag("--since", since, now_ms)?;
     filters.until = parse_time_flag("--until", until, now_ms)?;
+    // repo slug（schema v16）：逐字等值过滤；空白/空串是用法错误（拼写
+    // 错误伪装成"匹配零结果"比报错更糟）。形状不校验——未命中即诚实空页。
+    filters.repo = match repo {
+        Some(raw) if raw.trim().is_empty() => {
+            return Err(CliError::usage("--repo must not be empty"));
+        }
+        Some(raw) => Some(raw.to_string()),
+        None => None,
+    };
     Ok(filters)
 }
 
@@ -4425,6 +4450,7 @@ fn render(
             placements,
             source_placement_claims,
             usage,
+            repos,
         } => (
             protocol::Outcome::Success,
             serde_json::json!({
@@ -4443,6 +4469,11 @@ fn render(
                     "observed_events": totals.observed_events,
                     "derived_events": totals.derived_events,
                 })),
+                // repo identity（schema v16）：空列表 = 无 repo 事实（未知 ≠ 零）。
+                "repos": repos.iter().map(|totals| serde_json::json!({
+                    "repo_slug": totals.repo_slug,
+                    "sessions": totals.sessions,
+                })).collect::<Vec<_>>(),
             }),
             protocol::Page::default(),
             Vec::new(),
@@ -6096,6 +6127,32 @@ mod tests {
         let filters = hook_search_filters(&decay, now_ms).expect("decay valid");
         let since_ms = filters.since.expect("decay sets since").unix_seconds * 1_000;
         assert_eq!(since_ms, now_ms - 7 * 86_400_000);
+    }
+
+    #[test]
+    fn search_filters_from_flags_binds_repo_parameter() {
+        // 有值：逐字进 filters.repo（形状不校验——未命中即诚实空页）。
+        let filters =
+            search_filters_from_flags(&[], None, None, Some("github.com/o/app"), 1_000_000)
+                .expect("repo valid");
+        assert_eq!(filters.repo.as_deref(), Some("github.com/o/app"));
+        assert!(
+            !filters.is_empty(),
+            "repo-only filter must not read as empty"
+        );
+
+        // 缺省：repo 无限制。
+        let filters = search_filters_from_flags(&[], None, None, None, 1_000_000).expect("no repo");
+        assert!(filters.repo.is_none());
+        assert!(filters.is_empty());
+
+        // 空串/纯空白是用法错误（拼写错误不得伪装成零结果）。
+        for bad in ["", "   "] {
+            let error =
+                search_filters_from_flags(&[], None, None, Some(bad), 1_000_000).unwrap_err();
+            assert_eq!(error.0.code, CanonicalCode::InvalidRequest);
+            assert!(error.0.message.contains("--repo"), "{:?}", error.0.message);
+        }
     }
 
     // ---- 隐私（R2）----

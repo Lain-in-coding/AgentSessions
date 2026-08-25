@@ -27,9 +27,9 @@ use agent_session_grep_domain::{
 };
 use agent_session_grep_ports::{
     CatalogEntry, CatalogStore, ContextGraphStore, ContextStats, MessageContextCandidate,
-    PortError, PortResult, ResumeClaimsStore, SearchFacets, SearchHit, SearchIndex, SearchQuery,
-    SemanticIndex, SessionResumeMetadata, SidechainFacet, SourcePlacement, SourceResumeClaim,
-    UsageTotals,
+    PortError, PortResult, RepoTotals, ResumeClaimsStore, SearchFacets, SearchHit, SearchIndex,
+    SearchQuery, SemanticIndex, SessionResumeMetadata, SidechainFacet, SourcePlacement,
+    SourceResumeClaim, UsageTotals,
 };
 use rusqlite::{Connection, OptionalExtension};
 use std::any::Any;
@@ -1378,6 +1378,29 @@ fn stored_relation(value: &str) -> PortResult<MessageRelation> {
     }
 }
 
+/// Repo slug 解析器（schema v16）：cwd → 宿主仓 `host/owner/name` 三段 slug。
+///
+/// 写入路径由组合根注入真实实现（CLI 的 git 检测；借鉴 Recall 的
+/// repo_identity），测试注入确定性的 fake。解析器是环境事实探测器：
+/// 检测失败一律 `None`（诚实降级），绝不报错、绝不猜——sync/index 永远
+/// 不因 git 不可用而失败。
+pub trait RepoSlugResolver {
+    /// cwd → repo slug；任何一步失败（目录不存在/非 git 仓库/无 origin/
+    /// URL 形状不认识）返回 None。
+    fn resolve(&self, cwd: &str) -> Option<String>;
+}
+
+/// 默认解析器：不探测（repo identity 投影关闭）。未注入解析器时
+/// `session_repo_slugs` 恒为空——"无行 = 未知"，与"有解析器但检测失败"
+/// 同义，读取侧无需区分。
+pub struct NoopRepoSlugResolver;
+
+impl RepoSlugResolver for NoopRepoSlugResolver {
+    fn resolve(&self, _cwd: &str) -> Option<String> {
+        None
+    }
+}
+
 /// SQLite 支撑的存储：catalog 表存规范化实体负载，FTS5 表提供全文检索。
 ///
 /// 单连接 + `RefCell` 内部可变：端口 trait 以 `&self` 取用，而 rusqlite 的写操作
@@ -1393,6 +1416,10 @@ pub struct SqliteStore {
     /// 全部方法降级为空/未就绪。设置它是调用方声明"这些向量属于哪个模型"，
     /// 换模型后旧维度向量因 model_id 不匹配自然被排除。
     semantic_model_id: RefCell<Option<String>>,
+    /// Repo slug 解析器（schema v16）：写路径由组合根注入真实 git 实现；
+    /// 默认 [`NoopRepoSlugResolver`]（投影关闭）。解析器是环境事实探测器，
+    /// 失败一律 None。
+    repo_slug_resolver: RefCell<Box<dyn RepoSlugResolver>>,
 }
 
 /// 一批源路径的指纹缓存项：捕获时长度与内容指纹。
@@ -1416,6 +1443,7 @@ impl SqliteStore {
             conn: RefCell::new(conn),
             _lease: None,
             semantic_model_id: RefCell::new(None),
+            repo_slug_resolver: RefCell::new(Box::new(NoopRepoSlugResolver)),
         })
     }
 
@@ -1439,6 +1467,7 @@ impl SqliteStore {
             conn: RefCell::new(conn),
             _lease: Some(lease),
             semantic_model_id: RefCell::new(None),
+            repo_slug_resolver: RefCell::new(Box::new(NoopRepoSlugResolver)),
         };
         // lease 已到手，当前进程是唯一写者；安全收敛上次崩溃留下的无副作用 intent。
         store.recover_interrupted()?;
@@ -1453,6 +1482,7 @@ impl SqliteStore {
             conn: RefCell::new(conn),
             _lease: None,
             semantic_model_id: RefCell::new(None),
+            repo_slug_resolver: RefCell::new(Box::new(NoopRepoSlugResolver)),
         })
     }
 
@@ -1680,6 +1710,9 @@ impl SqliteStore {
         }
         if current < 15 {
             Self::migrate_v14_to_v15(conn)?;
+        }
+        if current < 16 {
+            Self::migrate_v15_to_v16(conn)?;
         }
         // 不随 user_version 门控：旧 v7 库（本列存在前建成的）打开时同样需要。
         Self::ensure_fts_ids_rowid(conn)?;
@@ -2125,11 +2158,54 @@ impl SqliteStore {
         tx.commit().map_err(backend)
     }
 
+    /// Add the v16 repo-identity projection in one explicit transaction
+    /// (additive, non-destructive).
+    ///
+    /// `session_repo_slugs` stores the privacy-safe `host/owner/name` slug
+    /// derived from each Session's pair-observed working directory via the
+    /// injected [`RepoSlugResolver`]（git rev-parse --show-toplevel +
+    /// remote get-url origin，Recall 同款）。绝对路径绝不落此表——只有三段
+    /// slug。行存在 = 检测成功；无行 = 未知/未派生（诚实降级，不猜）。
+    /// 生命周期与 `session_fts` 同一重建批次（affected-session commit +
+    /// rebuild 同事务），session 退役时同事务删除。旧库迁到 v16 后表为空，
+    /// 由 rebuild 或后续 affected source 提交回填。步骤只依赖 v7+ 表，在
+    /// v7..=15 的任意 catalog 上都能干净运行——与并行 schema 分支
+    /// merge-safe。`user_version = 16` 与 DDL 同事务。
+    fn migrate_v15_to_v16(conn: &Connection) -> PortResult<()> {
+        Self::migrate_v15_to_v16_inner(conn, false)
+    }
+
+    fn migrate_v15_to_v16_inner(conn: &Connection, inject_failure: bool) -> PortResult<()> {
+        let tx = conn.unchecked_transaction().map_err(backend)?;
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS session_repo_slugs (
+                 session_wire TEXT PRIMARY KEY,
+                 repo_slug    TEXT NOT NULL
+             );
+             PRAGMA user_version = 16;",
+        )
+        .map_err(backend)?;
+
+        if inject_failure {
+            return Err(PortError::Backend(
+                "injected v15-to-v16 migration failure".into(),
+            ));
+        }
+
+        tx.commit().map_err(backend)
+    }
+
     /// 声明语义向量归属的模型 id（#3）。未设置时 `SemanticIndex` 全部方法
     /// 视为未配置：`is_ready` 为 false、查询返回空、写入报错——这样"忘了配模型"
     /// 不会变成往表里写无归属向量。
     pub fn set_semantic_model(&self, model_id: impl Into<String>) {
         *self.semantic_model_id.borrow_mut() = Some(model_id.into());
+    }
+
+    /// 注入 repo slug 解析器（schema v16）。写路径（sync/index）在提交前
+    /// 注入真实 git 实现；未注入时投影恒为空（诚实降级，不猜）。
+    pub fn set_repo_slug_resolver(&self, resolver: Box<dyn RepoSlugResolver>) {
+        *self.repo_slug_resolver.borrow_mut() = resolver;
     }
 
     /// 清除当前模型下的全部向量（换模型或 rebuild 语义索引时使用）。
@@ -2299,6 +2375,37 @@ impl SqliteStore {
             observed_events: to_u64(totals.6)?,
             derived_events: to_u64(totals.7)?,
         }))
+    }
+
+    /// 全库 repo 身份聚合（schema v16 只读投影，status 展示用）。
+    ///
+    /// 每 slug 一行 `(repo_slug, sessions)`，会话数降序、slug 升序
+    /// tiebreak（确定性）。无投影行 → 空列表（未知 ≠ 零——绝不把
+    /// "没有 repo 事实"说成"零个仓库"）。
+    pub fn repo_totals(&self) -> PortResult<Vec<RepoTotals>> {
+        let conn = self.conn.borrow();
+        let mut stmt = conn
+            .prepare(
+                "SELECT repo_slug, COUNT(*)
+                 FROM session_repo_slugs
+                 GROUP BY repo_slug
+                 ORDER BY COUNT(*) DESC, repo_slug ASC",
+            )
+            .map_err(backend)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })
+            .map_err(backend)?;
+        let mut totals = Vec::new();
+        for row in rows {
+            let (repo_slug, sessions) = row.map_err(backend)?;
+            totals.push(RepoTotals {
+                repo_slug,
+                sessions: u64::try_from(sessions.max(0)).map_err(backend)?,
+            });
+        }
+        Ok(totals)
     }
 
     /// v12 工具活动投影的孤儿扫描（只读，doctor/维护证据）：
@@ -5107,6 +5214,73 @@ impl SqliteStore {
         Self::first_user_text_for_session(conn, session_wire, SESSION_TITLE_MAX_CHARS)
     }
 
+    /// Conflict-free resolved resume claim for one canonical Session。
+    ///
+    /// 声明冲突是隐私敏感信号：同一 Session 的 claims 必须逐字段一致，
+    /// 否则 fail closed 返回 None（绝不取任一冲突值）。`session_fts`
+    /// 搜索文本与 `session_repo_slugs`（schema v16）共用同一裁决。
+    fn resolved_session_claim(
+        conn: &Connection,
+        session_wire: &str,
+    ) -> PortResult<Option<StoredResumeClaim>> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT session_id, provider_id, provider_session_id,
+                        provider_session_id_state, original_working_directory,
+                        original_working_directory_state, pair_observed
+                 FROM source_session_resume_claims
+                 WHERE session_id = ?1",
+            )
+            .map_err(backend)?;
+        let rows = stmt
+            .query_map([session_wire], |row| {
+                Ok(StoredResumeClaim {
+                    session_id: row.get(0)?,
+                    provider_id: row.get(1)?,
+                    provider_session_id: row.get(2)?,
+                    provider_session_id_state: row.get(3)?,
+                    original_working_directory: row.get(4)?,
+                    original_working_directory_state: row.get(5)?,
+                    pair_observed: row.get(6)?,
+                })
+            })
+            .map_err(backend)?;
+        let mut claim: Option<StoredResumeClaim> = None;
+        let mut conflicting = false;
+        for row in rows {
+            let next = row.map_err(backend)?;
+            if claim.as_ref().is_some_and(|current| current != &next) {
+                conflicting = true;
+                break;
+            }
+            claim = Some(next);
+        }
+        if conflicting { Ok(None) } else { Ok(claim) }
+    }
+
+    /// Derive the repo slug for one resolved claim（schema v16）。
+    ///
+    /// 与 `session_fts` 的 cwd 披露同一门禁：provider_session_id 已
+    /// resolved、pair-observed、cwd resolved 且非空；再交给注入的
+    /// [`RepoSlugResolver`]。任一缺失或检测失败 → None（无行，不猜）。
+    /// 纯函数（无 I/O 以外注入的 resolver），失败测试先行锚定。
+    fn session_repo_slug(
+        claim: &StoredResumeClaim,
+        resolver: &dyn RepoSlugResolver,
+    ) -> Option<String> {
+        if claim.provider_session_id_state != "resolved" || !claim.pair_observed {
+            return None;
+        }
+        if claim.original_working_directory_state != "resolved" {
+            return None;
+        }
+        let cwd = claim.original_working_directory.as_deref()?;
+        if cwd.is_empty() {
+            return None;
+        }
+        resolver.resolve(cwd)
+    }
+
     /// Build one Session's bounded search text from authoritative relational
     /// state. A representative placement is required so a metadata match can be
     /// returned as an existing Message `SearchHit` without fabricating an id.
@@ -5127,41 +5301,7 @@ impl SqliteStore {
 
         // Claims for one canonical Session must agree exactly. Conflict is
         // privacy-sensitive, so fail closed and index none of their values.
-        let resolved_claim = {
-            let mut stmt = conn
-                .prepare(
-                    "SELECT session_id, provider_id, provider_session_id,
-                            provider_session_id_state, original_working_directory,
-                            original_working_directory_state, pair_observed
-                     FROM source_session_resume_claims
-                     WHERE session_id = ?1",
-                )
-                .map_err(backend)?;
-            let rows = stmt
-                .query_map([session_wire], |row| {
-                    Ok(StoredResumeClaim {
-                        session_id: row.get(0)?,
-                        provider_id: row.get(1)?,
-                        provider_session_id: row.get(2)?,
-                        provider_session_id_state: row.get(3)?,
-                        original_working_directory: row.get(4)?,
-                        original_working_directory_state: row.get(5)?,
-                        pair_observed: row.get(6)?,
-                    })
-                })
-                .map_err(backend)?;
-            let mut claim: Option<StoredResumeClaim> = None;
-            let mut conflicting = false;
-            for row in rows {
-                let next = row.map_err(backend)?;
-                if claim.as_ref().is_some_and(|current| current != &next) {
-                    conflicting = true;
-                    break;
-                }
-                claim = Some(next);
-            }
-            if conflicting { None } else { claim }
-        };
+        let resolved_claim = Self::resolved_session_claim(conn, session_wire)?;
 
         let mut fields = Vec::new();
         if let Some(claim) = resolved_claim
@@ -5196,6 +5336,7 @@ impl SqliteStore {
     fn rebuild_session_search_row_in_tx(
         tx: &rusqlite::Transaction<'_>,
         session_wire: &str,
+        resolver: &dyn RepoSlugResolver,
     ) -> PortResult<()> {
         tx.execute(
             "DELETE FROM session_fts
@@ -5237,14 +5378,45 @@ impl SqliteStore {
             )
             .map_err(backend)?;
         }
+        // repo identity 投影（schema v16）：与 session_fts/session_titles
+        // 同一派生批次。先删旧行，派生成功才写新行；session 已退役（不
+        // 在 catalog）、claim 缺失/冲突、门禁不满足或 git 检测失败 →
+        // 无行（诚实降级）。绝对路径绝不落此表——只有三段 slug。
+        tx.execute(
+            "DELETE FROM session_repo_slugs WHERE session_wire = ?1",
+            [session_wire],
+        )
+        .map_err(backend)?;
+        let session_exists: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM catalog WHERE id = ?1)",
+                [session_wire],
+                |row| row.get(0),
+            )
+            .map_err(backend)?;
+        if session_exists
+            && let Some(claim) = Self::resolved_session_claim(tx, session_wire)?
+            && let Some(slug) = Self::session_repo_slug(&claim, resolver)
+        {
+            tx.execute(
+                "INSERT INTO session_repo_slugs(session_wire, repo_slug) VALUES(?1, ?2)",
+                rusqlite::params![session_wire, slug],
+            )
+            .map_err(backend)?;
+        }
         Ok(())
     }
 
-    fn rebuild_all_session_search_in_tx(tx: &rusqlite::Transaction<'_>) -> PortResult<()> {
+    fn rebuild_all_session_search_in_tx(
+        tx: &rusqlite::Transaction<'_>,
+        resolver: &dyn RepoSlugResolver,
+    ) -> PortResult<()> {
         tx.execute("DELETE FROM session_fts", []).map_err(backend)?;
         tx.execute("DELETE FROM session_fts_ids", [])
             .map_err(backend)?;
         tx.execute("DELETE FROM session_titles", [])
+            .map_err(backend)?;
+        tx.execute("DELETE FROM session_repo_slugs", [])
             .map_err(backend)?;
         let sessions = {
             let mut stmt = tx
@@ -5260,7 +5432,7 @@ impl SqliteStore {
             sessions
         };
         for session_wire in sessions {
-            Self::rebuild_session_search_row_in_tx(tx, &session_wire)?;
+            Self::rebuild_session_search_row_in_tx(tx, &session_wire, resolver)?;
         }
         Ok(())
     }
@@ -5746,8 +5918,9 @@ impl SqliteStore {
             .map(|replacement| replacement.source_path.clone())
             .collect();
         Self::regenerate_compatibility_aliases_in_tx(&tx, &batch_sources)?;
+        let resolver: &dyn RepoSlugResolver = &**self.repo_slug_resolver.borrow();
         for session_wire in affected_sessions {
-            Self::rebuild_session_search_row_in_tx(&tx, &session_wire)?;
+            Self::rebuild_session_search_row_in_tx(&tx, &session_wire, resolver)?;
         }
 
         // 本批触碰的关系行：只校验这些 id 的引用完整性。
@@ -6236,8 +6409,10 @@ impl SqliteStore {
         tx.execute("DELETE FROM fts_ids", []).map_err(backend)?;
         // Session 元数据投影（schema v11）：全量重建 `session_fts`——与消息
         // FTS 同一"catalog + claims 可重建投影"不变量，从声明与目录逐会话
-        // 重投影，绝不从既有 session_fts 内容复制。
-        Self::rebuild_all_session_search_in_tx(&tx)?;
+        // 重投影，绝不从既有 session_fts 内容复制。repo identity（schema
+        // v16）同批重建，解析器来自注入的 [`RepoSlugResolver`]。
+        let resolver: &dyn RepoSlugResolver = &**self.repo_slug_resolver.borrow();
+        Self::rebuild_all_session_search_in_tx(&tx, resolver)?;
         // 与提交路径一致：只有 Message 实体重投影进 fts，且把 fts5 行 rowid 回写
         // 进 fts_ids 边车，删除才能按 rowid 定位（见 ensure_fts_ids_rowid）。
         // 批量多行写入（与提交路径共用 batch_upsert_fts_in_tx；整表清空后
@@ -6391,7 +6566,21 @@ pub const PARSER_SEMANTIC_VERSION: u32 = 1;
 /// 解析语义升级后版本落后的源即使字节未变也会 targeted backfill（重跑
 /// parse + commit）。旧行 DEFAULT 0 保证迁移后第一次 sync 自动 backfill；
 /// 新库在 v5 建表 DDL 已带本列（v9 provider_id 同一模式）。
-pub const SCHEMA_VERSION: i64 = 15;
+///
+/// v15：新增 `usage_events` 与 `usage_event_membership`——token 用量只读
+/// 投影，五桶非负、`token_source` 只允许 observed/derived（覆盖标记：
+/// 行存在 = provider 报过用量，真 0 与未知可区分）。
+///
+/// v16：新增 `session_repo_slugs`——repo identity 投影（借鉴 Recall 的
+/// repo_identity 与 sessiongrep 的 find_repo_root）。每行存会话的
+/// pair-observed working directory 经本机 git 检测（rev-parse
+/// --show-toplevel + remote get-url origin，由注入的
+/// [`RepoSlugResolver`] 执行）派生的 `host/owner/name` 三段 slug；
+/// **绝不落绝对路径**。行存在 = 检测成功；无行 = 未知/未派生（诚实
+/// 降级，不猜）。生命周期与 `session_fts` 同一重建批次（affected-session
+/// commit + rebuild 同事务），session 退役时同事务删除。旧库迁到 v16
+/// 后表为空，由 rebuild 或后续 affected source 提交回填。
+pub const SCHEMA_VERSION: i64 = 16;
 
 impl CatalogStore for SqliteStore {
     fn get(&self, id: &StableId) -> PortResult<Option<Vec<u8>>> {
@@ -6512,6 +6701,11 @@ impl CatalogStore for SqliteStore {
     fn usage_totals(&self) -> PortResult<Option<UsageTotals>> {
         // 委托给 inherent 实现（同一方法体；覆盖默认 None）。
         SqliteStore::usage_totals(self)
+    }
+
+    fn repo_totals(&self) -> PortResult<Vec<RepoTotals>> {
+        // 委托给 inherent 实现（同一方法体；覆盖默认空列表）。
+        SqliteStore::repo_totals(self)
     }
 
     fn active_generation(&self) -> PortResult<u64> {
@@ -7130,6 +7324,18 @@ impl SqliteStore {
             }
             sql.push(')');
         }
+        if let Some(repo) = &filters.repo {
+            // repo 维度（schema v16）：会话的 repo slug 逐字相等。无投影行
+            // 的会话（检测失败/未派生）诚实排除——不猜。
+            sql.push_str(
+                " AND EXISTS (
+                     SELECT 1 FROM session_repo_slugs repo_slug
+                     WHERE repo_slug.session_wire = sfi.session_wire
+                       AND repo_slug.repo_slug = ?
+                 )",
+            );
+            params.push(Box::new(repo.clone()));
+        }
         sql.push_str(" ORDER BY bm25(session_fts), sfi.session_wire LIMIT ?");
         params.push(Box::new(limit as i64));
 
@@ -7295,6 +7501,22 @@ impl SearchIndex for SqliteStore {
             }
             sql.push(')');
         }
+        if let Some(repo) = &filters.repo {
+            // repo 维度（schema v16）：命中消息归属任一 slug 相等的会话。
+            // 无投影行的会话（检测失败/未派生）诚实排除——不猜。
+            sql.push_str(
+                " AND EXISTS (
+                     SELECT 1 FROM message_placements repo_placement
+                     JOIN session_repo_slugs repo_slug
+                       ON repo_slug.session_wire = repo_placement.session_id
+                     WHERE repo_placement.message_id = (
+                         SELECT wire_id FROM fts_ids WHERE id_json = f.id
+                     )
+                     AND repo_slug.repo_slug = ?
+                 )",
+            );
+            params.push(Box::new(repo.clone()));
+        }
         sql.push_str(" ORDER BY bm25(fts), f.id LIMIT ?");
         params.push(Box::new(limit as i64));
 
@@ -7396,6 +7618,21 @@ impl SearchIndex for SqliteStore {
                 params.push(Box::new(until.sort_key().to_vec()));
             }
             sql.push(')');
+        }
+        if let Some(repo) = &query.filters.repo {
+            // repo 维度（schema v16）：与 query_filtered 同一 EXISTS 形状。
+            sql.push_str(
+                " AND EXISTS (
+                     SELECT 1 FROM message_placements repo_placement
+                     JOIN session_repo_slugs repo_slug
+                       ON repo_slug.session_wire = repo_placement.session_id
+                     WHERE repo_placement.message_id = (
+                         SELECT wire_id FROM fts_ids WHERE id_json = f.id
+                     )
+                     AND repo_slug.repo_slug = ?
+                 )",
+            );
+            params.push(Box::new(repo.clone()));
         }
         match facets.sidechain {
             SidechainFacet::Include => {}
@@ -8038,6 +8275,7 @@ mod filtered_query_tests {
             providers: Vec::new(),
             since: Some(instant(1_785_196_800)), // 2026-07-28T00:00:00Z
             until: Some(instant(1_786_320_000)), // 2026-08-10T00:00:00Z
+            repo: None,
         };
         let mut hits = search_filtered(&fixture.store, "shared-token", &window);
         hits.sort();
@@ -8053,6 +8291,7 @@ mod filtered_query_tests {
             providers: Vec::new(),
             since: Some(instant(1_785_196_800)),
             until: None,
+            repo: None,
         };
         let hits = search_filtered(&fixture.store, "shared-token", &since_only);
         assert_eq!(hits.len(), 3);
@@ -8063,6 +8302,7 @@ mod filtered_query_tests {
             providers: Vec::new(),
             since: None,
             until: Some(instant(1_786_320_000)),
+            repo: None,
         };
         let hits = search_filtered(&fixture.store, "shared-token", &until_only);
         assert_eq!(hits.len(), 3);
@@ -8076,6 +8316,7 @@ mod filtered_query_tests {
             providers: vec![SearchProvider::Codex],
             since: Some(instant(1_785_196_800)),
             until: Some(instant(1_786_320_000)),
+            repo: None,
         };
         let hits = search_filtered(&fixture.store, "shared-token", &filters);
         assert_eq!(hits, vec![fixture.codex_mid.as_str().to_string()]);
@@ -8088,12 +8329,14 @@ mod filtered_query_tests {
             providers: vec![SearchProvider::Claude],
             since: Some(instant(1_786_320_000)), // late window: codex only
             until: None,
+            repo: None,
         };
         assert!(search_filtered(&fixture.store, "shared-token", &no_provider_overlap).is_empty());
         let empty_window = SearchFilters {
             providers: Vec::new(),
             since: Some(instant(1_800_000_000)),
             until: Some(instant(1_800_100_000)),
+            repo: None,
         };
         assert!(search_filtered(&fixture.store, "shared-token", &empty_window).is_empty());
     }
@@ -8293,7 +8536,7 @@ mod tests {
     fn schema_v10_creates_message_vec_table() {
         let store = SqliteStore::open_in_memory().unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 15);
+        assert_eq!(SCHEMA_VERSION, 16);
         let conn = store.conn.borrow();
         let count: i64 = conn
             .query_row(
@@ -14001,7 +14244,12 @@ mod tests {
         let store = SqliteStore::open_in_memory().unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
         let conn = store.conn.borrow();
-        for table in ["session_fts", "session_fts_ids", "session_titles"] {
+        for table in [
+            "session_fts",
+            "session_fts_ids",
+            "session_titles",
+            "session_repo_slugs",
+        ] {
             let exists: i64 = conn
                 .query_row(
                     "SELECT COUNT(*) FROM sqlite_master
@@ -14620,6 +14868,89 @@ mod tests {
     }
 
     #[test]
+    fn v15_catalog_migrates_to_v16_with_empty_repo_projection() {
+        // 旧库（停在 v15）重开：v15→v16 迁移建表；投影为空——repo_totals
+        // 返回空列表（未知 ≠ 零），由 rebuild 或后续 affected source 提交回填。
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v15.db");
+        let p = path.to_string_lossy().into_owned();
+        {
+            let conn = rusqlite::Connection::open(&p).unwrap();
+            create_v6_schema(&conn);
+            SqliteStore::migrate_v6_to_v7(&conn).unwrap();
+            SqliteStore::migrate_v7_to_v8(&conn).unwrap();
+            SqliteStore::migrate_v8_to_v9(&conn).unwrap();
+            SqliteStore::migrate_v9_to_v10(&conn).unwrap();
+            SqliteStore::migrate_v10_to_v11(&conn).unwrap();
+            SqliteStore::migrate_v11_to_v12(&conn).unwrap();
+            SqliteStore::migrate_v12_to_v13(&conn).unwrap();
+            SqliteStore::migrate_v13_to_v14(&conn).unwrap();
+            SqliteStore::migrate_v14_to_v15(&conn).unwrap();
+            let table_exists: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master
+                     WHERE type = 'table' AND name = 'session_repo_slugs'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(table_exists, 0, "v15 尚无 session_repo_slugs 表");
+        }
+        // 重新打开：触发 v15→v16 迁移。
+        let store = SqliteStore::open(&p).unwrap();
+        assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
+        let conn = store.conn.borrow();
+        let table_exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'table' AND name = 'session_repo_slugs'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(table_exists, 1, "session_repo_slugs 必须随 v16 迁移创建");
+        drop(conn);
+        assert!(
+            store.repo_totals().unwrap().is_empty(),
+            "迁移后投影为空：空列表（未知），不是伪造的零行聚合"
+        );
+    }
+
+    #[test]
+    fn injected_v15_to_v16_failure_rolls_back_schema_and_version() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        create_v6_schema(&conn);
+        SqliteStore::migrate_v6_to_v7(&conn).unwrap();
+        SqliteStore::migrate_v7_to_v8(&conn).unwrap();
+        SqliteStore::migrate_v8_to_v9(&conn).unwrap();
+        SqliteStore::migrate_v9_to_v10(&conn).unwrap();
+        SqliteStore::migrate_v10_to_v11(&conn).unwrap();
+        SqliteStore::migrate_v11_to_v12(&conn).unwrap();
+        SqliteStore::migrate_v12_to_v13(&conn).unwrap();
+        SqliteStore::migrate_v13_to_v14(&conn).unwrap();
+        SqliteStore::migrate_v14_to_v15(&conn).unwrap();
+
+        let err = SqliteStore::migrate_v15_to_v16_inner(&conn, true).unwrap_err();
+        assert!(
+            matches!(err, PortError::Backend(message) if message.contains("injected v15-to-v16"))
+        );
+        assert!(conn.is_autocommit());
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 15);
+        let table_exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'table' AND name = 'session_repo_slugs'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(table_exists, 0);
+    }
+
+    #[test]
     fn usage_token_source_check_constraint_rejects_unknown_kinds() {
         let store = SqliteStore::open_in_memory().unwrap();
         let conn = store.conn.borrow();
@@ -14773,6 +15104,389 @@ mod tests {
                 .iter()
                 .any(|hit| hit.id == session && hit.session_id.as_deref() == Some(session.as_str()))
         );
+    }
+
+    /// 测试用确定性解析器：按 cwd 逐字查表；未列出的 cwd → None（模拟
+    /// "git 检测失败"）。解析调用次数可数（生命周期测试断言按需探测）。
+    struct MapRepoSlugResolver {
+        map: std::collections::HashMap<String, Option<String>>,
+        calls: RefCell<usize>,
+    }
+
+    impl RepoSlugResolver for MapRepoSlugResolver {
+        fn resolve(&self, cwd: &str) -> Option<String> {
+            *self.calls.borrow_mut() += 1;
+            self.map.get(cwd).and_then(|slug| slug.clone())
+        }
+    }
+
+    fn repo_slug_rows(store: &SqliteStore, session_wire: &str) -> Vec<String> {
+        let conn = store.conn.borrow();
+        let mut stmt = conn
+            .prepare("SELECT repo_slug FROM session_repo_slugs WHERE session_wire = ?1")
+            .unwrap();
+        stmt.query_map([session_wire], |row| row.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    }
+
+    fn repo_claim(
+        session: &StableId,
+        native: &str,
+        cwd: Option<&str>,
+        pair_observed: bool,
+    ) -> StoredResumeClaim {
+        StoredResumeClaim {
+            session_id: session.as_str().into(),
+            provider_id: "synthetic".into(),
+            provider_session_id: Some(native.into()),
+            provider_session_id_state: "resolved".into(),
+            original_working_directory: cwd.map(str::to_string),
+            original_working_directory_state: "resolved".into(),
+            pair_observed,
+        }
+    }
+
+    /// [`StoredResumeClaim`] → [`SourceResumeClaim`]（字段同构的端口类型转换，
+    /// 仅测试装配 SourceBatch 用）。
+    fn source_repo_claim(claim: &StoredResumeClaim) -> SourceResumeClaim {
+        SourceResumeClaim {
+            provider_id: claim.provider_id.clone(),
+            session_id: claim.session_id.clone(),
+            provider_session_id: claim.provider_session_id.clone(),
+            provider_session_id_state: claim.provider_session_id_state.clone(),
+            original_working_directory: claim.original_working_directory.clone(),
+            original_working_directory_state: claim.original_working_directory_state.clone(),
+            pair_observed: claim.pair_observed,
+        }
+    }
+
+    // ---- 每参数门禁：session_repo_slug 纯函数 ----
+
+    #[test]
+    fn session_repo_slug_gates_every_claim_parameter() {
+        let resolver = MapRepoSlugResolver {
+            map: std::collections::HashMap::from([(
+                "Z:/projects/app".into(),
+                Some("github.com/o/app".into()),
+            )]),
+            calls: RefCell::new(0),
+        };
+        let base = repo_claim(
+            &sid(IdKind::Session, b"gate"),
+            "native",
+            Some("Z:/projects/app"),
+            true,
+        );
+        assert_eq!(
+            SqliteStore::session_repo_slug(&base, &resolver).as_deref(),
+            Some("github.com/o/app")
+        );
+        // provider_session_id 未 resolved → 不派生。
+        let mut claim = repo_claim(
+            &sid(IdKind::Session, b"gate"),
+            "native",
+            Some("Z:/projects/app"),
+            true,
+        );
+        claim.provider_session_id_state = "missing".into();
+        assert_eq!(SqliteStore::session_repo_slug(&claim, &resolver), None);
+        // 未 pair 观测 → 不派生（cwd 未披露即不派生身份）。
+        let claim = repo_claim(
+            &sid(IdKind::Session, b"gate"),
+            "native",
+            Some("Z:/projects/app"),
+            false,
+        );
+        assert_eq!(SqliteStore::session_repo_slug(&claim, &resolver), None);
+        // cwd 未 resolved → 不派生。
+        let mut claim = repo_claim(
+            &sid(IdKind::Session, b"gate"),
+            "native",
+            Some("Z:/projects/app"),
+            true,
+        );
+        claim.original_working_directory_state = "missing".into();
+        assert_eq!(SqliteStore::session_repo_slug(&claim, &resolver), None);
+        // cwd 缺失/空 → 不派生。
+        let claim = repo_claim(&sid(IdKind::Session, b"gate"), "native", None, true);
+        assert_eq!(SqliteStore::session_repo_slug(&claim, &resolver), None);
+        let claim = repo_claim(&sid(IdKind::Session, b"gate"), "native", Some(""), true);
+        assert_eq!(SqliteStore::session_repo_slug(&claim, &resolver), None);
+        // 解析器检测失败 → 诚实 None，不猜。
+        let claim = repo_claim(
+            &sid(IdKind::Session, b"gate"),
+            "native",
+            Some("Z:/deleted-project"),
+            true,
+        );
+        assert_eq!(SqliteStore::session_repo_slug(&claim, &resolver), None);
+    }
+
+    // ---- 投影生命周期：随 session 重建批派生/更新/清除 ----
+
+    #[test]
+    fn repo_slug_projection_follows_session_rebuild_batch() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        store.set_repo_slug_resolver(Box::new(MapRepoSlugResolver {
+            map: std::collections::HashMap::from([(
+                "Z:/projects/app".into(),
+                Some("github.com/o/app".into()),
+            )]),
+            calls: RefCell::new(0),
+        }));
+        let session = sid(IdKind::Session, b"repo-session");
+        let document = sid(IdKind::Document, b"repo-document");
+        let message = sid(IdKind::Message, b"repo-message");
+        let batch = |claim: SourceResumeClaim| SourceBatch {
+            source_path: "repo-source.jsonl".into(),
+            entries: vec![
+                entity_entry(&session),
+                typed_document_entry(&document),
+                typed_message_entry(&message, "repo filter body"),
+            ],
+            placements: vec![placement(
+                &session,
+                &document,
+                &message,
+                0,
+                false,
+                Some((0, 5)),
+            )],
+            edges: Vec::new(),
+            activities: Vec::new(),
+            usage_events: Vec::new(),
+            relation_complete: true,
+            len_bytes: None,
+            fingerprint: None,
+            provider_id: None,
+            resume_claim: Some(claim),
+        };
+
+        // 无投影行（默认 no-op 解析器 + 空库）：repo filter 诚实返回空。
+        let filters = SearchFilters {
+            repo: Some("github.com/o/app".into()),
+            ..SearchFilters::default()
+        };
+        assert!(
+            store
+                .query_filtered(
+                    SearchQuery {
+                        text: "repo",
+                        filters: &filters,
+                    },
+                    10,
+                )
+                .unwrap()
+                .is_empty()
+        );
+
+        // 首次提交：affected-session 重建派生 slug 行。
+        store
+            .commit_source_batches_if_changed(std::slice::from_ref(&batch(source_repo_claim(
+                &repo_claim(&session, "repo-native", Some("Z:/projects/app"), true),
+            ))))
+            .unwrap();
+        assert_eq!(
+            repo_slug_rows(&store, session.as_str()),
+            vec!["github.com/o/app".to_string()]
+        );
+        let hits = store
+            .query_filtered(
+                SearchQuery {
+                    text: "repo",
+                    filters: &filters,
+                },
+                10,
+            )
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, message);
+        // store 层消息命中不装配 session_id（Application 层批量装配）；
+        // 会话元数据命中因该消息已代表会话被去重（R3），无重复返回。
+        // 其它 slug 不命中。
+        let other = SearchFilters {
+            repo: Some("gitlab.com/team/other".into()),
+            ..SearchFilters::default()
+        };
+        assert!(
+            store
+                .query_filtered(
+                    SearchQuery {
+                        text: "repo",
+                        filters: &other,
+                    },
+                    10,
+                )
+                .unwrap()
+                .is_empty()
+        );
+
+        // 全量 rebuild：投影可重建（先清后派生）。
+        {
+            let conn = store.conn.borrow();
+            conn.execute("DELETE FROM session_repo_slugs", []).unwrap();
+        }
+        store.rebuild_index().unwrap();
+        assert_eq!(
+            repo_slug_rows(&store, session.as_str()),
+            vec!["github.com/o/app".to_string()]
+        );
+
+        // claim 被替换（仓库检测失败）：重建后无行——诚实降级。
+        store
+            .commit_source_batches_if_changed(std::slice::from_ref(&batch(source_repo_claim(
+                &repo_claim(
+                    &session,
+                    "repo-native-two",
+                    Some("Z:/deleted-project"),
+                    true,
+                ),
+            ))))
+            .unwrap();
+        assert!(repo_slug_rows(&store, session.as_str()).is_empty());
+    }
+
+    #[test]
+    fn conflicting_claims_fail_closed_without_slug_row() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        store.set_repo_slug_resolver(Box::new(MapRepoSlugResolver {
+            map: std::collections::HashMap::from([
+                ("Z:/projects/app".into(), Some("github.com/o/app".into())),
+                (
+                    "Z:/projects/other".into(),
+                    Some("github.com/o/other".into()),
+                ),
+            ]),
+            calls: RefCell::new(0),
+        }));
+        let session = sid(IdKind::Session, b"conflict-session");
+        let document = sid(IdKind::Document, b"conflict-document");
+        let message = sid(IdKind::Message, b"conflict-message");
+        let claim_a = source_repo_claim(&repo_claim(
+            &session,
+            "conflict-native",
+            Some("Z:/projects/app"),
+            true,
+        ));
+        let claim_b = source_repo_claim(&repo_claim(
+            &session,
+            "conflict-native",
+            Some("Z:/projects/other"),
+            true,
+        ));
+        // 两个 source 对同一会话给出不同 cwd：冲突必须 fail closed。
+        let batch = |source_path: &str, claim: SourceResumeClaim| SourceBatch {
+            source_path: source_path.into(),
+            entries: vec![
+                entity_entry(&session),
+                typed_document_entry(&document),
+                typed_message_entry(&message, "conflict body"),
+            ],
+            placements: vec![placement(
+                &session,
+                &document,
+                &message,
+                0,
+                false,
+                Some((0, 5)),
+            )],
+            edges: Vec::new(),
+            activities: Vec::new(),
+            usage_events: Vec::new(),
+            relation_complete: true,
+            len_bytes: None,
+            fingerprint: None,
+            provider_id: None,
+            resume_claim: Some(claim),
+        };
+        store
+            .commit_source_batches_if_changed(&[
+                batch("conflict-a.jsonl", claim_a),
+                batch("conflict-b.jsonl", claim_b),
+            ])
+            .unwrap();
+        assert!(repo_slug_rows(&store, session.as_str()).is_empty());
+    }
+
+    #[test]
+    fn repo_totals_aggregates_by_slug_with_deterministic_order() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        store.set_repo_slug_resolver(Box::new(MapRepoSlugResolver {
+            map: std::collections::HashMap::from([
+                (
+                    "Z:/projects/shared".into(),
+                    Some("github.com/o/shared".into()),
+                ),
+                ("Z:/projects/solo".into(), Some("github.com/o/solo".into())),
+            ]),
+            calls: RefCell::new(0),
+        }));
+        // 两个会话同 slug + 一个会话另一 slug：会话数降序、slug 升序。
+        let batches: Vec<SourceBatch> = ["a", "b", "c"]
+            .iter()
+            .map(|tag| {
+                let session = sid(IdKind::Session, tag.as_bytes());
+                let document = sid(IdKind::Document, tag.as_bytes());
+                let message = sid(IdKind::Message, tag.as_bytes());
+                let cwd = if *tag == "c" {
+                    "Z:/projects/solo"
+                } else {
+                    "Z:/projects/shared"
+                };
+                SourceBatch {
+                    source_path: format!("repo-{tag}.jsonl"),
+                    entries: vec![
+                        entity_entry(&session),
+                        typed_document_entry(&document),
+                        typed_message_entry(&message, "totals body"),
+                    ],
+                    placements: vec![placement(
+                        &session,
+                        &document,
+                        &message,
+                        0,
+                        false,
+                        Some((0, 5)),
+                    )],
+                    edges: Vec::new(),
+                    activities: Vec::new(),
+                    usage_events: Vec::new(),
+                    relation_complete: true,
+                    len_bytes: None,
+                    fingerprint: None,
+                    provider_id: None,
+                    resume_claim: Some(source_repo_claim(&repo_claim(
+                        &session,
+                        "totals-native",
+                        Some(cwd),
+                        true,
+                    ))),
+                }
+            })
+            .collect();
+        store.commit_source_batches_if_changed(&batches).unwrap();
+        let totals = store.repo_totals().unwrap();
+        assert_eq!(
+            totals,
+            vec![
+                RepoTotals {
+                    repo_slug: "github.com/o/shared".into(),
+                    sessions: 2,
+                },
+                RepoTotals {
+                    repo_slug: "github.com/o/solo".into(),
+                    sessions: 1,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn repo_totals_empty_when_no_projection_rows() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        assert!(store.repo_totals().unwrap().is_empty());
     }
 
     #[test]
