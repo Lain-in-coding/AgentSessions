@@ -33,7 +33,7 @@ pub mod ranking;
 pub mod resume;
 
 pub use budget::{ResponseBudget, Truncation};
-pub use cjk::bigram_cjk;
+pub use cjk::{bigram_cjk, fts_tokens_cjk};
 pub use evidence::EvidenceSpanDto;
 pub use peek::SessionPeek;
 
