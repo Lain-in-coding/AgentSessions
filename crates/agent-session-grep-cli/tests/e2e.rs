@@ -12,6 +12,13 @@ use std::process::{Command, Output, Stdio};
 /// 刚构建出的 `agent-session-grep` 二进制的绝对路径（由 Cargo 在编译期注入）。
 const BIN: &str = env!("CARGO_BIN_EXE_agent-session-grep");
 
+/// 固定应用时钟（`ASG_CLOCK_MS`，2026-08-25T00:00:00Z 的 Unix 毫秒）：rank
+/// signals 的时效衰减随注入时钟确定，e2e 子进程全部注入该值——同 query 同
+/// clock 结果逐字节可复现，杜绝真实时钟造成的排序/得分漂移（含 handoff
+/// pack 字节确定性）。夹具时间戳都在 2026-08-10 之前，相对时间谓词断言
+/// （`--since 1d/1w` 等）在该时钟下语义不变。
+const E2E_CLOCK_MS: &str = "1787616000000";
+
 /// 在给定 db 上以 robot 协议模式跑一次 CLI，返回完整输出。
 /// 功能性测试统一断言稳定 JSON envelope；human 版式走 [`run_human`]。
 fn run(db: &str, args: &[&str]) -> Output {
@@ -20,6 +27,7 @@ fn run(db: &str, args: &[&str]) -> Output {
         .arg(db)
         .arg("--robot")
         .args(args)
+        .env("ASG_CLOCK_MS", E2E_CLOCK_MS)
         .output()
         .expect("failed to spawn agent-session-grep binary")
 }
@@ -30,6 +38,7 @@ fn run_human(db: &str, args: &[&str]) -> Output {
         .arg("--db")
         .arg(db)
         .args(args)
+        .env("ASG_CLOCK_MS", E2E_CLOCK_MS)
         .output()
         .expect("failed to spawn agent-session-grep binary")
 }
@@ -4643,6 +4652,67 @@ fn compact_relative_duration_uses_application_clock() {
     );
 }
 
+// ─── rank signals（competitor-borrowings #1）：lexical 时效衰减 + sidechain 惩罚 ──
+
+/// 合成夹具：两条同正文、不同时间戳的主线消息（时效差 236 天），加一对
+/// 同正文、一主线一侧链的消息（无时间戳）。正文逐字节相同 → bm25 全等，
+/// 排序必须由 rank signals 决定，而非 FTS 分差。
+const RANK_FIXTURE: &str = r#"{"type":"user","uuid":"rk-1","parentUuid":null,"sessionId":"sess-rank","timestamp":"2026-01-01T00:00:00.000Z","message":{"role":"user","content":"rank probe needle"}}
+{"type":"user","uuid":"rk-2","parentUuid":"rk-1","sessionId":"sess-rank","timestamp":"2026-08-24T00:00:00.000Z","message":{"role":"user","content":"rank probe needle"}}
+{"type":"assistant","uuid":"rk-3","parentUuid":"rk-2","sessionId":"sess-rank","isSidechain":true,"message":{"role":"assistant","content":"side probe needle"}}
+{"type":"assistant","uuid":"rk-4","parentUuid":"rk-2","sessionId":"sess-rank","message":{"role":"assistant","content":"side probe needle"}}"#;
+
+#[test]
+fn search_ranks_newer_first_and_demotes_sidechain_deterministically() {
+    let (dir, db) = temp_db("rank-signals");
+    let fixture = dir.path().join("rank.jsonl");
+    std::fs::write(&fixture, format!("{RANK_FIXTURE}\n")).expect("write rank fixture");
+    let out = run(&db, &["ingest", fixture.to_str().expect("utf-8 path")]);
+    assert!(out.status.success(), "ingest failed: {}", stdout(&out));
+
+    // 时效衰减：同 bm25 下新消息排前（E2E_CLOCK_MS=2026-08-25 固定）。
+    let out = run(&db, &["search", "rank probe needle"]);
+    assert!(out.status.success(), "search failed: {}", stdout(&out));
+    let frame = parse_first_line(&out);
+    let hits = frame["data"]["hits"].as_array().expect("hits");
+    assert_eq!(hits.len(), 2, "{frame}");
+    assert_eq!(
+        hits[0]["id"],
+        native_msg_wire("rk-2"),
+        "newer must rank first: {frame}"
+    );
+    assert_eq!(hits[1]["id"], native_msg_wire("rk-1"), "{frame}");
+
+    // 同 clock 同 query 两次调用结果一致（无真实时钟漂移）：envelope 的
+    // request_id（每次运行随机）与 meta.duration_ms（计时）天生逐次不同，
+    // 剥掉这两个运行特有字段后其余字节必须完全一致。
+    let again = run(&db, &["search", "rank probe needle"]);
+    assert!(again.status.success(), "search failed: {}", stdout(&again));
+    let mut first = parse_first_line(&out);
+    let mut second = parse_first_line(&again);
+    for frame in [&mut first, &mut second] {
+        frame
+            .as_object_mut()
+            .expect("frame object")
+            .remove("request_id");
+        frame.as_object_mut().expect("frame object").remove("meta");
+    }
+    assert_eq!(first, second, "same clock + query must rank identically");
+
+    // sidechain 惩罚：同 bm25 下主线消息排前。
+    let out = run(&db, &["search", "side probe needle"]);
+    assert!(out.status.success(), "search failed: {}", stdout(&out));
+    let frame = parse_first_line(&out);
+    let hits = frame["data"]["hits"].as_array().expect("hits");
+    assert_eq!(hits.len(), 2, "{frame}");
+    assert_eq!(
+        hits[0]["id"],
+        native_msg_wire("rk-4"),
+        "mainline must rank before equal-relevance sidechain: {frame}"
+    );
+    assert_eq!(hits[1]["id"], native_msg_wire("rk-3"), "{frame}");
+}
+
 #[test]
 fn cursor_reissued_under_mutated_filters_is_rejected() {
     let (_dir, db) = filter_db("filter-cursor");
@@ -4711,6 +4781,7 @@ fn mcp_frames(db: &str, inputs: &[serde_json::Value]) -> Vec<serde_json::Value> 
         .arg("--db")
         .arg(db)
         .arg("mcp")
+        .env("ASG_CLOCK_MS", E2E_CLOCK_MS)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -4761,6 +4832,7 @@ fn run_with_home(db: &str, home: &str, args: &[&str]) -> Output {
     // 两个变量都设，避免平台/继承差异导致 provider_discovery_target 解析到真实 home。
     cmd.env("HOME", home);
     cmd.env("USERPROFILE", home);
+    cmd.env("ASG_CLOCK_MS", E2E_CLOCK_MS);
     cmd.output()
         .expect("failed to spawn agent-session-grep binary")
 }

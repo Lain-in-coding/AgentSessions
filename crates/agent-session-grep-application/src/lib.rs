@@ -29,6 +29,7 @@ pub mod guidance;
 pub mod handoff_pack;
 pub mod hybrid;
 pub mod peek;
+pub mod ranking;
 pub mod resume;
 
 pub use budget::{ResponseBudget, Truncation};
@@ -951,8 +952,9 @@ fn search_hit_charge(hit: &SearchHit) -> usize {
         + 32
 }
 
-/// 系统时钟（Unix 毫秒）。[`App::new`] 的默认时钟；测试经 [`App::with_clock`] 注入固定值。
-fn system_now_ms() -> i64 {
+/// 系统时钟（Unix 毫秒）。[`App::new`] 的默认时钟；测试经 [`App::with_clock`]
+/// 注入固定值。CLI 组合根在 `ASG_CLOCK_MS` 未注入时回落本函数。
+pub fn system_now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
@@ -1697,20 +1699,54 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore, 
                 };
                 let response_warning = fallback_warning.clone();
 
+                // Rank signals（competitor-borrowings #1）：纯 lexical 命中（含
+                // semantic/hybrid 未就绪时的 lexical_fallback）在分页钉住排序前
+                // 重算最终分并重排；semantic 命中与 hybrid RRF 融合排序不动
+                // （README 明示）。时效与 sidechain 事实来自整窗 payload——
+                // 与 R2 系统噪声过滤共用同一次批量 get_many，无额外 N+1。
+                let rank_lexical = mode == RetrievalMode::Lexical || fallback_warning.is_some();
+                let mut window_payloads = if rank_lexical || !include_system {
+                    let scanned_ids: Vec<StableId> =
+                        scanned.iter().map(|hit| hit.id.clone()).collect();
+                    Some(self.catalog.get_many(&scanned_ids)?)
+                } else {
+                    None
+                };
+
                 // R2 系统噪声默认排除：role=system/developer 的命中不进入结果，
                 // `include_system` 显式恢复。过滤先于 offset 切片，cursor 位置因此
                 // 指向"非系统"序列。判定需整窗 payload（分块批量取，无 N+1）；扫描
                 // 窗内系统噪声饱和时可能提前终止分页（边界行为，见 GROUP_SCAN_FACTOR）。
+                // 过滤发生在任何重排之前，hit 与 payload 始终一一配对。
                 if !include_system {
-                    let scanned_ids: Vec<StableId> =
-                        scanned.iter().map(|hit| hit.id.clone()).collect();
-                    let scanned_payloads = self.catalog.get_many(&scanned_ids)?;
                     scanned = scanned
                         .into_iter()
-                        .zip(scanned_payloads)
+                        .zip(window_payloads.take().expect("payloads fetched above"))
                         .filter(|(_, payload)| !payload_role_is_system_noise(payload.1.as_deref()))
                         .map(|(hit, _)| hit)
                         .collect();
+                }
+
+                // 重算最终分并重排为 (final desc, id asc)：payload 以 (hit, payload)
+                // 对进入评分函数，排序发生在配对之后，结构上排除错位。payload 被
+                // 噪声过滤消耗后按需补取一次（同窗批量，无 N+1）。
+                if rank_lexical {
+                    let payloads = match window_payloads.take() {
+                        Some(payloads) => payloads,
+                        None => {
+                            let scanned_ids: Vec<StableId> =
+                                scanned.iter().map(|hit| hit.id.clone()).collect();
+                            self.catalog.get_many(&scanned_ids)?
+                        }
+                    };
+                    scanned = ranking::apply_lexical_signals(
+                        scanned
+                            .into_iter()
+                            .zip(payloads)
+                            .map(|(hit, (_id, payload))| (hit, payload))
+                            .collect(),
+                        self.now_ms(),
+                    );
                 }
 
                 // R3 按会话归并：整窗装配后每会话只保留最高分命中（钉住顺序中的
@@ -2848,13 +2884,16 @@ mod tests {
     fn search_hits_carry_session_id_from_placements() {
         // ADR-0008：命中带归属会话 wire id（session_of 批量解析）+ text 摘要。
         // GraphCatalog 的 graph 里有 placement → session_id 有值；payload 的
-        // `text` 字段 → text 有值。
+        // `text` 字段 → text 有值。FixedHits 同分命中被 rank signals 重钉为
+        // wire id 升序（与真实 store 的 bm25+id 全序一致）——输入按同序喂入，
+        // 产出顺序即输入顺序。
         let fixture = ctx_fixture();
-        let ids = vec![
+        let mut ids = vec![
             fixture.root.clone(),
             fixture.repeated.clone(),
             fixture.leaf.clone(),
         ];
+        ids.sort_by(|left, right| left.as_str().cmp(right.as_str()));
         let app = App::with_clock(&fixture.store, FixedHits(ids.clone()), clock_t0);
         let resp = app.handle(search_req("q", 10, None)).unwrap();
         let AppResponse::Search { hits, .. } = resp else {
@@ -2865,9 +2904,10 @@ mod tests {
             assert_eq!(&hit.id, expected);
             assert_eq!(hit.session_id.as_deref(), Some(fixture.session.as_str()));
         }
-        assert_eq!(hits[0].text.as_deref(), Some("root"));
+        // wire id 升序：ctx-leaf < ctx-repeated < ctx-root。
+        assert_eq!(hits[0].text.as_deref(), Some("leaf"));
         assert_eq!(hits[1].text.as_deref(), Some("repeated"));
-        assert_eq!(hits[2].text.as_deref(), Some("leaf"));
+        assert_eq!(hits[2].text.as_deref(), Some("root"));
     }
 
     #[test]
@@ -2942,6 +2982,9 @@ mod tests {
     }
 
     /// 可分页假索引：n 个确定性命中，按 limit 截取（模拟钉住排序上的超取）。
+    /// 分数为正、严格降序（与真实 store 的 bm25 负分取负后的形态一致）——
+    /// 产出顺序即 Application 重钉后的 (final desc, id asc) 序，重排是 no-op，
+    /// 既有分页/顺序断言保持有效。
     struct PagedIndex {
         n: usize,
     }
@@ -2961,7 +3004,7 @@ mod tests {
                         Stability::Reconstructed,
                         &[format!("hit{i:02}").as_bytes()],
                     ),
-                    score: -(i as f32),
+                    score: (self.n - i) as f32,
                     session_id: None,
                     text: None,
                     why_matched: Vec::new(),
@@ -2990,6 +3033,36 @@ mod tests {
                 .map(|id| SearchHit {
                     id: id.clone(),
                     score: 0.0,
+                    session_id: None,
+                    text: None,
+                    why_matched: Vec::new(),
+                    suggested_next_commands: Vec::new(),
+                    occurrences: 1,
+                    resume_available: false,
+                })
+                .collect())
+        }
+    }
+
+    /// 固定分值假索引：按给定 (id, bm25) 序返回——rank signals 测试用非零
+    /// 且可人为相等的 bm25（`FixedHits` 全 0 分无法区分衰减/惩罚）。
+    struct ScoredHits(Vec<(StableId, f32)>);
+    impl SearchIndex for ScoredHits {
+        fn index(&self, _id: &StableId, _text: &str) -> PortResult<()> {
+            Ok(())
+        }
+        fn query_filtered(
+            &self,
+            _query: SearchQuery<'_>,
+            limit: usize,
+        ) -> PortResult<Vec<SearchHit>> {
+            Ok(self
+                .0
+                .iter()
+                .take(limit)
+                .map(|(id, score)| SearchHit {
+                    id: id.clone(),
+                    score: *score,
                     session_id: None,
                     text: None,
                     why_matched: Vec::new(),
@@ -3292,7 +3365,11 @@ mod tests {
             panic!("expected Search response");
         };
         let kept: Vec<StableId> = hits.iter().map(|hit| hit.id.clone()).collect();
-        assert_eq!(kept, vec![hit_id("hit00"), hit_id("hit03")]);
+        // rank signals 重钉后同分命中按 wire id 升序（与真实 store 的
+        // bm25+id 全序同一约定）——期望值按同序排序再比较。
+        let mut expected = vec![hit_id("hit00"), hit_id("hit03")];
+        expected.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        assert_eq!(kept, expected);
     }
 
     #[test]
@@ -3331,18 +3408,19 @@ mod tests {
     #[test]
     fn search_group_by_session_collapses_with_occurrences() {
         // R3 归并：每会话保留最高分命中（钉住顺序中的首个），occurrences 为该
-        // 会话在扫描窗内的命中数；无归属（None）命中自成单例组。
+        // 会话在扫描窗内的命中数；无归属（None）命中自成单例组。同分命中被
+        // rank signals 重钉为 wire id 升序——native id 使该序可静态断言。
         let mut cat = MapCatalog::new(7);
-        let session_a = StableId::derive(IdKind::Session, Stability::Reconstructed, &[b"sA"]);
-        let session_b = StableId::derive(IdKind::Session, Stability::Reconstructed, &[b"sB"]);
+        let session_a = StableId::native(IdKind::Session, "sess-a");
+        let session_b = StableId::native(IdKind::Session, "sess-b");
         for (tag, session) in [
-            ("hit00", Some(&session_a)),
-            ("hit01", Some(&session_a)),
-            ("hit02", Some(&session_b)),
-            ("hit03", Some(&session_b)),
-            ("hit04", None),
+            ("grp-a1", Some(&session_a)),
+            ("grp-a2", Some(&session_a)),
+            ("grp-b1", Some(&session_b)),
+            ("grp-b2", Some(&session_b)),
+            ("grp-solo", None),
         ] {
-            let id = hit_id(tag);
+            let id = StableId::native(IdKind::Message, tag);
             cat.insert(
                 &id,
                 serde_json::json!({ "role": "user", "text": "needle" })
@@ -3353,12 +3431,13 @@ mod tests {
                 cat.set_session_of(&id, session);
             }
         }
+        // wire id 升序（与 rank signals 的重钉序一致）：a1 < a2 < b1 < b2 < solo。
         let index = FixedHits(vec![
-            hit_id("hit00"),
-            hit_id("hit01"),
-            hit_id("hit02"),
-            hit_id("hit03"),
-            hit_id("hit04"),
+            StableId::native(IdKind::Message, "grp-a1"),
+            StableId::native(IdKind::Message, "grp-a2"),
+            StableId::native(IdKind::Message, "grp-b1"),
+            StableId::native(IdKind::Message, "grp-b2"),
+            StableId::native(IdKind::Message, "grp-solo"),
         ]);
         let app = App::with_clock(cat, index, clock_t0);
         let AppResponse::Search { hits, .. } = app
@@ -3379,13 +3458,13 @@ mod tests {
             panic!("expected Search response");
         };
         assert_eq!(hits.len(), 3, "one group per session + singleton");
-        assert_eq!(hits[0].id, hit_id("hit00"));
+        assert_eq!(hits[0].id, StableId::native(IdKind::Message, "grp-a1"));
         assert_eq!(hits[0].occurrences, 2);
         assert_eq!(hits[0].session_id.as_deref(), Some(session_a.as_str()));
-        assert_eq!(hits[1].id, hit_id("hit02"));
+        assert_eq!(hits[1].id, StableId::native(IdKind::Message, "grp-b1"));
         assert_eq!(hits[1].occurrences, 2);
         assert_eq!(hits[1].session_id.as_deref(), Some(session_b.as_str()));
-        assert_eq!(hits[2].id, hit_id("hit04"));
+        assert_eq!(hits[2].id, StableId::native(IdKind::Message, "grp-solo"));
         assert_eq!(hits[2].occurrences, 1);
         assert!(hits[2].session_id.is_none());
     }
@@ -3394,10 +3473,11 @@ mod tests {
     fn search_group_by_session_default_path_keeps_occurrences_one() {
         // R3 默认路径（group_by_session=false）保持不变：不归并、逐命中返回，
         // occurrences 恒为 1（序列化时省略该键，与既有输出字节兼容）。
+        // 同分命中被 rank signals 重钉为 wire id 升序——输入按该序喂入。
         let mut cat = MapCatalog::new(7);
-        let session_a = StableId::derive(IdKind::Session, Stability::Reconstructed, &[b"sA"]);
-        for tag in ["hit00", "hit01"] {
-            let id = hit_id(tag);
+        let session_a = StableId::native(IdKind::Session, "sess-a");
+        for tag in ["grp-a1", "grp-a2"] {
+            let id = StableId::native(IdKind::Message, tag);
             cat.insert(
                 &id,
                 serde_json::json!({ "role": "user", "text": "needle" })
@@ -3406,14 +3486,17 @@ mod tests {
             );
             cat.set_session_of(&id, &session_a);
         }
-        let index = FixedHits(vec![hit_id("hit00"), hit_id("hit01")]);
+        let index = FixedHits(vec![
+            StableId::native(IdKind::Message, "grp-a1"),
+            StableId::native(IdKind::Message, "grp-a2"),
+        ]);
         let app = App::with_clock(cat, index, clock_t0);
         let AppResponse::Search { hits, .. } = app.handle(search_req("needle", 10, None)).unwrap()
         else {
             panic!("expected Search response");
         };
         assert_eq!(hits.len(), 2);
-        assert_eq!(hits[0].id, hit_id("hit00"));
+        assert_eq!(hits[0].id, StableId::native(IdKind::Message, "grp-a1"));
         assert_eq!(hits[0].occurrences, 1);
         assert_eq!(hits[1].occurrences, 1);
     }
@@ -3502,6 +3585,152 @@ mod tests {
         let first = app.handle(search_req("数据库 guidance", 10, None)).unwrap();
         let second = app.handle(search_req("数据库 guidance", 10, None)).unwrap();
         assert_eq!(first, second);
+    }
+
+    // ---- rank signals（competitor-borrowings #1）：lexical 时效衰减 + sidechain 惩罚 ----
+
+    /// 固定 rank 时钟：2026-08-25T00:00:00Z（与 CLI e2e 的 `ASG_CLOCK_MS` 同值）。
+    fn rank_clock() -> i64 {
+        1_787_616_000_000
+    }
+
+    #[test]
+    fn search_lexical_ranking_prefers_newer_message_under_fixed_clock() {
+        let old = StableId::native(IdKind::Message, "rank-old");
+        let new = StableId::native(IdKind::Message, "rank-new");
+        let mut cat = MapCatalog::new(7);
+        cat.insert(
+            &old,
+            serde_json::json!({ "text": "rank needle", "timestamp": "2026-01-01T00:00:00Z" })
+                .to_string()
+                .into_bytes(),
+        );
+        cat.insert(
+            &new,
+            serde_json::json!({ "text": "rank needle", "timestamp": "2026-08-24T00:00:00Z" })
+                .to_string()
+                .into_bytes(),
+        );
+        // 假索引按 [old, new] 序返回、bm25 全等——重排必须来自时效衰减。
+        let app = App::with_clock(
+            cat,
+            ScoredHits(vec![(old.clone(), 1.0), (new.clone(), 1.0)]),
+            rank_clock,
+        );
+        let (ids, _, _, _) = hits_of(app.handle(search_req("rank needle", 10, None)).unwrap());
+        assert_eq!(
+            ids,
+            vec![new.as_str().to_string(), old.as_str().to_string()],
+            "newer message must rank first"
+        );
+    }
+
+    #[test]
+    fn search_lexical_ranking_demotes_sidechain_under_equal_relevance() {
+        let main = StableId::native(IdKind::Message, "rank-main");
+        let side = StableId::native(IdKind::Message, "rank-side");
+        let mut cat = MapCatalog::new(7);
+        cat.insert(
+            &main,
+            serde_json::json!({ "text": "side needle", "is_sidechain": false })
+                .to_string()
+                .into_bytes(),
+        );
+        cat.insert(
+            &side,
+            serde_json::json!({ "text": "side needle", "is_sidechain": true })
+                .to_string()
+                .into_bytes(),
+        );
+        let app = App::with_clock(
+            cat,
+            ScoredHits(vec![(side.clone(), 2.0), (main.clone(), 2.0)]),
+            rank_clock,
+        );
+        let (ids, _, _, _) = hits_of(app.handle(search_req("side needle", 10, None)).unwrap());
+        assert_eq!(
+            ids,
+            vec![main.as_str().to_string(), side.as_str().to_string()],
+            "sidechain hit must rank after equal-relevance mainline hit"
+        );
+    }
+
+    #[test]
+    fn search_lexical_ranking_is_deterministic_across_identical_queries() {
+        let old = StableId::native(IdKind::Message, "rank-old");
+        let new = StableId::native(IdKind::Message, "rank-new");
+        let mut cat = MapCatalog::new(7);
+        cat.insert(
+            &old,
+            serde_json::json!({ "text": "rank needle", "timestamp": "2026-01-01T00:00:00Z" })
+                .to_string()
+                .into_bytes(),
+        );
+        cat.insert(
+            &new,
+            serde_json::json!({ "text": "rank needle", "timestamp": "2026-08-24T00:00:00Z" })
+                .to_string()
+                .into_bytes(),
+        );
+        let app = App::with_clock(
+            cat,
+            ScoredHits(vec![(old.clone(), 1.0), (new.clone(), 1.0)]),
+            rank_clock,
+        );
+        let first = app.handle(search_req("rank needle", 10, None)).unwrap();
+        let second = app.handle(search_req("rank needle", 10, None)).unwrap();
+        assert_eq!(first, second, "same clock + same query must be identical");
+    }
+
+    #[test]
+    fn search_lexical_ranking_pages_partition_the_pinned_ordering() {
+        // 时效重排后的钉住排序必须同样支持不重不漏分页（cursor 绑定 query+sort，
+        // 同 clock 下 offset 续读稳定）。三条命中且每页 fetch 窗口 ≥ 3（offset 0
+        // 时 fetch = page+1 = 3 恰好覆盖全集），窗口内的重排序与全集一致，
+        // 三页拼接 == 不分页结果。
+        let hits: Vec<(StableId, f32)> = (0..3)
+            .map(|i| {
+                (
+                    StableId::native(IdKind::Message, &format!("rank-p{i}")),
+                    1.0,
+                )
+            })
+            .collect();
+        let mut cat = MapCatalog::new(7);
+        for (index, (id, _)) in hits.iter().enumerate() {
+            cat.insert(
+                id,
+                serde_json::json!({ "text": "rank paged", "timestamp": format!(
+                    "2026-08-0{}T00:00:00Z", index + 1
+                ) })
+                .to_string()
+                .into_bytes(),
+            );
+        }
+        let app = App::with_clock(cat, ScoredHits(hits), rank_clock);
+        let (unpaged, _, _, _) = hits_of(app.handle(search_req("rank paged", 10, None)).unwrap());
+        assert_eq!(
+            unpaged,
+            vec!["msg_v1_rank-p2", "msg_v1_rank-p1", "msg_v1_rank-p0"],
+            "newest-first pinned order"
+        );
+
+        let mut paged: Vec<String> = Vec::new();
+        let mut token: Option<String> = None;
+        for _ in 0..2 {
+            let (ids, next, _, truncation) = hits_of(
+                app.handle(search_req("rank paged", 2, token.take()))
+                    .unwrap(),
+            );
+            assert!(!truncation.truncated);
+            paged.extend(ids);
+            token = next;
+            if token.is_none() {
+                break;
+            }
+        }
+        assert_eq!(paged, unpaged);
+        assert!(token.is_none());
     }
 
     #[test]
@@ -6072,9 +6301,17 @@ mod tests {
             panic!("expected Search response");
         };
         assert_eq!(hits.len(), 3);
-        assert!(hits[0].resume_available, "claimed session must be true");
-        assert!(!hits[1].resume_available, "unclaimed session must be false");
-        assert!(!hits[2].resume_available, "no session_id must be false");
+        // rank signals 把同分命中重钉为 wire id 升序，位置断言改为按 id 查找，
+        // 保持"有声明 → true；无声明/无归属 → false"的语义不变。
+        let resume_of = |tag: &str| {
+            hits.iter()
+                .find(|hit| hit.id == hit_id(tag))
+                .unwrap_or_else(|| panic!("missing hit {tag}"))
+                .resume_available
+        };
+        assert!(resume_of("hit00"), "claimed session must be true");
+        assert!(!resume_of("hit01"), "unclaimed session must be false");
+        assert!(!resume_of("hit02"), "no session_id must be false");
     }
 
     #[test]

@@ -1694,7 +1694,7 @@ fn dispatch(
             let include_sidechain = take_bool_flag(&mut args, "--include-sidechain");
             let tool_kind = extract_flag(&mut args, "--tool-kind")?;
             let tool_name = extract_flag(&mut args, "--tool-name")?;
-            let app = App::with_resume(store_ref(store), store_ref(store), store_ref(store));
+            let app = resume_app(store);
             let filters = search_filters_from_flags(
                 &providers,
                 since.as_deref(),
@@ -1755,7 +1755,7 @@ fn dispatch(
             // + warning（禁止静默切换）。
             let query = arg(&args, 1, "search <query>")?.to_string();
             let response = if retrieval_mode == RetrievalMode::Lexical {
-                let app = App::with_resume(store_ref(store), store_ref(store), store_ref(store));
+                let app = resume_app(store);
                 app.handle(AppRequest::Search {
                     query,
                     filters,
@@ -1817,12 +1817,7 @@ fn dispatch(
                     }
                 };
                 store.set_semantic_model(&model_id);
-                let app = App::with_resume_semantic(
-                    store_ref(store),
-                    store_ref(store),
-                    store_ref(store),
-                    store_ref(store),
-                );
+                let app = resume_semantic_app(store);
                 app.handle(AppRequest::Search {
                     query,
                     filters,
@@ -1862,7 +1857,7 @@ fn dispatch(
             let providers = extract_repeated_flag(&mut args, "--provider")?;
             let since = extract_flag(&mut args, "--since")?;
             let until = extract_flag(&mut args, "--until")?;
-            let app = App::with_resume(store_ref(store), store_ref(store), store_ref(store));
+            let app = resume_app(store);
             let filters = search_filters_from_flags(
                 &providers,
                 since.as_deref(),
@@ -2016,7 +2011,7 @@ fn dispatch(
                         .ok_or_else(|| CliError::usage(format!("not a valid session id: {wire}")))
                 })
                 .transpose()?;
-            let app = App::with_resume(store_ref(store), store_ref(store), store_ref(store));
+            let app = resume_app(store);
             let response = app.handle(AppRequest::Message {
                 message_id,
                 session_id,
@@ -2031,7 +2026,7 @@ fn dispatch(
             let wire = arg(rest, 1, "get <wire-id>")?;
             let id = StableId::from_wire(wire)
                 .ok_or_else(|| CliError::usage(format!("not a valid entity id: {wire}")))?;
-            let app = App::with_resume(store_ref(store), store_ref(store), store_ref(store));
+            let app = resume_app(store);
             let response = app.handle(AppRequest::Get { id: id.clone() })?;
             // 未找到实体：按 error catalog 映射 exit 4，而非当成功渲染 "not found"
             // （10 角色体验测试缺陷：show/get 不存在 ID 返回 exit 0，脚本无法区分）。
@@ -2050,7 +2045,7 @@ fn dispatch(
             let wire = arg(rest, 1, "show <wire-id>")?;
             let id = StableId::from_wire(wire)
                 .ok_or_else(|| CliError::usage(format!("not a valid entity id: {wire}")))?;
-            let app = App::with_resume(store_ref(store), store_ref(store), store_ref(store));
+            let app = resume_app(store);
             let response = app.handle(AppRequest::Show { id: id.clone() })?;
             if matches!(&response, AppResponse::Show { payload: None }) {
                 return Err(CliError(ProtocolError::new(
@@ -2074,7 +2069,7 @@ fn dispatch(
             let id = StableId::from_wire(wire)
                 .filter(|id| id.kind() == IdKind::Session)
                 .ok_or_else(|| CliError::usage(format!("not a valid session id: {wire}")))?;
-            let app = App::with_resume(store_ref(store), store_ref(store), store_ref(store));
+            let app = resume_app(store);
             let response = app.handle(AppRequest::GetSessionResume {
                 session_id: id.clone(),
             })?;
@@ -2210,8 +2205,7 @@ fn dispatch(
             let query = hooks::query_from_payload(event, &payload);
             let (text, hits_count) = match (config.should_run(), query) {
                 (true, Some(query)) => {
-                    let app =
-                        App::with_resume(store_ref(store), store_ref(store), store_ref(store));
+                    let app = resume_app(store);
                     let response = app.handle(AppRequest::Search {
                         query: query.clone(),
                         filters: hook_search_filters(&config, app.now_ms())?,
@@ -2262,7 +2256,7 @@ fn dispatch(
             let wire = arg(rest, 1, "get-session-resume <session-id>")?;
             let id = StableId::from_wire(wire)
                 .ok_or_else(|| CliError::usage(format!("not a valid entity id: {wire}")))?;
-            let app = App::with_resume(store_ref(store), store_ref(store), store_ref(store));
+            let app = resume_app(store);
             let response = app.handle(AppRequest::GetSessionResume {
                 session_id: id.clone(),
             })?;
@@ -2286,7 +2280,7 @@ fn dispatch(
                 } else {
                     20
                 });
-            let app = App::with_resume(store_ref(store), store_ref(store), store_ref(store));
+            let app = resume_app(store);
             let response = app.handle(AppRequest::List {
                 limit,
                 cursor,
@@ -2326,7 +2320,7 @@ fn dispatch(
             let session_id = StableId::from_wire(wire)
                 .filter(|id| id.kind() == IdKind::Session)
                 .ok_or_else(|| CliError::usage(format!("not a valid session id: {wire}")))?;
-            let app = App::with_resume(store_ref(store), store_ref(store), store_ref(store));
+            let app = resume_app(store);
             let response = app.handle(AppRequest::Context {
                 session_id,
                 policy,
@@ -2338,7 +2332,7 @@ fn dispatch(
         }
         "status" => {
             no_extra_args(rest, 0, "status")?;
-            let app = App::with_resume(store_ref(store), store_ref(store), store_ref(store));
+            let app = resume_app(store);
             let response = app.handle(AppRequest::Status)?;
             let (outcome, data, page, warnings) = render(response);
             Ok(("status", outcome, data, page, warnings))
@@ -2804,6 +2798,40 @@ fn index_one(store: &SqliteStore, fact: &str, text: &str) -> Result<serde_json::
 /// 这里用 `&SqliteStore` 满足两个 trait 约束（trait 对 &T 亦实现）。
 fn store_ref(store: &SqliteStore) -> &SqliteStore {
     store
+}
+
+/// 应用时钟注入点：`ASG_CLOCK_MS`（Unix 毫秒）存在时返回该固定值——仅供
+/// 确定性 e2e 测试使用；未设置时回落系统时钟，生产行为与旧版一致。
+/// rank signals 的时效衰减与 cursor 签发/校验共用同一时钟源。
+fn app_clock_ms() -> i64 {
+    std::env::var("ASG_CLOCK_MS")
+        .ok()
+        .and_then(|raw| raw.parse::<i64>().ok())
+        .unwrap_or_else(agent_session_grep_application::system_now_ms)
+}
+
+/// 组合根统一构造带 Resume 槽的 App（catalog/index/resume 共用同一 store），
+/// 时钟经 [`app_clock_ms`] 注入——测试固定、生产系统时钟。
+fn resume_app(store: &SqliteStore) -> App<&SqliteStore, &SqliteStore, &SqliteStore> {
+    App::with_resume_and_clock(
+        store_ref(store),
+        store_ref(store),
+        store_ref(store),
+        app_clock_ms,
+    )
+}
+
+/// 同上，但额外注入语义索引槽（#3 semantic/hybrid 模式）。
+fn resume_semantic_app(
+    store: &SqliteStore,
+) -> App<&SqliteStore, &SqliteStore, &SqliteStore, &SqliteStore> {
+    App::with_resume_semantic_and_clock(
+        store_ref(store),
+        store_ref(store),
+        store_ref(store),
+        store_ref(store),
+        app_clock_ms,
+    )
 }
 
 /// Human search 的会话表格行按 canonical Session 去重后批量解析 Resume

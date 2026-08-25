@@ -12,10 +12,10 @@
 //!   成功 JSON-RPC response，result 携 `isError: true` + canonical error 结构。
 
 use crate::protocol::{self, CanonicalCode, Outcome, ProtocolError};
-use crate::{CliError, canonical_search_provider, provider_registry, render, store_ref};
+use crate::{CliError, canonical_search_provider, provider_registry, render, resume_app};
 use agent_session_grep_adapters_sqlite::SqliteStore;
 use agent_session_grep_application::{
-    App, AppRequest, AppResponse, ContextLevel, ResponseBudget,
+    AppRequest, AppResponse, ContextLevel, ResponseBudget,
     handoff_pack::{HandoffInput, resolve_source_locations},
     parse_search_instant,
 };
@@ -692,11 +692,7 @@ impl McpServer<'_> {
         reject_below_floor(max_bytes.into(), "max_bytes", 4096)?;
         let filters = opt_filters(args)?;
         let search_limit = limit.unwrap_or(50);
-        let app = App::with_resume(
-            store_ref(self.store),
-            store_ref(self.store),
-            store_ref(self.store),
-        );
+        let app = resume_app(self.store);
         // 检索作为装配源：宽松 fetch-all 预算 + 全文级 snippet；pack 预算由
         // 包构建器单一执行（与 CLI handoff 同一约定）。
         let response = app.handle(AppRequest::Search {
@@ -816,11 +812,7 @@ impl McpServer<'_> {
     /// 良构请求进 Application，成功走 CLI 同一个 [`render`] 投影；
     /// 失败即业务错误——此后不再产生 `-32602`（design §2 note）。
     fn run_app(&self, request: AppRequest) -> Result<Value, ToolError> {
-        let app = App::with_resume(
-            store_ref(self.store),
-            store_ref(self.store),
-            store_ref(self.store),
-        );
+        let app = resume_app(self.store);
         match app.handle(request) {
             Ok(response) => {
                 let (outcome, data, page, warnings) = render(response);
