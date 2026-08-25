@@ -395,6 +395,10 @@ impl ProviderCapabilityMatrix {
                     context: CapabilityLevel::Unsupported,
                     resume: CapabilityLevel::Unknown,
                     handoff: CapabilityLevel::Derived,
+                    // step 记录确带 `tool_calls` 字段（adapter 忽略），但
+                    // `step_index` 是文件内序号而非跨文档 durable id（synthetic
+                    // 值会碰撞），消息以空 native id 上报——活动无法锚定
+                    // （staging fail-closed 丢弃）。如实保持 Unsupported。
                     tool_activity: CapabilityLevel::Unsupported,
                     // 行式 JSONL：adapter 逐记录发 `span: Some((start, end))`，
                     // golden `golden_spans_slice_back_to_exact_source_lines`
