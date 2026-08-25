@@ -109,6 +109,21 @@ fn redact_secret_value(value: serde_json::Value, count: &mut u64) -> serde_json:
 /// Check if a JSON key name indicates a secret field.
 fn is_secret_key(key: &str) -> bool {
     let lower = key.to_ascii_lowercase();
+    // usage 维度的计量键（v15 usage_events 投影的稳定输出键）：名称含
+    // "token" 片段但值是 SQL 求和的 u64 计数，绝不携带秘密——显式排除，
+    // 否则 status 的用量汇总会被整值涂红（覆盖标记"真 0 vs 未知"也被抹掉）。
+    // 排除只跳过"按键整值涂红"路径：值仍走 value-pattern 引擎，真正的秘密
+    // 形态（如 sk-…）照常被识别。
+    const USAGE_METRIC_KEYS: [&str; 5] = [
+        "input_tokens",
+        "output_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens",
+        "reasoning_tokens",
+    ];
+    if USAGE_METRIC_KEYS.contains(&lower.as_str()) {
+        return false;
+    }
     const SECRET_KEY_FRAGMENTS: &[&str] = &[
         "api_key",
         "apikey",
@@ -235,6 +250,41 @@ mod tests {
         assert_eq!(redacted["text"], "hello world");
         assert_eq!(status.redacted_count, 0);
         assert_eq!(status.status, RedactionState::None);
+    }
+
+    #[test]
+    fn does_not_redact_usage_metric_keys() {
+        // usage 维度（v15）：input_tokens 等计量键的值是 SQL 求和计数，绝不
+        // 按键涂红；但值层面的秘密形态仍被 value-pattern 引擎识别。
+        let val = serde_json::json!({
+            "usage": {
+                "sessions": 2,
+                "input_tokens": 108,
+                "output_tokens": 53,
+                "cache_read_tokens": 32,
+                "cache_write_tokens": 20,
+                "reasoning_tokens": 1,
+                "observed_events": 1,
+                "derived_events": 1,
+            },
+        });
+        let (redacted, status) = redact_value(val);
+        assert_eq!(redacted["usage"]["input_tokens"], 108);
+        assert_eq!(redacted["usage"]["output_tokens"], 53);
+        assert_eq!(redacted["usage"]["cache_read_tokens"], 32);
+        assert_eq!(status.redacted_count, 0);
+        assert_eq!(status.status, RedactionState::None);
+
+        // 值层面：秘密形态照常红（排除只跳过"按键整值涂红"路径）。
+        let val = serde_json::json!({"input_tokens": "sk-ant-api03-1234567890abcdef"});
+        let (redacted, _) = redact_value(val);
+        assert_eq!(redacted["input_tokens"], "[redacted:api_key]");
+
+        // 相邻秘密键不受影响：api_token 仍按键整值涂红。
+        let val = serde_json::json!({"api_token": "ghp_1234567890abcdef"});
+        let (redacted, status) = redact_value(val);
+        assert_eq!(redacted["api_token"], "[redacted]");
+        assert_eq!(status.redacted_count, 1);
     }
 
     #[test]
