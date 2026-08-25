@@ -609,6 +609,36 @@ ok. §5's provider-evidence table and §7.2's 0-Beta statement remain
 historical records of the 08-16 state; current per-provider status is
 tracked in `docs/product/PROVIDER-BETA-READINESS.md`.
 
+Closed 2026-08-26 (borrowed-feature waves, `main` at `c4b2a54`): seven
+competitor-borrowed improvements landed, each with failure-test-first
+coverage and the local gate green after every merge. Lexical rank signals
+(30-day exponential recency decay with a 0.3 floor, fixed sidechain score
+penalty, injected-clock determinism — `application::ranking`); pseudo-user
+noise filtering in the claude-code/codex parse layers (envelope-shape
+whitelist only, twelve formats pinned for verbatim passthrough) plus
+string-shaped Codex content parsing; `list_sessions` Peek previews charged
+to the response byte gate; session display titles derived via
+custom-title > ai-title > first-user chain (schema v13) with the parse-layer
+noise filter feeding the derivation; CJK single-character query recall via
+unigram FTS tokens (no schema change; ADR-0007 updated); parser-semantic
+versioning (schema v14) so parse upgrades force a targeted backfill of
+unchanged sources instead of silently retaining stale projections; bounded
+FTS projections (16,000 chars per message, schema-consistent across the
+write/rebuild/current paths); sidechain parent edges now classify as
+`Subagent` relations instead of `Reply`; token usage tracking (schema v15)
+extracting observed usage facts for claude-code and delta-derived Codex
+totals (Recall 98% stale-regression rule), with seven formats recording
+their evidence and staying honestly unsupported; and privacy-safe repo
+slugs (schema v16, `--repo` filter + `status` aggregation, git-detection
+failures degrade to null). Privacy scan stays at 0 findings,
+`verify-release.py` 10/10 against a fresh release build, and
+`cargo deny` advisories/bans/licenses/sources all ok (`cargo audit` is not
+runnable from this network — the RustSec advisory database fetch fails —
+so deny remains the advisory gate). The three gates this wave cannot close
+remain exactly the ones named in §7.2/§7.3: CI billing, owner sign-off, and
+provider Beta promotion (all 14 stay Experimental with the ledger recording
+the remaining local gaps).
+
 ---
 
 ## 8. Recommendation
