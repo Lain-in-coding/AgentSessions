@@ -71,6 +71,17 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   transcript plus `PROVENANCE.md`, pinned canonical output, span round-trip,
   and a read-only checksum regression, alongside the existing Claude/Codex
   golden evidence.
+- Seeded randomized property suites for six more provider adapters
+  (`kimi-code`, `openclaw`, `qoder`, `tencent-codebuddy`, `cline`, `aider`),
+  closing the coverage gap that previously left randomized property tests to
+  Claude/Codex. Fixed-seed xorshift64* transcripts assert span/seq/count/
+  metadata invariants against independent ground truth; deterministic
+  golden-source mutations (truncate/insert/delete/byte-flip, split and
+  shuffled lines) must never panic, never mutate the source bytes, never
+  report a partial commit, and stay byte-identical across re-parses; and
+  `probe` over arbitrary bytes must never panic and must report only the
+  adapter's own variant with non-ambiguous confidence
+  (`crates/agent-session-grep-provider-*/tests/properties.rs`).
 - Resume execution contract: the first run forces a preview acknowledgement
   before any real spawn, the provider binary is preflighted, and a drift test
   keeps the capability matrix and the resume command builder aligned.

@@ -689,7 +689,7 @@ fn beta_readiness_ledger_capability_columns_match_capability_matrix() {
     assert_eq!(rows.len(), 14, "ledger 实现表应恰有 14 行");
 
     // 列序：provider_id | golden | read-only | discover | source_span
-    // | tool_activity | resume | incremental | local Beta blockers。
+    // | tool_activity | resume | incremental | property | local Beta blockers。
     for cap in matrix
         .providers
         .iter()
@@ -701,8 +701,8 @@ fn beta_readiness_ledger_capability_columns_match_capability_matrix() {
             .unwrap_or_else(|| panic!("ledger 缺少 provider `{}` 的行", cap.provider_id));
         assert_eq!(
             row.len(),
-            9,
-            "{}: ledger 行应恰有 9 列，实际 {} 列",
+            10,
+            "{}: ledger 行应恰有 10 列，实际 {} 列",
             cap.provider_id,
             row.len()
         );
@@ -1557,6 +1557,9 @@ const NON_PATH_IDENTIFIERS: &[&str] = &[
     // 发版时生成的产物，不在源码树里。
     "THIRD-PARTY-DEPENDENCIES.json",
     "THIRD-PARTY-DEPENDENCIES.csv",
+    // CHANGELOG 用通配符指代 14 个 provider crate 的 properties.rs 族：
+    // 任何单一具体路径都无法指代整个集合，而逐条列出会让条目失去可读性。
+    "crates/agent-session-grep-provider-*/tests/properties.rs",
 ];
 
 /// 从文档原文里抽出所有"看起来是仓库路径"的反引号片段。
