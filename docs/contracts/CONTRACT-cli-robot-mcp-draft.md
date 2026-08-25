@@ -69,6 +69,7 @@ Exit Code(权威为 `schemas/robot/v1/error-catalog.json` 的 13 码): 0 成功 
 tools: search_sessions / get_session_context / get_session_resume / get_message / list_sessions / generate_handoff / list_providers / get_status / doctor
 - `get_session_resume`（ADR-0009，只读 Resume Metadata）：入参 canonical `ses_v1_*`，返回固定可空字段（provider_id / provider_session_id / original_working_directory / resume_available / unavailable_reason）；绝不构造或执行 shell 命令、绝不返回 transcript/source path。
 - `generate_handoff`：为查询组装 deterministic handoff pack（handoff-pack/v1）——证据带权威 source locator、预算（max_evidence/max_tokens/max_bytes）真实裁剪、默认跨边界脱敏（ADR-0009）；截断如实报 outcome partial。
+- `list_sessions`（Peek Bundle 借用，hstry）：每条会话条目附 `peek` 对象——`first_user_text` / `last_user_text`（各 ≤200 字符，char 边界截断；无用户消息时字段为 null），每条序列化 ≤1 KiB（预算常量集中、超限截断有测试）。peek 字节计入 `max_response_bytes` 字节闸，不免费越闸；`list`（全实体）不携带 peek。
 - 固定并测试 protocol version、capability negotiation、tool schema、错误映射、取消、超时、shutdown。
 - handler 只校验协议 + 映射 ADT，不复制搜索/分支/分页/预算规则。
 - 不提供任意文件读取、SQL 或命令执行。取消/超时后不留半提交 Catalog 或活动 IndexWriter。

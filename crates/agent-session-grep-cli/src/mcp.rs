@@ -1041,7 +1041,10 @@ fn tool_catalog() -> Value {
             "name": "list_sessions",
             "description": "Page Session entities (ses_v1_) in stable wire-id order. \
                 Documents and messages are not returned (competitor-borrowings R1.3); \
-                only session entities are listed.",
+                only session entities are listed. Each entry carries a peek object \
+                (first_user_text / last_user_text, <= 200 chars each, <= 1 KiB serialized \
+                per session; null when the session has no user message) for cheap triage \
+                without a full show.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2312,6 +2315,129 @@ mod tests {
         // 合法下限（1）不受影响：仍走正常业务帧。
         let v = call(&mut server, "list_sessions", json!({ "limit": 1 }));
         assert_eq!(v["result"]["isError"], false);
+    }
+
+    /// 提交一个含成员消息的会话实体（peek 用例的种子）。
+    fn seed_session(store: &SqliteStore, tag: &[u8], messages: &[(StableId, Vec<u8>)]) -> StableId {
+        let session = StableId::derive(IdKind::Session, Stability::Reconstructed, &[tag]);
+        let mut entries: Vec<(StableId, Vec<u8>, String)> = messages
+            .iter()
+            .map(|(id, payload)| (id.clone(), payload.clone(), String::new()))
+            .collect();
+        entries.push((
+            session.clone(),
+            serde_json::json!({
+                "documents": [],
+                "messages": messages.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(),
+            })
+            .to_string()
+            .into_bytes(),
+            String::new(),
+        ));
+        store
+            .commit_batch(&entries)
+            .expect("seed session with members");
+        session
+    }
+
+    fn user_payload(text: &str) -> Vec<u8> {
+        serde_json::json!({ "role": "user", "text": text })
+            .to_string()
+            .into_bytes()
+    }
+
+    fn list_entries(v: &Value) -> &Vec<Value> {
+        v["result"]["structuredContent"]["data"]["entries"]
+            .as_array()
+            .expect("list entries array")
+    }
+
+    #[test]
+    fn list_sessions_entries_carry_peek_with_first_and_last_user_text() {
+        // Peek Bundle 借用（#7，hstry）：每条会话条目附 1 KiB 级分诊预览，
+        // 首/尾用户消息按 member 顺序抽取；结构化输出与 content.text 同源。
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = open_store(&dir);
+        let first = StableId::derive(IdKind::Message, Stability::Reconstructed, &[b"peek-m1"]);
+        let middle = StableId::derive(IdKind::Message, Stability::Reconstructed, &[b"peek-m2"]);
+        let last = StableId::derive(IdKind::Message, Stability::Reconstructed, &[b"peek-m3"]);
+        seed_session(
+            &store,
+            b"peek-ses",
+            &[
+                (first, user_payload("first hello")),
+                (middle, br#"{"role":"assistant","text":"answer"}"#.to_vec()),
+                (last, user_payload("last hello")),
+            ],
+        );
+        let mut server = ready(&store);
+        let v = call(&mut server, "list_sessions", json!({ "limit": 10 }));
+        assert_eq!(v["result"]["isError"], false, "{v}");
+        let entries = list_entries(&v);
+        assert_eq!(entries.len(), 1);
+        let peek = &entries[0]["peek"];
+        assert_eq!(peek["first_user_text"], "first hello", "{peek}");
+        assert_eq!(peek["last_user_text"], "last hello", "{peek}");
+    }
+
+    #[test]
+    fn list_sessions_peek_stays_within_char_and_byte_budget() {
+        // 预算常量（PEEK_FIELD_MAX_CHARS / PEEK_MAX_BYTES）在协议边界成立：
+        // 宽字符（4 字节/字符）下字符上限会让字节超支，字节闸必须继续截断。
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = open_store(&dir);
+        let msg = StableId::derive(IdKind::Message, Stability::Reconstructed, &[b"peek-fat-m"]);
+        seed_session(
+            &store,
+            b"peek-fat-ses",
+            &[(msg, user_payload(&"🦀".repeat(1000)))],
+        );
+        let mut server = ready(&store);
+        let v = call(&mut server, "list_sessions", json!({ "limit": 10 }));
+        let entries = list_entries(&v);
+        let peek = &entries[0]["peek"];
+        for field in ["first_user_text", "last_user_text"] {
+            let text = peek[field].as_str().expect("peek field is text");
+            assert!(text.chars().count() <= 200, "{field} over char cap");
+        }
+        let serialized = serde_json::to_string(peek).expect("peek serializes");
+        assert!(
+            serialized.len() <= 1024,
+            "peek serialized {serialized} bytes"
+        );
+        // 宽字符把字段压到字符上限之下——字节闸确实生效而非摆设。
+        let first_chars = peek["first_user_text"]
+            .as_str()
+            .expect("text")
+            .chars()
+            .count();
+        assert!(first_chars < 200, "byte gate should cut below the char cap");
+    }
+
+    #[test]
+    fn list_sessions_peek_fields_are_null_when_no_user_message() {
+        // 只有 assistant/tool 消息的会话：peek 键恒在，字段为 null——
+        // 调用方可以区分"没有用户消息"与"没有 peek 键"。
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = open_store(&dir);
+        let a = StableId::derive(IdKind::Message, Stability::Reconstructed, &[b"peek-na-m1"]);
+        let b = StableId::derive(IdKind::Message, Stability::Reconstructed, &[b"peek-na-m2"]);
+        seed_session(
+            &store,
+            b"peek-na-ses",
+            &[
+                (a, br#"{"role":"assistant","text":"answer"}"#.to_vec()),
+                (b, br#"{"role":"tool","text":"output"}"#.to_vec()),
+            ],
+        );
+        let mut server = ready(&store);
+        let v = call(&mut server, "list_sessions", json!({ "limit": 10 }));
+        let entries = list_entries(&v);
+        assert_eq!(entries.len(), 1);
+        let peek = &entries[0]["peek"];
+        assert!(peek.is_object(), "peek key must be present: {entries:?}");
+        assert!(peek["first_user_text"].is_null(), "{peek}");
+        assert!(peek["last_user_text"].is_null(), "{peek}");
     }
 
     #[test]

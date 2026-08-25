@@ -1854,6 +1854,49 @@ fn list_sessions_zero_limit_is_protocol_error_like_search() {
     assert_eq!(frame_by_id(&frames, 2)["error"]["code"], -32602);
 }
 
+// ─── Peek Bundle（#7，hstry 借用）：list_sessions 条目附分诊预览 ─────────────
+
+#[test]
+fn list_sessions_entries_carry_peek_with_first_and_last_user_text() {
+    // 真实 ingest 后的 list_sessions：每条会话条目附 peek，首/尾用户消息按
+    // member 顺序抽取（sidechain 用户轮同样计入——member 顺序是唯一事实源）。
+    let (dir, db) = temp_db("mcp-list-peek");
+    let (fixture_path, _anchor) = write_context_fixture(dir.path());
+    let out = run_cli(&db, &["ingest", &fixture_path]);
+    assert!(out.status.success(), "ingest failed: {}", stdout(&out));
+
+    let frames = mcp_session(
+        &db,
+        &[
+            initialize_request(1, "2025-06-18"),
+            initialized_notification(),
+            tool_call(2, "list_sessions", json!({ "limit": 10 })),
+        ],
+    );
+    let result = &frame_by_id(&frames, 2)["result"];
+    assert_eq!(result["isError"], false, "list_sessions 应成功: {result}");
+    let entries = result["structuredContent"]["data"]["entries"]
+        .as_array()
+        .expect("entries must be an array");
+    assert_eq!(entries.len(), 1, "fixture ingests exactly one session");
+    let peek = &entries[0]["peek"];
+    assert!(peek.is_object(), "peek key must be present: {entries:?}");
+    assert_eq!(
+        peek["first_user_text"], "ctx root question",
+        "first user turn: {peek}"
+    );
+    assert_eq!(
+        peek["last_user_text"], "ctx sidechain probe",
+        "last user turn (sidechain included): {peek}"
+    );
+    // 预览必须是小对象：序列化 ≤1 KiB（per-session 预算常量）。
+    let serialized = serde_json::to_string(peek).expect("peek serializes");
+    assert!(
+        serialized.len() <= 1024,
+        "peek over budget: {serialized} bytes"
+    );
+}
+
 // ─── stderr 隐私（E2）：协议错误不落 stderr ─────────────────────────────────
 
 #[test]
