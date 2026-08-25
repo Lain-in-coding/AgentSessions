@@ -9,7 +9,7 @@ pub mod redact;
 
 use agent_session_grep_domain::{
     DomainError, DomainResult, PlacementId, SessionContextGraph, StableId, ToolActivity,
-    ToolActivityKind,
+    ToolActivityKind, UsageObservation,
 };
 use std::io::{BufRead, Read};
 
@@ -121,6 +121,14 @@ pub trait CatalogStore {
     /// Catalog 当前实体总数（status/doctor 使用）。
     fn count(&self) -> PortResult<u64>;
 
+    /// 全库 token 用量聚合（usage 维度只读投影）。`None` = 存储无 usage
+    /// 投影（legacy schema 未迁移或后端未实现）；`Some(totals)` 且
+    /// `totals.sessions == 0` = 有投影但没有任何 usage 事实（未知 ≠ 零）。
+    /// 默认空实现：无 usage 投影的存储返回 `None`。
+    fn usage_totals(&self) -> PortResult<Option<UsageTotals>> {
+        Ok(None)
+    }
+
     /// 当前对外可见的不可变 generation。`0` 表示尚未激活任何写批次。
     fn active_generation(&self) -> PortResult<u64>;
 }
@@ -151,6 +159,24 @@ pub struct SourcePlacement {
 pub struct ContextStats {
     pub placements: u64,
     pub source_placement_claims: u64,
+}
+
+/// 全库 token 用量聚合（status 展示用；只读投影）。
+///
+/// 覆盖标记原则（agentsview has_*_tokens 同义）：`sessions == 0` 表示库中
+/// **没有任何** usage 事实（未知），而不是"用量为零"——真 0 与未知必须可区分。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct UsageTotals {
+    /// 至少挂有一条 usage 事件的会话数。
+    pub sessions: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_write_tokens: u64,
+    pub reasoning_tokens: u64,
+    /// 事件数按来源分列（observed = provider 逐事件给出，derived = 累计量派生）。
+    pub observed_events: u64,
+    pub derived_events: u64,
 }
 
 /// Backend-independent read capability for contextual Message relations.
@@ -660,6 +686,9 @@ impl<T: CatalogStore + ?Sized> CatalogStore for &T {
     fn count(&self) -> PortResult<u64> {
         (**self).count()
     }
+    fn usage_totals(&self) -> PortResult<Option<UsageTotals>> {
+        (**self).usage_totals()
+    }
     fn active_generation(&self) -> PortResult<u64> {
         (**self).active_generation()
     }
@@ -1032,6 +1061,21 @@ pub struct ToolActivityEvent<'a> {
     pub activity: ToolActivity,
 }
 
+/// 一条规范化的 token 用量观察（RFC-0002 §2 扩展，usage 维度）。
+///
+/// 只承载 provider 格式**明确给出**的数字（Observed），或由累计量经单调校验
+/// 确定性派生的增量（Derived）——绝不按文本长度等代理估算。锚定规则：
+/// `message_native_id` 非空时挂在该消息上（如 Claude Code 的 `message.usage`
+/// 锚在 assistant 记录）；空串表示 **session 级观察**（如 Codex 的
+/// `token_count` 累计事件没有消息关联），由组合根挂到该源的会话上。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsageEvent<'a> {
+    /// 锚定消息的 provider-native id；空串 = session 级观察，绝不臆造锚点。
+    pub message_native_id: &'a str,
+    /// 提取出的完整用量事实。
+    pub usage: UsageObservation,
+}
+
 /// Canonical 事件接收端（RFC-0002 §2）：parse 流式产出，绝不整体加载。
 ///
 /// adapter 把每条规范化消息推入 sink；sink 的具体实现（staging / 直接入库）
@@ -1049,6 +1093,14 @@ pub trait CanonicalEventSink {
     /// 活动附着在 `event.message_native_id` 指向的消息上；sink 负责把 native id
     /// 解析为稳定消息身份，解析失败的活动必须丢弃（绝不臆造锚点）。
     fn emit_activity(&mut self, _event: ToolActivityEvent<'_>) -> PortResult<()> {
+        Ok(())
+    }
+
+    /// 接收一条 token 用量观察（additive：默认实现为 no-op，既有 sink 不受影响）。
+    ///
+    /// `event.message_native_id` 非空时用量挂在该消息上；空串是 session 级观察。
+    /// sink 负责解析锚点；解析失败必须丢弃（绝不臆造锚点）。
+    fn emit_usage(&mut self, _event: UsageEvent<'_>) -> PortResult<()> {
         Ok(())
     }
 }
