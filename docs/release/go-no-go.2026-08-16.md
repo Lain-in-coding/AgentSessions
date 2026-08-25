@@ -458,8 +458,31 @@ claims, and must still be cited by the ADR — so a rename cannot silently turn 
 governance record into an assertion. The same treatment went to the MCP tool
 catalog, whose nine-tool contract had been pinned to a hand-copied array:
 `contract_declared_mcp_tools_match_the_real_catalog` parses the CONTRACT document
-itself and compares it against the live registry. Local gate green throughout at
-1508 tests, `cargo fmt --all --check` and
+itself and compares it against the live registry.
+
+Continuing the same sweep outward from `capability.rs` to every release-facing
+document, four more hand-written claims were tied to their authoritative source.
+The README's Format column describes each provider's real source format, which
+is exactly the sort of prose that decays when an adapter changes storage:
+`readme_provider_format_column_matches_manifest_source_consumption` classifies
+each row as whole-source or record-stream from its wording and requires it to
+agree with that provider's `AdapterManifest.streaming_support`, the value
+`manifest.rs` derives from the format itself. Describing OpenCode (SQLite) as
+JSONL or Kimi (JSONL) as SQLite now fails. The README's eleventh line claims the
+planned version matches the Cargo workspace version, and its "honest maturity"
+bullet lists the grading tiers; `readme_release_status_and_maturity_tiers_match_authoritative_sources`
+reads the version out of `[workspace.package]` and the tier names out of
+`ProviderMaturity::as_str`, so a release bump that misses the README, a dropped
+tier, or a fabricated one like "stable" all fail. The CHANGELOG's `[Unreleased]`
+section names all 16 providers and both counts;
+`changelog_provider_claims_match_capability_matrix` derives those from the matrix
+and requires every implemented id to be named and both deferred ids to be marked
+deferred. Seven documents are now read through `include_str!` and fail on drift:
+the maturity matrix, the Beta-readiness ledger, README, CHANGELOG, the MCP
+CONTRACT, ADR-0010, and `capability.rs` itself as the authority they answer to.
+
+Local gate green throughout, ending at 1511 tests, with
+`cargo fmt --all --check` and
 `cargo clippy --workspace --all-targets -D warnings` both clean.
 
 Closed by the 2026-08-17 release-gap wave (post-draft audit fixes, pushed to
