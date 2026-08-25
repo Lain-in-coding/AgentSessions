@@ -119,6 +119,15 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Provider Beta readiness ledger (`docs/product/PROVIDER-BETA-READINESS.md`):
   per-provider local vs external Beta blockers, so no provider is promoted
   from code existence alone.
+- Seeded randomized property suites (`tests/properties.rs`) for `grok-build`,
+  `antigravity`, `opencode`, `pi`, `hermes`, and `cursor`, mirroring the
+  existing claude-code/codex coverage: deterministic xorshift64* corpora pin
+  span round-trips, seq/committed self-consistency, parse determinism,
+  read-only sources (RFC-0002 §7), probe never-panics on arbitrary bytes, and
+  no-panic legal output under seeded mutations of each golden fixture
+  (truncate / insert / delete / flip / split / shuffle). The readiness ledger
+  gains a `property` column guarded in both directions against each suite's
+  existence (`beta_readiness_property_column_matches_properties_test_existence`).
 
 ### Fixed
 

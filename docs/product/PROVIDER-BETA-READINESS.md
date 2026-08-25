@@ -7,10 +7,10 @@
 > repository-local gaps from external/owner gates. Do not promote from this
 > file alone.
 
-Last updated: 2026-08-25 (adds a `property` local column recording the
-seeded randomized property-test wave: kimi-code / openclaw / qoder /
-tencent-codebuddy / cline / aider now carry `properties.rs` suites mirroring
-the Claude/Codex coverage; the remaining six land in the sibling wave).
+Last updated: 2026-08-25 (two parallel property-test waves, merged: adds the
+`property` local column — seeded randomized suite `tests/properties.rs`
+mirroring the Claude/Codex coverage. Now `ok` for all 14 implemented
+providers; guarded both directions against the suite file's existence).
 
 ## Global external blockers (apply to every promotion)
 
@@ -22,24 +22,24 @@ the Claude/Codex coverage; the remaining six land in the sibling wave).
 
 ## Per-provider local readiness (implemented 14)
 
-Legend for local columns: `ok` = present with tests; `partial` = present with known holes; `missing` = not implemented / unsupported in capability matrix; `pending` = not yet landed in this wave (sibling wave in progress).
+Legend for local columns: `ok` = present with tests; `partial` = present with known holes; `missing` = not implemented / unsupported in capability matrix. `property` = seeded randomized property suite (`tests/properties.rs`, mirroring claude-code/codex).
 
-| provider_id | golden | read-only | discover | source_span | tool_activity | resume | incremental | property | local Beta blockers (beyond global) |
+| provider_id | golden | read-only | property | discover | source_span | tool_activity | resume | incremental | local Beta blockers (beyond global) |
 |---|---|---|---|---|---|---|---|---|---|
-| claude-code | ok | ok | native | ok (native) | partial | derived | derived | ok | richer tool-call extraction; owner promotion still required |
-| codex | ok | ok | native | ok (native) | partial | derived | derived | ok | richer tool-call extraction; owner promotion still required |
-| grok-build | ok | ok | native | ok (native) | missing | derived | derived | pending | no tool_activity; synthetic msg ids |
-| antigravity | ok | ok | native | ok (native) | missing | unknown | derived | pending | no in-file session id; no tool_activity |
-| opencode | ok | ok | native | missing | missing | unknown | derived | pending | no span (SQLite source has no in-file byte offsets); no resume template |
-| pi | ok | ok | native | ok (native) | missing | derived | derived | pending | no tool_activity |
-| hermes | ok | ok | native | missing | missing | unknown | derived | pending | JSON doc; no span; SQLite `state.db` surface not parsed |
-| cursor | ok | ok | missing | missing | missing | unknown | derived | pending | no discovery root: the adapter parses the VS Code `workspaceStorage/*/state.vscdb` ItemTable surface, whose per-workspace hash directories sit under a platform-specific application-data path, not a home-relative root this table can express; `~/.cursor/chats/<id>/store.db` is the separate Cursor CLI `meta`/`blobs` schema, which this adapter's probe rejects. No span; multi-gen format layering pending |
-| kimi-code | ok | ok | native | ok (native) | missing | unknown | derived | ok | loop events not parsed |
-| openclaw | ok | ok | native | ok (native) | missing | unsupported | derived | ok | resume intentionally unsupported |
-| qoder | ok | ok | native | ok (native) | missing | unknown | derived | ok | discovery covers the transcript-JSONL surface only (the Electron SQLite store is a separate, unimplemented surface); non-dialogue records skipped |
-| tencent-codebuddy | ok | ok | native | ok (native) | missing | unknown | derived | ok | extension variant pending |
-| cline | ok | ok | native | missing | missing | unsupported | derived | ok | no session id / span; discovery covers the `~/.cline/data/tasks` tree only (the VS Code extension `globalStorage` tree is not home-relative and is not registered) |
-| aider | ok | ok | missing | derived | missing | unsupported | derived | ok | approximate spans; no resume; no discovery root by construction — `.aider.chat.history.md` lives at the root of each user repository, so upstream agentsview discovers it by walking working trees rather than one canonical home directory; no tool_activity (blockquote tool output is folded into assistant text, no structured call/result records) |
+| claude-code | ok | ok | ok | native | ok (native) | partial | derived | derived | richer tool-call extraction; owner promotion still required |
+| codex | ok | ok | ok | native | ok (native) | partial | derived | derived | richer tool-call extraction; owner promotion still required |
+| grok-build | ok | ok | ok | native | ok (native) | missing | derived | derived | no tool_activity; synthetic msg ids |
+| antigravity | ok | ok | ok | native | ok (native) | missing | unknown | derived | no in-file session id; no tool_activity |
+| opencode | ok | ok | ok | native | missing | missing | unknown | derived | no span (SQLite source has no in-file byte offsets); no resume template |
+| pi | ok | ok | ok | native | ok (native) | missing | derived | derived | no tool_activity |
+| hermes | ok | ok | ok | native | missing | missing | unknown | derived | JSON doc; no span; SQLite `state.db` surface not parsed |
+| cursor | ok | ok | ok | missing | missing | missing | unknown | derived | no discovery root: the adapter parses the VS Code `workspaceStorage/*/state.vscdb` ItemTable surface, whose per-workspace hash directories sit under a platform-specific application-data path, not a home-relative root this table can express; `~/.cursor/chats/<id>/store.db` is the separate Cursor CLI `meta`/`blobs` schema, which this adapter's probe rejects. No span; multi-gen format layering pending |
+| kimi-code | ok | ok | ok | native | ok (native) | missing | unknown | derived | loop events not parsed |
+| openclaw | ok | ok | ok | native | ok (native) | missing | unsupported | derived | resume intentionally unsupported |
+| qoder | ok | ok | ok | native | ok (native) | missing | unknown | derived | discovery covers the transcript-JSONL surface only (the Electron SQLite store is a separate, unimplemented surface); non-dialogue records skipped |
+| tencent-codebuddy | ok | ok | ok | native | ok (native) | missing | unknown | derived | extension variant pending |
+| cline | ok | ok | ok | native | missing | missing | unsupported | derived | no session id / span; discovery covers the `~/.cline/data/tasks` tree only (the VS Code extension `globalStorage` tree is not home-relative and is not registered) |
+| aider | ok | ok | ok | missing | derived | missing | unsupported | derived | approximate spans; no resume; no discovery root by construction — `.aider.chat.history.md` lives at the root of each user repository, so upstream agentsview discovers it by walking working trees rather than one canonical home directory; no tool_activity (blockquote tool output is folded into assistant text, no structured call/result records) |
 
 ## Deferred providers (not Beta candidates)
 
