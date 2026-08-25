@@ -502,6 +502,35 @@ mod tests {
     }
 
     #[test]
+    fn parse_passes_noise_shaped_user_text_through_verbatim() {
+        // 钉住测试：CodeBuddy 格式没有 system-reminder / AGENTS.md / 环境上下文
+        // 等注入概念（本格式唯一的内容过滤是根消息的启动关键词 "code"）。
+        // 形似噪声的 user 文本必须逐字透传，防止将来把别家格式的过滤规则
+        // 盲目搬来造成 silent drift。
+        let adapter = CodeBuddyAdapter::new();
+        let fixture = r##"{"type":"message","role":"user","content":"real question","sessionId":"s1"}
+{"type":"message","role":"user","content":"<system-reminder>reminder text</system-reminder>","sessionId":"s1"}
+{"type":"message","role":"user","content":"# AGENTS.md instructions","sessionId":"s1"}
+"##;
+        let mut sink = CountSink {
+            count: 0,
+            texts: vec![],
+            roles: vec![],
+        };
+        let report = adapter.parse(fixture.as_bytes(), &mut sink).unwrap();
+        assert_eq!(report.committed, 3);
+        assert_eq!(report.skipped, 0);
+        assert_eq!(
+            sink.texts,
+            vec![
+                "real question".to_string(),
+                "<system-reminder>reminder text</system-reminder>".to_string(),
+                "# AGENTS.md instructions".to_string(),
+            ]
+        );
+    }
+
+    #[test]
     fn parse_skips_non_message_types() {
         let adapter = CodeBuddyAdapter::new();
         let fixture = r#"{"type":"meta","sessionId":"s1","cwd":"/p"}
