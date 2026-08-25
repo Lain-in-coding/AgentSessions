@@ -275,6 +275,10 @@ impl ProviderCapabilityMatrix {
                     context: CapabilityLevel::Unsupported,
                     resume: CapabilityLevel::Unknown,
                     handoff: CapabilityLevel::Derived,
+                    // wire.jsonl 的 `context.append_loop_event` 确承载 step/tool
+                    // 事件（含 tool.call/tool.result），但本切片不解析 loop 事件，
+                    // 且 append_message 记录无 per-message native id——活动无法
+                    // 锚定（staging fail-closed 丢弃）。如实保持 Unsupported。
                     tool_activity: CapabilityLevel::Unsupported,
                     source_span: CapabilityLevel::Native,
                     incremental: CapabilityLevel::Derived,
