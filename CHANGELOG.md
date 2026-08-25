@@ -128,6 +128,18 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (truncate / insert / delete / flip / split / shuffle). The readiness ledger
   gains a `property` column guarded in both directions against each suite's
   existence (`beta_readiness_property_column_matches_properties_test_existence`).
+- Resume command matrix extended with authoritative upstream evidence:
+  `antigravity` → `agy --conversation <id>` (fast-resume adapter +
+  agent-sessions builder), `opencode` → `opencode <directory> --session <id>`
+  with the directory positional omitted when unknown (fast-resume adapter;
+  cc-switch/agf corroborate the `--session`/`-s` flag), `kimi-code` →
+  `kimi --session <id>` (fast-resume adapter, same wire.jsonl source face),
+  and `tencent-codebuddy` → `codebuddy --resume <id>` (AgentRecall, same
+  `~/.codebuddy/projects` JSONL face). Capability matrix resume columns move
+  to Derived for these four; `hermes` (conflicting `--resume`/`--session`/no
+  CLI claims across reference projects), `qoder` (no resume evidence), and
+  `cursor` (CLI `agent --resume` belongs to a different store.db surface)
+  stay Unknown rather than fabricate commands.
 
 ### Fixed
 
