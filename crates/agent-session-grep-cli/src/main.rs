@@ -3556,7 +3556,16 @@ fn staged_to_source_with_provider(
                 child_placement_id: placement.id.clone(),
                 parent_message_id: parent_message_id.clone(),
                 parent_native_id: message.parent_native_id.clone(),
-                relation: MessageRelation::Reply,
+                // 会话树血缘诚实分类：provider 格式唯一能证明的边类型是 claude
+                // 的 isSidechain（subagent/分支标记，见 provider-claude 字段注释
+                // 与 ToolActivityActor 同源分类）→ Subagent；主线消息的边保持
+                // Reply。fork/retry/continuation 无格式字段区分（parentUuid 不
+                // 携带类型），绝不臆造——hstry fork_type 三分类的诚实子集。
+                relation: if message.is_sidechain {
+                    MessageRelation::Subagent
+                } else {
+                    MessageRelation::Reply
+                },
             });
         }
         if seen_members.insert(id.as_str().to_string()) {
@@ -5075,6 +5084,57 @@ mod tests {
         )
         .unwrap();
         assert!(!source.relation_complete);
+    }
+
+    #[test]
+    fn sidechain_edges_classify_as_subagent_while_mainline_edges_stay_reply() {
+        // 会话树血缘分类：provider 格式唯一能证明的边类型是 claude 的
+        // isSidechain（subagent/分支标记）→ 其 parentUuid 入边必须标
+        // Subagent；主线消息的边保持 Reply。fork/retry/continuation 在
+        // provider 格式里无显式字段区分（parentUuid 不携带类型），绝不
+        // 臆造三分类——这是 hstry fork_type 三分类的诚实子集。
+        let mut main_parent = staged_message(0, "main-native", (0, 9));
+        main_parent.parent_native_id = None;
+        let mut main_child = staged_message(1, "main-child", (10, 19));
+        main_child.parent_native_id = Some("main-native".into());
+        let mut side_child = staged_message(2, "side-native", (20, 29));
+        side_child.is_sidechain = true;
+        side_child.parent_native_id = Some("main-child".into());
+        let staged = staged_batch(vec![main_parent, main_child, side_child], 0, "session-1");
+        let source = staged_to_source(
+            "synthetic.jsonl",
+            &staged,
+            "synthetic",
+            "synthetic/jsonl-v1",
+            "fingerprint",
+            32,
+        )
+        .unwrap();
+
+        let mut relations_by_child = BTreeMap::new();
+        for edge in &source.edges {
+            relations_by_child.insert(edge.child_placement_id.as_str().to_string(), edge.relation);
+        }
+        assert_eq!(relations_by_child.len(), 2, "只有带 parent 的消息产生边");
+        let side_placement = source
+            .placements
+            .iter()
+            .find(|placement| placement.is_sidechain)
+            .unwrap();
+        assert_eq!(
+            relations_by_child[side_placement.id.as_str()],
+            MessageRelation::Subagent,
+            "sidechain 消息的入边必须标 Subagent，不得伪装成 Reply"
+        );
+        for (placement_id, relation) in &relations_by_child {
+            if placement_id != side_placement.id.as_str() {
+                assert_eq!(
+                    *relation,
+                    MessageRelation::Reply,
+                    "主线消息的入边保持 Reply（fork/retry 无格式区分，不臆造）"
+                );
+            }
+        }
     }
 
     #[test]

@@ -229,6 +229,14 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Message edge relation classification (session-tree lineage, borrowed from
+  hstry's `fork_type` three-way classification): a sidechain message's parent
+  edge is now stored as `subagent` instead of `reply`. Only the claude-code
+  format carries a provable edge type (`isSidechain` = subagent/branch flag),
+  so this is the honest subset — fork/retry/continuation have no explicit
+  format field and keep `reply` rather than being guessed. Edge relations are
+  deterministic and re-derived on re-ingest, so existing databases converge
+  on their next sync.
 - serve query-string routing: `/api/search?q=...` no longer 404s.
 - Smoke scripts assert the actual 9 MCP tools (was 7 after the provider wave;
   `generate_handoff` brought it to 9).
