@@ -800,4 +800,29 @@ mod tests {
         );
         assert!(report.session_observation.multi_session);
     }
+
+    #[test]
+    fn parse_passes_noise_shaped_user_text_through_verbatim() {
+        // 钉住测试：Cursor chatdata bubble 没有 system-reminder / AGENTS.md /
+        // 环境上下文等注入概念（user bubble 的 text 就是用户原文，无任何内容
+        // 过滤）。形似噪声的文本必须逐字透传，防止将来把别家格式的过滤规则
+        // 盲目搬来造成 silent drift。
+        let adapter = CursorAdapter::new();
+        let chatdata = r##"{"tabs":[{"id":"tab-1","title":"Synthetic","createdAt":100,"lastUpdatedAt":200,
+            "bubbles":[
+              {"type":"user","text":"<system-reminder>reminder text</system-reminder>","timingInfo":{"startTime":101}},
+              {"type":"user","text":"# AGENTS.md instructions","timingInfo":{"startTime":102}}
+            ]}]}"##;
+        let db_bytes = create_cursor_db(Some(chatdata), None);
+        let mut sink = sink();
+        let report = adapter.parse(&db_bytes, &mut sink).unwrap();
+
+        assert_eq!(report.committed, 2);
+        assert_eq!(report.skipped, 0);
+        assert_eq!(
+            sink.events[0].2,
+            "<system-reminder>reminder text</system-reminder>"
+        );
+        assert_eq!(sink.events[1].2, "# AGENTS.md instructions");
+    }
 }
