@@ -126,6 +126,7 @@ certified — currently 0 Beta. **Not release-ready per provider gate.**
 | 14 | Row 13's fix only reached `sync --discover`, which carries a scanned provider identity. Explicit `sync <file>` and `ingest <file>` still probed the whole registry, so naming a pi or openclaw transcript by path — the natural first move for a new user, and the only way to index a source outside a canonical root — still failed with the same `ambiguous provider selection` error | P1 | closed | this task |
 | 15 | `qoder`'s probe counted any record whose top-level `type` is `session_meta` as its own header, but every Codex rollout record is a `{timestamp, type, payload}` envelope whose first line is exactly that. Codex degrades `Confirmed`→`High` on a tolerated broken line (its own golden fixture has one), so both adapters returned `High` and a real Codex rollout with any damaged line was rejected as ambiguous rather than indexed as Codex | P1 | closed | this task |
 | 16 | `codex` declared `context: Native` while its adapter hard-codes `parent_native_id: None` — Codex rollout is a linear sequence with no threading edges, so no `message_edges` row can ever exist for it and `context` had nothing to walk. Found by the guard added for it: `context` was the last column falsifiable from pinned golden output that had none | P1 | closed | this task |
+| 17 | `handoff` was declared `Unsupported` for all 14 implemented providers and `incremental` was declared `Native` for two and `Unsupported` for the other twelve — but neither is a per-provider capability. `handoff_pack::generate_deterministic` reads no provider identity, and incremental judgement lives entirely in the composition root plus the store's fingerprint cache. Both columns had only a doc↔`capability.rs` consistency guard, never a claim-vs-behavior one, so twelve providers under-claimed a shipped command (`asg handoff`) and a shipped behavior (no-op resync) while two mislabeled a store-layer capability as provider-native | P1 | closed | this task |
 
 ---
 
@@ -346,6 +347,55 @@ described `context` as "unsupported 或 unknown" across the board while
 claude-code genuinely supports it; that line now states the per-provider truth.
 Mutation-verified in both directions: restoring `Native` for codex re-fails the
 guard, and deleting claude-code's parent links fails it too.
+
+Closed 2026-08-25 (§6 row 17, `main` at `5034838` and `2d23ca3`): auditing the
+sentence above — "the last column falsifiable from pinned golden output" — showed
+it was true only in its narrow reading. Two columns, `handoff` and `incremental`,
+had no claim-vs-behavior guard of any kind; they were covered only by
+doc↔`capability.rs` consistency checks, which keep three files agreeing with each
+other and say nothing about whether the agreed value is true. Both turned out to
+be under-claims of the same shape: neither capability is per-provider at all.
+
+`handoff`'s generator (`application::handoff_pack::generate_deterministic`)
+consumes only `SearchHit` plus authoritative source placement; it never reads a
+provider identity, and it sets `provenance: None` and
+`matched_sessions[].provider_id: None` on purpose, because a search-shaped pack
+spans providers and inventing a single origin would be dishonest. So "can this
+provider produce a pack with real evidence" reduces to "is the message indexed
+with a placement" — i.e. `parse` works. The blanket `Unsupported` was checked
+against reality by running `asg handoff` over three structurally unrelated real
+goldens (codex JSONL, aider markdown whose native ids are always empty, opencode
+SQLite); all three returned `confidence: high` with real evidence.
+`handoff_pack_generation_is_provider_independent` now runs every implemented
+provider id through the generator and requires the assembled pack to be
+field-identical, so the moment a per-provider branch appears the test fails.
+
+`incremental` is the same story one layer down: the decision lives entirely in
+the composition root and the store. `sync` reads the cached
+`(len_bytes, fingerprint)` from `source_scans`, compares it against the fresh
+snapshot's BLAKE3 fingerprint, and on a match skips parse outright (reporting
+`unchanged` = stored message count); `commit_source_batches_if_changed` then does
+content-level no-op detection and leaves `generation` alone. No adapter
+participates and no per-provider branch exists.
+`capability_incremental_claim_matches_real_resync_for_every_provider` syncs each
+provider's pinned golden *source* twice — staging pi and openclaw under their
+canonical roots, since the two are format twins and identity comes from the
+registered root — and requires the second sync to be `committed=0` /
+`unchanged=N` / unchanged generation. On its first run it failed on `aider`,
+which claimed `Unsupported`; the measured resync was a clean no-op, and the same
+held for all twelve providers marked `Unsupported`.
+
+Both columns are therefore now `Derived` for all 14 implemented providers, and
+`Derived` rather than `Native` deliberately: the behavior is derived from
+indexed content and source bytes, not natively provided by the agent's format.
+That also corrected an over-claim hiding inside the under-claim — claude-code and
+codex had `incremental: Native`, which recorded a store-layer capability as a
+provider-native one. Their dedicated append/shrink/empty-source tombstone resync
+e2e tests remain, and the matrix now says plainly that those represent deeper
+test coverage, not a higher capability tier. Mutation-verified in both
+directions on the incremental guard: restoring `Unsupported` for aider fails it
+(exit 101), and downgrading a row to `Unknown` fails it too, with `capability.rs`
+restored byte-identical (hash-checked) after each.
 
 Closed by the 2026-08-17 release-gap wave (post-draft audit fixes, pushed to
 `main` at `ed57a9a`): Robot v1.1 `searchData.facets` schema echo + protocol
