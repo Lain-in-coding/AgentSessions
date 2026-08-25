@@ -73,6 +73,12 @@ const MAX_FETCH_WINDOW: u64 = 1 << 20;
 /// MAX_FETCH_WINDOW 封顶），使 `occurrences` 覆盖更有意义的命中样本。
 const GROUP_SCAN_FACTOR: u64 = 16;
 
+/// JSON 语法开销：list 条目附加派生标题（#6，schema v13）时写入的
+/// `,"title":` 前缀（`,` + `"title"` + `:`）。与 peek 的
+/// [`peek::PEEK_ENTRY_OVERHEAD_BYTES`] 同一计费方式——标题是渲染产物，
+/// 字节必须计入 `max_response_bytes` 字节闸。
+const TITLE_ENTRY_OVERHEAD_BYTES: usize = 9;
+
 /// 一条 JSON 字符串字面量的序列化长度（含两端引号与转义）。
 fn json_string_len(value: &str) -> usize {
     2 + value
@@ -339,6 +345,11 @@ pub enum AppResponse {
         /// 会话条目一个 `Some`，普通 `list` 全为 `None`。预览字节计入
         /// `max_response_bytes` 字节闸，绝不免费越闸。
         peeks: Vec<Option<SessionPeek>>,
+        /// 与 `entries` 逐位对齐的派生会话标题（#6，schema v13 标题投影）：
+        /// `sessions_only` 列表的每个会话条目一个 `Option`（`None` = 无派生
+        /// 标题），普通 `list` 全为 `None`。标题字节与 peek 一样计入
+        /// `max_response_bytes` 字节闸。
+        titles: Vec<Option<String>>,
         next_cursor: Option<String>,
         generation: u64,
         truncation: Truncation,
@@ -1941,17 +1952,33 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore, 
                 } else {
                     slice.iter().map(|_| None).collect()
                 };
+                // 标题投影（#6，schema v13）：sessions_only 列表逐条附派生标题
+                // （custom-title > ai-title > 首条有效 user，存储层批量读取）；
+                // 普通 `list` 全 None。标题字节计入同一字节闸——与 peek 一样
+                // 不是免费内容。
+                let titles: Vec<Option<String>> = if sessions_only {
+                    let session_ids: Vec<StableId> =
+                        slice.iter().map(|entry| entry.id.clone()).collect();
+                    self.catalog.session_titles(&session_ids)?
+                } else {
+                    slice.iter().map(|_| None).collect()
+                };
                 let net_bytes = budget
                     .max_response_bytes
                     .saturating_sub(ENVELOPE_RESERVE_BYTES);
-                let paired: Vec<(CatalogEntry, Option<SessionPeek>)> =
-                    slice.into_iter().zip(peeks).collect();
+                let paired: Vec<(CatalogEntry, Option<SessionPeek>, Option<String>)> = slice
+                    .into_iter()
+                    .zip(peeks)
+                    .zip(titles)
+                    .map(|((entry, peek), title)| (entry, peek, title))
+                    .collect();
                 let (paired, truncation, _) =
-                    budget::clamp_items(paired, page, net_bytes, |(entry, peek)| {
+                    budget::clamp_items(paired, page, net_bytes, |(entry, peek, title)| {
                         // 最终 JSON 形态 `{"id":"<id>","payload":"<lossy utf-8>"}`
-                        // （sessions_only 时附加 `,"peek":{...}`）：
+                        // （sessions_only 时附加 `,"peek":{...}` 与 `,"title":"..."`）：
                         // id 按转义计长，payload 按序列化后长度计（不是原始字节数），
-                        // peek 按实际序列化长度计 + `,"peek":` 前缀 8 字节。
+                        // peek 按实际序列化长度计 + `,"peek":` 前缀 8 字节，
+                        // title 按转义后长度计 + `,"title":` 前缀 9 字节。
                         json_string_len(entry.id.as_str())
                             + lossy_payload_json_len(&entry.payload)
                             + 18
@@ -1959,9 +1986,19 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore, 
                                 .as_ref()
                                 .map(|peek| peek::PEEK_ENTRY_OVERHEAD_BYTES + peek.json_len())
                                 .unwrap_or(0)
+                            + title
+                                .as_ref()
+                                .map(|title| TITLE_ENTRY_OVERHEAD_BYTES + json_string_len(title))
+                                .unwrap_or(0)
                     });
-                let (entries, peeks): (Vec<CatalogEntry>, Vec<Option<SessionPeek>>) =
-                    paired.into_iter().unzip();
+                let mut entries = Vec::with_capacity(paired.len());
+                let mut peeks = Vec::with_capacity(paired.len());
+                let mut titles = Vec::with_capacity(paired.len());
+                for (entry, peek, title) in paired {
+                    entries.push(entry);
+                    peeks.push(peek);
+                    titles.push(title);
+                }
                 let consumed = offset + entries.len() as u64;
                 // A truncated page with zero kept entries means the first
                 // entity already exceeds the byte budget: the next cursor
@@ -1980,6 +2017,7 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore, 
                 Ok(AppResponse::List {
                     entries,
                     peeks,
+                    titles,
                     next_cursor,
                     generation,
                     truncation,
@@ -3083,6 +3121,7 @@ mod tests {
         map: std::collections::BTreeMap<String, Vec<u8>>,
         generation: std::cell::Cell<u64>,
         session_of: std::collections::BTreeMap<String, String>,
+        titles: std::collections::BTreeMap<String, String>,
     }
     impl MapCatalog {
         fn new(generation: u64) -> Self {
@@ -3090,6 +3129,7 @@ mod tests {
                 map: Default::default(),
                 generation: std::cell::Cell::new(generation),
                 session_of: Default::default(),
+                titles: Default::default(),
             }
         }
         fn insert(&mut self, id: &StableId, payload: impl Into<Vec<u8>>) {
@@ -3100,6 +3140,11 @@ mod tests {
                 message_id.as_str().to_string(),
                 session_id.as_str().to_string(),
             );
+        }
+        /// 注入标题投影（#6）：默认无标题；有则按 session wire id 返回。
+        fn set_title(&mut self, session_id: &StableId, title: impl Into<String>) {
+            self.titles
+                .insert(session_id.as_str().to_string(), title.into());
         }
     }
     impl CatalogStore for MapCatalog {
@@ -3139,6 +3184,12 @@ mod tests {
                     id: StableId::from_wire(k).expect("map keys are wire ids"),
                     payload: v.clone(),
                 })
+                .collect())
+        }
+        fn session_titles(&self, session_ids: &[StableId]) -> PortResult<Vec<Option<String>>> {
+            Ok(session_ids
+                .iter()
+                .map(|id| self.titles.get(id.as_str()).cloned())
                 .collect())
         }
         fn count(&self) -> PortResult<u64> {
@@ -4308,6 +4359,127 @@ mod tests {
         assert_eq!(entries.len(), 4);
         assert!(peeks.iter().all(Option::is_some));
         assert!(!truncation.truncated);
+    }
+
+    #[test]
+    fn list_sessions_attaches_titles_aligned_with_entries() {
+        // 标题投影（#6，schema v13）：sessions_only 列表逐条附派生标题，
+        // 与 entries/peeks 逐位对齐；无标题会话为 None；普通 list 全 None。
+        let mut cat = MapCatalog::new(7);
+        let titled = StableId::derive(IdKind::Session, Stability::Reconstructed, &[b"tsa"]);
+        let untitled = StableId::derive(IdKind::Session, Stability::Reconstructed, &[b"tsb"]);
+        for session in [&titled, &untitled] {
+            cat.insert(
+                session,
+                serde_json::json!({ "documents": [], "messages": [] })
+                    .to_string()
+                    .into_bytes(),
+            );
+        }
+        cat.set_title(&titled, "synthetic title");
+        let app = App::with_clock(&cat, FakeIndex, clock_t0);
+        let resp = app
+            .handle(AppRequest::List {
+                limit: 10,
+                cursor: None,
+                budget: ResponseBudget::default(),
+                sessions_only: true,
+            })
+            .unwrap();
+        let AppResponse::List {
+            entries,
+            peeks,
+            titles,
+            ..
+        } = resp
+        else {
+            panic!("expected List response");
+        };
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries.len(), peeks.len(), "peeks must align with entries");
+        assert_eq!(
+            entries.len(),
+            titles.len(),
+            "titles must align with entries"
+        );
+        let titled_index = entries
+            .iter()
+            .position(|entry| entry.id.as_str() == titled.as_str())
+            .expect("titled session listed");
+        let untitled_index = entries
+            .iter()
+            .position(|entry| entry.id.as_str() == untitled.as_str())
+            .expect("untitled session listed");
+        assert_eq!(titles[titled_index].as_deref(), Some("synthetic title"));
+        assert_eq!(titles[untitled_index], None);
+
+        // 普通 list（非 sessions_only）不附标题。
+        let resp = app
+            .handle(AppRequest::List {
+                limit: 10,
+                cursor: None,
+                budget: ResponseBudget::default(),
+                sessions_only: false,
+            })
+            .unwrap();
+        let AppResponse::List { titles, .. } = resp else {
+            panic!("expected List response");
+        };
+        assert!(titles.iter().all(Option::is_none), "{titles:?}");
+    }
+
+    #[test]
+    fn list_sessions_byte_gate_counts_title_serialized_bytes() {
+        // 标题是渲染产物，不是免费内容（#6）：字节闸必须按标题的序列化长度
+        // 计费。每条带 500 个 emoji 标题（≈2 KiB 序列化）的会话条目超过净预算
+        // 3072 的 1/2——只容 1 条；同一目录去掉标题后 4 条全保留。
+        let mut cat = MapCatalog::new(7);
+        for tag in ["ta", "tb", "tc", "td"] {
+            let session =
+                StableId::derive(IdKind::Session, Stability::Reconstructed, &[tag.as_bytes()]);
+            cat.insert(
+                &session,
+                serde_json::json!({ "documents": [], "messages": [] })
+                    .to_string()
+                    .into_bytes(),
+            );
+            cat.set_title(&session, "🦀".repeat(500));
+        }
+        let app = App::with_clock(&cat, FakeIndex, clock_t0);
+        let resp = app
+            .handle(AppRequest::List {
+                limit: 10,
+                cursor: None,
+                budget: ResponseBudget {
+                    max_response_bytes: budget::MIN_RESPONSE_BYTES,
+                    ..Default::default()
+                },
+                sessions_only: true,
+            })
+            .unwrap();
+        let AppResponse::List {
+            entries,
+            titles,
+            truncation,
+            ..
+        } = resp
+        else {
+            panic!("expected List response");
+        };
+        assert_eq!(
+            entries.len(),
+            titles.len(),
+            "titles must align with entries even after clamping"
+        );
+        assert!(titles.iter().all(Option::is_some));
+        assert!(
+            entries.len() < 4,
+            "title bytes must be charged: {entries:?}"
+        );
+        assert_eq!(
+            truncation.reason.as_deref(),
+            Some(budget::TRUNCATION_MAX_RESPONSE_BYTES)
+        );
     }
 
     // ---- context 装配 ----

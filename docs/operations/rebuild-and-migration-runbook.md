@@ -50,13 +50,14 @@ most usefully `schema_incompatible` when the store is newer than the binary.
 There is no manual upgrade command. Opening an older store with a newer
 binary migrates it in a single transaction gated by `PRAGMA user_version`;
 on failure the transaction rolls back and the old binary can still read the
-store. `SCHEMA_VERSION` is currently 12, and v8 through v12 are the current
+store. `SCHEMA_VERSION` is currently 13, and v8 through v13 are the current
 additive steps (v8 resume-claims, v9 source-scan provider id, v10 semantic
 vector sidecar, v11 session-metadata search projection, v12 tool-activity
-projection). They run stepwise on first open; the v7 → v12 chain is specified
+projection, v13 session-title display projection). They run stepwise on
+first open; the v7 → v13 chain is specified
 in this runbook's procedures below and in the store source
 (`crates/agent-session-grep-adapters-sqlite/src/lib.rs`, the
-`migrate_v7_to_v8` … `migrate_v11_to_v12` steps), not restated here. The
+`migrate_v7_to_v8` … `migrate_v12_to_v13` steps), not restated here. The
 v5 → v6 (`migration-v5-to-v6.md`) and v6 → v7 (`migration-v6-to-v7.md`) steps
 are historical by design; stores at v5 or v6 migrate stepwise to the current
 version on first open by the current binary.

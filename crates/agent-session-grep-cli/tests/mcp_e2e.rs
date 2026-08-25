@@ -1904,6 +1904,51 @@ fn list_sessions_entries_carry_peek_with_first_and_last_user_text() {
     );
 }
 
+// ─── 会话标题派生链（#6）：list_sessions 条目附派生标题 ─────────────────────
+
+#[test]
+fn list_sessions_entries_carry_title_skipping_injected_noise() {
+    // 真实 ingest：首条 user 消息是注入噪声封套（`<system-reminder>`，parse 层
+    // 过滤，feat/noise-filter 已合 main）→ 标题派生链跳过它，取第二条有效
+    // user 消息；条目在 peek 旁附 title 字段。
+    let (dir, db) = temp_db("mcp-list-title");
+    let fixture = dir.path().join("title-noise.jsonl");
+    std::fs::write(
+        &fixture,
+        concat!(
+            r#"{"type":"user","uuid":"d0000000-0000-4000-8000-000000000001","parentUuid":null,"sessionId":"ddee1234-5678-4abc-8def-001122334455","timestamp":"2026-07-26T01:00:00.000Z","message":{"role":"user","content":"<system-reminder>"#,
+            r#"\ninjected context noise\n</system-reminder>"}}"#,
+            "\n",
+            r#"{"type":"user","uuid":"d0000000-0000-4000-8000-000000000002","parentUuid":"d0000000-0000-4000-8000-000000000001","sessionId":"ddee1234-5678-4abc-8def-001122334455","timestamp":"2026-07-26T01:01:00.000Z","message":{"role":"user","content":"real title prompt"}}"#,
+            "\n",
+            r#"{"type":"assistant","uuid":"d0000000-0000-4000-8000-000000000003","parentUuid":"d0000000-0000-4000-8000-000000000002","sessionId":"ddee1234-5678-4abc-8def-001122334455","message":{"role":"assistant","content":"answer"}}"#,
+            "\n",
+        ),
+    )
+    .expect("write title fixture");
+    let out = run_cli(&db, &["ingest", &fixture.to_string_lossy()]);
+    assert!(out.status.success(), "ingest failed: {}", stdout(&out));
+
+    let frames = mcp_session(
+        &db,
+        &[
+            initialize_request(1, "2025-06-18"),
+            initialized_notification(),
+            tool_call(2, "list_sessions", json!({ "limit": 10 })),
+        ],
+    );
+    let result = &frame_by_id(&frames, 2)["result"];
+    assert_eq!(result["isError"], false, "list_sessions 应成功: {result}");
+    let entries = result["structuredContent"]["data"]["entries"]
+        .as_array()
+        .expect("entries must be an array");
+    assert_eq!(entries.len(), 1, "fixture ingests exactly one session");
+    assert_eq!(
+        entries[0]["title"], "real title prompt",
+        "派生标题必须跳过注入噪声、取首条有效 user: {entries:?}"
+    );
+}
+
 // ─── stderr 隐私（E2）：协议错误不落 stderr ─────────────────────────────────
 
 #[test]
