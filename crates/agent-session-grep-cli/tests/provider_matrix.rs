@@ -1441,3 +1441,86 @@ fn readme_release_status_and_maturity_tiers_match_authoritative_sources() {
         );
     }
 }
+
+/// CHANGELOG 原文：`[Unreleased]` 段落逐一点名 provider，与 README 同属对外声明。
+const CHANGELOG: &str = include_str!("../../../CHANGELOG.md");
+
+#[test]
+fn changelog_provider_claims_match_capability_matrix() {
+    // CHANGELOG 的 `[Unreleased]` 段落写着 "16-provider capability matrix"、
+    // "the 14 implemented, Experimental providers" 并逐一点名 provider id，还点名
+    // 两个 deferred。这三处都是手写事实：新增或降级一个 provider 而漏改这里，
+    // 发版说明就会比 capability.rs 更乐观（或更保守），且没有任何测试会失败。
+    //
+    // 与 README 的三条守护同一纪律，只是对象换成发版说明——发版说明是外部读者
+    // 判断"这个版本支持什么"的第一手材料，不能靠人记得同步。
+    let matrix = ProviderCapabilityMatrix::current();
+    let total = matrix.providers.len();
+    let implemented: Vec<&str> = matrix
+        .providers
+        .iter()
+        .filter(|p| p.maturity != ProviderMaturity::Unsupported)
+        .map(|p| p.provider_id.as_str())
+        .collect();
+    let deferred: Vec<&str> = matrix
+        .providers
+        .iter()
+        .filter(|p| p.maturity == ProviderMaturity::Unsupported)
+        .map(|p| p.provider_id.as_str())
+        .collect();
+
+    // 只在 [Unreleased] 段落内比对：历史版本段落记录的是当时的事实，不该被
+    // 今天的矩阵改写。
+    let unreleased: String = CHANGELOG
+        .lines()
+        .skip_while(|line| !line.starts_with("## [Unreleased]"))
+        .skip(1)
+        .take_while(|line| !line.starts_with("## ["))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !unreleased.trim().is_empty(),
+        "CHANGELOG 必须有非空的 [Unreleased] 段落"
+    );
+
+    assert!(
+        unreleased.contains(&format!("{total}-provider capability matrix")),
+        "CHANGELOG 的 provider 总数与 capability.rs（{total}）漂移"
+    );
+    assert!(
+        unreleased.contains(&format!("the {} implemented", implemented.len())),
+        "CHANGELOG 的已实现 provider 数与 capability.rs（{}）漂移",
+        implemented.len()
+    );
+
+    // 逐个点名：已实现的必须都在，deferred 的必须都被标注为 deferred。
+    for id in &implemented {
+        assert!(
+            unreleased.contains(&format!("`{id}`")),
+            "CHANGELOG 的 [Unreleased] 未点名已实现 provider `{id}`"
+        );
+    }
+    for id in &deferred {
+        assert!(
+            unreleased.contains(&format!("`{id}`")),
+            "CHANGELOG 的 [Unreleased] 未点名 deferred provider `{id}`"
+        );
+    }
+    assert!(
+        unreleased.contains("deferred"),
+        "CHANGELOG 必须说明 deferred provider 的状态"
+    );
+
+    // 诚实门：尚无 provider 晋级时，发版说明不得出现 Beta/GA/Certified 口径。
+    let has_promoted = matrix.providers.iter().any(|p| {
+        p.maturity != ProviderMaturity::Experimental && p.maturity != ProviderMaturity::Unsupported
+    });
+    if !has_promoted {
+        for inflated in ["Beta providers", "GA providers", "certified providers"] {
+            assert!(
+                !unreleased.contains(inflated),
+                "CHANGELOG 出现 `{inflated}`，但 capability.rs 尚无任何晋级 provider"
+            );
+        }
+    }
+}
