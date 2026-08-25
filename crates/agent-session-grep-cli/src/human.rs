@@ -381,7 +381,8 @@ fn render_search(data: &Value) -> Vec<String> {
 }
 
 /// `list`：头行 `N entrie(s) (generation G)` + 每条 `  <id>  <payload 预览>`；
-/// 零条目给措辞 `catalog is empty`。
+/// 携带派生标题（#6）的会话条目改为 `  <id>  <title>`；零条目给措辞
+/// `catalog is empty`。
 fn render_list(data: &Value) -> Vec<String> {
     let entries = data
         .get("entries")
@@ -402,6 +403,12 @@ fn render_list(data: &Value) -> Vec<String> {
             .and_then(Value::as_str)
             .map(sanitize)
             .unwrap_or_else(|| "?".into());
+        // 派生标题（#6，schema v13）：有标题的会话条目直接展示标题（比原始
+        // payload 预览更适合人读）；无标题键保持既有 payload 预览行不变。
+        if let Some(title) = entry.get("title").and_then(Value::as_str).map(sanitize) {
+            lines.push(format!("  {id}  {title}"));
+            continue;
+        }
         let payload = entry
             .get("payload")
             .and_then(Value::as_str)
@@ -1325,6 +1332,33 @@ mod tests {
         });
         let lines = render_success("list", Outcome::Success, &data, &Page::default());
         assert_eq!(lines, ["catalog is empty"]);
+    }
+
+    #[test]
+    fn list_renders_title_instead_of_payload_preview_when_present() {
+        // 派生标题（#6）：会话条目带 title 键时展示标题；无标题键保持
+        // payload 预览行（字节兼容既有输出）。
+        let data = json!({
+            "entries": [
+                {
+                    "id": "ses_v1_bbbb",
+                    "payload": "{\"document\":\"doc_v1_x\"}",
+                    "title": "修复数据库连接超时",
+                },
+                { "id": "ses_v1_cccc", "payload": "{\"document\":\"doc_v1_y\"}" },
+            ],
+            "generation": 4,
+            "truncation": { "truncated": false, "reason": null },
+        });
+        let lines = render_success("list", Outcome::Success, &data, &Page::default());
+        assert_eq!(
+            lines,
+            [
+                "2 entries (generation 4)".to_string(),
+                "  ses_v1_bbbb  修复数据库连接超时".to_string(),
+                "  ses_v1_cccc  {\"document\":\"doc_v1_y\"}".to_string(),
+            ]
+        );
     }
 
     #[test]

@@ -108,6 +108,16 @@ pub trait CatalogStore {
     /// 的结果并让 cursor 错位（competitor-borrowings R1.3）。
     fn list_sessions(&self, limit: usize) -> PortResult<Vec<CatalogEntry>>;
 
+    /// 批量读取会话标题投影（schema v13 `session_titles`）：与 `session_ids`
+    /// 同序的 `Option<String>`，`None` 表示该会话没有可派生标题（无候选或
+    /// 存储无此投影）。实现必须批量读取（分块 IN），不得逐条查询（N+1）。
+    ///
+    /// 默认空实现：无标题投影的存储对每个 id 返回 `None`，保持与条目数
+    /// 对齐的契约不变。
+    fn session_titles(&self, session_ids: &[StableId]) -> PortResult<Vec<Option<String>>> {
+        Ok(session_ids.iter().map(|_| None).collect())
+    }
+
     /// Catalog 当前实体总数（status/doctor 使用）。
     fn count(&self) -> PortResult<u64>;
 
@@ -643,6 +653,9 @@ impl<T: CatalogStore + ?Sized> CatalogStore for &T {
     }
     fn list_sessions(&self, limit: usize) -> PortResult<Vec<CatalogEntry>> {
         (**self).list_sessions(limit)
+    }
+    fn session_titles(&self, session_ids: &[StableId]) -> PortResult<Vec<Option<String>>> {
+        (**self).session_titles(session_ids)
     }
     fn count(&self) -> PortResult<u64> {
         (**self).count()

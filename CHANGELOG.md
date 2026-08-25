@@ -46,6 +46,15 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   chars each, char-boundary truncation; null without user messages), capped at
   1 KiB serialized per session with the cap and over-limit truncation guarded
   by tests. Peek bytes are charged to the `max_response_bytes` gate.
+- `list_sessions` derived session titles (borrowing list #6): session entries
+  carry a `title` string (≤80 chars, char-boundary truncation; omitted when no
+  candidate exists) derived by the chain custom title (`title` field) > AI
+  summary (`summary` field) > first valid user message. Injected noise is
+  filtered at provider parse time, so the first committed user message is the
+  first valid one. Titles live in a rebuildable schema v13 `session_titles`
+  projection maintained in the same transaction as the session FTS rows, and
+  title bytes are charged to the `max_response_bytes` gate like peek bytes.
+  The human list renderer shows the title instead of the raw payload preview.
 - Cross-boundary output redaction (ADR-0009): Robot JSON/JSONL, MCP, HTTP API,
   Handoff Pack, and Web UI redact standalone and prose-embedded secrets
   (AWS keys, GitHub PATs, OpenAI/Anthropic/xAI keys, Bearer tokens, PEM

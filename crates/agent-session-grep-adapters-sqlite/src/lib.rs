@@ -69,6 +69,9 @@ static NEXT_OPERATION_ID: AtomicU64 = AtomicU64::new(0);
 const BATCH_IN_CHUNK: usize = 500;
 /// Session 元数据搜索投影（`session_fts.text`）单字段的字符上限（schema v11）。
 const SESSION_SEARCH_FIELD_CHARS: usize = 4096;
+/// 会话标题显示投影（`session_titles.title`）的字符上限（schema v13，
+/// 借鉴清单 #6：≤80 字符，char 边界截断）。
+const SESSION_TITLE_MAX_CHARS: usize = 80;
 
 /// 批量 INSERT 每块行数。
 ///
@@ -1508,6 +1511,9 @@ impl SqliteStore {
         if current < 12 {
             Self::migrate_v11_to_v12(conn)?;
         }
+        if current < 13 {
+            Self::migrate_v12_to_v13(conn)?;
+        }
         // 不随 user_version 门控：旧 v7 库（本列存在前建成的）打开时同样需要。
         Self::ensure_fts_ids_rowid(conn)?;
         Ok(())
@@ -1816,6 +1822,38 @@ impl SqliteStore {
              PRAGMA user_version = 12;",
         )
         .map_err(backend)?;
+        tx.commit().map_err(backend)
+    }
+
+    /// Add the v13 session-title display projection in one explicit
+    /// transaction (additive, non-destructive).
+    ///
+    /// `session_titles` stores the derived display title per canonical Session
+    /// （借鉴清单 #6 的 custom-title > ai-title > 首条有效 user 派生链，
+    /// ≤[`SESSION_TITLE_MAX_CHARS`] 字符）。与 `session_fts` 同属"catalog +
+    /// claims 可重建投影"：旧库迁到 v13 后表为空，由 rebuild 或后续 affected
+    /// source 提交回填。`user_version = 13` 与 DDL 同事务。
+    fn migrate_v12_to_v13(conn: &Connection) -> PortResult<()> {
+        Self::migrate_v12_to_v13_inner(conn, false)
+    }
+
+    fn migrate_v12_to_v13_inner(conn: &Connection, inject_failure: bool) -> PortResult<()> {
+        let tx = conn.unchecked_transaction().map_err(backend)?;
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS session_titles (
+                 session_wire TEXT PRIMARY KEY,
+                 title        TEXT NOT NULL
+             );
+             PRAGMA user_version = 13;",
+        )
+        .map_err(backend)?;
+
+        if inject_failure {
+            return Err(PortError::Backend(
+                "injected v12-to-v13 migration failure".into(),
+            ));
+        }
+
         tx.commit().map_err(backend)
     }
 
@@ -4328,6 +4366,92 @@ impl SqliteStore {
         Ok(())
     }
 
+    /// 会话成员消息里第一条 role=user 且 text 非空的正文（placement 成员
+    /// 顺序：timestamp → document → source_ordinal → placement_id），截断到
+    /// `max_chars`（char 边界）。
+    ///
+    /// 注入噪声在 provider parse 层已被过滤（claude/codex user-noise filter，
+    /// feat/noise-filter），不进 catalog——此处读到的第一条即"噪声过滤后"
+    /// 的首条有效 user 消息。无 placement 或无有效 user 消息 → `None`。
+    fn first_user_text_for_session(
+        conn: &Connection,
+        session_wire: &str,
+        max_chars: usize,
+    ) -> PortResult<Option<String>> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT catalog.payload
+                 FROM message_placements
+                 JOIN catalog ON catalog.id = message_placements.message_id
+                 WHERE message_placements.session_id = ?1
+                 ORDER BY asg_instant_sort_key(
+                              CASE WHEN json_valid(catalog.payload)
+                                   THEN json_extract(catalog.payload, '$.timestamp') END
+                          ) IS NULL,
+                          asg_instant_sort_key(
+                              CASE WHEN json_valid(catalog.payload)
+                                   THEN json_extract(catalog.payload, '$.timestamp') END
+                          ),
+                          message_placements.document_id,
+                          message_placements.source_ordinal,
+                          message_placements.placement_id",
+            )
+            .map_err(backend)?;
+        let rows = stmt
+            .query_map([session_wire], |row| row.get::<_, Vec<u8>>(0))
+            .map_err(backend)?;
+        for row in rows {
+            let payload = row.map_err(backend)?;
+            if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&payload)
+                && value.get("role").and_then(serde_json::Value::as_str) == Some("user")
+                && let Some(text) = value.get("text").and_then(serde_json::Value::as_str)
+                && !text.is_empty()
+            {
+                return Ok(Some(text.chars().take(max_chars).collect::<String>()));
+            }
+        }
+        Ok(None)
+    }
+
+    /// 会话标题派生链（借鉴清单 #6；agent-sessions Session.swift `title` 的
+    /// custom > lightweight > first-user 链 + cc-switch codex.rs 的
+    /// thread-titles > first-user 链）：
+    ///
+    /// 1. custom-title：canonical session payload 的 `title` 字段（用户显式命名）；
+    /// 2. ai-title：canonical session payload 的 `summary` 字段（AI/平台生成摘要）；
+    /// 3. 首条有效 user 消息：噪声过滤后第一条非空 user 文本。
+    ///
+    /// claude-code/codex 的 Canonical payload 目前不携带 `title`/`summary`
+    /// 字段（格式事实：两格式均无该概念），实际一律落到候选 3；候选 1/2 是
+    /// 按格式事实预留的更高优先级来源，provider 未来填充即自动生效。全部
+    /// 候选缺失（含会话不存在）→ `None`（不写行）。所有候选统一 trim +
+    /// ≤[`SESSION_TITLE_MAX_CHARS`] char 边界截断。
+    fn session_title(conn: &Connection, session_wire: &str) -> PortResult<Option<String>> {
+        let payload: Option<Vec<u8>> = conn
+            .query_row(
+                "SELECT payload FROM catalog WHERE id = ?1",
+                [session_wire],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(backend)?;
+        if let Some(bytes) = payload
+            && let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes)
+        {
+            for key in ["title", "summary"] {
+                if let Some(text) = value.get(key).and_then(serde_json::Value::as_str) {
+                    let trimmed = text.trim();
+                    if !trimmed.is_empty() {
+                        return Ok(Some(
+                            trimmed.chars().take(SESSION_TITLE_MAX_CHARS).collect(),
+                        ));
+                    }
+                }
+            }
+        }
+        Self::first_user_text_for_session(conn, session_wire, SESSION_TITLE_MAX_CHARS)
+    }
+
     /// Build one Session's bounded search text from authoritative relational
     /// state. A representative placement is required so a metadata match can be
     /// returned as an existing Message `SearchHit` without fabricating an id.
@@ -4343,47 +4467,8 @@ impl SqliteStore {
             return Ok(None);
         }
 
-        let first_user_text = {
-            let mut stmt = conn
-                .prepare(
-                    "SELECT catalog.payload
-                     FROM message_placements
-                     JOIN catalog ON catalog.id = message_placements.message_id
-                     WHERE message_placements.session_id = ?1
-                     ORDER BY asg_instant_sort_key(
-                                  CASE WHEN json_valid(catalog.payload)
-                                       THEN json_extract(catalog.payload, '$.timestamp') END
-                              ) IS NULL,
-                              asg_instant_sort_key(
-                                  CASE WHEN json_valid(catalog.payload)
-                                       THEN json_extract(catalog.payload, '$.timestamp') END
-                              ),
-                              message_placements.document_id,
-                              message_placements.source_ordinal,
-                              message_placements.placement_id",
-                )
-                .map_err(backend)?;
-            let rows = stmt
-                .query_map([session_wire], |row| row.get::<_, Vec<u8>>(0))
-                .map_err(backend)?;
-            let mut first_user_text = None;
-            for row in rows {
-                let payload = row.map_err(backend)?;
-                if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&payload)
-                    && value.get("role").and_then(serde_json::Value::as_str) == Some("user")
-                    && let Some(text) = value.get("text").and_then(serde_json::Value::as_str)
-                    && !text.is_empty()
-                {
-                    first_user_text = Some(
-                        text.chars()
-                            .take(SESSION_SEARCH_FIELD_CHARS)
-                            .collect::<String>(),
-                    );
-                    break;
-                }
-            }
-            first_user_text
-        };
+        let first_user_text =
+            Self::first_user_text_for_session(conn, session_wire, SESSION_SEARCH_FIELD_CHARS)?;
 
         // Claims for one canonical Session must agree exactly. Conflict is
         // privacy-sensitive, so fail closed and index none of their values.
@@ -4482,12 +4567,29 @@ impl SqliteStore {
             )
             .map_err(backend)?;
         }
+        // 标题投影（schema v13）：与 session_fts 同一派生批次。先删旧行，
+        // 再按派生链重投影（custom-title > ai-title > 首条有效 user）；
+        // 派生链无候选 → 无行（读取侧恒得到 None，不写空标题）。
+        tx.execute(
+            "DELETE FROM session_titles WHERE session_wire = ?1",
+            [session_wire],
+        )
+        .map_err(backend)?;
+        if let Some(title) = Self::session_title(tx, session_wire)? {
+            tx.execute(
+                "INSERT INTO session_titles(session_wire, title) VALUES(?1, ?2)",
+                rusqlite::params![session_wire, title],
+            )
+            .map_err(backend)?;
+        }
         Ok(())
     }
 
     fn rebuild_all_session_search_in_tx(tx: &rusqlite::Transaction<'_>) -> PortResult<()> {
         tx.execute("DELETE FROM session_fts", []).map_err(backend)?;
         tx.execute("DELETE FROM session_fts_ids", [])
+            .map_err(backend)?;
+        tx.execute("DELETE FROM session_titles", [])
             .map_err(backend)?;
         let sessions = {
             let mut stmt = tx
@@ -5544,7 +5646,13 @@ const RELATION_SCHEMA_VERSION: i64 = 7;
 /// 观察投影，content-addressed activity_id 跨 source 去重，生命周期镜像
 /// `message_placements`（complete-scan replace、incomplete-scan union、
 /// claims tombstone）；随 rebuild 或后续 source 提交填充。
-pub const SCHEMA_VERSION: i64 = 12;
+///
+/// v13：新增 `session_titles`——会话标题显示投影（借鉴清单 #6）。派生链
+/// custom-title（session payload `title`）> ai-title（`summary`）> 首条有效
+/// user 消息（provider parse 层噪声过滤后第一条非空 user 文本，≤80 字符
+/// char 边界截断）；无候选 → 无行。与 `session_fts` 同一重建批次，随
+/// affected-session 提交与 rebuild 同事务维护；旧库迁到 v13 后表为空。
+pub const SCHEMA_VERSION: i64 = 13;
 
 impl CatalogStore for SqliteStore {
     fn get(&self, id: &StableId) -> PortResult<Option<Vec<u8>>> {
@@ -5619,6 +5727,39 @@ impl CatalogStore for SqliteStore {
 
     fn list_sessions(&self, limit: usize) -> PortResult<Vec<CatalogEntry>> {
         Self::list_filtered(&self.conn, Some(IdKind::Session), limit)
+    }
+
+    fn session_titles(&self, session_ids: &[StableId]) -> PortResult<Vec<Option<String>>> {
+        if session_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.conn.borrow();
+        let wires: Vec<&str> = session_ids.iter().map(|id| id.as_str()).collect();
+        // 批量读取，分块在 SQLite 变量上限之下；绝不逐条查询（N+1）。
+        let mut titles: BTreeMap<String, String> = BTreeMap::new();
+        for chunk in chunk_ids(&wires) {
+            let placeholders = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            let mut stmt = conn
+                .prepare(&format!(
+                    "SELECT session_wire, title FROM session_titles
+                     WHERE session_wire IN ({placeholders})"
+                ))
+                .map_err(backend)?;
+            let rows = stmt
+                .query_map(rusqlite::params_from_iter(chunk.iter().copied()), |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(backend)?;
+            for row in rows {
+                let (wire, title) = row.map_err(backend)?;
+                titles.insert(wire, title);
+            }
+        }
+        // 保序：与 `session_ids` 同序；无投影行的 id → None。
+        Ok(session_ids
+            .iter()
+            .map(|id| titles.get(id.as_str()).cloned())
+            .collect())
     }
 
     fn count(&self) -> PortResult<u64> {
@@ -7408,7 +7549,7 @@ mod tests {
     fn schema_v10_creates_message_vec_table() {
         let store = SqliteStore::open_in_memory().unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 12);
+        assert_eq!(SCHEMA_VERSION, 13);
         let conn = store.conn.borrow();
         let count: i64 = conn
             .query_row(
@@ -12918,7 +13059,7 @@ mod tests {
         let store = SqliteStore::open_in_memory().unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
         let conn = store.conn.borrow();
-        for table in ["session_fts", "session_fts_ids"] {
+        for table in ["session_fts", "session_fts_ids", "session_titles"] {
             let exists: i64 = conn
                 .query_row(
                     "SELECT COUNT(*) FROM sqlite_master
@@ -12937,6 +13078,418 @@ mod tests {
             .map(Result::unwrap)
             .collect();
         assert_eq!(columns, vec!["session_wire", "fts_rowid"]);
+        // 标题投影（v13）：两列形状固定，读取侧按 (session_wire, title) 批量投影。
+        let columns: Vec<String> = conn
+            .prepare("PRAGMA table_info(session_titles)")
+            .unwrap()
+            .query_map([], |row| row.get(1))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(columns, vec!["session_wire", "title"]);
+    }
+
+    // ---- 会话标题投影（schema v13）：派生链/截断/降级/增量/迁移 ----
+
+    /// 提交一个含单条 user 消息的会话（标题派生测试的种子）。
+    fn titled_session_batch(
+        tag: &[u8],
+        session_extra: Option<(&str, &str)>,
+        user_text: &str,
+    ) -> (StableId, SourceBatch) {
+        let session = sid(IdKind::Session, tag);
+        let document = sid(IdKind::Document, tag);
+        let message = sid(IdKind::Message, tag);
+        let mut session_value = serde_json::json!({ "messages": [message.as_str()] });
+        if let Some((key, value)) = session_extra {
+            session_value[key] = serde_json::json!(value);
+        }
+        let batch = SourceBatch {
+            source_path: format!("title-seed-{}.jsonl", String::from_utf8_lossy(tag)),
+            entries: vec![
+                (
+                    session.clone(),
+                    session_value.to_string().into_bytes(),
+                    String::new(),
+                ),
+                typed_document_entry(&document),
+                typed_message_entry(&message, user_text),
+            ],
+            placements: vec![placement(
+                &session,
+                &document,
+                &message,
+                0,
+                false,
+                Some((0, 5)),
+            )],
+            edges: Vec::new(),
+            activities: Vec::new(),
+            relation_complete: true,
+            len_bytes: None,
+            fingerprint: None,
+            provider_id: None,
+            resume_claim: None,
+        };
+        (session, batch)
+    }
+
+    #[test]
+    fn session_title_prefers_custom_then_ai_then_first_valid_user_message() {
+        // 派生优先级链（借鉴清单 #6）：custom-title（session payload `title`）
+        // > ai-title（`summary`）> 首条有效 user 消息。claude-code/codex 的
+        // Canonical payload 不带 title/summary（格式事实），实际落到第 3 候选；
+        // 字段由 provider 未来填充时自动优先。
+        let store = SqliteStore::open_in_memory().unwrap();
+        let (custom, custom_batch) = titled_session_batch(
+            b"title-custom",
+            Some(("title", "custom rename")),
+            "first user fallback",
+        );
+        let (ai, ai_batch) = titled_session_batch(
+            b"title-ai",
+            Some(("summary", "ai summary")),
+            "first user fallback",
+        );
+        let (plain, plain_batch) = titled_session_batch(b"title-plain", None, "plain first body");
+        store
+            .commit_source_batches_if_changed(&[custom_batch, ai_batch, plain_batch])
+            .unwrap();
+        let titles = store.session_titles(&[custom, ai, plain]).unwrap();
+        assert_eq!(
+            titles,
+            vec![
+                Some("custom rename".to_string()),
+                Some("ai summary".to_string()),
+                Some("plain first body".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn session_title_truncates_to_80_chars_on_char_boundary() {
+        // 上限（≤80 字符，char 边界）：100 个三字节汉字，截断恰好停在 80 字符
+        // 处——按字节截会 panic 或产出非法 UTF-8。custom/ai 候选同样截断。
+        let store = SqliteStore::open_in_memory().unwrap();
+        let long_user = "界".repeat(100);
+        let (session, batch) = titled_session_batch(b"title-trunc", None, &long_user);
+        store
+            .commit_source_batches_if_changed(std::slice::from_ref(&batch))
+            .unwrap();
+        let title = store
+            .session_titles(std::slice::from_ref(&session))
+            .unwrap()
+            .into_iter()
+            .next()
+            .flatten()
+            .expect("derived title");
+        assert_eq!(title.chars().count(), SESSION_TITLE_MAX_CHARS);
+        assert_eq!(title, "界".repeat(SESSION_TITLE_MAX_CHARS));
+
+        let long_custom = "🏷️".repeat(100);
+        let (custom, custom_batch) = titled_session_batch(
+            b"title-trunc-custom",
+            Some(("title", &long_custom)),
+            "fallback",
+        );
+        store
+            .commit_source_batches_if_changed(std::slice::from_ref(&custom_batch))
+            .unwrap();
+        let title = store
+            .session_titles(std::slice::from_ref(&custom))
+            .unwrap()
+            .into_iter()
+            .next()
+            .flatten()
+            .expect("derived title");
+        assert_eq!(title.chars().count(), SESSION_TITLE_MAX_CHARS);
+        assert!(
+            long_custom.starts_with(&title),
+            "prefix kept, tail cut: {title}"
+        );
+    }
+
+    #[test]
+    fn session_title_skips_non_user_roles_and_empty_text() {
+        // 派生只认 role=user 且 text 非空的消息：assistant 与空文本用户被跳过。
+        // 注入噪声（伪 user 封套）在 provider parse 层已过滤（feat/noise-filter
+        // 的 claude/codex user-noise filter 测试守卫），catalog 中不存在——
+        // 派生链读到的第一条 user 即"噪声过滤后"的首条有效请求。
+        let store = SqliteStore::open_in_memory().unwrap();
+        let session = sid(IdKind::Session, b"title-skip");
+        let document = sid(IdKind::Document, b"title-skip");
+        let assistant = sid(IdKind::Message, b"title-skip-a");
+        let empty_user = sid(IdKind::Message, b"title-skip-e");
+        let real_user = sid(IdKind::Message, b"title-skip-r");
+        let role_payload = |role: &str, text: &str| {
+            serde_json::json!({
+                "role": role,
+                "text": text,
+                "timestamp": "2026-07-28T00:00:00Z",
+            })
+            .to_string()
+            .into_bytes()
+        };
+        let session_value = serde_json::json!({
+            "messages": [
+                assistant.as_str(),
+                empty_user.as_str(),
+                real_user.as_str(),
+            ],
+        });
+        let batch = SourceBatch {
+            source_path: "title-skip-source.jsonl".into(),
+            entries: vec![
+                (
+                    session.clone(),
+                    session_value.to_string().into_bytes(),
+                    String::new(),
+                ),
+                typed_document_entry(&document),
+                (
+                    assistant.clone(),
+                    role_payload("assistant", "answer"),
+                    String::new(),
+                ),
+                (empty_user.clone(), role_payload("user", ""), String::new()),
+                (
+                    real_user.clone(),
+                    role_payload("user", "real prompt"),
+                    String::new(),
+                ),
+            ],
+            placements: vec![
+                placement(&session, &document, &assistant, 0, false, Some((0, 3))),
+                placement(&session, &document, &empty_user, 1, false, Some((3, 6))),
+                placement(&session, &document, &real_user, 2, false, Some((6, 9))),
+            ],
+            edges: Vec::new(),
+            activities: Vec::new(),
+            relation_complete: true,
+            len_bytes: None,
+            fingerprint: None,
+            provider_id: None,
+            resume_claim: None,
+        };
+        store
+            .commit_source_batches_if_changed(std::slice::from_ref(&batch))
+            .unwrap();
+        let title = store
+            .session_titles(std::slice::from_ref(&session))
+            .unwrap()
+            .into_iter()
+            .next()
+            .flatten();
+        assert_eq!(title.as_deref(), Some("real prompt"));
+    }
+
+    #[test]
+    fn session_title_is_none_without_valid_user_message() {
+        // 派生链无候选（无 user 消息、无 placement、会话不存在）→ 无投影行，
+        // 批量读取返回 None——绝不写空标题或臆造。
+        let store = SqliteStore::open_in_memory().unwrap();
+        let session = sid(IdKind::Session, b"title-none");
+        let document = sid(IdKind::Document, b"title-none");
+        let assistant = sid(IdKind::Message, b"title-none-a");
+        let session_value = serde_json::json!({ "messages": [assistant.as_str()] });
+        let batch = SourceBatch {
+            source_path: "title-none-source.jsonl".into(),
+            entries: vec![
+                (
+                    session.clone(),
+                    session_value.to_string().into_bytes(),
+                    String::new(),
+                ),
+                typed_document_entry(&document),
+                (
+                    assistant.clone(),
+                    serde_json::json!({ "role": "assistant", "text": "answer" })
+                        .to_string()
+                        .into_bytes(),
+                    String::new(),
+                ),
+            ],
+            placements: vec![placement(
+                &session,
+                &document,
+                &assistant,
+                0,
+                false,
+                Some((0, 3)),
+            )],
+            edges: Vec::new(),
+            activities: Vec::new(),
+            relation_complete: true,
+            len_bytes: None,
+            fingerprint: None,
+            provider_id: None,
+            resume_claim: None,
+        };
+        store
+            .commit_source_batches_if_changed(std::slice::from_ref(&batch))
+            .unwrap();
+        let ghost = sid(IdKind::Session, b"title-none-ghost");
+        let titles = store.session_titles(&[session, ghost]).unwrap();
+        assert_eq!(titles, vec![None, None]);
+    }
+
+    #[test]
+    fn session_title_projection_is_incremental_and_rebuildable() {
+        // 投影与 session_fts 同一重建批次：affected 提交增量重投影（更早的
+        // 新 user 消息成为新标题），rebuild_index 全量重投影得到同一派生链结果。
+        let store = SqliteStore::open_in_memory().unwrap();
+        let session = sid(IdKind::Session, b"title-incr");
+        let document = sid(IdKind::Document, b"title-incr");
+        let first = sid(IdKind::Message, b"title-incr-first");
+        let zeroth = sid(IdKind::Message, b"title-incr-zeroth");
+        let user_payload = |text: &str| {
+            serde_json::json!({
+                "role": "user",
+                "text": text,
+                "timestamp": "2026-07-28T00:00:00Z",
+            })
+            .to_string()
+            .into_bytes()
+        };
+        let session_value = serde_json::json!({ "messages": [first.as_str(), zeroth.as_str()] });
+        let batch = SourceBatch {
+            source_path: "title-incr-source.jsonl".into(),
+            entries: vec![
+                (
+                    session.clone(),
+                    session_value.to_string().into_bytes(),
+                    String::new(),
+                ),
+                typed_document_entry(&document),
+                (first.clone(), user_payload("first request"), String::new()),
+                (
+                    zeroth.clone(),
+                    user_payload("zeroth request"),
+                    String::new(),
+                ),
+            ],
+            placements: vec![
+                placement(&session, &document, &first, 0, false, Some((0, 3))),
+                placement(&session, &document, &zeroth, 1, false, Some((3, 6))),
+            ],
+            edges: Vec::new(),
+            activities: Vec::new(),
+            relation_complete: true,
+            len_bytes: None,
+            fingerprint: None,
+            provider_id: None,
+            resume_claim: None,
+        };
+        store
+            .commit_source_batches_if_changed(std::slice::from_ref(&batch))
+            .unwrap();
+        let title_of = |store: &SqliteStore| {
+            store
+                .session_titles(std::slice::from_ref(&session))
+                .unwrap()
+                .into_iter()
+                .next()
+                .flatten()
+        };
+        assert_eq!(title_of(&store).as_deref(), Some("first request"));
+        // 同 source 重扫：zeroth 提到 ordinal 0——complete-scan replace 后
+        // 派生链按新成员顺序取 "zeroth request"。
+        let moved = SourceBatch {
+            placements: vec![
+                placement(&session, &document, &zeroth, 0, false, Some((0, 3))),
+                placement(&session, &document, &first, 1, false, Some((3, 6))),
+            ],
+            ..batch
+        };
+        store
+            .commit_source_batches_if_changed(std::slice::from_ref(&moved))
+            .unwrap();
+        assert_eq!(title_of(&store).as_deref(), Some("zeroth request"));
+        // 全量 rebuild：清空后按 catalog + 关系重投影，标题不变。
+        {
+            let conn = store.conn.borrow();
+            conn.execute("DELETE FROM session_titles", []).unwrap();
+        }
+        store.rebuild_index().unwrap();
+        assert_eq!(title_of(&store).as_deref(), Some("zeroth request"));
+    }
+
+    #[test]
+    fn v12_catalog_migrates_to_v13_adding_session_titles_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v12.db");
+        let p = path.to_string_lossy().into_owned();
+        {
+            let conn = rusqlite::Connection::open(&p).unwrap();
+            create_v6_schema(&conn);
+            SqliteStore::migrate_v6_to_v7(&conn).unwrap();
+            SqliteStore::migrate_v7_to_v8(&conn).unwrap();
+            SqliteStore::migrate_v8_to_v9(&conn).unwrap();
+            SqliteStore::migrate_v9_to_v10(&conn).unwrap();
+            SqliteStore::migrate_v10_to_v11(&conn).unwrap();
+            SqliteStore::migrate_v11_to_v12(&conn).unwrap();
+            let version: i64 = conn
+                .query_row("PRAGMA user_version", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(version, 12);
+            let table_exists: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master
+                     WHERE type = 'table' AND name = 'session_titles'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(table_exists, 0, "v12 尚无 session_titles 表");
+        }
+        // 重新打开：触发 v12→v13 迁移。
+        let store = SqliteStore::open(&p).unwrap();
+        assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
+        let conn = store.conn.borrow();
+        let table_exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'table' AND name = 'session_titles'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(table_exists, 1);
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM session_titles", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0, "v13 迁移后标题表必须为空，等待 rebuild/提交回填");
+    }
+
+    #[test]
+    fn injected_v12_to_v13_failure_rolls_back_schema_and_version() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        create_v6_schema(&conn);
+        SqliteStore::migrate_v6_to_v7(&conn).unwrap();
+        SqliteStore::migrate_v7_to_v8(&conn).unwrap();
+        SqliteStore::migrate_v8_to_v9(&conn).unwrap();
+        SqliteStore::migrate_v9_to_v10(&conn).unwrap();
+        SqliteStore::migrate_v10_to_v11(&conn).unwrap();
+        SqliteStore::migrate_v11_to_v12(&conn).unwrap();
+
+        let err = SqliteStore::migrate_v12_to_v13_inner(&conn, true).unwrap_err();
+        assert!(
+            matches!(err, PortError::Backend(message) if message.contains("injected v12-to-v13"))
+        );
+        assert!(conn.is_autocommit());
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 12);
+        let table_exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'table' AND name = 'session_titles'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(table_exists, 0);
     }
 
     #[test]

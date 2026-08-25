@@ -1036,7 +1036,9 @@ fn tool_catalog() -> Value {
                 only session entities are listed. Each entry carries a peek object \
                 (first_user_text / last_user_text, <= 200 chars each, <= 1 KiB serialized \
                 per session; null when the session has no user message) for cheap triage \
-                without a full show.",
+                without a full show. When a title can be derived (custom title, then \
+                AI summary, then the first valid user message, <= 80 chars), the entry \
+                also carries a title string; it is omitted when no candidate exists.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1442,7 +1444,8 @@ fn budget_with(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_session_grep_domain::{IdKind, Stability};
+    use agent_session_grep_adapters_sqlite::SourceBatch;
+    use agent_session_grep_domain::{EvidenceSpan, IdKind, MessagePlacement, Stability};
     use agent_session_grep_ports::SearchProvider;
 
     fn open_store(dir: &tempfile::TempDir) -> SqliteStore {
@@ -2430,6 +2433,116 @@ mod tests {
         assert!(peek.is_object(), "peek key must be present: {entries:?}");
         assert!(peek["first_user_text"].is_null(), "{peek}");
         assert!(peek["last_user_text"].is_null(), "{peek}");
+    }
+
+    /// 提交一个带 placement 成员消息的会话（标题派生链用例的种子）。
+    fn seed_titled_session(
+        store: &SqliteStore,
+        tag: &[u8],
+        user_texts: &[&str],
+        session_extra: Option<(&str, &str)>,
+    ) -> StableId {
+        let session = StableId::derive(IdKind::Session, Stability::Reconstructed, &[tag]);
+        let document = StableId::derive(IdKind::Document, Stability::Reconstructed, &[tag]);
+        let mut entries: Vec<(StableId, Vec<u8>, String)> = Vec::new();
+        let mut placements: Vec<MessagePlacement> = Vec::new();
+        let mut member_ids: Vec<String> = Vec::new();
+        for (index, text) in user_texts.iter().enumerate() {
+            let message = StableId::derive(
+                IdKind::Message,
+                Stability::Reconstructed,
+                &[tag, &(index as u32).to_le_bytes()],
+            );
+            member_ids.push(message.as_str().to_string());
+            entries.push((message.clone(), user_payload(text), String::new()));
+            placements.push(MessagePlacement::new(
+                session.clone(),
+                document.clone(),
+                message,
+                index as u32,
+                false,
+                Some(EvidenceSpan { start: 0, end: 1 }),
+            ));
+        }
+        let mut session_value = serde_json::json!({ "messages": member_ids });
+        if let Some((key, value)) = session_extra {
+            session_value[key] = serde_json::json!(value);
+        }
+        entries.push((
+            session.clone(),
+            session_value.to_string().into_bytes(),
+            String::new(),
+        ));
+        entries.push((
+            document.clone(),
+            serde_json::json!({
+                "provider": "synthetic",
+                "variant": "synthetic/jsonl-v1",
+                "fingerprint": "0123456789abcdef",
+                "len": 128,
+            })
+            .to_string()
+            .into_bytes(),
+            String::new(),
+        ));
+        store
+            .commit_source_batches_if_changed(&[SourceBatch {
+                source_path: format!("title-seed-{}.jsonl", String::from_utf8_lossy(tag)),
+                entries,
+                placements,
+                edges: Vec::new(),
+                activities: Vec::new(),
+                relation_complete: true,
+                len_bytes: None,
+                fingerprint: None,
+                provider_id: None,
+                resume_claim: None,
+            }])
+            .expect("seed titled session");
+        session
+    }
+
+    #[test]
+    fn list_sessions_entries_carry_title_from_derivation_chain() {
+        // 标题派生链（#6）：custom-title（session payload `title`）>
+        // ai-title（`summary`）> 首条有效 user 消息；展示在条目 title 字段
+        // （peek 旁边）；派生链无候选时 title 键缺席。
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = open_store(&dir);
+        let custom = seed_titled_session(
+            &store,
+            b"t-custom",
+            &["fallback body"],
+            Some(("title", "自定义标题")),
+        );
+        let ai = seed_titled_session(
+            &store,
+            b"t-ai",
+            &["fallback body"],
+            Some(("summary", "AI 摘要标题")),
+        );
+        let plain = seed_titled_session(&store, b"t-plain", &["第一条有效用户消息"], None);
+        let empty = seed_titled_session(&store, b"t-empty", &[], None);
+        let mut server = ready(&store);
+        let v = call(&mut server, "list_sessions", json!({ "limit": 10 }));
+        assert_eq!(v["result"]["isError"], false, "{v}");
+        let entries = list_entries(&v);
+        assert_eq!(entries.len(), 4);
+        let title_of = |session: &StableId| {
+            entries
+                .iter()
+                .find(|entry| entry["id"] == session.as_str())
+                .and_then(|entry| entry.get("title"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        };
+        assert_eq!(title_of(&custom).as_deref(), Some("自定义标题"));
+        assert_eq!(title_of(&ai).as_deref(), Some("AI 摘要标题"));
+        assert_eq!(title_of(&plain).as_deref(), Some("第一条有效用户消息"));
+        assert!(
+            title_of(&empty).is_none(),
+            "无候选的会话必须省略 title 键: {entries:?}"
+        );
     }
 
     #[test]
