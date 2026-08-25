@@ -1028,6 +1028,79 @@ const GUARD_SOURCE_RESUME: &str =
     include_str!("../../agent-session-grep-application/src/resume.rs");
 const GUARD_SOURCE_HANDOFF: &str =
     include_str!("../../agent-session-grep-application/src/handoff_pack.rs");
+const GUARD_SOURCE_MANIFEST: &str = include_str!("../../agent-session-grep-ports/src/manifest.rs");
+
+/// ADR-0010（provider maturity 降级与回滚治理）原文。
+const ADR_0010: &str = include_str!("../../../docs/adr/ADR-0010-provider-maturity-rollback.md");
+
+/// ADR-0010 §1 证据清单里引用的实现标识 → 该标识所在源文件原文。
+///
+/// 治理记录把具体测试/常量名当作"可验证证据"写进表格。若这些名字被改名或删除，
+/// ADR 就从证据退化为断言，而且没有任何东西会失败——治理文档最需要的正是这种
+/// 不会静默腐坏的保证。
+const ADR_0010_CITED_EVIDENCE: &[(&str, &str)] = &[
+    (
+        "pinned_golden_table_covers_exactly_the_implemented_providers",
+        GUARD_SOURCE_THIS,
+    ),
+    (
+        "capability_probe_claim_matches_real_probe_on_own_golden",
+        GUARD_SOURCE_THIS,
+    ),
+    (
+        "capability_parse_claim_matches_real_parse_on_own_golden",
+        GUARD_SOURCE_THIS,
+    ),
+    ("CAPABILITY_BEHAVIOR_GUARDS", GUARD_SOURCE_THIS),
+    (
+        "every_capability_column_has_a_behavior_guard",
+        GUARD_SOURCE_THIS,
+    ),
+    (
+        "readme_provider_table_matches_capability_matrix_maturity",
+        GUARD_SOURCE_THIS,
+    ),
+    (
+        "beta_readiness_manifests_match_ledger_evidence_columns",
+        GUARD_SOURCE_THIS,
+    ),
+    (
+        "provider_output_has_every_current_matrix_row_and_enum_maturity",
+        GUARD_SOURCE_MAIN,
+    ),
+    (
+        "implemented_manifests_match_authoritative_capability_rows",
+        GUARD_SOURCE_MANIFEST,
+    ),
+    ("manifest_for", GUARD_SOURCE_MANIFEST),
+];
+
+#[test]
+fn adr_0010_cited_evidence_exists_in_source_and_is_actually_cited() {
+    // 双向对齐：表里的每个名字都必须 (a) 真实存在于所声明的源文件，
+    // (b) 真的被 ADR-0010 引用。(a) 防止改名后治理文档静默变成谎言；
+    // (b) 防止本表在 ADR 删掉引用后继续声称"文档有这条证据"。
+    assert_eq!(
+        ADR_0010_CITED_EVIDENCE.len(),
+        10,
+        "ADR-0010 引用证据表被改动——请同步确认 ADR §1 的引用集合"
+    );
+
+    for (name, source) in ADR_0010_CITED_EVIDENCE {
+        let defined = source.contains(&format!("fn {name}("))
+            || source.contains(&format!("const {name}:"))
+            || source.contains(&format!("const {name} "));
+        assert!(
+            defined,
+            "ADR-0010 §1 引用的 `{name}` 在其声明的源文件里没有定义——\
+             治理记录的证据链已断裂，必须同时修 ADR 与代码"
+        );
+        assert!(
+            ADR_0010.contains(name),
+            "`{name}` 已不再被 ADR-0010 引用，本表必须同步删除该行"
+        );
+    }
+}
 
 /// 每个能力列 → 把该列声明对照真实行为的守护测试名 + 该测试所在文件原文。
 ///
