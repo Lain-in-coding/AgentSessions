@@ -487,4 +487,25 @@ mod tests {
         // Exactly one event per committed message; no duplicates.
         assert_eq!(report.committed, sink.events.len());
     }
+
+    #[test]
+    fn parse_passes_noise_shaped_user_text_through_verbatim() {
+        // 钉住测试：Antigravity transcript.jsonl 没有 system-reminder / AGENTS.md /
+        // 环境上下文等注入概念（USER_EXPLICIT 的 content 就是用户原文；系统
+        // 注入走 source:"SYSTEM" 的记录类型，已在类型层排除）。形似噪声的文本
+        // 必须逐字透传，防止将来把别家格式的过滤规则盲目搬来造成 silent drift。
+        let adapter = AntigravityAdapter::new();
+        let fixture = r##"{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","content":"<system-reminder>reminder text</system-reminder>"}
+{"step_index":1,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","content":"# AGENTS.md instructions"}
+"##;
+        let mut sink = RecordingSink { events: Vec::new() };
+        let report = adapter.parse(fixture.as_bytes(), &mut sink).unwrap();
+        assert_eq!(report.committed, 2);
+        assert_eq!(report.skipped, 0);
+        assert_eq!(
+            sink.events[0].3,
+            "<system-reminder>reminder text</system-reminder>"
+        );
+        assert_eq!(sink.events[1].3, "# AGENTS.md instructions");
+    }
 }
