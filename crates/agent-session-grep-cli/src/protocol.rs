@@ -236,7 +236,18 @@ impl From<AppError> for ProtocolError {
 
 impl From<ProviderError> for ProtocolError {
     fn from(error: ProviderError) -> Self {
-        ProtocolError::new(CanonicalCode::ProviderError, error.to_string())
+        // R4.3 同款纪律：`Io` 变体携带 OS 层原始错误文本（Windows 上可能包含
+        // 真实绝对 transcript 路径），绝不进入用户可见 message。其余变体是
+        // adapter 的静态文案或有界数值，保持原样。原始细节仅在
+        // ASG_DEBUG_ERRORS=1 时写 stderr（永不进 stdout envelope）。
+        let message = match &error {
+            ProviderError::Io(_) => "提供方源文件读取失败".to_string(),
+            _ => error.to_string(),
+        };
+        if std::env::var_os("ASG_DEBUG_ERRORS").is_some() {
+            eprintln!("debug [{}]: {error}", CanonicalCode::ProviderError.as_str());
+        }
+        ProtocolError::new(CanonicalCode::ProviderError, message)
     }
 }
 
@@ -408,6 +419,12 @@ pub fn success_envelope(
 
 /// 错误 envelope。stdout 只有这一个对象；细节安全、有界（`err.details` 由构造方约束）。
 pub fn error_envelope(command: &str, err: &ProtocolError, request_id: Option<&str>) -> String {
+    // 与成功 envelope 同一脱敏纪律（ADR-0009）：错误路径不得绕过跨边界脱敏。
+    // message/details 可能回显调用方输入（密钥形状的 flag 值、用户参数），
+    // 出帧前统一过共享脱敏引擎；路径类细节已在各 From 转换处掩码
+    // （PortError::SourceIo / ProviderError::Io，R4.3）。
+    let (message, _) = crate::redaction::redact_text(&err.message);
+    let (details, _) = crate::redaction::redact_value(err.details.clone());
     json!({
         "schema_version": SCHEMA_VERSION,
         "frame_type": "error",
@@ -417,9 +434,9 @@ pub fn error_envelope(command: &str, err: &ProtocolError, request_id: Option<&st
         "outcome": "failure",
         "error": {
             "code": err.code.as_str(),
-            "message": err.message,
+            "message": message,
             "retryable": err.code.retryable(),
-            "details": err.details,
+            "details": details,
         },
         "warnings": [],
         "page": {
@@ -592,6 +609,35 @@ mod tests {
         assert_eq!(e.message, "源文件无法读取");
         assert!(!e.message.contains("secret"));
         assert!(!e.message.contains("transcript.jsonl"));
+    }
+
+    #[test]
+    fn provider_io_error_masks_source_path_in_message() {
+        // ProviderError::Io 携带 OS 层原始文本：Windows 上可能包含真实绝对
+        // transcript 路径。与 PortError::SourceIo 同一掩码纪律（R4.3）。
+        let e: ProtocolError =
+            ProviderError::Io("cannot open C:/Users/secret/transcript.jsonl (os error 2)".into())
+                .into();
+        assert_eq!(e.code, CanonicalCode::ProviderError);
+        assert_eq!(e.message, "提供方源文件读取失败");
+        assert!(!e.message.contains("secret"));
+        assert!(!e.message.contains("transcript.jsonl"));
+    }
+
+    #[test]
+    fn error_envelope_redacts_message_and_details() {
+        // 错误 envelope 与成功 envelope 同一脱敏纪律（ADR-0009）：message 里
+        // 回显的用户输入与 details 中的密钥形状值都必须在跨边界输出前脱敏。
+        let err = ProtocolError::new(
+            CanonicalCode::InvalidRequest,
+            "--mode must be lexical|semantic|hybrid, got \"sk-ant-api03-1234567890abcdef\"",
+        )
+        .with_details(json!({ "echo": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9" }));
+        let s = error_envelope("search", &err, None);
+        assert!(!s.contains("sk-ant-api03-1234567890abcdef"), "{s}");
+        assert!(s.contains("[redacted:api_key]"), "{s}");
+        assert!(!s.contains("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"), "{s}");
+        assert!(s.contains("[redacted:bearer_token]"), "{s}");
     }
 
     #[test]

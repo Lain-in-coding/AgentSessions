@@ -2532,6 +2532,28 @@ fn resume_yes_missing_provider_binary_returns_structured_error() {
 }
 
 #[test]
+fn robot_error_envelope_redacts_echoed_secrets() {
+    // 错误 envelope 与成功 envelope 同一脱敏纪律（ADR-0009）：--since 的非法值
+    // 被回显进错误 message，跨边界输出前必须脱敏——Robot 调用方把密钥形状的
+    // token 误贴进 flag 值是最常见的泄漏形态。
+    let (_dir, db) = temp_db("error-envelope-redaction");
+    let out = run(
+        &db,
+        &["search", "--since", "sk_live_abcdef1234567890xyz", "q"],
+    );
+    assert_eq!(out.status.code(), Some(2), "{}", stdout(&out));
+    let frame = parse_first_line(&out);
+    assert_envelope_shape(&frame, false);
+    assert_eq!(frame["error"]["code"], "invalid_request", "{frame}");
+    let text = stdout(&out);
+    assert!(
+        !text.contains("sk_live_abcdef1234567890xyz"),
+        "echoed secret must be redacted: {text}"
+    );
+    assert!(text.contains("[redacted:stripe_key]"), "{text}");
+}
+
+#[test]
 fn resume_unavailable_session_reports_reason_without_command() {
     let (dir, db) = temp_db("resume-unavailable");
     // 空库上任何 session 都无 resume 声明 → available:false + reason。

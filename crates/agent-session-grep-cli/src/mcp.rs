@@ -2441,6 +2441,29 @@ mod tests {
     }
 
     #[test]
+    fn business_error_frames_mask_provider_io_source_paths() {
+        // ProviderError::Io 的 OS 文本可能含真实绝对 transcript 路径；归一成
+        // ProtocolError 时已掩码（R4.3）。MCP 业务错误帧与 -32602 协议帧再叠加
+        // 跨边界脱敏，路径与密钥形状值都不得出现在任何错误帧里。
+        let error: ProtocolError = agent_session_grep_ports::ProviderError::Io(
+            "cannot open C:/Users/secret/transcript.jsonl (os error 2)".into(),
+        )
+        .into();
+        let frame = business_error_result(&error);
+        let text = frame.to_string();
+        assert_eq!(
+            frame["structuredContent"]["error"]["canonical_code"], "provider_error",
+            "{frame}"
+        );
+        assert!(!text.contains("secret"), "{text}");
+        assert!(!text.contains("transcript.jsonl"), "{text}");
+
+        let frame = error_frame(Value::Null, INVALID_PARAMS, &error.message, None);
+        assert!(!frame.contains("secret"), "{frame}");
+        assert!(!frame.contains("transcript.jsonl"), "{frame}");
+    }
+
+    #[test]
     fn tool_schemas_bound_unbounded_strings_and_arrays() {
         // R5：无界 string 参数加 maxLength、无界 array 参数加 maxItems。
         let tools = tool_catalog().as_array().expect("tools").clone();
