@@ -264,7 +264,12 @@ impl ProviderCapabilityMatrix {
                     parse: CapabilityLevel::Native,
                     search: CapabilityLevel::Native,
                     context: CapabilityLevel::Unsupported,
-                    resume: CapabilityLevel::Unknown,
+                    // resume 命令已由 application::resume builder 支持
+                    // （`kimi --session <id>`）。证据：fast-resume kimi.rs
+                    // `resume_command`，同源已核验（fast-resume 解析
+                    // `$KIMI_CODE_HOME/sessions/**/agents/main/wire.jsonl` +
+                    // `state.json`，与本 provider 的 wire.jsonl 面同一 CLI）。
+                    resume: CapabilityLevel::Derived,
                     handoff: CapabilityLevel::Derived,
                     tool_activity: CapabilityLevel::Unsupported,
                     source_span: CapabilityLevel::Native,
@@ -282,6 +287,10 @@ impl ProviderCapabilityMatrix {
                     parse: CapabilityLevel::Native,
                     search: CapabilityLevel::Native,
                     context: CapabilityLevel::Unsupported,
+                    // resume 保持 Unknown：Github_src 参考项目（fast-resume/
+                    // sessiongrep/ctx/agf/cc-switch/AgentRecall）均无 Qoder
+                    // resume 命令证据；AgentRecall 明确标 `resume: false`、
+                    // `resumeTarget: null`。无权威命令就不编造。
                     resume: CapabilityLevel::Unknown,
                     handoff: CapabilityLevel::Derived,
                     tool_activity: CapabilityLevel::Unsupported,
@@ -315,7 +324,12 @@ impl ProviderCapabilityMatrix {
                     parse: CapabilityLevel::Native,
                     search: CapabilityLevel::Native,
                     context: CapabilityLevel::Unsupported,
-                    resume: CapabilityLevel::Unknown,
+                    // resume 命令已由 application::resume builder 支持
+                    // （`codebuddy --resume <id>`）。证据：AgentRecall 对
+                    // codebuddy-cli（读 `~/.codebuddy/projects/*.jsonl`，与本
+                    // provider 同一源面）生成 `cd <repo> && codebuddy --resume
+                    // <id>`，并识别真实 `codebuddy --resume <id>` 进程行。
+                    resume: CapabilityLevel::Derived,
                     handoff: CapabilityLevel::Derived,
                     tool_activity: CapabilityLevel::Unsupported,
                     source_span: CapabilityLevel::Native,
@@ -333,9 +347,13 @@ impl ProviderCapabilityMatrix {
                     parse: CapabilityLevel::Native,
                     search: CapabilityLevel::Native,
                     context: CapabilityLevel::Unsupported,
-                    // resume 命令尚无权威模板（builder 未支持），如实标记 Unknown——
-                    // 曾误标 Derived（audit P1-2 drift 测试守护）。
-                    resume: CapabilityLevel::Unknown,
+                    // resume 命令已由 application::resume builder 支持：
+                    // fast-resume opencode.rs `resume_command` =
+                    // `opencode <directory> --session <id>`（directory 为
+                    // positional 参数，来自会话原始工作目录；同一 SQLite 源面）。
+                    // 目录缺失时省略 positional 参数（cc-switch `opencode -s
+                    // <id>` / agf 同形的已验证形态）。
+                    resume: CapabilityLevel::Derived,
                     handoff: CapabilityLevel::Derived,
                     tool_activity: CapabilityLevel::Unsupported,
                     source_span: CapabilityLevel::Unsupported,
@@ -372,6 +390,14 @@ impl ProviderCapabilityMatrix {
                     parse: CapabilityLevel::Native,
                     search: CapabilityLevel::Native,
                     context: CapabilityLevel::Unsupported,
+                    // resume 保持 Unknown：参考项目证据冲突——agf
+                    // `hermes --resume <id>`（SQLite state.db 面）、agent-sessions
+                    // `hermes --resume <id>`/`--continue`（附带"取决于所装 CLI
+                    // 是否暴露该 flag"的保留声明）、hstry `hermes --session
+                    // <id>`（其 resume 配置对 pi 已证不可靠：`pi --session
+                    // {session_path}` 与验证形态不符），而读同一 `~/.hermes/
+                    // sessions` JSON 面的 cc-switch 与 AgentRecall 均无 resume
+                    // 命令（None / `resume: false`）。无权威结论就不编造。
                     resume: CapabilityLevel::Unknown,
                     handoff: CapabilityLevel::Derived,
                     tool_activity: CapabilityLevel::Unsupported,
@@ -388,7 +414,13 @@ impl ProviderCapabilityMatrix {
                     parse: CapabilityLevel::Native,
                     search: CapabilityLevel::Native,
                     context: CapabilityLevel::Unsupported,
-                    resume: CapabilityLevel::Unknown,
+                    // resume 命令已由 application::resume builder 支持
+                    // （`agy --conversation <id>`）。证据：fast-resume
+                    // antigravity.rs `resume_command`（同一
+                    // `~/.gemini/antigravity-cli` 源面）与 agent-sessions 的
+                    // AntigravityResumeCommandBuilder（并以 `agy --help` 校验
+                    // `--conversation` 存在）双源一致。
+                    resume: CapabilityLevel::Derived,
                     handoff: CapabilityLevel::Derived,
                     tool_activity: CapabilityLevel::Unsupported,
                     // 行式 JSONL：adapter 逐记录发 `span: Some((start, end))`，
@@ -417,6 +449,10 @@ impl ProviderCapabilityMatrix {
                     parse: CapabilityLevel::Native,
                     search: CapabilityLevel::Native,
                     context: CapabilityLevel::Unsupported,
+                    // resume 保持 Unknown：fast-resume 的 `agent --resume <id>`
+                    // 属 Cursor **CLI**（`~/.cursor/chats/*/store.db` 面），与
+                    // 本 provider 的 VS Code workspaceStorage `state.vscdb`
+                    // 面不同源；该 CLI variant 未实现，不能借其命令。
                     resume: CapabilityLevel::Unknown,
                     handoff: CapabilityLevel::Derived,
                     tool_activity: CapabilityLevel::Unsupported,

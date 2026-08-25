@@ -91,9 +91,53 @@ pub fn build_resume_descriptor(metadata: &SessionResumeMetadata) -> ResumePrevie
         "codex" => ("codex", vec!["resume".to_string(), session_id.to_string()]),
         "pi" => ("pi", vec!["--session".to_string(), session_id.to_string()]),
         "grok-build" => ("grok", vec!["--resume".to_string(), session_id.to_string()]),
+        // 证据：fast-resume antigravity.rs `resume_command` = `agy --conversation
+        // <id>`（同一 `~/.gemini/antigravity-cli` 源面，brain/*/logs JSONL 为
+        // 回退面）；agent-sessions 的 AntigravityResumeCommandBuilder 同形并
+        // 以 `agy --help` 校验 `--conversation` 存在。双源一致。
+        "antigravity" => (
+            "agy",
+            vec!["--conversation".to_string(), session_id.to_string()],
+        ),
+        // 证据：fast-resume kimi.rs `resume_command` = `kimi --session <id>`。
+        // 同源已核验：fast-resume 解析 `$KIMI_CODE_HOME/sessions/**/agents/main/
+        // wire.jsonl` + `state.json`（默认 `~/.kimi-code/sessions`），与本
+        // provider-kimi 的 wire.jsonl 面（`context.append_message` 封套）同一
+        // CLI；provider-kimi PROVENANCE.md 亦明言结构适配自 fast-resume。
+        "kimi-code" => (
+            "kimi",
+            vec!["--session".to_string(), session_id.to_string()],
+        ),
+        // 证据：AgentRecall platform.ts `getResumeCommand` 对 codebuddy-cli
+        // （读 `~/.codebuddy/projects/*.jsonl`，与本 provider 同一源面）生成
+        // `cd <repo> && codebuddy --resume <id>`；其 live-detection 亦识别真实
+        // `codebuddy --resume <id>` 进程行。
+        "tencent-codebuddy" => (
+            "codebuddy",
+            vec!["--resume".to_string(), session_id.to_string()],
+        ),
+        // 证据：fast-resume opencode.rs `resume_command` =
+        // `opencode <directory> --session <id>`——directory 是 positional 参数，
+        // 来自会话原始工作目录（SQLite 源同面）。目录缺失时省略 positional
+        // 参数：cc-switch（`opencode -s <id>`，目录由 shell cwd 承担）与 agf
+        // （`opencode -s '<id>'`）均已验证明该省略形态。
+        "opencode" => {
+            let mut args = Vec::new();
+            if let Some(dir) = metadata.original_working_directory.as_deref()
+                && !dir.trim().is_empty()
+            {
+                args.push(dir.to_string());
+            }
+            args.push("--session".to_string());
+            args.push(session_id.to_string());
+            ("opencode", args)
+        }
         // Unknown/unverified providers: resume command is null/— (not fabricated).
-        // These include: opencode, antigravity, hermes, kimi-code (version conflicts),
-        // and all not-yet-implemented providers.
+        // These include: hermes（各参考项目 resume 命令冲突：agf `hermes
+        // --resume <id>`、hstry `hermes --session <id>`、cc-switch/AgentRecall
+        // 无 CLI resume，无权威结论）、qoder（参考项目无 resume 命令证据）、
+        // cursor（fast-resume 的 `agent --resume` 属 Cursor CLI store.db 面，
+        // 与本 provider 的 VS Code vscdb 面不同源），及所有未实现 provider。
         _ => {
             return ResumePreview {
                 descriptor: ResumeDescriptor {
@@ -244,7 +288,9 @@ mod tests {
 
     #[test]
     fn unverified_provider_returns_unavailable() {
-        let m = metadata("kimi-code", true, "k-sess", None);
+        // hermes：参考项目 resume 命令冲突（agf `--resume` vs hstry `--session`
+        // vs cc-switch/AgentRecall 无 CLI），无权威结论——必须保持 unavailable。
+        let m = metadata("hermes", true, "k-sess", None);
         let preview = build_resume_descriptor(&m);
         assert!(!preview.available);
         assert!(
@@ -280,6 +326,64 @@ mod tests {
         assert!(preview.available);
         assert_eq!(preview.descriptor.provider_binary, "grok");
         assert_eq!(preview.descriptor.args, vec!["--resume", "grok-sess"]);
+    }
+
+    #[test]
+    fn builds_antigravity_resume_command() {
+        let m = metadata("antigravity", true, "agy-conv-1", None);
+        let preview = build_resume_descriptor(&m);
+        assert!(preview.available);
+        assert_eq!(preview.descriptor.provider_binary, "agy");
+        assert_eq!(
+            preview.descriptor.args,
+            vec!["--conversation", "agy-conv-1"]
+        );
+    }
+
+    #[test]
+    fn builds_opencode_resume_command_with_directory() {
+        let m = metadata("opencode", true, "ses_opencode_1", Some("/work/opencode"));
+        let preview = build_resume_descriptor(&m);
+        assert!(preview.available);
+        assert_eq!(preview.descriptor.provider_binary, "opencode");
+        // fast-resume 形态：directory 为 positional 参数。
+        assert_eq!(
+            preview.descriptor.args,
+            vec!["/work/opencode", "--session", "ses_opencode_1"]
+        );
+        assert!(
+            preview
+                .command_string
+                .contains("opencode /work/opencode --session ses_opencode_1")
+        );
+    }
+
+    #[test]
+    fn builds_opencode_resume_command_without_directory() {
+        // 目录缺失时省略 positional 参数（cc-switch/agf 的 `opencode -s <id>`
+        // 已验证形态，目录由 shell cwd 承担），不臆造目录。
+        let m = metadata("opencode", true, "ses_opencode_2", None);
+        let preview = build_resume_descriptor(&m);
+        assert!(preview.available);
+        assert_eq!(preview.descriptor.args, vec!["--session", "ses_opencode_2"]);
+    }
+
+    #[test]
+    fn builds_kimi_code_resume_command() {
+        let m = metadata("kimi-code", true, "kimi-sess-1", None);
+        let preview = build_resume_descriptor(&m);
+        assert!(preview.available);
+        assert_eq!(preview.descriptor.provider_binary, "kimi");
+        assert_eq!(preview.descriptor.args, vec!["--session", "kimi-sess-1"]);
+    }
+
+    #[test]
+    fn builds_tencent_codebuddy_resume_command() {
+        let m = metadata("tencent-codebuddy", true, "cb-sess-1", None);
+        let preview = build_resume_descriptor(&m);
+        assert!(preview.available);
+        assert_eq!(preview.descriptor.provider_binary, "codebuddy");
+        assert_eq!(preview.descriptor.args, vec!["--resume", "cb-sess-1"]);
     }
 
     #[test]
