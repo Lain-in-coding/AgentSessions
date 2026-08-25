@@ -1385,3 +1385,59 @@ fn readme_implemented_provider_count_matches_capability_matrix() {
         "README 的实现计数与 capability.rs 漂移，应包含 `{expected}`"
     );
 }
+
+/// workspace 根 `Cargo.toml` 原文：README 的版本声明必须与之一致。
+const WORKSPACE_MANIFEST: &str = include_str!("../../../Cargo.toml");
+
+#[test]
+fn readme_release_status_and_maturity_tiers_match_authoritative_sources() {
+    // README 里剩下两处可腐坏的事实断言：
+    //
+    // (1) "the first public version is planned as `0.1.0`, matching the Cargo
+    //     workspace version" —— 这句话自己声称与 workspace 版本一致，却没有任何
+    //     测试核对。发版时 bump 了 workspace 版本而漏改 README，这句话就从事实
+    //     变成谎言，而且是访客读到的第 11 行。
+    //
+    // (2) "providers are graded certified/GA/beta/experimental/unsupported" ——
+    //     等级名单必须与 `ProviderMaturity` 的真实变体一致。少一档或多一档都会
+    //     让"诚实成熟度"这条宣传语本身不诚实。
+    let version = WORKSPACE_MANIFEST
+        .lines()
+        .skip_while(|line| line.trim() != "[workspace.package]")
+        .find_map(|line| line.trim().strip_prefix("version = "))
+        .map(|value| value.trim().trim_matches('"').to_string())
+        .expect("workspace Cargo.toml 必须在 [workspace.package] 下声明 version");
+    // README 是 CRLF 且这句话跨行折行，故先把所有空白折叠成单空格再比对——
+    // 断言要盯的是"版本号一致"这件事实，不是折行位置。
+    let readme_flat = README.split_whitespace().collect::<Vec<_>>().join(" ");
+    let claim = format!("planned as `{version}`, matching the Cargo workspace version");
+    assert!(
+        readme_flat.contains(&claim),
+        "README 的版本声明与 workspace 版本 `{version}` 漂移——\
+         这句话自称与 Cargo 版本一致，必须真的一致"
+    );
+
+    // 等级名单从 ProviderMaturity 的 as_str() 取真值，而不是在测试里手抄。
+    for tier in [
+        ProviderMaturity::Certified,
+        ProviderMaturity::Ga,
+        ProviderMaturity::Beta,
+        ProviderMaturity::Experimental,
+        ProviderMaturity::Unsupported,
+    ] {
+        // README 用人读大小写（certified/GA/beta/...），故按大小写不敏感匹配。
+        let name = tier.as_str();
+        assert!(
+            README.to_lowercase().contains(name),
+            "README 的成熟度等级名单缺少 `{name}`——\
+             ProviderMaturity 有该变体，对外名单不得漏档"
+        );
+    }
+    // 反向：名单不得声称存在 ProviderMaturity 没有的档位。
+    for fabricated in ["stable", "production-ready", "verified"] {
+        assert!(
+            !README.to_lowercase().contains(&format!("/{fabricated}")),
+            "README 的等级名单出现 `{fabricated}`，但 ProviderMaturity 无此档位"
+        );
+    }
+}
