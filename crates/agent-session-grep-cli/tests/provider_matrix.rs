@@ -1524,3 +1524,117 @@ fn changelog_provider_claims_match_capability_matrix() {
         }
     }
 }
+
+/// 根目录对外文档 → 原文。这些文件是访客与安全研究者的第一手材料，里面用反引号
+/// 引用的仓库路径若失效，读者会按错误路径去核对，等于把可核查的证据变成噪音。
+const ROOT_DOCS: &[(&str, &str)] = &[
+    ("README.md", README),
+    ("CHANGELOG.md", CHANGELOG),
+    ("SECURITY.md", include_str!("../../../SECURITY.md")),
+    ("NOTICE", include_str!("../../../NOTICE")),
+    ("CONTRIBUTING.md", include_str!("../../../CONTRIBUTING.md")),
+    (
+        "CODE_OF_CONDUCT.md",
+        include_str!("../../../CODE_OF_CONDUCT.md"),
+    ),
+];
+
+/// 反引号内容里，哪些看起来像仓库路径但其实是标识符（schema 名、HF 模型 id、
+/// 协议方法名、gitignore 条目）。这些不该被当成文件路径核对。
+///
+/// 判定标准写在这里而不是靠正则猜：白名单是显式的，新增一条必须有理由。
+const NON_PATH_IDENTIFIERS: &[&str] = &[
+    // Handoff pack schema 名（`handoff-pack/v1`），不是目录。
+    "handoff-pack/v1",
+    // Hugging Face 模型 id（`intfloat/multilingual-e5-small`）。
+    "intfloat/multilingual-e5-small",
+    // ACP 协议方法名（`session/update`）。
+    "session/update",
+    // 被 .gitignore 排除的文件，按契约不应存在于工作树。
+    ".mcp.json",
+    ".env",
+    "credentials*",
+    // 发版时生成的产物，不在源码树里。
+    "THIRD-PARTY-DEPENDENCIES.json",
+    "THIRD-PARTY-DEPENDENCIES.csv",
+];
+
+/// 从文档原文里抽出所有"看起来是仓库路径"的反引号片段。
+///
+/// 只认包含 `/` 且以已知源码/文档扩展名结尾的片段——这样既不会漏掉真实路径，
+/// 也不会把命令行、JSON 字段名之类的反引号内容误判成文件。
+fn cited_repo_paths(doc: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    let mut rest = doc;
+    while let Some(open) = rest.find('`') {
+        let after = &rest[open + 1..];
+        let Some(close) = after.find('`') else { break };
+        let candidate = &after[..close];
+        rest = &after[close + 1..];
+
+        if !candidate.contains('/') || candidate.contains(' ') {
+            continue;
+        }
+        let looks_like_file = [
+            ".rs", ".py", ".md", ".json", ".yml", ".yaml", ".toml", ".sh", ".ps1",
+        ]
+        .iter()
+        .any(|ext| candidate.ends_with(ext));
+        if !looks_like_file {
+            continue;
+        }
+        if NON_PATH_IDENTIFIERS.contains(&candidate) {
+            continue;
+        }
+        paths.push(candidate.to_string());
+    }
+    paths
+}
+
+#[test]
+fn root_docs_cited_repo_paths_all_resolve() {
+    // 前面几条守护盯的是"文档声明的事实是否为真"。这一条盯的是更基础的一层：
+    // 文档指给读者的路径是否还存在。重构搬走一个文件、重命名一个脚本，文档里的
+    // 引用就静默失效——读者按路径去核对却找不到，可核查性归零，而且没有任何测试
+    // 会失败。NOTICE 的 attribution、SECURITY.md 的 redaction 实现位置都属于这类
+    // "必须能被追到源码"的引用。
+    //
+    // `CARGO_MANIFEST_DIR` 指向 crates/agent-session-grep-cli，故上溯两级到仓库根。
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("必须能从 crate 目录上溯到仓库根")
+        .to_path_buf();
+    assert!(
+        repo_root.join("Cargo.toml").is_file(),
+        "仓库根定位失败：{repo_root:?} 下没有 Cargo.toml"
+    );
+
+    let mut checked = 0usize;
+    for (doc_name, doc) in ROOT_DOCS {
+        for cited in cited_repo_paths(doc) {
+            // CHANGELOG 里 `tests/network_egress.rs` 这类引用是相对 crate 的写法，
+            // 故既接受仓库根下的路径，也接受任一 crate 下的同名路径。
+            let direct = repo_root.join(&cited);
+            let resolved = direct.exists()
+                || std::fs::read_dir(repo_root.join("crates"))
+                    .map(|entries| {
+                        entries
+                            .filter_map(Result::ok)
+                            .any(|entry| entry.path().join(&cited).exists())
+                    })
+                    .unwrap_or(false);
+            assert!(
+                resolved,
+                "{doc_name} 引用的仓库路径 `{cited}` 不存在——\
+                 文档指给读者的证据必须真的能被追到；若该文件已搬迁请同步文档，\
+                 若它是生成产物或标识符请加入 NON_PATH_IDENTIFIERS 并说明理由"
+            );
+            checked += 1;
+        }
+    }
+    assert!(
+        checked >= 10,
+        "只核对到 {checked} 条被引用路径，抽取逻辑可能失效"
+    );
+}
