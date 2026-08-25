@@ -31,7 +31,7 @@ Legend for local columns: `ok` = present with tests; `partial` = present with kn
 | grok-build | ok | ok | ok | native | ok (native) | missing | derived | derived | format carries structured tool records (`_meta.bashCommand` meta chunks) but no per-message native id — tool_activity cannot anchor, honestly Unsupported; synthetic msg ids |
 | antigravity | ok | ok | ok | native | ok (native) | missing | unknown | derived | no in-file session id; format carries `tool_calls` on step records but `step_index` is not a durable cross-document id — tool_activity cannot anchor, honestly Unsupported |
 | opencode | ok | ok | ok | native | missing | missing | unknown | derived | no span (SQLite source has no in-file byte offsets); no resume template |
-| pi | ok | ok | ok | native | ok (native) | missing | derived | derived | no tool_activity |
+| pi | ok | ok | ok | native | ok (native) | missing | derived | derived | format carries no structured tool-call records — tool_activity honestly Unsupported |
 | hermes | ok | ok | ok | native | missing | missing | unknown | derived | JSON doc; no span; SQLite `state.db` surface not parsed |
 | cursor | ok | ok | ok | missing | missing | missing | unknown | derived | no discovery root: the adapter parses the VS Code `workspaceStorage/*/state.vscdb` ItemTable surface, whose per-workspace hash directories sit under a platform-specific application-data path, not a home-relative root this table can express; `~/.cursor/chats/<id>/store.db` is the separate Cursor CLI `meta`/`blobs` schema, which this adapter's probe rejects. No span; multi-gen format layering pending |
 | kimi-code | ok | ok | ok | native | ok (native) | missing | unknown | derived | loop events not parsed |
