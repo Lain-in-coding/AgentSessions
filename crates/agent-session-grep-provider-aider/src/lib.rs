@@ -365,4 +365,39 @@ mod tests {
         let report = adapter.parse(fixture.as_bytes(), &mut sink).unwrap();
         assert_eq!(report.committed, 4);
     }
+
+    struct TextSink {
+        texts: Vec<String>,
+    }
+    impl CanonicalEventSink for TextSink {
+        fn emit_message(
+            &mut self,
+            event: MessageEvent<'_>,
+        ) -> agent_session_grep_ports::PortResult<()> {
+            self.texts.push(event.text.to_string());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn parse_passes_noise_shaped_user_text_through_verbatim() {
+        // 钉住测试：aider Markdown 历史没有 system-reminder / AGENTS.md /
+        // 环境上下文等注入概念——`#### ` 行就是用户在 aider 里敲的原文。
+        // 形似噪声的文本必须逐字透传，防止将来把别家格式的过滤规则盲目
+        // 搬来造成 silent drift。
+        let adapter = AiderAdapter::new();
+        let fixture = "# aider chat started at 2026-01-01 12:00:00\n\n#### <system-reminder>this is literally what the user typed</system-reminder>\n\nIt is kept verbatim.\n";
+        let mut sink = TextSink { texts: vec![] };
+        let report = adapter.parse(fixture.as_bytes(), &mut sink).unwrap();
+        assert_eq!(report.committed, 2);
+        assert_eq!(report.skipped, 0);
+        assert_eq!(
+            sink.texts,
+            vec![
+                "<system-reminder>this is literally what the user typed</system-reminder>"
+                    .to_string(),
+                "It is kept verbatim.".to_string(),
+            ]
+        );
+    }
 }
