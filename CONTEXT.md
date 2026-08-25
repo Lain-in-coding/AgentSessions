@@ -8,6 +8,26 @@ handoff through CLI, Robot, MCP, TUI, and loopback Web UI surfaces sharing one
 Application ADT. Native GUI is not a first-release surface, but remains a
 future extension boundary.
 
+## Current status (2026-08-25)
+
+- 0.3 里程碑已收尾：deep rename 完成（二进制 `agent-session-grep` / `asg`），
+  workspace 版本为 `0.1.0`。当前重心是按
+  `docs/product/OPEN-SOURCE-ROADMAP.md` 准备 `0.1.0` 首次公开发布；仓库保持
+  PRIVATE，发布与否是 owner 最终裁量。
+- Provider 矩阵：16 行（14 个已实现、全部 `experimental`；2 个 deferred 无
+  transcript 证据）。至今 0 Beta；Claude/Codex `certified` 仅是目标——跨 target
+  CI 仍被 GitHub billing 阻塞（外部），`last_certified_targets` 全空。
+- 2026-08-25 波次：seeded 随机化 property 套件覆盖全部 14 个已实现 provider
+  （此前仅 Claude/Codex）；resume 命令矩阵新增 4 家
+  （antigravity/opencode/kimi-code/tencent-codebuddy → `derived`，现为 8
+  `derived` / 3 `unknown` / 3 `unsupported`）；tool_activity 完成 7 家诚实盘点
+  后全部保持 `unsupported`（逐行理由见
+  `docs/product/PROVIDER-BETA-READINESS.md`）；3 个代码审查 Medium 已修复
+  （Robot/JSON 错误信封走共享脱敏引擎、e2e 无 Python 时跳过而非 panic、CI 常驻
+  `semantic-candle` feature 编译测试步）。
+- 下方 2026-08-12 决策日志中的 "finish 0.3" 等条目是当时的历史记录；本段快照
+  才是当前状态。
+
 ## Language
 
 **Session**:

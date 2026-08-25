@@ -3,7 +3,7 @@
 > 对外可见的 Provider 状态清单，是 `0.1.0`（首个计划公开版本，`Cargo.toml`）的公开状态记录。
 > - 术语与晋级证据要求见 `../architecture/RFC-0002-provider-adapter-contract.md` §6。
 > - 本文件是**当前实现状态**的事实记录，不是承诺；晋级必须有证据，不由代码存在自动推断。
-> - 最后更新：2026-08-18（16-provider evidence wave + semantic-candle/handoff/context/TUI 投影 wave，HEAD `f7e2a49`）
+> - 最后更新：2026-08-25（property 全 14 家 + resume matrix 4 家新增 + tool_activity 7 家诚实盘点 + 3 个 Medium 修复 wave，HEAD `18a2162`）
 > - 权威数据源：`crates/agent-session-grep-ports/src/capability.rs` 的
 >   `ProviderCapabilityMatrix::current()`；本表与其保持一致，不一致以 capability.rs 为准。
 > - Beta 本地/外部缺口分账见 `PROVIDER-BETA-READINESS.md`（不得仅凭代码存在晋级）。
@@ -21,7 +21,7 @@
 
 **字段能力**（capability，逐字段）：`native`（provider 原生提供）、`derived`（由内在内容确定性派生）、`partial`（部分场景可得）、`unsupported`（该 provider 无此概念）、`unknown`（尚未评估）。
 
-## 成熟度总览（16 行，2026-08-16 事实）
+## 成熟度总览（16 行，2026-08-25 事实）
 
 | Provider | provider_id | variant | maturity | 证据 |
 |---|---|---|---|---|
@@ -44,12 +44,17 @@
 
 14 个已实现 provider 均为 **Experimental**：golden、property、source span 以及
 关系化 Message/Placement/Edge 的合成与 e2e 证据已入库（见下），授权真实数据全量
-绿色回归亦已闭合（见「晋级到 Beta 的缺口」第 4 条）。剩余 blocker 为跨 target CI
-认证与 provider 级回滚策略的 owner 批准——逐条见下方缺口清单。两个 deferred
-provider（DeepSeek Harness、ZCode）保留 16 行但不宣传为已实现、不设 maturity
-target。
+绿色回归亦已闭合（见「晋级到 Beta 的缺口」第 4 条）。2026-08-25 wave 起，seeded
+随机化 property 套件（`tests/properties.rs`，固定种子）覆盖**全部 14 个已实现
+provider**（此前仅 Claude/Codex，见缺口第 2 条）；resume 命令矩阵新增 4 家
+（antigravity/opencode/kimi-code/tencent-codebuddy → `derived`，见 Capability
+Matrix resume 行）；tool_activity 完成 7 家诚实盘点（全部如实保持
+`unsupported`，逐行理由见 capability.rs 注释与 `PROVIDER-BETA-READINESS.md`）。
+剩余 blocker 为跨 target CI 认证与 provider 级回滚策略的 owner 批准——逐条见
+下方缺口清单。两个 deferred provider（DeepSeek Harness、ZCode）保留 16 行但不
+宣传为已实现、不设 maturity target。
 
-## Capability Matrix（逐字段，2026-08-16）
+## Capability Matrix（逐字段，2026-08-25）
 
 字段对应 Canonical `Message`（`crates/agent-session-grep-domain/src/lib.rs`）与解析产出。
 
@@ -61,11 +66,11 @@ target。
 | parse | `native` | 全部 14 个 adapter 均 streaming 到 `CanonicalEventSink`。由 `capability_parse_claim_matches_real_parse_on_own_golden` 守护：逐 adapter 实跑 parse，`report.committed` 必须 > 0 且与真实 emit 的消息数相等（计数与入库量不得脱节），每条消息正文非空（空正文无 FTS token，计入 committed 等于宣称索引了检索不到的内容） |
 | search | `native` | 统一经 canonical 索引检索。由 e2e `capability_search_claim_matches_real_retrieval_for_every_provider` 守护：逐 provider sync 自己的 golden 源后，用**取自该 golden 正文**的 token 走真实 CLI 检索，必须至少命中一条且命中正文出自该源——固定关键词会因 fixture 语言不同而假阴性，故 query 由内容派生 |
 | discover | `native`（claude-code/codex/openclaw/tencent-codebuddy/antigravity/opencode/pi/hermes/grok-build/kimi-code/qoder/cline）；`unsupported`（其余） | `PROVIDER_DISCOVERY_ROOTS` 逐 provider 登记 (root, 扩展名)：JSONL provider 收 `jsonl`，opencode 的源是单个 SQLite `opencode.db` 故收 `db`（`-wal`/`-shm` 旁文件的 extension 不是 `db`，精确匹配天然排除）。pi 的 root 为 `~/.pi/agent/sessions/<encoded-cwd>/`，逐层递归即可命中。hermes 的 root 为 `~/.hermes/sessions` 收 `json`（上游 hstry adapter 硬编码该根并只认 `session_*.json`；同目录 `<id>.jsonl` 是部分状态，扩展名精确匹配天然排除）。qoder 的 root 为 `~/.qoder/projects/<project>/transcript` 收 `jsonl`（本 adapter 的 transcript JSONL 面；Electron SQLite 面不在 adapter 范围内，见 provider-qoder 模块文档）。cline 的 root 为 `~/.cline/data/tasks` 收 `json`：同目录三个旁文件（`ui_messages.json` / `context_history.json` / `task_metadata.json`）都是 JSON 对象而非带 `role` 的数组，adapter 的 probe 逐个如实 `AmbiguousVariant` 拒绝，故收 `json` 是安全的；VS Code 扩展的 `globalStorage` 树不是 home 相对路径（Linux `~/.config`、macOS `~/Library`、Windows `%APPData%` 各不相同），本表只登记 home 相对根故不登记它。cursor 与 aider 结构上无法登记，理由见 capability.rs 两行注释：cursor 的两个已知面（VS Code `workspaceStorage/*/state.vscdb`、Cursor CLI `~/.cursor/chats/<id>/store.db`）前者非 home 相对、后者 schema 与本 adapter 的 ItemTable 不同源；aider 的 `.aider.chat.history.md` 按 **repo** 存放，上游 agentsview 也是遍历用户给的仓库根去发现，没有 home 相对根可登记 |
-| resume | `derived`（claude-code/codex/pi/grok）；`unknown`（opencode/kimi/qoder/codebuddy/hermes/antigravity/cursor）；`unsupported`（aider/cline/openclaw） | 未核验的 resume 命令一律不设默认值 |
+| resume | `derived`（claude-code/codex/pi/grok/antigravity/opencode/kimi-code/tencent-codebuddy）；`unknown`（qoder/hermes/cursor）；`unsupported`（aider/cline/openclaw） | 2026-08-25 wave 新增 4 家 evidence-backed 命令：`agy --conversation <id>`、`opencode <directory> --session <id>`、`kimi --session <id>`、`codebuddy --resume <id>`（证据逐行见 capability.rs 注释与 `PROVIDER-BETA-READINESS.md`）；hermes/qoder/cursor 因参考项目证据冲突或无证据保持 `unknown`；未核验的 resume 命令一律不设默认值 |
 | context | `native`（claude-code）；`unsupported`（其余 13 个已实现 provider） | 上下文图靠 `message_edges` 的父指针拼装（`mainline` 逐边上溯），而边只能来自 adapter 发出的 `parent_native_id`——没有父指针就没有边，`context` 只能如实记 unsupported。仅 claude-code 的 JSONL 带 `parentUuid`；codex rollout 是线性序列、adapter 硬编码 `parent_native_id: None`（模块文档：不编造上层可推断的线性链），此前误记 `native` 已由 `capability_context_claim_matches_pinned_golden_parent_links` 抓出并更正 |
 | handoff | `derived`（全部 14 个已实现 provider）；`unknown`（deepseek-harness/zcode，deferred） | handoff 不是 per-provider 特性：`generate_deterministic` 只消费 `SearchHit` + 权威 source placement，`provenance` 与 `matched_sessions[].provider_id` 一律 `None`（搜索型 pack 无单一提供商，不臆造），全流程不读 provider 身份、无 per-provider 分支。故"能否装出带原文证据的 pack"只取决于消息是否落库并带 source placement——`parse` 可用即成立。此前全列 `unsupported` 是少报：`asg handoff` 是已发布命令，对 codex（JSONL）、aider（markdown 且 native_id 恒空）、opencode（SQLite）三种结构迥异的真实 golden 源实测均产出 `confidence: high` 的带证据 pack。由 `handoff_pack_generation_is_provider_independent` 守护（逐 provider 身份走生成器，装配结果必须逐字段一致） |
 | incremental | `derived`（全部 14 个已实现 provider）；`unknown`（deferred 2 个） | 与 handoff 同理，incremental 也不是 per-provider 特性：判定链全在 composition root + store 层——`sync` 先读 `source_scans` 的 `(len_bytes, fingerprint)` 缓存与当次快照的 BLAKE3 指纹比对，相同则**跳过 parse**（`unchanged` 上报已存消息数），再由 `commit_source_batches_if_changed` 做内容级 no-op 判定、不推进 `generation`。这条链上没有任何 per-provider 分支，adapter 也不参与。故一律 `derived`（由源字节确定性派生，而非 provider 原生提供）。此前 claude-code/codex 记 `native`、其余 12 个记 `unsupported` 都不准：前者把 store 层能力误记为 provider 原生，后者是少报——12 个 provider 的真实 golden 源实测 resync 均为 `committed=0` / `unchanged=N` / generation 不变。由 e2e `capability_incremental_claim_matches_real_resync_for_every_provider` 逐 provider 实测守护；claude-code/codex 另有 append/shrink/空源 tombstone 的专项 resync e2e，那是测试深度而非更高的能力档位 |
-| tool_activity | `partial`（claude-code/codex，schema v12 `tool_activities` 落库）；`unknown`（deepseek-harness/zcode，deferred）；`unsupported`（其余 12 个已实现 provider，含 aider） | CLI `--tool-kind`/`--tool-name`/`--main-only`/`--subagent-only`/`--include-sidechain`、MCP 同名参数与 TUI 分面键（`m` sidechain / `k` tool-kind）已落地；handoff pack 投影 `tool_activity` + 权威 `role`/`is_sidechain`，context 响应投影 `tool_activities` |
+| tool_activity | `partial`（claude-code/codex，schema v12 `tool_activities` 落库）；`unknown`（deepseek-harness/zcode，deferred）；`unsupported`（其余 12 个已实现 provider，含 aider） | CLI `--tool-kind`/`--tool-name`/`--main-only`/`--subagent-only`/`--include-sidechain`、MCP 同名参数与 TUI 分面键（`m` sidechain / `k` tool-kind）已落地；handoff pack 投影 `tool_activity` + 权威 `role`/`is_sidechain`，context 响应投影 `tool_activities`。2026-08-25 七家诚实盘点（grok-build/antigravity/kimi-code/qoder/pi/openclaw/tencent-codebuddy）：四家格式携带结构化工具记录但无 per-message native id 可锚定（grok-build/antigravity/kimi-code/qoder），三家无结构化记录（pi/openclaw/tencent-codebuddy）——全部如实保持 `unsupported`，理由逐行记录于 capability.rs 注释与 `PROVIDER-BETA-READINESS.md`，并由 golden 钉住测试与 provider_matrix 双向断言守护 |
 | source_span | `native`（claude/codex/grok/pi/kimi/openclaw/qoder/codebuddy/antigravity）；`derived`（aider）；`unsupported`（opencode/hermes/cursor/cline） | SQLite/单文档 JSON 类 provider 无文件内字节 span；cline 的数组下标 pseudo-span 已移除并如实降级为 unsupported。antigravity 虽无文件内 session id（身份在目录名），但 transcript 为行式 JSONL，逐消息 span 为真实字节区间并由 golden 测试 `golden_spans_slice_back_to_exact_source_lines` 逐字节校验 |
 
 ### 逐 provider 明细见 capability.rs（单源权威）
@@ -122,7 +127,11 @@ manifest 均已填真实限制，见各 `crates/agent-session-grep-provider-*/sr
 1. ~~golden 测试~~ —— 已入库：`tests/golden/` fixture（BLAKE3 锁定字节）+ 结构化
    期望输出比对，任何 canonical 输出漂移即失败（2026-07-26）。
 2. ~~property/fuzz 覆盖~~ —— 已入库：固定种子确定性 property 套件（畸形行、
-   Unicode 多字节 span、大字段、threading、codex 镜像去重），失败可由种子复现（2026-07-26）。
+   Unicode 多字节 span、大字段、threading、codex 镜像去重），失败可由种子复现
+   （2026-07-26 起，Claude/Codex 先行）；2026-08-25 扩展至**全部 14 个已实现
+   provider**（各自 `tests/properties.rs`），由
+   `beta_readiness_property_column_matches_properties_test_existence` 双向守护
+   ledger property 列与套件文件存在一致。
 3. ~~source span~~ —— 已入库：schema v6 + `MessageEvent.span` 契约，golden/e2e
    round-trip 锁定（2026-07-26，见 `docs/operations/migration-v5-to-v6.md`）。
 4. ~~真实历史数据回归（隔离沙箱、授权数据集、不外传）~~ —— **已闭合**：最新全量
