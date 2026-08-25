@@ -125,6 +125,7 @@ certified — currently 0 Beta. **Not release-ready per provider gate.**
 | 13 | pi and openclaw transcripts are the *same* v3 JSONL format with no in-content discriminator, so both adapters probe `Confirmed` on the same bytes and whole-registry selection always hit the ambiguity tie — every source under `~/.pi` or `~/.openclaw` was unindexable, including pi's own golden fixture | P1 | closed | 82f0f26 |
 | 14 | Row 13's fix only reached `sync --discover`, which carries a scanned provider identity. Explicit `sync <file>` and `ingest <file>` still probed the whole registry, so naming a pi or openclaw transcript by path — the natural first move for a new user, and the only way to index a source outside a canonical root — still failed with the same `ambiguous provider selection` error | P1 | closed | this task |
 | 15 | `qoder`'s probe counted any record whose top-level `type` is `session_meta` as its own header, but every Codex rollout record is a `{timestamp, type, payload}` envelope whose first line is exactly that. Codex degrades `Confirmed`→`High` on a tolerated broken line (its own golden fixture has one), so both adapters returned `High` and a real Codex rollout with any damaged line was rejected as ambiguous rather than indexed as Codex | P1 | closed | this task |
+| 16 | `codex` declared `context: Native` while its adapter hard-codes `parent_native_id: None` — Codex rollout is a linear sequence with no threading edges, so no `message_edges` row can ever exist for it and `context` had nothing to walk. The last unguarded capability column, found by the guard added for it | P1 | closed | this task |
 
 ---
 
@@ -323,6 +324,27 @@ the capability matrix, so a new provider cannot be added without being checked
 against the existing ones; whole-file SQLite sources are excluded by name, since
 their probes key on magic bytes and table structure rather than competing for
 the same JSONL records.
+
+Closed 2026-08-25 (§6 row 16, this task): `context` was the last capability
+column with no drift guard tying its claim to real adapter output, and adding
+one immediately found an over-claim. `capability_context_claim_matches_pinned_golden_parent_links`
+parses each implemented provider's pinned golden `expected.json` and requires
+that a `context: Native` claim be backed by at least one message carrying a
+`parent_native_id` — because a context graph is assembled by walking
+`message_edges`, and no code path synthesizes sequence-based edges. On its first
+run it failed on `codex`: the adapter hard-codes `parent_native_id: None`
+(`crates/agent-session-grep-provider-codex/src/lib.rs:708`, asserted at
+`lib.rs:1018`), and its module doc already said why — a Codex rollout is a linear
+sequence that publishes no explicit threading edge, so inventing one would be
+dishonest. The golden confirms it: codex's three messages all carry an empty
+parent, while claude-code's carries a real parent on four of five. So the claim
+was wrong, not the test, and codex's `context` is now `Unsupported` in
+`capability.rs`, in the Beta-readiness ledger, and in the maturity matrix. The
+same read surfaced the mirror-image under-claim in the matrix prose, which
+described `context` as "unsupported 或 unknown" across the board while
+claude-code genuinely supports it; that line now states the per-provider truth.
+Mutation-verified in both directions: restoring `Native` for codex re-fails the
+guard, and deleting claude-code's parent links fails it too.
 
 Closed by the 2026-08-17 release-gap wave (post-draft audit fixes, pushed to
 `main` at `ed57a9a`): Robot v1.1 `searchData.facets` schema echo + protocol
