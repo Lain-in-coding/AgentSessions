@@ -120,6 +120,12 @@ domain ← ports ← application ← adapters
 - **Stable Identity**: BLAKE3-based content-addressed IDs that survive file
   moves, renames, and incremental appends
 - **Evidence-first**: every search hit carries a source span for verification
+- **Recency-aware lexical ranking**: lexical search hits are scored as
+  `bm25 × recency decay − sidechain penalty` (30-day half-life, 0.3 decay
+  floor, fixed sidechain penalty), so newer and mainline messages surface
+  first without burying old or strongly relevant hits. Semantic hits and
+  hybrid RRF fusion are not re-ranked. All tuning constants live in one
+  module and are pinned by tests.
 - **Privacy**: zero telemetry, zero upload, offline by default; the global
   `--offline` flag refuses any network-requiring capability (fail-closed),
   and the default build has no HTTP client dependency (verified by a static

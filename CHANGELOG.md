@@ -152,6 +152,17 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `Unsupported` in the capability matrix, with the reason recorded in the
   Beta readiness ledger and pinned by new golden-corpus drift tests in each
   provider crate.
+- Rank signals for lexical search hits: displayed score is now
+  `max(0, bm25 × recency_decay) − sidechain_penalty` with a 30-day
+  exponential half-life (future timestamps clamp to full score) and a 0.3
+  decay floor so old messages are never fully suppressed; sidechain hits pay
+  a fixed 1.0 score penalty (same relevance ranks them after mainline hits).
+  Constants live in one module (`application::ranking`) and every parameter
+  is pinned by unit tests; ranking is recomputed from the injected
+  application clock, so results stay deterministic per clock (tests inject a
+  fixed clock; production tracks wall time as before). Applies to pure
+  lexical retrieval (including lexical fallback) only — semantic hits and
+  hybrid RRF fusion are unchanged.
 
 ### Fixed
 
