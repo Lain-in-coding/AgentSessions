@@ -36,6 +36,33 @@
   构建不启用该 feature，不得把 bigram-hash 宣传为真实语义模型。
 - GitHub hosted CI 当前因 account billing/spending-limit 在首步前失败；这属于 External，不得改代码伪造跨平台认证。仓库仍保持 PRIVATE，公开/tag/release/签名与 owner governance 由后续 owner 决定。
 
+## 0.2 2026-08-25 阶段快照
+
+2026-08-25 工程波次（property 全 14 家 / resume matrix 4 家新增 /
+tool_activity 7 家诚实盘点 / 3 个 Medium 修复）已落地并推送到 `main`。0.1
+快照保留为历史；本段记录最新现状：
+
+- **三个代码审查 Medium 已闭合**：Robot/JSON 错误信封复用共享脱敏引擎且
+  `ProviderError::Io` 按 R4.3 规则掩蔽源路径；入口一致性 e2e 在无 Python
+  解释器时跳过而非 panic；CI 增加常驻 `--features semantic-candle` 测试步，
+  candle 模块每次运行都被编译与测试。
+- **property 测试全 14 家**：seeded 随机化套件（`tests/properties.rs`）此前仅
+  Claude/Codex，现覆盖全部 14 个已实现 provider；Beta readiness ledger 新增
+  `property` 列并与各套件文件存在双向守护。
+- **resume 矩阵 4 家新增**（均来自上游已核验证据）：antigravity
+  `agy --conversation <id>`、opencode `opencode <directory> --session <id>`、
+  kimi-code `kimi --session <id>`、tencent-codebuddy
+  `codebuddy --resume <id>` → 升为 `derived`；hermes/qoder/cursor 因参考项目
+  证据冲突或无证据保持 `unknown`。
+- **tool_activity 7 家诚实盘点**：四家格式携带结构化工具记录但无 per-message
+  native id 可锚定、三家无结构化记录——全部如实保持 `unsupported`，理由逐行
+  记录并由 golden 语料漂移测试钉住。
+- **阶段 2 目标未达成（如实标注）**：Claude/Codex 仍 `experimental`、未
+  certified（全矩阵 0 Beta）；DeepSeek Harness/ZCode 仍 deferred 无证据。
+  外部 blocker 不变：GitHub Actions billing 使跨 target CI 无 named
+  successful run；仓库保持 PRIVATE；公开/tag/release/签名与 owner 治理由
+  owner 后续决定。
+
 
 **产品名 `agent-session-grep`,CLI 别名 `asg`。**
 
@@ -68,8 +95,8 @@
 
 ## 3. 阶段与任务树
 
-**Phase 0(进行中,照常收尾)**:08-13 四功能整合 + 08-14 Resume Metadata
-流——是本规划的既有地基,产出被后续任务吸收。
+**Phase 0(已收尾)**:08-13 四功能整合 + 08-14 Resume Metadata
+流——是本规划的既有地基,产出已被后续任务吸收。
 
 **Phase 1–10(08-15 任务树,父任务
 `08-15-open-source-product-roadmap` 只做集成验收)**:
@@ -86,6 +113,11 @@
 | 8 | 08-15-offline-privacy-hooks | ADR-0009 脱敏边界、零遥测可验证、Hook 默认关闭 | P0 |
 | 9 | 08-15-benchmark-install-open-source-gate | 公开 benchmark、三平台安装器、开源交付物、竞品对比表 | P0 |
 | 10 | 08-15-final-integration-release-rehearsal | 三平台全新环境演练、五入口一致性、Go/No-Go 报告 | P0 |
+
+阶段状态备注(2026-08-25,详见 0.2 快照):阶段 2 的「Claude/Codex 晋 certified」
+**未发生**(两 provider 仍 Experimental、全矩阵 0 Beta),DeepSeek Harness/ZCode
+证据未补齐(仍 deferred);阶段 5 的 resume 命令矩阵推进至 8 derived / 3 unknown
+/ 3 unsupported。其余阶段状态见 0.1 与 0.2 快照。
 
 依赖关系:1 先行;2/3/4 依赖 1 的契约;5 依赖 08-14 树收尾;7 依赖
 1+3+4 的能力面;9 依赖 2–8 主体;10 终局。并行原则:同一时间最多
