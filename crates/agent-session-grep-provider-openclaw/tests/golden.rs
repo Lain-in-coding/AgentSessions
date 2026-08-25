@@ -130,6 +130,47 @@ fn golden_spans_slice_back_to_exact_source_lines() {
     }
 }
 
+#[test]
+fn golden_corpus_carries_no_tool_structure() {
+    // 钉住"格式无结构化工具调用记录"这一事实（capability.rs 的
+    // tool_activity=Unsupported 依据）：语料中每条 message 记录的 content 块
+    // 只允许 {type:"text"} 形状，且 adapter 零 activity 输出。若未来格式知识
+    // 变化（fixture 引入 tool_use/tool_result 块或工具类记录类型）而 capability
+    // 声明未同步升级，此测试立即失败，防止 silent drift 式少报。
+    let expected = golden::read_expected(EXPECTED_PATH);
+    let bytes = golden::read_fixture_verified(FIXTURE_PATH, &expected);
+    let (report, sink) = parse_fixture(&bytes);
+    assert!(report.committed > 0, "fixture must exercise message output");
+    assert!(
+        sink.activities.is_empty(),
+        "golden 语料不含可提取工具活动，adapter 不得发 activity"
+    );
+    let text = std::str::from_utf8(&bytes).expect("fixture is UTF-8");
+    for line in text.lines() {
+        let Ok(record) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let Some(content) = record
+            .get("message")
+            .and_then(|m| m.get("content"))
+            .filter(|c| c.is_array())
+        else {
+            continue;
+        };
+        for block in content.as_array().expect("array checked above") {
+            assert_eq!(
+                block
+                    .get("type")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or(""),
+                "text",
+                "golden 语料出现非 text 的 content 块（{block}）：若这是新格式知识，\
+                 capability.rs 的 tool_activity 声明与 adapter 提取必须同步升级"
+            );
+        }
+    }
+}
+
 /// 手动再生辅助：
 /// ```text
 /// cargo test -p agent-session-grep-provider-openclaw --test golden -- --ignored --nocapture

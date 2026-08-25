@@ -140,6 +140,18 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   CLI claims across reference projects), `qoder` (no resume evidence), and
   `cursor` (CLI `agent --resume` belongs to a different store.db surface)
   stay Unknown rather than fabricate commands.
+- Honest `tool_activity` accounting for the seven providers whose formats
+  were reviewed for structured tool-call records: `grok-build` (ACP
+  `_meta.bashCommand` meta chunks), `antigravity` (`tool_calls`),
+  `qoder` (`tool_use`/`tool_result` record types), and `kimi-code` (loop
+  `step`/`tool` events) do carry structured tool records, but none of the
+  seven formats carries a durable per-message native id — messages report
+  empty native ids, so activities cannot anchor (staging fail-closed drop,
+  R5.3); `pi`, `openclaw`, and `tencent-codebuddy` documented format
+  knowledge carries no structured tool-call records. All seven stay
+  `Unsupported` in the capability matrix, with the reason recorded in the
+  Beta readiness ledger and pinned by new golden-corpus drift tests in each
+  provider crate.
 
 ### Fixed
 

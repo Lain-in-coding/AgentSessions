@@ -233,6 +233,11 @@ impl ProviderCapabilityMatrix {
                     // 与矩阵一致标记 Derived（audit P1-2 drift 测试守护）。
                     resume: CapabilityLevel::Derived,
                     handoff: CapabilityLevel::Derived,
+                    // ACP 流确有结构化工具记录（user_message_chunk 的
+                    // `content._meta.bashCommand`，adapter 作为非对话元 chunk 跳过），
+                    // 但格式无 per-message native id（promptId/promptIndex 是
+                    // prompt 级分组键）——消息以空 native id 上报，活动无法锚定
+                    // （staging fail-closed 丢弃）。如实保持 Unsupported。
                     tool_activity: CapabilityLevel::Unsupported,
                     source_span: CapabilityLevel::Native,
                     incremental: CapabilityLevel::Derived,
@@ -250,6 +255,10 @@ impl ProviderCapabilityMatrix {
                     context: CapabilityLevel::Unsupported,
                     resume: CapabilityLevel::Derived,
                     handoff: CapabilityLevel::Derived,
+                    // 文档化的格式知识（session/message 记录，content 为字符串或
+                    // {type:"text"} 块）不含任何结构化工具调用记录，且消息以空
+                    // native id 上报——既无事实可提取也无法锚定。如实保持
+                    // Unsupported（钉住测试见 crate golden.rs）。
                     tool_activity: CapabilityLevel::Unsupported,
                     source_span: CapabilityLevel::Native,
                     incremental: CapabilityLevel::Derived,
@@ -271,6 +280,10 @@ impl ProviderCapabilityMatrix {
                     // `state.json`，与本 provider 的 wire.jsonl 面同一 CLI）。
                     resume: CapabilityLevel::Derived,
                     handoff: CapabilityLevel::Derived,
+                    // wire.jsonl 的 `context.append_loop_event` 确承载 step/tool
+                    // 事件（含 tool.call/tool.result），但本切片不解析 loop 事件，
+                    // 且 append_message 记录无 per-message native id——活动无法
+                    // 锚定（staging fail-closed 丢弃）。如实保持 Unsupported。
                     tool_activity: CapabilityLevel::Unsupported,
                     source_span: CapabilityLevel::Native,
                     incremental: CapabilityLevel::Derived,
@@ -293,6 +306,10 @@ impl ProviderCapabilityMatrix {
                     // `resumeTarget: null`。无权威命令就不编造。
                     resume: CapabilityLevel::Unknown,
                     handoff: CapabilityLevel::Derived,
+                    // transcript 确有 `tool_use`/`tool_result` 记录类型（当前作为
+                    // 非对话记录跳过），但 user/assistant 记录无 per-message
+                    // native id——活动无法锚定（staging fail-closed 丢弃）。
+                    // 如实保持 Unsupported。
                     tool_activity: CapabilityLevel::Unsupported,
                     source_span: CapabilityLevel::Native,
                     incremental: CapabilityLevel::Derived,
@@ -310,6 +327,10 @@ impl ProviderCapabilityMatrix {
                     context: CapabilityLevel::Unsupported,
                     resume: CapabilityLevel::Unsupported,
                     handoff: CapabilityLevel::Derived,
+                    // 文档化的 v3 格式知识（session/message 记录，content 为字符串
+                    // 或 {type:"text"} 块）不含任何结构化工具调用记录，且消息以空
+                    // native id 上报——如实保持 Unsupported（钉住测试见 crate
+                    // golden.rs）。
                     tool_activity: CapabilityLevel::Unsupported,
                     source_span: CapabilityLevel::Native,
                     incremental: CapabilityLevel::Derived,
@@ -331,6 +352,10 @@ impl ProviderCapabilityMatrix {
                     // <id>`，并识别真实 `codebuddy --resume <id>` 进程行。
                     resume: CapabilityLevel::Derived,
                     handoff: CapabilityLevel::Derived,
+                    // 文档化的格式知识（type:"message" + 顶层 role/content，content
+                    // 为字符串或 {type:"text"} 数组）不含结构化工具调用记录形状，
+                    // 且消息以空 native id 上报——如实保持 Unsupported（钉住测试
+                    // 见 crate golden.rs）。
                     tool_activity: CapabilityLevel::Unsupported,
                     source_span: CapabilityLevel::Native,
                     incremental: CapabilityLevel::Derived,
@@ -422,6 +447,10 @@ impl ProviderCapabilityMatrix {
                     // `--conversation` 存在）双源一致。
                     resume: CapabilityLevel::Derived,
                     handoff: CapabilityLevel::Derived,
+                    // step 记录确带 `tool_calls` 字段（adapter 忽略），但
+                    // `step_index` 是文件内序号而非跨文档 durable id（synthetic
+                    // 值会碰撞），消息以空 native id 上报——活动无法锚定
+                    // （staging fail-closed 丢弃）。如实保持 Unsupported。
                     tool_activity: CapabilityLevel::Unsupported,
                     // 行式 JSONL：adapter 逐记录发 `span: Some((start, end))`，
                     // golden `golden_spans_slice_back_to_exact_source_lines`

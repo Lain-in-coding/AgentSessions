@@ -7,12 +7,12 @@
 > repository-local gaps from external/owner gates. Do not promote from this
 > file alone.
 
-Last updated: 2026-08-25 (resume matrix wave: the `resume` builder gained
-authoritative commands for `antigravity` (`agy --conversation <id>`),
-`opencode` (`opencode <directory> --session <id>`), `kimi-code`
-(`kimi --session <id>`), and `tencent-codebuddy` (`codebuddy --resume <id>`),
-so their resume column moves to `derived`; `hermes`/`qoder`/`cursor` stay
-`unknown` — conflicting or absent evidence, recorded per-row).
+Last updated: 2026-08-25 (resume matrix wave: `antigravity` / `opencode` /
+`kimi-code` / `tencent-codebuddy` resume column → `derived`, evidence per
+row; tool_activity honesty wave: seven formats reviewed — four carry
+structured tool records but no per-message native id to anchor, three carry
+none — all seven stay `Unsupported` with the reason recorded per row and
+pinned by golden-corpus drift tests).
 
 ## Global external blockers (apply to every promotion)
 
@@ -30,16 +30,16 @@ Legend for local columns: `ok` = present with tests; `partial` = present with kn
 |---|---|---|---|---|---|---|---|---|---|
 | claude-code | ok | ok | ok | native | ok (native) | partial | derived | derived | richer tool-call extraction; owner promotion still required |
 | codex | ok | ok | ok | native | ok (native) | partial | derived | derived | richer tool-call extraction; owner promotion still required |
-| grok-build | ok | ok | ok | native | ok (native) | missing | derived | derived | no tool_activity; synthetic msg ids |
-| antigravity | ok | ok | ok | native | ok (native) | missing | derived | derived | no in-file session id; no tool_activity |
+| grok-build | ok | ok | ok | native | ok (native) | missing | derived | derived | format carries structured tool records (`_meta.bashCommand` meta chunks) but no per-message native id — tool_activity cannot anchor, honestly Unsupported; synthetic msg ids |
+| antigravity | ok | ok | ok | native | ok (native) | missing | derived | derived | no in-file session id; format carries `tool_calls` on step records but `step_index` is not a durable cross-document id — tool_activity cannot anchor, honestly Unsupported |
 | opencode | ok | ok | ok | native | missing | missing | derived | derived | no span (SQLite source has no in-file byte offsets) |
-| pi | ok | ok | ok | native | ok (native) | missing | derived | derived | no tool_activity |
+| pi | ok | ok | ok | native | ok (native) | missing | derived | derived | format carries no structured tool-call records — tool_activity honestly Unsupported |
 | hermes | ok | ok | ok | native | missing | missing | unknown | derived | JSON doc; no span; SQLite `state.db` surface not parsed; resume evidence conflicting across reference projects (agf `hermes --resume <id>` vs hstry `hermes --session <id>` vs cc-switch/AgentRecall no CLI) — stays unknown |
 | cursor | ok | ok | ok | missing | missing | missing | unknown | derived | no discovery root: the adapter parses the VS Code `workspaceStorage/*/state.vscdb` ItemTable surface, whose per-workspace hash directories sit under a platform-specific application-data path, not a home-relative root this table can express; `~/.cursor/chats/<id>/store.db` is the separate Cursor CLI `meta`/`blobs` schema, which this adapter's probe rejects. No span; multi-gen format layering pending; Cursor CLI resume (`agent --resume`) is a different surface than this adapter — stays unknown |
-| kimi-code | ok | ok | ok | native | ok (native) | missing | derived | derived | loop events not parsed |
-| openclaw | ok | ok | ok | native | ok (native) | missing | unsupported | derived | resume intentionally unsupported |
-| qoder | ok | ok | ok | native | ok (native) | missing | unknown | derived | discovery covers the transcript-JSONL surface only (the Electron SQLite store is a separate, unimplemented surface); non-dialogue records skipped; no authoritative resume command in reference projects (AgentRecall: resume false) |
-| tencent-codebuddy | ok | ok | ok | native | ok (native) | missing | derived | derived | extension variant pending |
+| kimi-code | ok | ok | ok | native | ok (native) | missing | derived | derived | loop events (step/tool, incl. tool.call/tool.result) not parsed and no per-message native id — tool_activity cannot anchor, honestly Unsupported |
+| openclaw | ok | ok | ok | native | ok (native) | missing | unsupported | derived | resume intentionally unsupported; format carries no structured tool-call records — tool_activity honestly Unsupported |
+| qoder | ok | ok | ok | native | ok (native) | missing | unknown | derived | discovery covers the transcript-JSONL surface only (the Electron SQLite store is a separate, unimplemented surface); format carries `tool_use`/`tool_result` records but no per-message native id — tool_activity cannot anchor, honestly Unsupported; no authoritative resume command in reference projects (AgentRecall: resume false) |
+| tencent-codebuddy | ok | ok | ok | native | ok (native) | missing | derived | derived | extension variant pending; documented format knowledge carries no structured tool-call records — tool_activity honestly Unsupported |
 | cline | ok | ok | ok | native | missing | missing | unsupported | derived | no session id / span; discovery covers the `~/.cline/data/tasks` tree only (the VS Code extension `globalStorage` tree is not home-relative and is not registered) |
 | aider | ok | ok | ok | missing | derived | missing | unsupported | derived | approximate spans; no resume; no discovery root by construction — `.aider.chat.history.md` lives at the root of each user repository, so upstream agentsview discovers it by walking working trees rather than one canonical home directory; no tool_activity (blockquote tool output is folded into assistant text, no structured call/result records) |
 
