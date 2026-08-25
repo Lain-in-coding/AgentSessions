@@ -336,4 +336,38 @@ mod tests {
         let report = adapter.parse(fixture.as_bytes(), &mut sink).unwrap();
         assert_eq!(report.committed, 1);
     }
+
+    struct TextSink {
+        texts: Vec<String>,
+    }
+    impl CanonicalEventSink for TextSink {
+        fn emit_message(
+            &mut self,
+            event: MessageEvent<'_>,
+        ) -> agent_session_grep_ports::PortResult<()> {
+            self.texts.push(event.text.to_string());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn parse_passes_noise_shaped_user_text_through_verbatim() {
+        // 钉住测试：Cline 的 api_conversation_history.json 没有 system-reminder /
+        // AGENTS.md / 环境上下文等注入概念（系统层走 role:"system"，已被角色门
+        // 跳过）。形似噪声的 user 文本必须逐字透传，防止将来把别家格式的过滤
+        // 规则盲目搬来造成 silent drift。
+        let adapter = ClineAdapter::new();
+        let fixture = r##"[{"role":"user","content":"<system-reminder>reminder text</system-reminder>"},{"role":"user","content":"# AGENTS.md instructions"}]"##;
+        let mut sink = TextSink { texts: vec![] };
+        let report = adapter.parse(fixture.as_bytes(), &mut sink).unwrap();
+        assert_eq!(report.committed, 2);
+        assert_eq!(report.skipped, 0);
+        assert_eq!(
+            sink.texts,
+            vec![
+                "<system-reminder>reminder text</system-reminder>".to_string(),
+                "# AGENTS.md instructions".to_string(),
+            ]
+        );
+    }
 }
