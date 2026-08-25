@@ -48,6 +48,13 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
+      # The semantic-candle module is behind a cargo feature, so the default
+      # `cargo test --workspace` never compiles it. Run its suite explicitly
+      # to keep the feature inside the quality gate; the feature only builds
+      # the local candle runtime and downloads no model weights.
+      - name: Test semantic-candle feature
+        run: cargo test -p agent-session-grep-application --features semantic-candle
+
       - name: Robot contract tests
         run: cargo test -p agent-session-grep-cli --test e2e robot_ -- --nocapture
 
