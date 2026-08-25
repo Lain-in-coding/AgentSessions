@@ -50,14 +50,15 @@ most usefully `schema_incompatible` when the store is newer than the binary.
 There is no manual upgrade command. Opening an older store with a newer
 binary migrates it in a single transaction gated by `PRAGMA user_version`;
 on failure the transaction rolls back and the old binary can still read the
-store. `SCHEMA_VERSION` is currently 13, and v8 through v13 are the current
+store. `SCHEMA_VERSION` is currently 14, and v8 through v14 are the current
 additive steps (v8 resume-claims, v9 source-scan provider id, v10 semantic
 vector sidecar, v11 session-metadata search projection, v12 tool-activity
-projection, v13 session-title display projection). They run stepwise on
-first open; the v7 → v13 chain is specified
+projection, v13 session-title display projection, v14 source-scan parser
+version). They run stepwise on
+first open; the v7 → v14 chain is specified
 in this runbook's procedures below and in the store source
 (`crates/agent-session-grep-adapters-sqlite/src/lib.rs`, the
-`migrate_v7_to_v8` … `migrate_v12_to_v13` steps), not restated here. The
+`migrate_v7_to_v8` … `migrate_v13_to_v14` steps), not restated here. The
 v5 → v6 (`migration-v5-to-v6.md`) and v6 → v7 (`migration-v6-to-v7.md`) steps
 are historical by design; stores at v5 or v6 migrate stepwise to the current
 version on first open by the current binary.
@@ -80,6 +81,34 @@ Operational sequence:
 
 The reverse direction is refused: an older binary opening a newer store gets
 `schema_incompatible` (exit 9), not a silent downgrade.
+
+## Parser-semantic upgrades trigger targeted backfill, not rebuild
+
+`sync`'s "unchanged" judgment is not only `(len_bytes, fingerprint)`: it also
+compares the stored `source_scans.parser_version` against the binary's
+`PARSER_SEMANTIC_VERSION` constant (borrowed from Recall's parser-version
+incremental sync). When a release changes parsing semantics — anything that
+changes what a provider parse produces for the same bytes, such as noise
+filtering rules or a new transcript shape — the constant is bumped. Sources
+whose bytes are unchanged but whose stored parser version is behind are then
+re-parsed once on the next `sync` (targeted backfill: parse + commit, which
+writes the current version back into `source_scans`), instead of keeping
+stale parsed content until a manual `index rebuild` or until the source file
+happens to change. No full rebuild is required.
+
+Operational facts:
+
+- The schema v14 migration adds `parser_version INTEGER NOT NULL DEFAULT 0`
+  to `source_scans`. Existing rows default to `0`, which never equals the
+  current constant (≥ 1), so the first `sync` after the upgrade automatically
+  backfills every previously scanned source.
+- Each backfilled source commits once and advances the generation (cursors
+  are invalidated as for any commit); afterwards the source is current again
+  and subsequent syncs are no-ops.
+- A sync that re-parses sources for this reason reports it through the
+  warnings channel with a `parser semantics upgraded (stored parser_version
+  …, current …)` diagnostic per source. Truncated-tail sources are still
+  retained (not re-parsed) until the file is complete.
 
 ## Procedure 2: Full FTS rebuild
 
