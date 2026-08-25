@@ -37,7 +37,7 @@ Legend for local columns: `ok` = present with tests; `partial` = present with kn
 | kimi-code | ok | ok | ok | native | ok (native) | missing | unknown | derived | loop events not parsed |
 | openclaw | ok | ok | ok | native | ok (native) | missing | unsupported | derived | resume intentionally unsupported; format carries no structured tool-call records — tool_activity honestly Unsupported |
 | qoder | ok | ok | ok | native | ok (native) | missing | unknown | derived | discovery covers the transcript-JSONL surface only (the Electron SQLite store is a separate, unimplemented surface); format carries `tool_use`/`tool_result` records but no per-message native id — tool_activity cannot anchor, honestly Unsupported |
-| tencent-codebuddy | ok | ok | ok | native | ok (native) | missing | unknown | derived | extension variant pending |
+| tencent-codebuddy | ok | ok | ok | native | ok (native) | missing | unknown | derived | extension variant pending; documented format knowledge carries no structured tool-call records — tool_activity honestly Unsupported |
 | cline | ok | ok | ok | native | missing | missing | unsupported | derived | no session id / span; discovery covers the `~/.cline/data/tasks` tree only (the VS Code extension `globalStorage` tree is not home-relative and is not registered) |
 | aider | ok | ok | ok | missing | derived | missing | unsupported | derived | approximate spans; no resume; no discovery root by construction — `.aider.chat.history.md` lives at the root of each user repository, so upstream agentsview discovers it by walking working trees rather than one canonical home directory; no tool_activity (blockquote tool output is folded into assistant text, no structured call/result records) |
 

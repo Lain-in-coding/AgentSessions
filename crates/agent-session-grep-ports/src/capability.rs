@@ -334,6 +334,10 @@ impl ProviderCapabilityMatrix {
                     context: CapabilityLevel::Unsupported,
                     resume: CapabilityLevel::Unknown,
                     handoff: CapabilityLevel::Derived,
+                    // 文档化的格式知识（type:"message" + 顶层 role/content，content
+                    // 为字符串或 {type:"text"} 数组）不含结构化工具调用记录形状，
+                    // 且消息以空 native id 上报——如实保持 Unsupported（钉住测试
+                    // 见 crate golden.rs）。
                     tool_activity: CapabilityLevel::Unsupported,
                     source_span: CapabilityLevel::Native,
                     incremental: CapabilityLevel::Derived,
