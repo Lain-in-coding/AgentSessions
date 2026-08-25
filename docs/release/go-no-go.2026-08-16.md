@@ -136,6 +136,7 @@ certified — currently 0 Beta. **Not release-ready per provider gate.**
 | 17 | `handoff` was declared `Unsupported` for all 14 implemented providers and `incremental` was declared `Native` for two and `Unsupported` for the other twelve — but neither is a per-provider capability. `handoff_pack::generate_deterministic` reads no provider identity, and incremental judgement lives entirely in the composition root plus the store's fingerprint cache. Both columns had only a doc↔`capability.rs` consistency guard, never a claim-vs-behavior one, so twelve providers under-claimed a shipped command (`asg handoff`) and a shipped behavior (no-op resync) while two mislabeled a store-layer capability as provider-native | P1 | closed | this task |
 | 18 | Three release-facing documents cited implementation evidence that nothing verified, so each could silently decay into a false claim: the MCP CONTRACT §8 tool list was pinned only against a hand-copied array in the test (editing the doc failed nothing, editing the catalog forced no doc update); ADR-0010 §1's evidence table still described golden fixtures as a Claude/Codex-only path and `AdapterManifest` as unimplemented, though all 14 providers carry goldens at `fixture_revision=1` and `manifest_for` has shipped; and this ledger's provider row still called `known_limitations` incomplete. All three now read their cited source through `include_str!` and fail on drift in either direction | P1 | closed | this task |
 | 19 | The `tool_activity` guard was one-directional: it rejected a provider claiming support with no anchorable messages, but never rejected one that really emits activities while declaring `Unsupported`. Every other capability column already had both directions, so adding `emit_activity` to any of the twelve `Unsupported` adapters would have gone unnoticed — the exact asymmetry that let rows 16 and 17 through | P1 | closed | this task |
+| 20 | `SECURITY.md` promised redaction of five secret shapes (AWS keys, GitHub PATs, OpenAI/Anthropic/xAI keys, Bearer tokens, PEM private keys) while the shared detector implements eleven, and pointed at the CLI applier as if it were the ruleset. An under-claimed security boundary is still a false boundary statement, and it is the first one an external researcher reads. The policy now names all eleven kinds, cites the ruleset version and the real detector path, and `security_policy_lists_every_real_redaction_kind` parses the kinds out of `redact.rs`'s production region so a new pattern cannot ship without the promise following it | P1 | closed | this task |
 
 ---
 
@@ -484,6 +485,43 @@ CONTRACT, ADR-0010, and `capability.rs` itself as the authority they answer to.
 Local gate green throughout, ending at 1511 tests, with
 `cargo fmt --all --check` and
 `cargo clippy --workspace --all-targets -D warnings` both clean.
+
+Closed 2026-08-25 (§6 rows 19–20, `main` at `f1214cd` and `8cfd95e`): auditing
+the guards themselves rather than the claims turned up one that was only half a
+guard. Every capability column was checked in both directions except
+`tool_activity`, which rejected a provider claiming support it could not anchor
+but would have said nothing about a provider that really emits activities while
+declaring `Unsupported` — the same one-way asymmetry that produced rows 16 and
+17. `capability_tool_activity_unsupported_claim_is_not_an_under_claim` now parses
+each `Unsupported` provider's own golden through a `CapturingSink` and requires
+zero anchorable activities; mutating claude-code, a real emitter, to
+`Unsupported` fails it. The current claims were already honest — only claude-code
+and codex call `emit_activity`, and only they declare `Partial` — so this closes
+a latent gap rather than a live defect. `resume`, checked in the same pass, was
+already bidirectional: it asserts `(resume == Derived) == builder_supports`, an
+iff that fails either way.
+
+The same audit found the sweep's one genuinely outward-facing under-claim.
+SECURITY.md's boundary table named five secret families (AWS keys, GitHub PATs,
+OpenAI/Anthropic/xAI keys, Bearer tokens, PEM private keys) while the shared
+detector in `crates/agent-session-grep-ports/src/redact.rs` implements eleven,
+having gained GitLab PATs, Slack tokens, Google API keys, Stripe keys, bare JWTs,
+and a separate AWS secret-key shape since the policy was written. Under-claiming
+a security control is not the safe direction it looks like: a researcher reading
+that table decides what to treat as protected, and the file reference pointed at
+the CLI applier rather than the detector, so following it would not have shown
+the real rules either. The table now names all eleven kinds and cites both files
+plus ruleset `v1.1`, and `security_policy_lists_every_real_redaction_kind`
+parses the `[redacted:<kind>]` markers out of the detector's production region —
+not a hand-copied list — requiring every kind to appear in the policy, no
+fabricated kind to appear, and the cited ruleset version to match the constant.
+Adding a pattern without updating the policy now fails the build. One rebuild
+hazard is worth recording: cargo does not treat `include_str!` targets as
+dependencies, so editing a guarded document without touching the including source
+can leave a stale snapshot compiled into the test binary — the guard reported a
+missing `v1.1` that was present on disk until the source was touched. Any future
+document guard should be re-run after a `touch` of its host file before its
+result is believed. Local gate green at 1512 tests.
 
 Closed by the 2026-08-17 release-gap wave (post-draft audit fixes, pushed to
 `main` at `ed57a9a`): Robot v1.1 `searchData.facets` schema echo + protocol
