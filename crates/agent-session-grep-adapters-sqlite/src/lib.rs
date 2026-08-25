@@ -20,7 +20,7 @@ pub use source_fs::{
     FileSource, SnapshotFs, capture, open_snapshot_source, read_verified, verify_snapshot,
 };
 
-use agent_session_grep_application::{fts_tokens_cjk, parse_search_instant};
+use agent_session_grep_application::{bounded_index_text, fts_tokens_cjk, parse_search_instant};
 use agent_session_grep_domain::{
     EvidenceSpan, IdKind, Message, MessageEdge, MessagePlacement, MessageRelation, PlacementId,
     Role, SessionContextGraph, SourceDocument, StableId, ToolActivity,
@@ -152,6 +152,11 @@ const INDEX_PROJECTION_VERSION: &[u8] = b"sqlite-fts5-v1";
 /// 无前缀纯文本）。因此仅凭 catalog 即可无损重建 FTS 投影，无需依赖可能已损坏/丢失的
 /// 旧 FTS 内容。
 ///
+/// 投影统一施加 [`bounded_index_text`] 截断（借鉴清单 #3：ctx 文本保留策略，
+/// [`agent_session_grep_application::MESSAGE_FTS_MAX_CHARS`]）：catalog payload 保留
+/// provider 原文全文，FTS 投影有界——rebuild/merge/put 与直接写入路径必须产出
+/// 同一有界文本，否则 current 判定两侧分叉、重同步幂等失效。
+///
 /// 已知限制：切片期 `index` 命令若写入本身含制表符的正文，历史格式投影会截断到首个
 /// 制表符之后——该命令仅供切片期测试，真实数据均经 ingest/sync 以 JSON payload 写入。
 fn searchable_text(payload: &[u8]) -> String {
@@ -159,7 +164,7 @@ fn searchable_text(payload: &[u8]) -> String {
     // let structural tokens (`user`, `null`, `sessions`) match every message.
     if let Ok(value) = serde_json::from_slice::<serde_json::Value>(payload) {
         if let Some(text) = value.get("text").and_then(serde_json::Value::as_str) {
-            return text.to_string();
+            return bounded_index_text(text);
         }
         // JSON that lacks a string `text` field must not fall back to
         // indexing the raw JSON (structural-token pollution). It carries no
@@ -168,8 +173,8 @@ fn searchable_text(payload: &[u8]) -> String {
     }
     let text = String::from_utf8_lossy(payload);
     match text.split_once('\t') {
-        Some((_role, body)) => body.to_string(),
-        None => text.into_owned(),
+        Some((_role, body)) => bounded_index_text(body),
+        None => bounded_index_text(&text),
     }
 }
 
@@ -5428,7 +5433,13 @@ impl SqliteStore {
                 let id_json = serde_json::to_string(id).map_err(backend)?;
                 if id.kind() == IdKind::Message {
                     let fts_rowid = allocate_rowid()?;
-                    fts_rows.push((fts_rowid, id_json.clone(), fts_tokens_cjk(text)));
+                    // 索引侧强制有界（借鉴清单 #3）：入口已截断的 text 原样通过，
+                    // 未截断的直接写入路径（MCP/单条 index）在此兜底。
+                    fts_rows.push((
+                        fts_rowid,
+                        id_json.clone(),
+                        fts_tokens_cjk(&bounded_index_text(text)),
+                    ));
                     fts_ids_rows.push((id.as_str().to_string(), id_json, Some(fts_rowid)));
                 } else {
                     fts_ids_rows.push((id.as_str().to_string(), id_json, None));
@@ -5497,10 +5508,11 @@ impl SqliteStore {
             .map_err(backend)?;
         let fts_rowid = if id.kind() == IdKind::Message {
             // 索引侧 CJK n-gram（ADR-0007，单字 + bigram）：`SearchIndex::index`
-            // 与 `CatalogStore::put` 两条单条写入路径与批量提交共用同一 transform。
+            // 与 `CatalogStore::put` 两条单条写入路径与批量提交共用同一 transform；
+            // 先施加有界截断（借鉴清单 #3，与 searchable_text/批量路径同上限）。
             tx.execute(
                 "INSERT INTO fts(id, text) VALUES(?1, ?2)",
-                rusqlite::params![id_json, fts_tokens_cjk(text)],
+                rusqlite::params![id_json, fts_tokens_cjk(&bounded_index_text(text))],
             )
             .map_err(backend)?;
             Some(tx.last_insert_rowid())
@@ -8532,6 +8544,72 @@ mod tests {
         store.index(&mixed, "使用配置v2.0备份").unwrap();
         assert_eq!(store.query("配置v2.0", 10).unwrap().len(), 1);
         assert_eq!(store.query("v2.0", 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn message_fts_body_is_capped_at_char_boundary_on_index() {
+        // 借鉴清单 #3：单条消息正文超过 MESSAGE_FTS_MAX_CHARS 时，FTS 只索引前
+        // MESSAGE_FTS_MAX_CHARS 字符——上限之后的词不可检索，上限内的词仍可检索。
+        let store = SqliteStore::open_in_memory().unwrap();
+        let id = sid(IdKind::Message, b"index-long-body");
+        let full = format!(
+            "head-needle {}\n tail-needle",
+            "f".repeat(agent_session_grep_application::MESSAGE_FTS_MAX_CHARS)
+        );
+        store.index(&id, &full).unwrap();
+        assert_eq!(store.query("head-needle", 10).unwrap().len(), 1);
+        assert!(
+            store.query("tail-needle", 10).unwrap().is_empty(),
+            "beyond-cap text must not be indexed"
+        );
+    }
+
+    #[test]
+    fn catalog_put_and_rebuild_project_capped_fts_body() {
+        // put 与 rebuild 都按 searchable_text(payload) 重投影：catalog 保留全文
+        // （THREAT-MODEL：Catalog 不在索引期改写原文），FTS 投影有界。
+        let store = SqliteStore::open_in_memory().unwrap();
+        let id = sid(IdKind::Message, b"put-long-body");
+        let full = format!(
+            "early-needle {}\n late-needle",
+            "f".repeat(agent_session_grep_application::MESSAGE_FTS_MAX_CHARS)
+        );
+        let payload = serde_json::json!({ "role": "user", "text": full })
+            .to_string()
+            .into_bytes();
+        store.put(&id, &payload).unwrap();
+        assert_eq!(
+            store.get(&id).unwrap().unwrap(),
+            payload,
+            "catalog 保留原文全文"
+        );
+        assert_eq!(store.query("early-needle", 10).unwrap().len(), 1);
+        assert!(store.query("late-needle", 10).unwrap().is_empty());
+
+        store.rebuild_index().unwrap();
+        assert_eq!(store.query("early-needle", 10).unwrap().len(), 1);
+        assert!(store.query("late-needle", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn batch_commit_with_bounded_entry_text_stays_current() {
+        // 生产 CLI 构造三元组时已把 text 截断到 MESSAGE_FTS_MAX_CHARS（与索引侧
+        // 同一常量）：同样的有界 batch 重提交必须判 current，重同步幂等不被截断破坏。
+        let store = SqliteStore::open_in_memory().unwrap();
+        let id = sid(IdKind::Message, b"bounded-current");
+        let full = format!(
+            "stable-head {}",
+            "f".repeat(agent_session_grep_application::MESSAGE_FTS_MAX_CHARS)
+        );
+        let payload = serde_json::json!({ "role": "user", "text": full })
+            .to_string()
+            .into_bytes();
+        let text = agent_session_grep_application::bounded_index_text(&full);
+        let entries = [(id.clone(), payload, text)];
+        assert!(store.commit_batch_if_changed(&entries).unwrap());
+        let generation = store.active_generation().unwrap();
+        assert!(!store.commit_batch_if_changed(&entries).unwrap());
+        assert_eq!(store.active_generation().unwrap(), generation);
     }
 
     #[test]
