@@ -4,7 +4,8 @@
 //! 本 crate 是 hexagonal 架构里的 driven adapter——只依赖 domain + ports 的抽象，
 //! 把端口契约翻译成具体的 SQLite/FTS5 SQL，绝不反向依赖 application。
 //!
-//! 唯一例外：CJK bigram transform（ADR-0007）与 RFC3339/ISO-8601 时间戳解析按约定
+//! 唯一例外：CJK n-gram transform（ADR-0007，单字 + bigram）与 RFC3339/ISO-8601
+//! 时间戳解析按约定
 //! 放在 application crate（`cjk` 模块 / `parse_search_instant`），由本 crate 在 FTS
 //! 写入/查询两侧与时间过滤谓词的标量函数中调用（索引与查询必须共享同一 transform、
 //! 过滤谓词与请求边界必须共享同一解析才能一致），纯函数无 use-case 语义。
@@ -19,7 +20,7 @@ pub use source_fs::{
     FileSource, SnapshotFs, capture, open_snapshot_source, read_verified, verify_snapshot,
 };
 
-use agent_session_grep_application::{bigram_cjk, parse_search_instant};
+use agent_session_grep_application::{fts_tokens_cjk, parse_search_instant};
 use agent_session_grep_domain::{
     EvidenceSpan, IdKind, Message, MessageEdge, MessagePlacement, MessageRelation, PlacementId,
     Role, SessionContextGraph, SourceDocument, StableId, ToolActivity,
@@ -2485,10 +2486,10 @@ impl SqliteStore {
                 )
                 .optional()
                 .map_err(backend)?;
-            // fts 存的是 bigram 变换后的正文（见 fts 写入侧），current 判定
-            // 必须对同一 text 施加同一 transform 再比较，否则已同步的源每次
-            // 重同步都被误判为 not-current、反复推进 generation。
-            let expected = bigram_cjk(text);
+            // fts 存的是 CJK n-gram（单字 + bigram）变换后的正文（见 fts 写入侧），
+            // current 判定必须对同一 text 施加同一 transform 再比较，否则已同步
+            // 的源每次重同步都被误判为 not-current、反复推进 generation。
+            let expected = fts_tokens_cjk(text);
             if indexed_text.as_deref() != Some(expected.as_str()) {
                 return Ok(false);
             }
@@ -3151,8 +3152,8 @@ impl SqliteStore {
                 }
             }
             for (id, _payload, text) in &source.entries {
-                // 与写入侧同一 transform：fts 正文存的是 bigram(text)。
-                let expected = bigram_cjk(text);
+                // 与写入侧同一 transform：fts 正文存的是 fts_tokens_cjk(text)。
+                let expected = fts_tokens_cjk(text);
                 if fts_text.get(id.as_str()).map(String::as_str) != Some(expected.as_str()) {
                     return Ok(false);
                 }
@@ -4472,7 +4473,7 @@ impl SqliteStore {
         if let Some(text) = Self::session_search_text(tx, session_wire)? {
             tx.execute(
                 "INSERT INTO session_fts(session_wire, text) VALUES(?1, ?2)",
-                rusqlite::params![session_wire, bigram_cjk(&text)],
+                rusqlite::params![session_wire, fts_tokens_cjk(&text)],
             )
             .map_err(backend)?;
             tx.execute(
@@ -5184,7 +5185,7 @@ impl SqliteStore {
     /// `RETURNING rowid` 在 fts5 上不可用（实测返回 -1）。分配从当前
     /// `MAX(rowid)+1` 起顺序递增；本批次每个 wire_id 至多出现一次且旧行
     /// 已先删除，故不会与存量行或同批其他行冲突。索引侧正文与查询侧配对
-    /// 同一 CJK bigram transform（ADR-0007）。
+    /// 同一 CJK n-gram transform（ADR-0007，单字 + bigram）。
     fn batch_upsert_fts_in_tx(
         tx: &rusqlite::Transaction<'_>,
         upserts: &[(StableId, Vec<u8>, String)],
@@ -5240,7 +5241,7 @@ impl SqliteStore {
                 let id_json = serde_json::to_string(id).map_err(backend)?;
                 if id.kind() == IdKind::Message {
                     let fts_rowid = allocate_rowid()?;
-                    fts_rows.push((fts_rowid, id_json.clone(), bigram_cjk(text)));
+                    fts_rows.push((fts_rowid, id_json.clone(), fts_tokens_cjk(text)));
                     fts_ids_rows.push((id.as_str().to_string(), id_json, Some(fts_rowid)));
                 } else {
                     fts_ids_rows.push((id.as_str().to_string(), id_json, None));
@@ -5308,11 +5309,11 @@ impl SqliteStore {
         tx.execute("DELETE FROM fts_ids WHERE wire_id = ?1", [id.as_str()])
             .map_err(backend)?;
         let fts_rowid = if id.kind() == IdKind::Message {
-            // 索引侧 CJK bigram（ADR-0007）：`SearchIndex::index` 与
-            // `CatalogStore::put` 两条单条写入路径与批量提交共用同一 transform。
+            // 索引侧 CJK n-gram（ADR-0007，单字 + bigram）：`SearchIndex::index`
+            // 与 `CatalogStore::put` 两条单条写入路径与批量提交共用同一 transform。
             tx.execute(
                 "INSERT INTO fts(id, text) VALUES(?1, ?2)",
-                rusqlite::params![id_json, bigram_cjk(text)],
+                rusqlite::params![id_json, fts_tokens_cjk(text)],
             )
             .map_err(backend)?;
             Some(tx.last_insert_rowid())
@@ -6121,7 +6122,7 @@ impl ContextGraphStore for SqliteStore {
 impl SqliteStore {
     /// 把 Session 元数据命中（`session_fts MATCH`）并进既有消息命中列表。
     ///
-    /// 查询侧先做与消息路径同一的 CJK bigram 前置变换 + 字面量化；候选按
+    /// 查询侧先做与消息路径同一的 CJK n-gram 前置变换 + 字面量化；候选按
     /// `bm25(session_fts)` 排序后取前 `limit` 条。每条命中以"首个非系统
     /// 消息"作代表（保既有 SearchHit 形状，不臆造 id）；无非系统消息的
     /// Session（metadata-only）直接以 canonical Session 身份返回。已由匹配
@@ -6301,15 +6302,15 @@ impl SearchIndex for SqliteStore {
 
     fn query_filtered(&self, query: SearchQuery<'_>, limit: usize) -> PortResult<Vec<SearchHit>> {
         let conn = self.conn.borrow();
-        // 查询侧先做与索引侧同一的 CJK bigram transform（ADR-0007），再字面量化：
-        // bigram 输出里的单个空格就是词元分隔符，顺序敏感——先字面量化会把
-        // bigram 输出的空格包进引号，变成整段 bigram 连写的短语，无法匹配。
+        // 查询侧先做与索引侧同一的 CJK n-gram transform（ADR-0007，单字 + bigram），
+        // 再字面量化：transform 输出里的单个空格就是词元分隔符，顺序敏感——先
+        // 字面量化会把输出的空格包进引号，变成整段 n-gram 连写的短语，无法匹配。
         // cursor digest 绑定的是 Application 侧的原始用户查询，此处变换不影响。
         // 用户查询按字面量分词：冒号/点号/连字符等是 FTS5 语法保留字符，直接
         // MATCH 会泄漏 `fts5: syntax error near "."` 之类的底层报错（10 角色
         // 体验测试缺陷）。把每个词用引号包裹成短语查询，保留词内特殊字符的字面
         // 含义，同时保持原来的空格 AND 语义。
-        let safe_query = safe_fts_query(&bigram_cjk(query.text));
+        let safe_query = safe_fts_query(&fts_tokens_cjk(query.text));
         if safe_query.is_empty() {
             // 空查询（全标点/空白）无词可查：返回空而非让 FTS5 报语法错误。
             return Ok(Vec::new());
@@ -6455,7 +6456,7 @@ impl SearchIndex for SqliteStore {
             return self.query_filtered(query, limit);
         }
         let conn = self.conn.borrow();
-        let safe_query = safe_fts_query(&bigram_cjk(query.text));
+        let safe_query = safe_fts_query(&fts_tokens_cjk(query.text));
         if safe_query.is_empty() {
             return Ok(Vec::new());
         }
@@ -6883,7 +6884,7 @@ where
 /// 纯空白/纯标点输入返回空串。
 ///
 /// 参考 hstry `sanitize_fts_query`（MIT，hstry/crates/hstry-core/src/db.rs:3177）
-/// 的逐 token 引号化 + 引号外前缀 `*` 模式；本项目保留 CJK bigram 前置变换
+/// 的逐 token 引号化 + 引号外前缀 `*` 模式；本项目保留 CJK n-gram 前置变换
 /// （ADR-0007）与全标点词跳过。
 fn safe_fts_query(query: &str) -> String {
     let mut words: Vec<String> = Vec::new();
@@ -8122,8 +8123,8 @@ mod tests {
     #[test]
     fn cjk_bigram_recall_hits_two_char_queries_in_longer_sentences() {
         // R1.4：双字查询"配置"/"数据库"命中包含它们的长句。索引侧与查询侧
-        // 同一 bigram transform：整段汉字从 1 个 FTS 词元变成相邻两字 bigram
-        // 词元（"配置数据库迁移" → "配置 置数 数据 据库 库迁 迁移"）。
+        // 同一 transform：整段汉字从 1 个 FTS 词元变成单字 + 相邻两字 bigram
+        // 词元（"配置数据库迁移" → "配 置 数 据 库 迁 移 配置 置数 数据 据库 库迁 迁移"）。
         let store = SqliteStore::open_in_memory().unwrap();
         let id = sid(IdKind::Message, b"cjk-m1");
         store
@@ -8134,13 +8135,40 @@ mod tests {
             assert_eq!(hits.len(), 1, "query {query:?} must recall the message");
             assert_eq!(hits[0].id, id);
         }
-        // 多字查询按 bigram 并集 AND 匹配。
+        // 多字查询按单字 + bigram 并集 AND 匹配。
         assert_eq!(store.query("数据库迁移", 10).unwrap().len(), 1);
         // 不存在的双字组合不命中。
         assert!(store.query("翻墙", 10).unwrap().is_empty());
-        // 单字 CJK 查询仍弱（已知边界，ADR-0007 §后果）：transform 后为空串，
-        // 无结果且不触发 FTS 语法错误。
-        assert!(store.query("了", 10).unwrap().is_empty());
+        // 单字 CJK 查询由同一索引流中的 unigram 词元覆盖，不再落空。
+        assert_eq!(store.query("了", 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn cjk_unigram_tokens_recall_single_char_queries() {
+        // 单字查询增强：FTS 索引流除 bigram 外还为每个汉字产出单字词元，
+        // "了"/"配"这类单字查询不再 transform 成空串，命中含该字的句子。
+        let store = SqliteStore::open_in_memory().unwrap();
+        let id = sid(IdKind::Message, b"cjk-uni");
+        store
+            .index(&id, "我们已经在生产环境配置了数据库迁移，备份策略也更新了")
+            .unwrap();
+        for query in ["我", "了", "配", "置", "迁", "移", "备", "新"] {
+            let hits = store.query(query, 10).unwrap();
+            assert_eq!(
+                hits.len(),
+                1,
+                "single-char query {query:?} must recall the message"
+            );
+            assert_eq!(hits[0].id, id);
+        }
+        // 夹在 ASCII 之间的单字汉字运行（bigram 产不出词元）同样命中。
+        let mixed = sid(IdKind::Message, b"cjk-uni-mixed");
+        store.index(&mixed, "用cargo测试").unwrap();
+        assert_eq!(store.query("用", 10).unwrap().len(), 1);
+        assert_eq!(store.query("测", 10).unwrap().len(), 1);
+        assert_eq!(store.query("cargo", 10).unwrap().len(), 1);
+        // 未出现的单字不命中。
+        assert!(store.query("丙", 10).unwrap().is_empty());
     }
 
     #[test]
@@ -8178,7 +8206,7 @@ mod tests {
         assert_eq!(store.query("配置文件", 10).unwrap().len(), 1);
 
         // 内容级 no-op：再次同步同一源不推进 generation——current 判定对 fts
-        // 存储的 bigram 正文与同一 transform 后的 batch text 比较（若只比原文，
+        // 存储的 transform 后正文与同一 transform 后的 batch text 比较（若只比原文，
         // 已同步的源每次重同步都会被误判为 not-current 而反复推进 generation）。
         let generation = store.active_generation().unwrap();
         let again = store
@@ -8193,8 +8221,9 @@ mod tests {
         // R1.2：rebuild 从权威 catalog 重投影 FTS（searchable_text + 同一索引侧
         // transform），无 schema 变更、无 catalog 迁移；重建推进 generation
         // （旧 cursor 因此失效——正常契约行为）。
-        // 词元增长：消息正文"今天把数据库备份到了新目录"（11 字）从 1 个整段
-        // 词元变为 10 个 bigram 词元——纯 CJK 文本约 2x 最坏增长（ADR-0007 §后果）。
+        // 词元增长：消息正文"今天把数据库备份到了新目录"（13 字）从 1 个整段
+        // 词元变为 25 个单字 + bigram 词元——纯 CJK 文本约 4x 最坏增长
+        // （ADR-0007 §后果）。
         let store = SqliteStore::open_in_memory().unwrap();
         let session = sid(IdKind::Session, b"rebuild-ses");
         let document = sid(IdKind::Document, b"rebuild-doc");
@@ -8238,7 +8267,7 @@ mod tests {
 
     #[test]
     fn cjk_bigram_keeps_ascii_path_and_punctuation_literals_unchanged() {
-        // R1.3（ADR-0003）：纯 ASCII/路径/标点输入不含汉字，bigram_cjk 原样
+        // R1.3（ADR-0003）：纯 ASCII/路径/标点输入不含汉字，transform 原样
         // 返回——字面量化语义与之前逐字节一致，FTS 词元不变。
         let store = SqliteStore::open_in_memory().unwrap();
         let id = sid(IdKind::Message, b"literal");
@@ -8668,7 +8697,7 @@ mod tests {
         };
         assert_eq!(catalog_payloads(&store_a), catalog_payloads(&store_b));
 
-        // fts 正文逐实体相等（fts 存 id_json + bigram 正文）。
+        // fts 正文逐实体相等（fts 存 id_json + transform 后正文）。
         let fts_rows = |store: &SqliteStore| -> BTreeMap<String, String> {
             let conn = store.conn.borrow();
             let mut stmt = conn

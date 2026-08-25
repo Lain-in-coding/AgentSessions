@@ -183,6 +183,15 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   fixed clock; production tracks wall time as before). Applies to pure
   lexical retrieval (including lexical fallback) only — semantic hits and
   hybrid RRF fusion are unchanged.
+- CJK single-character query recall: the FTS token stream now also carries a
+  unigram for every Han character alongside the ADR-0007 bigrams
+  (`application::cjk::fts_tokens_cjk`, shared by the index and query sides),
+  so single-character queries such as `search 了` match sentences containing
+  the character instead of returning nothing. Bigram recall for two-character
+  and longer queries is unchanged; worst-case token growth over raw CJK text
+  is about 4x (ADR-0007 §后果 updated). Existing databases pick up the new
+  tokens via `index rebuild` (no schema change). `bigram_cjk` stays bigram-
+  only and remains the guidance evidence source.
 
 ### Fixed
 
