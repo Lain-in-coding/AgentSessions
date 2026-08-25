@@ -290,6 +290,30 @@ fn is_conversational_role(role: &str) -> bool {
     matches!(role, "user" | "assistant" | "developer" | "system")
 }
 
+/// 伪 user 消息噪声判定（Codex rollout）：只认明确前缀，绝不语义猜测。
+///
+/// 返回命中的规则名（供诊断引用）；`None` = 保留。规则与证据（cc-switch
+/// codex.rs `title_candidate_from_user_message` 与 `parse_session_skips_*_injection`
+/// 测试均展示 rollout 里 user 角色的注入记录）：
+///
+/// - `# AGENTS.md` 开头：Codex 启动时把 AGENTS.md 内容以 user 消息注入
+///   （`# AGENTS.md instructions for <path>\n<INSTRUCTIONS>…</INSTRUCTIONS>`）。
+/// - `<environment_context>` 开头：工作目录等环境上下文注入
+///   （`<environment_context>\n  <cwd>…</cwd>\n</environment_context>`）。
+///
+/// 刻意不收（宁可漏滤不可误滤）：`# CLAUDE.md` 标题注入（cc-switch 只 pin
+/// AGENTS.md 前缀）、IDE 上下文（`# Context from my IDE setup:` 内含真实请求，
+/// cc-switch 是提取其中的请求而非整条跳过）。
+fn codex_user_noise_kind(trimmed: &str) -> Option<&'static str> {
+    if trimmed.starts_with("# AGENTS.md") {
+        return Some("agents-md-injection");
+    }
+    if trimmed.starts_with("<environment_context>") {
+        return Some("environment-context");
+    }
+    None
+}
+
 /// 把配对好的调用构建为活动并 emit（设计 R2/R3/R4）。
 fn emit_paired_activity(
     sink: &mut dyn CanonicalEventSink,
@@ -701,6 +725,20 @@ impl ProviderAdapter for CodexAdapter {
                 continue;
             };
 
+            // 伪 user 消息过滤（检索层保守白名单）：Codex rollout 会以 user
+            // 角色注入项目指令与环境上下文（出处见 codex_user_noise_kind）。
+            // 只按明确前缀过滤，命中计入 skipped（不进索引），绝不语义猜测。
+            if payload.role == "user"
+                && let Some(kind) = codex_user_noise_kind(body.trim())
+            {
+                report.skipped += 1;
+                report.diagnostics.push(format!(
+                    "line {}: user message with injected noise envelope ({kind}), skipped",
+                    line_no + 1
+                ));
+                continue;
+            }
+
             sink.emit_message(MessageEvent {
                 seq,
                 native_id: &payload.id,
@@ -1084,6 +1122,70 @@ mod tests {
             .expect("parse synthetic rollout");
         assert_eq!(sink.messages.len(), 1);
         sink.messages.remove(0)
+    }
+
+    /// 解析单条 user message 记录（合成语料），返回报告与产出文本。
+    fn parse_single_user(text: &str) -> (ParseReport, Vec<String>) {
+        let input = serde_json::to_vec(&serde_json::json!({
+            "timestamp": "2026-07-19T23:40:01.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "id": "noise-uuid-1",
+                "role": "user",
+                "content": [{"type": "input_text", "text": text}],
+            },
+        }))
+        .expect("serialize synthetic rollout");
+        let mut sink = CollectingSink::default();
+        let report = CodexAdapter::new()
+            .parse(&input, &mut sink)
+            .expect("parse synthetic rollout");
+        let texts = sink.messages.into_iter().map(|m| m.text).collect();
+        (report, texts)
+    }
+
+    #[test]
+    fn parse_filters_injected_user_noise_envelopes() {
+        // 每条都是 Codex rollout 以 user 角色落盘的系统注入形状
+        // （证据逐条见 codex_user_noise_kind 注释）。
+        for noise in [
+            "# AGENTS.md instructions for /tmp/project\n<INSTRUCTIONS>Do stuff</INSTRUCTIONS>",
+            "# AGENTS.md instructions for /workspace/fixture-project\n<INSTRUCTIONS>Review</INSTRUCTIONS>",
+            "<environment_context>\n  <cwd>/tmp/project</cwd>\n</environment_context>",
+        ] {
+            let (report, texts) = parse_single_user(noise);
+            assert_eq!(
+                report.committed, 0,
+                "noise must not be committed: {noise:?}"
+            );
+            assert_eq!(report.skipped, 1, "noise must be skipped: {noise:?}");
+            assert!(texts.is_empty(), "noise must not be indexed: {noise:?}");
+            assert_eq!(
+                report.diagnostics.len(),
+                1,
+                "one diagnostic per skip: {noise:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_keeps_genuine_user_text_and_non_user_noise_shapes() {
+        // 非前缀的相似文本、其它角色的同形文本必须逐字保留：宁可漏滤不可误滤。
+        for (role, text) in [
+            ("user", "Fix the login bug"),
+            ("user", "Notes about # AGENTS.md usage"), // 非前缀，不滤
+            ("user", "What does <environment_context> mean?"), // 非前缀，不滤
+            ("assistant", "# AGENTS.md style guidelines"), // assistant 不滤
+            ("developer", "<permissions>read</permissions>"), // developer 角色由上层 role 过滤，adapter 不滤
+        ] {
+            let captured = parse_single_message("2026-07-19T23:40:01.000Z", role, text);
+            assert_eq!(captured.role, role, "role must pass through: {role:?}");
+            assert_eq!(
+                captured.text, text,
+                "text must pass through verbatim: {text:?}"
+            );
+        }
     }
 
     #[test]
