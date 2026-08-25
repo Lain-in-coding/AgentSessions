@@ -85,7 +85,20 @@ pub struct ProviderCapability {
     pub context: CapabilityLevel,
     /// Resume 能力。
     pub resume: CapabilityLevel,
-    /// Handoff 能力。
+    /// Handoff 能力（能否为该 provider 的会话装出带原文证据的 handoff pack）。
+    ///
+    /// 诚实口径：`handoff` 不是 per-provider 特性。生成器
+    /// （`application::handoff_pack::generate_deterministic`）只消费 `SearchHit`
+    /// 与权威 source placement，`provenance` 与 `matched_sessions[].provider_id`
+    /// 一律为 `None`（搜索型 pack 无单一提供商，不臆造），全流程不读 provider
+    /// 身份、无 per-provider 分支。因此"能否装出带证据的 pack"只取决于消息是否
+    /// 落库并带 source placement——`parse` 可用即成立。
+    ///
+    /// 故 14 个已实现 provider 一律 `Derived`（由已落库内容确定性派生），
+    /// 此前全列 `Unsupported` 是少报：`asg handoff` 是已发布命令，对 codex
+    /// （JSONL）、aider（markdown，native_id 恒空）、opencode（SQLite）三种结构
+    /// 迥异的真实 golden 源实测均产出 `confidence: high` 的带证据 pack。
+    /// 由 `handoff_pack_generation_is_provider_independent` 守护。
     pub handoff: CapabilityLevel,
     /// 工具活动提取能力。
     pub tool_activity: CapabilityLevel,
@@ -147,7 +160,7 @@ impl ProviderCapabilityMatrix {
                     search: CapabilityLevel::Native,
                     context: CapabilityLevel::Unsupported,
                     resume: CapabilityLevel::Unsupported,
-                    handoff: CapabilityLevel::Unsupported,
+                    handoff: CapabilityLevel::Derived,
                     // adapter 从不调用 `emit_activity`（零调用点），且消息以空
                     // native id 上报——composition root 对空锚点 fail-closed 丢弃，
                     // 故即便未来 emit 也无法附着。如实降级为 unsupported。
@@ -165,7 +178,7 @@ impl ProviderCapabilityMatrix {
                     search: CapabilityLevel::Native,
                     context: CapabilityLevel::Native,
                     resume: CapabilityLevel::Derived,
-                    handoff: CapabilityLevel::Unsupported,
+                    handoff: CapabilityLevel::Derived,
                     tool_activity: CapabilityLevel::Partial,
                     source_span: CapabilityLevel::Native,
                     incremental: CapabilityLevel::Native,
@@ -186,7 +199,7 @@ impl ProviderCapabilityMatrix {
                     // `capability_context_claim_matches_pinned_golden_parent_links` 抓出。
                     context: CapabilityLevel::Unsupported,
                     resume: CapabilityLevel::Derived,
-                    handoff: CapabilityLevel::Unsupported,
+                    handoff: CapabilityLevel::Derived,
                     tool_activity: CapabilityLevel::Partial,
                     source_span: CapabilityLevel::Native,
                     incremental: CapabilityLevel::Native,
@@ -204,7 +217,7 @@ impl ProviderCapabilityMatrix {
                     // resume 命令已由 application::resume builder 支持（grok --resume），
                     // 与矩阵一致标记 Derived（audit P1-2 drift 测试守护）。
                     resume: CapabilityLevel::Derived,
-                    handoff: CapabilityLevel::Unsupported,
+                    handoff: CapabilityLevel::Derived,
                     tool_activity: CapabilityLevel::Unsupported,
                     source_span: CapabilityLevel::Native,
                     incremental: CapabilityLevel::Unsupported,
@@ -221,7 +234,7 @@ impl ProviderCapabilityMatrix {
                     search: CapabilityLevel::Native,
                     context: CapabilityLevel::Unsupported,
                     resume: CapabilityLevel::Derived,
-                    handoff: CapabilityLevel::Unsupported,
+                    handoff: CapabilityLevel::Derived,
                     tool_activity: CapabilityLevel::Unsupported,
                     source_span: CapabilityLevel::Native,
                     incremental: CapabilityLevel::Unsupported,
@@ -237,7 +250,7 @@ impl ProviderCapabilityMatrix {
                     search: CapabilityLevel::Native,
                     context: CapabilityLevel::Unsupported,
                     resume: CapabilityLevel::Unknown,
-                    handoff: CapabilityLevel::Unsupported,
+                    handoff: CapabilityLevel::Derived,
                     tool_activity: CapabilityLevel::Unsupported,
                     source_span: CapabilityLevel::Native,
                     incremental: CapabilityLevel::Unsupported,
@@ -255,7 +268,7 @@ impl ProviderCapabilityMatrix {
                     search: CapabilityLevel::Native,
                     context: CapabilityLevel::Unsupported,
                     resume: CapabilityLevel::Unknown,
-                    handoff: CapabilityLevel::Unsupported,
+                    handoff: CapabilityLevel::Derived,
                     tool_activity: CapabilityLevel::Unsupported,
                     source_span: CapabilityLevel::Native,
                     incremental: CapabilityLevel::Unsupported,
@@ -272,7 +285,7 @@ impl ProviderCapabilityMatrix {
                     search: CapabilityLevel::Native,
                     context: CapabilityLevel::Unsupported,
                     resume: CapabilityLevel::Unsupported,
-                    handoff: CapabilityLevel::Unsupported,
+                    handoff: CapabilityLevel::Derived,
                     tool_activity: CapabilityLevel::Unsupported,
                     source_span: CapabilityLevel::Native,
                     incremental: CapabilityLevel::Unsupported,
@@ -288,7 +301,7 @@ impl ProviderCapabilityMatrix {
                     search: CapabilityLevel::Native,
                     context: CapabilityLevel::Unsupported,
                     resume: CapabilityLevel::Unknown,
-                    handoff: CapabilityLevel::Unsupported,
+                    handoff: CapabilityLevel::Derived,
                     tool_activity: CapabilityLevel::Unsupported,
                     source_span: CapabilityLevel::Native,
                     incremental: CapabilityLevel::Unsupported,
@@ -308,7 +321,7 @@ impl ProviderCapabilityMatrix {
                     // resume 命令尚无权威模板（builder 未支持），如实标记 Unknown——
                     // 曾误标 Derived（audit P1-2 drift 测试守护）。
                     resume: CapabilityLevel::Unknown,
-                    handoff: CapabilityLevel::Unsupported,
+                    handoff: CapabilityLevel::Derived,
                     tool_activity: CapabilityLevel::Unsupported,
                     source_span: CapabilityLevel::Unsupported,
                     incremental: CapabilityLevel::Unsupported,
@@ -327,7 +340,7 @@ impl ProviderCapabilityMatrix {
                     search: CapabilityLevel::Native,
                     context: CapabilityLevel::Unsupported,
                     resume: CapabilityLevel::Unsupported,
-                    handoff: CapabilityLevel::Unsupported,
+                    handoff: CapabilityLevel::Derived,
                     tool_activity: CapabilityLevel::Unsupported,
                     source_span: CapabilityLevel::Unsupported,
                     incremental: CapabilityLevel::Unsupported,
@@ -345,7 +358,7 @@ impl ProviderCapabilityMatrix {
                     search: CapabilityLevel::Native,
                     context: CapabilityLevel::Unsupported,
                     resume: CapabilityLevel::Unknown,
-                    handoff: CapabilityLevel::Unsupported,
+                    handoff: CapabilityLevel::Derived,
                     tool_activity: CapabilityLevel::Unsupported,
                     source_span: CapabilityLevel::Unsupported,
                     incremental: CapabilityLevel::Unsupported,
@@ -361,7 +374,7 @@ impl ProviderCapabilityMatrix {
                     search: CapabilityLevel::Native,
                     context: CapabilityLevel::Unsupported,
                     resume: CapabilityLevel::Unknown,
-                    handoff: CapabilityLevel::Unsupported,
+                    handoff: CapabilityLevel::Derived,
                     tool_activity: CapabilityLevel::Unsupported,
                     // 行式 JSONL：adapter 逐记录发 `span: Some((start, end))`，
                     // golden `golden_spans_slice_back_to_exact_source_lines`
@@ -390,7 +403,7 @@ impl ProviderCapabilityMatrix {
                     search: CapabilityLevel::Native,
                     context: CapabilityLevel::Unsupported,
                     resume: CapabilityLevel::Unknown,
-                    handoff: CapabilityLevel::Unsupported,
+                    handoff: CapabilityLevel::Derived,
                     tool_activity: CapabilityLevel::Unsupported,
                     source_span: CapabilityLevel::Unsupported,
                     incremental: CapabilityLevel::Unsupported,

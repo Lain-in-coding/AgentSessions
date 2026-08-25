@@ -125,7 +125,7 @@ certified — currently 0 Beta. **Not release-ready per provider gate.**
 | 13 | pi and openclaw transcripts are the *same* v3 JSONL format with no in-content discriminator, so both adapters probe `Confirmed` on the same bytes and whole-registry selection always hit the ambiguity tie — every source under `~/.pi` or `~/.openclaw` was unindexable, including pi's own golden fixture | P1 | closed | 82f0f26 |
 | 14 | Row 13's fix only reached `sync --discover`, which carries a scanned provider identity. Explicit `sync <file>` and `ingest <file>` still probed the whole registry, so naming a pi or openclaw transcript by path — the natural first move for a new user, and the only way to index a source outside a canonical root — still failed with the same `ambiguous provider selection` error | P1 | closed | this task |
 | 15 | `qoder`'s probe counted any record whose top-level `type` is `session_meta` as its own header, but every Codex rollout record is a `{timestamp, type, payload}` envelope whose first line is exactly that. Codex degrades `Confirmed`→`High` on a tolerated broken line (its own golden fixture has one), so both adapters returned `High` and a real Codex rollout with any damaged line was rejected as ambiguous rather than indexed as Codex | P1 | closed | this task |
-| 16 | `codex` declared `context: Native` while its adapter hard-codes `parent_native_id: None` — Codex rollout is a linear sequence with no threading edges, so no `message_edges` row can ever exist for it and `context` had nothing to walk. The last unguarded capability column, found by the guard added for it | P1 | closed | this task |
+| 16 | `codex` declared `context: Native` while its adapter hard-codes `parent_native_id: None` — Codex rollout is a linear sequence with no threading edges, so no `message_edges` row can ever exist for it and `context` had nothing to walk. Found by the guard added for it: `context` was the last column falsifiable from pinned golden output that had none | P1 | closed | this task |
 
 ---
 
@@ -326,8 +326,9 @@ their probes key on magic bytes and table structure rather than competing for
 the same JSONL records.
 
 Closed 2026-08-25 (§6 row 16, this task): `context` was the last capability
-column with no drift guard tying its claim to real adapter output, and adding
-one immediately found an over-claim. `capability_context_claim_matches_pinned_golden_parent_links`
+column falsifiable from pinned golden output that still had no guard tying its
+claim to that output, and adding one immediately found an over-claim.
+`capability_context_claim_matches_pinned_golden_parent_links`
 parses each implemented provider's pinned golden `expected.json` and requires
 that a `context: Native` claim be backed by at least one message carrying a
 `parent_native_id` — because a context graph is assembled by walking
