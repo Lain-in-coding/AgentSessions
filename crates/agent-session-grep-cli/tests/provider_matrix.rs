@@ -10,6 +10,7 @@
 //! `manifest()` → `manifest_for`）必须与 ledger 的本地列和全局 blocker 一致，且
 //! ledger 必须恰好列出 capability.rs 的 14 个已实现 + 2 个 deferred provider。
 
+use agent_session_grep_ports::Confidence;
 use agent_session_grep_ports::ProviderAdapter;
 use agent_session_grep_ports::capability::{
     CapabilityLevel, ProviderCapabilityMatrix, ProviderMaturity,
@@ -781,6 +782,233 @@ fn readme_provider_table_matches_capability_matrix_maturity() {
                 status == "Experimental" || status == "Deferred",
                 "README provider `{name}` 声明为 `{status}`，但 capability.rs 尚无任何晋级 provider"
             );
+        }
+    }
+}
+
+/// 每个已实现 provider 的 (adapter, golden fixture 字节)：`probe`/`parse` 两列的
+/// 声明必须靠真实 adapter 跑真实 fixture 反证，故这里同时要 adapter 实例与输入字节。
+///
+/// 与 [`PINNED_GOLDEN`]（expected.json，判定输出形状）和 e2e 的 `GOLDEN_SOURCES`
+/// （源路径，判定增量）互补：这一张要的是"喂进 adapter 的字节"。
+fn implemented_adapters_with_fixtures() -> Vec<(Box<dyn ProviderAdapter>, &'static [u8])> {
+    vec![
+        (
+            Box::new(ClaudeCodeAdapter::new()),
+            include_bytes!("../../agent-session-grep-provider-claude/tests/golden/basic.jsonl")
+                .as_slice(),
+        ),
+        (
+            Box::new(AiderAdapter::new()),
+            include_bytes!("../../agent-session-grep-provider-aider/tests/golden/basic.md")
+                .as_slice(),
+        ),
+        (
+            Box::new(CodexAdapter::new()),
+            include_bytes!("../../agent-session-grep-provider-codex/tests/golden/basic.jsonl")
+                .as_slice(),
+        ),
+        (
+            Box::new(GrokBuildAdapter::new()),
+            include_bytes!("../../agent-session-grep-provider-grok/tests/golden/basic.jsonl")
+                .as_slice(),
+        ),
+        (
+            Box::new(PiAdapter::new()),
+            include_bytes!("../../agent-session-grep-provider-pi/tests/golden/basic.jsonl")
+                .as_slice(),
+        ),
+        (
+            Box::new(QoderAdapter::new()),
+            include_bytes!("../../agent-session-grep-provider-qoder/tests/golden/basic.jsonl")
+                .as_slice(),
+        ),
+        (
+            Box::new(KimiCodeAdapter::new()),
+            include_bytes!("../../agent-session-grep-provider-kimi/tests/golden/basic.jsonl")
+                .as_slice(),
+        ),
+        (
+            Box::new(OpenClawAdapter::new()),
+            include_bytes!("../../agent-session-grep-provider-openclaw/tests/golden/basic.jsonl")
+                .as_slice(),
+        ),
+        (
+            Box::new(OpenCodeAdapter::new()),
+            include_bytes!("../../agent-session-grep-provider-opencode/tests/golden/basic.db")
+                .as_slice(),
+        ),
+        (
+            Box::new(CodeBuddyAdapter::new()),
+            include_bytes!("../../agent-session-grep-provider-codebuddy/tests/golden/basic.jsonl")
+                .as_slice(),
+        ),
+        (
+            Box::new(ClineAdapter::new()),
+            include_bytes!("../../agent-session-grep-provider-cline/tests/golden/basic.json")
+                .as_slice(),
+        ),
+        (
+            Box::new(AntigravityAdapter::new()),
+            include_bytes!(
+                "../../agent-session-grep-provider-antigravity/tests/golden/basic.jsonl"
+            )
+            .as_slice(),
+        ),
+        (
+            Box::new(OpenHermesAdapter::new()),
+            include_bytes!("../../agent-session-grep-provider-hermes/tests/golden/basic.json")
+                .as_slice(),
+        ),
+        (
+            Box::new(CursorAdapter::new()),
+            include_bytes!("../../agent-session-grep-provider-cursor/tests/golden/basic.db")
+                .as_slice(),
+        ),
+    ]
+}
+
+#[test]
+fn capability_probe_claim_matches_real_probe_on_own_golden() {
+    // `probe` 列声明的是"能否在字节上判定 variant"。此前它是全 14 行 `Native`
+    // 但没有任何测试把该声明对照真实 probe 调用——与 handoff/incremental 少报
+    // 同一类缺口：doc↔capability.rs 一致性守护只保证三份文件互相同意，不保证
+    // 同意的值为真。
+    //
+    // 诚实口径：声明可用（Native/Derived/Partial）则 adapter 必须对自己的 golden
+    // 字节返回 Ok 且置信度不是 Ambiguous——RFC-0002 §3 规定歧义即拒绝解析，
+    // 所以 Ambiguous 等于探测不出来。同时 variant_id 必须与 capability.rs 该行
+    // 的 variant_id 逐字相同：probe 报出别的 variant 意味着注册表选型会错挂
+    // adapter。声明 Unsupported 则必须真的判不出（Err 或 Ambiguous）。
+    let matrix = ProviderCapabilityMatrix::current();
+    let pairs = implemented_adapters_with_fixtures();
+    assert_eq!(
+        pairs.len(),
+        14,
+        "implemented_adapters_with_fixtures 必须覆盖 14 个已实现 provider"
+    );
+
+    for (adapter, fixture) in &pairs {
+        let provider_id = adapter.provider_id();
+        let cap = matrix
+            .providers
+            .iter()
+            .find(|p| p.provider_id == provider_id)
+            .unwrap_or_else(|| panic!("capability.rs 缺少 provider `{provider_id}`"));
+        assert_ne!(
+            cap.maturity,
+            ProviderMaturity::Unsupported,
+            "{provider_id}: 有 adapter 实例却记为 deferred"
+        );
+
+        let probed = adapter.probe(fixture);
+        match cap.probe {
+            CapabilityLevel::Native | CapabilityLevel::Derived | CapabilityLevel::Partial => {
+                let result = probed.unwrap_or_else(|error| {
+                    panic!(
+                        "{provider_id}: capability.rs 声明 probe={:?}，但对自己的 golden \
+                         字节 probe 失败（虚报）：{error:?}",
+                        cap.probe
+                    )
+                });
+                assert_ne!(
+                    result.confidence,
+                    Confidence::Ambiguous,
+                    "{provider_id}: probe 返回 Ambiguous 等于判不出 variant（RFC-0002 §3 \
+                     歧义即拒绝解析），与声明 {:?} 矛盾",
+                    cap.probe
+                );
+                assert_eq!(
+                    result.variant_id, cap.variant_id,
+                    "{provider_id}: probe 报出的 variant_id 与 capability.rs 声明不一致——\
+                     注册表选型会按声明挂错 adapter"
+                );
+                assert!(
+                    !result.matched_evidence.is_empty(),
+                    "{provider_id}: 判定成立必须给出可诊断的 matched_evidence"
+                );
+            }
+            CapabilityLevel::Unsupported => {
+                let judged = probed
+                    .as_ref()
+                    .is_ok_and(|r| r.confidence != Confidence::Ambiguous);
+                assert!(
+                    !judged,
+                    "{provider_id}: capability.rs 声明 probe=Unsupported，但对自己的 golden \
+                     字节实测判出了 variant（少报）：{probed:?}"
+                );
+            }
+            CapabilityLevel::Unknown => {
+                panic!("{provider_id}: 已实现 provider 的 probe 不得为 Unknown")
+            }
+        }
+    }
+}
+
+#[test]
+fn capability_parse_claim_matches_real_parse_on_own_golden() {
+    // `parse` 列声明的是"能否把字节流规范化成 canonical 消息"。与上面的 probe
+    // 同一纪律：声明可用则 adapter 必须对自己的 golden 真的 parse 成功并至少
+    // committed 一条消息，且发出的消息数与 report.committed 自洽——report 说
+    // committed=N 却只 emit 了 M 条，会让上层的提交计数与实际入库量脱节。
+    // 声明 Unsupported 则必须真的解析不出（Err 或 committed=0）。
+    let matrix = ProviderCapabilityMatrix::current();
+
+    for (adapter, fixture) in &implemented_adapters_with_fixtures() {
+        let provider_id = adapter.provider_id();
+        let cap = matrix
+            .providers
+            .iter()
+            .find(|p| p.provider_id == provider_id)
+            .unwrap_or_else(|| panic!("capability.rs 缺少 provider `{provider_id}`"));
+
+        let mut sink = agent_session_grep_testkit::golden::CapturingSink::default();
+        let report = adapter.parse(fixture, &mut sink);
+
+        match cap.parse {
+            CapabilityLevel::Native | CapabilityLevel::Derived | CapabilityLevel::Partial => {
+                let report = report.unwrap_or_else(|error| {
+                    panic!(
+                        "{provider_id}: capability.rs 声明 parse={:?}，但对自己的 golden \
+                         字节 parse 失败（虚报）：{error:?}",
+                        cap.parse
+                    )
+                });
+                assert!(
+                    report.committed > 0,
+                    "{provider_id}: 声明 parse={:?} 却一条都没 committed：{report:?}",
+                    cap.parse
+                );
+                assert_eq!(
+                    sink.messages.len(),
+                    report.committed,
+                    "{provider_id}: report.committed={} 与实际 emit 的消息数 {} 不符——\
+                     计数与入库量脱节",
+                    report.committed,
+                    sink.messages.len()
+                );
+                // 空正文的消息检索不到（FTS 无 token），committed 却把它算进去，
+                // 等于宣称索引了检索不到的内容。
+                for message in &sink.messages {
+                    assert!(
+                        !message.text.trim().is_empty(),
+                        "{provider_id}: seq={} 的消息正文为空，committed 计入它等于宣称\
+                         索引了检索不到的内容",
+                        message.seq
+                    );
+                }
+            }
+            CapabilityLevel::Unsupported => {
+                let parsed = report.as_ref().is_ok_and(|r| r.committed > 0);
+                assert!(
+                    !parsed,
+                    "{provider_id}: capability.rs 声明 parse=Unsupported，但对自己的 golden \
+                     字节实测解析出了消息（少报）：{report:?}"
+                );
+            }
+            CapabilityLevel::Unknown => {
+                panic!("{provider_id}: 已实现 provider 的 parse 不得为 Unknown")
+            }
         }
     }
 }

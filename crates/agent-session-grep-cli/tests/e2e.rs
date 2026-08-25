@@ -5765,3 +5765,160 @@ fn capability_incremental_claim_matches_real_resync_for_every_provider() {
         }
     }
 }
+
+// ---- `search` 能力列 ↔ 真实检索行为 防漂移 ----
+
+/// `search` 声明必须与真实检索行为一致（逐 provider 用其 pinned golden 源实测）。
+///
+/// 起因：`search` 对全部 14 个已实现 provider 声明 `Native`，但此前只有
+/// doc↔`capability.rs` 一致性守护，没有任何测试把"某 provider 的正文真的能被检索
+/// 到"钉成断言。这是能力列里风险最实的一种漏检：`parse` 落库与 `search` 可检索之
+/// 间还隔着 FTS 索引写入与查询投影，任一环节对某种正文（CJK、emoji、超长行、
+/// markdown 折叠文本）失效，都不会被 golden 的 expected.json 比对发现——那份基线
+/// 记录的是 adapter 发出的 `StagedMessage`，不是索引后的可检索性。
+///
+/// 断言形态：sync 该 provider 的真实 golden 源 → 从**它自己的** golden 正文里取一
+/// 个词做 query → 要求命中非空、命中正文确实包含该词、且命中 id 是 `msg_v1_`
+/// 形态。query 取自 golden 自身而非固定单词，因为 14 个 fixture 的语言不同
+/// （codex 是中文 + emoji、claude-code 混中英），固定英文词会在非英文 fixture 上
+/// 假失败——那是 harness 缺陷而非能力缺陷。
+#[test]
+fn capability_search_claim_matches_real_retrieval_for_every_provider() {
+    use agent_session_grep_ports::capability::{
+        CapabilityLevel, ProviderCapabilityMatrix, ProviderMaturity,
+    };
+
+    let matrix = ProviderCapabilityMatrix::current();
+    let implemented: Vec<_> = matrix
+        .providers
+        .iter()
+        .filter(|p| p.maturity != ProviderMaturity::Unsupported)
+        .collect();
+    assert_eq!(implemented.len(), 14, "已实现 provider 应为 14 个");
+
+    for cap in implemented {
+        let provider_id = cap.provider_id.as_str();
+        let relative = GOLDEN_SOURCES
+            .iter()
+            .find(|(id, _)| *id == provider_id)
+            .unwrap_or_else(|| panic!("{provider_id}: GOLDEN_SOURCES 缺少条目"))
+            .1;
+        let golden = Path::new(env!("CARGO_MANIFEST_DIR")).join(relative);
+
+        // 与 incremental 守护同一布局：pi/openclaw 是同格式孪生，身份来自登记根。
+        let (dir, db) = temp_db(&format!("search-{provider_id}"));
+        let root_relative = match provider_id {
+            "pi" => Some(".pi/agent/sessions"),
+            "openclaw" => Some(".openclaw/agents"),
+            _ => None,
+        };
+        let staged = match root_relative {
+            Some(root) => dir.path().join(root),
+            None => dir.path().to_path_buf(),
+        };
+        std::fs::create_dir_all(&staged).expect("create staging root");
+        let file_name = golden.file_name().expect("golden file name");
+        let source = staged.join(file_name);
+        std::fs::copy(&golden, &source).expect("copy golden source");
+        let path = source.to_string_lossy().into_owned();
+
+        let out = run(&db, &["sync", &path]);
+        assert!(
+            out.status.success(),
+            "{provider_id}: sync 必须成功: {}",
+            stdout(&out)
+        );
+        let synced = parse_first_line(&out);
+        let committed = synced["data"]["committed"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("{provider_id}: committed 必须是数字: {synced}"));
+        assert!(
+            committed > 0,
+            "{provider_id}: golden 源必须落库消息: {synced}"
+        );
+
+        // 从该 provider 自己的 pinned 基线正文里取一个可查询词：≥3 字符的
+        // ASCII 字母 token（FTS5 默认 unicode61 分词器对 ASCII 词的切分稳定，
+        // 对 CJK 逐字切分，故只取 ASCII token 以保证 query 语义确定）。
+        let expected_relative = relative
+            .rsplit_once('/')
+            .map(|(dir, _)| format!("{dir}/basic.expected.json"))
+            .unwrap_or_else(|| panic!("{provider_id}: golden 路径应含目录: {relative}"));
+        let expected_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(&expected_relative);
+        let expected_raw = std::fs::read_to_string(&expected_path)
+            .unwrap_or_else(|e| panic!("{provider_id}: 读取 {expected_relative} 失败: {e}"));
+        let expected: serde_json::Value = serde_json::from_str(&expected_raw)
+            .unwrap_or_else(|e| panic!("{provider_id}: expected.json 非合法 JSON: {e}"));
+        let bodies: Vec<String> = expected["messages"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{provider_id}: expected.json 缺少 messages 数组"))
+            .iter()
+            .filter_map(|m| m["text"].as_str().map(str::to_owned))
+            .collect();
+        let query = bodies
+            .iter()
+            .flat_map(|body| {
+                body.split(|c: char| !c.is_ascii_alphanumeric())
+                    .filter(|token| {
+                        token.len() >= 3 && token.chars().all(|c| c.is_ascii_alphabetic())
+                    })
+                    .map(str::to_lowercase)
+                    .collect::<Vec<_>>()
+            })
+            .next()
+            .unwrap_or_else(|| {
+                panic!("{provider_id}: pinned golden 正文里找不到可查询的 ASCII 词，无法实测检索")
+            });
+
+        let out = run(&db, &["search", &query]);
+        match cap.search {
+            CapabilityLevel::Native | CapabilityLevel::Derived | CapabilityLevel::Partial => {
+                assert!(
+                    out.status.success(),
+                    "{provider_id}: capability.rs 声明 search={:?}，但检索命令失败: {}",
+                    cap.search,
+                    stdout(&out)
+                );
+                let frame = parse_first_line(&out);
+                assert_envelope_shape(&frame, true);
+                let hits = frame["data"]["hits"]
+                    .as_array()
+                    .unwrap_or_else(|| panic!("{provider_id}: 响应缺少 hits 数组: {frame}"));
+                assert!(
+                    !hits.is_empty(),
+                    "{provider_id}: capability.rs 声明 search={:?}，但用它自己 golden 正文里的词 \
+                     `{query}` 检索到 0 条（落库 {committed} 条却检索不到，虚报）: {frame}",
+                    cap.search
+                );
+                for hit in hits {
+                    let id = hit["id"]
+                        .as_str()
+                        .unwrap_or_else(|| panic!("{provider_id}: 命中缺少 id: {hit}"));
+                    assert!(
+                        id.starts_with("msg_v1_"),
+                        "{provider_id}: 命中 id 必须是 msg_v1_ 形态: {hit}"
+                    );
+                    let text = hit["text"]
+                        .as_str()
+                        .unwrap_or_else(|| panic!("{provider_id}: 命中缺少 text: {hit}"));
+                    assert!(
+                        text.to_lowercase().contains(&query),
+                        "{provider_id}: 命中正文不含查询词 `{query}`（索引与投影不同源）: {hit}"
+                    );
+                }
+            }
+            CapabilityLevel::Unsupported => {
+                let frame = parse_first_line(&out);
+                let hits = frame["data"]["hits"].as_array().map(Vec::len).unwrap_or(0);
+                assert_eq!(
+                    hits, 0,
+                    "{provider_id}: capability.rs 声明 search=Unsupported，但用 `{query}` \
+                     实测检索到 {hits} 条（少报）: {frame}"
+                );
+            }
+            CapabilityLevel::Unknown => {
+                panic!("{provider_id}: 已实现 provider 的 search 不得为 Unknown")
+            }
+        }
+    }
+}
