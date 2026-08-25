@@ -26,15 +26,18 @@ or email the maintainers directly. You can expect:
 | Boundary | Behavior |
 |---|---|
 | Human CLI / TUI | Local output. Session content is shown unredacted (ADR-0004). |
-| Robot JSON/JSONL, MCP, HTTP API, Web UI, Handoff Pack | Cross-boundary outputs. Secret-shaped values (AWS keys, GitHub PATs, OpenAI/Anthropic/xAI keys, Bearer tokens, PEM private keys) and secret-named JSON fields are redacted with `[redacted:...]` markers (ADR-0009). |
+| Robot JSON/JSONL, MCP, HTTP API, Web UI, Handoff Pack | Cross-boundary outputs. Secret-shaped values and secret-named JSON fields are redacted with `[redacted:<kind>]` markers (ADR-0009). The ruleset detects eleven kinds: `aws_access_key`, `aws_secret_key`, `github_token`, `gitlab_token`, `slack_token`, `google_api_key`, `stripe_key`, `api_key` (OpenAI/Anthropic/xAI), `bearer_token`, `jwt`, and `private_key`. |
 | HTTP serve | Loopback-only (Host check), random bearer token per invocation, no TLS, GET-only. Do not expose the port to a network. |
 | Offline mode | Global `--offline` flag rejects any network-requiring capability (`capability_not_supported`); the default build has no HTTP client dependency and the only socket is serve's loopback `TcpListener` (static test + CI step). |
 | Provider transcripts | Read-only. Real user session data is never modified, uploaded, or committed. |
 
-Redaction is a conservative, pattern-based ruleset (see
-`crates/agent-session-grep-cli/src/redaction.rs`). It is not a substitute for
-secret hygiene: treat any transcript content as potentially sensitive, and do
-not rely on redaction for secrets whose format is not covered by the ruleset.
+Redaction is a conservative, pattern-based ruleset: the shared detector lives in
+`crates/agent-session-grep-ports/src/redact.rs` (ruleset `v1.1`), and
+`crates/agent-session-grep-cli/src/redaction.rs` applies it to boundary
+payloads including secret-named JSON fields. Only high-confidence, structured
+formats are matched, so it is not a substitute for secret hygiene: treat any
+transcript content as potentially sensitive, and do not rely on redaction for
+secrets whose format is not covered by the ruleset.
 
 ## Dependencies
 

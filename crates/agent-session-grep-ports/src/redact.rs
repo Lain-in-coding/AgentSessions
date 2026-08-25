@@ -584,4 +584,69 @@ mod tests {
     fn ruleset_version_is_v1_1() {
         assert_eq!(RULESET_VERSION, "v1.1");
     }
+
+    /// `SECURITY.md` 原文：对外的安全承诺必须与真实检测规则一致。
+    const SECURITY_POLICY: &str = include_str!("../../../SECURITY.md");
+
+    /// 本文件原文：用来把"生产区实际发出的 redaction kind"从代码里解析出来，
+    /// 而不是在测试里手抄一份清单（手抄清单会与代码同步腐坏）。
+    const THIS_SOURCE: &str = include_str!("redact.rs");
+
+    /// 从本文件生产区（`#[cfg(test)]` 之前）解析出所有 `[redacted:<kind>]` 标记。
+    fn production_redaction_kinds() -> std::collections::BTreeSet<String> {
+        let production = THIS_SOURCE
+            .split_once("#[cfg(test)]")
+            .map(|(before, _)| before)
+            .unwrap_or(THIS_SOURCE);
+        let mut kinds = std::collections::BTreeSet::new();
+        let mut rest = production;
+        while let Some(start) = rest.find("[redacted:") {
+            let after = &rest[start + "[redacted:".len()..];
+            if let Some(end) = after.find(']') {
+                kinds.insert(after[..end].to_string());
+                rest = &after[end..];
+            } else {
+                break;
+            }
+        }
+        kinds
+    }
+
+    #[test]
+    fn security_policy_lists_every_real_redaction_kind() {
+        // SECURITY.md 此前只点名五类（AWS keys / GitHub PATs / OpenAI-Anthropic-xAI
+        // keys / Bearer tokens / PEM private keys），而检测器实际覆盖十一类——
+        // 少报的安全承诺同样是不诚实的声明，且是外部研究者读到的第一份边界说明。
+        //
+        // 这条守护双向对齐：生产代码里实际发出的每个 kind 都必须被 SECURITY.md
+        // 点名，且 SECURITY.md 不得声称存在代码里没有的 kind。kind 集合从本文件
+        // 生产区解析，新增一条 pattern 而漏改文档立即失败。
+        let kinds = production_redaction_kinds();
+        assert!(
+            kinds.len() >= 11,
+            "从生产区解析出的 redaction kind 只有 {} 个，解析逻辑可能失效：{kinds:?}",
+            kinds.len()
+        );
+
+        for kind in &kinds {
+            assert!(
+                SECURITY_POLICY.contains(kind.as_str()),
+                "SECURITY.md 未点名 redaction kind `{kind}`——对外承诺不得少报实际能力"
+            );
+        }
+
+        // 反向：文档不得声称存在代码没有实现的 kind。
+        for fabricated in ["azure_key", "gcp_service_account", "npm_token"] {
+            assert!(
+                !SECURITY_POLICY.contains(fabricated),
+                "SECURITY.md 声称检测 `{fabricated}`，但 redact.rs 无此规则"
+            );
+        }
+
+        // 文档引用的 ruleset 版本必须与常量一致。
+        assert!(
+            SECURITY_POLICY.contains(RULESET_VERSION),
+            "SECURITY.md 未引用当前 ruleset 版本 `{RULESET_VERSION}`"
+        );
+    }
 }
