@@ -1855,4 +1855,67 @@ mod tests {
         let ok = read_bounded_source(&source, 10).unwrap();
         assert_eq!(ok, b"0123456789");
     }
+
+    /// RFC-0002 原文：provider adapter 契约的权威规范。
+    const RFC_0002: &str =
+        include_str!("../../../docs/architecture/RFC-0002-provider-adapter-contract.md");
+
+    /// RFC-0002 §5 错误矩阵里的标签 → 对应的 `ProviderError` 变体名。
+    ///
+    /// 契约文档用 snake_case 标签描述错误类，代码用 Pascal 变体实现。两侧此前
+    /// 没有任何联系：重命名一个变体、或在文档里写一个不存在的标签，都不会有测试
+    /// 失败，而 `PROVIDER-ADAPTER-CONTRIBUTOR-GUIDE.md` 让贡献者按这些标签实现
+    /// adapter——标签失效等于把规范变成传说。
+    ///
+    /// 只登记"确实是错误类型"的标签：`record_recoverable` 与 `incomplete_tail`
+    /// 是处理策略（分别落在 `ParseReport.skipped` 与"不提交半截"的调用方行为上），
+    /// 不是 `ProviderError` 变体，故不在此表。
+    const RFC_0002_ERROR_LABELS: &[(&str, &str)] = &[
+        ("source_changed_during_read", "SourceChangedDuringRead"),
+        ("structural_fatal", "StructuralFatal"),
+        ("ambiguous_variant", "AmbiguousVariant"),
+    ];
+
+    #[test]
+    fn rfc_0002_error_vocabulary_maps_to_real_provider_error_variants() {
+        let source = include_str!("lib.rs");
+        // 只在生产区找变体定义，避免测试里的字符串自证。
+        let production = source
+            .split_once("#[cfg(test)]")
+            .map(|(before, _)| before)
+            .unwrap_or(source);
+
+        for (label, variant) in RFC_0002_ERROR_LABELS {
+            assert!(
+                RFC_0002.contains(&format!("`{label}`")),
+                "RFC-0002 不再提及错误标签 `{label}`——本表必须同步删除该行，\
+                 否则守护会声称文档有一条它其实没有的规范"
+            );
+            assert!(
+                production.contains(&format!("{variant}(")),
+                "RFC-0002 §5 的错误标签 `{label}` 对应的 `ProviderError::{variant}` \
+                 在生产代码里找不到——契约词汇与实现已脱节，必须同时修文档与代码"
+            );
+        }
+
+        // §6 的字段能力词汇必须与 `CapabilityLevel` 的对外字符串一致：文档写
+        // `native | derived | partial | unsupported | unknown`，代码经 serde
+        // (`rename_all = "snake_case"`) 把同一组值输出给 CLI/MCP/Web。任一侧
+        // 改名而不同步，对外文档即失真。取值走 serde 而不是手抄常量。
+        for level in [
+            crate::capability::CapabilityLevel::Native,
+            crate::capability::CapabilityLevel::Derived,
+            crate::capability::CapabilityLevel::Partial,
+            crate::capability::CapabilityLevel::Unsupported,
+            crate::capability::CapabilityLevel::Unknown,
+        ] {
+            let wire = serde_json::to_string(&level).expect("CapabilityLevel 必须可序列化");
+            let name = wire.trim_matches('"');
+            assert!(
+                RFC_0002.contains(&format!("`{name}")) || RFC_0002.contains(&format!("{name} |")),
+                "RFC-0002 §6 的字段能力词汇缺少 `{name}`——\
+                 CapabilityLevel 有该档位，契约文档不得漏档"
+            );
+        }
+    }
 }
