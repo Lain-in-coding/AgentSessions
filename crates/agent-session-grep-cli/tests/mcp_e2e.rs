@@ -40,6 +40,11 @@ fn session_wire_for_message(db: &Path, message_wire: &str) -> String {
         .expect("message must have a canonical Session placement")
 }
 
+/// 固定应用时钟（`ASG_CLOCK_MS`，2026-08-25T00:00:00Z 的 Unix 毫秒）：
+/// 与 e2e.rs 同值——rank signals 时效衰减随注入时钟确定，MCP 会话同样
+/// 注入该值保持排序/得分确定性。
+const E2E_CLOCK_MS: &str = "1787616000000";
+
 /// 以 robot 模式跑一次 CLI：仅用于测试前置的数据准备（ingest 夹具），不涉 MCP。
 fn run_cli(db: &Path, args: &[&str]) -> Output {
     Command::new(BIN)
@@ -47,6 +52,7 @@ fn run_cli(db: &Path, args: &[&str]) -> Output {
         .arg(db)
         .arg("--robot")
         .args(args)
+        .env("ASG_CLOCK_MS", E2E_CLOCK_MS)
         .output()
         .expect("failed to spawn agent-session-grep binary")
 }
@@ -65,6 +71,7 @@ fn mcp_session_raw_stderr(db: &Path, lines: &[&str]) -> (Vec<Value>, String) {
         .arg("--db")
         .arg(db)
         .arg("mcp")
+        .env("ASG_CLOCK_MS", E2E_CLOCK_MS)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
