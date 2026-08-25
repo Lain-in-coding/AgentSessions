@@ -2046,13 +2046,16 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore, 
         let mut member_lists: Vec<Vec<StableId>> = Vec::with_capacity(slice.len());
         for entry in slice {
             let mut members = Vec::new();
-            if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&entry.payload) {
-                if let Some(ids) = value.get("messages").and_then(serde_json::Value::as_array) {
-                    members = ids
-                        .iter()
-                        .filter_map(|id| id.as_str().and_then(StableId::from_wire))
-                        .collect();
-                }
+            let parsed = serde_json::from_slice::<serde_json::Value>(&entry.payload).ok();
+            if let Some(ids) = parsed
+                .as_ref()
+                .and_then(|value| value.get("messages"))
+                .and_then(serde_json::Value::as_array)
+            {
+                members = ids
+                    .iter()
+                    .filter_map(|id| id.as_str().and_then(StableId::from_wire))
+                    .collect();
             }
             member_lists.push(members);
         }

@@ -159,40 +159,33 @@ mod tests {
 
     #[test]
     fn extracts_first_and_last_user_text_in_member_order() {
-        let peek = build_session_peek(
-            [
-                Some(user_payload("open the repo").as_slice()),
-                Some(br#"{"role":"assistant","text":"ok"}"#.as_slice()),
-                Some(br#"{"role":"tool","text":"output"}"#.as_slice()),
-                Some(user_payload("now fix the bug").as_slice()),
-            ]
-            .into_iter(),
-        );
+        let peek = build_session_peek([
+            Some(user_payload("open the repo").as_slice()),
+            Some(br#"{"role":"assistant","text":"ok"}"#.as_slice()),
+            Some(br#"{"role":"tool","text":"output"}"#.as_slice()),
+            Some(user_payload("now fix the bug").as_slice()),
+        ]);
         assert_eq!(peek.first_user_text.as_deref(), Some("open the repo"));
         assert_eq!(peek.last_user_text.as_deref(), Some("now fix the bug"));
     }
 
     #[test]
     fn skips_user_messages_without_text_and_missing_payloads() {
-        let peek = build_session_peek(
-            [
-                Some(br#"{"role":"user"}"#.as_slice()),
-                Some(br#"{"role":"user","text":"   "}"#.as_slice()),
-                None,
-                Some(br#"not json"#.as_slice()),
-                Some(user_payload("the only real turn").as_slice()),
-            ]
-            .into_iter(),
-        );
+        let peek = build_session_peek([
+            Some(br#"{"role":"user"}"#.as_slice()),
+            Some(br#"{"role":"user","text":"   "}"#.as_slice()),
+            None,
+            Some(br#"not json"#.as_slice()),
+            Some(user_payload("the only real turn").as_slice()),
+        ]);
         assert_eq!(peek.first_user_text.as_deref(), Some("the only real turn"));
         assert_eq!(peek.last_user_text.as_deref(), Some("the only real turn"));
     }
 
     #[test]
     fn no_user_turns_yields_null_fields_that_serialize_small() {
-        let peek = build_session_peek(
-            [Some(br#"{"role":"assistant","text":"answer"}"#.as_slice())].into_iter(),
-        );
+        let peek =
+            build_session_peek([Some(br#"{"role":"assistant","text":"answer"}"#.as_slice())]);
         assert_eq!(peek.first_user_text, None);
         assert_eq!(peek.last_user_text, None);
         assert!(peek.json_len() <= PEEK_MAX_BYTES);
@@ -203,7 +196,7 @@ mod tests {
         // ASCII (1 byte/char) stays under the byte budget even at the char cap,
         // so this test isolates the char boundary logic.
         let long = "a".repeat(500);
-        let peek = build_session_peek([Some(user_payload(&long).as_slice())].into_iter());
+        let peek = build_session_peek([Some(user_payload(&long).as_slice())]);
         let first = peek.first_user_text.expect("first user text");
         let last = peek.last_user_text.expect("last user text");
         assert_eq!(first.chars().count(), PEEK_FIELD_MAX_CHARS);
@@ -216,7 +209,7 @@ mod tests {
         // 500 emoji (4 bytes each): char-truncated fields alone would serialize
         // to ~1.6 KiB — the byte pass must cut further to honor the 1 KiB gate.
         let long = "🦀".repeat(500);
-        let peek = build_session_peek([Some(user_payload(&long).as_slice())].into_iter());
+        let peek = build_session_peek([Some(user_payload(&long).as_slice())]);
         let serialized = peek.json_len();
         assert!(
             serialized <= PEEK_MAX_BYTES,
@@ -233,7 +226,7 @@ mod tests {
         // Quotes (2x) and control bytes (6x) inflate on serialization; the loop
         // must converge on the serialized length, not the raw byte count.
         let nasty = "\u{0001}\"".repeat(300);
-        let peek = build_session_peek([Some(user_payload(&nasty).as_slice())].into_iter());
+        let peek = build_session_peek([Some(user_payload(&nasty).as_slice())]);
         let serialized = peek.json_len();
         assert!(
             serialized <= PEEK_MAX_BYTES,
