@@ -117,6 +117,15 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `verify-release.py` runs with `--db` and a committed gate fixture.
 - Redaction now covers secrets embedded inside prose (previously only
   whole-string secrets were matched).
+- Error output at the Robot/JSON boundary now follows the same redaction
+  discipline as success envelopes: error messages and details go through the
+  shared redaction engine, and `ProviderError::Io` OS text (which can embed
+  real absolute transcript paths on Windows) is masked at conversion, like
+  `PortError::SourceIo`. MCP error frames share the same masking.
+- The entry-point consistency e2e test skips (instead of failing the suite)
+  when no Python interpreter is available.
+- CI now runs the `semantic-candle` feature test suite, so that module is
+  covered by the quality gate.
 
 ### Planned for 0.1.0
 
