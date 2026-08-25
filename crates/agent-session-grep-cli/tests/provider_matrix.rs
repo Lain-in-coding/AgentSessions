@@ -823,6 +823,103 @@ fn readme_provider_table_matches_capability_matrix_maturity() {
     }
 }
 
+/// README Providers 表里 Format 列描述的源格式家族 → 该家族在
+/// `AdapterManifest::streaming_support` 上的权威分类。
+///
+/// README 的 Format 列是访客判断"我的历史能不能被索引"的唯一依据，却是手写散文。
+/// 它不能逐字对照代码，但它声明的**格式家族**是可判定的：`manifest.rs` 的
+/// `source_consumption()` 按格式把每个 provider 分为 record-stream（逐行 JSONL）
+/// 与 bounded-whole-source（整份 JSON / Markdown / SQLite）。README 说 "SQLite"
+/// 而 manifest 分类为 record stream（或反之），两者必有一个是假的。
+fn readme_format_is_whole_source(format: &str) -> Option<bool> {
+    let lowered = format.to_ascii_lowercase();
+    if lowered.starts_with('—') || lowered.starts_with("— ") {
+        return None; // deferred provider：无格式声明
+    }
+    // SQLite 与整份 JSON/Markdown 需要完整源；JSONL 是逐行流式。
+    if lowered.contains("sqlite") || lowered.contains("vscdb") {
+        return Some(true);
+    }
+    if lowered.contains("jsonl") {
+        return Some(false);
+    }
+    if lowered.contains("markdown") || lowered.contains("json") {
+        return Some(true);
+    }
+    None
+}
+
+#[test]
+fn readme_provider_format_column_matches_manifest_source_consumption() {
+    // README 的 Status 列已被 `readme_provider_table_matches_capability_matrix_maturity`
+    // 守护，Format 列此前没有任何守护——而它比 Status 更容易悄悄失真：adapter 换了
+    // 解析路径（例如从 JSONL 改为整份 JSON）时，capability.rs 的 maturity 不变，
+    // README 的散文描述也不会有人想起来改。
+    //
+    // 可判定的部分是格式家族：`AdapterManifest::streaming_support` 由 manifest.rs 的
+    // `source_consumption()` 按真实解析方式给出（record stream vs bounded whole
+    // source），是代码事实而非文档声明。这里把 README 的 Format 文字归一化成同一个
+    // 二分类再比对。
+    use agent_session_grep_ports::manifest::StreamingSupport;
+
+    let rows = readme_provider_rows();
+    let adapters = implemented_adapters_with_fixtures();
+    assert_eq!(
+        adapters.len(),
+        14,
+        "implemented_adapters_with_fixtures 必须覆盖 14 个已实现 provider"
+    );
+
+    // README 用人读展示名（"Claude Code"），capability.rs 用 provider_id
+    // （"claude-code"）。归一化后按名字对齐，避免再手抄一张映射表。
+    let normalize = |name: &str| {
+        name.to_ascii_lowercase()
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .collect::<String>()
+    };
+
+    let mut checked = 0usize;
+    for (adapter, _) in &adapters {
+        let provider_id = adapter.provider_id();
+        let manifest = adapter.manifest();
+        let expects_whole_source = match manifest.streaming_support {
+            StreamingSupport::BoundedWholeSource => true,
+            StreamingSupport::RecordStream => false,
+        };
+
+        // provider_id 去掉分隔符后必须是某个 README 展示名的前缀或相等
+        // （"claude-code"→"claudecode" 对 "Claude Code"→"claudecode"；
+        // "codex"→"codex" 对 "Codex CLI"→"codexcli"）。
+        let id_key = normalize(provider_id);
+        let row = rows.iter().find(|(name, _, _)| {
+            let name_key = normalize(name);
+            name_key == id_key || name_key.starts_with(&id_key) || id_key.starts_with(&name_key)
+        });
+        let Some((name, _, format)) = row else {
+            panic!("README Providers 表缺少 provider `{provider_id}` 对应行");
+        };
+
+        let Some(readme_whole_source) = readme_format_is_whole_source(format) else {
+            panic!(
+                "README provider `{name}` 的 Format 列 `{format}` 无法归类为 \
+                 record-stream 或 whole-source——请让描述明确包含格式家族关键词"
+            );
+        };
+        assert_eq!(
+            readme_whole_source, expects_whole_source,
+            "README provider `{name}` 的 Format 列 `{format}` 描述的格式家族与 \
+             manifest.streaming_support ({:?}) 矛盾——两者必有一个是假的",
+            manifest.streaming_support
+        );
+        checked += 1;
+    }
+    assert_eq!(
+        checked, 14,
+        "必须逐一核对 14 个已实现 provider 的 Format 列"
+    );
+}
+
 /// 每个已实现 provider 的 (adapter, golden fixture 字节)：`probe`/`parse` 两列的
 /// 声明必须靠真实 adapter 跑真实 fixture 反证，故这里同时要 adapter 实例与输入字节。
 ///
