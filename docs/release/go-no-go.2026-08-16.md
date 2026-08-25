@@ -639,6 +639,20 @@ remain exactly the ones named in §7.2/§7.3: CI billing, owner sign-off, and
 provider Beta promotion (all 14 stay Experimental with the ledger recording
 the remaining local gaps).
 
+Closed 2026-08-26 (installer-smoke local rehearsal, `main` at `d86ee52`):
+the CI `installer` job was the one remaining gate with no local equivalent.
+Its full Windows chain was reproduced on the development machine against a
+fresh `ci-prefix`: `install.ps1 -SkipBuild` copied both command files with a
+sha256, `surface smoke` passed all 34 assertions (`--version`, `doctor`,
+`sync` over a synthetic 3-message fixture, `search`/`get`/`context`/`status`,
+documented exit codes 2/4, the MCP stdio handshake listing exactly 9 tools,
+and `tools/call get_status`/`get_message` both `isError:false`), and
+`uninstall.ps1` removed exactly the two installer-owned files then reported
+"not installed" on a second run with exit 0. The macOS/Linux installer paths
+share the same smoke assertion scripts but remain unexecuted on this machine
+(still CI-billing blocked). That evidence is recorded here rather than in
+`last_certified_targets`, which requires a named cross-target CI success.
+
 ---
 
 ## 8. Recommendation
