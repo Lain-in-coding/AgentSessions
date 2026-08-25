@@ -155,7 +155,9 @@ fn golden_corpus_carries_no_tool_structure() {
         };
         for part in content.as_array().expect("array checked above") {
             assert_eq!(
-                part.get("type").and_then(serde_json::Value::as_str).unwrap_or(""),
+                part.get("type")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or(""),
                 "text",
                 "golden 语料出现非 text 的 content part（{part}）：若这是新格式知识，\
                  capability.rs 的 tool_activity 声明与 adapter 提取必须同步升级"
