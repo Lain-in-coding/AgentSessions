@@ -535,6 +535,59 @@ fn claude_tool_activity_claim_is_backed_by_observed_emissions() {
     }
 }
 
+#[test]
+fn capability_context_claim_matches_pinned_golden_parent_links() {
+    // `context` 声明的是"能否重建会话上下文图"。图的边只有一个来源：adapter 发出的
+    // `parent_native_id`（sqlite 的 `message_edges` 由它写入，`context_mainline` 沿这些
+    // 边逐级 `resolve_parent` 回溯）。代码里没有任何按序号合成边的回退路径，因此
+    // "pinned golden 里没有任何一条消息带 parent_native_id" 的 provider 结构上无法
+    // 重建图——声明必须是 Unsupported；反之声明可用就必须真有边。
+    //
+    // 这条与 `capability_source_span_claim_matches_pinned_golden_span_presence` 是同一
+    // 纪律的第三条：能力列不能靠人工填，必须由真实 adapter 输出反证。
+    let matrix = ProviderCapabilityMatrix::current();
+    for cap in matrix
+        .providers
+        .iter()
+        .filter(|p| p.maturity != ProviderMaturity::Unsupported)
+    {
+        let messages = pinned_messages(&cap.provider_id);
+        let with_parent = messages
+            .iter()
+            .filter(|m| {
+                !m["parent_native_id"]
+                    .as_str()
+                    .unwrap_or("")
+                    .trim()
+                    .is_empty()
+            })
+            .count();
+        match cap.context {
+            CapabilityLevel::Native | CapabilityLevel::Derived | CapabilityLevel::Partial => {
+                assert!(
+                    with_parent > 0,
+                    "{}: capability.rs 声明 context={:?}，但 pinned golden 里没有任何消息带 \
+                     parent_native_id——没有边就没有上下文图（虚报）",
+                    cap.provider_id,
+                    cap.context
+                );
+            }
+            CapabilityLevel::Unsupported => {
+                assert_eq!(
+                    with_parent, 0,
+                    "{}: capability.rs 声明 context=Unsupported，但 pinned golden 里有 \
+                     {with_parent} 条消息带 parent_native_id（少报，图其实可建）",
+                    cap.provider_id
+                );
+            }
+            CapabilityLevel::Unknown => panic!(
+                "{}: 已实现 provider 的 context 不得为 Unknown",
+                cap.provider_id
+            ),
+        }
+    }
+}
+
 /// 一段最小 Codex rollout：assistant 消息（提供锚点）+ 配对的
 /// `custom_tool_call` / `function_call_output`。codex 的 golden fixture 只有
 /// `session_meta` + `message`，不触发 activity，故这里用测试局部输入驱动——它

@@ -178,7 +178,13 @@ impl ProviderCapabilityMatrix {
                     probe: CapabilityLevel::Native,
                     parse: CapabilityLevel::Native,
                     search: CapabilityLevel::Native,
-                    context: CapabilityLevel::Native,
+                    // Codex rollout 是线性序列，不带显式 threading 边：adapter 对每条
+                    // 消息硬编码 `parent_native_id: None`（见 provider-codex 模块文档
+                    // "无 `parentUuid`……故 parent 一律 `None`（诚实：不编造上层可推断
+                    // 的线性链）"）。没有边就没有上下文图可组装——`context` 从
+                    // Native 降级为 Unsupported，此前的 Native 是虚报，由
+                    // `capability_context_claim_matches_pinned_golden_parent_links` 抓出。
+                    context: CapabilityLevel::Unsupported,
                     resume: CapabilityLevel::Derived,
                     handoff: CapabilityLevel::Unsupported,
                     tool_activity: CapabilityLevel::Partial,
