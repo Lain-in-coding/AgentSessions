@@ -137,6 +137,7 @@ certified — currently 0 Beta. **Not release-ready per provider gate.**
 | 18 | Three release-facing documents cited implementation evidence that nothing verified, so each could silently decay into a false claim: the MCP CONTRACT §8 tool list was pinned only against a hand-copied array in the test (editing the doc failed nothing, editing the catalog forced no doc update); ADR-0010 §1's evidence table still described golden fixtures as a Claude/Codex-only path and `AdapterManifest` as unimplemented, though all 14 providers carry goldens at `fixture_revision=1` and `manifest_for` has shipped; and this ledger's provider row still called `known_limitations` incomplete. All three now read their cited source through `include_str!` and fail on drift in either direction | P1 | closed | this task |
 | 19 | The `tool_activity` guard was one-directional: it rejected a provider claiming support with no anchorable messages, but never rejected one that really emits activities while declaring `Unsupported`. Every other capability column already had both directions, so adding `emit_activity` to any of the twelve `Unsupported` adapters would have gone unnoticed — the exact asymmetry that let rows 16 and 17 through | P1 | closed | this task |
 | 20 | `SECURITY.md` promised redaction of five secret shapes (AWS keys, GitHub PATs, OpenAI/Anthropic/xAI keys, Bearer tokens, PEM private keys) while the shared detector implements eleven, and pointed at the CLI applier as if it were the ruleset. An under-claimed security boundary is still a false boundary statement, and it is the first one an external researcher reads. The policy now names all eleven kinds, cites the ruleset version and the real detector path, and `security_policy_lists_every_real_redaction_kind` parses the kinds out of `redact.rs`'s production region so a new pattern cannot ship without the promise following it | P1 | closed | this task |
+| 21 | Two rot classes remained in the documents an outside contributor actually follows. Every repo path cited in the root documents (NOTICE's attribution targets, SECURITY.md's detector location, CHANGELOG's guard files) could be invalidated by any rename with nothing failing, turning verifiable evidence into dead references. And RFC-0002's contract vocabulary — the §5 error labels and §6 capability tiers that `PROVIDER-ADAPTER-CONTRIBUTOR-GUIDE.md` instructs new adapters to implement — had no tie to `ProviderError` or `CapabilityLevel` at all, so renaming a variant would leave the specification describing an API that no longer exists | P1 | closed | this task |
 
 ---
 
@@ -522,6 +523,40 @@ can leave a stale snapshot compiled into the test binary — the guard reported 
 missing `v1.1` that was present on disk until the source was touched. Any future
 document guard should be re-run after a `touch` of its host file before its
 result is believed. Local gate green at 1512 tests.
+
+Closed 2026-08-25 (§6 row 21, `main` at `b1686a1` and `a8a7c76`): the last two
+rot classes were about references rather than claims. Root documents cite repo
+paths in backticks as the evidence a reader is supposed to follow — NOTICE points
+at the file retaining an upstream copyright line, SECURITY.md at the detector,
+the CHANGELOG at the test enforcing a guarantee — and a refactor that moves any
+of them silently turns a verifiable citation into a dead end with nothing failing.
+`root_docs_cited_repo_paths_all_resolve` extracts every backticked fragment that
+contains a slash and ends in a source or document extension from the six root
+documents, then requires it to resolve either at the repository root or under
+some crate (the CHANGELOG writes `tests/network_egress.rs` crate-relative).
+Fragments that look like paths but are not — the `handoff-pack/v1` schema name,
+the `intfloat/multilingual-e5-small` model id, the ACP `session/update` method,
+gitignored files, and release-time generated inventories — sit in an explicit
+`NON_PATH_IDENTIFIERS` list with a stated reason each, rather than being guessed
+at by a regex. Sixteen citations are checked; inventing one that does not exist
+fails.
+
+The second is the contract vocabulary itself. RFC-0002 §5 grades failures with
+snake_case labels (`source_changed_during_read`, `structural_fatal`,
+`ambiguous_variant`) and §6 lists the field capability tiers, and the contributor
+guide instructs new adapter authors to report exactly those labels — but nothing
+connected either list to the code. Renaming a `ProviderError` variant, or writing
+a label the enum never had, would have left the specification intact and wrong.
+`rfc_0002_error_vocabulary_maps_to_real_provider_error_variants` requires each
+registered label to still appear in the RFC and its variant to exist in the
+production region of `ports/src/lib.rs`, and requires every `CapabilityLevel`
+tier to appear in §6's vocabulary. The two labels that are handling strategies
+rather than error types (`record_recoverable`, which lands in
+`ParseReport.skipped`, and `incomplete_tail`, which is a caller obligation not to
+commit a partial tail) are documented as deliberately out of the table.
+Mutation-verified in three directions each. Local gate green at 1514 unique
+tests (1548 as reported, since the CLI's unit tests run once per bin and the
+crate builds two).
 
 Closed by the 2026-08-17 release-gap wave (post-draft audit fixes, pushed to
 `main` at `ed57a9a`): Robot v1.1 `searchData.facets` schema echo + protocol
