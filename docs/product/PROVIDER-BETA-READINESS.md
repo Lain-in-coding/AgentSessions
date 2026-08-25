@@ -28,7 +28,7 @@ Legend for local columns: `ok` = present with tests; `partial` = present with kn
 |---|---|---|---|---|---|---|---|---|---|
 | claude-code | ok | ok | ok | native | ok (native) | partial | derived | derived | richer tool-call extraction; owner promotion still required |
 | codex | ok | ok | ok | native | ok (native) | partial | derived | derived | richer tool-call extraction; owner promotion still required |
-| grok-build | ok | ok | ok | native | ok (native) | missing | derived | derived | no tool_activity; synthetic msg ids |
+| grok-build | ok | ok | ok | native | ok (native) | missing | derived | derived | format carries structured tool records (`_meta.bashCommand` meta chunks) but no per-message native id — tool_activity cannot anchor, honestly Unsupported; synthetic msg ids |
 | antigravity | ok | ok | ok | native | ok (native) | missing | unknown | derived | no in-file session id; no tool_activity |
 | opencode | ok | ok | ok | native | missing | missing | unknown | derived | no span (SQLite source has no in-file byte offsets); no resume template |
 | pi | ok | ok | ok | native | ok (native) | missing | derived | derived | no tool_activity |

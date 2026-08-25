@@ -233,6 +233,11 @@ impl ProviderCapabilityMatrix {
                     // 与矩阵一致标记 Derived（audit P1-2 drift 测试守护）。
                     resume: CapabilityLevel::Derived,
                     handoff: CapabilityLevel::Derived,
+                    // ACP 流确有结构化工具记录（user_message_chunk 的
+                    // `content._meta.bashCommand`，adapter 作为非对话元 chunk 跳过），
+                    // 但格式无 per-message native id（promptId/promptIndex 是
+                    // prompt 级分组键）——消息以空 native id 上报，活动无法锚定
+                    // （staging fail-closed 丢弃）。如实保持 Unsupported。
                     tool_activity: CapabilityLevel::Unsupported,
                     source_span: CapabilityLevel::Native,
                     incremental: CapabilityLevel::Derived,
