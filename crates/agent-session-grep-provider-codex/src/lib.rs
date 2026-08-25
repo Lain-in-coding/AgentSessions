@@ -206,10 +206,13 @@ struct RawPayload {
     /// 角色（`developer` / `user` / `assistant`）。
     #[serde(default)]
     role: String,
-    /// Message 的 content-block 数组。非 message 的 response_item（例如
-    /// reasoning）可能显式写入 null，必须先按 payload type 分类再解释。
+    /// Message 的 content。官方形态是 block 数组，但旧样本存在字符串
+    /// 形态（cc-switch `session-manager.md` 文档化 `content: string`），
+    /// 对象形态（`{"text": ...}`）同样见于真实 rollout。三形态都解析；
+    /// 非 message 的 response_item（例如 reasoning）可能显式写入 null，
+    /// 必须先按 payload type 分类再解释。
     #[serde(default)]
-    content: Option<Vec<RawBlock>>,
+    content: Option<serde_json::Value>,
     /// durable 会话 id（仅 `session_meta` 的 payload 携带）。
     #[serde(default)]
     session_id: Option<String>,
@@ -261,24 +264,26 @@ struct PendingToolCall {
     anchor: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-struct RawBlock {
-    /// 仅抽取带 `text` 的 block（如 `input_text` / `output_text`）；
-    /// 工具调用等无 text 的 block 被忽略。
-    #[serde(default)]
-    text: Option<String>,
-}
-
 impl RawPayload {
-    /// 抽取可检索纯文本；按顺序拼接各 block 的 text。
+    /// 抽取可检索纯文本；三形态按 cc-switch `extract_text` 语义分派：
+    /// 字符串原样、block 数组按顺序拼接各 block 的 text、对象取 `text`
+    /// 字段。未知/缺失形态返回 `None`（调用方按 recoverable skip 处理）。
     fn to_plain_text(&self) -> Option<String> {
-        self.content.as_ref().map(|content| {
-            content
-                .iter()
-                .filter_map(|b| b.text.as_deref())
-                .collect::<Vec<_>>()
-                .join("\n")
-        })
+        match self.content.as_ref()? {
+            serde_json::Value::String(text) => Some(text.clone()),
+            serde_json::Value::Array(items) => Some(
+                items
+                    .iter()
+                    .filter_map(|item| item.get("text").and_then(serde_json::Value::as_str))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+            serde_json::Value::Object(map) => map
+                .get("text")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+            _ => None,
+        }
     }
 }
 
@@ -1143,6 +1148,46 @@ mod tests {
             .expect("parse synthetic rollout");
         let texts = sink.messages.into_iter().map(|m| m.text).collect();
         (report, texts)
+    }
+
+    #[test]
+    fn parse_handles_string_shaped_content_with_noise_filtering() {
+        // 旧样本形态：content 是裸字符串（cc-switch `session-manager.md` 文档化
+        // `content: string`）。此前 serde 只认 block 数组，字符串形态整条
+        // recoverable-skip（正常消息也丢失）；现在三形态解析，注入行带噪声
+        // 诊断名跳过、正常字符串消息进索引。
+        let rollout = |role: &str, text: &str| {
+            serde_json::to_vec(&serde_json::json!({
+                "timestamp": "2026-07-19T23:40:01.000Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "id": "string-shape-id",
+                    "role": role,
+                    "content": text,
+                },
+            }))
+            .expect("serialize synthetic rollout")
+        };
+
+        let mut sink = CollectingSink::default();
+        let report = CodexAdapter::new()
+            .parse(
+                &rollout("user", "# AGENTS.md instructions for /tmp/project\n<INSTRUCTIONS>Do stuff</INSTRUCTIONS>"),
+                &mut sink,
+            )
+            .expect("parse string-shaped noise");
+        assert_eq!(report.committed, 0, "string-shaped noise must be filtered");
+        assert_eq!(report.skipped, 1);
+        assert!(report.diagnostics[0].contains("injected noise envelope"));
+
+        let mut sink = CollectingSink::default();
+        let report = CodexAdapter::new()
+            .parse(&rollout("user", "Fix the login bug"), &mut sink)
+            .expect("parse string-shaped user message");
+        assert_eq!(report.committed, 1, "genuine string-shaped text must index");
+        assert_eq!(sink.messages.len(), 1);
+        assert_eq!(sink.messages[0].text, "Fix the login bug");
     }
 
     #[test]
