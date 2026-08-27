@@ -12,7 +12,10 @@
 //! 5. 会话身份：session_native_id == 首个 session 头 id，cwd pair 同源保留，
 //!    多 id 时 fail-closed 为 Ambiguous；
 //! 6. 坏行与无 body 的 message 只递增 skipped/diagnostics，绝不吞消息、绝不中止；
-//! 7. probe 对任意字节永不 panic；Ok 时 confidence 非 Ambiguous 且 variant 恒为自身。
+//! 7. probe 对任意字节永不 panic；Ok 时 confidence 非 Ambiguous 且 variant 恒为自身；
+//! 8. v2/v3 会话树血缘（头部 `version` + 逐条 `id`/`parentId`，含同 parentId 的
+//!    分支）必须被如实上报为一条诊断而非静默按线性解析，且 Pi 的 entry id 不得
+//!    被提升为 native 消息身份。
 //!
 //! 另含 golden fixture 的 seeded 确定性变异（截断 / 插入 / 删除 / 翻转 / 拆行 /
 //! 乱序行）语料：parse 永不 panic——Ok 则消息字段合法（span 界内且回切源行、
@@ -28,12 +31,16 @@ use agent_session_grep_ports::MetadataResolution;
 use agent_session_grep_ports::{
     CanonicalEventSink, Confidence, MessageEvent, ParseReport, ProviderAdapter,
 };
-use agent_session_grep_provider_pi::PiAdapter;
+use agent_session_grep_provider_pi::{PI_BRANCH_LINEAGE_DIAGNOSTIC_PREFIX, PiAdapter};
 use agent_session_grep_testkit::assert_read_only;
 use serde_json::{Value, json};
 
 const VARIANT_ID: &str = "pi/session-jsonl-v1";
 const FIXTURE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/basic.jsonl");
+const V3_FIXTURE_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/golden/v3-branched.jsonl"
+);
 
 /// 收集 emit 的消息事件；派生 PartialEq 以支撑"两次解析逐字段一致"断言。
 #[derive(Default)]
@@ -178,6 +185,14 @@ struct Case {
     saw_non_conversational: bool,
     saw_empty_content: bool,
     saw_msg_ts_number: bool,
+    /// 本用例是否注入了 v3 形态（头部 `version` + 逐条 `id`/`parentId`）。
+    lineage_shaped: bool,
+    /// 携带非空 `parentId` 的记录数（含非对话记录）。
+    lineage_records: usize,
+    /// 是否应恰好产生一条会话树血缘诊断（version>=2 或存在非空 parentId）。
+    lineage_expected: bool,
+    /// 是否生成了同一 `parentId` 的两条以上子记录（真实分支）。
+    saw_branch: bool,
 }
 
 /// message.content 形态；`text()` 与生产 `pi_content_text` 的抽取结果一致。
@@ -280,6 +295,17 @@ fn build_case(seed: u64, with_big_field: bool) -> Case {
     let mut saw_empty_content = false;
     let mut saw_msg_ts_number = false;
 
+    // v3 形态：一半种子把语料生成成 parent-linked 会话树（头部 version=3 +
+    // 逐条 8 位十六进制 entry id + parentId），另一半保持 v1 线性——两侧都必须
+    // 被覆盖，否则诊断的正/负向都无从检验。
+    let lineage_shaped = rng.chance(1, 2);
+    let mut entry_counter: u32 = 0;
+    let mut emitted_ids: Vec<String> = Vec::new();
+    let mut lineage_records = 0usize;
+    let mut versioned_headers = 0usize;
+    let mut saw_branch = false;
+    let mut parented: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+
     // 会话头配额 0..=3：25% 的种子没有任何 session 头 → 无会话 id 分支。
     let n_header_quota = rng.below(4);
     let mut headers_emitted = 0usize;
@@ -288,11 +314,24 @@ fn build_case(seed: u64, with_big_field: bool) -> Case {
     for i in 0..line_count {
         let roll = rng.next_u64() % 100;
         let (record, maybe_msg) = if with_big_field && i == 0 {
+            let lineage = lineage_shaped.then(|| {
+                assign_lineage(
+                    &mut rng,
+                    &mut entry_counter,
+                    &mut emitted_ids,
+                    &mut lineage_records,
+                    &mut parented,
+                    &mut saw_branch,
+                )
+            });
             let record = render_message(
                 "user",
                 &PiContent::Str(big_text()),
                 None,
                 Some("2026-01-01T00:00:00Z"),
+                lineage
+                    .as_ref()
+                    .map(|(id, parent)| (id.as_str(), parent.as_deref())),
             );
             (
                 record,
@@ -340,6 +379,11 @@ fn build_case(seed: u64, with_big_field: bool) -> Case {
             if rng.chance(1, 2) {
                 record["timestamp"] = json!("2026-01-01T00:00:00Z");
             }
+            if lineage_shaped {
+                // 会话头的 `id` 是会话身份，不是 entry id；v3 的判别位是 `version`。
+                record["version"] = json!(3);
+                versioned_headers += 1;
+            }
             (record.to_string(), None)
         } else if roll < 65 {
             // message 记录：role user/assistant 产出消息，其余静默略过。
@@ -364,7 +408,25 @@ fn build_case(seed: u64, with_big_field: bool) -> Case {
                     (Some(json!(123456)), Some("2026-01-01T00:01:00Z"))
                 }
             };
-            let record = render_message(role, &content, msg_ts.as_ref(), rec_ts);
+            let record = render_message(
+                role,
+                &content,
+                msg_ts.as_ref(),
+                rec_ts,
+                lineage_shaped
+                    .then(|| {
+                        assign_lineage(
+                            &mut rng,
+                            &mut entry_counter,
+                            &mut emitted_ids,
+                            &mut lineage_records,
+                            &mut parented,
+                            &mut saw_branch,
+                        )
+                    })
+                    .as_ref()
+                    .map(|(id, parent)| (id.as_str(), parent.as_deref())),
+            );
             let msg = if matches!(role, "user" | "assistant") && !text.trim().is_empty() {
                 let timestamp = msg_ts
                     .as_ref()
@@ -380,22 +442,45 @@ fn build_case(seed: u64, with_big_field: bool) -> Case {
             // message 记录但缺 message body：record_recoverable，计 skipped。
             saw_bodyless = true;
             skipped += 1;
-            let record = json!({
+            let mut record = json!({
                 "type": "message",
                 "timestamp": "2026-01-01T00:02:00Z",
-            })
-            .to_string();
-            (record, None)
+            });
+            if lineage_shaped {
+                let (id, parent) = assign_lineage(
+                    &mut rng,
+                    &mut entry_counter,
+                    &mut emitted_ids,
+                    &mut lineage_records,
+                    &mut parented,
+                    &mut saw_branch,
+                );
+                record["id"] = json!(id);
+                record["parentId"] = parent.map_or(Value::Null, |parent| json!(parent));
+            }
+            (record.to_string(), None)
         } else if roll < 80 {
-            // 非会话 type：静默略过，不计 skipped。
+            // 非会话 type：静默略过，不计 skipped——但它同样是会话树节点，
+            // 其 parentId 必须计入血缘事实，否则会低报"这是一棵树"。
             saw_non_conversational = true;
-            let kind = rng.pick(&NON_CONVERSATIONAL);
-            let record = json!({
+            let kind = rng.pick(&NON_CONVERSATIONAL).to_string();
+            let mut record = json!({
                 "type": kind,
                 "name": "synthetic",
-            })
-            .to_string();
-            (record, None)
+            });
+            if lineage_shaped {
+                let (id, parent) = assign_lineage(
+                    &mut rng,
+                    &mut entry_counter,
+                    &mut emitted_ids,
+                    &mut lineage_records,
+                    &mut parented,
+                    &mut saw_branch,
+                );
+                record["id"] = json!(id);
+                record["parentId"] = parent.map_or(Value::Null, |parent| json!(parent));
+            }
+            (record.to_string(), None)
         } else if roll < 92 {
             skipped += 1;
             (rng.pick(&MALFORMED_POOL).to_string(), None)
@@ -423,11 +508,24 @@ fn build_case(seed: u64, with_big_field: bool) -> Case {
 
     // 属性前提是"存在有效记录"；极端种子下若一条未生成则强制补一条。
     if expected.is_empty() {
+        let lineage = lineage_shaped.then(|| {
+            assign_lineage(
+                &mut rng,
+                &mut entry_counter,
+                &mut emitted_ids,
+                &mut lineage_records,
+                &mut parented,
+                &mut saw_branch,
+            )
+        });
         let record = render_message(
             "user",
             &PiContent::Str("forced valid record".to_string()),
             None,
             None,
+            lineage
+                .as_ref()
+                .map(|(id, parent)| (id.as_str(), parent.as_deref())),
         );
         expected.push(ExpectedMessage {
             role: "user".to_string(),
@@ -461,6 +559,10 @@ fn build_case(seed: u64, with_big_field: bool) -> Case {
         saw_non_conversational,
         saw_empty_content,
         saw_msg_ts_number,
+        lineage_shaped,
+        lineage_records,
+        lineage_expected: lineage_records > 0 || versioned_headers > 0,
+        saw_branch,
     }
 }
 
@@ -469,16 +571,59 @@ fn render_message(
     content: &PiContent,
     msg_ts: Option<&Value>,
     rec_ts: Option<&str>,
+    lineage: Option<(&str, Option<&str>)>,
 ) -> String {
     let mut message = json!({"role": role, "content": content.to_json()});
     if let Some(ts) = msg_ts {
         message["timestamp"] = ts.clone();
     }
     let mut record = json!({"type": "message", "message": message});
+    if let Some((id, parent)) = lineage {
+        record["id"] = json!(id);
+        record["parentId"] = match parent {
+            Some(parent) => json!(parent),
+            None => Value::Null,
+        };
+    }
     if let Some(ts) = rec_ts {
         record["timestamp"] = json!(ts);
     }
     record.to_string()
+}
+
+/// 给一条 v3 记录分配 entry id 与 `parentId`。
+///
+/// id 形如 `aa0000xx`——刻意复刻真实 Pi 的 8 位十六进制 entry id（本机证据：
+/// agent-sessions 的 pi stage0 fixture），因为"仅文件内唯一的短 id"正是本
+/// adapter 不把它提升为 native 消息身份的原因。返回的 parent 为 `None` 表示
+/// 显式 `null` 根记录；1/3 概率挂到较早的记录上，从而生成同 parentId 的真实分支。
+fn assign_lineage(
+    rng: &mut XorShift64Star,
+    counter: &mut u32,
+    emitted: &mut Vec<String>,
+    lineage_records: &mut usize,
+    parented: &mut std::collections::BTreeMap<String, usize>,
+    saw_branch: &mut bool,
+) -> (String, Option<String>) {
+    let id = format!("{:08x}", 0xaa00_0000u32 + *counter);
+    *counter += 1;
+    let parent = if emitted.is_empty() || rng.chance(1, 8) {
+        None
+    } else if rng.chance(1, 3) {
+        Some(emitted[rng.below(emitted.len())].clone())
+    } else {
+        Some(emitted[emitted.len() - 1].clone())
+    };
+    if let Some(parent) = &parent {
+        *lineage_records += 1;
+        let children = parented.entry(parent.clone()).or_insert(0);
+        *children += 1;
+        if *children >= 2 {
+            *saw_branch = true;
+        }
+    }
+    emitted.push(id.clone());
+    (id, parent)
 }
 
 fn parse_case(seed: u64, bytes: &[u8]) -> (ParseReport, Vec<Captured>) {
@@ -584,11 +729,11 @@ fn prop_metadata_survives_verbatim() {
             );
             assert_eq!(
                 got.native_id, "",
-                "seed={seed} seq={seq}: pi 无原生消息 id，native_id 恒空"
+                "seed={seed} seq={seq}: Pi 的 entry id 仅文件内唯一，不得提升为 native_id"
             );
             assert_eq!(
                 got.parent_native_id, None,
-                "seed={seed} seq={seq}: pi 无 threading 边"
+                "seed={seed} seq={seq}: v2/v3 的 parentId 只上报为诊断，不发出 parent 边"
             );
             assert!(!got.is_sidechain, "seed={seed} seq={seq}: pi 无 sidechain");
         }
@@ -647,7 +792,8 @@ fn prop_session_identity_matches_ground_truth() {
 }
 
 /// 性质 6：坏行与无 body 的 message 只递增 skipped/diagnostics（一一对应），
-/// 绝不吞消息、绝不中止解析。diagnostics = skipped +（多会话 ? 1 : 0）。
+/// 绝不吞消息、绝不中止解析。diagnostics = skipped +（多会话 ? 1 : 0）
+/// +（会话树血缘 ? 1 : 0）。
 #[test]
 fn prop_malformed_and_bodyless_lines_only_skip_never_abort() {
     for_each_seed(|seed, case| {
@@ -658,13 +804,53 @@ fn prop_malformed_and_bodyless_lines_only_skip_never_abort() {
         );
         assert_eq!(
             report.diagnostics.len(),
-            case.skipped + usize::from(case.multi_session),
-            "seed={seed}: 诊断数必须 = skipped + 多会话诊断"
+            case.skipped + usize::from(case.multi_session) + usize::from(case.lineage_expected),
+            "seed={seed}: 诊断数必须 = skipped + 多会话诊断 + 会话树血缘诊断"
         );
         assert_eq!(
             captured.len(),
             case.expected.len(),
             "seed={seed}: 坏行不得吞掉或伪造任何消息"
+        );
+    });
+}
+
+/// 性质 8：v2/v3 会话树血缘必须被如实上报，且只报一次。
+///
+/// 这条堵的是本切片修的那个缺陷：v3 文件会被 probe 命中并按线性解析，分支结构
+/// 静默消失。正向——含 `version>=2` 或非空 `parentId` 的语料必须恰好一条诊断，
+/// 且诊断里的血缘记录数与注入数逐字相等（含非对话记录）；负向——v1 线性语料
+/// 一条也不能有，否则诊断退化成噪音。两侧都断言"消息数不变"：血缘上报绝不能
+/// 以丢弃任何分支的正文为代价。
+#[test]
+fn prop_v3_lineage_is_reported_never_silently_dropped() {
+    for_each_seed(|seed, case| {
+        let (report, captured) = parse_case(seed, &case.bytes);
+        let lineage: Vec<&String> = report
+            .diagnostics
+            .iter()
+            .filter(|d| d.starts_with(PI_BRANCH_LINEAGE_DIAGNOSTIC_PREFIX))
+            .collect();
+        assert_eq!(
+            lineage.len(),
+            usize::from(case.lineage_expected),
+            "seed={seed}: 血缘诊断数必须与语料事实一致（lineage_shaped={}, \
+             lineage_records={}）；实际诊断 {:?}",
+            case.lineage_shaped,
+            case.lineage_records,
+            report.diagnostics
+        );
+        if let Some(diagnostic) = lineage.first() {
+            assert!(
+                diagnostic.contains(&format!("{} 条记录带 parentId", case.lineage_records)),
+                "seed={seed}: 诊断必须报出注入的血缘记录数 {}，实际：{diagnostic}",
+                case.lineage_records
+            );
+        }
+        assert_eq!(
+            captured.len(),
+            case.expected.len(),
+            "seed={seed}: 上报血缘不得以丢弃任何分支消息为代价"
         );
     });
 }
@@ -679,6 +865,9 @@ fn prop_corpus_coverage_is_not_degenerate() {
     let mut saw_ts_number = false;
     let mut saw_session = false;
     let mut saw_no_session = false;
+    let mut saw_lineage = false;
+    let mut saw_no_lineage = false;
+    let mut saw_branch = false;
     for (i, seed) in fixed_seeds().iter().copied().enumerate() {
         let case = build_case(seed, i == 0);
         saw_bodyless |= case.saw_bodyless;
@@ -687,6 +876,9 @@ fn prop_corpus_coverage_is_not_degenerate() {
         saw_ts_number |= case.saw_msg_ts_number;
         saw_session |= case.session_id.is_some();
         saw_no_session |= case.session_id.is_none();
+        saw_lineage |= case.lineage_expected;
+        saw_no_lineage |= !case.lineage_expected;
+        saw_branch |= case.saw_branch;
         assert!(
             !case.expected.is_empty(),
             "seed={seed}: 每个用例必须至少含一条有效消息"
@@ -696,6 +888,11 @@ fn prop_corpus_coverage_is_not_degenerate() {
         saw_bodyless && saw_other && saw_empty && saw_ts_number && saw_session && saw_no_session,
         "生成器语料退化：bodyless={saw_bodyless} other={saw_other} empty={saw_empty} \
          ts_number={saw_ts_number} session={saw_session} no_session={saw_no_session}"
+    );
+    assert!(
+        saw_lineage && saw_no_lineage && saw_branch,
+        "生成器语料退化：v3 血缘的正/负向与真实分支必须都被覆盖——\
+         lineage={saw_lineage} no_lineage={saw_no_lineage} branch={saw_branch}"
     );
 }
 
@@ -1004,6 +1201,68 @@ fn prop_golden_mutations_never_panic_and_output_stays_legal() {
                     panic!("seed={seed} op={op}: probe 在变异输入上 panic: {payload:?}")
                 }
             }
+        }
+    }
+}
+
+/// v3 golden 的 seeded 变异：截断/插入/删除/翻转/拆行/乱序行后，parse 永不 panic，
+/// Ok 时不得偷偷把残缺的 `id`/`parentId` 变成消息身份或 parent 边——变异语料是最
+/// 容易让"半解析出的 id"漏进身份路径的场景。源字节前后不变（RFC-0002 §7）。
+#[test]
+fn prop_v3_golden_mutations_never_promote_identity_or_panic() {
+    let fixture = std::fs::read(V3_FIXTURE_PATH).expect("read v3 golden fixture");
+    let adapter = PiAdapter::new();
+
+    for seed in fixed_seeds() {
+        let mut rng = XorShift64Star::new(seed.wrapping_add(0x5A5A_A5A5_C0FF_EE01).max(1));
+        for op in 0..8 {
+            let mutated = mutate_bytes(&mut rng, &fixture);
+            let (parsed, sink) = assert_read_only(&mutated, |src| {
+                let mut sink = CollectingSink::default();
+                let parsed = catch_unwind(AssertUnwindSafe(|| adapter.parse(src, &mut sink)));
+                (parsed, sink)
+            });
+            let report = match parsed {
+                Ok(Ok(report)) => report,
+                Ok(Err(_)) => continue,
+                Err(payload) => {
+                    panic!("seed={seed} op={op}: v3 变异输入上 parse panic: {payload:?}")
+                }
+            };
+            assert_eq!(
+                report.committed,
+                sink.messages.len(),
+                "seed={seed} op={op}: committed 必须等于实际 emit 数"
+            );
+            for m in &sink.messages {
+                assert!(
+                    m.native_id.is_empty(),
+                    "seed={seed} op={op}: seq={} 变异语料也不得提升 entry id 为 native 身份",
+                    m.seq
+                );
+                assert_eq!(
+                    m.parent_native_id, None,
+                    "seed={seed} op={op}: seq={} 不得发出 parent 边",
+                    m.seq
+                );
+                let (start, end) = m
+                    .span
+                    .unwrap_or_else(|| panic!("seed={seed} op={op}: seq={} 必须携带 span", m.seq));
+                assert!(
+                    start <= end && end as usize <= mutated.len(),
+                    "seed={seed} op={op}: span ({start},{end}) 越界（len={}）",
+                    mutated.len()
+                );
+            }
+            let lineage = report
+                .diagnostics
+                .iter()
+                .filter(|d| d.starts_with(PI_BRANCH_LINEAGE_DIAGNOSTIC_PREFIX))
+                .count();
+            assert!(
+                lineage <= 1,
+                "seed={seed} op={op}: 血缘诊断最多一条，实际 {lineage}"
+            );
         }
     }
 }

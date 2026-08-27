@@ -10,6 +10,23 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Pi session-tree lineage is now reported instead of silently flattened. Pi
+  format v2/v3 files are a parent-linked tree (`version` on the `session`
+  header, per-record `id` + `parentId`; two records sharing one `parentId` are
+  a retried/abandoned branch). The adapter still indexes **every** branch's
+  text in file order — search completeness comes first — but the parse report
+  now carries an explicit diagnostic naming the declared version and the number
+  of lineage-bearing records, and `probe` reports both as matched evidence. No
+  parent edges are emitted: canonical message identity adopts a provider native
+  id verbatim and without a provider namespace, while real Pi record ids are
+  8 hex characters scoped to one file, so promoting them would merge messages
+  from different sessions onto one entity. `context` therefore stays
+  Unsupported with the reason recorded per row — the blocker is
+  document-scoped native message identity in the composition root, not a
+  missing format fact. Pinned by a new synthetic branch fixture
+  (`crates/agent-session-grep-provider-pi/tests/golden/v3-branched.jsonl`,
+  BLAKE3-pinned, both branches indexed) plus positive/negative diagnostic
+  guards in the golden and property suites.
 - Repo identity (schema v16 `session_repo_slugs` projection): sessions are
   grouped by the `host/owner/name` slug derived from their pair-observed
   working directory via local git detection (`git rev-parse --show-toplevel`

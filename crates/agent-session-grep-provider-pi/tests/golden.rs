@@ -10,7 +10,7 @@
 //! 断言与一个手动再生辅助。
 
 use agent_session_grep_ports::{Confidence, ProviderAdapter};
-use agent_session_grep_provider_pi::PiAdapter;
+use agent_session_grep_provider_pi::{PI_BRANCH_LINEAGE_DIAGNOSTIC_PREFIX, PiAdapter};
 use agent_session_grep_testkit::assert_read_only;
 use agent_session_grep_testkit::golden::{self, CapturingSink};
 use serde_json::Value;
@@ -20,6 +20,23 @@ const EXPECTED_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/golden/basic.expected.json"
 );
+const V3_FIXTURE_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/golden/v3-branched.jsonl"
+);
+const V3_EXPECTED_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/golden/v3-branched.expected.json"
+);
+
+/// 报告里的会话树血缘诊断条数（marker 由被测 crate 导出，避免测试侧硬编码漂移）。
+fn lineage_diagnostics(report: &agent_session_grep_ports::ParseReport) -> Vec<&String> {
+    report
+        .diagnostics
+        .iter()
+        .filter(|d| d.starts_with(PI_BRANCH_LINEAGE_DIAGNOSTIC_PREFIX))
+        .collect()
+}
 
 /// 解析 fixture：经共享 sink 全字段捕获，返回报告与 sink。
 fn parse_fixture(bytes: &[u8]) -> (agent_session_grep_ports::ParseReport, CapturingSink) {
@@ -130,11 +147,15 @@ fn golden_spans_slice_back_to_exact_source_lines() {
 
 #[test]
 fn golden_corpus_carries_no_tool_structure() {
-    // 钉住"格式无结构化工具调用记录"这一事实（capability.rs 的
-    // tool_activity=Unsupported 依据）：语料中每条 message 记录的 content 块
-    // 只允许 {type:"text"} 形状，且 adapter 零 activity 输出。若未来格式知识
-    // 变化（fixture 引入 tool_use/tool_result 块或工具类记录类型）而 capability
-    // 声明未同步升级，此测试立即失败，防止 silent drift 式少报。
+    // 钉住"本语料不含结构化工具调用记录"以及"adapter 零 activity 输出"这两个
+    // 事实（capability.rs 的 tool_activity=Unsupported 依据）：语料中每条 message
+    // 记录的 content 块只允许 {type:"text"} 形状。
+    //
+    // 口径澄清：Pi 的 v3 格式**确实**带 `{type:"toolCall"}` 块与
+    // `message.role:"toolResult"` 记录（见 capability.rs pi 行的证据），
+    // Unsupported 的含义是"adapter 未提取"，不是"格式没有"。因此本测试守的是
+    // 语料边界——一旦哪天 fixture 引入工具块，说明提取范围要变，capability 声明与
+    // adapter 提取必须同步评审，而不是让 fixture 悄悄跑在声明前面。
     let expected = golden::read_expected(EXPECTED_PATH);
     let bytes = golden::read_fixture_verified(FIXTURE_PATH, &expected);
     let (report, sink) = parse_fixture(&bytes);
@@ -169,6 +190,121 @@ fn golden_corpus_carries_no_tool_structure() {
     }
 }
 
+#[test]
+fn v1_golden_reports_no_branch_lineage() {
+    // 负向钉住：v1 语料（无 `version` 键、无 entry id/parentId）不得产生血缘诊断。
+    // 若将来任何改动让诊断对线性语料也触发，它就从"可据以判断源是不是会话树"的
+    // 事实退化成噪音。
+    let expected = golden::read_expected(EXPECTED_PATH);
+    let bytes = golden::read_fixture_verified(FIXTURE_PATH, &expected);
+    let (report, _) = parse_fixture(&bytes);
+    assert!(
+        lineage_diagnostics(&report).is_empty(),
+        "v1 golden 不得出现会话树血缘诊断，实际：{:?}",
+        report.diagnostics
+    );
+}
+
+#[test]
+fn v3_golden_canonical_output_is_pinned() {
+    let expected = golden::read_expected(V3_EXPECTED_PATH);
+    let bytes = golden::read_fixture_verified(V3_FIXTURE_PATH, &expected);
+    let (report, sink) = parse_fixture(&bytes);
+    let hash = blake3::hash(&bytes).to_hex().to_string();
+    let actual = golden::canonical_json(&hash, &report, &sink.messages);
+    let actual_pretty = serde_json::to_string_pretty(&actual).expect("serialize actual");
+    assert_eq!(
+        actual, expected,
+        "v3 canonical 输出与 pinned 期望不一致——parser 行为漂移或 fixture 未经评审变更。actual =\n{actual_pretty}"
+    );
+}
+
+#[test]
+fn v3_golden_probe_and_parse_never_mutate_source_bytes() {
+    let expected = golden::read_expected(V3_EXPECTED_PATH);
+    let bytes = golden::read_fixture_verified(V3_FIXTURE_PATH, &expected);
+    assert_read_only(&bytes, |source| PiAdapter::new().probe(source))
+        .expect("v3 golden fixture probe must succeed");
+    let mut sink = CapturingSink::default();
+    let report = assert_read_only(&bytes, |source| PiAdapter::new().parse(source, &mut sink))
+        .expect("v3 golden fixture parse must succeed");
+    assert_eq!(report.committed, sink.messages.len());
+}
+
+#[test]
+fn v3_golden_indexes_every_branch_and_reports_lineage_exactly_once() {
+    // 这条是本 fixture 存在的理由：v3 是 parent-linked 会话树（`aa000002` 有两个
+    // 子记录），旧行为会把它按线性解析而**不留任何痕迹**。现在两条分支的正文都
+    // 必须进索引（检索完整性），且恰好一条诊断如实说明"树未建模"。
+    let expected = golden::read_expected(V3_EXPECTED_PATH);
+    let bytes = golden::read_fixture_verified(V3_FIXTURE_PATH, &expected);
+    let (report, sink) = parse_fixture(&bytes);
+
+    let texts: Vec<&str> = sink.messages.iter().map(|m| m.text.as_str()).collect();
+    assert!(
+        texts.contains(&"kept\nanswer") && texts.contains(&"abandoned branch answer"),
+        "同一 parentId 的两条分支都必须索引，实际：{texts:?}"
+    );
+
+    let lineage = lineage_diagnostics(&report);
+    assert_eq!(
+        lineage.len(),
+        1,
+        "v3 golden 必须恰好一条血缘诊断，实际：{:?}",
+        report.diagnostics
+    );
+    assert!(
+        lineage[0].contains("version=3") && lineage[0].contains("5 条记录带 parentId"),
+        "诊断必须报出声明版本与血缘记录数（含非对话记录），实际：{}",
+        lineage[0]
+    );
+}
+
+#[test]
+fn v3_golden_never_promotes_record_ids_to_native_identity() {
+    // 与 capability.rs 的 `context=Unsupported` 互为凭证：v3 记录带 id/parentId，
+    // 但事件一律以空 native_id + None parent 上报。要改这条必须同时改 capability
+    // 列与 composition root 的消息身份策略（`derive_message_id` 逐字采用 native id，
+    // 而 Pi 的 entry id 只在文件内唯一）。
+    let expected = golden::read_expected(V3_EXPECTED_PATH);
+    let bytes = golden::read_fixture_verified(V3_FIXTURE_PATH, &expected);
+    let (_, sink) = parse_fixture(&bytes);
+    assert!(!sink.messages.is_empty(), "v3 fixture must emit messages");
+    for m in &sink.messages {
+        assert!(
+            m.native_id.is_empty(),
+            "seq={}: Pi 不得把仅文件内唯一的 entry id 提升为 native 消息身份",
+            m.seq
+        );
+        assert_eq!(
+            m.parent_native_id, None,
+            "seq={}: 不得发出 parent 边",
+            m.seq
+        );
+        assert!(!m.is_sidechain, "seq={}: Pi 格式无 sidechain 概念", m.seq);
+    }
+}
+
+#[test]
+fn v3_golden_spans_slice_back_to_exact_source_lines() {
+    let expected = golden::read_expected(V3_EXPECTED_PATH);
+    let bytes = golden::read_fixture_verified(V3_FIXTURE_PATH, &expected);
+    let (_, sink) = parse_fixture(&bytes);
+    for m in &sink.messages {
+        let (start, end) = m.span.expect("v3 golden message must carry a span");
+        let slice = &bytes[start as usize..end as usize];
+        let record: Value =
+            serde_json::from_slice(slice).expect("span slice must be a complete JSON record");
+        assert_eq!(record["type"], "message", "seq={}", m.seq);
+        assert_eq!(
+            record["message"]["role"].as_str().unwrap_or(""),
+            m.role,
+            "seq={}",
+            m.seq
+        );
+    }
+}
+
 /// 手动再生辅助：
 /// ```text
 /// cargo test -p agent-session-grep-provider-pi --test golden -- --ignored --nocapture
@@ -177,6 +313,20 @@ fn golden_corpus_carries_no_tool_structure() {
 #[ignore = "manual regeneration helper — prints canonical JSON for basic.expected.json"]
 fn print_actual_canonical_output_for_regeneration() {
     let bytes = std::fs::read(FIXTURE_PATH).expect("read basic.jsonl fixture");
+    let hash = blake3::hash(&bytes).to_hex().to_string();
+    let (report, sink) = parse_fixture(&bytes);
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&golden::canonical_json(&hash, &report, &sink.messages))
+            .unwrap()
+    );
+}
+
+/// v3 fixture 的手动再生辅助（同上，输出写入 `v3-branched.expected.json`）。
+#[test]
+#[ignore = "manual regeneration helper — prints canonical JSON for v3-branched.expected.json"]
+fn print_actual_v3_canonical_output_for_regeneration() {
+    let bytes = std::fs::read(V3_FIXTURE_PATH).expect("read v3-branched.jsonl fixture");
     let hash = blake3::hash(&bytes).to_hex().to_string();
     let (report, sink) = parse_fixture(&bytes);
     println!(

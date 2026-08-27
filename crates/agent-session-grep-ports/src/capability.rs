@@ -272,13 +272,30 @@ impl ProviderCapabilityMatrix {
                     probe: CapabilityLevel::Native,
                     parse: CapabilityLevel::Native,
                     search: CapabilityLevel::Native,
+                    // 格式**确有** threading 边：v2/v3 逐条记录带 `id` + 显式
+                    // `parentId`，同 parentId 的多个子记录就是分支（证据：
+                    // cc-sessions-viewer `pi.rs parse_entries`、ctx
+                    // `pi-session.jsonl`、Recall/fast-resume/hstry 的 pi adapter）。
+                    // 仍记 Unsupported 的原因不是"没有边"，而是**发不出边**：
+                    // `message_edges` 的父指针经 `derive_message_id` →
+                    // `StableId::native(IdKind::Message, ..)` 逐字采用 native id，
+                    // 且与 Session 不同**没有 provider/安装命名空间**。真实 Pi 的
+                    // entry id 是 8 位十六进制（32 bit，本机证据：agent-sessions 的
+                    // pi stage0 fixture 里 `f7c7091e`/`3a59c5dd`），只在单文件内
+                    // 唯一——提升为全局消息身份会让两个会话的不同消息落到同一实体。
+                    // adapter 因此把"这是 v2/v3、树未建模"写成显式 ParseReport
+                    // 诊断（钉住测试见 crate golden.rs 的 v3 fixture），不静默降级。
+                    // 要升级 context 必须先在 composition root 落地 document-scoped
+                    // native 消息身份——共享契约改动，不是 per-adapter 改动。
                     context: CapabilityLevel::Unsupported,
                     resume: CapabilityLevel::Derived,
                     handoff: CapabilityLevel::Derived,
-                    // 文档化的格式知识（session/message 记录，content 为字符串或
-                    // {type:"text"} 块）不含任何结构化工具调用记录，且消息以空
-                    // native id 上报——既无事实可提取也无法锚定。如实保持
-                    // Unsupported（钉住测试见 crate golden.rs）。
+                    // 格式确有结构化工具记录（v3 的 assistant content 带
+                    // `{type:"toolCall"}` 块，`message.role:"toolResult"` 独立成条，
+                    // 证据同上），但 adapter 既不解析这些块、也不 emit_activity，
+                    // 且消息以空 native id 上报——活动无法锚定（staging fail-closed
+                    // 丢弃）。如实保持 Unsupported：这是"未提取"，不是"格式没有"。
+                    // 钉住测试见 crate golden.rs（语料只含 text 块 + 零 activity）。
                     tool_activity: CapabilityLevel::Unsupported,
                     // 格式确有 `message.usage`（input/output/total_tokens，证据：
                     // ctx provider-history fixture `pi-session.jsonl`），但消息以
