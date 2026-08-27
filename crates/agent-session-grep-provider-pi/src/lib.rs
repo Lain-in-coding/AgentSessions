@@ -1,13 +1,40 @@
 //! Pi coding agent provider adapter.
 //!
 //! Parses Pi's session JSONL format: each line carries a `type` discriminator.
-//! `type: "session"` is the header (carries `id`, `cwd`, `timestamp`);
-//! `type: "message"` wraps `message.role` (user/assistant) and `message.content`.
-//! `type: "session_info"` carries `name`; `custom_message`/`compaction` are
-//! non-conversational and skipped by the canonical adapter.
+//! `type: "session"` is the header (carries `id`, `cwd`, `timestamp`, and — from
+//! format version 2 onward — `version`); `type: "message"` wraps `message.role`
+//! (user/assistant) and `message.content`. `type: "session_info"` carries
+//! `name`; `custom_message`/`compaction`/`model_change` are non-conversational
+//! and skipped by the canonical adapter.
 //!
 //! Format evidence: fast-resume (MIT) `src/adapters/pi.rs`. The type-based
 //! dispatch and content extraction are adapted from fast-resume under MIT.
+//!
+//! # Session-tree lineage (format version 2/3)
+//!
+//! From version 2 onward every non-header record carries its own `id` and an
+//! explicit `parentId`, so a Pi file is a **parent-linked tree**: two records
+//! may share one `parentId` (a retried/abandoned branch), and the physical last
+//! line is not necessarily on the same path as the first. Version 1 files carry
+//! neither field and are plain linear appends. The discriminator is the header's
+//! `version` key: absent means v1.
+//!
+//! This adapter indexes **every** conversational record in file order —
+//! abandoned branches included, because their text is exactly what a history
+//! search must be able to find — and it deliberately does **not** emit
+//! `parent_native_id` edges. Emitting an edge requires promoting the record `id`
+//! to a canonical native message identity, and that identity is adopted
+//! verbatim and un-namespaced (`StableId::native(IdKind::Message, ..)`), unlike
+//! session ids which are provider+installation scoped. Real Pi record ids are
+//! 8 hex characters (32 bit) that are only unique *within one file*, while the
+//! session id in the same header is a UUID — so promoting them would make two
+//! records from two different sessions collide onto one message entity. Rather
+//! than degrade silently, the parse report carries an explicit diagnostic
+//! ([`PI_BRANCH_LINEAGE_DIAGNOSTIC_PREFIX`]) naming the declared version and the
+//! number of lineage-bearing records, and the probe reports the same as matched
+//! evidence. Modelling the tree needs document-scoped native message identity in
+//! the composition root first; that is a shared-contract change, not a
+//! per-adapter one.
 
 use agent_session_grep_ports::MetadataResolution;
 use agent_session_grep_ports::{
@@ -20,6 +47,17 @@ const VARIANT_ID: &str = "pi/session-jsonl-v1";
 
 /// Number of non-blank lines to sample during probe (bounded, RFC-0002 §7).
 const SAMPLE_LINE_LIMIT: usize = 8;
+
+/// Lowest Pi format version that carries per-record `id` + `parentId` lineage.
+const LINEAGE_MIN_VERSION: u64 = 2;
+
+/// Prefix of the diagnostic emitted when a source carries session-tree lineage
+/// this adapter deliberately does not model.
+///
+/// Public because the golden and property suites are separate crates: they must
+/// recognise the diagnostic without re-hardcoding its text, which is exactly how
+/// a pinned marker drifts away from the code that produces it.
+pub const PI_BRANCH_LINEAGE_DIAGNOSTIC_PREFIX: &str = "会话树血缘未建模";
 
 /// Pi coding agent adapter: parses session JSONL with `type`-discriminated records.
 pub struct PiAdapter;
@@ -46,6 +84,12 @@ struct PiRecord {
     r#type: String,
     #[serde(default)]
     id: Option<String>,
+    /// Pi format version, only present on the `session` header from v2 onward.
+    #[serde(default)]
+    version: Option<u64>,
+    /// Parent record id (session-tree edge); absent or `null` on a root record.
+    #[serde(rename = "parentId", default)]
+    parent_id: Option<String>,
     #[serde(default)]
     cwd: Option<String>,
     #[serde(default)]
@@ -76,6 +120,8 @@ impl ProviderAdapter for PiAdapter {
             &[
                 "non-conversational types (session_info/compaction/custom_message) are skipped",
                 "native message ids are not preserved (ids are derived, not native)",
+                "format v2/v3 session-tree lineage (`parentId`) is reported as a \
+                 diagnostic, not modeled: every branch is indexed linearly, no parent edges",
             ],
         )
     }
@@ -109,6 +155,8 @@ impl ProviderAdapter for PiAdapter {
         let mut session_headers = 0usize;
         let mut message_records = 0usize;
         let mut conversational = 0usize;
+        let mut declared_version: Option<u64> = None;
+        let mut lineage_records = 0usize;
 
         for &(line_no, line) in &sample {
             match serde_json::from_str::<serde_json::Value>(line) {
@@ -120,6 +168,15 @@ impl ProviderAdapter for PiAdapter {
                         .unwrap_or("");
                     if t == "session" {
                         session_headers += 1;
+                        if declared_version.is_none() {
+                            declared_version = v.get("version").and_then(serde_json::Value::as_u64);
+                        }
+                    }
+                    if v.get("parentId")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|parent| !parent.trim().is_empty())
+                    {
+                        lineage_records += 1;
                     }
                     if t == "message" {
                         message_records += 1;
@@ -169,6 +226,19 @@ impl ProviderAdapter for PiAdapter {
             Confidence::High
         };
 
+        // Lineage is reported as evidence, never as a discriminator: openclaw
+        // transcripts are the same v3 session JSONL (go-no-go §6 row 13), so the
+        // tie is resolved by the canonical root, not by content. Confidence and
+        // variant stay exactly as computed above.
+        if let Some(version) = declared_version {
+            matched.push(format!("session header declares format version {version}"));
+        }
+        if lineage_records > 0 {
+            matched.push(format!(
+                "{lineage_records} sampled records carry parentId lineage (session tree, not modeled)"
+            ));
+        }
+
         Ok(ProbeResult {
             variant_id: VARIANT_ID.to_string(),
             confidence,
@@ -203,6 +273,11 @@ impl ProviderAdapter for PiAdapter {
         let mut report = ParseReport::default();
         let mut seq: u32 = 0;
         let mut session_ids: Vec<String> = Vec::new();
+        // 会话树血缘的事实计量（不建模，只如实上报）：首个声明的格式版本 +
+        // 携带非空 parentId 的记录数。两者都是 O(1) 状态，不破坏"内存上界是
+        // 单条记录"的流式契约（RFC-0002 §7）。
+        let mut declared_version: Option<u64> = None;
+        let mut lineage_records = 0usize;
 
         while let Some(line) = lines.next_record()? {
             // 行负载已由 BoundedLineReader 剥离 \n/\r 与首行 BOM，span 仍以
@@ -229,8 +304,22 @@ impl ProviderAdapter for PiAdapter {
 
             let span = Some((start, end));
 
+            // 血缘计量先于类型分发：非对话记录（model_change/session_info/
+            // compaction）同样带 parentId，是会话树的一部分，漏计会低报事实。
+            if rec
+                .parent_id
+                .as_deref()
+                .is_some_and(|parent| !parent.trim().is_empty())
+            {
+                lineage_records += 1;
+            }
+
             match rec.r#type.as_str() {
                 "session" => {
+                    // 首个显式声明的 version 生效：v1 无该键，故 None 不覆盖。
+                    if declared_version.is_none() && rec.version.is_some() {
+                        declared_version = rec.version;
+                    }
                     if let Some(id) = rec.id.as_deref()
                         && !id.trim().is_empty()
                     {
@@ -293,7 +382,9 @@ impl ProviderAdapter for PiAdapter {
                 }
                 _ => {
                     // session_info, custom_message, compaction, branch_summary,
-                    // and unknown types are non-conversational → skipped.
+                    // model_change, thinking_level_change, and unknown types are
+                    // non-conversational → skipped (they may still carry
+                    // `id`/`parentId`, already counted as lineage above).
                 }
             }
         }
@@ -306,6 +397,24 @@ impl ProviderAdapter for PiAdapter {
                 "文件包含 {} 个不同 id——单文件=单会话，全部消息归属首个会话 {}",
                 session_ids.len(),
                 session_ids[0]
+            ));
+        }
+
+        // 会话树血缘诊断：把"这是 v2/v3、分支结构未建模"变成可见事实，而不是
+        // 静默按线性解析。触发条件是两个独立的格式事实之一——头部声明的
+        // version >= 2，或任意记录携带非空 parentId——因为真实语料里两者都可能
+        // 单独出现（头部缺失的截断文件仍有 parentId；只有一条根记录的 v3 会话
+        // 一条 parentId 也没有）。
+        if lineage_records > 0 || declared_version.is_some_and(|v| v >= LINEAGE_MIN_VERSION) {
+            let version = match declared_version {
+                Some(version) => version.to_string(),
+                None => "未声明（头部缺失或为 v1）".to_string(),
+            };
+            report.diagnostics.push(format!(
+                "{PI_BRANCH_LINEAGE_DIAGNOSTIC_PREFIX}：格式 version={version}，\
+                 {lineage_records} 条记录带 parentId。全部消息按文件顺序逐条索引\
+                 （含被放弃分支，不丢正文），但不发出 parent 边——Pi 逐条 entry id \
+                 是仅文件内唯一的 32 位标记，提升为全局 native 消息身份会跨会话碰撞。"
             ));
         }
 
@@ -454,6 +563,170 @@ mod tests {
         assert_eq!(report.committed, 1);
         assert!(!report.diagnostics.is_empty());
         assert!(report.session_observation.multi_session);
+    }
+
+    /// 该 fixture 里有多少条血缘诊断。
+    fn lineage_diagnostics(report: &ParseReport) -> usize {
+        report
+            .diagnostics
+            .iter()
+            .filter(|d| d.starts_with(PI_BRANCH_LINEAGE_DIAGNOSTIC_PREFIX))
+            .count()
+    }
+
+    #[test]
+    fn parse_v1_corpus_reports_no_branch_lineage() {
+        // 钉住负向：v1 无 version 键、无 entry id/parentId → 不得凭空产生血缘诊断
+        // （否则诊断会退化成噪音，读者无法据此判断哪些源真是会话树）。
+        let adapter = PiAdapter::new();
+        let fixture = r#"{"type":"session","id":"s1","cwd":"/p"}
+{"type":"message","message":{"role":"user","content":"linear one"}}
+{"type":"message","message":{"role":"assistant","content":"linear two"}}
+"#;
+        let mut sink = CountSink { count: 0 };
+        let report = adapter.parse(fixture.as_bytes(), &mut sink).unwrap();
+        assert_eq!(report.committed, 2);
+        assert_eq!(lineage_diagnostics(&report), 0);
+        assert!(report.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn parse_v3_branch_reports_lineage_once_and_keeps_every_branch() {
+        // 正向：v3 头部 + 两条同 parentId 的分支记录。全部消息（含被放弃分支）
+        // 必须都进索引，且恰好一条血缘诊断——分支结构不再静默丢失。
+        let adapter = PiAdapter::new();
+        let fixture = r#"{"type":"session","version":3,"id":"s3","cwd":"/p"}
+{"type":"message","id":"aa000001","parentId":null,"message":{"role":"user","content":"root"}}
+{"type":"message","id":"aa000002","parentId":"aa000001","message":{"role":"assistant","content":"kept branch"}}
+{"type":"message","id":"aa000003","parentId":"aa000001","message":{"role":"assistant","content":"abandoned branch"}}
+"#;
+        let mut sink = TextSink { texts: vec![] };
+        let report = adapter.parse(fixture.as_bytes(), &mut sink).unwrap();
+        assert_eq!(report.committed, 3, "两条分支都必须索引，不得只留一条");
+        assert_eq!(
+            sink.texts,
+            vec![
+                "root".to_string(),
+                "kept branch".to_string(),
+                "abandoned branch".to_string(),
+            ]
+        );
+        assert_eq!(lineage_diagnostics(&report), 1);
+        let diagnostic = report
+            .diagnostics
+            .iter()
+            .find(|d| d.starts_with(PI_BRANCH_LINEAGE_DIAGNOSTIC_PREFIX))
+            .expect("血缘诊断必须存在");
+        assert!(
+            diagnostic.contains("version=3") && diagnostic.contains("2 条记录带 parentId"),
+            "诊断必须报出声明版本与血缘记录数，实际：{diagnostic}"
+        );
+    }
+
+    #[test]
+    fn parse_reports_lineage_from_parent_id_even_without_a_version_header() {
+        // 截断/无头文件仍可能带 parentId：两个格式事实各自独立触发诊断，
+        // 否则丢头的 v3 源会退回"静默线性"。
+        let adapter = PiAdapter::new();
+        let fixture = r#"{"type":"message","id":"aa000001","message":{"role":"user","content":"a"}}
+{"type":"message","id":"aa000002","parentId":"aa000001","message":{"role":"assistant","content":"b"}}
+"#;
+        let mut sink = CountSink { count: 0 };
+        let report = adapter.parse(fixture.as_bytes(), &mut sink).unwrap();
+        assert_eq!(report.committed, 2);
+        assert_eq!(lineage_diagnostics(&report), 1);
+        assert!(
+            report.diagnostics[0].contains("未声明"),
+            "无 version 头时必须如实说明版本未声明，实际：{}",
+            report.diagnostics[0]
+        );
+    }
+
+    #[test]
+    fn parse_counts_lineage_on_non_conversational_records() {
+        // model_change / session_info 也是会话树节点：漏计会低报"这是一棵树"。
+        let adapter = PiAdapter::new();
+        let fixture = r#"{"type":"session","version":3,"id":"s3","cwd":"/p"}
+{"type":"model_change","id":"aa000001","parentId":null,"provider":"synthetic","modelId":"m"}
+{"type":"session_info","id":"aa000002","parentId":"aa000001","name":"named"}
+{"type":"message","id":"aa000003","parentId":"aa000002","message":{"role":"user","content":"only msg"}}
+"#;
+        let mut sink = CountSink { count: 0 };
+        let report = adapter.parse(fixture.as_bytes(), &mut sink).unwrap();
+        assert_eq!(report.committed, 1);
+        assert_eq!(lineage_diagnostics(&report), 1);
+        assert!(
+            report.diagnostics[0].contains("2 条记录带 parentId"),
+            "非对话记录的 parentId 必须计入，实际：{}",
+            report.diagnostics[0]
+        );
+    }
+
+    #[test]
+    fn parse_v3_never_promotes_record_ids_to_native_identity() {
+        // 钉住"不建模"的具体含义：即便记录带 id/parentId，事件仍以空 native_id
+        // 与 None parent 上报。若将来改为发出边，本测试必须与 capability.rs 的
+        // `context` 列、composition root 的消息身份策略一起评审后再改。
+        let adapter = PiAdapter::new();
+        let fixture = r#"{"type":"session","version":3,"id":"s3","cwd":"/p"}
+{"type":"message","id":"aa000001","parentId":null,"message":{"role":"user","content":"root"}}
+{"type":"message","id":"aa000002","parentId":"aa000001","message":{"role":"assistant","content":"child"}}
+"#;
+        let mut sink = IdentitySink { seen: vec![] };
+        let report = adapter.parse(fixture.as_bytes(), &mut sink).unwrap();
+        assert_eq!(report.committed, 2);
+        assert_eq!(
+            sink.seen,
+            vec![(String::new(), None, false), (String::new(), None, false),]
+        );
+    }
+
+    struct IdentitySink {
+        /// (native_id, parent_native_id, is_sidechain)
+        seen: Vec<(String, Option<String>, bool)>,
+    }
+    impl CanonicalEventSink for IdentitySink {
+        fn emit_message(
+            &mut self,
+            event: MessageEvent<'_>,
+        ) -> agent_session_grep_ports::PortResult<()> {
+            self.seen.push((
+                event.native_id.to_string(),
+                event.parent_native_id.map(str::to_string),
+                event.is_sidechain,
+            ));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn probe_reports_declared_version_and_lineage_as_evidence() {
+        let adapter = PiAdapter::new();
+        let fixture = r#"{"type":"session","version":3,"id":"s3","cwd":"/p","timestamp":"2026-01-01T00:00:00Z"}
+{"type":"message","id":"aa000001","parentId":null,"message":{"role":"user","content":"root"}}
+{"type":"message","id":"aa000002","parentId":"aa000001","message":{"role":"assistant","content":"child"}}
+"#;
+        let result = adapter.probe(fixture.as_bytes()).unwrap();
+        // variant 与 confidence 不因 v3 判别而改变：pi/openclaw 的内容歧义仍由
+        // 规范根收口（go-no-go §6 row 13），probe 只多报事实。
+        assert_eq!(result.variant_id, VARIANT_ID);
+        assert_eq!(result.confidence, Confidence::Confirmed);
+        assert!(
+            result
+                .matched_evidence
+                .iter()
+                .any(|e| e.contains("format version 3")),
+            "probe 必须报出声明的格式版本，实际：{:?}",
+            result.matched_evidence
+        );
+        assert!(
+            result
+                .matched_evidence
+                .iter()
+                .any(|e| e.contains("parentId lineage")),
+            "probe 必须报出血缘记录，实际：{:?}",
+            result.matched_evidence
+        );
     }
 
     struct TextSink {

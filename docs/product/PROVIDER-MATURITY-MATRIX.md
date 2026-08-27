@@ -30,7 +30,7 @@
 | Grok Build | `grok-build` | `grok-build/acp-updates-v1` | **Experimental** | ACP `updates.jsonl`（`session/update` stream），主格式证据充分，variant 分层 + golden（`tests/golden.rs`） |
 | Antigravity | `antigravity` | `antigravity/transcript-jsonl-v1` | **Experimental** | 本机真实格式核验（2026-08-15）：`brain/<uuid>/.system_generated/logs/transcript.jsonl`；identity 在目录名，文件内无 session id 字段 + golden（`tests/golden.rs`） |
 | OpenCode | `opencode` | `opencode/sqlite-v1` | **Experimental** | `opencode.db` SQLite（session/message/part 表），只读打开（SQLITE_OPEN_READONLY + busy_timeout）+ golden（`tests/golden.rs`） |
-| Pi | `pi` | `pi/session-jsonl-v1` | **Experimental** | session JSONL（`type:session` header + message）+ golden（`tests/golden.rs`） |
+| Pi | `pi` | `pi/session-jsonl-v1` | **Experimental** | session JSONL（`type:session` header + message）+ golden（`tests/golden.rs`，含 v3 会话树 fixture `tests/golden/v3-branched.jsonl`） |
 | Hermes | `hermes` | `hermes/session-json-v1` | **Experimental** | `~/.hermes/sessions/session_<id>.json`（session_id/messages），hstry@88b78b1 (MIT) 格式证据 + golden（`tests/golden.rs`） |
 | Cursor | `cursor` | `cursor/vscdb-chat-v1` | **Experimental** | `state.vscdb` SQLite KV（ItemTable `chatdata`/`prompts` key），hstry@88b78b1 (MIT) 格式证据，多代格式分层待补 + golden（`tests/golden.rs`） |
 | Kimi Code | `kimi-code` | `kimi-code/wire-jsonl-v1` | **Experimental** | wire.jsonl（`context.append_message`）+ golden（`tests/golden.rs`） |
@@ -95,7 +95,7 @@ manifest 均已填真实限制，见各 `crates/agent-session-grep-provider-*/sr
 - **Grok Build**：chunk 分组重建角色，无逐消息 native id（合成 `grok-msg-{seq}`）；逐消息时间戳未抽取；会话身份回退到首个 ACP `promptId`，非持久 session id。
 - **Antigravity**：文件内无 session id 字段（identity 在 `brain/<uuid>` 目录名），parse 时 `session_native_id`/`provider_session_id` 如实留缺；`SYSTEM`/`CONVERSATION_HISTORY` 与工具活动步骤永不为消息；`span` 用字节区间。
 - **OpenCode**：SQLite 源无字节 span；只提交 `text` part 且角色为 user/assistant；逐消息时间戳未抽取。
-- **Pi**：`session_info`/`compaction`/`custom_message` 等非对话类型跳过；无 native 消息 id（合成 `pi-msg-{seq}`）。
+- **Pi**：`session_info`/`compaction`/`custom_message`/`model_change` 等非对话类型跳过；消息以空 native id 上报（composition root 按 document+seq 派生 `Stability::Unstable` 身份，adapter 绝不编造假 id）。格式 v2/v3 是 parent-linked 会话树（头部 `version` + 逐条 `id`/`parentId`，同 parentId 即分支）：全部分支的正文都进索引，血缘如实上报为一条 parse 诊断，但不发出 parent 边——Pi 的 entry id 是 8 位十六进制的文件内标记，而消息 native 身份逐字采用且无命名空间，提升会跨会话碰撞。
 - **Hermes**：`session_<id>.json` 为主格式；同目录 `<id>.jsonl` 仅含部分近期状态，忽略；无字节 span，消息时间戳缺失时回退 `session_start`。
 - **Cursor**：`state.vscdb` 为 chatdata/prompts 两 key 的多代格式，版本分层待补；SQLite 无字节 span；无 native 消息 id（合成 `cursor-msg-{seq}`）。
 - **Kimi Code**：`context.append_loop_event`（step/tool 事件）暂未解析；wire.jsonl 罕见携带 session id，通常留缺；逐消息时间戳未抽取。
