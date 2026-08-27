@@ -852,14 +852,28 @@ pub fn parse_relative_search_instant(value: &str, now_ms: i64) -> Option<SearchI
     Some(SearchInstant::from_unix_millis(now_ms.checked_sub(delta)?))
 }
 
+/// Cursor 绑定的查询摘要：任何会改变结果集或其顺序的输入都必须进这个摘要，
+/// 否则换了输入的续页请求会静默按错误的 offset 切片。
+///
+/// 除 query/filters/facets/include_system/group_by_session 外，`current_repo`
+/// （调用方当前工作目录派生的 repo slug，见 [`ranking::CURRENT_REPO_SCORE_BOOST`]）
+/// 同样入摘要：它只改排序不改召回，但换了仓库就是另一个排序，跨仓库复用 cursor
+/// 必须显式失败而不是静默错页。无过滤、无 facet、也无当前仓库身份时保持旧的
+/// 纯 query 摘要（既有 cursor 的字节兼容路径）。
 fn search_query_digest(
     query: &str,
     filters: &SearchFilters,
     facets: &SearchFacets,
     include_system: bool,
     group_by_session: bool,
+    current_repo: Option<&str>,
 ) -> String {
-    if filters.is_empty() && facets.is_default() && !include_system && !group_by_session {
+    if filters.is_empty()
+        && facets.is_default()
+        && !include_system
+        && !group_by_session
+        && current_repo.is_none()
+    {
         return cursor::digest_query(query);
     }
     let providers = filters
@@ -878,7 +892,7 @@ fn search_query_digest(
         .unwrap_or_default();
     let repo = filters.repo.as_deref().unwrap_or_default();
     cursor::digest_query(&format!(
-        "search-filter-v1\0{}\0providers={}\0since={}\0until={}\0repo={}\0include_system={}\0group_by_session={}\0facets={}",
+        "search-filter-v1\0{}\0providers={}\0since={}\0until={}\0repo={}\0include_system={}\0group_by_session={}\0facets={}\0current_repo={}",
         query,
         providers,
         since,
@@ -887,6 +901,7 @@ fn search_query_digest(
         include_system,
         group_by_session,
         facets.canonical_binding(),
+        current_repo.unwrap_or_default(),
     ))
 }
 

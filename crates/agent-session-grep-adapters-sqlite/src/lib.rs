@@ -6899,6 +6899,40 @@ impl CatalogStore for SqliteStore {
             .collect())
     }
 
+    fn session_repo_slugs(&self, session_ids: &[StableId]) -> PortResult<Vec<Option<String>>> {
+        if session_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.conn.borrow();
+        let wires: Vec<&str> = session_ids.iter().map(|id| id.as_str()).collect();
+        // 批量读取 repo 投影（schema v16），分块在 SQLite 变量上限之下；
+        // 与 `session_titles` 同一模式，绝不逐条查询（N+1）。
+        let mut slugs: BTreeMap<String, String> = BTreeMap::new();
+        for chunk in chunk_ids(&wires) {
+            let placeholders = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            let mut stmt = conn
+                .prepare(&format!(
+                    "SELECT session_wire, repo_slug FROM session_repo_slugs
+                     WHERE session_wire IN ({placeholders})"
+                ))
+                .map_err(backend)?;
+            let rows = stmt
+                .query_map(rusqlite::params_from_iter(chunk.iter().copied()), |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(backend)?;
+            for row in rows {
+                let (wire, slug) = row.map_err(backend)?;
+                slugs.insert(wire, slug);
+            }
+        }
+        // 保序：与 `session_ids` 同序；无 repo 身份的会话 → None（未知 ≠ 匹配）。
+        Ok(session_ids
+            .iter()
+            .map(|id| slugs.get(id.as_str()).cloned())
+            .collect())
+    }
+
     fn count(&self) -> PortResult<u64> {
         let conn = self.conn.borrow();
         let count: i64 = conn
@@ -16043,6 +16077,94 @@ mod tests {
     fn repo_totals_empty_when_no_projection_rows() {
         let store = SqliteStore::open_in_memory().unwrap();
         assert!(store.repo_totals().unwrap().is_empty());
+    }
+
+    #[test]
+    fn session_repo_slugs_batch_read_preserves_order_and_reports_unknown_as_none() {
+        // ranking 的当前仓库偏好读的是这条投影：与入参同序、无行即 None
+        // （未知 ≠ 匹配），空入参不查库。
+        let store = SqliteStore::open_in_memory().unwrap();
+        assert!(store.session_repo_slugs(&[]).unwrap().is_empty());
+        store.set_repo_slug_resolver(Box::new(MapRepoSlugResolver {
+            map: std::collections::HashMap::from([
+                (
+                    "Z:/projects/shared".into(),
+                    Some("github.com/o/shared".into()),
+                ),
+                ("Z:/projects/solo".into(), Some("github.com/o/solo".into())),
+            ]),
+            calls: RefCell::new(0),
+        }));
+        let batches: Vec<SourceBatch> = ["a", "b", "c"]
+            .iter()
+            .map(|tag| {
+                let session = sid(IdKind::Session, tag.as_bytes());
+                let document = sid(IdKind::Document, tag.as_bytes());
+                let message = sid(IdKind::Message, tag.as_bytes());
+                let cwd = if *tag == "c" {
+                    "Z:/projects/solo"
+                } else {
+                    "Z:/projects/shared"
+                };
+                SourceBatch {
+                    source_path: format!("slug-read-{tag}.jsonl"),
+                    entries: vec![
+                        entity_entry(&session),
+                        typed_document_entry(&document),
+                        typed_message_entry(&message, "slug read body"),
+                    ],
+                    placements: vec![placement(
+                        &session,
+                        &document,
+                        &message,
+                        0,
+                        false,
+                        Some((0, 5)),
+                    )],
+                    edges: Vec::new(),
+                    activities: Vec::new(),
+                    usage_events: Vec::new(),
+                    relation_complete: true,
+                    len_bytes: None,
+                    fingerprint: None,
+                    provider_id: None,
+                    resume_claim: Some(source_repo_claim(&repo_claim(
+                        &session,
+                        "slug-read-native",
+                        Some(cwd),
+                        true,
+                    ))),
+                }
+            })
+            .collect();
+        store.commit_source_batches_if_changed(&batches).unwrap();
+
+        let shared = sid(IdKind::Session, b"a");
+        let also_shared = sid(IdKind::Session, b"b");
+        let solo = sid(IdKind::Session, b"c");
+        let unknown = sid(IdKind::Session, b"missing");
+        // 顺序、重复 id 与"无投影行"三件事一起钉住。
+        let slugs = store
+            .session_repo_slugs(&[
+                solo.clone(),
+                unknown.clone(),
+                shared.clone(),
+                also_shared,
+                shared,
+            ])
+            .unwrap();
+        assert_eq!(
+            slugs,
+            vec![
+                Some("github.com/o/solo".to_string()),
+                None,
+                Some("github.com/o/shared".to_string()),
+                Some("github.com/o/shared".to_string()),
+                Some("github.com/o/shared".to_string()),
+            ]
+        );
+        // 未派生 repo 身份的会话恒 None，绝不回落成任意 slug。
+        assert_eq!(store.session_repo_slugs(&[unknown]).unwrap(), vec![None]);
     }
 
     #[test]
