@@ -505,20 +505,75 @@ impl SearchFacets {
     }
 }
 
+/// 工具活动 target 的存储/投影上限（字符数）：显式截断；真实 transcript 的
+/// 路径与命令可能很长，但活动只承载检索面事实，不需要全文。
+///
+/// 单一来源：SQLite 落库前按本上限截断（`StoredActivity` 派生 activity id 前的
+/// 归一化点），provider-claude 把 `tool_use` 摘要并入可检索正文时用同一上限——
+/// 两侧同值，正文里看到的 target 与库里存的 target 才逐字一致。
+pub const TOOL_ACTIVITY_TARGET_MAX_CHARS: usize = 512;
+
+/// 工具名 → [`ToolActivityKind`] 的闭集（设计 R2）。名字**逐字**匹配 provider
+/// 记录的工具名，大小写敏感；不在表内 → `Unknown`（fail-closed，绝不猜）。
+///
+/// 闭集里每个名字都有真实语料证据（普查口径：本机真实 transcript 的结构统计，
+/// 只取「记录类型 / 工具名 / 参数键名」，不取任何内容字节）：
+///
+/// - Claude Code JSONL，`message.content[]` 的 `tool_use` block `name` 字段：
+///   `PowerShell`（Windows 形态下最高频）、`Read`、`Edit`、`Grep`、`Agent`
+///   （subagent 派发工具的现名，`Task` 为旧名）、`Bash`、`Write`、`Glob`、
+///   `WebFetch`、`WebSearch`。
+/// - Codex rollout，`response_item/function_call` 的 `name`（参数在 JSON 字符串
+///   `arguments` 里）：`shell_command`（最高频）、`exec_command`、`web_fetch`、
+///   `web_search`、`view_image`、`spawn_agent`。
+/// - Codex rollout，`response_item/custom_tool_call` 的 `name`（参数在字符串
+///   `input` 里）：`exec`、`apply_patch`。
+///
+/// 刻意**不**收入闭集：`mcp__*`（语义由 MCP server 定义）、`update_plan` /
+/// `get_goal` / `wait` / `wait_agent` / `close_agent` / `send_message` /
+/// `write_stdin` / `js` 等编排控制面工具（不属 file/command/web/query 任一类），
+/// 以及用户自定义插件工具（`CronList` 等）。它们如实记 `Unknown`。
+const COMMAND_TOOL_NAMES: [&str; 6] = [
+    "Bash",
+    "PowerShell",
+    "shell",
+    "shell_command",
+    "exec",
+    "exec_command",
+];
+/// 见 [`COMMAND_TOOL_NAMES`] 的证据说明。
+const FILE_TOOL_NAMES: [&str; 8] = [
+    "Read",
+    "Write",
+    "Edit",
+    "MultiEdit",
+    "NotebookEdit",
+    "ApplyPatch",
+    "apply_patch",
+    "view_image",
+];
+/// 见 [`COMMAND_TOOL_NAMES`] 的证据说明。
+const QUERY_TOOL_NAMES: [&str; 5] = ["Glob", "Grep", "Task", "Agent", "spawn_agent"];
+/// 见 [`COMMAND_TOOL_NAMES`] 的证据说明。
+const WEB_TOOL_NAMES: [&str; 4] = ["WebFetch", "WebSearch", "web_fetch", "web_search"];
+
 /// 工具活动 kind 推断规则（设计 R2）：按 provider 记录的**工具名**判定，
 /// 顺序匹配、首个命中生效；不在已知闭集内 → [`ToolActivityKind::Unknown`]
 /// （fail-closed，绝不猜）。
 pub fn infer_tool_activity_kind(name: &str) -> ToolActivityKind {
-    match name {
-        "Bash" | "shell" | "exec" => ToolActivityKind::Command,
-        "Read" | "Write" | "Edit" | "MultiEdit" | "NotebookEdit" | "ApplyPatch" => {
-            ToolActivityKind::File
-        }
-        "Glob" | "Grep" => ToolActivityKind::Query,
-        "WebFetch" | "WebSearch" => ToolActivityKind::Web,
-        "Task" => ToolActivityKind::Query,
-        _ => ToolActivityKind::Unknown,
+    if COMMAND_TOOL_NAMES.contains(&name) {
+        return ToolActivityKind::Command;
     }
+    if FILE_TOOL_NAMES.contains(&name) {
+        return ToolActivityKind::File;
+    }
+    if QUERY_TOOL_NAMES.contains(&name) {
+        return ToolActivityKind::Query;
+    }
+    if WEB_TOOL_NAMES.contains(&name) {
+        return ToolActivityKind::Web;
+    }
+    ToolActivityKind::Unknown
 }
 
 /// 把 provider 记录的调用事实构造成规范活动（设计 R1/R2/R4 的单一落点）。
@@ -556,6 +611,14 @@ pub fn build_tool_activity(
 /// （本项目 Web 工具的 input 只有 url），末尾追加 `description`（Task 类工具）。
 /// 与 Recall 的差异：只接受字符串值（数组形态的 `bash -c …` 参数在 Claude/Codex
 /// 记录中不出现，fail-closed 不猜），键匹配区分大小写（provider 记录的确切字段名）。
+///
+/// **字符串形态的 input**（不是对象）同样受理：Codex rollout 的
+/// `response_item/custom_tool_call` 把整段参数放在字符串 `input` 里（真实语料
+/// 1503/1503 条如此），此时整条字符串就是 provider 记录的 target。其中
+/// `apply_patch` 的 input 是补丁封套（真实语料 549/549 条首行恰为
+/// `*** Begin Patch`），按封套语法取首个 `*** {Add,Update,Delete} File:` 的路径
+/// ——比拿整段补丁当 target 有用得多；封套内没有 File 头时回退整段原文，绝不
+/// 编造路径。
 pub fn extract_tool_activity_target(input: &serde_json::Value) -> Option<String> {
     const PRIORITY: [&str; 13] = [
         "path",
@@ -572,12 +635,44 @@ pub fn extract_tool_activity_target(input: &serde_json::Value) -> Option<String>
         "regex",
         "description",
     ];
+    if let Some(raw) = input.as_str() {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        return Some(apply_patch_target(trimmed).unwrap_or(trimmed).to_string());
+    }
     let object = input.as_object()?;
     for key in PRIORITY {
         if let Some(value) = object.get(key).and_then(serde_json::Value::as_str) {
             let trimmed = value.trim();
             if !trimmed.is_empty() {
                 return Some(trimmed.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Codex `apply_patch` 封套里的首个受影响文件路径。
+///
+/// 只在**首行恰为** `*** Begin Patch` 时解析（fail-closed：真实语料里有把补丁
+/// 文本嵌进 shell 命令的 `exec` 调用，那类命令必须整条保留，不能被当补丁解析）。
+/// 返回 `None` 表示「不是补丁封套 / 封套内无 File 头」，由调用方回退原文。
+fn apply_patch_target(input: &str) -> Option<&str> {
+    const ENVELOPE_HEADER: &str = "*** Begin Patch";
+    const FILE_HEADERS: [&str; 3] = ["*** Update File: ", "*** Add File: ", "*** Delete File: "];
+    let mut lines = input.lines();
+    if lines.next()?.trim() != ENVELOPE_HEADER {
+        return None;
+    }
+    for line in lines {
+        for header in FILE_HEADERS {
+            if let Some(path) = line.trim_start().strip_prefix(header) {
+                let path = path.trim();
+                if !path.is_empty() {
+                    return Some(path);
+                }
             }
         }
     }
@@ -1519,6 +1614,129 @@ mod tests {
     }
 
     #[test]
+    fn tool_activity_kind_covers_the_names_real_transcripts_record() {
+        use agent_session_grep_domain::ToolActivityKind as K;
+        // 名字取自真实语料普查（见 `TOOL_NAME_EVIDENCE`）。此前这些名字全部落
+        // Unknown，且 Unknown 连 target 也一起丢弃（fail-closed 双保险），于是
+        // 真实语料里最高频的工具活动反而信息最少——这正是 "richer extraction"
+        // 要补的洞。
+        let cases = [
+            // Claude Code（Windows 形态的 shell 工具）。
+            ("PowerShell", K::Command),
+            // Claude Code：subagent 派发工具的现名（`Task` 是旧名，两者同工具）。
+            ("Agent", K::Query),
+            // Codex `function_call`：命令执行两代工具名。
+            ("shell_command", K::Command),
+            ("exec_command", K::Command),
+            // Codex `custom_tool_call`：补丁工具的真实名（小写下划线）。
+            ("apply_patch", K::File),
+            // Codex `function_call`：网页检索/抓取。
+            ("web_search", K::Web),
+            ("web_fetch", K::Web),
+            // Codex `function_call`：读图（按路径取文件内容）。
+            ("view_image", K::File),
+            // Codex `function_call`：子 agent 派发，与 Claude `Agent`/`Task` 同类。
+            ("spawn_agent", K::Query),
+        ];
+        for (name, expected) in cases {
+            assert_eq!(infer_tool_activity_kind(name), expected, "name: {name:?}");
+        }
+
+        // 反向：用户自定义 / MCP / 编排控制面工具不进闭集（语义由 server 或
+        // 会话编排定义，按名字猜 kind 就是编造）。
+        for name in [
+            "mcp__some-server__web_search",
+            "update_plan",
+            "get_goal",
+            "wait",
+            "wait_agent",
+            "close_agent",
+            "send_message",
+            "write_stdin",
+            "js",
+            "TodoWrite",
+            "CronList",
+        ] {
+            assert_eq!(
+                infer_tool_activity_kind(name),
+                K::Unknown,
+                "name: {name:?} 必须留在 Unknown（不按名字猜语义）"
+            );
+        }
+    }
+
+    #[test]
+    fn tool_activity_target_accepts_string_shaped_tool_input() {
+        use serde_json::json;
+        // 证据：Codex rollout 的 `response_item/custom_tool_call` 把参数放在
+        // **字符串** `input` 里（不是 `arguments` 对象），真实语料 1503/1503 条
+        // 皆如此。此前只接受对象 → 这些调用 target 恒为 None。
+        assert_eq!(
+            extract_tool_activity_target(&json!("cargo test --workspace")).as_deref(),
+            Some("cargo test --workspace")
+        );
+        // trim 后为空 → None（不把空白当 target）。
+        assert_eq!(extract_tool_activity_target(&json!("   ")), None);
+        assert_eq!(extract_tool_activity_target(&json!("")), None);
+        // 前后空白 trim，与对象形态同规。
+        assert_eq!(
+            extract_tool_activity_target(&json!("  git status  ")).as_deref(),
+            Some("git status")
+        );
+    }
+
+    #[test]
+    fn tool_activity_target_reads_the_apply_patch_envelope_file_header() {
+        use serde_json::json;
+        // 证据：Codex `custom_tool_call` name=`apply_patch` 的 `input` 是补丁
+        // 封套，真实语料 549/549 条首行恰为 `*** Begin Patch`，其后按
+        // `*** Update File: ` / `*** Add File: ` / `*** Delete File: ` 声明路径。
+        // 取首个 File 头的路径，比拿整段补丁文本当 target 有用得多。
+        let patch =
+            "*** Begin Patch\n*** Update File: crates/a/src/lib.rs\n@@\n-old\n+new\n*** End Patch";
+        assert_eq!(
+            extract_tool_activity_target(&json!(patch)).as_deref(),
+            Some("crates/a/src/lib.rs")
+        );
+        let added = "*** Begin Patch\n*** Add File: docs/new.md\n+hello\n*** End Patch";
+        assert_eq!(
+            extract_tool_activity_target(&json!(added)).as_deref(),
+            Some("docs/new.md")
+        );
+        let deleted = "*** Begin Patch\n*** Delete File: tmp/gone.txt\n*** End Patch";
+        assert_eq!(
+            extract_tool_activity_target(&json!(deleted)).as_deref(),
+            Some("tmp/gone.txt")
+        );
+        // 多个 File 头 → 取首个（确定性；活动只承载检索面事实）。
+        let multi =
+            "*** Begin Patch\n*** Update File: first.rs\n*** Add File: second.rs\n*** End Patch";
+        assert_eq!(
+            extract_tool_activity_target(&json!(multi)).as_deref(),
+            Some("first.rs")
+        );
+        // 封套但无 File 头 → 回退整段（trim 后的原文），绝不编路径。
+        let headerless = "*** Begin Patch\n*** End Patch";
+        assert_eq!(
+            extract_tool_activity_target(&json!(headerless)).as_deref(),
+            Some(headerless)
+        );
+        // 首行不是 `*** Begin Patch` 的字符串（真实语料里有 3 条 exec 命令内嵌
+        // 补丁文本）→ 不当补丁解析，保持整条命令。
+        let heredoc = "bash -lc 'apply_patch <<EOF\n*** Update File: a.rs\nEOF'";
+        assert_eq!(
+            extract_tool_activity_target(&json!(heredoc)).as_deref(),
+            Some(heredoc)
+        );
+        // File 头存在但路径为空白 → 继续找下一个头；都没有则回退整段。
+        let blank = "*** Begin Patch\n*** Update File:   \n*** Add File: real.rs\n*** End Patch";
+        assert_eq!(
+            extract_tool_activity_target(&json!(blank)).as_deref(),
+            Some("real.rs")
+        );
+    }
+
+    #[test]
     fn tool_activity_target_priority_chain_first_present_wins() {
         use serde_json::json;
         // 优先级（借用 Recall events.rs::target_from_value 的键序）：
@@ -1579,7 +1797,13 @@ mod tests {
             None
         );
         assert_eq!(extract_tool_activity_target(&json!(null)), None);
-        assert_eq!(extract_tool_activity_target(&json!("not an object")), None);
+        // 字符串形态的 input 不再是"非对象 → None"：Codex custom_tool_call 把
+        // 整段参数记在字符串 `input` 里，那就是 provider 记录的 target。
+        // 见 `tool_activity_target_accepts_string_shaped_tool_input`。
+        assert_eq!(
+            extract_tool_activity_target(&json!("not an object")).as_deref(),
+            Some("not an object")
+        );
         // 数组值（Recall 的 bash -c 形态）在本项目 fail-closed：不猜。
         assert_eq!(
             extract_tool_activity_target(&json!({"command": ["bash", "-c", "ls"]})),
@@ -1590,6 +1814,51 @@ mod tests {
             extract_tool_activity_target(&json!({"command": "  git status  "})).as_deref(),
             Some("git status")
         );
+    }
+
+    #[test]
+    fn build_tool_activity_keeps_the_fail_closed_double_guarantee() {
+        use agent_session_grep_domain::{
+            ToolActivityActor, ToolActivityKind as K, ToolActivityStatus,
+        };
+        use serde_json::json;
+        // 闭集扩张后这条不变量更重要：未知名 → kind=Unknown **且** target=None，
+        // 即使 input 带着形似命令/路径的字段（也包括字符串形态的 input）。
+        let unknown_object = build_tool_activity(
+            "mcp__some-server__run",
+            ToolActivityActor::Main,
+            &json!({"command": "rm -rf /"}),
+            ToolActivityStatus::Success,
+        );
+        assert_eq!(unknown_object.kind, K::Unknown);
+        assert_eq!(unknown_object.target, None);
+        let unknown_string = build_tool_activity(
+            "update_plan",
+            ToolActivityActor::Main,
+            &json!("cargo test"),
+            ToolActivityStatus::Unknown,
+        );
+        assert_eq!(unknown_string.kind, K::Unknown);
+        assert_eq!(unknown_string.target, None);
+        // 已知名 + 无可用字段 → kind 保留、target=None。
+        let known_without_target = build_tool_activity(
+            "Read",
+            ToolActivityActor::Subagent,
+            &json!({"limit": 20}),
+            ToolActivityStatus::Success,
+        );
+        assert_eq!(known_without_target.kind, K::File);
+        assert_eq!(known_without_target.target, None);
+        assert_eq!(known_without_target.actor, ToolActivityActor::Subagent);
+        // 已知名 + 字符串 input（Codex custom_tool_call 形态）→ target 取整条。
+        let known_string = build_tool_activity(
+            "exec",
+            ToolActivityActor::Main,
+            &json!("cargo fmt --all"),
+            ToolActivityStatus::Success,
+        );
+        assert_eq!(known_string.kind, K::Command);
+        assert_eq!(known_string.target.as_deref(), Some("cargo fmt --all"));
     }
 
     #[test]

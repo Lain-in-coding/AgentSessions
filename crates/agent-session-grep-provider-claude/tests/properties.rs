@@ -227,7 +227,10 @@ fn build_transcript(seed: u64, with_large_field: bool) -> GeneratedTranscript {
                 None
             };
             let sidechain = rng.chance(30);
-            // content 两种形态：字符串，或 text 块与无 text 工具块混排的数组。
+            // content 两种形态：字符串，或 text 块与工具块混排的数组。
+            // 工具块的 ground truth 是它的可检索摘要（设计 R7：`名字(target)`），
+            // 按 block 顺序追加在文本块之后——生成器与 adapter 用同一规则，
+            // 属性才检验"投影确定且只用 provider 记录的事实"。
             let (content, text) = if force_large_valid || rng.chance(50) {
                 let t = make_text(&mut rng, force_large_valid);
                 (json!(t), t)
@@ -235,17 +238,24 @@ fn build_transcript(seed: u64, with_large_field: bool) -> GeneratedTranscript {
                 let block_count = rng.below(4);
                 let mut blocks = Vec::new();
                 let mut texts = Vec::new();
+                let mut tool_summaries = Vec::new();
                 for _ in 0..block_count {
                     if rng.chance(75) {
                         let t = make_text(&mut rng, false);
                         blocks.push(json!({"type": "text", "text": t.clone()}));
                         texts.push(t);
                     } else {
+                        let path = format!("crates/prop/src/f{}.rs", rng.below(1000));
                         blocks.push(json!({
-                            "type": "tool_use", "id": "toolu-prop", "name": "Synthetic", "input": {}
+                            "type": "tool_use",
+                            "id": "toolu-prop",
+                            "name": "Read",
+                            "input": {"file_path": path.clone()},
                         }));
+                        tool_summaries.push(format!("Read({path})"));
                     }
                 }
+                texts.extend(tool_summaries);
                 (json!(blocks), texts.join("\n"))
             };
             let mut record = json!({

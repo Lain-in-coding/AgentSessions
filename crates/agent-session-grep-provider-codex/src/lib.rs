@@ -242,20 +242,30 @@ struct RawPayload {
     /// directory。缺失/空白 → None，绝不臆造。
     #[serde(default)]
     cwd: Option<String>,
-    /// `custom_tool_call` 的工具名（如 `shell`）。缺失/空 → 视为不透明调用。
+    /// `custom_tool_call` 的工具名（如 `exec` / `apply_patch`）；`function_call`
+    /// 的工具名（如 `shell_command` / `exec_command`）。缺失/空 → 视为不透明调用。
     #[serde(default)]
     name: String,
-    /// `custom_tool_call` 的参数：JSON 字符串或对象两种形态都接受
-    /// （老版本 rollout 为字符串；新版本直接为对象）。
+    /// `function_call` 的参数：JSON 字符串或对象两种形态都接受
+    /// （真实 rollout 为 JSON 字符串；对象形态见旧样本）。
     #[serde(default)]
     arguments: Option<serde_json::Value>,
-    /// `custom_tool_call` 的调用 id（新版本字段；旧版本复用顶层 `id`）。
+    /// `custom_tool_call` 的参数：真实 rollout 里是**字符串**（`exec` 是整条
+    /// 命令、`apply_patch` 是补丁封套），不是 `arguments` 对象。对象形态一并
+    /// 受理（additive 容错）。
+    #[serde(default)]
+    input: Option<serde_json::Value>,
+    /// `custom_tool_call` 的调用 id（旧版本字段名；真实 rollout 用 `call_id`）。
     #[serde(default, rename = "tool_call_id")]
     tool_call_id: Option<String>,
-    /// `function_call_output` 引用的调用 id（与 `custom_tool_call` 配对）。
+    /// 调用与输出的配对键：`function_call` / `custom_tool_call` 与各自的
+    /// `*_output` 记录都携带同一 `call_id`（真实语料 12805/12805 条输出按此键
+    /// 配对成功，0 孤儿）。
     #[serde(default, rename = "call_id")]
     call_id: Option<String>,
-    /// `function_call_output` 的失败标记；缺失视为 false（成功）。
+    /// 工具输出的失败标记。真实语料里 12805 条输出**没有任何一条**携带该字段
+    /// （也无 `metadata.exit_code`），故 Codex 的失败状态实际不可得；字段保留
+    /// 为 additive 容错：将来 provider 若开始记录，立即生效。缺失视为成功。
     #[serde(default, rename = "is_error")]
     is_error: bool,
     /// `event_msg/token_count` 的用量载荷（`info`：total_token_usage +
@@ -271,17 +281,64 @@ struct RawPayload {
 }
 
 impl RawPayload {
-    /// 归一化的调用参数对象：JSON 字符串解析为对象，对象形态原样使用，
-    /// 其余（缺失/非对象/解析失败）一律按不透明 `Null` 处理（fail-closed）。
-    fn normalized_arguments(&self) -> serde_json::Value {
+    /// 归一化的调用参数：`function_call` 的 `arguments` 优先，其次
+    /// `custom_tool_call` 的 `input`。
+    ///
+    /// - JSON 字符串的 `arguments` 解析为对象；解析失败 → 不透明 `Null`
+    ///   （fail-closed：不把一段坏 JSON 当 target 塞进检索面）。
+    /// - 对象形态原样使用。
+    /// - `input` 为字符串时**原样保留字符串**：真实 rollout 的 `exec` 把整条
+    ///   命令、`apply_patch` 把补丁封套记在这里，target 提取链已受理字符串形态。
+    /// - 两者都缺失/形态不认 → `Null`。
+    fn normalized_tool_input(&self) -> serde_json::Value {
         match &self.arguments {
             Some(serde_json::Value::String(raw)) => {
-                serde_json::from_str(raw).unwrap_or(serde_json::Value::Null)
+                return serde_json::from_str(raw).unwrap_or(serde_json::Value::Null);
             }
-            Some(value @ serde_json::Value::Object(_)) => value.clone(),
+            Some(value @ serde_json::Value::Object(_)) => return value.clone(),
+            _ => {}
+        }
+        match &self.input {
+            Some(value @ (serde_json::Value::String(_) | serde_json::Value::Object(_))) => {
+                value.clone()
+            }
             _ => serde_json::Value::Null,
         }
     }
+
+    /// 调用与输出的配对键：`call_id` 权威（真实 rollout 的两类调用记录都带），
+    /// 其次旧字段 `tool_call_id`，最后回退记录自身 `id`（更旧的样本形态）。
+    /// 全为空白 → `None`（不透明调用，R6 静默跳过）。
+    fn tool_call_key(&self) -> Option<String> {
+        [
+            self.call_id.as_deref(),
+            self.tool_call_id.as_deref(),
+            Some(self.id.as_str()),
+        ]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .find(|id| !id.is_empty())
+        .map(str::to_string)
+    }
+}
+
+/// 工具**调用**记录的 payload 类型闭集。
+///
+/// 真实语料（153 个 rollout）逐类计数：`function_call` 11308 条、
+/// `custom_tool_call` 1503 条。此前只认 `custom_tool_call`，于是 88% 的真实
+/// 工具调用完全不产出活动。
+fn is_tool_call_payload(kind: &str) -> bool {
+    matches!(kind, "function_call" | "custom_tool_call")
+}
+
+/// 工具**输出**记录的 payload 类型闭集。
+///
+/// 真实语料计数：`function_call_output` 11302 条、`custom_tool_call_output`
+/// 1503 条。此前只认 `function_call_output`，而 `custom_tool_call` 的输出走
+/// `custom_tool_call_output`——两半错位，配对恒失败（活动 status 恒 Unknown）。
+fn is_tool_call_output_payload(kind: &str) -> bool {
+    matches!(kind, "function_call_output" | "custom_tool_call_output")
 }
 
 /// 一次尚未配对到结果的工具调用（设计 R5/R6：按 `call_id` 跨记录配对）。
@@ -536,6 +593,12 @@ fn codex_user_noise_kind(trimmed: &str) -> Option<&'static str> {
 }
 
 /// 把配对好的调用构建为活动并 emit（设计 R2/R3/R4）。
+///
+/// 状态口径（诚实边界）：真实 rollout 的工具输出记录**不携带任何失败标记**
+/// （153 个样本 12805 条输出里 `is_error` 出现 0 次，`output` 也没有
+/// `metadata.exit_code`），因此「配对到输出」只能如实记 `Success`；`is_error`
+/// 字段保留为 additive 容错。绝不从输出正文里嗅探 "error"/"failed" 等词来推断
+/// 失败——那是编造 provider 没记录的事实。
 fn emit_paired_activity(
     sink: &mut dyn CanonicalEventSink,
     call: &PendingToolCall,
@@ -623,7 +686,10 @@ impl ProviderAdapter for CodexAdapter {
             self.provider_id(),
             Some(1),
             &[
-                "tool activity extraction is partial",
+                "tool outputs carry no failure marker, so tool activity status is \
+                 success or unknown — never error",
+                "web_search_call / tool_search_call records carry no tool name or call_id \
+                 and are not extracted as activities",
                 "turn_context metadata is not surfaced as canonical messages",
             ],
         )
@@ -914,34 +980,24 @@ impl ProviderAdapter for CodexAdapter {
             let Some(payload) = rec.payload else {
                 continue;
             };
-            // 工具活动观察（设计 R1-R6）：custom_tool_call 登记待决调用；
-            // function_call_output 配对后 emit。两者都不是对话消息记录。
-            if payload.r#type == "custom_tool_call" {
-                let call_id = payload
-                    .tool_call_id
-                    .clone()
-                    .or_else(|| {
-                        if payload.id.trim().is_empty() {
-                            None
-                        } else {
-                            Some(payload.id.clone())
-                        }
-                    })
-                    .filter(|id| !id.trim().is_empty());
-                if let (Some(call_id), name) = (call_id, payload.name.trim())
+            // 工具活动观察（设计 R1-R6）：function_call / custom_tool_call 登记
+            // 待决调用；对应的 *_output 记录按 `call_id` 配对后 emit。两者都不是
+            // 对话消息记录。
+            if is_tool_call_payload(&payload.r#type) {
+                if let (Some(call_id), name) = (payload.tool_call_key(), payload.name.trim())
                     && !name.is_empty()
                 {
                     pending_calls.push(PendingToolCall {
                         call_id,
                         name: name.to_string(),
-                        input: payload.normalized_arguments(),
+                        input: payload.normalized_tool_input(),
                         anchor: last_emitted_native_id.clone(),
                     });
                 }
                 // 缺 call id 或 name 的调用视为不透明（R6），静默跳过。
                 continue;
             }
-            if payload.r#type == "function_call_output" {
+            if is_tool_call_output_payload(&payload.r#type) {
                 if let Some(call_id) = payload.call_id.as_deref()
                     && let Some(index) = pending_calls
                         .iter()
@@ -2071,11 +2127,145 @@ mod tests {
         let patch = &activities[1];
         assert_eq!(
             patch.activity.kind,
-            ToolActivityKind::Unknown,
-            "apply_patch 不在已知闭集"
+            ToolActivityKind::File,
+            "apply_patch 是 Codex 真实记录的补丁工具名，已在闭集内"
         );
-        assert_eq!(patch.activity.target, None, "未知名不猜 target");
+        assert_eq!(patch.activity.target.as_deref(), Some("config.toml"));
         assert_eq!(patch.activity.status, ToolActivityStatus::Error);
+    }
+
+    #[test]
+    fn parse_pairs_real_function_call_shape_by_call_id() {
+        // 真实 rollout 形态：`function_call` 带 `name` + JSON 字符串 `arguments`
+        // + `call_id`（另有自身 `id`，与 `call_id` 不同串），输出为
+        // `function_call_output` 且按 `call_id` 引用。此前 adapter 只登记
+        // `custom_tool_call`，这类记录（真实语料 11308 条，占 88%）零活动。
+        let (messages, activities) = parse_rollout_records(&[
+            assistant_message("msg_a1", "running the suite"),
+            response_item(serde_json::json!({
+                "type": "function_call",
+                "id": "fc_0198",
+                "call_id": "call_9f2a",
+                "name": "shell_command",
+                "arguments": "{\"command\":\"cargo test --workspace\",\"workdir\":\"/repo\",\"timeout_ms\":600000}",
+            })),
+            response_item(serde_json::json!({
+                "type": "function_call_output",
+                "id": "fco_0198",
+                "call_id": "call_9f2a",
+                "output": "test result: ok. 68 passed",
+            })),
+        ]);
+        assert_eq!(messages, 1);
+        assert_eq!(activities.len(), 1);
+        let call = &activities[0];
+        assert_eq!(call.message_native_id, "msg_a1");
+        assert_eq!(call.activity.name, "shell_command");
+        assert_eq!(call.activity.kind, ToolActivityKind::Command);
+        assert_eq!(
+            call.activity.target.as_deref(),
+            Some("cargo test --workspace"),
+            "target 取 arguments.command（优先级链），不是 workdir"
+        );
+        assert_eq!(
+            call.activity.status,
+            ToolActivityStatus::Success,
+            "配对到输出即成功"
+        );
+    }
+
+    #[test]
+    fn parse_pairs_real_custom_tool_call_shape_with_its_own_output_type() {
+        // 真实 rollout 形态：`custom_tool_call` 的参数在**字符串** `input` 里
+        // （不是 `arguments`），输出记录类型是 `custom_tool_call_output`
+        // （不是 `function_call_output`），`output` 为 block 数组。
+        // 此前两半错位：调用登记用 `id`（≠ 输出的 `call_id`）、输出只认
+        // `function_call_output` → 真实语料 1503 条调用全部配不上（status 恒
+        // Unknown）、target 恒 None（只读 `arguments`）。
+        let (_, activities) = parse_rollout_records(&[
+            assistant_message("msg_a1", "formatting"),
+            response_item(serde_json::json!({
+                "type": "custom_tool_call",
+                "id": "fc_5d1c00b7f0",
+                "call_id": "call_7Kq2",
+                "name": "exec",
+                "input": "cargo fmt --all --check",
+                "status": "completed",
+            })),
+            response_item(serde_json::json!({
+                "type": "custom_tool_call_output",
+                "id": "fco_5d1c",
+                "call_id": "call_7Kq2",
+                "output": [{"type": "input_text", "text": "no diff"}],
+            })),
+        ]);
+        assert_eq!(activities.len(), 1);
+        let call = &activities[0];
+        assert_eq!(call.activity.name, "exec");
+        assert_eq!(call.activity.kind, ToolActivityKind::Command);
+        assert_eq!(
+            call.activity.target.as_deref(),
+            Some("cargo fmt --all --check"),
+            "字符串 input 整条就是 provider 记录的 target"
+        );
+        assert_eq!(call.activity.status, ToolActivityStatus::Success);
+    }
+
+    #[test]
+    fn parse_extracts_the_patched_file_from_an_apply_patch_envelope() {
+        // `apply_patch` 的 `input` 是补丁封套（真实语料 549/549 条首行为
+        // `*** Begin Patch`）：target 取首个 File 头的路径，而不是整段补丁。
+        let (_, activities) = parse_rollout_records(&[
+            assistant_message("msg_a1", "applying"),
+            response_item(serde_json::json!({
+                "type": "custom_tool_call",
+                "id": "fc_patch",
+                "call_id": "call_patch",
+                "name": "apply_patch",
+                "input": "*** Begin Patch\n*** Update File: crates/x/src/lib.rs\n@@\n-old\n+new\n*** End Patch",
+            })),
+            response_item(serde_json::json!({
+                "type": "custom_tool_call_output",
+                "id": "fco_patch",
+                "call_id": "call_patch",
+                "output": [{"type": "input_text", "text": "Success. Updated the following files:\nM crates/x/src/lib.rs"}],
+            })),
+        ]);
+        assert_eq!(activities.len(), 1);
+        assert_eq!(activities[0].activity.kind, ToolActivityKind::File);
+        assert_eq!(
+            activities[0].activity.target.as_deref(),
+            Some("crates/x/src/lib.rs")
+        );
+    }
+
+    #[test]
+    fn parse_never_infers_failure_from_tool_output_text() {
+        // 诚实边界：真实 rollout 的输出记录没有 `is_error`/`exit_code`，所以
+        // 「输出正文里出现 error」绝不能被当作失败——那是编造 provider 未记录
+        // 的事实。配对成功即 Success，不做文本嗅探。
+        let (_, activities) = parse_rollout_records(&[
+            assistant_message("msg_a1", "building"),
+            response_item(serde_json::json!({
+                "type": "function_call",
+                "id": "fc_err",
+                "call_id": "call_err",
+                "name": "shell_command",
+                "arguments": "{\"command\":\"cargo build\"}",
+            })),
+            response_item(serde_json::json!({
+                "type": "function_call_output",
+                "id": "fco_err",
+                "call_id": "call_err",
+                "output": "error[E0308]: mismatched types\nerror: could not compile",
+            })),
+        ]);
+        assert_eq!(activities.len(), 1);
+        assert_eq!(
+            activities[0].activity.status,
+            ToolActivityStatus::Success,
+            "provider 未记录失败标记时不得从正文推断失败"
+        );
     }
 
     #[test]
