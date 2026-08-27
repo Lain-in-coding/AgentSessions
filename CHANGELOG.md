@@ -252,6 +252,37 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Tool activity extraction now follows the record shapes real `claude-code` and
+  `codex` transcripts write (structure census over local corpora: record types,
+  tool names and argument key names only, never content). `codex` registers
+  `function_call` (previously ignored — 88% of observed tool calls) alongside
+  `custom_tool_call`, pairs both `function_call_output` and
+  `custom_tool_call_output` by `call_id` (12805/12805 observed outputs pair, 0
+  orphans; previously the two halves were crossed so nothing ever paired and
+  status stayed `unknown`), reads the string `input` that `custom_tool_call`
+  actually carries instead of an absent `arguments` object, and resolves an
+  `apply_patch` envelope to the first `*** {Add,Update,Delete} File:` path
+  instead of storing patch text. The kind closed set gained the names the
+  census found (`PowerShell`, `shell_command`, `exec_command`, `apply_patch`,
+  `Agent`, `spawn_agent`, `web_fetch`, `web_search`, `view_image`); everything
+  outside it — MCP tools, orchestration/plan tools, user plugins — still fails
+  closed to `kind = Unknown` with no target. Codex tool outputs carry no
+  failure marker in any observed record, so status stays success-or-unknown and
+  is never inferred from output text. `TOOL_ACTIVITY_TARGET_MAX_CHARS` moved to
+  ports as the single owner of the 512-character target bound.
+- Claude Code `tool_use` blocks now render as `Name(target)` summaries in the
+  canonical message projection (idea from cc-switch's `extract_text_from_item`,
+  MIT; implementation is our own). Claude Code stores tool calls inside
+  assistant messages and those blocks have no `text` field, so 2610 of 4226
+  observed assistant messages projected to an empty body — indexed, counted as
+  committed, and matchable by no query. The summary makes "which tool touched
+  which file" searchable. Only provider-recorded strings are used, under a
+  fixed template, bounded by the same target cap as the store, so a body and
+  its stored activity target agree verbatim; the catalog payload still holds
+  the provider record in full and spans still point at source bytes
+  (ADR-0004/THREAT-MODEL: the catalog never rewrites source text — this is the
+  canonical projection, which already canonicalizes local-command envelopes).
+  Those pinned canonicalizations keep priority over summaries.
 - Message FTS body retention (borrowing list #3, ctx text-retention policy):
   a message's searchable projection is now bounded to 16 000 characters
   (`application::retention::MESSAGE_FTS_MAX_CHARS`, char-boundary truncation)

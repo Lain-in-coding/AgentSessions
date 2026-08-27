@@ -715,7 +715,9 @@ impl ProviderAdapter for ClaudeCodeAdapter {
             self.provider_id(),
             Some(1),
             &[
-                "tool activity extraction is partial",
+                "tool activity kind is inferred from a closed set of documented tool names; \
+                 user-defined and MCP tools are recorded with kind `unknown`",
+                "a tool call with no matching tool_result reports status `unknown`",
                 "turn_context metadata is not surfaced as canonical messages",
             ],
         )

@@ -686,7 +686,10 @@ impl ProviderAdapter for CodexAdapter {
             self.provider_id(),
             Some(1),
             &[
-                "tool activity extraction is partial",
+                "tool outputs carry no failure marker, so tool activity status is \
+                 success or unknown — never error",
+                "web_search_call / tool_search_call records carry no tool name or call_id \
+                 and are not extracted as activities",
                 "turn_context metadata is not surfaced as canonical messages",
             ],
         )
