@@ -102,6 +102,14 @@ ALLOWLIST: frozenset[tuple[str, str, str]] = frozenset(
             "user-home",
             LINUX_HOME + "user",
         ),
+        # The v3 branch fixture declares the same synthetic placeholder home as
+        # basic.jsonl; it is BLAKE3-pinned, so the placeholder is allowlisted
+        # rather than rewritten.
+        (
+            "crates/agent-session-grep-provider-pi/tests/golden/v3-branched.jsonl",
+            "user-home",
+            LINUX_HOME + "user",
+        ),
         (
             "crates/agent-session-grep-provider-pi/tests/golden/PROVENANCE.md",
             "user-home",
