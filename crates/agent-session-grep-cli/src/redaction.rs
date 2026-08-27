@@ -79,8 +79,15 @@ fn redact_value_inner(value: serde_json::Value, count: &mut u64) -> serde_json::
 }
 
 /// When the key name signals a secret, replace the entire value with a
-/// redaction marker (even if the value is non-string, e.g. a number or null).
-/// Empty strings and null are left as-is (no secret to leak).
+/// redaction marker. Empty strings and null are left as-is (no secret to
+/// leak), and so are numbers and booleans: a JSON number cannot carry a
+/// secret shape, while several contract fields are numeric counters whose
+/// names contain a secret-looking fragment (`max_tokens` / `used_tokens` in
+/// `handoff-pack/v1`, whose published schema declares them as integers).
+/// Blanking those would emit a string where the schema promises an integer
+/// and would destroy the budget accounting the pack exists to report.
+/// Arrays and objects still recurse, so a secret-named container is scanned
+/// rather than trusted.
 ///
 /// For non-empty string values, first try the value-pattern engine: if the
 /// value matches a known secret shape, keep its specific marker (e.g.
@@ -90,6 +97,10 @@ fn redact_secret_value(value: serde_json::Value, count: &mut u64) -> serde_json:
     match &value {
         serde_json::Value::String(s) if s.is_empty() => value,
         serde_json::Value::Null => value,
+        serde_json::Value::Number(_) | serde_json::Value::Bool(_) => value,
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+            redact_value_inner(value, count)
+        }
         serde_json::Value::String(s) => {
             if let Some(redacted) = agent_session_grep_ports::redact::redact_string(s) {
                 *count += 1;
@@ -98,10 +109,6 @@ fn redact_secret_value(value: serde_json::Value, count: &mut u64) -> serde_json:
                 *count += 1;
                 serde_json::Value::String("[redacted]".into())
             }
-        }
-        _ => {
-            *count += 1;
-            serde_json::Value::String("[redacted]".into())
         }
     }
 }
@@ -285,6 +292,44 @@ mod tests {
         let (redacted, status) = redact_value(val);
         assert_eq!(redacted["api_token"], "[redacted]");
         assert_eq!(status.redacted_count, 1);
+    }
+
+    #[test]
+    fn key_name_redaction_leaves_numeric_and_boolean_contract_fields_intact() {
+        // 真实缺陷（dogfooding 在 17 万条语料上用 MCP generate_handoff 发现）：
+        // handoff-pack/v1 的 `budget.max_tokens` / `used_tokens` 是整数预算计数，
+        // 键名含 "token" 片段却被按键整值涂红成字符串 "[redacted]" ——
+        // 既违反 `schemas/handoff/v1/pack.schema.json`（声明 integer），
+        // 又抹掉了 pack 存在意义所在的预算账目。
+        // 根因修法：键名涂红不作用于数字/布尔（数字不可能是秘密形态）。
+        let val = serde_json::json!({
+            "budget": {
+                "max_tokens": 4000,
+                "max_bytes": 6000,
+                "used_tokens": 1234,
+                "used_bytes": 4951,
+                "max_evidence": 2,
+            },
+            "token_verified": false,
+        });
+        let (redacted, status) = redact_value(val);
+        assert_eq!(redacted["budget"]["max_tokens"], 4000);
+        assert_eq!(redacted["budget"]["used_tokens"], 1234);
+        assert_eq!(redacted["budget"]["max_bytes"], 6000);
+        assert_eq!(redacted["token_verified"], false);
+        assert_eq!(status.redacted_count, 0);
+        assert_eq!(status.status, RedactionState::None);
+
+        // 秘密名下的字符串照常涂红，容器仍递归扫描（不因本修法被信任放行）。
+        let val = serde_json::json!({
+            "access_token": "ghp_1234567890abcdef",
+            "secrets": {"nested_token": "ghp_abcdef1234567890", "retries": 3},
+        });
+        let (redacted, status) = redact_value(val);
+        assert_eq!(redacted["access_token"], "[redacted]");
+        assert_eq!(redacted["secrets"]["nested_token"], "[redacted]");
+        assert_eq!(redacted["secrets"]["retries"], 3);
+        assert_eq!(status.redacted_count, 2);
     }
 
     #[test]
