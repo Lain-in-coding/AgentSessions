@@ -29,7 +29,7 @@ use agent_session_grep_ports::{
     CatalogEntry, CatalogStore, ContextGraphStore, ContextStats, MessageContextCandidate,
     PortError, PortResult, RepoTotals, ResumeClaimsStore, SearchFacets, SearchHit, SearchIndex,
     SearchQuery, SemanticIndex, SessionResumeMetadata, SidechainFacet, SourcePlacement,
-    SourceResumeClaim, UsageTotals,
+    SourceResumeClaim, TOOL_ACTIVITY_TARGET_MAX_CHARS, UsageTotals,
 };
 use rusqlite::{Connection, OptionalExtension};
 use std::any::Any;
@@ -1194,9 +1194,9 @@ impl StoredActivity {
 
 /// 工具名存储上限（字符数）：显式截断，防止 provider 失控的工具名膨胀存储。
 const TOOL_ACTIVITY_NAME_MAX_CHARS: usize = 128;
-/// 工具 target 存储上限（字符数）：显式截断；真实 transcript 的路径/命令
-/// 可能很长，但活动只承载检索面事实，不需要全文。
-const TOOL_ACTIVITY_TARGET_MAX_CHARS: usize = 512;
+// 工具 target 存储上限（字符数）由 ports 的
+// `TOOL_ACTIVITY_TARGET_MAX_CHARS` 单一持有（provider 的可检索正文投影用同一
+// 常量），此处直接引用，避免两侧数值漂移。
 
 /// 内容寻址的活动 id：`act_v1_<hex16(blake3("tool-activity-v1" || …))>`。
 ///

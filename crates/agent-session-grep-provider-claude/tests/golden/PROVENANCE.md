@@ -20,7 +20,7 @@ UTF-8（无 BOM）、LF 行尾，`basic.expected.json` 中 pin 了全文件字�
 | 行 | 内容 | 覆盖点 |
 |----|------|--------|
 | 1 | `type:"user"` 根消息 | 首条记录携带 `sessionId`；`parentUuid:null` 根；字符串形态 `content`；additive 未知字段（`userType`/`cwd`/`version`）被忽略 |
-| 2 | `type:"assistant"` | `parentUuid` 链；block 数组形态 `content`；无 `text` 的 `tool_use` block 被过滤；CJK + emoji（多字节 span） |
+| 2 | `type:"assistant"` | `parentUuid` 链；block 数组形态 `content`；`tool_use` block 渲染为 `名字(target)` 摘要并入可检索正文（设计 R7）；CJK + emoji（多字节 span） |
 | 3 | `type:"summary"` | 非对话记录：静默略过，不计 skipped |
 | 4 | 空行 | 空白行静默略过，但参与字节偏移 |
 | 5 | 截断的 JSON | 破损行 → record_recoverable：skipped+1 + 诊断，不中止解析 |
@@ -36,8 +36,9 @@ UTF-8（无 BOM）、LF 行尾，`basic.expected.json` 中 pin 了全文件字�
   `sessionId`、`timestamp`（ISO-8601 UTC）、`isSidechain`，另有 `userType`/
   `cwd`/`version` 等 additive 字段；
 - `message.content` 两种形态：纯字符串，或 block 数组（`{"type":"text","text":…}`、
-  `tool_use`、`tool_result` 等；`text` 字段与 `tool_result` 的 `content` 字段
-  （字符串或 text block 数组）可检索）；
+  `tool_use`、`tool_result` 等；`text` 字段、`tool_result` 的 `content` 字段
+  （字符串或 text block 数组）可检索，`tool_use` 的 `name` + input 目标键渲染为
+  摘要后同样可检索）；
 - 非对话行如 `{"type":"summary","summary":…,"leafUuid":…}`。
 
 ## 脱敏与合规声明

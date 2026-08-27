@@ -10,8 +10,8 @@ use agent_session_grep_domain::{
 };
 use agent_session_grep_ports::{
     AdapterManifest, CanonicalEventSink, Confidence, MessageEvent, MetadataResolution, ParseReport,
-    ProbeResult, ProviderAdapter, ProviderError, ToolActivityEvent, UsageEvent,
-    build_tool_activity, manifest_for,
+    ProbeResult, ProviderAdapter, ProviderError, TOOL_ACTIVITY_TARGET_MAX_CHARS, ToolActivityEvent,
+    UsageEvent, build_tool_activity, extract_tool_activity_target, manifest_for,
 };
 use serde::{Deserialize, de::IgnoredAny};
 
@@ -33,6 +33,15 @@ const USAGE_KEY_INPUT: &str = "input_tokens";
 const USAGE_KEY_OUTPUT: &str = "output_tokens";
 const USAGE_KEY_CACHE_READ: &str = "cache_read_input_tokens";
 const USAGE_KEY_CACHE_WRITE: &str = "cache_creation_input_tokens";
+
+/// `tool_use` 摘要在可检索正文里的渲染形状（设计 R7）：`名字(target)`，
+/// 无 target 时只有名字。两个包裹符与 target 上限集中在此。
+const TOOL_SUMMARY_OPEN: char = '(';
+const TOOL_SUMMARY_CLOSE: char = ')';
+/// 摘要里 target 的字符上限：与 ports 的
+/// [`TOOL_ACTIVITY_TARGET_MAX_CHARS`] 同值，因此正文里看到的 target 与
+/// `tool_activities` 表里存的逐字一致（同一常量，无第二个数字可漂移）。
+const TOOL_SUMMARY_TARGET_MAX_CHARS: usize = TOOL_ACTIVITY_TARGET_MAX_CHARS;
 
 // Adapted from claude-historian-mcp/src/parser.ts:74-92 (MIT): inspect cheap
 // JSONL markers before invoking serde. Keep this predicate conservative: an
@@ -320,6 +329,49 @@ impl RawBlock {
             Some(RawContent::Empty) | None => None,
         }
     }
+
+    /// `tool_use` block 的可检索摘要（设计 R7）：`名字(target)`，取不到 target
+    /// 时只有名字。非 `tool_use` block、或名字为空的不透明调用 → `None`。
+    ///
+    /// **为什么要进正文**：Claude Code 把工具调用记在 assistant 消息的
+    /// `content[]` 里，而这类 block 没有 `text` 字段。真实语料普查（本机 25 个
+    /// 最近 transcript）：4226 条 assistant 消息里 2610 条（62%）**没有任何非空
+    /// text block**——它们的 canonical 正文因此为空串，进了 catalog 与 FTS 却一
+    /// 个词都匹配不到（`capability_parse_claim_matches_real_parse_on_own_golden`
+    /// 明确把"空正文却计入 committed"判为不诚实，只是 golden 里没有这一类，守卫
+    /// 抓不到）。把调用渲染成摘要后，"我当时用什么工具动了哪个文件"才可检索。
+    ///
+    /// **边界（THREAT-MODEL：Catalog 不在索引期改写原文）**：改写的是 canonical
+    /// **投影**，不是原文——catalog payload 仍保留 provider 原始记录全文，
+    /// source span 仍指向源记录字节，两者都不因本规则改变。投影只使用 provider
+    /// 逐字记录的事实（`name` 原样、target 走 R1 优先级链），模板固定、无语义
+    /// 推断，因此同一字节输入永远得到同一正文（determinism）。
+    ///
+    /// 借鉴 cc-switch `session_manager/providers/utils.rs::extract_text_from_item`
+    /// （MIT）的思想：工具调用渲染成人读摘要并入正文；实现为本项目自有代码。
+    fn tool_use_summary(&self) -> Option<String> {
+        if self.kind != "tool_use" {
+            return None;
+        }
+        let name = self.name.as_deref().map(str::trim).unwrap_or_default();
+        if name.is_empty() {
+            return None;
+        }
+        let target = self
+            .input
+            .as_ref()
+            .and_then(extract_tool_activity_target)
+            .map(|target| {
+                target
+                    .chars()
+                    .take(TOOL_SUMMARY_TARGET_MAX_CHARS)
+                    .collect::<String>()
+            });
+        Some(match target {
+            Some(target) => format!("{name}{TOOL_SUMMARY_OPEN}{target}{TOOL_SUMMARY_CLOSE}"),
+            None => name.to_string(),
+        })
+    }
 }
 
 impl RawContent {
@@ -352,7 +404,12 @@ impl RawContent {
                 {
                     return command.to_string();
                 }
-                text_blocks.join("\n")
+                // 工具调用摘要（设计 R7）：按 block 顺序追加在文本块之后。
+                // 刻意排在既有分支之后——本地命令封套/enriched meta 的规范化形态
+                // 是 pinned 的跨副本 determinism 契约，不得因摘要而改变。
+                let mut parts = text_blocks;
+                parts.extend(blocks.iter().filter_map(RawBlock::tool_use_summary));
+                parts.join("\n")
             }
             RawContent::Empty => String::new(),
         }
@@ -1353,7 +1410,111 @@ mod tests {
             {"type": "text", "text": "ordinary second block\n"}
         ]));
 
-        assert_eq!(text, " ordinary first block \nordinary second block\n");
+        // 文本块的内部空白逐字保留、按序以 `\n` 拼接；`tool_use` 摘要（设计 R7）
+        // 追加在文本块之后。`Synthetic` 的 input 无可用字段 → 只渲染名字。
+        assert_eq!(
+            text,
+            " ordinary first block \nordinary second block\n\nSynthetic"
+        );
+    }
+
+    #[test]
+    fn parse_renders_tool_use_only_message_into_searchable_text() {
+        // 真实语料里最常见的一类 assistant 消息：content 只有 tool_use block，
+        // 没有任何 text block（本机 25 个 transcript 普查：4226 条 assistant 消息
+        // 里 2610 条如此）。此前它们的 canonical 正文是空串——占一个 catalog
+        // 实体 + 一条 FTS 行，却一个词都检索不到。
+        let text = parse_single_content(serde_json::json!([
+            {"type": "tool_use", "id": "toolu_1", "name": "Read", "input": {"file_path": "crates/a/src/lib.rs"}},
+            {"type": "tool_use", "id": "toolu_2", "name": "PowerShell", "input": {"command": "cargo test --workspace"}}
+        ]));
+        assert_eq!(
+            text,
+            "Read(crates/a/src/lib.rs)\nPowerShell(cargo test --workspace)"
+        );
+        assert!(
+            !text.trim().is_empty(),
+            "tool-use-only 消息必须产出非空可检索正文"
+        );
+    }
+
+    #[test]
+    fn parse_tool_use_summary_follows_the_target_priority_chain() {
+        // 摘要里的 target 与 activity 的 target 是同一条链（ports R1），
+        // 因此正文与 `tool_activities` 表里的值逐字一致。
+        let cases = [
+            (
+                serde_json::json!({"type": "tool_use", "name": "Edit", "input": {"file_path": "a.rs", "old_string": "x"}}),
+                "Edit(a.rs)",
+            ),
+            (
+                serde_json::json!({"type": "tool_use", "name": "Grep", "input": {"pattern": "fn main", "output_mode": "content"}}),
+                "Grep(fn main)",
+            ),
+            (
+                serde_json::json!({"type": "tool_use", "name": "WebFetch", "input": {"url": "https://example.test/doc"}}),
+                "WebFetch(https://example.test/doc)",
+            ),
+            (
+                // 闭集外的工具照样进正文（正文只需要事实，不需要 kind）。
+                serde_json::json!({"type": "tool_use", "name": "mcp__server__tool", "input": {"query": "q"}}),
+                "mcp__server__tool(q)",
+            ),
+            (
+                // input 里没有链上任何键 → 只渲染名字，绝不编 target。
+                serde_json::json!({"type": "tool_use", "name": "TodoWrite", "input": {"todos": []}}),
+                "TodoWrite",
+            ),
+            (
+                // 完全没有 input 字段 → 同上。
+                serde_json::json!({"type": "tool_use", "name": "ExitPlanMode"}),
+                "ExitPlanMode",
+            ),
+        ];
+        for (block, expected) in cases {
+            assert_eq!(
+                parse_single_content(serde_json::json!([block.clone()])),
+                expected,
+                "block: {block}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_tool_use_summary_skips_opaque_and_non_tool_blocks() {
+        // 无 name / 空白 name 的 tool_use 是不透明记录（R6 同规）：不进正文，
+        // 也就不会出现 "()" 这种噪声条目。tool_result / image 等 block 不受影响。
+        let text = parse_single_content(serde_json::json!([
+            {"type": "tool_use", "input": {"command": "ls"}},
+            {"type": "tool_use", "name": "   ", "input": {"command": "pwd"}},
+            {"type": "text", "text": "only real text survives"}
+        ]));
+        assert_eq!(text, "only real text survives");
+    }
+
+    #[test]
+    fn parse_tool_use_summary_bounds_the_target() {
+        // 长命令按 ports 的存储上限截断（同一常量），正文不被单条工具参数淹没。
+        let long_command = "x".repeat(TOOL_SUMMARY_TARGET_MAX_CHARS + 200);
+        let text = parse_single_content(serde_json::json!([
+            {"type": "tool_use", "name": "Bash", "input": {"command": long_command}}
+        ]));
+        let expected_target = "x".repeat(TOOL_SUMMARY_TARGET_MAX_CHARS);
+        assert_eq!(text, format!("Bash({expected_target})"));
+    }
+
+    #[test]
+    fn parse_keeps_local_command_canonicalization_ahead_of_tool_summaries() {
+        // 本地命令封套的规范化形态是 pinned 的跨副本 determinism 契约：同一
+        // native message 的两种形态必须产出同一正文。摘要规则不得插队破坏它。
+        let envelope = "<command-name>synthetic-local</command-name>\n\
+                        <command-message>run synthetic local command</command-message>\n\
+                        <command-args>--flag value</command-args>";
+        let with_tool_block = parse_single_content(serde_json::json!([
+            {"type": "text", "text": format!("{envelope}\n")},
+            {"type": "tool_use", "name": "Read", "input": {"file_path": "a.rs"}}
+        ]));
+        assert_eq!(with_tool_block, envelope);
     }
 
     #[test]
