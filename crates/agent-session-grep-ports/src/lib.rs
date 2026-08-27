@@ -118,6 +118,17 @@ pub trait CatalogStore {
         Ok(session_ids.iter().map(|_| None).collect())
     }
 
+    /// 批量读取会话 repo 身份投影（schema v16 `session_repo_slugs`）：与
+    /// `session_ids` 同序的 `Option<String>`，值为三段 slug `host/owner/name`。
+    /// `None` 表示该会话没有 repo 身份（检测失败/非 git 目录/存储无此投影）——
+    /// "无行 = 未知"，未知绝不等于匹配。实现必须批量读取（分块 IN），不得逐条
+    /// 查询（N+1）。
+    ///
+    /// 默认空实现：无 repo 投影的存储对每个 id 返回 `None`，保持与条目数对齐。
+    fn session_repo_slugs(&self, session_ids: &[StableId]) -> PortResult<Vec<Option<String>>> {
+        Ok(session_ids.iter().map(|_| None).collect())
+    }
+
     /// Catalog 当前实体总数（status/doctor 使用）。
     fn count(&self) -> PortResult<u64>;
 
@@ -706,6 +717,9 @@ impl<T: CatalogStore + ?Sized> CatalogStore for &T {
     }
     fn session_titles(&self, session_ids: &[StableId]) -> PortResult<Vec<Option<String>>> {
         (**self).session_titles(session_ids)
+    }
+    fn session_repo_slugs(&self, session_ids: &[StableId]) -> PortResult<Vec<Option<String>>> {
+        (**self).session_repo_slugs(session_ids)
     }
     fn count(&self) -> PortResult<u64> {
         (**self).count()
