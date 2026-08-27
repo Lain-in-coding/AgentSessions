@@ -2884,7 +2884,8 @@ fn app_clock_ms() -> i64 {
 }
 
 /// 组合根统一构造带 Resume 槽的 App（catalog/index/resume 共用同一 store），
-/// 时钟经 [`app_clock_ms`] 注入——测试固定、生产系统时钟。
+/// 时钟经 [`app_clock_ms`] 注入——测试固定、生产系统时钟；当前仓库偏好经
+/// [`current_repo_slug`] 注入。
 fn resume_app(store: &SqliteStore) -> App<&SqliteStore, &SqliteStore, &SqliteStore> {
     App::with_resume_and_clock(
         store_ref(store),
@@ -2892,6 +2893,7 @@ fn resume_app(store: &SqliteStore) -> App<&SqliteStore, &SqliteStore, &SqliteSto
         store_ref(store),
         app_clock_ms,
     )
+    .with_current_repo(current_repo_slug())
 }
 
 /// 同上，但额外注入语义索引槽（#3 semantic/hybrid 模式）。
@@ -2905,6 +2907,27 @@ fn resume_semantic_app(
         store_ref(store),
         app_clock_ms,
     )
+    .with_current_repo(current_repo_slug())
+}
+
+/// 调用方当前工作目录派生的 repo slug（当前仓库偏好排序信号的唯一来源）。
+///
+/// CLI 有明确的 cwd 语义，因此在这里派生一次；不在 git 工作树内、无 `origin`、
+/// 或 cwd 不可读时一律 `None`（信号关闭，排序与注入前逐字节一致）。
+/// `ASG_CURRENT_REPO` 覆盖派生结果，供 e2e 固定该信号——与 `ASG_CLOCK_MS`
+/// 同一注入纪律：生产不设该变量时走真实 git 探测。
+fn current_repo_slug() -> Option<String> {
+    if let Ok(value) = std::env::var("ASG_CURRENT_REPO") {
+        let trimmed = value.trim();
+        return if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        };
+    }
+    let cwd = std::env::current_dir().ok()?;
+    let resolver = repo_identity::GitRepoSlugResolver::default();
+    agent_session_grep_adapters_sqlite::RepoSlugResolver::resolve(&resolver, &cwd.to_string_lossy())
 }
 
 /// Human search 的会话表格行按 canonical Session 去重后批量解析 Resume

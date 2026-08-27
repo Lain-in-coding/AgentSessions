@@ -236,7 +236,10 @@ mod tests {
         let boosted = final_score(2.0, 0, false, true);
         assert!((boosted - plain - CURRENT_REPO_SCORE_BOOST).abs() < 1e-6);
         // 不匹配（或调用方无仓库身份）时分值与旧行为逐位一致。
-        assert_eq!(final_score(2.0, 0, false, false).to_bits(), 2.0f32.to_bits());
+        assert_eq!(
+            final_score(2.0, 0, false, false).to_bits(),
+            2.0f32.to_bits()
+        );
         // 抵得住 30 天半衰期：当前仓库的中等强度旧命中 > 同分的新命中。
         assert!(final_score(2.0, 30 * DAY_MS, false, true) > final_score(2.0, 0, false, false));
         // 但远不足以盖过强相关的跨仓库命中——偏好是排序信号，不是过滤器。

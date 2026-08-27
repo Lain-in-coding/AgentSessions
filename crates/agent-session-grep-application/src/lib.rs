@@ -1428,6 +1428,14 @@ pub struct App<
     resume: R,
     semantic: M,
     clock_ms: fn() -> i64,
+    /// 调用方当前工作目录派生的 repo slug（`host/owner/name`），用于
+    /// [`ranking::CURRENT_REPO_SCORE_BOOST`] 的当前仓库偏好。
+    ///
+    /// `None` = 该入口没有可派生的仓库身份（不在 git 工作树内、无 origin、
+    /// 或该面本身没有 cwd 语义如 MCP/Web）——此时该信号恒不动分，且不产生
+    /// 任何额外读取。组合根用 [`Self::with_current_repo`] 显式注入，既有
+    /// 构造器一律为 `None`，调用点零改动。
+    current_repo: Option<String>,
 }
 
 impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore>
@@ -1443,6 +1451,7 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore>
             resume,
             semantic: NoSemanticIndex,
             clock_ms: system_now_ms,
+            current_repo: None,
         }
     }
 
@@ -1454,6 +1463,7 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore>
             resume,
             semantic: NoSemanticIndex,
             clock_ms,
+            current_repo: None,
         }
     }
 }
@@ -1469,6 +1479,7 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore, 
             resume,
             semantic,
             clock_ms: system_now_ms,
+            current_repo: None,
         }
     }
 
@@ -1485,6 +1496,7 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore, 
             resume,
             semantic,
             clock_ms,
+            current_repo: None,
         }
     }
 }
@@ -1502,6 +1514,7 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex>
             resume: NoResumeClaims,
             semantic: NoSemanticIndex,
             clock_ms: system_now_ms,
+            current_repo: None,
         }
     }
 
@@ -1513,6 +1526,7 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex>
             resume: NoResumeClaims,
             semantic: NoSemanticIndex,
             clock_ms,
+            current_repo: None,
         }
     }
 }
@@ -1524,6 +1538,16 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore, 
     /// value so every frontend shares the same time source.
     pub fn now_ms(&self) -> i64 {
         (self.clock_ms)()
+    }
+
+    /// 注入调用方当前工作目录派生的 repo slug（当前仓库偏好信号，见
+    /// [`ranking::CURRENT_REPO_SCORE_BOOST`]）。组合根在构造后链式调用；
+    /// 传 `None` 或不调用即该信号关闭（默认），此时排序与注入前逐字节一致。
+    ///
+    /// 空白 slug 视为无身份（`None`）：宁可关掉信号，也不拿空串去比对。
+    pub fn with_current_repo(mut self, slug: Option<String>) -> Self {
+        self.current_repo = slug.filter(|value| !value.trim().is_empty());
+        self
     }
 
     /// 解析续读偏移：无令牌即第一页（offset 0）；有令牌则完整校验
@@ -1669,6 +1693,7 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore, 
                     &facets,
                     include_system,
                     group_by_session,
+                    self.current_repo.as_deref(),
                 );
                 let offset = self.resolve_offset(
                     token.as_deref(),
@@ -1783,9 +1808,12 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore, 
                         .collect();
                 }
 
-                // 重算最终分并重排为 (final desc, id asc)：payload 以 (hit, payload)
-                // 对进入评分函数，排序发生在配对之后，结构上排除错位。payload 被
-                // 噪声过滤消耗后按需补取一次（同窗批量，无 N+1）。
+                // 重算最终分并重排为 (final desc, id asc)：payload 与仓库事实以
+                // (hit, payload, in_current_repo) 三元组进入评分函数，排序发生在
+                // 配对之后，结构上排除错位。payload 被噪声过滤消耗后按需补取一次
+                // （同窗批量，无 N+1）。仓库事实只在调用方确有当前仓库身份时才
+                // 读取（两次同窗批量：message→session、session→slug）；无身份时
+                // 该项恒 false 且不产生任何额外读取。
                 if rank_lexical {
                     let payloads = match window_payloads.take() {
                         Some(payloads) => payloads,
@@ -1795,11 +1823,37 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore, 
                             self.catalog.get_many(&scanned_ids)?
                         }
                     };
+                    let in_current_repo: Vec<bool> = match self.current_repo.as_deref() {
+                        Some(current) => {
+                            let scanned_ids: Vec<StableId> =
+                                scanned.iter().map(|hit| hit.id.clone()).collect();
+                            let sessions = self.catalog.session_of(&scanned_ids)?;
+                            let session_ids: Vec<StableId> = sessions
+                                .iter()
+                                .map(|(_message_id, session)| session.clone())
+                                .map(|session| {
+                                    session.unwrap_or_else(|| {
+                                        StableId::native(
+                                            agent_session_grep_domain::IdKind::Session,
+                                            "",
+                                        )
+                                    })
+                                })
+                                .collect();
+                            let slugs = self.catalog.session_repo_slugs(&session_ids)?;
+                            slugs
+                                .into_iter()
+                                .map(|slug| slug.as_deref() == Some(current))
+                                .collect()
+                        }
+                        None => vec![false; scanned.len()],
+                    };
                     scanned = ranking::apply_lexical_signals(
                         scanned
                             .into_iter()
                             .zip(payloads)
-                            .map(|(hit, (_id, payload))| (hit, payload))
+                            .zip(in_current_repo)
+                            .map(|((hit, (_id, payload)), in_repo)| (hit, payload, in_repo))
                             .collect(),
                         self.now_ms(),
                     );
