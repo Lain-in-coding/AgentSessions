@@ -156,7 +156,11 @@ fn operation_id() -> PortResult<String> {
     ))
 }
 
-const INDEX_PROJECTION_VERSION: &[u8] = b"sqlite-fts5-v1";
+/// Batch-manifest digest 的后端域分隔串。**字节值已冻结**：它参与
+/// `index_batches.operation_digest`，改动会与既有 data root 中已存摘要不符。
+/// 与 [`INDEX_PROJECTION_VERSION`] 无关——后者是可演进的投影版本，本常量只是
+/// 摘要域标签。
+const INDEX_BATCH_DIGEST_DOMAIN: &[u8] = b"sqlite-fts5-v1";
 
 /// 从存储的 catalog payload 投影出可检索正文——rebuild 的规范投影函数。
 ///
@@ -960,7 +964,7 @@ fn batch_manifest(
     // 数据兼容性：分隔串刻意保留旧名 `agentsessions`——operation_digest 持久化在
     // index_batches 表并与既有 data root 中已存摘要交叉比对，改名会破坏 v7 数据兼容。
     hash_field(&mut hasher, b"agentsessions-index-batch-v1");
-    hash_field(&mut hasher, INDEX_PROJECTION_VERSION);
+    hash_field(&mut hasher, INDEX_BATCH_DIGEST_DOMAIN);
     for (id, payload, text) in ordered_upserts {
         hash_field(&mut hasher, b"upsert");
         hash_field(&mut hasher, id.as_str().as_bytes());
@@ -1471,6 +1475,10 @@ impl SqliteStore {
         };
         // lease 已到手，当前进程是唯一写者；安全收敛上次崩溃留下的无副作用 intent。
         store.recover_interrupted()?;
+        // 投影版本自愈（schema v17）：本二进制的投影变换与库中现存词元流失配时，
+        // 从权威 catalog 重投影（无需 reparse）。放在 lease 之后——重投影是写操作，
+        // 必须由唯一写者执行；读路径（`open`）无 lease 不写，改为查询期 fail-closed。
+        store.ensure_index_projection_current()?;
         Ok(store)
     }
 
@@ -1563,7 +1571,8 @@ impl SqliteStore {
             mig.execute_batch(
                 "CREATE TABLE IF NOT EXISTS store_metadata (
                      singleton         INTEGER PRIMARY KEY CHECK(singleton = 1),
-                     active_generation INTEGER NOT NULL CHECK(active_generation >= 0)
+                     active_generation INTEGER NOT NULL CHECK(active_generation >= 0),
+                     index_projection_version INTEGER NOT NULL DEFAULT 0
                  );
                  INSERT OR IGNORE INTO store_metadata(singleton, active_generation)
                  VALUES(1, 0);
@@ -1713,6 +1722,9 @@ impl SqliteStore {
         }
         if current < 16 {
             Self::migrate_v15_to_v16(conn)?;
+        }
+        if current < 17 {
+            Self::migrate_v16_to_v17(conn)?;
         }
         // 不随 user_version 门控：旧 v7 库（本列存在前建成的）打开时同样需要。
         Self::ensure_fts_ids_rowid(conn)?;
@@ -2193,6 +2205,78 @@ impl SqliteStore {
         }
 
         tx.commit().map_err(backend)
+    }
+
+    /// Add the v17 `store_metadata.index_projection_version` column (additive,
+    /// non-destructive) and stamp it honestly for this catalog.
+    ///
+    /// 该列是**库级**投影属性（见 [`INDEX_PROJECTION_VERSION`]）：它回答
+    /// "现存 FTS 词元流与派生投影是哪个变换写的"。它不是 per-source 事实
+    /// （不像 `source_scans.parser_version`）——一次重投影重写整库的每一行，
+    /// 部分迁移状态没有可自洽的答案，故落在 singleton `store_metadata`，与
+    /// `active_generation` 同表同语义层级。
+    ///
+    /// 迁移期的标记取自**可观测事实**而非库版本：投影为空（`fts` 与
+    /// `session_fts` 都无行）说明没有任何旧变换写下的词元，直接标记当前版本
+    /// （新库/未索引库因此不会在第一次打开时被判失配）；投影非空的旧库保持
+    /// DEFAULT 0——0 永不等于当前版本（≥1），因此写路径打开时自动重投影
+    /// （[`SqliteStore::ensure_index_projection_current`]），读路径 fail-closed
+    /// 而不是静默返回错误命中集。`user_version = 17` 与 DDL 同事务。
+    fn migrate_v16_to_v17(conn: &Connection) -> PortResult<()> {
+        Self::migrate_v16_to_v17_inner(conn, false)
+    }
+
+    fn migrate_v16_to_v17_inner(conn: &Connection, inject_failure: bool) -> PortResult<()> {
+        let has_column = conn
+            .prepare("PRAGMA table_info(store_metadata)")
+            .map_err(backend)?
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(backend)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(backend)?
+            .iter()
+            .any(|name| name == "index_projection_version");
+        let tx = conn.unchecked_transaction().map_err(backend)?;
+        if !has_column {
+            // 新库在 v2 建表 DDL 已带本列（v5 parser_version / v9 provider_id
+            // 同一模式）；旧库在此加法扩展。
+            tx.execute_batch(
+                "ALTER TABLE store_metadata
+                 ADD COLUMN index_projection_version INTEGER NOT NULL DEFAULT 0;",
+            )
+            .map_err(backend)?;
+        }
+        if Self::index_projection_is_empty_in_tx(&tx)? {
+            tx.execute(
+                "UPDATE store_metadata SET index_projection_version = ?1 WHERE singleton = 1",
+                [i64::from(INDEX_PROJECTION_VERSION)],
+            )
+            .map_err(backend)?;
+        }
+        tx.execute_batch("PRAGMA user_version = 17;")
+            .map_err(backend)?;
+
+        if inject_failure {
+            return Err(PortError::Backend(
+                "injected v16-to-v17 migration failure".into(),
+            ));
+        }
+
+        tx.commit().map_err(backend)
+    }
+
+    /// True when no derived FTS projection row exists（`fts` 与 `session_fts`
+    /// 都为空）：此时不存在任何旧变换写下的词元，投影版本可无条件标记为当前。
+    fn index_projection_is_empty_in_tx(conn: &Connection) -> PortResult<bool> {
+        let empty: bool = conn
+            .query_row(
+                "SELECT NOT EXISTS(SELECT 1 FROM fts)
+                        AND NOT EXISTS(SELECT 1 FROM session_fts)",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(backend)?;
+        Ok(empty)
     }
 
     /// 声明语义向量归属的模型 id（#3）。未设置时 `SemanticIndex` 全部方法
@@ -4867,6 +4951,82 @@ impl SqliteStore {
         u64::try_from(g).map_err(backend)
     }
 
+    /// 读回本库现存投影的索引投影版本（schema v17；见
+    /// [`INDEX_PROJECTION_VERSION`]）。`0` 表示"未知/旧变换写的"——由 v17
+    /// 迁移为投影非空的旧库留下的哨兵值。
+    pub fn index_projection_version(&self) -> PortResult<i64> {
+        let conn = self.conn.borrow();
+        Self::stored_index_projection_version(&conn)
+    }
+
+    /// 现存投影是否由本二进制的投影变换写成。false ⇒ FTS 词元流与查询侧
+    /// 词元不可比，任何 MATCH 结果都不可信（doctor 据此如实报告）。
+    pub fn index_projection_is_current(&self) -> PortResult<bool> {
+        Ok(self.index_projection_version()? == i64::from(INDEX_PROJECTION_VERSION))
+    }
+
+    fn stored_index_projection_version(conn: &Connection) -> PortResult<i64> {
+        conn.query_row(
+            "SELECT index_projection_version FROM store_metadata WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(backend)
+    }
+
+    /// FTS 查询前的投影版本闸门（读路径 fail-closed）。
+    ///
+    /// 索引期与查询期的词元变换必须同版本。失配时**绝不返回命中集**——旧词元
+    /// 与新查询词元对不上会静默漏掉真实命中（实测：一个由旧二进制建立的
+    /// 170 468 实体真实库上，中文查询 0 命中而 ASCII 查询正常）。归到
+    /// [`PortError::SchemaIncompatible`]（error catalog `schema_incompatible`，
+    /// operator_action 已是"升级程序或重建派生数据根"），消息给出确切修复命令。
+    fn assert_index_projection_current(conn: &Connection) -> PortResult<()> {
+        let stored = Self::stored_index_projection_version(conn)?;
+        if stored == i64::from(INDEX_PROJECTION_VERSION) {
+            return Ok(());
+        }
+        Err(PortError::SchemaIncompatible(format!(
+            "search index projection version {stored} does not match this binary's \
+             {INDEX_PROJECTION_VERSION}: the stored FTS tokens were written by a different \
+             projection and cannot be matched against this binary's query tokens; run \
+             `index rebuild` to reproject from the catalog (a write-mode `sync` reprojects \
+             automatically)"
+        )))
+    }
+
+    /// 收敛索引投影版本（写路径自愈，[`SqliteStore::open_for_write`] 调用）。
+    ///
+    /// 已是当前版本 → no-op。否则：
+    /// - 投影为空（无 `fts`/`session_fts` 行）→ 没有旧词元可纠正，只标记版本，
+    ///   **不推进 generation、不写 outbox 行**（新库/空库不该因此产生 churn）；
+    /// - 投影非空 → 从权威 catalog 全量重投影（[`Self::rebuild_index`]，等价
+    ///   `index rebuild`）。catalog payload 对内容权威，**不需要回到 provider
+    ///   reparse**——这正是本轴与 [`PARSER_SEMANTIC_VERSION`] 的区别。重投影
+    ///   推进 generation（投影内容确实变了，旧 cursor 必须失效）。
+    ///
+    /// 返回是否执行了重投影。
+    pub fn ensure_index_projection_current(&self) -> PortResult<bool> {
+        if self.index_projection_is_current()? {
+            return Ok(false);
+        }
+        let projection_is_empty = {
+            let conn = self.conn.borrow();
+            Self::index_projection_is_empty_in_tx(&conn)?
+        };
+        if projection_is_empty {
+            let conn = self.conn.borrow();
+            conn.execute(
+                "UPDATE store_metadata SET index_projection_version = ?1 WHERE singleton = 1",
+                [i64::from(INDEX_PROJECTION_VERSION)],
+            )
+            .map_err(backend)?;
+            return Ok(false);
+        }
+        self.rebuild_index()?;
+        Ok(true)
+    }
+
     /// 阶段一（durable intent）：写入一条 `building` outbox 行并提交。
     ///
     /// Durable outbox 状态机的第一个 durable point——在任何 catalog/FTS
@@ -6424,6 +6584,14 @@ impl SqliteStore {
             [pending.target_generation as i64],
         )
         .map_err(backend)?;
+        // 投影版本戳与重投影同事务（schema v17）：只有"整库从 catalog 重投影"
+        // 才能声明全库投影属于当前变换版本——增量提交路径只覆盖本批实体，
+        // 因此刻意不在那里盖戳。回滚时戳与投影一起回滚，不会谎报已收敛。
+        tx.execute(
+            "UPDATE store_metadata SET index_projection_version = ?1 WHERE singleton = 1",
+            [i64::from(INDEX_PROJECTION_VERSION)],
+        )
+        .map_err(backend)?;
         tx.execute(
             "UPDATE index_batches
              SET state = 'activated', durable_point = 'activated', committed_at_ms = ?2
@@ -6531,6 +6699,37 @@ const RELATION_SCHEMA_VERSION: i64 = 7;
 /// `stale_parser_version_forces_reparse_and_converges`）锁住该语义。
 pub const PARSER_SEMANTIC_VERSION: u32 = 1;
 
+/// 索引投影版本：任何改变 **FTS 词元流或派生投影文本** 的变化都必须 +1。
+///
+/// 与 [`PARSER_SEMANTIC_VERSION`] 正交——后者管"从 provider 源解析出的
+/// canonical payload 语义"（变化 → 按源 reparse），本常量管"从权威 catalog
+/// 投影出的检索索引形态"（变化 → 从 catalog 重投影，**不需要 reparse**）。
+/// 两者都是"索引期与查询期必须一致"的契约，但失配后的修复动作不同。
+///
+/// 必须 +1 的变化（非穷举，但覆盖已知全部投影输入）：
+/// - CJK 分词变换（[`agent_session_grep_application::fts_tokens_cjk`]）产出的
+///   词元流——unigram/bigram 规则、汉字分类、运行分隔规则；
+/// - 保留分级上限（[`agent_session_grep_application::MESSAGE_FTS_MAX_CHARS`]）
+///   与 [`bounded_index_text`] 的截断规则——它改变被索引的正文；
+/// - [`searchable_text`] 的 payload → 检索正文投影规则；
+/// - `session_fts` 字段构成（[`SqliteStore::session_search_text`] 取哪些
+///   字段、`SESSION_SEARCH_FIELD_CHARS` 上限）；
+/// - `session_titles` 派生链与 [`SESSION_TITLE_MAX_CHARS`]、
+///   `session_repo_slugs` 的 slug 派生规则——它们与 `session_fts` 同属
+///   `rebuild_index` 一次重投影覆盖的派生投影，规则变化后旧行同样滞留。
+///
+/// **不**属于本轴：`message_vec` 语义向量（自带 model_id/dimension 归属，
+/// 换模型即失效）、`tool_activities`/`usage_events`（claims 派生，随
+/// `PARSER_SEMANTIC_VERSION` 的 reparse 收敛）、纯 schema 结构变化
+/// （走 [`SCHEMA_VERSION`] 迁移）。
+///
+/// 存储镜像是 `store_metadata.index_projection_version`（schema v17，库级
+/// singleton，不是 per-source）。失配处理：写路径打开时自动从 catalog 重投影
+/// （[`SqliteStore::ensure_index_projection_current`]），读路径的 FTS 查询
+/// fail-closed 报 [`PortError::SchemaIncompatible`]——**绝不静默返回一个
+/// 用旧词元匹配新查询得到的错误命中集**。
+pub const INDEX_PROJECTION_VERSION: u32 = 1;
+
 /// 当前 catalog schema 版本。每次结构变更 +1 并在 [`SqliteStore::migrate`] 追加步骤。
 ///
 /// v8：新增 `source_session_resume_claims`（ADR-0009）——source-scoped Resume
@@ -6580,7 +6779,17 @@ pub const PARSER_SEMANTIC_VERSION: u32 = 1;
 /// 降级，不猜）。生命周期与 `session_fts` 同一重建批次（affected-session
 /// commit + rebuild 同事务），session 退役时同事务删除。旧库迁到 v16
 /// 后表为空，由 rebuild 或后续 affected source 提交回填。
-pub const SCHEMA_VERSION: i64 = 16;
+///
+/// v17：`store_metadata` 增加 `index_projection_version INTEGER NOT NULL
+/// DEFAULT 0` 列——索引投影版本（见 [`INDEX_PROJECTION_VERSION`]）。它是
+/// **库级** singleton 事实（"现存 FTS 词元流与派生投影是哪个变换写的"），
+/// 与 `active_generation` 同表；刻意不做成 per-source 列——一次重投影重写
+/// 整库每一行，per-source 记录在部分迁移状态下没有自洽答案。迁移期按可观测
+/// 事实标记：投影为空（`fts` 与 `session_fts` 都无行）→ 直接标记当前版本，
+/// 新库不会在第一次打开就被判失配；投影非空的旧库保持 DEFAULT 0（0 永不
+/// 等于当前版本 ≥1）→ 写路径打开时自动从 catalog 重投影，读路径的 FTS
+/// 查询 fail-closed 报 `schema_incompatible`，绝不静默返回错误命中集。
+pub const SCHEMA_VERSION: i64 = 17;
 
 impl CatalogStore for SqliteStore {
     fn get(&self, id: &StableId) -> PortResult<Option<Vec<u8>>> {
@@ -7393,6 +7602,11 @@ impl SearchIndex for SqliteStore {
 
     fn query_filtered(&self, query: SearchQuery<'_>, limit: usize) -> PortResult<Vec<SearchHit>> {
         let conn = self.conn.borrow();
+        // 投影版本闸门（schema v17）：库中现存词元流由旧变换写成时，用本二进制
+        // 的查询词元去 MATCH 是拿两套不可比的词元对撞——命中集会静默残缺（实测
+        // 中文查询 0 命中而 ASCII 正常）。这是最坏的失败类：错误结果而非报错。
+        // 读路径无 writer lease，不能自愈，故 fail-closed；写路径打开时自动重投影。
+        Self::assert_index_projection_current(&conn)?;
         // 查询侧先做与索引侧同一的 CJK n-gram transform（ADR-0007，单字 + bigram），
         // 再字面量化：transform 输出里的单个空格就是词元分隔符，顺序敏感——先
         // 字面量化会把输出的空格包进引号，变成整段 n-gram 连写的短语，无法匹配。
@@ -7563,6 +7777,8 @@ impl SearchIndex for SqliteStore {
             return self.query_filtered(query, limit);
         }
         let conn = self.conn.borrow();
+        // 与 query_filtered 同一投影版本闸门（facet 路径同样 MATCH 存储词元）。
+        Self::assert_index_projection_current(&conn)?;
         let safe_query = safe_fts_query(&fts_tokens_cjk(query.text));
         if safe_query.is_empty() {
             return Ok(Vec::new());
@@ -8380,8 +8596,10 @@ mod filtered_query_tests {
             "claude rows must be excluded before LIMIT"
         );
         assert_eq!(
-            statements, 2,
-            "filtered message and session metadata candidates each use one prepared statement"
+            statements, 3,
+            "filtered message and session metadata candidates each use one prepared \
+             statement, plus one constant-cost index-projection-version gate read \
+             (singleton row; not per-row — the N+1 invariant this pins is unchanged)"
         );
     }
 
@@ -8536,7 +8754,7 @@ mod tests {
     fn schema_v10_creates_message_vec_table() {
         let store = SqliteStore::open_in_memory().unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 16);
+        assert_eq!(SCHEMA_VERSION, 17);
         let conn = store.conn.borrow();
         let count: i64 = conn
             .query_row(
@@ -9392,6 +9610,226 @@ mod tests {
         assert_eq!(store.query("数据库", 10).unwrap().len(), 1);
         assert_eq!(store.query("备份", 10).unwrap().len(), 1);
         assert_eq!(store.query("新目录", 10).unwrap().len(), 1);
+    }
+
+    // ─── 索引投影版本（schema v17 / INDEX_PROJECTION_VERSION）───
+
+    /// 把库改写成"旧投影"状态：FTS 正文用**上一版**纯 bigram 变换重写
+    /// （`bigram_cjk`，即 `fts_tokens_cjk` 加入单字词元之前的形态），投影版本戳
+    /// 回落为 0——精确复刻由旧二进制建立、迁到 v17 后的真实库。
+    fn downgrade_projection_to_legacy_bigrams(store: &SqliteStore) {
+        let conn = store.conn.borrow();
+        // 消息 FTS：从权威 catalog payload 重投影后施加旧变换。
+        let rows: Vec<(i64, Vec<u8>)> = conn
+            .prepare(
+                "SELECT f.rowid, c.payload FROM fts f
+                 JOIN fts_ids fi ON fi.id_json = f.id
+                 JOIN catalog c ON c.id = fi.wire_id",
+            )
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(!rows.is_empty(), "夹具必须先有消息 FTS 行");
+        for (rowid, payload) in rows {
+            conn.execute(
+                "UPDATE fts SET text = ?1 WHERE rowid = ?2",
+                rusqlite::params![
+                    agent_session_grep_application::bigram_cjk(&searchable_text(&payload)),
+                    rowid
+                ],
+            )
+            .unwrap();
+        }
+        // Session 元数据 FTS 同属本轴：同一旧变换重写。
+        let sessions: Vec<(i64, String)> = conn
+            .prepare("SELECT fts_rowid, session_wire FROM session_fts_ids")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        for (rowid, wire) in sessions {
+            let text = SqliteStore::session_search_text(&conn, &wire)
+                .unwrap()
+                .expect("fixture session must project search text");
+            conn.execute(
+                "UPDATE session_fts SET text = ?1 WHERE rowid = ?2",
+                rusqlite::params![agent_session_grep_application::bigram_cjk(&text), rowid],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "UPDATE store_metadata SET index_projection_version = 0 WHERE singleton = 1",
+            [],
+        )
+        .unwrap();
+    }
+
+    /// 一条含中文的真实 ingest 批次（session + document + message）。
+    fn cjk_projection_fixture(store: &SqliteStore, tag: &[u8], text: &str) -> StableId {
+        let session = sid(IdKind::Session, &[tag, b"-ses"].concat());
+        let document = sid(IdKind::Document, &[tag, b"-doc"].concat());
+        let message = sid(IdKind::Message, &[tag, b"-msg"].concat());
+        let source = source_batch(
+            &format!("{}.jsonl", String::from_utf8_lossy(tag)),
+            vec![
+                entity_entry(&session),
+                entity_entry(&document),
+                typed_message_entry(&message, text),
+            ],
+            vec![placement(
+                &session,
+                &document,
+                &message,
+                0,
+                false,
+                Some((0, 4)),
+            )],
+            Vec::new(),
+            true,
+        );
+        assert!(
+            store
+                .commit_source_batches_if_changed(std::slice::from_ref(&source))
+                .unwrap()
+        );
+        message
+    }
+
+    #[test]
+    fn stale_index_projection_refuses_instead_of_returning_wrong_cjk_hits() {
+        // 实测缺陷复现（真实 170 468 实体库上通过 MCP search_sessions 观察到）：
+        // 旧二进制写下的纯 bigram 词元流 + 新二进制的 unigram+bigram 查询词元
+        // ⇒ 中文查询静默 0 命中，ASCII 查询照常命中。这是错误结果而非报错，
+        // 最坏的失败类。修复后读路径必须 fail-closed。
+        let store = SqliteStore::open_in_memory().unwrap();
+        let message = cjk_projection_fixture(&store, b"stale-proj", "请帮我做配置备份 clippy");
+        assert_eq!(store.query("配置备份", 10).unwrap().len(), 1);
+        assert_eq!(store.query("备份", 10).unwrap().len(), 1);
+        assert_eq!(store.query("clippy", 10).unwrap().len(), 1);
+        assert!(store.index_projection_is_current().unwrap());
+
+        downgrade_projection_to_legacy_bigrams(&store);
+        assert_eq!(store.index_projection_version().unwrap(), 0);
+        assert!(!store.index_projection_is_current().unwrap());
+
+        // 修复前：下面三个查询分别返回 Ok([])、Ok([]) 与 Ok([hit])——中文静默
+        // 落空、ASCII 照常命中，调用方无从察觉。修复后：三者一律 fail-closed。
+        for query in ["配置备份", "备份", "clippy"] {
+            let error = store.query(query, 10).unwrap_err();
+            assert!(
+                matches!(&error, PortError::SchemaIncompatible(message)
+                    if message.contains("index rebuild")),
+                "query {query:?} 必须 fail-closed 并给出修复命令，实际 {error:?}"
+            );
+        }
+        // facet 路径同闸门。
+        let error = store
+            .query_faceted(
+                SearchQuery {
+                    text: "备份",
+                    filters: &SearchFilters::EMPTY,
+                },
+                10,
+                &SearchFacets {
+                    sidechain: SidechainFacet::MainOnly,
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(error, PortError::SchemaIncompatible(_)));
+
+        // catalog 是权威事实源，不受投影失配影响——get 仍返回原 payload。
+        assert!(store.get(&message).unwrap().is_some());
+    }
+
+    #[test]
+    fn write_open_reprojects_stale_projection_from_catalog_without_reparse() {
+        // 方案 A（自愈）：写路径打开时检测失配 → 从权威 catalog 重投影。
+        // 源文件**不存在于磁盘**，证明重投影无需回到 provider reparse。
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stale.db");
+        let p = path.to_string_lossy().into_owned();
+        let generation_before;
+        {
+            let store = SqliteStore::open_for_write(&p).unwrap();
+            cjk_projection_fixture(&store, b"heal-proj", "今天把配置备份到了新目录");
+            assert_eq!(store.query("配置备份", 10).unwrap().len(), 1);
+            downgrade_projection_to_legacy_bigrams(&store);
+            generation_before = store.active_generation().unwrap();
+        }
+        // 只读打开：不写、不自愈，如实报告失配（doctor 走这条路）。
+        {
+            let store = SqliteStore::open(&p).unwrap();
+            assert_eq!(store.index_projection_version().unwrap(), 0);
+            assert!(store.query("配置备份", 10).is_err());
+            assert_eq!(store.active_generation().unwrap(), generation_before);
+        }
+        // 写路径打开：自动重投影并收敛版本。
+        let store = SqliteStore::open_for_write(&p).unwrap();
+        assert!(store.index_projection_is_current().unwrap());
+        assert_eq!(
+            store.active_generation().unwrap(),
+            generation_before + 1,
+            "重投影改变了投影内容，必须推进 generation 以失效旧 cursor"
+        );
+        assert_eq!(store.query("配置备份", 10).unwrap().len(), 1);
+        assert_eq!(store.query("备份", 10).unwrap().len(), 1);
+        assert_eq!(store.query("配", 10).unwrap().len(), 1);
+        // 幂等：再次打开不再重投影、不再推进 generation。
+        drop(store);
+        let store = SqliteStore::open_for_write(&p).unwrap();
+        assert_eq!(store.active_generation().unwrap(), generation_before + 1);
+        assert!(!store.ensure_index_projection_current().unwrap());
+    }
+
+    #[test]
+    fn empty_projection_is_stamped_current_without_rebuild_churn() {
+        // 新库/空库：没有任何旧词元可纠正 → 只标记版本，不推进 generation、
+        // 不写 outbox 行（否则每个新 data root 一打开就产生 churn）。
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fresh.db");
+        let p = path.to_string_lossy().into_owned();
+        let store = SqliteStore::open_for_write(&p).unwrap();
+        assert!(store.index_projection_is_current().unwrap());
+        assert_eq!(store.active_generation().unwrap(), 0);
+        assert_eq!(store.interrupted_batch_count().unwrap(), 0);
+        assert_eq!(table_count(&store, "index_batches"), 0);
+
+        // 人为把戳打回 0（空投影）：收敛只盖戳，不重投影。
+        {
+            let conn = store.conn.borrow();
+            conn.execute(
+                "UPDATE store_metadata SET index_projection_version = 0 WHERE singleton = 1",
+                [],
+            )
+            .unwrap();
+        }
+        assert!(!store.ensure_index_projection_current().unwrap());
+        assert!(store.index_projection_is_current().unwrap());
+        assert_eq!(store.active_generation().unwrap(), 0);
+        assert_eq!(table_count(&store, "index_batches"), 0);
+    }
+
+    #[test]
+    fn incremental_commit_does_not_claim_whole_store_projection_currency() {
+        // 增量提交只覆盖本批实体，不能声明全库投影已收敛——否则一次 sync
+        // 就会把"其余 17 万条仍是旧词元"的库标记为当前，缺陷原地复活。
+        let store = SqliteStore::open_in_memory().unwrap();
+        cjk_projection_fixture(&store, b"partial-a", "第一批配置备份");
+        downgrade_projection_to_legacy_bigrams(&store);
+        cjk_projection_fixture(&store, b"partial-b", "第二批配置备份");
+        assert_eq!(
+            store.index_projection_version().unwrap(),
+            0,
+            "增量提交不得盖投影版本戳"
+        );
+        // 只有整库重投影才盖戳。
+        store.rebuild_index().unwrap();
+        assert!(store.index_projection_is_current().unwrap());
+        assert_eq!(store.query("配置备份", 10).unwrap().len(), 2);
     }
 
     #[test]
@@ -11523,6 +11961,9 @@ mod tests {
         drop(conn);
 
         // 回填后按 wire 别名删除能定位到旧 fts 行（无 fts 残留）。
+        // 断言直接查投影行数而非走 FTS MATCH：这个手工 v7 夹具的词元由"旧
+        // 二进制"写下，迁到 v17 后投影版本戳为 0，查询路径按契约 fail-closed
+        // （见 stale_index_projection_refuses_instead_of_returning_wrong_cjk_hits）。
         let wire_id = StableId::from_wire(legacy.as_str()).unwrap();
         let entries: [(StableId, Vec<u8>, String); 0] = [];
         let pending = store
@@ -11531,7 +11972,7 @@ mod tests {
         store
             .commit_index_batch(&pending, &entries, &[wire_id])
             .unwrap();
-        assert!(store.query("legacy fts body", 10).unwrap().is_empty());
+        assert_eq!(table_count(&store, "fts"), 0, "旧 fts 行必须被删除");
         assert_eq!(store.count().unwrap(), 0);
     }
 
@@ -14948,6 +15389,121 @@ mod tests {
             )
             .unwrap();
         assert_eq!(table_exists, 0);
+    }
+
+    #[test]
+    fn v16_catalog_migrates_to_v17_stamping_projection_version_honestly() {
+        // 投影**非空**的旧 v16 库：迁到 v17 后戳留在 DEFAULT 0——0 永不等于当前
+        // INDEX_PROJECTION_VERSION（≥1），因此读路径 fail-closed、写路径自动
+        // 重投影。绝不因为"迁移刚跑过"就谎报投影已收敛。
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v16.db");
+        let p = path.to_string_lossy().into_owned();
+        {
+            let conn = rusqlite::Connection::open(&p).unwrap();
+            create_v6_schema(&conn);
+            SqliteStore::migrate_v6_to_v7(&conn).unwrap();
+            SqliteStore::migrate_v7_to_v8(&conn).unwrap();
+            SqliteStore::migrate_v8_to_v9(&conn).unwrap();
+            SqliteStore::migrate_v9_to_v10(&conn).unwrap();
+            SqliteStore::migrate_v10_to_v11(&conn).unwrap();
+            SqliteStore::migrate_v11_to_v12(&conn).unwrap();
+            SqliteStore::migrate_v12_to_v13(&conn).unwrap();
+            SqliteStore::migrate_v13_to_v14(&conn).unwrap();
+            SqliteStore::migrate_v14_to_v15(&conn).unwrap();
+            SqliteStore::migrate_v15_to_v16(&conn).unwrap();
+            let version: i64 = conn
+                .query_row("PRAGMA user_version", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(version, 16);
+            let has_column: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('store_metadata')
+                     WHERE name = 'index_projection_version'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(has_column, 0, "v16 尚无 index_projection_version 列");
+            // 旧二进制写下的投影行（内容形态无关，只要非空）。
+            conn.execute(
+                "INSERT INTO fts(id, text) VALUES('\"legacy\"', '配置 置备 备份')",
+                [],
+            )
+            .unwrap();
+        }
+        let store = SqliteStore::open(&p).unwrap();
+        assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
+        assert_eq!(
+            store.index_projection_version().unwrap(),
+            0,
+            "投影非空的旧库迁移后必须留 0，驱动重投影"
+        );
+        assert!(!store.index_projection_is_current().unwrap());
+    }
+
+    #[test]
+    fn v16_catalog_with_empty_projection_migrates_to_v17_as_current() {
+        // 投影为空的旧库（含全新库）：没有任何旧变换写下的词元 → 迁移期直接
+        // 标记当前版本，第一次打开不会被判失配、不产生 rebuild churn。
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v16-empty.db");
+        let p = path.to_string_lossy().into_owned();
+        {
+            let conn = rusqlite::Connection::open(&p).unwrap();
+            create_v6_schema(&conn);
+            SqliteStore::migrate_v6_to_v7(&conn).unwrap();
+            SqliteStore::migrate_v7_to_v8(&conn).unwrap();
+            SqliteStore::migrate_v8_to_v9(&conn).unwrap();
+            SqliteStore::migrate_v9_to_v10(&conn).unwrap();
+            SqliteStore::migrate_v10_to_v11(&conn).unwrap();
+            SqliteStore::migrate_v11_to_v12(&conn).unwrap();
+            SqliteStore::migrate_v12_to_v13(&conn).unwrap();
+            SqliteStore::migrate_v13_to_v14(&conn).unwrap();
+            SqliteStore::migrate_v14_to_v15(&conn).unwrap();
+            SqliteStore::migrate_v15_to_v16(&conn).unwrap();
+        }
+        let store = SqliteStore::open(&p).unwrap();
+        assert_eq!(
+            store.index_projection_version().unwrap(),
+            i64::from(INDEX_PROJECTION_VERSION)
+        );
+        assert!(store.index_projection_is_current().unwrap());
+    }
+
+    #[test]
+    fn injected_v16_to_v17_failure_rolls_back_schema_and_version() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        create_v6_schema(&conn);
+        SqliteStore::migrate_v6_to_v7(&conn).unwrap();
+        SqliteStore::migrate_v7_to_v8(&conn).unwrap();
+        SqliteStore::migrate_v8_to_v9(&conn).unwrap();
+        SqliteStore::migrate_v9_to_v10(&conn).unwrap();
+        SqliteStore::migrate_v10_to_v11(&conn).unwrap();
+        SqliteStore::migrate_v11_to_v12(&conn).unwrap();
+        SqliteStore::migrate_v12_to_v13(&conn).unwrap();
+        SqliteStore::migrate_v13_to_v14(&conn).unwrap();
+        SqliteStore::migrate_v14_to_v15(&conn).unwrap();
+        SqliteStore::migrate_v15_to_v16(&conn).unwrap();
+
+        let err = SqliteStore::migrate_v16_to_v17_inner(&conn, true).unwrap_err();
+        assert!(
+            matches!(err, PortError::Backend(message) if message.contains("injected v16-to-v17"))
+        );
+        assert!(conn.is_autocommit());
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 16);
+        let has_column: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('store_metadata')
+                 WHERE name = 'index_projection_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(has_column, 0, "回滚后加法列不得残留");
     }
 
     #[test]

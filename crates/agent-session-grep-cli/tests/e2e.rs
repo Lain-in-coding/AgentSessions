@@ -1215,6 +1215,106 @@ fn doctor_reports_ok_without_db() {
 }
 
 #[test]
+fn stale_index_projection_is_reported_refused_then_healed_by_sync_and_rebuild() {
+    // 实测缺陷的端到端固化：由旧二进制建立的库（FTS 词元流是纯 bigram）在
+    // 新二进制下中文查询静默 0 命中、ASCII 照常命中。修复后三条线都必须成立：
+    // doctor 如实报告失配、搜索 fail-closed（绝不返回错误命中集）、写路径自愈。
+    let (dir, db) = temp_db("stale-projection");
+    let fixture = dir.path().join("cjk.jsonl");
+    std::fs::write(
+        &fixture,
+        concat!(
+            r#"{"type":"user","message":{"role":"user","content":"请帮我做配置备份 clippy"}}"#,
+            "\n",
+        ),
+    )
+    .expect("write fixture");
+    let path = fixture.to_string_lossy().into_owned();
+
+    let out = run(&db, &["sync", &path]);
+    assert!(out.status.success(), "sync failed: {}", stdout(&out));
+    assert!(
+        stdout(&run(&db, &["search", "配置备份"])).contains("msg_v1_"),
+        "健康库中文必须可检索"
+    );
+    let frame = parse_first_line(&run(&db, &["doctor"]));
+    assert_eq!(frame["data"]["index_projection_version"], 1);
+    assert_eq!(frame["data"]["index_projection_expected"], 1);
+    assert_eq!(frame["data"]["index_projection_stale"], false);
+
+    // 改写成旧二进制留下的状态：FTS 正文回落为**纯 bigram** 词元流（单字词元
+    // 加入之前的形态），版本戳落到 0——v17 迁移给"投影非空的旧库"留的哨兵值。
+    let downgrade = |db: &str| {
+        let conn = Connection::open(db).expect("open catalog");
+        let updated = conn
+            .execute("UPDATE fts SET text = '配置 置备 备份 clippy'", [])
+            .expect("rewrite fts with the legacy projection");
+        assert_eq!(updated, 1, "夹具应恰有一条消息 FTS 行");
+        conn.execute(
+            "UPDATE store_metadata SET index_projection_version = 0 WHERE singleton = 1",
+            [],
+        )
+        .expect("downgrade projection stamp");
+    };
+    downgrade(&db);
+
+    let frame = parse_first_line(&run(&db, &["doctor"]));
+    assert_eq!(frame["data"]["index_projection_version"], 0);
+    assert_eq!(frame["data"]["index_projection_stale"], true);
+
+    // 搜索 fail-closed：中文与 ASCII 一律报错，绝不静默返回 0 命中或半个结果集。
+    for query in ["配置备份", "备份", "clippy"] {
+        let out = run(&db, &["search", query]);
+        assert_eq!(
+            out.status.code(),
+            Some(9),
+            "query {query} 必须 exit 9（schema_incompatible）: {}",
+            stdout(&out)
+        );
+        let frame = parse_first_line(&out);
+        assert_envelope_shape(&frame, false);
+        assert_eq!(frame["error"]["code"], "schema_incompatible");
+        assert!(
+            frame["error"]["message"]
+                .as_str()
+                .expect("message")
+                .contains("index rebuild"),
+            "错误消息必须给出确切修复命令: {}",
+            stdout(&out)
+        );
+    }
+
+    // 写路径自愈：源字节未变（本应 no-op 的 sync）打开库时自动重投影。
+    let out = run(&db, &["sync", &path]);
+    assert!(
+        out.status.success(),
+        "healing sync failed: {}",
+        stdout(&out)
+    );
+    let frame = parse_first_line(&run(&db, &["doctor"]));
+    assert_eq!(frame["data"]["index_projection_stale"], false);
+    assert!(stdout(&run(&db, &["search", "配置备份"])).contains("msg_v1_"));
+    assert!(stdout(&run(&db, &["search", "备份"])).contains("msg_v1_"));
+
+    // 文档给出的手动修复命令同样收敛。
+    downgrade(&db);
+    let out = run(&db, &["index", "rebuild"]);
+    assert!(out.status.success(), "rebuild failed: {}", stdout(&out));
+    let frame = parse_first_line(&run(&db, &["doctor"]));
+    assert_eq!(frame["data"]["index_projection_stale"], false);
+    assert!(stdout(&run(&db, &["search", "配置备份"])).contains("msg_v1_"));
+}
+
+#[test]
+fn doctor_without_db_reports_expected_projection_version_and_no_guess() {
+    // 无 --db：期望版本是构建事实，可报告；库侧事实无从得知 → 显式 null，不猜。
+    let frame = parse_first_line(&run_bare(&["--robot", "doctor"]));
+    assert_eq!(frame["data"]["index_projection_expected"], 1);
+    assert!(frame["data"]["index_projection_version"].is_null());
+    assert!(frame["data"]["index_projection_stale"].is_null());
+}
+
+#[test]
 fn doctor_with_db_reports_generation_and_recovery_evidence() {
     let (_dir, db) = temp_db("doctor-db");
     // 写一条推进 generation 到 1。

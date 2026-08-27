@@ -13,7 +13,7 @@
 
 use crate::protocol::{self, CanonicalCode, Outcome, ProtocolError};
 use crate::{CliError, canonical_search_provider, provider_registry, render, resume_app};
-use agent_session_grep_adapters_sqlite::SqliteStore;
+use agent_session_grep_adapters_sqlite::{INDEX_PROJECTION_VERSION, SqliteStore};
 use agent_session_grep_application::{
     AppRequest, AppResponse, ContextLevel, ResponseBudget,
     handoff_pack::{HandoffInput, resolve_source_locations},
@@ -792,6 +792,9 @@ impl McpServer<'_> {
         let interrupted = self.store.interrupted_batch_count().map_err(business)?;
         let (orphaned_tool_activities, orphaned_activity_memberships) =
             self.store.orphaned_activity_counts().map_err(business)?;
+        // 索引投影版本事实（v17）：本缺陷正是在 MCP search_sessions 上观察到的
+        // （旧投影库中文查询静默 0 命中），因此 MCP doctor 必须同样如实报告。
+        let index_projection_version = self.store.index_projection_version().map_err(business)?;
         Ok(success_payload(
             Outcome::Success,
             json!({
@@ -803,6 +806,10 @@ impl McpServer<'_> {
                 "interrupted_batches": interrupted,
                 "orphaned_tool_activities": orphaned_tool_activities,
                 "orphaned_activity_memberships": orphaned_activity_memberships,
+                "index_projection_version": index_projection_version,
+                "index_projection_expected": INDEX_PROJECTION_VERSION,
+                "index_projection_stale":
+                    index_projection_version != i64::from(INDEX_PROJECTION_VERSION),
             }),
             &protocol::Page::default(),
             &[],

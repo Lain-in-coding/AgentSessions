@@ -24,8 +24,8 @@ mod serve;
 mod tui;
 
 use agent_session_grep_adapters_sqlite::{
-    PARSER_SEMANTIC_VERSION, SourceActivity, SourceBatch, SourceUsage, SqliteStore, capture,
-    open_snapshot_source, verify_snapshot,
+    INDEX_PROJECTION_VERSION, PARSER_SEMANTIC_VERSION, SourceActivity, SourceBatch, SourceUsage,
+    SqliteStore, capture, open_snapshot_source, verify_snapshot,
 };
 use agent_session_grep_application::{
     App, AppError, AppRequest, AppResponse, ContextLevel, ResponseBudget, StagedBatch, Truncation,
@@ -1300,6 +1300,11 @@ fn doctor(
             // schema v15 事实：usage_events/usage_event_membership 表同上述
             // 落库（未指定 --db 也成立）。
             "usage_storage": true,
+            // 构建事实：本二进制期望的索引投影版本（v17）。未指定 --db 时
+            // 无库可比，version/stale 显式为 null——不猜。
+            "index_projection_expected": INDEX_PROJECTION_VERSION,
+            "index_projection_version": null,
+            "index_projection_stale": null,
             // 新手会误以为 db: not-checked 是自检失败（10 角色体验测试缺陷）。
             // 加一行白话提示，说明如何真正校验。
             "hint": "未指定数据库：以上仅检查了环境。运行 doctor --db <path> 可校验数据库与 schema。",
@@ -1321,6 +1326,14 @@ fn doctor(
             // `index purge-activities` 同事务清理。
             let (orphaned_usage_events, orphaned_usage_memberships) =
                 store.orphaned_usage_counts().map_err(ProtocolError::from)?;
+            // 索引投影版本事实（v17）：现存 FTS 词元流由哪个投影变换写成。
+            // stale ⇒ 该库的词元与本二进制的查询词元不可比，搜索按契约
+            // fail-closed；`index rebuild` 或任意写路径 sync 会重投影收敛。
+            let index_projection_version = store
+                .index_projection_version()
+                .map_err(ProtocolError::from)?;
+            let index_projection_stale =
+                index_projection_version != i64::from(INDEX_PROJECTION_VERSION);
             serde_json::json!({
                 "tool": env!("CARGO_PKG_NAME"),
                 "version": env!("CARGO_PKG_VERSION"),
@@ -1338,6 +1351,9 @@ fn doctor(
                 "orphaned_activity_memberships": orphaned_activity_memberships,
                 "orphaned_usage_events": orphaned_usage_events,
                 "orphaned_usage_memberships": orphaned_usage_memberships,
+                "index_projection_version": index_projection_version,
+                "index_projection_expected": INDEX_PROJECTION_VERSION,
+                "index_projection_stale": index_projection_stale,
             })
         }
     };
