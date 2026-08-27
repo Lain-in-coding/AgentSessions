@@ -267,6 +267,33 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Silently wrong search results on stores built by an older binary**
+  (index-projection versioning, schema v17). The FTS token transform is a
+  contract between index time and query time; when it changed (pure CJK
+  bigrams → unigram + bigram) nothing invalidated the tokens already on disk,
+  and `PARSER_SEMANTIC_VERSION` does not cover this axis — it only triggers a
+  re-parse when *parse* semantics change. Measured on a real 170,468-entity
+  library (generation 9) built by the previous binary: MCP `search_sessions`
+  returned **0 hits** for `配置备份` and `备份` while `clippy` matched and
+  scored normally. An error would have been visible; a partially empty hit set
+  was not. Now: `INDEX_PROJECTION_VERSION` is persisted as the store-level
+  `store_metadata.index_projection_version`; write opens (`sync`/`ingest`/
+  `index`) reproject from the authoritative catalog automatically (no
+  re-parse — catalog payloads are authoritative for content) and advance the
+  generation once; read-only paths fail closed with `schema_incompatible`
+  (exit 9) naming `index rebuild` instead of returning a wrong hit set; and
+  `doctor` reports `index_projection_version` /
+  `index_projection_expected` / `index_projection_stale`. The version's
+  contract covers every projection input — CJK tokenization,
+  `MESSAGE_FTS_MAX_CHARS` retention truncation, `searchable_text`, the
+  `session_fts` field set, and the `session_titles` / `session_repo_slugs`
+  derivation rules (all reprojected by the same rebuild). The v17 migration
+  stamps from an observable fact, so a fresh data root is never reported stale
+  and never churns a rebuild on first open. `catalog`, `list`, and `get` are
+  unaffected: the catalog is authoritative and the projection is derived.
+  Measured on that library: v15 → v17 migration 0.19 s, one whole-store
+  reprojection of 170,468 entities ≈ 140 s, after which `配置备份` and `备份`
+  both recall again.
 - Message edge relation classification (session-tree lineage, borrowed from
   hstry's `fork_type` three-way classification): a sidechain message's parent
   edge is now stored as `subagent` instead of `reply`. Only the claude-code
