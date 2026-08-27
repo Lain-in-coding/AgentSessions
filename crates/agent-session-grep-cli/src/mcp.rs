@@ -378,6 +378,7 @@ impl McpServer<'_> {
                 "providers",
                 "since",
                 "until",
+                "repo",
                 "include_system",
                 "group_by_session",
                 "sidechain",
@@ -893,6 +894,15 @@ fn tool_catalog() -> Value {
                         "description": "Exclusive upper time bound; same syntax as since. \
                             Interval is half-open [since, until)."
                     },
+                    "repo": {
+                        "type": "string",
+                        "maxLength": 255,
+                        "description": "Restrict hits to sessions of this repository, \
+                            given as the privacy-safe three-segment slug \
+                            host/owner/name (verbatim equality; the same values \
+                            get_status reports under repos). Sessions without a repo \
+                            identity are excluded. Same semantics as the CLI --repo."
+                    },
                     "include_system": {
                         "type": "boolean",
                         "description": "Include system/developer-role messages. Default \
@@ -1299,6 +1309,9 @@ fn validate_string_length(key: &str, value: &str) -> Result<(), ToolError> {
         "cursor" => 512,
         "since" | "until" => 64,
         "session_id" | "message_id" => 128,
+        // repo slug 上界与派生侧一致（`repo_identity::REPO_SLUG_MAX_CHARS`）：
+        // 派生出的 slug 不可能超过该长度，更长的取值只可能是错误输入。
+        "repo" => crate::repo_identity::REPO_SLUG_MAX_CHARS,
         _ => return Ok(()),
     };
     if value.chars().count() > max {
@@ -1309,8 +1322,9 @@ fn validate_string_length(key: &str, value: &str) -> Result<(), ToolError> {
     Ok(())
 }
 
-/// 检索过滤参数（design §3）：providers 别名数组（OR 语义）+ 绝对 ISO-8601
-/// 的 since/until（半开区间 [since, until)，边界比较由 Application 统一执行）。
+/// 检索过滤参数（design §3）：providers 别名数组（OR 语义）、绝对 ISO-8601
+/// 的 since/until（半开区间 [since, until)，边界比较由 Application 统一执行）、
+/// repo 三段 slug（逐字等值）。
 /// provider 值经 [`crate::canonical_search_provider`] 归一（canonical id 与
 /// 历史别名），与 CLI `--provider` 同一套取值。
 /// MCP 只接受绝对时间：紧凑相对量（"1h"）没有声明的时钟基准，属非法参数。
@@ -1338,6 +1352,15 @@ fn opt_filters(args: &Map<String, Value>) -> Result<SearchFilters, ToolError> {
     }
     filters.since = opt_instant(args, "since")?;
     filters.until = opt_instant(args, "until")?;
+    // repo slug（schema v16）：与 CLI `--repo` 同语义——三段 slug 逐字等值，
+    // 形状不校验（未命中即诚实空页）。空串/纯空白是请求错误：拼写错误伪装成
+    // "无过滤"比报错更糟，绝不静默降级为全库检索。
+    filters.repo = match opt_str(args, "repo")? {
+        Some(raw) if raw.trim().is_empty() => {
+            return Err(ToolError::Params("repo must not be empty".into()));
+        }
+        other => other,
+    };
     Ok(filters)
 }
 
@@ -2163,11 +2186,18 @@ mod tests {
         );
         assert_eq!(properties["since"]["type"], "string");
         assert_eq!(properties["until"]["type"], "string");
+        // repo（schema v16）：与 CLI `--repo` 同一维度，声明与运行时同步。
+        assert_eq!(properties["repo"]["type"], "string");
+        assert_eq!(
+            properties["repo"]["maxLength"],
+            json!(crate::repo_identity::REPO_SLUG_MAX_CHARS)
+        );
 
         let valid = json!({
             "providers": ["codex", "claude", "claude-code"],
             "since": "2026-08-01T00:00:00Z",
-            "until": "2026-08-02T00:00:00+00:00"
+            "until": "2026-08-02T00:00:00+00:00",
+            "repo": "github.com/synthetic-owner/synthetic-repo"
         });
         let filters = opt_filters(valid.as_object().expect("filter object"))
             .expect("declared filter values must parse");
@@ -2182,6 +2212,19 @@ mod tests {
         assert!(filters.since.is_some());
         assert!(filters.until.is_some());
         assert!(filters.since < filters.until);
+        // 逐字进 filters.repo（形状不校验——未命中即诚实空页，与 CLI 一致）。
+        assert_eq!(
+            filters.repo.as_deref(),
+            Some("github.com/synthetic-owner/synthetic-repo")
+        );
+        // 缺省 = 无 repo 限制。
+        let no_repo = json!({ "since": "2026-08-01T00:00:00Z" });
+        assert!(
+            opt_filters(no_repo.as_object().expect("filter object"))
+                .expect("filters parse")
+                .repo
+                .is_none()
+        );
 
         let dir = tempfile::tempdir().expect("tempdir");
         let store = open_store(&dir);
@@ -2192,6 +2235,14 @@ mod tests {
             json!({ "query": "x", "providers": [1] }),
             json!({ "query": "x", "since": "1h" }),
             json!({ "query": "x", "until": "2026-08-01" }),
+            // repo：非字符串、空串、纯空白、超长一律 -32602（绝不静默变成无过滤）。
+            json!({ "query": "x", "repo": 5 }),
+            json!({ "query": "x", "repo": "" }),
+            json!({ "query": "x", "repo": "   " }),
+            json!({
+                "query": "x",
+                "repo": "o".repeat(crate::repo_identity::REPO_SLUG_MAX_CHARS + 1)
+            }),
         ] {
             let v = call(&mut server, "search_sessions", arguments.clone());
             assert_eq!(v["error"]["code"], -32602, "{arguments}");
@@ -2201,6 +2252,42 @@ mod tests {
             );
             assert!(v["result"].is_null(), "{arguments}");
         }
+    }
+
+    #[test]
+    fn search_repo_filter_reaches_the_store_like_the_cli_flag() {
+        // 参数不能只被解析后丢掉：同一 query 在无 repo 限制时有命中，加上一个
+        // 库内不存在的 slug 后必须是诚实的空页（success + 无 hits），而不是
+        // 静默忽略过滤返回全部命中。seeded_store 只提交消息、无会话 repo 身份，
+        // 故任何 slug 都不该匹配（"无行 = 未知"，未知不匹配）。
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = seeded_store(&dir);
+        let mut server = ready(&store);
+        let unfiltered = call(&mut server, "search_sessions", json!({ "query": "hello" }));
+        assert_eq!(unfiltered["result"]["isError"], false, "{unfiltered}");
+        assert_eq!(
+            unfiltered["result"]["structuredContent"]["data"]["hits"]
+                .as_array()
+                .expect("hits")
+                .len(),
+            2
+        );
+
+        let filtered = call(
+            &mut server,
+            "search_sessions",
+            json!({ "query": "hello", "repo": "github.com/synthetic-owner/synthetic-repo" }),
+        );
+        assert_eq!(filtered["result"]["isError"], false, "{filtered}");
+        let data = &filtered["result"]["structuredContent"]["data"];
+        assert!(
+            data["hits"].as_array().expect("hits").is_empty(),
+            "repo 过滤未生效（参数被忽略）：{data}"
+        );
+        assert_eq!(
+            filtered["result"]["structuredContent"]["page"]["has_more"], false,
+            "{filtered}"
+        );
     }
 
     #[test]
@@ -2712,6 +2799,10 @@ mod tests {
         assert_eq!(properties["cursor"]["maxLength"], 512);
         assert_eq!(properties["since"]["maxLength"], 64);
         assert_eq!(properties["until"]["maxLength"], 64);
+        assert_eq!(
+            properties["repo"]["maxLength"],
+            json!(crate::repo_identity::REPO_SLUG_MAX_CHARS)
+        );
         assert_eq!(properties["providers"]["maxItems"], 2);
         let context = tool("get_session_context");
         assert_eq!(

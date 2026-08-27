@@ -10,6 +10,13 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Repo filter parity across the machine surfaces: the MCP `search_sessions`
+  tool takes `repo` (declared in its tool schema with the same length bound
+  the derivation uses, enforced at runtime), the Web/loopback search routes
+  forward a `repo` query parameter, and `hook <event>` takes `--repo` — all
+  with the CLI `--repo` semantics (verbatim three-segment `host/owner/name`
+  slug; blank values are `invalid_request`, never a silent "no filter").
+  `generate_handoff` keeps no repo dimension on either surface.
 - Repo identity (schema v16 `session_repo_slugs` projection): sessions are
   grouped by the `host/owner/name` slug derived from their pair-observed
   working directory via local git detection (`git rev-parse --show-toplevel`

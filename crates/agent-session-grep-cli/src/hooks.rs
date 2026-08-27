@@ -18,8 +18,8 @@
 //!
 //! The `asg hook <event>` subcommand is the wiring: it reads the hook payload
 //! from stdin, honours `HookConfig` (flag-configured: `--enable`, `--max-tokens`,
-//! `--provider`, `--decay-days`; disabled by default), and writes the hook output
-//! to stdout.
+//! `--provider`, `--decay-days`, `--repo`; disabled by default), and writes the
+//! hook output to stdout.
 
 use serde::{Deserialize, Serialize};
 
@@ -35,6 +35,11 @@ pub struct HookConfig {
     pub providers: Vec<String>,
     /// Time decay: only include sessions from the last N days (0 = no decay).
     pub decay_days: u32,
+    /// Repo filter (schema v16): only inject history from sessions whose
+    /// derived `host/owner/name` slug matches verbatim. `None` = no repo
+    /// restriction; sessions without a repo identity are excluded when set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
     /// One-switch disable: if true, hook is disabled regardless of `enabled`.
     pub disabled: bool,
 }
@@ -46,6 +51,7 @@ impl Default for HookConfig {
             max_tokens: 2000,
             providers: Vec::new(),
             decay_days: 0,
+            repo: None,
             disabled: false,
         }
     }
@@ -248,6 +254,7 @@ mod tests {
             max_tokens: 3000,
             providers: vec!["claude-code".to_string()],
             decay_days: 7,
+            repo: Some("github.com/synthetic-owner/synthetic-repo".to_string()),
             disabled: false,
         };
         let json = serde_json::to_string(&config).unwrap();
@@ -256,6 +263,16 @@ mod tests {
         assert_eq!(back.max_tokens, 3000);
         assert_eq!(back.providers, vec!["claude-code"]);
         assert_eq!(back.decay_days, 7);
+        assert_eq!(
+            back.repo.as_deref(),
+            Some("github.com/synthetic-owner/synthetic-repo")
+        );
+
+        // 缺省的 repo 不进 JSON（旧配置读得回来，新字段可选）。
+        let bare = serde_json::to_string(&HookConfig::default()).unwrap();
+        assert!(!bare.contains("repo"), "{bare}");
+        let back: HookConfig = serde_json::from_str(&bare).unwrap();
+        assert!(back.repo.is_none());
     }
 
     #[test]

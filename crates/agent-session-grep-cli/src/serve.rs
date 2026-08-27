@@ -792,6 +792,9 @@ fn request_args(req: &HttpRequest) -> Result<Vec<String>, HttpResponse> {
             append_value_flag(&mut args, "--provider", value("provider"));
             append_value_flag(&mut args, "--since", value("since"));
             append_value_flag(&mut args, "--until", value("until"));
+            // repo（schema v16）：与 CLI `--repo` / MCP `repo` 同一维度，Web 面
+            // 不得少一个过滤轴（五入口一致性）。空取值被 `value` 过滤掉 = 无过滤。
+            append_value_flag(&mut args, "--repo", value("repo"));
             if value("include_system").as_deref() == Some("true") {
                 args.push("--include-system".to_string());
             }
@@ -1078,6 +1081,7 @@ mod tests {
             "/api/status",
             "/api/providers",
             "/api/search?q=needle&mode=lexical&limit=20",
+            "/api/search?q=needle&repo=github.com/synthetic-owner/synthetic-repo",
             "/api/handoff?q=needle",
         ] {
             let response = route_request(
@@ -1103,6 +1107,34 @@ mod tests {
         assert_eq!(invalid.status, 400);
         assert!(!invalid.body.contains("C:/Users"));
         assert!(!invalid.body.contains("secret.jsonl"));
+    }
+
+    #[test]
+    fn search_routes_forward_the_repo_filter_like_the_cli_flag() {
+        // 五入口一致性：Web 的检索路由必须携带与 CLI `--repo`/MCP `repo` 同一
+        // 过滤轴。缺省或空取值 = 不过滤（绝不生成空的 `--repo`，那是用法错误）。
+        for path in ["/api/search", "/api/projection/search"] {
+            let Ok(with_repo) = request_args(&authorized(
+                "GET",
+                &format!("{path}?q=needle&repo=github.com/synthetic-owner/synthetic-repo"),
+            )) else {
+                panic!("{path}: repo 取值必须映射为 --repo 而不是请求错误");
+            };
+            assert!(
+                with_repo.windows(2).any(|pair| pair[0] == "--repo"
+                    && pair[1] == "github.com/synthetic-owner/synthetic-repo"),
+                "{path}: {with_repo:?}"
+            );
+            for query in ["?q=needle", "?q=needle&repo="] {
+                let Ok(args) = request_args(&authorized("GET", &format!("{path}{query}"))) else {
+                    panic!("{path}{query}: 缺省/空 repo 必须是合法请求");
+                };
+                assert!(
+                    !args.iter().any(|arg| arg == "--repo"),
+                    "{path}{query}: {args:?}"
+                );
+            }
+        }
     }
 
     #[test]
