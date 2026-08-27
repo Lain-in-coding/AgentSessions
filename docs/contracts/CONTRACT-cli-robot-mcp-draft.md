@@ -67,6 +67,7 @@ Exit Code(权威为 `schemas/robot/v1/error-catalog.json` 的 13 码): 0 成功 
 ## 8. MCP 契约
 
 tools: search_sessions / get_session_context / get_session_resume / get_message / list_sessions / generate_handoff / list_providers / get_status / doctor
+- `search_sessions` 的过滤轴与 CLI `search` 逐一对应，入口之间不得少一维：`providers`（OR）/ `since` / `until`（半开区间 [since, until)，只接受带 offset 的绝对 ISO-8601）/ `repo`（schema v16 的三段 slug `host/owner/name`，逐字相等，取值即 `get_status` 的 `repos` 清单；无仓库身份的会话被排除）。空串/纯空白取值一律 `invalid_request`，绝不静默降级为"无过滤"。
 - `get_session_resume`（ADR-0009，只读 Resume Metadata）：入参 canonical `ses_v1_*`，返回固定可空字段（provider_id / provider_session_id / original_working_directory / resume_available / unavailable_reason）；绝不构造或执行 shell 命令、绝不返回 transcript/source path。
 - `generate_handoff`：为查询组装 deterministic handoff pack（handoff-pack/v1）——证据带权威 source locator、预算（max_evidence/max_tokens/max_bytes）真实裁剪、默认跨边界脱敏（ADR-0009）；截断如实报 outcome partial。
 - `list_sessions`（Peek Bundle 借用，hstry）：每条会话条目附 `peek` 对象——`first_user_text` / `last_user_text`（各 ≤200 字符，char 边界截断；无用户消息时字段为 null），每条序列化 ≤1 KiB（预算常量集中、超限截断有测试）。peek 字节计入 `max_response_bytes` 字节闸，不免费越闸；`list`（全实体）不携带 peek。

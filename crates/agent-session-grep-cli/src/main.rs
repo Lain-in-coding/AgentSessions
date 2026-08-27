@@ -1186,7 +1186,8 @@ fn subcommand_help_text(cmd: &str) -> &'static str {
                   从 stdin 读 hook payload，检索历史并按 hookSpecificOutput 契约输出；\n\
                   不加 --enable 时输出空 context（不注入任何历史）；\n\
                   flag：--enable 启用注入、--max-tokens <n> 预算（默认 2000）；\n\
-                  --provider claude|claude-code|codex（可重复，OR 限定 provider）、--decay-days <n>（只注入最近 N 天）；\n\
+                  --provider claude|claude-code|codex（可重复，OR 限定 provider）、--decay-days <n>（只注入最近 N 天）、\n\
+                  --repo <host/owner/name>（只注入该仓库的历史；与 search --repo 同语义）；\n\
                   注入文本经跨边界脱敏（ADR-0009）；全局 --offline 时如实上报 offline 字段。"
         }
         "show" => {
@@ -2204,8 +2205,11 @@ fn dispatch(
             let enabled = take_bool_flag(&mut args, "--enable");
             // #8 hook provider/time filter：--provider 可重复（OR），--decay-days
             // 限定时间窗（0 = 不过滤）。两者都是 opt-in，缺省空/0 = 全部历史。
+            // --repo（schema v16）同为 opt-in：只注入该仓库的历史（与 search
+            // `--repo` / MCP `repo` 同一维度与同一语义）。
             let providers = extract_repeated_flag(&mut args, "--provider")?;
             let decay_days = extract_flag(&mut args, "--decay-days")?;
+            let repo = extract_flag(&mut args, "--repo")?;
             no_extra_args(&args, 1, "hook <session-start|user-prompt-submit>")?;
             let raw_event = arg(&args, 1, "hook <session-start|user-prompt-submit>")?;
             let event = hooks::HookEvent::parse(raw_event).ok_or_else(|| {
@@ -2231,6 +2235,7 @@ fn dispatch(
                     })
                     .transpose()?
                     .unwrap_or(0),
+                repo,
                 ..Default::default()
             };
             // stdin payload 允许为空（手工调用/探测）：空即无 query，注入空 context。
@@ -2499,8 +2504,9 @@ fn canonical_search_provider(provider: &str) -> Option<SearchProvider> {
     }
 }
 
-/// 从 HookConfig 构建检索过滤（#8）：provider 白名单（空 = 全部）+ 时间衰减
-/// （`decay_days` > 0 时 `since = now - decay_days`，旧历史整体排除；0 = 不过滤）。
+/// 从 HookConfig 构建检索过滤（#8）：provider 白名单（空 = 全部）、时间衰减
+/// （`decay_days` > 0 时 `since = now - decay_days`，旧历史整体排除；0 = 不过滤）、
+/// repo slug（schema v16；`None` = 不限仓库）。
 /// provider 值经 [`parse_provider_value`] 归一，与 search `--provider` 同一套
 /// canonical id 与别名。
 /// 注入文本保持跨边界脱敏（ADR-0009）由调用方 hook 分支负责，本层只出过滤条件。
@@ -2520,6 +2526,15 @@ fn hook_search_filters(config: &hooks::HookConfig, now_ms: i64) -> Result<Search
         let since_ms = now_ms.saturating_sub(i64::from(config.decay_days).saturating_mul(day_ms));
         filters.since = Some(SearchInstant::from_unix_millis(since_ms));
     }
+    // repo slug：与 search `--repo` 同一门禁——空/纯空白是用法错误，绝不静默
+    // 降级为"不过滤"（拼写错误伪装成全库注入比报错更糟）。
+    filters.repo = match config.repo.as_deref() {
+        Some(raw) if raw.trim().is_empty() => {
+            return Err(CliError::usage("hook --repo must not be empty"));
+        }
+        Some(raw) => Some(raw.to_string()),
+        None => None,
+    };
     Ok(filters)
 }
 
@@ -6143,6 +6158,35 @@ mod tests {
         let filters = hook_search_filters(&decay, now_ms).expect("decay valid");
         let since_ms = filters.since.expect("decay sets since").unix_seconds * 1_000;
         assert_eq!(since_ms, now_ms - 7 * 86_400_000);
+
+        // repo（schema v16）：缺省不限仓库；有值逐字进 filters.repo；空/纯空白
+        // 是用法错误（与 search --repo 同一门禁，绝不静默变成全库注入）。
+        assert!(
+            hook_search_filters(&hooks::HookConfig::default(), now_ms)
+                .expect("default valid")
+                .repo
+                .is_none()
+        );
+        let scoped = hooks::HookConfig {
+            repo: Some("github.com/synthetic-owner/synthetic-repo".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            hook_search_filters(&scoped, now_ms)
+                .expect("repo valid")
+                .repo
+                .as_deref(),
+            Some("github.com/synthetic-owner/synthetic-repo")
+        );
+        for bad in ["", "   "] {
+            let blank = hooks::HookConfig {
+                repo: Some(bad.into()),
+                ..Default::default()
+            };
+            let error = hook_search_filters(&blank, now_ms).expect_err("blank repo rejected");
+            assert_eq!(error.0.code, CanonicalCode::InvalidRequest);
+            assert!(error.0.message.contains("--repo"), "{:?}", error.0.message);
+        }
     }
 
     #[test]
