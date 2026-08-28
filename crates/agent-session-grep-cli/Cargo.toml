@@ -14,13 +14,21 @@ default = []
 # The default release path stays bigram-hash / lexical-only.
 semantic-candle = ["agent-session-grep-application/semantic-candle"]
 
+[lib]
+# The CLI lives in the library so both installed command names share one
+# compilation unit and one unit-test run. Two thin bin shims (src/bin/*.rs)
+# forward to `run()`; pointing both bin targets at the same main.rs previously
+# made cargo compile the CLI twice and run its unit tests twice.
+name = "agent_session_grep_cli"
+path = "src/lib.rs"
+
 [[bin]]
 name = "agent-session-grep"
-path = "src/main.rs"
+path = "src/bin/agent-session-grep.rs"
 
 [[bin]]
 name = "asg"
-path = "src/main.rs"
+path = "src/bin/asg.rs"
 
 # Test-only fake provider for the resume smoke e2e test (never shipped to users).
 [[bin]]

@@ -1329,7 +1329,7 @@ const CAPABILITY_SOURCE: &str = include_str!("../../agent-session-grep-ports/src
 /// 行为），故这里逐个 include。
 const GUARD_SOURCE_THIS: &str = include_str!("provider_matrix.rs");
 const GUARD_SOURCE_E2E: &str = include_str!("e2e.rs");
-const GUARD_SOURCE_MAIN: &str = include_str!("../src/main.rs");
+const GUARD_SOURCE_MAIN: &str = include_str!("../src/lib.rs");
 const GUARD_SOURCE_RESUME: &str =
     include_str!("../../agent-session-grep-application/src/resume.rs");
 const GUARD_SOURCE_HANDOFF: &str =

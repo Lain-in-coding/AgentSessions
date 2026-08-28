@@ -34,7 +34,7 @@ adapted carry the following attributions:
 | Contributor Covenant | CC BY 4.0 | `CODE_OF_CONDUCT.md` text (adapted, v2.1) | adapt |
 
 Where upstream code comments carry a specific copyright line (for example the
-fast-resume adaptation in `crates/agent-session-grep-cli/src/main.rs`), that
+fast-resume adaptation in `crates/agent-session-grep-cli/src/lib.rs`), that
 line is retained in the source file.
 
 `coding_agent_session_search` (cass) is referenced idea-only under a

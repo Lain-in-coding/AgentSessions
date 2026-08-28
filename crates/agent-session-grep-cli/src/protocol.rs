@@ -1217,7 +1217,7 @@ mod tests {
         // parse_output_mode 上方的注释要求带值 flag 列表与 main.rs 各前缀
         // 扫描器保持一致。此测试把 main.rs 源 include 进来，逐扫描器断言
         // --tool-kind/--tool-name 都在跳过列表里——上次 drift 正是漏掉它们。
-        let main_src = include_str!("main.rs");
+        let main_src = include_str!("lib.rs");
         let scanners = [
             "fn extract_request_id",
             "fn command_name",

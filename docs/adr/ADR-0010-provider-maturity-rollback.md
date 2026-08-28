@@ -10,7 +10,7 @@
 > - due_milestone: 0.3 Integration Beta / Provider Promotion Train
 > - evidence_path: `docs/architecture/RFC-0002-provider-adapter-contract.md` §6；
 >   `crates/agent-session-grep-ports/src/capability.rs`、`src/manifest.rs`；
->   `crates/agent-session-grep-cli/src/main.rs`、`src/human.rs`、`src/mcp.rs`；
+>   `crates/agent-session-grep-cli/src/lib.rs`、`src/human.rs`、`src/mcp.rs`；
 >   `crates/agent-session-grep-cli/tests/provider_matrix.rs`（`CAPABILITY_BEHAVIOR_GUARDS`）；
 >   `docs/product/PROVIDER-MATURITY-MATRIX.md`
 > - governance: 本 ADR 当前仅为 Proposed。未经 owner/approver 记录

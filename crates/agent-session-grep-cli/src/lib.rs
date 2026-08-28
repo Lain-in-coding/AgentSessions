@@ -98,7 +98,7 @@ impl From<ProtocolError> for CliError {
     }
 }
 
-fn main() {
+pub fn run_cli() {
     // command 名先解析出来供错误 envelope 使用；失败时也要标注是哪个命令。
     let args: Vec<String> = std::env::args().skip(1).collect();
     let command = command_name(&args);

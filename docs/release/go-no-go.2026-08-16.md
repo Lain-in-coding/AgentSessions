@@ -204,7 +204,7 @@ Closed 2026-08-25 (`discover` column, `main` at `68665a7`): §6 row 10 plus the
 last unguarded capability column. `discover` was the only column whose claims
 had no code-side guard after the `source_span` / `tool_activity` wave above, and
 it held three under-claims. The provider→root wiring is now a single named table
-(`PROVIDER_DISCOVERY_ROOTS` in `crates/agent-session-grep-cli/src/main.rs`) and
+(`PROVIDER_DISCOVERY_ROOTS` in `crates/agent-session-grep-cli/src/lib.rs`) and
 `discover_roots_match_capability_discover_claims` asserts the equivalence in both
 directions: registered in the table ⟺ `capability.rs` declares a usable
 `discover` level. Mutation-verified in both directions (re-injected under-claim
