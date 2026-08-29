@@ -2078,6 +2078,46 @@ fn all_tool_results_carry_the_redaction_block() {
     }
 }
 
+#[test]
+fn non_utf8_line_is_a_parse_error_and_the_server_keeps_serving() {
+    // 曾经 `serve` 用 `BufRead::lines()` 读 stdin：一行非法 UTF-8 字节让迭代器
+    // 返回 Err，`?` 直接把它当 source_io 抛出整个进程（exit 5）。待答请求与其后
+    // 所有请求全部无声消失——客户端只能等到超时，而正确答复是 -32700。
+    let (_dir, db) = temp_db("mcp-non-utf8");
+    let mut payload = Vec::new();
+    payload.extend_from_slice(initialize_request(1, "2025-06-18").to_string().as_bytes());
+    payload.push(b'\n');
+    payload.extend_from_slice(initialized_notification().to_string().as_bytes());
+    payload.push(b'\n');
+    // 0xFF 0xFE 不是合法 UTF-8 序列。
+    payload.extend_from_slice(br#"{"jsonrpc":"2.0","id":2,"method":"ping","x":""#);
+    payload.extend_from_slice(&[0xFF, 0xFE]);
+    payload.extend_from_slice(br#""}"#);
+    payload.push(b'\n');
+    payload.extend_from_slice(
+        json!({ "jsonrpc": "2.0", "id": 3, "method": "ping" })
+            .to_string()
+            .as_bytes(),
+    );
+    payload.push(b'\n');
+
+    let (frames, stderr, code) = mcp_session_bytes(&db, &payload);
+    assert_eq!(code, Some(0), "EOF 必须干净停机；stderr: {stderr}");
+    // 坏字节那一行得到 -32700（id 无法回显 → null）。
+    let parse_errors: Vec<&Value> = frames
+        .iter()
+        .filter(|frame| frame["error"]["code"] == json!(-32700))
+        .collect();
+    assert_eq!(parse_errors.len(), 1, "{frames:?}");
+    assert!(parse_errors[0]["id"].is_null(), "{frames:?}");
+    // 其后的请求照常应答——这是回归的核心。
+    assert_eq!(frame_by_id(&frames, 3)["result"], json!({}), "{frames:?}");
+    assert!(
+        !stderr.contains(&db.to_string_lossy().to_string()),
+        "stderr 泄露 db 路径: {stderr}"
+    );
+}
+
 // ─── design §4 场景补充：search_sessions facet 参数（08-15 structured-activity）──
 
 #[test]

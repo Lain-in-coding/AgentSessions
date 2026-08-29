@@ -26,6 +26,7 @@ use agent_session_grep_ports::{
     handoff::HandoffFilters,
 };
 use serde_json::{Map, Value, json};
+use std::io::BufRead;
 
 /// 支持的 MCP 协议版本（新→旧）。协商绝不谎报支持：请求版本在列才回显。
 const SUPPORTED_PROTOCOL_VERSIONS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
@@ -60,6 +61,28 @@ pub(crate) fn serve(store: &SqliteStore, offline: bool) -> Result<Outcome, CliEr
                 format!("cannot read stdin: {error}"),
             )
         })?;
+        if read == 0 {
+            break;
+        }
+        // 与 `BufRead::lines()` 同一行界定：去掉行尾 "\n"，再去掉其前的 "\r"。
+        if raw.last() == Some(&b'\n') {
+            raw.pop();
+            if raw.last() == Some(&b'\r') {
+                raw.pop();
+            }
+        }
+        let line = match std::str::from_utf8(&raw) {
+            Ok(line) => line,
+            Err(_) => {
+                protocol::write_stdout_line(&error_frame(
+                    Value::Null,
+                    PARSE_ERROR,
+                    "parse error: line is not valid UTF-8",
+                    None,
+                ));
+                continue;
+            }
+        };
         if line.trim().is_empty() {
             continue;
         }
@@ -1115,8 +1138,8 @@ fn tool_catalog() -> Value {
                     },
                     "providers": {
                         "type": "array",
-                        "maxItems": 2,
-                        "items": { "type": "string", "enum": ["claude", "claude-code", "codex"] },
+                        "maxItems": PROVIDER_FILTER_VALUES.len(),
+                        "items": { "type": "string", "enum": PROVIDER_FILTER_VALUES },
                         "description": "Restrict hits to these providers (OR). Omitted matches all providers."
                     },
                     "since": {
@@ -1312,6 +1335,7 @@ fn validate_string_length(key: &str, value: &str) -> Result<(), ToolError> {
         "cursor" => 512,
         "since" | "until" => 64,
         "session_id" | "message_id" => 128,
+        "tool_name" => TOOL_NAME_MAX_CHARS,
         // repo slug 上界与派生侧一致（`repo_identity::REPO_SLUG_MAX_CHARS`）：
         // 派生出的 slug 不可能超过该长度，更长的取值只可能是错误输入。
         "repo" => crate::repo_identity::REPO_SLUG_MAX_CHARS,
