@@ -131,6 +131,60 @@ fn enabled_hook_writes_only_the_bare_contract_line() {
 }
 
 #[test]
+fn hook_failures_are_non_blocking_and_silent_on_stdout() {
+    let (_dir, db) = temp_db("hook-non-blocking");
+    // Claude Code 的 hook 契约里 exit 2 是"阻塞这次提交"：用 CLI 通用的
+    // usage-error 退出码，一个含控制字符的普通 prompt 或 settings 里拼错的
+    // 事件名就会让用户的提问被丢弃。注入失败只能是非阻塞的 exit 1。
+    for (label, payload, args) in [
+        (
+            "control characters in the prompt",
+            "{\"prompt\":\"parser\\u001b[31mrewrite\"}",
+            vec!["hook", "user-prompt-submit", "--enable"],
+        ),
+        (
+            "event name typo in settings",
+            "{}",
+            vec!["hook", "post-tool-use"],
+        ),
+        (
+            "payload that is not JSON",
+            "{not json",
+            vec!["hook", "user-prompt-submit", "--enable"],
+        ),
+        (
+            "unknown provider filter",
+            r#"{"prompt":"parser"}"#,
+            vec![
+                "hook",
+                "user-prompt-submit",
+                "--enable",
+                "--provider",
+                "not-a-provider",
+            ],
+        ),
+    ] {
+        let out = run_hook(&db, payload, &args);
+        assert_eq!(
+            out.status.code(),
+            Some(1),
+            "{label} must not block the prompt (exit 2): stderr={}",
+            stderr(&out)
+        );
+        assert_eq!(
+            stdout(&out),
+            "",
+            "{label} must leave stdout clean: it is injected verbatim"
+        );
+        assert!(
+            stderr(&out).contains("not injecting"),
+            "{label} must say why on stderr: stderr={}",
+            stderr(&out)
+        );
+    }
+}
+
+#[test]
 fn enabled_hook_without_a_query_writes_nothing() {
     let (_dir, db) = temp_db("hook-no-query");
     // UserPromptSubmit 缺 prompt / SessionStart 缺 cwd / stdin 全空：无从检索，

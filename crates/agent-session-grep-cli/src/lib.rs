@@ -137,6 +137,20 @@ pub fn run_cli() {
         // 部分成功（预算截断）按 contract §5 exit 10——结果可用但不完整，不伪装 success。
         Ok(protocol::Outcome::Partial) => std::process::exit(10),
         Err(CliError(err)) => {
+            // hook 的退出码同它的 stdout 一样属于 Claude Code 契约，不属于本 CLI 的
+            // 错误目录：在那份契约里 exit 2 是"阻塞这次提交"。于是一个含控制字符的
+            // 普通 prompt（App 会拒 `query contains control characters`）或 settings
+            // 里的事件名拼写错误，都会让用户的提问被直接丢弃。注入失败必须是非阻塞
+            // 的：stdout 一个字节不写（否则会被原样注入上下文），诊断走 stderr，
+            // 退出码取契约里的"非阻塞错误" 1。
+            if command == "hook" {
+                eprintln!(
+                    "hook: not injecting: [{}] {}",
+                    err.code.as_str(),
+                    err.message
+                );
+                std::process::exit(1);
+            }
             // 错误 envelope 只写 stdout 一个对象；进程级诊断（人类模式）走 stderr。
             match mode {
                 protocol::OutputMode::Human => {
