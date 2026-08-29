@@ -4459,6 +4459,58 @@ fn snippet_renders_in_human_search_but_is_stripped_in_machine_modes() {
 }
 
 #[test]
+fn human_search_next_step_commands_are_runnable_wire_ids() {
+    // 2026-08-29 审计：human `search` 只渲染冻结的五列会话表，表里的 Session ID
+    // 是 **provider 原生** id —— `context <它>` 直接 exit 2 `not a valid session
+    // id`，而 `--help` 承诺 search → show <msg_id> → context <ses_id>。表后的
+    // 下一步提示必须给真正能跑的 wire id，且这里逐条真跑一次来证明。
+    let (dir, db) = temp_db("next-step");
+    let fixture = dir.path().join("next-step.jsonl");
+    std::fs::write(
+        &fixture,
+        concat!(
+            r#"{"type":"user","uuid":"a0000000-0000-4000-8000-000000000001","sessionId":"a0000000-0000-4000-8000-000000000002","cwd":"C:\\placeholder\\project","timestamp":"2026-07-26T01:00:00.000Z","message":{"role":"user","content":"nextstepprobe body text"}}"#,
+            "\n",
+        ),
+    )
+    .expect("write fixture");
+    let fixture_path = fixture.to_string_lossy().into_owned();
+    let out = run(&db, &["ingest", &fixture_path]);
+    assert!(out.status.success(), "ingest failed: {}", stdout(&out));
+
+    let out = run_human(&db, &["search", "nextstepprobe"]);
+    assert!(out.status.success(), "search failed: {}", stdout(&out));
+    let human = stdout(&out);
+    assert!(
+        human.contains("会话标题"),
+        "冻结的五列表头必须保留: {human}"
+    );
+
+    // 提示行形如 `  context ses_v1_...` / `  show msg_v1_...`：逐条真跑。
+    let mut ran = 0usize;
+    for line in human.lines() {
+        let Some(rest) = line.strip_prefix("  ") else {
+            continue;
+        };
+        let mut parts = rest.split_whitespace();
+        let (Some(command), Some(id)) = (parts.next(), parts.next()) else {
+            continue;
+        };
+        if !matches!(command, "context" | "show") {
+            continue;
+        }
+        let out = run(&db, &[command, id]);
+        assert!(
+            out.status.success(),
+            "提示给出的命令必须真的能跑: {command} {id} → {}",
+            stdout(&out)
+        );
+        ran += 1;
+    }
+    assert_eq!(ran, 2, "提示必须同时给出 context 与 show 两条命令: {human}");
+}
+
+#[test]
 fn golden_broken_line_syncs_with_visible_diagnostic() {
     // R2.3：仓库固定的 Claude golden fixture 内含一条故意截断行。真实 sync
     // 必须成功，并把 parser 的行号诊断通过公开 warnings 通道带给调用方。
