@@ -139,6 +139,9 @@ certified — currently 0 Beta. **Not release-ready per provider gate.**
 | 20 | `SECURITY.md` promised redaction of five secret shapes (AWS keys, GitHub PATs, OpenAI/Anthropic/xAI keys, Bearer tokens, PEM private keys) while the shared detector implements eleven, and pointed at the CLI applier as if it were the ruleset. An under-claimed security boundary is still a false boundary statement, and it is the first one an external researcher reads. The policy now names all eleven kinds, cites the ruleset version and the real detector path, and `security_policy_lists_every_real_redaction_kind` parses the kinds out of `redact.rs`'s production region so a new pattern cannot ship without the promise following it | P1 | closed | this task |
 | 21 | Two rot classes remained in the documents an outside contributor actually follows. Every repo path cited in the root documents (NOTICE's attribution targets, SECURITY.md's detector location, CHANGELOG's guard files) could be invalidated by any rename with nothing failing, turning verifiable evidence into dead references. And RFC-0002's contract vocabulary — the §5 error labels and §6 capability tiers that `PROVIDER-ADAPTER-CONTRIBUTOR-GUIDE.md` instructs new adapters to implement — had no tie to `ProviderError` or `CapabilityLevel` at all, so renaming a variant would leave the specification describing an API that no longer exists | P1 | closed | this task |
 | 22 | Dogfooding on a real 170,468-entity library (generation 9, built by the previous binary) found MCP `search_sessions` returning **0 hits** for `配置备份` and `备份` while `clippy` matched and scored normally. Root cause: the FTS token transform is an index-time/query-time contract, and the change from pure CJK bigrams to unigram + bigram invalidated nothing — `PARSER_SEMANTIC_VERSION` (schema v14) only covers *parse* semantics and triggers a re-parse, so the projection axis had no version at all, `doctor` did not report it, and the failure surfaced as a silently wrong hit set rather than an error. Fixed by `INDEX_PROJECTION_VERSION` persisted as the store-level `store_metadata.index_projection_version` (schema v17): write opens reproject from the authoritative catalog (no re-parse needed), read-only paths fail closed with `schema_incompatible` naming `index rebuild`, and `doctor` reports version/expected/stale. The reproduction is pinned by a mutation-verified test showing the pre-fix behaviour on the same stale index (`Ok([])` for the Chinese query, `Ok([hit])` for the ASCII one). Verified against a copy of that library: migration 0.19 s, one reprojection ≈140 s, Chinese recall restored | P1 | closed | this task |
+| 23 | Kimi sessions indexed the assistant's answers but never the user's own prompts: Kimi writes them as `turn.prompt` / `turn.steer` records with the text in a top-level `input` block array, and the adapter parsed only `context.append_message` — so the highest-value text in a Kimi session never entered the index, and the golden fixture carried no such record for a test to catch it. Both record types now emit as user messages in file order, pinned by a unit test | P1 | closed | fe72de0 |
+| 24 | Key-name redaction blanked numeric contract fields into the string `"[redacted]"`: `handoff-pack/v1`'s `max_tokens` / `used_tokens` are integers whose names contain a secret-looking fragment, so every handoff payload crossed the machine boundary violating its own published schema. Numbers and booleans are now exempt (a JSON number cannot carry a secret shape); the two scope limits are stated in `SECURITY.md` | P1 | closed | 25c1aa6 |
+| 25 | Lexical search pages silently duplicated hits and hid the strongest one: the rank-signals wave over-fetched `offset + page + 1` and re-ranked the whole window, so the pinned ordering depended on which page you asked for — page 2 ranked a larger set than page 1, concatenated pages could repeat a hit and never show the true top hit, exit code 0 throughout. Found by dogfooding; reproduced with a 4-hit fixture whose recency order is the reverse of its index order (`[hit2, hit1, hit1, hit0]` against a truth of `[hit3, hit2, hit1, hit0]`). Re-ranked paths now fetch one fixed `RANK_SCAN_WINDOW` (512; ×16 grouped) independent of the offset, so every page ranks the same set and slices one total order; paging past the window ends with `has_more=false` (a ranking horizon, stated in the constant docs) | P1 | closed | 523a15d |
 
 ---
 
@@ -667,11 +670,22 @@ verification script are now green on the local Windows/WSL rehearsal evidence
 scrub, bounded ingestion, offline, resume/handoff, ToolActivity facets,
 serve hardening). Release readiness is not equivalent to those checks: P0-4
 (release pipeline has no named successful run and CI is blocked by billing;
-SBOM/NOTICE/REUSE audit open), the provider maturity gate (0 Beta,
+REUSE audit approval open), the provider maturity gate (0 Beta,
 Claude/Codex not certified), and the macOS clean-environment rehearsal remain
 open pending the external billing blocker and owner decisions. The owner
 should treat this draft as the evidence summary for a No-Go decision and
 re-run the affected sections after the open external items close.
+
+State refresh 2026-08-29: every locally-verifiable gate re-verified green at
+`cfef9ab` (1557 tests, verify-release 10/10, `cargo deny` all ok, privacy
+scan 0 findings, public-tree export rehearsal clean at `077e529`; the
+distracting three-line doc commits after that SHA do not touch code). Three
+further P1 defects found by dogfooding since the last update are closed as
+rows 23–25 (kimi user prompts, numeric-contract redaction, rank-window
+pagination), `serve` moved its token out of the query string, and the two
+THREAT-MODEL open decisions now carry fact bases and recommended rulings
+(§7.1/§7.2) awaiting signature. The external blockers and the No-Go
+recommendation are unchanged.
 
 ---
 
