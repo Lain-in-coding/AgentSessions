@@ -221,6 +221,8 @@ fn search_msg(response: AppResponse) -> Msg {
                     score: hit.score,
                     session_id: hit.session_id,
                     resume_available: hit.resume_available,
+                    // Application 已按 ADR-0008 装配好摘要；这里只透传。
+                    snippet: hit.text.unwrap_or_default(),
                 })
                 .collect();
             Msg::SearchLoaded(SearchPage {
@@ -473,6 +475,8 @@ mod tests {
         assert_eq!(page.hits.len(), 1);
         assert!(page.hits[0].resume_available);
         assert!(page.hits[0].session_id.is_some());
+        // Application 装配的摘要必须到达列表投影，否则 Results 屏只剩 UUID+score。
+        assert_eq!(page.hits[0].snippet, "preview");
     }
 
     #[test]
@@ -640,12 +644,14 @@ mod tests {
                     score: f32::NAN,
                     session_id: Some("中文会话\u{1b}[0m".to_string()),
                     resume_available: true,
+                    snippet: format!("{nasty} {}", "x".repeat(10_000)),
                 },
                 SearchHitView {
                     id: String::new(),
                     score: 0.0,
                     session_id: None,
                     resume_available: false,
+                    snippet: String::new(),
                 },
             ],
             selected: 1,

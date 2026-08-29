@@ -9,6 +9,9 @@
 use agent_session_grep_domain::ContextPolicy;
 use agent_session_grep_ports::{SearchFacets, SidechainFacet};
 
+/// 命中列表里正文预览的最大字符数（与 human 渲染器的 `SNIPPET_PREVIEW_CHARS` 一致）。
+const HIT_SNIPPET_CHARS: usize = 120;
+
 /// 三屏状态机（PRD R2）：Search（输入）→ Results(命中列表) → Context（消息链）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Screen {
@@ -118,6 +121,9 @@ pub(crate) struct SearchHitView {
     pub score: f32,
     pub session_id: Option<String>,
     pub resume_available: bool,
+    /// Application 装配的命中正文摘要（ADR-0008，已按 max_snippet_chars 截断）。
+    /// 缺失为空串——core 不回读 payload 自己造摘要。
+    pub snippet: String,
 }
 
 /// 一页检索结果的平数据投影（glue 从 `AppResponse::Search` 构造）。
@@ -560,8 +566,9 @@ fn max_scroll(model: &Model) -> usize {
         .unwrap_or(0)
 }
 
-/// 命中列表行：选中行前缀 `> `，其余两空格对齐；Session 与 Resume
-/// 可用性只展示 Application 已返回的结构化事实。
+/// 命中列表项：首行 `> <id>  score  session  resume`（选中行前缀 `> `，其余两
+/// 空格对齐），有摘要时追加一条缩进的正文预览行。返回的每个元素是一个列表项
+/// （可能两行），Session 与 Resume 可用性只展示 Application 已返回的结构化事实。
 pub(crate) fn hit_lines(model: &Model) -> Vec<String> {
     model
         .hits
@@ -576,10 +583,25 @@ pub(crate) fn hit_lines(model: &Model) -> Vec<String> {
                 .map(fold_controls)
                 .unwrap_or_else(|| "—".to_string());
             let resume = if hit.resume_available { "yes" } else { "no" };
-            format!(
+            let mut item = format!(
                 "{prefix}{id}  score {:.3}  session {session}  resume {resume}",
                 hit.score
-            )
+            );
+            // 只有 UUID + score 的命中列表无从判断哪条有用（human 渲染器已按
+            // 同一理由补了正文预览，见 human.rs `render_search`）。空白折叠成
+            // 单空格，整段按字符（非字节）截断。
+            let snippet: String = fold_controls(&hit.snippet)
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .chars()
+                .take(HIT_SNIPPET_CHARS)
+                .collect();
+            if !snippet.is_empty() {
+                item.push_str("\n    ");
+                item.push_str(&snippet);
+            }
+            item
         })
         .collect()
 }
@@ -762,6 +784,7 @@ mod tests {
             score,
             session_id: None,
             resume_available: false,
+            snippet: String::new(),
         }
     }
 
@@ -894,6 +917,7 @@ mod tests {
             score: 2.0,
             session_id: Some("ses_v1_resumable".to_string()),
             resume_available: true,
+            snippet: String::new(),
         }];
 
         let (model, effect) = update(submitted("rust"), Msg::SearchLoaded(loaded));
@@ -1122,6 +1146,7 @@ mod tests {
                 score: 1.0,
                 session_id: Some("ses_v1_s".into()),
                 resume_available: false,
+                snippet: String::new(),
             }],
             ..Model::default()
         };
@@ -1262,21 +1287,54 @@ mod tests {
     }
 
     #[test]
-    fn hit_lines_render_session_and_resume_availability() {
+    fn hit_lines_render_session_resume_availability_and_snippet() {
+        // 只有 UUID + score 的列表无从判断哪条有用；摘要与 human 渲染器同源，
+        // 空白折叠、按字符截断，控制字符不外泄。
         let mut model = results(&[], None);
         model.hits = vec![SearchHitView {
             id: "msg_v1_a".to_string(),
             score: 2.0,
             session_id: Some("ses_v1_a".to_string()),
             resume_available: true,
+            snippet: "  \u{1b}[31mfix the\n\tparser  bug 中文 ".to_string(),
         }];
 
         let lines = hit_lines(&model);
 
         assert_eq!(
             lines,
+            vec![
+                "> msg_v1_a  score 2.000  session ses_v1_a  resume yes\n    [31mfix the parser bug 中文"
+            ]
+        );
+
+        // 无摘要的命中不追加空行。
+        model.hits[0].snippet = "   ".to_string();
+        assert_eq!(
+            hit_lines(&model),
             vec!["> msg_v1_a  score 2.000  session ses_v1_a  resume yes"]
         );
+    }
+
+    #[test]
+    fn hit_lines_truncate_snippet_by_characters_not_bytes() {
+        let mut model = results(&[], None);
+        model.hits = vec![SearchHitView {
+            id: "msg_v1_wide".to_string(),
+            score: 1.0,
+            session_id: None,
+            resume_available: false,
+            snippet: "中".repeat(400),
+        }];
+
+        let preview = hit_lines(&model)[0]
+            .split_once("\n    ")
+            .expect("snippet row")
+            .1
+            .to_string();
+
+        assert_eq!(preview.chars().count(), HIT_SNIPPET_CHARS);
+        assert!(preview.chars().all(|c| c == '中'));
     }
 
     #[test]
@@ -1346,6 +1404,7 @@ mod tests {
                 score: 1.0,
                 session_id: Some(nasty.to_string()),
                 resume_available: true,
+                snippet: nasty.to_string(),
             }],
             context: Some(ContextView {
                 session_id: nasty.to_string(),
@@ -1366,20 +1425,29 @@ mod tests {
             ..Model::default()
         };
 
-        let rendered = [
-            hit_lines(&model).join(" / "),
-            context_lines(&model).join(" / "),
-            status_line(&model),
-            title_line(&model),
-            resume_lines(&model).join(" / "),
+        // 逐行检查：`hit_lines` 的项内换行是版式结构（首行 + 缩进摘要行），
+        // 内容里的控制字符才是缺陷。
+        let rows: Vec<String> = [
+            hit_lines(&model),
+            context_lines(&model),
+            vec![status_line(&model), title_line(&model)],
+            resume_lines(&model),
         ]
-        .join(" / ");
+        .concat()
+        .iter()
+        .flat_map(|item| item.split('\n').map(str::to_string).collect::<Vec<_>>())
+        .collect();
 
+        for row in &rows {
+            assert!(
+                !row.chars().any(char::is_control),
+                "view models must not emit control characters: {row:?}"
+            );
+        }
         assert!(
-            !rendered.chars().any(char::is_control),
-            "view models must not emit control characters: {rendered:?}"
+            rows.iter().any(|row| row.contains("Compiling")),
+            "text itself is preserved"
         );
-        assert!(rendered.contains("Compiling"), "text itself is preserved");
     }
 
     #[test]
