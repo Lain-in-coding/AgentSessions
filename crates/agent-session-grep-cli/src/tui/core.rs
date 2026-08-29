@@ -567,11 +567,16 @@ pub(crate) fn hit_lines(model: &Model) -> Vec<String> {
         .enumerate()
         .map(|(i, hit)| {
             let prefix = if i == model.selected { "> " } else { "  " };
-            let session = hit.session_id.as_deref().unwrap_or("—");
+            let id = fold_controls(&hit.id);
+            let session = hit
+                .session_id
+                .as_deref()
+                .map(fold_controls)
+                .unwrap_or_else(|| "—".to_string());
             let resume = if hit.resume_available { "yes" } else { "no" };
             format!(
-                "{prefix}{}  score {:.3}  session {session}  resume {resume}",
-                hit.id, hit.score
+                "{prefix}{id}  score {:.3}  session {session}  resume {resume}",
+                hit.score
             )
         })
         .collect()
@@ -615,6 +620,15 @@ fn display_field(value: Option<&str>) -> String {
     let Some(value) = value.filter(|value| !value.is_empty()) else {
         return "—".to_string();
     };
+    fold_controls(value)
+}
+
+/// 控制字符折叠为空格。ratatui 不会替我们做这件事：`unicode-width` 把 ESC 记为
+/// 宽度 1，于是 `Paragraph`/`List` 会把它当普通字符写进单元格，后端再原样打印
+/// ——真实 transcript 里的终端输出（`\x1b[31;1m   Compiling ...\x1b[0m`）就会被
+/// 终端执行，改颜色、移光标、清屏，把整帧 TUI 冲掉。所有非字面量文本（消息
+/// 正文/角色、id、错误与警告文本）渲染前必须过这里。
+fn fold_controls(value: &str) -> String {
     value
         .chars()
         .map(|character| {
@@ -636,7 +650,12 @@ pub(crate) fn context_lines(model: &Model) -> Vec<String> {
             .iter()
             .map(|message| {
                 let first = message.text.lines().next().unwrap_or("");
-                format!("{}: {} [{}]", message.role, first, message.precision)
+                format!(
+                    "{}: {} [{}]",
+                    fold_controls(&message.role),
+                    fold_controls(first),
+                    fold_controls(&message.precision)
+                )
             })
             .collect(),
     }
@@ -648,13 +667,13 @@ pub(crate) fn status_line(model: &Model) -> String {
     let mut parts = vec![format!("gen {}", model.generation)];
     if model.truncated {
         let reason = model.truncation_reason.as_deref().unwrap_or("unspecified");
-        parts.push(format!("PARTIAL: {reason}"));
+        parts.push(format!("PARTIAL: {}", fold_controls(reason)));
     }
     if let Some(warning) = model.warnings.first() {
-        parts.push(format!("warning: {warning}"));
+        parts.push(format!("warning: {}", fold_controls(warning)));
     }
     if let Some(status) = &model.status {
-        parts.push(status.clone());
+        parts.push(fold_controls(status));
     }
     parts.join(" | ")
 }
@@ -689,8 +708,8 @@ pub(crate) fn title_line(model: &Model) -> String {
             let session = model
                 .context
                 .as_ref()
-                .map(|view| view.session_id.as_str())
-                .unwrap_or("-");
+                .map(|view| fold_controls(&view.session_id))
+                .unwrap_or_else(|| "-".to_string());
             format!("Context {session} - policy {policy}  f: toggle, Esc: back, q: quit")
         }
     }
@@ -1289,6 +1308,56 @@ mod tests {
         // 只取文本首行；unknown 精度如实渲染 [unknown]。
         assert_eq!(lines[0], "user: hello [byte]");
         assert_eq!(lines[1], "assistant: hi [unknown]");
+    }
+
+    #[test]
+    fn view_models_fold_control_characters_from_provider_content() {
+        // 真实 transcript 会原样保存终端输出：本地 catalog 里的
+        // msg_v1_2cf77e63-… 首行就是 `\x1b[31;1m   Compiling krates v0.21.2\x1b[0m`。
+        // ratatui 不过滤 ESC（unicode-width 记宽度 1），所以折叠必须发生在这里，
+        // 否则转义序列会被终端执行、把整帧冲掉。
+        let nasty = "\u{1b}[31;1m   Compiling\u{1b}[0m\u{7}\r\ttail";
+        let model = Model {
+            screen: Screen::Context,
+            hits: vec![SearchHitView {
+                id: nasty.to_string(),
+                score: 1.0,
+                session_id: Some(nasty.to_string()),
+                resume_available: true,
+            }],
+            context: Some(ContextView {
+                session_id: nasty.to_string(),
+                lines: vec![ContextMessage {
+                    role: nasty.to_string(),
+                    text: nasty.to_string(),
+                    precision: nasty.to_string(),
+                }],
+                truncated: false,
+                truncation_reason: None,
+                warnings: Vec::new(),
+                generation: 7,
+            }),
+            truncated: true,
+            truncation_reason: Some(nasty.to_string()),
+            warnings: vec![nasty.to_string()],
+            status: Some(nasty.to_string()),
+            ..Model::default()
+        };
+
+        let rendered = [
+            hit_lines(&model).join(" / "),
+            context_lines(&model).join(" / "),
+            status_line(&model),
+            title_line(&model),
+            resume_lines(&model).join(" / "),
+        ]
+        .join(" / ");
+
+        assert!(
+            !rendered.chars().any(char::is_control),
+            "view models must not emit control characters: {rendered:?}"
+        );
+        assert!(rendered.contains("Compiling"), "text itself is preserved");
     }
 
     #[test]
