@@ -191,7 +191,8 @@ pub(crate) struct Model {
     pub tool_kind: ToolKindMode,
     /// 最近一次错误或提示（如 `no hits`）；渲染进状态行，不弹窗、不退出。
     pub status: Option<String>,
-    /// 最近一次加载的截断事实（PARTIAL 渲染依据），来自 App 响应。
+    /// 最近一次**检索页**的截断事实（PARTIAL 渲染依据），来自 App 响应。
+    /// Context 装配的截断/警告留在 [`ContextView`]，不共用这组字段。
     pub truncated: bool,
     pub truncation_reason: Option<String>,
     pub warnings: Vec<String>,
@@ -496,8 +497,12 @@ fn search_loaded(mut model: Model, page: SearchPage) -> (Model, Option<Effect>) 
     (model, None)
 }
 
-/// 上下文加载：截断/警告事实提升到 Model（状态行渲染源），滚动复位；
-/// Session 改变时清空旧 metadata，并通过 Application Effect 读取固定 Resume 契约。
+/// 上下文加载：滚动复位；Session 改变时清空旧 metadata，并通过 Application
+/// Effect 读取固定 Resume 契约。
+///
+/// 截断/警告事实**留在** [`ContextView`] 里，不上提到 Model：Model 上那组字段
+/// 属于检索页，覆盖掉会让 Esc 回到 Results 后把完整命中列表谎报成 `PARTIAL`
+/// （状态行由 [`status_line`] 按当前屏选源）。
 fn context_loaded(mut model: Model, view: ContextView) -> (Model, Option<Effect>) {
     let session_id = view.session_id.clone();
     let metadata_is_current = model
@@ -508,9 +513,6 @@ fn context_loaded(mut model: Model, view: ContextView) -> (Model, Option<Effect>
         model.resume = None;
     }
     model.generation = view.generation;
-    model.truncated = view.truncated;
-    model.truncation_reason = view.truncation_reason.clone();
-    model.warnings = view.warnings.clone();
     model.context = Some(view);
     model.scroll = 0;
     model.status = None;
@@ -662,14 +664,34 @@ pub(crate) fn context_lines(model: &Model) -> Vec<String> {
 }
 
 /// 状态行：generation + 截断（`PARTIAL: <预算旋钮>`）+ 首条警告 + 最近错误/提示。
-/// 诚实渲染是硬要求（PRD R3）：截断与降级绝不吞掉。
+/// 诚实渲染是硬要求（PRD R3）：截断与降级绝不吞掉——但也绝不把另一屏的截断
+/// 事实挂到当前屏上，所以截断/警告按当前屏选源（Context 屏取 [`ContextView`]，
+/// 其余屏取检索页留在 Model 上的那组字段）。
 pub(crate) fn status_line(model: &Model) -> String {
     let mut parts = vec![format!("gen {}", model.generation)];
-    if model.truncated {
-        let reason = model.truncation_reason.as_deref().unwrap_or("unspecified");
-        parts.push(format!("PARTIAL: {}", fold_controls(reason)));
+    let context = model
+        .context
+        .as_ref()
+        .filter(|_| model.screen == Screen::Context);
+    let (truncated, reason, warnings) = match context {
+        Some(view) => (
+            view.truncated,
+            view.truncation_reason.as_deref(),
+            view.warnings.as_slice(),
+        ),
+        None => (
+            model.truncated,
+            model.truncation_reason.as_deref(),
+            model.warnings.as_slice(),
+        ),
+    };
+    if truncated {
+        parts.push(format!(
+            "PARTIAL: {}",
+            fold_controls(reason.unwrap_or("unspecified"))
+        ));
     }
-    if let Some(warning) = model.warnings.first() {
+    if let Some(warning) = warnings.first() {
         parts.push(format!("warning: {}", fold_controls(warning)));
     }
     if let Some(status) = &model.status {
@@ -1332,9 +1354,9 @@ mod tests {
                     text: nasty.to_string(),
                     precision: nasty.to_string(),
                 }],
-                truncated: false,
-                truncation_reason: None,
-                warnings: Vec::new(),
+                truncated: true,
+                truncation_reason: Some(nasty.to_string()),
+                warnings: vec![nasty.to_string()],
                 generation: 7,
             }),
             truncated: true,
@@ -1358,6 +1380,39 @@ mod tests {
             "view models must not emit control characters: {rendered:?}"
         );
         assert!(rendered.contains("Compiling"), "text itself is preserved");
+    }
+
+    #[test]
+    fn status_line_reports_truncation_per_screen() {
+        // Results 屏的状态行只能描述当前那页命中；Context 装配的截断/警告
+        // 属于另一屏的数据。Esc 返回 Results 后若还挂着 `PARTIAL: max_messages`，
+        // 完整的命中列表就被谎报成不完整（PRD R3 诚实渲染反例）。
+        let mut truncated_context = view("ses_v1_s", 2);
+        truncated_context.truncated = true;
+        truncated_context.truncation_reason = Some("max_messages".to_string());
+        truncated_context.warnings =
+            vec!["1 of 2 evidence spans have unknown precision".to_string()];
+        let model = update(
+            results(&[("msg_v1_a", 2.0)], None),
+            Msg::ContextLoaded(truncated_context),
+        )
+        .0;
+
+        let on_context = status_line(&model);
+        assert!(on_context.contains("PARTIAL: max_messages"), "{on_context}");
+        assert!(on_context.contains("warning: 1 of 2"), "{on_context}");
+
+        let (model, _) = key(model, KeyInput::Esc);
+        assert_eq!(model.screen, Screen::Results);
+        let on_results = status_line(&model);
+        assert!(
+            !on_results.contains("PARTIAL"),
+            "the search page was complete: {on_results}"
+        );
+        assert!(
+            !on_results.contains("warning:"),
+            "context warnings belong to the Context screen: {on_results}"
+        );
     }
 
     #[test]
