@@ -10,6 +10,16 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- The loopback `serve` URL now carries its session token in the URL **fragment**
+  (`http://<addr>/#token=…`) instead of the query string. A fragment is never
+  sent to the server, so the token cannot reach a request log, an access log,
+  or the `Referer` header of a later navigation; the embedded UI reads it from
+  `location.hash`, still accepts a query-string token for a hand-typed or
+  bookmarked URL, and strips the token from the visible URL either way so it
+  does not persist in browser history. Idea from cc-sessions-viewer's
+  `web-server-mode.md` (that repository has no LICENSE file — spec-level idea
+  only; the implementation matches our existing token handling).
+
 - `kimi-code` now indexes the user's own prompts. Kimi writes them as
   `turn.prompt` (and `turn.steer` for a mid-turn correction) with the text in a
   top-level `input` block array, not as `context.append_message`; the adapter
