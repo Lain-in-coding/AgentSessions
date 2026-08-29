@@ -17,7 +17,7 @@ semantic-candle = ["agent-session-grep-application/semantic-candle"]
 [lib]
 # The CLI lives in the library so both installed command names share one
 # compilation unit and one unit-test run. Two thin bin shims (src/bin/*.rs)
-# forward to `run()`; pointing both bin targets at the same main.rs previously
+# forward to `run_cli()`; pointing both bin targets at the same main.rs previously
 # made cargo compile the CLI twice and run its unit tests twice.
 name = "agent_session_grep_cli"
 path = "src/lib.rs"
