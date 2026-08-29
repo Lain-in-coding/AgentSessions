@@ -732,19 +732,31 @@ pub fn route_request(
         );
     }
     if let Some(id) = path.strip_prefix("/api/show/") {
+        if let Err(response) = check_argv_value("id", id) {
+            return response;
+        }
         args = vec!["show".to_string(), id.to_string()];
     } else if path == "/api/show" {
         let Some(id) = req.query_param("id").filter(|value| !value.is_empty()) else {
             return fixed_error(400, "invalid_request", "missing id parameter");
         };
+        if let Err(response) = check_argv_value("id", &id) {
+            return response;
+        }
         args = vec!["show".to_string(), id];
     }
     if let Some(session_id) = path.strip_prefix("/api/resume/") {
+        if let Err(response) = check_argv_value("session", session_id) {
+            return response;
+        }
         args = vec!["resume".to_string(), session_id.to_string()];
     } else if path == "/api/resume" {
         let Some(session_id) = req.query_param("session").filter(|value| !value.is_empty()) else {
             return fixed_error(400, "invalid_request", "missing session parameter");
         };
+        if let Err(response) = check_argv_value("session", &session_id) {
+            return response;
+        }
         args = vec!["resume".to_string(), session_id];
     }
     if !matches!(
@@ -797,34 +809,40 @@ pub fn route_request(
 
 fn request_args(req: &HttpRequest) -> Result<Vec<String>, HttpResponse> {
     let path = path_only(req.path.as_str());
-    let value = |name: &str| req.query_param(name).filter(|value| !value.is_empty());
+    let value = |name: &str| -> Result<Option<String>, HttpResponse> {
+        let Some(value) = req.query_param(name).filter(|value| !value.is_empty()) else {
+            return Ok(None);
+        };
+        check_argv_value(name, &value)?;
+        Ok(Some(value))
+    };
     match path {
         "/" | "/health" | "/api/providers" => Ok(Vec::new()),
         "/api/status" => Ok(vec!["status".to_string()]),
         "/api/search" | "/api/projection/search" => {
-            let Some(query) = value("q") else {
+            let Some(query) = value("q")? else {
                 return Err(fixed_error(400, "invalid_request", "missing q parameter"));
             };
             let mut args = vec!["search".to_string(), query];
-            append_value_flag(&mut args, "--mode", value("mode"));
-            append_value_flag(&mut args, "--max-items", value("limit"));
-            append_value_flag(&mut args, "--cursor", value("cursor"));
-            append_value_flag(&mut args, "--provider", value("provider"));
-            append_value_flag(&mut args, "--since", value("since"));
-            append_value_flag(&mut args, "--until", value("until"));
+            append_value_flag(&mut args, "--mode", value("mode")?);
+            append_value_flag(&mut args, "--max-items", value("limit")?);
+            append_value_flag(&mut args, "--cursor", value("cursor")?);
+            append_value_flag(&mut args, "--provider", value("provider")?);
+            append_value_flag(&mut args, "--since", value("since")?);
+            append_value_flag(&mut args, "--until", value("until")?);
             // repo（schema v16）：与 CLI `--repo` / MCP `repo` 同一维度，Web 面
             // 不得少一个过滤轴（五入口一致性）。空取值被 `value` 过滤掉 = 无过滤。
-            append_value_flag(&mut args, "--repo", value("repo"));
-            if value("include_system").as_deref() == Some("true") {
+            append_value_flag(&mut args, "--repo", value("repo")?);
+            if value("include_system")?.as_deref() == Some("true") {
                 args.push("--include-system".to_string());
             }
-            if value("group_by_session").as_deref() == Some("true") {
+            if value("group_by_session")?.as_deref() == Some("true") {
                 args.push("--group-by-session".to_string());
             }
             Ok(args)
         }
         "/api/context" => {
-            let Some(session) = value("session") else {
+            let Some(session) = value("session")? else {
                 return Err(fixed_error(
                     400,
                     "invalid_request",
@@ -832,24 +850,44 @@ fn request_args(req: &HttpRequest) -> Result<Vec<String>, HttpResponse> {
                 ));
             };
             let mut args = vec!["context".to_string(), session];
-            append_value_flag(&mut args, "--policy", value("policy"));
-            append_value_flag(&mut args, "--level", value("level"));
-            append_value_flag(&mut args, "--max-messages", value("max_messages"));
+            append_value_flag(&mut args, "--policy", value("policy")?);
+            append_value_flag(&mut args, "--level", value("level")?);
+            append_value_flag(&mut args, "--max-messages", value("max_messages")?);
             Ok(args)
         }
         "/api/handoff" => {
-            let Some(query) = value("q") else {
+            let Some(query) = value("q")? else {
                 return Err(fixed_error(400, "invalid_request", "missing q parameter"));
             };
             let mut args = vec!["handoff".to_string(), query];
-            append_value_flag(&mut args, "--provider", value("provider"));
-            append_value_flag(&mut args, "--since", value("since"));
-            append_value_flag(&mut args, "--until", value("until"));
-            append_value_flag(&mut args, "--max-evidence", value("max_evidence"));
+            append_value_flag(&mut args, "--provider", value("provider")?);
+            append_value_flag(&mut args, "--since", value("since")?);
+            append_value_flag(&mut args, "--until", value("until")?);
+            append_value_flag(&mut args, "--max-evidence", value("max_evidence")?);
             Ok(args)
         }
         _ => Ok(Vec::new()),
     }
+}
+
+/// Every request value that reaches [`crate::dispatch`] travels as an argv
+/// token, and the CLI parser reads any `-`-prefixed token as a flag wherever it
+/// sits. A flag-shaped value therefore changed what actually ran:
+/// `?q=--repo&repo=needle` searched `needle` filtered by repo `--repo` and
+/// answered 200 for a query nobody asked, while `?q=--include-system` was eaten
+/// as a boolean flag and answered a 400 claiming `q` was missing. Same doctrine
+/// as the `--db <path>` flag-shaped-value guard (R8.1/R8.2): ambiguity is an
+/// explicit usage error, never a silent reinterpretation.
+fn check_argv_value(name: &str, value: &str) -> Result<(), HttpResponse> {
+    if value.starts_with('-') {
+        // 只回显参数名（调用点全是字面量），绝不回显取值——它可能是检索词。
+        return Err(fixed_error(
+            400,
+            "invalid_request",
+            &format!("parameter {name} must not start with '-'"),
+        ));
+    }
+    Ok(())
 }
 
 fn append_value_flag(args: &mut Vec<String>, flag: &str, value: Option<String>) {
@@ -1136,6 +1174,56 @@ mod tests {
         assert_eq!(invalid.status, 400);
         assert!(!invalid.body.contains("C:/Users"));
         assert!(!invalid.body.contains("secret.jsonl"));
+    }
+
+    /// Request values travel to `dispatch` as argv tokens, and the CLI parser
+    /// reads any `-`-prefixed token as a flag wherever it sits. Before the
+    /// guard, `?q=--repo&repo=needle` really searched `needle` filtered by repo
+    /// `--repo` and answered **200 for a query nobody asked**, while
+    /// `?q=--include-system` was eaten as a boolean flag and answered a 400
+    /// claiming the caller had omitted `q`. Both must be one explicit
+    /// `invalid_request` naming the parameter.
+    #[test]
+    fn flag_shaped_request_values_are_rejected_instead_of_reparsed() {
+        let store = SqliteStore::open_in_memory().expect("store");
+        for path in [
+            "/api/search?q=--repo&repo=needle",
+            "/api/search?q=--include-system",
+            "/api/search?q=needle&mode=-x",
+            "/api/search?q=needle&repo=--repo",
+            "/api/projection/search?q=--cursor&cursor=needle",
+            "/api/handoff?q=--provider&provider=codex",
+            "/api/context?session=--policy&policy=recent",
+            "/api/show?id=--yes",
+            "/api/show/--yes",
+            "/api/resume?session=--yes",
+            "/api/resume/--yes",
+        ] {
+            let response = route_request(
+                &authorized("GET", path),
+                TEST_TOKEN,
+                "test.db",
+                false,
+                &store,
+            );
+            assert_eq!(response.status, 400, "{path}: {}", response.body);
+            assert!(
+                response.body.contains("invalid_request"),
+                "{path}: {}",
+                response.body
+            );
+        }
+
+        // 取值本身绝不回显（可能是用户的检索词），只说参数名。
+        let named = route_request(
+            &authorized("GET", "/api/search?q=--repo&repo=needle"),
+            TEST_TOKEN,
+            "test.db",
+            false,
+            &store,
+        );
+        assert!(!named.body.contains("needle"), "{}", named.body);
+        assert!(named.body.contains("parameter q"), "{}", named.body);
     }
 
     #[test]
