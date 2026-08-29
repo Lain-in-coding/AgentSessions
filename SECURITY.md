@@ -27,7 +27,7 @@ or email the maintainers directly. You can expect:
 |---|---|
 | Human CLI / TUI | Local output. Session content is shown unredacted (ADR-0004). |
 | Robot JSON/JSONL, MCP, HTTP API, Web UI, Handoff Pack | Cross-boundary outputs. Secret-shaped values and secret-named JSON fields are redacted with `[redacted:<kind>]` markers (ADR-0009). The ruleset detects eleven kinds: `aws_access_key`, `aws_secret_key`, `github_token`, `gitlab_token`, `slack_token`, `google_api_key`, `stripe_key`, `api_key` (OpenAI/Anthropic/xAI), `bearer_token`, `jwt`, and `private_key`. |
-| HTTP serve | Loopback-only (Host check), random bearer token per invocation, no TLS, GET-only. Do not expose the port to a network. |
+| HTTP serve | Loopback-only (Host check), random bearer token per invocation, no TLS, GET-only. The token is printed in the URL **fragment** (`/#token=…`), which browsers never send to a server, so it stays out of request logs and `Referer` headers; the page moves it into an `Authorization: Bearer` header and strips it from the visible URL. Do not expose the port to a network. |
 | Offline mode | Global `--offline` flag rejects any network-requiring capability (`capability_not_supported`); the default build has no HTTP client dependency and the only socket is serve's loopback `TcpListener` (static test + CI step). |
 | Provider transcripts | Read-only. Real user session data is never modified, uploaded, or committed. |
 
