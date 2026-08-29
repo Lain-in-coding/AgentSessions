@@ -740,7 +740,16 @@ impl ProviderAdapter for ClaudeCodeAdapter {
                 "tool activity kind is inferred from a closed set of documented tool names; \
                  user-defined and MCP tools are recorded with kind `unknown`",
                 "a tool call with no matching tool_result reports status `unknown`",
-                "turn_context metadata is not surfaced as canonical messages",
+                // 此前这里写的是 Codex 的 `turn_context`——Claude Code JSONL 里
+                // 根本没有这个记录类型（本机 1641 个真实 transcript 普查：0 次
+                // 出现），所以那条"已知限制"从来不是 Claude 的事实。真实的
+                // 对应限制是：`type:"system"` 事件记录把正文放在**顶层**
+                // `content` 键上而非 `message` 里，`is_conversational` 只承认
+                // 带 `message` 的 system 行，故它们不产出 canonical 消息。
+                "`type:\"system\"` event records carry their body on a top-level `content` key \
+                 rather than inside `message`, so they are not surfaced as canonical messages",
+                "`attachment` records (harness-injected context such as output styles, \
+                 reminders, listings and hook output) are not surfaced as canonical messages",
             ],
         )
     }
@@ -1113,6 +1122,48 @@ mod tests {
         assert_eq!(manifest.capabilities.variant_id, VARIANT_ID);
         assert!(manifest.last_certified_targets.is_empty());
         assert_eq!(manifest.fixture_revision, Some(1));
+    }
+
+    #[test]
+    fn manifest_limitations_only_name_claude_code_record_types() {
+        // 防漂移：已知限制必须是**本 provider** 的事实。此前第三条抄了 Codex 的
+        // `turn_context`（Claude Code JSONL 无此记录类型，本机 1641 个真实
+        // transcript 普查 0 次出现），是对外声明里一条查不到出处的限制。
+        let manifest = ClaudeCodeAdapter::new().manifest();
+        assert!(
+            !manifest.known_limitations.is_empty(),
+            "must declare non-empty known limitations"
+        );
+        for foreign in [
+            "turn_context",
+            "world_state",
+            "response_item",
+            "event_msg",
+            "session_meta",
+            "append_message",
+            "sessionUpdate",
+            "step_index",
+        ] {
+            assert!(
+                !manifest
+                    .known_limitations
+                    .iter()
+                    .any(|limitation| limitation.contains(foreign)),
+                "known_limitations 提到了别的 provider 的记录类型 `{foreign}`: {:?}",
+                manifest.known_limitations
+            );
+        }
+        // 正向：真实存在的两类被跳过记录必须被如实声明。
+        for own in ["system", "attachment"] {
+            assert!(
+                manifest
+                    .known_limitations
+                    .iter()
+                    .any(|limitation| limitation.contains(own)),
+                "known_limitations 必须声明跳过 `{own}` 记录: {:?}",
+                manifest.known_limitations
+            );
+        }
     }
 
     /// 收集 emit 的消息事件，供断言解析结果（含 native 身份/threading）。
