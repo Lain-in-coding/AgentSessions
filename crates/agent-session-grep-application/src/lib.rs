@@ -70,6 +70,16 @@ const STRUCTURAL_METADATA_RESERVE_BYTES: usize = 320;
 /// overflowing into a negative SQL LIMIT (SQLite treats -1 as "no limit").
 const MAX_FETCH_WINDOW: u64 = 1 << 20;
 
+/// 重排路径（纯 lexical 与 semantic/hybrid 未就绪时的 lexical_fallback）的
+/// **排序窗口**：与 cursor offset 无关的固定取数上限。重排后的钉住排序是
+/// "同一窗口上的全序"——窗口若随 offset 增长，每一页都在不同的集合上重排，
+/// 拼接结果会重复页尾命中、漏掉真正的高分命中（silent wrong result）。
+/// 所有页取同一窗口、重排一次后按 offset 切片，分页才是同一个全序的不重
+/// 不漏划分；offset 越过窗口后分页以 has_more=false 诚实终止（这是排序
+/// 视界，不是缺陷）。512 ≈ 20 条/页 × 25 页，覆盖典型翻页深度；不受伪造
+/// offset 影响（窗口不随 offset 变化）。
+const RANK_SCAN_WINDOW: u64 = 512;
+
 /// group_by_session（R3）模式下相对分页窗口的扫描放大倍数：归并需要把命中先
 /// 汇到会话级再切页，扫描窗口取 `页窗口 × GROUP_SCAN_FACTOR`（仍被
 /// MAX_FETCH_WINDOW 封顶），使 `occurrences` 覆盖更有意义的命中样本。
@@ -1703,15 +1713,28 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore, 
                     None,
                 )?;
 
-                // 分页模型：钉住排序（bm25 + id tiebreak 全序）内的 offset 续读。
-                // 端口无 offset 参数——超取 offset+page+1（+1 作 has_more 哨兵）后
-                // 切片。grouped 模式把扫描窗放大 GROUP_SCAN_FACTOR 倍（仍封顶），
-                // 让 occurrences 覆盖更有意义的同会话命中样本。
+                // 分页模型：钉住排序（重排后的 final desc + id tiebreak 全序）
+                // 内的 offset 续读。端口无 offset 参数，因此在应用层超取后切片。
+                //
+                // 重排路径的取数窗口**必须与 offset 无关**（见 RANK_SCAN_WINDOW）：
+                // 重排后的钉住排序是"同一窗口上的全序"，窗口随 offset 增长会让
+                // 每页在不同集合上重排，拼接结果重复页尾命中并漏掉真正的高分
+                // 命中。不重排的路径（semantic / hybrid，排序由检索侧给定且是
+                // 稳定前缀）保持 offset+page+1 超取，+1 作 has_more 哨兵。
+                //
+                // grouped 模式把窗口放大 GROUP_SCAN_FACTOR 倍（仍封顶），让
+                // occurrences 覆盖更有意义的同会话命中样本。
                 let page = limit.min(budget.max_items);
-                let fetch = offset
-                    .saturating_add(page as u64)
-                    .saturating_add(1)
-                    .min(MAX_FETCH_WINDOW);
+                let will_rank = mode == RetrievalMode::Lexical
+                    || !(self.semantic.is_ready() && query_embedding.is_some());
+                let fetch = if will_rank {
+                    RANK_SCAN_WINDOW
+                } else {
+                    offset
+                        .saturating_add(page as u64)
+                        .saturating_add(1)
+                        .min(MAX_FETCH_WINDOW)
+                };
                 let scan = if group_by_session {
                     fetch
                         .saturating_mul(GROUP_SCAN_FACTOR)
@@ -1783,9 +1806,11 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore, 
                 // Rank signals（competitor-borrowings #1）：纯 lexical 命中（含
                 // semantic/hybrid 未就绪时的 lexical_fallback）在分页钉住排序前
                 // 重算最终分并重排；semantic 命中与 hybrid RRF 融合排序不动
-                // （README 明示）。时效与 sidechain 事实来自整窗 payload——
+                // （README 明示）。`will_rank` 在取数前已按同一谓词判定——
+                // 它同时决定了扫描窗口形态（见上方分页模型注释），两处必须
+                // 同源。时效与 sidechain 事实来自整窗 payload——
                 // 与 R2 系统噪声过滤共用同一次批量 get_many，无额外 N+1。
-                let rank_lexical = mode == RetrievalMode::Lexical || fallback_warning.is_some();
+                let rank_lexical = will_rank;
                 let mut window_payloads = if rank_lexical || !include_system {
                     let scanned_ids: Vec<StableId> =
                         scanned.iter().map(|hit| hit.id.clone()).collect();
@@ -3890,6 +3915,72 @@ mod tests {
         }
         assert_eq!(paged, unpaged);
         assert!(token.is_none());
+    }
+
+    /// 回归：重排后的分页必须不重不漏，且**扫描窗口不得随 offset 变化**。
+    ///
+    /// 缺陷形态：取数窗口曾是 `offset + page + 1`，于是第 1 页只看到全集的一个
+    /// 前缀、第 2 页看到更大的前缀。当 bm25 序与重排序不一致时，两页各自在
+    /// **不同的集合**上重排，拼接结果既重复又漏命中——返回码正常，结果静默错误。
+    ///
+    /// fixture 用等值 bm25 + 单调变新的时间戳，使时效成为唯一排序因素（重排序
+    /// 恰为索引返回序的反序）。bm25 若有较大跨度会盖过衰减区间、把重排变成
+    /// no-op，缺陷就观察不到——这正是既有分页测试用 3 条命中（fetch 窗口恰好
+    /// 覆盖全集）时未能暴露它的原因。
+    #[test]
+    fn search_rank_pages_do_not_depend_on_the_cursor_offset() {
+        let ids: Vec<StableId> = (0..4)
+            .map(|i| StableId::native(IdKind::Message, &format!("rank-off{i}")))
+            .collect();
+        let mut cat = MapCatalog::new(7);
+        // index 越大 → 时间越新 → 重排越靠前，与索引返回序完全相反。
+        for (index, id) in ids.iter().enumerate() {
+            cat.insert(
+                id,
+                serde_json::json!({
+                    "text": "rank offset",
+                    "timestamp": format!("2026-08-1{index}T00:00:00Z"),
+                })
+                .to_string()
+                .into_bytes(),
+            );
+        }
+        let scored: Vec<(StableId, f32)> = ids.iter().map(|id| (id.clone(), 1.0)).collect();
+        let app = App::with_clock(cat, ScoredHits(scored), rank_clock);
+
+        // 一次取全 4 条即钉住排序的真值：最新在前。
+        let (unpaged, _, _, _) = hits_of(app.handle(search_req("rank offset", 10, None)).unwrap());
+        assert_eq!(
+            unpaged,
+            vec![
+                "msg_v1_rank-off3",
+                "msg_v1_rank-off2",
+                "msg_v1_rank-off1",
+                "msg_v1_rank-off0",
+            ],
+            "unpaged pinned order must be newest-first"
+        );
+
+        let mut paged: Vec<String> = Vec::new();
+        let mut token: Option<String> = None;
+        for _ in 0..4 {
+            let (page_ids, next, _, truncation) = hits_of(
+                app.handle(search_req("rank offset", 2, token.take()))
+                    .unwrap(),
+            );
+            assert!(!truncation.truncated);
+            paged.extend(page_ids);
+            token = next;
+            if token.is_none() {
+                break;
+            }
+        }
+        assert!(token.is_none(), "paging must terminate");
+        assert_eq!(
+            paged, unpaged,
+            "paged concatenation must equal the unpaged pinned order: a window that \
+             grows with the cursor offset re-ranks a different set on every page"
+        );
     }
 
     #[test]
