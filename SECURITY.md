@@ -28,7 +28,7 @@ or email the maintainers directly. You can expect:
 | Human CLI / TUI | Local output. Session content is shown unredacted (ADR-0004). |
 | Robot JSON/JSONL, MCP, HTTP API, Web UI, Handoff Pack | Cross-boundary outputs. Secret-shaped values and secret-named JSON fields are redacted with `[redacted:<kind>]` markers (ADR-0009). The ruleset detects eleven kinds: `aws_access_key`, `aws_secret_key`, `github_token`, `gitlab_token`, `slack_token`, `google_api_key`, `stripe_key`, `api_key` (OpenAI/Anthropic/xAI), `bearer_token`, `jwt`, and `private_key`. |
 | HTTP serve | Loopback-only (Host check), random bearer token per invocation, no TLS, GET-only. The token is printed in the URL **fragment** (`/#token=…`), which browsers never send to a server, so it stays out of request logs and `Referer` headers; the page moves it into an `Authorization: Bearer` header and strips it from the visible URL. Do not expose the port to a network. |
-| Offline mode | Global `--offline` flag rejects any network-requiring capability (`capability_not_supported`); the default build has no HTTP client dependency and the only socket is serve's loopback `TcpListener` (static test + CI step). |
+| Offline mode | The default build has no HTTP client dependency and the only socket is serve's loopback `TcpListener` (static test + CI step). No shipped capability requires the network, so the global `--offline` flag currently rejects nothing — it is a stable, explicitly reported mode (`doctor` and `hook` echo it) backed by a fail-closed gate that any future network-requiring capability must pass (`capability_not_supported`). |
 | Provider transcripts | Read-only. Real user session data is never modified, uploaded, or committed. |
 
 Redaction is a conservative, pattern-based ruleset: the shared detector lives in
@@ -51,13 +51,22 @@ key-name signal:
   budget accounting the pack exists to report. Secret-named arrays and objects
   are still recursed into, not trusted.
 - **Absolute paths are not secrets to this ruleset.** There is no path rule, so
-  a path that crosses a machine boundary — notably
-  `original_working_directory`, which `resume` needs in order to work — is
-  emitted verbatim, OS account name included. `source_path` and
-  `transcript_path` are omitted from that response shape by design. A path
-  privacy mode is an open threat-model decision, recorded with its fact basis
-  in `docs/security/THREAT-MODEL.md` §7.1; until it is implemented and signed,
-  the behaviour above is what ships.
+  a path that crosses a machine boundary is emitted verbatim, OS account name
+  included. Two routes do this today: `original_working_directory`, which
+  `resume` needs in order to work, and `config paths`, which reports the
+  platform config/data/cache/logs locations under the user's home directory.
+  `source_path` and `transcript_path` are omitted from the resume response shape
+  by design, and `doctor` carries no paths at all. A path privacy mode is an
+  open threat-model decision, recorded with its fact basis in
+  `docs/security/THREAT-MODEL.md` §7.1; until it is implemented and signed, the
+  behaviour above is what ships.
+- **The resume preview refuses rather than guesses.** The preview `command`
+  string interpolates transcript-supplied values (the recorded working directory
+  and the provider session id), so those values are quoted, and the whole string
+  is withheld (`command: null`) when a value contains a character that can still
+  escape or expand inside double quotes in cmd.exe, PowerShell or a POSIX shell.
+  `working_directory` is still reported structurally, and `resume --yes` never
+  goes through a shell.
 
 ## Dependencies
 

@@ -370,6 +370,45 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`SECURITY.md` described `--offline` as an active control.** It read as
+  though the flag rejects network-requiring capabilities, but no shipped
+  capability requires the network (`NETWORK_REQUIRING_SUBCOMMANDS` is empty), so
+  the flag rejects nothing today and only changes the `offline` field that
+  `doctor` and `hook` report — which is what `--help` already said. The policy
+  now says so, and its absolute-path scope limit names `config paths` alongside
+  `original_working_directory` instead of implying the working directory is the
+  only verbatim-path route across a machine boundary.
+
+- **Cross-boundary redaction only masked the first sixteen secrets in a value.**
+  The shared span replacer stopped after 16 substitutions per string, so span 17
+  onward was emitted verbatim. One transcript message holding a pasted `.env`
+  dump with more than sixteen credentials therefore crossed *every* machine
+  boundary in the clear — Robot JSON `search`/`context`/`get`/`show`/`list`, MCP
+  `content` and `structuredContent`, the Web `/api/*` bodies, and the injected
+  hook context — while `redaction.status` still reported `applied`, so the
+  envelope claimed the value had been cleaned. The cap existed only because the
+  old implementation called `String::replace_range` once per span, which is
+  quadratic when secrets are dense; the replacer now accumulates into a single
+  output buffer, which is linear, so the cap could go without adding cost.
+  Reproduced with a 40-span synthetic dump and a mixed-shape variant, pinned in
+  both the ports engine and the CLI JSON-tree walker.
+
+- **The resume dry-run preview let a transcript inject shell commands.** The
+  preview string was built by raw interpolation of `(cd {dir} && {binary}
+  {args})`, and both the recorded working directory and the provider session id
+  come from a provider transcript — untrusted input per `THREAT-MODEL` §2. A
+  session whose recorded `cwd` ended in `...\ws" && <command> && cd "...`
+  rendered as a preview that runs `<command>` first, and that string is exactly
+  what the human preview invites an operator to copy and what an MCP/Robot
+  client may hand to a shell. Preview tokens are now quoted when they need it,
+  and the whole string is withheld (`command: null`, with the human renderer
+  saying why) when a token carries a character that can still escape or expand
+  inside double quotes in cmd.exe, PowerShell or a POSIX shell — no single
+  quoting style is safe across all three, so refusing beats emitting something
+  plausible. Ordinary paths with spaces now preview correctly instead of
+  splitting. Execution was never affected: `resume --yes` spawns argv with
+  `current_dir` and never goes through a shell.
+
 - **MCP tool results redacted secrets but never said so.** Every successful
   `tools/call` result runs the payload through cross-boundary redaction
   (ADR-0009), and `handle_tools_call` threw the resulting `RedactionStatus`
