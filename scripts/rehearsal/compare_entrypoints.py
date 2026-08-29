@@ -314,12 +314,16 @@ def _serve_url(binary: str, db: str) -> Tuple[subprocess.Popen[str], str]:
             if proc.poll() is not None:
                 break
             continue
-        # Current serve prints one ready line: `asg serve: open http://<addr>/?token=<token>`.
+        # Current serve prints one ready line: `asg serve: open http://<addr>/#token=<token>`.
+        # The token lives in the URL fragment (never sent to the server); the
+        # query form is still accepted for hand-typed URLs.
         if line.startswith("asg serve: open http://") and address is None:
             ready = line.removeprefix("asg serve: open ")
             parsed = urllib.parse.urlsplit(ready)
             address = f"{parsed.scheme}://{parsed.netloc}"
             token = urllib.parse.parse_qs(parsed.query).get("token", [None])[0]
+            if token is None:
+                token = urllib.parse.parse_qs(parsed.fragment).get("token", [None])[0]
         if address and token:
             return proc, f"{address}?token={urllib.parse.quote(token)}"
     stderr = "\\n".join(list(lines.queue))

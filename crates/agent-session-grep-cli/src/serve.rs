@@ -83,8 +83,16 @@ pub fn run(
     let local_addr = listener
         .local_addr()
         .map_err(|e| crate::CliError::usage(format!("serve: local address unavailable: {e}")))?;
+    // Token goes in the URL **fragment**, not the query string. A fragment is
+    // never sent to the server, so it cannot land in a request log, an access
+    // log, or a `Referer` header on any later navigation — whereas
+    // `?token=<secret>` reaches every one of those. The page reads it from
+    // `location.hash` and sends it as `Authorization: Bearer`, then strips it
+    // from the visible URL so it does not persist in browser history.
+    // Idea from cc-sessions-viewer's `web-server-mode.md` (no LICENSE file in
+    // that repository — spec-level idea only, no code borrowed).
     eprintln!(
-        "asg serve: open http://{local_addr}/?token={}",
+        "asg serve: open http://{local_addr}/#token={}",
         session.token()
     );
     eprintln!("asg serve: loopback-only; LAN mode is capability_not_supported");

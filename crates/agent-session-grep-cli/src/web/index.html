@@ -126,7 +126,12 @@ pre { max-height: 20rem; overflow: auto; padding: 13px; border: 1px solid var(--
 </main>
 <script>
 const url = new URL(window.location.href);
-const token = url.searchParams.get('token') || '';
+// Read the token from the fragment first: a fragment never reaches the server,
+// so it stays out of request logs and out of any `Referer` header. The query
+// form is still accepted for a hand-typed or bookmarked URL. Either way the
+// token is stripped from the visible URL so it does not persist in history.
+const hashParams = new URLSearchParams(url.hash.replace(/^#/, ''));
+const token = hashParams.get('token') || url.searchParams.get('token') || '';
 if (token) window.history.replaceState(null, '', url.pathname);
 const authHeaders = {'Authorization': 'Bearer ' + token};
 let activeSession = '';
