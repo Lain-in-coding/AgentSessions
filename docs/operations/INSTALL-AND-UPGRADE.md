@@ -129,11 +129,12 @@ asg --version
 ```
 
 An upgraded binary may need to migrate an existing data root on first open.
-Migration is automatic and transactional; the latest v11 → v12 step adds the
-`tool_activities` projection (the v5 → v6 and v6 → v7 steps in
-`migration-v5-to-v6.md` and `migration-v6-to-v7.md` are historical). An
-older binary refuses to open a newer store with `schema_incompatible` (exit
-9) rather than downgrading it.
+Migration is automatic, transactional, and stepwise; the current store schema
+is v17, whose last step records the store-level index-projection version. The
+per-step list is not restated here — `rebuild-and-migration-runbook.md` owns it,
+and the v5 → v6 and v6 → v7 steps in `migration-v5-to-v6.md` and
+`migration-v6-to-v7.md` are historical. An older binary refuses to open a newer
+store with `schema_incompatible` (exit 9) rather than downgrading it.
 
 ## Uninstall
 
