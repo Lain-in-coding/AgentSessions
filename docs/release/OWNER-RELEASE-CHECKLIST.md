@@ -1,16 +1,24 @@
 # Owner Release Checklist — agent-session-grep v0.1.0
 
-> Generated 2026-08-26 by the release-hardening waves (`main` at `4f4d379`).
+> Generated 2026-08-26 by the release-hardening waves; every gate below
+> re-verified 2026-08-29 against `main` at `dcc6ca7`.
 > This document does **not** change any governance state; it compresses the
 > remaining owner-only actions into exact steps. Every engineering gate the
 > repository can verify locally is green:
 >
-> - `cargo fmt --all --check` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo test --workspace` — all green
+> - `cargo fmt --all --check` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo test --workspace` — all green (1556 passed, 0 failed, 16 ignored, 78 suites)
 > - `python scripts/evidence/privacy_scan.py` — 0 findings
 > - `python scripts/verify-release.py --asg target/release/asg.exe` — 10/10
+> - both shipped command names agree: `asg` and `agent-session-grep` return
+>   byte-identical `--version` / `--help` / `doctor` output, because the CLI
+>   lives in `crates/agent-session-grep-cli/src/lib.rs` and both bin targets
+>   are three-line shims calling `run_cli()`
 > - `cargo deny check` — advisories/bans/licenses/sources all ok
->   (`cargo audit` cannot fetch the RustSec database from this network)
-> - `scripts/release/export_public_tree.py` dry-run — all tracked files exported, no `.trellis/` records leak
+>   (`cargo audit` still cannot fetch the RustSec database from this network:
+>   the `advisory-db.git` clone aborts mid-pack)
+> - `scripts/release/export_public_tree.py --destination <empty dir>` — 504
+>   tracked files exported from `dcc6ca7`, no `.trellis/` (or other internal
+>   working-record) path leaks
 >
 > Full history of what landed: `CHANGELOG.md [Unreleased]` and the
 > "Closed 2026-08-25/26" sections of
@@ -71,17 +79,18 @@ when every local column is `ok` (or an exception is recorded), a named
 cross-target CI success exists, ADR-0010 is Accepted, and the owner records
 the decision with evidence paths.
 
-Local status after the 08-26 waves:
+Local status after the 08-29 waves — the binding per-row reasons live in the
+ledger (`docs/product/PROVIDER-BETA-READINESS.md`), not here:
 
 | provider | property | read-only | golden | resume | main remaining local gaps |
 |---|---|---|---|---|---|
 | claude-code | ok | ok | ok | derived | richer tool-call extraction (optional; partial today) |
 | codex | ok | ok | ok | derived | richer tool-call extraction (optional) |
 | grok-build | ok | ok | ok | derived | tool_activity impossible to anchor (no per-message id) — record as exception if promoting |
-| pi | ok | ok | ok | derived | tool_activity: format carries none — exception |
+| pi | ok | ok | ok | derived | format does carry `toolCall`/`toolResult`, but its record ids are 8-hex and file-scoped; `context`/`tool_activity` wait on document-scoped message identity — recorded decision, not pending work |
 | openclaw | ok | ok | ok | unsupported (intentional) | exception already reasoned in the ledger |
-| tencent-codebuddy | ok | ok | ok | derived | extension variant pending |
-| kimi-code | ok | ok | ok | derived | loop events not parsed |
+| tencent-codebuddy | ok | ok | ok | derived | extension surface stays unimplemented for lack of format evidence — recorded decision, not pending work |
+| kimi-code | ok | ok | ok | derived | user prompts (`turn.prompt` / `turn.steer`) now indexed; loop events stay unparsed because they are tool activity with no per-message anchor — recorded decision |
 | opencode | ok | ok | ok | derived | source_span unsupported by construction (SQLite) — exception |
 | antigravity | ok | ok | ok | derived | no in-file session id |
 | qoder | ok | ok | ok | unknown | no resume evidence |
