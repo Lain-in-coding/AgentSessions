@@ -70,14 +70,14 @@ const STRUCTURAL_METADATA_RESERVE_BYTES: usize = 320;
 /// overflowing into a negative SQL LIMIT (SQLite treats -1 as "no limit").
 const MAX_FETCH_WINDOW: u64 = 1 << 20;
 
-/// 重排路径（纯 lexical 与 semantic/hybrid 未就绪时的 lexical_fallback）的
-/// **排序窗口**：与 cursor offset 无关的固定取数上限。重排后的钉住排序是
-/// "同一窗口上的全序"——窗口若随 offset 增长，每一页都在不同的集合上重排，
-/// 拼接结果会重复页尾命中、漏掉真正的高分命中（silent wrong result）。
-/// 所有页取同一窗口、重排一次后按 offset 切片，分页才是同一个全序的不重
-/// 不漏划分；offset 越过窗口后分页以 has_more=false 诚实终止（这是排序
-/// 视界，不是缺陷）。512 ≈ 20 条/页 × 25 页，覆盖典型翻页深度；不受伪造
-/// offset 影响（窗口不随 offset 变化）。
+/// 应用层重排路径（纯 lexical 的 rank signals、semantic/hybrid 未就绪时的
+/// lexical_fallback，以及 hybrid 的 RRF 融合）的 **排序窗口**：与 cursor
+/// offset 无关的固定取数上限。重排后的钉住排序是"同一窗口上的全序"——窗口
+/// 若随 offset 增长，每一页都在不同的集合上重排，拼接结果会重复页尾命中、
+/// 漏掉真正的高分命中（silent wrong result）。所有页取同一窗口、重排一次后
+/// 按 offset 切片，分页才是同一个全序的不重不漏划分；offset 越过窗口后分页
+/// 以 has_more=false 诚实终止（这是排序视界，不是缺陷）。512 ≈ 20 条/页 ×
+/// 25 页，覆盖典型翻页深度；不受伪造 offset 影响（窗口不随 offset 变化）。
 const RANK_SCAN_WINDOW: u64 = 512;
 
 /// group_by_session（R3）模式下相对分页窗口的扫描放大倍数：归并需要把命中先
@@ -1716,18 +1716,24 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore, 
                 // 分页模型：钉住排序（重排后的 final desc + id tiebreak 全序）
                 // 内的 offset 续读。端口无 offset 参数，因此在应用层超取后切片。
                 //
-                // 重排路径的取数窗口**必须与 offset 无关**（见 RANK_SCAN_WINDOW）：
-                // 重排后的钉住排序是"同一窗口上的全序"，窗口随 offset 增长会让
-                // 每页在不同集合上重排，拼接结果重复页尾命中并漏掉真正的高分
-                // 命中。不重排的路径（semantic / hybrid，排序由检索侧给定且是
-                // 稳定前缀）保持 offset+page+1 超取，+1 作 has_more 哨兵。
+                // **应用层重排**路径的取数窗口必须与 offset 无关（见
+                // RANK_SCAN_WINDOW）：重排后的钉住排序是"同一窗口上的全序"，
+                // 窗口随 offset 增长会让每页在不同集合上重排，拼接结果重复页尾
+                // 命中并漏掉真正的高分命中。重排有两种：lexical rank signals
+                // （[`ranking::apply_lexical_signals`]）与 hybrid 的 RRF 融合
+                // （[`hybrid::fuse`]）——后者尤其危险，两路都命中的文档拿到两份
+                // `1/(k+rank)` 加分，可以一举超过任何单路命中，窗口一放大就整体
+                // 顶到榜首。只有 semantic 单路不重排（顺序由检索侧给定且是稳定
+                // 前缀），保持 offset+page+1 超取，+1 作 has_more 哨兵。
                 //
                 // grouped 模式把窗口放大 GROUP_SCAN_FACTOR 倍（仍封顶），让
                 // occurrences 覆盖更有意义的同会话命中样本。
                 let page = limit.min(budget.max_items);
-                let will_rank = mode == RetrievalMode::Lexical
-                    || !(self.semantic.is_ready() && query_embedding.is_some());
-                let fetch = if will_rank {
+                let semantic_ready = self.semantic.is_ready() && query_embedding.is_some();
+                let will_rank = mode == RetrievalMode::Lexical || !semantic_ready;
+                // 融合也是重排：窗口必须与 offset 无关，与 rank 路径同一口径。
+                let reorders_window = will_rank || mode == RetrievalMode::Hybrid;
+                let fetch = if reorders_window {
                     RANK_SCAN_WINDOW
                 } else {
                     offset
@@ -3245,6 +3251,41 @@ mod tests {
         }
     }
 
+    /// 就绪的假语义索引：按给定 id 序返回"余弦相似度降序"的 top-k
+    /// （`take(limit)`，与端口契约同形）。`is_ready` 恒 true，使
+    /// semantic/hybrid 路径真正执行（而非降级 lexical_fallback）。
+    struct FakeSemantic(Vec<StableId>);
+    impl SemanticIndex for FakeSemantic {
+        fn index_embedding(&self, _id: &StableId, _embedding: &[f32]) -> PortResult<()> {
+            Ok(())
+        }
+        fn query_semantic(
+            &self,
+            _query_embedding: &[f32],
+            limit: usize,
+        ) -> PortResult<Vec<SearchHit>> {
+            Ok(self
+                .0
+                .iter()
+                .take(limit)
+                .enumerate()
+                .map(|(rank, id)| SearchHit {
+                    id: id.clone(),
+                    score: 1.0 - (rank as f32) / 100.0,
+                    session_id: None,
+                    text: None,
+                    why_matched: Vec::new(),
+                    suggested_next_commands: Vec::new(),
+                    occurrences: 1,
+                    resume_available: false,
+                })
+                .collect())
+        }
+        fn is_ready(&self) -> bool {
+            true
+        }
+    }
+
     /// 内存 map 目录：BTreeMap 键序即 wire id 升序（与 sqlite list 的钉住排序一致）；
     /// generation 用 Cell 可变，测 cursor 的 generation 绑定。
     struct MapCatalog {
@@ -3980,6 +4021,107 @@ mod tests {
             paged, unpaged,
             "paged concatenation must equal the unpaged pinned order: a window that \
              grows with the cursor offset re-ranks a different set on every page"
+        );
+    }
+
+    /// hybrid 请求：`Hybrid` 模式 + 就绪语义索引 + 查询向量（三者齐备才真正
+    /// 走 RRF 融合，缺一即降级 lexical_fallback）。
+    fn hybrid_req(query: &str, limit: usize, cursor: Option<String>) -> AppRequest {
+        AppRequest::Search {
+            query: query.into(),
+            filters: SearchFilters::default(),
+            facets: SearchFacets::default(),
+            limit,
+            cursor,
+            budget: ResponseBudget::default(),
+            include_system: false,
+            group_by_session: false,
+            mode: RetrievalMode::Hybrid,
+            query_embedding: Some(vec![0.1f32; 8]),
+        }
+    }
+
+    /// 回归：hybrid 的 RRF 融合同样是"应用层重排"，扫描窗口必须与 offset 无关。
+    ///
+    /// 缺陷形态：hybrid 取数窗口曾是 `offset + page + 1`，两路召回各截同一前缀
+    /// 后再融合。RRF 分数 `1/(k+rank)` 在**单路**内随窗口增长是稳定前缀，但
+    /// **两路都命中**的文档拿到两份加分（`1/(k+r_lex) + 1/(k+r_sem)`），可以
+    /// 一举超过任何单路命中——只要它的两个 rank 落在小窗口之外，它就在第 1 页
+    /// 不可见、在第 2 页跃居榜首，把整个融合序整体下移。于是第 2 页原样重复
+    /// 第 1 页的命中，而真正的最高分命中永远不出现。返回码正常，结果静默错误。
+    ///
+    /// fixture：两路各 5 条，前 3 条互不相交、后 2 条两路共有（rank 4/5）。
+    /// page=2 时第 1 页窗口 3 只看到不相交部分，第 2 页窗口 5 才看到共有部分。
+    #[test]
+    fn search_hybrid_pages_do_not_depend_on_the_cursor_offset() {
+        let tags = [
+            "lex1", "lex2", "lex3", "sem1", "sem2", "sem3", "dup1", "dup2",
+        ];
+        let mut cat = MapCatalog::new(7);
+        for tag in tags {
+            cat.insert(
+                &StableId::native(IdKind::Message, tag),
+                serde_json::json!({ "role": "user", "text": "hybrid needle" })
+                    .to_string()
+                    .into_bytes(),
+            );
+        }
+        let native = |tag: &str| StableId::native(IdKind::Message, tag);
+        // 两路召回的后两位是同一对文档（dup1/dup2）——它们各拿两份 RRF 加分。
+        let lexical = FixedHits(vec![
+            native("lex1"),
+            native("lex2"),
+            native("lex3"),
+            native("dup1"),
+            native("dup2"),
+        ]);
+        let semantic = FakeSemantic(vec![
+            native("sem1"),
+            native("sem2"),
+            native("sem3"),
+            native("dup1"),
+            native("dup2"),
+        ]);
+        let app =
+            App::with_resume_semantic_and_clock(cat, lexical, NoResumeClaims, semantic, rank_clock);
+
+        // 一次取全 8 条即融合后的钉住排序真值：两路共有的 dup1/dup2 居首。
+        let (unpaged, _, _, _) =
+            hits_of(app.handle(hybrid_req("hybrid needle", 10, None)).unwrap());
+        assert_eq!(
+            unpaged,
+            vec![
+                "msg_v1_dup1",
+                "msg_v1_dup2",
+                "msg_v1_lex1",
+                "msg_v1_sem1",
+                "msg_v1_lex2",
+                "msg_v1_sem2",
+                "msg_v1_lex3",
+                "msg_v1_sem3",
+            ],
+            "documents hit by both retrievers must outrank single-retriever hits"
+        );
+
+        let mut paged: Vec<String> = Vec::new();
+        let mut token: Option<String> = None;
+        for _ in 0..8 {
+            let (page_ids, next, _, truncation) = hits_of(
+                app.handle(hybrid_req("hybrid needle", 2, token.take()))
+                    .unwrap(),
+            );
+            assert!(!truncation.truncated);
+            paged.extend(page_ids);
+            token = next;
+            if token.is_none() {
+                break;
+            }
+        }
+        assert!(token.is_none(), "paging must terminate");
+        assert_eq!(
+            paged, unpaged,
+            "paged concatenation must equal the unpaged fused order: a fusion window \
+             that grows with the cursor offset re-fuses a different set on every page"
         );
     }
 
