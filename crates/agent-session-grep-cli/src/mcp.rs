@@ -1531,7 +1531,7 @@ mod tests {
     fn open_store(dir: &tempfile::TempDir) -> SqliteStore {
         let path = dir.path().join("mcp-test.db");
         SqliteStore::open_for_write(path.to_str().expect("temp path must be utf-8"))
-        .expect("open store for write")
+            .expect("open store for write")
     }
 
     /// 两条可检索消息（都命中 "hello"），供搜索/分页/status 用例。
