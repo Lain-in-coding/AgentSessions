@@ -43,6 +43,19 @@ const INVALID_PARAMS: i64 = -32602;
 /// 截断处以 "..." 标记——超长输入不得放大错误帧。
 const ECHO_CAP: usize = 128;
 
+/// `providers` 过滤参数接受的取值全集：2 个 canonical id 加 1 个历史别名，与
+/// [`crate::canonical_search_provider`] 同一套取值。schema 的 `enum` 与 `maxItems`
+/// 以及运行时长度校验都从这里取——schema 里写了 `maxItems` 而运行时不查，等于
+/// 对调用方谎报约束（原先声明 2、运行时不查，5 个条目照常成功；而 2 本身也过紧：
+/// 三个合法拼写全给出就是 3 个条目）。
+const PROVIDER_FILTER_VALUES: [&str; 3] = ["claude", "claude-code", "codex"];
+
+/// `tool_name` 过滤值的字符上界（schema `maxLength`）：provider 工具名
+/// （`Bash` / `Read` / `shell` / `mcp__server__tool`）远短于此，更长只可能是
+/// 错误输入；该值会原样回显进 `data.facets.tool_name`，无界就等于让调用方
+/// 自行放大响应。
+const TOOL_NAME_MAX_CHARS: usize = 128;
+
 /// 在已打开的只读 store 上服务 MCP，直到 stdin EOF（→ 干净停机）。
 ///
 /// 空行跳过；stdin 读错误归 `source_io`。stdout 写失败/EPIPE 的退出语义由
@@ -54,8 +67,16 @@ pub(crate) fn serve(store: &SqliteStore, offline: bool) -> Result<Outcome, CliEr
         initialized: false,
         initialize_seen: false,
     };
-    for line in std::io::stdin().lines() {
-        let line = line.map_err(|error| {
+    let stdin = std::io::stdin();
+    let mut reader = stdin.lock();
+    let mut raw = Vec::new();
+    loop {
+        raw.clear();
+        // 按字节读行，不用 `BufRead::lines()`：后者在非 UTF-8 输入上返回 Err，
+        // 会把"某一行有坏字节"升级成整个连接的 IO 故障——待答请求与其后所有
+        // 请求全部无声丢弃，客户端只能等到超时。坏字节是坏 frame，不是 IO
+        // 故障：按 JSON-RPC 回 -32700 并继续服务。
+        let read = reader.read_until(b'\n', &mut raw).map_err(|error| {
             ProtocolError::new(
                 CanonicalCode::SourceIo,
                 format!("cannot read stdin: {error}"),
@@ -86,7 +107,7 @@ pub(crate) fn serve(store: &SqliteStore, offline: bool) -> Result<Outcome, CliEr
         if line.trim().is_empty() {
             continue;
         }
-        if let Some(frame) = server.handle_line(&line) {
+        if let Some(frame) = server.handle_line(line) {
             protocol::write_stdout_line(&frame);
         }
     }
@@ -901,8 +922,8 @@ fn tool_catalog() -> Value {
                     },
                     "providers": {
                         "type": "array",
-                        "maxItems": 2,
-                        "items": { "type": "string", "enum": ["claude", "claude-code", "codex"] },
+                        "maxItems": PROVIDER_FILTER_VALUES.len(),
+                        "items": { "type": "string", "enum": PROVIDER_FILTER_VALUES },
                         "description": "Restrict hits to these providers (OR). Omitted matches all providers."
                     },
                     "since": {
@@ -952,6 +973,7 @@ fn tool_catalog() -> Value {
                     },
                     "tool_name": {
                         "type": "string",
+                        "maxLength": TOOL_NAME_MAX_CHARS,
                         "description": "Keep only messages carrying a tool activity with \
                             this exact tool name (e.g. Bash, Read, shell)."
                     },
@@ -1361,6 +1383,14 @@ fn opt_filters(args: &Map<String, Value>) -> Result<SearchFilters, ToolError> {
         let Value::Array(entries) = value else {
             return Err(ToolError::Params("providers must be an array".into()));
         };
+        // schema `maxItems` 的代码侧强制（与 additionalProperties 同理）。
+        if entries.len() > PROVIDER_FILTER_VALUES.len() {
+            return Err(ToolError::Params(format!(
+                "providers must contain at most {} entries, got {}",
+                PROVIDER_FILTER_VALUES.len(),
+                entries.len()
+            )));
+        }
         for entry in entries {
             let Some(provider) = entry.as_str() else {
                 return Err(ToolError::Params(
@@ -1501,7 +1531,7 @@ mod tests {
     fn open_store(dir: &tempfile::TempDir) -> SqliteStore {
         let path = dir.path().join("mcp-test.db");
         SqliteStore::open_for_write(path.to_str().expect("temp path must be utf-8"))
-            .expect("open store for write")
+        .expect("open store for write")
     }
 
     /// 两条可检索消息（都命中 "hello"），供搜索/分页/status 用例。
@@ -2202,6 +2232,91 @@ mod tests {
     }
 
     #[test]
+    fn declared_schema_bounds_are_enforced_at_runtime() {
+        // schema 里声明的每个约束都必须在运行时成立，否则就是对调用方谎报：
+        // `providers` 的 maxItems 曾只是装饰（5 个条目照常成功，而声明的 2 本身
+        // 也比合法取值数还紧），`tool_name` 则连 maxLength 都没声明、运行时也
+        // 不设界（100 KB 值被接受并原样回显进 data.facets）。声明与校验现在共用
+        // 同一常量，无法再分叉。
+        let catalog = tool_catalog();
+        let tools = catalog.as_array().expect("tools");
+        for name in ["search_sessions", "generate_handoff"] {
+            let tool = tools
+                .iter()
+                .find(|tool| tool["name"] == name)
+                .unwrap_or_else(|| panic!("missing tool {name}"));
+            let providers = &tool["inputSchema"]["properties"]["providers"];
+            assert_eq!(
+                providers["maxItems"],
+                json!(PROVIDER_FILTER_VALUES.len()),
+                "{name}"
+            );
+            assert_eq!(
+                providers["items"]["enum"],
+                json!(PROVIDER_FILTER_VALUES),
+                "{name}"
+            );
+        }
+        let search = tools
+            .iter()
+            .find(|tool| tool["name"] == "search_sessions")
+            .expect("search_sessions");
+        assert_eq!(
+            search["inputSchema"]["properties"]["tool_name"]["maxLength"],
+            json!(TOOL_NAME_MAX_CHARS)
+        );
+        // 声明的每个 enum 取值都必须真被运行时接受（反向也不能谎报）。
+        for value in PROVIDER_FILTER_VALUES {
+            assert!(
+                canonical_search_provider(value).is_some(),
+                "schema 声明了运行时不接受的 provider: {value}"
+            );
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = seeded_store(&dir);
+        let mut server = ready(&store);
+        let over_providers: Vec<Value> =
+            std::iter::repeat_n(json!("claude"), PROVIDER_FILTER_VALUES.len() + 1).collect();
+        for (tool, arguments) in [
+            (
+                "search_sessions",
+                json!({ "query": "hello", "providers": over_providers }),
+            ),
+            (
+                "generate_handoff",
+                json!({ "query": "hello", "providers": over_providers }),
+            ),
+            (
+                "search_sessions",
+                json!({
+                    "query": "hello",
+                    "tool_name": "b".repeat(TOOL_NAME_MAX_CHARS + 1)
+                }),
+            ),
+        ] {
+            let v = call(&mut server, tool, arguments.clone());
+            assert_eq!(v["error"]["code"], -32602, "{tool} {arguments}");
+            assert_eq!(
+                v["error"]["data"]["canonical_code"], "invalid_request",
+                "{tool} {arguments}"
+            );
+            assert!(v["result"].is_null(), "{tool} {arguments}");
+        }
+        // 恰好在界上的取值照常放行：三个合法拼写全给出 + 上限长度的 tool_name。
+        let v = call(
+            &mut server,
+            "search_sessions",
+            json!({
+                "query": "hello",
+                "providers": PROVIDER_FILTER_VALUES,
+                "tool_name": "b".repeat(TOOL_NAME_MAX_CHARS)
+            }),
+        );
+        assert_eq!(v["result"]["isError"], false, "{v}");
+    }
+
+    #[test]
     fn search_filter_schema_and_runtime_validation_stay_aligned() {
         let catalog = tool_catalog();
         let search = catalog
@@ -2832,7 +2947,14 @@ mod tests {
             properties["repo"]["maxLength"],
             json!(crate::repo_identity::REPO_SLUG_MAX_CHARS)
         );
-        assert_eq!(properties["providers"]["maxItems"], 2);
+        assert_eq!(
+            properties["providers"]["maxItems"],
+            json!(PROVIDER_FILTER_VALUES.len())
+        );
+        assert_eq!(
+            properties["tool_name"]["maxLength"],
+            json!(TOOL_NAME_MAX_CHARS)
+        );
         let context = tool("get_session_context");
         assert_eq!(
             context["inputSchema"]["properties"]["session_id"]["maxLength"],

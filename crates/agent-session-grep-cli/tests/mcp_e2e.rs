@@ -111,6 +111,38 @@ fn mcp_session(db: &Path, inputs: &[Value]) -> Vec<Value> {
     mcp_session_raw(db, &refs)
 }
 
+/// 原始字节版会话：整段 stdin 由调用方给出（含非 UTF-8 字节），退出码原样返回。
+///
+/// 与 [`mcp_session_raw_stderr`] 不同，本 helper 不断言 exit 0——退出语义本身
+/// 就是被测对象。stdout 纯净性仍然强制：每一行必须是完整 JSON frame。
+fn mcp_session_bytes(db: &Path, payload: &[u8]) -> (Vec<Value>, String, Option<i32>) {
+    let mut child = Command::new(BIN)
+        .arg("--db")
+        .arg(db)
+        .arg("mcp")
+        .env("ASG_CLOCK_MS", E2E_CLOCK_MS)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn agent-session-grep mcp");
+    {
+        let mut stdin = child.stdin.take().expect("child stdin must be piped");
+        stdin.write_all(payload).expect("write stdin bytes");
+    }
+    let out = child.wait_with_output().expect("wait for mcp server");
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    let frames = stdout(&out)
+        .lines()
+        .map(|line| {
+            serde_json::from_str(line).unwrap_or_else(|error| {
+                panic!("stdout not pure JSON-RPC: {error}\nline: {line}\nstderr: {stderr}")
+            })
+        })
+        .collect();
+    (frames, stderr, out.status.code())
+}
+
 /// 按 JSON-RPC id 取响应帧：通知没有响应，按位置对齐不可靠。
 fn frame_by_id(frames: &[Value], id: i64) -> &Value {
     frames
@@ -1338,7 +1370,15 @@ fn tool_schemas_publish_string_and_array_bounds() {
     assert_eq!(properties["cursor"]["maxLength"], 512, "{search}");
     assert_eq!(properties["since"]["maxLength"], 64, "{search}");
     assert_eq!(properties["until"]["maxLength"], 64, "{search}");
-    assert_eq!(properties["providers"]["maxItems"], 2, "{search}");
+    // providers 的 maxItems 等于被声明的合法取值数（2 个 canonical id + 1 个
+    // 历史别名），运行时同步强制；tool_name 不再是无界字符串。
+    assert_eq!(properties["providers"]["maxItems"], 3, "{search}");
+    assert_eq!(
+        properties["providers"]["items"]["enum"],
+        json!(["claude", "claude-code", "codex"]),
+        "{search}"
+    );
+    assert_eq!(properties["tool_name"]["maxLength"], 128, "{search}");
     let context = tools
         .iter()
         .find(|tool| tool["name"] == "get_session_context")

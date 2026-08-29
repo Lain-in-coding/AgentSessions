@@ -370,6 +370,34 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **One non-UTF-8 byte on the MCP server's stdin killed the whole session.**
+  `serve` read frames with `BufRead::lines()`, which yields `Err` for a line
+  that is not valid UTF-8; the `?` turned that into a `source_io` failure and
+  the process exited 5. The request on the bad line and *every request after
+  it* went unanswered — the client sees a hang, not an error. Verified against
+  the release binary: `{"jsonrpc":"2.0","id":2,"method":"ping","x":"<0xFF
+  0xFE>"}` followed by a valid `ping` for id 3 produced zero response frames
+  and exit 5. A byte that is not UTF-8 is a malformed frame, not an I/O
+  failure: the reader now takes bytes with `read_until(b'\n')`, answers the
+  offending line with JSON-RPC `-32700`, and keeps serving. Genuine stdin I/O
+  errors still surface as `source_io`.
+
+- **Declared MCP input-schema bounds were not enforced at runtime.**
+  `search_sessions`/`generate_handoff` published `providers.maxItems: 2` and
+  nothing checked it: `providers: ["claude","codex","claude-code","claude",
+  "codex"]` was accepted. The declared `2` was also tighter than the three
+  spellings the same schema's `enum` accepts, so a client that named every
+  legal value was violating a bound the server never applied. `tool_name` went
+  the other way — the only string parameter with no `maxLength` at all and no
+  runtime cap, so a 100 KB value was accepted and echoed back verbatim in
+  `data.facets.tool_name`. Both directions are a schema that lies to an AI
+  client that cannot see the code. The accepted provider values now live in one
+  `PROVIDER_FILTER_VALUES` constant that feeds the schema `enum`, the schema
+  `maxItems`, and the runtime length check; `tool_name` declares and enforces a
+  128-character bound. A regression test asserts each declared bound rejects
+  `bound + 1` at runtime and that every declared `enum` value is really
+  accepted.
+
 - **The MCP `doctor` tool answered with strictly less than the CLI `doctor`.**
   Both sides hand-wrote their own `json!`, and the MCP copy was missing six
   fields: `offline`, `semantic_feature`, `tool_activity_storage`,
