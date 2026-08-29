@@ -131,8 +131,8 @@ ALLOWLIST: frozenset[tuple[str, str, str]] = frozenset(
         # with a single-character placeholder account (`x`), and the MCP
         # error-frame mask test asserts a synthetic transcript path is masked
         # — all provably synthetic, never a real identity.
-        ("crates/agent-session-grep-cli/src/main.rs", "user-home", SLASH_WIN_HOME + "x"),
-        ("crates/agent-session-grep-cli/src/main.rs", "user-home", WIN_HOME + "x"),
+        ("crates/agent-session-grep-cli/src/lib.rs", "user-home", SLASH_WIN_HOME + "x"),
+        ("crates/agent-session-grep-cli/src/lib.rs", "user-home", WIN_HOME + "x"),
         ("crates/agent-session-grep-cli/src/mcp.rs", "user-home", SLASH_WIN_HOME + "secret"),
         # serve's POST-echo regression asserts a synthetic Windows user-home
         # transcript path is never reflected back in the 501 body.
