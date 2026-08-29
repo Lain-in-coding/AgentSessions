@@ -1781,6 +1781,14 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore, 
                 };
                 let response_warning = fallback_warning.clone();
 
+                // 检索侧返回满窗 ⇒ 窗口之外可能还有命中。必须在 R2 噪声过滤
+                // **之前**记录：窗口随 offset 增长的路径（semantic）以末尾 `+1`
+                // 作 has_more 哨兵，而过滤发生在取数之后，窗口内一条
+                // system/developer 命中就会把哨兵吃掉，让后续命中变成不可达
+                // （has_more=false 却确有下一页）。固定窗口的重排路径不适用：
+                // 那里的窗口就是排序视界，越界以 has_more=false 诚实终止。
+                let window_truncated_by_fetch = !reorders_window && scanned.len() as u64 >= scan;
+
                 // Rank signals（competitor-borrowings #1）：纯 lexical 命中（含
                 // semantic/hybrid 未就绪时的 lexical_fallback）在分页钉住排序前
                 // 重算最终分并重排；semantic 命中与 hybrid RRF 融合排序不动
@@ -1916,9 +1924,12 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore, 
                     // （`总数 > consumed`）：字节 clamp 削短本页时被削掉的组仍在
                     // 后续页可达。若按"是否存在第 page+1 组"判定，组总数不超过页
                     // 大小时会报 has_more=false，被削掉的组从此不可达（静默漏结果）。
+                    // `window_truncated_by_fetch` 补上归并对计数的压缩：整窗命中
+                    // 挤在少数会话里时组数会低于消耗量，但更大的窗口仍有新组。
                     // `!hits.is_empty()` 守卫首组即超预算的情形：cursor 会停在原
                     // offset，此时必须终止分页而非死循环。
-                    let has_more = grouped_len > consumed && !hits.is_empty();
+                    let has_more =
+                        (grouped_len > consumed || window_truncated_by_fetch) && !hits.is_empty();
                     let next_cursor = self.issue_cursor(
                         has_more,
                         generation,
@@ -1976,7 +1987,10 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore, 
                 let consumed = offset + hits.len() as u64;
                 // A truncated page with zero kept hits cannot advance the
                 // cursor offset; terminate paging instead of looping forever.
-                let has_more = scanned_len > consumed && !hits.is_empty();
+                // `window_truncated_by_fetch` covers the offset-dependent
+                // window whose `+1` sentinel the noise filter can consume.
+                let has_more =
+                    (scanned_len > consumed || window_truncated_by_fetch) && !hits.is_empty();
                 let next_cursor = self.issue_cursor(
                     has_more,
                     generation,
@@ -3603,6 +3617,94 @@ mod tests {
         };
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, hit_id("hit00"));
+    }
+
+    /// semantic 请求：`Semantic` 模式 + 就绪语义索引 + 查询向量。
+    fn semantic_req(query: &str, limit: usize, cursor: Option<String>) -> AppRequest {
+        AppRequest::Search {
+            query: query.into(),
+            filters: SearchFilters::default(),
+            facets: SearchFacets::default(),
+            limit,
+            cursor,
+            budget: ResponseBudget::default(),
+            include_system: false,
+            group_by_session: false,
+            mode: RetrievalMode::Semantic,
+            query_embedding: Some(vec![0.1f32; 8]),
+        }
+    }
+
+    /// 回归：系统噪声过滤不得吃掉 `has_more` 哨兵。
+    ///
+    /// 缺陷形态：不重排的路径（semantic）按 `offset + page + 1` 超取，末尾那个
+    /// `+1` 是"还有下一页"的唯一哨兵。R2 噪声过滤在**取数之后**执行，只要窗口
+    /// 内出现一条 role=system/developer 的命中，过滤后的窗口长度就恰好等于
+    /// 本页消耗量，`has_more` 判为 false、不发 cursor——窗口之外的命中从此
+    /// 不可达。返回码正常、`truncated` 为 false，调用方以为这就是全部结果。
+    ///
+    /// fixture：4 条语义命中，第 1 条是 system 噪声；page=2 时首页窗口恰好 3 条
+    /// （2 条可见 + 被吃掉的哨兵），第 4 条命中只有继续分页才能拿到。
+    #[test]
+    fn search_semantic_noise_filter_does_not_eat_the_has_more_sentinel() {
+        let mut cat = MapCatalog::new(7);
+        let noise = StableId::native(IdKind::Message, "sem-noise");
+        cat.insert(
+            &noise,
+            serde_json::json!({ "role": "system", "text": "semantic needle" })
+                .to_string()
+                .into_bytes(),
+        );
+        let visible: Vec<StableId> = ["sem-m1", "sem-m2", "sem-m3"]
+            .iter()
+            .map(|tag| StableId::native(IdKind::Message, tag))
+            .collect();
+        for id in &visible {
+            cat.insert(
+                id,
+                serde_json::json!({ "role": "user", "text": "semantic needle" })
+                    .to_string()
+                    .into_bytes(),
+            );
+        }
+        let mut ranked = vec![noise];
+        ranked.extend(visible.iter().cloned());
+        let app = App::with_resume_semantic_and_clock(
+            cat,
+            FixedHits(Vec::new()),
+            NoResumeClaims,
+            FakeSemantic(ranked),
+            clock_t0,
+        );
+
+        let (unpaged, _, _, _) = hits_of(
+            app.handle(semantic_req("semantic needle", 10, None))
+                .unwrap(),
+        );
+        let expected: Vec<String> = visible
+            .iter()
+            .map(|id| id.as_str().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(unpaged, expected, "system noise stays excluded, order kept");
+
+        let mut paged: Vec<String> = Vec::new();
+        let mut token: Option<String> = None;
+        for _ in 0..4 {
+            let (ids, next, _, _) = hits_of(
+                app.handle(semantic_req("semantic needle", 2, token.take()))
+                    .unwrap(),
+            );
+            paged.extend(ids);
+            token = next;
+            if token.is_none() {
+                break;
+            }
+        }
+        assert!(token.is_none(), "paging must terminate");
+        assert_eq!(
+            paged, expected,
+            "a filtered-out hit inside the fetch window must not end paging early"
+        );
     }
 
     #[test]
