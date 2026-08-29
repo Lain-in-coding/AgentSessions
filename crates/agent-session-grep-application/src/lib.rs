@@ -103,48 +103,20 @@ fn json_string_len(value: &str) -> usize {
         .sum::<usize>()
 }
 
-/// 估算 `payload` 经 `String::from_utf8_lossy` 转为字符串、再做 JSON 字符串
-/// 转义后的序列化长度（含两端引号）。
+/// `payload` 经 `String::from_utf8_lossy` 转为字符串、再做 JSON 字符串转义后的
+/// 序列化长度（含两端引号）。
 ///
 /// 字节闸的估算必须按**序列化后**长度计，而不是原始字节数：`Vec<u8>` 渲染为
-/// 字符串时，控制字节会膨胀为 `\uXXXX`（6 字符），无效 UTF-8 序列替换为一个
-/// U+FFFD（3 字节），与 CLI 的 lossy 渲染一致。
+/// 字符串时，控制字节会膨胀为 `\uXXXX`（6 字符），无效 UTF-8 的每个"最大子部分"
+/// 替换为一个 U+FFFD（3 字节）。
+///
+/// 实现直接复用渲染侧的同一个 `from_utf8_lossy`，而不是再实现一遍 UTF-8 校验：
+/// 手写规则必然与 `core` 的替换语义分叉——overlong 编码、UTF-16 代理区、超出
+/// U+10FFFF 的首字节都"看起来像"合法多字节序列，按长度计费即低估到真实值的
+/// 三分之一，字节闸会放行超预算的页并报 `truncated: false`。合法 UTF-8 时
+/// `from_utf8_lossy` 借用原缓冲、不分配。
 fn lossy_payload_json_len(payload: &[u8]) -> usize {
-    fn utf8_width(byte: u8) -> usize {
-        match byte {
-            0x00..=0x7F => 1,
-            0xC0..=0xDF => 2,
-            0xE0..=0xEF => 3,
-            0xF0..=0xF7 => 4,
-            _ => 0, // 续字节或越界头字节：无效
-        }
-    }
-    let mut len = 2usize; // 两端引号
-    let mut i = 0;
-    while i < payload.len() {
-        let width = utf8_width(payload[i]);
-        if width == 0
-            || i + width > payload.len()
-            || (1..width).any(|k| payload[i + k] & 0xC0 != 0x80)
-        {
-            // 无效/截断序列 → 一个 U+FFFD（3 字节，无需转义）。
-            len += 3;
-            i += 1;
-        } else {
-            // 多字节序列的续字节不会是引号/控制字符，只有单字节需要转义计。
-            len += if width == 1 {
-                match payload[i] {
-                    b'"' | b'\\' => 2,
-                    0x00..=0x1F | 0x7F => 6,
-                    _ => 1,
-                }
-            } else {
-                width
-            };
-            i += width;
-        }
-    }
-    len
+    json_string_len(&String::from_utf8_lossy(payload))
 }
 
 /// Application 边界错误：保留 Domain、Port、Provider、Cursor 与 Budget 的原始分类，
@@ -4681,6 +4653,105 @@ mod tests {
         assert_eq!(all, sorted);
         all.dedup();
         assert_eq!(all.len(), 3);
+    }
+
+    /// 回归：payload 字节估算必须与 CLI 的 `String::from_utf8_lossy` 渲染逐字节
+    /// 一致。
+    ///
+    /// 缺陷形态：估算器手写了一遍 UTF-8 规则，只按首字节区间取长度、再检查续
+    /// 字节的高两位。它因此把**永不合法**的序列当成合法多字节字符：overlong
+    /// 编码（`C0 80`）、UTF-16 代理区（`ED A0 80`）、超出 U+10FFFF 的首字节
+    /// （`F5..FF`、`F4 90..`）。这些序列 lossy 渲染时逐字节各产出一个 U+FFFD
+    /// （3 字节），估算却只记 2–4 字节——最坏低估到真实值的三分之一，字节闸
+    /// 因此放行超预算的页并报 `truncated: false`。
+    ///
+    /// 断言写成与渲染函数的恒等式：估算只能由同一个 lossy 转换派生，不能靠
+    /// 再实现一遍 UTF-8 校验来"平行推导"。
+    #[test]
+    fn lossy_payload_estimate_matches_the_rendered_length() {
+        let cases: Vec<Vec<u8>> = vec![
+            // 合法输入：ASCII、转义字符、控制字节、多字节、非 BMP。
+            b"plain ascii".to_vec(),
+            br#"{"quoted":"va\\lue"}"#.to_vec(),
+            vec![0x00, 0x01, 0x1F, 0x7F],
+            "配置备份 café 🦀".as_bytes().to_vec(),
+            Vec::new(),
+            // 截断/孤立续字节（估算器原本已正确处理的形态）。
+            vec![0xE7, 0x95], // 截断的 3 字节序列
+            vec![0x80, 0xBF], // 孤立续字节
+            vec![0xFF, 0xFE],
+            // 永不合法的首字节/序列（缺陷所在）。
+            vec![0xC0, 0x80],             // overlong NUL
+            vec![0xC1, 0xBF],             // overlong
+            vec![0xE0, 0x80, 0x80],       // overlong 3 字节
+            vec![0xF0, 0x80, 0x80, 0x80], // overlong 4 字节
+            vec![0xED, 0xA0, 0x80],       // UTF-16 代理 D800
+            vec![0xED, 0xBF, 0xBF],       // UTF-16 代理 DFFF
+            vec![0xF4, 0x90, 0x80, 0x80], // U+110000，超出上界
+            vec![0xF5, 0x80, 0x80, 0x80], // 首字节超出上界
+            vec![0xF7, 0xBF, 0xBF, 0xBF],
+            // 混合：合法文本夹着非法序列。
+            b"ok\xC0\x80ok\xED\xA0\x80ok".to_vec(),
+        ];
+        for payload in cases {
+            let rendered = json_string_len(&String::from_utf8_lossy(&payload));
+            assert_eq!(
+                lossy_payload_json_len(&payload),
+                rendered,
+                "estimate must equal the rendered length for {payload:02x?}"
+            );
+        }
+    }
+
+    #[test]
+    fn list_byte_gate_holds_for_never_valid_utf8_payloads() {
+        // 端到端：`C0 80` 对每字节渲染为一个 U+FFFD（每对 6 字节而非 2 字节）。
+        // 低估时三条全部放行且 `truncated: false`，实际渲染 3789 字节远超净预算
+        // 3072——响应超出 `max_response_bytes` 却声称未截断（CONTRACT §3 违约）。
+        let mut cat = MapCatalog::new(7);
+        let payload: Vec<u8> = [0xC0u8, 0x80].repeat(200);
+        for tag in ["ua", "ub", "uc"] {
+            let id = StableId::derive(IdKind::Message, Stability::Reconstructed, &[tag.as_bytes()]);
+            cat.insert(&id, payload.clone());
+        }
+        let app = App::with_clock(&cat, FakeIndex, clock_t0);
+        let AppResponse::List {
+            entries,
+            truncation,
+            ..
+        } = app
+            .handle(AppRequest::List {
+                limit: 10,
+                cursor: None,
+                budget: ResponseBudget {
+                    max_response_bytes: budget::MIN_RESPONSE_BYTES,
+                    ..Default::default()
+                },
+                sessions_only: false,
+            })
+            .unwrap()
+        else {
+            panic!("expected List response");
+        };
+        let net_bytes = budget::MIN_RESPONSE_BYTES - ENVELOPE_RESERVE_BYTES;
+        // 真实渲染字节（CLI 的 `{"id":...,"payload":<lossy>}` 形态）。
+        let rendered: usize = entries
+            .iter()
+            .map(|entry| {
+                json_string_len(entry.id.as_str())
+                    + json_string_len(&String::from_utf8_lossy(&entry.payload))
+                    + 18
+            })
+            .sum();
+        assert!(
+            rendered <= net_bytes,
+            "kept page renders to {rendered} bytes, over the {net_bytes} net budget"
+        );
+        assert!(!entries.is_empty(), "a page that fits must not be empty");
+        assert!(
+            truncation.truncated && entries.len() < 3,
+            "the over-budget tail must be reported as truncated: {truncation:?}"
+        );
     }
 
     #[test]
