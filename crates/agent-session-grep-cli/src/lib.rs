@@ -1024,6 +1024,7 @@ GLOBAL（全局 flag 放在命令名之前；子命令 flag 如 --max-items 放�
     --db <path>            SQLite 数据存储路径（doctor/help/version/config paths 除外必需）
     --output human|json|jsonl  输出模式（默认 human：人类可读文本；json/jsonl 为协议 envelope）
     --robot                等价 --output json，无颜色/进度（stdout 只输出协议）
+    --no-color             接受但无效果：human 输出本就不着色（供 NO_COLOR 习惯的调用方）
     --request-id <id>      robot 调用方关联 id，原样回显于每个 frame（A-Za-z0-9._:- 计 1-128 字符）
     --offline              拒绝任何需要联网的显式操作（fail-closed；当前所有命令本地执行，本 flag 是稳定显式模式，doctor/hook 会如实上报）
     -h, --help             打印本帮助
