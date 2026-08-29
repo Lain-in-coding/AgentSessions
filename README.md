@@ -21,7 +21,8 @@ schema. `agent-session-grep` solves this by:
 
 1. **Discovering** transcripts across multiple provider directories
 2. **Normalizing** them into a canonical model (Message, Session, Placement)
-3. **Indexing** for fast full-text search (FTS5 with CJK bigram support)
+3. **Indexing** for fast full-text search (FTS5; CJK text is tokenized as
+   single characters plus adjacent-pair bigrams)
 4. **Serving** search/resume/handoff through a unified contract
 
 ## Quickstart
@@ -69,7 +70,8 @@ asg --db <db-path> resume <session-id>
 asg --db <db-path> handoff "how did we configure the database?"
 ```
 
-Retrieval is lexical by default (FTS5 with CJK bigram support); the default
+Retrieval is lexical by default (FTS5; CJK text is tokenized as single
+characters plus adjacent-pair bigrams); the default
 vector mode is an honest bigram-hash fuzzy-lexical matcher, not a semantic
 model. An optional local semantic backend (Candle + multilingual-e5-small)
 exists behind the `semantic-candle` cargo feature — off by default and
@@ -92,7 +94,7 @@ Currently implemented (14/16 planned; 2 deferred — no transcript evidence):
 | Pi | Experimental | session JSONL (`type:session/message`) |
 | Hermes | Experimental | `session_<id>.json` (session_id/messages) |
 | Cursor | Experimental | `state.vscdb` SQLite KV (`chatdata`/`prompts`) |
-| Kimi Code | Experimental | wire.jsonl (`context.append_message`) |
+| Kimi Code | Experimental | wire.jsonl (`context.append_message` plus `turn.prompt`/`turn.steer`) |
 | OpenClaw | Experimental | v3 JSONL header + message records |
 | Qoder | Experimental | JSONL (`session_meta` + `type:user/assistant`) |
 | Tencent CodeBuddy | Experimental | OpenAI-style JSONL (`role`/`content`/`sessionId`) |
@@ -119,7 +121,14 @@ domain ← ports ← application ← adapters
 
 - **Stable Identity**: BLAKE3-based content-addressed IDs that survive file
   moves, renames, and incremental appends
-- **Evidence-first**: every search hit carries a source span for verification
+- **Evidence-first**: a search hit carries the source span it was read from
+  wherever the provider's format has one, so the match can be verified against
+  the original bytes. Four of the fourteen adapters cannot supply one — two
+  read a SQLite source, where a record's text lives in B-tree cell payloads
+  that spill across overflow pages and move on any page split, and two read a
+  whole-document JSON file. Those hits report no span rather than a synthesised
+  offset that would point at the wrong bytes. The per-provider column is in the
+  [Provider Beta Readiness Ledger](docs/product/PROVIDER-BETA-READINESS.md).
 - **Recency-aware lexical ranking**: lexical search hits are scored as
   `bm25 × recency decay − sidechain penalty` (30-day half-life, 0.3 decay
   floor, fixed sidechain penalty), so newer and mainline messages surface
