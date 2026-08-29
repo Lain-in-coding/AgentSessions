@@ -1341,7 +1341,13 @@ mod tests {
             WEB_UI_HTML.contains("[hidden] { display: none !important; }"),
             "author-level [hidden] override is required: `.gate`/`.shell` set display"
         );
-        for id in ["gate", "shell", "contextPanel", "detailEmpty", "previewOutput"] {
+        for id in [
+            "gate",
+            "shell",
+            "contextPanel",
+            "detailEmpty",
+            "previewOutput",
+        ] {
             assert!(
                 WEB_UI_HTML.contains(&format!("id=\"{id}\"")),
                 "missing element #{id} that the hidden-attribute contract covers"
