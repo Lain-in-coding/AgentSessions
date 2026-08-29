@@ -662,9 +662,15 @@ pub fn route_request(
             "direct loopback connection required",
         );
     }
+    // The UI page itself is static HTML with no secrets and no data; it may be
+    // fetched without a token so the fragment-based flow can boot at all — a
+    // fragment is never sent to the server, so the page-load request carries
+    // no credential by design (the query-string form keeps its historical
+    // bootstrap path too). Every data route below still requires the bearer.
+    let is_ui_page = req.method == "GET" && path_only(req.path.as_str()) == "/";
     let bootstrap_token =
         path_only(req.path.as_str()) == "/" && req.query_param("token").as_deref() == Some(token);
-    if !req.check_token(token) && !bootstrap_token {
+    if !is_ui_page && !req.check_token(token) && !bootstrap_token {
         return fixed_error(401, "unauthorized", "valid bearer token required");
     }
 
@@ -1079,6 +1085,16 @@ mod tests {
             route_request(&api_query_token, TEST_TOKEN, "test.db", false, &store).status,
             401
         );
+
+        // The fragment-based flow loads the page with NO credential at all —
+        // a fragment is never sent to the server, so `GET /` arrives bare.
+        // The static page must still load (the UI reads the token from
+        // `location.hash` and puts it in the Authorization header itself);
+        // data routes must not.
+        let bare_page = request("GET", "/", vec![("Host".into(), "127.0.0.1:8080".into())]);
+        let response = route_request(&bare_page, TEST_TOKEN, "test.db", false, &store);
+        assert_eq!(response.status, 200);
+        assert!(response.body.contains("local session observatory"));
     }
 
     #[test]
