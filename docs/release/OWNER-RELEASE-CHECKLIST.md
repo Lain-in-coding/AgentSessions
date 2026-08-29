@@ -1,12 +1,12 @@
 # Owner Release Checklist — agent-session-grep v0.1.0
 
 > Generated 2026-08-26 by the release-hardening waves; every gate below
-> re-verified 2026-08-29 against `main` at `dcc6ca7`.
+> re-verified 2026-08-29 against `main` at `077e529`.
 > This document does **not** change any governance state; it compresses the
 > remaining owner-only actions into exact steps. Every engineering gate the
 > repository can verify locally is green:
 >
-> - `cargo fmt --all --check` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo test --workspace` — all green (1556 passed, 0 failed, 16 ignored, 78 suites)
+> - `cargo fmt --all --check` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo test --workspace` — all green (1557 passed, 0 failed, 16 ignored, 78 suites)
 > - `python scripts/evidence/privacy_scan.py` — 0 findings
 > - `python scripts/verify-release.py --asg target/release/asg.exe` — 10/10
 > - both shipped command names agree: `asg` and `agent-session-grep` return
@@ -17,7 +17,7 @@
 >   (`cargo audit` still cannot fetch the RustSec database from this network:
 >   the `advisory-db.git` clone aborts mid-pack)
 > - `scripts/release/export_public_tree.py --destination <empty dir>` — 504
->   tracked files exported from `dcc6ca7`, no `.trellis/` (or other internal
+>   tracked files exported from `077e529`, no `.trellis/` (or other internal
 >   working-record) path leaks
 >
 > Full history of what landed: `CHANGELOG.md [Unreleased]` and the
