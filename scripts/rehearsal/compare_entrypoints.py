@@ -54,6 +54,19 @@ CANONICAL_OPERATIONS: Dict[str, Sequence[str]] = {
     "search": ("data.hits[*].id", "page.has_more", "outcome"),
 }
 
+#: Fields that must carry a non-empty value for the comparison to mean
+#: anything. Equality alone is not evidence: every entry point returns the same
+#: empty hit list when retrieval finds nothing and the same ``__absent__``
+#: sentinel when a field disappears from all five projections, so a broken
+#: fixture, ingest, or query path would otherwise be reported as "consistent" —
+#: the exact regression this harness exists to catch. Only fields whose emptiness
+#: is indistinguishable from breakage belong here; ``page.has_more`` is
+#: legitimately ``false`` on a single-page result and is checked for presence
+#: alone.
+NON_VACUOUS_FIELDS: Dict[str, Sequence[str]] = {
+    "search": ("data.hits[*].id", "outcome"),
+}
+
 #: A synthetic Claude Code JSONL fixture. Two messages, both containing the
 #: canonical search token ``rehearsaltoken``. Privacy-safe: no real paths,
 #: ids, or identities — every value below is synthetic.
@@ -417,13 +430,42 @@ def canonical_view(
     return view
 
 
+def vacuity_reasons(op: str, entry_point: str, view: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Report the canonical fields that make a comparison carry no information.
+
+    An absent field and an empty hit list are identical across every entry
+    point, so they compare equal and would pass as agreement.
+    """
+    reasons: List[Dict[str, Any]] = []
+    for field in CANONICAL_OPERATIONS[op]:
+        value = view.get(field)
+        if value == "__absent__":
+            reasons.append(
+                {
+                    "field": field,
+                    "entry_point": entry_point,
+                    "reason": "field absent from the projection",
+                }
+            )
+        elif field in NON_VACUOUS_FIELDS.get(op, ()) and not value:
+            reasons.append(
+                {
+                    "field": field,
+                    "entry_point": entry_point,
+                    "reason": "field is empty, so equality proves nothing",
+                }
+            )
+    return reasons
+
+
 def compare_canonical(
     op: str, results: Dict[str, Dict[str, Any]]
 ) -> Dict[str, Any]:
     """Compare canonical views across all entry points for one op.
 
     A ``not_implemented`` adapter fails the operation outright: release
-    consistency never treats missing coverage as a pass.
+    consistency never treats missing coverage as a pass. A result set with
+    nothing in it fails the same way, as ``vacuous``.
     """
     views: Dict[str, Dict[str, Any]] = {}
     skipped: List[Dict[str, Any]] = []
@@ -459,6 +501,17 @@ def compare_canonical(
         }
     reference_ep = next(iter(views))
     reference = views[reference_ep]
+    vacuous = vacuity_reasons(op, reference_ep, reference)
+    if vacuous:
+        return {
+            "operation": op,
+            "verdict": "vacuous",
+            "compared": list(views.keys()),
+            "skipped": skipped,
+            "aliases": aliases,
+            "unimplemented": [],
+            "divergences": vacuous,
+        }
     divergences: List[Dict[str, Any]] = []
     for entry_point, view in views.items():
         if entry_point == reference_ep:
@@ -540,10 +593,14 @@ def run_all(
 
 
 def build_report(binary: str, per_op: List[Dict[str, Any]]) -> Dict[str, Any]:
+    # The overall verdict carries the first failing operation's verdict verbatim
+    # rather than collapsing every failure to "divergent": a vacuous or
+    # unimplemented run is not a disagreement, and mislabelling it would hide
+    # what actually went wrong.
     overall = "consistent"
     for comparison in per_op:
         if comparison["verdict"] != "consistent":
-            overall = "divergent"
+            overall = comparison["verdict"]
             break
     return {
         "schema_version": REPORT_SCHEMA_VERSION,
