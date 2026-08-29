@@ -57,26 +57,43 @@ pub fn redact_string(s: &str) -> Option<String> {
     if count == 0 { None } else { Some(redacted) }
 }
 
-/// Replace every span a finder reports, bounded to 16 spans per value.
+/// Replace **every** span a finder reports — there is no span cap.
 ///
 /// The finder returns `(start, span_len, marker)` relative to the slice it was
-/// given; scanning resumes after the inserted marker so a marker is never
-/// re-scanned.
+/// given. Output is accumulated into a fresh buffer and scanning continues past
+/// the consumed span, so an inserted marker is never re-scanned and the pass is
+/// linear in the input length.
+///
+/// An earlier version stopped after 16 replacements "to bound the rewrite".
+/// That cap was a leak, not a guard: span 17 onward was emitted verbatim, so a
+/// single pasted `.env` dump carrying more than sixteen credentials crossed
+/// every machine boundary in the clear (Robot JSON, MCP `content` +
+/// `structuredContent`, the Web `/api/*` bodies). Bounding the *work* is
+/// legitimate; bounding the *redaction* is not. The cap only looked necessary
+/// because the old implementation called `String::replace_range` once per span,
+/// which is quadratic when secrets are dense; the single-pass rewrite below
+/// removes that cost, so the cap could go without adding any.
 fn replace_spans(
     text: &mut String,
     count: &mut u64,
     finder: impl Fn(&str) -> Option<(usize, usize, &'static str)>,
 ) {
-    let mut search_from = 0usize;
-    while let Some((start, span_len, marker)) = finder(&text[search_from..]) {
-        let abs_start = search_from + start;
-        text.replace_range(abs_start..abs_start + span_len, marker);
-        search_from = abs_start + marker.len();
+    let source = std::mem::take(text);
+    let mut out = String::new();
+    let mut consumed = 0usize;
+    while let Some((start, span_len, marker)) = finder(&source[consumed..]) {
+        let absolute = consumed + start;
+        out.push_str(&source[consumed..absolute]);
+        out.push_str(marker);
+        consumed = absolute + span_len;
         *count += 1;
-        if *count >= 16 {
-            break; // bounded: never rewrite more than 16 spans per value
-        }
     }
+    if consumed == 0 {
+        *text = source; // nothing matched: give the original buffer back
+        return;
+    }
+    out.push_str(&source[consumed..]);
+    *text = out;
 }
 
 /// Whole-string secret match: the value itself is a single secret token.
@@ -500,6 +517,70 @@ mod tests {
             "commit 1234567890abcdef1234567890abcdef12345678 landed"
         );
         assert_eq!(count, 0);
+
+        // 诚实边界：上面的豁免只属于 **embedded** 路径（`find_embedded_aws_secret`
+        // 要求大小写混排，hex 摘要永不满足）。整值恰好是 40 位 hex 时走的是
+        // `standalone_secret`，该规则没有大小写要求，所以会被判为
+        // aws_secret_key。这是 fail-safe 方向的过度脱敏，不是泄漏；在此钉住真实
+        // 行为，避免本测试的名字被读成"git SHA 一律不脱敏"的全局保证。
+        assert_eq!(
+            redact_text("1234567890abcdef1234567890abcdef12345678").0,
+            "[redacted:aws_secret_key]"
+        );
+    }
+
+    #[test]
+    fn redacts_every_secret_span_in_one_value_without_a_cap() {
+        // 真实泄漏（本次安全审计复现）：`replace_spans` 曾在替换满 16 段后
+        // `break`，第 17 段起原样出帧——一次粘贴的 .env dump（>16 条凭据）
+        // 就能让真实密钥穿过 Robot JSON / MCP structuredContent / Web
+        // `/api/*` 每一个机器边界。跨边界脱敏不允许"只脱前 N 个"。
+        const SPANS: usize = 40;
+        let secrets: Vec<String> = (0..SPANS)
+            .map(|index| format!("AKIA{index:016}X"))
+            .collect();
+        let dump = format!("dotenv dump {} tail", secrets.join(" "));
+
+        let (redacted, count) = redact_text(&dump);
+        assert_eq!(count, 1, "redact_text 报告的是条目数，不是段数");
+        for secret in &secrets {
+            assert!(
+                !redacted.contains(secret.as_str()),
+                "第 {} 个 secret 原样穿过脱敏：{redacted}",
+                secrets.iter().position(|s| s == secret).unwrap() + 1
+            );
+        }
+        assert_eq!(
+            redacted.matches("[redacted:aws_access_key]").count(),
+            SPANS,
+            "每一段都必须被替换：{redacted}"
+        );
+        assert!(redacted.starts_with("dotenv dump "));
+        assert!(redacted.ends_with(" tail"), "尾部正文必须保留：{redacted}");
+    }
+
+    #[test]
+    fn redacts_every_span_across_mixed_shapes_in_one_value() {
+        // 同一条值里混合多种形态，且总段数远超旧的 16 段上限：任何一种形态都
+        // 不得因为"预算用完"而漏过。
+        let mut parts = Vec::new();
+        for index in 0..8 {
+            parts.push(format!("AKIA{index:016}X"));
+            parts.push(format!("ghp_{index:036}"));
+            parts.push(format!("glpat-{index:020}"));
+            parts.push(format!("xoxb-{index:016}-abcdef"));
+        }
+        // 前缀是普通正文：否则整串会先命中 `standalone_secret`（整值一次替换），
+        // 就绕过了本测试要覆盖的 embedded 多段路径。
+        let text = format!("env dump: {}", parts.join(" | "));
+        let (redacted, count) = redact_text(&text);
+        assert_eq!(count, 1);
+        for part in &parts {
+            assert!(
+                !redacted.contains(part.as_str()),
+                "`{part}` 原样穿过脱敏：{redacted}"
+            );
+        }
     }
 
     #[test]

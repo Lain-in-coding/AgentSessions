@@ -475,6 +475,27 @@ mod tests {
     }
 
     #[test]
+    fn redacts_every_span_in_a_single_string_leaf() {
+        // 真实泄漏（安全审计复现）：共享引擎曾在同一条字符串里替换满 16 段后
+        // 停手，第 17 段起原样进 envelope，于是 Robot JSON / MCP
+        // structuredContent / Web `/api/*` 三个机器边界同时漏出真实密钥。
+        // 这里从 JSON 走树层再钉一次：单个 string leaf 的段数不设上限。
+        let secrets: Vec<String> = (0..25).map(|index| format!("AKIA{index:016}X")).collect();
+        let val = serde_json::json!({
+            "hits": [{ "text": format!("dotenv dump {} tail", secrets.join(" ")) }]
+        });
+        let (redacted, status) = redact_value(val);
+        let text = redacted["hits"][0]["text"].as_str().expect("text");
+        for secret in &secrets {
+            assert!(!text.contains(secret.as_str()), "`{secret}` 未脱敏：{text}");
+        }
+        assert_eq!(text.matches("[redacted:aws_access_key]").count(), 25);
+        // 一条字符串 = 一个 redaction 条目（ADR-0009 字段口径），不是段数。
+        assert_eq!(status.redacted_count, 1);
+        assert_eq!(status.status, RedactionState::Applied);
+    }
+
+    #[test]
     fn redacts_bare_jwt_value() {
         let jwt = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
         let val = serde_json::json!({"auth": jwt});
