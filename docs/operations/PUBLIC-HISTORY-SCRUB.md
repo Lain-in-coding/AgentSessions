@@ -36,6 +36,17 @@ source SHA and per-file SHA-256, and runs the same privacy rules against the
 ordinary exported directory. It does not modify refs or repository visibility;
 review the destination and publish it only after the owner chooses Option A.
 
+Note which tool scans the destination. The exporter's own `scan_export` walks
+the exported directory on the filesystem and applies the shared rules, so a
+successful export *is* a clean destination scan — a finding makes the export
+exit non-zero. Do **not** try to point the standalone scanner at the
+destination: `privacy_scan.py` enumerates through `git ls-files`, so
+`--repo <destination>` fails with exit 2 on a non-repository directory rather
+than reporting anything about its contents.
+
+Rehearsed 2026-08-29 at `3bcba5d`: 504 files exported, exporter scan clean
+(exit 0), exporter unittests 6/6 green, manifest written. History untouched.
+
 This does **not** clean older commits. Git history can still retain superseded
 copies of personal paths. Do not make the repository public until the owner
 chooses one of these publication strategies:
@@ -188,9 +199,11 @@ Reading the numbers:
   the export set.
 
 Export verification at this snapshot: the exporter copied 277 tracked files
-from `f7e2a49`; its built-in scanner and a standalone scanner run over the
-destination both reported 0 findings; the scanner and exporter unittest gates
-were green. History was not modified by this audit.
+from `f7e2a49`; its built-in scanner reported 0 findings, and the scanner and
+exporter unittest gates were green. History was not modified by this audit.
+(The original note also claimed a separate standalone scanner run over the
+destination; that is not something `privacy_scan.py` can do, since it
+enumerates through `git ls-files` — see the note above the export command.)
 
 ## Preview text replacement
 
