@@ -83,7 +83,10 @@
 - **控制**：loopback-only 绑定（127.0.0.1）+ 每会话 CSPRNG token + Host/Origin
   fail-closed 校验 + GET-only（POST 变更 501）+ `frame-ancestors 'none'` CSP +
   常量时间 token 比较 + bounded worker pool/请求头/请求体。
-- **残余风险**：同机恶意进程可读 loopback 端口；token 打印在 stderr 上。
+- **残余风险**：同机恶意进程可读 loopback 端口；token 打印在 stderr 上
+  （缓解：URL 以 fragment 携带 token，fragment 永不发给服务器，不进请求日志
+  与 `Referer`；页面读入后转 `Authorization` header 并从可见 URL 抹除。
+  stderr 打印本身仍由 terminal/日志归属方管理）。
 
 ### 6.2 Hook 输出
 
