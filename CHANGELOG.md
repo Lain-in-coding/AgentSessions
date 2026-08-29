@@ -305,7 +305,7 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Kimi format cell now names `turn.prompt`/`turn.steer`. The owner release
   checklist was re-verified against the current tree: verify-release 10/10,
   privacy scan 0, `cargo deny` all ok, public-tree export clean, and the last
-  three stale `src/main.rs` references from the CLI lib split repointed.
+  three stale CLI `main.rs` references from the lib split repointed.
 
 - Tool activity extraction now follows the record shapes real `claude-code` and
   `codex` transcripts write (structure census over local corpora: record types,
