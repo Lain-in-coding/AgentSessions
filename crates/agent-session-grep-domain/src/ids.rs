@@ -628,7 +628,7 @@ mod tests {
     /// provider data-root marker) plus the Windows path-case normalization
     /// the migration adds (`windows` lowercases the whole key; non-Windows
     /// keeps the spelling). Production `installation_namespace` in
-    /// `crates/agent-session-grep-cli/src/main.rs` lacks the normalization
+    /// `crates/agent-session-grep-cli/src/lib.rs` lacks the normalization
     /// today — that is the known debt this mirror fixes ahead of time.
     fn namespace_key(path: &str, provider_id: &str, windows: bool) -> String {
         let folded = path.replace('\\', "/");

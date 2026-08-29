@@ -193,7 +193,7 @@ all. `crates/agent-session-grep-cli/tests/provider_matrix.rs` now asserts both
 columns against each provider's pinned golden output: a declared span capability
 must match span presence in `basic.expected.json` (all 14 providers), and a
 `tool_activity` claim is rejected when every pinned message carries an empty
-`native_id`, since `main.rs:3517` fail-closed discards activities whose anchor is
+`native_id`, since `src/lib.rs:3810` fail-closed discards activities whose anchor is
 empty. Both new tests were mutation-verified by re-introducing each original bug
 and confirming a targeted failure. Note `codex` declares `tool_activity: Partial`
 on adapter evidence (three `emit_activity` call sites) while its golden fixture
