@@ -905,7 +905,6 @@ mod tests {
     use super::*;
     use std::net::{Shutdown, SocketAddr};
     use std::sync::{Arc, Barrier};
-    use std::time::Instant;
 
     const TEST_TOKEN: &str = "0123456789abcdef0123456789abcdef";
 
@@ -1205,24 +1204,45 @@ mod tests {
         server.join().expect("server join");
     }
 
+    /// Slowloris isolation is a **structural** property, not a latency budget.
+    /// The read timeout here is long enough that the parked connection provably
+    /// cannot be reaped first, so a 200 can only mean the fast request was
+    /// served alongside it; a server that serialised would stall past
+    /// `raw_http`'s own client read timeout and fail loudly. An absolute
+    /// wall-clock assertion instead measured how loaded the host was — it
+    /// flaked in a full `--workspace` run while passing in isolation.
     #[test]
     fn integration_slowloris_does_not_block_a_fast_get() {
-        let (address, token, server) = start_test_server(2, Duration::from_millis(300));
+        let (address, token, server) = start_test_server(2, Duration::from_secs(30));
         let mut slow = TcpStream::connect(address).expect("connect slow client");
-        slow.set_read_timeout(Some(Duration::from_secs(2)))
+        slow.write_all(b"GET /api/status HTTP/1.1\r\nHost:")
+            .expect("write partial request");
+
+        let fast = raw_http(address, &get_request(address, &token, "/api/status"));
+        assert!(fast.starts_with("HTTP/1.1 200"), "{fast}");
+
+        // Release the parked connection so the second slot completes and
+        // `stop_after` is reached without waiting out the 30s read timeout.
+        drop(slow);
+        server.join().expect("server join");
+    }
+
+    /// The reaping half of the same guard, with no timing assertion: a client
+    /// that never finishes its headers is answered 408 once the server's own
+    /// read timeout expires, whenever that happens to be.
+    #[test]
+    fn integration_stalled_headers_are_answered_408() {
+        let (address, _token, server) = start_test_server(1, Duration::from_millis(300));
+        let mut slow = TcpStream::connect(address).expect("connect slow client");
+        slow.set_read_timeout(Some(Duration::from_secs(10)))
             .expect("slow read timeout");
         slow.write_all(b"GET /api/status HTTP/1.1\r\nHost:")
             .expect("write partial request");
 
-        let started = Instant::now();
-        let fast = raw_http(address, &get_request(address, &token, "/api/status"));
-        assert!(fast.starts_with("HTTP/1.1 200"));
-        assert!(started.elapsed() < Duration::from_millis(250));
-
         let mut slow_response = String::new();
         slow.read_to_string(&mut slow_response)
             .expect("read timeout response");
-        assert!(slow_response.starts_with("HTTP/1.1 408"));
+        assert!(slow_response.starts_with("HTTP/1.1 408"), "{slow_response}");
         server.join().expect("server join");
     }
 

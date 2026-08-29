@@ -333,6 +333,20 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`serve`'s slowloris-isolation test no longer asserts a wall-clock budget.**
+  `integration_slowloris_does_not_block_a_fast_get` measured that a fast `GET`
+  finished within 250 ms while a partial-header client was parked on the pool.
+  That budget measures how loaded the host is, not whether the server
+  serialises: the test passed 5/5 in isolation and failed inside a full
+  `cargo test --workspace` run on a busy machine, which is exactly how it would
+  flake on a shared CI runner. The property is now expressed structurally — the
+  server's read timeout is set far beyond the request so the parked connection
+  provably cannot be reaped first, meaning a `200` can only come from
+  concurrent service, and a server that serialised would stall past the
+  client's own read timeout and fail loudly. The reaping half moved to
+  `integration_stalled_headers_are_answered_408`, which asserts the `408` with
+  no timing assertion at all. Server behaviour is unchanged.
+
 - **Silently wrong search results on stores built by an older binary**
   (index-projection versioning, schema v17). The FTS token transform is a
   contract between index time and query time; when it changed (pure CJK
