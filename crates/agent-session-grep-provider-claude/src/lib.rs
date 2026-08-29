@@ -273,6 +273,10 @@ struct RawBlock {
     /// 仅抽取带 `text` 的 block（如 `type:"text"`）；工具调用块无 text，忽略。
     #[serde(default)]
     text: Option<String>,
+    /// `type:"thinking"` block 的正文字段名是 `thinking`（另带 `signature`），
+    /// **不是** `text`——只读 `text` 会把整段推理当成空内容。
+    #[serde(default)]
+    thinking: Option<String>,
     /// `tool_result` block 的载荷在 `content`（字符串或 text block 数组），
     /// 真实工具输出（文件内容、命令输出）由此携带；缺失则为 None。
     #[serde(default)]
@@ -306,11 +310,29 @@ struct PendingToolCall {
 }
 
 impl RawBlock {
-    /// 抽取本 block 的可检索纯文本：`text` 优先，`tool_result` 的 `content`
-    /// 其次，否则为空。
+    /// 抽取本 block 的可检索纯文本：`text` 优先，`thinking` block 的
+    /// `thinking` 其次，`tool_result` 的 `content` 再次，否则为空。
+    ///
+    /// **为什么要读 `thinking`**：extended thinking 的 block 形状是
+    /// `{"type":"thinking","thinking":"…","signature":"…"}`——正文在 `thinking`
+    /// 键上，`text` 键根本不存在。只读 `text` 时，"只含一个 thinking block 的
+    /// assistant 记录"会整条投影成空正文却照样计入 committed，进了 catalog 与
+    /// FTS 却一个词都匹配不到（与 `tool_use_summary` 记录的同一类缺陷）。
+    /// 形状证据：cc-sessions-viewer `src-tauri/src/agents/claude.rs` 的
+    /// `"thinking" => el.get("thinking")` 分支，以及 agent-sessions 的
+    /// `Resources/Fixtures/stage0/agents/claude/*.jsonl` 语料。
+    ///
+    /// 空白 `thinking`（真实语料里存在）返回 `None`：不产出只有换行的空片段，
+    /// 与 cc-sessions-viewer 丢弃空/纯空白 thinking block 的行为一致。
     fn plain_text(&self) -> Option<String> {
         if let Some(text) = self.text.as_deref() {
             return Some(text.to_string());
+        }
+        if self.kind == "thinking"
+            && let Some(thinking) = self.thinking.as_deref()
+            && !thinking.trim().is_empty()
+        {
+            return Some(thinking.to_string());
         }
         match &self.content {
             Some(RawContent::Text(s)) => Some(s.clone()),
@@ -1438,6 +1460,67 @@ mod tests {
             !text.trim().is_empty(),
             "tool-use-only 消息必须产出非空可检索正文"
         );
+    }
+
+    #[test]
+    fn parse_renders_thinking_only_message_into_searchable_text() {
+        // extended thinking 的 block 正文在 `thinking` 键上（另带 `signature`），
+        // 不在 `text` 键上。本机真实语料普查（`~/.claude/projects` 全量 1641 个
+        // transcript，每文件前 1500 行）：158,293 条 assistant 记录里 34,989 条
+        // （22%）的 content **只有** thinking block——此前它们的 canonical 正文
+        // 整条为空串，却照样计入 committed，共 6,730 万字符推理正文完全不可检索。
+        // 形状证据：cc-sessions-viewer `agents/claude.rs` 的 `"thinking"` 分支读
+        // `el.get("thinking")`；agent-sessions `Resources/Fixtures/stage0/agents/
+        // claude/*.jsonl` 同形语料。
+        let text = parse_single_content(serde_json::json!([
+            {"type": "thinking", "thinking": "synthetic chain of thought", "signature": "sig-abc"}
+        ]));
+        assert_eq!(text, "synthetic chain of thought");
+    }
+
+    #[test]
+    fn parse_keeps_thinking_block_in_content_order() {
+        // thinking 走 `plain_text`，因此与 text block 一样按 block 顺序拼接
+        // （真实语料里 thinking 在数组首位）；tool_use 摘要仍追加在最后。
+        let text = parse_single_content(serde_json::json!([
+            {"type": "thinking", "thinking": "first I reason", "signature": "sig"},
+            {"type": "text", "text": "then I answer"},
+            {"type": "tool_use", "name": "Read", "input": {"file_path": "a.rs"}}
+        ]));
+        assert_eq!(text, "first I reason\nthen I answer\nRead(a.rs)");
+    }
+
+    #[test]
+    fn parse_drops_blank_thinking_and_opaque_redacted_thinking() {
+        // 真实语料里存在 `thinking` 为空/纯空白的 block：不得产出只有换行的
+        // 空片段。`redacted_thinking` 是加密载荷（无明文字段），保持忽略——
+        // 不编造它没有的正文。
+        assert_eq!(
+            parse_single_content(serde_json::json!([
+                {"type": "thinking", "thinking": "", "signature": "sig"},
+                {"type": "thinking", "thinking": "  \n  ", "signature": "sig"},
+                {"type": "text", "text": "only real text survives"}
+            ])),
+            "only real text survives"
+        );
+        assert_eq!(
+            parse_single_content(serde_json::json!([
+                {"type": "redacted_thinking", "data": "AAAAopaque"},
+                {"type": "text", "text": "kept"}
+            ])),
+            "kept"
+        );
+    }
+
+    #[test]
+    fn parse_never_reads_thinking_from_a_non_thinking_block() {
+        // 只有 `type:"thinking"` 的 block 才允许把 `thinking` 键当正文：其它
+        // block 上同名的 additive 字段不是对话正文，读它就是越界解释格式。
+        let text = parse_single_content(serde_json::json!([
+            {"type": "tool_use", "name": "Read", "input": {"file_path": "a.rs"}, "thinking": "not a body"},
+            {"type": "text", "text": "body"}
+        ]));
+        assert_eq!(text, "body\nRead(a.rs)");
     }
 
     #[test]
