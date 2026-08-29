@@ -1752,6 +1752,301 @@ fn readme_and_changelog_publish_every_applied_lexical_rank_signal() {
     }
 }
 
+/// 面向 Agent 的 Skill 说明原文。它是 MCP/Robot 调用方读到的第一手用法，
+/// 却此前完全没有守护。
+const SKILL_MD: &str = include_str!("../../../skills/agent-session-grep/SKILL.md");
+
+/// `PROVIDER_DISCOVERY_ROOTS` 的 `(provider_id, 扩展名)`，从 CLI 源解析。
+fn discovery_roots() -> Vec<(String, String)> {
+    let block = GUARD_SOURCE_MAIN
+        .split_once("const PROVIDER_DISCOVERY_ROOTS")
+        .expect("CLI 源必须有 PROVIDER_DISCOVERY_ROOTS")
+        .1;
+    let block = block.split_once("\n];").expect("发现根表必须闭合").0;
+    let mut out = Vec::new();
+    for line in block.lines() {
+        let trimmed = line.trim();
+        // 形如 `("claude-code", ".claude/projects", "jsonl"),`
+        let Some(inner) = trimmed
+            .strip_prefix('(')
+            .and_then(|rest| rest.strip_suffix("),"))
+        else {
+            continue;
+        };
+        let fields: Vec<&str> = inner
+            .split(',')
+            .map(|field| field.trim().trim_matches('"'))
+            .collect();
+        if fields.len() == 3 {
+            out.push((fields[0].to_string(), fields[2].to_string()));
+        }
+    }
+    out
+}
+
+#[test]
+fn discovery_root_registry_matches_capability_matrix_and_published_docs() {
+    // 抓到过的漂移：SKILL.md 的 `sync --discover` 行只点名 6 个数据根并声称
+    // "sync every `.jsonl` transcript found"，而注册表已有 12 个根、三种扩展名
+    // （opencode 是 SQLite `db`，hermes/cline 是 `json`）。调用方据此得出
+    // "我的 hermes / cline / opencode 历史不会被发现"的错误结论；`--help` 的
+    // 同一行也仍写 `.jsonl`。
+    let roots = discovery_roots();
+    assert!(
+        roots.len() >= 10,
+        "只解析到 {} 个发现根，抽取逻辑可能失效",
+        roots.len()
+    );
+
+    // (1) 注册表 ↔ capability.rs 的 discover 列必须双向一致。
+    let matrix = ProviderCapabilityMatrix::current();
+    let registered: std::collections::BTreeSet<&str> =
+        roots.iter().map(|(id, _)| id.as_str()).collect();
+    let declared: std::collections::BTreeSet<&str> = matrix
+        .providers
+        .iter()
+        .filter(|p| {
+            p.maturity != ProviderMaturity::Unsupported
+                && p.discover != CapabilityLevel::Unsupported
+        })
+        .map(|p| p.provider_id.as_str())
+        .collect();
+    assert_eq!(
+        registered, declared,
+        "PROVIDER_DISCOVERY_ROOTS 与 capability.rs 的 discover 列不一致——\
+         登记了根却记 unsupported 是少报，记 native 却没有根是虚报"
+    );
+
+    // (2) SKILL.md 的 `sync --discover` 行必须点名每个根与每种扩展名，并给出计数。
+    let row = SKILL_MD
+        .lines()
+        .find(|line| line.contains("`sync --discover`"))
+        .expect("SKILL.md 必须有 sync --discover 行");
+    assert!(
+        row.contains(&format!("{} registered provider data roots", roots.len())),
+        "SKILL.md 的发现根计数与注册表（{} 个）漂移",
+        roots.len()
+    );
+    for id in &registered {
+        assert!(
+            row.contains(&format!("`{id}`")),
+            "SKILL.md 的 `sync --discover` 行未点名已登记的 provider `{id}`——\
+             漏列等于告诉调用方该 provider 的历史不会被自动发现"
+        );
+    }
+    let extensions: std::collections::BTreeSet<&str> =
+        roots.iter().map(|(_, ext)| ext.as_str()).collect();
+    for ext in &extensions {
+        assert!(
+            row.contains(&format!("`{ext}`")),
+            "SKILL.md 的 `sync --discover` 行未提及已登记的扩展名 `{ext}`"
+        );
+    }
+
+    // (3) `--help` 的同一行不得把多扩展名的发现窄化成 `.jsonl`。
+    let help_line = GUARD_SOURCE_MAIN
+        .lines()
+        .find(|line| line.trim_start().starts_with("sync --discover  "))
+        .expect("--help 的 COMMANDS 块必须有 sync --discover 行");
+    if extensions.len() > 1 {
+        assert!(
+            !help_line.contains(".jsonl"),
+            "`--help` 仍把 `sync --discover` 描述为只发现 `.jsonl` 源，\
+             但注册表有 {} 种扩展名：{extensions:?}",
+            extensions.len()
+        );
+    }
+}
+
+/// 矩阵文档「已知限制」小节里，provider 显示名 → canonical `provider_id`。
+/// 显式写死并在测试里断言覆盖全部 14 个已实现 provider：新增 provider 必须
+/// 同时在这里登记，否则守护会退化成"少查一行"。
+const MATRIX_DISPLAY_NAMES: &[(&str, &str)] = &[
+    ("Claude Code", "claude-code"),
+    ("Codex", "codex"),
+    ("Grok Build", "grok-build"),
+    ("Antigravity", "antigravity"),
+    ("OpenCode", "opencode"),
+    ("Pi", "pi"),
+    ("Hermes", "hermes"),
+    ("Cursor", "cursor"),
+    ("Kimi Code", "kimi-code"),
+    ("OpenClaw", "openclaw"),
+    ("Qoder", "qoder"),
+    ("Tencent CodeBuddy", "tencent-codebuddy"),
+    ("Cline", "cline"),
+    ("Aider", "aider"),
+];
+
+#[test]
+fn matrix_no_span_limitation_bullets_list_exactly_the_unsupported_providers() {
+    // 抓到过的漂移：「已知限制」有一条 `**OpenCode / Cursor / Hermes / Kimi
+    // （SQLite 类与文档类）**：……无文件内字节 span` —— Kimi Code 的源是行式
+    // wire.jsonl，adapter 逐记录发真实 `span`，capability.rs 记 `native`，同一
+    // 文档上方的 `source_span` 行也把 kimi 列在 native 里。文档自相矛盾，且
+    // 对读者是"这个 provider 的命中无法回溯到源字节"的错误结论。
+    //
+    // 因此：凡声明"无文件内字节 span"的限制条目，其标题里点到的 provider 集合
+    // 必须恰好等于 capability.rs 里 `source_span == Unsupported` 的已实现集合。
+    let matrix = ProviderCapabilityMatrix::current();
+    let implemented: Vec<_> = matrix
+        .providers
+        .iter()
+        .filter(|p| p.maturity != ProviderMaturity::Unsupported)
+        .collect();
+    for provider in &implemented {
+        assert!(
+            MATRIX_DISPLAY_NAMES
+                .iter()
+                .any(|(_, id)| *id == provider.provider_id),
+            "MATRIX_DISPLAY_NAMES 缺少 provider `{}`——新增 provider 必须同时登记显示名",
+            provider.provider_id
+        );
+    }
+
+    let expected: std::collections::BTreeSet<&str> = implemented
+        .iter()
+        .filter(|p| p.source_span == CapabilityLevel::Unsupported)
+        .map(|p| p.provider_id.as_str())
+        .collect();
+    assert!(
+        !expected.is_empty(),
+        "capability.rs 已无 source_span unsupported 的 provider，请连同本守护一起更新文档"
+    );
+
+    // 只看「已知限制」小节，避免把上方 Capability Matrix 行的说明文字算进来。
+    let section = MATRIX
+        .split_once("## 已知限制")
+        .expect("矩阵文档必须有「已知限制」小节")
+        .1;
+    let mut claimed: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    let mut bullets = 0usize;
+    for bullet in section.split("\n- ").skip(1) {
+        // 条目会折行，`无文件内字节 span` 可能被换行+缩进切开——先把空白折叠。
+        let flat = bullet.split_whitespace().collect::<Vec<_>>().join("");
+        if !flat.contains("无文件内字节span") {
+            continue;
+        }
+        bullets += 1;
+        // 条目标题是首个 `**...**` 粗体段；provider 名只在标题里点名。
+        let header = flat
+            .split_once("**")
+            .and_then(|(_, rest)| rest.split_once("**"))
+            .map(|(header, _)| header)
+            .unwrap_or("");
+        for (display, id) in MATRIX_DISPLAY_NAMES {
+            // 标题里的显示名同样可能被折行切开，故按去空白形式比对。
+            let needle: String = display.split_whitespace().collect();
+            if header.contains(&needle) {
+                claimed.insert(id);
+            }
+        }
+    }
+    assert!(
+        bullets > 0,
+        "「已知限制」小节里找不到任何「无文件内字节 span」条目——\
+         span 覆盖是对外能力声明，缺项等于不再公布该限制"
+    );
+    assert_eq!(
+        claimed, expected,
+        "「无文件内字节 span」条目点名的 provider 与 capability.rs 的 \
+         `source_span == Unsupported` 集合不一致——文档声明某 provider 无 span，\
+         而代码逐记录发 span（或反之）"
+    );
+}
+
+/// Robot v1 error catalog（权威 schema）与引用它的契约文档原文。
+const ERROR_CATALOG: &str = include_str!("../../../schemas/robot/v1/error-catalog.json");
+const CLI_CONTRACT: &str = include_str!("../../../docs/contracts/CONTRACT-cli-robot-mcp-draft.md");
+
+#[test]
+fn contract_exit_code_table_matches_the_error_catalog() {
+    // 抓到过的漂移：契约 §5 写"权威为 error-catalog.json 的 13 码"，而目录里是
+    // 14 条；同一行的分组还漏掉了 cursor_expired（exit 2）与
+    // capability_not_supported（exit 7）。退出码是自动化调用方唯一的分支依据，
+    // 少一码就是让调用方对未列出的失败无分支可走。
+    let catalog: serde_json::Value =
+        serde_json::from_str(ERROR_CATALOG).expect("error-catalog.json 必须是合法 JSON");
+    let entries = catalog["errors"]
+        .as_array()
+        .expect("error-catalog.json 必须有 errors 数组");
+
+    // (1) 码数：文档自称"N 码"，N 必须等于目录条数。
+    let expected_count = format!("的 {} 码", entries.len());
+    assert!(
+        CLI_CONTRACT.contains(&expected_count),
+        "契约 §5 的错误码计数与 error-catalog.json（{} 条）漂移，应包含 `{expected_count}`",
+        entries.len()
+    );
+
+    // (2) 逐码点名：目录里的每个 code 都必须在契约里出现。
+    for entry in entries {
+        let code = entry["code"].as_str().expect("每条目录项必须有 code");
+        assert!(
+            CLI_CONTRACT.contains(code),
+            "契约 §5 未点名错误码 `{code}`——调用方无从为它准备分支"
+        );
+    }
+
+    // (3) 分组：`Exit Code(...)` 行按 `/ <exit> 名称(a, b)` 分段，每个 code 必须
+    //     落在自己真实 exit 值的那一组里。
+    let exit_line = CLI_CONTRACT
+        .lines()
+        .find(|line| line.starts_with("Exit Code("))
+        .expect("契约 §5 必须有 `Exit Code(` 行");
+    let mut grouped: std::collections::BTreeMap<i64, std::collections::BTreeSet<String>> =
+        std::collections::BTreeMap::new();
+    for fragment in exit_line.split(" / ") {
+        let digits: String = fragment
+            .chars()
+            .take_while(|character| character.is_ascii_digit())
+            .collect();
+        let Ok(exit) = digits.parse::<i64>() else {
+            continue;
+        };
+        let names = fragment
+            .split_once('(')
+            .and_then(|(_, rest)| rest.split_once(')'))
+            .map(|(inner, _)| inner)
+            .unwrap_or("");
+        let bucket = grouped.entry(exit).or_default();
+        for name in names.split(',') {
+            let name = name.trim();
+            if !name.is_empty() {
+                bucket.insert(name.to_string());
+            }
+        }
+    }
+    for entry in entries {
+        let code = entry["code"].as_str().expect("每条目录项必须有 code");
+        let exit = entry["cli_exit_code"]
+            .as_i64()
+            .expect("每条目录项必须有 cli_exit_code");
+        let listed = grouped
+            .get(&exit)
+            .is_some_and(|names| names.iter().any(|name| name == code));
+        assert!(
+            listed,
+            "契约 §5 的 exit {exit} 分组没有列出 `{code}`——\
+             分组是调用方读到的映射，漏列即错误映射（当前该组：{:?}）",
+            grouped.get(&exit)
+        );
+    }
+
+    // (4) 反向：文档不得声明目录里不存在的退出码。0 与 10 不是错误码
+    //     （成功 / 部分成功），显式豁免。
+    let real_exits: std::collections::BTreeSet<i64> = entries
+        .iter()
+        .filter_map(|entry| entry["cli_exit_code"].as_i64())
+        .collect();
+    for exit in grouped.keys() {
+        assert!(
+            *exit == 0 || *exit == 10 || real_exits.contains(exit),
+            "契约 §5 声明了 error-catalog.json 里不存在的退出码 {exit}"
+        );
+    }
+}
+
 /// 对外竞品对比表原文。它是 README 之外第二处对"证据能力"下断言的公开文档，
 /// 却没有任何守护——README 的 "every hit carries a source span" 被改正后，
 /// 这里的「每条命中带 source span」原封不动地留了下来。
@@ -1982,6 +2277,111 @@ fn root_docs_cited_repo_paths_all_resolve() {
     }
     assert!(
         checked >= 10,
+        "只核对到 {checked} 条被引用路径，抽取逻辑可能失效"
+    );
+}
+
+/// `docs/` 与 Skill 文档里，那些**故意**指向 HEAD 已不存在的路径。
+///
+/// `PUBLIC-HISTORY-SCRUB.md` 的正文论点就是"这些文件只存在于历史里"，逐条点名
+/// 是该论证的一部分；把它们当失效引用会逼人删掉证据。每条都必须有理由。
+const DOCS_INTENTIONALLY_ABSENT_PATHS: &[&str] = &[
+    // 已被 CLI lib 拆分取代，只存在于历史提交里（该文档明文如此说明）。
+    "crates/agent-session-grep-application/src/handoff_markdown.rs",
+    "crates/agent-session-grep-cli/src/main.rs",
+    // 历史里存在过的 go/no-go 草稿，未保留到 HEAD（同一段落的论点）。
+    "docs/release/go-no-go.2026-08-19.md",
+];
+
+/// 递归收集某目录下的 `.md` 文件（相对仓库根的 POSIX 风格路径）。
+fn markdown_files(repo_root: &std::path::Path, relative_dir: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut stack = vec![repo_root.join(relative_dir)];
+    while let Some(current) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&current) else {
+            continue;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().and_then(|ext| ext.to_str()) == Some("md")
+                && let Ok(relative) = path.strip_prefix(repo_root)
+            {
+                out.push(relative.to_string_lossy().replace('\\', "/"));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+#[test]
+fn docs_tree_cited_repo_paths_all_resolve() {
+    // `root_docs_cited_repo_paths_all_resolve` 只覆盖仓库根的 6 份文档。ADR、
+    // RFC、契约、运维 runbook、产品矩阵与 Skill 说明合起来引用的仓库路径远多于
+    // 根文档，却完全无守护——实测抓到 `PROVIDER-MATURITY-MATRIX.md` 的审计依据
+    // 仍指向任务归档前的旧路径。
+    //
+    // 与根守护的区别：这些文档大量使用**相对本文件目录**的引用
+    // （`../product/X.md`），因此三种解析都接受；glob 与 `~/` 家目录路径不是
+    // 仓库路径，跳过。
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("必须能从 crate 目录上溯到仓库根")
+        .to_path_buf();
+    assert!(
+        repo_root.join("Cargo.toml").is_file(),
+        "仓库根定位失败：{repo_root:?} 下没有 Cargo.toml"
+    );
+
+    let mut targets = markdown_files(&repo_root, "docs");
+    targets.push("skills/agent-session-grep/SKILL.md".to_string());
+    assert!(
+        targets.len() >= 20,
+        "只收集到 {} 份文档，遍历逻辑可能失效",
+        targets.len()
+    );
+    let crate_dirs: Vec<std::path::PathBuf> = std::fs::read_dir(repo_root.join("crates"))
+        .expect("crates 目录必须存在")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .collect();
+
+    let mut checked = 0usize;
+    for relative in &targets {
+        let Ok(text) = std::fs::read_to_string(repo_root.join(relative)) else {
+            continue;
+        };
+        let doc_dir = repo_root
+            .join(relative)
+            .parent()
+            .expect("文档必须有父目录")
+            .to_path_buf();
+        for cited in cited_repo_paths(&text) {
+            // glob 指代一族文件、`~/` 是用户家目录，都不是仓库路径。
+            if cited.contains('*') || cited.starts_with('~') {
+                continue;
+            }
+            if DOCS_INTENTIONALLY_ABSENT_PATHS.contains(&cited.as_str()) {
+                continue;
+            }
+            let resolved = repo_root.join(&cited).exists()
+                || doc_dir.join(&cited).exists()
+                || crate_dirs.iter().any(|dir| dir.join(&cited).exists());
+            assert!(
+                resolved,
+                "{relative} 引用的仓库路径 `{cited}` 不存在——\
+                 文档指给读者的证据必须真的能被追到；若该文件已搬迁请同步文档，\
+                 若它是刻意引用历史里的路径请加入 DOCS_INTENTIONALLY_ABSENT_PATHS \
+                 并写明理由"
+            );
+            checked += 1;
+        }
+    }
+    assert!(
+        checked >= 100,
         "只核对到 {checked} 条被引用路径，抽取逻辑可能失效"
     );
 }
