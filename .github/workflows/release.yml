@@ -281,6 +281,10 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
+          # This job deliberately has no checkout, so gh has no git remote to
+          # resolve the repository from and does not read GITHUB_REPOSITORY.
+          # Without GH_REPO every gh call below fails to determine a base repo.
+          GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
         run: |
           $ErrorActionPreference = 'Stop'
