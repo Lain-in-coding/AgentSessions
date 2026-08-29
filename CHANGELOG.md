@@ -10,6 +10,17 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `kimi-code` now indexes the user's own prompts. Kimi writes them as
+  `turn.prompt` (and `turn.steer` for a mid-turn correction) with the text in a
+  top-level `input` block array, not as `context.append_message`; the adapter
+  parsed only the latter, so the highest-value text in a Kimi session — what the
+  user actually asked — never entered the index, and the golden fixture carried
+  no such record for a test to catch it. Both record types now emit as user
+  messages in file order, with the record shape taken from the upstream ctx
+  adapter's real-shape fixture. `context.append_loop_event` step/tool events
+  stay unparsed on purpose: they are tool activity rather than messages, and
+  wire.jsonl carries no per-message native id to anchor them to.
+
 - Pi session-tree lineage is now reported instead of silently flattened. Pi
   format v2/v3 files are a parent-linked tree (`version` on the `session`
   header, per-record `id` + `parentId`; two records sharing one `parentId` are

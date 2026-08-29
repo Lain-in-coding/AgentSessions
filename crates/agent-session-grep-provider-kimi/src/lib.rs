@@ -43,6 +43,17 @@ struct WireRecord {
     r#type: String,
     #[serde(default)]
     message: Option<WireMessage>,
+    /// `turn.prompt` / `turn.steer` carry the user's own words here rather than
+    /// in `message`: an array of content blocks in the same shape
+    /// `message.content` uses.
+    ///
+    /// Evidence: the upstream ctx adapter classifies `turn.prompt` /
+    /// `turn.steer` as user-role message events and reads their text from this
+    /// field (`Github_src/ctx/.../kimi.rs:321,351,375`), and its real-shape
+    /// fixture writes exactly that record
+    /// (`{"type":"turn.prompt","input":[{"type":"text","text":...}],"origin":{"kind":"user"}}`).
+    #[serde(default)]
+    input: Option<serde_json::Value>,
 }
 
 #[derive(serde::Deserialize)]
@@ -63,7 +74,7 @@ impl ProviderAdapter for KimiCodeAdapter {
             self.provider_id(),
             Some(1),
             &[
-                "context.append_loop_event records (step/tool events) are not yet parsed",
+                "context.append_loop_event records (step/tool events) are not parsed: they are tool activity rather than messages, and wire.jsonl carries no per-message native id to anchor them to",
                 "session id is rarely carried in wire.jsonl; session_native_id is usually left unset",
                 "per-message timestamps are not extracted",
             ],
@@ -210,21 +221,34 @@ impl ProviderAdapter for KimiCodeAdapter {
                 }
             };
 
-            // Only handle context.append_message; loop events deferred.
-            if rec.r#type != "context.append_message" {
-                continue;
-            }
-
-            let Some(msg) = &rec.message else {
-                report.skipped += 1;
-                continue;
+            // 三类承载对话文本的记录：
+            // - `context.append_message`：role 在 `message.role`；
+            // - `turn.prompt` / `turn.steer`：**用户自己的话**，文本在顶层
+            //   `input` 的 content-block 数组里，role 恒为 user（证据见
+            //   `WireRecord::input` 的文档注释：ctx 的 kimi 适配器把这两类
+            //   归为 user-role message 事件）。此前只解析 append_message，
+            //   于是 kimi 会话里最有检索价值的用户提问完全没进索引。
+            // `context.append_loop_event`（step/tool 事件）仍不解析——它们是
+            //   工具活动而非消息，且缺 per-message native id 无法锚定。
+            let (role, text) = match rec.r#type.as_str() {
+                "context.append_message" => {
+                    let Some(msg) = &rec.message else {
+                        report.skipped += 1;
+                        continue;
+                    };
+                    let role = msg.role.as_str();
+                    if !matches!(role, "user" | "assistant") {
+                        continue;
+                    }
+                    let content = msg.content.as_ref().unwrap_or(&serde_json::Value::Null);
+                    (role, kimi_content_texts(content))
+                }
+                "turn.prompt" | "turn.steer" => {
+                    let input = rec.input.as_ref().unwrap_or(&serde_json::Value::Null);
+                    ("user", kimi_content_texts(input))
+                }
+                _ => continue,
             };
-            let role = msg.role.as_str();
-            if !matches!(role, "user" | "assistant") {
-                continue;
-            }
-            let content = msg.content.as_ref().unwrap_or(&serde_json::Value::Null);
-            let text = kimi_content_texts(content);
             if text.trim().is_empty() {
                 continue;
             }
@@ -327,6 +351,61 @@ mod tests {
         let adapter = KimiCodeAdapter::new();
         let fixture = "{\"foo\":1}\n{\"bar\":2}\n";
         assert!(adapter.probe(fixture.as_bytes()).is_err());
+    }
+
+    /// 记录 role/text 的最小 sink（本模块单测用；golden 集成测试各有自己的）。
+    #[derive(Default)]
+    struct RoleTextSink {
+        seen: Vec<(String, String)>,
+    }
+    impl CanonicalEventSink for RoleTextSink {
+        fn emit_message(
+            &mut self,
+            event: MessageEvent<'_>,
+        ) -> agent_session_grep_ports::PortResult<()> {
+            self.seen
+                .push((event.role.to_string(), event.text.to_string()));
+            Ok(())
+        }
+    }
+
+    /// Kimi 把**用户自己的提问**写在 `turn.prompt`（含 `turn.steer` 续问）里，
+    /// 而不是 `context.append_message`。此前适配器只解析后者，于是 kimi 会话
+    /// 里检索价值最高的用户输入完全没进索引；golden fixture 不含该记录，所以
+    /// 既有测试也抓不到。语料形状取自 ctx 的真实形态 fixture。
+    #[test]
+    fn parse_indexes_user_prompts_from_turn_records() {
+        let adapter = KimiCodeAdapter::new();
+        let fixture = concat!(
+            r#"{"type":"metadata","protocol_version":"1.4"}"#,
+            "\n",
+            r#"{"type":"turn.prompt","time":1783170001000,"input":[{"type":"text","text":"why does sync tombstone"}],"origin":{"kind":"user"}}"#,
+            "\n",
+            r#"{"type":"context.append_message","message":{"role":"assistant","content":[{"type":"text","text":"because the scan was complete"}]}}"#,
+            "\n",
+            r#"{"type":"turn.steer","time":1783170003000,"input":[{"type":"text","text":"stop and explain"}]}"#,
+            "\n",
+            r#"{"type":"context.append_loop_event","event":{"type":"tool.call","toolName":"Write"}}"#,
+            "\n",
+        );
+        let mut sink = RoleTextSink::default();
+        let report = adapter.parse(fixture.as_bytes(), &mut sink).unwrap();
+
+        assert_eq!(
+            sink.seen,
+            vec![
+                ("user".to_string(), "why does sync tombstone".to_string()),
+                (
+                    "assistant".to_string(),
+                    "because the scan was complete".to_string()
+                ),
+                ("user".to_string(), "stop and explain".to_string()),
+            ],
+            "turn.prompt / turn.steer must index as user messages in file order"
+        );
+        assert_eq!(report.committed, 3);
+        // metadata 与 loop event 都不是消息：既不提交也不计入 skipped。
+        assert_eq!(report.skipped, 0);
     }
 
     #[test]
