@@ -6,6 +6,8 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -98,6 +100,34 @@ class VerifyReleaseTests(unittest.TestCase):
             verify_release.parse_first_json_line('\n{"data":{"value":1}}\n'),
             {"data": {"value": 1}},
         )
+
+    def test_status_marks_print_on_a_non_utf8_code_page(self) -> None:
+        """The verdict must survive a non-UTF-8 stdout encoding.
+
+        A captured CI step's stdout is a pipe, so on a Windows runner Python
+        encodes it with the ANSI code page, where the ✓/✗ status marks are
+        unencodable. ``PYTHONIOENCODING`` reproduces that on every platform.
+        """
+        program = (
+            "import importlib.util, sys;"
+            f"spec = importlib.util.spec_from_file_location('verify_release', {str(SCRIPT)!r});"
+            "module = importlib.util.module_from_spec(spec);"
+            "sys.modules['verify_release'] = module;"
+            "spec.loader.exec_module(module);"
+            "module.step('encoding', True, 'pass mark');"
+            "module.step('encoding', False, 'fail mark')"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", program],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            env=dict(os.environ, PYTHONIOENCODING="cp1252"),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("UnicodeEncodeError", result.stderr)
+        self.assertIn("✓ encoding: pass mark", result.stdout)
+        self.assertIn("✗ encoding: fail mark", result.stdout)
 
 
 if __name__ == "__main__":

@@ -31,6 +31,26 @@ from pathlib import Path
 from typing import Any
 
 
+def _force_utf8_output() -> None:
+    """Keep the verdict printable on any host code page.
+
+    ``sys.stdout`` uses the platform encoding with ``errors="strict"``, and a
+    captured CI step's stdout is a pipe rather than a console, so on a Windows
+    runner it is the ANSI code page (cp1252). Printing the ✓/✗ status marks
+    there raises UnicodeEncodeError and the release gate dies with a traceback
+    instead of a verdict. Force UTF-8 (CI logs are UTF-8) and degrade an
+    unencodable character rather than aborting the run. ``sys.stderr`` already
+    defaults to ``backslashreplace``; it is included so both streams agree.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8", errors="replace")
+
+
+_force_utf8_output()
+
+
 class VerificationError(Exception):
     pass
 
