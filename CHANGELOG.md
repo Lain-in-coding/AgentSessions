@@ -353,6 +353,26 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Lexical search pages silently duplicated hits and hid the strongest one**
+  (rank-window pagination). After the rank-signals wave, the fetch window was
+  `offset + page + 1` — but re-ranking sorts the whole window, so the pinned
+  ordering depended on which page you asked for. Page 1 ranked a small window's
+  top slice; page 2 ranked a larger window where deep-bm25 items with strong
+  recency could leapfrog what page 1 had already shown. Concatenated pages
+  could repeat a hit and never show the true top hit at all, with exit code 0
+  throughout. Found by dogfooding against a real index; reproduced with a
+  4-hit fixture whose recency order is the reverse of its index order (pages
+  returned `[hit2, hit1, hit1, hit0]` against a truth of
+  `[hit3, hit2, hit1, hit0]`). Re-ranked paths (pure lexical, plus
+  semantic/hybrid degraded to lexical fallback) now fetch one fixed
+  `RANK_SCAN_WINDOW` (512; ×16 for `--group-by-session`) independent of the
+  offset, so every page ranks the same set and slices one total order; paging
+  past the window ends with `has_more=false` — a ranking horizon, not a
+  defect. Semantic/hybrid paths keep the offset-based over-fetch because
+  their order is a stable prefix of the retrieval order. The window-shape
+  predicate is computed once before the fetch and reused as the rank decision,
+  so the two cannot drift.
+
 - **`serve`'s slowloris-isolation test no longer asserts a wall-clock budget.**
   `integration_slowloris_does_not_block_a_fast_get` measured that a fast `GET`
   finished within 250 ms while a partial-header client was parked on the pool.
