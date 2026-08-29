@@ -1926,13 +1926,12 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore, 
                             }
                         }
                     }
-                    let grouped_kept: Vec<SearchHit> = grouped
+                    let grouped_len = grouped.len() as u64;
+                    let slice: Vec<SearchHit> = grouped
                         .into_iter()
                         .skip(usize::try_from(offset).unwrap_or(usize::MAX))
-                        .take(page + 1)
+                        .take(page)
                         .collect();
-                    let has_more = grouped_kept.len() > page;
-                    let slice: Vec<SearchHit> = grouped_kept.into_iter().take(page).collect();
                     let net_bytes = budget
                         .max_response_bytes
                         .saturating_sub(ENVELOPE_RESERVE_BYTES);
@@ -1941,9 +1940,13 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore, 
                     // Resume 可用性（ADR-0009）：只对保留的命中批量解析一次（无 N+1）。
                     self.assemble_resume_availability(&mut hits)?;
                     let consumed = offset + hits.len() as u64;
-                    // 与逐命中/List 分支相同的守卫：字节 clamp 把本页清空（首条组
-                    // 超预算）时 cursor 停在原 offset，must 终止分页而非死循环。
-                    let has_more = has_more && !hits.is_empty();
+                    // has_more 必须按**实际消耗**判定，与逐命中/List 分支同一口径
+                    // （`总数 > consumed`）：字节 clamp 削短本页时被削掉的组仍在
+                    // 后续页可达。若按"是否存在第 page+1 组"判定，组总数不超过页
+                    // 大小时会报 has_more=false，被削掉的组从此不可达（静默漏结果）。
+                    // `!hits.is_empty()` 守卫首组即超预算的情形：cursor 会停在原
+                    // offset，此时必须终止分页而非死循环。
+                    let has_more = grouped_len > consumed && !hits.is_empty();
                     let next_cursor = self.issue_cursor(
                         has_more,
                         generation,
@@ -3724,6 +3727,84 @@ mod tests {
         assert_eq!(hits[0].id, StableId::native(IdKind::Message, "grp-a1"));
         assert_eq!(hits[0].occurrences, 1);
         assert_eq!(hits[1].occurrences, 1);
+    }
+
+    /// 回归：归并模式下被字节闸截断的页必须继续发 cursor。
+    ///
+    /// 缺陷形态：`has_more` 曾在字节 clamp **之前**按"是否存在第 page+1 组"
+    /// 判定。当组总数不超过页大小、而字节预算只装得下前几组时，clamp 把本页
+    /// 削短却仍报 `has_more = false` → 无 next_cursor，被削掉的组从此不可达。
+    /// 逐命中路径（`has_more = scanned_len > consumed`）不存在该问题，两条
+    /// 路径对同一输入给出不同答案，正是缺陷的判据。
+    ///
+    /// fixture：4 组、page=10（组数不足以触发 page+1 哨兵）、字节预算只容 1 组。
+    #[test]
+    fn search_group_by_session_byte_truncated_page_keeps_paging() {
+        let mut cat = MapCatalog::new(7);
+        let tags = ["cut-a", "cut-b", "cut-c", "cut-d"];
+        for tag in tags {
+            let id = StableId::native(IdKind::Message, tag);
+            // 每组一条命中，正文足够长使字节闸每页只放过一组。
+            cat.insert(
+                &id,
+                serde_json::json!({ "role": "user", "text": "x".repeat(2000) })
+                    .to_string()
+                    .into_bytes(),
+            );
+            cat.set_session_of(&id, &StableId::native(IdKind::Session, tag));
+        }
+        let index = FixedHits(
+            tags.iter()
+                .map(|tag| StableId::native(IdKind::Message, tag))
+                .collect(),
+        );
+        let app = App::with_clock(cat, index, clock_t0);
+        let grouped_req = |cursor: Option<String>| AppRequest::Search {
+            query: "grouped needle".into(),
+            filters: SearchFilters::default(),
+            facets: SearchFacets::default(),
+            limit: 10,
+            cursor,
+            budget: ResponseBudget {
+                max_response_bytes: 4096,
+                ..Default::default()
+            },
+            include_system: false,
+            group_by_session: true,
+            mode: RetrievalMode::Lexical,
+            query_embedding: None,
+        };
+
+        let (first, token, _, truncation) = hits_of(app.handle(grouped_req(None)).unwrap());
+        assert!(
+            truncation.truncated && !first.is_empty() && first.len() < tags.len(),
+            "byte gate must cut a non-empty prefix: kept {first:?}, {truncation:?}"
+        );
+        assert_eq!(
+            truncation.reason.as_deref(),
+            Some(budget::TRUNCATION_MAX_RESPONSE_BYTES)
+        );
+        assert!(
+            token.is_some(),
+            "a byte-truncated grouped page must still hand out a cursor"
+        );
+
+        let mut paged = first;
+        let mut token = token;
+        while let Some(cursor) = token.take() {
+            let (ids, next, _, _) = hits_of(app.handle(grouped_req(Some(cursor))).unwrap());
+            assert!(!ids.is_empty(), "paging must advance, not spin");
+            paged.extend(ids);
+            token = next;
+        }
+        let expected: Vec<String> = tags
+            .iter()
+            .map(|tag| StableId::native(IdKind::Message, tag).as_str().to_string())
+            .collect();
+        assert_eq!(
+            paged, expected,
+            "every group must stay reachable across byte-truncated pages"
+        );
     }
 
     #[test]
