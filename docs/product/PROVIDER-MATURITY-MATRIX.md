@@ -39,8 +39,8 @@
 | Tencent CodeBuddy | `tencent-codebuddy` | `tencent-codebuddy/cli-jsonl-v1` | **Experimental** | CLI OpenAI-style JSONL（`role`/`content`/`sessionId`），extension variant 待分层 + golden（`tests/golden.rs`） |
 | Cline | `cline` | `cline/api-conversation-history-v1` | **Experimental** | `api_conversation_history.json` JSON family + golden（`tests/golden.rs`） |
 | Aider | `aider` | `aider/chat-history-md-v1` | **Experimental** | Markdown chat history（`#### ` user prompts），`.aider.chat.history.md` 为候选 root 待核验 + golden（`tests/golden.rs`） |
-| DeepSeek Harness | `deepseek-harness` | — | **Unsupported（deferred）** | 无任何 transcript 证据（本机无 `~/.deepseek`，参考项目无 adapter）；决策见 `deferred-deepseek-zcode.md` |
-| ZCode | `zcode` | — | **Unsupported（deferred）** | 无任何 transcript 证据（本机无 `~/.zcode`，参考项目无 adapter）；决策见 `deferred-deepseek-zcode.md` |
+| DeepSeek Harness | `deepseek-harness` | — | **Unsupported（deferred）** | 无任何 transcript 证据（本机无 `~/.deepseek`，参考项目无 adapter）；决策记录在内部工作记录 `deferred-deepseek-zcode.md`（`.trellis/` 不进公开树），公开侧的可核查事实是 capability.rs 该行与 `deepseek_harness_and_zcode_are_deferred` 测试 |
+| ZCode | `zcode` | — | **Unsupported（deferred）** | 无任何 transcript 证据（本机无 `~/.zcode`，参考项目无 adapter）；决策记录同上（同一内部工作记录，不进公开树） |
 
 14 个已实现 provider 均为 **Experimental**：golden、property、source span 以及
 关系化 Message/Placement/Edge 的合成与 e2e 证据已入库（见下），授权真实数据全量
@@ -104,7 +104,12 @@ manifest 均已填真实限制，见各 `crates/agent-session-grep-provider-*/sr
 - **Tencent CodeBuddy**：根启动关键字用户消息（content 恰为 `"code"`）被过滤；无 cwd pair 观察（无独立 cwd 头记录）；无 native 消息 id（合成 `codebuddy-msg-{seq}`）。
 - **Cline**：JSON 数组文件内无 session id，`session_native_id` 留缺；无字节 span（数组下标 pseudo-span 已移除）；无 native 消息 id（合成 `cline-msg-{seq}`）。
 - **Aider**：span 为派生近似（块起始行 + 文本长度），非逐字节整行切片；blockquote 工具/编辑输出并入助手正文；会话身份为首个 run 头时间戳。
-- **OpenCode / Cursor / Hermes / Kimi（SQLite 类与文档类）**：一律只读打开（`SQLITE_OPEN_READONLY` + `busy_timeout`），绝不写 provider 数据库；无文件内字节 span（round-trip 标 N/A）。
+- **OpenCode / Cursor（SQLite 类）**：源字节先落临时文件，再以
+  `SQLITE_OPEN_READONLY` + `busy_timeout` 打开，绝不写 provider 数据库；无文件内
+  字节 span（round-trip 标 N/A）。
+- **Hermes / Cline（整文档 JSON 类）**：单个 JSON 文档一次读入，无逐记录字节
+  边界，故无文件内字节 span（round-trip 标 N/A）。Kimi Code 不属此列：wire.jsonl
+  是行式 JSONL，逐消息 span 为真实字节区间（见上表 `source_span` 行）。
 - **共同（关系模型已实现，语料级回归已闭合）**：稳定 `Message` 与上下文
   `MessagePlacement` / `MessageEdge` 已分离，session-scoped graph、精确 placement
   evidence、不同上下文 parent 以及相应合成/e2e 覆盖均已实现。全量授权运行
@@ -175,5 +180,9 @@ manifest 均已填真实限制，见各 `crates/agent-session-grep-provider-*/sr
    的行为深度，不是 provider 原生能力——`incremental` 现已如实记为全 14 个
    provider 一律 `derived`（理由见上表该行）。
 
-审计依据：`.trellis/tasks/08-15-sixteen-provider-evidence-wave/research/beta-promotion-audit.md`
-（2026-08-16，逐项只读核查，含每项的 file:line 与测试名）。
+审计依据（内部工作记录，`scripts/release/export_public_tree.py` 把 `.trellis/`
+整体排除，故不在公开树内）：
+`.trellis/tasks/archive/2026-08/08-15-sixteen-provider-evidence-wave/research/beta-promotion-audit.md`
+（2026-08-16，逐项只读核查，含每项的 file:line 与测试名）。公开树内的可核查证据
+是本表逐行点名的守护测试（`crates/agent-session-grep-cli/tests/provider_matrix.rs`
+与各 provider crate 的 `tests/golden.rs` / `tests/properties.rs`）。
