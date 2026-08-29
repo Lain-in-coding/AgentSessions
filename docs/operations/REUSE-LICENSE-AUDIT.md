@@ -16,26 +16,38 @@
 
 ## 1. 审查范围
 
-对 `Github_src/` 下 12 个同类开源项目的调研结论做许可与复用判定。判定分四级：
+对 `Github_src/` 下 14 个同类开源项目的调研结论做许可与复用判定。判定分四级：
 
 - **direct-copy**：许可 + 语言兼容，保留版权/NOTICE、标注修改后可直接复制到本项目 Rust 源码；
 - **adapt**：设计与实现可移植，但需按本项目 Canonical/契约重写，不逐行照抄；
 - **idea-only**：仅借鉴设计思想或契约形状；语言不匹配（Swift/TS）、许可存疑或有实测缺陷者降到此级；
 - **reject**：许可红线、反模式或半成品，禁止复用。
 
+> 范围更新（2026-08-29）：本报告此前写 12 项，是 cc-sessions-viewer
+>（2026-08-29 加入本地镜像并精读）加入之前的快照。现在名单为 14 项。
+
 ## 2. 全局硬约束（Release 阻断级）
 
-1. **cass 是唯一法律红线**：其 LICENSE 含 OpenAI/Anthropic Restricted-Party Rider，代码整体 **reject**，只能由未读其源码者 clean-room 借鉴抽象思想。任何直接 copy/analyze/index 其代码的行为都是许可违约。
-2. **fixtures 一律重造**：所有调研项目的 fixtures provenance 未核实，禁止复制任何真实 transcript；本项目按 `docs/security/FIXTURE-REDACTION-POLICY.md` 生成合成数据。
-3. **语言边界**：本项目是全新 Rust 项目。Rust 仓（ctx / agf / Recall / hstry / memex / sessiongrep / fast-resume）代码在许可允许下可 copy/adapt；Swift/TS 仓（agent-sessions / AgentRecall / claude-historian-mcp）只能 idea-only。
-4. **依赖许可单列**：任何被复用资产引入的传递依赖（如 agf 的 nucleo 系列为 MPL-2.0，须 attribution；tantivy 传递引入 ort-sys 许可不干净——已由 spike 实证）必须进 SBOM 与 `cargo deny` 白名单，未过 deny 门不得合入。
-5. **制品 attribution 诚实边界**：release pipeline 生成的
-   `THIRD-PARTY-DEPENDENCIES.json/.csv` 是可审计 resolved-dependency 报告，
+1. **cass 与 cc-sessions-viewer 是两个法律边界,形态不同**:
+   - cass 的 LICENSE 含 OpenAI/Anthropic Restricted-Party Rider,代码整体
+     **reject**,只能由未读其源码者 clean-room 借鉴抽象思想。任何直接
+     copy/analyze/index 其代码的行为都是许可违约;
+   - cc-sessions-viewer 的 README 显示 MIT badge 但仓库内**没有 LICENSE
+     文件**(GitHub 仓库元数据 `licenseInfo: null`)。没有可依赖的授权文本,
+     就无法证明存在 MIT 许可——因此按**无授权**处理:不得逐字复制其代码
+     (包括正则集合、SQL、前端组件),只能 clean-room 引用规范级的文档化
+     设计。一旦作者补上真正的 LICENSE 文件,按新许可重新核定,并在本报告
+     记录复核结果。
+2. **fixtures 一律重造**:所有调研项目的 fixtures provenance 未核实,禁止复制任何真实 transcript;本项目按 `docs/security/FIXTURE-REDACTION-POLICY.md` 生成合成数据。
+3. **语言边界**:本项目是全新 Rust 项目。Rust 仓(ctx / agf / Recall / hstry / memex / sessiongrep / fast-resume)代码在许可允许下可 copy/adapt;Swift/TS 仓(agent-sessions / AgentRecall / claude-historian-mcp)只能 idea-only。
+4. **依赖许可单列**:任何被复用资产引入的传递依赖(如 agf 的 nucleo 系列为 MPL-2.0,须 attribution;tantivy 传递引入 ort-sys 许可不干净——已由 spike 实证)必须进 SBOM 与 `cargo deny` 白名单,未过 deny 门不得合入。
+5. **制品 attribution 诚实边界**:release pipeline 生成的
+   `THIRD-PARTY-DEPENDENCIES.json/.csv` 是可审计 resolved-dependency 报告,
    仅记录 `cargo metadata --locked --format-version 1` 与 `Cargo.lock` 实际
-   提供的 name/version/source/lock checksum/declared license 字段；Cargo
-   metadata 未声明 license 时保持 null/缺失状态，不推断 SPDX ID，不把它
-   说成完整 SPDX SBOM 或最终 legal clearance，也不凭空生成固定 NOTICE/
-   归属文字；每次 release bundle 仍携带该报告供 approver 复核。
+   提供的 name/version/source/lock checksum/declared license 字段;Cargo
+   metadata 未声明 license 时保持 null/缺失状态,不推断 SPDX ID,不把它
+   说成完整 SPDX SBOM 或最终 legal clearance,也不凭空生成固定 NOTICE/
+   归属文字;每次 release bundle 仍携带该报告供 approver 复核。
 
 ## 3. 可复用项判定（经独立复核 CONFIRMED）
 
@@ -62,6 +74,7 @@
 | claude-historian (MIT, TS) | MCP search→at→get_session 渐进披露契约 | idea-only | `../contracts/CONTRACT-cli-robot-mcp-draft.md` §8 | 署名归属存疑，引用前澄清 |
 | agentsview (Go) | SQLite 检索 UI 的 schema/查询参考 | idea-only | `../contracts/CONTRACT-cli-robot-mcp-draft.md` | 未直接复用资产，仅概念核对 |
 | cass (MIT+Rider) | fail-open/staged-publish/robot-freeze 思想 | idea-only（clean-room） | Provider staging、发布与 Robot contract | 禁读源码 |
+| cc-sessions-viewer (无 LICENSE 文件) | 13 类活动分类器、定价公式、CostSource 四值溯源、IME 防抖 hook、JSON 行前缀字段提取、树病态检测、parent 目录 watch 三件套、append-only rename 标题回写、meta_kind 注入分类 | idea-only（无授权文本,不逐字复制） | `../agent-session-grep-application` 的 tool-activity 增强;统计/成本(未来);搜索框防抖;会话标题与注入分类(对照补强);任何树形 transcript provider 的健壮性检查;实时 watch 类功能;写路径安全样板 | 无逐字代码落地;实现均为独立编写,不引用其字符串常量、正则集合或 SQL |
 
 ## 4. 反模式登记（作为验收反例，禁止复用）
 
@@ -104,5 +117,6 @@ approver sign the direct-copy/attribution matrix.
 
 - 每项拟复用资产有明确判定、来源许可、attribution 义务；
 - cass clean-room 边界有可执行约束（禁止读其源码者以外的人实现）；
+- cc-sessions-viewer 的授权状态有结论（作者补 LICENSE 后按新许可核定,否则一直按无授权处理）；
 - 依赖传递许可进入 cargo-deny 白名单流程；
 - approver 签署后本报告转 Accepted，方可在 0.1 之后按判定复用。
