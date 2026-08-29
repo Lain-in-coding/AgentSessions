@@ -397,9 +397,10 @@ impl ProviderAdapter for GrokBuildAdapter {
 
 /// Extract plain text from a Grok content value.
 ///
-/// Grok content can be a string or an array of content blocks with `text`
-/// fields (similar to Claude's content blocks). Non-string, non-array values
-/// yield empty text.
+/// Grok ACP uses all three content shapes in documented/reference transcripts:
+/// a bare string, an array of content blocks, and a single `{type:"text",text:…}`
+/// object. The object form is common in fast-resume/Recall fixtures. Non-string,
+/// non-array/object values yield empty text.
 fn grok_content_text(content: &serde_json::Value) -> String {
     match content {
         serde_json::Value::String(s) => s.clone(),
@@ -415,6 +416,11 @@ fn grok_content_text(content: &serde_json::Value) -> String {
             }
             buf
         }
+        serde_json::Value::Object(object) => object
+            .get("text")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
         _ => String::new(),
     }
 }
@@ -536,6 +542,36 @@ mod tests {
             self.texts.push(event.text.to_string());
             Ok(())
         }
+    }
+
+    #[test]
+    fn parse_object_content_shape_is_not_dropped() {
+        // Reference ACP fixtures (fast-resume/Recall) encode a chunk as one
+        // `{type:"text",text:…}` object rather than a bare string or array. Before
+        // the object branch in `grok_content_text`, both user and assistant chunks
+        // became empty, hit `continue`, and vanished from the index.
+        let adapter = GrokBuildAdapter::new();
+        let fixture = r#"{"params":{"update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"object-shaped user"}},"_meta":{"promptIndex":0}}}
+{"params":{"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"object-shaped assistant"}},"_meta":{"promptId":"p1"}}}
+"#;
+        let mut sink = TextSink { texts: vec![] };
+        let report = adapter.parse(fixture.as_bytes(), &mut sink).unwrap();
+        assert_eq!(report.committed, 2);
+        assert_eq!(
+            sink.texts,
+            vec![
+                "object-shaped user".to_string(),
+                "object-shaped assistant".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn object_content_shape_keeps_empty_object_non_message() {
+        // An object without a string `text` still carries no searchable prose;
+        // preserve the existing empty-content skip rather than stringifying the
+        // object or inventing a body.
+        assert!(grok_content_text(&serde_json::json!({"type": "image"})).is_empty());
     }
 
     #[test]
