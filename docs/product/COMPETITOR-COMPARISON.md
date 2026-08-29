@@ -17,7 +17,7 @@
 
 | 项目 | 形态 | License | Provider 覆盖 | 检索方式 | 其他可复现事实 |
 |---|---|---|---|---|---|
-| **agent-session-grep (本产品)** | Rust CLI + MCP + Robot + TUI + Web UI | MIT OR Apache-2.0 | 14 实现 + 2 deferred(16 行矩阵,诚实分级) | FTS5 lexical 默认 + optional semantic-candle (local E5) behind feature flag; default bigram-hash fuzzy-lexical; hybrid RRF 指标仅供参考 | evidence-first(source span)、handoff-pack/v1、resume dry-run、零遥测可验证、跨边界默认脱敏 |
+| **agent-session-grep (本产品)** | Rust CLI + MCP + Robot + TUI + Web UI | MIT OR Apache-2.0 | 14 实现 + 2 deferred(16 行矩阵,诚实分级) | FTS5 lexical 默认 + optional semantic-candle (local E5) behind feature flag; default bigram-hash fuzzy-lexical; hybrid RRF 指标仅供参考 | evidence-first(source span,14 家中 10 家格式可得)、handoff-pack/v1、resume dry-run、零遥测可验证、跨边界默认脱敏 |
 | ctx | Rust CLI | MIT | 40+ | hybrid RRF | 语义+词法融合,分阶段发布 |
 | coding_agent_session_search (cass) | Python CLI | **restricted-party rider** | 40+(claimed) | hybrid | 仅 clean-room 思路可引用;不可复现对比 |
 | agentsview | TS CLI | MIT | 40+ | hybrid | secret 扫描但非分层边界 |
@@ -38,7 +38,7 @@
 | 维度 | agent-session-grep | 参考项目快照 | 已核验差异 |
 |---|---|---|---|
 | 检索 | FTS5 lexical 默认 + optional semantic-candle (local E5) behind feature flag; 默认 bigram-hash fuzzy-lexical; hybrid 使用 RRF | ctx 使用 hybrid RRF | 默认构建没有真实 semantic model(bigram-hash fuzzy-lexical);可选 semantic-candle feature 提供本地 Candle E5 后端(默认 off、离线导入);semantic/hybrid gate metrics 仅供参考、benchmark 门未闭,不据此宣称质量或中文优势 |
-| 证据 | 每条命中带 source span,并定义 handoff pack 原文/推断分栏 | hstry 有 evidence 能力 | 契约形态不同;未做跨项目证据质量 benchmark |
+| 证据 | 格式带得出字节区间的 provider 其命中带 source span(capability.rs 的 `source_span`:9 家 native、aider derived、opencode/cursor/hermes/cline 如实 unsupported),并定义 handoff pack 原文/推断分栏 | hstry 有 evidence 能力 | 契约形态不同;未做跨项目证据质量 benchmark |
 | 身份 | StableId 三级 + durable outbox + CAS generation + 失败不删除 | hstry 使用 UUID v5;固定快照中未见 durable outbox | 两者身份与恢复机制不同;本表不作可靠性优劣结论 |
 | 成熟度 | certified/GA/beta/experimental/unsupported 证据晋级 | 各项目使用各自 provider 支持口径 | 术语与证据门槛不可直接等同 |
 | 隐私 | 零遥测代码约束 + CI 静态检查 + 跨边界默认脱敏 | agentsview 有 secret 扫描 | 边界模型不同;仅比较当前已实现的控制 |

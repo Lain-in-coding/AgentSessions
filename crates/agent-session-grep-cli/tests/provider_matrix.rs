@@ -1752,6 +1752,43 @@ fn readme_and_changelog_publish_every_applied_lexical_rank_signal() {
     }
 }
 
+/// 对外竞品对比表原文。它是 README 之外第二处对"证据能力"下断言的公开文档，
+/// 却没有任何守护——README 的 "every hit carries a source span" 被改正后，
+/// 这里的「每条命中带 source span」原封不动地留了下来。
+const COMPETITOR_COMPARISON: &str = include_str!("../../../docs/product/COMPETITOR-COMPARISON.md");
+
+#[test]
+fn competitor_comparison_span_coverage_matches_capability_matrix() {
+    // source span 不是全 provider 能力：SQLite 源（opencode/cursor）与整文档
+    // JSON 源（hermes/cline）如实报 unsupported。任何"每条命中都带 span"的
+    // 绝对口径都是虚报，且正是这条被抓过一次的错误。
+    let matrix = ProviderCapabilityMatrix::current();
+    let implemented: Vec<_> = matrix
+        .providers
+        .iter()
+        .filter(|p| p.maturity != ProviderMaturity::Unsupported)
+        .collect();
+    let with_span = implemented
+        .iter()
+        .filter(|p| p.source_span != CapabilityLevel::Unsupported)
+        .count();
+    let expected = format!("{} 家中 {with_span} 家格式可得", implemented.len());
+    assert!(
+        COMPETITOR_COMPARISON.contains(&expected),
+        "竞品对比表的 span 覆盖计数与 capability.rs 漂移，应包含 `{expected}`"
+    );
+
+    // 反向：绝对口径不得复活。
+    for inflated in ["每条命中带 source span", "每条命中都带 source span"] {
+        assert!(
+            !COMPETITOR_COMPARISON.contains(inflated),
+            "竞品对比表出现绝对口径 `{inflated}`，但 {} 个已实现 provider 中有 {} 个如实报 unsupported",
+            implemented.len(),
+            implemented.len() - with_span
+        );
+    }
+}
+
 #[test]
 fn changelog_provider_claims_match_capability_matrix() {
     // CHANGELOG 的 `[Unreleased]` 段落写着 "16-provider capability matrix"、
