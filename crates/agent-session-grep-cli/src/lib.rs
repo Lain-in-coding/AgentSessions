@@ -961,9 +961,9 @@ USAGE:
     agent-session-grep --help | --version
 
 COMMANDS:
-    ingest <file>          解析原始 .jsonl 文件并入库（只读源）
-    sync <file>...          原子扫描多个 .jsonl 文件；无变化时不生成新 generation
-    sync --discover          自动发现各 provider 数据根下的 .jsonl 源并同步（只读源）
+    ingest <file>          解析单个 transcript 文件并入库（只读源）
+    sync <file>...          原子扫描多个 transcript 文件；无变化时不生成新 generation
+    sync --discover          自动发现各 provider 数据根下的源并同步（jsonl/json/db；只读源）
     index <id-fact> <text> 直接写入一条 catalog + 索引（切片期写入入口）
     index rebuild          从权威 catalog 全量重投影 FTS 索引（维护命令）
     index embeddings       从权威 catalog 构建语义向量索引（semantic/hybrid 检索前置）
@@ -1217,15 +1217,15 @@ fn subcommand_help_text(cmd: &str) -> &'static str {
                      示例：agent-session-grep --db <path> status"
         }
         "sync" => {
-            "sync <file>...：原子扫描一个或多个 .jsonl 文件入库；无变化不写库。\n\
-                   sync --discover：自动发现各 provider 数据根（~/.claude/projects、~/.codex/sessions）下的 .jsonl 源并同步。\n\
+            "sync <file>...：原子扫描一个或多个 transcript 文件入库；无变化不写库。\n\
+                   sync --discover：自动发现 12 个已登记 provider 数据根（~/.claude/projects、~/.codex/sessions 等，逐根登记扩展名 jsonl/json/db）下的源并同步。\n\
                    示例：agent-session-grep --db <path> --robot sync 会话.jsonl\n\
                    示例：agent-session-grep --db <path> sync --discover\n\
                    约束：单个 transcript 文件应只包含一个会话；检测到多个 sessionId 时仍归属首个会话，并在 warnings 报告。\n\
-                   提示：只接受 .jsonl 文件，不接受目录；--discover 会递归扫描 provider 数据根。"
+                   提示：接受任何能被 provider 注册表识别的 transcript 文件（.jsonl / .json / .md / SQLite .db），不接受目录；--discover 会递归扫描 provider 数据根。"
         }
         "ingest" => {
-            "ingest <file>：解析单个 .jsonl 文件入库。\n\
+            "ingest <file>：解析单个 transcript 文件入库（.jsonl / .json / .md / SQLite .db）。\n\
                      示例：agent-session-grep --db <path> ingest 会话.jsonl\n\
                      约束：单个 transcript 文件应只包含一个会话；检测到多个 sessionId 时仍归属首个会话，并输出诊断 warning。"
         }
@@ -4013,7 +4013,7 @@ fn sync_files(
     for path in paths {
         if std::path::Path::new(path).is_dir() {
             return Err(CliError::usage(
-                "sync 接受一个或多个 .jsonl 文件，不接受目录；\
+                "sync 接受一个或多个 transcript 文件，不接受目录；\
                  需要同步整个目录时，请用你的 shell 展开文件列表，把文件逐个传给 sync",
             ));
         }
