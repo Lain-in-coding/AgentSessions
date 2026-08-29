@@ -89,7 +89,70 @@ git -C public-history-audit.git log --all --name-only --pretty=format: |
 Do not put real private values in this tracked runbook or in a committed
 replacement file.
 
-## Measured read-only history audit
+## Measured read-only history audit — re-measured 2026-08-29 at `e0ff3ad`
+
+The snapshot above is kept for comparison but is stale: it was taken when the
+tree held 277 exportable files, and the tree has since grown to 1017 tracked
+files (504 of them inside the export set). Re-measured with strictly read-only
+commands — `git log --all --extended-regexp -G<pattern>` over every ref, plus
+`git ls-files` to classify each matching path. Counts only; no private value is
+recorded here. History was not modified.
+
+**Methodology difference, stated so the two tables are not misread as
+comparable.** This pass counts *commits and distinct files* per family, not
+introduced match-lines, and its patterns are deliberately **broader** than the
+scanner's: no negative lookbehind on the Unix home forms and a looser worktree
+form. A `-G` hit means some commit's diff added or removed a matching line, so a
+file listed as "still in HEAD" may carry the match only in an older revision.
+That is the point of the exercise — HEAD being clean says nothing about what the
+history retains.
+
+| pattern family | matching commits | distinct files | still in HEAD |
+| --- | ---: | ---: | ---: |
+| Windows user home paths | 21 | 18 | 15 |
+| Unix user home paths (`/Users/`, `/home/`) | 24 | 20 | 18 |
+| machine roots (checkout/reference roots) | 26 | 40 | 20 |
+| worktree coordinates | 18 | 19 | 5 |
+| secret shapes (GitHub PAT, AWS key, private key block) | 12 | 5 | 4 |
+| union of all families | 63 distinct commits | 71 | 47 |
+
+Union split by publication relevance:
+
+- **32 union files are inside the export set** (tracked, not under an excluded
+  internal prefix). Every one is either a source file whose match is a synthetic
+  fixture the scanner already allowlists, a golden fixture whose placeholder home
+  is BLAKE3-pinned and documented in its `PROVENANCE.md`, this runbook and
+  `scripts/evidence/privacy_scan.py` (which necessarily contain the patterns
+  themselves), or a document quoting an example path. The current-tree scan at
+  this SHA reports **0 findings**.
+- **24 union files no longer exist at HEAD** and are reachable only through
+  history: 21 are `.trellis/` internal coordination records, plus
+  `crates/agent-session-grep-application/src/handoff_markdown.rs`,
+  `crates/agent-session-grep-cli/src/main.rs` (superseded by the CLI lib split),
+  and `docs/release/go-no-go.2026-08-19.md`.
+- The 5 secret-shape files are the redaction detector
+  (`crates/agent-session-grep-ports/src/redact.rs`), its boundary application
+  (`crates/agent-session-grep-cli/src/redaction.rs`), the `serve` POST-echo
+  regression that asserts a synthetic token is *not* reflected, and two internal
+  research notes. Documentation-style vectors only. **No credential rotation is
+  triggered**, consistent with the 08-18 measurement.
+
+**What this means for the owner decision.** The two options are not equally
+gated by these numbers:
+
+- **Option A** publishes an exported tree with no prior history, so the 63
+  history commits are out of scope by construction. Its only privacy gate is the
+  current-tree scan at the publication SHA, which is green. Option A is
+  executable today.
+- **Option B** publishes this history, so it must scrub all 63 commits across 71
+  files — including the 24 paths that no longer exist at HEAD and therefore
+  cannot be fixed by editing the working tree. Those 24 are dominated by
+  `.trellis/` records, which a rewrite would most cleanly remove by path rather
+  than by text replacement.
+
+Re-run this measurement at the exact publication SHA; it is cheap and read-only.
+
+## Measured read-only history audit (2026-08-18 snapshot, kept for comparison)
 
 Snapshot measured 2026-08-18 at commit `f7e2a49` with strictly read-only
 commands: `git log --all -G<pattern>` over every ref, plus per-commit diff
