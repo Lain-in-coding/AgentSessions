@@ -4217,6 +4217,56 @@ fn error_envelope_command_points_at_the_failing_token() {
 }
 
 #[test]
+fn unknown_subcommand_hint_lists_every_command_the_help_promises() {
+    // `--help` 的 COMMANDS 段与 `unknown subcommand` 的"可用命令"提示是两处
+    // 手写清单，历史上已漂移（handoff/resume/hook/serve/providers/model 存在
+    // 于帮助却被提示否认）。新手把提示当权威，会得出"这个命令不存在"的错误
+    // 结论。此测试把两者钉在一起：帮助里列出的每个命令都必须出现在提示里。
+    let help = run_bare(&["--help"]);
+    assert!(help.status.success(), "help failed: {}", stdout(&help));
+    let help_text = stdout(&help);
+    let commands_block = help_text
+        .split("COMMANDS:")
+        .nth(1)
+        .expect("help must have a COMMANDS block")
+        .split("\nPAGINATION")
+        .next()
+        .expect("COMMANDS block must be delimited");
+    // COMMANDS 行形如 `    <name>[ <sub>|<args>]   <说明>`；取首个 token 即命令名。
+    let mut promised: Vec<String> = commands_block
+        .lines()
+        .filter_map(|line| line.strip_prefix("    "))
+        .filter(|line| !line.starts_with(' '))
+        .filter_map(|line| line.split_whitespace().next())
+        .map(str::to_string)
+        .collect();
+    promised.sort();
+    promised.dedup();
+    assert!(
+        promised.len() >= 20,
+        "COMMANDS 解析出的命令数异常（{}）：{promised:?}",
+        promised.len()
+    );
+
+    let (_dir, db) = temp_db("unknown-subcommand");
+    let out = run(&db, &["definitely-not-a-command"]);
+    assert_eq!(out.status.code(), Some(2), "stdout={}", stdout(&out));
+    let frame = parse_first_line(&out);
+    assert_envelope_shape(&frame, false);
+    assert_eq!(frame["error"]["code"], "invalid_request", "{frame}");
+    let hint = frame["error"]["message"]
+        .as_str()
+        .expect("message is a string")
+        .to_string();
+    for command in &promised {
+        assert!(
+            hint.contains(command.as_str()),
+            "帮助承诺的命令 {command} 未出现在 unknown subcommand 提示里: {hint}"
+        );
+    }
+}
+
+#[test]
 fn sync_directory_rejection_is_path_free_and_platform_neutral() {
     // R2.2：sync 传目录 → invalid_request（exit 2）；消息不含路径，展开示例
     // 平台中立（不给 PowerShell-only 的 Get-ChildItem 例子）。robot envelope

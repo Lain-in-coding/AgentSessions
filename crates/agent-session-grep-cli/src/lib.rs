@@ -1103,32 +1103,38 @@ fn help_envelope(command: &str, data: serde_json::Value, request_id: Option<&str
     )
 }
 
+/// 全部子命令名，与 `--help` 的 COMMANDS 段同序。
+///
+/// 单一事实来源：[`known_subcommand`] 的识别与 dispatch 的 `unknown subcommand`
+/// 提示都读这一份清单。两处各自手写会漂移——新增命令只改了一处时，帮助里
+/// 存在的命令会被"可用命令"提示否认（新手照提示改写反而更错）。
+const KNOWN_SUBCOMMANDS: &[&str] = &[
+    "ingest",
+    "sync",
+    "index",
+    "search",
+    "handoff",
+    "get-message",
+    "get-session-resume",
+    "resume",
+    "hook",
+    "get",
+    "show",
+    "list",
+    "context",
+    "status",
+    "mcp",
+    "tui",
+    "serve",
+    "doctor",
+    "providers",
+    "config",
+    "model",
+];
+
 /// 是否为已知子命令（用于子命令 `--help` 拦截与 unknown-subcommand 报错提示）。
 fn known_subcommand(cmd: &str) -> bool {
-    matches!(
-        cmd,
-        "ingest"
-            | "sync"
-            | "index"
-            | "search"
-            | "handoff"
-            | "get-message"
-            | "get-session-resume"
-            | "resume"
-            | "hook"
-            | "get"
-            | "show"
-            | "list"
-            | "context"
-            | "status"
-            | "mcp"
-            | "tui"
-            | "serve"
-            | "doctor"
-            | "providers"
-            | "config"
-            | "model"
-    )
+    KNOWN_SUBCOMMANDS.contains(&cmd)
 }
 
 /// 子命令级帮助文本：渲染该命令的签名、flag 与一个真实示例。由 help/version
@@ -2385,28 +2391,10 @@ fn dispatch(
             let (outcome, data, page, warnings) = render(response);
             Ok(("status", outcome, data, page, warnings))
         }
-        other => {
-            let commands = [
-                "ingest",
-                "sync",
-                "index",
-                "search",
-                "get-message",
-                "get",
-                "show",
-                "list",
-                "context",
-                "status",
-                "mcp",
-                "tui",
-                "doctor",
-                "config",
-            ];
-            Err(CliError::usage(format!(
-                "unknown subcommand: {other}（可用命令：{}；运行 --help 查看完整用法）",
-                commands.join("、")
-            )))
-        }
+        other => Err(CliError::usage(format!(
+            "unknown subcommand: {other}（可用命令：{}；运行 --help 查看完整用法）",
+            KNOWN_SUBCOMMANDS.join("、")
+        ))),
     }
 }
 
