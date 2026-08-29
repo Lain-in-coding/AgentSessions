@@ -195,6 +195,23 @@ fn make_text(rng: &mut XorShift64Star, large: bool) -> String {
 /// 按文档契约独立实现的行前缀状态机 oracle：消费 SourceLine 序列，产出
 /// 期望消息与 session id。实现组织与 adapter 不同（adapter 是流式 flush
 /// 闭包，这里是先收集块再派生），但规则逐条对照模块文档。
+///
+/// 两个行标记在此**独立重写**（不从被测 crate 导入）：oracle 的价值就在于它是
+/// 契约的第二份实现，共享匹配器会让它退化成实现的复述。
+fn oracle_user_prompt_body(line: &str) -> Option<&str> {
+    match line {
+        "####" => Some(""),
+        _ => line.strip_prefix("#### "),
+    }
+}
+
+fn oracle_tool_output_body(line: &str) -> Option<&str> {
+    match line {
+        ">" => Some(""),
+        _ => line.strip_prefix("> "),
+    }
+}
+
 fn oracle(lines: &[SourceLine], use_bom: bool) -> (Vec<ExpectedMessage>, Option<String>) {
     let mut messages: Vec<ExpectedMessage> = Vec::new();
     let mut session_native_id: Option<String> = None;
@@ -237,14 +254,31 @@ fn oracle(lines: &[SourceLine], use_bom: bool) -> (Vec<ExpectedMessage>, Option<
             continue;
         }
 
-        if let Some(rest) = trimmed.strip_prefix("#### ") {
+        if let Some(rest) = oracle_user_prompt_body(trimmed) {
+            // 连续的 `#### ` 行属于同一条提示（aider 的多行输入形态）：留在
+            // user 频道就追加，只有频道切换时才 flush。裸 `####` 是空输入标记，
+            // 属 user 频道且不贡献正文。
+            if current_role.as_deref() == Some("user") {
+                if !current_text.is_empty() {
+                    current_text.push('\n');
+                }
+                current_text.push_str(rest);
+                continue;
+            }
             if let Some(role) = current_role.take() {
                 flush(&role, &mut current_text, current_start, &mut messages);
             }
             current_role = Some("user".to_string());
             current_text = rest.to_string();
             current_start = line.start;
-        } else if trimmed.starts_with("> ") {
+        } else if let Some(rest) = oracle_tool_output_body(trimmed) {
+            // 工具输出频道：aider 自己的输出永远不是用户的话，故它必须结束
+            // user 块（上游 agentsview 的频道切换语义），再按已声明的限制
+            // 折叠进 assistant 正文。
+            if current_role.as_deref() == Some("user") {
+                flush("user", &mut current_text, current_start, &mut messages);
+                current_role = None;
+            }
             if current_role.is_none() {
                 current_role = Some("assistant".to_string());
                 current_start = line.start;
@@ -252,7 +286,7 @@ fn oracle(lines: &[SourceLine], use_bom: bool) -> (Vec<ExpectedMessage>, Option<
             if !current_text.is_empty() {
                 current_text.push('\n');
             }
-            current_text.push_str(trimmed.strip_prefix("> ").unwrap_or(trimmed));
+            current_text.push_str(rest);
         } else if !parse_line.trim().is_empty() {
             if current_role.is_none() || current_role.as_deref() == Some("user") {
                 if current_role.is_some() {
@@ -298,14 +332,20 @@ fn build_transcript(seed: u64, with_large_field: bool) -> Generated {
         if roll < 30 {
             // —— user 提示（h4）——
             user_prompts += 1;
-            // 10% 空提示（"#### " 无内容）→ 空块被静默丢弃。
-            let content = if rng.chance(10) {
-                String::new()
+            // 10% 空提示 → 空块被静默丢弃；其中一半写成 aider 的**裸** `####`
+            // （空输入形态，上游 agentsview 以 `line == "####"` 单独匹配），
+            // 另一半写成带空格的 `"#### "`。
+            let text = if rng.chance(10) {
+                if rng.chance(50) {
+                    "####".to_string()
+                } else {
+                    "#### ".to_string()
+                }
             } else {
-                make_text(&mut rng, false)
+                format!("#### {}", make_text(&mut rng, false))
             };
             lines.push(SourceLine {
-                text: format!("#### {content}"),
+                text,
                 start: 0, // 渲染阶段回填
             });
         } else if roll < 65 || force_large {
@@ -319,15 +359,17 @@ fn build_transcript(seed: u64, with_large_field: bool) -> Generated {
         } else if roll < 80 {
             // —— blockquote 工具输出 ——
             blockquotes += 1;
-            let content = if rng.chance(10) {
-                String::new()
+            // 空输出同上：一半写成裸 `>`（上游以 `line == ">"` 单独匹配）。
+            let text = if rng.chance(10) {
+                if rng.chance(50) {
+                    ">".to_string()
+                } else {
+                    "> ".to_string()
+                }
             } else {
-                make_text(&mut rng, false)
+                format!("> {}", make_text(&mut rng, false))
             };
-            lines.push(SourceLine {
-                text: format!("> {content}"),
-                start: 0,
-            });
+            lines.push(SourceLine { text, start: 0 });
         } else if roll < 90 {
             // —— chat 头（多 run 场景）——
             headers += 1;
@@ -393,13 +435,14 @@ fn build_transcript(seed: u64, with_large_field: bool) -> Generated {
     // oracle 派生 ground truth。
     let (messages, session_native_id) = oracle(&lines, use_bom);
 
-    // 覆盖度：blockquote 直接跟在 user 块后（拼进 user 文本的路径）。
-    // 由 oracle 之外单独统计：渲染序列中 "####" 行后紧邻 "> " 行。
+    // 覆盖度：blockquote 直接跟在 user 块后（该行必须结束 user 块的路径）。
+    // 由 oracle 之外单独统计：渲染序列中提示行后紧邻工具输出行。
     let mut blockquote_into_user_block = 0usize;
     let mut prev_was_prompt = false;
     for line in &lines {
-        let is_prompt = line.text.trim_start().starts_with("#### ");
-        let is_quote = line.text.trim_start().starts_with("> ");
+        let trimmed = line.text.trim_start();
+        let is_prompt = trimmed == "####" || trimmed.starts_with("#### ");
+        let is_quote = trimmed == ">" || trimmed.starts_with("> ");
         if is_quote && prev_was_prompt {
             blockquote_into_user_block += 1;
         }
@@ -411,7 +454,10 @@ fn build_transcript(seed: u64, with_large_field: bool) -> Generated {
         .iter()
         .filter(|l| {
             let t = l.text.trim_start();
-            (t.starts_with("#### ") && t.strip_prefix("#### ").unwrap_or("").trim().is_empty())
+            t == "####"
+                || t == ">"
+                || (t.starts_with("#### ")
+                    && t.strip_prefix("#### ").unwrap_or("").trim().is_empty())
                 || (t.starts_with("> ") && t.strip_prefix("> ").unwrap_or("").trim().is_empty())
         })
         .count();

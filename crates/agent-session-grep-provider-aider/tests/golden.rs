@@ -21,6 +21,16 @@ const EXPECTED_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/golden/basic.expected.json"
 );
+/// 多行提示语料：连续的 `#### ` 行是一条提示，另含 aider 空输入的裸 `####`
+/// 与工具输出的裸 `>`。`basic.md` 一条都不覆盖。
+const MULTILINE_FIXTURE_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/golden/multiline-prompt.md"
+);
+const MULTILINE_EXPECTED_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/golden/multiline-prompt.expected.json"
+);
 
 /// 解析 fixture：经共享 sink 全字段捕获，返回报告与 sink。
 fn parse_fixture(bytes: &[u8]) -> (agent_session_grep_ports::ParseReport, CapturingSink) {
@@ -121,6 +131,90 @@ fn golden_spans_are_derived_approximations() {
 #[ignore = "manual regeneration helper — prints canonical JSON for basic.expected.json"]
 fn print_actual_canonical_output_for_regeneration() {
     let bytes = std::fs::read(FIXTURE_PATH).expect("read basic.md fixture");
+    let hash = blake3::hash(&bytes).to_hex().to_string();
+    let (report, sink) = parse_fixture(&bytes);
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&golden::canonical_json(&hash, &report, &sink.messages))
+            .unwrap()
+    );
+}
+
+// ---- 多行提示与裸标记语料（multiline-prompt.md）----
+//
+// `basic.md` 里每条 `#### ` 提示都只有一行，也没有裸 `####` / `>` 标记，
+// 于是"多行提示被切成 N 条单行消息"与"裸标记被当成助手正文"两个缺陷在
+// golden 全绿的情况下存活了下来。
+
+#[test]
+fn multiline_golden_canonical_output_is_pinned() {
+    let expected = golden::read_expected(MULTILINE_EXPECTED_PATH);
+    let bytes = golden::read_fixture_verified(MULTILINE_FIXTURE_PATH, &expected);
+    let (report, sink) = parse_fixture(&bytes);
+    let hash = blake3::hash(&bytes).to_hex().to_string();
+    let actual = golden::canonical_json(&hash, &report, &sink.messages);
+    let actual_pretty = serde_json::to_string_pretty(&actual).expect("serialize actual");
+    assert_eq!(
+        actual, expected,
+        "multiline canonical 输出与 pinned 期望不一致——parser 行为漂移或 fixture 未经评审变更。actual =\n{actual_pretty}"
+    );
+}
+
+#[test]
+fn multiline_golden_keeps_one_prompt_as_one_message() {
+    // 这条是本 fixture 存在的理由：连续 `#### ` 行是**一条**提示，必须以一条
+    // 消息进索引，否则跨行短语检索不到；裸 `####` 不得变成助手正文。
+    let expected = golden::read_expected(MULTILINE_EXPECTED_PATH);
+    let bytes = golden::read_fixture_verified(MULTILINE_FIXTURE_PATH, &expected);
+    let (report, sink) = parse_fixture(&bytes);
+    let users: Vec<&str> = sink
+        .messages
+        .iter()
+        .filter(|m| m.role == "user")
+        .map(|m| m.text.as_str())
+        .collect();
+    assert_eq!(
+        users.len(),
+        1,
+        "三行连续提示必须合成一条 user 消息：{users:?}"
+    );
+    assert_eq!(users[0].lines().count(), 3, "三行正文必须都在同一条消息里");
+    for m in &sink.messages {
+        assert!(
+            !m.text.trim().is_empty(),
+            "seq={}: 不得出现空正文消息",
+            m.seq
+        );
+        assert_ne!(m.text.trim(), "####", "裸 `####` 不得成为消息正文");
+        assert!(
+            !m.text.contains("####"),
+            "seq={}: 提示标记不得进入正文：{:?}",
+            m.seq,
+            m.text
+        );
+    }
+    assert_eq!(report.committed, sink.messages.len());
+}
+
+#[test]
+fn multiline_golden_probe_and_parse_never_mutate_source_bytes() {
+    let expected = golden::read_expected(MULTILINE_EXPECTED_PATH);
+    let bytes = golden::read_fixture_verified(MULTILINE_FIXTURE_PATH, &expected);
+    assert_read_only(&bytes, |source| AiderAdapter::new().probe(source))
+        .expect("multiline golden probe must succeed");
+    let mut sink = CapturingSink::default();
+    let report = assert_read_only(&bytes, |source| {
+        AiderAdapter::new().parse(source, &mut sink)
+    })
+    .expect("multiline golden parse must succeed");
+    assert_eq!(report.committed, sink.messages.len());
+}
+
+/// multiline fixture 的手动再生辅助（输出写入 `multiline-prompt.expected.json`）。
+#[test]
+#[ignore = "manual regeneration helper — prints canonical JSON for multiline-prompt.expected.json"]
+fn print_actual_multiline_canonical_output_for_regeneration() {
+    let bytes = std::fs::read(MULTILINE_FIXTURE_PATH).expect("read multiline-prompt.md fixture");
     let hash = blake3::hash(&bytes).to_hex().to_string();
     let (report, sink) = parse_fixture(&bytes);
     println!(

@@ -201,8 +201,22 @@ impl ProviderAdapter for AiderAdapter {
                 continue;
             }
 
-            if let Some(rest) = trimmed.strip_prefix("#### ") {
-                // User prompt: flush previous, emit new user message.
+            if let Some(rest) = strip_user_prompt_marker(trimmed) {
+                // User prompt line. aider writes a multi-line prompt as
+                // **consecutive** `#### ` lines, so staying on the user channel
+                // must append rather than restart: the upstream this adapter is
+                // adapted from (agentsview `internal/parser/aider.go`) is an
+                // anchored channel state machine that only emits "whenever the
+                // channel switches". Restarting per line split one prompt into N
+                // one-line messages, so a phrase spanning two lines could not be
+                // found at all and the message count was inflated.
+                if current_role == Some("user") {
+                    if !current_text.is_empty() {
+                        current_text.push('\n');
+                    }
+                    current_text.push_str(rest);
+                    continue;
+                }
                 if let Some(role) = current_role {
                     flush(
                         role,
@@ -216,8 +230,26 @@ impl ProviderAdapter for AiderAdapter {
                 current_role = Some("user");
                 current_text = rest.to_string();
                 current_start = start;
-            } else if trimmed.starts_with("> ") {
-                // Tool/edit output (blockquote): treat as system/assistant context.
+            } else if let Some(rest) = strip_tool_output_marker(trimmed) {
+                // Tool/edit output ends a user turn: aider's own output is never
+                // the user's words. Before this, a blockquote line directly after
+                // a `#### ` prompt was appended to the *user* block, so aider's
+                // "Applied edit to …" output was indexed with `role: user` —
+                // contradicting the shipped manifest ("tool/edit blockquote
+                // output is folded into assistant text") and poisoning any
+                // role-filtered search. Upstream agentsview treats `>` as its own
+                // channel, which always switches away from the user channel.
+                if current_role == Some("user") {
+                    flush(
+                        "user",
+                        &mut current_text,
+                        &mut current_start,
+                        &mut seq,
+                        &mut report,
+                        sink,
+                    )?;
+                    current_role = None;
+                }
                 // Append to current assistant block, or start one.
                 if current_role.is_none() {
                     current_role = Some("assistant");
@@ -226,7 +258,7 @@ impl ProviderAdapter for AiderAdapter {
                 if !current_text.is_empty() {
                     current_text.push('\n');
                 }
-                current_text.push_str(trimmed.strip_prefix("> ").unwrap_or(trimmed));
+                current_text.push_str(rest);
             } else if !parse_line.trim().is_empty() {
                 // Plain text: assistant response.
                 if current_role.is_none() || current_role == Some("user") {
@@ -264,6 +296,33 @@ impl ProviderAdapter for AiderAdapter {
 
         Ok(report)
     }
+}
+
+/// aider 的 user 提示行标记：`#### <text>`，以及**空输入**时写出的裸 `####`。
+///
+/// 返回该行贡献的正文（裸标记贡献空串）；非提示行返回 `None`。
+///
+/// 证据：本 adapter 所引上游 agentsview `internal/parser/aider.go` 的 channel
+/// 状态机同时匹配 `HasPrefix("#### ")` 与 `line == "####"`，并注明"aider writes
+/// `#### ` for empty input"。此前只认带空格的前缀，裸 `####` 会掉进"纯文本 →
+/// assistant"分支，把标记本身当成助手正文塞进检索面。
+fn strip_user_prompt_marker(line: &str) -> Option<&str> {
+    if let Some(rest) = line.strip_prefix("#### ") {
+        return Some(rest);
+    }
+    (line == "####").then_some("")
+}
+
+/// aider 的工具/编辑输出行标记：`> <text>`，以及裸 `>`（同上游 `line == ">"`）。
+///
+/// 返回该行贡献的正文（裸标记贡献空串，与上游把空串压进 buffer 同效，使块内
+/// 空行在拼接后保留）；非输出行返回 `None`。裸 `>` 此前同样被误判为 assistant
+/// 正文。输出仍按 manifest 已声明的限制折叠进 assistant 正文。
+fn strip_tool_output_marker(line: &str) -> Option<&str> {
+    if let Some(rest) = line.strip_prefix("> ") {
+        return Some(rest);
+    }
+    (line == ">").then_some("")
 }
 
 #[cfg(test)]
@@ -377,6 +436,55 @@ mod tests {
             self.texts.push(event.text.to_string());
             Ok(())
         }
+    }
+
+    #[test]
+    fn parse_joins_a_multi_line_user_prompt_into_one_message() {
+        // aider 把多行用户提示写成**连续的** `#### ` 行。此前每行都会重启
+        // user 块，于是一条提示被切成 N 条单行消息：跨行短语彻底检索不到，
+        // 消息计数也被虚增。上游 agentsview `internal/parser/aider.go` 的
+        // channel 状态机只在"频道切换"时才 emit。
+        let adapter = AiderAdapter::new();
+        let fixture = "# aider chat started at 2026-01-01 12:00:00\n\n#### please refactor the parser\n#### and keep the spans byte exact\n\nDone.\n";
+        let mut sink = TextSink { texts: vec![] };
+        let report = adapter.parse(fixture.as_bytes(), &mut sink).unwrap();
+        assert_eq!(report.committed, 2, "一条提示 + 一条回答");
+        assert_eq!(
+            sink.texts[0],
+            "please refactor the parser\nand keep the spans byte exact"
+        );
+        assert_eq!(sink.texts[1], "Done.");
+    }
+
+    #[test]
+    fn parse_treats_a_bare_prompt_marker_as_user_channel() {
+        // 空输入时 aider 写出的裸 `####` 此前掉进"纯文本 → assistant"分支，
+        // 把标记本身当成助手正文（`assert` 的第二条就是那时的产出）。它现在
+        // 属于 user 频道且不贡献正文，因此既不污染助手正文，也不产出空消息。
+        let adapter = AiderAdapter::new();
+        let fixture = "# aider chat started at 2026-01-01 12:00:00\n\n####\n\nassistant prose\n";
+        let mut sink = TextSink { texts: vec![] };
+        let report = adapter.parse(fixture.as_bytes(), &mut sink).unwrap();
+        assert_eq!(report.committed, 1);
+        assert_eq!(sink.texts, vec!["assistant prose".to_string()]);
+    }
+
+    #[test]
+    fn parse_treats_a_bare_blockquote_marker_as_tool_output() {
+        // 裸 `>` 同理：它是 aider 的工具输出空行，不是助手正文。按 manifest
+        // 已声明的限制仍折叠进 assistant 正文，块内空行在拼接后保留。
+        // （blockquote 紧跟 `#### ` 时会折叠进 user 块——那是本次改动之外的
+        // 既有行为，故此处让它跟在助手正文之后，只考察裸标记本身。）
+        let adapter = AiderAdapter::new();
+        let fixture = "# aider chat started at 2026-01-01 12:00:00\n\n#### edit it\n\nediting now.\n\n> Applied edit to src/main.rs\n>\n> Applied edit to src/lib.rs\n";
+        let mut sink = TextSink { texts: vec![] };
+        let report = adapter.parse(fixture.as_bytes(), &mut sink).unwrap();
+        assert_eq!(report.committed, 2);
+        assert_eq!(sink.texts[0], "edit it");
+        assert_eq!(
+            sink.texts[1],
+            "editing now.\nApplied edit to src/main.rs\n\nApplied edit to src/lib.rs"
+        );
     }
 
     #[test]
