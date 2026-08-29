@@ -146,7 +146,7 @@ Run the same binary as a stdio MCP server (tools only, sequential, read-only):
 | `get_status` | catalog count and active generation |
 | `doctor` | health probe: `db: "ok"`, schema, generation, interrupted batches |
 
-- Tool results carry the payload twice: `content[0].text` (serialized) and `structuredContent` = `{ outcome, data, warnings, page }` — the same shapes as the robot envelope.
+- Tool results carry the payload twice: `content[0].text` (serialized) and `structuredContent` = `{ outcome, data, redaction, warnings, page }` — the same shapes as the robot envelope. `redaction` reports whether cross-boundary redaction touched this payload (`status: none | applied`, `redacted_count`), so a `[redacted:...]` value is never mistaken for literal transcript text.
 - Business failures (bad cursor, not found) come back as `isError: true` results with `structuredContent.error.canonical_code`; malformed or invalid params are JSON-RPC errors (`-32602`).
 - Cursors are stateless signed tokens: a `page.next_cursor` from one `search_sessions` call works in a later call — even across server restarts — as long as the index generation is unchanged and the TTL has not passed.
 - v0 executes requests sequentially; `notifications/cancelled` is accepted but is a best-effort no-op.

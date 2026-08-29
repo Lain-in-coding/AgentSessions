@@ -318,7 +318,16 @@ impl McpServer<'_> {
         match self.call_tool(name, arguments) {
             Ok(payload) => {
                 // ADR-0009: MCP is a cross-boundary output → redact by default.
-                let (redacted_payload, _redaction) = crate::redaction::redact_value(payload);
+                let (mut redacted_payload, redaction) = crate::redaction::redact_value(payload);
+                // 脱敏状态必须随帧上报（08-15-offline-privacy-hooks design D3）：
+                // 与 Robot envelope 同一 `redaction` 块。少了它，调用方无法区分
+                // "服务端涂红了这个值"与"原文逐字就是 [redacted:...]"，也拿不到
+                // redacted_count——AI 客户端会把涂红标记当成真实历史内容推理。
+                // 状态在脱敏之后插入：块内是计数与静态标识，不参与二次扫描。
+                redacted_payload
+                    .as_object_mut()
+                    .expect("tool payload is a JSON object")
+                    .insert("redaction".into(), protocol::redaction_block(&redaction));
                 // content.text 与 structuredContent 是同一 payload 的两种载体
                 // （2025-06-18 字段；老客户端忽略未知字段，design §0.2）。
                 let text = redacted_payload.to_string();
@@ -1173,6 +1182,8 @@ fn tool_catalog() -> Value {
 }
 
 /// 成功工具 payload（9 个工具同形，design §2）：outcome/data/warnings/page。
+/// 跨边界脱敏状态（`redaction`）由 [`McpServer::handle_tools_call`] 在脱敏之后
+/// 追加——本函数在脱敏之前构造，拿不到计数。
 fn success_payload(
     outcome: Outcome,
     data: Value,
@@ -3069,6 +3080,93 @@ mod tests {
             v["result"]["structuredContent"]["error"]["canonical_code"],
             "not_found"
         );
+    }
+
+    #[test]
+    fn tool_results_report_redaction_status_like_the_robot_envelope() {
+        // ADR-0009 / 08-15-offline-privacy-hooks design D3：MCP 工具结果必须随帧
+        // 上报 `redaction` 块。曾经这里只做脱敏、丢弃状态——调用方拿到
+        // "[redacted:api_key]" 却无法区分"服务端涂红"与"原文逐字如此"，也拿不到
+        // redacted_count。形状与 Robot envelope 单源（protocol::redaction_block）。
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = open_store(&dir);
+        store
+            .commit_batch(&[(
+                StableId::derive(IdKind::Message, Stability::Reconstructed, &[b"secret"]),
+                // 合成密钥形状（与 ports::redact 测试同一约定），非真实凭据。
+                br#"{"role":"user","text":"leaky sk-ant-api03-1234567890abcdef here"}"#.to_vec(),
+                "leaky sk-ant-api03-1234567890abcdef here".to_string(),
+            )])
+            .expect("commit searchable row");
+        let mut server = ready(&store);
+
+        let v = call(&mut server, "search_sessions", json!({ "query": "leaky" }));
+        let payload = &v["result"]["structuredContent"];
+        let hits = payload["data"]["hits"].as_array().expect("hits");
+        assert_eq!(hits.len(), 1, "{payload}");
+        assert_eq!(
+            hits[0]["text"], "leaky [redacted:api_key] here",
+            "{payload}"
+        );
+        let redaction = &payload["redaction"];
+        assert_eq!(redaction["status"], "applied", "{payload}");
+        assert_eq!(redaction["mode"], "default", "{payload}");
+        assert!(
+            redaction["redacted_count"].as_u64().is_some_and(|n| n >= 1),
+            "{payload}"
+        );
+        assert_eq!(
+            redaction["ruleset_version"],
+            crate::redaction::RULESET_VERSION,
+            "{payload}"
+        );
+        assert!(redaction["audit_id"].is_null(), "{payload}");
+        // 双载体仍严格同形（脱敏状态进 text，不只进 structuredContent）。
+        let text = v["result"]["content"][0]["text"]
+            .as_str()
+            .expect("text content");
+        assert_eq!(parse(text), *payload);
+
+        // 无密钥的响应如实报 status=none / count=0——不得省略键（调用方靠它
+        // 判定"未脱敏"，缺键与 none 不是一回事）。
+        let v = call(&mut server, "get_status", json!({}));
+        let redaction = &v["result"]["structuredContent"]["redaction"];
+        assert_eq!(redaction["status"], "none", "{v}");
+        assert_eq!(redaction["redacted_count"], 0, "{v}");
+    }
+
+    #[test]
+    fn every_tool_result_carries_the_redaction_block() {
+        // 9 个工具同形（design §2）：任何成功工具结果都带 redaction 块，
+        // 不允许只在 search 上实现。这里覆盖 catalog-only 夹具即可成功的 6 个；
+        // 需要关系行的另外 3 个（context/message/handoff）由 mcp_e2e.rs 的
+        // `all_tool_results_carry_the_redaction_block` 在真实夹具上覆盖。
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = seeded_store(&dir);
+        let mut server = ready(&store);
+        let cases = [
+            ("doctor", json!({})),
+            ("get_status", json!({})),
+            ("list_providers", json!({})),
+            ("search_sessions", json!({ "query": "hello" })),
+            ("list_sessions", json!({ "limit": 5 })),
+            (
+                "get_session_resume",
+                json!({ "session_id": "ses_v1_ccdd1234-5678-4abc-8def-001122334455" }),
+            ),
+        ];
+        for (tool, arguments) in cases {
+            let v = call(&mut server, tool, arguments.clone());
+            assert_eq!(v["result"]["isError"], false, "{tool}: {v}");
+            let redaction = &v["result"]["structuredContent"]["redaction"];
+            assert!(
+                redaction.is_object(),
+                "{tool} 缺少 redaction 块: {}",
+                v["result"]["structuredContent"]
+            );
+            assert!(redaction["status"].is_string(), "{tool}: {redaction}");
+            assert!(redaction["redacted_count"].is_u64(), "{tool}: {redaction}");
+        }
     }
 
     #[test]

@@ -1982,6 +1982,68 @@ fn mcp_stderr_stays_clean_on_protocol_errors() {
     assert!(stderr.is_empty(), "参数错误不得写入 stderr: {stderr}");
 }
 
+#[test]
+fn all_tool_results_carry_the_redaction_block() {
+    // ADR-0009 / 08-15-offline-privacy-hooks design D3：跨边界脱敏状态必须随
+    // 每个成功工具结果上报。曾经 MCP 只做脱敏、丢弃状态，调用方拿到
+    // "[redacted:...]" 无法区分服务端涂红与原文逐字如此。真实夹具上覆盖全部
+    // 9 个工具（含需要关系行的 context/message/handoff）。
+    let (dir, db) = temp_db("mcp-redaction-block");
+    let (fixture_path, anchor_message) = write_context_fixture(dir.path());
+    let out = run_cli(&db, &["ingest", &fixture_path]);
+    assert!(out.status.success(), "ingest failed: {}", stdout(&out));
+    let session_wire = session_wire_for_message(&db, &anchor_message);
+
+    let calls = [
+        ("doctor", json!({})),
+        ("get_status", json!({})),
+        ("list_providers", json!({})),
+        ("search_sessions", json!({ "query": "ctx" })),
+        ("list_sessions", json!({ "limit": 5 })),
+        ("generate_handoff", json!({ "query": "ctx" })),
+        (
+            "get_session_context",
+            json!({ "session_id": session_wire.as_str() }),
+        ),
+        (
+            "get_session_resume",
+            json!({ "session_id": session_wire.as_str() }),
+        ),
+        (
+            "get_message",
+            json!({ "message_id": anchor_message.as_str(), "around": 1 }),
+        ),
+    ];
+    let mut inputs = vec![
+        initialize_request(1, "2025-06-18"),
+        initialized_notification(),
+    ];
+    for (index, (name, arguments)) in calls.iter().enumerate() {
+        inputs.push(tool_call(index as i64 + 10, name, arguments.clone()));
+    }
+    let frames = mcp_session(&db, &inputs);
+
+    for (index, (name, _)) in calls.iter().enumerate() {
+        let result = &frame_by_id(&frames, index as i64 + 10)["result"];
+        assert_eq!(result["isError"], false, "{name} 应成功: {result}");
+        let payload = &result["structuredContent"];
+        let redaction = &payload["redaction"];
+        assert!(redaction.is_object(), "{name} 缺少 redaction 块: {payload}");
+        assert_eq!(redaction["mode"], "default", "{name}: {redaction}");
+        assert_eq!(redaction["status"], "none", "{name}: {redaction}");
+        assert_eq!(redaction["redacted_count"], 0, "{name}: {redaction}");
+        assert!(
+            redaction["ruleset_version"].is_string(),
+            "{name}: {redaction}"
+        );
+        assert!(redaction["audit_id"].is_null(), "{name}: {redaction}");
+        // 双载体同形：状态进两个载体，不只进 structuredContent。
+        let text = result["content"][0]["text"].as_str().expect("text content");
+        let parsed: Value = serde_json::from_str(text).expect("content.text is JSON");
+        assert_eq!(&parsed, payload, "{name} 双载体漂移");
+    }
+}
+
 // ─── design §4 场景补充：search_sessions facet 参数（08-15 structured-activity）──
 
 #[test]

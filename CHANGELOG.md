@@ -363,6 +363,23 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **MCP tool results redacted secrets but never said so.** Every successful
+  `tools/call` result runs the payload through cross-boundary redaction
+  (ADR-0009), and `handle_tools_call` threw the resulting `RedactionStatus`
+  away: `structuredContent` carried only `{outcome, data, warnings, page}`
+  while the Robot envelope for the same operation carried a `redaction` block.
+  An AI client that received `"text": "leaky [redacted:api_key] here"` could
+  not tell whether the server had masked a secret or the transcript literally
+  said that, and had no `redacted_count` to reason about how much was removed —
+  the exact failure mode MCP exists to avoid. The tool payload now carries the
+  same `redaction` block as the Robot envelope (`mode`, `status`,
+  `ruleset_version`, `redacted_count`, `audit_id`), built by one shared
+  `protocol::redaction_block` so the two boundaries cannot drift, and the
+  status is attached after redaction so it is not itself rescanned. This was
+  a required part of the privacy-hooks design ("attaches `redaction` to
+  `structuredContent`") that was never implemented; no test asserted the key
+  set, so the whole suite stayed green.
+
 - **Lexical search pages silently duplicated hits and hid the strongest one**
   (rank-window pagination). After the rank-signals wave, the fetch window was
   `offset + page + 1` — but re-ranking sorts the whole window, so the pinned

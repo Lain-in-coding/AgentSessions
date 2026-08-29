@@ -365,6 +365,19 @@ pub struct Page {
     pub has_more: bool,
 }
 
+/// 脱敏状态块（ADR-0009）：Robot envelope 与 MCP 工具结果共用同一形状，
+/// 两个跨边界出口不得各写一份（否则一侧漏报脱敏，调用方无法区分
+/// "服务端涂红"与"原文就是 `[redacted:...]`"）。
+pub fn redaction_block(redaction: &RedactionStatus) -> Value {
+    json!({
+        "mode": redaction.mode.as_str(),
+        "status": redaction.status.as_str(),
+        "ruleset_version": redaction.ruleset_version,
+        "redacted_count": redaction.redacted_count,
+        "audit_id": redaction.audit_id,
+    })
+}
+
 /// 成功 envelope。`data` 是已验证的 JSON Value，不接受未校验字符串片段。
 /// `warnings` 原样序列化进 envelope 数组；模式分支（human vs envelope）由 main.rs 决定。
 ///
@@ -397,13 +410,7 @@ pub fn success_envelope(
         "outcome": outcome_str,
         "data": data,
         "retrieval_mode": retrieval_mode.as_str(),
-        "redaction": {
-            "mode": redaction.mode.as_str(),
-            "status": redaction.status.as_str(),
-            "ruleset_version": redaction.ruleset_version,
-            "redacted_count": redaction.redacted_count,
-            "audit_id": redaction.audit_id,
-        },
+        "redaction": redaction_block(redaction),
         "warnings": warnings,
         "page": {
             "next_cursor": page.next_cursor.as_deref().map_or(Value::Null, |c| json!(c)),
