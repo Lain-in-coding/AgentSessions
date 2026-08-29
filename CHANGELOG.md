@@ -287,6 +287,26 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- The public-facing security and readiness documents now state two limits they
+  previously glossed over. `SECURITY.md` records that key-name redaction covers
+  string values only (numbers/booleans under a secret-looking key pass through —
+  `handoff-pack/v1`'s integer `max_tokens`/`used_tokens` were being emitted as
+  the string `"[redacted]"`), and that absolute paths are not secrets to the
+  ruleset: `original_working_directory` crosses machine boundaries verbatim
+  because `resume` needs it, while `source_path`/`transcript_path` are omitted
+  from that shape by design. `THREAT-MODEL.md` §7 no longer claims the
+  data-root-locking spike "confirmed the lease does not support NFS" — the spike
+  says network filesystems were *not verified* — and both remaining open
+  decisions (path privacy mode, network data-root policy) now carry their fact
+  basis and a recommended ruling for the owner to sign (§7.1/§7.2).
+  `README.md` corrects three claims that did not survive checking: "every hit
+  carries a source span" (four of fourteen adapters honestly report none), "CJK
+  bigram" tokenization (unigrams + bigrams since the v17 projection), and the
+  Kimi format cell now names `turn.prompt`/`turn.steer`. The owner release
+  checklist was re-verified against the current tree: verify-release 10/10,
+  privacy scan 0, `cargo deny` all ok, public-tree export clean, and the last
+  three stale `src/main.rs` references from the CLI lib split repointed.
+
 - Tool activity extraction now follows the record shapes real `claude-code` and
   `codex` transcripts write (structure census over local corpora: record types,
   tool names and argument key names only, never content). `codex` registers
