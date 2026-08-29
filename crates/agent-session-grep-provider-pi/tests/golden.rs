@@ -28,6 +28,16 @@ const V3_EXPECTED_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/golden/v3-branched.expected.json"
 );
+/// thinking 语料：正文只在 `thinking` 键上的 block。`basic.jsonl` 与
+/// `v3-branched.jsonl` 的 content 块一律是 `{type:"text"}`（由
+/// `golden_corpus_carries_no_tool_structure` 钉住），所以"thinking 正文被丢弃、
+/// 记录随后被无声跳过"这个缺陷在 golden 全绿的情况下存活了下来。
+const THINKING_FIXTURE_PATH: &str =
+    concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/thinking.jsonl");
+const THINKING_EXPECTED_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/golden/thinking.expected.json"
+);
 
 /// 报告里的会话树血缘诊断条数（marker 由被测 crate 导出，避免测试侧硬编码漂移）。
 fn lineage_diagnostics(report: &agent_session_grep_ports::ParseReport) -> Vec<&String> {
@@ -327,6 +337,81 @@ fn print_actual_canonical_output_for_regeneration() {
 #[ignore = "manual regeneration helper — prints canonical JSON for v3-branched.expected.json"]
 fn print_actual_v3_canonical_output_for_regeneration() {
     let bytes = std::fs::read(V3_FIXTURE_PATH).expect("read v3-branched.jsonl fixture");
+    let hash = blake3::hash(&bytes).to_hex().to_string();
+    let (report, sink) = parse_fixture(&bytes);
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&golden::canonical_json(&hash, &report, &sink.messages))
+            .unwrap()
+    );
+}
+
+// ---- thinking 语料（thinking.jsonl）----
+
+#[test]
+fn thinking_golden_canonical_output_is_pinned() {
+    let expected = golden::read_expected(THINKING_EXPECTED_PATH);
+    let bytes = golden::read_fixture_verified(THINKING_FIXTURE_PATH, &expected);
+    let (report, sink) = parse_fixture(&bytes);
+    let hash = blake3::hash(&bytes).to_hex().to_string();
+    let actual = golden::canonical_json(&hash, &report, &sink.messages);
+    let actual_pretty = serde_json::to_string_pretty(&actual).expect("serialize actual");
+    assert_eq!(
+        actual, expected,
+        "thinking canonical 输出与 pinned 期望不一致——parser 行为漂移或 fixture 未经评审变更。actual =\n{actual_pretty}"
+    );
+}
+
+#[test]
+fn thinking_golden_commits_every_prose_bearing_record() {
+    // 这条是本 fixture 存在的理由：thinking-only 记录必须进索引。此前正文投影
+    // 为空 → 落进 `text.trim().is_empty()` 的 `continue` 分支 → 既不 committed
+    // 也不 skipped，记录彻底消失且报告里没有任何痕迹。
+    let expected = golden::read_expected(THINKING_EXPECTED_PATH);
+    let bytes = golden::read_fixture_verified(THINKING_FIXTURE_PATH, &expected);
+    let (report, sink) = parse_fixture(&bytes);
+    assert_eq!(report.committed, sink.messages.len());
+    assert_eq!(
+        report.committed, 4,
+        "1 条 user + 3 条带正文的 assistant 都必须进索引：{report:?}"
+    );
+    for m in &sink.messages {
+        assert!(
+            !m.text.trim().is_empty(),
+            "seq={}: thinking 语料不得出现空正文消息",
+            m.seq
+        );
+    }
+    // `toolCall` 块仍不进正文（capability.rs 的 tool_activity=Unsupported），
+    // 且 adapter 依旧不发 activity。
+    assert!(
+        sink.activities.is_empty(),
+        "pi 不得发出 activity（capability 声明 Unsupported）"
+    );
+    assert!(
+        sink.messages.iter().all(|m| !m.text.contains("list_dir")),
+        "toolCall 块不得进入正文：{:?}",
+        sink.messages.iter().map(|m| &m.text).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn thinking_golden_probe_and_parse_never_mutate_source_bytes() {
+    let expected = golden::read_expected(THINKING_EXPECTED_PATH);
+    let bytes = golden::read_fixture_verified(THINKING_FIXTURE_PATH, &expected);
+    assert_read_only(&bytes, |source| PiAdapter::new().probe(source))
+        .expect("thinking golden probe must succeed");
+    let mut sink = CapturingSink::default();
+    let report = assert_read_only(&bytes, |source| PiAdapter::new().parse(source, &mut sink))
+        .expect("thinking golden parse must succeed");
+    assert_eq!(report.committed, sink.messages.len());
+}
+
+/// thinking fixture 的手动再生辅助（输出写入 `thinking.expected.json`）。
+#[test]
+#[ignore = "manual regeneration helper — prints canonical JSON for thinking.expected.json"]
+fn print_actual_thinking_canonical_output_for_regeneration() {
+    let bytes = std::fs::read(THINKING_FIXTURE_PATH).expect("read thinking.jsonl fixture");
     let hash = blake3::hash(&bytes).to_hex().to_string();
     let (report, sink) = parse_fixture(&bytes);
     println!(

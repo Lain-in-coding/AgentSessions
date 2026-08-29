@@ -13,7 +13,7 @@
 
 use crate::protocol::{self, CanonicalCode, Outcome, ProtocolError};
 use crate::{CliError, canonical_search_provider, provider_registry, render, resume_app};
-use agent_session_grep_adapters_sqlite::{INDEX_PROJECTION_VERSION, SqliteStore};
+use agent_session_grep_adapters_sqlite::SqliteStore;
 use agent_session_grep_application::{
     AppRequest, AppResponse, ContextLevel, ResponseBudget,
     handoff_pack::{HandoffInput, resolve_source_locations},
@@ -46,9 +46,10 @@ const ECHO_CAP: usize = 128;
 ///
 /// 空行跳过；stdin 读错误归 `source_io`。stdout 写失败/EPIPE 的退出语义由
 /// [`protocol::write_stdout_line`] 统一执行（design §0.8）。
-pub(crate) fn serve(store: &SqliteStore) -> Result<Outcome, CliError> {
+pub(crate) fn serve(store: &SqliteStore, offline: bool) -> Result<Outcome, CliError> {
     let mut server = McpServer {
         store,
+        offline,
         initialized: false,
         initialize_seen: false,
     };
@@ -72,6 +73,8 @@ pub(crate) fn serve(store: &SqliteStore) -> Result<Outcome, CliError> {
 /// 单连接 MCP 服务状态：注入的只读 store + initialize 门闩。
 struct McpServer<'a> {
     store: &'a SqliteStore,
+    /// 全局 `--offline` 意图（design D5）：`doctor` 工具如实回显，与 CLI 同源。
+    offline: bool,
     /// `notifications/initialized` 之前只放行 initialize/ping（design §0.7）。
     initialized: bool,
     /// 是否收到过成功 initialize 握手：门闩只在握手之后打开，未握手先发
@@ -795,32 +798,14 @@ impl McpServer<'_> {
         ))
     }
 
-    /// doctor 不经 App：直接读 store 只读事实，data 形状与 CLI doctor 对齐。
+    /// doctor 不经 App：直接读 store 只读事实。data 由 [`crate::doctor_store_data`]
+    /// 投影——与 CLI `doctor --db` 同一份代码，不再各写一份 `json!`（曾因此漏报
+    /// offline / semantic_feature / *_storage / orphaned_usage_* 六个字段）。
     fn tool_doctor(&self) -> Result<Value, ToolError> {
-        let schema = self.store.schema_version().map_err(business)?;
-        let generation = self.store.active_generation().map_err(business)?;
-        let interrupted = self.store.interrupted_batch_count().map_err(business)?;
-        let (orphaned_tool_activities, orphaned_activity_memberships) =
-            self.store.orphaned_activity_counts().map_err(business)?;
-        // 索引投影版本事实（v17）：本缺陷正是在 MCP search_sessions 上观察到的
-        // （旧投影库中文查询静默 0 命中），因此 MCP doctor 必须同样如实报告。
-        let index_projection_version = self.store.index_projection_version().map_err(business)?;
+        let data = crate::doctor_store_data(self.store, self.offline).map_err(business)?;
         Ok(success_payload(
             Outcome::Success,
-            json!({
-                "tool": env!("CARGO_PKG_NAME"),
-                "version": env!("CARGO_PKG_VERSION"),
-                "db": "ok",
-                "schema": schema,
-                "generation": generation,
-                "interrupted_batches": interrupted,
-                "orphaned_tool_activities": orphaned_tool_activities,
-                "orphaned_activity_memberships": orphaned_activity_memberships,
-                "index_projection_version": index_projection_version,
-                "index_projection_expected": INDEX_PROJECTION_VERSION,
-                "index_projection_stale":
-                    index_projection_version != i64::from(INDEX_PROJECTION_VERSION),
-            }),
+            data,
             &protocol::Page::default(),
             &[],
         ))
@@ -1519,6 +1504,7 @@ mod tests {
     fn fresh(store: &SqliteStore) -> McpServer<'_> {
         McpServer {
             store,
+            offline: false,
             initialized: false,
             initialize_seen: false,
         }
@@ -1527,6 +1513,7 @@ mod tests {
     fn ready(store: &SqliteStore) -> McpServer<'_> {
         McpServer {
             store,
+            offline: false,
             initialized: true,
             initialize_seen: true,
         }
@@ -3269,6 +3256,34 @@ mod tests {
         assert_eq!(data["interrupted_batches"], 0);
         assert_eq!(data["orphaned_tool_activities"], 0);
         assert_eq!(data["orphaned_activity_memberships"], 0);
+    }
+
+    #[test]
+    fn doctor_tool_data_is_the_same_projection_as_the_cli_doctor() {
+        // MCP doctor 曾自己写一份 json!，比 CLI `doctor --db` 少 6 个字段
+        // （offline / semantic_feature / tool_activity_storage / usage_storage /
+        // orphaned_usage_events / orphaned_usage_memberships）——同一个诊断问题
+        // 经 MCP 问会得到严格更弱的答案。两侧现在共用 crate::doctor_store_data；
+        // 本测试直接与那个单源比对，任何一侧再分叉都会红。
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = open_store(&dir);
+        let mut server = ready(&store);
+        let v = call(&mut server, "doctor", json!({}));
+        let data = &v["result"]["structuredContent"]["data"];
+        let cli = crate::doctor_store_data(&store, false).expect("cli doctor projection");
+        assert_eq!(data, &cli, "MCP doctor 与 CLI doctor 投影漂移");
+        // offline 意图如实回显（design D5）：MCP 服务由 `--offline mcp` 启动时为 true。
+        let mut offline_server = McpServer {
+            store: &store,
+            offline: true,
+            initialized: true,
+            initialize_seen: true,
+        };
+        let v = call(&mut offline_server, "doctor", json!({}));
+        assert_eq!(
+            v["result"]["structuredContent"]["data"]["offline"], true,
+            "{v}"
+        );
     }
 
     #[test]

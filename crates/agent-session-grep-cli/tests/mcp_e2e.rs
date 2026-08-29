@@ -1429,6 +1429,40 @@ fn status_doctor_and_providers_return_real_data() {
     assert!(ids.contains(&"codex"), "{ids:?}");
 }
 
+#[test]
+fn mcp_doctor_data_matches_the_cli_doctor_envelope_field_for_field() {
+    // 跨入口一致性（release 一致性 harness 只比对 search 一个操作，doctor 从未
+    // 被比对过）：MCP doctor 曾比 CLI `doctor --db` 少 6 个字段——offline /
+    // semantic_feature / tool_activity_storage / usage_storage /
+    // orphaned_usage_events / orphaned_usage_memberships。AI 客户端靠 doctor
+    // 判断"为什么语义检索退化""为什么 usage 是空的"，经 MCP 问会得到严格更弱
+    // 的答案。期望值取自真实 CLI 输出，不是手抄清单。
+    let (dir, db) = temp_db("mcp-doctor-parity");
+    let (fixture_path, _anchor_message) = write_context_fixture(dir.path());
+    let out = run_cli(&db, &["ingest", &fixture_path]);
+    assert!(out.status.success(), "ingest failed: {}", stdout(&out));
+
+    let out = run_cli(&db, &["doctor"]);
+    assert!(out.status.success(), "cli doctor failed: {}", stdout(&out));
+    let cli: Value = serde_json::from_str(stdout(&out).trim())
+        .unwrap_or_else(|error| panic!("cli doctor envelope must be JSON: {error}"));
+    let cli_data = &cli["data"];
+
+    let frames = mcp_session(
+        &db,
+        &[
+            initialize_request(1, "2025-06-18"),
+            initialized_notification(),
+            tool_call(2, "doctor", json!({})),
+        ],
+    );
+    let mcp_data = &frame_by_id(&frames, 2)["result"]["structuredContent"]["data"];
+    assert_eq!(
+        mcp_data, cli_data,
+        "MCP doctor 与 CLI doctor 的 data 投影必须逐字段一致"
+    );
+}
+
 // ─── search-match-guidance：MCP search 命中携带追加 guidance 字段 ─────────────
 
 #[test]

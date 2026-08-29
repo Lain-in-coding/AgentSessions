@@ -370,6 +370,20 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The MCP `doctor` tool answered with strictly less than the CLI `doctor`.**
+  Both sides hand-wrote their own `json!`, and the MCP copy was missing six
+  fields: `offline`, `semantic_feature`, `tool_activity_storage`,
+  `usage_storage`, `orphaned_usage_events`, and `orphaned_usage_memberships`.
+  An AI agent asking "why did semantic search fall back to lexical?" or "why is
+  usage empty?" through MCP could not see the answer that the same command
+  gives on the CLI. The release consistency harness compares exactly one
+  operation (`search`), so no test ever put the two `doctor` projections side
+  by side. Both entry points now project through one
+  `doctor_store_data(store, offline)`; the MCP server takes the global
+  `--offline` intent so it reports that field honestly too. A new e2e test
+  compares the MCP `doctor` data against the real CLI `--robot doctor`
+  envelope field for field, rather than against a hand-copied list.
+
 - **`SECURITY.md` described `--offline` as an active control.** It read as
   though the flag rejects network-requiring capabilities, but no shipped
   capability requires the network (`NETWORK_REQUIRING_SUBCOMMANDS` is empty), so

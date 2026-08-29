@@ -424,17 +424,39 @@ impl ProviderAdapter for PiAdapter {
 
 /// Extract plain text from a Pi content value.
 ///
-/// Pi content can be a string or an array of `{type:"text", text:"..."}` blocks
-/// (similar to Claude's content blocks).
+/// Pi content can be a string or an array of content blocks. Two block kinds
+/// carry prose and both are extracted, in block order:
+///
+/// - `{"type":"text","text":…}` (also seen with an extra `textSignature`);
+/// - `{"type":"thinking","thinking":…,"thinkingSignature":…}` — the reasoning
+///   prose lives on the `thinking` key, **not** on `text`. Reading only `text`
+///   made a thinking-only assistant record project to an empty body, which this
+///   adapter then dropped without a diagnostic: the record vanished from the
+///   index entirely. Shape evidence: sessiongrep `src/providers/pi.rs` fixture
+///   (`{"type":"thinking","thinking":…}` inside pi assistant content),
+///   cc-sessions-viewer `src-tauri/src/agents/pi.rs` (`"thinking"` arm reading
+///   `.get("thinking")`), Recall `src/adapters/pi.rs` fixture, and the local
+///   authorized `~/.pi/agent/sessions` corpus.
+///
+/// Blank/whitespace-only prose contributes nothing (no empty fragments), the
+/// same way cc-sessions-viewer drops empty thinking blocks. `text` block
+/// handling is unchanged. `toolCall` blocks are deliberately left out — see the
+/// module docs and the `tool_activity` capability row.
 fn pi_content_text(content: &serde_json::Value) -> String {
     match content {
         serde_json::Value::String(s) => s.clone(),
         serde_json::Value::Array(blocks) => {
             let mut buf = String::new();
             for block in blocks {
-                if block.get("type").and_then(serde_json::Value::as_str) == Some("text")
-                    && let Some(t) = block.get("text").and_then(serde_json::Value::as_str)
-                {
+                let piece = match block.get("type").and_then(serde_json::Value::as_str) {
+                    Some("text") => block.get("text").and_then(serde_json::Value::as_str),
+                    Some("thinking") => block
+                        .get("thinking")
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|t| !t.trim().is_empty()),
+                    _ => None,
+                };
+                if let Some(t) = piece {
                     if !buf.is_empty() {
                         buf.push('\n');
                     }
@@ -525,6 +547,74 @@ mod tests {
         let mut sink = CountSink { count: 0 };
         let report = adapter.parse(fixture.as_bytes(), &mut sink).unwrap();
         assert_eq!(report.committed, 1);
+    }
+
+    #[test]
+    fn content_text_extracts_thinking_block_prose() {
+        // Pi 的 thinking block 正文在 `thinking` 键上（另带 `thinkingSignature`），
+        // 不在 `text` 上。只读 `text` 时，thinking-only 的 assistant 记录整条
+        // 投影为空正文，随后被 `text.trim().is_empty()` 分支**无声丢弃**（连
+        // skipped 都不计）——记录彻底不进索引。
+        assert_eq!(
+            pi_content_text(&serde_json::json!([
+                {"type": "thinking", "thinking": "synthetic reasoning", "thinkingSignature": "sig"}
+            ])),
+            "synthetic reasoning"
+        );
+    }
+
+    #[test]
+    fn content_text_keeps_thinking_and_text_in_block_order() {
+        // 真实语料里 thinking 在数组首位、text 在后（各带自己的 signature 字段）。
+        assert_eq!(
+            pi_content_text(&serde_json::json!([
+                {"type": "thinking", "thinking": "first I reason", "thinkingSignature": "sig-a"},
+                {"type": "text", "text": "then I answer", "textSignature": "sig-b"}
+            ])),
+            "first I reason\nthen I answer"
+        );
+    }
+
+    #[test]
+    fn content_text_ignores_blank_thinking_and_tool_call_blocks() {
+        // 空白 thinking 不产出空片段；`toolCall` 块仍不进正文（与
+        // capability.rs 的 tool_activity=Unsupported 口径一致，见模块文档）。
+        assert_eq!(
+            pi_content_text(&serde_json::json!([
+                {"type": "thinking", "thinking": "   "},
+                {"type": "toolCall", "id": "t1", "name": "ls", "arguments": {"path": "/tmp"}},
+                {"type": "text", "text": "only real text survives"}
+            ])),
+            "only real text survives"
+        );
+    }
+
+    #[test]
+    fn content_text_never_reads_thinking_from_a_non_thinking_block() {
+        // 只有 `type:"thinking"` 的块才允许把 `thinking` 键当正文。
+        assert_eq!(
+            pi_content_text(&serde_json::json!([
+                {"type": "toolCall", "name": "ls", "thinking": "not a body"},
+                {"type": "text", "text": "body"}
+            ])),
+            "body"
+        );
+    }
+
+    #[test]
+    fn parse_commits_thinking_only_assistant_record() {
+        // 端到端：thinking-only 记录必须被提交，而不是无声消失。
+        let adapter = PiAdapter::new();
+        let fixture = concat!(
+            r#"{"type":"session","id":"s1","cwd":"/p","version":3}"#,
+            "\n",
+            r#"{"type":"message","id":"a1","parentId":"u1","message":{"role":"assistant","content":[{"type":"thinking","thinking":"synthetic reasoning","thinkingSignature":"sig"}]}}"#,
+            "\n",
+        );
+        let mut sink = CountSink { count: 0 };
+        let report = adapter.parse(fixture.as_bytes(), &mut sink).unwrap();
+        assert_eq!(report.committed, 1, "thinking-only 记录必须进索引");
+        assert_eq!(sink.count, 1);
     }
 
     #[test]

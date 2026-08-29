@@ -453,7 +453,7 @@ fn run(
         if rest.len() > 1 {
             return Err(CliError::usage("mcp takes no positional arguments"));
         }
-        return mcp::serve(&store);
+        return mcp::serve(&store, offline);
     }
     // tui：交互式只读浏览（Preview）。同 mcp 一样接管终端，不走 dispatch/
     // emit_result；输出模式 flag 对其无意义（task design §0.6）。
@@ -1319,50 +1319,7 @@ fn doctor(
         }),
         Some(path) => {
             let store = SqliteStore::open(&path).map_err(ProtocolError::from)?;
-            let schema = store.schema_version().map_err(ProtocolError::from)?;
-            // generation 与待收敛 intent 数是 durable outbox 中断恢复与一致性的只读证据。
-            let generation = store.active_generation().map_err(ProtocolError::from)?;
-            let interrupted = store
-                .interrupted_batch_count()
-                .map_err(ProtocolError::from)?;
-            // 工具活动保留策略证据（v12）：孤儿投影行计数。>0 时用
-            // `index purge-activities` 确定性修剪（catalog/FTS 不受影响）。
-            let (orphaned_tool_activities, orphaned_activity_memberships) = store
-                .orphaned_activity_counts()
-                .map_err(ProtocolError::from)?;
-            // usage 投影保留策略证据（v15）：孤儿投影行计数；同一修剪命令
-            // `index purge-activities` 同事务清理。
-            let (orphaned_usage_events, orphaned_usage_memberships) =
-                store.orphaned_usage_counts().map_err(ProtocolError::from)?;
-            // 索引投影版本事实（v17）：现存 FTS 词元流由哪个投影变换写成。
-            // stale ⇒ 该库的词元与本二进制的查询词元不可比，搜索按契约
-            // fail-closed；`index rebuild` 或任意写路径 sync 会重投影收敛。
-            let index_projection_version = store
-                .index_projection_version()
-                .map_err(ProtocolError::from)?;
-            let index_projection_stale =
-                index_projection_version != i64::from(INDEX_PROJECTION_VERSION);
-            serde_json::json!({
-                "tool": env!("CARGO_PKG_NAME"),
-                "version": env!("CARGO_PKG_VERSION"),
-                "db": "ok",
-                "schema": schema,
-                "offline": offline,
-                "semantic_feature": semantic_feature_flag(),
-                // 打开的库已被迁移到本二进制的 schema v12，工具活动存储存在。
-                "tool_activity_storage": true,
-                // schema v15：usage 投影存在。
-                "usage_storage": true,
-                "generation": generation,
-                "interrupted_batches": interrupted,
-                "orphaned_tool_activities": orphaned_tool_activities,
-                "orphaned_activity_memberships": orphaned_activity_memberships,
-                "orphaned_usage_events": orphaned_usage_events,
-                "orphaned_usage_memberships": orphaned_usage_memberships,
-                "index_projection_version": index_projection_version,
-                "index_projection_expected": INDEX_PROJECTION_VERSION,
-                "index_projection_stale": index_projection_stale,
-            })
+            doctor_store_data(&store, offline)?
         }
     };
     let duration_ms = started.elapsed().as_millis() as u64;
@@ -1378,6 +1335,55 @@ fn doctor(
         RetrievalMode::Lexical,
     );
     Ok(protocol::Outcome::Success)
+}
+
+/// `doctor` 的库内事实投影：CLI `doctor --db` 与 MCP `doctor` 工具的单一来源。
+///
+/// 两侧曾各写一份 `json!`，MCP 那份漏掉 `offline` / `semantic_feature` /
+/// `tool_activity_storage` / `usage_storage` / `orphaned_usage_*` 六个字段——
+/// 同一个诊断问题经 MCP 问会得到严格更弱的答案，而没有任何测试比对两侧。
+/// 新增字段只能改这一处。
+pub(crate) fn doctor_store_data(
+    store: &SqliteStore,
+    offline: bool,
+) -> Result<serde_json::Value, ProtocolError> {
+    let schema = store.schema_version()?;
+    // generation 与待收敛 intent 数是 durable outbox 中断恢复与一致性的只读证据。
+    let generation = store.active_generation()?;
+    let interrupted = store.interrupted_batch_count()?;
+    // 工具活动保留策略证据（v12）：孤儿投影行计数。>0 时用
+    // `index purge-activities` 确定性修剪（catalog/FTS 不受影响）。
+    let (orphaned_tool_activities, orphaned_activity_memberships) =
+        store.orphaned_activity_counts()?;
+    // usage 投影保留策略证据（v15）：孤儿投影行计数；同一修剪命令
+    // `index purge-activities` 同事务清理。
+    let (orphaned_usage_events, orphaned_usage_memberships) = store.orphaned_usage_counts()?;
+    // 索引投影版本事实（v17）：现存 FTS 词元流由哪个投影变换写成。
+    // stale ⇒ 该库的词元与本二进制的查询词元不可比，搜索按契约
+    // fail-closed；`index rebuild` 或任意写路径 sync 会重投影收敛。
+    let index_projection_version = store.index_projection_version()?;
+    let index_projection_stale = index_projection_version != i64::from(INDEX_PROJECTION_VERSION);
+    Ok(serde_json::json!({
+        "tool": env!("CARGO_PKG_NAME"),
+        "version": env!("CARGO_PKG_VERSION"),
+        "db": "ok",
+        "schema": schema,
+        "offline": offline,
+        "semantic_feature": semantic_feature_flag(),
+        // 打开的库已被迁移到本二进制的 schema v12，工具活动存储存在。
+        "tool_activity_storage": true,
+        // schema v15：usage 投影存在。
+        "usage_storage": true,
+        "generation": generation,
+        "interrupted_batches": interrupted,
+        "orphaned_tool_activities": orphaned_tool_activities,
+        "orphaned_activity_memberships": orphaned_activity_memberships,
+        "orphaned_usage_events": orphaned_usage_events,
+        "orphaned_usage_memberships": orphaned_usage_memberships,
+        "index_projection_version": index_projection_version,
+        "index_projection_expected": INDEX_PROJECTION_VERSION,
+        "index_projection_stale": index_projection_stale,
+    }))
 }
 
 /// 已知 flag 名全集（前缀位置可出现的旗标）。取值守卫用它拒绝 `--db --robot`

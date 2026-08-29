@@ -7,6 +7,7 @@
 
 - `basic.jsonl` — revision 1（2026-08-16 引入）。
 - `v3-branched.jsonl` — revision 1（2026-08-27 引入，见下"v3 会话树 fixture"）。
+- `thinking.jsonl` — revision 1（2026-08-29 引入，见下"thinking 语料 fixture"）。
 - 格式修复必须新增 fixture 而非只改 parser（政策 §Provider fixture 要求）。
 
 ## 构造方式
@@ -35,9 +36,10 @@
 
 来自 Pi session JSONL 的格式观察，仅复用结构：`type:"session"` 头（`id`/`cwd`/
 `timestamp`）、`type:"message"` 包裹 `message.role`（user/assistant）与
-`message.content`（字符串或 `{type:"text",text}` 数组）；`session_info`/
-`compaction`/`custom_message` 非对话。内容抽取与类型分发适配自 fast-resume（MIT）
-的 idea-level 结构，未复制任何字节。
+`message.content`（字符串或 block 数组：`{type:"text",text}` 与
+`{type:"thinking",thinking}` 两种承载正文的块，正文键名与块类型同名）；
+`session_info`/`compaction`/`custom_message` 非对话。内容抽取与类型分发适配自
+fast-resume（MIT）的 idea-level 结构，未复制任何字节。
 
 ## 脱敏与合规声明
 
@@ -95,4 +97,43 @@ agentsview `internal/parser/pi.go`。**未复制任何一方的 fixture 或代�
 - 不含任何真实数据：session id 为 `sess-v3`、entry id 为 `aa0000xx` 序列、
   路径为 `/home/user/proj` 占位符、时间戳为 `2026-01-01T00:00:0NZ` 固定基准、
   正文为自述性合成文案；
+- 无人名、邮箱、token、密钥、真实项目名或真实主机路径。
+
+## thinking 语料 fixture（`thinking.jsonl`）
+
+覆盖"assistant content 里的 `thinking` block"这一形状。`basic.jsonl` 与
+`v3-branched.jsonl` 的 content 块一律是 `{type:"text"}`（由 golden
+`golden_corpus_carries_no_tool_structure` 钉住），因此"thinking 正文被丢弃、
+记录随后落进 `text.trim().is_empty()` 的 `continue` 分支而**既不 committed 也不
+skipped**"这个缺陷在 golden 全绿的情况下存活了下来——报告里没有任何痕迹。
+
+`thinking.jsonl` 同为**逐行人工手写的合成数据**，字节即权威：UTF-8（无 BOM）、
+LF 行尾、1396 字节，BLAKE3 pin 在 `thinking.expected.json`
+（`2b6c6a48af61d06094b5a06e0095d2a997d0671f010fd513cd2fc3c2ccb786e5`）。
+
+| 行 | 内容 | 覆盖点 |
+|----|------|--------|
+| 1 | `type:"session"`，含 `version:3` | 会话身份 + cwd pair |
+| 2 | `type:"message"` user，`{type:"text"}` block | 基线用户消息 |
+| 3 | `type:"message"` assistant，**只有 `thinking` block** | **本 fixture 的存在理由**：正文在 `thinking` 键上（另带 `thinkingSignature`），不在 `text` 上；此前整条记录无声消失 |
+| 4 | `type:"message"` assistant，`thinking` + `text` + `toolCall` | thinking 与 text 按 block 顺序拼接（thinking 在前）；`toolCall` 块仍不进正文、不发 activity；CJK + emoji（多字节 span） |
+| 5 | `type:"message"` assistant，空白 `thinking` + `text` | 纯空白 `thinking` 不产出空片段 |
+
+预期产出：4 条消息（committed=4、skipped=0），零 activity。
+
+### 编码的真实格式知识（仅字段名与形状）
+
+`{"type":"thinking","thinking":…,"thinkingSignature":…}` 与
+`{"type":"text","text":…,"textSignature":…}` 两种 block（正文键名与 block 类型
+同名），以及 `{"type":"toolCall","id","name","arguments"}`。多源交叉：sessiongrep
+`src/providers/pi.rs` 的 fixture、cc-sessions-viewer `src-tauri/src/agents/pi.rs`
+的 `"thinking"` 分支（读 `.get("thinking")`，并丢弃空/纯空白值）、Recall
+`src/adapters/pi.rs` 的 fixture。**未复制任何一方的 fixture 或代码文本**。
+
+### 脱敏与合规声明
+
+- 不含任何真实数据：session id 为 `11111111-2222-4333-8444-555555555555`、
+  entry id 为 `aa0000xa` 序列、路径为 `/placeholder/project` 占位符、时间戳为
+  `2026-01-03T00:00:0NZ` 固定基准、signature 为 `synthetic-*-signature-000N`
+  固定假值、正文为自述性合成文案；
 - 无人名、邮箱、token、密钥、真实项目名或真实主机路径。
