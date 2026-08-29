@@ -3875,6 +3875,14 @@ impl SqliteStore {
                 }
             }
             for (id, _payload, text) in &source.entries {
+                // 非 Message 实体不进 fts 全文表（见 batch_upsert_fts_in_tx），
+                // 恒无 fts 行；拿 fts_tokens_cjk(text) 与“无行”比较会让任何
+                // 含 session/document 条目的批次——即每个真实 ingest 批次——
+                // 永远判为 not-current，快路径整体失效，重同步退化为 O(全库)。
+                // 与 batch_is_current_with_derived_context 的同一判定保持一致。
+                if id.kind() != IdKind::Message {
+                    continue;
+                }
                 // 与写入侧同一 transform：fts 正文存的是 fts_tokens_cjk(text)。
                 let expected = fts_tokens_cjk(text);
                 if fts_text.get(id.as_str()).map(String::as_str) != Some(expected.as_str()) {
@@ -18115,5 +18123,77 @@ mod tests {
         let totals = store.usage_totals().unwrap().unwrap();
         assert_eq!(totals.sessions, 1);
         assert_eq!(totals.input_tokens, 8);
+    }
+
+    #[test]
+    fn unchanged_batch_with_container_entities_takes_the_fast_current_path() {
+        // 回归：`sources_are_current` 曾对**全部** entries 比较 fts 正文，而
+        // session/document 容器实体按设计没有 fts 行（见 batch_upsert_fts_in_tx）
+        // → 每个真实 ingest 批次（必含 session + document）都被判 not-current，
+        // O(batch) 快路径永远不生效，未变源的重同步退化为加载全库
+        // membership/placements/activities/usage。内容级 no-op 仍由
+        // source_batches_are_current 兜住，缺陷不改变结果、只静默改变成本，
+        // 因此必须直接锚定快路径本身。
+        let store = SqliteStore::open_in_memory().unwrap();
+        let session = sid(IdKind::Session, b"fast-ses");
+        let document = sid(IdKind::Document, b"fast-doc");
+        let message = sid(IdKind::Message, b"fast-msg");
+        let placements = vec![placement(
+            &session,
+            &document,
+            &message,
+            0,
+            false,
+            Some((0, 4)),
+        )];
+        let batch = source_batch(
+            "fast.jsonl",
+            vec![
+                entity_entry(&session),
+                typed_document_entry(&document),
+                typed_message_entry(&message, "fast path body"),
+            ],
+            placements.clone(),
+            Vec::new(),
+            true,
+        );
+        assert!(
+            store
+                .commit_source_batches_if_changed(std::slice::from_ref(&batch))
+                .unwrap()
+        );
+
+        // 第二次扫描：未变字节重解析得到 store 已持有的规范 payload（生产
+        // payload 已带由 v7 关系派生的上下文别名，与 regenerate 后的字节一致）。
+        let rescan_entries: Vec<(StableId, Vec<u8>, String)> = batch
+            .entries
+            .iter()
+            .map(|(id, _, text)| (id.clone(), store.get(id).unwrap().unwrap(), text.clone()))
+            .collect();
+        let rescan = source_batch(
+            "fast.jsonl",
+            rescan_entries,
+            placements.clone(),
+            Vec::new(),
+            true,
+        );
+        assert!(
+            store.sources_are_current(&[&rescan]).unwrap(),
+            "未变化批次必须被快路径识别"
+        );
+        assert!(
+            !store
+                .commit_source_batches_if_changed(std::slice::from_ref(&rescan))
+                .unwrap()
+        );
+
+        // 判定不是恒 true：消息正文变化必须离开快路径。
+        let mut edited = rescan.clone();
+        for entry in &mut edited.entries {
+            if entry.0.kind() == IdKind::Message {
+                entry.2 = "fast path body edited".into();
+            }
+        }
+        assert!(!store.sources_are_current(&[&edited]).unwrap());
     }
 }
