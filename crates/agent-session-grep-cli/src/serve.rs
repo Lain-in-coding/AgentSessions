@@ -211,6 +211,12 @@ fn worker_loop(
             }
         };
         let mut stream = stream;
+        // Windows 的 `accept` 会继承 listener 的非阻塞属性（`set_nonblocking(true)`
+        // 在 serve_listener 里是为了让 accept 轮询不阻塞事件循环）。不显式还原为
+        // 阻塞，SO_RCVTIMEO/SO_SNDTIMEO 就整体失效：请求字节晚到几百微秒即
+        // WouldBlock → 立刻回 408（实测 140 次合法请求误判 2 次），而半关闭的
+        // 客户端还会被随后的 RST 抹掉已经收到的响应（0 字节 + ConnectionAborted）。
+        let _ = stream.set_nonblocking(false);
         let _ = stream.set_read_timeout(Some(limits.read_timeout));
         let _ = stream.set_write_timeout(Some(limits.write_timeout));
         let request = parse_request(&mut stream);
@@ -1225,6 +1231,32 @@ mod tests {
 
         let ok = raw_http(address, &get_request(address, &token, "/api/status"));
         assert!(ok.starts_with("HTTP/1.1 200"));
+        server.join().expect("server join");
+    }
+
+    /// Windows' `accept` hands back a socket that inherited the listener's
+    /// non-blocking flag (`set_nonblocking(true)` is what keeps the accept poll
+    /// off the event loop). Without restoring blocking mode the read deadline is
+    /// inert: a request whose bytes land a moment after `accept` makes
+    /// `parse_request` return `WouldBlock`, which the server reports as 408 — 2
+    /// of 140 valid requests were answered that way against the real catalog,
+    /// and a half-closing client lost the response entirely to the RST that
+    /// followed. Delay the request past any accept-time read to pin it.
+    #[test]
+    fn integration_delayed_request_is_served_not_timed_out() {
+        let (address, token, server) = start_test_server(1, Duration::from_secs(5));
+        let mut stream = TcpStream::connect(address).expect("connect test server");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .expect("set client timeout");
+        std::thread::sleep(Duration::from_millis(200));
+        stream
+            .write_all(get_request(address, &token, "/api/status").as_bytes())
+            .expect("write request");
+        stream.shutdown(Shutdown::Write).expect("finish request");
+        let mut response = String::new();
+        stream.read_to_string(&mut response).expect("read response");
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
         server.join().expect("server join");
     }
 
