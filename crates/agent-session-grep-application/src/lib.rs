@@ -951,7 +951,13 @@ fn assemble_search_hit(
 /// 检索命中在 `max_response_bytes` 闸内的序列化字节估算（与 CLI 渲染对齐）：
 /// id + session_id + text + guidance；`occurrences` 仅当 >1（归并模式）时计入，
 /// 与序列化器"occurrences == 1 时省略该键"的约定一致。
+///
+/// `session_id` 与 `text` 是**恒发**字段（schema 承诺键不消失，缺值渲染为
+/// `null`），因此缺值也要计费——按 `null` 的 4 字节计。空集合的 guidance 字段
+/// 才是真正省略整个键的追加字段，缺值记 0。
 fn search_hit_charge(hit: &SearchHit) -> usize {
+    /// `null` 字面量的序列化长度（恒发字段缺值时的实际字节）。
+    const NULL_LEN: usize = 4;
     let why_matched_len = if hit.why_matched.is_empty() {
         0
     } else {
@@ -978,11 +984,13 @@ fn search_hit_charge(hit: &SearchHit) -> usize {
         0
     };
     json_string_len(hit.id.as_str())
+        + 14
         + hit
             .session_id
             .as_ref()
-            .map_or(0, |s| json_string_len(s) + 14)
-        + hit.text.as_ref().map_or(0, |s| json_string_len(s) + 8)
+            .map_or(NULL_LEN, |s| json_string_len(s))
+        + 8
+        + hit.text.as_ref().map_or(NULL_LEN, |s| json_string_len(s))
         + why_matched_len
         + suggested_len
         + occurrences_len
@@ -4769,6 +4777,53 @@ mod tests {
     ///
     /// 断言写成与渲染函数的恒等式：估算只能由同一个 lossy 转换派生，不能靠
     /// 再实现一遍 UTF-8 校验来"平行推导"。
+    /// 回归：字节闸对**恒发**字段缺值时也必须计费。
+    ///
+    /// 缺陷形态：机器渲染器恒发 `session_id` 与 `text` 两个键（schema 1.1 承诺
+    /// 键不消失，缺值渲染为 `null`），而估算把 `None` 记 0 字节。一条既无归属
+    /// 会话（无 placement）又无 `text` 的命中因此少算 18 字节；同一页约 58 条
+    /// 这样的命中就吃穿 1 KiB 的 envelope 预留，响应超出 `max_response_bytes`
+    /// 却报 `truncated: false`（CONTRACT §3 违约）。
+    ///
+    /// 断言按权威线形态的实际长度写，而不是复述估算表达式。
+    #[test]
+    fn search_hit_charge_covers_always_emitted_null_fields() {
+        let mut hit = SearchHit {
+            id: StableId::from_wire("msg_v1_aaaa").expect("valid wire id"),
+            score: 2.0,
+            session_id: None,
+            text: None,
+            why_matched: Vec::new(),
+            suggested_next_commands: Vec::new(),
+            occurrences: 1,
+            resume_available: false,
+        };
+        // 恒发字段缺值时的权威线形态（protocol schema 1.1）。
+        let null_wire = concat!(
+            r#"{"id":"msg_v1_aaaa","score":2.0,"session_id":null,"text":null,"#,
+            r#""resume_available":false}"#
+        );
+        assert!(
+            search_hit_charge(&hit) >= null_wire.len(),
+            "charge {} must cover the {} rendered bytes of {null_wire}",
+            search_hit_charge(&hit),
+            null_wire.len()
+        );
+        // 带值时同样不得低估（既有行为，一并钉住）。
+        hit.session_id = Some("ses_v1_aaaa".into());
+        hit.text = Some("T".into());
+        let full_wire = concat!(
+            r#"{"id":"msg_v1_aaaa","score":2.0,"session_id":"ses_v1_aaaa","text":"T","#,
+            r#""resume_available":false}"#
+        );
+        assert!(
+            search_hit_charge(&hit) >= full_wire.len(),
+            "charge {} must cover the {} rendered bytes of {full_wire}",
+            search_hit_charge(&hit),
+            full_wire.len()
+        );
+    }
+
     #[test]
     fn lossy_payload_estimate_matches_the_rendered_length() {
         let cases: Vec<Vec<u8>> = vec![
