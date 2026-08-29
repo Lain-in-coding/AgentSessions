@@ -96,7 +96,7 @@ loop:
 | `status` | catalog entity count and active generation |
 | `model import --dir <bundle>` / `model status` | offline model-cache management (never networks): `import` verifies the bundle manifest and every declared SHA-256, then publishes into the local model cache (requires a `--features semantic-candle` binary); `status` reports whether the default E5 bundle is imported. Default builds stay lexical-only (bigram-hash fuzzy-lexical) |
 | `providers` | report the 16-row provider capability matrix: 14 implemented (all experimental) + 2 deferred unsupported (`deepseek-harness`, `zcode`), with per-field capabilities |
-| `sync --discover` | scan the registered provider data roots (`claude-code`, `codex`, `openclaw`, `tencent-codebuddy`, `antigravity`, `opencode`) and sync every `.jsonl` transcript found; read-only on provider files; the response reports per-provider `found`/`removed` counts and scan completeness — never file paths |
+| `sync --discover` | scan the 12 registered provider data roots (`claude-code`, `codex`, `openclaw`, `tencent-codebuddy`, `antigravity`, `opencode`, `pi`, `hermes`, `grok-build`, `kimi-code`, `qoder`, `cline`) and sync every source matching that root's registered extension — `jsonl` for most, `json` for `hermes`/`cline`, `db` for OpenCode's SQLite store; `cursor` and `aider` have no home-relative root and are never auto-discovered, so pass their files to `sync <file>` by path; read-only on provider files; the response reports per-provider `found`/`removed` counts and scan completeness — never file paths |
 | `doctor` | health: db, schema, generation, interrupted_batches, orphaned_tool_activities, orphaned_activity_memberships (prune with `index purge-activities`) |
 
 `get`/`show` on a missing entity return exit 4 with a `not_found` error envelope (ADR-0005).
@@ -110,8 +110,18 @@ agent-session-grep --db C:/data/example.db --robot context ses_v1_abc123 --polic
 ```
 
 - `--policy mainline` (default) follows the parent chain root to leaf and excludes sidechains; `--policy full` returns every message in sequence order.
-- `data.evidence[]` has one span per returned message: source document id, source fingerprint, and location fields with `precision` tiers `byte`, `line`, `record`, or `unknown`.
-- `unknown` precision means the location fields are null (data ingested before spans existed). Re-ingest the source to restore byte-precision spans; a warning is emitted alongside.
+- `data.evidence[]` carries one span per returned message (subject to the
+  `max_evidence_spans` budget): source document id, source fingerprint, and
+  location fields with `precision` tiers `byte`, `line`, `record`, or `unknown`.
+  The contract declares four tiers; v1 emits only `byte` and `unknown`.
+- `unknown` precision means the location fields are null, and it has two
+  distinct causes. Either the data was ingested before spans existed — re-ingest
+  the source to restore byte precision, and a warning is emitted alongside — or
+  the provider's format has no in-file byte range for a record at all
+  (`opencode` and `cursor` read SQLite, `hermes` and `cline` read a
+  whole-document JSON). For those four, `unknown` is the honest permanent
+  answer and re-ingesting changes nothing; the per-provider column is
+  `source_span` in `docs/product/PROVIDER-BETA-READINESS.md`.
 
 ### Global flags
 
