@@ -507,6 +507,17 @@ fn run(
     // 故这里克隆一个连接语义上的第二把手不可行——改为让 App 持有单一 store。
     let (command, outcome, data, page, warnings) =
         dispatch(&store, &db, &rest, mode, request_id, offline)?;
+    // hook：Claude Code 直接把这条命令的 stdout 当协议读（同 mcp/tui/serve 一类，
+    // 输出模式 flag 对其无意义）。套 envelope 会把 `hookSpecificOutput` 埋深一层
+    // 而失效，envelope 自身又会被原样注入会话上下文；未启用时一个字节都不写。
+    // 运行事实走 stderr（exit 0 的 stderr 只进 Claude Code 调试日志）。
+    if command == "hook" {
+        if let Some(line) = hooks::hook_stdout_line(&data) {
+            protocol::write_stdout_line(&line);
+        }
+        eprintln!("{}", hooks::hook_diagnostics(&data));
+        return Ok(protocol::Outcome::Success);
+    }
     let duration_ms = started.elapsed().as_millis() as u64;
     // 生效检索模式：search 的 data 已含 `retrieval_mode` 字段（render 投影）；
     // 其他命令恒为 lexical。
@@ -1190,8 +1201,9 @@ fn subcommand_help_text(cmd: &str) -> &'static str {
         "hook" => {
             "hook <session-start|user-prompt-submit>：Claude Code Hook 集成（默认关闭）。\n\
                   示例：echo '{\"prompt\":\"数据库迁移\"}' | agent-session-grep --db <path> hook user-prompt-submit --enable\n\
-                  从 stdin 读 hook payload，检索历史并按 hookSpecificOutput 契约输出；\n\
-                  不加 --enable 时输出空 context（不注入任何历史）；\n\
+                  从 stdin 读 hook payload，检索历史后把 hookSpecificOutput 契约裸写到 stdout；\n\
+                  Claude Code 直接读 stdout 当协议，所以本命令不套 envelope（--robot/--output 无效），\n\
+                  不加 --enable 时 stdout 一个字节都不写（不注入任何历史）；运行事实走 stderr；\n\
                   flag：--enable 启用注入、--max-tokens <n> 预算（默认 2000）；\n\
                   --provider claude|claude-code|codex（可重复，OR 限定 provider）、--decay-days <n>（只注入最近 N 天）、\n\
                   --repo <host/owner/name>（只注入该仓库的历史；与 search --repo 同语义）；\n\
@@ -2293,7 +2305,7 @@ fn dispatch(
                 }
                 _ => (String::new(), 0usize),
             };
-            let output = hooks::build_hook_output(&text, config.max_tokens);
+            let output = hooks::build_hook_output(event, &text, config.max_tokens);
             let mut data = serde_json::to_value(&output)
                 .map_err(|e| CliError::usage(format!("hook: serialization error: {e}")))?;
             if let Some(object) = data.as_object_mut() {
