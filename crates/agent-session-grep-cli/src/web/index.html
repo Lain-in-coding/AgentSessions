@@ -62,6 +62,12 @@
   color-scheme: dark;
 }
 * { box-sizing: border-box; }
+/* `[hidden]` is only a UA-stylesheet `display: none`, so any author `display`
+   rule silently defeats it. `.gate` (grid) and `.shell` (flex) both set one,
+   which left the token gate and the app shell visible at the same time — the
+   gate looked unresponsive because hiding it changed nothing. Author-level
+   `!important` is the fix that keeps `hidden` meaning hidden everywhere. */
+[hidden] { display: none !important; }
 html, body { height: 100%; }
 body { margin: 0; background: var(--bg); color: var(--text); font: var(--font-ui-size)/1.5 var(--sans); }
 button { font: inherit; color: inherit; }
@@ -287,8 +293,9 @@ const I18N = {
     gateTitle: '需要访问令牌',
     gateBody: '这个页面是本机 agent-session-grep 服务的只读界面。令牌在启动 serve 的终端里,形如 #token=32位十六进制;把它粘贴到下面即可(只需一次,之后会记住)。',
     gateGo: '进入',
-    gateHint: '找不到令牌?看运行 asg serve 的那个终端窗口的第一行输出。',
+    gateHint: '找不到令牌?看运行 `asg serve` 的那个终端窗口的第一行输出。',
     gateRejected: '令牌无效或已过期(serve 重启后令牌会更换),请从终端重新复制。',
+    gateEmpty: '请先粘贴令牌(32 位十六进制)。',
     searchPlaceholder: '搜索消息、决策、报错……',
     searchGo: '搜索',
     statusConnecting: '正在连接本地库…',
@@ -326,8 +333,9 @@ const I18N = {
     gateTitle: 'Access token required',
     gateBody: 'This page is a read-only view over a local agent-session-grep serve instance. The token is printed in the terminal that started serve (a #token=… fragment); paste it below. You only need to do this once per serve session.',
     gateGo: 'Open',
-    gateHint: 'Lost the token? It is on the first line of the terminal running asg serve.',
+    gateHint: 'Lost the token? It is on the first line of the terminal running `asg serve`.',
     gateRejected: 'Token invalid or expired (serve rotates it on restart). Copy a fresh one from the terminal.',
+    gateEmpty: 'Paste the token first (32 hex characters).',
     searchPlaceholder: 'Search messages, decisions, errors…',
     searchGo: 'Search',
     statusConnecting: 'Connecting to local catalog…',
@@ -411,9 +419,15 @@ function showGate(rejected) {
 }
 function acceptToken(value) {
   token = (value || '').trim();
-  if (!token) return;
+  if (!token) {
+    const error = document.getElementById('gateError');
+    error.textContent = t('gateEmpty');
+    error.classList.add('show');
+    return;
+  }
   localStorage.setItem(TOKEN_KEY, token);
   authHeaders = { 'Authorization': 'Bearer ' + token };
+  document.getElementById('gateError').classList.remove('show');
   document.getElementById('gate').hidden = true;
   document.getElementById('shell').hidden = false;
   init();

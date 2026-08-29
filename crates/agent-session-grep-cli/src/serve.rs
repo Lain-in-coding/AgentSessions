@@ -1328,6 +1328,58 @@ mod tests {
         }
     }
 
+    /// The UI hides regions with the `hidden` attribute, but `[hidden]` is only
+    /// a UA-stylesheet `display: none`: any author `display` rule on the same
+    /// element wins and the region stays visible. `.gate` sets `display: grid`
+    /// and `.shell` sets `display: flex`, so without an author-level
+    /// `[hidden] { display: none !important }` the token gate and the app shell
+    /// render on top of each other and the gate's button looks dead. Pin both
+    /// the rule and every element that depends on it.
+    #[test]
+    fn embedded_ui_enforces_the_hidden_attribute_over_author_display_rules() {
+        assert!(
+            WEB_UI_HTML.contains("[hidden] { display: none !important; }"),
+            "author-level [hidden] override is required: `.gate`/`.shell` set display"
+        );
+        for id in ["gate", "shell", "contextPanel", "detailEmpty", "previewOutput"] {
+            assert!(
+                WEB_UI_HTML.contains(&format!("id=\"{id}\"")),
+                "missing element #{id} that the hidden-attribute contract covers"
+            );
+        }
+    }
+
+    /// Every `data-i18n` key the markup asks for must exist in **both**
+    /// dictionaries, or the toggle silently blanks that control (an empty
+    /// button is indistinguishable from a broken one). Both directions are
+    /// checked: a key added to the markup without a translation, and a key
+    /// present in one language only.
+    #[test]
+    fn embedded_ui_translates_every_referenced_i18n_key() {
+        let keys: Vec<&str> = WEB_UI_HTML
+            .match_indices("data-i18n=\"")
+            .map(|(index, marker)| {
+                let rest = &WEB_UI_HTML[index + marker.len()..];
+                &rest[..rest.find('"').expect("unterminated data-i18n value")]
+            })
+            .collect();
+        assert!(keys.len() >= 10, "expected the markup to use i18n keys");
+
+        let zh_start = WEB_UI_HTML.find("  zh: {").expect("zh dictionary");
+        let en_start = WEB_UI_HTML.find("  en: {").expect("en dictionary");
+        assert!(zh_start < en_start, "dictionary order assumption changed");
+        let zh = &WEB_UI_HTML[zh_start..en_start];
+        let en_end = WEB_UI_HTML[en_start..]
+            .find("\n};")
+            .expect("dictionary terminator");
+        let en = &WEB_UI_HTML[en_start..en_start + en_end];
+
+        for key in keys {
+            assert!(zh.contains(&format!("{key}:")), "zh missing i18n key {key}");
+            assert!(en.contains(&format!("{key}:")), "en missing i18n key {key}");
+        }
+    }
+
     #[test]
     fn serve_session_generates_token_and_loopback_address() {
         let session = ServeSession::bind_loopback(0).expect("session");
