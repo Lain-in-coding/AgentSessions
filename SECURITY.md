@@ -39,6 +39,26 @@ formats are matched, so it is not a substitute for secret hygiene: treat any
 transcript content as potentially sensitive, and do not rely on redaction for
 secrets whose format is not covered by the ruleset.
 
+Two scope limits are deliberate and worth knowing before you rely on the
+key-name signal:
+
+- **Key-name redaction covers string values only.** A JSON number or boolean
+  under a secret-looking key is passed through unchanged, because a number
+  cannot carry a secret shape while several contract fields *are* numeric
+  counters whose names contain a secret-looking fragment (`max_tokens` /
+  `used_tokens` in `handoff-pack/v1`, published as integers). Blanking those
+  emitted a string where the schema promises an integer and destroyed the
+  budget accounting the pack exists to report. Secret-named arrays and objects
+  are still recursed into, not trusted.
+- **Absolute paths are not secrets to this ruleset.** There is no path rule, so
+  a path that crosses a machine boundary — notably
+  `original_working_directory`, which `resume` needs in order to work — is
+  emitted verbatim, OS account name included. `source_path` and
+  `transcript_path` are omitted from that response shape by design. A path
+  privacy mode is an open threat-model decision, recorded with its fact basis
+  in `docs/security/THREAT-MODEL.md` §7.1; until it is implemented and signed,
+  the behaviour above is what ships.
+
 ## Dependencies
 
 Pull-request checks run `cargo deny check`, while
