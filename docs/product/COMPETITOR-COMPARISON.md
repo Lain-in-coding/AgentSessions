@@ -3,12 +3,15 @@
 > Open-source gate artifact (08-15-benchmark-install-open-source-gate R1):
 > 与当前已核验外部参考项目的公开对比表。只列可复现事实(provider 数、
 > 能力、license、形态);不能合法/稳定运行的竞品标「不可比」。
-> 证据来源: 本地深读报告(12 份可引用外部项目,不纳入公开树)与固定 clone
+> 证据来源: 本地深读报告(14 份外部项目报告,不纳入公开树)与固定 clone
 > (commit 见 `docs/operations/REUSE-LICENSE-AUDIT.md`)。
-> cass(coding_agent_session_search)因 LICENSE 含 restricted-party rider
-> 仅 clean-room 思路可引用,不进入可复现对比基线,也不产 deep-read 报告——
-> 因此报告数(12)等于可引用集大小,名单共 13 项。
-> 更新:2026-08-18
+> 其中两项因 license 状态只能 clean-room 引用思路、不进入可复现对比基线:
+> cass(coding_agent_session_search)的 LICENSE 含 restricted-party rider;
+> cc-sessions-viewer 的 README 挂 MIT badge 但仓库内没有 LICENSE 文件
+> (GitHub 仓库元数据 `licenseInfo: null`),在作者补上之前不存在可依赖的
+> 授权。因此可自由引用的对比基线是 12 项,名单共 14 项。
+> 更新:2026-08-29(新增 cc-sessions-viewer;并纠正上一版"cass 不产 deep-read
+> 报告"的说法——报告存在于本地不公开的深读集内,受限的是代码复用而不是阅读)
 
 ## 事实基线
 
@@ -25,6 +28,7 @@
 | agent-sessions | Go CLI | MIT | 10 | FTS5 | — |
 | agf | Go CLI | MIT | 8 | fuzzy | — |
 | cc-switch | 桌面 App | MIT | 7 | 无检索(配置切换器) | 非检索工具,「不可比」 |
+| cc-sessions-viewer | Tauri 2 桌面 App | **README 挂 MIT badge,仓库无 LICENSE 文件** | 7 | 无索引:rayon 并行全量扫描 + 进程内 (path→mtime) 缓存 | 仅匹配用户消息(工具调用/结果/文件改动不参与匹配);原始 JSONL 只读;不可复现对比 |
 | sessiongrep | Rust CLI | MIT | 5 | FTS5 | — |
 | memex | Rust CLI | MIT | 4 | hybrid | — |
 | claude-historian-mcp | Python MCP | MIT | 1 | 零存储全扫 | 仅 Claude Code |
@@ -44,13 +48,19 @@
 
 - **cc-switch**: 配置切换器,无检索能力。
 - **cass**: 受限 license,不可复现对比。
+- **cc-sessions-viewer**: 仓库无 LICENSE 文件(README 的 MIT badge 无文件支撑,
+  GitHub `licenseInfo: null`),因此只能 clean-room 引用思路;其检索为「无索引
+  全量并行扫描 + 只匹配用户消息」,与本产品的持久 FTS5 全内容索引不是同一
+  问题域,亦不作优劣结论。
 - 其余 12 项:license 可自由引用,但 provider 数、能力为 deep-read 快照
   (2026-08-14),与最新上游可能有差异;发布 benchmark 时以固定 clone commit
   为准复现。
 
 ## 口径说明
 
-- 「12 个外部项目」= 可自由引用集合(12 项);总名单 13 项(含 clean-room-only
-  cass)。未补齐新的独立外部基线前,不使用更大的宣传口径。
+- 「12 个外部项目」= 可自由引用集合(12 项);总名单 14 项(含 clean-room-only
+  的 cass 与 cc-sessions-viewer)。新增 cc-sessions-viewer 同时让名单 +1 与
+  clean-room-only 集 +1,所以可自由引用数仍是 12——这个数字未过期,不是漏更。
+  未补齐新的独立外部基线前,不使用更大的宣传口径。
 - 本表与 PROVIDER-MATURITY-MATRIX.md、README 数字一致(16 行矩阵、
   14 实现 + 2 deferred)。

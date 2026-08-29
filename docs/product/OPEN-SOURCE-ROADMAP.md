@@ -130,16 +130,18 @@ tool_activity 7 家诚实盘点 / 3 个 Medium 修复）已落地并推送到 `m
 parity、零遥测可验证、跨边界脱敏、Hook 默认关闭、三平台安装、
 benchmark/文档/对比表一致、三平台演练通过。
 
-## 5. 竞品事实基线(2026-08-15 精读结论,13 个外部项目/12 个可引用)
+## 5. 竞品事实基线(2026-08-29 更新,14 个外部项目/12 个可引用)
 
-当前仓库已保存并核验的外部参考项目共 **13 个**:
+当前仓库已保存并核验的外部参考项目共 **14 个**:
 `ctx`、`agentsview`、`AgentRecall`、`agent-sessions`、`agf`、
 `cc-switch`、`claude-historian-mcp`、`fast-resume`、`hstry`、`memex`、
-`Recall`、`sessiongrep`、`coding_agent_session_search`。
+`Recall`、`sessiongrep`、`coding_agent_session_search`、`cc-sessions-viewer`。
 其中 **12 个**可自由引用,是对比表与 benchmark 基线的合法来源;
 `coding_agent_session_search` 因其 LICENSE 含 restricted-party rider,
-仅限 clean-room 思路,计入名单但不计入可引用对比基线。因此名单共
-13 项 = 「12 可引用 + 1 clean-room-only」,对外口径「12 个外部项目」
+`cc-sessions-viewer` 因其仓库无 LICENSE 文件(README 的 MIT badge 无文件
+支撑,`licenseInfo: null`),两者均仅限 clean-room 思路,计入名单但不计入
+可引用对比基线。因此名单共
+14 项 = 「12 可引用 + 2 clean-room-only」,对外口径「12 个外部项目」
 指可自由引用集,与 `COMPETITOR-COMPARISON.md` 的口径说明一致。
 
 `cass` 是 `coding_agent_session_search` 的简称,两个名字指同一个仓库
@@ -154,17 +156,19 @@ benchmark/文档/对比表一致、三平台演练通过。
 
 - provider 覆盖:ctx 40+、agentsview 40+、AgentRecall 16、hstry 16、
   fast-resume 12、Recall 11、agent-sessions 10、agf 8、cc-switch 7、
-  sessiongrep 5、memex 4、claude-historian-mcp 1、
+  cc-sessions-viewer 7、sessiongrep 5、memex 4、claude-historian-mcp 1、
   coding_agent_session_search(待以同一 benchmark harness 核验)。
 - 检索:纯 FTS5 系(sessiongrep/agent-sessions)、FTS+模糊(fast-resume)、
-  hybrid RRF(ctx/cass/Recall/agentsview/memex)、fuzzy(agf)、零存储全扫
-  (claude-historian-mcp)。
-- 深度精读报告(14 份:12 份可引用外部项目各一份 + 2 份本项目文档,
-  2026-08-14 生成)仅作为本地研究输入,不纳入公开树;cass 因 clean-room
-  边界不产 deep-read 报告,因此外部报告数等于可引用集大小(12)而非名单
-  大小(13)。公开的 provider 格式结论落在对应 `.trellis/tasks/`
+  hybrid RRF(ctx/cass/Recall/agentsview/memex)、fuzzy(agf)、无索引并行全量
+  扫描+进程内缓存(cc-sessions-viewer)、零存储全扫(claude-historian-mcp)。
+- 深度精读报告(16 份:14 份外部项目各一份 + 2 份本项目文档)仅作为本地
+  研究输入,不纳入公开树。本文与对比表此前各有一处"cass 因 clean-room
+  边界不产 deep-read 报告"的说法,与事实不符:报告在本地精读集内存在,
+  受限的是代码复用而不是阅读,已更正。cass 与 cc-sessions-viewer 的精读
+  报告均不进入公开树,公开的 provider 格式结论落在对应 `.trellis/tasks/`
   research 记录中。
-- 法律红线:cass LICENSE 含 rider,仅 clean-room 思路;REUSE-LICENSE-AUDIT
+- 法律红线:cass LICENSE 含 rider、cc-sessions-viewer 无 LICENSE 文件,
+  两者均仅 clean-room 思路;REUSE-LICENSE-AUDIT
   维护 direct-copy/adapt/idea-only/reject 边界。
 
 ## 6. 术语与决策日志
