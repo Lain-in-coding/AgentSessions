@@ -176,14 +176,86 @@ pub fn build_resume_descriptor(metadata: &SessionResumeMetadata) -> ResumePrevie
 }
 
 /// Format a resume command as a displayable string for dry-run preview.
+///
+/// Every interpolated token is provider-transcript data, which the threat model
+/// treats as untrusted input (`docs/security/THREAT-MODEL.md` §2). The preview
+/// exists to be copied into a shell — and an MCP/Robot client may hand it to one
+/// directly — so an unquoted token turns a poisoned `cwd` into command
+/// execution: a session whose recorded working directory ends in
+/// `…\ws" && <injected> && cd "…` renders as a command string that runs
+/// `<injected>` before ever reaching the provider.
+///
+/// Tokens are therefore quoted when they need it, and the whole preview is
+/// refused — empty string, projected as `command: null` — when a token contains
+/// a character that can still escape or expand *inside* double quotes in some
+/// common shell. No single quoting style is safe across cmd.exe, PowerShell and
+/// POSIX shells simultaneously, so for such a token the honest answer is no
+/// command rather than a plausible-looking one; `working_directory` is still
+/// reported structurally. Actual execution is unaffected either way: `--yes`
+/// spawns argv directly with `current_dir` and never goes through a shell.
 fn format_command(binary: &str, args: &[String], cwd: &Option<String>) -> String {
-    let mut parts = vec![binary.to_string()];
-    parts.extend(args.iter().cloned());
+    let mut parts = Vec::with_capacity(args.len() + 1);
+    for token in std::iter::once(binary).chain(args.iter().map(String::as_str)) {
+        match quote_preview_token(token) {
+            Some(quoted) => parts.push(quoted),
+            None => return String::new(),
+        }
+    }
     let cmd = parts.join(" ");
-    if let Some(dir) = cwd {
-        format!("(cd {dir} && {cmd})")
+    match cwd {
+        Some(dir) => match quote_preview_token(dir) {
+            Some(quoted) => format!("(cd {quoted} && {cmd})"),
+            None => String::new(),
+        },
+        None => cmd,
+    }
+}
+
+/// Render one preview token, or `None` when it cannot be rendered safely.
+///
+/// - Rejected outright: `"` (closes the quote in every shell), `$` and
+///   `` ` `` (expand inside double quotes in POSIX shells and PowerShell), `%`
+///   and `!` (expand inside double quotes in cmd.exe), and any control
+///   character (a newline splits the command line).
+/// - Double-quoted: anything carrying whitespace or a shell metacharacter that
+///   double quotes *do* neutralise everywhere (`& | ; < > ( ) ^ ' * ? [ ] { } ~
+///   #`), so an ordinary path with spaces still previews correctly.
+/// - Left bare: plain tokens, keeping the common preview byte-identical to a
+///   hand-typed command.
+fn quote_preview_token(token: &str) -> Option<String> {
+    if token
+        .chars()
+        .any(|c| c.is_control() || matches!(c, '"' | '$' | '`' | '%' | '!'))
+    {
+        return None;
+    }
+    let needs_quotes = token.is_empty()
+        || token.chars().any(|c| {
+            c.is_whitespace()
+                || matches!(
+                    c,
+                    '&' | '|'
+                        | ';'
+                        | '<'
+                        | '>'
+                        | '('
+                        | ')'
+                        | '^'
+                        | '\''
+                        | '*'
+                        | '?'
+                        | '['
+                        | ']'
+                        | '{'
+                        | '}'
+                        | '~'
+                        | '#'
+                )
+        });
+    if needs_quotes {
+        Some(format!("\"{token}\""))
     } else {
-        cmd
+        Some(token.to_string())
     }
 }
 
@@ -255,6 +327,67 @@ mod tests {
                 None
             },
         }
+    }
+
+    #[test]
+    fn preview_command_refuses_shell_injection_from_transcript_cwd() {
+        // 真实缺陷（安全审计复现）：`original_working_directory` 逐字来自
+        // provider transcript（不可信输入），旧实现把它裸插进 `(cd {dir} && …)`。
+        // 一条被污染的会话记录即可让 dry-run 预览变成"复制即执行"的注入串，
+        // 而这个串正是给人和 MCP 客户端照抄的。
+        let evil = "C:\\ws\" && echo INJECTED && cd \".";
+        let m = metadata("claude-code", true, "abc-123", Some(evil));
+        let preview = build_resume_descriptor(&m);
+        // 结构化执行面不受影响：--yes 走 argv + current_dir，不经 shell。
+        assert!(preview.available);
+        assert_eq!(preview.descriptor.working_directory.as_deref(), Some(evil));
+        // 展示面 fail-closed：宁可没有命令，也不给一个能注入的命令。
+        assert!(
+            preview.command_string.is_empty(),
+            "不安全的 cwd 必须拒绝出预览串，实际：{}",
+            preview.command_string
+        );
+
+        // `$`/反引号/`%`/`!`/控制字符同样必须拒绝（分别对应 POSIX shell、
+        // PowerShell、cmd.exe 的引号内展开，以及换行拆命令）。
+        for hostile in [
+            "/tmp/$(id)",
+            "/tmp/`id`",
+            "C:\\ws\\%USERPROFILE%",
+            "C:\\ws\\!DELAYED!",
+            "/tmp/a\nrm -rf /",
+        ] {
+            let m = metadata("claude-code", true, "abc-123", Some(hostile));
+            assert!(
+                build_resume_descriptor(&m).command_string.is_empty(),
+                "cwd `{hostile}` 仍产出了预览串"
+            );
+        }
+
+        // 会话 id 也来自 transcript：同一纪律适用于 args。
+        let m = metadata(
+            "claude-code",
+            true,
+            "abc\" && echo INJECTED && echo \"",
+            None,
+        );
+        assert!(build_resume_descriptor(&m).command_string.is_empty());
+    }
+
+    #[test]
+    fn preview_command_quotes_ordinary_paths_with_spaces() {
+        // 普通含空格路径不该被拒绝，只需要引号——预览仍然可以照抄执行。
+        let m = metadata(
+            "claude-code",
+            true,
+            "abc-123",
+            Some("C:\\Program Files (x86)\\proj"),
+        );
+        let preview = build_resume_descriptor(&m);
+        assert_eq!(
+            preview.command_string,
+            "(cd \"C:\\Program Files (x86)\\proj\" && claude --resume abc-123)"
+        );
     }
 
     #[test]

@@ -139,11 +139,18 @@ fn render_resume(data: &Value) -> Vec<String> {
         return lines;
     }
 
+    // `available: true` 但 command 为 null 只有一个来因：预览串里的 token
+    // （transcript 提供的工作目录或会话 id）含 shell 元字符，无法在任一常见
+    // shell 下安全展示，resume.rs 的 `format_command` 因此 fail-closed。如实
+    // 说明，不要渲染成一个看不懂的 "?"。
     let command = data
         .get("command")
         .and_then(Value::as_str)
         .map(sanitize)
-        .unwrap_or_else(|| "?".into());
+        .unwrap_or_else(|| {
+            "—（无法安全展示：工作目录或会话 id 含 shell 元字符；请手动 cd 后再执行 provider 命令）"
+                .into()
+        });
     lines.push(format!("命令：{command}"));
     if let Some(dir) = data.get("working_directory").and_then(Value::as_str) {
         lines.push(format!("工作目录：{}", sanitize(dir)));
@@ -330,10 +337,12 @@ fn render_search(data: &Value) -> Vec<String> {
                     .to_string(),
             })
             .collect();
-        return render_session_resume_table(&rows)
+        let mut lines: Vec<String> = render_session_resume_table(&rows)
             .lines()
             .map(str::to_string)
             .collect();
+        lines.extend(next_step_hint(data));
+        return lines;
     }
     let hits = data
         .get("hits")
@@ -376,6 +385,37 @@ fn render_search(data: &Value) -> Vec<String> {
         {
             lines.push(format!("     {text}"));
         }
+    }
+    lines
+}
+
+/// 冻结的五列会话表之后的"下一步"提示。
+///
+/// 表里的 `Session ID` 是 **provider 原生** id（resume 要用的那个），任何
+/// `context`/`show`/`get-message` 都不接受它——`context <原生 id>` 直接 exit 2
+/// `not a valid session id`。而 `--help` 承诺的数据流是
+/// `search → show <msg_id> → context <ses_id>`：human 模式若只出表格，这条路
+/// 就断在第一步。故在表后补一行可直接复制的 wire-id 命令（取最相关命中，
+/// 与表格的相关度排序同源）。缺 wire id 的响应不补提示，不臆造 id。
+fn next_step_hint(data: &Value) -> Vec<String> {
+    let Some(top) = data
+        .get("hits")
+        .and_then(Value::as_array)
+        .and_then(|hits| hits.first())
+    else {
+        return Vec::new();
+    };
+    let session = top.get("session_id").and_then(Value::as_str).map(sanitize);
+    let message = top.get("id").and_then(Value::as_str).map(sanitize);
+    let mut lines = Vec::new();
+    if session.is_some() || message.is_some() {
+        lines.push("下一步（表中 Session ID 供 resume 用；展开正文请用下面的 wire id）：".into());
+    }
+    if let Some(session) = session {
+        lines.push(format!("  context {session}"));
+    }
+    if let Some(message) = message {
+        lines.push(format!("  show {message}"));
     }
     lines
 }
@@ -931,26 +971,74 @@ fn take_display_suffix(text: &str, max_width: usize) -> String {
     suffix.into_iter().rev().collect()
 }
 
-/// 字符串显示宽度：CJK（统一表意文字、假名、谚文、全角形式等）按 2 列计。
+/// 字符串显示宽度：宽字符（CJK、emoji 等）按 2 列，零宽字符按 0 列。
 fn display_width(text: &str) -> usize {
     text.chars().map(char_display_width).sum()
 }
 
-/// 单字符显示宽度：CJK 及其兼容形式按 2 列计，其余按 1 列计。
+/// 零宽字符：终端不占列，但仍是一个 `char`。按 1 列计会让含变体选择符的
+/// emoji（`⚠\u{FE0F}`）或组合重音的拉丁文把列宽算多，同样撑歪表格。
+fn is_zero_width(code: u32) -> bool {
+    (0x0300..=0x036F).contains(&code) // 组合附加符号
+        || (0x200B..=0x200F).contains(&code) // 零宽空格/连接符/方向标记
+        || (0xFE00..=0xFE0F).contains(&code) // 变体选择符（emoji presentation）
+        || code == 0xFEFF // BOM / 零宽不换行空格
+        || (0xE0100..=0xE01EF).contains(&code) // 变体选择符补充
+}
+
+/// emoji 与其它按 2 列渲染的符号（UAX #11 East_Asian_Width=W 中的非 CJK 部分）。
+///
+/// AI 编程会话正文里 ✅ ❌ 🚀 🎉 ⭐ 极常见；按 1 列计会让 `search` 的五列
+/// 会话表在含 emoji 的行整体右移，用户看到的是错位而不是表格。
+fn is_wide_symbol(code: u32) -> bool {
+    matches!(code,
+        0x231A..=0x231B      // ⌚⌛
+        | 0x2329..=0x232A    // 〈〉
+        | 0x23E9..=0x23EC | 0x23F0 | 0x23F3
+        | 0x25FD..=0x25FE
+        | 0x2614..=0x2615
+        | 0x2648..=0x2653
+        | 0x267F | 0x2693 | 0x26A1
+        | 0x26AA..=0x26AB
+        | 0x26BD..=0x26BE
+        | 0x26C4..=0x26C5
+        | 0x26CE | 0x26D4 | 0x26EA
+        | 0x26F2..=0x26F3
+        | 0x26F5 | 0x26FA | 0x26FD
+        | 0x2705
+        | 0x270A..=0x270B
+        | 0x2728 | 0x274C | 0x274E
+        | 0x2753..=0x2755
+        | 0x2757
+        | 0x2795..=0x2797
+        | 0x27B0 | 0x27BF
+        | 0x2B1B..=0x2B1C
+        | 0x2B50 | 0x2B55
+        | 0x1F000..=0x1FAFF  // 麻将/牌/emoji 各区段
+    )
+}
+
+/// 单字符显示宽度：宽字符 2 列、零宽字符 0 列，其余 1 列。
 fn char_display_width(c: char) -> usize {
     let code = c as u32;
+    if is_zero_width(code) {
+        return 0;
+    }
     if (0x1100..=0x115F).contains(&code) // 谚文字母
         || (0x2E80..=0x303E).contains(&code) // CJK 部首与标点
         || (0x3041..=0x33FF).contains(&code) // 假名、CJK 兼容
         || (0x3400..=0x4DBF).contains(&code) // CJK 扩展 A
         || (0x4E00..=0x9FFF).contains(&code) // CJK 统一表意文字
         || (0xA000..=0xA4CF).contains(&code) // 彝文
+        || (0xA960..=0xA97F).contains(&code) // 谚文字母扩展 A
         || (0xAC00..=0xD7A3).contains(&code) // 谚文音节
         || (0xF900..=0xFAFF).contains(&code) // CJK 兼容表意文字
+        || (0xFE10..=0xFE19).contains(&code) // 竖排形式
         || (0xFE30..=0xFE4F).contains(&code) // CJK 兼容形式
         || (0xFF00..=0xFF60).contains(&code) // 全角形式
-        || (0xFFE0..=0xFFE6).contains(&code)
-    // 全角符号
+        || (0xFFE0..=0xFFE6).contains(&code) // 全角符号
+        || (0x20000..=0x3FFFD).contains(&code) // CJK 扩展 B 及以后
+        || is_wide_symbol(code)
     {
         2
     } else {
@@ -1882,6 +1970,65 @@ mod tests {
     }
 
     #[test]
+    fn search_table_appends_wire_id_next_step_commands() {
+        // 2026-08-29 审计：human search 只出五列表，表里的 Session ID 是 provider
+        // 原生 id，`context <它>` 会 exit 2；`--help` 承诺的
+        // search → show <msg_id> → context <ses_id> 因此断在第一步。
+        // 表后必须补可直接复制的 wire-id 命令。
+        let data = json!({
+            "generation": 3,
+            "hits": [{
+                "id": "msg_v1_m1",
+                "session_id": "ses_v1_s1",
+                "score": 1.0,
+                "text": "hit body",
+            }],
+            "session_resume_rows": [{
+                "date": "2026-08-14",
+                "provider": "claude-code",
+                "title": "hit body",
+                "working_directory": "C:/dev/x",
+                // provider 原生 id：任何 wire-id 命令都不接受它
+                "session_id": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            }],
+        });
+        let lines = render_success("search", Outcome::Success, &data, &Page::default());
+        assert!(
+            lines.iter().any(|line| line.contains("会话标题")),
+            "冻结的五列表头必须保留: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|line| line == "  context ses_v1_s1"),
+            "缺少可复制的 context wire-id 命令: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|line| line == "  show msg_v1_m1"),
+            "缺少可复制的 show wire-id 命令: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn search_table_without_hit_ids_fabricates_no_next_step() {
+        // 没有 wire id 就不出提示，绝不臆造 id。
+        let data = json!({
+            "generation": 3,
+            "hits": [],
+            "session_resume_rows": [{
+                "date": "2026-08-14",
+                "provider": "claude-code",
+                "title": "t",
+                "working_directory": "C:/dev/x",
+                "session_id": "native-id",
+            }],
+        });
+        let lines = render_success("search", Outcome::Success, &data, &Page::default());
+        assert!(
+            !lines.iter().any(|line| line.contains("下一步")),
+            "无 hits 时不得出下一步提示: {lines:?}"
+        );
+    }
+
+    #[test]
     fn resume_table_renders_five_columns_in_contract_order() {
         let rows = [resume_row(
             "2026-08-14",
@@ -2013,6 +2160,79 @@ mod tests {
         assert!(
             body.contains(&format!("{expected_title} |")),
             "title not truncated by display width: {body:?}"
+        );
+    }
+
+    #[test]
+    fn display_width_counts_emoji_and_astral_cjk_as_two_columns() {
+        // emoji 在终端占 2 列；按 1 列计会撑歪 search 的五列会话表。
+        assert_eq!(display_width("🚀"), 2);
+        assert_eq!(display_width("✅❌"), 4);
+        assert_eq!(display_width("⭐✨"), 4);
+        // CJK 扩展 B（U+20000 起）同样是宽字符。
+        assert_eq!(display_width("\u{20000}"), 2);
+        // 变体选择符与组合附加符号零宽，不额外占列。
+        assert_eq!(display_width("\u{26A0}\u{FE0F}"), 1);
+        assert_eq!(display_width("e\u{0301}"), 1);
+        // BMP 拉丁与既有 CJK 行为不变。
+        assert_eq!(display_width("ok"), 2);
+        assert_eq!(display_width("会话"), 4);
+    }
+
+    #[test]
+    fn resume_table_keeps_columns_aligned_across_emoji_ascii_and_cjk_titles() {
+        // 同一列在三种标题（emoji / ASCII / CJK）下必须落在同一显示列；
+        // 回归 2026-08-29 审计：emoji 标题曾让工作目录与 Session ID 右移。
+        let rows = [
+            resume_row(
+                "2026-08-14",
+                "claude-code",
+                Some("wprobe 🚀🚀"),
+                Some("C:/a"),
+                "ses_v1_abc",
+            ),
+            resume_row(
+                "2026-08-14",
+                "claude-code",
+                Some("wprobe AAAA"),
+                Some("C:/a"),
+                "ses_v1_abc",
+            ),
+            resume_row(
+                "2026-08-14",
+                "claude-code",
+                Some("wprobe 中中"),
+                Some("C:/a"),
+                "ses_v1_abc",
+            ),
+        ];
+        let output = render_session_resume_table(&rows);
+        let widths: Vec<usize> = output.lines().map(display_width).collect();
+        assert_eq!(
+            widths
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            1,
+            "所有行的显示宽度必须一致（列对齐）: {widths:?}\n{output}"
+        );
+    }
+
+    #[test]
+    fn resume_table_truncates_emoji_title_by_display_width() {
+        // 标题列 19：10 个 emoji（20 列）→ 只能放 9 个（18 列）+ `…`。
+        let rows = [resume_row(
+            "2026-08-14",
+            "claude-code",
+            Some(&"🚀".repeat(10)),
+            Some("C:/a"),
+            "ses_v1_abc",
+        )];
+        let output = render_session_resume_table(&rows);
+        let body = output.lines().nth(1).unwrap();
+        assert!(
+            body.contains(&format!("{}…", "🚀".repeat(9))),
+            "emoji title not truncated by display width: {body:?}"
         );
     }
 
