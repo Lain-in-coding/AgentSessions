@@ -317,9 +317,19 @@ impl HttpRequest {
     /// requests made by the embedded UI carry no Origin header; a present
     /// Origin must exactly match the loopback Host authority (Q27).
     pub fn check_origin_loopback(&self) -> bool {
-        let Some(origin) = self.header("origin") else {
+        let mut origins = self
+            .headers
+            .iter()
+            .filter(|(key, _)| key.eq_ignore_ascii_case("origin"))
+            .map(|(_, value)| value.as_str());
+        let Some(origin) = origins.next() else {
             return true;
         };
+        // 重复 Origin 不是"没有 Origin"：`header` 对重复取值返回 None，沿用它会
+        // 把两个 Origin 头当成同源放行（fail open）。在场即校验，歧义即拒绝。
+        if origins.next().is_some() {
+            return false;
+        }
         let Some((scheme, authority)) = parse_http_origin(origin) else {
             return false;
         };
@@ -1076,6 +1086,31 @@ mod tests {
             vec![("X-Forwarded-For".into(), "127.0.0.1".into())],
         );
         assert!(!proxied.check_direct_client());
+    }
+
+    /// `header` returns `None` for a duplicated value, and a *missing* Origin is
+    /// deliberately treated as same-origin — so reusing it here let two Origin
+    /// headers walk through the cross-origin gate: one bad Origin answered 403,
+    /// the same bad Origin sent twice answered 200. Ambiguity must fail closed,
+    /// the way a duplicated Host and Authorization already do.
+    #[test]
+    fn duplicate_origin_header_cannot_bypass_the_cross_origin_guard() {
+        let store = SqliteStore::open_in_memory().expect("store");
+        let mut duplicated = authorized("GET", "/api/status");
+        duplicated
+            .headers
+            .push(("Origin".into(), "http://evil.test".into()));
+        duplicated
+            .headers
+            .push(("Origin".into(), "http://evil.test".into()));
+        assert!(!duplicated.check_origin_loopback());
+        let response = route_request(&duplicated, TEST_TOKEN, "test.db", false, &store);
+        assert_eq!(response.status, 403, "{}", response.body);
+        assert!(
+            response.body.contains("forbidden_origin"),
+            "{}",
+            response.body
+        );
     }
 
     #[test]
