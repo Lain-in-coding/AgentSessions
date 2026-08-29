@@ -129,12 +129,17 @@ domain ← ports ← application ← adapters
   whole-document JSON file. Those hits report no span rather than a synthesised
   offset that would point at the wrong bytes. The per-provider column is in the
   [Provider Beta Readiness Ledger](docs/product/PROVIDER-BETA-READINESS.md).
-- **Recency-aware lexical ranking**: lexical search hits are scored as
-  `bm25 × recency decay − sidechain penalty` (30-day half-life, 0.3 decay
-  floor, fixed sidechain penalty), so newer and mainline messages surface
-  first without burying old or strongly relevant hits. Semantic hits and
-  hybrid RRF fusion are not re-ranked. All tuning constants live in one
-  module and are pinned by tests.
+- **Recency- and repo-aware lexical ranking**: lexical search hits are scored
+  as `max(0, bm25 × recency decay − sidechain penalty + current-repo boost)`
+  (30-day half-life, 0.3 decay floor, 1.0 sidechain penalty, 2.0 boost), so
+  newer, mainline, and same-repository messages surface first without burying
+  old or strongly relevant hits. The current-repo boost applies when the hit's
+  session belongs to the repository the command is invoked from — the slug is
+  derived from the process working directory by local git detection, and a
+  caller with no derivable repository identity changes no score at all.
+  Semantic hits and hybrid RRF fusion are not re-ranked. All tuning constants
+  live in one module (`crates/agent-session-grep-application/src/ranking.rs`)
+  and are pinned by tests.
 - **Privacy**: zero telemetry, zero upload, offline by default; the global
   `--offline` flag refuses any network-requiring capability (fail-closed),
   and the default build has no HTTP client dependency (verified by a static

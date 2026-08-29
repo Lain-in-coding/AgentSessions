@@ -1622,6 +1622,136 @@ fn readme_release_status_and_maturity_tiers_match_authoritative_sources() {
 /// CHANGELOG 原文：`[Unreleased]` 段落逐一点名 provider，与 README 同属对外声明。
 const CHANGELOG: &str = include_str!("../../../CHANGELOG.md");
 
+/// `application::ranking` 原文：README/CHANGELOG 公布的评分公式与调参常量
+/// 必须由本文件推出，不能手写后遗忘。
+const RANKING_SOURCE: &str = include_str!("../../agent-session-grep-application/src/ranking.rs");
+
+/// 取 ranking.rs 的生产区（`#[cfg(test)]` 之前），避免把测试里的字面量当常量。
+fn ranking_production_region() -> &'static str {
+    RANKING_SOURCE
+        .split("#[cfg(test)]")
+        .next()
+        .expect("ranking.rs 必须有生产区")
+}
+
+/// 生产区里每个 `pub const NAME: TY = VALUE;` → `(name, value)`。
+fn ranking_tuning_constants() -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for line in ranking_production_region().lines() {
+        let Some(rest) = line.trim().strip_prefix("pub const ") else {
+            continue;
+        };
+        let Some((name, tail)) = rest.split_once(':') else {
+            continue;
+        };
+        let Some((_, value)) = tail.split_once('=') else {
+            continue;
+        };
+        out.push((
+            name.trim().to_string(),
+            value.trim().trim_end_matches(';').trim().to_string(),
+        ));
+    }
+    out
+}
+
+/// 文档里那一段专讲 lexical 排序的正文。数值必须在这一段里核对：整篇文档搜
+/// `2.0` 会被 `MIT OR Apache-2.0` 命中、搜 `1.0` 会被 `0.1.0` 命中，那样的守护
+/// 恒真、抓不住任何漂移。
+fn rank_signal_paragraph(doc: &str, anchor: &str) -> String {
+    let start = doc
+        .find(anchor)
+        .unwrap_or_else(|| panic!("文档缺少排序段落锚点 `{anchor}`"));
+    let rest = &doc[start + anchor.len()..];
+    // 段落止于下一个顶层列表项（换行 + "- "）。
+    let end = rest.find("\n- ").unwrap_or(rest.len());
+    rest[..end].split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+#[test]
+fn readme_and_changelog_publish_every_applied_lexical_rank_signal() {
+    // 已发生过的漂移：`CURRENT_REPO_SCORE_BOOST` 落地并在 CLI/MCP 生产路径生效，
+    // 但 README 的公式仍写 `bm25 × recency decay − sidechain penalty`，CHANGELOG
+    // 同样只列时效与 sidechain 两项。搜索结果顺序被一个没有任何文档提及的信号
+    // 改写——对使用者是"排序说不通"，对审计者是无从核对的黑箱。
+    //
+    // 因此这条守护盯的是"被真正应用的信号必须被公布"：凡在 `final_score` /
+    // `recency_decay` 的生产代码里被引用的调参常量，其数值必须出现在 README 与
+    // CHANGELOG **讲排序的那一段**里。新增第四个信号而不改文档即失败。
+    let region = ranking_production_region();
+    // 只看两个评分函数体：声明了但没被应用的常量不强制入文档。
+    let applied_bodies = {
+        let start = region
+            .find("pub fn recency_decay")
+            .expect("ranking.rs 必须有 recency_decay");
+        &region[start..]
+    };
+    let constants = ranking_tuning_constants();
+    assert!(
+        constants.len() >= 3,
+        "只解析到 {} 个调参常量，抽取逻辑可能失效",
+        constants.len()
+    );
+
+    let paragraphs = [
+        (
+            "README.md",
+            rank_signal_paragraph(README, "**Recency- and repo-aware lexical ranking**"),
+        ),
+        (
+            "CHANGELOG.md",
+            rank_signal_paragraph(CHANGELOG, "Rank signals for lexical search hits:"),
+        ),
+    ];
+
+    let mut checked = 0usize;
+    for (name, value) in &constants {
+        if !applied_bodies.contains(name.as_str()) {
+            continue;
+        }
+        // `30.0` 在 README 里写作 "30-day"，故 `.0` 结尾的值同时接受整数写法。
+        let mut spellings = vec![value.clone()];
+        if let Some(integral) = value.strip_suffix(".0") {
+            spellings.push(integral.to_string());
+        }
+        for (doc_name, paragraph) in &paragraphs {
+            assert!(
+                spellings
+                    .iter()
+                    .any(|spelling| paragraph.contains(spelling)),
+                "{doc_name} 讲排序的那一段未公布被应用的信号 `{name}`（值 {value}）——\
+                 排序信号改变用户看到的结果顺序，公开文档必须逐个点名其数值；\
+                 若该常量不再参与评分请先从 final_score/recency_decay 移除"
+            );
+        }
+        checked += 1;
+    }
+    assert!(
+        checked >= 3,
+        "只核对到 {checked} 个被应用的排序常量，抽取逻辑可能失效"
+    );
+
+    // 公式本身：钳制必须包住惩罚与加分（先合成再钳制）。ranking.rs 的
+    // `final_score` 文档注释是权威写法，改动它就必须同步改文档与本守护。
+    assert!(
+        region.contains(
+            "`final = max(0, bm25 × decay(age) − sidechain_penalty + current_repo_boost)`"
+        ),
+        "ranking.rs 的 final_score 公式注释被改写——请同步更新本守护与 README/CHANGELOG"
+    );
+    for (doc_name, paragraph) in &paragraphs {
+        assert!(
+            paragraph
+                .contains("max(0, bm25 × recency decay − sidechain penalty + current-repo boost)")
+                || paragraph.contains(
+                    "max(0, bm25 × recency_decay − sidechain_penalty + current_repo_boost)"
+                ),
+            "{doc_name} 的评分公式与 ranking.rs 不一致——钳制必须包住惩罚与加分，\
+             写成 `max(0, bm25 × decay) − penalty` 会允许负分，与代码相反"
+        );
+    }
+}
+
 #[test]
 fn changelog_provider_claims_match_capability_matrix() {
     // CHANGELOG 的 `[Unreleased]` 段落写着 "16-provider capability matrix"、
