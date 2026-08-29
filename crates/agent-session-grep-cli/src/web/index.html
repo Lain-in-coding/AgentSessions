@@ -1,186 +1,521 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="zh">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; object-src 'none'; frame-ancestors 'none'">
-<title>agent-session-grep / local observatory</title>
+<title>agent-session-grep</title>
 <style>
+/* ─── Design tokens (Geist-inspired neutral scale, light + dark) ───────────
+   Layout grammar: chrome and body share one background, regions are cut by
+   1px borders (no separate chrome tint); primary buttons are neutral
+   inversion (light: black on white, dark: white on black); accent color is
+   reserved for tiny highlights only. */
 :root {
+  --bg: hsl(0 0% 100%);
+  --surface-2: hsl(0 0% 98%);
+  --surface-hover: hsl(0 0% 95%);
+  --surface-active: hsl(0 0% 92%);
+  --line: hsl(0 0% 92%);
+  --line-strong: hsl(0 0% 79%);
+  --text: hsl(0 0% 9%);
+  --text-dim: hsl(0 0% 30%);
+  --text-mute: hsl(0 0% 56%);
+  --accent: hsl(0 0% 9%);
+  --on-accent: hsl(0 0% 100%);
+  --link: hsl(212 100% 48%);
+  --danger: #b91c1c;
+  --danger-soft: rgba(185, 28, 28, 0.08);
+  --ok: #047857;
+  --user-bubble: #f5f5f5;
+  --code-bg: hsl(0 0% 97%);
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --titlebar-h: 40px;
+  --sidebar-w: 248px;
+  --font-ui-size: 14px;
+  --font-code-size: 12px;
+  --mono: ui-monospace, "Cascadia Code", Consolas, monospace;
+  --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC",
+    "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif;
+  color-scheme: light;
+}
+:root.theme-dark {
+  --bg: hsl(0 0% 4%);
+  --surface-2: hsl(0 0% 0%);
+  --surface-hover: hsl(0 0% 10%);
+  --surface-active: hsl(0 0% 12%);
+  --line: hsl(0 0% 16%);
+  --line-strong: hsl(0 0% 27%);
+  --text: hsl(0 0% 93%);
+  --text-dim: hsl(0 0% 63%);
+  --text-mute: hsl(0 0% 53%);
+  --accent: hsl(0 0% 93%);
+  --on-accent: hsl(0 0% 4%);
+  --link: hsl(210 100% 66%);
+  --danger: #f87171;
+  --danger-soft: rgba(248, 113, 113, 0.14);
+  --ok: #10b981;
+  --user-bubble: hsl(0 0% 10%);
+  --code-bg: hsl(0 0% 8%);
   color-scheme: dark;
-  --ink: #e5edf4;
-  --muted: #8ea2b5;
-  --line: #263646;
-  --panel: #101a24;
-  --panel-raised: #152535;
-  --canvas: #081018;
-  --signal: #73e6c1;
-  --signal-dim: #2d846f;
-  --warning: #f2bf6b;
-  --danger: #ef847e;
-  --mono: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
-  --sans: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
 }
 * { box-sizing: border-box; }
-body { margin: 0; background: var(--canvas); color: var(--ink); font-family: var(--sans); }
-body::before { content: ""; display: block; height: 4px; background: linear-gradient(90deg, var(--signal-dim), var(--signal), transparent 72%); }
-.shell { max-width: 1320px; margin: 0 auto; padding: 28px 24px 48px; }
-.masthead { display: flex; justify-content: space-between; gap: 24px; align-items: flex-end; padding-bottom: 22px; border-bottom: 1px solid var(--line); }
-.eyebrow { color: var(--signal); font: 600 0.72rem/1 var(--mono); letter-spacing: 0.16em; text-transform: uppercase; }
-h1 { margin: 8px 0 0; font: 650 clamp(1.8rem, 4vw, 3.6rem)/0.95 var(--sans); letter-spacing: -0.06em; }
-.subtitle { max-width: 30rem; margin: 8px 0 0; color: var(--muted); font-size: 0.92rem; }
-.status { min-width: 15rem; padding: 12px 14px; border: 1px solid var(--line); background: var(--panel); color: var(--muted); font: 0.78rem/1.35 var(--mono); }
-.status.ok { color: var(--signal); border-color: var(--signal-dim); }
+html, body { height: 100%; }
+body { margin: 0; background: var(--bg); color: var(--text); font: var(--font-ui-size)/1.5 var(--sans); }
+button { font: inherit; color: inherit; }
+
+/* ─── Token gate (shown before authentication) ─────────────────────────── */
+.gate { min-height: 100vh; display: grid; place-items: center; padding: 24px; }
+.gate-card { width: min(26rem, 100%); padding: 28px; background: var(--surface-2);
+  border: 1px solid var(--line); border-radius: var(--radius-lg); }
+.gate-card h1 { margin: 0 0 6px; font-size: 1.15rem; letter-spacing: -0.01em; }
+.gate-card p { margin: 0 0 18px; color: var(--text-dim); font-size: 0.88rem; }
+.gate-error { margin: 0 0 14px; padding: 9px 12px; border-radius: var(--radius-sm);
+  background: var(--danger-soft); color: var(--danger); font-size: 0.85rem; display: none; }
+.gate-error.show { display: block; }
+.gate-row { display: flex; gap: 8px; }
+.gate-row input[type="text"] { flex: 1; min-width: 0; }
+.gate-hint { margin: 14px 0 0; color: var(--text-mute); font: var(--font-code-size)/1.6 var(--mono); word-break: break-all; }
+
+/* ─── Shell / topbar ────────────────────────────────────────────────────── */
+.shell { display: flex; flex-direction: column; height: 100vh; }
+.topbar { height: var(--titlebar-h); flex: none; display: flex; align-items: center; gap: 12px;
+  padding: 0 12px; border-bottom: 1px solid var(--line); }
+.brand { display: flex; align-items: center; gap: 8px; font-weight: 650; letter-spacing: -0.01em; flex: none; }
+.brand svg { display: block; color: var(--brand-dot, var(--text)); }
+.searchwrap { flex: 1; max-width: 560px; display: flex; align-items: center; gap: 8px;
+  height: 28px; padding: 0 10px; background: var(--surface-2); border: 1px solid var(--line);
+  border-radius: var(--radius-md); }
+.searchwrap:focus-within { border-color: var(--line-strong); }
+.searchwrap svg { flex: none; color: var(--text-mute); }
+.searchwrap input { flex: 1; min-width: 0; border: 0; background: transparent; color: var(--text); font: inherit; outline: none; }
+.searchwrap kbd { flex: none; color: var(--text-mute); font: 10px var(--mono);
+  border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px; }
+.topbar-spacer { flex: 1; }
+.status { flex: none; max-width: 22rem; color: var(--text-mute); font: var(--font-code-size) var(--mono);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.status.ok { color: var(--ok); }
 .status.error { color: var(--danger); }
-.toolbar { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; gap: 10px; margin: 24px 0 14px; }
-input, select, button { border: 1px solid var(--line); border-radius: 3px; color: var(--ink); background: var(--panel); font: inherit; }
-input, select { min-height: 40px; padding: 0 11px; }
-input:focus-visible, select:focus-visible, button:focus-visible { outline: 2px solid var(--signal); outline-offset: 2px; }
-button { min-height: 40px; padding: 0 14px; cursor: pointer; }
-button.primary { color: #06110e; background: var(--signal); border-color: var(--signal); font-weight: 700; }
-button.quiet { color: var(--signal); }
-button:disabled { opacity: 0.42; cursor: not-allowed; }
-.filters { display: flex; flex-wrap: wrap; gap: 9px; align-items: center; color: var(--muted); font-size: 0.78rem; }
-.filters label { display: flex; align-items: center; gap: 7px; }
-.filters input, .filters select { min-height: 32px; font-size: 0.8rem; }
-.filters input[type="number"] { width: 76px; }
-.filters input[type="checkbox"] { accent-color: var(--signal); }
-.rule { height: 1px; margin: 22px 0; background: var(--line); }
-.meta-row { display: flex; justify-content: space-between; gap: 16px; color: var(--muted); font: 0.76rem var(--mono); }
-.retrieval { color: var(--signal); }
-.results { display: grid; gap: 10px; margin-top: 14px; }
-.hit { display: block; width: 100%; padding: 16px; text-align: left; background: var(--panel); border-color: var(--line); transition: border-color 140ms ease, transform 140ms ease; }
-.hit:hover { border-color: var(--signal-dim); transform: translateX(3px); }
-.hit-head { display: flex; justify-content: space-between; gap: 16px; color: var(--muted); font: 0.74rem var(--mono); }
-.hit-score { color: var(--signal); }
-.hit-text { margin-top: 9px; color: var(--ink); line-height: 1.55; }
-.hit-session { margin-top: 9px; color: var(--muted); font: 0.76rem var(--mono); }
-.empty { padding: 38px 16px; border: 1px dashed var(--line); color: var(--muted); text-align: center; }
-.actions { display: flex; flex-wrap: wrap; gap: 9px; margin-top: 16px; }
-#contextPanel { display: none; margin-top: 30px; padding: 20px; border: 1px solid var(--line); background: var(--panel); }
-#contextPanel.open { display: block; }
-.context-head { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; }
-.context-head h2 { margin: 0; font-size: 1.05rem; }
-.context-controls { display: flex; flex-wrap: wrap; gap: 8px; margin: 16px 0; }
-.context-controls select { min-height: 32px; font-size: 0.8rem; }
-.message { padding: 13px 0; border-top: 1px solid var(--line); }
-.message-meta { display: flex; justify-content: space-between; gap: 12px; color: var(--muted); font: 0.72rem var(--mono); }
-.message-body { margin: 8px 0 0; white-space: pre-wrap; line-height: 1.55; }
-.message button { min-height: 28px; padding: 0 8px; color: var(--muted); font: 0.7rem var(--mono); }
-pre { max-height: 20rem; overflow: auto; padding: 13px; border: 1px solid var(--line); background: var(--canvas); color: var(--muted); font: 0.75rem/1.5 var(--mono); white-space: pre-wrap; }
-@media (max-width: 760px) {
-  .shell { padding: 20px 14px 36px; }
-  .masthead { display: block; }
-  .status { margin-top: 18px; }
-  .toolbar { grid-template-columns: 1fr 1fr; }
-  .toolbar input { grid-column: 1 / -1; }
+.icon-btn { flex: none; display: grid; place-items: center; width: 28px; height: 28px;
+  border: 0; border-radius: var(--radius-sm); background: transparent; cursor: pointer; color: var(--text-dim); }
+.icon-btn:hover { background: var(--surface-hover); color: var(--text); }
+.icon-btn svg { display: block; }
+#langToggle { flex: none; height: 28px; padding: 0 10px; border: 0; border-radius: var(--radius-sm);
+  background: transparent; color: var(--text-dim); font: 600 12px var(--sans); cursor: pointer; }
+#langToggle:hover { background: var(--surface-hover); color: var(--text); }
+:root.theme-dark #themeSun { display: block; }
+:root.theme-dark #themeMoon { display: none; }
+:root:not(.theme-dark) #themeSun { display: none; }
+:root:not(.theme-dark) #themeMoon { display: block; }
+
+/* ─── Two-pane layout: hits sidebar + detail ────────────────────────────── */
+.layout { flex: 1; display: flex; min-height: 0; }
+.sidebar { flex: none; width: var(--sidebar-w); display: flex; flex-direction: column; min-height: 0;
+  border-right: 1px solid var(--line); }
+.sidebar-head { flex: none; display: flex; align-items: baseline; justify-content: space-between;
+  padding: 12px 14px 8px; }
+.sidebar-title { font-size: 0.78rem; font-weight: 650; color: var(--text-dim); letter-spacing: 0.04em; }
+.sidebar-meta { font: var(--font-code-size) var(--mono); color: var(--text-mute); }
+.sidebar-controls { flex: none; display: grid; gap: 6px; padding: 0 12px 10px; }
+.ctl-row { display: flex; gap: 6px; }
+.ctl-row > * { flex: 1; min-width: 0; }
+.ctl-row label { flex: none; display: flex; align-items: center; gap: 6px;
+  color: var(--text-mute); font-size: 0.78rem; cursor: pointer; }
+.ctl-row input[type="checkbox"] { accent-color: var(--accent); margin: 0; }
+input[type="text"], input[type="number"], select {
+  height: 28px; padding: 0 8px; border: 1px solid var(--line); border-radius: var(--radius-sm);
+  background: var(--surface-2); color: var(--text); font-size: 0.82rem; outline: none; }
+input:focus-visible, select:focus-visible { border-color: var(--line-strong); }
+input[type="number"] { width: 64px; }
+.hit-list { flex: 1; overflow-y: auto; padding: 2px 8px 8px; }
+.hit { display: block; width: 100%; text-align: left; padding: 10px 12px; margin-bottom: 4px;
+  border: 0; border-radius: var(--radius-md); background: transparent; cursor: pointer; }
+.hit:hover { background: var(--surface-hover); }
+.hit.active { background: var(--surface-active); }
+.hit-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px;
+  font: var(--font-code-size) var(--mono); color: var(--text-mute); }
+.hit-score { color: var(--link); }
+.hit-text { margin-top: 5px; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
+  overflow: hidden; color: var(--text-dim); font-size: 0.83rem; line-height: 1.45; }
+.hit.active .hit-text { color: var(--text); }
+.hit-session { margin-top: 5px; font: 11px var(--mono); color: var(--text-mute); }
+.sidebar-foot { flex: none; padding: 8px 12px; border-top: 1px solid var(--line); }
+
+/* ─── Detail pane ───────────────────────────────────────────────────────── */
+.detail { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.detail-head { flex: none; display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 10px 16px; border-bottom: 1px solid var(--line); }
+.detail-title { margin: 0; font-size: 0.92rem; font-weight: 650; letter-spacing: -0.01em;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.detail-title .mono { font: var(--font-code-size) var(--mono); color: var(--text-mute); }
+.detail-actions { display: flex; gap: 6px; margin-left: auto; flex-wrap: wrap; }
+.detail-actions select { font-size: 0.78rem; }
+.btn { height: 28px; padding: 0 11px; border: 1px solid var(--line); border-radius: var(--radius-sm);
+  background: var(--surface-2); color: var(--text-dim); font-size: 0.8rem; cursor: pointer; }
+.btn:hover:not(:disabled) { background: var(--surface-hover); color: var(--text); }
+.btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.btn.primary { border-color: var(--accent); background: var(--accent); color: var(--on-accent); font-weight: 600; }
+.btn.primary:hover:not(:disabled) { background: var(--accent); color: var(--on-accent); opacity: 0.9; }
+.btn.danger { color: var(--danger); border-color: var(--line); }
+.chat { flex: 1; overflow-y: auto; padding: 16px 20px 24px; }
+.msg { margin-bottom: 14px; display: flex; flex-direction: column; gap: 5px; }
+.msg-head { display: flex; align-items: center; gap: 8px; font: 11px var(--mono); color: var(--text-mute); }
+.role-badge { display: inline-block; padding: 1px 7px; border-radius: 99px; font-weight: 600;
+  border: 1px solid var(--line); color: var(--text-dim); }
+.role-badge.user { background: var(--user-bubble); border-color: transparent; color: var(--text); }
+.msg-body { padding: 9px 13px; border-radius: var(--radius-md); white-space: pre-wrap;
+  line-height: 1.6; font-size: 0.88rem; }
+.msg.user .msg-body { background: var(--user-bubble); }
+.msg.assistant .msg-body { background: transparent; border: 1px solid var(--line); }
+.msg-head .btn { height: 22px; padding: 0 7px; font: 11px var(--sans); }
+.empty { padding: 40px 20px; color: var(--text-mute); font-size: 0.88rem; text-align: center; }
+.empty-block { margin: 14px; padding: 28px 20px; border: 1px dashed var(--line-strong);
+  border-radius: var(--radius-lg); color: var(--text-mute); text-align: center; font-size: 0.88rem; }
+.empty-block strong { display: block; margin-bottom: 6px; color: var(--text-dim); font-size: 0.95rem; }
+pre.preview { margin: 0 16px 20px; max-height: 40vh; overflow: auto; padding: 12px 14px;
+  border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--code-bg);
+  color: var(--text-dim); font: var(--font-code-size)/1.6 var(--mono); white-space: pre-wrap; }
+
+/* ─── Responsive ────────────────────────────────────────────────────────── */
+@media (max-width: 720px) {
+  .layout { flex-direction: column; }
+  .sidebar { width: 100%; max-height: 45%; border-right: 0; border-bottom: 1px solid var(--line); }
+  .status { display: none; }
+  .searchwrap kbd { display: none; }
 }
-@media (prefers-reduced-motion: reduce) { .hit { transition: none; } }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
 </style>
 </head>
 <body>
-<main class="shell">
-  <header class="masthead">
-    <div>
-      <div class="eyebrow">local session observatory</div>
-      <h1>Find the thread.</h1>
-      <p class="subtitle">A private, loopback-only window into indexed agent history. Every result is served by the same contract as the CLI.</p>
+
+<div id="gate" class="gate" hidden>
+  <div class="gate-card">
+    <h1 data-i18n="gateTitle"></h1>
+    <div id="gateError" class="gate-error" role="alert"></div>
+    <p data-i18n="gateBody"></p>
+    <div class="gate-row">
+      <input id="gateInput" type="text" autocomplete="off" spellcheck="false">
+      <button id="gateSubmit" class="btn primary" type="button" data-i18n="gateGo"></button>
     </div>
-    <div id="status" class="status" role="status">Connecting to local catalog…</div>
+    <p class="gate-hint" data-i18n="gateHint"></p>
+  </div>
+</div>
+
+<div id="shell" class="shell" data-shell="asg-web" hidden>
+  <header class="topbar">
+    <div class="brand">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+        <circle cx="6.5" cy="6.5" r="4.5" stroke="currentColor" stroke-width="1.7"/>
+        <path d="M10.5 10.5 L14 14" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+      </svg>
+      <span>agent-session-grep</span>
+    </div>
+    <div class="searchwrap">
+      <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+        <circle cx="6.5" cy="6.5" r="4.5" stroke="currentColor" stroke-width="1.7"/>
+        <path d="M10.5 10.5 L14 14" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+      </svg>
+      <input id="query" type="search" autocomplete="off">
+      <kbd>/</kbd>
+    </div>
+    <div class="topbar-spacer"></div>
+    <div id="status" class="status" role="status"></div>
+    <button id="searchButton" class="btn primary" type="button" data-i18n="searchGo" style="flex:none"></button>
+    <button id="langToggle" type="button" title="中文 / English">中 / EN</button>
+    <button id="themeToggle" class="icon-btn" type="button" title="Theme">
+      <svg id="themeSun" width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+        <circle cx="8" cy="8" r="3.2" stroke="currentColor" stroke-width="1.6"/>
+        <path d="M8 1.5v1.8M8 12.7v1.8M1.5 8h1.8M12.7 8h1.8M3.4 3.4l1.3 1.3M11.3 11.3l1.3 1.3M12.6 3.4l-1.3 1.3M4.7 11.3l-1.3 1.3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
+      </svg>
+      <svg id="themeMoon" width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+        <path d="M13.2 9.6A5.6 5.6 0 0 1 6.4 2.8a5.6 5.6 0 1 0 6.8 6.8Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+      </svg>
+    </button>
   </header>
 
-  <section aria-label="Search controls">
-    <div class="toolbar">
-      <input id="query" type="search" placeholder="Search messages, decisions, errors…" autocomplete="off">
-      <select id="mode" aria-label="Retrieval mode">
-        <option value="lexical">Lexical</option>
-        <option value="semantic">Semantic</option>
-        <option value="hybrid">Hybrid</option>
-      </select>
-      <select id="provider" aria-label="Provider"><option value="">All providers</option></select>
-      <button id="searchButton" class="primary" type="button">Search</button>
-    </div>
-    <div class="filters">
-      <label>Page size <input id="limit" type="number" value="20" min="1" max="100"></label>
-      <label><input id="includeSystem" type="checkbox"> Include system messages</label>
-      <label><input id="groupBySession" type="checkbox"> Group by session</label>
-    </div>
-  </section>
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="sidebar-head">
+        <span class="sidebar-title" data-i18n="hits"></span>
+        <span id="resultMeta" class="sidebar-meta"></span>
+      </div>
+      <div class="sidebar-controls">
+        <div class="ctl-row">
+          <select id="provider" aria-label="Provider"></select>
+          <select id="mode" aria-label="Retrieval mode"></select>
+        </div>
+        <div class="ctl-row">
+          <label><input id="includeSystem" type="checkbox"><span data-i18n="includeSystem"></span></label>
+          <label><input id="groupBySession" type="checkbox"><span data-i18n="groupBySession"></span></label>
+          <label><span data-i18n="pageSize"></span><input id="limit" type="number" value="20" min="1" max="100"></label>
+        </div>
+      </div>
+      <div id="results" class="hit-list" aria-live="polite"></div>
+      <div class="sidebar-foot">
+        <button id="loadMore" class="btn" type="button" disabled style="width:100%" data-i18n="loadMore"></button>
+      </div>
+    </aside>
 
-  <div class="rule"></div>
-  <div class="meta-row"><span id="resultMeta">Waiting for a query.</span><span id="retrievalMode" class="retrieval"></span></div>
-  <section id="results" class="results" aria-live="polite"><div class="empty">Type a query to inspect the catalog.</div></section>
-  <div class="actions"><button id="loadMore" class="quiet" type="button" disabled>Load next page</button><button id="handoff" class="quiet" type="button" disabled>Preview handoff pack</button></div>
+    <main class="detail">
+      <div class="detail-head" id="contextPanel" hidden>
+        <h2 class="detail-title" id="contextTitle"></h2>
+        <div class="detail-actions">
+          <select id="contextPolicy" aria-label="Context branch"></select>
+          <select id="contextLevel" aria-label="Context detail"></select>
+          <button id="refreshContext" class="btn" type="button" data-i18n="refresh"></button>
+          <button id="resumePreview" class="btn" type="button" data-i18n="resume"></button>
+          <button id="handoff" class="btn" type="button" disabled data-i18n="handoff"></button>
+          <button id="closeContext" class="btn danger" type="button" data-i18n="close"></button>
+        </div>
+      </div>
+      <div id="detailEmpty" class="empty-block">
+        <strong data-i18n="emptyTitle"></strong>
+        <span data-i18n="emptyBody"></span>
+      </div>
+      <div id="contextMessages" class="chat"></div>
+      <pre id="previewOutput" class="preview" hidden></pre>
+    </main>
+  </div>
+</div>
 
-  <section id="contextPanel" aria-label="Session context">
-    <div class="context-head"><h2 id="contextTitle">Session context</h2><button id="closeContext" class="quiet" type="button">Close</button></div>
-    <div class="context-controls">
-      <select id="contextPolicy" aria-label="Context branch"><option value="mainline">Mainline</option><option value="full">Full graph</option></select>
-      <select id="contextLevel" aria-label="Context detail"><option value="raw">Messages</option><option value="talks">Talks</option><option value="sessions">Session summary</option></select>
-      <button id="refreshContext" class="quiet" type="button">Refresh context</button>
-      <button id="resumePreview" class="quiet" type="button">Preview resume</button>
-    </div>
-    <div id="contextMessages"></div>
-    <pre id="previewOutput" hidden></pre>
-  </section>
-</main>
 <script>
+/* ─── i18n ──────────────────────────────────────────────────────────────── */
+const I18N = {
+  zh: {
+    gateTitle: '需要访问令牌',
+    gateBody: '这个页面是本机 agent-session-grep 服务的只读界面。令牌在启动 serve 的终端里,形如 #token=32位十六进制;把它粘贴到下面即可(只需一次,之后会记住)。',
+    gateGo: '进入',
+    gateHint: '找不到令牌?看运行 asg serve 的那个终端窗口的第一行输出。',
+    gateRejected: '令牌无效或已过期(serve 重启后令牌会更换),请从终端重新复制。',
+    searchPlaceholder: '搜索消息、决策、报错……',
+    searchGo: '搜索',
+    statusConnecting: '正在连接本地库…',
+    statusConnected: '已连接 · 第 {g} 代 · {n} 条记录',
+    statusUnavailable: '不可用 · ',
+    hits: '命中',
+    includeSystem: '含系统消息',
+    groupBySession: '按会话归并',
+    pageSize: '每页',
+    loadMore: '加载下一页',
+    refresh: '刷新',
+    resume: '恢复预览',
+    handoff: '交接包',
+    close: '关闭',
+    emptyTitle: '从左侧开始',
+    emptyBody: '搜索后点击任意一条命中,这里会展开它所在会话的完整上下文。',
+    noHits: '没有匹配的消息。',
+    notAnswer: '查询失败:',
+    noMessages: '该会话在当前层级下没有消息。',
+    showEntity: '查看原文',
+    retrievalMode: '检索模式:',
+    allProviders: '全部来源',
+    policyMainline: '主线',
+    policyFull: '全图',
+    levelRaw: '消息',
+    levelTalks: '对话轮',
+    levelSessions: '会话概览',
+    modeLexical: '词法',
+    modeSemantic: '语义',
+    modeHybrid: '混合',
+    sessionLabel: '会话',
+    providerSuffix: '',
+  },
+  en: {
+    gateTitle: 'Access token required',
+    gateBody: 'This page is a read-only view over a local agent-session-grep serve instance. The token is printed in the terminal that started serve (a #token=… fragment); paste it below. You only need to do this once per serve session.',
+    gateGo: 'Open',
+    gateHint: 'Lost the token? It is on the first line of the terminal running asg serve.',
+    gateRejected: 'Token invalid or expired (serve rotates it on restart). Copy a fresh one from the terminal.',
+    searchPlaceholder: 'Search messages, decisions, errors…',
+    searchGo: 'Search',
+    statusConnecting: 'Connecting to local catalog…',
+    statusConnected: 'Connected · generation {g} · {n} entities',
+    statusUnavailable: 'Unavailable · ',
+    hits: 'Hits',
+    includeSystem: 'System messages',
+    groupBySession: 'Group by session',
+    pageSize: 'Size',
+    loadMore: 'Load next page',
+    refresh: 'Refresh',
+    resume: 'Preview resume',
+    handoff: 'Handoff pack',
+    close: 'Close',
+    emptyTitle: 'Start from the sidebar',
+    emptyBody: 'Search, then click any hit to open its session context here.',
+    noHits: 'No matching messages.',
+    notAnswer: 'The catalog could not answer: ',
+    noMessages: 'This session has no messages at the selected level.',
+    showEntity: 'show',
+    retrievalMode: 'retrieval_mode:',
+    allProviders: 'All providers',
+    policyMainline: 'Mainline',
+    policyFull: 'Full graph',
+    levelRaw: 'Messages',
+    levelTalks: 'Talks',
+    levelSessions: 'Session summary',
+    modeLexical: 'Lexical',
+    modeSemantic: 'Semantic',
+    modeHybrid: 'Hybrid',
+    sessionLabel: 'session',
+    providerSuffix: ' · ',
+  },
+};
+const LANG_KEY = 'asg-web-lang';
+let lang = localStorage.getItem(LANG_KEY) ||
+  (navigator.language && navigator.language.toLowerCase().startsWith('zh') ? 'zh' : 'en');
+function t(key, vars) {
+  let s = (I18N[lang] && I18N[lang][key]) || I18N.en[key] || key;
+  if (vars) for (const k of Object.keys(vars)) s = s.split('{' + k + '}').join(vars[k]);
+  return s;
+}
+function applyI18n() {
+  document.documentElement.lang = lang === 'zh' ? 'zh' : 'en';
+  document.getElementById('query').placeholder = t('searchPlaceholder');
+  for (const node of document.querySelectorAll('[data-i18n]')) node.textContent = t(node.dataset.i18n);
+  fillSelects();
+}
+
+/* ─── Theme ─────────────────────────────────────────────────────────────── */
+const THEME_KEY = 'asg-web-theme';
+function applyTheme(mode) {
+  document.documentElement.classList.toggle('theme-dark', mode === 'dark');
+}
+{
+  const saved = localStorage.getItem(THEME_KEY);
+  const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+  applyTheme(saved || (prefersDark ? 'dark' : 'light'));
+}
+
+/* ─── Token: fragment → query fallback → remembered ────────────────────── */
+const TOKEN_KEY = 'asg-web-token';
 const url = new URL(window.location.href);
-// Read the token from the fragment first: a fragment never reaches the server,
-// so it stays out of request logs and out of any `Referer` header. The query
-// form is still accepted for a hand-typed or bookmarked URL. Either way the
-// token is stripped from the visible URL so it does not persist in history.
 const hashParams = new URLSearchParams(url.hash.replace(/^#/, ''));
-const token = hashParams.get('token') || url.searchParams.get('token') || '';
-if (token) window.history.replaceState(null, '', url.pathname);
-const authHeaders = {'Authorization': 'Bearer ' + token};
+const urlToken = hashParams.get('token') || url.searchParams.get('token') || '';
+if (urlToken) {
+  localStorage.setItem(TOKEN_KEY, urlToken);
+  window.history.replaceState(null, '', url.pathname);
+}
+let token = localStorage.getItem(TOKEN_KEY) || '';
+let authHeaders = { 'Authorization': 'Bearer ' + token };
+
+function showGate(rejected) {
+  document.getElementById('shell').hidden = true;
+  document.getElementById('gate').hidden = false;
+  const error = document.getElementById('gateError');
+  error.textContent = rejected ? t('gateRejected') : '';
+  error.classList.toggle('show', Boolean(rejected));
+  document.getElementById('gateInput').value = '';
+  document.getElementById('gateInput').focus();
+}
+function acceptToken(value) {
+  token = (value || '').trim();
+  if (!token) return;
+  localStorage.setItem(TOKEN_KEY, token);
+  authHeaders = { 'Authorization': 'Bearer ' + token };
+  document.getElementById('gate').hidden = true;
+  document.getElementById('shell').hidden = false;
+  init();
+}
+
+/* ─── App state ─────────────────────────────────────────────────────────── */
 let activeSession = '';
 let nextCursor = null;
 let lastQuery = '';
+let activeHit = null;
 
 function payload(body) { return body && body.data ? body.data : (body || {}); }
-function setStatus(text, kind) {
+function setStatus(textMsg, kind) {
   const node = document.getElementById('status');
-  node.textContent = text;
+  node.textContent = textMsg;
   node.className = 'status' + (kind ? ' ' + kind : '');
 }
 function clear(node) { node.replaceChildren(); }
 function text(node, value) { node.textContent = value == null ? '' : String(value); }
-function button(label, className, onClick) {
-  const node = document.createElement('button');
-  node.type = 'button'; node.className = className || 'quiet'; node.textContent = label; node.addEventListener('click', onClick); return node;
-}
+
 async function api(path) {
-  const response = await fetch(path, {headers: authHeaders, credentials: 'same-origin'});
+  const response = await fetch(path, { headers: authHeaders, credentials: 'same-origin' });
   const body = await response.json().catch(() => ({}));
+  if (response.status === 401) { showGate(true); throw new Error('unauthorized'); }
   if (!response.ok) throw new Error((body.error && body.error.message) || 'HTTP ' + response.status);
   return body;
 }
 function showPreview(value) {
   const node = document.getElementById('previewOutput');
-  node.hidden = false; node.textContent = JSON.stringify(value, null, 2);
+  node.hidden = false;
+  node.textContent = JSON.stringify(value, null, 2);
 }
-async function init() {
-  try {
-    const statusBody = await api('/health');
-    const status = payload(statusBody);
-    setStatus('Connected · generation ' + (status.generation == null ? '?' : status.generation), 'ok');
-    await loadProviders();
-  } catch (error) { setStatus('Unavailable · ' + error.message, 'error'); }
+
+function fillSelects() {
+  const provider = document.getElementById('provider');
+  const selectedProvider = provider.value;
+  clear(provider);
+  const all = document.createElement('option');
+  all.value = ''; all.textContent = t('allProviders');
+  provider.appendChild(all);
+  for (const item of providerCache) {
+    const option = document.createElement('option');
+    option.value = item.id;
+    option.textContent = item.id + (item.maturity ? t('providerSuffix') + item.maturity : '');
+    provider.appendChild(option);
+  }
+  provider.value = selectedProvider;
+
+  const mode = document.getElementById('mode');
+  const selectedMode = mode.value || 'lexical';
+  clear(mode);
+  for (const [value, key] of [['lexical', 'modeLexical'], ['semantic', 'modeSemantic'], ['hybrid', 'modeHybrid']]) {
+    const option = document.createElement('option');
+    option.value = value; option.textContent = t(key);
+    mode.appendChild(option);
+  }
+  mode.value = selectedMode;
+
+  const policy = document.getElementById('contextPolicy');
+  const selectedPolicy = policy.value || 'mainline';
+  clear(policy);
+  for (const [value, key] of [['mainline', 'policyMainline'], ['full', 'policyFull']]) {
+    const option = document.createElement('option');
+    option.value = value; option.textContent = t(key);
+    policy.appendChild(option);
+  }
+  policy.value = selectedPolicy;
+
+  const level = document.getElementById('contextLevel');
+  const selectedLevel = level.value || 'raw';
+  clear(level);
+  for (const [value, key] of [['raw', 'levelRaw'], ['talks', 'levelTalks'], ['sessions', 'levelSessions']]) {
+    const option = document.createElement('option');
+    option.value = value; option.textContent = t(key);
+    level.appendChild(option);
+  }
+  level.value = selectedLevel;
 }
+
+let providerCache = [];
 async function loadProviders() {
   const body = await api('/api/providers');
-  const providers = payload(body).providers || [];
-  const select = document.getElementById('provider');
-  for (const provider of providers) {
-    const option = document.createElement('option');
-    option.value = provider.provider_id || provider.id || '';
-    option.textContent = (provider.provider_id || provider.id || 'unknown') + ' · ' + (provider.maturity || 'unknown');
-    select.appendChild(option);
+  providerCache = (payload(body).providers || []).map(p => ({
+    id: p.provider_id || p.id || '',
+    maturity: p.maturity || '',
+  }));
+  fillSelects();
+}
+
+async function init() {
+  setStatus(t('statusConnecting'));
+  try {
+    const status = payload(await api('/health'));
+    setStatus(t('statusConnected', { g: status.generation == null ? '?' : status.generation, n: status.catalog_count == null ? '?' : status.catalog_count }), 'ok');
+    await loadProviders();
+  } catch (error) {
+    if (error.message !== 'unauthorized') setStatus(t('statusUnavailable') + error.message, 'error');
   }
 }
+
 function queryParams(cursor) {
-  const params = new URLSearchParams({q: lastQuery, mode: document.getElementById('mode').value, limit: document.getElementById('limit').value});
+  const params = new URLSearchParams({ q: lastQuery, mode: document.getElementById('mode').value, limit: document.getElementById('limit').value });
   const provider = document.getElementById('provider').value;
   if (provider) params.set('provider', provider);
   if (cursor) params.set('cursor', cursor);
@@ -188,6 +523,7 @@ function queryParams(cursor) {
   if (document.getElementById('groupBySession').checked) params.set('group_by_session', 'true');
   return params;
 }
+
 async function doSearch(cursor) {
   const query = document.getElementById('query').value.trim();
   if (!query) return;
@@ -198,72 +534,189 @@ async function doSearch(cursor) {
     renderHits(data.hits || [], Boolean(cursor));
     nextCursor = (body.page && body.page.next_cursor) || null;
     document.getElementById('loadMore').disabled = !nextCursor;
-    text(document.getElementById('retrievalMode'), 'retrieval_mode: ' + (data.retrieval_mode || 'lexical'));
-    text(document.getElementById('resultMeta'), (data.hits || []).length + ' hits · generation ' + (data.generation == null ? '?' : data.generation));
+    text(document.getElementById('resultMeta'), (data.retrieval_mode || 'lexical') + ' · ' + (data.hits || []).length);
     document.getElementById('handoff').disabled = false;
-  } catch (error) { renderError(error.message); }
+  } catch (error) { if (error.message !== 'unauthorized') renderError(error.message); }
 }
+
 function renderError(message) {
-  const node = document.createElement('div'); node.className = 'empty'; text(node, 'The catalog could not answer: ' + message); clear(document.getElementById('results')); document.getElementById('results').appendChild(node);
+  const node = document.createElement('div');
+  node.className = 'empty';
+  text(node, t('notAnswer') + message);
+  const results = document.getElementById('results');
+  clear(results);
+  results.appendChild(node);
 }
+
+function shortId(id) {
+  const s = String(id || '');
+  return s.length > 22 ? s.slice(0, 22) + '…' : s;
+}
+
 function renderHits(hits, append) {
   const results = document.getElementById('results');
   if (!append) clear(results);
-  if (!hits.length && !append) { const empty = document.createElement('div'); empty.className = 'empty'; text(empty, 'No matching messages.'); results.appendChild(empty); return; }
+  if (!hits.length && !append) {
+    const empty = document.createElement('div');
+    empty.className = 'empty';
+    text(empty, t('noHits'));
+    results.appendChild(empty);
+    return;
+  }
   for (const hit of hits) {
-    const card = button('', 'hit', () => loadContext(hit.session_id || ''));
-    const head = document.createElement('div'); head.className = 'hit-head';
-    const id = document.createElement('span'); text(id, hit.id || 'unknown');
-    const score = document.createElement('span'); score.className = 'hit-score'; text(score, Number(hit.score || 0).toFixed(3)); head.append(id, score);
-    const body = document.createElement('div'); body.className = 'hit-text'; text(body, hit.text || '');
+    const card = document.createElement('button');
+    card.type = 'button';
+    card.className = 'hit' + (activeHit === hit.id ? ' active' : '');
+    const head = document.createElement('div');
+    head.className = 'hit-head';
+    const id = document.createElement('span');
+    text(id, shortId(hit.id));
+    const score = document.createElement('span');
+    score.className = 'hit-score';
+    text(score, Number(hit.score || 0).toFixed(3));
+    head.append(id, score);
+    const body = document.createElement('div');
+    body.className = 'hit-text';
+    text(body, hit.text || '');
     card.append(head, body);
-    if (hit.session_id) { const session = document.createElement('div'); session.className = 'hit-session'; text(session, 'session · ' + hit.session_id); card.appendChild(session); }
+    if (hit.session_id) {
+      const session = document.createElement('div');
+      session.className = 'hit-session';
+      text(session, t('sessionLabel') + ' · ' + shortId(hit.session_id));
+      card.appendChild(session);
+      card.title = hit.session_id;
+    }
+    card.addEventListener('click', () => {
+      activeHit = hit.id;
+      for (const other of results.children) other.classList.remove('active');
+      card.classList.add('active');
+      loadContext(hit.session_id || '');
+    });
     results.appendChild(card);
   }
 }
+
 async function loadContext(sessionId) {
   if (!sessionId) return;
   activeSession = sessionId;
-  document.getElementById('contextPanel').classList.add('open');
-  text(document.getElementById('contextTitle'), 'Session · ' + sessionId);
+  document.getElementById('contextPanel').hidden = false;
+  document.getElementById('detailEmpty').hidden = true;
+  const title = document.getElementById('contextTitle');
+  clear(title);
+  const label = document.createElement('span');
+  text(label, t('sessionLabel') + ' ');
+  const mono = document.createElement('span');
+  mono.className = 'mono';
+  text(mono, shortId(sessionId));
+  mono.title = sessionId;
+  title.append(label, mono);
   await refreshContext();
 }
+
 async function refreshContext() {
   if (!activeSession) return;
   try {
-    const params = new URLSearchParams({session: activeSession, policy: document.getElementById('contextPolicy').value, level: document.getElementById('contextLevel').value});
+    const params = new URLSearchParams({ session: activeSession, policy: document.getElementById('contextPolicy').value, level: document.getElementById('contextLevel').value });
     const body = await api('/api/context?' + params);
-    const data = payload(body); const messages = data.messages || []; const container = document.getElementById('contextMessages'); clear(container);
+    const messages = payload(body).messages || [];
+    const container = document.getElementById('contextMessages');
+    clear(container);
     for (const message of messages) {
-      const item = document.createElement('article'); item.className = 'message';
-      const meta = document.createElement('div'); meta.className = 'message-meta';
-      const role = document.createElement('span'); const source = message.payload || {}; text(role, source.role || 'message');
-      const id = button('show ' + (message.message_id || message.id || ''), 'quiet', () => showEntity(message.message_id || message.id)); meta.append(role, id);
-      const bodyNode = document.createElement('div'); bodyNode.className = 'message-body'; text(bodyNode, source.text || JSON.stringify(source)); item.append(meta, bodyNode); container.appendChild(item);
+      const source = message.payload || {};
+      const role = source.role || 'message';
+      const item = document.createElement('article');
+      item.className = 'msg ' + (role === 'user' ? 'user' : 'assistant');
+      const head = document.createElement('div');
+      head.className = 'msg-head';
+      const badge = document.createElement('span');
+      badge.className = 'role-badge ' + (role === 'user' ? 'user' : '');
+      text(badge, role);
+      head.appendChild(badge);
+      const entityId = message.message_id || message.id || '';
+      if (entityId) {
+        const show = document.createElement('button');
+        show.type = 'button'; show.className = 'btn';
+        text(show, t('showEntity') + ' ' + shortId(entityId));
+        show.title = entityId;
+        show.addEventListener('click', () => showEntity(entityId));
+        head.appendChild(show);
+      }
+      const bodyNode = document.createElement('div');
+      bodyNode.className = 'msg-body';
+      text(bodyNode, source.text || JSON.stringify(source));
+      item.append(head, bodyNode);
+      container.appendChild(item);
     }
-    if (!messages.length) { const empty = document.createElement('div'); empty.className = 'empty'; text(empty, 'This session has no messages at the selected level.'); container.appendChild(empty); }
-  } catch (error) { const node = document.getElementById('contextMessages'); clear(node); const empty = document.createElement('div'); empty.className = 'empty'; text(empty, error.message); node.appendChild(empty); }
+    if (!messages.length) {
+      const empty = document.createElement('div');
+      empty.className = 'empty';
+      text(empty, t('noMessages'));
+      container.appendChild(empty);
+    }
+  } catch (error) {
+    if (error.message === 'unauthorized') return;
+    const node = document.getElementById('contextMessages');
+    clear(node);
+    const empty = document.createElement('div');
+    empty.className = 'empty';
+    text(empty, error.message);
+    node.appendChild(empty);
+  }
 }
+
 async function showEntity(id) {
   if (!id) return;
-  try { showPreview(payload(await api('/api/show?id=' + encodeURIComponent(id)))); } catch (error) { showPreview({error: error.message}); }
+  try { showPreview(payload(await api('/api/show?id=' + encodeURIComponent(id)))); }
+  catch (error) { if (error.message !== 'unauthorized') showPreview({ error: error.message }); }
 }
+
 async function previewResume() {
   if (!activeSession) return;
-  try { showPreview(payload(await api('/api/resume?session=' + encodeURIComponent(activeSession)))); } catch (error) { showPreview({error: error.message}); }
+  try { showPreview(payload(await api('/api/resume?session=' + encodeURIComponent(activeSession)))); }
+  catch (error) { if (error.message !== 'unauthorized') showPreview({ error: error.message }); }
 }
+
 async function previewHandoff() {
   if (!lastQuery) return;
-  try { showPreview(payload(await api('/api/handoff?q=' + encodeURIComponent(lastQuery)))); } catch (error) { showPreview({error: error.message}); }
+  try { showPreview(payload(await api('/api/handoff?q=' + encodeURIComponent(lastQuery)))); }
+  catch (error) { if (error.message !== 'unauthorized') showPreview({ error: error.message }); }
 }
+
+/* ─── Wiring ────────────────────────────────────────────────────────────── */
+document.getElementById('gateSubmit').addEventListener('click', () => acceptToken(document.getElementById('gateInput').value));
+document.getElementById('gateInput').addEventListener('keydown', event => { if (event.key === 'Enter') acceptToken(event.target.value); });
+document.getElementById('themeToggle').addEventListener('click', () => {
+  const dark = document.documentElement.classList.toggle('theme-dark');
+  localStorage.setItem(THEME_KEY, dark ? 'dark' : 'light');
+});
+document.getElementById('langToggle').addEventListener('click', () => {
+  lang = lang === 'zh' ? 'en' : 'zh';
+  localStorage.setItem(LANG_KEY, lang);
+  applyI18n();
+});
 document.getElementById('searchButton').addEventListener('click', () => doSearch());
 document.getElementById('query').addEventListener('keydown', event => { if (event.key === 'Enter') doSearch(); });
 document.getElementById('loadMore').addEventListener('click', () => doSearch(nextCursor));
 document.getElementById('handoff').addEventListener('click', previewHandoff);
 document.getElementById('refreshContext').addEventListener('click', refreshContext);
 document.getElementById('resumePreview').addEventListener('click', previewResume);
-document.getElementById('closeContext').addEventListener('click', () => document.getElementById('contextPanel').classList.remove('open'));
-init();
+document.getElementById('closeContext').addEventListener('click', () => {
+  document.getElementById('contextPanel').hidden = true;
+  document.getElementById('detailEmpty').hidden = false;
+  document.getElementById('contextMessages').replaceChildren();
+  document.getElementById('previewOutput').hidden = true;
+  activeSession = ''; activeHit = null;
+});
+document.addEventListener('keydown', event => {
+  if (event.key === '/' && document.activeElement !== document.getElementById('query') && document.getElementById('gate').hidden) {
+    event.preventDefault();
+    document.getElementById('query').focus();
+  }
+});
+
+applyI18n();
+if (token) { document.getElementById('gate').hidden = true; document.getElementById('shell').hidden = false; init(); }
+else showGate(false);
 </script>
 </body>
 </html>

@@ -1074,7 +1074,7 @@ mod tests {
         );
         let response = route_request(&bootstrap, TEST_TOKEN, "test.db", false, &store);
         assert_eq!(response.status, 200);
-        assert!(response.body.contains("local session observatory"));
+        assert!(response.body.contains("data-shell=\"asg-web\""));
 
         let api_query_token = request(
             "GET",
@@ -1094,7 +1094,7 @@ mod tests {
         let bare_page = request("GET", "/", vec![("Host".into(), "127.0.0.1:8080".into())]);
         let response = route_request(&bare_page, TEST_TOKEN, "test.db", false, &store);
         assert_eq!(response.status, 200);
-        assert!(response.body.contains("local session observatory"));
+        assert!(response.body.contains("data-shell=\"asg-web\""));
     }
 
     #[test]
