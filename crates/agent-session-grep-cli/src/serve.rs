@@ -548,14 +548,17 @@ pub fn parse_request(stream: &mut TcpStream) -> std::io::Result<HttpRequest> {
     let mut headers = Vec::new();
     let mut header_bytes = 0usize;
     loop {
-        if headers.len() >= MAX_HEADER_COUNT {
-            return Err(invalid_data("too many request headers"));
-        }
         let mut line = String::new();
         let n = read_bounded_line(&mut reader, &mut line, MAX_HEADER_BYTES - header_bytes)?;
         header_bytes += n;
         if n == 0 || line.trim().is_empty() {
             break;
+        }
+        // 计数放在"确认这一行是 header"之后：守卫在循环开头时，终止空行也要占
+        // 一次迭代，于是恰好 MAX_HEADER_COUNT 条 header 的合法请求被判 400
+        // （实际上限只有 99）。上限的含义是"接受这么多条 header"。
+        if headers.len() >= MAX_HEADER_COUNT {
+            return Err(invalid_data("too many request headers"));
         }
         let Some(idx) = line.find(':') else {
             return Err(invalid_data("malformed request header"));
@@ -1380,6 +1383,38 @@ mod tests {
         let mut response = String::new();
         stream.read_to_string(&mut response).expect("read response");
         assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        server.join().expect("server join");
+    }
+
+    /// The limit means "this many headers are accepted": counting at the top of
+    /// the loop spent one iteration on the terminating blank line, so a
+    /// well-formed request carrying exactly `MAX_HEADER_COUNT` headers was
+    /// rejected 400 and the real ceiling was 99. Pin both sides of the boundary.
+    #[test]
+    fn integration_accepts_exactly_max_header_count_headers() {
+        let (address, token, server) = start_test_server(2, Duration::from_secs(3));
+        let required = format!("Host: {address}\r\nAuthorization: Bearer {token}\r\n");
+        let pad = |count: usize| {
+            (0..count)
+                .map(|index| format!("X-Pad-{index}: v\r\n"))
+                .collect::<String>()
+        };
+        let at_limit = raw_http(
+            address,
+            &format!(
+                "GET /api/status HTTP/1.1\r\n{required}{}\r\n",
+                pad(MAX_HEADER_COUNT - 2)
+            ),
+        );
+        assert!(at_limit.starts_with("HTTP/1.1 200"), "{at_limit}");
+        let over_limit = raw_http(
+            address,
+            &format!(
+                "GET /api/status HTTP/1.1\r\n{required}{}\r\n",
+                pad(MAX_HEADER_COUNT - 1)
+            ),
+        );
+        assert!(over_limit.starts_with("HTTP/1.1 400"), "{over_limit}");
         server.join().expect("server join");
     }
 
