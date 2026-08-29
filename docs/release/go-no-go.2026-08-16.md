@@ -553,7 +553,8 @@ connected either list to the code. Renaming a `ProviderError` variant, or writin
 a label the enum never had, would have left the specification intact and wrong.
 `rfc_0002_error_vocabulary_maps_to_real_provider_error_variants` requires each
 registered label to still appear in the RFC and its variant to exist in the
-production region of `ports/src/lib.rs`, and requires every `CapabilityLevel`
+production region of `crates/agent-session-grep-ports/src/lib.rs`, and requires
+every `CapabilityLevel`
 tier to appear in §6's vocabulary. The two labels that are handling strategies
 rather than error types (`record_recoverable`, which lands in
 `ParseReport.skipped`, and `incomplete_tail`, which is a caller obligation not to
