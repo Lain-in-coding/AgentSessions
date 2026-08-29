@@ -2320,10 +2320,17 @@ impl SqliteStore {
         for chunk in chunk_ids(&wires) {
             let placeholders = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
             // Role from catalog payload JSON; sidechain via EXISTS on placements.
+            // `json_valid` 门必须在 `json_extract` 之前：catalog 里合法存在
+            // 非 JSON payload（切片期 `index <fact> <text>` 写入的裸文本），
+            // 直接 json_extract 会让整条语句以 "malformed JSON" 失败。
             let mut stmt = conn
                 .prepare(&format!(
                     "SELECT c.id,
-                            COALESCE(json_extract(c.payload, '$.role'), 'unknown'),
+                            COALESCE(
+                                CASE WHEN json_valid(c.payload)
+                                     THEN json_extract(c.payload, '$.role') END,
+                                'unknown'
+                            ),
                             EXISTS(
                               SELECT 1 FROM message_placements mp
                               WHERE mp.message_id = c.id AND mp.is_sidechain = 1
@@ -7723,7 +7730,8 @@ impl SearchIndex for SqliteStore {
                      WHERE mp.message_id = (
                          SELECT wire_id FROM fts_ids WHERE id_json = f.id
                      )
-                     AND json_extract(doc.payload, '$.provider') IN (",
+                     AND CASE WHEN json_valid(doc.payload)
+                              THEN json_extract(doc.payload, '$.provider') END IN (",
             );
             for (index, provider) in filters.providers.iter().enumerate() {
                 if index > 0 {
@@ -7745,13 +7753,15 @@ impl SearchIndex for SqliteStore {
             );
             if let Some(since) = filters.since {
                 sql.push_str(
-                    " AND asg_instant_sort_key(json_extract(msg.payload, '$.timestamp')) >= ?",
+                    " AND asg_instant_sort_key(CASE WHEN json_valid(msg.payload)
+                                                    THEN json_extract(msg.payload, '$.timestamp') END) >= ?",
                 );
                 params.push(Box::new(since.sort_key().to_vec()));
             }
             if let Some(until) = filters.until {
                 sql.push_str(
-                    " AND asg_instant_sort_key(json_extract(msg.payload, '$.timestamp')) < ?",
+                    " AND asg_instant_sort_key(CASE WHEN json_valid(msg.payload)
+                                                    THEN json_extract(msg.payload, '$.timestamp') END) < ?",
                 );
                 params.push(Box::new(until.sort_key().to_vec()));
             }
@@ -7843,7 +7853,8 @@ impl SearchIndex for SqliteStore {
                      WHERE mp.message_id = (
                          SELECT wire_id FROM fts_ids WHERE id_json = f.id
                      )
-                     AND json_extract(doc.payload, '$.provider') IN (",
+                     AND CASE WHEN json_valid(doc.payload)
+                              THEN json_extract(doc.payload, '$.provider') END IN (",
             );
             for (index, provider) in query.filters.providers.iter().enumerate() {
                 if index > 0 {
@@ -7865,13 +7876,15 @@ impl SearchIndex for SqliteStore {
             );
             if let Some(since) = query.filters.since {
                 sql.push_str(
-                    " AND asg_instant_sort_key(json_extract(msg.payload, '$.timestamp')) >= ?",
+                    " AND asg_instant_sort_key(CASE WHEN json_valid(msg.payload)
+                                                    THEN json_extract(msg.payload, '$.timestamp') END) >= ?",
                 );
                 params.push(Box::new(since.sort_key().to_vec()));
             }
             if let Some(until) = query.filters.until {
                 sql.push_str(
-                    " AND asg_instant_sort_key(json_extract(msg.payload, '$.timestamp')) < ?",
+                    " AND asg_instant_sort_key(CASE WHEN json_valid(msg.payload)
+                                                    THEN json_extract(msg.payload, '$.timestamp') END) < ?",
                 );
                 params.push(Box::new(until.sort_key().to_vec()));
             }
@@ -8201,11 +8214,13 @@ impl SqliteStore {
             let mut stmt = conn
                 .prepare(&format!(
                     "SELECT mp.session_id,
-                            MAX(json_extract(c.payload, '$.timestamp')) AS latest
+                            MAX(CASE WHEN json_valid(c.payload)
+                                     THEN json_extract(c.payload, '$.timestamp') END) AS latest
                      FROM message_placements mp
                      JOIN catalog c ON c.id = mp.message_id
                      WHERE mp.session_id IN ({placeholders})
-                       AND json_extract(c.payload, '$.timestamp') IS NOT NULL
+                       AND CASE WHEN json_valid(c.payload)
+                                THEN json_extract(c.payload, '$.timestamp') END IS NOT NULL
                      GROUP BY mp.session_id"
                 ))
                 .map_err(backend)?;
@@ -18195,5 +18210,121 @@ mod tests {
             }
         }
         assert!(!store.sources_are_current(&[&edited]).unwrap());
+    }
+
+    #[test]
+    fn non_json_catalog_payload_does_not_error_json_projected_reads() {
+        // 回归：catalog 里合法存在非 JSON payload——生产命令
+        // `index <fact> <text>`（cli `index_one` → `commit_batch`）把裸文本
+        // 直接写进 catalog，切片期的旧行同样如此。三处读路径当时缺
+        // `json_valid` 门（message_facts_for 的 role、query_filtered /
+        // query_faceted 的 provider+时间谓词、latest_activity_ymd 的
+        // timestamp），SQLite 的 json_extract 对非 JSON 输入**报错**而非返回
+        // NULL，于是"库里存在一条裸文本消息"就让每一次带时间过滤的搜索整体
+        // 失败为 Backend("malformed JSON")。修复后非 JSON payload 一律折叠成
+        // NULL（诚实排除），合法 JSON 行照常参与。
+        let store = SqliteStore::open_in_memory().unwrap();
+        let session = sid(IdKind::Session, b"nonjson-ses");
+        let document = sid(IdKind::Document, b"nonjson-doc");
+        let bare_member = sid(IdKind::Message, b"nonjson-msg");
+        let json_member = sid(IdKind::Message, b"nonjson-json-msg");
+        let batch = source_batch(
+            "nonjson.jsonl",
+            vec![
+                entity_entry(&session),
+                typed_document_entry(&document),
+                (
+                    bare_member.clone(),
+                    b"bare legacy text".to_vec(),
+                    "bareword".into(),
+                ),
+                typed_message_entry(&json_member, "jsonword"),
+            ],
+            vec![
+                placement(&session, &document, &bare_member, 0, false, Some((0, 4))),
+                placement(&session, &document, &json_member, 1, false, Some((0, 4))),
+            ],
+            Vec::new(),
+            true,
+        );
+        assert!(
+            store
+                .commit_source_batches_if_changed(std::slice::from_ref(&batch))
+                .unwrap()
+        );
+        // `index_one` 形状：裸文本消息，无 placement，但仍进 fts。
+        let lonely = sid(IdKind::Message, b"nonjson-bare");
+        store
+            .commit_batch(&[(
+                lonely.clone(),
+                b"lonely bare body".to_vec(),
+                "lonelyword".into(),
+            )])
+            .unwrap();
+
+        // 会话最近活动：只认可解析的 timestamp，裸文本行诚实缺席而不报错。
+        let latest = store
+            .latest_activity_ymd_for_sessions(&[session.clone()])
+            .unwrap();
+        assert_eq!(
+            latest.get(session.as_str()).map(String::as_str),
+            Some("2026-07-28")
+        );
+
+        // role 事实：非 JSON payload → 'unknown'，不报错。
+        let facts = store
+            .message_facts_for(&[bare_member.clone(), json_member.clone()])
+            .unwrap();
+        let bare_role = facts
+            .iter()
+            .find(|(id, _, _)| id == bare_member.as_str())
+            .map(|(_, role, _)| role.as_str());
+        assert_eq!(bare_role, Some("unknown"));
+        let json_role = facts
+            .iter()
+            .find(|(id, _, _)| id == json_member.as_str())
+            .map(|(_, role, _)| role.as_str());
+        assert_eq!(json_role, Some("user"));
+
+        // 时间过滤：裸文本行既不报错也不被谎报为命中；合法 JSON 行照常命中。
+        let filters = SearchFilters {
+            since: Some(agent_session_grep_ports::SearchInstant::from_unix_millis(0)),
+            ..SearchFilters::default()
+        };
+        for (text, expected) in [
+            ("bareword", None),
+            ("lonelyword", None),
+            ("jsonword", Some(json_member.as_str().to_string())),
+        ] {
+            let hits = store
+                .query_filtered(
+                    SearchQuery {
+                        text,
+                        filters: &filters,
+                    },
+                    10,
+                )
+                .unwrap();
+            let ids: Vec<String> = hits.iter().map(|hit| hit.id.as_str().to_string()).collect();
+            match expected {
+                Some(id) => assert_eq!(ids, vec![id], "query {text:?}"),
+                None => assert!(ids.is_empty(), "query {text:?} -> {ids:?}"),
+            }
+        }
+        // facet 路径同一门。
+        let faceted = store
+            .query_faceted(
+                SearchQuery {
+                    text: "bareword",
+                    filters: &filters,
+                },
+                10,
+                &SearchFacets {
+                    sidechain: SidechainFacet::MainOnly,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(faceted.is_empty());
     }
 }

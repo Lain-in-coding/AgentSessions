@@ -2283,6 +2283,89 @@ fn root_docs_cited_repo_paths_all_resolve() {
 
 /// `docs/` 与 Skill 文档里，那些**故意**指向 HEAD 已不存在的路径。
 ///
+/// 定位仓库根（`CARGO_MANIFEST_DIR` 指向 crates/agent-session-grep-cli，上溯两级）。
+fn repo_root_dir() -> std::path::PathBuf {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("必须能从 crate 目录上溯到仓库根")
+        .to_path_buf();
+    assert!(
+        root.join("Cargo.toml").is_file(),
+        "仓库根定位失败：{root:?} 下没有 Cargo.toml"
+    );
+    root
+}
+
+#[test]
+fn adr_decision_ids_are_unique_or_carry_a_collision_warning() {
+    // 抓到的结构性缺陷：两份 ADR 都声明 `decision_id: ADR-0009`——
+    // `ADR-0009-cross-boundary-output-redaction.md`（跨边界脱敏，Proposed）与
+    // `ADR-0009-session-resume-metadata.md`（resume 元数据，Accepted）。全仓约 90
+    // 处裸引用「ADR-0009」，指向的却是两个内容与状态都不同的决策：SECURITY.md
+    // 说的是脱敏，契约 §8 的 `get_session_resume` 说的是 resume。读者按编号去查会
+    // 有一半概率读到另一个决策，并把 Accepted 与 Proposed 的状态互相张冠李戴。
+    //
+    // 改号要同步 29 个文件（含 20 个源码文件的注释），是 owner 决策；本守护因此
+    // 采取"要么唯一，要么显式互指"的口径：冲突组里每份文件都必须带冲突警告并点名
+    // 组内其他文件。新增一个静默冲突会失败，删掉警告也会失败，真正改号后自然通过。
+    let repo_root = repo_root_dir();
+    let adr_dir = repo_root.join("docs/adr");
+    let mut by_id: std::collections::BTreeMap<String, Vec<(String, String)>> =
+        std::collections::BTreeMap::new();
+    for entry in std::fs::read_dir(&adr_dir).expect("docs/adr 必须存在") {
+        let path = entry.expect("目录项可读").path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("md") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).expect("ADR 必须可读");
+        let Some(id) = text.lines().find_map(|line| {
+            line.trim_start_matches(['>', ' ', '-'])
+                .strip_prefix("decision_id:")
+                .map(|value| value.trim().to_string())
+        }) else {
+            panic!(
+                "{:?} 缺少 `decision_id:` 治理字段",
+                path.file_name().unwrap_or_default()
+            );
+        };
+        let name = path
+            .file_name()
+            .expect("ADR 必须有文件名")
+            .to_string_lossy()
+            .to_string();
+        by_id.entry(id).or_default().push((name, text));
+    }
+    assert!(
+        by_id.len() >= 9,
+        "只解析到 {} 个 decision_id，遍历逻辑可能失效",
+        by_id.len()
+    );
+
+    for (id, files) in &by_id {
+        if files.len() == 1 {
+            continue;
+        }
+        for (name, text) in files {
+            assert!(
+                text.contains("编号冲突警告"),
+                "`{id}` 被 {} 份 ADR 共用，但 {name} 没有编号冲突警告——\
+                 共用编号必须在两侧都显式互指，否则按编号引用是掷硬币",
+                files.len()
+            );
+            for (other, _) in files {
+                if other == name {
+                    continue;
+                }
+                assert!(
+                    text.contains(other.as_str()),
+                    "{name} 的冲突警告没有点名同编号的 {other}"
+                );
+            }
+        }
+    }
+}
+
 /// `PUBLIC-HISTORY-SCRUB.md` 的正文论点就是"这些文件只存在于历史里"，逐条点名
 /// 是该论证的一部分；把它们当失效引用会逼人删掉证据。每条都必须有理由。
 const DOCS_INTENTIONALLY_ABSENT_PATHS: &[&str] = &[
