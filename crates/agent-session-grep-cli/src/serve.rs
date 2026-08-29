@@ -883,21 +883,47 @@ fn request_args(req: &HttpRequest) -> Result<Vec<String>, HttpResponse> {
     }
 }
 
+/// Flag tokens this surface itself puts into the argv it hands `dispatch`.
+/// [`crate::is_known_flag_name`] covers the prefix-position vocabulary but not
+/// the per-subcommand flags marshalled here, so the two lists together are the
+/// full set of tokens the parser can compare a value against.
+const SERVE_ARGV_FLAGS: &[&str] = &[
+    "--mode",
+    "--max-items",
+    "--cursor",
+    "--provider",
+    "--since",
+    "--until",
+    "--repo",
+    "--include-system",
+    "--group-by-session",
+    "--policy",
+    "--level",
+    "--max-messages",
+    "--max-evidence",
+];
+
 /// Every request value that reaches [`crate::dispatch`] travels as an argv
-/// token, and the CLI parser reads any `-`-prefixed token as a flag wherever it
-/// sits. A flag-shaped value therefore changed what actually ran:
-/// `?q=--repo&repo=needle` searched `needle` filtered by repo `--repo` and
+/// token, and the parser matches flag names by whole-token equality wherever
+/// they sit. A value that *equals* a flag name therefore changed what actually
+/// ran: `?q=--repo&repo=needle` searched `needle` filtered by repo `--repo` and
 /// answered 200 for a query nobody asked, while `?q=--include-system` was eaten
 /// as a boolean flag and answered a 400 claiming `q` was missing. Same doctrine
 /// as the `--db <path>` flag-shaped-value guard (R8.1/R8.2): ambiguity is an
 /// explicit usage error, never a silent reinterpretation.
+///
+/// The test is equality against the flag vocabulary, not a `-` prefix, because
+/// equality is exactly what the parser does. `q` is a free-text search term and
+/// coding transcripts are full of flag-*shaped* strings (`--no-verify`, `-Wall`,
+/// `-D warnings`); rejecting those would drop real coverage without closing any
+/// ambiguity, since the parser never compares against them.
 fn check_argv_value(name: &str, value: &str) -> Result<(), HttpResponse> {
-    if value.starts_with('-') {
+    if crate::is_known_flag_name(value) || SERVE_ARGV_FLAGS.contains(&value) {
         // 只回显参数名（调用点全是字面量），绝不回显取值——它可能是检索词。
         return Err(fixed_error(
             400,
             "invalid_request",
-            &format!("parameter {name} must not start with '-'"),
+            &format!("parameter {name} must not be a CLI flag name"),
         ));
     }
     Ok(())
@@ -1214,8 +1240,8 @@ mod tests {
         assert!(!invalid.body.contains("secret.jsonl"));
     }
 
-    /// Request values travel to `dispatch` as argv tokens, and the CLI parser
-    /// reads any `-`-prefixed token as a flag wherever it sits. Before the
+    /// Request values travel to `dispatch` as argv tokens, and the parser
+    /// matches flag names by whole-token equality wherever they sit. Before the
     /// guard, `?q=--repo&repo=needle` really searched `needle` filtered by repo
     /// `--repo` and answered **200 for a query nobody asked**, while
     /// `?q=--include-system` was eaten as a boolean flag and answered a 400
@@ -1262,6 +1288,58 @@ mod tests {
         );
         assert!(!named.body.contains("needle"), "{}", named.body);
         assert!(named.body.contains("parameter q"), "{}", named.body);
+    }
+
+    /// The guard tests equality against the flag vocabulary, not a `-` prefix:
+    /// `q` is a free-text search term and coding transcripts are full of
+    /// flag-shaped strings the parser never compares against. Rejecting those
+    /// would make `--no-verify` or `-D warnings` unsearchable from the Web UI
+    /// while closing no ambiguity at all.
+    #[test]
+    fn search_terms_that_merely_look_like_flags_stay_searchable() {
+        let store = SqliteStore::open_in_memory().expect("store");
+        for query in ["--no-verify", "-Wall", "-D%20warnings", "-1", "--repo%3Dx"] {
+            let response = route_request(
+                &authorized("GET", &format!("/api/search?q={query}")),
+                TEST_TOKEN,
+                "test.db",
+                false,
+                &store,
+            );
+            assert_eq!(response.status, 200, "q={query}: {}", response.body);
+        }
+    }
+
+    /// Structural half of the guard: every flag name this surface marshals into
+    /// argv must be one the guard refuses as a value. Adding a value-taking flag
+    /// to `request_args` without registering it turns the next query that
+    /// happens to equal that flag name back into a silently rewritten request,
+    /// so the omission has to fail here instead.
+    #[test]
+    fn every_flag_serve_marshals_is_refused_as_a_value() {
+        let populated = [
+            "/api/search?q=needle&mode=lexical&limit=5&cursor=c&provider=codex\
+             &since=1d&until=1h&repo=r&include_system=true&group_by_session=true",
+            "/api/context?session=s&policy=recent&level=full&max_messages=5",
+            "/api/handoff?q=needle&provider=codex&since=1d&until=1h&max_evidence=3",
+        ];
+        let mut seen = 0usize;
+        for path in populated {
+            let Ok(args) = request_args(&authorized("GET", path)) else {
+                panic!("{path}: a fully populated request must be accepted");
+            };
+            for flag in args.iter().filter(|arg| arg.starts_with("--")) {
+                assert!(
+                    check_argv_value("q", flag).is_err(),
+                    "{path}: serve emits {flag} but the guard accepts it as a value"
+                );
+                seen += 1;
+            }
+        }
+        assert_eq!(
+            seen, 16,
+            "the populated routes emit a known number of flags; update this with them"
+        );
     }
 
     #[test]
