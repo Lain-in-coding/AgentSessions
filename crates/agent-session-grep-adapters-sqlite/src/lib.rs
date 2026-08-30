@@ -223,8 +223,18 @@ fn merge_message_payloads(_wire: &str, left: &[u8], right: &[u8]) -> PortResult<
             Ok(serde_json::Value::Object(map)) => Ok(map),
             // Slice-era rows hold bare text rather than canonical JSON. Those
             // cannot be reconciled field by field, so the conflict stands.
+            // The two refusals below must stay distinguishable: the caller masks
+            // the detail into `catalog_error`, and "an old row predates the
+            // canonical payload" and "two sources disagree about a stable field"
+            // need opposite remedies. Neither text may name an entity — a
+            // provider native id is adopted verbatim into the wire id, so it is
+            // untrusted content (see `conflicting_message_projections_are_still_
+            // rejected`).
             _ => Err(PortError::Backend(
-                "message has conflicting projections across sources".into(),
+                "message has conflicting projections across sources \
+                 (a stored projection is not canonical JSON — a pre-canonical row \
+                 cannot be reconciled field by field)"
+                    .into(),
             )),
         }
     };
@@ -325,9 +335,10 @@ fn merge_message_payloads(_wire: &str, left: &[u8], right: &[u8]) -> PortResult<
                 {
                     continue;
                 }
-                return Err(PortError::Backend(
-                    "message has conflicting projections across sources".into(),
-                ));
+                return Err(PortError::Backend(format!(
+                    "message has conflicting projections across sources \
+                     (stable field `{key}` differs)"
+                )));
             }
         }
     }
