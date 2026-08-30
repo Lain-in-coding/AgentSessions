@@ -216,7 +216,12 @@ fn format_command(binary: &str, args: &[String], cwd: &Option<String>) -> String
 /// - Rejected outright: `"` (closes the quote in every shell), `$` and
 ///   `` ` `` (expand inside double quotes in POSIX shells and PowerShell), `%`
 ///   and `!` (expand inside double quotes in cmd.exe), and any control
-///   character (a newline splits the command line).
+///   character (a newline splits the command line). A token *ending* in `\` is
+///   rejected too: quoted, the `\"` is a literal quote in both POSIX shells and
+///   Windows argv parsing, so the closing quote never closes and the rest of the
+///   line is swallowed into the argument; bare, POSIX reads it as a line
+///   continuation. Interior backslashes are fine, so ordinary Windows paths
+///   still preview.
 /// - Double-quoted: anything carrying whitespace or a shell metacharacter that
 ///   double quotes *do* neutralise everywhere (`& | ; < > ( ) ^ ' * ? [ ] { } ~
 ///   #`), so an ordinary path with spaces still previews correctly.
@@ -227,6 +232,9 @@ fn quote_preview_token(token: &str) -> Option<String> {
         .chars()
         .any(|c| c.is_control() || matches!(c, '"' | '$' | '`' | '%' | '!'))
     {
+        return None;
+    }
+    if token.ends_with('\\') {
         return None;
     }
     let needs_quotes = token.is_empty()
@@ -372,6 +380,26 @@ mod tests {
             None,
         );
         assert!(build_resume_descriptor(&m).command_string.is_empty());
+    }
+
+    #[test]
+    fn preview_command_refuses_a_cwd_ending_in_a_backslash() {
+        // 真实缺陷：以 `\` 结尾的 cwd（Windows 上非常常见的"带尾分隔符"写法）
+        // 被引号包起来后是 `"C:\ws\"`——`\"` 在 POSIX shell 和 Windows argv
+        // 解析里都是"字面引号"，收尾引号因此不收尾，后面的 `&& claude …`
+        // 被整段吞进同一个参数，预览串照抄过去只会报语法错误。
+        let m = metadata("claude-code", true, "abc-123", Some("C:\\ws\\"));
+        assert!(
+            build_resume_descriptor(&m).command_string.is_empty(),
+            "尾随反斜杠的 cwd 必须拒绝出预览串"
+        );
+
+        // 但只有"尾随"才危险：路径中间的反斜杠是 Windows 常态，必须照常出串。
+        let m = metadata("claude-code", true, "abc-123", Some("C:\\ws\\proj"));
+        assert_eq!(
+            build_resume_descriptor(&m).command_string,
+            "(cd C:\\ws\\proj && claude --resume abc-123)"
+        );
     }
 
     #[test]
