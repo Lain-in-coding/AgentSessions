@@ -370,6 +370,54 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **One write open could delete the entire repo dimension and mark it
+  converged.** The index-projection self-heal inside `open_for_write` called the
+  same whole-store reprojection as `index rebuild`, which empties
+  `session_repo_slugs` and re-derives every row from the injected
+  `RepoSlugResolver`. Self-heal runs *before* the composition root can inject
+  that resolver, so it re-derived from nothing, then stamped
+  `index_projection_version` current in the same transaction. After that,
+  `search --repo` returned zero hits and `status` reported no repositories,
+  with no signal that anything had been lost. The projection is the only one
+  that cannot be rebuilt from the catalog — a slug exists only as a live probe
+  of the local git checkout, since no absolute path is ever stored — so
+  "reproject from the authoritative catalog" has no authority over it. The two
+  callers are now distinct: explicit `index rebuild` re-derives, self-heal
+  preserves (it never changes the session set, so it cannot orphan a row) while
+  still sweeping rows whose session has left the catalog. A slug-rule change is
+  therefore converged by an explicit `index rebuild`, which is now stated in
+  `docs/operations/rebuild-and-migration-runbook.md`.
+
+- **Ten defects in the embedded web UI**, each now pinned by a guard that fails
+  on the pre-fix markup: pasting a fresh `…/#token=…` into an already-open tab
+  did nothing (a fragment-only change is a same-document navigation, so the
+  script never re-ran — which is exactly what the gate's own error text tells
+  you to do after the token rotates); a token the server had already refused
+  stayed in `localStorage`, so every reload painted the authenticated shell for
+  one round-trip before falling back to the gate; the hit counter reported the
+  last page instead of everything loaded (three pages of two hits read "2");
+  switching language left the page half-translated, since `applyI18n()` only
+  rewrites `[data-i18n]` markup while the status line, hit cards, context title
+  and per-message buttons come from `t()` at render time; a resume preview
+  stayed on screen after another session was opened, attributing the wrong
+  `--resume` command to it; closing the context pane left the previous hit
+  highlighted; the filter controls needed 308px inside a 248px sidebar and the
+  page-size input was sliced at the edge; one unbreakable run — an absolute
+  path, URL or hash — stretched a message to 3200px and scrolled the whole list
+  sideways; `frame-ancestors` logged a CSP error on every load because it is
+  ignored in a meta-delivered policy (the HTTP header already carries it); and
+  with no icon declared the browser probed `/favicon.ico`, which is not the UI
+  page and so answered 401 every load.
+
+- **A resume preview whose path ended in `\` could not be run.**
+  `quote_preview_token` rejected the characters that expand inside double
+  quotes but not a trailing backslash: quoted, `"C:\ws\"` ends in `\"`, a
+  literal quote in both POSIX shells and Windows argv parsing, so the closing
+  quote never closed and `&& claude --resume …` was swallowed into the
+  directory argument; bare, POSIX read it as a line continuation. A trailing
+  separator is an ordinary way to write a Windows path. Only the trailing
+  position is refused, so ordinary Windows paths still preview.
+
 - **One non-UTF-8 byte on the MCP server's stdin killed the whole session.**
   `serve` read frames with `BufRead::lines()`, which yields `Err` for a line
   that is not valid UTF-8; the `?` turned that into a `source_io` failure and

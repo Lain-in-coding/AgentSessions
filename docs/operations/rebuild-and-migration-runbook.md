@@ -140,10 +140,22 @@ per-source record has no self-consistent value in a partially migrated store.
 What happens on a mismatch:
 
 - **Write opens self-heal.** Any write path (`sync`, `ingest`, `index`)
-  reprojects from the catalog before doing its own work — equivalent to
-  `index rebuild`, and **no re-parse is needed** because catalog payloads are
-  authoritative for content. That advances the generation once (cursors are
-  invalidated, as for any commit) and stamps the current version.
+  reprojects from the catalog before doing its own work, and **no re-parse is
+  needed** because catalog payloads are authoritative for content. That
+  advances the generation once (cursors are invalidated, as for any commit) and
+  stamps the current version.
+- **Self-heal covers every projection except one.** `session_repo_slugs` is
+  the only projection that cannot be rebuilt from the catalog: a slug exists
+  only as a live probe of the local git checkout, by design, since no absolute
+  path is ever stored. Self-heal runs inside the write open, before the
+  composition root can inject the resolver, so it deliberately preserves those
+  rows instead of emptying and re-deriving them — otherwise one self-heal
+  would delete the whole repo dimension and stamp the version current in the
+  same transaction, leaving `search --repo` at zero hits with nothing to
+  report the loss. Consequence to plan for: a change to the **slug derivation
+  rule** is converged only by an explicit `index rebuild`, which re-probes git.
+  A version bump alone converges the FTS token stream, `session_titles`, and
+  the display projections; it does not re-derive slugs.
 - **Read paths fail closed.** A read-only open holds no writer lease and must
   not write, so FTS queries return `schema_incompatible` (exit 9) with the
   exact remedy in the message instead of matching old tokens against new query
