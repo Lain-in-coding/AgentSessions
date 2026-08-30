@@ -1405,6 +1405,27 @@ impl RepoSlugResolver for NoopRepoSlugResolver {
     }
 }
 
+/// 重投影时对 repo 身份投影（schema v16 `session_repo_slugs`）的处置。
+///
+/// 该表是本适配器唯一**不可从 catalog 重建**的派生投影：slug 只能由注入的
+/// [`RepoSlugResolver`] 现场探测本机 git 得到，catalog 里没有任何字节能还原它
+/// （按设计——绝对路径不进这张表）。因此"从权威 catalog 全量重投影"这个动作
+/// 对它没有权威：若无条件清表重派生，一次解析器缺席（打开时自愈尚未装配组合根
+/// 注入的解析器，或 git 临时不可用）就会把整条 repo 维度删空，同时把
+/// `index_projection_version` 盖成当前——此后 `search --repo` 恒 0 命中、
+/// `status` 恒无仓库，而没有任何信号会报告这次丢失。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RepoIdentityRebuild {
+    /// 重派生：显式 `index rebuild` 与增量提交路径。调用方已装配解析器，
+    /// 且会话集合可能变化（退役会话必须同事务删除其 slug 行）。
+    Rederive,
+    /// 原样保留：打开时的投影版本自愈（[`SqliteStore::ensure_index_projection_current`]）。
+    /// 自愈只重投影 catalog 可重建的词元流与显示投影，完全不改变会话集合，
+    /// 因此保留既有 slug 行不会留下孤儿。slug 派生规则本身变化时的收敛动作
+    /// 是显式 `index rebuild`（它会重新探测 git），不是打开时自愈。
+    Preserve,
+}
+
 /// SQLite 支撑的存储：catalog 表存规范化实体负载，FTS5 表提供全文检索。
 ///
 /// 单连接 + `RefCell` 内部可变：端口 trait 以 `&self` 取用，而 rusqlite 的写操作
@@ -1451,10 +1472,15 @@ impl SqliteStore {
         })
     }
 
-    /// 写入路径打开：先在 db 所在目录获取 data-root writer lease，再打开库。
+    /// 写入路径打开：先在 db 所在目录获取 data-root writer lease，再打开库，
+    /// 最后收敛派生投影。
     ///
     /// 若另一进程已持 lease，立即失败（不阻塞）。lease 随本 store 存活，
     /// Drop 时释放，以维持每个 data root 单写者不变量。
+    ///
+    /// 注意本函数在返回**之前**就可能重投影派生索引（投影版本自愈），此时
+    /// 组合根还没机会 [`set_repo_slug_resolver`](Self::set_repo_slug_resolver)。
+    /// 因此自愈路径刻意不重派生 repo 身份投影——见 [`RepoIdentityRebuild`]。
     pub fn open_for_write(path: &str) -> PortResult<Self> {
         let db_path = Path::new(path);
         // 裸相对文件名（如 "catalog.db"）的 parent() 是空串 ""，create_dir_all("")
@@ -2288,6 +2314,10 @@ impl SqliteStore {
 
     /// 注入 repo slug 解析器（schema v16）。写路径（sync/index）在提交前
     /// 注入真实 git 实现；未注入时投影恒为空（诚实降级，不猜）。
+    ///
+    /// 可以在 [`open_for_write`](Self::open_for_write) 之后注入：打开时的投影
+    /// 版本自愈不重派生该投影（见 [`RepoIdentityRebuild`]），因此注入时机不会
+    /// 让已探测出的 repo 身份被删空。
     pub fn set_repo_slug_resolver(&self, resolver: Box<dyn RepoSlugResolver>) {
         *self.repo_slug_resolver.borrow_mut() = resolver;
     }
@@ -5015,10 +5045,15 @@ impl SqliteStore {
     /// 已是当前版本 → no-op。否则：
     /// - 投影为空（无 `fts`/`session_fts` 行）→ 没有旧词元可纠正，只标记版本，
     ///   **不推进 generation、不写 outbox 行**（新库/空库不该因此产生 churn）；
-    /// - 投影非空 → 从权威 catalog 全量重投影（[`Self::rebuild_index`]，等价
-    ///   `index rebuild`）。catalog payload 对内容权威，**不需要回到 provider
-    ///   reparse**——这正是本轴与 [`PARSER_SEMANTIC_VERSION`] 的区别。重投影
-    ///   推进 generation（投影内容确实变了，旧 cursor 必须失效）。
+    /// - 投影非空 → 从权威 catalog 全量重投影（等价 `index rebuild`）。catalog
+    ///   payload 对内容权威，**不需要回到 provider reparse**——这正是本轴与
+    ///   [`PARSER_SEMANTIC_VERSION`] 的区别。重投影推进 generation（投影内容
+    ///   确实变了，旧 cursor 必须失效）。
+    ///
+    /// 自愈的重投影**不重派生 repo 身份投影**（[`RepoIdentityRebuild::Preserve`]）：
+    /// 该投影不可从 catalog 重建，而本方法在 `open_for_write` 内、组合根注入
+    /// 解析器之前就会跑；无条件清表重派生会用一次自愈把整条 repo 维度删空
+    /// 并同时盖上"投影已收敛"的戳。自愈不改变会话集合，保留既有行不产生孤儿。
     ///
     /// 返回是否执行了重投影。
     pub fn ensure_index_projection_current(&self) -> PortResult<bool> {
@@ -5038,7 +5073,7 @@ impl SqliteStore {
             .map_err(backend)?;
             return Ok(false);
         }
-        self.rebuild_index()?;
+        self.reproject_from_catalog(RepoIdentityRebuild::Preserve)?;
         Ok(true)
     }
 
@@ -5512,6 +5547,7 @@ impl SqliteStore {
         tx: &rusqlite::Transaction<'_>,
         session_wire: &str,
         resolver: &dyn RepoSlugResolver,
+        repo_identity: RepoIdentityRebuild,
     ) -> PortResult<()> {
         tx.execute(
             "DELETE FROM session_fts
@@ -5557,6 +5593,9 @@ impl SqliteStore {
         // 同一派生批次。先删旧行，派生成功才写新行；session 已退役（不
         // 在 catalog）、claim 缺失/冲突、门禁不满足或 git 检测失败 →
         // 无行（诚实降级）。绝对路径绝不落此表——只有三段 slug。
+        if repo_identity == RepoIdentityRebuild::Preserve {
+            return Ok(());
+        }
         tx.execute(
             "DELETE FROM session_repo_slugs WHERE session_wire = ?1",
             [session_wire],
@@ -5585,14 +5624,31 @@ impl SqliteStore {
     fn rebuild_all_session_search_in_tx(
         tx: &rusqlite::Transaction<'_>,
         resolver: &dyn RepoSlugResolver,
+        repo_identity: RepoIdentityRebuild,
     ) -> PortResult<()> {
         tx.execute("DELETE FROM session_fts", []).map_err(backend)?;
         tx.execute("DELETE FROM session_fts_ids", [])
             .map_err(backend)?;
         tx.execute("DELETE FROM session_titles", [])
             .map_err(backend)?;
-        tx.execute("DELETE FROM session_repo_slugs", [])
+        if repo_identity == RepoIdentityRebuild::Rederive {
+            tx.execute("DELETE FROM session_repo_slugs", [])
+                .map_err(backend)?;
+        } else {
+            // 自愈不重派生 repo slug（它不可从 catalog 重建），但清理历史崩溃/
+            // 旧 bug 遗留的 orphan 行，避免它们继续污染 repo facet。把清理放在
+            // 全量重建入口而不是逐 session 行内，确保空 catalog 也能收敛且只执行一次。
+            tx.execute(
+                "DELETE FROM session_repo_slugs
+                 WHERE NOT EXISTS (
+                     SELECT 1 FROM catalog
+                     WHERE catalog.id = session_repo_slugs.session_wire
+                       AND catalog.id LIKE 'ses_v1_%'
+                 )",
+                [],
+            )
             .map_err(backend)?;
+        }
         let sessions = {
             let mut stmt = tx
                 .prepare("SELECT id FROM catalog WHERE id LIKE 'ses_v1_%' ORDER BY id")
@@ -5607,7 +5663,7 @@ impl SqliteStore {
             sessions
         };
         for session_wire in sessions {
-            Self::rebuild_session_search_row_in_tx(tx, &session_wire, resolver)?;
+            Self::rebuild_session_search_row_in_tx(tx, &session_wire, resolver, repo_identity)?;
         }
         Ok(())
     }
@@ -6095,7 +6151,12 @@ impl SqliteStore {
         Self::regenerate_compatibility_aliases_in_tx(&tx, &batch_sources)?;
         let resolver: &dyn RepoSlugResolver = &**self.repo_slug_resolver.borrow();
         for session_wire in affected_sessions {
-            Self::rebuild_session_search_row_in_tx(&tx, &session_wire, resolver)?;
+            Self::rebuild_session_search_row_in_tx(
+                &tx,
+                &session_wire,
+                resolver,
+                RepoIdentityRebuild::Rederive,
+            )?;
         }
 
         // 本批触碰的关系行：只校验这些 id 的引用完整性。
@@ -6535,7 +6596,16 @@ impl SqliteStore {
     ///
     /// rebuild 是显式维护命令，即使内容与现有投影一致也照常推进 generation——操作者
     /// 主动请求“干净重建”，不做 no-op 短路。返回重新索引的实体条数。
+    ///
+    /// 显式重建会**重派生** repo 身份投影（重新探测本机 git）；打开时的投影版本
+    /// 自愈走同一实现但保留该投影，见 [`RepoIdentityRebuild`]。
     pub fn rebuild_index(&self) -> PortResult<usize> {
+        self.reproject_from_catalog(RepoIdentityRebuild::Rederive)
+    }
+
+    /// [`rebuild_index`](Self::rebuild_index) 的实现体，`repo_identity` 决定
+    /// 是否重派生 repo 身份投影（见 [`RepoIdentityRebuild`]）。
+    fn reproject_from_catalog(&self, repo_identity: RepoIdentityRebuild) -> PortResult<usize> {
         // 1) 以 catalog 为权威实体集，投影检索正文；身份优先取 fts_ids 保真。
         // 单个 LEFT JOIN 取代逐行 fts_ids 查询(每行一次 prepare+execute 的 N+1)。
         let upserts: Vec<(StableId, Vec<u8>, String)> = {
@@ -6587,7 +6657,7 @@ impl SqliteStore {
         // 重投影，绝不从既有 session_fts 内容复制。repo identity（schema
         // v16）同批重建，解析器来自注入的 [`RepoSlugResolver`]。
         let resolver: &dyn RepoSlugResolver = &**self.repo_slug_resolver.borrow();
-        Self::rebuild_all_session_search_in_tx(&tx, resolver)?;
+        Self::rebuild_all_session_search_in_tx(&tx, resolver, repo_identity)?;
         // 与提交路径一致：只有 Message 实体重投影进 fts，且把 fts5 行 rowid 回写
         // 进 fts_ids 边车，删除才能按 rowid 定位（见 ensure_fts_ids_rowid）。
         // 批量多行写入（与提交路径共用 batch_upsert_fts_in_tx；整表清空后
@@ -6729,9 +6799,14 @@ pub const PARSER_SEMANTIC_VERSION: u32 = 1;
 /// - [`searchable_text`] 的 payload → 检索正文投影规则；
 /// - `session_fts` 字段构成（[`SqliteStore::session_search_text`] 取哪些
 ///   字段、`SESSION_SEARCH_FIELD_CHARS` 上限）；
-/// - `session_titles` 派生链与 [`SESSION_TITLE_MAX_CHARS`]、
-///   `session_repo_slugs` 的 slug 派生规则——它们与 `session_fts` 同属
-///   `rebuild_index` 一次重投影覆盖的派生投影，规则变化后旧行同样滞留。
+/// - `session_titles` 派生链与 [`SESSION_TITLE_MAX_CHARS`]——与 `session_fts`
+///   同属 `rebuild_index` 一次重投影覆盖的派生投影，规则变化后旧行同样滞留。
+///
+/// **半覆盖**：`session_repo_slugs` 的 slug 派生规则同样属于"投影规则变了"，
+/// 但该投影不可从 catalog 重建（slug 只能现场探测本机 git），所以只有显式
+/// `index rebuild` 会重派生它；打开时的投影版本自愈刻意保留既有行
+/// （见 [`RepoIdentityRebuild`]）。slug 规则变化的收敛动作因此是显式 rebuild，
+/// 不要指望写路径打开时自动收敛。
 ///
 /// **不**属于本轴：`message_vec` 语义向量（自带 model_id/dimension 归属，
 /// 换模型即失效）、`tool_activities`/`usage_events`（claims 派生，随
@@ -18264,7 +18339,7 @@ mod tests {
 
         // 会话最近活动：只认可解析的 timestamp，裸文本行诚实缺席而不报错。
         let latest = store
-            .latest_activity_ymd_for_sessions(&[session.clone()])
+            .latest_activity_ymd_for_sessions(std::slice::from_ref(&session))
             .unwrap();
         assert_eq!(
             latest.get(session.as_str()).map(String::as_str),
@@ -18326,5 +18401,113 @@ mod tests {
             )
             .unwrap();
         assert!(faceted.is_empty());
+    }
+
+    /// 生成本测试用的 repo-slug 解析器（`Z:/projects/app` → 三段 slug）。
+    fn app_repo_resolver() -> Box<dyn RepoSlugResolver> {
+        Box::new(MapRepoSlugResolver {
+            map: std::collections::HashMap::from([(
+                "Z:/projects/app".into(),
+                Some("github.com/o/app".into()),
+            )]),
+            calls: RefCell::new(0),
+        })
+    }
+
+    #[test]
+    fn write_open_self_heal_keeps_the_repo_identity_projection() {
+        // 回归：`open_for_write` 在返回之前就跑投影版本自愈
+        // （ensure_index_projection_current → 整库重投影），而重投影当时无条件
+        // `DELETE FROM session_repo_slugs` + 按注入的解析器重派生。解析器只能
+        // 在 open 返回之后注入（CLI 正是那么做的），因此自愈时它仍是 Noop：
+        // repo 投影被整表删空，同时 index_projection_version 被盖成当前——
+        // `search --repo` 从此恒 0 命中、`status` 恒无仓库，且再没有任何信号
+        // 会报告这次丢失。git 不在 PATH 时即使先注入真实解析器也一样删空。
+        // 修复：repo 身份投影不可从 catalog 重建，自愈路径保留既有行
+        // （RepoIdentityRebuild::Preserve）；重派生只属于显式 `index rebuild`。
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("repo-heal.db");
+        let p = path.to_string_lossy().into_owned();
+        let session = sid(IdKind::Session, b"heal-repo-ses");
+        let document = sid(IdKind::Document, b"heal-repo-doc");
+        let message = sid(IdKind::Message, b"heal-repo-msg");
+        let orphan_session = sid(IdKind::Session, b"heal-repo-orphan");
+        {
+            let store = SqliteStore::open_for_write(&p).unwrap();
+            store.set_repo_slug_resolver(app_repo_resolver());
+            let batch = SourceBatch {
+                source_path: "heal-repo.jsonl".into(),
+                entries: vec![
+                    entity_entry(&session),
+                    typed_document_entry(&document),
+                    typed_message_entry(&message, "今天把配置备份到了新目录"),
+                ],
+                placements: vec![placement(
+                    &session,
+                    &document,
+                    &message,
+                    0,
+                    false,
+                    Some((0, 4)),
+                )],
+                edges: Vec::new(),
+                activities: Vec::new(),
+                usage_events: Vec::new(),
+                relation_complete: true,
+                len_bytes: None,
+                fingerprint: None,
+                provider_id: None,
+                resume_claim: Some(source_repo_claim(&repo_claim(
+                    &session,
+                    "heal-native",
+                    Some("Z:/projects/app"),
+                    true,
+                ))),
+            };
+            assert!(
+                store
+                    .commit_source_batches_if_changed(std::slice::from_ref(&batch))
+                    .unwrap()
+            );
+            assert_eq!(
+                repo_slug_rows(&store, session.as_str()),
+                vec!["github.com/o/app".to_string()]
+            );
+            {
+                let conn = store.conn.borrow();
+                conn.execute(
+                    "INSERT INTO session_repo_slugs(session_wire, repo_slug)
+                     VALUES(?1, ?2)",
+                    rusqlite::params![orphan_session.as_str(), "github.com/o/orphan"],
+                )
+                .unwrap();
+            }
+            downgrade_projection_to_legacy_bigrams(&store);
+        }
+        // 重开写路径（CLI 顺序：先 open，解析器随后注入）：自愈跑在注入之前，
+        // repo 投影必须原样留存。
+        let store = SqliteStore::open_for_write(&p).unwrap();
+        assert!(store.index_projection_is_current().unwrap());
+        assert_eq!(
+            repo_slug_rows(&store, session.as_str()),
+            vec!["github.com/o/app".to_string()],
+            "自愈重投影后 repo 身份投影必须仍在"
+        );
+        assert!(
+            repo_slug_rows(&store, orphan_session.as_str()).is_empty(),
+            "自愈必须清理 catalog 已不存在的 repo slug 孤儿"
+        );
+        // 词元流也确实收敛了（自愈本身仍然生效，不是被整体跳过）。
+        assert_eq!(store.query("配置备份", 10).unwrap().len(), 1);
+        assert_eq!(store.query("配", 10).unwrap().len(), 1);
+        // 显式 rebuild 仍然重派生（解析器缺席 ⇒ 诚实降级为无行），语义未被削弱。
+        store.rebuild_index().unwrap();
+        assert!(repo_slug_rows(&store, session.as_str()).is_empty());
+        store.set_repo_slug_resolver(app_repo_resolver());
+        store.rebuild_index().unwrap();
+        assert_eq!(
+            repo_slug_rows(&store, session.as_str()),
+            vec!["github.com/o/app".to_string()]
+        );
     }
 }
