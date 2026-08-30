@@ -37,9 +37,9 @@ use agent_session_grep_domain::{
     MessageRelation, SessionIdentityNamespace, Stability, StableId,
 };
 use agent_session_grep_ports::{
-    ParseReport, ProviderAdapter, ProviderSessionObservation, ReadOnlySource, RedactionStatus,
-    ResumeClaimsStore, RetrievalMode, SearchFacets, SearchFilters, SearchInstant, SearchProvider,
-    SidechainFacet, SourceResumeClaim,
+    ParseReport, PortError, ProviderAdapter, ProviderSessionObservation, ReadOnlySource,
+    RedactionStatus, ResumeClaimsStore, RetrievalMode, SearchFacets, SearchFilters, SearchInstant,
+    SearchProvider, SidechainFacet, SourceResumeClaim, SourceSnapshot,
     capability::{ProviderCapability, ProviderCapabilityMatrix, ProviderMaturity},
 };
 use agent_session_grep_provider_aider::AiderAdapter;
@@ -4115,6 +4115,9 @@ fn sync_files_inner(
         .map_err(ProtocolError::from)?;
     let mut unchanged_messages = 0usize;
     let mut provider_id_backfills = Vec::new();
+    // 每个源本次实际 staged 的消息数，供推迟（deferred）时从 emitted 里扣回，
+    // 否则报告会把没提交的消息算进 emitted。
+    let mut staged_messages_by_path: BTreeMap<String, usize> = BTreeMap::new();
     let unchanged_counts = store
         .source_message_counts(paths)
         .map_err(ProtocolError::from)?;
@@ -4215,6 +4218,7 @@ fn sync_files_inner(
         }
         if let (Some(staged), Some(variant)) = (&staged, &variant) {
             message_count += staged.messages.len();
+            staged_messages_by_path.insert(path.clone(), staged.messages.len());
             skipped_count += staged.report.skipped;
             diagnostic_count += staged.report.diagnostics.len();
             diagnostics.extend(staged.report.diagnostics.iter().cloned());
@@ -4238,9 +4242,18 @@ fn sync_files_inner(
         snapshots.push((path_ref.to_path_buf(), snap));
     }
 
-    for (path, snapshot) in &snapshots {
-        verify_snapshot(path, snapshot).map_err(ProtocolError::from)?;
+    // 快照复核：字节在读取期间变化的源被**推迟**，从提交批次里摘掉，其余源照常
+    // 提交。这不是放宽 fail-closed——被推迟的源一个字节也不会入库，torn 数据依然
+    // 不可能出现；改变的只是"一个源的漂移不再作废整次 sync"。
+    let deferred_paths =
+        defer_sources_changed_during_read(&snapshots, &mut sources, &mut diagnostics, paths.len())
+            .map_err(ProtocolError::from)?;
+    for path in &deferred_paths {
+        if let Some(staged) = staged_messages_by_path.get(path) {
+            message_count = message_count.saturating_sub(*staged);
+        }
     }
+    diagnostic_count += deferred_paths.len();
 
     // discover 合成的空批（已删除源的 tombstone）追加进提交批次。
     sources.extend(synthetic_batches.iter().cloned());
@@ -4266,12 +4279,53 @@ fn sync_files_inner(
             "committed": committed,
             "unchanged": if changed { unchanged_messages } else { message_count + unchanged_messages },
             "retained": retained_count,
+            "deferred": deferred_paths.len(),
             "skipped": skipped_count,
             "diagnostics": diagnostic_count,
             "generation": generation,
         }),
         warnings,
     ))
+}
+
+/// 复核每个源的快照，把"读取期间字节发生变化"的源从提交批次里摘掉，返回被推迟
+/// 的源路径。
+///
+/// 为什么不是整次失败：`sync --discover` 的常态就是**一边有 agent 在写自己的
+/// transcript**（用户往往正是在一个 coding-agent 会话里运行它）。旧实现在这一步
+/// 用 `?` 直接返回 `source_changed`，于是一个正在增长的文件就作废了本次已经扫完
+/// 的全部源——一次也提交不成。被推迟的源不写入任何字节，torn 数据依旧不可能
+/// 出现；它上一次的索引原样保留，文件写完后下一次 sync 会因指纹不匹配走完整重扫。
+///
+/// 只有 [`PortError::SnapshotChanged`] 会被推迟。其余错误（真正的 I/O 失败）仍然
+/// 原样上抛：那不是"文件正在被写"，而是源不可读。
+fn defer_sources_changed_during_read(
+    snapshots: &[(std::path::PathBuf, SourceSnapshot)],
+    sources: &mut Vec<SourceBatch>,
+    diagnostics: &mut Vec<String>,
+    total: usize,
+) -> Result<Vec<String>, PortError> {
+    let mut deferred: Vec<String> = Vec::new();
+    for (index, (path, snapshot)) in snapshots.iter().enumerate() {
+        match verify_snapshot(path, snapshot) {
+            Ok(()) => {}
+            Err(PortError::SnapshotChanged(detail)) => {
+                diagnostics.push(format!(
+                    "source {} of {}: changed while being read ({detail}); deferred — \
+                     nothing was committed for it and any previously indexed content is \
+                     untouched; re-run sync once the file is no longer being written",
+                    index + 1,
+                    total
+                ));
+                deferred.push(path.to_string_lossy().into_owned());
+            }
+            Err(other) => return Err(other),
+        }
+    }
+    if !deferred.is_empty() {
+        sources.retain(|source| !deferred.contains(&source.source_path));
+    }
+    Ok(deferred)
 }
 
 /// 把应用结果投影为 (outcome, data, page, warnings)：截断 → partial（exit 10），
@@ -4989,6 +5043,81 @@ mod tests {
         } else {
             assert!(flag.is_null());
         }
+    }
+
+    /// 构造一个只带路径的最小提交批次，用于 deferral 过滤的测试。
+    fn empty_batch(path: &str) -> SourceBatch {
+        SourceBatch {
+            source_path: path.to_string(),
+            entries: Vec::new(),
+            placements: Vec::new(),
+            edges: Vec::new(),
+            activities: Vec::new(),
+            usage_events: Vec::new(),
+            relation_complete: true,
+            len_bytes: None,
+            fingerprint: None,
+            provider_id: None,
+            resume_claim: None,
+        }
+    }
+
+    #[test]
+    fn a_source_growing_during_the_read_is_deferred_and_its_siblings_still_commit() {
+        // 真实缺陷：`sync --discover` 的常态是一边有 agent 在写自己的 transcript
+        // （用户往往正是在一个 coding-agent 会话里跑它）。旧实现在快照复核处用 `?`
+        // 直接返回 source_changed，一个正在增长的文件就作废本次扫完的全部源——
+        // 在本机上等于"只要 Claude Code 开着就永远同步不完"。
+        let dir = tempfile::tempdir().unwrap();
+        let growing = dir.path().join("growing.jsonl");
+        let stable = dir.path().join("stable.jsonl");
+        std::fs::write(&growing, b"{\"a\":1}\n").unwrap();
+        std::fs::write(&stable, b"{\"b\":2}\n").unwrap();
+        let snapshots = vec![
+            (growing.clone(), capture(&growing).unwrap()),
+            (stable.clone(), capture(&stable).unwrap()),
+        ];
+        // 捕获之后文件继续增长：这正是竞态产生的状态。
+        std::fs::write(&growing, b"{\"a\":1}\n{\"a\":2}\n").unwrap();
+
+        let growing_path = growing.to_string_lossy().into_owned();
+        let stable_path = stable.to_string_lossy().into_owned();
+        let mut sources = vec![empty_batch(&growing_path), empty_batch(&stable_path)];
+        let mut diagnostics = Vec::new();
+        let deferred =
+            defer_sources_changed_during_read(&snapshots, &mut sources, &mut diagnostics, 2)
+                .expect("一个源漂移不该让整次 sync 失败");
+
+        assert_eq!(deferred, vec![growing_path]);
+        assert_eq!(
+            sources.len(),
+            1,
+            "被推迟的源必须从提交批次里摘掉，其余源照常提交"
+        );
+        assert_eq!(sources[0].source_path, stable_path);
+        assert_eq!(diagnostics.len(), 1);
+        assert!(
+            diagnostics[0].contains("deferred"),
+            "推迟必须留下可见诊断，不能静默跳过：{}",
+            diagnostics[0]
+        );
+    }
+
+    #[test]
+    fn an_unreadable_source_still_fails_the_sync() {
+        // 推迟只适用于"文件正在被写"。源不可读是另一回事，必须照旧上抛，
+        // 否则真正的 I/O 故障会被伪装成"稍后重试即可"。
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("gone.jsonl");
+        std::fs::write(&missing, b"{\"a\":1}\n").unwrap();
+        let snapshots = vec![(missing.clone(), capture(&missing).unwrap())];
+        std::fs::remove_file(&missing).unwrap();
+        let mut sources = vec![empty_batch(&missing.to_string_lossy())];
+        let mut diagnostics = Vec::new();
+        let err = defer_sources_changed_during_read(&snapshots, &mut sources, &mut diagnostics, 1)
+            .expect_err("源不可读必须报错，不能当成推迟");
+        assert!(!matches!(err, PortError::SnapshotChanged(_)));
+        assert_eq!(sources.len(), 1, "报错路径不改动提交批次");
     }
 
     #[test]

@@ -288,9 +288,17 @@ FTS. The next write open (`sync`, `ingest`, `index rebuild`) marks the
 stranded intents aborted automatically. Do not delete rows from
 `index_batches` directly.
 
-**`source_changed` (exit 5).** The transcript file was modified between its
-capture and the post-stage verification. Nothing committed. Retry once the
-source is stable; it is marked retryable for the same reason.
+**`source_changed` (exit 5).** A transcript file was modified between its
+capture and the post-stage verification, and nothing could be committed for it.
+`sync` no longer fails the whole run for this: the affected source is
+**deferred** — dropped from the commit batch, reported through a per-source
+diagnostic and the `deferred` count, with any content it had already indexed
+left untouched — and every other source commits normally. That matters because
+the normal case is an agent writing its own transcript while you sync, often
+the very session you are typing in; failing the run meant one growing file
+discarded the entire scan. Re-run `sync` once the file is no longer being
+written. `ingest` of a single source still reports exit 5, since there is no
+other source to carry the run.
 
 ## Procedure 5: Generation and cursor semantics
 

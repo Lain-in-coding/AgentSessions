@@ -641,6 +641,26 @@ fn render_sync(data: &Value) -> Vec<String> {
     ];
     let unchanged = data.get("unchanged").and_then(Value::as_u64);
     let emitted = data.get("emitted").and_then(Value::as_u64);
+    // retained/deferred 只在非零时出现：两者都表示"这个源本次故意没入库"，
+    // 沉默会让用户以为自己的会话丢了。零值不占版面。
+    if let Some(retained) = data
+        .get("retained")
+        .and_then(Value::as_u64)
+        .filter(|n| *n > 0)
+    {
+        lines.push(format!(
+            "retained: {retained}（源文件尾部被截断，正在被写入；保留上次索引，未重新入库）"
+        ));
+    }
+    if let Some(deferred) = data
+        .get("deferred")
+        .and_then(Value::as_u64)
+        .filter(|n| *n > 0)
+    {
+        lines.push(format!(
+            "deferred: {deferred}（源文件在读取期间发生变化，本次跳过；已有索引不变，写完后再 sync）"
+        ));
+    }
     match (emitted, unchanged) {
         (Some(0), Some(_)) => lines.push("总结：没有新增消息（源文件未变化）。".into()),
         (Some(e), Some(_)) => lines.push(format!("总结：新增 {e} 条消息。")),
