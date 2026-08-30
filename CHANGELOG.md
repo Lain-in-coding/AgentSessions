@@ -370,6 +370,33 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`sync` could not finish while any coding agent was running.** Every source
+  was staged, then every snapshot verified, then one commit ran; the
+  verification loop propagated the first `SnapshotChanged` with `?`, so a single
+  file that grew during the scan discarded the entire run — nothing committed
+  for any source. That is the normal case, not an edge case: the agent is
+  appending to its own transcript, often the very session the user is typing in.
+  Measured against a local 170k-entity library, `sync --discover` failed every
+  attempt with exit 5 while Claude Code was open, leaving the catalog untouched.
+  A drifted source is now **deferred** — dropped from the commit batch, reported
+  through a per-source diagnostic and a new `deferred` count, with its
+  previously indexed content left exactly as it was — and every other source
+  commits. Not a byte of a deferred source is written, so a torn snapshot
+  remains impossible; `emitted` excludes their staged messages so
+  `INV-NO-PARSE-LOSS` stays exact. Only `SnapshotChanged` defers: a genuine I/O
+  failure still aborts, and `ingest` of a single source still reports exit 5
+  because no other source can carry the run.
+
+- **The two message-conflict refusals were indistinguishable.** A stored payload
+  that is not canonical JSON and two sources that disagree about a stable field
+  produced the same sentence, which the CLI then masks into `catalog_error`
+  ("database internal error", remedy: check the `--db` path). The two causes
+  need opposite remedies, so a real conflict on a real library could not be
+  diagnosed even with `ASG_DEBUG_ERRORS=1`. The field-mismatch refusal now names
+  the differing key and the non-canonical one says so. Neither names an entity:
+  a provider native id is adopted verbatim into the wire id, so ids are
+  untrusted content in an error string.
+
 - **One write open could delete the entire repo dimension and mark it
   converged.** The index-projection self-heal inside `open_for_write` called the
   same whole-store reprojection as `index rebuild`, which empties
