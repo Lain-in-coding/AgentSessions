@@ -216,10 +216,7 @@ fn no_undocumented_probe_tie_at_the_top_confidence_rank() {
                 Some(_) => {}
                 None => best = Some(r),
             }
-            top.push((
-                adapter.provider_id().to_string(),
-                probe.variant_id.clone(),
-            ));
+            top.push((adapter.provider_id().to_string(), probe.variant_id.clone()));
         }
 
         assert!(
@@ -258,7 +255,7 @@ fn no_undocumented_probe_tie_at_the_top_confidence_rank() {
             ids[1]
         );
         assert!(
-            ids.contains(&owner),
+            ids.contains(owner),
             "{owner}/{label}: 顶档竞争者里没有 fixture 自己的 provider：{top:?}"
         );
     }
