@@ -300,6 +300,35 @@ discarded the entire scan. Re-run `sync` once the file is no longer being
 written. `ingest` of a single source still reports exit 5, since there is no
 other source to carry the run.
 
+**`catalog_error` (exit 6) that `doctor` cannot explain.** The masked message
+("database internal error") covers two different situations: the store failed
+to open or read, and the store *opened fine* but refused a write because it
+would have broken an invariant. Run `doctor --db <path>` first. If `doctor`
+reports a healthy store, it is the second case; rerun the same command with
+`ASG_DEBUG_ERRORS=1` to print the masked reason on stderr (it never enters the
+stdout envelope).
+
+The refusal seen on real data is `message has conflicting projections across
+sources (stable field \`role\` differs)`. Message identity adopts the provider's
+native id, so one entity can be contributed by more than one file; a *stable*
+field that disagrees between two contributions means the two files describe the
+same identity differently, and the store refuses rather than pick a winner.
+The case to expect is a store written by an **older parser**: re-parsing the
+same bytes today can produce a different stable projection than the row already
+on disk, and the merge then has no authority to choose. Verified on a 170k-entity
+library built by an older binary: every `sync` failed this way, while a full
+`sync --discover` of the same 1,888 sources into a *fresh* `--db` succeeded
+(336,563 messages, exit 0). Sources are authoritative and re-ingest is cheap
+relative to the value, so the remedy is to rebuild rather than to patch rows:
+
+```
+agent-session-grep --db C:/data/rebuilt.db sync --discover
+```
+
+Compare `status` on both stores, then swap the new file in and keep the old one
+until you are satisfied. An `index rebuild` does **not** help here: it reprojects
+the catalog it already has and never re-parses a source.
+
 ## Procedure 5: Generation and cursor semantics
 
 Every committed write batch advances the store's generation by one. The

@@ -138,7 +138,10 @@ impl CanonicalCode {
             }
             CanonicalCode::SnapshotFailed => "快照校验失败：检查源文件元数据与文件系统健康状态",
             CanonicalCode::CatalogError => {
-                "数据库打开/读取失败：检查 --db 路径是否正确（路径末尾不要带斜杠），可运行 doctor --db <path> 自检"
+                "先运行 doctor --db <path> 自检。若 doctor 正常，说明这不是打开失败而是\
+                 一次被拒绝的写入（例如同一条消息在不同源上投影冲突）：用 \
+                 ASG_DEBUG_ERRORS=1 重跑同一命令查看被掩码的原因，并按 \
+                 docs/operations/rebuild-and-migration-runbook.md 处理"
             }
             CanonicalCode::ProviderError => "该文件不是可识别的 transcript 格式，或文件已被破坏",
             CanonicalCode::CapabilityNotSupported => {
