@@ -3,7 +3,16 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; object-src 'none'; frame-ancestors 'none'">
+<!-- `frame-ancestors` is defined to be ignored in a meta-delivered policy, and
+     the browser logs a CSP error for it on every page load. serve.rs sends the
+     same policy as an HTTP response header, where the directive *is* honoured,
+     so the framing protection is kept by leaving it out of the meta tag. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; object-src 'none'">
+<!-- With no icon declared the browser probes /favicon.ico on its own. That path
+     is not the UI page, so it needs a bearer token the probe never carries: a
+     401 in the console on every load. An inline empty icon stops the request
+     (and `img-src ... data:` already permits it). -->
+<link rel="icon" href="data:,">
 <title>agent-session-grep</title>
 <style>
 /* ─── Design tokens (Geist-inspired neutral scale, light + dark) ───────────
@@ -125,7 +134,11 @@ button { font: inherit; color: inherit; }
 .sidebar-title { font-size: 0.78rem; font-weight: 650; color: var(--text-dim); letter-spacing: 0.04em; }
 .sidebar-meta { font: var(--font-code-size) var(--mono); color: var(--text-mute); }
 .sidebar-controls { flex: none; display: grid; gap: 6px; padding: 0 12px 10px; }
-.ctl-row { display: flex; gap: 6px; }
+/* `.ctl-row label` sets `flex: none` (it beats `.ctl-row > *` on specificity),
+   so the three filter controls could not shrink: they needed 308px inside the
+   248px sidebar and the page-size input was sliced in half at the sidebar
+   edge. Wrapping keeps every control whole at any label length or locale. */
+.ctl-row { display: flex; flex-wrap: wrap; gap: 6px; }
 .ctl-row > * { flex: 1; min-width: 0; }
 .ctl-row label { flex: none; display: flex; align-items: center; gap: 6px;
   color: var(--text-mute); font-size: 0.78rem; cursor: pointer; }
@@ -171,8 +184,13 @@ input[type="number"] { width: 64px; }
 .role-badge { display: inline-block; padding: 1px 7px; border-radius: 99px; font-weight: 600;
   border: 1px solid var(--line); color: var(--text-dim); }
 .role-badge.user { background: var(--user-bubble); border-color: transparent; color: var(--text); }
+/* `pre-wrap` wraps at soft break opportunities only, and transcript text is
+   full of runs with none: absolute paths, URLs, base64, hashes. Without
+   `overflow-wrap` a single such run made the body 3200px wide inside a 990px
+   pane, so `.chat` grew a horizontal scrollbar and slid the whole message list
+   sideways. */
 .msg-body { padding: 9px 13px; border-radius: var(--radius-md); white-space: pre-wrap;
-  line-height: 1.6; font-size: 0.88rem; }
+  overflow-wrap: anywhere; line-height: 1.6; font-size: 0.88rem; }
 .msg.user .msg-body { background: var(--user-bubble); }
 .msg.assistant .msg-body { background: transparent; border: 1px solid var(--line); }
 .msg-head .btn { height: 22px; padding: 0 7px; font: 11px var(--sans); }
@@ -182,7 +200,8 @@ input[type="number"] { width: 64px; }
 .empty-block strong { display: block; margin-bottom: 6px; color: var(--text-dim); font-size: 0.95rem; }
 pre.preview { margin: 0 16px 20px; max-height: 40vh; overflow: auto; padding: 12px 14px;
   border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--code-bg);
-  color: var(--text-dim); font: var(--font-code-size)/1.6 var(--mono); white-space: pre-wrap; }
+  color: var(--text-dim); font: var(--font-code-size)/1.6 var(--mono); white-space: pre-wrap;
+  overflow-wrap: anywhere; }
 
 /* ─── Responsive ────────────────────────────────────────────────────────── */
 @media (max-width: 720px) {
@@ -398,17 +417,29 @@ function applyTheme(mode) {
 
 /* ─── Token: fragment → query fallback → remembered ────────────────────── */
 const TOKEN_KEY = 'asg-web-token';
-const url = new URL(window.location.href);
-const hashParams = new URLSearchParams(url.hash.replace(/^#/, ''));
-const urlToken = hashParams.get('token') || url.searchParams.get('token') || '';
-if (urlToken) {
-  localStorage.setItem(TOKEN_KEY, urlToken);
-  window.history.replaceState(null, '', url.pathname);
+/* Read the token out of the address bar and strip it from the visible URL.
+   This must stay callable after load: a URL that differs only in its fragment
+   is a same-document navigation, so pasting the fresh `…/#token=…` line into
+   the tab that is already open — exactly what the gate's own error text tells
+   you to do after serve rotates the token — does not re-run this script. The
+   `hashchange` listener below is what makes that paste work. */
+function readUrlToken() {
+  const url = new URL(window.location.href);
+  const hashParams = new URLSearchParams(url.hash.replace(/^#/, ''));
+  const found = hashParams.get('token') || url.searchParams.get('token') || '';
+  if (found) window.history.replaceState(null, '', url.pathname);
+  return found;
 }
+const urlToken = readUrlToken();
+if (urlToken) localStorage.setItem(TOKEN_KEY, urlToken);
 let token = localStorage.getItem(TOKEN_KEY) || '';
 let authHeaders = { 'Authorization': 'Bearer ' + token };
 
 function showGate(rejected) {
+  // A credential the server has already refused must not be replayed on the
+  // next load: keeping it makes every reload paint the authenticated shell for
+  // one round-trip before falling back here.
+  if (rejected) localStorage.removeItem(TOKEN_KEY);
   document.getElementById('shell').hidden = true;
   document.getElementById('gate').hidden = false;
   const error = document.getElementById('gateError');
@@ -438,6 +469,13 @@ let activeSession = '';
 let nextCursor = null;
 let lastQuery = '';
 let activeHit = null;
+/* Every hit loaded for the current query, across all pages. The sidebar counter
+   has to report what is on screen (three pages of two is six hits, not two),
+   and the language toggle re-renders the list from here. `lastError` records a
+   failed query the same way, so the toggle re-renders the error, not an
+   invented "no hits". */
+let lastHits = [];
+let lastError = '';
 
 function payload(body) { return body && body.data ? body.data : (body || {}); }
 function setStatus(textMsg, kind) {
@@ -541,19 +579,23 @@ function queryParams(cursor) {
 async function doSearch(cursor) {
   const query = document.getElementById('query').value.trim();
   if (!query) return;
-  if (!cursor) { lastQuery = query; clear(document.getElementById('results')); }
+  if (!cursor) { lastQuery = query; lastHits = []; clear(document.getElementById('results')); }
   try {
     const body = await api('/api/search?' + queryParams(cursor));
     const data = payload(body);
-    renderHits(data.hits || [], Boolean(cursor));
+    const hits = data.hits || [];
+    lastHits = cursor ? lastHits.concat(hits) : hits;
+    lastError = '';
+    renderHits(hits, Boolean(cursor));
     nextCursor = (body.page && body.page.next_cursor) || null;
     document.getElementById('loadMore').disabled = !nextCursor;
-    text(document.getElementById('resultMeta'), (data.retrieval_mode || 'lexical') + ' · ' + (data.hits || []).length);
+    text(document.getElementById('resultMeta'), (data.retrieval_mode || 'lexical') + ' · ' + lastHits.length);
     document.getElementById('handoff').disabled = false;
   } catch (error) { if (error.message !== 'unauthorized') renderError(error.message); }
 }
 
 function renderError(message) {
+  lastError = message;
   const node = document.createElement('div');
   node.className = 'empty';
   text(node, t('notAnswer') + message);
@@ -612,6 +654,15 @@ function renderHits(hits, append) {
 
 async function loadContext(sessionId) {
   if (!sessionId) return;
+  /* A preview belongs to the session it was opened from. Left on screen under
+     another session's header it attributes the wrong `--resume` command to that
+     session, so drop it when the session actually changes — and only then, so
+     re-rendering the same session keeps it. */
+  if (sessionId !== activeSession) {
+    const preview = document.getElementById('previewOutput');
+    preview.hidden = true;
+    clear(preview);
+  }
   activeSession = sessionId;
   document.getElementById('contextPanel').hidden = false;
   document.getElementById('detailEmpty').hidden = true;
@@ -707,6 +758,15 @@ document.getElementById('langToggle').addEventListener('click', () => {
   lang = lang === 'zh' ? 'en' : 'zh';
   localStorage.setItem(LANG_KEY, lang);
   applyI18n();
+  /* `applyI18n()` only rewrites `[data-i18n]` markup and the select options.
+     Every other string on screen came from `t()` at render time — the status
+     line, each hit card's session line, the context title, the per-message
+     `show` buttons — so those regions must be rendered again or the toggle
+     leaves the page half-translated. */
+  if (lastError) renderError(lastError);
+  else if (lastQuery) renderHits(lastHits, false);
+  if (activeSession) loadContext(activeSession);
+  init();
 });
 document.getElementById('searchButton').addEventListener('click', () => doSearch());
 document.getElementById('query').addEventListener('keydown', event => { if (event.key === 'Enter') doSearch(); });
@@ -719,7 +779,15 @@ document.getElementById('closeContext').addEventListener('click', () => {
   document.getElementById('detailEmpty').hidden = false;
   document.getElementById('contextMessages').replaceChildren();
   document.getElementById('previewOutput').hidden = true;
+  // Nothing is open any more, so no hit may keep the selected highlight.
+  for (const card of document.getElementById('results').children) card.classList.remove('active');
   activeSession = ''; activeHit = null;
+});
+/* A fragment-only navigation does not reload the page, so the token pasted into
+   the address bar of an already-open tab arrives here and nowhere else. */
+window.addEventListener('hashchange', () => {
+  const fresh = readUrlToken();
+  if (fresh) acceptToken(fresh);
 });
 document.addEventListener('keydown', event => {
   if (event.key === '/' && document.activeElement !== document.getElementById('query') && document.getElementById('gate').hidden) {

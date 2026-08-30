@@ -1654,6 +1654,185 @@ mod tests {
         }
     }
 
+    /// The source text between `anchor` and the first following `terminator`.
+    /// Pins a behaviour to the handler that has to implement it: a bare
+    /// whole-file `contains` passes when the required call sits anywhere at all,
+    /// which is how a defect in one handler hides behind another's code.
+    fn ui_slice(anchor: &str, terminator: &str) -> &'static str {
+        let start = WEB_UI_HTML
+            .find(anchor)
+            .unwrap_or_else(|| panic!("web UI no longer contains `{anchor}`"));
+        let rest = &WEB_UI_HTML[start..];
+        let end = rest
+            .find(terminator)
+            .unwrap_or_else(|| panic!("`{anchor}` is not terminated by `{terminator}`"));
+        &rest[..end + terminator.len()]
+    }
+
+    /// A URL that differs from the current one only in its fragment is a
+    /// same-document navigation: the script does not re-run. So pasting the
+    /// fresh `#token=…` line into the tab that is already open — exactly what
+    /// the gate's rejection text instructs after serve rotates the token — left
+    /// the gate sitting there unchanged, with the dead token still in storage.
+    /// The fragment read has to be reachable again from `hashchange`.
+    #[test]
+    fn embedded_ui_reads_the_token_again_when_only_the_fragment_changes() {
+        assert!(
+            WEB_UI_HTML.contains("function readUrlToken()"),
+            "the fragment read must be a function, not inline boot-only code"
+        );
+        let handler = ui_slice("window.addEventListener('hashchange'", "\n});");
+        assert!(
+            handler.contains("readUrlToken()"),
+            "hashchange must re-read the fragment: {handler}"
+        );
+        assert!(
+            handler.contains("acceptToken("),
+            "a token found on hashchange must authenticate: {handler}"
+        );
+    }
+
+    /// A preview belongs to the session it was opened from. `closeContext` hid
+    /// it but `loadContext` did not, so opening session B while session A's
+    /// resume preview was on screen left A's `--resume` command under B's
+    /// header — a command that resumes the wrong session if copied.
+    #[test]
+    fn embedded_ui_scopes_the_preview_pane_to_the_open_session() {
+        let load_context = ui_slice("async function loadContext(", "\n}");
+        assert!(
+            load_context.contains("previewOutput"),
+            "opening a session must reset the preview pane: {load_context}"
+        );
+        assert!(
+            load_context.contains("hidden = true"),
+            "the preview pane must be hidden, not just emptied: {load_context}"
+        );
+    }
+
+    /// `applyI18n()` only rewrites `[data-i18n]` markup and the select options.
+    /// Everything else on screen came from `t()` at render time, so the toggle
+    /// used to leave the status line, every hit card's session line, the session
+    /// title and each `show` button in the previous language — an English UI
+    /// reading "已连接 · 第 4 代 · 38 条记录". The toggle must re-run those
+    /// renderers.
+    #[test]
+    fn embedded_ui_rerenders_dynamic_strings_when_the_language_changes() {
+        let toggle = ui_slice("getElementById('langToggle').addEventListener", "\n});");
+        for call in ["applyI18n()", "renderHits(", "loadContext(", "init()"] {
+            assert!(
+                toggle.contains(call),
+                "language toggle must re-render via `{call}`: {toggle}"
+            );
+        }
+    }
+
+    /// The counter beside the "Hits" heading reported the last page's length,
+    /// not what is on screen: paging 2 at a time through 18 hits left it reading
+    /// "lexical · 2" under an 18-row list.
+    #[test]
+    fn embedded_ui_counts_every_loaded_page_in_the_hit_meta() {
+        let meta = ui_slice("getElementById('resultMeta')", ";");
+        assert!(
+            meta.contains("lastHits.length"),
+            "the hit meta must count all loaded pages: {meta}"
+        );
+    }
+
+    /// Closing the context reset `activeHit` but left the `.active` class on the
+    /// card, so the sidebar kept showing a selected hit with nothing open.
+    #[test]
+    fn embedded_ui_clears_the_hit_highlight_when_the_context_closes() {
+        let close = ui_slice("getElementById('closeContext').addEventListener", "\n});");
+        assert!(
+            close.contains("classList.remove('active')"),
+            "closing the context must drop the hit highlight: {close}"
+        );
+    }
+
+    /// `white-space: pre-wrap` breaks at soft opportunities only, and transcript
+    /// text is full of runs with none (absolute paths, URLs, base64, hashes). A
+    /// single 400-character run measured 3233px inside a 990px pane, giving the
+    /// message list a horizontal scrollbar. Both text surfaces need a break rule.
+    #[test]
+    fn embedded_ui_wraps_unbreakable_runs_in_message_and_preview_text() {
+        for anchor in [".msg-body {", "pre.preview {"] {
+            let rule = ui_slice(anchor, "}");
+            assert!(
+                rule.contains("white-space: pre-wrap") && rule.contains("overflow-wrap:"),
+                "`{anchor}` wraps pre-formatted text and needs overflow-wrap: {rule}"
+            );
+        }
+    }
+
+    /// `frame-ancestors` is defined to be ignored in a meta-delivered policy and
+    /// the browser logs a CSP error for it on every page load. The directive is
+    /// only real on the HTTP response, so the meta tag must not carry it while
+    /// the served header still must.
+    #[test]
+    fn embedded_ui_meta_csp_omits_the_directive_only_a_header_can_carry() {
+        let meta = ui_slice("<meta http-equiv=\"Content-Security-Policy\"", ">");
+        assert!(
+            !meta.contains("frame-ancestors"),
+            "meta CSP must not declare frame-ancestors: {meta}"
+        );
+
+        let store = SqliteStore::open_in_memory().expect("store");
+        let page = route_request(
+            &authorized("GET", "/"),
+            TEST_TOKEN,
+            "test.db",
+            false,
+            &store,
+        );
+        let csp = page
+            .headers
+            .iter()
+            .find(|(name, _)| *name == "Content-Security-Policy")
+            .map(|(_, value)| *value)
+            .expect("the UI page must send a CSP header");
+        assert!(
+            csp.contains("frame-ancestors 'none'"),
+            "the header keeps the framing protection the meta tag cannot: {csp}"
+        );
+    }
+
+    /// With no icon declared the browser probes `/favicon.ico` on its own. That
+    /// path is not the UI page, so it needs a bearer token the probe never
+    /// carries — a 401 in the console on every load. An inline `data:` icon
+    /// stops the request; `img-src ... data:` already permits it.
+    #[test]
+    fn embedded_ui_declares_an_inline_icon_so_no_favicon_probe_is_made() {
+        assert!(
+            WEB_UI_HTML.contains("rel=\"icon\"") && WEB_UI_HTML.contains("href=\"data:"),
+            "the page must declare an inline icon"
+        );
+    }
+
+    /// A credential the server refused must not be replayed: keeping it made
+    /// every later load paint the authenticated shell, wait out a `/health`
+    /// round-trip, and only then fall back to the gate.
+    #[test]
+    fn embedded_ui_forgets_a_rejected_token() {
+        let show_gate = ui_slice("function showGate(", "\n}");
+        assert!(
+            show_gate.contains("removeItem(TOKEN_KEY)"),
+            "a rejected token must be dropped from storage: {show_gate}"
+        );
+    }
+
+    /// `.ctl-row label` sets `flex: none` and beats `.ctl-row > *` on
+    /// specificity, so the filter controls could not shrink to the 248px
+    /// sidebar: they needed 308px and the page-size input was cut in half at the
+    /// sidebar edge. The row must be allowed to wrap.
+    #[test]
+    fn embedded_ui_lets_the_filter_row_wrap_inside_the_sidebar() {
+        let rule = ui_slice(".ctl-row {", "}");
+        assert!(
+            rule.contains("flex-wrap: wrap"),
+            "unshrinkable filter labels overflow the sidebar without wrapping: {rule}"
+        );
+    }
+
     #[test]
     fn serve_session_generates_token_and_loopback_address() {
         let session = ServeSession::bind_loopback(0).expect("session");
