@@ -8300,9 +8300,10 @@ fn f32_slice_to_bytes(values: &[f32]) -> Vec<u8> {
 /// Read a little-endian f32 BLOB back into a vector. A trailing partial float
 /// is dropped rather than reconstructed from padding.
 fn bytes_to_f32_vec(bytes: &[u8]) -> Vec<f32> {
-    bytes
-        .chunks_exact(4)
-        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+    let (chunks, _) = bytes.as_chunks::<4>();
+    chunks
+        .iter()
+        .map(|chunk| f32::from_le_bytes(*chunk))
         .collect()
 }
 
@@ -9519,8 +9520,18 @@ mod tests {
         let bytes = f32_slice_to_bytes(&values);
         assert_eq!(bytes.len(), 12);
         assert_eq!(bytes_to_f32_vec(&bytes), values);
-        // 截断的尾部字节不被当成一个 float 复原。
-        assert_eq!(bytes_to_f32_vec(&bytes[..10]).len(), 2);
+        assert_eq!(bytes_to_f32_vec(&[0x00, 0x00, 0xC0, 0x3F]), [1.5]);
+        assert!(bytes_to_f32_vec(&[]).is_empty());
+
+        // A partial trailing float is ignored regardless of its byte length.
+        for tail_len in 1..=3 {
+            let mut with_partial_tail = bytes.clone();
+            with_partial_tail.extend_from_slice(&[0xAA, 0xBB, 0xCC][..tail_len]);
+            assert_eq!(bytes_to_f32_vec(&with_partial_tail), values);
+        }
+
+        // Truncating a complete float also drops its remaining bytes.
+        assert_eq!(bytes_to_f32_vec(&bytes[..10]), values[..2]);
     }
 
     #[test]
