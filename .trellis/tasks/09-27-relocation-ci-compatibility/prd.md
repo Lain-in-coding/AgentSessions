@@ -17,7 +17,7 @@ Make the explicit relocation identity change compatible with the current hosted 
 
 - [x] The changed SQLite crate passes fmt, Clippy with `-D warnings`, and its tests offline.
 - [x] The workspace debug/release and semantic-candle checks pass locally.
-- [ ] The hosted Ubuntu, Windows, and macOS generic CI jobs pass on PR #12.
+- [ ] The hosted Ubuntu, Windows, and macOS generic CI jobs pass on PR #12 after the Clippy fix and any directly related cross-platform test corrections.
 - [x] The regression test proves little-endian round-trip and drops every partial-tail length from 1 through 3 bytes.
 - [x] `git diff --check` passes and the staged commit contains only the allowlisted source, tests, and task artifacts.
 

@@ -8,7 +8,8 @@
 4. Expand `f32_blob_round_trips_and_drops_partial_tail` for empty input and 1/2/3-byte tails while preserving the existing value assertions.
 5. Run the affected crate fmt/Clippy/tests, then workspace debug/release and semantic-candle checks.
 6. Run `git diff --check`, review the allowlist, and commit with `fix(sqlite): support current Clippy slice lint`.
-7. Push with `git push origin HEAD:fix/session-relocation-identity`; monitor PR #12 required checks and merge only after all required jobs are green.
+7. If hosted CI exposes an unrelated cross-platform regression in the affected PR, fix it in the same task only when the root cause is a test/platform contract mismatch; rerun the complete local gate.
+8. Push with `git push origin HEAD:fix/session-relocation-identity`; monitor PR #12 required checks and merge only after all required jobs are green.
 
 ## Validation commands
 
@@ -35,3 +36,8 @@ git diff --check
 - Independent Trellis check passed for implementation semantics, scope, little-endian behavior, and tail coverage; exact Rust 1.90 compilation was not directly verified.
 - Rust 1.90 toolchain installation was attempted but static.rust-lang.org downloads failed with TLS handshake EOF. Rust 1.90 was therefore not directly executed; retain this as a validation limitation.
 - Steps 6–7 remain pending the final local diff gate, commit, push, and PR required checks.
+
+## CI follow-up on 2026-09-27
+
+- Hosted Ubuntu and macOS generic tests exposed an existing CLI test that unconditionally expected Windows backslash normalization. The implementation intentionally normalizes separators only on Windows, so the test assertion is now `#[cfg(windows)]` while portable root-matching cases remain unconditional.
+- Windows generic CI passed the original workspace test, Web tests, semantic-candle feature, entrypoint, Robot, release manifest, and evidence harness stages on the first compatibility push.
