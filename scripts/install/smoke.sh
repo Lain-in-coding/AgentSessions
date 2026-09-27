@@ -265,6 +265,68 @@ for retrieval_mode in semantic hybrid; do
 done
 pass 'CLI semantic and hybrid use the index and Grok filter'
 
+# Relocation covers the installed CLI surface using a separate synthetic store.
+# The script moves its own fixture; the binary only reconnects catalog locators.
+relocation_area="$workdir/relocation"
+relocation_old="$relocation_area/old-installation"
+relocation_new="$relocation_area/new-installation"
+relocation_backup="$relocation_area/catalog-backup.db"
+mkdir -p "$relocation_old"
+cp "$fixture" "$relocation_old/session.jsonl"
+saved_db="$db"
+db="$relocation_area/catalog.db"
+run_robot relocate --provider claude --from "$relocation_old" --to "$relocation_new"
+assert_envelope 'relocate-absent' 6 'f["error"]["code"] == "catalog_error"'
+[ ! -e "$db" ] || fail 'relocate preview created an absent catalog'
+pass 'relocate preview refuses an absent catalog without creating it'
+run_robot sync "$relocation_old/session.jsonl"
+assert_envelope 'relocate-fixture' 0 'f["data"]["messages"] == 3'
+relocation_generation=$(envelope_value 'f["data"]["generation"]')
+run_robot search "$term"
+assert_envelope 'relocate-session' 0 'len(f["data"]["hits"]) > 0'
+relocation_session=$(envelope_value 'f["data"]["hits"][0]["session_id"]')
+mv "$relocation_old" "$relocation_new"
+catalog_hash=$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$db")
+run_robot relocate --provider claude --from "$relocation_old" --to "$relocation_new" --alias-ttl-days 7
+assert_envelope 'relocate-preview' 0 \
+    'f["command"] == "relocate.preview"' \
+    'f["data"]["status"] == "planned"' \
+    'f["data"]["source_count"] == 1 and f["data"]["session_count"] == 1' \
+    'f["data"]["alias_ttl_days"] == 7' \
+    '"from" not in f["data"] and "to" not in f["data"] and "backup" not in f["data"]'
+relocation_plan=$(envelope_value 'f["data"]["plan"]')
+after_hash=$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$db")
+[ "$catalog_hash" = "$after_hash" ] || fail 'relocate preview changed the catalog'
+[ ! -e "$relocation_backup" ] || fail 'relocate preview created a backup'
+pass 'relocate preview is read-only and returns bounded counts and an opaque plan'
+run_robot relocate --provider claude --from "$relocation_old" --to "$relocation_new" --alias-ttl-days 7 --apply --plan "$relocation_plan" --backup "$relocation_backup"
+assert_envelope 'relocate-apply' 0 \
+    'f["command"] == "relocate.apply"' \
+    'f["data"]["status"] == "applied"' \
+    "f[\"data\"][\"generation\"] == $((relocation_generation + 1))"
+[ -f "$relocation_backup" ] || fail 'relocate apply did not produce a backup'
+cmp "$fixture" "$relocation_new/session.jsonl" >/dev/null || fail 'relocate apply changed provider source bytes'
+pass 'relocate apply advances generation once and leaves source bytes unchanged'
+db="$relocation_backup"
+run_robot status
+assert_envelope 'relocate-backup' 0 "f[\"data\"][\"generation\"] == $relocation_generation"
+db="$relocation_area/catalog.db"
+run_robot sync "$relocation_new/session.jsonl"
+assert_envelope 'relocate-resync' 0 "f[\"data\"][\"generation\"] == $((relocation_generation + 1))"
+run_robot context "$relocation_session"
+assert_envelope 'relocate-old-id' 0 'len(f["data"]["messages"]) > 0'
+run_robot relocate --provider claude --from "$relocation_old" --to "$relocation_new" --alias-ttl-days 7
+assert_envelope 'relocate-repeat' 0 \
+    'f["command"] == "relocate.preview" and f["data"]["status"] == "unchanged"' \
+    "f[\"data\"][\"generation\"] == $((relocation_generation + 1))"
+pass 'relocation backup, old-ID lookup, re-sync and repeated preview preserve their contracts'
+run_robot relocate --help
+assert_envelope 'relocate-help' 0 'f["ok"] is True'
+run_robot providers
+assert_envelope 'relocate-capability' 0 'f["data"]["relocation"]["interfaces"] == ["cli"]'
+pass 'relocate help and capability metadata remain CLI-only'
+db="$saved_db"
+
 # 9. MCP stdio handshake: stdout must carry nothing but JSON-RPC frames, and
 #    EOF on stdin must shut the server down cleanly.
 mcp_in="$workdir/mcp-in.jsonl"

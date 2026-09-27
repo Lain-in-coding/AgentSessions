@@ -41,6 +41,10 @@ use agent_session_grep_ports::{
     RedactionStatus, ResumeClaimsStore, RetrievalMode, SearchFacets, SearchFilters, SearchInstant,
     SearchProvider, SidechainFacet, SourceResumeClaim, SourceSnapshot,
     capability::{ProviderCapability, ProviderCapabilityMatrix, ProviderMaturity},
+    relocation::{
+        DEFAULT_ALIAS_TTL_DAYS, MAX_ALIAS_TTL_DAYS, MIN_ALIAS_TTL_DAYS, PLAN_TTL_MS,
+        RelocationResult, validate_alias_ttl_days,
+    },
 };
 use agent_session_grep_provider_aider::AiderAdapter;
 use agent_session_grep_provider_antigravity::AntigravityAdapter;
@@ -225,7 +229,9 @@ fn extract_offline_flag(args: &[String]) -> bool {
         match a.as_str() {
             "--db" | "--output" | "--request-id" | "--cursor" | "--max-items" | "--max-bytes"
             | "--max-messages" | "--policy" | "--level" | "--provider" | "--since" | "--until"
-            | "--repo" | "--session" | "--around" => {
+            | "--repo" | "--session" | "--around" | "--max-evidence" | "--max-tokens"
+            | "--tool-kind" | "--tool-name" | "--from" | "--to" | "--alias-ttl-days" | "--plan"
+            | "--backup" => {
                 it.next();
             }
             _ => {}
@@ -271,7 +277,7 @@ fn extract_request_id(args: &[String]) -> Result<Option<String>, String> {
             "--db" | "--output" | "--cursor" | "--max-items" | "--max-bytes" | "--max-messages"
             | "--max-evidence" | "--max-tokens" | "--policy" | "--level" | "--provider"
             | "--since" | "--until" | "--repo" | "--session" | "--around" | "--tool-kind"
-            | "--tool-name" => {
+            | "--tool-name" | "--from" | "--to" | "--alias-ttl-days" | "--plan" | "--backup" => {
                 it.next();
             }
             _ => {}
@@ -293,7 +299,8 @@ fn command_name(args: &[String]) -> String {
             "--db" | "--output" | "--cursor" | "--max-items" | "--max-bytes" | "--max-messages"
             | "--max-evidence" | "--max-tokens" | "--policy" | "--level" | "--request-id"
             | "--provider" | "--since" | "--until" | "--repo" | "--session" | "--around"
-            | "--tool-kind" | "--tool-name" => {
+            | "--tool-kind" | "--tool-name" | "--from" | "--to" | "--alias-ttl-days" | "--plan"
+            | "--backup" => {
                 it.next(); // 消费其取值
             }
             "--robot" | "--no-color" | "--help" | "-h" | "--version" | "-V" | "--discover"
@@ -364,7 +371,8 @@ fn intercept_help_or_version(args: &[String]) -> Option<HelpRequest> {
             "--db" | "--output" | "--request-id" | "--cursor" | "--max-items" | "--max-bytes"
             | "--max-messages" | "--max-evidence" | "--max-tokens" | "--policy" | "--level"
             | "--provider" | "--since" | "--until" | "--repo" | "--session" | "--around"
-            | "--tool-kind" | "--tool-name" => {
+            | "--tool-kind" | "--tool-name" | "--from" | "--to" | "--alias-ttl-days" | "--plan"
+            | "--backup" => {
                 it.next();
             }
             _ => {}
@@ -453,17 +461,39 @@ fn run(
         eprintln!("{}", hooks::hook_diagnostics(&data));
         return Ok(protocol::Outcome::Success);
     }
+    // Relocation validates all flags before acquiring a writer. Its apply path
+    // also requires an existing, current-schema catalog: opening for write must
+    // never bootstrap a missing catalog or upgrade one before plan validation.
+    let relocation = rest.first().is_some_and(|command| command == "relocate");
+    let relocation_apply = if relocation {
+        let request = parse_relocation_args(&rest)?;
+        if request.apply.is_some() {
+            drop(SqliteStore::open(&db).map_err(ProtocolError::from_private_port_error)?);
+        }
+        request.apply.is_some()
+    } else {
+        false
+    };
     // 写入子命令抢 data-root writer lease；读路径不抢，允许多读者并发。
-    let writes = rest
-        .first()
-        .map(|c| matches!(c.as_str(), "index" | "ingest" | "sync"))
-        .unwrap_or(false);
-    let store = if writes {
+    let writes = relocation_apply
+        || rest
+            .first()
+            .is_some_and(|command| matches!(command.as_str(), "index" | "ingest" | "sync"));
+    let store = if relocation_apply {
+        SqliteStore::open_for_relocation(&db)
+    } else if writes {
         SqliteStore::open_for_write(&db)
     } else {
         SqliteStore::open(&db)
     }
-    .map_err(ProtocolError::from)?;
+    .map_err(|error| {
+        if relocation {
+            ProtocolError::from_private_port_error(error)
+        } else {
+            ProtocolError::from(error)
+        }
+    })?
+    .with_relocation_clock(|| Ok(app_clock_ms()));
     if writes {
         // repo identity（schema v16）：写路径注入真实 git 解析器（Recall
         // 同款 rev-parse + remote get-url）。检测失败一律 None（诚实降级），
@@ -741,6 +771,19 @@ fn provider_matrix_data() -> serde_json::Value {
     serde_json::json!({
         "providers": providers,
         "semantic": semantic_capability_data(),
+        "relocation": {
+            "interfaces": ["cli"],
+            "command": "relocate",
+            "default_action": "preview",
+            "apply_requires": ["plan", "new_verified_backup"],
+            "plan_ttl_seconds": PLAN_TTL_MS / 1000,
+            "alias_ttl_days": {
+                "default": DEFAULT_ALIAS_TTL_DAYS,
+                "minimum": MIN_ALIAS_TTL_DAYS,
+                "maximum": MAX_ALIAS_TTL_DAYS,
+            },
+            "moves_source_files": false,
+        },
     })
 }
 
@@ -1079,6 +1122,8 @@ COMMANDS:
     ingest <file>          解析单个 transcript 文件并入库（只读源）
     sync <file>...          原子扫描多个 transcript 文件；无变化时不生成新 generation
     sync --discover          自动发现各 provider 数据根下的源并同步（jsonl/json/db；只读源）
+    relocate --provider <id> --from <old-root> --to <new-root>
+                             预览一个显式安装迁移（默认只读；--apply 才提交）
     index <id-fact> <text> 直接写入一条 catalog + 索引（切片期写入入口）
     index rebuild          从权威 catalog 全量重投影 FTS 索引（维护命令）
     index embeddings       从权威 catalog 构建语义向量索引（semantic/hybrid 检索前置）
@@ -1106,6 +1151,13 @@ PAGINATION / BUDGET (search, list):
     --cursor <token>       上一页 envelope `page.next_cursor` 的续读令牌
     --max-items <n>        页大小上限（同时作为响应条目预算）
     --max-bytes <n>        响应字节预算（最低 4096）
+
+RELOCATION:
+    relocate --provider <id> --from <old-root> --to <new-root>
+                             只读生成迁移计划；不创建或修改 catalog、源文件或备份
+    relocate ... --apply --plan <opaque-plan> --backup <new-file>
+                             校验新鲜计划、备份 catalog 后原子提交位置映射
+    --alias-ttl-days <n>     退休位置兼容期（默认 90，范围 1..365）
 
 FILTER (search):
     --provider claude|claude-code|codex  限定 provider（可重复，多个取值按 OR 合并）
@@ -1227,6 +1279,7 @@ fn help_envelope(command: &str, data: serde_json::Value, request_id: Option<&str
 const KNOWN_SUBCOMMANDS: &[&str] = &[
     "ingest",
     "sync",
+    "relocate",
     "index",
     "search",
     "handoff",
@@ -1334,11 +1387,23 @@ fn subcommand_help_text(cmd: &str) -> &'static str {
         }
         "sync" => {
             "sync <file>...：原子扫描一个或多个 transcript 文件入库；无变化不写库。\n\
-                   sync --discover：自动发现 12 个已登记 provider 数据根（~/.claude/projects、~/.codex/sessions 等，逐根登记扩展名 jsonl/json/db）下的源并同步。\n\
+                   sync --discover：扫描已登记活动位置及 12 个默认 provider 数据根（~/.claude/projects、~/.codex/sessions 等，逐根登记扩展名 jsonl/json/db）下的源并同步。\n\
                    示例：agent-session-grep --db <path> --robot sync 会话.jsonl\n\
                    示例：agent-session-grep --db <path> sync --discover\n\
                    约束：单个 transcript 文件应只包含一个会话；检测到多个 sessionId 时仍归属首个会话，并在 warnings 报告。\n\
                    提示：接受任何能被 provider 注册表识别的 transcript 文件（.jsonl / .json / .md / SQLite .db），不接受目录；--discover 会递归扫描 provider 数据根。"
+        }
+        "relocate" => {
+            "relocate --provider <id> --from <old-root> --to <new-root>：\n\
+                       默认只读生成显式安装迁移计划，不创建或修改 catalog、源文件或备份。\n\
+                       应用计划：追加 --apply --plan <opaque-plan> --backup <new-file>；\n\
+                       先由用户移动源目录；本命令只重连索引位置，不移动或改写源文件。\n\
+                       旧根按已存位置匹配（可以不存在）；新根必须是本机绝对路径。\n\
+                       --provider 接受 providers 中的规范 id 与 claude 别名。\n\
+                       计划有效期为 15 分钟；应用时必须沿用预览的映射和兼容期，备份文件必须尚不存在。\n\
+                       --alias-ttl-days <n> 可用于预览和应用（1..365，默认 90）；兼容期到期不影响原会话 ID 查询。\n\
+                       旧版 catalog 须先显式执行 index rebuild 升级；同一映射重复执行无变化。\n\
+                       仅 CLI 支持迁移；MCP/Web 保持只读。输出只含 opaque plan、计数与 generation。"
         }
         "ingest" => {
             "ingest <file>：解析单个 transcript 文件入库（.jsonl / .json / .md / SQLite .db）。\n\
@@ -1538,6 +1603,12 @@ fn is_known_flag_name(token: &str) -> bool {
             | "--include-sidechain"
             | "--tool-kind"
             | "--tool-name"
+            | "--from"
+            | "--to"
+            | "--alias-ttl-days"
+            | "--plan"
+            | "--backup"
+            | "--apply"
     )
 }
 
@@ -1589,7 +1660,7 @@ fn extract_db_flag_impl(args: &[String], prefix_only: bool) -> Result<Option<Str
             "--output" | "--request-id" | "--cursor" | "--max-items" | "--max-bytes"
             | "--max-messages" | "--max-evidence" | "--max-tokens" | "--policy" | "--level"
             | "--provider" | "--since" | "--until" | "--session" | "--around" | "--tool-kind"
-            | "--tool-name" => {
+            | "--tool-name" | "--from" | "--to" | "--alias-ttl-days" | "--plan" | "--backup" => {
                 it.next();
             }
             _ => {}
@@ -1660,7 +1731,7 @@ fn bare_positionals(args: &[String]) -> Vec<String> {
             "--db" | "--output" | "--request-id" | "--cursor" | "--max-items" | "--max-bytes"
             | "--max-messages" | "--max-evidence" | "--max-tokens" | "--policy" | "--level"
             | "--provider" | "--since" | "--until" | "--session" | "--around" | "--tool-kind"
-            | "--tool-name" => {
+            | "--tool-name" | "--from" | "--to" | "--alias-ttl-days" | "--plan" | "--backup" => {
                 it.next(); // 消费其取值
             }
             "--robot" | "--no-color" | "--help" | "-h" | "--version" | "-V" | "--discover"
@@ -1683,6 +1754,128 @@ fn offline_capability_gate(offline: bool, capability: &str) -> Result<(), CliErr
         )));
     }
     Ok(())
+}
+
+/// Parsed relocation scalars. Validation precedes catalog opens, including the
+/// write open which can otherwise create or migrate a catalog on invalid input.
+struct RelocationArgs {
+    provider: String,
+    from: String,
+    to: String,
+    alias_ttl_days: u32,
+    apply: Option<RelocationApplyArgs>,
+}
+
+struct RelocationApplyArgs {
+    plan: String,
+    backup: String,
+}
+
+/// Reuse the command flag extractor, with relocation's single-value contract.
+/// Messages name the flag, never its private path or opaque token value.
+fn relocation_flag(args: &mut Vec<String>, name: &str) -> Result<Option<String>, CliError> {
+    if let Some(index) = args.iter().position(|arg| arg == name) {
+        if args.iter().filter(|arg| *arg == name).count() != 1 {
+            return Err(CliError::usage(format!("duplicate {name} flag")));
+        }
+        let value = args
+            .get(index + 1)
+            .ok_or_else(|| CliError::usage(format!("{name} requires a value")))?;
+        if value.trim().is_empty() || value.starts_with('-') || value.chars().any(char::is_control)
+        {
+            return Err(CliError::usage(format!(
+                "{name} requires a non-empty scalar value"
+            )));
+        }
+    }
+    extract_flag(args, name)
+}
+
+fn parse_relocation_args(rest: &[String]) -> Result<RelocationArgs, CliError> {
+    let mut args = rest.to_vec();
+    let provider = relocation_flag(&mut args, "--provider")?
+        .ok_or_else(|| CliError::usage("relocate requires --provider <provider>"))?;
+    let provider = canonical_search_provider(&provider)
+        .ok_or_else(|| {
+            CliError::usage("unknown relocation provider; use `providers` to list providers")
+        })?
+        .as_str()
+        .to_string();
+    let from = relocation_flag(&mut args, "--from")?
+        .ok_or_else(|| CliError::usage("relocate requires --from <old-root>"))?;
+    let to = relocation_flag(&mut args, "--to")?
+        .ok_or_else(|| CliError::usage("relocate requires --to <new-root>"))?;
+    let ttl = relocation_flag(&mut args, "--alias-ttl-days")?
+        .map(|value| {
+            value.parse::<u32>().map_err(|_| {
+                CliError::usage("--alias-ttl-days requires an integer between 1 and 365")
+            })
+        })
+        .transpose()?
+        .unwrap_or(DEFAULT_ALIAS_TTL_DAYS);
+    validate_alias_ttl_days(ttl).map_err(CliError::usage)?;
+    let apply = take_bool_flag(&mut args, "--apply");
+    let plan = relocation_flag(&mut args, "--plan")?;
+    let backup = relocation_flag(&mut args, "--backup")?;
+    no_extra_args(
+        &args,
+        0,
+        "relocate --provider <provider> --from <old-root> --to <new-root> [--alias-ttl-days <1..365>] [--apply --plan <opaque-plan> --backup <new-file>]",
+    )?;
+    agent_session_grep_application::relocation::validate_root_mapping(&from, &to)
+        .map_err(ProtocolError::from_private_port_error)?;
+    if !std::path::Path::new(&to).is_absolute() {
+        return Err(CliError::usage(
+            "relocate requires a host-local absolute destination",
+        ));
+    }
+    let apply = if apply {
+        Some(RelocationApplyArgs {
+            plan: plan
+                .ok_or_else(|| CliError::usage("relocate --apply requires --plan <opaque-plan>"))?,
+            backup: backup
+                .ok_or_else(|| CliError::usage("relocate --apply requires --backup <new-file>"))?,
+        })
+    } else {
+        if plan.is_some() || backup.is_some() {
+            return Err(CliError::usage(
+                "--plan and --backup are valid only with relocate --apply",
+            ));
+        }
+        None
+    };
+    Ok(RelocationArgs {
+        provider,
+        from,
+        to,
+        alias_ttl_days: ttl,
+        apply,
+    })
+}
+
+/// Storage owns fingerprints, backup ordering and atomic activation. No source
+/// files are moved by this command, and no private inputs enter its result.
+fn relocate_command(
+    store: &SqliteStore,
+    request: &RelocationArgs,
+) -> Result<RelocationResult, CliError> {
+    let result = match &request.apply {
+        Some(apply) => store.apply_relocation(
+            &request.provider,
+            &request.from,
+            &request.to,
+            request.alias_ttl_days,
+            &apply.plan,
+            &apply.backup,
+        ),
+        None => store.relocation_preview(
+            &request.provider,
+            &request.from,
+            &request.to,
+            request.alias_ttl_days,
+        ),
+    };
+    result.map_err(|error| CliError(ProtocolError::from_private_port_error(error)))
 }
 
 /// 分发子命令。`store` 同时充当 CatalogStore 与 SearchIndex（同一 SqliteStore）。
@@ -1724,6 +1917,27 @@ fn dispatch(
         }
     }
     match cmd {
+        "relocate" => {
+            let request = parse_relocation_args(rest)?;
+            let command = if request.apply.is_some() {
+                "relocate.apply"
+            } else {
+                "relocate.preview"
+            };
+            let result = relocate_command(store, &request)?;
+            Ok((
+                command,
+                protocol::Outcome::Success,
+                serde_json::to_value(result).map_err(|_| {
+                    CliError(ProtocolError::new(
+                        CanonicalCode::Internal,
+                        "relocation result serialization failed",
+                    ))
+                })?,
+                protocol::Page::default(),
+                Vec::new(),
+            ))
+        }
         // index 是切片期的写入入口：派生一个 Reconstructed 消息 id，写 catalog + 索引。
         // 它不经 Application（Application 首片只暴露读用例），直接用端口写入。
         // `index rebuild` 是维护子命令：从权威 catalog 全量重投影 FTS 索引。
@@ -3106,22 +3320,7 @@ struct StagedMessageEntity {
 /// 共享 namespace、不同安装分离。手动 ingest 的 Source 若不在已知数据根下，
 /// 以其共同父目录作为未知安装边界，避免同一 Session 分散在多个文件时被拆开。
 fn installation_namespace(path: &str, provider_id: &str) -> String {
-    let marker = match provider_id {
-        "claude-code" => ".claude",
-        "codex" => ".codex",
-        _ => "",
-    };
-    let segments: Vec<&str> = path.split(['/', '\\']).filter(|s| !s.is_empty()).collect();
-    if !marker.is_empty()
-        && let Some(index) = segments.iter().rposition(|s| *s == marker)
-    {
-        return format!("{provider_id}:{}", segments[..=index].join("/"));
-    }
-    let parent = match segments.split_last() {
-        Some((_, parent)) if !parent.is_empty() => parent.join("/"),
-        _ => ".".to_string(),
-    };
-    format!("{provider_id}:{parent}")
+    agent_session_grep_application::relocation::legacy_installation_namespace(path, provider_id)
 }
 
 /// `sync --discover` 的 provider → (home 相对数据根, 源文件扩展名) 映射表（唯一来源）。
@@ -3287,6 +3486,97 @@ fn source_path_identity(path: &str) -> String {
     normalized
 }
 
+/// Resolve a newly supplied filesystem path before creating its first registry
+/// binding. Never silently replace a previously indexed non-normal locator.
+fn source_input_path(store: &SqliteStore, path: &str) -> Result<String, CliError> {
+    let input = std::path::Path::new(path);
+    if input.is_absolute()
+        && !input.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir | std::path::Component::CurDir
+            )
+        })
+    {
+        return Ok(source_path_identity(path));
+    }
+    if store
+        .source_fingerprints(&[path.to_string()])
+        .map_err(ProtocolError::from)?
+        .contains_key(path)
+    {
+        return Err(CliError::usage(
+            "existing source locator needs explicit provenance resolution",
+        ));
+    }
+    let canonical = std::fs::canonicalize(input).map_err(|_| {
+        ProtocolError::new(CanonicalCode::SourceIo, "source path could not be resolved")
+    })?;
+    let canonical = canonical
+        .to_str()
+        .ok_or_else(|| CliError::usage("source path must be valid Unicode"))?;
+    let path = if cfg!(windows) {
+        if let Some(unc) = canonical.strip_prefix(r"\\?\UNC\") {
+            format!(r"\\{unc}")
+        } else {
+            canonical
+                .strip_prefix(r"\\?\")
+                .unwrap_or(canonical)
+                .to_string()
+        }
+    } else {
+        canonical.to_string()
+    };
+    Ok(source_path_identity(&path))
+}
+
+/// Root hints apply only to previously scanned sources. New files in the same
+/// directory may belong to another provider and still require ordinary probes.
+/// Discovery ownership remains separate from source_scans.provider_id.
+fn registered_provider_hints(
+    store: &SqliteStore,
+    paths: &[String],
+) -> Result<BTreeMap<String, String>, CliError> {
+    let known_sources = store
+        .source_fingerprints(paths)
+        .map_err(ProtocolError::from)?;
+    let mut candidates: BTreeMap<String, Option<String>> = BTreeMap::new();
+    for adapter in provider_registry() {
+        let provider = adapter.provider_id();
+        let roots = store
+            .active_installation_roots(provider)
+            .map_err(ProtocolError::from_private_port_error)?;
+        for path in paths {
+            if !known_sources.contains_key(path) {
+                continue;
+            }
+            let mut contains = false;
+            for root in &roots {
+                if agent_session_grep_application::relocation::path_is_within(path, root)
+                    .map_err(ProtocolError::from_private_port_error)?
+                {
+                    contains = true;
+                    break;
+                }
+            }
+            if contains {
+                candidates
+                    .entry(path.clone())
+                    .and_modify(|candidate| {
+                        if candidate.as_deref() != Some(provider) {
+                            *candidate = None;
+                        }
+                    })
+                    .or_insert_with(|| Some(provider.to_string()));
+            }
+        }
+    }
+    Ok(candidates
+        .into_iter()
+        .filter_map(|(path, provider)| provider.map(|id| (path, id)))
+        .collect())
+}
+
 /// 递归遍历 `root`，收集扩展名恰为 `extension`（不含点）的文件路径（正斜杠归一）。
 ///
 /// 返回 `(paths, complete)`：`complete = false` 表示遍历中途遇到不可读目录
@@ -3372,33 +3662,49 @@ fn sync_discover(
     let mut per_provider: Vec<(String, Vec<String>, bool)> = Vec::new();
     for adapter in provider_registry() {
         let pid = adapter.provider_id().to_string();
-        let Some((root, extension)) = provider_discovery_target(&pid) else {
-            // 未登记发现根，或无法解析当前用户 home：该 provider 的根扫描不完整，
-            // 不能 tombstone。
-            overall_complete = false;
-            per_provider.push((pid.clone(), Vec::new(), false));
-            providers_out.push(ProviderDiscovery {
-                id: pid,
-                found: 0,
-                removed: 0,
-                complete: false,
-            });
-            continue;
-        };
-        if !root.is_dir() {
-            // 根目录不存在时无法确认 provider 源是否只是暂时不可见；保守标记
-            // partial，绝不因为缺少根目录而 tombstone prior paths。
-            overall_complete = false;
-            per_provider.push((pid.clone(), Vec::new(), false));
-            providers_out.push(ProviderDiscovery {
-                id: pid,
-                found: 0,
-                removed: 0,
-                complete: false,
-            });
-            continue;
+        let extension = PROVIDER_DISCOVERY_ROOTS
+            .iter()
+            .find(|(provider, _, _)| *provider == pid)
+            .map(|(_, _, extension)| *extension);
+        let mut roots: BTreeMap<String, std::path::PathBuf> = BTreeMap::new();
+        if extension.is_some() {
+            for root in store
+                .active_installation_roots(&pid)
+                .map_err(ProtocolError::from_private_port_error)?
+            {
+                let key =
+                    agent_session_grep_application::relocation::normalize_absolute_path(&root)
+                        .map_err(ProtocolError::from_private_port_error)?;
+                roots.insert(key, std::path::PathBuf::from(root));
+            }
+            if let Some((root, _)) = provider_discovery_target(&pid) {
+                // A missing default home root is not evidence against an
+                // explicitly relocated installation. Missing registered roots
+                // still make the provider scan incomplete.
+                if roots.is_empty() || root.is_dir() {
+                    let key = agent_session_grep_application::relocation::normalize_absolute_path(
+                        &root.to_string_lossy(),
+                    )
+                    .map_err(ProtocolError::from_private_port_error)?;
+                    roots.entry(key).or_insert(root);
+                }
+            }
         }
-        let (paths, complete) = discover_provider_sources(&root, extension);
+        let mut paths = BTreeMap::new();
+        let mut complete = !roots.is_empty();
+        if let Some(extension) = extension {
+            for root in roots.into_values() {
+                let (found, root_complete) = discover_provider_sources(&root, extension);
+                for path in found {
+                    let key =
+                        agent_session_grep_application::relocation::normalize_absolute_path(&path)
+                            .map_err(ProtocolError::from_private_port_error)?;
+                    paths.entry(key).or_insert(path);
+                }
+                complete = complete && root_complete;
+            }
+        }
+        let paths: Vec<String> = paths.into_values().collect();
         overall_complete = overall_complete && complete;
         per_provider.push((pid.clone(), paths.clone(), complete));
         let found = paths.len();
@@ -3409,7 +3715,7 @@ fn sync_discover(
         providers_out.push(ProviderDiscovery {
             id: pid,
             found,
-            removed: 0, // diff 后回填
+            removed: 0,
             complete,
         });
     }
@@ -3442,10 +3748,17 @@ fn sync_discover(
         let prior = store
             .source_paths_for_provider(pid.as_str())
             .map_err(ProtocolError::from)?;
-        let discovered_for_provider: BTreeSet<&str> = paths.iter().map(String::as_str).collect();
+        let discovered_for_provider: BTreeSet<String> = paths
+            .iter()
+            .map(|path| agent_session_grep_application::relocation::normalize_absolute_path(path))
+            .collect::<Result<_, _>>()
+            .map_err(ProtocolError::from_private_port_error)?;
         let mut removed = 0usize;
         for prior_path in &prior {
-            if !discovered_for_provider.contains(prior_path.as_str()) {
+            let key =
+                agent_session_grep_application::relocation::normalize_absolute_path(prior_path)
+                    .map_err(ProtocolError::from_private_port_error)?;
+            if !discovered_for_provider.contains(&key) {
                 // 源曾在该 provider 下被 sync，本次完整扫描未出现在磁盘上 → 合成空批。
                 synthetic_batches.push(SourceBatch {
                     source_path: prior_path.clone(),
@@ -3553,6 +3866,7 @@ fn derive_message_id(
     }
 }
 
+#[cfg(test)]
 fn staged_to_source(
     path: &str,
     staged: &StagedBatch,
@@ -3572,6 +3886,7 @@ fn staged_to_source(
     )
 }
 
+#[cfg(test)]
 fn staged_to_source_with_provider(
     path: &str,
     staged: &StagedBatch,
@@ -3580,6 +3895,29 @@ fn staged_to_source_with_provider(
     fingerprint: &str,
     source_len: u64,
     discovered_provider_id: Option<&str>,
+) -> Result<SourceBatch, CliError> {
+    staged_to_source_with_provider_namespace(
+        path,
+        staged,
+        provider_id,
+        variant,
+        fingerprint,
+        source_len,
+        discovered_provider_id,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn staged_to_source_with_provider_namespace(
+    path: &str,
+    staged: &StagedBatch,
+    provider_id: &str,
+    variant: &str,
+    fingerprint: &str,
+    source_len: u64,
+    discovered_provider_id: Option<&str>,
+    persisted_installation_namespace: Option<&str>,
 ) -> Result<SourceBatch, CliError> {
     if staged.report.committed != staged.messages.len() {
         return Err(DomainError::InvariantViolation(format!(
@@ -3602,7 +3940,10 @@ fn staged_to_source_with_provider(
     );
     // Report-level identity remains the single-session compatibility path.
     // Explicit per-message identities below take precedence for multi-session sources.
-    let install_ns = installation_namespace(path, provider_id);
+    let install_ns = persisted_installation_namespace
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| installation_namespace(path, provider_id));
     let fallback_session_id = match staged.report.session_native_id.as_deref() {
         Some(sid) if !sid.trim().is_empty() => StableId::native_session_scoped(
             &SessionIdentityNamespace {
@@ -4028,6 +4369,8 @@ fn ingest_file(
     store: &SqliteStore,
     path: &str,
 ) -> Result<(serde_json::Value, Vec<String>), CliError> {
+    let normalized = source_input_path(store, path)?;
+    let path = normalized.as_str();
     let path_ref = std::path::Path::new(path);
     // 1) 捕获只读源快照（只计算 len/mtime/fingerprint，不保留源字节）。
     let snap = capture(path_ref).map_err(ProtocolError::from)?;
@@ -4036,7 +4379,12 @@ fn ingest_file(
     // 2) probe-select + stage：每个 probe/parse 都从只读 source 重新打开 bounded reader。
     //    路径落在某个登记根之下时该归属是布局事实，按 root 表反查后收缩候选集
     //    （见 stage_with_source）；否则为 None，走全 registry probe。
-    let (staged, variant) = stage_with_source(&source, provider_for_source_path(path))?;
+    let registered = registered_provider_hints(store, &[path.to_string()])?;
+    let hint = registered
+        .get(path)
+        .map(String::as_str)
+        .or_else(|| provider_for_source_path(path));
+    let (staged, variant) = stage_with_source(&source, hint)?;
 
     // 3) 提交前复核：源在 stage 期间被改写则拒绝提交（RFC-0002 §4）。
     verify_snapshot(path_ref, &snap).map_err(ProtocolError::from)?;
@@ -4044,13 +4392,19 @@ fn ingest_file(
     // 4) 派生 id + 构造该源的完整 scan 结果（消息 + 会话/文档目录行），按
     //    source membership 提交。同文件重 ingest 时，本次消失的 id 会被推导为 tombstone。
     let provider = variant.split('/').next().unwrap_or(&variant).to_string();
-    let source = staged_to_source(
+    let legacy_namespace = installation_namespace(path, &provider);
+    let persisted_namespace = store
+        .resolve_or_allocate_installation_namespace(&provider, path, &legacy_namespace)
+        .map_err(ProtocolError::from_private_port_error)?;
+    let source = staged_to_source_with_provider_namespace(
         path,
         &staged,
         &provider,
         &variant,
         &snap.fingerprint,
         snap.len,
+        None,
+        Some(persisted_namespace.as_str()),
     )?;
     let changed = store
         .commit_source_batches_if_changed(std::slice::from_ref(&source))
@@ -4169,7 +4523,7 @@ fn sync_files(
     // （exit 6）——sync 幂等语义下应提前归一为单个源。
     let mut unique: Vec<String> = Vec::with_capacity(paths.len());
     for path in paths {
-        let path = source_path_identity(path);
+        let path = source_input_path(store, path)?;
         if !unique.iter().any(|existing| existing == &path) {
             unique.push(path);
         }
@@ -4220,6 +4574,7 @@ fn sync_files_inner(
     if paths.is_empty() && synthetic_batches.is_empty() && !allow_empty {
         return Err(CliError::usage("sync <file>... requires at least one file"));
     }
+    let registered_providers = registered_provider_hints(store, paths)?;
     let mut sources = Vec::with_capacity(paths.len() + synthetic_batches.len());
     let mut snapshots = Vec::with_capacity(paths.len());
     let mut message_count = 0usize;
@@ -4242,6 +4597,22 @@ fn sync_files_inner(
         .source_message_counts(paths)
         .map_err(ProtocolError::from)?;
     for (index, path) in paths.iter().enumerate() {
+        let hint = discovered_provider_ids
+            .get(path)
+            .map(String::as_str)
+            .or_else(|| registered_providers.get(path).map(String::as_str))
+            .or_else(|| provider_for_source_path(path));
+        let resolved_namespace = hint
+            .map(|provider| {
+                store
+                    .resolve_or_allocate_installation_namespace(
+                        provider,
+                        path,
+                        &installation_namespace(path, provider),
+                    )
+                    .map_err(ProtocolError::from_private_port_error)
+            })
+            .transpose()?;
         let path_ref = std::path::Path::new(path);
         let snap = capture(path_ref).map_err(ProtocolError::from)?;
         let source = open_snapshot_source(path_ref, &snap).map_err(ProtocolError::from)?;
@@ -4258,6 +4629,7 @@ fn sync_files_inner(
         // 以 tombstone 旧消息；跳过会退化成空批 no-op，丢失 tombstone 语义。
         let mut retained = false;
         let (staged, variant) = if !source.is_empty()
+            && resolved_namespace.is_some()
             && cached_fp.as_deref() == Some(snap.fingerprint.as_str())
             && !version_stale
             && !relation_recovery_paths.contains(path)
@@ -4307,10 +4679,6 @@ fn sync_files_inner(
             // 入口因此对同一个文件得到同一个 provider——不再出现 discover 能索引、
             // 显式 sync 撞 tie 的分裂。路径不在任何登记根下时仍为 None，走全
             // registry probe。
-            let hint = discovered_provider_ids
-                .get(path)
-                .map(String::as_str)
-                .or_else(|| provider_for_source_path(path));
             let (staged, variant) = stage_with_source(&source, hint)?;
             (Some(staged), Some(variant))
         };
@@ -4343,7 +4711,14 @@ fn sync_files_inner(
             diagnostic_count += staged.report.diagnostics.len();
             diagnostics.extend(staged.report.diagnostics.iter().cloned());
             let provider = variant.split('/').next().unwrap_or(variant).to_string();
-            let mut source = staged_to_source_with_provider(
+            let legacy_namespace = installation_namespace(path, &provider);
+            let persisted_namespace = match resolved_namespace {
+                Some(namespace) => namespace,
+                None => store
+                    .resolve_or_allocate_installation_namespace(&provider, path, &legacy_namespace)
+                    .map_err(ProtocolError::from_private_port_error)?,
+            };
+            let mut source = staged_to_source_with_provider_namespace(
                 path,
                 staged,
                 &provider,
@@ -4351,6 +4726,7 @@ fn sync_files_inner(
                 &snap.fingerprint,
                 snap.len,
                 discovered_provider_ids.get(path).map(String::as_str),
+                Some(persisted_namespace.as_str()),
             )?;
             if incomplete_providers.contains(&provider) {
                 source.relation_complete = false;
@@ -5120,8 +5496,9 @@ mod tests {
     #[test]
     fn provider_matrix_data_adds_semantic_surface_without_touching_rows() {
         let data = provider_matrix_data();
-        // 加法键：data 只有 providers（原样 16 行）与 semantic 两个键。
-        assert_eq!(data.as_object().unwrap().len(), 2);
+        // Provider rows stay unchanged; shared metadata adds a CLI-only operation.
+        assert_eq!(data.as_object().unwrap().len(), 3);
+        assert_eq!(data["relocation"]["interfaces"], serde_json::json!(["cli"]));
         assert_eq!(
             data["providers"].as_array().unwrap().len(),
             ProviderCapabilityMatrix::current().providers.len()

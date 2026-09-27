@@ -159,6 +159,53 @@ relevance retaining priority over weak repository/mainline preference.
 Wrong: fetch `page+1`, then discard noise/metadata mismatches.
 Correct: filter before top-k, preserve the bounded ranking window, then page.
 
+## Scenario: Pure relocation identity and plan policy
+
+### 1. Scope / Trigger
+A CLI relocation preview/apply or an installation namespace lookup crosses
+physical path, persisted identity and catalog-generation boundaries.
+
+### 2. Signatures
+`relocation::{issue_plan, decode_plan, verify_plan, alias_expiry_ms}` take
+injected milliseconds; `legacy_installation_namespace`,
+`normalize_absolute_path`, `path_is_within`, `validate_root_mapping` and
+`remap_source_path` are pure path/compatibility functions.
+
+### 3. Contracts
+Keep the legacy namespace derivation byte-for-byte compatible. Compare Windows
+ASCII casing and separators component-wise; preserve Unicode spelling and
+native IDs. Require absolute roots, reject ambiguous dot components and strict
+ancestor overlaps, allow equivalent roots as a no-op. Destination host semantics
+and actual filesystem access belong to adapters, not these helpers.
+
+A versioned, domain-separated plan binds schema, generation, the complete
+adapter-computed ownership/fingerprint digest and retention policy. Its 15-minute
+lifetime is checked using the injected clock, and its 2048-byte ceiling is
+checked before decode. Claims contain only digests and scalar values. Integrity
+is not authentication. Reuse the cursor's base64 implementation, but keep the
+relocation token domain/claims distinct. Ordinary generation mismatch is checked
+before comparing mapping facts. A replay requires a matching committed receipt
+and current complete ownership, never merely a matching token.
+
+### 4. Validation & Error Matrix
+Invalid, malformed, expired or mismatched plan/path -> `InvalidRequest`;
+changed generation -> `GenerationMismatch`. Do not echo token contents, roots,
+namespace seeds or native IDs. Never silently generate a replacement plan.
+
+### 5. Good/Base/Bad Cases
+Good: a moved directory retains its persisted seed. Base: equivalent casing
+produces the same comparison key. Bad: Unicode normalization changes native
+identity, or an expired plan is accepted because its digest still matches.
+
+### 6. Tests Required
+Pin compatibility seeds, plan tampering/unknown fields/size/TTL boundaries,
+generation precedence, checked time arithmetic, strict component ancestry,
+Windows drive/UNC/verbatim separators and Unicode-preserving remaps.
+
+### 7. Wrong vs Correct
+Wrong: read the wall clock or filesystem inside plan policy.
+Correct: receive time and ownership digests through explicit arguments.
+
 ## Quality Check
 
 - No concrete adapter imports; no `rusqlite`, no `std::fs` reads of sources.

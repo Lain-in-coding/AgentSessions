@@ -108,6 +108,63 @@ Before writing code in this crate:
 
 ---
 
+## Scenario: CLI-only installation relocation
+
+### 1. Scope / Trigger
+The owner explicitly reconnects a previously indexed provider root after moving
+unchanged source files to another directory or drive.
+
+### 2. Signatures
+`asg --db <catalog> relocate --provider <provider> --from <old-root>
+--to <new-root> [--alias-ttl-days 90]` previews.
+Apply additionally requires `--apply --plan <opaque-plan> --backup <new-file>`.
+The command is registered in every value-flag/prefix scanner and help/hint list.
+
+### 3. Contracts
+Validate complete scalar/flag combinations before opening the catalog. Preview
+uses `SqliteStore::open`; apply uses `open_for_relocation`, which does not create,
+migrate or reproject before the required backup. An old catalog needs an
+explicit `index rebuild` first. Canonicalize provider aliases through the shared
+registry. The source root need not exist; the destination must be host-local
+and absolute. No provider files/configuration are moved or rewritten.
+
+Production staging injects the persisted/reserved installation namespace before
+deriving native Sessions, then commits the reservation with source facts.
+Do not rederive from the new path. Explicit discovery supplements canonical
+provider roots with registered current roots, uses consistent locator spelling
+for fingerprint caching and refuses retired-location reuse. Independent catalogs
+with independently allocated namespaces need not have equal Session IDs; reads
+within one catalog and after relocation must preserve every canonical ID.
+
+Robot relocation responses contain only status, opaque plan, counts, generations
+and TTL. Errors stay path/native-ID/content-free. Capability metadata explicitly
+names CLI as the only mutation interface; MCP/Web must not advertise or accept
+new relocation mutation tools. Existing read/search/resume projections remain
+consistent after relocation.
+
+### 4. Validation & Error Matrix
+Invalid/duplicate/missing scalar or incompatible flag combination ->
+`invalid_request`, before catalog access. Preserve `source_changed`,
+`generation_mismatch`, `writer_busy`, `schema_incompatible`, source/backend I/O
+categories. An unchanged result does not advance generation or create a backup.
+
+### 5. Good/Base/Bad Cases
+Good: preview a moved synthetic provider root, apply its plan with a new backup,
+then re-sync/discover without identity changes. Base: help describes the same
+flags the parser accepts. Bad: open a writer for an invalid request, or compare
+random per-catalog namespace IDs as if they were globally reconstructible.
+
+### 6. Tests Required
+Assert no-create/no-migrate preview and invalid requests; exact Robot privacy
+shape; source/ID/resume/context preservation (generation advances once); occupied
+target refusal; repeated no-op and incremental discovery; capability metadata,
+MCP mutation rejection and installed-artifact smoke using only synthetic data.
+
+### 7. Wrong vs Correct
+Wrong: use ordinary `open_for_write` before verifying relocation prerequisites.
+Correct: parse first, use a non-mutating read or dedicated existing-catalog lease,
+then let the storage operation validate, back up and activate atomically.
+
 ## Quality Check
 
 Before proposing a commit for this crate:

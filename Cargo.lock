@@ -12,6 +12,7 @@ dependencies = [
  "blake3",
  "fs4",
  "rusqlite",
+ "serde",
  "serde_json",
  "tempfile",
 ]

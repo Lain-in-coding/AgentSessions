@@ -45,6 +45,12 @@ function Exit-Smoke {
     # The temp store is disposable and must go even on the failure path, but only
     # after diagnostics have been printed.
     if ($script:TempDir -and (Test-Path -LiteralPath $script:TempDir)) {
+        $cleanupPath = [System.IO.Path]::GetFullPath($script:TempDir)
+        $cleanupParent = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath()).TrimEnd([char[]]'\/')
+        if ([System.IO.Path]::GetDirectoryName($cleanupPath) -ne $cleanupParent -or
+            -not [System.IO.Path]::GetFileName($cleanupPath).StartsWith('agent-session-grep-smoke-')) {
+            throw 'Refusing cleanup outside the owned smoke directory'
+        }
         Remove-Item -LiteralPath $script:TempDir -Recurse -Force -ErrorAction SilentlyContinue
     }
     exit $Code
@@ -229,6 +235,65 @@ foreach ($retrievalMode in @('semantic', 'hybrid')) {
     $r = Invoke-Robot @('--db', $db, '--robot', 'search', 'smokegrokfilter', '--provider', 'grok-build', '--mode', $retrievalMode)
     Assert-That ($r.Code -eq 0 -and $null -ne $r.Frame -and $r.Frame.data.retrieval_mode -eq $retrievalMode -and @($r.Frame.data.hits).Count -eq 1) "CLI $retrievalMode uses the index and Grok filter" $r.Text
 }
+
+# Relocation uses a separate synthetic catalog and preserves canonical IDs.
+$relocationArea = Join-Path $script:TempDir 'relocation'
+$relocationOld = Join-Path $relocationArea 'old-installation'
+$relocationNew = Join-Path $relocationArea 'new-installation'
+$relocationDb = Join-Path $relocationArea 'catalog.db'
+$relocationBackup = Join-Path $relocationArea 'catalog-backup.db'
+$relocationSource = Join-Path $relocationOld 'session.jsonl'
+New-Item -ItemType Directory -Path $relocationOld -Force | Out-Null
+Copy-Item -LiteralPath $fixture -Destination $relocationSource
+$r = Invoke-Robot @('--db', $relocationDb, '--robot', 'relocate', '--provider', 'claude', '--from', $relocationOld, '--to', $relocationNew)
+Assert-That ($r.Code -eq 6 -and $null -ne $r.Frame -and $r.Frame.error.code -eq 'catalog_error') 'relocate preview refuses an absent catalog' $r.Text
+Assert-That (-not (Test-Path -LiteralPath $relocationDb)) 'relocate preview creates no catalog' $r.Text
+$r = Invoke-Robot @('--db', $relocationDb, '--robot', 'sync', $relocationSource)
+Assert-That ($r.Code -eq 0) 'relocation fixture sync succeeds' $r.Text
+$relocationGeneration = if ($null -ne $r.Frame) { [long]$r.Frame.data.generation } else { -1 }
+$r = Invoke-Robot @('--db', $relocationDb, '--robot', 'search', 'smokezylograph')
+$relocationSession = if ($null -ne $r.Frame -and @($r.Frame.data.hits).Count -gt 0) { $r.Frame.data.hits[0].session_id } else { $null }
+Assert-That (-not [string]::IsNullOrWhiteSpace($relocationSession)) 'relocation fixture has a canonical Session ID' $r.Text
+$relocationBoundary = [System.IO.Path]::GetFullPath($script:TempDir).TrimEnd([char[]]'\/') + [System.IO.Path]::DirectorySeparatorChar
+foreach ($candidate in @($relocationOld, $relocationNew)) {
+    if (-not [System.IO.Path]::GetFullPath($candidate).StartsWith($relocationBoundary, [System.StringComparison]::OrdinalIgnoreCase)) {
+        Abort 'Refusing fixture move outside the owned smoke directory'
+    }
+}
+Move-Item -LiteralPath $relocationOld -Destination $relocationNew
+$catalogHash = (Get-FileHash -LiteralPath $relocationDb).Hash
+$sourceHash = (Get-FileHash -LiteralPath (Join-Path $relocationNew 'session.jsonl')).Hash
+$r = Invoke-Robot @('--db', $relocationDb, '--robot', 'relocate', '--provider', 'claude', '--from', $relocationOld, '--to', $relocationNew, '--alias-ttl-days', '7')
+Assert-That ($r.Code -eq 0 -and $null -ne $r.Frame -and $r.Frame.command -eq 'relocate.preview' -and $r.Frame.data.status -eq 'planned') 'relocate preview returns a planned Robot result' $r.Text
+Assert-That ((Get-FileHash -LiteralPath $relocationDb).Hash -ceq $catalogHash) 'relocate preview does not write the catalog' $r.Text
+Assert-That (-not (Test-Path -LiteralPath $relocationBackup)) 'relocate preview creates no backup' $r.Text
+$relocationPlan = if ($null -ne $r.Frame -and (Test-HasProperty $r.Frame.data 'plan')) { $r.Frame.data.plan } else { $null }
+
+if (-not [string]::IsNullOrWhiteSpace($relocationPlan)) {
+    Assert-That ($r.Frame.data.source_count -eq 1 -and $r.Frame.data.session_count -eq 1 -and $r.Frame.data.alias_ttl_days -eq 7) 'relocate preview reports bounded counts and selected retention' $r.Text
+    Assert-That (-not (Test-HasProperty $r.Frame.data 'from') -and -not (Test-HasProperty $r.Frame.data 'to') -and -not (Test-HasProperty $r.Frame.data 'backup')) 'relocate results contain no private path fields' $r.Text
+    $r = Invoke-Robot @('--db', $relocationDb, '--robot', 'relocate', '--provider', 'claude', '--from', $relocationOld, '--to', $relocationNew, '--alias-ttl-days', '7', '--apply', '--plan', $relocationPlan, '--backup', $relocationBackup)
+    Assert-That ($r.Code -eq 0 -and $null -ne $r.Frame -and $r.Frame.command -eq 'relocate.apply' -and $r.Frame.data.status -eq 'applied' -and $r.Frame.data.generation -eq ($relocationGeneration + 1)) 'relocate apply advances generation exactly once' $r.Text
+    Assert-That (Test-Path -LiteralPath $relocationBackup) 'relocate apply creates a verified backup' $r.Text
+    Assert-That ((Get-FileHash -LiteralPath (Join-Path $relocationNew 'session.jsonl')).Hash -ceq $sourceHash) 'relocate apply leaves provider source bytes unchanged' $r.Text
+    $r = Invoke-Robot @('--db', $relocationBackup, '--robot', 'status')
+    Assert-That ($r.Code -eq 0 -and $null -ne $r.Frame -and $r.Frame.data.generation -eq $relocationGeneration) 'relocate backup retains the previous generation' $r.Text
+    $r = Invoke-Robot @('--db', $relocationDb, '--robot', 'sync', (Join-Path $relocationNew 'session.jsonl'))
+    Assert-That ($r.Code -eq 0 -and $null -ne $r.Frame -and $r.Frame.data.generation -eq ($relocationGeneration + 1)) 'sync after relocation retains identity and generation' $r.Text
+    if ($relocationSession) {
+        $r = Invoke-Robot @('--db', $relocationDb, '--robot', 'context', $relocationSession)
+        Assert-That ($r.Code -eq 0 -and $null -ne $r.Frame -and @($r.Frame.data.messages).Count -gt 0) 'the original Session ID still resolves after relocation' $r.Text
+    }
+    $r = Invoke-Robot @('--db', $relocationDb, '--robot', 'relocate', '--provider', 'claude', '--from', $relocationOld, '--to', $relocationNew, '--alias-ttl-days', '7')
+    Assert-That ($r.Code -eq 0 -and $null -ne $r.Frame -and $r.Frame.command -eq 'relocate.preview' -and $r.Frame.data.status -eq 'unchanged' -and $r.Frame.data.generation -eq ($relocationGeneration + 1)) 'repeated relocation preview is an unchanged no-op' $r.Text
+} else {
+    Write-Fail 'relocate preview provides an opaque plan' $r.Text
+}
+$r = Invoke-Robot @('--robot', 'relocate', '--help')
+Assert-That ($r.Code -eq 0 -and $r.Text.Contains('--backup') -and $r.Text.Contains('--alias-ttl-days')) 'relocate help describes apply and alias lifetime without a catalog' $r.Text
+$r = Invoke-Robot @('--robot', 'providers')
+$relocationCapability = if ($null -ne $r.Frame -and (Test-HasProperty $r.Frame.data 'relocation')) { $r.Frame.data.relocation } else { $null }
+Assert-That ($null -ne $relocationCapability -and ($relocationCapability.interfaces -join ',') -eq 'cli') 'capability metadata marks relocation CLI-only' $r.Text
 
 # 10. MCP stdio handshake. stdout is the protocol channel, so every line must be
 # a complete JSON-RPC frame; anything else means diagnostics leaked into it.

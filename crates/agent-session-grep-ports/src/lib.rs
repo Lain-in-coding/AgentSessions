@@ -6,6 +6,7 @@
 //! 分层依赖不变量：domain ← ports ← application ← adapters。
 
 pub mod redact;
+pub mod relocation;
 
 use agent_session_grep_domain::{
     DomainError, DomainResult, PlacementId, SessionContextGraph, StableId, ToolActivity,
@@ -19,6 +20,13 @@ use std::io::{BufRead, Read};
 /// Application 层负责把 PortError 归一为对外协议错误。
 #[derive(Debug, thiserror::Error)]
 pub enum PortError {
+    /// Invalid caller input or a relocation plan that cannot authorize this request.
+    #[error("invalid request: {0}")]
+    InvalidRequest(String),
+
+    /// The catalog changed after the caller obtained its plan.
+    #[error("catalog generation mismatch: {0}")]
+    GenerationMismatch(String),
     /// 底层存储/IO 故障。
     #[error("backend failure: {0}")]
     Backend(String),
@@ -978,6 +986,8 @@ fn port_error_kind(error: &PortError) -> &'static str {
         PortError::NotFound(_) => "not_found",
         PortError::SnapshotChanged(_) => "snapshot_changed",
         PortError::WriterBusy(_) => "writer_busy",
+        PortError::InvalidRequest(_) => "invalid_request",
+        PortError::GenerationMismatch(_) => "generation_mismatch",
     }
 }
 

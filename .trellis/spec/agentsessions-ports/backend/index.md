@@ -166,6 +166,39 @@ Wrong: `is_ready().unwrap_or(false)` or a second hard-coded provider list.
 Correct: propagate readiness errors and derive accepted provider values from
 the capability registry.
 
+## Scenario: Bounded relocation contracts
+
+### 1. Scope / Trigger
+Adapters expose relocation results and errors to the composition root.
+
+### 2. Signatures
+`relocation::{RelocationResult, RelocationStatus}`;
+`validate_alias_ttl_days(u32)`; `PortError::{InvalidRequest, GenerationMismatch}`.
+
+### 3. Contracts
+Result status is `planned|applied|unchanged`, with an optional opaque plan,
+source/Session/installation/namespace counts, current/previous generation and
+alias TTL. No public DTO contains physical paths, backup locations, native IDs
+or transcript text. Defaults/ranges/plan lifetime are shared constants, not
+repeated CLI literals. This is CLI-only mutation; no MCP/Web write port is added.
+
+### 4. Validation & Error Matrix
+Alias days outside 1..365 -> bounded invalid request. Storage and protocol keep
+source-change, generation, lease and schema failures distinct. Every added
+PortError has an exhaustive canonical-protocol mapping and internal kind label.
+
+### 5. Good/Base/Bad Cases
+Good: Robot emits an opaque plan and aggregate counts. Base: `unchanged` omits a
+new plan. Bad: DTO serialization publishes private mapping or receipt fields.
+
+### 6. Tests Required
+Assert serialization shape/counts, default and boundary policies, and every
+new error mapping without echoing caller-controlled details.
+
+### 7. Wrong vs Correct
+Wrong: expose SQLite rows or paths as a public relocation result.
+Correct: expose typed counts/status and keep private mappings in the adapter.
+
 ## Quality Check
 
 - No `use rusqlite`, no `use std::fs`, no `serde_json` in this crate.

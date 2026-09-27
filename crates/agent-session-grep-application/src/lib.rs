@@ -30,6 +30,7 @@ pub mod handoff_pack;
 pub mod hybrid;
 pub mod peek;
 pub mod ranking;
+pub mod relocation;
 pub mod resume;
 pub mod retention;
 

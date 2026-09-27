@@ -397,8 +397,15 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   indices no longer truncate on 32-bit targets.
 - Updated Ratatui to 0.30.2 and Crossterm to 0.29, removing both lru unsound
   advisories. One `paste` unmaintained warning remains in the optional semantic
-  dependency tree; no advisory suppression was added. Session relocation aliases
-  and upstream semantic dependency cleanup remain registered follow-up work.
+  dependency tree; no advisory suppression was added.
+- Added explicit CLI-only installation relocation. Schema v18 persists opaque
+  installation namespaces, current/retired locations, source bindings and
+  relocation receipts; preview is read-only, apply requires a fresh plan,
+  writer lease and verified SQLite backup. Relocation updates every live source
+  locator atomically while preserving canonical Session/Message/Document/
+  Placement IDs, resume observations, usage and tool activity. Retired aliases
+  default to 90 days (1..365), never expire canonical IDs, and never silently
+  reactivate an old source root.
 
 - **`sync` could not finish while any coding agent was running.** Every source
   was staged, then every snapshot verified, then one commit ran; the

@@ -4,14 +4,16 @@
 //! 本 crate 是 hexagonal 架构里的 driven adapter——只依赖 domain + ports 的抽象，
 //! 把端口契约翻译成具体的 SQLite/FTS5 SQL，绝不反向依赖 application。
 //!
-//! 唯一例外：CJK n-gram transform（ADR-0007，单字 + bigram）与 RFC3339/ISO-8601
+//! 共享纯策略：CJK n-gram transform（ADR-0007，单字 + bigram）与 RFC3339/ISO-8601
 //! 时间戳解析按约定
 //! 放在 application crate（`cjk` 模块 / `parse_search_instant`），由本 crate 在 FTS
 //! 写入/查询两侧与时间过滤谓词的标量函数中调用（索引与查询必须共享同一 transform、
-//! 过滤谓词与请求边界必须共享同一解析才能一致），纯函数无 use-case 语义。
+//! 过滤谓词与请求边界必须共享同一解析才能一致）；relocation 模块同样复用
+//! Application 的纯路径/计划策略。SQL、文件读取及持久化仍只在适配器中。
 
 mod cas;
 mod lease;
+mod relocation;
 mod source_fs;
 
 pub use cas::{cas_activate, read_current, write_current};
@@ -31,6 +33,7 @@ use agent_session_grep_ports::{
     SearchQuery, SemanticIndex, SessionResumeMetadata, SidechainFacet, SourcePlacement,
     SourceResumeClaim, TOOL_ACTIVITY_TARGET_MAX_CHARS, UsageTotals,
 };
+use relocation::{InstallationAssignment, RelocationManifest};
 use rusqlite::{Connection, OptionalExtension};
 use std::any::Any;
 use std::cell::RefCell;
@@ -619,6 +622,7 @@ struct SourceReplacementManifest {
     /// Source-scoped Resume Metadata 声明（ADR-0009）：随本 source replacement
     /// 同事务原子写入；空列表表示清除该 source 的旧声明。
     resume_claims: Vec<SourceResumeClaim>,
+    installation: Option<InstallationAssignment>,
 }
 
 impl SourceReplacementManifest {
@@ -638,7 +642,7 @@ impl SourceReplacementManifest {
         let mut claims: Vec<_> = self.resume_claims.iter().collect();
         claims.sort_by_key(|claim| &claim.session_id);
         let claims: Vec<_> = claims.into_iter().map(resume_claim_value).collect();
-        serde_json::json!({
+        let mut value = serde_json::json!({
             "source_path": self.source_path,
             "entity_memberships": entity_memberships,
             "placement_ids": placement_ids,
@@ -649,7 +653,11 @@ impl SourceReplacementManifest {
             "fingerprint": self.fingerprint,
             "provider_id": self.provider_id,
             "resume_claims": claims,
-        })
+        });
+        if let Some(installation) = &self.installation {
+            value["installation"] = installation.canonical_value();
+        }
+        value
     }
 }
 
@@ -762,10 +770,22 @@ struct RelationManifests {
     relation_upserts: Vec<RelationUpsertManifest>,
     relation_deletes: Vec<RelationDeleteManifest>,
     source_replacements: Vec<SourceReplacementManifest>,
+    relocation: Option<RelocationManifest>,
 }
 
 impl RelationManifests {
     fn validate(&self) -> PortResult<()> {
+        if let Some(relocation) = &self.relocation {
+            if !self.relation_upserts.is_empty()
+                || !self.relation_deletes.is_empty()
+                || !self.source_replacements.is_empty()
+            {
+                return Err(PortError::Backend(
+                    "relocation cannot include source replacements".into(),
+                ));
+            }
+            relocation.validate()?;
+        }
         for upsert in &self.relation_upserts {
             match upsert {
                 RelationUpsertManifest::Placement(placement) => {
@@ -938,6 +958,7 @@ struct CanonicalBatchManifest {
     relation_upserts_json: String,
     relation_deletes_json: String,
     source_replacements_json: String,
+    relocation_json: String,
     operation_digest: String,
 }
 
@@ -1001,6 +1022,17 @@ fn batch_manifest(
     hash_field(&mut hasher, relation_deletes_json.as_bytes());
     hash_field(&mut hasher, b"source_replacements");
     hash_field(&mut hasher, source_replacements_json.as_bytes());
+    let relocation_json = serde_json::to_string(
+        &relations
+            .relocation
+            .as_ref()
+            .map(RelocationManifest::canonical_value),
+    )
+    .map_err(backend)?;
+    if relations.relocation.is_some() {
+        hash_field(&mut hasher, b"installation_relocation_v1");
+        hash_field(&mut hasher, relocation_json.as_bytes());
+    }
 
     Ok(CanonicalBatchManifest {
         upsert_ids,
@@ -1008,6 +1040,7 @@ fn batch_manifest(
         relation_upserts_json,
         relation_deletes_json,
         source_replacements_json,
+        relocation_json,
         operation_digest: hasher.finalize().to_hex().to_string(),
     })
 }
@@ -1462,6 +1495,9 @@ pub struct SqliteStore {
     /// 默认 [`NoopRepoSlugResolver`]（投影关闭）。解析器是环境事实探测器，
     /// 失败一律 None。
     repo_slug_resolver: RefCell<Box<dyn RepoSlugResolver>>,
+    /// Staging reservations only; persisted with the matching source replacement.
+    pending_installations: RefCell<BTreeMap<String, InstallationAssignment>>,
+    relocation_clock: fn() -> PortResult<i64>,
 }
 
 /// 一批源路径的指纹缓存项：捕获时长度与内容指纹。
@@ -1498,6 +1534,8 @@ impl SqliteStore {
             _lease: None,
             semantic_model_id: RefCell::new(None),
             repo_slug_resolver: RefCell::new(Box::new(NoopRepoSlugResolver)),
+            pending_installations: RefCell::new(BTreeMap::new()),
+            relocation_clock: unix_ms,
         })
     }
 
@@ -1527,6 +1565,8 @@ impl SqliteStore {
             _lease: Some(lease),
             semantic_model_id: RefCell::new(None),
             repo_slug_resolver: RefCell::new(Box::new(NoopRepoSlugResolver)),
+            pending_installations: RefCell::new(BTreeMap::new()),
+            relocation_clock: unix_ms,
         };
         // lease 已到手，当前进程是唯一写者；安全收敛上次崩溃留下的无副作用 intent。
         store.recover_interrupted()?;
@@ -1546,6 +1586,8 @@ impl SqliteStore {
             _lease: None,
             semantic_model_id: RefCell::new(None),
             repo_slug_resolver: RefCell::new(Box::new(NoopRepoSlugResolver)),
+            pending_installations: RefCell::new(BTreeMap::new()),
+            relocation_clock: unix_ms,
         })
     }
 
@@ -1780,6 +1822,9 @@ impl SqliteStore {
         }
         if current < 17 {
             Self::migrate_v16_to_v17(conn)?;
+        }
+        if current < 18 {
+            Self::migrate_v17_to_v18(conn)?;
         }
         // 不随 user_version 门控：旧 v7 库（本列存在前建成的）打开时同样需要。
         Self::ensure_fts_ids_rowid(conn)?;
@@ -3281,7 +3326,11 @@ impl SqliteStore {
     /// derive tombstones. Incomplete scans union observed claims, derive no
     /// tombstones, and clear the source relation-completeness marker.
     pub fn commit_source_batches_if_changed(&self, sources: &[SourceBatch]) -> PortResult<bool> {
-        let mut ordered_sources: Vec<&SourceBatch> = sources.iter().collect();
+        let canonical_sources = self.canonicalize_source_batches(sources)?;
+        let mut ordered_sources: Vec<&SourceBatch> = canonical_sources
+            .iter()
+            .map(|source| source.as_ref())
+            .collect();
         ordered_sources.sort_by(|left, right| left.source_path.cmp(&right.source_path));
         let paths: Vec<&str> = ordered_sources
             .iter()
@@ -3296,6 +3345,7 @@ impl SqliteStore {
         // A no-op still promises a valid batch. Validate incoming identities
         // and multiplicities before set/map comparison can erase duplicates.
         for source in &ordered_sources {
+            self.installation_for_source_commit(source)?;
             batch_manifest(&source.entries, &[], &RelationManifests::default())?;
             self.ensure_stored_identity_metadata_matches(&source.entries)?;
             let mut placements = BTreeSet::new();
@@ -3576,6 +3626,7 @@ impl SqliteStore {
                 fingerprint: source.fingerprint.clone(),
                 provider_id: source.provider_id.clone(),
                 resume_claims: source.resume_claims.clone(),
+                installation: self.installation_for_source_commit(source)?,
             };
             prepared_sources.insert(
                 source.source_path.clone(),
@@ -3958,6 +4009,7 @@ impl SqliteStore {
                 .into_values()
                 .map(|prepared| prepared.replacement)
                 .collect(),
+            relocation: None,
         };
 
         batch_manifest(&upserts, &deletes, &relations)?;
@@ -3968,6 +4020,12 @@ impl SqliteStore {
 
         let pending = self.begin_index_batch_with_relations(&upserts, &deletes, &relations)?;
         self.commit_index_batch_with_relations(&pending, &upserts, &deletes, &relations)?;
+        self.clear_installation_reservations(
+            relations
+                .source_replacements
+                .iter()
+                .map(|source| source.source_path.as_str()),
+        );
         Ok(true)
     }
 
@@ -3980,6 +4038,9 @@ impl SqliteStore {
     fn sources_are_current(&self, ordered_sources: &[&SourceBatch]) -> PortResult<bool> {
         let conn = self.conn.borrow();
         for source in ordered_sources {
+            if !self.installation_is_current(&conn, source)? {
+                return Ok(false);
+            }
             // A source that has never been scanned cannot be current; skip the
             // per-entity queries (which dominate on first ingest of an
             // empty catalog) and go straight to the heavy path.
@@ -5049,6 +5110,19 @@ impl SqliteStore {
         let usage_state = self.source_usage_membership_state()?;
         let conn = self.conn.borrow();
         for replacement in &relations.source_replacements {
+            if replacement.entity_memberships.is_empty()
+                && replacement.fingerprint.is_none()
+                && replacement.len_bytes.is_none()
+                && Self::assignment_for_source(&conn, &replacement.source_path)?.is_some()
+            {
+                return Ok(false);
+            }
+            if let Some(installation) = &replacement.installation
+                && Self::assignment_for_source(&conn, &replacement.source_path)?.as_ref()
+                    != Some(installation)
+            {
+                return Ok(false);
+            }
             let expected_entities: BTreeMap<String, Option<String>> = replacement
                 .entity_memberships
                 .iter()
@@ -5289,9 +5363,9 @@ impl SqliteStore {
                  operation_id, base_generation, target_generation, state,
                  operation_digest, upsert_ids_json, delete_ids_json,
                  relation_upserts_json, relation_deletes_json,
-                 source_replacements_json, durable_point, created_at_ms
+                 source_replacements_json, durable_point, created_at_ms, relocation_json
              ) VALUES(
-                 ?1, ?2, ?3, 'building', ?4, ?5, ?6, ?7, ?8, ?9, 'intent', ?10
+                 ?1, ?2, ?3, 'building', ?4, ?5, ?6, ?7, ?8, ?9, 'intent', ?10, ?11
              )",
             rusqlite::params![
                 op,
@@ -5304,6 +5378,7 @@ impl SqliteStore {
                 manifest.relation_deletes_json,
                 manifest.source_replacements_json,
                 unix_ms()?,
+                manifest.relocation_json,
             ],
         )
         .map_err(backend)?;
@@ -5412,6 +5487,13 @@ impl SqliteStore {
                 pending.operation_id
             )));
         }
+        let declared_relocation: String = tx
+            .query_row(
+                "SELECT relocation_json FROM index_batches WHERE operation_id = ?1",
+                [&pending.operation_id],
+                |row| row.get(0),
+            )
+            .map_err(backend)?;
         let actual = batch_manifest(upserts, deletes, relations)?;
         let actual_upserts = serde_json::to_string(&actual.upsert_ids).map_err(backend)?;
         let actual_deletes = serde_json::to_string(&actual.delete_ids).map_err(backend)?;
@@ -5425,6 +5507,7 @@ impl SqliteStore {
             || declared_relation_upserts != actual.relation_upserts_json
             || declared_relation_deletes != actual.relation_deletes_json
             || declared_source_replacements != actual.source_replacements_json
+            || declared_relocation != actual.relocation_json
         {
             return Err(PortError::Backend(format!(
                 "index batch {} payload does not match durable intent",
@@ -5852,6 +5935,9 @@ impl SqliteStore {
         let mut conn = self.conn.borrow_mut();
         let tx = conn.transaction().map_err(backend)?;
         Self::verify_pending_in_tx(&tx, pending, upserts, deletes, relations)?;
+        if let Some(relocation) = &relations.relocation {
+            Self::apply_relocation_in_tx(&tx, pending, relocation)?;
+        }
 
         // Session 元数据投影（schema v11）：收集本批触碰的 Session，提交末尾
         // 逐个重建其 `session_fts` 行（删除按 rowid 经边车定位，重插新投影）。
@@ -6287,6 +6373,23 @@ impl SqliteStore {
                 )
                 .map_err(backend)?;
             }
+            if source.entity_memberships.is_empty()
+                && source.fingerprint.is_none()
+                && source.len_bytes.is_none()
+            {
+                tx.execute(
+                    "DELETE FROM source_installations WHERE source_path=?1",
+                    [&source.source_path],
+                )
+                .map_err(backend)?;
+            } else if let Some(installation) = &source.installation {
+                Self::persist_installation_in_tx(
+                    &tx,
+                    &source.source_path,
+                    installation,
+                    (self.relocation_clock)()?,
+                )?;
+            }
             // Source-scoped Resume Metadata 声明（ADR-0009）：随 source replacement
             // 同事务原子替换——先清旧声明，本批带声明才写新行；无声明
             // （source 不再观察/移除）即清除，绝不残留旧声明。
@@ -6379,6 +6482,9 @@ impl SqliteStore {
         // v7 关系行：被删实体若仍被 message_placements/message_edges 引用，会留下
         // 悬空引用，必须在此拒绝（B2 路径的删除按 claimer 推导，天然无悬空）。
         Self::verify_deleted_entities_unreferenced_in_tx(&tx, deletes)?;
+        if let Some(relocation) = &relations.relocation {
+            relocation.verify_snapshots()?;
+        }
 
         tx.execute(
             "UPDATE store_metadata SET active_generation = ?1 WHERE singleton = 1",
@@ -7053,7 +7159,10 @@ pub const INDEX_PROJECTION_VERSION: u32 = 1;
 /// 新库不会在第一次打开就被判失配；投影非空的旧库保持 DEFAULT 0（0 永不
 /// 等于当前版本 ≥1）→ 写路径打开时自动从 catalog 重投影，读路径的 FTS
 /// 查询 fail-closed 报 `schema_incompatible`，绝不静默返回错误命中集。
-pub const SCHEMA_VERSION: i64 = 17;
+///
+/// v18：持久化 installation namespace/location/source binding 与迁移回执；
+/// durable intent 增加 relocation manifest，保留所有既有 canonical ID。
+pub const SCHEMA_VERSION: i64 = 18;
 
 impl CatalogStore for SqliteStore {
     fn get(&self, id: &StableId) -> PortResult<Option<Vec<u8>>> {
@@ -8911,6 +9020,8 @@ mod tests {
             _lease: Some(lease),
             semantic_model_id: RefCell::new(None),
             repo_slug_resolver: RefCell::new(Box::new(NoopRepoSlugResolver)),
+            pending_installations: RefCell::new(BTreeMap::new()),
+            relocation_clock: unix_ms,
         }
     }
 
@@ -9423,7 +9534,7 @@ mod tests {
     fn schema_v10_creates_message_vec_table() {
         let store = SqliteStore::open_in_memory().unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 17);
+        assert_eq!(SCHEMA_VERSION, 18);
         let conn = store.conn.borrow();
         let count: i64 = conn
             .query_row(
@@ -14953,6 +15064,7 @@ mod tests {
         let relations = RelationManifests {
             source_replacements: vec![SourceReplacementManifest {
                 source_path: "manifest-source.jsonl".into(),
+                installation: None,
                 entity_memberships: Vec::new(),
                 placement_ids: Vec::new(),
                 activity_ids: Vec::new(),
@@ -18489,6 +18601,22 @@ mod tests {
                      active_generation INTEGER NOT NULL
                  );
                  INSERT INTO store_metadata(singleton, active_generation) VALUES(1, 3);
+                 CREATE TABLE index_batches (
+                     operation_id TEXT PRIMARY KEY,
+                     base_generation INTEGER NOT NULL,
+                     target_generation INTEGER NOT NULL,
+                     state TEXT NOT NULL,
+                     operation_digest TEXT NOT NULL,
+                     upsert_ids_json TEXT NOT NULL,
+                     delete_ids_json TEXT NOT NULL,
+                     relation_upserts_json TEXT NOT NULL DEFAULT '[]',
+                     relation_deletes_json TEXT NOT NULL DEFAULT '[]',
+                     source_replacements_json TEXT NOT NULL DEFAULT '[]',
+                     durable_point TEXT NOT NULL,
+                     created_at_ms INTEGER NOT NULL,
+                     committed_at_ms INTEGER,
+                     error_code TEXT
+                 );
                  CREATE TABLE fts_ids (wire_id TEXT PRIMARY KEY, id_json TEXT NOT NULL UNIQUE);
                  CREATE TABLE source_membership (
                      source_path TEXT NOT NULL,

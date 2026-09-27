@@ -206,16 +206,80 @@ metadata. It is a derived projection like the message `fts`, populated from
   JSON parameter (`json_each`) rather than one SQL expression per message;
   final merging uses deterministic RRF and canonical wire IDs.
 
-### Known RFC-0001 §5.1 identity debt (follow-up, not blocking Resume)
+## Scenario: Explicit installation relocation (schema v18)
 
-`installation_namespace` derives from absolute path and lacks: a persisted
-`installation_namespaces` registry, an `id_alias(old_id, new_id)` table with
-TTL, Windows path-case normalization, and resume claims keyed by
-`(namespace_registry_id, session_id)`. Relocation does not preserve Session
-identity. The domain layer (`StableId::native_session_scoped`,
-`SessionIdentityNamespace`) is correct; the gap is composition-root only.
-Tracked in `.trellis/tasks/09-25-session-relocation-aliases/`; ordinary sync
-must not silently rekey existing `ses_v1` records.
+### 1. Scope / Trigger
+Indexing a new installation, upgrading v17 provenance, or reconnecting an
+unchanged installation at an explicitly selected new directory/drive.
+
+### 2. Signatures
+`resolve_or_allocate_installation_namespace(provider, source, legacy_seed)`
+returns a staging namespace. `relocation_preview(provider, from, to, ttl)` is
+read-only. `open_for_relocation(path)` acquires a writer lease without schema
+migration or projection rebuild. `apply_relocation(provider, from, to, ttl,
+plan, backup)` returns the bounded `RelocationResult`; `backup_to(path)` never
+overwrites a destination or its SQLite sidecars.
+
+### 3. Contracts
+`installation_namespaces` freezes the exact legacy seed or a new opaque seed;
+`installation_locations` stores flat current/retired root ownership;
+`source_installations` binds source locators; `installation_relocations` stores
+private committed receipts. Migration skips unverifiable/ambiguous provenance
+without rekeying historical entities. New namespace reservations live only in
+memory until their source replacement activates. The durable source manifest
+includes the assignment; a failed source commit leaves no registry pollution.
+
+Relocation extends the existing outbox manifest and activation transaction.
+Move every live source locator in `source_scans`, `source_membership`,
+`source_placement_membership`, `source_relation_scans`,
+`source_session_resume_claims`, `tool_activity_membership`,
+`usage_event_membership` and `source_installations`, plus registry ownership,
+receipt, generation and intent state together. Keep canonical payloads,
+identity sidecars, intrinsic relations, native observations, original CWD and
+historical outbox manifests unchanged. Validate destination logical snapshots
+(including committed SQLite WAL) before and immediately before activation.
+
+Preview pins a read transaction, streams source enumeration in 128-row pages
+and retains bounded mapping metadata (up to 65,536 sources), never transcript
+payloads or embeddings. A verified Backup-API snapshot is published to a new
+file before creating the relocation intent. Only the private backup switches
+out of WAL; its temporary sidecars are cleaned after connections close.
+Read-only and stale-schema opens cannot create or migrate catalogs. Ordinary
+write-open auto-reprojection must not run before a relocation backup.
+
+The compatibility alias defaults to 90 days (1..365). It never authorizes an
+ordinary scan of the retired installation. Expiry permits a new independent
+installation, never namespace reuse from a stale staging reservation. It does
+not expire canonical IDs. Repeated mappings are unchanged only while the
+complete selected ownership/source set still matches the committed receipt.
+
+### 4. Validation & Error Matrix
+Malformed/occupied/ambiguous roots, unsupported provider or invalid policy ->
+`InvalidRequest`; stale generation -> `GenerationMismatch`; unreadable source
+-> `SourceIo`; changed content -> `SnapshotChanged`; missing lease ->
+`WriterBusy`; stale schema -> `SchemaIncompatible`; backup/SQL failure ->
+bounded backend error. All failures preserve live tables and generation;
+a building intent may remain for ordinary abort recovery. Public diagnostics
+and result fields contain counts/digests, never paths/native IDs/content.
+
+### 5. Good/Base/Bad Cases
+Good: several legacy namespace groups under one moved root retain distinct
+native Sessions. Base: re-syncing the new root is a no-op. Bad: using the new
+path as namespace input, accepting a stale receipt after a sibling installation
+was added, or allowing one provider's retired root to block another provider.
+
+### 6. Tests Required
+Use only synthetic sources. Assert full table/identity/context/resume/backup
+snapshots, not just counts; inject failure at every locator table, registry,
+receipt and activation. Cover legacy migration rollback, opaque allocation,
+independent same-native-ID installations, source deletion, WAL-only change,
+plan lifetime/mapping/generation, target conflicts, reverse moves, retired
+expiry, casing/separators/Unicode, read-only preview and no-clobber backup.
+
+### 7. Wrong vs Correct
+Wrong: persist a namespace during parsing or update only `source_scans`.
+Correct: stage the assignment, then atomically activate all authoritative facts
+through the same durable manifest and generation CAS used by source commits.
 
 ## Scenario: Read-only lifecycle and logical source snapshots
 

@@ -2291,3 +2291,47 @@ fn search_sessions_facet_params_filter_and_validate() {
     let error = &frame_by_id(&frames, 4)["error"];
     assert_eq!(error["code"], -32602, "{error}");
 }
+
+#[test]
+fn relocation_is_described_as_cli_only_and_rejected_as_an_mcp_mutation() {
+    let (_dir, db) = temp_db("mcp-relocation-boundary");
+    let before = std::fs::read(&db).unwrap();
+    let cli = run_cli(&db, &["providers"]);
+    assert!(cli.status.success());
+    let providers: Value = serde_json::from_str(&stdout(&cli)).unwrap();
+    assert_eq!(
+        providers["data"]["relocation"]["interfaces"],
+        json!(["cli"])
+    );
+    let frames = mcp_session(
+        &db,
+        &[
+            initialize_request(1, "2025-06-18"),
+            initialized_notification(),
+            tool_call(2, "list_providers", json!({})),
+            tool_call(
+                3,
+                "relocate",
+                json!({
+                    "provider": "claude-code", "from": "/private/retired-root",
+                    "to": "/private/new-root", "apply": true, "plan": "private-plan",
+                    "backup": "/private/backup.db",
+                }),
+            ),
+            tool_call(4, "relocate.apply", json!({})),
+        ],
+    );
+    assert!(frame_by_id(&frames, 2)["result"]["structuredContent"]["data"]["providers"].is_array());
+    for id in [3, 4] {
+        let frame = frame_by_id(&frames, id);
+        assert_eq!(frame["error"]["code"], -32602);
+        assert!(frame["result"].is_null());
+        assert!(!frame.to_string().contains("/private/"));
+        assert!(!frame.to_string().contains("private-plan"));
+    }
+    assert_eq!(
+        std::fs::read(&db).unwrap(),
+        before,
+        "MCP cannot mutate relocation state"
+    );
+}
