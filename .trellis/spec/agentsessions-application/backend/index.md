@@ -65,7 +65,7 @@ adapters know *how*. Depends on `agentsessions-domain` and
   their source document, and missing placement spans remain explicitly
   `precision: unknown`.
 - Pagination model — offset inside cursor claims over a PINNED total order
-  (search: bm25 + id tiebreak = `SORT_SCORE_DESC`; list: wire id ASC =
+  (search: RRF + explicit lexical signals + wire-id tiebreak = `SORT_SCORE_DESC`; list: wire id ASC =
   `SORT_WIRE_ID_ASC`). Ports have no offset parameter: `handle` over-fetches
   `offset + page + 1` (sentinel for has_more) and slices. Any cursor failure is
   an explicit error — never a silent restart from page one.
@@ -85,8 +85,14 @@ adapters know *how*. Depends on `agentsessions-domain` and
 - Search filters use backend-independent normalized UTC instants. Provider
   values are sorted and deduplicated before cursor digesting; provider values
   are ORed, provider/time dimensions are ANDed, and the time interval is
-  half-open `[since, until)`. Omitted filters preserve the legacy digest and
-  storage query path.
+  half-open `[since, until)`. Search v2 digests bind requested/effective mode,
+  model, query-vector dimension/content, ranking version/window, result set,
+  filters/facets/visibility/grouping and current-repository signal. Old search
+  cursors fail explicitly; list cursor behavior is unchanged.
+- Search continuation retains verified `CursorClaims`: recency scoring uses
+  the first request's `issued_at_ms`; only `offset` changes between pages.
+  Preserve `expires_at_ms`, so search pagination never extends the original
+  15-minute TTL. The digest version includes the clock-anchor revision.
 - System-noise messages (payload `role` system/developer) are excluded from
   search by default; `include_system: true` opts back in. `group_by_session`
   collapses hits per session over a bounded scan window: the best-scoring hit
@@ -109,12 +115,49 @@ adapters know *how*. Depends on `agentsessions-domain` and
   non-ambiguous confidence adapter; a top-confidence tie across *different*
   variants is an error, not a coin flip.
 - `StagedMessage` — the in-memory staged row before commit
-  (seq / native_id / parent_native_id / role / text / timestamp / is_sidechain / span).
+  (session / seq / native_id / parent_native_id / role / text / timestamp / is_sidechain / span).
 - `StagedBatch` — all emitted messages plus the complete provider `ParseReport`;
   callers must retain committed/skipped/diagnostic accounting rather than
   replacing it with guessed zeros.
 
 ---
+
+## Scenario: Filtered retrieval, ranking and strict request time
+
+### 1. Scope / Trigger
+Search across lexical, semantic, hybrid and explicit fallback modes.
+
+### 2. Signatures
+`AppRequest::Search` includes filters, facets, mode, query embedding, visibility,
+cursor and budgets. `parse_search_instant(&str) -> Option<SearchInstant>` is the
+strict request boundary; the Domain sorting parser remains intentionally broader.
+
+### 3. Contracts
+Read readiness once and propagate errors. Semantic candidates use the same
+filters/facets/visibility as lexical candidates before the sentinel/limit.
+Search v2 ranking uses RRF k=60; lexical signal constants use that scale:
+sidechain penalty `0.25/61`, current-repo boost `0.5/61`, 30-day recency
+half-life and 0.3 floor. Semantic/hybrid final scores do not get lexical signals.
+Request clock components cannot be signed; all date/offset arithmetic is checked.
+
+### 4. Validation & Error Matrix
+Changed mode/model/vector/filter/ranking context -> `cursor_invalid`.
+Changed generation -> `generation_mismatch`. Non-finite semantic data and
+backend readiness failures -> explicit error. Invalid request time -> invalid request.
+
+### 5. Good/Base/Bad Cases
+Good: system rows before a user row do not consume `has_more`. Base: a genuinely
+unready index returns lexical fallback with a warning. Bad: treating NaN as an
+equal score or restarting a cursor after changing models.
+
+### 6. Tests Required
+Assert page concatenation, mode/model/dimension/visibility binding, facet
+delimiter collision resistance, backend errors, invalid times, and strong
+relevance retaining priority over weak repository/mainline preference.
+
+### 7. Wrong vs Correct
+Wrong: fetch `page+1`, then discard noise/metadata mismatches.
+Correct: filter before top-k, preserve the bounded ranking window, then page.
 
 ## Quality Check
 

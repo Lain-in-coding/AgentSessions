@@ -1050,6 +1050,7 @@ impl ProviderAdapter for CodexAdapter {
             }
 
             sink.emit_message(MessageEvent {
+                session: None,
                 seq,
                 native_id: &payload.id,
                 // Codex rollout 不提供显式父指针，线性序列的 threading 由上层推断。

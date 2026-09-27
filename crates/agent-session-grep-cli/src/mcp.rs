@@ -43,12 +43,10 @@ const INVALID_PARAMS: i64 = -32602;
 /// 截断处以 "..." 标记——超长输入不得放大错误帧。
 const ECHO_CAP: usize = 128;
 
-/// `providers` 过滤参数接受的取值全集：2 个 canonical id 加 1 个历史别名，与
-/// [`crate::canonical_search_provider`] 同一套取值。schema 的 `enum` 与 `maxItems`
-/// 以及运行时长度校验都从这里取——schema 里写了 `maxItems` 而运行时不查，等于
-/// 对调用方谎报约束（原先声明 2、运行时不查，5 个条目照常成功；而 2 本身也过紧：
-/// 三个合法拼写全给出就是 3 个条目）。
-const PROVIDER_FILTER_VALUES: [&str; 3] = ["claude", "claude-code", "codex"];
+/// Schema and runtime share the capability registry's canonical IDs and aliases.
+fn provider_filter_values() -> Vec<&'static str> {
+    agent_session_grep_ports::capability::search_provider_filter_values()
+}
 
 /// `tool_name` 过滤值的字符上界（schema `maxLength`）：provider 工具名
 /// （`Bash` / `Read` / `shell` / `mcp__server__tool`）远短于此，更长只可能是
@@ -497,63 +495,8 @@ impl McpServer<'_> {
             tool_kind,
             tool_name,
         };
-        // 语义/混合查询向量：与 CLI search 同一策略——有已导入且验证过的
-        // 本地 Candle E5 bundle 时用真实模型（进程内缓存，MCP 长连接下后续
-        // 查询零加载成本），否则回退 bigram-hash。向量索引未就绪时 Application
-        // 显式 lexical_fallback。
-        let query_embedding = if mode == RetrievalMode::Lexical {
-            None
-        } else {
-            use agent_session_grep_application::embedding::BigramHashModel;
-            use agent_session_grep_ports::EmbeddingModel;
-            let (model_id, embedding) = {
-                #[cfg(feature = "semantic-candle")]
-                {
-                    let cache = crate::platform_paths_for_mcp().ok().and_then(|v| {
-                        v.get("cache")
-                            .and_then(|c| c.as_str())
-                            .map(|s| s.to_string())
-                    });
-                    if let Some(cache) = cache {
-                        let dir =
-                            agent_session_grep_application::candle_embedding::default_model_dir(
-                                std::path::Path::new(&cache),
-                            );
-                        if let Ok(model) =
-                            agent_session_grep_application::candle_embedding::CandleE5Model::load_cached(
-                                &dir,
-                            )
-                        {
-                            let emb =
-                                model.embed(&query, true).map_err(|error| ToolError::Business(error.into()))?;
-                            (model.manifest().model_id.clone(), Some(emb))
-                        } else {
-                            let model = BigramHashModel::new();
-                            let emb = model
-                                .embed(&query, true)
-                                .map_err(|error| ToolError::Business(error.into()))?;
-                            (model.manifest().model_id.clone(), Some(emb))
-                        }
-                    } else {
-                        let model = BigramHashModel::new();
-                        let emb = model
-                            .embed(&query, true)
-                            .map_err(|error| ToolError::Business(error.into()))?;
-                        (model.manifest().model_id.clone(), Some(emb))
-                    }
-                }
-                #[cfg(not(feature = "semantic-candle"))]
-                {
-                    let model = BigramHashModel::new();
-                    let emb = model
-                        .embed(&query, true)
-                        .map_err(|error| ToolError::Business(error.into()))?;
-                    (model.manifest().model_id.clone(), Some(emb))
-                }
-            };
-            self.store.set_semantic_model(&model_id);
-            embedding
-        };
+        let query_embedding =
+            crate::prepare_search_embedding(self.store, mode, &query).map_err(business)?;
         let mut payload = self.run_app(AppRequest::Search {
             query,
             filters,
@@ -858,7 +801,7 @@ impl McpServer<'_> {
     /// 良构请求进 Application，成功走 CLI 同一个 [`render`] 投影；
     /// 失败即业务错误——此后不再产生 `-32602`（design §2 note）。
     fn run_app(&self, request: AppRequest) -> Result<Value, ToolError> {
-        let app = resume_app(self.store);
+        let app = crate::resume_semantic_app(self.store);
         match app.handle(request) {
             Ok(response) => {
                 let (outcome, data, page, warnings) = render(response);
@@ -922,8 +865,8 @@ fn tool_catalog() -> Value {
                     },
                     "providers": {
                         "type": "array",
-                        "maxItems": PROVIDER_FILTER_VALUES.len(),
-                        "items": { "type": "string", "enum": PROVIDER_FILTER_VALUES },
+                        "maxItems": provider_filter_values().len(),
+                        "items": { "type": "string", "enum": provider_filter_values() },
                         "description": "Restrict hits to these providers (OR). Omitted matches all providers."
                     },
                     "since": {
@@ -1160,8 +1103,8 @@ fn tool_catalog() -> Value {
                     },
                     "providers": {
                         "type": "array",
-                        "maxItems": PROVIDER_FILTER_VALUES.len(),
-                        "items": { "type": "string", "enum": PROVIDER_FILTER_VALUES },
+                        "maxItems": provider_filter_values().len(),
+                        "items": { "type": "string", "enum": provider_filter_values() },
                         "description": "Restrict hits to these providers (OR). Omitted matches all providers."
                     },
                     "since": {
@@ -1384,10 +1327,10 @@ fn opt_filters(args: &Map<String, Value>) -> Result<SearchFilters, ToolError> {
             return Err(ToolError::Params("providers must be an array".into()));
         };
         // schema `maxItems` 的代码侧强制（与 additionalProperties 同理）。
-        if entries.len() > PROVIDER_FILTER_VALUES.len() {
+        if entries.len() > provider_filter_values().len() {
             return Err(ToolError::Params(format!(
                 "providers must contain at most {} entries, got {}",
-                PROVIDER_FILTER_VALUES.len(),
+                provider_filter_values().len(),
                 entries.len()
             )));
         }
@@ -1401,8 +1344,8 @@ fn opt_filters(args: &Map<String, Value>) -> Result<SearchFilters, ToolError> {
                 .providers
                 .push(canonical_search_provider(provider).ok_or_else(|| {
                     ToolError::Params(format!(
-                        "providers must contain only claude|claude-code|codex, got {}",
-                        bounded(provider)
+                        "providers must contain only {}",
+                        crate::provider_value_hint()
                     ))
                 })?);
         }
@@ -2248,12 +2191,12 @@ mod tests {
             let providers = &tool["inputSchema"]["properties"]["providers"];
             assert_eq!(
                 providers["maxItems"],
-                json!(PROVIDER_FILTER_VALUES.len()),
+                json!(provider_filter_values().len()),
                 "{name}"
             );
             assert_eq!(
                 providers["items"]["enum"],
-                json!(PROVIDER_FILTER_VALUES),
+                json!(provider_filter_values()),
                 "{name}"
             );
         }
@@ -2266,7 +2209,7 @@ mod tests {
             json!(TOOL_NAME_MAX_CHARS)
         );
         // 声明的每个 enum 取值都必须真被运行时接受（反向也不能谎报）。
-        for value in PROVIDER_FILTER_VALUES {
+        for value in provider_filter_values() {
             assert!(
                 canonical_search_provider(value).is_some(),
                 "schema 声明了运行时不接受的 provider: {value}"
@@ -2277,7 +2220,7 @@ mod tests {
         let store = seeded_store(&dir);
         let mut server = ready(&store);
         let over_providers: Vec<Value> =
-            std::iter::repeat_n(json!("claude"), PROVIDER_FILTER_VALUES.len() + 1).collect();
+            std::iter::repeat_n(json!("claude"), provider_filter_values().len() + 1).collect();
         for (tool, arguments) in [
             (
                 "search_sessions",
@@ -2309,7 +2252,7 @@ mod tests {
             "search_sessions",
             json!({
                 "query": "hello",
-                "providers": PROVIDER_FILTER_VALUES,
+                "providers": provider_filter_values(),
                 "tool_name": "b".repeat(TOOL_NAME_MAX_CHARS)
             }),
         );
@@ -2326,7 +2269,7 @@ mod tests {
         let properties = &search["inputSchema"]["properties"];
         assert_eq!(
             properties["providers"]["items"]["enum"],
-            json!(["claude", "claude-code", "codex"])
+            json!(provider_filter_values())
         );
         assert_eq!(properties["since"]["type"], "string");
         assert_eq!(properties["until"]["type"], "string");
@@ -2728,7 +2671,7 @@ mod tests {
                 len_bytes: None,
                 fingerprint: None,
                 provider_id: None,
-                resume_claim: None,
+                resume_claims: Vec::new(),
             }])
             .expect("seed titled session");
         session
@@ -2949,7 +2892,7 @@ mod tests {
         );
         assert_eq!(
             properties["providers"]["maxItems"],
-            json!(PROVIDER_FILTER_VALUES.len())
+            json!(provider_filter_values().len())
         );
         assert_eq!(
             properties["tool_name"]["maxLength"],
@@ -3340,6 +3283,76 @@ mod tests {
         assert_eq!(result["content"][0]["type"], "text");
         let text = result["content"][0]["text"].as_str().expect("text content");
         assert_eq!(parse(text), *payload);
+    }
+
+    #[test]
+    fn semantic_and_provider_search_match_cli_with_real_ingested_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open_store(&dir);
+        let claude = dir.path().join("claude.jsonl");
+        let grok = dir.path().join("grok.jsonl");
+        std::fs::write(&claude, r#"{"type":"user","uuid":"filter-claude","sessionId":"filter-session","timestamp":"2026-01-01T00:00:00Z","message":{"role":"user","content":"needle claude"}}"#).unwrap();
+        std::fs::write(&grok, r#"{"params":{"update":{"sessionUpdate":"user_message_chunk","content":"needle grok"},"_meta":{"promptIndex":0}}}"#).unwrap();
+        for source in [&claude, &grok] {
+            crate::ingest_file(&store, source.to_str().unwrap()).unwrap();
+        }
+        let (built, _) = crate::build_embeddings(&store).unwrap();
+        assert_eq!(built["indexed"], 2);
+        let mut server = ready(&store);
+        for mode in ["lexical", "semantic", "hybrid"] {
+            let all = call(
+                &mut server,
+                "search_sessions",
+                json!({"query":"needle", "mode":mode}),
+            );
+            assert_eq!(
+                all["result"]["structuredContent"]["data"]["hits"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                2,
+                "{all}"
+            );
+            let filtered = call(
+                &mut server,
+                "search_sessions",
+                json!({"query":"needle", "mode":mode,"providers":["grok-build"]}),
+            );
+            let data = &filtered["result"]["structuredContent"]["data"];
+            assert_eq!(data["retrieval_mode"], mode, "{filtered}");
+            assert_eq!(data["hits"].as_array().unwrap().len(), 1, "{filtered}");
+            assert_eq!(data["hits"][0]["text"], "needle grok");
+            let args: Vec<String> = [
+                "search",
+                "needle",
+                "--mode",
+                mode,
+                "--provider",
+                "grok-build",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+            let (_, _, cli, _, _) = crate::dispatch(
+                &store,
+                "test.db",
+                &args,
+                protocol::OutputMode::Json,
+                None,
+                true,
+            )
+            .unwrap();
+            assert_eq!(data["hits"], cli["hits"]);
+            let future = call(
+                &mut server,
+                "search_sessions",
+                json!({"query":"needle", "mode":mode,"since":"2050-01-01T00:00:00Z"}),
+            );
+            assert_eq!(
+                future["result"]["structuredContent"]["data"]["hits"],
+                json!([])
+            );
+        }
     }
 
     #[test]

@@ -194,6 +194,7 @@ impl ProviderAdapter for OpenHermesAdapter {
                     .and_then(serde_json::Value::as_str)
                     .or(session_start);
                 sink.emit_message(MessageEvent {
+                    session: None,
                     seq,
                     native_id: "",
                     parent_native_id: None,

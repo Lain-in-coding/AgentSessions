@@ -63,8 +63,10 @@ providers all depend on it; it depends on none of them. Keep it that way.
   the SQLite adapter. Any code that needs the real tier must go through that
   sidecar or re-derive from the provider — never assume `from_wire` round-trips.
 - **Native identity is preferred.** When a provider supplies a native id (e.g.
-  Claude Code `uuid`, Codex `payload.id`), build `StableId::native` →
-  `Native` tier. The v7 no-native fallback is an `Unstable`, path-free
+  Claude Code `uuid`, Codex `payload.id`), use `StableId::native_checked` →
+  `Native` tier. Reject invalid input before normalization. The legacy `native`
+  constructor remains for persisted identity compatibility, not new input.
+  The v7 no-native fallback is an `Unstable`, path-free
   provider/variant/document/ordinal derivation owned by ingest, not Domain.
 - **Validation is explicit.** `SessionContextGraph::validate` checks ID kinds,
   unique messages/documents/placements/edge children, derived Placement IDs,
@@ -73,6 +75,40 @@ providers all depend on it; it depends on none of them. Keep it that way.
   selector error rather than fabricated validation.
 
 ---
+
+## Scenario: Provider identity and calendar boundaries
+
+### 1. Scope / Trigger
+Provider-controlled IDs and timestamps enter ingest and context ordering.
+
+### 2. Signatures
+`StableId::native_checked(IdKind, &str) -> DomainResult<StableId>`;
+`thread::parse_instant(&str) -> Option<Instant>` (internal).
+
+### 3. Contracts
+Checked native suffixes are nonempty, at most 256 Unicode characters, and
+contain no whitespace or controls. Accepted values are preserved verbatim;
+Unicode normalization is not identity normalization. Historical `ses_v1`
+derivation is unchanged. Calendar parsing validates month length and leap years;
+arithmetic overflow and invalid clock/offset/fraction text are rejected.
+
+### 4. Validation & Error Matrix
+Invalid native suffix -> `DomainError::InvalidRequest` without echoing the ID.
+Invalid sorting timestamp -> `None`, preserving the existing ordering fallback.
+
+### 5. Good/Base/Bad Cases
+Good: composed and decomposed Unicode IDs remain distinct. Base: a UUID keeps
+its existing wire ID. Bad: `a\0b`, `a b`, or a 257-character suffix is rejected;
+February 30 is not a valid instant.
+
+### 6. Tests Required
+Assert valid wire compatibility, non-colliding Unicode, overlength/control
+rejection, leap-century rules, extreme years, and invalid offsets.
+
+### 7. Wrong vs Correct
+Wrong: trim/remove controls/truncate before constructing a new native ID.
+Correct: validate the original value, fail the write on error, and leave
+historical identities unchanged.
 
 ## Quality Check
 

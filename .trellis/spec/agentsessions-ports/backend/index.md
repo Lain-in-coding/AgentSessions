@@ -47,13 +47,16 @@ Depends only on `agentsessions-domain`. Never depends on any adapter crate,
   "snapshot bytes" (not "file bytes") so a future row-level source (SQLite
   provider) can satisfy the same contract by making the extracted row payload
   the snapshot. `None` means the provider cannot attribute a contiguous span —
-  never fabricate one. `ParseReport.session_native_id` carries the provider's
-  durable session id (report-level, not per-message); `None` when absent.
+  never fabricate one. `MessageEvent.session` optionally carries a
+  `ProviderSessionIdentity { source_key, observation }` per message. The
+  source-local key distinguishes native-less sessions and is never exposed
+  as a provider-native ID. Report-level session fields are compatibility
+  observations for messages without an explicit session.
 - `ProviderAdapter` — `probe(bytes) -> Probe` + `parse(bytes, sink)`. The
   probe/select contract lives here; the selection *policy* lives in the
   application core.
 - `SearchQuery<'a>` — literal query text plus normalized `SearchFilters`.
-  Providers are backend-independent enum values; time bounds use a normalized
+  Providers are validated canonical values from the capability matrix; time bounds use a normalized
   `(unix_seconds, nanosecond)` instant. Adapters must apply filters before
   storage `LIMIT`, not post-filter paginated hits.
 - `SearchHit` — ranked stable identity plus additive text/session/guidance
@@ -124,6 +127,44 @@ fn load_session_graph(&self, session: &StableId)
 ```
 
 ---
+
+## Scenario: Shared retrieval and source contracts
+
+### 1. Scope / Trigger
+Search ports and multi-session source events cross application/adapter boundaries.
+
+### 2. Signatures
+`SemanticIndex::is_ready() -> PortResult<bool>`;
+`semantic_model_id() -> PortResult<Option<String>>`;
+`query_semantic_filtered(&[f32], usize, &SearchFilters, &SearchFacets, bool)`
+returns `PortResult<Vec<SearchHit>>`. `SearchIndex::query_with_policy` accepts
+the same facets and `include_system` visibility policy for lexical search.
+
+### 3. Contracts
+Apply filters/facets/visibility before top-k. Only `Ok(false)` readiness permits
+explicit lexical fallback; errors retain their port classification. Reject
+non-finite vectors/scores. `SearchProvider` is a private canonical wrapper:
+accepted IDs come from implemented searchable capability rows, with the
+historical `claude` alias. Source fingerprints are opaque: file BLAKE3 hex or
+`sqlite:<logical-backup-BLAKE3>`; source paths remain locators.
+
+### 4. Validation & Error Matrix
+Unknown/deferred provider -> boundary invalid request. Missing semantic index
+-> explicit fallback. Backend/schema/busy failures -> errors, never absence.
+
+### 5. Good/Base/Bad Cases
+Good: two sessions in one source retain different observations. Base: absent
+event session uses the report observation. Bad: treating a source-local key
+as a native resume ID, or filtering an already truncated semantic result.
+
+### 6. Tests Required
+Assert registry/runtime/schema parity, trait forwarding, readiness error
+propagation, metadata/facet visibility, and staged session preservation.
+
+### 7. Wrong vs Correct
+Wrong: `is_ready().unwrap_or(false)` or a second hard-coded provider list.
+Correct: propagate readiness errors and derive accepted provider values from
+the capability registry.
 
 ## Quality Check
 

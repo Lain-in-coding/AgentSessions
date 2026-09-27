@@ -444,6 +444,15 @@ fn run(
     }
 
     let (db, rest) = parse_db_flag(args)?;
+    // Disabled hooks and payloads without a query have no catalog dependency.
+    if rest.first().map(String::as_str) == Some("hook") {
+        let data = hook_data(&db, &rest, offline)?;
+        if let Some(line) = hooks::hook_stdout_line(&data) {
+            protocol::write_stdout_line(&line);
+        }
+        eprintln!("{}", hooks::hook_diagnostics(&data));
+        return Ok(protocol::Outcome::Success);
+    }
     // 写入子命令抢 data-root writer lease；读路径不抢，允许多读者并发。
     let writes = rest
         .first()
@@ -521,17 +530,6 @@ fn run(
     // 故这里克隆一个连接语义上的第二把手不可行——改为让 App 持有单一 store。
     let (command, outcome, data, page, warnings) =
         dispatch(&store, &db, &rest, mode, request_id, offline)?;
-    // hook：Claude Code 直接把这条命令的 stdout 当协议读（同 mcp/tui/serve 一类，
-    // 输出模式 flag 对其无意义）。套 envelope 会把 `hookSpecificOutput` 埋深一层
-    // 而失效，envelope 自身又会被原样注入会话上下文；未启用时一个字节都不写。
-    // 运行事实走 stderr（exit 0 的 stderr 只进 Claude Code 调试日志）。
-    if command == "hook" {
-        if let Some(line) = hooks::hook_stdout_line(&data) {
-            protocol::write_stdout_line(&line);
-        }
-        eprintln!("{}", hooks::hook_diagnostics(&data));
-        return Ok(protocol::Outcome::Success);
-    }
     let duration_ms = started.elapsed().as_millis() as u64;
     // 生效检索模式：search 的 data 已含 `retrieval_mode` 字段（render 投影）；
     // 其他命令恒为 lexical。
@@ -557,6 +555,105 @@ fn run(
         retrieval_mode,
     );
     Ok(outcome)
+}
+
+/// Parse hook input before opening a read-only catalog. Only an enabled hook
+/// with an actual query needs storage; no-op hooks remain usable on a fresh install.
+fn hook_data(db: &str, rest: &[String], offline: bool) -> Result<serde_json::Value, CliError> {
+    // Claude Code Hook（#8）：默认关闭，用户显式 --enable 才注入历史上下文。
+    // payload 从 stdin 读，输出走 Claude Code 的 hookSpecificOutput 契约。
+    // 未启用时输出空 context——不报错、不注入任何历史。
+    let mut args = rest.to_vec();
+    let max_tokens_flag = extract_flag(&mut args, "--max-tokens")?;
+    let enabled = take_bool_flag(&mut args, "--enable");
+    // #8 hook provider/time filter：--provider 可重复（OR），--decay-days
+    // 限定时间窗（0 = 不过滤）。两者都是 opt-in，缺省空/0 = 全部历史。
+    // --repo（schema v16）同为 opt-in：只注入该仓库的历史（与 search
+    // `--repo` / MCP `repo` 同一维度与同一语义）。
+    let providers = extract_repeated_flag(&mut args, "--provider")?;
+    let decay_days = extract_flag(&mut args, "--decay-days")?;
+    let repo = extract_flag(&mut args, "--repo")?;
+    no_extra_args(&args, 1, "hook <session-start|user-prompt-submit>")?;
+    let raw_event = arg(&args, 1, "hook <session-start|user-prompt-submit>")?;
+    let event = hooks::HookEvent::parse(raw_event).ok_or_else(|| {
+        CliError::usage("hook <event>: event must be session-start|user-prompt-submit")
+    })?;
+    let max_tokens = max_tokens_flag
+        .as_deref()
+        .map(|v| {
+            v.parse::<u64>()
+                .map_err(|_| CliError::usage("--max-tokens 需要非负整数"))
+        })
+        .transpose()?
+        .unwrap_or(2000);
+    let config = hooks::HookConfig {
+        enabled,
+        max_tokens,
+        providers,
+        decay_days: decay_days
+            .as_deref()
+            .map(|v| {
+                v.parse::<u32>()
+                    .map_err(|_| CliError::usage("--decay-days 需要非负整数"))
+            })
+            .transpose()?
+            .unwrap_or(0),
+        repo,
+        ..Default::default()
+    };
+    // stdin payload 允许为空（手工调用/探测）：空即无 query，注入空 context。
+    let mut raw_payload = String::new();
+    use std::io::Read as _;
+    std::io::stdin()
+        .read_to_string(&mut raw_payload)
+        .map_err(|_| CliError::usage("hook: failed to read payload from stdin"))?;
+    let payload: serde_json::Value = if raw_payload.trim().is_empty() {
+        serde_json::json!({})
+    } else {
+        serde_json::from_str(&raw_payload)
+            .map_err(|_| CliError::usage("hook: payload is not valid JSON"))?
+    };
+    let query = hooks::query_from_payload(event, &payload);
+    let (text, hits_count) = match (config.should_run(), query) {
+        (true, Some(query)) => {
+            let store = SqliteStore::open(db).map_err(ProtocolError::from)?;
+            let app = resume_app(&store);
+            let response = app.handle(AppRequest::Search {
+                query: query.clone(),
+                filters: hook_search_filters(&config, app.now_ms())?,
+                facets: SearchFacets::default(),
+                limit: 10,
+                cursor: None,
+                budget: ResponseBudget::default(),
+                include_system: false,
+                group_by_session: true,
+                mode: RetrievalMode::Lexical,
+                query_embedding: None,
+            })?;
+            let AppResponse::Search { hits, .. } = response else {
+                return Err(CliError::usage("hook: unexpected search response"));
+            };
+            let mut text = hooks::format_context_header(&query, hits.len());
+            for hit in &hits {
+                // Hook 注入是跨边界输出：文本经脱敏后才进入其他 agent 上下文。
+                let (body, _) = redaction::redact_text(hit.text.as_deref().unwrap_or(""));
+                text.push_str(&format!("- [{}] {}\n", hit.id.as_str(), body));
+            }
+            let count = hits.len();
+            (text, count)
+        }
+        _ => (String::new(), 0usize),
+    };
+    let output = hooks::build_hook_output(event, &text, config.max_tokens);
+    let mut data = serde_json::to_value(&output)
+        .map_err(|e| CliError::usage(format!("hook: serialization error: {e}")))?;
+    if let Some(object) = data.as_object_mut() {
+        object.insert("event".into(), serde_json::json!(event.as_str()));
+        object.insert("enabled".into(), serde_json::json!(config.should_run()));
+        object.insert("offline".into(), serde_json::json!(offline));
+        object.insert("hits".into(), serde_json::json!(hits_count));
+    }
+    Ok(data)
 }
 
 /// 成功结果的统一出口（contract §6 truth table）：
@@ -881,13 +978,6 @@ fn model_command(
 }
 
 fn platform_paths() -> Result<serde_json::Value, CliError> {
-    platform_paths_impl()
-}
-
-/// MCP 侧可直接调用的平台路径解析（无需 CliError 转协议）。
-/// 仅在 semantic-candle 构建下被 mcp.rs 使用。
-#[cfg(feature = "semantic-candle")]
-pub(crate) fn platform_paths_for_mcp() -> Result<serde_json::Value, CliError> {
     platform_paths_impl()
 }
 
@@ -1836,6 +1926,8 @@ fn dispatch(
             // store.is_ready() 为 false，Application 显式降级为 lexical_fallback
             // + warning（禁止静默切换）。
             let query = arg(&args, 1, "search <query>")?.to_string();
+            let query_embedding =
+                prepare_search_embedding(store, retrieval_mode, &query).map_err(CliError)?;
             let response = if retrieval_mode == RetrievalMode::Lexical {
                 let app = resume_app(store);
                 app.handle(AppRequest::Search {
@@ -1848,57 +1940,9 @@ fn dispatch(
                     include_system,
                     group_by_session,
                     mode: retrieval_mode,
-                    query_embedding: None,
+                    query_embedding,
                 })?
             } else {
-                // Prefer a verified local Candle E5 bundle when the binary was
-                // built with --features semantic-candle and the operator has
-                // imported weights; otherwise stay on the honest bigram-hash
-                // path (and the store will lexical_fallback if empty).
-                use agent_session_grep_application::embedding::{
-                    BIGRAM_HASH_MODEL_ID, BigramHashModel,
-                };
-                use agent_session_grep_ports::EmbeddingModel;
-
-                let (model_id, query_embedding) = {
-                    #[cfg(feature = "semantic-candle")]
-                    {
-                        let cache = platform_paths().ok().and_then(|v| {
-                            v.get("cache")
-                                .and_then(|c| c.as_str())
-                                .map(|s| s.to_string())
-                        });
-                        if let Some(cache) = cache {
-                            let dir =
-                                agent_session_grep_application::candle_embedding::default_model_dir(
-                                    std::path::Path::new(&cache),
-                                );
-                            if let Ok(model) =
-                                agent_session_grep_application::candle_embedding::CandleE5Model::load_cached(
-                                    &dir,
-                                )
-                            {
-                                let emb = model.embed(&query, true).map_err(ProtocolError::from)?;
-                                (model.manifest().model_id.clone(), emb)
-                            } else {
-                                let model = BigramHashModel::new();
-                                let emb = model.embed(&query, true).map_err(ProtocolError::from)?;
-                                (BIGRAM_HASH_MODEL_ID.to_string(), emb)
-                            }
-                        } else {
-                            let model = BigramHashModel::new();
-                            let emb = model.embed(&query, true).map_err(ProtocolError::from)?;
-                            (BIGRAM_HASH_MODEL_ID.to_string(), emb)
-                        }
-                    }
-                    #[cfg(not(feature = "semantic-candle"))]
-                    {
-                        let model = BigramHashModel::new();
-                        let emb = model.embed(&query, true).map_err(ProtocolError::from)?;
-                        (BIGRAM_HASH_MODEL_ID.to_string(), emb)
-                    }
-                };
-                store.set_semantic_model(&model_id);
                 let app = resume_semantic_app(store);
                 app.handle(AppRequest::Search {
                     query,
@@ -1910,7 +1954,7 @@ fn dispatch(
                     include_system,
                     group_by_session,
                     mode: retrieval_mode,
-                    query_embedding: Some(query_embedding),
+                    query_embedding,
                 })?
             };
             let (outcome, mut data, page, warnings) = render(response);
@@ -2235,107 +2279,6 @@ fn dispatch(
                 warnings,
             ))
         }
-        "hook" => {
-            // Claude Code Hook（#8）：默认关闭，用户显式 --enable 才注入历史上下文。
-            // payload 从 stdin 读，输出走 Claude Code 的 hookSpecificOutput 契约。
-            // 未启用时输出空 context——不报错、不注入任何历史。
-            let mut args = rest.to_vec();
-            let max_tokens_flag = extract_flag(&mut args, "--max-tokens")?;
-            let enabled = take_bool_flag(&mut args, "--enable");
-            // #8 hook provider/time filter：--provider 可重复（OR），--decay-days
-            // 限定时间窗（0 = 不过滤）。两者都是 opt-in，缺省空/0 = 全部历史。
-            // --repo（schema v16）同为 opt-in：只注入该仓库的历史（与 search
-            // `--repo` / MCP `repo` 同一维度与同一语义）。
-            let providers = extract_repeated_flag(&mut args, "--provider")?;
-            let decay_days = extract_flag(&mut args, "--decay-days")?;
-            let repo = extract_flag(&mut args, "--repo")?;
-            no_extra_args(&args, 1, "hook <session-start|user-prompt-submit>")?;
-            let raw_event = arg(&args, 1, "hook <session-start|user-prompt-submit>")?;
-            let event = hooks::HookEvent::parse(raw_event).ok_or_else(|| {
-                CliError::usage("hook <event>: event must be session-start|user-prompt-submit")
-            })?;
-            let max_tokens = max_tokens_flag
-                .as_deref()
-                .map(|v| {
-                    v.parse::<u64>()
-                        .map_err(|_| CliError::usage("--max-tokens 需要非负整数"))
-                })
-                .transpose()?
-                .unwrap_or(2000);
-            let config = hooks::HookConfig {
-                enabled,
-                max_tokens,
-                providers,
-                decay_days: decay_days
-                    .as_deref()
-                    .map(|v| {
-                        v.parse::<u32>()
-                            .map_err(|_| CliError::usage("--decay-days 需要非负整数"))
-                    })
-                    .transpose()?
-                    .unwrap_or(0),
-                repo,
-                ..Default::default()
-            };
-            // stdin payload 允许为空（手工调用/探测）：空即无 query，注入空 context。
-            let mut raw_payload = String::new();
-            use std::io::Read as _;
-            std::io::stdin()
-                .read_to_string(&mut raw_payload)
-                .map_err(|_| CliError::usage("hook: failed to read payload from stdin"))?;
-            let payload: serde_json::Value = if raw_payload.trim().is_empty() {
-                serde_json::json!({})
-            } else {
-                serde_json::from_str(&raw_payload)
-                    .map_err(|_| CliError::usage("hook: payload is not valid JSON"))?
-            };
-            let query = hooks::query_from_payload(event, &payload);
-            let (text, hits_count) = match (config.should_run(), query) {
-                (true, Some(query)) => {
-                    let app = resume_app(store);
-                    let response = app.handle(AppRequest::Search {
-                        query: query.clone(),
-                        filters: hook_search_filters(&config, app.now_ms())?,
-                        facets: SearchFacets::default(),
-                        limit: 10,
-                        cursor: None,
-                        budget: ResponseBudget::default(),
-                        include_system: false,
-                        group_by_session: true,
-                        mode: RetrievalMode::Lexical,
-                        query_embedding: None,
-                    })?;
-                    let AppResponse::Search { hits, .. } = response else {
-                        return Err(CliError::usage("hook: unexpected search response"));
-                    };
-                    let mut text = hooks::format_context_header(&query, hits.len());
-                    for hit in &hits {
-                        // Hook 注入是跨边界输出：文本经脱敏后才进入其他 agent 上下文。
-                        let (body, _) = redaction::redact_text(hit.text.as_deref().unwrap_or(""));
-                        text.push_str(&format!("- [{}] {}\n", hit.id.as_str(), body));
-                    }
-                    let count = hits.len();
-                    (text, count)
-                }
-                _ => (String::new(), 0usize),
-            };
-            let output = hooks::build_hook_output(event, &text, config.max_tokens);
-            let mut data = serde_json::to_value(&output)
-                .map_err(|e| CliError::usage(format!("hook: serialization error: {e}")))?;
-            if let Some(object) = data.as_object_mut() {
-                object.insert("event".into(), serde_json::json!(event.as_str()));
-                object.insert("enabled".into(), serde_json::json!(config.should_run()));
-                object.insert("offline".into(), serde_json::json!(offline));
-                object.insert("hits".into(), serde_json::json!(hits_count));
-            }
-            Ok((
-                "hook",
-                protocol::Outcome::Success,
-                data,
-                protocol::Page::default(),
-                Vec::new(),
-            ))
-        }
         "get-session-resume" => {
             // 只读 Resume Metadata（ADR-0009）：只返回结构化字段，绝不构造/执行
             // shell 命令、绝不返回 transcript/source path。
@@ -2485,7 +2428,8 @@ fn search_filters_from_flags(
             .providers
             .push(canonical_search_provider(provider).ok_or_else(|| {
                 CliError::usage(format!(
-                    "unknown provider: {provider} (expected {PROVIDER_VALUE_HINT})"
+                    "unknown provider: {provider} (expected {})",
+                    provider_value_hint()
                 ))
             })?);
     }
@@ -2503,8 +2447,11 @@ fn search_filters_from_flags(
     Ok(filters)
 }
 
-/// Accepted `--provider` values, rendered in every provider usage error.
-const PROVIDER_VALUE_HINT: &str = "claude|claude-code|codex";
+/// Accepted provider spellings come from the capability registry used by every
+/// search entrypoint and by the MCP schema.
+pub(crate) fn provider_value_hint() -> String {
+    agent_session_grep_ports::capability::search_provider_filter_values().join("|")
+}
 
 /// Normalize one provider request value to [`SearchProvider`]; `None` = unknown.
 ///
@@ -2518,11 +2465,7 @@ const PROVIDER_VALUE_HINT: &str = "claude|claude-code|codex";
 /// loopback surface forbids. Unknown values stay fail-closed (usage error at
 /// the caller), never silently dropped.
 fn canonical_search_provider(provider: &str) -> Option<SearchProvider> {
-    match provider {
-        "claude" | "claude-code" => Some(SearchProvider::Claude),
-        "codex" => Some(SearchProvider::Codex),
-        _ => None,
-    }
+    SearchProvider::parse(provider)
 }
 
 /// 从 HookConfig 构建检索过滤（#8）：provider 白名单（空 = 全部）、时间衰减
@@ -2538,7 +2481,8 @@ fn hook_search_filters(config: &hooks::HookConfig, now_ms: i64) -> Result<Search
             .providers
             .push(canonical_search_provider(provider).ok_or_else(|| {
                 CliError::usage(format!(
-                    "hook --provider: unknown provider {provider} (expected {PROVIDER_VALUE_HINT})"
+                    "hook --provider: unknown provider {provider} (expected {})",
+                    provider_value_hint()
                 ))
             })?);
     }
@@ -2711,9 +2655,9 @@ fn provider_binary_on_path(binary: &str) -> bool {
 
 /// 从权威 catalog 重建语义向量索引（`index embeddings`，#3）。
 ///
-/// 与 FTS rebuild 同一语义：向量表是 catalog 的投影，整表清空后按 catalog
-/// 重投影，失败不留半成品（每条 upsert 独立，重跑幂等）。只对 Message 实体
-/// 建向量——session/document 没有检索正文。
+/// 与 FTS rebuild 同一语义：向量表是 catalog 的投影。以有界 keyset 批次扫描，
+/// 替换向量与 generation 在同一事务提交；编码失败保留旧投影。只对 Message
+/// 实体建向量——session/document 没有检索正文。
 ///
 /// Model selection:
 /// - With `--features semantic-candle` and a verified local E5 bundle under the
@@ -2723,7 +2667,7 @@ fn provider_binary_on_path(binary: &str) -> bool {
 ///   and emits the experimental warning (default release path).
 fn build_embeddings(store: &SqliteStore) -> Result<(serde_json::Value, Vec<String>), CliError> {
     use agent_session_grep_application::embedding::BigramHashModel;
-    use agent_session_grep_ports::{CatalogStore, EmbeddingModel, SemanticIndex};
+    use agent_session_grep_ports::EmbeddingModel;
 
     enum ActiveModel {
         Bigram(BigramHashModel),
@@ -2735,11 +2679,22 @@ fn build_embeddings(store: &SqliteStore) -> Result<(serde_json::Value, Vec<Strin
     }
 
     impl ActiveModel {
-        fn embed(&self, text: &str, is_query: bool) -> Result<Vec<f32>, ProtocolError> {
+        fn embed(
+            &self,
+            text: &str,
+            is_query: bool,
+        ) -> agent_session_grep_ports::PortResult<Vec<f32>> {
             match self {
-                Self::Bigram(m) => m.embed(text, is_query).map_err(ProtocolError::from),
+                Self::Bigram(m) => m.embed(text, is_query),
                 #[cfg(feature = "semantic-candle")]
-                Self::Candle(m) => m.embed(text, is_query).map_err(ProtocolError::from),
+                Self::Candle(m) => m.embed(text, is_query),
+            }
+        }
+        fn dimension(&self) -> usize {
+            match self {
+                Self::Bigram(m) => m.dimension(),
+                #[cfg(feature = "semantic-candle")]
+                Self::Candle(m) => m.dimension(),
             }
         }
         fn model_id(&self) -> &str {
@@ -2816,40 +2771,19 @@ fn build_embeddings(store: &SqliteStore) -> Result<(serde_json::Value, Vec<Strin
 
     let model_id = model.model_id().to_string();
     store.set_semantic_model(&model_id);
-    // 先清除本模型的旧向量：重建语义与 `index rebuild` 一致（整表重投影，
-    // 不是增量补齐），否则 catalog 里已删除的实体会留下孤儿向量。
-    let cleared = store
-        .clear_embeddings(&model_id)
+    let (indexed, skipped, cleared) = store
+        .rebuild_embeddings_from_catalog(&model_id, model.dimension(), 128, |entry| {
+            let payload = serde_json::from_slice::<serde_json::Value>(&entry.payload).ok();
+            let text = payload
+                .as_ref()
+                .and_then(|value| value.get("text"))
+                .and_then(serde_json::Value::as_str);
+            match text.filter(|text| !text.trim().is_empty()) {
+                Some(text) => model.embed(text, false).map(Some),
+                None => Ok(None),
+            }
+        })
         .map_err(ProtocolError::from)?;
-
-    // catalog 全量扫描：payload 里没有可检索正文的实体跳过（不臆造向量）。
-    let entries = store.list(usize::MAX).map_err(ProtocolError::from)?;
-    let mut indexed = 0usize;
-    let mut skipped = 0usize;
-    for entry in &entries {
-        if entry.id.kind() != IdKind::Message {
-            skipped += 1;
-            continue;
-        }
-        let text = serde_json::from_slice::<serde_json::Value>(&entry.payload)
-            .ok()
-            .and_then(|value| {
-                value
-                    .get("text")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_string)
-            })
-            .unwrap_or_default();
-        if text.trim().is_empty() {
-            skipped += 1;
-            continue;
-        }
-        let vector = model.embed(&text, false)?;
-        store
-            .index_embedding(&entry.id, &vector)
-            .map_err(ProtocolError::from)?;
-        indexed += 1;
-    }
 
     let mut data = model.manifest_json();
     if let Some(obj) = data.as_object_mut() {
@@ -2949,6 +2883,63 @@ fn current_repo_slug() -> Option<String> {
     let cwd = std::env::current_dir().ok()?;
     let resolver = repo_identity::GitRepoSlugResolver::default();
     agent_session_grep_adapters_sqlite::RepoSlugResolver::resolve(&resolver, &cwd.to_string_lossy())
+}
+
+/// Resolve the local query encoder once at the composition root so CLI and
+/// MCP semantic requests use the same model identity and fallback behavior.
+pub(crate) fn prepare_search_embedding(
+    store: &SqliteStore,
+    mode: RetrievalMode,
+    query: &str,
+) -> Result<Option<Vec<f32>>, ProtocolError> {
+    if matches!(
+        mode,
+        RetrievalMode::Lexical | RetrievalMode::LexicalFallback
+    ) {
+        return Ok(None);
+    }
+
+    use agent_session_grep_application::embedding::{BIGRAM_HASH_MODEL_ID, BigramHashModel};
+    use agent_session_grep_ports::EmbeddingModel;
+
+    let bigram_embedding = || -> Result<(String, Vec<f32>), ProtocolError> {
+        let model = BigramHashModel::new();
+        let embedding = model.embed(query, true).map_err(ProtocolError::from)?;
+        Ok((BIGRAM_HASH_MODEL_ID.to_string(), embedding))
+    };
+
+    #[cfg(feature = "semantic-candle")]
+    let (model_id, embedding) = {
+        let cached_model = platform_paths()
+            .ok()
+            .and_then(|paths| {
+                paths
+                    .get("cache")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_owned)
+            })
+            .map(|cache| {
+                let dir = agent_session_grep_application::candle_embedding::default_model_dir(
+                    std::path::Path::new(&cache),
+                );
+                agent_session_grep_application::candle_embedding::CandleE5Model::load_cached(dir)
+            })
+            .and_then(Result::ok);
+        if let Some(model) = cached_model {
+            (
+                model.manifest().model_id.clone(),
+                model.embed(query, true).map_err(ProtocolError::from)?,
+            )
+        } else {
+            bigram_embedding()?
+        }
+    };
+
+    #[cfg(not(feature = "semantic-candle"))]
+    let (model_id, embedding) = bigram_embedding()?;
+
+    store.set_semantic_model(&model_id);
+    Ok(Some(embedding))
 }
 
 /// Human search 的会话表格行按 canonical Session 去重后批量解析 Resume
@@ -3467,7 +3458,7 @@ fn sync_discover(
                     len_bytes: None,
                     fingerprint: None,
                     provider_id: Some(pid.clone()),
-                    resume_claim: None,
+                    resume_claims: Vec::new(),
                 });
                 removed += 1;
             }
@@ -3545,9 +3536,9 @@ fn derive_message_id(
     provider_id: &str,
     variant: &str,
     document_wire: &str,
-) -> StableId {
-    if native_id.trim().is_empty() {
-        StableId::derive(
+) -> Result<StableId, CliError> {
+    if native_id.is_empty() {
+        Ok(StableId::derive(
             IdKind::Message,
             Stability::Unstable,
             &[
@@ -3556,9 +3547,9 @@ fn derive_message_id(
                 document_wire.as_bytes(),
                 &seq.to_le_bytes(),
             ],
-        )
+        ))
     } else {
-        StableId::native(IdKind::Message, native_id)
+        Ok(StableId::native_checked(IdKind::Message, native_id)?)
     }
 }
 
@@ -3609,12 +3600,10 @@ fn staged_to_source_with_provider(
             fingerprint.as_bytes(),
         ],
     );
-    // 会话实体：native id 优先；缺失回退 document 派生（一文档一会话，见 design §9）。
-    // Native 路径必须走 namespaced 构造函数（identity 前置）：canonical 身份 =
-    // digest(provider, installation, native id)，同 native id 跨 provider/安装
-    // 绝不碰撞；wire 仍为 `ses_v1_` + digest，native id 单独经 Resume claim 持久化。
+    // Report-level identity remains the single-session compatibility path.
+    // Explicit per-message identities below take precedence for multi-session sources.
     let install_ns = installation_namespace(path, provider_id);
-    let session_id = match staged.report.session_native_id.as_deref() {
+    let fallback_session_id = match staged.report.session_native_id.as_deref() {
         Some(sid) if !sid.trim().is_empty() => StableId::native_session_scoped(
             &SessionIdentityNamespace {
                 provider_id,
@@ -3629,12 +3618,110 @@ fn staged_to_source_with_provider(
         ),
     };
 
+    if staged.report.session_observation.multi_session
+        && staged
+            .messages
+            .iter()
+            .any(|message| message.session.is_none())
+    {
+        return Err(DomainError::InvalidRequest(
+            "provider reported multiple sessions without per-message session identities".into(),
+        )
+        .into());
+    }
+
+    let mut session_members = BTreeMap::<String, (StableId, Vec<String>, BTreeSet<String>)>::new();
+    let mut resume_claims_by_session = BTreeMap::<String, SourceResumeClaim>::new();
+    let mut message_session_ids = Vec::with_capacity(staged.messages.len());
+    for message in &staged.messages {
+        let (session_id, observation) = match message.session.as_ref() {
+            Some(identity) => {
+                if identity.source_key.trim().is_empty() {
+                    return Err(DomainError::InvalidRequest(
+                        "provider emitted an empty source-local session key".into(),
+                    )
+                    .into());
+                }
+                let native_id = match &identity.observation.provider_session_id {
+                    agent_session_grep_ports::MetadataResolution::Resolved(value)
+                        if !value.trim().is_empty() =>
+                    {
+                        Some(value.as_str())
+                    }
+                    _ => None,
+                };
+                let session_id = if let Some(native_id) = native_id {
+                    StableId::native_session_scoped(
+                        &SessionIdentityNamespace {
+                            provider_id,
+                            installation_namespace: &install_ns,
+                        },
+                        native_id,
+                    )
+                } else {
+                    StableId::derive(
+                        IdKind::Session,
+                        Stability::Unstable,
+                        &[
+                            provider_id.as_bytes(),
+                            variant.as_bytes(),
+                            document_id.as_str().as_bytes(),
+                            identity.source_key.as_bytes(),
+                        ],
+                    )
+                };
+                (session_id, Some(&identity.observation))
+            }
+            None => (
+                fallback_session_id.clone(),
+                Some(&staged.report.session_observation),
+            ),
+        };
+
+        let session_key = session_id.as_str().to_string();
+        session_members
+            .entry(session_key.clone())
+            .or_insert_with(|| (session_id.clone(), Vec::new(), BTreeSet::new()));
+        if provider_id != "empty"
+            && let Some(observation) = observation
+        {
+            let claim =
+                SourceResumeClaim::from_observation(provider_id, session_id.as_str(), observation);
+            if let Some(existing) = resume_claims_by_session.get(&session_key) {
+                if existing != &claim {
+                    return Err(DomainError::InvalidRequest(
+                        "conflicting resume metadata for one source session".into(),
+                    )
+                    .into());
+                }
+            } else {
+                resume_claims_by_session.insert(session_key, claim);
+            }
+        }
+        message_session_ids.push(session_id);
+    }
+    if staged.messages.is_empty() {
+        let session_key = fallback_session_id.as_str().to_string();
+        session_members.insert(
+            session_key.clone(),
+            (fallback_session_id.clone(), Vec::new(), BTreeSet::new()),
+        );
+        if provider_id != "empty" {
+            resume_claims_by_session.insert(
+                session_key,
+                SourceResumeClaim::from_observation(
+                    provider_id,
+                    fallback_session_id.as_str(),
+                    &staged.report.session_observation,
+                ),
+            );
+        }
+    }
+
     let mut entities = BTreeMap::<String, StagedMessageEntity>::new();
-    let mut member_ids = Vec::new();
-    let mut seen_members = BTreeSet::new();
     let mut placements = Vec::with_capacity(staged.messages.len());
     let mut edges = Vec::new();
-    for message in &staged.messages {
+    for (message, session_id) in staged.messages.iter().zip(&message_session_ids) {
         if let Some((start, end)) = message.span
             && (end < start || end > source_len)
         {
@@ -3649,7 +3736,7 @@ fn staged_to_source_with_provider(
             provider_id,
             variant,
             document_id.as_str(),
-        );
+        )?;
         let span = message.span.map(|(start, end)| EvidenceSpan { start, end });
         let placement = MessagePlacement::new(
             session_id.clone(),
@@ -3662,8 +3749,9 @@ fn staged_to_source_with_provider(
         let parent_id = message
             .parent_native_id
             .as_deref()
-            .filter(|parent| !parent.trim().is_empty())
-            .map(|parent| StableId::native(IdKind::Message, parent));
+            .filter(|parent| !parent.is_empty())
+            .map(|parent| StableId::native_checked(IdKind::Message, parent))
+            .transpose()?;
         if let Some(parent_message_id) = &parent_id {
             edges.push(MessageEdge {
                 child_placement_id: placement.id.clone(),
@@ -3681,8 +3769,17 @@ fn staged_to_source_with_provider(
                 },
             });
         }
+        let (member_session, members, seen_members) = session_members
+            .get_mut(session_id.as_str())
+            .expect("every staged message session was registered");
+        if member_session != session_id {
+            return Err(DomainError::InvariantViolation(
+                "session member map has a conflicting canonical identity".into(),
+            )
+            .into());
+        }
         if seen_members.insert(id.as_str().to_string()) {
-            member_ids.push(id.as_str().to_string());
+            members.push(id.as_str().to_string());
         }
         match entities.entry(id.as_str().to_string()) {
             std::collections::btree_map::Entry::Vacant(entry) => {
@@ -3766,6 +3863,12 @@ fn staged_to_source_with_provider(
                 })
             })
             .collect();
+        let session_ids: BTreeSet<String> = occurrences
+            .iter()
+            .map(|(placement, _, _)| placement.session_id.as_str().to_string())
+            .collect();
+        let session_ids: Vec<String> = session_ids.into_iter().collect();
+        let primary_session = (session_ids.len() == 1).then(|| session_ids[0].clone());
         let payload = serde_json::json!({
             "role": entity.role,
             "text": entity.text,
@@ -3773,8 +3876,8 @@ fn staged_to_source_with_provider(
             "parent": parent,
             "parent_native_id": parent_native_id,
             "is_sidechain": is_sidechain,
-            "session": session_id.as_str(),
-            "sessions": [session_id.as_str()],
+            "session": primary_session,
+            "sessions": session_ids,
             "span": spans.first().map(|span| serde_json::json!({
                 "start": span["start"],
                 "end": span["end"],
@@ -3789,12 +3892,6 @@ fn staged_to_source_with_provider(
         entries.push((entity.id, payload, bounded_index_text(&entity.text)));
     }
 
-    let session_payload = serde_json::json!({
-        "documents": [document_id.as_str()],
-        "document": document_id.as_str(),
-        "messages": member_ids,
-    })
-    .to_string();
     let document_payload = serde_json::json!({
         "provider": provider_id,
         "variant": variant,
@@ -3802,22 +3899,21 @@ fn staged_to_source_with_provider(
         "len": source_len,
     })
     .to_string();
-    // Source-scoped Resume Metadata 声明（ADR-0009）：把 provider 观察归一为
-    // claim，随本批 source 事务原子写入；缺失/歧义已折叠进 state。
-    let resume_claim = if provider_id == "empty" {
-        None
-    } else {
-        Some(SourceResumeClaim::from_observation(
-            provider_id,
-            session_id.as_str(),
-            &staged.report.session_observation,
-        ))
-    };
-
-    // session_id 随后 move 进 entries；usage 事件挂会话锚点，先留一份克隆。
-    let session_wire = session_id.clone();
-    entries.push((session_id, session_payload.into_bytes(), String::new()));
     let document_wire = document_id.as_str().to_string();
+    entries.reserve(session_members.len() + 1);
+    for (session_id, member_ids, _) in session_members.values() {
+        let session_payload = serde_json::json!({
+            "documents": [document_wire],
+            "document": document_wire,
+            "messages": member_ids,
+        })
+        .to_string();
+        entries.push((
+            session_id.clone(),
+            session_payload.into_bytes(),
+            String::new(),
+        ));
+    }
     entries.push((document_id, document_payload.into_bytes(), String::new()));
 
     // 工具活动锚点解析（设计 R5.3）：把 provider-native 锚点 id 解析为本批的
@@ -3844,7 +3940,7 @@ fn staged_to_source_with_provider(
             provider_id,
             variant,
             &document_wire,
-        );
+        )?;
         activities.push(SourceActivity {
             message_id: id,
             activity: staged_activity.activity.clone(),
@@ -3856,30 +3952,54 @@ fn staged_to_source_with_provider(
     // token_count），message_id 记 None。锚点消息未被 emit → 事件丢弃，绝不臆造。
     let mut usage_events = Vec::new();
     for staged_usage in &staged.usage_events {
-        let message_id = if staged_usage.message_native_id.trim().is_empty() {
+        let anchor_index = if staged_usage.message_native_id.trim().is_empty() {
             None
         } else {
-            let Some(anchor) = staged
+            let matching = staged
                 .messages
                 .iter()
-                .find(|message| message.native_id == staged_usage.message_native_id)
-            else {
+                .enumerate()
+                .filter(|(_, message)| message.native_id == staged_usage.message_native_id)
+                .collect::<Vec<_>>();
+            if matching.is_empty()
+                || matching.iter().any(|(index, _)| {
+                    message_session_ids[*index] != message_session_ids[matching[0].0]
+                })
+            {
                 continue;
-            };
-            Some(derive_message_id(
-                &anchor.native_id,
-                anchor.seq,
-                provider_id,
-                variant,
-                &document_wire,
-            ))
+            }
+            Some(matching[0].0)
+        };
+        let message_id = anchor_index
+            .map(|index| {
+                let anchor = &staged.messages[index];
+                derive_message_id(
+                    &anchor.native_id,
+                    anchor.seq,
+                    provider_id,
+                    variant,
+                    &document_wire,
+                )
+            })
+            .transpose()?;
+        let session_id = match anchor_index {
+            Some(index) => message_session_ids[index].clone(),
+            None if session_members.len() == 1 => session_members
+                .values()
+                .next()
+                .expect("one session")
+                .0
+                .clone(),
+            None => continue,
         };
         usage_events.push(SourceUsage {
-            session_id: session_wire.clone(),
+            session_id,
             message_id,
             usage: staged_usage.usage.clone(),
         });
     }
+
+    let resume_claims = resume_claims_by_session.into_values().collect();
 
     Ok(SourceBatch {
         source_path: path.to_string(),
@@ -3892,7 +4012,7 @@ fn staged_to_source_with_provider(
         len_bytes: Some(source_len as i64),
         fingerprint: Some(fingerprint.to_string()),
         provider_id: discovered_provider_id.map(str::to_string),
-        resume_claim,
+        resume_claims,
     })
 }
 
@@ -4676,6 +4796,7 @@ mod tests {
 
     fn staged_message(seq: u32, native_id: &str, span: (u64, u64)) -> StagedMessage {
         StagedMessage {
+            session: None,
             seq,
             native_id: native_id.into(),
             parent_native_id: None,
@@ -5058,7 +5179,7 @@ mod tests {
             len_bytes: None,
             fingerprint: None,
             provider_id: None,
-            resume_claim: None,
+            resume_claims: Vec::new(),
         }
     }
 
@@ -5340,6 +5461,128 @@ mod tests {
         )
         .unwrap();
         assert_eq!(session_payload["messages"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn multi_session_staging_preserves_shared_messages_and_scopes_usage() {
+        use agent_session_grep_application::StagedUsage;
+        use agent_session_grep_domain::{TokenSource, UsageObservation};
+        use agent_session_grep_ports::{
+            ContextGraphStore, MetadataResolution, ProviderSessionIdentity,
+        };
+
+        let identity = |id: &str, cwd: &str| ProviderSessionIdentity {
+            source_key: id.into(),
+            observation: ProviderSessionObservation {
+                provider_session_id: MetadataResolution::Resolved(id.into()),
+                original_working_directory: MetadataResolution::Resolved(cwd.into()),
+                pair_observed: true,
+                multi_session: false,
+            },
+        };
+        let mut staged = staged_batch(
+            vec![
+                staged_message(0, "shared", (0, 4)),
+                staged_message(1, "only-a", (5, 9)),
+                staged_message(2, "shared", (10, 14)),
+                staged_message(3, "only-b", (15, 19)),
+            ],
+            0,
+            "session-a",
+        );
+        for (index, message) in staged.messages.iter_mut().enumerate() {
+            message.session = Some(if index < 2 {
+                identity("session-a", "/synthetic/a")
+            } else {
+                identity("session-b", "/synthetic/b")
+            });
+        }
+        staged.report.session_observation.multi_session = true;
+        for anchor in ["only-a", "only-b", "shared", ""] {
+            staged.usage_events.push(StagedUsage {
+                message_native_id: anchor.into(),
+                usage: UsageObservation {
+                    input_tokens: 10,
+                    output_tokens: 2,
+                    cache_read_tokens: 0,
+                    cache_write_tokens: 0,
+                    reasoning_tokens: 0,
+                    token_source: TokenSource::Observed,
+                },
+            });
+        }
+        let source = staged_to_source(
+            "synthetic.db",
+            &staged,
+            "opencode",
+            "opencode/sqlite-v1",
+            "synthetic-fingerprint",
+            20,
+        )
+        .unwrap();
+        assert_eq!(source.placements.len(), 4);
+        let session_a = source.placements[0].session_id.clone();
+        let session_b = source.placements[2].session_id.clone();
+        assert_ne!(session_a, session_b);
+        assert_eq!(source.placements[1].session_id, session_a);
+        assert_eq!(source.placements[3].session_id, session_b);
+        let shared = source
+            .entries
+            .iter()
+            .find(|(id, _, _)| id.as_str() == "msg_v1_shared")
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&shared.1).unwrap();
+        assert!(payload["session"].is_null());
+        let members: BTreeSet<&str> = payload["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|id| id.as_str().unwrap())
+            .collect();
+        assert_eq!(
+            members,
+            BTreeSet::from([session_a.as_str(), session_b.as_str()])
+        );
+        assert_eq!(source.resume_claims.len(), 2);
+        for (session, native, cwd) in [
+            (&session_a, "session-a", "/synthetic/a"),
+            (&session_b, "session-b", "/synthetic/b"),
+        ] {
+            let claim = source
+                .resume_claims
+                .iter()
+                .find(|claim| claim.session_id == session.as_str())
+                .unwrap();
+            assert_eq!(claim.provider_session_id.as_deref(), Some(native));
+            assert_eq!(claim.original_working_directory.as_deref(), Some(cwd));
+            assert!(claim.pair_observed);
+        }
+        assert_eq!(
+            source.usage_events.len(),
+            2,
+            "ambiguous usage anchors must not be assigned to the first session"
+        );
+        assert_eq!(source.usage_events[0].session_id, session_a);
+        assert_eq!(source.usage_events[1].session_id, session_b);
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            SqliteStore::open_for_write(&dir.path().join("catalog.db").to_string_lossy()).unwrap();
+        store.commit_source_batches_if_changed(&[source]).unwrap();
+        for (session, unique) in [(&session_a, "msg_v1_only-a"), (&session_b, "msg_v1_only-b")] {
+            let graph = store.load_session_graph(session).unwrap();
+            let messages: BTreeSet<&str> = graph
+                .messages
+                .iter()
+                .map(|message| message.id.as_str())
+                .collect();
+            assert_eq!(messages, BTreeSet::from(["msg_v1_shared", unique]));
+            assert!(
+                graph
+                    .placements
+                    .iter()
+                    .all(|placement| &placement.session_id == session)
+            );
+        }
     }
 
     #[test]

@@ -555,7 +555,7 @@ mod tests {
             len_bytes: None,
             fingerprint: None,
             provider_id: None,
-            resume_claim: None,
+            resume_claims: Vec::new(),
         }
     }
 

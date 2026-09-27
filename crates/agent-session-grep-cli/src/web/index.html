@@ -101,11 +101,13 @@ button { font: inherit; color: inherit; }
 .brand { display: flex; align-items: center; gap: 8px; font-weight: 650; letter-spacing: -0.01em; flex: none; }
 .brand svg { display: block; color: var(--brand-dot, var(--text)); }
 .searchwrap { flex: 1; max-width: 560px; display: flex; align-items: center; gap: 8px;
-  height: 28px; padding: 0 10px; background: var(--surface-2); border: 1px solid var(--line);
+  height: 36px; padding: 0 10px; background: var(--surface-2); border: 1px solid var(--line);
   border-radius: var(--radius-md); }
-.searchwrap:focus-within { border-color: var(--line-strong); }
+.searchwrap:focus-within { border-color: var(--line-strong); outline: 2px solid var(--link); outline-offset: 2px; }
 .searchwrap svg { flex: none; color: var(--text-mute); }
 .searchwrap input { flex: 1; min-width: 0; border: 0; background: transparent; color: var(--text); font: inherit; outline: none; }
+.visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 .searchwrap kbd { flex: none; color: var(--text-mute); font: 10px var(--mono);
   border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px; }
 .topbar-spacer { flex: 1; }
@@ -113,11 +115,11 @@ button { font: inherit; color: inherit; }
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .status.ok { color: var(--ok); }
 .status.error { color: var(--danger); }
-.icon-btn { flex: none; display: grid; place-items: center; width: 28px; height: 28px;
+.icon-btn { flex: none; display: grid; place-items: center; width: 36px; height: 36px;
   border: 0; border-radius: var(--radius-sm); background: transparent; cursor: pointer; color: var(--text-dim); }
 .icon-btn:hover { background: var(--surface-hover); color: var(--text); }
 .icon-btn svg { display: block; }
-#langToggle { flex: none; height: 28px; padding: 0 10px; border: 0; border-radius: var(--radius-sm);
+#langToggle { flex: none; height: 36px; padding: 0 10px; border: 0; border-radius: var(--radius-sm);
   background: transparent; color: var(--text-dim); font: 600 12px var(--sans); cursor: pointer; }
 #langToggle:hover { background: var(--surface-hover); color: var(--text); }
 :root.theme-dark #themeSun { display: block; }
@@ -133,21 +135,36 @@ button { font: inherit; color: inherit; }
   padding: 12px 14px 8px; }
 .sidebar-title { font-size: 0.78rem; font-weight: 650; color: var(--text-dim); letter-spacing: 0.04em; }
 .sidebar-meta { font: var(--font-code-size) var(--mono); color: var(--text-mute); }
-.sidebar-controls { flex: none; display: grid; gap: 6px; padding: 0 12px 10px; }
+.sidebar-controls { flex: 0 1 auto; min-height: 0; max-height: 60%; overflow-y: auto; display: grid; gap: 6px; padding: 0 12px 10px; }
 /* `.ctl-row label` sets `flex: none` (it beats `.ctl-row > *` on specificity),
    so the three filter controls could not shrink: they needed 308px inside the
    248px sidebar and the page-size input was sliced in half at the sidebar
    edge. Wrapping keeps every control whole at any label length or locale. */
 .ctl-row { display: flex; flex-wrap: wrap; gap: 6px; }
 .ctl-row > * { flex: 1; min-width: 0; }
+.ctl-select { display: grid; gap: 3px; min-width: 0; color: var(--text-mute); font-size: 0.72rem; }
+.ctl-select select { width: 100%; }
 .ctl-row label { flex: none; display: flex; align-items: center; gap: 6px;
   color: var(--text-mute); font-size: 0.78rem; cursor: pointer; }
+.ctl-row .ctl-select { flex: 1 1 100%; display: grid; }
 .ctl-row input[type="checkbox"] { accent-color: var(--accent); margin: 0; }
 input[type="text"], input[type="number"], select {
-  height: 28px; padding: 0 8px; border: 1px solid var(--line); border-radius: var(--radius-sm);
+  min-height: 36px; padding: 0 8px; border: 1px solid var(--line); border-radius: var(--radius-sm);
   background: var(--surface-2); color: var(--text); font-size: 0.82rem; outline: none; }
-input:focus-visible, select:focus-visible { border-color: var(--line-strong); }
-input[type="number"] { width: 64px; }
+input:focus-visible, select:focus-visible, button:focus-visible, summary:focus-visible {
+  outline: 2px solid var(--link); outline-offset: 2px; }
+input[type="number"] { width: 76px; }
+.search-filters { border-top: 1px solid var(--line); padding-top: 7px; }
+.search-filters summary { min-height: 36px; display: flex; align-items: center; cursor: pointer;
+  color: var(--text-dim); font-size: 0.8rem; font-weight: 600; }
+.filter-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; padding: 4px 0 2px; }
+.filter-field { display: grid; gap: 3px; min-width: 0; color: var(--text-mute); font-size: 0.72rem; }
+.filter-field input, .filter-field select { width: 100%; min-width: 0; }
+.filter-hint { grid-column: 1 / -1; margin: 0; color: var(--text-mute); font-size: 0.7rem; line-height: 1.4; }
+.feedback { padding: 0 2px; color: var(--text-mute); font-size: 0.75rem; line-height: 1.4; }
+.feedback:empty { display: none; }
+.feedback.error { color: var(--danger); }
+.btn:disabled { cursor: not-allowed; opacity: 0.55; }
 .hit-list { flex: 1; overflow-y: auto; padding: 2px 8px 8px; }
 .hit { display: block; width: 100%; text-align: left; padding: 10px 12px; margin-bottom: 4px;
   border: 0; border-radius: var(--radius-md); background: transparent; cursor: pointer; }
@@ -205,10 +222,23 @@ pre.preview { margin: 0 16px 20px; max-height: 40vh; overflow: auto; padding: 12
 
 /* ─── Responsive ────────────────────────────────────────────────────────── */
 @media (max-width: 720px) {
-  .layout { flex-direction: column; }
-  .sidebar { width: 100%; max-height: 45%; border-right: 0; border-bottom: 1px solid var(--line); }
+  .shell { height: auto; min-height: 100vh; }
+  .topbar { height: auto; min-height: 52px; flex-wrap: wrap; gap: 6px; padding: 6px 8px; }
+  .topbar-spacer { display: none; }
+  .searchwrap { order: 2; flex: 1 1 100%; max-width: none; height: 44px; }
+  #searchButton { order: 3; min-height: 44px; }
+  #langToggle, .icon-btn { min-width: 44px; min-height: 44px; }
+  .layout { flex: none; flex-direction: column; }
+  .sidebar { width: 100%; max-height: none; border-right: 0; border-bottom: 1px solid var(--line); }
+  .hit-list { flex: none; max-height: 40vh; }
+  .chat { flex: none; max-height: 70vh; }
   .status { display: none; }
   .searchwrap kbd { display: none; }
+  .sidebar-controls { gap: 8px; max-height: none; overflow: visible; }
+  .ctl-select, .filter-field { font-size: 0.78rem; }
+  input[type="text"], input[type="number"], select { min-height: 44px; font-size: 1rem; }
+  .search-filters summary, .ctl-row label, .btn { min-height: 44px; }
+  .msg-head .btn { min-height: 44px; }
 }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
 </style>
@@ -242,6 +272,7 @@ pre.preview { margin: 0 16px 20px; max-height: 40vh; overflow: auto; padding: 12
         <circle cx="6.5" cy="6.5" r="4.5" stroke="currentColor" stroke-width="1.7"/>
         <path d="M10.5 10.5 L14 14" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
       </svg>
+      <label class="visually-hidden" for="query" data-i18n="queryLabel"></label>
       <input id="query" type="search" autocomplete="off">
       <kbd>/</kbd>
     </div>
@@ -268,15 +299,35 @@ pre.preview { margin: 0 16px 20px; max-height: 40vh; overflow: auto; padding: 12
       </div>
       <div class="sidebar-controls">
         <div class="ctl-row">
-          <select id="provider" aria-label="Provider"></select>
-          <select id="mode" aria-label="Retrieval mode"></select>
+          <label class="ctl-select"><span data-i18n="providerLabel"></span><select id="provider"></select></label>
+          <label class="ctl-select"><span data-i18n="modeLabel"></span><select id="mode"></select></label>
         </div>
         <div class="ctl-row">
           <label><input id="includeSystem" type="checkbox"><span data-i18n="includeSystem"></span></label>
           <label><input id="groupBySession" type="checkbox"><span data-i18n="groupBySession"></span></label>
-          <label><span data-i18n="pageSize"></span><input id="limit" type="number" value="20" min="1" max="100"></label>
+          <label><span data-i18n="pageSize"></span><input id="limit" type="number" value="20" min="1" max="100" step="1" required></label>
         </div>
+        <details class="search-filters">
+          <summary data-i18n="filters"></summary>
+          <div class="filter-grid">
+            <label class="filter-field"><span data-i18n="maxBytes"></span><input id="maxBytes" type="number" min="1" step="1" inputmode="numeric"></label>
+            <label class="filter-field"><span data-i18n="repo"></span><input id="repo" type="text" autocomplete="off"></label>
+            <label class="filter-field"><span data-i18n="since"></span><input id="since" type="text" autocomplete="off" placeholder="2026-01-01T00:00:00Z"></label>
+            <label class="filter-field"><span data-i18n="until"></span><input id="until" type="text" autocomplete="off" placeholder="2026-01-01T00:00:00Z"></label>
+            <label class="filter-field"><span data-i18n="sidechain"></span>
+              <select id="sidechain">
+                <option value="include" data-i18n="sidechainInclude"></option>
+                <option value="main_only" data-i18n="sidechainMain"></option>
+                <option value="subagent_only" data-i18n="sidechainSubagent"></option>
+              </select>
+            </label>
+            <label class="filter-field"><span data-i18n="toolKind"></span><input id="toolKind" type="text" autocomplete="off"></label>
+            <label class="filter-field"><span data-i18n="toolName"></span><input id="toolName" type="text" autocomplete="off"></label>
+            <p class="filter-hint" data-i18n="filterTimeHint"></p>
+          </div>
+        </details>
       </div>
+      <div id="searchFeedback" class="feedback" role="status" aria-live="polite" aria-atomic="true"></div>
       <div id="results" class="hit-list" aria-live="polite"></div>
       <div class="sidebar-foot">
         <button id="loadMore" class="btn" type="button" disabled style="width:100%" data-i18n="loadMore"></button>
@@ -299,7 +350,8 @@ pre.preview { margin: 0 16px 20px; max-height: 40vh; overflow: auto; padding: 12
         <strong data-i18n="emptyTitle"></strong>
         <span data-i18n="emptyBody"></span>
       </div>
-      <div id="contextMessages" class="chat"></div>
+      <div id="contextFeedback" class="feedback context-feedback" role="status" aria-live="polite" aria-atomic="true"></div>
+      <div id="contextMessages" class="chat" aria-live="polite" aria-busy="false"></div>
       <pre id="previewOutput" class="preview" hidden></pre>
     </main>
   </div>
@@ -315,8 +367,29 @@ const I18N = {
     gateHint: '找不到令牌?看运行 `asg serve` 的那个终端窗口的第一行输出。',
     gateRejected: '令牌无效或已过期(serve 重启后令牌会更换),请从终端重新复制。',
     gateEmpty: '请先粘贴令牌(32 位十六进制)。',
+    queryLabel: '搜索查询',
     searchPlaceholder: '搜索消息、决策、报错……',
     searchGo: '搜索',
+    searchLoading: '正在搜索…',
+    searchChanged: '搜索条件已更改，请重新搜索。',
+    queryRequired: '请输入搜索内容。',
+    filterInvalid: '请检查数字筛选项。',
+    filters: '更多筛选',
+    providerLabel: '来源',
+    modeLabel: '检索模式',
+    maxBytes: '最大响应字节数',
+    since: '开始时间',
+    until: '结束时间',
+    repo: '仓库',
+    sidechain: '会话分支',
+    sidechainInclude: '全部消息',
+    sidechainMain: '仅主线',
+    sidechainSubagent: '仅子代理',
+    toolKind: '工具类型',
+    toolName: '工具名称',
+    filterTimeHint: '时间使用带时区的 ISO 8601 格式，例如 2026-01-01T00:00:00Z。',
+    contextLoading: '正在加载会话…',
+    contextFailed: '会话加载失败：',
     statusConnecting: '正在连接本地库…',
     statusConnected: '已连接 · 第 {g} 代 · {n} 条记录',
     statusUnavailable: '不可用 · ',
@@ -331,7 +404,7 @@ const I18N = {
     close: '关闭',
     emptyTitle: '从左侧开始',
     emptyBody: '搜索后点击任意一条命中,这里会展开它所在会话的完整上下文。',
-    noHits: '没有匹配的消息。',
+    noHits: '没有匹配的消息。试试其他关键词或放宽筛选条件。',
     notAnswer: '查询失败:',
     noMessages: '该会话在当前层级下没有消息。',
     showEntity: '查看原文',
@@ -355,8 +428,29 @@ const I18N = {
     gateHint: 'Lost the token? It is on the first line of the terminal running `asg serve`.',
     gateRejected: 'Token invalid or expired (serve rotates it on restart). Copy a fresh one from the terminal.',
     gateEmpty: 'Paste the token first (32 hex characters).',
+    queryLabel: 'Search query',
     searchPlaceholder: 'Search messages, decisions, errors…',
     searchGo: 'Search',
+    searchLoading: 'Searching…',
+    searchChanged: 'Search criteria changed. Run the search again.',
+    queryRequired: 'Enter a search query.',
+    filterInvalid: 'Check the numeric filters.',
+    filters: 'More filters',
+    providerLabel: 'Provider',
+    modeLabel: 'Retrieval mode',
+    maxBytes: 'Maximum response bytes',
+    since: 'From',
+    until: 'Until',
+    repo: 'Repository',
+    sidechain: 'Conversation branch',
+    sidechainInclude: 'All messages',
+    sidechainMain: 'Mainline only',
+    sidechainSubagent: 'Subagent only',
+    toolKind: 'Tool kind',
+    toolName: 'Tool name',
+    filterTimeHint: 'Use a timezone-qualified ISO 8601 time, for example 2026-01-01T00:00:00Z.',
+    contextLoading: 'Loading session…',
+    contextFailed: 'Could not load session: ',
     statusConnecting: 'Connecting to local catalog…',
     statusConnected: 'Connected · generation {g} · {n} entities',
     statusUnavailable: 'Unavailable · ',
@@ -371,7 +465,7 @@ const I18N = {
     close: 'Close',
     emptyTitle: 'Start from the sidebar',
     emptyBody: 'Search, then click any hit to open its session context here.',
-    noHits: 'No matching messages.',
+    noHits: 'No matching messages. Try another query or fewer filters.',
     notAnswer: 'The catalog could not answer: ',
     noMessages: 'This session has no messages at the selected level.',
     showEntity: 'show',
@@ -440,6 +534,8 @@ function showGate(rejected) {
   // next load: keeping it makes every reload paint the authenticated shell for
   // one round-trip before falling back here.
   if (rejected) localStorage.removeItem(TOKEN_KEY);
+  cancelRequest('init');
+  invalidateSearch();
   document.getElementById('shell').hidden = true;
   document.getElementById('gate').hidden = false;
   const error = document.getElementById('gateError');
@@ -458,6 +554,7 @@ function acceptToken(value) {
   }
   localStorage.setItem(TOKEN_KEY, token);
   authHeaders = { 'Authorization': 'Bearer ' + token };
+  invalidateSearch();
   document.getElementById('gateError').classList.remove('show');
   document.getElementById('gate').hidden = true;
   document.getElementById('shell').hidden = false;
@@ -476,6 +573,52 @@ let activeHit = null;
    invented "no hits". */
 let lastHits = [];
 let lastError = '';
+let searchSignature = '';
+const requests = { search: null, context: null, preview: null, init: null };
+const feedbackState = { search: null, context: null };
+
+// Controller identity is the request generation. Cancellation saves work;
+// identity checks also reject a response already queued when abort() runs.
+function cancelRequest(kind) {
+  const previous = requests[kind];
+  requests[kind] = null;
+  if (previous) previous.abort();
+}
+function beginRequest(kind) {
+  cancelRequest(kind);
+  const controller = new AbortController();
+  requests[kind] = controller;
+  return controller;
+}
+function currentRequest(kind, controller) {
+  return requests[kind] === controller && !controller.signal.aborted;
+}
+function setFeedback(kind, key = '', detail = '', error = false) {
+  feedbackState[kind] = { key, detail, error };
+  const node = document.getElementById(kind + 'Feedback');
+  text(node, (key ? t(key) : '') + detail);
+  node.classList.toggle('error', error);
+}
+function setSearchBusy(busy) {
+  document.getElementById('results').setAttribute('aria-busy', String(busy));
+  document.getElementById('searchButton').setAttribute('aria-busy', String(busy));
+  document.getElementById('loadMore').disabled = busy || !nextCursor;
+}
+function invalidateSearch(messageKey = '') {
+  const hadSearch = Boolean(lastQuery || requests.search || (messageKey && feedbackState.search && feedbackState.search.key === messageKey));
+  cancelRequest('search');
+  nextCursor = null;
+  searchSignature = '';
+  lastQuery = '';
+  lastHits = [];
+  lastError = '';
+  clear(document.getElementById('results'));
+  text(document.getElementById('resultMeta'), '');
+  document.getElementById('handoff').disabled = true;
+  setSearchBusy(false);
+  setFeedback('search', hadSearch ? messageKey : '');
+  closeContext();
+}
 
 function payload(body) { return body && body.data ? body.data : (body || {}); }
 function setStatus(textMsg, kind) {
@@ -486,9 +629,11 @@ function setStatus(textMsg, kind) {
 function clear(node) { node.replaceChildren(); }
 function text(node, value) { node.textContent = value == null ? '' : String(value); }
 
-async function api(path) {
-  const response = await fetch(path, { headers: authHeaders, credentials: 'same-origin' });
+async function api(path, signal) {
+  const requestToken = token;
+  const response = await fetch(path, { headers: authHeaders, credentials: 'same-origin', signal });
   const body = await response.json().catch(() => ({}));
+  if (requestToken !== token || (signal && signal.aborted)) throw new DOMException('Superseded request', 'AbortError');
   if (response.status === 401) { showGate(true); throw new Error('unauthorized'); }
   if (!response.ok) throw new Error((body.error && body.error.message) || 'HTTP ' + response.status);
   return body;
@@ -546,9 +691,10 @@ function fillSelects() {
 }
 
 let providerCache = [];
-async function loadProviders() {
-  const body = await api('/api/providers');
-  providerCache = (payload(body).providers || []).map(p => ({
+async function loadProviders(controller, providerValues) {
+  const body = await api('/api/providers', controller.signal);
+  if (!currentRequest('init', controller)) return;
+  providerCache = (payload(body).providers || []).filter(p => providerValues.has(p.provider_id || p.id)).map(p => ({
     id: p.provider_id || p.id || '',
     maturity: p.maturity || '',
   }));
@@ -556,21 +702,31 @@ async function loadProviders() {
 }
 
 async function init() {
+  const controller = beginRequest('init');
   setStatus(t('statusConnecting'));
   try {
-    const status = payload(await api('/health'));
+    const status = payload(await api('/api/status', controller.signal));
+    if (!currentRequest('init', controller)) return;
     setStatus(t('statusConnected', { g: status.generation == null ? '?' : status.generation, n: status.catalog_count == null ? '?' : status.catalog_count }), 'ok');
-    await loadProviders();
+    await loadProviders(controller, new Set(status.web_capabilities.provider_values));
   } catch (error) {
-    if (error.message !== 'unauthorized') setStatus(t('statusUnavailable') + error.message, 'error');
+    if (currentRequest('init', controller) && error.name !== 'AbortError' && error.message !== 'unauthorized') setStatus(t('statusUnavailable') + error.message, 'error');
+  } finally {
+    if (currentRequest('init', controller)) requests.init = null;
   }
 }
 
-function queryParams(cursor) {
-  const params = new URLSearchParams({ q: lastQuery, mode: document.getElementById('mode').value, limit: document.getElementById('limit').value });
-  const provider = document.getElementById('provider').value;
-  if (provider) params.set('provider', provider);
-  if (cursor) params.set('cursor', cursor);
+const SEARCH_FIELDS = [
+  ['provider', 'provider'], ['maxBytes', 'max_bytes'], ['repo', 'repo'],
+  ['since', 'since'], ['until', 'until'], ['sidechain', 'sidechain'],
+  ['toolKind', 'tool_kind'], ['toolName', 'tool_name'],
+];
+function queryParams() {
+  const params = new URLSearchParams({ q: document.getElementById('query').value.trim(), mode: document.getElementById('mode').value, limit: document.getElementById('limit').value });
+  for (const [id, name] of SEARCH_FIELDS) {
+    const value = document.getElementById(id).value.trim();
+    if (value && !(name === 'sidechain' && value === 'include')) params.set(name, value);
+  }
   if (document.getElementById('includeSystem').checked) params.set('include_system', 'true');
   if (document.getElementById('groupBySession').checked) params.set('group_by_session', 'true');
   return params;
@@ -578,20 +734,59 @@ function queryParams(cursor) {
 
 async function doSearch(cursor) {
   const query = document.getElementById('query').value.trim();
-  if (!query) return;
-  if (!cursor) { lastQuery = query; lastHits = []; clear(document.getElementById('results')); }
+  if (!query) {
+    invalidateSearch();
+    setFeedback('search', 'queryRequired', '', true);
+    return;
+  }
+  for (const id of ['limit', 'maxBytes']) {
+    const control = document.getElementById(id);
+    if (!control.checkValidity()) {
+      invalidateSearch();
+      setFeedback('search', 'filterInvalid', '', true);
+      control.reportValidity();
+      return;
+    }
+  }
+  const params = queryParams();
+  const signature = params.toString();
+  if (cursor && signature !== searchSignature) { invalidateSearch('searchChanged'); return; }
+  if (cursor && (requests.search || cursor !== nextCursor)) return;
+  if (!cursor) {
+    invalidateSearch();
+    lastQuery = query;
+    searchSignature = signature;
+  } else params.set('cursor', cursor);
+  const controller = beginRequest('search');
+  nextCursor = null;
+  setSearchBusy(true);
+  setFeedback('search', 'searchLoading');
   try {
-    const body = await api('/api/search?' + queryParams(cursor));
+    const body = await api('/api/search?' + params, controller.signal);
+    if (!currentRequest('search', controller)) return;
     const data = payload(body);
     const hits = data.hits || [];
     lastHits = cursor ? lastHits.concat(hits) : hits;
     lastError = '';
     renderHits(hits, Boolean(cursor));
-    nextCursor = (body.page && body.page.next_cursor) || null;
-    document.getElementById('loadMore').disabled = !nextCursor;
+    nextCursor = (body.page && body.page.has_more && body.page.next_cursor) || null;
     text(document.getElementById('resultMeta'), (data.retrieval_mode || 'lexical') + ' · ' + lastHits.length);
     document.getElementById('handoff').disabled = false;
-  } catch (error) { if (error.message !== 'unauthorized') renderError(error.message); }
+    setFeedback('search', '', (body.warnings || []).join(' '));
+  } catch (error) {
+    if (!currentRequest('search', controller) || error.name === 'AbortError' || error.message === 'unauthorized') return;
+    lastHits = [];
+    nextCursor = null;
+    text(document.getElementById('resultMeta'), '');
+    document.getElementById('handoff').disabled = true;
+    setFeedback('search', 'notAnswer', error.message, true);
+    renderError(error.message);
+  } finally {
+    if (currentRequest('search', controller)) {
+      requests.search = null;
+      setSearchBusy(false);
+    }
+  }
 }
 
 function renderError(message) {
@@ -653,12 +848,13 @@ function renderHits(hits, append) {
 }
 
 async function loadContext(sessionId) {
-  if (!sessionId) return;
+  if (!sessionId) { closeContext(); return; }
   /* A preview belongs to the session it was opened from. Left on screen under
      another session's header it attributes the wrong `--resume` command to that
      session, so drop it when the session actually changes — and only then, so
      re-rendering the same session keeps it. */
   if (sessionId !== activeSession) {
+    cancelRequest('preview');
     const preview = document.getElementById('previewOutput');
     preview.hidden = true;
     clear(preview);
@@ -680,11 +876,17 @@ async function loadContext(sessionId) {
 
 async function refreshContext() {
   if (!activeSession) return;
+  const controller = beginRequest('context');
+  const session = activeSession;
+  const container = document.getElementById('contextMessages');
+  clear(container);
+  container.setAttribute('aria-busy', 'true');
+  setFeedback('context', 'contextLoading');
   try {
-    const params = new URLSearchParams({ session: activeSession, policy: document.getElementById('contextPolicy').value, level: document.getElementById('contextLevel').value });
-    const body = await api('/api/context?' + params);
+    const params = new URLSearchParams({ session, policy: document.getElementById('contextPolicy').value, level: document.getElementById('contextLevel').value });
+    const body = await api('/api/context?' + params, controller.signal);
+    if (!currentRequest('context', controller) || activeSession !== session) return;
     const messages = payload(body).messages || [];
-    const container = document.getElementById('contextMessages');
     clear(container);
     for (const message of messages) {
       const source = message.payload || {};
@@ -718,33 +920,58 @@ async function refreshContext() {
       text(empty, t('noMessages'));
       container.appendChild(empty);
     }
+    setFeedback('context', '', (body.warnings || []).join(' '));
   } catch (error) {
-    if (error.message === 'unauthorized') return;
-    const node = document.getElementById('contextMessages');
-    clear(node);
-    const empty = document.createElement('div');
-    empty.className = 'empty';
-    text(empty, error.message);
-    node.appendChild(empty);
+    if (!currentRequest('context', controller) || activeSession !== session || error.name === 'AbortError' || error.message === 'unauthorized') return;
+    clear(container);
+    setFeedback('context', 'contextFailed', error.message, true);
+  } finally {
+    if (currentRequest('context', controller)) {
+      requests.context = null;
+      container.setAttribute('aria-busy', 'false');
+    }
+  }
+}
+
+function closeContext() {
+  cancelRequest('context');
+  cancelRequest('preview');
+  document.getElementById('contextPanel').hidden = true;
+  document.getElementById('detailEmpty').hidden = false;
+  clear(document.getElementById('contextMessages'));
+  document.getElementById('contextMessages').setAttribute('aria-busy', 'false');
+  document.getElementById('previewOutput').hidden = true;
+  clear(document.getElementById('previewOutput'));
+  setFeedback('context');
+  for (const card of document.getElementById('results').children) card.classList.remove('active');
+  activeSession = ''; activeHit = null;
+}
+
+async function loadPreview(path) {
+  const controller = beginRequest('preview');
+  try {
+    const body = await api(path, controller.signal);
+    if (currentRequest('preview', controller)) showPreview(payload(body));
+  } catch (error) {
+    if (currentRequest('preview', controller) && error.name !== 'AbortError' && error.message !== 'unauthorized') showPreview({ error: error.message });
+  } finally {
+    if (currentRequest('preview', controller)) requests.preview = null;
   }
 }
 
 async function showEntity(id) {
   if (!id) return;
-  try { showPreview(payload(await api('/api/show?id=' + encodeURIComponent(id)))); }
-  catch (error) { if (error.message !== 'unauthorized') showPreview({ error: error.message }); }
+  await loadPreview('/api/show?id=' + encodeURIComponent(id));
 }
 
 async function previewResume() {
   if (!activeSession) return;
-  try { showPreview(payload(await api('/api/resume?session=' + encodeURIComponent(activeSession)))); }
-  catch (error) { if (error.message !== 'unauthorized') showPreview({ error: error.message }); }
+  await loadPreview('/api/resume?session=' + encodeURIComponent(activeSession));
 }
 
 async function previewHandoff() {
   if (!lastQuery) return;
-  try { showPreview(payload(await api('/api/handoff?q=' + encodeURIComponent(lastQuery)))); }
-  catch (error) { if (error.message !== 'unauthorized') showPreview({ error: error.message }); }
+  await loadPreview('/api/handoff?q=' + encodeURIComponent(lastQuery));
 }
 
 /* ─── Wiring ────────────────────────────────────────────────────────────── */
@@ -758,6 +985,9 @@ document.getElementById('langToggle').addEventListener('click', () => {
   lang = lang === 'zh' ? 'en' : 'zh';
   localStorage.setItem(LANG_KEY, lang);
   applyI18n();
+  for (const [kind, state] of Object.entries(feedbackState)) {
+    if (state) setFeedback(kind, state.key, state.detail, state.error);
+  }
   /* `applyI18n()` only rewrites `[data-i18n]` markup and the select options.
      Every other string on screen came from `t()` at render time — the status
      line, each hit card's session line, the context title, the per-message
@@ -770,19 +1000,17 @@ document.getElementById('langToggle').addEventListener('click', () => {
 });
 document.getElementById('searchButton').addEventListener('click', () => doSearch());
 document.getElementById('query').addEventListener('keydown', event => { if (event.key === 'Enter') doSearch(); });
-document.getElementById('loadMore').addEventListener('click', () => doSearch(nextCursor));
+for (const id of ['query', 'mode', 'limit', 'includeSystem', 'groupBySession', ...SEARCH_FIELDS.map(([id]) => id)]) {
+  document.getElementById(id).addEventListener('input', () => invalidateSearch('searchChanged'));
+  document.getElementById(id).addEventListener('change', () => invalidateSearch('searchChanged'));
+}
+document.getElementById('loadMore').addEventListener('click', () => { if (nextCursor) doSearch(nextCursor); });
 document.getElementById('handoff').addEventListener('click', previewHandoff);
 document.getElementById('refreshContext').addEventListener('click', refreshContext);
 document.getElementById('resumePreview').addEventListener('click', previewResume);
-document.getElementById('closeContext').addEventListener('click', () => {
-  document.getElementById('contextPanel').hidden = true;
-  document.getElementById('detailEmpty').hidden = false;
-  document.getElementById('contextMessages').replaceChildren();
-  document.getElementById('previewOutput').hidden = true;
-  // Nothing is open any more, so no hit may keep the selected highlight.
-  for (const card of document.getElementById('results').children) card.classList.remove('active');
-  activeSession = ''; activeHit = null;
-});
+document.getElementById('closeContext').addEventListener('click', closeContext);
+document.getElementById('contextPolicy').addEventListener('change', refreshContext);
+document.getElementById('contextLevel').addEventListener('change', refreshContext);
 /* A fragment-only navigation does not reload the page, so the token pasted into
    the address bar of an already-open tab arrives here and nowhere else. */
 window.addEventListener('hashchange', () => {
@@ -790,7 +1018,8 @@ window.addEventListener('hashchange', () => {
   if (fresh) acceptToken(fresh);
 });
 document.addEventListener('keydown', event => {
-  if (event.key === '/' && document.activeElement !== document.getElementById('query') && document.getElementById('gate').hidden) {
+  const editing = document.activeElement && (document.activeElement.matches('input, textarea, select') || document.activeElement.isContentEditable);
+  if (event.key === '/' && !editing && document.getElementById('gate').hidden) {
     event.preventDefault();
     document.getElementById('query').focus();
   }

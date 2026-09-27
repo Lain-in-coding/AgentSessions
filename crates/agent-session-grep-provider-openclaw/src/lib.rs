@@ -287,6 +287,7 @@ impl ProviderAdapter for OpenClawAdapter {
                         .and_then(|v| v.as_str())
                         .or(rec.timestamp.as_deref());
                     sink.emit_message(MessageEvent {
+                        session: None,
                         seq,
                         native_id: "",
                         parent_native_id: None,

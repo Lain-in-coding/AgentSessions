@@ -50,9 +50,10 @@ are derived and must be fully rebuildable from `catalog` at any time.**
   authoritative locked handle, and maps contention to path-redacted WriterBusy.
 - `searchable_text(payload)` — extracts the searchable body from the canonical
   payload for FTS.
-- Filtered FTS search — uses one prepared query with `fts MATCH` plus provider
-  and normalized timestamp predicates before `LIMIT`; retains the pinned BM25
-  score/StableId order. Empty filters keep the legacy SQL path. SQLite FTS5
+- Filtered FTS search — uses prepared queries with `fts MATCH` plus provider,
+  timestamp, facet and visibility predicates before `LIMIT`. Each corpus uses
+  BM25 then canonical wire ID; message/session ranks combine through RRF k=60,
+  never by comparing their raw BM25 scores. SQLite FTS5
   auxiliary functions and `MATCH` name the real virtual table (`fts`), not a
   table alias.
 - `ContextGraphStore` reads — return typed Domain messages/documents/placements/
@@ -157,8 +158,9 @@ text, opaque Session payload, diagnostics, progress, or errors.
   none of the conflicting values. It never picks by source path or order.
 - **No reverse derivation**: there is no path from `ses_v1_*` back to the
   Provider-native ID. The native ID lives only in the claim row.
-- **Multi-Session Sources fail closed**: a Source declaring more than one
-  native Session is not resumable (ambiguous), though still searchable.
+- **Explicit multi-session observations**: one Source can carry independent
+  claims keyed by canonical Session. An ambiguous report-level observation
+  still fails closed; per-message session observations are not conflated.
 - **Batched reads**: `resume_of` chunks via `BATCH_IN_CHUNK` (no N+1) and
   short-circuits empty input with zero SQL statements. The `session_id` lookup
   is backed by index `source_session_resume_claims_session`, not a full scan
@@ -200,8 +202,9 @@ metadata. It is a derived projection like the message `fts`, populated from
   (score desc, wire id asc) and truncates to the limit. A Session already
   represented by a matching non-system Message hit is deduplicated; a
   metadata-only Session returns its canonical identity (or its first
-  non-system Message as representative) and remains discoverable before
-  Application-level system filtering.
+  non-system Message as representative). Candidate exclusions use a single
+  JSON parameter (`json_each`) rather than one SQL expression per message;
+  final merging uses deterministic RRF and canonical wire IDs.
 
 ### Known RFC-0001 §5.1 identity debt (follow-up, not blocking Resume)
 
@@ -211,6 +214,61 @@ TTL, Windows path-case normalization, and resume claims keyed by
 `(namespace_registry_id, session_id)`. Relocation does not preserve Session
 identity. The domain layer (`StableId::native_session_scoped`,
 `SessionIdentityNamespace`) is correct; the gap is composition-root only.
+Tracked in `.trellis/tasks/09-25-session-relocation-aliases/`; ordinary sync
+must not silently rekey existing `ses_v1` records.
+
+## Scenario: Read-only lifecycle and logical source snapshots
+
+### 1. Scope / Trigger
+Opening catalogs, ingesting live SQLite sources, and rebuilding embeddings.
+
+### 2. Signatures
+`SqliteStore::open` uses `SQLITE_OPEN_READ_ONLY`; `open_for_write` acquires the
+writer lease before migrations. `SourceBatch.resume_claims` is a vector of
+per-session claims. `rebuild_embeddings_from_catalog(model_id, dimension,
+batch_size, encode)` returns indexed/skipped/cleared counts.
+
+### 3. Contracts
+Read opens never create/migrate a catalog and use a finite 1-second busy timeout.
+SQLite source capture uses Backup under a pinned read transaction, with a
+128 MiB logical-size ceiling and guarded temporary destination. Never checkpoint
+or write the provider source. Logical fingerprints include committed WAL data
+and remain current across an external checkpoint without logical changes.
+Per-session resume claims share the existing `(source_path, session_id)` key;
+no schema migration is required. Parser semantic version 2 forces old source
+scans to reparse. Provider parser `TempDb` keeps `conn` before `_guard` so
+SQLite closes before cleanup. The guard owns the private database plus its
+`-wal`/`-shm` files; the last read-only connection does not guarantee their
+removal. Register that guard before writing bytes, and keep the file handle
+inside its lifetime so write/sync failure also cleans the copy. Never use
+this cleanup on original provider sources or enumerate unrelated temp files. Validate duplicate facts/claims/StableId metadata before any
+no-op shortcut. Old building intents are aborted on writer recovery.
+Embedding rebuild uses bounded wire-ID keysets (batch 1..512), finite vectors,
+and one transaction for replacement plus generation. Encoder failure rolls back.
+Semantic query scans rows but retains only bounded top-k candidates; it is an
+exact scan, not ANN and not a production latency guarantee.
+
+### 4. Validation & Error Matrix
+Absent read catalog -> backend error without creating a file. Wrong schema
+-> `SchemaIncompatible`, with explicit writer-maintenance action. Source changes
+-> `SnapshotChanged`; oversized snapshots -> `SourceIo`. Invalid batch facts,
+vectors or encoding failures -> error without changing authoritative data.
+
+### 5. Good/Base/Bad Cases
+Good: two sessions in one live WAL DB retain separate placements/resume claims.
+Base: repeated unchanged logical snapshot is a no-op. Bad: copying only the
+main DB, silently merging sessions, or clearing old vectors before encoding.
+
+### 6. Tests Required
+Assert absent/stale/read-under-writer catalog behavior, unchanged source bytes,
+WAL-only updates/checkpoints, per-session claims, invalid no-op batches,
+encoder rollback, keyset query plans, finite scores and bounded top-k equivalence.
+Both SQLite provider crates must create real temporary WAL/SHM files, then
+assert all owned files disappear after successful reads and query errors.
+
+### 7. Wrong vs Correct
+Wrong: call migration from a read command or return early before batch validation.
+Correct: lease writes explicitly and validate all incoming facts before no-op.
 
 ---
 

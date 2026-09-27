@@ -48,12 +48,20 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
+      # The embedded client has no npm dependencies. Node's built-in runner
+      # exercises the shipped script against delayed synthetic API responses.
+      - name: Web client interaction tests
+        run: node --test crates/agent-session-grep-cli/tests/web_ui.test.cjs
+
       # The semantic-candle module is behind a cargo feature, so the default
       # `cargo test --workspace` never compiles it. Run its suite explicitly
       # to keep the feature inside the quality gate; the feature only builds
       # the local candle runtime and downloads no model weights.
       - name: Test semantic-candle feature
         run: cargo test -p agent-session-grep-application --features semantic-candle
+
+      - name: Check semantic-candle entrypoints
+        run: cargo check -p agent-session-grep-cli --all-targets --features semantic-candle
 
       - name: Robot contract tests
         run: cargo test -p agent-session-grep-cli --test e2e robot_ -- --nocapture

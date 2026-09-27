@@ -309,6 +309,7 @@ impl ProviderAdapter for CodeBuddyAdapter {
 
             let timestamp = rec.timestamp.as_deref();
             sink.emit_message(MessageEvent {
+                session: None,
                 seq,
                 native_id: "",
                 parent_native_id: None,

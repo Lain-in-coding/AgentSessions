@@ -116,6 +116,11 @@ fn temp_db(tag: &str) -> (tempfile::TempDir, String) {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join(format!("{tag}.db"));
     let s = path.to_string_lossy().into_owned();
+    // Read-only CLI commands require an existing catalog. Initialize the empty
+    // fixture explicitly so tests do not rely on read opens creating/migrating it.
+    let store = agent_session_grep_adapters_sqlite::SqliteStore::open_for_write(&s)
+        .expect("initialize empty catalog fixture under writer lease");
+    drop(store);
     (dir, s)
 }
 
@@ -283,7 +288,12 @@ fn index_search_get_roundtrip() {
 
 #[test]
 fn migrated_v6_catalog_stays_readable_until_complete_reingest_enables_context() {
-    let (dir, db) = temp_db("migrated-v6-reingest");
+    let dir = tempfile::tempdir().expect("v6 fixture directory");
+    let db = dir
+        .path()
+        .join("migrated-v6-reingest.db")
+        .to_string_lossy()
+        .into_owned();
     let session_native = "66111111-1111-4111-8111-111111111111";
     let message_native = "66222222-2222-4222-8222-222222222222";
     let legacy_session_wire = format!("ses_v1_{session_native}");
@@ -306,6 +316,12 @@ fn migrated_v6_catalog_stays_readable_until_complete_reingest_enables_context() 
         legacy_document_wire,
         message_text,
     );
+    {
+        // Schema migration is a writer operation; exercise it under the same
+        // explicit lease used by production maintenance/write entrypoints.
+        let _store = agent_session_grep_adapters_sqlite::SqliteStore::open_for_write(&db)
+            .expect("migrate v6 catalog under writer lease");
+    }
 
     let get = run(&db, &["get", &message_wire]);
     assert!(get.status.success(), "get failed: {}", stdout(&get));
@@ -4574,9 +4590,8 @@ fn fatal_source_rejection_reports_line_numbers_and_repair_direction() {
 }
 
 #[test]
-fn multi_session_file_emits_visible_session_diagnostic() {
-    // R3.1：provider 已检测同文件多 sessionId；CLI 必须实际公开数量和 ID，
-    // 不能只把 diagnostics 数量从 0 改成 1 后仍让用户看不到原因。
+fn multi_session_file_without_message_identities_is_rejected_atomically() {
+    // A report-level warning cannot make assigning all messages to one session safe.
     let (dir, db) = temp_db("multi-session-warning");
     let fixture = dir.path().join("multi-session.jsonl");
     let first = serde_json::json!({
@@ -4594,19 +4609,74 @@ fn multi_session_file_emits_visible_session_diagnostic() {
     std::fs::write(&fixture, format!("{first}\n{second}\n")).expect("write fixture");
     let fixture_path = fixture.to_string_lossy().into_owned();
     let out = run(&db, &["ingest", &fixture_path]);
-    assert!(out.status.success(), "ingest failed: {}", stdout(&out));
+    assert_eq!(out.status.code(), Some(2), "{}", stdout(&out));
     let frame = parse_first_line(&out);
-    assert_envelope_shape(&frame, true);
-    assert_eq!(frame["data"]["diagnostics"], 1, "{frame}");
-    let warnings = frame["warnings"].as_array().expect("warnings");
-    let diagnostic = warnings
-        .iter()
-        .filter_map(serde_json::Value::as_str)
-        .find(|warning| warning.contains("2 个不同 sessionId"))
-        .unwrap_or_else(|| panic!("multi-session diagnostic missing: {frame}"));
-    assert!(diagnostic.contains("multi-session-first"), "{diagnostic}");
-    assert!(diagnostic.contains("multi-session-second"), "{diagnostic}");
-    assert!(diagnostic.contains("归属首个会话"), "{diagnostic}");
+    assert_envelope_shape(&frame, false);
+    assert_eq!(frame["error"]["code"], "invalid_request");
+    let message = frame["error"]["message"].as_str().expect("message");
+    assert!(
+        message.contains("per-message session identities"),
+        "{frame}"
+    );
+    assert!(!message.contains("multi-session-first"), "{frame}");
+    assert!(!message.contains("multi-session-second"), "{frame}");
+    let listed = run(&db, &["list", "10"]);
+    assert!(listed.status.success(), "{}", stdout(&listed));
+    assert!(
+        parse_first_line(&listed)["data"]["entries"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn unsafe_native_message_and_parent_ids_leave_the_catalog_unchanged() {
+    let (dir, db) = temp_db("unsafe-native-ids");
+    let fixture = dir.path().join("native-ids.jsonl");
+    let fixture_path = fixture.to_string_lossy().into_owned();
+    let safe_record = serde_json::json!({
+        "type": "user", "uuid": "safe-original", "sessionId": "safe-session",
+        "message": {"role": "user", "content": "original indexed text"}
+    });
+    std::fs::write(&fixture, format!("{safe_record}\n")).unwrap();
+    let initial = run(&db, &["ingest", &fixture_path]);
+    assert!(initial.status.success(), "{}", stdout(&initial));
+    let initial_generation = parse_first_line(&initial)["meta"]["generation"].clone();
+    let original = parse_first_line(&run(&db, &["get", "msg_v1_safe-original"]));
+    assert_envelope_shape(&original, true);
+
+    for invalid in [
+        "a\0b".to_string(),
+        " a".to_string(),
+        "a b".to_string(),
+        "x".repeat(257),
+    ] {
+        for field in ["uuid", "parentUuid"] {
+            let mut record = safe_record.clone();
+            record[field] = serde_json::Value::String(invalid.clone());
+            std::fs::write(&fixture, format!("{record}\n")).unwrap();
+            let out = run(&db, &["ingest", &fixture_path]);
+            assert_eq!(out.status.code(), Some(2), "{field}: {}", stdout(&out));
+            let frame = parse_first_line(&out);
+            assert_envelope_shape(&frame, false);
+            assert_eq!(frame["error"]["code"], "invalid_request", "{frame}");
+            assert!(
+                !frame["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains(&invalid)
+            );
+            let retained = parse_first_line(&run(&db, &["get", "msg_v1_safe-original"]));
+            assert_envelope_shape(&retained, true);
+            assert_eq!(retained["data"], original["data"]);
+            let store = agent_session_grep_adapters_sqlite::SqliteStore::open(&db).unwrap();
+            assert_eq!(
+                serde_json::json!(store.active_generation().unwrap()),
+                initial_generation
+            );
+        }
+    }
 }
 
 // ─── R4/ADR-0008：search 命中携带 session_id 与 text 摘要 ───────────────────
@@ -5296,6 +5366,149 @@ fn write_opencode_db(path: &std::path::Path, text: &str) {
     )
     .expect("insert opencode fixture part");
     conn.close().expect("close opencode fixture db");
+}
+
+#[test]
+fn sqlite_multi_session_wal_sources_keep_context_and_resume_metadata_separate() {
+    for provider in ["opencode", "cursor"] {
+        let (dir, db) = temp_db("sqlite-session-isolation");
+        let source = dir.path().join("source.db");
+        let source_path = source.to_string_lossy().into_owned();
+        let conn = Connection::open(&source).unwrap();
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;")
+            .unwrap();
+        if provider == "opencode" {
+            conn.execute_batch(
+                "CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT);
+                 CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, data TEXT, time_created INTEGER);
+                 CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, data TEXT, time_created INTEGER);"
+            ).unwrap();
+            for (index, label) in ["alpha", "beta"].iter().enumerate() {
+                conn.execute(
+                    "INSERT INTO session VALUES (?1, ?2)",
+                    rusqlite::params![format!("session-{label}"), format!("/synthetic/{label}")],
+                )
+                .unwrap();
+                for (ordinal, role) in ["user", "assistant"].iter().enumerate() {
+                    let id = format!("{label}-{ordinal}");
+                    let time = (index * 2 + ordinal) as i64;
+                    conn.execute(
+                        "INSERT INTO message VALUES (?1, ?2, ?3, ?4)",
+                        rusqlite::params![
+                            id,
+                            format!("session-{label}"),
+                            serde_json::json!({"role":role}).to_string(),
+                            time
+                        ],
+                    )
+                    .unwrap();
+                    conn.execute("INSERT INTO part VALUES (?1, ?2, ?3, ?4)",
+                        rusqlite::params![format!("part-{id}"), id, serde_json::json!({"type":"text", "text":format!("syntheticisolation {label} {ordinal}")}).to_string(), time]).unwrap();
+                }
+            }
+        } else {
+            conn.execute_batch("CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value TEXT);")
+                .unwrap();
+            let tabs: Vec<_> = ["alpha", "beta"]
+                .iter()
+                .enumerate()
+                .map(|(index, label)| {
+                    serde_json::json!({
+                        "id": format!("session-{label}"), "createdAt": index,
+                        "bubbles": [
+                            {"type":"user", "text":format!("syntheticisolation {label} 0")},
+                            {"type":"assistant", "text":format!("syntheticisolation {label} 1")}
+                        ]
+                    })
+                })
+                .collect();
+            conn.execute(
+                "INSERT INTO ItemTable VALUES (?1, ?2)",
+                rusqlite::params![
+                    "workbench.panel.aichat.view.aichat.chatdata",
+                    serde_json::json!({"tabs":tabs}).to_string()
+                ],
+            )
+            .unwrap();
+        }
+        assert!(Path::new(&format!("{source_path}-wal")).exists());
+        let main_before = std::fs::read(&source).unwrap();
+        let ingest = run(&db, &["ingest", &source_path]);
+        assert!(ingest.status.success(), "{provider}: {}", stdout(&ingest));
+        assert_eq!(parse_first_line(&ingest)["data"]["committed"], 4);
+        assert_eq!(
+            main_before,
+            std::fs::read(&source).unwrap(),
+            "ingest must not checkpoint the source"
+        );
+
+        let search = run(
+            &db,
+            &["search", "syntheticisolation", "--provider", provider],
+        );
+        assert!(search.status.success(), "{provider}: {}", stdout(&search));
+        let search = parse_first_line(&search);
+        let hits = search["data"]["hits"].as_array().unwrap();
+        assert_eq!(hits.len(), 4, "{search}");
+        let mut sessions = std::collections::BTreeSet::new();
+        for label in ["alpha", "beta"] {
+            let label_hits: Vec<_> = hits
+                .iter()
+                .filter(|hit| hit["text"].as_str().unwrap().contains(label))
+                .collect();
+            assert_eq!(label_hits.len(), 2);
+            let session = label_hits[0]["session_id"].as_str().unwrap();
+            assert!(
+                sessions.insert(session.to_string()),
+                "sessions must not merge"
+            );
+            assert!(label_hits.iter().all(|hit| hit["session_id"] == session));
+            for hit in label_hits {
+                let message = run(&db, &["get", hit["id"].as_str().unwrap()]);
+                assert!(message.status.success(), "{}", stdout(&message));
+                let message = parse_first_line(&message);
+                let payload: serde_json::Value =
+                    serde_json::from_str(message["data"]["payload"].as_str().unwrap()).unwrap();
+                assert_eq!(payload["session"], session);
+                assert_eq!(payload["sessions"], serde_json::json!([session]));
+            }
+            let context = run(&db, &["context", session, "--policy", "full"]);
+            assert!(context.status.success(), "{}", stdout(&context));
+            let context = parse_first_line(&context);
+            let messages = context["data"]["messages"].as_array().unwrap();
+            assert_eq!(messages.len(), 2, "{context}");
+            assert!(
+                messages
+                    .iter()
+                    .all(|message| message["payload"].to_string().contains(label)),
+                "{context}"
+            );
+            let metadata = run(&db, &["get-session-resume", session]);
+            assert!(metadata.status.success(), "{}", stdout(&metadata));
+            let metadata = parse_first_line(&metadata);
+            assert_eq!(metadata["data"]["session_id"], session);
+            assert_eq!(metadata["data"]["provider_id"], provider);
+            assert_eq!(
+                metadata["data"]["provider_session_id"],
+                format!("session-{label}")
+            );
+            if provider == "opencode" {
+                assert_eq!(
+                    metadata["data"]["original_working_directory"],
+                    format!("/synthetic/{label}")
+                );
+            }
+        }
+        let again = run(&db, &["ingest", &source_path]);
+        assert!(again.status.success(), "{}", stdout(&again));
+        let again = parse_first_line(&again);
+        assert_eq!(again["data"]["committed"], 0);
+        assert_eq!(again["data"]["unchanged"], 4);
+        assert_eq!(
+            again["meta"]["generation"],
+            parse_first_line(&ingest)["meta"]["generation"]
+        );
+    }
 }
 
 #[test]

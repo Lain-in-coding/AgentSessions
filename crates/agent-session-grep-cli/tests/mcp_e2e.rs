@@ -18,6 +18,12 @@ const BIN: &str = env!("CARGO_BIN_EXE_agent-session-grep");
 fn temp_db(tag: &str) -> (tempfile::TempDir, std::path::PathBuf) {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join(format!("{tag}.db"));
+    // The MCP server opens an existing catalog read-only. Fixture creation is
+    // an explicit writer operation, not a side effect of protocol startup.
+    drop(
+        agent_session_grep_adapters_sqlite::SqliteStore::open_for_write(&path.to_string_lossy())
+            .expect("initialize MCP catalog fixture"),
+    );
     (dir, path)
 }
 
@@ -1370,12 +1376,16 @@ fn tool_schemas_publish_string_and_array_bounds() {
     assert_eq!(properties["cursor"]["maxLength"], 512, "{search}");
     assert_eq!(properties["since"]["maxLength"], 64, "{search}");
     assert_eq!(properties["until"]["maxLength"], 64, "{search}");
-    // providers 的 maxItems 等于被声明的合法取值数（2 个 canonical id + 1 个
-    // 历史别名），运行时同步强制；tool_name 不再是无界字符串。
-    assert_eq!(properties["providers"]["maxItems"], 3, "{search}");
+    // All implemented provider IDs and aliases share the registry's bounds.
+    let provider_values = agent_session_grep_ports::capability::search_provider_filter_values();
+    assert_eq!(
+        properties["providers"]["maxItems"],
+        provider_values.len(),
+        "{search}"
+    );
     assert_eq!(
         properties["providers"]["items"]["enum"],
-        json!(["claude", "claude-code", "codex"]),
+        json!(provider_values),
         "{search}"
     );
     assert_eq!(properties["tool_name"]["maxLength"], 128, "{search}");
@@ -1711,11 +1721,57 @@ fn search_sessions_schema_publishes_provider_and_time_filters() {
     assert_eq!(properties["providers"]["type"], "array", "{search}");
     assert_eq!(
         properties["providers"]["items"]["enum"],
-        json!(["claude", "claude-code", "codex"]),
+        json!(agent_session_grep_ports::capability::search_provider_filter_values()),
         "{search}"
     );
     assert_eq!(properties["since"]["type"], "string", "{search}");
     assert_eq!(properties["until"]["type"], "string", "{search}");
+}
+
+#[test]
+fn semantic_and_hybrid_mcp_search_use_vectors_and_keep_cli_filters() {
+    let (_dir, db) = filter_db("mcp-semantic-filters");
+    let before: Value = serde_json::from_str(&stdout(&run_cli(&db, &["status"]))).unwrap();
+    let indexed = run_cli(&db, &["index", "embeddings"]);
+    assert!(indexed.status.success(), "{}", stdout(&indexed));
+    let after: Value = serde_json::from_str(&stdout(&run_cli(&db, &["status"]))).unwrap();
+    assert_eq!(
+        after["data"]["generation"].as_u64().unwrap(),
+        before["data"]["generation"].as_u64().unwrap() + 1,
+        "a complete rebuild must advance generation once, not once per vector"
+    );
+    for mode in ["semantic", "hybrid"] {
+        let cli = run_cli(
+            &db,
+            &[
+                "search",
+                "mcpfilter",
+                "--mode",
+                mode,
+                "--provider",
+                "claude-code",
+                "--since",
+                "2026-07-28T00:00:00Z",
+            ],
+        );
+        assert!(cli.status.success(), "{}", stdout(&cli));
+        let cli: Value = serde_json::from_str(&stdout(&cli)).unwrap();
+        let (matching, excluded) = two_searches(
+            &db,
+            json!({"query":"mcpfilter", "mode":mode, "providers":["claude"], "since":"2026-07-28T00:00:00Z"}),
+            json!({"query":"mcpfilter", "mode":mode, "providers":["claude"], "since":"2026-08-01T00:00:00Z"}),
+        );
+        assert_eq!(
+            matching["structuredContent"]["data"]["retrieval_mode"], mode,
+            "{matching}"
+        );
+        assert_eq!(hit_texts(&matching), ["mcpfilter mid note"], "{matching}");
+        assert!(hit_texts(&excluded).is_empty(), "{excluded}");
+        assert_eq!(
+            matching["structuredContent"]["data"]["hits"],
+            cli["data"]["hits"]
+        );
+    }
 }
 
 #[test]

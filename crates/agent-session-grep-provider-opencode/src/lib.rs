@@ -79,9 +79,9 @@ impl ProviderAdapter for OpenCodeAdapter {
         let conn = &db.conn;
 
         // Check for OpenCode-specific tables: session, message, part.
-        let has_session = table_exists(conn, "session");
-        let has_message = table_exists(conn, "message");
-        let has_part = table_exists(conn, "part");
+        let has_session = table_exists(conn, "session")?;
+        let has_message = table_exists(conn, "message")?;
+        let has_part = table_exists(conn, "part")?;
 
         if !has_session {
             return Err(ProviderError::AmbiguousVariant(
@@ -127,112 +127,135 @@ impl ProviderAdapter for OpenCodeAdapter {
         //   message(id, session_id, data)  -- data is JSON with role
         //   part(id, message_id, data)     -- data is JSON with type/text
 
-        // Collect session metadata.
-        let mut session_meta: std::collections::HashMap<String, (Option<String>, Option<String>)> =
-            std::collections::HashMap::new();
-        if let Ok(mut stmt) = conn.prepare("SELECT id, title, directory FROM session")
-            && let Ok(rows) = stmt.query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                ))
+        let sql_error = |error: rusqlite::Error| {
+            ProviderError::StructuralFatal(format!("OpenCode SQLite query failed: {error}"))
+        };
+        let mut session_meta = std::collections::BTreeMap::new();
+        let mut stmt = conn
+            .prepare("SELECT id, directory FROM session ORDER BY id")
+            .map_err(sql_error)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
             })
-        {
-            for row in rows.filter_map(Result::ok) {
-                session_meta.insert(row.0, (row.1, row.2));
+            .map_err(sql_error)?;
+        for row in rows {
+            let (id, directory) = row.map_err(sql_error)?;
+            if id.trim().is_empty() {
+                return Err(ProviderError::StructuralFatal(
+                    "OpenCode session id is empty".into(),
+                ));
             }
+            let cwd = directory.filter(|value| !value.trim().is_empty());
+            session_meta.insert(
+                id.clone(),
+                agent_session_grep_ports::ProviderSessionIdentity {
+                    source_key: id.clone(),
+                    observation: agent_session_grep_ports::ProviderSessionObservation {
+                        provider_session_id: MetadataResolution::Resolved(id),
+                        original_working_directory: cwd
+                            .clone()
+                            .map(MetadataResolution::Resolved)
+                            .unwrap_or_default(),
+                        pair_observed: cwd.is_some(),
+                        multi_session: false,
+                    },
+                },
+            );
         }
 
-        // Collect text parts by message_id.
         let mut parts_by_message: std::collections::HashMap<String, Vec<String>> =
             std::collections::HashMap::new();
-        if let Ok(mut stmt) = conn.prepare(
-            "SELECT message_id, json_extract(data, '$.text') FROM part \
-             WHERE json_extract(data, '$.type') = 'text' ORDER BY time_created ASC",
-        ) && let Ok(rows) = stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, Option<String>>(1)?.unwrap_or_default(),
-            ))
-        }) {
-            for (msg_id, text) in rows.filter_map(Result::ok) {
-                if !text.is_empty() {
-                    parts_by_message.entry(msg_id).or_default().push(text);
-                }
+        let mut stmt = conn
+            .prepare(
+                "SELECT message_id, json_extract(data, '$.text') FROM part \
+             WHERE json_extract(data, '$.type') = 'text' ORDER BY time_created ASC, id ASC",
+            )
+            .map_err(sql_error)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                ))
+            })
+            .map_err(sql_error)?;
+        for row in rows {
+            let (msg_id, text) = row.map_err(sql_error)?;
+            if !text.is_empty() {
+                parts_by_message.entry(msg_id).or_default().push(text);
             }
         }
 
-        // Query messages ordered by time.
         let mut seq: u32 = 0;
-        let mut session_ids: Vec<String> = Vec::new();
-
-        if let Ok(mut stmt) = conn.prepare(
-            "SELECT id, session_id, json_extract(data, '$.role') \
-             FROM message ORDER BY time_created ASC",
-        ) && let Ok(rows) = stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?, // message id
-                row.get::<_, String>(1)?, // session_id
-                row.get::<_, String>(2)?, // role
-            ))
-        }) {
-            for (msg_id, sess_id, role) in rows.filter_map(Result::ok) {
-                if !matches!(role.as_str(), "user" | "assistant") {
-                    continue;
-                }
-                let parts = parts_by_message.get(&msg_id);
-                let text = match parts {
-                    Some(parts) if !parts.is_empty() => parts.join("\n"),
-                    _ => continue,
-                };
-                if text.trim().is_empty() {
-                    continue;
-                }
-
-                // Session identity from first message.
-                if report.session_native_id.is_none() {
-                    report.session_native_id = Some(sess_id.clone());
-                    report.session_observation.provider_session_id =
-                        MetadataResolution::Resolved(sess_id.clone());
-                    if let Some((_, cwd)) = session_meta.get(&sess_id)
-                        && let Some(cwd) = cwd
-                        && !cwd.trim().is_empty()
-                    {
-                        report.session_observation.original_working_directory =
-                            MetadataResolution::Resolved(cwd.trim().to_string());
-                        report.session_observation.pair_observed = true;
-                    }
-                }
-                if !session_ids.iter().any(|s| s == &sess_id) {
-                    session_ids.push(sess_id.clone());
-                }
-
-                sink.emit_message(MessageEvent {
-                    seq,
-                    native_id: &msg_id,
-                    parent_native_id: None,
-                    role: &role,
-                    text: &text,
-                    timestamp: None,
-                    is_sidechain: false,
-                    span: None, // SQLite doesn't have byte spans
-                })
-                .map_err(|e| ProviderError::StructuralFatal(e.to_string()))?;
-                seq += 1;
-                report.committed += 1;
+        let mut session_ids = std::collections::BTreeSet::new();
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, session_id, json_extract(data, '$.role') \
+             FROM message ORDER BY time_created ASC, id ASC",
+            )
+            .map_err(sql_error)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, rusqlite::types::Value>(2)?,
+                ))
+            })
+            .map_err(sql_error)?;
+        for row in rows {
+            let (msg_id, sess_id, role) = row.map_err(sql_error)?;
+            // A decoded SQL value lacking a textual role is a malformed
+            // provider record, counted as skipped. Prepare/query/row-decoding
+            // failures above remain fatal; no backend error is swallowed.
+            let rusqlite::types::Value::Text(role) = role else {
+                report.skipped += 1;
+                report
+                    .diagnostics
+                    .push("OpenCode message has no textual role; skipped".into());
+                continue;
+            };
+            if !matches!(role.as_str(), "user" | "assistant") {
+                continue;
             }
+            let text = match parts_by_message.get(&msg_id) {
+                Some(parts) => parts.join("\n"),
+                None => continue,
+            };
+            if text.trim().is_empty() {
+                continue;
+            }
+            let session = session_meta.get(&sess_id).ok_or_else(|| {
+                ProviderError::StructuralFatal(
+                    "OpenCode message references an unknown session".into(),
+                )
+            })?;
+            if report.session_native_id.is_none() {
+                report.session_native_id = Some(sess_id.clone());
+                report.session_observation = session.observation.clone();
+            }
+            session_ids.insert(sess_id);
+            sink.emit_message(MessageEvent {
+                session: Some(session),
+                seq,
+                native_id: &msg_id,
+                parent_native_id: None,
+                role: &role,
+                text: &text,
+                timestamp: None,
+                is_sidechain: false,
+                span: None,
+            })
+            .map_err(|e| ProviderError::StructuralFatal(e.to_string()))?;
+            seq = seq.checked_add(1).ok_or_else(|| {
+                ProviderError::StructuralFatal("too many OpenCode messages".into())
+            })?;
+            report.committed += 1;
         }
-
-        // Multi-session diagnostic.
         if session_ids.len() > 1 {
             report.session_observation.multi_session = true;
             report.session_observation.provider_session_id = MetadataResolution::Ambiguous;
-            report.diagnostics.push(format!(
-                "数据库包含 {} 个不同 session——单文件=单会话，全部消息归属首个会话 {}",
-                session_ids.len(),
-                session_ids[0]
-            ));
         }
 
         Ok(report)
@@ -254,15 +277,19 @@ fn temp_file_suffix() -> String {
     )
 }
 
-/// Deletes the temp SQLite file when dropped. Only ever held by [`TempDb`],
-/// which guarantees the connection is closed first.
+/// Deletes the owned temp SQLite database and sidecars after its connection closes.
+/// A final read-only connection may leave WAL/SHM files behind.
 struct TempDbGuard {
     path: std::path::PathBuf,
 }
 
 impl Drop for TempDbGuard {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
+        for suffix in ["", "-wal", "-shm"] {
+            let mut owned_file = self.path.as_os_str().to_os_string();
+            owned_file.push(suffix);
+            let _ = std::fs::remove_file(std::path::Path::new(&owned_file));
+        }
     }
 }
 
@@ -296,12 +323,12 @@ impl TempDb {
 fn open_readonly_from_bytes(bytes: &[u8]) -> Result<TempDb, String> {
     let temp_dir = std::env::temp_dir();
     let temp_path = temp_dir.join(format!("asg-opencode-{}.db", temp_file_suffix()));
-    let mut file = std::fs::File::create(&temp_path).map_err(|e| e.to_string())?;
+    let guard = TempDbGuard { path: temp_path };
+    let mut file = std::fs::File::create(&guard.path).map_err(|e| e.to_string())?;
     file.write_all(bytes).map_err(|e| e.to_string())?;
     file.sync_all().map_err(|e| e.to_string())?;
     drop(file);
 
-    let guard = TempDbGuard { path: temp_path };
     let conn = Connection::open_with_flags(
         &guard.path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -317,12 +344,12 @@ fn open_readonly_from_bytes(bytes: &[u8]) -> Result<TempDb, String> {
 }
 
 /// Check if a table exists in the database.
-fn table_exists(conn: &Connection, table_name: &str) -> bool {
-    conn.prepare(&format!(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='{table_name}'"
-    ))
-    .and_then(|mut stmt| stmt.exists([]))
-    .unwrap_or(false)
+fn table_exists(conn: &Connection, table_name: &str) -> Result<bool, ProviderError> {
+    conn.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?1")
+        .and_then(|mut stmt| stmt.exists([table_name]))
+        .map_err(|error| {
+            ProviderError::StructuralFatal(format!("OpenCode SQLite schema query failed: {error}"))
+        })
 }
 
 #[cfg(test)]
@@ -339,6 +366,70 @@ mod tests {
         assert_eq!(manifest.capabilities.variant_id, VARIANT_ID);
         assert!(manifest.last_certified_targets.is_empty());
         assert_eq!(manifest.fixture_revision, Some(1));
+    }
+
+    fn assert_wal_temp_copy_cleanup(query: &str, should_fail: bool) {
+        let fixture = TempDbGuard {
+            path: std::env::temp_dir().join(format!(
+                "asg-opencode-wal-fixture-{}.db",
+                temp_file_suffix()
+            )),
+        };
+        let writer = Connection::open(&fixture.path).unwrap();
+        writer
+            .execute_batch(
+                "PRAGMA journal_mode=WAL;
+                 CREATE TABLE cleanup_fixture (value INTEGER);
+                 INSERT INTO cleanup_fixture VALUES (7);",
+            )
+            .unwrap();
+        drop(writer);
+        let bytes = std::fs::read(&fixture.path).unwrap();
+        let mut copy_path = None;
+        let result = (|| -> rusqlite::Result<i64> {
+            let db = open_readonly_from_bytes(&bytes).unwrap();
+            let path = db.temp_path().to_path_buf();
+            // A real read materializes the private WAL/SHM files.
+            db.conn
+                .query_row("SELECT value FROM cleanup_fixture", [], |row| {
+                    row.get::<_, i64>(0)
+                })?;
+            for suffix in ["-wal", "-shm"] {
+                let mut sidecar = path.as_os_str().to_os_string();
+                sidecar.push(suffix);
+                assert!(std::path::Path::new(&sidecar).exists());
+            }
+            copy_path = Some(path);
+            // The error case returns while TempDb is still a local owner.
+            db.conn.query_row(query, [], |row| row.get(0))
+        })();
+        assert_eq!(result.is_err(), should_fail);
+        let path = copy_path.unwrap();
+        let mut remaining = Vec::new();
+        for suffix in ["", "-wal", "-shm"] {
+            let mut owned_file = path.as_os_str().to_os_string();
+            owned_file.push(suffix);
+            let owned_file = std::path::Path::new(&owned_file);
+            if owned_file.exists() {
+                remaining.push(suffix);
+                // Do not leave this test's files behind when the assertion fails.
+                std::fs::remove_file(owned_file).unwrap();
+            }
+        }
+        assert!(
+            remaining.is_empty(),
+            "temporary SQLite files leaked: {remaining:?}"
+        );
+    }
+
+    #[test]
+    fn wal_temp_copy_cleans_sidecars_after_success() {
+        assert_wal_temp_copy_cleanup("SELECT value FROM cleanup_fixture", false);
+    }
+
+    #[test]
+    fn wal_temp_copy_cleans_sidecars_after_query_error() {
+        assert_wal_temp_copy_cleanup("SELECT missing_column FROM cleanup_fixture", true);
     }
 
     #[test]

@@ -204,14 +204,6 @@ impl ProviderAdapter for CursorAdapter {
         if session_count > 1 {
             report.session_observation.multi_session = true;
             report.session_observation.provider_session_id = MetadataResolution::Ambiguous;
-            let suffix = report
-                .session_native_id
-                .as_deref()
-                .map(|id| format!("，全部消息归属首个会话 {id}"))
-                .unwrap_or_default();
-            report.diagnostics.push(format!(
-                "state.vscdb 包含 {session_count} 个不同会话——单文件=单会话{suffix}"
-            ));
         }
 
         Ok(report)
@@ -265,7 +257,7 @@ fn parse_chat_data(
             continue;
         }
 
-        register_session(report, session_count, tab.id.as_deref());
+        let session = register_session(report, session_count, tab.id.as_deref());
         // Chronological order within the tab by bubble start time.
         bubbles.sort_by_key(|(_, _, start)| start.unwrap_or(i64::MAX));
         for (text, role, start) in bubbles {
@@ -276,6 +268,7 @@ fn parse_chat_data(
                 &role,
                 &text,
                 start.map(|t| t.to_string()),
+                &session,
             )?;
         }
     }
@@ -340,7 +333,7 @@ fn parse_prompts(
         }
 
         let id = (!conversation_id.trim().is_empty()).then_some(conversation_id.as_str());
-        register_session(report, session_count, id);
+        let session = register_session(report, session_count, id);
         for (role, text, created_at) in messages {
             emit_message(
                 sink,
@@ -349,6 +342,7 @@ fn parse_prompts(
                 &role,
                 &text,
                 created_at.map(|t| t.to_string()),
+                &session,
             )?;
         }
     }
@@ -358,15 +352,28 @@ fn parse_prompts(
 /// Count one more session and, when it is the first with a native id, claim
 /// it as the document session id (overridden to ambiguous at the end when
 /// the document turns out to hold multiple sessions).
-fn register_session(report: &mut ParseReport, session_count: &mut usize, native_id: Option<&str>) {
+fn register_session(
+    report: &mut ParseReport,
+    session_count: &mut usize,
+    native_id: Option<&str>,
+) -> agent_session_grep_ports::ProviderSessionIdentity {
     *session_count += 1;
-    let Some(id) = native_id.map(str::trim).filter(|s| !s.is_empty()) else {
-        return;
+    let native_id = native_id.filter(|s| !s.trim().is_empty());
+    let observation = agent_session_grep_ports::ProviderSessionObservation {
+        provider_session_id: native_id
+            .map(|id| MetadataResolution::Resolved(id.to_string()))
+            .unwrap_or_default(),
+        ..Default::default()
     };
     if report.session_native_id.is_none() {
-        report.session_native_id = Some(id.to_string());
-        report.session_observation.provider_session_id =
-            MetadataResolution::Resolved(id.to_string());
+        report.session_native_id = native_id.map(str::to_string);
+        report.session_observation = observation.clone();
+    }
+    agent_session_grep_ports::ProviderSessionIdentity {
+        source_key: native_id
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("anonymous-session-{}", session_count)),
+        observation,
     }
 }
 
@@ -382,8 +389,10 @@ fn emit_message(
     role: &str,
     text: &str,
     timestamp: Option<String>,
+    session: &agent_session_grep_ports::ProviderSessionIdentity,
 ) -> Result<(), ProviderError> {
     sink.emit_message(MessageEvent {
+        session: Some(session),
         seq: *seq,
         native_id: "",
         parent_native_id: None,
@@ -399,15 +408,19 @@ fn emit_message(
     Ok(())
 }
 
-/// Deletes the temp SQLite file when dropped. Only ever held by [`TempDb`],
-/// which guarantees the connection is closed first.
+/// Deletes the owned temp SQLite database and sidecars after its connection closes.
+/// A final read-only connection may leave WAL/SHM files behind.
 struct TempDbGuard {
     path: std::path::PathBuf,
 }
 
 impl Drop for TempDbGuard {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
+        for suffix in ["", "-wal", "-shm"] {
+            let mut owned_file = self.path.as_os_str().to_os_string();
+            owned_file.push(suffix);
+            let _ = std::fs::remove_file(std::path::Path::new(&owned_file));
+        }
     }
 }
 
@@ -440,12 +453,12 @@ impl TempDb {
 /// and returns a [`TempDb`] that deletes the temp copy once it goes out of scope.
 fn open_readonly_from_bytes(bytes: &[u8]) -> Result<TempDb, String> {
     let temp_path = temp_db_path("parse");
-    let mut file = std::fs::File::create(&temp_path).map_err(|e| e.to_string())?;
+    let guard = TempDbGuard { path: temp_path };
+    let mut file = std::fs::File::create(&guard.path).map_err(|e| e.to_string())?;
     file.write_all(bytes).map_err(|e| e.to_string())?;
     file.sync_all().map_err(|e| e.to_string())?;
     drop(file);
 
-    let guard = TempDbGuard { path: temp_path };
     let conn = Connection::open_with_flags(
         &guard.path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -517,6 +530,67 @@ mod tests {
         assert_eq!(manifest.capabilities.variant_id, VARIANT_ID);
         assert!(manifest.last_certified_targets.is_empty());
         assert_eq!(manifest.fixture_revision, Some(1));
+    }
+
+    fn assert_wal_temp_copy_cleanup(query: &str, should_fail: bool) {
+        let fixture = TempDbGuard {
+            path: temp_db_path("wal-fixture"),
+        };
+        let writer = Connection::open(&fixture.path).unwrap();
+        writer
+            .execute_batch(
+                "PRAGMA journal_mode=WAL;
+                 CREATE TABLE cleanup_fixture (value INTEGER);
+                 INSERT INTO cleanup_fixture VALUES (7);",
+            )
+            .unwrap();
+        drop(writer);
+        let bytes = std::fs::read(&fixture.path).unwrap();
+        let mut copy_path = None;
+        let result = (|| -> rusqlite::Result<i64> {
+            let db = open_readonly_from_bytes(&bytes).unwrap();
+            let path = db.temp_path().to_path_buf();
+            // A real read materializes the private WAL/SHM files.
+            db.conn
+                .query_row("SELECT value FROM cleanup_fixture", [], |row| {
+                    row.get::<_, i64>(0)
+                })?;
+            for suffix in ["-wal", "-shm"] {
+                let mut sidecar = path.as_os_str().to_os_string();
+                sidecar.push(suffix);
+                assert!(std::path::Path::new(&sidecar).exists());
+            }
+            copy_path = Some(path);
+            // The error case returns while TempDb is still a local owner.
+            db.conn.query_row(query, [], |row| row.get(0))
+        })();
+        assert_eq!(result.is_err(), should_fail);
+        let path = copy_path.unwrap();
+        let mut remaining = Vec::new();
+        for suffix in ["", "-wal", "-shm"] {
+            let mut owned_file = path.as_os_str().to_os_string();
+            owned_file.push(suffix);
+            let owned_file = std::path::Path::new(&owned_file);
+            if owned_file.exists() {
+                remaining.push(suffix);
+                // Do not leave this test's files behind when the assertion fails.
+                std::fs::remove_file(owned_file).unwrap();
+            }
+        }
+        assert!(
+            remaining.is_empty(),
+            "temporary SQLite files leaked: {remaining:?}"
+        );
+    }
+
+    #[test]
+    fn wal_temp_copy_cleans_sidecars_after_success() {
+        assert_wal_temp_copy_cleanup("SELECT value FROM cleanup_fixture", false);
+    }
+
+    #[test]
+    fn wal_temp_copy_cleans_sidecars_after_query_error() {
+        assert_wal_temp_copy_cleanup("SELECT missing_column FROM cleanup_fixture", true);
     }
 
     #[test]
@@ -744,12 +818,7 @@ mod tests {
             report.session_observation.provider_session_id,
             MetadataResolution::Ambiguous
         );
-        assert!(
-            report
-                .diagnostics
-                .iter()
-                .any(|d| d.contains("2 个不同会话"))
-        );
+        assert!(report.diagnostics.is_empty());
         // conv-a (earliest 100) emits before conv-b (300).
         let roles: Vec<&str> = sink.events.iter().map(|e| e.1.as_str()).collect();
         assert_eq!(roles, ["user", "assistant", "user", "assistant"]);

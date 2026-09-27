@@ -275,21 +275,21 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   asserting verbatim passthrough of noise-shaped user text, so a filter
   borrowed from another format cannot land silently.
 - Rank signals for lexical search hits: displayed score is now
-  `max(0, bm25 × recency_decay − sidechain_penalty + current_repo_boost)`
+  `max(0, RRF × recency_decay − sidechain_penalty + current_repo_boost)`
   with a 30-day exponential half-life (future timestamps clamp to full score)
   and a 0.3 decay floor so old messages are never fully suppressed; sidechain
-  hits pay a fixed 1.0 score penalty (same relevance ranks them after mainline
+  hits pay a fixed `0.25/61` score penalty (same relevance ranks them after mainline
   hits) and hits whose session belongs to the repository the command runs in
-  gain a fixed 2.0 boost (sessiongrep's current-repository preference,
-  rescaled to this project's bm25 range). Penalty and boost are composed
+  gain a fixed `0.5/61` boost (sessiongrep's current-repository preference,
+  scaled to RRF with k=60). Penalty and boost are composed
   before the clamp, so a hit clamped to zero cannot be revived by the
   preference; a caller with no derivable repository identity (not in a git
   work tree, no `origin`, or an entry point without working-directory
   semantics) leaves every score bit-identical. Constants live in one module
   (`application::ranking`) and every parameter is pinned by unit tests;
-  ranking is recomputed from the injected application clock, so results stay
-  deterministic per clock (tests inject a fixed clock; production tracks wall
-  time as before, and `ASG_CURRENT_REPO` fixes the repository signal for
+  ranking uses the injected application clock at the first search request;
+  subsequent pages retain that scoring time and original 15-minute expiry
+  (tests inject a fixed clock, and `ASG_CURRENT_REPO` fixes the repository signal for
   end-to-end tests). Applies to pure lexical retrieval (including lexical
   fallback) only — semantic hits and hybrid RRF fusion are unchanged.
 - CJK single-character query recall: the FTS token stream now also carries a
@@ -369,6 +369,36 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `index rebuild` re-projects the whole index from the catalog.
 
 ### Fixed
+
+- Live OpenCode/Cursor SQLite ingestion reads committed WAL state through
+  bounded read-only backups and preserves distinct sessions and resume claims.
+  Parser semantic version 2 reparses prior scans. SQL failures abort ingestion;
+  malformed role records count as skipped and cannot cause tombstones.
+  Private parser databases now clean their WAL/SHM files after successful
+  reads and errors, with connection handles closed before unlinking.
+- Read commands no longer create or migrate catalogs. Stale schemas require
+  explicit writer-leased maintenance; no-op writes still validate every fact.
+- Semantic/hybrid search applies metadata, facet and visibility filters before
+  pagination, propagates readiness errors, rejects non-finite vectors and uses
+  the shared semantic application path in MCP. Provider filters cover all 14
+  implemented providers; Web declares and validates its full search parameter set.
+- The embedded Web client exposes the supported search filters, invalidates
+  pagination when inputs change, and prevents obsolete search/context/preview
+  responses from overwriting current state. Loading/error feedback, token
+  rotation, bilingual results and responsive layout retain offline deployment.
+- Message/session FTS ranks now merge by RRF k=60 with canonical wire-ID ties.
+  Search cursors bind mode, model, vector and ranking context, retain first-page
+  scoring time and never refresh their original expiry; old search cursors
+  fail explicitly. Semantic top-k memory and metadata exclusion SQL are bounded;
+  embedding rebuild uses atomic keyset batches with complete failure rollback.
+- Unicode-safe secret redaction, checked native message/parent IDs, valid calendar
+  dates and checked time arithmetic prevent panics and identity collisions.
+  Hook budget detection/truncation uses the same character unit; Grok rewind
+  indices no longer truncate on 32-bit targets.
+- Updated Ratatui to 0.30.2 and Crossterm to 0.29, removing both lru unsound
+  advisories. One `paste` unmaintained warning remains in the optional semantic
+  dependency tree; no advisory suppression was added. Session relocation aliases
+  and upstream semantic dependency cleanup remain registered follow-up work.
 
 - **`sync` could not finish while any coding agent was running.** Every source
   was staged, then every snapshot verified, then one commit ran; the

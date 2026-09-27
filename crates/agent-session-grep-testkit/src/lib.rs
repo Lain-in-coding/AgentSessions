@@ -299,6 +299,37 @@ impl SearchIndex for InMemoryStore {
         hits.truncate(limit);
         Ok(hits)
     }
+    fn query_with_policy(
+        &self,
+        query: SearchQuery<'_>,
+        limit: usize,
+        facets: &agent_session_grep_ports::SearchFacets,
+        include_system: bool,
+    ) -> PortResult<Vec<SearchHit>> {
+        if !facets.is_default() {
+            return Err(PortError::Backend(
+                "InMemoryStore does not support facets".into(),
+            ));
+        }
+        let mut hits = self.query_filtered(query, usize::MAX)?;
+        if !include_system {
+            let catalog = self.catalog.borrow();
+            hits.retain(|hit| {
+                !catalog
+                    .get(hit.id.as_str())
+                    .and_then(|payload| serde_json::from_slice::<serde_json::Value>(payload).ok())
+                    .and_then(|value| {
+                        value
+                            .get("role")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_owned)
+                    })
+                    .is_some_and(|role| role == "system" || role == "developer")
+            });
+        }
+        hits.truncate(limit);
+        Ok(hits)
+    }
 }
 
 impl ContextGraphStore for InMemoryStore {
@@ -526,6 +557,7 @@ impl ProviderAdapter for FakeProvider {
         let mut report = ParseReport::default();
         for (seq, (role, text)) in self.messages.iter().enumerate() {
             sink.emit_message(MessageEvent {
+                session: None,
                 seq: seq as u32,
                 native_id: "",
                 parent_native_id: None,

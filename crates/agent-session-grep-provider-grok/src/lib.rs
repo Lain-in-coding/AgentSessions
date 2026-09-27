@@ -331,10 +331,11 @@ impl ProviderAdapter for GrokBuildAdapter {
                 }
                 "rewind_marker" => {
                     if let Some(target) = target
-                        && let Some(msg_idx) = user_message_indices.get(target as usize).copied()
+                        && let Ok(target) = usize::try_from(target)
+                        && let Some(msg_idx) = user_message_indices.get(target).copied()
                     {
                         messages.truncate(msg_idx);
-                        user_message_indices.truncate(target as usize);
+                        user_message_indices.truncate(target);
                         message_spans.truncate(msg_idx);
                         message_first_spans.truncate(msg_idx);
                         pending_user = None;
@@ -361,6 +362,7 @@ impl ProviderAdapter for GrokBuildAdapter {
             let role = if *is_user { "user" } else { "assistant" };
             let span = message_first_spans.get(idx).copied().flatten();
             sink.emit_message(MessageEvent {
+                session: None,
                 seq,
                 native_id: "",
                 parent_native_id: None,
@@ -508,6 +510,22 @@ mod tests {
         // then agent message → 1 total
         assert_eq!(sink.count, 1);
         assert_eq!(report.committed, 1);
+    }
+
+    #[test]
+    fn oversized_rewind_target_cannot_wrap_to_an_existing_prompt() {
+        for target in [u64::from(u32::MAX) + 1, u64::MAX] {
+            let fixture = format!(
+                "{{\"params\":{{\"update\":{{\"sessionUpdate\":\"user_message_chunk\",\"content\":\"retained\"}},\"_meta\":{{\"promptIndex\":0}}}}}}\n\
+                 {{\"params\":{{\"update\":{{\"sessionUpdate\":\"rewind_marker\",\"targetPromptIndex\":{target}}}}}}}\n"
+            );
+            let mut sink = TextSink { texts: vec![] };
+            let report = GrokBuildAdapter::new()
+                .parse(fixture.as_bytes(), &mut sink)
+                .unwrap();
+            assert_eq!(sink.texts, vec!["retained"]);
+            assert_eq!(report.committed, 1);
+        }
     }
 
     #[test]

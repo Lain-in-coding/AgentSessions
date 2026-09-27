@@ -176,7 +176,8 @@ Before proposing a commit for this crate:
   (asserted in `tests/mcp_e2e.rs` and `tests/e2e.rs`). Resume Metadata is
   isolated in its own port struct and SQLite table; it never enters FTS text,
   opaque session payload, diagnostics, progress frames, or error messages.
-  Multi-Session Sources fail closed. Canonical `session_id` (`ses_v1_*`) is the
+  Explicit per-message session observations produce separate per-session claims;
+  ambiguous report-level observations still fail closed. Canonical `session_id` (`ses_v1_*`) is the
   catalog identity; the Provider-native ID is Resume Metadata only — the two
   are not interchangeable and `ses_v1_*` cannot be reversed to the native ID.
 - **Scoped canonical Session identity (2026-08-14).** Native Session IDs are
@@ -188,6 +189,8 @@ Before proposing a commit for this crate:
   derives from absolute path and lacks a persisted registry, `id_alias` table,
   and path case normalization; relocation does not preserve Session identity.
   The domain layer is correct; the gap is composition-root only.
+  Follow-up: `.trellis/tasks/09-25-session-relocation-aliases/`; preserve
+  historical `ses_v1` during ordinary sync.
 - **Human session table (2026-08-14).** Human search renders a frozen
   five-column table: `日期 | Provider | 会话标题 | 工作目录 | Session ID`.
   Provider and Session ID are never truncated; title uses tail ellipsis;
@@ -198,5 +201,107 @@ Before proposing a commit for this crate:
   unchanged (Human-mode only projection).
 
 ---
+
+## Scenario: Cross-entry search and safe ingest boundaries
+
+### 1. Scope / Trigger
+CLI, MCP, Web, hook and handoff search; provider staging and vector rebuild.
+
+### 2. Signatures
+`prepare_search_embedding` owns shared local model selection/vectorization;
+semantic requests use `resume_semantic_app`. Web `/api/status` adds
+`data.web_capabilities`; search accepts `max_bytes`, sidechain/tool facets and
+repeated `provider` parameters in addition to existing search fields.
+
+### 3. Contracts
+Provider filters and MCP enums derive from implemented searchable capability
+rows (14 currently) plus the `claude` alias. Web unknown/empty parameters,
+duplicate scalars and invalid boolean/percent encoding fail explicitly; repeated
+providers form the same OR set as CLI/MCP. Web `limit` sets both page size and
+item budget; this difference is declared in capability metadata.
+Default bigram-hash remains fuzzy lexical vectorization, not a semantic-model
+quality claim. Source message/parent IDs are checked before normalization;
+explicit session observations survive staging. SQL/schema/corruption errors
+abort OpenCode ingestion; nontext roles are reported as skipped, making the
+scan incomplete and preventing missing-record tombstones.
+Hook truncation uses one Unicode character cutoff for both detection and
+output (the existing approximate 4 characters/token contract).
+
+### 4. Validation & Error Matrix
+Unknown/deferred provider, malformed search fields, unsafe native IDs -> invalid
+request. Store/schema/vector failures preserve canonical business errors. A
+read command on an absent catalog returns `catalog_error` and creates no DB.
+
+### 5. Good/Base/Bad Cases
+Good: indexed Grok data stays filtered in CLI/MCP semantic/hybrid results.
+Base: missing vectors cause explicit fallback. Bad: create an embedding and
+then call an App with `NoSemanticIndex`, or flag an uncut CJK hook as truncated.
+
+### 6. Tests Required
+Assert positive cross-entry hits, all advertised provider filters, invalid Web
+parameters, budgets/facets, Unicode hooks, atomic native-ID refusal and source
+multi-session accounting. Installer smoke covers no-create reads, explicit sync,
+registry filters and CLI/MCP effective semantic modes using synthetic data.
+
+### 7. Wrong vs Correct
+Wrong: duplicate embedding/model/provider-selection logic per entrypoint.
+Correct: share the composition helpers and keep protocol adapters thin.
+
+## Scenario: Embedded Web request state
+
+### 1. Scope / Trigger
+The offline `src/web/index.html` client changes filters, pages, sessions,
+context policy, preview or authentication while earlier requests are pending.
+
+### 2. Signatures
+`beginRequest(kind) -> AbortController`, `cancelRequest(kind)` and
+`currentRequest(kind, controller) -> boolean` own the `search`, `context`,
+`preview` and `init` request slots. `api(path, signal)` preserves shared error
+projection; `invalidateSearch(messageKey)` clears the current search state.
+
+### 3. Contracts
+Every search input participates in the serialized request signature. Changes
+clear the cursor, loaded hits, selection and handoff state; they cancel search
+and close context. Pagination may append only for the unchanged signature,
+and duplicate in-flight page loads are ignored. Aborting saves work, but
+controller identity also rejects responses queued before cancellation.
+Context success/error/finally paths must still belong to the active controller
+and Session. Closing context cancels context and preview work. An old 401 must
+not clear a newer accepted token. Render payloads with `textContent`; preserve
+CSP, single-file offline deployment and bilingual loaded-result state.
+
+### 4. Validation & Error Matrix
+Obsolete or aborted response -> no visible state change. Current request
+failure -> visible error and cleared busy state. Empty query or invalid numeric
+input -> no search request. Search input change -> pagination invalidated with
+accessible feedback. Current unauthorized response -> authentication gate.
+
+### 5. Good/Base/Bad Cases
+Good: query B completes before query A; B remains visible after A succeeds or
+fails. Base: a second page appends to the same search and updates the total.
+Bad: an old context response reopens a closed panel or replaces another Session.
+
+### 6. Tests Required
+Run `node --test crates/agent-session-grep-cli/tests/web_ui.test.cjs`. Assert
+all filters and capability-driven providers, out-of-order success/error,
+input/cursor invalidation, duplicate paging, empty-query/error reset, Session
+switch/close/policy changes, old-token 401, editable filter keys and language
+changes preserving every loaded page. These tests execute the shipped script
+with delayed synthetic responses and no npm dependencies. Browser layout
+inspection remains separate from the DOM interaction harness.
+
+### 7. Wrong vs Correct
+```javascript
+// Wrong: any completed request can replace the current context.
+const body = await api('/api/context?' + params);
+```
+
+```javascript
+// Correct: only the current controller and Session may project the response.
+const controller = beginRequest('context');
+const session = activeSession;
+const body = await api('/api/context?' + params, controller.signal);
+if (!currentRequest('context', controller) || activeSession !== session) return;
+```
 
 **Language**: write all guideline docs in **English**.

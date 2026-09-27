@@ -118,18 +118,23 @@ Set-Content -LiteralPath $fixture -Value ($fixtureLines -join "`n") -Encoding ut
 Write-Host "smoke: binary  $Binary"
 Write-Host "smoke: workdir $script:TempDir"
 
-# 1. doctor against a fresh store: reports the store as openable with a numeric schema.
+# An absent catalog stays absent on read; SQLite open failures map to catalog_error.
+$r = Invoke-Robot @('--db', $db, '--robot', 'doctor')
+Assert-That ($r.Code -eq 6 -and $null -ne $r.Frame -and $r.Frame.error.code -eq 'catalog_error') 'doctor on an absent store returns catalog_error (exit 6)' $r.Text
+Assert-That (-not (Test-Path -LiteralPath $db)) 'doctor does not create an absent database' $r.Text
+
+# 1. Only an explicit write initializes the fresh store; doctor is read-only.
+$r = Invoke-Robot @('--db', $db, '--robot', 'sync', $fixture)
+Assert-That ($r.Code -eq 0) 'sync exits 0' "exit=$($r.Code) stdout=$($r.Text)"
+Assert-That ($null -ne $r.Frame -and $r.Frame.ok -eq $true) 'sync envelope reports ok:true' $r.Text
+Assert-That ($null -ne $r.Frame -and $r.Frame.data.messages -eq 3) 'sync reports data.messages == 3' $r.Text
+
+# 2. doctor reports the initialized store as openable with a numeric schema.
 $r = Invoke-Robot @('--db', $db, '--robot', 'doctor')
 Assert-That ($r.Code -eq 0) 'doctor exits 0' "exit=$($r.Code) stdout=$($r.Text)"
 Assert-That (($null -ne $r.Frame) -and ($r.Frame.data.db -eq 'ok')) 'doctor reports data.db == ok' $r.Text
 $schema = if ($null -ne $r.Frame) { $r.Frame.data.schema } else { $null }
 Assert-That (($schema -is [int]) -or ($schema -is [int64]) -or ($schema -is [double])) 'doctor reports a numeric data.schema' $r.Text
-
-# 2. sync the fixture: all three conversational records are ingested in one batch.
-$r = Invoke-Robot @('--db', $db, '--robot', 'sync', $fixture)
-Assert-That ($r.Code -eq 0) 'sync exits 0' "exit=$($r.Code) stdout=$($r.Text)"
-Assert-That ($null -ne $r.Frame -and $r.Frame.ok -eq $true) 'sync envelope reports ok:true' $r.Text
-Assert-That ($null -ne $r.Frame -and $r.Frame.data.messages -eq 3) 'sync reports data.messages == 3' $r.Text
 
 # 3. search for the fixture term: hits are message-level entities.
 $r = Invoke-Robot @('--db', $db, '--robot', 'search', 'smokezylograph')
@@ -203,6 +208,28 @@ $r = Invoke-Robot @('--db', $db, '--robot', 'search', 'smokezylograph', '--curso
 Assert-That ($r.Code -eq 2) 'search with a garbage cursor exits 2' "exit=$($r.Code) stdout=$($r.Text)"
 Assert-That ($null -ne $r.Frame -and $r.Frame.error.code -eq 'cursor_invalid') 'garbage cursor reports error.code == cursor_invalid' $r.Text
 
+# Advertised provider filters must accept every implemented row. A distinct
+# Grok source makes filter enforcement observable, including semantic modes.
+$grokFixture = Join-Path $script:TempDir 'grok.jsonl'
+Set-Content -LiteralPath $grokFixture -Value '{"params":{"update":{"sessionUpdate":"user_message_chunk","content":"smokegrokfilter retained message"},"_meta":{"promptIndex":0}}}' -Encoding utf8NoBOM -NoNewline
+$r = Invoke-Robot @('--db', $db, '--robot', 'sync', $grokFixture)
+Assert-That ($r.Code -eq 0 -and $null -ne $r.Frame -and $r.Frame.data.messages -eq 1) 'sync ingests one Grok message' $r.Text
+$r = Invoke-Robot @('--db', $db, '--robot', 'providers')
+Assert-That ($r.Code -eq 0) 'providers exits 0' $r.Text
+$filterable = @(if ($null -ne $r.Frame) { $r.Frame.data.providers | Where-Object { $_.maturity -ne 'unsupported' } })
+Assert-That ($filterable.Count -gt 2) 'providers advertises more than the legacy two providers' $r.Text
+foreach ($provider in $filterable) {
+    $r = Invoke-Robot @('--db', $db, '--robot', 'search', 'smokegrokfilter', '--provider', $provider.provider_id)
+    $expected = if ($provider.provider_id -eq 'grok-build') { 1 } else { 0 }
+    Assert-That ($r.Code -eq 0 -and $null -ne $r.Frame -and @($r.Frame.data.hits).Count -eq $expected) "advertised provider filter $($provider.provider_id) selects the right messages" $r.Text
+}
+$r = Invoke-Robot @('--db', $db, '--robot', 'index', 'embeddings')
+Assert-That ($r.Code -eq 0 -and $null -ne $r.Frame -and $r.Frame.data.indexed -eq 4) 'index embeddings indexes all four synthetic messages' $r.Text
+foreach ($retrievalMode in @('semantic', 'hybrid')) {
+    $r = Invoke-Robot @('--db', $db, '--robot', 'search', 'smokegrokfilter', '--provider', 'grok-build', '--mode', $retrievalMode)
+    Assert-That ($r.Code -eq 0 -and $null -ne $r.Frame -and $r.Frame.data.retrieval_mode -eq $retrievalMode -and @($r.Frame.data.hits).Count -eq 1) "CLI $retrievalMode uses the index and Grok filter" $r.Text
+}
+
 # 10. MCP stdio handshake. stdout is the protocol channel, so every line must be
 # a complete JSON-RPC frame; anything else means diagnostics leaked into it.
 $mcpInput = @(
@@ -219,6 +246,8 @@ $mcpInput = @(
             arguments = @{ message_id = $mainlineMessageId; session_id = $sessionId; around = 0 }
         }
     } | ConvertTo-Json -Depth 5 -Compress)
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_sessions","arguments":{"query":"smokegrokfilter","providers":["grok-build"],"mode":"semantic"}}}'
+    '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"search_sessions","arguments":{"query":"smokegrokfilter","providers":["grok-build"],"mode":"hybrid"}}}'
 )
 $mcpOut = $mcpInput | & $Binary --db $db mcp
 $mcpCode = $LASTEXITCODE
@@ -248,6 +277,12 @@ $messageData = if ($null -ne $messageFrame) { $messageFrame.result.structuredCon
 Assert-That ($null -ne $messageFrame -and $messageFrame.result.isError -eq $false) 'tools/call get_message returns isError:false' $mcpText
 Assert-That ($null -ne $messageData -and $messageData.message_id -eq $mainlineMessageId) 'get_message returns the real anchor message id' $mcpText
 Assert-That ($null -ne $messageData -and @($messageData.messages).Count -eq 1) 'get_message around=0 returns exactly one message' $mcpText
+
+foreach ($case in @(@{ Id = 5; Mode = 'semantic' }, @{ Id = 6; Mode = 'hybrid' })) {
+    $searchFrame = $frames | Where-Object { (Test-HasProperty $_ 'id') -and $_.id -eq $case.Id } | Select-Object -First 1
+    $searchData = if ($null -ne $searchFrame -and (Test-HasProperty $searchFrame 'result')) { $searchFrame.result.structuredContent.data } else { $null }
+    Assert-That ($null -ne $searchData -and $searchFrame.result.isError -eq $false -and $searchData.retrieval_mode -eq $case.Mode -and @($searchData.hits).Count -eq 1) "MCP $($case.Mode) uses the index and Grok filter" $mcpText
+}
 
 if ($script:Failures -gt 0) {
     Write-Host "smoke: $script:Failures assertion(s) failed" -ForegroundColor Red
