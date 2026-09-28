@@ -15,7 +15,7 @@ agent-session-grep-ports = { path = "../agent-session-grep-ports" }
 # 从而从 release 图里剔除 hashlink/hashbrown-0.17/foldhash-0.2 重复依赖。
 # "trace" 仅供测试的 SQL 语句计数守卫使用(sqlite3_trace_v2 钩子),归入 dev-dependencies。
 # "functions" 供时间过滤谓词的 ISO-8601 → sort-key 标量函数注册。
-rusqlite = { version = "0.40", default-features = false, features = ["bundled", "functions", "backup"] }
+rusqlite = { version = "0.40.2", default-features = false, features = ["bundled", "functions", "backup"] }
 tempfile = "3"
 serde.workspace = true
 serde_json.workspace = true
@@ -25,4 +25,4 @@ blake3.workspace = true
 fs4 = "0.13"
 
 [dev-dependencies]
-rusqlite = { version = "0.40", default-features = false, features = ["bundled", "trace"] }
+rusqlite = { version = "0.40.2", default-features = false, features = ["bundled", "trace"] }
