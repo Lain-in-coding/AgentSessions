@@ -1,4 +1,6 @@
-{"_example": "Fill with {\"file\": \"<path>\", \"reason\": \"<why>\"}. Put spec/research files only — no code paths. Run `python .trellis/scripts/get_context.py --mode packages` to list available specs. Delete this line once real entries are added."}
-{"file": ".trellis\\spec\\agentsessions-adapters-sqlite\\backend\\index.md", "reason": "SQLite adapter quality checklist"}
-{"file": ".trellis\\spec\\guides\\cross-layer-thinking-guide.md", "reason": "Cross-layer verification checklist"}
-{"file": ".trellis\\tasks\\09-27-relocation-ci-compatibility\\research\\ci-blocker.md", "reason": "Remote check acceptance evidence"}
+{"file": ".trellis/spec/agentsessions-adapters-sqlite/backend/index.md", "reason": "SQLite adapter quality checklist"}
+{"file": ".trellis/spec/agentsessions-cli/backend/index.md", "reason": "Cross-platform CLI fixture identity, resume cwd, and subprocess test contracts"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Cross-layer verification checklist"}
+{"file": ".trellis/tasks/09-27-relocation-ci-compatibility/research/ci-blocker.md", "reason": "Remote check acceptance evidence"}
+{"file": ".trellis/tasks/09-27-relocation-ci-compatibility/research/v6-reingest-proof-audit.md", "reason": "Independent audit of legacy native proof and the Windows locator equivalence gap; requires executable reproduction"}
+{"file": ".trellis/tasks/09-27-relocation-ci-compatibility/research/msrv-dependency.md", "reason": "Reproduced Rust 1.90 dependency failure and verified official forward patch retaining SQLite security fixes"}

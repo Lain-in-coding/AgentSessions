@@ -171,8 +171,18 @@ Before proposing a commit for this crate:
 
 - [ ] `cargo fmt --all --check` clean.
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings` clean.
-- [ ] `cargo test -p agentsessions-cli` green, including `tests/e2e.rs` and
+- [ ] `cargo test -p agent-session-grep-cli` green, including `tests/e2e.rs` and
       `tests/mcp_e2e.rs` (both drive the real compiled binary end-to-end).
+- [ ] Positive legacy re-ingest fixtures use the historical installation seed
+      and `StableId::native_session_scoped`, and assert unchanged Session IDs.
+      Keep a separate unprovable-ID refusal with unchanged catalog/registry/
+      generation. Windows raw-locator coverage must not be hidden by seeding
+      every fixture with already-normalized source paths.
+- [ ] Resume subprocess cwd assertions canonicalize both filesystem paths and
+      compare native `PathBuf` values. Exercise a Unix symlink directory while
+      retaining first-run preview, actual spawn, and native argument assertions;
+      `/var` versus `/private/var` spellings alone do not indicate a wrong cwd.
+
 - [ ] Any protocol/envelope change is reflected in both `protocol.rs` tests and
       the `tests/e2e.rs` envelope-shape assertions.
 - [ ] Exit codes match the error catalog (invalid_request/cursor_invalid/

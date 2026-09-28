@@ -12,7 +12,7 @@
   "assignee": "QIN",
   "createdAt": "2026-09-27",
   "completedAt": null,
-  "branch": "fix/relocation-ci-compatibility",
+  "branch": "fix/relocation-ci-test-fixtures",
   "base_branch": "main",
   "worktree_path": null,
   "commit": null,

@@ -1422,6 +1422,208 @@ fn v17_case_ambiguous_or_unverifiable_provenance_stays_unregistered_and_readable
 }
 
 #[test]
+fn unbound_legacy_source_aliases_fail_before_namespace_allocation() {
+    for recorded in [
+        r"C:\RecordedCase\.claude\session.jsonl",
+        r"\\server\share\RecordedCase\.claude\session.jsonl",
+    ] {
+        let store = SqliteStore::open_in_memory().unwrap();
+        seed_legacy_source(&store, recorded, "claude-code", "native-a", false);
+        store
+            .conn
+            .borrow()
+            .execute(
+                "UPDATE source_scans SET provider_id=NULL, len_bytes=NULL, fingerprint=NULL",
+                [],
+            )
+            .unwrap();
+        let before = state(&store);
+        for input in [
+            recorded.to_owned(),
+            recorded.replace('\\', "/"),
+            recorded.replace('\\', "/").to_ascii_lowercase(),
+        ] {
+            assert!(matches!(
+                store.resolve_or_allocate_installation_namespace(
+                    "claude-code",
+                    &input,
+                    &legacy_installation_namespace(&input, "claude-code"),
+                ),
+                Err(PortError::InvalidRequest(_))
+            ));
+            assert_eq!(state(&store), before);
+            assert!(store.pending_installations.borrow().is_empty());
+        }
+    }
+}
+
+#[test]
+fn ambiguous_unbound_legacy_source_keys_refuse_even_an_exact_locator() {
+    let store = SqliteStore::open_in_memory().unwrap();
+    let paths = [
+        r"C:\RecordedCase\.claude\session.jsonl",
+        "C:/RecordedCase/.claude/session.jsonl",
+    ];
+    for (path, native) in paths.iter().zip(["native-a", "native-b"]) {
+        seed_legacy_source(&store, path, "claude-code", native, true);
+    }
+    let before = state(&store);
+    for path in paths {
+        assert!(matches!(
+            store.resolve_or_allocate_installation_namespace(
+                "claude-code",
+                path,
+                &legacy_installation_namespace(path, "claude-code"),
+            ),
+            Err(PortError::InvalidRequest(_))
+        ));
+        assert_eq!(state(&store), before);
+        assert!(store.pending_installations.borrow().is_empty());
+    }
+}
+
+#[test]
+fn unbound_legacy_source_alias_refuses_registered_and_pending_root_reuse() {
+    for registered in [false, true] {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let recorded = r"C:\RecordedCase\.claude\session.jsonl";
+        seed_legacy_source(&store, recorded, "claude-code", "native-a", false);
+        store
+            .conn
+            .borrow()
+            .execute(
+                "UPDATE source_scans SET provider_id=NULL WHERE source_path=?1",
+                [recorded],
+            )
+            .unwrap();
+        let sibling = seed_legacy_source(
+            &store,
+            r"C:\RecordedCase\.claude\sibling.jsonl",
+            "claude-code",
+            "native-b",
+            true,
+        );
+        assert_eq!(
+            store
+                .resolve_or_allocate_installation_namespace(
+                    "claude-code",
+                    &sibling.batch.source_path,
+                    &sibling.namespace,
+                )
+                .unwrap(),
+            sibling.namespace,
+        );
+        if registered {
+            store
+                .commit_source_batches_if_changed(&[sibling.batch])
+                .unwrap();
+        }
+        let before = state(&store);
+        let pending_keys: Vec<_> = store
+            .pending_installations
+            .borrow()
+            .keys()
+            .cloned()
+            .collect();
+        let alias = "c:/recordedcase/.claude/session.jsonl";
+        assert!(matches!(
+            store.resolve_or_allocate_installation_namespace(
+                "claude-code",
+                alias,
+                &legacy_installation_namespace(alias, "claude-code"),
+            ),
+            Err(PortError::InvalidRequest(_))
+        ));
+        assert_eq!(state(&store), before);
+        assert_eq!(
+            store
+                .pending_installations
+                .borrow()
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>(),
+            pending_keys,
+        );
+    }
+}
+
+#[test]
+fn exact_legacy_proof_preserves_ids_and_registered_source_aliases() {
+    let store = SqliteStore::open_in_memory().unwrap();
+    let recorded = r"C:\RecordedCase\.claude\session.jsonl";
+    let source = seed_legacy_source(&store, recorded, "claude-code", "native-a", true);
+    let before = state(&store);
+    assert_eq!(
+        store
+            .resolve_or_allocate_installation_namespace("claude-code", recorded, &source.namespace,)
+            .unwrap(),
+        source.namespace,
+    );
+    assert_eq!(state(&store), before);
+    assert!(
+        store
+            .commit_source_batches_if_changed(std::slice::from_ref(&source.batch))
+            .unwrap()
+    );
+    let after = state(&store);
+    let alias = "c:/recordedcase/.claude/session.jsonl";
+    assert_eq!(
+        store
+            .resolve_or_allocate_installation_namespace(
+                "claude-code",
+                alias,
+                &legacy_installation_namespace(alias, "claude-code"),
+            )
+            .unwrap(),
+        source.namespace,
+    );
+    let mut restaged = source.batch;
+    restaged.source_path = alias.into();
+    assert!(!store.commit_source_batches_if_changed(&[restaged]).unwrap());
+    assert_eq!(state(&store), after);
+    for id in source.sessions {
+        assert_eq!(
+            SqliteStore::stable_id_from_store(&store.conn.borrow(), id.as_str()).unwrap(),
+            id
+        );
+    }
+}
+
+#[test]
+fn legacy_locator_guard_does_not_guess_posix_case_or_relative_paths() {
+    for (recorded, input) in [
+        (
+            "/synthetic/CaseRoot/session.jsonl",
+            "/synthetic/caseroot/session.jsonl",
+        ),
+        (
+            "relative/session.jsonl",
+            "/synthetic/relative/session.jsonl",
+        ),
+    ] {
+        let store = SqliteStore::open_in_memory().unwrap();
+        store
+            .conn
+            .borrow()
+            .execute(
+                "INSERT INTO source_scans(source_path,scanned_at_ms) VALUES(?1,0)",
+                [recorded],
+            )
+            .unwrap();
+        let before = state(&store);
+        let namespace = store
+            .resolve_or_allocate_installation_namespace(
+                "claude-code",
+                input,
+                &legacy_installation_namespace(input, "claude-code"),
+            )
+            .unwrap();
+        assert!(namespace.starts_with("installation-v1:"));
+        assert_eq!(state(&store), before);
+    }
+}
+
+#[test]
 fn v18_migration_failure_rolls_back_schema_registry_and_legacy_data() {
     let store = legacy_store();
     seed_legacy_source(
