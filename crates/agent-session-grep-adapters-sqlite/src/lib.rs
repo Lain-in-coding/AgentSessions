@@ -1513,6 +1513,18 @@ pub type SourceFingerprint = (Option<i64>, Option<String>, i64);
 /// `(len_bytes, fingerprint, provider_id, parser_version)`。
 type StoredSourceScan = (Option<i64>, Option<String>, Option<String>, i64);
 
+/// 全库关系/成员视图，提交开始时读取一次，供后续 no-op 探测复用。
+struct CatalogStateSnapshot<'a> {
+    entities_by_source: &'a BTreeMap<String, BTreeMap<String, Option<String>>>,
+    placements_by_source: &'a BTreeMap<String, BTreeSet<String>>,
+    activities_by_source: &'a BTreeMap<String, BTreeSet<String>>,
+    usages_by_source: &'a BTreeMap<String, BTreeSet<String>>,
+    placements: &'a BTreeMap<String, StoredPlacement>,
+    edges: &'a BTreeMap<String, StoredEdge>,
+    activities: &'a BTreeMap<String, StoredActivity>,
+    usages: &'a BTreeMap<String, StoredUsage>,
+}
+
 impl SqliteStore {
     /// 只读打开（不抢 writer lease）。供 search/get/doctor 等读路径。
     pub fn open(path: &str) -> PortResult<Self> {
@@ -4041,7 +4053,20 @@ impl SqliteStore {
         let trace_started = trace::begin();
         batch_manifest(&upserts, &deletes, &relations)?;
         self.ensure_stored_identity_metadata_matches(&upserts)?;
-        let batch_current = self.source_batches_are_current(&upserts, &relations)?;
+        let batch_current = self.source_batches_are_current(
+            &upserts,
+            &relations,
+            &CatalogStateSnapshot {
+                entities_by_source: &current_entities_by_source,
+                placements_by_source: &current_placements_by_source,
+                activities_by_source: &current_activities_by_source,
+                usages_by_source: &current_usages_by_source,
+                placements: &stored_placements,
+                edges: &stored_edges,
+                activities: &stored_activities,
+                usages: &stored_usages,
+            },
+        )?;
         trace::add(&mut trace_stages, "manifest", trace_started);
         if batch_current {
             trace::emit(
@@ -5190,14 +5215,15 @@ impl SqliteStore {
         &self,
         upserts: &[(StableId, Vec<u8>, String)],
         relations: &RelationManifests,
+        state: &CatalogStateSnapshot<'_>,
     ) -> PortResult<bool> {
         if !self.batch_is_current_with_derived_context(upserts, true)? {
             return Ok(false);
         }
-        let stored_placements = self.stored_placements()?;
-        let stored_edges = self.stored_edges()?;
-        let stored_activities = self.stored_activities()?;
-        let stored_usages = self.stored_usages()?;
+        let stored_placements = state.placements;
+        let stored_edges = state.edges;
+        let stored_activities = state.activities;
+        let stored_usages = state.usages;
         for upsert in &relations.relation_upserts {
             let current = match upsert {
                 RelationUpsertManifest::Placement(placement) => stored_placements
@@ -5233,10 +5259,10 @@ impl SqliteStore {
             }
         }
 
-        let entity_state = self.source_entity_membership_state()?;
-        let placement_state = self.source_placement_membership_state()?;
-        let activity_state = self.source_activity_membership_state()?;
-        let usage_state = self.source_usage_membership_state()?;
+        let entity_state = state.entities_by_source;
+        let placement_state = state.placements_by_source;
+        let activity_state = state.activities_by_source;
+        let usage_state = state.usages_by_source;
         let conn = self.conn.borrow();
         for replacement in &relations.source_replacements {
             if replacement.entity_memberships.is_empty()
