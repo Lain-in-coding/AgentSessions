@@ -3,7 +3,7 @@
   "name": "provider-cursor-diskkv",
   "title": "Cursor IDE cursorDiskKV variant provider",
   "description": "",
-  "status": "planning",
+  "status": "in_progress",
   "dev_type": null,
   "scope": null,
   "package": "agentsessions-adapters-sqlite",
