@@ -81,6 +81,11 @@ const GOLDEN_FIXTURES: &[(&str, &str, &[u8])] = &[
         include_bytes!("../../agent-session-grep-provider-hermes/tests/golden/basic.json"),
     ),
     (
+        "hermes",
+        "state.db",
+        include_bytes!("../../agent-session-grep-provider-hermes/tests/golden/state.db"),
+    ),
+    (
         "kimi-code",
         "basic.jsonl",
         include_bytes!("../../agent-session-grep-provider-kimi/tests/golden/basic.jsonl"),

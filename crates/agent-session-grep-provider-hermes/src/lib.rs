@@ -1,13 +1,28 @@
 //! Hermes agent provider adapter.
 //!
-//! Parses Hermes session transcripts from `~/.hermes/sessions/session_<id>.json`
-//! (canonical format: full transcript + metadata; sibling `<id>.jsonl` files
-//! hold only partial recent state and are ignored). The top level carries
-//! `session_id`, `session_start`, and a `messages` array of
-//! `{role, content, reasoning?, timestamp?, tool_call_id?, tool_calls?}`.
+//! Two mutually exclusive variants:
 //!
-//! Format evidence: hstry (MIT) `adapters/hermes/adapter.ts` @88b78b1. Field
-//! shapes and the per-message extraction are adapted from hstry under MIT.
+//! * `hermes/session-json-v1` (unchanged): Hermes session transcripts from
+//!   `~/.hermes/sessions/session_<id>.json` (canonical format: full
+//!   transcript + metadata; sibling `<id>.jsonl` files hold only partial
+//!   recent state and are ignored). The top level carries `session_id`,
+//!   `session_start`, and a `messages` array of `{role, content,
+//!   reasoning?, timestamp?, tool_call_id?, tool_calls?}`.
+//! * `hermes/sqlite-state-v1` (see [`sqlite_state`]): `~/.hermes/state.db`
+//!   and `~/.hermes/profiles/<name>/state.db`, identified by their
+//!   `sessions` / `messages` tables and key columns.
+//!
+//! Variant dispatch is decided by the bytes alone: a SQLite header can never
+//! start a JSON object document, so each byte stream is claimed by exactly one
+//! variant; a stream that would satisfy both is refused as ambiguous instead of
+//! being guessed. Everything the JSON variant accepted before behaves
+//! byte-for-byte as before - the SQLite path is additive.
+//!
+//! Format evidence: hstry (MIT) `adapters/hermes/adapter.ts` @88b78b1 for the
+//! session JSON; NousResearch/hermes-agent `hermes_state_common.py` (schema
+//! version 30, blob `e35e61a06a3c69ebea6b37accec72d10cead20dc`) for the
+//! `state.db` column shape. Field shapes and the per-message extraction are
+//! adapted from those sources under their licenses.
 
 use agent_session_grep_ports::MetadataResolution;
 use agent_session_grep_ports::{
@@ -15,8 +30,25 @@ use agent_session_grep_ports::{
     ProviderAdapter, ProviderError, manifest_for,
 };
 
-/// Variant id surfaced in probe results.
+mod sqlite_state;
+
+/// Variant id of the session JSON document variant.
 const VARIANT_ID: &str = "hermes/session-json-v1";
+
+/// Fail closed when one byte stream would be claimed by both variants.
+///
+/// The two variants read disjoint formats (a file cannot both start with
+/// `SQLite format 3\0` and be a JSON object document), so this guard is a
+/// contract assertion rather than a live branch - but if a future format makes
+/// both claims true, refusing beats guessing.
+fn exclusive_claim(sqlite: bool, json: bool) -> Result<(), ProviderError> {
+    if sqlite && json {
+        return Err(ProviderError::AmbiguousVariant(
+            "bytes match both `hermes/sqlite-state-v1` and `hermes/session-json-v1`".into(),
+        ));
+    }
+    Ok(())
+}
 
 /// Hermes agent adapter: parses `session_<id>.json` transcripts.
 pub struct OpenHermesAdapter;
@@ -72,79 +104,23 @@ impl ProviderAdapter for OpenHermesAdapter {
             &[
                 "sibling <id>.jsonl files (partial recent state) are ignored; only session_<id>.json is parsed",
                 "no byte spans (whole-file JSON); message timestamps fall back to session_start when absent",
+                "the additive `hermes/sqlite-state-v1` variant reads state.db snapshots through a private read-only copy (single pinned read transaction); the capability row above still advertises only the JSON variant",
+                "state.db messages report no adopted native id: `messages.id` is a per-database rowid, so canonical message identity stays document-scoped and rowids appear only in diagnostics",
+                "state.db tool calls decode both documented shapes but every call/result association is non-authoritative: no call id is synthesized, no parent edge and no tool activity is emitted",
+                "state.db rows/cells/tool calls are bounded (4_096 sessions, 250_000 messages, 8 MiB per cell, 64 MiB per database, 32 tool calls per message, 200_000 per database); exceeding a bound fails the source instead of truncating it",
+                "discovery still registers only `~/.hermes/sessions`: state.db sources are ingested by explicit path until a multi-root discovery table exists",
             ],
         )
     }
 
     fn probe(&self, bytes: &[u8]) -> Result<ProbeResult, ProviderError> {
-        let text = std::str::from_utf8(bytes)
-            .map_err(|_| ProviderError::AmbiguousVariant("not valid UTF-8".into()))?;
-        let text = text.strip_prefix('\u{feff}').unwrap_or(text).trim();
-        if text.is_empty() {
-            return Err(ProviderError::AmbiguousVariant(
-                "empty input: nothing to probe".into(),
-            ));
+        if sqlite_state::has_sqlite_header(bytes) {
+            exclusive_claim(true, probe_session_json(bytes).is_ok())?;
+            return sqlite_state::probe(bytes);
         }
-        if !text.starts_with('{') {
-            return Err(ProviderError::AmbiguousVariant(
-                "input does not start with a JSON object".into(),
-            ));
-        }
-        let value: serde_json::Value = serde_json::from_str(text)
-            .map_err(|e| ProviderError::AmbiguousVariant(format!("not valid JSON: {e}")))?;
-
-        let mut matched = Vec::new();
-        let mut unmatched = Vec::new();
-
-        // Empty transcript: reject outright (nothing to parse), even when a
-        // `session_id` is present.
-        if let Some(serde_json::Value::Array(items)) = value.get("messages")
-            && items.is_empty()
-        {
-            return Err(ProviderError::AmbiguousVariant(
-                "top-level `messages` array is empty".into(),
-            ));
-        }
-
-        let messages_ok = match value.get("messages") {
-            Some(serde_json::Value::Array(items)) => {
-                let role_ok = items.iter().all(|m| m.get("role").is_some());
-                matched.push(format!(
-                    "top-level `messages` array with {} element(s)",
-                    items.len()
-                ));
-                if !role_ok {
-                    unmatched.push("some message elements lack a `role` field".into());
-                }
-                role_ok
-            }
-            Some(_) => {
-                unmatched.push("top-level `messages` is not an array".into());
-                false
-            }
-            None => false,
-        };
-
-        let session_id_ok = value
-            .get("session_id")
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|s| !s.trim().is_empty());
-
-        if !messages_ok && !session_id_ok {
-            return Err(ProviderError::AmbiguousVariant(
-                "no Hermes `messages` array with role-bearing elements, nor a `session_id`".into(),
-            ));
-        }
-        if session_id_ok {
-            matched.push("top-level `session_id` present".into());
-        }
-
-        Ok(ProbeResult {
-            variant_id: VARIANT_ID.to_string(),
-            confidence: Confidence::Confirmed,
-            matched_evidence: matched,
-            unmatched_evidence: unmatched,
-        })
+        let json = probe_session_json(bytes);
+        exclusive_claim(sqlite_state::has_sqlite_header(bytes), json.is_ok())?;
+        json
     }
 
     fn parse(
@@ -152,66 +128,148 @@ impl ProviderAdapter for OpenHermesAdapter {
         bytes: &[u8],
         sink: &mut dyn CanonicalEventSink,
     ) -> Result<ParseReport, ProviderError> {
-        let text = std::str::from_utf8(bytes)
-            .map_err(|e| ProviderError::StructuralFatal(format!("not valid UTF-8: {e}")))?;
-        let text = text.strip_prefix('\u{feff}').unwrap_or(text);
-        let session: HermesSessionFile = serde_json::from_str(text).map_err(|e| {
-            ProviderError::StructuralFatal(format!("not a Hermes session JSON: {e}"))
-        })?;
-
-        let mut report = ParseReport::default();
-        let session_start = session.session_start.as_deref();
-
-        if let Some(id) = session.session_id.as_deref()
-            && !id.trim().is_empty()
-        {
-            let id = id.trim();
-            report.session_native_id = Some(id.to_string());
-            report.session_observation.provider_session_id =
-                MetadataResolution::Resolved(id.to_string());
+        if sqlite_state::has_sqlite_header(bytes) {
+            return sqlite_state::parse(bytes, sink);
         }
-
-        let mut seq: u32 = 0;
-        if let Some(messages) = &session.messages {
-            for msg in messages.iter() {
-                let role = msg.role.as_str();
-                if !matches!(role, "user" | "assistant") {
-                    continue;
-                }
-                let Some(content) = msg.content.as_deref() else {
-                    continue;
-                };
-                if content.trim().is_empty() {
-                    continue;
-                }
-                let text = match msg.reasoning.as_deref().filter(|r| !r.trim().is_empty()) {
-                    Some(reasoning) => format!("[thinking]\n{reasoning}\n[/thinking]\n{content}"),
-                    None => content.to_string(),
-                };
-                let timestamp = msg
-                    .timestamp
-                    .as_ref()
-                    .and_then(serde_json::Value::as_str)
-                    .or(session_start);
-                sink.emit_message(MessageEvent {
-                    session: None,
-                    seq,
-                    native_id: "",
-                    parent_native_id: None,
-                    role,
-                    text: &text,
-                    timestamp,
-                    is_sidechain: false,
-                    span: None,
-                })
-                .map_err(|e| ProviderError::StructuralFatal(e.to_string()))?;
-                seq += 1;
-                report.committed += 1;
-            }
-        }
-
-        Ok(report)
+        parse_session_json(bytes, sink)
     }
+}
+
+/// Probe the `hermes/session-json-v1` document variant (unchanged behaviour).
+fn probe_session_json(bytes: &[u8]) -> Result<ProbeResult, ProviderError> {
+    let text = std::str::from_utf8(bytes)
+        .map_err(|_| ProviderError::AmbiguousVariant("not valid UTF-8".into()))?;
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text).trim();
+    if text.is_empty() {
+        return Err(ProviderError::AmbiguousVariant(
+            "empty input: nothing to probe".into(),
+        ));
+    }
+    if !text.starts_with('{') {
+        return Err(ProviderError::AmbiguousVariant(
+            "input does not start with a JSON object".into(),
+        ));
+    }
+    let value: serde_json::Value = serde_json::from_str(text)
+        .map_err(|e| ProviderError::AmbiguousVariant(format!("not valid JSON: {e}")))?;
+
+    let mut matched = Vec::new();
+    let mut unmatched = Vec::new();
+
+    // Empty transcript: reject outright (nothing to parse), even when a
+    // `session_id` is present.
+    if let Some(serde_json::Value::Array(items)) = value.get("messages")
+        && items.is_empty()
+    {
+        return Err(ProviderError::AmbiguousVariant(
+            "top-level `messages` array is empty".into(),
+        ));
+    }
+
+    let messages_ok = match value.get("messages") {
+        Some(serde_json::Value::Array(items)) => {
+            let role_ok = items.iter().all(|m| m.get("role").is_some());
+            matched.push(format!(
+                "top-level `messages` array with {} element(s)",
+                items.len()
+            ));
+            if !role_ok {
+                unmatched.push("some message elements lack a `role` field".into());
+            }
+            role_ok
+        }
+        Some(_) => {
+            unmatched.push("top-level `messages` is not an array".into());
+            false
+        }
+        None => false,
+    };
+
+    let session_id_ok = value
+        .get("session_id")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|s| !s.trim().is_empty());
+
+    if !messages_ok && !session_id_ok {
+        return Err(ProviderError::AmbiguousVariant(
+            "no Hermes `messages` array with role-bearing elements, nor a `session_id`".into(),
+        ));
+    }
+    if session_id_ok {
+        matched.push("top-level `session_id` present".into());
+    }
+
+    Ok(ProbeResult {
+        variant_id: VARIANT_ID.to_string(),
+        confidence: Confidence::Confirmed,
+        matched_evidence: matched,
+        unmatched_evidence: unmatched,
+    })
+}
+
+/// Parse the `hermes/session-json-v1` document variant (unchanged behaviour).
+fn parse_session_json(
+    bytes: &[u8],
+    sink: &mut dyn CanonicalEventSink,
+) -> Result<ParseReport, ProviderError> {
+    let text = std::str::from_utf8(bytes)
+        .map_err(|e| ProviderError::StructuralFatal(format!("not valid UTF-8: {e}")))?;
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let session: HermesSessionFile = serde_json::from_str(text)
+        .map_err(|e| ProviderError::StructuralFatal(format!("not a Hermes session JSON: {e}")))?;
+
+    let mut report = ParseReport::default();
+    let session_start = session.session_start.as_deref();
+
+    if let Some(id) = session.session_id.as_deref()
+        && !id.trim().is_empty()
+    {
+        let id = id.trim();
+        report.session_native_id = Some(id.to_string());
+        report.session_observation.provider_session_id =
+            MetadataResolution::Resolved(id.to_string());
+    }
+
+    let mut seq: u32 = 0;
+    if let Some(messages) = &session.messages {
+        for msg in messages.iter() {
+            let role = msg.role.as_str();
+            if !matches!(role, "user" | "assistant") {
+                continue;
+            }
+            let Some(content) = msg.content.as_deref() else {
+                continue;
+            };
+            if content.trim().is_empty() {
+                continue;
+            }
+            let text = match msg.reasoning.as_deref().filter(|r| !r.trim().is_empty()) {
+                Some(reasoning) => format!("[thinking]\n{reasoning}\n[/thinking]\n{content}"),
+                None => content.to_string(),
+            };
+            let timestamp = msg
+                .timestamp
+                .as_ref()
+                .and_then(serde_json::Value::as_str)
+                .or(session_start);
+            sink.emit_message(MessageEvent {
+                session: None,
+                seq,
+                native_id: "",
+                parent_native_id: None,
+                role,
+                text: &text,
+                timestamp,
+                is_sidechain: false,
+                span: None,
+            })
+            .map_err(|e| ProviderError::StructuralFatal(e.to_string()))?;
+            seq += 1;
+            report.committed += 1;
+        }
+    }
+
+    Ok(report)
 }
 
 #[cfg(test)]
