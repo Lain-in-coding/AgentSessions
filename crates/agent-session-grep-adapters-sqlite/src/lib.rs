@@ -4195,9 +4195,8 @@ impl SqliteStore {
                         + 64
                 })
                 .sum();
-            let activity_bytes: usize =
-                stored_activities.iter().map(|(id, _)| id.len() + 160).sum();
-            let usage_bytes: usize = stored_usages.iter().map(|(id, _)| id.len() + 96).sum();
+            let activity_bytes: usize = stored_activities.keys().map(|id| id.len() + 160).sum();
+            let usage_bytes: usize = stored_usages.keys().map(|id| id.len() + 96).sum();
             let entity_membership_bytes: usize = current_entities_by_source
                 .iter()
                 .map(|(source, rows)| {
@@ -5096,6 +5095,20 @@ impl SqliteStore {
             }
         }
         Ok(edges)
+    }
+
+    /// 测试专用：整表读取（生产提交路径只读候选 id，见 §Batch-scoped commit state）。
+    #[cfg(test)]
+    fn stored_placements(&self) -> PortResult<BTreeMap<String, StoredPlacement>> {
+        let conn = self.conn.borrow();
+        Self::stored_placements_from(&conn)
+    }
+
+    /// 测试专用：整表读取（生产提交路径只读候选 id）。
+    #[cfg(test)]
+    fn stored_edges(&self) -> PortResult<BTreeMap<String, StoredEdge>> {
+        let conn = self.conn.borrow();
+        Self::stored_edges_from(&conn)
     }
 
     fn stored_placements_from(conn: &Connection) -> PortResult<BTreeMap<String, StoredPlacement>> {
