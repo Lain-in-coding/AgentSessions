@@ -351,6 +351,59 @@ Correct: lease writes explicitly and validate all incoming facts before no-op.
 
 ---
 
+## Scenario: Batch-scoped commit state (measured 2026-09-29)
+
+### 1. Scope / Trigger
+Initial ingest at 10k-1M messages: latency and peak RSS of one `sync` commit.
+
+### 2. Signatures
+`commit_source_batches_if_changed` reads only the batch's own sources, the ids
+they observe, and the claim rows of those ids (`CatalogStateSnapshot`).
+`begin_index_batch_with_manifest` / `verify_pending_in_tx(..., manifest)` take
+one `CanonicalBatchManifest` per commit. Write connections run
+`PRAGMA cache_size = -131072` (session-level; `synchronous`/`journal_mode`
+unchanged).
+
+### 3. Contracts
+- Do not reintroduce whole-catalog maps in the commit path: membership and
+  relation rows must be loaded per batch sources plus candidate ids. Tables
+  without a candidate-index (e.g. `source_membership.message_id`) may be
+  scanned but must keep only candidate rows in memory (O(batch)).
+- The durable manifest is computed once per commit; `verify_pending_in_tx`
+  must still compare it against the `index_batches` row and reject tampering.
+- An unchanged (fingerprint-matched) source produced no commit batch, so the
+  post-read `verify_snapshot` re-read/re-hash must be skipped for it; sources
+  that were actually parsed keep the full verification.
+- `cache_size` is a performance knob only: never trade `synchronous`, journal
+  mode, or single-commit atomicity for throughput.
+
+### 4. Validation & Error Matrix
+Whole-catalog loads are not a correctness signal; removing them must not change
+any stored row. Evidence: equivalence check over 16 tables (catalog payloads,
+placements, edges, activities, usage, fts/fts_ids, session projections, four
+membership tables, scans, resume claims, outbox lifecycle) - 10k single batch
+and 100k split into 15 batches both byte-identical against the pre-optimization
+binary (`research/results`, `research/report.md`).
+
+### 5. Good/Base/Bad Cases
+Good: a 200k-message batch against a 1M catalog loads ~200k candidate rows and
+commits in one transaction. Base: an unchanged re-sync skips parsing, the
+double read, and the commit. Bad: rebuilding catalog-sized claimer maps or
+re-reading every unchanged source.
+
+### 6. Tests Required
+- Adapter suite (outbox/CAS/generation, identity fidelity, relation
+  completeness, durable-intent tamper rejection) stays green.
+- Multi-batch ingest equivalence: the same corpus split into many batches must
+  produce identical catalog/projection/relation rows as a single batch.
+
+### 7. Wrong vs Correct
+Wrong: load `source_membership`/`message_placements`/`message_edges` whole and
+build catalog-sized maps on every commit (measured 23.4 s and +3.4 GiB peak RSS
+on the 6th 200k batch against a 1M catalog).
+Correct: load the batch's sources + candidate ids, scan without retaining, and
+keep the durable manifest to one computation.
+
 ## Quality Check
 
 - `catalog` remains authoritative; `fts` fully rebuildable from it.
