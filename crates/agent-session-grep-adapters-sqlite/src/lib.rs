@@ -2819,7 +2819,9 @@ impl SqliteStore {
         let pending = self.begin_index_batch(&[], &[])?;
         let mut conn = self.conn.borrow_mut();
         let tx = conn.transaction().map_err(backend)?;
-        Self::verify_pending_in_tx(&tx, &pending, &[], &[], &RelationManifests::default())?;
+        let relations = RelationManifests::default();
+        let manifest = batch_manifest(&[], &[], &relations)?;
+        Self::verify_pending_in_tx(&tx, &pending, &[], &[], &relations, &manifest)?;
         // 确定性删除：谓词自包含，只删事务时刻仍然悬空的行（与扫描同一谓词）。
         // 先删孤儿活动行，再清悬空 claim——claim 的悬空定义是"指向不存在的
         // 活动"，第二个语句同时覆盖预先悬空的 claim 与刚删活动的 claim；
@@ -4051,7 +4053,7 @@ impl SqliteStore {
         };
 
         let trace_started = trace::begin();
-        batch_manifest(&upserts, &deletes, &relations)?;
+        let manifest = batch_manifest(&upserts, &deletes, &relations)?;
         self.ensure_stored_identity_metadata_matches(&upserts)?;
         let batch_current = self.source_batches_are_current(
             &upserts,
@@ -4078,10 +4080,13 @@ impl SqliteStore {
         }
 
         let trace_started = trace::begin();
-        let pending = self.begin_index_batch_with_relations(&upserts, &deletes, &relations)?;
+        let pending =
+            self.begin_index_batch_with_manifest(&manifest, &upserts, &deletes, &relations)?;
         trace::add(&mut trace_stages, "outbox_intent", trace_started);
         let trace_started = trace::begin();
-        self.commit_index_batch_with_relations(&pending, &upserts, &deletes, &relations)?;
+        self.commit_index_batch_with_relations(
+            &pending, &upserts, &deletes, &relations, &manifest,
+        )?;
         trace::add(&mut trace_stages, "apply_commit", trace_started);
         let trace_started = trace::begin();
         self.clear_installation_reservations(
@@ -5502,6 +5507,17 @@ impl SqliteStore {
         deletes: &[StableId],
         relations: &RelationManifests,
     ) -> PortResult<PendingIndexBatch> {
+        let manifest = batch_manifest(upserts, deletes, relations)?;
+        self.begin_index_batch_with_manifest(&manifest, upserts, deletes, relations)
+    }
+
+    fn begin_index_batch_with_manifest(
+        &self,
+        manifest: &CanonicalBatchManifest,
+        _upserts: &[(StableId, Vec<u8>, String)],
+        _deletes: &[StableId],
+        _relations: &RelationManifests,
+    ) -> PortResult<PendingIndexBatch> {
         let base = self.active_generation()?;
         let target = base
             .checked_add(1)
@@ -5509,7 +5525,6 @@ impl SqliteStore {
         let target_sql = i64::try_from(target).map_err(backend)?;
         let base_sql = i64::try_from(base).map_err(backend)?;
         let op = operation_id()?;
-        let manifest = batch_manifest(upserts, deletes, relations)?;
         let upsert_json = serde_json::to_string(&manifest.upsert_ids).map_err(backend)?;
         let delete_json = serde_json::to_string(&manifest.delete_ids).map_err(backend)?;
         let conn = self.conn.borrow();
@@ -5541,7 +5556,7 @@ impl SqliteStore {
             operation_id: op,
             base_generation: base,
             target_generation: target,
-            operation_digest: manifest.operation_digest,
+            operation_digest: manifest.operation_digest.clone(),
         })
     }
 
@@ -5560,12 +5575,9 @@ impl SqliteStore {
         upserts: &[(StableId, Vec<u8>, String)],
         deletes: &[StableId],
     ) -> PortResult<()> {
-        self.commit_index_batch_with_relations(
-            pending,
-            upserts,
-            deletes,
-            &RelationManifests::default(),
-        )
+        let relations = RelationManifests::default();
+        let manifest = batch_manifest(upserts, deletes, &relations)?;
+        self.commit_index_batch_with_relations(pending, upserts, deletes, &relations, &manifest)
     }
 
     /// 事务内校验 pending 句柄仍可安全激活：generation CAS + intent 行状态 + manifest 匹配。
@@ -5575,9 +5587,10 @@ impl SqliteStore {
     fn verify_pending_in_tx(
         tx: &rusqlite::Transaction<'_>,
         pending: &PendingIndexBatch,
-        upserts: &[(StableId, Vec<u8>, String)],
-        deletes: &[StableId],
-        relations: &RelationManifests,
+        _upserts: &[(StableId, Vec<u8>, String)],
+        _deletes: &[StableId],
+        _relations: &RelationManifests,
+        manifest: &CanonicalBatchManifest,
     ) -> PortResult<()> {
         // CAS：活动 generation 必须仍等于 intent 记录的 base，否则中止本批次。
         let current: i64 = tx
@@ -5649,7 +5662,7 @@ impl SqliteStore {
                 |row| row.get(0),
             )
             .map_err(backend)?;
-        let actual = batch_manifest(upserts, deletes, relations)?;
+        let actual = manifest;
         let actual_upserts = serde_json::to_string(&actual.upsert_ids).map_err(backend)?;
         let actual_deletes = serde_json::to_string(&actual.delete_ids).map_err(backend)?;
         let handle_matches = declared_base == pending.base_generation as i64
@@ -6086,12 +6099,13 @@ impl SqliteStore {
         upserts: &[(StableId, Vec<u8>, String)],
         deletes: &[StableId],
         relations: &RelationManifests,
+        manifest: &CanonicalBatchManifest,
     ) -> PortResult<()> {
         let mut conn = self.conn.borrow_mut();
         let tx = conn.transaction().map_err(backend)?;
         let mut trace_stages: Vec<(&'static str, std::time::Duration)> = Vec::new();
         let trace_started = trace::begin();
-        Self::verify_pending_in_tx(&tx, pending, upserts, deletes, relations)?;
+        Self::verify_pending_in_tx(&tx, pending, upserts, deletes, relations, manifest)?;
         if let Some(relocation) = &relations.relocation {
             Self::apply_relocation_in_tx(&tx, pending, relocation)?;
         }
@@ -7131,7 +7145,9 @@ impl SqliteStore {
         // 3) 单事务：校验句柄 → 整表清空 FTS → 按 catalog 重投影 → 推进 generation → 标记 activated。
         let mut conn = self.conn.borrow_mut();
         let tx = conn.transaction().map_err(backend)?;
-        Self::verify_pending_in_tx(&tx, &pending, &upserts, &[], &RelationManifests::default())?;
+        let relations = RelationManifests::default();
+        let manifest = batch_manifest(&upserts, &[], &relations)?;
+        Self::verify_pending_in_tx(&tx, &pending, &upserts, &[], &relations, &manifest)?;
 
         tx.execute("DELETE FROM fts", []).map_err(backend)?;
         tx.execute("DELETE FROM fts_ids", []).map_err(backend)?;
@@ -15246,6 +15262,7 @@ mod tests {
             relation_upserts: vec![RelationUpsertManifest::Placement(message_placement)],
             ..RelationManifests::default()
         };
+        let manifest = batch_manifest(&[], &[], &relations).unwrap();
         let pending = store
             .begin_index_batch_with_relations(&[], &[], &relations)
             .unwrap();
@@ -15260,7 +15277,7 @@ mod tests {
             .unwrap();
 
         let err = store
-            .commit_index_batch_with_relations(&pending, &[], &[], &relations)
+            .commit_index_batch_with_relations(&pending, &[], &[], &relations, &manifest)
             .unwrap_err();
         assert!(
             matches!(err, PortError::Backend(message) if message.contains("does not match durable intent"))
@@ -15291,6 +15308,7 @@ mod tests {
             }],
             ..RelationManifests::default()
         };
+        let manifest = batch_manifest(&[], &[], &relations).unwrap();
         let pending = store
             .begin_index_batch_with_relations(&[], &[], &relations)
             .unwrap();
@@ -15305,7 +15323,7 @@ mod tests {
             .unwrap();
 
         let err = store
-            .commit_index_batch_with_relations(&pending, &[], &[], &relations)
+            .commit_index_batch_with_relations(&pending, &[], &[], &relations, &manifest)
             .unwrap_err();
         assert!(
             matches!(err, PortError::Backend(message) if message.contains("does not match durable intent"))
