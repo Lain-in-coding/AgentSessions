@@ -1,0 +1,4 @@
+{"file": ".trellis/spec/agentsessions-ports/backend/index.md", "reason": "provider 契约与身份保真检查"}
+{"file": ".trellis/spec/agentsessions-adapters-sqlite/backend/index.md", "reason": "只读/有界/并发快照检查"}
+{"file": ".trellis/tasks/archive/2026-09/09-29-wake-reuse-study/research/upstream-evidence.md", "reason": "对照固定上游证据核验声明"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "跨层数据流检查"}
