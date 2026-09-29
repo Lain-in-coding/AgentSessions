@@ -1594,8 +1594,11 @@ impl SqliteStore {
 
     /// 打开并把 schema 迁移到当前版本，为版本化 migration 与可重建索引奠基。
     fn init(conn: &Connection) -> PortResult<()> {
-        conn.execute_batch("PRAGMA journal_mode=WAL;")
-            .map_err(backend)?;
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL;
+             PRAGMA cache_size = -131072;",
+        )
+        .map_err(backend)?;
         Self::migrate(conn)?;
         Self::register_scalar_functions(conn)
     }
