@@ -30,6 +30,7 @@ pub mod handoff_pack;
 pub mod hybrid;
 pub mod peek;
 pub mod ranking;
+pub mod relocation;
 pub mod resume;
 pub mod retention;
 
@@ -396,6 +397,7 @@ pub enum AppResponse {
 /// 使 stage 本身与存储无关、可独立单测。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StagedMessage {
+    pub session: Option<agent_session_grep_ports::ProviderSessionIdentity>,
     pub seq: u32,
     /// provider-native 消息 id；空串表示 provider 未提供，调用方回退派生。
     pub native_id: String,
@@ -434,7 +436,8 @@ pub struct StagedUsage {
 
 /// 一次 staging 的完整产物：缓冲消息 + provider 的完整解析报告。
 ///
-/// 会话 native id 的唯一权威来源是 [`ParseReport::session_native_id`]。
+/// Explicit per-message session identities take precedence; report-level
+/// session metadata is the compatibility projection for single-session sources.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StagedBatch {
     pub messages: Vec<StagedMessage>,
@@ -446,9 +449,8 @@ pub struct StagedBatch {
     pub report: ParseReport,
     /// Deprecated compatibility shim: the CLI composition root still
     /// constructs this struct literally, so the field cannot be removed yet.
-    /// It mirrors `report.session_native_id` (which is the single source of
-    /// truth) and must not be trusted independently — new code must read
-    /// `report.session_native_id`.
+    /// It mirrors `report.session_native_id` and must not be trusted
+    /// independently. Multi-session sources carry membership on each message.
     pub session_native_id: Option<String>,
 }
 
@@ -666,6 +668,7 @@ struct StagingSink {
 impl CanonicalEventSink for StagingSink {
     fn emit_message(&mut self, event: MessageEvent<'_>) -> PortResult<()> {
         self.buffered.push(StagedMessage {
+            session: event.session.cloned(),
             seq: event.seq,
             native_id: event.native_id.to_string(),
             parent_native_id: event.parent_native_id.map(str::to_string),
@@ -693,6 +696,31 @@ impl CanonicalEventSink for StagingSink {
         });
         Ok(())
     }
+}
+
+/// Validate search input without accessing a backend. Entrypoints reuse this
+/// before opening a catalog; Application remains authoritative for all callers.
+pub fn validate_search_request(
+    query: &str,
+    filters: &SearchFilters,
+    limit: usize,
+    budget: &ResponseBudget,
+) -> Result<(), AppError> {
+    if limit == 0 {
+        return Err(DomainError::InvalidRequest("limit must be > 0".into()).into());
+    }
+    if query.chars().any(char::is_control) {
+        return Err(DomainError::InvalidRequest("query contains control characters".into()).into());
+    }
+    if query.trim().is_empty() {
+        return Err(DomainError::InvalidRequest("query must not be empty".into()).into());
+    }
+    if let (Some(since), Some(until)) = (filters.since, filters.until)
+        && since >= until
+    {
+        return Err(DomainError::InvalidRequest("since must be earlier than until".into()).into());
+    }
+    budget.validate().map_err(AppError::from)
 }
 
 /// Parse a timezone-qualified RFC3339/ISO-8601 timestamp into a normalized
@@ -731,12 +759,18 @@ pub fn parse_search_instant(value: &str) -> Option<SearchInstant> {
         let (hours, minutes) = digits
             .split_once(':')
             .unwrap_or_else(|| digits.split_at_checked(2).unwrap_or((digits, "")));
-        if minutes.is_empty() || hours.len() != 2 || minutes.len() != 2 {
+        if hours.len() != 2
+            || minutes.len() != 2
+            || !hours
+                .bytes()
+                .chain(minutes.bytes())
+                .all(|byte| byte.is_ascii_digit())
+        {
             return None;
         }
         let hours: i32 = hours.parse().ok()?;
         let minutes: i32 = minutes.parse().ok()?;
-        if hours > 23 || minutes > 59 {
+        if !(0..=23).contains(&hours) || !(0..=59).contains(&minutes) {
             return None;
         }
         let magnitude = hours * 60 + minutes;
@@ -748,6 +782,12 @@ pub fn parse_search_instant(value: &str) -> Option<SearchInstant> {
     };
     let (hour, minute, second) = match clock.split_once(':') {
         Some(_) => {
+            if !clock
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || byte == b':')
+            {
+                return None;
+            }
             let mut parts = clock.split(':');
             let hour: i64 = parts.next()?.parse().ok()?;
             let minute: i64 = parts.next()?.parse().ok()?;
@@ -768,7 +808,7 @@ pub fn parse_search_instant(value: &str) -> Option<SearchInstant> {
             )
         }
     };
-    if hour > 23 || minute > 59 || second > 59 {
+    if !(0..=23).contains(&hour) || !(0..=59).contains(&minute) || !(0..=59).contains(&second) {
         return None;
     }
     if has_fraction && (fraction.is_empty() || !fraction.bytes().all(|byte| byte.is_ascii_digit()))
@@ -802,17 +842,31 @@ pub fn parse_search_instant(value: &str) -> Option<SearchInstant> {
 }
 
 fn days_from_civil(year: i64, month: u32, day: u32) -> Option<i64> {
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
     let year = if month <= 2 {
         year.checked_sub(1)?
     } else {
         year
     };
     let era = year.div_euclid(400);
-    let year_of_era = year - era * 400;
+    let era_years = era.checked_mul(400)?;
+    let year_of_era = year.checked_sub(era_years)?;
     let shifted_month = (month + 9) % 12;
-    let day_of_year = ((153 * shifted_month + 2) / 5 + day - 1) as i64;
-    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
-    Some(era * 146097 + day_of_era - 719468)
+    let month_start = 153_u32
+        .checked_mul(shifted_month)?
+        .checked_add(2)?
+        .checked_div(5)?;
+    let day_of_year = i64::from(month_start.checked_add(day.checked_sub(1)?)?);
+    let day_of_era = year_of_era
+        .checked_mul(365)?
+        .checked_add(year_of_era / 4)?
+        .checked_sub(year_of_era / 100)?
+        .checked_add(day_of_year)?;
+    era.checked_mul(146_097)?
+        .checked_add(day_of_era)?
+        .checked_sub(719_468)
 }
 
 /// Resolve the CLI's compact duration syntax against the caller's injected
@@ -840,8 +894,15 @@ pub fn parse_relative_search_instant(value: &str, now_ms: i64) -> Option<SearchI
 /// 除 query/filters/facets/include_system/group_by_session 外，`current_repo`
 /// （调用方当前工作目录派生的 repo slug，见 [`ranking::CURRENT_REPO_SCORE_BOOST`]）
 /// 同样入摘要：它只改排序不改召回，但换了仓库就是另一个排序，跨仓库复用 cursor
-/// 必须显式失败而不是静默错页。无过滤、无 facet、也无当前仓库身份时保持旧的
-/// 纯 query 摘要（既有 cursor 的字节兼容路径）。
+/// 必须显式失败而不是静默错页。检索模式、模型、向量、排序版本同样绑定；
+/// 旧版未绑定这些状态的 search cursor 显式失效。
+struct RetrievalBinding<'a> {
+    requested: RetrievalMode,
+    effective: RetrievalMode,
+    model: Option<String>,
+    embedding: Option<&'a [f32]>,
+}
+
 fn search_query_digest(
     query: &str,
     filters: &SearchFilters,
@@ -849,42 +910,41 @@ fn search_query_digest(
     include_system: bool,
     group_by_session: bool,
     current_repo: Option<&str>,
+    retrieval: &RetrievalBinding<'_>,
 ) -> String {
-    if filters.is_empty()
-        && facets.is_default()
-        && !include_system
-        && !group_by_session
-        && current_repo.is_none()
-    {
-        return cursor::digest_query(query);
-    }
-    let providers = filters
-        .providers
-        .iter()
-        .map(|provider| provider.as_str())
-        .collect::<Vec<_>>()
-        .join(",");
-    let since = filters
-        .since
-        .map(|instant| format!("{}:{}", instant.unix_seconds, instant.nanosecond))
-        .unwrap_or_default();
-    let until = filters
-        .until
-        .map(|instant| format!("{}:{}", instant.unix_seconds, instant.nanosecond))
-        .unwrap_or_default();
-    let repo = filters.repo.as_deref().unwrap_or_default();
-    cursor::digest_query(&format!(
-        "search-filter-v1\0{}\0providers={}\0since={}\0until={}\0repo={}\0include_system={}\0group_by_session={}\0facets={}\0current_repo={}",
-        query,
-        providers,
-        since,
-        until,
-        repo,
-        include_system,
-        group_by_session,
-        facets.canonical_binding(),
-        current_repo.unwrap_or_default(),
-    ))
+    let embedding_digest = retrieval.embedding.map(|values| {
+        let mut hasher = blake3::Hasher::new();
+        for value in values {
+            hasher.update(&value.to_le_bytes());
+        }
+        hasher.finalize().to_hex().to_string()
+    });
+    // Structured encoding prevents delimiter collisions in untrusted strings.
+    // v2 intentionally rejects old cursors whose ranking state was unbound.
+    cursor::digest_query(&serde_json::json!({
+        "version": "search-v2-rrf60-signals-v2-clock",
+        "result_set": "search",
+        "query": query,
+        "providers": filters.providers.iter().map(|provider| provider.as_str()).collect::<Vec<_>>(),
+        "since": filters.since.map(|i| (i.unix_seconds, i.nanosecond)),
+        "until": filters.until.map(|i| (i.unix_seconds, i.nanosecond)),
+        "repo": filters.repo,
+        "facets": {
+            "sidechain": facets.sidechain.as_str(),
+            "tool_kind": facets.tool_kind,
+            "tool_name": facets.tool_name,
+        },
+        "include_system": include_system,
+        "group_by_session": group_by_session,
+        "current_repo": current_repo,
+        "requested_mode": retrieval.requested.as_str(),
+        "effective_mode": retrieval.effective.as_str(),
+        "model": retrieval.model,
+        "dimension": retrieval.embedding.map(<[f32]>::len),
+        "embedding": embedding_digest,
+        "rank_window": RANK_SCAN_WINDOW,
+        "group_factor": GROUP_SCAN_FACTOR,
+    }).to_string())
 }
 
 /// R2 系统噪声判定：canonical message payload 的 `role` 字段为 system 或
@@ -1648,35 +1708,42 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore, 
                 mode,
                 query_embedding,
             } => {
-                if limit == 0 {
-                    return Err(DomainError::InvalidRequest("limit must be > 0".into()).into());
-                }
-                // R4.2（ADR-0003）：NUL/C0/C1 控制字符在 Application 边界拒绝为
-                // invalid_request，绝不清除式净化（删除会拼接 token）。必须发生在
-                // 任何索引查询之前。
-                if query.chars().any(char::is_control) {
-                    return Err(DomainError::InvalidRequest(
-                        "query contains control characters".into(),
-                    )
-                    .into());
-                }
-                if query.trim().is_empty() {
-                    return Err(
-                        DomainError::InvalidRequest("query must not be empty".into()).into(),
-                    );
-                }
+                validate_search_request(&query, &filters, limit, &budget)?;
                 filters.providers.sort_unstable();
                 filters.providers.dedup();
-                if let (Some(since), Some(until)) = (filters.since, filters.until)
-                    && since >= until
+                let generation = self.catalog.active_generation()?;
+                if mode != RetrievalMode::Lexical
+                    && query_embedding.as_deref().is_some_and(|values| {
+                        values.is_empty() || values.iter().any(|value| !value.is_finite())
+                    })
                 {
                     return Err(DomainError::InvalidRequest(
-                        "since must be earlier than until".into(),
+                        "query embedding must contain finite values and not be empty".into(),
                     )
                     .into());
                 }
-                budget.validate().map_err(AppError::from)?;
-                let generation = self.catalog.active_generation()?;
+                let semantic_ready = mode != RetrievalMode::Lexical
+                    && self.semantic.is_ready()?
+                    && query_embedding.is_some();
+                let response_mode = if mode == RetrievalMode::Lexical || semantic_ready {
+                    mode
+                } else {
+                    RetrievalMode::LexicalFallback
+                };
+                let retrieval = RetrievalBinding {
+                    requested: mode,
+                    effective: response_mode,
+                    model: if mode == RetrievalMode::Lexical {
+                        None
+                    } else {
+                        self.semantic.semantic_model_id()?
+                    },
+                    embedding: if semantic_ready {
+                        query_embedding.as_deref()
+                    } else {
+                        None
+                    },
+                };
                 let query_digest = search_query_digest(
                     &query,
                     &filters,
@@ -1684,14 +1751,44 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore, 
                     include_system,
                     group_by_session,
                     self.current_repo.as_deref(),
+                    &retrieval,
                 );
-                let offset = self.resolve_offset(
-                    token.as_deref(),
-                    generation,
-                    &query_digest,
-                    SORT_SCORE_DESC,
-                    None,
-                )?;
+                let now = self.now_ms();
+                let search_claims = match token.as_deref() {
+                    Some(token) => cursor::verify(
+                        token,
+                        &cursor::CursorExpectations {
+                            now_ms: now,
+                            active_generation: generation,
+                            query_digest: query_digest.clone(),
+                            sort_digest: SORT_SCORE_DESC.into(),
+                            result_set: None,
+                        },
+                    )?,
+                    None => cursor::CursorClaims {
+                        contract_major: cursor::SUPPORTED_CONTRACT_MAJOR,
+                        generation,
+                        issued_at_ms: now,
+                        expires_at_ms: now.saturating_add(cursor::DEFAULT_TTL_MS),
+                        query_digest: query_digest.clone(),
+                        sort_digest: SORT_SCORE_DESC.into(),
+                        result_set: None,
+                        offset: 0,
+                    },
+                };
+                let offset = search_claims.offset;
+                let ranking_time = search_claims.issued_at_ms;
+                // Recency is part of the pinned order. Continuations retain
+                // the initial query clock and expiry; only the offset changes.
+                let issue_search_cursor = |has_more: bool, offset: u64| {
+                    has_more.then(|| {
+                        cursor::issue(&cursor::CursorClaims {
+                            offset,
+                            ..search_claims.clone()
+                        })
+                        .into_string()
+                    })
+                };
 
                 // 分页模型：钉住排序（重排后的 final desc + id tiebreak 全序）
                 // 内的 offset 续读。端口无 offset 参数，因此在应用层超取后切片。
@@ -1709,10 +1806,10 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore, 
                 // grouped 模式把窗口放大 GROUP_SCAN_FACTOR 倍（仍封顶），让
                 // occurrences 覆盖更有意义的同会话命中样本。
                 let page = limit.min(budget.max_items);
-                let semantic_ready = self.semantic.is_ready() && query_embedding.is_some();
                 let will_rank = mode == RetrievalMode::Lexical || !semantic_ready;
                 // 融合也是重排：窗口必须与 offset 无关，与 rank 路径同一口径。
-                let reorders_window = will_rank || mode == RetrievalMode::Hybrid;
+                let reorders_window =
+                    will_rank || mode == RetrievalMode::Hybrid || group_by_session;
                 let fetch = if reorders_window {
                     RANK_SCAN_WINDOW
                 } else {
@@ -1733,32 +1830,42 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore, 
                 // （PRD Q54：禁止静默切换）。
                 let (mut scanned, fallback_warning) = if mode == RetrievalMode::Lexical {
                     (
-                        self.index.query_faceted(
+                        self.index.query_with_policy(
                             SearchQuery {
                                 text: &query,
                                 filters: &filters,
                             },
                             scan as usize,
                             &facets,
+                            include_system,
                         )?,
                         None,
                     )
-                } else if self.semantic.is_ready()
-                    && let Some(query_embedding) = query_embedding.as_deref()
-                {
-                    let semantic_hits = self
-                        .semantic
-                        .query_semantic(query_embedding, scan as usize)?;
+                } else if semantic_ready && let Some(query_embedding) = query_embedding.as_deref() {
+                    let semantic_hits = self.semantic.query_semantic_filtered(
+                        query_embedding,
+                        scan as usize,
+                        &filters,
+                        &facets,
+                        include_system,
+                    )?;
+                    if semantic_hits.iter().any(|hit| !hit.score.is_finite()) {
+                        return Err(PortError::Backend(
+                            "semantic index returned a non-finite score".into(),
+                        )
+                        .into());
+                    }
                     if mode == RetrievalMode::Semantic {
                         (semantic_hits, None)
                     } else {
-                        let lexical_hits = self.index.query_faceted(
+                        let lexical_hits = self.index.query_with_policy(
                             SearchQuery {
                                 text: &query,
                                 filters: &filters,
                             },
                             scan as usize,
                             &facets,
+                            include_system,
                         )?;
                         (hybrid::fuse(&lexical_hits, &semantic_hits), None)
                     }
@@ -1768,13 +1875,14 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore, 
                         mode.as_str()
                     ));
                     (
-                        self.index.query_faceted(
+                        self.index.query_with_policy(
                             SearchQuery {
                                 text: &query,
                                 filters: &filters,
                             },
                             scan as usize,
                             &facets,
+                            include_system,
                         )?,
                         warning,
                     )
@@ -1874,7 +1982,7 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore, 
                             .zip(in_current_repo)
                             .map(|((hit, (_id, payload)), in_repo)| (hit, payload, in_repo))
                             .collect(),
-                        self.now_ms(),
+                        ranking_time,
                     );
                 }
 
@@ -1938,14 +2046,7 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore, 
                     // offset，此时必须终止分页而非死循环。
                     let has_more =
                         (grouped_len > consumed || window_truncated_by_fetch) && !hits.is_empty();
-                    let next_cursor = self.issue_cursor(
-                        has_more,
-                        generation,
-                        &query_digest,
-                        SORT_SCORE_DESC,
-                        None,
-                        consumed,
-                    );
+                    let next_cursor = issue_search_cursor(has_more, consumed);
                     return Ok(AppResponse::Search {
                         hits,
                         next_cursor,
@@ -1999,14 +2100,7 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore, 
                 // window whose `+1` sentinel the noise filter can consume.
                 let has_more =
                     (scanned_len > consumed || window_truncated_by_fetch) && !hits.is_empty();
-                let next_cursor = self.issue_cursor(
-                    has_more,
-                    generation,
-                    &query_digest,
-                    SORT_SCORE_DESC,
-                    None,
-                    consumed,
-                );
+                let next_cursor = issue_search_cursor(has_more, consumed);
                 Ok(AppResponse::Search {
                     hits,
                     next_cursor,
@@ -3256,10 +3350,13 @@ mod tests {
         fn index_embedding(&self, _id: &StableId, _embedding: &[f32]) -> PortResult<()> {
             Ok(())
         }
-        fn query_semantic(
+        fn query_semantic_filtered(
             &self,
             _query_embedding: &[f32],
             limit: usize,
+            _filters: &SearchFilters,
+            _facets: &SearchFacets,
+            _include_system: bool,
         ) -> PortResult<Vec<SearchHit>> {
             Ok(self
                 .0
@@ -3278,8 +3375,11 @@ mod tests {
                 })
                 .collect())
         }
-        fn is_ready(&self) -> bool {
-            true
+        fn is_ready(&self) -> PortResult<bool> {
+            Ok(true)
+        }
+        fn semantic_model_id(&self) -> PortResult<Option<String>> {
+            Ok(Some("fake-model".into()))
         }
     }
 
@@ -3653,6 +3753,179 @@ mod tests {
     ///
     /// fixture：4 条语义命中，第 1 条是 system 噪声；page=2 时首页窗口恰好 3 条
     /// （2 条可见 + 被吃掉的哨兵），第 4 条命中只有继续分页才能拿到。
+    struct MutableSemantic {
+        inner: FakeSemantic,
+        ready: std::cell::Cell<bool>,
+        model: std::cell::RefCell<String>,
+        fail: std::cell::Cell<bool>,
+        nonfinite: std::cell::Cell<bool>,
+    }
+    impl SemanticIndex for MutableSemantic {
+        fn index_embedding(&self, _id: &StableId, _embedding: &[f32]) -> PortResult<()> {
+            Ok(())
+        }
+        fn query_semantic_filtered(
+            &self,
+            embedding: &[f32],
+            limit: usize,
+            filters: &SearchFilters,
+            facets: &SearchFacets,
+            include_system: bool,
+        ) -> PortResult<Vec<SearchHit>> {
+            let mut hits = self.inner.query_semantic_filtered(
+                embedding,
+                limit,
+                filters,
+                facets,
+                include_system,
+            )?;
+            if self.nonfinite.get() {
+                hits[0].score = f32::NAN;
+            }
+            Ok(hits)
+        }
+        fn is_ready(&self) -> PortResult<bool> {
+            if self.fail.get() {
+                Err(PortError::Backend("synthetic readiness failure".into()))
+            } else {
+                Ok(self.ready.get())
+            }
+        }
+        fn semantic_model_id(&self) -> PortResult<Option<String>> {
+            Ok(Some(self.model.borrow().clone()))
+        }
+    }
+
+    fn mutable_semantic_app() -> App<MapCatalog, FixedHits, NoResumeClaims, MutableSemantic> {
+        let ids: Vec<_> = ["sem-a", "sem-b", "sem-c"]
+            .iter()
+            .map(|tag| StableId::native(IdKind::Message, tag))
+            .collect();
+        let mut cat = MapCatalog::new(7);
+        for id in &ids {
+            cat.insert(id, br#"{"role":"user","text":"needle"}"#.to_vec());
+        }
+        App::with_resume_semantic_and_clock(
+            cat,
+            FixedHits(ids.clone()),
+            NoResumeClaims,
+            MutableSemantic {
+                inner: FakeSemantic(ids),
+                ready: std::cell::Cell::new(true),
+                model: std::cell::RefCell::new("model-a".into()),
+                fail: std::cell::Cell::new(false),
+                nonfinite: std::cell::Cell::new(false),
+            },
+            clock_t0,
+        )
+    }
+
+    #[test]
+    fn semantic_readiness_errors_and_nonfinite_scores_do_not_fallback() {
+        let app = mutable_semantic_app();
+        app.semantic.fail.set(true);
+        assert!(matches!(
+            app.handle(semantic_req("needle", 1, None)),
+            Err(AppError::Port(PortError::Backend(_)))
+        ));
+        // A lexical request never probes the semantic backend.
+        assert!(app.handle(search_req("needle", 1, None)).is_ok());
+        app.semantic.fail.set(false);
+        app.semantic.nonfinite.set(true);
+        assert!(matches!(
+            app.handle(semantic_req("needle", 1, None)),
+            Err(AppError::Port(PortError::Backend(_)))
+        ));
+    }
+
+    #[test]
+    fn search_cursor_facet_binding_has_no_delimiter_collisions() {
+        let first = SearchFacets {
+            tool_kind: Some("a|tool_name=b".into()),
+            tool_name: Some("c".into()),
+            ..Default::default()
+        };
+        let second = SearchFacets {
+            tool_kind: Some("a".into()),
+            tool_name: Some("b|tool_name=c".into()),
+            ..Default::default()
+        };
+        let retrieval = RetrievalBinding {
+            requested: RetrievalMode::Lexical,
+            effective: RetrievalMode::Lexical,
+            model: None,
+            embedding: None,
+        };
+        let digest = |facets: &SearchFacets| {
+            search_query_digest(
+                "needle",
+                &SearchFilters::EMPTY,
+                facets,
+                false,
+                false,
+                None,
+                &retrieval,
+            )
+        };
+        assert_ne!(digest(&first), digest(&second));
+        assert_ne!(
+            digest(&SearchFacets::default()),
+            digest(&SearchFacets {
+                tool_name: Some(String::new()),
+                ..Default::default()
+            })
+        );
+    }
+
+    #[test]
+    fn semantic_cursor_binds_mode_model_dimension_and_readiness() {
+        let app = mutable_semantic_app();
+        let (_, token, _, _) = hits_of(app.handle(semantic_req("needle", 1, None)).unwrap());
+        let token = token.expect("first page");
+        assert!(matches!(
+            app.handle(search_req("needle", 1, Some(token.clone()))),
+            Err(AppError::Cursor(_))
+        ));
+        *app.semantic.model.borrow_mut() = "model-b".into();
+        assert!(matches!(
+            app.handle(semantic_req("needle", 1, Some(token.clone()))),
+            Err(AppError::Cursor(_))
+        ));
+        *app.semantic.model.borrow_mut() = "model-a".into();
+        let mut request = semantic_req("needle", 1, Some(token.clone()));
+        if let AppRequest::Search {
+            query_embedding, ..
+        } = &mut request
+        {
+            *query_embedding = Some(vec![1.0; 17]);
+        }
+        assert!(matches!(app.handle(request), Err(AppError::Cursor(_))));
+        app.semantic.ready.set(false);
+        assert!(matches!(
+            app.handle(semantic_req("needle", 1, Some(token))),
+            Err(AppError::Cursor(_))
+        ));
+    }
+
+    #[test]
+    fn semantic_rejects_nonfinite_query_embedding_before_backend() {
+        let app = mutable_semantic_app();
+        app.semantic.fail.set(true);
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let mut request = semantic_req("needle", 1, None);
+            if let AppRequest::Search {
+                query_embedding, ..
+            } = &mut request
+            {
+                *query_embedding = Some(vec![bad]);
+            }
+            assert!(matches!(
+                app.handle(request),
+                Err(AppError::Domain(DomainError::InvalidRequest(_)))
+            ));
+        }
+    }
+
     #[test]
     fn search_semantic_noise_filter_does_not_eat_the_has_more_sentinel() {
         let mut cat = MapCatalog::new(7);
@@ -3980,6 +4253,77 @@ mod tests {
     /// 固定 rank 时钟：2026-08-25T00:00:00Z（与 CLI e2e 的 `ASG_CLOCK_MS` 同值）。
     fn rank_clock() -> i64 {
         1_787_616_000_000
+    }
+
+    #[test]
+    fn search_cursor_pins_recency_clock_and_original_expiry_across_pages() {
+        thread_local! {
+            static NOW: std::cell::Cell<i64> = const { std::cell::Cell::new(0) };
+        }
+        fn moving_clock() -> i64 {
+            NOW.with(std::cell::Cell::get)
+        }
+        for grouped in [false, true] {
+            NOW.with(|now| now.set(rank_clock()));
+            let ids: Vec<_> = ["clock-a", "clock-b", "clock-c"]
+                .iter()
+                .map(|tag| StableId::native(IdKind::Message, tag))
+                .collect();
+            let mut catalog = MapCatalog::new(7);
+            for id in &ids {
+                catalog.insert(id, br#"{"text":"needle"}"#.to_vec());
+            }
+            // Rank 1 crosses rank 2's constant score five minutes after the
+            // first page, well within the cursor's fifteen-minute lifetime.
+            catalog.insert(
+                &ids[0],
+                br#"{"text":"needle","timestamp":"2026-08-24T07:11:34Z"}"#.to_vec(),
+            );
+            let app = App::with_clock(
+                catalog,
+                ScoredHits(
+                    ids.iter()
+                        .enumerate()
+                        .map(|(rank, id)| (id.clone(), 1.0 / (61 + rank) as f32))
+                        .collect(),
+                ),
+                moving_clock,
+            );
+            let request = |token| {
+                let mut request = search_req("needle", 1, token);
+                if let AppRequest::Search {
+                    group_by_session, ..
+                } = &mut request
+                {
+                    *group_by_session = grouped;
+                }
+                request
+            };
+            let (first, token, _, _) = hits_of(app.handle(request(None)).unwrap());
+            assert_eq!(first, [ids[0].as_str()]);
+            NOW.with(|now| now.set(rank_clock() + 10 * 60 * 1_000));
+            let (fresh, _, _, _) = hits_of(app.handle(request(None)).unwrap());
+            assert_eq!(
+                fresh,
+                [ids[1].as_str()],
+                "fixture must change fresh ranking"
+            );
+            let (second, token, _, _) = hits_of(app.handle(request(token)).unwrap());
+            assert_eq!(
+                second,
+                [ids[1].as_str()],
+                "continuation must not repeat page one"
+            );
+            let token = token.expect("third page");
+            NOW.with(|now| now.set(rank_clock() + 14 * 60 * 1_000));
+            let (third, _, _, _) = hits_of(app.handle(request(Some(token.clone()))).unwrap());
+            assert_eq!(third, [ids[2].as_str()]);
+            NOW.with(|now| now.set(rank_clock() + cursor::DEFAULT_TTL_MS));
+            assert!(matches!(
+                app.handle(request(Some(token))),
+                Err(AppError::Cursor(cursor::CursorError::Expired(_)))
+            ));
+        }
     }
 
     #[test]
@@ -4504,12 +4848,24 @@ mod tests {
             "2026-07-28T24:00:00Z",
             "2026-07-28T00:00:00.1234567891Z",
             "2026-07-28T12:00Z",
+            "2026-01-01T-1:00:00Z",
+            "2026-01-01T00:-1:00Z",
+            "2026-01-01T00:00:-1Z",
+            "2026-01-01T-0:00:00Z",
+            "2026-01-01T00:+0:00Z",
+            "2026-01-01T00:00:00+-0:00",
+            "2026-01-01T00:00:00+00:+0",
+            "2026-01-01T00:00:00-25:00",
             "1h",
             "",
         ] {
             assert!(parse_search_instant(value).is_none(), "{value:?}");
         }
         assert!(parse_search_instant("2024-02-29T00:00:00Z").is_some());
+        assert!(
+            parse_search_instant(&format!("{}-12-31T00:00:00Z", i64::MAX)).is_none(),
+            "extreme year arithmetic must fail closed instead of panicking or wrapping"
+        );
     }
 
     #[test]
@@ -4671,7 +5027,20 @@ mod tests {
             &cursor::CursorExpectations {
                 now_ms: clock_t0(),
                 active_generation: 7,
-                query_digest: cursor::digest_query("q"),
+                query_digest: search_query_digest(
+                    "q",
+                    &SearchFilters::EMPTY,
+                    &SearchFacets::default(),
+                    false,
+                    false,
+                    None,
+                    &RetrievalBinding {
+                        requested: RetrievalMode::Lexical,
+                        effective: RetrievalMode::Lexical,
+                        model: None,
+                        embedding: None,
+                    },
+                ),
                 sort_digest: SORT_SCORE_DESC.into(),
                 result_set: None,
             },
@@ -6666,6 +7035,7 @@ mod tests {
                 sink: &mut dyn CanonicalEventSink,
             ) -> Result<agent_session_grep_ports::ParseReport, ProviderError> {
                 sink.emit_message(MessageEvent {
+                    session: None,
                     seq: 0,
                     native_id: "m-1",
                     parent_native_id: None,
@@ -6677,6 +7047,7 @@ mod tests {
                 })
                 .map_err(|e| ProviderError::Io(e.to_string()))?;
                 sink.emit_message(MessageEvent {
+                    session: None,
                     seq: 1,
                     native_id: "m-2",
                     parent_native_id: None,
@@ -6959,6 +7330,7 @@ mod tests {
             sink: &mut dyn CanonicalEventSink,
         ) -> Result<agent_session_grep_ports::ParseReport, ProviderError> {
             sink.emit_message(MessageEvent {
+                session: None,
                 seq: 0,
                 native_id: "m-1",
                 parent_native_id: None,

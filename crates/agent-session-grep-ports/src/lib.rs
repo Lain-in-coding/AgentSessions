@@ -6,6 +6,7 @@
 //! 分层依赖不变量：domain ← ports ← application ← adapters。
 
 pub mod redact;
+pub mod relocation;
 
 use agent_session_grep_domain::{
     DomainError, DomainResult, PlacementId, SessionContextGraph, StableId, ToolActivity,
@@ -19,6 +20,13 @@ use std::io::{BufRead, Read};
 /// Application 层负责把 PortError 归一为对外协议错误。
 #[derive(Debug, thiserror::Error)]
 pub enum PortError {
+    /// Invalid caller input or a relocation plan that cannot authorize this request.
+    #[error("invalid request: {0}")]
+    InvalidRequest(String),
+
+    /// The catalog changed after the caller obtained its plan.
+    #[error("catalog generation mismatch: {0}")]
+    GenerationMismatch(String),
     /// 底层存储/IO 故障。
     #[error("backend failure: {0}")]
     Backend(String),
@@ -54,11 +62,12 @@ pub type PortResult<T> = Result<T, PortError>;
 pub struct SourceSnapshot {
     /// 源在存储中的规范路径（相对 data-root 或绝对，由 adapter 定义）。
     pub path: String,
-    /// 字节长度。
+    /// Captured byte length (logical backup length for SQLite sources).
     pub len: u64,
     /// 修改时间（Unix 毫秒）。
     pub mtime_ms: i64,
-    /// 内容指纹（BLAKE3 十六进制），用于识别等长改写。
+    /// Opaque content fingerprint. Files use BLAKE3 hex; SQLite logical
+    /// snapshots use `sqlite:` followed by the backup's BLAKE3 hex.
     pub fingerprint: String,
 }
 
@@ -261,18 +270,23 @@ pub trait ContextGraphStore {
 
 /// A provider whose authoritative source-document metadata may constrain search.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum SearchProvider {
-    Claude,
-    Codex,
-}
+pub struct SearchProvider(&'static str);
 
 impl SearchProvider {
+    // Preserve the original public constructor spellings while making the
+    // capability matrix authoritative for every additional provider.
+    #[allow(non_upper_case_globals)]
+    pub const Claude: Self = Self("claude-code");
+    #[allow(non_upper_case_globals)]
+    pub const Codex: Self = Self("codex");
+
+    pub fn parse(value: &str) -> Option<Self> {
+        capability::canonical_search_provider_id(value).map(Self)
+    }
+
     /// Canonical provider id stored in SourceDocument payloads.
     pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Claude => "claude-code",
-            Self::Codex => "codex",
-        }
+        self.0
     }
 }
 
@@ -702,7 +716,7 @@ pub trait SearchIndex {
 
     /// 带 facet 过滤的查询（additive）：`facets` 为默认值时语义与
     /// [`Self::query_filtered`] 完全一致（实现可短路）。命中仍按钉住排序
-    /// （bm25 + id tiebreak）。
+    /// （rank fusion + id tiebreak）。
     fn query_faceted(
         &self,
         query: SearchQuery<'_>,
@@ -711,6 +725,19 @@ pub trait SearchIndex {
     ) -> PortResult<Vec<SearchHit>> {
         let _ = facets;
         self.query_filtered(query, limit)
+    }
+
+    /// Apply visibility before the backend limit. Legacy implementations may
+    /// leave visibility to Application; storage adapters should push it down.
+    fn query_with_policy(
+        &self,
+        query: SearchQuery<'_>,
+        limit: usize,
+        facets: &SearchFacets,
+        include_system: bool,
+    ) -> PortResult<Vec<SearchHit>> {
+        let _ = include_system;
+        self.query_faceted(query, limit, facets)
     }
 }
 
@@ -729,11 +756,33 @@ pub trait SemanticIndex {
     /// 执行语义查询：返回与 query embedding 最相似的 top-k 消息。
     ///
     /// 结果按余弦相似度降序。`limit` 是最大返回数。
-    fn query_semantic(&self, query_embedding: &[f32], limit: usize) -> PortResult<Vec<SearchHit>>;
+    fn query_semantic(&self, query_embedding: &[f32], limit: usize) -> PortResult<Vec<SearchHit>> {
+        self.query_semantic_filtered(
+            query_embedding,
+            limit,
+            &SearchFilters::EMPTY,
+            &SearchFacets::default(),
+            true,
+        )
+    }
+
+    /// Apply the same metadata/facet/visibility predicates as lexical search
+    /// before selecting top-k. Non-finite vectors or scores are errors.
+    fn query_semantic_filtered(
+        &self,
+        query_embedding: &[f32],
+        limit: usize,
+        filters: &SearchFilters,
+        facets: &SearchFacets,
+        include_system: bool,
+    ) -> PortResult<Vec<SearchHit>>;
 
     /// 语义索引是否就绪（模型已加载、向量索引已建）。
-    /// 未就绪时 Application 应回退到 lexical。
-    fn is_ready(&self) -> bool;
+    /// Only `Ok(false)` permits lexical fallback; backend errors propagate.
+    fn is_ready(&self) -> PortResult<bool>;
+
+    /// Current model identity for cursor binding; errors must not be hidden.
+    fn semantic_model_id(&self) -> PortResult<Option<String>>;
 }
 
 /// 未提供语义索引实现时的占位（对应 `App<.., NoSemanticIndex>`）：语义/
@@ -747,16 +796,23 @@ impl SemanticIndex for NoSemanticIndex {
         Ok(())
     }
 
-    fn query_semantic(
+    fn query_semantic_filtered(
         &self,
         _query_embedding: &[f32],
         _limit: usize,
+        _filters: &SearchFilters,
+        _facets: &SearchFacets,
+        _include_system: bool,
     ) -> PortResult<Vec<SearchHit>> {
         Ok(Vec::new())
     }
 
-    fn is_ready(&self) -> bool {
-        false
+    fn is_ready(&self) -> PortResult<bool> {
+        Ok(false)
+    }
+
+    fn semantic_model_id(&self) -> PortResult<Option<String>> {
+        Ok(None)
     }
 }
 
@@ -880,6 +936,16 @@ impl<T: SearchIndex + ?Sized> SearchIndex for &T {
     ) -> PortResult<Vec<SearchHit>> {
         (**self).query_faceted(query, limit, facets)
     }
+
+    fn query_with_policy(
+        &self,
+        query: SearchQuery<'_>,
+        limit: usize,
+        facets: &SearchFacets,
+        include_system: bool,
+    ) -> PortResult<Vec<SearchHit>> {
+        (**self).query_with_policy(query, limit, facets, include_system)
+    }
 }
 
 /// 读取并校验一个源快照，把端口错误归一为领域语义，并返回校验过的字节——
@@ -920,6 +986,8 @@ fn port_error_kind(error: &PortError) -> &'static str {
         PortError::NotFound(_) => "not_found",
         PortError::SnapshotChanged(_) => "snapshot_changed",
         PortError::WriterBusy(_) => "writer_busy",
+        PortError::InvalidRequest(_) => "invalid_request",
+        PortError::GenerationMismatch(_) => "generation_mismatch",
     }
 }
 
@@ -1141,8 +1209,23 @@ impl<T: SemanticIndex + ?Sized> SemanticIndex for &T {
         (**self).query_semantic(query_embedding, limit)
     }
 
-    fn is_ready(&self) -> bool {
+    fn query_semantic_filtered(
+        &self,
+        query_embedding: &[f32],
+        limit: usize,
+        filters: &SearchFilters,
+        facets: &SearchFacets,
+        include_system: bool,
+    ) -> PortResult<Vec<SearchHit>> {
+        (**self).query_semantic_filtered(query_embedding, limit, filters, facets, include_system)
+    }
+
+    fn is_ready(&self) -> PortResult<bool> {
         (**self).is_ready()
+    }
+
+    fn semantic_model_id(&self) -> PortResult<Option<String>> {
+        (**self).semantic_model_id()
     }
 }
 
@@ -1153,7 +1236,10 @@ impl<T: SemanticIndex + ?Sized> SemanticIndex for &T {
 /// 由 sink 侧决定如何映射到 domain 类型（未知角色、id 稳定性策略归 sink）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MessageEvent<'a> {
-    /// 会话内单调序号，从 0 起（只对成功产出的对话消息递增）。
+    /// Explicit session membership for a multi-session source. None retains
+    /// the report-level single-session contract.
+    pub session: Option<&'a ProviderSessionIdentity>,
+    /// Source-local ordinal, starting at zero and increasing for emitted messages.
     pub seq: u32,
     /// provider-native 消息 id（如 Claude Code 的 `uuid`）。空串表示 provider 未提供，
     /// 此时 sink 必须自行派生，且不得声称 `Stability::Native`。
@@ -1180,6 +1266,15 @@ pub struct MessageEvent<'a> {
     /// 来源即提取出的行负载——同一契约无需改动即可覆盖两者（R4）。
     /// `None` 表示 provider 无法归因一段连续区间，绝不臆造。
     pub span: Option<(u64, u64)>,
+}
+
+/// A provider's source-local session boundary, with independently observed
+/// resume metadata. `source_key` is not a native ID and must never be exposed
+/// as one; it distinguishes sessions whose provider omitted a durable ID.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderSessionIdentity {
+    pub source_key: String,
+    pub observation: ProviderSessionObservation,
 }
 
 /// 一条规范化的工具活动观察（RFC-0002 §2 扩展）：provider 把 `tool_use` /

@@ -105,7 +105,11 @@ fn standalone_secret(s: &str) -> Option<&'static str> {
         return Some("[redacted:jwt]");
     }
     // AWS access key: AKIA + 16 uppercase alphanumeric
-    if s.starts_with("AKIA") && s.len() >= 20 && s[..20].chars().all(|c| c.is_ascii_alphanumeric())
+    if s.starts_with("AKIA")
+        && s.len() >= 20
+        && s.as_bytes()[4..20]
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric())
     {
         return Some("[redacted:aws_access_key]");
     }
@@ -398,6 +402,13 @@ mod tests {
         let (redacted, count) = redact_text("AKIAIOSFODNN7EXAMPLE");
         assert_eq!(redacted, "[redacted:aws_access_key]");
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn multibyte_text_after_aws_prefix_does_not_panic_or_redact() {
+        let (redacted, count) = redact_text(&format!("AKIA{}", "中".repeat(6)));
+        assert_eq!(count, 0);
+        assert_eq!(redacted, format!("AKIA{}", "中".repeat(6)));
     }
 
     #[test]

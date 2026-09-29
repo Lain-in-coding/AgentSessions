@@ -66,6 +66,7 @@ fn disabled_hook_writes_nothing_to_stdout() {
                 "stderr={}",
                 stderr(&out)
             );
+            assert!(!db.exists(), "disabled hooks must not create a catalog");
         }
     }
 }
@@ -197,5 +198,9 @@ fn enabled_hook_without_a_query_writes_nothing() {
         let out = run_hook(&db, payload, &["hook", event, "--enable"]);
         assert!(out.status.success(), "stderr={}", stderr(&out));
         assert_eq!(stdout(&out), "", "event={event} payload={payload:?}");
+        assert!(
+            !db.exists(),
+            "a hook without a query must not create a catalog"
+        );
     }
 }

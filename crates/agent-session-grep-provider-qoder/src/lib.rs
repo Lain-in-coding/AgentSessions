@@ -351,6 +351,7 @@ impl ProviderAdapter for QoderAdapter {
                         .filter(|s| !s.trim().is_empty())
                         .or(rec.timestamp.as_deref().filter(|s| !s.trim().is_empty()));
                     sink.emit_message(MessageEvent {
+                        session: None,
                         seq,
                         native_id: "",
                         parent_native_id: None,

@@ -366,6 +366,27 @@ impl HttpRequest {
         }
         None
     }
+
+    fn query_pairs(&self) -> Result<Vec<(String, String)>, HttpResponse> {
+        let Some((_, query)) = self.path.split_once('?') else {
+            return Ok(Vec::new());
+        };
+        query
+            .split('&')
+            .filter(|pair| !pair.is_empty())
+            .map(|pair| {
+                let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+                match (percent_decode(key), percent_decode(value)) {
+                    (Some(key), Some(value)) => Ok((key, value)),
+                    _ => Err(fixed_error(
+                        400,
+                        "invalid_request",
+                        "invalid query parameter encoding",
+                    )),
+                }
+            })
+            .collect()
+    }
 }
 
 fn percent_decode(value: &str) -> Option<String> {
@@ -797,7 +818,19 @@ pub fn route_request(
         None,
         offline,
     ) {
-        Ok((command, outcome, data, page, warnings)) => {
+        Ok((command, outcome, mut data, page, warnings)) => {
+            if command == "status"
+                && let Some(data) = data.as_object_mut()
+            {
+                data.insert("web_capabilities".into(), serde_json::json!({
+                    "search_parameters": WEB_SEARCH_PARAMETERS,
+                    "repeated_parameters": ["provider"],
+                    "provider_values": agent_session_grep_ports::capability::search_provider_filter_values(),
+                    "retrieval_modes": ["lexical", "semantic", "hybrid"],
+                    "limit_sets_max_items": true,
+                    "mutation_and_execution": false,
+                }));
+            }
             let outcome = match outcome {
                 crate::protocol::Outcome::Success => "success",
                 crate::protocol::Outcome::Partial => "partial",
@@ -820,6 +853,23 @@ pub fn route_request(
     }
 }
 
+const WEB_SEARCH_PARAMETERS: &[&str] = &[
+    "q",
+    "mode",
+    "limit",
+    "max_bytes",
+    "cursor",
+    "provider",
+    "since",
+    "until",
+    "repo",
+    "include_system",
+    "group_by_session",
+    "sidechain",
+    "tool_kind",
+    "tool_name",
+];
+
 fn request_args(req: &HttpRequest) -> Result<Vec<String>, HttpResponse> {
     let path = path_only(req.path.as_str());
     let value = |name: &str| -> Result<Option<String>, HttpResponse> {
@@ -833,24 +883,66 @@ fn request_args(req: &HttpRequest) -> Result<Vec<String>, HttpResponse> {
         "/" | "/health" | "/api/providers" => Ok(Vec::new()),
         "/api/status" => Ok(vec!["status".to_string()]),
         "/api/search" | "/api/projection/search" => {
+            let parameters = req.query_pairs()?;
+            let mut seen = std::collections::BTreeSet::new();
+            for (name, parameter) in &parameters {
+                if !WEB_SEARCH_PARAMETERS.contains(&name.as_str())
+                    || (name != "provider" && !seen.insert(name.as_str()))
+                    || parameter.trim().is_empty()
+                {
+                    return Err(fixed_error(
+                        400,
+                        "invalid_request",
+                        "unknown, duplicate or empty search parameter",
+                    ));
+                }
+                check_argv_value(name, parameter)?;
+            }
             let Some(query) = value("q")? else {
                 return Err(fixed_error(400, "invalid_request", "missing q parameter"));
             };
             let mut args = vec!["search".to_string(), query];
             append_value_flag(&mut args, "--mode", value("mode")?);
             append_value_flag(&mut args, "--max-items", value("limit")?);
+            append_value_flag(&mut args, "--max-bytes", value("max_bytes")?);
             append_value_flag(&mut args, "--cursor", value("cursor")?);
-            append_value_flag(&mut args, "--provider", value("provider")?);
+            for (_, provider) in parameters.iter().filter(|(name, _)| name == "provider") {
+                append_value_flag(&mut args, "--provider", Some(provider.clone()));
+            }
             append_value_flag(&mut args, "--since", value("since")?);
             append_value_flag(&mut args, "--until", value("until")?);
             // repo（schema v16）：与 CLI `--repo` / MCP `repo` 同一维度，Web 面
             // 不得少一个过滤轴（五入口一致性）。空取值被 `value` 过滤掉 = 无过滤。
             append_value_flag(&mut args, "--repo", value("repo")?);
-            if value("include_system")?.as_deref() == Some("true") {
-                args.push("--include-system".to_string());
+            append_value_flag(&mut args, "--tool-kind", value("tool_kind")?);
+            append_value_flag(&mut args, "--tool-name", value("tool_name")?);
+            match value("sidechain")?.as_deref() {
+                None | Some("include") => {}
+                Some("main_only") => args.push("--main-only".into()),
+                Some("subagent_only") => args.push("--subagent-only".into()),
+                Some(_) => {
+                    return Err(fixed_error(
+                        400,
+                        "invalid_request",
+                        "invalid sidechain parameter",
+                    ));
+                }
             }
-            if value("group_by_session")?.as_deref() == Some("true") {
-                args.push("--group-by-session".to_string());
+            for (name, flag) in [
+                ("include_system", "--include-system"),
+                ("group_by_session", "--group-by-session"),
+            ] {
+                match value(name)?.as_deref() {
+                    Some("true") => args.push(flag.into()),
+                    None | Some("false") => {}
+                    Some(_) => {
+                        return Err(fixed_error(
+                            400,
+                            "invalid_request",
+                            "search boolean must be true or false",
+                        ));
+                    }
+                }
             }
             Ok(args)
         }
@@ -890,6 +982,12 @@ fn request_args(req: &HttpRequest) -> Result<Vec<String>, HttpResponse> {
 const SERVE_ARGV_FLAGS: &[&str] = &[
     "--mode",
     "--max-items",
+    "--max-bytes",
+    "--tool-kind",
+    "--tool-name",
+    "--main-only",
+    "--subagent-only",
+    "--include-sidechain",
     "--cursor",
     "--provider",
     "--since",
@@ -1345,7 +1443,7 @@ mod tests {
     #[test]
     fn search_routes_forward_the_repo_filter_like_the_cli_flag() {
         // 五入口一致性：Web 的检索路由必须携带与 CLI `--repo`/MCP `repo` 同一
-        // 过滤轴。缺省或空取值 = 不过滤（绝不生成空的 `--repo`，那是用法错误）。
+        // 过滤轴。缺省 = 不过滤；空取值与 CLI/MCP 一样明确报错。
         for path in ["/api/search", "/api/projection/search"] {
             let Ok(with_repo) = request_args(&authorized(
                 "GET",
@@ -1358,16 +1456,93 @@ mod tests {
                     && pair[1] == "github.com/synthetic-owner/synthetic-repo"),
                 "{path}: {with_repo:?}"
             );
-            for query in ["?q=needle", "?q=needle&repo="] {
-                let Ok(args) = request_args(&authorized("GET", &format!("{path}{query}"))) else {
-                    panic!("{path}{query}: 缺省/空 repo 必须是合法请求");
-                };
-                assert!(
-                    !args.iter().any(|arg| arg == "--repo"),
-                    "{path}{query}: {args:?}"
-                );
-            }
+            let Ok(args) = request_args(&authorized("GET", &format!("{path}?q=needle"))) else {
+                panic!("{path}: 缺省 repo 必须是合法请求");
+            };
+            assert!(!args.iter().any(|arg| arg == "--repo"), "{path}: {args:?}");
+            assert!(request_args(&authorized("GET", &format!("{path}?q=needle&repo="))).is_err());
         }
+    }
+
+    #[test]
+    fn search_forwards_budget_facets_and_every_provider_value() {
+        let request = authorized(
+            "GET",
+            "/api/search?q=needle&max_bytes=4096&provider=claude&provider=grok-build&sidechain=subagent_only&tool_kind=command&tool_name=Bash",
+        );
+        let args = request_args(&request).unwrap_or_else(|response| panic!("{}", response.body));
+        for expected in [
+            ["--max-bytes", "4096"],
+            ["--provider", "claude"],
+            ["--provider", "grok-build"],
+            ["--tool-kind", "command"],
+            ["--tool-name", "Bash"],
+        ] {
+            assert!(
+                args.windows(2)
+                    .any(|pair| pair[0] == expected[0] && pair[1] == expected[1]),
+                "{args:?}"
+            );
+        }
+        assert!(args.iter().any(|arg| arg == "--subagent-only"));
+        for query in [
+            "q=x&max_bytes=",
+            "q=x&mode=lexical&mode=semantic",
+            "q=x&tool_name=%FF",
+            "q=x&sidechain=other",
+            "q=x&include_system=1",
+            "q=x&unexpected=true",
+        ] {
+            assert!(
+                request_args(&authorized("GET", &format!("/api/search?{query}"))).is_err(),
+                "{query}"
+            );
+        }
+    }
+
+    #[test]
+    fn web_search_applies_provider_union_and_reports_its_capabilities() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SqliteStore::open_in_memory().unwrap();
+        let source = dir.path().join("grok.jsonl");
+        std::fs::write(&source, r#"{"params":{"update":{"sessionUpdate":"user_message_chunk","content":"needle web"},"_meta":{"promptIndex":0}}}"#).unwrap();
+        crate::ingest_file(&store, source.to_str().unwrap()).unwrap();
+        crate::build_embeddings(&store).unwrap();
+        for mode in ["lexical", "semantic", "hybrid"] {
+            let response = route_request(
+                &authorized(
+                    "GET",
+                    &format!(
+                        "/api/search?q=needle&provider=claude&provider=grok-build&mode={mode}&max_bytes=4096&sidechain=main_only"
+                    ),
+                ),
+                TEST_TOKEN,
+                "test.db",
+                true,
+                &store,
+            );
+            assert_eq!(response.status, 200, "{}", response.body);
+            let body: serde_json::Value = serde_json::from_str(&response.body).unwrap();
+            assert_eq!(body["data"]["retrieval_mode"], mode);
+            assert_eq!(body["data"]["hits"].as_array().unwrap().len(), 1, "{body}");
+            assert_eq!(body["data"]["hits"][0]["text"], "needle web");
+        }
+        let status = route_request(
+            &authorized("GET", "/api/status"),
+            TEST_TOKEN,
+            "test.db",
+            true,
+            &store,
+        );
+        let body: serde_json::Value = serde_json::from_str(&status.body).unwrap();
+        assert_eq!(
+            body["data"]["web_capabilities"]["search_parameters"],
+            serde_json::json!(WEB_SEARCH_PARAMETERS)
+        );
+        assert_eq!(
+            body["data"]["web_capabilities"]["mutation_and_execution"],
+            false
+        );
     }
 
     #[test]
@@ -1584,7 +1759,7 @@ mod tests {
         assert!(!WEB_UI_HTML.contains("https://"));
         assert!(!WEB_UI_HTML.contains("innerHTML"));
         for endpoint in [
-            "/health",
+            "/api/status",
             "/api/providers",
             "/api/search",
             "/api/show",
@@ -1731,7 +1906,7 @@ mod tests {
     /// "lexical · 2" under an 18-row list.
     #[test]
     fn embedded_ui_counts_every_loaded_page_in_the_hit_meta() {
-        let meta = ui_slice("getElementById('resultMeta')", ";");
+        let meta = ui_slice("async function doSearch(", "\n}");
         assert!(
             meta.contains("lastHits.length"),
             "the hit meta must count all loaded pages: {meta}"
@@ -1742,7 +1917,7 @@ mod tests {
     /// card, so the sidebar kept showing a selected hit with nothing open.
     #[test]
     fn embedded_ui_clears_the_hit_highlight_when_the_context_closes() {
-        let close = ui_slice("getElementById('closeContext').addEventListener", "\n});");
+        let close = ui_slice("function closeContext()", "\n}");
         assert!(
             close.contains("classList.remove('active')"),
             "closing the context must drop the hit highlight: {close}"

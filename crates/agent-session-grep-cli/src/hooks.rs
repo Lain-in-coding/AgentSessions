@@ -100,20 +100,17 @@ pub struct HookSpecificOutput {
 /// (approximated as chars/4), it is truncated and `truncated` is set.
 pub fn build_hook_output(event: HookEvent, text: &str, max_tokens: u64) -> HookOutput {
     // Rough token estimate: ~4 chars per token.
-    let max_chars = (max_tokens.saturating_mul(4)) as usize;
-    let (context, truncated) = if text.len() > max_chars {
-        // Truncate at char boundary to avoid splitting multi-byte chars.
-        let truncated_text: String = text.chars().take(max_chars).collect();
-        (truncated_text, true)
-    } else {
-        (text.to_string(), false)
-    };
+    let max_chars = usize::try_from(max_tokens.saturating_mul(4)).unwrap_or(usize::MAX);
+    // Count and cut with the same unit. Byte length would falsely mark short
+    // Unicode text as truncated while retaining every character.
+    let cutoff = text.char_indices().nth(max_chars).map(|(byte, _)| byte);
+    let context = text[..cutoff.unwrap_or(text.len())].to_string();
 
     HookOutput {
         hook_specific_output: HookSpecificOutput {
             hook_event_name: event.as_str().to_string(),
             additional_context: context,
-            truncated: if truncated { Some(true) } else { None },
+            truncated: cutoff.map(|_| true),
         },
     }
 }
@@ -282,6 +279,35 @@ mod tests {
         let text = "你好世界";
         let output = build_hook_output(HookEvent::UserPromptSubmit, text, 1000);
         assert_eq!(output.hook_specific_output.additional_context, text);
+    }
+
+    #[test]
+    fn hook_budget_uses_character_units_for_detection_and_truncation() {
+        for text in ["你好", "你好世界", "aé中🙂"] {
+            let output = build_hook_output(HookEvent::UserPromptSubmit, text, 1);
+            assert_eq!(output.hook_specific_output.additional_context, text);
+            assert_eq!(output.hook_specific_output.truncated, None);
+        }
+        let output = build_hook_output(HookEvent::UserPromptSubmit, "aé中🙂z", 1);
+        assert_eq!(output.hook_specific_output.additional_context, "aé中🙂");
+        assert_eq!(output.hook_specific_output.truncated, Some(true));
+    }
+
+    #[test]
+    fn hook_budget_zero_and_large_limits_do_not_wrap() {
+        let empty = build_hook_output(HookEvent::SessionStart, "", 0);
+        assert_eq!(empty.hook_specific_output.truncated, None);
+        let zero = build_hook_output(HookEvent::SessionStart, "🙂", 0);
+        assert_eq!(zero.hook_specific_output.additional_context, "");
+        assert_eq!(zero.hook_specific_output.truncated, Some(true));
+        for budget in [u64::from(u32::MAX) + 1, u64::MAX] {
+            let output = build_hook_output(HookEvent::SessionStart, "full context", budget);
+            assert_eq!(
+                output.hook_specific_output.additional_context,
+                "full context"
+            );
+            assert_eq!(output.hook_specific_output.truncated, None);
+        }
     }
 
     #[test]

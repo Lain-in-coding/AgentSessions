@@ -119,8 +119,10 @@ domain ← ports ← application ← adapters
 
 ### Key design decisions
 
-- **Stable Identity**: BLAKE3-based content-addressed IDs that survive file
-  moves, renames, and incremental appends
+- **Stable Identity**: native and content-derived message IDs preserve identity
+  across source locations. Existing `ses_v1` session namespaces still depend on
+  the installation path; cross-machine relocation needs an explicit alias
+  migration and is not currently automatic.
 - **Evidence-first**: a search hit carries the source span it was read from
   wherever the provider's format has one, so the match can be verified against
   the original bytes. Four of the fourteen adapters cannot supply one — two
@@ -130,8 +132,9 @@ domain ← ports ← application ← adapters
   offset that would point at the wrong bytes. The per-provider column is in the
   [Provider Beta Readiness Ledger](docs/product/PROVIDER-BETA-READINESS.md).
 - **Recency- and repo-aware lexical ranking**: lexical search hits are scored
-  as `max(0, bm25 × recency decay − sidechain penalty + current-repo boost)`
-  (30-day half-life, 0.3 decay floor, 1.0 sidechain penalty, 2.0 boost), so
+  as `max(0, RRF × recency decay − sidechain penalty + current-repo boost)`.
+  Message and session FTS ranks use RRF with k=60, a 30-day half-life,
+  0.3 decay floor, `0.25/61` sidechain penalty and `0.5/61` repo boost, so
   newer, mainline, and same-repository messages surface first without burying
   old or strongly relevant hits. The current-repo boost applies when the hit's
   session belongs to the repository the command is invoked from — the slug is
@@ -139,7 +142,8 @@ domain ← ports ← application ← adapters
   caller with no derivable repository identity changes no score at all.
   Semantic hits and hybrid RRF fusion are not re-ranked. All tuning constants
   live in one module (`crates/agent-session-grep-application/src/ranking.rs`)
-  and are pinned by tests.
+  and are pinned by tests. Search pages keep the first request's scoring time
+  and 15-minute cursor expiry; requesting another page does not extend it.
 - **Privacy**: zero telemetry, zero upload, offline by default; the global
   `--offline` flag refuses any network-requiring capability (fail-closed),
   and the default build has no HTTP client dependency (verified by a static

@@ -41,6 +41,10 @@ use agent_session_grep_ports::{
     RedactionStatus, ResumeClaimsStore, RetrievalMode, SearchFacets, SearchFilters, SearchInstant,
     SearchProvider, SidechainFacet, SourceResumeClaim, SourceSnapshot,
     capability::{ProviderCapability, ProviderCapabilityMatrix, ProviderMaturity},
+    relocation::{
+        DEFAULT_ALIAS_TTL_DAYS, MAX_ALIAS_TTL_DAYS, MIN_ALIAS_TTL_DAYS, PLAN_TTL_MS,
+        RelocationResult, validate_alias_ttl_days,
+    },
 };
 use agent_session_grep_provider_aider::AiderAdapter;
 use agent_session_grep_provider_antigravity::AntigravityAdapter;
@@ -225,7 +229,9 @@ fn extract_offline_flag(args: &[String]) -> bool {
         match a.as_str() {
             "--db" | "--output" | "--request-id" | "--cursor" | "--max-items" | "--max-bytes"
             | "--max-messages" | "--policy" | "--level" | "--provider" | "--since" | "--until"
-            | "--repo" | "--session" | "--around" => {
+            | "--repo" | "--session" | "--around" | "--max-evidence" | "--max-tokens"
+            | "--tool-kind" | "--tool-name" | "--from" | "--to" | "--alias-ttl-days" | "--plan"
+            | "--backup" => {
                 it.next();
             }
             _ => {}
@@ -271,7 +277,7 @@ fn extract_request_id(args: &[String]) -> Result<Option<String>, String> {
             "--db" | "--output" | "--cursor" | "--max-items" | "--max-bytes" | "--max-messages"
             | "--max-evidence" | "--max-tokens" | "--policy" | "--level" | "--provider"
             | "--since" | "--until" | "--repo" | "--session" | "--around" | "--tool-kind"
-            | "--tool-name" => {
+            | "--tool-name" | "--from" | "--to" | "--alias-ttl-days" | "--plan" | "--backup" => {
                 it.next();
             }
             _ => {}
@@ -293,7 +299,8 @@ fn command_name(args: &[String]) -> String {
             "--db" | "--output" | "--cursor" | "--max-items" | "--max-bytes" | "--max-messages"
             | "--max-evidence" | "--max-tokens" | "--policy" | "--level" | "--request-id"
             | "--provider" | "--since" | "--until" | "--repo" | "--session" | "--around"
-            | "--tool-kind" | "--tool-name" => {
+            | "--tool-kind" | "--tool-name" | "--from" | "--to" | "--alias-ttl-days" | "--plan"
+            | "--backup" => {
                 it.next(); // 消费其取值
             }
             "--robot" | "--no-color" | "--help" | "-h" | "--version" | "-V" | "--discover"
@@ -364,7 +371,8 @@ fn intercept_help_or_version(args: &[String]) -> Option<HelpRequest> {
             "--db" | "--output" | "--request-id" | "--cursor" | "--max-items" | "--max-bytes"
             | "--max-messages" | "--max-evidence" | "--max-tokens" | "--policy" | "--level"
             | "--provider" | "--since" | "--until" | "--repo" | "--session" | "--around"
-            | "--tool-kind" | "--tool-name" => {
+            | "--tool-kind" | "--tool-name" | "--from" | "--to" | "--alias-ttl-days" | "--plan"
+            | "--backup" => {
                 it.next();
             }
             _ => {}
@@ -444,17 +452,48 @@ fn run(
     }
 
     let (db, rest) = parse_db_flag(args)?;
+    // Disabled hooks and payloads without a query have no catalog dependency.
+    if rest.first().map(String::as_str) == Some("hook") {
+        let data = hook_data(&db, &rest, offline)?;
+        if let Some(line) = hooks::hook_stdout_line(&data) {
+            protocol::write_stdout_line(&line);
+        }
+        eprintln!("{}", hooks::hook_diagnostics(&data));
+        return Ok(protocol::Outcome::Success);
+    }
+    // Relocation validates all flags before acquiring a writer. Its apply path
+    // also requires an existing, current-schema catalog: opening for write must
+    // never bootstrap a missing catalog or upgrade one before plan validation.
+    let relocation = rest.first().is_some_and(|command| command == "relocate");
+    let relocation_apply = if relocation {
+        let request = parse_relocation_args(&rest)?;
+        if request.apply.is_some() {
+            drop(SqliteStore::open(&db).map_err(ProtocolError::from_private_port_error)?);
+        }
+        request.apply.is_some()
+    } else {
+        false
+    };
     // 写入子命令抢 data-root writer lease；读路径不抢，允许多读者并发。
-    let writes = rest
-        .first()
-        .map(|c| matches!(c.as_str(), "index" | "ingest" | "sync"))
-        .unwrap_or(false);
-    let store = if writes {
+    let writes = relocation_apply
+        || rest
+            .first()
+            .is_some_and(|command| matches!(command.as_str(), "index" | "ingest" | "sync"));
+    let store = if relocation_apply {
+        SqliteStore::open_for_relocation(&db)
+    } else if writes {
         SqliteStore::open_for_write(&db)
     } else {
         SqliteStore::open(&db)
     }
-    .map_err(ProtocolError::from)?;
+    .map_err(|error| {
+        if relocation {
+            ProtocolError::from_private_port_error(error)
+        } else {
+            ProtocolError::from(error)
+        }
+    })?
+    .with_relocation_clock(|| Ok(app_clock_ms()));
     if writes {
         // repo identity（schema v16）：写路径注入真实 git 解析器（Recall
         // 同款 rev-parse + remote get-url）。检测失败一律 None（诚实降级），
@@ -521,17 +560,6 @@ fn run(
     // 故这里克隆一个连接语义上的第二把手不可行——改为让 App 持有单一 store。
     let (command, outcome, data, page, warnings) =
         dispatch(&store, &db, &rest, mode, request_id, offline)?;
-    // hook：Claude Code 直接把这条命令的 stdout 当协议读（同 mcp/tui/serve 一类，
-    // 输出模式 flag 对其无意义）。套 envelope 会把 `hookSpecificOutput` 埋深一层
-    // 而失效，envelope 自身又会被原样注入会话上下文；未启用时一个字节都不写。
-    // 运行事实走 stderr（exit 0 的 stderr 只进 Claude Code 调试日志）。
-    if command == "hook" {
-        if let Some(line) = hooks::hook_stdout_line(&data) {
-            protocol::write_stdout_line(&line);
-        }
-        eprintln!("{}", hooks::hook_diagnostics(&data));
-        return Ok(protocol::Outcome::Success);
-    }
     let duration_ms = started.elapsed().as_millis() as u64;
     // 生效检索模式：search 的 data 已含 `retrieval_mode` 字段（render 投影）；
     // 其他命令恒为 lexical。
@@ -557,6 +585,105 @@ fn run(
         retrieval_mode,
     );
     Ok(outcome)
+}
+
+/// Parse hook input before opening a read-only catalog. Only an enabled hook
+/// with an actual query needs storage; no-op hooks remain usable on a fresh install.
+fn hook_data(db: &str, rest: &[String], offline: bool) -> Result<serde_json::Value, CliError> {
+    // Claude Code Hook（#8）：默认关闭，用户显式 --enable 才注入历史上下文。
+    // payload 从 stdin 读，输出走 Claude Code 的 hookSpecificOutput 契约。
+    // 未启用时输出空 context——不报错、不注入任何历史。
+    let mut args = rest.to_vec();
+    let max_tokens_flag = extract_flag(&mut args, "--max-tokens")?;
+    let enabled = take_bool_flag(&mut args, "--enable");
+    // #8 hook provider/time filter：--provider 可重复（OR），--decay-days
+    // 限定时间窗（0 = 不过滤）。两者都是 opt-in，缺省空/0 = 全部历史。
+    // --repo（schema v16）同为 opt-in：只注入该仓库的历史（与 search
+    // `--repo` / MCP `repo` 同一维度与同一语义）。
+    let providers = extract_repeated_flag(&mut args, "--provider")?;
+    let decay_days = extract_flag(&mut args, "--decay-days")?;
+    let repo = extract_flag(&mut args, "--repo")?;
+    no_extra_args(&args, 1, "hook <session-start|user-prompt-submit>")?;
+    let raw_event = arg(&args, 1, "hook <session-start|user-prompt-submit>")?;
+    let event = hooks::HookEvent::parse(raw_event).ok_or_else(|| {
+        CliError::usage("hook <event>: event must be session-start|user-prompt-submit")
+    })?;
+    let max_tokens = max_tokens_flag
+        .as_deref()
+        .map(|v| {
+            v.parse::<u64>()
+                .map_err(|_| CliError::usage("--max-tokens 需要非负整数"))
+        })
+        .transpose()?
+        .unwrap_or(2000);
+    let config = hooks::HookConfig {
+        enabled,
+        max_tokens,
+        providers,
+        decay_days: decay_days
+            .as_deref()
+            .map(|v| {
+                v.parse::<u32>()
+                    .map_err(|_| CliError::usage("--decay-days 需要非负整数"))
+            })
+            .transpose()?
+            .unwrap_or(0),
+        repo,
+        ..Default::default()
+    };
+    // stdin payload 允许为空（手工调用/探测）：空即无 query，注入空 context。
+    let mut raw_payload = String::new();
+    use std::io::Read as _;
+    std::io::stdin()
+        .read_to_string(&mut raw_payload)
+        .map_err(|_| CliError::usage("hook: failed to read payload from stdin"))?;
+    let payload: serde_json::Value = if raw_payload.trim().is_empty() {
+        serde_json::json!({})
+    } else {
+        serde_json::from_str(&raw_payload)
+            .map_err(|_| CliError::usage("hook: payload is not valid JSON"))?
+    };
+    let query = hooks::query_from_payload(event, &payload);
+    let (text, hits_count) = match (config.should_run(), query) {
+        (true, Some(query)) => {
+            let store = SqliteStore::open(db).map_err(ProtocolError::from)?;
+            let app = resume_app(&store);
+            let response = app.handle(AppRequest::Search {
+                query: query.clone(),
+                filters: hook_search_filters(&config, app.now_ms())?,
+                facets: SearchFacets::default(),
+                limit: 10,
+                cursor: None,
+                budget: ResponseBudget::default(),
+                include_system: false,
+                group_by_session: true,
+                mode: RetrievalMode::Lexical,
+                query_embedding: None,
+            })?;
+            let AppResponse::Search { hits, .. } = response else {
+                return Err(CliError::usage("hook: unexpected search response"));
+            };
+            let mut text = hooks::format_context_header(&query, hits.len());
+            for hit in &hits {
+                // Hook 注入是跨边界输出：文本经脱敏后才进入其他 agent 上下文。
+                let (body, _) = redaction::redact_text(hit.text.as_deref().unwrap_or(""));
+                text.push_str(&format!("- [{}] {}\n", hit.id.as_str(), body));
+            }
+            let count = hits.len();
+            (text, count)
+        }
+        _ => (String::new(), 0usize),
+    };
+    let output = hooks::build_hook_output(event, &text, config.max_tokens);
+    let mut data = serde_json::to_value(&output)
+        .map_err(|e| CliError::usage(format!("hook: serialization error: {e}")))?;
+    if let Some(object) = data.as_object_mut() {
+        object.insert("event".into(), serde_json::json!(event.as_str()));
+        object.insert("enabled".into(), serde_json::json!(config.should_run()));
+        object.insert("offline".into(), serde_json::json!(offline));
+        object.insert("hits".into(), serde_json::json!(hits_count));
+    }
+    Ok(data)
 }
 
 /// 成功结果的统一出口（contract §6 truth table）：
@@ -644,6 +771,19 @@ fn provider_matrix_data() -> serde_json::Value {
     serde_json::json!({
         "providers": providers,
         "semantic": semantic_capability_data(),
+        "relocation": {
+            "interfaces": ["cli"],
+            "command": "relocate",
+            "default_action": "preview",
+            "apply_requires": ["plan", "new_verified_backup"],
+            "plan_ttl_seconds": PLAN_TTL_MS / 1000,
+            "alias_ttl_days": {
+                "default": DEFAULT_ALIAS_TTL_DAYS,
+                "minimum": MIN_ALIAS_TTL_DAYS,
+                "maximum": MAX_ALIAS_TTL_DAYS,
+            },
+            "moves_source_files": false,
+        },
     })
 }
 
@@ -884,13 +1024,6 @@ fn platform_paths() -> Result<serde_json::Value, CliError> {
     platform_paths_impl()
 }
 
-/// MCP 侧可直接调用的平台路径解析（无需 CliError 转协议）。
-/// 仅在 semantic-candle 构建下被 mcp.rs 使用。
-#[cfg(feature = "semantic-candle")]
-pub(crate) fn platform_paths_for_mcp() -> Result<serde_json::Value, CliError> {
-    platform_paths_impl()
-}
-
 #[cfg(windows)]
 // 数据兼容性：目录名 `AgentSessions` 刻意保留旧名——data-root 布局（config/data/
 // cache/logs）与既有安装共享，改名会破坏已存在 data root 的路径查找。
@@ -989,6 +1122,8 @@ COMMANDS:
     ingest <file>          解析单个 transcript 文件并入库（只读源）
     sync <file>...          原子扫描多个 transcript 文件；无变化时不生成新 generation
     sync --discover          自动发现各 provider 数据根下的源并同步（jsonl/json/db；只读源）
+    relocate --provider <id> --from <old-root> --to <new-root>
+                             预览一个显式安装迁移（默认只读；--apply 才提交）
     index <id-fact> <text> 直接写入一条 catalog + 索引（切片期写入入口）
     index rebuild          从权威 catalog 全量重投影 FTS 索引（维护命令）
     index embeddings       从权威 catalog 构建语义向量索引（semantic/hybrid 检索前置）
@@ -1016,6 +1151,13 @@ PAGINATION / BUDGET (search, list):
     --cursor <token>       上一页 envelope `page.next_cursor` 的续读令牌
     --max-items <n>        页大小上限（同时作为响应条目预算）
     --max-bytes <n>        响应字节预算（最低 4096）
+
+RELOCATION:
+    relocate --provider <id> --from <old-root> --to <new-root>
+                             只读生成迁移计划；不创建或修改 catalog、源文件或备份
+    relocate ... --apply --plan <opaque-plan> --backup <new-file>
+                             校验新鲜计划、备份 catalog 后原子提交位置映射
+    --alias-ttl-days <n>     退休位置兼容期（默认 90，范围 1..365）
 
 FILTER (search):
     --provider claude|claude-code|codex  限定 provider（可重复，多个取值按 OR 合并）
@@ -1137,6 +1279,7 @@ fn help_envelope(command: &str, data: serde_json::Value, request_id: Option<&str
 const KNOWN_SUBCOMMANDS: &[&str] = &[
     "ingest",
     "sync",
+    "relocate",
     "index",
     "search",
     "handoff",
@@ -1244,11 +1387,23 @@ fn subcommand_help_text(cmd: &str) -> &'static str {
         }
         "sync" => {
             "sync <file>...：原子扫描一个或多个 transcript 文件入库；无变化不写库。\n\
-                   sync --discover：自动发现 12 个已登记 provider 数据根（~/.claude/projects、~/.codex/sessions 等，逐根登记扩展名 jsonl/json/db）下的源并同步。\n\
+                   sync --discover：扫描已登记活动位置及 12 个默认 provider 数据根（~/.claude/projects、~/.codex/sessions 等，逐根登记扩展名 jsonl/json/db）下的源并同步。\n\
                    示例：agent-session-grep --db <path> --robot sync 会话.jsonl\n\
                    示例：agent-session-grep --db <path> sync --discover\n\
                    约束：单个 transcript 文件应只包含一个会话；检测到多个 sessionId 时仍归属首个会话，并在 warnings 报告。\n\
                    提示：接受任何能被 provider 注册表识别的 transcript 文件（.jsonl / .json / .md / SQLite .db），不接受目录；--discover 会递归扫描 provider 数据根。"
+        }
+        "relocate" => {
+            "relocate --provider <id> --from <old-root> --to <new-root>：\n\
+                       默认只读生成显式安装迁移计划，不创建或修改 catalog、源文件或备份。\n\
+                       应用计划：追加 --apply --plan <opaque-plan> --backup <new-file>；\n\
+                       先由用户移动源目录；本命令只重连索引位置，不移动或改写源文件。\n\
+                       旧根按已存位置匹配（可以不存在）；新根必须是本机绝对路径。\n\
+                       --provider 接受 providers 中的规范 id 与 claude 别名。\n\
+                       计划有效期为 15 分钟；应用时必须沿用预览的映射和兼容期，备份文件必须尚不存在。\n\
+                       --alias-ttl-days <n> 可用于预览和应用（1..365，默认 90）；兼容期到期不影响原会话 ID 查询。\n\
+                       旧版 catalog 须先显式执行 index rebuild 升级；同一映射重复执行无变化。\n\
+                       仅 CLI 支持迁移；MCP/Web 保持只读。输出只含 opaque plan、计数与 generation。"
         }
         "ingest" => {
             "ingest <file>：解析单个 transcript 文件入库（.jsonl / .json / .md / SQLite .db）。\n\
@@ -1448,6 +1603,12 @@ fn is_known_flag_name(token: &str) -> bool {
             | "--include-sidechain"
             | "--tool-kind"
             | "--tool-name"
+            | "--from"
+            | "--to"
+            | "--alias-ttl-days"
+            | "--plan"
+            | "--backup"
+            | "--apply"
     )
 }
 
@@ -1499,7 +1660,7 @@ fn extract_db_flag_impl(args: &[String], prefix_only: bool) -> Result<Option<Str
             "--output" | "--request-id" | "--cursor" | "--max-items" | "--max-bytes"
             | "--max-messages" | "--max-evidence" | "--max-tokens" | "--policy" | "--level"
             | "--provider" | "--since" | "--until" | "--session" | "--around" | "--tool-kind"
-            | "--tool-name" => {
+            | "--tool-name" | "--from" | "--to" | "--alias-ttl-days" | "--plan" | "--backup" => {
                 it.next();
             }
             _ => {}
@@ -1570,7 +1731,7 @@ fn bare_positionals(args: &[String]) -> Vec<String> {
             "--db" | "--output" | "--request-id" | "--cursor" | "--max-items" | "--max-bytes"
             | "--max-messages" | "--max-evidence" | "--max-tokens" | "--policy" | "--level"
             | "--provider" | "--since" | "--until" | "--session" | "--around" | "--tool-kind"
-            | "--tool-name" => {
+            | "--tool-name" | "--from" | "--to" | "--alias-ttl-days" | "--plan" | "--backup" => {
                 it.next(); // 消费其取值
             }
             "--robot" | "--no-color" | "--help" | "-h" | "--version" | "-V" | "--discover"
@@ -1593,6 +1754,128 @@ fn offline_capability_gate(offline: bool, capability: &str) -> Result<(), CliErr
         )));
     }
     Ok(())
+}
+
+/// Parsed relocation scalars. Validation precedes catalog opens, including the
+/// write open which can otherwise create or migrate a catalog on invalid input.
+struct RelocationArgs {
+    provider: String,
+    from: String,
+    to: String,
+    alias_ttl_days: u32,
+    apply: Option<RelocationApplyArgs>,
+}
+
+struct RelocationApplyArgs {
+    plan: String,
+    backup: String,
+}
+
+/// Reuse the command flag extractor, with relocation's single-value contract.
+/// Messages name the flag, never its private path or opaque token value.
+fn relocation_flag(args: &mut Vec<String>, name: &str) -> Result<Option<String>, CliError> {
+    if let Some(index) = args.iter().position(|arg| arg == name) {
+        if args.iter().filter(|arg| *arg == name).count() != 1 {
+            return Err(CliError::usage(format!("duplicate {name} flag")));
+        }
+        let value = args
+            .get(index + 1)
+            .ok_or_else(|| CliError::usage(format!("{name} requires a value")))?;
+        if value.trim().is_empty() || value.starts_with('-') || value.chars().any(char::is_control)
+        {
+            return Err(CliError::usage(format!(
+                "{name} requires a non-empty scalar value"
+            )));
+        }
+    }
+    extract_flag(args, name)
+}
+
+fn parse_relocation_args(rest: &[String]) -> Result<RelocationArgs, CliError> {
+    let mut args = rest.to_vec();
+    let provider = relocation_flag(&mut args, "--provider")?
+        .ok_or_else(|| CliError::usage("relocate requires --provider <provider>"))?;
+    let provider = canonical_search_provider(&provider)
+        .ok_or_else(|| {
+            CliError::usage("unknown relocation provider; use `providers` to list providers")
+        })?
+        .as_str()
+        .to_string();
+    let from = relocation_flag(&mut args, "--from")?
+        .ok_or_else(|| CliError::usage("relocate requires --from <old-root>"))?;
+    let to = relocation_flag(&mut args, "--to")?
+        .ok_or_else(|| CliError::usage("relocate requires --to <new-root>"))?;
+    let ttl = relocation_flag(&mut args, "--alias-ttl-days")?
+        .map(|value| {
+            value.parse::<u32>().map_err(|_| {
+                CliError::usage("--alias-ttl-days requires an integer between 1 and 365")
+            })
+        })
+        .transpose()?
+        .unwrap_or(DEFAULT_ALIAS_TTL_DAYS);
+    validate_alias_ttl_days(ttl).map_err(CliError::usage)?;
+    let apply = take_bool_flag(&mut args, "--apply");
+    let plan = relocation_flag(&mut args, "--plan")?;
+    let backup = relocation_flag(&mut args, "--backup")?;
+    no_extra_args(
+        &args,
+        0,
+        "relocate --provider <provider> --from <old-root> --to <new-root> [--alias-ttl-days <1..365>] [--apply --plan <opaque-plan> --backup <new-file>]",
+    )?;
+    agent_session_grep_application::relocation::validate_root_mapping(&from, &to)
+        .map_err(ProtocolError::from_private_port_error)?;
+    if !std::path::Path::new(&to).is_absolute() {
+        return Err(CliError::usage(
+            "relocate requires a host-local absolute destination",
+        ));
+    }
+    let apply = if apply {
+        Some(RelocationApplyArgs {
+            plan: plan
+                .ok_or_else(|| CliError::usage("relocate --apply requires --plan <opaque-plan>"))?,
+            backup: backup
+                .ok_or_else(|| CliError::usage("relocate --apply requires --backup <new-file>"))?,
+        })
+    } else {
+        if plan.is_some() || backup.is_some() {
+            return Err(CliError::usage(
+                "--plan and --backup are valid only with relocate --apply",
+            ));
+        }
+        None
+    };
+    Ok(RelocationArgs {
+        provider,
+        from,
+        to,
+        alias_ttl_days: ttl,
+        apply,
+    })
+}
+
+/// Storage owns fingerprints, backup ordering and atomic activation. No source
+/// files are moved by this command, and no private inputs enter its result.
+fn relocate_command(
+    store: &SqliteStore,
+    request: &RelocationArgs,
+) -> Result<RelocationResult, CliError> {
+    let result = match &request.apply {
+        Some(apply) => store.apply_relocation(
+            &request.provider,
+            &request.from,
+            &request.to,
+            request.alias_ttl_days,
+            &apply.plan,
+            &apply.backup,
+        ),
+        None => store.relocation_preview(
+            &request.provider,
+            &request.from,
+            &request.to,
+            request.alias_ttl_days,
+        ),
+    };
+    result.map_err(|error| CliError(ProtocolError::from_private_port_error(error)))
 }
 
 /// 分发子命令。`store` 同时充当 CatalogStore 与 SearchIndex（同一 SqliteStore）。
@@ -1634,6 +1917,27 @@ fn dispatch(
         }
     }
     match cmd {
+        "relocate" => {
+            let request = parse_relocation_args(rest)?;
+            let command = if request.apply.is_some() {
+                "relocate.apply"
+            } else {
+                "relocate.preview"
+            };
+            let result = relocate_command(store, &request)?;
+            Ok((
+                command,
+                protocol::Outcome::Success,
+                serde_json::to_value(result).map_err(|_| {
+                    CliError(ProtocolError::new(
+                        CanonicalCode::Internal,
+                        "relocation result serialization failed",
+                    ))
+                })?,
+                protocol::Page::default(),
+                Vec::new(),
+            ))
+        }
         // index 是切片期的写入入口：派生一个 Reconstructed 消息 id，写 catalog + 索引。
         // 它不经 Application（Application 首片只暴露读用例），直接用端口写入。
         // `index rebuild` 是维护子命令：从权威 catalog 全量重投影 FTS 索引。
@@ -1836,6 +2140,8 @@ fn dispatch(
             // store.is_ready() 为 false，Application 显式降级为 lexical_fallback
             // + warning（禁止静默切换）。
             let query = arg(&args, 1, "search <query>")?.to_string();
+            let query_embedding =
+                prepare_search_embedding(store, retrieval_mode, &query).map_err(CliError)?;
             let response = if retrieval_mode == RetrievalMode::Lexical {
                 let app = resume_app(store);
                 app.handle(AppRequest::Search {
@@ -1848,57 +2154,9 @@ fn dispatch(
                     include_system,
                     group_by_session,
                     mode: retrieval_mode,
-                    query_embedding: None,
+                    query_embedding,
                 })?
             } else {
-                // Prefer a verified local Candle E5 bundle when the binary was
-                // built with --features semantic-candle and the operator has
-                // imported weights; otherwise stay on the honest bigram-hash
-                // path (and the store will lexical_fallback if empty).
-                use agent_session_grep_application::embedding::{
-                    BIGRAM_HASH_MODEL_ID, BigramHashModel,
-                };
-                use agent_session_grep_ports::EmbeddingModel;
-
-                let (model_id, query_embedding) = {
-                    #[cfg(feature = "semantic-candle")]
-                    {
-                        let cache = platform_paths().ok().and_then(|v| {
-                            v.get("cache")
-                                .and_then(|c| c.as_str())
-                                .map(|s| s.to_string())
-                        });
-                        if let Some(cache) = cache {
-                            let dir =
-                                agent_session_grep_application::candle_embedding::default_model_dir(
-                                    std::path::Path::new(&cache),
-                                );
-                            if let Ok(model) =
-                                agent_session_grep_application::candle_embedding::CandleE5Model::load_cached(
-                                    &dir,
-                                )
-                            {
-                                let emb = model.embed(&query, true).map_err(ProtocolError::from)?;
-                                (model.manifest().model_id.clone(), emb)
-                            } else {
-                                let model = BigramHashModel::new();
-                                let emb = model.embed(&query, true).map_err(ProtocolError::from)?;
-                                (BIGRAM_HASH_MODEL_ID.to_string(), emb)
-                            }
-                        } else {
-                            let model = BigramHashModel::new();
-                            let emb = model.embed(&query, true).map_err(ProtocolError::from)?;
-                            (BIGRAM_HASH_MODEL_ID.to_string(), emb)
-                        }
-                    }
-                    #[cfg(not(feature = "semantic-candle"))]
-                    {
-                        let model = BigramHashModel::new();
-                        let emb = model.embed(&query, true).map_err(ProtocolError::from)?;
-                        (BIGRAM_HASH_MODEL_ID.to_string(), emb)
-                    }
-                };
-                store.set_semantic_model(&model_id);
                 let app = resume_semantic_app(store);
                 app.handle(AppRequest::Search {
                     query,
@@ -1910,7 +2168,7 @@ fn dispatch(
                     include_system,
                     group_by_session,
                     mode: retrieval_mode,
-                    query_embedding: Some(query_embedding),
+                    query_embedding,
                 })?
             };
             let (outcome, mut data, page, warnings) = render(response);
@@ -2235,107 +2493,6 @@ fn dispatch(
                 warnings,
             ))
         }
-        "hook" => {
-            // Claude Code Hook（#8）：默认关闭，用户显式 --enable 才注入历史上下文。
-            // payload 从 stdin 读，输出走 Claude Code 的 hookSpecificOutput 契约。
-            // 未启用时输出空 context——不报错、不注入任何历史。
-            let mut args = rest.to_vec();
-            let max_tokens_flag = extract_flag(&mut args, "--max-tokens")?;
-            let enabled = take_bool_flag(&mut args, "--enable");
-            // #8 hook provider/time filter：--provider 可重复（OR），--decay-days
-            // 限定时间窗（0 = 不过滤）。两者都是 opt-in，缺省空/0 = 全部历史。
-            // --repo（schema v16）同为 opt-in：只注入该仓库的历史（与 search
-            // `--repo` / MCP `repo` 同一维度与同一语义）。
-            let providers = extract_repeated_flag(&mut args, "--provider")?;
-            let decay_days = extract_flag(&mut args, "--decay-days")?;
-            let repo = extract_flag(&mut args, "--repo")?;
-            no_extra_args(&args, 1, "hook <session-start|user-prompt-submit>")?;
-            let raw_event = arg(&args, 1, "hook <session-start|user-prompt-submit>")?;
-            let event = hooks::HookEvent::parse(raw_event).ok_or_else(|| {
-                CliError::usage("hook <event>: event must be session-start|user-prompt-submit")
-            })?;
-            let max_tokens = max_tokens_flag
-                .as_deref()
-                .map(|v| {
-                    v.parse::<u64>()
-                        .map_err(|_| CliError::usage("--max-tokens 需要非负整数"))
-                })
-                .transpose()?
-                .unwrap_or(2000);
-            let config = hooks::HookConfig {
-                enabled,
-                max_tokens,
-                providers,
-                decay_days: decay_days
-                    .as_deref()
-                    .map(|v| {
-                        v.parse::<u32>()
-                            .map_err(|_| CliError::usage("--decay-days 需要非负整数"))
-                    })
-                    .transpose()?
-                    .unwrap_or(0),
-                repo,
-                ..Default::default()
-            };
-            // stdin payload 允许为空（手工调用/探测）：空即无 query，注入空 context。
-            let mut raw_payload = String::new();
-            use std::io::Read as _;
-            std::io::stdin()
-                .read_to_string(&mut raw_payload)
-                .map_err(|_| CliError::usage("hook: failed to read payload from stdin"))?;
-            let payload: serde_json::Value = if raw_payload.trim().is_empty() {
-                serde_json::json!({})
-            } else {
-                serde_json::from_str(&raw_payload)
-                    .map_err(|_| CliError::usage("hook: payload is not valid JSON"))?
-            };
-            let query = hooks::query_from_payload(event, &payload);
-            let (text, hits_count) = match (config.should_run(), query) {
-                (true, Some(query)) => {
-                    let app = resume_app(store);
-                    let response = app.handle(AppRequest::Search {
-                        query: query.clone(),
-                        filters: hook_search_filters(&config, app.now_ms())?,
-                        facets: SearchFacets::default(),
-                        limit: 10,
-                        cursor: None,
-                        budget: ResponseBudget::default(),
-                        include_system: false,
-                        group_by_session: true,
-                        mode: RetrievalMode::Lexical,
-                        query_embedding: None,
-                    })?;
-                    let AppResponse::Search { hits, .. } = response else {
-                        return Err(CliError::usage("hook: unexpected search response"));
-                    };
-                    let mut text = hooks::format_context_header(&query, hits.len());
-                    for hit in &hits {
-                        // Hook 注入是跨边界输出：文本经脱敏后才进入其他 agent 上下文。
-                        let (body, _) = redaction::redact_text(hit.text.as_deref().unwrap_or(""));
-                        text.push_str(&format!("- [{}] {}\n", hit.id.as_str(), body));
-                    }
-                    let count = hits.len();
-                    (text, count)
-                }
-                _ => (String::new(), 0usize),
-            };
-            let output = hooks::build_hook_output(event, &text, config.max_tokens);
-            let mut data = serde_json::to_value(&output)
-                .map_err(|e| CliError::usage(format!("hook: serialization error: {e}")))?;
-            if let Some(object) = data.as_object_mut() {
-                object.insert("event".into(), serde_json::json!(event.as_str()));
-                object.insert("enabled".into(), serde_json::json!(config.should_run()));
-                object.insert("offline".into(), serde_json::json!(offline));
-                object.insert("hits".into(), serde_json::json!(hits_count));
-            }
-            Ok((
-                "hook",
-                protocol::Outcome::Success,
-                data,
-                protocol::Page::default(),
-                Vec::new(),
-            ))
-        }
         "get-session-resume" => {
             // 只读 Resume Metadata（ADR-0009）：只返回结构化字段，绝不构造/执行
             // shell 命令、绝不返回 transcript/source path。
@@ -2485,7 +2642,8 @@ fn search_filters_from_flags(
             .providers
             .push(canonical_search_provider(provider).ok_or_else(|| {
                 CliError::usage(format!(
-                    "unknown provider: {provider} (expected {PROVIDER_VALUE_HINT})"
+                    "unknown provider: {provider} (expected {})",
+                    provider_value_hint()
                 ))
             })?);
     }
@@ -2503,8 +2661,11 @@ fn search_filters_from_flags(
     Ok(filters)
 }
 
-/// Accepted `--provider` values, rendered in every provider usage error.
-const PROVIDER_VALUE_HINT: &str = "claude|claude-code|codex";
+/// Accepted provider spellings come from the capability registry used by every
+/// search entrypoint and by the MCP schema.
+pub(crate) fn provider_value_hint() -> String {
+    agent_session_grep_ports::capability::search_provider_filter_values().join("|")
+}
 
 /// Normalize one provider request value to [`SearchProvider`]; `None` = unknown.
 ///
@@ -2518,11 +2679,7 @@ const PROVIDER_VALUE_HINT: &str = "claude|claude-code|codex";
 /// loopback surface forbids. Unknown values stay fail-closed (usage error at
 /// the caller), never silently dropped.
 fn canonical_search_provider(provider: &str) -> Option<SearchProvider> {
-    match provider {
-        "claude" | "claude-code" => Some(SearchProvider::Claude),
-        "codex" => Some(SearchProvider::Codex),
-        _ => None,
-    }
+    SearchProvider::parse(provider)
 }
 
 /// 从 HookConfig 构建检索过滤（#8）：provider 白名单（空 = 全部）、时间衰减
@@ -2538,7 +2695,8 @@ fn hook_search_filters(config: &hooks::HookConfig, now_ms: i64) -> Result<Search
             .providers
             .push(canonical_search_provider(provider).ok_or_else(|| {
                 CliError::usage(format!(
-                    "hook --provider: unknown provider {provider} (expected {PROVIDER_VALUE_HINT})"
+                    "hook --provider: unknown provider {provider} (expected {})",
+                    provider_value_hint()
                 ))
             })?);
     }
@@ -2711,9 +2869,9 @@ fn provider_binary_on_path(binary: &str) -> bool {
 
 /// 从权威 catalog 重建语义向量索引（`index embeddings`，#3）。
 ///
-/// 与 FTS rebuild 同一语义：向量表是 catalog 的投影，整表清空后按 catalog
-/// 重投影，失败不留半成品（每条 upsert 独立，重跑幂等）。只对 Message 实体
-/// 建向量——session/document 没有检索正文。
+/// 与 FTS rebuild 同一语义：向量表是 catalog 的投影。以有界 keyset 批次扫描，
+/// 替换向量与 generation 在同一事务提交；编码失败保留旧投影。只对 Message
+/// 实体建向量——session/document 没有检索正文。
 ///
 /// Model selection:
 /// - With `--features semantic-candle` and a verified local E5 bundle under the
@@ -2723,7 +2881,7 @@ fn provider_binary_on_path(binary: &str) -> bool {
 ///   and emits the experimental warning (default release path).
 fn build_embeddings(store: &SqliteStore) -> Result<(serde_json::Value, Vec<String>), CliError> {
     use agent_session_grep_application::embedding::BigramHashModel;
-    use agent_session_grep_ports::{CatalogStore, EmbeddingModel, SemanticIndex};
+    use agent_session_grep_ports::EmbeddingModel;
 
     enum ActiveModel {
         Bigram(BigramHashModel),
@@ -2735,11 +2893,22 @@ fn build_embeddings(store: &SqliteStore) -> Result<(serde_json::Value, Vec<Strin
     }
 
     impl ActiveModel {
-        fn embed(&self, text: &str, is_query: bool) -> Result<Vec<f32>, ProtocolError> {
+        fn embed(
+            &self,
+            text: &str,
+            is_query: bool,
+        ) -> agent_session_grep_ports::PortResult<Vec<f32>> {
             match self {
-                Self::Bigram(m) => m.embed(text, is_query).map_err(ProtocolError::from),
+                Self::Bigram(m) => m.embed(text, is_query),
                 #[cfg(feature = "semantic-candle")]
-                Self::Candle(m) => m.embed(text, is_query).map_err(ProtocolError::from),
+                Self::Candle(m) => m.embed(text, is_query),
+            }
+        }
+        fn dimension(&self) -> usize {
+            match self {
+                Self::Bigram(m) => m.dimension(),
+                #[cfg(feature = "semantic-candle")]
+                Self::Candle(m) => m.dimension(),
             }
         }
         fn model_id(&self) -> &str {
@@ -2816,40 +2985,19 @@ fn build_embeddings(store: &SqliteStore) -> Result<(serde_json::Value, Vec<Strin
 
     let model_id = model.model_id().to_string();
     store.set_semantic_model(&model_id);
-    // 先清除本模型的旧向量：重建语义与 `index rebuild` 一致（整表重投影，
-    // 不是增量补齐），否则 catalog 里已删除的实体会留下孤儿向量。
-    let cleared = store
-        .clear_embeddings(&model_id)
+    let (indexed, skipped, cleared) = store
+        .rebuild_embeddings_from_catalog(&model_id, model.dimension(), 128, |entry| {
+            let payload = serde_json::from_slice::<serde_json::Value>(&entry.payload).ok();
+            let text = payload
+                .as_ref()
+                .and_then(|value| value.get("text"))
+                .and_then(serde_json::Value::as_str);
+            match text.filter(|text| !text.trim().is_empty()) {
+                Some(text) => model.embed(text, false).map(Some),
+                None => Ok(None),
+            }
+        })
         .map_err(ProtocolError::from)?;
-
-    // catalog 全量扫描：payload 里没有可检索正文的实体跳过（不臆造向量）。
-    let entries = store.list(usize::MAX).map_err(ProtocolError::from)?;
-    let mut indexed = 0usize;
-    let mut skipped = 0usize;
-    for entry in &entries {
-        if entry.id.kind() != IdKind::Message {
-            skipped += 1;
-            continue;
-        }
-        let text = serde_json::from_slice::<serde_json::Value>(&entry.payload)
-            .ok()
-            .and_then(|value| {
-                value
-                    .get("text")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_string)
-            })
-            .unwrap_or_default();
-        if text.trim().is_empty() {
-            skipped += 1;
-            continue;
-        }
-        let vector = model.embed(&text, false)?;
-        store
-            .index_embedding(&entry.id, &vector)
-            .map_err(ProtocolError::from)?;
-        indexed += 1;
-    }
 
     let mut data = model.manifest_json();
     if let Some(obj) = data.as_object_mut() {
@@ -2949,6 +3097,63 @@ fn current_repo_slug() -> Option<String> {
     let cwd = std::env::current_dir().ok()?;
     let resolver = repo_identity::GitRepoSlugResolver::default();
     agent_session_grep_adapters_sqlite::RepoSlugResolver::resolve(&resolver, &cwd.to_string_lossy())
+}
+
+/// Resolve the local query encoder once at the composition root so CLI and
+/// MCP semantic requests use the same model identity and fallback behavior.
+pub(crate) fn prepare_search_embedding(
+    store: &SqliteStore,
+    mode: RetrievalMode,
+    query: &str,
+) -> Result<Option<Vec<f32>>, ProtocolError> {
+    if matches!(
+        mode,
+        RetrievalMode::Lexical | RetrievalMode::LexicalFallback
+    ) {
+        return Ok(None);
+    }
+
+    use agent_session_grep_application::embedding::{BIGRAM_HASH_MODEL_ID, BigramHashModel};
+    use agent_session_grep_ports::EmbeddingModel;
+
+    let bigram_embedding = || -> Result<(String, Vec<f32>), ProtocolError> {
+        let model = BigramHashModel::new();
+        let embedding = model.embed(query, true).map_err(ProtocolError::from)?;
+        Ok((BIGRAM_HASH_MODEL_ID.to_string(), embedding))
+    };
+
+    #[cfg(feature = "semantic-candle")]
+    let (model_id, embedding) = {
+        let cached_model = platform_paths()
+            .ok()
+            .and_then(|paths| {
+                paths
+                    .get("cache")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_owned)
+            })
+            .map(|cache| {
+                let dir = agent_session_grep_application::candle_embedding::default_model_dir(
+                    std::path::Path::new(&cache),
+                );
+                agent_session_grep_application::candle_embedding::CandleE5Model::load_cached(dir)
+            })
+            .and_then(Result::ok);
+        if let Some(model) = cached_model {
+            (
+                model.manifest().model_id.clone(),
+                model.embed(query, true).map_err(ProtocolError::from)?,
+            )
+        } else {
+            bigram_embedding()?
+        }
+    };
+
+    #[cfg(not(feature = "semantic-candle"))]
+    let (model_id, embedding) = bigram_embedding()?;
+
+    store.set_semantic_model(&model_id);
+    Ok(Some(embedding))
 }
 
 /// Human search 的会话表格行按 canonical Session 去重后批量解析 Resume
@@ -3115,22 +3320,7 @@ struct StagedMessageEntity {
 /// 共享 namespace、不同安装分离。手动 ingest 的 Source 若不在已知数据根下，
 /// 以其共同父目录作为未知安装边界，避免同一 Session 分散在多个文件时被拆开。
 fn installation_namespace(path: &str, provider_id: &str) -> String {
-    let marker = match provider_id {
-        "claude-code" => ".claude",
-        "codex" => ".codex",
-        _ => "",
-    };
-    let segments: Vec<&str> = path.split(['/', '\\']).filter(|s| !s.is_empty()).collect();
-    if !marker.is_empty()
-        && let Some(index) = segments.iter().rposition(|s| *s == marker)
-    {
-        return format!("{provider_id}:{}", segments[..=index].join("/"));
-    }
-    let parent = match segments.split_last() {
-        Some((_, parent)) if !parent.is_empty() => parent.join("/"),
-        _ => ".".to_string(),
-    };
-    format!("{provider_id}:{parent}")
+    agent_session_grep_application::relocation::legacy_installation_namespace(path, provider_id)
 }
 
 /// `sync --discover` 的 provider → (home 相对数据根, 源文件扩展名) 映射表（唯一来源）。
@@ -3296,6 +3486,97 @@ fn source_path_identity(path: &str) -> String {
     normalized
 }
 
+/// Resolve a newly supplied filesystem path before creating its first registry
+/// binding. Never silently replace a previously indexed non-normal locator.
+fn source_input_path(store: &SqliteStore, path: &str) -> Result<String, CliError> {
+    let input = std::path::Path::new(path);
+    if input.is_absolute()
+        && !input.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir | std::path::Component::CurDir
+            )
+        })
+    {
+        return Ok(source_path_identity(path));
+    }
+    if store
+        .source_fingerprints(&[path.to_string()])
+        .map_err(ProtocolError::from)?
+        .contains_key(path)
+    {
+        return Err(CliError::usage(
+            "existing source locator needs explicit provenance resolution",
+        ));
+    }
+    let canonical = std::fs::canonicalize(input).map_err(|_| {
+        ProtocolError::new(CanonicalCode::SourceIo, "source path could not be resolved")
+    })?;
+    let canonical = canonical
+        .to_str()
+        .ok_or_else(|| CliError::usage("source path must be valid Unicode"))?;
+    let path = if cfg!(windows) {
+        if let Some(unc) = canonical.strip_prefix(r"\\?\UNC\") {
+            format!(r"\\{unc}")
+        } else {
+            canonical
+                .strip_prefix(r"\\?\")
+                .unwrap_or(canonical)
+                .to_string()
+        }
+    } else {
+        canonical.to_string()
+    };
+    Ok(source_path_identity(&path))
+}
+
+/// Root hints apply only to previously scanned sources. New files in the same
+/// directory may belong to another provider and still require ordinary probes.
+/// Discovery ownership remains separate from source_scans.provider_id.
+fn registered_provider_hints(
+    store: &SqliteStore,
+    paths: &[String],
+) -> Result<BTreeMap<String, String>, CliError> {
+    let known_sources = store
+        .source_fingerprints(paths)
+        .map_err(ProtocolError::from)?;
+    let mut candidates: BTreeMap<String, Option<String>> = BTreeMap::new();
+    for adapter in provider_registry() {
+        let provider = adapter.provider_id();
+        let roots = store
+            .active_installation_roots(provider)
+            .map_err(ProtocolError::from_private_port_error)?;
+        for path in paths {
+            if !known_sources.contains_key(path) {
+                continue;
+            }
+            let mut contains = false;
+            for root in &roots {
+                if agent_session_grep_application::relocation::path_is_within(path, root)
+                    .map_err(ProtocolError::from_private_port_error)?
+                {
+                    contains = true;
+                    break;
+                }
+            }
+            if contains {
+                candidates
+                    .entry(path.clone())
+                    .and_modify(|candidate| {
+                        if candidate.as_deref() != Some(provider) {
+                            *candidate = None;
+                        }
+                    })
+                    .or_insert_with(|| Some(provider.to_string()));
+            }
+        }
+    }
+    Ok(candidates
+        .into_iter()
+        .filter_map(|(path, provider)| provider.map(|id| (path, id)))
+        .collect())
+}
+
 /// 递归遍历 `root`，收集扩展名恰为 `extension`（不含点）的文件路径（正斜杠归一）。
 ///
 /// 返回 `(paths, complete)`：`complete = false` 表示遍历中途遇到不可读目录
@@ -3381,33 +3662,49 @@ fn sync_discover(
     let mut per_provider: Vec<(String, Vec<String>, bool)> = Vec::new();
     for adapter in provider_registry() {
         let pid = adapter.provider_id().to_string();
-        let Some((root, extension)) = provider_discovery_target(&pid) else {
-            // 未登记发现根，或无法解析当前用户 home：该 provider 的根扫描不完整，
-            // 不能 tombstone。
-            overall_complete = false;
-            per_provider.push((pid.clone(), Vec::new(), false));
-            providers_out.push(ProviderDiscovery {
-                id: pid,
-                found: 0,
-                removed: 0,
-                complete: false,
-            });
-            continue;
-        };
-        if !root.is_dir() {
-            // 根目录不存在时无法确认 provider 源是否只是暂时不可见；保守标记
-            // partial，绝不因为缺少根目录而 tombstone prior paths。
-            overall_complete = false;
-            per_provider.push((pid.clone(), Vec::new(), false));
-            providers_out.push(ProviderDiscovery {
-                id: pid,
-                found: 0,
-                removed: 0,
-                complete: false,
-            });
-            continue;
+        let extension = PROVIDER_DISCOVERY_ROOTS
+            .iter()
+            .find(|(provider, _, _)| *provider == pid)
+            .map(|(_, _, extension)| *extension);
+        let mut roots: BTreeMap<String, std::path::PathBuf> = BTreeMap::new();
+        if extension.is_some() {
+            for root in store
+                .active_installation_roots(&pid)
+                .map_err(ProtocolError::from_private_port_error)?
+            {
+                let key =
+                    agent_session_grep_application::relocation::normalize_absolute_path(&root)
+                        .map_err(ProtocolError::from_private_port_error)?;
+                roots.insert(key, std::path::PathBuf::from(root));
+            }
+            if let Some((root, _)) = provider_discovery_target(&pid) {
+                // A missing default home root is not evidence against an
+                // explicitly relocated installation. Missing registered roots
+                // still make the provider scan incomplete.
+                if roots.is_empty() || root.is_dir() {
+                    let key = agent_session_grep_application::relocation::normalize_absolute_path(
+                        &root.to_string_lossy(),
+                    )
+                    .map_err(ProtocolError::from_private_port_error)?;
+                    roots.entry(key).or_insert(root);
+                }
+            }
         }
-        let (paths, complete) = discover_provider_sources(&root, extension);
+        let mut paths = BTreeMap::new();
+        let mut complete = !roots.is_empty();
+        if let Some(extension) = extension {
+            for root in roots.into_values() {
+                let (found, root_complete) = discover_provider_sources(&root, extension);
+                for path in found {
+                    let key =
+                        agent_session_grep_application::relocation::normalize_absolute_path(&path)
+                            .map_err(ProtocolError::from_private_port_error)?;
+                    paths.entry(key).or_insert(path);
+                }
+                complete = complete && root_complete;
+            }
+        }
+        let paths: Vec<String> = paths.into_values().collect();
         overall_complete = overall_complete && complete;
         per_provider.push((pid.clone(), paths.clone(), complete));
         let found = paths.len();
@@ -3418,7 +3715,7 @@ fn sync_discover(
         providers_out.push(ProviderDiscovery {
             id: pid,
             found,
-            removed: 0, // diff 后回填
+            removed: 0,
             complete,
         });
     }
@@ -3451,10 +3748,17 @@ fn sync_discover(
         let prior = store
             .source_paths_for_provider(pid.as_str())
             .map_err(ProtocolError::from)?;
-        let discovered_for_provider: BTreeSet<&str> = paths.iter().map(String::as_str).collect();
+        let discovered_for_provider: BTreeSet<String> = paths
+            .iter()
+            .map(|path| agent_session_grep_application::relocation::normalize_absolute_path(path))
+            .collect::<Result<_, _>>()
+            .map_err(ProtocolError::from_private_port_error)?;
         let mut removed = 0usize;
         for prior_path in &prior {
-            if !discovered_for_provider.contains(prior_path.as_str()) {
+            let key =
+                agent_session_grep_application::relocation::normalize_absolute_path(prior_path)
+                    .map_err(ProtocolError::from_private_port_error)?;
+            if !discovered_for_provider.contains(&key) {
                 // 源曾在该 provider 下被 sync，本次完整扫描未出现在磁盘上 → 合成空批。
                 synthetic_batches.push(SourceBatch {
                     source_path: prior_path.clone(),
@@ -3467,7 +3771,7 @@ fn sync_discover(
                     len_bytes: None,
                     fingerprint: None,
                     provider_id: Some(pid.clone()),
-                    resume_claim: None,
+                    resume_claims: Vec::new(),
                 });
                 removed += 1;
             }
@@ -3545,9 +3849,9 @@ fn derive_message_id(
     provider_id: &str,
     variant: &str,
     document_wire: &str,
-) -> StableId {
-    if native_id.trim().is_empty() {
-        StableId::derive(
+) -> Result<StableId, CliError> {
+    if native_id.is_empty() {
+        Ok(StableId::derive(
             IdKind::Message,
             Stability::Unstable,
             &[
@@ -3556,12 +3860,13 @@ fn derive_message_id(
                 document_wire.as_bytes(),
                 &seq.to_le_bytes(),
             ],
-        )
+        ))
     } else {
-        StableId::native(IdKind::Message, native_id)
+        Ok(StableId::native_checked(IdKind::Message, native_id)?)
     }
 }
 
+#[cfg(test)]
 fn staged_to_source(
     path: &str,
     staged: &StagedBatch,
@@ -3581,6 +3886,7 @@ fn staged_to_source(
     )
 }
 
+#[cfg(test)]
 fn staged_to_source_with_provider(
     path: &str,
     staged: &StagedBatch,
@@ -3589,6 +3895,29 @@ fn staged_to_source_with_provider(
     fingerprint: &str,
     source_len: u64,
     discovered_provider_id: Option<&str>,
+) -> Result<SourceBatch, CliError> {
+    staged_to_source_with_provider_namespace(
+        path,
+        staged,
+        provider_id,
+        variant,
+        fingerprint,
+        source_len,
+        discovered_provider_id,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn staged_to_source_with_provider_namespace(
+    path: &str,
+    staged: &StagedBatch,
+    provider_id: &str,
+    variant: &str,
+    fingerprint: &str,
+    source_len: u64,
+    discovered_provider_id: Option<&str>,
+    persisted_installation_namespace: Option<&str>,
 ) -> Result<SourceBatch, CliError> {
     if staged.report.committed != staged.messages.len() {
         return Err(DomainError::InvariantViolation(format!(
@@ -3609,12 +3938,13 @@ fn staged_to_source_with_provider(
             fingerprint.as_bytes(),
         ],
     );
-    // 会话实体：native id 优先；缺失回退 document 派生（一文档一会话，见 design §9）。
-    // Native 路径必须走 namespaced 构造函数（identity 前置）：canonical 身份 =
-    // digest(provider, installation, native id)，同 native id 跨 provider/安装
-    // 绝不碰撞；wire 仍为 `ses_v1_` + digest，native id 单独经 Resume claim 持久化。
-    let install_ns = installation_namespace(path, provider_id);
-    let session_id = match staged.report.session_native_id.as_deref() {
+    // Report-level identity remains the single-session compatibility path.
+    // Explicit per-message identities below take precedence for multi-session sources.
+    let install_ns = persisted_installation_namespace
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| installation_namespace(path, provider_id));
+    let fallback_session_id = match staged.report.session_native_id.as_deref() {
         Some(sid) if !sid.trim().is_empty() => StableId::native_session_scoped(
             &SessionIdentityNamespace {
                 provider_id,
@@ -3629,12 +3959,110 @@ fn staged_to_source_with_provider(
         ),
     };
 
+    if staged.report.session_observation.multi_session
+        && staged
+            .messages
+            .iter()
+            .any(|message| message.session.is_none())
+    {
+        return Err(DomainError::InvalidRequest(
+            "provider reported multiple sessions without per-message session identities".into(),
+        )
+        .into());
+    }
+
+    let mut session_members = BTreeMap::<String, (StableId, Vec<String>, BTreeSet<String>)>::new();
+    let mut resume_claims_by_session = BTreeMap::<String, SourceResumeClaim>::new();
+    let mut message_session_ids = Vec::with_capacity(staged.messages.len());
+    for message in &staged.messages {
+        let (session_id, observation) = match message.session.as_ref() {
+            Some(identity) => {
+                if identity.source_key.trim().is_empty() {
+                    return Err(DomainError::InvalidRequest(
+                        "provider emitted an empty source-local session key".into(),
+                    )
+                    .into());
+                }
+                let native_id = match &identity.observation.provider_session_id {
+                    agent_session_grep_ports::MetadataResolution::Resolved(value)
+                        if !value.trim().is_empty() =>
+                    {
+                        Some(value.as_str())
+                    }
+                    _ => None,
+                };
+                let session_id = if let Some(native_id) = native_id {
+                    StableId::native_session_scoped(
+                        &SessionIdentityNamespace {
+                            provider_id,
+                            installation_namespace: &install_ns,
+                        },
+                        native_id,
+                    )
+                } else {
+                    StableId::derive(
+                        IdKind::Session,
+                        Stability::Unstable,
+                        &[
+                            provider_id.as_bytes(),
+                            variant.as_bytes(),
+                            document_id.as_str().as_bytes(),
+                            identity.source_key.as_bytes(),
+                        ],
+                    )
+                };
+                (session_id, Some(&identity.observation))
+            }
+            None => (
+                fallback_session_id.clone(),
+                Some(&staged.report.session_observation),
+            ),
+        };
+
+        let session_key = session_id.as_str().to_string();
+        session_members
+            .entry(session_key.clone())
+            .or_insert_with(|| (session_id.clone(), Vec::new(), BTreeSet::new()));
+        if provider_id != "empty"
+            && let Some(observation) = observation
+        {
+            let claim =
+                SourceResumeClaim::from_observation(provider_id, session_id.as_str(), observation);
+            if let Some(existing) = resume_claims_by_session.get(&session_key) {
+                if existing != &claim {
+                    return Err(DomainError::InvalidRequest(
+                        "conflicting resume metadata for one source session".into(),
+                    )
+                    .into());
+                }
+            } else {
+                resume_claims_by_session.insert(session_key, claim);
+            }
+        }
+        message_session_ids.push(session_id);
+    }
+    if staged.messages.is_empty() {
+        let session_key = fallback_session_id.as_str().to_string();
+        session_members.insert(
+            session_key.clone(),
+            (fallback_session_id.clone(), Vec::new(), BTreeSet::new()),
+        );
+        if provider_id != "empty" {
+            resume_claims_by_session.insert(
+                session_key,
+                SourceResumeClaim::from_observation(
+                    provider_id,
+                    fallback_session_id.as_str(),
+                    &staged.report.session_observation,
+                ),
+            );
+        }
+    }
+
     let mut entities = BTreeMap::<String, StagedMessageEntity>::new();
-    let mut member_ids = Vec::new();
-    let mut seen_members = BTreeSet::new();
     let mut placements = Vec::with_capacity(staged.messages.len());
     let mut edges = Vec::new();
-    for message in &staged.messages {
+    for (message, session_id) in staged.messages.iter().zip(&message_session_ids) {
         if let Some((start, end)) = message.span
             && (end < start || end > source_len)
         {
@@ -3649,7 +4077,7 @@ fn staged_to_source_with_provider(
             provider_id,
             variant,
             document_id.as_str(),
-        );
+        )?;
         let span = message.span.map(|(start, end)| EvidenceSpan { start, end });
         let placement = MessagePlacement::new(
             session_id.clone(),
@@ -3662,8 +4090,9 @@ fn staged_to_source_with_provider(
         let parent_id = message
             .parent_native_id
             .as_deref()
-            .filter(|parent| !parent.trim().is_empty())
-            .map(|parent| StableId::native(IdKind::Message, parent));
+            .filter(|parent| !parent.is_empty())
+            .map(|parent| StableId::native_checked(IdKind::Message, parent))
+            .transpose()?;
         if let Some(parent_message_id) = &parent_id {
             edges.push(MessageEdge {
                 child_placement_id: placement.id.clone(),
@@ -3681,8 +4110,17 @@ fn staged_to_source_with_provider(
                 },
             });
         }
+        let (member_session, members, seen_members) = session_members
+            .get_mut(session_id.as_str())
+            .expect("every staged message session was registered");
+        if member_session != session_id {
+            return Err(DomainError::InvariantViolation(
+                "session member map has a conflicting canonical identity".into(),
+            )
+            .into());
+        }
         if seen_members.insert(id.as_str().to_string()) {
-            member_ids.push(id.as_str().to_string());
+            members.push(id.as_str().to_string());
         }
         match entities.entry(id.as_str().to_string()) {
             std::collections::btree_map::Entry::Vacant(entry) => {
@@ -3766,6 +4204,12 @@ fn staged_to_source_with_provider(
                 })
             })
             .collect();
+        let session_ids: BTreeSet<String> = occurrences
+            .iter()
+            .map(|(placement, _, _)| placement.session_id.as_str().to_string())
+            .collect();
+        let session_ids: Vec<String> = session_ids.into_iter().collect();
+        let primary_session = (session_ids.len() == 1).then(|| session_ids[0].clone());
         let payload = serde_json::json!({
             "role": entity.role,
             "text": entity.text,
@@ -3773,8 +4217,8 @@ fn staged_to_source_with_provider(
             "parent": parent,
             "parent_native_id": parent_native_id,
             "is_sidechain": is_sidechain,
-            "session": session_id.as_str(),
-            "sessions": [session_id.as_str()],
+            "session": primary_session,
+            "sessions": session_ids,
             "span": spans.first().map(|span| serde_json::json!({
                 "start": span["start"],
                 "end": span["end"],
@@ -3789,12 +4233,6 @@ fn staged_to_source_with_provider(
         entries.push((entity.id, payload, bounded_index_text(&entity.text)));
     }
 
-    let session_payload = serde_json::json!({
-        "documents": [document_id.as_str()],
-        "document": document_id.as_str(),
-        "messages": member_ids,
-    })
-    .to_string();
     let document_payload = serde_json::json!({
         "provider": provider_id,
         "variant": variant,
@@ -3802,22 +4240,21 @@ fn staged_to_source_with_provider(
         "len": source_len,
     })
     .to_string();
-    // Source-scoped Resume Metadata 声明（ADR-0009）：把 provider 观察归一为
-    // claim，随本批 source 事务原子写入；缺失/歧义已折叠进 state。
-    let resume_claim = if provider_id == "empty" {
-        None
-    } else {
-        Some(SourceResumeClaim::from_observation(
-            provider_id,
-            session_id.as_str(),
-            &staged.report.session_observation,
-        ))
-    };
-
-    // session_id 随后 move 进 entries；usage 事件挂会话锚点，先留一份克隆。
-    let session_wire = session_id.clone();
-    entries.push((session_id, session_payload.into_bytes(), String::new()));
     let document_wire = document_id.as_str().to_string();
+    entries.reserve(session_members.len() + 1);
+    for (session_id, member_ids, _) in session_members.values() {
+        let session_payload = serde_json::json!({
+            "documents": [document_wire],
+            "document": document_wire,
+            "messages": member_ids,
+        })
+        .to_string();
+        entries.push((
+            session_id.clone(),
+            session_payload.into_bytes(),
+            String::new(),
+        ));
+    }
     entries.push((document_id, document_payload.into_bytes(), String::new()));
 
     // 工具活动锚点解析（设计 R5.3）：把 provider-native 锚点 id 解析为本批的
@@ -3844,7 +4281,7 @@ fn staged_to_source_with_provider(
             provider_id,
             variant,
             &document_wire,
-        );
+        )?;
         activities.push(SourceActivity {
             message_id: id,
             activity: staged_activity.activity.clone(),
@@ -3856,30 +4293,54 @@ fn staged_to_source_with_provider(
     // token_count），message_id 记 None。锚点消息未被 emit → 事件丢弃，绝不臆造。
     let mut usage_events = Vec::new();
     for staged_usage in &staged.usage_events {
-        let message_id = if staged_usage.message_native_id.trim().is_empty() {
+        let anchor_index = if staged_usage.message_native_id.trim().is_empty() {
             None
         } else {
-            let Some(anchor) = staged
+            let matching = staged
                 .messages
                 .iter()
-                .find(|message| message.native_id == staged_usage.message_native_id)
-            else {
+                .enumerate()
+                .filter(|(_, message)| message.native_id == staged_usage.message_native_id)
+                .collect::<Vec<_>>();
+            if matching.is_empty()
+                || matching.iter().any(|(index, _)| {
+                    message_session_ids[*index] != message_session_ids[matching[0].0]
+                })
+            {
                 continue;
-            };
-            Some(derive_message_id(
-                &anchor.native_id,
-                anchor.seq,
-                provider_id,
-                variant,
-                &document_wire,
-            ))
+            }
+            Some(matching[0].0)
+        };
+        let message_id = anchor_index
+            .map(|index| {
+                let anchor = &staged.messages[index];
+                derive_message_id(
+                    &anchor.native_id,
+                    anchor.seq,
+                    provider_id,
+                    variant,
+                    &document_wire,
+                )
+            })
+            .transpose()?;
+        let session_id = match anchor_index {
+            Some(index) => message_session_ids[index].clone(),
+            None if session_members.len() == 1 => session_members
+                .values()
+                .next()
+                .expect("one session")
+                .0
+                .clone(),
+            None => continue,
         };
         usage_events.push(SourceUsage {
-            session_id: session_wire.clone(),
+            session_id,
             message_id,
             usage: staged_usage.usage.clone(),
         });
     }
+
+    let resume_claims = resume_claims_by_session.into_values().collect();
 
     Ok(SourceBatch {
         source_path: path.to_string(),
@@ -3892,7 +4353,7 @@ fn staged_to_source_with_provider(
         len_bytes: Some(source_len as i64),
         fingerprint: Some(fingerprint.to_string()),
         provider_id: discovered_provider_id.map(str::to_string),
-        resume_claim,
+        resume_claims,
     })
 }
 
@@ -3908,6 +4369,8 @@ fn ingest_file(
     store: &SqliteStore,
     path: &str,
 ) -> Result<(serde_json::Value, Vec<String>), CliError> {
+    let normalized = source_input_path(store, path)?;
+    let path = normalized.as_str();
     let path_ref = std::path::Path::new(path);
     // 1) 捕获只读源快照（只计算 len/mtime/fingerprint，不保留源字节）。
     let snap = capture(path_ref).map_err(ProtocolError::from)?;
@@ -3916,7 +4379,12 @@ fn ingest_file(
     // 2) probe-select + stage：每个 probe/parse 都从只读 source 重新打开 bounded reader。
     //    路径落在某个登记根之下时该归属是布局事实，按 root 表反查后收缩候选集
     //    （见 stage_with_source）；否则为 None，走全 registry probe。
-    let (staged, variant) = stage_with_source(&source, provider_for_source_path(path))?;
+    let registered = registered_provider_hints(store, &[path.to_string()])?;
+    let hint = registered
+        .get(path)
+        .map(String::as_str)
+        .or_else(|| provider_for_source_path(path));
+    let (staged, variant) = stage_with_source(&source, hint)?;
 
     // 3) 提交前复核：源在 stage 期间被改写则拒绝提交（RFC-0002 §4）。
     verify_snapshot(path_ref, &snap).map_err(ProtocolError::from)?;
@@ -3924,13 +4392,19 @@ fn ingest_file(
     // 4) 派生 id + 构造该源的完整 scan 结果（消息 + 会话/文档目录行），按
     //    source membership 提交。同文件重 ingest 时，本次消失的 id 会被推导为 tombstone。
     let provider = variant.split('/').next().unwrap_or(&variant).to_string();
-    let source = staged_to_source(
+    let legacy_namespace = installation_namespace(path, &provider);
+    let persisted_namespace = store
+        .resolve_or_allocate_installation_namespace(&provider, path, &legacy_namespace)
+        .map_err(ProtocolError::from_private_port_error)?;
+    let source = staged_to_source_with_provider_namespace(
         path,
         &staged,
         &provider,
         &variant,
         &snap.fingerprint,
         snap.len,
+        None,
+        Some(persisted_namespace.as_str()),
     )?;
     let changed = store
         .commit_source_batches_if_changed(std::slice::from_ref(&source))
@@ -4049,7 +4523,7 @@ fn sync_files(
     // （exit 6）——sync 幂等语义下应提前归一为单个源。
     let mut unique: Vec<String> = Vec::with_capacity(paths.len());
     for path in paths {
-        let path = source_path_identity(path);
+        let path = source_input_path(store, path)?;
         if !unique.iter().any(|existing| existing == &path) {
             unique.push(path);
         }
@@ -4100,6 +4574,7 @@ fn sync_files_inner(
     if paths.is_empty() && synthetic_batches.is_empty() && !allow_empty {
         return Err(CliError::usage("sync <file>... requires at least one file"));
     }
+    let registered_providers = registered_provider_hints(store, paths)?;
     let mut sources = Vec::with_capacity(paths.len() + synthetic_batches.len());
     let mut snapshots = Vec::with_capacity(paths.len());
     let mut message_count = 0usize;
@@ -4122,6 +4597,22 @@ fn sync_files_inner(
         .source_message_counts(paths)
         .map_err(ProtocolError::from)?;
     for (index, path) in paths.iter().enumerate() {
+        let hint = discovered_provider_ids
+            .get(path)
+            .map(String::as_str)
+            .or_else(|| registered_providers.get(path).map(String::as_str))
+            .or_else(|| provider_for_source_path(path));
+        let resolved_namespace = hint
+            .map(|provider| {
+                store
+                    .resolve_or_allocate_installation_namespace(
+                        provider,
+                        path,
+                        &installation_namespace(path, provider),
+                    )
+                    .map_err(ProtocolError::from_private_port_error)
+            })
+            .transpose()?;
         let path_ref = std::path::Path::new(path);
         let snap = capture(path_ref).map_err(ProtocolError::from)?;
         let source = open_snapshot_source(path_ref, &snap).map_err(ProtocolError::from)?;
@@ -4138,6 +4629,7 @@ fn sync_files_inner(
         // 以 tombstone 旧消息；跳过会退化成空批 no-op，丢失 tombstone 语义。
         let mut retained = false;
         let (staged, variant) = if !source.is_empty()
+            && resolved_namespace.is_some()
             && cached_fp.as_deref() == Some(snap.fingerprint.as_str())
             && !version_stale
             && !relation_recovery_paths.contains(path)
@@ -4187,10 +4679,6 @@ fn sync_files_inner(
             // 入口因此对同一个文件得到同一个 provider——不再出现 discover 能索引、
             // 显式 sync 撞 tie 的分裂。路径不在任何登记根下时仍为 None，走全
             // registry probe。
-            let hint = discovered_provider_ids
-                .get(path)
-                .map(String::as_str)
-                .or_else(|| provider_for_source_path(path));
             let (staged, variant) = stage_with_source(&source, hint)?;
             (Some(staged), Some(variant))
         };
@@ -4223,7 +4711,14 @@ fn sync_files_inner(
             diagnostic_count += staged.report.diagnostics.len();
             diagnostics.extend(staged.report.diagnostics.iter().cloned());
             let provider = variant.split('/').next().unwrap_or(variant).to_string();
-            let mut source = staged_to_source_with_provider(
+            let legacy_namespace = installation_namespace(path, &provider);
+            let persisted_namespace = match resolved_namespace {
+                Some(namespace) => namespace,
+                None => store
+                    .resolve_or_allocate_installation_namespace(&provider, path, &legacy_namespace)
+                    .map_err(ProtocolError::from_private_port_error)?,
+            };
+            let mut source = staged_to_source_with_provider_namespace(
                 path,
                 staged,
                 &provider,
@@ -4231,6 +4726,7 @@ fn sync_files_inner(
                 &snap.fingerprint,
                 snap.len,
                 discovered_provider_ids.get(path).map(String::as_str),
+                Some(persisted_namespace.as_str()),
             )?;
             if incomplete_providers.contains(&provider) {
                 source.relation_complete = false;
@@ -4676,6 +5172,7 @@ mod tests {
 
     fn staged_message(seq: u32, native_id: &str, span: (u64, u64)) -> StagedMessage {
         StagedMessage {
+            session: None,
             seq,
             native_id: native_id.into(),
             parent_native_id: None,
@@ -4963,15 +5460,20 @@ mod tests {
             provider_for_source_path("C:/Users/x/.openclaw/agents/main/sessions/one.jsonl"),
             Some("openclaw")
         );
-        // Windows 反斜杠与大写盘符经 source_path_identity 归一后同样匹配。
-        assert_eq!(
-            provider_for_source_path(r"C:\Users\x\.pi\agent\sessions\--work--\one.jsonl"),
-            Some("pi")
-        );
         // 非默认 home（测试用 HOME 覆盖、多用户 profile）也匹配：按分段窗口对齐，
         // 不依赖 home 前缀。
         assert_eq!(
             provider_for_source_path("/tmp/fake-home/.pi/agent/sessions/x/one.jsonl"),
+            Some("pi")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn provider_for_source_path_resolves_windows_separators() {
+        // Windows 反斜杠与大写盘符经 source_path_identity 归一后同样匹配。
+        assert_eq!(
+            provider_for_source_path(r"C:\Users\x\.pi\agent\sessions\--work--\one.jsonl"),
             Some("pi")
         );
     }
@@ -4999,8 +5501,9 @@ mod tests {
     #[test]
     fn provider_matrix_data_adds_semantic_surface_without_touching_rows() {
         let data = provider_matrix_data();
-        // 加法键：data 只有 providers（原样 16 行）与 semantic 两个键。
-        assert_eq!(data.as_object().unwrap().len(), 2);
+        // Provider rows stay unchanged; shared metadata adds a CLI-only operation.
+        assert_eq!(data.as_object().unwrap().len(), 3);
+        assert_eq!(data["relocation"]["interfaces"], serde_json::json!(["cli"]));
         assert_eq!(
             data["providers"].as_array().unwrap().len(),
             ProviderCapabilityMatrix::current().providers.len()
@@ -5058,7 +5561,7 @@ mod tests {
             len_bytes: None,
             fingerprint: None,
             provider_id: None,
-            resume_claim: None,
+            resume_claims: Vec::new(),
         }
     }
 
@@ -5340,6 +5843,128 @@ mod tests {
         )
         .unwrap();
         assert_eq!(session_payload["messages"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn multi_session_staging_preserves_shared_messages_and_scopes_usage() {
+        use agent_session_grep_application::StagedUsage;
+        use agent_session_grep_domain::{TokenSource, UsageObservation};
+        use agent_session_grep_ports::{
+            ContextGraphStore, MetadataResolution, ProviderSessionIdentity,
+        };
+
+        let identity = |id: &str, cwd: &str| ProviderSessionIdentity {
+            source_key: id.into(),
+            observation: ProviderSessionObservation {
+                provider_session_id: MetadataResolution::Resolved(id.into()),
+                original_working_directory: MetadataResolution::Resolved(cwd.into()),
+                pair_observed: true,
+                multi_session: false,
+            },
+        };
+        let mut staged = staged_batch(
+            vec![
+                staged_message(0, "shared", (0, 4)),
+                staged_message(1, "only-a", (5, 9)),
+                staged_message(2, "shared", (10, 14)),
+                staged_message(3, "only-b", (15, 19)),
+            ],
+            0,
+            "session-a",
+        );
+        for (index, message) in staged.messages.iter_mut().enumerate() {
+            message.session = Some(if index < 2 {
+                identity("session-a", "/synthetic/a")
+            } else {
+                identity("session-b", "/synthetic/b")
+            });
+        }
+        staged.report.session_observation.multi_session = true;
+        for anchor in ["only-a", "only-b", "shared", ""] {
+            staged.usage_events.push(StagedUsage {
+                message_native_id: anchor.into(),
+                usage: UsageObservation {
+                    input_tokens: 10,
+                    output_tokens: 2,
+                    cache_read_tokens: 0,
+                    cache_write_tokens: 0,
+                    reasoning_tokens: 0,
+                    token_source: TokenSource::Observed,
+                },
+            });
+        }
+        let source = staged_to_source(
+            "synthetic.db",
+            &staged,
+            "opencode",
+            "opencode/sqlite-v1",
+            "synthetic-fingerprint",
+            20,
+        )
+        .unwrap();
+        assert_eq!(source.placements.len(), 4);
+        let session_a = source.placements[0].session_id.clone();
+        let session_b = source.placements[2].session_id.clone();
+        assert_ne!(session_a, session_b);
+        assert_eq!(source.placements[1].session_id, session_a);
+        assert_eq!(source.placements[3].session_id, session_b);
+        let shared = source
+            .entries
+            .iter()
+            .find(|(id, _, _)| id.as_str() == "msg_v1_shared")
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&shared.1).unwrap();
+        assert!(payload["session"].is_null());
+        let members: BTreeSet<&str> = payload["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|id| id.as_str().unwrap())
+            .collect();
+        assert_eq!(
+            members,
+            BTreeSet::from([session_a.as_str(), session_b.as_str()])
+        );
+        assert_eq!(source.resume_claims.len(), 2);
+        for (session, native, cwd) in [
+            (&session_a, "session-a", "/synthetic/a"),
+            (&session_b, "session-b", "/synthetic/b"),
+        ] {
+            let claim = source
+                .resume_claims
+                .iter()
+                .find(|claim| claim.session_id == session.as_str())
+                .unwrap();
+            assert_eq!(claim.provider_session_id.as_deref(), Some(native));
+            assert_eq!(claim.original_working_directory.as_deref(), Some(cwd));
+            assert!(claim.pair_observed);
+        }
+        assert_eq!(
+            source.usage_events.len(),
+            2,
+            "ambiguous usage anchors must not be assigned to the first session"
+        );
+        assert_eq!(source.usage_events[0].session_id, session_a);
+        assert_eq!(source.usage_events[1].session_id, session_b);
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            SqliteStore::open_for_write(&dir.path().join("catalog.db").to_string_lossy()).unwrap();
+        store.commit_source_batches_if_changed(&[source]).unwrap();
+        for (session, unique) in [(&session_a, "msg_v1_only-a"), (&session_b, "msg_v1_only-b")] {
+            let graph = store.load_session_graph(session).unwrap();
+            let messages: BTreeSet<&str> = graph
+                .messages
+                .iter()
+                .map(|message| message.id.as_str())
+                .collect();
+            assert_eq!(messages, BTreeSet::from(["msg_v1_shared", unique]));
+            assert!(
+                graph
+                    .placements
+                    .iter()
+                    .all(|placement| &placement.session_id == session)
+            );
+        }
     }
 
     #[test]

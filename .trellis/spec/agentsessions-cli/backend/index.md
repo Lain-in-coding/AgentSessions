@@ -108,14 +108,81 @@ Before writing code in this crate:
 
 ---
 
+## Scenario: CLI-only installation relocation
+
+### 1. Scope / Trigger
+The owner explicitly reconnects a previously indexed provider root after moving
+unchanged source files to another directory or drive.
+
+### 2. Signatures
+`asg --db <catalog> relocate --provider <provider> --from <old-root>
+--to <new-root> [--alias-ttl-days 90]` previews.
+Apply additionally requires `--apply --plan <opaque-plan> --backup <new-file>`.
+The command is registered in every value-flag/prefix scanner and help/hint list.
+
+### 3. Contracts
+Validate complete scalar/flag combinations before opening the catalog. Preview
+uses `SqliteStore::open`; apply uses `open_for_relocation`, which does not create,
+migrate or reproject before the required backup. An old catalog needs an
+explicit `index rebuild` first. Canonicalize provider aliases through the shared
+registry. The source root need not exist; the destination must be host-local
+and absolute. No provider files/configuration are moved or rewritten.
+
+Production staging injects the persisted/reserved installation namespace before
+deriving native Sessions, then commits the reservation with source facts.
+Do not rederive from the new path. Explicit discovery supplements canonical
+provider roots with registered current roots, uses consistent locator spelling
+for fingerprint caching and refuses retired-location reuse. Independent catalogs
+with independently allocated namespaces need not have equal Session IDs; reads
+within one catalog and after relocation must preserve every canonical ID.
+
+Robot relocation responses contain only status, opaque plan, counts, generations
+and TTL. Errors stay path/native-ID/content-free. Capability metadata explicitly
+names CLI as the only mutation interface; MCP/Web must not advertise or accept
+new relocation mutation tools. Existing read/search/resume projections remain
+consistent after relocation.
+
+### 4. Validation & Error Matrix
+Invalid/duplicate/missing scalar or incompatible flag combination ->
+`invalid_request`, before catalog access. Preserve `source_changed`,
+`generation_mismatch`, `writer_busy`, `schema_incompatible`, source/backend I/O
+categories. An unchanged result does not advance generation or create a backup.
+
+### 5. Good/Base/Bad Cases
+Good: preview a moved synthetic provider root, apply its plan with a new backup,
+then re-sync/discover without identity changes. Base: help describes the same
+flags the parser accepts. Bad: open a writer for an invalid request, or compare
+random per-catalog namespace IDs as if they were globally reconstructible.
+
+### 6. Tests Required
+Assert no-create/no-migrate preview and invalid requests; exact Robot privacy
+shape; source/ID/resume/context preservation (generation advances once); occupied
+target refusal; repeated no-op and incremental discovery; capability metadata,
+MCP mutation rejection and installed-artifact smoke using only synthetic data.
+
+### 7. Wrong vs Correct
+Wrong: use ordinary `open_for_write` before verifying relocation prerequisites.
+Correct: parse first, use a non-mutating read or dedicated existing-catalog lease,
+then let the storage operation validate, back up and activate atomically.
+
 ## Quality Check
 
 Before proposing a commit for this crate:
 
 - [ ] `cargo fmt --all --check` clean.
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings` clean.
-- [ ] `cargo test -p agentsessions-cli` green, including `tests/e2e.rs` and
+- [ ] `cargo test -p agent-session-grep-cli` green, including `tests/e2e.rs` and
       `tests/mcp_e2e.rs` (both drive the real compiled binary end-to-end).
+- [ ] Positive legacy re-ingest fixtures use the historical installation seed
+      and `StableId::native_session_scoped`, and assert unchanged Session IDs.
+      Keep a separate unprovable-ID refusal with unchanged catalog/registry/
+      generation. Windows raw-locator coverage must not be hidden by seeding
+      every fixture with already-normalized source paths.
+- [ ] Resume subprocess cwd assertions canonicalize both filesystem paths and
+      compare native `PathBuf` values. Exercise a Unix symlink directory while
+      retaining first-run preview, actual spawn, and native argument assertions;
+      `/var` versus `/private/var` spellings alone do not indicate a wrong cwd.
+
 - [ ] Any protocol/envelope change is reflected in both `protocol.rs` tests and
       the `tests/e2e.rs` envelope-shape assertions.
 - [ ] Exit codes match the error catalog (invalid_request/cursor_invalid/
@@ -176,7 +243,8 @@ Before proposing a commit for this crate:
   (asserted in `tests/mcp_e2e.rs` and `tests/e2e.rs`). Resume Metadata is
   isolated in its own port struct and SQLite table; it never enters FTS text,
   opaque session payload, diagnostics, progress frames, or error messages.
-  Multi-Session Sources fail closed. Canonical `session_id` (`ses_v1_*`) is the
+  Explicit per-message session observations produce separate per-session claims;
+  ambiguous report-level observations still fail closed. Canonical `session_id` (`ses_v1_*`) is the
   catalog identity; the Provider-native ID is Resume Metadata only — the two
   are not interchangeable and `ses_v1_*` cannot be reversed to the native ID.
 - **Scoped canonical Session identity (2026-08-14).** Native Session IDs are
@@ -188,6 +256,8 @@ Before proposing a commit for this crate:
   derives from absolute path and lacks a persisted registry, `id_alias` table,
   and path case normalization; relocation does not preserve Session identity.
   The domain layer is correct; the gap is composition-root only.
+  Follow-up: `.trellis/tasks/09-25-session-relocation-aliases/`; preserve
+  historical `ses_v1` during ordinary sync.
 - **Human session table (2026-08-14).** Human search renders a frozen
   five-column table: `日期 | Provider | 会话标题 | 工作目录 | Session ID`.
   Provider and Session ID are never truncated; title uses tail ellipsis;
@@ -198,5 +268,107 @@ Before proposing a commit for this crate:
   unchanged (Human-mode only projection).
 
 ---
+
+## Scenario: Cross-entry search and safe ingest boundaries
+
+### 1. Scope / Trigger
+CLI, MCP, Web, hook and handoff search; provider staging and vector rebuild.
+
+### 2. Signatures
+`prepare_search_embedding` owns shared local model selection/vectorization;
+semantic requests use `resume_semantic_app`. Web `/api/status` adds
+`data.web_capabilities`; search accepts `max_bytes`, sidechain/tool facets and
+repeated `provider` parameters in addition to existing search fields.
+
+### 3. Contracts
+Provider filters and MCP enums derive from implemented searchable capability
+rows (14 currently) plus the `claude` alias. Web unknown/empty parameters,
+duplicate scalars and invalid boolean/percent encoding fail explicitly; repeated
+providers form the same OR set as CLI/MCP. Web `limit` sets both page size and
+item budget; this difference is declared in capability metadata.
+Default bigram-hash remains fuzzy lexical vectorization, not a semantic-model
+quality claim. Source message/parent IDs are checked before normalization;
+explicit session observations survive staging. SQL/schema/corruption errors
+abort OpenCode ingestion; nontext roles are reported as skipped, making the
+scan incomplete and preventing missing-record tombstones.
+Hook truncation uses one Unicode character cutoff for both detection and
+output (the existing approximate 4 characters/token contract).
+
+### 4. Validation & Error Matrix
+Unknown/deferred provider, malformed search fields, unsafe native IDs -> invalid
+request. Store/schema/vector failures preserve canonical business errors. A
+read command on an absent catalog returns `catalog_error` and creates no DB.
+
+### 5. Good/Base/Bad Cases
+Good: indexed Grok data stays filtered in CLI/MCP semantic/hybrid results.
+Base: missing vectors cause explicit fallback. Bad: create an embedding and
+then call an App with `NoSemanticIndex`, or flag an uncut CJK hook as truncated.
+
+### 6. Tests Required
+Assert positive cross-entry hits, all advertised provider filters, invalid Web
+parameters, budgets/facets, Unicode hooks, atomic native-ID refusal and source
+multi-session accounting. Installer smoke covers no-create reads, explicit sync,
+registry filters and CLI/MCP effective semantic modes using synthetic data.
+
+### 7. Wrong vs Correct
+Wrong: duplicate embedding/model/provider-selection logic per entrypoint.
+Correct: share the composition helpers and keep protocol adapters thin.
+
+## Scenario: Embedded Web request state
+
+### 1. Scope / Trigger
+The offline `src/web/index.html` client changes filters, pages, sessions,
+context policy, preview or authentication while earlier requests are pending.
+
+### 2. Signatures
+`beginRequest(kind) -> AbortController`, `cancelRequest(kind)` and
+`currentRequest(kind, controller) -> boolean` own the `search`, `context`,
+`preview` and `init` request slots. `api(path, signal)` preserves shared error
+projection; `invalidateSearch(messageKey)` clears the current search state.
+
+### 3. Contracts
+Every search input participates in the serialized request signature. Changes
+clear the cursor, loaded hits, selection and handoff state; they cancel search
+and close context. Pagination may append only for the unchanged signature,
+and duplicate in-flight page loads are ignored. Aborting saves work, but
+controller identity also rejects responses queued before cancellation.
+Context success/error/finally paths must still belong to the active controller
+and Session. Closing context cancels context and preview work. An old 401 must
+not clear a newer accepted token. Render payloads with `textContent`; preserve
+CSP, single-file offline deployment and bilingual loaded-result state.
+
+### 4. Validation & Error Matrix
+Obsolete or aborted response -> no visible state change. Current request
+failure -> visible error and cleared busy state. Empty query or invalid numeric
+input -> no search request. Search input change -> pagination invalidated with
+accessible feedback. Current unauthorized response -> authentication gate.
+
+### 5. Good/Base/Bad Cases
+Good: query B completes before query A; B remains visible after A succeeds or
+fails. Base: a second page appends to the same search and updates the total.
+Bad: an old context response reopens a closed panel or replaces another Session.
+
+### 6. Tests Required
+Run `node --test crates/agent-session-grep-cli/tests/web_ui.test.cjs`. Assert
+all filters and capability-driven providers, out-of-order success/error,
+input/cursor invalidation, duplicate paging, empty-query/error reset, Session
+switch/close/policy changes, old-token 401, editable filter keys and language
+changes preserving every loaded page. These tests execute the shipped script
+with delayed synthetic responses and no npm dependencies. Browser layout
+inspection remains separate from the DOM interaction harness.
+
+### 7. Wrong vs Correct
+```javascript
+// Wrong: any completed request can replace the current context.
+const body = await api('/api/context?' + params);
+```
+
+```javascript
+// Correct: only the current controller and Session may project the response.
+const controller = beginRequest('context');
+const session = activeSession;
+const body = await api('/api/context?' + params, controller.signal);
+if (!currentRequest('context', controller) || activeSession !== session) return;
+```
 
 **Language**: write all guideline docs in **English**.

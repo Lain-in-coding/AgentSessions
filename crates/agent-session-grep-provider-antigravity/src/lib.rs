@@ -244,6 +244,7 @@ impl ProviderAdapter for AntigravityAdapter {
             // document-scoped id instead.
 
             sink.emit_message(MessageEvent {
+                session: None,
                 seq,
                 native_id: "",
                 parent_native_id: None,

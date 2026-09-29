@@ -1,0 +1,9 @@
+{"file": "docs/architecture/RFC-0001-canonical-model-and-stable-id.md", "reason": "Stable identity, installation registry, relocation and alias boundary"}
+{"file": ".trellis/tasks/09-25-session-relocation-aliases/research/relocation-findings.md", "reason": "Current namespace derivation and live source-locator ownership evidence"}
+{"file": ".trellis/spec/agentsessions-domain/backend/index.md", "reason": "Preserve canonical identity and no-I/O domain constraints"}
+{"file": ".trellis/spec/agentsessions-ports/backend/index.md", "reason": "Backend-independent contracts and explicit errors"}
+{"file": ".trellis/spec/agentsessions-application/backend/index.md", "reason": "Orchestration, injected clock and canonical policy"}
+{"file": ".trellis/spec/agentsessions-adapters-sqlite/backend/index.md", "reason": "Writer lease, migrations, durable intent, source claims and backup boundaries"}
+{"file": ".trellis/spec/agentsessions-cli/backend/index.md", "reason": "Staging/composition, command/protocol/privacy and installed artifact tests"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Trace locator/identity/claim flow across layers"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "Reuse provider, snapshot, generation and projection mechanisms"}

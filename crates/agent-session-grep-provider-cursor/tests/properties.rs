@@ -700,8 +700,8 @@ fn prop_session_identity_matches_ground_truth() {
         );
         assert_eq!(
             report.diagnostics.len(),
-            usize::from(multi),
-            "seed={seed}: 诊断数必须 = 多会话诊断（0 或 1）"
+            0,
+            "seed={seed}: supported multi-session sources need no diagnostic"
         );
         match (case.session_id.as_deref(), multi) {
             (Some(id), false) => assert_eq!(

@@ -254,16 +254,49 @@ impl From<ProviderError> for ProtocolError {
     }
 }
 
+/// One canonical classification for both ordinary and strictly private ports.
+fn port_error_code(error: &PortError) -> CanonicalCode {
+    match error {
+        PortError::Backend(_) => CanonicalCode::CatalogError,
+        PortError::SourceIo(_) => CanonicalCode::SourceIo,
+        PortError::SchemaIncompatible(_) => CanonicalCode::SchemaIncompatible,
+        PortError::NotFound(_) => CanonicalCode::NotFound,
+        PortError::SnapshotChanged(_) => CanonicalCode::SourceChanged,
+        PortError::WriterBusy(_) => CanonicalCode::WriterBusy,
+        PortError::InvalidRequest(_) => CanonicalCode::InvalidRequest,
+        PortError::GenerationMismatch(_) => CanonicalCode::GenerationMismatch,
+    }
+}
+
+impl ProtocolError {
+    /// Relocation inputs include private roots, backup destinations and plan
+    /// tokens. Their port errors must stay opaque even under ASG_DEBUG_ERRORS.
+    pub fn from_private_port_error(error: PortError) -> Self {
+        let code = port_error_code(&error);
+        let message = match code {
+            CanonicalCode::CatalogError => "catalog operation failed",
+            CanonicalCode::SourceIo => "source or backup could not be accessed",
+            CanonicalCode::SchemaIncompatible => {
+                "catalog schema is incompatible; run index rebuild explicitly before relocation"
+            }
+            CanonicalCode::NotFound => "registered installation was not found",
+            CanonicalCode::SourceChanged => "source changed; create a fresh relocation preview",
+            CanonicalCode::WriterBusy => "another writer holds the catalog lease",
+            CanonicalCode::InvalidRequest => {
+                "relocation request is invalid; check the mapping and obtain a fresh preview"
+            }
+            CanonicalCode::GenerationMismatch => {
+                "catalog generation changed; create a fresh relocation preview"
+            }
+            _ => unreachable!("port_error_code only returns port error categories"),
+        };
+        Self::new(code, message)
+    }
+}
+
 impl From<PortError> for ProtocolError {
     fn from(e: PortError) -> Self {
-        let code = match &e {
-            PortError::Backend(_) => CanonicalCode::CatalogError,
-            PortError::SourceIo(_) => CanonicalCode::SourceIo,
-            PortError::SchemaIncompatible(_) => CanonicalCode::SchemaIncompatible,
-            PortError::NotFound(_) => CanonicalCode::NotFound,
-            PortError::SnapshotChanged(_) => CanonicalCode::SourceChanged,
-            PortError::WriterBusy(_) => CanonicalCode::WriterBusy,
-        };
+        let code = port_error_code(&e);
         // R4.3：Backend、SourceIo 携带后端/文件系统原始细节，绝不进入用户可见
         // message（其中 SourceIo 可能包含绝对 transcript 路径）。其余变体已验证
         // 不携带路径/ID（静态文案或数值），保持原样。
@@ -331,7 +364,7 @@ pub fn parse_output_mode(args: &[String]) -> Result<OutputMode, String> {
             "--db" | "--request-id" | "--cursor" | "--max-items" | "--max-bytes"
             | "--max-messages" | "--max-evidence" | "--max-tokens" | "--policy" | "--level"
             | "--provider" | "--since" | "--until" | "--session" | "--around" | "--tool-kind"
-            | "--tool-name" => {
+            | "--tool-name" | "--from" | "--to" | "--alias-ttl-days" | "--plan" | "--backup" => {
                 it.next();
             }
             _ => {}
@@ -1248,6 +1281,87 @@ mod tests {
                 body.contains("\"--tool-kind\"") && body.contains("\"--tool-name\""),
                 "{scanner} value-skip list missing --tool-kind/--tool-name"
             );
+        }
+    }
+
+    #[test]
+    fn relocation_errors_keep_canonical_categories_and_private_values_out() {
+        let secret = "private-root/private-backup/private-plan/private-native";
+        for (error, code) in [
+            (
+                PortError::InvalidRequest(secret.into()),
+                CanonicalCode::InvalidRequest,
+            ),
+            (
+                PortError::GenerationMismatch(secret.into()),
+                CanonicalCode::GenerationMismatch,
+            ),
+            (
+                PortError::Backend(secret.into()),
+                CanonicalCode::CatalogError,
+            ),
+            (PortError::SourceIo(secret.into()), CanonicalCode::SourceIo),
+            (
+                PortError::SnapshotChanged(secret.into()),
+                CanonicalCode::SourceChanged,
+            ),
+            (
+                PortError::WriterBusy(secret.into()),
+                CanonicalCode::WriterBusy,
+            ),
+            (
+                PortError::SchemaIncompatible(secret.into()),
+                CanonicalCode::SchemaIncompatible,
+            ),
+            (PortError::NotFound(secret.into()), CanonicalCode::NotFound),
+        ] {
+            let projected = ProtocolError::from_private_port_error(error);
+            assert_eq!(projected.code, code);
+            assert!(!projected.message.contains(secret));
+            assert!(projected.details.as_object().unwrap().is_empty());
+            assert!(projected.message.len() < 256);
+        }
+        assert_eq!(
+            ProtocolError::from(PortError::InvalidRequest("invalid plan".into())).code,
+            CanonicalCode::InvalidRequest
+        );
+        assert_eq!(
+            ProtocolError::from(PortError::GenerationMismatch("stale plan".into())).code,
+            CanonicalCode::GenerationMismatch
+        );
+    }
+
+    #[test]
+    fn relocation_scalar_flags_are_skipped_by_every_prefix_scanner() {
+        let source = include_str!("lib.rs");
+        for flag in ["--from", "--to", "--plan", "--backup", "--alias-ttl-days"] {
+            assert_eq!(
+                parse_output_mode(&[
+                    flag.into(),
+                    "private-value".into(),
+                    "--robot".into(),
+                    "relocate".into()
+                ]),
+                Ok(OutputMode::Json),
+                "a value must not hide --robot",
+            );
+            for scanner in [
+                "fn extract_offline_flag",
+                "fn extract_request_id",
+                "fn command_name",
+                "fn intercept_help_or_version",
+                "fn extract_db_flag_impl",
+                "fn bare_positionals",
+            ] {
+                let start = source.find(scanner).expect("scanner exists");
+                let end = source[start..]
+                    .find("\n}\n")
+                    .map_or(source.len(), |offset| start + offset);
+                assert!(
+                    source[start..end].contains(&format!("\"{flag}\"")),
+                    "{scanner} must skip {flag}'s value"
+                );
+            }
         }
     }
 }

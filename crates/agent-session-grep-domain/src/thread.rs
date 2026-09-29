@@ -227,6 +227,13 @@ fn parse_instant(value: &str) -> Option<Instant> {
 
     let (time, offset_minutes) = split_zone(time);
     let (hms, fraction) = time.rsplit_once('.').unwrap_or((time, ""));
+    if !hms
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || byte == b':')
+        || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
     let mut hms_parts = hms.split(':');
     let hour: u32 = hms_parts.next()?.parse().ok()?;
     let minute: u32 = hms_parts.next()?.parse().ok()?;
@@ -269,7 +276,19 @@ fn split_zone(time: &str) -> (&str, i32) {
         return (without, 0);
     }
     let parse_offset = |sign: u8, hours: &str, minutes: &str| -> Option<i32> {
-        let magnitude = hours.parse::<i32>().ok()? * 60 + minutes.parse::<i32>().ok()?;
+        if !hours
+            .bytes()
+            .chain(minutes.bytes())
+            .all(|byte| byte.is_ascii_digit())
+        {
+            return None;
+        }
+        let hours = hours.parse::<i32>().ok()?;
+        let minutes = minutes.parse::<i32>().ok()?;
+        if hours > 23 || minutes > 59 {
+            return None;
+        }
+        let magnitude = hours * 60 + minutes;
         Some(if sign == b'-' { -magnitude } else { magnitude })
     };
     // 字节窗口必须落在 char 边界上，否则非 ASCII 时间戳会 panic。失败返回
@@ -304,21 +323,38 @@ fn days_from_civil(year: i64, month: u32, day: u32) -> Option<i64> {
     if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
         return None;
     }
-    let year = if month <= 2 { year - 1 } else { year };
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let days_in_month = match month {
+        2 if leap => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    };
+    if day > days_in_month {
+        return None;
+    }
+    let year = if month <= 2 {
+        year.checked_sub(1)?
+    } else {
+        year
+    };
     let era = year.div_euclid(400);
-    let year_of_era = year - era * 400;
+    let era_years = era.checked_mul(400)?;
+    let year_of_era = year.checked_sub(era_years)?;
     let shifted_month = (month + 9) % 12;
-    let day_of_year = ((153 * shifted_month + 2) / 5 + day - 1) as i64;
+    let month_start = 153_u32
+        .checked_mul(shifted_month)?
+        .checked_add(2)?
+        .checked_div(5)?;
+    let day_of_year = i64::from(month_start.checked_add(day.checked_sub(1)?)?);
     let day_of_era = year_of_era
         .checked_mul(365)?
         .checked_add(year_of_era / 4)?
         .checked_sub(year_of_era / 100)?
         .checked_add(day_of_year)?;
-    let days = era
-        .checked_mul(146097)?
+    era.checked_mul(146_097)?
         .checked_add(day_of_era)?
-        .checked_sub(719468)?;
-    Some(days)
+        .checked_sub(719_468)
 }
 
 /// 比较两个出现:先按消息时间戳(预解析 map,每消息解析一次),缺失排在
@@ -888,6 +924,33 @@ mod tests {
             cmp_timestamps("2026-01-01T00:04:01Z", "2026-01-01T00:04:00.999Z"),
             Ordering::Greater
         );
+    }
+
+    #[test]
+    fn timestamp_parsing_rejects_impossible_dates() {
+        assert!(parse_instant("2026-02-30T00:00:00Z").is_none());
+        assert!(parse_instant("2026-04-31T00:00:00Z").is_none());
+        assert!(parse_instant("2025-02-29T00:00:00Z").is_none());
+        assert!(parse_instant("2024-02-29T00:00:00Z").is_some());
+        assert!(parse_instant("1900-02-29T00:00:00Z").is_none());
+        assert!(parse_instant("2000-02-29T00:00:00Z").is_some());
+        assert!(parse_instant("9223372036854775807-12-31T00:00:00Z").is_none());
+    }
+
+    #[test]
+    fn timestamp_parsing_rejects_invalid_clock_and_zone_components() {
+        for value in [
+            "2026-01-01T00:00:00+24:00",
+            "2026-01-01T00:00:00+00:60",
+            "2026-01-01T00:00:00+-1:00",
+            "2026-01-01T00:00:00+00:-1",
+            "2026-01-01T00:00:00+2400",
+            "2026-01-01T00:00:00+é:é",
+            "2026-01-01T00:00:+0Z",
+            "2026-01-01T00:00:00.123456789xZ",
+        ] {
+            assert!(parse_instant(value).is_none(), "{value:?}");
+        }
     }
 
     #[test]

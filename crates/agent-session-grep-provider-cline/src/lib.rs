@@ -185,6 +185,7 @@ impl ProviderAdapter for ClineAdapter {
                 .or_else(|| rec.timestamp.as_ref().and_then(|v| v.as_i64().map(|_| "")));
 
             sink.emit_message(MessageEvent {
+                session: None,
                 seq,
                 native_id: "",
                 parent_native_id: None,

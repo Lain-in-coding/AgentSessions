@@ -154,6 +154,60 @@ pub struct ProviderCapabilityMatrix {
     pub providers: Vec<ProviderCapability>,
 }
 
+const SEARCH_PROVIDER_ALIASES: &[(&str, &str)] = &[("claude", "claude-code")];
+
+fn search_provider_registry() -> &'static ProviderCapabilityMatrix {
+    static MATRIX: std::sync::OnceLock<ProviderCapabilityMatrix> = std::sync::OnceLock::new();
+    MATRIX.get_or_init(ProviderCapabilityMatrix::current)
+}
+
+fn is_filterable(provider: &ProviderCapability) -> bool {
+    provider.maturity != ProviderMaturity::Unsupported
+        && !provider.variant_id.is_empty()
+        && matches!(
+            provider.parse,
+            CapabilityLevel::Native | CapabilityLevel::Derived | CapabilityLevel::Partial
+        )
+        && matches!(
+            provider.search,
+            CapabilityLevel::Native | CapabilityLevel::Derived | CapabilityLevel::Partial
+        )
+}
+
+/// Resolve canonical IDs and supported historical aliases from the same
+/// capability rows that advertise searchable, ingestible providers.
+pub fn canonical_search_provider_id(value: &str) -> Option<&'static str> {
+    let canonical = SEARCH_PROVIDER_ALIASES
+        .iter()
+        .find_map(|(alias, canonical)| (*alias == value).then_some(*canonical))
+        .unwrap_or(value);
+    search_provider_registry()
+        .providers
+        .iter()
+        .find(|provider| provider.provider_id == canonical && is_filterable(provider))
+        .map(|provider| provider.provider_id.as_str())
+}
+
+/// Accepted request spellings for CLI help, MCP schemas and runtime validation.
+pub fn search_provider_filter_values() -> Vec<&'static str> {
+    let mut values: Vec<_> = search_provider_registry()
+        .providers
+        .iter()
+        .filter(|provider| is_filterable(provider))
+        .map(|provider| provider.provider_id.as_str())
+        .collect();
+    values.extend(
+        SEARCH_PROVIDER_ALIASES
+            .iter()
+            .filter_map(|(alias, canonical)| {
+                canonical_search_provider_id(canonical).map(|_| *alias)
+            }),
+    );
+    values.sort_unstable();
+    values.dedup();
+    values
+}
+
 impl ProviderCapabilityMatrix {
     /// 返回当前 16 个 provider 的能力矩阵（evidence wave 08-15 全量：
     /// 14 个已实现 + 2 个 deferred）。deferred provider（deepseek-harness/zcode）
@@ -711,6 +765,34 @@ mod tests {
             "matrix must list all 16 providers (evidence wave 08-15), got {}",
             m.providers.len()
         );
+    }
+
+    #[test]
+    fn search_filters_cover_implemented_matrix_rows_and_preserve_aliases() {
+        let values = search_provider_filter_values();
+        let matrix = ProviderCapabilityMatrix::current();
+        let mut accepted = 0;
+        for provider in &matrix.providers {
+            let parsed = crate::SearchProvider::parse(&provider.provider_id);
+            if provider.maturity == ProviderMaturity::Unsupported {
+                assert!(parsed.is_none(), "{}", provider.provider_id);
+                assert!(!values.contains(&provider.provider_id.as_str()));
+            } else {
+                assert_eq!(parsed.unwrap().as_str(), provider.provider_id);
+                assert!(values.contains(&provider.provider_id.as_str()));
+                accepted += 1;
+            }
+        }
+        assert_eq!(accepted, 14);
+        assert_eq!(
+            crate::SearchProvider::parse("claude"),
+            Some(crate::SearchProvider::Claude)
+        );
+        assert_eq!(
+            crate::SearchProvider::parse("codex"),
+            Some(crate::SearchProvider::Codex)
+        );
+        assert!(crate::SearchProvider::parse("unknown-provider").is_none());
     }
 
     #[test]

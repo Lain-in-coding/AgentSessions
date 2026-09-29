@@ -65,7 +65,7 @@ adapters know *how*. Depends on `agentsessions-domain` and
   their source document, and missing placement spans remain explicitly
   `precision: unknown`.
 - Pagination model — offset inside cursor claims over a PINNED total order
-  (search: bm25 + id tiebreak = `SORT_SCORE_DESC`; list: wire id ASC =
+  (search: RRF + explicit lexical signals + wire-id tiebreak = `SORT_SCORE_DESC`; list: wire id ASC =
   `SORT_WIRE_ID_ASC`). Ports have no offset parameter: `handle` over-fetches
   `offset + page + 1` (sentinel for has_more) and slices. Any cursor failure is
   an explicit error — never a silent restart from page one.
@@ -85,8 +85,14 @@ adapters know *how*. Depends on `agentsessions-domain` and
 - Search filters use backend-independent normalized UTC instants. Provider
   values are sorted and deduplicated before cursor digesting; provider values
   are ORed, provider/time dimensions are ANDed, and the time interval is
-  half-open `[since, until)`. Omitted filters preserve the legacy digest and
-  storage query path.
+  half-open `[since, until)`. Search v2 digests bind requested/effective mode,
+  model, query-vector dimension/content, ranking version/window, result set,
+  filters/facets/visibility/grouping and current-repository signal. Old search
+  cursors fail explicitly; list cursor behavior is unchanged.
+- Search continuation retains verified `CursorClaims`: recency scoring uses
+  the first request's `issued_at_ms`; only `offset` changes between pages.
+  Preserve `expires_at_ms`, so search pagination never extends the original
+  15-minute TTL. The digest version includes the clock-anchor revision.
 - System-noise messages (payload `role` system/developer) are excluded from
   search by default; `include_system: true` opts back in. `group_by_session`
   collapses hits per session over a bounded scan window: the best-scoring hit
@@ -109,12 +115,96 @@ adapters know *how*. Depends on `agentsessions-domain` and
   non-ambiguous confidence adapter; a top-confidence tie across *different*
   variants is an error, not a coin flip.
 - `StagedMessage` — the in-memory staged row before commit
-  (seq / native_id / parent_native_id / role / text / timestamp / is_sidechain / span).
+  (session / seq / native_id / parent_native_id / role / text / timestamp / is_sidechain / span).
 - `StagedBatch` — all emitted messages plus the complete provider `ParseReport`;
   callers must retain committed/skipped/diagnostic accounting rather than
   replacing it with guessed zeros.
 
 ---
+
+## Scenario: Filtered retrieval, ranking and strict request time
+
+### 1. Scope / Trigger
+Search across lexical, semantic, hybrid and explicit fallback modes.
+
+### 2. Signatures
+`AppRequest::Search` includes filters, facets, mode, query embedding, visibility,
+cursor and budgets. `parse_search_instant(&str) -> Option<SearchInstant>` is the
+strict request boundary; the Domain sorting parser remains intentionally broader.
+
+### 3. Contracts
+Read readiness once and propagate errors. Semantic candidates use the same
+filters/facets/visibility as lexical candidates before the sentinel/limit.
+Search v2 ranking uses RRF k=60; lexical signal constants use that scale:
+sidechain penalty `0.25/61`, current-repo boost `0.5/61`, 30-day recency
+half-life and 0.3 floor. Semantic/hybrid final scores do not get lexical signals.
+Request clock components cannot be signed; all date/offset arithmetic is checked.
+
+### 4. Validation & Error Matrix
+Changed mode/model/vector/filter/ranking context -> `cursor_invalid`.
+Changed generation -> `generation_mismatch`. Non-finite semantic data and
+backend readiness failures -> explicit error. Invalid request time -> invalid request.
+
+### 5. Good/Base/Bad Cases
+Good: system rows before a user row do not consume `has_more`. Base: a genuinely
+unready index returns lexical fallback with a warning. Bad: treating NaN as an
+equal score or restarting a cursor after changing models.
+
+### 6. Tests Required
+Assert page concatenation, mode/model/dimension/visibility binding, facet
+delimiter collision resistance, backend errors, invalid times, and strong
+relevance retaining priority over weak repository/mainline preference.
+
+### 7. Wrong vs Correct
+Wrong: fetch `page+1`, then discard noise/metadata mismatches.
+Correct: filter before top-k, preserve the bounded ranking window, then page.
+
+## Scenario: Pure relocation identity and plan policy
+
+### 1. Scope / Trigger
+A CLI relocation preview/apply or an installation namespace lookup crosses
+physical path, persisted identity and catalog-generation boundaries.
+
+### 2. Signatures
+`relocation::{issue_plan, decode_plan, verify_plan, alias_expiry_ms}` take
+injected milliseconds; `legacy_installation_namespace`,
+`normalize_absolute_path`, `path_is_within`, `validate_root_mapping` and
+`remap_source_path` are pure path/compatibility functions.
+
+### 3. Contracts
+Keep the legacy namespace derivation byte-for-byte compatible. Compare Windows
+ASCII casing and separators component-wise; preserve Unicode spelling and
+native IDs. Require absolute roots, reject ambiguous dot components and strict
+ancestor overlaps, allow equivalent roots as a no-op. Destination host semantics
+and actual filesystem access belong to adapters, not these helpers.
+
+A versioned, domain-separated plan binds schema, generation, the complete
+adapter-computed ownership/fingerprint digest and retention policy. Its 15-minute
+lifetime is checked using the injected clock, and its 2048-byte ceiling is
+checked before decode. Claims contain only digests and scalar values. Integrity
+is not authentication. Reuse the cursor's base64 implementation, but keep the
+relocation token domain/claims distinct. Ordinary generation mismatch is checked
+before comparing mapping facts. A replay requires a matching committed receipt
+and current complete ownership, never merely a matching token.
+
+### 4. Validation & Error Matrix
+Invalid, malformed, expired or mismatched plan/path -> `InvalidRequest`;
+changed generation -> `GenerationMismatch`. Do not echo token contents, roots,
+namespace seeds or native IDs. Never silently generate a replacement plan.
+
+### 5. Good/Base/Bad Cases
+Good: a moved directory retains its persisted seed. Base: equivalent casing
+produces the same comparison key. Bad: Unicode normalization changes native
+identity, or an expired plan is accepted because its digest still matches.
+
+### 6. Tests Required
+Pin compatibility seeds, plan tampering/unknown fields/size/TTL boundaries,
+generation precedence, checked time arithmetic, strict component ancestry,
+Windows drive/UNC/verbatim separators and Unicode-preserving remaps.
+
+### 7. Wrong vs Correct
+Wrong: read the wall clock or filesystem inside plan policy.
+Correct: receive time and ownership digests through explicit arguments.
 
 ## Quality Check
 

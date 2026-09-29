@@ -116,7 +116,32 @@ fn temp_db(tag: &str) -> (tempfile::TempDir, String) {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join(format!("{tag}.db"));
     let s = path.to_string_lossy().into_owned();
+    // Read-only CLI commands require an existing catalog. Initialize the empty
+    // fixture explicitly so tests do not rely on read opens creating/migrating it.
+    let store = agent_session_grep_adapters_sqlite::SqliteStore::open_for_write(&s)
+        .expect("initialize empty catalog fixture under writer lease");
+    drop(store);
     (dir, s)
+}
+
+/// Match the CLI's source locator spelling when seeding historical scan rows.
+fn v6_fixture_source_locator(path: &Path) -> String {
+    let locator = path
+        .to_str()
+        .expect("fixture source path is Unicode")
+        .to_owned();
+    #[cfg(windows)]
+    {
+        let mut locator = locator.replace('\\', "/");
+        if locator.as_bytes().get(1) == Some(&b':') {
+            locator[..1].make_ascii_lowercase();
+        }
+        locator
+    }
+    #[cfg(not(windows))]
+    {
+        locator
+    }
 }
 
 fn create_v6_catalog(
@@ -283,10 +308,14 @@ fn index_search_get_roundtrip() {
 
 #[test]
 fn migrated_v6_catalog_stays_readable_until_complete_reingest_enables_context() {
-    let (dir, db) = temp_db("migrated-v6-reingest");
+    let dir = tempfile::tempdir().expect("v6 fixture directory");
+    let db = dir
+        .path()
+        .join("migrated-v6-reingest.db")
+        .to_string_lossy()
+        .into_owned();
     let session_native = "66111111-1111-4111-8111-111111111111";
     let message_native = "66222222-2222-4222-8222-222222222222";
-    let legacy_session_wire = format!("ses_v1_{session_native}");
     let message_wire = format!("msg_v1_{message_native}");
     let legacy_document_wire = "doc_v1_legacy-v6-document";
     let message_text = "legacy catalog survives migration";
@@ -297,7 +326,22 @@ fn migrated_v6_catalog_stays_readable_until_complete_reingest_enables_context() 
          \"message\":{{\"role\":\"user\",\"content\":\"{message_text}\"}}}}\n"
     );
     std::fs::write(&source, &source_content).expect("write v6 re-ingest fixture");
-    let source_path = source.to_string_lossy().into_owned();
+    let source_path = v6_fixture_source_locator(&source);
+    // Reproduce the historical namespace and CLI locator spelling. A complete
+    // re-ingest must prove and preserve this Session, never allocate a new one.
+    let namespace = agent_session_grep_application::relocation::legacy_installation_namespace(
+        &source_path,
+        "claude-code",
+    );
+    let legacy_session_wire = agent_session_grep_domain::StableId::native_session_scoped(
+        &agent_session_grep_domain::SessionIdentityNamespace {
+            provider_id: "claude-code",
+            installation_namespace: &namespace,
+        },
+        session_native,
+    )
+    .as_str()
+    .to_owned();
     create_v6_catalog(
         &db,
         &source_path,
@@ -306,6 +350,12 @@ fn migrated_v6_catalog_stays_readable_until_complete_reingest_enables_context() 
         legacy_document_wire,
         message_text,
     );
+    {
+        // Schema migration is a writer operation; exercise it under the same
+        // explicit lease used by production maintenance/write entrypoints.
+        let _store = agent_session_grep_adapters_sqlite::SqliteStore::open_for_write(&db)
+            .expect("migrate v6 catalog under writer lease");
+    }
 
     let get = run(&db, &["get", &message_wire]);
     assert!(get.status.success(), "get failed: {}", stdout(&get));
@@ -366,7 +416,7 @@ fn migrated_v6_catalog_stays_readable_until_complete_reingest_enables_context() 
     );
     assert_eq!(parse_first_line(&ingest)["data"]["skipped"], 0);
     let session_wire = session_wire_for_message(&db, &message_wire);
-    assert_ne!(session_wire, legacy_session_wire);
+    assert_eq!(session_wire, legacy_session_wire);
 
     let context = run(&db, &["context", &session_wire]);
     assert!(
@@ -404,6 +454,103 @@ fn migrated_v6_catalog_stays_readable_until_complete_reingest_enables_context() 
             stdout(&output)
         );
     }
+}
+
+fn assert_v6_reingest_rejects_unproven_session(raw_locator: bool) {
+    let (dir, home) = discover_env();
+    let db = dir
+        .path()
+        .join("unproven-v6.db")
+        .to_string_lossy()
+        .into_owned();
+    let source = dir.path().join(".claude/projects/legacy-source.jsonl");
+    let source_content = serde_json::json!({
+        "type": "user",
+        "uuid": "c0000000-0000-4000-8000-000000000001",
+        "parentUuid": null,
+        "sessionId": "ccdd1234-5678-4abc-8def-001122334455",
+        "timestamp": "2026-07-28T00:00:00.000Z",
+        "message": { "role": "user", "content": "resume smoke root" },
+    });
+    std::fs::write(&source, format!("{source_content}\n")).expect("write unproven legacy source");
+    let input_path = source.to_string_lossy().into_owned();
+    let message_wire = "msg_v1_c0000000-0000-4000-8000-000000000001";
+    let source_path = if raw_locator {
+        input_path.clone()
+    } else {
+        v6_fixture_source_locator(Path::new(&input_path))
+    };
+    create_v6_catalog(
+        &db,
+        &source_path,
+        "ses_v1_ccdd1234-5678-4abc-8def-001122334455",
+        message_wire,
+        "doc_v1_unproven-v6-document",
+        "resume smoke root",
+    );
+    let store = agent_session_grep_adapters_sqlite::SqliteStore::open_for_write(&db)
+        .expect("migrate unproven v6 catalog under writer lease");
+    drop(store);
+    let before = relocation_rows(&db, None);
+    let generation_before: i64 = Connection::open(&db)
+        .expect("open legacy generation")
+        .query_row("SELECT active_generation FROM store_metadata", [], |row| {
+            row.get(0)
+        })
+        .expect("read legacy generation");
+
+    // Both explicit entrypoints normalize their input; discovery constructs
+    // its own locators. All routes must reach the shared storage guard.
+    let normalized_input = v6_fixture_source_locator(Path::new(&input_path));
+    let mut commands = vec![
+        vec!["ingest", input_path.as_str()],
+        vec!["sync", input_path.as_str()],
+    ];
+    if normalized_input != input_path {
+        commands.push(vec!["ingest", normalized_input.as_str()]);
+        commands.push(vec!["sync", normalized_input.as_str()]);
+    }
+    commands.push(vec!["sync", "--discover"]);
+    for args in commands {
+        let ingest = run_with_home(&db, &home, &args);
+        assert_eq!(
+            ingest.status.code(),
+            Some(2),
+            "{} must not replace an unproven legacy Session: {}",
+            args[0],
+            stdout(&ingest)
+        );
+        assert_eq!(
+            parse_first_line(&ingest)["error"]["code"],
+            "invalid_request"
+        );
+        assert_relocation_rows(&db, None, &before);
+        let generation_after: i64 = Connection::open(&db)
+            .expect("open unchanged generation")
+            .query_row("SELECT active_generation FROM store_metadata", [], |row| {
+                row.get(0)
+            })
+            .expect("read unchanged generation");
+        assert_eq!(generation_after, generation_before);
+        // The relocation snapshot compares path keys; also preserve the exact
+        // historical spelling so a rejected ingest cannot normalize it silently.
+        let stored_source_path: String = Connection::open(&db)
+            .expect("open unchanged source locator")
+            .query_row("SELECT source_path FROM source_scans", [], |row| row.get(0))
+            .expect("read unchanged source locator");
+        assert_eq!(stored_source_path, source_path);
+    }
+}
+
+#[test]
+fn migrated_v6_catalog_rejects_unproven_session_identity() {
+    assert_v6_reingest_rejects_unproven_session(false);
+}
+
+#[cfg(windows)]
+#[test]
+fn migrated_v6_catalog_rejects_unproven_session_at_raw_windows_locator() {
+    assert_v6_reingest_rejects_unproven_session(true);
 }
 
 #[test]
@@ -2627,25 +2774,19 @@ fn run_with_path(
         .expect("failed to spawn agent-session-grep binary")
 }
 
-/// cwd 文本比较：忽略尾部分隔符；Windows 大小写不敏感。
-fn same_cwd(recorded: &str, expected: &str) -> bool {
-    let recorded = recorded.trim().trim_end_matches(['/', '\\']);
-    let expected = expected.trim().trim_end_matches(['/', '\\']);
-    #[cfg(windows)]
-    {
-        recorded.eq_ignore_ascii_case(expected)
-    }
-    #[cfg(not(windows))]
-    {
-        recorded == expected
-    }
-}
-
 #[test]
 fn resume_yes_first_run_forced_preview_then_spawns_in_original_cwd() {
     let (dir, db) = temp_db("resume-spawn");
     let workdir = dir.path().join("original-workspace");
     std::fs::create_dir_all(&workdir).expect("create workspace");
+    // Exercise logical and physical cwd spellings even when the host's temp
+    // directory is not itself a symlink (as /var is on macOS).
+    #[cfg(unix)]
+    let workdir = {
+        let alias = dir.path().join("workspace-link");
+        std::os::unix::fs::symlink(&workdir, &alias).expect("link original workspace");
+        alias
+    };
     let workdir_str = workdir.to_string_lossy().into_owned();
     let (fixture_path, anchor_message) = write_claude_resume_fixture(dir.path(), &workdir_str);
     let out = run(&db, &["ingest", &fixture_path]);
@@ -2708,8 +2849,9 @@ fn resume_yes_first_run_forced_preview_then_spawns_in_original_cwd() {
         "second run must not report first-run: {frame}"
     );
     let recorded_cwd = std::fs::read_to_string(&cwd_out).expect("read recorded cwd");
-    assert!(
-        same_cwd(&recorded_cwd, &workdir_str),
+    assert_eq!(
+        std::fs::canonicalize(&recorded_cwd).expect("resolve spawned cwd"),
+        workdir.canonicalize().expect("resolve original workspace"),
         "spawned cwd {recorded_cwd:?} != expected {workdir_str:?}"
     );
     let recorded_args = std::fs::read_to_string(&args_out).expect("read recorded args");
@@ -4574,9 +4716,8 @@ fn fatal_source_rejection_reports_line_numbers_and_repair_direction() {
 }
 
 #[test]
-fn multi_session_file_emits_visible_session_diagnostic() {
-    // R3.1：provider 已检测同文件多 sessionId；CLI 必须实际公开数量和 ID，
-    // 不能只把 diagnostics 数量从 0 改成 1 后仍让用户看不到原因。
+fn multi_session_file_without_message_identities_is_rejected_atomically() {
+    // A report-level warning cannot make assigning all messages to one session safe.
     let (dir, db) = temp_db("multi-session-warning");
     let fixture = dir.path().join("multi-session.jsonl");
     let first = serde_json::json!({
@@ -4594,19 +4735,74 @@ fn multi_session_file_emits_visible_session_diagnostic() {
     std::fs::write(&fixture, format!("{first}\n{second}\n")).expect("write fixture");
     let fixture_path = fixture.to_string_lossy().into_owned();
     let out = run(&db, &["ingest", &fixture_path]);
-    assert!(out.status.success(), "ingest failed: {}", stdout(&out));
+    assert_eq!(out.status.code(), Some(2), "{}", stdout(&out));
     let frame = parse_first_line(&out);
-    assert_envelope_shape(&frame, true);
-    assert_eq!(frame["data"]["diagnostics"], 1, "{frame}");
-    let warnings = frame["warnings"].as_array().expect("warnings");
-    let diagnostic = warnings
-        .iter()
-        .filter_map(serde_json::Value::as_str)
-        .find(|warning| warning.contains("2 个不同 sessionId"))
-        .unwrap_or_else(|| panic!("multi-session diagnostic missing: {frame}"));
-    assert!(diagnostic.contains("multi-session-first"), "{diagnostic}");
-    assert!(diagnostic.contains("multi-session-second"), "{diagnostic}");
-    assert!(diagnostic.contains("归属首个会话"), "{diagnostic}");
+    assert_envelope_shape(&frame, false);
+    assert_eq!(frame["error"]["code"], "invalid_request");
+    let message = frame["error"]["message"].as_str().expect("message");
+    assert!(
+        message.contains("per-message session identities"),
+        "{frame}"
+    );
+    assert!(!message.contains("multi-session-first"), "{frame}");
+    assert!(!message.contains("multi-session-second"), "{frame}");
+    let listed = run(&db, &["list", "10"]);
+    assert!(listed.status.success(), "{}", stdout(&listed));
+    assert!(
+        parse_first_line(&listed)["data"]["entries"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn unsafe_native_message_and_parent_ids_leave_the_catalog_unchanged() {
+    let (dir, db) = temp_db("unsafe-native-ids");
+    let fixture = dir.path().join("native-ids.jsonl");
+    let fixture_path = fixture.to_string_lossy().into_owned();
+    let safe_record = serde_json::json!({
+        "type": "user", "uuid": "safe-original", "sessionId": "safe-session",
+        "message": {"role": "user", "content": "original indexed text"}
+    });
+    std::fs::write(&fixture, format!("{safe_record}\n")).unwrap();
+    let initial = run(&db, &["ingest", &fixture_path]);
+    assert!(initial.status.success(), "{}", stdout(&initial));
+    let initial_generation = parse_first_line(&initial)["meta"]["generation"].clone();
+    let original = parse_first_line(&run(&db, &["get", "msg_v1_safe-original"]));
+    assert_envelope_shape(&original, true);
+
+    for invalid in [
+        "a\0b".to_string(),
+        " a".to_string(),
+        "a b".to_string(),
+        "x".repeat(257),
+    ] {
+        for field in ["uuid", "parentUuid"] {
+            let mut record = safe_record.clone();
+            record[field] = serde_json::Value::String(invalid.clone());
+            std::fs::write(&fixture, format!("{record}\n")).unwrap();
+            let out = run(&db, &["ingest", &fixture_path]);
+            assert_eq!(out.status.code(), Some(2), "{field}: {}", stdout(&out));
+            let frame = parse_first_line(&out);
+            assert_envelope_shape(&frame, false);
+            assert_eq!(frame["error"]["code"], "invalid_request", "{frame}");
+            assert!(
+                !frame["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains(&invalid)
+            );
+            let retained = parse_first_line(&run(&db, &["get", "msg_v1_safe-original"]));
+            assert_envelope_shape(&retained, true);
+            assert_eq!(retained["data"], original["data"]);
+            let store = agent_session_grep_adapters_sqlite::SqliteStore::open(&db).unwrap();
+            assert_eq!(
+                serde_json::json!(store.active_generation().unwrap()),
+                initial_generation
+            );
+        }
+    }
 }
 
 // ─── R4/ADR-0008：search 命中携带 session_id 与 text 摘要 ───────────────────
@@ -5296,6 +5492,149 @@ fn write_opencode_db(path: &std::path::Path, text: &str) {
     )
     .expect("insert opencode fixture part");
     conn.close().expect("close opencode fixture db");
+}
+
+#[test]
+fn sqlite_multi_session_wal_sources_keep_context_and_resume_metadata_separate() {
+    for provider in ["opencode", "cursor"] {
+        let (dir, db) = temp_db("sqlite-session-isolation");
+        let source = dir.path().join("source.db");
+        let source_path = source.to_string_lossy().into_owned();
+        let conn = Connection::open(&source).unwrap();
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;")
+            .unwrap();
+        if provider == "opencode" {
+            conn.execute_batch(
+                "CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT);
+                 CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, data TEXT, time_created INTEGER);
+                 CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, data TEXT, time_created INTEGER);"
+            ).unwrap();
+            for (index, label) in ["alpha", "beta"].iter().enumerate() {
+                conn.execute(
+                    "INSERT INTO session VALUES (?1, ?2)",
+                    rusqlite::params![format!("session-{label}"), format!("/synthetic/{label}")],
+                )
+                .unwrap();
+                for (ordinal, role) in ["user", "assistant"].iter().enumerate() {
+                    let id = format!("{label}-{ordinal}");
+                    let time = (index * 2 + ordinal) as i64;
+                    conn.execute(
+                        "INSERT INTO message VALUES (?1, ?2, ?3, ?4)",
+                        rusqlite::params![
+                            id,
+                            format!("session-{label}"),
+                            serde_json::json!({"role":role}).to_string(),
+                            time
+                        ],
+                    )
+                    .unwrap();
+                    conn.execute("INSERT INTO part VALUES (?1, ?2, ?3, ?4)",
+                        rusqlite::params![format!("part-{id}"), id, serde_json::json!({"type":"text", "text":format!("syntheticisolation {label} {ordinal}")}).to_string(), time]).unwrap();
+                }
+            }
+        } else {
+            conn.execute_batch("CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value TEXT);")
+                .unwrap();
+            let tabs: Vec<_> = ["alpha", "beta"]
+                .iter()
+                .enumerate()
+                .map(|(index, label)| {
+                    serde_json::json!({
+                        "id": format!("session-{label}"), "createdAt": index,
+                        "bubbles": [
+                            {"type":"user", "text":format!("syntheticisolation {label} 0")},
+                            {"type":"assistant", "text":format!("syntheticisolation {label} 1")}
+                        ]
+                    })
+                })
+                .collect();
+            conn.execute(
+                "INSERT INTO ItemTable VALUES (?1, ?2)",
+                rusqlite::params![
+                    "workbench.panel.aichat.view.aichat.chatdata",
+                    serde_json::json!({"tabs":tabs}).to_string()
+                ],
+            )
+            .unwrap();
+        }
+        assert!(Path::new(&format!("{source_path}-wal")).exists());
+        let main_before = std::fs::read(&source).unwrap();
+        let ingest = run(&db, &["ingest", &source_path]);
+        assert!(ingest.status.success(), "{provider}: {}", stdout(&ingest));
+        assert_eq!(parse_first_line(&ingest)["data"]["committed"], 4);
+        assert_eq!(
+            main_before,
+            std::fs::read(&source).unwrap(),
+            "ingest must not checkpoint the source"
+        );
+
+        let search = run(
+            &db,
+            &["search", "syntheticisolation", "--provider", provider],
+        );
+        assert!(search.status.success(), "{provider}: {}", stdout(&search));
+        let search = parse_first_line(&search);
+        let hits = search["data"]["hits"].as_array().unwrap();
+        assert_eq!(hits.len(), 4, "{search}");
+        let mut sessions = std::collections::BTreeSet::new();
+        for label in ["alpha", "beta"] {
+            let label_hits: Vec<_> = hits
+                .iter()
+                .filter(|hit| hit["text"].as_str().unwrap().contains(label))
+                .collect();
+            assert_eq!(label_hits.len(), 2);
+            let session = label_hits[0]["session_id"].as_str().unwrap();
+            assert!(
+                sessions.insert(session.to_string()),
+                "sessions must not merge"
+            );
+            assert!(label_hits.iter().all(|hit| hit["session_id"] == session));
+            for hit in label_hits {
+                let message = run(&db, &["get", hit["id"].as_str().unwrap()]);
+                assert!(message.status.success(), "{}", stdout(&message));
+                let message = parse_first_line(&message);
+                let payload: serde_json::Value =
+                    serde_json::from_str(message["data"]["payload"].as_str().unwrap()).unwrap();
+                assert_eq!(payload["session"], session);
+                assert_eq!(payload["sessions"], serde_json::json!([session]));
+            }
+            let context = run(&db, &["context", session, "--policy", "full"]);
+            assert!(context.status.success(), "{}", stdout(&context));
+            let context = parse_first_line(&context);
+            let messages = context["data"]["messages"].as_array().unwrap();
+            assert_eq!(messages.len(), 2, "{context}");
+            assert!(
+                messages
+                    .iter()
+                    .all(|message| message["payload"].to_string().contains(label)),
+                "{context}"
+            );
+            let metadata = run(&db, &["get-session-resume", session]);
+            assert!(metadata.status.success(), "{}", stdout(&metadata));
+            let metadata = parse_first_line(&metadata);
+            assert_eq!(metadata["data"]["session_id"], session);
+            assert_eq!(metadata["data"]["provider_id"], provider);
+            assert_eq!(
+                metadata["data"]["provider_session_id"],
+                format!("session-{label}")
+            );
+            if provider == "opencode" {
+                assert_eq!(
+                    metadata["data"]["original_working_directory"],
+                    format!("/synthetic/{label}")
+                );
+            }
+        }
+        let again = run(&db, &["ingest", &source_path]);
+        assert!(again.status.success(), "{}", stdout(&again));
+        let again = parse_first_line(&again);
+        assert_eq!(again["data"]["committed"], 0);
+        assert_eq!(again["data"]["unchanged"], 4);
+        assert_eq!(
+            again["meta"]["generation"],
+            parse_first_line(&ingest)["meta"]["generation"]
+        );
+    }
 }
 
 #[test]
@@ -6464,4 +6803,1060 @@ fn ingest_codex_usage_flows_into_status_as_derived_totals() {
     assert_eq!(usage["reasoning_tokens"], 1);
     assert_eq!(usage["observed_events"], 0);
     assert_eq!(usage["derived_events"], 2);
+}
+
+// Relocation regressions use only synthetic provider files and disposable
+// catalogs. Snapshot every identity and live claim row, not merely counts.
+fn relocation_rows(db: &str, moved: Option<(&Path, &Path)>) -> Vec<(String, Vec<String>)> {
+    use rusqlite::types::Value;
+    let conn = Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .expect("open relocation snapshot read-only");
+    let mut result = Vec::new();
+    for table in [
+        "catalog",
+        "fts_ids",
+        "message_placements",
+        "message_edges",
+        "tool_activities",
+        "usage_events",
+        "session_titles",
+        "session_repo_slugs",
+        "message_vec",
+        "source_scans",
+        "source_membership",
+        "source_placement_membership",
+        "source_relation_scans",
+        "source_session_resume_claims",
+        "tool_activity_membership",
+        "usage_event_membership",
+        "source_installations",
+        "installation_namespaces",
+    ] {
+        let mut stmt = conn
+            .prepare(&format!("SELECT * FROM {table}"))
+            .expect("snapshot table");
+        let count = stmt.column_count();
+        let source_columns: Vec<_> = stmt
+            .column_names()
+            .iter()
+            .enumerate()
+            .filter_map(|(index, name)| {
+                matches!(*name, "source_path" | "source_key").then_some(index)
+            })
+            .collect();
+        let mut rows = stmt
+            .query_map([], |row| {
+                let mut values = (0..count)
+                    .map(|index| row.get::<_, Value>(index))
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                let path_key = |path: &str| {
+                    let path = path.replace('\\', "/");
+                    if cfg!(windows) {
+                        path.to_ascii_lowercase()
+                    } else {
+                        path
+                    }
+                };
+                for index in &source_columns {
+                    if let Value::Text(source) = &mut values[*index] {
+                        *source = path_key(source);
+                        if let Some((new, old)) = moved {
+                            let new = path_key(&new.to_string_lossy());
+                            let old = path_key(&old.to_string_lossy());
+                            if let Some(suffix) = source.strip_prefix(&(new + "/")) {
+                                *source = format!("{old}/{suffix}");
+                            }
+                        }
+                    }
+                }
+                Ok(format!("{values:?}"))
+            })
+            .expect("read snapshot rows")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("snapshot rows");
+        rows.sort();
+        result.push((table.to_string(), rows));
+    }
+    result
+}
+
+fn assert_relocation_rows(
+    db: &str,
+    moved: Option<(&Path, &Path)>,
+    expected: &[(String, Vec<String>)],
+) {
+    let actual = relocation_rows(db, moved);
+    assert_eq!(actual.len(), expected.len());
+    for ((table, rows), (expected_table, expected_rows)) in actual.iter().zip(expected) {
+        assert_eq!(table, expected_table);
+        assert!(
+            rows == expected_rows,
+            "all rows in {table} must remain identical"
+        );
+    }
+}
+
+fn relocation_session_ids(db: &str) -> Vec<String> {
+    let conn = Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .expect("open catalog read-only");
+    conn.prepare("SELECT id FROM catalog WHERE id LIKE 'ses_v1_%' ORDER BY id")
+        .expect("select sessions")
+        .query_map([], |row| row.get(0))
+        .expect("read sessions")
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .expect("session ids")
+}
+
+fn relocation_fixture(provider: &str, original_cwd: &str) -> String {
+    if provider == "codex" {
+        return codex_fixture_with_cwd(
+            "relocation-private-native-session",
+            original_cwd,
+            &[(
+                "relocation-codex-message",
+                "user",
+                "relocation synthetic source message",
+            )],
+        );
+    }
+    let records = [
+        serde_json::json!({
+            "type": "user", "uuid": "relocation-claude-user", "parentUuid": null,
+            "sessionId": "relocation-private-native-session", "cwd": original_cwd,
+            "timestamp": "2026-08-15T03:00:00.000Z",
+            "message": {"role": "user", "content": "relocation synthetic source message"},
+        }),
+        serde_json::json!({
+            "type": "assistant", "uuid": "relocation-claude-assistant",
+            "parentUuid": "relocation-claude-user", "sessionId": "relocation-private-native-session",
+            "cwd": original_cwd, "timestamp": "2026-08-15T03:00:01.000Z",
+            "message": {"role": "assistant", "content": [
+                {"type": "text", "text": "relocation synthetic answer"},
+                {"type": "tool_use", "id": "relocation-tool", "name": "Bash", "input": {"command": "echo synthetic"}},
+            ], "usage": {"input_tokens": 12, "output_tokens": 7}},
+        }),
+        serde_json::json!({
+            "type": "user", "uuid": "relocation-claude-tool-result",
+            "parentUuid": "relocation-claude-assistant", "sessionId": "relocation-private-native-session",
+            "cwd": original_cwd, "timestamp": "2026-08-15T03:00:02.000Z",
+            "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "relocation-tool", "content": "synthetic result"},
+            ]},
+        }),
+    ];
+    records
+        .iter()
+        .map(serde_json::Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n"
+}
+
+fn assert_relocation_private(output: &Output, roots: &[&str]) {
+    let text = format!(
+        "{}{}",
+        stdout(output),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    for private in roots.iter().copied().chain([
+        "relocation-private-native-session",
+        "relocation synthetic source message",
+    ]) {
+        assert!(
+            !text.contains(private),
+            "private relocation input escaped its boundary"
+        );
+        assert!(
+            !text.contains(&private.replace('\\', "/")),
+            "normalized private input escaped"
+        );
+        assert!(
+            !text.contains(&private.replace('\\', "\\\\")),
+            "JSON-escaped private input escaped"
+        );
+    }
+}
+
+#[test]
+fn relocate_invalid_arguments_never_open_or_create_the_catalog() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("absent.db").to_string_lossy().into_owned();
+    let old = dir
+        .path()
+        .join("private-old-root")
+        .to_string_lossy()
+        .into_owned();
+    let new = dir
+        .path()
+        .join("private-new-root")
+        .to_string_lossy()
+        .into_owned();
+    let backup = dir
+        .path()
+        .join("private-backup.db")
+        .to_string_lossy()
+        .into_owned();
+    let base = vec![
+        "relocate",
+        "--provider",
+        "claude",
+        "--from",
+        &old,
+        "--to",
+        &new,
+    ];
+    let extras: &[&[&str]] = &[
+        &["--apply"],
+        &["--apply", "--plan", "opaque-plan"],
+        &["--apply", "--backup", &backup],
+        &["--plan", "opaque-plan"],
+        &["--backup", &backup],
+        &["--alias-ttl-days", "0"],
+        &["--alias-ttl-days", "366"],
+        &["--alias-ttl-days", "1.5"],
+        &["--alias-ttl-days", "-1"],
+        &["--alias-ttl-days", "90", "--alias-ttl-days", "90"],
+        &["--from", &old],
+        &["--to", &new],
+        &["--provider", "codex"],
+        &[
+            "--apply",
+            "--apply",
+            "--plan",
+            "opaque-plan",
+            "--backup",
+            &backup,
+        ],
+        &["--apply", "--plan", "", "--backup", &backup],
+        &["--apply", "--plan", "opaque-plan", "--backup", ""],
+        &["--apply", "--plan", "--backup", &backup],
+        &["--private-unknown-option"],
+    ];
+    for extra in extras {
+        let mut args = base.clone();
+        args.extend_from_slice(extra);
+        let out = run(&db, &args);
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "invalid flags: {}",
+            stdout(&out)
+        );
+        let frame = parse_first_line(&out);
+        assert_envelope_shape(&frame, false);
+        assert_eq!(frame["command"], "relocate");
+        assert_eq!(frame["error"]["code"], "invalid_request");
+        assert!(
+            !Path::new(&db).exists(),
+            "invalid apply must not create a database"
+        );
+        assert!(
+            !Path::new(&backup).exists(),
+            "invalid apply must not create a backup"
+        );
+        assert_relocation_private(&out, &[&old, &new, &backup]);
+    }
+    for (provider, from, to) in [
+        ("private-unknown-provider", old.as_str(), new.as_str()),
+        ("claude", "private-relative-root", new.as_str()),
+        ("claude", old.as_str(), "private-relative-destination"),
+        ("claude", "", new.as_str()),
+        ("claude", old.as_str(), ""),
+    ] {
+        let out = run(
+            &db,
+            &[
+                "relocate",
+                "--provider",
+                provider,
+                "--from",
+                from,
+                "--to",
+                to,
+            ],
+        );
+        assert_eq!(out.status.code(), Some(2), "{}", stdout(&out));
+        assert!(!Path::new(&db).exists());
+        assert_relocation_private(
+            &out,
+            &[
+                &old,
+                &new,
+                "private-unknown-provider",
+                "private-relative-root",
+                "private-relative-destination",
+            ],
+        );
+    }
+}
+
+#[test]
+fn relocate_preview_and_apply_refuse_missing_or_old_catalogs_without_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("absent.db").to_string_lossy().into_owned();
+    let old = dir
+        .path()
+        .join("private-old-root")
+        .to_string_lossy()
+        .into_owned();
+    let new = dir
+        .path()
+        .join("private-new-root")
+        .to_string_lossy()
+        .into_owned();
+    let backup = dir
+        .path()
+        .join("private-backup.db")
+        .to_string_lossy()
+        .into_owned();
+    for apply in [false, true] {
+        let mut args = vec![
+            "relocate",
+            "--provider",
+            "claude-code",
+            "--from",
+            &old,
+            "--to",
+            &new,
+        ];
+        if apply {
+            args.extend(["--apply", "--plan", "opaque-plan", "--backup", &backup]);
+        }
+        let out = Command::new(BIN)
+            .args(["--db", &db, "--robot"])
+            .args(&args)
+            .env("ASG_DEBUG_ERRORS", "1")
+            .output()
+            .expect("run missing catalog relocation");
+        assert_eq!(out.status.code(), Some(6), "{}", stdout(&out));
+        assert!(!Path::new(&db).exists());
+        assert!(!Path::new(&backup).exists());
+        assert_relocation_private(&out, &[&db, &old, &new, &backup]);
+    }
+    Connection::open(&db).expect("create synthetic older catalog")
+        .execute_batch("PRAGMA user_version = 17; CREATE TABLE catalog(id TEXT PRIMARY KEY, payload BLOB NOT NULL);")
+        .expect("set older schema");
+    let before = std::fs::read(&db).expect("read old catalog");
+    for apply in [false, true] {
+        let mut args = vec![
+            "relocate",
+            "--provider",
+            "claude-code",
+            "--from",
+            &old,
+            "--to",
+            &new,
+        ];
+        if apply {
+            args.extend(["--apply", "--plan", "opaque-plan", "--backup", &backup]);
+        }
+        let out = run(&db, &args);
+        assert_eq!(out.status.code(), Some(9), "{}", stdout(&out));
+        assert_eq!(
+            parse_first_line(&out)["error"]["code"],
+            "schema_incompatible"
+        );
+        assert_eq!(
+            std::fs::read(&db).unwrap(),
+            before,
+            "relocation cannot migrate older catalogs"
+        );
+        assert!(!Path::new(&backup).exists());
+    }
+}
+
+#[test]
+fn relocate_preserves_native_identity_claims_resume_and_incremental_discovery() {
+    for (provider, marker, subtree) in [
+        ("claude-code", ".claude", "projects/project"),
+        ("codex", ".codex", "sessions/2026"),
+    ] {
+        let (dir, db) = temp_db("relocate-lifecycle");
+        let old = dir.path().join("old-owner").join(marker);
+        let new = dir.path().join("迁移后 installation");
+        let old_source = old.join(subtree).join("session.jsonl");
+        let new_source = new.join(subtree).join("session.jsonl");
+        let backup = dir.path().join("catalog-backup.db");
+        let home = dir.path().join("isolated-discovery-home");
+        std::fs::create_dir_all(old_source.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        let content = relocation_fixture(provider, &old.to_string_lossy());
+        std::fs::write(&old_source, &content).unwrap();
+        let initial = run(&db, &["sync", old_source.to_str().unwrap()]);
+        assert!(initial.status.success(), "{}", stdout(&initial));
+        let generation = parse_first_line(&initial)["data"]["generation"]
+            .as_u64()
+            .unwrap();
+        let sessions = relocation_session_ids(&db);
+        assert_eq!(sessions.len(), 1);
+        let before = relocation_rows(&db, None);
+        let context = parse_first_line(&run(&db, &["context", &sessions[0]]))["data"].clone();
+        let resume =
+            parse_first_line(&run(&db, &["get-session-resume", &sessions[0]]))["data"].clone();
+        if provider == "claude-code" {
+            for table in ["tool_activity_membership", "usage_event_membership"] {
+                assert!(
+                    !before
+                        .iter()
+                        .find(|(name, _)| name == table)
+                        .unwrap()
+                        .1
+                        .is_empty(),
+                    "exercise {table}"
+                );
+            }
+        }
+        std::fs::rename(&old, &new).unwrap();
+        let catalog_bytes = std::fs::read(&db).unwrap();
+        let preview = run(
+            &db,
+            &[
+                "relocate",
+                "--provider",
+                provider,
+                "--from",
+                old.to_str().unwrap(),
+                "--to",
+                new.to_str().unwrap(),
+            ],
+        );
+        assert!(preview.status.success(), "{}", stdout(&preview));
+        assert_relocation_private(
+            &preview,
+            &[
+                old.to_str().unwrap(),
+                new.to_str().unwrap(),
+                backup.to_str().unwrap(),
+            ],
+        );
+        let planned = parse_first_line(&preview);
+        assert_envelope_shape(&planned, true);
+        assert_eq!(planned["command"], "relocate.preview");
+        assert_eq!(planned["data"]["status"], "planned");
+        assert_eq!(planned["data"]["source_count"], 1);
+        assert_eq!(planned["data"]["session_count"], 1);
+        assert_eq!(planned["data"]["alias_ttl_days"], 90);
+        assert_eq!(planned["data"]["generation"], generation);
+        assert_eq!(
+            std::fs::read(&db).unwrap(),
+            catalog_bytes,
+            "preview must not write the catalog"
+        );
+        assert_relocation_rows(&db, None, &before);
+        assert!(!backup.exists());
+        let plan = planned["data"]["plan"].as_str().expect("opaque plan");
+        let claims = agent_session_grep_application::relocation::decode_plan(
+            plan,
+            E2E_CLOCK_MS.parse().unwrap(),
+        )
+        .expect("plan uses the CLI injected clock");
+        let claims = serde_json::to_string(&claims).unwrap();
+        for private in [
+            old.to_str().unwrap(),
+            new.to_str().unwrap(),
+            "relocation-private-native-session",
+        ] {
+            assert!(
+                !claims.contains(private),
+                "opaque plan claims contain no private inputs"
+            );
+        }
+        let applied = run(
+            &db,
+            &[
+                "relocate",
+                "--provider",
+                provider,
+                "--from",
+                old.to_str().unwrap(),
+                "--to",
+                new.to_str().unwrap(),
+                "--apply",
+                "--plan",
+                plan,
+                "--backup",
+                backup.to_str().unwrap(),
+            ],
+        );
+        assert!(applied.status.success(), "{}", stdout(&applied));
+        assert_relocation_private(
+            &applied,
+            &[
+                old.to_str().unwrap(),
+                new.to_str().unwrap(),
+                backup.to_str().unwrap(),
+            ],
+        );
+        let applied = parse_first_line(&applied);
+        assert_eq!(applied["command"], "relocate.apply");
+        assert_eq!(applied["data"]["status"], "applied");
+        assert_eq!(applied["data"]["previous_generation"], generation);
+        assert_eq!(applied["data"]["generation"], generation + 1);
+        assert_relocation_rows(backup.to_str().unwrap(), None, &before);
+        assert_relocation_rows(&db, Some((&new, &old)), &before);
+        assert_eq!(
+            std::fs::read_to_string(&new_source).unwrap(),
+            content,
+            "apply never rewrites provider content"
+        );
+        assert!(
+            !old.exists(),
+            "apply must not recreate the retired directory"
+        );
+        assert_eq!(relocation_session_ids(&db), sessions);
+        let mut expected_context = context;
+        expected_context["generation"] = (generation + 1).into();
+        for evidence in expected_context["evidence"].as_array_mut().unwrap() {
+            evidence["generation"] = (generation + 1).into();
+        }
+        assert_eq!(
+            parse_first_line(&run(&db, &["context", &sessions[0]]))["data"],
+            expected_context
+        );
+        assert_eq!(
+            parse_first_line(&run(&db, &["get-session-resume", &sessions[0]]))["data"],
+            resume
+        );
+        let repeat = run(
+            &db,
+            &[
+                "relocate",
+                "--provider",
+                provider,
+                "--from",
+                old.to_str().unwrap(),
+                "--to",
+                new.to_str().unwrap(),
+            ],
+        );
+        assert!(repeat.status.success(), "{}", stdout(&repeat));
+        let repeat = parse_first_line(&repeat);
+        assert_eq!(
+            repeat["command"], "relocate.preview",
+            "no-op preview remains a preview"
+        );
+        assert_eq!(repeat["data"]["status"], "unchanged");
+        assert_eq!(repeat["data"]["generation"], generation + 1);
+        let second_backup = dir.path().join("unused-second-backup.db");
+        let repeat = run(
+            &db,
+            &[
+                "relocate",
+                "--provider",
+                provider,
+                "--from",
+                old.to_str().unwrap(),
+                "--to",
+                new.to_str().unwrap(),
+                "--apply",
+                "--plan",
+                plan,
+                "--backup",
+                second_backup.to_str().unwrap(),
+            ],
+        );
+        assert!(repeat.status.success(), "{}", stdout(&repeat));
+        assert_eq!(parse_first_line(&repeat)["data"]["status"], "unchanged");
+        assert!(
+            !second_backup.exists(),
+            "idempotent apply needs no second backup"
+        );
+        for command in ["sync", "ingest"] {
+            let again = run(&db, &[command, new_source.to_str().unwrap()]);
+            assert!(again.status.success(), "{}", stdout(&again));
+            assert_eq!(
+                parse_first_line(&again)["data"]["generation"],
+                generation + 1
+            );
+            assert_eq!(relocation_session_ids(&db), sessions);
+        }
+        let discover = run_with_home(&db, home.to_str().unwrap(), &["sync", "--discover"]);
+        assert!(discover.status.success(), "{}", stdout(&discover));
+        assert_eq!(
+            parse_first_line(&discover)["data"]["sources"],
+            1,
+            "registered non-default root is discovered"
+        );
+        assert_eq!(relocation_session_ids(&db), sessions);
+        let added = new_source.with_file_name("additional-source.jsonl");
+        std::fs::write(&added, &content).unwrap();
+        let discover = run_with_home(&db, home.to_str().unwrap(), &["sync", "--discover"]);
+        assert!(discover.status.success(), "{}", stdout(&discover));
+        assert_eq!(parse_first_line(&discover)["data"]["sources"], 2);
+        assert_eq!(
+            relocation_session_ids(&db),
+            sessions,
+            "new sibling sources reuse the moved installation namespace"
+        );
+        std::fs::remove_file(&new_source).unwrap();
+        let discover = run_with_home(&db, home.to_str().unwrap(), &["sync", "--discover"]);
+        assert!(discover.status.success(), "{}", stdout(&discover));
+        assert_eq!(
+            relocation_session_ids(&db),
+            sessions,
+            "deleting one relocated claim keeps its shared content"
+        );
+        assert!(run(&db, &["get", &sessions[0]]).status.success());
+        // A retired source is refused even when its bytes match the moved copy.
+        std::fs::create_dir_all(old_source.parent().unwrap()).unwrap();
+        std::fs::write(&old_source, &content).unwrap();
+        let before_retired = relocation_rows(&db, None);
+        let retired = run(&db, &["sync", old_source.to_str().unwrap()]);
+        assert_eq!(retired.status.code(), Some(2), "{}", stdout(&retired));
+        assert_relocation_private(&retired, &[old.to_str().unwrap(), new.to_str().unwrap()]);
+        assert_relocation_rows(&db, None, &before_retired);
+    }
+}
+
+#[test]
+fn relocate_occupied_target_preserves_independent_installations_with_equal_native_ids() {
+    let (dir, db) = temp_db("relocate-occupied");
+    let first = dir.path().join("installation-one");
+    let second = dir.path().join("installation-two");
+    std::fs::create_dir_all(&first).unwrap();
+    std::fs::create_dir_all(&second).unwrap();
+    let first_source = first.join("session.jsonl");
+    let second_source = second.join("session.jsonl");
+    let content = relocation_fixture("claude-code", "/synthetic/original-cwd");
+    std::fs::write(&first_source, &content).unwrap();
+    std::fs::write(&second_source, &content).unwrap();
+    let out = run(
+        &db,
+        &[
+            "sync",
+            first_source.to_str().unwrap(),
+            second_source.to_str().unwrap(),
+        ],
+    );
+    assert!(out.status.success(), "{}", stdout(&out));
+    assert_eq!(
+        relocation_session_ids(&db).len(),
+        2,
+        "equal native session ids do not merge installations"
+    );
+    let before = relocation_rows(&db, None);
+    let out = run(
+        &db,
+        &[
+            "relocate",
+            "--provider",
+            "claude",
+            "--from",
+            first.to_str().unwrap(),
+            "--to",
+            second.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(out.status.code(), Some(2), "{}", stdout(&out));
+    assert_eq!(parse_first_line(&out)["error"]["code"], "invalid_request");
+    assert_relocation_private(&out, &[first.to_str().unwrap(), second.to_str().unwrap()]);
+    assert_relocation_rows(&db, None, &before);
+}
+
+#[test]
+fn relocate_rejects_changed_expired_mismatched_and_stale_plans_without_writes() {
+    let (dir, db) = temp_db("relocate-plan-errors");
+    let old = dir.path().join("old-root");
+    let new = dir.path().join("new-root");
+    let backup = dir.path().join("backup.db");
+    std::fs::create_dir_all(&old).unwrap();
+    let content = relocation_fixture("claude-code", "/synthetic/original-cwd");
+    std::fs::write(old.join("session.jsonl"), &content).unwrap();
+    let initial = run(&db, &["sync", old.join("session.jsonl").to_str().unwrap()]);
+    assert!(initial.status.success(), "{}", stdout(&initial));
+    std::fs::rename(&old, &new).unwrap();
+    let base = [
+        "relocate",
+        "--provider",
+        "claude",
+        "--from",
+        old.to_str().unwrap(),
+        "--to",
+        new.to_str().unwrap(),
+        "--alias-ttl-days",
+        "7",
+    ];
+    let preview = run(&db, &base);
+    assert!(preview.status.success(), "{}", stdout(&preview));
+    let frame = parse_first_line(&preview);
+    let plan = frame["data"]["plan"].as_str().unwrap();
+    let generation = frame["data"]["generation"].as_u64().unwrap();
+    let mut apply = base.to_vec();
+    apply.extend([
+        "--apply",
+        "--plan",
+        plan,
+        "--backup",
+        backup.to_str().unwrap(),
+    ]);
+    let before = relocation_rows(&db, None);
+    for (token, clock, expected) in [
+        (
+            "private-invalid-plan-value",
+            E2E_CLOCK_MS.parse::<i64>().unwrap(),
+            2,
+        ),
+        (plan, E2E_CLOCK_MS.parse::<i64>().unwrap() + 900_001, 2),
+    ] {
+        let mut args = base.to_vec();
+        args.extend([
+            "--apply",
+            "--plan",
+            token,
+            "--backup",
+            backup.to_str().unwrap(),
+        ]);
+        let out = Command::new(BIN)
+            .args(["--db", &db, "--robot"])
+            .args(args)
+            .env("ASG_CLOCK_MS", clock.to_string())
+            .env("ASG_DEBUG_ERRORS", "1")
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(expected), "{}", stdout(&out));
+        assert_relocation_private(
+            &out,
+            &[
+                old.to_str().unwrap(),
+                new.to_str().unwrap(),
+                backup.to_str().unwrap(),
+                "private-invalid-plan-value",
+            ],
+        );
+        assert_relocation_rows(&db, None, &before);
+        assert!(!backup.exists());
+    }
+    let mut wrong_ttl = apply.clone();
+    let ttl = wrong_ttl
+        .iter()
+        .position(|value| *value == "--alias-ttl-days")
+        .unwrap()
+        + 1;
+    wrong_ttl[ttl] = "8";
+    let out = run(&db, &wrong_ttl);
+    assert_eq!(out.status.code(), Some(2), "{}", stdout(&out));
+    assert_relocation_rows(&db, None, &before);
+    assert!(!backup.exists());
+    std::fs::write(new.join("session.jsonl"), format!("{content}\n")).unwrap();
+    let out = run(&db, &apply);
+    assert_eq!(out.status.code(), Some(5), "{}", stdout(&out));
+    assert_eq!(parse_first_line(&out)["error"]["code"], "source_changed");
+    assert_relocation_rows(&db, None, &before);
+    assert!(!backup.exists());
+    std::fs::write(new.join("session.jsonl"), &content).unwrap();
+    std::fs::write(&backup, b"existing backup must survive").unwrap();
+    let out = run(&db, &apply);
+    assert!(matches!(out.status.code(), Some(5 | 6)), "{}", stdout(&out));
+    assert_eq!(
+        std::fs::read(&backup).unwrap(),
+        b"existing backup must survive"
+    );
+    assert_relocation_rows(&db, None, &before);
+    assert_eq!(
+        parse_first_line(&run(&db, &["status"]))["data"]["generation"],
+        generation
+    );
+    std::fs::remove_file(&backup).unwrap();
+    let extra = run(
+        &db,
+        &[
+            "index",
+            "relocation-generation-change",
+            "synthetic generation advance",
+        ],
+    );
+    assert!(extra.status.success(), "{}", stdout(&extra));
+    let advanced = relocation_rows(&db, None);
+    let out = run(&db, &apply);
+    assert_eq!(out.status.code(), Some(9), "{}", stdout(&out));
+    assert_eq!(
+        parse_first_line(&out)["error"]["code"],
+        "generation_mismatch"
+    );
+    assert_relocation_rows(&db, None, &advanced);
+    assert!(!backup.exists());
+}
+
+#[test]
+fn relocate_sqlite_sources_preserve_every_native_session_and_resume_observation() {
+    for provider in ["opencode", "cursor"] {
+        let (dir, db) = temp_db("relocate-sqlite-sessions");
+        let old = dir.path().join("old-installation");
+        let new = dir.path().join("new-installation");
+        let backup = dir.path().join("backup.db");
+        std::fs::create_dir_all(&old).unwrap();
+        let source = old.join("sessions.db");
+        let conn = Connection::open(&source).unwrap();
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;")
+            .unwrap();
+        if provider == "opencode" {
+            conn.execute_batch(
+                "CREATE TABLE session(id TEXT PRIMARY KEY, directory TEXT);
+                 CREATE TABLE message(id TEXT PRIMARY KEY, session_id TEXT, data TEXT, time_created INTEGER);
+                 CREATE TABLE part(id TEXT PRIMARY KEY, message_id TEXT, data TEXT, time_created INTEGER);"
+            ).unwrap();
+            for label in ["first", "second"] {
+                conn.execute(
+                    "INSERT INTO session VALUES (?1, ?2)",
+                    rusqlite::params![label, format!("/synthetic/{label}")],
+                )
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO message VALUES (?1, ?1, '{\"role\":\"user\"}', 1)",
+                    [label],
+                )
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO part VALUES (?1, ?1, json_object('type','text','text',?2), 1)",
+                    rusqlite::params![label, format!("relocation sqlite {label}")],
+                )
+                .unwrap();
+            }
+        } else {
+            conn.execute_batch("CREATE TABLE ItemTable(key TEXT PRIMARY KEY, value TEXT);")
+                .unwrap();
+            conn.execute("INSERT INTO ItemTable VALUES (?1, ?2)", rusqlite::params![
+                "workbench.panel.aichat.view.aichat.chatdata",
+                serde_json::json!({"tabs": [
+                    {"id": "first", "createdAt": 1, "bubbles": [{"type": "user", "text": "relocation sqlite first"}]},
+                    {"id": "second", "createdAt": 2, "bubbles": [{"type": "user", "text": "relocation sqlite second"}]},
+                ]}).to_string()
+            ]).unwrap();
+        }
+        let out = run(&db, &["ingest", source.to_str().unwrap()]);
+        assert!(out.status.success(), "{provider}: {}", stdout(&out));
+        let sessions = relocation_session_ids(&db);
+        assert_eq!(sessions.len(), 2);
+        let before = relocation_rows(&db, None);
+        let resume: Vec<_> = sessions
+            .iter()
+            .map(|id| parse_first_line(&run(&db, &["get-session-resume", id]))["data"].clone())
+            .collect();
+        // Closing the writer may checkpoint WAL; the logical snapshot is still
+        // the same source and must retain its Document and placement identities.
+        conn.close().unwrap();
+        std::fs::rename(&old, &new).unwrap();
+        let base = [
+            "relocate",
+            "--provider",
+            provider,
+            "--from",
+            old.to_str().unwrap(),
+            "--to",
+            new.to_str().unwrap(),
+        ];
+        let out = run(&db, &base);
+        assert!(out.status.success(), "{provider}: {}", stdout(&out));
+        let preview = parse_first_line(&out);
+        assert_eq!(preview["data"]["source_count"], 1);
+        assert_eq!(preview["data"]["session_count"], 2);
+        let mut apply = base.to_vec();
+        apply.extend([
+            "--apply",
+            "--plan",
+            preview["data"]["plan"].as_str().unwrap(),
+            "--backup",
+            backup.to_str().unwrap(),
+        ]);
+        let out = run(&db, &apply);
+        assert!(out.status.success(), "{provider}: {}", stdout(&out));
+        assert_relocation_rows(&db, Some((&new, &old)), &before);
+        assert_eq!(relocation_session_ids(&db), sessions);
+        for (id, expected) in sessions.iter().zip(resume) {
+            assert_eq!(
+                parse_first_line(&run(&db, &["get-session-resume", id]))["data"],
+                expected
+            );
+            assert!(run(&db, &["context", id]).status.success());
+        }
+        let out = run(&db, &["sync", new.join("sessions.db").to_str().unwrap()]);
+        assert!(out.status.success(), "{provider}: {}", stdout(&out));
+        assert_eq!(relocation_session_ids(&db), sessions);
+    }
+}
+
+#[test]
+fn relocate_namespace_reservations_do_not_survive_a_failed_source_batch() {
+    let (dir, db) = temp_db("relocate-aborted-staging");
+    let first = dir.path().join("first.jsonl");
+    let second = dir.path().join("invalid.jsonl");
+    let content = relocation_fixture("claude-code", "/synthetic/original-cwd");
+    std::fs::write(&first, &content).unwrap();
+    std::fs::write(
+        &second,
+        content.replace("relocation-claude-user", "invalid message id"),
+    )
+    .unwrap();
+    let before = relocation_rows(&db, None);
+    let out = run(
+        &db,
+        &["sync", first.to_str().unwrap(), second.to_str().unwrap()],
+    );
+    assert!(
+        !out.status.success(),
+        "invalid native identity must abort the source batch"
+    );
+    assert_relocation_rows(&db, None, &before);
+    assert_eq!(
+        parse_first_line(&run(&db, &["status"]))["data"]["generation"],
+        0
+    );
+}
+
+#[test]
+fn relocate_help_capability_human_and_jsonl_surfaces_share_the_cli_contract() {
+    let dir = tempfile::tempdir().unwrap();
+    let absent = dir.path().join("absent.db");
+    let help = Command::new(BIN)
+        .args([
+            "--db",
+            absent.to_str().unwrap(),
+            "--robot",
+            "--request-id",
+            "relocation-help",
+            "relocate",
+            "--help",
+        ])
+        .output()
+        .unwrap();
+    assert!(help.status.success(), "{}", stdout(&help));
+    let help = parse_first_line(&help);
+    assert_eq!(help["request_id"], "relocation-help");
+    let text = help["data"].to_string();
+    for required in [
+        "--apply",
+        "--plan",
+        "--backup",
+        "--alias-ttl-days",
+        "15",
+        "90",
+        "MCP/Web",
+    ] {
+        assert!(text.contains(required), "help must describe {required}");
+    }
+    assert!(!absent.exists());
+    let providers = run(absent.to_str().unwrap(), &["providers"]);
+    assert!(providers.status.success());
+    let capability = &parse_first_line(&providers)["data"]["relocation"];
+    assert_eq!(capability["interfaces"], serde_json::json!(["cli"]));
+    assert_eq!(capability["default_action"], "preview");
+    assert_eq!(capability["plan_ttl_seconds"], 900);
+    assert_eq!(
+        capability["alias_ttl_days"],
+        serde_json::json!({"default":90,"minimum":1,"maximum":365})
+    );
+    let (dir, db) = temp_db("relocate-jsonl");
+    let old = dir.path().join("old-root");
+    let new = dir.path().join("new-root");
+    std::fs::create_dir_all(&old).unwrap();
+    std::fs::write(
+        old.join("session.jsonl"),
+        relocation_fixture("claude-code", "/synthetic/original-cwd"),
+    )
+    .unwrap();
+    assert!(
+        run(&db, &["sync", old.join("session.jsonl").to_str().unwrap()])
+            .status
+            .success()
+    );
+    std::fs::rename(&old, &new).unwrap();
+    let args = [
+        "relocate",
+        "--provider",
+        "claude",
+        "--from",
+        old.to_str().unwrap(),
+        "--to",
+        new.to_str().unwrap(),
+    ];
+    let out = Command::new(BIN)
+        .args([
+            "--db",
+            &db,
+            "--output",
+            "jsonl",
+            "--request-id",
+            "relocation-jsonl",
+        ])
+        .args(args)
+        .env("ASG_CLOCK_MS", E2E_CLOCK_MS)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stdout(&out));
+    assert_eq!(
+        stdout(&out).lines().count(),
+        1,
+        "preview emits one bounded response, no progress paths"
+    );
+    let frame = parse_first_line(&out);
+    assert_envelope_shape(&frame, true);
+    assert_eq!(frame["request_id"], "relocation-jsonl");
+    assert_eq!(frame["command"], "relocate.preview");
+    let mut keys: Vec<_> = frame["data"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort();
+    assert_eq!(
+        keys,
+        [
+            "alias_ttl_days",
+            "generation",
+            "installation_count",
+            "namespace_count",
+            "plan",
+            "previous_generation",
+            "session_count",
+            "source_count",
+            "status"
+        ]
+    );
+    assert_relocation_private(&out, &[old.to_str().unwrap(), new.to_str().unwrap()]);
+    let human = run_human(&db, &args);
+    assert!(human.status.success(), "{}", stdout(&human));
+    assert!(stdout(&human).contains("planned"));
+    assert!(stdout(&human).contains("plan:"));
+    assert_relocation_private(&human, &[old.to_str().unwrap(), new.to_str().unwrap()]);
+}
+
+#[cfg(windows)]
+#[test]
+fn relocate_equivalent_windows_root_is_a_readonly_noop() {
+    let (dir, db) = temp_db("relocate-case");
+    let root = dir.path().join("MixedCase-安装");
+    std::fs::create_dir_all(&root).unwrap();
+    let source = root.join("session.jsonl");
+    std::fs::write(
+        &source,
+        relocation_fixture("claude-code", "/synthetic/original-cwd"),
+    )
+    .unwrap();
+    let first = run(&db, &["sync", source.to_str().unwrap()]);
+    assert!(first.status.success());
+    let generation = parse_first_line(&first)["data"]["generation"].clone();
+    let before = relocation_rows(&db, None);
+    let alternate = root
+        .to_string_lossy()
+        .replace('\\', "/")
+        .to_ascii_uppercase();
+    let out = run(
+        &db,
+        &[
+            "relocate",
+            "--provider",
+            "claude",
+            "--from",
+            &alternate,
+            "--to",
+            root.to_str().unwrap(),
+        ],
+    );
+    assert!(out.status.success(), "{}", stdout(&out));
+    let frame = parse_first_line(&out);
+    assert_eq!(frame["command"], "relocate.preview");
+    assert_eq!(frame["data"]["status"], "unchanged");
+    assert_eq!(frame["data"]["generation"], generation);
+    assert_relocation_rows(&db, None, &before);
 }

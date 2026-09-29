@@ -1711,6 +1711,12 @@ fn readme_and_changelog_publish_every_applied_lexical_rank_signal() {
         }
         // `30.0` 在 README 里写作 "30-day"，故 `.0` 结尾的值同时接受整数写法。
         let mut spellings = vec![value.clone()];
+        if let Some(multiplier) = value.strip_suffix(" * RRF_SCORE_UNIT") {
+            // Documentation spells this policy as a fraction. Pin the unit so
+            // changing its scale cannot leave the documented fraction stale.
+            assert!(region.contains("const RRF_SCORE_UNIT: f32 = 1.0 / 61.0;"));
+            spellings.push(format!("{multiplier}/61"));
+        }
         if let Some(integral) = value.strip_suffix(".0") {
             spellings.push(integral.to_string());
         }
@@ -1735,19 +1741,19 @@ fn readme_and_changelog_publish_every_applied_lexical_rank_signal() {
     // `final_score` 文档注释是权威写法，改动它就必须同步改文档与本守护。
     assert!(
         region.contains(
-            "`final = max(0, bm25 × decay(age) − sidechain_penalty + current_repo_boost)`"
+            "`final = max(0, relevance × decay(age) − sidechain_penalty + current_repo_boost)`"
         ),
         "ranking.rs 的 final_score 公式注释被改写——请同步更新本守护与 README/CHANGELOG"
     );
     for (doc_name, paragraph) in &paragraphs {
         assert!(
             paragraph
-                .contains("max(0, bm25 × recency decay − sidechain penalty + current-repo boost)")
+                .contains("max(0, RRF × recency decay − sidechain penalty + current-repo boost)")
                 || paragraph.contains(
-                    "max(0, bm25 × recency_decay − sidechain_penalty + current_repo_boost)"
+                    "max(0, RRF × recency_decay − sidechain_penalty + current_repo_boost)"
                 ),
             "{doc_name} 的评分公式与 ranking.rs 不一致——钳制必须包住惩罚与加分，\
-             写成 `max(0, bm25 × decay) − penalty` 会允许负分，与代码相反"
+             写成 `max(0, RRF × decay) − penalty` 会允许负分，与代码相反"
         );
     }
 }

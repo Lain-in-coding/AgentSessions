@@ -1036,6 +1036,7 @@ impl ProviderAdapter for ClaudeCodeAdapter {
             );
 
             sink.emit_message(MessageEvent {
+                session: None,
                 seq,
                 native_id: &rec.uuid,
                 // 空串 parentUuid 语义等价于 null（根消息）；透传空串会在

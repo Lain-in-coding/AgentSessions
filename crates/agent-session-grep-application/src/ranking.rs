@@ -1,4 +1,4 @@
-//! Lexical search rank signals（competitor-borrowings #1）：把 bm25 相关性、
+//! Lexical search rank signals（competitor-borrowings #1）：把 relevance 相关性、
 //! 时效衰减、sidechain 惩罚与当前仓库偏好合成为单一评分函数。
 //!
 //! 借鉴来源：
@@ -6,7 +6,7 @@
 //!   经 `(floor + (1-floor)*decay)` 插值保住下限）；
 //! - sessiongrep：FTS 召回后应用层重排补充新鲜度/业务信号（本模块同构），
 //!   其"当前仓库 +200"即本模块 [`CURRENT_REPO_SCORE_BOOST`] 的来源（量级按本仓
-//!   bm25 口径重新定标，不照搬数值）；
+//!   relevance 口径重新定标，不照搬数值）；
 //! - agentsview：subordinate（sidechain/subagent）命中 rank+5 的 RRF 惩罚精神。
 //!
 //! 教训（deep-read-claude-historian-mcp.md §11.7）：多层经验参数无测试固化必
@@ -29,27 +29,19 @@ use agent_session_grep_ports::SearchHit;
 /// 时效半衰期（天）：30 天前的时间戳衰减到 0.5（AgentRecall smartScore 同款）。
 pub const RECENCY_HALF_LIFE_DAYS: f64 = 30.0;
 
-/// 时效衰减下限：无论多老都保留该比例的 bm25 分，防止老消息被完全压没。
+/// 时效衰减下限：无论多老都保留该比例的 relevance 分，防止老消息被完全压没。
 pub const RECENCY_DECAY_FLOOR: f64 = 0.3;
 
-/// sidechain 命中固定扣分。与 bm25 量级相称：FTS5 bm25（SQLite ≥3.53 的 idf
-/// 口径）实测单/多词命中约 0.5–15；扣 1.0 约等于"一个单词匹配"的分值——
-/// 同等相关性下 sidechain 命中让位，强相关 sidechain 仍可胜出。
-pub const SIDECHAIN_SCORE_PENALTY: f32 = 1.0;
+/// One first-place contribution under RRF with k=60.
+const RRF_SCORE_UNIT: f32 = 1.0 / 61.0;
 
-/// 当前仓库偏好加分（sessiongrep 的"当前仓库优先"应用层重排信号，量级按本仓
-/// bm25 口径重新定标）：命中会话的 repo slug（schema v16 投影）等于调用方当前
-/// 工作目录派生的 slug 时加该分。
-///
-/// 取 2.0 的理由：
-/// - 与 bm25 同量纲。bm25 实测 0.5–15，[`SIDECHAIN_SCORE_PENALTY`] = 1.0 约等于
-///   "一个单词匹配"；本加分取其两倍，即"两个单词匹配"的量级；
-/// - 足以在相关性接近时把当前仓库的历史顶上来，并抵得住 30 天半衰期对中等强度
-///   命中的衰减（2.0 × 0.5 + 2.0 = 3.0 > 同分的新命中 2.0）；
-/// - 远小于强命中上限（15）：跨仓库的强相关历史仍然胜出——这是排序偏好，不是
-///   过滤器（要硬过滤用 `--repo`）。sessiongrep 的 +200 是其自有量纲下的同一
-///   比例，照搬到本仓会让该信号退化成事实上的过滤器。
-pub const CURRENT_REPO_SCORE_BOOST: f32 = 2.0;
+/// Fixed sidechain penalty: a quarter of a first-place RRF contribution.
+/// A strong sidechain match may still outrank a weak mainline match.
+pub const SIDECHAIN_SCORE_PENALTY: f32 = 0.25 * RRF_SCORE_UNIT;
+
+/// Current-repository preference: half a first-place RRF contribution.
+/// This is an explicit policy scale, not a relevance-calibration claim.
+pub const CURRENT_REPO_SCORE_BOOST: f32 = 0.5 * RRF_SCORE_UNIT;
 
 /// 每天毫秒数（仅内部换算用，非调参常量）。
 const MS_PER_DAY: f64 = 86_400_000.0;
@@ -65,15 +57,15 @@ pub fn recency_decay(age_ms: i64) -> f64 {
 }
 
 /// 单一评分函数：
-/// `final = max(0, bm25 × decay(age) − sidechain_penalty + current_repo_boost)`。
+/// `final = max(0, relevance × decay(age) − sidechain_penalty + current_repo_boost)`。
 ///
 /// 惩罚与加分同量纲、同一表达式内合成后才钳制到 0——先钳制再加分会让所有被
 /// 钳到 0 的命中"凭偏好复活"，顺序失去意义。
 ///
-/// 展示的 `score` 字段即本函数输出；bm25 原值不保留在命中结构里
+/// 展示的 `score` 字段即本函数输出；relevance 原值不保留在命中结构里
 /// （why_matched/guidance 不消费 score，语义不变）。
-pub fn final_score(bm25: f32, age_ms: i64, is_sidechain: bool, in_current_repo: bool) -> f32 {
-    let mut score = f64::from(bm25) * recency_decay(age_ms);
+pub fn final_score(relevance: f32, age_ms: i64, is_sidechain: bool, in_current_repo: bool) -> f32 {
+    let mut score = f64::from(relevance) * recency_decay(age_ms);
     if is_sidechain {
         score -= f64::from(SIDECHAIN_SCORE_PENALTY);
     }
@@ -116,7 +108,7 @@ fn payload_is_sidechain(payload: Option<&[u8]>) -> bool {
 
 /// 对纯 lexical 扫描窗应用排序信号：逐 hit 从 canonical payload 派生
 /// 时效与 sidechain 事实，重算 `hit.score` 为最终分，并重排为
-/// `(final desc, id asc)` 全序（与 store 层 bm25+id 的钉住排序同一 tiebreak
+/// `(final desc, id asc)` 全序（与 store 层 relevance+id 的钉住排序同一 tiebreak
 /// 约定，保证同 query 同 clock 下分页稳定）。
 ///
 /// 输入是已与命中同序配对的 `(hit, payload, in_current_repo)` 三元组——排序
@@ -206,53 +198,25 @@ mod tests {
 
     #[test]
     fn final_score_applies_decay_then_fixed_sidechain_penalty() {
-        // 30 天龄：2.0 × 0.5 = 1.0。
-        assert!((final_score(2.0, 30 * DAY_MS, false, false) - 1.0).abs() < 1e-6);
-        // sidechain：1.0 − 1.0 = 0（钳制到 0，绝不为负）。
-        assert_eq!(final_score(2.0, 30 * DAY_MS, true, false), 0.0);
-        // 弱命中（0.5）sidechain 惩罚后钳到 0，不产生负分。
-        assert_eq!(final_score(0.5, 0, true, false), 0.0);
-        // 强命中（4.0）sidechain 仍保留 3.0——惩罚是固定分值而非比例。
-        assert!((final_score(4.0, 0, true, false) - 3.0).abs() < 1e-6);
-        // 同等相关性下 sidechain 恒不高于主线。
-        for (bm25, age) in [
-            (0.1, 0),
-            (1.0, 0),
-            (10.0, 90 * DAY_MS),
-            (100.0, 1000 * DAY_MS),
-        ] {
-            assert!(final_score(bm25, age, true, false) <= final_score(bm25, age, false, false));
-        }
+        let top = 1.0 / 61.0;
+        assert!((final_score(top, 30 * DAY_MS, false, false) - top * 0.5).abs() < 1e-8);
+        assert!((final_score(top, 30 * DAY_MS, true, false) - top * 0.25).abs() < 1e-8);
+        assert_eq!(final_score(top * 0.1, 0, true, false), 0.0);
+        assert!(final_score(top, 0, true, false) > final_score(1.0 / 572.0, 0, false, false));
     }
-
-    // ---- 当前仓库偏好：固定加分，量级与 bm25 相称 ----
 
     #[test]
     fn final_score_adds_current_repo_boost_only_when_the_repo_matches() {
-        // 常量值本身钉住（改动必须同时改这条断言与 README/CHANGELOG 的口径）。
-        assert_eq!(CURRENT_REPO_SCORE_BOOST, 2.0);
-        // 加分是固定分值：同 bm25 同龄下恰好相差 CURRENT_REPO_SCORE_BOOST。
-        let plain = final_score(2.0, 0, false, false);
-        let boosted = final_score(2.0, 0, false, true);
-        assert!((boosted - plain - CURRENT_REPO_SCORE_BOOST).abs() < 1e-6);
-        // 不匹配（或调用方无仓库身份）时分值与旧行为逐位一致。
-        assert_eq!(
-            final_score(2.0, 0, false, false).to_bits(),
-            2.0f32.to_bits()
-        );
-        // 抵得住 30 天半衰期：当前仓库的中等强度旧命中 > 同分的新命中。
-        assert!(final_score(2.0, 30 * DAY_MS, false, true) > final_score(2.0, 0, false, false));
-        // 但远不足以盖过强相关的跨仓库命中——偏好是排序信号，不是过滤器。
-        assert!(final_score(2.0, 0, false, true) < final_score(15.0, 0, false, false));
-        // 与 sidechain 惩罚同量纲叠加：先合成再钳制，弱 sidechain 命中不因
-        // 偏好"复活"到主线之上（同 bm25 下 sidechain 恒不高于主线）。
-        for (bm25, age) in [(0.5, 0), (2.0, 30 * DAY_MS), (10.0, 90 * DAY_MS)] {
-            assert!(final_score(bm25, age, true, true) <= final_score(bm25, age, false, true));
-        }
-        assert!(
-            (final_score(2.0, 0, true, true) - (2.0 - 1.0 + 2.0)).abs() < 1e-6,
-            "惩罚与加分必须在同一表达式内合成"
-        );
+        let top = 1.0 / 61.0;
+        assert_eq!(CURRENT_REPO_SCORE_BOOST, 0.5 / 61.0);
+        let plain = final_score(top, 0, false, false);
+        let boosted = final_score(top, 0, false, true);
+        assert!((boosted - plain - CURRENT_REPO_SCORE_BOOST).abs() < 1e-8);
+        assert_eq!(plain.to_bits(), top.to_bits());
+        assert!(final_score(top, 0, false, true) > final_score(top, 0, false, false));
+        // A weak current-repository hit cannot displace a strong external hit.
+        assert!(final_score(1.0 / 572.0, 0, false, true) < final_score(top, 0, false, false));
+        assert!((final_score(top, 0, true, true) - top * 1.25).abs() < 1e-8);
     }
 
     // ---- 单一函数确定性：同输入同输出 ----
@@ -336,13 +300,13 @@ mod tests {
         );
         assert_eq!(hits[1].id.as_str(), "msg_v1_side");
         assert_eq!(hits[0].score, 2.0);
-        assert_eq!(hits[1].score, 1.0);
+        assert_eq!(hits[1].score, 2.0 - SIDECHAIN_SCORE_PENALTY);
     }
 
     #[test]
     fn apply_lexical_signals_treats_missing_facts_as_no_signal() {
         // 无 timestamp / is_sidechain null / 非法 timestamp：衰减恒 1.0、
-        // 无 sidechain 惩罚——无信号不加罚，顺序保持 bm25 序。
+        // 无 sidechain 惩罚——无信号不加罚，顺序保持 relevance 序。
         let pairs = vec![
             (hit("b", 2.0), Some(payload(None, Some(false)))),
             (
@@ -375,7 +339,7 @@ mod tests {
 
     #[test]
     fn apply_lexical_signals_zero_scores_are_normalized_positive() {
-        // `-0.0`/NaN bm25 归一为 +0.0（负零符号在平台上未定义，排序必须逐位稳定）。
+        // `-0.0`/NaN relevance 归一为 +0.0（负零符号在平台上未定义，排序必须逐位稳定）。
         let pairs = vec![(hit("neg", -0.0), None), (hit("zero", 0.0), None)];
         let hits = apply(pairs);
         assert_eq!(hits[0].score.to_bits(), 0.0f32.to_bits());
@@ -384,7 +348,7 @@ mod tests {
 
     #[test]
     fn apply_lexical_signals_promotes_current_repo_hit_under_equal_relevance() {
-        // 同 bm25 同龄：属于当前仓库的命中排前，且分差恰为加分常量。
+        // 同 relevance 同龄：属于当前仓库的命中排前，且分差恰为加分常量。
         let scored = vec![
             (hit("other", 2.0), Some(payload(None, Some(false))), false),
             (hit("current", 2.0), Some(payload(None, Some(false))), true),
@@ -443,7 +407,7 @@ mod tests {
 
     #[test]
     fn apply_lexical_signals_repo_boost_ties_break_by_wire_id_ascending() {
-        // 全部属于当前仓库、同 bm25：加分一致 → tiebreak 仍落到 id 升序，
+        // 全部属于当前仓库、同 relevance：加分一致 → tiebreak 仍落到 id 升序，
         // 跨运行逐字节稳定（分页不会因偏好而抖动）。
         let scored = vec![
             (hit("zeta", 1.0), Some(payload(None, None)), true),

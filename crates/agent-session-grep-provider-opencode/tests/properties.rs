@@ -154,6 +154,7 @@ struct Case {
     cwd: Option<String>,
     saw_system_role: bool,
     saw_dropped_data: bool,
+    expected_skipped: usize,
     saw_tool_part: bool,
     saw_ws_only: bool,
 }
@@ -209,7 +210,7 @@ struct PlannedMsg {
 }
 
 /// 生成器把"计划语义"与 adapter 的查询口径做同源判定：
-/// `data` 不是合法 JSON 或 `$.role` 不是字符串 → 该行被 adapter 丢弃；
+/// `data` 是 SQL NULL 或 `$.role` 不是字符串 → 该行计入 skipped；
 /// part 同理（`$.type` != 'text' 或 `$.text` 不是字符串 → 不进正文）。
 fn build_case(seed: u64, with_big_field: bool) -> Case {
     let mut rng = XorShift64Star::new(seed);
@@ -241,6 +242,7 @@ fn build_case(seed: u64, with_big_field: bool) -> Case {
     let mut planned: Vec<PlannedMsg> = Vec::with_capacity(n_msgs);
     let mut saw_system_role = false;
     let mut saw_dropped_data = false;
+    let mut expected_skipped = 0;
     let mut saw_tool_part = false;
     let mut saw_ws_only = false;
     let mut time_counter: i64 = 0;
@@ -260,10 +262,12 @@ fn build_case(seed: u64, with_big_field: bool) -> Case {
             }
             7 => {
                 saw_dropped_data = true;
-                (None, String::new()) // 坏 JSON：adapter 整行丢弃
+                expected_skipped += 1;
+                (None, String::new()) // SQL NULL: counted as skipped
             }
             8 => {
                 saw_dropped_data = true;
+                expected_skipped += 1;
                 (Some(r#"{"role":42}"#.to_string()), String::new()) // 非字符串角色：丢弃
             }
             _ => (Some(r#"{"role":"tool"}"#.to_string()), "tool".to_string()),
@@ -426,6 +430,7 @@ fn build_case(seed: u64, with_big_field: bool) -> Case {
         cwd,
         saw_system_role,
         saw_dropped_data,
+        expected_skipped,
         saw_tool_part,
         saw_ws_only,
     }
@@ -472,6 +477,10 @@ fn prop_spans_are_always_none() {
 fn prop_seq_contiguous_and_counts_committed() {
     for_each_seed(|seed, case| {
         let (report, captured) = parse_case(seed, &case.bytes);
+        assert_eq!(
+            report.skipped, case.expected_skipped,
+            "seed={seed}: malformed roles must be counted"
+        );
         for (i, got) in captured.iter().enumerate() {
             assert_eq!(got.seq, i as u32, "seed={seed}: seq 必须从 0 连续递增");
         }
