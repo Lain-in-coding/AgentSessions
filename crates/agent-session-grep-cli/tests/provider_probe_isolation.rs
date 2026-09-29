@@ -71,6 +71,16 @@ const GOLDEN_FIXTURES: &[(&str, &str, &[u8])] = &[
         include_bytes!("../../agent-session-grep-provider-cursor/tests/golden/basic.db"),
     ),
     (
+        "cursor",
+        "disk-kv.db",
+        include_bytes!("../../agent-session-grep-provider-cursor/tests/golden/disk-kv.db"),
+    ),
+    (
+        "cursor",
+        "disk-kv-shuffled.db",
+        include_bytes!("../../agent-session-grep-provider-cursor/tests/golden/disk-kv-shuffled.db"),
+    ),
+    (
         "grok-build",
         "basic.jsonl",
         include_bytes!("../../agent-session-grep-provider-grok/tests/golden/basic.jsonl"),

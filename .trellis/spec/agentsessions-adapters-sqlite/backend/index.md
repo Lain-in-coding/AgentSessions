@@ -350,8 +350,8 @@ no-op batches, encoder rollback, keyset query plans, finite scores and bounded
 top-k equivalence. Each SQLite-reading provider crate (`opencode`,
 `cursor`, `hermes/sqlite-state-v1`) must create real temporary WAL/SHM files
 while parsing its private read-only copy, then assert all owned files disappear
-after successful reads and query errors (the hermes variant also guards a
-stray `-journal`).
+after successful reads and query errors (the hermes and cursor copy guards
+also remove a stray `-journal`).
 
 ### 7. Wrong vs Correct
 Wrong: call migration from a read command or return early before batch validation.

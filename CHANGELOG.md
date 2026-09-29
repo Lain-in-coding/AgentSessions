@@ -10,6 +10,34 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Cursor `state.vscdb` gains a second, additive variant (`cursor/disk-kv-v1`)
+  covering the `cursorDiskKV` table (`composerData:<id>` metadata +
+  `bubbleId:<composerId>:<bubbleId>` bodies), a surface the ItemTable-only
+  adapter never read. Variant selection is decided by the bytes alone
+  (`cursorDiskKV` plus a `composerData:` key vs. ItemTable `chatdata`/`prompts`):
+  the two variants are mutually exclusive, and a double claim or a broken shape
+  is refused instead of guessed. Messages follow `fullConversationHeadersOnly`
+  strictly - never KV key, rowid or insertion order (pinned by two synthetic
+  fixtures whose KV insertion orders are shuffled) - and a missing, NULL,
+  malformed, wrong-shape or invalid-UTF-8 bubble keeps its slot, is counted in
+  `skipped` and is named with its exact storage key instead of silently
+  disappearing. Tool input prefers `rawArgs` and falls back to `params`, accepts
+  object and JSON/plain-string encodings, and is only ever treated as text
+  (never executed). Every database is read through one pinned read transaction
+  on a private copy of the captured snapshot: the parser never opens the source
+  file, so source DB/WAL/SHM stay untouched and a concurrent commit cannot
+  change one parse's observation. Messages report no adopted native id
+  (`bubbleId` is a composer-scoped storage-key component and Cursor's private
+  storage has no official version contract), so canonical message identity
+  stays document-scoped; verbatim composer/bubble ids appear only as
+  observations. Composers, headers, cells and total bytes are bounded, and
+  exceeding a bound fails the source explicitly instead of truncating it.
+  Evidence: BLAKE3-pinned synthetic goldens plus adversarial unit tests in
+  `crates/agent-session-grep-provider-cursor/` and CLI ingest/search/bad-bubble
+  end-to-end tests in `crates/agent-session-grep-cli/tests/cursor_disk_kv.rs`.
+  Maturity stays Experimental: no official versioned storage contract was
+  located, so only the pinned Wake implementation and the synthetic probes
+  support the format (recorded in the crate's golden PROVENANCE).
 - Hermes `state.db` sessions are now indexed by a second, additive variant
   (`hermes/sqlite-state-v1`) covering `~/.hermes/state.db` and
   `~/.hermes/profiles/<name>/state.db`, a surface the JSON-only adapter never
