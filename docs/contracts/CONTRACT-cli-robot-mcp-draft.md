@@ -85,6 +85,8 @@ tools: search_sessions / get_session_context / get_session_resume / get_message 
 
 `SearchRequest.query` 只支持 plain-text 关键词：按空白切分的字面 token、隐式 AND。FTS5 操作符（`AND`/`OR`/`NOT`、`NEAR(...)`、短语引号、前缀 `*`）**不是查询语言**，一律作为字面文本参与匹配；不存在高级查询语法（ADR-0003，已实现）。`safe_fts_query` 是该语义的强制边界，CLI/MCP/Port 入口共用。
 
+- 命中的 `text` 是 Application 装配的显示摘要（ADR-0008），不是索引原文：有可证明的字面命中时取该命中的原文连续窗口（≤ `max_snippet_chars` 字符，以最早命中为中心按 2 右 : 1 左 扩展，锚点自身超限时取锚点起始切片）；无字面证据（无匹配、语义-only）时回退正文前缀。不插入省略号/高亮等合成字符，大小写不敏感匹配按小写展开回映到原字符边界；窗口字节经既有命中级估算计入 `max_response_bytes`，排名/游标/`why_matched`/建议命令不受影响。human 模式的片段行在此摘要上按同一字面词元重新居中（≤120 字符，命中左侧约 40 字符上下文）；无词元/未命中/正文更短时保持原前缀预览。
+
 ## 10. Web 搜索参数与向量重建
 
 - `GET /api/search` 与 `/api/projection/search` 支持 `q`、`mode`、`limit`、`max_bytes`、`cursor`、可重复的 `provider`、`since`、`until`、`repo`、`include_system`、`group_by_session`、`sidechain`、`tool_kind`、`tool_name`。`limit` 同时设置页大小和 `max_items`；没有独立的第二个 item 预算。`sidechain` 接受 `include|main_only|subagent_only`，布尔值只接受 `true|false`。

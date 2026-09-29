@@ -17,6 +17,9 @@ const CONTEXT_TEXT_CHARS: usize = 80;
 /// `search` 命中正文预览的最大字符数（10 角色体验测试缺陷修复：命中只有
 /// UUID+score 时新手无从判断哪条有用）。
 const SNIPPET_PREVIEW_CHARS: usize = 120;
+/// `search` 命中预览在命中起点左侧保留的上下文字符数。Application 的 `text`
+/// 窗口默认 2000 字符、锚点约在 1/3 处，纯前缀预览仍会看不到命中。
+const SNIPPET_ANCHOR_LEFT_CONTEXT: usize = 40;
 
 /// 把成功结果渲染为人类可读行（无 envelope、无颜色）。
 ///
@@ -374,13 +377,23 @@ fn render_search(data: &Value) -> Vec<String> {
         lines.push(format!("  {}. {id}  score {score}", index + 1));
         // 正文预览：命中是否有用一瞥即知。取不到 preview 的命中不补行。
         // ADR-0008 后摘要统一由命中对象的 `text` 字段承载（application 装配，
-        // 按 max_snippet_chars 截前缀）；`snippet` 是旧字段名，为兼容旧形状
-        // 仍作为回退读取。两者都不存在则省略该行。
+        // 按 max_snippet_chars 构建命中窗口）；`snippet` 是旧字段名，为兼容旧
+        // 形状仍作为回退读取。两者都不存在则省略该行。窗口可能远长于预览上限
+        // （默认 2000 字符、锚点约 1/3 处），因此按 why_matched 字面词元把预览
+        // 挪到最早命中上（无词元/未命中/正文更短时保持既有前缀行为）。
         if let Some(text) = hit
             .get("snippet")
             .or_else(|| hit.get("text"))
             .and_then(Value::as_str)
-            .map(|text| preview(text, SNIPPET_PREVIEW_CHARS))
+            .map(|text| {
+                anchored_preview(
+                    text,
+                    hit.get("why_matched")
+                        .and_then(Value::as_array)
+                        .map(Vec::as_slice),
+                    SNIPPET_PREVIEW_CHARS,
+                )
+            })
             && !text.is_empty()
         {
             lines.push(format!("     {text}"));
@@ -763,6 +776,73 @@ fn preview(text: &str, max: usize) -> String {
         .map(|c| if c.is_control() { ' ' } else { c })
         .take(max)
         .collect()
+}
+
+/// 命中摘要（Application 装配的 `text` 窗口）可能远长于 `SNIPPET_PREVIEW_CHARS`：
+/// 直接取前缀会把命中切掉（窗口按 2 右 : 1 左 居中，锚点约在 1/3 处）。这里按
+/// `why_matched` 的字面词元找到 `text` 内最早命中，把 ≤ `max` 字符的预览窗口挪到
+/// 命中上：命中起点左侧约 [`SNIPPET_ANCHOR_LEFT_CONTEXT`] 个字符，词元长于 `max`
+/// 时右移到能容纳词元结尾为止；无词元、无命中或 `text` 不超 `max` 时保持
+/// [`preview`] 的既有前缀语义。控制字符单行化规则与 [`preview`] 相同。
+///
+/// 词元来自 Application 的 `why_matched`（字面证据，无正则/FTS 语法），命中判定
+/// 与 Application 的窗口锚点同一规则：逐字符小写展开并回映到原字符边界（如
+/// `İ`），绝不按展开串偏移切片。
+fn anchored_preview(text: &str, why_matched: Option<&[Value]>, max: usize) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= max {
+        return preview(text, max);
+    }
+    let terms: Vec<&str> = why_matched
+        .unwrap_or_default()
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    let Some((anchor_start, anchor_end)) = earliest_term_span(&chars, &terms) else {
+        return preview(text, max);
+    };
+    let start = anchor_start
+        .saturating_sub(SNIPPET_ANCHOR_LEFT_CONTEXT)
+        .max(anchor_end.saturating_sub(max));
+    let end = (start + max).min(chars.len());
+    chars[start..end]
+        .iter()
+        .map(|value| if value.is_control() { ' ' } else { *value })
+        .collect()
+}
+
+/// `why_matched` 词元在 `text` 原字符上的最早命中（半开区间）：起点最小，平局
+/// 按词元顺序。与 Application 命中窗口的锚点同一规则（逐字符小写展开并回映到
+/// 原字符边界）。
+fn earliest_term_span(chars: &[char], terms: &[&str]) -> Option<(usize, usize)> {
+    let mut lower = Vec::new();
+    let mut origins = Vec::new();
+    for (index, ch) in chars.iter().enumerate() {
+        for folded in ch.to_lowercase() {
+            lower.push(folded);
+            origins.push(index);
+        }
+    }
+    let mut best: Option<(usize, usize, usize)> = None;
+    for (term_index, term) in terms.iter().enumerate() {
+        let needle: Vec<char> = term.chars().flat_map(char::to_lowercase).collect();
+        if needle.is_empty() || needle.len() > lower.len() {
+            continue;
+        }
+        let Some(offset) = lower
+            .windows(needle.len())
+            .position(|candidate| candidate == needle.as_slice())
+        else {
+            continue;
+        };
+        let start = origins[offset];
+        let end = origins[offset + needle.len() - 1] + 1;
+        let found = (start, term_index, end);
+        if best.is_none_or(|current| found < current) {
+            best = Some(found);
+        }
+    }
+    best.map(|(start, _, end)| (start, end))
 }
 
 /// 仅单行化、不截断。
@@ -1390,6 +1470,99 @@ mod tests {
             lines,
             ["1 hit(s) (generation 3)", "  1. msg_v1_aaaa  score 2.00",]
         );
+    }
+
+    /// 渲染一条带 `text` 的命中，返回片段预览行（测试固定：预览行是最后一行）。
+    fn rendered_preview_line(text: &str, why_matched: Option<Value>) -> String {
+        let mut hit = json!({ "id": "msg_v1_aaaa", "score": 2.0, "text": text });
+        if let Some(terms) = why_matched {
+            hit["why_matched"] = terms;
+        }
+        let data = json!({
+            "hits": [hit],
+            "generation": 3,
+            "truncation": { "truncated": false, "reason": null },
+        });
+        let lines = render_success("search", Outcome::Success, &data, &Page::default());
+        lines.last().expect("preview line").clone()
+    }
+
+    #[test]
+    fn search_preview_recenters_on_late_literal_term() {
+        // Application 的 text 窗口默认 2000 字符、锚点约在 1/3 处；≤120 字符的
+        // human 预览必须挪到命中上（大小写不敏感），否则长窗口命中在 CLI 不可见。
+        let text = format!("{} NEEDLE {}", "x".repeat(300), "y".repeat(300));
+        let line = rendered_preview_line(&text, Some(json!(["needle"])));
+        assert_eq!(
+            line,
+            format!("     {} NEEDLE {}", "x".repeat(39), "y".repeat(73))
+        );
+    }
+
+    #[test]
+    fn search_preview_keeps_term_at_text_start() {
+        // 命中就在正文开头：左侧无可取上下文，预览等于既有前缀。
+        let text = format!("needle {}", "x".repeat(300));
+        let line = rendered_preview_line(&text, Some(json!(["needle"])));
+        assert_eq!(line, format!("     needle {}", "x".repeat(113)));
+    }
+
+    #[test]
+    fn search_preview_keeps_term_at_text_end() {
+        // 命中在正文末尾：右侧无上下文，预览在文本尾部收口。
+        let text = format!("{}needle", "x".repeat(300));
+        let line = rendered_preview_line(&text, Some(json!(["needle"])));
+        assert_eq!(line, format!("     {}needle", "x".repeat(40)));
+    }
+
+    #[test]
+    fn search_preview_falls_back_to_prefix_without_terms() {
+        // 无 why_matched 或词元未命中 → 既有前缀行为不变。
+        let text = format!("{}needle", "x".repeat(300));
+        let prefix = format!("     {}", "x".repeat(120));
+        assert_eq!(rendered_preview_line(&text, None), prefix);
+        assert_eq!(
+            rendered_preview_line(&text, Some(json!(["absent"]))),
+            prefix
+        );
+    }
+
+    #[test]
+    fn search_preview_sanitizes_control_characters_around_the_term() {
+        // 窗口挪到命中上后，控制字符仍走 preview 的单行化规则（换成空格）。
+        let text = format!("{}\tneedle\n{}", "x".repeat(300), "y".repeat(300));
+        let line = rendered_preview_line(&text, Some(json!(["needle"])));
+        assert_eq!(
+            line,
+            format!("     {} needle {}", "x".repeat(39), "y".repeat(73))
+        );
+        assert!(!line.chars().any(char::is_control), "{line:?}");
+    }
+
+    #[test]
+    fn search_preview_keeps_short_text_unchanged() {
+        // 正文不超预览上限：整体输出，不做任何位移。
+        let line = rendered_preview_line("short needle text", Some(json!(["needle"])));
+        assert_eq!(line, "     short needle text");
+    }
+
+    #[test]
+    fn search_preview_prefers_earliest_position_over_term_order() {
+        // 锚点由正文位置决定：命中更早的词元胜出，与 why_matched 顺序无关。
+        let text = format!("{}first{}second", "x".repeat(300), "y".repeat(300));
+        let line = rendered_preview_line(&text, Some(json!(["second", "first"])));
+        assert!(line.contains("first"), "{line}");
+        assert!(!line.contains("second"), "{line}");
+    }
+
+    #[test]
+    fn search_preview_maps_expansion_offsets_to_original_characters() {
+        // İ 的小写展开是 i + U+0307：按展开偏移切片会切碎原字符，预览必须
+        // 回映到原字符边界（与 Application 命中窗口同一规则）。
+        let text = format!("{}İSTANBUL tail", "x".repeat(300));
+        let line = rendered_preview_line(&text, Some(json!(["i\u{307}stan"])));
+        assert!(line.contains("İSTAN"), "{line}");
+        assert!(text.contains(line.trim_start()), "{line:?}");
     }
 
     #[test]

@@ -1,0 +1,4 @@
+{"file": ".trellis/spec/agentsessions-application/backend/index.md", "reason": "Application 质量与回归检查"}
+{"file": ".trellis/spec/agentsessions-ports/backend/index.md", "reason": "端口契约一致性"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "跨入口/跨层一致性检查"}
+{"file": ".trellis/tasks/archive/2026-09/09-29-wake-reuse-study/research/experiments/snippet/README.md", "reason": "对照实验边界验证实现"}
