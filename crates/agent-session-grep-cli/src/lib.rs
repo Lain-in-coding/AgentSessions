@@ -4845,8 +4845,20 @@ fn defer_sources_changed_during_read(
     diagnostics: &mut Vec<String>,
     total: usize,
 ) -> Result<Vec<String>, PortError> {
+    // Only sources that produced a commit batch consumed their bytes during
+    // staging. A fingerprint-matched source was dropped from the batch without
+    // being parsed, so re-reading and re-hashing it here would double the no-op
+    // I/O for bytes that are never written; the next sync re-captures any new
+    // content because the stored fingerprint no longer matches.
+    let staged: BTreeSet<&str> = sources
+        .iter()
+        .map(|source| source.source_path.as_str())
+        .collect();
     let mut deferred: Vec<String> = Vec::new();
     for (index, (path, snapshot)) in snapshots.iter().enumerate() {
+        if !staged.contains(path.to_string_lossy().as_ref()) {
+            continue;
+        }
         match verify_snapshot(path, snapshot) {
             Ok(()) => {}
             Err(PortError::SnapshotChanged(detail)) => {
