@@ -1,0 +1,203 @@
+{
+  "repository": "https://github.com/iAmCorey/Wake",
+  "version": "0.8.5",
+  "commit": "71aeca67ec80f8645d1f9d5199290c2c732036ce",
+  "commit_date": "2026-09-27",
+  "tracked_files": 235,
+  "license": "MIT",
+  "copyright": "Copyright (c) 2026 Corey Chiu",
+  "baseline_commit": "2b8f89562e43bd1f68ad3c8e5cf8ccc9281f9af2",
+  "source_checkout_verified_clean": true,
+  "contains_real_transcripts": false,
+  "files": [
+    {
+      "path": "LICENSE",
+      "git_blob": "77ad15a2bbf1194c9728572cbbe7393b8295954e",
+      "sha256": "6c5b814b7380ea079c57a49de1a2fce2befe4e15a2a34427626a4ecdeb8947a5",
+      "line_count": 21,
+      "url": "https://github.com/iAmCorey/Wake/blob/71aeca67ec80f8645d1f9d5199290c2c732036ce/LICENSE"
+    },
+    {
+      "path": "Cargo.toml",
+      "git_blob": "82e784ec29ce0d9d6ef6e283e0e489c224d529fc",
+      "sha256": "af1f0dec0422bc5a6c3a205ff21666acdc269330e2693a951bc54436a5ad6819",
+      "line_count": 30,
+      "url": "https://github.com/iAmCorey/Wake/blob/71aeca67ec80f8645d1f9d5199290c2c732036ce/Cargo.toml"
+    },
+    {
+      "path": "crates/wake-core/Cargo.toml",
+      "git_blob": "00df417f30e684c748a4e4a83855fa00da7d63bd",
+      "sha256": "ebaf5f539c6ff2a883eac6278ece4c43294f2a048a7dba8880f26ae3edc35eff",
+      "line_count": 63,
+      "url": "https://github.com/iAmCorey/Wake/blob/71aeca67ec80f8645d1f9d5199290c2c732036ce/crates/wake-core/Cargo.toml"
+    },
+    {
+      "path": "crates/wake/Cargo.toml",
+      "git_blob": "335da4f210e05a6265c6ff793ddc1b5e50e70340",
+      "sha256": "3556c6d01c30ca5607002dd56548a3ff58b15eb21b7d19acacfbd203ff82c3d4",
+      "line_count": 43,
+      "url": "https://github.com/iAmCorey/Wake/blob/71aeca67ec80f8645d1f9d5199290c2c732036ce/crates/wake/Cargo.toml"
+    },
+    {
+      "path": "crates/wake-core/src/db.rs",
+      "git_blob": "d0152507eba4fcc470f57538ae2661f0dcc9a799",
+      "sha256": "4376611d08f58bd628ce78ae35d09fe132d62784cc6a72ae3afb4a87c3c89b8c",
+      "line_count": 3408,
+      "url": "https://github.com/iAmCorey/Wake/blob/71aeca67ec80f8645d1f9d5199290c2c732036ce/crates/wake-core/src/db.rs"
+    },
+    {
+      "path": "crates/wake-core/src/scanner.rs",
+      "git_blob": "88acb5dde50fc302a3aeb7bb4391cbb98d9b6f4e",
+      "sha256": "190a2596b4e8fa5885d9c51f2325a0b5fdfc19af37c6bfdad9cb536cf716e967",
+      "line_count": 1170,
+      "url": "https://github.com/iAmCorey/Wake/blob/71aeca67ec80f8645d1f9d5199290c2c732036ce/crates/wake-core/src/scanner.rs"
+    },
+    {
+      "path": "crates/wake-core/src/watcher.rs",
+      "git_blob": "01cbcafec4c4afde9c9d1e61bc671f73b8e4f3cd",
+      "sha256": "cf175d4597eeec78e91f4d4d85c344462da0bec8d43a514b415d8e34a827ceb3",
+      "line_count": 396,
+      "url": "https://github.com/iAmCorey/Wake/blob/71aeca67ec80f8645d1f9d5199290c2c732036ce/crates/wake-core/src/watcher.rs"
+    },
+    {
+      "path": "crates/wake-core/src/models.rs",
+      "git_blob": "b8e9ea0506d579c09963268dc67f488aec62b908",
+      "sha256": "08fcd93f7837ce79b3a0ce3bd34ca5de67ee1c8c3b258320e1a57e0d44f1e2e3",
+      "line_count": 1035,
+      "url": "https://github.com/iAmCorey/Wake/blob/71aeca67ec80f8645d1f9d5199290c2c732036ce/crates/wake-core/src/models.rs"
+    },
+    {
+      "path": "crates/wake-core/src/adapters/mod.rs",
+      "git_blob": "22e7b5dc5b01c623bb95bed7903ee1eeb0492761",
+      "sha256": "7528e6a4af508a773019245f97e600064e533da9e4603b381232b2fd92cc8fea",
+      "line_count": 1371,
+      "url": "https://github.com/iAmCorey/Wake/blob/71aeca67ec80f8645d1f9d5199290c2c732036ce/crates/wake-core/src/adapters/mod.rs"
+    },
+    {
+      "path": "crates/wake-core/src/adapters/parse_utils.rs",
+      "git_blob": "9839e9694a56577e70cdd54b65b78a6e18adcb76",
+      "sha256": "1796fabfd0cb0efbb760ed59fccb3c685637ccd1ca7d04ff87deebdfc16914ce",
+      "line_count": 1193,
+      "url": "https://github.com/iAmCorey/Wake/blob/71aeca67ec80f8645d1f9d5199290c2c732036ce/crates/wake-core/src/adapters/parse_utils.rs"
+    },
+    {
+      "path": "crates/wake-core/src/adapters/sqlite_ro.rs",
+      "git_blob": "e2aa36ac90e099cd6a2e0681b6c54c14f8d6a1eb",
+      "sha256": "2117fac2fece7c2feb150c277c7c41c0c31ca7b3013939e8362ba88edc574e83",
+      "line_count": 102,
+      "url": "https://github.com/iAmCorey/Wake/blob/71aeca67ec80f8645d1f9d5199290c2c732036ce/crates/wake-core/src/adapters/sqlite_ro.rs"
+    },
+    {
+      "path": "crates/wake-core/src/adapters/dsh.rs",
+      "git_blob": "2e88e3230a5fdb829c9a4a5cb9fe4dcc5c0eef2a",
+      "sha256": "64640b5e3e0322bd6dfad41e39276ad10861bf4aa978717e9e623a402380936f",
+      "line_count": 650,
+      "url": "https://github.com/iAmCorey/Wake/blob/71aeca67ec80f8645d1f9d5199290c2c732036ce/crates/wake-core/src/adapters/dsh.rs"
+    },
+    {
+      "path": "crates/wake-core/src/adapters/zcode.rs",
+      "git_blob": "722ce4983ffe593922a0264b6b0e4108de3f87ce",
+      "sha256": "8a7ed720ec9a4b6f298d5a72f3271acb1630e15b763f23f8bfe338684117e608",
+      "line_count": 547,
+      "url": "https://github.com/iAmCorey/Wake/blob/71aeca67ec80f8645d1f9d5199290c2c732036ce/crates/wake-core/src/adapters/zcode.rs"
+    },
+    {
+      "path": "crates/wake-core/src/adapters/cursor_ide.rs",
+      "git_blob": "618d4e63c471f3ed9d9ec4da261f9ad03f342d90",
+      "sha256": "71e75330334284d34e47bcbfc4a757e7a0075079ef0e6a405c3799b501c50adb",
+      "line_count": 699,
+      "url": "https://github.com/iAmCorey/Wake/blob/71aeca67ec80f8645d1f9d5199290c2c732036ce/crates/wake-core/src/adapters/cursor_ide.rs"
+    },
+    {
+      "path": "crates/wake-core/src/adapters/hermes.rs",
+      "git_blob": "033cf14e85b99d83b0600c808156b5942fb07432",
+      "sha256": "c74c4b081ccdf2f7162dff7d7f3a2cee3d74b754971d22d863be76caa367b453",
+      "line_count": 549,
+      "url": "https://github.com/iAmCorey/Wake/blob/71aeca67ec80f8645d1f9d5199290c2c732036ce/crates/wake-core/src/adapters/hermes.rs"
+    },
+    {
+      "path": "crates/wake-core/src/adapters/opencode.rs",
+      "git_blob": "0f72a2585c0d87fd145ad8eb51a579d8ca79e421",
+      "sha256": "bb7f449ab97aecef5f3c3f92f0324e7b94f69d00248a661c60a65a0a5874f19b",
+      "line_count": 804,
+      "url": "https://github.com/iAmCorey/Wake/blob/71aeca67ec80f8645d1f9d5199290c2c732036ce/crates/wake-core/src/adapters/opencode.rs"
+    },
+    {
+      "path": "crates/wake-core/src/cli.rs",
+      "git_blob": "29c27edc80bb0d131de8542b43f21af50e4ece4a",
+      "sha256": "163cc80dfed70ae9efc5813cf71049cd3677a40cdf40ea382da76547096fbf97",
+      "line_count": 1407,
+      "url": "https://github.com/iAmCorey/Wake/blob/71aeca67ec80f8645d1f9d5199290c2c732036ce/crates/wake-core/src/cli.rs"
+    },
+    {
+      "path": "crates/wake-core/src/mcp/mod.rs",
+      "git_blob": "877a62682095ffa5416eba68470b1fb149242664",
+      "sha256": "f6c6fe2da696574ce30853f70d471c60da76dc4bfec020b62de0ee5c28ce5b51",
+      "line_count": 339,
+      "url": "https://github.com/iAmCorey/Wake/blob/71aeca67ec80f8645d1f9d5199290c2c732036ce/crates/wake-core/src/mcp/mod.rs"
+    },
+    {
+      "path": "crates/wake-core/src/mcp/tools.rs",
+      "git_blob": "fc09546ed6ec99738b7e8922c40191bd6907d976",
+      "sha256": "f3022979942d3ff7d82e3140d5f3522a48a97f908975f985f2682d6e36e65cf1",
+      "line_count": 1424,
+      "url": "https://github.com/iAmCorey/Wake/blob/71aeca67ec80f8645d1f9d5199290c2c732036ce/crates/wake-core/src/mcp/tools.rs"
+    },
+    {
+      "path": "crates/wake-core/src/services/context.rs",
+      "git_blob": "c405379a44070c9fc3965f2c4bd79355f0096c71",
+      "sha256": "1edd25cda720a0cabf13264ee2c40dc2631b464b56886f5eecfe1542f97be6ab",
+      "line_count": 252,
+      "url": "https://github.com/iAmCorey/Wake/blob/71aeca67ec80f8645d1f9d5199290c2c732036ce/crates/wake-core/src/services/context.rs"
+    },
+    {
+      "path": "crates/wake-core/src/services/exporter.rs",
+      "git_blob": "88aa52397dfed91f19f56b7c1e907fa0123b676a",
+      "sha256": "5f3f3b4308ea5c3a668a3660e1ab71366e931f64a0157e35f2eb1ba0d46c1e7f",
+      "line_count": 580,
+      "url": "https://github.com/iAmCorey/Wake/blob/71aeca67ec80f8645d1f9d5199290c2c732036ce/crates/wake-core/src/services/exporter.rs"
+    },
+    {
+      "path": "crates/wake-core/src/services/terminal/mod.rs",
+      "git_blob": "e948f9137e1c77624c32b7110fd53d46bfbfd3e7",
+      "sha256": "40c71010c7f24fb2c5f73ffb64e94feb9440388bc38117e5baac3688e03db21e",
+      "line_count": 768,
+      "url": "https://github.com/iAmCorey/Wake/blob/71aeca67ec80f8645d1f9d5199290c2c732036ce/crates/wake-core/src/services/terminal/mod.rs"
+    },
+    {
+      "path": "crates/wake-core/src/services/terminal/windows.rs",
+      "git_blob": "5a655f0fcce30fad2085d994b9d66a8761565d81",
+      "sha256": "f48989e86fd1d7db5382076d2476b6a268b6463e88797e5bba36e5bd96ad44e5",
+      "line_count": 496,
+      "url": "https://github.com/iAmCorey/Wake/blob/71aeca67ec80f8645d1f9d5199290c2c732036ce/crates/wake-core/src/services/terminal/windows.rs"
+    },
+    {
+      "path": "crates/wake-core/src/services/terminal/cmd.rs",
+      "git_blob": "84394536704d2be46dee59f76d2b5036aed8469a",
+      "sha256": "7ba375260dbd5647a4589c7a74f64d8fe474f8aba5b238bb1d57fa826f5b17d9",
+      "line_count": 81,
+      "url": "https://github.com/iAmCorey/Wake/blob/71aeca67ec80f8645d1f9d5199290c2c732036ce/crates/wake-core/src/services/terminal/cmd.rs"
+    },
+    {
+      "path": "crates/wake-core/src/services/terminal/posix.rs",
+      "git_blob": "8e2034673eddfaaabdb1a128489667aea7306cc3",
+      "sha256": "cc0c7b40157d3508f6bf99f53be3322523250322c914752974689ad464b26392",
+      "line_count": 166,
+      "url": "https://github.com/iAmCorey/Wake/blob/71aeca67ec80f8645d1f9d5199290c2c732036ce/crates/wake-core/src/services/terminal/posix.rs"
+    },
+    {
+      "path": "crates/wake-core/src/services/terminal/macos.rs",
+      "git_blob": "434fd83035d029bf3396852750af61c72fff8fa8",
+      "sha256": "4acf2c4106ca15bed1517c256c09dbee86901c37d0d6b11b02be322b4881e1ed",
+      "line_count": 702,
+      "url": "https://github.com/iAmCorey/Wake/blob/71aeca67ec80f8645d1f9d5199290c2c732036ce/crates/wake-core/src/services/terminal/macos.rs"
+    },
+    {
+      "path": "crates/wake-core/src/bin/wake_cli.rs",
+      "git_blob": "69f3ba76cb03e4b7932bc2466ee46158cb2cbe95",
+      "sha256": "2f91b2936772e3b105fe1e842775b1121352193741e1b2c5c93d2c11802e982a",
+      "line_count": 214,
+      "url": "https://github.com/iAmCorey/Wake/blob/71aeca67ec80f8645d1f9d5199290c2c732036ce/crates/wake-core/src/bin/wake_cli.rs"
+    }
+  ]
+}
