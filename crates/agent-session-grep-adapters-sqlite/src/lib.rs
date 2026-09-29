@@ -4898,7 +4898,58 @@ impl SqliteStore {
     fn regenerate_compatibility_aliases_in_tx(
         tx: &rusqlite::Transaction<'_>,
         batch_sources: &[String],
+        in_memory_payloads: &BTreeMap<&str, &[u8]>,
     ) -> PortResult<()> {
+        // Only entities claimed by this batch's sources can have their
+        // aliases changed; collecting that candidate set up front keeps the
+        // claimer maps proportional to the batch instead of the catalog.
+        let mut candidate_entities = BTreeSet::<String>::new();
+        for chunk in chunk_ids(batch_sources) {
+            let placeholders = in_placeholders(chunk.len());
+            let mut stmt = tx
+                .prepare(&format!(
+                    "SELECT message_id FROM source_membership
+                     WHERE source_path IN ({placeholders})"
+                ))
+                .map_err(backend)?;
+            let rows = stmt
+                .query_map(rusqlite::params_from_iter(chunk.iter()), |row| {
+                    row.get::<_, String>(0)
+                })
+                .map_err(backend)?;
+            for row in rows {
+                candidate_entities.insert(row.map_err(backend)?);
+            }
+            let mut stmt = tx
+                .prepare(&format!(
+                    "SELECT placements.session_id, placements.document_id,
+                            placements.message_id
+                     FROM source_placement_membership AS claims
+                     JOIN message_placements AS placements
+                       ON placements.placement_id = claims.placement_id
+                     WHERE claims.source_path IN ({placeholders})"
+                ))
+                .map_err(backend)?;
+            let rows = stmt
+                .query_map(rusqlite::params_from_iter(chunk.iter()), |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })
+                .map_err(backend)?;
+            for row in rows {
+                let (session_id, document_id, message_id) = row.map_err(backend)?;
+                candidate_entities.insert(session_id);
+                candidate_entities.insert(document_id);
+                candidate_entities.insert(message_id);
+            }
+        }
+        if candidate_entities.is_empty() {
+            return Ok(());
+        }
+
         let complete_sources = {
             let mut stmt = tx
                 .prepare("SELECT source_path FROM source_relation_scans")
@@ -4933,6 +4984,9 @@ impl SqliteStore {
                 .map_err(backend)?;
             for row in rows {
                 let (source_path, entity_id, document_id) = row.map_err(backend)?;
+                if !candidate_entities.contains(&entity_id) {
+                    continue;
+                }
                 claimers_by_entity
                     .entry(entity_id.clone())
                     .or_default()
@@ -4970,6 +5024,9 @@ impl SqliteStore {
             for row in rows {
                 let (source_path, session_id, document_id, message_id) = row.map_err(backend)?;
                 for entity_id in [session_id, document_id, message_id] {
+                    if !candidate_entities.contains(&entity_id) {
+                        continue;
+                    }
                     claimers_by_entity
                         .entry(entity_id)
                         .or_default()
@@ -5041,18 +5098,27 @@ impl SqliteStore {
             if !matches!(id.kind(), IdKind::Message | IdKind::Session) {
                 continue;
             }
-            let payload: Option<Vec<u8>> = tx
-                .query_row(
-                    "SELECT payload FROM catalog WHERE id = ?1",
-                    [&entity_id],
-                    |row| row.get(0),
-                )
-                .optional()
-                .map_err(backend)?;
+            let owned_payload: Option<Vec<u8>> =
+                if in_memory_payloads.contains_key(entity_id.as_str()) {
+                    None
+                } else {
+                    tx.query_row(
+                        "SELECT payload FROM catalog WHERE id = ?1",
+                        [&entity_id],
+                        |row| row.get::<_, Option<Vec<u8>>>(0),
+                    )
+                    .optional()
+                    .map_err(backend)?
+                    .flatten()
+                };
+            let payload: Option<&[u8]> = match in_memory_payloads.get(entity_id.as_str()) {
+                Some(payload) => Some(*payload),
+                None => owned_payload.as_deref(),
+            };
             let Some(payload) = payload else {
                 continue;
             };
-            let mut map = match serde_json::from_slice::<serde_json::Value>(&payload) {
+            let mut map = match serde_json::from_slice::<serde_json::Value>(payload) {
                 Ok(serde_json::Value::Object(map)) => map,
                 _ => continue,
             };
@@ -5197,15 +5263,23 @@ impl SqliteStore {
             // Skip the write when the rebuilt aliases equal the stored bytes:
             // regeneration must not rewrite the catalog (and inflate the WAL)
             // on every commit once aliases are stable.
-            let stored: Option<Vec<u8>> = tx
-                .query_row(
-                    "SELECT payload FROM catalog WHERE id = ?1",
-                    [&entity_id],
-                    |row| row.get(0),
-                )
-                .optional()
-                .map_err(backend)?;
-            if stored.as_deref() != Some(payload.as_slice()) {
+            let stored_owned: Option<Vec<u8>>;
+            let stored: Option<&[u8]> = match in_memory_payloads.get(entity_id.as_str()) {
+                Some(stored) => Some(*stored),
+                None => {
+                    stored_owned = tx
+                        .query_row(
+                            "SELECT payload FROM catalog WHERE id = ?1",
+                            [&entity_id],
+                            |row| row.get::<_, Option<Vec<u8>>>(0),
+                        )
+                        .optional()
+                        .map_err(backend)?
+                        .flatten();
+                    stored_owned.as_deref()
+                }
+            };
+            if stored != Some(payload.as_slice()) {
                 tx.execute(
                     "UPDATE catalog SET payload = ?2 WHERE id = ?1",
                     rusqlite::params![entity_id, payload],
@@ -6610,7 +6684,11 @@ impl SqliteStore {
             .iter()
             .map(|replacement| replacement.source_path.clone())
             .collect();
-        Self::regenerate_compatibility_aliases_in_tx(&tx, &batch_sources)?;
+        let in_memory_payloads: BTreeMap<&str, &[u8]> = upserts
+            .iter()
+            .map(|(id, payload, _)| (id.as_str(), payload.as_slice()))
+            .collect();
+        Self::regenerate_compatibility_aliases_in_tx(&tx, &batch_sources, &in_memory_payloads)?;
         let resolver: &dyn RepoSlugResolver = &**self.repo_slug_resolver.borrow();
         for session_wire in affected_sessions {
             Self::rebuild_session_search_row_in_tx(
