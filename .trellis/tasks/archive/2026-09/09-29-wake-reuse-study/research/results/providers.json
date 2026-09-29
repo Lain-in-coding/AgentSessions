@@ -1,0 +1,944 @@
+{
+  "schema_version": "wake-reuse-study.providers/v1",
+  "status": "passed",
+  "contains_real_transcripts": false,
+  "evidence_status": "isolated_synthetic_probe",
+  "certification": "none: this does not certify provider compatibility, resume support or canonical identity",
+  "provider_version_evidence": {
+    "cursor_ide": "no official versioned storage contract located; pinned Wake implementation plus synthetic probes only",
+    "hermes": "independent snapshot NousResearch/hermes-agent@bac0c45d8593ed9d53a8e3fcacecdc920b71a2c4 hermes_state_common.py schema_version 30, sessions/messages columns; see ../../upstream-evidence.md"
+  },
+  "wake_commit": "71aeca67ec80f8645d1f9d5199290c2c732036ce",
+  "fixture_revision": 1,
+  "expected_suite_sha256": "92fec53e00abc38a1fbbaa10d8691456994afd9404f69fcbb94b7d4cbad5a358",
+  "python_sqlite_version": "3.40.1",
+  "limitations": [
+    "Python sqlite3 version is probe metadata only, not product runtime evidence.",
+    "Synthetic schema fixtures are hand-built; they are not provider certification or version coverage.",
+    "Association results are observation-only and never authoritative.",
+    "Native IDs are preserved exactly in observations but this is not StableId proof.",
+    "No resume, source-write, discovery or platform-path behavior is exercised."
+  ],
+  "summary": {
+    "case_count": 35,
+    "passed": 35,
+    "failed": 0,
+    "failed_ids": []
+  },
+  "cases": [
+    {
+      "id": "cursor.header_order_exact_ids",
+      "recipe": "KV insertion/key order opposes header order; non-BMP and separator IDs",
+      "expected": {
+        "status": "ok",
+        "session_id": "session:雪/#%_é",
+        "message_ids": [
+          "z:💡/#%_é",
+          "a:𐀀/雪"
+        ],
+        "ordinals": [
+          0,
+          1
+        ],
+        "roles": [
+          "user",
+          "assistant"
+        ],
+        "texts": [
+          "  synthetic 雪 é  ",
+          "synthetic second"
+        ]
+      },
+      "actual": {
+        "status": "ok",
+        "session_id": "session:雪/#%_é",
+        "message_ids": [
+          "z:💡/#%_é",
+          "a:𐀀/雪"
+        ],
+        "ordinals": [
+          0,
+          1
+        ],
+        "roles": [
+          "user",
+          "assistant"
+        ],
+        "texts": [
+          "  synthetic 雪 é  ",
+          "synthetic second"
+        ]
+      },
+      "passed": true
+    },
+    {
+      "id": "cursor.missing_null_malformed",
+      "recipe": "Keep a slot for malformed, missing, SQL NULL, non-object and invalid UTF-8 bubbles",
+      "expected": {
+        "status": "partial",
+        "ids": [
+          "valid",
+          "bad",
+          "missing",
+          "null",
+          "array",
+          "utf8"
+        ],
+        "states": [
+          "ok",
+          "malformed_json",
+          "missing_row",
+          "null_value",
+          "invalid_bubble_shape",
+          "invalid_utf8"
+        ]
+      },
+      "actual": {
+        "status": "partial",
+        "ids": [
+          "valid",
+          "bad",
+          "missing",
+          "null",
+          "array",
+          "utf8"
+        ],
+        "states": [
+          "ok",
+          "malformed_json",
+          "missing_row",
+          "null_value",
+          "invalid_bubble_shape",
+          "invalid_utf8"
+        ]
+      },
+      "passed": true
+    },
+    {
+      "id": "cursor.arguments_encodings",
+      "recipe": "rawArgs, params, plain text, blank field and JSON null; never execute inputs",
+      "expected": {
+        "selected": [
+          "rawArgs",
+          "params",
+          "rawArgs",
+          "params",
+          "rawArgs"
+        ],
+        "raw_encoding": [
+          "json_text",
+          "missing",
+          "unparsed_text",
+          "empty_text",
+          "json_text"
+        ],
+        "params_encoding": [
+          "json_value",
+          "json_value",
+          "missing",
+          "json_text",
+          "json_value"
+        ],
+        "values": [
+          {
+            "path": "synthetic/雪"
+          },
+          {
+            "path": "synthetic/params"
+          },
+          "not a command: synthetic",
+          {
+            "n": 2
+          },
+          null
+        ],
+        "result_encoding": [
+          "json_text",
+          "json_value",
+          "missing",
+          "missing",
+          "missing"
+        ],
+        "native_call_ids": [
+          "call:雪/#%",
+          null,
+          null,
+          null,
+          null
+        ]
+      },
+      "actual": {
+        "selected": [
+          "rawArgs",
+          "params",
+          "rawArgs",
+          "params",
+          "rawArgs"
+        ],
+        "raw_encoding": [
+          "json_text",
+          "missing",
+          "unparsed_text",
+          "empty_text",
+          "json_text"
+        ],
+        "params_encoding": [
+          "json_value",
+          "json_value",
+          "missing",
+          "json_text",
+          "json_value"
+        ],
+        "values": [
+          {
+            "path": "synthetic/雪"
+          },
+          {
+            "path": "synthetic/params"
+          },
+          "not a command: synthetic",
+          {
+            "n": 2
+          },
+          null
+        ],
+        "result_encoding": [
+          "json_text",
+          "json_value",
+          "missing",
+          "missing",
+          "missing"
+        ],
+        "native_call_ids": [
+          "call:雪/#%",
+          null,
+          null,
+          null,
+          null
+        ]
+      },
+      "passed": true
+    },
+    {
+      "id": "cursor.no_unicode_normalization",
+      "recipe": "Separate NFC/NFD session IDs and wildcard-bearing neighboring keys",
+      "expected": {
+        "ids": [
+          "é",
+          "é",
+          "id%_"
+        ],
+        "texts": [
+          "composed",
+          "decomposed",
+          "literal wildcard"
+        ]
+      },
+      "actual": {
+        "ids": [
+          "é",
+          "é",
+          "id%_"
+        ],
+        "texts": [
+          "composed",
+          "decomposed",
+          "literal wildcard"
+        ]
+      },
+      "passed": true
+    },
+    {
+      "id": "cursor.duplicate_occurrences",
+      "recipe": "Repeated bubble IDs preserve distinct header ordinals; not canonical message proof",
+      "expected": {
+        "ids": [
+          "same",
+          "same"
+        ],
+        "ordinals": [
+          0,
+          1
+        ],
+        "roles": [
+          "user",
+          "assistant"
+        ]
+      },
+      "actual": {
+        "ids": [
+          "same",
+          "same"
+        ],
+        "ordinals": [
+          0,
+          1
+        ],
+        "roles": [
+          "user",
+          "assistant"
+        ]
+      },
+      "passed": true
+    },
+    {
+      "id": "cursor.compound_key_ambiguity",
+      "recipe": "Two native tuples can spell the same colon-delimited storage key",
+      "expected": {
+        "native_tuples": [
+          [
+            "a:b",
+            "c"
+          ],
+          [
+            "a",
+            "b:c"
+          ]
+        ],
+        "texts": [
+          "shared storage cell",
+          "shared storage cell"
+        ]
+      },
+      "actual": {
+        "native_tuples": [
+          [
+            "a:b",
+            "c"
+          ],
+          [
+            "a",
+            "b:c"
+          ]
+        ],
+        "texts": [
+          "shared storage cell",
+          "shared storage cell"
+        ]
+      },
+      "passed": true
+    },
+    {
+      "id": "cursor.invalid_headers_explicit",
+      "recipe": "Missing ID and unknown header role are not silently assigned an assistant role",
+      "expected": {
+        "status": "partial",
+        "states": [
+          "invalid_header",
+          "unknown_role"
+        ],
+        "role": "unknown"
+      },
+      "actual": {
+        "status": "partial",
+        "states": [
+          "invalid_header",
+          "unknown_role"
+        ],
+        "role": "unknown"
+      },
+      "passed": true
+    },
+    {
+      "id": "cursor.missing_composer",
+      "recipe": "Isolated negative mutation: missing_composer",
+      "expected": {
+        "status": "error",
+        "code": "missing_composer",
+        "stage": "cursor.composer"
+      },
+      "actual": {
+        "status": "error",
+        "code": "missing_composer",
+        "stage": "cursor.composer"
+      },
+      "passed": true
+    },
+    {
+      "id": "cursor.bad_json",
+      "recipe": "Isolated negative mutation: bad_json",
+      "expected": {
+        "status": "error",
+        "code": "malformed_json",
+        "stage": "cursor.composer"
+      },
+      "actual": {
+        "status": "error",
+        "code": "malformed_json",
+        "stage": "cursor.composer"
+      },
+      "passed": true
+    },
+    {
+      "id": "cursor.null_composer",
+      "recipe": "Isolated negative mutation: null_composer",
+      "expected": {
+        "status": "error",
+        "code": "null_composer",
+        "stage": "cursor.composer"
+      },
+      "actual": {
+        "status": "error",
+        "code": "null_composer",
+        "stage": "cursor.composer"
+      },
+      "passed": true
+    },
+    {
+      "id": "cursor.missing_headers",
+      "recipe": "Isolated negative mutation: missing_headers",
+      "expected": {
+        "status": "error",
+        "code": "missing_headers",
+        "stage": "cursor.composer"
+      },
+      "actual": {
+        "status": "error",
+        "code": "missing_headers",
+        "stage": "cursor.composer"
+      },
+      "passed": true
+    },
+    {
+      "id": "cursor.bad_headers",
+      "recipe": "Isolated negative mutation: bad_headers",
+      "expected": {
+        "status": "error",
+        "code": "invalid_headers",
+        "stage": "cursor.composer"
+      },
+      "actual": {
+        "status": "error",
+        "code": "invalid_headers",
+        "stage": "cursor.composer"
+      },
+      "passed": true
+    },
+    {
+      "id": "cursor.duplicate_json_key",
+      "recipe": "Isolated negative mutation: duplicate_json_key",
+      "expected": {
+        "status": "error",
+        "code": "malformed_json",
+        "stage": "cursor.composer"
+      },
+      "actual": {
+        "status": "error",
+        "code": "malformed_json",
+        "stage": "cursor.composer"
+      },
+      "passed": true
+    },
+    {
+      "id": "cursor.duplicate_row",
+      "recipe": "Isolated negative mutation: duplicate_row",
+      "expected": {
+        "status": "error",
+        "code": "duplicate_row",
+        "stage": "cursor.composer"
+      },
+      "actual": {
+        "status": "error",
+        "code": "duplicate_row",
+        "stage": "cursor.composer"
+      },
+      "passed": true
+    },
+    {
+      "id": "cursor.huge_cell",
+      "recipe": "Isolated negative mutation: huge_cell",
+      "expected": {
+        "status": "error",
+        "code": "cell_limit",
+        "stage": "cursor.composer"
+      },
+      "actual": {
+        "status": "error",
+        "code": "cell_limit",
+        "stage": "cursor.composer"
+      },
+      "passed": true
+    },
+    {
+      "id": "cursor.headers_limit",
+      "recipe": "Isolated negative mutation: headers_limit",
+      "expected": {
+        "status": "error",
+        "code": "header_limit",
+        "stage": "cursor.composer"
+      },
+      "actual": {
+        "status": "error",
+        "code": "header_limit",
+        "stage": "cursor.composer"
+      },
+      "passed": true
+    },
+    {
+      "id": "cursor.total_bytes",
+      "recipe": "Isolated negative mutation: total_bytes",
+      "expected": {
+        "status": "error",
+        "code": "total_byte_limit",
+        "stage": "cursor.bubble"
+      },
+      "actual": {
+        "status": "error",
+        "code": "total_byte_limit",
+        "stage": "cursor.bubble"
+      },
+      "passed": true
+    },
+    {
+      "id": "cursor.logical_size",
+      "recipe": "Isolated negative mutation: logical_size",
+      "expected": {
+        "status": "error",
+        "code": "logical_size_limit",
+        "stage": "source.size"
+      },
+      "actual": {
+        "status": "error",
+        "code": "logical_size_limit",
+        "stage": "source.size"
+      },
+      "passed": true
+    },
+    {
+      "id": "cursor.file_size",
+      "recipe": "Isolated negative mutation: file_size",
+      "expected": {
+        "status": "error",
+        "code": "file_size_limit",
+        "stage": "source.files"
+      },
+      "actual": {
+        "status": "error",
+        "code": "file_size_limit",
+        "stage": "source.files"
+      },
+      "passed": true
+    },
+    {
+      "id": "hermes.order_and_native_text",
+      "recipe": "Message timestamp seconds first, integer ID second; no text trimming",
+      "expected": {
+        "status": "ok",
+        "session_id": "session:雪/#%_é",
+        "ids": [
+          30,
+          10,
+          20
+        ],
+        "seconds": [
+          1699999999.125,
+          1700000000.125,
+          1700000000.125
+        ],
+        "texts": [
+          "  synthetic 雪  ",
+          "tie first",
+          "tie second"
+        ]
+      },
+      "actual": {
+        "status": "ok",
+        "session_id": "session:雪/#%_é",
+        "ids": [
+          30,
+          10,
+          20
+        ],
+        "seconds": [
+          1699999999.125,
+          1700000000.125,
+          1700000000.125
+        ],
+        "texts": [
+          "  synthetic 雪  ",
+          "tie first",
+          "tie second"
+        ]
+      },
+      "passed": true
+    },
+    {
+      "id": "hermes.profile_namespaces",
+      "recipe": "Main vs named default vs Unicode profile; identical native session IDs",
+      "expected": {
+        "namespaces": [
+          {
+            "kind": "main",
+            "profile": null
+          },
+          {
+            "kind": "profile",
+            "profile": "default"
+          },
+          {
+            "kind": "profile",
+            "profile": "档案 # % é"
+          }
+        ],
+        "ids": [
+          "session:雪/#%_é",
+          "session:雪/#%_é",
+          "session:雪/#%_é"
+        ],
+        "texts": [
+          "main",
+          "named default",
+          "unicode profile"
+        ]
+      },
+      "actual": {
+        "namespaces": [
+          {
+            "kind": "main",
+            "profile": null
+          },
+          {
+            "kind": "profile",
+            "profile": "default"
+          },
+          {
+            "kind": "profile",
+            "profile": "档案 # % é"
+          }
+        ],
+        "ids": [
+          "session:雪/#%_é",
+          "session:雪/#%_é",
+          "session:雪/#%_é"
+        ],
+        "texts": [
+          "main",
+          "named default",
+          "unicode profile"
+        ]
+      },
+      "passed": true
+    },
+    {
+      "id": "hermes.tool_shapes",
+      "recipe": "Compact + function tool calls; IDs stay native, missing IDs stay null",
+      "expected": {
+        "shapes": [
+          "compact",
+          "function"
+        ],
+        "ids": [
+          null,
+          "call:雪/#%"
+        ],
+        "encodings": [
+          "json_text",
+          "json_value"
+        ],
+        "values": [
+          {
+            "n": 1
+          },
+          {
+            "n": 2
+          }
+        ],
+        "association": {
+          "basis": "observed_id",
+          "authoritative": false,
+          "candidates": [
+            {
+              "message_id": 1,
+              "call_index": 1
+            }
+          ]
+        }
+      },
+      "actual": {
+        "shapes": [
+          "compact",
+          "function"
+        ],
+        "ids": [
+          null,
+          "call:雪/#%"
+        ],
+        "encodings": [
+          "json_text",
+          "json_value"
+        ],
+        "values": [
+          {
+            "n": 1
+          },
+          {
+            "n": 2
+          }
+        ],
+        "association": {
+          "basis": "observed_id",
+          "authoritative": false,
+          "candidates": [
+            {
+              "message_id": 1,
+              "call_index": 1
+            }
+          ]
+        }
+      },
+      "passed": true
+    },
+    {
+      "id": "hermes.ambiguous_name",
+      "recipe": "Retain candidates without merging output or selecting a call",
+      "expected": {
+        "basis": "ambiguous_name",
+        "authoritative": false,
+        "candidates": [
+          {
+            "message_id": 1,
+            "call_index": 0
+          },
+          {
+            "message_id": 1,
+            "call_index": 1
+          }
+        ]
+      },
+      "actual": {
+        "basis": "ambiguous_name",
+        "authoritative": false,
+        "candidates": [
+          {
+            "message_id": 1,
+            "call_index": 0
+          },
+          {
+            "message_id": 1,
+            "call_index": 1
+          }
+        ]
+      },
+      "passed": true
+    },
+    {
+      "id": "hermes.ambiguous_id",
+      "recipe": "Retain candidates without merging output or selecting a call",
+      "expected": {
+        "basis": "ambiguous_id",
+        "authoritative": false,
+        "candidates": [
+          {
+            "message_id": 1,
+            "call_index": 0
+          },
+          {
+            "message_id": 1,
+            "call_index": 1
+          }
+        ]
+      },
+      "actual": {
+        "basis": "ambiguous_id",
+        "authoritative": false,
+        "candidates": [
+          {
+            "message_id": 1,
+            "call_index": 0
+          },
+          {
+            "message_id": 1,
+            "call_index": 1
+          }
+        ]
+      },
+      "passed": true
+    },
+    {
+      "id": "hermes.unmatched_id",
+      "recipe": "Retain candidates without merging output or selecting a call",
+      "expected": {
+        "basis": "unmatched_id",
+        "authoritative": false,
+        "candidates": []
+      },
+      "actual": {
+        "basis": "unmatched_id",
+        "authoritative": false,
+        "candidates": []
+      },
+      "passed": true
+    },
+    {
+      "id": "hermes.invalid_tool_json",
+      "recipe": "Malformed JSON, non-array, invalid item, plain-text arguments, absent tool calls",
+      "expected": {
+        "status": "partial",
+        "states": [
+          "malformed_json",
+          "invalid_tool_calls_shape",
+          "invalid_tool_shape",
+          "ok",
+          "ok"
+        ],
+        "plain_arguments": {
+          "encoding": "unparsed_text",
+          "value": "synthetic free text"
+        },
+        "null_calls": []
+      },
+      "actual": {
+        "status": "partial",
+        "states": [
+          "malformed_json",
+          "invalid_tool_calls_shape",
+          "invalid_tool_shape",
+          "ok",
+          "ok"
+        ],
+        "plain_arguments": {
+          "encoding": "unparsed_text",
+          "value": "synthetic free text"
+        },
+        "null_calls": []
+      },
+      "passed": true
+    },
+    {
+      "id": "hermes.empty_session",
+      "recipe": "An existing session with zero message rows is distinguished from a missing session",
+      "expected": {
+        "status": "ok",
+        "messages": []
+      },
+      "actual": {
+        "status": "ok",
+        "messages": []
+      },
+      "passed": true
+    },
+    {
+      "id": "hermes.null_timestamp_content",
+      "recipe": "NULL values remain explicit, never synthesized as an epoch or empty text",
+      "expected": {
+        "status": "partial",
+        "timestamp": null,
+        "content": null,
+        "state": "missing_timestamp"
+      },
+      "actual": {
+        "status": "partial",
+        "timestamp": null,
+        "content": null,
+        "state": "missing_timestamp"
+      },
+      "passed": true
+    },
+    {
+      "id": "hermes.missing_session",
+      "recipe": "Isolated negative mutation: missing_session",
+      "expected": {
+        "status": "error",
+        "code": "missing_session",
+        "stage": "hermes.session"
+      },
+      "actual": {
+        "status": "error",
+        "code": "missing_session",
+        "stage": "hermes.session"
+      },
+      "passed": true
+    },
+    {
+      "id": "hermes.bad_timestamp",
+      "recipe": "Isolated negative mutation: bad_timestamp",
+      "expected": {
+        "status": "error",
+        "code": "invalid_timestamp",
+        "stage": "hermes.messages"
+      },
+      "actual": {
+        "status": "error",
+        "code": "invalid_timestamp",
+        "stage": "hermes.messages"
+      },
+      "passed": true
+    },
+    {
+      "id": "hermes.huge_content",
+      "recipe": "Isolated negative mutation: huge_content",
+      "expected": {
+        "status": "error",
+        "code": "cell_limit",
+        "stage": "hermes.messages"
+      },
+      "actual": {
+        "status": "error",
+        "code": "cell_limit",
+        "stage": "hermes.messages"
+      },
+      "passed": true
+    },
+    {
+      "id": "hermes.huge_tool_json",
+      "recipe": "Isolated negative mutation: huge_tool_json",
+      "expected": {
+        "status": "error",
+        "code": "cell_limit",
+        "stage": "hermes.messages"
+      },
+      "actual": {
+        "status": "error",
+        "code": "cell_limit",
+        "stage": "hermes.messages"
+      },
+      "passed": true
+    },
+    {
+      "id": "hermes.rows_limit",
+      "recipe": "Isolated negative mutation: rows_limit",
+      "expected": {
+        "status": "error",
+        "code": "row_limit",
+        "stage": "hermes.messages"
+      },
+      "actual": {
+        "status": "error",
+        "code": "row_limit",
+        "stage": "hermes.messages"
+      },
+      "passed": true
+    },
+    {
+      "id": "hermes.total_bytes",
+      "recipe": "Isolated negative mutation: total_bytes",
+      "expected": {
+        "status": "error",
+        "code": "total_byte_limit",
+        "stage": "hermes.messages"
+      },
+      "actual": {
+        "status": "error",
+        "code": "total_byte_limit",
+        "stage": "hermes.messages"
+      },
+      "passed": true
+    },
+    {
+      "id": "hermes.tools_limit",
+      "recipe": "Isolated negative mutation: tools_limit",
+      "expected": {
+        "status": "error",
+        "code": "tool_call_limit",
+        "stage": "hermes.tool_calls"
+      },
+      "actual": {
+        "status": "error",
+        "code": "tool_call_limit",
+        "stage": "hermes.tool_calls"
+      },
+      "passed": true
+    }
+  ],
+  "integrity_sha256": "06ada52f92bc20596abffbc2bbc432336d0fe74b2174829017c7830786acced8"
+}

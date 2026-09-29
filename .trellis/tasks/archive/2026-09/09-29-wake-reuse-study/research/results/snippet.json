@@ -1,0 +1,5381 @@
+{
+  "baseline": {
+    "blob_sha1": "5cce489f96bb4b1692a263569f07128143f0a832",
+    "commit": "2b8f89562e43bd1f68ad3c8e5cf8ccc9281f9af2",
+    "line_range": [
+      970,
+      1009
+    ],
+    "path": "crates/agent-session-grep-application/src/lib.rs",
+    "reproduced_expression": "text.chars().take(max_snippet_chars).collect()",
+    "scope": "Only the text-prefix expression is reproduced. raw_prefix has no local byte gate; bounded_prefix is an experimental wrapper, not product behavior.",
+    "symbol": "assemble_search_hit",
+    "unmodified_product_executed": false
+  },
+  "cases": [
+    {
+      "actual": {
+        "bounded_prefix": {
+          "json_bytes": 29,
+          "scalar_count": 18,
+          "source_range": {
+            "end": 18,
+            "start": 0
+          },
+          "text": "hello needle world",
+          "visible_source_matches": [
+            {
+              "range": {
+                "end": 12,
+                "start": 6
+              },
+              "term_index": 0
+            }
+          ],
+          "wire_json": "{\"text\":\"hello needle world\"}"
+        },
+        "candidate": {
+          "output": {
+            "json_bytes": 29,
+            "scalar_count": 18,
+            "source_range": {
+              "end": 18,
+              "start": 0
+            },
+            "text": "hello needle world",
+            "visible_source_matches": [
+              {
+                "range": {
+                  "end": 12,
+                  "start": 6
+                },
+                "term_index": 0
+              }
+            ],
+            "wire_json": "{\"text\":\"hello needle world\"}"
+          },
+          "strategy": "hit_centered"
+        },
+        "evidence": "literal",
+        "focus": {
+          "range": {
+            "end": 12,
+            "start": 6
+          },
+          "term_index": 0
+        },
+        "raw_prefix": {
+          "json_bytes": 29,
+          "scalar_count": 18,
+          "source_range": {
+            "end": 18,
+            "start": 0
+          },
+          "text": "hello needle world",
+          "visible_source_matches": [
+            {
+              "range": {
+                "end": 12,
+                "start": 6
+              },
+              "term_index": 0
+            }
+          ],
+          "wire_json": "{\"text\":\"hello needle world\"}"
+        },
+        "source_matches": [
+          {
+            "range": {
+              "end": 12,
+              "start": 6
+            },
+            "term_index": 0
+          }
+        ]
+      },
+      "checks": {
+        "bounded_prefix_golden": true,
+        "candidate_golden": true,
+        "candidate_strategy": true,
+        "character_budgets": true,
+        "evidence": true,
+        "local_json_byte_budgets": true,
+        "omission_only_below_json_floor": true,
+        "original_source_slices": true,
+        "raw_prefix_expression": true,
+        "raw_prefix_golden": true,
+        "serialized_json_round_trip": true,
+        "source_matches": true,
+        "visible_spans_from_original_evidence": true
+      },
+      "expected": {
+        "bounded_prefix_text": "hello needle world",
+        "candidate_strategy": "hit_centered",
+        "candidate_text": "hello needle world",
+        "evidence": "literal",
+        "raw_prefix_text": "hello needle world",
+        "source_matches": [
+          {
+            "range": {
+              "end": 12,
+              "start": 6
+            },
+            "term_index": 0
+          }
+        ]
+      },
+      "id": "ascii_head",
+      "input": {
+        "budget": {
+          "max_json_bytes": 4096,
+          "max_snippet_chars": 512
+        },
+        "mode": "lexical",
+        "terms": [
+          "needle"
+        ],
+        "text": "hello needle world"
+      },
+      "passed": true
+    },
+    {
+      "actual": {
+        "bounded_prefix": {
+          "json_bytes": 51,
+          "scalar_count": 40,
+          "source_range": {
+            "end": 40,
+            "start": 0
+          },
+          "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "visible_source_matches": [],
+          "wire_json": "{\"text\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}"
+        },
+        "candidate": {
+          "output": {
+            "json_bytes": 51,
+            "scalar_count": 40,
+            "source_range": {
+              "end": 230,
+              "start": 190
+            },
+            "text": "aaaaaaaaaa needle zzzzzzzzzzzzzzzzzzzzzz",
+            "visible_source_matches": [
+              {
+                "range": {
+                  "end": 207,
+                  "start": 201
+                },
+                "term_index": 0
+              }
+            ],
+            "wire_json": "{\"text\":\"aaaaaaaaaa needle zzzzzzzzzzzzzzzzzzzzzz\"}"
+          },
+          "strategy": "hit_centered"
+        },
+        "evidence": "literal",
+        "focus": {
+          "range": {
+            "end": 207,
+            "start": 201
+          },
+          "term_index": 0
+        },
+        "raw_prefix": {
+          "json_bytes": 51,
+          "scalar_count": 40,
+          "source_range": {
+            "end": 40,
+            "start": 0
+          },
+          "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "visible_source_matches": [],
+          "wire_json": "{\"text\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}"
+        },
+        "source_matches": [
+          {
+            "range": {
+              "end": 207,
+              "start": 201
+            },
+            "term_index": 0
+          }
+        ]
+      },
+      "checks": {
+        "bounded_prefix_golden": true,
+        "candidate_golden": true,
+        "candidate_strategy": true,
+        "character_budgets": true,
+        "evidence": true,
+        "local_json_byte_budgets": true,
+        "omission_only_below_json_floor": true,
+        "original_source_slices": true,
+        "raw_prefix_expression": true,
+        "raw_prefix_golden": true,
+        "serialized_json_round_trip": true,
+        "source_matches": true,
+        "visible_spans_from_original_evidence": true
+      },
+      "expected": {
+        "bounded_prefix_text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "candidate_strategy": "hit_centered",
+        "candidate_text": "aaaaaaaaaa needle zzzzzzzzzzzzzzzzzzzzzz",
+        "evidence": "literal",
+        "raw_prefix_text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "source_matches": [
+          {
+            "range": {
+              "end": 207,
+              "start": 201
+            },
+            "term_index": 0
+          }
+        ]
+      },
+      "id": "long_tail",
+      "input": {
+        "budget": {
+          "max_json_bytes": 4096,
+          "max_snippet_chars": 40
+        },
+        "mode": "lexical",
+        "terms": [
+          "needle"
+        ],
+        "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa needle zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      },
+      "passed": true
+    },
+    {
+      "actual": {
+        "bounded_prefix": {
+          "json_bytes": 187,
+          "scalar_count": 176,
+          "source_range": {
+            "end": 176,
+            "start": 0
+          },
+          "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaneedlebbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "visible_source_matches": [
+            {
+              "range": {
+                "end": 76,
+                "start": 70
+              },
+              "term_index": 0
+            }
+          ],
+          "wire_json": "{\"text\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaneedlebbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}"
+        },
+        "candidate": {
+          "output": {
+            "json_bytes": 137,
+            "scalar_count": 126,
+            "source_range": {
+              "end": 156,
+              "start": 30
+            },
+            "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaneedlebbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "visible_source_matches": [
+              {
+                "range": {
+                  "end": 76,
+                  "start": 70
+                },
+                "term_index": 0
+              }
+            ],
+            "wire_json": "{\"text\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaneedlebbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}"
+          },
+          "strategy": "hit_centered"
+        },
+        "evidence": "literal",
+        "focus": {
+          "range": {
+            "end": 76,
+            "start": 70
+          },
+          "term_index": 0
+        },
+        "raw_prefix": {
+          "json_bytes": 187,
+          "scalar_count": 176,
+          "source_range": {
+            "end": 176,
+            "start": 0
+          },
+          "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaneedlebbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "visible_source_matches": [
+            {
+              "range": {
+                "end": 76,
+                "start": 70
+              },
+              "term_index": 0
+            }
+          ],
+          "wire_json": "{\"text\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaneedlebbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}"
+        },
+        "source_matches": [
+          {
+            "range": {
+              "end": 76,
+              "start": 70
+            },
+            "term_index": 0
+          }
+        ]
+      },
+      "checks": {
+        "bounded_prefix_golden": true,
+        "candidate_golden": true,
+        "candidate_strategy": true,
+        "character_budgets": true,
+        "evidence": true,
+        "local_json_byte_budgets": true,
+        "omission_only_below_json_floor": true,
+        "original_source_slices": true,
+        "raw_prefix_expression": true,
+        "raw_prefix_golden": true,
+        "serialized_json_round_trip": true,
+        "source_matches": true,
+        "visible_spans_from_original_evidence": true
+      },
+      "expected": {
+        "bounded_prefix_text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaneedlebbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "candidate_strategy": "hit_centered",
+        "candidate_text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaneedlebbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "evidence": "literal",
+        "raw_prefix_text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaneedlebbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "source_matches": [
+          {
+            "range": {
+              "end": 76,
+              "start": 70
+            },
+            "term_index": 0
+          }
+        ]
+      },
+      "id": "wake_40_before_80_after_limit",
+      "input": {
+        "budget": {
+          "max_json_bytes": 4096,
+          "max_snippet_chars": 500
+        },
+        "mode": "lexical",
+        "terms": [
+          "needle"
+        ],
+        "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaneedlebbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "passed": true
+    },
+    {
+      "actual": {
+        "bounded_prefix": {
+          "json_bytes": 31,
+          "scalar_count": 20,
+          "source_range": {
+            "end": 20,
+            "start": 0
+          },
+          "text": "first xxxxxxxxxxxxxx",
+          "visible_source_matches": [
+            {
+              "range": {
+                "end": 5,
+                "start": 0
+              },
+              "term_index": 1
+            }
+          ],
+          "wire_json": "{\"text\":\"first xxxxxxxxxxxxxx\"}"
+        },
+        "candidate": {
+          "output": {
+            "json_bytes": 31,
+            "scalar_count": 20,
+            "source_range": {
+              "end": 20,
+              "start": 0
+            },
+            "text": "first xxxxxxxxxxxxxx",
+            "visible_source_matches": [
+              {
+                "range": {
+                  "end": 5,
+                  "start": 0
+                },
+                "term_index": 1
+              }
+            ],
+            "wire_json": "{\"text\":\"first xxxxxxxxxxxxxx\"}"
+          },
+          "strategy": "hit_centered"
+        },
+        "evidence": "literal",
+        "focus": {
+          "range": {
+            "end": 5,
+            "start": 0
+          },
+          "term_index": 1
+        },
+        "raw_prefix": {
+          "json_bytes": 31,
+          "scalar_count": 20,
+          "source_range": {
+            "end": 20,
+            "start": 0
+          },
+          "text": "first xxxxxxxxxxxxxx",
+          "visible_source_matches": [
+            {
+              "range": {
+                "end": 5,
+                "start": 0
+              },
+              "term_index": 1
+            }
+          ],
+          "wire_json": "{\"text\":\"first xxxxxxxxxxxxxx\"}"
+        },
+        "source_matches": [
+          {
+            "range": {
+              "end": 5,
+              "start": 0
+            },
+            "term_index": 1
+          },
+          {
+            "range": {
+              "end": 71,
+              "start": 67
+            },
+            "term_index": 0
+          }
+        ]
+      },
+      "checks": {
+        "bounded_prefix_golden": true,
+        "candidate_golden": true,
+        "candidate_strategy": true,
+        "character_budgets": true,
+        "evidence": true,
+        "local_json_byte_budgets": true,
+        "omission_only_below_json_floor": true,
+        "original_source_slices": true,
+        "raw_prefix_expression": true,
+        "raw_prefix_golden": true,
+        "serialized_json_round_trip": true,
+        "source_matches": true,
+        "visible_spans_from_original_evidence": true
+      },
+      "expected": {
+        "bounded_prefix_text": "first xxxxxxxxxxxxxx",
+        "candidate_strategy": "hit_centered",
+        "candidate_text": "first xxxxxxxxxxxxxx",
+        "evidence": "literal",
+        "raw_prefix_text": "first xxxxxxxxxxxxxx",
+        "source_matches": [
+          {
+            "range": {
+              "end": 5,
+              "start": 0
+            },
+            "term_index": 1
+          },
+          {
+            "range": {
+              "end": 71,
+              "start": 67
+            },
+            "term_index": 0
+          }
+        ]
+      },
+      "id": "earliest_hit_not_query_order",
+      "input": {
+        "budget": {
+          "max_json_bytes": 4096,
+          "max_snippet_chars": 20
+        },
+        "mode": "lexical",
+        "terms": [
+          "last",
+          "first"
+        ],
+        "text": "first xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx last"
+      },
+      "passed": true
+    },
+    {
+      "actual": {
+        "bounded_prefix": {
+          "json_bytes": 27,
+          "scalar_count": 16,
+          "source_range": {
+            "end": 16,
+            "start": 0
+          },
+          "text": "zzzzzzzzzzzzzzzz",
+          "visible_source_matches": [],
+          "wire_json": "{\"text\":\"zzzzzzzzzzzzzzzz\"}"
+        },
+        "candidate": {
+          "output": {
+            "json_bytes": 27,
+            "scalar_count": 16,
+            "source_range": {
+              "end": 57,
+              "start": 41
+            },
+            "text": "zzzzzzzzz match!",
+            "visible_source_matches": [
+              {
+                "range": {
+                  "end": 56,
+                  "start": 51
+                },
+                "term_index": 1
+              }
+            ],
+            "wire_json": "{\"text\":\"zzzzzzzzz match!\"}"
+          },
+          "strategy": "hit_centered"
+        },
+        "evidence": "literal",
+        "focus": {
+          "range": {
+            "end": 56,
+            "start": 51
+          },
+          "term_index": 1
+        },
+        "raw_prefix": {
+          "json_bytes": 27,
+          "scalar_count": 16,
+          "source_range": {
+            "end": 16,
+            "start": 0
+          },
+          "text": "zzzzzzzzzzzzzzzz",
+          "visible_source_matches": [],
+          "wire_json": "{\"text\":\"zzzzzzzzzzzzzzzz\"}"
+        },
+        "source_matches": [
+          {
+            "range": {
+              "end": 56,
+              "start": 51
+            },
+            "term_index": 1
+          }
+        ]
+      },
+      "checks": {
+        "bounded_prefix_golden": true,
+        "candidate_golden": true,
+        "candidate_strategy": true,
+        "character_budgets": true,
+        "evidence": true,
+        "local_json_byte_budgets": true,
+        "omission_only_below_json_floor": true,
+        "original_source_slices": true,
+        "raw_prefix_expression": true,
+        "raw_prefix_golden": true,
+        "serialized_json_round_trip": true,
+        "source_matches": true,
+        "visible_spans_from_original_evidence": true
+      },
+      "expected": {
+        "bounded_prefix_text": "zzzzzzzzzzzzzzzz",
+        "candidate_strategy": "hit_centered",
+        "candidate_text": "zzzzzzzzz match!",
+        "evidence": "literal",
+        "raw_prefix_text": "zzzzzzzzzzzzzzzz",
+        "source_matches": [
+          {
+            "range": {
+              "end": 56,
+              "start": 51
+            },
+            "term_index": 1
+          }
+        ]
+      },
+      "id": "absent_first_term_present_second",
+      "input": {
+        "budget": {
+          "max_json_bytes": 4096,
+          "max_snippet_chars": 16
+        },
+        "mode": "lexical",
+        "terms": [
+          "absent",
+          "match"
+        ],
+        "text": "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz match!"
+      },
+      "passed": true
+    },
+    {
+      "actual": {
+        "bounded_prefix": {
+          "json_bytes": 17,
+          "scalar_count": 6,
+          "source_range": {
+            "end": 6,
+            "start": 0
+          },
+          "text": "banana",
+          "visible_source_matches": [
+            {
+              "range": {
+                "end": 4,
+                "start": 1
+              },
+              "term_index": 0
+            },
+            {
+              "range": {
+                "end": 6,
+                "start": 3
+              },
+              "term_index": 0
+            }
+          ],
+          "wire_json": "{\"text\":\"banana\"}"
+        },
+        "candidate": {
+          "output": {
+            "json_bytes": 17,
+            "scalar_count": 6,
+            "source_range": {
+              "end": 6,
+              "start": 0
+            },
+            "text": "banana",
+            "visible_source_matches": [
+              {
+                "range": {
+                  "end": 4,
+                  "start": 1
+                },
+                "term_index": 0
+              },
+              {
+                "range": {
+                  "end": 6,
+                  "start": 3
+                },
+                "term_index": 0
+              }
+            ],
+            "wire_json": "{\"text\":\"banana\"}"
+          },
+          "strategy": "hit_centered"
+        },
+        "evidence": "literal",
+        "focus": {
+          "range": {
+            "end": 4,
+            "start": 1
+          },
+          "term_index": 0
+        },
+        "raw_prefix": {
+          "json_bytes": 17,
+          "scalar_count": 6,
+          "source_range": {
+            "end": 6,
+            "start": 0
+          },
+          "text": "banana",
+          "visible_source_matches": [
+            {
+              "range": {
+                "end": 4,
+                "start": 1
+              },
+              "term_index": 0
+            },
+            {
+              "range": {
+                "end": 6,
+                "start": 3
+              },
+              "term_index": 0
+            }
+          ],
+          "wire_json": "{\"text\":\"banana\"}"
+        },
+        "source_matches": [
+          {
+            "range": {
+              "end": 4,
+              "start": 1
+            },
+            "term_index": 0
+          },
+          {
+            "range": {
+              "end": 6,
+              "start": 3
+            },
+            "term_index": 0
+          }
+        ]
+      },
+      "checks": {
+        "bounded_prefix_golden": true,
+        "candidate_golden": true,
+        "candidate_strategy": true,
+        "character_budgets": true,
+        "evidence": true,
+        "local_json_byte_budgets": true,
+        "omission_only_below_json_floor": true,
+        "original_source_slices": true,
+        "raw_prefix_expression": true,
+        "raw_prefix_golden": true,
+        "serialized_json_round_trip": true,
+        "source_matches": true,
+        "visible_spans_from_original_evidence": true
+      },
+      "expected": {
+        "bounded_prefix_text": "banana",
+        "candidate_strategy": "hit_centered",
+        "candidate_text": "banana",
+        "evidence": "literal",
+        "raw_prefix_text": "banana",
+        "source_matches": [
+          {
+            "range": {
+              "end": 4,
+              "start": 1
+            },
+            "term_index": 0
+          },
+          {
+            "range": {
+              "end": 6,
+              "start": 3
+            },
+            "term_index": 0
+          }
+        ]
+      },
+      "id": "overlapping_occurrences",
+      "input": {
+        "budget": {
+          "max_json_bytes": 4096,
+          "max_snippet_chars": 512
+        },
+        "mode": "lexical",
+        "terms": [
+          "ana"
+        ],
+        "text": "banana"
+      },
+      "passed": true
+    },
+    {
+      "actual": {
+        "bounded_prefix": {
+          "json_bytes": 38,
+          "scalar_count": 9,
+          "source_range": {
+            "end": 9,
+            "start": 0
+          },
+          "text": "前前前前前前前前前",
+          "visible_source_matches": [],
+          "wire_json": "{\"text\":\"前前前前前前前前前\"}"
+        },
+        "candidate": {
+          "output": {
+            "json_bytes": 38,
+            "scalar_count": 9,
+            "source_range": {
+              "end": 37,
+              "start": 28
+            },
+            "text": "前前库后后后后后后",
+            "visible_source_matches": [
+              {
+                "range": {
+                  "end": 31,
+                  "start": 30
+                },
+                "term_index": 0
+              }
+            ],
+            "wire_json": "{\"text\":\"前前库后后后后后后\"}"
+          },
+          "strategy": "hit_centered"
+        },
+        "evidence": "literal",
+        "focus": {
+          "range": {
+            "end": 31,
+            "start": 30
+          },
+          "term_index": 0
+        },
+        "raw_prefix": {
+          "json_bytes": 38,
+          "scalar_count": 9,
+          "source_range": {
+            "end": 9,
+            "start": 0
+          },
+          "text": "前前前前前前前前前",
+          "visible_source_matches": [],
+          "wire_json": "{\"text\":\"前前前前前前前前前\"}"
+        },
+        "source_matches": [
+          {
+            "range": {
+              "end": 31,
+              "start": 30
+            },
+            "term_index": 0
+          }
+        ]
+      },
+      "checks": {
+        "bounded_prefix_golden": true,
+        "candidate_golden": true,
+        "candidate_strategy": true,
+        "character_budgets": true,
+        "evidence": true,
+        "local_json_byte_budgets": true,
+        "omission_only_below_json_floor": true,
+        "original_source_slices": true,
+        "raw_prefix_expression": true,
+        "raw_prefix_golden": true,
+        "serialized_json_round_trip": true,
+        "source_matches": true,
+        "visible_spans_from_original_evidence": true
+      },
+      "expected": {
+        "bounded_prefix_text": "前前前前前前前前前",
+        "candidate_strategy": "hit_centered",
+        "candidate_text": "前前库后后后后后后",
+        "evidence": "literal",
+        "raw_prefix_text": "前前前前前前前前前",
+        "source_matches": [
+          {
+            "range": {
+              "end": 31,
+              "start": 30
+            },
+            "term_index": 0
+          }
+        ]
+      },
+      "id": "cjk_one_scalar",
+      "input": {
+        "budget": {
+          "max_json_bytes": 4096,
+          "max_snippet_chars": 9
+        },
+        "mode": "lexical",
+        "terms": [
+          "库"
+        ],
+        "text": "前前前前前前前前前前前前前前前前前前前前前前前前前前前前前前库后后后后后后后后后后后后后后后后后后后后后后后后后后后后后后"
+      },
+      "passed": true
+    },
+    {
+      "actual": {
+        "bounded_prefix": {
+          "json_bytes": 34,
+          "scalar_count": 9,
+          "source_range": {
+            "end": 9,
+            "start": 0
+          },
+          "text": "开头 数据库 结束",
+          "visible_source_matches": [
+            {
+              "range": {
+                "end": 5,
+                "start": 3
+              },
+              "term_index": 0
+            }
+          ],
+          "wire_json": "{\"text\":\"开头 数据库 结束\"}"
+        },
+        "candidate": {
+          "output": {
+            "json_bytes": 34,
+            "scalar_count": 9,
+            "source_range": {
+              "end": 9,
+              "start": 0
+            },
+            "text": "开头 数据库 结束",
+            "visible_source_matches": [
+              {
+                "range": {
+                  "end": 5,
+                  "start": 3
+                },
+                "term_index": 0
+              }
+            ],
+            "wire_json": "{\"text\":\"开头 数据库 结束\"}"
+          },
+          "strategy": "hit_centered"
+        },
+        "evidence": "literal",
+        "focus": {
+          "range": {
+            "end": 5,
+            "start": 3
+          },
+          "term_index": 0
+        },
+        "raw_prefix": {
+          "json_bytes": 34,
+          "scalar_count": 9,
+          "source_range": {
+            "end": 9,
+            "start": 0
+          },
+          "text": "开头 数据库 结束",
+          "visible_source_matches": [
+            {
+              "range": {
+                "end": 5,
+                "start": 3
+              },
+              "term_index": 0
+            }
+          ],
+          "wire_json": "{\"text\":\"开头 数据库 结束\"}"
+        },
+        "source_matches": [
+          {
+            "range": {
+              "end": 5,
+              "start": 3
+            },
+            "term_index": 0
+          }
+        ]
+      },
+      "checks": {
+        "bounded_prefix_golden": true,
+        "candidate_golden": true,
+        "candidate_strategy": true,
+        "character_budgets": true,
+        "evidence": true,
+        "local_json_byte_budgets": true,
+        "omission_only_below_json_floor": true,
+        "original_source_slices": true,
+        "raw_prefix_expression": true,
+        "raw_prefix_golden": true,
+        "serialized_json_round_trip": true,
+        "source_matches": true,
+        "visible_spans_from_original_evidence": true
+      },
+      "expected": {
+        "bounded_prefix_text": "开头 数据库 结束",
+        "candidate_strategy": "hit_centered",
+        "candidate_text": "开头 数据库 结束",
+        "evidence": "literal",
+        "raw_prefix_text": "开头 数据库 结束",
+        "source_matches": [
+          {
+            "range": {
+              "end": 5,
+              "start": 3
+            },
+            "term_index": 0
+          }
+        ]
+      },
+      "id": "cjk_two_scalars",
+      "input": {
+        "budget": {
+          "max_json_bytes": 4096,
+          "max_snippet_chars": 512
+        },
+        "mode": "lexical",
+        "terms": [
+          "数据"
+        ],
+        "text": "开头 数据库 结束"
+      },
+      "passed": true
+    },
+    {
+      "actual": {
+        "bounded_prefix": {
+          "json_bytes": 20,
+          "scalar_count": 3,
+          "source_range": {
+            "end": 3,
+            "start": 0
+          },
+          "text": "数据库",
+          "visible_source_matches": [
+            {
+              "range": {
+                "end": 2,
+                "start": 0
+              },
+              "term_index": 0
+            },
+            {
+              "range": {
+                "end": 3,
+                "start": 1
+              },
+              "term_index": 1
+            }
+          ],
+          "wire_json": "{\"text\":\"数据库\"}"
+        },
+        "candidate": {
+          "output": {
+            "json_bytes": 20,
+            "scalar_count": 3,
+            "source_range": {
+              "end": 3,
+              "start": 0
+            },
+            "text": "数据库",
+            "visible_source_matches": [
+              {
+                "range": {
+                  "end": 2,
+                  "start": 0
+                },
+                "term_index": 0
+              },
+              {
+                "range": {
+                  "end": 3,
+                  "start": 1
+                },
+                "term_index": 1
+              }
+            ],
+            "wire_json": "{\"text\":\"数据库\"}"
+          },
+          "strategy": "hit_centered"
+        },
+        "evidence": "literal",
+        "focus": {
+          "range": {
+            "end": 2,
+            "start": 0
+          },
+          "term_index": 0
+        },
+        "raw_prefix": {
+          "json_bytes": 20,
+          "scalar_count": 3,
+          "source_range": {
+            "end": 3,
+            "start": 0
+          },
+          "text": "数据库",
+          "visible_source_matches": [
+            {
+              "range": {
+                "end": 2,
+                "start": 0
+              },
+              "term_index": 0
+            },
+            {
+              "range": {
+                "end": 3,
+                "start": 1
+              },
+              "term_index": 1
+            }
+          ],
+          "wire_json": "{\"text\":\"数据库\"}"
+        },
+        "source_matches": [
+          {
+            "range": {
+              "end": 2,
+              "start": 0
+            },
+            "term_index": 0
+          },
+          {
+            "range": {
+              "end": 3,
+              "start": 1
+            },
+            "term_index": 1
+          }
+        ]
+      },
+      "checks": {
+        "bounded_prefix_golden": true,
+        "candidate_golden": true,
+        "candidate_strategy": true,
+        "character_budgets": true,
+        "evidence": true,
+        "local_json_byte_budgets": true,
+        "omission_only_below_json_floor": true,
+        "original_source_slices": true,
+        "raw_prefix_expression": true,
+        "raw_prefix_golden": true,
+        "serialized_json_round_trip": true,
+        "source_matches": true,
+        "visible_spans_from_original_evidence": true
+      },
+      "expected": {
+        "bounded_prefix_text": "数据库",
+        "candidate_strategy": "hit_centered",
+        "candidate_text": "数据库",
+        "evidence": "literal",
+        "raw_prefix_text": "数据库",
+        "source_matches": [
+          {
+            "range": {
+              "end": 2,
+              "start": 0
+            },
+            "term_index": 0
+          },
+          {
+            "range": {
+              "end": 3,
+              "start": 1
+            },
+            "term_index": 1
+          }
+        ]
+      },
+      "id": "cjk_overlapping_terms",
+      "input": {
+        "budget": {
+          "max_json_bytes": 4096,
+          "max_snippet_chars": 512
+        },
+        "mode": "lexical",
+        "terms": [
+          "数据",
+          "据库"
+        ],
+        "text": "数据库"
+      },
+      "passed": true
+    },
+    {
+      "actual": {
+        "bounded_prefix": {
+          "json_bytes": 46,
+          "scalar_count": 32,
+          "source_range": {
+            "end": 32,
+            "start": 0
+          },
+          "text": "open C:\\synthetic\\src\\lib.rs now",
+          "visible_source_matches": [
+            {
+              "range": {
+                "end": 21,
+                "start": 5
+              },
+              "term_index": 0
+            }
+          ],
+          "wire_json": "{\"text\":\"open C:\\\\synthetic\\\\src\\\\lib.rs now\"}"
+        },
+        "candidate": {
+          "output": {
+            "json_bytes": 46,
+            "scalar_count": 32,
+            "source_range": {
+              "end": 32,
+              "start": 0
+            },
+            "text": "open C:\\synthetic\\src\\lib.rs now",
+            "visible_source_matches": [
+              {
+                "range": {
+                  "end": 21,
+                  "start": 5
+                },
+                "term_index": 0
+              }
+            ],
+            "wire_json": "{\"text\":\"open C:\\\\synthetic\\\\src\\\\lib.rs now\"}"
+          },
+          "strategy": "hit_centered"
+        },
+        "evidence": "literal",
+        "focus": {
+          "range": {
+            "end": 21,
+            "start": 5
+          },
+          "term_index": 0
+        },
+        "raw_prefix": {
+          "json_bytes": 46,
+          "scalar_count": 32,
+          "source_range": {
+            "end": 32,
+            "start": 0
+          },
+          "text": "open C:\\synthetic\\src\\lib.rs now",
+          "visible_source_matches": [
+            {
+              "range": {
+                "end": 21,
+                "start": 5
+              },
+              "term_index": 0
+            }
+          ],
+          "wire_json": "{\"text\":\"open C:\\\\synthetic\\\\src\\\\lib.rs now\"}"
+        },
+        "source_matches": [
+          {
+            "range": {
+              "end": 21,
+              "start": 5
+            },
+            "term_index": 0
+          }
+        ]
+      },
+      "checks": {
+        "bounded_prefix_golden": true,
+        "candidate_golden": true,
+        "candidate_strategy": true,
+        "character_budgets": true,
+        "evidence": true,
+        "local_json_byte_budgets": true,
+        "omission_only_below_json_floor": true,
+        "original_source_slices": true,
+        "raw_prefix_expression": true,
+        "raw_prefix_golden": true,
+        "serialized_json_round_trip": true,
+        "source_matches": true,
+        "visible_spans_from_original_evidence": true
+      },
+      "expected": {
+        "bounded_prefix_text": "open C:\\synthetic\\src\\lib.rs now",
+        "candidate_strategy": "hit_centered",
+        "candidate_text": "open C:\\synthetic\\src\\lib.rs now",
+        "evidence": "literal",
+        "raw_prefix_text": "open C:\\synthetic\\src\\lib.rs now",
+        "source_matches": [
+          {
+            "range": {
+              "end": 21,
+              "start": 5
+            },
+            "term_index": 0
+          }
+        ]
+      },
+      "id": "windows_path",
+      "input": {
+        "budget": {
+          "max_json_bytes": 4096,
+          "max_snippet_chars": 512
+        },
+        "mode": "lexical",
+        "terms": [
+          "C:\\synthetic\\src"
+        ],
+        "text": "open C:\\synthetic\\src\\lib.rs now"
+      },
+      "passed": true
+    },
+    {
+      "actual": {
+        "bounded_prefix": {
+          "json_bytes": 57,
+          "scalar_count": 46,
+          "source_range": {
+            "end": 46,
+            "start": 0
+          },
+          "text": "/tmp/demo/src/lib.rs module::Symbol snake_case",
+          "visible_source_matches": [
+            {
+              "range": {
+                "end": 13,
+                "start": 0
+              },
+              "term_index": 0
+            },
+            {
+              "range": {
+                "end": 35,
+                "start": 21
+              },
+              "term_index": 1
+            },
+            {
+              "range": {
+                "end": 46,
+                "start": 36
+              },
+              "term_index": 2
+            }
+          ],
+          "wire_json": "{\"text\":\"/tmp/demo/src/lib.rs module::Symbol snake_case\"}"
+        },
+        "candidate": {
+          "output": {
+            "json_bytes": 57,
+            "scalar_count": 46,
+            "source_range": {
+              "end": 46,
+              "start": 0
+            },
+            "text": "/tmp/demo/src/lib.rs module::Symbol snake_case",
+            "visible_source_matches": [
+              {
+                "range": {
+                  "end": 13,
+                  "start": 0
+                },
+                "term_index": 0
+              },
+              {
+                "range": {
+                  "end": 35,
+                  "start": 21
+                },
+                "term_index": 1
+              },
+              {
+                "range": {
+                  "end": 46,
+                  "start": 36
+                },
+                "term_index": 2
+              }
+            ],
+            "wire_json": "{\"text\":\"/tmp/demo/src/lib.rs module::Symbol snake_case\"}"
+          },
+          "strategy": "hit_centered"
+        },
+        "evidence": "literal",
+        "focus": {
+          "range": {
+            "end": 13,
+            "start": 0
+          },
+          "term_index": 0
+        },
+        "raw_prefix": {
+          "json_bytes": 57,
+          "scalar_count": 46,
+          "source_range": {
+            "end": 46,
+            "start": 0
+          },
+          "text": "/tmp/demo/src/lib.rs module::Symbol snake_case",
+          "visible_source_matches": [
+            {
+              "range": {
+                "end": 13,
+                "start": 0
+              },
+              "term_index": 0
+            },
+            {
+              "range": {
+                "end": 35,
+                "start": 21
+              },
+              "term_index": 1
+            },
+            {
+              "range": {
+                "end": 46,
+                "start": 36
+              },
+              "term_index": 2
+            }
+          ],
+          "wire_json": "{\"text\":\"/tmp/demo/src/lib.rs module::Symbol snake_case\"}"
+        },
+        "source_matches": [
+          {
+            "range": {
+              "end": 13,
+              "start": 0
+            },
+            "term_index": 0
+          },
+          {
+            "range": {
+              "end": 35,
+              "start": 21
+            },
+            "term_index": 1
+          },
+          {
+            "range": {
+              "end": 46,
+              "start": 36
+            },
+            "term_index": 2
+          }
+        ]
+      },
+      "checks": {
+        "bounded_prefix_golden": true,
+        "candidate_golden": true,
+        "candidate_strategy": true,
+        "character_budgets": true,
+        "evidence": true,
+        "local_json_byte_budgets": true,
+        "omission_only_below_json_floor": true,
+        "original_source_slices": true,
+        "raw_prefix_expression": true,
+        "raw_prefix_golden": true,
+        "serialized_json_round_trip": true,
+        "source_matches": true,
+        "visible_spans_from_original_evidence": true
+      },
+      "expected": {
+        "bounded_prefix_text": "/tmp/demo/src/lib.rs module::Symbol snake_case",
+        "candidate_strategy": "hit_centered",
+        "candidate_text": "/tmp/demo/src/lib.rs module::Symbol snake_case",
+        "evidence": "literal",
+        "raw_prefix_text": "/tmp/demo/src/lib.rs module::Symbol snake_case",
+        "source_matches": [
+          {
+            "range": {
+              "end": 13,
+              "start": 0
+            },
+            "term_index": 0
+          },
+          {
+            "range": {
+              "end": 35,
+              "start": 21
+            },
+            "term_index": 1
+          },
+          {
+            "range": {
+              "end": 46,
+              "start": 36
+            },
+            "term_index": 2
+          }
+        ]
+      },
+      "id": "posix_path_and_code",
+      "input": {
+        "budget": {
+          "max_json_bytes": 4096,
+          "max_snippet_chars": 512
+        },
+        "mode": "lexical",
+        "terms": [
+          "/tmp/demo/src",
+          "module::Symbol",
+          "snake_case"
+        ],
+        "text": "/tmp/demo/src/lib.rs module::Symbol snake_case"
+      },
+      "passed": true
+    },
+    {
+      "actual": {
+        "bounded_prefix": {
+          "json_bytes": 31,
+          "scalar_count": 5,
+          "source_range": {
+            "end": 5,
+            "start": 0
+          },
+          "text": "🙂🙂🙂🙂🙂",
+          "visible_source_matches": [],
+          "wire_json": "{\"text\":\"🙂🙂🙂🙂🙂\"}"
+        },
+        "candidate": {
+          "output": {
+            "json_bytes": 22,
+            "scalar_count": 5,
+            "source_range": {
+              "end": 24,
+              "start": 19
+            },
+            "text": "🙂🚀 la",
+            "visible_source_matches": [
+              {
+                "range": {
+                  "end": 21,
+                  "start": 20
+                },
+                "term_index": 0
+              }
+            ],
+            "wire_json": "{\"text\":\"🙂🚀 la\"}"
+          },
+          "strategy": "hit_centered"
+        },
+        "evidence": "literal",
+        "focus": {
+          "range": {
+            "end": 21,
+            "start": 20
+          },
+          "term_index": 0
+        },
+        "raw_prefix": {
+          "json_bytes": 31,
+          "scalar_count": 5,
+          "source_range": {
+            "end": 5,
+            "start": 0
+          },
+          "text": "🙂🙂🙂🙂🙂",
+          "visible_source_matches": [],
+          "wire_json": "{\"text\":\"🙂🙂🙂🙂🙂\"}"
+        },
+        "source_matches": [
+          {
+            "range": {
+              "end": 21,
+              "start": 20
+            },
+            "term_index": 0
+          }
+        ]
+      },
+      "checks": {
+        "bounded_prefix_golden": true,
+        "candidate_golden": true,
+        "candidate_strategy": true,
+        "character_budgets": true,
+        "evidence": true,
+        "local_json_byte_budgets": true,
+        "omission_only_below_json_floor": true,
+        "original_source_slices": true,
+        "raw_prefix_expression": true,
+        "raw_prefix_golden": true,
+        "serialized_json_round_trip": true,
+        "source_matches": true,
+        "visible_spans_from_original_evidence": true
+      },
+      "expected": {
+        "bounded_prefix_text": "🙂🙂🙂🙂🙂",
+        "candidate_strategy": "hit_centered",
+        "candidate_text": "🙂🚀 la",
+        "evidence": "literal",
+        "raw_prefix_text": "🙂🙂🙂🙂🙂",
+        "source_matches": [
+          {
+            "range": {
+              "end": 21,
+              "start": 20
+            },
+            "term_index": 0
+          }
+        ]
+      },
+      "id": "emoji_window",
+      "input": {
+        "budget": {
+          "max_json_bytes": 100,
+          "max_snippet_chars": 5
+        },
+        "mode": "lexical",
+        "terms": [
+          "🚀"
+        ],
+        "text": "🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🚀 launch 🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂"
+      },
+      "passed": true
+    },
+    {
+      "actual": {
+        "bounded_prefix": {
+          "json_bytes": 16,
+          "scalar_count": 5,
+          "source_range": {
+            "end": 5,
+            "start": 0
+          },
+          "text": "xxxxx",
+          "visible_source_matches": [],
+          "wire_json": "{\"text\":\"xxxxx\"}"
+        },
+        "candidate": {
+          "output": {
+            "json_bytes": 17,
+            "scalar_count": 5,
+            "source_range": {
+              "end": 15,
+              "start": 10
+            },
+            "text": " é y",
+            "visible_source_matches": [
+              {
+                "range": {
+                  "end": 13,
+                  "start": 11
+                },
+                "term_index": 0
+              }
+            ],
+            "wire_json": "{\"text\":\" é y\"}"
+          },
+          "strategy": "hit_centered"
+        },
+        "evidence": "literal",
+        "focus": {
+          "range": {
+            "end": 13,
+            "start": 11
+          },
+          "term_index": 0
+        },
+        "raw_prefix": {
+          "json_bytes": 16,
+          "scalar_count": 5,
+          "source_range": {
+            "end": 5,
+            "start": 0
+          },
+          "text": "xxxxx",
+          "visible_source_matches": [],
+          "wire_json": "{\"text\":\"xxxxx\"}"
+        },
+        "source_matches": [
+          {
+            "range": {
+              "end": 13,
+              "start": 11
+            },
+            "term_index": 0
+          }
+        ]
+      },
+      "checks": {
+        "bounded_prefix_golden": true,
+        "candidate_golden": true,
+        "candidate_strategy": true,
+        "character_budgets": true,
+        "evidence": true,
+        "local_json_byte_budgets": true,
+        "omission_only_below_json_floor": true,
+        "original_source_slices": true,
+        "raw_prefix_expression": true,
+        "raw_prefix_golden": true,
+        "serialized_json_round_trip": true,
+        "source_matches": true,
+        "visible_spans_from_original_evidence": true
+      },
+      "expected": {
+        "bounded_prefix_text": "xxxxx",
+        "candidate_strategy": "hit_centered",
+        "candidate_text": " é y",
+        "evidence": "literal",
+        "raw_prefix_text": "xxxxx",
+        "source_matches": [
+          {
+            "range": {
+              "end": 13,
+              "start": 11
+            },
+            "term_index": 0
+          }
+        ]
+      },
+      "id": "combining_sequence",
+      "input": {
+        "budget": {
+          "max_json_bytes": 100,
+          "max_snippet_chars": 5
+        },
+        "mode": "lexical",
+        "terms": [
+          "é"
+        ],
+        "text": "xxxxxxxxxx é yyyyyyyyyy"
+      },
+      "passed": true
+    },
+    {
+      "actual": {
+        "bounded_prefix": {
+          "json_bytes": 12,
+          "scalar_count": 1,
+          "source_range": {
+            "end": 1,
+            "start": 0
+          },
+          "text": "e",
+          "visible_source_matches": [],
+          "wire_json": "{\"text\":\"e\"}"
+        },
+        "candidate": {
+          "output": {
+            "json_bytes": 12,
+            "scalar_count": 1,
+            "source_range": {
+              "end": 1,
+              "start": 0
+            },
+            "text": "e",
+            "visible_source_matches": [],
+            "wire_json": "{\"text\":\"e\"}"
+          },
+          "strategy": "prefix_without_literal_evidence"
+        },
+        "evidence": "empty_terms",
+        "focus": null,
+        "raw_prefix": {
+          "json_bytes": 12,
+          "scalar_count": 1,
+          "source_range": {
+            "end": 1,
+            "start": 0
+          },
+          "text": "e",
+          "visible_source_matches": [],
+          "wire_json": "{\"text\":\"e\"}"
+        },
+        "source_matches": []
+      },
+      "checks": {
+        "bounded_prefix_golden": true,
+        "candidate_golden": true,
+        "candidate_strategy": true,
+        "character_budgets": true,
+        "evidence": true,
+        "local_json_byte_budgets": true,
+        "omission_only_below_json_floor": true,
+        "original_source_slices": true,
+        "raw_prefix_expression": true,
+        "raw_prefix_golden": true,
+        "serialized_json_round_trip": true,
+        "source_matches": true,
+        "visible_spans_from_original_evidence": true
+      },
+      "expected": {
+        "bounded_prefix_text": "e",
+        "candidate_strategy": "prefix_without_literal_evidence",
+        "candidate_text": "e",
+        "evidence": "empty_terms",
+        "raw_prefix_text": "e",
+        "source_matches": []
+      },
+      "id": "scalar_not_grapheme_contract",
+      "input": {
+        "budget": {
+          "max_json_bytes": 100,
+          "max_snippet_chars": 1
+        },
+        "mode": "lexical",
+        "terms": [],
+        "text": "é"
+      },
+      "passed": true
+    },
+    {
+      "actual": {
+        "bounded_prefix": {
+          "json_bytes": 21,
+          "scalar_count": 7,
+          "source_range": {
+            "end": 7,
+            "start": 0
+          },
+          "text": "İİ ΩK t",
+          "visible_source_matches": [],
+          "wire_json": "{\"text\":\"İİ ΩK t\"}"
+        },
+        "candidate": {
+          "output": {
+            "json_bytes": 18,
+            "scalar_count": 7,
+            "source_range": {
+              "end": 13,
+              "start": 6
+            },
+            "text": "target!",
+            "visible_source_matches": [
+              {
+                "range": {
+                  "end": 12,
+                  "start": 6
+                },
+                "term_index": 0
+              }
+            ],
+            "wire_json": "{\"text\":\"target!\"}"
+          },
+          "strategy": "hit_centered"
+        },
+        "evidence": "literal",
+        "focus": {
+          "range": {
+            "end": 12,
+            "start": 6
+          },
+          "term_index": 0
+        },
+        "raw_prefix": {
+          "json_bytes": 21,
+          "scalar_count": 7,
+          "source_range": {
+            "end": 7,
+            "start": 0
+          },
+          "text": "İİ ΩK t",
+          "visible_source_matches": [],
+          "wire_json": "{\"text\":\"İİ ΩK t\"}"
+        },
+        "source_matches": [
+          {
+            "range": {
+              "end": 12,
+              "start": 6
+            },
+            "term_index": 0
+          }
+        ]
+      },
+      "checks": {
+        "bounded_prefix_golden": true,
+        "candidate_golden": true,
+        "candidate_strategy": true,
+        "character_budgets": true,
+        "evidence": true,
+        "local_json_byte_budgets": true,
+        "omission_only_below_json_floor": true,
+        "original_source_slices": true,
+        "raw_prefix_expression": true,
+        "raw_prefix_golden": true,
+        "serialized_json_round_trip": true,
+        "source_matches": true,
+        "visible_spans_from_original_evidence": true
+      },
+      "expected": {
+        "bounded_prefix_text": "İİ ΩK t",
+        "candidate_strategy": "hit_centered",
+        "candidate_text": "target!",
+        "evidence": "literal",
+        "raw_prefix_text": "İİ ΩK t",
+        "source_matches": [
+          {
+            "range": {
+              "end": 12,
+              "start": 6
+            },
+            "term_index": 0
+          }
+        ]
+      },
+      "id": "expansions_before_hit",
+      "input": {
+        "budget": {
+          "max_json_bytes": 100,
+          "max_snippet_chars": 7
+        },
+        "mode": "lexical",
+        "terms": [
+          "target"
+        ],
+        "text": "İİ ΩK target!"
+      },
+      "passed": true
+    },
+    {
+      "actual": {
+        "bounded_prefix": {
+          "json_bytes": 17,
+          "scalar_count": 5,
+          "source_range": {
+            "end": 5,
+            "start": 0
+          },
+          "text": "ab İS",
+          "visible_source_matches": [],
+          "wire_json": "{\"text\":\"ab İS\"}"
+        },
+        "candidate": {
+          "output": {
+            "json_bytes": 17,
+            "scalar_count": 5,
+            "source_range": {
+              "end": 8,
+              "start": 3
+            },
+            "text": "İSTAN",
+            "visible_source_matches": [
+              {
+                "range": {
+                  "end": 8,
+                  "start": 3
+                },
+                "term_index": 0
+              }
+            ],
+            "wire_json": "{\"text\":\"İSTAN\"}"
+          },
+          "strategy": "hit_centered"
+        },
+        "evidence": "literal",
+        "focus": {
+          "range": {
+            "end": 8,
+            "start": 3
+          },
+          "term_index": 0
+        },
+        "raw_prefix": {
+          "json_bytes": 17,
+          "scalar_count": 5,
+          "source_range": {
+            "end": 5,
+            "start": 0
+          },
+          "text": "ab İS",
+          "visible_source_matches": [],
+          "wire_json": "{\"text\":\"ab İS\"}"
+        },
+        "source_matches": [
+          {
+            "range": {
+              "end": 8,
+              "start": 3
+            },
+            "term_index": 0
+          }
+        ]
+      },
+      "checks": {
+        "bounded_prefix_golden": true,
+        "candidate_golden": true,
+        "candidate_strategy": true,
+        "character_budgets": true,
+        "evidence": true,
+        "local_json_byte_budgets": true,
+        "omission_only_below_json_floor": true,
+        "original_source_slices": true,
+        "raw_prefix_expression": true,
+        "raw_prefix_golden": true,
+        "serialized_json_round_trip": true,
+        "source_matches": true,
+        "visible_spans_from_original_evidence": true
+      },
+      "expected": {
+        "bounded_prefix_text": "ab İS",
+        "candidate_strategy": "hit_centered",
+        "candidate_text": "İSTAN",
+        "evidence": "literal",
+        "raw_prefix_text": "ab İS",
+        "source_matches": [
+          {
+            "range": {
+              "end": 8,
+              "start": 3
+            },
+            "term_index": 0
+          }
+        ]
+      },
+      "id": "expansion_inside_hit",
+      "input": {
+        "budget": {
+          "max_json_bytes": 100,
+          "max_snippet_chars": 5
+        },
+        "mode": "lexical",
+        "terms": [
+          "i̇stan"
+        ],
+        "text": "ab İSTANBUL cd"
+      },
+      "passed": true
+    },
+    {
+      "actual": {
+        "bounded_prefix": {
+          "json_bytes": 13,
+          "scalar_count": 1,
+          "source_range": {
+            "end": 1,
+            "start": 0
+          },
+          "text": "İ",
+          "visible_source_matches": [
+            {
+              "range": {
+                "end": 1,
+                "start": 0
+              },
+              "term_index": 0
+            }
+          ],
+          "wire_json": "{\"text\":\"İ\"}"
+        },
+        "candidate": {
+          "output": {
+            "json_bytes": 13,
+            "scalar_count": 1,
+            "source_range": {
+              "end": 1,
+              "start": 0
+            },
+            "text": "İ",
+            "visible_source_matches": [
+              {
+                "range": {
+                  "end": 1,
+                  "start": 0
+                },
+                "term_index": 0
+              }
+            ],
+            "wire_json": "{\"text\":\"İ\"}"
+          },
+          "strategy": "hit_centered"
+        },
+        "evidence": "literal",
+        "focus": {
+          "range": {
+            "end": 1,
+            "start": 0
+          },
+          "term_index": 0
+        },
+        "raw_prefix": {
+          "json_bytes": 13,
+          "scalar_count": 1,
+          "source_range": {
+            "end": 1,
+            "start": 0
+          },
+          "text": "İ",
+          "visible_source_matches": [
+            {
+              "range": {
+                "end": 1,
+                "start": 0
+              },
+              "term_index": 0
+            }
+          ],
+          "wire_json": "{\"text\":\"İ\"}"
+        },
+        "source_matches": [
+          {
+            "range": {
+              "end": 1,
+              "start": 0
+            },
+            "term_index": 0
+          }
+        ]
+      },
+      "checks": {
+        "bounded_prefix_golden": true,
+        "candidate_golden": true,
+        "candidate_strategy": true,
+        "character_budgets": true,
+        "evidence": true,
+        "local_json_byte_budgets": true,
+        "omission_only_below_json_floor": true,
+        "original_source_slices": true,
+        "raw_prefix_expression": true,
+        "raw_prefix_golden": true,
+        "serialized_json_round_trip": true,
+        "source_matches": true,
+        "visible_spans_from_original_evidence": true
+      },
+      "expected": {
+        "bounded_prefix_text": "İ",
+        "candidate_strategy": "hit_centered",
+        "candidate_text": "İ",
+        "evidence": "literal",
+        "raw_prefix_text": "İ",
+        "source_matches": [
+          {
+            "range": {
+              "end": 1,
+              "start": 0
+            },
+            "term_index": 0
+          }
+        ]
+      },
+      "id": "partial_expansion_maps_whole_source_scalar",
+      "input": {
+        "budget": {
+          "max_json_bytes": 13,
+          "max_snippet_chars": 1
+        },
+        "mode": "lexical",
+        "terms": [
+          "i"
+        ],
+        "text": "İ"
+      },
+      "passed": true
+    },
+    {
+      "actual": {
+        "bounded_prefix": {
+          "json_bytes": 14,
+          "scalar_count": 2,
+          "source_range": {
+            "end": 2,
+            "start": 0
+          },
+          "text": "İz",
+          "visible_source_matches": [],
+          "wire_json": "{\"text\":\"İz\"}"
+        },
+        "candidate": {
+          "output": {
+            "json_bytes": 14,
+            "scalar_count": 2,
+            "source_range": {
+              "end": 2,
+              "start": 0
+            },
+            "text": "İz",
+            "visible_source_matches": [],
+            "wire_json": "{\"text\":\"İz\"}"
+          },
+          "strategy": "prefix_without_literal_evidence"
+        },
+        "evidence": "no_match",
+        "focus": null,
+        "raw_prefix": {
+          "json_bytes": 14,
+          "scalar_count": 2,
+          "source_range": {
+            "end": 2,
+            "start": 0
+          },
+          "text": "İz",
+          "visible_source_matches": [],
+          "wire_json": "{\"text\":\"İz\"}"
+        },
+        "source_matches": []
+      },
+      "checks": {
+        "bounded_prefix_golden": true,
+        "candidate_golden": true,
+        "candidate_strategy": true,
+        "character_budgets": true,
+        "evidence": true,
+        "local_json_byte_budgets": true,
+        "omission_only_below_json_floor": true,
+        "original_source_slices": true,
+        "raw_prefix_expression": true,
+        "raw_prefix_golden": true,
+        "serialized_json_round_trip": true,
+        "source_matches": true,
+        "visible_spans_from_original_evidence": true
+      },
+      "expected": {
+        "bounded_prefix_text": "İz",
+        "candidate_strategy": "prefix_without_literal_evidence",
+        "candidate_text": "İz",
+        "evidence": "no_match",
+        "raw_prefix_text": "İz",
+        "source_matches": []
+      },
+      "id": "prefix_cannot_start_inside_expansion",
+      "input": {
+        "budget": {
+          "max_json_bytes": 4096,
+          "max_snippet_chars": 512
+        },
+        "mode": "lexical",
+        "terms": [
+          "̇*"
+        ],
+        "text": "İz"
+      },
+      "passed": true
+    },
+    {
+      "actual": {
+        "bounded_prefix": {
+          "json_bytes": 16,
+          "scalar_count": 4,
+          "source_range": {
+            "end": 4,
+            "start": 0
+          },
+          "text": "café",
+          "visible_source_matches": [],
+          "wire_json": "{\"text\":\"café\"}"
+        },
+        "candidate": {
+          "output": {
+            "json_bytes": 16,
+            "scalar_count": 4,
+            "source_range": {
+              "end": 4,
+              "start": 0
+            },
+            "text": "café",
+            "visible_source_matches": [],
+            "wire_json": "{\"text\":\"café\"}"
+          },
+          "strategy": "prefix_without_literal_evidence"
+        },
+        "evidence": "no_match",
+        "focus": null,
+        "raw_prefix": {
+          "json_bytes": 16,
+          "scalar_count": 4,
+          "source_range": {
+            "end": 4,
+            "start": 0
+          },
+          "text": "café",
+          "visible_source_matches": [],
+          "wire_json": "{\"text\":\"café\"}"
+        },
+        "source_matches": []
+      },
+      "checks": {
+        "bounded_prefix_golden": true,
+        "candidate_golden": true,
+        "candidate_strategy": true,
+        "character_budgets": true,
+        "evidence": true,
+        "local_json_byte_budgets": true,
+        "omission_only_below_json_floor": true,
+        "original_source_slices": true,
+        "raw_prefix_expression": true,
+        "raw_prefix_golden": true,
+        "serialized_json_round_trip": true,
+        "source_matches": true,
+        "visible_spans_from_original_evidence": true
+      },
+      "expected": {
+        "bounded_prefix_text": "café",
+        "candidate_strategy": "prefix_without_literal_evidence",
+        "candidate_text": "café",
+        "evidence": "no_match",
+        "raw_prefix_text": "café",
+        "source_matches": []
+      },
+      "id": "no_unicode_normalization",
+      "input": {
+        "budget": {
+          "max_json_bytes": 4096,
+          "max_snippet_chars": 512
+        },
+        "mode": "lexical",
+        "terms": [
+          "café"
+        ],
+        "text": "café"
+      },
+      "passed": true
+    },
+    {
+      "actual": {
+        "bounded_prefix": {
+          "json_bytes": 18,
+          "scalar_count": 6,
+          "source_range": {
+            "end": 6,
+            "start": 0
+          },
+          "text": "Straße",
+          "visible_source_matches": [],
+          "wire_json": "{\"text\":\"Straße\"}"
+        },
+        "candidate": {
+          "output": {
+            "json_bytes": 18,
+            "scalar_count": 6,
+            "source_range": {
+              "end": 6,
+              "start": 0
+            },
+            "text": "Straße",
+            "visible_source_matches": [],
+            "wire_json": "{\"text\":\"Straße\"}"
+          },
+          "strategy": "prefix_without_literal_evidence"
+        },
+        "evidence": "no_match",
+        "focus": null,
+        "raw_prefix": {
+          "json_bytes": 18,
+          "scalar_count": 6,
+          "source_range": {
+            "end": 6,
+            "start": 0
+          },
+          "text": "Straße",
+          "visible_source_matches": [],
+          "wire_json": "{\"text\":\"Straße\"}"
+        },
+        "source_matches": []
+      },
+      "checks": {
+        "bounded_prefix_golden": true,
+        "candidate_golden": true,
+        "candidate_strategy": true,
+        "character_budgets": true,
+        "evidence": true,
+        "local_json_byte_budgets": true,
+        "omission_only_below_json_floor": true,
+        "original_source_slices": true,
+        "raw_prefix_expression": true,
+        "raw_prefix_golden": true,
+        "serialized_json_round_trip": true,
+        "source_matches": true,
+        "visible_spans_from_original_evidence": true
+      },
+      "expected": {
+        "bounded_prefix_text": "Straße",
+        "candidate_strategy": "prefix_without_literal_evidence",
+        "candidate_text": "Straße",
+        "evidence": "no_match",
+        "raw_prefix_text": "Straße",
+        "source_matches": []
+      },
+      "id": "no_full_case_folding",
+      "input": {
+        "budget": {
+          "max_json_bytes": 4096,
+          "max_snippet_chars": 512
+        },
+        "mode": "lexical",
+        "terms": [
+          "STRASSE"
+        ],
+        "text": "Straße"
+      },
+      "passed": true
+    },
+    {
+      "actual": {
+        "bounded_prefix": {
+          "json_bytes": 15,
+          "scalar_count": 2,
+          "source_range": {
+            "end": 2,
+            "start": 0
+          },
+          "text": "ΟΣ",
+          "visible_source_matches": [],
+          "wire_json": "{\"text\":\"ΟΣ\"}"
+        },
+        "candidate": {
+          "output": {
+            "json_bytes": 15,
+            "scalar_count": 2,
+            "source_range": {
+              "end": 2,
+              "start": 0
+            },
+            "text": "ΟΣ",
+            "visible_source_matches": [],
+            "wire_json": "{\"text\":\"ΟΣ\"}"
+          },
+          "strategy": "prefix_without_literal_evidence"
+        },
+        "evidence": "no_match",
+        "focus": null,
+        "raw_prefix": {
+          "json_bytes": 15,
+          "scalar_count": 2,
+          "source_range": {
+            "end": 2,
+            "start": 0
+          },
+          "text": "ΟΣ",
+          "visible_source_matches": [],
+          "wire_json": "{\"text\":\"ΟΣ\"}"
+        },
+        "source_matches": []
+      },
+      "checks": {
+        "bounded_prefix_golden": true,
+        "candidate_golden": true,
+        "candidate_strategy": true,
+        "character_budgets": true,
+        "evidence": true,
+        "local_json_byte_budgets": true,
+        "omission_only_below_json_floor": true,
+        "original_source_slices": true,
+        "raw_prefix_expression": true,
+        "raw_prefix_golden": true,
+        "serialized_json_round_trip": true,
+        "source_matches": true,
+        "visible_spans_from_original_evidence": true
+      },
+      "expected": {
+        "bounded_prefix_text": "ΟΣ",
+        "candidate_strategy": "prefix_without_literal_evidence",
+        "candidate_text": "ΟΣ",
+        "evidence": "no_match",
+        "raw_prefix_text": "ΟΣ",
+        "source_matches": []
+      },
+      "id": "scalar_lowercase_not_contextual_sigma",
+      "input": {
+        "budget": {
+          "max_json_bytes": 4096,
+          "max_snippet_chars": 512
+        },
+        "mode": "lexical",
+        "terms": [
+          "ος"
+        ],
+        "text": "ΟΣ"
+      },
+      "passed": true
+    },
+    {
+      "actual": {
+        "bounded_prefix": {
+          "json_bytes": 50,
+          "scalar_count": 17,
+          "source_range": {
+            "end": 17,
+            "start": 0
+          },
+          "text": "\"\\\n\t\r\b\f\u0000\u0001\u001f needle",
+          "visible_source_matches": [
+            {
+              "range": {
+                "end": 17,
+                "start": 11
+              },
+              "term_index": 0
+            }
+          ],
+          "wire_json": "{\"text\":\"\\\"\\\\\\n\\t\\r\\b\\f\\u0000\\u0001\\u001f needle\"}"
+        },
+        "candidate": {
+          "output": {
+            "json_bytes": 50,
+            "scalar_count": 17,
+            "source_range": {
+              "end": 17,
+              "start": 0
+            },
+            "text": "\"\\\n\t\r\b\f\u0000\u0001\u001f needle",
+            "visible_source_matches": [
+              {
+                "range": {
+                  "end": 17,
+                  "start": 11
+                },
+                "term_index": 0
+              }
+            ],
+            "wire_json": "{\"text\":\"\\\"\\\\\\n\\t\\r\\b\\f\\u0000\\u0001\\u001f needle\"}"
+          },
+          "strategy": "hit_centered"
+        },
+        "evidence": "literal",
+        "focus": {
+          "range": {
+            "end": 17,
+            "start": 11
+          },
+          "term_index": 0
+        },
+        "raw_prefix": {
+          "json_bytes": 50,
+          "scalar_count": 17,
+          "source_range": {
+            "end": 17,
+            "start": 0
+          },
+          "text": "\"\\\n\t\r\b\f\u0000\u0001\u001f needle",
+          "visible_source_matches": [
+            {
+              "range": {
+                "end": 17,
+                "start": 11
+              },
+              "term_index": 0
+            }
+          ],
+          "wire_json": "{\"text\":\"\\\"\\\\\\n\\t\\r\\b\\f\\u0000\\u0001\\u001f needle\"}"
+        },
+        "source_matches": [
+          {
+            "range": {
+              "end": 17,
+              "start": 11
+            },
+            "term_index": 0
+          }
+        ]
+      },
+      "checks": {
+        "bounded_prefix_golden": true,
+        "candidate_golden": true,
+        "candidate_strategy": true,
+        "character_budgets": true,
+        "evidence": true,
+        "local_json_byte_budgets": true,
+        "omission_only_below_json_floor": true,
+        "original_source_slices": true,
+        "raw_prefix_expression": true,
+        "raw_prefix_golden": true,
+        "serialized_json_round_trip": true,
+        "source_matches": true,
+        "visible_spans_from_original_evidence": true
+      },
+      "expected": {
+        "bounded_prefix_text": "\"\\\n\t\r\b\f\u0000\u0001\u001f needle",
+        "candidate_strategy": "hit_centered",
+        "candidate_text": "\"\\\n\t\r\b\f\u0000\u0001\u001f needle",
+        "evidence": "literal",
+        "raw_prefix_text": "\"\\\n\t\r\b\f\u0000\u0001\u001f needle",
+        "source_matches": [
+          {
+            "range": {
+              "end": 17,
+              "start": 11
+            },
+            "term_index": 0
+          }
+        ]
+      },
+      "id": "quotes_backslashes_all_json_short_escapes",
+      "input": {
+        "budget": {
+          "max_json_bytes": 4096,
+          "max_snippet_chars": 512
+        },
+        "mode": "lexical",
+        "terms": [
+          "needle"
+        ],
+        "text": "\"\\\n\t\r\b\f\u0000\u0001\u001f needle"
+      },
+      "passed": true
+    },
+    {
+      "actual": {
+        "bounded_prefix": {
+          "json_bytes": 15,
+          "scalar_count": 2,
+          "source_range": {
+            "end": 2,
+            "start": 0
+          },
+          "text": "\"\\",
+          "visible_source_matches": [],
+          "wire_json": "{\"text\":\"\\\"\\\\\"}"
+        },
+        "candidate": {
+          "output": {
+            "json_bytes": 15,
+            "scalar_count": 2,
+            "source_range": {
+              "end": 2,
+              "start": 0
+            },
+            "text": "\"\\",
+            "visible_source_matches": [],
+            "wire_json": "{\"text\":\"\\\"\\\\\"}"
+          },
+          "strategy": "prefix_without_literal_evidence"
+        },
+        "evidence": "empty_terms",
+        "focus": null,
+        "raw_prefix": {
+          "json_bytes": 16,
+          "scalar_count": 3,
+          "source_range": {
+            "end": 3,
+            "start": 0
+          },
+          "text": "\"\\x",
+          "visible_source_matches": [],
+          "wire_json": "{\"text\":\"\\\"\\\\x\"}"
+        },
+        "source_matches": []
+      },
+      "checks": {
+        "bounded_prefix_golden": true,
+        "candidate_golden": true,
+        "candidate_strategy": true,
+        "character_budgets": true,
+        "evidence": true,
+        "local_json_byte_budgets": true,
+        "omission_only_below_json_floor": true,
+        "original_source_slices": true,
+        "raw_prefix_expression": true,
+        "raw_prefix_golden": true,
+        "serialized_json_round_trip": true,
+        "source_matches": true,
+        "visible_spans_from_original_evidence": true
+      },
+      "expected": {
+        "bounded_prefix_text": "\"\\",
+        "candidate_strategy": "prefix_without_literal_evidence",
+        "candidate_text": "\"\\",
+        "evidence": "empty_terms",
+        "raw_prefix_text": "\"\\x",
+        "source_matches": []
+      },
+      "id": "quote_backslash_byte_gate",
+      "input": {
+        "budget": {
+          "max_json_bytes": 15,
+          "max_snippet_chars": 10
+        },
+        "mode": "lexical",
+        "terms": [],
+        "text": "\"\\x"
+      },
+      "passed": true
+    },
+    {
+      "actual": {
+        "bounded_prefix": {
+          "json_bytes": 11,
+          "scalar_count": 0,
+          "source_range": {
+            "end": 0,
+            "start": 0
+          },
+          "text": "",
+          "visible_source_matches": [],
+          "wire_json": "{\"text\":\"\"}"
+        },
+        "candidate": {
+          "output": {
+            "json_bytes": 11,
+            "scalar_count": 0,
+            "source_range": {
+              "end": 0,
+              "start": 0
+            },
+            "text": "",
+            "visible_source_matches": [],
+            "wire_json": "{\"text\":\"\"}"
+          },
+          "strategy": "prefix_without_literal_evidence"
+        },
+        "evidence": "empty_terms",
+        "focus": null,
+        "raw_prefix": {
+          "json_bytes": 18,
+          "scalar_count": 2,
+          "source_range": {
+            "end": 2,
+            "start": 0
+          },
+          "text": "\u0001x",
+          "visible_source_matches": [],
+          "wire_json": "{\"text\":\"\\u0001x\"}"
+        },
+        "source_matches": []
+      },
+      "checks": {
+        "bounded_prefix_golden": true,
+        "candidate_golden": true,
+        "candidate_strategy": true,
+        "character_budgets": true,
+        "evidence": true,
+        "local_json_byte_budgets": true,
+        "omission_only_below_json_floor": true,
+        "original_source_slices": true,
+        "raw_prefix_expression": true,
+        "raw_prefix_golden": true,
+        "serialized_json_round_trip": true,
+        "source_matches": true,
+        "visible_spans_from_original_evidence": true
+      },
+      "expected": {
+        "bounded_prefix_text": "",
+        "candidate_strategy": "prefix_without_literal_evidence",
+        "candidate_text": "",
+        "evidence": "empty_terms",
+        "raw_prefix_text": "\u0001x",
+        "source_matches": []
+      },
+      "id": "control_escape_too_expensive",
+      "input": {
+        "budget": {
+          "max_json_bytes": 16,
+          "max_snippet_chars": 10
+        },
+        "mode": "lexical",
+        "terms": [],
+        "text": "\u0001x"
+      },
+      "passed": true
+    },
+    {
+      "actual": {
+        "bounded_prefix": {
+          "json_bytes": 13,
+          "scalar_count": 2,
+          "source_range": {
+            "end": 2,
+            "start": 0
+          },
+          "text": "xx",
+          "visible_source_matches": [],
+          "wire_json": "{\"text\":\"xx\"}"
+        },
+        "candidate": {
+          "output": {
+            "json_bytes": 15,
+            "scalar_count": 2,
+            "source_range": {
+              "end": 5,
+              "start": 3
+            },
+            "text": "\"\\",
+            "visible_source_matches": [
+              {
+                "range": {
+                  "end": 5,
+                  "start": 3
+                },
+                "term_index": 0
+              }
+            ],
+            "wire_json": "{\"text\":\"\\\"\\\\\"}"
+          },
+          "strategy": "hit_centered"
+        },
+        "evidence": "literal",
+        "focus": {
+          "range": {
+            "end": 5,
+            "start": 3
+          },
+          "term_index": 0
+        },
+        "raw_prefix": {
+          "json_bytes": 13,
+          "scalar_count": 2,
+          "source_range": {
+            "end": 2,
+            "start": 0
+          },
+          "text": "xx",
+          "visible_source_matches": [],
+          "wire_json": "{\"text\":\"xx\"}"
+        },
+        "source_matches": [
+          {
+            "range": {
+              "end": 5,
+              "start": 3
+            },
+            "term_index": 0
+          }
+        ]
+      },
+      "checks": {
+        "bounded_prefix_golden": true,
+        "candidate_golden": true,
+        "candidate_strategy": true,
+        "character_budgets": true,
+        "evidence": true,
+        "local_json_byte_budgets": true,
+        "omission_only_below_json_floor": true,
+        "original_source_slices": true,
+        "raw_prefix_expression": true,
+        "raw_prefix_golden": true,
+        "serialized_json_round_trip": true,
+        "source_matches": true,
+        "visible_spans_from_original_evidence": true
+      },
+      "expected": {
+        "bounded_prefix_text": "xx",
+        "candidate_strategy": "hit_centered",
+        "candidate_text": "\"\\",
+        "evidence": "literal",
+        "raw_prefix_text": "xx",
+        "source_matches": [
+          {
+            "range": {
+              "end": 5,
+              "start": 3
+            },
+            "term_index": 0
+          }
+        ]
+      },
+      "id": "escaped_anchor_exact_fit",
+      "input": {
+        "budget": {
+          "max_json_bytes": 15,
+          "max_snippet_chars": 2
+        },
+        "mode": "lexical",
+        "terms": [
+          "\"\\"
+        ],
+        "text": "xx \"\\ yy"
+      },
+      "passed": true
+    },
+    {
+      "actual": {
+        "bounded_prefix": {
+          "json_bytes": 13,
+          "scalar_count": 2,
+          "source_range": {
+            "end": 2,
+            "start": 0
+          },
+          "text": "xx",
+          "visible_source_matches": [],
+          "wire_json": "{\"text\":\"xx\"}"
+        },
+        "candidate": {
+          "output": {
+            "json_bytes": 11,
+            "scalar_count": 0,
+            "source_range": {
+              "end": 3,
+              "start": 3
+            },
+            "text": "",
+            "visible_source_matches": [],
+            "wire_json": "{\"text\":\"\"}"
+          },
+          "strategy": "empty_anchor_exceeds_budget"
+        },
+        "evidence": "literal",
+        "focus": {
+          "range": {
+            "end": 5,
+            "start": 3
+          },
+          "term_index": 0
+        },
+        "raw_prefix": {
+          "json_bytes": 13,
+          "scalar_count": 2,
+          "source_range": {
+            "end": 2,
+            "start": 0
+          },
+          "text": "xx",
+          "visible_source_matches": [],
+          "wire_json": "{\"text\":\"xx\"}"
+        },
+        "source_matches": [
+          {
+            "range": {
+              "end": 5,
+              "start": 3
+            },
+            "term_index": 0
+          }
+        ]
+      },
+      "checks": {
+        "bounded_prefix_golden": true,
+        "candidate_golden": true,
+        "candidate_strategy": true,
+        "character_budgets": true,
+        "evidence": true,
+        "local_json_byte_budgets": true,
+        "omission_only_below_json_floor": true,
+        "original_source_slices": true,
+        "raw_prefix_expression": true,
+        "raw_prefix_golden": true,
+        "serialized_json_round_trip": true,
+        "source_matches": true,
+        "visible_spans_from_original_evidence": true
+      },
+      "expected": {
+        "bounded_prefix_text": "xx",
+        "candidate_strategy": "empty_anchor_exceeds_budget",
+        "candidate_text": "",
+        "evidence": "literal",
+        "raw_prefix_text": "xx",
+        "source_matches": [
+          {
+            "range": {
+              "end": 5,
+              "start": 3
+            },
+            "term_index": 0
+          }
+        ]
+      },
+      "id": "escaped_anchor_one_byte_short",
+      "input": {
+        "budget": {
+          "max_json_bytes": 14,
+          "max_snippet_chars": 2
+        },
+        "mode": "lexical",
+        "terms": [
+          "\"\\"
+        ],
+        "text": "xx \"\\ yy"
+      },
+      "passed": true
+    },
+    {
+      "actual": {
+        "bounded_prefix": {
+          "json_bytes": 12,
+          "scalar_count": 1,
+          "source_range": {
+            "end": 1,
+            "start": 0
+          },
+          "text": "a",
+          "visible_source_matches": [],
+          "wire_json": "{\"text\":\"a\"}"
+        },
+        "candidate": {
+          "output": {
+            "json_bytes": 15,
+            "scalar_count": 1,
+            "source_range": {
+              "end": 2,
+              "start": 1
+            },
+            "text": "🙂",
+            "visible_source_matches": [
+              {
+                "range": {
+                  "end": 2,
+                  "start": 1
+                },
+                "term_index": 0
+              }
+            ],
+            "wire_json": "{\"text\":\"🙂\"}"
+          },
+          "strategy": "hit_centered"
+        },
+        "evidence": "literal",
+        "focus": {
+          "range": {
+            "end": 2,
+            "start": 1
+          },
+          "term_index": 0
+        },
+        "raw_prefix": {
+          "json_bytes": 17,
+          "scalar_count": 3,
+          "source_range": {
+            "end": 3,
+            "start": 0
+          },
+          "text": "a🙂b",
+          "visible_source_matches": [
+            {
+              "range": {
+                "end": 2,
+                "start": 1
+              },
+              "term_index": 0
+            }
+          ],
+          "wire_json": "{\"text\":\"a🙂b\"}"
+        },
+        "source_matches": [
+          {
+            "range": {
+              "end": 2,
+              "start": 1
+            },
+            "term_index": 0
+          }
+        ]
+      },
+      "checks": {
+        "bounded_prefix_golden": true,
+        "candidate_golden": true,
+        "candidate_strategy": true,
+        "character_budgets": true,
+        "evidence": true,
+        "local_json_byte_budgets": true,
+        "omission_only_below_json_floor": true,
+        "original_source_slices": true,
+        "raw_prefix_expression": true,
+        "raw_prefix_golden": true,
+        "serialized_json_round_trip": true,
+        "source_matches": true,
+        "visible_spans_from_original_evidence": true
+      },
+      "expected": {
+        "bounded_prefix_text": "a",
+        "candidate_strategy": "hit_centered",
+        "candidate_text": "🙂",
+        "evidence": "literal",
+        "raw_prefix_text": "a🙂b",
+        "source_matches": [
+          {
+            "range": {
+              "end": 2,
+              "start": 1
+            },
+            "term_index": 0
+          }
+        ]
+      },
+      "id": "emoji_byte_gate_keeps_anchor",
+      "input": {
+        "budget": {
+          "max_json_bytes": 15,
+          "max_snippet_chars": 3
+        },
+        "mode": "lexical",
+        "terms": [
+          "🙂"
+        ],
+        "text": "a🙂b"
+      },
+      "passed": true
+    },
+    {
+      "actual": {
+        "bounded_prefix": {
+          "json_bytes": 11,
+          "scalar_count": 0,
+          "source_range": {
+            "end": 0,
+            "start": 0
+          },
+          "text": "",
+          "visible_source_matches": [],
+          "wire_json": "{\"text\":\"\"}"
+        },
+        "candidate": {
+          "output": {
+            "json_bytes": 11,
+            "scalar_count": 0,
+            "source_range": {
+              "end": 0,
+              "start": 0
+            },
+            "text": "",
+            "visible_source_matches": [],
+            "wire_json": "{\"text\":\"\"}"
+          },
+          "strategy": "empty_anchor_exceeds_budget"
+        },
+        "evidence": "literal",
+        "focus": {
+          "range": {
+            "end": 6,
+            "start": 0
+          },
+          "term_index": 0
+        },
+        "raw_prefix": {
+          "json_bytes": 17,
+          "scalar_count": 6,
+          "source_range": {
+            "end": 6,
+            "start": 0
+          },
+          "text": "needle",
+          "visible_source_matches": [
+            {
+              "range": {
+                "end": 6,
+                "start": 0
+              },
+              "term_index": 0
+            }
+          ],
+          "wire_json": "{\"text\":\"needle\"}"
+        },
+        "source_matches": [
+          {
+            "range": {
+              "end": 6,
+              "start": 0
+            },
+            "term_index": 0
+          }
+        ]
+      },
+      "checks": {
+        "bounded_prefix_golden": true,
+        "candidate_golden": true,
+        "candidate_strategy": true,
+        "character_budgets": true,
+        "evidence": true,
+        "local_json_byte_budgets": true,
+        "omission_only_below_json_floor": true,
+        "original_source_slices": true,
+        "raw_prefix_expression": true,
+        "raw_prefix_golden": true,
+        "serialized_json_round_trip": true,
+        "source_matches": true,
+        "visible_spans_from_original_evidence": true
+      },
+      "expected": {
+        "bounded_prefix_text": "",
+        "candidate_strategy": "empty_anchor_exceeds_budget",
+        "candidate_text": "",
+        "evidence": "literal",
+        "raw_prefix_text": "needle",
+        "source_matches": [
+          {
+            "range": {
+              "end": 6,
+              "start": 0
+            },
+            "term_index": 0
+          }
+        ]
+      },
+      "id": "minimum_json_payload",
+      "input": {
+        "budget": {
+          "max_json_bytes": 11,
+          "max_snippet_chars": 8
+        },
+        "mode": "lexical",
+        "terms": [
+          "needle"
+        ],
+        "text": "needle"
+      },
+      "passed": true
+    },
+    {
+      "actual": {
+        "bounded_prefix": null,
+        "candidate": {
+          "output": null,
+          "strategy": "omitted_json_floor"
+        },
+        "evidence": "literal",
+        "focus": {
+          "range": {
+            "end": 1,
+            "start": 0
+          },
+          "term_index": 0
+        },
+        "raw_prefix": {
+          "json_bytes": 12,
+          "scalar_count": 1,
+          "source_range": {
+            "end": 1,
+            "start": 0
+          },
+          "text": "x",
+          "visible_source_matches": [
+            {
+              "range": {
+                "end": 1,
+                "start": 0
+              },
+              "term_index": 0
+            }
+          ],
+          "wire_json": "{\"text\":\"x\"}"
+        },
+        "source_matches": [
+          {
+            "range": {
+              "end": 1,
+              "start": 0
+            },
+            "term_index": 0
+          }
+        ]
+      },
+      "checks": {
+        "bounded_prefix_golden": true,
+        "candidate_golden": true,
+        "candidate_strategy": true,
+        "character_budgets": true,
+        "evidence": true,
+        "local_json_byte_budgets": true,
+        "omission_only_below_json_floor": true,
+        "original_source_slices": true,
+        "raw_prefix_expression": true,
+        "raw_prefix_golden": true,
+        "serialized_json_round_trip": true,
+        "source_matches": true,
+        "visible_spans_from_original_evidence": true
+      },
+      "expected": {
+        "bounded_prefix_text": null,
+        "candidate_strategy": "omitted_json_floor",
+        "candidate_text": null,
+        "evidence": "literal",
+        "raw_prefix_text": "x",
+        "source_matches": [
+          {
+            "range": {
+              "end": 1,
+              "start": 0
+            },
+            "term_index": 0
+          }
+        ]
+      },
+      "id": "below_json_floor",
+      "input": {
+        "budget": {
+          "max_json_bytes": 10,
+          "max_snippet_chars": 1
+        },
+        "mode": "lexical",
+        "terms": [
+          "x"
+        ],
+        "text": "x"
+      },
+      "passed": true
+    },
+    {
+      "actual": {
+        "bounded_prefix": null,
+        "candidate": {
+          "output": null,
+          "strategy": "omitted_json_floor"
+        },
+        "evidence": "literal",
+        "focus": {
+          "range": {
+            "end": 1,
+            "start": 0
+          },
+          "term_index": 0
+        },
+        "raw_prefix": {
+          "json_bytes": 12,
+          "scalar_count": 1,
+          "source_range": {
+            "end": 1,
+            "start": 0
+          },
+          "text": "x",
+          "visible_source_matches": [
+            {
+              "range": {
+                "end": 1,
+                "start": 0
+              },
+              "term_index": 0
+            }
+          ],
+          "wire_json": "{\"text\":\"x\"}"
+        },
+        "source_matches": [
+          {
+            "range": {
+              "end": 1,
+              "start": 0
+            },
+            "term_index": 0
+          }
+        ]
+      },
+      "checks": {
+        "bounded_prefix_golden": true,
+        "candidate_golden": true,
+        "candidate_strategy": true,
+        "character_budgets": true,
+        "evidence": true,
+        "local_json_byte_budgets": true,
+        "omission_only_below_json_floor": true,
+        "original_source_slices": true,
+        "raw_prefix_expression": true,
+        "raw_prefix_golden": true,
+        "serialized_json_round_trip": true,
+        "source_matches": true,
+        "visible_spans_from_original_evidence": true
+      },
+      "expected": {
+        "bounded_prefix_text": null,
+        "candidate_strategy": "omitted_json_floor",
+        "candidate_text": null,
+        "evidence": "literal",
+        "raw_prefix_text": "x",
+        "source_matches": [
+          {
+            "range": {
+              "end": 1,
+              "start": 0
+            },
+            "term_index": 0
+          }
+        ]
+      },
+      "id": "zero_json_budget",
+      "input": {
+        "budget": {
+          "max_json_bytes": 0,
+          "max_snippet_chars": 1
+        },
+        "mode": "lexical",
+        "terms": [
+          "x"
+        ],
+        "text": "x"
+      },
+      "passed": true
+    },
+    {
+      "actual": {
+        "bounded_prefix": {
+          "json_bytes": 11,
+          "scalar_count": 0,
+          "source_range": {
+            "end": 0,
+            "start": 0
+          },
+          "text": "",
+          "visible_source_matches": [],
+          "wire_json": "{\"text\":\"\"}"
+        },
+        "candidate": {
+          "output": {
+            "json_bytes": 11,
+            "scalar_count": 0,
+            "source_range": {
+              "end": 0,
+              "start": 0
+            },
+            "text": "",
+            "visible_source_matches": [],
+            "wire_json": "{\"text\":\"\"}"
+          },
+          "strategy": "empty_anchor_exceeds_budget"
+        },
+        "evidence": "literal",
+        "focus": {
+          "range": {
+            "end": 6,
+            "start": 0
+          },
+          "term_index": 0
+        },
+        "raw_prefix": {
+          "json_bytes": 11,
+          "scalar_count": 0,
+          "source_range": {
+            "end": 0,
+            "start": 0
+          },
+          "text": "",
+          "visible_source_matches": [],
+          "wire_json": "{\"text\":\"\"}"
+        },
+        "source_matches": [
+          {
+            "range": {
+              "end": 6,
+              "start": 0
+            },
+            "term_index": 0
+          }
+        ]
+      },
+      "checks": {
+        "bounded_prefix_golden": true,
+        "candidate_golden": true,
+        "candidate_strategy": true,
+        "character_budgets": true,
+        "evidence": true,
+        "local_json_byte_budgets": true,
+        "omission_only_below_json_floor": true,
+        "original_source_slices": true,
+        "raw_prefix_expression": true,
+        "raw_prefix_golden": true,
+        "serialized_json_round_trip": true,
+        "source_matches": true,
+        "visible_spans_from_original_evidence": true
+      },
+      "expected": {
+        "bounded_prefix_text": "",
+        "candidate_strategy": "empty_anchor_exceeds_budget",
+        "candidate_text": "",
+        "evidence": "literal",
+        "raw_prefix_text": "",
+        "source_matches": [
+          {
+            "range": {
+              "end": 6,
+              "start": 0
+            },
+            "term_index": 0
+          }
+        ]
+      },
+      "id": "zero_character_budget",
+      "input": {
+        "budget": {
+          "max_json_bytes": 100,
+          "max_snippet_chars": 0
+        },
+        "mode": "lexical",
+        "terms": [
+          "needle"
+        ],
+        "text": "needle"
+      },
+      "passed": true
+    },
+    {
+      "actual": {
+        "bounded_prefix": {
+          "json_bytes": 14,
+          "scalar_count": 3,
+          "source_range": {
+            "end": 3,
+            "start": 0
+          },
+          "text": "beg",
+          "visible_source_matches": [],
+          "wire_json": "{\"text\":\"beg\"}"
+        },
+        "candidate": {
+          "output": {
+            "json_bytes": 11,
+            "scalar_count": 0,
+            "source_range": {
+              "end": 6,
+              "start": 6
+            },
+            "text": "",
+            "visible_source_matches": [],
+            "wire_json": "{\"text\":\"\"}"
+          },
+          "strategy": "empty_anchor_exceeds_budget"
+        },
+        "evidence": "literal",
+        "focus": {
+          "range": {
+            "end": 12,
+            "start": 6
+          },
+          "term_index": 0
+        },
+        "raw_prefix": {
+          "json_bytes": 14,
+          "scalar_count": 3,
+          "source_range": {
+            "end": 3,
+            "start": 0
+          },
+          "text": "beg",
+          "visible_source_matches": [],
+          "wire_json": "{\"text\":\"beg\"}"
+        },
+        "source_matches": [
+          {
+            "range": {
+              "end": 12,
+              "start": 6
+            },
+            "term_index": 0
+          }
+        ]
+      },
+      "checks": {
+        "bounded_prefix_golden": true,
+        "candidate_golden": true,
+        "candidate_strategy": true,
+        "character_budgets": true,
+        "evidence": true,
+        "local_json_byte_budgets": true,
+        "omission_only_below_json_floor": true,
+        "original_source_slices": true,
+        "raw_prefix_expression": true,
+        "raw_prefix_golden": true,
+        "serialized_json_round_trip": true,
+        "source_matches": true,
+        "visible_spans_from_original_evidence": true
+      },
+      "expected": {
+        "bounded_prefix_text": "beg",
+        "candidate_strategy": "empty_anchor_exceeds_budget",
+        "candidate_text": "",
+        "evidence": "literal",
+        "raw_prefix_text": "beg",
+        "source_matches": [
+          {
+            "range": {
+              "end": 12,
+              "start": 6
+            },
+            "term_index": 0
+          }
+        ]
+      },
+      "id": "anchor_longer_than_char_budget",
+      "input": {
+        "budget": {
+          "max_json_bytes": 100,
+          "max_snippet_chars": 3
+        },
+        "mode": "lexical",
+        "terms": [
+          "needle"
+        ],
+        "text": "begin needle end"
+      },
+      "passed": true
+    },
+    {
+      "actual": {
+        "bounded_prefix": {
+          "json_bytes": 11,
+          "scalar_count": 0,
+          "source_range": {
+            "end": 0,
+            "start": 0
+          },
+          "text": "",
+          "visible_source_matches": [],
+          "wire_json": "{\"text\":\"\"}"
+        },
+        "candidate": {
+          "output": {
+            "json_bytes": 11,
+            "scalar_count": 0,
+            "source_range": {
+              "end": 0,
+              "start": 0
+            },
+            "text": "",
+            "visible_source_matches": [],
+            "wire_json": "{\"text\":\"\"}"
+          },
+          "strategy": "prefix_without_literal_evidence"
+        },
+        "evidence": "no_match",
+        "focus": null,
+        "raw_prefix": {
+          "json_bytes": 11,
+          "scalar_count": 0,
+          "source_range": {
+            "end": 0,
+            "start": 0
+          },
+          "text": "",
+          "visible_source_matches": [],
+          "wire_json": "{\"text\":\"\"}"
+        },
+        "source_matches": []
+      },
+      "checks": {
+        "bounded_prefix_golden": true,
+        "candidate_golden": true,
+        "candidate_strategy": true,
+        "character_budgets": true,
+        "evidence": true,
+        "local_json_byte_budgets": true,
+        "omission_only_below_json_floor": true,
+        "original_source_slices": true,
+        "raw_prefix_expression": true,
+        "raw_prefix_golden": true,
+        "serialized_json_round_trip": true,
+        "source_matches": true,
+        "visible_spans_from_original_evidence": true
+      },
+      "expected": {
+        "bounded_prefix_text": "",
+        "candidate_strategy": "prefix_without_literal_evidence",
+        "candidate_text": "",
+        "evidence": "no_match",
+        "raw_prefix_text": "",
+        "source_matches": []
+      },
+      "id": "empty_text",
+      "input": {
+        "budget": {
+          "max_json_bytes": 4096,
+          "max_snippet_chars": 512
+        },
+        "mode": "lexical",
+        "terms": [
+          "needle"
+        ],
+        "text": ""
+      },
+      "passed": true
+    },
+    {
+      "actual": {
+        "bounded_prefix": {
+          "json_bytes": 20,
+          "scalar_count": 9,
+          "source_range": {
+            "end": 9,
+            "start": 0
+          },
+          "text": "synthetic",
+          "visible_source_matches": [],
+          "wire_json": "{\"text\":\"synthetic\"}"
+        },
+        "candidate": {
+          "output": {
+            "json_bytes": 20,
+            "scalar_count": 9,
+            "source_range": {
+              "end": 9,
+              "start": 0
+            },
+            "text": "synthetic",
+            "visible_source_matches": [],
+            "wire_json": "{\"text\":\"synthetic\"}"
+          },
+          "strategy": "prefix_without_literal_evidence"
+        },
+        "evidence": "empty_terms",
+        "focus": null,
+        "raw_prefix": {
+          "json_bytes": 20,
+          "scalar_count": 9,
+          "source_range": {
+            "end": 9,
+            "start": 0
+          },
+          "text": "synthetic",
+          "visible_source_matches": [],
+          "wire_json": "{\"text\":\"synthetic\"}"
+        },
+        "source_matches": []
+      },
+      "checks": {
+        "bounded_prefix_golden": true,
+        "candidate_golden": true,
+        "candidate_strategy": true,
+        "character_budgets": true,
+        "evidence": true,
+        "local_json_byte_budgets": true,
+        "omission_only_below_json_floor": true,
+        "original_source_slices": true,
+        "raw_prefix_expression": true,
+        "raw_prefix_golden": true,
+        "serialized_json_round_trip": true,
+        "source_matches": true,
+        "visible_spans_from_original_evidence": true
+      },
+      "expected": {
+        "bounded_prefix_text": "synthetic",
+        "candidate_strategy": "prefix_without_literal_evidence",
+        "candidate_text": "synthetic",
+        "evidence": "empty_terms",
+        "raw_prefix_text": "synthetic",
+        "source_matches": []
+      },
+      "id": "empty_terms",
+      "input": {
+        "budget": {
+          "max_json_bytes": 100,
+          "max_snippet_chars": 9
+        },
+        "mode": "lexical",
+        "terms": [],
+        "text": "synthetic body"
+      },
+      "passed": true
+    },
+    {
+      "actual": {
+        "bounded_prefix": {
+          "json_bytes": 27,
+          "scalar_count": 16,
+          "source_range": {
+            "end": 16,
+            "start": 0
+          },
+          "text": "synthetic * text",
+          "visible_source_matches": [],
+          "wire_json": "{\"text\":\"synthetic * text\"}"
+        },
+        "candidate": {
+          "output": {
+            "json_bytes": 27,
+            "scalar_count": 16,
+            "source_range": {
+              "end": 16,
+              "start": 0
+            },
+            "text": "synthetic * text",
+            "visible_source_matches": [],
+            "wire_json": "{\"text\":\"synthetic * text\"}"
+          },
+          "strategy": "prefix_without_literal_evidence"
+        },
+        "evidence": "empty_terms",
+        "focus": null,
+        "raw_prefix": {
+          "json_bytes": 27,
+          "scalar_count": 16,
+          "source_range": {
+            "end": 16,
+            "start": 0
+          },
+          "text": "synthetic * text",
+          "visible_source_matches": [],
+          "wire_json": "{\"text\":\"synthetic * text\"}"
+        },
+        "source_matches": []
+      },
+      "checks": {
+        "bounded_prefix_golden": true,
+        "candidate_golden": true,
+        "candidate_strategy": true,
+        "character_budgets": true,
+        "evidence": true,
+        "local_json_byte_budgets": true,
+        "omission_only_below_json_floor": true,
+        "original_source_slices": true,
+        "raw_prefix_expression": true,
+        "raw_prefix_golden": true,
+        "serialized_json_round_trip": true,
+        "source_matches": true,
+        "visible_spans_from_original_evidence": true
+      },
+      "expected": {
+        "bounded_prefix_text": "synthetic * text",
+        "candidate_strategy": "prefix_without_literal_evidence",
+        "candidate_text": "synthetic * text",
+        "evidence": "empty_terms",
+        "raw_prefix_text": "synthetic * text",
+        "source_matches": []
+      },
+      "id": "blank_and_bare_star_terms",
+      "input": {
+        "budget": {
+          "max_json_bytes": 100,
+          "max_snippet_chars": 40
+        },
+        "mode": "lexical",
+        "terms": [
+          "",
+          " \t",
+          "*"
+        ],
+        "text": "synthetic * text"
+      },
+      "passed": true
+    },
+    {
+      "actual": {
+        "bounded_prefix": {
+          "json_bytes": 22,
+          "scalar_count": 11,
+          "source_range": {
+            "end": 11,
+            "start": 0
+          },
+          "text": "only apples",
+          "visible_source_matches": [],
+          "wire_json": "{\"text\":\"only apples\"}"
+        },
+        "candidate": {
+          "output": {
+            "json_bytes": 22,
+            "scalar_count": 11,
+            "source_range": {
+              "end": 11,
+              "start": 0
+            },
+            "text": "only apples",
+            "visible_source_matches": [],
+            "wire_json": "{\"text\":\"only apples\"}"
+          },
+          "strategy": "prefix_without_literal_evidence"
+        },
+        "evidence": "no_match",
+        "focus": null,
+        "raw_prefix": {
+          "json_bytes": 22,
+          "scalar_count": 11,
+          "source_range": {
+            "end": 11,
+            "start": 0
+          },
+          "text": "only apples",
+          "visible_source_matches": [],
+          "wire_json": "{\"text\":\"only apples\"}"
+        },
+        "source_matches": []
+      },
+      "checks": {
+        "bounded_prefix_golden": true,
+        "candidate_golden": true,
+        "candidate_strategy": true,
+        "character_budgets": true,
+        "evidence": true,
+        "local_json_byte_budgets": true,
+        "omission_only_below_json_floor": true,
+        "original_source_slices": true,
+        "raw_prefix_expression": true,
+        "raw_prefix_golden": true,
+        "serialized_json_round_trip": true,
+        "source_matches": true,
+        "visible_spans_from_original_evidence": true
+      },
+      "expected": {
+        "bounded_prefix_text": "only apples",
+        "candidate_strategy": "prefix_without_literal_evidence",
+        "candidate_text": "only apples",
+        "evidence": "no_match",
+        "raw_prefix_text": "only apples",
+        "source_matches": []
+      },
+      "id": "nonmatching_terms",
+      "input": {
+        "budget": {
+          "max_json_bytes": 100,
+          "max_snippet_chars": 11
+        },
+        "mode": "lexical",
+        "terms": [
+          "banana"
+        ],
+        "text": "only apples and pears"
+      },
+      "passed": true
+    },
+    {
+      "actual": {
+        "bounded_prefix": {
+          "json_bytes": 41,
+          "scalar_count": 30,
+          "source_range": {
+            "end": 30,
+            "start": 0
+          },
+          "text": "network workbench /workstation",
+          "visible_source_matches": [
+            {
+              "range": {
+                "end": 12,
+                "start": 8
+              },
+              "term_index": 0
+            },
+            {
+              "range": {
+                "end": 23,
+                "start": 19
+              },
+              "term_index": 0
+            }
+          ],
+          "wire_json": "{\"text\":\"network workbench /workstation\"}"
+        },
+        "candidate": {
+          "output": {
+            "json_bytes": 41,
+            "scalar_count": 30,
+            "source_range": {
+              "end": 30,
+              "start": 0
+            },
+            "text": "network workbench /workstation",
+            "visible_source_matches": [
+              {
+                "range": {
+                  "end": 12,
+                  "start": 8
+                },
+                "term_index": 0
+              },
+              {
+                "range": {
+                  "end": 23,
+                  "start": 19
+                },
+                "term_index": 0
+              }
+            ],
+            "wire_json": "{\"text\":\"network workbench /workstation\"}"
+          },
+          "strategy": "hit_centered"
+        },
+        "evidence": "literal",
+        "focus": {
+          "range": {
+            "end": 12,
+            "start": 8
+          },
+          "term_index": 0
+        },
+        "raw_prefix": {
+          "json_bytes": 41,
+          "scalar_count": 30,
+          "source_range": {
+            "end": 30,
+            "start": 0
+          },
+          "text": "network workbench /workstation",
+          "visible_source_matches": [
+            {
+              "range": {
+                "end": 12,
+                "start": 8
+              },
+              "term_index": 0
+            },
+            {
+              "range": {
+                "end": 23,
+                "start": 19
+              },
+              "term_index": 0
+            }
+          ],
+          "wire_json": "{\"text\":\"network workbench /workstation\"}"
+        },
+        "source_matches": [
+          {
+            "range": {
+              "end": 12,
+              "start": 8
+            },
+            "term_index": 0
+          },
+          {
+            "range": {
+              "end": 23,
+              "start": 19
+            },
+            "term_index": 0
+          }
+        ]
+      },
+      "checks": {
+        "bounded_prefix_golden": true,
+        "candidate_golden": true,
+        "candidate_strategy": true,
+        "character_budgets": true,
+        "evidence": true,
+        "local_json_byte_budgets": true,
+        "omission_only_below_json_floor": true,
+        "original_source_slices": true,
+        "raw_prefix_expression": true,
+        "raw_prefix_golden": true,
+        "serialized_json_round_trip": true,
+        "source_matches": true,
+        "visible_spans_from_original_evidence": true
+      },
+      "expected": {
+        "bounded_prefix_text": "network workbench /workstation",
+        "candidate_strategy": "hit_centered",
+        "candidate_text": "network workbench /workstation",
+        "evidence": "literal",
+        "raw_prefix_text": "network workbench /workstation",
+        "source_matches": [
+          {
+            "range": {
+              "end": 12,
+              "start": 8
+            },
+            "term_index": 0
+          },
+          {
+            "range": {
+              "end": 23,
+              "start": 19
+            },
+            "term_index": 0
+          }
+        ]
+      },
+      "id": "prefix_boundary_positive_and_internal_negative",
+      "input": {
+        "budget": {
+          "max_json_bytes": 4096,
+          "max_snippet_chars": 512
+        },
+        "mode": "lexical",
+        "terms": [
+          "work*"
+        ],
+        "text": "network workbench /workstation"
+      },
+      "passed": true
+    },
+    {
+      "actual": {
+        "bounded_prefix": {
+          "json_bytes": 54,
+          "scalar_count": 39,
+          "source_range": {
+            "end": 39,
+            "start": 0
+          },
+          "text": "network rework _work éwork éwork 中work",
+          "visible_source_matches": [],
+          "wire_json": "{\"text\":\"network rework _work éwork éwork 中work\"}"
+        },
+        "candidate": {
+          "output": {
+            "json_bytes": 54,
+            "scalar_count": 39,
+            "source_range": {
+              "end": 39,
+              "start": 0
+            },
+            "text": "network rework _work éwork éwork 中work",
+            "visible_source_matches": [],
+            "wire_json": "{\"text\":\"network rework _work éwork éwork 中work\"}"
+          },
+          "strategy": "prefix_without_literal_evidence"
+        },
+        "evidence": "no_match",
+        "focus": null,
+        "raw_prefix": {
+          "json_bytes": 54,
+          "scalar_count": 39,
+          "source_range": {
+            "end": 39,
+            "start": 0
+          },
+          "text": "network rework _work éwork éwork 中work",
+          "visible_source_matches": [],
+          "wire_json": "{\"text\":\"network rework _work éwork éwork 中work\"}"
+        },
+        "source_matches": []
+      },
+      "checks": {
+        "bounded_prefix_golden": true,
+        "candidate_golden": true,
+        "candidate_strategy": true,
+        "character_budgets": true,
+        "evidence": true,
+        "local_json_byte_budgets": true,
+        "omission_only_below_json_floor": true,
+        "original_source_slices": true,
+        "raw_prefix_expression": true,
+        "raw_prefix_golden": true,
+        "serialized_json_round_trip": true,
+        "source_matches": true,
+        "visible_spans_from_original_evidence": true
+      },
+      "expected": {
+        "bounded_prefix_text": "network rework _work éwork éwork 中work",
+        "candidate_strategy": "prefix_without_literal_evidence",
+        "candidate_text": "network rework _work éwork éwork 中work",
+        "evidence": "no_match",
+        "raw_prefix_text": "network rework _work éwork éwork 中work",
+        "source_matches": []
+      },
+      "id": "prefix_counterexamples",
+      "input": {
+        "budget": {
+          "max_json_bytes": 4096,
+          "max_snippet_chars": 512
+        },
+        "mode": "lexical",
+        "terms": [
+          "work*"
+        ],
+        "text": "network rework _work éwork éwork 中work"
+      },
+      "passed": true
+    },
+    {
+      "actual": {
+        "bounded_prefix": {
+          "json_bytes": 15,
+          "scalar_count": 4,
+          "source_range": {
+            "end": 4,
+            "start": 0
+          },
+          "text": "xwor",
+          "visible_source_matches": [],
+          "wire_json": "{\"text\":\"xwor\"}"
+        },
+        "candidate": {
+          "output": {
+            "json_bytes": 15,
+            "scalar_count": 4,
+            "source_range": {
+              "end": 4,
+              "start": 0
+            },
+            "text": "xwor",
+            "visible_source_matches": [],
+            "wire_json": "{\"text\":\"xwor\"}"
+          },
+          "strategy": "prefix_without_literal_evidence"
+        },
+        "evidence": "no_match",
+        "focus": null,
+        "raw_prefix": {
+          "json_bytes": 15,
+          "scalar_count": 4,
+          "source_range": {
+            "end": 4,
+            "start": 0
+          },
+          "text": "xwor",
+          "visible_source_matches": [],
+          "wire_json": "{\"text\":\"xwor\"}"
+        },
+        "source_matches": []
+      },
+      "checks": {
+        "bounded_prefix_golden": true,
+        "candidate_golden": true,
+        "candidate_strategy": true,
+        "character_budgets": true,
+        "evidence": true,
+        "local_json_byte_budgets": true,
+        "omission_only_below_json_floor": true,
+        "original_source_slices": true,
+        "raw_prefix_expression": true,
+        "raw_prefix_golden": true,
+        "serialized_json_round_trip": true,
+        "source_matches": true,
+        "visible_spans_from_original_evidence": true
+      },
+      "expected": {
+        "bounded_prefix_text": "xwor",
+        "candidate_strategy": "prefix_without_literal_evidence",
+        "candidate_text": "xwor",
+        "evidence": "no_match",
+        "raw_prefix_text": "xwor",
+        "source_matches": []
+      },
+      "id": "truncation_cannot_create_prefix_boundary",
+      "input": {
+        "budget": {
+          "max_json_bytes": 100,
+          "max_snippet_chars": 4
+        },
+        "mode": "lexical",
+        "terms": [
+          "work*"
+        ],
+        "text": "xworkstation"
+      },
+      "passed": true
+    },
+    {
+      "actual": {
+        "bounded_prefix": {
+          "json_bytes": 25,
+          "scalar_count": 12,
+          "source_range": {
+            "end": 12,
+            "start": 0
+          },
+          "text": "net　WORKshop",
+          "visible_source_matches": [
+            {
+              "range": {
+                "end": 8,
+                "start": 4
+              },
+              "term_index": 0
+            }
+          ],
+          "wire_json": "{\"text\":\"net　WORKshop\"}"
+        },
+        "candidate": {
+          "output": {
+            "json_bytes": 25,
+            "scalar_count": 12,
+            "source_range": {
+              "end": 12,
+              "start": 0
+            },
+            "text": "net　WORKshop",
+            "visible_source_matches": [
+              {
+                "range": {
+                  "end": 8,
+                  "start": 4
+                },
+                "term_index": 0
+              }
+            ],
+            "wire_json": "{\"text\":\"net　WORKshop\"}"
+          },
+          "strategy": "hit_centered"
+        },
+        "evidence": "literal",
+        "focus": {
+          "range": {
+            "end": 8,
+            "start": 4
+          },
+          "term_index": 0
+        },
+        "raw_prefix": {
+          "json_bytes": 25,
+          "scalar_count": 12,
+          "source_range": {
+            "end": 12,
+            "start": 0
+          },
+          "text": "net　WORKshop",
+          "visible_source_matches": [
+            {
+              "range": {
+                "end": 8,
+                "start": 4
+              },
+              "term_index": 0
+            }
+          ],
+          "wire_json": "{\"text\":\"net　WORKshop\"}"
+        },
+        "source_matches": [
+          {
+            "range": {
+              "end": 8,
+              "start": 4
+            },
+            "term_index": 0
+          }
+        ]
+      },
+      "checks": {
+        "bounded_prefix_golden": true,
+        "candidate_golden": true,
+        "candidate_strategy": true,
+        "character_budgets": true,
+        "evidence": true,
+        "local_json_byte_budgets": true,
+        "omission_only_below_json_floor": true,
+        "original_source_slices": true,
+        "raw_prefix_expression": true,
+        "raw_prefix_golden": true,
+        "serialized_json_round_trip": true,
+        "source_matches": true,
+        "visible_spans_from_original_evidence": true
+      },
+      "expected": {
+        "bounded_prefix_text": "net　WORKshop",
+        "candidate_strategy": "hit_centered",
+        "candidate_text": "net　WORKshop",
+        "evidence": "literal",
+        "raw_prefix_text": "net　WORKshop",
+        "source_matches": [
+          {
+            "range": {
+              "end": 8,
+              "start": 4
+            },
+            "term_index": 0
+          }
+        ]
+      },
+      "id": "unicode_whitespace_prefix_boundary",
+      "input": {
+        "budget": {
+          "max_json_bytes": 4096,
+          "max_snippet_chars": 512
+        },
+        "mode": "lexical",
+        "terms": [
+          "work*"
+        ],
+        "text": "net　WORKshop"
+      },
+      "passed": true
+    },
+    {
+      "actual": {
+        "bounded_prefix": {
+          "json_bytes": 17,
+          "scalar_count": 2,
+          "source_range": {
+            "end": 2,
+            "start": 0
+          },
+          "text": "工作",
+          "visible_source_matches": [
+            {
+              "range": {
+                "end": 1,
+                "start": 0
+              },
+              "term_index": 0
+            }
+          ],
+          "wire_json": "{\"text\":\"工作\"}"
+        },
+        "candidate": {
+          "output": {
+            "json_bytes": 17,
+            "scalar_count": 2,
+            "source_range": {
+              "end": 2,
+              "start": 0
+            },
+            "text": "工作",
+            "visible_source_matches": [
+              {
+                "range": {
+                  "end": 1,
+                  "start": 0
+                },
+                "term_index": 0
+              }
+            ],
+            "wire_json": "{\"text\":\"工作\"}"
+          },
+          "strategy": "hit_centered"
+        },
+        "evidence": "literal",
+        "focus": {
+          "range": {
+            "end": 1,
+            "start": 0
+          },
+          "term_index": 0
+        },
+        "raw_prefix": {
+          "json_bytes": 17,
+          "scalar_count": 2,
+          "source_range": {
+            "end": 2,
+            "start": 0
+          },
+          "text": "工作",
+          "visible_source_matches": [
+            {
+              "range": {
+                "end": 1,
+                "start": 0
+              },
+              "term_index": 0
+            }
+          ],
+          "wire_json": "{\"text\":\"工作\"}"
+        },
+        "source_matches": [
+          {
+            "range": {
+              "end": 1,
+              "start": 0
+            },
+            "term_index": 0
+          }
+        ]
+      },
+      "checks": {
+        "bounded_prefix_golden": true,
+        "candidate_golden": true,
+        "candidate_strategy": true,
+        "character_budgets": true,
+        "evidence": true,
+        "local_json_byte_budgets": true,
+        "omission_only_below_json_floor": true,
+        "original_source_slices": true,
+        "raw_prefix_expression": true,
+        "raw_prefix_golden": true,
+        "serialized_json_round_trip": true,
+        "source_matches": true,
+        "visible_spans_from_original_evidence": true
+      },
+      "expected": {
+        "bounded_prefix_text": "工作",
+        "candidate_strategy": "hit_centered",
+        "candidate_text": "工作",
+        "evidence": "literal",
+        "raw_prefix_text": "工作",
+        "source_matches": [
+          {
+            "range": {
+              "end": 1,
+              "start": 0
+            },
+            "term_index": 0
+          }
+        ]
+      },
+      "id": "single_cjk_prefix_at_start",
+      "input": {
+        "budget": {
+          "max_json_bytes": 4096,
+          "max_snippet_chars": 512
+        },
+        "mode": "lexical",
+        "terms": [
+          "工*"
+        ],
+        "text": "工作"
+      },
+      "passed": true
+    },
+    {
+      "actual": {
+        "bounded_prefix": {
+          "json_bytes": 29,
+          "scalar_count": 18,
+          "source_range": {
+            "end": 18,
+            "start": 0
+          },
+          "text": "fooxbar foo*barley",
+          "visible_source_matches": [
+            {
+              "range": {
+                "end": 15,
+                "start": 8
+              },
+              "term_index": 0
+            }
+          ],
+          "wire_json": "{\"text\":\"fooxbar foo*barley\"}"
+        },
+        "candidate": {
+          "output": {
+            "json_bytes": 29,
+            "scalar_count": 18,
+            "source_range": {
+              "end": 18,
+              "start": 0
+            },
+            "text": "fooxbar foo*barley",
+            "visible_source_matches": [
+              {
+                "range": {
+                  "end": 15,
+                  "start": 8
+                },
+                "term_index": 0
+              }
+            ],
+            "wire_json": "{\"text\":\"fooxbar foo*barley\"}"
+          },
+          "strategy": "hit_centered"
+        },
+        "evidence": "literal",
+        "focus": {
+          "range": {
+            "end": 15,
+            "start": 8
+          },
+          "term_index": 0
+        },
+        "raw_prefix": {
+          "json_bytes": 29,
+          "scalar_count": 18,
+          "source_range": {
+            "end": 18,
+            "start": 0
+          },
+          "text": "fooxbar foo*barley",
+          "visible_source_matches": [
+            {
+              "range": {
+                "end": 15,
+                "start": 8
+              },
+              "term_index": 0
+            }
+          ],
+          "wire_json": "{\"text\":\"fooxbar foo*barley\"}"
+        },
+        "source_matches": [
+          {
+            "range": {
+              "end": 15,
+              "start": 8
+            },
+            "term_index": 0
+          }
+        ]
+      },
+      "checks": {
+        "bounded_prefix_golden": true,
+        "candidate_golden": true,
+        "candidate_strategy": true,
+        "character_budgets": true,
+        "evidence": true,
+        "local_json_byte_budgets": true,
+        "omission_only_below_json_floor": true,
+        "original_source_slices": true,
+        "raw_prefix_expression": true,
+        "raw_prefix_golden": true,
+        "serialized_json_round_trip": true,
+        "source_matches": true,
+        "visible_spans_from_original_evidence": true
+      },
+      "expected": {
+        "bounded_prefix_text": "fooxbar foo*barley",
+        "candidate_strategy": "hit_centered",
+        "candidate_text": "fooxbar foo*barley",
+        "evidence": "literal",
+        "raw_prefix_text": "fooxbar foo*barley",
+        "source_matches": [
+          {
+            "range": {
+              "end": 15,
+              "start": 8
+            },
+            "term_index": 0
+          }
+        ]
+      },
+      "id": "interior_star_stays_literal",
+      "input": {
+        "budget": {
+          "max_json_bytes": 4096,
+          "max_snippet_chars": 512
+        },
+        "mode": "lexical",
+        "terms": [
+          "foo*bar*"
+        ],
+        "text": "fooxbar foo*barley"
+      },
+      "passed": true
+    },
+    {
+      "actual": {
+        "bounded_prefix": {
+          "json_bytes": 33,
+          "scalar_count": 22,
+          "source_range": {
+            "end": 22,
+            "start": 0
+          },
+          "text": "workstation work*bench",
+          "visible_source_matches": [
+            {
+              "range": {
+                "end": 17,
+                "start": 12
+              },
+              "term_index": 0
+            }
+          ],
+          "wire_json": "{\"text\":\"workstation work*bench\"}"
+        },
+        "candidate": {
+          "output": {
+            "json_bytes": 33,
+            "scalar_count": 22,
+            "source_range": {
+              "end": 22,
+              "start": 0
+            },
+            "text": "workstation work*bench",
+            "visible_source_matches": [
+              {
+                "range": {
+                  "end": 17,
+                  "start": 12
+                },
+                "term_index": 0
+              }
+            ],
+            "wire_json": "{\"text\":\"workstation work*bench\"}"
+          },
+          "strategy": "hit_centered"
+        },
+        "evidence": "literal",
+        "focus": {
+          "range": {
+            "end": 17,
+            "start": 12
+          },
+          "term_index": 0
+        },
+        "raw_prefix": {
+          "json_bytes": 33,
+          "scalar_count": 22,
+          "source_range": {
+            "end": 22,
+            "start": 0
+          },
+          "text": "workstation work*bench",
+          "visible_source_matches": [
+            {
+              "range": {
+                "end": 17,
+                "start": 12
+              },
+              "term_index": 0
+            }
+          ],
+          "wire_json": "{\"text\":\"workstation work*bench\"}"
+        },
+        "source_matches": [
+          {
+            "range": {
+              "end": 17,
+              "start": 12
+            },
+            "term_index": 0
+          }
+        ]
+      },
+      "checks": {
+        "bounded_prefix_golden": true,
+        "candidate_golden": true,
+        "candidate_strategy": true,
+        "character_budgets": true,
+        "evidence": true,
+        "local_json_byte_budgets": true,
+        "omission_only_below_json_floor": true,
+        "original_source_slices": true,
+        "raw_prefix_expression": true,
+        "raw_prefix_golden": true,
+        "serialized_json_round_trip": true,
+        "source_matches": true,
+        "visible_spans_from_original_evidence": true
+      },
+      "expected": {
+        "bounded_prefix_text": "workstation work*bench",
+        "candidate_strategy": "hit_centered",
+        "candidate_text": "workstation work*bench",
+        "evidence": "literal",
+        "raw_prefix_text": "workstation work*bench",
+        "source_matches": [
+          {
+            "range": {
+              "end": 17,
+              "start": 12
+            },
+            "term_index": 0
+          }
+        ]
+      },
+      "id": "only_last_repeated_star_is_operator",
+      "input": {
+        "budget": {
+          "max_json_bytes": 4096,
+          "max_snippet_chars": 512
+        },
+        "mode": "lexical",
+        "terms": [
+          "work**"
+        ],
+        "text": "workstation work*bench"
+      },
+      "passed": true
+    },
+    {
+      "actual": {
+        "bounded_prefix": {
+          "json_bytes": 22,
+          "scalar_count": 11,
+          "source_range": {
+            "end": 11,
+            "start": 0
+          },
+          "text": "workstation",
+          "visible_source_matches": [],
+          "wire_json": "{\"text\":\"workstation\"}"
+        },
+        "candidate": {
+          "output": {
+            "json_bytes": 22,
+            "scalar_count": 11,
+            "source_range": {
+              "end": 11,
+              "start": 0
+            },
+            "text": "workstation",
+            "visible_source_matches": [],
+            "wire_json": "{\"text\":\"workstation\"}"
+          },
+          "strategy": "prefix_without_literal_evidence"
+        },
+        "evidence": "no_match",
+        "focus": null,
+        "raw_prefix": {
+          "json_bytes": 22,
+          "scalar_count": 11,
+          "source_range": {
+            "end": 11,
+            "start": 0
+          },
+          "text": "workstation",
+          "visible_source_matches": [],
+          "wire_json": "{\"text\":\"workstation\"}"
+        },
+        "source_matches": []
+      },
+      "checks": {
+        "bounded_prefix_golden": true,
+        "candidate_golden": true,
+        "candidate_strategy": true,
+        "character_budgets": true,
+        "evidence": true,
+        "local_json_byte_budgets": true,
+        "omission_only_below_json_floor": true,
+        "original_source_slices": true,
+        "raw_prefix_expression": true,
+        "raw_prefix_golden": true,
+        "serialized_json_round_trip": true,
+        "source_matches": true,
+        "visible_spans_from_original_evidence": true
+      },
+      "expected": {
+        "bounded_prefix_text": "workstation",
+        "candidate_strategy": "prefix_without_literal_evidence",
+        "candidate_text": "workstation",
+        "evidence": "no_match",
+        "raw_prefix_text": "workstation",
+        "source_matches": []
+      },
+      "id": "repeated_star_not_product_fts_equivalence",
+      "input": {
+        "budget": {
+          "max_json_bytes": 4096,
+          "max_snippet_chars": 512
+        },
+        "mode": "lexical",
+        "terms": [
+          "work**"
+        ],
+        "text": "workstation"
+      },
+      "passed": true
+    },
+    {
+      "actual": {
+        "bounded_prefix": {
+          "json_bytes": 22,
+          "scalar_count": 11,
+          "source_range": {
+            "end": 11,
+            "start": 0
+          },
+          "text": "aXb ab aZZb",
+          "visible_source_matches": [],
+          "wire_json": "{\"text\":\"aXb ab aZZb\"}"
+        },
+        "candidate": {
+          "output": {
+            "json_bytes": 22,
+            "scalar_count": 11,
+            "source_range": {
+              "end": 11,
+              "start": 0
+            },
+            "text": "aXb ab aZZb",
+            "visible_source_matches": [],
+            "wire_json": "{\"text\":\"aXb ab aZZb\"}"
+          },
+          "strategy": "prefix_without_literal_evidence"
+        },
+        "evidence": "no_match",
+        "focus": null,
+        "raw_prefix": {
+          "json_bytes": 22,
+          "scalar_count": 11,
+          "source_range": {
+            "end": 11,
+            "start": 0
+          },
+          "text": "aXb ab aZZb",
+          "visible_source_matches": [],
+          "wire_json": "{\"text\":\"aXb ab aZZb\"}"
+        },
+        "source_matches": []
+      },
+      "checks": {
+        "bounded_prefix_golden": true,
+        "candidate_golden": true,
+        "candidate_strategy": true,
+        "character_budgets": true,
+        "evidence": true,
+        "local_json_byte_budgets": true,
+        "omission_only_below_json_floor": true,
+        "original_source_slices": true,
+        "raw_prefix_expression": true,
+        "raw_prefix_golden": true,
+        "serialized_json_round_trip": true,
+        "source_matches": true,
+        "visible_spans_from_original_evidence": true
+      },
+      "expected": {
+        "bounded_prefix_text": "aXb ab aZZb",
+        "candidate_strategy": "prefix_without_literal_evidence",
+        "candidate_text": "aXb ab aZZb",
+        "evidence": "no_match",
+        "raw_prefix_text": "aXb ab aZZb",
+        "source_matches": []
+      },
+      "id": "no_other_wildcards_negative",
+      "input": {
+        "budget": {
+          "max_json_bytes": 4096,
+          "max_snippet_chars": 512
+        },
+        "mode": "lexical",
+        "terms": [
+          "a?b",
+          "a%b",
+          "a_b",
+          "a*b"
+        ],
+        "text": "aXb ab aZZb"
+      },
+      "passed": true
+    },
+    {
+      "actual": {
+        "bounded_prefix": {
+          "json_bytes": 26,
+          "scalar_count": 15,
+          "source_range": {
+            "end": 15,
+            "start": 0
+          },
+          "text": "a?b a%b a_b a*b",
+          "visible_source_matches": [
+            {
+              "range": {
+                "end": 3,
+                "start": 0
+              },
+              "term_index": 0
+            },
+            {
+              "range": {
+                "end": 7,
+                "start": 4
+              },
+              "term_index": 1
+            },
+            {
+              "range": {
+                "end": 11,
+                "start": 8
+              },
+              "term_index": 2
+            },
+            {
+              "range": {
+                "end": 15,
+                "start": 12
+              },
+              "term_index": 3
+            }
+          ],
+          "wire_json": "{\"text\":\"a?b a%b a_b a*b\"}"
+        },
+        "candidate": {
+          "output": {
+            "json_bytes": 26,
+            "scalar_count": 15,
+            "source_range": {
+              "end": 15,
+              "start": 0
+            },
+            "text": "a?b a%b a_b a*b",
+            "visible_source_matches": [
+              {
+                "range": {
+                  "end": 3,
+                  "start": 0
+                },
+                "term_index": 0
+              },
+              {
+                "range": {
+                  "end": 7,
+                  "start": 4
+                },
+                "term_index": 1
+              },
+              {
+                "range": {
+                  "end": 11,
+                  "start": 8
+                },
+                "term_index": 2
+              },
+              {
+                "range": {
+                  "end": 15,
+                  "start": 12
+                },
+                "term_index": 3
+              }
+            ],
+            "wire_json": "{\"text\":\"a?b a%b a_b a*b\"}"
+          },
+          "strategy": "hit_centered"
+        },
+        "evidence": "literal",
+        "focus": {
+          "range": {
+            "end": 3,
+            "start": 0
+          },
+          "term_index": 0
+        },
+        "raw_prefix": {
+          "json_bytes": 26,
+          "scalar_count": 15,
+          "source_range": {
+            "end": 15,
+            "start": 0
+          },
+          "text": "a?b a%b a_b a*b",
+          "visible_source_matches": [
+            {
+              "range": {
+                "end": 3,
+                "start": 0
+              },
+              "term_index": 0
+            },
+            {
+              "range": {
+                "end": 7,
+                "start": 4
+              },
+              "term_index": 1
+            },
+            {
+              "range": {
+                "end": 11,
+                "start": 8
+              },
+              "term_index": 2
+            },
+            {
+              "range": {
+                "end": 15,
+                "start": 12
+              },
+              "term_index": 3
+            }
+          ],
+          "wire_json": "{\"text\":\"a?b a%b a_b a*b\"}"
+        },
+        "source_matches": [
+          {
+            "range": {
+              "end": 3,
+              "start": 0
+            },
+            "term_index": 0
+          },
+          {
+            "range": {
+              "end": 7,
+              "start": 4
+            },
+            "term_index": 1
+          },
+          {
+            "range": {
+              "end": 11,
+              "start": 8
+            },
+            "term_index": 2
+          },
+          {
+            "range": {
+              "end": 15,
+              "start": 12
+            },
+            "term_index": 3
+          }
+        ]
+      },
+      "checks": {
+        "bounded_prefix_golden": true,
+        "candidate_golden": true,
+        "candidate_strategy": true,
+        "character_budgets": true,
+        "evidence": true,
+        "local_json_byte_budgets": true,
+        "omission_only_below_json_floor": true,
+        "original_source_slices": true,
+        "raw_prefix_expression": true,
+        "raw_prefix_golden": true,
+        "serialized_json_round_trip": true,
+        "source_matches": true,
+        "visible_spans_from_original_evidence": true
+      },
+      "expected": {
+        "bounded_prefix_text": "a?b a%b a_b a*b",
+        "candidate_strategy": "hit_centered",
+        "candidate_text": "a?b a%b a_b a*b",
+        "evidence": "literal",
+        "raw_prefix_text": "a?b a%b a_b a*b",
+        "source_matches": [
+          {
+            "range": {
+              "end": 3,
+              "start": 0
+            },
+            "term_index": 0
+          },
+          {
+            "range": {
+              "end": 7,
+              "start": 4
+            },
+            "term_index": 1
+          },
+          {
+            "range": {
+              "end": 11,
+              "start": 8
+            },
+            "term_index": 2
+          },
+          {
+            "range": {
+              "end": 15,
+              "start": 12
+            },
+            "term_index": 3
+          }
+        ]
+      },
+      "id": "all_other_wildcards_are_literal",
+      "input": {
+        "budget": {
+          "max_json_bytes": 4096,
+          "max_snippet_chars": 512
+        },
+        "mode": "lexical",
+        "terms": [
+          "a?b",
+          "a%b",
+          "a_b",
+          "a*b"
+        ],
+        "text": "a?b a%b a_b a*b"
+      },
+      "passed": true
+    },
+    {
+      "actual": {
+        "bounded_prefix": {
+          "json_bytes": 22,
+          "scalar_count": 11,
+          "source_range": {
+            "end": 11,
+            "start": 0
+          },
+          "text": "workstation",
+          "visible_source_matches": [],
+          "wire_json": "{\"text\":\"workstation\"}"
+        },
+        "candidate": {
+          "output": {
+            "json_bytes": 22,
+            "scalar_count": 11,
+            "source_range": {
+              "end": 11,
+              "start": 0
+            },
+            "text": "workstation",
+            "visible_source_matches": [],
+            "wire_json": "{\"text\":\"workstation\"}"
+          },
+          "strategy": "prefix_without_literal_evidence"
+        },
+        "evidence": "no_match",
+        "focus": null,
+        "raw_prefix": {
+          "json_bytes": 22,
+          "scalar_count": 11,
+          "source_range": {
+            "end": 11,
+            "start": 0
+          },
+          "text": "workstation",
+          "visible_source_matches": [],
+          "wire_json": "{\"text\":\"workstation\"}"
+        },
+        "source_matches": []
+      },
+      "checks": {
+        "bounded_prefix_golden": true,
+        "candidate_golden": true,
+        "candidate_strategy": true,
+        "character_budgets": true,
+        "evidence": true,
+        "local_json_byte_budgets": true,
+        "omission_only_below_json_floor": true,
+        "original_source_slices": true,
+        "raw_prefix_expression": true,
+        "raw_prefix_golden": true,
+        "serialized_json_round_trip": true,
+        "source_matches": true,
+        "visible_spans_from_original_evidence": true
+      },
+      "expected": {
+        "bounded_prefix_text": "workstation",
+        "candidate_strategy": "prefix_without_literal_evidence",
+        "candidate_text": "workstation",
+        "evidence": "no_match",
+        "raw_prefix_text": "workstation",
+        "source_matches": []
+      },
+      "id": "leading_star_is_literal",
+      "input": {
+        "budget": {
+          "max_json_bytes": 4096,
+          "max_snippet_chars": 512
+        },
+        "mode": "lexical",
+        "terms": [
+          "*work"
+        ],
+        "text": "workstation"
+      },
+      "passed": true
+    },
+    {
+      "actual": {
+        "bounded_prefix": {
+          "json_bytes": 17,
+          "scalar_count": 6,
+          "source_range": {
+            "end": 6,
+            "start": 0
+          },
+          "text": "needle",
+          "visible_source_matches": [],
+          "wire_json": "{\"text\":\"needle\"}"
+        },
+        "candidate": {
+          "output": {
+            "json_bytes": 17,
+            "scalar_count": 6,
+            "source_range": {
+              "end": 6,
+              "start": 0
+            },
+            "text": "needle",
+            "visible_source_matches": [],
+            "wire_json": "{\"text\":\"needle\"}"
+          },
+          "strategy": "prefix_without_literal_evidence"
+        },
+        "evidence": "semantic_only",
+        "focus": null,
+        "raw_prefix": {
+          "json_bytes": 17,
+          "scalar_count": 6,
+          "source_range": {
+            "end": 6,
+            "start": 0
+          },
+          "text": "needle",
+          "visible_source_matches": [],
+          "wire_json": "{\"text\":\"needle\"}"
+        },
+        "source_matches": []
+      },
+      "checks": {
+        "bounded_prefix_golden": true,
+        "candidate_golden": true,
+        "candidate_strategy": true,
+        "character_budgets": true,
+        "evidence": true,
+        "local_json_byte_budgets": true,
+        "omission_only_below_json_floor": true,
+        "original_source_slices": true,
+        "raw_prefix_expression": true,
+        "raw_prefix_golden": true,
+        "serialized_json_round_trip": true,
+        "source_matches": true,
+        "visible_spans_from_original_evidence": true
+      },
+      "expected": {
+        "bounded_prefix_text": "needle",
+        "candidate_strategy": "prefix_without_literal_evidence",
+        "candidate_text": "needle",
+        "evidence": "semantic_only",
+        "raw_prefix_text": "needle",
+        "source_matches": []
+      },
+      "id": "semantic_only_even_if_term_spelling_occurs",
+      "input": {
+        "budget": {
+          "max_json_bytes": 100,
+          "max_snippet_chars": 6
+        },
+        "mode": "semantic_only",
+        "terms": [
+          "needle"
+        ],
+        "text": "needle appears"
+      },
+      "passed": true
+    },
+    {
+      "actual": {
+        "bounded_prefix": {
+          "json_bytes": 18,
+          "scalar_count": 7,
+          "source_range": {
+            "end": 7,
+            "start": 0
+          },
+          "text": "oranges",
+          "visible_source_matches": [],
+          "wire_json": "{\"text\":\"oranges\"}"
+        },
+        "candidate": {
+          "output": {
+            "json_bytes": 18,
+            "scalar_count": 7,
+            "source_range": {
+              "end": 7,
+              "start": 0
+            },
+            "text": "oranges",
+            "visible_source_matches": [],
+            "wire_json": "{\"text\":\"oranges\"}"
+          },
+          "strategy": "prefix_without_literal_evidence"
+        },
+        "evidence": "semantic_only",
+        "focus": null,
+        "raw_prefix": {
+          "json_bytes": 18,
+          "scalar_count": 7,
+          "source_range": {
+            "end": 7,
+            "start": 0
+          },
+          "text": "oranges",
+          "visible_source_matches": [],
+          "wire_json": "{\"text\":\"oranges\"}"
+        },
+        "source_matches": []
+      },
+      "checks": {
+        "bounded_prefix_golden": true,
+        "candidate_golden": true,
+        "candidate_strategy": true,
+        "character_budgets": true,
+        "evidence": true,
+        "local_json_byte_budgets": true,
+        "omission_only_below_json_floor": true,
+        "original_source_slices": true,
+        "raw_prefix_expression": true,
+        "raw_prefix_golden": true,
+        "serialized_json_round_trip": true,
+        "source_matches": true,
+        "visible_spans_from_original_evidence": true
+      },
+      "expected": {
+        "bounded_prefix_text": "oranges",
+        "candidate_strategy": "prefix_without_literal_evidence",
+        "candidate_text": "oranges",
+        "evidence": "semantic_only",
+        "raw_prefix_text": "oranges",
+        "source_matches": []
+      },
+      "id": "semantic_only_no_literal_evidence",
+      "input": {
+        "budget": {
+          "max_json_bytes": 100,
+          "max_snippet_chars": 20
+        },
+        "mode": "semantic_only",
+        "terms": [
+          "citrus"
+        ],
+        "text": "oranges"
+      },
+      "passed": true
+    }
+  ],
+  "contains_real_transcripts": false,
+  "dataset_hash": {
+    "algorithm": "SHA-256",
+    "encoding": "UTF-8 compact JSON of the ordered {id,input,expected} case array, recursively sorted object keys, no ASCII escaping of Unicode, including independent expectations",
+    "value": "a700529b59060c53399939057821b09a4a27fe4f5c97759b705df6523f8499d5"
+  },
+  "evidence_status": "isolated_synthetic_correctness_prototype",
+  "experiment": "A",
+  "fixture_revision": "snippet-synthetic-v1",
+  "limitations": [
+    "This is not Wake execution, product integration, provider certification, legal approval, a benchmark or a production recommendation.",
+    "Only explicit text and terms are studied. Product CJK bigram term derivation, payload-leaf guidance, why_matched, final-star FTS semantics, ranking, cursor, occurrence merging and full serialized envelopes remain unchanged and untested here.",
+    "Prefix boundaries are intentionally conservative and not equivalent to SQLite tokenization. Repeated final stars differ from the product sanitizer, which trims every trailing star; interior * remains literal here.",
+    "Scalar lowercase is neither full case folding nor Unicode normalization; sharp-s, decomposed accents and contextual Greek sigma counterexamples are retained. A match inside a lowercase expansion maps to the entire original scalar.",
+    "UTF-8 boundaries are safe, but grapheme clusters, combining marks and emoji ZWJ sequences can be split at snippet edges.",
+    "One earliest-hit window need not show later or more useful matches. An over-budget anchor yields empty display, not a fabricated shorter match.",
+    "The prototype materializes full scalar/lowercase maps and all occurrences, and repeatedly serializes candidates. No streaming, memory bound or performance improvement is claimed.",
+    "The JSON cap applies only to the isolated text payload. A future product change must account for all real SearchHit/guidance/evidence/envelope bytes before claiming product budget integration.",
+    "Replay validation detects accidental or intentional report edits but is not a cryptographic signature or independent implementation oracle; the hand-authored golden cases and focused tests provide separate checks."
+  ],
+  "method": {
+    "case_matching": "Per-scalar char::to_lowercase on text and terms; expanded positions map to whole original scalars",
+    "character_unit": "Rust Unicode scalar values, not grapheme clusters or UTF-8 byte offsets",
+    "empty_payload_json_bytes": 11,
+    "final_star": "Remove exactly one final *; match its literal stem only at an original scalar/token start. Start of text, whitespace or ASCII punctuation except _ opens a token. All other wildcard characters remain literal.",
+    "hit_selection": "All overlapping occurrences are recorded; earliest original start wins, then term index, then end. Only one window is displayed.",
+    "json_budget_scope": "Exactly compact UTF-8 {\"text\":<string>} after serde_json escaping, including braces, key, quotes and all escapes. The diagnostic report and the product SearchHit/Robot envelope are NOT under this budget.",
+    "literal_terms": "Explicit terms only; no query parser, CJK bigram transform, normalization, regex, SQL, FTS or semantic model",
+    "no_match": "Empty/nonmatching/semantic-only terms produce a bounded prefix with no literal evidence. Semantic-only mode is an explicit test flag, not actual semantic search.",
+    "plain_text": "Original contiguous source slice only; no highlighting, markup or ellipsis characters",
+    "small_budget": "When an anchor cannot fit, emit empty text and retain source evidence separately. Below the empty payload byte floor, emit no snippet payload.",
+    "validation": "Rebuild all synthetic cases, recompute SHA-256/outputs/checks/counts, and require exact JSON-value equality; object key order is irrelevant.",
+    "window": "Preserve complete anchor, add two right scalars then one left; at most 40 before and 80 after. Stop a side when its adjacent scalar cannot fit; no skipped source text."
+  },
+  "performance_claims": false,
+  "product_integration": false,
+  "reuse_classification": "adapt",
+  "schema_version": "agent-session-grep.wake-reuse-snippet/v1",
+  "status": "passed",
+  "summary": {
+    "bounded_prefix_cases_with_visible_literal_match": 16,
+    "candidate_cases_with_visible_literal_match": 25,
+    "case_count": 49,
+    "count_interpretation": "Descriptive counts on this hand-authored synthetic suite, NOT recall, ranking quality, latency, throughput or representative product metrics.",
+    "failed": 0,
+    "passed": 49,
+    "raw_prefix_cases_over_local_json_byte_budget": 6
+  },
+  "upstream": {
+    "blob_sha1": "d0152507eba4fcc470f57538ae2661f0dcc9a799",
+    "commit": "71aeca67ec80f8645d1f9d5199290c2c732036ce",
+    "copyright": "Copyright (c) 2026 Corey Chiu",
+    "execution": "not_executed; source inspection only",
+    "license": "MIT",
+    "license_blob_sha1": "77ad15a2bbf1194c9728572cbbe7393b8295954e",
+    "line_range": [
+      3302,
+      3345
+    ],
+    "path": "crates/wake-core/src/db.rs",
+    "repository": "https://github.com/iAmCorey/Wake",
+    "symbol": "make_like_snippet",
+    "tag": "v0.8.5"
+  }
+}

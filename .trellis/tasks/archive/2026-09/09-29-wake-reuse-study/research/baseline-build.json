@@ -1,0 +1,12 @@
+{
+  "baseline_commit": "2b8f89562e43bd1f68ad3c8e5cf8ccc9281f9af2",
+  "source_tree_product_unchanged": true,
+  "artifact": "target/product-baseline/release/agent-session-grep.exe",
+  "sha256": "605bd1b350bf2c0842c9e1c24400bee493719bde9f93fba7756d87a6e51fde1d",
+  "size_bytes": 6922752,
+  "build_command": "cargo build --release --locked --offline -p agent-session-grep-cli",
+  "cargo_lock_sha256": "cf2b176f0244dcf944f7b7b35bc5db9cd02463a2364de3c75ed53f8746345b84",
+  "compiler": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+  "provenance": "built_by_coordinator_from_unmodified_product_baseline",
+  "contains_real_transcripts": false
+}
