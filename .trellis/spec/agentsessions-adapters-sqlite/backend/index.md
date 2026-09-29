@@ -371,6 +371,13 @@ unchanged).
   scanned but must keep only candidate rows in memory (O(batch)).
 - The durable manifest is computed once per commit; `verify_pending_in_tx`
   must still compare it against the `index_batches` row and reject tampering.
+  Accepted trade-off (2026-09-29): the pre-optimization "recompute the manifest
+  from the transaction inputs" defence was dropped - `verify_pending_in_tx`
+  (`crates/agent-session-grep-adapters-sqlite/src/lib.rs:6036-6043,6114-6127`)
+  now compares the caller-supplied manifest against the stored row instead of
+  recomputing it; behaviour is equivalent and the durable-intent tamper tests
+  still reject DB-row tampering. Optional hardening: a debug assertion or an
+  opt-in recompute.
 - An unchanged (fingerprint-matched) source produced no commit batch, so the
   post-read `verify_snapshot` re-read/re-hash must be skipped for it; sources
   that were actually parsed keep the full verification.
@@ -379,11 +386,25 @@ unchanged).
 
 ### 4. Validation & Error Matrix
 Whole-catalog loads are not a correctness signal; removing them must not change
-any stored row. Evidence: equivalence check over 16 tables (catalog payloads,
-placements, edges, activities, usage, fts/fts_ids, session projections, four
-membership tables, scans, resume claims, outbox lifecycle) - 10k single batch
-and 100k split into 15 batches both byte-identical against the pre-optimization
-binary (`research/results`, `research/report.md`).
+any stored row. Evidence boundaries (verified 2026-09-29):
+
+- `research/scripts/verify_equiv.py` compares 15 tables + `active_generation`
+  only; its membership coverage is 2 tables (`source_membership`,
+  `source_placement_membership`), the synthetic corpus has no tool_use/usage
+  records so `tool_activities`/`usage_events` (and their membership tables)
+  compare 0 rows, it does not exercise no-op / shrink-replacement / tombstone
+  scenarios, and it excludes the `index_batches` manifest/replacement columns.
+  Its historical runs were not persisted as artifacts.
+- Sealed extended evidence:
+  `research/results/auxiliary/equiv-extended-10k.json` from
+  `research/scripts/verify_equiv_extended.py` runs initial -> no-op -> shrink
+  replacement -> post-replacement no-op -> empty-source tombstone -> second
+  no-op with both binaries against the same absolute source paths, and compares
+  25 non-shadow tables (including all four membership tables) by row-content
+  hash plus `active_generation`: 0 mismatches (generation 3 == 3). FTS5 shadow
+  tables and the per-fresh-catalog installation namespace id/wall-clock columns
+  are excluded with recorded reasons; the tool_use/usage tables remain 0-row
+  empty comparisons.
 
 ### 5. Good/Base/Bad Cases
 Good: a 200k-message batch against a 1M catalog loads ~200k candidate rows and
@@ -399,8 +420,10 @@ re-reading every unchanged source.
 
 ### 7. Wrong vs Correct
 Wrong: load `source_membership`/`message_placements`/`message_edges` whole and
-build catalog-sized maps on every commit (measured 23.4 s and +3.4 GiB peak RSS
-on the 6th 200k batch against a 1M catalog).
+build catalog-sized maps on every commit (the 6th 200k batch against a 1M
+catalog spent 23.417 s in `load_catalog_state` and loaded 1,000,000 placement +
+900,000 edge rows; sealed trace
+`research/results/auxiliary/state-load-diagnostic-before.jsonl`).
 Correct: load the batch's sources + candidate ids, scan without retaining, and
 keep the durable manifest to one computation.
 
