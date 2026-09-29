@@ -1014,6 +1014,7 @@ mod tests {
     enum FixtureValue {
         Text(String),
         Blob(Vec<u8>),
+        Integer(i64),
         Null,
     }
 
@@ -1036,6 +1037,13 @@ mod tests {
                     conn.execute(
                         "INSERT INTO cursorDiskKV (key, value) VALUES (?1, ?2)",
                         params![key, bytes],
+                    )
+                    .unwrap();
+                }
+                FixtureValue::Integer(value) => {
+                    conn.execute(
+                        "INSERT INTO cursorDiskKV (key, value) VALUES (?1, ?2)",
+                        params![key, value],
                     )
                     .unwrap();
                 }
@@ -1353,6 +1361,144 @@ mod tests {
             ]
         );
         assert!(sink.events.iter().all(|event| event.role == "assistant"));
+    }
+
+    #[test]
+    fn parse_reports_text_type_tool_shape_and_composer_row_states() {
+        // Every remaining slot state in one compact database: a non-text
+        // SQLite cell, both malformed tool envelopes, a non-string `text`
+        // field, the three composer-row defects, and the empty-composer-id
+        // fallback. Defects must keep their slot (and their session), never
+        // discard a whole conversation.
+        let bytes = cursor_db(vec![
+            (
+                composer_key(""),
+                FixtureValue::Text(composer_json(&[header("anon", 1)])),
+            ),
+            (
+                bubble_key("", "anon"),
+                FixtureValue::Text(text_bubble("synthetic anonymous composer")),
+            ),
+            (
+                composer_key("slots"),
+                FixtureValue::Text(composer_json(&[
+                    header("int-cell", 1),
+                    header("tool-not-object", 2),
+                    header("tool-bad-name", 2),
+                    header("bad-text", 2),
+                    header("ok", 1),
+                ])),
+            ),
+            (bubble_key("slots", "int-cell"), FixtureValue::Integer(7)),
+            (
+                bubble_key("slots", "tool-not-object"),
+                FixtureValue::Text(json!({ "toolFormerData": 42 }).to_string()),
+            ),
+            (
+                bubble_key("slots", "tool-bad-name"),
+                FixtureValue::Text(tool_bubble(json!({ "name": 7 }))),
+            ),
+            (
+                bubble_key("slots", "bad-text"),
+                FixtureValue::Text(json!({ "text": 42 }).to_string()),
+            ),
+            (
+                bubble_key("slots", "ok"),
+                FixtureValue::Text(text_bubble("synthetic surviving slot")),
+            ),
+            (composer_key("shape"), FixtureValue::Text("[]".to_string())),
+            (
+                composer_key("no-headers"),
+                FixtureValue::Text("{}".to_string()),
+            ),
+            (
+                composer_key("bad-headers"),
+                FixtureValue::Text(json!({ "fullConversationHeadersOnly": {} }).to_string()),
+            ),
+        ]);
+
+        let (report, sink) = parse_ok(&bytes);
+
+        // Two conversations survive: the anonymous composer and the intact
+        // slot of the composer whose four sibling slots were defective.
+        assert_eq!(report.committed, 2);
+        assert_eq!(sink.events.len(), 2);
+        assert_eq!(report.skipped, 7);
+        let sessions: Vec<Option<&str>> = sink
+            .events
+            .iter()
+            .map(|event| event.session.as_deref())
+            .collect();
+        assert_eq!(
+            sessions,
+            [Some("anonymous-composer-1"), Some("slots")],
+            "a defective slot or composer row must not discard its session"
+        );
+        assert_eq!(
+            sink.events
+                .iter()
+                .map(|event| event.text.as_str())
+                .collect::<Vec<_>>(),
+            ["synthetic anonymous composer", "synthetic surviving slot"]
+        );
+
+        let notes = diagnostics(&report);
+        // Per-slot states of composer `slots`: one ok, two non-text cells and
+        // two malformed tool envelopes; every defective slot keeps its ordinal.
+        assert!(
+            notes.contains(
+                "cursorDiskKV composer `slots`: 5 header slot(s), 1 message(s) emitted, \
+                 4 slot(s) skipped; states: ok=1 invalid_text_type=2 invalid_tool_shape=2"
+            ),
+            "{notes}"
+        );
+        for slot in 0..4 {
+            assert!(
+                notes.contains(&format!("composer `slots`: header slot {slot} ")),
+                "missing defect line for header slot {slot}: {notes}"
+            );
+        }
+        assert!(
+            notes.contains("header slot 1 (`bubbleId:slots:tool-not-object`): invalid_tool_shape")
+                && notes
+                    .contains("header slot 2 (`bubbleId:slots:tool-bad-name`): invalid_tool_shape"),
+            "{notes}"
+        );
+        // Composer-row defects: each is counted, named, and skips only itself.
+        assert!(
+            notes.contains(
+                "cursorDiskKV composer `shape`: composer row invalid_composer_shape; composer \
+                 skipped"
+            ),
+            "{notes}"
+        );
+        assert!(
+            notes.contains(
+                "cursorDiskKV composer `no-headers`: `fullConversationHeadersOnly` is missing; \
+                 composer skipped"
+            ),
+            "{notes}"
+        );
+        assert!(
+            notes.contains(
+                "cursorDiskKV composer `bad-headers`: `fullConversationHeadersOnly` is not an \
+                 array; composer skipped"
+            ),
+            "{notes}"
+        );
+        for state in [
+            "invalid_composer_shape=1",
+            "missing_headers=1",
+            "invalid_headers=1",
+        ] {
+            assert!(notes.contains(state), "missing state {state} in {notes}");
+        }
+        // The empty-id composer is an observation-only fallback, named verbatim.
+        assert!(
+            notes.contains("key `composerData:` has an empty suffix")
+                && notes.contains("source-local key `anonymous-composer-1`"),
+            "{notes}"
+        );
     }
 
     #[test]

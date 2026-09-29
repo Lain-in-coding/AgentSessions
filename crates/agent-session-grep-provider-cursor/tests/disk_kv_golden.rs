@@ -218,40 +218,31 @@ fn golden_disk_kv_insertion_order_does_not_change_the_output() {
         "shuffled fixture bytes drifted - regenerate only with review"
     );
 
+    let primary_hash = blake3::hash(&bytes).to_hex().to_string();
+    let shuffled_hash = blake3::hash(&shuffled).to_hex().to_string();
     let (report, sink) = parse_fixture(&bytes);
     let (shuffled_report, shuffled_sink) = parse_fixture(&shuffled);
-    let messages: Vec<serde_json::Value> = sink
-        .messages
-        .iter()
-        .map(|message| {
-            json!({
-                "seq": message.seq,
-                "session": message.session,
-                "role": message.role,
-                "text": message.text,
-            })
-        })
-        .collect();
-    let shuffled_messages: Vec<serde_json::Value> = shuffled_sink
-        .messages
-        .iter()
-        .map(|message| {
-            json!({
-                "seq": message.seq,
-                "session": message.session,
-                "role": message.role,
-                "text": message.text,
-            })
-        })
-        .collect();
-    assert_eq!(
-        messages, shuffled_messages,
-        "messages must follow fullConversationHeadersOnly, not KV insertion order"
+
+    // Compare the *whole* canonical projection - every message field
+    // (native_id/timestamp/is_sidechain/span included) plus the report level
+    // session, accounting and diagnostics. The two fixture hashes are fixture
+    // identity rather than projection facts, so both sides receive the same
+    // pair (the bytes themselves are pinned above and by
+    // `read_fixture_verified`).
+    let projection = canonical_json(&primary_hash, &shuffled_hash, &report, &sink);
+    let shuffled_projection = canonical_json(
+        &primary_hash,
+        &shuffled_hash,
+        &shuffled_report,
+        &shuffled_sink,
     );
-    assert_eq!(report.committed, shuffled_report.committed);
-    assert_eq!(report.skipped, shuffled_report.skipped);
-    assert_eq!(report.session_native_id, shuffled_report.session_native_id);
-    assert_eq!(report.diagnostics, shuffled_report.diagnostics);
+    let shuffled_pretty =
+        serde_json::to_string_pretty(&shuffled_projection).expect("serialize shuffled projection");
+    assert_eq!(
+        projection, shuffled_projection,
+        "the whole canonical projection must be independent of the KV insertion order \
+         (messages follow fullConversationHeadersOnly). shuffled =\n{shuffled_pretty}"
+    );
 }
 
 #[test]
