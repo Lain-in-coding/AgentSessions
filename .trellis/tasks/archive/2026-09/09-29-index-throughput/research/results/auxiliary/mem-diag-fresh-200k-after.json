@@ -1,0 +1,315 @@
+{
+  "schema": "asg.mem-diag-evidence/v1",
+  "label": "after",
+  "generated_at_utc": "2026-09-29T09:28:15.958833+00:00",
+  "scenario": "fresh empty catalog, single sync of the whole corpus",
+  "total_ms": 40698.5,
+  "peak_mb": 2695.9,
+  "samples": [
+    [
+      4.9,
+      1.7,
+      1.7
+    ],
+    [
+      1007.1,
+      157.2,
+      157.2
+    ],
+    [
+      2005.3,
+      298.8,
+      298.8
+    ],
+    [
+      2996.5,
+      320.8,
+      320.8
+    ],
+    [
+      3991.4,
+      469.9,
+      469.9
+    ],
+    [
+      4987.2,
+      715.6,
+      715.6
+    ],
+    [
+      5985.0,
+      936.4,
+      936.4
+    ],
+    [
+      6982.1,
+      1172.1,
+      1172.1
+    ],
+    [
+      7976.5,
+      1239.2,
+      1239.2
+    ],
+    [
+      8974.5,
+      1524.2,
+      1524.2
+    ],
+    [
+      9969.5,
+      1882.0,
+      1882.0
+    ],
+    [
+      10964.4,
+      2334.1,
+      2334.1
+    ],
+    [
+      11963.5,
+      1535.7,
+      2695.9
+    ],
+    [
+      12959.7,
+      1547.0,
+      2695.9
+    ],
+    [
+      13959.0,
+      1391.5,
+      2695.9
+    ],
+    [
+      14944.9,
+      1355.0,
+      2695.9
+    ],
+    [
+      15916.6,
+      1359.5,
+      2695.9
+    ],
+    [
+      16908.6,
+      1368.0,
+      2695.9
+    ],
+    [
+      17906.5,
+      1368.0,
+      2695.9
+    ],
+    [
+      18902.6,
+      1390.5,
+      2695.9
+    ],
+    [
+      19902.6,
+      1390.5,
+      2695.9
+    ],
+    [
+      20897.7,
+      1390.6,
+      2695.9
+    ],
+    [
+      21889.1,
+      1390.6,
+      2695.9
+    ],
+    [
+      22881.1,
+      1390.6,
+      2695.9
+    ],
+    [
+      23873.8,
+      1390.6,
+      2695.9
+    ],
+    [
+      24856.5,
+      1370.0,
+      2695.9
+    ],
+    [
+      25845.5,
+      1376.3,
+      2695.9
+    ],
+    [
+      26834.8,
+      1383.9,
+      2695.9
+    ],
+    [
+      27809.0,
+      1479.7,
+      2695.9
+    ],
+    [
+      28769.9,
+      1479.7,
+      2695.9
+    ],
+    [
+      29762.0,
+      1616.8,
+      2695.9
+    ],
+    [
+      30749.0,
+      1616.8,
+      2695.9
+    ],
+    [
+      31731.9,
+      1474.6,
+      2695.9
+    ],
+    [
+      32712.0,
+      1402.5,
+      2695.9
+    ],
+    [
+      33690.6,
+      1401.1,
+      2695.9
+    ],
+    [
+      34679.4,
+      1401.7,
+      2695.9
+    ],
+    [
+      35662.9,
+      1403.3,
+      2695.9
+    ],
+    [
+      36650.1,
+      1417.0,
+      2695.9
+    ],
+    [
+      37640.8,
+      1541.0,
+      2695.9
+    ],
+    [
+      38626.5,
+      1417.7,
+      2695.9
+    ],
+    [
+      39613.0,
+      1417.8,
+      2695.9
+    ],
+    [
+      40575.7,
+      166.3,
+      2695.9
+    ]
+  ],
+  "sample_note": "peak_mb = max of sampled WorkingSetSize (psapi.GetProcessMemoryInfo) over the run; samples downsampled by mem_diag.py",
+  "provenance": {
+    "command": "cd <repo> && C:\\Users\\小Q\\AppData\\Local\\Programs\\Python\\Python310\\python.exe -B .trellis/tasks/09-29-index-throughput/research/scripts/mem_diag.py --binary C:\\AgentSessions-worktrees\\post-reuse-phase\\target\\release\\agent-session-grep.exe --db C:\\AgentSessions-worktrees\\post-reuse-phase\\target\\index-throughput\\mem-diag-fresh-200k-after\\catalog.db --dataset C:\\AgentSessions-worktrees\\post-reuse-phase\\target\\index-throughput\\corpus-200k-fresh --trace C:\\AgentSessions-worktrees\\post-reuse-phase\\target\\index-throughput\\mem-diag-fresh-200k-after\\trace.jsonl --interval-ms 20",
+    "wall_s": 40.769,
+    "binary": {
+      "path": "target\\release\\agent-session-grep.exe",
+      "sha256": "3e55a4c42ac49ffde50e43a895e79b35df30cf73cddfed057a706783f740e835"
+    },
+    "dataset": {
+      "path": "target\\index-throughput\\corpus-200k-fresh",
+      "method": "sha256(sorted(relative_posix_path + NUL + file_bytes + NUL))",
+      "sha256": "8702459924c72f762e7d43b3ce250a5b7eea33da19f45524e8778f104ad52c4c",
+      "file_count": 40,
+      "total_bytes": 56108235,
+      "generator": "python -B .trellis/tasks/09-29-index-throughput/research/scripts/gen_corpus.py --out target/index-throughput/corpus-200k-fresh --messages 200000 --per-file 5000 --offset 1000000"
+    },
+    "db_path": "C:\\AgentSessions-worktrees\\post-reuse-phase\\target\\index-throughput\\mem-diag-fresh-200k-after\\catalog.db",
+    "trace_path": "C:\\AgentSessions-worktrees\\post-reuse-phase\\target\\index-throughput\\mem-diag-fresh-200k-after\\trace.jsonl"
+  },
+  "trace_records": [
+    {
+      "detail": "entities=200080",
+      "label": "adapter:fts",
+      "pid": 91188,
+      "schema": "asg.index-trace/v1",
+      "stages_ms": {
+        "fts_ids_insert": 706.785,
+        "fts_projection_rows": 979.183
+      },
+      "t_ms": 0.001
+    },
+    {
+      "detail": "upserts=200080 deletes=0 relation_upserts=380000 relation_deletes=0",
+      "label": "adapter:commit",
+      "pid": 91188,
+      "schema": "asg.index-trace/v1",
+      "stages_ms": {
+        "affected_sessions": 1989.178,
+        "catalog_deletes": 0.0,
+        "catalog_upserts": 297.636,
+        "fts_projection": 1706.102,
+        "generation_activate": 758.054,
+        "integrity_checks": 1289.353,
+        "relation_upserts": 6420.683,
+        "session_projection": 10388.788,
+        "source_replacements": 1464.921,
+        "tx_commit": 1710.7,
+        "verify_outbox": 329.505
+      },
+      "t_ms": 22037.638
+    },
+    {
+      "detail": "upserts=200080 upsert_bytes~126765555 stored_payloads=0 stored_payload_bytes~0 stored_placements=0 placement_bytes~0 stored_edges=0 edge_bytes~0 stored_activities=0 activity_bytes~0 stored_usages=0 usage_bytes~0 entity_membership_bytes~0 placement_membership_bytes~0",
+      "label": "adapter:bytes",
+      "pid": 91188,
+      "schema": "asg.index-trace/v1",
+      "stages_ms": {},
+      "t_ms": 22059.255
+    },
+    {
+      "detail": "noop=false sources=40 upserts=200080 deletes=0 relation_upserts=380000 relation_deletes=0 source_replacements=40",
+      "label": "adapter:catalog",
+      "pid": 91188,
+      "schema": "asg.index-trace/v1",
+      "stages_ms": {
+        "apply_commit": 26375.614,
+        "finalize": 0.121,
+        "load_catalog_state": 637.549,
+        "manifest": 5382.804,
+        "merge_sources": 2446.012,
+        "merge_stored": 215.109,
+        "noop_probe": 0.085,
+        "outbox_intent": 1087.83,
+        "tombstones": 829.723,
+        "validate_incoming": 793.028
+      },
+      "t_ms": 22059.511
+    },
+    {
+      "detail": "sources=40 emitted=200000 unchanged=0 changed=true deferred=0",
+      "label": "cli:sync",
+      "pid": 91188,
+      "schema": "asg.index-trace/v1",
+      "stages_ms": {
+        "assemble": 1490.323,
+        "capture": 31.751,
+        "commit": 38355.907,
+        "jsonl_health": 0.0,
+        "namespace": 7.714,
+        "prelude": 0.425,
+        "stage": 396.359
+      },
+      "t_ms": 0.206
+    }
+  ]
+}

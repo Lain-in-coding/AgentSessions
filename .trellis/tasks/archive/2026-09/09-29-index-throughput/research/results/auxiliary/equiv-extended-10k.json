@@ -1,0 +1,860 @@
+{
+  "schema": "asg.equiv-extended/v1",
+  "generated_at_utc": "2026-09-29T09:29:09.238648+00:00",
+  "scenario": [
+    "initial-both",
+    "noop-both",
+    "shrink-replacement",
+    "post-replacement-noop",
+    "empty-source-tombstone",
+    "second-noop"
+  ],
+  "dataset": {
+    "path": "C:\\AgentSessions-worktrees\\post-reuse-phase\\target\\index-throughput\\corpus-10k-equiv",
+    "method": "sha256(sorted(relative_posix_path + NUL + file_bytes + NUL))",
+    "sha256": "c50db4123b248fcc3d736e445089c233ccff7a530456a054f4e1bd35c73707c8",
+    "file_count": 2,
+    "total_bytes": 2805411
+  },
+  "binaries": {
+    "a": {
+      "path": "C:\\AgentSessions-worktrees\\post-reuse-phase\\target\\index-throughput\\baseline-target\\release\\agent-session-grep.exe",
+      "sha256": "664c2e7bf035c1fc88f956df03345449a024ba2e3f7cf33c407658b9cc95c4fc"
+    },
+    "b": {
+      "path": "C:\\AgentSessions-worktrees\\post-reuse-phase\\target\\release\\agent-session-grep.exe",
+      "sha256": "3e55a4c42ac49ffde50e43a895e79b35df30cf73cddfed057a706783f740e835"
+    }
+  },
+  "steps": {
+    "a": [
+      {
+        "label": "initial-both",
+        "files": [
+          "session-000000.jsonl",
+          "session-000001.jsonl"
+        ],
+        "duration_ms": 1983.7,
+        "counts": {
+          "sources": 2,
+          "emitted": 10000,
+          "committed": 10000,
+          "unchanged": 0,
+          "retained": 0,
+          "deferred": 0,
+          "skipped": 0,
+          "diagnostics": 0
+        }
+      },
+      {
+        "label": "noop-both",
+        "files": [
+          "session-000000.jsonl",
+          "session-000001.jsonl"
+        ],
+        "duration_ms": 15.2,
+        "counts": {
+          "sources": 2,
+          "emitted": 0,
+          "committed": 0,
+          "unchanged": 10000,
+          "retained": 0,
+          "deferred": 0,
+          "skipped": 0,
+          "diagnostics": 0
+        }
+      },
+      {
+        "label": "shrink-replacement",
+        "files": [
+          "session-000000.jsonl"
+        ],
+        "duration_ms": 876.2,
+        "counts": {
+          "sources": 1,
+          "emitted": 2500,
+          "committed": 2500,
+          "unchanged": 0,
+          "retained": 0,
+          "deferred": 0,
+          "skipped": 0,
+          "diagnostics": 0
+        }
+      },
+      {
+        "label": "post-replacement-noop",
+        "files": [
+          "session-000000.jsonl",
+          "session-000001.jsonl"
+        ],
+        "duration_ms": 14.4,
+        "counts": {
+          "sources": 2,
+          "emitted": 0,
+          "committed": 0,
+          "unchanged": 7500,
+          "retained": 0,
+          "deferred": 0,
+          "skipped": 0,
+          "diagnostics": 0
+        }
+      },
+      {
+        "label": "empty-source-tombstone",
+        "files": [
+          "session-000001.jsonl"
+        ],
+        "duration_ms": 369.9,
+        "counts": {
+          "sources": 1,
+          "emitted": 0,
+          "committed": 0,
+          "unchanged": 0,
+          "retained": 0,
+          "deferred": 0,
+          "skipped": 0,
+          "diagnostics": 0
+        }
+      },
+      {
+        "label": "second-noop",
+        "files": [
+          "session-000000.jsonl",
+          "session-000001.jsonl"
+        ],
+        "duration_ms": 16.5,
+        "counts": {
+          "sources": 2,
+          "emitted": 0,
+          "committed": 0,
+          "unchanged": 2500,
+          "retained": 0,
+          "deferred": 0,
+          "skipped": 0,
+          "diagnostics": 0
+        }
+      }
+    ],
+    "b": [
+      {
+        "label": "initial-both",
+        "files": [
+          "session-000000.jsonl",
+          "session-000001.jsonl"
+        ],
+        "duration_ms": 1361.6,
+        "counts": {
+          "sources": 2,
+          "emitted": 10000,
+          "committed": 10000,
+          "unchanged": 0,
+          "retained": 0,
+          "deferred": 0,
+          "skipped": 0,
+          "diagnostics": 0
+        }
+      },
+      {
+        "label": "noop-both",
+        "files": [
+          "session-000000.jsonl",
+          "session-000001.jsonl"
+        ],
+        "duration_ms": 15.5,
+        "counts": {
+          "sources": 2,
+          "emitted": 0,
+          "committed": 0,
+          "unchanged": 10000,
+          "retained": 0,
+          "deferred": 0,
+          "skipped": 0,
+          "diagnostics": 0
+        }
+      },
+      {
+        "label": "shrink-replacement",
+        "files": [
+          "session-000000.jsonl"
+        ],
+        "duration_ms": 703.7,
+        "counts": {
+          "sources": 1,
+          "emitted": 2500,
+          "committed": 2500,
+          "unchanged": 0,
+          "retained": 0,
+          "deferred": 0,
+          "skipped": 0,
+          "diagnostics": 0
+        }
+      },
+      {
+        "label": "post-replacement-noop",
+        "files": [
+          "session-000000.jsonl",
+          "session-000001.jsonl"
+        ],
+        "duration_ms": 13.6,
+        "counts": {
+          "sources": 2,
+          "emitted": 0,
+          "committed": 0,
+          "unchanged": 7500,
+          "retained": 0,
+          "deferred": 0,
+          "skipped": 0,
+          "diagnostics": 0
+        }
+      },
+      {
+        "label": "empty-source-tombstone",
+        "files": [
+          "session-000001.jsonl"
+        ],
+        "duration_ms": 330.0,
+        "counts": {
+          "sources": 1,
+          "emitted": 0,
+          "committed": 0,
+          "unchanged": 0,
+          "retained": 0,
+          "deferred": 0,
+          "skipped": 0,
+          "diagnostics": 0
+        }
+      },
+      {
+        "label": "second-noop",
+        "files": [
+          "session-000000.jsonl",
+          "session-000001.jsonl"
+        ],
+        "duration_ms": 14.0,
+        "counts": {
+          "sources": 2,
+          "emitted": 0,
+          "committed": 0,
+          "unchanged": 2500,
+          "retained": 0,
+          "deferred": 0,
+          "skipped": 0,
+          "diagnostics": 0
+        }
+      }
+    ]
+  },
+  "compared_tables": 25,
+  "generation": {
+    "a": 3,
+    "b": 3
+  },
+  "tables_a": {
+    "catalog": {
+      "rows": 2504,
+      "sha256": "c9b8576335429d6a04cc8c410b2e5f354787af83229549be85ddaaf4e1913fcf",
+      "columns_compared": [
+        "id",
+        "payload"
+      ],
+      "columns_excluded": []
+    },
+    "fts": {
+      "rows": 2500,
+      "sha256": "1d7c0e832b142c6590cdff5bcabc1971abf1ff825e8df57715ac098ab54c790c",
+      "columns_compared": [
+        "id",
+        "text"
+      ],
+      "columns_excluded": []
+    },
+    "fts_ids": {
+      "rows": 2504,
+      "sha256": "6dd28649c6f83126e0760d3c71c03c04c92cdde0ed948cbd2e2c613d51204255",
+      "columns_compared": [
+        "wire_id",
+        "id_json",
+        "fts_rowid"
+      ],
+      "columns_excluded": []
+    },
+    "index_batches": {
+      "rows": 3,
+      "sha256": "67baf73409b64d741b6c30090230233121b9315fe5fc5987a66aa3ef08c976bf",
+      "columns_compared": [
+        "base_generation",
+        "target_generation",
+        "state",
+        "durable_point",
+        "upsert_ids_json",
+        "delete_ids_json",
+        "relation_upserts_json",
+        "relation_deletes_json",
+        "relocation_json"
+      ],
+      "columns_excluded": [
+        "operation_id",
+        "operation_digest",
+        "created_at_ms",
+        "committed_at_ms",
+        "error_code",
+        "source_replacements_json"
+      ]
+    },
+    "installation_locations": {
+      "rows": 1,
+      "sha256": "51b97c8db721f0c19c4462bacd542479fd27105e7ff9502424b53c28b64cbcf0",
+      "columns_compared": [
+        "provider_id",
+        "root_key",
+        "root_locator",
+        "state"
+      ],
+      "columns_excluded": [
+        "namespace_id",
+        "retired_until_ms"
+      ]
+    },
+    "installation_namespaces": {
+      "rows": 1,
+      "sha256": "2d182bceeadb7a5f30ba62bc46ccdcbd64d6dc97659d052ff2c24a0be270d289",
+      "columns_compared": [
+        "provider_id",
+        "origin"
+      ],
+      "columns_excluded": [
+        "namespace_id",
+        "namespace_input",
+        "created_at_ms"
+      ]
+    },
+    "installation_relocations": {
+      "rows": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "columns_compared": [
+        "operation_id",
+        "mapping_key",
+        "mapping_digest",
+        "provider_id",
+        "from_key",
+        "to_key",
+        "base_generation",
+        "target_generation",
+        "alias_ttl_days",
+        "source_count",
+        "session_count",
+        "namespace_count",
+        "manifest_json"
+      ],
+      "columns_excluded": []
+    },
+    "message_edges": {
+      "rows": 2250,
+      "sha256": "06ae6ede8207ebfaddd7a48f5daf0fbb38fad432397590e7e872fb4b212942c1",
+      "columns_compared": [
+        "child_placement_id",
+        "parent_message_id",
+        "parent_native_id",
+        "relation"
+      ],
+      "columns_excluded": []
+    },
+    "message_placements": {
+      "rows": 2500,
+      "sha256": "8a968e49b3362f44028e928cd9aea4e94ff23b2208e4f6d933d1ca18f2324104",
+      "columns_compared": [
+        "placement_id",
+        "session_id",
+        "document_id",
+        "message_id",
+        "source_ordinal",
+        "is_sidechain",
+        "byte_start",
+        "byte_end"
+      ],
+      "columns_excluded": []
+    },
+    "message_vec": {
+      "rows": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "columns_compared": [
+        "wire_id",
+        "model_id",
+        "dimension",
+        "embedding"
+      ],
+      "columns_excluded": []
+    },
+    "session_fts": {
+      "rows": 1,
+      "sha256": "5e83387f588436462d49fcc6a6dc4d925823f1ff43e76442a06c57c7ff7aaaa2",
+      "columns_compared": [
+        "session_wire",
+        "text"
+      ],
+      "columns_excluded": []
+    },
+    "session_fts_ids": {
+      "rows": 1,
+      "sha256": "639a6fe078cc0c7844afbc813316bfc1d391fba3a47e2e2251e03eb6bfe82cc2",
+      "columns_compared": [
+        "session_wire",
+        "fts_rowid"
+      ],
+      "columns_excluded": []
+    },
+    "session_repo_slugs": {
+      "rows": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "columns_compared": [
+        "session_wire",
+        "repo_slug"
+      ],
+      "columns_excluded": []
+    },
+    "session_titles": {
+      "rows": 1,
+      "sha256": "5e83387f588436462d49fcc6a6dc4d925823f1ff43e76442a06c57c7ff7aaaa2",
+      "columns_compared": [
+        "session_wire",
+        "title"
+      ],
+      "columns_excluded": []
+    },
+    "source_installations": {
+      "rows": 2,
+      "sha256": "b31b898d5ecea1d5a97453b61b37d22dd69af67e9706503c7a951d6e8bb09235",
+      "columns_compared": [
+        "source_path",
+        "source_key"
+      ],
+      "columns_excluded": [
+        "namespace_id"
+      ]
+    },
+    "source_membership": {
+      "rows": 2504,
+      "sha256": "ae181fd97007ed9d13c50116f6bd22e7689a8f749b687c920058a833e04d4dfa",
+      "columns_compared": [
+        "source_path",
+        "message_id",
+        "document_id"
+      ],
+      "columns_excluded": []
+    },
+    "source_placement_membership": {
+      "rows": 2500,
+      "sha256": "5f3930ae135885a4b975b85f1c22ddbfd8a8a6154340f8a5dccfaf5da15301c9",
+      "columns_compared": [
+        "source_path",
+        "placement_id"
+      ],
+      "columns_excluded": []
+    },
+    "source_relation_scans": {
+      "rows": 2,
+      "sha256": "6e0e02c7c519fb14f492230277081b5117082369619cecd4dd5dcf1491b794bc",
+      "columns_compared": [
+        "source_path",
+        "relation_schema_version"
+      ],
+      "columns_excluded": []
+    },
+    "source_scans": {
+      "rows": 2,
+      "sha256": "2d8023fa437ba7d0292bd6f9f5abd45d377581e6e666af51373bb487bb85899c",
+      "columns_compared": [
+        "source_path",
+        "len_bytes",
+        "fingerprint",
+        "provider_id",
+        "parser_version"
+      ],
+      "columns_excluded": [
+        "scanned_at_ms"
+      ]
+    },
+    "source_session_resume_claims": {
+      "rows": 1,
+      "sha256": "eaebca92c82c74f1ce9bd65f4b3673d811b473a886eba671aa0a5210a5f1ad50",
+      "columns_compared": [
+        "source_path",
+        "session_id",
+        "provider_id",
+        "provider_session_id",
+        "provider_session_id_state",
+        "original_working_directory",
+        "original_working_directory_state",
+        "pair_observed"
+      ],
+      "columns_excluded": []
+    },
+    "store_metadata": {
+      "rows": 1,
+      "sha256": "ca6556e96abf6dc494bcf99b8042142905317066baa85d2f8a7e4c8701a1b120",
+      "columns_compared": [
+        "singleton",
+        "active_generation",
+        "index_projection_version"
+      ],
+      "columns_excluded": []
+    },
+    "tool_activities": {
+      "rows": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "columns_compared": [
+        "activity_id",
+        "message_id",
+        "kind",
+        "actor",
+        "name",
+        "target",
+        "status"
+      ],
+      "columns_excluded": []
+    },
+    "tool_activity_membership": {
+      "rows": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "columns_compared": [
+        "source_path",
+        "activity_id"
+      ],
+      "columns_excluded": []
+    },
+    "usage_event_membership": {
+      "rows": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "columns_compared": [
+        "source_path",
+        "usage_id"
+      ],
+      "columns_excluded": []
+    },
+    "usage_events": {
+      "rows": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "columns_compared": [
+        "usage_id",
+        "session_id",
+        "message_id",
+        "input_tokens",
+        "output_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens",
+        "reasoning_tokens",
+        "token_source"
+      ],
+      "columns_excluded": []
+    }
+  },
+  "tables_b": {
+    "catalog": {
+      "rows": 2504,
+      "sha256": "c9b8576335429d6a04cc8c410b2e5f354787af83229549be85ddaaf4e1913fcf",
+      "columns_compared": [
+        "id",
+        "payload"
+      ],
+      "columns_excluded": []
+    },
+    "fts": {
+      "rows": 2500,
+      "sha256": "1d7c0e832b142c6590cdff5bcabc1971abf1ff825e8df57715ac098ab54c790c",
+      "columns_compared": [
+        "id",
+        "text"
+      ],
+      "columns_excluded": []
+    },
+    "fts_ids": {
+      "rows": 2504,
+      "sha256": "6dd28649c6f83126e0760d3c71c03c04c92cdde0ed948cbd2e2c613d51204255",
+      "columns_compared": [
+        "wire_id",
+        "id_json",
+        "fts_rowid"
+      ],
+      "columns_excluded": []
+    },
+    "index_batches": {
+      "rows": 3,
+      "sha256": "67baf73409b64d741b6c30090230233121b9315fe5fc5987a66aa3ef08c976bf",
+      "columns_compared": [
+        "base_generation",
+        "target_generation",
+        "state",
+        "durable_point",
+        "upsert_ids_json",
+        "delete_ids_json",
+        "relation_upserts_json",
+        "relation_deletes_json",
+        "relocation_json"
+      ],
+      "columns_excluded": [
+        "operation_id",
+        "operation_digest",
+        "created_at_ms",
+        "committed_at_ms",
+        "error_code",
+        "source_replacements_json"
+      ]
+    },
+    "installation_locations": {
+      "rows": 1,
+      "sha256": "51b97c8db721f0c19c4462bacd542479fd27105e7ff9502424b53c28b64cbcf0",
+      "columns_compared": [
+        "provider_id",
+        "root_key",
+        "root_locator",
+        "state"
+      ],
+      "columns_excluded": [
+        "namespace_id",
+        "retired_until_ms"
+      ]
+    },
+    "installation_namespaces": {
+      "rows": 1,
+      "sha256": "2d182bceeadb7a5f30ba62bc46ccdcbd64d6dc97659d052ff2c24a0be270d289",
+      "columns_compared": [
+        "provider_id",
+        "origin"
+      ],
+      "columns_excluded": [
+        "namespace_id",
+        "namespace_input",
+        "created_at_ms"
+      ]
+    },
+    "installation_relocations": {
+      "rows": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "columns_compared": [
+        "operation_id",
+        "mapping_key",
+        "mapping_digest",
+        "provider_id",
+        "from_key",
+        "to_key",
+        "base_generation",
+        "target_generation",
+        "alias_ttl_days",
+        "source_count",
+        "session_count",
+        "namespace_count",
+        "manifest_json"
+      ],
+      "columns_excluded": []
+    },
+    "message_edges": {
+      "rows": 2250,
+      "sha256": "06ae6ede8207ebfaddd7a48f5daf0fbb38fad432397590e7e872fb4b212942c1",
+      "columns_compared": [
+        "child_placement_id",
+        "parent_message_id",
+        "parent_native_id",
+        "relation"
+      ],
+      "columns_excluded": []
+    },
+    "message_placements": {
+      "rows": 2500,
+      "sha256": "8a968e49b3362f44028e928cd9aea4e94ff23b2208e4f6d933d1ca18f2324104",
+      "columns_compared": [
+        "placement_id",
+        "session_id",
+        "document_id",
+        "message_id",
+        "source_ordinal",
+        "is_sidechain",
+        "byte_start",
+        "byte_end"
+      ],
+      "columns_excluded": []
+    },
+    "message_vec": {
+      "rows": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "columns_compared": [
+        "wire_id",
+        "model_id",
+        "dimension",
+        "embedding"
+      ],
+      "columns_excluded": []
+    },
+    "session_fts": {
+      "rows": 1,
+      "sha256": "5e83387f588436462d49fcc6a6dc4d925823f1ff43e76442a06c57c7ff7aaaa2",
+      "columns_compared": [
+        "session_wire",
+        "text"
+      ],
+      "columns_excluded": []
+    },
+    "session_fts_ids": {
+      "rows": 1,
+      "sha256": "639a6fe078cc0c7844afbc813316bfc1d391fba3a47e2e2251e03eb6bfe82cc2",
+      "columns_compared": [
+        "session_wire",
+        "fts_rowid"
+      ],
+      "columns_excluded": []
+    },
+    "session_repo_slugs": {
+      "rows": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "columns_compared": [
+        "session_wire",
+        "repo_slug"
+      ],
+      "columns_excluded": []
+    },
+    "session_titles": {
+      "rows": 1,
+      "sha256": "5e83387f588436462d49fcc6a6dc4d925823f1ff43e76442a06c57c7ff7aaaa2",
+      "columns_compared": [
+        "session_wire",
+        "title"
+      ],
+      "columns_excluded": []
+    },
+    "source_installations": {
+      "rows": 2,
+      "sha256": "b31b898d5ecea1d5a97453b61b37d22dd69af67e9706503c7a951d6e8bb09235",
+      "columns_compared": [
+        "source_path",
+        "source_key"
+      ],
+      "columns_excluded": [
+        "namespace_id"
+      ]
+    },
+    "source_membership": {
+      "rows": 2504,
+      "sha256": "ae181fd97007ed9d13c50116f6bd22e7689a8f749b687c920058a833e04d4dfa",
+      "columns_compared": [
+        "source_path",
+        "message_id",
+        "document_id"
+      ],
+      "columns_excluded": []
+    },
+    "source_placement_membership": {
+      "rows": 2500,
+      "sha256": "5f3930ae135885a4b975b85f1c22ddbfd8a8a6154340f8a5dccfaf5da15301c9",
+      "columns_compared": [
+        "source_path",
+        "placement_id"
+      ],
+      "columns_excluded": []
+    },
+    "source_relation_scans": {
+      "rows": 2,
+      "sha256": "6e0e02c7c519fb14f492230277081b5117082369619cecd4dd5dcf1491b794bc",
+      "columns_compared": [
+        "source_path",
+        "relation_schema_version"
+      ],
+      "columns_excluded": []
+    },
+    "source_scans": {
+      "rows": 2,
+      "sha256": "2d8023fa437ba7d0292bd6f9f5abd45d377581e6e666af51373bb487bb85899c",
+      "columns_compared": [
+        "source_path",
+        "len_bytes",
+        "fingerprint",
+        "provider_id",
+        "parser_version"
+      ],
+      "columns_excluded": [
+        "scanned_at_ms"
+      ]
+    },
+    "source_session_resume_claims": {
+      "rows": 1,
+      "sha256": "eaebca92c82c74f1ce9bd65f4b3673d811b473a886eba671aa0a5210a5f1ad50",
+      "columns_compared": [
+        "source_path",
+        "session_id",
+        "provider_id",
+        "provider_session_id",
+        "provider_session_id_state",
+        "original_working_directory",
+        "original_working_directory_state",
+        "pair_observed"
+      ],
+      "columns_excluded": []
+    },
+    "store_metadata": {
+      "rows": 1,
+      "sha256": "ca6556e96abf6dc494bcf99b8042142905317066baa85d2f8a7e4c8701a1b120",
+      "columns_compared": [
+        "singleton",
+        "active_generation",
+        "index_projection_version"
+      ],
+      "columns_excluded": []
+    },
+    "tool_activities": {
+      "rows": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "columns_compared": [
+        "activity_id",
+        "message_id",
+        "kind",
+        "actor",
+        "name",
+        "target",
+        "status"
+      ],
+      "columns_excluded": []
+    },
+    "tool_activity_membership": {
+      "rows": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "columns_compared": [
+        "source_path",
+        "activity_id"
+      ],
+      "columns_excluded": []
+    },
+    "usage_event_membership": {
+      "rows": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "columns_compared": [
+        "source_path",
+        "usage_id"
+      ],
+      "columns_excluded": []
+    },
+    "usage_events": {
+      "rows": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "columns_compared": [
+        "usage_id",
+        "session_id",
+        "message_id",
+        "input_tokens",
+        "output_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens",
+        "reasoning_tokens",
+        "token_source"
+      ],
+      "columns_excluded": []
+    }
+  },
+  "mismatches": [],
+  "excluded_tables": [
+    "FTS5 shadow tables: fts_config, fts_content, fts_data, fts_docsize, fts_idx, session_fts_config, session_fts_content, session_fts_data, session_fts_docsize, session_fts_idx"
+  ],
+  "exclusion_notes": [
+    "installation namespace id/input/created_at_ms are randomly allocated per fresh catalog",
+    "index_batches.source_replacements_json embeds the installation allocation and wall clock",
+    "index_batches operation id/digest and timestamps, source_scans.scanned_at_ms are per-run values"
+  ],
+  "conclusion": "0 mismatches across 25 tables + active_generation"
+}

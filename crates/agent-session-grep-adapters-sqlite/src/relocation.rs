@@ -1578,7 +1578,8 @@ impl SqliteStore {
             ..Default::default()
         };
         let pending = self.begin_index_batch_with_relations(&[], &[], &relations)?;
-        self.commit_index_batch_with_relations(&pending, &[], &[], &relations)?;
+        let batch_manifest = crate::batch_manifest(&[], &[], &relations)?;
+        self.commit_index_batch_with_relations(&pending, &[], &[], &relations, &batch_manifest)?;
         self.clear_installation_reservations(
             manifest
                 .sources

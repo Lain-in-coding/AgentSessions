@@ -21,6 +21,7 @@ mod protocol;
 mod redaction;
 mod repo_identity;
 mod serve;
+mod trace;
 mod tui;
 
 use agent_session_grep_adapters_sqlite::{
@@ -4582,9 +4583,17 @@ fn sync_files_inner(
     let mut retained_count = 0usize;
     let mut diagnostic_count = 0usize;
     let mut diagnostics = Vec::new();
+    // Env-gated measurement scaffolding; zero-cost unless ASG_INDEX_TRACE is set.
+    let mut trace_prelude = std::time::Duration::ZERO;
+    let mut trace_namespace = std::time::Duration::ZERO;
+    let mut trace_capture = std::time::Duration::ZERO;
+    let mut trace_health = std::time::Duration::ZERO;
+    let mut trace_stage = std::time::Duration::ZERO;
+    let mut trace_assemble = std::time::Duration::ZERO;
 
     // 指纹缓存：capture 后先与已存指纹比对，未变化的源跳过重复解析
     // （parse 是大语料重扫的主导成本）。指纹缓存缺失/不匹配才走完整路径。
+    let trace_started = trace::begin();
     let cached = store
         .source_fingerprints(paths)
         .map_err(ProtocolError::from)?;
@@ -4596,12 +4605,14 @@ fn sync_files_inner(
     let unchanged_counts = store
         .source_message_counts(paths)
         .map_err(ProtocolError::from)?;
+    trace_prelude += trace::elapsed(trace_started);
     for (index, path) in paths.iter().enumerate() {
         let hint = discovered_provider_ids
             .get(path)
             .map(String::as_str)
             .or_else(|| registered_providers.get(path).map(String::as_str))
             .or_else(|| provider_for_source_path(path));
+        let trace_started = trace::begin();
         let resolved_namespace = hint
             .map(|provider| {
                 store
@@ -4613,9 +4624,12 @@ fn sync_files_inner(
                     .map_err(ProtocolError::from_private_port_error)
             })
             .transpose()?;
+        trace_namespace += trace::elapsed(trace_started);
         let path_ref = std::path::Path::new(path);
+        let trace_started = trace::begin();
         let snap = capture(path_ref).map_err(ProtocolError::from)?;
         let source = open_snapshot_source(path_ref, &snap).map_err(ProtocolError::from)?;
+        trace_capture += trace::elapsed(trace_started);
         let cached_scan = cached.get(path);
         let cached_fp = cached_scan.and_then(|(_, fp, _)| fp.clone());
         // 解析语义版本参与 unchanged 判定（借鉴 Recall 的 parser_version 增量
@@ -4639,10 +4653,12 @@ fn sync_files_inner(
             // 会走 membership/scan 对比），因此这里只需空 staged 占位。
             unchanged_messages += unchanged_counts.get(path).copied().unwrap_or(0);
             (None, None)
-        } else if !source.is_empty()
-            && cached_fp.is_some()
-            && jsonl_health(path_ref, &snap).map_err(ProtocolError::from)? == JsonlHealth::Invalid
-        {
+        } else if !source.is_empty() && cached_fp.is_some() && {
+            let trace_started = trace::begin();
+            let health = jsonl_health(path_ref, &snap).map_err(ProtocolError::from)?;
+            trace_health += trace::elapsed(trace_started);
+            health == JsonlHealth::Invalid
+        } {
             // 截断尾（EOF 落在记录中间）＝agent 正在写这个源。已索引过的源
             // 必须 Retain：不重 parse、不推进指纹、不提交——旧索引原样保留，
             // 不产生 rebuild churn，也不误 tombstone（fast-resume
@@ -4679,7 +4695,9 @@ fn sync_files_inner(
             // 入口因此对同一个文件得到同一个 provider——不再出现 discover 能索引、
             // 显式 sync 撞 tie 的分裂。路径不在任何登记根下时仍为 None，走全
             // registry probe。
+            let trace_started = trace::begin();
             let (staged, variant) = stage_with_source(&source, hint)?;
+            trace_stage += trace::elapsed(trace_started);
             (Some(staged), Some(variant))
         };
         if progress {
@@ -4712,12 +4730,15 @@ fn sync_files_inner(
             diagnostics.extend(staged.report.diagnostics.iter().cloned());
             let provider = variant.split('/').next().unwrap_or(variant).to_string();
             let legacy_namespace = installation_namespace(path, &provider);
+            let trace_started = trace::begin();
             let persisted_namespace = match resolved_namespace {
                 Some(namespace) => namespace,
                 None => store
                     .resolve_or_allocate_installation_namespace(&provider, path, &legacy_namespace)
                     .map_err(ProtocolError::from_private_port_error)?,
             };
+            trace_namespace += trace::elapsed(trace_started);
+            let trace_started = trace::begin();
             let mut source = staged_to_source_with_provider_namespace(
                 path,
                 staged,
@@ -4728,6 +4749,7 @@ fn sync_files_inner(
                 discovered_provider_ids.get(path).map(String::as_str),
                 Some(persisted_namespace.as_str()),
             )?;
+            trace_assemble += trace::elapsed(trace_started);
             if incomplete_providers.contains(&provider) {
                 source.relation_complete = false;
             }
@@ -4754,9 +4776,11 @@ fn sync_files_inner(
     // discover 合成的空批（已删除源的 tombstone）追加进提交批次。
     sources.extend(synthetic_batches.iter().cloned());
 
+    let trace_commit = trace::begin();
     let changed = store
         .commit_source_batches_if_changed(&sources)
         .map_err(ProtocolError::from)?;
+    let trace_commit_ms = trace::elapsed(trace_commit);
     store
         .backfill_source_provider_ids(&provider_id_backfills)
         .map_err(ProtocolError::from)?;
@@ -4766,6 +4790,26 @@ fn sync_files_inner(
     // 解析也不提交，单列 `retained`（源数），其诊断进 warnings 通道。
     let committed = if changed { message_count } else { 0 };
     let warnings = diagnostic_warnings(diagnostics.iter().map(String::as_str), diagnostic_count);
+    trace::emit(
+        "cli:sync",
+        &[
+            ("prelude", trace_prelude),
+            ("namespace", trace_namespace),
+            ("capture", trace_capture),
+            ("jsonl_health", trace_health),
+            ("stage", trace_stage),
+            ("assemble", trace_assemble),
+            ("commit", trace_commit_ms),
+        ],
+        &format!(
+            "sources={} emitted={} unchanged={} changed={} deferred={}",
+            paths.len(),
+            message_count,
+            unchanged_messages,
+            changed,
+            deferred_paths.len()
+        ),
+    );
     let source_count = paths.len() + synthetic_batches.len();
     Ok((
         serde_json::json!({
@@ -4801,8 +4845,20 @@ fn defer_sources_changed_during_read(
     diagnostics: &mut Vec<String>,
     total: usize,
 ) -> Result<Vec<String>, PortError> {
+    // Only sources that produced a commit batch consumed their bytes during
+    // staging. A fingerprint-matched source was dropped from the batch without
+    // being parsed, so re-reading and re-hashing it here would double the no-op
+    // I/O for bytes that are never written; the next sync re-captures any new
+    // content because the stored fingerprint no longer matches.
+    let staged: BTreeSet<&str> = sources
+        .iter()
+        .map(|source| source.source_path.as_str())
+        .collect();
     let mut deferred: Vec<String> = Vec::new();
     for (index, (path, snapshot)) in snapshots.iter().enumerate() {
+        if !staged.contains(path.to_string_lossy().as_ref()) {
+            continue;
+        }
         match verify_snapshot(path, snapshot) {
             Ok(()) => {}
             Err(PortError::SnapshotChanged(detail)) => {

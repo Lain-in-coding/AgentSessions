@@ -190,6 +190,7 @@ dependencies = [
  "agent-session-grep-ports",
  "agent-session-grep-testkit",
  "blake3",
+ "rusqlite",
  "serde",
  "serde_json",
 ]

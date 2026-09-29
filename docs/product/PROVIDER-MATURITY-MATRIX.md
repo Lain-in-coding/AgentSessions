@@ -32,7 +32,7 @@
 | OpenCode | `opencode` | `opencode/sqlite-v1` | **Experimental** | `opencode.db` SQLite（session/message/part 表），只读打开（SQLITE_OPEN_READONLY + busy_timeout）+ golden（`tests/golden.rs`） |
 | Pi | `pi` | `pi/session-jsonl-v1` | **Experimental** | session JSONL（`type:session` header + message）+ golden（`tests/golden.rs`，含 v3 会话树 fixture `tests/golden/v3-branched.jsonl`） |
 | Hermes | `hermes` | `hermes/session-json-v1` | **Experimental** | `~/.hermes/sessions/session_<id>.json`（session_id/messages），hstry@88b78b1 (MIT) 格式证据 + golden（`tests/golden.rs`） |
-| Cursor | `cursor` | `cursor/vscdb-chat-v1` | **Experimental** | `state.vscdb` SQLite KV（ItemTable `chatdata`/`prompts` key），hstry@88b78b1 (MIT) 格式证据，多代格式分层待补 + golden（`tests/golden.rs`） |
+| Cursor | `cursor` | `cursor/vscdb-chat-v1` | **Experimental** | `state.vscdb` SQLite KV：ItemTable `chatdata`/`prompts`（hstry@88b78b1 MIT 格式证据）+ 增量变体 `cursor/disk-kv-v1`（`cursorDiskKV` composerData/bubbleId：header 顺序、坏槽位逐状态计数、有界只读副本；证据为固定 Wake@71aeca67 实现与合成探针，无官方版本化存储契约）+ golden（`tests/golden.rs`、`tests/disk_kv_golden.rs`） |
 | Kimi Code | `kimi-code` | `kimi-code/wire-jsonl-v1` | **Experimental** | wire.jsonl（`context.append_message`）+ golden（`tests/golden.rs`） |
 | OpenClaw | `openclaw` | `openclaw/session-jsonl-v3` | **Experimental** | v3 JSONL header + message records，本机仅 config 无 transcript 样本 + golden（`tests/golden.rs`） |
 | Qoder | `qoder` | `qoder/transcript-jsonl-v1` | **Experimental** | JSONL（`session_meta` + `type:user/assistant`），官方路径已实现 + golden（`tests/golden.rs`） |

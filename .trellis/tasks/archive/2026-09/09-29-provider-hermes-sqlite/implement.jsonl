@@ -1,0 +1,5 @@
+{"file": ".trellis/spec/agentsessions-ports/backend/index.md", "reason": "provider 端口/ParseReport 契约"}
+{"file": ".trellis/spec/agentsessions-adapters-sqlite/backend/index.md", "reason": "SQLite 只读快照与来源身份边界"}
+{"file": ".trellis/spec/guides/index.md", "reason": "共享思考指南入口"}
+{"file": ".trellis/tasks/archive/2026-09/09-29-wake-reuse-study/research/experiments/providers/README.md", "reason": "Hermes 合成探针与边界（35 例）"}
+{"file": ".trellis/tasks/archive/2026-09/09-29-wake-reuse-study/research/upstream-evidence.md", "reason": "Hermes 官方 schema 固定证据"}
