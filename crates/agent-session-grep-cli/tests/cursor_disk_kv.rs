@@ -49,34 +49,37 @@ fn temp_db(tag: &str) -> (tempfile::TempDir, String) {
     (dir, db)
 }
 
+/// One synthetic composer: its id, its `fullConversationHeadersOnly` entries
+/// and its bubble rows (a `None` body becomes a SQL NULL value).
+struct Composer {
+    id: &'static str,
+    headers: Vec<serde_json::Value>,
+    bodies: Vec<(&'static str, Option<serde_json::Value>)>,
+}
+
 /// Write one synthetic `state.vscdb` with a `cursorDiskKV` surface.
 ///
-/// `composers` is `(composer_id, headers, bodies)` where a `headers` entry is
-/// `{"bubbleId": id, "type": 1|2}` and `bodies` maps a bubble id to its JSON
-/// body (or `None` for a SQL NULL value).
-fn write_state_vscdb(
-    path: &std::path::Path,
-    composers: &[(
-        &str,
-        Vec<serde_json::Value>,
-        Vec<(&str, Option<serde_json::Value>)>,
-    )],
-) {
+/// A `headers` entry is `{"bubbleId": id, "type": 1|2}` and `bodies` maps a
+/// bubble id to its JSON body (or `None` for a SQL NULL value).
+fn write_state_vscdb(path: &std::path::Path, composers: &[Composer]) {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).expect("create state.vscdb parent");
     }
     let conn = Connection::open(path).expect("open synthetic state.vscdb");
     conn.execute_batch("CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY, value BLOB);")
         .expect("create cursorDiskKV");
-    for (composer_id, headers, bodies) in composers {
-        let metadata = serde_json::json!({ "fullConversationHeadersOnly": headers });
+    for composer in composers {
+        let metadata = serde_json::json!({ "fullConversationHeadersOnly": composer.headers });
         conn.execute(
             "INSERT INTO cursorDiskKV (key, value) VALUES (?1, ?2)",
-            rusqlite::params![format!("composerData:{composer_id}"), metadata.to_string()],
+            rusqlite::params![
+                format!("composerData:{}", composer.id),
+                metadata.to_string()
+            ],
         )
         .expect("insert composer row");
-        for (bubble_id, body) in bodies {
-            let key = format!("bubbleId:{composer_id}:{bubble_id}");
+        for (bubble_id, body) in &composer.bodies {
+            let key = format!("bubbleId:{}:{bubble_id}", composer.id);
             match body {
                 Some(body) => {
                     conn.execute(
@@ -121,13 +124,13 @@ fn disk_kv_is_ingested_by_explicit_path_and_searchable() {
     write_state_vscdb(
         &source,
         &[
-            (
-                "composer-a",
-                vec![
+            Composer {
+                id: "composer-a",
+                headers: vec![
                     serde_json::json!({ "bubbleId": "a1", "type": USER }),
                     serde_json::json!({ "bubbleId": "a2", "type": ASSISTANT }),
                 ],
-                vec![
+                bodies: vec![
                     (
                         "a1",
                         Some(serde_json::json!({ "text": "synthetic disk kv token one" })),
@@ -137,15 +140,15 @@ fn disk_kv_is_ingested_by_explicit_path_and_searchable() {
                         Some(serde_json::json!({ "text": "synthetic disk kv reply" })),
                     ),
                 ],
-            ),
-            (
-                "composer-b",
-                vec![serde_json::json!({ "bubbleId": "b1", "type": USER })],
-                vec![(
+            },
+            Composer {
+                id: "composer-b",
+                headers: vec![serde_json::json!({ "bubbleId": "b1", "type": USER })],
+                bodies: vec![(
                     "b1",
                     Some(serde_json::json!({ "text": "synthetic disk kv token two" })),
                 )],
-            ),
+            },
         ],
     );
     let path = source.to_string_lossy().into_owned();
@@ -193,17 +196,17 @@ fn a_broken_bubble_does_not_discard_its_session() {
     let source = dir.path().join("workspace/state.vscdb");
     write_state_vscdb(
         &source,
-        &[(
-            "composer-a",
-            vec![
+        &[Composer {
+            id: "composer-a",
+            headers: vec![
                 serde_json::json!({ "bubbleId": "ok", "type": USER }),
                 serde_json::json!({ "bubbleId": "gone", "type": ASSISTANT }),
             ],
-            vec![(
+            bodies: vec![(
                 "ok",
                 Some(serde_json::json!({ "text": "synthetic disk kv surviving token" })),
             )],
-        )],
+        }],
     );
     let path = source.to_string_lossy().into_owned();
 
