@@ -10,6 +10,35 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Hermes `state.db` sessions are now indexed by a second, additive variant
+  (`hermes/sqlite-state-v1`) covering `~/.hermes/state.db` and
+  `~/.hermes/profiles/<name>/state.db`, a surface the JSON-only adapter never
+  read. Variant selection is decided by the bytes alone (SQLite header plus the
+  `sessions`/`messages` key columns vs. a JSON object document), so the two
+  variants are mutually exclusive and a double claim is refused instead of
+  guessed. Each database is read through one pinned read transaction on a
+  private copy of the captured snapshot, so the source database, its WAL and its
+  SHM are never opened or written and a concurrent committed write cannot change
+  what one parse observes. Sessions are enumerated per database, messages follow
+  `ORDER BY timestamp, id`, REAL unix seconds are normalized to millisecond UTC
+  instants, and NULL timestamps stay absent instead of being back-filled from
+  `started_at`. Both documented tool-call shapes (`{name,arguments}` and
+  `{id,function:{...}}`) are decoded, but every call/result association stays
+  non-authoritative: no native call id is synthesized, no parent edge and no
+  tool activity is emitted, and unmatched or ambiguous associations are reported
+  as bounded diagnostics. Message rowids are not adopted as canonical identity
+  (they are per-database and reused), so messages keep document-scoped ids — the
+  same decision recorded for Pi. Rows, cells, total bytes and tool calls are
+  bounded, and exceeding a bound fails the source explicitly instead of
+  truncating it. Evidence: a BLAKE3-pinned synthetic `state.db` golden plus unit
+  tests for ordering, NULL handling, bad rows, both tool-call shapes, budgets
+  and WAL/source immutability under
+  `crates/agent-session-grep-provider-hermes/`, and a CLI end-to-end
+  profile-isolation and search test in
+  `crates/agent-session-grep-cli/tests/hermes_state_db.rs`. Known gaps: no
+  discovery root for `state.db` yet, and an already registered shallower
+  installation root currently absorbs a profile database — both recorded in
+  `docs/product/PROVIDER-BETA-READINESS.md`.
 - The loopback `serve` URL now carries its session token in the URL **fragment**
   (`http://<addr>/#token=…`) instead of the query string. A fragment is never
   sent to the server, so the token cannot reach a request log, an access log,
