@@ -59,6 +59,18 @@ Unsupported with the reason stated per row, and the adapter reports the
 un-modeled lineage as an explicit parse diagnostic so the omission is visible
 instead of silent.
 
+## Recorded follow-ups from the Hermes `state.db` variant (2026-09-29)
+
+Recorded, not silently accepted: each row is a measured, user-visible or
+contract-level consequence that needs an owner decision or a separate change.
+None of them is a promotion, and none changes any column in the tables below.
+
+| Follow-up | Measured effect | Owner action |
+|---|---|---|
+| Whole-source ceiling for `hermes/sqlite-state-v1` | The adapter's own snapshot cap is 128 MiB, but the provider manifest keeps this format in the whole-source family with the JSON variant's 32 MiB `JSON_FAMILY_MAX_SOURCE_BYTES`, so the selection layer rejects a larger `state.db` before the adapter runs (explicit `SourceTooLarge`, never truncation). A real Hermes database can exceed 32 MiB. | Decide whether this variant gets a wider whole-source bound (a manifest/capability-contract change, with the JSON variant's accepted input left unchanged), or whether 32 MiB stays the documented ceiling. |
+| Count-based limits are reported in "bytes" | `ProviderError::SourceTooLarge` / `RecordTooLarge` are phrased in bytes, so count ceilings surface as e.g. `33 bytes exceeds supported limit 32` (tool calls) or `4097 bytes exceeds supported limit 4096` (sessions). The wording is hard-coded in the shared port error and was deliberately not changed here. | Decide whether the shared error type gains unit-aware wording (or the adapter wraps counts in a dedicated variant) so user-facing diagnostics do not misstate what exceeded the limit. |
+| Probe-error attribution when a source exceeds the whole-source ceiling | The selection layer keeps only the last probe failure, so a `state.db` over the 32 MiB ceiling can surface as a *different* adapter's probe error (measured: Cursor's, on the same file). The honest cause (size) is not what the user sees. | Decide whether selection reports all probe failures (or the size rejection) instead of the last one. |
+
 ## Global external blockers (apply to every promotion)
 
 | Blocker | Owner | Notes |

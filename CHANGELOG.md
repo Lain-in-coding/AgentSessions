@@ -17,9 +17,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `sessions`/`messages` key columns vs. a JSON object document), so the two
   variants are mutually exclusive and a double claim is refused instead of
   guessed. Each database is read through one pinned read transaction on a
-  private copy of the captured snapshot, so the source database, its WAL and its
-  SHM are never opened or written and a concurrent committed write cannot change
-  what one parse observes. Sessions are enumerated per database, messages follow
+  private copy of the captured snapshot: the parser never opens the source file
+  (the capture step's read-only WAL attach can still write `-shm` read marks, as
+  recorded in the crate's golden PROVENANCE), so a concurrent committed write
+  cannot change what one parse observes. Sessions are enumerated per database, messages follow
   `ORDER BY timestamp, id`, REAL unix seconds are normalized to millisecond UTC
   instants, and NULL timestamps stay absent instead of being back-filled from
   `started_at`. Both documented tool-call shapes (`{name,arguments}` and

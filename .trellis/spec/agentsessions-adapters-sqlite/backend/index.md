@@ -311,8 +311,13 @@ batch_size, encode)` returns indexed/skipped/cleared counts.
 Read opens never create/migrate a catalog and use a finite 1-second busy timeout.
 SQLite source capture uses Backup under a pinned read transaction, with a
 128 MiB logical-size ceiling and guarded temporary destination. Never checkpoint
-or write the provider source. Logical fingerprints include committed WAL data
-and remain current across an external checkpoint without logical changes.
+or write the provider source database or its WAL; attaching a read-only
+connection to a live WAL source does let SQLite write reader marks into the
+`-shm` wal-index (measured 2026-09-29), so the executable immutability claim is
+"database + WAL bytes unchanged, and the provider parser never opens the source
+at all" rather than "all three files are byte-identical". Logical fingerprints
+include committed WAL data and remain current across an external checkpoint
+without logical changes.
 Per-session resume claims share the existing `(source_path, session_id)` key;
 no schema migration is required. Parser semantic version 2 forces old source
 scans to reparse. Provider parser `TempDb` keeps `conn` before `_guard` so
@@ -339,11 +344,14 @@ Base: repeated unchanged logical snapshot is a no-op. Bad: copying only the
 main DB, silently merging sessions, or clearing old vectors before encoding.
 
 ### 6. Tests Required
-Assert absent/stale/read-under-writer catalog behavior, unchanged source bytes,
-WAL-only updates/checkpoints, per-session claims, invalid no-op batches,
-encoder rollback, keyset query plans, finite scores and bounded top-k equivalence.
-Both SQLite provider crates must create real temporary WAL/SHM files, then
-assert all owned files disappear after successful reads and query errors.
+Assert absent/stale/read-under-writer catalog behavior, unchanged source
+database/WAL bytes, WAL-only updates/checkpoints, per-session claims, invalid
+no-op batches, encoder rollback, keyset query plans, finite scores and bounded
+top-k equivalence. Each SQLite-reading provider crate (`opencode`,
+`cursor`, `hermes/sqlite-state-v1`) must create real temporary WAL/SHM files
+while parsing its private read-only copy, then assert all owned files disappear
+after successful reads and query errors (the hermes variant also guards a
+stray `-journal`).
 
 ### 7. Wrong vs Correct
 Wrong: call migration from a read command or return early before batch validation.

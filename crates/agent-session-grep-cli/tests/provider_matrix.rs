@@ -2482,8 +2482,9 @@ fn every_adapter_leaves_its_source_directory_untouched_through_probe_and_parse()
     // 那钉的是"fixture 没被 git 改坏"，不是"parse 没动过源"。
     //
     // 只断言入参切片没变是同义反复：`probe`/`parse` 都只收 `&[u8]`，类型系统已经
-    // 排除了原地改写。真实风险在文件系统——两个 SQLite adapter（opencode/cursor）
-    // 会把源拷进临时文件再只读打开，§6 row 11 的临时副本泄漏就出在这条路径上；
+    // 排除了原地改写。真实风险在文件系统——三个 SQLite adapter
+    // （opencode/cursor/hermes 的 sqlite 变体）会把源拷进临时文件再只读打开，
+    // §6 row 11 的临时副本泄漏就出在这条路径上；
     // 若哪天有人改成就地打开源文件、或在源目录旁落下 `-wal`/`-shm`/`.bak`，
     // 现有测试全都不会失败。
     //

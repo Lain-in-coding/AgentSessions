@@ -1457,6 +1457,82 @@ INSERT INTO messages (id, session_id, role, content) VALUES (5, 's1', NULL, 'nul
         );
     }
 
+    /// Private temp copies must be unlinked after a successful read *and* after
+    /// a query error, including the `-wal`/`-shm` files a WAL-mode source makes
+    /// SQLite materialize for the copy. Mirrors the contract the other
+    /// SQLite-reading provider crates pin.
+    fn assert_wal_temp_copy_cleanup(query: &str, should_fail: bool) {
+        let scratch = scratch("wal-cleanup");
+        let fixture_path = scratch.dir.join("cleanup.db");
+        {
+            let writer = Connection::open(&fixture_path).expect("wal fixture writer");
+            writer
+                .execute_batch(
+                    "PRAGMA journal_mode=WAL;\
+                     CREATE TABLE cleanup_fixture (value INTEGER);\
+                     INSERT INTO cleanup_fixture VALUES (7);",
+                )
+                .expect("wal fixture schema");
+            // Dropping the last writer checkpoints the WAL into the main file,
+            // exactly like a real source that is at rest when capture reads it.
+        }
+        let bytes = std::fs::read(&fixture_path).expect("fixture bytes");
+
+        let mut copy_path = None;
+        let result = (|| -> Result<i64, ProviderError> {
+            let db = open_readonly_from_bytes(&bytes)?;
+            let path = db.temp_path().to_path_buf();
+            // A real read materializes the private copy's own sidecars: its
+            // header still records WAL mode.
+            db.conn
+                .query_row("SELECT value FROM cleanup_fixture", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .map_err(sql_error)?;
+            for suffix in ["-wal", "-shm"] {
+                let mut sidecar = path.as_os_str().to_os_string();
+                sidecar.push(suffix);
+                assert!(
+                    std::path::Path::new(&sidecar).exists(),
+                    "the read-only copy must materialize its own {suffix}"
+                );
+            }
+            copy_path = Some(path);
+            // The error case returns while `TempDb` is still the local owner.
+            db.conn
+                .query_row(query, [], |row| row.get::<_, i64>(0))
+                .map_err(sql_error)
+        })();
+        assert_eq!(result.is_err(), should_fail, "{result:?}");
+
+        let path = copy_path.expect("copy path");
+        let mut remaining = Vec::new();
+        for suffix in ["", "-wal", "-shm", "-journal"] {
+            let mut owned_file = path.as_os_str().to_os_string();
+            owned_file.push(suffix);
+            let owned_file = std::path::Path::new(&owned_file);
+            if owned_file.exists() {
+                remaining.push(suffix);
+                // Do not leave files behind when the assertion below fails.
+                let _ = std::fs::remove_file(owned_file);
+            }
+        }
+        assert!(
+            remaining.is_empty(),
+            "temporary SQLite files leaked: {remaining:?}"
+        );
+    }
+
+    #[test]
+    fn wal_temp_copy_cleans_sidecars_after_success() {
+        assert_wal_temp_copy_cleanup("SELECT value FROM cleanup_fixture", false);
+    }
+
+    #[test]
+    fn wal_temp_copy_cleans_sidecars_after_query_error() {
+        assert_wal_temp_copy_cleanup("SELECT missing_column FROM cleanup_fixture", true);
+    }
+
     #[test]
     fn source_database_files_stay_byte_identical_across_a_concurrent_wal_commit() {
         let scratch = scratch("wal");

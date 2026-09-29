@@ -108,6 +108,7 @@ impl ProviderAdapter for OpenHermesAdapter {
                 "state.db messages report no adopted native id: `messages.id` is a per-database rowid, so canonical message identity stays document-scoped and rowids appear only in diagnostics",
                 "state.db tool calls decode both documented shapes but every call/result association is non-authoritative: no call id is synthesized, no parent edge and no tool activity is emitted",
                 "state.db rows/cells/tool calls are bounded (4_096 sessions, 250_000 messages, 8 MiB per cell, 64 MiB per database, 32 tool calls per message, 200_000 per database); exceeding a bound fails the source instead of truncating it",
+                "the production whole-source ceiling stays 32 MiB (shared with the JSON variant), so a larger state.db is rejected by the selection layer before this adapter runs; the adapter's own 128 MiB snapshot cap only applies to direct byte callers",
                 "discovery still registers only `~/.hermes/sessions`: state.db sources are ingested by explicit path until a multi-root discovery table exists",
             ],
         )
