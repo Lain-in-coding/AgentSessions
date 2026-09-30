@@ -435,6 +435,68 @@ catalog spent 23.417 s in `load_catalog_state` and loaded 1,000,000 placement +
 Correct: load the batch's sources + candidate ids, scan without retaining, and
 keep the durable manifest to one computation.
 
+## Scenario: Historical empty-placeholder repair (parser version 3)
+
+### 1. Scope / Trigger
+A source was first ingested at zero bytes by the historical first-empty path,
+which persisted an `empty` provider namespace/location for it, and a later parse
+now proves a real provider (the CLI-side lifecycle is owned by the CLI).
+
+### 2. Signatures
+`SqliteStore::repairable_empty_placeholder(conn, source_path, namespace_id) ->
+PortResult<bool>`;
+`SqliteStore::authorized_placeholder_rebinds(tx, sources) ->
+PortResult<BTreeSet<String>>`;
+`persist_installation_in_tx(..., authorized_placeholder_rebind: bool)`;
+`PARSER_SEMANTIC_VERSION = 3`.
+
+### 3. Contracts
+`resolve_or_allocate_installation_namespace` may return a different namespace
+for a source only when the persisted binding is a provable empty placeholder:
+the namespace provider is exactly `empty`, the current scan is zero bytes with
+the empty-blake3 fingerprint, there are no message/placement/activity/usage
+claims, every surviving claim is a Reconstructed `doc_v1_`/`ses_v1_`
+placeholder per the `fts_ids.id_json` sidecar, and no resume fact, alias or
+relocation provenance resolves. Anything unprovable fails closed with
+`source belongs to another provider installation`; the placeholder path never
+runs legacy provenance recovery and never reconstructs identity.
+Authorization is re-evaluated inside the write transaction by
+`authorized_placeholder_rebinds`, before the batch replaces the proof
+(`source_scans`, memberships, catalog identities); `persist_installation_in_tx`
+then only re-checks that authorization flag plus `prior_provider == "empty"`.
+A pre-parse reservation alone never authorizes a rebind, and the repair is
+scoped to that source path: other sources sharing the placeholder
+namespace/location keep their rows. `PARSER_SEMANTIC_VERSION = 3` makes sync
+treat sources stored under an older parser version as changed, which is how the
+corrected staging reaches already-scanned sources without byte changes.
+
+### 4. Validation & Error Matrix
+Provable placeholder + real provider -> binding replaced once, placeholder
+entities retired by the same replacement batch. Real claim, unresolved
+identity, ambiguous provenance, non-empty scan, or foreign fingerprint -> hard
+`invalid_request` conflict, prior binding and rows untouched. Transaction
+failure or a racing writer -> nothing persisted (writer lease and CAS/outbox
+unchanged).
+
+### 5. Good/Base/Bad Cases
+Good: a legacy zero-byte `empty` binding is repaired to `claude-code` and the
+old placeholder documents disappear from search.
+Base: an empty binding rebuilt by the fixed binary is never created again, and
+unrelated sources keep their bindings.
+Bad: a forged `msg_v1_*` claim on the placeholder source blocks the rebind.
+
+### 6. Tests Required
+`cargo --offline --locked test -p agent-session-grep-cli --test e2e` (repair
+success, forged-claim refusal, standalone empty replacement) plus the SQLite
+adapter unit tests for the proof predicate and version-stale reparse.
+
+### 7. Wrong vs Correct
+Wrong: authorize the rebind from the pre-parse reservation, or read the proof
+after the batch has already replaced the scan row and memberships.
+Correct: evaluate the proof at the top of the write transaction, pass the
+resulting authorization into the persist step, and keep everything else
+fail-closed.
+
 ## Quality Check
 
 - `catalog` remains authoritative; `fts` fully rebuildable from it.

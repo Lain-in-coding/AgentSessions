@@ -2414,6 +2414,255 @@ fn sync_new_truncated_source_parses_valid_prefix_recoverably() {
     assert!(stdout(&out).contains("msg_v1_"), "search={}", stdout(&out));
 }
 
+/// A source that has always been empty carries no provider/variant evidence.
+/// The first sighting must be a warned no-op: no fake provider, installation
+/// binding, scan row or placeholder entity may be persisted. Content arriving
+/// later establishes the real provider through the ordinary path.
+#[test]
+fn first_empty_standalone_source_is_a_warned_noop_until_content_exists() {
+    let (dir, db) = temp_db("first-empty-noop");
+    let fixture = dir.path().join("empty-later.jsonl");
+    std::fs::write(&fixture, b"").expect("write empty fixture");
+    let path = fixture.to_string_lossy().into_owned();
+
+    let out = run(&db, &["sync", &path]);
+    assert!(
+        out.status.success(),
+        "empty sync must succeed: {}",
+        stdout(&out)
+    );
+    let frame = parse_first_line(&out);
+    assert_eq!(frame["data"]["committed"], 0, "{frame}");
+    assert_eq!(frame["data"]["generation"], 0, "{frame}");
+    let warnings = frame["warnings"].as_array().expect("warnings");
+    assert!(
+        warnings.iter().any(|warning| warning
+            .as_str()
+            .is_some_and(|text| text.contains("empty source"))),
+        "first-empty no-op must be visible: {frame}"
+    );
+
+    // Nothing may be persisted for a source that never had content: no binding,
+    // no scan row, and no provider="empty" namespace.
+    let conn = Connection::open(&db).expect("open catalog");
+    let bindings: i64 = conn
+        .query_row("SELECT COUNT(*) FROM source_installations", [], |r| {
+            r.get(0)
+        })
+        .expect("count bindings");
+    let scans: i64 = conn
+        .query_row("SELECT COUNT(*) FROM source_scans", [], |r| r.get(0))
+        .expect("count scans");
+    let empty_namespaces: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM installation_namespaces WHERE provider_id='empty'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("count empty namespaces");
+    assert_eq!(
+        (bindings, scans, empty_namespaces),
+        (0, 0, 0),
+        "first-empty sighting must not persist identity"
+    );
+    drop(conn);
+
+    std::fs::write(
+        &fixture,
+        claude_fixture(r#""first empty source recovered""#),
+    )
+    .expect("write content");
+    let out = run(&db, &["sync", &path]);
+    assert!(
+        out.status.success(),
+        "content sync failed: {}",
+        stdout(&out)
+    );
+    let frame = parse_first_line(&out);
+    assert_eq!(frame["data"]["committed"], 1, "{frame}");
+    assert_eq!(frame["data"]["generation"], 1, "{frame}");
+    let conn = Connection::open(&db).expect("open catalog");
+    let provider: String = conn
+        .query_row(
+            "SELECT n.provider_id FROM source_installations si
+             JOIN installation_namespaces n USING(namespace_id)",
+            [],
+            |r| r.get(0),
+        )
+        .expect("provider binding");
+    assert_eq!(provider, "claude-code");
+    drop(conn);
+    let out = run(&db, &["search", "recovered"]);
+    assert!(stdout(&out).contains("msg_v1_"), "search={}", stdout(&out));
+}
+
+/// The ingest entry point must treat an emptied known source exactly like sync:
+/// an honest empty replacement that keeps the proven installation binding and
+/// tombstones the previous messages, instead of failing with a provider clash.
+#[test]
+fn ingest_empty_replacement_keeps_proven_provider_and_tombstones_messages() {
+    let (dir, db) = temp_db("ingest-empty");
+    let fixture = dir.path().join("ingest-empty.jsonl");
+    std::fs::write(&fixture, claude_fixture(r#""ingest emptied content""#)).expect("write fixture");
+    let path = fixture.to_string_lossy().into_owned();
+
+    let out = run(&db, &["ingest", &path]);
+    assert!(out.status.success(), "ingest failed: {}", stdout(&out));
+    assert_eq!(parse_first_line(&out)["data"]["generation"], 1);
+    let out = run(&db, &["search", "emptied"]);
+    assert!(stdout(&out).contains("msg_v1_"), "search={}", stdout(&out));
+
+    std::fs::write(&fixture, b"").expect("truncate fixture");
+    let out = run(&db, &["ingest", &path]);
+    assert!(
+        out.status.success(),
+        "emptied ingest must succeed: {}",
+        stdout(&out)
+    );
+    let frame = parse_first_line(&out);
+    assert_eq!(frame["data"]["committed"], 0, "{frame}");
+    assert_eq!(frame["data"]["generation"], 2, "{frame}");
+    let out = run(&db, &["search", "emptied"]);
+    assert!(
+        !stdout(&out).contains("msg_v1_"),
+        "emptied source must tombstone its messages: {}",
+        stdout(&out)
+    );
+}
+
+/// The historical first-empty path persisted an `empty` provider binding. Such
+/// a binding may be replaced exactly once, and only when the source provably
+/// holds no real facts; anything with a real claim stays a hard conflict.
+#[test]
+fn empty_placeholder_binding_is_repaired_only_with_proof() {
+    const EMPTY_FINGERPRINT: &str =
+        "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262";
+    let (dir, db) = temp_db("empty-placeholder-repair");
+
+    // Seed the exact durable shape the old first-empty path wrote: an
+    // allocated-v1 `empty` namespace with one current location, the source
+    // binding, and a zero-byte scan row.
+    let seed = |fixture: &Path, forged_message: bool| {
+        // The CLI records the canonical locator spelling; seed the same one.
+        let path = v6_fixture_source_locator(fixture);
+        let key = agent_session_grep_application::relocation::normalize_absolute_path(&path)
+            .expect("normalize fixture path");
+        let root = v6_fixture_source_locator(fixture.parent().expect("fixture parent"));
+        let tag = fixture
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .expect("fixture stem");
+        let namespace_id = format!("ins_v1_{tag}");
+        let namespace_input = format!("installation-v1:{tag}");
+        let conn = Connection::open(&db).expect("open catalog");
+        conn.execute(
+            "INSERT INTO installation_namespaces(
+                 namespace_id, provider_id, namespace_input, origin, created_at_ms)
+             VALUES(?1, 'empty', ?2, 'allocated-v1', 1)",
+            rusqlite::params![&namespace_id, &namespace_input],
+        )
+        .expect("seed namespace");
+        conn.execute(
+            "INSERT INTO installation_locations(
+                 provider_id, root_key, root_locator, namespace_id, state, retired_until_ms)
+             VALUES('empty', ?1, ?2, ?3, 'current', NULL)",
+            rusqlite::params![&root, &root, &namespace_id],
+        )
+        .expect("seed location");
+        conn.execute(
+            "INSERT INTO source_installations(source_path, source_key, namespace_id)
+             VALUES(?1, ?2, ?3)",
+            rusqlite::params![&path, &key, &namespace_id],
+        )
+        .expect("seed binding");
+        conn.execute(
+            "INSERT INTO source_scans(
+                 source_path, scanned_at_ms, len_bytes, fingerprint, provider_id, parser_version)
+             VALUES(?1, 1, 0, ?2, NULL, 3)",
+            rusqlite::params![&path, EMPTY_FINGERPRINT],
+        )
+        .expect("seed scan");
+        if forged_message {
+            conn.execute(
+                "INSERT INTO catalog(id, payload) VALUES('msg_v1_forged',
+                     '{\"role\":\"user\",\"text\":\"forged\",\
+                       \"timestamp\":\"2026-01-01T00:00:00Z\"}')",
+                [],
+            )
+            .expect("seed forged catalog row");
+            conn.execute(
+                "INSERT INTO source_membership(source_path, message_id, document_id)
+                 VALUES(?1, 'msg_v1_forged', NULL)",
+                [&path],
+            )
+            .expect("seed forged claim");
+        }
+        drop(conn);
+    };
+
+    let fixture = dir.path().join("legacy-empty.jsonl");
+    std::fs::write(&fixture, b"").expect("write empty fixture");
+    seed(&fixture, false);
+    std::fs::write(&fixture, claude_fixture(r#""legacy placeholder repaired""#))
+        .expect("write content");
+    let locator = v6_fixture_source_locator(&fixture);
+    let out = run(&db, &["sync", &fixture.to_string_lossy()]);
+    assert!(out.status.success(), "repair sync failed: {}", stdout(&out));
+    let frame = parse_first_line(&out);
+    assert_eq!(frame["data"]["committed"], 1, "{frame}");
+    let conn = Connection::open(&db).expect("open catalog");
+    let provider: String = conn
+        .query_row(
+            "SELECT n.provider_id FROM source_installations si
+             JOIN installation_namespaces n USING(namespace_id)
+             WHERE si.source_path = ?1",
+            [&locator],
+            |r| r.get(0),
+        )
+        .expect("repaired binding");
+    assert_eq!(provider, "claude-code");
+    let placeholders: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM catalog WHERE id LIKE 'doc_v1_9d688f0b%'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("count legacy placeholders");
+    assert_eq!(
+        placeholders, 0,
+        "repaired batch must retire the old placeholders"
+    );
+    drop(conn);
+    let out = run(&db, &["search", "placeholder repaired"]);
+    assert!(stdout(&out).contains("msg_v1_"), "search={}", stdout(&out));
+
+    // Negative control: any real claim makes the binding non-repairable. The
+    // fixture lives in its own directory: installation locations are keyed by
+    // (provider_id, root_key) and both seeds share the `empty` provider.
+    let forged_dir = dir.path().join("forged");
+    std::fs::create_dir_all(&forged_dir).expect("create forged dir");
+    let forged = forged_dir.join("forged-empty.jsonl");
+    std::fs::write(&forged, b"").expect("write empty fixture");
+    seed(&forged, true);
+    std::fs::write(&forged, claude_fixture(r#""forged must not rebind""#)).expect("write content");
+    let forged_locator = v6_fixture_source_locator(&forged);
+    let out = run(&db, &["sync", &forged.to_string_lossy()]);
+    assert!(!out.status.success(), "real claims must block the rebind");
+    let frame = parse_first_line(&out);
+    assert_eq!(frame["error"]["code"], "invalid_request", "{frame}");
+    let conn = Connection::open(&db).expect("open catalog");
+    let provider: String = conn
+        .query_row(
+            "SELECT n.provider_id FROM source_installations si
+             JOIN installation_namespaces n USING(namespace_id)
+             WHERE si.source_path = ?1",
+            [&forged_locator],
+            |r| r.get(0),
+        )
+        .expect("binding must survive the refusal");
+    assert_eq!(provider, "empty");
+}
+
 #[test]
 fn sync_partial_scan_never_tombstones_unseen_messages() {
     // 不完整扫描（坏行 + 消息被移除）：relation_complete=false → store 层只并集
@@ -5690,6 +5939,144 @@ fn sync_discover_finds_sqlite_sourced_opencode() {
     );
 }
 
+/// R1 回归：整档源（SQLite / 整档 JSON / Markdown）的字节不是记录流。
+///
+/// 旧的截断尾启发式对所有源做逐行 JSON 健康检查：改写后的整档源会被判成
+/// `Invalid` 并 Retain 旧索引，于是源更新永远不可见。这里对每个整档 provider
+/// 用 pinned golden 源实测：首次 sync 可见 → 改写源 → resync 必须提交新内容
+/// 并 tombstone 被替换的旧内容。
+#[test]
+fn whole_source_updates_become_visible_after_rewrite() {
+    struct Case {
+        provider: &'static str,
+        golden: &'static str,
+        /// SQLite 源的 (表, 列) 改写目标；`None` 表示文本源。
+        sqlite: Option<(&'static str, &'static str)>,
+        from: &'static str,
+        to: &'static str,
+        old_token: &'static str,
+        new_token: &'static str,
+    }
+
+    let cases = [
+        Case {
+            provider: "cline",
+            golden: "../agent-session-grep-provider-cline/tests/golden/basic.json",
+            sqlite: None,
+            from: "hello world",
+            to: "rewrittencline corpus",
+            old_token: "world",
+            new_token: "rewrittencline",
+        },
+        Case {
+            provider: "hermes",
+            golden: "../agent-session-grep-provider-hermes/tests/golden/basic.json",
+            sqlite: None,
+            from: "hello world",
+            to: "rewrittenhermes corpus",
+            old_token: "world",
+            new_token: "rewrittenhermes",
+        },
+        Case {
+            provider: "aider",
+            golden: "../agent-session-grep-provider-aider/tests/golden/basic.md",
+            sqlite: None,
+            from: "Rust is a systems programming language.",
+            to: "Rust is a rewrittenaider corpus.",
+            old_token: "systems",
+            new_token: "rewrittenaider",
+        },
+        Case {
+            provider: "cursor",
+            golden: "../agent-session-grep-provider-cursor/tests/golden/basic.db",
+            sqlite: Some(("ItemTable", "value")),
+            from: "hello",
+            to: "rewrittencursor",
+            old_token: "hello",
+            new_token: "rewrittencursor",
+        },
+        Case {
+            provider: "opencode",
+            golden: "../agent-session-grep-provider-opencode/tests/golden/basic.db",
+            sqlite: Some(("part", "data")),
+            from: "hello world",
+            to: "rewrittenopencode",
+            old_token: "world",
+            new_token: "rewrittenopencode",
+        },
+    ];
+
+    for case in cases {
+        let (dir, db) = temp_db(&format!("whole-source-{}", case.provider));
+        let golden = Path::new(env!("CARGO_MANIFEST_DIR")).join(case.golden);
+        let file_name = golden.file_name().expect("golden file name");
+        let source = dir.path().join(file_name);
+        std::fs::copy(&golden, &source).expect("copy golden source");
+        let path = source.to_string_lossy().into_owned();
+
+        let out = run(&db, &["sync", &path]);
+        assert!(
+            out.status.success(),
+            "{}: 首次 sync 失败: {}",
+            case.provider,
+            stdout(&out)
+        );
+        let before = run(&db, &["search", case.old_token]);
+        assert!(
+            stdout(&before).contains("msg_v1_"),
+            "{}: 改写前必须能检索到旧内容: {}",
+            case.provider,
+            stdout(&before)
+        );
+
+        // 改写整档源：文本源整体替换，SQLite 源原地 UPDATE。
+        match case.sqlite {
+            Some((table, column)) => {
+                let conn = Connection::open(&source).expect("open fixture db");
+                conn.execute(
+                    &format!("UPDATE {table} SET {column} = replace({column}, ?1, ?2)"),
+                    rusqlite::params![case.from, case.to],
+                )
+                .expect("rewrite sqlite source");
+                conn.close().expect("close rewritten source");
+            }
+            None => {
+                let text = std::fs::read_to_string(&source).expect("read text source");
+                std::fs::write(&source, text.replace(case.from, case.to))
+                    .expect("rewrite text source");
+            }
+        }
+
+        let out = run(&db, &["sync", &path]);
+        assert!(
+            out.status.success(),
+            "{}: resync 失败: {}",
+            case.provider,
+            stdout(&out)
+        );
+        let frame = parse_first_line(&out);
+        assert!(
+            frame["data"]["committed"].as_u64().unwrap_or(0) > 0,
+            "{}: 改写后的整档源必须重新解析并提交: {frame}",
+            case.provider
+        );
+
+        let after = run(&db, &["search", case.new_token]);
+        assert!(
+            stdout(&after).contains("msg_v1_"),
+            "{}: 改写后的内容必须可见: {}",
+            case.provider,
+            stdout(&after)
+        );
+        let stale = run(&db, &["search", case.old_token]);
+        assert!(
+            !stdout(&stale).contains("msg_v1_"),
+            "{}: 被替换的旧内容必须 tombstone: {}",
+            case.provider,
+            stdout(&stale)
+        );
+    }
+}
 fn pi_fixture(text: &str) -> String {
     // Pi 的 session JSONL：`type:"session"` 头行携带身份，`type:"message"` 携带
     // 嵌套 `message.role`（见 provider-pi 的 golden `basic.jsonl`）。

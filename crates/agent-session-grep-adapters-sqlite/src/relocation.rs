@@ -168,7 +168,7 @@ impl SqliteStore {
             {
                 continue; // Ambiguous provenance remains readable but ineligible.
             }
-            Self::persist_installation_in_tx(tx, &path, &assignment, unix_ms()?)?;
+            Self::persist_installation_in_tx(tx, &path, &assignment, unix_ms()?, false)?;
         }
         Ok(())
     }
@@ -317,6 +317,174 @@ impl SqliteStore {
         Ok(())
     }
 
+    /// Proof that an installation binding is the derived placeholder left by
+    /// the historical first-empty-source path, and therefore carries no real
+    /// identity. Accepts only a zero-byte scan, no message/placement/activity/
+    /// usage claims, Reconstructed document/session placeholders, no resolved
+    /// resume identity and no relocation history. Health checks that cannot be
+    /// proven return `false` (fail closed); this is a one-way repair
+    /// precondition, never a licence to reassign real source identities.
+    pub(super) fn repairable_empty_placeholder(
+        conn: &Connection,
+        source_path: &str,
+        namespace_id: &str,
+    ) -> PortResult<bool> {
+        let provider: Option<String> = conn
+            .query_row(
+                "SELECT provider_id FROM installation_namespaces WHERE namespace_id=?1",
+                [namespace_id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(backend)?;
+        if provider.as_deref() != Some("empty") {
+            return Ok(false);
+        }
+        let scan: Option<(Option<i64>, Option<String>)> = conn
+            .query_row(
+                "SELECT len_bytes, fingerprint FROM source_scans WHERE source_path=?1",
+                [source_path],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .map_err(backend)?;
+        let Some((Some(0), Some(fingerprint))) = scan else {
+            return Ok(false);
+        };
+        if fingerprint != blake3::hash(b"").to_hex().to_string() {
+            return Ok(false);
+        }
+        // Any message-level or relation-level claim proves the source observed
+        // real content and must keep its identity.
+        let message_claims: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM source_membership
+                 WHERE source_path=?1 AND message_id GLOB 'msg_v1_*'",
+                [source_path],
+                |r| r.get(0),
+            )
+            .map_err(backend)?;
+        if message_claims != 0 {
+            return Ok(false);
+        }
+        for table in [
+            "source_placement_membership",
+            "tool_activity_membership",
+            "usage_event_membership",
+        ] {
+            let claims: i64 = conn
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE source_path=?1"),
+                    [source_path],
+                    |r| r.get(0),
+                )
+                .map_err(backend)?;
+            if claims != 0 {
+                return Ok(false);
+            }
+        }
+        // Every surviving claim must be a Reconstructed document/session
+        // placeholder. The wire id does not encode stability, so the identity
+        // sidecar is authoritative.
+        let mut statement = conn
+            .prepare(
+                "SELECT sm.message_id, f.id_json FROM source_membership sm
+                 LEFT JOIN fts_ids f ON f.wire_id = sm.message_id
+                 WHERE sm.source_path=?1",
+            )
+            .map_err(backend)?;
+        let mut rows = statement.query([source_path]).map_err(backend)?;
+        while let Some(row) = rows.next().map_err(backend)? {
+            let wire: String = row.get(0).map_err(backend)?;
+            let id_json: Option<String> = row.get(1).map_err(backend)?;
+            if !(wire.starts_with("doc_v1_") || wire.starts_with("ses_v1_")) {
+                return Ok(false);
+            }
+            let Some(id_json) = id_json else {
+                return Ok(false);
+            };
+            let identity: serde_json::Value = match serde_json::from_str(&id_json) {
+                Ok(identity) => identity,
+                Err(_) => return Ok(false),
+            };
+            if identity.get("stability").and_then(|value| value.as_str()) != Some("Reconstructed") {
+                return Ok(false);
+            }
+        }
+        // A named or resolved provider session is evidence of real content, as
+        // is an ambiguous observation; only absent placeholder claims pass.
+        let identity_claims: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM source_session_resume_claims
+                 WHERE source_path=?1
+                   AND (provider_session_id IS NOT NULL
+                        OR provider_session_id_state IN ('resolved', 'ambiguous'))",
+                [source_path],
+                |r| r.get(0),
+            )
+            .map_err(backend)?;
+        if identity_claims != 0 {
+            return Ok(false);
+        }
+        // A retired location or a recorded relocation means the namespace took
+        // part in an identity rewrite; rebinding it here would be silent.
+        let retired: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM installation_locations
+                 WHERE namespace_id=?1 AND state='retired'",
+                [namespace_id],
+                |r| r.get(0),
+            )
+            .map_err(backend)?;
+        if retired != 0 {
+            return Ok(false);
+        }
+        let relocated: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM installation_relocations r
+                 WHERE r.provider_id = (SELECT provider_id FROM installation_namespaces
+                                        WHERE namespace_id = ?1)",
+                [namespace_id],
+                |r| r.get(0),
+            )
+            .map_err(backend)?;
+        if relocated != 0 {
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
+    /// Source paths in this batch whose persisted binding is a provable empty
+    /// placeholder and may therefore be rebound to the staged installation.
+    /// Evaluated inside the write transaction, before the batch replaces the
+    /// scan row, memberships and catalog identities that prove it.
+    pub(super) fn authorized_placeholder_rebinds(
+        tx: &rusqlite::Transaction<'_>,
+        sources: &[SourceReplacementManifest],
+    ) -> PortResult<std::collections::BTreeSet<String>> {
+        let mut authorized = std::collections::BTreeSet::new();
+        for source in sources {
+            let Some(installation) = &source.installation else {
+                continue;
+            };
+            let prior: Option<String> = tx
+                .query_row(
+                    "SELECT namespace_id FROM source_installations WHERE source_path=?1",
+                    [&source.source_path],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(backend)?;
+            let Some(prior) = prior.filter(|id| id != &installation.namespace_id) else {
+                continue;
+            };
+            if Self::repairable_empty_placeholder(tx, &source.source_path, &prior)? {
+                authorized.insert(source.source_path.clone());
+            }
+        }
+        Ok(authorized)
+    }
+
     /// Resolve identity before parsing. New values are in-memory reservations;
     /// only a successful source activation can persist them.
     pub fn resolve_or_allocate_installation_namespace(
@@ -327,11 +495,19 @@ impl SqliteStore {
     ) -> PortResult<String> {
         let source_key = normalize_absolute_path(source_path)?;
         let conn = self.conn.borrow();
+        let mut replaces_empty_placeholder = false;
         if let Some(existing) = Self::assignment_for_source(&conn, source_path)? {
-            if existing.provider_id != provider_id {
+            if existing.provider_id == provider_id {
+                return Ok(existing.namespace_input);
+            }
+            // A source first seen at zero bytes has no provider evidence; its
+            // `empty` placeholder binding may be replaced exactly once, and
+            // only through the ordinary transactional activation of a real
+            // provider. Everything else stays a hard conflict.
+            if !Self::repairable_empty_placeholder(&conn, source_path, &existing.namespace_id)? {
                 return Err(invalid("source belongs to another provider installation"));
             }
-            return Ok(existing.namespace_input);
+            replaces_empty_placeholder = true;
         }
         Self::validate_unbound_source_locator(&conn, source_path, &source_key)?;
         let now = (self.relocation_clock)()?;
@@ -342,7 +518,9 @@ impl SqliteStore {
                 |r| r.get(0),
             )
             .map_err(backend)?;
-        let legacy_existing = if scanned {
+        // A repairable placeholder holds no identity to reconstruct, so the
+        // legacy provenance recovery below must not run for it.
+        let legacy_existing = if scanned && !replaces_empty_placeholder {
             match Self::legacy_assignment(&conn, source_path, Some(provider_id))? {
                 Some(assignment) => Some(assignment),
                 None => {
@@ -439,7 +617,7 @@ impl SqliteStore {
                 let legacy_group = Self::unbound_legacy_root(&conn, provider_id, &root_key)?;
                 if let Some(legacy) = legacy_existing.clone().or(legacy_group) {
                     found = Some(legacy);
-                } else if scanned {
+                } else if scanned && !replaces_empty_placeholder {
                     return Err(invalid(
                         "source installation provenance is unresolved; identity cannot be reconstructed",
                     ));
@@ -665,6 +843,7 @@ impl SqliteStore {
         path: &str,
         assignment: &InstallationAssignment,
         now_ms: i64,
+        authorized_placeholder_rebind: bool,
     ) -> PortResult<()> {
         let retired: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM installation_locations WHERE provider_id=?1 AND root_key=?2 AND state='retired' AND retired_until_ms>?3)", rusqlite::params![assignment.provider_id,assignment.root_key,now_ms], |r|r.get(0)).map_err(backend)?;
         if retired {
@@ -696,13 +875,24 @@ impl SqliteStore {
             )
             .optional()
             .map_err(backend)?;
-        if prior
-            .as_ref()
-            .is_some_and(|id| id != &assignment.namespace_id)
-        {
-            return Err(invalid(
-                "source installation binding conflicts with persisted identity",
-            ));
+        if let Some(prior_id) = prior.as_ref().filter(|id| *id != &assignment.namespace_id) {
+            // The placeholder proof is evaluated once at the top of this write
+            // transaction (against pre-batch state); the persist step only
+            // re-checks the authorization flag and the prior provider. The
+            // pre-parse reservation alone never authorizes a rebind.
+            let prior_provider: Option<String> = tx
+                .query_row(
+                    "SELECT provider_id FROM installation_namespaces WHERE namespace_id=?1",
+                    [prior_id],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(backend)?;
+            if !authorized_placeholder_rebind || prior_provider.as_deref() != Some("empty") {
+                return Err(invalid(
+                    "source installation binding conflicts with persisted identity",
+                ));
+            }
         }
         tx.execute("INSERT INTO source_installations(source_path,source_key,namespace_id) VALUES(?1,?2,?3) ON CONFLICT(source_path) DO UPDATE SET source_key=excluded.source_key,namespace_id=excluded.namespace_id",rusqlite::params![path,key,assignment.namespace_id]).map_err(backend)?;
         Ok(())

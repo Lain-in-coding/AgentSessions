@@ -6558,6 +6558,11 @@ impl SqliteStore {
         if let Some(relocation) = &relations.relocation {
             Self::apply_relocation_in_tx(&tx, pending, relocation)?;
         }
+        // Rebinding a historical empty placeholder must be revalidated inside
+        // this write transaction, before the batch replaces the evidence. The
+        // pre-parse reservation alone is never authorization.
+        let authorized_placeholder_rebinds =
+            SqliteStore::authorized_placeholder_rebinds(&tx, &relations.source_replacements)?;
         trace::add(&mut trace_stages, "verify_outbox", trace_started);
 
         // Session 元数据投影（schema v11）：收集本批触碰的 Session，提交末尾
@@ -7020,6 +7025,7 @@ impl SqliteStore {
                     &source.source_path,
                     installation,
                     (self.relocation_clock)()?,
+                    authorized_placeholder_rebinds.contains(&source.source_path),
                 )?;
             }
             // Source-scoped Resume Metadata 声明（ADR-0009）：随 source replacement
@@ -7734,7 +7740,7 @@ const RELATION_SCHEMA_VERSION: i64 = 7;
 /// 已存版本落后于该常量的源即使字节未变也走 targeted backfill（重跑 parse +
 /// commit），并在重新 commit 时写回当前版本。单测（lib.rs
 /// `stale_parser_version_forces_reparse_and_converges`）锁住该语义。
-pub const PARSER_SEMANTIC_VERSION: u32 = 2;
+pub const PARSER_SEMANTIC_VERSION: u32 = 3;
 
 /// 索引投影版本：任何改变 **FTS 词元流或派生投影文本** 的变化都必须 +1。
 ///
