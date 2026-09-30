@@ -125,6 +125,104 @@ fn state_db_is_ingested_by_explicit_path_and_searchable() {
     assert_eq!(frame["data"]["unchanged"], 1, "{frame}");
 }
 
+/// A snapshot whose message rows survive without their session row is an
+/// incomplete scan: the omitted rows must be counted as skipped, the previous
+/// claims must stay searchable, and restoring the session must converge without
+/// duplicate hits.
+#[test]
+fn partial_orphan_snapshot_counts_skips_and_retains_prior_claims() {
+    let (dir, db) = temp_db("hermes-partial-orphan");
+    let source = dir.path().join(".hermes/state.db");
+    write_state_db(
+        &source,
+        "hermes-partial-session",
+        "synthetic partial orphan needle",
+        1700000030.0,
+    );
+    let path = source.to_string_lossy().into_owned();
+
+    let first = run(&db, &["ingest", &path]);
+    assert!(first.status.success(), "ingest failed: {}", stdout(&first));
+    let frame = parse_first_line(&first);
+    assert_eq!(frame["data"]["committed"], 1, "{frame}");
+    assert_eq!(frame["data"]["skipped"], 0, "{frame}");
+
+    // The message row remains, but nothing links it to a session any more.
+    let conn = Connection::open(&source).expect("open state.db");
+    conn.execute("DELETE FROM sessions", [])
+        .expect("drop session row");
+    drop(conn);
+
+    let partial = run(&db, &["ingest", &path]);
+    assert!(
+        partial.status.success(),
+        "partial ingest failed: {}",
+        stdout(&partial)
+    );
+    let frame = parse_first_line(&partial);
+    assert_eq!(frame["data"]["committed"], 0, "{frame}");
+    assert!(
+        frame["data"]["skipped"]
+            .as_u64()
+            .is_some_and(|skipped| skipped >= 1),
+        "unread message rows must be counted as skipped: {frame}"
+    );
+    let search = run(&db, &["search", "orphan needle"]);
+    let frame = parse_first_line(&search);
+    assert_eq!(
+        frame["data"]["hits"].as_array().expect("hits").len(),
+        1,
+        "an incomplete scan must retain prior claims: {frame}"
+    );
+
+    // Restoring the session row returns the source to a complete scan; the
+    // original document identity is observed again and nothing is duplicated.
+    let conn = Connection::open(&source).expect("open state.db");
+    conn.execute(
+        "INSERT INTO sessions (id, started_at) VALUES ('hermes-partial-session', 1700000030.0)",
+        [],
+    )
+    .expect("restore session row");
+    drop(conn);
+    let restored = run(&db, &["ingest", &path]);
+    assert!(
+        restored.status.success(),
+        "restore failed: {}",
+        stdout(&restored)
+    );
+    let frame = parse_first_line(&restored);
+    assert_eq!(frame["data"]["skipped"], 0, "{frame}");
+    let search = run(&db, &["search", "orphan needle"]);
+    let frame = parse_first_line(&search);
+    assert_eq!(
+        frame["data"]["hits"].as_array().expect("hits").len(),
+        1,
+        "a complete rescan must converge without duplicates: {frame}"
+    );
+
+    // A message that is genuinely gone from a complete scan is an obsolete
+    // claim and must be retired; only partial scans retain unseen history.
+    let conn = Connection::open(&source).expect("open state.db");
+    conn.execute("DELETE FROM messages", [])
+        .expect("drop message row");
+    drop(conn);
+    let cleared = run(&db, &["ingest", &path]);
+    assert!(
+        cleared.status.success(),
+        "complete empty rescan failed: {}",
+        stdout(&cleared)
+    );
+    let frame = parse_first_line(&cleared);
+    assert_eq!(frame["data"]["skipped"], 0, "{frame}");
+    let search = run(&db, &["search", "orphan needle"]);
+    let frame = parse_first_line(&search);
+    assert_eq!(
+        frame["data"]["hits"].as_array().expect("hits").len(),
+        0,
+        "a complete scan must retire the removed claim: {frame}"
+    );
+}
+
 #[test]
 fn profiles_with_the_same_native_session_id_stay_separate_sources() {
     let (dir, db) = temp_db("hermes-state-profiles");

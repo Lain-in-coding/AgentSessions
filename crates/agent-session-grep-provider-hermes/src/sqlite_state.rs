@@ -576,6 +576,16 @@ fn parse_with_limits(
     let db = open_readonly_from_bytes(bytes)?;
     let conn = &db.conn;
     let schema = require_schema(conn)?;
+    // Count the whole source, including rows no valid session walk will reach.
+    // The result is exact only within this hard cap; the smaller orphan census
+    // below is diagnostic-only and must not determine ParseReport::skipped.
+    let source_message_rows = bounded_count(conn, "SELECT 1 FROM messages", limits.max_messages)?;
+    if source_message_rows > limits.max_messages {
+        return Err(ProviderError::SourceTooLarge {
+            actual: source_message_rows,
+            max: limits.max_messages,
+        });
+    }
     let mut budget = Materialization::new(limits);
     let mut report = ParseReport::default();
 
@@ -592,19 +602,25 @@ fn parse_with_limits(
 
     struct SessionRow {
         id: String,
+        // text_cell accepts UTF-8 TEXT and BLOB; preserve the storage class
+        // when binding the key rather than matching a different session.
+        is_blob: bool,
         identity: ProviderSessionIdentity,
     }
 
     let mut sessions: Vec<SessionRow> = Vec::new();
     {
+        let mut session_rows = 0_u64;
+        let mut session_ids = std::collections::BTreeSet::new();
         let mut statement = conn
             .prepare("SELECT id, started_at FROM sessions ORDER BY id")
             .map_err(sql_error)?;
         let mut rows = statement.query([]).map_err(sql_error)?;
         while let Some(row) = rows.next().map_err(sql_error)? {
-            if sessions.len() as u64 >= limits.max_sessions {
+            session_rows += 1;
+            if session_rows > limits.max_sessions {
                 return Err(ProviderError::SourceTooLarge {
-                    actual: sessions.len() as u64 + 1,
+                    actual: session_rows,
                     max: limits.max_sessions,
                 });
             }
@@ -626,6 +642,14 @@ fn parse_with_limits(
                     continue;
                 }
             };
+            // Column presence does not guarantee a UNIQUE constraint. Repeated
+            // accepted ids would read the same messages twice; unread orphans
+            // could then conceal that overcount in the final reconciliation.
+            if !session_ids.insert(id.clone()) {
+                return Err(ProviderError::StructuralFatal(
+                    "hermes state.db has duplicate session ids".into(),
+                ));
+            }
             // `started_at` is validated and normalized to milliseconds, but is
             // never used as a message-timestamp fallback: a NULL message
             // timestamp is preserved as absent.
@@ -644,6 +668,7 @@ fn parse_with_limits(
             }
             sessions.push(SessionRow {
                 id: id.clone(),
+                is_blob: matches!(row.get_ref(0).map_err(sql_error)?, ValueRef::Blob(_)),
                 identity: ProviderSessionIdentity {
                     source_key: id.clone(),
                     observation: ProviderSessionObservation {
@@ -689,7 +714,7 @@ fn parse_with_limits(
         "NULL"
     };
     let select_messages = format!(
-        "SELECT id, role, content, tool_calls, tool_call_id, tool_name, timestamp, {reasoning_expr} \
+        "SELECT id, role, content, tool_calls, tool_call_id, tool_name, timestamp, {reasoning_expr}, session_id \
          FROM messages WHERE session_id = ?1 COLLATE BINARY ORDER BY timestamp, id"
     );
 
@@ -705,8 +730,26 @@ fn parse_with_limits(
         };
         let mut defect_note = Vec::<String>::new();
         let mut statement = conn.prepare(&select_messages).map_err(sql_error)?;
-        let mut rows = statement.query([session.id.as_str()]).map_err(sql_error)?;
+        let session_key = if session.is_blob {
+            ValueRef::Blob(session.id.as_bytes())
+        } else {
+            ValueRef::Text(session.id.as_bytes())
+        };
+        let mut rows = if session.is_blob {
+            statement.query([session.id.as_bytes()])
+        } else {
+            statement.query([session.id.as_str()])
+        }
+        .map_err(sql_error)?;
         while let Some(row) = rows.next().map_err(sql_error)? {
+            // Numeric affinity can make distinct ids such as "01" and "1"
+            // match one row even under COLLATE BINARY. Successful walks must
+            // partition rows by the exact observed key, without coercion.
+            if row.get_ref(8).map_err(sql_error)? != session_key {
+                return Err(ProviderError::StructuralFatal(
+                    "hermes state.db has inconsistent session/message ownership".into(),
+                ));
+            }
             message_rows += 1;
             if message_rows > limits.max_messages {
                 return Err(ProviderError::SourceTooLarge {
@@ -896,6 +939,23 @@ fn parse_with_limits(
                 walk.tool.missing_identity,
             ));
         }
+    }
+
+    let unread_message_rows = source_message_rows
+        .checked_sub(message_rows)
+        .ok_or_else(|| {
+            ProviderError::StructuralFatal(
+                "hermes state.db message accounting is inconsistent".into(),
+            )
+        })?;
+    // Per-session skips already count visited bad rows. Only the remaining
+    // rows (orphans or messages excluded by invalid session ids) are added.
+    report.skipped += unread_message_rows as usize;
+    if unread_message_rows > 0 {
+        report.diagnostics.push(format!(
+            "state.db: {unread_message_rows} message row(s) were not read under a valid session id; \
+             counted as skipped"
+        ));
     }
 
     Ok(report)
@@ -1330,6 +1390,326 @@ INSERT INTO messages (id, session_id, role, content) VALUES (5, 's1', NULL, 'nul
         assert!(notes.contains("invalid UTF-8"), "{notes}");
         assert!(notes.contains("message id 4"), "{notes}");
         assert!(notes.contains("NULL role"), "{notes}");
+    }
+
+    #[test]
+    fn parse_accounts_for_all_orphans_beyond_the_diagnostic_census() {
+        for count in [
+            0,
+            1,
+            MAX_ORPHAN_CENSUS,
+            MAX_ORPHAN_CENSUS + 1,
+            MAX_ORPHAN_CENSUS + 2,
+        ] {
+            let scratch = scratch("orphan-accounting");
+            let bytes = state_db(
+                &scratch,
+                &format!(
+                    "{SCHEMA}WITH RECURSIVE ids(id) AS (\
+                     SELECT 1 WHERE {count} > 0 UNION ALL SELECT id + 1 FROM ids WHERE id < {count}) \
+                     INSERT INTO messages (id, session_id, role, content) \
+                     SELECT id, 'missing', 'user', 'omitted orphan body' FROM ids;"
+                ),
+            );
+            let (report, sink) = parse_ok(&bytes);
+            assert_eq!((report.committed, report.skipped), (0, count as usize));
+            assert!(sink.messages.is_empty());
+            let notes = diagnostics(&report);
+            if count > 0 {
+                let census = count.min(MAX_ORPHAN_CENSUS + 1);
+                assert!(
+                    notes.contains(&format!("at least {census} message row(s)")),
+                    "{notes}"
+                );
+                assert!(
+                    notes.contains(&format!("{count} message row(s) were not read")),
+                    "{notes}"
+                );
+            }
+            assert!(!notes.contains("omitted orphan body"), "{notes}");
+        }
+    }
+
+    #[test]
+    fn parse_accounts_for_messages_excluded_by_invalid_session_ids() {
+        // No affinity on either key: numbers stay numbers instead of SQLite
+        // converting them to valid text before the parser can observe them.
+        let schema = SCHEMA
+            .replace("id TEXT PRIMARY KEY", "id")
+            .replace("session_id TEXT", "session_id");
+        for (id, reason) in [
+            ("NULL", "NULL/blank"),
+            ("''", "NULL/blank"),
+            ("'  '", "NULL/blank"),
+            ("CAST(x'ff' AS TEXT)", "invalid UTF-8"),
+            ("x'ff'", "invalid UTF-8"),
+            ("42", "non-text SQLite type"),
+            ("1.25", "non-text SQLite type"),
+        ] {
+            for with_valid_session in [false, true] {
+                let scratch = scratch("invalid-session-accounting");
+                let mut sql = format!(
+                    "{schema}INSERT INTO sessions VALUES ({id}, NULL); \
+                     INSERT INTO messages (id, session_id, role, content) VALUES \
+                     (1, {id}, 'user', 'omitted invalid-session body'), \
+                     (2, {id}, 'assistant', 'another omitted body');"
+                );
+                if with_valid_session {
+                    sql.push_str(
+                        "INSERT INTO sessions VALUES ('s1', NULL); \
+                         INSERT INTO messages (id, session_id, role, content) \
+                         VALUES (3, 's1', 'user', 'kept');",
+                    );
+                }
+                let bytes = state_db(&scratch, &sql);
+                let (report, sink) = parse_ok(&bytes);
+                let committed = usize::from(with_valid_session);
+                assert_eq!((report.committed, report.skipped), (committed, 2), "{id}");
+                assert_eq!(sink.messages.len(), committed);
+                if with_valid_session {
+                    assert_eq!(sink.messages[0].text, "kept");
+                    assert_eq!(sink.messages[0].session.as_deref(), Some("s1"));
+                    assert_eq!(sink.messages[0].seq, 0);
+                    assert!(sink.messages[0].native_id.is_empty());
+                }
+                let notes = diagnostics(&report);
+                assert!(notes.contains(reason), "{notes}");
+                assert!(notes.contains("2 message row(s) were not read"), "{notes}");
+                assert!(!notes.contains("omitted invalid-session body"), "{notes}");
+                assert!(!notes.contains("another omitted body"), "{notes}");
+            }
+        }
+    }
+
+    #[test]
+    fn parse_accounts_for_mixed_omissions_and_bad_rows_once() {
+        let scratch = scratch("mixed-accounting");
+        let bytes = state_db(
+            &scratch,
+            &format!(
+                "{SCHEMA}INSERT INTO sessions VALUES ('s1', NULL), (' ', NULL); \
+                 INSERT INTO messages (id, session_id, role, content, tool_calls, timestamp) VALUES \
+                 (1, 's1', 'user', 'kept', NULL, NULL), \
+                 (2, 's1', 'wizard', NULL, NULL, 'bad timestamp'), \
+                 (3, 'missing', 'wizard', 'omitted orphan body', NULL, NULL), \
+                 (4, ' ', 'user', 'omitted invalid-session body', NULL, NULL), \
+                 (5, 's1', 'assistant', 'kept despite bad calls', '{{', NULL);"
+            ),
+        );
+        let (report, sink) = parse_ok(&bytes);
+        assert_eq!((report.committed, report.skipped), (2, 3));
+        assert_eq!(sink.messages.len(), report.committed);
+        assert_eq!(sink.messages[0].text, "kept");
+        assert_eq!(sink.messages[1].text, "kept despite bad calls");
+        assert_eq!(sink.messages[1].seq, 1);
+        assert!(
+            sink.messages
+                .iter()
+                .all(|message| message.native_id.is_empty())
+        );
+        let notes = diagnostics(&report);
+        assert!(notes.contains("at least 1 message row(s)"), "{notes}");
+        assert!(notes.contains("2 message row(s) were not read"), "{notes}");
+        assert!(
+            notes.contains("2 message(s) emitted, 1 row(s) skipped"),
+            "{notes}"
+        );
+        assert!(notes.contains("malformed JSON"), "{notes}");
+        assert!(!notes.contains("omitted orphan body"), "{notes}");
+        assert!(!notes.contains("omitted invalid-session body"), "{notes}");
+    }
+
+    #[test]
+    fn parse_counts_repeated_message_rows_without_deduplication() {
+        let scratch = scratch("repeated-message-accounting");
+        let schema = SCHEMA.replace("id INTEGER PRIMARY KEY", "id INTEGER");
+        let bytes = state_db(
+            &scratch,
+            &format!(
+                "{schema}INSERT INTO sessions VALUES ('s1', NULL); \
+                 INSERT INTO messages (id, session_id, role, content) VALUES \
+                 (1, 's1', 'user', 'repeated body'), (1, 's1', 'user', 'repeated body');"
+            ),
+        );
+        let (report, sink) = parse_ok(&bytes);
+        assert_eq!((report.committed, report.skipped), (2, 0));
+        assert_eq!(sink.messages.len(), 2);
+        assert_eq!(sink.messages[0].text, sink.messages[1].text);
+        assert_eq!((sink.messages[0].seq, sink.messages[1].seq), (0, 1));
+        assert!(
+            sink.messages
+                .iter()
+                .all(|message| message.native_id.is_empty())
+        );
+    }
+
+    #[test]
+    fn parse_enforces_full_source_message_limits_including_unread_rows() {
+        for owners in [
+            vec![],
+            vec!["s1"],
+            vec!["missing"],
+            vec![""],
+            vec!["s1", "missing", ""],
+        ] {
+            let scratch = scratch("source-message-limit");
+            let mut sql = format!("{SCHEMA}INSERT INTO sessions VALUES ('s1', NULL), ('', NULL);");
+            for (index, owner) in owners.iter().enumerate() {
+                sql.push_str(&format!(
+                    "INSERT INTO messages (id, session_id, role, content) \
+                     VALUES ({}, '{owner}', 'user', 'synthetic body');",
+                    index + 1,
+                ));
+            }
+            let bytes = state_db(&scratch, &sql);
+            let limits = Limits {
+                max_messages: owners.len() as u64,
+                ..Limits::default()
+            };
+            let mut sink = RecordingSink::default();
+            let report = parse_with_limits(&bytes, &mut sink, &limits)
+                .expect("the exact message limit must be accepted");
+            let committed = owners.iter().filter(|owner| **owner == "s1").count();
+            assert_eq!(report.committed, committed);
+            assert_eq!(report.skipped, owners.len() - committed);
+            assert_eq!(sink.messages.len(), committed);
+            if !owners.is_empty() {
+                let mut sink = RecordingSink::default();
+                let smaller = Limits {
+                    max_messages: limits.max_messages - 1,
+                    ..limits
+                };
+                let error = parse_with_limits(&bytes, &mut sink, &smaller).expect_err(
+                    "an overflow must fail even when only unread rows exceed the limit",
+                );
+                assert!(
+                    matches!(error, ProviderError::SourceTooLarge { actual, max }
+                    if actual == limits.max_messages && max == smaller.max_messages)
+                );
+                assert!(
+                    sink.messages.is_empty(),
+                    "the census must fail before emission"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn parse_enforces_session_limits_including_invalid_rows() {
+        let schema = SCHEMA.replace("id TEXT PRIMARY KEY", "id");
+        for (first, second) in [
+            ("NULL", "NULL"),
+            ("''", "'s1'"),
+            ("x'ff'", "x'fe'"),
+            ("41", "42"),
+        ] {
+            let scratch = scratch("source-session-limit");
+            let bytes = state_db(
+                &scratch,
+                &format!(
+                    "{schema}INSERT INTO sessions VALUES ({first}, NULL), ({second}, NULL); \
+                     INSERT INTO messages (id, session_id, role, content) \
+                     VALUES (1, {first}, 'user', 'omitted body');"
+                ),
+            );
+            let mut sink = RecordingSink::default();
+            let exact = Limits {
+                max_sessions: 2,
+                ..Limits::default()
+            };
+            let report = parse_with_limits(&bytes, &mut sink, &exact)
+                .expect("the exact session row limit must be accepted");
+            assert_eq!((report.committed, report.skipped), (0, 1));
+            let smaller = Limits {
+                max_sessions: 1,
+                ..exact
+            };
+            assert!(matches!(
+                parse_with_limits(&bytes, &mut sink, &smaller),
+                Err(ProviderError::SourceTooLarge { actual: 2, max: 1 })
+            ));
+            assert!(sink.messages.is_empty());
+        }
+    }
+
+    #[test]
+    fn parse_rejects_duplicate_sessions_even_when_orphans_hide_overcounting() {
+        let schema = SCHEMA.replace("id TEXT PRIMARY KEY", "id TEXT");
+        for duplicate in ["'s1'", "CAST('s1' AS BLOB)"] {
+            let scratch = scratch("duplicate-session-accounting");
+            let bytes = state_db(
+                &scratch,
+                &format!(
+                    "{schema}INSERT INTO sessions VALUES ('s1', NULL), ({duplicate}, 1.0); \
+                     INSERT INTO messages (id, session_id, role, content) VALUES \
+                     (1, 's1', 'user', 'kept once'), (2, 'missing', 'user', 'orphan body');"
+                ),
+            );
+            let mut sink = RecordingSink::default();
+            let error = parse(&bytes, &mut sink)
+                .expect_err("duplicate accepted session ids make the walk ambiguous");
+            assert!(matches!(error, ProviderError::StructuralFatal(ref reason)
+                if reason.contains("duplicate session id")));
+            assert!(
+                sink.messages.is_empty(),
+                "duplicates must fail before emission"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_rejects_coercing_session_matches_even_when_orphans_hide_overcounting() {
+        let scratch = scratch("coercing-session-accounting");
+        let schema = SCHEMA.replace("session_id TEXT", "session_id NUMERIC");
+        let bytes = state_db(
+            &scratch,
+            &format!(
+                "{schema}INSERT INTO sessions VALUES ('01', NULL), ('1', NULL); \
+                 INSERT INTO messages (id, session_id, role, content) VALUES \
+                 (1, 1, 'user', 'kept once'), (2, 99, 'user', 'orphan body');"
+            ),
+        );
+        let mut sink = RecordingSink::default();
+        let error = parse(&bytes, &mut sink)
+            .expect_err("numeric affinity must not make two session walks emit the same row");
+        assert!(matches!(error, ProviderError::StructuralFatal(ref reason)
+            if reason.contains("inconsistent session/message ownership")));
+        assert!(sink.messages.is_empty());
+    }
+
+    #[test]
+    fn parse_preserves_binary_session_keys_without_reading_text_orphans() {
+        let scratch = scratch("binary-session-accounting");
+        let bytes = state_db(
+            &scratch,
+            &format!(
+                "{SCHEMA}INSERT INTO sessions VALUES (CAST('s1' AS BLOB), NULL), ('s2', NULL); \
+                 INSERT INTO messages (id, session_id, role, content) VALUES \
+                 (1, CAST('s1' AS BLOB), 'user', 'binary session body'), \
+                 (2, 's1', 'user', 'orphan text body'), (3, 's2', 'user', 'text session body');"
+            ),
+        );
+        let (report, sink) = parse_ok(&bytes);
+        assert_eq!((report.committed, report.skipped), (2, 1));
+        assert_eq!(sink.messages.len(), 2);
+        assert!(
+            sink.messages
+                .iter()
+                .any(|message| message.session.as_deref() == Some("s1")
+                    && message.text == "binary session body")
+        );
+        assert!(
+            sink.messages
+                .iter()
+                .any(|message| message.session.as_deref() == Some("s2")
+                    && message.text == "text session body")
+        );
+        assert!(
+            !sink
+                .messages
+                .iter()
+                .any(|message| message.text == "orphan text body")
+        );
     }
 
     #[test]
