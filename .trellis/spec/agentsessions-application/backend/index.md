@@ -276,6 +276,12 @@ Correct: receive time and ownership digests through explicit arguments.
 
 ## Quality Check
 
+- New or modified filesystem test helpers must not use PID + wall-clock time
+  alone as a unique directory name: even `as_nanos()` can repeat across parallel
+  callers. Use a process-local atomic nonce and exclusive `create_dir` for the
+  fixture leaf, rather than silently reusing it with `create_dir_all`. Cover
+  parallel allocations at a fixed clock tick without serializing the suite
+  (see `candle_embedding::tests::tempfile_dirs_are_isolated_for_parallel_callers_at_one_clock_tick`).
 - No concrete adapter imports; no `rusqlite`, no `std::fs` reads of sources.
 - Handlers are exhaustive over `AppRequest`; no catch-all that silently drops
   a new request kind.
