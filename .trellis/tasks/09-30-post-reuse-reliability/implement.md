@@ -9,7 +9,7 @@
 - [x] Coordinator updated the three applicable shared specs (domain ordering, CLI empty-source/record-stream lifecycle, SQLite placeholder repair + parser version 3) where behavior changed.
 - [x] Run integrated offline quality gates and the privacy/diff review (evidence in research/check-report.md).
 - [ ] Final independent Trellis check: NOT run — every sub-agent spawn failed with HTTP 402 (AgentRouter quota); the coordinator check above carries that explicit gap.
-- [ ] Commit only this task's allowlisted code/spec/task changes after local gates pass.
+- [x] Commit only this task's allowlisted code/spec/task changes after local gates pass (four local commits; nothing pushed).
 - [ ] Request any needed remote publication/merge authorization; do not change visibility/billing or bypass CI.
 
 ## Local validation
