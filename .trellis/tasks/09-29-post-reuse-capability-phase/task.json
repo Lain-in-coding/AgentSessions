@@ -3,7 +3,7 @@
   "name": "post-reuse-capability-phase",
   "title": "Post-reuse capability phase: index scale, hit experience, provider coverage",
   "description": "",
-  "status": "planning",
+  "status": "in_progress",
   "dev_type": null,
   "scope": null,
   "package": "agentsessions-adapters-sqlite",
@@ -12,11 +12,11 @@
   "assignee": "QIN",
   "createdAt": "2026-09-29",
   "completedAt": null,
-  "branch": null,
+  "branch": "docs/post-reuse-closeout",
   "base_branch": "main",
   "worktree_path": null,
-  "commit": null,
-  "pr_url": null,
+  "commit": "b1324b475f1036718799c5c76ec8c0bfd33ddb24",
+  "pr_url": "https://github.com/qin-devs/AgentSessions/pull/14",
   "subtasks": [
     "09-29-match-centered-snippet",
     "09-29-index-throughput",
@@ -31,6 +31,6 @@
   ],
   "parent": null,
   "relatedFiles": [],
-  "notes": "",
+  "notes": "Implementation delivered by PR #14; all four children are archived. On 2026-09-29 the owner replied \"keep going\" directly to the disclosed conditional-acceptance question; recorded as acceptance of stop-and-report delivery, not achievement of the >=50% throughput goals or beta promotion. All five PRD acceptance records are now checked; both new SQLite variants remain experimental. Parent remains in_progress pending documentation-closeout PR checks/merge; only after those phase gates pass may archival bookkeeping be committed and checked. The overall temporary-public operation is not complete until PRIVATE restoration is verified. Runs 36562310348 and 36562310272 for the recorded merge commit had zero-step billing/spending denial at attempts 1/2. On 2026-09-30 main verified via GitHub API that both completed SUCCESS at attempt 3: ci had all 7 jobs succeed (six jobs with 19 steps each; cargo-deny with 6 steps), and core-beta-evidence had all 4 jobs succeed (17 steps each). Post-merge CI is satisfied; this does not promote either provider variant. On 2026-09-30 the owner explicitly accepted irreversible temporary-public exposure: \"接受，接受，继续吧，不要让我们的项目推进受到阻碍\". Main verified PUBLIC at approximately 2026-09-30T02:31Z. Temporary-public CI/closeout is the authorized route; creating the closeout PR no longer depends on a billing fix. Main owns visibility/CI/PR operations and must restore and verify PRIVATE after CI/closeout regardless of pass/fail, no later than the local rollback-guard deadline 2026-09-30T03:30:16Z; unfinished work remains open if the guard expires first. The final restoration readback will be recorded in the closeout PR operational comment and local journal, without generating another CI-triggering commit solely for visibility bookkeeping. No billing, spending-limit, credential, product-code, dependency, release-gate or SLO changes were authorized or made for this temporary-public operation. Do not mark complete or archive before the remaining closure conditions are met. See integration-report.md section 7.",
   "meta": {}
 }

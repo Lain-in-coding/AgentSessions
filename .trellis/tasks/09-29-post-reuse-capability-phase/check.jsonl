@@ -1,1 +1,3 @@
-{"_example": "Fill with {\"file\": \"<path>\", \"reason\": \"<why>\"}. Put spec/research files only — no code paths. Run `python .trellis/scripts/get_context.py --mode packages` to list available specs. Delete this line once real entries are added."}
+{"file": ".trellis/spec/guides/index.md", "reason": "Check evidence provenance and avoid equating a lifecycle status with acceptance."}
+{"file": ".trellis/tasks/archive/2026-09/09-29-index-throughput/research/report.md", "reason": "Keep the original throughput targets, paired A/B baselines, and stop-rule findings distinct."}
+{"file": "docs/product/PROVIDER-BETA-READINESS.md", "reason": "Keep the two SQLite variants experimental; distinguish recorded conditional owner acceptance from beta promotion, new product decisions, or billing authorization."}
