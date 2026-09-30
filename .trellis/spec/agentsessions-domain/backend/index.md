@@ -26,9 +26,12 @@
   all placements. Parent resolution always searches the complete Session
   placement set, including sidechain placements; filtering sidechains affects
   leaf candidacy, not whether a real parent can be followed.
-  Deterministic ordering compares ISO-8601 timestamps with fractional digits
-  normalized (zero-padded to microseconds), then document id, ordinal, and
-  placement id; missing timestamps sort before present ones.
+  Deterministic ordering is one total order over a per-message timestamp key:
+  `Missing` first, then `Invalid` (raw bytes, byte order), then `Valid` parsed
+  UTC instants (fractional digits normalized, zero-padded to microseconds),
+  then document id, ordinal, and placement id. `select_mainline` and
+  `select_full` share this single comparator, so both are independent of the
+  input placement permutation.
 - **Domain errors** — `DomainError` (`src/error.rs`).
 
 It depends on **nothing in this workspace**. Ports, application, adapters, and
@@ -94,7 +97,7 @@ arithmetic overflow and invalid clock/offset/fraction text are rejected.
 
 ### 4. Validation & Error Matrix
 Invalid native suffix -> `DomainError::InvalidRequest` without echoing the ID.
-Invalid sorting timestamp -> `None`, preserving the existing ordering fallback.
+Invalid sorting timestamp -> `None` from `parse_instant`; callers keep the original bytes in the `Invalid` key class, so ordering stays total and permutation-independent.
 
 ### 5. Good/Base/Bad Cases
 Good: composed and decomposed Unicode IDs remain distinct. Base: a UUID keeps
