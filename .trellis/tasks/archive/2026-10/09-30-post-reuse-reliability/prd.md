@@ -29,7 +29,7 @@ Repair four reproduced correctness defects without reopening the completed post-
 - [x] Coordinator check completed against the specs, the diff, and the executable evidence (`research/check-report.md`); the three shared specs document the repaired contracts.
 - [x] Independent full-scope Trellis source review completed on 2026-10-01 (`research/independent-check.md`). The reviewer fixed two product defects, strengthened missing regression proof and propagated the new warning assertions; coordinator integration accepted the patch after fresh full offline gates passed. Historical failed gates remain recorded, not relabeled as success.
 - [x] Historical CI evidence is retained separately from new-code verification and contains no committed private runner data.
-- [ ] Publish the authorized PR and record new current-head PR/main CI separately. This external delivery gate remains pending until the actual runs pass; old CI or local success cannot satisfy it.
+- [x] PR #17 current head `a51a60e` passed 12/12 checks and merged normally as `124fb57e52c051b90e2f308a24487352fdb5ac5d`. The merge tree equals the tested head. Fresh main `ci` 36874887357 passed 7/7 jobs and `core-beta-evidence` 36874887468 passed 4/4 jobs, both on the actual merge SHA. Repository visibility remains PRIVATE; final receipts are in `research/check-report.md`.
 
 ## Out of scope
 Performance routes A-D; schema/dependency/MSRV/release/SLO changes; beta promotion; wider provider bounds; Cursor dual-surface policy; identity redesign or content-based dedup; other windows' cleanup/archival. Repository stays PRIVATE.
