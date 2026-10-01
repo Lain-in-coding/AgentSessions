@@ -7,7 +7,8 @@ Repair four reproduced correctness defects without reopening the completed post-
 - Review baseline: `bbb7c79533c13db584fa5ca2e1e05990d990c8da` (origin/main, verified 2026-09-30).
 - The six earlier phase tasks remain completed. Prior paired 1M improvement remains approximately 37.5%, not >=50%; Hermes/Cursor SQLite variants remain experimental.
 - The owner selected all four fixes, partial Hermes ingestion with temporary old/new coexistence, successful no-op for a first unknown empty source, restricted atomic repair of historical empty bindings, and the three-class timestamp order.
-- On 2026-09-30, after reviewing the final proposed plan, the owner explicitly instructed: `Implement the plan.` This authorizes creating these tasks and implementing that reviewed scope. No remote push, merge, visibility or billing change is inferred.
+- On 2026-09-30, after reviewing the final proposed plan, the owner explicitly instructed: `Implement the plan.` This authorized creating these tasks and implementing that reviewed scope, not remote publication at that time.
+- On 2026-10-01 the owner separately authorized continuing planning and execution in full. This continuation covers task-scoped commits, branch publication, a PR and normal merge only after successful current-head checks. It does not lift the existing exclusions on visibility, billing, performance routes A-D, schema/dependencies, release/SLO contracts, or provider promotion.
 
 ## Requirements
 - R1: Changed bounded-whole sources must reach their adapter, not be misclassified as truncated JSONL.
@@ -26,9 +27,9 @@ Repair four reproduced correctness defects without reopening the completed post-
 - [x] A/B/C satisfy their acceptance criteria with regression tests for the reproduced failures.
 - [x] Current debug/release workspace, semantic feature, Rust 1.90, Node/Python and lint gates pass locally offline.
 - [x] Coordinator check completed against the specs, the diff, and the executable evidence (`research/check-report.md`); the three shared specs document the repaired contracts.
-- [ ] Independent Trellis check sub-agent run remains an explicit gap: every AgentRouter spawn in this window failed with HTTP 402 (quota), so no independent agent reviewed the patch.
+- [x] Independent full-scope Trellis source review completed on 2026-10-01 (`research/independent-check.md`). The reviewer fixed two product defects, strengthened missing regression proof and propagated the new warning assertions; coordinator integration accepted the patch after fresh full offline gates passed. Historical failed gates remain recorded, not relabeled as success.
 - [x] Historical CI evidence is retained separately from new-code verification and contains no committed private runner data.
-- [ ] New PR/main CI are recorded when publication/merge is separately authorized; until then this external delivery gate stays pending.
+- [ ] Publish the authorized PR and record new current-head PR/main CI separately. This external delivery gate remains pending until the actual runs pass; old CI or local success cannot satisfy it.
 
 ## Out of scope
 Performance routes A-D; schema/dependency/MSRV/release/SLO changes; beta promotion; wider provider bounds; Cursor dual-surface policy; identity redesign or content-based dedup; other windows' cleanup/archival. Repository stays PRIVATE.

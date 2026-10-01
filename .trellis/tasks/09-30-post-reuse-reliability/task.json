@@ -15,7 +15,7 @@
   "branch": "fix/post-reuse-reliability",
   "base_branch": "main",
   "worktree_path": null,
-  "commit": null,
+  "commit": "107578d90e4711d931d677cfbdb56d9829fcdc94",
   "pr_url": null,
   "subtasks": [],
   "children": [
@@ -25,6 +25,6 @@
   ],
   "parent": null,
   "relatedFiles": [],
-  "notes": "Owner approved the reviewed final plan on 2026-09-30: Implement the plan. Scope/behavior choices are recorded in prd.md and design.md. Parent coordinates integration, shared specs, and commits.",
+  "notes": "Owner approved the reviewed final plan on 2026-09-30: Implement the plan. Scope/behavior choices are recorded in prd.md and design.md. Parent coordinates integration, shared specs, and commits. On 2026-10-01 the owner separately authorized continued task-scoped execution, commits, branch/PR publication and normal merge after green current-head CI; existing visibility/billing, performance, schema/dependency, release/SLO and promotion exclusions remain. Independent full-scope source review and reviewer repairs are accepted after fresh coordinator debug/release, semantic, MSRV, lint, Node and Python gates passed on the stable product tree. The parent remains in_progress for authorized PR/main CI; no remote success or delivery completion is claimed yet.",
   "meta": {}
 }
