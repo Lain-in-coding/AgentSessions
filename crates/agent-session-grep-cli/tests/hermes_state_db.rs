@@ -125,6 +125,303 @@ fn state_db_is_ingested_by_explicit_path_and_searchable() {
     assert_eq!(frame["data"]["unchanged"], 1, "{frame}");
 }
 
+/// A snapshot whose message rows survive without their session row is an
+/// incomplete scan: the omitted rows must be counted as skipped, the previous
+/// claims must stay searchable, and restoring the session must converge without
+/// duplicate hits.
+#[test]
+fn partial_orphan_snapshot_counts_skips_and_retains_prior_claims() {
+    let (dir, db) = temp_db("hermes-partial-orphan");
+    let source = dir.path().join(".hermes/state.db");
+    write_state_db(
+        &source,
+        "hermes-partial-session",
+        "synthetic partial orphan needle",
+        1700000030.0,
+    );
+    let path = source.to_string_lossy().into_owned();
+
+    let first = run(&db, &["ingest", &path]);
+    assert!(first.status.success(), "ingest failed: {}", stdout(&first));
+    let frame = parse_first_line(&first);
+    assert_eq!(frame["data"]["committed"], 1, "{frame}");
+    assert_eq!(frame["data"]["skipped"], 0, "{frame}");
+
+    // The message row remains, but nothing links it to a session any more.
+    let conn = Connection::open(&source).expect("open state.db");
+    conn.execute("DELETE FROM sessions", [])
+        .expect("drop session row");
+    drop(conn);
+
+    let partial = run(&db, &["ingest", &path]);
+    assert!(
+        partial.status.success(),
+        "partial ingest failed: {}",
+        stdout(&partial)
+    );
+    let frame = parse_first_line(&partial);
+    assert_eq!(frame["data"]["committed"], 0, "{frame}");
+    assert!(
+        frame["data"]["skipped"]
+            .as_u64()
+            .is_some_and(|skipped| skipped >= 1),
+        "unread message rows must be counted as skipped: {frame}"
+    );
+    let search = run(&db, &["search", "orphan needle"]);
+    let frame = parse_first_line(&search);
+    assert_eq!(
+        frame["data"]["hits"].as_array().expect("hits").len(),
+        1,
+        "an incomplete scan must retain prior claims: {frame}"
+    );
+
+    // Restoring the session row returns the source to a complete scan; the
+    // original document identity is observed again and nothing is duplicated.
+    let conn = Connection::open(&source).expect("open state.db");
+    conn.execute(
+        "INSERT INTO sessions (id, started_at) VALUES ('hermes-partial-session', 1700000030.0)",
+        [],
+    )
+    .expect("restore session row");
+    drop(conn);
+    let restored = run(&db, &["ingest", &path]);
+    assert!(
+        restored.status.success(),
+        "restore failed: {}",
+        stdout(&restored)
+    );
+    let frame = parse_first_line(&restored);
+    assert_eq!(frame["data"]["skipped"], 0, "{frame}");
+    let search = run(&db, &["search", "orphan needle"]);
+    let frame = parse_first_line(&search);
+    assert_eq!(
+        frame["data"]["hits"].as_array().expect("hits").len(),
+        1,
+        "a complete rescan must converge without duplicates: {frame}"
+    );
+
+    // A message that is genuinely gone from a complete scan is an obsolete
+    // claim and must be retired; only partial scans retain unseen history.
+    let conn = Connection::open(&source).expect("open state.db");
+    conn.execute("DELETE FROM messages", [])
+        .expect("drop message row");
+    drop(conn);
+    let cleared = run(&db, &["ingest", &path]);
+    assert!(
+        cleared.status.success(),
+        "complete empty rescan failed: {}",
+        stdout(&cleared)
+    );
+    let frame = parse_first_line(&cleared);
+    assert_eq!(frame["data"]["skipped"], 0, "{frame}");
+    let search = run(&db, &["search", "orphan needle"]);
+    let frame = parse_first_line(&search);
+    assert_eq!(
+        frame["data"]["hits"].as_array().expect("hits").len(),
+        0,
+        "a complete scan must retire the removed claim: {frame}"
+    );
+}
+
+#[test]
+fn partial_state_db_rescans_warn_and_preserve_shared_history() {
+    for command in ["ingest", "sync"] {
+        for defect in ["orphan", "blank", "malformed"] {
+            let (dir, db) = temp_db("hermes-shared-partial");
+            let source = dir.path().join(".hermes/state.db");
+            write_state_db(&source, "first-session", "retainedfirst body", 1700000030.0);
+            let conn = Connection::open(&source).unwrap();
+            conn.execute_batch(
+                "INSERT INTO sessions VALUES ('second-session', 1700000031.0);
+                 INSERT INTO messages (id, session_id, role, content, timestamp)
+                 VALUES (2, 'second-session', 'user', 'retainedsecond body', 1700000031.0);",
+            )
+            .unwrap();
+            drop(conn);
+            let path = source.to_string_lossy().into_owned();
+            let first = run(&db, &[command, &path]);
+            assert!(first.status.success(), "{}", stdout(&first));
+            let hits = parse_first_line(&run(&db, &["search", "retainedfirst"]));
+            let session = hit_sessions(&hits).pop().unwrap();
+            let shared = dir.path().join("shared/state.db");
+            std::fs::create_dir_all(shared.parent().unwrap()).unwrap();
+            std::fs::copy(&source, &shared).unwrap();
+            let shared_path = shared.to_string_lossy().into_owned();
+            let copy = run(&db, &[command, &shared_path]);
+            assert!(copy.status.success(), "{}", stdout(&copy));
+
+            let hit_count = |query: &str| {
+                let output = run(&db, &["search", query]);
+                assert!(output.status.success(), "{}", stdout(&output));
+                parse_first_line(&output)["data"]["hits"]
+                    .as_array()
+                    .unwrap()
+                    .len()
+            };
+            assert_eq!(
+                hit_count("retainedfirst"),
+                1,
+                "shared identity is not parse loss"
+            );
+            let conn = Connection::open(&source).unwrap();
+            conn.execute_batch(match defect {
+                "orphan" => "DELETE FROM sessions WHERE id='second-session';",
+                "blank" => {
+                    "UPDATE sessions SET id='' WHERE id='second-session';
+                            UPDATE messages SET session_id='' WHERE id=2;"
+                }
+                "malformed" => {
+                    "UPDATE sessions SET id=CAST(x'ff' AS TEXT) WHERE id='second-session';
+                                UPDATE messages SET session_id=CAST(x'ff' AS TEXT) WHERE id=2;"
+                }
+                _ => unreachable!(),
+            })
+            .unwrap();
+            drop(conn);
+            let partial = run(&db, &[command, &path]);
+            assert!(
+                partial.status.success(),
+                "{command}/{defect}: {}",
+                stdout(&partial)
+            );
+            let frame = parse_first_line(&partial);
+            assert_eq!(frame["data"]["committed"], 1, "{frame}");
+            assert_eq!(frame["data"]["skipped"], 1, "{frame}");
+            let warnings = frame["warnings"].as_array().unwrap();
+            assert!(
+                warnings.iter().any(|warning| warning
+                    .as_str()
+                    .is_some_and(|text| text.contains("may temporarily coexist")
+                        && text.contains("complete rescan"))),
+                "partial retention and accepted copies need an explicit bounded warning: {frame}"
+            );
+            assert!(warnings.iter().all(|warning| {
+                let text = warning.as_str().unwrap();
+                text.chars().count() <= 513 && !text.contains(&path) && !text.contains(&shared_path)
+            }));
+            assert_eq!(
+                hit_count("retainedfirst"),
+                2,
+                "old/new document copies are accepted"
+            );
+            assert_eq!(
+                hit_count("retainedsecond"),
+                1,
+                "omitted history stays searchable"
+            );
+            let context = run(&db, &["context", &session]);
+            assert_eq!(
+                parse_first_line(&context)["error"]["code"],
+                "schema_incompatible"
+            );
+
+            let conn = Connection::open(&source).unwrap();
+            conn.execute_batch(
+                "DELETE FROM sessions WHERE id<>'first-session';
+                 INSERT INTO sessions VALUES ('second-session', 1700000031.0);
+                 UPDATE messages SET session_id='second-session', content='recoveredsecond body'
+                 WHERE id=2;",
+            )
+            .unwrap();
+            drop(conn);
+            let recovered = run(&db, &[command, &path]);
+            assert!(recovered.status.success(), "{}", stdout(&recovered));
+            assert_eq!(parse_first_line(&recovered)["data"]["skipped"], 0);
+            assert_eq!(
+                hit_count("retainedfirst"),
+                2,
+                "only shared old and complete new copies survive"
+            );
+            assert_eq!(
+                hit_count("retainedsecond"),
+                1,
+                "the shared source still owns old history"
+            );
+            assert_eq!(hit_count("recoveredsecond"), 1);
+            let context = run(&db, &["context", &session]);
+            assert!(context.status.success(), "{}", stdout(&context));
+
+            let conn = Connection::open(&shared).unwrap();
+            conn.execute("DELETE FROM messages", []).unwrap();
+            drop(conn);
+            let removed = run(&db, &[command, &shared_path]);
+            assert!(removed.status.success(), "{}", stdout(&removed));
+            assert_eq!(hit_count("retainedfirst"), 1);
+            assert_eq!(
+                hit_count("retainedsecond"),
+                0,
+                "no source owns the obsolete history now"
+            );
+            let repeated = run(&db, &["sync", &path]);
+            assert!(repeated.status.success(), "{}", stdout(&repeated));
+            assert_eq!(parse_first_line(&repeated)["data"]["committed"], 0);
+        }
+    }
+}
+
+#[test]
+fn unchanged_version_two_state_db_reparses_completeness_once() {
+    let (dir, db) = temp_db("hermes-parser-version");
+    let source = dir.path().join(".hermes/state.db");
+    write_state_db(
+        &source,
+        "version-session",
+        "versionvisible body",
+        1700000030.0,
+    );
+    let conn = Connection::open(&source).unwrap();
+    conn.execute(
+        "INSERT INTO messages (id, session_id, role, content) VALUES (2, 'orphan', 'user', 'omitted')",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+    let path = source.to_string_lossy().into_owned();
+    let initial = run(&db, &["sync", &path]);
+    assert!(initial.status.success(), "{}", stdout(&initial));
+    let generation = parse_first_line(&initial)["data"]["generation"]
+        .as_u64()
+        .unwrap();
+    let conn = Connection::open(&db).unwrap();
+    conn.execute("UPDATE source_scans SET parser_version=2", [])
+        .unwrap();
+    conn.execute(
+        "INSERT OR REPLACE INTO source_relation_scans(source_path, relation_schema_version)
+         SELECT source_path, 7 FROM source_scans",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+    let reparsed = run(&db, &["sync", &path]);
+    assert!(reparsed.status.success(), "{}", stdout(&reparsed));
+    let frame = parse_first_line(&reparsed);
+    assert_eq!(
+        frame["data"]["emitted"], 1,
+        "unchanged bytes must still reparse: {frame}"
+    );
+    assert_eq!(frame["data"]["skipped"], 1, "{frame}");
+    assert_eq!(frame["data"]["generation"], generation + 1, "{frame}");
+    let conn = Connection::open(&db).unwrap();
+    assert_eq!(
+        conn.query_row("SELECT parser_version FROM source_scans", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        3
+    );
+    assert_eq!(
+        conn.query_row("SELECT COUNT(*) FROM source_relation_scans", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    drop(conn);
+    let repeated = run(&db, &["sync", &path]);
+    assert!(repeated.status.success(), "{}", stdout(&repeated));
+    let frame = parse_first_line(&repeated);
+    assert_eq!(frame["data"]["emitted"], 0, "{frame}");
+    assert_eq!(frame["data"]["committed"], 0, "{frame}");
+    assert_eq!(frame["data"]["generation"], generation + 1, "{frame}");
+}
 #[test]
 fn profiles_with_the_same_native_session_id_stay_separate_sources() {
     let (dir, db) = temp_db("hermes-state-profiles");

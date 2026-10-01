@@ -70,6 +70,8 @@ use std::collections::{BTreeMap, BTreeSet};
 /// actionable line/session detail required by sync diagnostics.
 const DIAGNOSTIC_WARNING_LIMIT: usize = 16;
 const DIAGNOSTIC_WARNING_CHARS: usize = 512;
+const PARTIAL_SOURCE_WARNING: &str = "partial source scan: previously indexed history is retained \
+    where present; old and new document-scoped copies may temporarily coexist until a complete rescan";
 
 /// CLI 顶层错误：所有失败都归一到 [`ProtocolError`]，exit code 由 Error Catalog 决定。
 ///
@@ -3234,6 +3236,23 @@ fn provider_registry() -> Vec<Box<dyn ProviderAdapter>> {
     ]
 }
 
+/// Whether a provider's adapter consumes its source as a record stream
+/// (line-delimited JSONL). Derived from the adapter manifest — the single
+/// source of truth for `streaming_support`; `None` means no adapter claims
+/// this provider id. Whole-source formats (SQLite/JSON/Markdown) must never be
+/// triaged by the JSONL tail-health heuristic.
+fn provider_is_record_stream(provider_id: &str) -> Option<bool> {
+    provider_registry()
+        .iter()
+        .find(|adapter| adapter.provider_id() == provider_id)
+        .map(|adapter| {
+            matches!(
+                adapter.manifest().streaming_support,
+                agent_session_grep_ports::StreamingSupport::RecordStream
+            )
+        })
+}
+
 /// 对一个可重复打开的只读 source probe-select 并 stage，同时返回选中 variant。
 ///
 /// 空源保留整源清空/tombstone 语义；其它源的每次 probe/parse 都由 source
@@ -3290,6 +3309,30 @@ fn stage_with_source(
         None => registry.iter().map(|a| a.as_ref()).collect(),
     };
     select_and_stage_source(&refs, source).map_err(Into::into)
+}
+
+/// 0 字节源是合法的"整源清空"批次：它必须触发 source replacement 推导
+/// tombstone，但空源没有任何 provider/variant 证据——绝不派生
+/// `provider="empty"` 的伪实体或伪安装绑定。安装归属由已证明的既有绑定在提交
+/// 时解析；`provider_id` 只承载 discovery 的所有权事实。
+fn empty_source_batch(
+    path: &str,
+    fingerprint: &str,
+    discovered_provider_id: Option<&str>,
+) -> SourceBatch {
+    SourceBatch {
+        source_path: path.to_string(),
+        entries: Vec::new(),
+        placements: Vec::new(),
+        edges: Vec::new(),
+        activities: Vec::new(),
+        usage_events: Vec::new(),
+        relation_complete: true,
+        len_bytes: Some(0),
+        fingerprint: Some(fingerprint.to_string()),
+        provider_id: discovered_provider_id.map(str::to_string),
+        resume_claims: Vec::new(),
+    }
 }
 
 struct StagedMessageEntity {
@@ -4377,6 +4420,43 @@ fn ingest_file(
     let snap = capture(path_ref).map_err(ProtocolError::from)?;
     let source = open_snapshot_source(path_ref, &snap).map_err(ProtocolError::from)?;
 
+    // 0 字节源没有 provider/variant 证据：首次见到就是空的源只报 warning，
+    // 不写绑定、scan 行或占位实体；已扫描过的源走诚实空替换（沿用既有绑定）。
+    if source.is_empty() {
+        let known = store
+            .source_fingerprints(&[path.to_string()])
+            .map_err(ProtocolError::from)?
+            .contains_key(path);
+        let mut warnings = Vec::new();
+        if known {
+            verify_snapshot(path_ref, &snap).map_err(ProtocolError::from)?;
+            let batch = empty_source_batch(path, &snap.fingerprint, None);
+            store
+                .commit_source_batches_if_changed(std::slice::from_ref(&batch))
+                .map_err(ProtocolError::from)?;
+        } else {
+            warnings.push(
+                "empty source has no provider evidence and nothing indexed; nothing was \
+                 committed — re-run ingest once it contains data"
+                    .into(),
+            );
+        }
+        let generation = store.active_generation().map_err(ProtocolError::from)?;
+        return Ok((
+            serde_json::json!({
+                "variant": "empty",
+                "emitted": 0,
+                "committed": 0,
+                "unchanged": 0,
+                "skipped": 0,
+                "diagnostics": warnings.len(),
+                "generation": generation,
+                "source_fp": snap.fingerprint,
+            }),
+            warnings,
+        ));
+    }
+
     // 2) probe-select + stage：每个 probe/parse 都从只读 source 重新打开 bounded reader。
     //    路径落在某个登记根之下时该归属是布局事实，按 root 表反查后收缩候选集
     //    （见 stage_with_source）；否则为 None，走全 registry probe。
@@ -4412,9 +4492,13 @@ fn ingest_file(
         .map_err(ProtocolError::from)?;
 
     let generation = store.active_generation().map_err(ProtocolError::from)?;
+    let partial_warning = (staged.report.skipped > 0).then_some(PARTIAL_SOURCE_WARNING);
+    let diagnostic_count = staged.report.diagnostics.len() + usize::from(partial_warning.is_some());
     let warnings = diagnostic_warnings(
-        staged.report.diagnostics.iter().map(String::as_str),
-        staged.report.diagnostics.len(),
+        partial_warning
+            .into_iter()
+            .chain(staged.report.diagnostics.iter().map(String::as_str)),
+        diagnostic_count,
     );
     Ok((
         serde_json::json!({
@@ -4423,7 +4507,7 @@ fn ingest_file(
             "committed": if changed { staged.messages.len() } else { 0 },
             "unchanged": if changed { 0 } else { staged.messages.len() },
             "skipped": staged.report.skipped,
-            "diagnostics": staged.report.diagnostics.len(),
+            "diagnostics": diagnostic_count,
             "generation": generation,
             "source_fp": snap.fingerprint,
         }),
@@ -4639,11 +4723,43 @@ fn sync_files_inner(
         let cached_version = cached_scan.map(|(_, _, version)| *version);
         let version_stale = cached_fp.as_deref() == Some(snap.fingerprint.as_str())
             && cached_version != Some(i64::from(PARSER_SEMANTIC_VERSION));
-        // 空文件（0 字节）不能走指纹跳过：它必须作为"整源清空"批次提交
-        // 以 tombstone 旧消息；跳过会退化成空批 no-op，丢失 tombstone 语义。
+        // 0 字节源必须先于任何 provider 探测处理：它没有 provider/variant
+        // 证据。首次见到就是空的源只报诊断，不写绑定、scan 行或占位实体；
+        // 已扫描过的源是诚实的整源清空批次，由既有 replacement 推导
+        // tombstone，并沿用已证明的安装绑定。
         let mut retained = false;
-        let (staged, variant) = if !source.is_empty()
-            && resolved_namespace.is_some()
+        let mut empty_cleared = false;
+        let mut empty_skipped = false;
+        let (staged, variant) = if source.is_empty() {
+            let repeat_of_empty =
+                cached_scan.is_some_and(|(stored_len, stored_fp, stored_version)| {
+                    *stored_len == Some(0)
+                        && stored_fp.as_deref() == Some(snap.fingerprint.as_str())
+                        && *stored_version == i64::from(PARSER_SEMANTIC_VERSION)
+                        && !relation_recovery_paths.contains(path)
+                        && !incomplete_paths.contains(path)
+                });
+            if repeat_of_empty {
+                unchanged_messages += unchanged_counts.get(path).copied().unwrap_or(0);
+            } else if cached_scan.is_some() {
+                sources.push(empty_source_batch(
+                    path,
+                    &snap.fingerprint,
+                    discovered_provider_ids.get(path).map(String::as_str),
+                ));
+                empty_cleared = true;
+            } else {
+                diagnostics.push(format!(
+                    "source {} of {}: empty source has no provider evidence and nothing indexed; \
+                     nothing was committed — re-run sync once it contains data",
+                    index + 1,
+                    paths.len()
+                ));
+                diagnostic_count += 1;
+                empty_skipped = true;
+            }
+            (None, None)
+        } else if resolved_namespace.is_some()
             && cached_fp.as_deref() == Some(snap.fingerprint.as_str())
             && !version_stale
             && !relation_recovery_paths.contains(path)
@@ -4653,12 +4769,18 @@ fn sync_files_inner(
             // 会走 membership/scan 对比），因此这里只需空 staged 占位。
             unchanged_messages += unchanged_counts.get(path).copied().unwrap_or(0);
             (None, None)
-        } else if !source.is_empty() && cached_fp.is_some() && {
-            let trace_started = trace::begin();
-            let health = jsonl_health(path_ref, &snap).map_err(ProtocolError::from)?;
-            trace_health += trace::elapsed(trace_started);
-            health == JsonlHealth::Invalid
-        } {
+        } else if cached_fp.is_some()
+            && hint.and_then(provider_is_record_stream).unwrap_or(false)
+            && {
+                // JSONL 截断尾分诊只适用于 manifest 声明为 record-stream 的
+                // provider。SQLite/整档 JSON/Markdown 的字节不是记录流，
+                // 逐行 JSON 健康检查会把合法更新误判成截断尾并永久保留旧索引。
+                let trace_started = trace::begin();
+                let health = jsonl_health(path_ref, &snap).map_err(ProtocolError::from)?;
+                trace_health += trace::elapsed(trace_started);
+                health == JsonlHealth::Invalid
+            }
+        {
             // 截断尾（EOF 落在记录中间）＝agent 正在写这个源。已索引过的源
             // 必须 Retain：不重 parse、不推进指纹、不提交——旧索引原样保留，
             // 不产生 rebuild churn，也不误 tombstone（fast-resume
@@ -4704,20 +4826,34 @@ fn sync_files_inner(
             // 措辞如实区分三种路径：指纹命中只是 checked（未 parse），
             // 走完整解析的才是 scanned，截断尾 retain 是 kept——不得谎报
             // 缓存命中的源为 "staged (0 messages)"。
-            let message = match (&staged, retained) {
-                (Some(staged), _) => format!(
-                    "scanned source {}/{} ({} messages)",
-                    index + 1,
-                    paths.len(),
-                    staged.messages.len()
-                ),
-                (None, true) => format!(
-                    "retained source {}/{} (truncated tail — keeping previous index)",
+            let message = if empty_cleared {
+                format!(
+                    "cleared source {}/{} (empty replacement)",
                     index + 1,
                     paths.len()
-                ),
-                (None, false) => {
-                    format!("checked source {}/{} (unchanged)", index + 1, paths.len())
+                )
+            } else if empty_skipped {
+                format!(
+                    "empty source {}/{} (nothing indexed)",
+                    index + 1,
+                    paths.len()
+                )
+            } else {
+                match (&staged, retained) {
+                    (Some(staged), _) => format!(
+                        "scanned source {}/{} ({} messages)",
+                        index + 1,
+                        paths.len(),
+                        staged.messages.len()
+                    ),
+                    (None, true) => format!(
+                        "retained source {}/{} (truncated tail — keeping previous index)",
+                        index + 1,
+                        paths.len()
+                    ),
+                    (None, false) => {
+                        format!("checked source {}/{} (unchanged)", index + 1, paths.len())
+                    }
                 }
             };
             protocol::write_stdout_line(&protocol::progress_frame("sync", &message, request_id));
@@ -4789,7 +4925,16 @@ fn sync_files_inner(
     // 计入 unchanged（与 emitted 同单位：消息数）。截断尾被 retain 的源既不
     // 解析也不提交，单列 `retained`（源数），其诊断进 warnings 通道。
     let committed = if changed { message_count } else { 0 };
-    let warnings = diagnostic_warnings(diagnostics.iter().map(String::as_str), diagnostic_count);
+    // Put the partial-state contract first so the diagnostic cap cannot hide
+    // retained history / temporary copies behind individual provider defects.
+    let partial_warning = (skipped_count > 0).then_some(PARTIAL_SOURCE_WARNING);
+    diagnostic_count += usize::from(partial_warning.is_some());
+    let warnings = diagnostic_warnings(
+        partial_warning
+            .into_iter()
+            .chain(diagnostics.iter().map(String::as_str)),
+        diagnostic_count,
+    );
     trace::emit(
         "cli:sync",
         &[

@@ -371,4 +371,73 @@ const body = await api('/api/context?' + params, controller.signal);
 if (!currentRequest('context', controller) || activeSession !== session) return;
 ```
 
+## Scenario: Empty sources and record-stream tail health
+
+### 1. Scope / Trigger
+`ingest`/`sync` open a source at zero bytes, or rescan a known source whose
+bytes may or may not be a line-delimited record stream.
+
+### 2. Signatures
+`provider_is_record_stream(provider_id) -> Option<bool>` (derived from the
+adapter manifest's `StreamingSupport`, so the registry stays the single source
+of truth); `empty_source_batch(path, fingerprint, discovered_provider_id) ->
+SourceBatch`; `SqliteStore::source_fingerprints(&[String])`.
+
+### 3. Contracts
+Zero-byte input is triaged before any provider probe. A first unknown empty
+source is a warned no-op: no provider binding, no scan row, no placeholder
+entity, generation and committed counters stay 0. An empty source that already
+has a scan row commits an honest whole-source replacement batch (empty
+entries/placements/edges/activities/usage, `relation_complete: true`,
+`len_bytes: Some(0)`, provider id only from discovery) so the existing
+replacement inference tombstones the old rows while provider ownership is
+resolved from the already proven installation binding. Repeating the same
+empty fingerprint/parser version is a no-op; refilling the file goes through
+the ordinary parse path.
+JSONL truncated-tail retention (keep the previous index, do not advance the
+fingerprint) applies only when the manifest declares
+`StreamingSupport::RecordStream`. Whole-source formats (SQLite, whole JSON,
+Markdown, disk KV) must reach their own adapter validation; the line-wise JSON
+health probe would otherwise read a legitimate edit as a truncated tail and
+retain a stale index forever.
+When a parsed source reports `skipped > 0`, both `ingest` and `sync` prepend the
+same bounded partial-source warning: previously indexed history is retained
+where present, and old/new document-scoped copies may temporarily coexist until
+a complete rescan. Emit it once per response ahead of per-row diagnostics so
+the existing diagnostic warning cap cannot hide it; include it in
+`data.diagnostics` and apply the existing count/character budgets. The warning
+contains no source path or native identifier. Accounting alone is not a
+user-visible explanation of retained history.
+
+### 4. Validation & Error Matrix
+Unknown/provider-less source id -> `None` -> not a record stream -> no tail
+retention. Empty known source -> empty replacement may only tombstone, never
+invent a provider. Empty unknown source -> exit 0 with a diagnostic warning.
+Unreadable or changed source -> existing capture/verify failure paths, nothing
+committed.
+
+### 5. Good/Base/Bad Cases
+Good: emptying a known JSONL source tombstones its messages and a later refill
+re-indexes them under the proven provider.
+Base: repeating sync on an empty source reports unchanged and commits nothing.
+Bad: a rewritten SQLite/whole-JSON source keeps its previous index because a
+synthetic JSONL health check called it truncated.
+
+### 6. Tests Required
+`cargo --offline --locked test -p agent-session-grep-cli --test e2e` covering
+first-empty no-op, empty replacement and refill for canonical and standalone
+paths, whole-source update visibility, and truncated-tail and partial-row
+retention. Cover the empty lifecycle across ingest/sync, canonical/standalone
+sources, and native/fallback identity, including unchanged generation on the
+repeated empty scan and stable Session identity after refill.
+Hermes integration must exercise partial ingest and sync, require the bounded
+retention/coexistence warning, preserve shared-source history across complete
+recovery, and reparse an unchanged parser-version-2 snapshot exactly once.
+
+### 7. Wrong vs Correct
+Wrong: gate tail health on a file extension or a hard-coded provider list, or
+emit a zero-byte batch before checking whether the source was ever scanned.
+Correct: ask the adapter manifest what the provider streams, and let the stored
+scan rows decide whether an empty source is a no-op or a replacement.
+
 **Language**: write all guideline docs in **English**.

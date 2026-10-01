@@ -1,0 +1,6 @@
+{"file": ".trellis/spec/guides/index.md", "reason": "Cross-layer review and false-positive checks"}
+{"file": ".trellis/tasks/09-30-post-reuse-reliability/research/handover-review.md", "reason": "Reproduced baseline failures and negative controls"}
+{"file": ".trellis/tasks/09-30-post-reuse-reliability/design.md", "reason": "Owner-approved boundaries, dependencies and coexistence policy"}
+{"file": ".trellis/spec/agentsessions-ports/backend/index.md", "reason": "Applicable executable contract and regression requirements"}
+{"file": ".trellis/spec/agentsessions-adapters-sqlite/backend/index.md", "reason": "Applicable executable contract and regression requirements"}
+{"file": "docs/architecture/RFC-0002-provider-adapter-contract.md", "reason": "Applicable executable contract and regression requirements"}

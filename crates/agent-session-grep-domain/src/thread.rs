@@ -39,7 +39,7 @@ pub fn select_mainline(graph: &SessionContextGraph) -> DomainResult<Option<Branc
 
     let messages = messages_by_id(graph);
     // 每条消息的时间戳只解析一次;比较时读 map(逐跳重复解析是 O(n²) 热点)。
-    let instants = instants_by_id(&messages);
+    let timestamp_keys = timestamp_keys_by_id(&messages);
     let edges: BTreeMap<&str, &MessageEdge> = graph
         .edges
         .iter()
@@ -95,18 +95,18 @@ pub fn select_mainline(graph: &SessionContextGraph) -> DomainResult<Option<Branc
         if !edged.is_empty() {
             edged
                 .into_iter()
-                .max_by(|left, right| compare_placements(left, right, &messages, &instants))
+                .max_by(|left, right| compare_placements(left, right, &timestamp_keys))
         } else {
             leaves
                 .into_iter()
-                .max_by(|left, right| compare_placements(left, right, &messages, &instants))
+                .max_by(|left, right| compare_placements(left, right, &timestamp_keys))
         }
     }
     .or_else(|| {
         candidates
             .iter()
             .copied()
-            .max_by(|left, right| compare_placements(left, right, &messages, &instants))
+            .max_by(|left, right| compare_placements(left, right, &timestamp_keys))
     });
     let Some(leaf) = leaf else {
         return Ok(None);
@@ -134,9 +134,9 @@ pub fn select_mainline(graph: &SessionContextGraph) -> DomainResult<Option<Branc
 pub fn select_full(graph: &SessionContextGraph) -> DomainResult<Vec<&MessagePlacement>> {
     graph.validate()?;
     let messages = messages_by_id(graph);
-    let instants = instants_by_id(&messages);
+    let timestamp_keys = timestamp_keys_by_id(&messages);
     let mut placements: Vec<&MessagePlacement> = graph.placements.iter().collect();
-    placements.sort_by(|left, right| compare_placements(left, right, &messages, &instants));
+    placements.sort_by(|left, right| compare_placements(left, right, &timestamp_keys));
     Ok(placements)
 }
 
@@ -148,14 +148,30 @@ fn messages_by_id(graph: &SessionContextGraph) -> BTreeMap<&str, &Message> {
         .collect()
 }
 
-/// 每条消息的解析后时间戳(秒 + 纳秒),每消息只解析一次。缺失或不可解析均为
-/// `None`;不可解析时比较回退原始字节序,与逐次解析的语义一致。
-fn instants_by_id<'a>(
+/// Variant order defines the shared timestamp ordering for both selectors.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum TimestampKey<'a> {
+    Missing,
+    Invalid(&'a [u8]),
+    Valid(Instant),
+}
+
+/// Parse each message's timestamp once, borrowing invalid bytes unchanged.
+fn timestamp_keys_by_id<'a>(
     messages: &'a BTreeMap<&'a str, &'a Message>,
-) -> BTreeMap<&'a str, Option<Instant>> {
+) -> BTreeMap<&'a str, TimestampKey<'a>> {
     messages
         .iter()
-        .map(|(id, message)| (*id, message.timestamp.as_deref().and_then(parse_instant)))
+        .map(|(id, message)| {
+            let key = match message.timestamp.as_deref() {
+                None => TimestampKey::Missing,
+                Some(raw) => match parse_instant(raw) {
+                    Some(instant) => TimestampKey::Valid(instant),
+                    None => TimestampKey::Invalid(raw.as_bytes()),
+                },
+            };
+            (*id, key)
+        })
         .collect()
 }
 
@@ -213,7 +229,7 @@ type Instant = (i64, u32);
 /// Parse an ISO-8601 timestamp into a UTC instant.
 ///
 /// Accepts `YYYY-MM-DD[T ]HH:MM:SS[.fraction][Z|±HH:MM|±HHMM]`. Returns `None`
-/// for anything that does not parse (callers fall back to byte comparison).
+/// for anything that does not parse (callers retain the original invalid bytes).
 fn parse_instant(value: &str) -> Option<Instant> {
     let value = value.trim();
     let (date, time) = value.split_once(['T', ' '])?;
@@ -357,50 +373,28 @@ fn days_from_civil(year: i64, month: u32, day: u32) -> Option<i64> {
         .checked_sub(719_468)
 }
 
-/// 比较两个出现:先按消息时间戳(预解析 map,每消息解析一次),缺失排在
-/// 有值之前;时间戳相同时按文档 id → 源内序号 → 出现 id 的字节序决胜。
-///
-/// 时间戳值都在 `instants` 里预解析过;两个都能解析则按 UTC 瞬时比较,
-/// 任一不可解析则回退原始字节比较(与逐次解析的 `cmp_timestamps` 一致)。
+/// Compare cached timestamp keys, then document, source ordinal and placement ID.
+/// Selectors validate the graph before building the index, so every key exists.
 fn compare_placements(
     left: &MessagePlacement,
     right: &MessagePlacement,
-    messages: &BTreeMap<&str, &Message>,
-    instants: &BTreeMap<&str, Option<Instant>>,
+    timestamp_keys: &BTreeMap<&str, TimestampKey<'_>>,
 ) -> Ordering {
-    let left_raw = messages
-        .get(left.message_id.as_str())
-        .and_then(|message| message.timestamp.as_deref());
-    let right_raw = messages
-        .get(right.message_id.as_str())
-        .and_then(|message| message.timestamp.as_deref());
-
-    match (left_raw, right_raw) {
-        (None, None) => Ordering::Equal,
-        (None, Some(_)) => Ordering::Less,
-        (Some(_), None) => Ordering::Greater,
-        (Some(left_raw), Some(right_raw)) => {
-            let left_instant = instants.get(left.message_id.as_str()).copied().flatten();
-            let right_instant = instants.get(right.message_id.as_str()).copied().flatten();
-            match (left_instant, right_instant) {
-                (Some(left_instant), Some(right_instant)) => left_instant.cmp(&right_instant),
-                _ => left_raw.as_bytes().cmp(right_raw.as_bytes()),
-            }
-        }
-    }
-    .then_with(|| {
-        left.source_document_id
-            .as_str()
-            .as_bytes()
-            .cmp(right.source_document_id.as_str().as_bytes())
-    })
-    .then_with(|| left.source_ordinal.cmp(&right.source_ordinal))
-    .then_with(|| {
-        left.id
-            .as_str()
-            .as_bytes()
-            .cmp(right.id.as_str().as_bytes())
-    })
+    timestamp_keys[left.message_id.as_str()]
+        .cmp(&timestamp_keys[right.message_id.as_str()])
+        .then_with(|| {
+            left.source_document_id
+                .as_str()
+                .as_bytes()
+                .cmp(right.source_document_id.as_str().as_bytes())
+        })
+        .then_with(|| left.source_ordinal.cmp(&right.source_ordinal))
+        .then_with(|| {
+            left.id
+                .as_str()
+                .as_bytes()
+                .cmp(right.id.as_str().as_bytes())
+        })
 }
 
 #[cfg(test)]
@@ -480,12 +474,31 @@ mod tests {
             .collect()
     }
 
-    // ===== pre-change reference implementation (property-test oracle) =====
+    fn timestamp_graph(timestamps: &[Option<&str>]) -> SessionContextGraph {
+        let session = id(IdKind::Session, "timestamp-session");
+        let document = document("timestamp-document");
+        let messages: Vec<Message> = timestamps
+            .iter()
+            .enumerate()
+            .map(|(index, timestamp)| message(&format!("m{index}"), *timestamp))
+            .collect();
+        let placements = messages
+            .iter()
+            .enumerate()
+            .map(|(index, message)| {
+                placement(&session, &document.id, &message.id, index as u32, false)
+            })
+            .collect();
+        graph(session, messages, vec![document], placements, Vec::new())
+    }
+
+    // ===== pre-change reference (valid/missing timestamp oracle) =====
     //
     // The production path pre-parses timestamps into a map and resolves parents
     // through a per-message placement index; this copy preserves the original
     // per-comparison parse + per-hop scan semantics to prove the selection is
-    // byte-for-byte identical on generated graphs.
+    // byte-for-byte identical on generated graphs with valid/missing timestamps.
+    // Mixed invalid/valid timestamps intentionally use a different order now.
 
     /// Compare two timestamps in ISO-8601 form.
     ///
@@ -682,7 +695,7 @@ mod tests {
         message_count: u64,
         target_placement_count: u64,
     ) -> SessionContextGraph {
-        let timestamps: [Option<&str>; 9] = [
+        let timestamps: [Option<&str>; 7] = [
             None,
             Some("2026-01-01T00:04:00Z"),
             Some("2026-01-01T00:04:00.123Z"),
@@ -690,8 +703,6 @@ mod tests {
             Some("2026-01-01T00:04:00-05:00"),
             Some("2026-01-01T00:04:00.123456789Z"),
             Some("2026-01-01T00:04:00"),
-            Some("2026-13-40T99:99:99Z"),
-            Some("not-a-timestamp"),
         ];
         let mut messages = Vec::new();
         for index in 0..message_count {
@@ -772,10 +783,10 @@ mod tests {
     }
 
     #[test]
-    fn select_mainline_matches_pre_change_reference_on_random_graphs() {
+    fn selections_match_reference_on_valid_or_missing_timestamps() {
         // R2/R3 行为保真:主链选择(叶子 + 完整分支)与改前逐跳扫描/逐次解析
         // 的实现完全一致。生成图覆盖跨文档重复消息(叉/歧义)、孤儿父、
-        // sidechain、不可解析时间戳与各种时区/小数形态。
+        // sidechain、缺失时间戳与各种有效时区/小数形态。
         let session = id(IdKind::Session, "property-session");
         let mut rng = Lcg::new(0x9e37_79b9_7f4a_7c15);
         for iteration in 0..400 {
@@ -785,6 +796,15 @@ mod tests {
             let before = before_result.as_ref().map(selection_outcome);
             let after = after_result.as_ref().map(selection_outcome);
             assert_eq!(after, before, "iteration {iteration}");
+
+            let messages = messages_by_id(&graph);
+            let mut full_before: Vec<&MessagePlacement> = graph.placements.iter().collect();
+            full_before.sort_by(|left, right| compare_placements_reference(left, right, &messages));
+            assert_eq!(
+                select_full(&graph).unwrap(),
+                full_before,
+                "iteration {iteration}"
+            );
         }
     }
 
@@ -1310,6 +1330,140 @@ mod tests {
                 p_later.id,
             ]
         );
+    }
+
+    #[test]
+    fn mixed_timestamp_counterexample_has_one_order_and_leaf_for_all_permutations() {
+        let mut graph = timestamp_graph(&[
+            Some("2026-01-01T00:00:00+10:00"),
+            Some("2025-12-31T20:00:00Z"),
+            Some("2026"),
+        ]);
+        let placements = graph.placements.clone();
+        let mut outcomes = BTreeSet::new();
+        for permutation in [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ] {
+            graph.placements = permutation
+                .iter()
+                .map(|&index| placements[index].clone())
+                .collect();
+            let full = select_full(&graph).unwrap();
+            let mainline = select_mainline(&graph).unwrap().unwrap();
+            outcomes.insert((ordinals(&full), mainline.leaf.source_ordinal));
+        }
+        assert_eq!(outcomes, BTreeSet::from([(vec![2, 0, 1], 1)]));
+    }
+
+    #[test]
+    fn mixed_timestamp_order_is_stable_on_random_permutations() {
+        let timestamps = [
+            Some("2026-01-01T00:00:00+10:00"),
+            Some("2025-12-31T20:00:00Z"),
+            Some("2026"),
+            None,
+            Some(""),
+            Some(" invalid"),
+            Some("invalid"),
+            Some("\u{e9}"),
+            Some("e\u{301}"),
+            Some("\0"),
+            Some("2025-12-31T14:00:00.000000001Z"),
+            Some("2025-12-31T14:00:00.123456000Z"),
+            Some("2025-12-31T14:00:00.123456789Z"),
+            Some("2025-12-31T14:00:00Z"),
+            None,
+            Some(" invalid "),
+            Some("invalid"),
+            Some("2025-12-31T14:00:00.1234567899Z"),
+            Some(" 2025-12-31T14:00:00.000000001Z "),
+        ];
+        let mut graph = timestamp_graph(&timestamps);
+        // Missing, invalid (original bytes), then UTC instants. Equal keys use
+        // the fixed source ordinals, including fractions beyond nanoseconds.
+        let expected = vec![
+            3, 14, 4, 9, 5, 15, 2, 8, 6, 16, 7, 0, 13, 10, 18, 11, 12, 17, 1,
+        ];
+        let mut rng = Lcg::new(0x7469_6d65_6f72_6465);
+        for iteration in 0..256 {
+            for index in (1..graph.placements.len()).rev() {
+                let other = rng.below((index + 1) as u64) as usize;
+                graph.placements.swap(index, other);
+            }
+            assert_eq!(
+                ordinals(&select_full(&graph).unwrap()),
+                expected,
+                "full order at permutation {iteration}"
+            );
+            let mainline = select_mainline(&graph).unwrap().unwrap();
+            assert_eq!(mainline.leaf.source_ordinal, 1, "permutation {iteration}");
+            assert_eq!(ordinals(&mainline.placements), vec![1]);
+        }
+        assert_eq!(
+            graph
+                .messages
+                .iter()
+                .map(|message| message.timestamp.as_deref())
+                .collect::<Vec<_>>(),
+            timestamps
+        );
+    }
+
+    #[test]
+    fn equal_timestamp_keys_preserve_document_ordinal_and_placement_tiebreaks() {
+        for timestamps in [
+            [None; 4],
+            [Some("invalid"); 4],
+            [
+                Some("2026-01-01T00:00:00.500000000+10:00"),
+                Some("2025-12-31T14:00:00.5Z"),
+                Some("2025-12-31T09:00:00.500000-0500"),
+                Some("2025-12-31T14:00:00.5000000009"),
+            ],
+        ] {
+            let session = id(IdKind::Session, "timestamp-session");
+            let mut document_a = document("a");
+            document_a.id = StableId::native(IdKind::Document, "a");
+            let mut document_b = document("b");
+            document_b.id = StableId::native(IdKind::Document, "b");
+            let messages: Vec<Message> = timestamps
+                .iter()
+                .enumerate()
+                .map(|(index, timestamp)| message(&format!("m{index}"), *timestamp))
+                .collect();
+            let placements = [
+                placement(&session, &document_a.id, &messages[0].id, 1, false),
+                placement(&session, &document_a.id, &messages[1].id, 1, false),
+                placement(&session, &document_a.id, &messages[2].id, 0, false),
+                placement(&session, &document_b.id, &messages[3].id, 0, false),
+            ];
+            let mut same_ordinal = [&placements[0], &placements[1]];
+            same_ordinal.sort_by_key(|placement| placement.id.as_str());
+            let expected = vec![
+                &placements[2],
+                same_ordinal[0],
+                same_ordinal[1],
+                &placements[3],
+            ];
+            let graph = graph(
+                session,
+                messages,
+                vec![document_b, document_a],
+                placements.iter().rev().cloned().collect(),
+                Vec::new(),
+            );
+            assert_eq!(select_full(&graph).unwrap(), expected, "{timestamps:?}");
+            assert_eq!(
+                select_mainline(&graph).unwrap().unwrap().leaf.id,
+                placements[3].id,
+                "{timestamps:?}"
+            );
+        }
     }
 
     #[test]
