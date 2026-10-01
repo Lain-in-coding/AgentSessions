@@ -454,10 +454,18 @@ PortResult<BTreeSet<String>>`;
 `resolve_or_allocate_installation_namespace` may return a different namespace
 for a source only when the persisted binding is a provable empty placeholder:
 the namespace provider is exactly `empty`, the current scan is zero bytes with
-the empty-blake3 fingerprint, there are no message/placement/activity/usage
-claims, every surviving claim is a Reconstructed `doc_v1_`/`ses_v1_`
-placeholder per the `fts_ids.id_json` sidecar, and no resume fact, alias or
-relocation provenance resolves. Anything unprovable fails closed with
+the empty-blake3 fingerprint and its provider is NULL or `empty`, and there are
+no message/placement/activity/usage claims. Every surviving claim must match
+the exact historical empty document/session derivation, its full typed
+`fts_ids.id_json` identity, its catalog payload, and its membership document
+attribution. A Reconstructed stability label alone is not placeholder proof:
+real containers can have that label too. Re-derivation only checks existing
+proof and never creates or rewrites a native identity.
+Resume metadata may only describe that exact placeholder session under provider
+`empty`, with both native-session and working-directory values NULL, both
+states exactly `missing`, and `pair_observed = 0`. Foreign identities, cwd facts,
+unknown states, missing payload/sidecar evidence, aliases or relocation
+provenance fail closed. Anything unprovable fails closed with
 `source belongs to another provider installation`; the placeholder path never
 runs legacy provenance recovery and never reconstructs identity.
 Authorization is re-evaluated inside the write transaction by
@@ -488,14 +496,23 @@ Bad: a forged `msg_v1_*` claim on the placeholder source blocks the rebind.
 ### 6. Tests Required
 `cargo --offline --locked test -p agent-session-grep-cli --test e2e` (repair
 success, forged-claim refusal, standalone empty replacement) plus the SQLite
-adapter unit tests for the proof predicate and version-stale reparse.
+adapter unit tests for the proof predicate and version-stale reparse. Required
+negative controls mutate one proof surface at a time: exact container identity,
+sidecar, catalog payload, document attribution, scan provider, native-session
+metadata, cwd metadata, and observed-pair state. A refused rebind must leave the
+live catalog, memberships, installation registry and generation unchanged.
+Exercise shared placeholders until the last claimant is replaced, proof changes
+after pre-parse reservation, transaction rollback on failed activation, and
+real-provider/retired-alias boundaries. The unchanged parser-version-2 Hermes
+snapshot must be reparsed once by version 3, preserve partial history, then no-op.
 
 ### 7. Wrong vs Correct
 Wrong: authorize the rebind from the pre-parse reservation, or read the proof
 after the batch has already replaced the scan row and memberships.
-Correct: evaluate the proof at the top of the write transaction, pass the
-resulting authorization into the persist step, and keep everything else
-fail-closed.
+Correct: verify exact historical container and metadata proof at the top of the
+write transaction, pass the resulting authorization into the persist step, and
+keep everything else fail-closed; neither an `empty` namespace nor a
+Reconstructed sidecar label is sufficient on its own.
 
 ## Quality Check
 

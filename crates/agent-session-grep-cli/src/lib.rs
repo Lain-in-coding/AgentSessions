@@ -70,6 +70,8 @@ use std::collections::{BTreeMap, BTreeSet};
 /// actionable line/session detail required by sync diagnostics.
 const DIAGNOSTIC_WARNING_LIMIT: usize = 16;
 const DIAGNOSTIC_WARNING_CHARS: usize = 512;
+const PARTIAL_SOURCE_WARNING: &str = "partial source scan: previously indexed history is retained \
+    where present; old and new document-scoped copies may temporarily coexist until a complete rescan";
 
 /// CLI 顶层错误：所有失败都归一到 [`ProtocolError`]，exit code 由 Error Catalog 决定。
 ///
@@ -4490,9 +4492,13 @@ fn ingest_file(
         .map_err(ProtocolError::from)?;
 
     let generation = store.active_generation().map_err(ProtocolError::from)?;
+    let partial_warning = (staged.report.skipped > 0).then_some(PARTIAL_SOURCE_WARNING);
+    let diagnostic_count = staged.report.diagnostics.len() + usize::from(partial_warning.is_some());
     let warnings = diagnostic_warnings(
-        staged.report.diagnostics.iter().map(String::as_str),
-        staged.report.diagnostics.len(),
+        partial_warning
+            .into_iter()
+            .chain(staged.report.diagnostics.iter().map(String::as_str)),
+        diagnostic_count,
     );
     Ok((
         serde_json::json!({
@@ -4501,7 +4507,7 @@ fn ingest_file(
             "committed": if changed { staged.messages.len() } else { 0 },
             "unchanged": if changed { 0 } else { staged.messages.len() },
             "skipped": staged.report.skipped,
-            "diagnostics": staged.report.diagnostics.len(),
+            "diagnostics": diagnostic_count,
             "generation": generation,
             "source_fp": snap.fingerprint,
         }),
@@ -4919,7 +4925,16 @@ fn sync_files_inner(
     // 计入 unchanged（与 emitted 同单位：消息数）。截断尾被 retain 的源既不
     // 解析也不提交，单列 `retained`（源数），其诊断进 warnings 通道。
     let committed = if changed { message_count } else { 0 };
-    let warnings = diagnostic_warnings(diagnostics.iter().map(String::as_str), diagnostic_count);
+    // Put the partial-state contract first so the diagnostic cap cannot hide
+    // retained history / temporary copies behind individual provider defects.
+    let partial_warning = (skipped_count > 0).then_some(PARTIAL_SOURCE_WARNING);
+    diagnostic_count += usize::from(partial_warning.is_some());
+    let warnings = diagnostic_warnings(
+        partial_warning
+            .into_iter()
+            .chain(diagnostics.iter().map(String::as_str)),
+        diagnostic_count,
+    );
     trace::emit(
         "cli:sync",
         &[

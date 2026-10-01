@@ -400,6 +400,14 @@ fingerprint) applies only when the manifest declares
 Markdown, disk KV) must reach their own adapter validation; the line-wise JSON
 health probe would otherwise read a legitimate edit as a truncated tail and
 retain a stale index forever.
+When a parsed source reports `skipped > 0`, both `ingest` and `sync` prepend the
+same bounded partial-source warning: previously indexed history is retained
+where present, and old/new document-scoped copies may temporarily coexist until
+a complete rescan. Emit it once per response ahead of per-row diagnostics so
+the existing diagnostic warning cap cannot hide it; include it in
+`data.diagnostics` and apply the existing count/character budgets. The warning
+contains no source path or native identifier. Accounting alone is not a
+user-visible explanation of retained history.
 
 ### 4. Validation & Error Matrix
 Unknown/provider-less source id -> `None` -> not a record stream -> no tail
@@ -419,7 +427,12 @@ synthetic JSONL health check called it truncated.
 `cargo --offline --locked test -p agent-session-grep-cli --test e2e` covering
 first-empty no-op, empty replacement and refill for canonical and standalone
 paths, whole-source update visibility, and truncated-tail and partial-row
-retention.
+retention. Cover the empty lifecycle across ingest/sync, canonical/standalone
+sources, and native/fallback identity, including unchanged generation on the
+repeated empty scan and stable Session identity after refill.
+Hermes integration must exercise partial ingest and sync, require the bounded
+retention/coexistence warning, preserve shared-source history across complete
+recovery, and reparse an unchanged parser-version-2 snapshot exactly once.
 
 ### 7. Wrong vs Correct
 Wrong: gate tail health on a file extension or a hard-coded provider list, or

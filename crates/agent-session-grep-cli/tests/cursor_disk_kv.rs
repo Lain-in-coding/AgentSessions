@@ -215,9 +215,42 @@ fn a_broken_bubble_does_not_discard_its_session() {
     let frame = parse_first_line(&sync);
     assert_eq!(frame["data"]["committed"], 1, "{frame}");
     assert_eq!(frame["data"]["skipped"], 1, "{frame}");
-    // Identity note + the per-composer slot accounting summary + the defect
-    // line naming the exact missing storage key.
-    assert_eq!(frame["data"]["diagnostics"], 3, "{frame}");
+    // Shared retention warning + identity note + per-composer slot accounting
+    // + the defect line naming the exact missing storage key.
+    assert_eq!(frame["data"]["diagnostics"], 4, "{frame}");
+    let warnings = frame["warnings"].as_array().expect("warnings");
+    assert_eq!(warnings.len(), 4, "{frame}");
+    for expected in [
+        "messages report no adopted native id",
+        "2 header slot(s), 1 message(s) emitted, 1 slot(s) skipped",
+        "header slot 1 (`bubbleId:composer-a:gone`): missing_row",
+    ] {
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.as_str().is_some_and(|text| text.contains(expected))),
+            "original provider diagnostic must remain visible ({expected}): {frame}"
+        );
+    }
+    let retention = warnings[0].as_str().expect("retention warning");
+    assert!(
+        retention.starts_with("partial source scan:")
+            && retention.contains("history is retained")
+            && retention.contains("may temporarily coexist")
+            && retention.contains("complete rescan")
+            && retention.chars().count() <= 512,
+        "bounded retention/coexistence warning must be first: {frame}"
+    );
+    assert_eq!(
+        warnings
+            .iter()
+            .filter(|warning| warning
+                .as_str()
+                .is_some_and(|text| text.starts_with("partial source scan:")))
+            .count(),
+        1,
+        "one retention warning per response: {frame}"
+    );
 
     let search = run(&db, &["search", "surviving token"]);
     assert!(

@@ -340,20 +340,41 @@ impl SqliteStore {
         if provider.as_deref() != Some("empty") {
             return Ok(false);
         }
-        let scan: Option<(Option<i64>, Option<String>)> = conn
+        let scan: Option<(Option<i64>, Option<String>, Option<String>)> = conn
             .query_row(
-                "SELECT len_bytes, fingerprint FROM source_scans WHERE source_path=?1",
+                "SELECT len_bytes, fingerprint, provider_id FROM source_scans WHERE source_path=?1",
                 [source_path],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()
             .map_err(backend)?;
-        let Some((Some(0), Some(fingerprint))) = scan else {
+        let Some((Some(0), Some(fingerprint), scanned_provider)) = scan else {
             return Ok(false);
         };
-        if fingerprint != blake3::hash(b"").to_hex().to_string() {
+        if fingerprint != blake3::hash(b"").to_hex().to_string()
+            || scanned_provider.is_some_and(|provider| provider != "empty")
+        {
             return Ok(false);
         }
+        // Verify the historical empty derivation, not merely a stability label:
+        // real documents and sessions can also be Reconstructed. These values
+        // only check persisted proof; they never replace or infer native IDs.
+        let document = StableId::derive(
+            IdKind::Document,
+            Stability::Reconstructed,
+            &[b"empty", b"empty", fingerprint.as_bytes()],
+        );
+        let session = StableId::derive(
+            IdKind::Session,
+            Stability::Reconstructed,
+            &[document.as_str().as_bytes()],
+        );
+        let document_payload = serde_json::json!({
+            "provider": "empty", "variant": "empty", "fingerprint": fingerprint, "len": 0,
+        });
+        let session_payload = serde_json::json!({
+            "document": document.as_str(), "documents": [document.as_str()], "messages": [],
+        });
         // Any message-level or relation-level claim proves the source observed
         // real content and must keep its identity.
         let message_claims: i64 = conn
@@ -383,13 +404,15 @@ impl SqliteStore {
                 return Ok(false);
             }
         }
-        // Every surviving claim must be a Reconstructed document/session
-        // placeholder. The wire id does not encode stability, so the identity
-        // sidecar is authoritative.
+        // Check the full sidecar, payload and document attribution of every
+        // surviving claim. Missing or contradictory evidence is not permission
+        // to retire a real container just because its scan currently says zero.
         let mut statement = conn
             .prepare(
-                "SELECT sm.message_id, f.id_json FROM source_membership sm
+                "SELECT sm.message_id, f.id_json, c.payload, sm.document_id
+                 FROM source_membership sm
                  LEFT JOIN fts_ids f ON f.wire_id = sm.message_id
+                 LEFT JOIN catalog c ON c.id = sm.message_id
                  WHERE sm.source_path=?1",
             )
             .map_err(backend)?;
@@ -397,29 +420,45 @@ impl SqliteStore {
         while let Some(row) = rows.next().map_err(backend)? {
             let wire: String = row.get(0).map_err(backend)?;
             let id_json: Option<String> = row.get(1).map_err(backend)?;
-            if !(wire.starts_with("doc_v1_") || wire.starts_with("ses_v1_")) {
-                return Ok(false);
-            }
-            let Some(id_json) = id_json else {
+            let payload: Option<Vec<u8>> = row.get(2).map_err(backend)?;
+            let document_id: Option<String> = row.get(3).map_err(backend)?;
+            let (expected_id, expected_payload) = if wire == document.as_str() {
+                (&document, &document_payload)
+            } else if wire == session.as_str() {
+                (&session, &session_payload)
+            } else {
                 return Ok(false);
             };
-            let identity: serde_json::Value = match serde_json::from_str(&id_json) {
-                Ok(identity) => identity,
-                Err(_) => return Ok(false),
+            let (Some(id_json), Some(payload)) = (id_json, payload) else {
+                return Ok(false);
             };
-            if identity.get("stability").and_then(|value| value.as_str()) != Some("Reconstructed") {
+            let Ok(identity) = serde_json::from_str::<StableId>(&id_json) else {
+                return Ok(false);
+            };
+            let Ok(payload) = serde_json::from_slice::<serde_json::Value>(&payload) else {
+                return Ok(false);
+            };
+            if identity != *expected_id
+                || payload != *expected_payload
+                || document_id.as_deref() != Some(document.as_str())
+            {
                 return Ok(false);
             }
         }
-        // A named or resolved provider session is evidence of real content, as
-        // is an ambiguous observation; only absent placeholder claims pass.
+        // Missing-state metadata is not native proof, but it must belong to
+        // this exact placeholder. Any cwd, pair, foreign identity or unknown
+        // state is contradictory evidence and keeps the binding fail-closed.
         let identity_claims: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM source_session_resume_claims
                  WHERE source_path=?1
-                   AND (provider_session_id IS NOT NULL
-                        OR provider_session_id_state IN ('resolved', 'ambiguous'))",
-                [source_path],
+                   AND (session_id IS NOT ?2 OR provider_id IS NOT 'empty'
+                        OR provider_session_id IS NOT NULL
+                        OR provider_session_id_state IS NOT 'missing'
+                        OR original_working_directory IS NOT NULL
+                        OR original_working_directory_state IS NOT 'missing'
+                        OR pair_observed IS NOT 0)",
+                rusqlite::params![source_path, session.as_str()],
                 |r| r.get(0),
             )
             .map_err(backend)?;
@@ -1968,3 +2007,466 @@ impl SqliteStore {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod empty_placeholder_review_tests {
+    use super::*;
+
+    fn placeholder_source(path: &str) -> SourceBatch {
+        let fingerprint = blake3::hash(b"").to_hex().to_string();
+        let document = StableId::derive(
+            IdKind::Document,
+            Stability::Reconstructed,
+            &[b"empty", b"empty", fingerprint.as_bytes()],
+        );
+        let session = StableId::derive(
+            IdKind::Session,
+            Stability::Reconstructed,
+            &[document.as_str().as_bytes()],
+        );
+        assert_eq!(document.as_str(), "doc_v1_9d688f0b845e2b6f7adb7a9eda35c150");
+        assert_eq!(session.as_str(), "ses_v1_bf6e9effacfd4419e7a57dd0d881f0c6");
+        SourceBatch {
+            source_path: path.into(),
+            entries: vec![
+                (
+                    session,
+                    serde_json::to_vec(&serde_json::json!({
+                        "document": document.as_str(),
+                        "documents": [document.as_str()],
+                        "messages": [],
+                    }))
+                    .unwrap(),
+                    String::new(),
+                ),
+                (
+                    document,
+                    serde_json::to_vec(&serde_json::json!({
+                        "provider": "empty", "variant": "empty",
+                        "fingerprint": fingerprint, "len": 0,
+                    }))
+                    .unwrap(),
+                    String::new(),
+                ),
+            ],
+            placements: Vec::new(),
+            edges: Vec::new(),
+            activities: Vec::new(),
+            usage_events: Vec::new(),
+            relation_complete: true,
+            len_bytes: Some(0),
+            fingerprint: Some(fingerprint),
+            provider_id: None,
+            resume_claims: Vec::new(),
+        }
+    }
+
+    fn seed_placeholder(store: &SqliteStore, source: &SourceBatch) -> String {
+        store
+            .resolve_or_allocate_installation_namespace(
+                "empty",
+                &source.source_path,
+                &legacy_installation_namespace(&source.source_path, "empty"),
+            )
+            .unwrap();
+        store
+            .commit_source_batches_if_changed(std::slice::from_ref(source))
+            .unwrap();
+        let conn = store.conn.borrow();
+        let assignment = SqliteStore::assignment_for_source(&conn, &source.source_path)
+            .unwrap()
+            .unwrap();
+        assert!(
+            SqliteStore::repairable_empty_placeholder(
+                &conn,
+                &source.source_path,
+                &assignment.namespace_id,
+            )
+            .unwrap()
+        );
+        assignment.namespace_id
+    }
+
+    fn replacement_source(store: &SqliteStore, path: &str) -> SourceBatch {
+        let namespace = store
+            .resolve_or_allocate_installation_namespace(
+                "claude-code",
+                path,
+                &legacy_installation_namespace(path, "claude-code"),
+            )
+            .unwrap();
+        let mut source = placeholder_source(path);
+        let document = StableId::derive(
+            IdKind::Document,
+            Stability::Reconstructed,
+            &[b"new document"],
+        );
+        let session = StableId::native_session_scoped(
+            &SessionIdentityNamespace {
+                provider_id: "claude-code",
+                installation_namespace: &namespace,
+            },
+            "real-session",
+        );
+        let message = StableId::native_checked(IdKind::Message, "real-message").unwrap();
+        source.entries = vec![
+            (
+                document.clone(),
+                serde_json::to_vec(&serde_json::json!({
+                    "provider": "claude-code", "variant": "claude-code/jsonl-v1",
+                    "fingerprint": "nonempty", "len": 8,
+                }))
+                .unwrap(),
+                String::new(),
+            ),
+            (
+                session.clone(),
+                serde_json::to_vec(&serde_json::json!({
+                    "document": document.as_str(), "documents": [document.as_str()],
+                    "messages": [message.as_str()],
+                }))
+                .unwrap(),
+                String::new(),
+            ),
+            (
+                message.clone(),
+                serde_json::to_vec(&serde_json::json!({
+                    "role": "user", "text": "real body", "timestamp": null,
+                }))
+                .unwrap(),
+                "real body".into(),
+            ),
+        ];
+        source.placements = vec![MessagePlacement::new(
+            session.clone(),
+            document,
+            message,
+            0,
+            false,
+            None,
+        )];
+        source.resume_claims = vec![SourceResumeClaim::from_observation(
+            "claude-code",
+            session.as_str(),
+            &agent_session_grep_ports::ProviderSessionObservation {
+                provider_session_id: agent_session_grep_ports::MetadataResolution::Resolved(
+                    "real-session".into(),
+                ),
+                original_working_directory: agent_session_grep_ports::MetadataResolution::Missing,
+                pair_observed: false,
+                multi_session: false,
+            },
+        )];
+        source.len_bytes = Some(8);
+        source.fingerprint = Some("nonempty".into());
+        source
+    }
+
+    fn live_state(store: &SqliteStore) -> BTreeMap<String, Vec<Vec<rusqlite::types::Value>>> {
+        let conn = store.conn.borrow();
+        let tables: Vec<String> = conn
+            .prepare(
+                "SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'
+             AND name<>'index_batches' ORDER BY name",
+            )
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        tables
+            .into_iter()
+            .map(|table| {
+                let mut statement = conn
+                    .prepare(&format!("SELECT * FROM \"{}\"", table.replace('"', "\"\"")))
+                    .unwrap();
+                let width = statement.column_count();
+                let mut rows: Vec<Vec<rusqlite::types::Value>> = statement
+                    .query_map([], |row| (0..width).map(|column| row.get(column)).collect())
+                    .unwrap()
+                    .collect::<rusqlite::Result<_>>()
+                    .unwrap();
+                rows.sort_by_cached_key(|row| format!("{row:?}"));
+                (table, rows)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn empty_repair_preserves_shared_placeholders_until_the_last_source_replaces_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir
+            .path()
+            .join("first.jsonl")
+            .to_string_lossy()
+            .into_owned();
+        let other_path = dir
+            .path()
+            .join("second.jsonl")
+            .to_string_lossy()
+            .into_owned();
+        let store = SqliteStore::open_in_memory().unwrap();
+        let source = placeholder_source(&path);
+        let namespace = seed_placeholder(&store, &source);
+        assert_eq!(
+            seed_placeholder(&store, &placeholder_source(&other_path)),
+            namespace
+        );
+        let replacement = replacement_source(&store, &path);
+        assert!(
+            store
+                .commit_source_batches_if_changed(&[replacement])
+                .unwrap()
+        );
+        for (id, payload, _) in &source.entries {
+            assert_eq!(
+                store.get(id).unwrap(),
+                Some(payload.clone()),
+                "shared placeholder must survive"
+            );
+        }
+        let conn = store.conn.borrow();
+        let other = SqliteStore::assignment_for_source(&conn, &other_path)
+            .unwrap()
+            .unwrap();
+        assert_eq!(other.namespace_id, namespace);
+        assert_eq!(other.provider_id, "empty");
+        let repaired = SqliteStore::assignment_for_source(&conn, &path)
+            .unwrap()
+            .unwrap();
+        assert_eq!(repaired.provider_id, "claude-code");
+        assert_ne!(repaired.namespace_id, namespace);
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM source_membership WHERE source_path=?1",
+                [&other_path],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            2
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT provider_id FROM source_scans WHERE source_path=?1",
+                [&path],
+                |row| row.get::<_, Option<String>>(0)
+            )
+            .unwrap(),
+            None
+        );
+        drop(conn);
+        let replacement = replacement_source(&store, &other_path);
+        assert!(
+            store
+                .commit_source_batches_if_changed(&[replacement])
+                .unwrap()
+        );
+        for (id, _, _) in &source.entries {
+            assert_eq!(
+                store.get(id).unwrap(),
+                None,
+                "last replacement retires only the empty placeholder"
+            );
+        }
+        assert_eq!(
+            store
+                .conn
+                .borrow()
+                .query_row(
+                    "SELECT COUNT(*) FROM installation_namespaces WHERE namespace_id=?1",
+                    [&namespace],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1,
+            "repair is not namespace garbage collection"
+        );
+    }
+
+    #[test]
+    fn empty_repair_revalidates_reservations_and_rolls_back_failed_activation() {
+        for failure in ["changed-proof", "activation"] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir
+                .path()
+                .join("source.jsonl")
+                .to_string_lossy()
+                .into_owned();
+            let store = SqliteStore::open_in_memory().unwrap();
+            seed_placeholder(&store, &placeholder_source(&path));
+            let replacement = replacement_source(&store, &path);
+            let conn = store.conn.borrow();
+            if failure == "changed-proof" {
+                conn.execute(
+                    "UPDATE source_scans SET provider_id='claude-code' WHERE source_path=?1",
+                    [&path],
+                )
+                .unwrap();
+            } else {
+                conn.execute_batch(
+                    "CREATE TRIGGER reject_placeholder_rebind BEFORE UPDATE ON source_installations
+                     BEGIN SELECT RAISE(ABORT, 'injected placeholder activation failure'); END;",
+                )
+                .unwrap();
+            }
+            drop(conn);
+            let before = live_state(&store);
+            let error = store
+                .commit_source_batches_if_changed(&[replacement])
+                .unwrap_err();
+            if failure == "changed-proof" {
+                assert!(matches!(error, PortError::InvalidRequest(_)), "{error:?}");
+            }
+            assert_eq!(
+                live_state(&store),
+                before,
+                "{failure}: no live table or generation may change"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_repair_keeps_real_provider_and_retired_alias_boundaries_closed() {
+        for real_provider in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir
+                .path()
+                .join("source.jsonl")
+                .to_string_lossy()
+                .into_owned();
+            let store = SqliteStore::open_in_memory().unwrap();
+            let namespace = seed_placeholder(&store, &placeholder_source(&path));
+            let conn = store.conn.borrow();
+            if real_provider {
+                conn.execute("UPDATE installation_namespaces SET provider_id='claude-code' WHERE namespace_id=?1", [&namespace]).unwrap();
+            } else {
+                conn.execute("UPDATE installation_locations SET state='retired', retired_until_ms=?1 WHERE namespace_id=?2", rusqlite::params![i64::MAX, namespace]).unwrap();
+            }
+            assert!(!SqliteStore::repairable_empty_placeholder(&conn, &path, &namespace).unwrap());
+        }
+    }
+    #[test]
+    fn empty_repair_rejects_nonplaceholder_catalog_and_identity_evidence() {
+        for defect in [
+            "document",
+            "session",
+            "sidecar",
+            "sidecar-kind",
+            "sidecar-value",
+            "sidecar-native",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir
+                .path()
+                .join("source.jsonl")
+                .to_string_lossy()
+                .into_owned();
+            let store = SqliteStore::open_in_memory().unwrap();
+            let source = placeholder_source(&path);
+            let namespace = seed_placeholder(&store, &source);
+            let session = &source.entries[0].0;
+            let document = &source.entries[1].0;
+            let conn = store.conn.borrow();
+            if defect == "document" || defect == "session" {
+                let (id, payload) = if defect == "document" {
+                    (
+                        document,
+                        serde_json::json!({
+                            "provider": "claude-code", "variant": "claude-code/jsonl",
+                            "fingerprint": "real-content", "len": 42,
+                        }),
+                    )
+                } else {
+                    (
+                        session,
+                        serde_json::json!({
+                            "document": document.as_str(), "documents": [document.as_str()],
+                            "messages": ["msg_v1_real-history"],
+                        }),
+                    )
+                };
+                conn.execute(
+                    "UPDATE catalog SET payload=?1 WHERE id=?2",
+                    rusqlite::params![serde_json::to_vec(&payload).unwrap(), id.as_str()],
+                )
+                .unwrap();
+            } else {
+                let mut identity = serde_json::to_value(document).unwrap();
+                match defect {
+                    "sidecar" => identity = serde_json::json!({"stability": "Reconstructed"}),
+                    "sidecar-kind" => identity["kind"] = serde_json::json!("Message"),
+                    "sidecar-native" => identity["stability"] = serde_json::json!("Native"),
+                    "sidecar-value" => identity["value"] = serde_json::json!("doc_v1_other"),
+                    _ => unreachable!(),
+                }
+                conn.execute(
+                    "UPDATE fts_ids SET id_json=?1 WHERE wire_id=?2",
+                    rusqlite::params![identity.to_string(), document.as_str()],
+                )
+                .unwrap();
+            }
+            assert!(
+                !SqliteStore::repairable_empty_placeholder(&conn, &path, &namespace).unwrap(),
+                "{defect} is not proof of an empty placeholder"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_repair_allows_only_missing_metadata_for_the_actual_placeholder() {
+        for defect in [
+            "none",
+            "cwd",
+            "ambiguous-cwd",
+            "pair",
+            "provider",
+            "session",
+            "unknown-state",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir
+                .path()
+                .join("source.jsonl")
+                .to_string_lossy()
+                .into_owned();
+            let store = SqliteStore::open_in_memory().unwrap();
+            let source = placeholder_source(&path);
+            let namespace = seed_placeholder(&store, &source);
+            let conn = store.conn.borrow();
+            conn.execute(
+                "INSERT INTO source_session_resume_claims(
+                    source_path, session_id, provider_id, provider_session_id,
+                    provider_session_id_state, original_working_directory,
+                    original_working_directory_state, pair_observed)
+                 VALUES(?1, ?2, ?3, NULL, 'missing', ?4, ?5, ?6)",
+                rusqlite::params![
+                    path,
+                    if defect == "session" {
+                        "ses_v1_other"
+                    } else {
+                        source.entries[0].0.as_str()
+                    },
+                    if defect == "provider" {
+                        "claude-code"
+                    } else {
+                        "empty"
+                    },
+                    (defect == "cwd").then_some("synthetic-working-directory"),
+                    match defect {
+                        "cwd" => "resolved",
+                        "ambiguous-cwd" => "ambiguous",
+                        "unknown-state" => "unknown",
+                        _ => "missing",
+                    },
+                    i64::from(defect == "pair"),
+                ],
+            )
+            .unwrap();
+            assert_eq!(
+                SqliteStore::repairable_empty_placeholder(&conn, &path, &namespace).unwrap(),
+                defect == "none",
+                "{defect}: only a fully missing claim for the proven placeholder is repairable"
+            );
+        }
+    }
+}

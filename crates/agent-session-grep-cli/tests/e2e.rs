@@ -2409,8 +2409,36 @@ fn sync_new_truncated_source_parses_valid_prefix_recoverably() {
     assert_eq!(frame["data"]["messages"], 1, "有效前缀应解析: {frame}");
     assert_eq!(frame["data"]["committed"], 1, "有效前缀应提交: {frame}");
     assert_eq!(frame["data"]["skipped"], 1, "截断行应计 skipped: {frame}");
-    assert_eq!(frame["data"]["diagnostics"], 1, "{frame}");
+    assert_eq!(frame["data"]["diagnostics"], 2, "{frame}");
+    let warnings = frame["warnings"].as_array().expect("warnings");
+    assert_eq!(warnings.len(), 2, "{frame}");
+    assert!(
+        warnings.iter().any(|warning| warning
+            .as_str()
+            .is_some_and(|text| text.contains("line 2") && text.contains("invalid JSON"))),
+        "original truncated-line diagnostic must remain visible: {frame}"
+    );
+    let retention = warnings[0].as_str().expect("retention warning");
+    assert!(
+        retention.starts_with("partial source scan:")
+            && retention.contains("history is retained")
+            && retention.contains("may temporarily coexist")
+            && retention.contains("complete rescan")
+            && retention.chars().count() <= 512,
+        "bounded retention/coexistence warning must be first: {frame}"
+    );
+    assert_eq!(
+        warnings
+            .iter()
+            .filter(|warning| warning
+                .as_str()
+                .is_some_and(|text| text.starts_with("partial source scan:")))
+            .count(),
+        1,
+        "one retention warning per response: {frame}"
+    );
     let out = run(&db, &["search", "complete"]);
+
     assert!(stdout(&out).contains("msg_v1_"), "search={}", stdout(&out));
 }
 
@@ -2578,10 +2606,60 @@ fn empty_placeholder_binding_is_repaired_only_with_proof() {
         conn.execute(
             "INSERT INTO source_scans(
                  source_path, scanned_at_ms, len_bytes, fingerprint, provider_id, parser_version)
-             VALUES(?1, 1, 0, ?2, NULL, 3)",
+             VALUES(?1, 1, 0, ?2, NULL, 2)",
             rusqlite::params![&path, EMPTY_FINGERPRINT],
         )
         .expect("seed scan");
+        let document = "doc_v1_9d688f0b845e2b6f7adb7a9eda35c150";
+        let session = "ses_v1_bf6e9effacfd4419e7a57dd0d881f0c6";
+        for (wire, kind, payload) in [
+            (
+                document,
+                "Document",
+                serde_json::json!({
+                    "provider": "empty", "variant": "empty", "len": 0,
+                    "fingerprint": EMPTY_FINGERPRINT,
+                }),
+            ),
+            (
+                session,
+                "Session",
+                serde_json::json!({
+                    "document": document, "documents": [document], "messages": [],
+                }),
+            ),
+        ] {
+            conn.execute(
+                "INSERT INTO catalog(id, payload) VALUES(?1, ?2)",
+                rusqlite::params![wire, serde_json::to_vec(&payload).unwrap()],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO fts_ids(wire_id, id_json) VALUES(?1, ?2)",
+                rusqlite::params![
+                    wire,
+                    serde_json::json!({"kind": kind, "stability": "Reconstructed", "value": wire})
+                        .to_string()
+                ],
+            )
+            .unwrap();
+            conn.execute("INSERT INTO source_membership(source_path, message_id, document_id) VALUES(?1, ?2, ?3)", rusqlite::params![path, wire, document]).unwrap();
+        }
+        conn.execute(
+            "INSERT INTO source_relation_scans(source_path, relation_schema_version) VALUES(?1, 7)",
+            [&path],
+        )
+        .unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM catalog WHERE id=?1",
+                [document],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1,
+            "the repair assertion must start with a real placeholder"
+        );
         if forged_message {
             conn.execute(
                 "INSERT INTO catalog(id, payload) VALUES('msg_v1_forged',
@@ -2663,6 +2741,127 @@ fn empty_placeholder_binding_is_repaired_only_with_proof() {
     assert_eq!(provider, "empty");
 }
 
+#[test]
+fn empty_lifecycle_matrix_preserves_provider_identity_and_refills() {
+    for command in ["ingest", "sync"] {
+        for canonical in [false, true] {
+            for (native_session, native_message) in
+                [(false, false), (false, true), (true, false), (true, true)]
+            {
+                let (dir, db) = temp_db("empty-lifecycle-matrix");
+                let source = dir.path().join(if canonical {
+                    ".claude/projects/synthetic/session.jsonl"
+                } else {
+                    "standalone.jsonl"
+                });
+                std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+                let path = source.to_string_lossy().into_owned();
+                let context = format!("{command}/{canonical}/{native_session}/{native_message}");
+                let invoke = || {
+                    let output = run(&db, &[command, &path]);
+                    assert!(output.status.success(), "{context}: {}", stdout(&output));
+                    parse_first_line(&output)
+                };
+                std::fs::write(&source, b"").unwrap();
+                let first_empty = invoke();
+                assert_eq!(first_empty["data"]["committed"], 0, "{context}");
+                assert_eq!(first_empty["data"]["generation"], 0, "{context}");
+                assert!(
+                    first_empty["warnings"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|warning| warning.as_str().unwrap().contains("empty source"))
+                );
+                let conn = Connection::open(&db).unwrap();
+                for table in [
+                    "catalog",
+                    "source_scans",
+                    "source_installations",
+                    "installation_namespaces",
+                    "installation_locations",
+                ] {
+                    assert_eq!(
+                        conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row
+                            .get::<_, i64>(0))
+                            .unwrap(),
+                        0,
+                        "{context}/{table}"
+                    );
+                }
+                drop(conn);
+                let mut record: serde_json::Value =
+                    serde_json::from_str(&claude_fixture(r#""lifecyclevisible body""#)).unwrap();
+                if !native_session {
+                    record.as_object_mut().unwrap().remove("sessionId");
+                }
+                if !native_message {
+                    record.as_object_mut().unwrap().remove("uuid");
+                }
+                let bytes = serde_json::to_vec(&record).unwrap();
+                std::fs::write(&source, &bytes).unwrap();
+                assert_eq!(invoke()["data"]["generation"], 1, "{context}");
+                let conn = Connection::open(&db).unwrap();
+                let binding: (String, String) = conn
+                    .query_row(
+                        "SELECT si.namespace_id, n.provider_id FROM source_installations si
+                     JOIN installation_namespaces n USING(namespace_id)",
+                        [],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .unwrap();
+                assert_eq!(binding.1, "claude-code");
+                let identities: Vec<(String, String)> = conn
+                    .prepare("SELECT wire_id, id_json FROM fts_ids ORDER BY wire_id")
+                    .unwrap()
+                    .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                    .unwrap()
+                    .collect::<rusqlite::Result<_>>()
+                    .unwrap();
+                drop(conn);
+                std::fs::write(&source, b"").unwrap();
+                assert_eq!(invoke()["data"]["generation"], 2, "{context}");
+                let repeated_empty = invoke();
+                assert_eq!(repeated_empty["data"]["generation"], 2, "{context}");
+                assert_eq!(repeated_empty["data"]["committed"], 0, "{context}");
+                let empty_search = parse_first_line(&run(&db, &["search", "lifecyclevisible"]));
+                assert!(
+                    empty_search["data"]["hits"].as_array().unwrap().is_empty(),
+                    "{context}"
+                );
+                std::fs::write(&source, &bytes).unwrap();
+                assert_eq!(invoke()["data"]["generation"], 3, "{context}");
+                assert_eq!(invoke()["data"]["generation"], 3, "{context}");
+                let conn = Connection::open(&db).unwrap();
+                assert_eq!(
+                    conn.query_row("SELECT namespace_id FROM source_installations", [], |row| {
+                        row.get::<_, String>(0)
+                    })
+                    .unwrap(),
+                    binding.0
+                );
+                let restored: Vec<(String, String)> = conn
+                    .prepare("SELECT wire_id, id_json FROM fts_ids ORDER BY wire_id")
+                    .unwrap()
+                    .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                    .unwrap()
+                    .collect::<rusqlite::Result<_>>()
+                    .unwrap();
+                assert_eq!(
+                    restored, identities,
+                    "{context}: refill must restore exact identities"
+                );
+                assert_eq!(
+                    conn.query_row("SELECT provider_id FROM source_scans", [], |row| row
+                        .get::<_, Option<String>>(0))
+                        .unwrap(),
+                    None,
+                    "explicit inputs are not discovery ownership"
+                );
+            }
+        }
+    }
+}
 #[test]
 fn sync_partial_scan_never_tombstones_unseen_messages() {
     // 不完整扫描（坏行 + 消息被移除）：relation_complete=false → store 层只并集
@@ -4918,13 +5117,33 @@ fn golden_broken_line_syncs_with_visible_diagnostic() {
     let frame = parse_first_line(&out);
     assert_envelope_shape(&frame, true);
     assert_eq!(frame["data"]["skipped"], 1, "{frame}");
-    assert_eq!(frame["data"]["diagnostics"], 1, "{frame}");
+    assert_eq!(frame["data"]["diagnostics"], 2, "{frame}");
     let warnings = frame["warnings"].as_array().expect("warnings");
+    assert_eq!(warnings.len(), 2, "{frame}");
     assert!(
         warnings.iter().any(|warning| warning
             .as_str()
             .is_some_and(|text| text.contains("line 5") && text.contains("invalid JSON"))),
         "broken-line diagnostic must be visible: {frame}"
+    );
+    let retention = warnings[0].as_str().expect("retention warning");
+    assert!(
+        retention.starts_with("partial source scan:")
+            && retention.contains("history is retained")
+            && retention.contains("may temporarily coexist")
+            && retention.contains("complete rescan")
+            && retention.chars().count() <= 512,
+        "bounded retention/coexistence warning must be first: {frame}"
+    );
+    assert_eq!(
+        warnings
+            .iter()
+            .filter(|warning| warning
+                .as_str()
+                .is_some_and(|text| text.starts_with("partial source scan:")))
+            .count(),
+        1,
+        "one retention warning per response: {frame}"
     );
 }
 

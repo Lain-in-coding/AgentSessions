@@ -28,7 +28,7 @@
   leaf candidacy, not whether a real parent can be followed.
   Deterministic ordering is one total order over a per-message timestamp key:
   `Missing` first, then `Invalid` (raw bytes, byte order), then `Valid` parsed
-  UTC instants (fractional digits normalized, zero-padded to microseconds),
+  UTC instants (fractional digits normalized, zero-padded to nanoseconds),
   then document id, ordinal, and placement id. `select_mainline` and
   `select_full` share this single comparator, so both are independent of the
   input placement permutation.
