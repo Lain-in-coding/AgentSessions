@@ -428,6 +428,25 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Resume rejects option-like/unchecked provider session IDs before constructing
+  argv; machine-output execution is refused rather than sharing an interactive
+  provider's terminal streams. Human confirmation and interaction remain.
+  HTTP resume previews no longer change the CLI acknowledgement marker.
+- Model integrity verification now requires a unique size/hash entry for every
+  required content file. Incomplete old manifests must be regenerated and
+  reimported; verification alone does not prove model inference works.
+- Handoff generation enforces its content-byte budget after all metadata is
+  finalized, reports Low confidence without retained evidence, and rejects
+  irreducible overflow. Tagged identity hashing separates previously colliding
+  filter fields; generated pack IDs change, while the v1 pack schema remains.
+- SQLite source classification reads the complete signature across short reads
+  so a segmented read cannot bypass logical WAL snapshotting.
+- Release quality/build/assembly now check out the same resolved commit;
+  reusable CI includes an explicit Rust 1.90 all-feature compatibility gate.
+- Machine diagnostic warnings retain accurate redaction status while Human
+  diagnostics keep their original text. Synthetic release verification isolates
+  user model caches and checks disabled hooks for empty stdout.
+
 - Live OpenCode/Cursor SQLite ingestion reads committed WAL state through
   bounded read-only backups and preserves distinct sessions and resume claims.
   Parser semantic version 2 reparses prior scans. SQL failures abort ingestion;
