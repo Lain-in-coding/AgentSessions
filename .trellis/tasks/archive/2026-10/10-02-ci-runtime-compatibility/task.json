@@ -1,0 +1,30 @@
+{
+  "id": "ci-runtime-compatibility",
+  "name": "ci-runtime-compatibility",
+  "title": "CI runtime compatibility: Node24 actions and runner readiness",
+  "description": "Implement the owner-approved 11 fixed Action SHA/comment updates in three verifiable CI workflows, preserving product dependencies, release/SLO contracts, runner policy and repository privacy.",
+  "status": "completed",
+  "dev_type": null,
+  "scope": "ci",
+  "package": "agentsessions-cli",
+  "priority": "P2",
+  "creator": "QIN",
+  "assignee": "QIN",
+  "createdAt": "2026-10-02",
+  "completedAt": "2026-10-02",
+  "branch": "chore/ci-runtime-compatibility",
+  "base_branch": "main",
+  "worktree_path": null,
+  "commit": "8611c41656b86d23a45435f9dab11189533b2b44",
+  "pr_url": "https://github.com/qin-devs/AgentSessions/pull/19",
+  "subtasks": [],
+  "children": [],
+  "parent": null,
+  "relatedFiles": [
+    ".github/workflows/ci.yml",
+    ".github/workflows/core-beta-evidence.yml",
+    ".github/workflows/security-audit.yml"
+  ],
+  "notes": "Created as a separate planning task with --no-start on 2026-10-02; no other session selection was cleared. The owner subsequently approved the final four-Action, three-workflow, 11-reference scope and normal private PR/CI/merge flow by replying keep going after the explicit final review question. The only dependency exception is the exact four CI Action pins in design.md. Baseline ffaf69b and all four official tag-to-commit/runtime mappings were reverified before activation. Current owned branch: chore/ci-runtime-compatibility. Release workflow, tag creation/publication, runner labels, product dependencies/schema/MSRV/SLO, provider promotion and performance routes A-D remain excluded. No release rehearsal is claimed; its existing-tag prerequisite is absent. Activation and implementation/CI evidence are recorded separately as they occur. Implementer completed the exact 11 replacements; independent full-scope check passed on 2026-10-02 with no repair needed. Workflow tests 3/3, manifests 6+6, 1,250 tracked-blob boundary proof and nine task-file privacy checks passed. Shared specs remain unchanged after explicit spec-sync judgment. Ready for the one-shot commit gate; no commits, PR/main CI, artifact or new-head runner acceptance are claimed yet. On 2026-10-02 the owner confirmed the exact two-batch commit plan by replying keep going. The three reviewed workflow files were committed as 8611c41656b86d23a45435f9dab11189533b2b44; this task-evidence batch follows separately. No PR/main/runner/artifact completion is implied by these local commits. Final implementation acceptance on 2026-10-02 supersedes the historical pending-remote snapshots: PR #19 passed 12/12 current-head jobs and merged normally with the exact head guard as ad7e0424ea0d8bd9c120929be591a0d6c15a86e9; main ci 37002416149 passed 7/7 and core-beta-evidence 37002416098 passed 4/4, all attempt 1. Test/head/merge trees match. Actual PR and main artifacts and hosted runner versions were checked; PRIVATE was read back. PR #19 comment 5951921995 and implement.md contain portable receipts. The original independent implementation review passed; an additional post-merge check-agent launch failed before execution, so fresh main-artifact verification is attributed to the coordinator. This task-only archive is delivered separately on docs/ci-runtime-compatibility-closeout; no local journal/runtime state or other-window work is included. Product/release/provider/performance exclusions remain unchanged.",
+  "meta": {}
+}
