@@ -1,0 +1,6 @@
+{"file": ".trellis/spec/guides/index.md", "reason": "Review trust boundaries and evidence without false-positive scope expansion"}
+{"file": ".trellis/spec/agentsessions-cli/backend/index.md", "reason": "Preserve installed-artifact and evidence-honesty contracts"}
+{"file": "docs/operations/core-beta-evidence-matrix.md", "reason": "Keep hosted CI distinct from minimum-OS, clean-machine, provider and release certification"}
+{"file": "docs/operations/external-readiness-gate.md", "reason": "Preserve external publication and safe rehearsal gates"}
+{"file": ".trellis/tasks/10-02-ci-runtime-compatibility/research/workflow-contracts.md", "reason": "Current 11 use sites, workflow contracts, runner exposure and empty-tag rehearsal limitation"}
+{"file": ".trellis/tasks/10-02-ci-runtime-compatibility/research/action-runtime-upgrades.md", "reason": "Verified immutable Action candidates, native runtime metadata and compatibility risks"}
