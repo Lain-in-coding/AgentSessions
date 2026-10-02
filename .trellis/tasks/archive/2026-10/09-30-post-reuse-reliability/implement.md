@@ -12,8 +12,9 @@
 - [x] Commit only this task's allowlisted code/spec/task changes after local gates pass (five local commits including subtask archival at the 2026-10-01 handover; nothing had been pushed).
 - [x] Owner separately authorized continued task-scoped execution and remote publication on 2026-10-01; do not change visibility/billing or bypass CI.
 - [x] Accept and commit independent-review fixes plus three spec updates as `107578d90e4711d931d677cfbdb56d9829fcdc94`; record the final stable-tree offline gates in portable task evidence.
-- [ ] Publish the authorized PR and record its current-head checks; no old or local run replaces PR CI.
-- [ ] Merge normally only after the current-head PR checks pass, verify main-push CI, then archive the parent task. A billing-blocked run keeps this gate pending.
+- [x] Publish PR #17 at `a51a60e`; verify all 12 current-head checks succeed. No old or local run was substituted for PR CI.
+- [x] Merge PR #17 normally with an exact head guard as `124fb57`; verify identical tested/merge trees and successful main-push `ci` 36874887357 (7/7) plus `core-beta-evidence` 36874887468 (4/4).
+- [x] Archive the accepted parent on 2026-10-01, relocate its 18 owned context references across eight manifests, and validate all four task directories. Archive publication uses a separate normal closeout PR; the final publication/CI receipt is recorded there.
 
 ## Local validation
 All Cargo invocations use --offline; dependency-resolving checks also use --locked.

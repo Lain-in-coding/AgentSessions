@@ -1,0 +1,30 @@
+{
+  "id": "post-reuse-reliability",
+  "name": "post-reuse-reliability",
+  "title": "Post-reuse reliability: source lifecycle and deterministic context",
+  "description": "Repair four reproduced correctness defects without reopening the completed post-reuse capability phase or expanding product scope.",
+  "status": "completed",
+  "dev_type": null,
+  "scope": null,
+  "package": "agentsessions-adapters-sqlite",
+  "priority": "P1",
+  "creator": "QIN",
+  "assignee": "QIN",
+  "createdAt": "2026-09-30",
+  "completedAt": "2026-10-01",
+  "branch": "fix/post-reuse-reliability",
+  "base_branch": "main",
+  "worktree_path": null,
+  "commit": "107578d90e4711d931d677cfbdb56d9829fcdc94",
+  "pr_url": "https://github.com/qin-devs/AgentSessions/pull/17",
+  "subtasks": [],
+  "children": [
+    "09-30-hermes-partial-source-accounting",
+    "09-30-source-lifecycle-correctness",
+    "09-30-context-order-determinism"
+  ],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": "Owner approved the reviewed final plan on 2026-09-30: Implement the plan. Scope/behavior choices are recorded in prd.md and design.md. Parent coordinates integration, shared specs, and commits. On 2026-10-01 the owner separately authorized continued task-scoped execution, commits, branch/PR publication and normal merge after green current-head CI; existing visibility/billing, performance, schema/dependency, release/SLO and promotion exclusions remain. Independent full-scope source review and reviewer repairs are accepted after fresh coordinator debug/release, semantic, MSRV, lint, Node and Python gates passed on the stable product tree. PR #17 passed 12/12 checks and merged normally at 124fb57e52c051b90e2f308a24487352fdb5ac5d. Main ci 36874887357 passed 7/7 jobs and core-beta-evidence 36874887468 passed 4/4 jobs on that merge SHA. All implementation acceptance criteria are met. Parent archived on 2026-10-01 after successful PR/main gates; the metadata-only closeout is published from docs/post-reuse-reliability-closeout with its final CI receipt on the closeout PR. The archive operation was preflighted to affect only this session selection; no other task pointers were cleared. Repository remains PRIVATE.",
+  "meta": {}
+}

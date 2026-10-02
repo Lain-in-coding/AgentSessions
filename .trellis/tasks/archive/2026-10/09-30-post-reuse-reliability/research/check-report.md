@@ -201,3 +201,42 @@ All independent-review product findings are addressed and local integration is
 accepted. Only authorized remote PR/main verification and final parent archival
 remain. Repository visibility must stay PRIVATE and all original exclusions
 remain in force.
+
+
+## Remote implementation delivery accepted (2026-10-01)
+
+This section supersedes the pending remote implementation gates above. PR #17
+was published from `fix/post-reuse-reliability` at
+`a51a60ef9d04d49b500c836cb8daf85f857f48a7`. All **12/12 current-head checks**
+succeeded; the coordinator then merged normally, with the exact head guard and
+without admin bypass, at `2026-10-01T14:15:14Z` as
+`124fb57e52c051b90e2f308a24487352fdb5ac5d`. Both commit trees are
+`4a9e415cbf61b1dad244569fe63934d828a5593d`.
+
+| Event / workflow | Run | Checked SHA | Actual result |
+|---|---|---|---|
+| PR / ci | 36871054317 | a51a60e | SUCCESS, 7/7 jobs |
+| PR / security-audit | 36871054201 | a51a60e | SUCCESS, 1/1 job |
+| PR / core-beta-evidence | 36871054114 | a51a60e | SUCCESS, 4/4 jobs |
+| main push / ci | 36874887357 | 124fb57 | SUCCESS, 7/7 jobs, attempt 1 |
+| main push / core-beta-evidence | 36874887468 | 124fb57 | SUCCESS, 4/4 jobs, attempt 1 |
+
+The main results were independently read back through the authenticated GitHub
+API on 2026-10-01: six ci jobs had 19 steps each, cargo-deny had six, and all
+four core-beta-evidence jobs had 17. The final Windows ci job finished at
+`2026-10-01T14:35:03Z`. Transport-level TLS/EOF failures affected some read-only
+monitoring requests; they were not CI failures and did not cause workflow
+reruns, TLS-validation bypasses, or repository/billing changes. Credentials were
+used only in memory by the existing authenticated client/API path, never
+printed or persisted in task artifacts.
+
+Repository visibility was read back **PRIVATE** at
+`2026-10-01T22:42:01+08:00`. This successful private CI execution is not a claim
+that future billing/spending capacity is guaranteed. Neither earlier temporary
+public authorization nor prior successful runs was reused as a gate bypass.
+
+All implementation acceptance criteria are now satisfied. The parent can be
+archived with its three already-completed children preserved. The archive is a
+metadata-only closeout from the verified main; its own PR/main CI receipt will
+be recorded on that closeout PR, without replaying the completed implementation
+or changing any product, dependency, schema, workflow, release or SLO file.
