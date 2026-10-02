@@ -525,3 +525,26 @@ Reconstructed sidecar label is sufficient on its own.
 ---
 
 **Language**: All documentation in **English**.
+
+## Scenario: Complete SQLite source signature reads
+
+### 1. Scope / Trigger
+Classifying a source before choosing ordinary byte fingerprinting or a logical SQLite/WAL snapshot.
+
+### 2. Signatures
+`source_fs::capture(&Path) -> PortResult<SourceSnapshot>` uses the private `has_sqlite_header(&mut dyn Read)` classifier.
+
+### 3. Contracts
+Read exactly 16 signature bytes or observe definite EOF. A successful short Read is not EOF and cannot decide the format. Classification must not consume payload bytes beyond the header. Existing logical backup and read-only source guarantees remain unchanged.
+
+### 4. Validation & Error Matrix
+Exact SQLite signature -> logical backup; short file/nonmatching signature -> ordinary file; other I/O error -> SourceIo. Do not downgrade a real I/O error into a text-file classification.
+
+### 5. Good/Base/Bad Cases
+Good: one-byte chunks still identify SQLite. Base: empty/short text is a regular file. Bad: one short read skips committed WAL data.
+
+### 6. Tests Required
+`source_fs` tests cover chunks 1..16, EOF/nonmatch, error after partial input and the existing WAL-only change/source-immutability regression.
+
+### 7. Wrong vs Correct
+Wrong: classify from one read's byte count. Correct: `read_exact` with explicit UnexpectedEof handling and other errors propagated.

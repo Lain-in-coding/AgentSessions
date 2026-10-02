@@ -3213,13 +3213,120 @@ fn run_with_path(
     args_out: &Path,
     args: &[&str],
 ) -> Output {
+    run_resume_with_output(db, path, cwd_out, args_out, &["--robot"], args)
+}
+
+fn run_resume_with_output(
+    db: &str,
+    path: &std::ffi::OsStr,
+    cwd_out: &Path,
+    args_out: &Path,
+    output_flags: &[&str],
+    args: &[&str],
+) -> Output {
     let mut cmd = Command::new(BIN);
-    cmd.arg("--db").arg(db).arg("--robot").args(args);
+    cmd.arg("--db").arg(db).args(output_flags).args(args);
     cmd.env("PATH", path);
     cmd.env("RESUME_SMOKE_CWD_OUT", cwd_out);
     cmd.env("RESUME_SMOKE_ARGS_OUT", args_out);
     cmd.output()
         .expect("failed to spawn agent-session-grep binary")
+}
+
+#[test]
+fn boundary_machine_resume_yes_never_spawns_or_acknowledges() {
+    let (dir, db) = temp_db("resume-machine-boundary");
+    let (fixture, anchor) = write_claude_resume_fixture(dir.path(), dir.path().to_str().unwrap());
+    let out = run(&db, &["ingest", &fixture]);
+    assert!(out.status.success(), "{}", stdout(&out));
+    let session = session_wire_for_message(&db, &anchor);
+    let fake_dir = dir.path().join("fake-bin");
+    std::fs::create_dir_all(&fake_dir).unwrap();
+    write_fake_provider(&fake_dir);
+    let cwd_out = dir.path().join("spawn-cwd.txt");
+    let args_out = dir.path().join("spawn-args.txt");
+    let marker = dir.path().join(".agent-session-grep-resume-ack");
+    let request_id = "sk_live_abcdef1234567890xyz";
+    for acknowledged in [false, true] {
+        if acknowledged {
+            let out = run(&db, &["resume", &session]);
+            assert!(out.status.success(), "{}", stdout(&out));
+            assert_eq!(parse_first_line(&out)["data"]["executed"], false);
+        }
+        for flags in [
+            vec!["--robot"],
+            vec!["--output", "json"],
+            vec!["--output", "jsonl"],
+        ] {
+            let mut flags = flags;
+            flags.extend(["--request-id", request_id]);
+            let out = run_resume_with_output(
+                &db,
+                fake_dir.as_os_str(),
+                &cwd_out,
+                &args_out,
+                &flags,
+                &["resume", &session, "--yes"],
+            );
+            assert_eq!(out.status.code(), Some(2), "{}", stdout(&out));
+            let frame = parse_first_line(&out);
+            assert_envelope_shape(&frame, false);
+            assert_eq!(frame["error"]["code"], "invalid_request");
+            assert_eq!(frame["request_id"], request_id);
+            assert_eq!(stdout(&out).lines().count(), 1);
+            assert!(out.stderr.is_empty());
+            assert!(
+                !cwd_out.exists() && !args_out.exists(),
+                "machine mode spawned"
+            );
+            assert_eq!(
+                marker.exists(),
+                acknowledged,
+                "machine refusal changed acknowledgement"
+            );
+        }
+    }
+}
+
+#[test]
+fn boundary_option_like_native_ids_never_spawn_even_after_acknowledgement() {
+    for native in ["--dangerously-skip-permissions", "--", "-h"] {
+        let (dir, db) = temp_db("resume-native-boundary");
+        let (fixture, anchor) =
+            write_claude_resume_fixture(dir.path(), dir.path().to_str().unwrap());
+        let body = std::fs::read_to_string(&fixture)
+            .unwrap()
+            .replace("ccdd1234-5678-4abc-8def-001122334455", native);
+        std::fs::write(&fixture, body).unwrap();
+        let out = run(&db, &["ingest", &fixture]);
+        assert!(out.status.success(), "{}", stdout(&out));
+        let session = session_wire_for_message(&db, &anchor);
+        let preview = run(&db, &["resume", &session]);
+        let fake_dir = dir.path().join("fake-bin");
+        std::fs::create_dir_all(&fake_dir).unwrap();
+        write_fake_provider(&fake_dir);
+        let cwd_out = dir.path().join("spawn-cwd.txt");
+        let args_out = dir.path().join("spawn-args.txt");
+        agent_session_grep_application::resume::acknowledge_resume_preview(dir.path()).unwrap();
+        let out = run_resume_with_output(
+            &db,
+            fake_dir.as_os_str(),
+            &cwd_out,
+            &args_out,
+            &[],
+            &["resume", &session, "--yes"],
+        );
+        assert!(out.status.success(), "{}", stdout(&out));
+        assert!(
+            !cwd_out.exists() && !args_out.exists(),
+            "option-like native id spawned: {native}"
+        );
+        let frame = parse_first_line(&preview);
+        assert_eq!(frame["data"]["available"], false);
+        assert!(frame["data"]["command"].is_null());
+        assert_eq!(frame["data"]["executed"], false);
+        assert!(!stdout(&preview).contains(native));
+    }
 }
 
 #[test]
@@ -3256,11 +3363,12 @@ fn resume_yes_first_run_forced_preview_then_spawns_in_original_cwd() {
         .unwrap_or_else(|| fake_dir.clone().into_os_string());
 
     // 1) 首次 resume --yes：强制预览不执行（持久标记缺失），落标记。
-    let out = run_with_path(
+    let out = run_resume_with_output(
         &db,
         &path,
         &cwd_out,
         &args_out,
+        &[],
         &["resume", &session_wire, "--yes"],
     );
     assert!(
@@ -3268,20 +3376,19 @@ fn resume_yes_first_run_forced_preview_then_spawns_in_original_cwd() {
         "first resume failed: {}",
         stdout(&out)
     );
-    let frame = parse_first_line(&out);
-    assert_envelope_shape(&frame, true);
-    assert_eq!(frame["data"]["executed"], false, "{frame}");
-    assert_eq!(frame["data"]["first_run_preview"], true, "{frame}");
-    assert_eq!(frame["data"]["permission_mode_verified"], false, "{frame}");
+    assert!(!stdout(&out).trim_start().starts_with('{'));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("首次使用 resume"));
+    assert!(dir.path().join(".agent-session-grep-resume-ack").exists());
     assert!(!cwd_out.exists(), "first run must not spawn provider");
     assert!(!args_out.exists(), "first run must not spawn provider");
 
     // 2) 第二次 resume --yes：标记已确认，真实 spawn 到原 cwd 并传正确参数。
-    let out = run_with_path(
+    let out = run_resume_with_output(
         &db,
         &path,
         &cwd_out,
         &args_out,
+        &[],
         &["resume", &session_wire, "--yes"],
     );
     assert!(
@@ -3289,13 +3396,8 @@ fn resume_yes_first_run_forced_preview_then_spawns_in_original_cwd() {
         "second resume failed: {}",
         stdout(&out)
     );
-    let frame = parse_first_line(&out);
-    assert_envelope_shape(&frame, true);
-    assert_eq!(frame["data"]["executed"], true, "{frame}");
-    assert!(
-        frame["data"].get("first_run_preview").is_none(),
-        "second run must not report first-run: {frame}"
-    );
+    assert!(!stdout(&out).trim_start().starts_with('{'));
+    assert!(out.stderr.is_empty());
     let recorded_cwd = std::fs::read_to_string(&cwd_out).expect("read recorded cwd");
     assert_eq!(
         std::fs::canonicalize(&recorded_cwd).expect("resolve spawned cwd"),
@@ -3315,13 +3417,14 @@ fn resume_yes_first_run_forced_preview_then_spawns_in_original_cwd() {
     let frame = parse_first_line(&out);
     assert_envelope_shape(&frame, true);
     assert_eq!(frame["data"]["executed"], false, "{frame}");
+    assert_eq!(frame["data"]["permission_mode_verified"], false, "{frame}");
     let command = frame["data"]["command"].as_str().expect("command string");
     assert!(command.contains("claude --resume"), "command {command}");
     assert!(command.contains(&workdir_str), "command {command}");
 }
 
 #[test]
-fn resume_yes_missing_provider_binary_returns_structured_error() {
+fn resume_yes_missing_provider_binary_returns_human_error() {
     let (dir, db) = temp_db("resume-missing-bin");
     let cwd_str = dir.path().to_string_lossy().into_owned();
     let (fixture_path, anchor_message) = write_claude_resume_fixture(dir.path(), &cwd_str);
@@ -3335,13 +3438,13 @@ fn resume_yes_missing_provider_binary_returns_structured_error() {
     let cwd_out = dir.path().join("never-cwd.txt");
     let args_out = dir.path().join("never-args.txt");
 
-    // 首次 resume --yes：强制预览 + 落标记（不触发 preflight）。
+    // Machine preview acknowledges without execution or binary preflight.
     let out = run_with_path(
         &db,
         empty_bin.as_os_str(),
         &cwd_out,
         &args_out,
-        &["resume", &session_wire, "--yes"],
+        &["resume", &session_wire],
     );
     assert!(
         out.status.success(),
@@ -3353,11 +3456,12 @@ fn resume_yes_missing_provider_binary_returns_structured_error() {
     assert!(!cwd_out.exists(), "first run must not spawn");
 
     // 第二次 --yes：preflight 拦截缺失二进制 → 结构化 provider_error（exit 7）。
-    let out = run_with_path(
+    let out = run_resume_with_output(
         &db,
         empty_bin.as_os_str(),
         &cwd_out,
         &args_out,
+        &[],
         &["resume", &session_wire, "--yes"],
     );
     assert!(
@@ -3366,20 +3470,162 @@ fn resume_yes_missing_provider_binary_returns_structured_error() {
         stdout(&out)
     );
     assert_eq!(out.status.code(), Some(7), "provider_error exit code");
+    assert!(out.stdout.is_empty());
+    let diagnostic = String::from_utf8_lossy(&out.stderr);
+    assert!(diagnostic.contains("[provider_error]"), "{diagnostic}");
+    assert!(diagnostic.contains("install"), "{diagnostic}");
+    assert!(!cwd_out.exists() && !args_out.exists());
+}
+
+#[test]
+fn boundary_unknown_command_and_machine_errors_do_not_echo_secrets() {
+    let (_dir, db) = temp_db("error-text-boundary");
+    let secret = "sk_live_abcdef1234567890xyz";
+    for unknown in [secret, "C:/private/unknown-command"] {
+        let out = run(&db, &["--request-id", secret, unknown]);
+        assert_eq!(out.status.code(), Some(2), "{}", stdout(&out));
+        let frame = parse_first_line(&out);
+        assert_eq!(frame["command"], "unknown");
+        assert_eq!(frame["request_id"], secret);
+        assert!(
+            !frame["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains(unknown)
+        );
+    }
+    let out = run_human(&db, &["search", "--since", secret, "q"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(out.stdout.is_empty());
+    let diagnostic = String::from_utf8_lossy(&out.stderr);
+    // Preserve the local Human diagnostic policy; the machine boundary redacts.
+    assert!(diagnostic.contains(secret), "{diagnostic}");
+    let machine = run(&db, &["search", "--since", secret, "q"]);
+    let frame = parse_first_line(&machine);
+    assert_eq!(machine.status.code(), Some(2));
+    assert!(!frame["error"]["message"].as_str().unwrap().contains(secret));
+}
+
+#[cfg(feature = "semantic-candle")]
+#[test]
+fn boundary_local_model_absence_failure_and_vector_readiness_are_distinct() {
+    let (dir, db) = temp_db("model-boundary");
+    let command = || {
+        let mut command = Command::new(BIN);
+        command
+            .args(["--db", &db, "--robot"])
+            .env("HOME", dir.path())
+            .env("USERPROFILE", dir.path())
+            .env("APPDATA", dir.path())
+            .env("LOCALAPPDATA", dir.path())
+            .env("XDG_CACHE_HOME", dir.path().join("cache"))
+            .env("XDG_CONFIG_HOME", dir.path().join("config"))
+            .env("XDG_DATA_HOME", dir.path().join("data"));
+        command
+    };
+    let paths = command().args(["config", "paths"]).output().unwrap();
+    assert!(paths.status.success(), "{}", stdout(&paths));
+    let paths = parse_first_line(&paths);
+    let model_dir = agent_session_grep_application::candle_embedding::default_model_dir(Path::new(
+        paths["data"]["cache"].as_str().unwrap(),
+    ));
+    assert!(!model_dir.exists());
+    let source = dir.path().join("model-source.jsonl");
+    std::fs::write(
+        &source,
+        serde_json::json!({
+            "type": "user", "uuid": "model-message", "sessionId": "model-session",
+            "message": {"role": "user", "content": "hello"}
+        })
+        .to_string()
+            + "\n",
+    )
+    .unwrap();
+    let out = command()
+        .args(["ingest", source.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stdout(&out));
+    let out = command()
+        .args(["search", "--mode", "semantic", "hello"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stdout(&out));
     let frame = parse_first_line(&out);
-    assert_envelope_shape(&frame, false);
-    assert_eq!(frame["error"]["code"], "provider_error", "{frame}");
-    assert_eq!(
-        frame["error"]["details"]["stage"], "binary_preflight",
-        "{frame}"
-    );
-    assert_eq!(frame["error"]["details"]["binary"], "claude", "{frame}");
+    assert_eq!(frame["retrieval_mode"], "lexical_fallback");
+    assert!(!frame["warnings"].as_array().unwrap().is_empty());
+    let out = command().args(["index", "embeddings"]).output().unwrap();
+    assert!(out.status.success(), "{}", stdout(&out));
+    let out = command()
+        .args(["search", "--mode", "semantic", "hello"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stdout(&out));
+    assert_eq!(parse_first_line(&out)["retrieval_mode"], "semantic");
+    std::fs::create_dir_all(&model_dir).unwrap();
+    for args in [
+        vec!["search", "--mode", "semantic", "hello"],
+        vec!["index", "embeddings"],
+    ] {
+        let out = command().args(args).output().unwrap();
+        assert_eq!(out.status.code(), Some(6), "{}", stdout(&out));
+        let frame = parse_first_line(&out);
+        assert_eq!(frame["error"]["code"], "catalog_error");
+        assert_eq!(frame["error"]["details"]["stage"], "model_load");
+        assert!(
+            frame["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("restart")
+        );
+        assert!(!stdout(&out).contains(model_dir.to_str().unwrap()));
+    }
+    let out = command().args(["search", "hello"]).output().unwrap();
     assert!(
-        frame["error"]["message"]
-            .as_str()
-            .is_some_and(|m| m.contains("install")),
-        "error message must hint installation: {frame}"
+        out.status.success(),
+        "lexical search must remain usable: {}",
+        stdout(&out)
     );
+}
+
+#[test]
+fn boundary_diagnostic_redaction_preserves_human_and_reports_machine_status() {
+    let secret = "sk_live_abcdef1234567890xyz";
+    for command in ["ingest", "sync"] {
+        for human in [false, true] {
+            let (dir, db) = temp_db("diagnostic-redaction-status");
+            let source = dir.path().join("sessions.jsonl");
+            let valid = serde_json::json!({
+                "type": "user", "uuid": "synthetic-message",
+                "sessionId": "synthetic-session",
+                "message": {"role": "user", "content": "synthetic diagnostic fixture"}
+            });
+            let invalid = serde_json::json!({"type": "user", "message": secret});
+            std::fs::write(&source, format!("{valid}\n{invalid}\n")).unwrap();
+            let args = [command, source.to_str().unwrap()];
+            let out = if human {
+                run_human(&db, &args)
+            } else {
+                run(&db, &args)
+            };
+            assert!(out.status.success(), "{}", stdout(&out));
+            if human {
+                let diagnostic = String::from_utf8_lossy(&out.stderr);
+                assert!(diagnostic.contains(secret), "{diagnostic}");
+                assert!(!diagnostic.contains("[redacted:"), "{diagnostic}");
+            } else {
+                let frame = parse_first_line(&out);
+                assert!(!stdout(&out).contains(secret), "{frame}");
+                assert!(
+                    frame["warnings"]
+                        .to_string()
+                        .contains("[redacted:stripe_key]")
+                );
+                assert_eq!(frame["redaction"]["status"], "applied", "{frame}");
+                assert_eq!(frame["redaction"]["redacted_count"], 1, "{frame}");
+            }
+        }
+    }
 }
 
 #[test]
@@ -4796,14 +5042,14 @@ fn doctor_and_config_reject_unknown_tokens() {
 }
 
 #[test]
-fn error_envelope_command_points_at_the_failing_token() {
-    // R8.4：未知 `-` 开头 token 是命令名笔误，envelope 的 `command` 指向它，
+fn error_envelope_normalizes_the_failing_unknown_token() {
+    // R8.4：未知 `-` 开头 token 是命令名笔误，envelope 使用安全的 unknown，
     // 而不是后面的真命令。
     let out = run_bare(&["--bogus", "--robot", "status"]);
     assert_eq!(out.status.code(), Some(2), "stdout={}", stdout(&out));
     let frame = parse_first_line(&out);
     assert_envelope_shape(&frame, false);
-    assert_eq!(frame["command"], "--bogus", "{frame}");
+    assert_eq!(frame["command"], "unknown", "{frame}");
 }
 
 #[test]

@@ -154,7 +154,7 @@ pub fn run_cli() {
                 eprintln!(
                     "hook: not injecting: [{}] {}",
                     err.code.as_str(),
-                    err.message
+                    redaction::redact_text(&err.message).0
                 );
                 std::process::exit(1);
             }
@@ -184,9 +184,9 @@ fn render_human_error(err: &ProtocolError) {
     eprintln!("下一步：{}", err.code.operator_action());
 }
 
-/// Convert provider parse diagnostics into bounded public warnings. Diagnostics
-/// are source-derived and may include line numbers or bounded session IDs, but
-/// never source paths; each warning is independently clamped before rendering.
+/// Limit the number of provider diagnostics, retaining raw text until rendering.
+/// The output boundary must redact machine diagnostics before character clamping
+/// and retain the redaction count; Human diagnostics are clamped without redaction.
 fn diagnostic_warnings<'a>(
     diagnostics: impl IntoIterator<Item = &'a str>,
     total: usize,
@@ -199,13 +199,7 @@ fn diagnostic_warnings<'a>(
     let mut warnings: Vec<String> = diagnostics
         .into_iter()
         .take(detail_limit)
-        .map(|diagnostic| {
-            let mut bounded: String = diagnostic.chars().take(DIAGNOSTIC_WARNING_CHARS).collect();
-            if diagnostic.chars().count() > DIAGNOSTIC_WARNING_CHARS {
-                bounded.push('…');
-            }
-            bounded
-        })
+        .map(str::to_owned)
         .collect();
     if total > detail_limit {
         warnings.push(format!(
@@ -214,6 +208,36 @@ fn diagnostic_warnings<'a>(
         ));
     }
     warnings
+}
+
+/// Apply output policy before bounding provider diagnostic text. Count changed
+/// warning entries before truncation, not by comparing the final bounded strings.
+fn render_warnings(
+    command: &str,
+    mode: protocol::OutputMode,
+    warnings: &[String],
+) -> (Vec<String>, u64) {
+    let mut redacted_count = 0;
+    let warnings = warnings
+        .iter()
+        .map(|warning| {
+            let mut text = if mode == protocol::OutputMode::Human {
+                warning.clone()
+            } else {
+                let (text, status) = redaction::redact_text(warning);
+                redacted_count += u64::from(status.redacted_count > 0);
+                text
+            };
+            if matches!(command, "ingest" | "sync")
+                && text.chars().count() > DIAGNOSTIC_WARNING_CHARS
+            {
+                text = text.chars().take(DIAGNOSTIC_WARNING_CHARS).collect();
+                text.push('…');
+            }
+            text
+        })
+        .collect();
+    (warnings, redacted_count)
 }
 
 /// 从参数抽出 `--offline`（裸 flag，无取值）：只在全局 flag 前缀位置识别。
@@ -308,7 +332,7 @@ fn command_name(args: &[String]) -> String {
             }
             "--robot" | "--no-color" | "--help" | "-h" | "--version" | "-V" | "--discover"
             | "--offline" => {}
-            s => return s.to_string(),
+            s => return if known_subcommand(s) { s } else { "unknown" }.to_string(),
         }
     }
     "unknown".into()
@@ -704,6 +728,7 @@ fn emit_result(
     request_id: Option<&str>,
     retrieval_mode: RetrievalMode,
 ) {
+    let (warnings, warning_redactions) = render_warnings(command, mode, warnings);
     match mode {
         protocol::OutputMode::Human => {
             for warning in warnings {
@@ -717,19 +742,6 @@ fn emit_result(
             // ADR-0009: machine/cross-boundary output is redacted by default.
             // Human CLI output stays unredacted per ADR-0004 (handled above).
             let (redacted_data, mut redaction) = redaction::redact_value(data);
-            let redacted_warnings: Vec<String> = warnings
-                .iter()
-                .map(|w| {
-                    let (r, _) = redaction::redact_text(w);
-                    r
-                })
-                .collect();
-            // If any warning was redacted, merge into the count.
-            let warning_redactions = warnings
-                .iter()
-                .zip(redacted_warnings.iter())
-                .filter(|(a, b)| a != b)
-                .count() as u64;
             if warning_redactions > 0 {
                 redaction.redacted_count += warning_redactions;
                 redaction.status = agent_session_grep_ports::RedactionState::Applied;
@@ -740,7 +752,7 @@ fn emit_result(
                 redacted_data,
                 duration_ms,
                 page,
-                &redacted_warnings,
+                &warnings,
                 request_id,
                 retrieval_mode,
                 &redaction,
@@ -2313,7 +2325,8 @@ fn dispatch(
                     max_evidence: max_evidence_n,
                     target: None,
                 },
-            );
+            )
+            .map_err(|error| CliError(error.into()))?;
             // 预算截断 → partial（exit 10），绝不伪装 success（contract §5）。
             let outcome = if pack.truncation.truncated {
                 protocol::Outcome::Partial
@@ -2408,37 +2421,14 @@ fn dispatch(
             // 绝不编造命令。
             let mut args = rest.to_vec();
             let confirmed = take_bool_flag(&mut args, "--yes");
+            if confirmed && mode != protocol::OutputMode::Human {
+                return Err(CliError::usage(
+                    "resume --yes requires Human output; omit machine output flags to execute, or omit --yes to preview",
+                ));
+            }
             no_extra_args(&args, 1, "resume <session-id>")?;
             let wire = arg(&args, 1, "resume <session-id>")?;
-            let id = StableId::from_wire(wire)
-                .filter(|id| id.kind() == IdKind::Session)
-                .ok_or_else(|| CliError::usage(format!("not a valid session id: {wire}")))?;
-            let app = resume_app(store);
-            let response = app.handle(AppRequest::GetSessionResume {
-                session_id: id.clone(),
-            })?;
-            let AppResponse::SessionResume(metadata) = response else {
-                return Err(CliError::usage("resume: unexpected response"));
-            };
-            let preview =
-                agent_session_grep_application::resume::build_resume_descriptor(&metadata);
-            let mut data = serde_json::json!({
-                "session_id": metadata.session_id.as_str(),
-                "provider_id": metadata.provider_id,
-                "available": preview.available,
-                "command": if preview.command_string.is_empty() {
-                    serde_json::Value::Null
-                } else {
-                    serde_json::json!(preview.command_string)
-                },
-                "working_directory": preview.descriptor.working_directory,
-                "permission_mode": preview.descriptor.permission_mode,
-                // 诚实口径：permission mode 恒未核验（metadata/配置不携带真实
-                // 模式），如实标注，绝不宣称已校验（audit P1-2）。
-                "permission_mode_verified": false,
-                "unavailable_reason": preview.unavailable_reason,
-                "executed": false,
-            });
+            let (preview, mut data) = load_resume_preview(store, wire)?;
             // 不可恢复不是错误：历史恒可检索，只是不可恢复（ADR-0009）。
             if !preview.available {
                 return Ok((
@@ -2470,7 +2460,8 @@ fn dispatch(
                     }
                     Err(error) => {
                         warnings.push(format!(
-                            "resume: 首次预览标记写入失败（将继续强制预览）：{error}"
+                            "resume: 首次预览标记写入失败（将继续强制预览）：{:?}",
+                            error.kind()
                         ));
                     }
                 }
@@ -2584,8 +2575,8 @@ fn dispatch(
             let (outcome, data, page, warnings) = render(response);
             Ok(("status", outcome, data, page, warnings))
         }
-        other => Err(CliError::usage(format!(
-            "unknown subcommand: {other}（可用命令：{}；运行 --help 查看完整用法）",
+        _ => Err(CliError::usage(format!(
+            "unknown subcommand（可用命令：{}；运行 --help 查看完整用法）",
             KNOWN_SUBCOMMANDS.join("、")
         ))),
     }
@@ -2766,6 +2757,69 @@ fn budget_from_flags(
     Ok(budget)
 }
 
+/// Stateless preview for read-only entrypoints. Never acknowledges or executes.
+pub(crate) fn preview_resume(
+    store: &SqliteStore,
+    wire: &str,
+) -> Result<
+    (
+        protocol::Outcome,
+        serde_json::Value,
+        protocol::Page,
+        Vec<String>,
+    ),
+    CliError,
+> {
+    let (_, data) = load_resume_preview(store, wire)?;
+    Ok((
+        protocol::Outcome::Success,
+        data,
+        protocol::Page::default(),
+        Vec::new(),
+    ))
+}
+
+fn load_resume_preview(
+    store: &SqliteStore,
+    wire: &str,
+) -> Result<
+    (
+        agent_session_grep_application::resume::ResumePreview,
+        serde_json::Value,
+    ),
+    CliError,
+> {
+    let id = StableId::from_wire(wire)
+        .filter(|id| id.kind() == IdKind::Session)
+        .ok_or_else(|| CliError::usage(format!("not a valid session id: {wire}")))?;
+    let app = resume_app(store);
+    let response = app.handle(AppRequest::GetSessionResume {
+        session_id: id.clone(),
+    })?;
+    let AppResponse::SessionResume(metadata) = response else {
+        return Err(CliError::usage("resume: unexpected response"));
+    };
+    let preview = agent_session_grep_application::resume::build_resume_descriptor(&metadata);
+    let data = serde_json::json!({
+        "session_id": metadata.session_id.as_str(),
+        "provider_id": metadata.provider_id,
+        "available": preview.available,
+        "command": if preview.command_string.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::json!(preview.command_string)
+        },
+        "working_directory": preview.descriptor.working_directory,
+        "permission_mode": preview.descriptor.permission_mode,
+        // 诚实口径：permission mode 恒未核验（metadata/配置不携带真实
+        // 模式），如实标注，绝不宣称已校验（audit P1-2）。
+        "permission_mode_verified": false,
+        "unavailable_reason": preview.unavailable_reason,
+        "executed": false,
+    });
+    Ok((preview, data))
+}
+
 /// 执行 resume：在原 cwd 下 spawn provider 进程并等待其退出（前台接管）。
 ///
 /// 执行前校验 cwd 存在（存在但不可访问也在此暴露）与 provider 二进制在 PATH
@@ -2882,6 +2936,41 @@ fn provider_binary_on_path(binary: &str) -> bool {
 ///   multilingual-e5-small encoder.
 /// - Otherwise falls back to the honest bigram-hash fuzzy-lexical vectorizer
 ///   and emits the experimental warning (default release path).
+#[cfg(feature = "semantic-candle")]
+fn installed_local_model_dir() -> Result<Option<std::path::PathBuf>, ProtocolError> {
+    let paths = platform_paths().map_err(|error| error.0)?;
+    let cache = paths
+        .get("cache")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            ProtocolError::new(
+                CanonicalCode::Internal,
+                "model cache configuration is unavailable",
+            )
+        })?;
+    let dir = agent_session_grep_application::candle_embedding::default_model_dir(
+        std::path::Path::new(cache),
+    );
+    match std::fs::symlink_metadata(&dir) {
+        Ok(_) => Ok(Some(dir)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err(ProtocolError::new(
+            CanonicalCode::CatalogError,
+            "local model bundle could not be inspected",
+        )
+        .with_details(serde_json::json!({"stage": "model_discovery"}))),
+    }
+}
+
+#[cfg(feature = "semantic-candle")]
+fn model_load_error(error: agent_session_grep_ports::PortError) -> ProtocolError {
+    // Preserve the existing private diagnostic path without putting backend
+    // paths, manifest content or native IDs in the public error.
+    let mut error = ProtocolError::from(error);
+    error.message = "local model bundle could not be loaded; verify or re-import the bundle, then restart the process before retrying".into();
+    error.with_details(serde_json::json!({"stage": "model_load"}))
+}
+
 fn build_embeddings(store: &SqliteStore) -> Result<(serde_json::Value, Vec<String>), CliError> {
     use agent_session_grep_application::embedding::BigramHashModel;
     use agent_session_grep_ports::EmbeddingModel;
@@ -2961,23 +3050,14 @@ fn build_embeddings(store: &SqliteStore) -> Result<(serde_json::Value, Vec<Strin
     let model = {
         #[cfg(feature = "semantic-candle")]
         {
-            let cache = platform_paths().ok().and_then(|v| {
-                v.get("cache")
-                    .and_then(|c| c.as_str())
-                    .map(|s| s.to_string())
-            });
-            if let Some(cache) = cache {
-                let dir = agent_session_grep_application::candle_embedding::default_model_dir(
-                    std::path::Path::new(&cache),
-                );
-                match agent_session_grep_application::candle_embedding::CandleE5Model::load_from_dir(
-                    &dir,
-                ) {
-                    Ok(m) => ActiveModel::Candle(Box::new(m)),
-                    Err(_) => ActiveModel::Bigram(BigramHashModel::new()),
-                }
-            } else {
-                ActiveModel::Bigram(BigramHashModel::new())
+            match installed_local_model_dir()? {
+                Some(dir) => ActiveModel::Candle(Box::new(
+                    agent_session_grep_application::candle_embedding::CandleE5Model::load_from_dir(
+                        &dir,
+                    )
+                    .map_err(model_load_error)?,
+                )),
+                None => ActiveModel::Bigram(BigramHashModel::new()),
             }
         }
         #[cfg(not(feature = "semantic-candle"))]
@@ -3127,28 +3207,19 @@ pub(crate) fn prepare_search_embedding(
 
     #[cfg(feature = "semantic-candle")]
     let (model_id, embedding) = {
-        let cached_model = platform_paths()
-            .ok()
-            .and_then(|paths| {
-                paths
-                    .get("cache")
-                    .and_then(|value| value.as_str())
-                    .map(str::to_owned)
-            })
-            .map(|cache| {
-                let dir = agent_session_grep_application::candle_embedding::default_model_dir(
-                    std::path::Path::new(&cache),
-                );
-                agent_session_grep_application::candle_embedding::CandleE5Model::load_cached(dir)
-            })
-            .and_then(Result::ok);
-        if let Some(model) = cached_model {
-            (
-                model.manifest().model_id.clone(),
-                model.embed(query, true).map_err(ProtocolError::from)?,
-            )
-        } else {
-            bigram_embedding()?
+        match installed_local_model_dir()? {
+            Some(dir) => {
+                let model =
+                    agent_session_grep_application::candle_embedding::CandleE5Model::load_cached(
+                        dir,
+                    )
+                    .map_err(model_load_error)?;
+                (
+                    model.manifest().model_id.clone(),
+                    model.embed(query, true).map_err(ProtocolError::from)?,
+                )
+            }
+            None => bigram_embedding()?,
         }
     };
 
@@ -5386,6 +5457,34 @@ mod tests {
     }
 
     #[test]
+    fn boundary_diagnostic_warnings_redact_before_bounding() {
+        let secret = format!("sk_live_{}", "a".repeat(600));
+        let diagnostic = format!("skipped provider row: {secret}");
+        let warnings = diagnostic_warnings([diagnostic.as_str()], 1);
+        assert_eq!(warnings, std::slice::from_ref(&diagnostic));
+        let (machine, count) = render_warnings("ingest", protocol::OutputMode::Json, &warnings);
+        assert_eq!(machine, ["skipped provider row: [redacted:stripe_key]"]);
+        assert_eq!(count, 1);
+        let (human, count) = render_warnings("ingest", protocol::OutputMode::Human, &warnings);
+        assert_eq!(
+            human[0],
+            diagnostic.chars().take(512).collect::<String>() + "…"
+        );
+        assert_eq!(count, 0);
+        let (plain, count) =
+            render_warnings("sync", protocol::OutputMode::Json, &["x".repeat(600)]);
+        assert_eq!(plain[0].chars().count(), DIAGNOSTIC_WARNING_CHARS + 1);
+        assert_eq!(count, 0, "truncation alone is not redaction");
+    }
+
+    #[test]
+    fn boundary_unknown_command_name_is_constant() {
+        for token in ["sk_live_abcdef1234567890xyz", "C:/private/unknown"] {
+            assert_eq!(command_name(&[token.to_string()]), "unknown");
+        }
+    }
+
+    #[test]
     fn provider_discovery_target_rejects_unknown_provider() {
         assert!(provider_discovery_target("unknown-provider").is_none());
     }
@@ -6943,12 +7042,12 @@ mod tests {
     }
 
     #[test]
-    fn command_name_points_at_failing_token() {
+    fn command_name_normalizes_unknown_tokens_without_skipping_them() {
         // 未知 '-' 开头 token 不是 flag——它是命令名笔误，错误 envelope 的
-        // command 必须指向它，而不是后面的真命令（R8.4）。
+        // command 使用安全的 unknown，而不是跳到后面的真命令。
         assert_eq!(
             command_name(&["--bogus".into(), "--robot".into(), "status".into()]),
-            "--bogus"
+            "unknown"
         );
         assert_eq!(
             command_name(&[
@@ -6957,7 +7056,7 @@ mod tests {
                 "--bogus".into(),
                 "status".into()
             ]),
-            "--bogus"
+            "unknown"
         );
         // 已知 flag 与其取值跳过，命令名正常识别。
         assert_eq!(command_name(&["--robot".into(), "status".into()]), "status");

@@ -294,3 +294,29 @@ Correct: receive time and ownership digests through explicit arguments.
 ---
 
 **Language**: All documentation in **English**.
+
+## Scenario: Verified model manifests and bounded handoff output
+
+### 1. Scope / Trigger
+Local bundle verification/import and deterministic cross-boundary handoff generation.
+
+### 2. Signatures
+`read_and_verify_bundle(&Path) -> PortResult<ModelBundleManifest>`;
+`generate_deterministic(HandoffInput<'_>) -> PortResult<HandoffPack>`.
+
+### 3. Contracts
+A manifest covers config.json, tokenizer.json and model.safetensors with size/hash entries; MODEL-MANIFEST.json does not need a self-hash. Names are single safe path components and entries are unique. Verification is not proof that weights can be loaded or inference succeeds. The existing process-local load cache also caches failure: restart a long-lived caller after repairing/importing the bundle; automatic live reload is not implemented.
+Handoff `max_bytes` bounds the existing serialized content measure, excluding dropped/source locators and the used_bytes counter's self-reference. Recompute confidence, redaction status and token use before each byte check. Trim evidence/mainline together, then ancillary activities/session summaries if necessary; mandatory content that cannot fit returns InvalidRequest, never oversized Partial. Empty retained evidence means Low. Identity hash revision `handoff-pack/identity-v2` uses labeled JSON inputs, including target, optional fields and budgets; the pack schema/wire prefix remain v1.
+
+### 4. Validation & Error Matrix
+Missing/duplicate/unsafe manifest entry or wrong size/hash -> verification error. Valid integrity with unsupported model/dimension -> loader error. Required handoff content too large -> InvalidRequest. Successful truncation -> bounded pack with truthful reason/count and retained confidence.
+
+### 5. Good/Base/Bad Cases
+Good: every required file is hashed and a bounded pack retains evidence. Base: an empty result has Low confidence. Bad: accepting files:[] or keeping High after all evidence was removed.
+
+### 6. Tests Required
+Application all-feature tests: required-content coverage, duplicate/size/hash failures; long mandatory query, oversized activity metadata, post-trim confidence and since/until/None/empty/query-provider identity separation. CLI and MCP must propagate the fallible generator through existing structured errors.
+
+### 7. Wrong vs Correct
+Wrong: treat file existence as verification, or stop trimming merely because evidence is empty.
+Correct: prove manifest coverage, check every retained content field, and reject irreducible overflow.

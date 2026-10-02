@@ -769,7 +769,8 @@ impl McpServer<'_> {
                 max_bytes: max_bytes as u64,
                 max_evidence,
                 target: None,
-            });
+            })
+            .map_err(business)?;
         let outcome = if pack.truncation.truncated {
             Outcome::Partial
         } else {
@@ -1251,7 +1252,7 @@ fn error_frame(id: Value, code: i64, message: &str, data: Option<Value>) -> Stri
     let (message, _) = crate::redaction::redact_text(message);
     let mut error = json!({ "code": code, "message": message });
     if let Some(data) = data {
-        error["data"] = data;
+        error["data"] = crate::redaction::redact_value(data).0;
     }
     json!({ "jsonrpc": "2.0", "id": id, "error": error }).to_string()
 }
@@ -1426,6 +1427,7 @@ fn is_valid_jsonrpc_id(id: &Value) -> bool {
 /// 错误消息插值截断（R5）：超长 method/tool/id/参数值回显前截到
 /// [`ECHO_CAP`] 字符，截断处以 "..." 标记。
 fn bounded(value: &str) -> String {
+    let (value, _) = crate::redaction::redact_text(value);
     let mut chars = value.chars();
     let head: String = chars.by_ref().take(ECHO_CAP).collect();
     if chars.next().is_some() {
@@ -1470,6 +1472,23 @@ mod tests {
     use agent_session_grep_adapters_sqlite::SourceBatch;
     use agent_session_grep_domain::{EvidenceSpan, IdKind, MessagePlacement, Stability};
     use agent_session_grep_ports::SearchProvider;
+
+    #[test]
+    fn boundary_mcp_protocol_error_redacts_data_not_id() {
+        let secret = "sk_live_abcdef1234567890xyz";
+        let text = error_frame(
+            json!(secret),
+            INVALID_PARAMS,
+            secret,
+            Some(json!({"canonical_code": "invalid_request", "echo": secret})),
+        );
+        let frame: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(frame["id"], secret);
+        assert_eq!(frame["error"]["message"], "[redacted:stripe_key]");
+        assert_eq!(frame["error"]["data"]["echo"], "[redacted:stripe_key]");
+        assert_eq!(frame["error"]["data"]["canonical_code"], "invalid_request");
+        assert_eq!(bounded(secret), "[redacted:stripe_key]");
+    }
 
     fn open_store(dir: &tempfile::TempDir) -> SqliteStore {
         let path = dir.path().join("mcp-test.db");
