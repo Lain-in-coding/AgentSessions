@@ -428,6 +428,13 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Filtered search results now use a Session from a placement matching the
+  requested repository/provider/sidechain conditions, including semantic and
+  hybrid results; Context activity-read failures no longer appear as empty
+  successful activity output.
+  Current-repository scoring uses the same matched Session without changing
+  signal weights. Existing search cursors must restart after this correction;
+  list cursors are unchanged.
 - Resume rejects option-like/unchecked provider session IDs before constructing
   argv; machine-output execution is refused rather than sharing an interactive
   provider's terminal streams. Human confirmation and interaction remain.

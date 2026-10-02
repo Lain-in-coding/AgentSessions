@@ -31,7 +31,7 @@ These are tracking items, not a count of confirmed defects or completed work.
 | P0-1 | Implemented; checked native-ID and leading-option rejection; integration gate pending |
 | P0-2 | Implemented; Human-only execution, machine refusal; integration gate pending |
 | P0-3 | Partial: normalized unknown command, secret-safe diagnostic/progress/MCP errors. Full private-path and adversarial identity audit remains open |
-| P0-4 | Pending current-baseline revalidation and implementation |
+| P0-4 | Verified: matching-placement ownership across lexical/semantic/hybrid/fallback, metadata and grouping; current-repo boost uses the same owner. Old search cursors explicitly invalidated. Full 1904-test integration passed |
 | P0-5 | Pending current-baseline revalidation and implementation |
 | P0-6 | Pending current-baseline revalidation and implementation |
 | P0-7 | Pending current-baseline revalidation and implementation |
@@ -48,7 +48,7 @@ These are tracking items, not a count of confirmed defects or completed work.
 | P1-7 | Pending current-baseline revalidation and implementation |
 | P1-8 | Withdrawn diagnosis; current linear Pi behavior retained; tree enhancement deferred |
 | P1-9 | Pending current-baseline revalidation and implementation |
-| P1-10 | Partial: explicit restart semantics documented. Automatic selection diagnostics, readiness and activity-port errors still pending |
+| P1-10 | Partial: explicit restart semantics and missing/corrupt model diagnostics implemented; Context activity error propagation verified red/green and in full integration. Readiness/dimension remains open |
 | P2-1 | Implemented; actual GET-ack regression failed then passed; POST remains unsupported |
 | P2-2 | Pending current-baseline revalidation and implementation |
 | P2-3 | Pending current-baseline revalidation and implementation |
@@ -95,3 +95,10 @@ These are tracking items, not a count of confirmed defects or completed work.
 - Debug-binary synthetic release smoke initially returned 8/10. Both failures were verifier defects: platform model discovery was not isolated by --db, and disabled hooks use empty stdout rather than a JSON envelope. Child-process-only platform paths now isolate synthetic state; the hook check rejects any stdout or nonzero exit. Nine verifier tests passed, including parent-environment preservation. Main independently reran real smoke: 10/10 passed. Final scripts discovery: 21 tests (1 skipped); release 11 and evidence 54 (1 skipped); Node 11 passed. This is debug-binary smoke, not release packaging, real-model quality or remote CI evidence.
 - Final post-review workspace run: **1895 passed, 0 failed, 22 ignored**; Rust 1.90 all-target/all-feature workspace check passed. Both used offline/locked dependencies. Ignored cases remain unverified; no cross-platform result is implied by local Windows execution.
 - Remaining storage/provider/read-surface ledger items stay open. This batch is ready for risk-focused checkpoint commits; it does not close or archive the parent task. Remote CI, packaging and the controlled mismatch rehearsal remain pending; no tag/release is authorized by this checkpoint.
+
+## Second-batch evidence (2026-10-03)
+- P0-4 and the Context activity part of P1-10 implemented and independently reviewed; related current-repo ownership mismatch corrected without changing ranking weights.
+- Final Windows all-feature workspace gate: **1904 passed, 0 failed, 22 ignored**. Formatting, all-target/all-feature Clippy, and Rust 1.90 all-target/all-feature locked/offline check passed.
+- Python suites: scripts 21 (1 skipped), release 11, evidence 54 (1 skipped); Node 11 passed. Real debug-binary synthetic smoke: 10/10. Privacy scan, diff checks and storage context manifests passed.
+- Old search cursors must restart because the digest now binds matched-owner ranking. List cursors and persisted schema are unchanged.
+- Original checkout's eight dirty entries remain untouched. The storage task remains in progress: snapshots, per-source projections, claimant removal and vector invalidation are not implemented by this batch.
