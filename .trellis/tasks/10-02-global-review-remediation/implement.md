@@ -32,7 +32,7 @@ These are tracking items, not a count of confirmed defects or completed work.
 | P0-2 | Implemented; Human-only execution, machine refusal; integration gate pending |
 | P0-3 | Partial: normalized unknown command, secret-safe diagnostic/progress/MCP errors. Full private-path and adversarial identity audit remains open |
 | P0-4 | Verified: matching-placement ownership across lexical/semantic/hybrid/fallback, metadata and grouping; current-repo boost uses the same owner. Old search cursors explicitly invalidated. Full 1904-test integration passed |
-| P0-5 | Pending current-baseline revalidation and implementation |
+| P0-5 | Verified eager, nested request read snapshots plus CLI/MCP outer composition scopes; actual WAL counterexamples reproduced. Final post-review all-feature integration: 1913 passed, 0 failed |
 | P0-6 | Pending current-baseline revalidation and implementation |
 | P0-7 | Pending current-baseline revalidation and implementation |
 | P0-8 | Pending current-baseline revalidation and implementation |
@@ -102,3 +102,14 @@ These are tracking items, not a count of confirmed defects or completed work.
 - Python suites: scripts 21 (1 skipped), release 11, evidence 54 (1 skipped); Node 11 passed. Real debug-binary synthetic smoke: 10/10. Privacy scan, diff checks and storage context manifests passed.
 - Old search cursors must restart because the digest now binds matched-owner ranking. List cursors and persisted schema are unchanged.
 - Original checkout's eight dirty entries remain untouched. The storage task remains in progress: snapshots, per-source projections, claimant removal and vector invalidation are not implemented by this batch.
+
+## Remote checkpoint verification
+- Draft PR #21: https://github.com/qin-devs/AgentSessions/pull/21 ; no merge or release.
+- Head `ee7c6faebb33b9209a2a04f629fd8360419d325f`: CI run 37038343286 completed successfully, including Windows/Linux/macOS tests and installer smoke, Rust 1.90 all-feature compatibility and cargo-deny.
+- The same head passed security-audit run 37038343600 and core-beta-evidence run 37038343238. These results verify the first two batches only, not subsequent uncommitted snapshot work, and do not promote provider maturity.
+
+## Third-batch snapshot evidence
+- P0-5 implemented through ports/application/SQLite and CLI/MCP composite reads, with seven core snapshot regressions and two outer-scope release tests. Independent review's Git-inside-snapshot finding was fixed before the final run.
+- Final Windows all-feature workspace tests: **1913 passed, 0 failed, 22 ignored**. Formatting, all-target/all-feature Clippy and Rust 1.90 locked/offline check passed after the last code edit.
+- Python suites 21/11/54 (2 skips total), Node 11, privacy/diff checks and real debug smoke 10/10 passed. No schema migration; cleanup failure is documented as reopen-required for subsequent snapshot acquisition.
+- P0-6/P0-7/P0-8 and provider/release/performance remainder stay open. Original dirty checkout unchanged; no parent/child archive, main merge, release or cleanup performed.

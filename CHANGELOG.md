@@ -428,6 +428,11 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Read requests now pin one SQLite view across generation, search, payload,
+  ownership and resume reads. Human search rows, handoff evidence and doctor
+  counters share the same view; nested scopes release on errors/unwind and
+  refuse writes. Model loading, Git repository discovery and output waits stay
+  outside read scopes. No persisted schema migration is required.
 - Filtered search results now use a Session from a placement matching the
   requested repository/provider/sidechain conditions, including semantic and
   hybrid results; Context activity-read failures no longer appear as empty

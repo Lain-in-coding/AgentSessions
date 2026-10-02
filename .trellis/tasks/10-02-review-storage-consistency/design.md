@@ -17,6 +17,8 @@ Persisted per-source projection evidence is necessary for deterministic source r
 
 Snapshot scope should start before generation and cover all read orchestration including payload/ownership/resume metadata. A port-owned RAII read unit can share SQLite's connection without holding its RefCell borrow across calls; consider nested use and release on errors. BEGIN alone does not pin until the first read. In production every data port must use that same store. Use a two-connection WAL test with an injected writer between generation/query/payload; test next request sees new data and failed requests release snapshot. Do not hold snapshot across model loading, prompts or network waits.
 
+Composition audit at ee7c6fa: every AppRequest is read-only and CLI resume_app/resume_semantic_app share one store across all data ports. Query embedding/model preparation happens before App dispatch. Human search attaches resume/date rows after App returns; CLI and MCP handoff resolve source locations, tool activities and message facts after Search returns. Those composition paths need a nested outer scope through their final DB read, rather than independent per-call snapshots. Doctor bypasses App and reads multiple catalog counters; protect that projection directly. Resume process execution and acknowledgement must remain outside read scopes.
+
 All-request consistency, source authority, alias cleanup and vector changes may be split internally but must retain one correct final integration. Notify main before public schema changes beyond these approved corrections. Ports/app lib are owned here; CLI owns loader diagnostics, model worker owns candle/handoff.
 
 ## Source-projection implementation checkpoints (rechecked at 0395394)
