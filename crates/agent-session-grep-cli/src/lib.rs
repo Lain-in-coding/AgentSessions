@@ -1543,6 +1543,7 @@ pub(crate) fn doctor_store_data(
     store: &SqliteStore,
     offline: bool,
 ) -> Result<serde_json::Value, ProtocolError> {
+    let _snapshot = store.begin_read_snapshot()?;
     let schema = store.schema_version()?;
     // generation 与待收敛 intent 数是 durable outbox 中断恢复与一致性的只读证据。
     let generation = store.active_generation()?;
@@ -2157,39 +2158,31 @@ fn dispatch(
             let query = arg(&args, 1, "search <query>")?.to_string();
             let query_embedding =
                 prepare_search_embedding(store, retrieval_mode, &query).map_err(CliError)?;
-            let response = if retrieval_mode == RetrievalMode::Lexical {
-                let app = resume_app(store);
-                app.handle(AppRequest::Search {
-                    query,
-                    filters,
-                    facets: facets.clone(),
-                    limit,
-                    cursor,
-                    budget,
-                    include_system,
-                    group_by_session,
-                    mode: retrieval_mode,
-                    query_embedding,
-                })?
-            } else {
-                let app = resume_semantic_app(store);
-                app.handle(AppRequest::Search {
-                    query,
-                    filters,
-                    facets: facets.clone(),
-                    limit,
-                    cursor,
-                    budget,
-                    include_system,
-                    group_by_session,
-                    mode: retrieval_mode,
-                    query_embedding,
-                })?
-            };
+            // Construction resolves the current repo via Git; finish that
+            // before pinning a DB view. Lexical mode never reads semantic data.
+            let app = resume_semantic_app(store);
+            // Human rows are loaded after App returns; share its read view.
+            // Model loading/embedding must stay outside this scope.
+            let snapshot = store
+                .begin_read_snapshot()
+                .map_err(|error| CliError(error.into()))?;
+            let response = app.handle(AppRequest::Search {
+                query,
+                filters,
+                facets: facets.clone(),
+                limit,
+                cursor,
+                budget,
+                include_system,
+                group_by_session,
+                mode: retrieval_mode,
+                query_embedding,
+            })?;
             let (outcome, mut data, page, warnings) = render(response);
             if mode == protocol::OutputMode::Human {
                 attach_session_resume_rows(store, &mut data)?;
             }
+            drop(snapshot);
             // Robot/机器面如实回显本次应用的 facet（默认值不回显——输出字节不变）。
             if !facets.is_default() {
                 let echo = data.as_object_mut().expect("search data is an object");
@@ -2223,6 +2216,9 @@ fn dispatch(
             no_extra_args(&args, 1, "handoff <query>")?;
             let query = arg(&args, 1, "handoff <query>")?.to_string();
             let search_limit = 50usize;
+            let snapshot = store
+                .begin_read_snapshot()
+                .map_err(|error| CliError(error.into()))?;
             // 检索作为装配源：用宽松的 fetch-all 预算（含全文级 snippet），pack
             // 预算由包构建器单一执行（设计 D3——Context 路径的独立 clamp 会双重
             // 应用用户预算）。max_snippet_chars 放大到 schema 上限，让证据尽量
@@ -2298,6 +2294,9 @@ fn dispatch(
                     }
                 })
                 .collect();
+            // All DB-backed evidence is materialized; do not retain the read
+            // transaction while formatting/trimming the deterministic pack.
+            drop(snapshot);
             let pack = agent_session_grep_application::handoff_pack::generate_deterministic(
                 HandoffInput {
                     query_terms: std::slice::from_ref(&query),
@@ -7393,6 +7392,33 @@ mod tests {
         assert!(take_bool_flag(&mut args, "--group-by-session"));
         assert!(!take_bool_flag(&mut args, "--include-system"));
         assert_eq!(args, vec![String::from("foo")]);
+    }
+
+    #[test]
+    fn read_snapshot_composition_releases_after_success_and_error() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        for (args, mode, succeeds) in [
+            (vec!["search", "needle"], protocol::OutputMode::Human, true),
+            (vec!["handoff", "needle"], protocol::OutputMode::Json, true),
+            (
+                vec!["handoff", "needle", "--max-tokens", "invalid"],
+                protocol::OutputMode::Json,
+                false,
+            ),
+        ] {
+            let args: Vec<String> = args.into_iter().map(str::to_owned).collect();
+            assert_eq!(
+                dispatch(&store, "test.db", &args, mode, None, false).is_ok(),
+                succeeds
+            );
+            doctor_store_data(&store, true).unwrap();
+            let before = store.active_generation().unwrap();
+            let id = StableId::native(IdKind::Message, &format!("snapshot-{before}"));
+            store
+                .commit_batch(&[(id, br#"{"text":"needle"}"#.to_vec(), "needle".into())])
+                .expect("completed read scopes must not leave a transaction open");
+            assert_eq!(store.active_generation().unwrap(), before + 1);
+        }
     }
 
     #[test]

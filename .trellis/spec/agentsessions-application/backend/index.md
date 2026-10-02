@@ -331,3 +331,12 @@ Application all-feature tests: required-content coverage, duplicate/size/hash fa
 ### 7. Wrong vs Correct
 Wrong: treat file existence as verification, or stop trimming merely because evidence is empty.
 Correct: prove manifest coverage, check every retained content field, and reject irreducible overflow.
+
+## Scenario: Read request consistency
+1. **Scope:** all current AppRequest variants are read-only.
+2. **Signature:** `App::handle` acquires `catalog.begin_read_snapshot()` before request reads.
+3. **Contract:** generation, readiness/query, payload, ownership, graph and resume reads use the shared backend session. The guard survives through response assembly and drops on success/error/unwind; outer composition guards may extend the same view.
+4. **Errors:** acquisition errors remain AppError::Port; invalid cursor/budget paths still release the scope.
+5. **Cases:** a racing writer cannot pair old generation with new payload; a later request observes the new generation.
+6. **Tests:** adapter/application WAL integration injects commits before query and before payload/ownership, plus early errors and unwinding.
+7. **Boundary:** if a future AppRequest writes data, it must not inherit this read-only scope accidentally. Model embedding and interactive execution stay outside App read assembly.

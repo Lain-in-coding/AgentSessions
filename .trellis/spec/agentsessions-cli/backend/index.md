@@ -467,3 +467,12 @@ Boundary units and fake-provider e2e cover no-spawn, valid argv, mode isolation 
 ### 7. Wrong vs Correct
 Wrong: infer safe argv from shell quoting, or use the dispatch branch for release quality.
 Correct: validate operands before preview/execute and bind every release consumer to prepare's SHA.
+
+## Scenario: Composite read response snapshots
+1. **Scope:** Human search rows, CLI/MCP handoff evidence and doctor counters extend beyond a single App call.
+2. **Signature:** use the store's nestable `begin_read_snapshot` around App plus all subsequent DB projection reads.
+3. **Contract:** prepare model/query embeddings first. Human search retains its view through resume/date rows; handoff retains it through source locators, activities and message facts, then releases before pack formatting. Doctor protects its direct multi-counter projection. Ordinary App calls rely on App's guard.
+4. **Errors:** map acquisition errors through existing protocol/business mappings. Early failures release the view before the next command.
+5. **Cases:** generation and evidence refer to one view; resume confirmation, child process execution and output/transport waits never retain a guard.
+6. **Tests:** CLI Human search/handoff/doctor and MCP handoff success/error paths permit a subsequent write; core WAL tests prove nested view consistency.
+7. **Wrong/right:** wrapping App alone leaves post-response DB reads unprotected; extend only the composite read region, never the whole command/server lifetime.

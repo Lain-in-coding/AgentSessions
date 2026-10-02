@@ -1695,6 +1695,10 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore, 
     /// 执行一个应用请求。校验错误保持 Domain 分类，端口错误保持 Port 分类，
     /// cursor/budget 错误保持各自分类（protocol 层有专属 canonical code）。
     pub fn handle(&self, req: AppRequest) -> Result<AppResponse, AppError> {
+        // Every AppRequest is read-only. All data ports must share the catalog's
+        // backend session; outer composition may keep a nested guard for its
+        // additional evidence/display reads after this response is assembled.
+        let _snapshot = self.catalog.begin_read_snapshot()?;
         match req {
             AppRequest::Search {
                 query,

@@ -212,3 +212,12 @@ Correct: expose typed counts/status and keep private mappings in the adapter.
 ---
 
 **Language**: All documentation in **English**.
+
+## Scenario: Request read snapshots
+1. **Scope:** one read request across catalog/search/context/resume ports.
+2. **Signature:** `CatalogStore::begin_read_snapshot() -> PortResult<Box<dyn ReadSnapshot + '_>>`; `&T` forwards it.
+3. **Contract:** returned guards represent an already pinned view; nested guards share it until the last drops, including non-LIFO release. All mutable ports must use the same backend session. The default no-op is only for immutable/in-memory fixtures; persistent adapters and forwarding wrappers must override it.
+4. **Errors:** acquisition failure propagates as a port error; early return/unwind must release the guard. Adapter cleanup failure must fail closed on later acquisition, never silently reuse a stale snapshot.
+5. **Cases:** good: search IDs and their payloads share a generation; bad: independently reopened connections or a RefCell borrow retained through port calls.
+6. **Tests:** actual WAL writer interleavings, reference forwarding, nested scope and error/unwind cleanup.
+7. **Boundary:** this is a read capability, not an exposed SQLite transaction. Never hold it across writes, model loading, prompts or network/output waits.

@@ -1646,6 +1646,8 @@ impl SqliteStore {
         Self::register_scalar_functions(&conn)?;
         let store = SqliteStore {
             conn: RefCell::new(conn),
+            read_snapshot_count: Default::default(),
+            read_snapshot_failed: Default::default(),
             _lease: Some(lease),
             semantic_model_id: RefCell::new(None),
             repo_slug_resolver: RefCell::new(Box::new(NoopRepoSlugResolver)),

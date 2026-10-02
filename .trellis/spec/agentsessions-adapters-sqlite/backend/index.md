@@ -555,3 +555,12 @@ Good: one-byte chunks still identify SQLite. Base: empty/short text is a regular
 
 ### 7. Wrong vs Correct
 Wrong: classify from one read's byte count. Correct: `read_exact` with explicit UnexpectedEof handling and other errors propagated.
+
+## Scenario: Pinned SQLite request views
+1. **Scope:** multi-read requests on one SqliteStore, including write-open stores used for tests/composition.
+2. **Signature:** `begin_read_snapshot() -> PortResult<Box<dyn ReadSnapshot + '_>>` implements the catalog port.
+3. **Contract:** first guard starts a deferred transaction and reads store_metadata before returning; BEGIN or SELECT 1 alone is insufficient. Nested guards share a counter without retaining a RefCell borrow. query_only refuses writes within the scope. Constructors leave query_only OFF; the private connection is not externally configurable. Final guard rolls back and restores OFF without changing SQLite open flags or migrating schema.
+4. **Errors:** do not join an unrelated active transaction. Failed pin cleans up; failed rollback/reset poisons subsequent snapshot acquisition with a reopen-required backend error. Drop cannot return a cleanup error for the current response; it must not panic during unwinding.
+5. **Cases:** concurrent WAL commit is invisible to the current view and visible to the next. Read-only source/catalog permissions stay unchanged.
+6. **Tests:** writer before query and before payload/ownership, eager pin, non-LIFO nesting, early error/unwind, failed pin, write refusal and cleanup poisoning.
+7. **Wrong/right:** a process mutex cannot provide cross-process consistency; one pinned connection shared by every request data port can.

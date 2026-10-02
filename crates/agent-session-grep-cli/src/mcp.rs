@@ -693,6 +693,8 @@ impl McpServer<'_> {
         let filters = opt_filters(args)?;
         let search_limit = limit.unwrap_or(50);
         let app = resume_app(self.store);
+        // Search and the later source/activity/fact reads form one response.
+        let snapshot = self.store.begin_read_snapshot().map_err(business)?;
         // 检索作为装配源：宽松 fetch-all 预算 + 全文级 snippet；pack 预算由
         // 包构建器单一执行（与 CLI handoff 同一约定）。
         let response = app.handle(AppRequest::Search {
@@ -743,6 +745,7 @@ impl McpServer<'_> {
                 }
             })
             .collect();
+        drop(snapshot);
         let pack =
             agent_session_grep_application::handoff_pack::generate_deterministic(HandoffInput {
                 query_terms: std::slice::from_ref(&query),
@@ -2020,6 +2023,27 @@ mod tests {
                 tool["name"]
             );
             assert!(tool["description"].as_str().is_some_and(|d| !d.is_empty()));
+        }
+    }
+
+    #[test]
+    fn read_snapshot_handoff_releases_after_success_and_error() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let mut server = ready(&store);
+        for (query, is_error) in [("needle".to_string(), false), ("x".repeat(4096), true)] {
+            let response = call(
+                &mut server,
+                "generate_handoff",
+                json!({ "query": query, "max_bytes": 4096 }),
+            );
+            assert_eq!(response["result"]["isError"], is_error, "{response}");
+            let id = StableId::native(
+                IdKind::Message,
+                if is_error { "after-error" } else { "after-ok" },
+            );
+            store
+                .commit_batch(&[(id, br#"{"text":"needle"}"#.to_vec(), "needle".into())])
+                .expect("handoff must release its outer snapshot before the next write");
         }
     }
 

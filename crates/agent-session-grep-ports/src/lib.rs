@@ -91,10 +91,27 @@ pub struct CatalogEntry {
     pub payload: Vec<u8>,
 }
 
+/// A request-scoped, already pinned read view. Dropping the last nested guard
+/// releases the view, including on early return or unwinding. Implementations
+/// must not retain an interior-mutability borrow across other port calls.
+/// Keep this guard out of writes, prompts, model loading and network waits.
+pub trait ReadSnapshot {}
+
+impl ReadSnapshot for () {}
+
 /// 目录存储端口：规范化实体的持久化目录（对应 SQLite catalog）。
 ///
 /// 只暴露按 StableId 存取及稳定排序列表；全文查询能力由 SearchIndex 承担。
 pub trait CatalogStore {
+    /// Pin the shared catalog/search/context/resume read view before any read.
+    /// All mutable data ports in one request must use this same backend session.
+    /// Nested guards share the view until the last guard drops (not just LIFO).
+    /// The default is only suitable for immutable/in-memory request fixtures;
+    /// mutable persistent adapters must override it, as must forwarding wrappers.
+    fn begin_read_snapshot(&self) -> PortResult<Box<dyn ReadSnapshot + '_>> {
+        Ok(Box::new(()))
+    }
+
     /// 按 StableId 取回已规范化实体的原始 JSON 负载。
     fn get(&self, id: &StableId) -> PortResult<Option<Vec<u8>>>;
 
@@ -859,6 +876,10 @@ pub struct EmbeddingManifest {
 // 用共享引用同时填充 App<C,S> 的两个泛型槽（catalog 与 index 是同一实例）。
 // 组合根据此复用单一 SqliteStore，无需两份连接或内部 Arc。
 impl<T: CatalogStore + ?Sized> CatalogStore for &T {
+    fn begin_read_snapshot(&self) -> PortResult<Box<dyn ReadSnapshot + '_>> {
+        (**self).begin_read_snapshot()
+    }
+
     fn get(&self, id: &StableId) -> PortResult<Option<Vec<u8>>> {
         (**self).get(id)
     }

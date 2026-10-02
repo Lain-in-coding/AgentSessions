@@ -30,14 +30,14 @@ use agent_session_grep_domain::{
 };
 use agent_session_grep_ports::{
     CatalogEntry, CatalogStore, ContextGraphStore, ContextStats, MessageContextCandidate,
-    PortError, PortResult, RepoTotals, ResumeClaimsStore, SearchFacets, SearchHit, SearchIndex,
-    SearchQuery, SemanticIndex, SessionResumeMetadata, SidechainFacet, SourcePlacement,
-    SourceResumeClaim, TOOL_ACTIVITY_TARGET_MAX_CHARS, UsageTotals,
+    PortError, PortResult, ReadSnapshot, RepoTotals, ResumeClaimsStore, SearchFacets, SearchHit,
+    SearchIndex, SearchQuery, SemanticIndex, SessionResumeMetadata, SidechainFacet,
+    SourcePlacement, SourceResumeClaim, TOOL_ACTIVITY_TARGET_MAX_CHARS, UsageTotals,
 };
 use relocation::{InstallationAssignment, RelocationManifest};
 use rusqlite::{Connection, OptionalExtension};
 use std::any::Any;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -1486,6 +1486,8 @@ enum RepoIdentityRebuild {
 /// lease 与 store 同生命周期，Drop store 时释放 data-root 写锁。
 pub struct SqliteStore {
     conn: RefCell<Connection>,
+    read_snapshot_count: Cell<usize>,
+    read_snapshot_failed: Cell<bool>,
     /// 写入路径持有的 data-root 独占 lease；只读打开时为 None。
     _lease: Option<WriterLease>,
     /// 当前语义模型 id（#3）：`None` 表示未配置语义检索，`SemanticIndex`
@@ -1499,6 +1501,32 @@ pub struct SqliteStore {
     /// Staging reservations only; persisted with the matching source replacement.
     pending_installations: RefCell<BTreeMap<String, InstallationAssignment>>,
     relocation_clock: fn() -> PortResult<i64>,
+}
+
+struct SqliteReadSnapshot<'a> {
+    store: &'a SqliteStore,
+}
+
+impl ReadSnapshot for SqliteReadSnapshot<'_> {}
+
+impl Drop for SqliteReadSnapshot<'_> {
+    fn drop(&mut self) {
+        let remaining = self.store.read_snapshot_count.get() - 1;
+        self.store.read_snapshot_count.set(remaining);
+        if remaining == 0 {
+            // No writes belong in this scope. Rollback also releases read locks.
+            // A failed cleanup poisons future snapshots rather than silently
+            // reusing an old view. Drop itself must not panic during unwinding.
+            let released = self.store.conn.try_borrow().is_ok_and(|conn| {
+                let rollback = conn.execute_batch("ROLLBACK");
+                let reset = conn.execute_batch("PRAGMA query_only = OFF");
+                rollback.is_ok() && reset.is_ok()
+            });
+            if !released {
+                self.store.read_snapshot_failed.set(true);
+            }
+        }
+    }
 }
 
 /// 一批源路径的指纹缓存项：捕获时长度与内容指纹。
@@ -1526,6 +1554,53 @@ struct CatalogStateSnapshot<'a> {
 }
 
 impl SqliteStore {
+    /// Pin this connection's read view; nested callers share it until the last
+    /// guard drops. This never creates, migrates or writes a catalog.
+    pub fn begin_read_snapshot(&self) -> PortResult<Box<dyn ReadSnapshot + '_>> {
+        if self.read_snapshot_failed.get() {
+            return Err(PortError::Backend(
+                "read snapshot cleanup failed; reopen catalog".into(),
+            ));
+        }
+        let count = self.read_snapshot_count.get();
+        if count == 0 {
+            let conn = self.conn.borrow();
+            if !conn.is_autocommit() {
+                return Err(PortError::InvalidRequest(
+                    "read snapshot cannot join a write transaction".into(),
+                ));
+            }
+            // All constructors leave query_only OFF. Enforce the read-only
+            // scope even on a write-open store; never accept writes then silently
+            // discard them on guard cleanup. SQLITE_OPEN_READ_ONLY is unchanged.
+            conn.execute_batch("PRAGMA query_only = ON")
+                .map_err(backend)?;
+            if let Err(error) = conn.execute_batch("BEGIN DEFERRED") {
+                if conn.execute_batch("PRAGMA query_only = OFF").is_err() {
+                    self.read_snapshot_failed.set(true);
+                }
+                return Err(backend(error));
+            }
+            // BEGIN alone does not pin SQLite's view. Read a real main-database
+            // table before returning (SELECT 1 would not suffice).
+            let pinned = conn.query_row(
+                "SELECT active_generation FROM store_metadata WHERE singleton = 1",
+                [],
+                |row| row.get::<_, i64>(0),
+            );
+            if let Err(error) = pinned {
+                let rollback = conn.execute_batch("ROLLBACK");
+                let reset = conn.execute_batch("PRAGMA query_only = OFF");
+                if rollback.is_err() || reset.is_err() {
+                    self.read_snapshot_failed.set(true);
+                }
+                return Err(backend(error));
+            }
+        }
+        self.read_snapshot_count.set(count + 1);
+        Ok(Box::new(SqliteReadSnapshot { store: self }))
+    }
+
     /// 只读打开（不抢 writer lease）。供 search/get/doctor 等读路径。
     pub fn open(path: &str) -> PortResult<Self> {
         let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
@@ -1544,6 +1619,8 @@ impl SqliteStore {
         Self::register_scalar_functions(&conn)?;
         Ok(SqliteStore {
             conn: RefCell::new(conn),
+            read_snapshot_count: Cell::new(0),
+            read_snapshot_failed: Cell::new(false),
             _lease: None,
             semantic_model_id: RefCell::new(None),
             repo_slug_resolver: RefCell::new(Box::new(NoopRepoSlugResolver)),
@@ -1575,6 +1652,8 @@ impl SqliteStore {
         Self::init(&conn)?;
         let store = SqliteStore {
             conn: RefCell::new(conn),
+            read_snapshot_count: Cell::new(0),
+            read_snapshot_failed: Cell::new(false),
             _lease: Some(lease),
             semantic_model_id: RefCell::new(None),
             repo_slug_resolver: RefCell::new(Box::new(NoopRepoSlugResolver)),
@@ -1596,6 +1675,8 @@ impl SqliteStore {
         Self::init(&conn)?;
         Ok(SqliteStore {
             conn: RefCell::new(conn),
+            read_snapshot_count: Cell::new(0),
+            read_snapshot_failed: Cell::new(false),
             _lease: None,
             semantic_model_id: RefCell::new(None),
             repo_slug_resolver: RefCell::new(Box::new(NoopRepoSlugResolver)),
@@ -7843,6 +7924,10 @@ pub const INDEX_PROJECTION_VERSION: u32 = 1;
 pub const SCHEMA_VERSION: i64 = 18;
 
 impl CatalogStore for SqliteStore {
+    fn begin_read_snapshot(&self) -> PortResult<Box<dyn ReadSnapshot + '_>> {
+        SqliteStore::begin_read_snapshot(self)
+    }
+
     fn get(&self, id: &StableId) -> PortResult<Option<Vec<u8>>> {
         let conn = self.conn.borrow();
         let mut stmt = conn
@@ -10041,6 +10126,282 @@ mod tests {
     };
     use agent_session_grep_ports::SearchFilters;
 
+    struct SnapshotRaceIndex<'a> {
+        store: &'a SqliteStore,
+        change: RefCell<Option<Box<dyn FnOnce() + 'a>>>,
+        before_query: bool,
+    }
+
+    impl SearchIndex for SnapshotRaceIndex<'_> {
+        fn index(&self, id: &StableId, text: &str) -> PortResult<()> {
+            self.store.index(id, text)
+        }
+
+        fn query_filtered(
+            &self,
+            query: SearchQuery<'_>,
+            limit: usize,
+        ) -> PortResult<Vec<SearchHit>> {
+            let change = self.change.borrow_mut().take();
+            if self.before_query {
+                if let Some(change) = change {
+                    change();
+                }
+                self.store.query_filtered(query, limit)
+            } else {
+                let mut hits = self.store.query_filtered(query, limit)?;
+                if let Some(change) = change {
+                    change();
+                }
+                // Exercise Application's batched ownership read as well as payload.
+                for hit in &mut hits {
+                    hit.session_id = None;
+                }
+                Ok(hits)
+            }
+        }
+    }
+
+    #[test]
+    fn app_read_snapshot_survives_wal_writer_before_query() {
+        assert_app_read_snapshot_with_writer(true);
+    }
+
+    #[test]
+    fn app_read_snapshot_survives_wal_writer_before_payload_and_ownership() {
+        assert_app_read_snapshot_with_writer(false);
+    }
+
+    fn assert_app_read_snapshot_with_writer(before_query: bool) {
+        use agent_session_grep_application::{App, AppRequest, AppResponse, ResponseBudget};
+        use agent_session_grep_ports::RetrievalMode;
+        {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("catalog.db");
+            let writer = SqliteStore::open_for_write(path.to_str().unwrap()).unwrap();
+            let message = sid(IdKind::Message, b"snapshot-message");
+            let document = sid(IdKind::Document, b"snapshot-document");
+            let old_owner = sid(IdKind::Session, b"snapshot-old-owner");
+            let new_owner = sid(IdKind::Session, b"snapshot-new-owner");
+            let old_payload = br#"{"role":"user","text":"snapshotneedle old"}"#;
+            let new_payload = br#"{"role":"user","text":"replacementneedle new"}"#;
+            writer
+                .commit_source_batches_if_changed(&[source_batch(
+                    "synthetic-snapshot.jsonl",
+                    vec![
+                        (
+                            message.clone(),
+                            old_payload.to_vec(),
+                            "snapshotneedle old".into(),
+                        ),
+                        entity_entry(&document),
+                        entity_entry(&old_owner),
+                        entity_entry(&new_owner),
+                    ],
+                    vec![placement(&old_owner, &document, &message, 0, false, None)],
+                    Vec::new(),
+                    true,
+                )])
+                .unwrap();
+            let reader = SqliteStore::open(path.to_str().unwrap()).unwrap();
+            let generation = reader.active_generation().unwrap();
+            let index = SnapshotRaceIndex {
+                store: &reader,
+                before_query,
+                change: RefCell::new(Some(Box::new(|| {
+                    let mut conn = writer.conn.borrow_mut();
+                    let tx = conn.transaction().unwrap();
+                    tx.execute(
+                        "UPDATE catalog SET payload=?1 WHERE id=?2",
+                        rusqlite::params![new_payload.as_slice(), message.as_str()],
+                    )
+                    .unwrap();
+                    tx.execute("UPDATE fts SET text='replacementneedle new' WHERE rowid=(SELECT fts_rowid FROM fts_ids WHERE wire_id=?1)", [message.as_str()]).unwrap();
+                    tx.execute_batch("DELETE FROM session_fts; DELETE FROM session_fts_ids;")
+                        .unwrap();
+                    tx.execute(
+                        "UPDATE message_placements SET session_id=?1 WHERE message_id=?2",
+                        rusqlite::params![new_owner.as_str(), message.as_str()],
+                    )
+                    .unwrap();
+                    tx.execute("UPDATE store_metadata SET active_generation=active_generation+1 WHERE singleton=1", []).unwrap();
+                    tx.commit().unwrap();
+                }))),
+            };
+            let app = App::new(&reader, index);
+            let request = |text: &str| AppRequest::Search {
+                query: text.into(),
+                filters: SearchFilters::EMPTY,
+                facets: SearchFacets::default(),
+                limit: 10,
+                cursor: None,
+                budget: ResponseBudget::default(),
+                include_system: false,
+                group_by_session: false,
+                mode: RetrievalMode::Lexical,
+                query_embedding: None,
+            };
+            let AppResponse::Search {
+                hits,
+                generation: observed,
+                ..
+            } = app.handle(request("snapshotneedle")).unwrap()
+            else {
+                panic!("search")
+            };
+            assert_eq!(observed, generation);
+            assert_eq!(hits.len(), 1, "query must use the generation's snapshot");
+            assert_eq!(hits[0].text.as_deref(), Some("snapshotneedle old"));
+            assert_eq!(hits[0].session_id.as_deref(), Some(old_owner.as_str()));
+            let AppResponse::Search {
+                hits,
+                generation: observed,
+                ..
+            } = app.handle(request("replacementneedle")).unwrap()
+            else {
+                panic!("search")
+            };
+            assert_eq!(observed, generation + 1);
+            assert_eq!(hits.len(), 1);
+            assert_eq!(hits[0].text.as_deref(), Some("replacementneedle new"));
+            assert_eq!(hits[0].session_id.as_deref(), Some(new_owner.as_str()));
+        }
+    }
+
+    #[test]
+    fn read_snapshot_pins_immediately_and_nested_guards_release_last() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.db");
+        let writer = SqliteStore::open_for_write(path.to_str().unwrap()).unwrap();
+        let reader = SqliteStore::open(path.to_str().unwrap()).unwrap();
+        let schema = reader.schema_version().unwrap();
+        let outer = reader.begin_read_snapshot().unwrap();
+        // No caller SELECT between begin and the writer: tests eager pinning.
+        writer
+            .conn
+            .borrow()
+            .execute("UPDATE store_metadata SET active_generation=1", [])
+            .unwrap();
+        let reader_ref = &reader;
+        let inner = CatalogStore::begin_read_snapshot(&reader_ref).unwrap();
+        assert_eq!(reader.active_generation().unwrap(), 0);
+        drop(outer); // Non-LIFO release must not terminate the inner view.
+        assert_eq!(reader.active_generation().unwrap(), 0);
+        assert!(!reader.conn.borrow().is_autocommit());
+        drop(inner);
+        assert!(reader.conn.borrow().is_autocommit());
+        let next = reader.begin_read_snapshot().unwrap();
+        assert_eq!(reader.active_generation().unwrap(), 1);
+        assert!(reader.conn.borrow().is_readonly("main").unwrap());
+        assert_eq!(reader.schema_version().unwrap(), schema);
+        assert!(
+            reader
+                .put(&sid(IdKind::Message, b"read-only"), b"{}")
+                .is_err()
+        );
+        drop(next);
+        assert_eq!(reader.conn.borrow().total_changes(), 0);
+    }
+
+    #[test]
+    fn read_snapshot_releases_after_app_errors_and_unwind() {
+        use agent_session_grep_application::{App, AppRequest};
+        let store = SqliteStore::open_in_memory().unwrap();
+        let app = App::new(&store, &store);
+        // Validation error, after snapshot entry but before data assembly.
+        assert!(
+            app.handle(AppRequest::GetSessionResume {
+                session_id: sid(IdKind::Message, b"wrong-kind"),
+            })
+            .is_err()
+        );
+        assert!(store.conn.borrow().is_autocommit());
+        assert_eq!(store.read_snapshot_count.get(), 0);
+        // Backend error in an App read releases its nested guard but not ours.
+        let outer = store.begin_read_snapshot().unwrap();
+        assert!(
+            app.handle(AppRequest::Context {
+                session_id: sid(IdKind::Session, b"absent"),
+                policy: agent_session_grep_domain::ContextPolicy::Mainline,
+                level: agent_session_grep_application::ContextLevel::Raw,
+                budget: Default::default(),
+            })
+            .is_err()
+        );
+        assert_eq!(store.read_snapshot_count.get(), 1);
+        drop(outer);
+        assert!(store.conn.borrow().is_autocommit());
+        let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _snapshot = store.begin_read_snapshot().unwrap();
+            panic!("synthetic read failure");
+        }));
+        assert!(unwind.is_err());
+        assert!(store.conn.borrow().is_autocommit());
+        let _next = store.begin_read_snapshot().unwrap();
+    }
+
+    #[test]
+    fn read_snapshot_refuses_unrelated_transaction_and_rolls_back_failed_pin() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        store
+            .conn
+            .borrow()
+            .execute_batch("BEGIN IMMEDIATE")
+            .unwrap();
+        assert!(matches!(
+            store.begin_read_snapshot(),
+            Err(PortError::InvalidRequest(_))
+        ));
+        assert!(!store.conn.borrow().is_autocommit());
+        store
+            .conn
+            .borrow()
+            .execute_batch("ROLLBACK; ALTER TABLE store_metadata RENAME TO hidden_metadata")
+            .unwrap();
+        assert!(matches!(
+            store.begin_read_snapshot(),
+            Err(PortError::Backend(_))
+        ));
+        assert!(store.conn.borrow().is_autocommit());
+        assert_eq!(store.read_snapshot_count.get(), 0);
+        store
+            .conn
+            .borrow()
+            .execute_batch("ALTER TABLE hidden_metadata RENAME TO store_metadata")
+            .unwrap();
+        let _next = store.begin_read_snapshot().unwrap();
+    }
+
+    #[test]
+    fn read_snapshot_cleanup_failure_refuses_later_requests() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let snapshot = store.begin_read_snapshot().unwrap();
+        // Simulate external transaction misuse so cleanup cannot succeed.
+        store.conn.borrow().execute_batch("ROLLBACK").unwrap();
+        drop(snapshot);
+        assert!(matches!(
+            store.begin_read_snapshot(),
+            Err(PortError::Backend(_))
+        ));
+        assert!(store.read_snapshot_failed.get());
+    }
+
+    #[test]
+    fn read_snapshot_refuses_writes_and_restores_writer_after_last_drop() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let id = sid(IdKind::Message, b"snapshot-write-refusal");
+        let outer = store.begin_read_snapshot().unwrap();
+        let inner = store.begin_read_snapshot().unwrap();
+        assert!(store.put(&id, b"{}").is_err());
+        assert!(store.index(&id, "forbidden").is_err());
+        assert_eq!(store.get(&id).unwrap(), None);
+        drop(outer);
+        assert!(store.put(&id, b"{}").is_err());
+        drop(inner);
+        store.put(&id, b"{}").unwrap();
+        assert_eq!(store.get(&id).unwrap(), Some(b"{}".to_vec()));
+    }
+
     type PlacementSnapshotRow = (
         String,
         String,
@@ -10060,6 +10421,8 @@ mod tests {
         SqliteStore::init(&conn).unwrap();
         SqliteStore {
             conn: RefCell::new(conn),
+            read_snapshot_count: Cell::new(0),
+            read_snapshot_failed: Cell::new(false),
             _lease: Some(lease),
             semantic_model_id: RefCell::new(None),
             repo_slug_resolver: RefCell::new(Box::new(NoopRepoSlugResolver)),
