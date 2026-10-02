@@ -78,6 +78,11 @@ adapters know *how*. Depends on `agentsessions-domain` and
   charged per retained occurrence. Budget fallback retries in detail order
   `sessions -> talks -> raw`; context item clamps expose `max_messages`, never
   the internal generic `max_items` reason.
+- Context activity reads use only retained Message IDs after budgeting. Port
+  failures propagate as `AppError::Port` even for an empty selected graph;
+  `Ok([])` remains a valid result for absent optional activity projections.
+  Never replace an activity storage error with successful empty output. Usage
+  aggregation follows the same existing error-propagation contract.
 - `ContextMessage` carries `{ id, placement_id, message_id, payload }`;
   `id == message_id` is the compatibility alias and `placement_id` is
   authoritative. `branch_leaf_placement_id` is authoritative while
@@ -93,6 +98,12 @@ adapters know *how*. Depends on `agentsessions-domain` and
   the first request's `issued_at_ms`; only `offset` changes between pages.
   Preserve `expires_at_ms`, so search pagination never extends the original
   15-minute TTL. The digest version includes the clock-anchor revision.
+- Current-repository scoring uses the filtered `SearchHit.session_id` when
+  present; only legacy hits without an owner use `CatalogStore::session_of`.
+  Display, grouping and repository boost must refer to that same owner. Signal
+  weights are unchanged. The `search-v2-rrf60-signals-v3-matched-owner` digest
+  invalidates pre-fix search cursors so pagination cannot silently mix old and
+  corrected rankings; list cursors retain their existing contract.
 - System-noise messages (payload `role` system/developer) are excluded from
   search by default; `include_system: true` opts back in. `group_by_session`
   collapses hits per session over a bounded scan window: the best-scoring hit

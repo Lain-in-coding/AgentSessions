@@ -56,6 +56,13 @@ are derived and must be fully rebuildable from `catalog` at any time.**
   never by comparing their raw BM25 scores. SQLite FTS5
   auxiliary functions and `MATCH` name the real virtual table (`fts`), not a
   table alias.
+- Filtered hit ownership is occurrence-aware: repo, provider and applicable
+  sidechain predicates must hold on the same placement. Select the smallest
+  matching Session wire ID deterministically and return it with lexical and
+  semantic hits so hybrid/grouping/display do not fall back to an unrelated
+  compatibility alias. Metadata representatives must satisfy the same placement
+  predicates. Preserve MainOnly's existing message-wide exclusion of any
+  sidechain history; this ownership correction does not redefine that facet.
 - `ContextGraphStore` reads — return typed Domain messages/documents/placements/
   edges, group reverse candidates by distinct Session, and expose aggregate
   placement/claim counts. They never return SQL rows or compatibility JSON.

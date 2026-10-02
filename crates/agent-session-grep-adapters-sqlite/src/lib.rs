@@ -8517,6 +8517,13 @@ impl SqliteStore {
             "SELECT representative.message_id FROM message_placements representative
              WHERE representative.session_id = sfi.session_wire",
         );
+        append_placement_predicates(
+            &mut representative,
+            &mut params,
+            "representative",
+            filters,
+            &SearchFacets::default(),
+        );
         // A metadata hit must project a Message satisfying the same predicates,
         // not a different (possibly out-of-window) Message from that Session.
         append_message_predicates(
@@ -8648,8 +8655,14 @@ impl SearchIndex for SqliteStore {
         if safe_query.is_empty() || limit == 0 {
             return Ok(Vec::new());
         }
-        let mut sql = String::from("SELECT f.id, bm25(fts) FROM fts AS f WHERE fts MATCH ?1");
         let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(safe_query.clone())];
+        let owner = matching_session_sql(
+            &mut params,
+            "(SELECT wire_id FROM fts_ids WHERE id_json = f.id)",
+            query.filters,
+            facets,
+        );
+        let mut sql = format!("SELECT f.id, bm25(fts), ({owner}) FROM fts AS f WHERE fts MATCH ?1");
         append_message_predicates(
             &mut sql,
             &mut params,
@@ -8666,7 +8679,11 @@ impl SearchIndex for SqliteStore {
         let mut stmt = conn.prepare(&sql).map_err(backend)?;
         let rows = stmt
             .query_map(rusqlite::params_from_iter(params.iter()), |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, f64>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
             })
             .map_err(backend)?;
         let mut hits = collect_hits(rows)?;
@@ -8710,21 +8727,32 @@ impl SearchIndex for SqliteStore {
     }
 }
 
-/// Shared lexical/semantic metadata predicates. The message expression is
-/// generated only by this adapter; all user values remain bound parameters.
-fn append_message_predicates(
-    sql: &mut String,
+/// Select the canonical owner from placements satisfying all occurrence-local
+/// predicates together; never combine a repo from one placement with another's
+/// provider or sidechain flag. Wire ordering keeps shared-message ownership stable.
+fn matching_session_sql(
     params: &mut Vec<Box<dyn rusqlite::ToSql>>,
     message: &str,
     filters: &agent_session_grep_ports::SearchFilters,
     facets: &SearchFacets,
-    include_system: bool,
+) -> String {
+    let mut sql = format!(
+        "SELECT MIN(owner.session_id) FROM message_placements owner WHERE owner.message_id = {message}"
+    );
+    append_placement_predicates(&mut sql, params, "owner", filters, facets);
+    sql
+}
+
+fn append_placement_predicates(
+    sql: &mut String,
+    params: &mut Vec<Box<dyn rusqlite::ToSql>>,
+    placement: &str,
+    filters: &agent_session_grep_ports::SearchFilters,
+    facets: &SearchFacets,
 ) {
     if !filters.providers.is_empty() {
         sql.push_str(&format!(
-            " AND EXISTS (SELECT 1 FROM message_placements mp
-             JOIN catalog doc ON doc.id = mp.document_id
-             WHERE mp.message_id = {message}
+            " AND EXISTS (SELECT 1 FROM catalog doc WHERE doc.id = {placement}.document_id
              AND CASE WHEN json_valid(doc.payload) THEN json_extract(doc.payload, '$.provider') END IN ("
         ));
         for (index, provider) in filters.providers.iter().enumerate() {
@@ -8735,6 +8763,37 @@ fn append_message_predicates(
             sql.push_str(&format!("?{}", params.len()));
         }
         sql.push_str("))");
+    }
+    if let Some(repo) = &filters.repo {
+        params.push(Box::new(repo.clone()));
+        sql.push_str(&format!(
+            " AND EXISTS (SELECT 1 FROM session_repo_slugs rs
+             WHERE rs.session_wire = {placement}.session_id AND rs.repo_slug = ?{})",
+            params.len()
+        ));
+    }
+    if facets.sidechain != SidechainFacet::Include {
+        let sidechain = i32::from(facets.sidechain == SidechainFacet::SubagentOnly);
+        sql.push_str(&format!(" AND {placement}.is_sidechain = {sidechain}"));
+    }
+}
+
+/// Shared lexical/semantic metadata predicates. The message expression is
+/// generated only by this adapter; all user values remain bound parameters.
+fn append_message_predicates(
+    sql: &mut String,
+    params: &mut Vec<Box<dyn rusqlite::ToSql>>,
+    message: &str,
+    filters: &agent_session_grep_ports::SearchFilters,
+    facets: &SearchFacets,
+    include_system: bool,
+) {
+    if !filters.providers.is_empty()
+        || filters.repo.is_some()
+        || facets.sidechain == SidechainFacet::SubagentOnly
+    {
+        let owner = matching_session_sql(params, message, filters, facets);
+        sql.push_str(&format!(" AND ({owner}) IS NOT NULL"));
     }
     if filters.since.is_some() || filters.until.is_some() || !include_system {
         sql.push_str(&format!(
@@ -8758,23 +8817,10 @@ fn append_message_predicates(
         }
         sql.push(')');
     }
-    if let Some(repo) = &filters.repo {
-        params.push(Box::new(repo.clone()));
+    // Preserve MainOnly's existing message-wide exclusion of sidechain history.
+    if facets.sidechain == SidechainFacet::MainOnly {
         sql.push_str(&format!(
-            " AND EXISTS (SELECT 1 FROM message_placements rp
-             JOIN session_repo_slugs rs ON rs.session_wire = rp.session_id
-             WHERE rp.message_id = {message} AND rs.repo_slug = ?{})",
-            params.len()
-        ));
-    }
-    if facets.sidechain != SidechainFacet::Include {
-        let negate = if facets.sidechain == SidechainFacet::MainOnly {
-            "NOT "
-        } else {
-            ""
-        };
-        sql.push_str(&format!(
-            " AND {negate}EXISTS (SELECT 1 FROM message_placements mp
+            " AND NOT EXISTS (SELECT 1 FROM message_placements mp
             WHERE mp.message_id = {message} AND mp.is_sidechain = 1)"
         ));
     }
@@ -8847,17 +8893,18 @@ impl SemanticIndex for SqliteStore {
             return Ok(Vec::new());
         };
         let conn = self.conn.borrow();
-        let mut sql = String::from(
-            "SELECT mv.wire_id, fi.id_json, mv.embedding
-             FROM message_vec mv
-             JOIN catalog live_message ON live_message.id = mv.wire_id
-             LEFT JOIN fts_ids fi ON fi.wire_id = mv.wire_id
-             WHERE mv.model_id = ?1 AND mv.dimension = ?2",
-        );
         let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![
             Box::new(model_id),
             Box::new(i64::try_from(query_embedding.len()).map_err(backend)?),
         ];
+        let owner = matching_session_sql(&mut params, "mv.wire_id", filters, facets);
+        let mut sql = format!(
+            "SELECT mv.wire_id, fi.id_json, mv.embedding, ({owner})
+             FROM message_vec mv
+             JOIN catalog live_message ON live_message.id = mv.wire_id
+             LEFT JOIN fts_ids fi ON fi.wire_id = mv.wire_id
+             WHERE mv.model_id = ?1 AND mv.dimension = ?2"
+        );
         append_message_predicates(
             &mut sql,
             &mut params,
@@ -8873,13 +8920,14 @@ impl SemanticIndex for SqliteStore {
                     row.get::<_, String>(0)?,
                     row.get::<_, Option<String>>(1)?,
                     row.get::<_, Vec<u8>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
                 ))
             })
             .map_err(backend)?;
         // Retain at most k identities, not every scored row in the corpus.
         let mut top = std::collections::BinaryHeap::new();
         for row in rows {
-            let (wire, id_json, blob) = row.map_err(backend)?;
+            let (wire, id_json, blob, session_id) = row.map_err(backend)?;
             if blob.len() != query_embedding.len() * 4 {
                 return Err(PortError::Backend(
                     "stored embedding has an invalid dimension".into(),
@@ -8901,7 +8949,11 @@ impl SemanticIndex for SqliteStore {
                     PortError::Backend("stored embedding has an invalid identity".into())
                 })?,
             };
-            top.push(SemanticCandidate { score, id });
+            top.push(SemanticCandidate {
+                score,
+                id,
+                session_id,
+            });
             if top.len() > limit {
                 top.pop();
             }
@@ -8912,7 +8964,7 @@ impl SemanticIndex for SqliteStore {
             .map(|candidate| SearchHit {
                 id: candidate.id,
                 score: candidate.score,
-                session_id: None,
+                session_id: candidate.session_id,
                 text: None,
                 why_matched: Vec::new(),
                 suggested_next_commands: Vec::new(),
@@ -8945,6 +8997,7 @@ impl SemanticIndex for SqliteStore {
 struct SemanticCandidate {
     score: f32,
     id: StableId,
+    session_id: Option<String>,
 }
 impl PartialEq for SemanticCandidate {
     fn eq(&self, other: &Self) -> bool {
@@ -9127,19 +9180,18 @@ impl SqliteStore {
 }
 fn collect_hits<F>(rows: rusqlite::MappedRows<'_, F>) -> PortResult<Vec<SearchHit>>
 where
-    F: FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<(String, f64)>,
+    F: FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<(String, f64, Option<String>)>,
 {
     let mut hits = Vec::new();
     for r in rows {
-        let (id_json, bm25) = r.map_err(backend)?;
+        let (id_json, bm25, session_id) = r.map_err(backend)?;
         let id: StableId = serde_json::from_str(&id_json).map_err(backend)?;
         // 取负使"分数越高越相关"，符合 SearchHit.score 的直觉（后端相对值）。
         hits.push(SearchHit {
             id,
             score: -bm25 as f32,
-            // 端口只提供 id+score；session_id/text/guidance 由 Application 装配
-            // （批量 session_of + 批量取 payload）。
-            session_id: None,
+            // Preserve the matching placement's owner through application assembly.
+            session_id,
             text: None,
             why_matched: Vec::new(),
             suggested_next_commands: Vec::new(),
@@ -9474,6 +9526,318 @@ mod filtered_query_tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn filtered_shared_message_ownership_matches_repo_and_sidechain_in_all_modes() {
+        use agent_session_grep_application::{App, AppRequest, AppResponse, ResponseBudget};
+        use agent_session_grep_ports::{NoResumeClaims, RetrievalMode};
+        for reverse in [false, true] {
+            let store = SqliteStore::open_in_memory().unwrap();
+            let message = sid(IdKind::Message, b"shared-ownership");
+            let document = sid(IdKind::Document, b"shared-ownership-doc");
+            let mut sessions = [
+                sid(IdKind::Session, b"ownership-a"),
+                sid(IdKind::Session, b"ownership-b"),
+                sid(IdKind::Session, b"ownership-c"),
+            ];
+            sessions.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+            let mut placements: Vec<_> = sessions
+                .iter()
+                .enumerate()
+                .map(|(index, session)| {
+                    placement(session, &document, &message, index as u32, index != 0, None)
+                })
+                .collect();
+            if reverse {
+                placements.reverse();
+            }
+            let mut entries = vec![
+                (
+                    message.clone(),
+                    serde_json::json!({"role":"user", "text":"ownershipneedle"})
+                        .to_string()
+                        .into_bytes(),
+                    "ownershipneedle".into(),
+                ),
+                (
+                    document.clone(),
+                    serde_json::json!({"provider":"codex"})
+                        .to_string()
+                        .into_bytes(),
+                    String::new(),
+                ),
+            ];
+            entries.extend(sessions.iter().map(entity_entry));
+            store
+                .commit_source_batches_if_changed(&[source_batch(
+                    "ownership.jsonl",
+                    entries,
+                    placements,
+                    Vec::new(),
+                    true,
+                )])
+                .unwrap();
+            for session in &sessions[1..] {
+                store.conn.borrow().execute(
+                    "INSERT INTO session_repo_slugs(session_wire, repo_slug) VALUES(?1, 'example.test/matched')",
+                    [session.as_str()],
+                ).unwrap();
+            }
+            store.set_semantic_model("ownership-model");
+            store.index_embedding(&message, &[1.0, 0.0]).unwrap();
+            let app = App::with_resume_semantic(&store, &store, NoResumeClaims, &store);
+            for (repo, sidechain) in [
+                (Some("example.test/matched"), SidechainFacet::Include),
+                (None, SidechainFacet::SubagentOnly),
+                (Some("example.test/matched"), SidechainFacet::SubagentOnly),
+                (None, SidechainFacet::MainOnly),
+                (Some("example.test/matched"), SidechainFacet::MainOnly),
+            ] {
+                for (mode, has_embedding) in [
+                    (RetrievalMode::Lexical, true),
+                    (RetrievalMode::Semantic, true),
+                    (RetrievalMode::Hybrid, true),
+                    (RetrievalMode::Semantic, false),
+                    (RetrievalMode::Hybrid, false),
+                ] {
+                    for group_by_session in [false, true] {
+                        let AppResponse::Search {
+                            hits,
+                            retrieval_mode,
+                            fallback_warning,
+                            ..
+                        } = app
+                            .handle(AppRequest::Search {
+                                query: "ownershipneedle".into(),
+                                filters: SearchFilters {
+                                    repo: repo.map(str::to_owned),
+                                    ..Default::default()
+                                },
+                                facets: SearchFacets {
+                                    sidechain,
+                                    ..Default::default()
+                                },
+                                limit: 1,
+                                cursor: None,
+                                budget: ResponseBudget::default(),
+                                include_system: false,
+                                group_by_session,
+                                mode,
+                                query_embedding: has_embedding.then(|| vec![1.0, 0.0]),
+                            })
+                            .unwrap()
+                        else {
+                            panic!("search")
+                        };
+                        assert_eq!(
+                            retrieval_mode,
+                            if has_embedding {
+                                mode
+                            } else {
+                                RetrievalMode::LexicalFallback
+                            }
+                        );
+                        assert_eq!(fallback_warning.is_some(), !has_embedding);
+                        if sidechain == SidechainFacet::MainOnly {
+                            assert!(
+                                hits.is_empty(),
+                                "mixed main/sidechain history must be excluded: {mode:?}, embedding={has_embedding}"
+                            );
+                            continue;
+                        }
+                        assert_eq!(hits.len(), 1);
+                        assert_eq!(hits[0].id, message);
+                        assert_eq!(
+                            hits[0].session_id.as_deref(),
+                            Some(sessions[1].as_str()),
+                            "{mode:?}, {sidechain:?}, repo={repo:?}, reverse={reverse}, embedding={has_embedding}"
+                        );
+                    }
+                }
+            }
+            // Legacy catalog messages without placements remain searchable under
+            // MainOnly; absence of a placement is not evidence of sidechain use.
+            let unplaced = sid(IdKind::Message, b"unplaced-ownership");
+            store
+                .put(
+                    &unplaced,
+                    &serde_json::to_vec(&serde_json::json!({
+                        "role": "user", "text": "unplacedneedle"
+                    }))
+                    .unwrap(),
+                )
+                .unwrap();
+            store.index_embedding(&unplaced, &[1.0, 0.0]).unwrap();
+            let facets = SearchFacets {
+                sidechain: SidechainFacet::MainOnly,
+                ..Default::default()
+            };
+            let lexical = store
+                .query_faceted(
+                    SearchQuery {
+                        text: "unplacedneedle",
+                        filters: &SearchFilters::EMPTY,
+                    },
+                    10,
+                    &facets,
+                )
+                .unwrap();
+            let semantic = store
+                .query_semantic_filtered(&[1.0, 0.0], 10, &SearchFilters::EMPTY, &facets, false)
+                .unwrap();
+            for hits in [lexical, semantic] {
+                assert_eq!(hits.len(), 1);
+                assert_eq!(hits[0].id, unplaced);
+                assert_eq!(hits[0].session_id, None);
+            }
+        }
+    }
+
+    #[test]
+    fn filtered_ownership_requires_repo_provider_and_sidechain_on_same_placement() {
+        let fixture = filter_fixture();
+        let store = &fixture.store;
+        let other_session = sid(IdKind::Session, b"split-filter-session");
+        let other_document = sid(IdKind::Document, b"split-filter-doc");
+        store
+            .put(
+                &other_session,
+                &serde_json::to_vec(&serde_json::json!({})).unwrap(),
+            )
+            .unwrap();
+        store
+            .put(
+                &other_document,
+                &serde_json::to_vec(&serde_json::json!({"provider":"codex"})).unwrap(),
+            )
+            .unwrap();
+        {
+            let conn = store.conn.borrow();
+            conn.execute(
+                "INSERT INTO message_placements(placement_id,session_id,document_id,message_id,source_ordinal,is_sidechain)
+                 VALUES(?1,?2,?3,?4,0,1)",
+                rusqlite::params![
+                    placement(&other_session, &other_document, &fixture.claude_mid, 0, true, None).id.as_str(),
+                    other_session.as_str(), other_document.as_str(), fixture.claude_mid.as_str()
+                ],
+            ).unwrap();
+            conn.execute("INSERT INTO session_repo_slugs(session_wire,repo_slug) SELECT DISTINCT session_id,'example.test/main' FROM message_placements WHERE session_id != ?1", [other_session.as_str()]).unwrap();
+        }
+        store.set_semantic_model("split-model");
+        store
+            .index_embedding(&fixture.claude_mid, &[1.0, 0.0])
+            .unwrap();
+        let filters = SearchFilters {
+            repo: Some("example.test/main".into()),
+            ..Default::default()
+        };
+        for (filters, facets) in [
+            (
+                filters.clone(),
+                SearchFacets {
+                    sidechain: SidechainFacet::SubagentOnly,
+                    ..Default::default()
+                },
+            ),
+            (
+                SearchFilters {
+                    providers: vec![SearchProvider::Codex],
+                    ..filters
+                },
+                SearchFacets::default(),
+            ),
+        ] {
+            let lexical = store
+                .query_faceted(
+                    SearchQuery {
+                        text: "shared-token",
+                        filters: &filters,
+                    },
+                    10,
+                    &facets,
+                )
+                .unwrap();
+            let semantic = store
+                .query_semantic_filtered(&[1.0, 0.0], 10, &filters, &facets, false)
+                .unwrap();
+            assert!(!lexical.iter().any(|hit| hit.id == fixture.claude_mid));
+            assert!(semantic.is_empty());
+        }
+    }
+
+    #[test]
+    fn filtered_metadata_owner_keeps_matching_session_and_representative() {
+        let fixture = filter_fixture();
+        let store = &fixture.store;
+        let other_session = sid(IdKind::Session, b"metadata-other-session");
+        let other_document = sid(IdKind::Document, b"metadata-other-doc");
+        let mut source = source_batch(
+            "metadata-other.jsonl",
+            vec![
+                entity_entry(&other_session),
+                (
+                    other_document.clone(),
+                    serde_json::json!({"provider":"claude-code"})
+                        .to_string()
+                        .into_bytes(),
+                    String::new(),
+                ),
+            ],
+            vec![placement(
+                &other_session,
+                &other_document,
+                &fixture.codex_mid,
+                0,
+                false,
+                None,
+            )],
+            Vec::new(),
+            true,
+        );
+        source.resume_claims.push(SourceResumeClaim {
+            provider_id: "claude-code".into(),
+            session_id: other_session.as_str().into(),
+            provider_session_id: Some("uniquemetadataneedle".into()),
+            provider_session_id_state: "resolved".into(),
+            original_working_directory: None,
+            original_working_directory_state: "missing".into(),
+            pair_observed: false,
+        });
+        store.commit_source_batches_if_changed(&[source]).unwrap();
+        let filters = SearchFilters {
+            providers: vec![SearchProvider::Codex],
+            ..Default::default()
+        };
+        // The shared message is Codex in another Session, not in the metadata hit's Session.
+        assert!(
+            store
+                .query_filtered(
+                    SearchQuery {
+                        text: "uniquemetadataneedle",
+                        filters: &filters
+                    },
+                    10
+                )
+                .unwrap()
+                .is_empty()
+        );
+        let filters = SearchFilters {
+            providers: vec![SearchProvider::Claude],
+            ..Default::default()
+        };
+        let hits = store
+            .query_filtered(
+                SearchQuery {
+                    text: "uniquemetadataneedle",
+                    filters: &filters,
+                },
+                10,
+            )
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, fixture.codex_mid);
+        assert_eq!(hits[0].session_id.as_deref(), Some(other_session.as_str()));
     }
 
     #[test]
