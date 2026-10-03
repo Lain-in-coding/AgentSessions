@@ -802,9 +802,10 @@ pub trait SemanticIndex {
         include_system: bool,
     ) -> PortResult<Vec<SearchHit>>;
 
-    /// 语义索引是否就绪（模型已加载、向量索引已建）。
+    /// Whether the selected model has live catalog vectors of the query dimension.
+    /// Zero is never ready.
     /// Only `Ok(false)` permits lexical fallback; backend errors propagate.
-    fn is_ready(&self) -> PortResult<bool>;
+    fn is_ready(&self, query_dimension: usize) -> PortResult<bool>;
 
     /// Current model identity for cursor binding; errors must not be hidden.
     fn semantic_model_id(&self) -> PortResult<Option<String>>;
@@ -832,7 +833,7 @@ impl SemanticIndex for NoSemanticIndex {
         Ok(Vec::new())
     }
 
-    fn is_ready(&self) -> PortResult<bool> {
+    fn is_ready(&self, _query_dimension: usize) -> PortResult<bool> {
         Ok(false)
     }
 
@@ -1249,8 +1250,8 @@ impl<T: SemanticIndex + ?Sized> SemanticIndex for &T {
         (**self).query_semantic_filtered(query_embedding, limit, filters, facets, include_system)
     }
 
-    fn is_ready(&self) -> PortResult<bool> {
-        (**self).is_ready()
+    fn is_ready(&self, query_dimension: usize) -> PortResult<bool> {
+        (**self).is_ready(query_dimension)
     }
 
     fn semantic_model_id(&self) -> PortResult<Option<String>> {
@@ -2112,6 +2113,52 @@ mod tests {
             ..SearchFilters::default()
         };
         assert!(!repo_only.is_empty());
+    }
+
+    #[test]
+    fn semantic_index_reference_forwards_dimension_and_errors() {
+        struct DimensionIndex;
+        impl SemanticIndex for DimensionIndex {
+            fn index_embedding(&self, _id: &StableId, _embedding: &[f32]) -> PortResult<()> {
+                Ok(())
+            }
+            fn query_semantic_filtered(
+                &self,
+                _embedding: &[f32],
+                _limit: usize,
+                _filters: &SearchFilters,
+                _facets: &SearchFacets,
+                _include_system: bool,
+            ) -> PortResult<Vec<SearchHit>> {
+                Ok(Vec::new())
+            }
+            fn is_ready(&self, dimension: usize) -> PortResult<bool> {
+                if dimension == 4 {
+                    Err(PortError::WriterBusy(
+                        "synthetic readiness contention".into(),
+                    ))
+                } else {
+                    Ok(dimension == 3)
+                }
+            }
+            fn semantic_model_id(&self) -> PortResult<Option<String>> {
+                Ok(Some("dimension-model".into()))
+            }
+        }
+        let index = &DimensionIndex;
+        assert!(SemanticIndex::is_ready(&index, 3).unwrap());
+        assert!(!SemanticIndex::is_ready(&index, 2).unwrap());
+        assert!(matches!(
+            SemanticIndex::is_ready(&index, 4),
+            Err(PortError::WriterBusy(_))
+        ));
+        assert_eq!(
+            SemanticIndex::semantic_model_id(&index).unwrap().as_deref(),
+            Some("dimension-model")
+        );
+        for dimension in [0, 2, 3] {
+            assert!(!SemanticIndex::is_ready(&NoSemanticIndex, dimension).unwrap());
+        }
     }
 
     struct FakeContextStore {

@@ -182,11 +182,16 @@ const INDEX_BATCH_DIGEST_DOMAIN: &[u8] = b"sqlite-fts5-v1";
 /// 已知限制：切片期 `index` 命令若写入本身含制表符的正文，历史格式投影会截断到首个
 /// 制表符之后——该命令仅供切片期测试，真实数据均经 ingest/sync 以 JSON payload 写入。
 fn searchable_text(payload: &[u8]) -> String {
+    bounded_index_text(&message_body(payload))
+}
+
+/// Full canonical body: vector validity must not use the truncated FTS projection.
+fn message_body(payload: &[u8]) -> String {
     // Modern shape: `{"role":...,"text":...,...}`. Indexing the raw JSON would
     // let structural tokens (`user`, `null`, `sessions`) match every message.
     if let Ok(value) = serde_json::from_slice::<serde_json::Value>(payload) {
         if let Some(text) = value.get("text").and_then(serde_json::Value::as_str) {
-            return bounded_index_text(text);
+            return text.to_owned();
         }
         // JSON that lacks a string `text` field must not fall back to
         // indexing the raw JSON (structural-token pollution). It carries no
@@ -195,8 +200,8 @@ fn searchable_text(payload: &[u8]) -> String {
     }
     let text = String::from_utf8_lossy(payload);
     match text.split_once('\t') {
-        Some((_role, body)) => bounded_index_text(body),
-        None => bounded_index_text(&text),
+        Some((_role, body)) => body.to_owned(),
+        None => text.into_owned(),
     }
 }
 
@@ -6861,16 +6866,16 @@ impl SqliteStore {
 
     /// Retire vectors only when the final embedding input changes. Source
     /// evidence updates and compatibility aliases alone do not invalidate it.
-    fn invalidate_changed_vectors_in_tx(
+    fn invalidate_changed_vectors_in_tx<'a>(
         tx: &rusqlite::Transaction<'_>,
-        upserts: &[SourceProjection],
+        upserts: impl IntoIterator<Item = (&'a StableId, &'a [u8])>,
         deletes: &[StableId],
     ) -> PortResult<()> {
         let mut stale: BTreeSet<String> = deletes.iter().map(|id| id.as_str().to_owned()).collect();
         let incoming: BTreeMap<_, _> = upserts
-            .iter()
-            .filter(|(id, _, _)| id.kind() == IdKind::Message)
-            .map(|(id, payload, _)| (id.as_str(), payload))
+            .into_iter()
+            .filter(|(id, _)| id.kind() == IdKind::Message)
+            .map(|(id, payload)| (id.as_str(), payload))
             .collect();
         let ids: Vec<_> = incoming.keys().copied().collect();
         for chunk in chunk_ids(&ids) {
@@ -6889,9 +6894,10 @@ impl SqliteStore {
                 .map_err(backend)?;
             for row in rows {
                 let (id, old) = row.map_err(backend)?;
-                if old.as_ref().is_none_or(|old| {
-                    searchable_text(old) != searchable_text(incoming[id.as_str()])
-                }) {
+                if old
+                    .as_ref()
+                    .is_none_or(|old| message_body(old) != message_body(incoming[id.as_str()]))
+                {
                     stale.insert(id);
                 }
             }
@@ -6999,7 +7005,13 @@ impl SqliteStore {
         Self::collect_placement_sessions(&tx, &old_placement_ids, &mut affected_sessions)?;
         Self::collect_resume_claim_sessions(&tx, &source_paths, &mut affected_sessions)?;
         let alias_candidates = Self::alias_candidates(&tx, &source_paths)?;
-        Self::invalidate_changed_vectors_in_tx(&tx, upserts, deletes)?;
+        Self::invalidate_changed_vectors_in_tx(
+            &tx,
+            upserts
+                .iter()
+                .map(|(id, payload, _)| (id, payload.as_slice())),
+            deletes,
+        )?;
         trace::add(&mut trace_stages, "affected_sessions", trace_started);
 
         // 批量写入：同一事务内以多行 VALUES 语句替代逐行 prepared execute
@@ -8023,6 +8035,15 @@ impl SqliteStore {
         let tx = conn.transaction().map_err(backend)?;
         Self::verify_pending_in_tx(&tx, &pending, &upserts, &[], &relations, &manifest)?;
 
+        // Historical orphan vectors are repairable only on this writer-side
+        // maintenance path. Readiness/query never mutate; live vectors survive.
+        tx.execute(
+            "DELETE FROM message_vec WHERE NOT EXISTS (
+                 SELECT 1 FROM catalog WHERE catalog.id = message_vec.wire_id
+             )",
+            [],
+        )
+        .map_err(backend)?;
         tx.execute("DELETE FROM fts", []).map_err(backend)?;
         tx.execute("DELETE FROM fts_ids", []).map_err(backend)?;
         // Session 元数据投影（schema v11）：全量重建 `session_fts`——与消息
@@ -8311,6 +8332,7 @@ impl CatalogStore for SqliteStore {
         let mut conn = self.conn.borrow_mut();
         let tx = conn.transaction().map_err(backend)?;
         Self::reject_source_owned_writes(&tx, &[], std::slice::from_ref(id))?;
+        Self::invalidate_changed_vectors_in_tx(&tx, [(id, payload)], &[])?;
         tx.execute(
             "INSERT INTO catalog(id, payload) VALUES(?1, ?2)
              ON CONFLICT(id) DO UPDATE SET payload = excluded.payload",
@@ -9394,15 +9416,16 @@ impl SemanticIndex for SqliteStore {
             .collect())
     }
 
-    fn is_ready(&self) -> PortResult<bool> {
+    fn is_ready(&self, query_dimension: usize) -> PortResult<bool> {
         let Some(model_id) = self.semantic_model_id.borrow().clone() else {
             return Ok(false);
         };
         let conn = self.conn.borrow();
         conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM message_vec mv
-             JOIN catalog c ON c.id = mv.wire_id WHERE mv.model_id = ?1)",
-            [model_id],
+             JOIN catalog c ON c.id = mv.wire_id
+             WHERE mv.model_id = ?1 AND mv.dimension = ?2 AND ?2 > 0)",
+            rusqlite::params![model_id, i64::try_from(query_dimension).map_err(backend)?],
             |row| row.get::<_, bool>(0),
         )
         .map_err(backend)
@@ -10497,6 +10520,119 @@ mod tests {
         }
     }
 
+    impl SemanticIndex for SnapshotRaceIndex<'_> {
+        fn index_embedding(&self, id: &StableId, embedding: &[f32]) -> PortResult<()> {
+            self.store.index_embedding(id, embedding)
+        }
+        fn is_ready(&self, dimension: usize) -> PortResult<bool> {
+            let ready = self.store.is_ready(dimension)?;
+            if self.before_query
+                && let Some(change) = self.change.borrow_mut().take()
+            {
+                change();
+            }
+            Ok(ready)
+        }
+        fn semantic_model_id(&self) -> PortResult<Option<String>> {
+            self.store.semantic_model_id()
+        }
+        fn query_semantic_filtered(
+            &self,
+            embedding: &[f32],
+            limit: usize,
+            filters: &SearchFilters,
+            facets: &SearchFacets,
+            include_system: bool,
+        ) -> PortResult<Vec<SearchHit>> {
+            let hits = self.store.query_semantic_filtered(
+                embedding,
+                limit,
+                filters,
+                facets,
+                include_system,
+            )?;
+            if !self.before_query
+                && let Some(change) = self.change.borrow_mut().take()
+            {
+                change();
+            }
+            Ok(hits)
+        }
+    }
+
+    #[test]
+    fn semantic_readiness_query_and_payload_share_one_wal_snapshot() {
+        use agent_session_grep_application::{App, AppRequest, AppResponse, ResponseBudget};
+        use agent_session_grep_ports::{NoResumeClaims, RetrievalMode};
+        for before_query in [true, false] {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("catalog.sqlite");
+            let writer = SqliteStore::open_for_write(path.to_str().unwrap()).unwrap();
+            let message = sid(IdKind::Message, b"semantic-snapshot");
+            writer
+                .put(&message, br#"{"role":"user","text":"needle old"}"#)
+                .unwrap();
+            writer.set_semantic_model("snapshot-model");
+            writer.index_embedding(&message, &[1.0, 0.0]).unwrap();
+            let reader = SqliteStore::open(path.to_str().unwrap()).unwrap();
+            reader.set_semantic_model("snapshot-model");
+            let generation = reader.active_generation().unwrap();
+            let semantic = SnapshotRaceIndex {
+                store: &reader,
+                before_query,
+                change: RefCell::new(Some(Box::new(|| {
+                    writer
+                        .put(&message, br#"{"role":"user","text":"needle fixed"}"#)
+                        .unwrap();
+                }))),
+            };
+            let app = App::with_resume_semantic(&reader, &reader, NoResumeClaims, semantic);
+            let request = || AppRequest::Search {
+                query: "needle".into(),
+                filters: SearchFilters::EMPTY,
+                facets: SearchFacets::default(),
+                limit: 10,
+                cursor: None,
+                budget: ResponseBudget::default(),
+                include_system: false,
+                group_by_session: false,
+                mode: RetrievalMode::Semantic,
+                query_embedding: Some(vec![1.0, 0.0]),
+            };
+            for (expected_generation, expected_mode, expected_text) in [
+                (generation, RetrievalMode::Semantic, "needle old"),
+                (
+                    generation + 1,
+                    RetrievalMode::LexicalFallback,
+                    "needle fixed",
+                ),
+            ] {
+                let AppResponse::Search {
+                    hits,
+                    generation,
+                    retrieval_mode,
+                    fallback_warning,
+                    ..
+                } = app.handle(request()).unwrap()
+                else {
+                    panic!("search response")
+                };
+                assert_eq!(
+                    generation, expected_generation,
+                    "before_query={before_query}"
+                );
+                assert_eq!(retrieval_mode, expected_mode);
+                assert_eq!(
+                    fallback_warning.is_some(),
+                    expected_mode == RetrievalMode::LexicalFallback
+                );
+                assert_eq!(hits.len(), 1);
+                assert_eq!(hits[0].id, message);
+                assert_eq!(hits[0].text.as_deref(), Some(expected_text));
+            }
+        }
+    }
+
     #[test]
     fn app_read_snapshot_survives_wal_writer_before_query() {
         assert_app_read_snapshot_with_writer(true);
@@ -10772,7 +10908,25 @@ mod tests {
 
     #[test]
     fn semantic_vectors_reject_nonfinite_and_corrupt_storage() {
+        use agent_session_grep_application::{App, AppError, AppRequest, ResponseBudget};
+        use agent_session_grep_ports::{NoResumeClaims, RetrievalMode};
         let store = SqliteStore::open_in_memory().unwrap();
+        let search = || {
+            App::with_resume_semantic(&store, &store, NoResumeClaims, &store).handle(
+                AppRequest::Search {
+                    query: "needle".into(),
+                    filters: SearchFilters::EMPTY,
+                    facets: SearchFacets::default(),
+                    limit: 10,
+                    cursor: None,
+                    budget: ResponseBudget::default(),
+                    include_system: false,
+                    group_by_session: false,
+                    mode: RetrievalMode::Semantic,
+                    query_embedding: Some(vec![1.0, 0.0]),
+                },
+            )
+        };
         store.set_semantic_model("finite-model");
         let id = sid(IdKind::Message, b"finite");
         store.put(&id, b"{}").unwrap();
@@ -10780,7 +10934,7 @@ mod tests {
             assert!(store.index_embedding(&id, &[bad, 1.0]).is_err());
             assert!(store.query_semantic(&[bad, 1.0], 1).is_err());
         }
-        assert!(!store.is_ready().unwrap());
+        assert!(!store.is_ready(2).unwrap());
         store.index_embedding(&id, &[f32::MAX, f32::MAX]).unwrap();
         let hits = store.query_semantic(&[f32::MAX, f32::MAX], 1).unwrap();
         assert!(
@@ -10796,18 +10950,38 @@ mod tests {
             )
             .unwrap();
         assert!(store.query_semantic(&[1.0, 0.0], 1).is_err());
+        assert!(
+            store.is_ready(2).unwrap(),
+            "matching corrupt row must not masquerade as absent"
+        );
+        assert!(matches!(
+            search(),
+            Err(AppError::Port(PortError::Backend(_)))
+        ));
         store
             .conn
             .borrow()
             .execute("UPDATE message_vec SET embedding = X'0000'", [])
             .unwrap();
         assert!(store.query_semantic(&[1.0, 0.0], 1).is_err());
+        assert!(
+            store.is_ready(2).unwrap(),
+            "matching corrupt row must not masquerade as absent"
+        );
+        assert!(matches!(
+            search(),
+            Err(AppError::Port(PortError::Backend(_)))
+        ));
         store
             .conn
             .borrow()
             .execute("DROP TABLE message_vec", [])
             .unwrap();
-        assert!(matches!(store.is_ready(), Err(PortError::Backend(_))));
+        assert!(matches!(store.is_ready(2), Err(PortError::Backend(_))));
+        assert!(matches!(
+            search(),
+            Err(AppError::Port(PortError::Backend(_)))
+        ));
     }
 
     #[test]
@@ -11081,7 +11255,7 @@ mod tests {
     fn semantic_index_is_not_ready_without_model_or_vectors() {
         let store = SqliteStore::open_in_memory().unwrap();
         // 未设模型：未就绪，查询空，写入报错（不写无归属向量）。
-        assert!(!store.is_ready().unwrap());
+        assert!(!store.is_ready(2).unwrap());
         assert!(store.query_semantic(&[0.1, 0.2], 5).unwrap().is_empty());
         assert!(
             store
@@ -11090,7 +11264,7 @@ mod tests {
         );
         // 设了模型但表空：仍未就绪，Application 必须降级为 lexical_fallback。
         store.set_semantic_model("test-model");
-        assert!(!store.is_ready().unwrap());
+        assert!(!store.is_ready(2).unwrap());
     }
 
     #[test]
@@ -11104,7 +11278,7 @@ mod tests {
         // near 与查询同向；far 正交。
         store.index_embedding(&near, &[1.0, 0.0, 0.0]).unwrap();
         store.index_embedding(&far, &[0.0, 1.0, 0.0]).unwrap();
-        assert!(store.is_ready().unwrap());
+        assert!(store.is_ready(3).unwrap());
 
         let hits = store.query_semantic(&[1.0, 0.0, 0.0], 10).unwrap();
         assert_eq!(hits.len(), 2);
@@ -11124,7 +11298,7 @@ mod tests {
             .unwrap();
         // 换模型：旧向量因 model_id 不匹配被排除，不参与相似度。
         store.set_semantic_model("model-b");
-        assert!(!store.is_ready().unwrap());
+        assert!(!store.is_ready(2).unwrap());
         assert!(store.query_semantic(&[1.0, 0.0], 10).unwrap().is_empty());
         // 同模型但维度不同的查询也不匹配（避免截断比较产出无意义分数）。
         store.set_semantic_model("model-a");
@@ -11134,6 +11308,291 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn semantic_readiness_matches_query_dimension_model_and_live_catalog() {
+        use agent_session_grep_application::{App, AppRequest, AppResponse, ResponseBudget};
+        use agent_session_grep_ports::{NoResumeClaims, RetrievalMode};
+        let store = SqliteStore::open_in_memory().unwrap();
+        let live = sid(IdKind::Message, b"readiness-live");
+        let foreign = sid(IdKind::Message, b"readiness-foreign");
+        let orphan = sid(IdKind::Message, b"readiness-orphan");
+        store
+            .put(&live, br#"{"role":"user","text":"needle"}"#)
+            .unwrap();
+        store
+            .put(&foreign, br#"{"role":"user","text":"foreign"}"#)
+            .unwrap();
+        store.set_semantic_model("other-model");
+        store.index_embedding(&foreign, &[1.0, 0.0, 0.0]).unwrap();
+        store.set_semantic_model("selected-model");
+        store.index_embedding(&live, &[1.0, 0.0]).unwrap();
+        // Historical orphan has the requested dimension, but no live payload.
+        store.conn.borrow().execute(
+            "INSERT INTO message_vec(wire_id,model_id,dimension,embedding) VALUES(?1,'selected-model',3,?2)",
+            rusqlite::params![orphan.as_str(), f32_slice_to_bytes(&[1.0, 0.0, 0.0])],
+        ).unwrap();
+        let generation = store.active_generation().unwrap();
+        let app = App::with_resume_semantic(&store, &store, NoResumeClaims, &store);
+        for mode in [RetrievalMode::Semantic, RetrievalMode::Hybrid] {
+            for (dimension, expected_mode) in [(3, RetrievalMode::LexicalFallback), (2, mode)] {
+                let response = app
+                    .handle(AppRequest::Search {
+                        query: "needle".into(),
+                        filters: SearchFilters::EMPTY,
+                        facets: SearchFacets::default(),
+                        limit: 10,
+                        cursor: None,
+                        budget: ResponseBudget::default(),
+                        include_system: false,
+                        group_by_session: false,
+                        mode,
+                        query_embedding: Some(vec![1.0; dimension]),
+                    })
+                    .unwrap();
+                let AppResponse::Search {
+                    hits,
+                    retrieval_mode,
+                    fallback_warning,
+                    ..
+                } = response
+                else {
+                    panic!("search response")
+                };
+                assert_eq!(
+                    retrieval_mode, expected_mode,
+                    "{mode:?}, dimension={dimension}"
+                );
+                assert_eq!(
+                    fallback_warning.is_some(),
+                    expected_mode == RetrievalMode::LexicalFallback
+                );
+                assert_eq!(hits.len(), 1);
+                assert_eq!(hits[0].id, live);
+            }
+        }
+        assert_eq!(store.active_generation().unwrap(), generation);
+        assert_eq!(
+            table_count(&store, "message_vec"),
+            3,
+            "readiness and query must not prune orphans"
+        );
+    }
+
+    #[test]
+    fn semantic_catalog_put_invalidates_only_changed_body_and_rolls_back_on_error() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let changed = sid(IdKind::Message, b"put-vector-changed");
+        let retained = sid(IdKind::Message, b"put-vector-retained");
+        let original = typed_message_entry(&changed, "obsolete body").1;
+        store.put(&changed, &original).unwrap();
+        store.put(&retained, br#"{"text":"unrelated"}"#).unwrap();
+        store.set_semantic_model("original-model");
+        store.index_embedding(&changed, &[1.0, 0.0]).unwrap();
+        store.set_semantic_model("current-model");
+        store.index_embedding(&retained, &[0.0, 1.0]).unwrap();
+        let mut metadata_only: serde_json::Value = serde_json::from_slice(&original).unwrap();
+        metadata_only["seq"] = serde_json::json!(2);
+        let metadata_only = serde_json::to_vec(&metadata_only).unwrap();
+        store.put(&changed, &metadata_only).unwrap();
+        assert_eq!(
+            table_count(&store, "message_vec"),
+            2,
+            "metadata alone retains vectors"
+        );
+        let generation = store.active_generation().unwrap();
+        let corrected = typed_message_entry(&changed, "fixed").1;
+        store.conn.borrow().execute_batch(
+            "CREATE TRIGGER reject_put_vector_generation BEFORE UPDATE ON store_metadata BEGIN SELECT RAISE(ABORT, 'synthetic'); END;"
+        ).unwrap();
+        assert!(store.put(&changed, &corrected).is_err());
+        assert_eq!(store.get(&changed).unwrap(), Some(metadata_only));
+        assert_eq!(table_count(&store, "message_vec"), 2);
+        assert_eq!(store.active_generation().unwrap(), generation);
+        assert_eq!(store.query("obsolete", 10).unwrap().len(), 1);
+        store
+            .conn
+            .borrow()
+            .execute_batch("DROP TRIGGER reject_put_vector_generation;")
+            .unwrap();
+        store.put(&changed, &corrected).unwrap();
+        assert_eq!(store.get(&changed).unwrap(), Some(corrected));
+        assert_eq!(store.active_generation().unwrap(), generation + 1);
+        assert_eq!(
+            table_count(&store, "message_vec"),
+            1,
+            "put must retire the previous body vector even for an unselected model"
+        );
+        assert!(store.query("obsolete", 10).unwrap().is_empty());
+        assert_eq!(store.query("fixed", 10).unwrap()[0].id, changed);
+        assert_eq!(
+            store.query_semantic(&[0.0, 1.0], 10).unwrap()[0].id,
+            retained
+        );
+        store.set_semantic_model("original-model");
+        assert!(store.query_semantic(&[1.0, 0.0], 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn semantic_full_body_changes_beyond_fts_cap_invalidate_each_public_batch_path() {
+        let prefix = "x".repeat(agent_session_grep_application::MESSAGE_FTS_MAX_CHARS);
+        let old = format!("{prefix} old-tail");
+        let corrected = format!("{prefix} new-tail");
+        let mut stale_paths = Vec::new();
+        for path in [
+            "put",
+            "commit_batch",
+            "commit_batch_if_changed",
+            "commit_index_batch",
+            "source_batch",
+        ] {
+            let store = SqliteStore::open_in_memory().unwrap();
+            let message = sid(IdKind::Message, path.as_bytes());
+            let write = |body: &str| -> PortResult<()> {
+                let entries = [typed_message_entry(&message, body)];
+                match path {
+                    "put" => store.put(&message, &entries[0].1),
+                    "commit_batch" => store.commit_batch(&entries),
+                    "commit_batch_if_changed" => {
+                        store.commit_batch_if_changed(&entries).map(|_| ())
+                    }
+                    "commit_index_batch" => {
+                        let pending = store.begin_index_batch(&entries, &[])?;
+                        store.commit_index_batch(&pending, &entries, &[])
+                    }
+                    "source_batch" => store
+                        .commit_source_batches_if_changed(&[projection_source(
+                            "tail-source",
+                            &message,
+                            body,
+                        )])
+                        .map(|_| ()),
+                    _ => unreachable!(),
+                }
+            };
+            write(&old).unwrap();
+            let before = store.get(&message).unwrap().unwrap();
+            store.set_semantic_model("full-body-model");
+            store.index_embedding(&message, &[1.0, 0.0]).unwrap();
+            let generation = store.active_generation().unwrap();
+            write(&corrected).unwrap();
+            let after = store.get(&message).unwrap().unwrap();
+            assert_eq!(
+                searchable_text(&before),
+                searchable_text(&after),
+                "FTS prefix deliberately unchanged"
+            );
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&after).unwrap()["text"],
+                corrected
+            );
+            assert_eq!(store.active_generation().unwrap(), generation + 1, "{path}");
+            if table_count(&store, "message_vec") != 0 {
+                stale_paths.push(path);
+            }
+        }
+        assert!(
+            stale_paths.is_empty(),
+            "full body changed but stale vectors survived: {stale_paths:?}"
+        );
+    }
+
+    fn vector_rows(store: &SqliteStore) -> Vec<(String, String, i64, Vec<u8>)> {
+        let conn = store.conn.borrow();
+        let mut stmt = conn
+            .prepare(
+                "SELECT wire_id,model_id,dimension,embedding FROM message_vec ORDER BY wire_id",
+            )
+            .unwrap();
+        stmt.query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+    }
+
+    #[test]
+    fn semantic_orphans_are_pruned_only_by_explicit_rebuild_and_rollback_atomically() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("catalog.sqlite");
+        let path = path.to_str().unwrap();
+        let store = SqliteStore::open_for_write(path).unwrap();
+        let live = sid(IdKind::Message, b"maintenance-live");
+        let other = sid(IdKind::Message, b"maintenance-other");
+        let orphan = sid(IdKind::Message, b"maintenance-orphan");
+        for (id, model, embedding) in [
+            (&live, "live-model", [1.0, 0.0]),
+            (&other, "other-model", [0.0, 1.0]),
+        ] {
+            store
+                .put(id, br#"{"role":"user","text":"needle"}"#)
+                .unwrap();
+            store.set_semantic_model(model);
+            store.index_embedding(id, &embedding).unwrap();
+        }
+        store.conn.borrow().execute(
+            "INSERT INTO message_vec(wire_id,model_id,dimension,embedding) VALUES(?1,'orphan-only-model',2,?2)",
+            rusqlite::params![orphan.as_str(), f32_slice_to_bytes(&[1.0, 1.0])],
+        ).unwrap();
+        let before = vector_rows(&store);
+        let generation = store.active_generation().unwrap();
+        let payloads = store.get_many(&[live.clone(), other.clone()]).unwrap();
+        drop(store);
+
+        let reader = SqliteStore::open(path).unwrap();
+        reader.set_semantic_model("orphan-only-model");
+        assert!(!reader.is_ready(2).unwrap());
+        assert!(reader.query_semantic(&[1.0, 1.0], 10).unwrap().is_empty());
+        assert_eq!(reader.query("needle", 10).unwrap().len(), 2);
+        assert_eq!(
+            vector_rows(&reader),
+            before,
+            "read-side never repairs historical rows"
+        );
+        assert_eq!(reader.active_generation().unwrap(), generation);
+        assert!(
+            reader.rebuild_index().is_err(),
+            "read-only open cannot perform maintenance"
+        );
+        assert_eq!(vector_rows(&reader), before);
+        drop(reader);
+
+        let store = SqliteStore::open_for_write(path).unwrap();
+        assert_eq!(
+            vector_rows(&store),
+            before,
+            "ordinary current-schema open does not prune"
+        );
+        store.conn.borrow().execute_batch(
+            "CREATE TRIGGER reject_vector_rebuild_activation BEFORE UPDATE ON index_batches WHEN NEW.state='activated' BEGIN SELECT RAISE(ABORT, 'synthetic'); END;"
+        ).unwrap();
+        assert!(store.rebuild_index().is_err());
+        assert_eq!(vector_rows(&store), before);
+        assert_eq!(
+            store.get_many(&[live.clone(), other.clone()]).unwrap(),
+            payloads
+        );
+        assert_eq!(store.active_generation().unwrap(), generation);
+        store
+            .conn
+            .borrow()
+            .execute_batch("DROP TRIGGER reject_vector_rebuild_activation;")
+            .unwrap();
+        assert_eq!(store.rebuild_index().unwrap(), 2);
+        let expected: Vec<_> = before
+            .into_iter()
+            .filter(|row| row.0 != orphan.as_str())
+            .collect();
+        assert_eq!(
+            vector_rows(&store),
+            expected,
+            "maintenance removes only orphan vectors, across all models"
+        );
+        assert_eq!(store.get_many(&[live, other]).unwrap(), payloads);
+        assert_eq!(store.active_generation().unwrap(), generation + 1);
+        assert_eq!(store.query("needle", 10).unwrap().len(), 2);
     }
 
     #[test]
@@ -11160,7 +11619,7 @@ mod tests {
         assert_eq!(store.clear_embeddings("model-a").unwrap(), 0);
         assert_eq!(store.active_generation().unwrap(), generation + 1);
         // model-b 的向量不受影响。
-        assert!(store.is_ready().unwrap());
+        assert!(store.is_ready(2).unwrap());
     }
 
     #[test]
@@ -12264,6 +12723,9 @@ mod tests {
                 None
             };
             store.commit_source_batches_if_changed(&[source]).unwrap();
+            store.set_semantic_model("source-owned-model");
+            store.index_embedding(&message, &[1.0, 0.0]).unwrap();
+            let vectors = vector_rows(&store);
             let before = store.get(&message).unwrap();
             let evidence =
                 SqliteStore::source_projections_for_path(&store.conn.borrow(), "a").unwrap();
@@ -12288,6 +12750,7 @@ mod tests {
                 "{path}: {result:?}"
             );
             assert_eq!(store.get(&message).unwrap(), before);
+            assert_eq!(vector_rows(&store), vectors);
             assert_eq!(
                 SqliteStore::source_projections_for_path(&store.conn.borrow(), "a").unwrap(),
                 evidence

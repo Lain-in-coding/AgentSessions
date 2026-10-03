@@ -1726,9 +1726,10 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore, 
                     )
                     .into());
                 }
-                let semantic_ready = mode != RetrievalMode::Lexical
-                    && self.semantic.is_ready()?
-                    && query_embedding.is_some();
+                let semantic_ready = match (mode, query_embedding.as_ref()) {
+                    (RetrievalMode::Lexical, _) | (_, None) => false,
+                    (_, Some(embedding)) => self.semantic.is_ready(embedding.len())?,
+                };
                 let response_mode = if mode == RetrievalMode::Lexical || semantic_ready {
                     mode
                 } else {
@@ -1742,7 +1743,9 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore, 
                     } else {
                         self.semantic.semantic_model_id()?
                     },
-                    embedding: if semantic_ready {
+                    // Fallback changes the execution path, not the identity
+                    // of the requested query vector used by cursor validation.
+                    embedding: if mode != RetrievalMode::Lexical {
                         query_embedding.as_deref()
                     } else {
                         None
@@ -3462,7 +3465,7 @@ mod tests {
                 })
                 .collect())
         }
-        fn is_ready(&self) -> PortResult<bool> {
+        fn is_ready(&self, _query_dimension: usize) -> PortResult<bool> {
             Ok(true)
         }
         fn semantic_model_id(&self) -> PortResult<Option<String>> {
@@ -3854,6 +3857,7 @@ mod tests {
         model: std::cell::RefCell<String>,
         fail: std::cell::Cell<bool>,
         nonfinite: std::cell::Cell<bool>,
+        readiness_dimensions: std::cell::RefCell<Vec<usize>>,
     }
     impl SemanticIndex for MutableSemantic {
         fn index_embedding(&self, _id: &StableId, _embedding: &[f32]) -> PortResult<()> {
@@ -3879,11 +3883,12 @@ mod tests {
             }
             Ok(hits)
         }
-        fn is_ready(&self) -> PortResult<bool> {
+        fn is_ready(&self, query_dimension: usize) -> PortResult<bool> {
+            self.readiness_dimensions.borrow_mut().push(query_dimension);
             if self.fail.get() {
                 Err(PortError::Backend("synthetic readiness failure".into()))
             } else {
-                Ok(self.ready.get())
+                Ok(self.ready.get() && query_dimension == 8)
             }
         }
         fn semantic_model_id(&self) -> PortResult<Option<String>> {
@@ -3910,9 +3915,73 @@ mod tests {
                 model: std::cell::RefCell::new("model-a".into()),
                 fail: std::cell::Cell::new(false),
                 nonfinite: std::cell::Cell::new(false),
+                readiness_dimensions: std::cell::RefCell::new(Vec::new()),
             },
             clock_t0,
         )
+    }
+
+    #[test]
+    fn semantic_missing_query_embedding_falls_back_without_readiness_probe() {
+        let app = mutable_semantic_app();
+        app.semantic.fail.set(true);
+        for mode in [RetrievalMode::Semantic, RetrievalMode::Hybrid] {
+            let mut request = semantic_req("needle", 10, None);
+            if let AppRequest::Search {
+                query_embedding,
+                mode: requested_mode,
+                ..
+            } = &mut request
+            {
+                *query_embedding = None;
+                *requested_mode = mode;
+            }
+            let AppResponse::Search {
+                hits,
+                retrieval_mode,
+                fallback_warning,
+                ..
+            } = app.handle(request).unwrap()
+            else {
+                panic!("search response")
+            };
+            assert_eq!(retrieval_mode, RetrievalMode::LexicalFallback);
+            assert!(fallback_warning.is_some());
+            assert_eq!(hits.len(), 3);
+        }
+        assert!(app.semantic.readiness_dimensions.borrow().is_empty());
+    }
+
+    #[test]
+    fn semantic_readiness_probes_the_query_dimension_once_per_request() {
+        let app = mutable_semantic_app();
+        for dimension in [8, 17] {
+            let mut request = semantic_req("needle", 10, None);
+            if let AppRequest::Search {
+                query_embedding, ..
+            } = &mut request
+            {
+                *query_embedding = Some(vec![1.0; dimension]);
+            }
+            let AppResponse::Search {
+                retrieval_mode,
+                fallback_warning,
+                ..
+            } = app.handle(request).unwrap()
+            else {
+                panic!("search response")
+            };
+            assert_eq!(
+                retrieval_mode,
+                if dimension == 8 {
+                    RetrievalMode::Semantic
+                } else {
+                    RetrievalMode::LexicalFallback
+                }
+            );
+            assert_eq!(fallback_warning.is_some(), dimension != 8);
+        }
+        assert_eq!(*app.semantic.readiness_dimensions.borrow(), [8, 17]);
     }
 
     #[test]
@@ -4000,6 +4069,54 @@ mod tests {
             app.handle(semantic_req("needle", 1, Some(token))),
             Err(AppError::Cursor(_))
         ));
+    }
+
+    #[test]
+    fn semantic_fallback_cursor_binds_requested_vector_dimension_and_content() {
+        for mode in [RetrievalMode::Semantic, RetrievalMode::Hybrid] {
+            let app = mutable_semantic_app();
+            let request = |embedding: Vec<f32>, token: Option<String>| {
+                let mut request = semantic_req("needle", 1, token);
+                if let AppRequest::Search {
+                    query_embedding,
+                    mode: requested_mode,
+                    ..
+                } = &mut request
+                {
+                    *query_embedding = Some(embedding);
+                    *requested_mode = mode;
+                }
+                request
+            };
+            let (first, token, _, _) = hits_of(app.handle(request(vec![1.0; 17], None)).unwrap());
+            let token = token.expect("fallback must retain paging");
+            let same = app
+                .handle(request(vec![1.0; 17], Some(token.clone())))
+                .unwrap();
+            assert!(matches!(
+                &same,
+                AppResponse::Search {
+                    retrieval_mode: RetrievalMode::LexicalFallback,
+                    ..
+                }
+            ));
+            let (second, _, _, _) = hits_of(same);
+            assert_eq!(first.len(), 1);
+            assert_eq!(second.len(), 1);
+            assert_ne!(
+                first, second,
+                "unchanged fallback input must continue the page"
+            );
+            for changed in [vec![1.0; 18], vec![0.5; 17]] {
+                assert!(
+                    matches!(
+                        app.handle(request(changed, Some(token.clone()))),
+                        Err(AppError::Cursor(cursor::CursorError::Invalid(_)))
+                    ),
+                    "fallback cursor must bind the requested dimension and vector"
+                );
+            }
+        }
     }
 
     #[test]

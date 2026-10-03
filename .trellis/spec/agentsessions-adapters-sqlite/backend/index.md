@@ -155,8 +155,11 @@ instead of rejecting the batch. Which fields may differ is deliberately narrow:
   metadata against persisted `fts_ids.id_json` before taking a no-op shortcut
   or creating an outbox intent. A cross-batch metadata conflict fails without
   changing generation, claims, catalog, or index state.
-- FTS rebuild touches only `fts`/`fts_ids`; relation rows, claims, completeness,
-  context graphs, and aggregate context stats must remain byte-for-byte stable.
+- FTS rebuild reprojects `fts`/`fts_ids` and removes historical vector rows
+  with no catalog entity inside its writer transaction. Live vectors remain;
+  relation rows, claims, completeness, context graphs and aggregate context
+  stats must remain byte-for-byte stable. This does not repair stale-but-live
+  legacy vectors; those require `index embeddings`.
 - Context reads fail `SchemaIncompatible` with a bounded re-ingest action when
   any known contributor lacks a v7 completeness marker. They never parse
   compatibility aliases as graph authority.
@@ -591,3 +594,12 @@ Wrong: classify from one read's byte count. Correct: `read_exact` with explicit 
 5. **Cases:** concurrent WAL commit is invisible to the current view and visible to the next. Read-only source/catalog permissions stay unchanged.
 6. **Tests:** writer before query and before payload/ownership, eager pin, non-LIFO nesting, early error/unwind, failed pin, write refusal and cleanup poisoning.
 7. **Wrong/right:** a process mutex cannot provide cross-process consistency; one pinned connection shared by every request data port can.
+
+## Scenario: Dimension-aware vector validity
+1. **Scope:** semantic/hybrid reads, canonical body updates, and explicit index maintenance.
+2. **Signatures:** `SemanticIndex::is_ready(query_dimension: usize)`; private `message_body`, `invalidate_changed_vectors_in_tx`; existing `rebuild_index`/`index embeddings` maintenance.
+3. **Contracts:** readiness checks selected model, query dimension and live catalog within the request snapshot. Invalidation compares complete canonical message bodies, not the FTS-capped projection, on both `put` and batch/source write paths. Unchanged body/alias-only updates preserve valid vectors. Index rebuild removes only historical orphans; reads never prune.
+4. **Errors:** corruption in a matching vector and backend failures propagate; only an actual not-ready result permits explicit lexical fallback. Invalidations/pruning roll back together with catalog/index/generation on failure.
+5. **Cases:** a body change beyond the FTS cap still retires a vector; wrong-dimension-only vectors do not make an index ready. Live legacy vectors may be stale and require explicit embedding rebuild; do not promise automatic historical repair.
+6. **Tests:** model/dimension/live-row matrix; malformed matching vector; put plus every public batch/source path; unchanged-body retention; transaction rollback; read-only orphan retention and writer rebuild cleanup; WAL writer between readiness/query/payload.
+7. **Wrong/right:** comparing capped FTS text misses changes used by the vectorizer; compare full input and keep the original FTS cap unchanged. No schema or parser bump is required for these derived-cache corrections.

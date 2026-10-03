@@ -3559,6 +3559,123 @@ fn boundary_unknown_command_and_machine_errors_do_not_echo_secrets() {
     assert!(!frame["error"]["message"].as_str().unwrap().contains(secret));
 }
 
+#[test]
+fn semantic_readiness_matches_model_dimension_and_live_messages() {
+    use agent_session_grep_application::embedding::{BIGRAM_HASH_DIMENSION, BIGRAM_HASH_MODEL_ID};
+
+    let (dir, db) = temp_db("vector-readiness");
+    let command = || {
+        let mut command = Command::new(BIN);
+        command
+            .args(["--db", &db, "--robot"])
+            .env("ASG_CLOCK_MS", E2E_CLOCK_MS)
+            .env("HOME", dir.path())
+            .env("USERPROFILE", dir.path())
+            .env("APPDATA", dir.path())
+            .env("LOCALAPPDATA", dir.path())
+            .env("XDG_CACHE_HOME", dir.path().join("cache"))
+            .env("XDG_CONFIG_HOME", dir.path().join("config"))
+            .env("XDG_DATA_HOME", dir.path().join("data"));
+        command
+    };
+    let source = dir.path().join("source.jsonl");
+    let native = "88222222-2222-4222-8222-222222222222";
+    let wire = format!("msg_v1_{native}");
+    std::fs::write(
+        &source,
+        serde_json::json!({
+            "type": "user", "uuid": native,
+            "sessionId": "88111111-1111-4111-8111-111111111111",
+            "message": {"role": "user", "content": "readinessneedle"}
+        })
+        .to_string()
+            + "\n",
+    )
+    .unwrap();
+    let out = command()
+        .args(["sync", source.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stdout(&out));
+    for (model, dimension, stored_wire) in [
+        (BIGRAM_HASH_MODEL_ID, 2usize, wire.as_str()),
+        (BIGRAM_HASH_MODEL_ID, BIGRAM_HASH_DIMENSION, "msg_v1_absent"),
+        (
+            "synthetic-other-model",
+            BIGRAM_HASH_DIMENSION,
+            wire.as_str(),
+        ),
+    ] {
+        {
+            let conn = Connection::open(&db).unwrap();
+            conn.execute("DELETE FROM message_vec", []).unwrap();
+            conn.execute(
+                "INSERT INTO message_vec(wire_id, model_id, dimension, embedding) VALUES(?1, ?2, ?3, ?4)",
+                rusqlite::params![stored_wire, model, dimension as i64, vec![0u8; dimension * 4]],
+            ).unwrap();
+        }
+        for mode in ["semantic", "hybrid"] {
+            let out = command()
+                .args(["search", "--mode", mode, "readinessneedle"])
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{}", stdout(&out));
+            let frame = parse_first_line(&out);
+            assert_eq!(frame["retrieval_mode"], "lexical_fallback", "{frame}");
+            assert!(!frame["warnings"].as_array().unwrap().is_empty(), "{frame}");
+            assert_eq!(
+                frame["data"]["hits"].as_array().unwrap().len(),
+                1,
+                "{frame}"
+            );
+            assert_eq!(frame["data"]["hits"][0]["id"], wire, "{frame}");
+        }
+        let conn = Connection::open(&db).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM message_vec", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1, "readiness/search must not prune stored vectors");
+    }
+    let out = command().args(["index", "embeddings"]).output().unwrap();
+    assert!(out.status.success(), "{}", stdout(&out));
+    for mode in ["semantic", "hybrid"] {
+        let out = command()
+            .args(["search", "--mode", mode, "readinessneedle"])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", stdout(&out));
+        let frame = parse_first_line(&out);
+        assert_eq!(frame["retrieval_mode"], mode, "{frame}");
+        assert_eq!(
+            frame["data"]["hits"].as_array().unwrap().len(),
+            1,
+            "{frame}"
+        );
+    }
+    {
+        let conn = Connection::open(&db).unwrap();
+        conn.execute(
+            "INSERT INTO message_vec(wire_id, model_id, dimension, embedding) VALUES(?1, ?2, ?3, ?4)",
+            rusqlite::params!["msg_v1_absent", BIGRAM_HASH_MODEL_ID, BIGRAM_HASH_DIMENSION as i64, vec![0u8; BIGRAM_HASH_DIMENSION * 4]],
+        ).unwrap();
+    }
+    let out = command().args(["index", "rebuild"]).output().unwrap();
+    assert!(out.status.success(), "{}", stdout(&out));
+    let conn = Connection::open(&db).unwrap();
+    let ids: Vec<String> = conn
+        .prepare("SELECT wire_id FROM message_vec ORDER BY wire_id")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        ids,
+        vec![wire],
+        "explicit maintenance removes only historical orphans"
+    );
+}
+
 #[cfg(feature = "semantic-candle")]
 #[test]
 fn boundary_local_model_absence_failure_and_vector_readiness_are_distinct() {

@@ -134,7 +134,7 @@ fn load_session_graph(&self, session: &StableId)
 Search ports and multi-session source events cross application/adapter boundaries.
 
 ### 2. Signatures
-`SemanticIndex::is_ready() -> PortResult<bool>`;
+`SemanticIndex::is_ready(query_dimension: usize) -> PortResult<bool>`;
 `semantic_model_id() -> PortResult<Option<String>>`;
 `query_semantic_filtered(&[f32], usize, &SearchFilters, &SearchFacets, bool)`
 returns `PortResult<Vec<SearchHit>>`. `SearchIndex::query_with_policy` accepts
@@ -142,7 +142,9 @@ the same facets and `include_system` visibility policy for lexical search.
 
 ### 3. Contracts
 Apply filters/facets/visibility before top-k. Only `Ok(false)` readiness permits
-explicit lexical fallback; errors retain their port classification. Reject
+explicit lexical fallback; errors retain their port classification. Readiness
+requires vectors for the selected model, query dimension and live catalog; zero
+dimension is not ready. Shared references must forward the exact dimension. Reject
 non-finite vectors/scores. `SearchProvider` is a private canonical wrapper:
 accepted IDs come from implemented searchable capability rows, with the
 historical `claude` alias. Source fingerprints are opaque: file BLAKE3 hex or

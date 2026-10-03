@@ -340,3 +340,12 @@ Correct: prove manifest coverage, check every retained content field, and reject
 5. **Cases:** a racing writer cannot pair old generation with new payload; a later request observes the new generation.
 6. **Tests:** adapter/application WAL integration injects commits before query and before payload/ownership, plus early errors and unwinding.
 7. **Boundary:** if a future AppRequest writes data, it must not inherit this read-only scope accidentally. Model embedding and interactive execution stay outside App read assembly.
+
+## Scenario: Requested vector and fallback cursors
+1. **Scope:** semantic/hybrid readiness selection and paginated fallback.
+2. **Signatures:** `App::handle`, `SemanticIndex::is_ready(query_dimension)`, `RetrievalBinding`, `search_query_digest`.
+3. **Contracts:** probe exactly the supplied query dimension once; missing embedding or pure lexical mode skips readiness. Bind the requested vector/dimension in semantic/hybrid cursor digests even when the effective mode is lexical_fallback. Keep requested/effective mode and selected model binding.
+4. **Errors:** changed fallback vector/dimension -> cursor_invalid; unchanged input continues normally. Readiness/backend errors and malformed matching vectors are not empty-success/fallback signals.
+5. **Cases:** 17-to-18 dimensions while both remain fallback must reject the old cursor; identical fallback input must advance the page.
+6. **Tests:** semantic and hybrid fallback-to-fallback changed dimension, changed same-dimension content and identical continuation; reference forwarding; absent-embedding probe count.
+7. **Wrong/right:** operational fallback does not make request identity irrelevant. Separate the requested input binding from the effective retrieval route.

@@ -2153,7 +2153,7 @@ fn dispatch(
             };
             // #3 语义/混合模式：注入 SqliteStore 作为 SemanticIndex，并用同一
             // vectorizer 生成查询向量。`index embeddings` 未跑过时向量表为空，
-            // store.is_ready() 为 false，Application 显式降级为 lexical_fallback
+            // store.is_ready(dimension) 为 false，Application 显式降级为 lexical_fallback
             // + warning（禁止静默切换）。
             let query = arg(&args, 1, "search <query>")?.to_string();
             let query_embedding =
