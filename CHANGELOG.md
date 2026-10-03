@@ -428,6 +428,14 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Semantic/hybrid readiness now matches the selected model, query-vector
+  dimension and live catalog rows. Full message-body changes (including beyond
+  the FTS text cap) invalidate vectors atomically on every public catalog/batch
+  write path. Fallback cursors retain the requested vector and dimension, so
+  changing either cannot silently continue an old page.
+  Existing `index rebuild` removes historical orphan vectors without touching
+  live vectors; use `index embeddings` to regenerate stale-but-live legacy
+  caches. Reads never perform cleanup. No schema/parser bump is required.
 - Source updates now replace their own original projection before deterministic
   cross-source aggregation. Removing a source restores the surviving projection
   and regenerates affected compatibility aliases. Source evidence is stored
@@ -438,8 +446,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   writer upgrade. Legacy evidence is not fabricated: old aggregates remain until
   all live contributors have been re-ingested. An older binary cannot open the
   upgraded schema; restore a verified pre-upgrade backup rather than lowering
-  the schema version. Historical orphan vectors and model/dimension readiness
-  remain separate remediation work.
+  the schema version. Historical vector caches require explicit maintenance
+  as described above; per-source migration does not prove their input provenance.
   Unscoped storage writes now reject source-owned IDs; update or remove them
   through source replacement so raw evidence and catalog authority cannot diverge.
 - Read requests now pin one SQLite view across generation, search, payload,

@@ -35,7 +35,7 @@ These are tracking items, not a count of confirmed defects or completed work.
 | P0-5 | Verified eager, nested request read snapshots plus CLI/MCP outer composition scopes; actual WAL counterexamples reproduced. Final post-review all-feature integration: 1913 passed, 0 failed |
 | P0-6 | Verified per-source original projections and live aggregation; same-source corrections, separate batches, legacy/incomplete retention, no-op and migration rollback covered. Schema 19/parser 4 requires backup and contributor re-ingestion |
 | P0-7 | Verified before/after alias candidates, source deletion convergence and relocation of projection locators; incomplete scans retain compatibility fields |
-| P0-8 | Partial: phase-2 final-text change/deletion invalidates vectors atomically; evidence-only updates preserve them. Model/dimension readiness, historical orphans and remaining write entrypoints still need audit |
+| P0-8 | Verified: selected-model/query-dimension/live-row readiness; full-body invalidation across put and batch/source paths; explicit rebuild prunes historical orphans; fallback cursors bind requested vectors. Historical stale-but-live caches require explicit index embeddings; no automatic provenance proof claimed |
 | P0-9 | Implemented and focused tests passed; complete required manifest coverage and unique safe names |
 | P0-10 | Implemented and focused tests passed; hard content budget, final confidence and labeled identity |
 | P0-11 | Upstream MSRV fix revalidated on 2edf2dc; real MSRV CI gate added. Release/remote gates pending |
@@ -48,7 +48,7 @@ These are tracking items, not a count of confirmed defects or completed work.
 | P1-7 | Pending current-baseline revalidation and implementation |
 | P1-8 | Withdrawn diagnosis; current linear Pi behavior retained; tree enhancement deferred |
 | P1-9 | Pending current-baseline revalidation and implementation |
-| P1-10 | Partial: explicit restart semantics and missing/corrupt model diagnostics implemented; Context activity error propagation verified red/green and in full integration. Readiness/dimension remains open |
+| P1-10 | Verified scoped contracts: explicit model-cache restart semantics, missing/corrupt model diagnostics, Context port error propagation and dimension-aware readiness. No automatic model retry/reload or maturity promotion added |
 | P2-1 | Implemented; actual GET-ack regression failed then passed; POST remains unsupported |
 | P2-2 | Pending current-baseline revalidation and implementation |
 | P2-3 | Pending current-baseline revalidation and implementation |
@@ -121,3 +121,16 @@ These are tracking items, not a count of confirmed defects or completed work.
 - Final all-feature Windows workspace gate: **1929 passed, 0 failed, 22 ignored**; fmt, all-target/all-feature Clippy and Rust 1.90 locked/offline check passed. Python 21/11/54 (two skips), Node 11, privacy/diff checks, task context validation and real debug smoke 10/10 passed.
 - CLI counterexamples were reproduced on b480627 before the fix, then passed as Rust e2e. Migration/reopen, transaction rollback, durable evidence tamper, source deletion, partial/legacy retention and vector atomic invalidation have regression coverage. Large-scale memory/disk/throughput costs are not yet benchmarked.
 - New-schema rollout requires a consistent pre-upgrade backup. Do not downgrade by editing user_version; old binaries require restoration of a verified old-schema backup. This checkpoint does not migrate any user catalog, merge main, release a version or complete the broader review task.
+
+## Public CI validation and vector follow-up
+- The owner explicitly accepted publication of repository history and Actions logs. Repository visibility changed to public; no billing settings or validation gates were changed.
+- On unchanged head b6f3d48, attempt 2 of CI 37088354707, security-audit 37088354735 and core-beta-evidence 37088354731 all passed. This closes the billing-blocked validation for that head only; it does not certify subsequent vector edits. PR #21 remains draft.
+- Remaining vector work is being implemented locally. The child reported four actual failing vector tests before fixes; it later encountered a runtime resource-routing error. Main took over, ran the expanded semantic suites and CLI readiness e2e successfully, and requested independent review.
+- Main's independent baseline CLI probe confirmed wrong-dimension vectors yielded semantic with zero hits and hybrid without fallback. Orphan-only and wrong-model controls already fell back. A temporary probe cleanup issue was fixed by explicitly closing Python sqlite connections; its own checked temporary directory was removed, not user data.
+- Review identified fallback-to-fallback cursor binding as an additional gap. A new regression is being tested; no final vector completion claim yet.
+
+## Fifth-batch vector evidence (2026-10-03)
+- Final independent review passed after the fallback cursor correction. Actual red-to-green cases cover dimension mismatch, full-body corrections beyond FTS cap, catalog put, explicit orphan cleanup and fallback-to-fallback cursor drift.
+- Final Windows all-feature workspace run: **1939 passed, 0 failed, 22 ignored**. Formatting, all-target/all-feature Clippy and Rust 1.90 all-target/all-feature check passed with locked/offline dependencies.
+- Python suites 21/11/54 (two skips total), Node 11, privacy/diff checks, task context validation and real debug-binary smoke 10/10 passed. Original checkout remains unchanged; no schema/parser bump, main merge or release.
+- P0-8/P1-10 scoped implementation contracts are verified. Upgrading does not prove validity of preexisting stale-but-live vectors; regenerate them explicitly with index embeddings. Provider fidelity, remaining protocol/read-surface work, privacy expansion and scale performance/release decisions remain open.
