@@ -40,8 +40,8 @@ These are tracking items, not a count of confirmed defects or completed work.
 | P0-10 | Implemented and focused tests passed; hard content budget, final confidence and labeled identity |
 | P0-11 | Upstream MSRV fix revalidated on 2edf2dc; real MSRV CI gate added. Release/remote gates pending |
 | P1-1 | Keep approved fail-closed baseline; upstream tail/partial changes retained; recovery matrix pending |
-| P1-2 | Pending current-baseline revalidation and implementation |
-| P1-3 | Pending current-baseline revalidation and implementation |
+| P1-2 | Verified ItemTable millisecond normalization, disk-kv field distinction and provenance-gated rolling upgrades; raw observations, stable IDs, filters and source bytes covered by full integration |
+| P1-3 | Verified native integer Cline ts, numeric-token precision rejection, field-loss diagnostics and exactly one leading document BOM; Cline fixture revision 2, maturity unchanged |
 | P1-4 | Pending current-baseline revalidation and implementation |
 | P1-5 | Pending current-baseline revalidation and implementation |
 | P1-6 | Pending current-baseline revalidation and implementation |
@@ -134,3 +134,30 @@ These are tracking items, not a count of confirmed defects or completed work.
 - Final Windows all-feature workspace run: **1939 passed, 0 failed, 22 ignored**. Formatting, all-target/all-feature Clippy and Rust 1.90 all-target/all-feature check passed with locked/offline dependencies.
 - Python suites 21/11/54 (two skips total), Node 11, privacy/diff checks, task context validation and real debug-binary smoke 10/10 passed. Original checkout remains unchanged; no schema/parser bump, main merge or release.
 - P0-8/P1-10 scoped implementation contracts are verified. Upgrading does not prove validity of preexisting stale-but-live vectors; regenerate them explicitly with index embeddings. Provider fidelity, remaining protocol/read-surface work, privacy expansion and scale performance/release decisions remain open.
+
+## Remote vector checkpoint
+- Public repository head df9746f passed CI 37097266899, security-audit 37097266928 and core-beta-evidence 37097266943. These results cover the vector checkpoint, not the subsequent timestamp/BOM edits. No merge, release or maturity promotion.
+
+
+## Sixth-batch timestamp/BOM evidence (2026-10-03)
+Implementation checkpoint: `9a36ad6`.
+- P1-2/P1-3 now have pinned provider evidence, actual counterexamples and end-to-end
+  assertions. Cursor ItemTable milliseconds and disk-kv string timestamps stay
+  distinct; Cline accepts native integer ts without f64 precision loss or field
+  fallback, retains valid compatibility strings and strips one byte-zero BOM.
+- Parser semantic version is 5; catalog schema remains 19. Copied Cursor sources
+  roll forward in either order using exact-instant, associated-Document proof.
+  Original source projections and source bytes are never normalized in place;
+  removal of the last UTC claimant restores the surviving raw observation.
+- Independent production/spec/CLI review passed. Final Windows all-feature suite:
+  **1966 passed, 0 failed, 23 ignored** (one new manual golden printer explains the
+  ignored-count increase). No functional regression was ignored to obtain a pass.
+- Full fmt, Clippy -D warnings and Rust 1.90 locked/offline all-target/all-feature
+  checks passed. Python 21/11/54 (two skips total), Node 11, privacy/diff/context
+  checks and real debug-binary smoke 10/10 passed. Remote validation is bound to
+  the subsequently pushed SHA, never inferred from df9746f's earlier green runs.
+- Semantic downgrade requires a matching backup or fresh-catalog re-ingestion,
+  not decrementing a marker or merely running index rebuild. Other provider,
+  protocol/read-surface, privacy, performance and release decisions remain open.
+  The original eight dirty entries remain outside this worktree and untouched;
+  no task archive, main merge, release or provider maturity promotion occurred.

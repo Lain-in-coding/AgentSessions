@@ -9,3 +9,12 @@ Normalize format-proven epoch units in Cursor/Cline and single-document BOM; nev
 
 ## Compatibility
 Retain contracts except specified corrections. Document migration/cache changes. Revert isolated commits only after accounting for new data; never remove validation to roll back.
+
+
+## Timestamp/BOM integration slice
+Provider workers keep their own crate scopes. Main owns the parser-5/schema-19
+compatibility boundary, specs and commits, and explicitly delegates CLI test-only
+integration scopes when needed. No production CLI/API expansion or Cargo.lock
+change is included. Cross-source Cursor compatibility is aggregate-only, gated
+by each claimant's associated ItemTable Document and exact timestamp instant;
+raw source observations and generic intrinsic conflict rules are unchanged.
