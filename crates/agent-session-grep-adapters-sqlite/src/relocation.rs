@@ -18,6 +18,7 @@ use agent_session_grep_ports::relocation::{
 const LIVE_SOURCE_TABLES: &[&str] = &[
     "source_scans",
     "source_membership",
+    "source_entity_projections",
     "source_placement_membership",
     "source_relation_scans",
     "source_session_resume_claims",

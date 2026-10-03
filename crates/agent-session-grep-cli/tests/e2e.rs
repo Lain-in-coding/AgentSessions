@@ -1362,6 +1362,59 @@ fn doctor_reports_ok_without_db() {
 }
 
 #[test]
+fn source_projection_corrections_and_deleted_winner_converge() {
+    let (dir, db) = temp_db("source-projection-authority");
+    let a = dir.path().join("a.jsonl");
+    let b = dir.path().join("b.jsonl");
+    let message = "99222222-2222-4222-8222-222222222222";
+    let wire = format!("msg_v1_{message}");
+    let write_projection = |path: &Path, text: &str| {
+        let row = serde_json::json!({
+            "type": "user", "uuid": message, "parentUuid": null,
+            "sessionId": "99111111-1111-4111-8111-111111111111",
+            "timestamp": "2026-08-01T00:00:00Z",
+            "message": { "role": "user", "content": text }
+        });
+        std::fs::write(path, format!("{row}\n")).unwrap();
+    };
+    let sync = |path: &Path| {
+        let out = run(&db, &["sync", path.to_str().unwrap()]);
+        assert!(out.status.success(), "{}", stdout(&out));
+        parse_first_line(&out)
+    };
+    let read_text = || {
+        let out = run(&db, &["get", &wire]);
+        assert!(out.status.success(), "{}", stdout(&out));
+        let frame = parse_first_line(&out);
+        let payload: serde_json::Value =
+            serde_json::from_str(frame["data"]["payload"].as_str().unwrap()).unwrap();
+        payload["text"].as_str().unwrap().to_owned()
+    };
+    write_projection(&a, "obsoletepayload much longer historical text");
+    sync(&a);
+    write_projection(&a, "freshpayload");
+    sync(&a);
+    assert_eq!(read_text(), "freshpayload");
+    let old = parse_first_line(&run(&db, &["search", "obsoletepayload"]));
+    assert!(old["data"]["hits"].as_array().unwrap().is_empty());
+
+    let longer = "survivorpayload second source projection with a much longer body than the first";
+    write_projection(&b, longer);
+    sync(&b);
+    assert_eq!(read_text(), longer);
+    std::fs::write(&b, "").unwrap();
+    let deleted = sync(&b);
+    assert_eq!(read_text(), "freshpayload");
+    let old = parse_first_line(&run(&db, &["search", "survivorpayload"]));
+    assert!(old["data"]["hits"].as_array().unwrap().is_empty());
+    let repeated = sync(&a);
+    assert_eq!(
+        repeated["data"]["generation"],
+        deleted["data"]["generation"]
+    );
+}
+
+#[test]
 fn stale_index_projection_is_reported_refused_then_healed_by_sync_and_rebuild() {
     // 实测缺陷的端到端固化：由旧二进制建立的库（FTS 词元流是纯 bigram）在
     // 新二进制下中文查询静默 0 命中、ASCII 照常命中。修复后三条线都必须成立：

@@ -80,7 +80,7 @@ instead of rejecting the batch. Which fields may differ is deliberately narrow:
 | Entity | Unioned fields | Everything else |
 |---|---|---|
 | Session | `messages` (append-order), `documents` (sorted) | fields not in the union set (`document`, `documents`, `messages`) are not preserved by the merge |
-| Message | contextual compatibility keys (`session(s)`, `span(s)`, parent provenance, sidechain, seq) | stable role/text and unknown intrinsic fields must match; timestamp has one deliberate exception (below) |
+| Message | contextual compatibility keys (`session(s)`, `span(s)`, parent provenance, sidechain, seq); text uses the existing deterministic longer-projection rule | stable role and unknown intrinsic fields must match across live sources; timestamp has one deliberate exception (below) |
 
 - **Timestamp exception (Codex)**: `timestamp` may differ as `string` vs `null`
   across projections of the same stable message — the old Codex adapter stored
@@ -93,18 +93,45 @@ instead of rejecting the batch. Which fields may differ is deliberately narrow:
   holding the first entry, so readers written against the pre-union shape keep
   working. On a shared entity the alias names *one* contributor, not all of
   them — treat it as a compatibility shim, never as the complete answer.
-- The merge starts from **the value already in the catalog**, not just from the
-  other source in the current batch. Without that, syncing a corpus in several
-  invocations would let each batch overwrite the previous batch's members.
-- Identical stored bytes skip the merge entirely. That keeps an unchanged
-  re-sync a content-level no-op and avoids forcing slice-era opaque payloads
-  through a JSON parse.
-- Once every known contributing source is relation-complete, compatibility
+- Schema 19 retains original observations in `source_entity_projections`, keyed
+  by source and entity. A complete scan replaces that source's observations;
+  an incomplete scan updates observed entries but retains unobserved evidence.
+  Aggregate payloads are recomputed from final live claimants, not folded with
+  historical aggregate text. Thus a same-source shorter/equal-length correction
+  replaces its predecessor, while cross-source reconciliation remains deterministic.
+- Migration creates an empty evidence table: missing legacy evidence stays
+  unknown. Preserve an existing aggregate until every live claimant has actual
+  observations; if no aggregate exists to preserve, fail with re-ingest guidance.
+  Parser version 4 reparses unchanged sources. Re-ingesting all contributors
+  supplies evidence and converges; never manufacture per-source payloads from
+  the historical aggregate.
+- Both no-op checks include original identity/payload/text evidence. Evidence
+  changes must commit even when the aggregate does not change, since a later
+  source deletion may reveal that observation.
+- Once every known contributing source is relation-complete and has evidence, compatibility
   aliases are regenerated subtractively from placements/edges/claims:
   divergent parents/sidechain values become `null`, spans name exact placement
   and document identities, and zero-message Session documents survive through
   source entity membership. Mixed legacy/incomplete state preserves existing
   aliases and never pretends they are complete.
+- Alias candidates include memberships/placements from both before and after
+  source replacement, including entities retained only by another source. Keep
+  all candidate/evidence loads batch-scoped. Relocation moves the new table's
+  live source locator alongside existing source tables.
+- Incomplete scans preserve existing compatibility aliases while allowing
+  observed intrinsic payload corrections. An unobserved raw projection must not
+  overwrite previously generated spans/parents/session aliases. No-op probes
+  compare authoritative state without treating a retained legacy aggregate as a
+  live original claimant; intrinsic corrections can repeat and later converge.
+- Unscoped public writes (`put`, ordinary batch and index-batch APIs) reject
+  IDs claimed by source membership, including unscoped deletions. Use source
+  replacement to change those facts. Validate before creating intent and again
+  at public commit boundaries; standalone unclaimed entities remain writable.
+- Source manifest descriptors retain full typed identity and labeled BLAKE3
+  payload/text digests, not JSON numeric arrays or another copy of transcript
+  bodies. Original bytes remain in the projection table. Reuse the one sealed
+  canonical manifest during private phase-2 verification; CAS and persisted
+  durable-manifest comparisons remain mandatory.
 
 ## SQLite v7 relation commit
 

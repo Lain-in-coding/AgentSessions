@@ -604,11 +604,52 @@ impl SourceEntityMembershipManifest {
     }
 }
 
+/// Context fields derived from relation evidence, not intrinsic entity content.
+fn compatibility_keys(kind: IdKind) -> &'static [&'static str] {
+    match kind {
+        IdKind::Message => &[
+            "session",
+            "sessions",
+            "span",
+            "spans",
+            "parent",
+            "parent_native_id",
+            "is_sidechain",
+            "seq",
+        ],
+        IdKind::Session => &["document", "documents", "messages"],
+        _ => &[],
+    }
+}
+
+/// Compare intrinsic content without making the historical aggregate a claimant.
+fn intrinsic_payloads_equal(kind: IdKind, left: &[u8], right: &[u8]) -> bool {
+    if left == right {
+        return true;
+    }
+    let (Ok(serde_json::Value::Object(mut left)), Ok(serde_json::Value::Object(mut right))) =
+        (serde_json::from_slice(left), serde_json::from_slice(right))
+    else {
+        return false;
+    };
+    for key in compatibility_keys(kind) {
+        left.remove(*key);
+        right.remove(*key);
+    }
+    left == right
+}
+
+/// Original observed identity, payload bytes, and indexed text for one source.
+type SourceProjection = (StableId, Vec<u8>, String);
+type SourceProjections = BTreeMap<String, SourceProjection>;
+
 /// Complete source-scoped state after applying one scan.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SourceReplacementManifest {
     source_path: String,
     entity_memberships: Vec<SourceEntityMembershipManifest>,
+    /// Original observations only. Missing members explicitly lack legacy evidence.
+    projections: SourceProjections,
     placement_ids: Vec<PlacementId>,
     /// 该源声明的工具活动 id（v12；按 activity_id 排序去重）。
     activity_ids: Vec<String>,
@@ -643,9 +684,27 @@ impl SourceReplacementManifest {
         let mut claims: Vec<_> = self.resume_claims.iter().collect();
         claims.sort_by_key(|claim| &claim.session_id);
         let claims: Vec<_> = claims.into_iter().map(resume_claim_value).collect();
+        // The outbox seals evidence; it is not a replay copy of transcript
+        // bodies. Labels distinguish the two byte domains, and the full typed
+        // identity remains part of the descriptor sealed by the batch digest.
+        let projections: BTreeMap<_, _> = self
+            .projections
+            .iter()
+            .map(|(wire, (id, payload, text))| {
+                (
+                    wire,
+                    serde_json::json!({
+                        "id": id,
+                        "payload_blake3": blake3::hash(payload).to_hex().to_string(),
+                        "text_blake3": blake3::hash(text.as_bytes()).to_hex().to_string(),
+                    }),
+                )
+            })
+            .collect();
         let mut value = serde_json::json!({
             "source_path": self.source_path,
             "entity_memberships": entity_memberships,
+            "projections": projections,
             "placement_ids": placement_ids,
             "activity_ids": activity_ids,
             "usage_ids": usage_ids,
@@ -1922,6 +1981,25 @@ impl SqliteStore {
         }
         if current < 18 {
             Self::migrate_v17_to_v18(conn)?;
+        }
+        if current < 19 {
+            let tx = conn.unchecked_transaction().map_err(backend)?;
+            tx.execute_batch(
+                "CREATE TABLE source_entity_projections (
+                    source_path TEXT NOT NULL,
+                    entity_id TEXT NOT NULL,
+                    id_json TEXT NOT NULL,
+                    payload BLOB NOT NULL,
+                    text TEXT NOT NULL,
+                    PRIMARY KEY(source_path, entity_id)
+                 );
+                 CREATE INDEX source_entity_projections_entity
+                    ON source_entity_projections(entity_id, source_path);
+                 PRAGMA user_version = 19;",
+            )
+            .map_err(backend)?;
+            // Never manufacture original observations from the catalog aggregate.
+            tx.commit().map_err(backend)?;
         }
         // 不随 user_version 门控：旧 v7 库（本列存在前建成的）打开时同样需要。
         Self::ensure_fts_ids_rowid(conn)?;
@@ -3298,6 +3376,38 @@ impl SqliteStore {
         self.commit_batch_if_changed(entries).map(|_| ())
     }
 
+    /// Unscoped writes cannot change source-owned entities. Only a source
+    /// replacement can update their observations and membership coherently.
+    fn reject_source_owned_writes(
+        conn: &Connection,
+        upserts: &[SourceProjection],
+        deletes: &[StableId],
+    ) -> PortResult<()> {
+        let ids: Vec<_> = upserts
+            .iter()
+            .map(|(id, _, _)| id.as_str())
+            .chain(deletes.iter().map(StableId::as_str))
+            .collect();
+        for chunk in chunk_ids(&ids) {
+            let claimed: bool = conn
+                .query_row(
+                    &format!(
+                        "SELECT EXISTS(SELECT 1 FROM source_membership WHERE message_id IN ({}))",
+                        in_placeholders(chunk.len())
+                    ),
+                    rusqlite::params_from_iter(chunk.iter()),
+                    |row| row.get(0),
+                )
+                .map_err(backend)?;
+            if claimed {
+                return Err(PortError::InvalidRequest(
+                    "source-owned entities must be updated through a source replacement".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Durable batch commit that reports whether a new generation was activated.
     ///
     /// `false` means every catalog payload and indexed text already matched the batch;
@@ -3311,6 +3421,7 @@ impl SqliteStore {
         }
         // Validate the complete change set before the no-op shortcut; duplicate IDs must
         // never be silently accepted just because the first copy is already current.
+        Self::reject_source_owned_writes(&self.conn.borrow(), entries, &[])?;
         batch_manifest(entries, &[], &RelationManifests::default())?;
         self.ensure_stored_identity_metadata_matches(entries)?;
         if self.batch_is_current(entries)? {
@@ -3346,28 +3457,7 @@ impl SqliteStore {
             let payload_is_current = if contextual_payloads_are_derived
                 && matches!(id.kind(), IdKind::Message | IdKind::Session)
             {
-                if catalog_payload.as_slice() == payload.as_slice() {
-                    true
-                } else {
-                    // 存储 payload 可能携带从 v7 关系再生的上下文别名（parent/
-                    // is_sidechain/session/spans 等），与传入的合并结果未必逐字节
-                    // 一致；因此用与提交路径相同的合并操作判定：把传入 payload 并入
-                    // 存储值，若能还原出存储字节才是内容级 no-op。只查存在性会把
-                    // merge 实际会应用的 payload-only 变更静默丢弃（如消息新增一个
-                    // session 引用而 text 未变）。字节相同则直接短路——与提交路径
-                    // “stored == payload 时不做 merge”的行为一致（非 JSON 的旧式
-                    // 裸文本行在此保持 no-op 而非误报）。
-                    let merged = match id.kind() {
-                        IdKind::Message => {
-                            merge_message_payloads(id.as_str(), &catalog_payload, payload)?
-                        }
-                        IdKind::Session => {
-                            merge_session_payloads(id.as_str(), &catalog_payload, payload)?
-                        }
-                        _ => unreachable!(),
-                    };
-                    merged == catalog_payload
-                }
+                intrinsic_payloads_equal(id.kind(), &catalog_payload, payload)
             } else {
                 catalog_payload.as_slice() == payload.as_slice()
             };
@@ -3580,6 +3670,8 @@ impl SqliteStore {
             &usage_candidates,
             &scanned_paths,
         )?;
+        let mut projections =
+            Self::load_source_projections(&self.conn.borrow(), &entity_candidates)?;
         let stored_placements = self.stored_placements_for(&placement_candidates)?;
         let stored_edges = self.stored_edges_for(&placement_candidates)?;
         let stored_activities = self.stored_activities_for(&activity_candidates)?;
@@ -3785,7 +3877,15 @@ impl SqliteStore {
             };
             final_usage_ids.extend(source_usages.keys().cloned());
 
+            let evidence = projections.entry(source.source_path.clone()).or_default();
+            if source.relation_complete {
+                evidence.clear();
+            }
+            for entry in &source.entries {
+                evidence.insert(entry.0.as_str().to_string(), entry.clone());
+            }
             let replacement = SourceReplacementManifest {
+                projections: evidence.clone(),
                 source_path: source.source_path.clone(),
                 entity_memberships: final_entities
                     .into_iter()
@@ -3824,85 +3924,9 @@ impl SqliteStore {
                     replacement,
                 },
             );
-
-            for (id, payload, text) in &source.entries {
-                if let Some((old_id, old_payload, old_text)) = merged.get(id.as_str()) {
-                    if old_id != id {
-                        return Err(PortError::Backend(
-                            "entity has conflicting identity metadata across sources".into(),
-                        ));
-                    }
-                    if old_payload != payload || old_text != text {
-                        let union = match id.kind() {
-                            IdKind::Session => {
-                                merge_session_payloads(id.as_str(), old_payload, payload)?
-                            }
-                            IdKind::Message => {
-                                merge_message_payloads(id.as_str(), old_payload, payload)?
-                            }
-                            _ => {
-                                return Err(PortError::Backend(
-                                    "entity has conflicting projections across sources".into(),
-                                ));
-                            }
-                        };
-                        // 合并后的 payload 是内容的权威投影：FTS 正文必须从它重投影
-                        // （与 rebuild_index 同一投影函数），而不是取“排序最后处理的
-                        // 源的原始 text”——后者在 text 较短源排最后时会与 payload 分叉
-                        // （长文本在 payload 但搜不到，需 rebuild 才恢复），也会让按源
-                        // 分批 sync 时 generation 反复推进、内容级 no-op 失效。
-                        let merged_text = if id.kind() == IdKind::Message {
-                            searchable_text(&union)
-                        } else {
-                            text.clone()
-                        };
-                        merged.insert(id.as_str().to_string(), (id.clone(), union, merged_text));
-                        continue;
-                    }
-                } else {
-                    merged.insert(
-                        id.as_str().to_string(),
-                        (id.clone(), payload.clone(), text.clone()),
-                    );
-                }
-            }
         }
 
-        // 合并前先批量读取 catalog 中已有的 payload(分块 IN,同 get_many 模式),
-        // 取代逐实体 get 的 N+1;与 get 语义一致:目录中不存在的 id 视为 None。
         trace::add(&mut trace_stages, "merge_sources", trace_started);
-        let trace_started = trace::begin();
-        let merged_ids: Vec<StableId> = merged.values().map(|(id, _, _)| id.clone()).collect();
-        let stored_payloads = self.get_many(&merged_ids)?;
-        let stored_by_id: BTreeMap<String, Vec<u8>> = stored_payloads
-            .into_iter()
-            .filter_map(|(id, payload)| payload.map(|payload| (id.as_str().to_string(), payload)))
-            .collect();
-
-        for (id, payload, text) in merged.values_mut() {
-            let Some(stored) = stored_by_id.get(id.as_str()) else {
-                continue;
-            };
-            if stored == payload {
-                continue;
-            }
-            match id.kind() {
-                IdKind::Session => {
-                    *payload = merge_session_payloads(id.as_str(), stored, payload)?;
-                }
-                IdKind::Message => {
-                    let union = merge_message_payloads(id.as_str(), stored, payload)?;
-                    // 与 stored 合并后再次重投影正文：合并结果可能以 stored 中更长的
-                    // text 为准，FTS 必须索引 searchable_text(合并后 payload) 而非
-                    // 来源侧原始 text，否则 payload 与搜索索引再次分叉。
-                    *text = searchable_text(&union);
-                    *payload = union;
-                }
-                _ => continue,
-            };
-        }
-
-        trace::add(&mut trace_stages, "merge_stored", trace_started);
         let trace_started = trace::begin();
         let mut final_entity_claimers = BTreeMap::<String, BTreeSet<String>>::new();
         for (source_path, memberships) in &current_entities_by_source {
@@ -3981,6 +4005,136 @@ impl SqliteStore {
                     .or_default()
                     .insert(source_path.clone());
             }
+        }
+
+        // Recompute only the affected entities from final live observations. A
+        // source update replaces its prior evidence even when its text shrinks.
+        let missing_ids: Vec<StableId> = final_entity_claimers
+            .iter()
+            .filter(|(id, claimers)| {
+                claimers.iter().any(|source| {
+                    !projections
+                        .get(source)
+                        .is_some_and(|rows| rows.contains_key(*id))
+                })
+            })
+            .filter_map(|(id, _)| StableId::from_wire(id))
+            .collect();
+        let legacy_payloads: BTreeMap<_, _> = self
+            .get_many(&missing_ids)?
+            .into_iter()
+            .filter_map(|(id, payload)| payload.map(|p| (id.as_str().to_string(), p)))
+            .collect();
+        for (wire, claimers) in &final_entity_claimers {
+            if claimers.iter().any(|source| {
+                !projections
+                    .get(source)
+                    .is_some_and(|rows| rows.contains_key(wire))
+            }) {
+                // A mixed legacy entity cannot yet be reconstructed. Retain its
+                // aggregate, not a fabricated source projection. Evidence still
+                // commits, so the last required re-ingest converges.
+                if !legacy_payloads.contains_key(wire) {
+                    return Err(PortError::SchemaIncompatible(
+                        "source projection evidence is missing; completely re-ingest all contributing sources".into()));
+                }
+                continue;
+            }
+            for source in claimers {
+                let (id, payload, text) = &projections[source][wire];
+                if let Some((old_id, old_payload, old_text)) = merged.get(wire) {
+                    if old_id != id {
+                        return Err(PortError::Backend(
+                            "entity has conflicting identity metadata across sources".into(),
+                        ));
+                    }
+                    if old_payload == payload && old_text == text {
+                        continue;
+                    }
+                    let union = match id.kind() {
+                        IdKind::Session => merge_session_payloads(wire, old_payload, payload)?,
+                        IdKind::Message => merge_message_payloads(wire, old_payload, payload)?,
+                        _ => {
+                            return Err(PortError::Backend(
+                                "entity has conflicting projections across sources".into(),
+                            ));
+                        }
+                    };
+                    let text = if id.kind() == IdKind::Message {
+                        searchable_text(&union)
+                    } else {
+                        text.clone()
+                    };
+                    merged.insert(wire.clone(), (id.clone(), union, text));
+                } else {
+                    merged.insert(wire.clone(), (id.clone(), payload.clone(), text.clone()));
+                }
+            }
+        }
+
+        let claimant_sources: Vec<_> = final_entity_claimers
+            .values()
+            .flatten()
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let mut complete_sources = BTreeSet::new();
+        {
+            let conn = self.conn.borrow();
+            for chunk in chunk_ids(&claimant_sources) {
+                let mut stmt = conn
+                    .prepare(&format!(
+                        "SELECT source_path FROM source_relation_scans WHERE source_path IN ({})",
+                        in_placeholders(chunk.len())
+                    ))
+                    .map_err(backend)?;
+                let rows = stmt
+                    .query_map(rusqlite::params_from_iter(chunk.iter()), |row| {
+                        row.get::<_, String>(0)
+                    })
+                    .map_err(backend)?;
+                for row in rows {
+                    complete_sources.insert(row.map_err(backend)?);
+                }
+            }
+        }
+        for (source, prepared) in &prepared_sources {
+            if prepared.relation_complete {
+                complete_sources.insert(source.clone());
+            } else {
+                complete_sources.remove(source);
+            }
+        }
+        let retain_alias_ids: Vec<_> = merged
+            .values()
+            .filter(|(id, _, _)| {
+                !compatibility_keys(id.kind()).is_empty()
+                    && final_entity_claimers[id.as_str()]
+                        .iter()
+                        .any(|source| !complete_sources.contains(source))
+            })
+            .map(|(id, _, _)| id.clone())
+            .collect();
+        for (id, old_payload) in self.get_many(&retain_alias_ids)? {
+            let Some(old_payload) = old_payload else {
+                continue;
+            };
+            let (_, payload, _) = merged.get_mut(id.as_str()).expect("selected merged entity");
+            // An incomplete relation set cannot regenerate subtractive aliases.
+            // Keep only the old compatibility fields, never old role/text/etc.
+            let (Ok(serde_json::Value::Object(old)), Ok(serde_json::Value::Object(mut new))) = (
+                serde_json::from_slice(&old_payload),
+                serde_json::from_slice(payload),
+            ) else {
+                continue;
+            };
+            for key in compatibility_keys(id.kind()) {
+                if let Some(value) = old.get(*key) {
+                    new.insert((*key).into(), value.clone());
+                }
+            }
+            *payload = serde_json::to_vec(&new).map_err(backend)?;
         }
 
         let mut deletes = BTreeMap::new();
@@ -4252,7 +4406,7 @@ impl SqliteStore {
                 .iter()
                 .map(|(_, payload, text)| payload.len() + text.len())
                 .sum();
-            let stored_payload_bytes: usize = stored_by_id
+            let stored_payload_bytes: usize = legacy_payloads
                 .iter()
                 .map(|(id, payload)| id.len() + payload.len() + 48)
                 .sum();
@@ -4306,7 +4460,7 @@ impl SqliteStore {
                      entity_membership_bytes~{} placement_membership_bytes~{}",
                     upserts.len(),
                     payload_bytes,
-                    stored_by_id.len(),
+                    legacy_payloads.len(),
                     stored_payload_bytes,
                     stored_placements.len(),
                     placement_bytes,
@@ -4336,6 +4490,59 @@ impl SqliteStore {
         Ok(true)
     }
 
+    fn source_projections_for_path(conn: &Connection, path: &str) -> PortResult<SourceProjections> {
+        let mut stmt = conn.prepare("SELECT entity_id, id_json, payload, text FROM source_entity_projections WHERE source_path=?1").map_err(backend)?;
+        let rows = stmt
+            .query_map([path], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })
+            .map_err(backend)?;
+        let mut result = BTreeMap::new();
+        for row in rows {
+            let (wire, id, payload, text) = row.map_err(backend)?;
+            result.insert(
+                wire,
+                (serde_json::from_str(&id).map_err(backend)?, payload, text),
+            );
+        }
+        Ok(result)
+    }
+
+    fn load_source_projections(
+        conn: &Connection,
+        candidates: &BTreeSet<String>,
+    ) -> PortResult<BTreeMap<String, SourceProjections>> {
+        let ids: Vec<_> = candidates.iter().collect();
+        let mut result: BTreeMap<String, SourceProjections> = BTreeMap::new();
+        for chunk in chunk_ids(&ids) {
+            let mut stmt = conn.prepare(&format!("SELECT source_path, entity_id, id_json, payload, text FROM source_entity_projections WHERE entity_id IN ({})", in_placeholders(chunk.len()))).map_err(backend)?;
+            let rows = stmt
+                .query_map(rusqlite::params_from_iter(chunk.iter()), |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Vec<u8>>(3)?,
+                        row.get::<_, String>(4)?,
+                    ))
+                })
+                .map_err(backend)?;
+            for row in rows {
+                let (source, wire, id, payload, text) = row.map_err(backend)?;
+                result.entry(source).or_default().insert(
+                    wire,
+                    (serde_json::from_str(&id).map_err(backend)?, payload, text),
+                );
+            }
+        }
+        Ok(result)
+    }
+
     /// True when every source in the batch is already fully current: catalog
     /// entries (payload + fts text), placements, edges, entity membership,
     /// placement claims, scan record, and relation-completeness marker all
@@ -4345,6 +4552,14 @@ impl SqliteStore {
     fn sources_are_current(&self, ordered_sources: &[&SourceBatch]) -> PortResult<bool> {
         let conn = self.conn.borrow();
         for source in ordered_sources {
+            let evidence = Self::source_projections_for_path(&conn, &source.source_path)?;
+            if source
+                .entries
+                .iter()
+                .any(|entry| evidence.get(entry.0.as_str()) != Some(entry))
+            {
+                return Ok(false);
+            }
             if !self.installation_is_current(&conn, source)? {
                 return Ok(false);
             }
@@ -4390,36 +4605,40 @@ impl SqliteStore {
                 return Ok(false);
             }
 
-            // Catalog entries: batched payload reads, chunked under the
+            // Catalog existence: batch-scoped ID reads, chunked under the
             // SQLite variable limit.
             let ids: Vec<&str> = source
                 .entries
                 .iter()
                 .map(|(id, _, _)| id.as_str())
                 .collect();
-            let mut payloads: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+            let mut catalog_ids = BTreeSet::new();
             for chunk in chunk_ids(&ids) {
                 let placeholders = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
                 let mut stmt = conn
                     .prepare(&format!(
-                        "SELECT id, payload FROM catalog WHERE id IN ({placeholders})"
+                        "SELECT id FROM catalog WHERE id IN ({placeholders})"
                     ))
                     .map_err(backend)?;
                 let rows = stmt
                     .query_map(rusqlite::params_from_iter(chunk.iter().copied()), |row| {
-                        Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+                        row.get::<_, String>(0)
                     })
                     .map_err(backend)?;
                 for row in rows {
-                    let (id, payload) = row.map_err(backend)?;
-                    payloads.insert(id, payload);
+                    catalog_ids.insert(row.map_err(backend)?);
                 }
             }
-            for (id, payload, _text) in &source.entries {
-                if payloads.get(id.as_str()).map(Vec::as_slice) != Some(payload.as_slice()) {
-                    return Ok(false);
-                }
+            if source
+                .entries
+                .iter()
+                .any(|(id, _, _)| !catalog_ids.contains(id.as_str()))
+            {
+                return Ok(false);
             }
+            // Original observations were checked against source evidence above.
+            // The historical aggregate may intentionally differ while another
+            // legacy claimant is still unknown; it is never a competing source.
             // Indexed text: batched reads mapping wire_id -> fts text.
             let mut fts_text: BTreeMap<String, String> = BTreeMap::new();
             for chunk in chunk_ids(&ids) {
@@ -5351,18 +5570,14 @@ impl SqliteStore {
         Ok(edges)
     }
 
-    fn regenerate_compatibility_aliases_in_tx(
-        tx: &rusqlite::Transaction<'_>,
+    fn alias_candidates(
+        conn: &Connection,
         batch_sources: &[String],
-        in_memory_payloads: &BTreeMap<&str, &[u8]>,
-    ) -> PortResult<()> {
-        // Only entities claimed by this batch's sources can have their
-        // aliases changed; collecting that candidate set up front keeps the
-        // claimer maps proportional to the batch instead of the catalog.
+    ) -> PortResult<BTreeSet<String>> {
         let mut candidate_entities = BTreeSet::<String>::new();
         for chunk in chunk_ids(batch_sources) {
             let placeholders = in_placeholders(chunk.len());
-            let mut stmt = tx
+            let mut stmt = conn
                 .prepare(&format!(
                     "SELECT message_id FROM source_membership
                      WHERE source_path IN ({placeholders})"
@@ -5376,7 +5591,7 @@ impl SqliteStore {
             for row in rows {
                 candidate_entities.insert(row.map_err(backend)?);
             }
-            let mut stmt = tx
+            let mut stmt = conn
                 .prepare(&format!(
                     "SELECT placements.session_id, placements.document_id,
                             placements.message_id
@@ -5402,6 +5617,16 @@ impl SqliteStore {
                 candidate_entities.insert(message_id);
             }
         }
+        Ok(candidate_entities)
+    }
+
+    fn regenerate_compatibility_aliases_in_tx(
+        tx: &rusqlite::Transaction<'_>,
+        batch_sources: &[String],
+        in_memory_payloads: &BTreeMap<&str, &[u8]>,
+        mut candidate_entities: BTreeSet<String>,
+    ) -> PortResult<()> {
+        candidate_entities.extend(Self::alias_candidates(tx, batch_sources)?);
         if candidate_entities.is_empty() {
             return Ok(());
         }
@@ -5491,21 +5716,17 @@ impl SqliteStore {
             }
         }
 
+        let evidence = Self::load_source_projections(tx, &candidate_entities)?;
         let fully_complete_entities: BTreeSet<String> = claimers_by_entity
             .into_iter()
             .filter_map(|(entity_id, claimers)| {
-                // Only entities whose claimers intersect this batch's sources
-                // can have their aliases changed by this commit; regenerating
-                // the whole catalog per batch is what made first ingest
-                // O(n²). Fully-complete still requires every claimer scanned.
-                let touched_by_batch = claimers
-                    .iter()
-                    .any(|source_path| batch_sources.iter().any(|batch| batch == source_path));
                 (!claimers.is_empty()
-                    && touched_by_batch
-                    && claimers
-                        .iter()
-                        .all(|source_path| complete_sources.contains(source_path)))
+                    && claimers.iter().all(|source_path| {
+                        complete_sources.contains(source_path)
+                            && evidence
+                                .get(source_path)
+                                .is_some_and(|rows| rows.contains_key(&entity_id))
+                    }))
                 .then_some(entity_id)
             })
             .collect();
@@ -5752,6 +5973,16 @@ impl SqliteStore {
         relations: &RelationManifests,
         state: &CatalogStateSnapshot<'_>,
     ) -> PortResult<bool> {
+        {
+            let conn = self.conn.borrow();
+            for replacement in &relations.source_replacements {
+                if Self::source_projections_for_path(&conn, &replacement.source_path)?
+                    != replacement.projections
+                {
+                    return Ok(false);
+                }
+            }
+        }
         if !self.batch_is_current_with_derived_context(upserts, true)? {
             return Ok(false);
         }
@@ -6028,6 +6259,7 @@ impl SqliteStore {
         upserts: &[(StableId, Vec<u8>, String)],
         deletes: &[StableId],
     ) -> PortResult<PendingIndexBatch> {
+        Self::reject_source_owned_writes(&self.conn.borrow(), upserts, deletes)?;
         self.begin_index_batch_with_relations(upserts, deletes, &RelationManifests::default())
     }
 
@@ -6105,6 +6337,7 @@ impl SqliteStore {
         upserts: &[(StableId, Vec<u8>, String)],
         deletes: &[StableId],
     ) -> PortResult<()> {
+        Self::reject_source_owned_writes(&self.conn.borrow(), upserts, deletes)?;
         let relations = RelationManifests::default();
         let manifest = batch_manifest(upserts, deletes, &relations)?;
         self.commit_index_batch_with_relations(pending, upserts, deletes, &relations, &manifest)
@@ -6122,6 +6355,9 @@ impl SqliteStore {
         _relations: &RelationManifests,
         manifest: &CanonicalBatchManifest,
     ) -> PortResult<()> {
+        // Public commit_index_batch constructs a fresh actual-input manifest;
+        // the private source path passes the same immutable inputs used to seal
+        // its intent. Reuse that manifest here (no second whole-batch hash).
         // CAS：活动 generation 必须仍等于 intent 记录的 base，否则中止本批次。
         let current: i64 = tx
             .query_row(
@@ -6623,6 +6859,57 @@ impl SqliteStore {
         Ok(())
     }
 
+    /// Retire vectors only when the final embedding input changes. Source
+    /// evidence updates and compatibility aliases alone do not invalidate it.
+    fn invalidate_changed_vectors_in_tx(
+        tx: &rusqlite::Transaction<'_>,
+        upserts: &[SourceProjection],
+        deletes: &[StableId],
+    ) -> PortResult<()> {
+        let mut stale: BTreeSet<String> = deletes.iter().map(|id| id.as_str().to_owned()).collect();
+        let incoming: BTreeMap<_, _> = upserts
+            .iter()
+            .filter(|(id, _, _)| id.kind() == IdKind::Message)
+            .map(|(id, payload, _)| (id.as_str(), payload))
+            .collect();
+        let ids: Vec<_> = incoming.keys().copied().collect();
+        for chunk in chunk_ids(&ids) {
+            let mut stmt = tx
+                .prepare(&format!(
+                    "SELECT v.wire_id, c.payload FROM message_vec v
+                 LEFT JOIN catalog c ON c.id=v.wire_id
+                 WHERE v.wire_id IN ({})",
+                    in_placeholders(chunk.len())
+                ))
+                .map_err(backend)?;
+            let rows = stmt
+                .query_map(rusqlite::params_from_iter(chunk.iter()), |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, Option<Vec<u8>>>(1)?))
+                })
+                .map_err(backend)?;
+            for row in rows {
+                let (id, old) = row.map_err(backend)?;
+                if old.as_ref().is_none_or(|old| {
+                    searchable_text(old) != searchable_text(incoming[id.as_str()])
+                }) {
+                    stale.insert(id);
+                }
+            }
+        }
+        let ids: Vec<_> = stale.into_iter().collect();
+        for chunk in chunk_ids(&ids) {
+            tx.execute(
+                &format!(
+                    "DELETE FROM message_vec WHERE wire_id IN ({})",
+                    in_placeholders(chunk.len())
+                ),
+                rusqlite::params_from_iter(chunk.iter()),
+            )
+            .map_err(backend)?;
+        }
+        Ok(())
+    }
+
     fn commit_index_batch_with_relations(
         &self,
         pending: &PendingIndexBatch,
@@ -6633,6 +6920,9 @@ impl SqliteStore {
     ) -> PortResult<()> {
         let mut conn = self.conn.borrow_mut();
         let tx = conn.transaction().map_err(backend)?;
+        if relations.source_replacements.is_empty() && relations.relocation.is_none() {
+            Self::reject_source_owned_writes(&tx, upserts, deletes)?;
+        }
         let mut trace_stages: Vec<(&'static str, std::time::Duration)> = Vec::new();
         let trace_started = trace::begin();
         Self::verify_pending_in_tx(&tx, pending, upserts, deletes, relations, manifest)?;
@@ -6708,6 +6998,8 @@ impl SqliteStore {
         }
         Self::collect_placement_sessions(&tx, &old_placement_ids, &mut affected_sessions)?;
         Self::collect_resume_claim_sessions(&tx, &source_paths, &mut affected_sessions)?;
+        let alias_candidates = Self::alias_candidates(&tx, &source_paths)?;
+        Self::invalidate_changed_vectors_in_tx(&tx, upserts, deletes)?;
         trace::add(&mut trace_stages, "affected_sessions", trace_started);
 
         // 批量写入：同一事务内以多行 VALUES 语句替代逐行 prepared execute
@@ -6971,6 +7263,43 @@ impl SqliteStore {
         let trace_sources = trace::begin();
         for source in &relations.source_replacements {
             tx.execute(
+                "DELETE FROM source_entity_projections WHERE source_path = ?1",
+                [&source.source_path],
+            )
+            .map_err(backend)?;
+            let rows: Vec<_> = source
+                .projections
+                .values()
+                .map(|(id, payload, text)| {
+                    Ok((
+                        id.as_str(),
+                        serde_json::to_string(id).map_err(backend)?,
+                        payload,
+                        text,
+                    ))
+                })
+                .collect::<PortResult<Vec<_>>>()?;
+            for chunk in rows.chunks(BULK_INSERT_ROWS_PER_CHUNK) {
+                let sql = format!(
+                    "INSERT INTO source_entity_projections(source_path, entity_id, id_json, payload, text) VALUES {}",
+                    multi_row_values(chunk.len(), 5)
+                );
+                let params: Vec<&dyn rusqlite::ToSql> = chunk
+                    .iter()
+                    .flat_map(|row| {
+                        [
+                            &source.source_path as &dyn rusqlite::ToSql,
+                            &row.0,
+                            &row.1,
+                            row.2,
+                            row.3,
+                        ]
+                    })
+                    .collect();
+                tx.execute(&sql, rusqlite::params_from_iter(params))
+                    .map_err(backend)?;
+            }
+            tx.execute(
                 "DELETE FROM source_membership WHERE source_path = ?1",
                 [&source.source_path],
             )
@@ -7150,7 +7479,12 @@ impl SqliteStore {
             .iter()
             .map(|(id, payload, _)| (id.as_str(), payload.as_slice()))
             .collect();
-        Self::regenerate_compatibility_aliases_in_tx(&tx, &batch_sources, &in_memory_payloads)?;
+        Self::regenerate_compatibility_aliases_in_tx(
+            &tx,
+            &batch_sources,
+            &in_memory_payloads,
+            alias_candidates,
+        )?;
         let resolver: &dyn RepoSlugResolver = &**self.repo_slug_resolver.borrow();
         for session_wire in affected_sessions {
             Self::rebuild_session_search_row_in_tx(
@@ -7680,13 +8014,13 @@ impl SqliteStore {
         };
 
         // 2) durable intent：记录本次重建将索引的完整集合（崩溃后 recover 会 abort 它）。
-        let pending = self.begin_index_batch(&upserts, &[])?;
+        let relations = RelationManifests::default();
+        let manifest = batch_manifest(&upserts, &[], &relations)?;
+        let pending = self.begin_index_batch_with_manifest(&manifest, &upserts, &[], &relations)?;
 
         // 3) 单事务：校验句柄 → 整表清空 FTS → 按 catalog 重投影 → 推进 generation → 标记 activated。
         let mut conn = self.conn.borrow_mut();
         let tx = conn.transaction().map_err(backend)?;
-        let relations = RelationManifests::default();
-        let manifest = batch_manifest(&upserts, &[], &relations)?;
         Self::verify_pending_in_tx(&tx, &pending, &upserts, &[], &relations, &manifest)?;
 
         tx.execute("DELETE FROM fts", []).map_err(backend)?;
@@ -7821,7 +8155,7 @@ const RELATION_SCHEMA_VERSION: i64 = 7;
 /// 已存版本落后于该常量的源即使字节未变也走 targeted backfill（重跑 parse +
 /// commit），并在重新 commit 时写回当前版本。单测（lib.rs
 /// `stale_parser_version_forces_reparse_and_converges`）锁住该语义。
-pub const PARSER_SEMANTIC_VERSION: u32 = 3;
+pub const PARSER_SEMANTIC_VERSION: u32 = 4;
 
 /// 索引投影版本：任何改变 **FTS 词元流或派生投影文本** 的变化都必须 +1。
 ///
@@ -7921,7 +8255,7 @@ pub const INDEX_PROJECTION_VERSION: u32 = 1;
 ///
 /// v18：持久化 installation namespace/location/source binding 与迁移回执；
 /// durable intent 增加 relocation manifest，保留所有既有 canonical ID。
-pub const SCHEMA_VERSION: i64 = 18;
+pub const SCHEMA_VERSION: i64 = 19;
 
 impl CatalogStore for SqliteStore {
     fn begin_read_snapshot(&self) -> PortResult<Box<dyn ReadSnapshot + '_>> {
@@ -7976,6 +8310,7 @@ impl CatalogStore for SqliteStore {
     fn put(&self, id: &StableId, payload: &[u8]) -> PortResult<()> {
         let mut conn = self.conn.borrow_mut();
         let tx = conn.transaction().map_err(backend)?;
+        Self::reject_source_owned_writes(&tx, &[], std::slice::from_ref(id))?;
         tx.execute(
             "INSERT INTO catalog(id, payload) VALUES(?1, ?2)
              ON CONFLICT(id) DO UPDATE SET payload = excluded.payload",
@@ -10950,7 +11285,7 @@ mod tests {
     fn schema_v10_creates_message_vec_table() {
         let store = SqliteStore::open_in_memory().unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 18);
+        assert_eq!(SCHEMA_VERSION, 19);
         let conn = store.conn.borrow();
         let count: i64 = conn
             .query_row(
@@ -11288,6 +11623,682 @@ mod tests {
             .unwrap()
     }
 
+    fn projection_source(path: &str, message: &StableId, text: &str) -> SourceBatch {
+        source_batch(
+            path,
+            vec![(
+                message.clone(),
+                message_payload("ses_v1_aaa", text),
+                text.into(),
+            )],
+            vec![],
+            vec![],
+            true,
+        )
+    }
+
+    #[test]
+    fn source_projection_latest_shorter_and_equal_length() {
+        for replacement in ["new", "different-long-body"] {
+            let store = SqliteStore::open_in_memory().unwrap();
+            let message = sid(IdKind::Message, b"projection-latest");
+            store
+                .commit_source_batches_if_changed(&[projection_source(
+                    "a",
+                    &message,
+                    "original-long-body!",
+                )])
+                .unwrap();
+            store
+                .commit_source_batches_if_changed(&[projection_source("a", &message, replacement)])
+                .unwrap();
+            let payload = store.get(&message).unwrap().unwrap();
+            assert_eq!(searchable_text(&payload), replacement);
+        }
+    }
+
+    #[test]
+    fn source_projection_removal_reveals_surviving_observation() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let message = sid(IdKind::Message, b"projection-remove");
+        store
+            .commit_source_batches_if_changed(&[
+                projection_source("a", &message, "long winning original"),
+                projection_source("b", &message, "short"),
+            ])
+            .unwrap();
+        store
+            .commit_source_batches_if_changed(&[source_batch("a", vec![], vec![], vec![], true)])
+            .unwrap();
+        assert_eq!(
+            searchable_text(&store.get(&message).unwrap().unwrap()),
+            "short"
+        );
+        assert!(store.query("winning", 10).unwrap().is_empty());
+        store
+            .commit_source_batches_if_changed(&[source_batch("b", vec![], vec![], vec![], true)])
+            .unwrap();
+        assert!(store.get(&message).unwrap().is_none());
+    }
+
+    #[test]
+    fn source_projection_batch_order_and_incomplete_retention() {
+        let message = sid(IdKind::Message, b"projection-order");
+        let mut results = Vec::new();
+        for separate in [false, true] {
+            for reverse in [false, true] {
+                let store = SqliteStore::open_in_memory().unwrap();
+                let mut sources = vec![
+                    projection_source("a", &message, "original-long"),
+                    projection_source("b", &message, "short"),
+                ];
+                if reverse {
+                    sources.reverse();
+                }
+                if separate {
+                    for source in sources {
+                        store.commit_source_batches_if_changed(&[source]).unwrap();
+                    }
+                } else {
+                    store.commit_source_batches_if_changed(&sources).unwrap();
+                }
+                store
+                    .commit_source_batches_if_changed(&[projection_source("a", &message, "new")])
+                    .unwrap();
+                store
+                    .commit_source_batches_if_changed(&[source_batch(
+                        "b",
+                        vec![],
+                        vec![],
+                        vec![],
+                        false,
+                    )])
+                    .unwrap();
+                results.push(store.get(&message).unwrap().unwrap());
+                assert_eq!(searchable_text(results.last().unwrap()), "short");
+            }
+        }
+        assert!(results.windows(2).all(|pair| pair[0] == pair[1]));
+    }
+
+    #[test]
+    fn source_projection_evidence_changes_even_when_aggregate_does_not() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let message = sid(IdKind::Message, b"projection-evidence");
+        store
+            .commit_source_batches_if_changed(&[
+                projection_source("a", &message, "winning-original"),
+                projection_source("b", &message, "short"),
+            ])
+            .unwrap();
+        let correction = projection_source("b", &message, "tiny");
+        assert!(
+            store
+                .commit_source_batches_if_changed(std::slice::from_ref(&correction))
+                .unwrap()
+        );
+        assert!(
+            !store
+                .commit_source_batches_if_changed(&[correction])
+                .unwrap()
+        );
+        store
+            .commit_source_batches_if_changed(&[source_batch("a", vec![], vec![], vec![], true)])
+            .unwrap();
+        assert_eq!(
+            searchable_text(&store.get(&message).unwrap().unwrap()),
+            "tiny"
+        );
+    }
+
+    #[test]
+    fn source_projection_legacy_migration_reingest_and_incomplete_unknown() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.sqlite");
+        let message = sid(IdKind::Message, b"legacy-projection");
+        let first = projection_source("a", &message, "historical-long");
+        let second = projection_source("b", &message, "short");
+        let old_payload;
+        {
+            let store = SqliteStore::open_for_write(path.to_str().unwrap()).unwrap();
+            store
+                .commit_source_batches_if_changed(&[first.clone(), second.clone()])
+                .unwrap();
+            old_payload = store.get(&message).unwrap().unwrap();
+            // Exact pre-v19 state: no original projection table existed.
+            store
+                .conn
+                .borrow()
+                .execute_batch("DROP TABLE source_entity_projections; PRAGMA user_version=18;")
+                .unwrap();
+        }
+        assert!(matches!(
+            SqliteStore::open(path.to_str().unwrap()),
+            Err(PortError::SchemaIncompatible(_))
+        ));
+        {
+            let store = SqliteStore::open_for_write(path.to_str().unwrap()).unwrap();
+            assert_eq!(table_count(&store, "source_entity_projections"), 0);
+            assert_eq!(store.get(&message).unwrap().unwrap(), old_payload);
+            // Parser version is already current: evidence, not the version,
+            // must invalidate BOTH no-op paths.
+            assert!(!store.sources_are_current(&[&first]).unwrap());
+            assert!(
+                store
+                    .commit_source_batches_if_changed(&[projection_source("a", &message, "new")])
+                    .unwrap()
+            );
+            assert_eq!(store.get(&message).unwrap().unwrap(), old_payload);
+            assert_eq!(table_count(&store, "source_entity_projections"), 1);
+            assert!(
+                store
+                    .commit_source_batches_if_changed(&[source_batch(
+                        "b",
+                        vec![],
+                        vec![],
+                        vec![],
+                        false
+                    )])
+                    .unwrap()
+            );
+            assert_eq!(table_count(&store, "source_entity_projections"), 1);
+            assert_eq!(store.get(&message).unwrap().unwrap(), old_payload);
+            assert!(
+                store
+                    .commit_source_batches_if_changed(std::slice::from_ref(&second))
+                    .unwrap()
+            );
+            assert_eq!(
+                searchable_text(&store.get(&message).unwrap().unwrap()),
+                "short"
+            );
+            assert!(
+                !store
+                    .commit_source_batches_if_changed(std::slice::from_ref(&second))
+                    .unwrap()
+            );
+        }
+        let store = SqliteStore::open(path.to_str().unwrap()).unwrap();
+        assert_eq!(table_count(&store, "source_entity_projections"), 2);
+        assert_eq!(
+            searchable_text(&store.get(&message).unwrap().unwrap()),
+            "short"
+        );
+    }
+
+    #[test]
+    fn source_projection_migration_rolls_back_table_and_version_on_failure() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let conn = store.conn.borrow();
+        conn.execute_batch(
+            "DROP TABLE source_entity_projections; PRAGMA user_version=18;
+            CREATE TABLE source_entity_projections_entity (block INTEGER);",
+        )
+        .unwrap();
+        assert!(SqliteStore::migrate(&conn).is_err());
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            18
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM sqlite_schema WHERE name='source_entity_projections'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn source_projection_phase_two_failure_retains_old_evidence_and_catalog() {
+        for trigger in [
+            "CREATE TRIGGER reject_projection BEFORE INSERT ON source_entity_projections BEGIN SELECT RAISE(ABORT, 'synthetic'); END;",
+            "CREATE TRIGGER reject_activation BEFORE UPDATE ON index_batches WHEN NEW.state='activated' BEGIN SELECT RAISE(ABORT, 'synthetic'); END;",
+        ] {
+            let store = SqliteStore::open_in_memory().unwrap();
+            let message = sid(IdKind::Message, b"projection-rollback");
+            store
+                .commit_source_batches_if_changed(&[projection_source("a", &message, "original")])
+                .unwrap();
+            let before = store.get(&message).unwrap();
+            let evidence =
+                SqliteStore::source_projections_for_path(&store.conn.borrow(), "a").unwrap();
+            let generation = store.active_generation().unwrap();
+            store.conn.borrow().execute_batch(trigger).unwrap();
+            assert!(
+                store
+                    .commit_source_batches_if_changed(&[projection_source("a", &message, "new")])
+                    .is_err()
+            );
+            assert_eq!(store.active_generation().unwrap(), generation);
+            assert_eq!(store.get(&message).unwrap(), before);
+            assert_eq!(
+                SqliteStore::source_projections_for_path(&store.conn.borrow(), "a").unwrap(),
+                evidence
+            );
+            assert_eq!(store.query("original", 10).unwrap().len(), 1);
+            assert!(store.query("new", 10).unwrap().is_empty());
+            assert_eq!(store.interrupted_batch_count().unwrap(), 1);
+            assert_eq!(store.recover_interrupted().unwrap(), 1);
+        }
+    }
+
+    #[test]
+    fn source_projection_manifest_descriptor_size_is_independent_of_body_size() {
+        let message = sid(IdKind::Message, b"descriptor-size");
+        let mut sizes = Vec::new();
+        for repeats in [1, 16_384] {
+            let store = SqliteStore::open_in_memory().unwrap();
+            let text = "synthetic-private-body".repeat(repeats);
+            let source = projection_source("a", &message, &text);
+            store
+                .commit_source_batches_if_changed(std::slice::from_ref(&source))
+                .unwrap();
+            let batch = latest_index_batch(&store);
+            let descriptor = &batch.source_replacements[0]["projections"][message.as_str()];
+            let serialized = serde_json::to_string(descriptor).unwrap();
+            assert!(
+                serialized.len() < 512,
+                "descriptor expanded to {} bytes",
+                serialized.len()
+            );
+            assert!(!serialized.contains("synthetic-private-body"));
+            assert_eq!(descriptor["id"], serde_json::to_value(&message).unwrap());
+            assert_eq!(
+                descriptor["payload_blake3"],
+                blake3::hash(&source.entries[0].1).to_hex().to_string()
+            );
+            assert_eq!(
+                descriptor["text_blake3"],
+                blake3::hash(text.as_bytes()).to_hex().to_string()
+            );
+            sizes.push(serialized.len());
+            let evidence =
+                SqliteStore::source_projections_for_path(&store.conn.borrow(), "a").unwrap();
+            assert_eq!(evidence[message.as_str()], source.entries[0]);
+        }
+        assert_eq!(sizes[0], sizes[1]);
+    }
+
+    #[test]
+    fn source_projection_manifest_seals_original_payload_text_and_identity() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let message = sid(IdKind::Message, b"projection-seal");
+        let entry = projection_source("a", &message, "original")
+            .entries
+            .remove(0);
+        let relations = RelationManifests {
+            source_replacements: vec![SourceReplacementManifest {
+                source_path: "a".into(),
+                entity_memberships: vec![SourceEntityMembershipManifest {
+                    entity_id: message.as_str().into(),
+                    document_id: None,
+                }],
+                projections: BTreeMap::from([(message.as_str().into(), entry)]),
+                placement_ids: vec![],
+                activity_ids: vec![],
+                usage_ids: vec![],
+                relation_complete: true,
+                len_bytes: None,
+                fingerprint: None,
+                provider_id: None,
+                resume_claims: vec![],
+                installation: None,
+            }],
+            ..RelationManifests::default()
+        };
+        let manifest = batch_manifest(&[], &[], &relations).unwrap();
+        let pending = store
+            .begin_index_batch_with_relations(&[], &[], &relations)
+            .unwrap();
+        for field in 0..3 {
+            let mut tampered = relations.clone();
+            let entry = tampered.source_replacements[0]
+                .projections
+                .values_mut()
+                .next()
+                .unwrap();
+            match field {
+                0 => entry.0 = StableId::from_wire(message.as_str()).unwrap(),
+                1 => entry.1 = b"tampered".to_vec(),
+                _ => entry.2 = "tampered".into(),
+            }
+            assert_ne!(
+                manifest.operation_digest,
+                batch_manifest(&[], &[], &tampered)
+                    .unwrap()
+                    .operation_digest,
+                "changing source identity, payload, or text must change the sealed digest"
+            );
+            let tampered_json = tampered.canonical_json().unwrap().2;
+            store
+                .conn
+                .borrow()
+                .execute(
+                    "UPDATE index_batches SET source_replacements_json=?1 WHERE operation_id=?2",
+                    rusqlite::params![tampered_json, pending.operation_id],
+                )
+                .unwrap();
+            assert!(
+                store
+                    .commit_index_batch_with_relations(&pending, &[], &[], &relations, &manifest)
+                    .is_err()
+            );
+            assert_eq!(store.active_generation().unwrap(), 0);
+            assert_eq!(table_count(&store, "source_entity_projections"), 0);
+        }
+    }
+
+    #[test]
+    fn source_projection_alias_removal_uses_before_candidates() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let message = sid(IdKind::Message, b"projection-alias");
+        let session = sid(IdKind::Session, b"projection-session");
+        let docs = [
+            sid(IdKind::Document, b"projection-doc-a"),
+            sid(IdKind::Document, b"projection-doc-b"),
+        ];
+        let sources: Vec<_> = docs
+            .iter()
+            .enumerate()
+            .map(|(n, doc)| {
+                source_batch(
+                    if n == 0 { "a" } else { "b" },
+                    vec![
+                        typed_message_entry(&message, "body"),
+                        (
+                            session.clone(),
+                            session_payload(doc.as_str(), &[message.as_str()]),
+                            String::new(),
+                        ),
+                        typed_document_entry(doc),
+                    ],
+                    vec![placement(
+                        &session,
+                        doc,
+                        &message,
+                        0,
+                        false,
+                        Some((n as u64, n as u64 + 1)),
+                    )],
+                    vec![],
+                    true,
+                )
+            })
+            .collect();
+        store.commit_source_batches_if_changed(&sources).unwrap();
+        store
+            .commit_source_batches_if_changed(&[source_batch("a", vec![], vec![], vec![], true)])
+            .unwrap();
+        let payload: serde_json::Value =
+            serde_json::from_slice(&store.get(&message).unwrap().unwrap()).unwrap();
+        assert_eq!(payload["spans"].as_array().unwrap().len(), 1);
+        assert_eq!(payload["spans"][0]["document"], docs[1].as_str());
+        let session_payload: serde_json::Value =
+            serde_json::from_slice(&store.get(&session).unwrap().unwrap()).unwrap();
+        assert_eq!(
+            session_payload["documents"],
+            serde_json::json!([docs[1].as_str()])
+        );
+    }
+
+    #[test]
+    fn source_projection_final_text_change_invalidates_vectors_atomically() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let message = sid(IdKind::Message, b"projection-vector");
+        store.set_semantic_model("synthetic-model");
+        store
+            .commit_source_batches_if_changed(&[
+                projection_source("a", &message, "winning-original"),
+                projection_source("b", &message, "short"),
+            ])
+            .unwrap();
+        store.index_embedding(&message, &[1.0, 0.0]).unwrap();
+        store
+            .commit_source_batches_if_changed(&[projection_source("b", &message, "tiny")])
+            .unwrap();
+        assert_eq!(
+            table_count(&store, "message_vec"),
+            1,
+            "evidence-only change keeps valid embedding"
+        );
+        store.conn.borrow().execute_batch("CREATE TRIGGER reject_vector_activation BEFORE UPDATE ON index_batches WHEN NEW.state='activated' BEGIN SELECT RAISE(ABORT, 'synthetic'); END;").unwrap();
+        let remove = source_batch("a", vec![], vec![], vec![], true);
+        assert!(
+            store
+                .commit_source_batches_if_changed(std::slice::from_ref(&remove))
+                .is_err()
+        );
+        assert_eq!(table_count(&store, "message_vec"), 1);
+        store
+            .conn
+            .borrow()
+            .execute_batch("DROP TRIGGER reject_vector_activation;")
+            .unwrap();
+        store.commit_source_batches_if_changed(&[remove]).unwrap();
+        assert_eq!(
+            table_count(&store, "message_vec"),
+            0,
+            "changed final text must retire its embedding"
+        );
+        store.index_embedding(&message, &[1.0, 0.0]).unwrap();
+        store
+            .commit_source_batches_if_changed(&[source_batch("b", vec![], vec![], vec![], true)])
+            .unwrap();
+        assert_eq!(
+            table_count(&store, "message_vec"),
+            0,
+            "last source deletion removes orphan embedding"
+        );
+    }
+
+    #[test]
+    fn source_projection_same_source_intrinsic_correction_and_missing_legacy_refusal() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let message = sid(IdKind::Message, b"projection-intrinsic");
+        let mut source = projection_source("a", &message, "body");
+        store
+            .commit_source_batches_if_changed(std::slice::from_ref(&source))
+            .unwrap();
+        let mut payload: serde_json::Value = serde_json::from_slice(&source.entries[0].1).unwrap();
+        payload["role"] = serde_json::json!("assistant");
+        source.entries[0].1 = serde_json::to_vec(&payload).unwrap();
+        assert!(
+            store
+                .commit_source_batches_if_changed(std::slice::from_ref(&source))
+                .unwrap()
+        );
+        assert_eq!(store.get(&message).unwrap().unwrap(), source.entries[0].1);
+        store
+            .commit_source_batches_if_changed(&[projection_source("b", &message, "body")])
+            .unwrap_err();
+        // A legacy claimant without either evidence or an aggregate cannot be
+        // guessed. The refusal must happen before creating a durable intent.
+        store
+            .conn
+            .borrow()
+            .execute_batch("DELETE FROM source_entity_projections; DELETE FROM catalog;")
+            .unwrap();
+        let generation = store.active_generation().unwrap();
+        let error = store
+            .commit_source_batches_if_changed(&[source_batch("a", vec![], vec![], vec![], false)])
+            .unwrap_err();
+        assert!(matches!(error, PortError::SchemaIncompatible(_)));
+        assert_eq!(store.active_generation().unwrap(), generation);
+        assert_eq!(store.interrupted_batch_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn review_incomplete_scan_preserves_generated_aliases_but_updates_intrinsics() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let message = sid(IdKind::Message, b"review-incomplete");
+        let session = sid(IdKind::Session, b"review-incomplete-session");
+        let document = sid(IdKind::Document, b"review-incomplete-doc");
+        let source = source_batch(
+            "a",
+            vec![
+                typed_message_entry(&message, "original long body"),
+                (
+                    session.clone(),
+                    session_payload(document.as_str(), &[message.as_str()]),
+                    String::new(),
+                ),
+                typed_document_entry(&document),
+            ],
+            vec![placement(
+                &session,
+                &document,
+                &message,
+                0,
+                false,
+                Some((3, 8)),
+            )],
+            vec![],
+            true,
+        );
+        store.commit_source_batches_if_changed(&[source]).unwrap();
+        let before = store.get(&message).unwrap().unwrap();
+        assert!(serde_json::from_slice::<serde_json::Value>(&before).unwrap()["spans"][0]["placement_id"].is_string());
+        let empty = source_batch("a", vec![], vec![], vec![], false);
+        store
+            .commit_source_batches_if_changed(std::slice::from_ref(&empty))
+            .unwrap();
+        assert_eq!(store.get(&message).unwrap().unwrap(), before);
+        assert!(!store.commit_source_batches_if_changed(&[empty]).unwrap());
+        let changed = source_batch(
+            "a",
+            vec![typed_message_entry(&message, "new")],
+            vec![],
+            vec![],
+            false,
+        );
+        store
+            .commit_source_batches_if_changed(std::slice::from_ref(&changed))
+            .unwrap();
+        let mut expected: serde_json::Value = serde_json::from_slice(&before).unwrap();
+        expected["text"] = serde_json::json!("new");
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&store.get(&message).unwrap().unwrap())
+                .unwrap(),
+            expected
+        );
+        assert_eq!(store.query("new", 10).unwrap().len(), 1);
+        assert!(store.query("original", 10).unwrap().is_empty());
+        assert!(!store.commit_source_batches_if_changed(&[changed]).unwrap());
+    }
+
+    #[test]
+    fn review_legacy_unknown_claimant_repeat_and_removal_converge() {
+        for repeat in [false, true] {
+            let store = SqliteStore::open_in_memory().unwrap();
+            let message = sid(IdKind::Message, b"review-legacy");
+            let mut source = projection_source("a", &message, "body");
+            store
+                .commit_source_batches_if_changed(&[
+                    source.clone(),
+                    projection_source("b", &message, "body"),
+                ])
+                .unwrap();
+            store
+                .conn
+                .borrow()
+                .execute("DELETE FROM source_entity_projections", [])
+                .unwrap();
+            let before = store.get(&message).unwrap();
+            let mut payload: serde_json::Value =
+                serde_json::from_slice(&source.entries[0].1).unwrap();
+            payload["role"] = serde_json::json!("assistant");
+            source.entries[0].1 = serde_json::to_vec(&payload).unwrap();
+            store
+                .commit_source_batches_if_changed(std::slice::from_ref(&source))
+                .unwrap();
+            assert_eq!(store.get(&message).unwrap(), before);
+            if repeat {
+                assert!(
+                    !store
+                        .commit_source_batches_if_changed(std::slice::from_ref(&source))
+                        .unwrap()
+                );
+            }
+            store
+                .commit_source_batches_if_changed(&[source_batch(
+                    "b",
+                    vec![],
+                    vec![],
+                    vec![],
+                    true,
+                )])
+                .unwrap();
+            assert_eq!(store.get(&message).unwrap().unwrap(), source.entries[0].1);
+            assert!(!store.commit_source_batches_if_changed(&[source]).unwrap());
+        }
+    }
+
+    #[test]
+    fn review_unscoped_mutations_reject_source_owned_entities_before_intent() {
+        for path in [
+            "put",
+            "batch",
+            "begin-upsert",
+            "begin-delete",
+            "commit-upsert",
+            "commit-delete",
+        ] {
+            let store = SqliteStore::open_in_memory().unwrap();
+            let message = sid(IdKind::Message, b"review-owned");
+            let source = projection_source("a", &message, "original");
+            let edit = projection_source("a", &message, "unscoped").entries;
+            // Public phase-2 must recheck ownership acquired after intent creation.
+            let pending = if path == "commit-upsert" {
+                Some(store.begin_index_batch(&edit, &[]).unwrap())
+            } else if path == "commit-delete" {
+                Some(
+                    store
+                        .begin_index_batch(&[], std::slice::from_ref(&message))
+                        .unwrap(),
+                )
+            } else {
+                None
+            };
+            store.commit_source_batches_if_changed(&[source]).unwrap();
+            let before = store.get(&message).unwrap();
+            let evidence =
+                SqliteStore::source_projections_for_path(&store.conn.borrow(), "a").unwrap();
+            let generation = store.active_generation().unwrap();
+            let intents = table_count(&store, "index_batches");
+            let result = match path {
+                "put" => store.put(&message, &edit[0].1),
+                "batch" => store.commit_batch_if_changed(&edit).map(|_| ()),
+                "begin-upsert" => store.begin_index_batch(&edit, &[]).map(|_| ()),
+                "begin-delete" => store
+                    .begin_index_batch(&[], std::slice::from_ref(&message))
+                    .map(|_| ()),
+                "commit-upsert" => store.commit_index_batch(pending.as_ref().unwrap(), &edit, &[]),
+                _ => store.commit_index_batch(
+                    pending.as_ref().unwrap(),
+                    &[],
+                    std::slice::from_ref(&message),
+                ),
+            };
+            assert!(
+                matches!(result, Err(PortError::InvalidRequest(_))),
+                "{path}: {result:?}"
+            );
+            assert_eq!(store.get(&message).unwrap(), before);
+            assert_eq!(
+                SqliteStore::source_projections_for_path(&store.conn.borrow(), "a").unwrap(),
+                evidence
+            );
+            assert_eq!(store.query("original", 10).unwrap().len(), 1);
+            assert!(store.query("unscoped", 10).unwrap().is_empty());
+            assert_eq!(store.active_generation().unwrap(), generation);
+            assert_eq!(table_count(&store, "index_batches"), intents);
+        }
+    }
+
     #[test]
     fn source_no_op_rejects_duplicate_facts_without_advancing_generation() {
         let store = SqliteStore::open_in_memory().unwrap();
@@ -11320,9 +12331,6 @@ mod tests {
         store
             .commit_source_batches_if_changed(std::slice::from_ref(&batch))
             .unwrap();
-        for (id, payload, _) in &mut batch.entries {
-            *payload = store.get(id).unwrap().unwrap();
-        }
         assert!(store.sources_are_current(&[&batch]).unwrap());
         let generation = store.active_generation().unwrap();
         for duplicate_placement in [false, true] {
@@ -14074,11 +15082,7 @@ mod tests {
                 .chain(std::iter::once((ses.clone(), b"s".to_vec(), String::new())))
                 .collect(),
         };
-        assert!(
-            store
-                .commit_source_batches_if_changed(std::slice::from_ref(&source))
-                .unwrap()
-        );
+        assert!(store.commit_batch_if_changed(&source.entries).unwrap());
         let conn = store.conn.borrow();
         let mismatch: i64 = conn
             .query_row(
@@ -14167,11 +15171,7 @@ mod tests {
                 .map(|(i, id)| (id.clone(), b"m".to_vec(), format!("bulk text {i}")))
                 .collect(),
         };
-        assert!(
-            store
-                .commit_source_batches_if_changed(std::slice::from_ref(&source))
-                .unwrap()
-        );
+        assert!(store.commit_batch_if_changed(&source.entries).unwrap());
         assert_eq!(store.query("bulk text 5000", 10).unwrap().len(), 1);
         let victim = messages[5000].clone();
         let entries: [(StableId, Vec<u8>, String); 0] = [];
@@ -15456,10 +16456,8 @@ mod tests {
 
     #[test]
     fn message_payload_only_change_is_not_dropped() {
-        // 回归（Minor-2）：contextual payload 判定必须比对字节（经与提交路径相同
-        // 的合并），而不是只查 catalog 行存在。text 不变、仅 payload 变化（新增
-        // session 引用）时，旧实现把 batch 判为 current，payload-only 变更被静默
-        // 丢弃，搜索与上下文永远缺该 session。
+        // A payload-only source correction must commit even when text is unchanged.
+        // It replaces the old observation rather than accumulating historical aliases.
         let store = SqliteStore::open_in_memory().unwrap();
         let msg = sid(IdKind::Message, b"payload-only-msg");
         let first = SourceBatch {
@@ -15512,9 +16510,9 @@ mod tests {
         let stored: serde_json::Value =
             serde_json::from_slice(&store.get(&msg).unwrap().unwrap()).unwrap();
         assert_eq!(
-            stored["sessions"],
-            serde_json::json!(["ses_v1_aaa", "ses_v1_bbb"]),
-            "merged payload must accumulate the new session ref"
+            stored["session"],
+            serde_json::json!("ses_v1_bbb"),
+            "latest same-source payload must replace the old session ref"
         );
         // 已收敛：内容与存储一致后重同步是 no-op。
         assert!(
@@ -15757,14 +16755,13 @@ mod tests {
                 .unwrap()
         );
 
-        // 裸 B1 删除被 placement 引用的 message 实体 → 拒绝。
-        let pending = store
-            .begin_index_batch(&[], std::slice::from_ref(&message))
-            .unwrap();
+        // Reject the unscoped deletion before an intent is created.
+        let intents = table_count(&store, "index_batches");
         let error = store
-            .commit_index_batch(&pending, &[], &[message])
-            .expect_err("deleting a referenced catalog entity must fail");
-        assert!(format!("{error}").contains("still referenced"), "{error}");
+            .begin_index_batch(&[], std::slice::from_ref(&message))
+            .expect_err("deleting a source-owned referenced entity must fail");
+        assert!(matches!(error, PortError::InvalidRequest(_)));
+        assert_eq!(table_count(&store, "index_batches"), intents);
         // 事务回滚：实体仍在，generation 未推进。
         assert!(
             store
@@ -15798,11 +16795,7 @@ mod tests {
                 "old body".into(),
             )],
         };
-        assert!(
-            store
-                .commit_source_batches_if_changed(std::slice::from_ref(&source))
-                .unwrap()
-        );
+        assert!(store.commit_batch_if_changed(&source.entries).unwrap());
         assert_eq!(store.query("old", 10).unwrap().len(), 1);
         store
             .put(&msg, &message_payload("ses_v1_aaa", "brand new body"))
@@ -16480,6 +17473,7 @@ mod tests {
         let store = SqliteStore::open_in_memory().unwrap();
         let relations = RelationManifests {
             source_replacements: vec![SourceReplacementManifest {
+                projections: BTreeMap::new(),
                 source_path: "manifest-source.jsonl".into(),
                 installation: None,
                 entity_memberships: Vec::new(),
@@ -20444,13 +21438,9 @@ mod tests {
                 .unwrap()
         );
 
-        // 第二次扫描：未变字节重解析得到 store 已持有的规范 payload（生产
-        // payload 已带由 v7 关系派生的上下文别名，与 regenerate 后的字节一致）。
-        let rescan_entries: Vec<(StableId, Vec<u8>, String)> = batch
-            .entries
-            .iter()
-            .map(|(id, _, text)| (id.clone(), store.get(id).unwrap().unwrap(), text.clone()))
-            .collect();
+        // Reparse the original source bytes, not the derived catalog aliases.
+        // Exact original evidence must also be a fast-path no-op.
+        let rescan_entries: Vec<(StableId, Vec<u8>, String)> = batch.entries.to_vec();
         let rescan = source_batch(
             "fast.jsonl",
             rescan_entries,
