@@ -33,9 +33,9 @@ These are tracking items, not a count of confirmed defects or completed work.
 | P0-3 | Partial: normalized unknown command, secret-safe diagnostic/progress/MCP errors. Full private-path and adversarial identity audit remains open |
 | P0-4 | Verified: matching-placement ownership across lexical/semantic/hybrid/fallback, metadata and grouping; current-repo boost uses the same owner. Old search cursors explicitly invalidated. Full 1904-test integration passed |
 | P0-5 | Verified eager, nested request read snapshots plus CLI/MCP outer composition scopes; actual WAL counterexamples reproduced. Final post-review all-feature integration: 1913 passed, 0 failed |
-| P0-6 | Pending current-baseline revalidation and implementation |
-| P0-7 | Pending current-baseline revalidation and implementation |
-| P0-8 | Pending current-baseline revalidation and implementation |
+| P0-6 | Verified per-source original projections and live aggregation; same-source corrections, separate batches, legacy/incomplete retention, no-op and migration rollback covered. Schema 19/parser 4 requires backup and contributor re-ingestion |
+| P0-7 | Verified before/after alias candidates, source deletion convergence and relocation of projection locators; incomplete scans retain compatibility fields |
+| P0-8 | Partial: phase-2 final-text change/deletion invalidates vectors atomically; evidence-only updates preserve them. Model/dimension readiness, historical orphans and remaining write entrypoints still need audit |
 | P0-9 | Implemented and focused tests passed; complete required manifest coverage and unique safe names |
 | P0-10 | Implemented and focused tests passed; hard content budget, final confidence and labeled identity |
 | P0-11 | Upstream MSRV fix revalidated on 2edf2dc; real MSRV CI gate added. Release/remote gates pending |
@@ -113,3 +113,11 @@ These are tracking items, not a count of confirmed defects or completed work.
 - Final Windows all-feature workspace tests: **1913 passed, 0 failed, 22 ignored**. Formatting, all-target/all-feature Clippy and Rust 1.90 locked/offline check passed after the last code edit.
 - Python suites 21/11/54 (2 skips total), Node 11, privacy/diff checks and real debug smoke 10/10 passed. No schema migration; cleanup failure is documented as reopen-required for subsequent snapshot acquisition.
 - P0-6/P0-7/P0-8 and provider/release/performance remainder stay open. Original dirty checkout unchanged; no parent/child archive, main merge, release or cleanup performed.
+- Remote head b480627 subsequently passed CI 37045273393, security-audit 37045273470 and core-beta-evidence 37045273547. These green results cover the snapshot checkpoint only, not later source-authority work.
+
+## Fourth-batch source-authority evidence
+- Implemented schema 19 original source observations, parser 4 re-ingestion, authoritative same-source replacement/live aggregation, before/after alias candidates and coherent source-owned write restrictions. Migration does not fabricate historical evidence; mixed legacy aggregates are retained until contributing evidence is available.
+- Independent review found and then verified fixes for incomplete alias loss, legacy intrinsic/no-op conflicts and unscoped writes. Kept the F6 single canonical-manifest computation; source descriptors seal typed identity and labeled payload/text digests without repeating bodies in outbox JSON.
+- Final all-feature Windows workspace gate: **1929 passed, 0 failed, 22 ignored**; fmt, all-target/all-feature Clippy and Rust 1.90 locked/offline check passed. Python 21/11/54 (two skips), Node 11, privacy/diff checks, task context validation and real debug smoke 10/10 passed.
+- CLI counterexamples were reproduced on b480627 before the fix, then passed as Rust e2e. Migration/reopen, transaction rollback, durable evidence tamper, source deletion, partial/legacy retention and vector atomic invalidation have regression coverage. Large-scale memory/disk/throughput costs are not yet benchmarked.
+- New-schema rollout requires a consistent pre-upgrade backup. Do not downgrade by editing user_version; old binaries require restoration of a verified old-schema backup. This checkpoint does not migrate any user catalog, merge main, release a version or complete the broader review task.
