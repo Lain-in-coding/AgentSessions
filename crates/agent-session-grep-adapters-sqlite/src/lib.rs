@@ -421,6 +421,69 @@ fn merge_message_payloads(_wire: &str, left: &[u8], right: &[u8]) -> PortResult<
     serde_json::to_vec(&serde_json::Value::Object(merged)).map_err(backend)
 }
 
+/// Check every non-null original observation before pairwise folding can hide
+/// a disagreement behind null. Only the proven Cursor ItemTable caller uses this
+/// legacy integer-milliseconds interpretation; raw source evidence is untouched.
+fn cursor_itemtable_timestamp_alias<'a>(
+    payloads: impl IntoIterator<Item = &'a [u8]>,
+) -> PortResult<Option<String>> {
+    let mut expected = None;
+    let mut canonical = None;
+    for payload in payloads {
+        let value: serde_json::Value = serde_json::from_slice(payload).map_err(backend)?;
+        let Some(timestamp) = value.get("timestamp").filter(|value| !value.is_null()) else {
+            continue;
+        };
+        let timestamp = timestamp.as_str().ok_or_else(|| {
+            PortError::Backend("Cursor ItemTable timestamp observation is not a string".into())
+        })?;
+        let instant = if let Ok(millis) = timestamp.parse::<i64>() {
+            (
+                millis.div_euclid(1000),
+                (millis.rem_euclid(1000) as u32) * 1_000_000,
+            )
+        } else {
+            let instant = parse_search_instant(timestamp).ok_or_else(|| {
+                PortError::Backend(
+                    "Cursor ItemTable timestamp observation has an unproven format".into(),
+                )
+            })?;
+            canonical.get_or_insert_with(|| timestamp.to_string());
+            (instant.unix_seconds, instant.nanosecond)
+        };
+        if expected.is_some_and(|previous| previous != instant) {
+            return Err(PortError::Backend(
+                "message has conflicting projections across sources (stable field `timestamp` differs)".into()));
+        }
+        expected = Some(instant);
+    }
+    Ok(canonical)
+}
+
+/// Use an actually observed RFC3339 alias for the aggregate only. Never
+/// overwrite the raw per-source observation or keep a removed claimant's alias.
+fn cursor_aggregate_payload<'a>(
+    payload: &'a [u8],
+    canonical: Option<&str>,
+) -> PortResult<std::borrow::Cow<'a, [u8]>> {
+    let Some(canonical) = canonical else {
+        return Ok(std::borrow::Cow::Borrowed(payload));
+    };
+    let mut value: serde_json::Value = serde_json::from_slice(payload).map_err(backend)?;
+    if value
+        .get("timestamp")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|timestamp| timestamp.parse::<i64>().is_ok())
+    {
+        value["timestamp"] = serde_json::json!(canonical);
+        Ok(std::borrow::Cow::Owned(
+            serde_json::to_vec(&value).map_err(backend)?,
+        ))
+    } else {
+        Ok(std::borrow::Cow::Borrowed(payload))
+    }
+}
+
 /// Union two projections of the same session container entity.
 ///
 /// One logical session is routinely split across many transcript files, so each
@@ -3677,6 +3740,20 @@ impl SqliteStore {
         )?;
         let mut projections =
             Self::load_source_projections(&self.conn.borrow(), &entity_candidates)?;
+        // An unscanned claimant may attribute the affected message to a document
+        // outside the aggregate candidates. Load only those referenced proofs;
+        // do not broaden the merge set or infer evidence from catalog aliases.
+        let proof_candidates = current_entities_by_source
+            .values()
+            .flat_map(|memberships| memberships.values().flatten())
+            .filter(|document| !entity_candidates.contains(*document))
+            .cloned()
+            .collect();
+        for (source, documents) in
+            Self::load_source_projections(&self.conn.borrow(), &proof_candidates)?
+        {
+            projections.entry(source).or_default().extend(documents);
+        }
         let stored_placements = self.stored_placements_for(&placement_candidates)?;
         let stored_edges = self.stored_edges_for(&placement_candidates)?;
         let stored_activities = self.stored_activities_for(&activity_candidates)?;
@@ -3933,12 +4010,38 @@ impl SqliteStore {
 
         trace::add(&mut trace_stages, "merge_sources", trace_started);
         let trace_started = trace::begin();
+        // Cache document proof once, scoped to the already loaded candidate
+        // projections. A source's unrelated Cursor document is not proof for a
+        // message: the final source/message membership must name that document.
+        let cursor_documents: BTreeSet<(&str, &str)> = projections
+            .iter()
+            .flat_map(|(source, rows)| {
+                rows.iter().filter_map(move |(wire, (id, payload, _))| {
+                    if id.kind() != IdKind::Document {
+                        return None;
+                    }
+                    let value: serde_json::Value = serde_json::from_slice(payload).ok()?;
+                    (value.get("provider").and_then(serde_json::Value::as_str) == Some("cursor")
+                        && value.get("variant").and_then(serde_json::Value::as_str)
+                            == Some("cursor/vscdb-chat-v1"))
+                    .then_some((source.as_str(), wire.as_str()))
+                })
+            })
+            .collect();
+        let mut cursor_epoch_claims = BTreeMap::<String, usize>::new();
         let mut final_entity_claimers = BTreeMap::<String, BTreeSet<String>>::new();
         for (source_path, memberships) in &current_entities_by_source {
             if scanned_paths.contains(source_path) {
                 continue;
             }
-            for entity_id in memberships.keys() {
+            for (entity_id, document_id) in memberships {
+                if entity_id.starts_with("msg_v1_")
+                    && document_id.as_deref().is_some_and(|document| {
+                        cursor_documents.contains(&(source_path.as_str(), document))
+                    })
+                {
+                    *cursor_epoch_claims.entry(entity_id.clone()).or_default() += 1;
+                }
                 final_entity_claimers
                     .entry(entity_id.clone())
                     .or_default()
@@ -3959,6 +4062,15 @@ impl SqliteStore {
         }
         for (source_path, prepared) in &prepared_sources {
             for membership in &prepared.replacement.entity_memberships {
+                if membership.entity_id.starts_with("msg_v1_")
+                    && membership.document_id.as_deref().is_some_and(|document| {
+                        cursor_documents.contains(&(source_path.as_str(), document))
+                    })
+                {
+                    *cursor_epoch_claims
+                        .entry(membership.entity_id.clone())
+                        .or_default() += 1;
+                }
                 final_entity_claimers
                     .entry(membership.entity_id.clone())
                     .or_default()
@@ -4045,20 +4157,35 @@ impl SqliteStore {
                 }
                 continue;
             }
+            let cursor_timestamp =
+                if claimers.len() > 1 && cursor_epoch_claims.get(wire) == Some(&claimers.len()) {
+                    cursor_itemtable_timestamp_alias(
+                        claimers
+                            .iter()
+                            .map(|source| projections[source][wire].1.as_slice()),
+                    )?
+                } else {
+                    None
+                };
             for source in claimers {
-                let (id, payload, text) = &projections[source][wire];
+                let (id, raw_payload, text) = &projections[source][wire];
+                let payload = cursor_aggregate_payload(raw_payload, cursor_timestamp.as_deref())?;
                 if let Some((old_id, old_payload, old_text)) = merged.get(wire) {
                     if old_id != id {
                         return Err(PortError::Backend(
                             "entity has conflicting identity metadata across sources".into(),
                         ));
                     }
-                    if old_payload == payload && old_text == text {
+                    if old_payload.as_slice() == payload.as_ref() && old_text == text {
                         continue;
                     }
                     let union = match id.kind() {
-                        IdKind::Session => merge_session_payloads(wire, old_payload, payload)?,
-                        IdKind::Message => merge_message_payloads(wire, old_payload, payload)?,
+                        IdKind::Session => {
+                            merge_session_payloads(wire, old_payload, payload.as_ref())?
+                        }
+                        IdKind::Message => {
+                            merge_message_payloads(wire, old_payload, payload.as_ref())?
+                        }
                         _ => {
                             return Err(PortError::Backend(
                                 "entity has conflicting projections across sources".into(),
@@ -4072,7 +4199,10 @@ impl SqliteStore {
                     };
                     merged.insert(wire.clone(), (id.clone(), union, text));
                 } else {
-                    merged.insert(wire.clone(), (id.clone(), payload.clone(), text.clone()));
+                    merged.insert(
+                        wire.clone(),
+                        (id.clone(), payload.into_owned(), text.clone()),
+                    );
                 }
             }
         }
@@ -8176,7 +8306,7 @@ const RELATION_SCHEMA_VERSION: i64 = 7;
 /// 已存版本落后于该常量的源即使字节未变也走 targeted backfill（重跑 parse +
 /// commit），并在重新 commit 时写回当前版本。单测（lib.rs
 /// `stale_parser_version_forces_reparse_and_converges`）锁住该语义。
-pub const PARSER_SEMANTIC_VERSION: u32 = 4;
+pub const PARSER_SEMANTIC_VERSION: u32 = 5;
 
 /// 索引投影版本：任何改变 **FTS 词元流或派生投影文本** 的变化都必须 +1。
 ///
@@ -12094,6 +12224,373 @@ mod tests {
             vec![],
             true,
         )
+    }
+
+    fn cursor_timestamp_source(
+        path: &str,
+        message: &StableId,
+        timestamp: serde_json::Value,
+    ) -> SourceBatch {
+        let mut source = projection_source(path, message, "timestamp upgrade body");
+        let mut payload: serde_json::Value = serde_json::from_slice(&source.entries[0].1).unwrap();
+        payload["timestamp"] = timestamp;
+        source.entries[0].1 = serde_json::to_vec(&payload).unwrap();
+        source.entries.insert(
+            0,
+            (
+                sid(
+                    IdKind::Document,
+                    format!("cursor-timestamp-{path}").as_bytes(),
+                ),
+                serde_json::to_vec(&serde_json::json!({
+                    "provider":"cursor", "variant":"cursor/vscdb-chat-v1",
+                    "fingerprint":"synthetic", "len":1
+                }))
+                .unwrap(),
+                String::new(),
+            ),
+        );
+        source
+    }
+
+    #[test]
+    fn cursor_timestamp_upgrade_requires_matching_itemtable_provenance_and_instant() {
+        for (provider, variant, allowed) in [
+            ("cursor", "cursor/vscdb-chat-v1", true),
+            ("cursor", "cursor/disk-kv-v1", false),
+            ("cline", "cline/api-history-json-v1", false),
+        ] {
+            for [first, second] in [["a", "b"], ["b", "a"]] {
+                let store = SqliteStore::open_in_memory().unwrap();
+                let message = sid(IdKind::Message, b"cursor-time-upgrade-message");
+                let source = |path: &str, timestamp: &str| {
+                    let mut source =
+                        cursor_timestamp_source(path, &message, serde_json::json!(timestamp));
+                    let mut document: serde_json::Value =
+                        serde_json::from_slice(&source.entries[0].1).unwrap();
+                    document["provider"] = serde_json::json!(provider);
+                    document["variant"] = serde_json::json!(variant);
+                    source.entries[0].1 = serde_json::to_vec(&document).unwrap();
+                    source
+                };
+                store
+                    .commit_source_batches_if_changed(&[
+                        source("a", "1735689600123"),
+                        source("b", "1735689600123"),
+                    ])
+                    .unwrap();
+                store
+                    .conn
+                    .borrow()
+                    .execute("UPDATE source_scans SET parser_version=4", [])
+                    .unwrap();
+                let before = store.active_generation().unwrap();
+                let original = store.get(&message).unwrap();
+                let old_observation =
+                    SqliteStore::source_projections_for_path(&store.conn.borrow(), second).unwrap();
+                for different in ["2025-01-01T00:00:00.124Z", "2025-01-01T00:00:00.123000001Z"] {
+                    let error = store
+                        .commit_source_batches_if_changed(&[source(first, different)])
+                        .unwrap_err();
+                    assert!(
+                        matches!(error, PortError::Backend(ref detail) if detail.contains("timestamp"))
+                    );
+                    assert_eq!(store.active_generation().unwrap(), before);
+                    assert_eq!(store.get(&message).unwrap(), original);
+                }
+                let canonical = "2025-01-01T00:00:00.123Z";
+                let result = store.commit_source_batches_if_changed(&[source(first, canonical)]);
+                if !allowed {
+                    assert!(result.is_err(), "unproven units: {provider}/{variant}");
+                    assert_eq!(store.active_generation().unwrap(), before);
+                    assert_eq!(store.get(&message).unwrap(), original);
+                    continue;
+                }
+                assert!(result.unwrap());
+                let payload: serde_json::Value =
+                    serde_json::from_slice(&store.get(&message).unwrap().unwrap()).unwrap();
+                assert_eq!(payload["timestamp"], canonical);
+                assert_eq!(
+                    SqliteStore::source_projections_for_path(&store.conn.borrow(), second).unwrap(),
+                    old_observation,
+                    "never rewrite original source evidence"
+                );
+                assert!(
+                    !store
+                        .commit_source_batches_if_changed(&[source(first, canonical)])
+                        .unwrap()
+                );
+                assert!(
+                    store
+                        .commit_source_batches_if_changed(&[source(second, canonical)])
+                        .unwrap()
+                );
+                assert!(
+                    !store
+                        .commit_source_batches_if_changed(&[source(second, canonical)])
+                        .unwrap()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cursor_timestamp_upgrade_needs_each_claimants_associated_document() {
+        for bad_source in ["a", "b"] {
+            for missing_proof in [
+                "missing_association",
+                "wrong_document",
+                "wrong_provider",
+                "wrong_variant",
+                "unrelated_document",
+            ] {
+                let store = SqliteStore::open_in_memory().unwrap();
+                let message = sid(IdKind::Message, b"cursor-time-document-proof");
+                let source = |path: &str, timestamp: &str| {
+                    let mut source =
+                        cursor_timestamp_source(path, &message, serde_json::json!(timestamp));
+                    if path == bad_source {
+                        let mut document: serde_json::Value =
+                            serde_json::from_slice(&source.entries[0].1).unwrap();
+                        match missing_proof {
+                            "wrong_provider" => document["provider"] = serde_json::json!("cline"),
+                            "wrong_variant" | "unrelated_document" => {
+                                document["variant"] = serde_json::json!("cursor/disk-kv-v1")
+                            }
+                            _ => {}
+                        }
+                        if missing_proof == "unrelated_document" {
+                            let mut unrelated = source.entries[0].clone();
+                            unrelated.0 = sid(IdKind::Document, b"unrelated-cursor-document");
+                            source.entries.push(unrelated);
+                        }
+                        source.entries[0].1 = serde_json::to_vec(&document).unwrap();
+                    }
+                    source
+                };
+                store
+                    .commit_source_batches_if_changed(&[source("a", "1000"), source("b", "1000")])
+                    .unwrap();
+                if matches!(missing_proof, "missing_association" | "wrong_document") {
+                    let wrong = sid(IdKind::Document, b"missing-cursor-document");
+                    let document = (missing_proof == "wrong_document").then_some(wrong.as_str());
+                    store.conn.borrow().execute(
+                        "UPDATE source_membership SET document_id=?1 WHERE source_path=?2 AND message_id=?3",
+                        rusqlite::params![document, bad_source, message.as_str()],
+                    ).unwrap();
+                }
+                let good_source = if bad_source == "a" { "b" } else { "a" };
+                let before = store.active_generation().unwrap();
+                let original = store.get(&message).unwrap();
+                let evidence =
+                    SqliteStore::source_projections_for_path(&store.conn.borrow(), bad_source)
+                        .unwrap();
+                let error = store
+                    .commit_source_batches_if_changed(&[source(
+                        good_source,
+                        "1970-01-01T00:00:01.000Z",
+                    )])
+                    .unwrap_err();
+                assert!(
+                    matches!(error, PortError::Backend(ref detail) if detail.contains("timestamp")),
+                    "{missing_proof}"
+                );
+                assert_eq!(store.active_generation().unwrap(), before);
+                assert_eq!(store.get(&message).unwrap(), original);
+                assert_eq!(
+                    SqliteStore::source_projections_for_path(&store.conn.borrow(), bad_source)
+                        .unwrap(),
+                    evidence
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cursor_timestamp_upgrade_checks_all_non_null_originals_before_folding() {
+        for updated in ["a", "c"] {
+            let store = SqliteStore::open_in_memory().unwrap();
+            let message = sid(IdKind::Message, b"cursor-time-null-fold");
+            let source = |path, timestamp| cursor_timestamp_source(path, &message, timestamp);
+            store
+                .commit_source_batches_if_changed(&[
+                    source("a", serde_json::json!("1000")),
+                    source("b", serde_json::Value::Null),
+                    source("c", serde_json::json!("1000")),
+                ])
+                .unwrap();
+            let before = store.active_generation().unwrap();
+            let original = store.get(&message).unwrap();
+            let old_path = if updated == "a" { "c" } else { "a" };
+            let old_evidence =
+                SqliteStore::source_projections_for_path(&store.conn.borrow(), old_path).unwrap();
+            let null_evidence =
+                SqliteStore::source_projections_for_path(&store.conn.borrow(), "b").unwrap();
+            for different in ["1970-01-01T00:00:02.000Z", "1970-01-01T00:00:01.000000001Z"] {
+                assert!(
+                    store
+                        .commit_source_batches_if_changed(&[source(
+                            updated,
+                            serde_json::json!(different)
+                        )])
+                        .is_err()
+                );
+                assert_eq!(store.active_generation().unwrap(), before);
+                assert_eq!(store.get(&message).unwrap(), original);
+            }
+            // An equivalent offset spelling is the same instant; null still converges.
+            let canonical = "1970-01-01T01:00:01.000000000+01:00";
+            assert!(
+                store
+                    .commit_source_batches_if_changed(&[source(
+                        updated,
+                        serde_json::json!(canonical)
+                    )])
+                    .unwrap()
+            );
+            let payload: serde_json::Value =
+                serde_json::from_slice(&store.get(&message).unwrap().unwrap()).unwrap();
+            assert!(payload["timestamp"].is_null());
+            assert_eq!(
+                SqliteStore::source_projections_for_path(&store.conn.borrow(), old_path).unwrap(),
+                old_evidence
+            );
+            assert_eq!(
+                SqliteStore::source_projections_for_path(&store.conn.borrow(), "b").unwrap(),
+                null_evidence
+            );
+            assert!(
+                !store
+                    .commit_source_batches_if_changed(&[source(
+                        updated,
+                        serde_json::json!(canonical)
+                    )])
+                    .unwrap()
+            );
+            assert!(
+                store
+                    .commit_source_batches_if_changed(&[source_batch(
+                        "b",
+                        vec![],
+                        vec![],
+                        vec![],
+                        true
+                    )])
+                    .unwrap()
+            );
+            let payload: serde_json::Value =
+                serde_json::from_slice(&store.get(&message).unwrap().unwrap()).unwrap();
+            assert_eq!(payload["timestamp"], canonical);
+        }
+    }
+
+    #[test]
+    fn cursor_timestamp_upgrade_removal_restores_only_surviving_observations() {
+        for updated in ["a", "c"] {
+            let store = SqliteStore::open_in_memory().unwrap();
+            let message = sid(IdKind::Message, b"cursor-time-removal");
+            let source = |path, timestamp| {
+                cursor_timestamp_source(path, &message, serde_json::json!(timestamp))
+            };
+            store
+                .commit_source_batches_if_changed(&[
+                    source("a", "-1"),
+                    source("b", "-1"),
+                    source("c", "-1"),
+                ])
+                .unwrap();
+            let survivor = if updated == "a" { "c" } else { "a" };
+            let old_evidence =
+                SqliteStore::source_projections_for_path(&store.conn.borrow(), survivor).unwrap();
+            let canonical = "1969-12-31T23:59:59.999Z";
+            assert!(
+                store
+                    .commit_source_batches_if_changed(&[source(updated, canonical)])
+                    .unwrap()
+            );
+            let timestamp = || {
+                let payload: serde_json::Value =
+                    serde_json::from_slice(&store.get(&message).unwrap().unwrap()).unwrap();
+                payload["timestamp"].clone()
+            };
+            assert_eq!(timestamp(), canonical);
+            // An incomplete scan is not a deletion of the RFC3339 observation.
+            assert!(
+                store
+                    .commit_source_batches_if_changed(&[source_batch(
+                        updated,
+                        vec![],
+                        vec![],
+                        vec![],
+                        false
+                    )])
+                    .unwrap()
+            );
+            assert_eq!(timestamp(), canonical);
+            assert!(
+                store
+                    .commit_source_batches_if_changed(&[source_batch(
+                        updated,
+                        vec![],
+                        vec![],
+                        vec![],
+                        true
+                    )])
+                    .unwrap()
+            );
+            assert_eq!(timestamp(), "-1");
+            assert!(
+                SqliteStore::source_projections_for_path(&store.conn.borrow(), updated)
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(
+                SqliteStore::source_projections_for_path(&store.conn.borrow(), survivor).unwrap(),
+                old_evidence
+            );
+            assert!(
+                !store
+                    .commit_source_batches_if_changed(&[source_batch(
+                        updated,
+                        vec![],
+                        vec![],
+                        vec![],
+                        true
+                    )])
+                    .unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn cursor_timestamp_upgrade_does_not_relax_other_intrinsic_fields() {
+        for field in ["role", "intrinsic_marker"] {
+            let store = SqliteStore::open_in_memory().unwrap();
+            let message = sid(IdKind::Message, b"cursor-time-intrinsic");
+            let source = |path, timestamp| {
+                cursor_timestamp_source(path, &message, serde_json::json!(timestamp))
+            };
+            store
+                .commit_source_batches_if_changed(&[source("a", "1000"), source("b", "1000")])
+                .unwrap();
+            let before = store.active_generation().unwrap();
+            let original = store.get(&message).unwrap();
+            let mut changed = source("a", "1970-01-01T00:00:01.000Z");
+            let payload = changed
+                .entries
+                .iter_mut()
+                .find(|(id, _, _)| id == &message)
+                .unwrap();
+            let mut value: serde_json::Value = serde_json::from_slice(&payload.1).unwrap();
+            value[field] = serde_json::json!("different");
+            payload.1 = serde_json::to_vec(&value).unwrap();
+            let error = store
+                .commit_source_batches_if_changed(&[changed])
+                .unwrap_err();
+            assert!(matches!(error, PortError::Backend(ref detail) if detail.contains(field)));
+            assert_eq!(store.active_generation().unwrap(), before);
+            assert_eq!(store.get(&message).unwrap(), original);
+        }
     }
 
     #[test]

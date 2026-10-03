@@ -80,7 +80,7 @@ instead of rejecting the batch. Which fields may differ is deliberately narrow:
 | Entity | Unioned fields | Everything else |
 |---|---|---|
 | Session | `messages` (append-order), `documents` (sorted) | fields not in the union set (`document`, `documents`, `messages`) are not preserved by the merge |
-| Message | contextual compatibility keys (`session(s)`, `span(s)`, parent provenance, sidechain, seq); text uses the existing deterministic longer-projection rule | stable role and unknown intrinsic fields must match across live sources; timestamp has one deliberate exception (below) |
+| Message | contextual compatibility keys (`session(s)`, `span(s)`, parent provenance, sidechain, seq); text uses the existing deterministic longer-projection rule | stable role and unknown intrinsic fields must match across live sources; timestamp has only the deliberate compatibility exceptions below |
 
 - **Timestamp exception (Codex)**: `timestamp` may differ as `string` vs `null`
   across projections of the same stable message — the old Codex adapter stored
@@ -88,6 +88,13 @@ instead of rejecting the batch. Which fields may differ is deliberately narrow:
   stable timestamp, so re-ingesting an old catalog must not conflict. The
   merged value converges deterministically on `null` regardless of merge
   order (no stable timestamp exists for the entity).
+
+- **Timestamp spelling exception (Cursor ItemTable)**: the same proven
+  millisecond instant may arrive as an old decimal string and a new UTC string
+  during parser-version re-ingestion. This is allowed only for final claimants
+  whose own associated Document observation proves provider `cursor` and variant
+  `cursor/vscdb-chat-v1`. See the rolling-upgrade scenario below; the generic
+  pairwise merge and other providers are not broadened.
 
 - Each unioned field keeps a **singular alias** (`document`, `session`, `span`)
   holding the first entry, so readers written against the pre-union shape keep
@@ -102,7 +109,8 @@ instead of rejecting the batch. Which fields may differ is deliberately narrow:
 - Migration creates an empty evidence table: missing legacy evidence stays
   unknown. Preserve an existing aggregate until every live claimant has actual
   observations; if no aggregate exists to preserve, fail with re-ingest guidance.
-  Parser version 4 reparses unchanged sources. Re-ingesting all contributors
+  Parser version 4 introduced this re-ingestion; current version 5 also reparses
+  unchanged sources for timestamp/BOM fidelity. Re-ingesting all contributors
   supplies evidence and converges; never manufacture per-source payloads from
   the historical aggregate.
 - Both no-op checks include original identity/payload/text evidence. Evidence
@@ -603,3 +611,65 @@ Wrong: classify from one read's byte count. Correct: `read_exact` with explicit 
 5. **Cases:** a body change beyond the FTS cap still retires a vector; wrong-dimension-only vectors do not make an index ready. Live legacy vectors may be stale and require explicit embedding rebuild; do not promise automatic historical repair.
 6. **Tests:** model/dimension/live-row matrix; malformed matching vector; put plus every public batch/source path; unchanged-body retention; transaction rollback; read-only orphan retention and writer rebuild cleanup; WAL writer between readiness/query/payload.
 7. **Wrong/right:** comparing capped FTS text misses changes used by the vectorizer; compare full input and keep the original FTS cap unchanged. No schema or parser bump is required for these derived-cache corrections.
+
+
+## Scenario: Cursor ItemTable timestamp rolling upgrade
+
+### 1. Scope / Trigger
+Parser 5 can replace a decimal millisecond string with a UTC string while an
+unscanned copy still claims the same Message. Source replacement, not a schema
+migration or a read, reconciles this representation-only change. Schema stays 19.
+
+### 2. Signatures
+`commit_source_batches_if_changed(&[SourceBatch]) -> PortResult<bool>`;
+`cursor_itemtable_timestamp_alias(...) -> PortResult<Option<String>>` and
+`cursor_aggregate_payload(...) -> PortResult<Cow<[u8]>>` are private helpers.
+`source_membership.document_id` selects the proving Document in that source's
+`source_entity_projections`, never in the merged catalog payload.
+
+### 3. Contracts
+- Every final claimant must have an associated Document observation naming
+  `cursor` / `cursor/vscdb-chat-v1`. A correct but unrelated Document does not
+  authorize reinterpretation. Load referenced proofs outside aggregate candidates
+  in a batch-scoped query; do not expand the merge set or scan the whole catalog.
+- Compare all non-null original timestamp observations before pairwise folding.
+  Interpret only this proven old spelling as signed i64 Unix milliseconds and
+  compare the complete `(unix_seconds, nanosecond)` tuple to parsed date-times.
+  Do not round to milliseconds, guess units by digit count, or let null hide a
+  non-null disagreement within the proven ItemTable set.
+- Use an actually observed UTC/offset spelling only while aggregating. Never
+  mutate `SourceReplacementManifest.projections`, original payload/text evidence,
+  identity, or exact no-op comparisons. Null still converges to null.
+- Recompute from final surviving observations: removing the sole date-time
+  claimant restores the remaining decimal spelling; an incomplete scan does not
+  remove that claimant. Generic role/unknown intrinsic conflicts stay strict.
+- Parser-version rollback is not an inverse data migration. Do not merely lower
+  markers; restore a matching catalog backup or re-ingest into a fresh catalog
+  with the chosen compatible binary before a semantic downgrade. `index rebuild`
+  alone does not reparse original provider sources.
+
+### 4. Validation & Error Matrix
+Missing/wrong provenance does not authorize the exception. Different instants,
+unsupported proven observations, and other intrinsic conflicts remain bounded
+`PortError::Backend` failures; no generation, catalog or original observation
+changes commit. Missing legacy source evidence keeps the existing schema-19
+re-ingestion policy rather than fabricating proof.
+
+### 5. Good / Base / Bad Cases
+Good: `1000` and `1970-01-01T01:00:01.000+01:00` under proven ItemTable claims.
+Base: one live decimal claimant retains its original spelling.
+Bad: `1000`, null and `1970-01-01T00:00:01.000000001Z` must not be silently folded.
+
+### 6. Tests Required
+The `cursor_timestamp_upgrade_*` storage tests cover both replacement orders,
+1-nanosecond differences, three-source null folding, per-claimant association,
+unrelated/wrong/missing Document proof, source removal versus incomplete scans,
+raw evidence equality, no-op behavior and other intrinsic fields. CLI tests must
+also exercise identical snapshot copies, stable IDs, parser-4 to parser-5
+re-ingestion and unchanged source bytes.
+
+### 7. Wrong vs Correct
+Wrong: normalize timestamps globally in `merge_message_payloads` or overwrite
+old source observations to make them compare equal.
+Correct: prove the variant per claimant, compare exact instants first, then use
+a temporary aggregate-only alias that disappears with its last live claimant.

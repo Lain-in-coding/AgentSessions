@@ -428,6 +428,23 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Cursor ItemTable message timestamps now normalize proven Unix milliseconds
+  to millisecond-precise UTC. Disk-kv bubble strings preserve their offset and
+  fraction; unsupported numeric bubble times are diagnosed rather than guessed.
+  Cline reads its native integer `ts` milliseconds and one leading document BOM,
+  rejects float/exponent timestamp tokens without rounding, preserves valid
+  legacy string timestamps, and diagnoses numeric compatibility fields whose
+  unit is unknown. Invalid timestamp metadata does not invent an empty time or
+  discard otherwise valid Cline conversation text.
+  **Upgrade:** parser version 5 re-ingests unchanged sources once; schema remains
+  19. Sequential re-ingestion of shared Cursor ItemTable messages reconciles
+  equal decimal/UTC instants only with per-source Document proof, without changing
+  original evidence or stable IDs. Different instants still conflict, even one
+  nanosecond apart or separated by a null observation. Removing the sole updated
+  claimant restores the surviving observations. Source files and provider
+  maturity are unchanged. To downgrade parsing semantics, use a matching catalog
+  backup or re-ingest into a fresh catalog; lowering a parser marker alone is
+  not a rollback. `index rebuild` only refreshes projections, not parser semantics.
 - Semantic/hybrid readiness now matches the selected model, query-vector
   dimension and live catalog rows. Full message-body changes (including beyond
   the FTS text cap) invalidate vectors atomically on every public catalog/batch

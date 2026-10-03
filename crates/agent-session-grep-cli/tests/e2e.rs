@@ -1362,6 +1362,324 @@ fn doctor_reports_ok_without_db() {
 }
 
 #[test]
+fn provider_epoch_millis_filters_and_parser_reparse_preserve_source_bytes() {
+    let instant = 1_735_689_600_000_i64;
+    for kind in ["cursor-chatdata", "cursor-prompts", "cline", "cline-bom"] {
+        let (dir, db) = temp_db("provider-time");
+        let source = dir.path().join(if kind.starts_with("cursor") {
+            "state.vscdb"
+        } else {
+            "api_conversation_history.json"
+        });
+        let records = [
+            (instant - 1, "timestampneedle before"),
+            (instant, "timestampneedle exact"),
+            (instant + 1, "timestampneedle until"),
+        ];
+        if kind.starts_with("cursor") {
+            let conn = Connection::open(&source).unwrap();
+            conn.execute_batch("CREATE TABLE ItemTable(key TEXT PRIMARY KEY, value TEXT)")
+                .unwrap();
+            let (key, value) = if kind == "cursor-chatdata" {
+                (
+                    "workbench.panel.aichat.view.aichat.chatdata",
+                    serde_json::json!({"tabs":[{"id":"time-tab","createdAt":instant,"bubbles":records.iter().map(|(ts, text)| {
+                        serde_json::json!({"type":"user","text":text,"timingInfo":{"startTime":ts}})
+                    }).collect::<Vec<_>>()}]}),
+                )
+            } else {
+                (
+                    "aiService.prompts",
+                    serde_json::json!(records.iter().map(|(ts,text)| {
+                        serde_json::json!({"conversationId":"time-conversation","createdAt":ts,"prompt":text,"response":""})
+                    }).collect::<Vec<_>>()),
+                )
+            };
+            conn.execute(
+                "INSERT INTO ItemTable(key,value) VALUES(?1,?2)",
+                rusqlite::params![key, value.to_string()],
+            )
+            .unwrap();
+        } else {
+            let data = serde_json::to_vec(
+                &records
+                    .iter()
+                    .map(|(ts, text)| serde_json::json!({"role":"user","content":text,"ts":ts}))
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+            let mut bytes = if kind == "cline-bom" {
+                vec![0xef, 0xbb, 0xbf]
+            } else {
+                Vec::new()
+            };
+            bytes.extend_from_slice(&data);
+            std::fs::write(&source, bytes).unwrap();
+        }
+        let original = std::fs::read(&source).unwrap();
+        let path = source.to_str().unwrap();
+        let out = run(&db, &["sync", path]);
+        assert!(out.status.success(), "{kind}: {}", stdout(&out));
+        let first = parse_first_line(&out);
+        let provider = if kind.starts_with("cursor") {
+            "cursor"
+        } else {
+            "cline"
+        };
+        let check_filtered = || {
+            let out = run(
+                &db,
+                &[
+                    "search",
+                    "timestampneedle",
+                    "--provider",
+                    provider,
+                    "--since",
+                    "2025-01-01T00:00:00Z",
+                    "--until",
+                    "2025-01-01T00:00:00.001Z",
+                ],
+            );
+            assert!(out.status.success(), "{kind}: {}", stdout(&out));
+            let frame = parse_first_line(&out);
+            let hits = frame["data"]["hits"].as_array().unwrap();
+            assert_eq!(hits.len(), 1, "{kind}: {frame}");
+            assert!(
+                hits[0]["text"].as_str().unwrap().contains("exact"),
+                "{kind}: {frame}"
+            );
+        };
+        check_filtered();
+        {
+            let conn = Connection::open(&db).unwrap();
+            conn.execute("UPDATE source_scans SET parser_version=4", [])
+                .unwrap();
+        }
+        let out = run(&db, &["sync", path]);
+        assert!(out.status.success(), "{kind}: {}", stdout(&out));
+        let reparsed = parse_first_line(&out);
+        assert_eq!(
+            reparsed["data"]["generation"].as_u64().unwrap(),
+            first["data"]["generation"].as_u64().unwrap() + 1
+        );
+        assert!(
+            reparsed["data"]["emitted"].as_u64().unwrap() > 0,
+            "{kind}: {reparsed}"
+        );
+        let out = run(&db, &["sync", path]);
+        assert!(out.status.success(), "{kind}: {}", stdout(&out));
+        let repeated = parse_first_line(&out);
+        assert_eq!(
+            repeated["data"]["generation"], reparsed["data"]["generation"],
+            "{kind}: {repeated}"
+        );
+        let conn = Connection::open(&db).unwrap();
+        let version: i64 = conn
+            .query_row("SELECT parser_version FROM source_scans", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            version,
+            i64::from(agent_session_grep_adapters_sqlite::PARSER_SEMANTIC_VERSION)
+        );
+        check_filtered();
+        assert_eq!(
+            std::fs::read(&source).unwrap(),
+            original,
+            "{kind}: source bytes changed"
+        );
+    }
+}
+
+#[test]
+fn cursor_identical_copies_reparse_legacy_timestamps_in_either_order() {
+    for [first, second] in [[0, 1], [1, 0]] {
+        let (dir, db) = temp_db("cursor-timestamp-rolling-upgrade");
+        let sources = [
+            dir.path().join("a/state.vscdb"),
+            dir.path().join("b/state.vscdb"),
+        ];
+        for source in &sources {
+            std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        }
+        let millis = 1_735_689_600_123_i64;
+        let canonical = "2025-01-01T00:00:00.123Z";
+        {
+            let conn = Connection::open(&sources[0]).unwrap();
+            conn.execute_batch("CREATE TABLE ItemTable(key TEXT PRIMARY KEY, value TEXT)")
+                .unwrap();
+            let value = serde_json::json!({"tabs":[{
+                "id":"rolling-time-tab", "createdAt":millis,
+                "bubbles":[{"type":"user", "text":"rollingepochneedle", "timingInfo":{"startTime":millis}}]
+            }]});
+            conn.execute(
+                "INSERT INTO ItemTable(key,value) VALUES(?1,?2)",
+                rusqlite::params![
+                    "workbench.panel.aichat.view.aichat.chatdata",
+                    value.to_string()
+                ],
+            )
+            .unwrap();
+        }
+        let original = std::fs::read(&sources[0]).unwrap();
+        std::fs::write(&sources[1], &original).unwrap();
+        let sync = |index: usize| {
+            let output = run(&db, &["sync", sources[index].to_str().unwrap()]);
+            assert!(output.status.success(), "{}", stdout(&output));
+            parse_first_line(&output)
+        };
+        sync(0);
+        let initial = sync(1);
+        let message: String = Connection::open(&db)
+            .unwrap()
+            .query_row(
+                "SELECT id FROM catalog WHERE id LIKE 'msg_v1_%'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let observations = || {
+            let conn = Connection::open(&db).unwrap();
+            let mut stmt = conn.prepare(
+                "SELECT source_path, id_json, payload, text FROM source_entity_projections WHERE entity_id=?1 ORDER BY source_path",
+            ).unwrap();
+            stmt.query_map([&message], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+        };
+        let new_evidence = observations();
+        assert_eq!(new_evidence.len(), 2);
+        for (index, (path, _, _, _)) in new_evidence.iter().enumerate() {
+            let suffix = if index == 0 {
+                "/a/state.vscdb"
+            } else {
+                "/b/state.vscdb"
+            };
+            assert!(path.replace('\\', "/").ends_with(suffix));
+        }
+        // Seed the actual parser-4 representation in the disposable catalog,
+        // not in either provider file. Preserve all non-timestamp evidence.
+        {
+            let mut conn = Connection::open(&db).unwrap();
+            let tx = conn.transaction().unwrap();
+            let bytes: Vec<u8> = tx
+                .query_row(
+                    "SELECT payload FROM catalog WHERE id=?1",
+                    [&message],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let mut payload: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            payload["timestamp"] = serde_json::json!(millis.to_string());
+            tx.execute(
+                "UPDATE catalog SET payload=?1 WHERE id=?2",
+                rusqlite::params![serde_json::to_vec(&payload).unwrap(), message],
+            )
+            .unwrap();
+            for (path, _, bytes, _) in &new_evidence {
+                let mut payload: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+                payload["timestamp"] = serde_json::json!(millis.to_string());
+                tx.execute("UPDATE source_entity_projections SET payload=?1 WHERE source_path=?2 AND entity_id=?3",
+                    rusqlite::params![serde_json::to_vec(&payload).unwrap(), path, message]).unwrap();
+            }
+            assert_eq!(
+                tx.execute("UPDATE source_scans SET parser_version=4", [])
+                    .unwrap(),
+                2
+            );
+            tx.commit().unwrap();
+        }
+        let legacy_evidence = observations();
+        let upgraded = sync(first);
+        assert_eq!(
+            upgraded["data"]["generation"].as_u64().unwrap(),
+            initial["data"]["generation"].as_u64().unwrap() + 1
+        );
+        let mixed = observations();
+        assert_eq!(mixed[first], new_evidence[first]);
+        assert_eq!(
+            mixed[second], legacy_evidence[second],
+            "unscanned raw evidence must not be rewritten"
+        );
+        let got = run(&db, &["get", &message]);
+        assert!(got.status.success(), "{}", stdout(&got));
+        let payload: serde_json::Value =
+            serde_json::from_str(parse_first_line(&got)["data"]["payload"].as_str().unwrap())
+                .unwrap();
+        assert_eq!(payload["timestamp"], canonical);
+        let search = run(
+            &db,
+            &[
+                "search",
+                "rollingepochneedle",
+                "--provider",
+                "cursor",
+                "--since",
+                canonical,
+                "--until",
+                "2025-01-01T00:00:00.124Z",
+            ],
+        );
+        assert!(search.status.success(), "{}", stdout(&search));
+        assert_eq!(
+            parse_first_line(&search)["data"]["hits"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            sync(first)["data"]["generation"],
+            upgraded["data"]["generation"]
+        );
+        let converged = sync(second);
+        assert_eq!(
+            converged["data"]["generation"].as_u64().unwrap(),
+            upgraded["data"]["generation"].as_u64().unwrap() + 1
+        );
+        assert_eq!(observations(), new_evidence);
+        for index in [0, 1] {
+            let repeated = sync(index);
+            assert_eq!(
+                repeated["data"]["generation"],
+                converged["data"]["generation"]
+            );
+            assert_eq!(repeated["data"]["committed"], 0);
+            assert_eq!(std::fs::read(&sources[index]).unwrap(), original);
+        }
+        let conn = Connection::open(&db).unwrap();
+        let (messages, claims, documents): (i64, i64, i64) = conn.query_row(
+            "SELECT (SELECT COUNT(*) FROM catalog WHERE id LIKE 'msg_v1_%'), COUNT(*), COUNT(DISTINCT document_id) FROM source_membership WHERE message_id=?1",
+            [&message], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).unwrap();
+        assert_eq!((messages, claims, documents), (1, 2, 1));
+        let current: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM source_scans WHERE parser_version=?1",
+                [i64::from(
+                    agent_session_grep_adapters_sqlite::PARSER_SEMANTIC_VERSION,
+                )],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(current, 2);
+        let schema: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(schema, 19);
+    }
+}
+
+#[test]
 fn source_projection_corrections_and_deleted_winner_converge() {
     let (dir, db) = temp_db("source-projection-authority");
     let a = dir.path().join("a.jsonl");
