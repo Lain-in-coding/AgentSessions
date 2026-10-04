@@ -42,9 +42,9 @@ These are tracking items, not a count of confirmed defects or completed work.
 | P1-1 | Keep approved fail-closed baseline; upstream tail/partial changes retained; recovery matrix pending |
 | P1-2 | Verified ItemTable millisecond normalization, disk-kv field distinction and provenance-gated rolling upgrades; raw observations, stable IDs, filters and source bytes covered by full integration |
 | P1-3 | Verified native integer Cline ts, numeric-token precision rejection, field-loss diagnostics and exactly one leading document BOM; Cline fixture revision 2, maturity unchanged |
-| P1-4 | Locally verified: Grok prompt IDs remain turn keys, no false native/multi-session authority; 1979-test integration and independent check passed, remote delivery pending |
-| P1-5 | Locally verified: OpenClaw genuine-empty/non-indexable distinction, per-message loss and incomplete-history retention; integration and independent check passed, remote delivery pending |
-| P1-6 | Locally verified: Grok whitespace composition/rewind/seq and actual parser-5 to parser-6 rolling upgrade; integration and independent check passed, remote delivery pending |
+| P1-4 | Verified at 452c883: Grok prompt IDs remain turn keys, no false native/multi-session authority; CLI and old-binary upgrade evidence, independent check and all 14 remote checks passed |
+| P1-5 | Verified at 452c883: OpenClaw genuine-empty/non-indexable distinction, per-message loss, no reasoning leak and incomplete-history retention; full local/remote integration passed |
+| P1-6 | Verified at 452c883: Grok whitespace composition/rewind/seq and parser-5 to parser-6 rolling upgrade; Message IDs/source bytes preserved; full local/remote integration passed |
 | P1-7 | Pending current-baseline revalidation and implementation |
 | P1-8 | Withdrawn diagnosis; current linear Pi behavior retained; tree enhancement deferred |
 | P1-9 | Pending current-baseline revalidation and implementation |
@@ -53,7 +53,7 @@ These are tracking items, not a count of confirmed defects or completed work.
 | P2-2 | Pending current-baseline revalidation and implementation |
 | P2-3 | Pending current-baseline revalidation and implementation |
 | P2-4 | Pending current-baseline revalidation and implementation |
-| P2-5 | Pending current-baseline revalidation and implementation |
+| P2-5 | Reproduced at 452c883: Codex session_meta.payload.id loses SID/cwd while the equivalent session_id form succeeds; type-scoped alias/conflict repair pending |
 | P2-6 | Pending current-baseline revalidation and implementation |
 | P2-7 | Withdrawn; no mapping from historical tool errors to current request failure |
 | P2-8 | Deferred product decision; existing ranking policy preserved |
@@ -168,3 +168,16 @@ Head 20f30c8 passed CI 37122185785, security-audit 37122185800 and
 core-beta-evidence 37122185773. All 14 PR checks succeeded on that immutable SHA.
 The repository remains public and PR #21 remains draft. These results do not
 certify the subsequent Grok/OpenClaw conversation-fidelity slice.
+
+
+### Conversation-fidelity checkpoint
+- Implementation `452c883` closes scoped P1-4/P1-5/P1-6 after red/green provider
+  tests, final CLI regressions, actual old-binary rolling upgrade and independent
+  review. Parser 6/schema 19; no maturity or capability expansion.
+- Local full gate: 1979 passed / 0 failed / 24 ignored; the one new ignore is a
+  manual golden printer. Full fmt/Clippy/MSRV plus Python/Node/privacy/smoke passed.
+- Exact implementation SHA remote checks: ci `37173224386`, security-audit
+  `37173224639`, core-beta-evidence `37173224455`; all succeeded, 14/14 PR checks.
+  Follow-up documentation commits have their own SHA and require separate checks.
+- P2-5 now has a fresh id-vs-session_id counterexample, not a completed fix. Other
+  open ledger items remain open. No merge, release, archive or worktree cleanup.

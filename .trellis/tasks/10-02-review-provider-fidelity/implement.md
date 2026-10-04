@@ -83,7 +83,7 @@ whitespace override. The three existing Cursor binary fixtures remain unchanged.
 - [x] Preserve chunk/rewind semantics and honest derived identity; verify Resume refusal.
 - [x] Keep legitimate empty content distinct from non-indexable content loss.
 - [x] Check parser-version upgrade, unchanged-source reparse and legacy source authority.
-- [ ] Independent review and full local/remote gates; no maturity or schema expansion.
+- [x] Independent review and full local/remote gates; no maturity or schema expansion.
 Provider changes require new synthetic fixtures with explicit provenance; never
 mutate a real source corpus or use model/CI failure as successful validation.
 
@@ -165,3 +165,32 @@ mutate a real source corpus or use model/CI failure as successful validation.
 - P1-4/P1-5/P1-6 are locally verified. The first push and its exact-SHA remote
   checks are the remaining batch delivery gate. Parent and provider tasks stay
   open for other items; no archive, main merge, formal release or promotion.
+
+
+### Conversation-fidelity remote checkpoint
+Implementation: `452c883cc5a46a0dcb0268c28b3e9d49b00be0ef`.
+All three completed runs were checked against this exact SHA; PR #21 reported
+**14/14 successful checks**, not results from an earlier timestamp checkpoint.
+
+| Workflow | Run ID | Result |
+|---|---|---|
+| ci | 37173224386 | success |
+| security-audit | 37173224639 | success |
+| core-beta-evidence | 37173224455 | success |
+
+The scoped P1-4/P1-5/P1-6 acceptance is verified, including independent review
+and local/remote integration. A documentation-only follow-up records this result;
+its own pushed head must be checked separately, not inferred from these run IDs.
+No provider promotion, official release, merge, archive or source cleanup occurred.
+
+### Next confirmed counterexample (P2-5; not fixed in this checkpoint)
+While remote CI ran, the current debug binary was exercised with two synthetic
+Codex sources in disposable catalogs. Both contain one `session_meta` and one
+valid `response_item/message`; only the session field name differs:
+- `session_meta.payload.id` plus cwd: message is indexed, but native session ID
+  and original working directory are both missing and Resume is unavailable.
+- The same value under `session_meta.payload.session_id` plus the same cwd:
+  native ID and the same-record cwd are observed, and Resume metadata is available.
+This confirms the type-scoped alias gap at `452c883`. Do not turn arbitrary
+id-only records into messages; same-record alias conflicts still need explicit
+regressions in the next slice. P2-5 remains open; no code change was made for it.
