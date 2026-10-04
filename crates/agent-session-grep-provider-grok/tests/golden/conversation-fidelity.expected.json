@@ -1,0 +1,73 @@
+{
+  "fixture_blake3": "c5cd1382aa4d022ea90caf91154be835f9253b67c70344345ec0e4bfeeca81a5",
+  "session_native_id": null,
+  "committed": 5,
+  "skipped": 0,
+  "messages": [
+    {
+      "seq": 0,
+      "native_id": "",
+      "parent_native_id": null,
+      "role": "user",
+      "text": "question zero",
+      "timestamp": null,
+      "is_sidechain": false,
+      "span": {
+        "start": 0,
+        "end": 155
+      }
+    },
+    {
+      "seq": 1,
+      "native_id": "",
+      "parent_native_id": null,
+      "role": "assistant",
+      "text": "\talpha \n omega\t",
+      "timestamp": null,
+      "is_sidechain": false,
+      "span": {
+        "start": 156,
+        "end": 262
+      }
+    },
+    {
+      "seq": 2,
+      "native_id": "",
+      "parent_native_id": null,
+      "role": "user",
+      "text": "question one",
+      "timestamp": null,
+      "is_sidechain": false,
+      "span": {
+        "start": 1100,
+        "end": 1231
+      }
+    },
+    {
+      "seq": 3,
+      "native_id": "",
+      "parent_native_id": null,
+      "role": "user",
+      "text": "question two",
+      "timestamp": null,
+      "is_sidechain": false,
+      "span": {
+        "start": 1343,
+        "end": 1474
+      }
+    },
+    {
+      "seq": 4,
+      "native_id": "",
+      "parent_native_id": null,
+      "role": "assistant",
+      "text": "final answer",
+      "timestamp": null,
+      "is_sidechain": false,
+      "span": {
+        "start": 1475,
+        "end": 1591
+      }
+    }
+  ]
+}

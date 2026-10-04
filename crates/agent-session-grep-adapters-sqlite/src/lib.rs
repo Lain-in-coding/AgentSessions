@@ -8306,7 +8306,7 @@ const RELATION_SCHEMA_VERSION: i64 = 7;
 /// 已存版本落后于该常量的源即使字节未变也走 targeted backfill（重跑 parse +
 /// commit），并在重新 commit 时写回当前版本。单测（lib.rs
 /// `stale_parser_version_forces_reparse_and_converges`）锁住该语义。
-pub const PARSER_SEMANTIC_VERSION: u32 = 5;
+pub const PARSER_SEMANTIC_VERSION: u32 = 6;
 
 /// 索引投影版本：任何改变 **FTS 词元流或派生投影文本** 的变化都必须 +1。
 ///

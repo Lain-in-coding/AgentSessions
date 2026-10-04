@@ -1680,6 +1680,284 @@ fn cursor_identical_copies_reparse_legacy_timestamps_in_either_order() {
 }
 
 #[test]
+fn grok_conversation_fidelity_and_parser_reparse_preserve_source_bytes() {
+    use agent_session_grep_domain::{IdKind, Stability, StableId};
+
+    let (dir, db) = temp_db("grok-conversation-fidelity");
+    let golden = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../agent-session-grep-provider-grok/tests/golden/conversation-fidelity.jsonl");
+    let original = std::fs::read(golden).unwrap();
+    assert_eq!(std::str::from_utf8(&original).unwrap().lines().count(), 13);
+    let source = dir.path().join("updates.jsonl");
+    std::fs::write(&source, &original).unwrap();
+    let sync = || {
+        let output = run(&db, &["sync", source.to_str().unwrap()]);
+        assert!(output.status.success(), "{}", stdout(&output));
+        let frame = parse_first_line(&output);
+        assert_envelope_shape(&frame, true);
+        frame
+    };
+    let search = |query: &str| {
+        let output = run(&db, &["search", query, "--provider", "grok-build"]);
+        assert!(output.status.success(), "{}", stdout(&output));
+        parse_first_line(&output)
+    };
+    let first = sync();
+    for (field, expected) in [
+        ("sources", 1),
+        ("emitted", 5),
+        ("committed", 5),
+        ("unchanged", 0),
+        ("skipped", 0),
+        ("diagnostics", 0),
+    ] {
+        assert_eq!(first["data"][field], expected, "{field}: {first}");
+    }
+    assert!(first["warnings"].as_array().unwrap().is_empty());
+
+    let found = search("alpha omega");
+    let hits = found["data"]["hits"].as_array().unwrap();
+    assert_eq!(hits.len(), 1, "{found}");
+    let answer = hits[0]["id"].as_str().unwrap().to_owned();
+    let session = hits[0]["session_id"].as_str().unwrap().to_owned();
+    let shown = run(&db, &["show", &session]);
+    assert!(shown.status.success(), "{}", stdout(&shown));
+    let shown = parse_first_line(&shown);
+    let document = shown["data"]["entity"]["document"].as_str().unwrap();
+    let expected_session = StableId::derive(
+        IdKind::Session,
+        Stability::Reconstructed,
+        &[document.as_bytes()],
+    );
+    assert_eq!(session, expected_session.as_str());
+
+    let records = || {
+        let conn = Connection::open(&db).unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT p.source_ordinal, p.message_id, c.payload
+             FROM message_placements p JOIN catalog c ON c.id=p.message_id
+             ORDER BY p.source_ordinal",
+            )
+            .unwrap();
+        stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Vec<u8>>(2)?,
+            ))
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
+    };
+    let initial_records = records();
+    let expected = [
+        ("user", "question zero", 0),
+        ("assistant", "\talpha \n omega\t", 1),
+        ("user", "question one", 9),
+        ("user", "question two", 11),
+        ("assistant", "final answer", 12),
+    ];
+    assert_eq!(initial_records.len(), expected.len());
+    assert_eq!(
+        shown["data"]["entity"]["messages"],
+        serde_json::json!(
+            initial_records
+                .iter()
+                .map(|(_, id, _)| id)
+                .collect::<Vec<_>>()
+        )
+    );
+    let lines: Vec<_> = original.split(|byte| *byte == b'\n').collect();
+    for (seq, ((ordinal, _, bytes), (role, text, first_line))) in
+        initial_records.iter().zip(expected).enumerate()
+    {
+        assert_eq!(*ordinal, seq as i64, "blank assistant must not consume seq");
+        let payload: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+        assert_eq!(payload["role"], role);
+        assert_eq!(payload["text"], text);
+        assert_eq!(payload["session"], session);
+        let start = payload["span"]["start"].as_u64().unwrap() as usize;
+        let end = payload["span"]["end"].as_u64().unwrap() as usize;
+        assert_eq!(&original[start..end], lines[first_line]);
+    }
+    let status = run(&db, &["status"]);
+    assert!(status.status.success(), "{}", stdout(&status));
+    let status = parse_first_line(&status);
+    assert_eq!(status["data"]["placements"], 5);
+    assert_eq!(status["data"]["source_placement_claims"], 5);
+    let counts: (i64, i64, i64) = Connection::open(&db)
+        .unwrap()
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM catalog WHERE id LIKE 'ses_v1_%'),
+                (SELECT COUNT(*) FROM catalog WHERE id LIKE 'doc_v1_%'),
+                (SELECT COUNT(*) FROM source_relation_scans)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(counts, (1, 1, 1));
+    for query in ["discarded", "turn-0", "turn-1", "turn-2", "alphaomega"] {
+        let found = search(query);
+        assert!(
+            found["data"]["hits"].as_array().unwrap().is_empty(),
+            "{query}: {found}"
+        );
+    }
+    let metadata = run(&db, &["get-session-resume", &session]);
+    assert!(metadata.status.success(), "{}", stdout(&metadata));
+    let metadata = parse_first_line(&metadata);
+    assert_eq!(metadata["data"]["provider_id"], "grok-build");
+    assert_eq!(metadata["data"]["resume_available"], false);
+    assert!(metadata["data"]["provider_session_id"].is_null());
+    assert!(metadata["data"]["original_working_directory"].is_null());
+    let preview = run(&db, &["resume", &session]);
+    assert!(preview.status.success(), "{}", stdout(&preview));
+    let preview = parse_first_line(&preview);
+    assert_eq!(preview["data"]["available"], false);
+    assert_eq!(preview["data"]["executed"], false);
+    assert!(preview["data"]["command"].is_null());
+    assert!(
+        !preview["data"]["unavailable_reason"]
+            .as_str()
+            .unwrap()
+            .is_empty()
+    );
+
+    let evidence = || {
+        Connection::open(&db)
+            .unwrap()
+            .query_row(
+                "SELECT id_json, payload, text FROM source_entity_projections WHERE entity_id=?1",
+                [&answer],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Vec<u8>>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .unwrap()
+    };
+    let initial_evidence = evidence();
+    assert_eq!(initial_evidence.2, "\talpha \n omega\t");
+    // Seed the parser-5 chunk-text defect in both catalog and original source
+    // evidence, not just its version marker. Keep current identities/spans:
+    // this tests text repair, NOT a complete historical native-ID migration.
+    {
+        let mut conn = Connection::open(&db).unwrap();
+        let tx = conn.transaction().unwrap();
+        let mut payload: serde_json::Value = serde_json::from_slice(&initial_records[1].2).unwrap();
+        payload["text"] = serde_json::json!("alphaomega");
+        assert_eq!(
+            tx.execute(
+                "UPDATE catalog SET payload=?1 WHERE id=?2",
+                rusqlite::params![serde_json::to_vec(&payload).unwrap(), answer],
+            )
+            .unwrap(),
+            1
+        );
+        let mut payload: serde_json::Value = serde_json::from_slice(&initial_evidence.1).unwrap();
+        payload["text"] = serde_json::json!("alphaomega");
+        assert_eq!(
+            tx.execute(
+                "UPDATE source_entity_projections SET payload=?1, text=?2 WHERE entity_id=?3",
+                rusqlite::params![serde_json::to_vec(&payload).unwrap(), "alphaomega", answer],
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            tx.execute(
+                "UPDATE fts SET text=?1 WHERE rowid=(SELECT fts_rowid FROM fts_ids WHERE wire_id=?2)",
+                rusqlite::params!["alphaomega", answer],
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            tx.execute("UPDATE source_scans SET parser_version=5", [])
+                .unwrap(),
+            1
+        );
+        tx.commit().unwrap();
+    }
+    assert_eq!(evidence().2, "alphaomega");
+    assert_eq!(
+        search("alphaomega")["data"]["hits"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        search("alpha omega")["data"]["hits"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let reparsed = sync();
+    assert_eq!(reparsed["data"]["emitted"], 5);
+    assert_eq!(reparsed["data"]["committed"], 5);
+    assert_eq!(reparsed["data"]["skipped"], 0);
+    assert_eq!(reparsed["data"]["diagnostics"], 1);
+    let warnings = reparsed["warnings"].as_array().unwrap();
+    assert_eq!(warnings.len(), 1);
+    assert!(
+        warnings[0]
+            .as_str()
+            .unwrap()
+            .contains("parser semantics upgraded")
+    );
+    assert!(
+        warnings[0]
+            .as_str()
+            .unwrap()
+            .contains("stored parser_version 5")
+    );
+    assert_eq!(
+        reparsed["data"]["generation"].as_u64().unwrap(),
+        first["data"]["generation"].as_u64().unwrap() + 1
+    );
+    assert_eq!(records(), initial_records);
+    assert_eq!(evidence(), initial_evidence);
+    for query in ["alpha", "omega", "alpha omega"] {
+        let found = search(query);
+        let hits = found["data"]["hits"].as_array().unwrap();
+        assert_eq!(hits.len(), 1, "{query}: {found}");
+        assert_eq!(hits[0]["id"], answer);
+        assert_eq!(hits[0]["session_id"], session);
+    }
+    assert!(
+        search("alphaomega")["data"]["hits"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let repeated = sync();
+    assert_eq!(repeated["data"]["emitted"], 0);
+    assert_eq!(repeated["data"]["committed"], 0);
+    assert_eq!(repeated["data"]["unchanged"], 5);
+    assert_eq!(
+        repeated["data"]["generation"],
+        reparsed["data"]["generation"]
+    );
+    let version: i64 = Connection::open(&db)
+        .unwrap()
+        .query_row("SELECT parser_version FROM source_scans", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(
+        version,
+        i64::from(agent_session_grep_adapters_sqlite::PARSER_SEMANTIC_VERSION)
+    );
+    assert_eq!(std::fs::read(&source).unwrap(), original);
+}
+
+#[test]
 fn source_projection_corrections_and_deleted_winner_converge() {
     let (dir, db) = temp_db("source-projection-authority");
     let a = dir.path().join("a.jsonl");
@@ -7241,6 +7519,157 @@ fn explicit_sync_resolves_pi_and_openclaw_by_canonical_root() {
         "拒绝原因必须仍是 ambiguous provider selection: {}",
         stdout(&out)
     );
+}
+
+#[test]
+fn openclaw_textless_content_reports_loss_without_tombstoning_history() {
+    // All rows are synthetic. Exercise both fresh ingestion and a partial
+    // replacement: loss accounting must not turn unseen history into deletion.
+    for prior_history in [false, true] {
+        let (dir, db) = temp_db("openclaw-content-loss");
+        let home = dir.path().join("home");
+        let source = home.join(".openclaw/agents/main/sessions/test.jsonl");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        let home = home.to_str().unwrap();
+        let path = source.to_str().unwrap();
+        let search = |query: &str| {
+            let output = run_with_home(&db, home, &["search", query, "--provider", "openclaw"]);
+            assert!(output.status.success(), "{}", stdout(&output));
+            parse_first_line(&output)
+        };
+        let header = serde_json::json!({
+            "type":"session", "version":3, "id":"claw-fidelity-session",
+            "cwd":"/synthetic/claw-fidelity", "timestamp":"2026-01-01T00:00:00Z"
+        });
+        let prior_entry = if prior_history {
+            let old_source = format!(
+                "{header}\n{}\n",
+                serde_json::json!({
+                    "type":"message", "message":{"role":"assistant", "content":"clawretainedneedle"}
+                })
+            );
+            std::fs::write(&source, &old_source).unwrap();
+            let output = run_with_home(&db, home, &["sync", path]);
+            assert!(output.status.success(), "{}", stdout(&output));
+            let first = parse_first_line(&output);
+            assert_eq!(first["data"]["committed"], 1);
+            assert_eq!(first["data"]["skipped"], 0);
+            assert_eq!(std::fs::read(&source).unwrap(), old_source.as_bytes());
+            let found = search("clawretainedneedle");
+            let hits = found["data"]["hits"].as_array().unwrap();
+            assert_eq!(hits.len(), 1);
+            let id = hits[0]["id"].as_str().unwrap().to_owned();
+            let entry = run_with_home(&db, home, &["get", &id]);
+            assert!(entry.status.success(), "{}", stdout(&entry));
+            Some((id, parse_first_line(&entry)["data"].clone()))
+        } else {
+            None
+        };
+        let original = [
+            header,
+            serde_json::json!({"type":"message", "message":{"role":"user", "content":"clawtextneedle"}}),
+            serde_json::json!({"type":"message", "message":{"role":"assistant", "content":[
+                {"type":"thinking", "thinking":"reasoningonlyneedle"},
+                {"type":"redacted_thinking", "data":"redactedreasoningneedle"}
+            ]}}),
+            serde_json::json!({"type":"message", "message":{"role":"assistant", "content":[
+                {"type":"unrecognizedblock", "text":"unknownblockneedle"}
+            ]}}),
+            serde_json::json!({"type":"message", "message":{"role":"assistant"}}),
+            serde_json::json!({"type":"message", "message":{"role":"assistant", "content":null}}),
+            serde_json::json!({"type":"message", "message":{"role":"assistant", "content":""}}),
+            serde_json::json!({"type":"message", "message":{"role":"assistant", "content":" \t\n "}}),
+            serde_json::json!({"type":"message", "message":{"role":"assistant", "content":[]}}),
+        ].iter().map(serde_json::Value::to_string).collect::<Vec<_>>().join("\n") + "\n";
+        std::fs::write(&source, &original).unwrap();
+        let output = run_with_home(&db, home, &["sync", path]);
+        assert!(output.status.success(), "{}", stdout(&output));
+        let frame = parse_first_line(&output);
+        assert_envelope_shape(&frame, true);
+        for (field, expected) in [
+            ("sources", 1),
+            ("emitted", 1),
+            ("committed", 1),
+            ("skipped", 2),
+            // Two lost messages plus the shared partial-source warning.
+            ("diagnostics", 3),
+        ] {
+            assert_eq!(
+                frame["data"][field], expected,
+                "prior={prior_history}, {field}: {frame}"
+            );
+        }
+        let warnings = frame["warnings"].as_array().unwrap();
+        assert_eq!(warnings.len(), 3, "{frame}");
+        assert!(
+            warnings[0]
+                .as_str()
+                .unwrap()
+                .starts_with("partial source scan:")
+        );
+        assert!(
+            warnings[0]
+                .as_str()
+                .unwrap()
+                .contains("history is retained")
+        );
+        assert!(warnings[1].as_str().unwrap().starts_with("第 3 行："));
+        assert!(warnings[2].as_str().unwrap().starts_with("第 4 行："));
+        assert!(
+            warnings
+                .iter()
+                .all(|warning| warning.as_str().unwrap().chars().count() <= 512)
+        );
+        let public_output = format!(
+            "{}{}",
+            stdout(&output),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        for marker in [
+            "reasoningonlyneedle",
+            "redactedreasoningneedle",
+            "unknownblockneedle",
+            "unrecognizedblock",
+        ] {
+            assert!(
+                !public_output.contains(marker),
+                "content must not leak through diagnostics"
+            );
+            let found = search(marker);
+            assert!(
+                found["data"]["hits"].as_array().unwrap().is_empty(),
+                "{marker}: {found}"
+            );
+        }
+        let found = search("clawtextneedle");
+        assert_eq!(
+            found["data"]["hits"].as_array().unwrap().len(),
+            1,
+            "{found}"
+        );
+        let retained = search("clawretainedneedle");
+        assert_eq!(
+            retained["data"]["hits"].as_array().unwrap().len(),
+            usize::from(prior_history)
+        );
+        if let Some((id, data)) = prior_entry {
+            assert_eq!(retained["data"]["hits"][0]["id"], id);
+            let entry = run_with_home(&db, home, &["get", &id]);
+            assert!(entry.status.success(), "{}", stdout(&entry));
+            assert_eq!(parse_first_line(&entry)["data"], data);
+        }
+        let counts: (i64, i64) = Connection::open(&db)
+            .unwrap()
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM catalog WHERE id LIKE 'msg_v1_%'),
+                    (SELECT COUNT(*) FROM source_relation_scans)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(counts, (1 + i64::from(prior_history), 0));
+        assert_eq!(std::fs::read(&source).unwrap(), original.as_bytes());
+    }
 }
 
 #[test]

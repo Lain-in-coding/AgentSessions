@@ -428,6 +428,20 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Grok ACP prompt IDs now remain turn-grouping keys instead of native session
+  identities, so ordinary multi-turn sources no longer fail as ambiguous sessions.
+  Assistant chunks retain leading, trailing and internal whitespace; entirely
+  blank reconstructed assistant messages are omitted without sequence gaps.
+  Rewind behavior and exact first-chunk source evidence are preserved. OpenClaw
+  reports one skipped message with a content-free diagnostic for non-indexable
+  content, while genuine empty content remains a silent no-op. Thinking/reasoning
+  is not indexed, and tool support and provider maturity are unchanged.
+  **Upgrade:** parser version 6 re-ingests older unchanged sources once; schema
+  stays 19. Grok updates-only sessions use document-derived identities and gain
+  no Resume authority. Old prompt-derived session IDs can change after complete
+  source replacement; incomplete scans retain prior evidence until recovery.
+  As with parser 5, downgrade via a matching backup or a fresh re-ingestion, not
+  by lowering markers or running `index rebuild`.
 - Cursor ItemTable message timestamps now normalize proven Unix milliseconds
   to millisecond-precise UTC. Disk-kv bubble strings preserve their offset and
   fraction; unsupported numeric bubble times are diagnosed rather than guessed.

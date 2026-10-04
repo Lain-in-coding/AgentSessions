@@ -75,3 +75,93 @@ All source inputs were synthetic and source-byte preservation was asserted.
 The existing expected Cursor JSON has only six semantic timestamp differences;
 its generated output is now LF to satisfy ordinary diff checks without a
 whitespace override. The three existing Cursor binary fixtures remain unchanged.
+
+
+## Conversation-fidelity execution slice (base 20f30c8)
+- [x] Reproduce Grok multi-prompt misclassification and whitespace loss before fixes.
+- [x] Reproduce OpenClaw thinking-only zero-loss report without exposing reasoning.
+- [x] Preserve chunk/rewind semantics and honest derived identity; verify Resume refusal.
+- [x] Keep legitimate empty content distinct from non-indexable content loss.
+- [x] Check parser-version upgrade, unchanged-source reparse and legacy source authority.
+- [ ] Independent review and full local/remote gates; no maturity or schema expansion.
+Provider changes require new synthetic fixtures with explicit provenance; never
+mutate a real source corpus or use model/CI failure as successful validation.
+
+
+### Conversation-fidelity implementation evidence (2026-10-04)
+- Grok red regressions at parser 5 reproduced `Some("turn-0")` instead of absent
+  native identity and `alphaomega` instead of `\talpha \n omega\t` (2 failures).
+  Pinned synthetic expected output now preserves whitespace, rewind and seq;
+  the 2/3/5-turn table and fixed-seed oracle no longer encode the false identity.
+- OpenClaw red run: 20 passed / 7 failed / 2 manual printers ignored. Five failures
+  proved missing loss accounting; two guarded fixture revision 2. Green: 27 passed,
+  0 failed, 2 manual printers ignored. Missing/null/empty-string/whitespace-string/
+  empty-array remain silent; other textless content reports one loss per message.
+- Main reran both provider suites: **64 passed, 0 failed, 4 ignored printers**.
+  Package all-target/all-feature Clippy passed for both providers. New fixtures
+  are entirely synthetic; original source inputs remain unmodified.
+- Real compatibility experiment used a disposable catalog produced by the actual
+  parser-5 binary before rebuilding, not just lowered scan markers. Two identical
+  Grok files under distinct synthetic installation roots yielded two old native
+  Sessions and two shared Messages. Reparse source A with parser 6: retain source
+  B's exact original evidence and old Session, introduce one document-derived
+  Session and correct the text. Reparse B: converge to one reconstructed Session,
+  preserve both Message IDs, remove old Session IDs/aliases, keep Resume unavailable.
+  Generations were 3 -> 4 -> 4; the last unchanged sync emitted zero. Both input
+  files remained byte-identical. This verifies complete replacements; incomplete
+  scans deliberately retain prior observations under existing storage policy.
+- Python suites 21/11/54 ran successfully (two existing environment skips); Node
+  Web UI suite passed 11/11; curated task context validation passed 8 entries each.
+  Subsequent CLI/independent/full-workspace gates are recorded below. New-SHA
+  remote gates remain required before the parent ledger marks these items Verified.
+
+### Root-cause prevention: conversation fidelity
+- Categories B/D/E: turn identifiers were promoted across the provider/session
+  boundary without evidence, whitespace was discarded before message composition,
+  and a valid record was conflated with successfully indexed content.
+- Existing goldens and a mirror-model property oracle had encoded the same wrong
+  native-ID assumption. Revision-2 fixtures use explicit independent text/span
+  expectations; semantic counterexamples precede fixes. Reference adapters are
+  field-shape evidence, not correctness or format-certification authorities.
+- The ports spec now pins identity scope, the closed empty-content set, loss vs
+  intentional text-only projection, and parser-6/source-replacement consequences.
+  CLI assertions and a real old-binary upgrade complement provider-only tests.
+  No reasoning/tool capability expansion, path guessing or maturity promotion.
+
+
+### Independent check and CLI boundary evidence
+- Both new CLI regressions pass. Grok checks exact five-message/first-span/seq
+  output, reconstructed Session identity, absent native/cwd/Resume authority,
+  seeded old body in catalog/source observations/FTS, parser-5 marker backfill and
+  subsequent no-op. This automated body test does not claim original legacy-ID
+  migration; the actual parser-5 executable experiment above covers that boundary.
+- OpenClaw CLI covers fresh import and replacement after indexed history. Two
+  non-indexable messages produce two skips plus the existing retention diagnostic;
+  genuine empty content contributes no loss. Negative searches and machine
+  diagnostics exclude reasoning; incomplete replacement retains old history.
+- Independent Trellis check reviewed every changed file and all four new fixture
+  files, including final CLI additions. The only finding was a stale "current
+  parser 5" sentence in the SQLite spec; it now names 6 and retains historical
+  parser-5 notes. No Rust/test defect remained. The reviewer independently ran
+  scoped rustfmt/diff and Python fixture field/span/line/byte checks; Cargo and the
+  real old-binary migration experiment were run by main, not independently rerun.
+- Final binary verification passed 10/10; privacy scan includes the four staged
+  intent-to-add fixtures and passed. No source bytes or Cargo.lock were modified.
+
+
+### Conversation-fidelity final local gate
+- Main ran the same complete command matrix listed under Final verification
+  commands above. Windows all-feature workspace result: **1979 passed, 0 failed,
+  24 ignored** across 86 test targets. Versus the prior 1966/23 checkpoint, all 13
+  added regression tests ran; the one new ignored test is an OpenClaw manual
+  golden printer, not a disabled regression.
+- Workspace fmt, all-target/all-feature Clippy with `-D warnings`, and Rust 1.90.0
+  all-target/all-feature locked/offline check passed. Python 21/11/54 (two skips),
+  Node 11, real binary smoke 10/10, fixture-inclusive privacy scan, context and
+  ordinary diff checks passed. No whitespace-check override was used.
+- Independent review is complete and its sole documentation finding is fixed.
+  Existing Grok basic expected JSON is now LF; its only semantic change is the
+  approved native session ID removal. Original fixture inputs remain unchanged.
+- P1-4/P1-5/P1-6 are locally verified. The first push and its exact-SHA remote
+  checks are the remaining batch delivery gate. Parent and provider tasks stay
+  open for other items; no archive, main merge, formal release or promotion.

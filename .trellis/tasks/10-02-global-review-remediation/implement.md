@@ -42,9 +42,9 @@ These are tracking items, not a count of confirmed defects or completed work.
 | P1-1 | Keep approved fail-closed baseline; upstream tail/partial changes retained; recovery matrix pending |
 | P1-2 | Verified ItemTable millisecond normalization, disk-kv field distinction and provenance-gated rolling upgrades; raw observations, stable IDs, filters and source bytes covered by full integration |
 | P1-3 | Verified native integer Cline ts, numeric-token precision rejection, field-loss diagnostics and exactly one leading document BOM; Cline fixture revision 2, maturity unchanged |
-| P1-4 | Pending current-baseline revalidation and implementation |
-| P1-5 | Pending current-baseline revalidation and implementation |
-| P1-6 | Pending current-baseline revalidation and implementation |
+| P1-4 | Locally verified: Grok prompt IDs remain turn keys, no false native/multi-session authority; 1979-test integration and independent check passed, remote delivery pending |
+| P1-5 | Locally verified: OpenClaw genuine-empty/non-indexable distinction, per-message loss and incomplete-history retention; integration and independent check passed, remote delivery pending |
+| P1-6 | Locally verified: Grok whitespace composition/rewind/seq and actual parser-5 to parser-6 rolling upgrade; integration and independent check passed, remote delivery pending |
 | P1-7 | Pending current-baseline revalidation and implementation |
 | P1-8 | Withdrawn diagnosis; current linear Pi behavior retained; tree enhancement deferred |
 | P1-9 | Pending current-baseline revalidation and implementation |
@@ -161,3 +161,10 @@ Implementation checkpoint: `9a36ad6`.
   protocol/read-surface, privacy, performance and release decisions remain open.
   The original eight dirty entries remain outside this worktree and untouched;
   no task archive, main merge, release or provider maturity promotion occurred.
+
+
+## Remote timestamp checkpoint
+Head 20f30c8 passed CI 37122185785, security-audit 37122185800 and
+core-beta-evidence 37122185773. All 14 PR checks succeeded on that immutable SHA.
+The repository remains public and PR #21 remains draft. These results do not
+certify the subsequent Grok/OpenClaw conversation-fidelity slice.

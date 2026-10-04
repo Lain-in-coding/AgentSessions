@@ -7,18 +7,29 @@
 //!
 //! 全字段捕获 sink、fixture 读取与 BLAKE3 校验、canonical JSON 投影复用
 //! `agent_session_grep_testkit::golden`，本文件只保留 openclaw 特有的 span↔record
-//! 断言与一个手动再生辅助。
+//! 断言、内容损失回归与手动再生辅助。
 
-use agent_session_grep_ports::{Confidence, ProviderAdapter};
+use agent_session_grep_ports::{
+    Confidence, ParseReport, PortResult, ProviderAdapter, ReadOnlySource,
+};
 use agent_session_grep_provider_openclaw::OpenClawAdapter;
 use agent_session_grep_testkit::assert_read_only;
 use agent_session_grep_testkit::golden::{self, CapturingSink};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 const FIXTURE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/basic.jsonl");
 const EXPECTED_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/golden/basic.expected.json"
+);
+
+const CONTENT_LOSS_FIXTURE_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/golden/content-loss.jsonl"
+);
+const CONTENT_LOSS_EXPECTED_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/golden/content-loss.expected.json"
 );
 
 /// 解析 fixture：经共享 sink 全字段捕获，返回报告与 sink。
@@ -49,7 +60,7 @@ fn parse_never_mutates_source_bytes() {
 
 #[test]
 fn golden_provenance_revision_matches_manifest() {
-    assert_eq!(OpenClawAdapter::new().manifest().fixture_revision, Some(1));
+    assert_eq!(OpenClawAdapter::new().manifest().fixture_revision, Some(2));
 }
 
 #[test]
@@ -78,8 +89,17 @@ fn golden_probe_tolerates_intentional_broken_line() {
 
 #[test]
 fn golden_spans_slice_back_to_exact_source_lines() {
-    let expected = golden::read_expected(EXPECTED_PATH);
-    let bytes = golden::read_fixture_verified(FIXTURE_PATH, &expected);
+    for (fixture_path, expected_path) in [
+        (FIXTURE_PATH, EXPECTED_PATH),
+        (CONTENT_LOSS_FIXTURE_PATH, CONTENT_LOSS_EXPECTED_PATH),
+    ] {
+        assert_spans_slice_back_to_exact_source_lines(fixture_path, expected_path);
+    }
+}
+
+fn assert_spans_slice_back_to_exact_source_lines(fixture_path: &str, expected_path: &str) {
+    let expected = golden::read_expected(expected_path);
+    let bytes = golden::read_fixture_verified(fixture_path, &expected);
     let (_, sink) = parse_fixture(&bytes);
     let messages = &sink.messages;
     assert!(!messages.is_empty(), "golden fixture must emit messages");
@@ -179,6 +199,237 @@ fn golden_corpus_carries_no_tool_structure() {
 #[ignore = "manual regeneration helper — prints canonical JSON for basic.expected.json"]
 fn print_actual_canonical_output_for_regeneration() {
     let bytes = std::fs::read(FIXTURE_PATH).expect("read basic.jsonl fixture");
+    let hash = blake3::hash(&bytes).to_hex().to_string();
+    let (report, sink) = parse_fixture(&bytes);
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&golden::canonical_json(&hash, &report, &sink.messages))
+            .unwrap()
+    );
+}
+
+#[test]
+fn content_legitimate_empties_are_silent() {
+    let contents = [
+        None,
+        Some(Value::Null),
+        Some(json!("")),
+        Some(json!(" \t\r\n\u{3000}")),
+        Some(json!([])),
+    ];
+    for role in ["user", "assistant"] {
+        for (index, content) in contents.iter().enumerate() {
+            let mut record = json!({"type": "message", "message": {"role": role}});
+            if let Some(content) = content {
+                record["message"]["content"] = content.clone();
+            }
+            let bytes = serde_json::to_vec(&record).unwrap();
+            let (report, sink) = parse_fixture(&bytes);
+            assert_eq!(report, ParseReport::default(), "role={role}, case={index}");
+            assert!(sink.messages.is_empty());
+            assert!(sink.activities.is_empty());
+            assert!(sink.usages.is_empty());
+        }
+    }
+}
+
+#[test]
+fn content_non_indexable_messages_report_loss_once_each() {
+    let contents = [
+        json!([{"type": "thinking", "thinking": "SYNTHETIC_REASONING"}]),
+        json!([
+            {"type": "thinking", "thinking": "SYNTHETIC_REASONING"},
+            {"type": "redacted_thinking", "data": "SYNTHETIC_REDACTED"}
+        ]),
+        json!([{"type": "synthetic_unknown", "text": "SYNTHETIC_UNKNOWN"}]),
+        json!({"type": "text", "text": "SYNTHETIC_OBJECT"}),
+        json!({}),
+        json!(true),
+        json!(false),
+        json!(0),
+        json!(1.5),
+        json!([null]),
+        json!([{}]),
+        json!([[]]),
+        json!(["SYNTHETIC_ARRAY_STRING"]),
+        json!([{"type": "text", "text": ""}]),
+        json!([{"type": "text", "text": " \t\r\n\u{3000}"}]),
+        json!([{"type": "text", "text": null}]),
+        json!([{"type": "text", "text": 42}]),
+        json!([{"text": "SYNTHETIC_MISSING_TYPE"}]),
+    ];
+    for role in ["user", "assistant"] {
+        for (index, content) in contents.iter().enumerate() {
+            let bytes = serde_json::to_vec(&json!({
+                "type": "message", "message": {"role": role, "content": content},
+            }))
+            .unwrap();
+            let (report, sink) = parse_fixture(&bytes);
+            assert_eq!(report.committed, 0, "role={role}, case={index}");
+            assert_eq!(report.skipped, 1, "role={role}, case={index}");
+            assert_eq!(
+                report.diagnostics,
+                ["第 1 行：消息无可索引文本，已跳过"],
+                "role={role}, case={index}"
+            );
+            assert!(sink.messages.is_empty());
+            assert!(sink.activities.is_empty());
+            assert!(sink.usages.is_empty());
+        }
+    }
+}
+
+#[test]
+fn content_loss_diagnostic_is_bounded_and_payload_independent() {
+    for repetitions in [1, 8192] {
+        let marker = "SYNTHETIC_PRIVATE_PAYLOAD".repeat(repetitions);
+        let bytes = serde_json::to_vec(&json!({
+            "type": "message",
+            "message": {"role": "assistant", "content": [
+                {"type": "thinking", "thinking": marker, "signature": marker},
+                {"type": "synthetic_unknown", "text": marker},
+                {"type": "text", "text": " \t"}
+            ]},
+        }))
+        .unwrap();
+        let (report, sink) = parse_fixture(&bytes);
+        assert_eq!(report.committed, 0);
+        assert_eq!(report.skipped, 1);
+        assert_eq!(report.diagnostics, ["第 1 行：消息无可索引文本，已跳过"]);
+        assert!(report.diagnostics[0].len() <= 128);
+        assert!(!report.diagnostics[0].contains("SYNTHETIC"));
+        assert!(sink.messages.is_empty());
+        assert!(sink.activities.is_empty());
+        assert!(sink.usages.is_empty());
+    }
+}
+
+#[test]
+fn content_mixed_blocks_preserve_text_without_reasoning_or_loss() {
+    let bytes = serde_json::to_vec(&json!({
+        "type": "message",
+        "message": {"role": "assistant", "content": [
+            {"type": "thinking", "thinking": "SYNTHETIC_REASONING", "text": "SYNTHETIC_DECOY"},
+            {"type": "text", "text": "  kept 中文\t"},
+            {"type": "redacted_thinking", "data": "SYNTHETIC_REDACTED"},
+            {"type": "synthetic_unknown", "text": "SYNTHETIC_UNKNOWN"},
+            {"type": "text", "text": "next🚀  "}
+        ]},
+    }))
+    .unwrap();
+    let (report, sink) = parse_fixture(&bytes);
+    assert_eq!(report.committed, 1);
+    assert_eq!(report.skipped, 0);
+    assert!(report.diagnostics.is_empty());
+    assert_eq!(sink.messages.len(), 1);
+    assert_eq!(sink.messages[0].text, "  kept 中文\t\nnext🚀  ");
+    assert!(sink.activities.is_empty());
+    assert!(sink.usages.is_empty());
+}
+
+#[test]
+fn content_non_conversational_roles_remain_outside_loss_accounting() {
+    for role in ["system", "tool", "toolResult", "synthetic_unknown"] {
+        let bytes = serde_json::to_vec(&json!({
+            "type": "message",
+            "message": {"role": role, "content": [
+                {"type": "thinking", "thinking": "SYNTHETIC_NON_CONVERSATIONAL"}
+            ]},
+        }))
+        .unwrap();
+        let (report, sink) = parse_fixture(&bytes);
+        assert_eq!(report, ParseReport::default());
+        assert!(sink.messages.is_empty());
+        assert!(sink.activities.is_empty());
+        assert!(sink.usages.is_empty());
+    }
+}
+
+#[test]
+fn content_loss_golden_output_and_per_message_counters_are_pinned() {
+    let expected = golden::read_expected(CONTENT_LOSS_EXPECTED_PATH);
+    let bytes = golden::read_fixture_verified(CONTENT_LOSS_FIXTURE_PATH, &expected);
+    let mut sink = CapturingSink::default();
+    let report = assert_read_only(&bytes, |source| {
+        OpenClawAdapter::new().parse(source, &mut sink)
+    })
+    .expect("synthetic content-loss fixture must parse");
+    let hash = blake3::hash(&bytes).to_hex().to_string();
+    assert_eq!(
+        golden::canonical_json(&hash, &report, &sink.messages),
+        expected
+    );
+    assert_eq!(
+        report.diagnostics,
+        (7..=11)
+            .map(|line| format!("第 {line} 行：消息无可索引文本，已跳过"))
+            .collect::<Vec<_>>()
+    );
+    assert!(report.session_observation.pair_observed);
+    assert!(!report.session_observation.multi_session);
+    assert!(sink.activities.is_empty());
+    assert!(sink.usages.is_empty());
+}
+
+struct ChunkedSource<'a> {
+    bytes: &'a [u8],
+    capacity: usize,
+}
+
+impl ReadOnlySource for ChunkedSource<'_> {
+    fn len(&self) -> u64 {
+        self.bytes.len() as u64
+    }
+
+    fn open(&self) -> PortResult<Box<dyn std::io::BufRead + Send + '_>> {
+        Ok(Box::new(std::io::BufReader::with_capacity(
+            self.capacity,
+            std::io::Cursor::new(self.bytes),
+        )))
+    }
+}
+
+#[test]
+fn content_loss_parse_and_bounded_source_are_equivalent() {
+    let expected = golden::read_expected(CONTENT_LOSS_EXPECTED_PATH);
+    let fixture = golden::read_fixture_verified(CONTENT_LOSS_FIXTURE_PATH, &expected);
+    let mut bom_crlf = b"\xEF\xBB\xBF".to_vec();
+    bom_crlf.extend_from_slice(
+        std::str::from_utf8(&fixture)
+            .unwrap()
+            .replace('\n', "\r\n")
+            .as_bytes(),
+    );
+    let unterminated = fixture.strip_suffix(b"\n").unwrap().to_vec();
+    for bytes in [fixture, bom_crlf, unterminated] {
+        let (expected_report, expected_sink) = parse_fixture(&bytes);
+        assert_eq!(expected_report.committed, 2);
+        assert_eq!(expected_report.skipped, 5);
+        let hash = blake3::hash(&bytes).to_hex().to_string();
+        for capacity in [1, 7, 64] {
+            let source = ChunkedSource {
+                bytes: &bytes,
+                capacity,
+            };
+            let mut sink = CapturingSink::default();
+            let report = OpenClawAdapter::new()
+                .parse_source(&source, &mut sink)
+                .unwrap();
+            assert_eq!(report, expected_report);
+            assert_eq!(
+                golden::canonical_json(&hash, &report, &sink.messages),
+                golden::canonical_json(&hash, &expected_report, &expected_sink.messages)
+            );
+            assert!(sink.activities.is_empty());
+            assert!(sink.usages.is_empty());
+        }
+    }
+}
+
+#[test]
+#[ignore = "manual regeneration helper — prints canonical JSON for content-loss.expected.json"]
+fn print_content_loss_canonical_output_for_regeneration() {
+    let bytes = std::fs::read(CONTENT_LOSS_FIXTURE_PATH).expect("read content-loss fixture");
     let hash = blake3::hash(&bytes).to_hex().to_string();
     let (report, sink) = parse_fixture(&bytes);
     println!(

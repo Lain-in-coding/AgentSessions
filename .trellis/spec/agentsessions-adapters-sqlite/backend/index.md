@@ -109,8 +109,9 @@ instead of rejecting the batch. Which fields may differ is deliberately narrow:
 - Migration creates an empty evidence table: missing legacy evidence stays
   unknown. Preserve an existing aggregate until every live claimant has actual
   observations; if no aggregate exists to preserve, fail with re-ingest guidance.
-  Parser version 4 introduced this re-ingestion; current version 5 also reparses
-  unchanged sources for timestamp/BOM fidelity. Re-ingesting all contributors
+  Parser version 4 introduced this re-ingestion; version 5 added timestamp/BOM
+  fidelity reparses. Current version 6 reparses older unchanged sources for Grok
+  identity/text fidelity and OpenClaw loss accounting. Re-ingesting all contributors
   supplies evidence and converges; never manufacture per-source payloads from
   the historical aggregate.
 - Both no-op checks include original identity/payload/text evidence. Evidence

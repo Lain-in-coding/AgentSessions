@@ -6,13 +6,12 @@
 //! chunk kind (`user_message_chunk` / `agent_message_chunk` / `rewind_marker`).
 //!
 //! Agent message chunks are grouped by `params._meta.promptId`; user message
-//! chunks by `update._meta.promptIndex`. A `rewind_marker` truncates the
+//! chunks by `params._meta.promptIndex`. A `rewind_marker` truncates the
 //! reconstructed message list to the target prompt index.
 //!
 //! Format evidence: fast-resume (MIT) `src/adapters/grok.rs`. The chunk-grouping
 //! approach is adapted from fast-resume under its MIT license.
 
-use agent_session_grep_ports::MetadataResolution;
 use agent_session_grep_ports::{
     AdapterManifest, CanonicalEventSink, Confidence, MessageEvent, ParseReport, ProbeResult,
     ProviderAdapter, ProviderError, manifest_for,
@@ -27,9 +26,9 @@ const SAMPLE_LINE_LIMIT: usize = 8;
 /// Grok Build adapter: parses `updates.jsonl` (ACP session/update stream).
 ///
 /// `summary.json` is not read here because the port contract delivers a single
-/// byte stream. Session identity falls back to the first record that carries a
-/// usable id; when none is found the report leaves it `None` and the caller
-/// (discovery layer) may supply a path-derived id.
+/// byte stream. `promptId` and `promptIndex` group turns, not sessions. Without
+/// durable session evidence the report leaves identity absent; the composition
+/// root derives document-scoped identity, never native Resume authority.
 pub struct GrokBuildAdapter;
 
 impl GrokBuildAdapter {
@@ -101,11 +100,11 @@ impl ProviderAdapter for GrokBuildAdapter {
     fn manifest(&self) -> AdapterManifest {
         manifest_for(
             self.provider_id(),
-            Some(1),
+            Some(2),
             &[
                 "chunk grouping reconstructs roles; no per-message native ids (ids are derived, not native)",
                 "per-message timestamps are not extracted (always None)",
-                "session identity falls back to the first ACP promptId seen, not a durable session id",
+                "updates carry no durable session id; identity is document-derived and Resume is unsupported",
             ],
         )
     }
@@ -236,8 +235,6 @@ impl ProviderAdapter for GrokBuildAdapter {
         let mut message_spans: Vec<Option<(u64, u64)>> = Vec::new();
         // First span seen for each message (evidence start).
         let mut message_first_spans: Vec<Option<(u64, u64)>> = Vec::new();
-        // Session id candidates extracted from records (rare in updates.jsonl).
-        let mut session_ids: Vec<String> = Vec::new();
 
         while let Some(line) = lines.next_record()? {
             // 行负载已由 BoundedLineReader 剥离 \n/\r 与首行 BOM，span 仍以
@@ -313,7 +310,7 @@ impl ProviderAdapter for GrokBuildAdapter {
                 "agent_message_chunk" => {
                     pending_user = None;
                     let text = grok_content_text(&content);
-                    if text.trim().is_empty() {
+                    if text.is_empty() {
                         continue;
                     }
                     if let Some((pending_id, msg_idx)) = &pending_agent
@@ -327,7 +324,7 @@ impl ProviderAdapter for GrokBuildAdapter {
                     messages.push((false, text));
                     message_spans.push(Some((start, end)));
                     message_first_spans.push(Some((start, end)));
-                    pending_agent = Some((prompt_id.clone(), msg_idx));
+                    pending_agent = Some((prompt_id, msg_idx));
                 }
                 "rewind_marker" => {
                     if let Some(target) = target
@@ -346,11 +343,6 @@ impl ProviderAdapter for GrokBuildAdapter {
                     // Unknown sessionUpdate kind or non-update record: skip.
                 }
             }
-
-            // Collect any session id found in params (rare for updates.jsonl).
-            if !prompt_id.is_empty() && !session_ids.iter().any(|s| s == &prompt_id) {
-                session_ids.push(prompt_id.clone());
-            }
         }
 
         // Emit reconstructed messages in order.
@@ -359,6 +351,12 @@ impl ProviderAdapter for GrokBuildAdapter {
         // adopting a synthetic `<provider>-msg-{seq}` that would collide
         // across documents.
         for (idx, (is_user, text)) in messages.iter().enumerate() {
+            // Preserve every chunk until composition is complete: whitespace can
+            // separate words or carry indentation. Only a wholly blank assistant
+            // message is omitted, without consuming a sequence number.
+            if !is_user && text.trim().is_empty() {
+                continue;
+            }
             let role = if *is_user { "user" } else { "assistant" };
             let span = message_first_spans.get(idx).copied().flatten();
             sink.emit_message(MessageEvent {
@@ -375,22 +373,6 @@ impl ProviderAdapter for GrokBuildAdapter {
             .map_err(|e| ProviderError::StructuralFatal(e.to_string()))?;
             seq += 1;
             report.committed += 1;
-        }
-
-        // Session identity: prefer first collected id; otherwise leave None
-        // (discovery layer may supply a path-derived id).
-        if let Some(first) = session_ids.first() {
-            report.session_native_id = Some(first.clone());
-            report.session_observation.provider_session_id =
-                MetadataResolution::Resolved(first.clone());
-        }
-        if session_ids.len() > 1 {
-            report.session_observation.multi_session = true;
-            report.session_observation.provider_session_id = MetadataResolution::Ambiguous;
-            report.diagnostics.push(format!(
-                "文件包含 {} 个不同 id——单文件=单会话，归属保持首个",
-                session_ids.len()
-            ));
         }
 
         Ok(report)
@@ -440,7 +422,7 @@ mod tests {
         assert_eq!(manifest.capabilities.provider_id, adapter.provider_id());
         assert_eq!(manifest.capabilities.variant_id, VARIANT_ID);
         assert!(manifest.last_certified_targets.is_empty());
-        assert_eq!(manifest.fixture_revision, Some(1));
+        assert_eq!(manifest.fixture_revision, Some(2));
     }
 
     #[test]

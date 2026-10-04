@@ -1,0 +1,13 @@
+{"params":{"update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"question zero"}},"_meta":{"promptId":"turn-0","promptIndex":0}}}
+{"params":{"update":{"sessionUpdate":"agent_message_chunk","content":"\t"},"_meta":{"promptId":"turn-0"}}}
+{"params":{"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"alpha"}},"_meta":{"promptId":"turn-0"}}}
+{"params":{"update":{"sessionUpdate":"agent_message_chunk","content":[{"type":"text","text":" \n "}]},"_meta":{"promptId":"turn-0"}}}
+{"params":{"update":{"sessionUpdate":"agent_message_chunk","content":"omega"},"_meta":{"promptId":"turn-0"}}}
+{"params":{"update":{"sessionUpdate":"agent_message_chunk","content":"\t"},"_meta":{"promptId":"turn-0"}}}
+{"params":{"update":{"sessionUpdate":"user_message_chunk","content":"discarded question"},"_meta":{"promptId":"discarded-turn","promptIndex":1}}}
+{"params":{"update":{"sessionUpdate":"agent_message_chunk","content":"discarded answer"},"_meta":{"promptId":"discarded-turn"}}}
+{"params":{"update":{"sessionUpdate":"rewind_marker","targetPromptIndex":1}}}
+{"params":{"update":{"sessionUpdate":"user_message_chunk","content":"question one"},"_meta":{"promptId":"turn-1","promptIndex":1}}}
+{"params":{"update":{"sessionUpdate":"agent_message_chunk","content":" \n\t "},"_meta":{"promptId":"turn-1"}}}
+{"params":{"update":{"sessionUpdate":"user_message_chunk","content":"question two"},"_meta":{"promptId":"turn-2","promptIndex":2}}}
+{"params":{"update":{"sessionUpdate":"agent_message_chunk","content":"final answer"},"_meta":{"promptId":"turn-2"}}}

@@ -285,3 +285,64 @@ bytes, duplicate-Cursor rolling replacement and the fixture revision matrix.
 Wrong: `numeric.as_f64().filter(|v| v.fract() == 0.0)` or treating every `createdAt`
 as the same unit. Correct: validate the original integer token and the exact
 field/variant evidence, preserving unknown metadata as absent with diagnostics.
+
+
+## Scenario: Conversation identity and loss accounting
+
+### 1. Scope / Trigger
+Grok ACP reconstruction and OpenClaw text-only ingestion. A provider fix must
+preserve source bytes, message order and truthful identity/loss observations.
+
+### 2. Signatures
+`ProviderAdapter::{parse, parse_source}` emits `MessageEvent` and returns
+`ParseReport::{committed, skipped, diagnostics, session_native_id,
+session_observation}`. CLI source scans compare `PARSER_SEMANTIC_VERSION` (6);
+schema remains 19. No new port or capability is added.
+
+### 3. Contracts
+- Grok `promptId`/`promptIndex` are turn/chunk keys, not durable Session IDs or
+  multi-session evidence. An updates-only source leaves native session metadata
+  missing; staging derives document-scoped identity. Never invent Resume
+  authority from these keys or paths. Genuine multi-session sources without
+  per-message attribution still fail closed under the unchanged shared contract.
+- Concatenate all nonempty Grok assistant chunks verbatim, including leading,
+  trailing and internal whitespace. Only after reconstruction omit an entirely
+  whitespace assistant message, without consuming `seq`. User behavior, grouping,
+  rewind targets and first-chunk byte spans remain unchanged.
+- OpenClaw missing/null content, empty/whitespace strings and empty arrays are
+  genuine empties. Other content yielding no indexable text increments `skipped`
+  once per message and emits a bounded content-free diagnostic. Do not expose
+  thinking/reasoning, unknown block details or tool payloads to repair counters.
+  Mixed supported text/non-text blocks retain the existing text-only projection.
+- `skipped` counts lost messages, not omitted metadata or intentionally excluded
+  parts of otherwise indexed messages. It also prevents claiming source relation
+  completeness; existing retention/no-tombstone policy is not bypassed.
+- Parser 6 forces one reparse of older unchanged sources. Historical false Grok
+  session claims converge through complete source replacement; incomplete scans
+  retain prior evidence by design. Do not lower version markers as a rollback.
+  Source inputs and provider maturity remain unchanged.
+
+### 4. Validation & Error Matrix
+Several Grok prompt IDs -> ordinary single-document ingestion, not an ambiguity.
+Assistant whitespace-only -> no event, no sequence gap. Unsupported OpenClaw
+textless content -> one skipped message; genuine empty -> no loss diagnostic.
+Diagnostics must not contain message content or unknown block values.
+
+### 5. Good / Base / Bad Cases
+Good: chunks `"alpha"`, `" "`, `"omega"` become `"alpha omega"`.
+Base: missing native session metadata stays missing.
+Bad: assigning the first prompt ID to the Session, removing whitespace before
+composition, or reporting a thinking-only message as loss-free indexed content.
+
+### 6. Tests Required
+Synthetic pinned fixtures cover multiple prompt IDs, rewind, leading/internal/
+trailing whitespace, pure-blank omission and sequence continuity. Test byte and
+bounded-source entry equivalence, exact first spans and source immutability.
+OpenClaw distinguishes empty from non-indexable shapes and mixed blocks with no
+reasoning leak. CLI covers successful sync/search, unavailable Resume, honest
+loss counters and parser-version one-time reparse. Provider matrices pin revisions.
+
+### 7. Wrong vs Correct
+Wrong: infer session identity from a turn key, or add reasoning extraction to
+make a loss counter disappear. Correct: keep evidence at its proven scope,
+preserve indexable text exactly, and account for unsupported content explicitly.

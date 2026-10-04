@@ -162,9 +162,9 @@ struct ExpectedMessage {
 struct Generated {
     bytes: Vec<u8>,
     messages: Vec<ExpectedMessage>,
-    /// 应计入 skipped 的行数（破损 JSON + 缺 message 体的 message 记录）。
+    /// 应计入 skipped 的行数（破损 JSON + 缺 message 体 + 无可索引文本）。
     skipped: usize,
-    /// 应计入 diagnostics 的条数（破损 JSON + 缺体记录 + 多 session 各一条）。
+    /// 应计入 diagnostics 的条数（上述损失逐条 + 多 session 一条）。
     diagnostics: usize,
     /// 期望的 session_native_id（首个非空 id 的 session 头）。
     session_native_id: Option<String>,
@@ -269,7 +269,7 @@ fn build_transcript(seed: u64, with_large_field: bool) -> Generated {
                         (json!(blocks), text)
                     }
                     _ => {
-                        // 空文本形态：null / 空数组 / 仅非 text 块——静默跳过。
+                        // 无文本形态：null / 空数组静默跳过，仅非 text 块必须报告损失。
                         let v = match rng.below(3) {
                             0 => serde_json::Value::Null,
                             1 => json!([]),
@@ -299,8 +299,16 @@ fn build_transcript(seed: u64, with_large_field: bool) -> Generated {
             };
             let line = serde_json::to_string(&record).expect("render valid message record");
             if expected_text.trim().is_empty() {
-                // 记录合法但文本为空——parser 静默跳过，不 emit、不计数。
-                empty_text_records += 1;
+                // 只有 null、空/纯空白字符串和空数组是合法空内容；非空块无正文是损失。
+                if content.is_null()
+                    || content.as_str().is_some_and(|text| text.trim().is_empty())
+                    || content == json!([])
+                {
+                    empty_text_records += 1;
+                } else {
+                    skipped += 1;
+                    diagnostics += 1;
+                }
                 rendered.push(line);
                 continue;
             }
@@ -813,12 +821,12 @@ fn prop_generated_transcripts_match_ground_truth() {
 
         assert_eq!(
             report.skipped, case.skipped,
-            "seed={seed}: skipped 必须恰等于注入的坏行 + 缺体记录数"
+            "seed={seed}: skipped 必须恰等于坏行 + 缺体记录 + 无可索引文本消息数"
         );
         assert_eq!(
             report.diagnostics.len(),
             case.diagnostics,
-            "seed={seed}: 诊断数必须恰等于破损 JSON + 缺体记录 + 多 session 各一条"
+            "seed={seed}: 诊断数必须恰等于逐消息损失数 + 多 session 一条"
         );
         assert_eq!(
             report.session_native_id, case.session_native_id,
