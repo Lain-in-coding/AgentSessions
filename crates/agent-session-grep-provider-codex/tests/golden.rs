@@ -115,7 +115,7 @@ fn parse_never_mutates_source_bytes() {
 
 #[test]
 fn golden_provenance_revision_matches_manifest() {
-    assert_eq!(CodexAdapter::new().manifest().fixture_revision, Some(1));
+    assert_eq!(CodexAdapter::new().manifest().fixture_revision, Some(2));
 }
 
 #[test]
@@ -231,9 +231,255 @@ fn golden_basic_spans_slice_back_to_source_envelope_lines() {
 #[test]
 #[ignore = "manual regeneration helper — prints canonical JSON for basic.expected.json"]
 fn print_actual_canonical_output_for_regeneration() {
-    let bytes = read_fixture_bytes();
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&parse_to_canonical_json(&bytes)).unwrap()
+    for name in ["basic.jsonl", "session-metadata.jsonl"] {
+        let bytes = std::fs::read(golden_dir().join(name)).expect("read synthetic fixture");
+        println!(
+            "{name}:\n{}",
+            serde_json::to_string_pretty(&parse_to_canonical_json(&bytes)).unwrap()
+        );
+    }
+}
+
+#[test]
+fn session_metadata_ids_are_type_scoped_and_keep_messages_native() {
+    use agent_session_grep_ports::MetadataResolution;
+    use agent_session_grep_testkit::golden;
+    let cases = [
+        (
+            json!({"id":" sid-a ","cwd":" /synthetic/paired "}),
+            Some("sid-a"),
+            Some("/synthetic/paired"),
+        ),
+        (
+            json!({"session_id":"sid-a","cwd":"/synthetic/paired"}),
+            Some("sid-a"),
+            Some("/synthetic/paired"),
+        ),
+        (
+            json!({"id":"sid-a","session_id":" sid-a ","cwd":"/synthetic/paired"}),
+            Some("sid-a"),
+            Some("/synthetic/paired"),
+        ),
+        (
+            json!({"id":" sid-a ","session_id":"root-session","cwd":"/synthetic/paired"}),
+            Some("sid-a"),
+            Some("/synthetic/paired"),
+        ),
+        (
+            json!({"id":"sid-a","session_id":" \t","cwd":"/synthetic/paired"}),
+            Some("sid-a"),
+            Some("/synthetic/paired"),
+        ),
+        (
+            json!({"id":" \t","session_id":"sid-a","cwd":"/synthetic/paired"}),
+            Some("sid-a"),
+            Some("/synthetic/paired"),
+        ),
+        (
+            json!({"id":"sid-a","session_id":null,"cwd":"/synthetic/paired"}),
+            Some("sid-a"),
+            Some("/synthetic/paired"),
+        ),
+        (json!({"id":"sid-a"}), Some("sid-a"), None),
+        (json!({"cwd":"/synthetic/unpaired"}), None, None),
+        (
+            json!({"id":" ","session_id":"\t","cwd":"/synthetic/unpaired"}),
+            None,
+            None,
+        ),
+    ];
+    for (payload, expected_sid, expected_cwd) in cases {
+        let records = [
+            json!({"type":"session_meta","payload":payload}),
+            json!({"type":"turn_context","payload":{"id":"other-turn","session_id":"not-a-session","cwd":"/synthetic/ignored"}}),
+            json!({"type":"response_item","payload":{"type":"message","id":"message-u","session_id":"not-a-session","role":"user","content":[{"type":"input_text","text":"user body"}]}}),
+            json!({"type":"event_msg","payload":{"type":"user_message","id":"mirror-id","message":"user body"}}),
+            json!({"type":"response_item","payload":{"type":"message","id":"message-a","role":"assistant","content":[{"type":"output_text","text":"assistant body"}]}}),
+        ];
+        let bytes = records
+            .iter()
+            .map(|record| format!("{record}\n"))
+            .collect::<String>();
+        let (report, sink) = golden::parse_golden(&CodexAdapter::new(), bytes.as_bytes());
+        assert_eq!(report.session_native_id.as_deref(), expected_sid);
+        assert_eq!(
+            report.session_observation.provider_session_id,
+            expected_sid
+                .map(|id| MetadataResolution::Resolved(id.into()))
+                .unwrap_or_default()
+        );
+        assert_eq!(
+            report.session_observation.original_working_directory,
+            expected_cwd
+                .map(|cwd| MetadataResolution::Resolved(cwd.into()))
+                .unwrap_or_default()
+        );
+        assert_eq!(
+            report.session_observation.pair_observed,
+            expected_cwd.is_some()
+        );
+        assert!(!report.session_observation.multi_session);
+        assert!(report.diagnostics.is_empty());
+        assert_eq!((report.committed, report.skipped), (2, 0));
+        for (seq, (message, (id, text))) in sink
+            .messages
+            .iter()
+            .zip([("message-u", "user body"), ("message-a", "assistant body")])
+            .enumerate()
+        {
+            assert_eq!(message.seq, seq as u32);
+            assert_eq!(message.native_id, id);
+            assert_eq!(message.text, text);
+            assert_eq!(message.timestamp, None);
+            assert_eq!(message.parent_native_id, None);
+        }
+    }
+}
+
+#[test]
+fn root_and_thread_metadata_are_distinct_in_both_entry_points() {
+    use agent_session_grep_ports::{MetadataResolution, SliceSource};
+    use agent_session_grep_testkit::golden::CapturingSink;
+    let metadata = json!({"type":"session_meta","payload":{"id":"current-thread","session_id":"root-thread","cwd":"/synthetic/child"}});
+    let message = json!({"type":"response_item","payload":{"type":"message","id":"message-after","role":"assistant","content":[{"type":"output_text","text":"synthetic answer"}]}});
+    for prefix in [
+        "",
+        "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"id\":\"message-before\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"synthetic prompt\"}]}}\n",
+    ] {
+        let bytes = format!("{prefix}{metadata}\n{message}\n").into_bytes();
+        for source_entry in [false, true] {
+            let mut sink = CapturingSink::default();
+            let report = assert_read_only(&bytes, |bytes| {
+                if source_entry {
+                    CodexAdapter::new().parse_source(&SliceSource::new(bytes), &mut sink)
+                } else {
+                    CodexAdapter::new().parse(bytes, &mut sink)
+                }
+            })
+            .expect("root and current thread IDs are not conflicting aliases");
+            assert_eq!(report.session_native_id.as_deref(), Some("current-thread"));
+            assert_eq!(
+                report.session_observation.provider_session_id,
+                MetadataResolution::Resolved("current-thread".into())
+            );
+            assert_eq!(
+                report.session_observation.original_working_directory,
+                MetadataResolution::Resolved("/synthetic/child".into())
+            );
+            assert!(report.session_observation.pair_observed);
+            assert!(!report.session_observation.multi_session);
+            assert!(report.diagnostics.is_empty());
+            assert_eq!(report.skipped, 0);
+            let expected_ids = if prefix.is_empty() {
+                vec!["message-after"]
+            } else {
+                vec!["message-before", "message-after"]
+            };
+            assert_eq!(report.committed, expected_ids.len());
+            assert_eq!(
+                sink.messages
+                    .iter()
+                    .map(|m| m.native_id.as_str())
+                    .collect::<Vec<_>>(),
+                expected_ids
+            );
+        }
+    }
+}
+
+#[test]
+fn multiple_thread_headers_remain_multi_session_and_unpaired_cwd_stays_missing() {
+    use agent_session_grep_ports::MetadataResolution;
+    use agent_session_grep_testkit::golden;
+    let records = [
+        json!({"type":"session_meta","payload":{"id":"sid-a","session_id":"shared-root"}}),
+        json!({"type":"session_meta","payload":{"cwd":"/unpaired"}}),
+        json!({"type":"session_meta","payload":{"id":"sid-b","session_id":"shared-root","cwd":"/other-session"}}),
+    ];
+    let bytes = records
+        .iter()
+        .map(|record| format!("{record}\n"))
+        .collect::<String>();
+    let (report, _) = golden::parse_golden(&CodexAdapter::new(), bytes.as_bytes());
+    assert_eq!(report.session_native_id.as_deref(), Some("sid-a"));
+    assert!(report.session_observation.multi_session);
+    assert_eq!(
+        report.session_observation.provider_session_id,
+        MetadataResolution::Ambiguous
     );
+    assert_eq!(
+        report.session_observation.original_working_directory,
+        MetadataResolution::Missing
+    );
+    assert!(!report.session_observation.pair_observed);
+    assert_eq!((report.committed, report.skipped), (0, 0));
+    assert_eq!(report.diagnostics.len(), 1);
+}
+
+#[test]
+fn malformed_metadata_id_types_do_not_gain_fallback_authority() {
+    use agent_session_grep_testkit::golden;
+    for payload in [
+        json!({"id":null,"session_id":"sid-a","cwd":"/not-authorized"}),
+        json!({"id":"sid-a","session_id":17,"cwd":"/not-authorized"}),
+    ] {
+        let bytes = format!("{}\n", json!({"type":"session_meta","payload":payload}));
+        let (report, sink) = golden::parse_golden(&CodexAdapter::new(), bytes.as_bytes());
+        assert_eq!(report.skipped, 1);
+        assert_eq!(report.session_native_id, None);
+        assert_eq!(report.session_observation, Default::default());
+        assert!(sink.messages.is_empty());
+    }
+}
+
+#[test]
+fn session_metadata_golden_and_bounded_source_preserve_evidence() {
+    use agent_session_grep_ports::{MetadataResolution, SliceSource};
+    use agent_session_grep_testkit::golden;
+    let path = golden_dir().join("session-metadata.jsonl");
+    let expected_path = golden_dir().join("session-metadata.expected.json");
+    let expected = golden::read_expected(expected_path.to_str().unwrap());
+    let bytes = golden::read_fixture_verified(path.to_str().unwrap(), &expected);
+    let (report, sink) = golden::parse_golden(&CodexAdapter::new(), &bytes);
+    let hash = blake3::hash(&bytes).to_hex().to_string();
+    assert_eq!(
+        golden::canonical_json(&hash, &report, &sink.messages),
+        expected
+    );
+    assert_eq!(
+        report.session_observation.provider_session_id,
+        MetadataResolution::Resolved("current-thread".into())
+    );
+    assert_eq!(
+        report.session_observation.original_working_directory,
+        MetadataResolution::Resolved("/synthetic/paired".into())
+    );
+    assert!(report.session_observation.pair_observed);
+    assert!(!report.session_observation.multi_session);
+    assert!(report.diagnostics.is_empty());
+    let bom_crlf = [
+        b"\xef\xbb\xbf".as_slice(),
+        String::from_utf8(bytes.clone())
+            .unwrap()
+            .replace('\n', "\r\n")
+            .as_bytes(),
+    ]
+    .concat();
+    for variant in [&bytes, &bom_crlf] {
+        let (expected_report, expected_sink) = golden::parse_golden(&CodexAdapter::new(), variant);
+        let mut actual_sink = golden::CapturingSink::default();
+        let actual_report = assert_read_only(variant, |input| {
+            CodexAdapter::new().parse_source(&SliceSource::new(input), &mut actual_sink)
+        })
+        .unwrap();
+        assert_eq!(
+            actual_report.session_observation,
+            expected_report.session_observation
+        );
+        assert_eq!(actual_report.diagnostics, expected_report.diagnostics);
+        assert_eq!(
+            golden::canonical_json("same-input", &actual_report, &actual_sink.messages),
+            golden::canonical_json("same-input", &expected_report, &expected_sink.messages)
+        );
+    }
 }

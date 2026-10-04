@@ -111,7 +111,7 @@ impl ProviderAdapter for QoderAdapter {
     fn manifest(&self) -> AdapterManifest {
         manifest_for(
             self.provider_id(),
-            Some(1),
+            Some(2),
             &[
                 "identity fields are matched leniently from session_meta (session_id/cwd)",
                 "non-conversational records (progress/tool_use/tool_result) are skipped",
@@ -285,20 +285,21 @@ impl ProviderAdapter for QoderAdapter {
 
             match rec.r#type.as_str() {
                 "session_meta" => {
-                    // Identity may live at top level of the record or nested in
-                    // the `session_meta` body object; probe both leniently.
-                    let sid = rec
+                    // Preserve top-level SID precedence, but keep each body's pair
+                    // together: cwd alone is not evidence for a different record/SID.
+                    let top_sid = rec
                         .session_id
                         .as_deref()
-                        .filter(|s| !s.trim().is_empty())
-                        .or_else(|| {
-                            rec.session_meta
-                                .as_ref()
-                                .and_then(|m| m.get("session_id"))
-                                .and_then(serde_json::Value::as_str)
-                        })
                         .map(str::trim)
-                        .filter(|s| !s.is_empty());
+                        .filter(|id| !id.is_empty());
+                    let nested_sid = rec
+                        .session_meta
+                        .as_ref()
+                        .and_then(|meta| meta.get("session_id"))
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::trim)
+                        .filter(|id| !id.is_empty());
+                    let sid = top_sid.or(nested_sid);
                     if let Some(id) = sid {
                         if report.session_native_id.is_none() {
                             report.session_native_id = Some(id.to_string());
@@ -309,20 +310,30 @@ impl ProviderAdapter for QoderAdapter {
                             session_ids.push(id.to_string());
                         }
                     }
-                    // cwd observed from the same session_meta record (pair preserved).
-                    if !report.session_observation.pair_observed {
-                        let cwd = rec
-                            .cwd
-                            .as_deref()
-                            .filter(|s| !s.trim().is_empty())
-                            .or_else(|| {
+                    if !report.session_observation.pair_observed
+                        && sid.is_some()
+                        && report.session_native_id.as_deref() == sid
+                    {
+                        let cwd = if top_sid == sid {
+                            rec.cwd
+                                .as_deref()
+                                .map(str::trim)
+                                .filter(|cwd| !cwd.is_empty())
+                        } else {
+                            None
+                        }
+                        .or_else(|| {
+                            if nested_sid == sid {
                                 rec.session_meta
                                     .as_ref()
-                                    .and_then(|m| m.get("cwd"))
+                                    .and_then(|meta| meta.get("cwd"))
                                     .and_then(serde_json::Value::as_str)
-                            })
-                            .map(str::trim)
-                            .filter(|s| !s.is_empty());
+                                    .map(str::trim)
+                                    .filter(|cwd| !cwd.is_empty())
+                            } else {
+                                None
+                            }
+                        });
                         if let Some(cwd) = cwd {
                             report.session_observation.original_working_directory =
                                 MetadataResolution::Resolved(cwd.to_string());
@@ -425,7 +436,7 @@ mod tests {
         assert_eq!(manifest.capabilities.provider_id, adapter.provider_id());
         assert_eq!(manifest.capabilities.variant_id, VARIANT_ID);
         assert!(manifest.last_certified_targets.is_empty());
-        assert_eq!(manifest.fixture_revision, Some(1));
+        assert_eq!(manifest.fixture_revision, Some(2));
     }
 
     struct CountSink {

@@ -296,7 +296,7 @@ preserve source bytes, message order and truthful identity/loss observations.
 ### 2. Signatures
 `ProviderAdapter::{parse, parse_source}` emits `MessageEvent` and returns
 `ParseReport::{committed, skipped, diagnostics, session_native_id,
-session_observation}`. CLI source scans compare `PARSER_SEMANTIC_VERSION` (6);
+session_observation}`. CLI source scans compare `PARSER_SEMANTIC_VERSION` (7);
 schema remains 19. No new port or capability is added.
 
 ### 3. Contracts
@@ -346,3 +346,65 @@ loss counters and parser-version one-time reparse. Provider matrices pin revisio
 Wrong: infer session identity from a turn key, or add reasoning extraction to
 make a loss counter disappear. Correct: keep evidence at its proven scope,
 preserve indexable text exactly, and account for unsupported content explicitly.
+
+
+## Scenario: Provider thread metadata and probe parity
+
+### 1. Scope / Trigger
+Codex metadata identity, Qoder cwd authority and Kimi format selection cross the
+provider, staging, catalog and Resume boundaries. Pin upstream field semantics,
+not a field-name assumption or a reference adapter's correctness.
+
+### 2. Signatures
+`ProviderAdapter::{probe, probe_source, parse, parse_source}`;
+`ParseReport::{session_native_id, session_observation}` and
+`ProviderSessionObservation::{provider_session_id, original_working_directory,
+pair_observed, multi_session}`. `PARSER_SEMANTIC_VERSION = 7`; schema remains 19.
+No new capability or public DTO is introduced.
+
+### 3. Contracts
+- Codex `session_meta.payload.id` identifies the current thread. `session_id`
+  identifies its root and may differ, so inequality is not a structural error
+  or multi-session evidence. Prefer usable trimmed id, retaining session_id-only
+  input compatibility. Type-invalid metadata remains a recoverable record error,
+  not fallback authority. Other envelope IDs retain their existing scopes.
+- Only complete metadata in one authoritative body can supply a SID/cwd pair
+  for the selected first Session. Qoder preserves top-level SID precedence; cwd
+  from a nested body is valid only if that body carries the same SID. A later
+  same-session complete pair is valid; SID-only plus cwd-only is not. Multiple
+  selected native session IDs still report ambiguity under the existing contract.
+- Kimi probe accepts only exact turn.prompt/turn.steer with a top-level string
+  or array input. Supported shape is High; Confirmed requires nonblank text from
+  the existing extractor. Missing/unsupported input or similar discriminators
+  cannot independently identify Kimi. Append-message rules, sample bounds,
+  extraction, byte evidence and maturity remain unchanged.
+- Parser 7 re-ingests older unchanged sources. Complete replacement removes old
+  derived/root-based Codex session claims and false Qoder cwd observations;
+  incomplete scans retain historical evidence until a complete recovery. Source
+  bytes and native Message IDs are unchanged. Do not lower parser markers or
+  claim index rebuild alone repairs provider observations.
+
+### 4. Validation & Error Matrix
+Codex id=current/session_id=root -> current Session, not rejection. Missing IDs
+-> no cwd pairing. Genuine distinct current-thread headers -> existing ambiguity.
+Qoder different-record/body/session cwd -> Missing. Kimi unknown turn discriminator
+-> no new positive evidence. Existing parse/probe error boundaries are preserved.
+
+### 5. Good / Base / Bad Cases
+Good: Codex child thread differs from its root but retains its own cwd and Resume
+identity. Base: absent metadata stays absent. Bad: resuming the root for a child,
+rejecting valid child metadata, or assigning a cwd-only observation to a prior SID.
+
+### 6. Tests Required
+Synthetic revision-2 goldens and field/body matrices cover exact native IDs, cwd,
+message order, spans, BOM/CRLF and both byte/bounded-source entry points. Probe
+counterexamples cover empty/unsupported input, lookalike markers and sampling.
+CLI asserts provider selection, metadata/Resume and unchanged-source no-op. Use a
+real parser-6-created catalog for rolling replacement evidence; lowering a marker
+alone does not reproduce old identity or observations. Preserve unscanned claims
+and assert convergence only after all complete sources have been reparsed.
+
+### 7. Wrong vs Correct
+Wrong: `id != session_id` implies conflicting aliases. Correct: first verify the
+upstream fields' distinct current/root scopes, then map only current-thread
+identity into this application's resumable Session abstraction.

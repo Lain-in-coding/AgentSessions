@@ -1098,8 +1098,8 @@ pub struct ParseReport {
     /// 诊断信息（跳过原因、未知字段计数等）。
     pub diagnostics: Vec<String>,
     /// provider 报告的 durable 会话 native id（如 Claude Code 的 `sessionId`、
-    /// Codex `session_meta` 的 `session_id`）。`None` 表示 provider 未提供，
-    /// 由上层回退 Reconstructed 派生——绝不臆造。
+    /// Codex `session_meta.payload.id` 的当前线程 id，旧式输入兼容 `session_id`）。
+    /// `None` 表示 provider 未提供，由上层回退 Reconstructed 派生——绝不臆造。
     pub session_native_id: Option<String>,
     /// Provider-native Resume Metadata 观察（ADR-0009）：native id 之外的
     /// `provider_session_id` 与 `original_working_directory` 同源关联、

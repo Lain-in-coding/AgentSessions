@@ -53,8 +53,8 @@ These are tracking items, not a count of confirmed defects or completed work.
 | P2-2 | Pending current-baseline revalidation and implementation |
 | P2-3 | Pending current-baseline revalidation and implementation |
 | P2-4 | Pending current-baseline revalidation and implementation |
-| P2-5 | Reproduced at 452c883: Codex session_meta.payload.id loses SID/cwd while the equivalent session_id form succeeds; type-scoped alias/conflict repair pending |
-| P2-6 | Pending current-baseline revalidation and implementation |
+| P2-5 | Implemented and locally checked: Codex current-thread payload.id, legal different root session_id and legacy compatibility; original alias-conflict rejection withdrawn by pinned upstream evidence. Actual parser-6 upgrade and full 2001-test gate passed; new-SHA remote gate pending |
+| P2-6 | Implemented and locally checked: exact Kimi turn probe parity and Qoder same-body/selected-session SID-cwd pairing. Native/source/old-evidence invariants and full local gates passed; new-SHA remote gate pending |
 | P2-7 | Withdrawn; no mapping from historical tool errors to current request failure |
 | P2-8 | Deferred product decision; existing ranking policy preserved |
 | P2-9 | Conditional platform/hint work pending reproduction |
@@ -181,3 +181,25 @@ certify the subsequent Grok/OpenClaw conversation-fidelity slice.
   Follow-up documentation commits have their own SHA and require separate checks.
 - P2-5 now has a fresh id-vs-session_id counterexample, not a completed fix. Other
   open ledger items remain open. No merge, release, archive or worktree cleanup.
+
+
+### Metadata/probe local checkpoint (2026-10-04)
+- P2-5/P2-6 implementation has provider, CLI and independent review evidence.
+  Codex's id/root fields were rechecked against official fixed upstream code;
+  the original plan's alias-conflict rejection would reject legitimate child
+  threads and was corrected before commit. The external combined plan was updated
+  with the dated correction; normal Message identity and provider maturity remain.
+- Parser 7/schema 19. Actual parser-6-created catalogs cover id-only recovery in
+  two independent installation namespaces, legal current/root IDs in one
+  installation, and two-copy Qoder false cwd repair. Reparse retains unscanned
+  original observations, preserves Message IDs/source bytes, removes obsolete
+  Session aliases and reaches unchanged-source no-op. Native Sessions remain
+  installation-scoped; correction does not merge separate installations.
+- Main full local gate: 2001 passed / 0 failed / 24 ignored; fmt, all-target/
+  all-feature Clippy -D warnings and Rust 1.90 compatibility passed. Python
+  21/11/54 (two existing skips), Node 11, binary smoke 10/10 and fixture-inclusive
+  privacy/context/diff checks passed. Independent review found only two stale
+  identity comments; both are corrected, with its non-Cargo limits recorded.
+- Commit and exact-SHA remote gates are pending. P1-7 temp SQLite ownership is
+  the next separate slice; other open ledger items remain open. No merge,
+  release, archive, repository visibility change or unrelated workspace cleanup.

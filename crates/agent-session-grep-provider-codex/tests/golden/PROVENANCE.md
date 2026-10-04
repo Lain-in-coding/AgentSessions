@@ -1,6 +1,6 @@
 # PROVENANCE — codex golden fixture
 
-- **fixture_revision**: 1
+- **fixture_revision**: 2
 - **政策依据**: `docs/security/FIXTURE-REDACTION-POLICY.md`（合成优先）。本目录所有
   fixture 均为**人工合成**，未复制任何真实 transcript 的字节；不含真实路径、人名、
   邮箱、token、密钥或项目名。ids / session_id / cwd / cli_version 全部是虚构值。
@@ -43,3 +43,37 @@ fixture 若需合法变更，必须递增本文件的 `fixture_revision` 并重�
 `event_msg` 镜像），只有权威记录被提交；Codex 无 `parentUuid`（线性序列，parent 恒
 null）、无 `isSidechain`。外层时间戳只证明 source occurrence 的封套形态；同一
 native message 的复制记录可携带不同值，因此 canonical Message 时间戳为 null。
+
+
+## Revision 2 — current-thread session metadata
+
+`session-metadata.jsonl` is a new hand-written synthetic fixture, not a copied
+rollout. It intentionally contains different `id: current-thread` and
+`session_id: root-thread` in one session_meta payload, plus a paired synthetic
+cwd. A turn_context and an event_msg mirror do not provide session or Message
+identity. The two response_item/message records preserve their native Message
+IDs, text, order and exact byte spans. The original basic fixture and expected
+output remain unchanged and retain session_id-only compatibility coverage.
+
+Pinned field-shape evidence (verified 2026-10-04):
+- openai/codex commit `c5d242fa7907bff1b7a7e26e95febc548c0a6963` (2026-10-02),
+  `codex-rs/protocol/src/protocol.rs` lines 3130-3132: session_id is the root
+  SessionId; id is the current ThreadId. Lines 3259-3265 fill an absent root ID
+  from id when reading older rollouts; they do not enforce equality.
+- The same commit's `codex-rs/rollout/src/metadata.rs` lines 43-59 uses meta.id
+  to construct ThreadMetadataBuilder and meta.cwd for the original directory.
+- Source: https://github.com/openai/codex/blob/c5d242fa7907bff1b7a7e26e95febc548c0a6963/codex-rs/protocol/src/protocol.rs
+- Consumer: https://github.com/openai/codex/blob/c5d242fa7907bff1b7a7e26e95febc548c0a6963/codex-rs/rollout/src/metadata.rs
+
+This corrects the original review's false alias-conflict rejection rule. It does
+not add multi-thread attribution or promote Experimental maturity. Session-ID-only
+inputs are an existing adapter compatibility contract, not proof that root and
+current thread IDs are interchangeable in modern upstream data.
+
+BLAKE3: `971cfac04487e790d35eab52d8d3855e3302099780b83c8628414c98255c57bf`.
+Expected output was printed by the existing ignored helper, then independently
+reviewed for two Messages, zero skipped, current-thread identity, exact native
+Message IDs/text and byte spans `(223,361)` / `(440,618)`. All values are synthetic.
+Companion tests cover id-only, session_id-only, equal/different/blank/null fields,
+malformed types, genuine multi-thread headers, no cwd-only authority, BOM/CRLF,
+source immutability and byte/bounded-source equivalence.

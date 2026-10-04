@@ -4,5 +4,7 @@
 {"file": ".trellis/spec/agentsessions-testkit/backend/index.md", "reason": "Synthetic golden fixture and regression contracts"}
 {"file": ".trellis/spec/agentsessions-adapters-sqlite/backend/index.md", "reason": "Provenance-gated timestamp rolling upgrade and raw source evidence"}
 {"file": ".trellis/spec/agentsessions-cli/backend/index.md", "reason": "CLI timestamp filters, parser reparse and fixture matrix integration"}
-{"file": "crates/agent-session-grep-provider-grok/tests/golden/PROVENANCE.md", "reason": "ACP chunk grouping, rewind and current fixture evidence; prompt IDs are not durable session authority"}
-{"file": "crates/agent-session-grep-provider-openclaw/tests/golden/PROVENANCE.md", "reason": "Supported message content and genuine empty versus omitted non-text content"}
+{"file": ".trellis/spec/agentsessions-provider-codex/backend/index.md", "reason": "Type-scoped session metadata, native message identity, mirror exclusion and source fidelity"}
+{"file": "crates/agent-session-grep-provider-codex/tests/golden/PROVENANCE.md", "reason": "Synthetic rollout metadata and message identity evidence"}
+{"file": "crates/agent-session-grep-provider-kimi/tests/golden/PROVENANCE.md", "reason": "Supported wire record and text extraction boundary"}
+{"file": "crates/agent-session-grep-provider-qoder/tests/golden/PROVENANCE.md", "reason": "Existing top-level/nested metadata and conversation envelope scope"}

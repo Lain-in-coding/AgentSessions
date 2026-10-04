@@ -5,7 +5,7 @@ Follow parent decisions and revised finding semantics.
 provider crates and their tests only; no Cargo.lock/CLI/app/sqlite edits. Main owns docs, task artifacts, commit and push; never revert another worker.
 
 ## Approach
-Normalize format-proven epoch units in Cursor/Cline and single-document BOM; never numeric timestamp to empty string. Grok promptId is not durable session ID; retain whitespace/rewind. OpenClaw thinking-only loss gets skipped/diagnostics without indexing reasoning. Codex payload.id is SID only in session_meta, reject conflicting aliases. Kimi probe accepts supported prompt/steer discriminator, not arbitrary JSON. Qoder SID/cwd must come from one authoritative record/session. Temporary DB files are exclusive/private; only successful creation owns cleanup; conflict never deletes another file. Cover Cursor/OpenCode and check new Hermes for same pattern. Preserve Pi and provider maturity.
+Normalize format-proven epoch units in Cursor/Cline and single-document BOM; never numeric timestamp to empty string. Grok promptId is not durable session ID; retain whitespace/rewind. OpenClaw thinking-only loss gets skipped/diagnostics without indexing reasoning. Codex payload.id is the current thread identity only in session_meta; root session_id may differ and is not a conflicting alias. Retain session_id-only compatibility. Kimi probe accepts supported prompt/steer discriminator, not arbitrary JSON. Qoder SID/cwd must come from one authoritative record/session. Temporary DB files are exclusive/private; only successful creation owns cleanup; conflict never deletes another file. Cover Cursor/OpenCode and check new Hermes for same pattern. Preserve Pi and provider maturity.
 
 ## Compatibility
 Retain contracts except specified corrections. Document migration/cache changes. Revert isolated commits only after accounting for new data; never remove validation to roll back.
@@ -30,3 +30,27 @@ content-free diagnostics, while genuine empty messages remain distinct. Do not
 index thinking text or add tool execution/activity capabilities to fix counters.
 Main owns cross-provider CLI/re-ingestion tests, any required parser-version bump,
 shared specs, commits and push; provider workers have explicit disjoint scopes.
+
+
+## Metadata/probe slice (P2-5/P2-6; base 57529db)
+- Only Codex `session_meta.payload` treats `id` as the current thread identity.
+  Official protocol and rollout metadata at c5d242fa7907bff1b7a7e26e95febc548c0a6963
+  distinguish it from root `session_id`; different values are legal, not an alias
+  conflict. This supersedes the original plan's rejection rule (verified 2026-10-04).
+  Prefer trimmed nonempty `id`; retain existing session_id-only compatibility when
+  no usable id exists. Native Message IDs and other envelope classification are
+  unchanged. Missing IDs do not authorize cwd-only pairing; existing type errors
+  are not relaxed. Distinct current-thread headers still trigger multi-session
+  ambiguity; the root ID alone does not.
+- Kimi probe recognizes the existing parser's exact `turn.prompt`/`turn.steer`
+  discriminators, with evidence/confidence for supported input, rather than a
+  generic JSON or `turn.*` fallback. Other provider selection, sampling bounds,
+  input extraction and loop/tool behavior remain unchanged.
+- Qoder cwd authority requires a complete SID/cwd pair belonging to the selected
+  first Session. Never combine cwd-only and SID-only records or mismatched nested
+  bodies. Preserve existing top-level SID precedence; use cwd from a body carrying
+  that same SID, not independently selected aliases. A later same-session complete
+  pair is valid; another Session's pair is not. Do not broaden multi-session support.
+- Main owns shared specs, CLI regression/upgrade tests, parser version (7 if required
+  by these observation changes), fixture matrix, commits and push. Provider workers
+  have disjoint crate scopes. Temp SQLite ownership (P1-7) remains a separate slice.

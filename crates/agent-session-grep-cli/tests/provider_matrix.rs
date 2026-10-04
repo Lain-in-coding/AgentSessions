@@ -233,7 +233,7 @@ fn beta_ledger_ids(section: &str) -> Vec<String> {
 #[test]
 fn beta_readiness_manifests_match_ledger_evidence_columns() {
     // ledger 的本地列（golden / local Beta blockers）与全局 blocker 必须与真实
-    // adapter manifest 一致：Cline/Grok/OpenClaw fixture revision 2、其余 1，无跨平台认证 target、
+    // adapter manifest 一致：Cline/Codex/Grok/Kimi/OpenClaw/Qoder revision 2、其余 1，无跨平台认证 target、
     // maturity=Experimental、known_limitations 非空。manifest() 经由 manifest_for
     // 携带各 adapter 自己的声明，因此空限制声明/伪造 revision 会在此失败。
     let ledger_rows = beta_ledger_rows("Per-provider local readiness");
@@ -251,7 +251,7 @@ fn beta_readiness_manifests_match_ledger_evidence_columns() {
         let manifest = adapter.manifest();
         let id = manifest.provider_id.as_str();
         let expected_revision = match id {
-            "cline" | "grok-build" | "openclaw" => 2,
+            "cline" | "codex" | "grok-build" | "kimi-code" | "openclaw" | "qoder" => 2,
             _ => 1,
         };
         assert_eq!(

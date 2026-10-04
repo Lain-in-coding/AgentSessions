@@ -428,6 +428,20 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Codex session metadata now uses `session_meta.payload.id` as the current thread
+  identity, including id-only rollouts. Its `session_id` is the root thread and
+  may legitimately differ; that is not an alias conflict or a second session.
+  Existing session_id-only inputs remain supported, while response-item IDs
+  retain their Message scope. Kimi probes recognize exact `turn.prompt` and
+  `turn.steer` records with supported input rather than requiring a sampled
+  append-message record. Qoder only accepts cwd from a body carrying the selected
+  session ID, never by joining separate SID-only/cwd-only records or other sessions.
+  **Upgrade:** parser version 7 reparses older unchanged sources once; schema stays
+  19. Complete source replacement corrects old identity/cwd claims, so historical
+  Codex Session IDs can change; native Message IDs and source bytes do not.
+  Incomplete scans retain prior evidence until recovery. Rebuild alone cannot
+  repair provider metadata, and lowering parser markers is not a rollback.
+  Provider maturity and tool/reasoning support are unchanged.
 - Grok ACP prompt IDs now remain turn-grouping keys instead of native session
   identities, so ordinary multi-turn sources no longer fail as ambiguous sessions.
   Assistant chunks retain leading, trailing and internal whitespace; entirely

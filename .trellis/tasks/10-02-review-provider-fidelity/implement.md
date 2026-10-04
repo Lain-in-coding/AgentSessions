@@ -194,3 +194,103 @@ valid `response_item/message`; only the session field name differs:
 This confirms the type-scoped alias gap at `452c883`. Do not turn arbitrary
 id-only records into messages; same-record alias conflicts still need explicit
 regressions in the next slice. P2-5 remains open; no code change was made for it.
+
+
+## Metadata/probe execution slice (base 57529db)
+- [x] Reproduce Codex current/root identity and type boundaries, Kimi prompt/steer probe
+  mismatch and Qoder cross-record/body SID/cwd pairing before each fix.
+- [x] Add synthetic revision-2 fixture evidence and minimal provider changes.
+- [x] Verify CLI provider selection, current/root identity scope, no invented Resume
+  authority and unchanged-source rolling upgrade.
+- [x] Update parser/version and shared executable specs without capability promotion.
+- [ ] Independent review; full local gates; commits/push and exact-SHA remote gates.
+Previous 57529db delivery is confirmed: ci 37173862774, security-audit 37173862769,
+core-beta-evidence 37173862760 all succeeded; PR #21 had 14/14 successful checks.
+This does not validate the new metadata/probe code before its own gates run.
+
+
+### Metadata/probe evidence correction (2026-10-04)
+- The original P2-5 alias-conflict rejection was a misdiagnosis, not a format
+  invariant. Official openai/codex protocol.rs at fixed commit
+  `c5d242fa7907bff1b7a7e26e95febc548c0a6963` (2026-10-02) defines `id: ThreadId`
+  and `session_id: SessionId` with root-thread semantics (lines 3130-3132).
+  SessionMetaLine fills absent session_id from id (3259-3265); rollout metadata.rs
+  builds thread identity from meta.id (45) and cwd from meta.cwd (59).
+- New distinct-root regression failed against the uncommitted alias-rejection
+  implementation with StructuralFatal, then passed after selecting current id.
+  Both byte and bounded-source entry points cover legal differing fields, with
+  and without an earlier Message. A separate matrix covers ten field shapes;
+  same-root/different-current headers still report multi-session ambiguity.
+  The original id-only omission remains a real bug; root-only identity chosen by
+  parser 6 for child rollouts is also incorrect. No real transcript was copied.
+- Kimi's resumed implement worker failed with an upstream cross-resource session
+  error before execution; main finished the reviewed golden and package checks.
+  Provider all-target tests and all-target/all-feature Clippy passed for Codex,
+  Kimi and Qoder. Original fixtures are unchanged. Qoder/Kimi property suites
+  pass unchanged; the Qoder random oracle never asserted cwd authority, which is
+  independently covered by the new fourteen-case same-body table and golden.
+- Parser 7, CLI integration, actual old-catalog migration and full/remote gates
+  still require verification below; this is not yet a completed delivery.
+
+
+### Actual parser-6 to parser-7 replacement evidence
+- Preserved the actual pre-rebuild parser-6 executable (SHA256
+  `680b4579f512b1744887a609c324334358c968f25761ea116e7e1ef480fec347`). Its
+  synthetic catalogs recorded parser_version=6 and schema=19. Tests copied these
+  databases through SQLite backup, never by lowering new parser markers.
+- Codex id-only, two independent noncanonical installation roots: old metadata
+  was Missing and one document-derived Session was shared. Rolling replacement
+  retained the unscanned source's exact resume claims and original entity
+  projections, preserved the native Message ID, then removed the old Session and
+  all stale message aliases. Session counts were 1 -> 2 -> 2: each installation
+  correctly owns its own native Session after metadata recovery. Generations were
+  2 -> 3 -> 4 -> 4; final unchanged scan emitted zero for both sources.
+- Codex current/root IDs, two copies under one canonical installation: parser 6
+  chose the root as Resume identity. Parser 7 selected current-thread identity;
+  Session counts were 1 -> 2 -> 1, generations 1 -> 2 -> 3 -> 3. The unscanned
+  source's old root claim remained byte-identical until its own complete reparse;
+  afterward the old root Session and stale aliases disappeared. Message IDs,
+  message text and source bytes were unchanged.
+- Qoder, two same-installation copies with separate SID-only and cwd-only records:
+  parser 6 incorrectly set pair=1 and a cwd. The first replacement made only that
+  source's cwd Missing/pair=0; unscanned original observations were untouched.
+  The second replacement converged both to Missing/pair=0 without changing Session
+  or Message IDs. Generations 1 -> 2 -> 3 -> 3; final unchanged scan emitted zero.
+- All three experiments asserted exact source bytes, native/message identity,
+  original unscanned projection bytes, schema 19 and per-source 6/7 markers. Real
+  search and get-session-resume commands succeeded after convergence. These are
+  complete-scan cases, not a claim that incomplete scans discard retained evidence.
+- An initial experimental assertion wrongly expected one final Session across
+  two independent installation namespaces. Inspecting claims/identities corrected
+  that test expectation; no production cross-namespace merge was introduced.
+- Provider gate totals: **130 passed, 0 failed, 4 ignored** across nine targets;
+  three manual golden printers and one timing microbenchmark remain ignored. Python 21/11/54 (two existing
+  environment skips), Node 11/11 and real parser-7 binary smoke 10/10 passed.
+  Privacy scan includes all six intent-to-add fixture files and passed. Full Rust
+  workspace and remote-SHA gates remain pending until recorded below.
+
+
+### Metadata/probe independent check and final local gate
+- Independent Trellis checker reviewed all changed providers, the six new fixture
+  files, final CLI additions, parser/schema constants, provenance and shared specs.
+  It independently fetched fixed upstream Codex/Kimi evidence and checked fixture
+  fields/order, exact byte spans, UTF-8/LF/BOM/CRLF, original fixture immutability,
+  Git -text attributes and task references. Scoped rustfmt/diff checks passed.
+- Review found two stale identity comments, not runtime defects. The checker fixed
+  CodexAdapter's current/root description; main corrected ParseReport's old Codex
+  example in ports. No blocking code/test defect remained. The checker did not
+  independently run Cargo, old-catalog experiments or BLAKE3; those checks belong
+  to main and the implementation worker, not to the independent review.
+- CLI worker added four metadata_probe_* regressions and updated the exact provider
+  revision map. All four and the complete 35-test provider matrix passed, as did
+  all-target/all-feature CLI Clippy. Its lowered-marker test only proves reparse
+  triggering; the actual old-executable experiments above prove migration effects.
+- Main's all-feature Windows workspace suite: **2001 passed, 0 failed, 24 ignored**
+  across 86 test targets, with all 22 added regressions executed and no new ignored
+  tests. Workspace fmt, all-target/all-feature Clippy with -D warnings and Rust
+  1.90.0 all-target/all-feature locked/offline check passed. The final remaining
+  edit is the two-line ports documentation correction, not executable behavior.
+- Python 21/11/54 (two environment skips), Node 11, binary smoke 10/10, fixture-
+  inclusive privacy scan and task-context validation passed. Original worktrees,
+  Cargo.lock, sources, provider maturity and schema 19 are unchanged. Commit/push
+  and exact new-SHA remote gates still must be recorded; no main merge or release.

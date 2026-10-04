@@ -110,8 +110,10 @@ instead of rejecting the batch. Which fields may differ is deliberately narrow:
   unknown. Preserve an existing aggregate until every live claimant has actual
   observations; if no aggregate exists to preserve, fail with re-ingest guidance.
   Parser version 4 introduced this re-ingestion; version 5 added timestamp/BOM
-  fidelity reparses. Current version 6 reparses older unchanged sources for Grok
-  identity/text fidelity and OpenClaw loss accounting. Re-ingesting all contributors
+  fidelity reparses. Version 6 added Grok identity/text fidelity and OpenClaw
+  loss accounting. Current version 7 reparses older unchanged sources for Codex
+  current-thread metadata and Qoder same-body SID/cwd authority; it also aligns
+  Kimi probing with existing turn input parsing. Re-ingesting all contributors
   supplies evidence and converges; never manufacture per-source payloads from
   the historical aggregate.
 - Both no-op checks include original identity/payload/text evidence. Evidence

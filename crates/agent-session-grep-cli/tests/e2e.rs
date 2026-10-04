@@ -1958,6 +1958,397 @@ fn grok_conversation_fidelity_and_parser_reparse_preserve_source_bytes() {
 }
 
 #[test]
+fn metadata_probe_codex_current_thread_and_version_reparse_preserve_source_bytes() {
+    for shape in ["id-only", "current-and-root", "legacy-session-id"] {
+        let (dir, db) = temp_db("codex-session-metadata");
+        let home = dir.path().join("home");
+        let source = home.join(".codex/sessions/rollout.jsonl");
+        let cwd = dir.path().join("working-directory");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::create_dir(&cwd).unwrap();
+        let home = home.to_str().unwrap();
+        let cwd = cwd.to_str().unwrap();
+        let path = source.to_str().unwrap();
+        let messages = [
+            ("metadata-user", "user", "codexmetadataneedle request"),
+            ("metadata-answer", "assistant", "codexmetadataneedle answer"),
+        ];
+        let template = codex_fixture_with_cwd("metadata-current-thread", cwd, &messages);
+        let (header, body) = template.split_once('\n').unwrap();
+        let mut header: serde_json::Value = serde_json::from_str(header).unwrap();
+        if shape != "legacy-session-id" {
+            header["payload"]["id"] = serde_json::json!("  metadata-current-thread  ");
+            header["payload"]
+                .as_object_mut()
+                .unwrap()
+                .remove("session_id");
+            if shape == "current-and-root" {
+                // session_id is the root thread, not an alias of the current id.
+                header["payload"]["session_id"] = serde_json::json!("metadata-root-thread");
+            }
+        }
+        let original = format!("{header}\n{body}");
+        std::fs::write(&source, &original).unwrap();
+        let request = |args: &[&str]| {
+            let output = run_with_home(&db, home, args);
+            assert!(output.status.success(), "{shape}: {}", stdout(&output));
+            let frame = parse_first_line(&output);
+            assert_envelope_shape(&frame, true);
+            frame
+        };
+        let first = request(&["sync", path]);
+        for (field, expected) in [
+            ("sources", 1),
+            ("emitted", 2),
+            ("committed", 2),
+            ("skipped", 0),
+            ("diagnostics", 0),
+        ] {
+            assert_eq!(first["data"][field], expected, "{shape}/{field}: {first}");
+        }
+        assert!(first["warnings"].as_array().unwrap().is_empty());
+        let found = request(&["search", "codexmetadataneedle", "--provider", "codex"]);
+        let hits = found["data"]["hits"].as_array().unwrap();
+        assert_eq!(hits.len(), 2, "{shape}: {found}");
+        let session = hits[0]["session_id"].as_str().unwrap();
+        for (native, _, text) in messages {
+            let hit = hits
+                .iter()
+                .find(|hit| hit["id"] == native_msg_wire(native))
+                .unwrap();
+            assert_eq!(hit["text"], text);
+            assert_eq!(hit["session_id"], session);
+        }
+        let metadata = request(&["get-session-resume", session]);
+        assert_eq!(metadata["data"]["provider_id"], "codex");
+        assert_eq!(
+            metadata["data"]["provider_session_id"],
+            "metadata-current-thread"
+        );
+        assert_eq!(metadata["data"]["original_working_directory"], cwd);
+        assert_eq!(metadata["data"]["resume_available"], true);
+        assert!(metadata["data"]["unavailable_reason"].is_null());
+        let preview = request(&["resume", session]);
+        assert_eq!(preview["data"]["available"], true);
+        assert_eq!(preview["data"]["executed"], false);
+        assert_eq!(preview["data"]["working_directory"], cwd);
+        let command = preview["data"]["command"].as_str().unwrap();
+        assert!(command.contains("metadata-current-thread"));
+        assert!(!command.contains("metadata-root-thread"));
+        let counts: (i64, i64, i64) = Connection::open(&db)
+            .unwrap()
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM catalog WHERE id LIKE 'ses_v1_%'),
+                (SELECT COUNT(*) FROM source_entity_projections WHERE entity_id LIKE 'ses_v1_%'),
+                (SELECT COUNT(*) FROM source_session_resume_claims)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            counts,
+            (1, 1, 1),
+            "root thread must not create another Session"
+        );
+
+        let mut generation = first["data"]["generation"].clone();
+        if shape == "id-only" {
+            // Only seed the old parser marker. This proves one-time reparse,
+            // not migration of identities produced by a real parser-6 binary.
+            assert_eq!(
+                Connection::open(&db)
+                    .unwrap()
+                    .execute("UPDATE source_scans SET parser_version=6", [])
+                    .unwrap(),
+                1
+            );
+            let reparsed = request(&["sync", path]);
+            assert_eq!(reparsed["data"]["emitted"], 2);
+            assert_eq!(reparsed["data"]["committed"], 2);
+            assert_eq!(reparsed["data"]["skipped"], 0);
+            assert_eq!(reparsed["data"]["diagnostics"], 1);
+            let warnings = reparsed["warnings"].as_array().unwrap();
+            assert_eq!(warnings.len(), 1);
+            let warning = warnings[0].as_str().unwrap();
+            assert!(warning.contains("stored parser_version 6"));
+            assert!(warning.chars().count() <= 512);
+            for marker in [
+                "metadata-current-thread",
+                "metadata-user",
+                "codexmetadataneedle",
+                cwd,
+                path,
+            ] {
+                assert!(!warning.contains(marker));
+            }
+            assert_eq!(
+                reparsed["data"]["generation"].as_u64().unwrap(),
+                generation.as_u64().unwrap() + 1
+            );
+            generation = reparsed["data"]["generation"].clone();
+        }
+        let repeated = request(&["sync", path]);
+        assert_eq!(repeated["data"]["emitted"], 0);
+        assert_eq!(repeated["data"]["committed"], 0);
+        assert_eq!(repeated["data"]["unchanged"], 2);
+        assert_eq!(repeated["data"]["generation"], generation);
+        assert_eq!(
+            request(&["search", "codexmetadataneedle", "--provider", "codex"])["data"]["hits"],
+            found["data"]["hits"]
+        );
+        assert_eq!(
+            request(&["get-session-resume", session])["data"],
+            metadata["data"]
+        );
+        let version: i64 = Connection::open(&db)
+            .unwrap()
+            .query_row("SELECT parser_version FROM source_scans", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            version,
+            i64::from(agent_session_grep_adapters_sqlite::PARSER_SEMANTIC_VERSION)
+        );
+        assert_eq!(std::fs::read(&source).unwrap(), original.as_bytes());
+    }
+}
+
+#[test]
+fn metadata_probe_codex_non_session_ids_do_not_authorize_resume() {
+    let (dir, db) = temp_db("codex-non-session-ids");
+    let home = dir.path().join("home");
+    let source = home.join(".codex/sessions/message-only.jsonl");
+    std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+    let home = home.to_str().unwrap();
+    let path = source.to_str().unwrap();
+    let template = codex_incremental_fixture(
+        "unused-header",
+        &[("ordinary-message-id", "user", "codexitemneedle")],
+    );
+    let (_, body) = template.split_once('\n').unwrap();
+    let original = format!(
+        "{}\n{body}{}\n",
+        serde_json::json!({"type":"turn_context", "timestamp":"2026-01-01T00:00:00Z",
+            "payload":{"id":"ordinary-turn-id", "session_id":"ordinary-turn-root", "cwd":"/synthetic/turn-only"}}),
+        serde_json::json!({"type":"event_msg", "timestamp":"2026-01-01T00:00:01Z",
+            "payload":{"type":"user_message", "id":"ordinary-event-id", "message":"codexitemneedle"}}),
+    );
+    std::fs::write(&source, &original).unwrap();
+    let request = |args: &[&str]| {
+        let output = run_with_home(&db, home, args);
+        assert!(output.status.success(), "{}", stdout(&output));
+        parse_first_line(&output)
+    };
+    let first = request(&["sync", path]);
+    assert_eq!(first["data"]["emitted"], 1);
+    assert_eq!(first["data"]["committed"], 1);
+    assert_eq!(first["data"]["skipped"], 0);
+    assert_eq!(first["data"]["diagnostics"], 0);
+    let found = request(&["search", "codexitemneedle", "--provider", "codex"]);
+    let hits = found["data"]["hits"].as_array().unwrap();
+    assert_eq!(hits.len(), 1, "{found}");
+    assert_eq!(hits[0]["id"], native_msg_wire("ordinary-message-id"));
+    let session = hits[0]["session_id"].as_str().unwrap();
+    let metadata = request(&["get-session-resume", session]);
+    assert_eq!(metadata["data"]["provider_id"], "codex");
+    assert_eq!(metadata["data"]["resume_available"], false);
+    assert!(metadata["data"]["provider_session_id"].is_null());
+    assert!(metadata["data"]["original_working_directory"].is_null());
+    let preview = request(&["resume", session]);
+    assert_eq!(preview["data"]["available"], false);
+    assert_eq!(preview["data"]["executed"], false);
+    assert!(preview["data"]["command"].is_null());
+    let repeated = request(&["sync", path]);
+    assert_eq!(repeated["data"]["emitted"], 0);
+    assert_eq!(repeated["data"]["committed"], 0);
+    assert_eq!(repeated["data"]["unchanged"], 1);
+    assert_eq!(repeated["data"]["generation"], first["data"]["generation"]);
+    assert_eq!(std::fs::read(&source).unwrap(), original.as_bytes());
+}
+
+#[test]
+fn metadata_probe_kimi_exact_turns_sync_and_generic_json_preserves_catalog() {
+    for (turn_type, prior_history) in [
+        ("turn.prompt", false),
+        ("turn.prompt", true),
+        ("turn.steer", true),
+    ] {
+        let (dir, db) = temp_db("kimi-turn-probe");
+        let home = dir.path().join("home");
+        let source = home.join(".kimi-code/sessions/path-is-not-native-id/wire.jsonl");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        let home = home.to_str().unwrap();
+        let path = source.to_str().unwrap();
+        let request = |args: &[&str]| {
+            let output = run_with_home(&db, home, args);
+            assert!(output.status.success(), "{}", stdout(&output));
+            parse_first_line(&output)
+        };
+        if prior_history {
+            // Each discriminator must select Kimi without evidence from the other.
+            let original = format!(
+                "{}\n{}\n",
+                serde_json::json!({"type":turn_type, "input":"kimiinputneedle string"}),
+                serde_json::json!({"type":turn_type, "input":[{"type":"text", "text":"kimiinputneedle blocks"}]}),
+            );
+            std::fs::write(&source, &original).unwrap();
+            let first = request(&["sync", path]);
+            for (field, expected) in [
+                ("sources", 1),
+                ("emitted", 2),
+                ("committed", 2),
+                ("skipped", 0),
+                ("diagnostics", 0),
+            ] {
+                assert_eq!(first["data"][field], expected, "{field}: {first}");
+            }
+            assert!(first["warnings"].as_array().unwrap().is_empty());
+            let found = request(&["search", "kimiinputneedle", "--provider", "kimi-code"]);
+            let hits = found["data"]["hits"].as_array().unwrap();
+            assert_eq!(hits.len(), 2, "{found}");
+            let session = hits[0]["session_id"].as_str().unwrap();
+            assert_eq!(hits[1]["session_id"], session);
+            for text in ["kimiinputneedle string", "kimiinputneedle blocks"] {
+                assert!(hits.iter().any(|hit| hit["text"] == text));
+            }
+            let metadata = request(&["get-session-resume", session]);
+            assert_eq!(metadata["data"]["provider_id"], "kimi-code");
+            assert_eq!(metadata["data"]["resume_available"], false);
+            assert!(metadata["data"]["provider_session_id"].is_null());
+            assert!(metadata["data"]["original_working_directory"].is_null());
+            let repeated = request(&["sync", path]);
+            assert_eq!(repeated["data"]["emitted"], 0);
+            assert_eq!(repeated["data"]["committed"], 0);
+            assert_eq!(repeated["data"]["unchanged"], 2);
+            assert_eq!(repeated["data"]["generation"], first["data"]["generation"]);
+            assert_eq!(std::fs::read(&source).unwrap(), original.as_bytes());
+        }
+        let catalog_state = || {
+            let conn = Connection::open(&db).unwrap();
+            [
+                "SELECT id, payload FROM catalog ORDER BY id",
+                "SELECT entity_id, payload FROM source_entity_projections ORDER BY entity_id",
+            ]
+            .map(|sql| {
+                let mut stmt = conn.prepare(sql).unwrap();
+                stmt.query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+                })
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+            })
+        };
+        let before = catalog_state();
+        if !prior_history {
+            assert!(before.iter().all(Vec::is_empty));
+        }
+        let original = concat!(
+            "{\"input\":\"kimigenericneedle\"}\n",
+            "{\"type\":\"turn.prompted\",\"input\":\"kimigenericneedle\"}\n",
+        );
+        std::fs::write(&source, original).unwrap();
+        let output = run_with_home(&db, home, &["sync", path]);
+        assert_eq!(output.status.code(), Some(2), "{}", stdout(&output));
+        let frame = parse_first_line(&output);
+        assert_envelope_shape(&frame, false);
+        assert_eq!(frame["error"]["code"], "invalid_request");
+        assert!(frame["error"]["message"].as_str().unwrap().chars().count() <= 512);
+        let diagnostics = format!(
+            "{}{}",
+            stdout(&output),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        for marker in ["kimigenericneedle", "turn.prompted", path] {
+            assert!(!diagnostics.contains(marker), "source values must not leak");
+        }
+        // Failure scan bookkeeping may exist; no new catalog/source observations
+        // may commit, and an existing valid projection must survive byte-for-byte.
+        assert_eq!(catalog_state(), before);
+        let claims: i64 = Connection::open(&db)
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM source_session_resume_claims",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(claims, i64::from(prior_history));
+        let found = request(&["search", "kimiinputneedle", "--provider", "kimi-code"]);
+        assert_eq!(
+            found["data"]["hits"].as_array().unwrap().len(),
+            if prior_history { 2 } else { 0 }
+        );
+        let rejected = request(&["search", "kimigenericneedle", "--provider", "kimi-code"]);
+        assert!(rejected["data"]["hits"].as_array().unwrap().is_empty());
+        assert_eq!(std::fs::read(&source).unwrap(), original.as_bytes());
+    }
+}
+
+#[test]
+fn metadata_probe_qoder_separate_records_do_not_authorize_cwd() {
+    let (dir, db) = temp_db("qoder-unpaired-metadata");
+    let home = dir.path().join("home");
+    let source = home.join(".qoder/projects/synthetic/transcript/session.jsonl");
+    std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+    let home = home.to_str().unwrap();
+    let path = source.to_str().unwrap();
+    let original = concat!(
+        "{\"type\":\"session_meta\",\"session_id\":\"qoder-known-session\"}\n",
+        "{\"type\":\"session_meta\",\"cwd\":\"/synthetic/qoderunpairedcwdneedle\"}\n",
+        "{\"type\":\"user\",\"message\":{\"content\":\"qodermetadataneedle\"}}\n",
+    );
+    std::fs::write(&source, original).unwrap();
+    let request = |args: &[&str]| {
+        let output = run_with_home(&db, home, args);
+        assert!(output.status.success(), "{}", stdout(&output));
+        parse_first_line(&output)
+    };
+    let first = request(&["sync", path]);
+    assert_eq!(first["data"]["emitted"], 1);
+    assert_eq!(first["data"]["committed"], 1);
+    assert_eq!(first["data"]["skipped"], 0);
+    assert_eq!(first["data"]["diagnostics"], 0);
+    let found = request(&["search", "qodermetadataneedle", "--provider", "qoder"]);
+    let hits = found["data"]["hits"].as_array().unwrap();
+    assert_eq!(hits.len(), 1, "{found}");
+    let session = hits[0]["session_id"].as_str().unwrap();
+    let metadata = request(&["get-session-resume", session]);
+    assert_eq!(metadata["data"]["provider_id"], "qoder");
+    assert_eq!(
+        metadata["data"]["provider_session_id"],
+        "qoder-known-session"
+    );
+    // This flag means native SID metadata is known, not that a command is verified.
+    assert_eq!(metadata["data"]["resume_available"], true);
+    assert!(metadata["data"]["original_working_directory"].is_null());
+    let claim: (String, Option<String>, i64) = Connection::open(&db)
+        .unwrap()
+        .query_row(
+            "SELECT original_working_directory_state, original_working_directory, pair_observed
+         FROM source_session_resume_claims WHERE session_id=?1",
+            [session],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(claim, ("missing".into(), None, 0));
+    let preview = request(&["resume", session]);
+    assert_eq!(preview["data"]["available"], false);
+    assert_eq!(preview["data"]["executed"], false);
+    assert!(preview["data"]["command"].is_null());
+    assert!(preview["data"]["working_directory"].is_null());
+    let unpaired = request(&["search", "qoderunpairedcwdneedle", "--provider", "qoder"]);
+    assert!(unpaired["data"]["hits"].as_array().unwrap().is_empty());
+    let repeated = request(&["sync", path]);
+    assert_eq!(repeated["data"]["emitted"], 0);
+    assert_eq!(repeated["data"]["committed"], 0);
+    assert_eq!(repeated["data"]["unchanged"], 1);
+    assert_eq!(repeated["data"]["generation"], first["data"]["generation"]);
+    assert_eq!(std::fs::read(&source).unwrap(), original.as_bytes());
+}
+
+#[test]
 fn source_projection_corrections_and_deleted_winner_converge() {
     let (dir, db) = temp_db("source-projection-authority");
     let a = dir.path().join("a.jsonl");

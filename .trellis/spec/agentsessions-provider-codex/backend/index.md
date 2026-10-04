@@ -40,8 +40,20 @@ envelope `{timestamp, type, payload}`:
 (`user_message` / `agent_message`, a UI mirror, no id, same text). Parse **only**
 `response_item/message`; ignore the `event_msg` mirror or you double-count.
 
+`session_meta.payload.id` is the **current thread ID**, while `session_id` is
+its **root thread ID** and can legitimately differ. Only this envelope treats id
+as Session identity; prefer its trimmed nonempty value and retain session_id-only
+legacy input compatibility. Do not reject differing fields as conflicting aliases,
+merge child threads under the root, or count root identity as an additional Session.
+Missing IDs do not authorize cwd-only pairing, and malformed types do not gain
+fallback authority. Multiple distinct current-thread headers still report the
+existing multi-session ambiguity. Pin: openai/codex
+`c5d242fa7907bff1b7a7e26e95febc548c0a6963`, protocol `SessionMeta` /
+`SessionMetaLine::deserialize` and rollout `builder_from_session_meta`.
+
 Other record types (`session_meta`, `turn_context`, `world_state`,
-`response_item/reasoning`, tool calls, `token_count`) are ignored.
+`response_item/reasoning`, tool calls, `token_count`) emit no conversation messages;
+metadata, tool activity and usage keep their separate existing handling.
 `response_item/reasoning` may carry `content: null`; classify the payload type
 before interpreting message content so this expected non-conversation shape
 does not increment `ParseReport.skipped`. A `response_item/message` still
@@ -66,7 +78,8 @@ The adapter remains **Experimental** and the provider contract remains
       while a message without a content array remains a recoverable skip.
 - [ ] Use the outer `timestamp` only as part of the envelope shape for
       probe/classification; emit `timestamp: None` for the canonical event.
-- [ ] Identity uses native `payload.id` (`StableId::native`). Do not truncate
+- [ ] Message identity uses native `response_item/message.payload.id`
+      (`StableId::native`). Do not truncate
       ids when comparing — session-seeded prefixes are shared.
 - [ ] Preserve strict stable conflicts for native identity, role, and text;
       occurrence-local envelope timestamps do not participate.
