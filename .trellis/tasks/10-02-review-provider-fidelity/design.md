@@ -54,3 +54,39 @@ shared specs, commits and push; provider workers have explicit disjoint scopes.
 - Main owns shared specs, CLI regression/upgrade tests, parser version (7 if required
   by these observation changes), fixture matrix, commits and push. Provider workers
   have disjoint crate scopes. Temp SQLite ownership (P1-7) remains a separate slice.
+
+
+## Temp SQLite ownership slice (P1-7; base 83528d9)
+- Apply the source-backed lifecycle correction to Cursor (both SQLite variants),
+  OpenCode and Hermes SQLite only. Parsing, identities, snapshot acquisition,
+  SQL/transaction policy, limits, maturity and fixture revisions remain unchanged.
+  This does not require another parser/schema version or a dependency change.
+- The ownership boundary includes DB and fixed SQLite sidecars, not only the main
+  file. Acquire an exclusive per-copy directory with nonrecursive DirBuilder::create
+  (Unix mode 0700, subject to umask), then create the DB exclusively with
+  OpenOptions::create_new (Unix mode 0600, subject to umask). Reuse existing
+  PID/counter naming without claiming randomness; no retry/fallback or reuse of
+  an existing directory, DB, symlink or sidecar namespace.
+- Directory cleanup authority begins only after directory creation succeeds;
+  DB/group cleanup authority begins only after DB creation succeeds. On any
+  failure, never remove a foreign DB or sidecar. Drop write handles before DB
+  cleanup on write/sync errors; drop the SQLite connection before DB/group cleanup
+  on success/query errors. Remove only fixed owned files and the now-empty owned
+  directory nonrecursively. Unknown entries remain untouched; cleanup stays
+  best-effort rather than inventing a new error/retry interface.
+- A new exclusive private directory establishes the sidecar namespace; merely
+  checking sidecar existence before creating the main DB is racy and insufficient.
+  Windows ACLs inherit from the creation environment; do not claim owner-only
+  DACL enforcement or protection from same-user interference. No Windows ACL
+  manipulation, new crate, Cargo.toml/Cargo.lock changes, source reopening or
+  filesystem scanning is included.
+- Tests exercise the actual production lifecycle through minimal private candidate
+  path/error-injection seams: existing main/sidecar-only/directory/symlink conflicts
+  remain byte-identical after error/drop; owned copies clean up on successful
+  reads and controlled write/sync/query/open errors; connection/handle ordering,
+  concurrency and Unix group/other access bits are asserted. Distinguish injected
+  I/O errors from actual OS failures. No process-global TEMP/TMP/umask mutation.
+- Worker A owns Cursor src/lib.rs and necessary existing disk_kv test adjustments;
+  worker B owns OpenCode src/lib.rs and Hermes src/sqlite_state.rs. Main owns
+  task/spec/CHANGELOG, integration, commit and push. Keep Cargo builds serialized;
+  preserve each other's work and all original fixtures/source bytes.

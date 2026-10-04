@@ -203,7 +203,7 @@ regressions in the next slice. P2-5 remains open; no code change was made for it
 - [x] Verify CLI provider selection, current/root identity scope, no invented Resume
   authority and unchanged-source rolling upgrade.
 - [x] Update parser/version and shared executable specs without capability promotion.
-- [ ] Independent review; full local gates; commits/push and exact-SHA remote gates.
+- [x] Independent review; full local gates; commits/push and exact-SHA remote gates.
 Previous 57529db delivery is confirmed: ci 37173862774, security-audit 37173862769,
 core-beta-evidence 37173862760 all succeeded; PR #21 had 14/14 successful checks.
 This does not validate the new metadata/probe code before its own gates run.
@@ -294,3 +294,34 @@ This does not validate the new metadata/probe code before its own gates run.
   inclusive privacy scan and task-context validation passed. Original worktrees,
   Cargo.lock, sources, provider maturity and schema 19 are unchanged. Commit/push
   and exact new-SHA remote gates still must be recorded; no main merge or release.
+
+
+### Metadata/probe remote checkpoint
+Implementation `83528d944182919d8c503d9de0851bacc0ff9a2a` passed:
+- ci `37200315199` (all three OS tests/installers, supply chain and Rust 1.90);
+- security-audit `37200315202`;
+- core-beta-evidence `37200315200` (Windows, Linux, macOS Intel and Apple Silicon).
+All three workflow run records name that exact head SHA, and PR #21 reports
+14/14 successful checks. The repository remains public; the PR remains draft.
+GitHub reports the existing repository's move to its canonical owner/name; no
+remote configuration, visibility or repository ownership was changed by this work.
+A transient Git TLS failure succeeded on an unchanged read retry. gh run watch
+also hit a transient annotations-request EOF; workflow run/job APIs, not that
+watch exit code, confirmed success. No TLS validation or failed check was bypassed.
+The final ports comment correction passed a fresh fmt and ports doc-test command;
+there are no ports doctests, so it adds no functional test count. No merge,
+release, archive or unrelated worktree cleanup occurred. Later documentation
+commits have separate SHAs and require their own remote check, not an inferred pass.
+
+
+## Temp SQLite ownership execution slice (P1-7; base 83528d9)
+- [x] Read source-backed research for Cursor, OpenCode and Hermes; include sidecar
+  ownership rather than treating main-file create_new as protection for the group.
+- [ ] Add and run baseline counterexamples through the actual lifecycle helpers.
+- [ ] Implement exclusive per-copy directory and exclusive/private DB creation;
+  cleanup ownership must follow successful creation and close handles first.
+- [ ] Verify conflict preservation, injected write/sync errors, SQLite query/open
+  failures, normal/sidecar cleanup, concurrent copies and Unix access bits.
+- [ ] Independent check; scoped and full local gates; new-SHA remote checks.
+Research is static evidence only; no P1-7 red/green or platform permission result
+has been obtained yet. Metadata/probe closure above does not close this slice.

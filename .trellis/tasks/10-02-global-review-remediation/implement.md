@@ -45,7 +45,7 @@ These are tracking items, not a count of confirmed defects or completed work.
 | P1-4 | Verified at 452c883: Grok prompt IDs remain turn keys, no false native/multi-session authority; CLI and old-binary upgrade evidence, independent check and all 14 remote checks passed |
 | P1-5 | Verified at 452c883: OpenClaw genuine-empty/non-indexable distinction, per-message loss, no reasoning leak and incomplete-history retention; full local/remote integration passed |
 | P1-6 | Verified at 452c883: Grok whitespace composition/rewind/seq and parser-5 to parser-6 rolling upgrade; Message IDs/source bytes preserved; full local/remote integration passed |
-| P1-7 | Pending current-baseline revalidation and implementation |
+| P1-7 | Source revalidated in Cursor, OpenCode and Hermes. Next slice covers exclusive private directory plus DB/group cleanup ownership; red/green and platform verification pending |
 | P1-8 | Withdrawn diagnosis; current linear Pi behavior retained; tree enhancement deferred |
 | P1-9 | Pending current-baseline revalidation and implementation |
 | P1-10 | Verified scoped contracts: explicit model-cache restart semantics, missing/corrupt model diagnostics, Context port error propagation and dimension-aware readiness. No automatic model retry/reload or maturity promotion added |
@@ -53,8 +53,8 @@ These are tracking items, not a count of confirmed defects or completed work.
 | P2-2 | Pending current-baseline revalidation and implementation |
 | P2-3 | Pending current-baseline revalidation and implementation |
 | P2-4 | Pending current-baseline revalidation and implementation |
-| P2-5 | Implemented and locally checked: Codex current-thread payload.id, legal different root session_id and legacy compatibility; original alias-conflict rejection withdrawn by pinned upstream evidence. Actual parser-6 upgrade and full 2001-test gate passed; new-SHA remote gate pending |
-| P2-6 | Implemented and locally checked: exact Kimi turn probe parity and Qoder same-body/selected-session SID-cwd pairing. Native/source/old-evidence invariants and full local gates passed; new-SHA remote gate pending |
+| P2-5 | Verified at 83528d9: Codex current-thread payload.id, legal different root session_id and legacy compatibility; original alias-conflict rejection withdrawn. Actual parser-6 upgrade, full 2001-test local gate and all 14 exact-SHA remote checks passed |
+| P2-6 | Verified at 83528d9: exact Kimi turn probe parity and Qoder same-body/selected-session SID-cwd pairing. Source/identity/old-evidence invariants, full local gates and all 14 exact-SHA remote checks passed |
 | P2-7 | Withdrawn; no mapping from historical tool errors to current request failure |
 | P2-8 | Deferred product decision; existing ranking policy preserved |
 | P2-9 | Conditional platform/hint work pending reproduction |
@@ -203,3 +203,13 @@ certify the subsequent Grok/OpenClaw conversation-fidelity slice.
 - Commit and exact-SHA remote gates are pending. P1-7 temp SQLite ownership is
   the next separate slice; other open ledger items remain open. No merge,
   release, archive, repository visibility change or unrelated workspace cleanup.
+
+
+### Remote metadata/probe checkpoint
+Implementation `83528d9` passed ci `37200315199`, security-audit `37200315202`
+and core-beta-evidence `37200315200`; every run's head SHA matched, and PR #21
+had all 14 checks successful. P2-5/P2-6 scoped contracts are now Verified. Any
+following documentation/implementation SHA must have its own checks. The next
+P1-7 source review confirms the same early-guard/truncating-create pattern in
+all three SQLite providers, but its tests and fix remain pending. Public/draft
+state is unchanged; no merge, release or broad task closure is implied.

@@ -1,10 +1,10 @@
 {"file": ".trellis/tasks/10-02-global-review-remediation/design.md", "reason": "Approved decisions and scopes"}
-{"file": ".trellis/tasks/10-02-global-review-remediation/research/baseline.md", "reason": "Fixed baseline and upstream work"}
-{"file": ".trellis/spec/agentsessions-ports/backend/index.md", "reason": "Provider event, timestamp, identity and loss-report contracts"}
-{"file": ".trellis/spec/agentsessions-testkit/backend/index.md", "reason": "Synthetic golden fixture and regression contracts"}
-{"file": ".trellis/spec/agentsessions-adapters-sqlite/backend/index.md", "reason": "Provenance-gated timestamp rolling upgrade and raw source evidence"}
-{"file": ".trellis/spec/agentsessions-cli/backend/index.md", "reason": "CLI timestamp filters, parser reparse and fixture matrix integration"}
-{"file": ".trellis/spec/agentsessions-provider-codex/backend/index.md", "reason": "Type-scoped session metadata, native message identity, mirror exclusion and source fidelity"}
-{"file": "crates/agent-session-grep-provider-codex/tests/golden/PROVENANCE.md", "reason": "Synthetic rollout metadata and message identity evidence"}
-{"file": "crates/agent-session-grep-provider-kimi/tests/golden/PROVENANCE.md", "reason": "Supported wire record and text extraction boundary"}
-{"file": "crates/agent-session-grep-provider-qoder/tests/golden/PROVENANCE.md", "reason": "Existing top-level/nested metadata and conversation envelope scope"}
+{"file": ".trellis/tasks/10-02-global-review-remediation/research/baseline.md", "reason": "Fixed baseline and retained upstream fixes"}
+{"file": ".trellis/spec/agentsessions-ports/backend/index.md", "reason": "Provider boundaries, source read-only and no port filesystem I/O"}
+{"file": ".trellis/spec/agentsessions-testkit/backend/index.md", "reason": "Synthetic fixtures and regression contracts"}
+{"file": ".trellis/spec/agentsessions-adapters-sqlite/backend/index.md", "reason": "Read-only temporary SQLite lifecycle and handle/sidecar ordering"}
+{"file": ".trellis/tasks/10-02-review-provider-fidelity/research/temp-sqlite-ownership.md", "reason": "Source-backed create/cleanup defects and complete ownership boundary"}
+{"file": "crates/agent-session-grep-provider-cursor/tests/golden/PROVENANCE.md", "reason": "Preserve both Cursor SQLite variants and original synthetic fixtures"}
+{"file": "crates/agent-session-grep-provider-opencode/tests/golden/PROVENANCE.md", "reason": "Existing SQLite fixture and extraction contract"}
+{"file": "crates/agent-session-grep-provider-hermes/tests/golden/PROVENANCE.md", "reason": "Hermes JSON/SQLite separation and immutable fixture evidence"}
+{"file": "docs/security/FIXTURE-REDACTION-POLICY.md", "reason": "Synthetic-only test data and unchanged fixture provenance"}
