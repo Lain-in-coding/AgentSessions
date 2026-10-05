@@ -53,9 +53,9 @@ const PROMPTS_KEY: &str = "aiService.prompts";
 
 /// Cursor adapter: parses `state.vscdb` (SQLite ItemTable KV store).
 ///
-/// The adapter writes the byte stream to a temp file and opens it read-only,
-/// because rusqlite requires a file path (no in-memory deserialize in 0.40).
-/// The temp file is cleaned up by the OS.
+/// The adapter writes snapshot bytes to an exclusively created temp database
+/// and opens it read-only. Its owned database, sidecars, and directory receive
+/// best-effort cleanup when the temporary database owner drops.
 pub struct CursorAdapter;
 
 impl CursorAdapter {
@@ -486,10 +486,24 @@ fn emit_message(
     Ok(())
 }
 
-/// Deletes the owned temp SQLite database and sidecars after its connection closes.
-/// A final read-only connection may leave WAL/SHM files behind.
+/// Created only after exclusive directory creation succeeds. Never removes
+/// unknown entries: a nonempty directory is deliberately left in place.
+struct TempDirGuard {
+    path: std::path::PathBuf,
+}
+
+impl Drop for TempDirGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir(&self.path);
+    }
+}
+
+/// Created only after exclusive DB creation succeeds inside the owned directory.
+/// A final read-only connection may leave WAL/SHM files behind. Drop removes only
+/// the fixed SQLite file group, then the directory guard removes the empty dir.
 struct TempDbGuard {
     path: std::path::PathBuf,
+    _directory: TempDirGuard,
 }
 
 impl Drop for TempDbGuard {
@@ -506,9 +520,9 @@ impl Drop for TempDbGuard {
 /// guard that unlinks that copy.
 ///
 /// **Field order is load-bearing.** Struct fields drop in declaration order, so
-/// `conn` closes the database before `_guard` unlinks the file. Windows refuses
-/// to delete a file that is still open and `remove_file`'s error is discarded, so
-/// the reverse order leaks every temp copy silently. A tuple binding
+/// `conn` closes the database before `_guard` removes its file group. On Windows,
+/// handles without delete sharing can block removal; cleanup errors are ignored,
+/// so reversing the order can silently leak the copy. A tuple binding
 /// (`let (conn, guard) = ...`) drops the *later* binding first — i.e. the guard
 /// while the connection is still open — which is exactly the broken order this
 /// struct exists to prevent.
@@ -530,12 +544,68 @@ impl TempDb {
 /// Writes bytes to a temp file, opens with SQLITE_OPEN_READONLY + busy_timeout,
 /// and returns a [`TempDb`] that deletes the temp copy once it goes out of scope.
 fn open_readonly_from_bytes(bytes: &[u8]) -> Result<TempDb, String> {
-    let temp_path = temp_db_path("parse");
-    let guard = TempDbGuard { path: temp_path };
-    let mut file = std::fs::File::create(&guard.path).map_err(|e| e.to_string())?;
-    file.write_all(bytes).map_err(|e| e.to_string())?;
-    file.sync_all().map_err(|e| e.to_string())?;
-    drop(file);
+    open_readonly_from_bytes_at(
+        bytes,
+        temp_db_path("parse").with_extension("").join("snapshot.db"),
+    )
+}
+
+// The candidate is explicit so tests exercise this same production lifecycle.
+fn open_readonly_from_bytes_at(
+    bytes: &[u8],
+    temp_path: std::path::PathBuf,
+) -> Result<TempDb, String> {
+    open_readonly_from_bytes_with(bytes, temp_path, create_temp_db_file, |file, bytes| {
+        file.write_all(bytes)?;
+        file.sync_all()
+    })
+}
+
+fn create_temp_db_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)
+}
+
+// Local I/O seams allow deterministic failure tests without global failpoints.
+fn open_readonly_from_bytes_with(
+    bytes: &[u8],
+    temp_path: std::path::PathBuf,
+    create_file: impl FnOnce(&std::path::Path) -> std::io::Result<std::fs::File>,
+    write_file: impl FnOnce(&mut std::fs::File, &[u8]) -> std::io::Result<()>,
+) -> Result<TempDb, String> {
+    let directory = temp_path.parent().expect("temporary DB path has a parent");
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    // Nonrecursive creation must reject even an existing empty directory or
+    // symlink. On Windows, both directory and file retain inherited ACLs.
+    builder
+        .recursive(false)
+        .create(directory)
+        .map_err(|e| e.to_string())?;
+    let directory = TempDirGuard {
+        path: directory.to_path_buf(),
+    };
+    let file = create_file(&temp_path).map_err(|e| e.to_string())?;
+    let guard = TempDbGuard {
+        path: temp_path,
+        _directory: directory,
+    };
+    {
+        // Move (do not borrow) the handle after the DB guard: error unwinding
+        // must close it before the guard attempts to remove any owned files.
+        let mut file = file;
+        write_file(&mut file, bytes).map_err(|e| e.to_string())?;
+    }
 
     let conn = Connection::open_with_flags(
         &guard.path,
@@ -558,12 +628,9 @@ fn open_readonly_from_bytes(bytes: &[u8]) -> Result<TempDb, String> {
     })
 }
 
-/// Unique temp file path for a purpose: process id + atomic counter prevent
-/// concurrent parses (and parallel tests) from colliding on the same name.
-///
-/// The pid is load-bearing: the counter alone restarts at 0 in every process, so
-/// two concurrent `asg` runs would both pick `asg-cursor-0-parse.db` and
-/// `File::create` would truncate the other's copy mid-parse.
+/// Candidate name scoped by process id and atomic counter, not randomness or
+/// cleanup authority. The parser acquires its directory and DB exclusively;
+/// collisions are errors, never a reason to reuse or overwrite another copy.
 fn temp_db_path(tag: &str) -> std::path::PathBuf {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     std::env::temp_dir().join(format!(
@@ -617,11 +684,560 @@ mod tests {
         assert_eq!(manifest.fixture_revision, Some(1));
     }
 
-    fn assert_wal_temp_copy_cleanup(query: &str, should_fail: bool) {
-        let fixture = TempDbGuard {
-            path: temp_db_path("wal-fixture"),
+    /// Owns only the explicitly created synthetic conflict fixtures.
+    struct NamespaceFixture {
+        directory: std::path::PathBuf,
+        files: Vec<std::path::PathBuf>,
+        directories: Vec<std::path::PathBuf>,
+    }
+
+    impl NamespaceFixture {
+        fn new() -> Self {
+            let directory = temp_db_path("ownership-fixture").with_extension("");
+            std::fs::create_dir(&directory).unwrap();
+            Self {
+                directory,
+                files: Vec::new(),
+                directories: Vec::new(),
+            }
+        }
+
+        fn db_path(&self) -> std::path::PathBuf {
+            self.directory.join("snapshot.db")
+        }
+
+        fn file(&mut self, name: &str, bytes: &[u8]) -> std::path::PathBuf {
+            let path = self.directory.join(name);
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .unwrap();
+            self.files.push(path.clone());
+            file.write_all(bytes).unwrap();
+            path
+        }
+
+        fn sidecars(&mut self) {
+            for suffix in ["-wal", "-shm", "-journal"] {
+                self.file(&format!("snapshot.db{suffix}"), suffix.as_bytes());
+            }
+        }
+
+        fn assert_sidecars_unchanged(&self) {
+            for suffix in ["-wal", "-shm", "-journal"] {
+                assert_eq!(
+                    std::fs::read(self.directory.join(format!("snapshot.db{suffix}")))
+                        .ok()
+                        .as_deref(),
+                    Some(suffix.as_bytes()),
+                    "foreign sidecar {suffix} was changed or deleted"
+                );
+            }
+        }
+    }
+
+    impl Drop for NamespaceFixture {
+        fn drop(&mut self) {
+            for file in &self.files {
+                let _ = std::fs::remove_file(file);
+            }
+            for directory in self.directories.iter().rev() {
+                let _ = std::fs::remove_dir(directory);
+            }
+            let _ = std::fs::remove_dir(&self.directory);
+        }
+    }
+
+    #[test]
+    fn temp_ownership_existing_main_is_never_truncated_or_deleted() {
+        let bytes = create_cursor_db(None, Some("[]"));
+        let mut fixture = NamespaceFixture::new();
+        let expected = b"foreign database sentinel";
+        fixture.file("snapshot.db", expected);
+        fixture.sidecars();
+        let result = open_readonly_from_bytes_at(&bytes, fixture.db_path());
+        let rejected = result.is_err();
+        let before_drop = std::fs::read(fixture.db_path()).ok();
+        drop(result);
+        assert!(
+            before_drop.as_deref() == Some(expected.as_slice()),
+            "existing main database was truncated or deleted before result drop"
+        );
+        assert_eq!(
+            std::fs::read(fixture.db_path()).ok().as_deref(),
+            Some(expected.as_slice()),
+            "existing main database was deleted during result drop"
+        );
+        fixture.assert_sidecars_unchanged();
+        assert!(rejected, "an existing namespace must be rejected");
+    }
+
+    #[test]
+    fn temp_ownership_failed_create_preserves_foreign_sidecars() {
+        let mut fixture = NamespaceFixture::new();
+        std::fs::create_dir(fixture.db_path()).unwrap();
+        fixture.directories.push(fixture.db_path());
+        fixture.sidecars();
+        let result = open_readonly_from_bytes_at(b"unused", fixture.db_path());
+        assert!(result.is_err());
+        drop(result);
+        assert!(fixture.db_path().is_dir());
+        fixture.assert_sidecars_unchanged();
+    }
+
+    #[test]
+    fn temp_ownership_sidecar_only_namespace_is_preserved() {
+        let bytes = create_cursor_db(None, Some("[]"));
+        let mut fixture = NamespaceFixture::new();
+        fixture.sidecars();
+        let result = open_readonly_from_bytes_at(&bytes, fixture.db_path());
+        let rejected = result.is_err();
+        drop(result);
+        fixture.assert_sidecars_unchanged();
+        assert!(!fixture.db_path().exists());
+        assert!(rejected, "a sidecar-only namespace must be rejected");
+    }
+
+    fn sqlite_file(path: &std::path::Path, suffix: &str) -> std::path::PathBuf {
+        let mut name = path.as_os_str().to_os_string();
+        name.push(suffix);
+        name.into()
+    }
+
+    fn assert_temp_files_removed(path: &std::path::Path) {
+        for suffix in ["", "-wal", "-shm", "-journal"] {
+            assert!(
+                !sqlite_file(path, suffix).exists(),
+                "owned SQLite file {suffix:?} leaked"
+            );
+        }
+    }
+
+    fn assert_temp_copy_removed(path: &std::path::Path) {
+        assert_temp_files_removed(path);
+        assert!(!path.parent().unwrap().exists(), "owned directory leaked");
+    }
+
+    fn create_test_sidecars(path: &std::path::Path) {
+        for suffix in ["-wal", "-shm", "-journal"] {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(sqlite_file(path, suffix))
+                .unwrap();
+            file.write_all(suffix.as_bytes()).unwrap();
+        }
+    }
+
+    #[test]
+    fn temp_ownership_existing_empty_directory_is_not_reused() {
+        let fixture = NamespaceFixture::new();
+        let result = open_readonly_from_bytes_with(
+            b"unused",
+            fixture.db_path(),
+            |_| panic!("directory collision must fail before file creation"),
+            |_, _| panic!("directory collision must fail before writing"),
+        );
+        assert!(result.is_err());
+        assert!(fixture.directory.is_dir());
+        assert!(!fixture.db_path().exists());
+    }
+
+    #[test]
+    fn temp_ownership_existing_namespace_file_is_preserved() {
+        let mut fixture = NamespaceFixture::new();
+        let namespace = fixture.file("copy", b"foreign namespace file");
+        let result = open_readonly_from_bytes_at(b"unused", namespace.join("snapshot.db"));
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(namespace).unwrap(), b"foreign namespace file");
+    }
+
+    #[test]
+    fn temp_ownership_missing_parents_are_not_created() {
+        let fixture = NamespaceFixture::new();
+        let path = fixture.directory.join("missing/copy/snapshot.db");
+        assert!(open_readonly_from_bytes_at(b"unused", path).is_err());
+        assert!(!fixture.directory.join("missing").exists());
+    }
+
+    #[test]
+    fn temp_ownership_failed_db_create_removes_only_the_new_empty_directory() {
+        let fixture = NamespaceFixture::new();
+        let path = fixture.directory.join("copy/snapshot.db");
+        let result = open_readonly_from_bytes_with(
+            b"unused",
+            path.clone(),
+            |path| {
+                assert!(path.parent().unwrap().is_dir());
+                Err(std::io::Error::other("injected create failure"))
+            },
+            |_, _| panic!("failed creation must not write"),
+        );
+        assert_eq!(result.err().as_deref(), Some("injected create failure"));
+        assert_temp_copy_removed(&path);
+        assert!(fixture.directory.is_dir());
+    }
+
+    fn assert_db_create_collision_preserved(main_is_directory: bool) {
+        let mut fixture = NamespaceFixture::new();
+        let path = fixture.directory.join("copy/snapshot.db");
+        let result = open_readonly_from_bytes_with(
+            b"unused",
+            path.clone(),
+            |path| {
+                // The real lifecycle has just acquired this directory. Inject
+                // foreign entries before its real create_new attempt, not a
+                // fake guard or an alternate cleanup implementation.
+                fixture
+                    .directories
+                    .push(path.parent().unwrap().to_path_buf());
+                if main_is_directory {
+                    std::fs::create_dir(path).unwrap();
+                    fixture.directories.push(path.to_path_buf());
+                } else {
+                    fixture.file("copy/snapshot.db", b"foreign main");
+                }
+                for suffix in ["-wal", "-shm", "-journal"] {
+                    fixture.file(&format!("copy/snapshot.db{suffix}"), suffix.as_bytes());
+                }
+                create_temp_db_file(path)
+            },
+            |_, _| panic!("failed creation must not write"),
+        );
+        assert!(result.is_err());
+        drop(result);
+        if main_is_directory {
+            assert!(path.is_dir());
+        } else {
+            assert_eq!(std::fs::read(&path).unwrap(), b"foreign main");
+        }
+        for suffix in ["-wal", "-shm", "-journal"] {
+            assert_eq!(
+                std::fs::read(sqlite_file(&path, suffix)).unwrap(),
+                suffix.as_bytes()
+            );
+        }
+        assert!(path.parent().unwrap().is_dir());
+    }
+
+    #[test]
+    fn temp_ownership_main_collision_after_directory_creation_is_preserved() {
+        assert_db_create_collision_preserved(false);
+    }
+
+    #[test]
+    fn temp_ownership_directory_at_db_path_preserves_sidecars_after_create_failure() {
+        assert_db_create_collision_preserved(true);
+    }
+
+    #[test]
+    fn temp_ownership_unknown_file_prevents_directory_removal() {
+        let bytes = create_cursor_db(None, Some("[]"));
+        let mut fixture = NamespaceFixture::new();
+        let path = fixture.directory.join("copy/snapshot.db");
+        let db = open_readonly_from_bytes_at(&bytes, path.clone()).unwrap();
+        fixture
+            .directories
+            .push(path.parent().unwrap().to_path_buf());
+        let unknown = fixture.file("copy/unknown", b"unrelated entry");
+        create_test_sidecars(&path);
+        drop(db);
+        assert_temp_files_removed(&path);
+        assert_eq!(std::fs::read(unknown).unwrap(), b"unrelated entry");
+        assert!(path.parent().unwrap().is_dir());
+    }
+
+    fn create_test_write_handle(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            // Unlike production's default sharing, this handle forbids delete.
+            // Cleanup can succeed only if the actual OS handle closes first.
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .share_mode(0)
+                .open(path)
+        }
+        #[cfg(not(windows))]
+        create_temp_db_file(path)
+    }
+
+    fn assert_write_failure_cleanup(sync_failure: bool) {
+        let bytes = create_cursor_db(None, Some("[]"));
+        let fixture = NamespaceFixture::new();
+        let path = fixture.directory.join("copy/snapshot.db");
+        let error = if sync_failure {
+            "injected sync failure"
+        } else {
+            "injected partial-write failure"
         };
-        let writer = Connection::open(&fixture.path).unwrap();
+        let result = open_readonly_from_bytes_with(
+            &bytes,
+            path.clone(),
+            create_test_write_handle,
+            |file, bytes| {
+                file.write_all(if sync_failure { bytes } else { &bytes[..32] })?;
+                create_test_sidecars(&path);
+                #[cfg(windows)]
+                assert!(
+                    std::fs::remove_file(&path).is_err(),
+                    "the test handle must actually forbid deletion while open"
+                );
+                // These are injected I/O failures, not a disk-full or sync_all
+                // OS failure. Windows deletion above/below is real OS evidence
+                // for close-before-cleanup on these same error returns.
+                Err(std::io::Error::other(error))
+            },
+        );
+        assert_eq!(result.err().as_deref(), Some(error));
+        assert_temp_copy_removed(&path);
+    }
+
+    #[test]
+    fn temp_ownership_partial_write_failure_closes_handle_before_cleanup() {
+        assert_write_failure_cleanup(false);
+    }
+
+    #[test]
+    fn temp_ownership_sync_failure_closes_handle_before_cleanup() {
+        assert_write_failure_cleanup(true);
+    }
+
+    #[test]
+    fn temp_ownership_sqlite_open_error_cleans_owned_sidecars_and_directory() {
+        let bytes = create_cursor_db(None, Some("[]"));
+        let fixture = NamespaceFixture::new();
+        let path = fixture.directory.join("copy/snapshot.db");
+        let result = open_readonly_from_bytes_with(
+            &bytes,
+            path.clone(),
+            create_temp_db_file,
+            |file, bytes| {
+                file.write_all(bytes)?;
+                file.sync_all()?;
+                create_test_sidecars(&path);
+                // Controlled removal makes the subsequent real READ_ONLY open
+                // fail. This is not a claim that malformed bytes fail at open.
+                std::fs::remove_file(&path)
+            },
+        );
+        assert!(
+            result
+                .err()
+                .unwrap()
+                .contains("unable to open database file")
+        );
+        assert_temp_copy_removed(&path);
+    }
+
+    #[test]
+    fn temp_ownership_invalid_database_cleans_after_pinned_read_error() {
+        let fixture = NamespaceFixture::new();
+        let path = fixture.directory.join("copy/snapshot.db");
+        let result = open_readonly_from_bytes_with(
+            b"not a SQLite database",
+            path.clone(),
+            create_temp_db_file,
+            |file, bytes| {
+                file.write_all(bytes)?;
+                file.sync_all()?;
+                Ok(())
+            },
+        );
+        let error = result.err().unwrap();
+        assert_temp_copy_removed(&path);
+        assert!(
+            error.contains("file is not a database"),
+            "unexpected SQLite error: {error}"
+        );
+    }
+
+    #[test]
+    fn temp_ownership_same_candidate_cannot_damage_a_live_copy() {
+        let bytes = create_cursor_db(None, Some("[]"));
+        let db = open_readonly_from_bytes(&bytes).unwrap();
+        let path = db.temp_path().to_path_buf();
+        create_test_sidecars(&path);
+        let result = open_readonly_from_bytes_at(b"replacement", path.clone());
+        assert!(result.is_err());
+        drop(result);
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        for suffix in ["-wal", "-shm", "-journal"] {
+            assert_eq!(
+                std::fs::read(sqlite_file(&path, suffix)).unwrap(),
+                suffix.as_bytes()
+            );
+        }
+        let value: String = db
+            .conn
+            .query_row(
+                "SELECT value FROM ItemTable WHERE key = ?1",
+                [PROMPTS_KEY],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(value, "[]");
+        drop(db);
+        assert_temp_copy_removed(&path);
+    }
+
+    #[test]
+    fn temp_ownership_simultaneous_copies_remain_independent() {
+        let first_value = r#"[{"prompt":"first synthetic copy"}]"#;
+        let second_value = r#"[{"prompt":"second synthetic copy"}]"#;
+        let first_bytes = create_cursor_db(None, Some(first_value));
+        let second_bytes = create_cursor_db(None, Some(second_value));
+        std::thread::scope(|scope| {
+            let (path_tx, path_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let first = scope.spawn(move || {
+                let db = open_readonly_from_bytes(&first_bytes).unwrap();
+                let path = db.temp_path().to_path_buf();
+                let value: String = db
+                    .conn
+                    .query_row(
+                        "SELECT value FROM ItemTable WHERE key = ?1",
+                        [PROMPTS_KEY],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(value, first_value);
+                assert_eq!(std::fs::read(&path).unwrap(), first_bytes);
+                path_tx.send(path.clone()).unwrap();
+                release_rx.recv().unwrap();
+                path
+            });
+            let second = open_readonly_from_bytes(&second_bytes).unwrap();
+            let second_path = second.temp_path().to_path_buf();
+            let first_path = path_rx.recv().unwrap();
+            assert_ne!(first_path.parent(), second_path.parent());
+            assert!(first_path.exists());
+            assert_eq!(std::fs::read(&second_path).unwrap(), second_bytes);
+            release_tx.send(()).unwrap();
+            assert_eq!(first.join().unwrap(), first_path);
+            assert_temp_copy_removed(&first_path);
+            // One owner is gone; the other still reads its own pinned snapshot.
+            let value: String = second
+                .conn
+                .query_row(
+                    "SELECT value FROM ItemTable WHERE key = ?1",
+                    [PROMPTS_KEY],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(value, second_value);
+            assert!(second_path.exists());
+            drop(second);
+            assert_temp_copy_removed(&second_path);
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn temp_ownership_unix_permissions_exclude_group_and_other_access() {
+        use std::os::unix::fs::PermissionsExt;
+        let bytes = create_cursor_db(None, Some("[]"));
+        let db = open_readonly_from_bytes(&bytes).unwrap();
+        let path = db.temp_path().to_path_buf();
+        // Do not change process-global umask or require it to retain owner bits.
+        let file_mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        let dir_mode = std::fs::metadata(path.parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(file_mode & !0o600, 0);
+        assert_eq!(dir_mode & !0o700, 0);
+        drop(db);
+        assert_temp_copy_removed(&path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn temp_ownership_namespace_symlink_preserves_target_and_sidecars() {
+        let mut fixture = NamespaceFixture::new();
+        let target = fixture.directory.join("target");
+        std::fs::create_dir(&target).unwrap();
+        fixture.directories.push(target.clone());
+        fixture.file("target/snapshot.db", b"foreign target");
+        for suffix in ["-wal", "-shm", "-journal"] {
+            fixture.file(&format!("target/snapshot.db{suffix}"), suffix.as_bytes());
+        }
+        let link = fixture.directory.join("copy");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        fixture.files.push(link.clone());
+        assert!(open_readonly_from_bytes_at(b"replacement", link.join("snapshot.db")).is_err());
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            std::fs::read(target.join("snapshot.db")).unwrap(),
+            b"foreign target"
+        );
+        for suffix in ["-wal", "-shm", "-journal"] {
+            assert_eq!(
+                std::fs::read(target.join(format!("snapshot.db{suffix}"))).unwrap(),
+                suffix.as_bytes()
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn temp_ownership_db_symlinks_including_dangling_links_are_preserved() {
+        for target_exists in [true, false] {
+            let mut fixture = NamespaceFixture::new();
+            let target = fixture.directory.join("target.db");
+            if target_exists {
+                fixture.file("target.db", b"foreign target");
+            }
+            let path = fixture.directory.join("copy/snapshot.db");
+            let result = open_readonly_from_bytes_with(
+                b"replacement",
+                path.clone(),
+                |path| {
+                    fixture
+                        .directories
+                        .push(path.parent().unwrap().to_path_buf());
+                    std::os::unix::fs::symlink(&target, path).unwrap();
+                    fixture.files.push(path.to_path_buf());
+                    for suffix in ["-wal", "-shm", "-journal"] {
+                        fixture.file(&format!("copy/snapshot.db{suffix}"), suffix.as_bytes());
+                    }
+                    create_temp_db_file(path)
+                },
+                |_, _| panic!("a DB symlink must not be opened for writing"),
+            );
+            assert!(result.is_err());
+            assert!(
+                std::fs::symlink_metadata(&path)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+            if target_exists {
+                assert_eq!(std::fs::read(&target).unwrap(), b"foreign target");
+            } else {
+                assert!(!target.exists());
+            }
+            for suffix in ["-wal", "-shm", "-journal"] {
+                assert_eq!(
+                    std::fs::read(sqlite_file(&path, suffix)).unwrap(),
+                    suffix.as_bytes()
+                );
+            }
+        }
+    }
+
+    fn assert_wal_temp_copy_cleanup(query: &str, should_fail: bool) {
+        let mut fixture = NamespaceFixture::new();
+        let fixture_path = fixture.file("snapshot.db", b"");
+        let writer = Connection::open(&fixture_path).unwrap();
         writer
             .execute_batch(
                 "PRAGMA journal_mode=WAL;
@@ -630,7 +1246,7 @@ mod tests {
             )
             .unwrap();
         drop(writer);
-        let bytes = std::fs::read(&fixture.path).unwrap();
+        let bytes = std::fs::read(&fixture_path).unwrap();
         let mut copy_path = None;
         let result = (|| -> rusqlite::Result<i64> {
             let db = open_readonly_from_bytes(&bytes).unwrap();
@@ -645,6 +1261,7 @@ mod tests {
                 sidecar.push(suffix);
                 assert!(std::path::Path::new(&sidecar).exists());
             }
+            std::fs::write(sqlite_file(&path, "-journal"), b"owned stray journal").unwrap();
             copy_path = Some(path);
             // The error case returns while TempDb is still a local owner.
             db.conn.query_row(query, [], |row| row.get(0))
@@ -652,7 +1269,7 @@ mod tests {
         assert_eq!(result.is_err(), should_fail);
         let path = copy_path.unwrap();
         let mut remaining = Vec::new();
-        for suffix in ["", "-wal", "-shm"] {
+        for suffix in ["", "-wal", "-shm", "-journal"] {
             let mut owned_file = path.as_os_str().to_os_string();
             owned_file.push(suffix);
             let owned_file = std::path::Path::new(&owned_file);
@@ -662,10 +1279,16 @@ mod tests {
                 std::fs::remove_file(owned_file).unwrap();
             }
         }
+        let directory_remains = path.parent().unwrap().exists();
+        if directory_remains {
+            // Nonrecursive cleanup of this test's already-inspected empty dir.
+            std::fs::remove_dir(path.parent().unwrap()).unwrap();
+        }
         assert!(
             remaining.is_empty(),
             "temporary SQLite files leaked: {remaining:?}"
         );
+        assert!(!directory_remains, "temporary SQLite directory leaked");
     }
 
     #[test]
@@ -695,13 +1318,16 @@ mod tests {
             !leaked_path.exists(),
             "temp copy must be unlinked after the connection is dropped"
         );
+        assert!(
+            !leaked_path.parent().unwrap().exists(),
+            "temp directory leaked"
+        );
     }
 
     #[test]
     fn temp_paths_are_scoped_to_this_process() {
-        // The name must carry the pid: two concurrent processes both starting at
-        // counter 0 would otherwise pick `asg-cursor-0-parse.db` and
-        // `File::create` would truncate the other process's database mid-parse.
+        // Names distinguish concurrent processes; exclusive creation, not
+        // the predictable name, establishes ownership and rejects collisions.
         let path = temp_db_path("parse");
         let name = path.file_name().unwrap().to_string_lossy().to_string();
         assert!(

@@ -369,12 +369,27 @@ without logical changes.
 Per-session resume claims share the existing `(source_path, session_id)` key;
 no schema migration is required. Parser semantic version 2 forces old source
 scans to reparse. Provider parser `TempDb` keeps `conn` before `_guard` so
-SQLite closes before cleanup. The guard owns the private database plus its
-`-wal`/`-shm` files; the last read-only connection does not guarantee their
-removal. Register that guard before writing bytes, and keep the file handle
-inside its lifetime so write/sync failure also cleans the copy. Never use
-this cleanup on original provider sources or enumerate unrelated temp files. Validate duplicate facts/claims/StableId metadata before any
-no-op shortcut. Old building intents are aborted on writer recovery.
+SQLite closes before cleanup. Temporary parser copies in Cursor, OpenCode and
+Hermes must first acquire an exclusive per-copy directory (nonrecursive create,
+Unix mode 0700 subject to umask), then an exclusive DB with `create_new` (Unix
+mode 0600 subject to umask). Existing files, directories, symlinks or sidecar-only
+namespaces are conflicts, never permission to truncate, reuse or clean them.
+Directory cleanup authority starts only after directory creation succeeds; DB
+and fixed SQLite-sidecar cleanup authority starts only after DB creation succeeds.
+The private directory gives sidecars a new namespace; checking sidecars with
+`exists()` before main-file creation is not atomic group ownership.
+Register the DB guard after exclusive DB creation but before writing bytes, and
+keep the write handle inside its lifetime (or move it into a later inner binding)
+so write/sync errors close the handle before cleanup. On return, `conn` still drops
+before the guard. Clean only fixed owned DB/sidecar names, then remove the owned
+empty directory nonrecursively; unknown entries remain untouched. The last
+read-only connection does not guarantee WAL/SHM removal. Drop cleanup remains
+best-effort, not a new retry/error interface. Windows inherits environment ACLs;
+this is not owner-only DACL enforcement or a same-user tamper guarantee. Preserve
+existing PID/counter naming without claiming randomness. No retry/fallback,
+new dependency, process-global temp/umask mutation or source reopening is needed.
+Never apply this cleanup to original provider sources or enumerate unrelated temp
+files. Validate duplicate facts/claims/StableId metadata before any no-op shortcut. Old building intents are aborted on writer recovery.
 Embedding rebuild uses bounded wire-ID keysets (batch 1..512), finite vectors,
 and one transaction for replacement plus generation. Encoder failure rolls back.
 Semantic query scans rows but retains only bounded top-k candidates; it is an
@@ -385,6 +400,10 @@ Absent read catalog -> backend error without creating a file. Wrong schema
 -> `SchemaIncompatible`, with explicit writer-maintenance action. Source changes
 -> `SnapshotChanged`; oversized snapshots -> `SourceIo`. Invalid batch facts,
 vectors or encoding failures -> error without changing authoritative data.
+Temporary namespace/DB creation conflict -> existing provider error classification,
+without truncating or deleting the conflicting group. Write/sync/open/query failure
+-> propagate the existing error and clean only resources actually acquired. Do not
+turn a filesystem/SQLite error into format fallback or a guessed empty session.
 
 ### 5. Good/Base/Bad Cases
 Good: two sessions in one live WAL DB retain separate placements/resume claims.
@@ -398,8 +417,15 @@ no-op batches, encoder rollback, keyset query plans, finite scores and bounded
 top-k equivalence. Each SQLite-reading provider crate (`opencode`,
 `cursor`, `hermes/sqlite-state-v1`) must create real temporary WAL/SHM files
 while parsing its private read-only copy, then assert all owned files disappear
-after successful reads and query errors (the hermes and cursor copy guards
-also remove a stray `-journal`).
+after successful reads and query errors (all three copy guards also remove a
+stray `-journal`). Regressions through the production lifecycle must
+cover existing main-file, failed-create, sidecar-only and directory conflicts,
+source/sentinel bytes preserved after error/drop, owned directory removal, unknown
+entry retention, concurrent copies and Unix group/other access bits. Controlled
+write/sync injection tests close handles before checking cleanup and are labeled
+as injection, not an OS disk-failure experiment. Do not mutate global TEMP/TMP or
+umask to force test conditions; unsupported Windows symlink/ACL experiments remain
+explicit platform limits rather than ignored cross-platform regressions.
 
 ### 7. Wrong vs Correct
 Wrong: call migration from a read command or return early before batch validation.

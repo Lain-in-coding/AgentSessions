@@ -428,6 +428,16 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Cursor (both SQLite variants), OpenCode and Hermes SQLite parsing now reserve
+  an exclusive per-copy directory before exclusively creating the temporary DB.
+  Existing DB/sidecar namespaces are never truncated, reused or cleaned on a
+  creation conflict. Cleanup authority follows successful creation; write handles
+  and SQLite connections close before fixed owned files are removed, and unknown
+  directory entries remain untouched. Unix creation modes clear group/other permission
+  bits (subject to umask); Windows retains inherited ACLs rather than claiming
+  owner-only DACL enforcement. Cleanup remains best-effort and nonrecursive.
+  Parsing, source bytes, identities, fixture revisions, dependencies and the
+  current parser 7/schema 19 compatibility boundary are unchanged.
 - Codex session metadata now uses `session_meta.payload.id` as the current thread
   identity, including id-only rollouts. Its `session_id` is the root thread and
   may legitimately differ; that is not an alias conflict or a second session.

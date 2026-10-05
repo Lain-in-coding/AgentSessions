@@ -1825,6 +1825,10 @@ mod tests {
             !leaked_path.exists(),
             "temp copy must be unlinked after the connection is dropped"
         );
+        assert!(
+            !leaked_path.parent().unwrap().exists(),
+            "temp directory leaked"
+        );
     }
 
     /// Best-effort cleanup for the WAL test's owned files.

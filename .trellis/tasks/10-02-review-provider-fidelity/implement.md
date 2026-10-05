@@ -317,11 +317,72 @@ commits have separate SHAs and require their own remote check, not an inferred p
 ## Temp SQLite ownership execution slice (P1-7; base 83528d9)
 - [x] Read source-backed research for Cursor, OpenCode and Hermes; include sidecar
   ownership rather than treating main-file create_new as protection for the group.
-- [ ] Add and run baseline counterexamples through the actual lifecycle helpers.
-- [ ] Implement exclusive per-copy directory and exclusive/private DB creation;
+- [x] Add and run baseline counterexamples through the actual lifecycle helpers.
+- [x] Implement exclusive per-copy directory and exclusive/private DB creation;
   cleanup ownership must follow successful creation and close handles first.
 - [ ] Verify conflict preservation, injected write/sync errors, SQLite query/open
   failures, normal/sidecar cleanup, concurrent copies and Unix access bits.
 - [ ] Independent check; scoped and full local gates; new-SHA remote checks.
 Research is static evidence only; no P1-7 red/green or platform permission result
 has been obtained yet. Metadata/probe closure above does not close this slice.
+
+
+Metadata documentation/planning head `88484ed0c8186519c549eb589e4dc7b3ca8cb8ab`
+also passed its own ci `37201508669`, security-audit `37201508667` and
+core-beta-evidence `37201508665`; PR #21 had 14/14 successful checks. This does not
+validate the subsequent, uncommitted P1-7 lifecycle regressions/implementation.
+
+
+### P1-7 Cursor implementation checkpoint
+- Cursor worker first ran three regressions through the same production lifecycle:
+  **0 passed / 3 failed** for pre-existing DB truncation, failed creation deleting
+  foreign sidecars, and sidecar-only namespace deletion. The same three became
+  green after the ownership correction. No copied fake legacy implementation was
+  used as the tested path.
+- Completed package result: **78 passed, 0 failed, 2 existing ignored**; package
+  all-target/all-feature Clippy -D warnings, scoped rustfmt and diff checks passed.
+  Main has not yet rerun the complete P1-7 workspace or granted full-slice closure.
+- Cursor now separately owns the exclusive directory and successfully created DB;
+  the write handle is moved inside the DB guard lifetime, while returned TempDb
+  keeps conn first. Fixed owned names are removed before nonrecursive empty-dir
+  removal; unknown entries survive. Both SQLite variants/fixtures stay unchanged.
+- Controlled write/sync faults are injection, not OS disk-failure experiments.
+  Real Windows non-delete-sharing handles exercise close-before-cleanup; three
+  Unix permission/symlink cases await Unix CI. ACL inheritance and best-effort
+  cleanup limitations remain explicit. OpenCode/Hermes and independent full-slice
+  review are still pending, so this is not a P1-7 Verified claim.
+
+
+### P1-7 OpenCode/Hermes implementation checkpoint
+- The shared-lifecycle baseline regressions actually produced **12 failures**
+  before the semantic fix, then **12 passes**. Expanded ownership coverage ran
+  **32 passing tests**. No fixture, field parsing or SQL/transaction change was
+  used to obtain the result.
+- Windows mutation check deliberately restored the wrong write-handle/guard drop
+  order; all four write/sync failure tests failed. Restoring the correct source
+  returned them to green. Non-delete-sharing handles provide a real OS ordering
+  check; injected write/sync/open errors remain identified as controlled injection.
+- Final all-target/all-feature package results: OpenCode **41 passed / 0 failed /
+  1 existing ignored**, Hermes **69 passed / 0 failed / 2 existing ignored**.
+  Combined package Clippy -D warnings, scoped rustfmt and ordinary diff checks
+  passed. Six Unix permission/symlink cases await remote Unix execution.
+- Together with Cursor, provider packages report **188 passed / 0 failed /
+  5 existing ignored** on Windows. Main is now running full workspace integration;
+  the independent checker is extending its Cursor review to all final providers.
+  No new dependency, fixture revision or parser/schema bump is introduced.
+
+
+### P1-7 full local gate evidence (main, base 83528d9 + uncommitted slice)
+- Workspace gates on the P1-7 working tree: rustfmt exit 0; workspace Clippy
+  -D warnings exit 0; workspace tests exit 0 with **86 targets / 2049 passed /
+  0 failed / 24 ignored**; MSRV (dev-profile check of all targets) exit 0.
+- Non-Rust gates: Node web UI 11 passed / 0 failed; Python scripts 21 (1 skip),
+  release 11, evidence 54 (1 skip inside 54) all OK; privacy scan reported no
+  personal path findings; task validation passed.
+- Nine Unix-only permission/symlink cases (3 Cursor, 6 OpenCode/Hermes) cannot
+  execute on this Windows host and remain subject to remote Unix CI on the new
+  commit. Real non-delete-sharing handle tests did run on Windows.
+- Independent full-slice review did not complete in this session (the previously
+  assigned checker terminated on a provider-side payment error); it must not be
+  recorded as passed. Full-slice closure stays pending until a fresh independent
+  check or an explicit record that no independent review was obtained.
