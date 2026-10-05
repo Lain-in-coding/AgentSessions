@@ -4,7 +4,8 @@
 //! `context.append_message` records wrap `message.role` (user/assistant) and
 //! `message.content`. `context.append_loop_event` records carry step/tool
 //! events (step.begin/content.part/tool.call/tool.result/step.end) — this
-//! initial implementation handles append_message; loop events are deferred.
+//! adapter also reads user input from `turn.prompt` / `turn.steer`; loop events
+//! are deferred.
 //!
 //! Format evidence: fast-resume (MIT) `src/adapters/kimi.rs`. The message
 //! extraction is adapted from fast-resume under its MIT license.
@@ -44,14 +45,14 @@ struct WireRecord {
     #[serde(default)]
     message: Option<WireMessage>,
     /// `turn.prompt` / `turn.steer` carry the user's own words here rather than
-    /// in `message`: an array of content blocks in the same shape
+    /// in `message`: a string or array of content blocks in the same shape
     /// `message.content` uses.
     ///
-    /// Evidence: the upstream ctx adapter classifies `turn.prompt` /
-    /// `turn.steer` as user-role message events and reads their text from this
-    /// field (`Github_src/ctx/.../kimi.rs:321,351,375`), and its real-shape
-    /// fixture writes exactly that record
-    /// (`{"type":"turn.prompt","input":[{"type":"text","text":...}],"origin":{"kind":"user"}}`).
+    /// Evidence: ctx's `kimi_event_type`, `kimi_event_role` and `kimi_event_text`
+    /// classify these exact types as user messages and read this field. Its
+    /// shape fixture uses text blocks; its tests also construct string input.
+    /// See `tests/golden/PROVENANCE.md` for immutable source links and the
+    /// shape-only observations; no upstream fixture bytes are copied.
     #[serde(default)]
     input: Option<serde_json::Value>,
 }
@@ -72,7 +73,7 @@ impl ProviderAdapter for KimiCodeAdapter {
     fn manifest(&self) -> AdapterManifest {
         manifest_for(
             self.provider_id(),
-            Some(1),
+            Some(2),
             &[
                 "context.append_loop_event records (step/tool events) are not parsed: they are tool activity rather than messages, and wire.jsonl carries no per-message native id to anchor them to",
                 "session id is rarely carried in wire.jsonl; session_native_id is usually left unset",
@@ -109,6 +110,8 @@ impl ProviderAdapter for KimiCodeAdapter {
         let mut json_lines = 0usize;
         let mut append_message_records = 0usize;
         let mut conversational = 0usize;
+        let mut turn_input_records = 0usize;
+        let mut conversational_turns = 0usize;
 
         for &(line_no, line) in &sample {
             match serde_json::from_str::<serde_json::Value>(line) {
@@ -127,6 +130,15 @@ impl ProviderAdapter for KimiCodeAdapter {
                         if matches!(role, "user" | "assistant") {
                             conversational += 1;
                         }
+                    } else if matches!(t, "turn.prompt" | "turn.steer")
+                        && let Some(input) = v
+                            .get("input")
+                            .filter(|input| input.is_string() || input.is_array())
+                    {
+                        turn_input_records += 1;
+                        if !kimi_content_texts(input).trim().is_empty() {
+                            conversational_turns += 1;
+                        }
                     }
                 }
                 Err(_) => {
@@ -144,23 +156,33 @@ impl ProviderAdapter for KimiCodeAdapter {
 
         matched.push(format!("{json_lines} sampled lines are valid JSON"));
 
-        // Kimi wire.jsonl is distinct: context.append_message / context.append_loop_event.
-        // Refuse if no Kimi-specific type markers present.
-        if append_message_records == 0 {
+        // Only supported message discriminators provide Kimi evidence. Turn records
+        // additionally require the string/array input shape the parser handles.
+        if append_message_records == 0 && turn_input_records == 0 {
             return Err(ProviderError::AmbiguousVariant(
-                "no Kimi context.append_message records found in sampled lines".into(),
+                "no supported Kimi message or turn input records found in sampled lines".into(),
             ));
         }
 
-        let confidence = if conversational > 0 {
+        if append_message_records > 0 {
+            if conversational > 0 {
+                matched.push(format!(
+                    "{append_message_records} append_message records, {conversational} conversational"
+                ));
+            } else {
+                matched.push(format!(
+                    "{append_message_records} append_message records found"
+                ));
+            }
+        }
+        if turn_input_records > 0 {
             matched.push(format!(
-                "{append_message_records} append_message records, {conversational} conversational"
+                "{turn_input_records} turn.prompt/turn.steer records with string/array input, {conversational_turns} with nonempty text"
             ));
+        }
+        let confidence = if conversational > 0 || conversational_turns > 0 {
             Confidence::Confirmed
         } else {
-            matched.push(format!(
-                "{append_message_records} append_message records found"
-            ));
             Confidence::High
         };
 
@@ -314,7 +336,7 @@ mod tests {
         assert_eq!(manifest.capabilities.provider_id, adapter.provider_id());
         assert_eq!(manifest.capabilities.variant_id, VARIANT_ID);
         assert!(manifest.last_certified_targets.is_empty());
-        assert_eq!(manifest.fixture_revision, Some(1));
+        assert_eq!(manifest.fixture_revision, Some(2));
     }
 
     struct CountSink {
@@ -352,6 +374,264 @@ mod tests {
         let adapter = KimiCodeAdapter::new();
         let fixture = "{\"foo\":1}\n{\"bar\":2}\n";
         assert!(adapter.probe(fixture.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn probe_confirms_exact_turn_records_with_supported_text() {
+        let adapter = KimiCodeAdapter::new();
+        let cases = [
+            (
+                serde_json::json!(" \tprompt 会话🚀 \n"),
+                " \tprompt 会话🚀 \n",
+            ),
+            (
+                serde_json::json!([
+                    {"type": "text", "text": "first"},
+                    {"type": "text", "text": " second "}
+                ]),
+                "first\n second ",
+            ),
+            (
+                serde_json::json!([
+                    {"text": ""}, {"type": "image"}, 42,
+                    {"text": " part "}, null, {"text": 7}, {"text": "end"}
+                ]),
+                " part \nend",
+            ),
+            (serde_json::json!("body\u{feff}text"), "body\u{feff}text"),
+        ];
+        for kind in ["turn.prompt", "turn.steer"] {
+            for (input, text) in &cases {
+                let bytes = serde_json::to_vec(&serde_json::json!({
+                    "type": kind, "input": input
+                }))
+                .unwrap();
+                let result = adapter.probe(&bytes).unwrap();
+                assert_eq!(result.variant_id, VARIANT_ID);
+                assert_eq!(result.confidence, Confidence::Confirmed, "{kind}");
+                assert!(result.unmatched_evidence.is_empty());
+                let mut sink = RoleTextSink::default();
+                let report = adapter.parse(&bytes, &mut sink).unwrap();
+                assert_eq!(report.committed, 1);
+                assert_eq!(report.skipped, 0);
+                assert_eq!(sink.seen, vec![("user".into(), text.to_string())]);
+            }
+        }
+    }
+
+    #[test]
+    fn probe_requires_supported_turn_input_shape() {
+        let adapter = KimiCodeAdapter::new();
+        for kind in ["turn.prompt", "turn.steer"] {
+            for record in [
+                serde_json::json!({"type": kind}),
+                serde_json::json!({"type": kind, "input": null}),
+                serde_json::json!({"type": kind, "input": false}),
+                serde_json::json!({"type": kind, "input": 42}),
+                serde_json::json!({"type": kind, "input": {"text": "not an input block array"}}),
+                serde_json::json!({"type": kind, "message": {"role": "user", "content": "wrong location"}}),
+                serde_json::json!({"type": kind, "data": {"input": [{"text": "wrong location"}]}}),
+            ] {
+                let bytes = serde_json::to_vec(&record).unwrap();
+                assert!(
+                    matches!(
+                        adapter.probe(&bytes),
+                        Err(ProviderError::AmbiguousVariant(_))
+                    ),
+                    "{record}"
+                );
+                let mut sink = RoleTextSink::default();
+                let report = adapter.parse(&bytes, &mut sink).unwrap();
+                assert_eq!(report.committed, 0);
+                assert_eq!(report.skipped, 0);
+                assert!(sink.seen.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn probe_keeps_textless_turn_input_at_high_confidence() {
+        let adapter = KimiCodeAdapter::new();
+        for kind in ["turn.prompt", "turn.steer"] {
+            for input in [
+                serde_json::json!(""),
+                serde_json::json!(" \t\n"),
+                serde_json::json!([]),
+                serde_json::json!([{ "text": "" }, { "text": " \t" }]),
+                serde_json::json!([null, 42, "not a text block", {"text": 7}, {"type": "image"}]),
+            ] {
+                let bytes = serde_json::to_vec(&serde_json::json!({
+                    "type": kind, "input": input
+                }))
+                .unwrap();
+                let probe = adapter.probe(&bytes).unwrap();
+                assert_eq!(probe.confidence, Confidence::High, "{kind}: {input}");
+                let mut sink = RoleTextSink::default();
+                let report = adapter.parse(&bytes, &mut sink).unwrap();
+                assert_eq!(report.committed, 0);
+                assert_eq!(report.skipped, 0);
+                assert!(sink.seen.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn probe_rejects_unknown_and_similar_turn_discriminators() {
+        let adapter = KimiCodeAdapter::new();
+        for kind in [
+            "",
+            "turn",
+            "turn.",
+            "turn.Prompt",
+            "Turn.prompt",
+            "turn.prompted",
+            "turn.prompt.extra",
+            "turn.prompt ",
+            " turn.prompt",
+            "turn.steering",
+            "turn.steer.extra",
+            "turn.steer ",
+            "context.append_loop_event",
+            "metadata",
+        ] {
+            let bytes = serde_json::to_vec(&serde_json::json!({
+                "type": kind, "input": [{"type": "text", "text": "not a supported turn"}]
+            }))
+            .unwrap();
+            assert!(
+                matches!(
+                    adapter.probe(&bytes),
+                    Err(ProviderError::AmbiguousVariant(_))
+                ),
+                "{kind}"
+            );
+        }
+        for record in [
+            serde_json::json!(null),
+            serde_json::json!([]),
+            serde_json::json!(true),
+            serde_json::json!(42),
+            serde_json::json!("turn.prompt"),
+            serde_json::json!({"input": "no discriminator"}),
+            serde_json::json!({"type": ["turn.prompt"], "input": "not a string discriminator"}),
+        ] {
+            assert!(matches!(
+                adapter.probe(&serde_json::to_vec(&record).unwrap()),
+                Err(ProviderError::AmbiguousVariant(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn probe_sampling_bound_counts_nonblank_records() {
+        let adapter = KimiCodeAdapter::new();
+        for kind in ["turn.prompt", "turn.steer"] {
+            let candidate = format!(r#"{{"type":"{kind}","input":[{{"text":"sampled text"}}]}}"#);
+            for noise in ["{\"type\":\"metadata\"}\n \t\r\n", "not json\n\n"] {
+                let inside = format!("\n{}{}", noise.repeat(SAMPLE_LINE_LIMIT - 1), candidate);
+                assert_eq!(
+                    adapter.probe(inside.as_bytes()).unwrap().confidence,
+                    Confidence::Confirmed
+                );
+                let outside = format!("\n{}{}", noise.repeat(SAMPLE_LINE_LIMIT), candidate);
+                assert!(matches!(
+                    adapter.probe(outside.as_bytes()),
+                    Err(ProviderError::AmbiguousVariant(_))
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn probe_preserves_bom_utf8_and_broken_line_tolerance() {
+        let adapter = KimiCodeAdapter::new();
+        for kind in ["turn.prompt", "turn.steer"] {
+            let record = format!(r#"{{"type":"{kind}","input":"text with \ufeff inside"}}"#);
+            let with_bom = format!("\u{feff}{record}\r\n");
+            assert_eq!(
+                adapter.probe(with_bom.as_bytes()).unwrap().confidence,
+                Confidence::Confirmed
+            );
+            let mixed = format!("\u{feff}not json\r\n \t\r\n{record}\r\n");
+            let probe = adapter.probe(mixed.as_bytes()).unwrap();
+            assert_eq!(probe.confidence, Confidence::Confirmed);
+            assert_eq!(probe.unmatched_evidence, ["line 1: not valid JSON"]);
+            for misplaced in [
+                format!("\u{feff}\u{feff}{record}\n"),
+                format!("{{\"type\":\"metadata\"}}\n\u{feff}{record}\n"),
+            ] {
+                assert!(matches!(
+                    adapter.probe(misplaced.as_bytes()),
+                    Err(ProviderError::AmbiguousVariant(_))
+                ));
+            }
+            // Byte probe still validates UTF-8 even beyond its JSON line sample.
+            let mut invalid =
+                format!("{record}\n{}", "{}\n".repeat(SAMPLE_LINE_LIMIT)).into_bytes();
+            invalid.push(0xff);
+            assert!(matches!(
+                adapter.probe(&invalid),
+                Err(ProviderError::StructuralFatal(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn probe_preserves_append_message_confidence() {
+        let adapter = KimiCodeAdapter::new();
+        for (message, confidence, evidence) in [
+            (
+                serde_json::json!(null),
+                Confidence::High,
+                "1 append_message records found",
+            ),
+            (
+                serde_json::json!({"role": "system", "content": "not conversational"}),
+                Confidence::High,
+                "1 append_message records found",
+            ),
+            (
+                serde_json::json!({"role": "user"}),
+                Confidence::Confirmed,
+                "1 append_message records, 1 conversational",
+            ),
+            (
+                serde_json::json!({"role": "assistant", "content": ""}),
+                Confidence::Confirmed,
+                "1 append_message records, 1 conversational",
+            ),
+        ] {
+            let bytes = serde_json::to_vec(&serde_json::json!({
+                "type": "context.append_message", "message": message
+            }))
+            .unwrap();
+            let probe = adapter.probe(&bytes).unwrap();
+            assert_eq!(probe.confidence, confidence);
+            assert_eq!(
+                probe.matched_evidence,
+                ["1 sampled lines are valid JSON", evidence]
+            );
+        }
+    }
+
+    #[test]
+    fn probe_combines_turn_and_append_message_evidence() {
+        let bytes = concat!(
+            "{\"type\":\"context.append_message\",\"message\":{\"role\":\"system\"}}\n",
+            "{\"type\":\"turn.prompt\",\"input\":[{\"text\":\"supported prompt\"}]}\n",
+            "{\"type\":\"turn.steer\",\"input\":[]}\n",
+        )
+        .as_bytes();
+        let probe = KimiCodeAdapter::new().probe(bytes).unwrap();
+        assert_eq!(probe.confidence, Confidence::Confirmed);
+        assert_eq!(
+            probe.matched_evidence,
+            [
+                "3 sampled lines are valid JSON",
+                "1 append_message records found",
+                "2 turn.prompt/turn.steer records with string/array input, 1 with nonempty text",
+            ]
+        );
     }
 
     /// 记录 role/text 的最小 sink（本模块单测用；golden 集成测试各有自己的）。

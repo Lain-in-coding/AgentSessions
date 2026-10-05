@@ -64,7 +64,7 @@ fn parse_never_mutates_source_bytes() {
 
 #[test]
 fn golden_provenance_revision_matches_manifest() {
-    assert_eq!(GrokBuildAdapter::new().manifest().fixture_revision, Some(1));
+    assert_eq!(GrokBuildAdapter::new().manifest().fixture_revision, Some(2));
 }
 
 #[test]
@@ -264,4 +264,149 @@ fn print_actual_object_content_canonical_output_for_regeneration() {
         serde_json::to_string_pretty(&golden::canonical_json(&hash, &report, &sink.messages))
             .unwrap()
     );
+}
+
+#[test]
+fn prompt_ids_are_turn_keys_not_session_identity() {
+    for turns in [2, 3, 5] {
+        let mut bytes = Vec::new();
+        for turn in 0..turns {
+            for (kind, content, meta) in [
+                (
+                    "user_message_chunk",
+                    format!("question {turn}"),
+                    serde_json::json!({"promptIndex": turn, "promptId": format!("turn-{turn}")}),
+                ),
+                (
+                    "agent_message_chunk",
+                    format!("answer {turn}"),
+                    serde_json::json!({"promptId": format!("turn-{turn}")}),
+                ),
+            ] {
+                let record = serde_json::json!({
+                    "params": {
+                        "update": {"sessionUpdate": kind, "content": content},
+                        "_meta": meta
+                    }
+                });
+                bytes.extend_from_slice(record.to_string().as_bytes());
+                bytes.push(b'\n');
+            }
+        }
+        let (report, sink) = parse_fixture(&bytes);
+        assert_eq!(report.committed, turns * 2);
+        assert_eq!(report.skipped, 0);
+        assert_eq!(report.session_native_id, None, "turns={turns}");
+        assert_eq!(report.session_observation, Default::default());
+        assert!(report.diagnostics.is_empty());
+        for (seq, message) in sink.messages.iter().enumerate() {
+            assert_eq!(message.seq as usize, seq);
+            assert_eq!(
+                message.text,
+                format!(
+                    "{} {}",
+                    if seq % 2 == 0 { "question" } else { "answer" },
+                    seq / 2
+                )
+            );
+            assert!(message.native_id.is_empty());
+        }
+    }
+}
+
+#[test]
+fn assistant_whitespace_chunks_survive_composition() {
+    for shape in ["string", "object", "array"] {
+        let mut bytes = Vec::new();
+        for chunk in ["\t", "alpha", " \n ", "omega", "\t"] {
+            let content = match shape {
+                "string" => serde_json::json!(chunk),
+                "object" => serde_json::json!({"type": "text", "text": chunk}),
+                "array" => serde_json::json!([{"type": "text", "text": chunk}]),
+                _ => unreachable!(),
+            };
+            let record = serde_json::json!({
+                "params": {
+                    "update": {"sessionUpdate": "agent_message_chunk", "content": content},
+                    "_meta": {"promptId": "synthetic-turn"}
+                }
+            });
+            bytes.extend_from_slice(record.to_string().as_bytes());
+            bytes.push(b'\n');
+        }
+        let (report, sink) = parse_fixture(&bytes);
+        assert_eq!(report.committed, 1);
+        assert_eq!(report.skipped, 0);
+        assert_eq!(sink.messages[0].text, "\talpha \n omega\t", "shape={shape}");
+        let (start, end) = sink.messages[0].span.expect("first chunk span");
+        assert_eq!(start, 0, "leading whitespace is part of the message");
+        let first_line_end = bytes.iter().position(|byte| *byte == b'\n').unwrap();
+        assert_eq!(end as usize, first_line_end, "never span multiple records");
+    }
+}
+
+const CONVERSATION_FIXTURE_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/golden/conversation-fidelity.jsonl"
+);
+const CONVERSATION_EXPECTED_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/golden/conversation-fidelity.expected.json"
+);
+
+#[test]
+fn conversation_fidelity_golden_preserves_whitespace_and_rewind() {
+    let expected = golden::read_expected(CONVERSATION_EXPECTED_PATH);
+    let bytes = golden::read_fixture_verified(CONVERSATION_FIXTURE_PATH, &expected);
+    let (report, sink) = parse_fixture(&bytes);
+    let hash = blake3::hash(&bytes).to_hex().to_string();
+    assert_eq!(
+        golden::canonical_json(&hash, &report, &sink.messages),
+        expected
+    );
+    assert_eq!(report.session_observation, Default::default());
+    assert!(report.diagnostics.is_empty());
+
+    let mut source_sink = CapturingSink::default();
+    let source_report = assert_read_only(&bytes, |bytes| {
+        GrokBuildAdapter::new().parse_source(
+            &agent_session_grep_ports::SliceSource::new(bytes),
+            &mut source_sink,
+        )
+    })
+    .expect("bounded source parse");
+    assert_eq!(
+        golden::canonical_json(&hash, &source_report, &source_sink.messages),
+        expected
+    );
+    assert_eq!(
+        source_report.session_observation,
+        report.session_observation
+    );
+    assert_eq!(source_report.diagnostics, report.diagnostics);
+    assert!(source_sink.activities.is_empty());
+    assert!(source_sink.usages.is_empty());
+}
+
+#[test]
+fn only_reconstructed_assistant_whitespace_is_omitted() {
+    for (kind, expected_count) in [("agent_message_chunk", 0), ("user_message_chunk", 1)] {
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "params": {
+                "update": {"sessionUpdate": kind, "content": " \t\n "},
+                "_meta": {"promptIndex": 0, "promptId": "whitespace-turn"}
+            }
+        }))
+        .unwrap();
+        let (report, sink) = parse_fixture(&bytes);
+        assert_eq!(report.committed, expected_count);
+        assert_eq!(sink.messages.len(), expected_count);
+        assert_eq!(report.skipped, 0);
+        assert!(report.diagnostics.is_empty());
+        assert_eq!(report.session_observation, Default::default());
+        if let Some(message) = sink.messages.first() {
+            assert_eq!(message.seq, 0);
+            assert_eq!(message.text, " \t\n ");
+        }
+    }
 }

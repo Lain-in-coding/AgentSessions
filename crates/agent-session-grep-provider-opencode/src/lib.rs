@@ -25,9 +25,9 @@ const SQLITE_MAGIC: &[u8] = b"SQLite format 3\0";
 
 /// OpenCode adapter: parses `opencode.db` (SQLite: session/message/part).
 ///
-/// The adapter writes the byte stream to a temp file and opens it read-only.
-/// This is necessary because rusqlite requires a file path (no in-memory
-/// deserialize in 0.40). The temp file is cleaned up after parsing.
+/// The adapter writes snapshot bytes to an exclusively created temp database
+/// and opens it read-only. Its owned database, sidecars, and directory receive
+/// best-effort cleanup when the temporary database owner drops.
 pub struct OpenCodeAdapter;
 
 impl OpenCodeAdapter {
@@ -277,15 +277,29 @@ fn temp_file_suffix() -> String {
     )
 }
 
-/// Deletes the owned temp SQLite database and sidecars after its connection closes.
-/// A final read-only connection may leave WAL/SHM files behind.
+/// Owns only an exclusively-created directory. Unknown entries keep it alive:
+/// cleanup deliberately removes an empty directory nonrecursively.
+struct TempDirGuard {
+    path: std::path::PathBuf,
+}
+
+impl Drop for TempDirGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir(&self.path);
+    }
+}
+
+/// Constructed only after exclusive DB creation succeeds in the owned namespace.
+/// A final read-only connection can leave sidecars behind. Remove that fixed
+/// group first; the directory guard then removes the now-empty directory.
 struct TempDbGuard {
     path: std::path::PathBuf,
+    _directory: TempDirGuard,
 }
 
 impl Drop for TempDbGuard {
     fn drop(&mut self) {
-        for suffix in ["", "-wal", "-shm"] {
+        for suffix in ["", "-wal", "-shm", "-journal"] {
             let mut owned_file = self.path.as_os_str().to_os_string();
             owned_file.push(suffix);
             let _ = std::fs::remove_file(std::path::Path::new(&owned_file));
@@ -297,9 +311,9 @@ impl Drop for TempDbGuard {
 /// guard that unlinks that copy.
 ///
 /// **Field order is load-bearing.** Struct fields drop in declaration order, so
-/// `conn` closes the database before `_guard` unlinks the file. Windows refuses
-/// to delete a file that is still open and `remove_file`'s error is discarded, so
-/// the reverse order leaks every temp copy silently. A tuple binding
+/// `conn` closes the database before `_guard` removes its file group. On Windows,
+/// handles without delete sharing can block removal; cleanup errors are ignored,
+/// so reversing the order can silently leak the copy. A tuple binding
 /// (`let (conn, guard) = ...`) drops the *later* binding first — i.e. the guard
 /// while the connection is still open — which is exactly the broken order this
 /// struct exists to prevent.
@@ -321,15 +335,78 @@ impl TempDb {
 /// Writes bytes to a temp file, opens with SQLITE_OPEN_READONLY + busy_timeout,
 /// and returns a [`TempDb`] that deletes the temp copy once it goes out of scope.
 fn open_readonly_from_bytes(bytes: &[u8]) -> Result<TempDb, String> {
-    let temp_dir = std::env::temp_dir();
-    let temp_path = temp_dir.join(format!("asg-opencode-{}.db", temp_file_suffix()));
-    let guard = TempDbGuard { path: temp_path };
-    let mut file = std::fs::File::create(&guard.path).map_err(|e| e.to_string())?;
-    file.write_all(bytes).map_err(|e| e.to_string())?;
-    file.sync_all().map_err(|e| e.to_string())?;
-    drop(file);
+    open_readonly_from_bytes_at(bytes, temp_db_path(&std::env::temp_dir()))
+}
 
-    let conn = Connection::open_with_flags(
+fn temp_db_path(root: &std::path::Path) -> std::path::PathBuf {
+    root.join(format!("asg-opencode-{}", temp_file_suffix()))
+        .join("snapshot.db")
+}
+
+fn create_temp_db_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)
+}
+
+fn open_readonly_from_bytes_at(
+    bytes: &[u8],
+    temp_path: std::path::PathBuf,
+) -> Result<TempDb, String> {
+    open_readonly_from_bytes_with(
+        bytes,
+        temp_path,
+        create_temp_db_file,
+        |file, bytes| file.write_all(bytes),
+        std::fs::File::sync_all,
+        |path, flags| Connection::open_with_flags(path, flags),
+    )
+}
+
+// Keep fault injection local to this same production lifecycle, not a copied opener.
+fn open_readonly_from_bytes_with(
+    bytes: &[u8],
+    temp_path: std::path::PathBuf,
+    create_file: impl FnOnce(&std::path::Path) -> std::io::Result<std::fs::File>,
+    write_file: impl FnOnce(&mut std::fs::File, &[u8]) -> std::io::Result<()>,
+    sync_file: impl FnOnce(&std::fs::File) -> std::io::Result<()>,
+    open_db: impl FnOnce(&std::path::Path, OpenFlags) -> rusqlite::Result<Connection>,
+) -> Result<TempDb, String> {
+    let directory = temp_path.parent().expect("temporary DB path has a parent");
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    // Never reuse even an empty directory or a symlink. Windows directory/file
+    // permissions remain inherited ACLs, not an owner-only DACL guarantee.
+    builder
+        .recursive(false)
+        .create(directory)
+        .map_err(|e| e.to_string())?;
+    let directory = TempDirGuard {
+        path: directory.to_path_buf(),
+    };
+    let file = create_file(&temp_path).map_err(|e| e.to_string())?;
+    let guard = TempDbGuard {
+        path: temp_path,
+        _directory: directory,
+    };
+    {
+        // Move, rather than borrow, the handle into a later binding so every
+        // write/sync error closes it before the DB guard starts cleanup.
+        let mut file = file;
+        write_file(&mut file, bytes).map_err(|e| e.to_string())?;
+        sync_file(&file).map_err(|e| e.to_string())?;
+    }
+
+    let conn = open_db(
         &guard.path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
@@ -356,6 +433,600 @@ fn table_exists(conn: &Connection, table_name: &str) -> Result<bool, ProviderErr
 mod tests {
     use super::*;
 
+    mod temp_ownership {
+        use super::*;
+        use std::io::Write;
+        use std::path::{Path, PathBuf};
+
+        struct Case {
+            root: PathBuf,
+            path: PathBuf,
+        }
+
+        impl Case {
+            fn new() -> Self {
+                let root = std::env::temp_dir().join(format!(
+                    "asg-opencode-ownership-test-{}",
+                    temp_file_suffix()
+                ));
+                std::fs::create_dir(&root).expect("exclusive test scratch directory");
+                let path = temp_db_path(&root);
+                Self { root, path }
+            }
+
+            fn occupy_namespace(&self) {
+                let parent = self.path.parent().unwrap();
+                if parent != self.root.as_path() {
+                    std::fs::create_dir(parent).expect("pre-existing candidate namespace");
+                }
+            }
+
+            fn foreign_files(&self, suffixes: &[&str]) -> Vec<(PathBuf, Vec<u8>)> {
+                suffixes
+                    .iter()
+                    .map(|suffix| {
+                        let mut path = self.path.as_os_str().to_os_string();
+                        path.push(suffix);
+                        let path = PathBuf::from(path);
+                        let bytes = format!("foreign {suffix} bytes must survive").into_bytes();
+                        std::fs::write(&path, &bytes).unwrap();
+                        (path, bytes)
+                    })
+                    .collect()
+            }
+        }
+
+        impl Drop for Case {
+            fn drop(&mut self) {
+                // Only this test's exclusively-created scratch tree; all preservation
+                // assertions run before it is removed, including on the RED baseline.
+                let _ = std::fs::remove_dir_all(&self.root);
+            }
+        }
+
+        fn bytes() -> Vec<u8> {
+            create_test_opencode_db()
+        }
+
+        fn assert_conflict_preserved(
+            result: Result<TempDb, String>,
+            foreign: &[(PathBuf, Vec<u8>)],
+        ) {
+            let snapshot = || {
+                foreign
+                    .iter()
+                    .map(|(path, _)| std::fs::read(path).map_err(|error| error.kind()))
+                    .collect::<Vec<_>>()
+            };
+            // Check both while a mistakenly accepted copy could still be alive and
+            // after it has dropped: refusal must neither truncate nor unlink a file.
+            let before_drop = snapshot();
+            let rejected = result.is_err();
+            drop(result);
+            let after_drop = snapshot();
+            let expected: Vec<Result<Vec<u8>, std::io::ErrorKind>> = foreign
+                .iter()
+                .map(|(_, contents)| Ok(contents.clone()))
+                .collect();
+            assert_eq!(
+                (before_drop, after_drop),
+                (expected.clone(), expected),
+                "foreign files changed before or after dropping the result"
+            );
+            assert!(rejected, "an occupied candidate must be rejected");
+        }
+
+        #[test]
+        fn existing_main_and_sidecars_are_preserved() {
+            let case = Case::new();
+            case.occupy_namespace();
+            let foreign = case.foreign_files(&["", "-wal", "-shm", "-journal"]);
+            let result = open_readonly_from_bytes_at(&bytes(), case.path.clone());
+            assert_conflict_preserved(result, &foreign);
+        }
+
+        #[test]
+        fn sidecar_only_namespace_is_preserved() {
+            let case = Case::new();
+            case.occupy_namespace();
+            let foreign = case.foreign_files(&["-wal", "-shm", "-journal"]);
+            assert!(!case.path.exists());
+            let result = open_readonly_from_bytes_at(&bytes(), case.path.clone());
+            assert_conflict_preserved(result, &foreign);
+            assert!(
+                !case.path.exists(),
+                "a refused namespace must not gain a DB"
+            );
+        }
+
+        #[test]
+        fn existing_empty_namespace_is_not_reused() {
+            let case = Case::new();
+            case.occupy_namespace();
+            // Panic closures pin the rejection to the directory layer: a future
+            // implementation that reused the existing directory would reach one
+            // of these seams and fail here instead of passing on an unrelated
+            // earlier error.
+            let result = open_readonly_from_bytes_with(
+                &bytes(),
+                case.path.clone(),
+                |_| panic!("namespace collision must fail before file creation"),
+                |_, _| panic!("namespace collision must fail before writing"),
+                |_| panic!("namespace collision must fail before syncing"),
+                |_, _| panic!("namespace collision must fail before opening"),
+            );
+            let rejected = result.is_err();
+            drop(result);
+            assert!(case.path.parent().unwrap().is_dir());
+            assert!(!case.path.exists());
+            assert!(
+                rejected,
+                "an existing empty directory is not an owned namespace"
+            );
+        }
+
+        #[test]
+        fn failed_file_create_preserves_foreign_sidecars() {
+            let case = Case::new();
+            case.occupy_namespace();
+            std::fs::create_dir(&case.path).unwrap();
+            let foreign = case.foreign_files(&["-wal", "-shm", "-journal"]);
+            let result = open_readonly_from_bytes_at(&bytes(), case.path.clone());
+            assert_conflict_preserved(result, &foreign);
+            assert!(
+                case.path.is_dir(),
+                "the conflicting DB directory must survive"
+            );
+        }
+
+        #[test]
+        fn file_collision_after_namespace_acquisition_is_preserved() {
+            let case = Case::new();
+            let mut foreign = Vec::new();
+            let result = open_readonly_from_bytes_with(
+                &bytes(),
+                case.path.clone(),
+                |path| {
+                    assert_eq!(path, case.path.as_path());
+                    foreign = case.foreign_files(&["", "-wal", "-shm", "-journal"]);
+                    create_temp_db_file(path)
+                },
+                |file, bytes| file.write_all(bytes),
+                std::fs::File::sync_all,
+                |path, flags| Connection::open_with_flags(path, flags),
+            );
+            assert_conflict_preserved(result, &foreign);
+        }
+
+        #[test]
+        fn file_create_error_after_namespace_acquisition_preserves_sidecars() {
+            let case = Case::new();
+            let mut foreign = Vec::new();
+            let result = open_readonly_from_bytes_with(
+                &bytes(),
+                case.path.clone(),
+                |path: &Path| {
+                    // Deterministic real OS create failure, not a permission/umask race.
+                    std::fs::create_dir(path)?;
+                    foreign = case.foreign_files(&["-wal", "-shm", "-journal"]);
+                    create_temp_db_file(path)
+                },
+                |file, bytes| file.write_all(bytes),
+                std::fs::File::sync_all,
+                |path, flags| Connection::open_with_flags(path, flags),
+            );
+            assert_conflict_preserved(result, &foreign);
+            assert!(case.path.is_dir(), "a failed create never owns the DB path");
+        }
+        fn group_path(path: &Path, suffix: &str) -> PathBuf {
+            let mut name = path.as_os_str().to_os_string();
+            name.push(suffix);
+            PathBuf::from(name)
+        }
+
+        fn assert_group_removed(path: &Path) {
+            for suffix in ["", "-wal", "-shm", "-journal"] {
+                assert!(
+                    !group_path(path, suffix).exists(),
+                    "owned SQLite file remained: {suffix}"
+                );
+            }
+        }
+
+        fn assert_copy_removed(path: &Path) {
+            assert_group_removed(path);
+            assert!(
+                !path.parent().unwrap().exists(),
+                "the empty owned namespace must also be removed"
+            );
+        }
+
+        fn create_non_delete_sharing_file(path: &Path) -> std::io::Result<std::fs::File> {
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::OpenOptionsExt;
+                // A real handle that denies deletion: default File sharing would let a
+                // wrong cleanup-before-close order pass on Windows.
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .share_mode(0)
+                    .open(path)
+            }
+            #[cfg(not(windows))]
+            create_temp_db_file(path)
+        }
+
+        fn assert_io_failure_cleanup(fail_sync: bool) {
+            let case = Case::new();
+            let input = bytes();
+            let message = if fail_sync {
+                "injected sync failure"
+            } else {
+                "injected partial-write failure"
+            };
+            let result = open_readonly_from_bytes_with(
+                &input,
+                case.path.clone(),
+                create_non_delete_sharing_file,
+                |file, bytes| {
+                    file.write_all(if fail_sync { bytes } else { &bytes[..32] })?;
+                    // These sidecars belong to the newly acquired copy namespace.
+                    case.foreign_files(&["-wal", "-shm", "-journal"]);
+                    #[cfg(windows)]
+                    assert!(
+                        std::fs::remove_file(&case.path).is_err(),
+                        "the live test handle must actually prevent deletion"
+                    );
+                    if fail_sync {
+                        Ok(())
+                    } else {
+                        Err(std::io::Error::other(message))
+                    }
+                },
+                |file| {
+                    assert!(fail_sync, "sync must not run after a write error");
+                    file.sync_all()?;
+                    #[cfg(windows)]
+                    assert!(std::fs::remove_file(&case.path).is_err());
+                    // The reported sync error is injected, not an OS disk/sync fault.
+                    // Handle liveness and close-before-cleanup checks use real OS I/O.
+                    Err(std::io::Error::other(message))
+                },
+                |_, _| panic!("SQLite open must not run after a write/sync error"),
+            );
+            let error = result.err().expect("injected I/O failure must propagate");
+            assert_eq!(error, message);
+            assert_copy_removed(&case.path);
+        }
+
+        #[test]
+        fn partial_write_failure_closes_handle_before_cleanup() {
+            assert_io_failure_cleanup(false);
+        }
+
+        #[test]
+        fn sync_failure_closes_handle_before_cleanup() {
+            assert_io_failure_cleanup(true);
+        }
+
+        #[test]
+        fn namespace_file_is_preserved() {
+            let case = Case::new();
+            let namespace = case.path.parent().unwrap().to_path_buf();
+            let contents = b"foreign namespace file".to_vec();
+            std::fs::write(&namespace, &contents).unwrap();
+            let result = open_readonly_from_bytes_at(&bytes(), case.path.clone());
+            assert_conflict_preserved(result, &[(namespace, contents)]);
+        }
+
+        #[test]
+        fn missing_parent_is_not_created_recursively() {
+            let case = Case::new();
+            let missing = case.root.join("missing");
+            let result =
+                open_readonly_from_bytes_at(&bytes(), missing.join("copy").join("snapshot.db"));
+            assert!(result.is_err());
+            drop(result);
+            assert!(!missing.exists());
+        }
+
+        #[test]
+        fn sqlite_open_error_cleans_owned_files_and_directory() {
+            let case = Case::new();
+            let mut reached_open = false;
+            let result = open_readonly_from_bytes_with(
+                &bytes(),
+                case.path.clone(),
+                create_non_delete_sharing_file,
+                |file, bytes| {
+                    file.write_all(bytes)?;
+                    case.foreign_files(&["-wal", "-shm", "-journal"]);
+                    Ok(())
+                },
+                std::fs::File::sync_all,
+                |path, flags| {
+                    reached_open = true;
+                    assert!(path.is_file());
+                    assert_eq!(
+                        flags,
+                        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                    );
+                    #[cfg(windows)]
+                    {
+                        use std::os::windows::fs::OpenOptionsExt;
+                        // The non-sharing write handle must already be closed here.
+                        let file = std::fs::OpenOptions::new()
+                            .read(true)
+                            .share_mode(0)
+                            .open(path)
+                            .unwrap();
+                        drop(file);
+                    }
+                    Err(rusqlite::Error::InvalidQuery)
+                },
+            );
+            assert!(reached_open);
+            let error = result
+                .err()
+                .expect("injected SQLite open failure must propagate");
+            assert_eq!(error, rusqlite::Error::InvalidQuery.to_string());
+            assert_copy_removed(&case.path);
+        }
+
+        #[test]
+        fn malformed_snapshot_query_error_cleans_owned_files_and_directory() {
+            let case = Case::new();
+            let mut sqlite_opened = false;
+            let result = (|| -> Result<bool, ProviderError> {
+                let result = open_readonly_from_bytes_with(
+                    b"not a SQLite database",
+                    case.path.clone(),
+                    create_temp_db_file,
+                    |file, bytes| {
+                        file.write_all(bytes)?;
+                        case.foreign_files(&["-wal", "-shm", "-journal"]);
+                        Ok(())
+                    },
+                    std::fs::File::sync_all,
+                    |path, flags| {
+                        let conn = Connection::open_with_flags(path, flags)?;
+                        sqlite_opened = true;
+                        Ok(conn)
+                    },
+                );
+                let db = result.map_err(ProviderError::StructuralFatal)?;
+                table_exists(&db.conn, "session")
+            })();
+            assert!(
+                sqlite_opened,
+                "this must cover a query failure, not SQLite open"
+            );
+            assert!(matches!(
+                &result,
+                Err(ProviderError::StructuralFatal(message))
+                    if message.starts_with("OpenCode SQLite schema query failed:")
+            ));
+            drop(result);
+            assert_copy_removed(&case.path);
+        }
+
+        #[test]
+        fn successful_copy_preserves_read_policy_and_removes_directory() {
+            let case = Case::new();
+            let db = open_readonly_from_bytes_at(&bytes(), case.path.clone()).unwrap();
+            assert_ne!(case.path.parent().unwrap(), case.root);
+            assert_eq!(
+                db.conn
+                    .query_row("PRAGMA busy_timeout", [], |row| row.get::<_, i64>(0))
+                    .unwrap(),
+                1000
+            );
+            assert!(
+                db.conn.is_autocommit(),
+                "OpenCode must not gain a new transaction policy"
+            );
+            assert!(
+                db.conn
+                    .execute("CREATE TABLE forbidden_write (value INTEGER)", [])
+                    .is_err(),
+                "the private copy must still be opened read-only"
+            );
+            #[cfg(windows)]
+            assert!(
+                std::fs::remove_file(&case.path).is_err(),
+                "a live SQLite connection must actually prevent deletion"
+            );
+            drop(db);
+            assert_copy_removed(&case.path);
+        }
+
+        #[test]
+        fn unknown_entries_survive_owned_group_cleanup() {
+            let case = Case::new();
+            let db = open_readonly_from_bytes_at(&bytes(), case.path.clone()).unwrap();
+            let directory = case.path.parent().unwrap();
+            let unknown = directory.join("unrelated.bin");
+            let unknown_dir = directory.join("unrelated-directory");
+            std::fs::write(&unknown, b"keep unknown bytes").unwrap();
+            std::fs::create_dir(&unknown_dir).unwrap();
+            let nested = unknown_dir.join("keep.bin");
+            std::fs::write(&nested, b"keep nested bytes").unwrap();
+            drop(db);
+            assert_group_removed(&case.path);
+            assert_eq!(std::fs::read(&unknown).unwrap(), b"keep unknown bytes");
+            assert_eq!(std::fs::read(&nested).unwrap(), b"keep nested bytes");
+            assert!(
+                directory.is_dir(),
+                "unknown entries must prevent directory removal"
+            );
+        }
+
+        fn marker_bytes(marker: i64) -> Vec<u8> {
+            let fixture = Case::new();
+            let path = fixture.root.join("source.db");
+            {
+                let writer = Connection::open(&path).unwrap();
+                writer
+                    .execute_batch(
+                        "PRAGMA journal_mode=WAL; CREATE TABLE ownership_marker (value INTEGER);",
+                    )
+                    .unwrap();
+                writer
+                    .execute("INSERT INTO ownership_marker VALUES (?1)", [marker])
+                    .unwrap();
+            }
+            // A closed synthetic WAL-mode database, with its committed pages in main.
+            std::fs::read(&path).unwrap()
+        }
+
+        fn read_marker(db: &TempDb) -> i64 {
+            db.conn
+                .query_row("SELECT value FROM ownership_marker", [], |row| row.get(0))
+                .unwrap()
+        }
+
+        #[test]
+        fn a_second_open_cannot_damage_a_live_copy_or_its_sidecars() {
+            let case = Case::new();
+            let input = marker_bytes(7);
+            let first = open_readonly_from_bytes_at(&input, case.path.clone()).unwrap();
+            assert_eq!(read_marker(&first), 7);
+            let owned: Vec<_> = ["", "-wal", "-shm"]
+                .iter()
+                .map(|suffix| {
+                    let path = group_path(&case.path, suffix);
+                    let contents = std::fs::read(&path).unwrap();
+                    (path, contents)
+                })
+                .collect();
+            let second = open_readonly_from_bytes_at(&input, case.path.clone());
+            assert_conflict_preserved(second, &owned);
+            assert_eq!(read_marker(&first), 7);
+            drop(first);
+            assert_copy_removed(&case.path);
+        }
+
+        #[test]
+        fn concurrent_copies_have_independent_directories_contents_and_lifetimes() {
+            let case = Case::new();
+            let first_bytes = marker_bytes(11);
+            let second_bytes = marker_bytes(22);
+            let start = std::sync::Barrier::new(2);
+            let (first, second) = std::thread::scope(|scope| {
+                let first = scope.spawn(|| {
+                    start.wait();
+                    open_readonly_from_bytes_at(&first_bytes, temp_db_path(&case.root)).unwrap()
+                });
+                let second = scope.spawn(|| {
+                    start.wait();
+                    open_readonly_from_bytes_at(&second_bytes, temp_db_path(&case.root)).unwrap()
+                });
+                (first.join().unwrap(), second.join().unwrap())
+            });
+            let first_path = first.temp_path().to_path_buf();
+            let second_path = second.temp_path().to_path_buf();
+            assert_ne!(first_path, second_path);
+            assert_ne!(first_path.parent(), second_path.parent());
+            assert_eq!(read_marker(&first), 11);
+            assert_eq!(read_marker(&second), 22);
+            drop(first);
+            assert_copy_removed(&first_path);
+            assert!(second_path.is_file());
+            assert_eq!(read_marker(&second), 22);
+            drop(second);
+            assert_copy_removed(&second_path);
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn unix_copy_directory_and_file_have_no_group_or_other_access() {
+            use std::os::unix::fs::PermissionsExt;
+            let case = Case::new();
+            let db = open_readonly_from_bytes_at(&bytes(), case.path.clone()).unwrap();
+            for path in [case.path.as_path(), case.path.parent().unwrap()] {
+                // Stricter inherited umasks may remove owner bits; never change umask
+                // in this shared test process or claim exact owner bits under all masks.
+                assert_eq!(
+                    std::fs::metadata(path).unwrap().permissions().mode() & 0o077,
+                    0
+                );
+            }
+            drop(db);
+            assert_copy_removed(&case.path);
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn unix_existing_directory_symlinks_are_not_followed() {
+            use std::os::unix::fs::symlink;
+            for target_exists in [true, false] {
+                let case = Case::new();
+                let target = case.root.join("foreign-directory");
+                if target_exists {
+                    std::fs::create_dir(&target).unwrap();
+                }
+                let namespace = case.path.parent().unwrap();
+                symlink(&target, namespace).unwrap();
+                let foreign = if target_exists {
+                    case.foreign_files(&["", "-wal", "-shm", "-journal"])
+                } else {
+                    Vec::new()
+                };
+                let result = open_readonly_from_bytes_at(&bytes(), case.path.clone());
+                assert_conflict_preserved(result, &foreign);
+                assert!(
+                    std::fs::symlink_metadata(namespace)
+                        .unwrap()
+                        .file_type()
+                        .is_symlink()
+                );
+                assert_eq!(target.exists(), target_exists);
+            }
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn unix_file_symlinks_after_namespace_acquisition_are_preserved() {
+            use std::os::unix::fs::symlink;
+            for target_exists in [true, false] {
+                let case = Case::new();
+                let target = case.root.join("foreign-target.db");
+                if target_exists {
+                    std::fs::write(&target, b"foreign symlink target").unwrap();
+                }
+                let mut foreign = Vec::new();
+                let result = open_readonly_from_bytes_with(
+                    &bytes(),
+                    case.path.clone(),
+                    |path| {
+                        symlink(&target, path)?;
+                        foreign = case.foreign_files(&["-wal", "-shm", "-journal"]);
+                        create_temp_db_file(path)
+                    },
+                    |file, bytes| file.write_all(bytes),
+                    std::fs::File::sync_all,
+                    |path, flags| Connection::open_with_flags(path, flags),
+                );
+                assert_conflict_preserved(result, &foreign);
+                assert!(
+                    std::fs::symlink_metadata(&case.path)
+                        .unwrap()
+                        .file_type()
+                        .is_symlink()
+                );
+                if target_exists {
+                    assert_eq!(std::fs::read(&target).unwrap(), b"foreign symlink target");
+                } else {
+                    assert!(
+                        !target.exists(),
+                        "exclusive create must not follow a dangling symlink"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn manifest_matches_provider_matrix() {
         let adapter = OpenCodeAdapter::new();
@@ -369,12 +1040,17 @@ mod tests {
     }
 
     fn assert_wal_temp_copy_cleanup(query: &str, should_fail: bool) {
+        let directory =
+            std::env::temp_dir().join(format!("asg-opencode-wal-fixture-{}", temp_file_suffix()));
+        std::fs::create_dir(&directory).unwrap();
+        let directory = TempDirGuard { path: directory };
+        let path = directory.path.join("fixture.db");
+        let file = create_temp_db_file(&path).unwrap();
         let fixture = TempDbGuard {
-            path: std::env::temp_dir().join(format!(
-                "asg-opencode-wal-fixture-{}.db",
-                temp_file_suffix()
-            )),
+            path,
+            _directory: directory,
         };
+        drop(file);
         let writer = Connection::open(&fixture.path).unwrap();
         writer
             .execute_batch(
@@ -399,6 +1075,11 @@ mod tests {
                 sidecar.push(suffix);
                 assert!(std::path::Path::new(&sidecar).exists());
             }
+            #[cfg(windows)]
+            assert!(
+                std::fs::remove_file(&path).is_err(),
+                "the live SQLite connection must prevent premature deletion"
+            );
             copy_path = Some(path);
             // The error case returns while TempDb is still a local owner.
             db.conn.query_row(query, [], |row| row.get(0))
@@ -406,7 +1087,7 @@ mod tests {
         assert_eq!(result.is_err(), should_fail);
         let path = copy_path.unwrap();
         let mut remaining = Vec::new();
-        for suffix in ["", "-wal", "-shm"] {
+        for suffix in ["", "-wal", "-shm", "-journal"] {
             let mut owned_file = path.as_os_str().to_os_string();
             owned_file.push(suffix);
             let owned_file = std::path::Path::new(&owned_file);
@@ -419,6 +1100,10 @@ mod tests {
         assert!(
             remaining.is_empty(),
             "temporary SQLite files leaked: {remaining:?}"
+        );
+        assert!(
+            !path.parent().unwrap().exists(),
+            "the private copy directory must be removed after success or query error"
         );
     }
 

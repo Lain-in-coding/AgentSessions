@@ -9,7 +9,7 @@
 //! `agent_session_grep_testkit::golden`，本文件只保留 kimi 特有的 span↔record
 //! 断言与一个手动再生辅助。
 
-use agent_session_grep_ports::{Confidence, ProviderAdapter};
+use agent_session_grep_ports::{Confidence, ProviderAdapter, SliceSource};
 use agent_session_grep_provider_kimi::KimiCodeAdapter;
 use agent_session_grep_testkit::assert_read_only;
 use agent_session_grep_testkit::golden::{self, CapturingSink};
@@ -19,6 +19,15 @@ const FIXTURE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/ba
 const EXPECTED_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/golden/basic.expected.json"
+);
+
+const TURN_FIXTURE_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/golden/turn-inputs.jsonl"
+);
+const TURN_EXPECTED_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/golden/turn-inputs.expected.json"
 );
 
 /// 解析 fixture：经共享 sink 全字段捕获，返回报告与 sink。
@@ -49,7 +58,7 @@ fn parse_never_mutates_source_bytes() {
 
 #[test]
 fn golden_provenance_revision_matches_manifest() {
-    assert_eq!(KimiCodeAdapter::new().manifest().fixture_revision, Some(1));
+    assert_eq!(KimiCodeAdapter::new().manifest().fixture_revision, Some(2));
 }
 
 #[test]
@@ -81,10 +90,14 @@ fn golden_spans_slice_back_to_exact_source_lines() {
     let expected = golden::read_expected(EXPECTED_PATH);
     let bytes = golden::read_fixture_verified(FIXTURE_PATH, &expected);
     let (_, sink) = parse_fixture(&bytes);
+    assert_source_line_spans(&bytes, &sink);
+}
+
+fn assert_source_line_spans(bytes: &[u8], sink: &CapturingSink) {
     let messages = &sink.messages;
     assert!(!messages.is_empty(), "golden fixture must emit messages");
 
-    let text = std::str::from_utf8(&bytes).expect("fixture is UTF-8");
+    let text = std::str::from_utf8(bytes).expect("fixture is UTF-8");
     let mut line_by_start = std::collections::HashMap::new();
     let mut offset = 0u64;
     for raw in text.split_inclusive('\n') {
@@ -116,18 +129,120 @@ fn golden_spans_slice_back_to_exact_source_lines() {
         // span 指向的必须是"它自己"的记录：type + message.role 与消息角色一致。
         let record: Value =
             serde_json::from_slice(slice).expect("span slice must be a complete JSON record");
-        assert_eq!(
-            record["type"], "context.append_message",
-            "seq={}: span 必须指向 context.append_message 记录",
-            m.seq
-        );
-        assert_eq!(
-            record["message"]["role"].as_str().unwrap_or(""),
-            m.role,
-            "seq={}: span 指向记录的 message.role 必须等于消息角色",
-            m.seq
-        );
+        match record["type"].as_str() {
+            Some("context.append_message") => assert_eq!(
+                record["message"]["role"].as_str().unwrap_or(""),
+                m.role,
+                "seq={}: span must point to the message's own role",
+                m.seq
+            ),
+            Some("turn.prompt" | "turn.steer") => assert_eq!(m.role, "user"),
+            other => panic!(
+                "seq={}: span points to an unsupported record {other:?}",
+                m.seq
+            ),
+        }
     }
+}
+
+#[test]
+fn golden_turn_inputs_probe_without_sampled_append_messages() {
+    let expected = golden::read_expected(TURN_EXPECTED_PATH);
+    let bytes = golden::read_fixture_verified(TURN_FIXTURE_PATH, &expected);
+    // The first append_message is deliberately outside the eight-line probe window.
+    assert!(
+        std::str::from_utf8(&bytes)
+            .unwrap()
+            .lines()
+            .take(8)
+            .all(|line| !line.contains("context.append_message"))
+    );
+    let adapter = KimiCodeAdapter::new();
+    let probe = assert_read_only(&bytes, |bytes| adapter.probe(bytes)).unwrap();
+    assert_eq!(probe.variant_id, "kimi-code/wire-jsonl-v1");
+    assert_eq!(probe.confidence, Confidence::Confirmed);
+    assert_eq!(probe.unmatched_evidence, ["line 7: not valid JSON"]);
+    assert_eq!(
+        probe,
+        assert_read_only(&bytes, |bytes| adapter
+            .probe_source(&SliceSource::new(bytes)))
+        .unwrap()
+    );
+    assert_eq!(std::fs::read(TURN_FIXTURE_PATH).unwrap(), bytes);
+}
+
+#[test]
+fn golden_turn_inputs_pin_parse_and_source_equivalence() {
+    for (fixture_path, expected_path) in [
+        (FIXTURE_PATH, EXPECTED_PATH),
+        (TURN_FIXTURE_PATH, TURN_EXPECTED_PATH),
+    ] {
+        let expected = golden::read_expected(expected_path);
+        let bytes = golden::read_fixture_verified(fixture_path, &expected);
+        let hash = blake3::hash(&bytes).to_hex().to_string();
+        let adapter = KimiCodeAdapter::new();
+        let mut byte_sink = CapturingSink::default();
+        let report =
+            assert_read_only(&bytes, |bytes| adapter.parse(bytes, &mut byte_sink)).unwrap();
+        let mut source_sink = CapturingSink::default();
+        let source_report = assert_read_only(&bytes, |bytes| {
+            adapter.parse_source(&SliceSource::new(bytes), &mut source_sink)
+        })
+        .unwrap();
+        assert_eq!(report, source_report);
+        assert_eq!(
+            golden::canonical_json(&hash, &report, &byte_sink.messages),
+            expected
+        );
+        assert_eq!(
+            golden::canonical_json(&hash, &source_report, &source_sink.messages),
+            expected
+        );
+        assert!(byte_sink.activities.is_empty() && source_sink.activities.is_empty());
+        assert!(byte_sink.usages.is_empty() && source_sink.usages.is_empty());
+        assert_source_line_spans(&bytes, &byte_sink);
+        assert_source_line_spans(&bytes, &source_sink);
+        assert_eq!(std::fs::read(fixture_path).unwrap(), bytes);
+    }
+}
+
+#[test]
+fn turn_input_source_equivalence_preserves_bom_crlf_and_final_line() {
+    let bytes = concat!(
+        "\u{feff}{\"type\":\"turn.prompt\",\"input\":\"  first 会话🚀  \"}\r\n",
+        " \t\r\n",
+        "{\"type\":\"turn.steer\",\"input\":[{\"text\":\"next\"},{\"text\":\" \\ufeff last\\n\"}]}"
+    )
+    .as_bytes();
+    let adapter = KimiCodeAdapter::new();
+    let hash = blake3::hash(bytes).to_hex().to_string();
+    let (report, sink) = parse_fixture(bytes);
+    let mut source_sink = CapturingSink::default();
+    let source_report = assert_read_only(bytes, |bytes| {
+        adapter.parse_source(&SliceSource::new(bytes), &mut source_sink)
+    })
+    .unwrap();
+    assert_eq!(report, source_report);
+    assert_eq!(report.committed, 2);
+    assert_eq!(report.skipped, 0);
+    assert_eq!(sink.messages[0].text, "  first 会话🚀  ");
+    assert_eq!(sink.messages[1].text, "next\n \u{feff} last\n");
+    assert_eq!(
+        golden::canonical_json(&hash, &report, &sink.messages),
+        golden::canonical_json(&hash, &source_report, &source_sink.messages)
+    );
+    assert_eq!(
+        adapter.probe(bytes).unwrap(),
+        adapter.probe_source(&SliceSource::new(bytes)).unwrap()
+    );
+    let first_end = bytes.iter().position(|byte| *byte == b'\r').unwrap();
+    let second_start = bytes.windows(2).rposition(|pair| pair == b"\r\n").unwrap() + 2;
+    assert_eq!(sink.messages[0].span, Some((0, first_end as u64)));
+    assert_eq!(
+        sink.messages[1].span,
+        Some((second_start as u64, bytes.len() as u64))
+    );
+    assert_eq!(&bytes[..3], &[0xef, 0xbb, 0xbf]);
 }
 
 #[test]
@@ -166,14 +281,16 @@ fn tool_activity_stays_unsupported_because_activities_cannot_anchor() {
 /// cargo test -p agent-session-grep-provider-kimi --test golden -- --ignored --nocapture
 /// ```
 #[test]
-#[ignore = "manual regeneration helper — prints canonical JSON for basic.expected.json"]
+#[ignore = "manual regeneration helper — prints canonical JSON for both expected files"]
 fn print_actual_canonical_output_for_regeneration() {
-    let bytes = std::fs::read(FIXTURE_PATH).expect("read basic.jsonl fixture");
-    let hash = blake3::hash(&bytes).to_hex().to_string();
-    let (report, sink) = parse_fixture(&bytes);
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&golden::canonical_json(&hash, &report, &sink.messages))
-            .unwrap()
-    );
+    for fixture_path in [FIXTURE_PATH, TURN_FIXTURE_PATH] {
+        let bytes = std::fs::read(fixture_path).expect("read golden fixture");
+        let hash = blake3::hash(&bytes).to_hex().to_string();
+        let (report, sink) = parse_fixture(&bytes);
+        println!(
+            "{fixture_path}:\n{}",
+            serde_json::to_string_pretty(&golden::canonical_json(&hash, &report, &sink.messages))
+                .unwrap()
+        );
+    }
 }

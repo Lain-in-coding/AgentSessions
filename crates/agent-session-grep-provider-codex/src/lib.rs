@@ -178,10 +178,10 @@ fn codex_line_may_need_deserialize(line: &[u8]) -> bool {
 
 /// Codex rollout JSONL adapter。无状态——所有解析所需信息都来自输入字节。
 ///
-/// **单文件 = 单会话**：一个源文件预期只含一个会话（`session_meta` 的
-/// `session_id`）。若同一文件出现多个不同的 `session_id`（如手工拼接的合并
-/// 文件），全部消息仍归属首个出现的会话（保持既有 first-session 契约），
-/// 解析报告会追加一条多会话诊断（PRD R3.1）。
+/// **Single file = single Session**: select the first current-thread ID from
+/// `session_meta.payload.id` (legacy fallback: `session_id`). Distinct selected
+/// IDs report multi-session ambiguity; a different root `session_id` is not an
+/// additional Session. Messages retain the existing first-session attribution.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct CodexAdapter;
 
@@ -219,7 +219,7 @@ struct RawPayload {
     /// 内层记录类型（`message` / `reasoning` / `custom_tool_call` / …）。
     #[serde(default)]
     r#type: String,
-    /// provider-native 消息 id（`response_item/message` 才有）。
+    /// `response_item/message` 的 native 消息 id；`session_meta` 中则是当前线程 id。
     #[serde(default)]
     id: String,
     /// 角色（`developer` / `user` / `assistant`）。
@@ -232,7 +232,7 @@ struct RawPayload {
     /// 必须先按 payload type 分类再解释。
     #[serde(default)]
     content: Option<serde_json::Value>,
-    /// durable 会话 id（仅 `session_meta` 的 payload 携带）。
+    /// `session_meta` 的根线程 id；只有旧式输入缺少可用 `id` 时作为兼容身份。
     #[serde(default)]
     session_id: Option<String>,
     /// 会话启动时的工作目录（仅 `session_meta` 的 payload 携带且权威；ADR-0009
@@ -281,6 +281,20 @@ struct RawPayload {
 }
 
 impl RawPayload {
+    /// Only session_meta interprets id as the current thread, not a Message ID.
+    /// session_id is the root thread and may legitimately differ for subagents;
+    /// retain session_id-only input support for older adapter fixtures/exports.
+    fn session_meta_id(&self) -> Option<&str> {
+        let id = self.id.trim();
+        if !id.is_empty() {
+            return Some(id);
+        }
+        self.session_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+    }
+
     /// 归一化的调用参数：`function_call` 的 `arguments` 优先，其次
     /// `custom_tool_call` 的 `input`。
     ///
@@ -684,7 +698,7 @@ impl ProviderAdapter for CodexAdapter {
     fn manifest(&self) -> AdapterManifest {
         manifest_for(
             self.provider_id(),
-            Some(1),
+            Some(2),
             &[
                 "tool outputs carry no failure marker, so tool activity status is \
                  success or unknown — never error",
@@ -906,10 +920,8 @@ impl ProviderAdapter for CodexAdapter {
             // session_meta 头携带 durable 会话 id——上报后该行不产生 Canonical 消息；
             // 同时收集全部非空 session id，供末尾的多会话诊断（PRD R3.1）。
             if rec.r#type == "session_meta" {
-                if let Some(sid) = rec.payload.as_ref().and_then(|p| p.session_id.as_deref())
-                    && !sid.trim().is_empty()
-                {
-                    let sid = sid.trim();
+                let sid = rec.payload.as_ref().and_then(RawPayload::session_meta_id);
+                if let Some(sid) = sid {
                     if report.session_native_id.is_none() {
                         report.session_native_id = Some(sid.to_string());
                     }
@@ -917,14 +929,14 @@ impl ProviderAdapter for CodexAdapter {
                         session_ids.push(sid.to_string());
                     }
                     // Resume metadata（ADR-0009）：provider_session_id 取首个非空
-                    // session_id；只有 sid 无 cwd 时目录保持 Missing（显式缺失不臆造）。
+                    // 当前线程 id；只有 sid 无 cwd 时目录保持 Missing（显式缺失不臆造）。
                     if report.session_observation.provider_session_id == MetadataResolution::Missing
                     {
                         report.session_observation.provider_session_id =
                             MetadataResolution::Resolved(sid.to_string());
                     }
                     // Original Working Directory 只从「同一条 session_meta
-                    // payload 同时携带非空 session_id 与 cwd」的首个 pair 观测，
+                    // payload 同时携带非空当前线程 id 与 cwd」的首个 pair 观测，
                     // 且该 pair 必须属于首个会话——其它会话的 cwd 绝不拼接
                     // （R3 保关联）。turn_context 的 cwd 是 turn-scoped，绝不
                     // 作为 working directory（见 RawPayload::cwd 注释）。
@@ -1124,7 +1136,7 @@ mod tests {
         assert_eq!(manifest.capabilities.provider_id, adapter.provider_id());
         assert_eq!(manifest.capabilities.variant_id, VARIANT_ID);
         assert!(manifest.last_certified_targets.is_empty());
-        assert_eq!(manifest.fixture_revision, Some(1));
+        assert_eq!(manifest.fixture_revision, Some(2));
     }
 
     /// 收集 emit 的消息事件，供断言解析结果（含 native 身份/时间）。

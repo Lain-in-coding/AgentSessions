@@ -1,0 +1,34 @@
+{
+  "committed": 2,
+  "fixture_blake3": "971cfac04487e790d35eab52d8d3855e3302099780b83c8628414c98255c57bf",
+  "messages": [
+    {
+      "is_sidechain": false,
+      "native_id": "message-u",
+      "parent_native_id": null,
+      "role": "user",
+      "seq": 0,
+      "span": {
+        "end": 361,
+        "start": 223
+      },
+      "text": "alias user",
+      "timestamp": null
+    },
+    {
+      "is_sidechain": false,
+      "native_id": "message-a",
+      "parent_native_id": null,
+      "role": "assistant",
+      "seq": 1,
+      "span": {
+        "end": 618,
+        "start": 440
+      },
+      "text": "alias assistant",
+      "timestamp": null
+    }
+  ],
+  "session_native_id": "current-thread",
+  "skipped": 0
+}

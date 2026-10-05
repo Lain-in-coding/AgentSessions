@@ -79,7 +79,7 @@ impl ProviderAdapter for OpenClawAdapter {
     fn manifest(&self) -> AdapterManifest {
         manifest_for(
             self.provider_id(),
-            Some(1),
+            Some(2),
             &[
                 "resume is intentionally unsupported (gateway-managed)",
                 "native message ids are not preserved (ids are derived, not native)",
@@ -279,6 +279,19 @@ impl ProviderAdapter for OpenClawAdapter {
                     let content = msg.content.as_ref().unwrap_or(&serde_json::Value::Null);
                     let text = openclaw_content_text(content);
                     if text.trim().is_empty() {
+                        // 合法空内容不算损失；非空或不支持的内容按消息报告，绝不输出块详情。
+                        let empty_content = match content {
+                            serde_json::Value::Null => true,
+                            serde_json::Value::String(value) => value.trim().is_empty(),
+                            serde_json::Value::Array(blocks) => blocks.is_empty(),
+                            _ => false,
+                        };
+                        if !empty_content {
+                            report.skipped += 1;
+                            report
+                                .diagnostics
+                                .push(format!("第 {} 行：消息无可索引文本，已跳过", line_no + 1));
+                        }
                         continue;
                     }
                     let timestamp = msg
@@ -360,7 +373,7 @@ mod tests {
         assert_eq!(manifest.capabilities.provider_id, adapter.provider_id());
         assert_eq!(manifest.capabilities.variant_id, VARIANT_ID);
         assert!(manifest.last_certified_targets.is_empty());
-        assert_eq!(manifest.fixture_revision, Some(1));
+        assert_eq!(manifest.fixture_revision, Some(2));
     }
 
     struct CountSink {

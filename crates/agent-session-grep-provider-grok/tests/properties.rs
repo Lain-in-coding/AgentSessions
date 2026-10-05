@@ -7,7 +7,7 @@
 //! 2. seq 从 0 连续，committed == emit 数 == ground truth 消息数；
 //! 3. 确定性：同一字节两次解析，事件流与报告完全一致；
 //! 4. 元数据透传：role/text 原样、native_id 恒空、无 parent/timestamp/sidechain；
-//! 5. 会话身份：session_native_id 等于首个 agent promptId，multi_session 与 ground truth 一致；
+//! 5. 会话身份：promptId 只分组轮次，不产生原生会话身份或 multi_session 证据；
 //! 6. 坏行只递增 skipped/diagnostics，绝不吞消息、绝不中止解析。
 //!
 //! 另有两个 fuzz 面（同一固定种子纪律）：
@@ -23,7 +23,6 @@
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
-use agent_session_grep_ports::MetadataResolution;
 use agent_session_grep_ports::{
     CanonicalEventSink, Confidence, MessageEvent, ParseReport, ProviderAdapter,
 };
@@ -155,8 +154,7 @@ struct ExpectedMessage {
 struct Case {
     bytes: Vec<u8>,
     expected: Vec<ExpectedMessage>,
-    session_id: Option<String>,
-    multi_session: bool,
+    prompt_id_count: usize,
     malformed: usize,
     merged: bool,
     rewind_hit: bool,
@@ -213,7 +211,7 @@ enum Event {
 }
 
 /// 与生产 `parse_source` 同构的状态机仿真：生成器决定事件语义，仿真决定
-/// ground truth（哪些 chunk 合并成消息、rewind 截断到哪、会话 id 集合）。
+/// ground truth（哪些 chunk 合并成消息、rewind 截断到哪、轮次分组键集合）。
 /// 仿真忠实镜像 adapter 的分支顺序（bash 先于 seen_prompt_index 等），
 /// 因此"生成器想表达什么"与"adapter 实际会产出什么"由同一份逻辑判定。
 struct SimMessage {
@@ -229,7 +227,7 @@ struct Sim {
     pending_user: Option<(Option<u64>, usize)>,
     pending_agent: Option<(String, usize)>,
     seen_prompt_index: bool,
-    session_ids: Vec<String>,
+    prompt_ids: Vec<String>,
     skipped: usize,
     merged: bool,
     rewind_hit: bool,
@@ -279,7 +277,7 @@ impl Sim {
             Event::AgentChunk { key, content } => {
                 self.pending_user = None;
                 let text = content.text();
-                if text.trim().is_empty() {
+                if text.is_empty() {
                     return;
                 }
                 if let Some((pending_id, msg_idx)) = &self.pending_agent
@@ -298,8 +296,8 @@ impl Sim {
                     span_line: rendered_line.to_string(),
                 });
                 self.pending_agent = Some((key.clone(), msg_idx));
-                if !key.is_empty() && !self.session_ids.iter().any(|s| s == key) {
-                    self.session_ids.push(key.clone());
+                if !key.is_empty() && !self.prompt_ids.iter().any(|s| s == key) {
+                    self.prompt_ids.push(key.clone());
                 }
             }
             Event::Rewind { target } => {
@@ -400,9 +398,8 @@ fn build_case(seed: u64, with_big_field: bool) -> Case {
     let mut sim = Sim::default();
     let mut rendered: Vec<String> = Vec::new();
 
-    // Agent chunk 配额 0..=4：20% 的种子没有任何 agent chunk，因此也就没有
-    // 会话 id（grok 的会话 id 只来自 agent 的 promptId）——保证语料覆盖
-    // "有会话 / 无会话"两个分支。
+    // Agent chunk 配额 0..=4：覆盖有/无 promptId 的流；这些键仅分组轮次，
+    // 无论其个数如何，都不能提供原生会话身份或多会话证据。
     let n_agent_quota = rng.below(5);
     let mut agents_emitted = 0usize;
 
@@ -426,7 +423,7 @@ fn build_case(seed: u64, with_big_field: bool) -> Case {
                     content: gen_content(&mut rng),
                 }
             } else if roll < 72 && agents_emitted < n_agent_quota {
-                // Agent chunk：空 promptId 20%（不贡献会话 id），其余 p0..=p7。
+                // Agent chunk：空 promptId 20%（无命名分组键），其余 p0..=p7。
                 agents_emitted += 1;
                 let key = match rng.below(10) {
                     0..=1 => String::new(),
@@ -465,7 +462,11 @@ fn build_case(seed: u64, with_big_field: bool) -> Case {
     }
 
     // 属性前提是"存在有效记录"；极端种子下若一条未生成则强制补一条。
-    if sim.messages.is_empty() {
+    if sim
+        .messages
+        .iter()
+        .all(|m| !m.is_user && m.text.trim().is_empty())
+    {
         let ev = Event::UserChunk {
             key: Some(99),
             content: Content::Text("forced valid record".to_string()),
@@ -492,14 +493,14 @@ fn build_case(seed: u64, with_big_field: bool) -> Case {
         expected: sim
             .messages
             .iter()
+            .filter(|m| m.is_user || !m.text.trim().is_empty())
             .map(|m| ExpectedMessage {
                 role: if m.is_user { "user" } else { "assistant" }.to_string(),
                 text: m.text.clone(),
                 span_line: m.span_line.clone(),
             })
             .collect(),
-        session_id: sim.session_ids.first().cloned(),
-        multi_session: sim.session_ids.len() > 1,
+        prompt_id_count: sim.prompt_ids.len(),
         malformed: sim.skipped,
         merged: sim.merged,
         rewind_hit: sim.rewind_hit,
@@ -624,42 +625,25 @@ fn prop_metadata_survives_verbatim() {
     });
 }
 
-/// 性质 5：session_native_id == 首个 agent promptId；多 id 时 multi_session 置位、
-/// provider_session_id fail-closed 为 Ambiguous；无 id 时保持 Missing。
+/// 性质 5：promptId 是轮次分组键；零个、一个或多个键均不提供会话身份。
 #[test]
 fn prop_session_identity_matches_ground_truth() {
     for_each_seed(|seed, case| {
         let (report, _) = parse_case(seed, &case.bytes);
         assert_eq!(
-            report.session_native_id, case.session_id,
-            "seed={seed}: session_native_id 必须等于首个 agent promptId"
+            report.session_native_id, None,
+            "seed={seed}: promptId is not a durable session id"
         );
         assert_eq!(
-            report.session_observation.multi_session, case.multi_session,
-            "seed={seed}: multi_session 必须与 ground truth 一致"
+            report.session_observation,
+            Default::default(),
+            "seed={seed}: turn keys must not invent session metadata"
         );
-        match (case.session_id.as_deref(), case.multi_session) {
-            (Some(id), false) => assert_eq!(
-                report.session_observation.provider_session_id,
-                MetadataResolution::Resolved(id.to_string()),
-                "seed={seed}: 单会话 provider_session_id 必须 Resolved"
-            ),
-            (Some(_), true) => assert_eq!(
-                report.session_observation.provider_session_id,
-                MetadataResolution::Ambiguous,
-                "seed={seed}: 多会话 provider_session_id 必须 fail-closed 为 Ambiguous"
-            ),
-            (None, _) => assert_eq!(
-                report.session_observation.provider_session_id,
-                MetadataResolution::Missing,
-                "seed={seed}: 无会话 id 时 provider_session_id 必须 Missing"
-            ),
-        }
     });
 }
 
 /// 性质 6：坏行只递增 skipped/diagnostics，绝不吞消息、绝不中止解析。
-/// grok 的 diagnostics 恰好 = 坏行数 +（多会话 ? 1 : 0）。
+/// grok 的 diagnostics 恰好 = 坏行数；多个 promptId 不产生会话诊断。
 #[test]
 fn prop_malformed_lines_only_skip_never_abort() {
     for_each_seed(|seed, case| {
@@ -670,8 +654,8 @@ fn prop_malformed_lines_only_skip_never_abort() {
         );
         assert_eq!(
             report.diagnostics.len(),
-            case.malformed + usize::from(case.multi_session),
-            "seed={seed}: 诊断数必须 = 坏行数 + 多会话诊断"
+            case.malformed,
+            "seed={seed}: 诊断数必须 = 坏行数"
         );
         assert_eq!(
             captured.len(),
@@ -682,32 +666,40 @@ fn prop_malformed_lines_only_skip_never_abort() {
 }
 
 /// 语料覆盖度：64 个固定种子必须实际exercise过合并、rewind 截断、bash 元块、
-/// 坏行与"有/无会话 id"两种分支——防止生成器退化成空转语料。
+/// 坏行与零/单/多轮次分组键——防止生成器退化成空转语料。
 #[test]
 fn prop_corpus_coverage_is_not_degenerate() {
     let mut saw_merged = false;
     let mut saw_rewind = false;
     let mut saw_bash = false;
     let mut saw_malformed = false;
-    let mut saw_session = false;
-    let mut saw_no_session = false;
+    let mut saw_prompt_ids = false;
+    let mut saw_no_prompt_ids = false;
+    let mut saw_multiple_prompt_ids = false;
     for (i, seed) in fixed_seeds().iter().copied().enumerate() {
         let case = build_case(seed, i == 0);
         saw_merged |= case.merged;
         saw_rewind |= case.rewind_hit;
         saw_bash |= case.bash_seen;
         saw_malformed |= case.malformed > 0;
-        saw_session |= case.session_id.is_some();
-        saw_no_session |= case.session_id.is_none();
+        saw_prompt_ids |= case.prompt_id_count > 0;
+        saw_no_prompt_ids |= case.prompt_id_count == 0;
+        saw_multiple_prompt_ids |= case.prompt_id_count > 1;
         assert!(
             !case.expected.is_empty(),
             "seed={seed}: 每个用例必须至少含一条有效消息"
         );
     }
     assert!(
-        saw_merged && saw_rewind && saw_bash && saw_malformed && saw_session && saw_no_session,
+        saw_merged
+            && saw_rewind
+            && saw_bash
+            && saw_malformed
+            && saw_prompt_ids
+            && saw_no_prompt_ids
+            && saw_multiple_prompt_ids,
         "生成器语料退化：merged={saw_merged} rewind={saw_rewind} bash={saw_bash} \
-         malformed={saw_malformed} session={saw_session} no_session={saw_no_session}"
+         malformed={saw_malformed} prompt_ids={saw_prompt_ids} no_prompt_ids={saw_no_prompt_ids} multiple={saw_multiple_prompt_ids}"
     );
 }
 

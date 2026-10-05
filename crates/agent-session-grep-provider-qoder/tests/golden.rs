@@ -49,7 +49,7 @@ fn parse_never_mutates_source_bytes() {
 
 #[test]
 fn golden_provenance_revision_matches_manifest() {
-    assert_eq!(QoderAdapter::new().manifest().fixture_revision, Some(1));
+    assert_eq!(QoderAdapter::new().manifest().fixture_revision, Some(2));
 }
 
 #[test]
@@ -169,4 +169,209 @@ fn print_actual_canonical_output_for_regeneration() {
         serde_json::to_string_pretty(&golden::canonical_json(&hash, &report, &sink.messages))
             .unwrap()
     );
+}
+
+#[test]
+fn metadata_pair_requires_same_record_body_and_selected_session() {
+    use agent_session_grep_ports::MetadataResolution;
+    use serde_json::json;
+    let cases = [
+        (
+            "cwd-only",
+            json!([{"type":"session_meta","cwd":"/stray"}]),
+            None,
+            None,
+            false,
+        ),
+        (
+            "id-then-cwd",
+            json!([{"type":"session_meta","session_id":"sid-a"},{"type":"session_meta","cwd":"/stray"}]),
+            Some("sid-a"),
+            None,
+            false,
+        ),
+        (
+            "cwd-then-id",
+            json!([{"type":"session_meta","cwd":"/stray"},{"type":"session_meta","session_id":"sid-a"}]),
+            Some("sid-a"),
+            None,
+            false,
+        ),
+        (
+            "later-same-session-pair",
+            json!([{"type":"session_meta","session_id":"sid-a"},{"type":"session_meta","session_id":"sid-a","cwd":"/paired"}]),
+            Some("sid-a"),
+            Some("/paired"),
+            false,
+        ),
+        (
+            "later-other-session-pair",
+            json!([{"type":"session_meta","session_id":"sid-a"},{"type":"session_meta","session_id":"sid-b","cwd":"/other"}]),
+            Some("sid-a"),
+            None,
+            true,
+        ),
+        (
+            "mismatched-nested-pair",
+            json!([{"type":"session_meta","session_id":"sid-a","session_meta":{"session_id":"sid-b","cwd":"/other"}}]),
+            Some("sid-a"),
+            None,
+            false,
+        ),
+        (
+            "idless-nested-cwd",
+            json!([{"type":"session_meta","session_id":"sid-a","session_meta":{"cwd":"/stray"}}]),
+            Some("sid-a"),
+            None,
+            false,
+        ),
+        (
+            "nested-id-root-cwd",
+            json!([{"type":"session_meta","cwd":"/stray","session_meta":{"session_id":"sid-a"}}]),
+            Some("sid-a"),
+            None,
+            false,
+        ),
+        (
+            "matching-nested-pair",
+            json!([{"type":"session_meta","session_id":"sid-a","session_meta":{"session_id":"sid-a","cwd":"/paired"}}]),
+            Some("sid-a"),
+            Some("/paired"),
+            false,
+        ),
+        (
+            "nested-pair-not-root-cwd",
+            json!([{"type":"session_meta","session_id":"  ","cwd":"/stray","session_meta":{"session_id":"sid-a","cwd":"/paired"}}]),
+            Some("sid-a"),
+            Some("/paired"),
+            false,
+        ),
+        (
+            "top-level-precedence",
+            json!([{"type":"session_meta","session_id":"sid-a","cwd":"/top","session_meta":{"session_id":"sid-b","cwd":"/nested"}}]),
+            Some("sid-a"),
+            Some("/top"),
+            false,
+        ),
+        (
+            "first-complete-pair",
+            json!([{"type":"session_meta","session_id":"sid-a","cwd":"/first"},{"type":"session_meta","session_id":"sid-a","cwd":"/later"}]),
+            Some("sid-a"),
+            Some("/first"),
+            false,
+        ),
+        (
+            "blank-cwd",
+            json!([{"type":"session_meta","session_id":"sid-a","cwd":" \t "}]),
+            Some("sid-a"),
+            None,
+            false,
+        ),
+        (
+            "trim-pair",
+            json!([{"type":"session_meta","session_id":" sid-a ","cwd":" /paired "}]),
+            Some("sid-a"),
+            Some("/paired"),
+            false,
+        ),
+    ];
+    for (name, records, expected_sid, expected_cwd, multi) in cases {
+        let mut bytes = records
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|record| format!("{record}\n"))
+            .collect::<String>();
+        bytes.push_str("{\"type\":\"user\",\"message\":{\"content\":\"retained body\"}}\n");
+        let (report, sink) = parse_fixture(bytes.as_bytes());
+        assert_eq!(report.session_native_id.as_deref(), expected_sid, "{name}");
+        assert_eq!(report.session_observation.multi_session, multi, "{name}");
+        let expected_id = if multi {
+            MetadataResolution::Ambiguous
+        } else {
+            expected_sid
+                .map(|sid| MetadataResolution::Resolved(sid.to_string()))
+                .unwrap_or_default()
+        };
+        assert_eq!(
+            report.session_observation.provider_session_id, expected_id,
+            "{name}"
+        );
+        assert_eq!(
+            report.session_observation.original_working_directory,
+            expected_cwd
+                .map(|cwd| MetadataResolution::Resolved(cwd.to_string()))
+                .unwrap_or_default(),
+            "{name}"
+        );
+        assert_eq!(
+            report.session_observation.pair_observed,
+            expected_cwd.is_some(),
+            "{name}"
+        );
+        assert_eq!(report.committed, 1, "{name}");
+        assert_eq!(report.skipped, 0, "{name}");
+        assert_eq!(report.diagnostics.len(), usize::from(multi), "{name}");
+        assert_eq!(sink.messages[0].text, "retained body");
+        assert_eq!(sink.messages[0].seq, 0);
+        assert!(sink.messages[0].native_id.is_empty());
+    }
+}
+
+const METADATA_FIXTURE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/golden/metadata-pair.jsonl"
+);
+const METADATA_EXPECTED: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/golden/metadata-pair.expected.json"
+);
+
+#[test]
+fn metadata_pair_golden_and_bounded_source_preserve_evidence() {
+    use agent_session_grep_ports::{MetadataResolution, SliceSource};
+    let expected = golden::read_expected(METADATA_EXPECTED);
+    let bytes = golden::read_fixture_verified(METADATA_FIXTURE, &expected);
+    let (report, sink) = parse_fixture(&bytes);
+    let hash = blake3::hash(&bytes).to_hex().to_string();
+    assert_eq!(
+        golden::canonical_json(&hash, &report, &sink.messages),
+        expected
+    );
+    assert_eq!(
+        report.session_observation.provider_session_id,
+        MetadataResolution::Resolved("pair-session".into())
+    );
+    assert_eq!(
+        report.session_observation.original_working_directory,
+        MetadataResolution::Resolved("/synthetic/paired".into())
+    );
+    assert!(report.session_observation.pair_observed);
+    assert!(!report.session_observation.multi_session);
+    assert!(report.diagnostics.is_empty());
+    let bom_crlf = [
+        b"\xef\xbb\xbf".as_slice(),
+        String::from_utf8(bytes.clone())
+            .unwrap()
+            .replace('\n', "\r\n")
+            .as_bytes(),
+    ]
+    .concat();
+    for variant in [&bytes, &bom_crlf] {
+        let (expected_report, expected_sink) = parse_fixture(variant);
+        let mut actual_sink = CapturingSink::default();
+        let actual_report = assert_read_only(variant, |input| {
+            QoderAdapter::new().parse_source(&SliceSource::new(input), &mut actual_sink)
+        })
+        .unwrap();
+        assert_eq!(
+            actual_report.session_observation,
+            expected_report.session_observation
+        );
+        assert_eq!(actual_report.diagnostics, expected_report.diagnostics);
+        assert_eq!(
+            golden::canonical_json("same-input", &actual_report, &actual_sink.messages),
+            golden::canonical_json("same-input", &expected_report, &expected_sink.messages)
+        );
+    }
 }

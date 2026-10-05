@@ -363,7 +363,8 @@ impl McpServer<'_> {
         match self.call_tool(name, arguments) {
             Ok(payload) => {
                 // ADR-0009: MCP is a cross-boundary output → redact by default.
-                let (mut redacted_payload, redaction) = crate::redaction::redact_value(payload);
+                let (mut redacted_payload, redaction) =
+                    crate::redaction::redact_command_response(name, payload);
                 // 脱敏状态必须随帧上报（08-15-offline-privacy-hooks design D3）：
                 // 与 Robot envelope 同一 `redaction` 块。少了它，调用方无法区分
                 // "服务端涂红了这个值"与"原文逐字就是 [redacted:...]"，也拿不到
@@ -541,12 +542,7 @@ impl McpServer<'_> {
         // 冒充（否则 get_session_context 的上下文装配语义会被错置）。
         let session_id = StableId::from_wire(&wire)
             .filter(|id| id.kind() == IdKind::Session)
-            .ok_or_else(|| {
-                ToolError::Params(format!(
-                    "session_id is not a valid session id: {}",
-                    bounded(&wire)
-                ))
-            })?;
+            .ok_or_else(|| ToolError::Params("session_id is not a valid session id".into()))?;
         let policy = match opt_str(args, "policy")?.as_deref() {
             None | Some("mainline") => ContextPolicy::Mainline,
             Some("full") => ContextPolicy::Full,
@@ -586,12 +582,7 @@ impl McpServer<'_> {
         let wire = required_str(args, "session_id")?;
         let session_id = StableId::from_wire(&wire)
             .filter(|id| id.kind() == IdKind::Session)
-            .ok_or_else(|| {
-                ToolError::Params(format!(
-                    "session_id is not a valid session id: {}",
-                    bounded(&wire)
-                ))
-            })?;
+            .ok_or_else(|| ToolError::Params("session_id is not a valid session id".into()))?;
         self.run_app(AppRequest::GetSessionResume { session_id })
     }
 
@@ -612,22 +603,14 @@ impl McpServer<'_> {
         // 校验：message_id 必须是 Message 实体。
         let message_id = StableId::from_wire(&message_wire)
             .filter(|id| id.kind() == IdKind::Message)
-            .ok_or_else(|| {
-                ToolError::Params(format!(
-                    "message_id is not a valid message id: {}",
-                    bounded(&message_wire)
-                ))
-            })?;
+            .ok_or_else(|| ToolError::Params("message_id is not a valid message id".into()))?;
         let session_id = match opt_str(args, "session_id")? {
             None => None,
             Some(wire) => Some(
                 StableId::from_wire(&wire)
                     .filter(|id| id.kind() == IdKind::Session)
                     .ok_or_else(|| {
-                        ToolError::Params(format!(
-                            "session_id is not a valid session id: {}",
-                            bounded(&wire)
-                        ))
+                        ToolError::Params("session_id is not a valid session id".into())
                     })?,
             ),
         };
@@ -693,6 +676,8 @@ impl McpServer<'_> {
         let filters = opt_filters(args)?;
         let search_limit = limit.unwrap_or(50);
         let app = resume_app(self.store);
+        // Search and the later source/activity/fact reads form one response.
+        let snapshot = self.store.begin_read_snapshot().map_err(business)?;
         // 检索作为装配源：宽松 fetch-all 预算 + 全文级 snippet；pack 预算由
         // 包构建器单一执行（与 CLI handoff 同一约定）。
         let response = app.handle(AppRequest::Search {
@@ -743,6 +728,7 @@ impl McpServer<'_> {
                 }
             })
             .collect();
+        drop(snapshot);
         let pack =
             agent_session_grep_application::handoff_pack::generate_deterministic(HandoffInput {
                 query_terms: std::slice::from_ref(&query),
@@ -769,7 +755,8 @@ impl McpServer<'_> {
                 max_bytes: max_bytes as u64,
                 max_evidence,
                 target: None,
-            });
+            })
+            .map_err(business)?;
         let outcome = if pack.truncation.truncated {
             Outcome::Partial
         } else {
@@ -1251,7 +1238,7 @@ fn error_frame(id: Value, code: i64, message: &str, data: Option<Value>) -> Stri
     let (message, _) = crate::redaction::redact_text(message);
     let mut error = json!({ "code": code, "message": message });
     if let Some(data) = data {
-        error["data"] = data;
+        error["data"] = crate::redaction::redact_value(data).0;
     }
     json!({ "jsonrpc": "2.0", "id": id, "error": error }).to_string()
 }
@@ -1426,6 +1413,7 @@ fn is_valid_jsonrpc_id(id: &Value) -> bool {
 /// 错误消息插值截断（R5）：超长 method/tool/id/参数值回显前截到
 /// [`ECHO_CAP`] 字符，截断处以 "..." 标记。
 fn bounded(value: &str) -> String {
+    let (value, _) = crate::redaction::redact_text(value);
     let mut chars = value.chars();
     let head: String = chars.by_ref().take(ECHO_CAP).collect();
     if chars.next().is_some() {
@@ -1470,6 +1458,23 @@ mod tests {
     use agent_session_grep_adapters_sqlite::SourceBatch;
     use agent_session_grep_domain::{EvidenceSpan, IdKind, MessagePlacement, Stability};
     use agent_session_grep_ports::SearchProvider;
+
+    #[test]
+    fn boundary_mcp_protocol_error_redacts_data_not_id() {
+        let secret = "sk_live_abcdef1234567890xyz";
+        let text = error_frame(
+            json!(secret),
+            INVALID_PARAMS,
+            secret,
+            Some(json!({"canonical_code": "invalid_request", "echo": secret})),
+        );
+        let frame: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(frame["id"], secret);
+        assert_eq!(frame["error"]["message"], "[redacted:stripe_key]");
+        assert_eq!(frame["error"]["data"]["echo"], "[redacted:stripe_key]");
+        assert_eq!(frame["error"]["data"]["canonical_code"], "invalid_request");
+        assert_eq!(bounded(secret), "[redacted:stripe_key]");
+    }
 
     fn open_store(dir: &tempfile::TempDir) -> SqliteStore {
         let path = dir.path().join("mcp-test.db");
@@ -2001,6 +2006,27 @@ mod tests {
                 tool["name"]
             );
             assert!(tool["description"].as_str().is_some_and(|d| !d.is_empty()));
+        }
+    }
+
+    #[test]
+    fn read_snapshot_handoff_releases_after_success_and_error() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let mut server = ready(&store);
+        for (query, is_error) in [("needle".to_string(), false), ("x".repeat(4096), true)] {
+            let response = call(
+                &mut server,
+                "generate_handoff",
+                json!({ "query": query, "max_bytes": 4096 }),
+            );
+            assert_eq!(response["result"]["isError"], is_error, "{response}");
+            let id = StableId::native(
+                IdKind::Message,
+                if is_error { "after-error" } else { "after-ok" },
+            );
+            store
+                .commit_batch(&[(id, br#"{"text":"needle"}"#.to_vec(), "needle".into())])
+                .expect("handoff must release its outer snapshot before the next write");
         }
     }
 

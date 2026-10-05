@@ -20,7 +20,7 @@ use crate::tui::core::{
     SearchHitView, SearchPage,
 };
 use crate::tui::core::{context_lines, hit_lines, resume_lines, status_line, title_line, update};
-use crate::{CliError, render, store_ref};
+use crate::{CliError, render, resume_app};
 use agent_session_grep_adapters_sqlite::SqliteStore;
 use agent_session_grep_application::{
     App, AppError, AppRequest, AppResponse, ContextLevel, ResponseBudget,
@@ -152,6 +152,18 @@ fn key_input(event: Event) -> Option<KeyInput> {
             _ => None,
         };
     }
+    // Only exact Alt shortcuts are actions. Other modified input (except
+    // ordinary Shift text and the Ctrl+C handling above) must not become text.
+    if key.modifiers == KeyModifiers::ALT {
+        return match key.code {
+            KeyCode::Char('m' | 'M') => Some(KeyInput::CycleSidechain),
+            KeyCode::Char('k' | 'K') => Some(KeyInput::CycleToolKind),
+            _ => None,
+        };
+    }
+    if !matches!(key.modifiers, KeyModifiers::NONE | KeyModifiers::SHIFT) {
+        return None;
+    }
     match key.code {
         // 控制字符不是文本：某些终端把 DEL/ESC 之类当 `Char` 上报，打进输入框
         // 后会随查询串一起渲染进终端（见 core.rs `fold_controls`）。这里就地丢弃，
@@ -172,7 +184,7 @@ fn key_input(event: Event) -> Option<KeyInput> {
 /// 执行一个 Effect：构造 [`AppRequest`]（与 main.rs dispatch 同参），把
 /// [`AppResponse`] 投影为平数据 Msg。失败进状态行，绝不向上抛、绝不 panic。
 fn execute(store: &SqliteStore, effect: Effect) -> Msg {
-    let app = App::with_resume(store_ref(store), store_ref(store), store_ref(store));
+    let app = resume_app(store);
     match effect {
         Effect::Search {
             query,
@@ -185,7 +197,7 @@ fn execute(store: &SqliteStore, effect: Effect) -> Msg {
                 limit: SEARCH_PAGE_LIMIT,
                 cursor,
                 budget: ResponseBudget::default(),
-                // Facets come from the pure-core Model toggles (m/k keys).
+                // Facets come from the pure-core Model, not terminal key handling.
                 facets,
                 include_system: false,
                 group_by_session: false,
@@ -433,6 +445,7 @@ fn draw(frame: &mut Frame, model: &Model) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store_ref;
     use agent_session_grep_adapters_sqlite::SourceBatch;
     use agent_session_grep_domain::{IdKind, MessagePlacement, Stability};
     use serde_json::json;
@@ -612,6 +625,186 @@ mod tests {
         );
     }
 
+    #[test]
+    fn key_input_ignores_unbound_modifiers() {
+        for (code, modifiers) in [
+            (KeyCode::Char('x'), KeyModifiers::ALT),
+            (KeyCode::Char('m'), KeyModifiers::ALT | KeyModifiers::SHIFT),
+            (
+                KeyCode::Char('k'),
+                KeyModifiers::ALT | KeyModifiers::CONTROL,
+            ),
+            (KeyCode::Char('m'), KeyModifiers::SUPER),
+            (KeyCode::Char('k'), KeyModifiers::HYPER),
+            (KeyCode::Char('中'), KeyModifiers::META),
+            (KeyCode::Char('k'), KeyModifiers::ALT | KeyModifiers::SUPER),
+            (KeyCode::Enter, KeyModifiers::ALT),
+            (KeyCode::Esc, KeyModifiers::META),
+        ] {
+            assert_eq!(
+                key_input(Event::Key(crossterm::event::KeyEvent::new(code, modifiers))),
+                None,
+                "unbound {modifiers:?} + {code:?} must not become text or an action"
+            );
+        }
+    }
+
+    #[test]
+    fn search_effect_uses_shared_clock_and_current_repo() {
+        const CLOCK: i64 = 1_787_616_000_000; // 2026-08-25T00:00:00Z
+        const REPO: &str = "example.test/tui/current";
+        const CHILD: &str = "ASG_TUI_RANKING_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            // Isolate the existing composition-root hooks; never mutate this
+            // test process's environment or cwd while other tests are running.
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "tui::tests::search_effect_uses_shared_clock_and_current_repo",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(CHILD, "1")
+                .env("ASG_CLOCK_MS", CLOCK.to_string())
+                .env("ASG_CURRENT_REPO", REPO)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "isolated ranking regression failed:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        struct TestRepoResolver;
+        impl agent_session_grep_adapters_sqlite::RepoSlugResolver for TestRepoResolver {
+            fn resolve(&self, cwd: &str) -> Option<String> {
+                match cwd {
+                    "/synthetic/current" => Some(REPO.into()),
+                    "/synthetic/other" => Some("example.test/tui/other".into()),
+                    _ => None,
+                }
+            }
+        }
+        let store = SqliteStore::open_in_memory().unwrap();
+        store.set_repo_slug_resolver(Box::new(TestRepoResolver));
+        let sources: Vec<_> = [
+            (
+                "recent-current",
+                "2026-08-25T00:00:00Z",
+                "/synthetic/current",
+            ),
+            ("recent-other", "2026-08-25T00:00:00Z", "/synthetic/other"),
+            ("old-current", "2026-07-11T00:00:00Z", "/synthetic/current"),
+        ]
+        .into_iter()
+        .map(|(label, timestamp, cwd)| {
+            let session = id(IdKind::Session, label);
+            let mut source = source_batch(
+                label,
+                session.clone(),
+                id(IdKind::Document, label),
+                id(IdKind::Message, label),
+                &[0],
+            );
+            source.entries[0].1 = serde_json::to_vec(&json!({
+                "role": "assistant", "text": "shared TUI message", "timestamp": timestamp,
+            }))
+            .unwrap();
+            source
+                .resume_claims
+                .push(agent_session_grep_ports::SourceResumeClaim {
+                    session_id: session.as_str().into(),
+                    provider_id: "synthetic".into(),
+                    provider_session_id: Some(format!("resume-{label}")),
+                    provider_session_id_state: "resolved".into(),
+                    original_working_directory: Some(cwd.into()),
+                    original_working_directory_state: "resolved".into(),
+                    pair_observed: true,
+                });
+            source
+        })
+        .collect();
+        store.commit_source_batches_if_changed(&sources).unwrap();
+        let request = || AppRequest::Search {
+            query: "shared".into(),
+            filters: SearchFilters::default(),
+            limit: SEARCH_PAGE_LIMIT,
+            cursor: None,
+            budget: ResponseBudget::default(),
+            facets: agent_session_grep_ports::SearchFacets::default(),
+            include_system: false,
+            group_by_session: false,
+            mode: agent_session_grep_ports::RetrievalMode::Lexical,
+            query_embedding: None,
+        };
+        let reference = App::with_resume_and_clock(&store, &store, &store, || CLOCK)
+            .with_current_repo(Some(REPO.into()));
+        let expected = search_msg(reference.handle(request()).unwrap());
+        let ids = |msg: &Msg| -> Vec<String> {
+            let Msg::SearchLoaded(page) = msg else {
+                panic!("expected search results, got {msg:?}");
+            };
+            page.hits.iter().map(|hit| hit.id.clone()).collect()
+        };
+        assert_eq!(
+            ids(&expected),
+            ["recent-current", "recent-other", "old-current"].map(|label| id(
+                IdKind::Message,
+                label
+            )
+            .as_str()
+            .to_string())
+        );
+        // Negative controls: each injected signal must actually affect order,
+        // rather than comparing identical adapters on an insensitive fixture.
+        let no_repo = App::with_resume_and_clock(&store, &store, &store, || CLOCK);
+        assert_ne!(
+            ids(&expected),
+            ids(&search_msg(no_repo.handle(request()).unwrap()))
+        );
+        let later = App::with_resume_and_clock(&store, &store, &store, || CLOCK + 120 * 86_400_000)
+            .with_current_repo(Some(REPO.into()));
+        assert_ne!(
+            ids(&expected),
+            ids(&search_msg(later.handle(request()).unwrap()))
+        );
+
+        let (_, outcome, data, _, _) = crate::dispatch(
+            &store,
+            ":memory:",
+            &["search".into(), "shared".into()],
+            crate::protocol::OutputMode::Json,
+            None,
+            true,
+        )
+        .unwrap();
+        assert_eq!(outcome, Outcome::Success);
+        let cli_ids: Vec<_> = data["hits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|hit| hit["id"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(cli_ids, ids(&expected));
+        for _ in 0..3 {
+            assert_eq!(
+                execute(
+                    &store,
+                    Effect::Search {
+                        query: "shared".into(),
+                        cursor: None,
+                        facets: agent_session_grep_ports::SearchFacets::default(),
+                    }
+                ),
+                expected,
+                "TUI must preserve the same fixed-clock/repo order and scores as the shared App"
+            );
+        }
+    }
+
     /// Render `draw` through ratatui's `TestBackend` and hand back the cell
     /// buffer. This is the only way to exercise the real layout/widget math
     /// without a terminal — the reducer tests cannot catch a panic that lives
@@ -736,21 +929,123 @@ mod tests {
 
     #[test]
     fn key_input_rejects_control_characters() {
-        let press = |code: KeyCode| {
-            key_input(Event::Key(crossterm::event::KeyEvent::new(
-                code,
+        for control in ('\u{0}'..='\u{9f}').filter(|ch| ch.is_control()) {
+            for modifiers in [
                 KeyModifiers::NONE,
-            )))
-        };
-        for control in ['\u{1b}', '\u{7f}', '\u{0}', '\r', '\n', '\t'] {
+                KeyModifiers::SHIFT,
+                KeyModifiers::ALT,
+                KeyModifiers::CONTROL,
+            ] {
+                assert_eq!(
+                    key_input(Event::Key(crossterm::event::KeyEvent::new(
+                        KeyCode::Char(control),
+                        modifiers
+                    ))),
+                    None,
+                    "control char {control:?} must not reach the input box"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn key_input_keeps_text_and_navigation_without_facet_shortcuts() {
+        for modifiers in [KeyModifiers::NONE, KeyModifiers::SHIFT] {
+            for ch in ['m', 'k', 'M', 'K', 'q', 'é', '中', '🦀', '\u{301}'] {
+                assert_eq!(
+                    key_input(Event::Key(crossterm::event::KeyEvent::new(
+                        KeyCode::Char(ch),
+                        modifiers
+                    ))),
+                    Some(KeyInput::Char(ch))
+                );
+            }
+        }
+        for (code, expected) in [
+            (KeyCode::Enter, KeyInput::Enter),
+            (KeyCode::Esc, KeyInput::Esc),
+            (KeyCode::Up, KeyInput::Up),
+            (KeyCode::Down, KeyInput::Down),
+            (KeyCode::PageUp, KeyInput::PgUp),
+            (KeyCode::PageDown, KeyInput::PgDn),
+            (KeyCode::Backspace, KeyInput::Backspace),
+        ] {
             assert_eq!(
-                press(KeyCode::Char(control)),
-                None,
-                "control char {control:?} must not reach the input box"
+                key_input(Event::Key(crossterm::event::KeyEvent::new(
+                    code,
+                    KeyModifiers::NONE
+                ))),
+                Some(expected)
             );
         }
-        assert_eq!(press(KeyCode::Char('中')), Some(KeyInput::Char('中')));
-        assert_eq!(press(KeyCode::Enter), Some(KeyInput::Enter));
+        for ch in ['c', 'C'] {
+            assert_eq!(
+                key_input(Event::Key(crossterm::event::KeyEvent::new(
+                    KeyCode::Char(ch),
+                    KeyModifiers::CONTROL
+                ))),
+                Some(KeyInput::CtrlC)
+            );
+        }
+    }
+
+    #[test]
+    fn key_input_maps_only_alt_m_and_k_to_explicit_facets() {
+        for (ch, expected) in [
+            ('m', KeyInput::CycleSidechain),
+            ('M', KeyInput::CycleSidechain),
+            ('k', KeyInput::CycleToolKind),
+            ('K', KeyInput::CycleToolKind),
+        ] {
+            let translated = key_input(Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Char(ch),
+                KeyModifiers::ALT,
+            )));
+            assert_eq!(translated, Some(expected));
+            let (model, effect) = update(
+                Model {
+                    input: "mk中文🦀".into(),
+                    ..Model::default()
+                },
+                Msg::Key(translated.unwrap()),
+            );
+            assert_eq!(model.input, "mk中文🦀");
+            assert!(effect.is_none());
+            assert_eq!(
+                model.sidechain,
+                if ch.eq_ignore_ascii_case(&'m') {
+                    core::SidechainMode::MainOnly
+                } else {
+                    core::SidechainMode::Include
+                }
+            );
+            assert_eq!(
+                model.tool_kind,
+                if ch.eq_ignore_ascii_case(&'k') {
+                    core::ToolKindMode::File
+                } else {
+                    core::ToolKindMode::Any
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn key_input_ignores_non_press_and_non_key_events() {
+        for (code, modifiers) in [
+            (KeyCode::Char('m'), KeyModifiers::ALT),
+            (KeyCode::Char('k'), KeyModifiers::ALT),
+            (KeyCode::Char('中'), KeyModifiers::NONE),
+            (KeyCode::Char('c'), KeyModifiers::CONTROL),
+            (KeyCode::Enter, KeyModifiers::NONE),
+        ] {
+            for kind in [KeyEventKind::Release, KeyEventKind::Repeat] {
+                let mut key = crossterm::event::KeyEvent::new(code, modifiers);
+                key.kind = kind;
+                assert_eq!(key_input(Event::Key(key)), None);
+            }
+        }
+        assert_eq!(key_input(Event::Resize(80, 24)), None);
     }
 
     #[test]

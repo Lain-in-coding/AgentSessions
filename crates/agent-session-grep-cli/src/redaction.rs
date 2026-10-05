@@ -23,8 +23,109 @@ pub const RULESET_VERSION: &str = agent_session_grep_ports::redact::RULESET_VERS
 /// high-confidence secret patterns. Unknown structure is left intact
 /// (forward-compatible).
 pub fn redact_value(value: serde_json::Value) -> (serde_json::Value, RedactionStatus) {
+    redact_with_identity_paths(value, &[])
+}
+
+/// Redact a command's data projection, preserving only its typed identity leaves.
+/// The command is supplied by dispatch, never inferred from untrusted JSON.
+/// Opaque payloads and unknown commands retain the conservative default scan.
+pub fn redact_command_data(
+    command: &str,
+    data: serde_json::Value,
+) -> (serde_json::Value, RedactionStatus) {
+    redact_with_identity_paths(data, command_identity_paths(command))
+}
+
+/// Redact an internally constructed MCP/HTTP success payload: data/page/warnings.
+/// This is not a JSON-RPC frame or a Robot envelope; their correlation fields are
+/// already handled outside this boundary. Return counts before callers add their
+/// redaction metadata, and do not scan the returned payload a second time.
+pub fn redact_command_response(
+    command: &str,
+    response: serde_json::Value,
+) -> (serde_json::Value, RedactionStatus) {
+    let mut paths: Vec<Vec<&str>> = command_identity_paths(command)
+        .iter()
+        .map(|path| {
+            std::iter::once("data")
+                .chain(path.iter().copied())
+                .collect()
+        })
+        .collect();
+    paths.push(vec!["page", "next_cursor"]);
+    let paths: Vec<&[&str]> = paths.iter().map(Vec::as_slice).collect();
+    redact_with_identity_paths(response, &paths)
+}
+
+/// Exact paths from `render`, ResumeMetadata, HandoffPack and the fixed
+/// `tool_activities_for_messages` projection. `*` matches an array element only.
+/// In particular, `session`, `entity`, every message `payload`, and unknown
+/// tool fields are opaque JSON, not additional sources of trusted identities.
+fn command_identity_paths(command: &str) -> &'static [&'static [&'static str]] {
+    match command {
+        "index" => &[&["id"]],
+        "search" | "search_sessions" => &[&["hits", "*", "id"], &["hits", "*", "session_id"]],
+        "list" | "list_sessions" => &[&["entries", "*", "id"]],
+        "get-session-resume" | "get_session_resume" => &[&["session_id"], &["provider_session_id"]],
+        "resume" => &[&["session_id"]],
+        "get-message" | "get_message" => &[
+            &["message_id"],
+            &["session_id"],
+            &["anchor_placement_id"],
+            &["messages", "*", "id"],
+            &["messages", "*", "placement_id"],
+            &["messages", "*", "message_id"],
+        ],
+        "context" | "get_session_context" => &[
+            &["session_id"],
+            &["branch_leaf"],
+            &["branch_leaf_placement_id"],
+            &["messages", "*", "id"],
+            &["messages", "*", "placement_id"],
+            &["messages", "*", "message_id"],
+            &["evidence", "*", "occurrence_id"],
+            &["evidence", "*", "message_id"],
+            &["evidence", "*", "source_document_id"],
+            &["tool_activities", "*", "activity_id"],
+            &["tool_activities", "*", "message_id"],
+            &["talks", "*", "user_message", "id"],
+            &["talks", "*", "user_message", "placement_id"],
+            &["talks", "*", "user_message", "message_id"],
+            &["talks", "*", "following_messages", "*", "id"],
+            &["talks", "*", "following_messages", "*", "placement_id"],
+            &["talks", "*", "following_messages", "*", "message_id"],
+            &["summary", "first_user_message", "id"],
+            &["summary", "first_user_message", "placement_id"],
+            &["summary", "first_user_message", "message_id"],
+            &["hint", "session_id"],
+        ],
+        "handoff" | "generate_handoff" => &[
+            &["pack_id"],
+            &["matched_sessions", "*", "session_id"],
+            &["mainline", "*", "message_id"],
+            &["mainline", "*", "session_id"],
+            &["evidence", "*", "message_id"],
+            &["evidence", "*", "session_id"],
+            &["evidence", "*", "source_document_id"],
+            &["provenance", "session_id"],
+            &["tool_activity", "*", "activity_id"],
+            &["tool_activity", "*", "message_id"],
+            &["source_locators", "*", "source_document_id"],
+            &["source_locators", "*", "cursor"],
+            &["truncation", "dropped_locators", "*", "source_document_id"],
+            &["truncation", "dropped_locators", "*", "cursor"],
+            &["confidence", "per_session", "*", "session_id"],
+        ],
+        _ => &[],
+    }
+}
+
+fn redact_with_identity_paths(
+    value: serde_json::Value,
+    identity_paths: &[&[&str]],
+) -> (serde_json::Value, RedactionStatus) {
     let mut count = 0u64;
-    let redacted = redact_value_inner(value, &mut count);
+    let redacted = redact_value_inner(value, &mut count, identity_paths);
     let status = if count == 0 {
         RedactionStatus {
             mode: RedactionMode::Default,
@@ -45,7 +146,16 @@ pub fn redact_value(value: serde_json::Value) -> (serde_json::Value, RedactionSt
     (redacted, status)
 }
 
-fn redact_value_inner(value: serde_json::Value, count: &mut u64) -> serde_json::Value {
+fn redact_value_inner(
+    value: serde_json::Value,
+    count: &mut u64,
+    identity_paths: &[&[&str]],
+) -> serde_json::Value {
+    // A path exemption is scalar-only. A container in an identity position
+    // must still be scanned, rather than trusting attacker-controlled children.
+    if value.is_string() && identity_paths.iter().any(|path| path.is_empty()) {
+        return value;
+    }
     match value {
         serde_json::Value::String(s) => {
             if let Some(redacted) = agent_session_grep_ports::redact::redact_string(&s) {
@@ -55,11 +165,17 @@ fn redact_value_inner(value: serde_json::Value, count: &mut u64) -> serde_json::
                 serde_json::Value::String(s)
             }
         }
-        serde_json::Value::Array(arr) => serde_json::Value::Array(
-            arr.into_iter()
-                .map(|v| redact_value_inner(v, count))
-                .collect(),
-        ),
+        serde_json::Value::Array(arr) => {
+            let paths: Vec<&[&str]> = identity_paths
+                .iter()
+                .filter_map(|path| path.strip_prefix(&["*"]))
+                .collect();
+            serde_json::Value::Array(
+                arr.into_iter()
+                    .map(|v| redact_value_inner(v, count, &paths))
+                    .collect(),
+            )
+        }
         serde_json::Value::Object(map) => {
             let mut new_map = serde_json::Map::with_capacity(map.len());
             for (key, val) in map {
@@ -68,7 +184,14 @@ fn redact_value_inner(value: serde_json::Value, count: &mut u64) -> serde_json::
                 let redacted_val = if is_secret_key(&key) {
                     redact_secret_value(val, count)
                 } else {
-                    redact_value_inner(val, count)
+                    let paths: Vec<&[&str]> = identity_paths
+                        .iter()
+                        .filter_map(|path| match path.split_first() {
+                            Some((head, tail)) if *head != "*" && *head == key => Some(tail),
+                            _ => None,
+                        })
+                        .collect();
+                    redact_value_inner(val, count, &paths)
                 };
                 new_map.insert(key, redacted_val);
             }
@@ -99,7 +222,7 @@ fn redact_secret_value(value: serde_json::Value, count: &mut u64) -> serde_json:
         serde_json::Value::Null => value,
         serde_json::Value::Number(_) | serde_json::Value::Bool(_) => value,
         serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
-            redact_value_inner(value, count)
+            redact_value_inner(value, count, &[])
         }
         serde_json::Value::String(s) => {
             if let Some(redacted) = agent_session_grep_ports::redact::redact_string(s) {
@@ -196,6 +319,128 @@ pub fn redact_text(s: &str) -> (String, RedactionStatus) {
 mod tests {
     use super::*;
 
+    #[test]
+    fn command_profiles_preserve_only_typed_leaves_and_count_changes() {
+        let secret = "sk_live_abcdef1234567890xyz";
+        let id = format!("msg_v1_part:{secret}");
+        let message = serde_json::json!({
+            "id": id, "message_id": id, "placement_id": format!("plc_v1_part:{secret}"),
+            "payload": {"id": id, "session_id": secret, "token": "opaque-secret"}
+        });
+        let data = serde_json::json!({
+            "session_id": format!("ses_v1_part:{secret}"), "branch_leaf": id,
+            "messages": [message.clone()],
+            "talks": [{"user_message": message.clone(), "following_messages": [message.clone()]}],
+            "summary": {"first_user_message": message},
+            "tool_activities": [{"activity_id": id, "message_id": id, "target": secret,
+                "payload": {"activity_id": id}}],
+            "session": {"message_id": id}, "unknown": {"messages": [{"id": id}]}
+        });
+        for command in ["context", "get_session_context"] {
+            let (redacted, status) = redact_command_data(command, data.clone());
+            assert_eq!(redacted["branch_leaf"], id);
+            for message in [
+                &redacted["messages"][0],
+                &redacted["talks"][0]["user_message"],
+                &redacted["talks"][0]["following_messages"][0],
+                &redacted["summary"]["first_user_message"],
+            ] {
+                assert_eq!(message["id"], id);
+                assert_eq!(message["message_id"], id);
+                assert!(!message["payload"].to_string().contains(secret));
+                assert_eq!(message["payload"]["token"], "[redacted]");
+            }
+            assert_eq!(redacted["tool_activities"][0]["message_id"], id);
+            assert_eq!(redacted["tool_activities"][0]["activity_id"], id);
+            assert!(
+                !redacted["tool_activities"][0]["payload"]
+                    .to_string()
+                    .contains(secret)
+            );
+            assert!(!redacted["session"].to_string().contains(secret));
+            assert!(!redacted["unknown"].to_string().contains(secret));
+            // Four opaque message copies (three leaves each), two tool leaves,
+            // opaque session and unknown node; typed identity leaves add zero.
+            assert_eq!(status.redacted_count, 16);
+            assert_eq!(status.status, RedactionState::Applied);
+        }
+    }
+
+    #[test]
+    fn command_response_paths_preserve_cursor_without_trusting_nested_page_or_ids() {
+        let secret = "sk_live_abcdef1234567890xyz";
+        let id = format!("msg_v1_part:{secret}");
+        let cursor = format!("cursor:{secret}");
+        let response = serde_json::json!({
+            "command": "search", "outcome": "success",
+            "data": {"hits": [{"id": id, "session_id": id, "text": secret, "token": "opaque-secret"}],
+                "page": {"next_cursor": cursor}},
+            "page": {"next_cursor": cursor, "has_more": true, "unknown": {"id": secret}},
+            "warnings": [secret], "id": secret
+        });
+        for command in ["search", "search_sessions"] {
+            let (redacted, status) = redact_command_response(command, response.clone());
+            assert_eq!(redacted["command"], "search");
+            assert_eq!(redacted["data"]["hits"][0]["id"], id);
+            assert_eq!(redacted["data"]["hits"][0]["session_id"], id);
+            assert_eq!(redacted["page"]["next_cursor"], cursor);
+            assert_eq!(redacted["page"]["has_more"], true);
+            assert!(!redacted["data"]["page"].to_string().contains(secret));
+            assert_eq!(redacted["data"]["hits"][0]["token"], "[redacted]");
+            assert!(!redacted["warnings"].to_string().contains(secret));
+            assert_eq!(status.redacted_count, 6);
+        }
+    }
+
+    #[test]
+    fn identity_exemptions_do_not_match_wrong_shapes_or_unknown_commands() {
+        let secret = "sk_live_abcdef1234567890xyz";
+        for value in [
+            serde_json::json!({"hits": {"*": {"id": secret}}}),
+            serde_json::json!({"hits": [[{"id": secret}]]}),
+            serde_json::json!({"hits": [{"id": {"id": secret}}]}),
+            serde_json::json!({"hits": [{"id": [secret]}]}),
+            serde_json::json!({"unknown": {"hits": [{"id": secret}]}}),
+        ] {
+            let (redacted, status) = redact_command_data("search", value);
+            assert!(!redacted.to_string().contains(secret), "{redacted}");
+            assert_eq!(status.redacted_count, 1);
+        }
+        let data = serde_json::json!({"hits": [{"id": secret}], "token": "opaque-secret"});
+        for command in ["unknown", "show", "get", "doctor", "get_status"] {
+            let (redacted, status) = redact_command_data(command, data.clone());
+            assert!(
+                !redacted.to_string().contains(secret),
+                "{command}: {redacted}"
+            );
+            assert_eq!(redacted["token"], "[redacted]");
+            assert_eq!(status.redacted_count, 2);
+        }
+    }
+
+    #[test]
+    fn native_metadata_identity_is_not_a_global_key_exemption() {
+        let secret = "sk_live_abcdef1234567890xyz";
+        let data = serde_json::json!({
+            "session_id": format!("ses_v1_part:{secret}"), "provider_session_id": secret,
+            "original_working_directory": secret,
+            "unknown": {"provider_session_id": secret}
+        });
+        for command in ["get-session-resume", "get_session_resume"] {
+            let (redacted, status) = redact_command_data(command, data.clone());
+            assert_eq!(redacted["provider_session_id"], secret);
+            assert!(redacted["session_id"].as_str().unwrap().contains(secret));
+            assert_eq!(
+                redacted["original_working_directory"],
+                "[redacted:stripe_key]"
+            );
+            assert!(!redacted["unknown"].to_string().contains(secret));
+            assert_eq!(status.redacted_count, 2);
+        }
+        let (redacted, status) = redact_value(data);
+        assert!(!redacted.to_string().contains(secret));
+        assert_eq!(status.redacted_count, 4);
+    }
     #[test]
     fn redacts_aws_access_key() {
         let val = serde_json::json!({"text": "AKIAIOSFODNN7EXAMPLE"});

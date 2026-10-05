@@ -54,6 +54,23 @@ commit, collaboration, and quality standards below remain in force.
     co-authors, "Generated with ..." footers, or command transcripts to commit
     messages.
 
+## Robot schema test dependency
+
+Rust binaries have no new runtime dependency. The Robot schema gate uses a
+pinned Python test dependency; install it before running the Python helper suite:
+
+```text
+python -m pip install jsonschema==4.26.0
+python -m unittest discover -s scripts -p "test_*.py" -v
+python scripts/verify-robot-schema.py --asg <built-binary>
+```
+
+Pass the binary built from the current checkout explicitly. The gate copies a
+synthetic fixture into isolated temporary state, validates actual Robot 1.1
+response/error/progress frames using the local schema, and refuses remote schema
+retrieval. Missing dependencies or binaries are failures, not skipped tests.
+Historical Robot 1.0 stays frozen; diagnostic frames have fixture-only coverage.
+
 ## Destructive operation policy
 
 Destructive Git and filesystem commands — `git reset --hard`, `git clean -fd`,

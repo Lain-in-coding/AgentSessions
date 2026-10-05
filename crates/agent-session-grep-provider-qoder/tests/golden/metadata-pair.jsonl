@@ -1,0 +1,7 @@
+{"type":"session_meta","cwd":"/synthetic/stray"}
+{"type":"session_meta","session_id":"pair-session"}
+{"type":"session_meta","session_id":"pair-session","session_meta":{"session_id":"other-session","cwd":"/synthetic/other"}}
+{"type":"user","message":{"content":"paired user"}}
+{"type":"session_meta","session_meta":{"session_id":"pair-session","cwd":"/synthetic/paired"}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"paired assistant"}]}}
+{"type":"progress","session_id":"ignored-session","cwd":"/synthetic/ignored"}

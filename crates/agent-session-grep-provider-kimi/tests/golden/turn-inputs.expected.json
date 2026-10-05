@@ -1,0 +1,60 @@
+{
+  "committed": 4,
+  "fixture_blake3": "99adedd116061547381802fdf07d9bff6a5f489ed492a074ffbb050cf9cf3f53",
+  "messages": [
+    {
+      "is_sidechain": false,
+      "native_id": "",
+      "parent_native_id": null,
+      "role": "user",
+      "seq": 0,
+      "span": {
+        "end": 215,
+        "start": 45
+      },
+      "text": "  synthetic prompt 会话🚀\t\nsecond prompt part",
+      "timestamp": null
+    },
+    {
+      "is_sidechain": false,
+      "native_id": "",
+      "parent_native_id": null,
+      "role": "user",
+      "seq": 1,
+      "span": {
+        "end": 481,
+        "start": 389
+      },
+      "text": "\tsteer clarification\n",
+      "timestamp": null
+    },
+    {
+      "is_sidechain": false,
+      "native_id": "",
+      "parent_native_id": null,
+      "role": "assistant",
+      "seq": 2,
+      "span": {
+        "end": 732,
+        "start": 598
+      },
+      "text": "synthetic answer\nsecond answer part",
+      "timestamp": null
+    },
+    {
+      "is_sidechain": false,
+      "native_id": "",
+      "parent_native_id": null,
+      "role": "user",
+      "seq": 3,
+      "span": {
+        "end": 809,
+        "start": 733
+      },
+      "text": "  compatibility string with ﻿ inside  ",
+      "timestamp": null
+    }
+  ],
+  "session_native_id": null,
+  "skipped": 1
+}

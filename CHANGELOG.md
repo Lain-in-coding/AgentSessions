@@ -428,6 +428,114 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Cursor (both SQLite variants), OpenCode and Hermes SQLite parsing now reserve
+  an exclusive per-copy directory before exclusively creating the temporary DB.
+  Existing DB/sidecar namespaces are never truncated, reused or cleaned on a
+  creation conflict. Cleanup authority follows successful creation; write handles
+  and SQLite connections close before fixed owned files are removed, and unknown
+  directory entries remain untouched. Unix creation modes clear group/other permission
+  bits (subject to umask); Windows retains inherited ACLs rather than claiming
+  owner-only DACL enforcement. Cleanup remains best-effort and nonrecursive.
+  Parsing, source bytes, identities, fixture revisions, dependencies and the
+  current parser 7/schema 19 compatibility boundary are unchanged.
+- Codex session metadata now uses `session_meta.payload.id` as the current thread
+  identity, including id-only rollouts. Its `session_id` is the root thread and
+  may legitimately differ; that is not an alias conflict or a second session.
+  Existing session_id-only inputs remain supported, while response-item IDs
+  retain their Message scope. Kimi probes recognize exact `turn.prompt` and
+  `turn.steer` records with supported input rather than requiring a sampled
+  append-message record. Qoder only accepts cwd from a body carrying the selected
+  session ID, never by joining separate SID-only/cwd-only records or other sessions.
+  **Upgrade:** parser version 7 reparses older unchanged sources once; schema stays
+  19. Complete source replacement corrects old identity/cwd claims, so historical
+  Codex Session IDs can change; native Message IDs and source bytes do not.
+  Incomplete scans retain prior evidence until recovery. Rebuild alone cannot
+  repair provider metadata, and lowering parser markers is not a rollback.
+  Provider maturity and tool/reasoning support are unchanged.
+- Grok ACP prompt IDs now remain turn-grouping keys instead of native session
+  identities, so ordinary multi-turn sources no longer fail as ambiguous sessions.
+  Assistant chunks retain leading, trailing and internal whitespace; entirely
+  blank reconstructed assistant messages are omitted without sequence gaps.
+  Rewind behavior and exact first-chunk source evidence are preserved. OpenClaw
+  reports one skipped message with a content-free diagnostic for non-indexable
+  content, while genuine empty content remains a silent no-op. Thinking/reasoning
+  is not indexed, and tool support and provider maturity are unchanged.
+  **Upgrade:** parser version 6 re-ingests older unchanged sources once; schema
+  stays 19. Grok updates-only sessions use document-derived identities and gain
+  no Resume authority. Old prompt-derived session IDs can change after complete
+  source replacement; incomplete scans retain prior evidence until recovery.
+  As with parser 5, downgrade via a matching backup or a fresh re-ingestion, not
+  by lowering markers or running `index rebuild`.
+- Cursor ItemTable message timestamps now normalize proven Unix milliseconds
+  to millisecond-precise UTC. Disk-kv bubble strings preserve their offset and
+  fraction; unsupported numeric bubble times are diagnosed rather than guessed.
+  Cline reads its native integer `ts` milliseconds and one leading document BOM,
+  rejects float/exponent timestamp tokens without rounding, preserves valid
+  legacy string timestamps, and diagnoses numeric compatibility fields whose
+  unit is unknown. Invalid timestamp metadata does not invent an empty time or
+  discard otherwise valid Cline conversation text.
+  **Upgrade:** parser version 5 re-ingests unchanged sources once; schema remains
+  19. Sequential re-ingestion of shared Cursor ItemTable messages reconciles
+  equal decimal/UTC instants only with per-source Document proof, without changing
+  original evidence or stable IDs. Different instants still conflict, even one
+  nanosecond apart or separated by a null observation. Removing the sole updated
+  claimant restores the surviving observations. Source files and provider
+  maturity are unchanged. To downgrade parsing semantics, use a matching catalog
+  backup or re-ingest into a fresh catalog; lowering a parser marker alone is
+  not a rollback. `index rebuild` only refreshes projections, not parser semantics.
+- Semantic/hybrid readiness now matches the selected model, query-vector
+  dimension and live catalog rows. Full message-body changes (including beyond
+  the FTS text cap) invalidate vectors atomically on every public catalog/batch
+  write path. Fallback cursors retain the requested vector and dimension, so
+  changing either cannot silently continue an old page.
+  Existing `index rebuild` removes historical orphan vectors without touching
+  live vectors; use `index embeddings` to regenerate stale-but-live legacy
+  caches. Reads never perform cleanup. No schema/parser bump is required.
+- Source updates now replace their own original projection before deterministic
+  cross-source aggregation. Removing a source restores the surviving projection
+  and regenerates affected compatibility aliases. Source evidence is stored
+  atomically with its durable batch; final text changes/deletion retire vectors
+  in that same transaction.
+  **Upgrade:** catalog schema 19 adds per-source observations; parser version 4
+  reparses unchanged sources. Make a consistent catalog backup before the first
+  writer upgrade. Legacy evidence is not fabricated: old aggregates remain until
+  all live contributors have been re-ingested. An older binary cannot open the
+  upgraded schema; restore a verified pre-upgrade backup rather than lowering
+  the schema version. Historical vector caches require explicit maintenance
+  as described above; per-source migration does not prove their input provenance.
+  Unscoped storage writes now reject source-owned IDs; update or remove them
+  through source replacement so raw evidence and catalog authority cannot diverge.
+- Read requests now pin one SQLite view across generation, search, payload,
+  ownership and resume reads. Human search rows, handoff evidence and doctor
+  counters share the same view; nested scopes release on errors/unwind and
+  refuse writes. Model loading, Git repository discovery and output waits stay
+  outside read scopes. No persisted schema migration is required.
+- Filtered search results now use a Session from a placement matching the
+  requested repository/provider/sidechain conditions, including semantic and
+  hybrid results; Context activity-read failures no longer appear as empty
+  successful activity output.
+  Current-repository scoring uses the same matched Session without changing
+  signal weights. Existing search cursors must restart after this correction;
+  list cursors are unchanged.
+- Resume rejects option-like/unchecked provider session IDs before constructing
+  argv; machine-output execution is refused rather than sharing an interactive
+  provider's terminal streams. Human confirmation and interaction remain.
+  HTTP resume previews no longer change the CLI acknowledgement marker.
+- Model integrity verification now requires a unique size/hash entry for every
+  required content file. Incomplete old manifests must be regenerated and
+  reimported; verification alone does not prove model inference works.
+- Handoff generation enforces its content-byte budget after all metadata is
+  finalized, reports Low confidence without retained evidence, and rejects
+  irreducible overflow. Tagged identity hashing separates previously colliding
+  filter fields; generated pack IDs change, while the v1 pack schema remains.
+- SQLite source classification reads the complete signature across short reads
+  so a segmented read cannot bypass logical WAL snapshotting.
+- Release quality/build/assembly now check out the same resolved commit;
+  reusable CI includes an explicit Rust 1.90 all-feature compatibility gate.
+- Machine diagnostic warnings retain accurate redaction status while Human
+  diagnostics keep their original text. Synthetic release verification isolates
+  user model caches and checks disabled hooks for empty stdout.
+
 - Live OpenCode/Cursor SQLite ingestion reads committed WAL state through
   bounded read-only backups and preserves distinct sessions and resume claims.
   Parser semantic version 2 reparses prior scans. SQL failures abort ingestion;

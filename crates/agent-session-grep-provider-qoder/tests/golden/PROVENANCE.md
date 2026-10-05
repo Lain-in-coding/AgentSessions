@@ -5,7 +5,9 @@
 
 ## fixture_revision
 
-- `basic.jsonl` — revision 1（2026-08-16 引入）。
+- Provider fixture revision: **2**.
+- `basic.jsonl` — revision 1（2026-08-16 引入，字节与 expected 保持不变）。
+- `metadata-pair.jsonl` — revision 2（同记录、同 body、同 Session 的元数据配对）。
 - 格式修复必须新增 fixture 而非只改 parser（政策 §Provider fixture 要求）。
 
 ## 构造方式
@@ -50,3 +52,22 @@
 行式 JSONL：每个 span 覆盖"某一整行去掉行尾符"，golden 测试
 `golden_spans_slice_back_to_exact_source_lines` 逐字节校验切片并核对记录 `type`
 与消息角色一致。
+
+
+## Revision 2 — paired metadata authority
+
+`metadata-pair.jsonl` is entirely hand-written synthetic data based on the existing
+adapter's supported top-level/nested metadata shapes, not new upstream format
+certification. It starts with cwd-only and SID-only records; a top-level selected
+SID plus a different nested SID/cwd must not create a pair. Only the later nested
+body carrying both the selected SID and cwd supplies authority. User/assistant
+text and spans remain unchanged; progress metadata has no authority.
+
+BLAKE3: `036b8833506e2ed39fc72bbb58770fec0b63a75b91b96778bcebe6a206fc527a`.
+Expected output is independently reviewed for two messages, zero skipped and
+`pair-session`; metadata observations are asserted separately from canonical
+Message JSON. Fourteen synthetic table cases cover cross-record/body/session
+mixing, top-level precedence, matching nested pairs, blank IDs and later complete
+pairs. The golden also covers byte/bounded-source equivalence and BOM/CRLF without
+source mutation. No transcript bytes, real project paths or native identifiers
+were copied. Provider maturity and tool activity support are unchanged.

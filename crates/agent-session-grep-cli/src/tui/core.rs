@@ -20,7 +20,7 @@ pub(crate) enum Screen {
     Context,
 }
 
-/// Search-screen facet cycle (mainline filter). Keys: `m` cycles
+/// Sidechain facet cycle. Alt+M (or `m` in Results) cycles
 /// Include → MainOnly → SubagentOnly → Include.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum SidechainMode {
@@ -56,7 +56,7 @@ impl SidechainMode {
     }
 }
 
-/// Tool-kind cycle for Search facets. Keys: `k` cycles through the closed set.
+/// Tool-kind facet cycle. Alt+K (or `k` in Results) cycles the closed set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum ToolKindMode {
     #[default]
@@ -103,6 +103,8 @@ impl ToolKindMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum KeyInput {
     Char(char),
+    CycleSidechain,
+    CycleToolKind,
     Enter,
     Esc,
     Up,
@@ -191,9 +193,9 @@ pub(crate) struct Model {
     pub resume: Option<ResumeMetadataView>,
     pub scroll: usize,
     pub policy: ContextPolicy,
-    /// Search-screen facet: sidechain filter (cycled with `m`).
+    /// Sidechain filter (Alt+M, or `m` in Results).
     pub sidechain: SidechainMode,
-    /// Search-screen facet: tool-kind filter (cycled with `k`).
+    /// Tool-kind filter (Alt+K, or `k` in Results).
     pub tool_kind: ToolKindMode,
     /// 最近一次错误或提示（如 `no hits`）；渲染进状态行，不弹窗、不退出。
     pub status: Option<String>,
@@ -287,14 +289,13 @@ fn handle_key(mut model: Model, key: KeyInput) -> (Model, Option<Effect>) {
     }
     match model.screen {
         Screen::Search => match key {
-            // Facet cycles only when the input box is empty so typing a query
-            // that contains `m`/`k` is never intercepted.
-            KeyInput::Char('m') if model.input.is_empty() => {
+            // Explicit actions leave every ordinary character available to the editor.
+            KeyInput::CycleSidechain => {
                 model.sidechain = model.sidechain.cycle();
                 model.status = Some(format!("facet sidechain={}", model.sidechain.as_str()));
                 (model, None)
             }
-            KeyInput::Char('k') if model.input.is_empty() => {
+            KeyInput::CycleToolKind => {
                 model.tool_kind = model.tool_kind.cycle();
                 model.status = Some(format!("facet tool_kind={}", model.tool_kind.as_str()));
                 (model, None)
@@ -375,7 +376,7 @@ fn handle_key(mut model: Model, key: KeyInput) -> (Model, Option<Effect>) {
                 _ => (model, None),
             },
             // Re-run current query with cycled facets from Results.
-            KeyInput::Char('m') => {
+            KeyInput::Char('m') | KeyInput::CycleSidechain => {
                 model.sidechain = model.sidechain.cycle();
                 if model.query.trim().is_empty() {
                     model.status = Some(format!("facet sidechain={}", model.sidechain.as_str()));
@@ -393,7 +394,7 @@ fn handle_key(mut model: Model, key: KeyInput) -> (Model, Option<Effect>) {
                 };
                 (model, Some(effect))
             }
-            KeyInput::Char('k') => {
+            KeyInput::Char('k') | KeyInput::CycleToolKind => {
                 model.tool_kind = model.tool_kind.cycle();
                 if model.query.trim().is_empty() {
                     model.status = Some(format!("facet tool_kind={}", model.tool_kind.as_str()));
@@ -726,7 +727,7 @@ pub(crate) fn status_line(model: &Model) -> String {
 pub(crate) fn title_line(model: &Model) -> String {
     match model.screen {
         Screen::Search => format!(
-            "Search - Enter: run  Esc: clear/quit  m: sidechain={}  k: tool={}",
+            "Search - Enter: run  Esc: clear/quit  Alt+M: sidechain={}  Alt+K: tool={}",
             model.sidechain.as_str(),
             model.tool_kind.as_str()
         ),
@@ -839,6 +840,47 @@ mod tests {
     }
 
     // ---- reducer：Search 屏 ----
+
+    #[test]
+    fn search_editor_preserves_literal_m_and_k() {
+        for text in [
+            "m",
+            "k",
+            "mk",
+            "km",
+            "make",
+            "kubernetes",
+            "M K",
+            "mk中文🦀",
+            "中文km",
+        ] {
+            let mut model = Model::default();
+            for ch in text.chars() {
+                let (next, effect) = key(model, KeyInput::Char(ch));
+                assert!(effect.is_none(), "typing {ch:?} must not search");
+                assert_eq!(next.search_facets(), SearchFacets::default());
+                assert!(next.status.is_none(), "typing must not cycle a facet");
+                model = next;
+            }
+            assert_eq!(model.input, text);
+            let (_, effect) = key(model, KeyInput::Enter);
+            assert_eq!(
+                effect,
+                Some(Effect::Search {
+                    query: text.into(),
+                    cursor: None,
+                    facets: SearchFacets::default(),
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn search_help_names_explicit_facet_shortcuts() {
+        let title = title_line(&Model::default());
+        assert!(title.contains("Alt+M: sidechain=all"), "{title}");
+        assert!(title.contains("Alt+K: tool=any"), "{title}");
+    }
 
     #[test]
     fn typing_and_backspace_edit_input() {
@@ -1115,56 +1157,123 @@ mod tests {
 
     #[test]
     fn search_screen_cycles_sidechain_and_tool_kind_facets() {
-        let model = Model::default();
-        assert_eq!(model.sidechain, SidechainMode::Include);
-        assert_eq!(model.tool_kind, ToolKindMode::Any);
-        let (model, effect) = key(model, KeyInput::Char('m'));
-        assert!(effect.is_none());
-        assert_eq!(model.sidechain, SidechainMode::MainOnly);
-        let (model, _) = key(model, KeyInput::Char('m'));
-        assert_eq!(model.sidechain, SidechainMode::SubagentOnly);
-        let (model, _) = key(model, KeyInput::Char('k'));
-        assert_eq!(model.tool_kind, ToolKindMode::File);
-        let facets = model.search_facets();
-        assert_eq!(facets.sidechain, SidechainFacet::SubagentOnly);
-        assert_eq!(facets.tool_kind.as_deref(), Some("file"));
-        // With empty input, m/k are facet keys (not typed). Typing them only
-        // happens once the input is non-empty.
-        let model = typed(Model::default(), "x");
-        let model = typed(model, "m");
-        assert_eq!(model.input, "xm");
-        assert_eq!(model.sidechain, SidechainMode::Include);
-    }
-
-    #[test]
-    fn results_screen_facet_cycle_reissues_search_with_facets() {
-        let model = Model {
-            screen: Screen::Results,
-            query: "rust".into(),
-            hits: vec![SearchHitView {
-                id: "msg_v1_a".into(),
-                score: 1.0,
-                session_id: Some("ses_v1_s".into()),
-                resume_available: false,
-                snippet: String::new(),
-            }],
-            ..Model::default()
-        };
-        let (model, effect) = key(model, KeyInput::Char('m'));
-        assert_eq!(model.sidechain, SidechainMode::MainOnly);
+        for input in ["", "mk中文🦀"] {
+            let mut model = typed(Model::default(), input);
+            for expected in [
+                SidechainMode::MainOnly,
+                SidechainMode::SubagentOnly,
+                SidechainMode::Include,
+            ] {
+                let (next, effect) = key(model, KeyInput::CycleSidechain);
+                assert!(effect.is_none());
+                assert_eq!(next.input, input);
+                assert_eq!(next.sidechain, expected);
+                assert_eq!(next.tool_kind, ToolKindMode::Any);
+                assert_eq!(next.search_facets().sidechain, expected.to_facet());
+                model = next;
+            }
+            for expected in [
+                ToolKindMode::File,
+                ToolKindMode::Command,
+                ToolKindMode::Web,
+                ToolKindMode::Query,
+                ToolKindMode::Unknown,
+                ToolKindMode::Any,
+            ] {
+                let (next, effect) = key(model, KeyInput::CycleToolKind);
+                assert!(effect.is_none());
+                assert_eq!(next.input, input);
+                assert_eq!(next.sidechain, SidechainMode::Include);
+                assert_eq!(next.tool_kind, expected);
+                assert_eq!(next.search_facets().tool_kind, expected.to_filter());
+                model = next;
+            }
+        }
+        let (model, _) = key(typed(Model::default(), "mk"), KeyInput::CycleSidechain);
+        let (model, _) = key(model, KeyInput::CycleToolKind);
+        let (_, effect) = key(model, KeyInput::Enter);
         assert_eq!(
             effect,
             Some(Effect::Search {
-                query: "rust".into(),
+                query: "mk".into(),
                 cursor: None,
                 facets: SearchFacets {
                     sidechain: SidechainFacet::MainOnly,
-                    tool_kind: None,
+                    tool_kind: Some("file".into()),
                     tool_name: None,
                 },
             })
         );
-        assert!(model.hits.is_empty(), "facet cycle clears prior hits");
+    }
+
+    #[test]
+    fn results_screen_facet_cycle_reissues_search_with_facets() {
+        for (action, sidechain, tool_kind) in [
+            (KeyInput::Char('m'), SidechainFacet::MainOnly, None),
+            (KeyInput::CycleSidechain, SidechainFacet::MainOnly, None),
+            (KeyInput::Char('k'), SidechainFacet::Include, Some("file")),
+            (
+                KeyInput::CycleToolKind,
+                SidechainFacet::Include,
+                Some("file"),
+            ),
+        ] {
+            let mut model = results(&[("msg_v1_a", 2.0), ("msg_v1_b", 1.0)], Some("old-cursor"));
+            model.selected = 1;
+            model.page_note = Some("+1".into());
+            let (model, effect) = key(model, action);
+            assert_eq!(
+                effect,
+                Some(Effect::Search {
+                    query: "rust".into(),
+                    cursor: None,
+                    facets: SearchFacets {
+                        sidechain,
+                        tool_kind: tool_kind.map(str::to_string),
+                        tool_name: None,
+                    },
+                })
+            );
+            assert_eq!(model.screen, Screen::Results);
+            assert_eq!(model.input, "rust");
+            assert_eq!(model.query, "rust");
+            assert!(model.hits.is_empty(), "facet cycle clears prior hits");
+            assert_eq!(model.selected, 0);
+            assert!(model.next_cursor.is_none());
+            assert!(!model.has_more);
+            assert!(model.page_note.is_none());
+        }
+    }
+
+    #[test]
+    fn facet_actions_leave_context_unchanged() {
+        let model = in_context("ses_v1_a", 3);
+        for action in [
+            KeyInput::CycleSidechain,
+            KeyInput::CycleToolKind,
+            KeyInput::Char('m'),
+            KeyInput::Char('k'),
+        ] {
+            assert_eq!(key(model.clone(), action), (model.clone(), None));
+        }
+    }
+
+    #[test]
+    fn search_editor_preserves_facet_letters_after_clear_and_backspace() {
+        let (model, _) = key(typed(Model::default(), "x"), KeyInput::Backspace);
+        let (model, _) = key(model, KeyInput::Char('m'));
+        assert_eq!(model.input, "m");
+        assert_eq!(model.search_facets(), SearchFacets::default());
+        let (model, _) = key(model, KeyInput::Esc);
+        let (model, _) = key(model, KeyInput::Char('k'));
+        assert_eq!(model.input, "k");
+        assert_eq!(model.search_facets(), SearchFacets::default());
+        assert!(!model.quit);
+        let (model, _) = key(results(&[], None), KeyInput::Esc);
+        let (model, _) = key(model, KeyInput::Esc);
+        let model = typed(model, "mk");
+        assert_eq!(model.input, "mk");
+        assert_eq!(model.search_facets(), SearchFacets::default());
     }
 
     #[test]

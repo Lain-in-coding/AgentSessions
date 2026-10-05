@@ -5,6 +5,7 @@
 
 ## fixture_revision
 
+- 当前 fixture 集为 revision 2（2026-10-04 会话/分片保真修复）；成熟度不变。
 - `basic.jsonl` — revision 1（2026-08-16 引入）。
 - `object-content.jsonl` — revision 1（2026-08-29 引入，见下"对象 content fixture"）。
 - 格式修复必须新增 fixture 而非只改 parser（政策 §Provider fixture 要求）。
@@ -24,14 +25,14 @@
 |----|------|--------|
 | 1 | `user_message_chunk`，字符串 content，`_meta.promptIndex:0` | 用户消息开启；span 指向首 chunk 行 |
 | 2 | `user_message_chunk`，同 `promptIndex:0` | 同 prompt 的 chunk 按序拼接成一条消息 |
-| 3 | `agent_message_chunk`，content 为 `[{text}]` 数组 | block 数组以 `\n` 拼接；`promptId` 上报为会话身份 |
+| 3 | `agent_message_chunk`，content 为 `[{text}]` 数组 | block 数组以 `\n` 拼接；`promptId` 仅为轮次分组键 |
 | 4 | `user_message_chunk`，content 含 `_meta.bashCommand` | 工具活动元 chunk 被跳过（非对话） |
 | 5 | `user_message_chunk`，`promptIndex:1` | 新 prompt 开启新用户消息 |
-| 6 | `agent_message_chunk`，纯空白 content | 空白文本 chunk 被跳过 |
+| 6 | `agent_message_chunk`，纯空白 content | 分片先原样累积；最终纯空白助手消息不发出 |
 | 7 | 非 JSON 行 | 破损行 → `skipped+1` + 诊断，不中止解析 |
 | 8 | 未知 `sessionUpdate` 种类 | 未知种类静默跳过 |
 | 9 | `user_message_chunk`，CJK 文本 | 多字节文本与 span 字节长度 |
-| 10 | `agent_message_chunk`，`promptId:p1` | 助手消息；会话身份保持首个 `promptId` |
+| 10 | `agent_message_chunk`，`promptId:p1` | 助手消息；重复 `promptId` 不提供原生会话身份 |
 
 ## 编码的真实格式知识（仅字段名与封套形状，无真实内容）
 
@@ -42,7 +43,7 @@
   `params._meta.promptId` 分组；`rewind_marker` 的 `targetPromptIndex` 截断
   重建列表；content 为字符串或 `{text}` block 数组；
 - 修复注记：adapter 的 `UpdateParams.meta` 字段此前缺少 `_meta` 显式 rename，
-  `promptId`/`promptIndex` 从未被解析（会话身份静默丢失）。已加
+  `promptId`/`promptIndex` 从未被解析（分组信息静默丢失，不是会话身份）。已加
   `#[serde(rename = "_meta")]` 对齐文档格式；本 fixture 用 `_meta` 如实覆盖该路径。
 
 ## 脱敏与合规声明
@@ -77,3 +78,42 @@
 形状证据：fast-resume（MIT）`src/adapters/grok.rs` 测试
 （`content: {"type":"text","text":…}`）与 Recall `src/adapters/grok.rs` 测试
 （同形 `session/update` 记录）。**未复制任何真实内容**。
+
+
+## Conversation fidelity fixture（revision 2）
+
+`conversation-fidelity.jsonl` 是从零手写结构/合成文本的 UTF-8、无 BOM、LF
+fixture（1592 字节、13 行），不是实际 transcript 的拷贝或改写。
+`conversation-fidelity.expected.json` 固定 BLAKE3、全部消息正文/顺序/首分片
+span 与计数。预期独立按下表构造，不从 parser 的现有输出推导消息语义。
+
+| 行 | 合成内容 | 验证点 |
+|----|----------|--------|
+| 1 | `turn-0` 用户问题 | 对象 content、轮次 0 |
+| 2–6 | 同一 prompt 的 `\t` / `alpha` / ` \n ` / `omega` / `\t` | 字符串、对象、数组分片；首尾与中间空白逐字保留 |
+| 7–8 | `discarded-turn` 问答 | 将被 rewind 撤去的轮次 |
+| 9 | `targetPromptIndex:1` | 截断至第二个用户位置，不重排保留消息 |
+| 10 | `turn-1` 新用户问题 | rewind 后重建 |
+| 11 | 纯空白助手分片 | 最终不落消息、不产生 seq 空洞 |
+| 12–13 | `turn-2` 问答 | 多个 promptId 仍是单文档会话 |
+
+最终 5 条消息；`session_native_id` 为 null，session observation 保持 Missing，
+无多会话诊断。原 basic/object-content fixture 字节和消息内容不变；仅其 canonical
+期望的错误 prompt-derived native session ID 改为 null。新增 golden 同时校验
+`parse` 与有界 `parse_source` 等价；专项测试覆盖 2/3/5 个 promptId、三种 content
+形状、全空白助手与原样保留的全空白用户文本。固定种子 properties 不再把旧错误
+身份推断当作 ground truth，仍要求零/单/多个分组键、rewind、合并与坏行覆盖。
+
+### 证据边界
+
+已通过 GitHub API 核验 fast-resume（MIT）
+[`src/adapters/grok.rs` at `b0dff8f431690b45b459fe9af3f3d5242b1fe10f`](https://github.com/angristan/fast-resume/blob/b0dff8f431690b45b459fe9af3f3d5242b1fe10f/src/adapters/grok.rs)：
+原生会话信息读取独立 `summary.json`，而 assistant 的 `params._meta.promptId`
+用于 chunk 分组。因此单独 updates 字节流中的 promptId 不能被升级为原生 Session
+或 Resume 证据。这里只核验字段职责，未引入 summary/path 猜测或额外格式支持。
+参考实现也有 trim-before-concatenation 代码；不能把该历史行为当作文本保真真源，
+本修复用合成分片和逐字期望验证空白不丢失。此证据不是官方版本化格式认证。
+
+所有 ID 为 `turn-*` / `discarded-turn` 合成键；无真实人名、路径、凭据或对话。
+跨层 parser 版本 6 触发 unchanged-source 重解析；schema 仍为 19，provider
+继续 Experimental，不新增 Resume、tool activity 或 usage 能力。

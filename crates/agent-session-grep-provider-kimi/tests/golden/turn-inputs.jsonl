@@ -1,0 +1,10 @@
+{"type":"metadata","protocol_version":"1.4"}
+{"type":"turn.prompt","time":1000,"input":[{"type":"text","text":"  synthetic prompt 会话🚀\t"},{"type":"text","text":"second prompt part"}],"origin":{"kind":"user"}}
+{"type":"turn.prompted","input":[{"type":"text","text":"similar type is ignored"}]}
+{"type":"context.append_loop_event","event":{"type":"tool.call","toolName":"Synthetic"}}
+{"type":"turn.steer","time":2000,"input":[{"type":"text","text":"\tsteer clarification\n"}]}
+{"type":"turn.prompt","input":[]}
+not json at all
+{"type":"turn.steer","input":{"text":"unsupported input object"}}
+{"type":"context.append_message","message":{"role":"assistant","content":[{"text":"synthetic answer"},{"text":"second answer part"}]}}
+{"type":"turn.prompt","input":"  compatibility string with \ufeff inside  "}

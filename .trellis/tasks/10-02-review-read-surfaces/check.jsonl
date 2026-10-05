@@ -1,0 +1,5 @@
+{"file": ".trellis/spec/agentsessions-cli/backend/index.md", "reason": "Package contracts"}
+{"file": ".trellis/tasks/10-02-global-review-remediation/design.md", "reason": "Approved decisions and scopes"}
+{"file": ".trellis/tasks/10-02-global-review-remediation/research/baseline.md", "reason": "Fixed baseline and upstream work"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Cross-entry data and identity boundaries"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "Reuse existing validators, rendering and App construction"}

@@ -1,0 +1,15 @@
+{"type":"session","id":"synthetic-content-loss","cwd":"/synthetic/workspace","timestamp":"2026-01-01T00:00:00Z"}
+{"type":"message","message":{"role":"user"}}
+{"type":"message","message":{"role":"assistant","content":null}}
+{"type":"message","message":{"role":"user","content":""}}
+{"type":"message","message":{"role":"assistant","content":" \t\r\n　"}}
+{"type":"message","message":{"role":"user","content":[]}}
+{"type":"message","message":{"role":"assistant","content":[{"type":"thinking","thinking":"SYNTHETIC_PRIVATE_REASONING_A","text":"SYNTHETIC_DECOY_TEXT_A"},{"type":"redacted_thinking","data":"SYNTHETIC_REDACTED_DATA"}]}}
+{"type":"message","message":{"role":"user","content":[{"type":"synthetic_unknown","text":"SYNTHETIC_UNKNOWN_TEXT"},{"type":"synthetic_other","payload":"SYNTHETIC_UNKNOWN_PAYLOAD"}]}}
+{"type":"message","message":{"role":"assistant","content":{"type":"text","text":"SYNTHETIC_OBJECT_TEXT"}}}
+{"type":"message","message":{"role":"user","content":true}}
+{"type":"message","message":{"role":"assistant","content":[{"type":"text","text":" \t"}]}}
+{"type":"message","timestamp":"2026-01-01T00:01:00Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"SYNTHETIC_PRIVATE_REASONING_B","text":"SYNTHETIC_DECOY_TEXT_B"},{"type":"text","text":" 可索引正文 \t"},{"type":"synthetic_unknown","text":"SYNTHETIC_MIXED_UNKNOWN_TEXT"},{"type":"text","text":"second line🚀"}],"timestamp":"2026-01-01T00:02:00Z"}}
+{"type":"message","timestamp":"2026-01-01T00:03:00Z","message":{"role":"user","content":"  visible user text \t"}}
+{"type":"message","message":{"role":"tool","content":[{"type":"thinking","thinking":"SYNTHETIC_TOOL_REASONING"}]}}
+{"type":"session_info","name":"synthetic non-conversational record"}
