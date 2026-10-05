@@ -47,12 +47,12 @@ These are tracking items, not a count of confirmed defects or completed work.
 | P1-6 | Verified at 452c883: Grok whitespace composition/rewind/seq and parser-5 to parser-6 rolling upgrade; Message IDs/source bytes preserved; full local/remote integration passed |
 | P1-7 | Verified at 5ca05e2/428f535: exclusive temporary directory/DB ownership and nonrecursive owned cleanup; Unix permission/collision tests executed remotely. No parser/schema bump |
 | P1-8 | Withdrawn diagnosis; current linear Pi behavior retained; tree enhancement deferred |
-| P1-9 | Locally and independently verified: HTTP/Web parameters and budgets; active 1.1 searchData retrieval_mode omission reproduced and corrected, historical 1.0 frozen; real schema gate with negative/mutation controls. Exact-SHA remote gate pending publication |
+| P1-9 | Locally and independently verified: HTTP/Web parameters and budgets; active 1.1 searchData retrieval_mode omission reproduced and corrected, historical 1.0 frozen; real schema gate with negative/mutation controls. Verified remote at a867a01 with all 14 checks successful |
 | P1-10 | Verified scoped contracts: explicit model-cache restart semantics, missing/corrupt model diagnostics, Context port error propagation and dimension-aware readiness. No automatic model retry/reload or maturity promotion added |
 | P2-1 | Implemented; actual GET-ack regression failed then passed; POST remains unsupported |
-| P2-2 | Locally and independently verified: actual raw/talks/sessions, returned messages/warnings and truncation; real Chrome/native numeric/390px checks and Node47 passed. Remote gate pending |
-| P2-3 | Locally and independently verified: literal m/k, explicit Alt+M/K, Results compatibility; TUI53 and actual Windows PTY journey passed. Remote gate pending |
-| P2-4 | Locally and independently verified: shared clock/current_repo injection with independent negative ranking controls, no ranking policy change. Remote gate pending |
+| P2-2 | Locally and independently verified: actual raw/talks/sessions, returned messages/warnings and truncation; real Chrome/native numeric/390px checks and Node47 passed. Verified remote at a867a01 (14/14) |
+| P2-3 | Locally and independently verified: literal m/k, explicit Alt+M/K, Results compatibility; TUI53 and actual Windows PTY journey passed. Verified remote at a867a01 (14/14) |
+| P2-4 | Locally and independently verified: shared clock/current_repo injection with independent negative ranking controls, no ranking policy change. Verified remote at a867a01 (14/14) |
 | P2-5 | Verified at 83528d9: Codex current-thread payload.id, legal different root session_id and legacy compatibility; original alias-conflict rejection withdrawn. Actual parser-6 upgrade, full 2001-test local gate and all 14 exact-SHA remote checks passed |
 | P2-6 | Verified at 83528d9: exact Kimi turn probe parity and Qoder same-body/selected-session SID-cwd pairing. Source/identity/old-evidence invariants, full local gates and all 14 exact-SHA remote checks passed |
 | P2-7 | Withdrawn; no mapping from historical tool errors to current request failure |
@@ -218,3 +218,6 @@ state is unchanged; no merge, release or broad task closure is implied.
 Owner approved the experience-first plan after choosing that scope. The read-surfaces phase now has complete local and scoped independent evidence: workspace 2084/0/24 across 86 targets; Node47; Python38/11/58 (one platform skip); real schema10 cases and synthetic smoke10/10; fmt/Clippy/Rust1.90; real Chrome and Windows PTY acceptance. A native Enter cancellation defect discovered in the browser was reproduced, corrected and independently rechecked before this final local gate.
 
 The whole parent is not closed. Broader P0-3 diagnostic policy, C1/P2-9, release rehearsal/governance and performance baselines remain open. No maturity promotion, default-provider pruning, release/tag, merge, archive or unrelated workspace cleanup occurred. Publication/immutable-SHA remote evidence follows in a separate checkpoint.
+
+## Remote experience checkpoint (2026-10-05)
+The experience-first implementation at `a867a016d8ce29607e203ccbd2b0c0644e8811b5` passed all 14 PR #21 checks: CI 37311676480, security-audit 37311676337, core-beta-evidence 37311676379. The new real-frame schema step actually ran successfully on all three CI OS jobs. This evidence-only closeout does not change source behavior. The scoped experience phase is complete; the parent and deferred findings remain open, especially broader P0-3 diagnostic policy, C1/P2-9, release rehearsal and performance measurement.

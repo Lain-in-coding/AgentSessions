@@ -21,7 +21,10 @@ Users and machine clients must reliably complete search -> read context -> extra
 - [x] TUI input and fixed-clock/cwd cross-entry ranking regressions pass.
 - [x] Identity round-trip and safe diagnostic regressions cover actual machine output, not only helpers.
 - [x] Real frame schema validation includes negative controls, plus browser/terminal user-journey verification.
-- [ ] Independent review and exact-final-SHA local/remote gates pass; unavailable reviews or platforms remain explicitly pending.
+- [x] Independent review and local/remote gates passed for immutable implementation checkpoint a867a01 (14/14 remote checks); remaining interactive-platform/IME limits and deferred work are explicit.
 
 ## Deferred / preserved scope
 This task originally tracks P1-9/P2-1/P2-2/P2-3/P2-4, withdrawn P2-7 regression, C1/C2/P2-9. P2-1 and C2 already have implementation/evidence and remain regression guards. C1/P2-9 conditional filesystem work remains open outside this experience phase. Release rehearsal, performance scale work, ranking policy changes, Pi tree enhancement, provider pruning, model hot reload and cleanup remain deferred. No merge, official release/tag, history rewrite, task archive, or removal of other worktrees is authorized by this phase.
+
+## Verified phase result
+Experience-first implementation and its acceptance are complete at checkpoint a867a01. CI/security/evidence runs 37311676480/37311676337/37311676379 passed; the task itself is not archived because C1/P2-9 remain deferred under its original scope. See implement.md for scoped P0-3 limits and reproducible validation evidence.

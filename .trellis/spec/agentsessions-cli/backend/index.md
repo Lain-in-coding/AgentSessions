@@ -545,3 +545,6 @@ Node tests model native event order and bubbling, true-edit invalidation, cursor
 
 ### 7. Wrong vs Correct
 Wrong: compare only the changed field, ignore native validity, or blame duplicate handlers without evidence. Correct: compare the full submitted signature with validity and preserve the existing request identity guards.
+
+### Shared validation target ownership
+Serialize Cargo validation commands through the complete test run when they share a target directory. On Windows, another Cargo command can try to replace a binary still executing in a test child even after a compile lock is released. Use a copied candidate for long-lived manual UI services. An access-denied rebuild is not a test assertion failure: release the owned validation slot, retry serially and report the actual result; never kill unrelated processes or claim an old executable proves the current tree.

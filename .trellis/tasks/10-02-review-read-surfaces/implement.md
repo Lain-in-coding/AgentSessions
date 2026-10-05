@@ -10,7 +10,7 @@ Baseline: f0831af. The previous provider phase is not reopened. P2-1 GET-ack and
 - [x] 4. TUI literal input, modified facets and shared clock/current_repo injection.
 - [x] 5. Real-frame schema validation, negative controls and browser/terminal acceptance.
 - [x] Independent scoped and integration review; resolve findings with regressions.
-- [ ] Final exact-tree local gates, then commit/push and exact-SHA remote gates.
+- [x] Final exact-tree local gates, then commit/push and exact-SHA remote gates (verified implementation checkpoint a867a01).
 - [x] Update parent/child evidence, relevant specs and the existing owner-facing combined plan. Do not archive the parent/children or mark deferred items closed.
 
 ## Gate commands
@@ -64,3 +64,13 @@ This file will record exact command results and remaining gaps per batch. The pl
 - Final Windows workspace: 86 targets / **2084 passed, 0 failed, 24 ignored**. fmt, all-target/all-feature Clippy, Rust 1.90 all-target/all-feature check passed. Node **47/47**; Python scripts **38 tests (1 platform skip)**, release **11**, evidence **58** (binary-backed cases enabled). Real Robot schema **10 cases / 11 frames**; synthetic smoke **10/10**. The test-only candidate is a copied build, so live acceptance does not lock Cargo's shared executable.
 - Native Windows PTY and real Chrome verification were completed, with inspected desktop/narrow screenshots. Only the owned test service and dedicated nonpersistent browser were closed. No real source catalog was read or migrated. IME and non-Windows interactive UI were not claimed; platform CI is a separate gate.
 - Remaining: publish reviewed commits and bind remote checks to their immutable SHA. No official release, merge, archive or broader P0-3 closure. C1/P2-9 and release/performance work remain outside this verified experience phase.
+
+## Immutable publication checkpoint (2026-10-05)
+- Implementation/publication checkpoint: `a867a016d8ce29607e203ccbd2b0c0644e8811b5`. Commits: `77f6db9` TUI, `ee2516d` read surfaces/identity, `0b2e45a` real schema validation, `a867a01` local verification records. All were pushed to the existing remediation branch.
+- PR #21 at that exact head passed **14/14 checks**. Runs: CI **37311676480**, security-audit **37311676337**, core-beta-evidence **37311676379**, all `success`, all bound to the same head SHA.
+- CI job metadata confirms the pinned validator installation and real Robot schema step actually executed successfully on Ubuntu, Windows and macOS; not skipped and not inferred from an old run. Four evidence targets and all installer/MSRV/supply-chain checks passed.
+- The approved experience phase is verified. This follow-up changes evidence/spec text only, not product code, workflow, schema or test behavior. The final documentation head is checked separately before delivery; the immutable source checkpoint above remains the reproducible implementation evidence.
+- Parent/task archive remains intentionally open for deferred scope: C1/P2-9, broader P0-3 non-identity diagnostics/debug stderr, release rehearsal/governance and measured performance. No release/tag, main merge, maturity change or unrelated cleanup.
+
+## Shared Cargo validation ownership
+All Cargo validators sharing one target must be serialized through test execution, not only compilation. A build lock does not guarantee another Cargo command cannot relink a Windows executable still used by a test child. Long-lived manual services use a copied candidate; never kill unrelated processes to clear a build error. The integration checker's initial access-denied attempt was retried only after main's workspace run completed, and its CLI/MCP 7 tests then passed.
