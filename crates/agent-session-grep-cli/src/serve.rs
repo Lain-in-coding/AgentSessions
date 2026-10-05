@@ -840,8 +840,9 @@ pub fn route_request(
                 crate::protocol::Outcome::Success => "success",
                 crate::protocol::Outcome::Partial => "partial",
             };
-            redacted_json(
+            redacted_command_json(
                 200,
+                command,
                 serde_json::json!({
                     "command": command,
                     "outcome": outcome,
@@ -875,6 +876,28 @@ const WEB_SEARCH_PARAMETERS: &[&str] = &[
     "tool_name",
 ];
 
+fn checked_query_pairs(
+    req: &HttpRequest,
+    allowed: &[&str],
+) -> Result<Vec<(String, String)>, HttpResponse> {
+    let parameters = req.query_pairs()?;
+    let mut seen = std::collections::BTreeSet::new();
+    for (name, parameter) in &parameters {
+        if !allowed.contains(&name.as_str())
+            || (name != "provider" && !seen.insert(name.as_str()))
+            || parameter.trim().is_empty()
+        {
+            return Err(fixed_error(
+                400,
+                "invalid_request",
+                "unknown, duplicate or empty query parameter",
+            ));
+        }
+        check_argv_value(name, parameter)?;
+    }
+    Ok(parameters)
+}
+
 fn request_args(req: &HttpRequest) -> Result<Vec<String>, HttpResponse> {
     let path = path_only(req.path.as_str());
     let value = |name: &str| -> Result<Option<String>, HttpResponse> {
@@ -888,21 +911,7 @@ fn request_args(req: &HttpRequest) -> Result<Vec<String>, HttpResponse> {
         "/" | "/health" | "/api/providers" => Ok(Vec::new()),
         "/api/status" => Ok(vec!["status".to_string()]),
         "/api/search" | "/api/projection/search" => {
-            let parameters = req.query_pairs()?;
-            let mut seen = std::collections::BTreeSet::new();
-            for (name, parameter) in &parameters {
-                if !WEB_SEARCH_PARAMETERS.contains(&name.as_str())
-                    || (name != "provider" && !seen.insert(name.as_str()))
-                    || parameter.trim().is_empty()
-                {
-                    return Err(fixed_error(
-                        400,
-                        "invalid_request",
-                        "unknown, duplicate or empty search parameter",
-                    ));
-                }
-                check_argv_value(name, parameter)?;
-            }
+            let parameters = checked_query_pairs(req, WEB_SEARCH_PARAMETERS)?;
             let Some(query) = value("q")? else {
                 return Err(fixed_error(400, "invalid_request", "missing q parameter"));
             };
@@ -952,6 +961,10 @@ fn request_args(req: &HttpRequest) -> Result<Vec<String>, HttpResponse> {
             Ok(args)
         }
         "/api/context" => {
+            checked_query_pairs(
+                req,
+                &["session", "policy", "level", "max_messages", "max_bytes"],
+            )?;
             let Some(session) = value("session")? else {
                 return Err(fixed_error(
                     400,
@@ -963,17 +976,34 @@ fn request_args(req: &HttpRequest) -> Result<Vec<String>, HttpResponse> {
             append_value_flag(&mut args, "--policy", value("policy")?);
             append_value_flag(&mut args, "--level", value("level")?);
             append_value_flag(&mut args, "--max-messages", value("max_messages")?);
+            append_value_flag(&mut args, "--max-bytes", value("max_bytes")?);
             Ok(args)
         }
         "/api/handoff" => {
+            let parameters = checked_query_pairs(
+                req,
+                &[
+                    "q",
+                    "provider",
+                    "since",
+                    "until",
+                    "max_evidence",
+                    "max_tokens",
+                    "max_bytes",
+                ],
+            )?;
             let Some(query) = value("q")? else {
                 return Err(fixed_error(400, "invalid_request", "missing q parameter"));
             };
             let mut args = vec!["handoff".to_string(), query];
-            append_value_flag(&mut args, "--provider", value("provider")?);
+            for (_, provider) in parameters.iter().filter(|(name, _)| name == "provider") {
+                append_value_flag(&mut args, "--provider", Some(provider.clone()));
+            }
             append_value_flag(&mut args, "--since", value("since")?);
             append_value_flag(&mut args, "--until", value("until")?);
             append_value_flag(&mut args, "--max-evidence", value("max_evidence")?);
+            append_value_flag(&mut args, "--max-tokens", value("max_tokens")?);
+            append_value_flag(&mut args, "--max-bytes", value("max_bytes")?);
             Ok(args)
         }
         _ => Ok(Vec::new()),
@@ -1004,6 +1034,7 @@ const SERVE_ARGV_FLAGS: &[&str] = &[
     "--level",
     "--max-messages",
     "--max-evidence",
+    "--max-tokens",
 ];
 
 /// Every request value that reaches [`crate::dispatch`] travels as an argv
@@ -1097,6 +1128,14 @@ fn protocol_error(error: crate::protocol::ProtocolError) -> HttpResponse {
 /// Serialize a JSON value through the cross-boundary redactor (ADR-0009).
 fn redacted_json(status: u16, value: serde_json::Value) -> HttpResponse {
     let (redacted, _status) = crate::redaction::redact_value(value);
+    HttpResponse::json(status, &redacted.to_string())
+}
+
+/// Success identities are selected by the trusted dispatch result, not by
+/// inspecting arbitrary JSON for a self-declared command. Error/opaque bodies
+/// keep using redacted_json's conservative scan.
+fn redacted_command_json(status: u16, command: &str, value: serde_json::Value) -> HttpResponse {
+    let (redacted, _status) = crate::redaction::redact_command_response(command, value);
     HttpResponse::json(status, &redacted.to_string())
 }
 
@@ -1427,6 +1466,10 @@ mod tests {
             "/api/search?q=needle&repo=--repo",
             "/api/projection/search?q=--cursor&cursor=needle",
             "/api/handoff?q=--provider&provider=codex",
+            "/api/handoff?q=needle&provider=codex&provider=--max-tokens",
+            "/api/handoff?q=needle&max_tokens=--max-bytes&max_bytes=4096",
+            "/api/handoff?q=needle&max_bytes=--max-evidence&max_evidence=1",
+            "/api/context?session=s&max_bytes=--max-messages&max_messages=1",
             "/api/context?session=--policy&policy=recent",
             "/api/show?id=--yes",
             "/api/show/--yes",
@@ -1488,10 +1531,13 @@ mod tests {
     #[test]
     fn every_flag_serve_marshals_is_refused_as_a_value() {
         let populated = [
-            "/api/search?q=needle&mode=lexical&limit=5&cursor=c&provider=codex\
-             &since=1d&until=1h&repo=r&include_system=true&group_by_session=true",
-            "/api/context?session=s&policy=recent&level=full&max_messages=5",
-            "/api/handoff?q=needle&provider=codex&since=1d&until=1h&max_evidence=3",
+            "/api/search?q=needle&mode=lexical&limit=5&max_bytes=8192&cursor=c&provider=codex\
+             &since=1d&until=1h&repo=r&include_system=true&group_by_session=true\
+             &sidechain=main_only&tool_kind=command&tool_name=Bash",
+            "/api/projection/search?q=needle&sidechain=subagent_only",
+            "/api/context?session=s&policy=full&level=raw&max_messages=5&max_bytes=8192",
+            "/api/handoff?q=needle&provider=codex&provider=claude&since=1d&until=1h\
+             &max_evidence=3&max_tokens=4&max_bytes=8192",
         ];
         let mut seen = 0usize;
         for path in populated {
@@ -1507,7 +1553,7 @@ mod tests {
             }
         }
         assert_eq!(
-            seen, 16,
+            seen, 25,
             "the populated routes emit a known number of flags; update this with them"
         );
     }
@@ -1569,6 +1615,623 @@ mod tests {
                 request_args(&authorized("GET", &format!("/api/search?{query}"))).is_err(),
                 "{query}"
             );
+        }
+    }
+
+    #[test]
+    fn context_forwards_all_supported_parameters() {
+        let args = request_args(&authorized(
+            "GET",
+            "/api/context?session=s&policy=full&level=talks&max_messages=7&max_bytes=8192",
+        ))
+        .unwrap_or_else(|response| panic!("{}", response.body));
+        assert_eq!(
+            args,
+            [
+                "context",
+                "s",
+                "--policy",
+                "full",
+                "--level",
+                "talks",
+                "--max-messages",
+                "7",
+                "--max-bytes",
+                "8192",
+            ]
+        );
+    }
+
+    #[test]
+    fn handoff_forwards_budgets_and_every_provider_value() {
+        let args = request_args(&authorized(
+            "GET",
+            "/api/handoff?q=needle%2B+%E9%85%8D%E7%BD%AE&provider=claude&provider=grok-build\
+             &provider=claude&since=2026-01-01T00:00:00Z&until=2026-01-03T00:00:00Z\
+             &max_evidence=2&max_tokens=4&max_bytes=8192",
+        ))
+        .unwrap_or_else(|response| panic!("{}", response.body));
+        assert_eq!(
+            args,
+            [
+                "handoff",
+                "needle+ 配置",
+                "--provider",
+                "claude",
+                "--provider",
+                "grok-build",
+                "--provider",
+                "claude",
+                "--since",
+                "2026-01-01T00:00:00Z",
+                "--until",
+                "2026-01-03T00:00:00Z",
+                "--max-evidence",
+                "2",
+                "--max-tokens",
+                "4",
+                "--max-bytes",
+                "8192",
+            ]
+        );
+    }
+
+    #[test]
+    fn read_routes_preserve_omitted_and_zero_budgets() {
+        for (path, expected) in [
+            ("/api/context?session=s", vec!["context", "s"]),
+            ("/api/handoff?q=needle", vec!["handoff", "needle"]),
+            (
+                "/api/context?session=s&max_messages=0&max_bytes=0",
+                vec!["context", "s", "--max-messages", "0", "--max-bytes", "0"],
+            ),
+            (
+                "/api/handoff?q=needle&max_evidence=0&max_tokens=0&max_bytes=0",
+                vec![
+                    "handoff",
+                    "needle",
+                    "--max-evidence",
+                    "0",
+                    "--max-tokens",
+                    "0",
+                    "--max-bytes",
+                    "0",
+                ],
+            ),
+        ] {
+            let args = request_args(&authorized("GET", path))
+                .unwrap_or_else(|response| panic!("{path}: {}", response.body));
+            assert_eq!(args, expected, "{path}");
+        }
+    }
+
+    fn assert_invalid_read_parameters(path: &str) {
+        let Err(response) = request_args(&authorized("GET", path)) else {
+            panic!("{path}: invalid parameters must be rejected before dispatch");
+        };
+        assert_eq!(response.status, 400, "{path}: {}", response.body);
+        let body: serde_json::Value = serde_json::from_str(&response.body).unwrap();
+        assert_eq!(body["error"]["code"], "invalid_request", "{path}: {body}");
+    }
+
+    fn assert_strict_read_parameters(route: &str, fields: &[(&str, &str)]) {
+        let (required, value) = fields[0];
+        let base = format!("{route}?{required}={value}");
+        for query in [
+            "unexpected=hidden-value",
+            "repo=hidden-value",
+            "mode=lexical",
+            "=hidden-value",
+            "%=hidden-value",
+            "%GG=hidden-value",
+            "%FF=hidden-value",
+        ] {
+            assert_invalid_read_parameters(&format!("{base}&{query}"));
+        }
+        for (name, value) in fields {
+            let prefix = if *name == required {
+                format!("{route}?")
+            } else {
+                format!("{base}&")
+            };
+            assert_invalid_read_parameters(&format!("{prefix}{name}"));
+            for invalid in [
+                "",
+                "+%20%09",
+                "%",
+                "%2",
+                "%GG",
+                "%FF",
+                "%C3%28",
+                "%ED%A0%80",
+            ] {
+                assert_invalid_read_parameters(&format!("{prefix}{name}={invalid}"));
+            }
+            if *name != "provider" {
+                assert_invalid_read_parameters(&format!("{prefix}{name}={value}&{name}={value}"));
+                let encoded_name = format!("%{:02X}{}", name.as_bytes()[0], &name[1..]);
+                assert_invalid_read_parameters(&format!(
+                    "{prefix}{name}={value}&{encoded_name}={value}"
+                ));
+            }
+        }
+        assert_invalid_read_parameters(route);
+    }
+
+    #[test]
+    fn context_rejects_unknown_empty_duplicate_and_malformed_parameters() {
+        assert_strict_read_parameters(
+            "/api/context",
+            &[
+                ("session", "s"),
+                ("policy", "full"),
+                ("level", "raw"),
+                ("max_messages", "2"),
+                ("max_bytes", "4096"),
+            ],
+        );
+        assert_invalid_read_parameters("/api/context?session=s&provider=claude&provider=codex");
+        assert_invalid_read_parameters("/api/context?session=s&max_tokens=4");
+    }
+
+    #[test]
+    fn handoff_rejects_unknown_empty_duplicate_and_malformed_parameters() {
+        assert_strict_read_parameters(
+            "/api/handoff",
+            &[
+                ("q", "needle"),
+                ("provider", "claude"),
+                ("since", "2026-01-01T00:00:00Z"),
+                ("until", "2026-01-03T00:00:00Z"),
+                ("max_evidence", "2"),
+                ("max_tokens", "4"),
+                ("max_bytes", "4096"),
+            ],
+        );
+        for value in ["", "%", "%FF", "--max-tokens"] {
+            assert_invalid_read_parameters(&format!(
+                "/api/handoff?q=needle&provider=claude&provider={value}"
+            ));
+        }
+    }
+
+    #[test]
+    fn http_identity_round_trips_without_exempting_message_text() {
+        const SECRET: &str = "sk_live_abcdef1234567890xyz";
+        let native_ids = [format!("part:{SECRET}"), format!("reply:{SECRET}")];
+        let expected: std::collections::BTreeSet<_> =
+            native_ids.iter().map(|id| format!("msg_v1_{id}")).collect();
+        let dir = tempfile::tempdir().unwrap();
+        let store = SqliteStore::open_in_memory().unwrap();
+        let source = dir.path().join("http-identity.jsonl");
+        let rows: Vec<_> = native_ids
+            .iter()
+            .enumerate()
+            .map(|(index, id)| {
+                serde_json::json!({
+                    "type": "user", "uuid": id,
+                    "parentUuid": index.checked_sub(1).map(|parent| &native_ids[parent]),
+                    "sessionId": "http-identity-session",
+                    "message": {"role": "user", "content": format!("httpidentity {SECRET}")},
+                })
+                .to_string()
+            })
+            .collect();
+        std::fs::write(&source, rows.join("\n") + "\n").unwrap();
+        crate::ingest_file(&store, source.to_str().unwrap()).unwrap();
+        let get = |path: &str| -> serde_json::Value {
+            let response = route_request(
+                &authorized("GET", path),
+                TEST_TOKEN,
+                "test.db",
+                true,
+                &store,
+            );
+            assert_eq!(response.status, 200, "{path}: {}", response.body);
+            serde_json::from_str(&response.body).unwrap()
+        };
+        let encode = |value: &str| {
+            value
+                .bytes()
+                .map(|byte| format!("%{byte:02X}"))
+                .collect::<String>()
+        };
+        let mut cursor = None::<String>;
+        let mut found = std::collections::BTreeSet::new();
+        let mut session = String::new();
+        for index in 0..2 {
+            let mut path = "/api/search?q=httpidentity&limit=1".to_string();
+            if let Some(cursor) = &cursor {
+                path.push_str(&format!("&cursor={}", encode(cursor)));
+            }
+            let frame = get(&path);
+            let hits = frame["data"]["hits"].as_array().unwrap();
+            assert_eq!(hits.len(), 1);
+            let id = hits[0]["id"].as_str().unwrap();
+            assert!(expected.contains(id), "HTTP rewrote an identity: {id}");
+            assert!(!hits[0]["text"].as_str().unwrap().contains(SECRET));
+            assert!(found.insert(id.to_string()), "cursor repeated a hit");
+            session = hits[0]["session_id"].as_str().unwrap().to_string();
+            let entity = get(&format!("/api/show?id={}", encode(id)));
+            assert!(entity["data"]["entity"].is_object());
+            assert!(!entity["data"]["entity"].to_string().contains(SECRET));
+            cursor = frame["page"]["next_cursor"].as_str().map(str::to_string);
+            assert_eq!(cursor.is_some(), index == 0);
+        }
+        assert_eq!(found, expected);
+        for level in ["raw", "talks", "sessions"] {
+            let frame = get(&format!(
+                "/api/context?session={}&policy=full&level={level}",
+                encode(&session)
+            ));
+            let messages = frame["data"]["messages"].as_array().unwrap();
+            assert_eq!(messages.len(), 2);
+            for message in messages {
+                for key in ["id", "message_id"] {
+                    assert!(expected.contains(message[key].as_str().unwrap()));
+                }
+                assert!(!message["payload"].to_string().contains(SECRET));
+            }
+        }
+        let handoff = get("/api/handoff?q=httpidentity");
+        let evidence = handoff["data"]["evidence"].as_array().unwrap();
+        assert_eq!(evidence.len(), 2);
+        for entry in evidence {
+            assert!(expected.contains(entry["message_id"].as_str().unwrap()));
+        }
+    }
+
+    #[test]
+    fn untyped_http_json_cannot_select_an_identity_profile_from_its_own_command() {
+        let id = "msg_v1_part:sk_live_abcdef1234567890xyz";
+        let response = redacted_json(
+            200,
+            serde_json::json!({
+                "command": "search", "data": {"hits": [{"id": id}]},
+            }),
+        );
+        let frame: serde_json::Value = serde_json::from_str(&response.body).unwrap();
+        assert_ne!(frame["data"]["hits"][0]["id"], id);
+    }
+
+    fn read_surface_fixture() -> (tempfile::TempDir, SqliteStore, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SqliteStore::open_in_memory().unwrap();
+        let source = dir.path().join("claude.jsonl");
+        let mut transcript = String::new();
+        for index in 0usize..3 {
+            let message = serde_json::json!({
+                "type": "user",
+                "uuid": format!("web-read-message-{index}"),
+                "parentUuid": index.checked_sub(1).map(|parent| format!("web-read-message-{parent}")),
+                "sessionId": "web-read-session",
+                "timestamp": format!("2026-01-0{}T12:00:00Z", index + 1),
+                "message": {
+                    "role": "user",
+                    "content": format!("needle message {index} {}", "padding ".repeat(200)),
+                },
+            });
+            transcript.push_str(&message.to_string());
+            transcript.push('\n');
+        }
+        std::fs::write(&source, transcript).unwrap();
+        crate::ingest_file(&store, source.to_str().unwrap()).unwrap();
+        let sessions = agent_session_grep_ports::CatalogStore::list_sessions(&store, 10).unwrap();
+        assert_eq!(sessions.len(), 1);
+        let session = sessions[0].id.as_str().to_string();
+        let source = dir.path().join("grok.jsonl");
+        std::fs::write(
+            &source,
+            serde_json::json!({
+                "params": {
+                    "update": {"sessionUpdate": "user_message_chunk", "content": "needle 配置"},
+                    "_meta": {"promptIndex": 0},
+                },
+            })
+            .to_string(),
+        )
+        .unwrap();
+        crate::ingest_file(&store, source.to_str().unwrap()).unwrap();
+        (dir, store, session)
+    }
+
+    /// Use independently built CLI argv, not request_args, as the behavior oracle.
+    /// Identity redaction is a separate boundary; compare budget/content facts here.
+    fn read_http_matches_cli(
+        store: &SqliteStore,
+        path: &str,
+        args: &[String],
+    ) -> (serde_json::Value, serde_json::Value) {
+        let (command, outcome, data, _, _) = crate::dispatch(
+            store,
+            "test.db",
+            args,
+            crate::protocol::OutputMode::Json,
+            None,
+            true,
+        )
+        .unwrap();
+        let response = route_request(&authorized("GET", path), TEST_TOKEN, "test.db", true, store);
+        assert_eq!(response.status, 200, "{path}: {}", response.body);
+        let body: serde_json::Value = serde_json::from_str(&response.body).unwrap();
+        assert_eq!(body["command"], command, "{path}");
+        assert_eq!(
+            body["outcome"],
+            match outcome {
+                crate::protocol::Outcome::Success => "success",
+                crate::protocol::Outcome::Partial => "partial",
+            },
+            "{path}: {body}"
+        );
+        for field in ["truncated", "reason", "dropped_count"] {
+            assert_eq!(
+                body["data"]["truncation"][field], data["truncation"][field],
+                "{path}"
+            );
+        }
+        (body["data"].clone(), data)
+    }
+
+    #[test]
+    fn context_http_budgets_match_cli_defaults_and_boundaries() {
+        let (_dir, store, session) = read_surface_fixture();
+        let path = format!("/api/context?session={session}");
+        let args = vec!["context".into(), session.clone()];
+        let (default, cli) = read_http_matches_cli(&store, &path, &args);
+        assert_eq!(default["messages"].as_array().unwrap().len(), 3);
+        assert_eq!(default["requested_level"], "raw");
+        assert_eq!(default["effective_level"], cli["effective_level"]);
+        let explicit = route_request(
+            &authorized(
+                "GET",
+                &format!("{path}&policy=mainline&level=raw&max_messages=500&max_bytes=4194304"),
+            ),
+            TEST_TOKEN,
+            "test.db",
+            true,
+            &store,
+        );
+        assert_eq!(explicit.status, 200, "{}", explicit.body);
+        let explicit: serde_json::Value = serde_json::from_str(&explicit.body).unwrap();
+        assert_eq!(explicit["data"], default);
+        for bytes in [4096, 4097, 8192] {
+            let mut args = args.clone();
+            args.extend(["--max-bytes".into(), bytes.to_string()]);
+            let (data, cli) =
+                read_http_matches_cli(&store, &format!("{path}&max_bytes={bytes}"), &args);
+            assert_eq!(
+                data["messages"].as_array().unwrap().len(),
+                cli["messages"].as_array().unwrap().len()
+            );
+            if bytes <= 4097 {
+                assert!(data["messages"].as_array().unwrap().len() < 3);
+                assert_eq!(data["truncation"]["reason"], "max_response_bytes");
+            }
+        }
+        let (data, _) = read_http_matches_cli(
+            &store,
+            &format!("{path}&max_messages=1"),
+            &[
+                "context".into(),
+                session,
+                "--max-messages".into(),
+                "1".into(),
+            ],
+        );
+        assert_eq!(data["messages"].as_array().unwrap().len(), 1);
+        assert_eq!(data["truncation"]["reason"], "max_messages");
+    }
+
+    #[test]
+    fn read_http_numeric_errors_match_cli_without_clamping() {
+        let (_dir, store, session) = read_surface_fixture();
+        for (command, operand, parameter, flag, rejects_zero) in [
+            (
+                "context",
+                session.as_str(),
+                "max_bytes",
+                "--max-bytes",
+                true,
+            ),
+            (
+                "context",
+                session.as_str(),
+                "max_messages",
+                "--max-messages",
+                true,
+            ),
+            ("handoff", "needle", "max_evidence", "--max-evidence", false),
+            ("handoff", "needle", "max_tokens", "--max-tokens", false),
+            ("handoff", "needle", "max_bytes", "--max-bytes", true),
+        ] {
+            let mut invalid = vec!["invalid", "-1", "1.5", "184467440737095516160"];
+            if rejects_zero {
+                invalid.push("0");
+            }
+            if command == "context" && parameter == "max_bytes" {
+                invalid.push("4095");
+            }
+            if command == "handoff" && parameter == "max_bytes" {
+                invalid.push("1");
+            }
+            for value in invalid {
+                let args = [command.into(), operand.into(), flag.into(), value.into()];
+                let error = crate::dispatch(
+                    &store,
+                    "test.db",
+                    &args,
+                    crate::protocol::OutputMode::Json,
+                    None,
+                    true,
+                )
+                .expect_err("the existing CLI rejects this numeric value");
+                assert_eq!(error.0.code, crate::protocol::CanonicalCode::InvalidRequest);
+                let required = if command == "context" { "session" } else { "q" };
+                let path = format!("/api/{command}?{required}={operand}&{parameter}={value}");
+                let response = route_request(
+                    &authorized("GET", &path),
+                    TEST_TOKEN,
+                    "test.db",
+                    true,
+                    &store,
+                );
+                assert_eq!(response.status, 400, "{path}: {}", response.body);
+                let body: serde_json::Value = serde_json::from_str(&response.body).unwrap();
+                assert_eq!(body["error"]["code"], "invalid_request", "{path}: {body}");
+            }
+        }
+    }
+
+    #[test]
+    fn handoff_http_provider_union_and_time_filters_match_cli() {
+        let (_dir, store, _) = read_surface_fixture();
+        for (providers, count) in [
+            (vec!["claude"], 3),
+            (vec!["grok-build"], 1),
+            (vec!["claude", "grok-build", "claude"], 4),
+        ] {
+            let mut path = "/api/handoff?q=needle".to_string();
+            let mut args = vec!["handoff".into(), "needle".into()];
+            for provider in providers {
+                path.push_str(&format!("&provider={provider}"));
+                args.extend(["--provider".into(), provider.into()]);
+            }
+            let (data, cli) = read_http_matches_cli(&store, &path, &args);
+            assert_eq!(data["query"]["filters"], cli["query"]["filters"]);
+            assert_eq!(data["evidence"].as_array().unwrap().len(), count);
+            assert_eq!(cli["evidence"].as_array().unwrap().len(), count);
+        }
+        let since = "2026-01-02T00:00:00Z";
+        let until = "2026-01-02T23:59:59Z";
+        let (data, cli) = read_http_matches_cli(
+            &store,
+            &format!("/api/handoff?q=needle&provider=claude&since={since}&until={until}"),
+            &[
+                "handoff".into(),
+                "needle".into(),
+                "--provider".into(),
+                "claude".into(),
+                "--since".into(),
+                since.into(),
+                "--until".into(),
+                until.into(),
+            ],
+        );
+        assert_eq!(data["query"]["filters"], cli["query"]["filters"]);
+        assert_eq!(data["evidence"].as_array().unwrap().len(), 1);
+        assert!(
+            data["evidence"][0]["text"]
+                .as_str()
+                .unwrap()
+                .starts_with("needle message 1 ")
+        );
+    }
+
+    #[test]
+    fn handoff_http_defaults_zero_and_token_boundaries_match_cli() {
+        let (_dir, store, _) = read_surface_fixture();
+        let (default, cli) = read_http_matches_cli(
+            &store,
+            "/api/handoff?q=needle",
+            &["handoff".into(), "needle".into()],
+        );
+        assert_eq!(default["budget"], cli["budget"]);
+        assert_eq!(default["budget"]["max_evidence"], 20);
+        assert_eq!(default["budget"]["max_tokens"], 8000);
+        assert_eq!(default["budget"]["max_bytes"], 2_000_000);
+        assert_eq!(default["evidence"].as_array().unwrap().len(), 4);
+        for query in ["needle", "missingreadfixtureterm"] {
+            let (data, cli) = read_http_matches_cli(
+                &store,
+                &format!("/api/handoff?q={query}&max_evidence=0"),
+                &[
+                    "handoff".into(),
+                    query.into(),
+                    "--max-evidence".into(),
+                    "0".into(),
+                ],
+            );
+            assert_eq!(data["budget"], cli["budget"]);
+            assert_eq!(data["budget"]["max_evidence"], 0);
+            assert_eq!(data["evidence"], serde_json::json!([]));
+            assert_eq!(data["truncation"]["truncated"], query == "needle");
+        }
+        // "needle 配置": ceil(7 ASCII bytes / 4) + 2 Han characters = 4 tokens.
+        for tokens in [0, 3, 4, 5] {
+            let (data, cli) = read_http_matches_cli(
+                &store,
+                &format!("/api/handoff?q=needle&provider=grok-build&max_tokens={tokens}"),
+                &[
+                    "handoff".into(),
+                    "needle".into(),
+                    "--provider".into(),
+                    "grok-build".into(),
+                    "--max-tokens".into(),
+                    tokens.to_string(),
+                ],
+            );
+            assert_eq!(data["budget"], cli["budget"]);
+            assert_eq!(data["budget"]["max_tokens"], tokens);
+            assert_eq!(
+                data["budget"]["used_tokens"],
+                if tokens < 4 { 0 } else { 4 }
+            );
+            assert_eq!(
+                data["evidence"].as_array().unwrap().len(),
+                usize::from(tokens >= 4)
+            );
+            assert_eq!(data["truncation"]["truncated"], tokens < 4);
+        }
+    }
+
+    #[test]
+    fn handoff_http_byte_budget_matches_cli_content_boundary() {
+        let (_dir, store, _) = read_surface_fixture();
+        let mut args = vec![
+            "handoff".into(),
+            "needle".into(),
+            "--provider".into(),
+            "grok-build".into(),
+            "--max-bytes".into(),
+            "4096".into(),
+        ];
+        let (_, _, full, _, _) = crate::dispatch(
+            &store,
+            "test.db",
+            &args,
+            crate::protocol::OutputMode::Json,
+            None,
+            true,
+        )
+        .unwrap();
+        let exact = full["budget"]["used_bytes"].as_u64().unwrap();
+        assert_eq!(full["evidence"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            exact.to_string().len(),
+            "4096".len(),
+            "keep the same budget digit width"
+        );
+        for bytes in [exact - 1, exact, exact + 1] {
+            *args.last_mut().unwrap() = bytes.to_string();
+            let (data, cli) = read_http_matches_cli(
+                &store,
+                &format!("/api/handoff?q=needle&provider=grok-build&max_bytes={bytes}"),
+                &args,
+            );
+            assert_eq!(data["budget"], cli["budget"]);
+            assert_eq!(data["budget"]["max_bytes"], bytes);
+            // used_bytes is the pack CONTENT budget, not the HTTP/JSON wire size.
+            assert!(data["budget"]["used_bytes"].as_u64().unwrap() <= bytes);
+            assert_eq!(
+                data["evidence"].as_array().unwrap().len(),
+                usize::from(bytes >= exact)
+            );
+            if bytes == exact {
+                assert_eq!(data["budget"]["used_bytes"], exact);
+            }
+            if bytes < exact {
+                assert_eq!(data["truncation"]["reason"], "max_bytes");
+            }
         }
     }
 
@@ -1946,14 +2609,15 @@ mod tests {
     #[test]
     fn embedded_ui_scopes_the_preview_pane_to_the_open_session() {
         let load_context = ui_slice("async function loadContext(", "\n}");
-        assert!(
-            load_context.contains("previewOutput"),
-            "opening a session must reset the preview pane: {load_context}"
-        );
-        assert!(
-            load_context.contains("hidden = true"),
-            "the preview pane must be hidden, not just emptied: {load_context}"
-        );
+        let refresh = ui_slice("async function refreshContext(", "\n}");
+        let invalidate = ui_slice("function invalidateContext(", "\n}");
+        let preview = ui_slice("function invalidatePreview(", "\n}");
+        assert!(load_context.contains("refreshContext()"));
+        assert!(refresh.contains("invalidateContext()"));
+        assert!(invalidate.contains("invalidatePreview()"));
+        assert!(preview.contains("previewOutput"));
+        assert!(preview.contains("hidden = true"));
+        assert!(preview.contains("cancelRequest('preview')"));
     }
 
     /// `applyI18n()` only rewrites `[data-i18n]` markup and the select options.
@@ -1965,7 +2629,13 @@ mod tests {
     #[test]
     fn embedded_ui_rerenders_dynamic_strings_when_the_language_changes() {
         let toggle = ui_slice("getElementById('langToggle').addEventListener", "\n});");
-        for call in ["applyI18n()", "renderHits(", "loadContext(", "init()"] {
+        for call in [
+            "applyI18n()",
+            "renderHits(",
+            "renderContextTitle(",
+            "renderContext(lastContext)",
+            "init()",
+        ] {
             assert!(
                 toggle.contains(call),
                 "language toggle must re-render via `{call}`: {toggle}"

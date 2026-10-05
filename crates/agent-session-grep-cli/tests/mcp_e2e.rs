@@ -2335,3 +2335,260 @@ fn relocation_is_described_as_cli_only_and_rejected_as_an_mcp_mutation() {
         "MCP cannot mutate relocation state"
     );
 }
+
+const MCP_IDENTITY_SECRET: &str = "sk_live_abcdef1234567890xyz";
+const MCP_IDENTITY_SESSION: &str = "session:sk_live_abcdef1234567890xyz";
+
+fn mcp_identity_fixture(tag: &str) -> (tempfile::TempDir, std::path::PathBuf, Vec<String>, String) {
+    let (dir, db) = temp_db(tag);
+    let (fixture, _) = write_context_fixture(dir.path());
+    let mut text = std::fs::read_to_string(&fixture)
+        .unwrap()
+        .replace("ccdd1234-5678-4abc-8def-001122334455", MCP_IDENTITY_SESSION)
+        .replace(
+            "ctx root question",
+            &format!("ctx root {MCP_IDENTITY_SECRET}"),
+        );
+    let natives = [
+        "part:sk_live_abcdef1234567890xyz",
+        "reply:ghp_1234567890abcdefghijklmnopqrstuvwxyz",
+        "side:xoxb-1234567890-abcdef",
+        "tail:sk_live_abcdef1234567890xyz",
+    ];
+    for (index, native) in natives.iter().enumerate() {
+        text = text.replace(
+            &format!("c0000000-0000-4000-8000-{:012}", index + 1),
+            native,
+        );
+    }
+    std::fs::write(&fixture, text).unwrap();
+    let out = run_cli(&db, &["ingest", &fixture]);
+    assert!(out.status.success(), "{}", stdout(&out));
+    let ids: Vec<String> = natives
+        .iter()
+        .map(|native| format!("msg_v1_{native}"))
+        .collect();
+    let session = session_wire_for_message(&db, &ids[0]);
+    let conn = Connection::open(&db).unwrap();
+    let bytes: Vec<u8> = conn
+        .query_row(
+            "SELECT payload FROM catalog WHERE id=?1",
+            [&ids[0]],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut payload: Value = serde_json::from_slice(&bytes).unwrap();
+    payload["untrusted"] = json!({
+        "id": ids[0], "message_id": ids[0], "provider_session_id": MCP_IDENTITY_SESSION,
+        "token": "opaque-secret", "page": {"next_cursor": MCP_IDENTITY_SECRET},
+        "tool_activity": [{"message_id": ids[0]}]
+    });
+    conn.execute(
+        "UPDATE catalog SET payload=?1 WHERE id=?2",
+        rusqlite::params![serde_json::to_vec(&payload).unwrap(), ids[0]],
+    )
+    .unwrap();
+    (dir, db, ids, session)
+}
+
+fn assert_mcp_identity_payload(result: &Value) -> &Value {
+    assert_eq!(result["isError"], false, "{result}");
+    let payload = &result["structuredContent"];
+    let text: Value = serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(&text, payload, "MCP representations diverged");
+    payload
+}
+
+#[test]
+fn boundary_identity_mcp_search_ids_round_trip_with_cursor_and_correlation() {
+    let (_dir, db, mut ids, _) = mcp_identity_fixture("mcp-identity-search");
+    // get_message is a mainline window; do not ask it to open a sidechain hit.
+    ids.remove(2);
+    let mut cursor = None;
+    let mut found = Vec::new();
+    for _ in 0..ids.len() {
+        let mut arguments = json!({"query": "ctx", "max_items": 1, "sidechain": "main_only"});
+        if let Some(cursor) = &cursor {
+            arguments["cursor"] = json!(cursor);
+        }
+        let mut call = tool_call(2, "search_sessions", arguments);
+        call["id"] = json!(MCP_IDENTITY_SECRET);
+        let frames = mcp_session(
+            &db,
+            &[
+                initialize_request(1, "2025-06-18"),
+                initialized_notification(),
+                call,
+            ],
+        );
+        let response = frames
+            .iter()
+            .find(|frame| frame["id"] == MCP_IDENTITY_SECRET)
+            .unwrap();
+        let payload = assert_mcp_identity_payload(&response["result"]);
+        let hit = &payload["data"]["hits"][0];
+        let id = hit["id"].as_str().unwrap().to_string();
+        assert!(ids.contains(&id), "typed search ID was changed: {response}");
+        assert!(
+            !hit["text"].as_str().unwrap().contains(MCP_IDENTITY_SECRET),
+            "{response}"
+        );
+        let frames = mcp_session(
+            &db,
+            &[
+                initialize_request(1, "2025-06-18"),
+                initialized_notification(),
+                tool_call(2, "get_message", json!({"message_id": id})),
+            ],
+        );
+        let message = assert_mcp_identity_payload(&frame_by_id(&frames, 2)["result"]);
+        assert_eq!(message["data"]["message_id"], id, "{message}");
+        assert_eq!(message["data"]["messages"][0]["id"], id, "{message}");
+        if id == ids[0] {
+            // One body and six opaque payload leaves, not the typed IDs or
+            // the duplicated content.text transport representation.
+            assert_eq!(message["redaction"]["redacted_count"], 7, "{message}");
+        }
+        found.push(id);
+        cursor = payload["page"]["next_cursor"].as_str().map(str::to_owned);
+    }
+    assert!(cursor.is_none());
+    found.sort();
+    let mut expected = ids;
+    expected.sort();
+    assert_eq!(found, expected);
+}
+
+#[test]
+fn boundary_identity_mcp_context_handoff_and_resume_metadata_paths() {
+    let (_dir, db, ids, session) = mcp_identity_fixture("mcp-identity-context");
+    let calls = [
+        (
+            "get_session_context",
+            json!({"session_id": session, "level": "raw"}),
+        ),
+        (
+            "get_session_context",
+            json!({"session_id": session, "level": "talks"}),
+        ),
+        (
+            "get_session_context",
+            json!({"session_id": session, "level": "sessions"}),
+        ),
+        (
+            "generate_handoff",
+            json!({"query": "ctx", "max_evidence": 1}),
+        ),
+        ("get_session_resume", json!({"session_id": session})),
+    ];
+    let mut inputs = vec![
+        initialize_request(1, "2025-06-18"),
+        initialized_notification(),
+    ];
+    for (index, (tool, args)) in calls.iter().enumerate() {
+        inputs.push(tool_call(index as i64 + 2, tool, args.clone()));
+    }
+    let frames = mcp_session(&db, &inputs);
+    for (index, _) in calls.iter().enumerate() {
+        let payload =
+            assert_mcp_identity_payload(&frame_by_id(&frames, index as i64 + 2)["result"]);
+        let data = &payload["data"];
+        if index < 3 {
+            assert_eq!(data["branch_leaf"], ids[3], "{payload}");
+            let messages = data["messages"].as_array().unwrap();
+            assert_eq!(messages.len(), 3);
+            for (message, expected) in messages.iter().zip([&ids[0], &ids[1], &ids[3]]) {
+                assert_eq!(message["id"], *expected, "{payload}");
+                assert_eq!(message["message_id"], *expected, "{payload}");
+                assert!(!message["payload"].to_string().contains(MCP_IDENTITY_SECRET));
+            }
+            assert_eq!(messages[0]["payload"]["untrusted"]["token"], "[redacted]");
+            assert_eq!(data["evidence"][0]["message_id"], ids[0], "{payload}");
+            if index == 1 {
+                assert_eq!(
+                    data["talks"][0]["user_message"]["message_id"], ids[0],
+                    "{payload}"
+                );
+                assert_eq!(
+                    data["talks"][0]["following_messages"][0]["message_id"], ids[1],
+                    "{payload}"
+                );
+            }
+            if index == 2 {
+                assert_eq!(
+                    data["summary"]["first_user_message"]["message_id"], ids[0],
+                    "{payload}"
+                );
+            }
+        } else if index == 3 {
+            assert_eq!(payload["outcome"], "partial");
+            for key in ["evidence", "mainline"] {
+                assert!(
+                    ids.iter().any(|id| data[key][0]["message_id"] == *id),
+                    "{payload}"
+                );
+            }
+            for key in [
+                &data["source_locators"],
+                &data["truncation"]["dropped_locators"],
+            ] {
+                for locator in key.as_array().unwrap() {
+                    assert!(ids.iter().any(|id| locator["cursor"] == *id), "{payload}");
+                }
+            }
+        } else {
+            assert_eq!(
+                data["provider_session_id"], MCP_IDENTITY_SESSION,
+                "{payload}"
+            );
+            assert_eq!(data["session_id"], session);
+            assert_eq!(payload["redaction"]["status"], "none", "{payload}");
+            assert_eq!(payload["redaction"]["redacted_count"], 0, "{payload}");
+        }
+    }
+}
+
+#[test]
+fn boundary_identity_mcp_diagnostics_omit_private_input_paths_at_source() {
+    let (_dir, db) = temp_db("mcp-identity-diagnostics");
+    for input in [
+        r"C:\private-project\synthetic-owner\notes.jsonl",
+        "/srv/private-project/synthetic-owner/notes.jsonl",
+    ] {
+        let calls = [
+            ("get_session_context", json!({"session_id": input})),
+            ("get_session_resume", json!({"session_id": input})),
+            ("get_message", json!({"message_id": input})),
+            (
+                "get_message",
+                json!({"message_id": "msg_v1_valid", "session_id": input}),
+            ),
+        ];
+        let mut inputs = vec![
+            initialize_request(1, "2025-06-18"),
+            initialized_notification(),
+        ];
+        for (index, (tool, args)) in calls.iter().enumerate() {
+            inputs.push(tool_call(index as i64 + 2, tool, args.clone()));
+        }
+        let lines: Vec<String> = inputs.iter().map(Value::to_string).collect();
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let (frames, stderr) = mcp_session_raw_stderr(&db, &refs);
+        assert!(stderr.is_empty(), "{stderr}");
+        for (index, _) in calls.iter().enumerate() {
+            let frame = frame_by_id(&frames, index as i64 + 2);
+            assert_eq!(frame["error"]["code"], -32602, "{frame}");
+            assert_eq!(
+                frame["error"]["data"]["canonical_code"], "invalid_request",
+                "{frame}"
+            );
+            assert!(frame["result"].is_null());
+            for private in [input, "private-project", "synthetic-owner", "notes.jsonl"] {
+                assert!(
+                    !frame.to_string().contains(private),
+                    "private input leaked: {frame}"
+                );
+            }
+        }
+    }
+}

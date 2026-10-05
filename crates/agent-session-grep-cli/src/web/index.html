@@ -188,6 +188,11 @@ input[type="number"] { width: 76px; }
 .detail-title .mono { font: var(--font-code-size) var(--mono); color: var(--text-mute); }
 .detail-actions { display: flex; gap: 6px; margin-left: auto; flex-wrap: wrap; }
 .detail-actions select { font-size: 0.78rem; }
+.context-options { flex: 1 1 100%; min-width: 0; }
+.context-facts { margin-bottom: 14px; color: var(--text-dim); font-size: 0.78rem; overflow-wrap: anywhere; }
+.context-facts p { margin: 4px 0; }
+.context-section { margin-bottom: 16px; }
+.context-section > .detail-title { margin-bottom: 10px; }
 .btn { height: 28px; padding: 0 11px; border: 1px solid var(--line); border-radius: var(--radius-sm);
   background: var(--surface-2); color: var(--text-dim); font-size: 0.8rem; cursor: pointer; }
 .btn:hover:not(:disabled) { background: var(--surface-hover); color: var(--text); }
@@ -345,6 +350,18 @@ pre.preview { margin: 0 16px 20px; max-height: 40vh; overflow: auto; padding: 12
           <button id="handoff" class="btn" type="button" disabled data-i18n="handoff"></button>
           <button id="closeContext" class="btn danger" type="button" data-i18n="close"></button>
         </div>
+        <details class="search-filters context-options">
+          <summary data-i18n="readBudgets"></summary>
+          <div class="filter-grid">
+            <label class="filter-field"><span data-i18n="contextMaxMessages"></span><input id="contextMaxMessages" type="number" min="0" step="1" inputmode="numeric" aria-describedby="readBudgetHint"></label>
+            <label class="filter-field"><span data-i18n="contextMaxBytes"></span><input id="contextMaxBytes" type="number" min="0" step="1" inputmode="numeric" aria-describedby="readBudgetHint"></label>
+            <label class="filter-field"><span data-i18n="handoffMaxEvidence"></span><input id="handoffMaxEvidence" type="number" min="0" step="1" inputmode="numeric" aria-describedby="readBudgetHint handoffScopeHint"></label>
+            <label class="filter-field"><span data-i18n="handoffMaxTokens"></span><input id="handoffMaxTokens" type="number" min="0" step="1" inputmode="numeric" aria-describedby="readBudgetHint handoffScopeHint"></label>
+            <label class="filter-field"><span data-i18n="handoffMaxBytes"></span><input id="handoffMaxBytes" type="number" min="0" step="1" inputmode="numeric" aria-describedby="readBudgetHint handoffScopeHint"></label>
+            <p id="readBudgetHint" class="filter-hint" data-i18n="readBudgetHint"></p>
+          </div>
+        </details>
+        <p id="handoffScopeHint" class="filter-hint context-options" data-i18n="handoffScopeHint"></p>
       </div>
       <div id="detailEmpty" class="empty-block">
         <strong data-i18n="emptyTitle"></strong>
@@ -390,6 +407,27 @@ const I18N = {
     filterTimeHint: '时间使用带时区的 ISO 8601 格式，例如 2026-01-01T00:00:00Z。',
     contextLoading: '正在加载会话…',
     contextFailed: '会话加载失败：',
+    contextChanged: '上下文预算已更改，请刷新会话。',
+    contextPartial: '上下文仅部分返回。',
+    contextLevels: '请求层级：{requested} · 实际层级：{effective}',
+    contextFallback: '层级降级 · ',
+    contextCounts: '已返回：{messages} 条消息 · {evidence} 个证据区间',
+    contextTruncation: '截断原因：{reason}',
+    contextHint: '下一次调用：{command} · session_id={session} · level={level}',
+    contextTalk: '对话轮 {n}',
+    contextSummaryMessages: '概览消息数：{n}',
+    contextSummaryTurns: '概览轮数：{n}',
+    contextFiles: '文件引用：',
+    returnedMessages: '返回的消息',
+    noBudgetMessages: '本次响应预算内未返回消息。',
+    readBudgets: '上下文 / 交接包预算（可选）',
+    contextMaxMessages: '上下文 · 最大消息数',
+    contextMaxBytes: '上下文 · 最大响应字节数',
+    handoffMaxEvidence: '交接包 · 最大证据数',
+    handoffMaxTokens: '交接包 · 最大 token 数',
+    handoffMaxBytes: '交接包 · 最大内容字节数',
+    readBudgetHint: '留空使用服务端默认值；0 会原样发送，由服务端校验。',
+    handoffScopeHint: '交接包仅继承最近一次成功搜索的 q/provider/since/until；不继承仓库 repo、分支 sidechain、工具 tool 筛选或检索模式 mode。',
     statusConnecting: '正在连接本地库…',
     statusConnected: '已连接 · 第 {g} 代 · {n} 条记录',
     statusUnavailable: '不可用 · ',
@@ -406,7 +444,7 @@ const I18N = {
     emptyBody: '搜索后点击任意一条命中,这里会展开它所在会话的完整上下文。',
     noHits: '没有匹配的消息。试试其他关键词或放宽筛选条件。',
     notAnswer: '查询失败:',
-    noMessages: '该会话在当前层级下没有消息。',
+    noMessages: '本次上下文未返回消息。',
     showEntity: '查看原文',
     retrievalMode: '检索模式:',
     allProviders: '全部来源',
@@ -451,6 +489,27 @@ const I18N = {
     filterTimeHint: 'Use a timezone-qualified ISO 8601 time, for example 2026-01-01T00:00:00Z.',
     contextLoading: 'Loading session…',
     contextFailed: 'Could not load session: ',
+    contextChanged: 'Context budgets changed. Refresh the session.',
+    contextPartial: 'Partial context.',
+    contextLevels: 'Requested level: {requested} · Effective level: {effective}',
+    contextFallback: 'Fallback · ',
+    contextCounts: 'Returned: {messages} messages · {evidence} evidence spans',
+    contextTruncation: 'Truncation reason: {reason}',
+    contextHint: 'Next call: {command} · session_id={session} · level={level}',
+    contextTalk: 'Talk {n}',
+    contextSummaryMessages: 'Summary messages: {n}',
+    contextSummaryTurns: 'Summary turns: {n}',
+    contextFiles: 'File references: ',
+    returnedMessages: 'Returned messages',
+    noBudgetMessages: 'No messages returned within this response budget.',
+    readBudgets: 'Context / Handoff budgets (optional)',
+    contextMaxMessages: 'Context · max messages',
+    contextMaxBytes: 'Context · max response bytes',
+    handoffMaxEvidence: 'Handoff · max evidence',
+    handoffMaxTokens: 'Handoff · max tokens',
+    handoffMaxBytes: 'Handoff · max content bytes',
+    readBudgetHint: 'Leave blank for server defaults; 0 is sent explicitly and validated by the server.',
+    handoffScopeHint: 'Handoff uses only q/provider/since/until from the last successful search; it does not inherit repo, sidechain, tool filters or mode.',
     statusConnecting: 'Connecting to local catalog…',
     statusConnected: 'Connected · generation {g} · {n} entities',
     statusUnavailable: 'Unavailable · ',
@@ -467,7 +526,7 @@ const I18N = {
     emptyBody: 'Search, then click any hit to open its session context here.',
     noHits: 'No matching messages. Try another query or fewer filters.',
     notAnswer: 'The catalog could not answer: ',
-    noMessages: 'This session has no messages at the selected level.',
+    noMessages: 'No messages were returned.',
     showEntity: 'show',
     retrievalMode: 'retrieval_mode:',
     allProviders: 'All providers',
@@ -565,6 +624,9 @@ function acceptToken(value) {
 let activeSession = '';
 let nextCursor = null;
 let lastQuery = '';
+// Only a current, successful search may supply Handoff's inherited filters.
+let acceptedSearchParams = null;
+let lastContext = null;
 let activeHit = null;
 /* Every hit loaded for the current query, across all pages. The sidebar counter
    has to report what is on screen (three pages of two is six hits, not two),
@@ -610,6 +672,7 @@ function invalidateSearch(messageKey = '') {
   nextCursor = null;
   searchSignature = '';
   lastQuery = '';
+  acceptedSearchParams = null;
   lastHits = [];
   lastError = '';
   clear(document.getElementById('results'));
@@ -637,6 +700,12 @@ async function api(path, signal) {
   if (response.status === 401) { showGate(true); throw new Error('unauthorized'); }
   if (!response.ok) throw new Error((body.error && body.error.message) || 'HTTP ' + response.status);
   return body;
+}
+function invalidatePreview() {
+  cancelRequest('preview');
+  const node = document.getElementById('previewOutput');
+  node.hidden = true;
+  clear(node);
 }
 function showPreview(value) {
   const node = document.getElementById('previewOutput');
@@ -721,6 +790,26 @@ const SEARCH_FIELDS = [
   ['since', 'since'], ['until', 'until'], ['sidechain', 'sidechain'],
   ['toolKind', 'tool_kind'], ['toolName', 'tool_name'],
 ];
+const CONTEXT_BUDGET_FIELDS = [['contextMaxMessages', 'max_messages'], ['contextMaxBytes', 'max_bytes']];
+const HANDOFF_BUDGET_FIELDS = [['handoffMaxEvidence', 'max_evidence'], ['handoffMaxTokens', 'max_tokens'], ['handoffMaxBytes', 'max_bytes']];
+function validControls(ids) {
+  for (const id of ids) {
+    const control = document.getElementById(id);
+    if (!control.checkValidity()) {
+      control.reportValidity();
+      return false;
+    }
+  }
+  return true;
+}
+function appendBudgetParams(params, fields) {
+  for (const [id, name] of fields) {
+    const value = document.getElementById(id).value.trim();
+    // Do not parse, clamp, or replace zero. Budget validation/defaults belong
+    // to the server and Context bytes are not Handoff content bytes.
+    if (value !== '') params.set(name, value);
+  }
+}
 function queryParams() {
   const params = new URLSearchParams({ q: document.getElementById('query').value.trim(), mode: document.getElementById('mode').value, limit: document.getElementById('limit').value });
   for (const [id, name] of SEARCH_FIELDS) {
@@ -732,6 +821,15 @@ function queryParams() {
   return params;
 }
 
+function invalidateEditedSearch() {
+  // Enter's native change can commit the same value after keydown has already
+  // submitted it. Compare the full request, not the event type or just q.
+  // An invalid number may still serialize as an omitted (empty) field.
+  if (searchSignature && queryParams().toString() === searchSignature &&
+      ['limit', 'maxBytes'].every(id => document.getElementById(id).checkValidity())) return;
+  invalidateSearch('searchChanged');
+}
+
 async function doSearch(cursor) {
   const query = document.getElementById('query').value.trim();
   if (!query) {
@@ -739,14 +837,10 @@ async function doSearch(cursor) {
     setFeedback('search', 'queryRequired', '', true);
     return;
   }
-  for (const id of ['limit', 'maxBytes']) {
-    const control = document.getElementById(id);
-    if (!control.checkValidity()) {
-      invalidateSearch();
-      setFeedback('search', 'filterInvalid', '', true);
-      control.reportValidity();
-      return;
-    }
+  if (!validControls(['limit', 'maxBytes'])) {
+    invalidateSearch();
+    setFeedback('search', 'filterInvalid', '', true);
+    return;
   }
   const params = queryParams();
   const signature = params.toString();
@@ -766,6 +860,7 @@ async function doSearch(cursor) {
     if (!currentRequest('search', controller)) return;
     const data = payload(body);
     const hits = data.hits || [];
+    acceptedSearchParams = new URLSearchParams(signature);
     lastHits = cursor ? lastHits.concat(hits) : hits;
     lastError = '';
     renderHits(hits, Boolean(cursor));
@@ -777,6 +872,8 @@ async function doSearch(cursor) {
     if (!currentRequest('search', controller) || error.name === 'AbortError' || error.message === 'unauthorized') return;
     lastHits = [];
     nextCursor = null;
+    acceptedSearchParams = null;
+    invalidatePreview();
     text(document.getElementById('resultMeta'), '');
     document.getElementById('handoff').disabled = true;
     setFeedback('search', 'notAnswer', error.message, true);
@@ -847,80 +944,56 @@ function renderHits(hits, append) {
   }
 }
 
-async function loadContext(sessionId) {
-  if (!sessionId) { closeContext(); return; }
-  /* A preview belongs to the session it was opened from. Left on screen under
-     another session's header it attributes the wrong `--resume` command to that
-     session, so drop it when the session actually changes — and only then, so
-     re-rendering the same session keeps it. */
-  if (sessionId !== activeSession) {
-    cancelRequest('preview');
-    const preview = document.getElementById('previewOutput');
-    preview.hidden = true;
-    clear(preview);
-  }
-  activeSession = sessionId;
-  document.getElementById('contextPanel').hidden = false;
-  document.getElementById('detailEmpty').hidden = true;
+function renderContextTitle() {
   const title = document.getElementById('contextTitle');
   clear(title);
   const label = document.createElement('span');
   text(label, t('sessionLabel') + ' ');
   const mono = document.createElement('span');
   mono.className = 'mono';
-  text(mono, shortId(sessionId));
-  mono.title = sessionId;
+  text(mono, shortId(activeSession));
+  mono.title = activeSession;
   title.append(label, mono);
+}
+
+async function loadContext(sessionId) {
+  if (!sessionId) { closeContext(); return; }
+  activeSession = sessionId;
+  document.getElementById('contextPanel').hidden = false;
+  document.getElementById('detailEmpty').hidden = true;
+  renderContextTitle();
   await refreshContext();
+}
+
+function invalidateContext(messageKey = '') {
+  cancelRequest('context');
+  lastContext = null;
+  const container = document.getElementById('contextMessages');
+  clear(container);
+  container.setAttribute('aria-busy', 'false');
+  setFeedback('context', activeSession ? messageKey : '');
+  invalidatePreview();
 }
 
 async function refreshContext() {
   if (!activeSession) return;
+  invalidateContext();
+  if (!validControls(CONTEXT_BUDGET_FIELDS.map(([id]) => id))) {
+    setFeedback('context', 'filterInvalid', '', true);
+    return;
+  }
   const controller = beginRequest('context');
   const session = activeSession;
   const container = document.getElementById('contextMessages');
-  clear(container);
   container.setAttribute('aria-busy', 'true');
   setFeedback('context', 'contextLoading');
   try {
     const params = new URLSearchParams({ session, policy: document.getElementById('contextPolicy').value, level: document.getElementById('contextLevel').value });
+    appendBudgetParams(params, CONTEXT_BUDGET_FIELDS);
     const body = await api('/api/context?' + params, controller.signal);
     if (!currentRequest('context', controller) || activeSession !== session) return;
-    const messages = payload(body).messages || [];
-    clear(container);
-    for (const message of messages) {
-      const source = message.payload || {};
-      const role = source.role || 'message';
-      const item = document.createElement('article');
-      item.className = 'msg ' + (role === 'user' ? 'user' : 'assistant');
-      const head = document.createElement('div');
-      head.className = 'msg-head';
-      const badge = document.createElement('span');
-      badge.className = 'role-badge ' + (role === 'user' ? 'user' : '');
-      text(badge, role);
-      head.appendChild(badge);
-      const entityId = message.message_id || message.id || '';
-      if (entityId) {
-        const show = document.createElement('button');
-        show.type = 'button'; show.className = 'btn';
-        text(show, t('showEntity') + ' ' + shortId(entityId));
-        show.title = entityId;
-        show.addEventListener('click', () => showEntity(entityId));
-        head.appendChild(show);
-      }
-      const bodyNode = document.createElement('div');
-      bodyNode.className = 'msg-body';
-      text(bodyNode, source.text || JSON.stringify(source));
-      item.append(head, bodyNode);
-      container.appendChild(item);
-    }
-    if (!messages.length) {
-      const empty = document.createElement('div');
-      empty.className = 'empty';
-      text(empty, t('noMessages'));
-      container.appendChild(empty);
-    }
-    setFeedback('context', '', (body.warnings || []).join(' '));
+    renderContext(body);
+    lastContext = body;
   } catch (error) {
     if (!currentRequest('context', controller) || activeSession !== session || error.name === 'AbortError' || error.message === 'unauthorized') return;
     clear(container);
@@ -933,16 +1006,114 @@ async function refreshContext() {
   }
 }
 
+function renderContextMessage(message) {
+  const source = message.payload || {};
+  const role = source.role || 'message';
+  const item = document.createElement('article');
+  item.className = 'msg ' + (role === 'user' ? 'user' : 'assistant');
+  const head = document.createElement('div');
+  head.className = 'msg-head';
+  const badge = document.createElement('span');
+  badge.className = 'role-badge ' + (role === 'user' ? 'user' : '');
+  text(badge, role);
+  head.appendChild(badge);
+  const entityId = message.message_id || message.id || '';
+  if (entityId) {
+    const show = document.createElement('button');
+    show.type = 'button'; show.className = 'btn';
+    text(show, t('showEntity') + ' ' + shortId(entityId));
+    show.title = entityId;
+    show.addEventListener('click', () => showEntity(entityId));
+    head.appendChild(show);
+  }
+  const bodyNode = document.createElement('div');
+  bodyNode.className = 'msg-body';
+  text(bodyNode, source.text || JSON.stringify(source));
+  item.append(head, bodyNode);
+  return item;
+}
+
+function contextNote(parent, value) {
+  const note = document.createElement('p');
+  text(note, value);
+  parent.appendChild(note);
+}
+function contextSection(parent, title) {
+  const section = document.createElement('section');
+  section.className = 'context-section';
+  const heading = document.createElement('h3');
+  heading.className = 'detail-title';
+  text(heading, title);
+  section.appendChild(heading);
+  parent.appendChild(section);
+  return section;
+}
+
+function renderContext(body) {
+  const data = payload(body);
+  const messages = data.messages || [];
+  const partial = body.outcome === 'partial' || Boolean(data.truncation && data.truncation.truncated);
+  const container = document.getElementById('contextMessages');
+  clear(container);
+  const facts = document.createElement('div');
+  facts.className = 'context-facts';
+  if (data.requested_level && data.effective_level) {
+    contextNote(facts, (data.requested_level !== data.effective_level ? t('contextFallback') : '') +
+      t('contextLevels', { requested: data.requested_level, effective: data.effective_level }));
+  }
+  // These counts describe this response, never an invented session total or
+  // number omitted. render() supplies only truncated/reason, not lost counts.
+  contextNote(facts, t('contextCounts', { messages: messages.length, evidence: (data.evidence || []).length }));
+  if (partial && data.truncation && data.truncation.reason) {
+    contextNote(facts, t('contextTruncation', { reason: data.truncation.reason }));
+  }
+  if (data.hint) {
+    contextNote(facts, t('contextHint', { command: data.hint.command, session: data.hint.session_id, level: data.hint.level }));
+  }
+  container.appendChild(facts);
+  let structured = false;
+  switch (data.effective_level) {
+    case 'talks':
+      for (const [index, talk] of (data.talks || []).entries()) {
+        const section = contextSection(container, t('contextTalk', { n: index + 1 }));
+        section.appendChild(renderContextMessage(talk.user_message));
+        for (const message of talk.following_messages) section.appendChild(renderContextMessage(message));
+        structured = true;
+      }
+      break;
+    case 'sessions':
+      if (data.summary) {
+        const summary = data.summary;
+        const section = contextSection(container, t('levelSessions'));
+        const counts = document.createElement('div');
+        counts.className = 'context-facts';
+        contextNote(counts, t('contextSummaryMessages', { n: summary.message_count }));
+        contextNote(counts, t('contextSummaryTurns', { n: summary.turn_count }));
+        if (summary.file_references.length) contextNote(counts, t('contextFiles') + summary.file_references.join(' · '));
+        section.appendChild(counts);
+        if (summary.first_user_message) section.appendChild(renderContextMessage(summary.first_user_message));
+        structured = true;
+      }
+      break;
+  }
+  // Structural views do not cover every returned message (e.g. system or
+  // developer messages before a user anchor). Preserve the full message list.
+  const returned = structured ? contextSection(container, t('returnedMessages')) : container;
+  for (const message of messages) returned.appendChild(renderContextMessage(message));
+  if (!messages.length && !structured) {
+    const empty = document.createElement('div');
+    empty.className = 'empty';
+    text(empty, t(partial ? 'noBudgetMessages' : 'noMessages'));
+    container.appendChild(empty);
+  }
+  const warnings = (body.warnings || []).join(' ');
+  setFeedback('context', partial ? 'contextPartial' : '', (partial && warnings ? ' ' : '') + warnings);
+}
+
 function closeContext() {
-  cancelRequest('context');
-  cancelRequest('preview');
+  invalidateContext();
   document.getElementById('contextPanel').hidden = true;
   document.getElementById('detailEmpty').hidden = false;
-  clear(document.getElementById('contextMessages'));
-  document.getElementById('contextMessages').setAttribute('aria-busy', 'false');
-  document.getElementById('previewOutput').hidden = true;
-  clear(document.getElementById('previewOutput'));
-  setFeedback('context');
   for (const card of document.getElementById('results').children) card.classList.remove('active');
   activeSession = ''; activeHit = null;
 }
@@ -970,8 +1141,18 @@ async function previewResume() {
 }
 
 async function previewHandoff() {
-  if (!lastQuery) return;
-  await loadPreview('/api/handoff?q=' + encodeURIComponent(lastQuery));
+  if (!acceptedSearchParams) return;
+  if (!validControls(HANDOFF_BUDGET_FIELDS.map(([id]) => id))) {
+    invalidatePreview();
+    showPreview({ error: t('filterInvalid') });
+    return;
+  }
+  const params = new URLSearchParams();
+  for (const name of ['q', 'provider', 'since', 'until']) {
+    for (const value of acceptedSearchParams.getAll(name)) params.append(name, value);
+  }
+  appendBudgetParams(params, HANDOFF_BUDGET_FIELDS);
+  await loadPreview('/api/handoff?' + params);
 }
 
 /* ─── Wiring ────────────────────────────────────────────────────────────── */
@@ -995,14 +1176,15 @@ document.getElementById('langToggle').addEventListener('click', () => {
      leaves the page half-translated. */
   if (lastError) renderError(lastError);
   else if (lastQuery) renderHits(lastHits, false);
-  if (activeSession) loadContext(activeSession);
+  if (activeSession) renderContextTitle();
+  if (lastContext) renderContext(lastContext);
   init();
 });
 document.getElementById('searchButton').addEventListener('click', () => doSearch());
 document.getElementById('query').addEventListener('keydown', event => { if (event.key === 'Enter') doSearch(); });
 for (const id of ['query', 'mode', 'limit', 'includeSystem', 'groupBySession', ...SEARCH_FIELDS.map(([id]) => id)]) {
-  document.getElementById(id).addEventListener('input', () => invalidateSearch('searchChanged'));
-  document.getElementById(id).addEventListener('change', () => invalidateSearch('searchChanged'));
+  document.getElementById(id).addEventListener('input', invalidateEditedSearch);
+  document.getElementById(id).addEventListener('change', invalidateEditedSearch);
 }
 document.getElementById('loadMore').addEventListener('click', () => { if (nextCursor) doSearch(nextCursor); });
 document.getElementById('handoff').addEventListener('click', previewHandoff);
@@ -1011,6 +1193,14 @@ document.getElementById('resumePreview').addEventListener('click', previewResume
 document.getElementById('closeContext').addEventListener('click', closeContext);
 document.getElementById('contextPolicy').addEventListener('change', refreshContext);
 document.getElementById('contextLevel').addEventListener('change', refreshContext);
+for (const [id] of CONTEXT_BUDGET_FIELDS) {
+  document.getElementById(id).addEventListener('input', () => invalidateContext('contextChanged'));
+  document.getElementById(id).addEventListener('change', refreshContext);
+}
+for (const [id] of HANDOFF_BUDGET_FIELDS) {
+  document.getElementById(id).addEventListener('input', invalidatePreview);
+  document.getElementById(id).addEventListener('change', invalidatePreview);
+}
 /* A fragment-only navigation does not reload the page, so the token pasted into
    the address bar of an already-open tab arrives here and nowhere else. */
 window.addEventListener('hashchange', () => {

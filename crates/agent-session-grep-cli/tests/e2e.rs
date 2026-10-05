@@ -4882,6 +4882,331 @@ fn resume_yes_missing_provider_binary_returns_human_error() {
     assert!(!cwd_out.exists() && !args_out.exists());
 }
 
+const IDENTITY_SECRET: &str = "sk_live_abcdef1234567890xyz";
+const IDENTITY_NATIVE_SESSION: &str = "session:sk_live_abcdef1234567890xyz";
+
+fn boundary_identity_fixture(tag: &str) -> (tempfile::TempDir, String, Vec<String>, String) {
+    let (dir, db) = temp_db(tag);
+    let natives = [
+        "part:sk_live_abcdef1234567890xyz",
+        "reply:ghp_1234567890abcdefghijklmnopqrstuvwxyz",
+        "result:xoxb-1234567890-abcdef",
+    ];
+    let rows = [
+        serde_json::json!({
+            "type": "user", "uuid": natives[0], "sessionId": IDENTITY_NATIVE_SESSION,
+            "message": {"role": "user", "content": format!("identityneedle {IDENTITY_SECRET}")}
+        }),
+        serde_json::json!({
+            "type": "assistant", "uuid": natives[1], "parentUuid": natives[0],
+            "sessionId": IDENTITY_NATIVE_SESSION,
+            "message": {"role": "assistant", "content": [
+                {"type": "text", "text": "identityneedle reply"},
+                {"type": "tool_use", "id": "identity-call", "name": "Bash",
+                 "input": {"command": format!("echo {IDENTITY_SECRET}")}}
+            ]}
+        }),
+        serde_json::json!({
+            "type": "user", "uuid": natives[2], "parentUuid": natives[1],
+            "sessionId": IDENTITY_NATIVE_SESSION,
+            "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "identity-call", "content": "identityneedle result"}
+            ]}
+        }),
+    ];
+    let fixture = dir.path().join("identity.jsonl");
+    std::fs::write(
+        &fixture,
+        rows.iter()
+            .map(|row| format!("{row}\n"))
+            .collect::<String>(),
+    )
+    .unwrap();
+    let out = run(&db, &["ingest", fixture.to_str().unwrap()]);
+    assert!(out.status.success(), "{}", stdout(&out));
+    let ids: Vec<String> = natives
+        .iter()
+        .map(|native| format!("msg_v1_{native}"))
+        .collect();
+    let session = session_wire_for_message(&db, &ids[0]);
+    // The opaque catalog payload may contain arbitrary, identity-shaped keys.
+    // It is not the typed ContextMessage / ResumeMetadata projection.
+    let conn = Connection::open(&db).unwrap();
+    let bytes: Vec<u8> = conn
+        .query_row(
+            "SELECT payload FROM catalog WHERE id=?1",
+            [&ids[0]],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut payload: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    payload["untrusted"] = serde_json::json!({
+        "id": IDENTITY_SECRET, "message_id": ids[0], "session_id": IDENTITY_NATIVE_SESSION,
+        "provider_session_id": IDENTITY_NATIVE_SESSION, "token": "opaque-secret",
+        "page": {"next_cursor": IDENTITY_SECRET},
+        "messages": [{"id": IDENTITY_SECRET}],
+        "tool_activities": [{"activity_id": IDENTITY_SECRET, "message_id": ids[0]}]
+    });
+    conn.execute(
+        "UPDATE catalog SET payload=?1 WHERE id=?2",
+        rusqlite::params![serde_json::to_vec(&payload).unwrap(), ids[0]],
+    )
+    .unwrap();
+    (dir, db, ids, session)
+}
+
+#[test]
+fn boundary_identity_search_and_list_ids_round_trip_with_cursors() {
+    let (_dir, db, ids, _) = boundary_identity_fixture("identity-search");
+    let mut found = Vec::new();
+    let mut cursor = None;
+    for _ in 0..ids.len() {
+        let mut args = vec![
+            "--request-id",
+            IDENTITY_SECRET,
+            "search",
+            "identityneedle",
+            "--max-items",
+            "1",
+        ];
+        if let Some(cursor) = cursor.as_deref() {
+            args.extend(["--cursor", cursor]);
+        }
+        let out = run(&db, &args);
+        assert!(out.status.success(), "{}", stdout(&out));
+        let frame = parse_first_line(&out);
+        assert_envelope_shape(&frame, true);
+        assert_eq!(frame["request_id"], IDENTITY_SECRET);
+        let hit = &frame["data"]["hits"][0];
+        let id = hit["id"].as_str().unwrap().to_string();
+        assert!(ids.contains(&id), "typed search ID was changed: {frame}");
+        assert!(
+            !hit["text"].as_str().unwrap().contains(IDENTITY_SECRET),
+            "{frame}"
+        );
+        let message = run(&db, &["get-message", &id]);
+        assert!(message.status.success(), "{}", stdout(&message));
+        let message = parse_first_line(&message);
+        assert_eq!(message["data"]["message_id"], id);
+        assert_eq!(message["data"]["messages"][0]["id"], id);
+        assert_eq!(message["data"]["messages"][0]["message_id"], id);
+        if id == ids[0] {
+            // One body plus nine untrusted leaves; the three typed Message ID
+            // positions must not inflate the actual output redaction count.
+            assert_eq!(message["redaction"]["redacted_count"], 10, "{message}");
+        }
+        found.push(id);
+        cursor = frame["page"]["next_cursor"].as_str().map(str::to_owned);
+    }
+    assert!(cursor.is_none());
+    found.sort();
+    let mut expected = ids;
+    expected.sort();
+    assert_eq!(found, expected);
+
+    let mut cursor = None;
+    let mut listed = Vec::new();
+    // Messages plus their Session, Document and possible Source entity.
+    for _ in 0..expected.len() + 3 {
+        let mut args = vec!["list", "1"];
+        if let Some(cursor) = cursor.as_deref() {
+            args.extend(["--cursor", cursor]);
+        }
+        let out = run(&db, &args);
+        assert!(out.status.success(), "{}", stdout(&out));
+        let frame = parse_first_line(&out);
+        for entry in frame["data"]["entries"].as_array().unwrap() {
+            let id = entry["id"].as_str().unwrap();
+            assert!(
+                !id.contains("[redacted"),
+                "typed list ID was changed: {frame}"
+            );
+            if id.starts_with("msg_v1_") {
+                listed.push(id.to_string());
+            }
+        }
+        cursor = frame["page"]["next_cursor"].as_str().map(str::to_owned);
+        if cursor.is_none() {
+            break;
+        }
+        assert!(listed.len() <= expected.len());
+    }
+    assert!(cursor.is_none(), "list cursor did not reach the end");
+    listed.sort();
+    assert_eq!(listed, expected);
+}
+
+#[test]
+fn boundary_identity_context_handoff_and_opaque_payload_paths() {
+    let (_dir, db, ids, session) = boundary_identity_fixture("identity-context");
+    for level in ["raw", "talks", "sessions"] {
+        let out = run(&db, &["context", &session, "--level", level]);
+        assert!(out.status.success(), "{}", stdout(&out));
+        let frame = parse_first_line(&out);
+        let data = &frame["data"];
+        assert_eq!(data["session_id"], session);
+        assert_eq!(data["branch_leaf"], ids[2], "{frame}");
+        assert_eq!(data["messages"].as_array().unwrap().len(), ids.len());
+        assert_eq!(data["evidence"].as_array().unwrap().len(), ids.len());
+        for (message, expected) in data["messages"].as_array().unwrap().iter().zip(&ids) {
+            assert_eq!(message["id"], *expected, "{frame}");
+            assert_eq!(message["message_id"], *expected, "{frame}");
+            assert!(
+                !message["payload"].to_string().contains(IDENTITY_SECRET),
+                "{frame}"
+            );
+        }
+        for (evidence, expected) in data["evidence"].as_array().unwrap().iter().zip(&ids) {
+            assert_eq!(evidence["message_id"], *expected, "{frame}");
+        }
+        let untrusted = &data["messages"][0]["payload"]["untrusted"];
+        assert_eq!(untrusted["token"], "[redacted]");
+        assert!(!untrusted.to_string().contains(IDENTITY_SECRET), "{frame}");
+        assert_eq!(data["tool_activities"][0]["message_id"], ids[2], "{frame}");
+        assert!(
+            !data["tool_activities"][0]["target"]
+                .to_string()
+                .contains(IDENTITY_SECRET)
+        );
+        if level == "talks" {
+            assert_eq!(
+                data["talks"][0]["user_message"]["message_id"], ids[0],
+                "{frame}"
+            );
+            assert_eq!(
+                data["talks"][0]["following_messages"][0]["message_id"], ids[1],
+                "{frame}"
+            );
+        }
+        if level == "sessions" {
+            assert_eq!(
+                data["summary"]["first_user_message"]["message_id"], ids[0],
+                "{frame}"
+            );
+        }
+    }
+    for extra in [vec![], vec!["--max-evidence", "1"]] {
+        let mut args = vec!["handoff", "identityneedle"];
+        args.extend(extra);
+        let out = run(&db, &args);
+        assert!(
+            matches!(out.status.code(), Some(0 | 10)),
+            "{}",
+            stdout(&out)
+        );
+        let frame = parse_first_line(&out);
+        let data = &frame["data"];
+        for key in ["evidence", "mainline"] {
+            for entry in data[key].as_array().unwrap() {
+                assert!(ids.iter().any(|id| entry["message_id"] == *id), "{frame}");
+                assert!(
+                    !entry[if key == "evidence" {
+                        "text"
+                    } else {
+                        "text_preview"
+                    }]
+                    .to_string()
+                    .contains(IDENTITY_SECRET)
+                );
+            }
+        }
+        for locators in [
+            &data["source_locators"],
+            &data["truncation"]["dropped_locators"],
+        ] {
+            if let Some(locators) = locators.as_array() {
+                for locator in locators {
+                    assert!(ids.iter().any(|id| locator["cursor"] == *id), "{frame}");
+                }
+            }
+        }
+        assert_eq!(data["tool_activity"][0]["message_id"], ids[2], "{frame}");
+        assert!(data["budget"]["used_tokens"].is_u64());
+    }
+    let show = run(&db, &["show", &ids[0]]);
+    assert!(show.status.success());
+    let data = parse_first_line(&show);
+    assert!(!data["data"]["entity"].to_string().contains(IDENTITY_SECRET));
+    assert_eq!(data["data"]["entity"]["untrusted"]["token"], "[redacted]");
+    let human = run_human(&db, &["show", &ids[0]]);
+    assert!(human.status.success());
+    assert!(
+        stdout(&human).contains(IDENTITY_SECRET),
+        "local Human payload policy changed"
+    );
+}
+
+#[test]
+fn boundary_identity_native_resume_metadata_does_not_count_as_redaction() {
+    let (_dir, db, _, session) = boundary_identity_fixture("identity-resume");
+    let out = run(
+        &db,
+        &[
+            "--request-id",
+            IDENTITY_SECRET,
+            "get-session-resume",
+            &session,
+        ],
+    );
+    assert!(out.status.success(), "{}", stdout(&out));
+    let frame = parse_first_line(&out);
+    assert_eq!(frame["request_id"], IDENTITY_SECRET);
+    assert_eq!(frame["data"]["session_id"], session);
+    assert_eq!(
+        frame["data"]["provider_session_id"], IDENTITY_NATIVE_SESSION,
+        "{frame}"
+    );
+    assert_eq!(frame["redaction"]["status"], "none", "{frame}");
+    assert_eq!(frame["redaction"]["redacted_count"], 0, "{frame}");
+}
+
+#[test]
+fn boundary_identity_diagnostics_omit_private_input_paths_at_source() {
+    let (_dir, db) = temp_db("identity-diagnostics");
+    for input in [
+        r"C:\private-project\synthetic-owner\notes.jsonl",
+        "/srv/private-project/synthetic-owner/notes.jsonl",
+    ] {
+        for args in [
+            vec!["context", input],
+            vec!["get-session-resume", input],
+            vec!["resume", input],
+            vec!["get", input],
+            vec!["show", input],
+            vec!["get-message", input],
+            vec!["get-message", "msg_v1_valid", "--session", input],
+        ] {
+            for mode in ["human", "json", "jsonl"] {
+                let out = Command::new(BIN)
+                    .args([
+                        "--db",
+                        &db,
+                        "--output",
+                        mode,
+                        "--request-id",
+                        IDENTITY_SECRET,
+                    ])
+                    .args(&args)
+                    .output()
+                    .unwrap();
+                assert_eq!(out.status.code(), Some(2), "{}", stdout(&out));
+                let output = format!("{}{}", stdout(&out), String::from_utf8_lossy(&out.stderr));
+                for private in [input, "private-project", "synthetic-owner", "notes.jsonl"] {
+                    assert!(!output.contains(private), "{mode} {args:?}: {output}");
+                }
+                if mode == "human" {
+                    assert!(out.stdout.is_empty());
+                    assert!(output.contains("invalid_request"));
+                } else {
+                    let frame = parse_first_line(&out);
+                    assert_envelope_shape(&frame, false);
+                    assert_eq!(frame["error"]["code"], "invalid_request");
+                    assert_eq!(frame["request_id"], IDENTITY_SECRET);
+                }
+            }
+        }
+    }
+}
 #[test]
 fn boundary_unknown_command_and_machine_errors_do_not_echo_secrets() {
     let (_dir, db) = temp_db("error-text-boundary");

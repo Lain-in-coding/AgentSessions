@@ -741,7 +741,7 @@ fn emit_result(
         protocol::OutputMode::Json | protocol::OutputMode::Jsonl => {
             // ADR-0009: machine/cross-boundary output is redacted by default.
             // Human CLI output stays unredacted per ADR-0004 (handled above).
-            let (redacted_data, mut redaction) = redaction::redact_value(data);
+            let (redacted_data, mut redaction) = redaction::redact_command_data(command, data);
             if warning_redactions > 0 {
                 redaction.redacted_count += warning_redactions;
                 redaction.status = agent_session_grep_ports::RedactionState::Applied;
@@ -2358,13 +2358,13 @@ fn dispatch(
             let wire = arg(&args, 1, "get-message <message-wire-id>")?;
             let message_id = StableId::from_wire(wire)
                 .filter(|id| id.kind() == IdKind::Message)
-                .ok_or_else(|| CliError::usage(format!("not a valid message id: {wire}")))?;
+                .ok_or_else(|| CliError::usage("not a valid message id"))?;
             let session_id = session
                 .as_deref()
                 .map(|wire| {
                     StableId::from_wire(wire)
                         .filter(|id| id.kind() == IdKind::Session)
-                        .ok_or_else(|| CliError::usage(format!("not a valid session id: {wire}")))
+                        .ok_or_else(|| CliError::usage("not a valid session id"))
                 })
                 .transpose()?;
             let app = resume_app(store);
@@ -2381,7 +2381,7 @@ fn dispatch(
             no_extra_args(rest, 1, "get <wire-id>")?;
             let wire = arg(rest, 1, "get <wire-id>")?;
             let id = StableId::from_wire(wire)
-                .ok_or_else(|| CliError::usage(format!("not a valid entity id: {wire}")))?;
+                .ok_or_else(|| CliError::usage("not a valid entity id"))?;
             let app = resume_app(store);
             let response = app.handle(AppRequest::Get { id: id.clone() })?;
             // 未找到实体：按 error catalog 映射 exit 4，而非当成功渲染 "not found"
@@ -2400,7 +2400,7 @@ fn dispatch(
             no_extra_args(rest, 1, "show <wire-id>")?;
             let wire = arg(rest, 1, "show <wire-id>")?;
             let id = StableId::from_wire(wire)
-                .ok_or_else(|| CliError::usage(format!("not a valid entity id: {wire}")))?;
+                .ok_or_else(|| CliError::usage("not a valid entity id"))?;
             let app = resume_app(store);
             let response = app.handle(AppRequest::Show { id: id.clone() })?;
             if matches!(&response, AppResponse::Show { payload: None }) {
@@ -2492,7 +2492,7 @@ fn dispatch(
             no_extra_args(rest, 1, "get-session-resume <session-id>")?;
             let wire = arg(rest, 1, "get-session-resume <session-id>")?;
             let id = StableId::from_wire(wire)
-                .ok_or_else(|| CliError::usage(format!("not a valid entity id: {wire}")))?;
+                .ok_or_else(|| CliError::usage("not a valid entity id"))?;
             let app = resume_app(store);
             let response = app.handle(AppRequest::GetSessionResume {
                 session_id: id.clone(),
@@ -2556,7 +2556,7 @@ fn dispatch(
             let wire = arg(&args, 1, "context <session-wire-id>")?;
             let session_id = StableId::from_wire(wire)
                 .filter(|id| id.kind() == IdKind::Session)
-                .ok_or_else(|| CliError::usage(format!("not a valid session id: {wire}")))?;
+                .ok_or_else(|| CliError::usage("not a valid session id"))?;
             let app = resume_app(store);
             let response = app.handle(AppRequest::Context {
                 session_id,
@@ -2790,7 +2790,7 @@ fn load_resume_preview(
 > {
     let id = StableId::from_wire(wire)
         .filter(|id| id.kind() == IdKind::Session)
-        .ok_or_else(|| CliError::usage(format!("not a valid session id: {wire}")))?;
+        .ok_or_else(|| CliError::usage("not a valid session id"))?;
     let app = resume_app(store);
     let response = app.handle(AppRequest::GetSessionResume {
         session_id: id.clone(),

@@ -363,7 +363,8 @@ impl McpServer<'_> {
         match self.call_tool(name, arguments) {
             Ok(payload) => {
                 // ADR-0009: MCP is a cross-boundary output → redact by default.
-                let (mut redacted_payload, redaction) = crate::redaction::redact_value(payload);
+                let (mut redacted_payload, redaction) =
+                    crate::redaction::redact_command_response(name, payload);
                 // 脱敏状态必须随帧上报（08-15-offline-privacy-hooks design D3）：
                 // 与 Robot envelope 同一 `redaction` 块。少了它，调用方无法区分
                 // "服务端涂红了这个值"与"原文逐字就是 [redacted:...]"，也拿不到
@@ -541,12 +542,7 @@ impl McpServer<'_> {
         // 冒充（否则 get_session_context 的上下文装配语义会被错置）。
         let session_id = StableId::from_wire(&wire)
             .filter(|id| id.kind() == IdKind::Session)
-            .ok_or_else(|| {
-                ToolError::Params(format!(
-                    "session_id is not a valid session id: {}",
-                    bounded(&wire)
-                ))
-            })?;
+            .ok_or_else(|| ToolError::Params("session_id is not a valid session id".into()))?;
         let policy = match opt_str(args, "policy")?.as_deref() {
             None | Some("mainline") => ContextPolicy::Mainline,
             Some("full") => ContextPolicy::Full,
@@ -586,12 +582,7 @@ impl McpServer<'_> {
         let wire = required_str(args, "session_id")?;
         let session_id = StableId::from_wire(&wire)
             .filter(|id| id.kind() == IdKind::Session)
-            .ok_or_else(|| {
-                ToolError::Params(format!(
-                    "session_id is not a valid session id: {}",
-                    bounded(&wire)
-                ))
-            })?;
+            .ok_or_else(|| ToolError::Params("session_id is not a valid session id".into()))?;
         self.run_app(AppRequest::GetSessionResume { session_id })
     }
 
@@ -612,22 +603,14 @@ impl McpServer<'_> {
         // 校验：message_id 必须是 Message 实体。
         let message_id = StableId::from_wire(&message_wire)
             .filter(|id| id.kind() == IdKind::Message)
-            .ok_or_else(|| {
-                ToolError::Params(format!(
-                    "message_id is not a valid message id: {}",
-                    bounded(&message_wire)
-                ))
-            })?;
+            .ok_or_else(|| ToolError::Params("message_id is not a valid message id".into()))?;
         let session_id = match opt_str(args, "session_id")? {
             None => None,
             Some(wire) => Some(
                 StableId::from_wire(&wire)
                     .filter(|id| id.kind() == IdKind::Session)
                     .ok_or_else(|| {
-                        ToolError::Params(format!(
-                            "session_id is not a valid session id: {}",
-                            bounded(&wire)
-                        ))
+                        ToolError::Params("session_id is not a valid session id".into())
                     })?,
             ),
         };
