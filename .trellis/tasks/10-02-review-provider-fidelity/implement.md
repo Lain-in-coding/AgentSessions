@@ -417,3 +417,142 @@ SHA's results are not reused for it.
   (c) Cursor's injected open-failure case covers sidecar and directory cleanup,
   while guard deletion of the main file stays covered by write/sync,
   same-candidate, WAL and query-failure cases.
+
+
+## UTF-8 tail/mid-file decision and matrix slice (P1-1; base 428f535)
+- [x] Record the D3 decision: keep the existing safety baseline (an indexed
+  record-stream source whose JSON tail is cut at EOF is Retained without parse,
+  fingerprint or generation advance) plus the existing recoverable valid-prefix
+  path for never-indexed sources; no --strict switch, no change to which bytes
+  become searchable, no silent tombstone, no permanent fingerprint for unfinished
+  sources.
+- [x] Add CLI e2e matrix through the real binary: (a) an indexed source with a
+  mid-file invalid row followed by valid rows must scan rather than Retain, keep
+  old membership and index the later valid rows; (b) indexed source EOF truncation
+  followed by completion must converge without loss or duplication; (c) a
+  never-indexed source with an EOF-truncated tail followed by completion must
+  converge without duplication while relation_complete stays false only while
+  incomplete. Verify actual classification (Clean/Partial/Invalid) before fixing
+  expected behavior to a guess.
+- [x] Assert retained / skipped / diagnostics / warnings stay individually
+  attributable in the single-source result and batch outcome, and that none of
+  the matrix cases cache an unfinished source as complete.
+- [x] Run CLI/package gates, then the full local gate on the final tree;
+  independent check; SHA-bound remote checks. No parser/schema bump expected.
+
+### P1-1 D3 decision
+Keep the existing two-path safety baseline. An indexed record-stream source
+whose JSON tail is cut at EOF (`JsonlHealth::Invalid` with a cached fingerprint)
+stays Retained: no parse, no fingerprint advance, no generation advance, no
+commit. A never-indexed source takes the existing recoverable valid-prefix path:
+valid prefix committed, truncated row counted as `skipped` plus diagnostics,
+`relation_complete=false`. No `--strict` switch is added, which bytes become
+searchable is unchanged, no silent tombstone is introduced, and an unfinished
+source never leaves a complete relation fingerprint: `source_scans` may cache
+its exact-bytes fingerprint as a parse cache, but the completeness marker
+`source_relation_scans` is absent for it (deleted on an incomplete commit,
+re-inserted only by a complete scan).
+
+### P1-1 matrix e2e evidence (implement worker, 2026-10-05, base 428f535)
+Verified classification facts (read-only inspection; no product code changed):
+- `crates/agent-session-grep-cli/src/lib.rs:4600-4641`: `jsonl_health` is
+  tri-state — `Clean` (no malformed row), `Partial` (malformed row with at least
+  one valid row after it), `Invalid` (no valid row, or the last malformed row
+  sits at EOF).
+- `lib.rs:4842-4852`: the Retain branch requires a cached fingerprint
+  (`cached_fp.is_some()`) AND a `RecordStream` provider hint AND
+  `health == JsonlHealth::Invalid`; `4860-4870` records `retained`, emits the
+  truncated-tail diagnostic and commits nothing; `4871-4893` routes Partial and
+  never-indexed sources to `stage_with_source` (recoverable-skip).
+- `lib.rs:3314-3324` (`provider_is_record_stream`) derives record-stream status
+  from the adapter manifest; the JSONL fixture shape used by the matrix is
+  claimed by the `claude-code` adapter.
+- `lib.rs:5029-5043`: the single-source sync frame keeps `retained` (source
+  count) separate from `emitted`/`messages`/`committed`/`skipped`/`diagnostics`/
+  `generation`, so each path stays individually attributable.
+- `crates/agent-session-grep-adapters-sqlite/src/lib.rs:3159-3180`:
+  `source_fingerprints` reads `source_scans` (content-keyed parse cache);
+  `:7528-7548` upserts `source_scans` for every committed replacement;
+  `:7549-7562` inserts `source_relation_scans` only when `relation_complete`,
+  otherwise deletes it; `:3258-` (`source_paths_requiring_relation_scan`)
+  reports scan rows missing the relation marker.
+
+Tests added (pure additions: `git diff --numstat` reports 0 deletions):
+- `crates/agent-session-grep-cli/tests/e2e.rs:3485-3518` helpers
+  `search_hit_count`, `relation_scan_count`, `stored_source_fingerprint`.
+- `sync_indexed_mid_file_invalid_row_scans_without_retain_or_tombstone`
+  (`:3524`): indexed source rewritten to "valid row / malformed middle / valid
+  row", with both previously indexed rows removed from the new file. Pins
+  baseline `source_relation_scans==1` before the rewrite, then
+  `retained==0`, `emitted==2`, `committed==2`, `skipped==1`, `diagnostics==2`,
+  `generation==2`, both warnings (partial-retention warning first, `line 2 ...
+  invalid JSON` diagnostic second), both new needles searchable once, both old
+  needles still searchable (no tombstone), status `placements==4` /
+  `catalog_count==8`, and `source_relation_scans==0` after the partial rescan
+  (the stale complete marker is revoked).
+- `sync_indexed_truncated_tail_completion_converges_without_duplicates`
+  (`:3634`): Retain for an indexed EOF-truncated tail (`retained==1`,
+  `emitted==0`, `committed==0`, `generation==1`, stored fingerprint unchanged,
+  relation marker kept), then completion re-sync (`emitted==3`, `committed==3`,
+  `skipped==0`, `generation==2`, fingerprint advanced), new needle searchable
+  once, both old needles searchable once, status `placements==3` /
+  `catalog_count==5`.
+- `sync_new_truncated_source_completion_converges_without_duplicates`
+  (`:3752`): never-indexed truncated source keeps the recoverable path
+  (`retained==0`, `messages==1`, `committed==1`, `skipped==1`,
+  `diagnostics==2`, valid prefix searchable, truncated message _not_ indexed,
+  `source_relation_scans==0`), then completion re-sync converges
+  (`messages==2`, `skipped==0`, relation marker restored) with both needles
+  searchable once and status `placements==2` / `catalog_count==4`.
+
+RED/GREEN record (every product mutation was reverted; final
+`git diff --quiet -- crates/agent-session-grep-cli/src/lib.rs` exit 0):
+- GREEN: the 3 new tests plus the 2 existing truncation tests each ran alone —
+  5 invocations, 1 passed / 0 failed / 0 ignored each, on unmodified source.
+- M1 RED (`health == JsonlHealth::Invalid` -> `health != JsonlHealth::Clean`):
+  test (a) failed at `retained` (left 1, right 0) with a false truncated-tail
+  warning; tests (b)/(c) unaffected. Proves (a)'s file classifies as `Partial`.
+- M2 RED (`cached_fp.is_some()` -> `true`, plus the record-stream hint gate ->
+  `true`): test (c) failed at `retained` (left 1, right 0, generation 0);
+  (a)/(b) unaffected. Honest limit: neutralizing the `cached_fp` gate alone did
+  not flip test (c), because that temp-path first sync also has no provider
+  hint; only the combined mutation demonstrates the oracle.
+- M3 RED (`health == JsonlHealth::Invalid` -> `false`): the new test (b) and the
+  pre-existing `sync_truncated_tail_retains_previous_index_without_churn` both
+  failed at `retained` (left 0, right 1) with the recoverable-skip frame;
+  (a)/(c) unaffected. Proves (b)'s file classifies as `Invalid` and the new pin
+  matches the existing one.
+- Manual trace probe (not asserted by the tests): a rewritten mid-file fixture
+  synced with `ASG_INDEX_TRACE=<temp file>` emitted `cli:sync` with
+  `stages_ms.jsonl_health=0.123 > 0`, i.e. the health triage really ran before
+  the Partial scan was staged.
+
+Commands and results (env `CARGO_TARGET_DIR` set to the shared build cache,
+`CARGO_BUILD_JOBS=2`, `RUST_TEST_THREADS=2`, all with `--offline --locked`):
+- `cargo test -p agent-session-grep-cli --test e2e <each of the 5 names>` —
+  5 x (1 passed / 0 failed / 0 ignored).
+- `cargo test -p agent-session-grep-cli --all-targets --all-features` —
+  exit 0, 13 targets: 630 passed / 0 failed / 0 ignored (lib 361, e2e 169,
+  mcp_e2e 45, provider_matrix 35, hermes_state_db 6, hook_contract 4,
+  cursor_disk_kv 3, e2e_consistency 2, network_egress 2,
+  provider_probe_isolation 3, three bin targets 0).
+- `cargo test -p agent-session-grep-cli --doc --all-features` — 0 tests, exit 0.
+- `cargo fmt --all --check` — exit 0 (rustfmt was applied once to the new test
+  block only; no unrelated file changed).
+- `cargo clippy -p agent-session-grep-cli --all-targets --all-features -- -D warnings`
+  — exit 0.
+- No product defect surfaced: zero lines of product code changed. The working
+  tree holds only the `tests/e2e.rs` additions plus this task document.
+
+Not verified / limits:
+- No `sync --discover` registered-root variant of case (c): the individual
+  necessity of the `cached_fp` guard for discovered sources is argued from
+  `lib.rs:4842-4852` plus the combined mutation M2, not from a discovery-path
+  test. Discovery incomplete/relation-recovery paths (`incomplete_paths`,
+  `relation_recovery_paths`) were not exercised here.
+- No independent check, no commit/push, no SHA-bound remote gates and no full
+  workspace gate; those remain for main/the checker.
+- Windows-only local execution; no Linux/macOS run of this slice.
+- The `ASG_INDEX_TRACE` observation is a manual probe, not asserted in a test.
+- The relation-marker SQL assertions pin local store state after explicit sync;
+  they make no claim about multi-source batches.

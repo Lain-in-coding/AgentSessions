@@ -3482,6 +3482,371 @@ fn sync_new_truncated_source_parses_valid_prefix_recoverably() {
     assert!(stdout(&out).contains("msg_v1_"), "search={}", stdout(&out));
 }
 
+/// robot search envelope 的命中数（`data.hits`）。
+fn search_hit_count(db: &str, needle: &str) -> usize {
+    let out = run(db, &["search", needle]);
+    assert!(
+        out.status.success(),
+        "search {needle} failed: {}",
+        stdout(&out)
+    );
+    parse_first_line(&out)["data"]["hits"]
+        .as_array()
+        .expect("hits array")
+        .len()
+}
+
+/// 该目录中 source_relation_scans 的行数：只有完整扫描才允许留下关系标记。
+fn relation_scan_count(db: &str) -> i64 {
+    Connection::open(db)
+        .expect("open catalog")
+        .query_row("SELECT COUNT(*) FROM source_relation_scans", [], |row| {
+            row.get(0)
+        })
+        .expect("count relation scans")
+}
+
+/// source_scans 中已提交的指纹（单源临时目录）。
+fn stored_source_fingerprint(db: &str) -> String {
+    Connection::open(db)
+        .expect("open catalog")
+        .query_row("SELECT fingerprint FROM source_scans LIMIT 1", [], |row| {
+            row.get::<_, Option<String>>(0)
+        })
+        .expect("read stored fingerprint")
+        .expect("committed scan must carry a fingerprint")
+}
+
+/// P1-1 matrix (a)：已索引源在中部插入坏行（其后仍有合法行）→ 健康度 Partial，
+/// 必须照常扫描而不是 Retain；坏行 recoverable-skip、后续合法行入库；本次扫描
+/// relation_complete=false，旧 membership 不得被 tombstone。
+#[test]
+fn sync_indexed_mid_file_invalid_row_scans_without_retain_or_tombstone() {
+    let (dir, db) = temp_db("sync-mid-invalid");
+    let fixture = dir.path().join("mid-invalid.jsonl");
+    std::fs::write(
+        &fixture,
+        concat!(
+            r#"{"type":"user","message":{"role":"user","content":"keep old alpha"}}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"role":"assistant","content":"keep old beta"}}"#,
+            "\n",
+        ),
+    )
+    .expect("write fixture");
+    let path = fixture.to_string_lossy().into_owned();
+
+    let out = run(&db, &["sync", &path]);
+    assert!(out.status.success(), "sync failed: {}", stdout(&out));
+    assert_eq!(
+        parse_first_line(&out)["data"]["generation"],
+        1,
+        "indexed baseline"
+    );
+    assert_eq!(
+        relation_scan_count(&db),
+        1,
+        "complete baseline scan must leave the relation marker"
+    );
+
+    // 重写为：合法行 + 中部坏行（未闭合字符串）+ 后续合法行。两条旧行都被移出
+    // 新文件：Partial 扫描下它们“缺席”也不能被 tombstone。
+    std::fs::write(
+        &fixture,
+        concat!(
+            r#"{"type":"user","message":{"role":"user","content":"fresh delta"}}"#,
+            "\n",
+            r#"{"type":"user","message":{"role":"user","content":"broken middle"#,
+            "\n",
+            r#"{"type":"assistant","message":{"role":"assistant","content":"after bad gamma"}}"#,
+            "\n",
+        ),
+    )
+    .expect("rewrite fixture");
+
+    let out = run(&db, &["sync", &path]);
+    assert!(
+        out.status.success(),
+        "mid-file invalid sync must succeed: {}",
+        stdout(&out)
+    );
+    let frame = parse_first_line(&out);
+    assert_eq!(
+        frame["data"]["retained"], 0,
+        "中部坏行是 Partial，不是截断尾，不得 Retain: {frame}"
+    );
+    assert_eq!(
+        frame["data"]["emitted"], 2,
+        "坏行前后合法行都应 parse: {frame}"
+    );
+    assert_eq!(frame["data"]["committed"], 2, "{frame}");
+    assert_eq!(frame["data"]["skipped"], 1, "坏行必须计 skipped: {frame}");
+    assert_eq!(
+        frame["data"]["diagnostics"], 2,
+        "坏行诊断 + partial 保留提示: {frame}"
+    );
+    assert_eq!(
+        frame["data"]["generation"], 2,
+        "Partial 扫描必须提交并推进 generation: {frame}"
+    );
+    let warnings = frame["warnings"].as_array().expect("warnings");
+    assert_eq!(warnings.len(), 2, "{frame}");
+    assert!(
+        warnings[0]
+            .as_str()
+            .is_some_and(|text| text.starts_with("partial source scan:")),
+        "partial 保留/共存提示必须首位且可见: {frame}"
+    );
+    assert!(
+        warnings.iter().any(|warning| warning
+            .as_str()
+            .is_some_and(|text| text.contains("line 2") && text.contains("invalid JSON"))),
+        "坏行诊断必须单独可见: {frame}"
+    );
+
+    // 坏行之前的合法行与坏行之后的合法行都已索引。
+    assert_eq!(
+        search_hit_count(&db, "delta"),
+        1,
+        "坏行之前的合法行必须可搜索"
+    );
+    assert_eq!(search_hit_count(&db, "gamma"), 1, "后续合法行必须可搜索");
+    // 旧 membership 零 tombstone：两条旧行都已不在新文件里，仍必须可搜索。
+    assert_eq!(search_hit_count(&db, "alpha"), 1, "旧消息不得被 tombstone");
+    assert_eq!(search_hit_count(&db, "beta"), 1, "旧消息不得被 tombstone");
+
+    let out = run(&db, &["status"]);
+    let status = parse_first_line(&out);
+    assert_eq!(
+        status["data"]["placements"], 4,
+        "旧 2 条 + 新 2 条 placement: {status}"
+    );
+    assert_eq!(
+        status["data"]["catalog_count"], 8,
+        "4 消息 + 旧/新各一套 session/document: {status}"
+    );
+    assert_eq!(
+        relation_scan_count(&db),
+        0,
+        "Partial 扫描必须撤销此前留下的完整关系标记"
+    );
+}
+
+/// P1-1 matrix (b)：已索引源 EOF 截断 → Retain（不 parse/不提交/不推进指纹与
+/// generation）；补全尾部后字节变化 → 完整重扫收敛：新消息入库、旧消息保留、
+/// 无重复 catalog 实体。
+#[test]
+fn sync_indexed_truncated_tail_completion_converges_without_duplicates() {
+    let (dir, db) = temp_db("sync-indexed-truncation-completion");
+    let fixture = dir.path().join("live-completed.jsonl");
+    std::fs::write(
+        &fixture,
+        concat!(
+            r#"{"type":"user","message":{"role":"user","content":"tune the index"}}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"role":"assistant","content":"raise the batch size"}}"#,
+            "\n",
+        ),
+    )
+    .expect("write fixture");
+    let path = fixture.to_string_lossy().into_owned();
+
+    let out = run(&db, &["sync", &path]);
+    assert!(out.status.success(), "sync failed: {}", stdout(&out));
+    assert_eq!(parse_first_line(&out)["data"]["generation"], 1);
+    assert_eq!(relation_scan_count(&db), 1, "完整扫描应留下关系标记");
+    let fingerprint_before_retain = stored_source_fingerprint(&db);
+
+    // agent 正在写：追加一条未闭合记录（无尾换行，EOF 落在记录中间）。
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&fixture)
+        .expect("open fixture");
+    write!(
+        file,
+        r#"{{"type":"assistant","message":{{"role":"assistant","content":"still thinking"}}"#
+    )
+    .expect("append truncated tail");
+    drop(file);
+
+    let out = run(&db, &["sync", &path]);
+    assert!(
+        out.status.success(),
+        "truncated-tail sync must succeed: {}",
+        stdout(&out)
+    );
+    let retained_frame = parse_first_line(&out);
+    assert_eq!(retained_frame["data"]["retained"], 1, "{retained_frame}");
+    assert_eq!(retained_frame["data"]["emitted"], 0, "{retained_frame}");
+    assert_eq!(retained_frame["data"]["committed"], 0, "{retained_frame}");
+    assert_eq!(retained_frame["data"]["skipped"], 0, "{retained_frame}");
+    assert_eq!(retained_frame["data"]["diagnostics"], 1, "{retained_frame}");
+    assert_eq!(
+        retained_frame["data"]["generation"], 1,
+        "Retain 不得推进 generation: {retained_frame}"
+    );
+    assert!(
+        retained_frame["warnings"]
+            .as_array()
+            .expect("warnings")
+            .iter()
+            .any(|warning| warning
+                .as_str()
+                .is_some_and(|text| text.contains("truncated tail"))),
+        "retain 诊断必须可见: {retained_frame}"
+    );
+    assert_eq!(
+        stored_source_fingerprint(&db),
+        fingerprint_before_retain,
+        "Retain 不得改写指纹"
+    );
+    assert_eq!(
+        relation_scan_count(&db),
+        1,
+        "Retain 不得撤销既有完整关系标记"
+    );
+
+    // 写回缺失的外层右括号与换行，记录完整。
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&fixture)
+        .expect("open fixture");
+    file.write_all(b"}\n").expect("complete truncated tail");
+    drop(file);
+
+    let out = run(&db, &["sync", &path]);
+    assert!(
+        out.status.success(),
+        "completion sync must succeed: {}",
+        stdout(&out)
+    );
+    let completed = parse_first_line(&out);
+    assert_eq!(completed["data"]["retained"], 0, "{completed}");
+    assert_eq!(
+        completed["data"]["emitted"], 3,
+        "补全后应完整重扫 3 条消息: {completed}"
+    );
+    assert_eq!(completed["data"]["committed"], 3, "{completed}");
+    assert_eq!(completed["data"]["skipped"], 0, "{completed}");
+    assert_eq!(completed["data"]["diagnostics"], 0, "{completed}");
+    assert_eq!(completed["data"]["generation"], 2, "{completed}");
+    assert_ne!(
+        stored_source_fingerprint(&db),
+        fingerprint_before_retain,
+        "补全的字节必须作为新扫描提交"
+    );
+    assert_eq!(search_hit_count(&db, "thinking"), 1, "新消息必须可搜索");
+    assert_eq!(search_hit_count(&db, "batch"), 1, "旧消息必须保留");
+    assert_eq!(search_hit_count(&db, "tune"), 1, "旧消息必须保留");
+    let out = run(&db, &["status"]);
+    let status = parse_first_line(&out);
+    assert_eq!(
+        status["data"]["placements"], 3,
+        "3 条消息、无重复 placement: {status}"
+    );
+    assert_eq!(
+        status["data"]["catalog_count"], 5,
+        "3 消息 + session + document: {status}"
+    );
+}
+
+/// P1-1 matrix (c)：从未索引过的新源 EOF 截断 → 既有 recoverable-skip（提交有效
+/// 前缀、skipped>0、relation_complete=false，不留完整关系标记）；补全尾部后完整
+/// 重扫收敛且无重复。
+#[test]
+fn sync_new_truncated_source_completion_converges_without_duplicates() {
+    let (dir, db) = temp_db("sync-new-truncation-completion");
+    let fixture = dir.path().join("brand-new-completed.jsonl");
+    std::fs::write(
+        &fixture,
+        concat!(
+            r#"{"type":"user","message":{"role":"user","content":"complete line"}}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"role":"assistant","content":"half-written"}"#,
+        ),
+    )
+    .expect("write fixture");
+    let path = fixture.to_string_lossy().into_owned();
+
+    let out = run(&db, &["sync", &path]);
+    assert!(out.status.success(), "sync failed: {}", stdout(&out));
+    let frame = parse_first_line(&out);
+    assert_eq!(
+        frame["data"]["retained"], 0,
+        "新源无旧索引可 Retain，走 recoverable-skip: {frame}"
+    );
+    assert_eq!(frame["data"]["messages"], 1, "有效前缀应解析: {frame}");
+    assert_eq!(frame["data"]["committed"], 1, "有效前缀应提交: {frame}");
+    assert_eq!(frame["data"]["skipped"], 1, "截断行应计 skipped: {frame}");
+    assert_eq!(frame["data"]["diagnostics"], 2, "{frame}");
+    assert_eq!(frame["data"]["generation"], 1, "{frame}");
+    let warnings = frame["warnings"].as_array().expect("warnings");
+    assert_eq!(warnings.len(), 2, "{frame}");
+    assert!(
+        warnings.iter().any(|warning| warning
+            .as_str()
+            .is_some_and(|text| text.contains("line 2") && text.contains("invalid JSON"))),
+        "截断行诊断必须单独可见: {frame}"
+    );
+    assert_eq!(
+        relation_scan_count(&db),
+        0,
+        "部分扫描不得留下完整关系标记: {frame}"
+    );
+    assert_eq!(search_hit_count(&db, "complete"), 1, "{frame}");
+    assert_eq!(
+        search_hit_count(&db, "half-written"),
+        0,
+        "截断行不得进入索引: {frame}"
+    );
+
+    // 补全尾部后重扫：完成的消息可搜索，不再有 skipped/诊断，且无重复实体。
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&fixture)
+        .expect("open fixture");
+    file.write_all(b"}\n").expect("complete truncated tail");
+    drop(file);
+
+    let out = run(&db, &["sync", &path]);
+    assert!(
+        out.status.success(),
+        "completion sync must succeed: {}",
+        stdout(&out)
+    );
+    let completed = parse_first_line(&out);
+    assert_eq!(completed["data"]["retained"], 0, "{completed}");
+    assert_eq!(completed["data"]["messages"], 2, "{completed}");
+    assert_eq!(completed["data"]["committed"], 2, "{completed}");
+    assert_eq!(
+        completed["data"]["skipped"], 0,
+        "补全后不再 skip: {completed}"
+    );
+    assert_eq!(completed["data"]["diagnostics"], 0, "{completed}");
+    assert_eq!(completed["data"]["generation"], 2, "{completed}");
+    assert_eq!(
+        relation_scan_count(&db),
+        1,
+        "完整重扫应恢复关系标记: {completed}"
+    );
+    assert_eq!(
+        search_hit_count(&db, "half-written"),
+        1,
+        "补全的消息必须可搜索: {completed}"
+    );
+    assert_eq!(search_hit_count(&db, "complete"), 1, "{completed}");
+    let out = run(&db, &["status"]);
+    let status = parse_first_line(&out);
+    assert_eq!(
+        status["data"]["placements"], 2,
+        "2 条消息、无重复 placement: {status}"
+    );
+    assert_eq!(
+        status["data"]["catalog_count"], 4,
+        "2 消息 + session + document: {status}"
+    );
+}
+
 /// A source that has always been empty carries no provider/variant evidence.
 /// The first sighting must be a warned no-op: no fake provider, installation
 /// binding, scan row or placeholder entity may be persisted. Content arriving
