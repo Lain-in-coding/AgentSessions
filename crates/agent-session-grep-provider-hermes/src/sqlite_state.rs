@@ -1252,7 +1252,18 @@ mod tests {
         fn existing_empty_namespace_is_not_reused() {
             let case = Case::new();
             case.occupy_namespace();
-            let result = open_readonly_from_bytes_at(&bytes(), case.path.clone());
+            // Panic closures pin the rejection to the directory layer: a future
+            // implementation that reused the existing directory would reach one
+            // of these seams and fail here instead of passing on an unrelated
+            // earlier error.
+            let result = open_readonly_from_bytes_with(
+                &bytes(),
+                case.path.clone(),
+                |_| panic!("namespace collision must fail before file creation"),
+                |_, _| panic!("namespace collision must fail before writing"),
+                |_| panic!("namespace collision must fail before syncing"),
+                |_, _| panic!("namespace collision must fail before opening"),
+            );
             let rejected = result.is_err();
             drop(result);
             assert!(case.path.parent().unwrap().is_dir());

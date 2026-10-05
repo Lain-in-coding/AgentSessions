@@ -320,17 +320,19 @@ commits have separate SHAs and require their own remote check, not an inferred p
 - [x] Add and run baseline counterexamples through the actual lifecycle helpers.
 - [x] Implement exclusive per-copy directory and exclusive/private DB creation;
   cleanup ownership must follow successful creation and close handles first.
-- [ ] Verify conflict preservation, injected write/sync errors, SQLite query/open
+- [x] Verify conflict preservation, injected write/sync errors, SQLite query/open
   failures, normal/sidecar cleanup, concurrent copies and Unix access bits.
-- [ ] Independent check; scoped and full local gates; new-SHA remote checks.
-Research is static evidence only; no P1-7 red/green or platform permission result
-has been obtained yet. Metadata/probe closure above does not close this slice.
+- [x] Independent check; scoped and full local gates; new-SHA remote checks.
+P1-7 red/green evidence, Windows lifecycle checks and the Ubuntu-only permission
+and symlink results are recorded below; metadata/probe closure above is not used
+as evidence for this slice.
 
 
 Metadata documentation/planning head `88484ed0c8186519c549eb589e4dc7b3ca8cb8ab`
 also passed its own ci `37201508669`, security-audit `37201508667` and
-core-beta-evidence `37201508665`; PR #21 had 14/14 successful checks. This does not
-validate the subsequent, uncommitted P1-7 lifecycle regressions/implementation.
+core-beta-evidence `37201508665`; PR #21 had 14/14 successful checks. The later
+P1-7 slice is commit `5ca05e2` and carries its own remote checks; the earlier
+SHA's results are not reused for it.
 
 
 ### P1-7 Cursor implementation checkpoint
@@ -372,17 +374,46 @@ validate the subsequent, uncommitted P1-7 lifecycle regressions/implementation.
   No new dependency, fixture revision or parser/schema bump is introduced.
 
 
-### P1-7 full local gate evidence (main, base 83528d9 + uncommitted slice)
+### P1-7 full local gate evidence (main, commit 5ca05e2)
 - Workspace gates on the P1-7 working tree: rustfmt exit 0; workspace Clippy
   -D warnings exit 0; workspace tests exit 0 with **86 targets / 2049 passed /
   0 failed / 24 ignored**; MSRV (dev-profile check of all targets) exit 0.
 - Non-Rust gates: Node web UI 11 passed / 0 failed; Python scripts 21 (1 skip),
   release 11, evidence 54 (1 skip inside 54) all OK; privacy scan reported no
   personal path findings; task validation passed.
-- Nine Unix-only permission/symlink cases (3 Cursor, 6 OpenCode/Hermes) cannot
-  execute on this Windows host and remain subject to remote Unix CI on the new
-  commit. Real non-delete-sharing handle tests did run on Windows.
-- Independent full-slice review did not complete in this session (the previously
-  assigned checker terminated on a provider-side payment error); it must not be
-  recorded as passed. Full-slice closure stays pending until a fresh independent
-  check or an explicit record that no independent review was obtained.
+- Real non-delete-sharing handle ordering tests ran on Windows: while such a
+  handle is alive `remove_file` must fail; after drop the four fixed names and
+  the owned directory are asserted gone.
+
+### P1-7 independent check and remote checkpoint (commit 5ca05e2)
+- A fresh independent checker (read-only, separate session) re-derived the slice
+  from the diff and reported: exclusive-directory/exclusive-DB ordering, conflict
+  preservation, cleanup authority with close-before-remove ordering, and the
+  no-new-dependency / no parser-schema bump / no global TEMP-umask mutation
+  constraints were all VERIFIED with no counterexample found. The only
+  documentary defect was the stale 'no P1-7 red/green obtained yet' sentence,
+  removed in this commit; it also listed three non-blocking test-strength
+  weaknesses, handled below. It could not reconstruct the historical RED counts
+  or the workspace/remote totals from the commit alone and did not claim them.
+- The checker independently reproduced package results (Cursor 78/0/2, OpenCode
+  41/0/1, Hermes 69/0/2 = 188 passed, 0 failed, 5 pre-existing ignored), package
+  Clippy -D warnings and rustfmt --check. Its cross-target type-check attempt
+  stopped at a missing x86_64-linux-gnu-gcc toolchain, not at a code failure.
+- Ubuntu CI executed all nine Unix-only cases and each passed: Cursor permissions,
+  namespace symlink and DB/dangling symlinks; OpenCode and Hermes each permissions,
+  directory symlinks and post-acquisition file symlinks. The Windows, macOS and
+  Ubuntu test jobs were all green on this commit.
+- Remote checks bound to this exact commit: ci `37254129995`, security-audit
+  `37254130043`, core-beta-evidence `37254130014` all succeeded; PR #21 reported
+  14/14 successful checks at head `5ca05e2`. Remaining platform limits: Windows
+  symlink/ACL behavior is not exercised (the slice does not claim owner-only DACL
+  or same-user tamper resistance) and owned-directory removal stays best-effort.
+- Reviewer-identified non-blocking weaknesses, kept rather than dropped:
+  (a) Cursor's existing-main and sidecar-only cases are gated at the directory
+  layer, with file-layer collisions separately covered by injected create_new
+  tests; (b) OpenCode/Hermes existing-empty-namespace cases previously asserted
+  only is_err, and this commit pins them to the directory layer with panic
+  closures so a future file-first implementation cannot silently lose the oracle;
+  (c) Cursor's injected open-failure case covers sidecar and directory cleanup,
+  while guard deletion of the main file stays covered by write/sync,
+  same-candidate, WAL and query-failure cases.
