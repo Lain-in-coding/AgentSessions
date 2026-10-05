@@ -99,3 +99,18 @@ tools: search_sessions / get_session_context / get_session_resume / get_message 
 - 读取命令只读打开已有当前 schema 的目录，不创建数据库、不执行迁移；旧 schema 返回 `schema_incompatible`，迁移必须通过持 writer lease 的显式写路径。
 - OpenCode/Cursor 活库以只读事务下的 Backup 捕获逻辑快照（上限 128 MiB），包含已提交 WAL；不得写入或 checkpoint 用户源库。源路径保留为 locator，指纹采用 `sqlite:<BLAKE3>`。
 - 一份源可携带多个消息级 Session observation 和独立 resume claims；无 native ID 的 source-local key 不得冒充可恢复的 provider ID。解析版本 2 强制重新解析旧扫描；历史有效 `ses_v1` 派生规则保持不变。
+
+## 11. Read-only Context / Handoff experience
+
+- `GET /api/context` accepts `session`, `policy`, `level`, `max_messages`, `max_bytes`. `GET /api/handoff` accepts `q`, repeated `provider` (OR), `since`, `until`, `max_evidence`, `max_tokens`, `max_bytes`. Unknown/empty parameters, duplicate scalars and malformed encoding are `invalid_request`; values remain protected against marshalled-flag confusion.
+- HTTP preserves CLI budget validation, defaults and explicit-zero behavior; MCP retains its declared stricter floors. Context serialized-response budgeting and Handoff content budgeting are separate contracts, not a promise that every transport wrapper fits the same byte limit.
+- Web optional budget fields omit unset values and never silently discard an explicit zero. Handoff inherits only q/provider/since/until from the last accepted search snapshot; repo/sidechain/tool/mode are not inherited and the UI must explain that boundary. Changing applicable inputs cancels stale previews.
+- Context presentation uses `effective_level` and the actual `talks`/`summary` projections, preserving supplied messages, warnings, requested/effective-level differences, hint and truncation facts. Empty, failed and partial results remain distinct; do not invent missing counts.
+- GET resume remains a stateless preview without CLI acknowledgement writes; POST mutation/execution remains unsupported. Historical tool errors do not change the outcome of a successful read request.
+
+## 12. TUI input and machine-contract regression gates
+
+- Search treats all ordinary m/k characters as text, including the first character. Alt+M and Alt+K produce explicit facet actions; Results also retains ordinary m/k shortcuts. The pure reducer owns state transitions; terminal glue maps keys without embedding storage/ranking rules.
+- TUI uses the shared clock/current_repo composition helper. Same data, clock, cwd and supported query options must yield the same ordering as CLI; this does not change ranking policy or add TUI filter dimensions.
+- Robot remains 1.1, historical 1.0 remains frozen. Search payload `retrieval_mode` is an existing effective-mode echo, not a new protocol version or runtime field. Validate actual response/error/partial/progress output against the local published 1.1 schema; diagnostic remains fixture-only until emitted at runtime.
+- Contract validation uses the pinned test-only validator and refuses remote schema retrieval. Required validation dependencies or explicit binary inputs cannot be silently skipped. Negative schema controls must fail even when helper shape assertions would pass.

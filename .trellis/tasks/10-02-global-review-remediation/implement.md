@@ -30,7 +30,7 @@ These are tracking items, not a count of confirmed defects or completed work.
 |---|---|
 | P0-1 | Implemented; checked native-ID and leading-option rejection; integration gate pending |
 | P0-2 | Implemented; Human-only execution, machine refusal; integration gate pending |
-| P0-3 | Partial: normalized unknown command, secret-safe diagnostic/progress/MCP errors. Full private-path and adversarial identity audit remains open |
+| P0-3 | Partial: earlier diagnostic normalization retained; scoped typed-ID/identity-operand corrections now locally and independently verified across CLI/MCP/HTTP. Existing non-identity MCP echoes and ASG_DEBUG_ERRORS stderr policy remain open; not a full privacy closure |
 | P0-4 | Verified: matching-placement ownership across lexical/semantic/hybrid/fallback, metadata and grouping; current-repo boost uses the same owner. Old search cursors explicitly invalidated. Full 1904-test integration passed |
 | P0-5 | Verified eager, nested request read snapshots plus CLI/MCP outer composition scopes; actual WAL counterexamples reproduced. Final post-review all-feature integration: 1913 passed, 0 failed |
 | P0-6 | Verified per-source original projections and live aggregation; same-source corrections, separate batches, legacy/incomplete retention, no-op and migration rollback covered. Schema 19/parser 4 requires backup and contributor re-ingestion |
@@ -39,20 +39,20 @@ These are tracking items, not a count of confirmed defects or completed work.
 | P0-9 | Implemented and focused tests passed; complete required manifest coverage and unique safe names |
 | P0-10 | Implemented and focused tests passed; hard content budget, final confidence and labeled identity |
 | P0-11 | Upstream MSRV fix revalidated on 2edf2dc; real MSRV CI gate added. Release/remote gates pending |
-| P1-1 | Keep approved fail-closed baseline; upstream tail/partial changes retained; recovery matrix pending |
+| P1-1 | Verified at f0831af: retained existing indexed-tail safety and new-source incomplete-prefix behavior; UTF-8/mid-file matrix, mutation controls, independent review and exact-SHA remote gates passed. No product change or strict flag |
 | P1-2 | Verified ItemTable millisecond normalization, disk-kv field distinction and provenance-gated rolling upgrades; raw observations, stable IDs, filters and source bytes covered by full integration |
 | P1-3 | Verified native integer Cline ts, numeric-token precision rejection, field-loss diagnostics and exactly one leading document BOM; Cline fixture revision 2, maturity unchanged |
 | P1-4 | Verified at 452c883: Grok prompt IDs remain turn keys, no false native/multi-session authority; CLI and old-binary upgrade evidence, independent check and all 14 remote checks passed |
 | P1-5 | Verified at 452c883: OpenClaw genuine-empty/non-indexable distinction, per-message loss, no reasoning leak and incomplete-history retention; full local/remote integration passed |
 | P1-6 | Verified at 452c883: Grok whitespace composition/rewind/seq and parser-5 to parser-6 rolling upgrade; Message IDs/source bytes preserved; full local/remote integration passed |
-| P1-7 | Source revalidated in Cursor, OpenCode and Hermes. Next slice covers exclusive private directory plus DB/group cleanup ownership; red/green and platform verification pending |
+| P1-7 | Verified at 5ca05e2/428f535: exclusive temporary directory/DB ownership and nonrecursive owned cleanup; Unix permission/collision tests executed remotely. No parser/schema bump |
 | P1-8 | Withdrawn diagnosis; current linear Pi behavior retained; tree enhancement deferred |
-| P1-9 | Pending current-baseline revalidation and implementation |
+| P1-9 | Locally and independently verified: HTTP/Web parameters and budgets; active 1.1 searchData retrieval_mode omission reproduced and corrected, historical 1.0 frozen; real schema gate with negative/mutation controls. Exact-SHA remote gate pending publication |
 | P1-10 | Verified scoped contracts: explicit model-cache restart semantics, missing/corrupt model diagnostics, Context port error propagation and dimension-aware readiness. No automatic model retry/reload or maturity promotion added |
 | P2-1 | Implemented; actual GET-ack regression failed then passed; POST remains unsupported |
-| P2-2 | Pending current-baseline revalidation and implementation |
-| P2-3 | Pending current-baseline revalidation and implementation |
-| P2-4 | Pending current-baseline revalidation and implementation |
+| P2-2 | Locally and independently verified: actual raw/talks/sessions, returned messages/warnings and truncation; real Chrome/native numeric/390px checks and Node47 passed. Remote gate pending |
+| P2-3 | Locally and independently verified: literal m/k, explicit Alt+M/K, Results compatibility; TUI53 and actual Windows PTY journey passed. Remote gate pending |
+| P2-4 | Locally and independently verified: shared clock/current_repo injection with independent negative ranking controls, no ranking policy change. Remote gate pending |
 | P2-5 | Verified at 83528d9: Codex current-thread payload.id, legal different root session_id and legacy compatibility; original alias-conflict rejection withdrawn. Actual parser-6 upgrade, full 2001-test local gate and all 14 exact-SHA remote checks passed |
 | P2-6 | Verified at 83528d9: exact Kimi turn probe parity and Qoder same-body/selected-session SID-cwd pairing. Source/identity/old-evidence invariants, full local gates and all 14 exact-SHA remote checks passed |
 | P2-7 | Withdrawn; no mapping from historical tool errors to current request failure |
@@ -213,3 +213,8 @@ following documentation/implementation SHA must have its own checks. The next
 P1-7 source review confirms the same early-guard/truncating-create pattern in
 all three SQLite providers, but its tests and fix remain pending. Public/draft
 state is unchanged; no merge, release or broad task closure is implied.
+
+## Experience-first local closeout (2026-10-05)
+Owner approved the experience-first plan after choosing that scope. The read-surfaces phase now has complete local and scoped independent evidence: workspace 2084/0/24 across 86 targets; Node47; Python38/11/58 (one platform skip); real schema10 cases and synthetic smoke10/10; fmt/Clippy/Rust1.90; real Chrome and Windows PTY acceptance. A native Enter cancellation defect discovered in the browser was reproduced, corrected and independently rechecked before this final local gate.
+
+The whole parent is not closed. Broader P0-3 diagnostic policy, C1/P2-9, release rehearsal/governance and performance baselines remain open. No maturity promotion, default-provider pruning, release/tag, merge, archive or unrelated workspace cleanup occurred. Publication/immutable-SHA remote evidence follows in a separate checkpoint.

@@ -476,3 +476,72 @@ Correct: validate operands before preview/execute and bind every release consume
 5. **Cases:** generation and evidence refer to one view; resume confirmation, child process execution and output/transport waits never retain a guard.
 6. **Tests:** CLI Human search/handoff/doctor and MCP handoff success/error paths permit a subsequent write; core WAL tests prove nested view consistency.
 7. **Wrong/right:** wrapping App alone leaves post-response DB reads unprotected; extend only the composite read region, never the whole command/server lifetime.
+
+## Scenario: Real Robot schema validation
+
+### 1. Scope / Trigger
+Changes to machine payloads, protocol schema or the real CLI verification gate.
+
+### 2. Signatures
+`python scripts/verify-robot-schema.py --asg <current-build-binary>` uses test-only `jsonschema==4.26.0`, `Draft202012Validator`, and a local-only `Registry`.
+
+### 3. Contracts
+Runtime Robot 1.1 is validated against `schemas/robot/v1.1/envelope.schema.json`; historical 1.0 is frozen. The closed search payload permits the existing optional `retrieval_mode` enum echo, without removing other field validation. Validate every JSONL frame, request correlation and the single last terminal frame; Json mode allows one frame. Synthetic inputs and all child home/config/cache paths are isolated. No ASG overrides are inherited from the user environment.
+
+### 4. Validation & Error Matrix
+Wrong version, missing required fields, invalid nested hit/mode/types or unknown fields fail schema validation. Non-JSON/nonfinite output, changed request ID, missing/multiple terminals or wrong outcome fail the stream gate. Missing binary/dependency and remote references fail, never skip or fetch.
+
+### 5. Good/Base/Bad Cases
+Good: real response/error/progress plus success/partial/failure are observed. Base: diagnostic has schema-fixture coverage only. Bad: a helper asserts version 1.1 while an emitted search field is absent from the closed schema.
+
+### 6. Tests Required
+`test_verify_robot_schema.py` covers schema and stream negative controls, frozen 1.0, remote-reference refusal, dependency/binary failures and parent/child environment separation. The explicit-binary gate runs in each CI OS test job after building the current checkout. A disabled-validator mutation must be rejected by the negative controls.
+
+### 7. Wrong vs Correct
+Wrong: overwrite 1.0, remove a runtime field, allow arbitrary extra properties, or call shape-only assertions full schema validation. Correct: reproduce with a real frame, minimally correct the active schema, and retain precise negative controls without a protocol-version bump.
+
+## Scenario: Typed identity redaction across read surfaces
+
+### 1. Scope / Trigger
+CLI/Robot, MCP and HTTP command data and response wrappers. This is a bounded P0-3 correction, not a claim that every existing diagnostic policy is closed.
+
+### 2. Signatures
+`redact_command_data(command, data)` processes CLI data; `redact_command_response(command, response)` processes internal data/page/warnings wrappers. HTTP passes the trusted dispatch command explicitly through `redacted_command_json`; generic `redacted_json` and `redact_value` remain conservative.
+
+### 3. Contracts
+Identity exemptions are exact command-specific structural paths, string leaves only. A wildcard consumes an array element, never an arbitrary object key. Opaque session/entity/message payloads and unknown nodes remain scanned. Never let an untrusted object's command/id keys select its own exemption. Request correlation outside these wrappers remains unchanged; counts are computed once before metadata, and MCP text/structuredContent share one processed payload. Human/TUI content policy is unchanged. Invalid identity operands do not reappear in error messages.
+
+### 4. Validation & Error Matrix
+Valid secret-shaped identifiers remain usable in search pagination, context and handoff references; their text/payload copies still redact. Containers in identity positions are not trusted. Invalid identities retain their existing canonical error category without private input-path echoes. Existing non-identity MCP bounded echoes and ASG_DEBUG_ERRORS stderr behavior remain separate open work.
+
+### 5. Good/Base/Bad Cases
+Good: a returned canonical ID can be used in the next real request. Base: unknown data retains ordinary redaction. Bad: exempt all id keys, infer a profile from arbitrary JSON, or run a generic second scan over an already identity-aware result.
+
+### 6. Tests Required
+Real CLI/MCP boundary_identity regressions cover valid adversarial IDs, replay, context levels, tool activity, handoff, opaque payloads, counts and local Human policy. HTTP adds real ingest/search/cursor/show/context/handoff round-trip and arbitrary-profile rejection.
+
+### 7. Wrong vs Correct
+Wrong: treat every string as free text or every key named id as authoritative. Correct: choose a finite profile at the trusted composition boundary and preserve only the typed reference leaves.
+
+## Scenario: Native input commits and accepted Web search state
+
+### 1. Scope / Trigger
+Search input/change/Enter handlers, pagination, Handoff inheritance and optional numeric controls.
+
+### 2. Signatures
+The existing complete query-parameter signature identifies the submitted search; Handoff inherits q/provider/since/until only from accepted responses. Context/Handoff budget controls preserve their separate native validity checks.
+
+### 3. Contracts
+A native same-value change after Enter must not cancel the already-submitted request or clear accepted results, cursor, selection, preview or budgets. Equal serialized parameters alone are insufficient: native invalid numeric input may expose an empty value, so validity must also hold. Genuine edits retain all cancellation/stale-response behavior. Do not invent a debounce or suppress every change event.
+
+### 4. Validation & Error Matrix
+Enter -> same-value change keeps the request; changed values cancel it. Invalid numeric badInput never becomes an omitted default. Old success/error responses cannot overwrite the new state. Language changes render cached context without refetching its data.
+
+### 5. Good/Base/Bad Cases
+Good: the first native Enter yields results. Base: explicit Search still works. Bad: a late native change cancels an identical request and presents an empty filters-changed state.
+
+### 6. Tests Required
+Node tests model native event order and bubbling, true-edit invalidation, cursor/preview retention and malformed numeric controls. Verify in a real browser as well as fake DOM; native validity and physical layout cannot be inferred from Node alone.
+
+### 7. Wrong vs Correct
+Wrong: compare only the changed field, ignore native validity, or blame duplicate handlers without evidence. Correct: compare the full submitted signature with validity and preserve the existing request identity guards.
