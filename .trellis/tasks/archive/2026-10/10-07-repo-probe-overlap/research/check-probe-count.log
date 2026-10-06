@@ -1,0 +1,14 @@
+test binary: C:\AgentSessions\.trellis\.runtime\target-b8\debug\deps\agent_session_grep_cli-97672c691f5005f3.exe
+
+running 1 test
+test repo_identity::tests::resolver_caches_failures_and_successes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 345 filtered out; finished in 0.12s
+
+
+--- GIT_TRACE built-in lines (count per command) ---
+  1x  init -q
+  1x  remote add origin https://github.com/owner/cached.git
+  2x  remote get-url origin
+  2x  rev-parse --show-toplevel
+TOTAL PROBES = 6

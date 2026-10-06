@@ -1,0 +1,38 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.15s
+     Running unittests src\lib.rs (.trellis/.runtime/target-b8\debug\deps\agent_session_grep_cli-97672c691f5005f3.exe)
+
+running 1 test
+test repo_identity::zz_check_diag::zz_check_b8_divergence_probe ... DIAG A GIT_WORK_TREE only, cwd=wr/x/y
+  cwd  : C:\Users\小Q\AppData\Local\Temp\asg-b8-diag-11880\wr\x/y
+  gate : Some("C:/Users/小Q/AppData/Local/Temp/asg-b8-diag-11880/outside-wt")
+  old  : None
+  new  : Some("github.com/synthetic-owner/wr")
+  delta: *** DIVERGENT ***
+DIAG B relative GIT_DIR + GIT_WORK_TREE, cwd=er/x/y
+  cwd  : C:\Users\小Q\AppData\Local\Temp\asg-b8-diag-11880\er\x/y
+  gate : Some("C:/Users/小Q/AppData/Local/Temp/asg-b8-diag-11880/er")
+  old  : Some("github.com/synthetic-owner/envrepo")
+  new  : Some("github.com/synthetic-owner/nested")
+  delta: *** DIVERGENT ***
+DIAG C1 core.worktree outside gitdir tree, cwd=gitdir
+  cwd  : C:\Users\小Q\AppData\Local\Temp\asg-b8-diag-11880\det/gd
+  gate : Some("C:/Users/小Q/AppData/Local/Temp/asg-b8-diag-11880/det/w")
+  old  : None
+  new  : Some("github.com/synthetic-owner/detached")
+  delta: *** DIVERGENT ***
+DIAG C2 core.worktree outside gitdir tree, cwd=gitdir/sub
+  cwd  : C:\Users\小Q\AppData\Local\Temp\asg-b8-diag-11880\det/gd\sub
+  gate : Some("C:/Users/小Q/AppData/Local/Temp/asg-b8-diag-11880/det/w")
+  old  : None
+  new  : Some("github.com/synthetic-owner/detached")
+  delta: *** DIVERGENT ***
+DIAG C3 core.worktree outside gitdir tree, cwd=worktree(no .git)
+  cwd  : C:\Users\小Q\AppData\Local\Temp\asg-b8-diag-11880\det/w
+  gate : None
+  old  : None
+  new  : None
+  delta: EQUAL
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 345 filtered out; finished in 0.71s
+

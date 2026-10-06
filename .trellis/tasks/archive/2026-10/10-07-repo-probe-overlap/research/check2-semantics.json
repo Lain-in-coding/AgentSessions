@@ -1,0 +1,380 @@
+[
+  {
+    "Context": "1a plain root",
+    "Env": "-",
+    "Path": "overlap(cwd-url)",
+    "Status": "EQUAL",
+    "Lit": "lit=ok",
+    "Old": "git@github.com:synthetic-owner/plain.git",
+    "New": "git@github.com:synthetic-owner/plain.git"
+  },
+  {
+    "Context": "1b plain subdir",
+    "Env": "-",
+    "Path": "overlap(cwd-url)",
+    "Status": "EQUAL",
+    "Lit": "lit=ok",
+    "Old": "git@github.com:synthetic-owner/plain.git",
+    "New": "git@github.com:synthetic-owner/plain.git"
+  },
+  {
+    "Context": "1c plain subdir trailing slash",
+    "Env": "-",
+    "Path": "overlap(cwd-url)",
+    "Status": "EQUAL",
+    "Lit": "lit=ok",
+    "Old": "git@github.com:synthetic-owner/plain.git",
+    "New": "git@github.com:synthetic-owner/plain.git"
+  },
+  {
+    "Context": "2a nested inner",
+    "Env": "-",
+    "Path": "overlap(cwd-url)",
+    "Status": "EQUAL",
+    "Lit": "lit=ok",
+    "Old": "https://gitlab.example.com/team/inner.git",
+    "New": "https://gitlab.example.com/team/inner.git"
+  },
+  {
+    "Context": "2b outer from root",
+    "Env": "-",
+    "Path": "overlap(cwd-url)",
+    "Status": "EQUAL",
+    "Lit": "lit=ok",
+    "Old": "git@github.com:synthetic-owner/plain.git",
+    "New": "git@github.com:synthetic-owner/plain.git"
+  },
+  {
+    "Context": "2c vendor parent (outer)",
+    "Env": "-",
+    "Path": "overlap(cwd-url)",
+    "Status": "EQUAL",
+    "Lit": "lit=ok",
+    "Old": "git@github.com:synthetic-owner/plain.git",
+    "New": "git@github.com:synthetic-owner/plain.git"
+  },
+  {
+    "Context": "3a bare root",
+    "Env": "-",
+    "Path": "overlap(gate=None)",
+    "Status": "EQUAL(None)",
+    "Lit": "lit=ok",
+    "Old": null,
+    "New": null
+  },
+  {
+    "Context": "3b bare subdir (refs/heads)",
+    "Env": "-",
+    "Path": "overlap(gate=None)",
+    "Status": "EQUAL(None)",
+    "Lit": "lit=ok",
+    "Old": null,
+    "New": null
+  },
+  {
+    "Context": "4a .git dir cwd",
+    "Env": "-",
+    "Path": "overlap(gate=None)",
+    "Status": "EQUAL(None)",
+    "Lit": "lit=ok",
+    "Old": null,
+    "New": null
+  },
+  {
+    "Context": "4b .git/hooks cwd",
+    "Env": "-",
+    "Path": "overlap(gate=None)",
+    "Status": "EQUAL(None)",
+    "Lit": "lit=ok",
+    "Old": null,
+    "New": null
+  },
+  {
+    "Context": "5a non-git dir (outside any repo)",
+    "Env": "-",
+    "Path": "overlap(gate=None)",
+    "Status": "EQUAL(None)",
+    "Lit": "lit=ok",
+    "Old": null,
+    "New": null
+  },
+  {
+    "Context": "5b nonexistent dir",
+    "Env": "-",
+    "Path": "overlap(gate=None)",
+    "Status": "EQUAL(None)",
+    "Lit": "lit=ok",
+    "Old": null,
+    "New": null
+  },
+  {
+    "Context": "6a linked worktree root",
+    "Env": "-",
+    "Path": "overlap(cwd-url)",
+    "Status": "EQUAL",
+    "Lit": "lit=ok",
+    "Old": "https://github.com/synthetic-owner/wt-host.git",
+    "New": "https://github.com/synthetic-owner/wt-host.git"
+  },
+  {
+    "Context": "6b linked worktree subdir",
+    "Env": "-",
+    "Path": "overlap(cwd-url)",
+    "Status": "EQUAL",
+    "Lit": "lit=ok",
+    "Old": "https://github.com/synthetic-owner/wt-host.git",
+    "New": "https://github.com/synthetic-owner/wt-host.git"
+  },
+  {
+    "Context": "6c host after worktree add",
+    "Env": "-",
+    "Path": "overlap(cwd-url)",
+    "Status": "EQUAL",
+    "Lit": "lit=ok",
+    "Old": "https://github.com/synthetic-owner/wt-host.git",
+    "New": "https://github.com/synthetic-owner/wt-host.git"
+  },
+  {
+    "Context": "7a submodule root",
+    "Env": "-",
+    "Path": "overlap(cwd-url)",
+    "Status": "EQUAL",
+    "Lit": "lit=ok",
+    "Old": "git@github.com:synthetic-owner/submodule.git",
+    "New": "git@github.com:synthetic-owner/submodule.git"
+  },
+  {
+    "Context": "7b submodule deep subdir",
+    "Env": "-",
+    "Path": "overlap(cwd-url)",
+    "Status": "EQUAL",
+    "Lit": "lit=ok",
+    "Old": "git@github.com:synthetic-owner/submodule.git",
+    "New": "git@github.com:synthetic-owner/submodule.git"
+  },
+  {
+    "Context": "7c superproject from submodule parent",
+    "Env": "-",
+    "Path": "overlap(cwd-url)",
+    "Status": "EQUAL",
+    "Lit": "lit=ok",
+    "Old": "https://github.com/synthetic-owner/super.git",
+    "New": "https://github.com/synthetic-owner/super.git"
+  },
+  {
+    "Context": "7d inside submodule gitdir",
+    "Env": "-",
+    "Path": "overlap(cwd-url)",
+    "Status": "EQUAL",
+    "Lit": "lit=ok",
+    "Old": "git@github.com:synthetic-owner/submodule.git",
+    "New": "git@github.com:synthetic-owner/submodule.git"
+  },
+  {
+    "Context": "8 no origin",
+    "Env": "-",
+    "Path": "overlap(cwd-url)",
+    "Status": "EQUAL(None)",
+    "Lit": "lit=ok",
+    "Old": null,
+    "New": null
+  },
+  {
+    "Context": "9 uppercase ORIGIN only",
+    "Env": "-",
+    "Path": "overlap(cwd-url)",
+    "Status": "EQUAL(None)",
+    "Lit": "lit=ok",
+    "Old": null,
+    "New": null
+  },
+  {
+    "Context": "10 local path origin",
+    "Env": "-",
+    "Path": "overlap(cwd-url)",
+    "Status": "EQUAL",
+    "Lit": "lit=ok",
+    "Old": "C:\\AgentSessions\\.trellis\\.runtime\\b8-check2\\semantics\\subsrc",
+    "New": "C:\\AgentSessions\\.trellis\\.runtime\\b8-check2\\semantics\\subsrc"
+  },
+  {
+    "Context": "11 insteadOf rewrite",
+    "Env": "-",
+    "Path": "overlap(cwd-url)",
+    "Status": "EQUAL",
+    "Lit": "lit=ok",
+    "Old": "https://x.example.com/team/rewritten-repo.git",
+    "New": "https://x.example.com/team/rewritten-repo.git"
+  },
+  {
+    "Context": "12 pushurl differs from fetch url",
+    "Env": "-",
+    "Path": "overlap(cwd-url)",
+    "Status": "EQUAL",
+    "Lit": "lit=ok",
+    "Old": "https://github.com/synthetic-owner/pushurl.git",
+    "New": "https://github.com/synthetic-owner/pushurl.git"
+  },
+  {
+    "Context": "13 worktree-local origin override",
+    "Env": "-",
+    "Path": "overlap(cwd-url)",
+    "Status": "EQUAL",
+    "Lit": "lit=ok",
+    "Old": "https://github.com/synthetic-owner/wtconfig.git",
+    "New": "https://github.com/synthetic-owner/wtconfig.git"
+  },
+  {
+    "Context": "14a GIT_DIR absolute, cwd outside",
+    "Env": "GIT_DIR=C:\\AgentSessions\\.trellis\\.runtime\\b8-check2\\semantics\\envrepo\\.git",
+    "Path": "serial(env)",
+    "Status": "EQUAL",
+    "Lit": "lit=ok",
+    "Old": "git@github.com:synthetic-owner/envrepo.git",
+    "New": "git@github.com:synthetic-owner/envrepo.git"
+  },
+  {
+    "Context": "14b GIT_DIR absolute, cwd = repo subdir",
+    "Env": "GIT_DIR=C:\\AgentSessions\\.trellis\\.runtime\\b8-check2\\semantics\\envrepo\\.git",
+    "Path": "serial(env)",
+    "Status": "EQUAL",
+    "Lit": "lit=ok",
+    "Old": "git@github.com:synthetic-owner/envrepo.git",
+    "New": "git@github.com:synthetic-owner/envrepo.git"
+  },
+  {
+    "Context": "14c GIT_DIR relative .git, cwd = repo subdir",
+    "Env": "GIT_DIR=.git",
+    "Path": "serial(env)",
+    "Status": "EQUAL(None)",
+    "Lit": "",
+    "Old": null,
+    "New": null
+  },
+  {
+    "Context": "14d GIT_DIR absolute + GIT_WORK_TREE=repo, cwd = subdir",
+    "Env": "GIT_DIR=C:\\AgentSessions\\.trellis\\.runtime\\b8-check2\\semantics\\envrepo\\.git;GIT_WORK_TREE=C:\\AgentSessions\\.trellis\\.runtime\\b8-check2\\semantics\\envrepo",
+    "Path": "serial(env)",
+    "Status": "EQUAL",
+    "Lit": "lit=ok",
+    "Old": "git@github.com:synthetic-owner/envrepo.git",
+    "New": "git@github.com:synthetic-owner/envrepo.git"
+  },
+  {
+    "Context": "14e R1: GIT_WORK_TREE only, cwd = repo subdir",
+    "Env": "GIT_WORK_TREE=C:\\Users\\小Q\\AppData\\Local\\Temp\\b8-check2-outside\\outside",
+    "Path": "serial(env)",
+    "Status": "EQUAL(None)",
+    "Lit": "",
+    "Old": null,
+    "New": null
+  },
+  {
+    "Context": "14f GIT_CEILING_DIRECTORIES = parent of repo",
+    "Env": "GIT_CEILING_DIRECTORIES=C:\\AgentSessions\\.trellis\\.runtime\\b8-check2\\semantics",
+    "Path": "serial(env)",
+    "Status": "EQUAL",
+    "Lit": "lit=ok",
+    "Old": "git@github.com:synthetic-owner/envrepo.git",
+    "New": "git@github.com:synthetic-owner/envrepo.git"
+  },
+  {
+    "Context": "15 R2: rel GIT_DIR + GIT_WORK_TREE, cwd = nested repo",
+    "Env": "GIT_DIR=.git;GIT_WORK_TREE=C:\\AgentSessions\\.trellis\\.runtime\\b8-check2\\semantics\\envrepo",
+    "Path": "serial(env)",
+    "Status": "EQUAL",
+    "Lit": "lit=ok",
+    "Old": "git@github.com:synthetic-owner/envrepo.git",
+    "New": "git@github.com:synthetic-owner/envrepo.git"
+  },
+  {
+    "Context": "16a R3: core.worktree outside, cwd = gitdir",
+    "Env": "-",
+    "Path": "overlap+serial-reprobe",
+    "Status": "EQUAL(None)",
+    "Lit": "lit=ok",
+    "Old": null,
+    "New": null
+  },
+  {
+    "Context": "16b R3: core.worktree outside, cwd = gitdir/sub",
+    "Env": "-",
+    "Path": "overlap+serial-reprobe",
+    "Status": "EQUAL(None)",
+    "Lit": "lit=ok",
+    "Old": null,
+    "New": null
+  },
+  {
+    "Context": "16c R3: core.worktree outside, cwd = worktree (no .git)",
+    "Env": "-",
+    "Path": "overlap(gate=None)",
+    "Status": "EQUAL(None)",
+    "Lit": "lit=ok",
+    "Old": null,
+    "New": null
+  },
+  {
+    "Context": "17a core.worktree=root, cwd = .git",
+    "Env": "-",
+    "Path": "overlap(cwd-url)",
+    "Status": "EQUAL",
+    "Lit": "lit=ok",
+    "Old": "git@github.com:synthetic-owner/cwrepo.git",
+    "New": "git@github.com:synthetic-owner/cwrepo.git"
+  },
+  {
+    "Context": "17b core.worktree=root, cwd = subdir",
+    "Env": "-",
+    "Path": "overlap(cwd-url)",
+    "Status": "EQUAL",
+    "Lit": "lit=ok",
+    "Old": "git@github.com:synthetic-owner/cwrepo.git",
+    "New": "git@github.com:synthetic-owner/cwrepo.git"
+  },
+  {
+    "Context": "18a bare + core.worktree external, cwd = bare dir",
+    "Env": "-",
+    "Path": "overlap(gate=None)",
+    "Status": "EQUAL(None)",
+    "Lit": "lit=ok",
+    "Old": null,
+    "New": null
+  },
+  {
+    "Context": "18b bare + core.worktree external, cwd = bare/sub",
+    "Env": "-",
+    "Path": "overlap(gate=None)",
+    "Status": "EQUAL(None)",
+    "Lit": "lit=ok",
+    "Old": null,
+    "New": null
+  },
+  {
+    "Context": "H1 toplevel/.git belongs to ANOTHER repo, cwd = gitdir",
+    "Env": "-",
+    "Path": "overlap(cwd-url)",
+    "Status": "DIFF(value)",
+    "Lit": "",
+    "Old": "git@github.com:synthetic-owner/h1-worktree-repo.git",
+    "New": "git@github.com:synthetic-owner/h1-gitdir.git"
+  },
+  {
+    "Context": "H2 toplevel/.git invalid empty dir, cwd = gitdir",
+    "Env": "-",
+    "Path": "overlap(cwd-url)",
+    "Status": "DIFF(value)",
+    "Lit": "",
+    "Old": "https://github.com/qin-devs/AgentSessions.git",
+    "New": "git@github.com:synthetic-owner/h2-gitdir.git"
+  },
+  {
+    "Context": "H3 toplevel/.git pointer file back to gitdir, cwd = gitdir",
+    "Env": "-",
+    "Path": "overlap(cwd-url)",
+    "Status": "EQUAL",
+    "Lit": "",
+    "Old": "git@github.com:synthetic-owner/h3-gitdir.git",
+    "New": "git@github.com:synthetic-owner/h3-gitdir.git"
+  }
+]

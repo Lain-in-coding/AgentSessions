@@ -1,0 +1,6 @@
+{"_example": "Fill with {\"file\": \"<path>\", \"reason\": \"<why>\"}. Put spec/research files only — no code paths. Run `python .trellis/scripts/get_context.py --mode packages` to list available specs. Delete this line once real entries are added."}
+{"file": ".trellis/tasks/archive/2026-10/10-07-final-perf-regression/research/residual-hotpath-verdict.md", "reason": "B7 判定与证伪数据：单子进程/文件系统替代为何不采纳；本任务只在契约不变前提下并发化"}
+{"file": ".trellis/tasks/archive/2026-10/10-07-final-perf-regression/research/hotpath-comparison.md", "reason": "B7 热路径基线：search 48.02ms/2 探测、seam 9.08ms、单轮成本 38.94ms"}
+{"file": ".trellis/tasks/archive/2026-10/10-07-final-perf-regression/research/measure.ps1", "reason": "同口径测量脚本（仅改 $expDir/$outDir 即可复用）"}
+{"file": ".trellis/spec/agentsessions-cli/backend/index.md", "reason": "CLI 组合根规约：注入、失败降级、协议字段稳定性"}
+{"file": ".trellis/tasks/10-05-competitive-source-audit-plan/research/repo-probe-overhead.json", "reason": "审计原始基线与探测计数口径"}

@@ -1,0 +1,72 @@
+outside base clean (not a git dir): C:\Users\小Q\AppData\Local\Temp\b8-check-v2-outside
+
+===== MATRIX (v2) =====
+context                                                          status         old probe (-C toplevel)                                  new probe (-C cwd)                              
+1a plain root                                                    EQUAL          0:git@github.com:synthetic-owner/plain.git               0:git@github.com:synthetic-owner/plain.git      
+1b plain subdir                                                  EQUAL          0:git@github.com:synthetic-owner/plain.git               0:git@github.com:synthetic-owner/plain.git      
+1c plain subdir trailing slash                                   EQUAL          0:git@github.com:synthetic-owner/plain.git               0:git@github.com:synthetic-owner/plain.git      
+2a nested inner                                                  EQUAL          0:https://gitlab.example.com/team/inner.git              0:https://gitlab.example.com/team/inner.git     
+2b outer from root                                               EQUAL          0:git@github.com:synthetic-owner/plain.git               0:git@github.com:synthetic-owner/plain.git      
+2c vendor parent (outer)                                         EQUAL          0:git@github.com:synthetic-owner/plain.git               0:git@github.com:synthetic-owner/plain.git      
+3a bare root                                                     EQUAL(None)    (gate=null)                                              (gate=null)                                     
+3b bare subdir (refs/heads)                                      EQUAL(None)    (gate=null)                                              (gate=null)                                     
+4a .git dir cwd                                                  EQUAL(None)    (gate=null)                                              (gate=null)                                     
+4b .git/hooks cwd                                                EQUAL(None)    (gate=null)                                              (gate=null)                                     
+5a non-git dir (truly outside any repo)                          EQUAL(None)    (gate=null)                                              (gate=null)                                     
+5b nonexistent dir                                               EQUAL(None)    (gate=null)                                              (gate=null)                                     
+6a linked worktree root                                          EQUAL          0:https://github.com/synthetic-owner/wt-host.g..         0:https://github.com/synthetic-owner/wt-host.g..
+6b linked worktree subdir                                        EQUAL          0:https://github.com/synthetic-owner/wt-host.g..         0:https://github.com/synthetic-owner/wt-host.g..
+6c host after worktree add                                       EQUAL          0:https://github.com/synthetic-owner/wt-host.g..         0:https://github.com/synthetic-owner/wt-host.g..
+7a submodule root                                                EQUAL          0:git@github.com:synthetic-owner/submodule.git           0:git@github.com:synthetic-owner/submodule.git  
+7b submodule deep subdir                                         EQUAL          0:git@github.com:synthetic-owner/submodule.git           0:git@github.com:synthetic-owner/submodule.git  
+7c superproject from submodule parent                            EQUAL          0:https://github.com/synthetic-owner/super.git           0:https://github.com/synthetic-owner/super.git  
+7d inside submodule gitdir                                       EQUAL          0:git@github.com:synthetic-owner/submodule.git           0:git@github.com:synthetic-owner/submodule.git  
+8 no origin                                                      EQUAL(None)    2:                                                       2:                                              
+9 uppercase ORIGIN only                                          EQUAL(None)    2:                                                       2:                                              
+10 local path origin                                             EQUAL          0:C:\AgentSessions\.trellis\.runtime\b8-check-..         0:C:\AgentSessions\.trellis\.runtime\b8-check-..
+11 insteadOf rewrite (repo-local config)                         EQUAL          0:https://x.example.com/team/rewritten-repo.gi..         0:https://x.example.com/team/rewritten-repo.gi..
+12 pushurl differs from fetch url                                EQUAL          0:https://github.com/synthetic-owner/pushurl.g..         0:https://github.com/synthetic-owner/pushurl.g..
+13 worktree-local origin override                                EQUAL          0:https://github.com/synthetic-owner/wtconfig...         0:https://github.com/synthetic-owner/wtconfig...
+14a GIT_DIR absolute, cwd truly outside                          EQUAL          0:git@github.com:synthetic-owner/envrepo.git             0:git@github.com:synthetic-owner/envrepo.git    
+14b GIT_DIR absolute, cwd = repo subdir                          EQUAL          0:git@github.com:synthetic-owner/envrepo.git             0:git@github.com:synthetic-owner/envrepo.git    
+14c GIT_DIR relative .git, cwd = repo subdir                     EQUAL(None)    (gate=null)                                              (gate=null)                                     
+14d GIT_DIR absolute + GIT_WORK_TREE=repo, cwd = subdir          EQUAL          0:git@github.com:synthetic-owner/envrepo.git             0:git@github.com:synthetic-owner/envrepo.git    
+14e GIT_WORK_TREE only, cwd = repo subdir                        DIFF(old=None) 128:                                                     0:git@github.com:synthetic-owner/envrepo.git    
+14f GIT_CEILING_DIRECTORIES = parent of repo, cwd = subdir       EQUAL          0:git@github.com:synthetic-owner/envrepo.git             0:git@github.com:synthetic-owner/envrepo.git    
+15 rel GIT_DIR resolves differently from cwd vs toplevel         DIFF(value)    0:git@github.com:synthetic-owner/envrepo.git             0:git@github.com:synthetic-owner/nested-under-..
+16a core.worktree outside gitdir tree, cwd = gitdir              DIFF(value)    0:https://github.com/qin-devs/AgentSessions.gi..         0:git@github.com:synthetic-owner/detached.git   
+16b core.worktree outside gitdir tree, cwd = gitdir/sub          DIFF(value)    0:https://github.com/qin-devs/AgentSessions.gi..         0:git@github.com:synthetic-owner/detached.git   
+16c core.worktree outside gitdir tree, cwd = worktree (no .git)  EQUAL          0:https://github.com/qin-devs/AgentSessions.gi..         0:https://github.com/qin-devs/AgentSessions.gi..
+17a core.worktree=root, cwd = .git                               EQUAL          0:git@github.com:synthetic-owner/cwrepo.git              0:git@github.com:synthetic-owner/cwrepo.git     
+17b core.worktree=root, cwd = subdir                             EQUAL          0:git@github.com:synthetic-owner/cwrepo.git              0:git@github.com:synthetic-owner/cwrepo.git     
+18a bare + core.worktree external, cwd = bare dir                EQUAL(None)    (gate=null)                                              (gate=null)                                     
+18b bare + core.worktree external, cwd = bare/sub                EQUAL(None)    (gate=null)                                              (gate=null)                                     
+
+===== ENV NOTES =====
+14a GIT_DIR absolute, cwd truly outside :: GIT_DIR=C:\AgentSessions\.trellis\.runtime\b8-check-v2\envrepo\.git
+14b GIT_DIR absolute, cwd = repo subdir :: GIT_DIR=C:\AgentSessions\.trellis\.runtime\b8-check-v2\envrepo\.git
+14c GIT_DIR relative .git, cwd = repo subdir :: GIT_DIR=.git
+14d GIT_DIR absolute + GIT_WORK_TREE=repo, cwd = subdir :: GIT_DIR=C:\AgentSessions\.trellis\.runtime\b8-check-v2\envrepo\.git;GIT_WORK_TREE=C:\AgentSessions\.trellis\.runtime\b8-check-v2\envrepo
+14e GIT_WORK_TREE only, cwd = repo subdir :: GIT_WORK_TREE=C:\Users\小Q\AppData\Local\Temp\b8-check-v2-outside\outside
+14f GIT_CEILING_DIRECTORIES = parent of repo, cwd = subdir :: GIT_CEILING_DIRECTORIES=C:\AgentSessions\.trellis\.runtime\b8-check-v2
+15 rel GIT_DIR resolves differently from cwd vs toplevel :: GIT_DIR=.git;GIT_WORK_TREE=C:\AgentSessions\.trellis\.runtime\b8-check-v2\envrepo
+
+===== VERDICT =====
+DIVERGENCES: 4
+  14e GIT_WORK_TREE only, cwd = repo subdir
+    cfg: GIT_WORK_TREE=C:\Users\小Q\AppData\Local\Temp\b8-check-v2-outside\outside
+    old=[128:]
+    new=[0:git@github.com:synthetic-owner/envrepo.git]
+  15 rel GIT_DIR resolves differently from cwd vs toplevel
+    cfg: GIT_DIR=.git;GIT_WORK_TREE=C:\AgentSessions\.trellis\.runtime\b8-check-v2\envrepo
+    old=[0:git@github.com:synthetic-owner/envrepo.git]
+    new=[0:git@github.com:synthetic-owner/nested-under-envrepo.git]
+  16a core.worktree outside gitdir tree, cwd = gitdir
+    cfg: -
+    old=[0:https://github.com/qin-devs/AgentSessions.git]
+    new=[0:git@github.com:synthetic-owner/detached.git]
+  16b core.worktree outside gitdir tree, cwd = gitdir/sub
+    cfg: -
+    old=[0:https://github.com/qin-devs/AgentSessions.git]
+    new=[0:git@github.com:synthetic-owner/detached.git]
+wrote C:\AgentSessions\.trellis\tasks\10-07-repo-probe-overlap\research\check-semantics.json

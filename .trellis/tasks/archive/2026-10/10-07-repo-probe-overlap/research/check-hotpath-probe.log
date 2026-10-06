@@ -1,0 +1,9 @@
+   Compiling agent-session-grep-cli v0.1.0 (C:\AgentSessions\crates\agent-session-grep-cli)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.74s
+     Running tests\hotpath_repo_probe.rs (.trellis/.runtime/target-b8\debug\deps\hotpath_repo_probe-c67533a73d36147d.exe)
+
+running 1 test
+test read_commands_probe_no_git_and_search_resolves_repo_once ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.25s
+

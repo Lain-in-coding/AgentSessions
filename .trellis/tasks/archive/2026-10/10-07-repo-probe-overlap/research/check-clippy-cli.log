@@ -1,0 +1,6 @@
+    Checking rusqlite v0.40.1
+    Checking agent-session-grep-adapters-sqlite v0.1.0 (C:\AgentSessions\crates\agent-session-grep-adapters-sqlite)
+    Checking agent-session-grep-provider-opencode v0.1.0 (C:\AgentSessions\crates\agent-session-grep-provider-opencode)
+    Checking agent-session-grep-provider-cursor v0.1.0 (C:\AgentSessions\crates\agent-session-grep-provider-cursor)
+    Checking agent-session-grep-cli v0.1.0 (C:\AgentSessions\crates\agent-session-grep-cli)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 5.79s

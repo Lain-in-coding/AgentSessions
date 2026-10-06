@@ -1,0 +1,4 @@
+{"_example": "Fill with {\"file\": \"<path>\", \"reason\": \"<why>\"}. Put spec/research files only — no code paths. Run `python .trellis/scripts/get_context.py --mode packages` to list available specs. Delete this line once real entries are added."}
+{"file": ".trellis/tasks/archive/2026-10/10-07-final-perf-regression/research/residual-hotpath-verdict.md", "reason": "校验并发化确实没有扩张 current_repo_slug 契约"}
+{"file": ".trellis/tasks/archive/2026-10/10-07-final-perf-regression/research/hotpath-comparison.md", "reason": "校验前后对比数字与口径一致、未被选择性呈现"}
+{"file": ".trellis/spec/agentsessions-cli/backend/index.md", "reason": "校验 CLI 可见行为（协议/退出码/注入旁路）未变"}

@@ -1,0 +1,29 @@
+context                                                        status         new path                 gate
+R3a core.worktree outside, cwd = gitdir                        EQUAL(None) lit=ok overlap+serial-reprobe   C:/Users/小Q/AppData/Local/Temp/b8-check2b/r3/w
+R3b core.worktree outside, cwd = gitdir/sub                    EQUAL(None) lit=ok overlap+serial-reprobe   C:/Users/小Q/AppData/Local/Temp/b8-check2b/r3/w
+R3c core.worktree outside, cwd = worktree(no .git)             EQUAL(None) lit=ok overlap(gate=None)       (none)
+H1 toplevel/.git belongs to ANOTHER repo, cwd = gitdir         DIFF(value) lit=FAIL overlap(cwd-url)         C:/Users/小Q/AppData/Local/Temp/b8-check2b/h1/w
+H2 toplevel/.git invalid empty dir, cwd = gitdir               DIFF(old=None) lit=FAIL overlap(cwd-url)         C:/Users/小Q/AppData/Local/Temp/b8-check2b/h2/w
+H3 toplevel/.git pointer file back to gitdir, cwd = gitdir     EQUAL lit=ok   overlap(cwd-url)         C:/Users/小Q/AppData/Local/Temp/b8-check2b/h3/w
+
+old -> new:
+  R3a core.worktree outside, cwd = gitdir
+    old=[]
+    new=[]
+  R3b core.worktree outside, cwd = gitdir/sub
+    old=[]
+    new=[]
+  R3c core.worktree outside, cwd = worktree(no .git)
+    old=[]
+    new=[]
+  H1 toplevel/.git belongs to ANOTHER repo, cwd = gitdir
+    old=[git@github.com:synthetic-owner/h1-worktree-repo.git]
+    new=[git@github.com:synthetic-owner/h1-gitdir.git]
+  H2 toplevel/.git invalid empty dir, cwd = gitdir
+    old=[]
+    new=[git@github.com:synthetic-owner/h2-gitdir.git]
+  H3 toplevel/.git pointer file back to gitdir, cwd = gitdir
+    old=[git@github.com:synthetic-owner/h3-gitdir.git]
+    new=[git@github.com:synthetic-owner/h3-gitdir.git]
+
+VERDICT: DIFF=2 litFAIL=2
