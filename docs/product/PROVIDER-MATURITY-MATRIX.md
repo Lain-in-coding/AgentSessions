@@ -3,7 +3,7 @@
 > 对外可见的 Provider 状态清单，是 `0.1.0`（首个计划公开版本，`Cargo.toml`）的公开状态记录。
 > - 术语与晋级证据要求见 `../architecture/RFC-0002-provider-adapter-contract.md` §6。
 > - 本文件是**当前实现状态**的事实记录，不是承诺；晋级必须有证据，不由代码存在自动推断。
-> - 最后更新：2026-08-25（property 全 14 家 + resume matrix 4 家新增 + tool_activity 7 家诚实盘点 + 3 个 Medium 修复 wave，HEAD `18a2162`）
+> - 最后更新：2026-10-06（B5 生命周期 wave：Claude/Codex 的 append/shrink/同长改写/分叉证据入库并各自指向 `tests/lifecycle.rs` 与 64 种子 append property；移动/WAL 如实标注 provider 层 N/A 并指到 store 层证据。未晋级、无能力变化。前次 2026-08-25：property 全 14 家 + resume matrix 4 家新增 + tool_activity 7 家诚实盘点 + 3 个 Medium 修复 wave，HEAD `18a2162`）
 > - 权威数据源：`crates/agent-session-grep-ports/src/capability.rs` 的
 >   `ProviderCapabilityMatrix::current()`；本表与其保持一致，不一致以 capability.rs 为准。
 > - Beta 本地/外部缺口分账见 `PROVIDER-BETA-READINESS.md`（不得仅凭代码存在晋级）。
@@ -25,8 +25,8 @@
 
 | Provider | provider_id | variant | maturity | 证据 |
 |---|---|---|---|---|
-| Claude Code | `claude-code` | `claude-code/jsonl-v1` | **Experimental** | 单元 + e2e + golden（`crates/agent-session-grep-provider-claude/tests/golden.rs`）+ 确定性 property 套件（`tests/properties.rs`，固定种子）+ span round-trip |
-| Codex | `codex` | `codex/rollout-jsonl-v1` | **Experimental** | 单元 + e2e + golden（`crates/agent-session-grep-provider-codex/tests/golden.rs`）+ 确定性 property 套件（含镜像去重性质）+ span round-trip |
+| Claude Code | `claude-code` | `claude-code/jsonl-v1` | **Experimental** | 单元 + e2e + golden（`crates/agent-session-grep-provider-claude/tests/golden.rs`）+ 确定性 property 套件（`tests/properties.rs`，固定种子）+ span round-trip + 生命周期回归（append/shrink/同长改写/分叉 + 64 种子 append property；`tests/lifecycle.rs`） |
+| Codex | `codex` | `codex/rollout-jsonl-v1` | **Experimental** | 单元 + e2e + golden（`crates/agent-session-grep-provider-codex/tests/golden.rs`）+ 确定性 property 套件（含镜像去重性质）+ span round-trip + 生命周期回归（append/shrink/同长改写；分叉为无父边的反向钉住 + 64 种子 append property；`tests/lifecycle.rs`） |
 | Grok Build | `grok-build` | `grok-build/acp-updates-v1` | **Experimental** | ACP `updates.jsonl`（`session/update` stream），主格式证据充分，variant 分层 + golden（`tests/golden.rs`） |
 | Antigravity | `antigravity` | `antigravity/transcript-jsonl-v1` | **Experimental** | 本机真实格式核验（2026-08-15）：`brain/<uuid>/.system_generated/logs/transcript.jsonl`；identity 在目录名，文件内无 session id 字段 + golden（`tests/golden.rs`） |
 | OpenCode | `opencode` | `opencode/sqlite-v1` | **Experimental** | `opencode.db` SQLite（session/message/part 表），只读打开（SQLITE_OPEN_READONLY + busy_timeout）+ golden（`tests/golden.rs`） |
@@ -84,6 +84,37 @@ cargo run -q -p agent-session-grep-cli -- --output json providers
 
 入口层不得硬编码 provider maturity 或 capability；上述命令与 MCP
 `list_providers` 均从 `ProviderCapabilityMatrix::current()` 投影。
+
+## Provider 生命周期证据（append/shrink/rewrite/fork/move/WAL，2026-10-06 B5）
+
+> 判分边界：provider 只接收已验证快照字节（`crates/agent-session-grep-ports/src/lib.rs` 的
+> `ProviderAdapter::parse`），拿不到路径，也没有"上次解析结果"；水位推进 /
+> tombstone / last-good 回滚由 store 层负责。本节"覆盖"只指 provider 层性质，
+> 不构成 maturity 晋级证据，也不改变任何 capability 列取值。
+
+- **append / shrink / 同长改写（claude-code、codex 均覆盖）**：两个 crate 的
+  `tests/lifecycle.rs` 钉住"追加后既有消息（seq/native_id/parent/角色/正文/
+  时间戳/sidechain/span）逐字段不变"、"行边界截断 == 前缀解析"、"撕裂半行只
+  可恢复跳过、不得整体失败或吞掉前缀"、"清空源返回空报告"、"同长正文/id 改写
+  按当前字节生效（无陈旧缓存）"；既有 64 种子生成器新增
+  `prop_append_keeps_prefix_byte_stable`（`tests/properties.rs`）做随机化复验。
+  store 端的 no-op / tombstone / 撕裂尾保留旧索引语义另由 CLI e2e 守护
+  （`crates/agent-session-grep-cli/tests/e2e.rs`）。
+- **分叉 parent 边**：claude-code 已覆盖（兄弟共享同一父边、悬空父边原样保留
+  给跨源解析、空串 parentUuid 归一为根；`tests/lifecycle.rs`）。codex rollout
+  格式无父指针，provider 层 N/A，以反向测试钉住"复制前缀与 event_msg 镜像也
+  不臆造父边/sidechain、不重复计数"。跨源父边解析属 store/application 层，
+  不在该测试范围。
+- **文件移动**：provider 层 N/A（`parse`/`probe` 只收字节，adapter 结构上
+  拿不到路径，身份取自记录内 native id）。locator remap 与历史恒可检索证据在
+  store 层：`crates/agent-session-grep-adapters-sqlite/src/relocation/tests.rs`
+  与 `crates/agent-session-grep-cli/tests/e2e.rs`。
+- **SQLite WAL**：claude-code/codex 源为 JSONL，provider 层 N/A；SQLite 读侧的
+  WAL 证据在 `crates/agent-session-grep-adapters-sqlite/src/source_fs.rs`
+  （WAL 帧逻辑捕获、WAL-only 变化触发快照失效、捕获/校验全程不写源）。
+- **native resume**：本轮未执行 native resume（环境限制）；矩阵与 ledger 的
+  resume 列只记录 CLI 命令证据（derived/unknown/unsupported），不是 native
+  resume 成功证据，且本 wave 未改变该列任何取值。
 
 ## 已知限制
 

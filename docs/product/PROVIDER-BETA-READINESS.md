@@ -7,7 +7,9 @@
 > repository-local gaps from external/owner gates. Do not promote from this
 > file alone.
 
-Last updated: 2026-08-28 (local-gap closure pass: `kimi-code` now indexes user
+Last updated: 2026-10-06 (lifecycle wave (B5) — provider-level append / shrink / same-length rewrite / fork evidence for `claude-code` and `codex` landed in each crate (see the lifecycle section below); no maturity, capability or blocker column changes).
+
+2026-08-28 (local-gap closure pass: `kimi-code` now indexes user
 prompts (`turn.prompt` / `turn.steer`) — the earlier gap left the highest-value
 text out of the index entirely; the three remaining "pending" items are resolved
 into recorded decisions instead of open work: `tencent-codebuddy`'s extension
@@ -51,6 +53,34 @@ into a provider patch. Until then `pi`'s `context` and `tool_activity` stay
 Unsupported with the reason stated per row, and the adapter reports the
 un-modeled lineage as an explicit parse diagnostic so the omission is visible
 instead of silent.
+
+## Lifecycle evidence (2026-10-06, B5)
+
+Provider-level lifecycle scenarios for the two high-frequency JSONL providers.
+Synthetic fixtures only; this section adds anchors, not promotions.
+
+- `claude-code` / `codex`: append, shrink (line boundary / torn tail / empty
+  source), same-length rewrite (text and native id) and fork-edge scenarios are
+  covered in each crate's `tests/lifecycle.rs`. The append prefix-stability
+  invariant — unchanged records keep their seq, identity, parent edge, text and
+  span when a snapshot grows — is additionally randomized over the existing
+  64-seed generators in `tests/properties.rs`
+  (`prop_append_keeps_prefix_byte_stable`). The provider contract sees only
+  snapshot bytes (no path, no previous parse), so these tests pin prefix
+  stability and honest degradation, never sync watermarks.
+- `codex` fork: N/A at the provider layer — the rollout format has no parent
+  field and the adapter hard-codes `parent_native_id: None`; a negative test
+  pins that copied prefixes and `event_msg` mirrors never fabricate threading or
+  double-count.
+- File move: N/A at the provider layer (no path input); locator- and
+  identity-preserving move semantics live in
+  `crates/agent-session-grep-adapters-sqlite/src/relocation/tests.rs` and the CLI
+  relocation e2e.
+- SQLite WAL: N/A for both JSONL providers; WAL capture / WAL-only change
+  detection evidence is in
+  `crates/agent-session-grep-adapters-sqlite/src/source_fs.rs`.
+- Native resume: not executed in this environment; the `resume` column records
+  CLI-command evidence only and is unchanged by this wave.
 
 ## Global external blockers (apply to every promotion)
 
