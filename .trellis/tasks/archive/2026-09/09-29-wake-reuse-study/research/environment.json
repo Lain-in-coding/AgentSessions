@@ -1,0 +1,19 @@
+{
+  "os": "windows",
+  "target_triple": "x86_64-pc-windows-msvc",
+  "cpu": "Intel(R) Core(TM) Ultra 7 155H",
+  "cpu_logical_processors": 22.0,
+  "ram_gb": 31.5,
+  "disk": {
+    "FriendlyName": "NVMe SAMSUNG MZVL81T0HELB-00BTW",
+    "MediaType": "SSD",
+    "Size": 1024209543168
+  },
+  "filesystem": "NTFS",
+  "available_disk_gb": 257.09,
+  "antivirus_state": "AntivirusEnabled=True; RealTimeProtectionEnabled=True; AMServiceEnabled=True",
+  "rustc": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+  "cargo": "cargo 1.97.1 (c980f4866 2026-06-30)",
+  "cache_method": "No OS disk cache flush; process/connection lifecycle is labeled explicitly",
+  "contains_real_transcripts": false
+}

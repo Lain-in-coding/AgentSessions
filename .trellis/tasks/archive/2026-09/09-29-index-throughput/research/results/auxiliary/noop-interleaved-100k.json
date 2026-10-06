@@ -1,0 +1,104 @@
+{
+  "summary": {
+    "tag": "final-noop",
+    "pairs": 2,
+    "a": {
+      "initial_ms": 30465.85,
+      "noop_median_ms": 76.94999999999999,
+      "rss_mb": 1438.675781,
+      "search_median_ms": null,
+      "db_bytes": 517963776
+    },
+    "b": {
+      "initial_ms": 20735.15,
+      "noop_median_ms": 75.35,
+      "rss_mb": 1362.8710935,
+      "search_median_ms": null,
+      "db_bytes": 517963776
+    },
+    "delta_pct": {
+      "initial_ms": -31.94,
+      "noop_median_ms": -2.08,
+      "rss_mb": -5.27,
+      "search_median_ms": null
+    }
+  },
+  "records": {
+    "tag": "final-noop",
+    "a_commit": "c2d58e862b4fe0320240f8a40eefef09d958ff55",
+    "b_commit": "f04d1a88ebc3ceaf31854bae10855241354ad80e",
+    "pairs": 2,
+    "a": [
+      {
+        "label": "a",
+        "commit": "c2d58e862b4fe0320240f8a40eefef09d958ff55",
+        "binary_sha256": "664c2e7bf035c1fc",
+        "initial_ms": 29685.2,
+        "initial_batches_ms": [
+          29683.5357
+        ],
+        "initial_rss_max_mb": 1438.644531,
+        "noop_ms": [
+          93.8,
+          65.5,
+          82.3
+        ],
+        "noop_median_ms": 82.3,
+        "db_bytes": 517963776
+      },
+      {
+        "label": "a",
+        "commit": "c2d58e862b4fe0320240f8a40eefef09d958ff55",
+        "binary_sha256": "664c2e7bf035c1fc",
+        "initial_ms": 31246.5,
+        "initial_batches_ms": [
+          31244.651
+        ],
+        "initial_rss_max_mb": 1438.707031,
+        "noop_ms": [
+          83.5,
+          71.6,
+          67.5
+        ],
+        "noop_median_ms": 71.6,
+        "db_bytes": 517963776
+      }
+    ],
+    "b": [
+      {
+        "label": "b",
+        "commit": "f04d1a88ebc3ceaf31854bae10855241354ad80e",
+        "binary_sha256": "3e55a4c42ac49ffd",
+        "initial_ms": 21923.1,
+        "initial_batches_ms": [
+          21921.1117
+        ],
+        "initial_rss_max_mb": 1362.757812,
+        "noop_ms": [
+          80.1,
+          67.6,
+          67.6
+        ],
+        "noop_median_ms": 67.6,
+        "db_bytes": 517963776
+      },
+      {
+        "label": "b",
+        "commit": "f04d1a88ebc3ceaf31854bae10855241354ad80e",
+        "binary_sha256": "3e55a4c42ac49ffd",
+        "initial_ms": 19547.2,
+        "initial_batches_ms": [
+          19545.4302
+        ],
+        "initial_rss_max_mb": 1362.984375,
+        "noop_ms": [
+          85.5,
+          83.1,
+          74.8
+        ],
+        "noop_median_ms": 83.1,
+        "db_bytes": 517963776
+      }
+    ]
+  }
+}

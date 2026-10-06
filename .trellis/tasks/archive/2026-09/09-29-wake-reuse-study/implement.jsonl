@@ -1,0 +1,7 @@
+{"reason":"Shared code reuse and cross-layer reasoning rules","file":".trellis/spec/guides/index.md"}
+{"reason":"Reuse existing generators and statistics; isolate comparisons deliberately","file":".trellis/spec/guides/code-reuse-thinking-guide.md"}
+{"reason":"Ranking, Unicode guidance, budget and cursor boundaries stay unchanged","file":".trellis/spec/agentsessions-application/backend/index.md"}
+{"reason":"Catalog authority, source immutability, projection and identity contracts","file":".trellis/spec/agentsessions-adapters-sqlite/backend/index.md"}
+{"reason":"Only independently synthetic fixtures and explicit provenance","file":"docs/security/FIXTURE-REDACTION-POLICY.md"}
+{"reason":"Four-tier reuse classification and copyright boundaries","file":"docs/operations/REUSE-LICENSE-AUDIT.md"}
+{"reason":"Raw samples, statistics and honest performance evidence","file":"docs/product/SLI-AND-BENCHMARK-FORMAT.md"}

@@ -33,6 +33,7 @@ pub mod ranking;
 pub mod relocation;
 pub mod resume;
 pub mod retention;
+pub mod snippet;
 
 pub use budget::{ResponseBudget, Truncation};
 pub use cjk::{bigram_cjk, fts_tokens_cjk};
@@ -964,8 +965,9 @@ fn payload_role_is_system_noise(payload: Option<&[u8]>) -> bool {
         .is_some_and(|role| role == "system" || role == "developer")
 }
 
-/// 装配一条检索命中（R1/ADR-0008 + guidance）：从 payload 解析 `text` 摘要、
-/// 填充归属会话、派生确定性 `why_matched` 与 `suggested_next_commands`。
+/// 装配一条检索命中（R1/ADR-0008 + guidance）：从 payload 解析 `text` 摘要
+/// （有字面证据取命中窗口，否则回退前缀，见 [`snippet::build`]）、填充归属
+/// 会话、派生确定性 `why_matched` 与 `suggested_next_commands`。
 /// payload 无 text（或非 JSON）→ text None；无 placement → session_id None。
 fn assemble_search_hit(
     hit: &mut SearchHit,
@@ -985,13 +987,11 @@ fn assemble_search_hit(
     });
     // 证据装配期间全量 payload 仍可用：除规范 `text` 字段外，把整棵 JSON 值
     // 交给 guidance（string-leaves 源覆盖 Codex content blocks 等无顶层 text
-    // 的 payload），显示前缀作最后一个兜底源（可能是截断 snippet，会漏掉前缀
-    // 之后的真实命中——guidance design §2）。
+    // 的 payload），显示摘要作最后一个兜底源（可能是截断窗口，会漏掉窗口之外
+    // 的真实命中——guidance design §2）。
     let payload_value =
         payload.and_then(|bytes| serde_json::from_slice::<serde_json::Value>(bytes).ok());
-    hit.text = full_text
-        .as_deref()
-        .map(|text| text.chars().take(max_snippet_chars).collect());
+    hit.text = snippet::build(full_text.as_deref(), query_terms, max_snippet_chars);
     // 保留 adapter 提供的 canonical session_id（Session 元数据命中自带归属
     // 会话）；否则才用 placement 解析的归属会话回填。metadata-only Session
     // 命中无 placement，session_of 返回 None，不得把既有值覆盖成 None。
@@ -2065,10 +2065,11 @@ impl<C: CatalogStore + ContextGraphStore, S: SearchIndex, R: ResumeClaimsStore, 
                     .collect();
 
                 // R1/ADR-0008 装配：对页内命中一次性批量取 payload（分块 IN，
-                // 无 N+1），解析 `text` 字段按 `max_snippet_chars` 截取前缀；
-                // 再一次性批量解析归属会话（session_of，同序）。payload 无 text
-                // （或非 JSON）→ text None，不臆造正文；无 placement → session_id
-                // None。不做任何脱敏（ADR-0004 所有者决定，本地优先工具接受屏显）。
+                // 无 N+1），解析 `text` 字段按 `max_snippet_chars` 构建命中窗口
+                // （无字面证据回退前缀，见 [`snippet::build`]）；再一次性批量
+                // 解析归属会话（session_of，同序）。payload 无 text（或非 JSON）
+                // → text None，不臆造正文；无 placement → session_id None。
+                // 不做任何脱敏（ADR-0004 所有者决定，本地优先工具接受屏显）。
                 let ids: Vec<StableId> = slice.iter().map(|hit| hit.id.clone()).collect();
                 let payloads = self.catalog.get_many(&ids)?;
                 let sessions = self.catalog.session_of(&ids)?;
@@ -3021,8 +3022,8 @@ mod tests {
     #[test]
     fn search_hits_carry_text_summary_from_payloads() {
         // R1（ADR-0004）/ADR-0008：text 摘要（原 snippet）在 Application 检索
-        // 装配时生成——批量取 payload、解析 `text` 字段、截取前缀；不做任何
-        // 脱敏。MapCatalog 无 placement 数据 → session_id 为 None。
+        // 装配时生成——批量取 payload、解析 `text` 字段、构建命中窗口（短正文
+        // 整体输出）；不做任何脱敏。MapCatalog 无 placement → session_id 为 None。
         let mut cat = MapCatalog::new(7);
         for (tag, text) in [("hit00", "hello world"), ("hit01", "second hit")] {
             let id = hit_id(tag);
@@ -3046,8 +3047,9 @@ mod tests {
     }
 
     #[test]
-    fn search_text_truncates_to_max_snippet_chars() {
-        // R1.2：单条 text 摘要按 `max_snippet_chars`（字符数）显式截取前缀。
+    fn search_text_falls_back_to_prefix_without_literal_evidence() {
+        // R1.2：无字面证据（本用例查询词不在正文）时，单条 text 摘要按
+        // `max_snippet_chars`（字符数）回退为前缀；命中窗口语义见 snippet 模块。
         let mut cat = MapCatalog::new(7);
         let id = hit_id("hit00");
         cat.insert(
@@ -3144,6 +3146,81 @@ mod tests {
             truncation.reason.as_deref(),
             Some(budget::TRUNCATION_MAX_RESPONSE_BYTES)
         );
+    }
+
+    #[test]
+    fn search_window_bytes_are_charged_not_full_payload() {
+        // 命中窗口（而非完整正文）经既有 `search_hit_charge` 计入
+        // `max_response_bytes`：4 条 10 万字符正文在 32 字符窗口下全部放得下
+        // 且顺序不变；窗口放到 2000 字符时净预算 3072 只容 1 条，截断原因
+        // 显式报 max_response_bytes（预算收紧时既有 truncation 语义可复现）。
+        let mut cat = MapCatalog::new(7);
+        for tag in ["hit00", "hit01", "hit02", "hit03"] {
+            let id = hit_id(tag);
+            let mut full = "x".repeat(100_000);
+            full.push_str(" needle");
+            cat.insert(
+                &id,
+                serde_json::json!({ "text": full }).to_string().into_bytes(),
+            );
+        }
+        let app = App::with_clock(&cat, PagedIndex { n: 4 }, clock_t0);
+        let request = |max_snippet_chars: usize| AppRequest::Search {
+            query: "needle".into(),
+            filters: SearchFilters::default(),
+            facets: SearchFacets::default(),
+            limit: 10,
+            cursor: None,
+            budget: ResponseBudget {
+                max_response_bytes: budget::MIN_RESPONSE_BYTES,
+                max_snippet_chars,
+                ..Default::default()
+            },
+            include_system: false,
+            group_by_session: false,
+            mode: RetrievalMode::Lexical,
+            query_embedding: None,
+        };
+        let AppResponse::Search {
+            hits,
+            next_cursor,
+            truncation,
+            ..
+        } = app.handle(request(32)).unwrap()
+        else {
+            panic!("expected Search response");
+        };
+        assert_eq!(
+            hits.iter().map(|hit| hit.id.clone()).collect::<Vec<_>>(),
+            vec![
+                hit_id("hit00"),
+                hit_id("hit01"),
+                hit_id("hit02"),
+                hit_id("hit03")
+            ],
+            "窗口构建不得影响排序"
+        );
+        assert!(!truncation.truncated && next_cursor.is_none(), "{hits:?}");
+        for hit in &hits {
+            let window = hit.text.as_deref().expect("window text");
+            assert_eq!(window.chars().count(), 32);
+            assert!(window.contains("needle"), "{window:?}");
+        }
+        let AppResponse::Search {
+            hits,
+            next_cursor,
+            truncation,
+            ..
+        } = app.handle(request(2000)).unwrap()
+        else {
+            panic!("expected Search response");
+        };
+        assert!(hits.len() < 4 && !hits.is_empty(), "kept {}", hits.len());
+        assert_eq!(
+            truncation.reason.as_deref(),
+            Some(budget::TRUNCATION_MAX_RESPONSE_BYTES)
+        );
+        assert!(next_cursor.is_some(), "被截断的页必须仍交出 cursor");
     }
 
     #[test]
@@ -4163,7 +4240,9 @@ mod tests {
     }
 
     #[test]
-    fn search_why_matched_detects_term_beyond_displayed_prefix() {
+    fn search_text_window_keeps_late_literal_match_visible() {
+        // 命中位于前缀之外：text 摘要不再是固定前缀，而是包含该命中的窗口；
+        // why_matched 仍按完整正文派生（证据来源与显示窗口无关的回归断言）。
         let mut cat = MapCatalog::new(7);
         let mut text = "x".repeat(1500);
         text.push_str(" needle");
@@ -4192,7 +4271,7 @@ mod tests {
         else {
             panic!("expected Search response");
         };
-        assert_eq!(hits[0].text.as_deref(), Some("xxxxxxxx"));
+        assert_eq!(hits[0].text.as_deref(), Some("x needle"));
         assert_eq!(hits[0].why_matched, vec!["needle"]);
     }
 

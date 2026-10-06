@@ -15,6 +15,7 @@ mod cas;
 mod lease;
 mod relocation;
 mod source_fs;
+mod trace;
 
 pub use cas::{cas_activate, read_current, write_current};
 pub use lease::WriterLease;
@@ -1713,6 +1714,18 @@ pub type SourceFingerprint = (Option<i64>, Option<String>, i64);
 /// `(len_bytes, fingerprint, provider_id, parser_version)`。
 type StoredSourceScan = (Option<i64>, Option<String>, Option<String>, i64);
 
+/// 全库关系/成员视图，提交开始时读取一次，供后续 no-op 探测复用。
+struct CatalogStateSnapshot<'a> {
+    entities_by_source: &'a BTreeMap<String, BTreeMap<String, Option<String>>>,
+    placements_by_source: &'a BTreeMap<String, BTreeSet<String>>,
+    activities_by_source: &'a BTreeMap<String, BTreeSet<String>>,
+    usages_by_source: &'a BTreeMap<String, BTreeSet<String>>,
+    placements: &'a BTreeMap<String, StoredPlacement>,
+    edges: &'a BTreeMap<String, StoredEdge>,
+    activities: &'a BTreeMap<String, StoredActivity>,
+    usages: &'a BTreeMap<String, StoredUsage>,
+}
+
 impl SqliteStore {
     /// 只读打开（不抢 writer lease）。供 search/get/doctor 等读路径。
     pub fn open(path: &str) -> PortResult<Self> {
@@ -1797,8 +1810,11 @@ impl SqliteStore {
 
     /// 打开并把 schema 迁移到当前版本，为版本化 migration 与可重建索引奠基。
     fn init(conn: &Connection) -> PortResult<()> {
-        conn.execute_batch("PRAGMA journal_mode=WAL;")
-            .map_err(backend)?;
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL;
+             PRAGMA cache_size = -131072;",
+        )
+        .map_err(backend)?;
         Self::migrate(conn)?;
         Self::register_scalar_functions(conn)
     }
@@ -3098,7 +3114,9 @@ impl SqliteStore {
         let pending = self.begin_index_batch(&[], &[])?;
         let mut conn = self.conn.borrow_mut();
         let tx = conn.transaction().map_err(backend)?;
-        Self::verify_pending_in_tx(&tx, &pending, &[], &[], &RelationManifests::default())?;
+        let relations = RelationManifests::default();
+        let manifest = batch_manifest(&[], &[], &relations)?;
+        Self::verify_pending_in_tx(&tx, &pending, &[], &[], &relations, &manifest)?;
         // 确定性删除：谓词自包含，只删事务时刻仍然悬空的行（与扫描同一谓词）。
         // 先删孤儿活动行，再清悬空 claim——claim 的悬空定义是"指向不存在的
         // 活动"，第二个语句同时覆盖预先悬空的 claim 与刚删活动的 claim；
@@ -3637,6 +3655,9 @@ impl SqliteStore {
             ));
         }
 
+        let mut trace_stages: Vec<(&'static str, std::time::Duration)> = Vec::new();
+        let trace_source_count = ordered_sources.len();
+        let trace_started = trace::begin();
         // A no-op still promises a valid batch. Validate incoming identities
         // and multiplicities before set/map comparison can erase duplicates.
         for source in &ordered_sources {
@@ -3686,19 +3707,98 @@ impl SqliteStore {
         // claims, scans), skip all of it and report no generation change.
         // The per-batch cost is then proportional to the batch, not the
         // catalog — this is what makes an unchanged re-sync fast.
-        if self.sources_are_current(&ordered_sources)? {
+        trace::add(&mut trace_stages, "validate_incoming", trace_started);
+        let trace_started = trace::begin();
+        let batch_current = self.sources_are_current(&ordered_sources)?;
+        trace::add(&mut trace_stages, "noop_probe", trace_started);
+        if batch_current {
+            trace::emit(
+                "adapter:catalog",
+                &trace_stages,
+                &format!("noop=true sources={trace_source_count}"),
+            );
             return Ok(false);
         }
 
+        let trace_started = trace::begin();
         let scanned_paths: BTreeSet<String> = paths.into_iter().map(str::to_string).collect();
-        let current_entities_by_source = self.source_entity_membership_state()?;
-        let current_placements_by_source = self.source_placement_membership_state()?;
-        let current_activities_by_source = self.source_activity_membership_state()?;
-        let current_usages_by_source = self.source_usage_membership_state()?;
-        let stored_placements = self.stored_placements()?;
-        let stored_edges = self.stored_edges()?;
-        let stored_activities = self.stored_activities()?;
-        let stored_usages = self.stored_usages()?;
+        // Batch-scoped state: only this batch's own sources plus the ids they
+        // observe/claim. Whole-catalog maps cost ~23 s and multi-GiB peak RSS on
+        // the 6th 200k-message batch against a 1M catalog (measured 2026-09-29).
+        let mut entity_candidates = BTreeSet::<String>::new();
+        let mut placement_candidates = BTreeSet::<String>::new();
+        let mut activity_candidates = BTreeSet::<String>::new();
+        let mut usage_candidates = BTreeSet::<String>::new();
+        for source in &ordered_sources {
+            for (id, _, _) in &source.entries {
+                entity_candidates.insert(id.as_str().to_string());
+            }
+            for placement in &source.placements {
+                placement_candidates.insert(placement.id.as_str().to_string());
+            }
+            for activity in &source.activities {
+                let stored = stored_activity_from(&activity.message_id, &activity.activity)?;
+                activity_candidates.insert(stored.activity_id);
+            }
+            for usage in &source.usage_events {
+                let stored =
+                    stored_usage_from(&usage.session_id, usage.message_id.as_ref(), &usage.usage)?;
+                usage_candidates.insert(stored.usage_id);
+            }
+        }
+        let mut current_entities_by_source =
+            self.source_entity_membership_state_for_sources(&scanned_paths)?;
+        for memberships in current_entities_by_source.values() {
+            for entity_id in memberships.keys() {
+                entity_candidates.insert(entity_id.clone());
+            }
+        }
+        self.extend_entity_claims_for_candidates(
+            &mut current_entities_by_source,
+            &entity_candidates,
+            &scanned_paths,
+        )?;
+        let mut current_placements_by_source =
+            self.source_placement_membership_state_for_sources(&scanned_paths)?;
+        for placement_ids in current_placements_by_source.values() {
+            for placement_id in placement_ids {
+                placement_candidates.insert(placement_id.clone());
+            }
+        }
+        self.extend_placement_claims_for_candidates(
+            &mut current_placements_by_source,
+            &placement_candidates,
+            &scanned_paths,
+        )?;
+        let mut current_activities_by_source =
+            self.source_activity_membership_state_for_sources(&scanned_paths)?;
+        for activity_ids in current_activities_by_source.values() {
+            for activity_id in activity_ids {
+                activity_candidates.insert(activity_id.clone());
+            }
+        }
+        self.extend_activity_claims_for_candidates(
+            &mut current_activities_by_source,
+            &activity_candidates,
+            &scanned_paths,
+        )?;
+        let mut current_usages_by_source =
+            self.source_usage_membership_state_for_sources(&scanned_paths)?;
+        for usage_ids in current_usages_by_source.values() {
+            for usage_id in usage_ids {
+                usage_candidates.insert(usage_id.clone());
+            }
+        }
+        self.extend_usage_claims_for_candidates(
+            &mut current_usages_by_source,
+            &usage_candidates,
+            &scanned_paths,
+        )?;
+        let stored_placements = self.stored_placements_for(&placement_candidates)?;
+        let stored_edges = self.stored_edges_for(&placement_candidates)?;
+        let stored_activities = self.stored_activities_for(&activity_candidates)?;
+        let stored_usages = self.stored_usages_for(&usage_candidates)?;
+        trace::add(&mut trace_stages, "load_catalog_state", trace_started);
 
         let mut merged = BTreeMap::<String, (StableId, Vec<u8>, String)>::new();
         let mut observed_placements = BTreeMap::<String, MessagePlacement>::new();
@@ -3706,6 +3806,8 @@ impl SqliteStore {
         let mut observed_activities = BTreeMap::<String, StoredActivity>::new();
         let mut observed_usages = BTreeMap::<String, StoredUsage>::new();
         let mut prepared_sources = BTreeMap::<String, PreparedSource>::new();
+
+        let trace_started = trace::begin();
 
         for source in ordered_sources {
             let present: BTreeSet<&str> = source
@@ -3982,6 +4084,8 @@ impl SqliteStore {
 
         // 合并前先批量读取 catalog 中已有的 payload(分块 IN,同 get_many 模式),
         // 取代逐实体 get 的 N+1;与 get 语义一致:目录中不存在的 id 视为 None。
+        trace::add(&mut trace_stages, "merge_sources", trace_started);
+        let trace_started = trace::begin();
         let merged_ids: Vec<StableId> = merged.values().map(|(id, _, _)| id.clone()).collect();
         let stored_payloads = self.get_many(&merged_ids)?;
         let stored_by_id: BTreeMap<String, Vec<u8>> = stored_payloads
@@ -4012,6 +4116,8 @@ impl SqliteStore {
             };
         }
 
+        trace::add(&mut trace_stages, "merge_stored", trace_started);
+        let trace_started = trace::begin();
         let mut final_entity_claimers = BTreeMap::<String, BTreeSet<String>>::new();
         for (source_path, memberships) in &current_entities_by_source {
             if scanned_paths.contains(source_path) {
@@ -4251,6 +4357,8 @@ impl SqliteStore {
             }
         }
 
+        trace::add(&mut trace_stages, "tombstones", trace_started);
+
         let upserts: Vec<(StableId, Vec<u8>, String)> = merged.into_values().collect();
         let deletes: Vec<StableId> = deletes.into_values().collect();
         let relations = RelationManifests {
@@ -4307,19 +4415,137 @@ impl SqliteStore {
             relocation: None,
         };
 
-        batch_manifest(&upserts, &deletes, &relations)?;
+        let trace_started = trace::begin();
+        let manifest = batch_manifest(&upserts, &deletes, &relations)?;
         self.ensure_stored_identity_metadata_matches(&upserts)?;
-        if self.source_batches_are_current(&upserts, &relations)? {
+        let batch_current = self.source_batches_are_current(
+            &upserts,
+            &relations,
+            &CatalogStateSnapshot {
+                entities_by_source: &current_entities_by_source,
+                placements_by_source: &current_placements_by_source,
+                activities_by_source: &current_activities_by_source,
+                usages_by_source: &current_usages_by_source,
+                placements: &stored_placements,
+                edges: &stored_edges,
+                activities: &stored_activities,
+                usages: &stored_usages,
+            },
+        )?;
+        trace::add(&mut trace_stages, "manifest", trace_started);
+        if batch_current {
+            trace::emit(
+                "adapter:catalog",
+                &trace_stages,
+                &format!("noop=late sources={trace_source_count}"),
+            );
             return Ok(false);
         }
 
-        let pending = self.begin_index_batch_with_relations(&upserts, &deletes, &relations)?;
-        self.commit_index_batch_with_relations(&pending, &upserts, &deletes, &relations)?;
+        let trace_started = trace::begin();
+        let pending =
+            self.begin_index_batch_with_manifest(&manifest, &upserts, &deletes, &relations)?;
+        trace::add(&mut trace_stages, "outbox_intent", trace_started);
+        let trace_started = trace::begin();
+        self.commit_index_batch_with_relations(
+            &pending, &upserts, &deletes, &relations, &manifest,
+        )?;
+        trace::add(&mut trace_stages, "apply_commit", trace_started);
+        let trace_started = trace::begin();
         self.clear_installation_reservations(
             relations
                 .source_replacements
                 .iter()
                 .map(|source| source.source_path.as_str()),
+        );
+        trace::add(&mut trace_stages, "finalize", trace_started);
+        if trace::enabled() {
+            // Approximate retained bytes of the full-catalog maps that this
+            // batch loaded; the harness measures the process peak externally.
+            let payload_bytes: usize = upserts
+                .iter()
+                .map(|(_, payload, text)| payload.len() + text.len())
+                .sum();
+            let stored_payload_bytes: usize = stored_by_id
+                .iter()
+                .map(|(id, payload)| id.len() + payload.len() + 48)
+                .sum();
+            let placement_bytes: usize = stored_placements
+                .iter()
+                .map(|(id, row)| {
+                    id.len()
+                        + row.session_id.len()
+                        + row.document_id.len()
+                        + row.message_id.len()
+                        + 72
+                })
+                .sum();
+            let edge_bytes: usize = stored_edges
+                .iter()
+                .map(|(id, row)| {
+                    id.len()
+                        + row.parent_message_id.len()
+                        + row.parent_native_id.as_deref().map_or(0, str::len)
+                        + row.relation.len()
+                        + 64
+                })
+                .sum();
+            let activity_bytes: usize = stored_activities.keys().map(|id| id.len() + 160).sum();
+            let usage_bytes: usize = stored_usages.keys().map(|id| id.len() + 96).sum();
+            let entity_membership_bytes: usize = current_entities_by_source
+                .iter()
+                .map(|(source, rows)| {
+                    source.len()
+                        + rows
+                            .iter()
+                            .map(|(id, document)| {
+                                id.len() + document.as_deref().map_or(0, str::len) + 48
+                            })
+                            .sum::<usize>()
+                })
+                .sum();
+            let placement_membership_bytes: usize = current_placements_by_source
+                .iter()
+                .map(|(source, rows)| {
+                    source.len() + rows.iter().map(|id| id.len() + 32).sum::<usize>()
+                })
+                .sum();
+            trace::emit(
+                "adapter:bytes",
+                &[],
+                &format!(
+                    "upserts={} upsert_bytes~{} stored_payloads={} stored_payload_bytes~{} \
+                     stored_placements={} placement_bytes~{} stored_edges={} edge_bytes~{} \
+                     stored_activities={} activity_bytes~{} stored_usages={} usage_bytes~{} \
+                     entity_membership_bytes~{} placement_membership_bytes~{}",
+                    upserts.len(),
+                    payload_bytes,
+                    stored_by_id.len(),
+                    stored_payload_bytes,
+                    stored_placements.len(),
+                    placement_bytes,
+                    stored_edges.len(),
+                    edge_bytes,
+                    stored_activities.len(),
+                    activity_bytes,
+                    stored_usages.len(),
+                    usage_bytes,
+                    entity_membership_bytes,
+                    placement_membership_bytes
+                ),
+            );
+        }
+        trace::emit(
+            "adapter:catalog",
+            &trace_stages,
+            &format!(
+                "noop=false sources={trace_source_count} upserts={} deletes={} relation_upserts={} relation_deletes={} source_replacements={}",
+                upserts.len(),
+                deletes.len(),
+                relations.relation_upserts.len(),
+                relations.relation_deletes.len(),
+                relations.source_replacements.len()
+            ),
         );
         Ok(true)
     }
@@ -4761,6 +4987,7 @@ impl SqliteStore {
         Ok(true)
     }
 
+    #[cfg(test)]
     fn source_entity_membership_state(
         &self,
     ) -> PortResult<BTreeMap<String, BTreeMap<String, Option<String>>>> {
@@ -4801,30 +5028,382 @@ impl SqliteStore {
             .collect())
     }
 
-    fn source_placement_membership_state(&self) -> PortResult<BTreeMap<String, BTreeSet<String>>> {
+    /// 本批来源自身的实体成员行（按 `source_path` 索引，只读本批 source）。
+    fn source_entity_membership_state_for_sources(
+        &self,
+        sources: &BTreeSet<String>,
+    ) -> PortResult<BTreeMap<String, BTreeMap<String, Option<String>>>> {
         let conn = self.conn.borrow();
-        let mut stmt = conn
-            .prepare(
-                "SELECT source_path, placement_id
-                 FROM source_placement_membership ORDER BY source_path, placement_id",
-            )
-            .map_err(backend)?;
-        let rows = stmt
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })
-            .map_err(backend)?;
-        let mut state = BTreeMap::<String, BTreeSet<String>>::new();
-        for row in rows {
-            let (source_path, placement_id) = row.map_err(backend)?;
-            state.entry(source_path).or_default().insert(placement_id);
+        let mut state = BTreeMap::<String, BTreeMap<String, Option<String>>>::new();
+        for chunk in chunk_ids(&sources.iter().cloned().collect::<Vec<_>>()) {
+            let placeholders = in_placeholders(chunk.len());
+            let mut stmt = conn
+                .prepare(&format!(
+                    "SELECT source_path, message_id, document_id FROM source_membership
+                     WHERE source_path IN ({placeholders}) ORDER BY source_path, message_id"
+                ))
+                .map_err(backend)?;
+            let rows = stmt
+                .query_map(rusqlite::params_from_iter(chunk.iter()), |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                })
+                .map_err(backend)?;
+            for row in rows {
+                let (source_path, entity_id, document_id) = row.map_err(backend)?;
+                state
+                    .entry(source_path)
+                    .or_default()
+                    .insert(entity_id, document_id);
+            }
         }
         Ok(state)
     }
 
+    /// 追加候选实体的跨来源 claim 行。`source_membership` 没有 message_id 索引，
+    /// 只能整表扫描；扫描成本 O(catalog)，但只保留候选行（内存 O(batch)）。
+    fn extend_entity_claims_for_candidates(
+        &self,
+        state: &mut BTreeMap<String, BTreeMap<String, Option<String>>>,
+        candidates: &BTreeSet<String>,
+        scanned: &BTreeSet<String>,
+    ) -> PortResult<()> {
+        let conn = self.conn.borrow();
+        let mut stmt = conn
+            .prepare("SELECT source_path, message_id, document_id FROM source_membership")
+            .map_err(backend)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            })
+            .map_err(backend)?;
+        for row in rows {
+            let (source_path, entity_id, document_id) = row.map_err(backend)?;
+            if scanned.contains(&source_path) || !candidates.contains(&entity_id) {
+                continue;
+            }
+            state
+                .entry(source_path)
+                .or_default()
+                .insert(entity_id, document_id);
+        }
+        Ok(())
+    }
+
+    /// 本批来源自身的 placement 成员行。
+    fn source_placement_membership_state_for_sources(
+        &self,
+        sources: &BTreeSet<String>,
+    ) -> PortResult<BTreeMap<String, BTreeSet<String>>> {
+        let conn = self.conn.borrow();
+        let mut state = BTreeMap::<String, BTreeSet<String>>::new();
+        for chunk in chunk_ids(&sources.iter().cloned().collect::<Vec<_>>()) {
+            let placeholders = in_placeholders(chunk.len());
+            let mut stmt = conn
+                .prepare(&format!(
+                    "SELECT source_path, placement_id FROM source_placement_membership
+                     WHERE source_path IN ({placeholders}) ORDER BY source_path, placement_id"
+                ))
+                .map_err(backend)?;
+            let rows = stmt
+                .query_map(rusqlite::params_from_iter(chunk.iter()), |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(backend)?;
+            for row in rows {
+                let (source_path, placement_id) = row.map_err(backend)?;
+                state.entry(source_path).or_default().insert(placement_id);
+            }
+        }
+        Ok(state)
+    }
+
+    /// 追加候选 placement 的跨来源 claim 行（按 placement_id 索引分块查询）。
+    fn extend_placement_claims_for_candidates(
+        &self,
+        state: &mut BTreeMap<String, BTreeSet<String>>,
+        candidates: &BTreeSet<String>,
+        scanned: &BTreeSet<String>,
+    ) -> PortResult<()> {
+        let conn = self.conn.borrow();
+        let ids: Vec<String> = candidates.iter().cloned().collect();
+        for chunk in chunk_ids(&ids) {
+            let placeholders = in_placeholders(chunk.len());
+            let mut stmt = conn
+                .prepare(&format!(
+                    "SELECT source_path, placement_id FROM source_placement_membership
+                     WHERE placement_id IN ({placeholders})"
+                ))
+                .map_err(backend)?;
+            let rows = stmt
+                .query_map(rusqlite::params_from_iter(chunk.iter()), |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(backend)?;
+            for row in rows {
+                let (source_path, placement_id) = row.map_err(backend)?;
+                if scanned.contains(&source_path) {
+                    continue;
+                }
+                state.entry(source_path).or_default().insert(placement_id);
+            }
+        }
+        Ok(())
+    }
+
+    /// 本批来源自身的工具活动成员行。
+    fn source_activity_membership_state_for_sources(
+        &self,
+        sources: &BTreeSet<String>,
+    ) -> PortResult<BTreeMap<String, BTreeSet<String>>> {
+        let conn = self.conn.borrow();
+        let mut state = BTreeMap::<String, BTreeSet<String>>::new();
+        for chunk in chunk_ids(&sources.iter().cloned().collect::<Vec<_>>()) {
+            let placeholders = in_placeholders(chunk.len());
+            let mut stmt = conn
+                .prepare(&format!(
+                    "SELECT source_path, activity_id FROM tool_activity_membership
+                     WHERE source_path IN ({placeholders})"
+                ))
+                .map_err(backend)?;
+            let rows = stmt
+                .query_map(rusqlite::params_from_iter(chunk.iter()), |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(backend)?;
+            for row in rows {
+                let (source_path, activity_id) = row.map_err(backend)?;
+                state.entry(source_path).or_default().insert(activity_id);
+            }
+        }
+        Ok(state)
+    }
+
+    /// 追加候选活动的跨来源 claim 行（按 activity_id 索引分块查询）。
+    fn extend_activity_claims_for_candidates(
+        &self,
+        state: &mut BTreeMap<String, BTreeSet<String>>,
+        candidates: &BTreeSet<String>,
+        scanned: &BTreeSet<String>,
+    ) -> PortResult<()> {
+        let conn = self.conn.borrow();
+        let ids: Vec<String> = candidates.iter().cloned().collect();
+        for chunk in chunk_ids(&ids) {
+            let placeholders = in_placeholders(chunk.len());
+            let mut stmt = conn
+                .prepare(&format!(
+                    "SELECT source_path, activity_id FROM tool_activity_membership
+                     WHERE activity_id IN ({placeholders})"
+                ))
+                .map_err(backend)?;
+            let rows = stmt
+                .query_map(rusqlite::params_from_iter(chunk.iter()), |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(backend)?;
+            for row in rows {
+                let (source_path, activity_id) = row.map_err(backend)?;
+                if scanned.contains(&source_path) {
+                    continue;
+                }
+                state.entry(source_path).or_default().insert(activity_id);
+            }
+        }
+        Ok(())
+    }
+
+    /// 本批来源自身的用量事件成员行。
+    fn source_usage_membership_state_for_sources(
+        &self,
+        sources: &BTreeSet<String>,
+    ) -> PortResult<BTreeMap<String, BTreeSet<String>>> {
+        let conn = self.conn.borrow();
+        let mut state = BTreeMap::<String, BTreeSet<String>>::new();
+        for chunk in chunk_ids(&sources.iter().cloned().collect::<Vec<_>>()) {
+            let placeholders = in_placeholders(chunk.len());
+            let mut stmt = conn
+                .prepare(&format!(
+                    "SELECT source_path, usage_id FROM usage_event_membership
+                     WHERE source_path IN ({placeholders})"
+                ))
+                .map_err(backend)?;
+            let rows = stmt
+                .query_map(rusqlite::params_from_iter(chunk.iter()), |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(backend)?;
+            for row in rows {
+                let (source_path, usage_id) = row.map_err(backend)?;
+                state.entry(source_path).or_default().insert(usage_id);
+            }
+        }
+        Ok(state)
+    }
+
+    /// 追加候选用量事件的跨来源 claim 行（按 usage_id 索引分块查询）。
+    fn extend_usage_claims_for_candidates(
+        &self,
+        state: &mut BTreeMap<String, BTreeSet<String>>,
+        candidates: &BTreeSet<String>,
+        scanned: &BTreeSet<String>,
+    ) -> PortResult<()> {
+        let conn = self.conn.borrow();
+        let ids: Vec<String> = candidates.iter().cloned().collect();
+        for chunk in chunk_ids(&ids) {
+            let placeholders = in_placeholders(chunk.len());
+            let mut stmt = conn
+                .prepare(&format!(
+                    "SELECT source_path, usage_id FROM usage_event_membership
+                     WHERE usage_id IN ({placeholders})"
+                ))
+                .map_err(backend)?;
+            let rows = stmt
+                .query_map(rusqlite::params_from_iter(chunk.iter()), |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(backend)?;
+            for row in rows {
+                let (source_path, usage_id) = row.map_err(backend)?;
+                if scanned.contains(&source_path) {
+                    continue;
+                }
+                state.entry(source_path).or_default().insert(usage_id);
+            }
+        }
+        Ok(())
+    }
+
+    /// 只读取候选 id 的关系行（主键分块查询，替代整表加载）。
+    fn stored_placements_for(
+        &self,
+        candidates: &BTreeSet<String>,
+    ) -> PortResult<BTreeMap<String, StoredPlacement>> {
+        let conn = self.conn.borrow();
+        let ids: Vec<String> = candidates.iter().cloned().collect();
+        let mut placements = BTreeMap::new();
+        for chunk in chunk_ids(&ids) {
+            let placeholders = in_placeholders(chunk.len());
+            let mut stmt = conn
+                .prepare(&format!(
+                    "SELECT placement_id, session_id, document_id, message_id,
+                            source_ordinal, is_sidechain, byte_start, byte_end
+                     FROM message_placements WHERE placement_id IN ({placeholders})"
+                ))
+                .map_err(backend)?;
+            let rows = stmt
+                .query_map(rusqlite::params_from_iter(chunk.iter()), |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, i64>(5)?,
+                        row.get::<_, Option<i64>>(6)?,
+                        row.get::<_, Option<i64>>(7)?,
+                    ))
+                })
+                .map_err(backend)?;
+            for row in rows {
+                let (
+                    placement_id,
+                    session_id,
+                    document_id,
+                    message_id,
+                    ordinal,
+                    sidechain,
+                    start,
+                    end,
+                ) = row.map_err(backend)?;
+                let span = match (start, end) {
+                    (None, None) => None,
+                    (Some(start), Some(end)) => Some((
+                        u64::try_from(start).map_err(backend)?,
+                        u64::try_from(end).map_err(backend)?,
+                    )),
+                    _ => {
+                        return Err(PortError::Backend(
+                            "stored placement has a partial span".into(),
+                        ));
+                    }
+                };
+                placements.insert(
+                    placement_id,
+                    StoredPlacement {
+                        session_id,
+                        document_id,
+                        message_id,
+                        source_ordinal: u32::try_from(ordinal).map_err(backend)?,
+                        is_sidechain: sidechain != 0,
+                        span,
+                    },
+                );
+            }
+        }
+        Ok(placements)
+    }
+
+    /// 只读取候选 placement 的边行。
+    fn stored_edges_for(
+        &self,
+        candidates: &BTreeSet<String>,
+    ) -> PortResult<BTreeMap<String, StoredEdge>> {
+        let conn = self.conn.borrow();
+        let ids: Vec<String> = candidates.iter().cloned().collect();
+        let mut edges = BTreeMap::new();
+        for chunk in chunk_ids(&ids) {
+            let placeholders = in_placeholders(chunk.len());
+            let mut stmt = conn
+                .prepare(&format!(
+                    "SELECT child_placement_id, parent_message_id, parent_native_id, relation
+                     FROM message_edges WHERE child_placement_id IN ({placeholders})"
+                ))
+                .map_err(backend)?;
+            let rows = stmt
+                .query_map(rusqlite::params_from_iter(chunk.iter()), |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                })
+                .map_err(backend)?;
+            for row in rows {
+                let (child, parent_message_id, parent_native_id, relation) =
+                    row.map_err(backend)?;
+                edges.insert(
+                    child,
+                    StoredEdge {
+                        parent_message_id,
+                        parent_native_id,
+                        relation,
+                    },
+                );
+            }
+        }
+        Ok(edges)
+    }
+
+    /// 测试专用：整表读取（生产提交路径只读候选 id，见 §Batch-scoped commit state）。
+    #[cfg(test)]
     fn stored_placements(&self) -> PortResult<BTreeMap<String, StoredPlacement>> {
         let conn = self.conn.borrow();
         Self::stored_placements_from(&conn)
+    }
+
+    /// 测试专用：整表读取（生产提交路径只读候选 id）。
+    #[cfg(test)]
+    fn stored_edges(&self) -> PortResult<BTreeMap<String, StoredEdge>> {
+        let conn = self.conn.borrow();
+        Self::stored_edges_from(&conn)
     }
 
     fn stored_placements_from(conn: &Connection) -> PortResult<BTreeMap<String, StoredPlacement>> {
@@ -4880,9 +5459,83 @@ impl SqliteStore {
         Ok(placements)
     }
 
-    fn stored_edges(&self) -> PortResult<BTreeMap<String, StoredEdge>> {
+    fn stored_activities_for(
+        &self,
+        candidates: &BTreeSet<String>,
+    ) -> PortResult<BTreeMap<String, StoredActivity>> {
         let conn = self.conn.borrow();
-        Self::stored_edges_from(&conn)
+        let ids: Vec<String> = candidates.iter().cloned().collect();
+        let mut activities = BTreeMap::new();
+        for chunk in chunk_ids(&ids) {
+            let placeholders = in_placeholders(chunk.len());
+            let mut stmt = conn
+                .prepare(&format!(
+                    "SELECT activity_id, message_id, kind, actor, name, target, status
+                     FROM tool_activities WHERE activity_id IN ({placeholders})"
+                ))
+                .map_err(backend)?;
+            let rows = stmt
+                .query_map(rusqlite::params_from_iter(chunk.iter()), |row| {
+                    Ok(StoredActivity {
+                        activity_id: row.get(0)?,
+                        message_id: row.get(1)?,
+                        kind: row.get(2)?,
+                        actor: row.get(3)?,
+                        name: row.get(4)?,
+                        target: row.get(5)?,
+                        status: row.get(6)?,
+                    })
+                })
+                .map_err(backend)?;
+            for row in rows {
+                let activity = row.map_err(backend)?;
+                activities.insert(activity.activity_id.clone(), activity);
+            }
+        }
+        Ok(activities)
+    }
+
+    fn stored_usages_for(
+        &self,
+        candidates: &BTreeSet<String>,
+    ) -> PortResult<BTreeMap<String, StoredUsage>> {
+        let conn = self.conn.borrow();
+        let ids: Vec<String> = candidates.iter().cloned().collect();
+        let mut usages = BTreeMap::new();
+        for chunk in chunk_ids(&ids) {
+            let placeholders = in_placeholders(chunk.len());
+            let mut stmt = conn
+                .prepare(&format!(
+                    "SELECT usage_id, session_id, message_id, input_tokens, output_tokens,
+                            cache_read_tokens, cache_write_tokens, reasoning_tokens, token_source
+                     FROM usage_events WHERE usage_id IN ({placeholders})"
+                ))
+                .map_err(backend)?;
+            let rows = stmt
+                .query_map(rusqlite::params_from_iter(chunk.iter()), |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        StoredUsage {
+                            usage_id: String::new(),
+                            session_id: row.get(1)?,
+                            message_id: row.get(2)?,
+                            input_tokens: row_u64(row, 3)?,
+                            output_tokens: row_u64(row, 4)?,
+                            cache_read_tokens: row_u64(row, 5)?,
+                            cache_write_tokens: row_u64(row, 6)?,
+                            reasoning_tokens: row_u64(row, 7)?,
+                            token_source: row.get(8)?,
+                        },
+                    ))
+                })
+                .map_err(backend)?;
+            for row in rows {
+                let (usage_id, mut usage) = row.map_err(backend)?;
+                usage.usage_id = usage_id.clone();
+                usages.insert(usage_id, usage);
+            }
+        }
+        Ok(usages)
     }
 
     fn stored_edges_from(conn: &Connection) -> PortResult<BTreeMap<String, StoredEdge>> {
@@ -4912,129 +5565,61 @@ impl SqliteStore {
         Ok(edges)
     }
 
-    fn stored_activities(&self) -> PortResult<BTreeMap<String, StoredActivity>> {
-        let conn = self.conn.borrow();
-        Self::stored_activities_from(&conn)
-    }
-
-    fn stored_activities_from(conn: &Connection) -> PortResult<BTreeMap<String, StoredActivity>> {
-        let mut stmt = conn
-            .prepare(
-                "SELECT activity_id, message_id, kind, actor, name, target, status
-                 FROM tool_activities ORDER BY activity_id",
-            )
-            .map_err(backend)?;
-        let rows = stmt
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    StoredActivity {
-                        activity_id: String::new(), // 键即 id，行内不重复承载
-                        message_id: row.get(1)?,
-                        kind: row.get(2)?,
-                        actor: row.get(3)?,
-                        name: row.get(4)?,
-                        target: row.get(5)?,
-                        status: row.get(6)?,
-                    },
-                ))
-            })
-            .map_err(backend)?;
-        let mut activities = BTreeMap::new();
-        for row in rows {
-            let (activity_id, mut activity) = row.map_err(backend)?;
-            activity.activity_id = activity_id.clone();
-            activities.insert(activity_id, activity);
-        }
-        Ok(activities)
-    }
-
-    fn stored_usages(&self) -> PortResult<BTreeMap<String, StoredUsage>> {
-        let conn = self.conn.borrow();
-        Self::stored_usages_from(&conn)
-    }
-
-    fn stored_usages_from(conn: &Connection) -> PortResult<BTreeMap<String, StoredUsage>> {
-        let mut stmt = conn
-            .prepare(
-                "SELECT usage_id, session_id, message_id, input_tokens, output_tokens,
-                        cache_read_tokens, cache_write_tokens, reasoning_tokens, token_source
-                 FROM usage_events ORDER BY usage_id",
-            )
-            .map_err(backend)?;
-        let rows = stmt
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    StoredUsage {
-                        usage_id: String::new(), // 键即 id，行内不重复承载
-                        session_id: row.get(1)?,
-                        message_id: row.get(2)?,
-                        input_tokens: row_u64(row, 3)?,
-                        output_tokens: row_u64(row, 4)?,
-                        cache_read_tokens: row_u64(row, 5)?,
-                        cache_write_tokens: row_u64(row, 6)?,
-                        reasoning_tokens: row_u64(row, 7)?,
-                        token_source: row.get(8)?,
-                    },
-                ))
-            })
-            .map_err(backend)?;
-        let mut usages = BTreeMap::new();
-        for row in rows {
-            let (usage_id, mut usage) = row.map_err(backend)?;
-            usage.usage_id = usage_id.clone();
-            usages.insert(usage_id, usage);
-        }
-        Ok(usages)
-    }
-
-    fn source_usage_membership_state(&self) -> PortResult<BTreeMap<String, BTreeSet<String>>> {
-        let conn = self.conn.borrow();
-        let mut stmt = conn
-            .prepare(
-                "SELECT source_path, usage_id
-                 FROM usage_event_membership ORDER BY source_path, usage_id",
-            )
-            .map_err(backend)?;
-        let rows = stmt
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })
-            .map_err(backend)?;
-        let mut state = BTreeMap::<String, BTreeSet<String>>::new();
-        for row in rows {
-            let (source_path, usage_id) = row.map_err(backend)?;
-            state.entry(source_path).or_default().insert(usage_id);
-        }
-        Ok(state)
-    }
-
-    fn source_activity_membership_state(&self) -> PortResult<BTreeMap<String, BTreeSet<String>>> {
-        let conn = self.conn.borrow();
-        let mut stmt = conn
-            .prepare(
-                "SELECT source_path, activity_id
-                 FROM tool_activity_membership ORDER BY source_path, activity_id",
-            )
-            .map_err(backend)?;
-        let rows = stmt
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })
-            .map_err(backend)?;
-        let mut state = BTreeMap::<String, BTreeSet<String>>::new();
-        for row in rows {
-            let (source_path, activity_id) = row.map_err(backend)?;
-            state.entry(source_path).or_default().insert(activity_id);
-        }
-        Ok(state)
-    }
-
     fn regenerate_compatibility_aliases_in_tx(
         tx: &rusqlite::Transaction<'_>,
         batch_sources: &[String],
+        in_memory_payloads: &BTreeMap<&str, &[u8]>,
     ) -> PortResult<()> {
+        // Only entities claimed by this batch's sources can have their
+        // aliases changed; collecting that candidate set up front keeps the
+        // claimer maps proportional to the batch instead of the catalog.
+        let mut candidate_entities = BTreeSet::<String>::new();
+        for chunk in chunk_ids(batch_sources) {
+            let placeholders = in_placeholders(chunk.len());
+            let mut stmt = tx
+                .prepare(&format!(
+                    "SELECT message_id FROM source_membership
+                     WHERE source_path IN ({placeholders})"
+                ))
+                .map_err(backend)?;
+            let rows = stmt
+                .query_map(rusqlite::params_from_iter(chunk.iter()), |row| {
+                    row.get::<_, String>(0)
+                })
+                .map_err(backend)?;
+            for row in rows {
+                candidate_entities.insert(row.map_err(backend)?);
+            }
+            let mut stmt = tx
+                .prepare(&format!(
+                    "SELECT placements.session_id, placements.document_id,
+                            placements.message_id
+                     FROM source_placement_membership AS claims
+                     JOIN message_placements AS placements
+                       ON placements.placement_id = claims.placement_id
+                     WHERE claims.source_path IN ({placeholders})"
+                ))
+                .map_err(backend)?;
+            let rows = stmt
+                .query_map(rusqlite::params_from_iter(chunk.iter()), |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })
+                .map_err(backend)?;
+            for row in rows {
+                let (session_id, document_id, message_id) = row.map_err(backend)?;
+                candidate_entities.insert(session_id);
+                candidate_entities.insert(document_id);
+                candidate_entities.insert(message_id);
+            }
+        }
+        if candidate_entities.is_empty() {
+            return Ok(());
+        }
+
         let complete_sources = {
             let mut stmt = tx
                 .prepare("SELECT source_path FROM source_relation_scans")
@@ -5069,6 +5654,9 @@ impl SqliteStore {
                 .map_err(backend)?;
             for row in rows {
                 let (source_path, entity_id, document_id) = row.map_err(backend)?;
+                if !candidate_entities.contains(&entity_id) {
+                    continue;
+                }
                 claimers_by_entity
                     .entry(entity_id.clone())
                     .or_default()
@@ -5106,6 +5694,9 @@ impl SqliteStore {
             for row in rows {
                 let (source_path, session_id, document_id, message_id) = row.map_err(backend)?;
                 for entity_id in [session_id, document_id, message_id] {
+                    if !candidate_entities.contains(&entity_id) {
+                        continue;
+                    }
                     claimers_by_entity
                         .entry(entity_id)
                         .or_default()
@@ -5177,18 +5768,27 @@ impl SqliteStore {
             if !matches!(id.kind(), IdKind::Message | IdKind::Session) {
                 continue;
             }
-            let payload: Option<Vec<u8>> = tx
-                .query_row(
-                    "SELECT payload FROM catalog WHERE id = ?1",
-                    [&entity_id],
-                    |row| row.get(0),
-                )
-                .optional()
-                .map_err(backend)?;
+            let owned_payload: Option<Vec<u8>> =
+                if in_memory_payloads.contains_key(entity_id.as_str()) {
+                    None
+                } else {
+                    tx.query_row(
+                        "SELECT payload FROM catalog WHERE id = ?1",
+                        [&entity_id],
+                        |row| row.get::<_, Option<Vec<u8>>>(0),
+                    )
+                    .optional()
+                    .map_err(backend)?
+                    .flatten()
+                };
+            let payload: Option<&[u8]> = match in_memory_payloads.get(entity_id.as_str()) {
+                Some(payload) => Some(*payload),
+                None => owned_payload.as_deref(),
+            };
             let Some(payload) = payload else {
                 continue;
             };
-            let mut map = match serde_json::from_slice::<serde_json::Value>(&payload) {
+            let mut map = match serde_json::from_slice::<serde_json::Value>(payload) {
                 Ok(serde_json::Value::Object(map)) => map,
                 _ => continue,
             };
@@ -5333,15 +5933,23 @@ impl SqliteStore {
             // Skip the write when the rebuilt aliases equal the stored bytes:
             // regeneration must not rewrite the catalog (and inflate the WAL)
             // on every commit once aliases are stable.
-            let stored: Option<Vec<u8>> = tx
-                .query_row(
-                    "SELECT payload FROM catalog WHERE id = ?1",
-                    [&entity_id],
-                    |row| row.get(0),
-                )
-                .optional()
-                .map_err(backend)?;
-            if stored.as_deref() != Some(payload.as_slice()) {
+            let stored_owned: Option<Vec<u8>>;
+            let stored: Option<&[u8]> = match in_memory_payloads.get(entity_id.as_str()) {
+                Some(stored) => Some(*stored),
+                None => {
+                    stored_owned = tx
+                        .query_row(
+                            "SELECT payload FROM catalog WHERE id = ?1",
+                            [&entity_id],
+                            |row| row.get::<_, Option<Vec<u8>>>(0),
+                        )
+                        .optional()
+                        .map_err(backend)?
+                        .flatten();
+                    stored_owned.as_deref()
+                }
+            };
+            if stored != Some(payload.as_slice()) {
                 tx.execute(
                     "UPDATE catalog SET payload = ?2 WHERE id = ?1",
                     rusqlite::params![entity_id, payload],
@@ -5356,14 +5964,15 @@ impl SqliteStore {
         &self,
         upserts: &[(StableId, Vec<u8>, String)],
         relations: &RelationManifests,
+        state: &CatalogStateSnapshot<'_>,
     ) -> PortResult<bool> {
         if !self.batch_is_current_with_derived_context(upserts, true)? {
             return Ok(false);
         }
-        let stored_placements = self.stored_placements()?;
-        let stored_edges = self.stored_edges()?;
-        let stored_activities = self.stored_activities()?;
-        let stored_usages = self.stored_usages()?;
+        let stored_placements = state.placements;
+        let stored_edges = state.edges;
+        let stored_activities = state.activities;
+        let stored_usages = state.usages;
         for upsert in &relations.relation_upserts {
             let current = match upsert {
                 RelationUpsertManifest::Placement(placement) => stored_placements
@@ -5399,10 +6008,10 @@ impl SqliteStore {
             }
         }
 
-        let entity_state = self.source_entity_membership_state()?;
-        let placement_state = self.source_placement_membership_state()?;
-        let activity_state = self.source_activity_membership_state()?;
-        let usage_state = self.source_usage_membership_state()?;
+        let entity_state = state.entities_by_source;
+        let placement_state = state.placements_by_source;
+        let activity_state = state.activities_by_source;
+        let usage_state = state.usages_by_source;
         let conn = self.conn.borrow();
         for replacement in &relations.source_replacements {
             if replacement.entity_memberships.is_empty()
@@ -5642,6 +6251,17 @@ impl SqliteStore {
         deletes: &[StableId],
         relations: &RelationManifests,
     ) -> PortResult<PendingIndexBatch> {
+        let manifest = batch_manifest(upserts, deletes, relations)?;
+        self.begin_index_batch_with_manifest(&manifest, upserts, deletes, relations)
+    }
+
+    fn begin_index_batch_with_manifest(
+        &self,
+        manifest: &CanonicalBatchManifest,
+        _upserts: &[(StableId, Vec<u8>, String)],
+        _deletes: &[StableId],
+        _relations: &RelationManifests,
+    ) -> PortResult<PendingIndexBatch> {
         let base = self.active_generation()?;
         let target = base
             .checked_add(1)
@@ -5649,7 +6269,6 @@ impl SqliteStore {
         let target_sql = i64::try_from(target).map_err(backend)?;
         let base_sql = i64::try_from(base).map_err(backend)?;
         let op = operation_id()?;
-        let manifest = batch_manifest(upserts, deletes, relations)?;
         let upsert_json = serde_json::to_string(&manifest.upsert_ids).map_err(backend)?;
         let delete_json = serde_json::to_string(&manifest.delete_ids).map_err(backend)?;
         let conn = self.conn.borrow();
@@ -5681,7 +6300,7 @@ impl SqliteStore {
             operation_id: op,
             base_generation: base,
             target_generation: target,
-            operation_digest: manifest.operation_digest,
+            operation_digest: manifest.operation_digest.clone(),
         })
     }
 
@@ -5700,12 +6319,9 @@ impl SqliteStore {
         upserts: &[(StableId, Vec<u8>, String)],
         deletes: &[StableId],
     ) -> PortResult<()> {
-        self.commit_index_batch_with_relations(
-            pending,
-            upserts,
-            deletes,
-            &RelationManifests::default(),
-        )
+        let relations = RelationManifests::default();
+        let manifest = batch_manifest(upserts, deletes, &relations)?;
+        self.commit_index_batch_with_relations(pending, upserts, deletes, &relations, &manifest)
     }
 
     /// 事务内校验 pending 句柄仍可安全激活：generation CAS + intent 行状态 + manifest 匹配。
@@ -5715,9 +6331,10 @@ impl SqliteStore {
     fn verify_pending_in_tx(
         tx: &rusqlite::Transaction<'_>,
         pending: &PendingIndexBatch,
-        upserts: &[(StableId, Vec<u8>, String)],
-        deletes: &[StableId],
-        relations: &RelationManifests,
+        _upserts: &[(StableId, Vec<u8>, String)],
+        _deletes: &[StableId],
+        _relations: &RelationManifests,
+        manifest: &CanonicalBatchManifest,
     ) -> PortResult<()> {
         // CAS：活动 generation 必须仍等于 intent 记录的 base，否则中止本批次。
         let current: i64 = tx
@@ -5789,7 +6406,7 @@ impl SqliteStore {
                 |row| row.get(0),
             )
             .map_err(backend)?;
-        let actual = batch_manifest(upserts, deletes, relations)?;
+        let actual = manifest;
         let actual_upserts = serde_json::to_string(&actual.upsert_ids).map_err(backend)?;
         let actual_deletes = serde_json::to_string(&actual.delete_ids).map_err(backend)?;
         let handle_matches = declared_base == pending.base_generation as i64
@@ -6226,18 +6843,28 @@ impl SqliteStore {
         upserts: &[(StableId, Vec<u8>, String)],
         deletes: &[StableId],
         relations: &RelationManifests,
+        manifest: &CanonicalBatchManifest,
     ) -> PortResult<()> {
         let mut conn = self.conn.borrow_mut();
         let tx = conn.transaction().map_err(backend)?;
-        Self::verify_pending_in_tx(&tx, pending, upserts, deletes, relations)?;
+        let mut trace_stages: Vec<(&'static str, std::time::Duration)> = Vec::new();
+        let trace_started = trace::begin();
+        Self::verify_pending_in_tx(&tx, pending, upserts, deletes, relations, manifest)?;
         if let Some(relocation) = &relations.relocation {
             Self::apply_relocation_in_tx(&tx, pending, relocation)?;
         }
+        // Rebinding a historical empty placeholder must be revalidated inside
+        // this write transaction, before the batch replaces the evidence. The
+        // pre-parse reservation alone is never authorization.
+        let authorized_placeholder_rebinds =
+            SqliteStore::authorized_placeholder_rebinds(&tx, &relations.source_replacements)?;
+        trace::add(&mut trace_stages, "verify_outbox", trace_started);
 
         // Session 元数据投影（schema v11）：收集本批触碰的 Session，提交末尾
         // 逐个重建其 `session_fts` 行（删除按 rowid 经边车定位，重插新投影）。
         // 覆盖 upsert/delete 实体、placement 变动（含移动归属的旧主）、以及
         // source replacement 的旧 placement 与 claim 行——与写入路径同事务。
+        let trace_started = trace::begin();
         let mut affected_sessions = BTreeSet::new();
         for id in upserts.iter().map(|(id, _, _)| id).chain(deletes.iter()) {
             match id.kind() {
@@ -6295,6 +6922,7 @@ impl SqliteStore {
         }
         Self::collect_placement_sessions(&tx, &old_placement_ids, &mut affected_sessions)?;
         Self::collect_resume_claim_sessions(&tx, &source_paths, &mut affected_sessions)?;
+        trace::add(&mut trace_stages, "affected_sessions", trace_started);
 
         // 批量写入：同一事务内以多行 VALUES 语句替代逐行 prepared execute
         // （借鉴 hstry bulk_insert_messages_in_tx，MIT，
@@ -6303,6 +6931,7 @@ impl SqliteStore {
         // 5 条语句。Scoped so the borrow ends before the relation/source
         // loops below.
         {
+            let trace_catalog = trace::begin();
             const _: () = assert!(2 * BULK_INSERT_ROWS_PER_CHUNK <= 950);
             for chunk in upserts.chunks(BULK_INSERT_ROWS_PER_CHUNK) {
                 let sql = format!(
@@ -6327,7 +6956,12 @@ impl SqliteStore {
             }
             // fts 行与 fts_ids 身份边车的批量维护（含按 rowid 的旧行删除）：
             // 与逐行路径同语义，rowid 显式分配（见 batch_upsert_fts_in_tx）。
+            trace::add(&mut trace_stages, "catalog_upserts", trace_catalog);
+            let trace_fts = trace::begin();
             Self::batch_upsert_fts_in_tx(&tx, upserts)?;
+            trace::add(&mut trace_stages, "fts_projection", trace_fts);
+            let trace_deletes = trace::begin();
+            trace::add(&mut trace_stages, "catalog_deletes", trace_deletes);
             for chunk in deletes.chunks(BULK_INSERT_ROWS_PER_CHUNK) {
                 let ids: Vec<&str> = chunk.iter().map(|id| id.as_str()).collect();
                 let placeholders = in_placeholders(ids.len());
@@ -6354,6 +6988,7 @@ impl SqliteStore {
             }
         }
 
+        let trace_relations = trace::begin();
         for delete in &relations.relation_deletes {
             match delete {
                 RelationDeleteManifest::Edge(placement_id) => {
@@ -6546,6 +7181,8 @@ impl SqliteStore {
             }
         }
 
+        trace::add(&mut trace_stages, "relation_upserts", trace_relations);
+        let trace_sources = trace::begin();
         for source in &relations.source_replacements {
             tx.execute(
                 "DELETE FROM source_membership WHERE source_path = ?1",
@@ -6683,6 +7320,7 @@ impl SqliteStore {
                     &source.source_path,
                     installation,
                     (self.relocation_clock)()?,
+                    authorized_placeholder_rebinds.contains(&source.source_path),
                 )?;
             }
             // Source-scoped Resume Metadata 声明（ADR-0009）：随 source replacement
@@ -6715,12 +7353,18 @@ impl SqliteStore {
             }
         }
 
+        trace::add(&mut trace_stages, "source_replacements", trace_sources);
+        let trace_sessions = trace::begin();
         let batch_sources: Vec<String> = relations
             .source_replacements
             .iter()
             .map(|replacement| replacement.source_path.clone())
             .collect();
-        Self::regenerate_compatibility_aliases_in_tx(&tx, &batch_sources)?;
+        let in_memory_payloads: BTreeMap<&str, &[u8]> = upserts
+            .iter()
+            .map(|(id, payload, _)| (id.as_str(), payload.as_slice()))
+            .collect();
+        Self::regenerate_compatibility_aliases_in_tx(&tx, &batch_sources, &in_memory_payloads)?;
         let resolver: &dyn RepoSlugResolver = &**self.repo_slug_resolver.borrow();
         for session_wire in affected_sessions {
             Self::rebuild_session_search_row_in_tx(
@@ -6732,6 +7376,8 @@ impl SqliteStore {
         }
 
         // 本批触碰的关系行：只校验这些 id 的引用完整性。
+        trace::add(&mut trace_stages, "session_projection", trace_sessions);
+        let trace_integrity = trace::begin();
         let mut touched_placements: Vec<String> = Vec::new();
         let mut touched_edges: Vec<String> = Vec::new();
         let mut touched_claims: Vec<String> = Vec::new();
@@ -6781,6 +7427,8 @@ impl SqliteStore {
             relocation.verify_snapshots()?;
         }
 
+        trace::add(&mut trace_stages, "integrity_checks", trace_integrity);
+        let trace_generation = trace::begin();
         tx.execute(
             "UPDATE store_metadata SET active_generation = ?1 WHERE singleton = 1",
             [pending.target_generation as i64],
@@ -6794,7 +7442,21 @@ impl SqliteStore {
         )
         .map_err(backend)?;
 
+        trace::add(&mut trace_stages, "generation_activate", trace_generation);
+        let trace_commit = trace::begin();
         tx.commit().map_err(backend)?;
+        trace::add(&mut trace_stages, "tx_commit", trace_commit);
+        trace::emit(
+            "adapter:commit",
+            &trace_stages,
+            &format!(
+                "upserts={} deletes={} relation_upserts={} relation_deletes={}",
+                upserts.len(),
+                deletes.len(),
+                relations.relation_upserts.len(),
+                relations.relation_deletes.len()
+            ),
+        );
         Ok(())
     }
 
@@ -6994,6 +7656,8 @@ impl SqliteStore {
             return Ok(());
         }
         let mut next_fts_rowid: Option<i64> = None;
+        let mut trace_fts_time = std::time::Duration::ZERO;
+        let mut trace_sidecar_time = std::time::Duration::ZERO;
         let mut allocate_rowid = || -> PortResult<i64> {
             match next_fts_rowid {
                 Some(id) => {
@@ -7012,6 +7676,7 @@ impl SqliteStore {
             }
         };
         for chunk in upserts.chunks(BULK_INSERT_ROWS_PER_CHUNK) {
+            let trace_chunk = trace::begin();
             // StableId 无字符串反解构造器，故存其 serde JSON 以便查询时无损重建
             // （wire 串不含 stability，无法从 as_str() 还原完整身份）。
             let ids: Vec<&str> = chunk.iter().map(|(id, _, _)| id.as_str()).collect();
@@ -7071,6 +7736,8 @@ impl SqliteStore {
                 tx.execute(&sql, rusqlite::params_from_iter(params))
                     .map_err(backend)?;
             }
+            trace_fts_time += trace::elapsed(trace_chunk);
+            let trace_sidecar = trace::begin();
             const _: () = assert!(3 * BULK_INSERT_ROWS_PER_CHUNK <= 950);
             let sql = format!(
                 "INSERT INTO fts_ids(wire_id, id_json, fts_rowid) VALUES {}",
@@ -7087,7 +7754,16 @@ impl SqliteStore {
                 .collect();
             tx.execute(&sql, rusqlite::params_from_iter(params))
                 .map_err(backend)?;
+            trace_sidecar_time += trace::elapsed(trace_sidecar);
         }
+        trace::emit(
+            "adapter:fts",
+            &[
+                ("fts_projection_rows", trace_fts_time),
+                ("fts_ids_insert", trace_sidecar_time),
+            ],
+            &format!("entities={}", upserts.len()),
+        );
         Ok(())
     }
 
@@ -7223,7 +7899,9 @@ impl SqliteStore {
         // 3) 单事务：校验句柄 → 整表清空 FTS → 按 catalog 重投影 → 推进 generation → 标记 activated。
         let mut conn = self.conn.borrow_mut();
         let tx = conn.transaction().map_err(backend)?;
-        Self::verify_pending_in_tx(&tx, &pending, &upserts, &[], &RelationManifests::default())?;
+        let relations = RelationManifests::default();
+        let manifest = batch_manifest(&upserts, &[], &relations)?;
+        Self::verify_pending_in_tx(&tx, &pending, &upserts, &[], &relations, &manifest)?;
 
         tx.execute("DELETE FROM fts", []).map_err(backend)?;
         tx.execute("DELETE FROM fts_ids", []).map_err(backend)?;
@@ -8040,7 +8718,7 @@ const RELATION_SCHEMA_VERSION: i64 = 7;
 /// 已存版本落后于该常量的源即使字节未变也走 targeted backfill（重跑 parse +
 /// commit），并在重新 commit 时写回当前版本。单测（lib.rs
 /// `stale_parser_version_forces_reparse_and_converges`）锁住该语义。
-pub const PARSER_SEMANTIC_VERSION: u32 = 2;
+pub const PARSER_SEMANTIC_VERSION: u32 = 3;
 
 /// 索引投影版本：任何改变 **FTS 词元流或派生投影文本** 的变化都必须 +1。
 ///
@@ -16261,6 +16939,7 @@ mod tests {
             relation_upserts: vec![RelationUpsertManifest::Placement(message_placement)],
             ..RelationManifests::default()
         };
+        let manifest = batch_manifest(&[], &[], &relations).unwrap();
         let pending = store
             .begin_index_batch_with_relations(&[], &[], &relations)
             .unwrap();
@@ -16275,7 +16954,7 @@ mod tests {
             .unwrap();
 
         let err = store
-            .commit_index_batch_with_relations(&pending, &[], &[], &relations)
+            .commit_index_batch_with_relations(&pending, &[], &[], &relations, &manifest)
             .unwrap_err();
         assert!(
             matches!(err, PortError::Backend(message) if message.contains("does not match durable intent"))
@@ -16306,6 +16985,7 @@ mod tests {
             }],
             ..RelationManifests::default()
         };
+        let manifest = batch_manifest(&[], &[], &relations).unwrap();
         let pending = store
             .begin_index_batch_with_relations(&[], &[], &relations)
             .unwrap();
@@ -16320,7 +17000,7 @@ mod tests {
             .unwrap();
 
         let err = store
-            .commit_index_batch_with_relations(&pending, &[], &[], &relations)
+            .commit_index_batch_with_relations(&pending, &[], &[], &relations, &manifest)
             .unwrap_err();
         assert!(
             matches!(err, PortError::Backend(message) if message.contains("does not match durable intent"))

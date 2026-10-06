@@ -1,0 +1,6 @@
+{"file": ".trellis/spec/agentsessions-adapters-sqlite/backend/index.md", "reason": "outbox/CAS/generation/关系与投影权威边界"}
+{"file": ".trellis/spec/agentsessions-cli/backend/index.md", "reason": "sync 入口与跨平台测试契约"}
+{"file": ".trellis/spec/guides/index.md", "reason": "共享思考指南入口"}
+{"file": ".trellis/tasks/archive/2026-09/09-29-wake-reuse-study/research/experiments/search/README.md", "reason": "可复用测量 harness 与协议（含局限）"}
+{"file": ".trellis/tasks/archive/2026-09/09-29-wake-reuse-study/research/report.md", "reason": "实测基线与瓶颈排序"}
+{"file": ".trellis/tasks/archive/2026-09/09-29-wake-reuse-study/research/environment.json", "reason": "测量环境与限制声明"}

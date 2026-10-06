@@ -1,15 +1,31 @@
 //! Cursor provider adapter.
 //!
-//! Parses Cursor chat history from the VS Code workspaceStorage `state.vscdb`
-//! SQLite file (ItemTable KV store). The adapter receives the SQLite file as a
-//! byte stream, writes it to a temporary file, and opens it read-only
-//! (SQLITE_OPEN_READONLY + busy_timeout), same as the opencode adapter.
+//! Two mutually exclusive variants:
+//!
+//! * `cursor/vscdb-chat-v1` (unchanged): `state.vscdb` ItemTable KV keys
+//!   `workbench.panel.aichat.view.aichat.chatdata` (tabs -> bubbles) and
+//!   `aiService.prompts` (flat prompt/response history).
+//! * `cursor/disk-kv-v1` (see [`disk_kv`]): the newer `cursorDiskKV` table
+//!   (`composerData:<id>` metadata + `bubbleId:<composerId>:<bubbleId>` bodies).
+//!
+//! Variant dispatch is decided by the bytes alone: a SQLite stream can claim
+//! the ItemTable surface, the disk-kv surface, or neither, and a stream that
+//! satisfies both is refused as ambiguous instead of guessed. Everything the
+//! ItemTable variant accepted before behaves byte-for-byte as before - the
+//! disk-kv path is additive.
+//!
+//! Both variants receive the SQLite file as a byte stream, write it to a
+//! private temporary file, and open that copy read-only
+//! (SQLITE_OPEN_READONLY + busy_timeout + `query_only`, one pinned read
+//! transaction); the source database is never opened.
 //!
 //! Format evidence: hstry (MIT) `adapters/cursor/adapter.ts`:
 //! - key `workbench.panel.aichat.view.aichat.chatdata` → JSON document with
 //!   `tabs`, each tab holding `bubbles` (type/text/rawText/timingInfo.startTime)
 //! - key `aiService.prompts` → JSON array of `{prompt, response, createdAt,
 //!   conversationId}` records, grouped into conversations by conversationId
+//! - the `cursorDiskKV` surface: pinned Wake implementation plus the frozen
+//!   synthetic probe suite, cited in `tests/golden/PROVENANCE.md`
 
 use std::io::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -19,6 +35,8 @@ use agent_session_grep_ports::{
     ProbeResult, ProviderAdapter, ProviderError, manifest_for,
 };
 use rusqlite::{Connection, OpenFlags, params};
+
+mod disk_kv;
 
 /// Variant id surfaced in probe results.
 const VARIANT_ID: &str = "cursor/vscdb-chat-v1";
@@ -108,6 +126,10 @@ impl ProviderAdapter for CursorAdapter {
                 "SQLite source has no byte spans",
                 "chatdata/prompts are multi-generation formats; version layering is not yet implemented",
                 "native message ids are not preserved (ids are derived, not native)",
+                "the additive `cursor/disk-kv-v1` variant reads cursorDiskKV composerData/bubbleId rows through a private read-only snapshot (one pinned read transaction); the capability row above still advertises only the ItemTable variant",
+                "disk-kv messages report no adopted native id: a bubbleId is a composer-scoped storage-key component with no official version contract, so canonical message identity stays document-scoped (the same decision as hermes rowids); verbatim composer/bubble ids appear only as observations in diagnostics and the session identity",
+                "disk-kv bubbles with no usable text or tool input, and composers whose own row is malformed, are counted in `skipped` with per-state diagnostics; a broken bubble never discards its session and a broken composer row never discards the source's other composers",
+                "disk-kv rows/headers/cells are bounded (4_096 composers, 100_000 headers per composer, 250_000 headers per database, 8 MiB per cell, 64 MiB per database); exceeding a bound fails the source instead of truncating it",
             ],
         )
     }
@@ -124,14 +146,28 @@ impl ProviderAdapter for CursorAdapter {
         }
         matched.push("SQLite magic header detected".into());
 
-        // Open read-only and check for the VS Code ItemTable KV table. `db`
-        // unlinks the temp copy when it goes out of scope (see `TempDb`).
+        // Open one read-only snapshot and decide which Cursor surface the
+        // bytes carry. `db` unlinks the temp copy when it goes out of scope
+        // (see `TempDb`).
         let db = open_readonly_from_bytes(bytes)
             .map_err(|e| ProviderError::StructuralFatal(format!("failed to open SQLite: {e}")))?;
         let conn = &db.conn;
-        if !table_exists(conn, "ItemTable") {
+        let item_table = item_table_claim(conn);
+        let disk_kv = disk_kv::claims(conn)?;
+        if item_table && disk_kv {
             return Err(ProviderError::AmbiguousVariant(
-                "no `ItemTable` table found — not a Cursor state database".into(),
+                "bytes match both `cursor/disk-kv-v1` and `cursor/vscdb-chat-v1`".into(),
+            ));
+        }
+        if disk_kv {
+            // Re-validates the schema and checks the adapter's own source cap.
+            return disk_kv::probe(conn, bytes.len() as u64, &disk_kv::Limits::default());
+        }
+        if !item_table {
+            return Err(ProviderError::AmbiguousVariant(
+                "no Cursor state surface found (no ItemTable chatdata/prompts key and no \
+                 `cursorDiskKV` composerData: key)"
+                    .into(),
             ));
         }
         matched.push("ItemTable found".into());
@@ -139,11 +175,6 @@ impl ProviderAdapter for CursorAdapter {
         // Cursor chat history lives under either of two ItemTable keys.
         let has_chat_data = key_exists(conn, CHAT_DATA_KEY);
         let has_prompts = key_exists(conn, PROMPTS_KEY);
-        if !has_chat_data && !has_prompts {
-            return Err(ProviderError::AmbiguousVariant(
-                "ItemTable has neither the Cursor chatdata nor prompts key".into(),
-            ));
-        }
         if has_chat_data {
             matched.push("Cursor chatdata key found".into());
         }
@@ -169,45 +200,73 @@ impl ProviderAdapter for CursorAdapter {
             .map_err(|e| ProviderError::StructuralFatal(format!("failed to open SQLite: {e}")))?;
         let conn = &db.conn;
 
-        let mut report = ParseReport::default();
-        let mut seq: u32 = 0;
-        let mut session_count = 0usize;
-
-        // Chat tabs first, then the flat prompts history (hstry order).
-        match read_key(conn, CHAT_DATA_KEY) {
-            Ok(Some(value)) if !value.trim().is_empty() => {
-                parse_chat_data(&value, sink, &mut report, &mut seq, &mut session_count)?;
-            }
-            Ok(_) => {}
-            Err(e) => {
-                report.skipped += 1;
-                report
-                    .diagnostics
-                    .push(format!("failed to read chatdata value: {e}"));
-            }
+        // The same surface decision the probe makes, so a byte stream can only
+        // ever be parsed as the variant its probe selected.
+        let item_table = item_table_claim(conn);
+        let disk_kv = disk_kv::claims(conn)?;
+        if item_table && disk_kv {
+            return Err(ProviderError::AmbiguousVariant(
+                "bytes match both `cursor/disk-kv-v1` and `cursor/vscdb-chat-v1`".into(),
+            ));
         }
-        match read_key(conn, PROMPTS_KEY) {
-            Ok(Some(value)) if !value.trim().is_empty() => {
-                parse_prompts(&value, sink, &mut report, &mut seq, &mut session_count)?;
-            }
-            Ok(_) => {}
-            Err(e) => {
-                report.skipped += 1;
-                report
-                    .diagnostics
-                    .push(format!("failed to read prompts value: {e}"));
-            }
+        if disk_kv {
+            return disk_kv::parse(conn, bytes.len() as u64, sink, &disk_kv::Limits::default());
         }
-
-        // Fail closed for multi-session sources (ADR-0009): no single native id
-        // may be claimed authoritative when the file holds several sessions.
-        if session_count > 1 {
-            report.session_observation.multi_session = true;
-            report.session_observation.provider_session_id = MetadataResolution::Ambiguous;
-        }
-
-        Ok(report)
+        parse_item_table(conn, sink)
     }
+}
+
+/// The `cursor/vscdb-chat-v1` surface: the ItemTable plus at least one of the
+/// two Cursor chat keys. Table/column problems are not an error here - they
+/// simply cannot claim this surface.
+fn item_table_claim(conn: &Connection) -> bool {
+    table_exists(conn, "ItemTable")
+        && (key_exists(conn, CHAT_DATA_KEY) || key_exists(conn, PROMPTS_KEY))
+}
+
+/// Parse the ItemTable surface (`cursor/vscdb-chat-v1`, unchanged).
+fn parse_item_table(
+    conn: &Connection,
+    sink: &mut dyn CanonicalEventSink,
+) -> Result<ParseReport, ProviderError> {
+    let mut report = ParseReport::default();
+    let mut seq: u32 = 0;
+    let mut session_count = 0usize;
+
+    // Chat tabs first, then the flat prompts history (hstry order).
+    match read_key(conn, CHAT_DATA_KEY) {
+        Ok(Some(value)) if !value.trim().is_empty() => {
+            parse_chat_data(&value, sink, &mut report, &mut seq, &mut session_count)?;
+        }
+        Ok(_) => {}
+        Err(e) => {
+            report.skipped += 1;
+            report
+                .diagnostics
+                .push(format!("failed to read chatdata value: {e}"));
+        }
+    }
+    match read_key(conn, PROMPTS_KEY) {
+        Ok(Some(value)) if !value.trim().is_empty() => {
+            parse_prompts(&value, sink, &mut report, &mut seq, &mut session_count)?;
+        }
+        Ok(_) => {}
+        Err(e) => {
+            report.skipped += 1;
+            report
+                .diagnostics
+                .push(format!("failed to read prompts value: {e}"));
+        }
+    }
+
+    // Fail closed for multi-session sources (ADR-0009): no single native id
+    // may be claimed authoritative when the file holds several sessions.
+    if session_count > 1 {
+        report.session_observation.multi_session = true;
+        report.session_observation.provider_session_id = MetadataResolution::Ambiguous;
+    }
+
+    Ok(report)
 }
 
 /// Parse the chatdata JSON document: each tab is one session, each bubble one
@@ -416,7 +475,7 @@ struct TempDbGuard {
 
 impl Drop for TempDbGuard {
     fn drop(&mut self) {
-        for suffix in ["", "-wal", "-shm"] {
+        for suffix in ["", "-wal", "-shm", "-journal"] {
             let mut owned_file = self.path.as_os_str().to_os_string();
             owned_file.push(suffix);
             let _ = std::fs::remove_file(std::path::Path::new(&owned_file));
@@ -466,6 +525,13 @@ fn open_readonly_from_bytes(bytes: &[u8]) -> Result<TempDb, String> {
     .map_err(|e| e.to_string())?;
     conn.busy_timeout(std::time::Duration::from_secs(1))
         .map_err(|e| e.to_string())?;
+    // Pin one read transaction (`BEGIN` + a first read): every later statement
+    // in this connection sees that same snapshot, and `query_only` makes a
+    // write attempt fail instead of silently mutating the copy.
+    conn.execute_batch(
+        "PRAGMA query_only = ON; BEGIN; SELECT rootpage FROM sqlite_schema LIMIT 1;",
+    )
+    .map_err(|e| e.to_string())?;
 
     Ok(TempDb {
         conn,
@@ -658,6 +724,48 @@ mod tests {
         bytes
     }
 
+    /// Build a synthetic Cursor `state.vscdb` with only a `cursorDiskKV` table.
+    fn create_disk_kv_db() -> Vec<u8> {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY, value BLOB);")
+            .unwrap();
+        conn.execute(
+            "INSERT INTO cursorDiskKV (key, value) VALUES (?1, ?2)",
+            params![
+                "composerData:c1",
+                r#"{"fullConversationHeadersOnly":[{"bubbleId":"b1","type":1}]}"#
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO cursorDiskKV (key, value) VALUES (?1, ?2)",
+            params!["bubbleId:c1:b1", r#"{"text":"synthetic disk kv"}"#],
+        )
+        .unwrap();
+        vacuum_to_bytes(&conn)
+    }
+
+    /// Build a synthetic database that carries both Cursor surfaces.
+    fn create_dual_surface_db() -> Vec<u8> {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value TEXT);
+             CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY, value BLOB);",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO ItemTable (key, value) VALUES (?1, ?2)",
+            params![CHAT_DATA_KEY, r#"{"tabs":[]}"#],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO cursorDiskKV (key, value) VALUES (?1, ?2)",
+            params!["composerData:c1", r#"{"fullConversationHeadersOnly":[]}"#],
+        )
+        .unwrap();
+        vacuum_to_bytes(&conn)
+    }
+
     /// Build a synthetic Cursor `state.vscdb` (ItemTable + given key values).
     fn create_cursor_db(chatdata: Option<&str>, prompts: Option<&str>) -> Vec<u8> {
         let conn = Connection::open_in_memory().unwrap();
@@ -739,6 +847,38 @@ mod tests {
                 .iter()
                 .any(|e| e.contains("prompts"))
         );
+    }
+
+    #[test]
+    fn probe_confirms_disk_kv_only_database() {
+        let adapter = CursorAdapter::new();
+        let result = adapter.probe(&create_disk_kv_db()).unwrap();
+        assert_eq!(result.variant_id, "cursor/disk-kv-v1");
+        assert_eq!(result.confidence, Confidence::Confirmed);
+    }
+
+    #[test]
+    fn probe_rejects_a_stream_that_matches_both_cursor_variants() {
+        let adapter = CursorAdapter::new();
+        let err = adapter.probe(&create_dual_surface_db()).unwrap_err();
+        assert!(
+            matches!(err, ProviderError::AmbiguousVariant(_)),
+            "a double claim must be refused, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_dispatches_to_the_disk_kv_surface_and_refuses_a_double_claim() {
+        let adapter = CursorAdapter::new();
+        let mut sink = sink();
+        let report = adapter.parse(&create_disk_kv_db(), &mut sink).unwrap();
+        assert_eq!(report.committed, 1);
+        assert_eq!(sink.events[0].2, "synthetic disk kv");
+
+        let err = adapter
+            .parse(&create_dual_surface_db(), &mut sink)
+            .unwrap_err();
+        assert!(matches!(err, ProviderError::AmbiguousVariant(_)));
     }
 
     #[test]

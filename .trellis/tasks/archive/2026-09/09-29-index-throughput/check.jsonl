@@ -1,0 +1,4 @@
+{"file": ".trellis/spec/agentsessions-adapters-sqlite/backend/index.md", "reason": "正确性/原子性/投影边界检查"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "跨层数据流与预算检查"}
+{"file": ".trellis/tasks/archive/2026-09/09-29-wake-reuse-study/research/report.md", "reason": "对照基线与验收口径"}
+{"file": ".trellis/tasks/archive/2026-09/09-29-wake-reuse-study/research/experiments/search/README.md", "reason": "测量协议与失败/超时处理"}

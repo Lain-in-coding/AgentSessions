@@ -1,0 +1,684 @@
+{
+  "schema_version": "wake-reuse-study/matrix-v1",
+  "wake_commit": "71aeca67ec80f8645d1f9d5199290c2c732036ce",
+  "baseline_commit": "2b8f89562e43bd1f68ad3c8e5cf8ccc9281f9af2",
+  "contains_real_transcripts": false,
+  "direct_copy_approved": [],
+  "entries": [
+    {
+      "id": "snippet",
+      "topic": "命中位置摘要",
+      "classification": "adapt",
+      "priority": 1,
+      "source": [
+        {
+          "path": "crates/wake-core/src/db.rs",
+          "lines": [
+            3307,
+            3375
+          ],
+          "url": "https://github.com/iAmCorey/Wake/blob/71aeca67ec80f8645d1f9d5199290c2c732036ce/crates/wake-core/src/db.rs#L3307-L3375"
+        }
+      ],
+      "local_mapping": "agent-session-grep-application::assemble_search_hit",
+      "delta": "长消息尾部命中仍可见；现有正文前缀是实际增量",
+      "required_before_product_adoption": [
+        "Unicode offset mapping",
+        "literal/prefix evidence",
+        "final JSON byte budget",
+        "no ranking/cursor changes"
+      ],
+      "product_adoption_approved": false,
+      "evidence_level": "pinned-source; experiments and upstream confirmation are separately labeled"
+    },
+    {
+      "id": "statement-cache",
+      "topic": "SQL 语句缓存",
+      "classification": "adapt",
+      "priority": 2,
+      "source": [
+        {
+          "path": "crates/wake-core/src/db.rs",
+          "lines": [
+            889,
+            931
+          ],
+          "url": "https://github.com/iAmCorey/Wake/blob/71aeca67ec80f8645d1f9d5199290c2c732036ce/crates/wake-core/src/db.rs#L889-L931"
+        },
+        {
+          "path": "crates/wake-core/src/db.rs",
+          "lines": [
+            2565,
+            2780
+          ],
+          "url": "https://github.com/iAmCorey/Wake/blob/71aeca67ec80f8645d1f9d5199290c2c732036ce/crates/wake-core/src/db.rs#L2565-L2780"
+        }
+      ],
+      "local_mapping": "agent-session-grep-adapters-sqlite::SearchIndex",
+      "delta": "只可能改善重复 SQL；已有 intentional cache feature exclusion",
+      "required_before_product_adoption": [
+        "connection lifetime comparison",
+        "identical query results",
+        "dependency/artifact/memory delta",
+        "no production default-feature changes"
+      ],
+      "product_adoption_approved": false,
+      "evidence_level": "pinned-source; experiments and upstream confirmation are separately labeled"
+    },
+    {
+      "id": "trigram",
+      "topic": "trigram 作为默认检索引擎替换",
+      "classification": "idea-only",
+      "priority": 3,
+      "source": [
+        {
+          "path": "crates/wake-core/src/db.rs",
+          "lines": [
+            60,
+            69
+          ],
+          "url": "https://github.com/iAmCorey/Wake/blob/71aeca67ec80f8645d1f9d5199290c2c732036ce/crates/wake-core/src/db.rs#L60-L69"
+        },
+        {
+          "path": "crates/wake-core/src/db.rs",
+          "lines": [
+            3255,
+            3272
+          ],
+          "url": "https://github.com/iAmCorey/Wake/blob/71aeca67ec80f8645d1f9d5199290c2c732036ce/crates/wake-core/src/db.rs#L3255-L3272"
+        }
+      ],
+      "local_mapping": "agent-session-grep-application::fts_tokens_cjk",
+      "delta": "子串召回不同，不是已存在 CJK 能力的升级证明",
+      "required_before_product_adoption": [
+        "independent qrels",
+        "query-plan evidence",
+        "compare token/prefix semantics"
+      ],
+      "product_adoption_approved": false,
+      "evidence_level": "pinned-source; experiments and upstream confirmation are separately labeled"
+    },
+    {
+      "id": "short-like",
+      "topic": "短词 LIKE 默认降级",
+      "classification": "reject",
+      "priority": null,
+      "source": [
+        {
+          "path": "crates/wake-core/src/db.rs",
+          "lines": [
+            3260,
+            3264
+          ],
+          "url": "https://github.com/iAmCorey/Wake/blob/71aeca67ec80f8645d1f9d5199290c2c732036ce/crates/wake-core/src/db.rs#L3260-L3264"
+        },
+        {
+          "path": "crates/wake-core/src/db.rs",
+          "lines": [
+            2565,
+            2780
+          ],
+          "url": "https://github.com/iAmCorey/Wake/blob/71aeca67ec80f8645d1f9d5199290c2c732036ce/crates/wake-core/src/db.rs#L2565-L2780"
+        }
+      ],
+      "local_mapping": "agent-session-grep-adapters-sqlite::SearchIndex",
+      "delta": "百万级短词可能线性扫描；仅作为实验对照",
+      "required_before_product_adoption": [
+        "do not adopt as default",
+        "record short-CJK query plans"
+      ],
+      "product_adoption_approved": false,
+      "evidence_level": "pinned-source; experiments and upstream confirmation are separately labeled"
+    },
+    {
+      "id": "rank-fusion",
+      "topic": "标题/正文与时间信号",
+      "classification": "idea-only",
+      "priority": null,
+      "source": [
+        {
+          "path": "crates/wake-core/src/db.rs",
+          "lines": [
+            2565,
+            2780
+          ],
+          "url": "https://github.com/iAmCorey/Wake/blob/71aeca67ec80f8645d1f9d5199290c2c732036ce/crates/wake-core/src/db.rs#L2565-L2780"
+        }
+      ],
+      "local_mapping": "agent-session-grep-application ranking + SQLite query_with_policy",
+      "delta": "本项目已有 RRF、clock anchoring 与稳定破平，不是新增能力",
+      "required_before_product_adoption": [
+        "do not compare BM25 across corpora",
+        "preserve pagination total order"
+      ],
+      "product_adoption_approved": false,
+      "evidence_level": "pinned-source; experiments and upstream confirmation are separately labeled"
+    },
+    {
+      "id": "scan-preview",
+      "topic": "quick metadata 与新近文件优先",
+      "classification": "idea-only",
+      "priority": 3,
+      "source": [
+        {
+          "path": "crates/wake-core/src/scanner.rs",
+          "lines": [
+            447,
+            505
+          ],
+          "url": "https://github.com/iAmCorey/Wake/blob/71aeca67ec80f8645d1f9d5199290c2c732036ce/crates/wake-core/src/scanner.rs#L447-L505"
+        },
+        {
+          "path": "crates/wake-core/src/scanner.rs",
+          "lines": [
+            522,
+            617
+          ],
+          "url": "https://github.com/iAmCorey/Wake/blob/71aeca67ec80f8645d1f9d5199290c2c732036ce/crates/wake-core/src/scanner.rs#L522-L617"
+        }
+      ],
+      "local_mapping": "agent-session-grep-cli::sync_files_inner",
+      "delta": "GUI 早可见性不能绕过 canonical 原子提交",
+      "required_before_product_adoption": [
+        "outbox/generation/CAS",
+        "complete relations before authoritative commit"
+      ],
+      "product_adoption_approved": false,
+      "evidence_level": "pinned-source; experiments and upstream confirmation are separately labeled"
+    },
+    {
+      "id": "root-owner",
+      "topic": "最长根归属与副本候选",
+      "classification": "idea-only",
+      "priority": 3,
+      "source": [
+        {
+          "path": "crates/wake-core/src/scanner.rs",
+          "lines": [
+            345,
+            423
+          ],
+          "url": "https://github.com/iAmCorey/Wake/blob/71aeca67ec80f8645d1f9d5199290c2c732036ce/crates/wake-core/src/scanner.rs#L345-L423"
+        },
+        {
+          "path": "crates/wake-core/src/watcher.rs",
+          "lines": [
+            46,
+            52
+          ],
+          "url": "https://github.com/iAmCorey/Wake/blob/71aeca67ec80f8645d1f9d5199290c2c732036ce/crates/wake-core/src/watcher.rs#L46-L52"
+        }
+      ],
+      "local_mapping": "source discovery + installation namespaces",
+      "delta": "可借鉴实例归属测试，不替代身份与来源证明",
+      "required_before_product_adoption": [
+        "component boundaries",
+        "namespace preservation",
+        "no lossy native IDs"
+      ],
+      "product_adoption_approved": false,
+      "evidence_level": "pinned-source; experiments and upstream confirmation are separately labeled"
+    },
+    {
+      "id": "watch-events",
+      "topic": "事件合并与溢出重扫",
+      "classification": "idea-only",
+      "priority": 3,
+      "source": [
+        {
+          "path": "crates/wake-core/src/watcher.rs",
+          "lines": [
+            123,
+            199
+          ],
+          "url": "https://github.com/iAmCorey/Wake/blob/71aeca67ec80f8645d1f9d5199290c2c732036ce/crates/wake-core/src/watcher.rs#L123-L199"
+        },
+        {
+          "path": "crates/wake-core/src/watcher.rs",
+          "lines": [
+            202,
+            255
+          ],
+          "url": "https://github.com/iAmCorey/Wake/blob/71aeca67ec80f8645d1f9d5199290c2c732036ce/crates/wake-core/src/watcher.rs#L202-L255"
+        }
+      ],
+      "local_mapping": "future sync scheduling tests",
+      "delta": "本轮不增加后台 watcher",
+      "required_before_product_adoption": [
+        "bounded queue",
+        "rename/delete ordering",
+        "explicit rescan signal"
+      ],
+      "product_adoption_approved": false,
+      "evidence_level": "pinned-source; experiments and upstream confirmation are separately labeled"
+    },
+    {
+      "id": "cursor-storage",
+      "topic": "Cursor IDE cursorDiskKV",
+      "classification": "adapt",
+      "priority": 2,
+      "source": [
+        {
+          "path": "crates/wake-core/src/adapters/cursor_ide.rs",
+          "lines": [
+            189,
+            236
+          ],
+          "url": "https://github.com/iAmCorey/Wake/blob/71aeca67ec80f8645d1f9d5199290c2c732036ce/crates/wake-core/src/adapters/cursor_ide.rs#L189-L236"
+        },
+        {
+          "path": "crates/wake-core/src/adapters/cursor_ide.rs",
+          "lines": [
+            348,
+            384
+          ],
+          "url": "https://github.com/iAmCorey/Wake/blob/71aeca67ec80f8645d1f9d5199290c2c732036ce/crates/wake-core/src/adapters/cursor_ide.rs#L348-L384"
+        },
+        {
+          "path": "crates/wake-core/src/adapters/cursor_ide.rs",
+          "lines": [
+            460,
+            545
+          ],
+          "url": "https://github.com/iAmCorey/Wake/blob/71aeca67ec80f8645d1f9d5199290c2c732036ce/crates/wake-core/src/adapters/cursor_ide.rs#L460-L545"
+        }
+      ],
+      "local_mapping": "agent-session-grep-provider-cursor",
+      "delta": "与 ItemTable variant 不同的存储代际",
+      "required_before_product_adoption": [
+        "header order",
+        "bounded JSON cells",
+        "missing/bad row accounting",
+        "native ID proof",
+        "no resume certification"
+      ],
+      "product_adoption_approved": false,
+      "evidence_level": "pinned-source; experiments and upstream confirmation are separately labeled"
+    },
+    {
+      "id": "hermes-storage",
+      "topic": "Hermes SQLite/profile",
+      "classification": "adapt",
+      "priority": 2,
+      "source": [
+        {
+          "path": "crates/wake-core/src/adapters/hermes.rs",
+          "lines": [
+            174,
+            303
+          ],
+          "url": "https://github.com/iAmCorey/Wake/blob/71aeca67ec80f8645d1f9d5199290c2c732036ce/crates/wake-core/src/adapters/hermes.rs#L174-L303"
+        },
+        {
+          "path": "crates/wake-core/src/adapters/hermes.rs",
+          "lines": [
+            409,
+            435
+          ],
+          "url": "https://github.com/iAmCorey/Wake/blob/71aeca67ec80f8645d1f9d5199290c2c732036ce/crates/wake-core/src/adapters/hermes.rs#L409-L435"
+        }
+      ],
+      "local_mapping": "agent-session-grep-provider-hermes",
+      "delta": "与现有 session JSON 不同；独立 schema 列证据已核实",
+      "required_before_product_adoption": [
+        "profile namespace",
+        "REAL seconds",
+        "unambiguous tool association",
+        "readonly WAL snapshot",
+        "no resume certification"
+      ],
+      "product_adoption_approved": false,
+      "evidence_level": "pinned-source; experiments and upstream confirmation are separately labeled"
+    },
+    {
+      "id": "dsh-format",
+      "topic": "DSH 代际 JSONL/zstd",
+      "classification": "adapt",
+      "priority": 3,
+      "source": [
+        {
+          "path": "crates/wake-core/src/adapters/dsh.rs",
+          "lines": [
+            169,
+            211
+          ],
+          "url": "https://github.com/iAmCorey/Wake/blob/71aeca67ec80f8645d1f9d5199290c2c732036ce/crates/wake-core/src/adapters/dsh.rs#L169-L211"
+        },
+        {
+          "path": "crates/wake-core/src/adapters/dsh.rs",
+          "lines": [
+            224,
+            495
+          ],
+          "url": "https://github.com/iAmCorey/Wake/blob/71aeca67ec80f8645d1f9d5199290c2c732036ce/crates/wake-core/src/adapters/dsh.rs#L224-L495"
+        }
+      ],
+      "local_mapping": "future independent provider crate",
+      "delta": "新 provider 候选；事件/header/代际格式有独立上游证据",
+      "required_before_product_adoption": [
+        "decompression bound",
+        "header native bytes",
+        "unknown events",
+        "do not silently discard replacements/subagents"
+      ],
+      "product_adoption_approved": false,
+      "evidence_level": "pinned-source; experiments and upstream confirmation are separately labeled"
+    },
+    {
+      "id": "zcode-format",
+      "topic": "ZCode 独立 schema variant",
+      "classification": "adapt",
+      "priority": 3,
+      "source": [
+        {
+          "path": "crates/wake-core/src/adapters/zcode.rs",
+          "lines": [
+            103,
+            138
+          ],
+          "url": "https://github.com/iAmCorey/Wake/blob/71aeca67ec80f8645d1f9d5199290c2c732036ce/crates/wake-core/src/adapters/zcode.rs#L103-L138"
+        },
+        {
+          "path": "crates/wake-core/src/adapters/zcode.rs",
+          "lines": [
+            322,
+            435
+          ],
+          "url": "https://github.com/iAmCorey/Wake/blob/71aeca67ec80f8645d1f9d5199290c2c732036ce/crates/wake-core/src/adapters/zcode.rs#L322-L435"
+        },
+        {
+          "path": "crates/wake-core/src/adapters/opencode.rs",
+          "lines": [
+            346,
+            404
+          ],
+          "url": "https://github.com/iAmCorey/Wake/blob/71aeca67ec80f8645d1f9d5199290c2c732036ce/crates/wake-core/src/adapters/opencode.rs#L346-L404"
+        }
+      ],
+      "local_mapping": "provider selection + future ZCode adapter",
+      "delta": "三表近似 OpenCode 不能用于兼容或 resume 认证",
+      "required_before_product_adoption": [
+        "distinct probe evidence",
+        "optional-column migrations",
+        "bounded row parsing",
+        "no flattened SQL errors"
+      ],
+      "product_adoption_approved": false,
+      "evidence_level": "pinned-source; experiments and upstream confirmation are separately labeled"
+    },
+    {
+      "id": "readonly-copy",
+      "topic": "只读 SQLite helper 的边车复制回退",
+      "classification": "reject",
+      "priority": null,
+      "source": [
+        {
+          "path": "crates/wake-core/src/adapters/sqlite_ro.rs",
+          "lines": [
+            21,
+            60
+          ],
+          "url": "https://github.com/iAmCorey/Wake/blob/71aeca67ec80f8645d1f9d5199290c2c732036ce/crates/wake-core/src/adapters/sqlite_ro.rs#L21-L60"
+        }
+      ],
+      "local_mapping": "agent-session-grep-adapters-sqlite source snapshot",
+      "delta": "忽略复制错误且不保证一致快照，不能直接复用",
+      "required_before_product_adoption": [
+        "consistent snapshot",
+        "source DB/WAL/SHM immutability",
+        "explicit failures"
+      ],
+      "product_adoption_approved": false,
+      "evidence_level": "pinned-source; experiments and upstream confirmation are separately labeled"
+    },
+    {
+      "id": "auto-rebuild",
+      "topic": "open_or_rebuild",
+      "classification": "reject",
+      "priority": null,
+      "source": [
+        {
+          "path": "crates/wake-core/src/db.rs",
+          "lines": [
+            355,
+            383
+          ],
+          "url": "https://github.com/iAmCorey/Wake/blob/71aeca67ec80f8645d1f9d5199290c2c732036ce/crates/wake-core/src/db.rs#L355-L383"
+        }
+      ],
+      "local_mapping": "catalog authoritative / projection-only recovery",
+      "delta": "任何 open 失败后移主库并删除 WAL/SHM，文件错误还被忽略",
+      "required_before_product_adoption": [
+        "never rebuild authoritative catalog implicitly",
+        "retain outbox/generation/claims",
+        "failure atomicity"
+      ],
+      "product_adoption_approved": false,
+      "evidence_level": "pinned-source; experiments and upstream confirmation are separately labeled"
+    },
+    {
+      "id": "schema-parity-test",
+      "topic": "CLI 参数与 MCP schema 双向覆盖测试",
+      "classification": "adapt",
+      "priority": 3,
+      "source": [
+        {
+          "path": "crates/wake-core/src/cli.rs",
+          "lines": [
+            960,
+            1011
+          ],
+          "url": "https://github.com/iAmCorey/Wake/blob/71aeca67ec80f8645d1f9d5199290c2c732036ce/crates/wake-core/src/cli.rs#L960-L1011"
+        }
+      ],
+      "local_mapping": "agent-session-grep-cli::mcp contract tests",
+      "delta": "新增测试覆盖候选，不另建投影",
+      "required_before_product_adoption": [
+        "normalize to shared ADT",
+        "allowed entrypoint differences",
+        "error/budget parity"
+      ],
+      "product_adoption_approved": false,
+      "evidence_level": "pinned-source; experiments and upstream confirmation are separately labeled"
+    },
+    {
+      "id": "project-scope",
+      "topic": "目录范围选择",
+      "classification": "idea-only",
+      "priority": 3,
+      "source": [
+        {
+          "path": "crates/wake-core/src/services/context.rs",
+          "lines": [
+            17,
+            68
+          ],
+          "url": "https://github.com/iAmCorey/Wake/blob/71aeca67ec80f8645d1f9d5199290c2c732036ce/crates/wake-core/src/services/context.rs#L17-L68"
+        }
+      ],
+      "local_mapping": "existing relocation/alias contracts",
+      "delta": "字符串祖先关系不等于 junction 或 installation 身份",
+      "required_before_product_adoption": [
+        "explicit identity proof",
+        "no guessed alias canonicalization"
+      ],
+      "product_adoption_approved": false,
+      "evidence_level": "pinned-source; experiments and upstream confirmation are separately labeled"
+    },
+    {
+      "id": "soft-budget",
+      "topic": "转录软字符预算与裸 seq 分页",
+      "classification": "reject",
+      "priority": null,
+      "source": [
+        {
+          "path": "crates/wake-core/src/services/exporter.rs",
+          "lines": [
+            223,
+            232
+          ],
+          "url": "https://github.com/iAmCorey/Wake/blob/71aeca67ec80f8645d1f9d5199290c2c732036ce/crates/wake-core/src/services/exporter.rs#L223-L232"
+        },
+        {
+          "path": "crates/wake-core/src/services/exporter.rs",
+          "lines": [
+            261,
+            394
+          ],
+          "url": "https://github.com/iAmCorey/Wake/blob/71aeca67ec80f8645d1f9d5199290c2c732036ce/crates/wake-core/src/services/exporter.rs#L261-L394"
+        },
+        {
+          "path": "crates/wake-core/src/mcp/tools.rs",
+          "lines": [
+            1215,
+            1346
+          ],
+          "url": "https://github.com/iAmCorey/Wake/blob/71aeca67ec80f8645d1f9d5199290c2c732036ce/crates/wake-core/src/mcp/tools.rs#L1215-L1346"
+        }
+      ],
+      "local_mapping": "Application budgets/cursors and CLI serialization",
+      "delta": "不能替代硬字节预算、generation/query/TTL 绑定",
+      "required_before_product_adoption": [
+        "final serialization budget",
+        "truthful truncation",
+        "stable cursor errors"
+      ],
+      "product_adoption_approved": false,
+      "evidence_level": "pinned-source; experiments and upstream confirmation are separately labeled"
+    },
+    {
+      "id": "terminal-runtime",
+      "topic": "shell/剪贴板终端恢复",
+      "classification": "reject",
+      "priority": null,
+      "source": [
+        {
+          "path": "crates/wake-core/src/services/terminal/mod.rs",
+          "lines": [
+            359,
+            438
+          ],
+          "url": "https://github.com/iAmCorey/Wake/blob/71aeca67ec80f8645d1f9d5199290c2c732036ce/crates/wake-core/src/services/terminal/mod.rs#L359-L438"
+        },
+        {
+          "path": "crates/wake-core/src/services/terminal/windows.rs",
+          "lines": [
+            138,
+            194
+          ],
+          "url": "https://github.com/iAmCorey/Wake/blob/71aeca67ec80f8645d1f9d5199290c2c732036ce/crates/wake-core/src/services/terminal/windows.rs#L138-L194"
+        },
+        {
+          "path": "crates/wake-core/src/services/terminal/macos.rs",
+          "lines": [
+            286,
+            348
+          ],
+          "url": "https://github.com/iAmCorey/Wake/blob/71aeca67ec80f8645d1f9d5199290c2c732036ce/crates/wake-core/src/services/terminal/macos.rs#L286-L348"
+        }
+      ],
+      "local_mapping": "existing structured ResumeCommand and ACK",
+      "delta": "安装探测、spawn 成功、真实恢复成功必须分开",
+      "required_before_product_adoption": [
+        "no shell assembly",
+        "no clipboard fallback",
+        "exact native ID and original CWD",
+        "no remote SSH scope"
+      ],
+      "product_adoption_approved": false,
+      "evidence_level": "pinned-source; experiments and upstream confirmation are separately labeled"
+    },
+    {
+      "id": "full-export",
+      "topic": "完整 thinking/tool I/O 导出",
+      "classification": "reject",
+      "priority": null,
+      "source": [
+        {
+          "path": "crates/wake-core/src/services/exporter.rs",
+          "lines": [
+            36,
+            88
+          ],
+          "url": "https://github.com/iAmCorey/Wake/blob/71aeca67ec80f8645d1f9d5199290c2c732036ce/crates/wake-core/src/services/exporter.rs#L36-L88"
+        },
+        {
+          "path": "crates/wake-core/src/services/exporter.rs",
+          "lines": [
+            133,
+            200
+          ],
+          "url": "https://github.com/iAmCorey/Wake/blob/71aeca67ec80f8645d1f9d5199290c2c732036ce/crates/wake-core/src/services/exporter.rs#L133-L200"
+        }
+      ],
+      "local_mapping": "existing deterministic evidence handoff",
+      "delta": "隐私/预算/确定性不同，不可替代 handoff",
+      "required_before_product_adoption": [
+        "no silent child load failures",
+        "bounded and deterministic output"
+      ],
+      "product_adoption_approved": false,
+      "evidence_level": "pinned-source; experiments and upstream confirmation are separately labeled"
+    },
+    {
+      "id": "source-cleanup",
+      "topic": "源文件清理与回收站",
+      "classification": "reject",
+      "priority": null,
+      "source": [
+        {
+          "path": "crates/wake-core/src/adapters/mod.rs",
+          "lines": [
+            106,
+            114
+          ],
+          "url": "https://github.com/iAmCorey/Wake/blob/71aeca67ec80f8645d1f9d5199290c2c732036ce/crates/wake-core/src/adapters/mod.rs#L106-L114"
+        },
+        {
+          "path": "crates/wake-core/src/adapters/dsh.rs",
+          "lines": [
+            601,
+            610
+          ],
+          "url": "https://github.com/iAmCorey/Wake/blob/71aeca67ec80f8645d1f9d5199290c2c732036ce/crates/wake-core/src/adapters/dsh.rs#L601-L610"
+        }
+      ],
+      "local_mapping": "provider source read-only boundary",
+      "delta": "源清理不是索引读取能力",
+      "required_before_product_adoption": [
+        "no source mutation",
+        "no trash dependency"
+      ],
+      "product_adoption_approved": false,
+      "evidence_level": "pinned-source; experiments and upstream confirmation are separately labeled"
+    },
+    {
+      "id": "gui-remote",
+      "topic": "GPUI/远程镜像/团队同步",
+      "classification": "reject",
+      "priority": null,
+      "source": [
+        {
+          "path": "crates/wake/Cargo.toml",
+          "lines": [
+            14,
+            31
+          ],
+          "url": "https://github.com/iAmCorey/Wake/blob/71aeca67ec80f8645d1f9d5199290c2c732036ce/crates/wake/Cargo.toml#L14-L31"
+        }
+      ],
+      "local_mapping": "CLI-first product scope",
+      "delta": "GUI 与网络功能不是本轮批准范围",
+      "required_before_product_adoption": [
+        "separate product decision"
+      ],
+      "product_adoption_approved": false,
+      "evidence_level": "pinned-source"
+    }
+  ],
+  "notes": [
+    "MIT permission does not by itself approve product reuse.",
+    "No product spec/API/schema/dependency change in this task.",
+    "The experiments reproduce ideas, not Wake application performance."
+  ]
+}

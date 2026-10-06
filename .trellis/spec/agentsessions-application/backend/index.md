@@ -110,6 +110,17 @@ adapters know *how*. Depends on `agentsessions-domain` and
   literal plain-text/CJK terms against full hit text, and bounded suggested
   calls use only real Message/Session IDs. JSON-escaped guidance bytes are
   charged before result clamping and never affect ranking or cursor identity.
+- Search display snippet (`SearchHit.text`) is a match-centered window over
+  the canonical payload `text` field, built by `snippet::build`: the earliest
+  literal `guidance::literal_terms` hit (smallest start, ties by term order)
+  anchors a 2-right : 1-left expansion up to `max_snippet_chars`; an anchor
+  that alone reaches the cap emits its leading `max_snippet_chars` slice;
+  without literal evidence (missing text, no match, semantic-only) the old
+  character prefix is kept. Case-insensitive matching maps per-character
+  lowercase expansions back to original scalar boundaries (`İ`); output is
+  always an exact contiguous slice with no synthetic characters. Window bytes
+  are charged by the existing `search_hit_charge` path, and the window never
+  changes ranking, cursors, `why_matched`, or suggested commands.
 - `Message` retrieval resolves typed Session candidates without guessing,
   selects a unique mainline placement, and returns a chronological around
   window that always retains the anchor. If only a projected anchor fits, keep
@@ -166,6 +177,63 @@ relevance retaining priority over weak repository/mainline preference.
 Wrong: fetch `page+1`, then discard noise/metadata mismatches.
 Correct: filter before top-k, preserve the bounded ranking window, then page.
 
+## Scenario: Match-centered search snippet window
+
+### 1. Scope / Trigger
+`SearchHit.text` assembly on every search path (lexical, semantic, hybrid,
+grouped or not) and every entry point that renders the shared projection
+(CLI human/robot, MCP, Robot, Web, TUI, handoff).
+
+### 2. Signatures
+`assemble_search_hit(hit, payload, session, max_snippet_chars, query_terms)`
+delegates to `snippet::build(full_text: Option<&str>, terms: &[String],
+max_snippet_chars: usize) -> Option<String>`. `terms` is the same
+`guidance::literal_terms(&query)` instance used by `why_matched`; no second
+tokenizer, prefix operator or FTS syntax is introduced.
+
+### 3. Contracts
+Text comes only from the canonical payload `text` string; missing/non-JSON
+payloads keep `text: None`. With literal evidence the snippet is an exact
+contiguous original slice anchored on the earliest hit (smallest start, ties
+by term order) and grown 2 right : 1 left until `max_snippet_chars` or the text
+boundary; an anchor that alone reaches the cap emits its leading slice. With no
+literal evidence (no match, empty terms, semantic-only) the previous
+`chars().take(max_snippet_chars)` prefix is preserved. Matching is
+case-insensitive through per-character lowercase expansion with an origin map
+back to original scalar boundaries; the expanded offsets are never sliced
+directly. Output never inserts ellipses/highlights and stays within the
+character cap; bytes are charged through the existing `search_hit_charge`
+estimate against `max_response_bytes`. The window is display-only: ranking,
+cursor digests, `why_matched`, suggestions, occurrences, evidence and facets
+are unchanged. A renderer may re-center its own bounded preview on the same
+literal terms, but must not alter the wire `text` or fall back to a prefix that
+hides a provable hit (CLI human mode does exactly this for its 120-char line).
+
+### 4. Validation & Error Matrix
+No new error variants: request budgets are already validated (floor 1); a zero
+cap degrades to an empty window instead of panicking. A missing payload row,
+non-JSON payload or non-string `text` yields `None`, never a fabricated hit.
+
+### 5. Good/Base/Bad Cases
+Good: a hit whose match sits far beyond the old prefix still shows the match in
+`text`. Base: short text is emitted whole; a query with no literal evidence
+keeps the prefix. Bad: slicing the lowercase-expanded string by its own
+offsets, emitting an empty window when the anchor exceeds the cap, or letting a
+multi-scalar expansion (`İ`) split an original scalar.
+
+### 6. Tests Required
+Assert anchor selection (earliest hit, absent earlier term), 2-right : 1-left
+expansion, anchor-over-cap leading slice, CJK bigram/emoji/combining cases, the
+`İ` expansion origin map, prefix fallback for no match/empty terms/empty/null
+text, exact-slice containment, zero-cap safety, and that clamped pages still
+charge window bytes and report `max_response_bytes`.
+
+### 7. Wrong vs Correct
+Wrong: reuse lowercase offsets as original offsets, or keep prefix truncation
+and claim the hit is invisible-by-design.
+Correct: map expansion offsets back to original scalar boundaries and emit a
+bounded, contiguous, evidence-anchored window.
+
 ## Scenario: Pure relocation identity and plan policy
 
 ### 1. Scope / Trigger
@@ -215,6 +283,12 @@ Correct: receive time and ownership digests through explicit arguments.
 
 ## Quality Check
 
+- New or modified filesystem test helpers must not use PID + wall-clock time
+  alone as a unique directory name: even `as_nanos()` can repeat across parallel
+  callers. Use a process-local atomic nonce and exclusive `create_dir` for the
+  fixture leaf, rather than silently reusing it with `create_dir_all`. Cover
+  parallel allocations at a fixed clock tick without serializing the suite
+  (see `candle_embedding::tests::tempfile_dirs_are_isolated_for_parallel_callers_at_one_clock_tick`).
 - No concrete adapter imports; no `rusqlite`, no `std::fs` reads of sources.
 - Handlers are exhaustive over `AppRequest`; no catch-all that silently drops
   a new request kind.

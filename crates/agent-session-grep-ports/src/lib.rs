@@ -365,11 +365,19 @@ pub struct SearchHit {
     /// 任何 placement（无归属会话）。
     pub session_id: Option<String>,
     /// 命中实体正文的摘要，由 Application 检索装配时填充（保序批量取 payload
-    /// 后截取 `text` 字段，按 `max_snippet_chars` 截前缀）。`None` 表示该实体
-    /// 没有可展示正文。
+    /// 的规范 `text` 字段后构建显示窗口）。`None` 表示该实体没有可展示正文。
+    ///
+    /// 摘要字符数 ≤ `max_snippet_chars`，且始终是原文的连续切片：存在可证明的
+    /// 字面命中（与 `why_matched` 同源词元）时，以最早命中为中心按 2 右 : 1 左
+    /// 交替扩展；锚点自身超过上限时取锚点起始的 `max_snippet_chars` 个字符；
+    /// 无字面证据（含语义-only 命中）时回退为正文前缀。不插入省略号、高亮或
+    /// 任何合成字符；大小写不敏感匹配把逐字符小写展开回映到原字符边界（如
+    /// `İ`），只保证 Unicode 标量边界、不保证字素簇完整。摘要字节经既有
+    /// 命中级字节估算计入 `max_response_bytes`（不分入口另行计费）。
     ///
     /// robot/json/jsonl 序列化器输出为命中对象的 `text` 字段；人类渲染器打印
-    /// 同一摘要作为 snippet 行（R4.3：human 输出不变）。
+    /// 同一摘要的片段行（human 预览会再按 `why_matched` 词元居中，见 CLI
+    /// `render_search`）。
     pub text: Option<String>,
     /// 确定性字面量命中证据（search-match-guidance）：由 Application 用与索引侧
     /// 同一 CJK/plain-text 词元分析对用户**字面查询**派生，逐词断言在命中完整正文

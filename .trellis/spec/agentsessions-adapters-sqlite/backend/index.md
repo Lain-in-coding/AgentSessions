@@ -311,8 +311,13 @@ batch_size, encode)` returns indexed/skipped/cleared counts.
 Read opens never create/migrate a catalog and use a finite 1-second busy timeout.
 SQLite source capture uses Backup under a pinned read transaction, with a
 128 MiB logical-size ceiling and guarded temporary destination. Never checkpoint
-or write the provider source. Logical fingerprints include committed WAL data
-and remain current across an external checkpoint without logical changes.
+or write the provider source database or its WAL; attaching a read-only
+connection to a live WAL source does let SQLite write reader marks into the
+`-shm` wal-index (measured 2026-09-29), so the executable immutability claim is
+"database + WAL bytes unchanged, and the provider parser never opens the source
+at all" rather than "all three files are byte-identical". Logical fingerprints
+include committed WAL data and remain current across an external checkpoint
+without logical changes.
 Per-session resume claims share the existing `(source_path, session_id)` key;
 no schema migration is required. Parser semantic version 2 forces old source
 scans to reparse. Provider parser `TempDb` keeps `conn` before `_guard` so
@@ -339,17 +344,175 @@ Base: repeated unchanged logical snapshot is a no-op. Bad: copying only the
 main DB, silently merging sessions, or clearing old vectors before encoding.
 
 ### 6. Tests Required
-Assert absent/stale/read-under-writer catalog behavior, unchanged source bytes,
-WAL-only updates/checkpoints, per-session claims, invalid no-op batches,
-encoder rollback, keyset query plans, finite scores and bounded top-k equivalence.
-Both SQLite provider crates must create real temporary WAL/SHM files, then
-assert all owned files disappear after successful reads and query errors.
+Assert absent/stale/read-under-writer catalog behavior, unchanged source
+database/WAL bytes, WAL-only updates/checkpoints, per-session claims, invalid
+no-op batches, encoder rollback, keyset query plans, finite scores and bounded
+top-k equivalence. Each SQLite-reading provider crate (`opencode`,
+`cursor`, `hermes/sqlite-state-v1`) must create real temporary WAL/SHM files
+while parsing its private read-only copy, then assert all owned files disappear
+after successful reads and query errors (the hermes and cursor copy guards
+also remove a stray `-journal`).
 
 ### 7. Wrong vs Correct
 Wrong: call migration from a read command or return early before batch validation.
 Correct: lease writes explicitly and validate all incoming facts before no-op.
 
 ---
+
+## Scenario: Batch-scoped commit state (measured 2026-09-29)
+
+### 1. Scope / Trigger
+Initial ingest at 10k-1M messages: latency and peak RSS of one `sync` commit.
+
+### 2. Signatures
+`commit_source_batches_if_changed` reads only the batch's own sources, the ids
+they observe, and the claim rows of those ids (`CatalogStateSnapshot`).
+`begin_index_batch_with_manifest` / `verify_pending_in_tx(..., manifest)` take
+one `CanonicalBatchManifest` per commit. Write connections run
+`PRAGMA cache_size = -131072` (session-level; `synchronous`/`journal_mode`
+unchanged).
+
+### 3. Contracts
+- Do not reintroduce whole-catalog maps in the commit path: membership and
+  relation rows must be loaded per batch sources plus candidate ids. Tables
+  without a candidate-index (e.g. `source_membership.message_id`) may be
+  scanned but must keep only candidate rows in memory (O(batch)).
+- The durable manifest is computed once per commit; `verify_pending_in_tx`
+  must still compare it against the `index_batches` row and reject tampering.
+  Accepted trade-off (2026-09-29): the pre-optimization "recompute the manifest
+  from the transaction inputs" defence was dropped - `verify_pending_in_tx`
+  (`crates/agent-session-grep-adapters-sqlite/src/lib.rs:6036-6043,6114-6127`)
+  now compares the caller-supplied manifest against the stored row instead of
+  recomputing it; behaviour is equivalent and the durable-intent tamper tests
+  still reject DB-row tampering. Optional hardening: a debug assertion or an
+  opt-in recompute.
+- An unchanged (fingerprint-matched) source produced no commit batch, so the
+  post-read `verify_snapshot` re-read/re-hash must be skipped for it; sources
+  that were actually parsed keep the full verification.
+- `cache_size` is a performance knob only: never trade `synchronous`, journal
+  mode, or single-commit atomicity for throughput.
+
+### 4. Validation & Error Matrix
+Whole-catalog loads are not a correctness signal; removing them must not change
+any stored row. Evidence boundaries (verified 2026-09-29):
+
+- `research/scripts/verify_equiv.py` compares 15 tables + `active_generation`
+  only; its membership coverage is 2 tables (`source_membership`,
+  `source_placement_membership`), the synthetic corpus has no tool_use/usage
+  records so `tool_activities`/`usage_events` (and their membership tables)
+  compare 0 rows, it does not exercise no-op / shrink-replacement / tombstone
+  scenarios, and it excludes the `index_batches` manifest/replacement columns.
+  Its historical runs were not persisted as artifacts.
+- Sealed extended evidence:
+  `research/results/auxiliary/equiv-extended-10k.json` from
+  `research/scripts/verify_equiv_extended.py` runs initial -> no-op -> shrink
+  replacement -> post-replacement no-op -> empty-source tombstone -> second
+  no-op with both binaries against the same absolute source paths, and compares
+  25 non-shadow tables (including all four membership tables) by row-content
+  hash plus `active_generation`: 0 mismatches (generation 3 == 3). FTS5 shadow
+  tables and the per-fresh-catalog installation namespace id/wall-clock columns
+  are excluded with recorded reasons; the tool_use/usage tables remain 0-row
+  empty comparisons.
+
+### 5. Good/Base/Bad Cases
+Good: a 200k-message batch against a 1M catalog loads ~200k candidate rows and
+commits in one transaction. Base: an unchanged re-sync skips parsing, the
+double read, and the commit. Bad: rebuilding catalog-sized claimer maps or
+re-reading every unchanged source.
+
+### 6. Tests Required
+- Adapter suite (outbox/CAS/generation, identity fidelity, relation
+  completeness, durable-intent tamper rejection) stays green.
+- Multi-batch ingest equivalence: the same corpus split into many batches must
+  produce identical catalog/projection/relation rows as a single batch.
+
+### 7. Wrong vs Correct
+Wrong: load `source_membership`/`message_placements`/`message_edges` whole and
+build catalog-sized maps on every commit (the 6th 200k batch against a 1M
+catalog spent 23.417 s in `load_catalog_state` and loaded 1,000,000 placement +
+900,000 edge rows; sealed trace
+`research/results/auxiliary/state-load-diagnostic-before.jsonl`).
+Correct: load the batch's sources + candidate ids, scan without retaining, and
+keep the durable manifest to one computation.
+
+## Scenario: Historical empty-placeholder repair (parser version 3)
+
+### 1. Scope / Trigger
+A source was first ingested at zero bytes by the historical first-empty path,
+which persisted an `empty` provider namespace/location for it, and a later parse
+now proves a real provider (the CLI-side lifecycle is owned by the CLI).
+
+### 2. Signatures
+`SqliteStore::repairable_empty_placeholder(conn, source_path, namespace_id) ->
+PortResult<bool>`;
+`SqliteStore::authorized_placeholder_rebinds(tx, sources) ->
+PortResult<BTreeSet<String>>`;
+`persist_installation_in_tx(..., authorized_placeholder_rebind: bool)`;
+`PARSER_SEMANTIC_VERSION = 3`.
+
+### 3. Contracts
+`resolve_or_allocate_installation_namespace` may return a different namespace
+for a source only when the persisted binding is a provable empty placeholder:
+the namespace provider is exactly `empty`, the current scan is zero bytes with
+the empty-blake3 fingerprint and its provider is NULL or `empty`, and there are
+no message/placement/activity/usage claims. Every surviving claim must match
+the exact historical empty document/session derivation, its full typed
+`fts_ids.id_json` identity, its catalog payload, and its membership document
+attribution. A Reconstructed stability label alone is not placeholder proof:
+real containers can have that label too. Re-derivation only checks existing
+proof and never creates or rewrites a native identity.
+Resume metadata may only describe that exact placeholder session under provider
+`empty`, with both native-session and working-directory values NULL, both
+states exactly `missing`, and `pair_observed = 0`. Foreign identities, cwd facts,
+unknown states, missing payload/sidecar evidence, aliases or relocation
+provenance fail closed. Anything unprovable fails closed with
+`source belongs to another provider installation`; the placeholder path never
+runs legacy provenance recovery and never reconstructs identity.
+Authorization is re-evaluated inside the write transaction by
+`authorized_placeholder_rebinds`, before the batch replaces the proof
+(`source_scans`, memberships, catalog identities); `persist_installation_in_tx`
+then only re-checks that authorization flag plus `prior_provider == "empty"`.
+A pre-parse reservation alone never authorizes a rebind, and the repair is
+scoped to that source path: other sources sharing the placeholder
+namespace/location keep their rows. `PARSER_SEMANTIC_VERSION = 3` makes sync
+treat sources stored under an older parser version as changed, which is how the
+corrected staging reaches already-scanned sources without byte changes.
+
+### 4. Validation & Error Matrix
+Provable placeholder + real provider -> binding replaced once, placeholder
+entities retired by the same replacement batch. Real claim, unresolved
+identity, ambiguous provenance, non-empty scan, or foreign fingerprint -> hard
+`invalid_request` conflict, prior binding and rows untouched. Transaction
+failure or a racing writer -> nothing persisted (writer lease and CAS/outbox
+unchanged).
+
+### 5. Good/Base/Bad Cases
+Good: a legacy zero-byte `empty` binding is repaired to `claude-code` and the
+old placeholder documents disappear from search.
+Base: an empty binding rebuilt by the fixed binary is never created again, and
+unrelated sources keep their bindings.
+Bad: a forged `msg_v1_*` claim on the placeholder source blocks the rebind.
+
+### 6. Tests Required
+`cargo --offline --locked test -p agent-session-grep-cli --test e2e` (repair
+success, forged-claim refusal, standalone empty replacement) plus the SQLite
+adapter unit tests for the proof predicate and version-stale reparse. Required
+negative controls mutate one proof surface at a time: exact container identity,
+sidecar, catalog payload, document attribution, scan provider, native-session
+metadata, cwd metadata, and observed-pair state. A refused rebind must leave the
+live catalog, memberships, installation registry and generation unchanged.
+Exercise shared placeholders until the last claimant is replaced, proof changes
+after pre-parse reservation, transaction rollback on failed activation, and
+real-provider/retired-alias boundaries. The unchanged parser-version-2 Hermes
+snapshot must be reparsed once by version 3, preserve partial history, then no-op.
+
+### 7. Wrong vs Correct
+Wrong: authorize the rebind from the pre-parse reservation, or read the proof
+after the batch has already replaced the scan row and memberships.
+Correct: verify exact historical container and metadata proof at the top of the
+write transaction, pass the resulting authorization into the persist step, and
+keep everything else fail-closed; neither an `empty` namespace nor a
+Reconstructed sidecar label is sufficient on its own.
 
 ## Scenario: Journal retention compaction (schema v19)
 
