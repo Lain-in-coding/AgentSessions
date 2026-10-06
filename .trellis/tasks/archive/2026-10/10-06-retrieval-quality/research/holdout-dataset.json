@@ -1,0 +1,569 @@
+{
+  "schema_version": 1,
+  "generator": "retrieval_holdout.py",
+  "kind": "deterministic_synthetic",
+  "contains_real_transcripts": false,
+  "corpus": {
+    "provider": "claude-code",
+    "sessions": 12,
+    "messages": 120,
+    "files": [
+      "holdout-s00.jsonl",
+      "holdout-s01.jsonl",
+      "holdout-s02.jsonl",
+      "holdout-s03.jsonl",
+      "holdout-s04.jsonl",
+      "holdout-s05.jsonl",
+      "holdout-s06.jsonl",
+      "holdout-s07.jsonl",
+      "holdout-s08.jsonl",
+      "holdout-s09.jsonl",
+      "holdout-s10.jsonl",
+      "holdout-s11.jsonl"
+    ],
+    "query_reachability_contract": "gold queries are remembered-phrase queries over the gold text; long_tail queries must be lexically unreachable (marker beyond the 16,000-char index cap)"
+  },
+  "buckets": [
+    "zh",
+    "en",
+    "code",
+    "long_body",
+    "long_tail",
+    "near_dup",
+    "no_result"
+  ],
+  "queries": [
+    {
+      "id": "zh-0-1",
+      "bucket": "zh",
+      "query": "zhmarkerk01 备份策略 每日快照 排查 对比",
+      "gold_message_ids": [
+        "msg_v1_00000002-0000-4000-8000-000000000002"
+      ],
+      "marker": "zhmarkerk01",
+      "expect_lexical_reachable": true
+    },
+    {
+      "id": "zh-0-2",
+      "bucket": "zh",
+      "query": "zhmarkerk02 备份策略 每日快照 复盘 对比",
+      "gold_message_ids": [
+        "msg_v1_00000003-0000-4000-8000-000000000003"
+      ],
+      "marker": "zhmarkerk02",
+      "expect_lexical_reachable": true
+    },
+    {
+      "id": "zh-1-1",
+      "bucket": "zh",
+      "query": "zhmarkerk11 索引重建 全量重投影 排查 耗时",
+      "gold_message_ids": [
+        "msg_v1_00000012-0000-4000-8000-000000000012"
+      ],
+      "marker": "zhmarkerk11",
+      "expect_lexical_reachable": true
+    },
+    {
+      "id": "zh-1-2",
+      "bucket": "zh",
+      "query": "zhmarkerk12 索引重建 全量重投影 复盘 耗时",
+      "gold_message_ids": [
+        "msg_v1_00000013-0000-4000-8000-000000000013"
+      ],
+      "marker": "zhmarkerk12",
+      "expect_lexical_reachable": true
+    },
+    {
+      "id": "zh-2-1",
+      "bucket": "zh",
+      "query": "zhmarkerk21 游标过期 十五分钟 排查 续页",
+      "gold_message_ids": [
+        "msg_v1_00000022-0000-4000-8000-000000000022"
+      ],
+      "marker": "zhmarkerk21",
+      "expect_lexical_reachable": true
+    },
+    {
+      "id": "zh-2-2",
+      "bucket": "zh",
+      "query": "zhmarkerk22 游标过期 十五分钟 复盘 续页",
+      "gold_message_ids": [
+        "msg_v1_00000023-0000-4000-8000-000000000023"
+      ],
+      "marker": "zhmarkerk22",
+      "expect_lexical_reachable": true
+    },
+    {
+      "id": "zh-3-1",
+      "bucket": "zh",
+      "query": "zhmarkerk31 脱敏规则 默认掩码 排查 审计",
+      "gold_message_ids": [
+        "msg_v1_00000032-0000-4000-8000-000000000032"
+      ],
+      "marker": "zhmarkerk31",
+      "expect_lexical_reachable": true
+    },
+    {
+      "id": "zh-3-2",
+      "bucket": "zh",
+      "query": "zhmarkerk32 脱敏规则 默认掩码 复盘 审计",
+      "gold_message_ids": [
+        "msg_v1_00000033-0000-4000-8000-000000000033"
+      ],
+      "marker": "zhmarkerk32",
+      "expect_lexical_reachable": true
+    },
+    {
+      "id": "zh-4-1",
+      "bucket": "zh",
+      "query": "zhmarkerk41 向量维度 三百八十四 排查 存储",
+      "gold_message_ids": [
+        "msg_v1_00000042-0000-4000-8000-000000000042"
+      ],
+      "marker": "zhmarkerk41",
+      "expect_lexical_reachable": true
+    },
+    {
+      "id": "zh-4-2",
+      "bucket": "zh",
+      "query": "zhmarkerk42 向量维度 三百八十四 复盘 存储",
+      "gold_message_ids": [
+        "msg_v1_00000043-0000-4000-8000-000000000043"
+      ],
+      "marker": "zhmarkerk42",
+      "expect_lexical_reachable": true
+    },
+    {
+      "id": "en-0-1",
+      "bucket": "en",
+      "query": "enmarkerk51 retry budget capped at three attempts triaged",
+      "gold_message_ids": [
+        "msg_v1_00000052-0000-4000-8000-000000000052"
+      ],
+      "marker": "enmarkerk51",
+      "expect_lexical_reachable": true
+    },
+    {
+      "id": "en-0-2",
+      "bucket": "en",
+      "query": "enmarkerk52 retry budget capped at three attempts reviewed",
+      "gold_message_ids": [
+        "msg_v1_00000053-0000-4000-8000-000000000053"
+      ],
+      "marker": "enmarkerk52",
+      "expect_lexical_reachable": true
+    },
+    {
+      "id": "en-1-1",
+      "bucket": "en",
+      "query": "enmarkerk61 cold cache warmed by a small script triaged",
+      "gold_message_ids": [
+        "msg_v1_00000062-0000-4000-8000-000000000062"
+      ],
+      "marker": "enmarkerk61",
+      "expect_lexical_reachable": true
+    },
+    {
+      "id": "en-1-2",
+      "bucket": "en",
+      "query": "enmarkerk62 cold cache warmed by a small script reviewed",
+      "gold_message_ids": [
+        "msg_v1_00000063-0000-4000-8000-000000000063"
+      ],
+      "marker": "enmarkerk62",
+      "expect_lexical_reachable": true
+    },
+    {
+      "id": "en-2-1",
+      "bucket": "en",
+      "query": "enmarkerk71 lockfile drift checked before tagging triaged",
+      "gold_message_ids": [
+        "msg_v1_00000072-0000-4000-8000-000000000072"
+      ],
+      "marker": "enmarkerk71",
+      "expect_lexical_reachable": true
+    },
+    {
+      "id": "en-2-2",
+      "bucket": "en",
+      "query": "enmarkerk72 lockfile drift checked before tagging reviewed",
+      "gold_message_ids": [
+        "msg_v1_00000073-0000-4000-8000-000000000073"
+      ],
+      "marker": "enmarkerk72",
+      "expect_lexical_reachable": true
+    },
+    {
+      "id": "en-3-1",
+      "bucket": "en",
+      "query": "enmarkerk81 audit ordering stable and explicit triaged",
+      "gold_message_ids": [
+        "msg_v1_00000082-0000-4000-8000-000000000082"
+      ],
+      "marker": "enmarkerk81",
+      "expect_lexical_reachable": true
+    },
+    {
+      "id": "en-3-2",
+      "bucket": "en",
+      "query": "enmarkerk82 audit ordering stable and explicit reviewed",
+      "gold_message_ids": [
+        "msg_v1_00000083-0000-4000-8000-000000000083"
+      ],
+      "marker": "enmarkerk82",
+      "expect_lexical_reachable": true
+    },
+    {
+      "id": "en-4-1",
+      "bucket": "en",
+      "query": "enmarkerk91 summary facts checkable only triaged",
+      "gold_message_ids": [
+        "msg_v1_00000092-0000-4000-8000-000000000092"
+      ],
+      "marker": "enmarkerk91",
+      "expect_lexical_reachable": true
+    },
+    {
+      "id": "en-4-2",
+      "bucket": "en",
+      "query": "enmarkerk92 summary facts checkable only reviewed",
+      "gold_message_ids": [
+        "msg_v1_00000093-0000-4000-8000-000000000093"
+      ],
+      "marker": "enmarkerk92",
+      "expect_lexical_reachable": true
+    },
+    {
+      "id": "code-0-3",
+      "bucket": "code",
+      "query": "codemarkerk03 resolve_symbol_table backend/query/router.go nil map write canary",
+      "gold_message_ids": [
+        "msg_v1_00000004-0000-4000-8000-000000000004"
+      ],
+      "marker": "codemarkerk03",
+      "expect_lexical_reachable": true
+    },
+    {
+      "id": "code-0-4",
+      "bucket": "code",
+      "query": "codemarkerk04 resolve_symbol_table backend/query/router.go nil map write hotfix",
+      "gold_message_ids": [
+        "msg_v1_00000005-0000-4000-8000-000000000005"
+      ],
+      "marker": "codemarkerk04",
+      "expect_lexical_reachable": true
+    },
+    {
+      "id": "code-1-3",
+      "bucket": "code",
+      "query": "codemarkerk13 drain_pending src/queue/drain.rs index out of bounds canary",
+      "gold_message_ids": [
+        "msg_v1_00000014-0000-4000-8000-000000000014"
+      ],
+      "marker": "codemarkerk13",
+      "expect_lexical_reachable": true
+    },
+    {
+      "id": "code-1-4",
+      "bucket": "code",
+      "query": "codemarkerk14 drain_pending src/queue/drain.rs index out of bounds hotfix",
+      "gold_message_ids": [
+        "msg_v1_00000015-0000-4000-8000-000000000015"
+      ],
+      "marker": "codemarkerk14",
+      "expect_lexical_reachable": true
+    },
+    {
+      "id": "code-2-3",
+      "bucket": "code",
+      "query": "codemarkerk23 parse_search_instant app/src/time.rs invalid RFC3339 input canary",
+      "gold_message_ids": [
+        "msg_v1_00000024-0000-4000-8000-000000000024"
+      ],
+      "marker": "codemarkerk23",
+      "expect_lexical_reachable": true
+    },
+    {
+      "id": "code-2-4",
+      "bucket": "code",
+      "query": "codemarkerk24 parse_search_instant app/src/time.rs invalid RFC3339 input hotfix",
+      "gold_message_ids": [
+        "msg_v1_00000025-0000-4000-8000-000000000025"
+      ],
+      "marker": "codemarkerk24",
+      "expect_lexical_reachable": true
+    },
+    {
+      "id": "code-3-3",
+      "bucket": "code",
+      "query": "codemarkerk33 advance_generation_in_tx store/src/generation.rs stale baseline canary",
+      "gold_message_ids": [
+        "msg_v1_00000034-0000-4000-8000-000000000034"
+      ],
+      "marker": "codemarkerk33",
+      "expect_lexical_reachable": true
+    },
+    {
+      "id": "code-3-4",
+      "bucket": "code",
+      "query": "codemarkerk34 advance_generation_in_tx store/src/generation.rs stale baseline hotfix",
+      "gold_message_ids": [
+        "msg_v1_00000035-0000-4000-8000-000000000035"
+      ],
+      "marker": "codemarkerk34",
+      "expect_lexical_reachable": true
+    },
+    {
+      "id": "code-4-3",
+      "bucket": "code",
+      "query": "codemarkerk43 bounded_index_text app/src/retention.rs char boundary panic canary",
+      "gold_message_ids": [
+        "msg_v1_00000044-0000-4000-8000-000000000044"
+      ],
+      "marker": "codemarkerk43",
+      "expect_lexical_reachable": true
+    },
+    {
+      "id": "code-4-4",
+      "bucket": "code",
+      "query": "codemarkerk44 bounded_index_text app/src/retention.rs char boundary panic hotfix",
+      "gold_message_ids": [
+        "msg_v1_00000045-0000-4000-8000-000000000045"
+      ],
+      "marker": "codemarkerk44",
+      "expect_lexical_reachable": true
+    },
+    {
+      "id": "long-body-0",
+      "bucket": "long_body",
+      "query": "longmarkerbody5 处理结论 保留旧索引",
+      "gold_message_ids": [
+        "msg_v1_00000054-0000-4000-8000-000000000054"
+      ],
+      "marker": "longmarkerbody5",
+      "expect_lexical_reachable": true
+    },
+    {
+      "id": "long-tail-0",
+      "bucket": "long_tail",
+      "query": "longmarkertail5 最终结论 保留旧索引",
+      "gold_message_ids": [
+        "msg_v1_00000055-0000-4000-8000-000000000055"
+      ],
+      "marker": "longmarkertail5",
+      "expect_lexical_reachable": false
+    },
+    {
+      "id": "long-body-1",
+      "bucket": "long_body",
+      "query": "longmarkerbody6 处理结论 保留旧索引",
+      "gold_message_ids": [
+        "msg_v1_00000064-0000-4000-8000-000000000064"
+      ],
+      "marker": "longmarkerbody6",
+      "expect_lexical_reachable": true
+    },
+    {
+      "id": "long-tail-1",
+      "bucket": "long_tail",
+      "query": "longmarkertail6 最终结论 保留旧索引",
+      "gold_message_ids": [
+        "msg_v1_00000065-0000-4000-8000-000000000065"
+      ],
+      "marker": "longmarkertail6",
+      "expect_lexical_reachable": false
+    },
+    {
+      "id": "long-body-2",
+      "bucket": "long_body",
+      "query": "longmarkerbody7 处理结论 保留旧索引",
+      "gold_message_ids": [
+        "msg_v1_00000074-0000-4000-8000-000000000074"
+      ],
+      "marker": "longmarkerbody7",
+      "expect_lexical_reachable": true
+    },
+    {
+      "id": "long-tail-2",
+      "bucket": "long_tail",
+      "query": "longmarkertail7 最终结论 保留旧索引",
+      "gold_message_ids": [
+        "msg_v1_00000075-0000-4000-8000-000000000075"
+      ],
+      "marker": "longmarkertail7",
+      "expect_lexical_reachable": false
+    },
+    {
+      "id": "long-body-3",
+      "bucket": "long_body",
+      "query": "longmarkerbody8 处理结论 保留旧索引",
+      "gold_message_ids": [
+        "msg_v1_00000084-0000-4000-8000-000000000084"
+      ],
+      "marker": "longmarkerbody8",
+      "expect_lexical_reachable": true
+    },
+    {
+      "id": "long-tail-3",
+      "bucket": "long_tail",
+      "query": "longmarkertail8 最终结论 保留旧索引",
+      "gold_message_ids": [
+        "msg_v1_00000085-0000-4000-8000-000000000085"
+      ],
+      "marker": "longmarkertail8",
+      "expect_lexical_reachable": false
+    },
+    {
+      "id": "dup-0-a",
+      "bucket": "near_dup",
+      "query": "dupmarkerk00 迁移中断 先保留 索引",
+      "gold_message_ids": [
+        "msg_v1_00000096-0000-4000-8000-000000000096",
+        "msg_v1_00000106-0000-4000-8000-000000000106"
+      ],
+      "marker": "dupmarkerk00",
+      "expect_lexical_reachable": true
+    },
+    {
+      "id": "dup-0-b",
+      "bucket": "near_dup",
+      "query": "dupmarkerk00 fingerprint 重放批次",
+      "gold_message_ids": [
+        "msg_v1_00000096-0000-4000-8000-000000000096",
+        "msg_v1_00000106-0000-4000-8000-000000000106"
+      ],
+      "marker": "dupmarkerk00",
+      "expect_lexical_reachable": true
+    },
+    {
+      "id": "dup-1-a",
+      "bucket": "near_dup",
+      "query": "dupmarkerk01 写日志前先脱敏 保留审计顺序",
+      "gold_message_ids": [
+        "msg_v1_00000097-0000-4000-8000-000000000097",
+        "msg_v1_00000107-0000-4000-8000-000000000107"
+      ],
+      "marker": "dupmarkerk01",
+      "expect_lexical_reachable": true
+    },
+    {
+      "id": "dup-1-b",
+      "bucket": "near_dup",
+      "query": "dupmarkerk01 跨边界输出 统一走掩码规则",
+      "gold_message_ids": [
+        "msg_v1_00000097-0000-4000-8000-000000000097",
+        "msg_v1_00000107-0000-4000-8000-000000000107"
+      ],
+      "marker": "dupmarkerk01",
+      "expect_lexical_reachable": true
+    },
+    {
+      "id": "dup-2-a",
+      "bucket": "near_dup",
+      "query": "dupmarkerk02 向量重建 单事务完成",
+      "gold_message_ids": [
+        "msg_v1_00000098-0000-4000-8000-000000000098",
+        "msg_v1_00000116-0000-4000-8000-000000000116"
+      ],
+      "marker": "dupmarkerk02",
+      "expect_lexical_reachable": true
+    },
+    {
+      "id": "dup-2-b",
+      "bucket": "near_dup",
+      "query": "dupmarkerk02 失败时回滚全部替换",
+      "gold_message_ids": [
+        "msg_v1_00000098-0000-4000-8000-000000000098",
+        "msg_v1_00000116-0000-4000-8000-000000000116"
+      ],
+      "marker": "dupmarkerk02",
+      "expect_lexical_reachable": true
+    },
+    {
+      "id": "dup-3-a",
+      "bucket": "near_dup",
+      "query": "dupmarkerk03 分页令牌绑定查询摘要",
+      "gold_message_ids": [
+        "msg_v1_00000108-0000-4000-8000-000000000108",
+        "msg_v1_00000117-0000-4000-8000-000000000117"
+      ],
+      "marker": "dupmarkerk03",
+      "expect_lexical_reachable": true
+    },
+    {
+      "id": "dup-3-b",
+      "bucket": "near_dup",
+      "query": "dupmarkerk03 过期后显式报错",
+      "gold_message_ids": [
+        "msg_v1_00000108-0000-4000-8000-000000000108",
+        "msg_v1_00000117-0000-4000-8000-000000000117"
+      ],
+      "marker": "dupmarkerk03",
+      "expect_lexical_reachable": true
+    },
+    {
+      "id": "none-0",
+      "bucket": "no_result",
+      "query": "voidmarkerk00 zzqxjw kqwwzpt nzqxwv",
+      "gold_message_ids": [],
+      "marker": "voidmarkerk00",
+      "expect_lexical_reachable": false
+    },
+    {
+      "id": "none-1",
+      "bucket": "no_result",
+      "query": "voidmarkerk01 zzqxjw kqwwzpt nzqxwv",
+      "gold_message_ids": [],
+      "marker": "voidmarkerk01",
+      "expect_lexical_reachable": false
+    },
+    {
+      "id": "none-2",
+      "bucket": "no_result",
+      "query": "voidmarkerk02 zzqxjw kqwwzpt nzqxwv",
+      "gold_message_ids": [],
+      "marker": "voidmarkerk02",
+      "expect_lexical_reachable": false
+    },
+    {
+      "id": "none-3",
+      "bucket": "no_result",
+      "query": "voidmarkerk03 zzqxjw kqwwzpt nzqxwv",
+      "gold_message_ids": [],
+      "marker": "voidmarkerk03",
+      "expect_lexical_reachable": false
+    },
+    {
+      "id": "none-4",
+      "bucket": "no_result",
+      "query": "voidmarkerk04 zzqxjw kqwwzpt nzqxwv",
+      "gold_message_ids": [],
+      "marker": "voidmarkerk04",
+      "expect_lexical_reachable": false
+    },
+    {
+      "id": "none-5",
+      "bucket": "no_result",
+      "query": "voidmarkerk05 zzqxjw kqwwzpt nzqxwv",
+      "gold_message_ids": [],
+      "marker": "voidmarkerk05",
+      "expect_lexical_reachable": false
+    },
+    {
+      "id": "none-6",
+      "bucket": "no_result",
+      "query": "voidmarkerk06 zzqxjw kqwwzpt nzqxwv",
+      "gold_message_ids": [],
+      "marker": "voidmarkerk06",
+      "expect_lexical_reachable": false
+    },
+    {
+      "id": "none-7",
+      "bucket": "no_result",
+      "query": "voidmarkerk07 zzqxjw kqwwzpt nzqxwv",
+      "gold_message_ids": [],
+      "marker": "voidmarkerk07",
+      "expect_lexical_reachable": false
+    }
+  ]
+}

@@ -62,9 +62,19 @@ pub fn recency_decay(age_ms: i64) -> f64 {
 /// 惩罚与加分同量纲、同一表达式内合成后才钳制到 0——先钳制再加分会让所有被
 /// 钳到 0 的命中"凭偏好复活"，顺序失去意义。
 ///
+/// 证据门（B4，D3 边界 1）：`relevance <= 0`（含 NaN）视为零证据候选，直接
+/// 返回 0.0——recency/repo 偏好信号只能放大已准入的证据，不得把"无证据"变成
+/// "有候选"。准入本身属于检索端口（FTS MATCH / 相似度下限），此处的防御锁死
+/// 未来新增候选源（ANN 平局、外部 rerank）忘记设门的情形；当前生产 lexical
+/// 命中分恒 > 0，防御不可达但必须存在且有测试锚定。
+///
 /// 展示的 `score` 字段即本函数输出；relevance 原值不保留在命中结构里
 /// （why_matched/guidance 不消费 score，语义不变）。
 pub fn final_score(relevance: f32, age_ms: i64, is_sidechain: bool, in_current_repo: bool) -> f32 {
+    // `<= 0` 与 NaN 都视为零证据（NaN 不满足任何序关系，单独判定）。
+    if relevance <= 0.0 || relevance.is_nan() {
+        return 0.0;
+    }
     let mut score = f64::from(relevance) * recency_decay(age_ms);
     if is_sidechain {
         score -= f64::from(SIDECHAIN_SCORE_PENALTY);
@@ -217,6 +227,32 @@ mod tests {
         // A weak current-repository hit cannot displace a strong external hit.
         assert!(final_score(1.0 / 572.0, 0, false, true) < final_score(top, 0, false, false));
         assert!((final_score(top, 0, true, true) - top * 1.25).abs() < 1e-8);
+    }
+
+    // ---- 证据门（B4）：零证据候选不得仅凭 repo/recency 偏好得正分 ----
+
+    #[test]
+    fn final_score_zero_evidence_never_gains_boost() {
+        // 零/负/NaN relevance：无论多新（0 龄）、是否属于当前仓库，都不得因
+        // 偏好信号复活为正分（D3 边界 1；当前不可达，防未来候选源爆雷）。
+        for relevance in [0.0, -0.0, -1.0, f32::NAN, f32::NEG_INFINITY] {
+            for in_repo in [false, true] {
+                for age_ms in [0, i64::MAX / 2] {
+                    assert_eq!(
+                        final_score(relevance, age_ms, false, in_repo),
+                        0.0,
+                        "zero/negative/NaN relevance {relevance} must stay 0 (repo={in_repo})"
+                    );
+                }
+            }
+        }
+        // 纯偏好差在零证据上没有排序能力：repo/新 与 非 repo/老 同为 0.0。
+        assert_eq!(
+            final_score(0.0, 0, false, true),
+            final_score(0.0, i64::MAX / 2, false, false)
+        );
+        // 已准入的正证据仍按原信号放大（防御不改变既有排序语义）。
+        assert!(final_score(0.5, 0, false, true) > final_score(0.5, 0, false, false));
     }
 
     // ---- 单一函数确定性：同输入同输出 ----

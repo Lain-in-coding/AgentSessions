@@ -36,11 +36,23 @@ use agent_session_grep_ports::{
 use relocation::{InstallationAssignment, RelocationManifest};
 use rusqlite::{Connection, OptionalExtension};
 use std::any::Any;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// 语义证据门默认相似度下限（B4）：`query_semantic_filtered` 在候选进入 top-k
+/// 堆**之前**丢弃 `cosine_similarity < floor` 的候选（证据门同样遵守
+/// filter-before-topk 不变量），hybrid 的 RRF 名次分因此只作用于有相似度证据
+/// 的语义候选——零相似度向量不能再仅凭名次进入融合结果。
+///
+/// 取值由独立 holdout 的阈值扫描决定（见
+/// `.trellis/tasks/10-06-retrieval-quality/research/` 的 `threshold-scan.json`
+/// 与评测报告）；`0.0` 表示仅保留防御路径（只排除负相似度候选）。
+/// 覆盖通道：[`SqliteStore::set_semantic_similarity_floor`]（测试/评测）与
+/// CLI 环境变量 `ASG_SEMANTIC_SIMILARITY_FLOOR`（显式注入，仅评测使用）。
+pub const SEMANTIC_SIMILARITY_FLOOR_DEFAULT: f32 = 0.2;
 
 /// Translate adapter failures into the stable port error vocabulary.
 ///
@@ -1676,6 +1688,10 @@ pub struct SqliteStore {
     /// 全部方法降级为空/未就绪。设置它是调用方声明"这些向量属于哪个模型"，
     /// 换模型后旧维度向量因 model_id 不匹配自然被排除。
     semantic_model_id: RefCell<Option<String>>,
+    /// 语义证据门下限（B4）：`query_semantic_filtered` 在 top-k 名额分配前
+    /// 丢弃低于该相似度的候选。默认 [`SEMANTIC_SIMILARITY_FLOOR_DEFAULT`]，
+    /// 仅测试/评测经 [`Self::set_semantic_similarity_floor`] 覆盖。
+    semantic_similarity_floor: Cell<f32>,
     /// Repo slug 解析器（schema v16）：写路径由组合根注入真实 git 实现；
     /// 默认 [`NoopRepoSlugResolver`]（投影关闭）。解析器是环境事实探测器，
     /// 失败一律 None。
@@ -1718,6 +1734,7 @@ impl SqliteStore {
             conn: RefCell::new(conn),
             _lease: None,
             semantic_model_id: RefCell::new(None),
+            semantic_similarity_floor: Cell::new(SEMANTIC_SIMILARITY_FLOOR_DEFAULT),
             repo_slug_resolver: RefCell::new(Box::new(NoopRepoSlugResolver)),
             pending_installations: RefCell::new(BTreeMap::new()),
             relocation_clock: unix_ms,
@@ -1749,6 +1766,7 @@ impl SqliteStore {
             conn: RefCell::new(conn),
             _lease: Some(lease),
             semantic_model_id: RefCell::new(None),
+            semantic_similarity_floor: Cell::new(SEMANTIC_SIMILARITY_FLOOR_DEFAULT),
             repo_slug_resolver: RefCell::new(Box::new(NoopRepoSlugResolver)),
             pending_installations: RefCell::new(BTreeMap::new()),
             relocation_clock: unix_ms,
@@ -1770,6 +1788,7 @@ impl SqliteStore {
             conn: RefCell::new(conn),
             _lease: None,
             semantic_model_id: RefCell::new(None),
+            semantic_similarity_floor: Cell::new(SEMANTIC_SIMILARITY_FLOOR_DEFAULT),
             repo_slug_resolver: RefCell::new(Box::new(NoopRepoSlugResolver)),
             pending_installations: RefCell::new(BTreeMap::new()),
             relocation_clock: unix_ms,
@@ -2642,6 +2661,24 @@ impl SqliteStore {
     /// 不会变成往表里写无归属向量。
     pub fn set_semantic_model(&self, model_id: impl Into<String>) {
         *self.semantic_model_id.borrow_mut() = Some(model_id.into());
+    }
+
+    /// 覆盖语义证据门下限（B4）。仅测试/评测使用（生产值来自
+    /// [`SEMANTIC_SIMILARITY_FLOOR_DEFAULT`]）；非有限值显式报错，绝不静默
+    /// 换成一个与调用方声明不同的阈值（评测数字必须绑定真实生效的门）。
+    pub fn set_semantic_similarity_floor(&self, floor: f32) -> PortResult<()> {
+        if !floor.is_finite() {
+            return Err(PortError::Backend(
+                "semantic similarity floor must be finite".into(),
+            ));
+        }
+        self.semantic_similarity_floor.set(floor);
+        Ok(())
+    }
+
+    /// 当前生效的语义相似度下限（B4）。
+    pub fn semantic_similarity_floor(&self) -> f32 {
+        self.semantic_similarity_floor.get()
     }
 
     /// 注入 repo slug 解析器（schema v16）。写路径（sync/index）在提交前
@@ -9118,6 +9155,7 @@ impl SemanticIndex for SqliteStore {
             return Ok(Vec::new());
         };
         let conn = self.conn.borrow();
+        let floor = self.semantic_similarity_floor.get();
         let mut sql = String::from(
             "SELECT mv.wire_id, fi.id_json, mv.embedding
              FROM message_vec mv
@@ -9165,6 +9203,12 @@ impl SemanticIndex for SqliteStore {
             let score = cosine_similarity(query_embedding, &vector);
             if !score.is_finite() {
                 return Err(PortError::Backend("semantic score is non-finite".into()));
+            }
+            // 证据门（B4）：低于相似度下限的候选不占用 top-k 名额，也不进入
+            // hybrid 的 RRF 融合。过滤在堆插入之前（filter-before-topk），
+            // 与既有谓词过滤同一取数窗口。
+            if score < floor {
+                continue;
             }
             let id = match id_json {
                 Some(json) => serde_json::from_str(&json).map_err(backend)?,
@@ -9968,6 +10012,7 @@ mod tests {
             conn: RefCell::new(conn),
             _lease: Some(lease),
             semantic_model_id: RefCell::new(None),
+            semantic_similarity_floor: Cell::new(SEMANTIC_SIMILARITY_FLOOR_DEFAULT),
             repo_slug_resolver: RefCell::new(Box::new(NoopRepoSlugResolver)),
             pending_installations: RefCell::new(BTreeMap::new()),
             relocation_clock: unix_ms,
@@ -10135,6 +10180,144 @@ mod tests {
         eprintln!(
             "semantic exact scan: rows=2048 dimensions=2 retained=17 elapsed={:?}; candidate heap bounded to k+1, work remains O(N*d + N*log(k))",
             started.elapsed()
+        );
+    }
+
+    #[test]
+    fn semantic_evidence_floor_default_is_the_holdout_choice() {
+        // 默认门必须等于 holdout 阈值扫描 + frozen 100-query 回归交叉校验选出的
+        // 值（B4）：见
+        // .trellis/tasks/10-06-retrieval-quality/research/threshold-scan.json 的
+        // `selection.selected_floor`（0.2）。改动该常量必须重新跑扫描并同步报告。
+        assert_eq!(SEMANTIC_SIMILARITY_FLOOR_DEFAULT, 0.2);
+    }
+
+    #[test]
+    fn semantic_evidence_gate_filters_below_floor_before_top_k() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        store.set_semantic_model("floor-model");
+        let aligned = sid(IdKind::Message, b"floor-aligned");
+        let diagonal = sid(IdKind::Message, b"floor-diagonal");
+        let orthogonal = sid(IdKind::Message, b"floor-orthogonal");
+        let inverted = sid(IdKind::Message, b"floor-inverted");
+        for id in [&aligned, &diagonal, &orthogonal, &inverted] {
+            store.put(id, b"{}").unwrap();
+        }
+        // 与查询 [1, 0] 的余弦相似度：1.0 / ~0.707 / 0.0 / -1.0。
+        store.index_embedding(&aligned, &[1.0, 0.0]).unwrap();
+        store.index_embedding(&diagonal, &[1.0, 1.0]).unwrap();
+        store.index_embedding(&orthogonal, &[0.0, 1.0]).unwrap();
+        store.index_embedding(&inverted, &[-1.0, 0.0]).unwrap();
+
+        let ids = |hits: Vec<SearchHit>| -> Vec<String> {
+            hits.into_iter()
+                .map(|hit| hit.id.as_str().to_string())
+                .collect()
+        };
+
+        // 显式下限 0.5：正交与反向候选在堆插入之前被淘汰。
+        store.set_semantic_similarity_floor(0.5).unwrap();
+        assert_eq!(
+            ids(store.query_semantic(&[1.0, 0.0], 10).unwrap()),
+            vec![aligned.as_str().to_string(), diagonal.as_str().to_string()],
+            "candidates below the floor must not be retained"
+        );
+        // limit=1：名额给最高分准入者（被过滤候选不占 top-k 名额）。
+        let top = store.query_semantic(&[1.0, 0.0], 1).unwrap();
+        assert_eq!(top.len(), 1);
+        assert_eq!(top[0].id.as_str(), aligned.as_str());
+
+        // 防御路径 floor=0.0：仅负相似度被排除，正交 0.0 保留。
+        store.set_semantic_similarity_floor(0.0).unwrap();
+        let kept = ids(store.query_semantic(&[1.0, 0.0], 10).unwrap());
+        assert!(kept.contains(&orthogonal.as_str().to_string()));
+        assert!(!kept.contains(&inverted.as_str().to_string()));
+        assert_eq!(store.semantic_similarity_floor(), 0.0);
+
+        // 非有限下限显式报错，不静默换值。
+        assert!(store.set_semantic_similarity_floor(f32::NAN).is_err());
+        assert_eq!(store.semantic_similarity_floor(), 0.0);
+    }
+
+    #[test]
+    fn hybrid_rrf_cannot_admit_a_zero_similarity_semantic_candidate() {
+        use agent_session_grep_application::{App, AppRequest, AppResponse, ResponseBudget};
+        use agent_session_grep_ports::{NoResumeClaims, RetrievalMode};
+
+        let store = SqliteStore::open_in_memory().unwrap();
+        store.set_semantic_model("gate-model");
+        let relevant = sid(IdKind::Message, b"gate-relevant");
+        let orthogonal = sid(IdKind::Message, b"gate-orthogonal");
+        // 两条消息都有 payload；只有 relevant 含查询词（lexical 证据）。
+        // orthogonal 不参与 lexical 检索，只能靠向量名次进入 hybrid——
+        // 其相似度为 0.0，即"无语义证据"。
+        store
+            .put(
+                &relevant,
+                br#"{"text":"gategolden needletoken body","timestamp":"2026-08-01T00:00:00Z"}"#,
+            )
+            .unwrap();
+        store
+            .put(
+                &orthogonal,
+                br#"{"text":"unrelated envelope text","timestamp":"2026-08-02T00:00:00Z"}"#,
+            )
+            .unwrap();
+        store
+            .index(&relevant, "gategolden needletoken body")
+            .unwrap();
+        store.index(&orthogonal, "unrelated envelope text").unwrap();
+        store.index_embedding(&relevant, &[1.0, 0.0]).unwrap();
+        store.index_embedding(&orthogonal, &[0.0, 1.0]).unwrap();
+
+        let app = App::with_resume_semantic(&store, &store, NoResumeClaims, &store);
+        let run = |mode: RetrievalMode| -> Vec<String> {
+            let AppResponse::Search { hits, .. } = app
+                .handle(AppRequest::Search {
+                    query: "needletoken".into(),
+                    filters: SearchFilters::default(),
+                    facets: agent_session_grep_ports::SearchFacets::default(),
+                    limit: 10,
+                    cursor: None,
+                    budget: ResponseBudget::default(),
+                    include_system: true,
+                    group_by_session: false,
+                    mode,
+                    query_embedding: Some(vec![1.0, 0.0]),
+                })
+                .unwrap()
+            else {
+                panic!("search expected");
+            };
+            hits.into_iter()
+                .map(|hit| hit.id.as_str().to_string())
+                .collect()
+        };
+
+        // 门开（floor=0.0 防御路径）：0 相似度候选仅凭 semantic 榜的 RRF 名次分
+        // 进入结果——即 D3 边界 2 记录的缺陷形态；这一步同时证明下一步的拒绝
+        // 来自证据门而不是别的过滤。
+        store.set_semantic_similarity_floor(0.0).unwrap();
+        let ungated = run(RetrievalMode::Hybrid);
+        assert!(
+            ungated.contains(&orthogonal.as_str().to_string()),
+            "with the floor open the 0-similarity candidate is admitted by RRF rank"
+        );
+
+        // 证据门（显式 0.5）：0 相似度语义候选在融合之前被淘汰。
+        store.set_semantic_similarity_floor(0.5).unwrap();
+        let gated = run(RetrievalMode::Hybrid);
+        assert!(gated.contains(&relevant.as_str().to_string()));
+        assert!(
+            !gated.contains(&orthogonal.as_str().to_string()),
+            "0-similarity semantic candidate must be rejected by the evidence gate"
+        );
+
+        // lexical 路径不受证据门影响：结果集与门开闭无关。
+        store.set_semantic_similarity_floor(0.0).unwrap();
+        assert_eq!(
+            run(RetrievalMode::Lexical),
+            vec![relevant.as_str().to_string()]
         );
     }
 
@@ -10314,12 +10497,23 @@ mod tests {
         store.index_embedding(&far, &[0.0, 1.0, 0.0]).unwrap();
         assert!(store.is_ready().unwrap());
 
+        // 证据门（B4）之前的行为：把门槛开到 0.0（防御路径）后按纯余弦排序，
+        // 正交候选保留在 top-k 里。
+        store.set_semantic_similarity_floor(0.0).unwrap();
         let hits = store.query_semantic(&[1.0, 0.0, 0.0], 10).unwrap();
         assert_eq!(hits.len(), 2);
         assert_eq!(hits[0].id.as_str(), near.as_str());
         assert!(hits[0].score > hits[1].score);
         assert!((hits[0].score - 1.0).abs() < 1e-5);
         assert!(hits[1].score.abs() < 1e-5);
+
+        // 默认门生效：0 相似度候选在 top-k 之前被拒绝，只剩同向候选。
+        store
+            .set_semantic_similarity_floor(SEMANTIC_SIMILARITY_FLOOR_DEFAULT)
+            .unwrap();
+        let gated = store.query_semantic(&[1.0, 0.0, 0.0], 10).unwrap();
+        assert_eq!(gated.len(), 1);
+        assert_eq!(gated[0].id.as_str(), near.as_str());
     }
 
     #[test]

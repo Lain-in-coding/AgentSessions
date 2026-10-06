@@ -395,6 +395,23 @@ compaction ratio without stating whether the audit row is included.
 Correct: validate first, aggregate only terminal rows that benefit, keep the
 CAS transaction atomic, and publish both ratio scopes.
 
+## Semantic search evidence gate (B4)
+
+Contract: when assembling semantic or hybrid candidates, a candidate whose
+cosine similarity is below the evidence floor is discarded in the same query
+pass that applies provider/time/repo/facet predicates, and before the bounded
+top-k heap insert; filter-before-top-k therefore holds for the evidence gate
+as well. The shipped default floor is 0.20, selected from the holdout and
+frozen regression scans (zero-recall-loss interval intersection, one step of
+margin). The floor is overridable through ASG_SEMANTIC_SIMILARITY_FLOOR;
+non-numeric or non-finite values must fail as invalid_request rather than
+silently falling back. A floor of 0.0 still excludes negative similarity.
+The lexical FTS path is untouched by the floor. Known limitation, disclosed in
+README and the retrieval report: the fuzzy-lexical hash model has a background
+similarity near 0.40 on unrelated short text, so the default gate rejects zero
+and negative evidence but cannot remove non-zero, non-semantic false hits;
+that requires real embedding weights plus recalibration.
+
 ## Quality Check
 
 - `catalog` remains authoritative; `fts` fully rebuildable from it.

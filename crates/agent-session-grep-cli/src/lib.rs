@@ -814,6 +814,8 @@ fn semantic_capability_data() -> serde_json::Value {
         serde_json::json!({
             "feature": "semantic-candle",
             "default_model": BIGRAM_HASH_MODEL_ID,
+            "model_kind": "fuzzy_lexical_hash",
+            "model_label": "fuzzy lexical vector",
             "runtime": "candle-e5-local",
         })
     }
@@ -822,6 +824,8 @@ fn semantic_capability_data() -> serde_json::Value {
         serde_json::json!({
             "feature": null,
             "default_model": BIGRAM_HASH_MODEL_ID,
+            "model_kind": "fuzzy_lexical_hash",
+            "model_label": "fuzzy lexical vector",
             "runtime": null,
         })
     }
@@ -989,6 +993,12 @@ fn model_command(
                         "feature": "semantic-candle",
                         "present": present,
                         "verified": verified,
+                        "model_kind": if verified { "real_embedding" } else { "fuzzy_lexical_hash" },
+                        "model_label": if verified {
+                            "real embedding (multilingual-e5-small)"
+                        } else {
+                            "fuzzy lexical vector (bigram-hash)"
+                        },
                         "detail": detail,
                     }),
                     0,
@@ -1010,6 +1020,8 @@ fn model_command(
                         "feature": null,
                         "present": false,
                         "verified": false,
+                        "model_kind": "fuzzy_lexical_hash",
+                        "model_label": "fuzzy lexical vector (bigram-hash)",
                         "detail": {
                             "note": "default build has no semantic-candle feature; \
                                      lexical/bigram-hash remains the only vector backend"
@@ -1364,6 +1376,8 @@ fn subcommand_help_text(cmd: &str) -> &'static str {
                      过滤：--provider claude|claude-code|codex（可重复，OR）、--since/--until <RFC3339 或 1h|1d|1w>（半开区间 [since, until)）、\n\
                      --repo <host/owner/name>（会话仓库 slug，逐字相等；与 status 的 repos 清单一致）；\n\
                      检索模式：--mode lexical|semantic|hybrid（默认 lexical）。semantic/hybrid 需先跑 `index embeddings`；\n\
+                     默认向量化器是 fuzzy lexical vector（bigram-hash，模糊词法相似、非语义模型）；\n\
+                     semantic 候选在融合前按相似度下限过滤（低于下限的候选不占 top-k 名额）；\n\
                      向量索引未就绪时结果标注 retrieval_mode=lexical_fallback 并给出 warning，绝不静默降级；\n\
                      --include-system（默认排除 system/developer 角色消息）、--group-by-session（按会话归并并附 occurrences）；\n\
                      结构化过滤：--main-only 只看主线（排除 sidechain）、--subagent-only 只看 subagent 消息、\n\
@@ -1459,7 +1473,9 @@ fn subcommand_help_text(cmd: &str) -> &'static str {
         "index" => {
             "index <id-fact> <text>：写入一条 catalog + 索引。\n\
                     index rebuild：从权威 catalog 重建全文（FTS）索引；\n\
-                    index embeddings：从权威 catalog 构建语义向量索引（semantic/hybrid 检索前置，需 semantic-candle 构建的二进制）。\n\
+                    index embeddings：从权威 catalog 构建语义向量索引（semantic/hybrid 检索前置）。\n\
+                    默认构建用 fuzzy lexical vector（bigram-hash，模糊词法相似、非语义模型）；\n\
+                    `--features semantic-candle` + 已验证 E5 bundle 时改用真实 embedding 模型。\n\
                    示例：agent-session-grep --db <path> --robot index rebuild"
         }
         "doctor" => {
@@ -1494,7 +1510,8 @@ fn subcommand_help_text(cmd: &str) -> &'static str {
         "model" => {
             "model import|status：本地 embedding 模型缓存管理（永不联网）。\n\
                      model import --dir <bundle>  校验 SHA-256 后原子发布到 cache/models/...\n\
-                     model status                 报告默认 E5 bundle 是否已导入且校验通过\n\
+                     model status                 报告默认 E5 bundle 是否已导入且校验通过；\n\
+                                                  无 bundle 时语义检索用 fuzzy lexical vector（bigram-hash，非语义模型）\n\
                      需要 `--features semantic-candle` 构建的二进制才能 import；默认构建仅 status。\n\
                      示例：agent-session-grep model status"
         }
@@ -2998,6 +3015,8 @@ fn build_embeddings(store: &SqliteStore) -> Result<(serde_json::Value, Vec<Strin
                     let man = m.manifest();
                     serde_json::json!({
                         "model_id": man.model_id,
+                        "model_kind": "fuzzy_lexical_hash",
+                        "model_label": "fuzzy lexical vector",
                         "dimension": man.dimension,
                         "license": man.license,
                         "file_hash": man.file_hash,
@@ -3009,6 +3028,8 @@ fn build_embeddings(store: &SqliteStore) -> Result<(serde_json::Value, Vec<Strin
                     let man = m.manifest();
                     serde_json::json!({
                         "model_id": man.model_id,
+                        "model_kind": "real_embedding",
+                        "model_label": "real embedding (multilingual-e5-small)",
                         "dimension": man.dimension,
                         "license": man.license,
                         "file_hash": man.file_hash,
@@ -3020,7 +3041,7 @@ fn build_embeddings(store: &SqliteStore) -> Result<(serde_json::Value, Vec<Strin
         fn warning(&self) -> Option<String> {
             match self {
                 Self::Bigram(_) => Some(
-                    "当前向量化器是 bigram-hash（模糊词法相似，非语义）；semantic/hybrid 因此仅供实验，lexical 仍是默认。"
+                    "当前向量化器是 fuzzy lexical vector（bigram-hash，模糊词法相似、非语义模型）；semantic/hybrid 因此仅供实验，lexical 仍是默认。"
                         .to_string(),
                 ),
                 #[cfg(feature = "semantic-candle")]
@@ -3191,7 +3212,8 @@ fn current_repo_slug() -> Option<String> {
 }
 
 /// Resolve the local query encoder once at the composition root so CLI and
-/// MCP semantic requests use the same model identity and fallback behavior.
+/// MCP semantic requests use the same model identity, evidence gate, and
+/// fallback behavior.
 pub(crate) fn prepare_search_embedding(
     store: &SqliteStore,
     mode: RetrievalMode,
@@ -3244,7 +3266,38 @@ pub(crate) fn prepare_search_embedding(
     let (model_id, embedding) = bigram_embedding()?;
 
     store.set_semantic_model(&model_id);
+    // 证据门（B4）：显式环境注入覆盖 adapter 默认相似度下限（见
+    // [`semantic_floor_override`]；holdout 阈值扫描的注入通道）。
+    if let Some(floor) = semantic_floor_override()? {
+        store
+            .set_semantic_similarity_floor(floor)
+            .map_err(ProtocolError::from)?;
+    }
     Ok(Some(embedding))
+}
+
+/// 语义证据门的显式注入通道（B4）：`ASG_SEMANTIC_SIMILARITY_FLOOR` 覆盖
+/// adapter 默认常量（`agent_session_grep_adapters_sqlite::
+/// SEMANTIC_SIMILARITY_FLOOR_DEFAULT`）。与 `ASG_CLOCK_MS`/`ASG_CURRENT_REPO`
+/// 同一纪律：生产不设该变量；显式设置但不可解析/非有限 → invalid_request，
+/// 绝不静默忽略（评测数字必须绑定真实生效的阈值）。
+fn semantic_floor_override() -> Result<Option<f32>, ProtocolError> {
+    let Ok(raw) = std::env::var("ASG_SEMANTIC_SIMILARITY_FLOOR") else {
+        return Ok(None);
+    };
+    let parsed = raw.trim().parse::<f32>().map_err(|_| {
+        ProtocolError::new(
+            protocol::CanonicalCode::InvalidRequest,
+            format!("ASG_SEMANTIC_SIMILARITY_FLOOR must be a finite number, got {raw:?}"),
+        )
+    })?;
+    if !parsed.is_finite() {
+        return Err(ProtocolError::new(
+            protocol::CanonicalCode::InvalidRequest,
+            "ASG_SEMANTIC_SIMILARITY_FLOOR must be a finite number",
+        ));
+    }
+    Ok(Some(parsed))
 }
 
 /// Human search 的会话表格行按 canonical Session 去重后批量解析 Resume
@@ -5611,15 +5664,25 @@ mod tests {
             .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(
             keys,
-            ["default_model", "feature", "runtime"]
-                .into_iter()
-                .collect::<std::collections::BTreeSet<_>>()
+            [
+                "default_model",
+                "feature",
+                "model_kind",
+                "model_label",
+                "runtime"
+            ]
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>()
         );
         // 诚实默认向量化器事实：任何构建都是 bigram-hash-v1。
         assert_eq!(
             semantic["default_model"],
             agent_session_grep_application::embedding::BIGRAM_HASH_MODEL_ID
         );
+        // B4 正名（additive）：默认向量化器标注为 fuzzy lexical vector，
+        // model_kind 枚举区分模糊词法哈希与真实 embedding 模型。
+        assert_eq!(semantic["model_kind"], "fuzzy_lexical_hash");
+        assert_eq!(semantic["model_label"], "fuzzy lexical vector");
         // feature/runtime 严格跟随 cfg(feature = "semantic-candle")：
         // 默认构建断言 null 形状，feature 构建断言稳定标识（CI 两种构建都会跑到）。
         if cfg!(feature = "semantic-candle") {

@@ -22,7 +22,10 @@ schema. `agent-session-grep` solves this by:
 1. **Discovering** transcripts across multiple provider directories
 2. **Normalizing** them into a canonical model (Message, Session, Placement)
 3. **Indexing** for fast full-text search (FTS5; CJK text is tokenized as
-   single characters plus adjacent-pair bigrams)
+   single characters plus adjacent-pair bigrams). The indexed projection of a
+   message is capped at 16,000 characters — the catalog keeps the provider's
+   full text (`show`/`get` return it), but words beyond the cap in one message
+   are not searchable
 4. **Serving** search/resume/handoff through a unified contract
 
 ## Quickstart
@@ -79,11 +82,15 @@ asg handoff "how did we configure the database?"
 ```
 
 Retrieval is lexical by default (FTS5; CJK text is tokenized as single
-characters plus adjacent-pair bigrams); the default
-vector mode is an honest bigram-hash fuzzy-lexical matcher, not a semantic
-model. An optional local semantic backend (Candle + multilingual-e5-small)
-exists behind the `semantic-candle` cargo feature — off by default and
-offline-only (`asg model import --dir <bundle>` / `asg model status`).
+characters plus adjacent-pair bigrams; per-message indexed text is capped at
+16,000 characters while the catalog keeps the full text). The default vector
+mode is an honest fuzzy lexical vector (`bigram-hash`) — a fuzzy-lexical
+matcher, not a semantic model. Semantic/hybrid candidates whose cosine
+similarity falls below the evidence floor are discarded before RRF fusion, so
+zero-similarity vectors cannot enter results on rank alone. An optional local
+semantic backend (Candle + multilingual-e5-small) exists behind the
+`semantic-candle` cargo feature — off by default and offline-only
+(`asg model import --dir <bundle>` / `asg model status`).
 
 See [Install and upgrade](docs/operations/INSTALL-AND-UPGRADE.md) for custom
 prefixes, persistent PATH setup, upgrades, and safe uninstall.

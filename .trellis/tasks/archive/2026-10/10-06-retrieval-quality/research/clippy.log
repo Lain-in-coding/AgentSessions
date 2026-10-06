@@ -1,0 +1,4 @@
+    Checking agent-session-grep-application v0.1.0 (C:\AgentSessions\crates\agent-session-grep-application)
+    Checking agent-session-grep-adapters-sqlite v0.1.0 (C:\AgentSessions\crates\agent-session-grep-adapters-sqlite)
+    Checking agent-session-grep-cli v0.1.0 (C:\AgentSessions\crates\agent-session-grep-cli)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 6.58s
