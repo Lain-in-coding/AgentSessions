@@ -1,0 +1,5 @@
+{"_example": "Fill with {\"file\": \"<path>\", \"reason\": \"<why>\"}. Put spec/research files only — no code paths. Run `python .trellis/scripts/get_context.py --mode packages` to list available specs. Delete this line once real entries are added."}
+{"file": ".trellis/spec/agentsessions-cli/backend/index.md", "reason": "verify CLI-visible behavior unchanged (protocol, exit codes, default path)"}
+{"file": ".trellis/tasks/10-05-competitive-source-audit-plan/review-report.md", "reason": "verify each claimed residual optimization maps to a finding and evidence"}
+{"file": ".trellis/tasks/archive/2026-10/10-06-hotpath-git-probe/research/measure.ps1", "reason": "verify measurement methodology matches B1 baseline"}
+{"file": ".trellis/tasks/10-05-competitive-source-audit-plan/research/repo-probe-overhead.json", "reason": "verify before/after numbers are reproducible and not cherry-picked"}

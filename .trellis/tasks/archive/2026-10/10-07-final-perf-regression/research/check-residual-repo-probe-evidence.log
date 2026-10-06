@@ -1,0 +1,55 @@
+# B7 check-side residual probe reproduction (trellis-check, independent contexts)
+base=C:\AgentSessions\.trellis\.runtime\b7-bare-probe-check
+git version: git version 2.55.0.windows.2
+
+## raw git: worktree nested subdir: step1 (current first gate)
+cwd=C:\AgentSessions\.trellis\.runtime\b7-bare-probe-check\work\sub\deep | git rev-parse --show-toplevel
+exit=0
+output=C:/AgentSessions/.trellis/.runtime/b7-bare-probe-check/work
+
+## raw git: worktree nested subdir: step2 / candidate single call
+cwd=C:\AgentSessions\.trellis\.runtime\b7-bare-probe-check\work\sub\deep | git remote get-url origin
+exit=0
+output=https://example.com/owner/name.git
+
+## raw git: bare repo with origin: step1
+cwd=C:\AgentSessions\.trellis\.runtime\b7-bare-probe-check\asg.git | git rev-parse --show-toplevel
+exit=128
+output=fatal: this operation must be run in a work tree
+
+## raw git: bare repo with origin: candidate single call
+cwd=C:\AgentSessions\.trellis\.runtime\b7-bare-probe-check\asg.git | git remote get-url origin
+exit=0
+output=https://example.com/owner/name.git
+
+## raw git: cwd inside .git/hooks: step1
+cwd=C:\AgentSessions\.trellis\.runtime\b7-bare-probe-check\work\.git\hooks | git rev-parse --show-toplevel
+exit=128
+output=fatal: this operation must be run in a work tree
+
+## raw git: cwd inside .git/hooks: candidate single call
+cwd=C:\AgentSessions\.trellis\.runtime\b7-bare-probe-check\work\.git\hooks | git remote get-url origin
+exit=0
+output=https://example.com/owner/name.git
+
+## binary search: worktree subdir (expect 2: rev-parse+remote)
+cwd=C:\AgentSessions\.trellis\.runtime\b7-bare-probe-check\work\sub\deep | env=(none) | exit=0 | spawned git built-ins=2 (expect 2)
+  trace: 01:13:59.997437 git.c:502               trace: built-in: git rev-parse --show-toplevel
+  trace: 01:14:00.019751 git.c:502               trace: built-in: git remote get-url origin
+verdict=MATCH
+
+## binary search: bare repo (expect 1: rev-parse fails -> None, no remote call)
+cwd=C:\AgentSessions\.trellis\.runtime\b7-bare-probe-check\asg.git | env=(none) | exit=0 | spawned git built-ins=1 (expect 1)
+  trace: 01:14:00.061838 git.c:502               trace: built-in: git rev-parse --show-toplevel
+verdict=MATCH
+
+## binary search: cwd inside .git/hooks (expect 1: rev-parse fails -> None)
+cwd=C:\AgentSessions\.trellis\.runtime\b7-bare-probe-check\work\.git\hooks | env=(none) | exit=0 | spawned git built-ins=1 (expect 1)
+  trace: 01:14:00.095051 git.c:502               trace: built-in: git rev-parse --show-toplevel
+verdict=MATCH
+
+## binary search: nested dir with GIT_CEILING_DIRECTORIES at probe base (expect 1: walk-up blocked)
+cwd=C:\AgentSessions\.trellis\.runtime\b7-bare-probe-check\elsewhere | env=GIT_CEILING_DIRECTORIES=C:\AgentSessions\.trellis\.runtime\b7-bare-probe-check | exit=0 | spawned git built-ins=1 (expect 1)
+  trace: 01:14:00.137492 git.c:502               trace: built-in: git rev-parse --show-toplevel
+verdict=MATCH
+

@@ -1,0 +1,10 @@
+{"_example": "Fill with {\"file\": \"<path>\", \"reason\": \"<why>\"}. Put spec/research files only — no code paths. Run `python .trellis/scripts/get_context.py --mode packages` to list available specs. Delete this line once real entries are added."}
+{"file": ".trellis/spec/agentsessions-cli/backend/index.md", "reason": "CLI contracts: default db path, missing-db fail-closed, doctor parity, duration_ms protocol"}
+{"file": ".trellis/spec/agentsessions-adapters-sqlite/backend/index.md", "reason": "store schema v19 + evidence gate + journal retention contracts touched by earlier waves"}
+{"file": ".trellis/spec/agentsessions-application/backend/index.md", "reason": "final_score defense + ranking contract to keep stable during perf work"}
+{"file": ".trellis/tasks/10-05-competitive-source-audit-plan/research/repo-probe-overhead.json", "reason": "audit baseline: get/show/search git probe counts + medians (53.67/52.44/97.11ms)"}
+{"file": ".trellis/tasks/10-05-competitive-source-audit-plan/research/core-benchmark-run.log", "reason": "audit baseline: core benchmark P95 (search 162.9ms, noop 16.22ms)"}
+{"file": ".trellis/tasks/10-05-competitive-source-audit-plan/review-report.md", "reason": "parent audit report: P2-07 residual hot path + maintainability findings"}
+{"file": ".trellis/tasks/10-05-competitive-source-audit-plan/design.md", "reason": "parent design sections 8/9: perf roadmap + maintainability mapping scope"}
+{"file": ".trellis/tasks/archive/2026-10/10-06-hotpath-git-probe/research/measure.ps1", "reason": "B1 measurement harness to reuse for identical methodology"}
+{"file": ".trellis/tasks/archive/2026-10/10-06-hotpath-git-probe/research/hotpath-summary.md", "reason": "B1 before/after numbers and methodology notes"}

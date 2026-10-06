@@ -1,0 +1,15 @@
+=== B7 independent hotpath re-run (check-measure.ps1, fresh fixture dir) ===
+deliverable binary sha256: 5924c24d9ecb625427ba97a52ecb2e60497ae1b3945e8bbf0edd4da050a6123d
+rerun       binary sha256: 5924c24d9ecb625427ba97a52ecb2e60497ae1b3945e8bbf0edd4da050a6123d
+deliverable commit: 4bea67f4d113976d439e91a5bac825bb10a7106d | rerun commit: 4bea67f4d113976d439e91a5bac825bb10a7106d
+deliverable wire_id: msg_v1_cb6837d0712fbb4e022f869652978b74 | rerun wire_id: msg_v1_cb6837d0712fbb4e022f869652978b74
+
+variant/cmd                            deliv med rerun med   ratio  deliv probes  rerun probes  verdict
+git_detect/get                             7.957     9.503    1.19     [0, 0, 0]     [0, 0, 0]  PASS
+git_detect/show                            7.913     9.108    1.15     [0, 0, 0]     [0, 0, 0]  PASS
+git_detect/search                         48.017    53.422    1.11     [2, 2, 2]     [2, 2, 2]  PASS
+repo_disabled_by_test_seam/get             7.912     7.737    0.98     [0, 0, 0]     [0, 0, 0]  PASS
+repo_disabled_by_test_seam/show            8.163     7.614    0.93     [0, 0, 0]     [0, 0, 0]  PASS
+repo_disabled_by_test_seam/search          9.076     8.557    0.94     [0, 0, 0]     [0, 0, 0]  PASS
+
+RESULT: PASS - probe counts identical, medians within +/-30%

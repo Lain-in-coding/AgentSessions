@@ -1,0 +1,14 @@
+B7 check-side output diff (reviewer)
+============================================================
+[A] deliverable: git_detect vs repo_disabled_by_test_seam (claim: only meta.duration_ms differs)
+  get: diffs=0 volatile=0 non-volatile=0
+  show: diffs=0 volatile=0 non-volatile=0
+  search: diffs=1 volatile=1 non-volatile=0
+    volatile: $.meta.duration_ms: 42 -> 1
+[B] cross-run: deliverable git_detect outputs vs reviewer re-run outputs (expect only meta.duration_ms)
+  get: diffs=0 volatile=0 non-volatile=0
+  show: diffs=0 volatile=0 non-volatile=0
+  search: diffs=1 volatile=1 non-volatile=0
+    volatile: $.meta.duration_ms: 42 -> 41
+
+RESULT: PASS

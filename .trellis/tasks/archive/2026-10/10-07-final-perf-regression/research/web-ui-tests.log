@@ -1,0 +1,19 @@
+✔ all visible filters reach the API and providers use the capability registry (8.1961ms)
+✔ late search success cannot replace a newer result (2.0479ms)
+✔ late search failure cannot replace a newer result (1.482ms)
+✔ each search input invalidates its cursor and both change events retain feedback (14.4778ms)
+✔ cursor guard also rejects programmatic input changes and duplicate page loads (1.6665ms)
+✔ clearing a query or failing a request resets paging, busy state and visible results (1.3562ms)
+✔ late context success cannot overwrite a new session (1.4313ms)
+✔ late context failure cannot overwrite a new session (1.1602ms)
+✔ context policy changes reload and closing prevents context or preview resurrection (1.4761ms)
+✔ an old unauthorized response cannot discard a newly accepted token (1.4535ms)
+✔ slash stays editable in filter inputs and a language switch preserves all loaded hits (2.1612ms)
+ℹ tests 11
+ℹ suites 0
+ℹ pass 11
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 120.5797
