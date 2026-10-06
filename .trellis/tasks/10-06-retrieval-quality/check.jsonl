@@ -1,3 +1,0 @@
-{"_example": "Fill with {\"file\": \"<path>\", \"reason\": \"<why>\"}. Put spec/research files only — no code paths. Run `python .trellis/scripts/get_context.py --mode packages` to list available specs. Delete this line once real entries are added."}
-{"file": ".trellis/tasks/10-05-competitive-source-audit-plan/review-report.md", "reason": "P1-04 默认向量事实与验收口径"}
-{"file": ".trellis/tasks/archive/2026-10/10-06-six-invariant-selfchecks/research/invariant-matrix.md", "reason": "回归锁：六项不变量不得被 B4 破坏"}

@@ -18,16 +18,23 @@ D1 journal 保留合同和 D2 发布次序未决，完整审读未完成，禁�
 - 10-06-hotpath-git-probe（B1）→ 校验 PASS，commit 4a1aa28（get/show 探测 2→0；search 4→2）
 - 10-06-six-invariant-selfchecks（D3）→ 校验 PASS（6/6 通过 + 3 处边界归 B4），commit f899794
 
-**第二波（运行中）**：
-- 10-06-first-run-closure（B3，CLI）
-- 10-06-journal-retention（B2，adapters-sqlite 适配层 API，preview-first；不动 CLI）
+**第二波（已完成、已提交）**：
+- 10-06-first-run-closure（B3）→ 校验 PASS（含 doctor 缺库路径修复），commit d5b2d54
+- 10-06-journal-retention（B2）→ 校验 PASS（校验方修复 fail-closed 顺序缺陷 +4 测试；数字纠偏），commit e552a3f
 
-**后续波次（依赖满足后创建，不预支顺序）**：
-- B3 首用闭环 ← 依赖 B1 落地后的装配形态
-- B2 journal 治理 ← D1 已批准（有约束 compact；未决记录不可删）
-- B4 检索质量 / B5 provider 稳定性 ← 依赖 D3 六项结论（失败项先修复）
-- B6 发布闭环 ← 依赖 B0/B1/B3
-- B7 维护性 ← 最后
+**第三波（已完成、已提交）**：
+- 10-06-retrieval-quality（B4，证据门 floor=0.20 + fuzzy_lexical 正名 + 零证据 boost 防御）→ 校验 PASS，commit d864207
+- 10-06-provider-stability（B5，Claude/Codex 生命周期契约 + 矩阵锚点同步）→ 校验 PASS，commit c41cbca
+- 10-06-release-closure（B6，三 OS release-verify workflow + Windows 安装/升级/卸载 20 断言 smoke；未发布）→ 校验 PASS，commit 006746b
+
+**第四波（收口）**：
+- 10-07-final-perf-regression（B7，热路径与 Core benchmark 复测 + 残余判定 + 维护性映射）→ 校验 PASS（独立复测 + 反证），commit 283b948。关键数字：get 53.67→7.96ms、show 52.44→7.91ms、search 97.11→48.02ms（仍 2 探测）；Core P95 search 162.9→72.1ms、initial sync 1059→777ms。残余 ~38.9ms/search 判定**不实施**（唯一更省的子进程形状会扩张 `current_repo_slug` 契约并改变排序/cursor digest，属 owner 决策）。
+- 10-07-repo-probe-overlap（B8，契约不变地把 2 个 git 探测改为重叠执行）→ 进行中
+- 证据矩阵 `IB-CI-INSTALLER-001` 依 run 36391073119 升级为 `ci_verified`，并修正记录中的仓库名（commit 4bea67f）
+
+**剩余延后清单（未排期）**：B4 的真实 E5 语义运行、1万/10万/100万消息阶梯与过滤选择性测试；B7 映射出的 4 个重复同步点（CLI flag 注册、schema 版本、关系投影版本、协议 schema）；B7 候选 B/C（文件系统替代 / 跨进程 slug 缓存）。
+
+**依赖次序（实际执行记录）**：B0 → B1 → D3 → B3 → B2 → B4 → B5 → B6 → B7 → B8。原计划里的“后续波次”已全部落地，逐个 commit 见上。
 
 **纪律**：子任务实现者不 commit；主会话复核后统一提交（仅本任务树+对应产品文件）。
 
