@@ -13,10 +13,14 @@ D1 journal 保留合同和 D2 发布次序未决，完整审读未完成，禁�
 
 ## 实施进行态（2026-10-06，D1/D2/D3 已批准）
 
-**已创建并启动的子任务**：
-- 10-06-fact-table-truth-repair（B0，P0，docs-only）→ 运行中
-- 10-06-hotpath-git-probe（B1，P1，CLI 热路径）→ 运行中
-- 10-06-six-invariant-selfchecks（D3，P0，测试/研究）→ 运行中
+**第一波（已完成、已提交）**：
+- 10-06-fact-table-truth-repair（B0）→ 校验 PASS，commit 77ffbb7
+- 10-06-hotpath-git-probe（B1）→ 校验 PASS，commit 4a1aa28（get/show 探测 2→0；search 4→2）
+- 10-06-six-invariant-selfchecks（D3）→ 校验 PASS（6/6 通过 + 3 处边界归 B4），commit f899794
+
+**第二波（运行中）**：
+- 10-06-first-run-closure（B3，CLI）
+- 10-06-journal-retention（B2，adapters-sqlite 适配层 API，preview-first；不动 CLI）
 
 **后续波次（依赖满足后创建，不预支顺序）**：
 - B3 首用闭环 ← 依赖 B1 落地后的装配形态
