@@ -228,17 +228,34 @@ def verify_semantic(asg_bin: str, data_root: str) -> bool:
 
 
 def verify_hook(asg_bin: str, data_root: str) -> bool:
-    disabled = run_asg(
-        asg_bin,
-        data_root,
-        ["hook", "user-prompt-submit"],
-        stdin='{"prompt":"retry"}',
-    )["data"]
-    ok = (
-        disabled.get("enabled") is False
-        and disabled.get("hookSpecificOutput", {}).get("additionalContext") == ""
+    """不加 --enable 时 hook 必须完全不写 stdout（不注入历史），运行事实走 stderr。
+
+    CLI 自身的契约（help 文本）：`不加 --enable 时 stdout 一个字节都不写；运行事实走
+    stderr`。所以这里断言 exit 0 + stdout 为空 + stderr 记录 enabled=false，
+    **不能**再期望 stdout 上的 hookSpecificOutput JSON 帧。
+    """
+    env = os.environ.copy()
+    env["ASG_DATA_ROOT"] = data_root
+    db = str(Path(data_root) / "asg.db")
+    result = subprocess.run(
+        [asg_bin, "--db", db, "--output", "json", "hook", "user-prompt-submit"],
+        input='{"prompt":"retry"}',
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
     )
-    return step("hook off by default", ok, f"enabled={disabled.get('enabled')}")
+    ok = (
+        result.returncode == 0
+        and result.stdout == ""
+        and "enabled=false" in result.stderr
+    )
+    return step(
+        "hook off by default",
+        ok,
+        f"exit={result.returncode} stdout={len(result.stdout)}B "
+        f"stderr={result.stderr.strip()!r}",
+    )
 
 
 def verify_providers(asg_bin: str, data_root: str) -> bool:
