@@ -336,6 +336,65 @@ Correct: lease writes explicitly and validate all incoming facts before no-op.
 
 ---
 
+## Scenario: Journal retention compaction (schema v19)
+
+### 1. Scope / Trigger
+Explicit maintenance on a long-lived catalog whose terminal outbox batches keep
+full detail manifests for every historical rewrite. Preview, staged plan, apply
+and recovery are the only surfaces; ordinary open paths never compact.
+
+### 2. Signatures
+preview_journal_compaction() -> JournalCompactionPreview is read-only.
+stage_journal_compaction(preview) -> JournalCompactionStage persists the plan with
+a CAS plan digest. apply_journal_compaction(id) -> JournalCompactionOutcome runs
+the single-transaction rewrite. recover_journal_compactions() converges staged
+plans explicitly; journal_compaction_event(id) reads the audit row.
+
+### 3. Contracts
+Permanent bytes: operation_id, base/target_generation, state, operation_digest,
+durable_point, created/committed_at_ms, error_code, relocation_json,
+detail_format. Unresolved rows (building / search_built / cleanup_pending) keep
+full detail forever and never enter a plan. Terminal rows (activated / aborted /
+superseded) may aggregate the five detail columns into [] plus a
+detail_summary_json carrying counts, byte sizes and a detail_digest; a
+no-benefit row (detail smaller than the summary) stays full byte-identical.
+Unknown states or detail formats fail closed with SchemaIncompatible in read,
+preview and apply; validation happens before any skip logic. Apply is one
+transaction with a four-column CAS (state, operation_digest,
+target_generation, detail_digest); drift rolls back whole and recovery
+abandons the plan with a reason. The v18 -> v19 migration is additive, rolls
+back on interruption, keeps old rows readable as full, and older binaries
+refuse the newer user_version instead of misreading summaries. The
+journal_compactions audit table grows linearly with explicit maintenance and
+that growth must be disclosed next to any compaction numbers.
+
+### 4. Validation & Error Matrix
+Unknown format on pending or aggregated rows -> SchemaIncompatible (read,
+preview, apply). Plan drift -> whole-plan rollback; recover marks abandoned,
+detail untouched. Re-apply -> idempotent, zero rewrites. Interrupted stage ->
+recover converges without touching details. Concurrent readers -> WAL snapshot
+isolation across the rewrite.
+
+### 5. Good/Base/Bad Cases
+Good: 21 single-message rewrites aggregate to 0.381 percent of detail bytes
+(0.876 percent including the audit row) with operation digests unchanged.
+Base: a tiny terminal row stays full because aggregation would not save bytes.
+Bad: deleting unresolved detail, silently skipping an unknown format, or
+compacting automatically inside open_for_write.
+
+### 6. Tests Required
+journal_retention.rs pins preview numbers, the soak, killed-stage recovery,
+drift abandonment, concurrent reads, v18 migration and rollback, unknown
+format/state fail-closed on all three surfaces, no-benefit rows staying full,
+unresolved-row protection, CAS idempotence, and byte-identical relocation
+manifests.
+
+### 7. Wrong vs Correct
+Wrong: explain-or-skip unknown values, aggregate pending rows, or report a
+compaction ratio without stating whether the audit row is included.
+Correct: validate first, aggregate only terminal rows that benefit, keep the
+CAS transaction atomic, and publish both ratio scopes.
+
 ## Quality Check
 
 - `catalog` remains authoritative; `fts` fully rebuildable from it.
