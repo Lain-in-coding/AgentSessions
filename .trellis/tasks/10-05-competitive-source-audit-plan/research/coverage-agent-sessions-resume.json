@@ -1,0 +1,345 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-06",
+  "task": ".trellis/tasks/10-05-competitive-source-audit-plan",
+  "repository": "C:\\AgentSessions\\Github_src\\agent-sessions",
+  "commit": "af4793d317ab83e73ea205ff3f91feee32a3f0dd",
+  "scope": "Shard B only (terminal / resume / list coherence): AgentSessions/Views/SessionTerminalView.swift; AgentSessions/Views/UnifiedSessionsView.swift; AgentSessions/CodexStatus/CodexStatusService.swift; AgentSessions/Services/CodexActiveSessionsModel.swift. Static read-only audit; no build, no test, no app launch, no network, no git write. Shard A files (DB/Session/SearchCoordinator/index) deliberately untouched.",
+  "status": "t1_deep_read_complete_report_delivered",
+  "t1_scope_rule": "Only the four assigned files were personally read. SessionTerminalView.swift / UnifiedSessionsView.swift / CodexActiveSessionsModel.swift are marked partial with explicit missing_ranges; CodexStatusService.swift is full (all 3869 logical lines in sequential windows). No hash-only reading: every claimed line range was displayed as numbered source.",
+  "read_window_rule": "Every personally executed read window was <=150 lines via `codegraph node --file <rel> --offset <n> --limit <m>`. Display-truncated mid-spans were re-read with a narrow follow-up window. Files were hashed before the first read and re-hashed after the last read; sha256_final equality covers content stability during this audit only.",
+  "sweep_reference": "research/sweep-agent-sessions.json (T2, main-session product; commit af4793d317ab83e73ea205ff3f91feee32a3f0dd) was queried with filtered node -e lookups only, never fully read, and was not used as line-level evidence.",
+  "files": [
+    {
+      "path": "AgentSessions/Views/SessionTerminalView.swift",
+      "bytes": 274740,
+      "total_lines": 5861,
+      "sha256_initial": "6a51c3fb5e6846081b59ceae2364d3720c682e4a827dccb739689c5ff2e6feb6",
+      "read_ranges": [
+        [
+          1,
+          120
+        ],
+        [
+          300,
+          449
+        ],
+        [
+          950,
+          1249
+        ],
+        [
+          3760,
+          3909
+        ],
+        [
+          4290,
+          4589
+        ]
+      ],
+      "status": "partial",
+      "reason": "Grep map for resume|launch|Process|pty|terminal|command|escape|args was built first, then bounded windows covered the file's only Process use, its external-open/pasteboard image actions, the windowed transcript rebuild scheduler, and toolbar/notification plumbing. The requested terminal-launch/resume chain does not exist in this file: it is the terminal-style transcript renderer; the launch chain lives at UnifiedSessionsView.swift:3148+ and AgentSessions/Resume/*. Unread ranges are listed in missing_ranges and are NOT claimed as read.",
+      "sha256_final": "6a51c3fb5e6846081b59ceae2364d3720c682e4a827dccb739689c5ff2e6feb6",
+      "content_unchanged": true,
+      "description": "Terminal-style transcript view: two-stage windowed build (stage-1 last-window first paint, stage-2 full swap gated by char threshold, ScrubSignal quiet gate), role/semantic filters and nav indexes, unified search + local find navigation, inline session images (open/copy/save), speech, block copy. Only Process use: `/usr/bin/open -a Preview` via try? with no error surface (4369-4372).",
+      "read_line_count": 1020,
+      "read_method": "codegraph node numbered source windows (<=150 lines) with narrow gap-fill re-reads; PowerShell SHA-256 and logical line-count checks",
+      "missing_ranges": [
+        [
+          121,
+          299
+        ],
+        [
+          450,
+          949
+        ],
+        [
+          1250,
+          3759
+        ],
+        [
+          3910,
+          4289
+        ],
+        [
+          4590,
+          5861
+        ]
+      ]
+    },
+    {
+      "path": "AgentSessions/Views/UnifiedSessionsView.swift",
+      "bytes": 213585,
+      "total_lines": 4455,
+      "sha256_initial": "2d11a7e95cdf42505b0b3d5997a9b2afc5e9827dd4ec7fe78b480f20a4d606bc",
+      "read_ranges": [
+        [
+          330,
+          479
+        ],
+        [
+          560,
+          709
+        ],
+        [
+          1130,
+          1279
+        ],
+        [
+          1294,
+          1403
+        ],
+        [
+          1490,
+          1715
+        ],
+        [
+          2068,
+          2777
+        ],
+        [
+          3013,
+          3292
+        ],
+        [
+          4190,
+          4279
+        ]
+      ],
+      "status": "partial",
+      "reason": "Bounded windows target the list/selection/filter pipeline, selection reconciliation under churn, cockpit hit->detail navigation, copy-resume-command construction, per-provider resume dispatch, and search debounce/focus handling. Large UI-body regions remain unread and are listed in missing_ranges.",
+      "sha256_final": "2d11a7e95cdf42505b0b3d5997a9b2afc5e9827dd4ec7fe78b480f20a4d606bc",
+      "content_unchanged": true,
+      "description": "Unified sessions table and transcript-pane wiring: selection identity is the String session id (settledSelection debounced 150 ms; row highlight uses raw selection), O(1) cachedRowByID, search auto-select and auto-jump kept in lockstep with settledSelection, cockpit navigation resolves identity as unifiedSessionID -> normalized logPath -> runtime session id and deliberately rejects cwd-only guesses, resume command is built as a shell string (`cd <quoted wd> && <quoted binary> ...`) for the clipboard, and resume(s) dispatches per provider to coordinators whose launcher is chosen by terminal preference (iTerm2/Warp/WarpPreview/Terminal.app); every async resume result is discarded.",
+      "read_line_count": 1866,
+      "read_method": "codegraph node numbered source windows (<=150 lines) with narrow gap-fill re-reads; PowerShell SHA-256 and logical line-count checks",
+      "missing_ranges": [
+        [
+          1,
+          329
+        ],
+        [
+          480,
+          559
+        ],
+        [
+          710,
+          1129
+        ],
+        [
+          1280,
+          1293
+        ],
+        [
+          1404,
+          1489
+        ],
+        [
+          1716,
+          2067
+        ],
+        [
+          2778,
+          3012
+        ],
+        [
+          3293,
+          4189
+        ],
+        [
+          4280,
+          4455
+        ]
+      ]
+    },
+    {
+      "path": "AgentSessions/CodexStatus/CodexStatusService.swift",
+      "bytes": 183644,
+      "total_lines": 3869,
+      "sha256_initial": "b292e3c25c2b20dc3dbc7c05b8e3ca4dacc87eff6a9c224c59169dcbcbf24468",
+      "read_ranges": [
+        [
+          1,
+          150
+        ],
+        [
+          151,
+          300
+        ],
+        [
+          301,
+          450
+        ],
+        [
+          451,
+          600
+        ],
+        [
+          601,
+          750
+        ],
+        [
+          751,
+          900
+        ],
+        [
+          901,
+          1050
+        ],
+        [
+          1051,
+          1200
+        ],
+        [
+          1201,
+          1350
+        ],
+        [
+          1351,
+          1500
+        ],
+        [
+          1501,
+          1650
+        ],
+        [
+          1651,
+          1800
+        ],
+        [
+          1801,
+          1950
+        ],
+        [
+          1951,
+          2100
+        ],
+        [
+          2101,
+          2250
+        ],
+        [
+          2251,
+          2400
+        ],
+        [
+          2401,
+          2550
+        ],
+        [
+          2551,
+          2700
+        ],
+        [
+          2701,
+          2850
+        ],
+        [
+          2851,
+          3000
+        ],
+        [
+          3001,
+          3150
+        ],
+        [
+          3151,
+          3300
+        ],
+        [
+          3301,
+          3450
+        ],
+        [
+          3451,
+          3600
+        ],
+        [
+          3601,
+          3750
+        ],
+        [
+          3751,
+          3869
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines personally displayed and reviewed in the listed sequential ranges; hashes alone did not count as reading. Two display-truncated mid-spans (around lines 671-673) were re-read with a narrow follow-up window.",
+      "sha256_final": "b292e3c25c2b20dc3dbc7c05b8e3ca4dacc87eff6a9c224c59169dcbcbf24468",
+      "content_unchanged": true,
+      "description": "Codex usage/auth status service: three-tier tracking (passive JSONL rate-limit parsing; OAuth / CLI-RPC authoritative fetch; opt-in tmux /status probe), polling interval policy (60-180 s visible, 180 s battery, 1 h hidden non-urgent, menu-bar background), probe cooldowns (OAuth success 60 s, auto tmux probe 4 h, authoritative login-status 120 s, orphan cleanup 1 h, unchanged-parse skip 12 min, 192 KiB tail cap), auth classifier with generation guards, alert evaluator + notifier, probe orphan cleanup via ps/lsof/tmux scanning, status JSON / token-count parsers, login-shell PATH resolution.",
+      "read_line_count": 3869,
+      "read_method": "codegraph node numbered source windows (150 lines each, 26 windows) plus a 10-line gap-fill re-read; PowerShell SHA-256 and logical line-count checks",
+      "missing_ranges": []
+    },
+    {
+      "path": "AgentSessions/Services/CodexActiveSessionsModel.swift",
+      "bytes": 157962,
+      "total_lines": 3490,
+      "sha256_initial": "d3dce417e83587d1fe5386a8c58ecdcfa8bf1099b9f56dad43fc030a667879e0",
+      "read_ranges": [
+        [
+          1,
+          449
+        ],
+        [
+          450,
+          599
+        ],
+        [
+          1420,
+          1983
+        ],
+        [
+          1985,
+          2284
+        ],
+        [
+          2290,
+          2369
+        ],
+        [
+          2543,
+          2692
+        ],
+        [
+          2750,
+          2899
+        ]
+      ],
+      "status": "partial",
+      "reason": "Task brief listed this file under AgentSessions/CodexStatus/; the actual location is AgentSessions/Services/CodexActiveSessionsModel.swift (resolved by filesystem search; matches coverage-index line_count 3490). Bounded windows target state aggregation, poll/probe cadence policy, live-state classification, iTerm focus, fallback discovery, and the command runner. Remaining parser/test-seam ranges are listed in missing_ranges. The actual poll loop now lives in PresenceEngine.swift, which is out of this shard's read scope.",
+      "sha256_final": "d3dce417e83587d1fe5386a8c58ecdcfa8bf1099b9f56dad43fc030a667879e0",
+      "content_unchanged": true,
+      "description": "Facade over PresenceEngine for live presence (Codex/Claude/Antigravity/OpenCode): poll interval constants and policy (2 s foreground-visible / 15 s background / 3 s pinned / 5 s stable backoff), process/iTerm probe min-interval matrices (6/45/30/120 s; iTerm 9/12 s pinned; round-robin iTerm tail budget 4), transient-empty publish suppression (up to 3 cycles), iTerm-tail lexical live-state heuristics with log-mtime fallback (2.5/15/30 s windows), osascript iTerm focus/listing, ps/lsof fallback discovery, timeout-bounded command runner, parsers and test seams.",
+      "read_line_count": 1843,
+      "read_method": "codegraph node numbered source windows (<=150 lines) with narrow gap-fill re-reads; PowerShell SHA-256 and logical line-count checks",
+      "missing_ranges": [
+        [
+          600,
+          1419
+        ],
+        [
+          1984,
+          1984
+        ],
+        [
+          2285,
+          2289
+        ],
+        [
+          2370,
+          2542
+        ],
+        [
+          2693,
+          2749
+        ],
+        [
+          2900,
+          3490
+        ]
+      ]
+    }
+  ]
+}

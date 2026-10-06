@@ -1,0 +1,523 @@
+[
+  {
+    "project": "agent-sessions",
+    "commit": "af4793d317ab83e73ea205ff3f91feee32a3f0dd",
+    "commit_date": "2026-07-20",
+    "files": 1022,
+    "candidate_source_files": 572,
+    "candidate_source_lines": 182245,
+    "largest_source_files": [
+      [
+        "AgentSessions/Views/AgentCockpitHUDView.swift",
+        6459
+      ],
+      [
+        "AgentSessions/Views/SessionTerminalView.swift",
+        5861
+      ],
+      [
+        "AgentSessionsTests/CodexUsageParserTests.swift",
+        4724
+      ],
+      [
+        "AgentSessions/Views/TranscriptPlainView.swift",
+        4599
+      ],
+      [
+        "AgentSessions/Views/UnifiedSessionsView.swift",
+        4455
+      ]
+    ],
+    "note": "Automated inventory only; generated sources/test data may be included. Not a reading-completion claim.",
+    "working_tree_changes": 1,
+    "working_tree_status_sample": [
+      "?? .codegraph/"
+    ]
+  },
+  {
+    "project": "AgentRecall",
+    "commit": "3c7bfa59bc52e5fa39affabcb267dc73ae6858d2",
+    "commit_date": "2026-07-21",
+    "files": 404,
+    "candidate_source_files": 266,
+    "candidate_source_lines": 75333,
+    "largest_source_files": [
+      [
+        "src/renderer/src/styles.css",
+        7572
+      ],
+      [
+        "src/core/session-store.test.ts",
+        2953
+      ],
+      [
+        "src/renderer/src/App.tsx",
+        2757
+      ],
+      [
+        "src/core/store/sessions.ts",
+        2147
+      ],
+      [
+        "src/core/session-loader.ts",
+        1990
+      ]
+    ],
+    "note": "Automated inventory only; generated sources/test data may be included. Not a reading-completion claim.",
+    "working_tree_changes": 1,
+    "working_tree_status_sample": [
+      "?? .codegraph/"
+    ]
+  },
+  {
+    "project": "agentsview",
+    "commit": "a84564ad6ea35f8fb80905da4693144f89f84229",
+    "commit_date": "2026-07-21",
+    "files": 1930,
+    "candidate_source_files": 1493,
+    "candidate_source_lines": 644150,
+    "largest_source_files": [
+      [
+        "internal/sync/engine_integration_test.go",
+        12497
+      ],
+      [
+        "internal/sync/engine.go",
+        10245
+      ],
+      [
+        "internal/db/db_test.go",
+        7483
+      ],
+      [
+        "internal/sync/engine_test.go",
+        5892
+      ],
+      [
+        "internal/db/analytics.go",
+        5685
+      ]
+    ],
+    "note": "Automated inventory only; generated sources/test data may be included. Not a reading-completion claim.",
+    "working_tree_changes": 1,
+    "working_tree_status_sample": [
+      "?? .codegraph/"
+    ]
+  },
+  {
+    "project": "agf",
+    "commit": "44be9cffd3b3eeb44ff1f31a751ec8954adf14cf",
+    "commit_date": "2026-06-11",
+    "files": 34,
+    "candidate_source_files": 24,
+    "candidate_source_lines": 9283,
+    "largest_source_files": [
+      [
+        "src/tui/mod.rs",
+        2686
+      ],
+      [
+        "src/scanner/cursor_agent.rs",
+        786
+      ],
+      [
+        "src/delete.rs",
+        616
+      ],
+      [
+        "src/scanner/codex.rs",
+        612
+      ],
+      [
+        "src/shell.rs",
+        465
+      ]
+    ],
+    "note": "Automated inventory only; generated sources/test data may be included. Not a reading-completion claim.",
+    "working_tree_changes": 1,
+    "working_tree_status_sample": [
+      "?? .codegraph/"
+    ]
+  },
+  {
+    "project": "cc-sessions-viewer",
+    "commit": null,
+    "commit_date": null,
+    "files": 93,
+    "candidate_source_files": 75,
+    "candidate_source_lines": 61526,
+    "largest_source_files": [
+      [
+        "src/App.vue",
+        4643
+      ],
+      [
+        "src-tauri/src/agents/claude.rs",
+        4101
+      ],
+      [
+        "src-tauri/src/agent_chat.rs",
+        4087
+      ],
+      [
+        "src-tauri/src/agents/codex.rs",
+        3950
+      ],
+      [
+        "src-tauri/src/agents/grok.rs",
+        3182
+      ]
+    ],
+    "note": "Automated inventory only; generated sources/test data may be included. Not a reading-completion claim.",
+    "working_tree_changes": null
+  },
+  {
+    "project": "cc-switch",
+    "commit": "f748f3ac4afbbbc6554a3ca2bb7e56e4036fedfa",
+    "commit_date": "2026-08-14",
+    "files": 1177,
+    "candidate_source_files": 674,
+    "candidate_source_lines": 289183,
+    "largest_source_files": [
+      [
+        "src-tauri/src/services/proxy.rs",
+        7749
+      ],
+      [
+        "src-tauri/src/commands/misc.rs",
+        6397
+      ],
+      [
+        "src-tauri/src/proxy/forwarder.rs",
+        5023
+      ],
+      [
+        "src-tauri/src/services/skill.rs",
+        4910
+      ],
+      [
+        "src-tauri/src/services/provider/mod.rs",
+        4722
+      ]
+    ],
+    "note": "Automated inventory only; generated sources/test data may be included. Not a reading-completion claim.",
+    "working_tree_changes": 1,
+    "working_tree_status_sample": [
+      "?? .codegraph/"
+    ]
+  },
+  {
+    "project": "claude-historian-mcp",
+    "commit": "b627cdfbfe46040368ed9c3f5bb2b531c65a8988",
+    "commit_date": "2026-03-22",
+    "files": 46,
+    "candidate_source_files": 12,
+    "candidate_source_lines": 8406,
+    "largest_source_files": [
+      [
+        "src/search.ts",
+        2373
+      ],
+      [
+        "src/formatter.ts",
+        1138
+      ],
+      [
+        "src/index.ts",
+        884
+      ],
+      [
+        "src/parser.ts",
+        871
+      ],
+      [
+        "src/utils.ts",
+        729
+      ]
+    ],
+    "note": "Automated inventory only; generated sources/test data may be included. Not a reading-completion claim.",
+    "working_tree_changes": 1,
+    "working_tree_status_sample": [
+      "?? .codegraph/"
+    ]
+  },
+  {
+    "project": "coding_agent_session_search",
+    "commit": "aa92a45311e10a3ac9c40c3730664a7366af2fe8",
+    "commit_date": "2026-07-21",
+    "files": 3641,
+    "candidate_source_files": 663,
+    "candidate_source_lines": 685409,
+    "largest_source_files": [
+      [
+        "src/lib.rs",
+        100119
+      ],
+      [
+        "src/indexer/mod.rs",
+        52111
+      ],
+      [
+        "src/ui/app.rs",
+        47556
+      ],
+      [
+        "src/storage/sqlite.rs",
+        30047
+      ],
+      [
+        "src/search/query.rs",
+        20986
+      ]
+    ],
+    "note": "Automated inventory only; generated sources/test data may be included. Not a reading-completion claim.",
+    "working_tree_changes": 1,
+    "working_tree_status_sample": [
+      "?? .codegraph/"
+    ]
+  },
+  {
+    "project": "ctx",
+    "commit": "06bc5ed17ce4d0f6c8255981e009f86802dbe32f",
+    "commit_date": "2026-07-16",
+    "files": 673,
+    "candidate_source_files": 397,
+    "candidate_source_lines": 169534,
+    "largest_source_files": [
+      [
+        "crates/ctx-history-capture/src/tests/native_json.rs",
+        2820
+      ],
+      [
+        "crates/ctx-history-capture/src/tests/native_providers.rs",
+        2382
+      ],
+      [
+        "crates/ctx-cli/src/semantic/daemon.rs",
+        2315
+      ],
+      [
+        "crates/ctx-history-capture/src/tests/support.rs",
+        2083
+      ],
+      [
+        "crates/ctx-history-capture/src/tests/codex.rs",
+        2057
+      ]
+    ],
+    "note": "Automated inventory only; generated sources/test data may be included. Not a reading-completion claim.",
+    "working_tree_changes": 1,
+    "working_tree_status_sample": [
+      "?? .codegraph/"
+    ]
+  },
+  {
+    "project": "fast-resume",
+    "commit": "66e42cfd34bca4800161098d3b302a35a52ce69b",
+    "commit_date": "2026-07-21",
+    "files": 68,
+    "candidate_source_files": 37,
+    "candidate_source_lines": 16625,
+    "largest_source_files": [
+      [
+        "src/adapters/opencode.rs",
+        1578
+      ],
+      [
+        "src/adapters/kimi.rs",
+        1396
+      ],
+      [
+        "src/tui.rs",
+        1125
+      ],
+      [
+        "src/tui/render.rs",
+        1064
+      ],
+      [
+        "src/adapters/antigravity.rs",
+        941
+      ]
+    ],
+    "note": "Automated inventory only; generated sources/test data may be included. Not a reading-completion claim.",
+    "working_tree_changes": 1,
+    "working_tree_status_sample": [
+      "?? .codegraph/"
+    ]
+  },
+  {
+    "project": "hstry",
+    "commit": "88b78b1f3a84723e31a2c444bec326829fd02459",
+    "commit_date": "2026-07-20",
+    "files": 186,
+    "candidate_source_files": 96,
+    "candidate_source_lines": 38305,
+    "largest_source_files": [
+      [
+        "crates/hstry-cli/src/main.rs",
+        6946
+      ],
+      [
+        "crates/hstry-core/src/db.rs",
+        3400
+      ],
+      [
+        "crates/hstry-tui/src/main.rs",
+        2512
+      ],
+      [
+        "crates/hstry-cli/src/service.rs",
+        2062
+      ],
+      [
+        "adapters/opencode/adapter.ts",
+        1398
+      ]
+    ],
+    "note": "Automated inventory only; generated sources/test data may be included. Not a reading-completion claim.",
+    "working_tree_changes": 1,
+    "working_tree_status_sample": [
+      "?? .codegraph/"
+    ]
+  },
+  {
+    "project": "memex",
+    "commit": "9a88a5cbeccd14ef2a526729e1815b8df0793414",
+    "commit_date": "2026-06-08",
+    "files": 130,
+    "candidate_source_files": 92,
+    "candidate_source_lines": 29250,
+    "largest_source_files": [
+      [
+        "memex-rs/src/mcp/mod.rs",
+        2556
+      ],
+      [
+        "memex-rs/src/api/mod.rs",
+        1891
+      ],
+      [
+        "memex-rs/src/compact/db.rs",
+        1730
+      ],
+      [
+        "memex-rs/src/main.rs",
+        1510
+      ],
+      [
+        "memex-rs/src/server/ingest.rs",
+        1475
+      ]
+    ],
+    "note": "Automated inventory only; generated sources/test data may be included. Not a reading-completion claim.",
+    "working_tree_changes": 2,
+    "working_tree_status_sample": [
+      "?? .codegraph/",
+      "?? memex-rs/Cargo.lock"
+    ]
+  },
+  {
+    "project": "Recall",
+    "commit": "22625bf8979a185d9913c1bfb20290ac466d492b",
+    "commit_date": "2026-07-20",
+    "files": 155,
+    "candidate_source_files": 110,
+    "candidate_source_lines": 33876,
+    "largest_source_files": [
+      [
+        "src/tui/app.rs",
+        3701
+      ],
+      [
+        "src/adapters/codex.rs",
+        1631
+      ],
+      [
+        "src/adapters/cursor.rs",
+        1439
+      ],
+      [
+        "src/integration/regression.rs",
+        1324
+      ],
+      [
+        "src/share/render.rs",
+        1247
+      ]
+    ],
+    "note": "Automated inventory only; generated sources/test data may be included. Not a reading-completion claim.",
+    "working_tree_changes": 1,
+    "working_tree_status_sample": [
+      "?? .codegraph/"
+    ]
+  },
+  {
+    "project": "sessiongrep",
+    "commit": "c5c1874f420fb20cc55e484f79bdff3d848b71a8",
+    "commit_date": "2026-07-15",
+    "files": 26,
+    "candidate_source_files": 17,
+    "candidate_source_lines": 5089,
+    "largest_source_files": [
+      [
+        "src/tui.rs",
+        679
+      ],
+      [
+        "src/db.rs",
+        640
+      ],
+      [
+        "src/cli.rs",
+        508
+      ],
+      [
+        "src/util.rs",
+        498
+      ],
+      [
+        "src/mcp.rs",
+        465
+      ]
+    ],
+    "note": "Automated inventory only; generated sources/test data may be included. Not a reading-completion claim.",
+    "working_tree_changes": 1,
+    "working_tree_status_sample": [
+      "?? .codegraph/"
+    ]
+  },
+  {
+    "project": "Wake",
+    "commit": "71aeca67ec80f8645d1f9d5199290c2c732036ce",
+    "commit_date": "2026-09-27",
+    "files": 235,
+    "candidate_source_files": 85,
+    "candidate_source_lines": 63596,
+    "largest_source_files": [
+      [
+        "crates/wake/src/workbench.rs",
+        9644
+      ],
+      [
+        "crates/wake-core/tests/adapter_contracts.rs",
+        4949
+      ],
+      [
+        "crates/wake-core/src/db.rs",
+        3408
+      ],
+      [
+        "crates/wake-core/src/cleanup.rs",
+        2349
+      ],
+      [
+        "crates/wake-core/tests/scanner_finale.rs",
+        2121
+      ]
+    ],
+    "note": "Automated inventory only; generated sources/test data may be included. Not a reading-completion claim.",
+    "working_tree_changes": 0,
+    "working_tree_status_sample": []
+  }
+]

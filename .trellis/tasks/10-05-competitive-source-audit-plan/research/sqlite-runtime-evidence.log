@@ -1,0 +1,41 @@
+   Compiling find-msvc-tools v0.1.9
+   Compiling shlex v2.0.1
+   Compiling vcpkg v0.2.15
+   Compiling pkg-config v0.3.33
+   Compiling foldhash v0.2.0
+   Compiling getrandom v0.4.3
+   Compiling anyhow v1.0.104
+   Compiling cfg-if v1.0.4
+   Compiling windows-link v0.2.1
+   Compiling smallvec v1.15.2
+   Compiling fallible-iterator v0.3.0
+   Compiling bitflags v2.13.1
+   Compiling fallible-streaming-iterator v0.1.9
+   Compiling fastrand v2.5.0
+   Compiling once_cell v1.21.4
+   Compiling windows-sys v0.61.2
+   Compiling hashbrown v0.17.1
+   Compiling cc v1.3.0
+   Compiling hashlink v0.12.1
+   Compiling tempfile v3.27.0
+   Compiling libsqlite3-sys v0.38.1
+   Compiling rusqlite v0.40.1
+   Compiling sqlite-snapshot-wal-spike v0.0.0 (C:\AgentHub\project\spikes\sqlite-snapshot-wal)
+    Finished `release` profile [optimized] target(s) in 18.56s
+     Running `target-competitive-audit-sqlite-20261005\release\sqlite-snapshot-wal-spike.exe`
+=== sqlite-snapshot-wal spike ===
+环境记录：
+  os            = windows
+  arch          = x86_64
+  sqlite_version= 3.53.2
+
+=== 结论汇总 ===
+  [PASS] A 裸复制主库(缺 -wal)丢数据 — live=5000 行, 裸复制副本读到=-1 行（副本更少即坐实风险）
+  [PASS] B Backup API 一致快照 — live=5000 行, Backup 快照读到=5000 行（相等即一致）
+  [PASS] C VACUUM INTO 一致快照 — live=5000 行, VACUUM INTO 快照读到=5000 行（相等即一致）
+  [PASS] D 旧快照写入期间可只读打开 — 冻结时=5000, 写入后源库=6000, 旧快照仍读=5000（旧快照不变即成立）
+
+Contract / decision evidence：
+  快照实现：Backup API / VACUUM INTO 通过 → 正式 bundle 快照禁止裸 fs::copy 主库；
+  不可变 bundle：旧快照只读打开成立 → 可作为 cursor 分页 pinning 的证据输入；
+  历史审查#13：断言 A 若复现，即坐实裸复制丢事务风险，正式存储记录应引用本证据。

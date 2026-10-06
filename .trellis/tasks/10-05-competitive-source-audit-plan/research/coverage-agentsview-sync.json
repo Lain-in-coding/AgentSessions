@@ -1,0 +1,494 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-06",
+  "task": ".trellis/tasks/10-05-competitive-source-audit-plan",
+  "repository": "C:\\AgentSessions\\Github_src\\agentsview",
+  "commit": "a84564ad6ea35f8fb80905da4693144f89f84229",
+  "scope": "Shard B (sync orchestration and parser): internal/sync/engine.go bounded mandated read; internal/parser/codex.go and internal/parser/claude.go full reads; bounded supporting reads (parsediff.go, cwd_filter.go, watcher.go, provider.go) needed to answer deletion/freshness/provider-inventory questions. Mechanical sweep reuse: research/sweep-agentsview.json (read via filtered queries, not in full).",
+  "status": "source_review_complete",
+  "t1_scope_rule": "T1 mandates: engine.go partial with precise read_ranges+missing_ranges; codex.go and claude.go full (all logical lines); no hash-only reading; every read segment <=150 lines. Supporting files are marked role=supporting and are not claimed as T1.",
+  "line_count_method": "UTF-8 splitlines; 1-based inclusive read ranges; final newline does not create an extra logical source line (codegraph virtual EOF line excluded).",
+  "reading_methods": [
+    "codegraph node --file <path> --offset N --limit M --path C:/AgentSessions/Github_src/agentsview (line-numbered windows)",
+    "Select-String whole-file grep for symbol/topic maps (engine.go, parser registry only)",
+    "research/sweep-agentsview.json filtered queries (ConvertFrom-Json filtering; not read in full)"
+  ],
+  "files": [
+    {
+      "role": "t1",
+      "path": "internal/sync/engine.go",
+      "bytes": 318297,
+      "total_lines": 10245,
+      "sha256_initial": "7bc0dc38a51ed8b427935fcb5f2fa572c1c1d3457be70361bb93c0607a3e410a",
+      "read_ranges": [
+        [
+          1,
+          405
+        ],
+        [
+          524,
+          1061
+        ],
+        [
+          1167,
+          1967
+        ],
+        [
+          2053,
+          2068
+        ],
+        [
+          2298,
+          2422
+        ],
+        [
+          2465,
+          2895
+        ],
+        [
+          2907,
+          3026
+        ],
+        [
+          3126,
+          3221
+        ],
+        [
+          3900,
+          4344
+        ],
+        [
+          4394,
+          4998
+        ],
+        [
+          5107,
+          5298
+        ],
+        [
+          5385,
+          5461
+        ],
+        [
+          5475,
+          5524
+        ],
+        [
+          5699,
+          5772
+        ],
+        [
+          5811,
+          6152
+        ],
+        [
+          6199,
+          6259
+        ],
+        [
+          6840,
+          6865
+        ],
+        [
+          6899,
+          7158
+        ],
+        [
+          8269,
+          8441
+        ],
+        [
+          8496,
+          8575
+        ],
+        [
+          9550,
+          9810
+        ]
+      ],
+      "status": "partial",
+      "reason": "Mandated bounded read of a 10k-line file: full-file Select-String map of func/topic markers (sync entry, resync, delete/orphan, watch, freshness, retry, locks) plus line-numbered codegraph windows over orchestration, deletion, retry, lock and freshness regions. Not a full read; read_line_count is the deduplicated union of the listed ranges.",
+      "sha256_final": "7bc0dc38a51ed8b427935fcb5f2fa572c1c1d3457be70361bb93c0607a3e410a",
+      "content_unchanged": true,
+      "description": "The single sync engine: SyncPaths/SyncAll/SyncAllSince/SyncRootsSince/SyncSingleSession/ResyncAll orchestration, skip cache, provider freshness gates, worker pool and batch writes, deletion/exclusion seam, resync temp-DB swap with orphan copy.",
+      "read_line_count": 5178,
+      "read_method": "codegraph node line-numbered windows (<=150 lines each) + Select-String whole-file symbol/topic map",
+      "missing_ranges": [
+        [
+          406,
+          523
+        ],
+        [
+          1062,
+          1166
+        ],
+        [
+          1968,
+          2052
+        ],
+        [
+          2069,
+          2297
+        ],
+        [
+          2423,
+          2464
+        ],
+        [
+          2896,
+          2906
+        ],
+        [
+          3027,
+          3125
+        ],
+        [
+          3222,
+          3899
+        ],
+        [
+          4345,
+          4393
+        ],
+        [
+          4999,
+          5106
+        ],
+        [
+          5299,
+          5384
+        ],
+        [
+          5462,
+          5474
+        ],
+        [
+          5525,
+          5698
+        ],
+        [
+          5773,
+          5810
+        ],
+        [
+          6153,
+          6198
+        ],
+        [
+          6260,
+          6839
+        ],
+        [
+          6866,
+          6898
+        ],
+        [
+          7159,
+          8268
+        ],
+        [
+          8442,
+          8495
+        ],
+        [
+          8576,
+          9549
+        ],
+        [
+          9811,
+          10245
+        ]
+      ]
+    },
+    {
+      "role": "t1",
+      "path": "internal/parser/codex.go",
+      "bytes": 62063,
+      "total_lines": 2343,
+      "sha256_initial": "4bd3aeda0a1803857e08cdac4abd415916b696a9b6f08be8567a639969694c9d",
+      "read_ranges": [
+        [
+          1,
+          150
+        ],
+        [
+          151,
+          300
+        ],
+        [
+          301,
+          450
+        ],
+        [
+          451,
+          600
+        ],
+        [
+          601,
+          750
+        ],
+        [
+          751,
+          900
+        ],
+        [
+          901,
+          1050
+        ],
+        [
+          1051,
+          1200
+        ],
+        [
+          1201,
+          1350
+        ],
+        [
+          1351,
+          1500
+        ],
+        [
+          1501,
+          1650
+        ],
+        [
+          1651,
+          1800
+        ],
+        [
+          1801,
+          1950
+        ],
+        [
+          1951,
+          2100
+        ],
+        [
+          2101,
+          2250
+        ],
+        [
+          2251,
+          2343
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines displayed and reviewed in sequential line-numbered windows; the codegraph virtual EOF line 2344 is not a logical source line and is excluded. Hashes alone did not count as reading.",
+      "sha256_final": "4bd3aeda0a1803857e08cdac4abd415916b696a9b6f08be8567a639969694c9d",
+      "content_unchanged": true,
+      "description": "Codex JSONL parser: session_meta identity, fork replay gate (uuidv7 turn ids), response_item/event_msg handling, token-count normalization, tool call + subagent link bookkeeping, conservative incremental reader with prefix seeding, session_index.jsonl title integration.",
+      "read_line_count": 2343,
+      "read_method": "codegraph node full-file sequential windows (150 lines each)",
+      "missing_ranges": []
+    },
+    {
+      "role": "t1",
+      "path": "internal/parser/claude.go",
+      "bytes": 65175,
+      "total_lines": 2283,
+      "sha256_initial": "9a4ccd1815436e6f5c03216f2cb940ddf45675f3a249a277fa0e57dfcf3b27ef",
+      "read_ranges": [
+        [
+          1,
+          150
+        ],
+        [
+          151,
+          300
+        ],
+        [
+          301,
+          450
+        ],
+        [
+          451,
+          600
+        ],
+        [
+          601,
+          750
+        ],
+        [
+          751,
+          900
+        ],
+        [
+          901,
+          1050
+        ],
+        [
+          1051,
+          1200
+        ],
+        [
+          1201,
+          1350
+        ],
+        [
+          1351,
+          1500
+        ],
+        [
+          1501,
+          1650
+        ],
+        [
+          1651,
+          1800
+        ],
+        [
+          1801,
+          1950
+        ],
+        [
+          1951,
+          2100
+        ],
+        [
+          2101,
+          2250
+        ],
+        [
+          2251,
+          2283
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines displayed and reviewed in sequential line-numbered windows; the codegraph virtual EOF line 2284 is not a logical source line and is excluded. Hashes alone did not count as reading.",
+      "sha256_final": "9a4ccd1815436e6f5c03216f2cb940ddf45675f3a249a277fa0e57dfcf3b27ef",
+      "content_unchanged": true,
+      "description": "Claude Code JSONL parser: uuid/parentUuid DAG fork detection and split, linear fallback, queued_command splicing, assistant chunk merging by message.id, compact summaries, subagent links, tool_result persisted-output resolution, truncation and malformed-line handling, incremental append with full-parse fallbacks.",
+      "read_line_count": 2283,
+      "read_method": "codegraph node full-file sequential windows (150 lines each)",
+      "missing_ranges": []
+    },
+    {
+      "role": "supporting",
+      "path": "internal/sync/parsediff.go",
+      "bytes": 37389,
+      "total_lines": 1053,
+      "sha256_initial": "3e1e7ce4c1227c52f634ce56439b43f2182d4180d0be7d1d2b95b598e1982483",
+      "read_ranges": [
+        [
+          100,
+          199
+        ],
+        [
+          880,
+          979
+        ]
+      ],
+      "status": "partial",
+      "reason": "Supporting bounded read to establish that the presence sweep is part of the report-only parse-diff engine (write-refusing) and therefore does not delete archive rows on a normal scan.",
+      "sha256_final": "3e1e7ce4c1227c52f634ce56439b43f2182d4180d0be7d1d2b95b598e1982483",
+      "content_unchanged": true,
+      "description": "Parse-diff report engine: stored-session indexing, presence sweep classification (DiffChanged/PendingResync) and parser-exclusion reporting; no product writes.",
+      "read_line_count": 200,
+      "read_method": "codegraph node line-numbered windows",
+      "missing_ranges": [
+        [
+          1,
+          99
+        ],
+        [
+          200,
+          879
+        ],
+        [
+          980,
+          1053
+        ]
+      ]
+    },
+    {
+      "role": "supporting",
+      "path": "internal/sync/cwd_filter.go",
+      "bytes": 3564,
+      "total_lines": 114,
+      "sha256_initial": "40759f02fdfd71aaba344702beca1ff9f410a5f5185dd21cecde23c9ac2777e9",
+      "read_ranges": [
+        [
+          55,
+          114
+        ]
+      ],
+      "status": "partial",
+      "reason": "Supporting bounded read of the cwd allow-list freeze contract that gates parser-exclusion deletions.",
+      "sha256_final": "40759f02fdfd71aaba344702beca1ff9f410a5f5185dd21cecde23c9ac2777e9",
+      "content_unchanged": true,
+      "description": "cwd prefix filter: sourceAllowsParserExclusions and splitResultsByCwdFilter (ingestion-only contract; archived rows survive filter vetoes).",
+      "read_line_count": 60,
+      "read_method": "codegraph node line-numbered window",
+      "missing_ranges": [
+        [
+          1,
+          54
+        ]
+      ]
+    },
+    {
+      "role": "supporting",
+      "path": "internal/sync/watcher.go",
+      "bytes": 13007,
+      "total_lines": 544,
+      "sha256_initial": "842aa96c19df10207560d9e65e48aa442de02c389a7d520f840380a177dbd2eb",
+      "read_ranges": [
+        [
+          1,
+          100
+        ]
+      ],
+      "status": "partial",
+      "reason": "Supporting bounded read of watcher batching/overflow semantics (bounded path sets; overflow degrades to one full-sync marker).",
+      "sha256_final": "842aa96c19df10207560d9e65e48aa442de02c389a7d520f840380a177dbd2eb",
+      "content_unchanged": true,
+      "description": "fsnotify watcher: WatchBatch contract, bounded pendingWatchBatch (8192 entries / 2 MiB), FullSync overflow marker.",
+      "read_line_count": 100,
+      "read_method": "codegraph node line-numbered window",
+      "missing_ranges": [
+        [
+          101,
+          544
+        ]
+      ]
+    },
+    {
+      "role": "supporting",
+      "path": "internal/parser/provider.go",
+      "bytes": 19361,
+      "total_lines": 547,
+      "sha256_initial": "3e8af4a3fe17c293784ccca20ab9179c2af361a370f9e3b0b11ead90eb3f469d",
+      "read_ranges": [
+        [
+          283,
+          400
+        ],
+        [
+          402,
+          524
+        ]
+      ],
+      "status": "partial",
+      "reason": "Supporting bounded read of the provider contract types (ParseOutcome/DataVersionState/SkipReason) and the full provider factory registry switch used for the provider inventory.",
+      "sha256_final": "3e8af4a3fe17c293784ccca20ab9179c2af361a370f9e3b0b11ead90eb3f469d",
+      "content_unchanged": true,
+      "description": "Provider interface/type contracts and ProviderFactories/registry switch listing all registered provider factories.",
+      "read_line_count": 241,
+      "read_method": "codegraph node line-numbered windows",
+      "missing_ranges": [
+        [
+          1,
+          282
+        ],
+        [
+          401,
+          401
+        ],
+        [
+          525,
+          547
+        ]
+      ]
+    }
+  ]
+}

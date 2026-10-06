@@ -1,0 +1,1099 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-06",
+  "task": ".trellis/tasks/10-05-competitive-source-audit-plan",
+  "repository": "C:\\AgentSessions\\Github_src\\sessiongrep",
+  "scope": "Complete first-party static source and text artifact audit; no product discovery/resume execution.",
+  "status": "source_review_complete_report_pending",
+  "inventory_method": "Filesystem traversal excluding .git/.codegraph/target/node_modules; 26 matches user-supplied tracked-file count; no git command.",
+  "line_count_method": "UTF-8 splitlines; 1-based inclusive read ranges; final newline does not create an extra logical source line.",
+  "previous_report_preserved": true,
+  "files": [
+    {
+      "path": ".github/workflows/ci.yml",
+      "bytes": 598,
+      "total_lines": 30,
+      "sha256_initial": "6721158bf032b8c8d32b352befd9521b0799e3f6a6d2e7fd723834051308461e",
+      "read_ranges": [
+        [
+          1,
+          30
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines personally displayed and reviewed in the listed sequential ranges; hashes alone did not count as reading.",
+      "sha256_final": "6721158bf032b8c8d32b352befd9521b0799e3f6a6d2e7fd723834051308461e",
+      "content_unchanged": true,
+      "description": "Ubuntu stable Rust cargo check/test workflow; no release job.",
+      "read_line_count": 30,
+      "read_method": "PowerShell line-numbered text read",
+      "missing_ranges": []
+    },
+    {
+      "path": ".gitignore",
+      "bytes": 31,
+      "total_lines": 4,
+      "sha256_initial": "7fa76e0323a560f9b2e0f7de6c8194c64fc25f0ff545caa3857d4d3702e4ea46",
+      "read_ranges": [
+        [
+          1,
+          4
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines personally displayed and reviewed in the listed sequential ranges; hashes alone did not count as reading.",
+      "sha256_final": "7fa76e0323a560f9b2e0f7de6c8194c64fc25f0ff545caa3857d4d3702e4ea46",
+      "content_unchanged": true,
+      "description": "Build output and macOS metadata ignore rules.",
+      "read_line_count": 4,
+      "read_method": "PowerShell line-numbered text read",
+      "missing_ranges": []
+    },
+    {
+      "path": "Cargo.lock",
+      "bytes": 44424,
+      "total_lines": 1660,
+      "sha256_initial": "2661365851a8bb9736afea6fe24827fba4e02c162d1e1e3e5dd39f5d8e1f324a",
+      "read_ranges": [
+        [
+          1,
+          90
+        ],
+        [
+          91,
+          245
+        ],
+        [
+          246,
+          400
+        ],
+        [
+          401,
+          555
+        ],
+        [
+          556,
+          710
+        ],
+        [
+          711,
+          865
+        ],
+        [
+          866,
+          1020
+        ],
+        [
+          1021,
+          1175
+        ],
+        [
+          1176,
+          1330
+        ],
+        [
+          1331,
+          1485
+        ],
+        [
+          1486,
+          1660
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines personally displayed and reviewed in the listed sequential ranges; hashes alone did not count as reading.",
+      "sha256_final": "2661365851a8bb9736afea6fe24827fba4e02c162d1e1e3e5dd39f5d8e1f324a",
+      "content_unchanged": true,
+      "description": "Complete generated dependency lock metadata, not dependency source review.",
+      "read_line_count": 1660,
+      "read_method": "PowerShell line-numbered text read",
+      "missing_ranges": []
+    },
+    {
+      "path": "Cargo.toml",
+      "bytes": 1043,
+      "total_lines": 38,
+      "sha256_initial": "d08785c4fb9952cc3f19a5a08a9685a08a91890989ec3646922c09ad6dee4cda",
+      "read_ranges": [
+        [
+          1,
+          38
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines personally displayed and reviewed in the listed sequential ranges; hashes alone did not count as reading.",
+      "sha256_final": "d08785c4fb9952cc3f19a5a08a9685a08a91890989ec3646922c09ad6dee4cda",
+      "content_unchanged": true,
+      "description": "Package 0.1.0, two binaries, runtime/dev dependencies.",
+      "read_line_count": 38,
+      "read_method": "PowerShell line-numbered text read",
+      "missing_ranges": []
+    },
+    {
+      "path": "docs/demo.gif",
+      "bytes": 1371110,
+      "total_lines": null,
+      "sha256_initial": "d8a87632e6cc769dbe3ea8c9ff0be3fd89f20fa522ede5c03a33c4b6a07b5016",
+      "read_ranges": [],
+      "status": "excluded",
+      "reason": "Binary animated demo; inventoried only, not source code or a product validation.",
+      "sha256_final": "d8a87632e6cc769dbe3ea8c9ff0be3fd89f20fa522ede5c03a33c4b6a07b5016",
+      "content_unchanged": true,
+      "description": "Binary animated demo; not visually inspected or treated as runtime evidence.",
+      "read_line_count": 0,
+      "read_method": "Inventory and content fingerprint only; no visual read",
+      "missing_ranges": null
+    },
+    {
+      "path": "flake.lock",
+      "bytes": 1558,
+      "total_lines": 61,
+      "sha256_initial": "c0b082f5b4a719536328764caf00d911c1398a126f9b355008195df8c34e1dee",
+      "read_ranges": [
+        [
+          1,
+          61
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines personally displayed and reviewed in the listed sequential ranges; hashes alone did not count as reading.",
+      "sha256_final": "c0b082f5b4a719536328764caf00d911c1398a126f9b355008195df8c34e1dee",
+      "content_unchanged": true,
+      "description": "Pinned Nix inputs and hashes.",
+      "read_line_count": 61,
+      "read_method": "PowerShell line-numbered text read",
+      "missing_ranges": []
+    },
+    {
+      "path": "flake.nix",
+      "bytes": 2176,
+      "total_lines": 78,
+      "sha256_initial": "eff21a869c16de7787d5391f01e6440635ba9c3ce808cfca5a3a6723e6e13882",
+      "read_ranges": [
+        [
+          1,
+          78
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines personally displayed and reviewed in the listed sequential ranges; hashes alone did not count as reading.",
+      "sha256_final": "eff21a869c16de7787d5391f01e6440635ba9c3ce808cfca5a3a6723e6e13882",
+      "content_unchanged": true,
+      "description": "Nix package/apps/development shell definitions.",
+      "read_line_count": 78,
+      "read_method": "PowerShell line-numbered text read",
+      "missing_ranges": []
+    },
+    {
+      "path": "LICENSE",
+      "bytes": 11519,
+      "total_lines": 201,
+      "sha256_initial": "bcee2dc315e09782d09d8d75f742aaaff46b9f3f86d69c189a950ec50e5e4e15",
+      "read_ranges": [
+        [
+          1,
+          81
+        ],
+        [
+          82,
+          162
+        ],
+        [
+          163,
+          201
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines personally displayed and reviewed in the listed sequential ranges; hashes alone did not count as reading.",
+      "sha256_final": "bcee2dc315e09782d09d8d75f742aaaff46b9f3f86d69c189a950ec50e5e4e15",
+      "content_unchanged": true,
+      "description": "Complete Apache-2.0 license and project copyright notice; no legal advice.",
+      "read_line_count": 201,
+      "read_method": "PowerShell line-numbered text read",
+      "missing_ranges": []
+    },
+    {
+      "path": "README.md",
+      "bytes": 6808,
+      "total_lines": 172,
+      "sha256_initial": "1bfa5550a0b43bd049aac728acd3260e799ec568a7e660d52a2995ee3e4f66ac",
+      "read_ranges": [
+        [
+          1,
+          90
+        ],
+        [
+          91,
+          172
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines personally displayed and reviewed in the listed sequential ranges; hashes alone did not count as reading.",
+      "sha256_final": "1bfa5550a0b43bd049aac728acd3260e799ec568a7e660d52a2995ee3e4f66ac",
+      "content_unchanged": true,
+      "description": "Positioning, installation, CLI/MCP usage, config, privacy and limitations.",
+      "read_line_count": 172,
+      "read_method": "PowerShell line-numbered text read",
+      "missing_ranges": []
+    },
+    {
+      "path": "src/cli.rs",
+      "bytes": 16599,
+      "total_lines": 508,
+      "sha256_initial": "f7e8e5360ede77d7abf3feaebafb87fd6e3d7159a6bf58550ccc94ff6ceb041a",
+      "read_ranges": [
+        [
+          1,
+          132
+        ],
+        [
+          133,
+          251
+        ],
+        [
+          252,
+          363
+        ],
+        [
+          364,
+          478
+        ],
+        [
+          479,
+          508
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines personally displayed and reviewed in the listed sequential ranges; hashes alone did not count as reading.",
+      "sha256_final": "f7e8e5360ede77d7abf3feaebafb87fd6e3d7159a6bf58550ccc94ff6ceb041a",
+      "content_unchanged": true,
+      "description": "CLI parsing, pre-read refresh, rendering, doctor, export and guarded process launch.",
+      "read_line_count": 508,
+      "read_method": "CodeGraph MCP/file node, current on-disk source",
+      "missing_ranges": [],
+      "inline_test_count": 0,
+      "inline_tests": []
+    },
+    {
+      "path": "src/config.rs",
+      "bytes": 7322,
+      "total_lines": 266,
+      "sha256_initial": "0547f0887b07c87f68492de3419ef0a91d95d4d5f34ee509455477ac88d9ed7e",
+      "read_ranges": [
+        [
+          1,
+          120
+        ],
+        [
+          121,
+          266
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines personally displayed and reviewed in the listed sequential ranges; hashes alone did not count as reading.",
+      "sha256_final": "0547f0887b07c87f68492de3419ef0a91d95d4d5f34ee509455477ac88d9ed7e",
+      "content_unchanged": true,
+      "description": "Defaults, TOML merging and provider/data path resolution.",
+      "read_line_count": 266,
+      "read_method": "CodeGraph MCP/file node, current on-disk source",
+      "missing_ranges": [],
+      "inline_test_count": 0,
+      "inline_tests": []
+    },
+    {
+      "path": "src/db.rs",
+      "bytes": 24961,
+      "total_lines": 640,
+      "sha256_initial": "aec8257aea120e11c4e5eeca699d81782a38004a6df66c97fc5a641321c28bc0",
+      "read_ranges": [
+        [
+          1,
+          111
+        ],
+        [
+          112,
+          218
+        ],
+        [
+          219,
+          329
+        ],
+        [
+          330,
+          433
+        ],
+        [
+          434,
+          538
+        ],
+        [
+          539,
+          640
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines personally displayed and reviewed in the listed sequential ranges; hashes alone did not count as reading.",
+      "sha256_final": "aec8257aea120e11c4e5eeca699d81782a38004a6df66c97fc5a641321c28bc0",
+      "content_unchanged": true,
+      "description": "SQLite schema, file transaction, FTS candidates, ranking, filtering, resolution and LIKE test.",
+      "read_line_count": 640,
+      "read_method": "CodeGraph MCP/file node, current on-disk source",
+      "missing_ranges": [],
+      "inline_test_count": 1,
+      "inline_tests": [
+        {
+          "line": 634,
+          "name": "escape_like_prefix_escapes_underscore_and_percent"
+        }
+      ]
+    },
+    {
+      "path": "src/indexer.rs",
+      "bytes": 2932,
+      "total_lines": 85,
+      "sha256_initial": "e8036c96b8e7a4a7f48fde4cfc800735826a2823b74ba20fed515754c750b9a8",
+      "read_ranges": [
+        [
+          1,
+          85
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines personally displayed and reviewed in the listed sequential ranges; hashes alone did not count as reading.",
+      "sha256_final": "e8036c96b8e7a4a7f48fde4cfc800735826a2823b74ba20fed515754c750b9a8",
+      "content_unchanged": true,
+      "description": "Enabled-provider discovery, file freshness checks and incremental/full indexing.",
+      "read_line_count": 85,
+      "read_method": "CodeGraph MCP/file node, current on-disk source",
+      "missing_ranges": [],
+      "inline_test_count": 0,
+      "inline_tests": []
+    },
+    {
+      "path": "src/lib.rs",
+      "bytes": 119,
+      "total_lines": 7,
+      "sha256_initial": "bece1e1cb59e09e5f34028bdff39a51532045b2ef1efe59bd9dbd6f546ba2e21",
+      "read_ranges": [
+        [
+          1,
+          7
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines personally displayed and reviewed in the listed sequential ranges; hashes alone did not count as reading.",
+      "sha256_final": "bece1e1cb59e09e5f34028bdff39a51532045b2ef1efe59bd9dbd6f546ba2e21",
+      "content_unchanged": true,
+      "description": "Library module surface.",
+      "read_line_count": 7,
+      "read_method": "CodeGraph MCP/file node, current on-disk source",
+      "missing_ranges": [],
+      "inline_test_count": 0,
+      "inline_tests": []
+    },
+    {
+      "path": "src/main.rs",
+      "bytes": 151,
+      "total_lines": 9,
+      "sha256_initial": "63ad58de5d11eef3d625b5d0d836e429af6cb9ab606fb0eb74c15ac74bf565e4",
+      "read_ranges": [
+        [
+          1,
+          9
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines personally displayed and reviewed in the listed sequential ranges; hashes alone did not count as reading.",
+      "sha256_final": "63ad58de5d11eef3d625b5d0d836e429af6cb9ab606fb0eb74c15ac74bf565e4",
+      "content_unchanged": true,
+      "description": "CLI entry and error exit.",
+      "read_line_count": 9,
+      "read_method": "CodeGraph MCP/file node, current on-disk source",
+      "missing_ranges": [],
+      "inline_test_count": 0,
+      "inline_tests": []
+    },
+    {
+      "path": "src/mcp.rs",
+      "bytes": 17176,
+      "total_lines": 465,
+      "sha256_initial": "daa2d72de43cf5d704bccbdf1d7460c5454acf0c458295676c458a019aed9a60",
+      "read_ranges": [
+        [
+          1,
+          57
+        ],
+        [
+          58,
+          145
+        ],
+        [
+          146,
+          252
+        ],
+        [
+          253,
+          361
+        ],
+        [
+          362,
+          465
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines personally displayed and reviewed in the listed sequential ranges; hashes alone did not count as reading.",
+      "sha256_final": "daa2d72de43cf5d704bccbdf1d7460c5454acf0c458295676c458a019aed9a60",
+      "content_unchanged": true,
+      "description": "Stdio dispatcher, startup/throttled refresh, five tools and tool-list test.",
+      "read_line_count": 465,
+      "read_method": "CodeGraph MCP/file node, current on-disk source",
+      "missing_ranges": [],
+      "inline_test_count": 1,
+      "inline_tests": [
+        {
+          "line": 453,
+          "name": "tools_list_includes_timeline_for_repo"
+        }
+      ]
+    },
+    {
+      "path": "src/models.rs",
+      "bytes": 2991,
+      "total_lines": 113,
+      "sha256_initial": "50b072dc7b1ad9308295ad5fbf268e2a51ebf911230ee7a7a2ea7c9ab1f8480a",
+      "read_ranges": [
+        [
+          1,
+          113
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines personally displayed and reviewed in the listed sequential ranges; hashes alone did not count as reading.",
+      "sha256_final": "50b072dc7b1ad9308295ad5fbf268e2a51ebf911230ee7a7a2ea7c9ab1f8480a",
+      "content_unchanged": true,
+      "description": "Five providers and session/source/search/health data models.",
+      "read_line_count": 113,
+      "read_method": "CodeGraph MCP/file node, current on-disk source",
+      "missing_ranges": [],
+      "inline_test_count": 0,
+      "inline_tests": []
+    },
+    {
+      "path": "src/providers/antigravity.rs",
+      "bytes": 9225,
+      "total_lines": 240,
+      "sha256_initial": "d3d3d1275a15cefce1b9648dfeef13528df1391f8f6a6b7d3c955d974dbd529d",
+      "read_ranges": [
+        [
+          1,
+          61
+        ],
+        [
+          62,
+          160
+        ],
+        [
+          161,
+          240
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines personally displayed and reviewed in the listed sequential ranges; hashes alone did not count as reading.",
+      "sha256_final": "d3d3d1275a15cefce1b9648dfeef13528df1391f8f6a6b7d3c955d974dbd529d",
+      "content_unchanged": true,
+      "description": "Transcript discovery, path identity, message parsing and parser test.",
+      "read_line_count": 240,
+      "read_method": "CodeGraph MCP/file node, current on-disk source",
+      "missing_ranges": [],
+      "inline_test_count": 1,
+      "inline_tests": [
+        {
+          "line": 215,
+          "name": "test_antigravity_parser"
+        }
+      ]
+    },
+    {
+      "path": "src/providers/claude.rs",
+      "bytes": 11890,
+      "total_lines": 316,
+      "sha256_initial": "cf575f66c6ebb9d521c4703e48e3e5fcc3da0424da558a186cdfa6ca1f6d3ce1",
+      "read_ranges": [
+        [
+          1,
+          110
+        ],
+        [
+          111,
+          221
+        ],
+        [
+          222,
+          316
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines personally displayed and reviewed in the listed sequential ranges; hashes alone did not count as reading.",
+      "sha256_final": "cf575f66c6ebb9d521c4703e48e3e5fcc3da0424da558a186cdfa6ca1f6d3ce1",
+      "content_unchanged": true,
+      "description": "JSONL discovery/normalization, command metadata filtering and six tests.",
+      "read_line_count": 316,
+      "read_method": "CodeGraph MCP/file node, current on-disk source",
+      "missing_ranges": [],
+      "inline_test_count": 6,
+      "inline_tests": [
+        {
+          "line": 265,
+          "name": "skips_local_command_caveat_meta_messages"
+        },
+        {
+          "line": 278,
+          "name": "keeps_normal_user_messages"
+        },
+        {
+          "line": 290,
+          "name": "skips_no_arg_slash_commands"
+        },
+        {
+          "line": 299,
+          "name": "keeps_slash_commands_with_args"
+        },
+        {
+          "line": 306,
+          "name": "strip_command_markup_extracts_args"
+        },
+        {
+          "line": 312,
+          "name": "strip_command_markup_leaves_normal_messages"
+        }
+      ]
+    },
+    {
+      "path": "src/providers/codex.rs",
+      "bytes": 10489,
+      "total_lines": 283,
+      "sha256_initial": "ffc078a8aabecb38a7b7f4cd89882fa2a75353455e0840a4e141c98b571510c3",
+      "read_ranges": [
+        [
+          1,
+          114
+        ],
+        [
+          115,
+          224
+        ],
+        [
+          225,
+          283
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines personally displayed and reviewed in the listed sequential ranges; hashes alone did not count as reading.",
+      "sha256_final": "ffc078a8aabecb38a7b7f4cd89882fa2a75353455e0840a4e141c98b571510c3",
+      "content_unchanged": true,
+      "description": "Rollout parser with SQLite/index title enrichment; no inline tests.",
+      "read_line_count": 283,
+      "read_method": "CodeGraph MCP/file node, current on-disk source",
+      "missing_ranges": [],
+      "inline_test_count": 0,
+      "inline_tests": []
+    },
+    {
+      "path": "src/providers/cursor.rs",
+      "bytes": 13218,
+      "total_lines": 372,
+      "sha256_initial": "ce98ee1a689208f4894fb744be5d016fc3061a55a07e4a2c817777e7f137f0c7",
+      "read_ranges": [
+        [
+          1,
+          119
+        ],
+        [
+          120,
+          226
+        ],
+        [
+          227,
+          325
+        ],
+        [
+          326,
+          372
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines personally displayed and reviewed in the listed sequential ranges; hashes alone did not count as reading.",
+      "sha256_final": "ce98ee1a689208f4894fb744be5d016fc3061a55a07e4a2c817777e7f137f0c7",
+      "content_unchanged": true,
+      "description": "Parent transcript reader, workspace path reconstruction and five tests.",
+      "read_line_count": 372,
+      "read_method": "CodeGraph MCP/file node, current on-disk source",
+      "missing_ranges": [],
+      "inline_test_count": 5,
+      "inline_tests": [
+        {
+          "line": 283,
+          "name": "discovers_and_parses_cursor_parent_transcripts"
+        },
+        {
+          "line": 332,
+          "name": "extracts_user_query_from_cursor_message"
+        },
+        {
+          "line": 346,
+          "name": "ignores_tool_use_payloads_in_cursor_messages"
+        },
+        {
+          "line": 360,
+          "name": "extracts_tag_body"
+        },
+        {
+          "line": 368,
+          "name": "skips_empty_window_workspace"
+        }
+      ]
+    },
+    {
+      "path": "src/providers/mod.rs",
+      "bytes": 85,
+      "total_lines": 5,
+      "sha256_initial": "50c8e36fe6e7411ef1d9a3cde309210a3cab271a0310f0d3fcf5ca40436d1c43",
+      "read_ranges": [
+        [
+          1,
+          5
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines personally displayed and reviewed in the listed sequential ranges; hashes alone did not count as reading.",
+      "sha256_final": "50c8e36fe6e7411ef1d9a3cde309210a3cab271a0310f0d3fcf5ca40436d1c43",
+      "content_unchanged": true,
+      "description": "Provider module exports.",
+      "read_line_count": 5,
+      "read_method": "CodeGraph MCP/file node, current on-disk source",
+      "missing_ranges": [],
+      "inline_test_count": 0,
+      "inline_tests": []
+    },
+    {
+      "path": "src/providers/pi.rs",
+      "bytes": 14094,
+      "total_lines": 334,
+      "sha256_initial": "e13a6d8b6eca2875ccb73bf0f3a1f298b28614a33e42796aa334f4bf1e33ccfd",
+      "read_ranges": [
+        [
+          1,
+          71
+        ],
+        [
+          72,
+          185
+        ],
+        [
+          186,
+          258
+        ],
+        [
+          259,
+          334
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines personally displayed and reviewed in the listed sequential ranges; hashes alone did not count as reading.",
+      "sha256_final": "e13a6d8b6eca2875ccb73bf0f3a1f298b28614a33e42796aa334f4bf1e33ccfd",
+      "content_unchanged": true,
+      "description": "Depth-constrained JSONL discovery, normalization and three tests.",
+      "read_line_count": 334,
+      "read_method": "CodeGraph MCP/file node, current on-disk source",
+      "missing_ranges": [],
+      "inline_test_count": 3,
+      "inline_tests": [
+        {
+          "line": 228,
+          "name": "discovers_and_parses_pi_sessions"
+        },
+        {
+          "line": 280,
+          "name": "falls_back_to_filename_id_when_session_line_has_no_id"
+        },
+        {
+          "line": 306,
+          "name": "discovers_sessions_when_root_is_a_project_directory"
+        }
+      ]
+    },
+    {
+      "path": "src/timeline.rs",
+      "bytes": 9352,
+      "total_lines": 269,
+      "sha256_initial": "4b08518478b37f043e665d8c515d06e212f4fb9d1d488ec02d9ccf21f688dfbe",
+      "read_ranges": [
+        [
+          1,
+          89
+        ],
+        [
+          90,
+          201
+        ],
+        [
+          202,
+          269
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines personally displayed and reviewed in the listed sequential ranges; hashes alone did not count as reading.",
+      "sha256_final": "4b08518478b37f043e665d8c515d06e212f4fb9d1d488ec02d9ccf21f688dfbe",
+      "content_unchanged": true,
+      "description": "Repo prefix match, bounded UTC buckets/Markdown and eight tests.",
+      "read_line_count": 269,
+      "read_method": "CodeGraph MCP/file node, current on-disk source",
+      "missing_ranges": [],
+      "inline_test_count": 8,
+      "inline_tests": [
+        {
+          "line": 179,
+          "name": "same_day_bucketing"
+        },
+        {
+          "line": 193,
+          "name": "multi_day_ordering_newest_first"
+        },
+        {
+          "line": 211,
+          "name": "prefix_mismatch_excluded"
+        },
+        {
+          "line": 217,
+          "name": "case_insensitive_prefix_matching"
+        },
+        {
+          "line": 230,
+          "name": "limit_cap_behavior"
+        },
+        {
+          "line": 237,
+          "name": "empty_result_message"
+        },
+        {
+          "line": 243,
+          "name": "unknown_day_bucket_last"
+        },
+        {
+          "line": 251,
+          "name": "total_session_cap_not_per_day"
+        }
+      ]
+    },
+    {
+      "path": "src/tui.rs",
+      "bytes": 23307,
+      "total_lines": 679,
+      "sha256_initial": "46ac577c1836614ee6645de8d479a238a618f74d385a36afdbba7650e79da5d1",
+      "read_ranges": [
+        [
+          1,
+          133
+        ],
+        [
+          134,
+          261
+        ],
+        [
+          262,
+          379
+        ],
+        [
+          380,
+          509
+        ],
+        [
+          510,
+          634
+        ],
+        [
+          635,
+          679
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines personally displayed and reviewed in the listed sequential ranges; hashes alone did not count as reading.",
+      "sha256_final": "46ac577c1836614ee6645de8d479a238a618f74d385a36afdbba7650e79da5d1",
+      "content_unchanged": true,
+      "description": "Terminal lifecycle, synchronous search, bookend preview, native resume and five tests.",
+      "read_line_count": 679,
+      "read_method": "CodeGraph MCP/file node, current on-disk source",
+      "missing_ranges": [],
+      "inline_test_count": 5,
+      "inline_tests": [
+        {
+          "line": 615,
+          "name": "parses_turns_in_canonical_format"
+        },
+        {
+          "line": 631,
+          "name": "summary_shows_bookends_with_elision"
+        },
+        {
+          "line": 656,
+          "name": "summary_handles_short_session"
+        },
+        {
+          "line": 667,
+          "name": "summary_truncates_long_body"
+        },
+        {
+          "line": 675,
+          "name": "summary_for_empty_transcript"
+        }
+      ]
+    },
+    {
+      "path": "src/util.rs",
+      "bytes": 16673,
+      "total_lines": 498,
+      "sha256_initial": "64cee9652ff084c05cc42500aa7c822e06f63469bf5fbe9a220d3b684f8e99eb",
+      "read_ranges": [
+        [
+          1,
+          127
+        ],
+        [
+          128,
+          254
+        ],
+        [
+          255,
+          379
+        ],
+        [
+          380,
+          498
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines personally displayed and reviewed in the listed sequential ranges; hashes alone did not count as reading.",
+      "sha256_final": "64cee9652ff084c05cc42500aa7c822e06f63469bf5fbe9a220d3b684f8e99eb",
+      "content_unchanged": true,
+      "description": "Path/text/time helpers, warning record, resume planning and six tests.",
+      "read_line_count": 498,
+      "read_method": "CodeGraph MCP/file node, current on-disk source",
+      "missing_ranges": [],
+      "inline_test_count": 6,
+      "inline_tests": [
+        {
+          "line": 434,
+          "name": "extracts_nested_text"
+        },
+        {
+          "line": 445,
+          "name": "trims_preview"
+        },
+        {
+          "line": 451,
+          "name": "builds_match_snippet"
+        },
+        {
+          "line": 458,
+          "name": "highlights_matches"
+        },
+        {
+          "line": 464,
+          "name": "find_repo_root_resolves_worktree_to_main_repo"
+        },
+        {
+          "line": 480,
+          "name": "find_repo_root_does_not_resolve_submodule_as_worktree"
+        }
+      ]
+    }
+  ],
+  "progress_note": "Every Rust source line and every text artifact has been personally read; the binary GIF is explicitly excluded.",
+  "isolated_models": {
+    "kind": "isolated_in_memory_models_not_product_tests",
+    "python": "3.10.11",
+    "sqlite": "3.40.1",
+    "product_commands_executed": [],
+    "results": [
+      {
+        "id": "E1",
+        "source": "src/db.rs:281-295,394-477",
+        "case": "FTS limit*5 before provider filter",
+        "candidates": [
+          "claude:0",
+          "claude:1",
+          "claude:2",
+          "claude:3",
+          "claude:4"
+        ],
+        "post_filter": [],
+        "pre_filter_control": [
+          "codex:target"
+        ]
+      },
+      {
+        "id": "E2",
+        "source": "src/db.rs:87-90,281-315,394-424",
+        "case": "path-only hit is outside nonempty FTS candidate set",
+        "fts_candidates": [
+          "claude:body"
+        ],
+        "path_only_session": "codex:path"
+      },
+      {
+        "id": "E3",
+        "source": "src/db.rs:453-457,550-554,621-627",
+        "case": "LIKE underscore wildcard",
+        "unescaped": [
+          "/work/my_app",
+          "/work/myXapp"
+        ],
+        "escaped_control": [
+          "/work/my_app"
+        ]
+      },
+      {
+        "id": "E4",
+        "source": "src/db.rs:111-120",
+        "case": "nontransactional clear fails after first DELETE",
+        "error": "synthetic-delete-failure",
+        "remaining_rows": {
+          "sessions_fts": 0,
+          "transcripts": 1,
+          "sessions": 2,
+          "files_seen": 1
+        }
+      },
+      {
+        "id": "E5",
+        "source": "src/db.rs:318-380",
+        "case": "ranking arithmetic only, not running SkimMatcher",
+        "assumed_textual_score": 0,
+        "age_days": 0,
+        "rank_score": 180,
+        "included_by_score_gt_zero": true
+      },
+      {
+        "id": "E6",
+        "source": "src/mcp.rs:428-446",
+        "case": "shell lexical model only; no shell or child process executed",
+        "rendered": "claude --resume abc; printf DEMO",
+        "tokens": [
+          "claude",
+          "--resume",
+          "abc",
+          ";",
+          "printf",
+          "DEMO"
+        ]
+      }
+    ]
+  },
+  "report": "sessiongrep-local-audit-20261006.md",
+  "ownership_note": "Only coverage-sessiongrep.json and sessiongrep-local-audit-20261006.md are owned by this researcher. sessiongrep-full-audit.md and sessiongrep-file-coverage.json are another task output and were not modified.",
+  "summary": {
+    "inventory_files": 26,
+    "full_files": 25,
+    "partial_files": 0,
+    "unread_files": 0,
+    "excluded_files": 1,
+    "text_files": 25,
+    "text_lines_total": 7333,
+    "text_lines_read": 7333,
+    "rust_files": 17,
+    "rust_lines_total": 5089,
+    "rust_lines_read": 5089,
+    "inline_tests_observed": 36,
+    "rust_tests_executed": 0,
+    "in_memory_models_executed": 6,
+    "source_files_hash_unchanged": 26
+  },
+  "snapshot_fingerprint": "41013e1701d8593e8a5a4680627dd60b8c059cc0c5e0b3f4a77037987c57fcb7",
+  "external_reference": {
+    "url": "https://doc.rust-lang.org/1.87.0/std/primitive.usize.html#method.is_multiple_of",
+    "verified_date": "2026-10-06",
+    "verified_fact": "usize::is_multiple_of is stable since 1.87.0; directly fetched official versioned method section.",
+    "search_caveat": "Grok synthesis supplied no verifiable sources; broad fallback was not used as evidence. Official versioned HTML was fetched directly. No rate limit prevented local review."
+  },
+  "external_reuse_provenance": {
+    "coverage_file": "sessiongrep-file-coverage.json",
+    "coverage_sha256": "ce321a1cdbfaba128e16a73006dbb92007b462baaeb42fc045c8f6b7ec325866",
+    "report_file": "sessiongrep-full-audit.md",
+    "report_sha256": "68895ecab18faaff7f34859ad3bbc31067f399252a7b17eb9b6bebe5888ea757",
+    "report_total_lines": 235,
+    "report_read_ranges": [
+      [
+        1,
+        35
+      ],
+      [
+        83,
+        169
+      ],
+      [
+        225,
+        235
+      ]
+    ],
+    "coverage_inspected_sections": [
+      "top-level keys",
+      "remaining_ledger",
+      "Cargo.lock file entry",
+      "per-file SHA256 fields for cross-receipt comparison"
+    ],
+    "matching_source_fingerprints": 26,
+    "external_lock_read_lines": 312,
+    "external_lock_remaining_ranges": [
+      {
+        "end": 143,
+        "start": 5
+      },
+      {
+        "end": 257,
+        "start": 179
+      },
+      {
+        "end": 438,
+        "start": 295
+      },
+      {
+        "end": 552,
+        "start": 448
+      },
+      {
+        "end": 654,
+        "start": 571
+      },
+      {
+        "end": 821,
+        "start": 668
+      },
+      {
+        "end": 862,
+        "start": 851
+      },
+      {
+        "end": 974,
+        "start": 907
+      },
+      {
+        "end": 1136,
+        "start": 1067
+      },
+      {
+        "end": 1178,
+        "start": 1151
+      },
+      {
+        "end": 1660,
+        "start": 1196
+      }
+    ],
+    "external_lock_remaining_lines": 1348,
+    "remaining_lines_already_personally_read_before_coordination_update": 1348,
+    "new_source_lines_read_after_coordination_update": 0,
+    "source_lines_claimed_from_external_receipts": 0,
+    "reuse_kind": "Independent cross-check and gap closure by this researcher's already-completed personal receipts, not adoption of unseen source lines.",
+    "scope_note": "Generated lock reading covers dependency names, versions, source origins, checksums and dependency edges only; not source audits of dependencies or vulnerability/license/MSRV certification."
+  }
+}

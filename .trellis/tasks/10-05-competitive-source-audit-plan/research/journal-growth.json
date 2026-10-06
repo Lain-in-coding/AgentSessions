@@ -1,0 +1,279 @@
+{
+  "commit": "5b232cdedbff33a251e7fb266558be7af8496e1a",
+  "method": "One synthetic 200-message source; 21 syncs, each changes only the final message with a fixed-length revision marker. Current-state entity count remains fixed. No VACUUM or pruning performed.",
+  "samples": [
+    {
+      "sync_number": 1,
+      "catalog_rows": 202,
+      "batch_states": [
+        [
+          "activated",
+          1
+        ]
+      ],
+      "journal_manifest_chars": 194315,
+      "source_bytes": 56320,
+      "store_bytes_including_sidecars": 1368064
+    },
+    {
+      "sync_number": 2,
+      "catalog_rows": 202,
+      "batch_states": [
+        [
+          "activated",
+          2
+        ]
+      ],
+      "journal_manifest_chars": 421572,
+      "source_bytes": 56320,
+      "store_bytes_including_sidecars": 1699840
+    },
+    {
+      "sync_number": 3,
+      "catalog_rows": 202,
+      "batch_states": [
+        [
+          "activated",
+          3
+        ]
+      ],
+      "journal_manifest_chars": 648829,
+      "source_bytes": 56320,
+      "store_bytes_including_sidecars": 1945600
+    },
+    {
+      "sync_number": 4,
+      "catalog_rows": 202,
+      "batch_states": [
+        [
+          "activated",
+          4
+        ]
+      ],
+      "journal_manifest_chars": 876086,
+      "source_bytes": 56320,
+      "store_bytes_including_sidecars": 2142208
+    },
+    {
+      "sync_number": 5,
+      "catalog_rows": 202,
+      "batch_states": [
+        [
+          "activated",
+          5
+        ]
+      ],
+      "journal_manifest_chars": 1103343,
+      "source_bytes": 56320,
+      "store_bytes_including_sidecars": 2387968
+    },
+    {
+      "sync_number": 6,
+      "catalog_rows": 202,
+      "batch_states": [
+        [
+          "activated",
+          6
+        ]
+      ],
+      "journal_manifest_chars": 1330600,
+      "source_bytes": 56320,
+      "store_bytes_including_sidecars": 2633728
+    },
+    {
+      "sync_number": 7,
+      "catalog_rows": 202,
+      "batch_states": [
+        [
+          "activated",
+          7
+        ]
+      ],
+      "journal_manifest_chars": 1557857,
+      "source_bytes": 56320,
+      "store_bytes_including_sidecars": 2830336
+    },
+    {
+      "sync_number": 8,
+      "catalog_rows": 202,
+      "batch_states": [
+        [
+          "activated",
+          8
+        ]
+      ],
+      "journal_manifest_chars": 1785114,
+      "source_bytes": 56320,
+      "store_bytes_including_sidecars": 3072000
+    },
+    {
+      "sync_number": 9,
+      "catalog_rows": 202,
+      "batch_states": [
+        [
+          "activated",
+          9
+        ]
+      ],
+      "journal_manifest_chars": 2012371,
+      "source_bytes": 56320,
+      "store_bytes_including_sidecars": 3325952
+    },
+    {
+      "sync_number": 10,
+      "catalog_rows": 202,
+      "batch_states": [
+        [
+          "activated",
+          10
+        ]
+      ],
+      "journal_manifest_chars": 2239628,
+      "source_bytes": 56320,
+      "store_bytes_including_sidecars": 3518464
+    },
+    {
+      "sync_number": 11,
+      "catalog_rows": 202,
+      "batch_states": [
+        [
+          "activated",
+          11
+        ]
+      ],
+      "journal_manifest_chars": 2466885,
+      "source_bytes": 56320,
+      "store_bytes_including_sidecars": 3768320
+    },
+    {
+      "sync_number": 12,
+      "catalog_rows": 202,
+      "batch_states": [
+        [
+          "activated",
+          12
+        ]
+      ],
+      "journal_manifest_chars": 2694142,
+      "source_bytes": 56320,
+      "store_bytes_including_sidecars": 4009984
+    },
+    {
+      "sync_number": 13,
+      "catalog_rows": 202,
+      "batch_states": [
+        [
+          "activated",
+          13
+        ]
+      ],
+      "journal_manifest_chars": 2921399,
+      "source_bytes": 56320,
+      "store_bytes_including_sidecars": 4206592
+    },
+    {
+      "sync_number": 14,
+      "catalog_rows": 202,
+      "batch_states": [
+        [
+          "activated",
+          14
+        ]
+      ],
+      "journal_manifest_chars": 3148656,
+      "source_bytes": 56320,
+      "store_bytes_including_sidecars": 4444160
+    },
+    {
+      "sync_number": 15,
+      "catalog_rows": 202,
+      "batch_states": [
+        [
+          "activated",
+          15
+        ]
+      ],
+      "journal_manifest_chars": 3375913,
+      "source_bytes": 56320,
+      "store_bytes_including_sidecars": 4689920
+    },
+    {
+      "sync_number": 16,
+      "catalog_rows": 202,
+      "batch_states": [
+        [
+          "activated",
+          16
+        ]
+      ],
+      "journal_manifest_chars": 3603170,
+      "source_bytes": 56320,
+      "store_bytes_including_sidecars": 4939776
+    },
+    {
+      "sync_number": 17,
+      "catalog_rows": 202,
+      "batch_states": [
+        [
+          "activated",
+          17
+        ]
+      ],
+      "journal_manifest_chars": 3830427,
+      "source_bytes": 56320,
+      "store_bytes_including_sidecars": 5132288
+    },
+    {
+      "sync_number": 18,
+      "catalog_rows": 202,
+      "batch_states": [
+        [
+          "activated",
+          18
+        ]
+      ],
+      "journal_manifest_chars": 4057684,
+      "source_bytes": 56320,
+      "store_bytes_including_sidecars": 5378048
+    },
+    {
+      "sync_number": 19,
+      "catalog_rows": 202,
+      "batch_states": [
+        [
+          "activated",
+          19
+        ]
+      ],
+      "journal_manifest_chars": 4284941,
+      "source_bytes": 56320,
+      "store_bytes_including_sidecars": 5627904
+    },
+    {
+      "sync_number": 20,
+      "catalog_rows": 202,
+      "batch_states": [
+        [
+          "activated",
+          20
+        ]
+      ],
+      "journal_manifest_chars": 4512198,
+      "source_bytes": 56320,
+      "store_bytes_including_sidecars": 5820416
+    },
+    {
+      "sync_number": 21,
+      "catalog_rows": 202,
+      "batch_states": [
+        [
+          "activated",
+          21
+        ]
+      ],
+      "journal_manifest_chars": 4739455,
+      "source_bytes": 56320,
+      "store_bytes_including_sidecars": 6066176
+    }
+  ]
+}

@@ -1,0 +1,60 @@
+{
+ "date": "2026-10-06",
+ "method": "mechanical marker detection (Cargo.toml/go.mod/package.json deps/*.swift/src-tauri) on local clones",
+ "projects": {
+  "agent-sessions": [
+   "Swift(455 files)"
+  ],
+  "AgentRecall": [
+   "Node/TS(package.json)",
+   "Electron",
+   "React"
+  ],
+  "agentsview": [
+   "Go(go.mod)"
+  ],
+  "agf": [
+   "Rust(cargo)"
+  ],
+  "cc-sessions-viewer": [
+   "Node/TS(package.json)",
+   "Vue",
+   "Tauri"
+  ],
+  "cc-switch": [
+   "Node/TS(package.json)",
+   "React",
+   "Tauri",
+   "FlexSearch"
+  ],
+  "claude-historian-mcp": [
+   "Node/TS(package.json)"
+  ],
+  "coding_agent_session_search": [
+   "Rust(cargo)"
+  ],
+  "ctx": [
+   "Rust(cargo)",
+   "Swift(1 files)"
+  ],
+  "fast-resume": [
+   "Rust(cargo)",
+   "Python"
+  ],
+  "hstry": [
+   "Rust(cargo)",
+   "Node/TS(package.json)"
+  ],
+  "memex": [],
+  "Recall": [
+   "Rust(cargo)"
+  ],
+  "sessiongrep": [
+   "Rust(cargo)"
+  ],
+  "Wake": [
+   "Rust(cargo)",
+   "Swift(1 files)"
+  ]
+ }
+}

@@ -1,0 +1,582 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-06",
+  "task": ".trellis/tasks/10-05-competitive-source-audit-plan",
+  "repository": "C:\\AgentSessions\\Github_src\\fast-resume",
+  "commit": "66e42cfd34bca4800161098d3b302a35a52ce69b",
+  "scope": "Read-only competitive source audit of fast-resume at the pinned commit: session discovery/indexing/incremental/freshness/concurrency, resume-launch construction, provider coverage and normalization boundaries, failure behavior, search/query capabilities, and ASG comparison. No build/test/install/network/git-write was executed.",
+  "status": "source_review_complete",
+  "t1_scope_rule": "T1 = the 10 task-designated files: the 9 full files were read end-to-end in bounded consecutive ranges (<=150 lines per call, 1-based inclusive); src/adapters/opencode.rs was read by key regions only and is partial with missing_ranges recorded. supplementary_reads lists additional bounded reads used to ground the audit questions; no file counts as read on a hash alone.",
+  "line_count_method": "UTF-8 splitlines; 1-based inclusive read ranges; final newline does not create an extra logical source line. codegraph sometimes reports one virtual trailing line, which is not counted.",
+  "inventory_method": "Fixed task-designated T1 file list; byte sizes and SHA256 via PowerShell Get-FileHash; T2 sweep results cross-checked via filtered queries against research/sweep-fast-resume.json (not read in full).",
+  "sweep_reference": "research/sweep-fast-resume.json",
+  "files": [
+    {
+      "path": "src/main.rs",
+      "bytes": 9734,
+      "total_lines": 321,
+      "sha256_initial": "eaaeb97f1f08b0443706a892b97711502802b932d5359ce7186ed0ebd68d6b48",
+      "read_ranges": [
+        [
+          1,
+          150
+        ],
+        [
+          151,
+          300
+        ],
+        [
+          301,
+          321
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical lines personally displayed and reviewed in the listed sequential bounded ranges; hashes alone did not count as reading.",
+      "sha256_final": "eaaeb97f1f08b0443706a892b97711502802b932d5359ce7186ed0ebd68d6b48",
+      "content_unchanged": true,
+      "description": "CLI entry: args, rebuild, refreshed_index, list/stats output, TUI handoff, exec_resume (set_current_dir + argv exec).",
+      "read_line_count": 321,
+      "read_method": "codegraph node bounded file read (line-numbered, <=150 lines per call)",
+      "missing_ranges": []
+    },
+    {
+      "path": "src/index.rs",
+      "bytes": 15512,
+      "total_lines": 472,
+      "sha256_initial": "d63787c1c63f8b5e9f00b0753ab3e8e42202062bf74ee5aafc22c98751741652",
+      "read_ranges": [
+        [
+          1,
+          150
+        ],
+        [
+          151,
+          300
+        ],
+        [
+          301,
+          450
+        ],
+        [
+          451,
+          472
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical lines personally displayed and reviewed in the listed sequential bounded ranges; hashes alone did not count as reading.",
+      "sha256_final": "d63787c1c63f8b5e9f00b0753ab3e8e42202062bf74ee5aafc22c98751741652",
+      "content_unchanged": true,
+      "description": "Tantivy SessionIndex: schema-version gate, rebuild, incremental delegate, upsert/delete by session_key, search/search_count, known_sessions.",
+      "read_line_count": 472,
+      "read_method": "codegraph node bounded file read (line-numbered, <=150 lines per call)",
+      "missing_ranges": []
+    },
+    {
+      "path": "src/config.rs",
+      "bytes": 7949,
+      "total_lines": 311,
+      "sha256_initial": "4fb2d8d7ef21d12c17d1de9d37aa5128314a37234c78cc3163969fadcac864c4",
+      "read_ranges": [
+        [
+          1,
+          150
+        ],
+        [
+          151,
+          300
+        ],
+        [
+          301,
+          311
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical lines personally displayed and reviewed in the listed sequential bounded ranges; hashes alone did not count as reading.",
+      "sha256_final": "4fb2d8d7ef21d12c17d1de9d37aa5128314a37234c78cc3163969fadcac864c4",
+      "content_unchanged": true,
+      "description": "Constants: INDEX_SCHEMA_VERSION 23, 12-agent registry, default provider paths, env overrides (GROK_HOME/KIMI_CODE_HOME/PI_*), tilde expansion.",
+      "read_line_count": 311,
+      "read_method": "codegraph node bounded file read (line-numbered, <=150 lines per call)",
+      "missing_ranges": []
+    },
+    {
+      "path": "src/query.rs",
+      "bytes": 8179,
+      "total_lines": 273,
+      "sha256_initial": "6228f1c8b5e3a8cb8a5dfba8147857dcb2198a9547e5e7ba89990608ba30caea",
+      "read_ranges": [
+        [
+          1,
+          140
+        ],
+        [
+          141,
+          273
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical lines personally displayed and reviewed in the listed sequential bounded ranges; hashes alone did not count as reading.",
+      "sha256_final": "6228f1c8b5e3a8cb8a5dfba8147857dcb2198a9547e5e7ba89990608ba30caea",
+      "content_unchanged": true,
+      "description": "Query parser: agent/dir/date keywords, negation, comma lists, relative date grammar; tests.",
+      "read_line_count": 273,
+      "read_method": "codegraph node bounded file read (line-numbered, <=150 lines per call)",
+      "missing_ranges": []
+    },
+    {
+      "path": "src/search.rs",
+      "bytes": 8206,
+      "total_lines": 262,
+      "sha256_initial": "f590c89f4f26defb1b33883ff2c3fa11fbb0e10b3ba7fe278fe74a5708d6eb52",
+      "read_ranges": [
+        [
+          1,
+          140
+        ],
+        [
+          141,
+          262
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical lines personally displayed and reviewed in the listed sequential bounded ranges; hashes alone did not count as reading.",
+      "sha256_final": "f590c89f4f26defb1b33883ff2c3fa11fbb0e10b3ba7fe278fe74a5708d6eb52",
+      "content_unchanged": true,
+      "description": "SearchEngine wrapper; most methods swallow errors via unwrap_or_default/unwrap_or(0); search_result surfaces errors.",
+      "read_line_count": 262,
+      "read_method": "codegraph node bounded file read (line-numbered, <=150 lines per call)",
+      "missing_ranges": []
+    },
+    {
+      "path": "src/adapters/shared.rs",
+      "bytes": 16239,
+      "total_lines": 522,
+      "sha256_initial": "7c5bf16827256a53e7836388954cf8d124a1127bd0262a0351ab9f97877b3479",
+      "read_ranges": [
+        [
+          1,
+          135
+        ],
+        [
+          136,
+          270
+        ],
+        [
+          271,
+          405
+        ],
+        [
+          406,
+          522
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical lines personally displayed and reviewed in the listed sequential bounded ranges; hashes alone did not count as reading.",
+      "sha256_final": "7c5bf16827256a53e7836388954cf8d124a1127bd0262a0351ab9f97877b3479",
+      "content_unchanged": true,
+      "description": "Shared adapter helpers: mtime-delta update rule, deleted-id diff, failed-scan no-op, JSONL health Clean/Partial/Invalid, parse helpers.",
+      "read_line_count": 522,
+      "read_method": "codegraph node bounded file read (line-numbered, <=150 lines per call)",
+      "missing_ranges": []
+    },
+    {
+      "path": "src/adapters/claude.rs",
+      "bytes": 18446,
+      "total_lines": 525,
+      "sha256_initial": "83ab8ced04d1f4961e87b720afbf4668b9b429a83e4c336a034b7da8108062a3",
+      "read_ranges": [
+        [
+          1,
+          135
+        ],
+        [
+          136,
+          270
+        ],
+        [
+          271,
+          405
+        ],
+        [
+          406,
+          525
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical lines personally displayed and reviewed in the listed sequential bounded ranges; hashes alone did not count as reading.",
+      "sha256_final": "83ab8ced04d1f4961e87b720afbf4668b9b429a83e4c336a034b7da8108062a3",
+      "content_unchanged": true,
+      "description": "Claude JSONL parser (user/assistant/ai-title, meta/command filtering), sessions-index.json titles, incremental scan, resume_command, tests.",
+      "read_line_count": 525,
+      "read_method": "codegraph node bounded file read (line-numbered, <=150 lines per call)",
+      "missing_ranges": []
+    },
+    {
+      "path": "src/adapters/codex.rs",
+      "bytes": 28822,
+      "total_lines": 724,
+      "sha256_initial": "33333008ab80da364db58ae970258660e456ffcc5cbda018547fbd81f3fad7bf",
+      "read_ranges": [
+        [
+          1,
+          130
+        ],
+        [
+          131,
+          260
+        ],
+        [
+          261,
+          390
+        ],
+        [
+          391,
+          520
+        ],
+        [
+          521,
+          650
+        ],
+        [
+          651,
+          724
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical lines personally displayed and reviewed in the listed sequential bounded ranges; hashes alone did not count as reading.",
+      "sha256_final": "33333008ab80da364db58ae970258660e456ffcc5cbda018547fbd81f3fad7bf",
+      "content_unchanged": true,
+      "description": "Codex rollout parser (session_meta/turn_context/response_item/event_msg), thread-name index, complete-flag deletion barrier, resume_command, tests.",
+      "read_line_count": 724,
+      "read_method": "codegraph node bounded file read (line-numbered, <=150 lines per call)",
+      "missing_ranges": []
+    },
+    {
+      "path": "src/tui/state.rs",
+      "bytes": 18441,
+      "total_lines": 583,
+      "sha256_initial": "70cf87faabba1b5d8d6eb0c11fa59c582efe03e4c08bb90cd91e4db1f6a51297",
+      "read_ranges": [
+        [
+          1,
+          120
+        ],
+        [
+          121,
+          240
+        ],
+        [
+          241,
+          360
+        ],
+        [
+          361,
+          480
+        ],
+        [
+          481,
+          583
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical lines personally displayed and reviewed in the listed sequential bounded ranges; hashes alone did not count as reading.",
+      "sha256_final": "70cf87faabba1b5d8d6eb0c11fa59c582efe03e4c08bb90cd91e4db1f6a51297",
+      "content_unchanged": true,
+      "description": "TUI AppState: generation-stamped search requests, limit=100, async scan messages, filters, suggestions, yolo modal state.",
+      "read_line_count": 583,
+      "read_method": "codegraph node bounded file read (line-numbered, <=150 lines per call)",
+      "missing_ranges": []
+    },
+    {
+      "path": "src/adapters/opencode.rs",
+      "bytes": 55918,
+      "total_lines": 1578,
+      "sha256_initial": "efe826be1c138669d13fe3c6e3be9a1777cc9c316be2c7e8a8f587e1f291a6de",
+      "read_ranges": [
+        [
+          1,
+          90
+        ],
+        [
+          108,
+          257
+        ],
+        [
+          258,
+          407
+        ],
+        [
+          408,
+          457
+        ]
+      ],
+      "status": "partial",
+      "reason": "Key regions only (adapter entry, resume_command, SQLite full+incremental queries, no-op error scan, dynamic mtime SQL). Legacy storage parser and test tail were NOT read; lines 458-1578 remain unverified.",
+      "sha256_final": "efe826be1c138669d13fe3c6e3be9a1777cc9c316be2c7e8a8f587e1f291a6de",
+      "content_unchanged": true,
+      "description": "SQLite (session/message/part) + legacy storage adapter. Dynamic SQL uses fixed table names, column whitelist and bound chunk ids (900).",
+      "read_line_count": 440,
+      "read_method": "codegraph node bounded file read (line-numbered, <=150 lines per call)",
+      "missing_ranges": [
+        {
+          "start": 91,
+          "end": 107
+        },
+        {
+          "start": 458,
+          "end": 1578
+        }
+      ]
+    }
+  ],
+  "supplementary_reads": [
+    {
+      "path": "src/refresh.rs",
+      "bytes": 5895,
+      "total_lines": 190,
+      "sha256_initial": "0bc3c501a41bfb4f823a6b9eb734029f5a6c5c5fa81dc512574c86f13747f60d",
+      "read_ranges": [
+        [
+          1,
+          150
+        ],
+        [
+          151,
+          190
+        ]
+      ],
+      "status": "full",
+      "reason": "Supplementary full read for incremental orchestration/concurrency questions; hash baseline captured before reads.",
+      "sha256_final": "0bc3c501a41bfb4f823a6b9eb734029f5a6c5c5fa81dc512574c86f13747f60d",
+      "content_unchanged": true,
+      "description": "Rayon full scan; per-adapter thread::spawn + mpsc; 500-session flush batches; deletion only on Finished event.",
+      "read_line_count": 190,
+      "read_method": "codegraph node bounded file read (line-numbered, <=150 lines per call)",
+      "missing_ranges": []
+    },
+    {
+      "path": "src/adapters/mod.rs",
+      "bytes": 3105,
+      "total_lines": 101,
+      "sha256_initial": "175f0d8f696cd8edb3b45b85c9791d066a9ac83f1a2f92e42c5f73a45e9f5d62",
+      "read_ranges": [
+        1,
+        101
+      ],
+      "status": "full",
+      "reason": "Supplementary full read for provider coverage and IncrementalScan semantics; hash baseline captured before reads.",
+      "sha256_final": "175f0d8f696cd8edb3b45b85c9791d066a9ac83f1a2f92e42c5f73a45e9f5d62",
+      "content_unchanged": true,
+      "description": "Adapter trait (MTIME_TOLERANCE 0.001), IncrementalScan, 12-adapter registry, adapter_for.",
+      "read_line_count": 101,
+      "read_method": "codegraph node bounded file read (line-numbered, <=150 lines per call)",
+      "missing_ranges": []
+    },
+    {
+      "path": "src/index/schema.rs",
+      "bytes": 2857,
+      "total_lines": 84,
+      "sha256_initial": "909056687dfe7504ca76b49d5a89de1179d211e14e8ff9c7341926eafe924007",
+      "read_ranges": [
+        1,
+        84
+      ],
+      "status": "full",
+      "reason": "Supplementary full read for index-format question; first hash captured at close-of-audit and re-hash identical.",
+      "sha256_final": "909056687dfe7504ca76b49d5a89de1179d211e14e8ff9c7341926eafe924007",
+      "content_unchanged": true,
+      "description": "Tantivy schema fields, raw-text options, .schema_version file semantics.",
+      "read_line_count": 84,
+      "read_method": "codegraph node bounded file read (line-numbered, <=150 lines per call)",
+      "missing_ranges": []
+    },
+    {
+      "path": "src/index/document.rs",
+      "bytes": 2415,
+      "total_lines": 62,
+      "sha256_initial": "569ec9cf9bd2dedcc289e9ef5ccec9812cd1ed1d24c64af75e32301c381a1403",
+      "read_ranges": [
+        1,
+        62
+      ],
+      "status": "full",
+      "reason": "Supplementary full read for index-format question; first hash captured at close-of-audit and re-hash identical.",
+      "sha256_final": "569ec9cf9bd2dedcc289e9ef5ccec9812cd1ed1d24c64af75e32301c381a1403",
+      "content_unchanged": true,
+      "description": "Session<->document mapping; session_key = agent::id.",
+      "read_line_count": 62,
+      "read_method": "codegraph node bounded file read (line-numbered, <=150 lines per call)",
+      "missing_ranges": []
+    },
+    {
+      "path": "src/index/queries.rs",
+      "bytes": 7958,
+      "total_lines": 226,
+      "sha256_initial": "13ff3a92bd21407a7e7b83d37eae0cc097f4b05a1180578302a80a8901dde3bb",
+      "read_ranges": [
+        [
+          1,
+          130
+        ],
+        [
+          131,
+          226
+        ]
+      ],
+      "status": "full",
+      "reason": "Supplementary full read for search-capability question; first hash captured at close-of-audit and re-hash identical.",
+      "sha256_final": "13ff3a92bd21407a7e7b83d37eae0cc097f4b05a1180578302a80a8901dde3bb",
+      "content_unchanged": true,
+      "description": "Query construction: lenient parser + 5x boost, fuzzy (>=3 chars, 1 edit, prefix), directory substring regex, date ranges, DST test.",
+      "read_line_count": 226,
+      "read_method": "codegraph node bounded file read (line-numbered, <=150 lines per call)",
+      "missing_ranges": []
+    },
+    {
+      "path": "src/model.rs",
+      "bytes": 3357,
+      "total_lines": 115,
+      "sha256_initial": "9690e8c07600f76a25548d459be827733a6471d6a9cf0b145abe74de9887f8ee",
+      "read_ranges": [
+        1,
+        115
+      ],
+      "status": "full",
+      "reason": "Supplementary full read for normalization-model question; first hash captured at close-of-audit and re-hash identical.",
+      "sha256_final": "9690e8c07600f76a25548d459be827733a6471d6a9cf0b145abe74de9887f8ee",
+      "content_unchanged": true,
+      "description": "Session model, display_directory (HOME only), truncate_title, file mtime/timestamp, sort_and_dedupe.",
+      "read_line_count": 115,
+      "read_method": "codegraph node bounded file read (line-numbered, <=150 lines per call)",
+      "missing_ranges": []
+    },
+    {
+      "path": "src/tui/input.rs",
+      "bytes": 5864,
+      "total_lines": 154,
+      "sha256_initial": "ce473dc35e297876b79e5e95a118a47011f3fbd02f850ba870e6e80fcfebe605",
+      "read_ranges": [
+        [
+          1,
+          120
+        ],
+        [
+          121,
+          154
+        ]
+      ],
+      "status": "full",
+      "reason": "Supplementary full read for resume/launch question; first hash captured at close-of-audit and re-hash identical.",
+      "sha256_final": "ce473dc35e297876b79e5e95a118a47011f3fbd02f850ba870e6e80fcfebe605",
+      "content_unchanged": true,
+      "description": "Key handling, yolo modal policy, finish_action: Resume exec handoff vs Copy via shell_join/shell_quote.",
+      "read_line_count": 154,
+      "read_method": "codegraph node bounded file read (line-numbered, <=150 lines per call)",
+      "missing_ranges": []
+    },
+    {
+      "path": "src/tui.rs",
+      "bytes": 38517,
+      "total_lines": 1125,
+      "sha256_initial": "d2cb94e94f7859edc78d1ea21083d0889f9add99368568dbc44b87c44938cfbe",
+      "read_ranges": [
+        [
+          30,
+          129
+        ],
+        [
+          176,
+          230
+        ]
+      ],
+      "status": "partial",
+      "reason": "Targeted regions only (run_tui startup refresh, scan-message loop, search worker); lines 1-29,130-175,231-1125 not read.",
+      "sha256_final": "d2cb94e94f7859edc78d1ea21083d0889f9add99368568dbc44b87c44938cfbe",
+      "content_unchanged": true,
+      "description": "run_tui: single startup background refresh, search worker using search_result with limit=100, TuiExit shape.",
+      "read_line_count": 155,
+      "read_method": "codegraph node bounded file read (line-numbered, <=150 lines per call)",
+      "missing_ranges": [
+        {
+          "start": 1,
+          "end": 29
+        },
+        {
+          "start": 130,
+          "end": 175
+        },
+        {
+          "start": 231,
+          "end": 1125
+        }
+      ]
+    },
+    {
+      "path": "src/tui/text.rs",
+      "bytes": 7576,
+      "total_lines": 244,
+      "sha256_initial": "68c9c9bc4046ae239d3620d234ed6b50b1258e4231ae73912ffeecbef51c1174",
+      "read_ranges": [
+        185,
+        224
+      ],
+      "status": "partial",
+      "reason": "Targeted region only (shell_join/shell_quote); lines 1-184,225-244 not read.",
+      "sha256_final": "68c9c9bc4046ae239d3620d234ed6b50b1258e4231ae73912ffeecbef51c1174",
+      "content_unchanged": true,
+      "description": "POSIX shell quoting helpers used for the clipboard copy string.",
+      "read_line_count": 40,
+      "read_method": "codegraph node bounded file read (line-numbered, <=150 lines per call)",
+      "missing_ranges": [
+        {
+          "start": 1,
+          "end": 184
+        },
+        {
+          "start": 225,
+          "end": 244
+        }
+      ]
+    },
+    {
+      "path": "Cargo.toml",
+      "bytes": 932,
+      "total_lines": 35,
+      "sha256_initial": "53a7d4bcbc5ca0fb454fd61a6e93eb4bcdf026bdb3c388cb1beac2959160eca3",
+      "read_ranges": [
+        1,
+        35
+      ],
+      "status": "full",
+      "reason": "Supplementary full read via PowerShell numbered output (not indexed by codegraph); hash baseline captured before read.",
+      "sha256_final": "53a7d4bcbc5ca0fb454fd61a6e93eb4bcdf026bdb3c388cb1beac2959160eca3",
+      "content_unchanged": true,
+      "description": "v2.5.0, edition 2024, bin fr; Tantivy 0.26.1, rusqlite 0.40 bundled, rayon, ratatui 0.30.1; no MCP server dependency.",
+      "read_line_count": 35,
+      "read_method": "PowerShell line-numbered text read",
+      "missing_ranges": []
+    }
+  ],
+  "summary": {
+    "t1_files": 10,
+    "t1_full": 9,
+    "t1_partial": 1,
+    "t1_lines_total": 5571,
+    "t1_lines_read": 4433,
+    "supplementary_files": 10,
+    "supplementary_full": 8,
+    "supplementary_partial": 2,
+    "supplementary_lines_read": 1162,
+    "total_files_in_ledger": 20,
+    "total_lines_read": 5595,
+    "files_with_pre_read_hash_baseline": 13,
+    "files_first_hashed_at_close_of_audit": 7,
+    "files_rehashed_identical": 20,
+    "t2_sweep_files_scanned": 55,
+    "t2_binary_excluded": 13,
+    "t2_files_with_hits": 47,
+    "build_test_network_git_write_operations": 0
+  },
+  "ownership_note": "This worker owns only research/coverage-fast-resume.json and research/audit-fast-resume.md. No other file was created or modified; the fast-resume repository and other TASKDIR artifacts were left untouched.",
+  "report": "research/audit-fast-resume.md"
+}

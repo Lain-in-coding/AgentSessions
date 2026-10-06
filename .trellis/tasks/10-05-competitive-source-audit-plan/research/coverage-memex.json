@@ -1,0 +1,590 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-06",
+  "task": ".trellis/tasks/10-05-competitive-source-audit-plan",
+  "repository": "C:\\AgentSessions\\Github_src\\memex",
+  "commit": "9a88a5cbeccd14ef2a526729e1815b8df0793414",
+  "commit_verification": "Read-only inspection of .git/HEAD and refs/heads/main returned the recorded commit; no git command was run.",
+  "scope": "memex competitive source audit: T1 full-text read of designated Lite and full-service files only; static source review; no build/test/install/network/git-write execution.",
+  "status": "source_review_complete_report_delivered",
+  "t1_scope_rule": "T1 = full read of the 7 required files plus the 2 budget-permitting optional files, each read in bounded windows <=150 lines with exact ranges recorded; a file not fully read must be marked partial with missing_ranges; hashes never count as reading. Auxiliary context reads are listed separately and do not change the T1 scope.",
+  "line_count_method": "UTF-8 text; PowerShell Get-Content logical line count (final newline does not create an extra line); read ranges are 1-based inclusive.",
+  "files": [
+    {
+      "path": "memex-rs/src/mcp/mod.rs",
+      "bytes": 91728,
+      "total_lines": 2556,
+      "sha256_initial": "89dd90412eea9fd8233cbfccc11ae515c3c9d4416c9bcfcb0cbb624e59e73ef2",
+      "read_ranges": [
+        [
+          1,
+          150
+        ],
+        [
+          151,
+          300
+        ],
+        [
+          301,
+          450
+        ],
+        [
+          451,
+          600
+        ],
+        [
+          601,
+          750
+        ],
+        [
+          751,
+          900
+        ],
+        [
+          901,
+          1050
+        ],
+        [
+          1051,
+          1200
+        ],
+        [
+          1201,
+          1350
+        ],
+        [
+          1351,
+          1500
+        ],
+        [
+          1501,
+          1650
+        ],
+        [
+          1651,
+          1800
+        ],
+        [
+          1801,
+          1950
+        ],
+        [
+          1951,
+          2100
+        ],
+        [
+          2101,
+          2250
+        ],
+        [
+          2251,
+          2400
+        ],
+        [
+          2401,
+          2556
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines personally displayed and reviewed in the listed sequential ranges; hashes alone did not count as reading.",
+      "sha256_final": "89dd90412eea9fd8233cbfccc11ae515c3c9d4416c9bcfcb0cbb624e59e73ef2",
+      "content_unchanged": true,
+      "description": "HTTP JSON-RPC MCP server: 5 tools (search_history/get_session/get_recent_sessions/list_projects/extract_knowledge), progressive disclosure L3->L2->L0, at/around anchor contract, source=local|remote|peers. 41 inline tests (static count).",
+      "read_line_count": 2556,
+      "read_method": "codegraph node bounded line-numbered windows (<=150 lines per call), cross-checked with PowerShell Get-Content line counts and Get-FileHash.",
+      "missing_ranges": []
+    },
+    {
+      "path": "memex-rs/src/search/mod.rs",
+      "bytes": 39654,
+      "total_lines": 1136,
+      "sha256_initial": "bc49f9a92721964f76583b33f7c534eed117c2349a32a7db504f70ddaae61c47",
+      "read_ranges": [
+        [
+          1,
+          150
+        ],
+        [
+          151,
+          300
+        ],
+        [
+          301,
+          450
+        ],
+        [
+          451,
+          600
+        ],
+        [
+          601,
+          750
+        ],
+        [
+          751,
+          900
+        ],
+        [
+          901,
+          1050
+        ],
+        [
+          1051,
+          1136
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines personally displayed and reviewed in the listed sequential ranges; hashes alone did not count as reading.",
+      "sha256_final": "bc49f9a92721964f76583b33f7c534eed117c2349a32a7db504f70ddaae61c47",
+      "content_unchanged": true,
+      "description": "Hybrid search service: FTS via ai-cli-session-db + LanceDB vector + RRF(k=60) with per-source attribution; time order silently downgrades to FTS-only; FTS/vector errors degrade to empty results.",
+      "read_line_count": 1136,
+      "read_method": "codegraph node bounded line-numbered windows (<=150 lines per call), cross-checked with PowerShell Get-Content line counts and Get-FileHash.",
+      "missing_ranges": []
+    },
+    {
+      "path": "memex-rs/src/inject/mod.rs",
+      "bytes": 33444,
+      "total_lines": 990,
+      "sha256_initial": "e9a6573e4925f981aff787b833244a80bc6ec5b193756c0b58dfec11008872cf",
+      "read_ranges": [
+        [
+          1,
+          150
+        ],
+        [
+          151,
+          300
+        ],
+        [
+          301,
+          450
+        ],
+        [
+          451,
+          600
+        ],
+        [
+          601,
+          750
+        ],
+        [
+          751,
+          900
+        ],
+        [
+          901,
+          990
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines personally displayed and reviewed in the listed sequential ranges; hashes alone did not count as reading.",
+      "sha256_final": "e9a6573e4925f981aff787b833244a80bc6ec5b193756c0b58dfec11008872cf",
+      "content_unchanged": true,
+      "description": "Claude Code hook injection (SessionStart fallback chain, UserPromptSubmit combine/fallback via embeddings); context items carry only 8-char session prefixes and layer labels; chars/4 token budget with hard break; 500-char message truncation; time_decay mutates an unused score field.",
+      "read_line_count": 990,
+      "read_method": "codegraph node bounded line-numbered windows (<=150 lines per call), cross-checked with PowerShell Get-Content line counts and Get-FileHash.",
+      "missing_ranges": []
+    },
+    {
+      "path": "memex-rs/src/db_reader.rs",
+      "bytes": 14473,
+      "total_lines": 450,
+      "sha256_initial": "58e73df00e4df0180c9ba31e459869cadb2b78c72adce505f2343667919f5ac6",
+      "read_ranges": [
+        [
+          1,
+          150
+        ],
+        [
+          151,
+          300
+        ],
+        [
+          301,
+          450
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines personally displayed and reviewed in the listed sequential ranges; hashes alone did not count as reading.",
+      "sha256_final": "58e73df00e4df0180c9ba31e459869cadb2b78c72adce505f2343667919f5ac6",
+      "content_unchanged": true,
+      "description": "Read-oriented wrapper over ai-cli-session-db (external git dep); exposes FTS/talks searches and also vector-index/admin write methods despite read-only doc comment.",
+      "read_line_count": 450,
+      "read_method": "codegraph node bounded line-numbered windows (<=150 lines per call), cross-checked with PowerShell Get-Content line counts and Get-FileHash.",
+      "missing_ranges": []
+    },
+    {
+      "path": "memex-rs/src/domain/mod.rs",
+      "bytes": 13248,
+      "total_lines": 418,
+      "sha256_initial": "494fa473ecd3596c48bc02cd0bf07647fbd78a2313600b93dedd0e815263d04a",
+      "read_ranges": [
+        [
+          1,
+          150
+        ],
+        [
+          151,
+          300
+        ],
+        [
+          301,
+          418
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines personally displayed and reviewed in the listed sequential ranges; hashes alone did not count as reading.",
+      "sha256_final": "494fa473ecd3596c48bc02cd0bf07647fbd78a2313600b93dedd0e815263d04a",
+      "content_unchanged": true,
+      "description": "API DTOs and conversions from the DB crate; several DTO conversions hardcode source=claude / channel=code for a multi-provider product.",
+      "read_line_count": 418,
+      "read_method": "codegraph node bounded line-numbered windows (<=150 lines per call), cross-checked with PowerShell Get-Content line counts and Get-FileHash.",
+      "missing_ranges": []
+    },
+    {
+      "path": "memex-lite/src/main.rs",
+      "bytes": 10230,
+      "total_lines": 381,
+      "sha256_initial": "9f047727e4f428af9ade45550e53996071e07d8bc0e4e3aa36db7d560ea7ed6e",
+      "read_ranges": [
+        [
+          1,
+          150
+        ],
+        [
+          151,
+          300
+        ],
+        [
+          301,
+          381
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines personally displayed and reviewed in the listed sequential ranges; hashes alone did not count as reading.",
+      "sha256_final": "9f047727e4f428af9ade45550e53996071e07d8bc0e4e3aa36db7d560ea7ed6e",
+      "content_unchanged": true,
+      "description": "Lite CLI entry (separate package/workspace): search/list/view/sources subcommands, regex query passthrough, file-mtime-based date range, no index/MCP/network.",
+      "read_line_count": 381,
+      "read_method": "codegraph node bounded line-numbered windows (<=150 lines per call), cross-checked with PowerShell Get-Content line counts and Get-FileHash.",
+      "missing_ranges": []
+    },
+    {
+      "path": "memex-lite/src/output.rs",
+      "bytes": 15217,
+      "total_lines": 444,
+      "sha256_initial": "a6c607067aea02847f5b4eea16656056788c361e8aa7d1707ee2c4ff1f338a46",
+      "read_ranges": [
+        [
+          1,
+          150
+        ],
+        [
+          151,
+          300
+        ],
+        [
+          301,
+          444
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines personally displayed and reviewed in the listed sequential ranges; hashes alone did not count as reading.",
+      "sha256_final": "a6c607067aea02847f5b4eea16656056788c361e8aa7d1707ee2c4ff1f338a46",
+      "content_unchanged": true,
+      "description": "Lite text/json/markdown formatters for sources, session lists, search results, session detail; 4 inline tests (static count).",
+      "read_line_count": 444,
+      "read_method": "codegraph node bounded line-numbered windows (<=150 lines per call), cross-checked with PowerShell Get-Content line counts and Get-FileHash.",
+      "missing_ranges": []
+    },
+    {
+      "path": "memex-rs/src/knowledge/matcher.rs",
+      "bytes": 11034,
+      "total_lines": 368,
+      "sha256_initial": "f47a4a73c3125e4d988dd0cbc3acd001ccc289b69ac20951e52cd5864e129bc0",
+      "read_ranges": [
+        [
+          1,
+          150
+        ],
+        [
+          151,
+          300
+        ],
+        [
+          301,
+          368
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines personally displayed and reviewed in the listed sequential ranges; hashes alone did not count as reading.",
+      "sha256_final": "f47a4a73c3125e4d988dd0cbc3acd001ccc289b69ac20951e52cd5864e129bc0",
+      "content_unchanged": true,
+      "description": "Optional budget read: L4 knowledge clustering (embedding cosine similarity, average-linkage, LLM cluster naming/evolution); 4 inline tests (static count).",
+      "read_line_count": 368,
+      "read_method": "codegraph node bounded line-numbered windows (<=150 lines per call), cross-checked with PowerShell Get-Content line counts and Get-FileHash.",
+      "missing_ranges": []
+    },
+    {
+      "path": "memex-rs/src/vector/mod.rs",
+      "bytes": 12626,
+      "total_lines": 390,
+      "sha256_initial": "9b536e191413110ca4368f553537fecf78b77d141cb237257194ef4b9b0af861",
+      "read_ranges": [
+        [
+          1,
+          150
+        ],
+        [
+          151,
+          300
+        ],
+        [
+          301,
+          390
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines personally displayed and reviewed in the listed sequential ranges; hashes alone did not count as reading.",
+      "sha256_final": "9b536e191413110ca4368f553537fecf78b77d141cb237257194ef4b9b0af861",
+      "content_unchanged": true,
+      "description": "Optional budget read: real LanceDB vector store (1024-dim table embeddings, insert/search/delete/compact); missing table silently returns empty search results.",
+      "read_line_count": 390,
+      "read_method": "codegraph node bounded line-numbered windows (<=150 lines per call), cross-checked with PowerShell Get-Content line counts and Get-FileHash.",
+      "missing_ranges": []
+    }
+  ],
+  "auxiliary_reads": [
+    {
+      "path": "memex-lite/src/search.rs",
+      "bytes": 9773,
+      "total_lines": 304,
+      "sha256_initial": "72bee943f11367f831172a0927bbb0d8440148a4442b1dc00d0fc42d41225c4d",
+      "read_ranges": [
+        [
+          1,
+          150
+        ],
+        [
+          151,
+          300
+        ],
+        [
+          301,
+          304
+        ]
+      ],
+      "status": "full",
+      "reason": "Fully displayed and reviewed as T1-adjacent context for the Lite retrieval boundary.",
+      "sha256_final": "72bee943f11367f831172a0927bbb0d8440148a4442b1dc00d0fc42d41225c4d",
+      "content_unchanged": true,
+      "description": "Lite grep search core: enumerates sessions live, regex over parsed user/assistant messages, mtime time filter, 200-char context. codegraph node bounded line-numbered windows (<=150 lines per call), cross-checked with PowerShell Get-Content/Get-FileHash; T1-adjacent context read, outside the required T1 list.",
+      "read_line_count": 304,
+      "read_method": "",
+      "missing_ranges": []
+    },
+    {
+      "path": "memex-rs/src/server/search.rs",
+      "bytes": 2633,
+      "total_lines": 95,
+      "sha256_initial": "3d087685f145f43e36c0d7315f967f76bd1fd4e88e7f227c048f3235295e1bd8",
+      "read_ranges": [
+        [
+          1,
+          95
+        ]
+      ],
+      "status": "full",
+      "reason": "Fully displayed and reviewed as T1-adjacent context for server-side retrieval.",
+      "sha256_final": "3d087685f145f43e36c0d7315f967f76bd1fd4e88e7f227c048f3235295e1bd8",
+      "content_unchanged": true,
+      "description": "Server /api/search reusing HybridSearchService; no embedding provider server-side; limit capped to 100. codegraph node bounded line-numbered windows (<=150 lines per call), cross-checked with PowerShell Get-Content/Get-FileHash; T1-adjacent context read, outside the required T1 list.",
+      "read_line_count": 95,
+      "read_method": "",
+      "missing_ranges": []
+    },
+    {
+      "path": "README.md",
+      "bytes": 3214,
+      "total_lines": 105,
+      "sha256_initial": "dc7629718884bcee50a7dcc2e64942d6a0fac93c9d75613ab0da89ff970cd7ea",
+      "read_ranges": [
+        [
+          1,
+          105
+        ]
+      ],
+      "status": "full",
+      "reason": "Fully displayed and reviewed as T1-adjacent context for product claims.",
+      "sha256_final": "dc7629718884bcee50a7dcc2e64942d6a0fac93c9d75613ab0da89ff970cd7ea",
+      "content_unchanged": true,
+      "description": "Product readme: Full (brew server, MCP) vs Lite (zero-dependency CLI); FTS5+vectors+RRF claim; Local storage claim; hook docs pointer. codegraph node bounded line-numbered windows (<=150 lines per call), cross-checked with PowerShell Get-Content/Get-FileHash; T1-adjacent context read, outside the required T1 list.",
+      "read_line_count": 105,
+      "read_method": "",
+      "missing_ranges": []
+    },
+    {
+      "path": "memex-lite/Cargo.toml",
+      "bytes": 955,
+      "total_lines": 41,
+      "sha256_initial": "0f5a9c42422a94053fbf9133e3389c52652789c98cb5ba917b02a0232b167921",
+      "read_ranges": [
+        [
+          1,
+          41
+        ]
+      ],
+      "status": "full",
+      "reason": "Fully displayed and reviewed as T1-adjacent context for Lite dependency/network boundary.",
+      "sha256_final": "0f5a9c42422a94053fbf9133e3389c52652789c98cb5ba917b02a0232b167921",
+      "content_unchanged": true,
+      "description": "Lite package memex 0.1.0, edition 2024, standalone workspace; deps clap/colored/regex/glob/serde/anyhow/dirs/chrono + git dep ai-cli-session-collector. codegraph node bounded line-numbered windows (<=150 lines per call), cross-checked with PowerShell Get-Content/Get-FileHash; T1-adjacent context read, outside the required T1 list.",
+      "read_line_count": 41,
+      "read_method": "",
+      "missing_ranges": []
+    },
+    {
+      "path": "memex-rs/Cargo.toml",
+      "bytes": 3258,
+      "total_lines": 99,
+      "sha256_initial": "1a290e07e0b432be604375f3e11ca732efe03221e5952ce974b05c7cfa4bec0f",
+      "read_ranges": [
+        [
+          1,
+          99
+        ]
+      ],
+      "status": "full",
+      "reason": "Fully displayed and reviewed as T1-adjacent context for full-service dependency/network boundary.",
+      "sha256_final": "1a290e07e0b432be604375f3e11ca732efe03221e5952ce974b05c7cfa4bec0f",
+      "content_unchanged": true,
+      "description": "Full service memex-rs 0.0.4-platform.3: axum/rustls server-mode, reqwest, rusqlite bundled, lancedb 0.15 + arrow 53, notify watcher, git dep ai-cli-session-db (reader/search/sync). codegraph node bounded line-numbered windows (<=150 lines per call), cross-checked with PowerShell Get-Content/Get-FileHash; T1-adjacent context read, outside the required T1 list.",
+      "read_line_count": 99,
+      "read_method": "",
+      "missing_ranges": []
+    },
+    {
+      "path": "memex-rs/src/compact/mod.rs",
+      "bytes": 1248,
+      "total_lines": 35,
+      "sha256_initial": "a318a457f5114a7d19be97b975cd3157e8f63ed788c51b8ae050091e04cbcc5c",
+      "read_ranges": [
+        [
+          1,
+          35
+        ]
+      ],
+      "status": "full",
+      "reason": "Fully displayed and reviewed as T1-adjacent context for the compact layer boundary.",
+      "sha256_final": "a318a457f5114a7d19be97b975cd3157e8f63ed788c51b8ae050091e04cbcc5c",
+      "content_unchanged": true,
+      "description": "Compact layer module: L0 raw always kept; L1 observations / L2 talks / L3 session summaries are LLM-driven and rebuildable; exports compact DB/vector/indexer/queue/service. codegraph node bounded line-numbered windows (<=150 lines per call), cross-checked with PowerShell Get-Content/Get-FileHash; T1-adjacent context read, outside the required T1 list.",
+      "read_line_count": 35,
+      "read_method": "",
+      "missing_ranges": []
+    },
+    {
+      "path": "memex-rs/src/indexer/mod.rs",
+      "bytes": 20051,
+      "total_lines": 585,
+      "sha256_initial": "846fc9a3006c16c391184e9490caf4559de62ec0069c4ac190c76d5f45d9ba4b",
+      "read_ranges": [
+        [
+          1,
+          150
+        ]
+      ],
+      "status": "partial",
+      "reason": "Only head (1-150) displayed and reviewed for role/queue/status-sync behavior; remainder intentionally left unread under budget.",
+      "sha256_final": "846fc9a3006c16c391184e9490caf4559de62ec0069c4ac190c76d5f45d9ba4b",
+      "content_unchanged": true,
+      "description": "Vector index queue and indexer: async mpsc queue, index_by_ids, sync LanceDB indexed ids back to SQLite vector_indexed flags. codegraph node bounded line-numbered windows (<=150 lines per call), cross-checked with PowerShell Get-Content/Get-FileHash; T1-adjacent context read, outside the required T1 list.",
+      "read_line_count": 150,
+      "read_method": "151 585",
+      "missing_ranges": [
+        [
+          151,
+          585
+        ]
+      ]
+    }
+  ],
+  "asg_reference_reads": [
+    {
+      "path": ".trellis/spec/agentsessions-domain/backend/index.md",
+      "bytes": 6560,
+      "total_lines": 138,
+      "sha256_initial": "n/a",
+      "read_ranges": [
+        [
+          1,
+          138
+        ]
+      ],
+      "status": "full",
+      "reason": "Fully displayed and reviewed as ASG reference context (not a memex file; hash not recomputed in this worker).",
+      "sha256_final": "n/a",
+      "content_unchanged": true,
+      "description": "ASG domain spec: stable identity tiers (Native/Reconstructed/Unstable), placement/occurrence identity, context graph invariants, pure-core contracts. PowerShell line-numbered text read.",
+      "read_line_count": 138,
+      "read_method": "",
+      "missing_ranges": []
+    },
+    {
+      "path": ".trellis/spec/agentsessions-provider-claude/backend/index.md",
+      "bytes": 6100,
+      "total_lines": 94,
+      "sha256_initial": "n/a",
+      "read_ranges": [
+        [
+          1,
+          94
+        ]
+      ],
+      "status": "full",
+      "reason": "Fully displayed and reviewed as ASG reference context (not a memex file; hash not recomputed in this worker).",
+      "sha256_final": "n/a",
+      "content_unchanged": true,
+      "description": "ASG Claude provider spec: native uuid identity, parentUuid threading, shape-limited normalization, read-only streaming parse, synthetic fixtures. PowerShell line-numbered text read.",
+      "read_line_count": 94,
+      "read_method": "",
+      "missing_ranges": []
+    }
+  ],
+  "excluded_from_review": [
+    ".git/ (HEAD/ref read-only check only)",
+    ".codegraph/ (generated index)",
+    "target/build caches (none audited)",
+    "external git dependencies ai-cli-session-collector / ai-cli-session-db internals"
+  ],
+  "sweep_reference": "research/sweep-memex.json (mechanical sweep, 130 files, main-session T2 product) used for filtered queries only.",
+  "deliverables": [
+    "research/audit-memex.md",
+    "research/coverage-memex.json"
+  ],
+  "ownership_note": "This worker only created coverage-memex.json and audit-memex.md; no other file was created or modified; no source file was written.",
+  "summary": {
+    "t1_files": 9,
+    "t1_full": 9,
+    "t1_partial": 0,
+    "t1_unread": 0,
+    "t1_lines_total": 7133,
+    "t1_lines_read": 7133,
+    "aux_files": 7,
+    "aux_full": 6,
+    "aux_partial": 1,
+    "aux_lines_read": 829,
+    "asg_reference_files": 2,
+    "asg_reference_lines_read": 232,
+    "total_lines_read_including_references": 8194,
+    "t1_files_hash_unchanged": 9,
+    "t1_inline_test_declarations_static": 59,
+    "tests_executed": 0,
+    "findings_by_severity": {
+      "P1": 0,
+      "P2": 5,
+      "P3": 6
+    }
+  }
+}

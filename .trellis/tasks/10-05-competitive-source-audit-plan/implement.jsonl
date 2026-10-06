@@ -1,0 +1,11 @@
+{"file": ".trellis/spec/guides/index.md", "reason": "Review evidence and false-positive discipline"}
+{"file": ".trellis/spec/agentsessions-cli/backend/index.md", "reason": "CLI composition, parser and interface contracts"}
+{"file": ".trellis/spec/agentsessions-adapters-sqlite/backend/index.md", "reason": "Storage, journal, identity and transaction invariants"}
+{"file": ".trellis/spec/agentsessions-application/backend/index.md", "reason": "Application use case and shared surface boundaries"}
+{"file": ".trellis/tasks/10-05-competitive-source-audit-plan/research/asg-main.md", "reason": "Current verified ASG evidence and explicit limitations"}
+{"file": ".trellis/tasks/10-05-competitive-source-audit-plan/research/competitor-cli-resume.md", "reason": "CLI/resume competitor evidence; not exhaustive coverage"}
+{"file": ".trellis/tasks/10-05-competitive-source-audit-plan/research/competitor-ctx-hstry.md", "reason": "History infrastructure evidence"}
+{"file": ".trellis/tasks/10-05-competitive-source-audit-plan/research/competitor-memory-mcp.md", "reason": "MCP and memory product evidence"}
+{"file": ".trellis/tasks/10-05-competitive-source-audit-plan/research/competitor-desktop.md", "reason": "Desktop evidence and full path inventory"}
+{"file": ".trellis/tasks/10-05-competitive-source-audit-plan/research/competitor-adjacent.md", "reason": "Adjacent session manager evidence"}
+{"file": ".trellis/tasks/10-05-competitive-source-audit-plan/research/competitor-cass.md", "reason": "cass source findings and license/coverage limitations"}
