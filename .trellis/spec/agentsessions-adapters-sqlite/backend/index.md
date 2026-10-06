@@ -228,6 +228,16 @@ private committed receipts. Migration skips unverifiable/ambiguous provenance
 without rekeying historical entities. New namespace reservations live only in
 memory until their source replacement activates. The durable source manifest
 includes the assignment; a failed source commit leaves no registry pollution.
+Before selecting or reserving a namespace for an unregistered input,
+`validate_unbound_source_locator` checks existing unbound scan locators using
+`normalize_absolute_path`. Include NULL provider metadata. A different stored
+spelling with the same lexical key is `InvalidRequest`, even if an exact-text
+row also exists; preserve the original locator, all tables and generation.
+An exact unique legacy locator still requires complete native-session proof.
+Registered current bindings keep their indexed path. The unbound cold path
+streams rows with bounded memory, but may scan legacy candidates per input;
+it is not an indexed or batched time-complexity optimization.
+
 
 Relocation extends the existing outbox manifest and activation transaction.
 Move every live source locator in `source_scans`, `source_membership`,
@@ -275,6 +285,11 @@ receipt and activation. Cover legacy migration rollback, opaque allocation,
 independent same-native-ID installations, source deletion, WAL-only change,
 plan lifetime/mapping/generation, target conflicts, reverse moves, retired
 expiry, casing/separators/Unicode, read-only preview and no-clobber backup.
+Cover provider-less legacy Windows locators with raw and normalized inputs,
+ambiguous equivalent rows, exact legacy proof, and preservation on refusal.
+The namespace guard is shared by ingest, explicit sync and discovery; tests
+must include those routes rather than relying on CLI input normalization.
+
 
 ### 7. Wrong vs Correct
 Wrong: persist a namespace during parsing or update only `source_scans`.

@@ -289,6 +289,34 @@ impl SqliteStore {
         ).optional().map_err(backend)
     }
 
+    fn validate_unbound_source_locator(
+        conn: &Connection,
+        source_path: &str,
+        source_key: &str,
+    ) -> PortResult<()> {
+        // Exact text still needs the ordinary legacy proof. Any other unbound
+        // spelling of the same lexical key makes that provenance ambiguous.
+        let mut statement = conn
+            .prepare(
+                "SELECT ss.source_path FROM source_scans ss
+                 LEFT JOIN source_installations si USING(source_path)
+                 WHERE si.source_path IS NULL AND ss.source_path <> ?1",
+            )
+            .map_err(backend)?;
+        for recorded in statement
+            .query_map([source_path], |row| row.get::<_, String>(0))
+            .map_err(backend)?
+        {
+            let recorded = recorded.map_err(backend)?;
+            if normalize_absolute_path(&recorded).is_ok_and(|key| key == source_key) {
+                return Err(invalid(
+                    "existing source locator needs explicit provenance resolution",
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Resolve identity before parsing. New values are in-memory reservations;
     /// only a successful source activation can persist them.
     pub fn resolve_or_allocate_installation_namespace(
@@ -305,6 +333,7 @@ impl SqliteStore {
             }
             return Ok(existing.namespace_input);
         }
+        Self::validate_unbound_source_locator(&conn, source_path, &source_key)?;
         let now = (self.relocation_clock)()?;
         let scanned: bool = conn
             .query_row(

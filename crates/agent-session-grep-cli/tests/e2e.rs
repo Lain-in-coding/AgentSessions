@@ -124,6 +124,26 @@ fn temp_db(tag: &str) -> (tempfile::TempDir, String) {
     (dir, s)
 }
 
+/// Match the CLI's source locator spelling when seeding historical scan rows.
+fn v6_fixture_source_locator(path: &Path) -> String {
+    let locator = path
+        .to_str()
+        .expect("fixture source path is Unicode")
+        .to_owned();
+    #[cfg(windows)]
+    {
+        let mut locator = locator.replace('\\', "/");
+        if locator.as_bytes().get(1) == Some(&b':') {
+            locator[..1].make_ascii_lowercase();
+        }
+        locator
+    }
+    #[cfg(not(windows))]
+    {
+        locator
+    }
+}
+
 fn create_v6_catalog(
     db: &str,
     source_path: &str,
@@ -356,7 +376,6 @@ fn migrated_v6_catalog_stays_readable_until_complete_reingest_enables_context() 
         .into_owned();
     let session_native = "66111111-1111-4111-8111-111111111111";
     let message_native = "66222222-2222-4222-8222-222222222222";
-    let legacy_session_wire = format!("ses_v1_{session_native}");
     let message_wire = format!("msg_v1_{message_native}");
     let legacy_document_wire = "doc_v1_legacy-v6-document";
     let message_text = "legacy catalog survives migration";
@@ -367,7 +386,22 @@ fn migrated_v6_catalog_stays_readable_until_complete_reingest_enables_context() 
          \"message\":{{\"role\":\"user\",\"content\":\"{message_text}\"}}}}\n"
     );
     std::fs::write(&source, &source_content).expect("write v6 re-ingest fixture");
-    let source_path = source.to_string_lossy().into_owned();
+    let source_path = v6_fixture_source_locator(&source);
+    // Reproduce the historical namespace and CLI locator spelling. A complete
+    // re-ingest must prove and preserve this Session, never allocate a new one.
+    let namespace = agent_session_grep_application::relocation::legacy_installation_namespace(
+        &source_path,
+        "claude-code",
+    );
+    let legacy_session_wire = agent_session_grep_domain::StableId::native_session_scoped(
+        &agent_session_grep_domain::SessionIdentityNamespace {
+            provider_id: "claude-code",
+            installation_namespace: &namespace,
+        },
+        session_native,
+    )
+    .as_str()
+    .to_owned();
     create_v6_catalog(
         &db,
         &source_path,
@@ -442,7 +476,7 @@ fn migrated_v6_catalog_stays_readable_until_complete_reingest_enables_context() 
     );
     assert_eq!(parse_first_line(&ingest)["data"]["skipped"], 0);
     let session_wire = session_wire_for_message(&db, &message_wire);
-    assert_ne!(session_wire, legacy_session_wire);
+    assert_eq!(session_wire, legacy_session_wire);
 
     let context = run(&db, &["context", &session_wire]);
     assert!(
@@ -480,6 +514,103 @@ fn migrated_v6_catalog_stays_readable_until_complete_reingest_enables_context() 
             stdout(&output)
         );
     }
+}
+
+fn assert_v6_reingest_rejects_unproven_session(raw_locator: bool) {
+    let (dir, home) = discover_env();
+    let db = dir
+        .path()
+        .join("unproven-v6.db")
+        .to_string_lossy()
+        .into_owned();
+    let source = dir.path().join(".claude/projects/legacy-source.jsonl");
+    let source_content = serde_json::json!({
+        "type": "user",
+        "uuid": "c0000000-0000-4000-8000-000000000001",
+        "parentUuid": null,
+        "sessionId": "ccdd1234-5678-4abc-8def-001122334455",
+        "timestamp": "2026-07-28T00:00:00.000Z",
+        "message": { "role": "user", "content": "resume smoke root" },
+    });
+    std::fs::write(&source, format!("{source_content}\n")).expect("write unproven legacy source");
+    let input_path = source.to_string_lossy().into_owned();
+    let message_wire = "msg_v1_c0000000-0000-4000-8000-000000000001";
+    let source_path = if raw_locator {
+        input_path.clone()
+    } else {
+        v6_fixture_source_locator(Path::new(&input_path))
+    };
+    create_v6_catalog(
+        &db,
+        &source_path,
+        "ses_v1_ccdd1234-5678-4abc-8def-001122334455",
+        message_wire,
+        "doc_v1_unproven-v6-document",
+        "resume smoke root",
+    );
+    let store = agent_session_grep_adapters_sqlite::SqliteStore::open_for_write(&db)
+        .expect("migrate unproven v6 catalog under writer lease");
+    drop(store);
+    let before = relocation_rows(&db, None);
+    let generation_before: i64 = Connection::open(&db)
+        .expect("open legacy generation")
+        .query_row("SELECT active_generation FROM store_metadata", [], |row| {
+            row.get(0)
+        })
+        .expect("read legacy generation");
+
+    // Both explicit entrypoints normalize their input; discovery constructs
+    // its own locators. All routes must reach the shared storage guard.
+    let normalized_input = v6_fixture_source_locator(Path::new(&input_path));
+    let mut commands = vec![
+        vec!["ingest", input_path.as_str()],
+        vec!["sync", input_path.as_str()],
+    ];
+    if normalized_input != input_path {
+        commands.push(vec!["ingest", normalized_input.as_str()]);
+        commands.push(vec!["sync", normalized_input.as_str()]);
+    }
+    commands.push(vec!["sync", "--discover"]);
+    for args in commands {
+        let ingest = run_with_home(&db, &home, &args);
+        assert_eq!(
+            ingest.status.code(),
+            Some(2),
+            "{} must not replace an unproven legacy Session: {}",
+            args[0],
+            stdout(&ingest)
+        );
+        assert_eq!(
+            parse_first_line(&ingest)["error"]["code"],
+            "invalid_request"
+        );
+        assert_relocation_rows(&db, None, &before);
+        let generation_after: i64 = Connection::open(&db)
+            .expect("open unchanged generation")
+            .query_row("SELECT active_generation FROM store_metadata", [], |row| {
+                row.get(0)
+            })
+            .expect("read unchanged generation");
+        assert_eq!(generation_after, generation_before);
+        // The relocation snapshot compares path keys; also preserve the exact
+        // historical spelling so a rejected ingest cannot normalize it silently.
+        let stored_source_path: String = Connection::open(&db)
+            .expect("open unchanged source locator")
+            .query_row("SELECT source_path FROM source_scans", [], |row| row.get(0))
+            .expect("read unchanged source locator");
+        assert_eq!(stored_source_path, source_path);
+    }
+}
+
+#[test]
+fn migrated_v6_catalog_rejects_unproven_session_identity() {
+    assert_v6_reingest_rejects_unproven_session(false);
+}
+
+#[cfg(windows)]
+#[test]
+fn migrated_v6_catalog_rejects_unproven_session_at_raw_windows_locator() {
+    assert_v6_reingest_rejects_unproven_session(true);
 }
 
 #[test]
@@ -2721,25 +2852,19 @@ fn run_with_path(
         .expect("failed to spawn agent-session-grep binary")
 }
 
-/// cwd 文本比较：忽略尾部分隔符；Windows 大小写不敏感。
-fn same_cwd(recorded: &str, expected: &str) -> bool {
-    let recorded = recorded.trim().trim_end_matches(['/', '\\']);
-    let expected = expected.trim().trim_end_matches(['/', '\\']);
-    #[cfg(windows)]
-    {
-        recorded.eq_ignore_ascii_case(expected)
-    }
-    #[cfg(not(windows))]
-    {
-        recorded == expected
-    }
-}
-
 #[test]
 fn resume_yes_first_run_forced_preview_then_spawns_in_original_cwd() {
     let (dir, db) = temp_db("resume-spawn");
     let workdir = dir.path().join("original-workspace");
     std::fs::create_dir_all(&workdir).expect("create workspace");
+    // Exercise logical and physical cwd spellings even when the host's temp
+    // directory is not itself a symlink (as /var is on macOS).
+    #[cfg(unix)]
+    let workdir = {
+        let alias = dir.path().join("workspace-link");
+        std::os::unix::fs::symlink(&workdir, &alias).expect("link original workspace");
+        alias
+    };
     let workdir_str = workdir.to_string_lossy().into_owned();
     let (fixture_path, anchor_message) = write_claude_resume_fixture(dir.path(), &workdir_str);
     let out = run(&db, &["ingest", &fixture_path]);
@@ -2802,8 +2927,9 @@ fn resume_yes_first_run_forced_preview_then_spawns_in_original_cwd() {
         "second run must not report first-run: {frame}"
     );
     let recorded_cwd = std::fs::read_to_string(&cwd_out).expect("read recorded cwd");
-    assert!(
-        same_cwd(&recorded_cwd, &workdir_str),
+    assert_eq!(
+        std::fs::canonicalize(&recorded_cwd).expect("resolve spawned cwd"),
+        workdir.canonicalize().expect("resolve original workspace"),
         "spawned cwd {recorded_cwd:?} != expected {workdir_str:?}"
     );
     let recorded_args = std::fs::read_to_string(&args_out).expect("read recorded args");

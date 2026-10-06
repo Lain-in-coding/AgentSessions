@@ -5611,15 +5611,20 @@ mod tests {
             provider_for_source_path("C:/Users/x/.openclaw/agents/main/sessions/one.jsonl"),
             Some("openclaw")
         );
-        // Windows 反斜杠与大写盘符经 source_path_identity 归一后同样匹配。
-        assert_eq!(
-            provider_for_source_path(r"C:\Users\x\.pi\agent\sessions\--work--\one.jsonl"),
-            Some("pi")
-        );
         // 非默认 home（测试用 HOME 覆盖、多用户 profile）也匹配：按分段窗口对齐，
         // 不依赖 home 前缀。
         assert_eq!(
             provider_for_source_path("/tmp/fake-home/.pi/agent/sessions/x/one.jsonl"),
+            Some("pi")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn provider_for_source_path_resolves_windows_separators() {
+        // Windows 反斜杠与大写盘符经 source_path_identity 归一后同样匹配。
+        assert_eq!(
+            provider_for_source_path(r"C:\Users\x\.pi\agent\sessions\--work--\one.jsonl"),
             Some("pi")
         );
     }
