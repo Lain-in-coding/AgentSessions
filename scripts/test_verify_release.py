@@ -85,15 +85,33 @@ class VerifyReleaseTests(unittest.TestCase):
         with mock.patch.object(verify_release, "run_asg", side_effect=lambda *args, **kwargs: next(frames)):
             self.assertFalse(verify_release.verify_handoff("synthetic-binary", "synthetic-root"))
 
-    def test_hook_default_check_rejects_nonempty_context(self) -> None:
-        frame = {
-            "data": {
-                "enabled": False,
-                "hookSpecificOutput": {"additionalContext": "unexpected history"},
-            }
-        }
-        with mock.patch.object(verify_release, "run_asg", return_value=frame):
+    def _hook_process(
+        self, *, stdout: str, stderr: str, returncode: int = 0
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            args=["synthetic-binary"],
+            returncode=returncode,
+            stdout=stdout,
+            stderr=stderr,
+        )
+
+    def test_hook_default_check_rejects_stdout_bytes(self) -> None:
+        """默认关闭的 hook 一旦往 stdout 写任何字节，检查必须失败。"""
+        written = self._hook_process(
+            stdout='{"hookSpecificOutput": {"additionalContext": "unexpected history"}}',
+            stderr="hook: event=UserPromptSubmit enabled=false",
+        )
+        with mock.patch.object(verify_release, "run_asg_raw", return_value=written):
             self.assertFalse(verify_release.verify_hook("synthetic-binary", "synthetic-root"))
+
+    def test_hook_default_check_accepts_silent_hook(self) -> None:
+        """契约：默认关闭时 exit 0 + stdout 为空 + 运行事实（enabled=false）走 stderr。"""
+        silent = self._hook_process(
+            stdout="",
+            stderr="hook: event=UserPromptSubmit enabled=false offline=false hits=0 injected=false",
+        )
+        with mock.patch.object(verify_release, "run_asg_raw", return_value=silent):
+            self.assertTrue(verify_release.verify_hook("synthetic-binary", "synthetic-root"))
 
     def test_parse_first_json_line_ignores_blank_lines(self) -> None:
         self.assertEqual(

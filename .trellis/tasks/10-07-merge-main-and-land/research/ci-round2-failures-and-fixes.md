@@ -16,3 +16,10 @@ head db41494（含 F1/F2 修复）：
 - 说明：scripts/verify-release.py 与 origin/main 逐字节相同（非本分支引入）；B6 新增的 release-verify.yml 只是第一次在 CI 里真正运行它，把既有问题暴露出来。
 - 修复：verify_hook 改为按契约断言——exit 0、stdout 长度 0、stderr 含 enabled=false，并把观测写进 step 详情。断言不是放宽：它校验 CLI 的文档化契约（默认静默 + 运行事实走 stderr），原先的 JSON 帧期望才是错的。
 - 本地复验：python scripts/verify-release.py --asg <release 二进制> 得到 10/10；python -m unittest discover -s scripts/release 18 tests OK。
+
+## F3 收尾：脚本自测同步（第三轮子修复）
+
+- 改 verify_hook 后，scripts/test_verify_release.py 的旧测试失败：它 patch 的是 run_asg，而新实现直接调 subprocess.run，于是测试去 spawn 假二进制（CI 三平台同错，失败步骤 Release verifier and entry-point tests）。
+- 处理：把原始调用抽成 run_asg_raw()（返回 CompletedProcess），run_asg() 在其上解析 JSON 帧；verify_hook 复用 run_asg_raw 以保持可注入。
+- 测试改为两条（可证伪性不减）：test_hook_default_check_rejects_stdout_bytes（hook 若往 stdout 写字节则必须判失败）与 test_hook_default_check_accepts_silent_hook（exit 0 + 空 stdout + stderr enabled=false 则通过）。
+- 本地复验：scripts 19 tests OK、scripts/release 18 OK、scripts/evidence 58 OK；verify-release.py 10/10。
