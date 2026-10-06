@@ -1,0 +1,14 @@
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"入口、存储、检索与协议修复跨越多个 hexagonal layers；使用其 data-flow、boundary contract 与 round-trip checklist。"}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"修复涉及重复 parser、semantic resolver、provider filter、SQL helper 与 budget estimator；使用其 search-before-new-helper 和 single-owner 规则。"}
+{"file":".trellis/spec/agentsessions-ports/backend/index.md","reason":"阶段 1/2 会触及 PortResult、SemanticIndex、SearchIndex、SearchProvider 与 error mapping；这是 ports 的接口边界和 object-safety 契约。"}
+{"file":".trellis/spec/agentsessions-domain/backend/index.md","reason":"阶段 1 会触及 StableId、SessionContextGraph.validate、时间/branch selection；需要保持纯 domain、无 I/O 和不变量错误规则。"}
+{"file":".trellis/spec/agentsessions-application/backend/index.md","reason":"阶段 1/2/3 会触及 AppRequest、cursor digest、ranking、semantic orchestration 与 AppError；需要保持应用层只依赖 ports/domain。"}
+{"file":".trellis/spec/agentsessions-adapters-sqlite/backend/index.md","reason":"阶段 2/4 会触及 catalog/FTS/vector projection、durable outbox、tombstone、migration、generation、batching 与 SQLite 错误边界。"}
+{"file":".trellis/spec/agentsessions-cli/backend/index.md","reason":"阶段 1/3/5 会触及 hook、CLI/MCP/Web/TUI、Robot output、provider parsing 和 cross-entry gate；需要保持 stdout/protocol/exit-code 约束。"}
+{"file":".trellis/spec/agentsessions-testkit/backend/index.md","reason":"阶段 0/1/2/5 需要使用 testkit fake、fixture builders、graph validation 与 cross-layer test conventions。"}
+{"file":"docs/contracts/CONTRACT-cli-robot-mcp-draft.md","reason":"规范性来源：Application ADT、ResponseBudget、Robot envelope、14 error codes、cursor、MCP tools 与 plain-text query contract。"}
+{"file":"docs/operations/rebuild-and-migration-runbook.md","reason":"projection version、自愈、tombstone、source rebuild、writer lease、generation、cursor 与回滚操作证据。"}
+{"file":"docs/architecture/RFC-0002-provider-adapter-contract.md","reason":"provider snapshot、bounded parsing、source read-only、staging、error matrix 与 cross-platform adapter contract。"}
+{"file":".trellis/tasks/08-15-open-source-product-roadmap/research/2026-08-15-review-domain-ports.md","reason":"已有 domain/ports 风险和身份迁移背景，避免重复设计或错误修改 ses_v1。"}
+{"file":".trellis/tasks/08-15-open-source-product-roadmap/research/2026-08-15-review-sqlite-query.md","reason":"已有 SQLite query、FTS、参数上限和 CJK 风险记录，作为当前源码行号之外的历史交叉证据。"}
+{"file":".trellis/tasks/archive/2026-08/08-15-unified-release-contract/research/2026-08-18-provider-scoped-identity-plan.md","reason":"installation_namespace、ses_v2、id_alias、schema migration 与 backfill 的既有独立计划；本任务必须避开静默身份重写。"}
