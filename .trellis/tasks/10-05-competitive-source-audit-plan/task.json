@@ -28,7 +28,8 @@
     "10-06-provider-stability",
     "10-06-release-closure",
     "10-07-final-perf-regression",
-    "10-07-repo-probe-overlap"
+    "10-07-repo-probe-overlap",
+    "10-07-merge-main-and-land"
   ],
   "parent": null,
   "relatedFiles": [],
