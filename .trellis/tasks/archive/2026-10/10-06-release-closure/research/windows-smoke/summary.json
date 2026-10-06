@@ -1,0 +1,194 @@
+{
+  "schema": "agent-session-grep.b6-windows-smoke/v1",
+  "generated_at": "2026-10-07 00:03:10+08:00",
+  "host": {
+    "os": "Microsoft Windows NT 10.0.22631.0",
+    "architecture": "AMD64",
+    "powershell": "7.6.1",
+    "cargo": "cargo 1.97.1 (c980f4866 2026-06-30)",
+    "rustc": "rustc 1.97.1 (8bab26f4f 2026-07-14)"
+  },
+  "repo": {
+    "worktree": "C:\\AgentSessions-worktrees\\b6-release-closure",
+    "commit": "1d65a27516eb57afef3781f679a5a2adc4c43e6c"
+  },
+  "prefix": "C:/AgentSessions/.trellis/.runtime/b6-smoke/prefix",
+  "sandbox": {
+    "root": "C:/AgentSessions/.trellis/.runtime/b6-smoke/user-profile",
+    "grew_during_first_run": {
+      "roaming": false,
+      "local": false
+    }
+  },
+  "artifact": {
+    "path": "C:\\AgentSessions-worktrees\\b6-release-closure\\target\\release\\agent-session-grep.exe",
+    "sha256": "4e009759864a4c4680a39731a5ad15afbbd6fe5c50818577bb082631d43d4442",
+    "version": "agent-session-grep-cli 0.1.0"
+  },
+  "successor": {
+    "worktree": "C:/AgentSessions-worktrees/b6-release-successor",
+    "sha256": "6c6ba928e4eaf8cc2faec3337b7513116f136a723af38952d82cb9ff25b216d3",
+    "version": "agent-session-grep-cli 0.1.1",
+    "note": "synthetic 0.1.1 bump in a scratch worktree; never committed"
+  },
+  "steps": [
+    {
+      "step": "clean install from source (install.ps1 -Prefix)",
+      "log": "02-install-first.log",
+      "exit_code": 0
+    },
+    {
+      "step": "first run: --version (both command names)",
+      "log": "03-first-run-version.log",
+      "exit_code": 0
+    },
+    {
+      "step": "first run: alias --version",
+      "log": "03-first-run-version.log",
+      "exit_code": 0
+    },
+    {
+      "step": "first run: --robot config paths",
+      "log": "04-first-run-config-paths.log",
+      "exit_code": 0
+    },
+    {
+      "step": "first run: doctor (environment only)",
+      "log": "05-first-run-doctor.log",
+      "exit_code": 0
+    },
+    {
+      "step": "surface smoke against the installed pair (robot envelopes, exit codes, MCP handshake)",
+      "log": "06-surface-smoke.log",
+      "exit_code": 0
+    },
+    {
+      "step": "upgrade: create synthetic successor worktree",
+      "log": "07-upgrade-build.log",
+      "exit_code": 0
+    },
+    {
+      "step": "upgrade: build the successor artifact (synthetic 0.1.1)",
+      "log": "07-upgrade-build.log",
+      "exit_code": 0
+    },
+    {
+      "step": "upgrade: re-run the documented installer over the existing install",
+      "log": "08-upgrade-install.log",
+      "exit_code": 0
+    },
+    {
+      "step": "uninstall (removes exactly the two managed files)",
+      "log": "09-uninstall.log",
+      "exit_code": 0
+    },
+    {
+      "step": "uninstall again (must be a no-op and exit 0)",
+      "log": "10-uninstall-again.log",
+      "exit_code": 0
+    }
+  ],
+  "assertions": [
+    {
+      "assertion": "install: both command names exist",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "assertion": "install: canonical matches the built artifact",
+      "passed": true,
+      "detail": "built=4e009759864a4c4680a39731a5ad15afbbd6fe5c50818577bb082631d43d4442 installed=4e009759864a4c4680a39731a5ad15afbbd6fe5c50818577bb082631d43d4442"
+    },
+    {
+      "assertion": "install: alias is byte-identical to canonical",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "assertion": "first run: both names report the same version",
+      "passed": true,
+      "detail": "canonical=agent-session-grep-cli 0.1.0 alias=agent-session-grep-cli 0.1.0"
+    },
+    {
+      "assertion": "first run: version matches the built artifact",
+      "passed": true,
+      "detail": "build=agent-session-grep-cli 0.1.0 installed=agent-session-grep-cli 0.1.0"
+    },
+    {
+      "assertion": "first run: config path is inside the sandboxed profile",
+      "passed": true,
+      "detail": "config=C:\\AgentSessions\\.trellis\\.runtime\\b6-smoke\\user-profile\\Roaming\\AgentSessions\\config.toml"
+    },
+    {
+      "assertion": "first run: data/cache/logs paths are inside the sandboxed profile",
+      "passed": true,
+      "detail": "data=C:\\AgentSessions\\.trellis\\.runtime\\b6-smoke\\user-profile\\Local\\AgentSessions\\data"
+    },
+    {
+      "assertion": "first run: doctor reports the tool and skips the db check",
+      "passed": true,
+      "detail": "db: not-checked\r\nhint: 未指定数据库：以上仅检查了环境。运行 doctor --db <path> 可校验数据库与 schema。\r\nindex_projection_expected: 1\r\nindex_projection_stale: null\r\nindex_projection_version: null\r\noffline: false\r\nschema: null\r\nsemantic_feature: null\r\ntool: agent-session-grep-cli\r\ntool_activity_storage: true\r\nusage_storage: true\r\nversion: 0.1.0"
+    },
+    {
+      "assertion": "surface smoke: exit 0",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "assertion": "upgrade: successor version differs from the installed version",
+      "passed": true,
+      "detail": "successor=agent-session-grep-cli 0.1.1 installed=agent-session-grep-cli 0.1.0"
+    },
+    {
+      "assertion": "upgrade: successor artifact hash differs",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "assertion": "upgrade: installed canonical is the successor artifact",
+      "passed": true,
+      "detail": "expect=6c6ba928e4eaf8cc2faec3337b7513116f136a723af38952d82cb9ff25b216d3 actual=6c6ba928e4eaf8cc2faec3337b7513116f136a723af38952d82cb9ff25b216d3"
+    },
+    {
+      "assertion": "upgrade: alias follows the successor artifact",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "assertion": "upgrade: both names report the successor version",
+      "passed": true,
+      "detail": "canonical=agent-session-grep-cli 0.1.1 alias=agent-session-grep-cli 0.1.1"
+    },
+    {
+      "assertion": "upgrade: no temporary files left in the prefix",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "assertion": "uninstall: canonical removed",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "assertion": "uninstall: alias removed",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "assertion": "uninstall: prefix directory left in place",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "assertion": "uninstall: sandboxed data root untouched by uninstall",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "assertion": "uninstall twice: reports not installed and exits 0",
+      "passed": true,
+      "detail": ""
+    }
+  ],
+  "failures": 0
+}

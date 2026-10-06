@@ -1,0 +1,121 @@
+# SUPERSEDED: this build ran in the shared main checkout while a concurrent
+# workstream (B4 retrieval-quality) was mid-edit in crates/. The tree was not
+# stable, so this log is kept only as the record of why the smoke was redone
+# in a detached worktree at HEAD (see 01-release-build.log).
+# The later probe in the same checkout (02-...) observed the in-flight breakage.
+# command: cargo build --release --locked --target-dir C:/AgentSessions/.trellis/.runtime/target-b6
+# cwd: C:/AgentSessions
+# started: 2026-10-06 23:52:19+08:00
+# git HEAD: 1d65a27516eb57afef3781f679a5a2adc4c43e6c
+# cargo: cargo 1.97.1 (c980f4866 2026-06-30)
+# rustc: rustc 1.97.1 (8bab26f4f 2026-07-14)
+# host: Microsoft Windows NT 10.0.22631.0 / AMD64
+   Compiling proc-macro2 v1.0.107
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.47
+   Compiling cfg-if v1.0.4
+   Compiling shlex v2.0.1
+   Compiling find-msvc-tools v0.1.9
+   Compiling thiserror v2.0.19
+   Compiling itoa v1.0.18
+   Compiling serde_core v1.0.229
+   Compiling zmij v1.0.23
+   Compiling serde v1.0.229
+   Compiling arrayvec v0.7.8
+   Compiling cpufeatures v0.3.0
+   Compiling serde_json v1.0.151
+   Compiling constant_time_eq v0.4.2
+   Compiling arrayref v0.3.9
+   Compiling memchr v2.8.3
+   Compiling bitflags v2.13.1
+   Compiling smallvec v1.15.2
+   Compiling windows-link v0.2.1
+   Compiling vcpkg v0.2.15
+   Compiling foldhash v0.2.0
+   Compiling pkg-config v0.3.33
+   Compiling rustversion v1.0.23
+   Compiling allocator-api2 v0.2.21
+   Compiling equivalent v1.0.2
+   Compiling ident_case v1.0.1
+   Compiling windows_x86_64_msvc v0.52.6
+   Compiling strsim v0.11.1
+   Compiling unicode-segmentation v1.13.3
+   Compiling heck v0.5.0
+   Compiling winapi v0.3.9
+   Compiling either v1.17.0
+   Compiling parking_lot_core v0.9.12
+   Compiling getrandom v0.4.3
+   Compiling instability v0.3.12
+   Compiling ryu v1.0.23
+   Compiling static_assertions v1.1.0
+   Compiling unicode-width v0.2.0
+   Compiling cc v1.3.0
+   Compiling itertools v0.14.0
+   Compiling scopeguard v1.2.0
+   Compiling fallible-streaming-iterator v0.1.9
+   Compiling fallible-iterator v0.3.0
+   Compiling hashbrown v0.16.1
+   Compiling hashbrown v0.17.1
+   Compiling lock_api v0.4.14
+   Compiling windows-targets v0.52.6
+   Compiling convert_case v0.10.0
+   Compiling critical-section v1.2.0
+   Compiling litrs v1.0.0
+   Compiling indoc v2.0.7
+   Compiling windows-sys v0.59.0
+   Compiling windows-sys v0.61.2
+   Compiling fastrand v2.5.0
+   Compiling once_cell v1.21.4
+   Compiling parking_lot v0.12.5
+   Compiling line-clipping v0.3.8
+   Compiling document-features v0.2.12
+   Compiling castaway v0.2.4
+   Compiling syn v3.0.2
+   Compiling syn v2.0.119
+   Compiling compact_str v0.9.1
+   Compiling lru v0.18.5
+   Compiling fs4 v0.13.1
+   Compiling blake3 v1.8.5
+   Compiling libsqlite3-sys v0.38.1
+   Compiling tempfile v3.27.0
+   Compiling unicode-truncate v2.0.1
+   Compiling crossterm_winapi v0.9.1
+   Compiling thiserror-impl v2.0.19
+   Compiling serde_derive v1.0.229
+   Compiling kasuari v0.4.12
+   Compiling darling_core v0.23.0
+   Compiling strum_macros v0.28.0
+   Compiling derive_more-impl v2.1.1
+   Compiling derive_more v2.1.1
+   Compiling crossterm v0.29.0
+   Compiling agent-session-grep-domain v0.1.0 (C:\AgentSessions\crates\agent-session-grep-domain)
+   Compiling strum v0.28.0
+   Compiling darling_macro v0.23.0
+   Compiling ratatui-core v0.1.2
+   Compiling darling v0.23.0
+   Compiling agent-session-grep-ports v0.1.0 (C:\AgentSessions\crates\agent-session-grep-ports)
+   Compiling ratatui-widgets v0.3.2
+   Compiling ratatui-crossterm v0.1.2
+   Compiling agent-session-grep-application v0.1.0 (C:\AgentSessions\crates\agent-session-grep-application)
+   Compiling agent-session-grep-provider-openclaw v0.1.0 (C:\AgentSessions\crates\agent-session-grep-provider-openclaw)
+   Compiling agent-session-grep-provider-hermes v0.1.0 (C:\AgentSessions\crates\agent-session-grep-provider-hermes)
+   Compiling agent-session-grep-provider-cline v0.1.0 (C:\AgentSessions\crates\agent-session-grep-provider-cline)
+   Compiling agent-session-grep-provider-codex v0.1.0 (C:\AgentSessions\crates\agent-session-grep-provider-codex)
+   Compiling agent-session-grep-provider-codebuddy v0.1.0 (C:\AgentSessions\crates\agent-session-grep-provider-codebuddy)
+   Compiling agent-session-grep-provider-grok v0.1.0 (C:\AgentSessions\crates\agent-session-grep-provider-grok)
+   Compiling agent-session-grep-provider-aider v0.1.0 (C:\AgentSessions\crates\agent-session-grep-provider-aider)
+   Compiling agent-session-grep-provider-kimi v0.1.0 (C:\AgentSessions\crates\agent-session-grep-provider-kimi)
+   Compiling agent-session-grep-provider-qoder v0.1.0 (C:\AgentSessions\crates\agent-session-grep-provider-qoder)
+   Compiling agent-session-grep-provider-antigravity v0.1.0 (C:\AgentSessions\crates\agent-session-grep-provider-antigravity)
+   Compiling agent-session-grep-provider-pi v0.1.0 (C:\AgentSessions\crates\agent-session-grep-provider-pi)
+   Compiling agent-session-grep-provider-claude v0.1.0 (C:\AgentSessions\crates\agent-session-grep-provider-claude)
+   Compiling agent-session-grep-testkit v0.1.0 (C:\AgentSessions\crates\agent-session-grep-testkit)
+   Compiling ratatui v0.30.2
+   Compiling rusqlite v0.40.1
+   Compiling agent-session-grep-adapters-sqlite v0.1.0 (C:\AgentSessions\crates\agent-session-grep-adapters-sqlite)
+   Compiling agent-session-grep-provider-opencode v0.1.0 (C:\AgentSessions\crates\agent-session-grep-provider-opencode)
+   Compiling agent-session-grep-provider-cursor v0.1.0 (C:\AgentSessions\crates\agent-session-grep-provider-cursor)
+   Compiling agent-session-grep-cli v0.1.0 (C:\AgentSessions\crates\agent-session-grep-cli)
+    Finished `release` profile [optimized] target(s) in 1m 13s
+# exit=0
+# finished: 2026-10-06 23:53:33+08:00

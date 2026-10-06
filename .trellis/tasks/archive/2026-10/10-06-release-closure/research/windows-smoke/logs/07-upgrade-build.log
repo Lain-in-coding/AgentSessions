@@ -1,0 +1,275 @@
+
+# ==== upgrade: create synthetic successor worktree
+# command: git -C C:\AgentSessions-worktrees\b6-release-closure worktree add --detach C:/AgentSessions-worktrees/b6-release-successor 1d65a27516eb57afef3781f679a5a2adc4c43e6c
+# cwd: C:\AgentSessions
+# started: 2026-10-06 23:59:38+08:00
+Preparing worktree (detached HEAD 1d65a27)
+Updating files:  79% (1037/1298)
+Updating files:  80% (1039/1298)
+Updating files:  81% (1052/1298)
+Updating files:  82% (1065/1298)
+Updating files:  83% (1078/1298)
+Updating files:  84% (1091/1298)
+Updating files:  85% (1104/1298)
+Updating files:  86% (1117/1298)
+Updating files:  87% (1130/1298)
+Updating files:  88% (1143/1298)
+Updating files:  89% (1156/1298)
+Updating files:  90% (1169/1298)
+Updating files:  91% (1182/1298)
+Updating files:  92% (1195/1298)
+Updating files:  93% (1208/1298)
+Updating files:  94% (1221/1298)
+Updating files:  95% (1234/1298)
+Updating files:  96% (1247/1298)
+Updating files:  97% (1260/1298)
+Updating files:  98% (1273/1298)
+Updating files:  99% (1286/1298)
+Updating files: 100% (1298/1298)
+Updating files: 100% (1298/1298), done.
+HEAD is now at 1d65a27 docs(trellis): plan retrieval-quality, provider-stability and release-closure tasks
+# exit=0
+# synthetic version bump in the scratch worktree only: 0.1.0 -> 0.1.1
+# (Cargo.lock is rewritten by the build below; --locked is deliberately not
+#  used here because the committed lockfile does not know this version)
+
+# ==== upgrade: build the successor artifact (synthetic 0.1.1)
+# command: cargo build --release -p agent-session-grep-cli --bin agent-session-grep
+# cwd: C:\AgentSessions-worktrees\b6-release-successor
+# started: 2026-10-06 23:59:40+08:00
+   Compiling proc-macro2 v1.0.107
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.47
+   Compiling cfg-if v1.0.4
+   Compiling shlex v2.0.1
+   Compiling find-msvc-tools v0.1.9
+   Compiling thiserror v2.0.19
+   Compiling itoa v1.0.18
+   Compiling serde_core v1.0.229
+   Compiling serde v1.0.229
+   Compiling zmij v1.0.23
+   Compiling serde_json v1.0.151
+   Compiling constant_time_eq v0.4.2
+   Compiling cpufeatures v0.3.0
+   Compiling arrayvec v0.7.8
+   Compiling arrayref v0.3.9
+   Compiling memchr v2.8.3
+   Compiling bitflags v2.13.1
+   Compiling smallvec v1.15.2
+   Compiling windows-link v0.2.1
+   Compiling allocator-api2 v0.2.21
+   Compiling foldhash v0.2.0
+   Compiling rustversion v1.0.23
+   Compiling equivalent v1.0.2
+   Compiling vcpkg v0.2.15
+   Compiling strsim v0.11.1
+   Compiling pkg-config v0.3.33
+   Compiling ident_case v1.0.1
+   Compiling unicode-segmentation v1.13.3
+   Compiling winapi v0.3.9
+   Compiling either v1.17.0
+   Compiling heck v0.5.0
+   Compiling windows_x86_64_msvc v0.52.6
+   Compiling parking_lot_core v0.9.12
+   Compiling ryu v1.0.23
+   Compiling instability v0.3.12
+   Compiling cc v1.3.0
+   Compiling hashbrown v0.17.1
+   Compiling hashbrown v0.16.1
+   Compiling static_assertions v1.1.0
+   Compiling itertools v0.14.0
+   Compiling scopeguard v1.2.0
+   Compiling convert_case v0.10.0
+   Compiling unicode-width v0.2.0
+   Compiling fallible-iterator v0.3.0
+   Compiling lock_api v0.4.14
+   Compiling fallible-streaming-iterator v0.1.9
+   Compiling getrandom v0.4.3
+   Compiling critical-section v1.2.0
+   Compiling litrs v1.0.0
+   Compiling indoc v2.0.7
+   Compiling line-clipping v0.3.8
+   Compiling windows-sys v0.61.2
+   Compiling once_cell v1.21.4
+   Compiling fastrand v2.5.0
+   Compiling lru v0.18.5
+   Compiling castaway v0.2.4
+   Compiling compact_str v0.9.1
+   Compiling document-features v0.2.12
+   Compiling windows-targets v0.52.6
+   Compiling blake3 v1.8.5
+   Compiling libsqlite3-sys v0.38.1
+   Compiling windows-sys v0.59.0
+   Compiling parking_lot v0.12.5
+   Compiling tempfile v3.27.0
+   Compiling syn v3.0.2
+   Compiling syn v2.0.119
+   Compiling fs4 v0.13.1
+   Compiling unicode-truncate v2.0.1
+   Compiling crossterm_winapi v0.9.1
+   Compiling thiserror-impl v2.0.19
+   Compiling serde_derive v1.0.229
+   Compiling kasuari v0.4.12
+   Compiling darling_core v0.23.0
+   Compiling strum_macros v0.28.0
+   Compiling derive_more-impl v2.1.1
+   Compiling derive_more v2.1.1
+   Compiling crossterm v0.29.0
+   Compiling agent-session-grep-domain v0.1.1 (C:\AgentSessions-worktrees\b6-release-successor\crates\agent-session-grep-domain)
+   Compiling darling_macro v0.23.0
+   Compiling strum v0.28.0
+   Compiling agent-session-grep-ports v0.1.1 (C:\AgentSessions-worktrees\b6-release-successor\crates\agent-session-grep-ports)
+   Compiling ratatui-core v0.1.2
+   Compiling darling v0.23.0
+   Compiling ratatui-crossterm v0.1.2
+   Compiling ratatui-widgets v0.3.2
+   Compiling agent-session-grep-application v0.1.1 (C:\AgentSessions-worktrees\b6-release-successor\crates\agent-session-grep-application)
+   Compiling agent-session-grep-provider-kimi v0.1.1 (C:\AgentSessions-worktrees\b6-release-successor\crates\agent-session-grep-provider-kimi)
+   Compiling agent-session-grep-provider-grok v0.1.1 (C:\AgentSessions-worktrees\b6-release-successor\crates\agent-session-grep-provider-grok)
+   Compiling agent-session-grep-provider-cline v0.1.1 (C:\AgentSessions-worktrees\b6-release-successor\crates\agent-session-grep-provider-cline)
+   Compiling agent-session-grep-provider-codebuddy v0.1.1 (C:\AgentSessions-worktrees\b6-release-successor\crates\agent-session-grep-provider-codebuddy)
+   Compiling agent-session-grep-provider-hermes v0.1.1 (C:\AgentSessions-worktrees\b6-release-successor\crates\agent-session-grep-provider-hermes)
+   Compiling agent-session-grep-provider-pi v0.1.1 (C:\AgentSessions-worktrees\b6-release-successor\crates\agent-session-grep-provider-pi)
+   Compiling agent-session-grep-provider-openclaw v0.1.1 (C:\AgentSessions-worktrees\b6-release-successor\crates\agent-session-grep-provider-openclaw)
+   Compiling agent-session-grep-provider-antigravity v0.1.1 (C:\AgentSessions-worktrees\b6-release-successor\crates\agent-session-grep-provider-antigravity)
+   Compiling agent-session-grep-provider-aider v0.1.1 (C:\AgentSessions-worktrees\b6-release-successor\crates\agent-session-grep-provider-aider)
+   Compiling agent-session-grep-provider-claude v0.1.1 (C:\AgentSessions-worktrees\b6-release-successor\crates\agent-session-grep-provider-claude)
+   Compiling agent-session-grep-provider-codex v0.1.1 (C:\AgentSessions-worktrees\b6-release-successor\crates\agent-session-grep-provider-codex)
+   Compiling agent-session-grep-provider-qoder v0.1.1 (C:\AgentSessions-worktrees\b6-release-successor\crates\agent-session-grep-provider-qoder)
+   Compiling ratatui v0.30.2
+   Compiling rusqlite v0.40.1
+   Compiling agent-session-grep-provider-opencode v0.1.1 (C:\AgentSessions-worktrees\b6-release-successor\crates\agent-session-grep-provider-opencode)
+   Compiling agent-session-grep-provider-cursor v0.1.1 (C:\AgentSessions-worktrees\b6-release-successor\crates\agent-session-grep-provider-cursor)
+   Compiling agent-session-grep-adapters-sqlite v0.1.1 (C:\AgentSessions-worktrees\b6-release-successor\crates\agent-session-grep-adapters-sqlite)
+   Compiling agent-session-grep-cli v0.1.1 (C:\AgentSessions-worktrees\b6-release-successor\crates\agent-session-grep-cli)
+    Finished `release` profile [optimized] target(s) in 1m 24s
+# exit=0
+# successor artifact: C:\AgentSessions-worktrees\b6-release-successor\target\release\agent-session-grep.exe
+# successor sha256: f9b8e1a9369aa3d334b8bcee82f8091cb15c11a1de32792335efaced8b8d09d1
+# successor --version: agent-session-grep-cli 0.1.1
+
+# ==== upgrade: create synthetic successor worktree
+# command: git -C C:\AgentSessions-worktrees\b6-release-closure worktree add --detach C:/AgentSessions-worktrees/b6-release-successor 1d65a27516eb57afef3781f679a5a2adc4c43e6c
+# cwd: C:\AgentSessions
+# started: 2026-10-07 00:01:43+08:00
+Preparing worktree (detached HEAD 1d65a27)
+HEAD is now at 1d65a27 docs(trellis): plan retrieval-quality, provider-stability and release-closure tasks
+# exit=0
+# synthetic version bump in the scratch worktree only: 0.1.0 -> 0.1.1
+# (Cargo.lock is rewritten by the build below; --locked is deliberately not
+#  used here because the committed lockfile does not know this version)
+
+# ==== upgrade: build the successor artifact (synthetic 0.1.1)
+# command: cargo build --release -p agent-session-grep-cli --bin agent-session-grep
+# cwd: C:\AgentSessions-worktrees\b6-release-successor
+# started: 2026-10-07 00:01:44+08:00
+   Compiling proc-macro2 v1.0.107
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.47
+   Compiling cfg-if v1.0.4
+   Compiling shlex v2.0.1
+   Compiling find-msvc-tools v0.1.9
+   Compiling thiserror v2.0.19
+   Compiling itoa v1.0.18
+   Compiling serde_core v1.0.229
+   Compiling zmij v1.0.23
+   Compiling serde v1.0.229
+   Compiling serde_json v1.0.151
+   Compiling arrayref v0.3.9
+   Compiling constant_time_eq v0.4.2
+   Compiling arrayvec v0.7.8
+   Compiling cpufeatures v0.3.0
+   Compiling memchr v2.8.3
+   Compiling bitflags v2.13.1
+   Compiling smallvec v1.15.2
+   Compiling rustversion v1.0.23
+   Compiling windows-link v0.2.1
+   Compiling equivalent v1.0.2
+   Compiling foldhash v0.2.0
+   Compiling allocator-api2 v0.2.21
+   Compiling pkg-config v0.3.33
+   Compiling strsim v0.11.1
+   Compiling vcpkg v0.2.15
+   Compiling ident_case v1.0.1
+   Compiling windows_x86_64_msvc v0.52.6
+   Compiling parking_lot_core v0.9.12
+   Compiling heck v0.5.0
+   Compiling either v1.17.0
+   Compiling unicode-segmentation v1.13.3
+   Compiling winapi v0.3.9
+   Compiling unicode-width v0.2.0
+   Compiling instability v0.3.12
+   Compiling static_assertions v1.1.0
+   Compiling cc v1.3.0
+   Compiling itertools v0.14.0
+   Compiling ryu v1.0.23
+   Compiling scopeguard v1.2.0
+   Compiling hashbrown v0.17.1
+   Compiling hashbrown v0.16.1
+   Compiling lock_api v0.4.14
+   Compiling indoc v2.0.7
+   Compiling fallible-streaming-iterator v0.1.9
+   Compiling getrandom v0.4.3
+   Compiling convert_case v0.10.0
+   Compiling litrs v1.0.0
+   Compiling critical-section v1.2.0
+   Compiling fallible-iterator v0.3.0
+   Compiling windows-targets v0.52.6
+   Compiling line-clipping v0.3.8
+   Compiling windows-sys v0.59.0
+   Compiling windows-sys v0.61.2
+   Compiling parking_lot v0.12.5
+   Compiling once_cell v1.21.4
+   Compiling fastrand v2.5.0
+   Compiling syn v3.0.2
+   Compiling syn v2.0.119
+   Compiling castaway v0.2.4
+   Compiling document-features v0.2.12
+   Compiling compact_str v0.9.1
+   Compiling lru v0.18.5
+   Compiling blake3 v1.8.5
+   Compiling libsqlite3-sys v0.38.1
+   Compiling fs4 v0.13.1
+   Compiling tempfile v3.27.0
+   Compiling unicode-truncate v2.0.1
+   Compiling crossterm_winapi v0.9.1
+   Compiling thiserror-impl v2.0.19
+   Compiling serde_derive v1.0.229
+   Compiling kasuari v0.4.12
+   Compiling darling_core v0.23.0
+   Compiling strum_macros v0.28.0
+   Compiling derive_more-impl v2.1.1
+   Compiling derive_more v2.1.1
+   Compiling crossterm v0.29.0
+   Compiling agent-session-grep-domain v0.1.1 (C:\AgentSessions-worktrees\b6-release-successor\crates\agent-session-grep-domain)
+   Compiling darling_macro v0.23.0
+   Compiling strum v0.28.0
+   Compiling ratatui-core v0.1.2
+   Compiling darling v0.23.0
+   Compiling agent-session-grep-ports v0.1.1 (C:\AgentSessions-worktrees\b6-release-successor\crates\agent-session-grep-ports)
+   Compiling ratatui-widgets v0.3.2
+   Compiling ratatui-crossterm v0.1.2
+   Compiling agent-session-grep-application v0.1.1 (C:\AgentSessions-worktrees\b6-release-successor\crates\agent-session-grep-application)
+   Compiling agent-session-grep-provider-claude v0.1.1 (C:\AgentSessions-worktrees\b6-release-successor\crates\agent-session-grep-provider-claude)
+   Compiling agent-session-grep-provider-openclaw v0.1.1 (C:\AgentSessions-worktrees\b6-release-successor\crates\agent-session-grep-provider-openclaw)
+   Compiling agent-session-grep-provider-aider v0.1.1 (C:\AgentSessions-worktrees\b6-release-successor\crates\agent-session-grep-provider-aider)
+   Compiling agent-session-grep-provider-codebuddy v0.1.1 (C:\AgentSessions-worktrees\b6-release-successor\crates\agent-session-grep-provider-codebuddy)
+   Compiling agent-session-grep-provider-hermes v0.1.1 (C:\AgentSessions-worktrees\b6-release-successor\crates\agent-session-grep-provider-hermes)
+   Compiling agent-session-grep-provider-codex v0.1.1 (C:\AgentSessions-worktrees\b6-release-successor\crates\agent-session-grep-provider-codex)
+   Compiling agent-session-grep-provider-kimi v0.1.1 (C:\AgentSessions-worktrees\b6-release-successor\crates\agent-session-grep-provider-kimi)
+   Compiling agent-session-grep-provider-grok v0.1.1 (C:\AgentSessions-worktrees\b6-release-successor\crates\agent-session-grep-provider-grok)
+   Compiling agent-session-grep-provider-pi v0.1.1 (C:\AgentSessions-worktrees\b6-release-successor\crates\agent-session-grep-provider-pi)
+   Compiling agent-session-grep-provider-antigravity v0.1.1 (C:\AgentSessions-worktrees\b6-release-successor\crates\agent-session-grep-provider-antigravity)
+   Compiling agent-session-grep-provider-cline v0.1.1 (C:\AgentSessions-worktrees\b6-release-successor\crates\agent-session-grep-provider-cline)
+   Compiling agent-session-grep-provider-qoder v0.1.1 (C:\AgentSessions-worktrees\b6-release-successor\crates\agent-session-grep-provider-qoder)
+   Compiling ratatui v0.30.2
+   Compiling rusqlite v0.40.1
+   Compiling agent-session-grep-provider-cursor v0.1.1 (C:\AgentSessions-worktrees\b6-release-successor\crates\agent-session-grep-provider-cursor)
+   Compiling agent-session-grep-adapters-sqlite v0.1.1 (C:\AgentSessions-worktrees\b6-release-successor\crates\agent-session-grep-adapters-sqlite)
+   Compiling agent-session-grep-provider-opencode v0.1.1 (C:\AgentSessions-worktrees\b6-release-successor\crates\agent-session-grep-provider-opencode)
+   Compiling agent-session-grep-cli v0.1.1 (C:\AgentSessions-worktrees\b6-release-successor\crates\agent-session-grep-cli)
+    Finished `release` profile [optimized] target(s) in 1m 05s
+# exit=0
+# successor artifact: C:\AgentSessions-worktrees\b6-release-successor\target\release\agent-session-grep.exe
+# successor sha256: 6c6ba928e4eaf8cc2faec3337b7513116f136a723af38952d82cb9ff25b216d3
+# successor --version: agent-session-grep-cli 0.1.1

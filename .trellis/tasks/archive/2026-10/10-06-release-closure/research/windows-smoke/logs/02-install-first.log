@@ -1,0 +1,52 @@
+
+# ==== clean install from source (install.ps1 -Prefix)
+# command: pwsh -NoProfile -File C:\AgentSessions-worktrees\b6-release-closure\scripts\install\install.ps1 -Prefix C:/AgentSessions/.trellis/.runtime/b6-smoke/prefix
+# cwd: C:\AgentSessions
+# started: 2026-10-06 23:58:53+08:00
+cargo 1.97.1 (c980f4866 2026-06-30)
+   Compiling agent-session-grep-cli v0.1.0 (C:\AgentSessions-worktrees\b6-release-closure\crates\agent-session-grep-cli)
+    Finished `release` profile [optimized] target(s) in 18.17s
+install: installed agent-session-grep-cli 0.1.0
+install: command  C:\AgentSessions\.trellis\.runtime\b6-smoke\prefix\agent-session-grep.exe
+install: alias    C:\AgentSessions\.trellis\.runtime\b6-smoke\prefix\asg.exe
+install: sha256   4e009759864a4c4680a39731a5ad15afbbd6fe5c50818577bb082631d43d4442
+install: this script does not modify PATH. To use the binary by name in
+install: the current shell session, run:
+install:   $env:PATH = "C:/AgentSessions/.trellis/.runtime/b6-smoke/prefix;$env:PATH"
+install: to make it permanent, add C:/AgentSessions/.trellis/.runtime/b6-smoke/prefix to PATH yourself.
+install: the artifact is unsigned and unnotarized.
+# exit=0
+
+# ==== clean install from source (install.ps1 -Prefix)
+# command: pwsh -NoProfile -File C:\AgentSessions-worktrees\b6-release-closure\scripts\install\install.ps1 -Prefix C:/AgentSessions/.trellis/.runtime/b6-smoke/prefix
+# cwd: C:\AgentSessions
+# started: 2026-10-06 23:59:27+08:00
+cargo 1.97.1 (c980f4866 2026-06-30)
+    Finished `release` profile [optimized] target(s) in 0.49s
+install: installed agent-session-grep-cli 0.1.0
+install: command  C:\AgentSessions\.trellis\.runtime\b6-smoke\prefix\agent-session-grep.exe
+install: alias    C:\AgentSessions\.trellis\.runtime\b6-smoke\prefix\asg.exe
+install: sha256   4e009759864a4c4680a39731a5ad15afbbd6fe5c50818577bb082631d43d4442
+install: this script does not modify PATH. To use the binary by name in
+install: the current shell session, run:
+install:   $env:PATH = "C:/AgentSessions/.trellis/.runtime/b6-smoke/prefix;$env:PATH"
+install: to make it permanent, add C:/AgentSessions/.trellis/.runtime/b6-smoke/prefix to PATH yourself.
+install: the artifact is unsigned and unnotarized.
+# exit=0
+
+# ==== clean install from source (install.ps1 -Prefix)
+# command: pwsh -NoProfile -File C:\AgentSessions-worktrees\b6-release-closure\scripts\install\install.ps1 -Prefix C:/AgentSessions/.trellis/.runtime/b6-smoke/prefix
+# cwd: C:\AgentSessions
+# started: 2026-10-07 00:01:39+08:00
+cargo 1.97.1 (c980f4866 2026-06-30)
+    Finished `release` profile [optimized] target(s) in 0.23s
+install: installed agent-session-grep-cli 0.1.0
+install: command  C:\AgentSessions\.trellis\.runtime\b6-smoke\prefix\agent-session-grep.exe
+install: alias    C:\AgentSessions\.trellis\.runtime\b6-smoke\prefix\asg.exe
+install: sha256   4e009759864a4c4680a39731a5ad15afbbd6fe5c50818577bb082631d43d4442
+install: this script does not modify PATH. To use the binary by name in
+install: the current shell session, run:
+install:   $env:PATH = "C:/AgentSessions/.trellis/.runtime/b6-smoke/prefix;$env:PATH"
+install: to make it permanent, add C:/AgentSessions/.trellis/.runtime/b6-smoke/prefix to PATH yourself.
+install: the artifact is unsigned and unnotarized.
+# exit=0
