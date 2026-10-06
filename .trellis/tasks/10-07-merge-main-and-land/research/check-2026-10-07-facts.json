@@ -1,0 +1,48 @@
+{
+  "checker": "trellis-check",
+  "checked_at": "2026-10-07T04:18:00+08:00",
+  "head": "8755928dad1611a15d5b00a9edd28d4ea15ace40",
+  "merge_commit": "161b83e8f62a6bcc0d2dffd545417afbfc01dd60",
+  "parents": { "branch": "fa2224608bbf501e34406b35dbc637dae8e18211", "main": "2edf2dc3bd6052f54fa1e95070daab462eaf4d86" },
+  "merge_base": "2b8f89562e43bd1f68ad3c8e5cf8ccc9281f9af2",
+  "conflict_resolution": {
+    "spec_scenario_order": ["Batch-scoped commit state (measured 2026-09-29)", "Historical empty-placeholder repair (parser version 3)", "Journal retention compaction (schema v19)", "Semantic search evidence gate (B4)"],
+    "spec_scenarios_before_quality_check": true,
+    "spec_diff_vs_main": { "insertions": 76, "deletions": 0 },
+    "provider_header_chain": ["Last updated: 2026-10-06 (B5)", "Previous pass, 2026-09-29 (hermes)", "Previous pass, 2026-08-28 (kimi-code)"],
+    "provider_2026_08_28_occurrences": 1,
+    "provider_section_order": ["Recorded follow-ups from the Hermes state.db variant (2026-09-29)", "Lifecycle evidence (2026-10-06, B5)", "Global external blockers"],
+    "provider_diff_vs_main": { "insertions": 31, "deletions": 1, "hunks": 2 }
+  },
+  "marker_grep_hits": 0,
+  "main_only_files": 208,
+  "main_only_overlap_with_head_diff": 0,
+  "head_diff_file_count": 488,
+  "schema": { "SCHEMA_VERSION_head": 19, "SCHEMA_VERSION_main": 18, "RELATION_SCHEMA_VERSION": 7, "v18_to_v19_migration_present": true },
+  "merge_write_scope": { "files_differing_from_both_parents": 11, "merge_tree_replay_diff_files": [".trellis/spec/agentsessions-adapters-sqlite/backend/index.md", "docs/product/PROVIDER-BETA-READINESS.md"] },
+  "gate_log": { "file": ".trellis/.runtime/merge-gate-tests.log", "result_lines": 93, "passed": 1912, "failed": 0, "ignored": 22 },
+  "local_reruns": { "adapters_sqlite_exit": 0, "cli_exit": 0, "combined_passed": 915, "combined_failed": 0, "hotpath_repo_probe": "ok", "journal_retention": "13 passed" },
+  "semantics_rerun": { "contexts": 42, "equal_rows": 42, "verdict": "ALL CONTEXTS EQUIVALENT", "only_error": "write to archived path" },
+  "perf": {
+    "binary_sha256": "792776c1c0d4951400f0ea4f1f8cecc188cf80b6468e0d434a8ef1b6b1f54bb4",
+    "git_detect_search_median_ms": 38.0065,
+    "seam_search_median_ms": 12.47885,
+    "single_round_cost_ms": 25.52765,
+    "git_revparse_median_20_ms": 30.88,
+    "git_revparse_median_10_ms": 29.06,
+    "serial_prediction_ms": 60.5,
+    "overlap_claim_holds": true
+  },
+  "ci": {
+    "ci": "failure",
+    "release_verify": "failure",
+    "security_audit": "success",
+    "core_beta_evidence": "in_progress",
+    "failures": [
+      { "jobs": "ci + release-verify test (macos-latest)", "test": "crates/agent-session-grep-cli/tests/invariant_resume_args.rs:239", "detail": "spawned cwd /private/var/... != expected /var/..." },
+      { "jobs": "ci + release-verify test (windows-latest)", "test": "crates/agent-session-grep-cli/tests/hotpath_repo_probe.rs:134", "detail": "assertion left: 3, right: 2", "local_windows": "passes (git 2.55.0.windows.2), CI git 2.55.0.windows.5" }
+    ]
+  },
+  "worktree_observation": "clean at check start; crates/agent-session-grep-cli/src/repo_identity.rs modified 04:15:34+ by parallel main-session work, not by this check",
+  "verdict": { "local_dimension": "pass", "ci_dimension": "fail", "landable_now": false }
+}

@@ -122,9 +122,27 @@ fn toplevel_is_rediscoverable(toplevel: &str) -> bool {
 /// worktree、submodule 恒成立）。core.worktree 把工作树指到别处、或该路径
 /// 本身是另一个仓库根时 cwd 不在 toplevel 之下——那正是从 toplevel
 /// 重新发现会落到另一仓库（甚至外层仓）的布局，必须回退串行。
+///
+/// 路径别名必须按真实路径比较：`git rev-parse --show-toplevel` 会解析
+/// junction / 符号链接（实测 Windows junction 下 cwd 报链接路径、toplevel
+/// 报真实路径；macOS `/var` -> `/private/var` 同理），CI 的临时目录正是这种
+/// 布局，字面比较会把命中的重叠误判成需要回退。字面比较不成立时再比较
+/// canonicalize 后的路径；两侧都解析失败才判否（保守回退串行）。
 fn cwd_is_inside_toplevel(cwd: &str, toplevel: &str) -> bool {
-    std::path::Path::new(cwd).starts_with(toplevel)
+    let cwd_path = std::path::Path::new(cwd);
+    let toplevel_path = std::path::Path::new(toplevel);
+    if cwd_path.starts_with(toplevel_path) {
+        return true;
+    }
+    match (
+        std::fs::canonicalize(cwd_path),
+        std::fs::canonicalize(toplevel_path),
+    ) {
+        (Ok(cwd_real), Ok(toplevel_real)) => cwd_real.starts_with(&toplevel_real),
+        _ => false,
+    }
 }
+
 /// 远端 URL → 三段 slug（`host/owner/name`）。
 ///
 /// 支持五种常见形状（Recall 同款，但 host 通用不限 github.com）：
@@ -542,6 +560,35 @@ mod tests {
         );
     }
 
+    /// CI 的临时目录常是别名路径（macOS `/var` -> `/private/var`、Windows
+    /// junction / 8.3 短名 / 大小写差异），而 `git rev-parse --show-toplevel`
+    /// 报的是解析后的真实路径。守卫必须按真实路径判定，否则重叠派发被误判
+    /// 成需要回退，search 会多花一次 git 子进程（CI 实测 3 次探测）。
+    #[cfg(unix)]
+    #[test]
+    fn cwd_inside_toplevel_resolves_symlink_alias() {
+        let base = std::env::temp_dir().join(format!("asg-alias-{}", std::process::id()));
+        let real = base.join("real");
+        let nested = real.join("sub");
+        fs::create_dir_all(&nested).unwrap();
+        let link = base.join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let cwd_via_link = link.join("sub");
+        assert!(cwd_is_inside_toplevel(
+            cwd_via_link.to_str().unwrap(),
+            real.to_str().unwrap()
+        ));
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cwd_inside_toplevel_accepts_case_alias() {
+        let dir = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+        let as_written = dir.to_string_lossy().to_string();
+        let lowered = as_written.to_lowercase();
+        assert!(cwd_is_inside_toplevel(&as_written, &lowered));
+    }
     #[test]
     fn resolver_rejects_empty_cwd_without_spawning() {
         let resolver = GitRepoSlugResolver::default();

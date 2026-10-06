@@ -130,16 +130,38 @@ fn run_resume(
         .expect("failed to spawn agent-session-grep binary")
 }
 
-fn same_cwd(recorded: &str, expected: &str) -> bool {
-    let recorded = recorded.trim().trim_end_matches(['/', '\\']);
-    let expected = expected.trim().trim_end_matches(['/', '\\']);
+fn same_path(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
     #[cfg(windows)]
     {
-        recorded.eq_ignore_ascii_case(expected)
+        a.eq_ignore_ascii_case(b)
     }
     #[cfg(not(windows))]
     {
-        recorded == expected
+        false
+    }
+}
+
+fn same_cwd(recorded: &str, expected: &str) -> bool {
+    let recorded = recorded.trim().trim_end_matches(std::path::is_separator);
+    let expected = expected.trim().trim_end_matches(std::path::is_separator);
+    if same_path(recorded, expected) {
+        return true;
+    }
+    // 临时目录路径常带别名：macOS 的 TMPDIR 是 /var/...，子进程 getcwd 报
+    // /private/var/...；Windows 侧有 junction / 8.3 短名 / 盘符大小写。
+    // 字面比较失败时按真实路径再比一次，不成立才判否。
+    match (
+        std::fs::canonicalize(recorded),
+        std::fs::canonicalize(expected),
+    ) {
+        (Ok(recorded_real), Ok(expected_real)) => same_path(
+            &recorded_real.to_string_lossy(),
+            &expected_real.to_string_lossy(),
+        ),
+        _ => false,
     }
 }
 
