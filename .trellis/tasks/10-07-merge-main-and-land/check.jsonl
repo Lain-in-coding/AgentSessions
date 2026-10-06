@@ -1,0 +1,4 @@
+{"_example": "Fill with {\"file\": \"<path>\", \"reason\": \"<why>\"}. Put spec/research files only — no code paths. Run `python .trellis/scripts/get_context.py --mode packages` to list available specs. Delete this line once real entries are added."}
+{"file": ".trellis/tasks/10-07-merge-main-and-land/prd.md", "reason": "逐条核对冲突解决规则与硬校验是否真的执行"}
+{"file": ".trellis/spec/agentsessions-adapters-sqlite/backend/index.md", "reason": "核对合并后 spec 无冲突标记、双方章节齐全且无矛盾"}
+{"file": ".trellis/spec/agentsessions-cli/backend/index.md", "reason": "核对 CLI 契约面在合并后未被两侧任一覆盖"}
