@@ -1,0 +1,147 @@
+# B0 事实账修复 - PRD 反模式 grep 检查（改前/改后）
+
+- 任务: .trellis/tasks/10-06-fact-table-truth-repair
+- 目标文档: docs/product/COMPETITOR-COMPARISON.md, docs/product/OPEN-SOURCE-ROADMAP.md
+- 工具: git grep（-E 正则 / -F 固定串），逐行匹配
+
+## 改前（2026-10-06，编辑前工作区）
+
+### [regex] cass.*Python
+$ git grep -n -E "cass.*Python" -- docs/product/COMPETITOR-COMPARISON.md docs/product/OPEN-SOURCE-ROADMAP.md
+docs/product/COMPETITOR-COMPARISON.md:22:| coding_agent_session_search (cass) | Python CLI | **restricted-party rider** | 40+(claimed) | hybrid | 仅 clean-room 思路可引用;不可复现对比 |
+exit=0
+
+### [regex] agentsview.*TS CLI
+$ git grep -n -E "agentsview.*TS CLI" -- docs/product/COMPETITOR-COMPARISON.md docs/product/OPEN-SOURCE-ROADMAP.md
+docs/product/COMPETITOR-COMPARISON.md:23:| agentsview | TS CLI | MIT | 40+ | hybrid | secret 扫描但非分层边界 |
+exit=0
+
+### [regex] AgentRecall.*Python
+$ git grep -n -E "AgentRecall.*Python" -- docs/product/COMPETITOR-COMPARISON.md docs/product/OPEN-SOURCE-ROADMAP.md
+docs/product/COMPETITOR-COMPARISON.md:24:| AgentRecall | Python CLI | MIT | 16 | hybrid | — |
+exit=0
+
+### [regex] agent-sessions.*Go
+$ git grep -n -E "agent-sessions.*Go" -- docs/product/COMPETITOR-COMPARISON.md docs/product/OPEN-SOURCE-ROADMAP.md
+docs/product/COMPETITOR-COMPARISON.md:28:| agent-sessions | Go CLI | MIT | 10 | FTS5 | — |
+exit=0
+
+### [regex] agf.*Go
+$ git grep -n -E "agf.*Go" -- docs/product/COMPETITOR-COMPARISON.md docs/product/OPEN-SOURCE-ROADMAP.md
+docs/product/COMPETITOR-COMPARISON.md:29:| agf | Go CLI | MIT | 8 | fuzzy | — |
+exit=0
+
+### [regex] claude-historian.*Python
+$ git grep -n -E "claude-historian.*Python" -- docs/product/COMPETITOR-COMPARISON.md docs/product/OPEN-SOURCE-ROADMAP.md
+docs/product/COMPETITOR-COMPARISON.md:34:| claude-historian-mcp | Python MCP | MIT | 1 | 零存储全扫 | 仅 Claude Code |
+exit=0
+
+### [fixed] 无检索(配置切换器)
+$ git grep -n -F "无检索(配置切换器)" -- docs/product/COMPETITOR-COMPARISON.md docs/product/OPEN-SOURCE-ROADMAP.md
+docs/product/COMPETITOR-COMPARISON.md:30:| cc-switch | 桌面 App | MIT | 7 | 无检索(配置切换器) | 非检索工具,「不可比」 |
+exit=0
+
+### [fixed] 无人做到 pack
+$ git grep -n -F "无人做到 pack" -- docs/product/COMPETITOR-COMPARISON.md docs/product/OPEN-SOURCE-ROADMAP.md
+docs/product/OPEN-SOURCE-ROADMAP.md:88:| Evidence-first | 每条结果带 source span 可回溯原文;handoff pack 原文/推断分栏 | 无人做到 pack 级证据契约 |
+exit=0
+
+### [fixed] TS adapter 生态
+$ git grep -n -F "TS adapter 生态" -- docs/product/COMPETITOR-COMPARISON.md docs/product/OPEN-SOURCE-ROADMAP.md
+docs/product/COMPETITOR-COMPARISON.md:25:| hstry | TS adapter 生态 | MIT | 16 | FTS + adapter 架构 | UUID v5 身份最接近,但无 durable outbox |
+exit=0
+
+### [fixed] 竞品基本无中文分词处理
+$ git grep -n -F "竞品基本无中文分词处理" -- docs/product/COMPETITOR-COMPARISON.md docs/product/OPEN-SOURCE-ROADMAP.md
+docs/product/OPEN-SOURCE-ROADMAP.md:90:| CJK 一等公民 | bigram 索引 + 可选 `semantic-candle` 本地 E5 后端(feature-gated、默认 off、离线导入) + 中文语义模型 benchmark 待落地后锁定(默认向量模式为 bigram-hash fuzzy-lexical,非真实语义模型) | 竞品基本无中文分词处理 |
+exit=0
+
+### [fixed] 无人做到可验证
+$ git grep -n -F "无人做到可验证" -- docs/product/COMPETITOR-COMPARISON.md docs/product/OPEN-SOURCE-ROADMAP.md
+docs/product/OPEN-SOURCE-ROADMAP.md:92:| 零遥测可验证 | 代码级禁止 + CI 静态检查 + 全局 `--offline` flag（fail-closed）+ `tests/network_egress.rs` 零 HTTP client / 唯一 loopback socket 断言 | 无人做到可验证 |
+exit=0
+
+### git diff --stat -- （两个目标文档）
+(empty)
+
+### git diff --stat （全工作区）
+.../tasks/09-25-semantic-dependency-advisories/prd.md  | 18 ++++++++++++++++++
+ 1 file changed, 18 insertions(+)
+
+## 改后（2026-10-06，编辑后工作区；含主会话批准的两项扩域：memex 拆分、REUSE-LICENSE-AUDIT 登记 Wake）
+
+### [regex] cass.*Python
+$ git grep -n -E "cass.*Python" -- docs/product/COMPETITOR-COMPARISON.md docs/product/OPEN-SOURCE-ROADMAP.md
+(无匹配)
+exit=1
+
+### [regex] agentsview.*TS CLI
+$ git grep -n -E "agentsview.*TS CLI" -- docs/product/COMPETITOR-COMPARISON.md docs/product/OPEN-SOURCE-ROADMAP.md
+(无匹配)
+exit=1
+
+### [regex] AgentRecall.*Python
+$ git grep -n -E "AgentRecall.*Python" -- docs/product/COMPETITOR-COMPARISON.md docs/product/OPEN-SOURCE-ROADMAP.md
+(无匹配)
+exit=1
+
+### [regex] agent-sessions.*Go
+$ git grep -n -E "agent-sessions.*Go" -- docs/product/COMPETITOR-COMPARISON.md docs/product/OPEN-SOURCE-ROADMAP.md
+(无匹配)
+exit=1
+
+### [regex] agf.*Go
+$ git grep -n -E "agf.*Go" -- docs/product/COMPETITOR-COMPARISON.md docs/product/OPEN-SOURCE-ROADMAP.md
+(无匹配)
+exit=1
+
+### [regex] claude-historian.*Python
+$ git grep -n -E "claude-historian.*Python" -- docs/product/COMPETITOR-COMPARISON.md docs/product/OPEN-SOURCE-ROADMAP.md
+(无匹配)
+exit=1
+
+### [fixed] 无检索(配置切换器)
+$ git grep -n -F "无检索(配置切换器)" -- docs/product/COMPETITOR-COMPARISON.md docs/product/OPEN-SOURCE-ROADMAP.md
+(无匹配)
+exit=1
+
+### [fixed] 无人做到 pack
+$ git grep -n -F "无人做到 pack" -- docs/product/COMPETITOR-COMPARISON.md docs/product/OPEN-SOURCE-ROADMAP.md
+(无匹配)
+exit=1
+
+### [fixed] TS adapter 生态
+$ git grep -n -F "TS adapter 生态" -- docs/product/COMPETITOR-COMPARISON.md docs/product/OPEN-SOURCE-ROADMAP.md
+(无匹配)
+exit=1
+
+### [fixed] 竞品基本无中文分词处理
+$ git grep -n -F "竞品基本无中文分词处理" -- docs/product/COMPETITOR-COMPARISON.md docs/product/OPEN-SOURCE-ROADMAP.md
+(无匹配)
+exit=1
+
+### [fixed] 无人做到可验证
+$ git grep -n -F "无人做到可验证" -- docs/product/COMPETITOR-COMPARISON.md docs/product/OPEN-SOURCE-ROADMAP.md
+(无匹配)
+exit=1
+
+### git diff --stat -- （B0 写集：两个产品文档 + REUSE-LICENSE-AUDIT 登记）
+docs/operations/REUSE-LICENSE-AUDIT.md |  5 +++
+ docs/product/COMPETITOR-COMPARISON.md  | 56 +++++++++++++++++++++++-----------
+ docs/product/OPEN-SOURCE-ROADMAP.md    | 35 ++++++++++++---------
+ 3 files changed, 64 insertions(+), 32 deletions(-)
+
+### git diff --stat （全工作区）
+.../09-25-semantic-dependency-advisories/prd.md    | 18 +++++++
+ crates/agent-session-grep-cli/src/lib.rs           | 42 +++++++++++-----
+ crates/agent-session-grep-cli/src/mcp.rs           | 11 +++--
+ docs/operations/REUSE-LICENSE-AUDIT.md             |  5 ++
+ docs/product/COMPETITOR-COMPARISON.md              | 56 +++++++++++++++-------
+ docs/product/OPEN-SOURCE-ROADMAP.md                | 35 ++++++++------
+ 6 files changed, 121 insertions(+), 46 deletions(-)
+
+说明: 全工作区 diff 中 .trellis/tasks/09-25-semantic-dependency-advisories/prd.md
+为本任务开始前已存在的无关改动（改前基线见上节），不属于 B0 写集。B0 写集 =
+两个产品文档 + docs/operations/REUSE-LICENSE-AUDIT.md（Wake 登记，主会话 2026-10-06
+批准扩域）；任务工件（本文件、prd.md）位于 untracked 任务目录，不出现在 git diff。
+并行会话期间出现的 crates/agent-session-grep-cli/* 等改动同样不属于 B0 写集（见上一节全工作区 stat；其归属请以各任务为准）。
