@@ -647,7 +647,7 @@ fn hook_data(db: &str, rest: &[String], offline: bool) -> Result<serde_json::Val
     let (text, hits_count) = match (config.should_run(), query) {
         (true, Some(query)) => {
             let store = SqliteStore::open(db).map_err(ProtocolError::from)?;
-            let app = resume_app(&store);
+            let app = resume_app_with_repo(&store, current_repo_slug());
             let response = app.handle(AppRequest::Search {
                 query: query.clone(),
                 filters: hook_search_filters(&config, app.now_ms())?,
@@ -2079,13 +2079,13 @@ fn dispatch(
             let include_sidechain = take_bool_flag(&mut args, "--include-sidechain");
             let tool_kind = extract_flag(&mut args, "--tool-kind")?;
             let tool_name = extract_flag(&mut args, "--tool-name")?;
-            let app = resume_app(store);
+            // 取时钟不构造 App（App 构造会解析当前仓库；时钟与 repo 无关）。
             let filters = search_filters_from_flags(
                 &providers,
                 since.as_deref(),
                 until.as_deref(),
                 repo.as_deref(),
-                app.now_ms(),
+                app_clock_ms(),
             )?;
             let budget = budget_from_flags(max_items.as_deref(), max_bytes.as_deref(), None)?;
             no_extra_args(&args, 1, "search <query>")?;
@@ -2142,8 +2142,11 @@ fn dispatch(
             let query = arg(&args, 1, "search <query>")?.to_string();
             let query_embedding =
                 prepare_search_embedding(store, retrieval_mode, &query).map_err(CliError)?;
+            // 每请求只解析一轮 repo（repo-aware 排序输入）：lexical/semantic
+            // 分支复用同一 slug；未设 ASG_CURRENT_REPO 时即一次 git 探测。
+            let repo_slug = current_repo_slug();
             let response = if retrieval_mode == RetrievalMode::Lexical {
-                let app = resume_app(store);
+                let app = resume_app_with_repo(store, repo_slug);
                 app.handle(AppRequest::Search {
                     query,
                     filters,
@@ -2157,7 +2160,7 @@ fn dispatch(
                     query_embedding,
                 })?
             } else {
-                let app = resume_semantic_app(store);
+                let app = resume_semantic_app_with_repo(store, repo_slug);
                 app.handle(AppRequest::Search {
                     query,
                     filters,
@@ -2197,13 +2200,12 @@ fn dispatch(
             let providers = extract_repeated_flag(&mut args, "--provider")?;
             let since = extract_flag(&mut args, "--since")?;
             let until = extract_flag(&mut args, "--until")?;
-            let app = resume_app(store);
             let filters = search_filters_from_flags(
                 &providers,
                 since.as_deref(),
                 until.as_deref(),
                 None,
-                app.now_ms(),
+                app_clock_ms(),
             )?;
             no_extra_args(&args, 1, "handoff <query>")?;
             let query = arg(&args, 1, "handoff <query>")?.to_string();
@@ -2212,6 +2214,7 @@ fn dispatch(
             // 预算由包构建器单一执行（设计 D3——Context 路径的独立 clamp 会双重
             // 应用用户预算）。max_snippet_chars 放大到 schema 上限，让证据尽量
             // 携带原文而非 512 字符截断摘要。
+            let app = resume_app_with_repo(store, current_repo_slug());
             let response = app.handle(AppRequest::Search {
                 query: query.clone(),
                 filters: filters.clone(),
@@ -3053,8 +3056,10 @@ fn app_clock_ms() -> i64 {
 }
 
 /// 组合根统一构造带 Resume 槽的 App（catalog/index/resume 共用同一 store），
-/// 时钟经 [`app_clock_ms`] 注入——测试固定、生产系统时钟；当前仓库偏好经
-/// [`current_repo_slug`] 注入。
+/// 时钟经 [`app_clock_ms`] 注入——测试固定、生产系统时钟。**不解析当前仓库**：
+/// 按 ID 的纯读取用例（get/show/status/list/context/resume 等）经此构造，零
+/// git 探测；`current_repo` 只被 Search 的排序与 query digest 消费，其他用例
+/// 传入与否行为一致。
 fn resume_app(store: &SqliteStore) -> App<&SqliteStore, &SqliteStore, &SqliteStore> {
     App::with_resume_and_clock(
         store_ref(store),
@@ -3062,7 +3067,15 @@ fn resume_app(store: &SqliteStore) -> App<&SqliteStore, &SqliteStore, &SqliteSto
         store_ref(store),
         app_clock_ms,
     )
-    .with_current_repo(current_repo_slug())
+}
+
+/// [`resume_app`] + repo-aware 排序信号：slug 由调用方**每请求解析一次**后传入
+/// （Search/Handoff/Hook 用；解析失败或无 origin 时为 `None`，信号关闭）。
+fn resume_app_with_repo(
+    store: &SqliteStore,
+    repo: Option<String>,
+) -> App<&SqliteStore, &SqliteStore, &SqliteStore> {
+    resume_app(store).with_current_repo(repo)
 }
 
 /// 同上，但额外注入语义索引槽（#3 semantic/hybrid 模式）。
@@ -3076,7 +3089,14 @@ fn resume_semantic_app(
         store_ref(store),
         app_clock_ms,
     )
-    .with_current_repo(current_repo_slug())
+}
+
+/// [`resume_semantic_app`] + repo-aware 排序信号（见 [`resume_app_with_repo`]）。
+fn resume_semantic_app_with_repo(
+    store: &SqliteStore,
+    repo: Option<String>,
+) -> App<&SqliteStore, &SqliteStore, &SqliteStore, &SqliteStore> {
+    resume_semantic_app(store).with_current_repo(repo)
 }
 
 /// 调用方当前工作目录派生的 repo slug（当前仓库偏好排序信号的唯一来源）。

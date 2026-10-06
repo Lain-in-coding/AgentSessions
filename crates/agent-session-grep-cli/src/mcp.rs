@@ -12,7 +12,7 @@
 //!   成功 JSON-RPC response，result 携 `isError: true` + canonical error 结构。
 
 use crate::protocol::{self, CanonicalCode, Outcome, ProtocolError};
-use crate::{CliError, canonical_search_provider, provider_registry, render, resume_app};
+use crate::{CliError, canonical_search_provider, provider_registry, render, resume_app_with_repo};
 use agent_session_grep_adapters_sqlite::SqliteStore;
 use agent_session_grep_application::{
     AppRequest, AppResponse, ContextLevel, ResponseBudget,
@@ -692,7 +692,7 @@ impl McpServer<'_> {
         reject_below_floor(max_bytes.into(), "max_bytes", 4096)?;
         let filters = opt_filters(args)?;
         let search_limit = limit.unwrap_or(50);
-        let app = resume_app(self.store);
+        let app = resume_app_with_repo(self.store, crate::current_repo_slug());
         // 检索作为装配源：宽松 fetch-all 预算 + 全文级 snippet；pack 预算由
         // 包构建器单一执行（与 CLI handoff 同一约定）。
         let response = app.handle(AppRequest::Search {
@@ -801,7 +801,12 @@ impl McpServer<'_> {
     /// 良构请求进 Application，成功走 CLI 同一个 [`render`] 投影；
     /// 失败即业务错误——此后不再产生 `-32602`（design §2 note）。
     fn run_app(&self, request: AppRequest) -> Result<Value, ToolError> {
-        let app = crate::resume_semantic_app(self.store);
+        // repo boost 只在 Search 路径被消费：仅搜索请求解析一次当前仓库，
+        // 其余 MCP 请求零 git 探测；长生命周期服务不做跨请求缓存。
+        let repo = matches!(request, AppRequest::Search { .. })
+            .then(crate::current_repo_slug)
+            .flatten();
+        let app = crate::resume_semantic_app_with_repo(self.store, repo);
         match app.handle(request) {
             Ok(response) => {
                 let (outcome, data, page, warnings) = render(response);

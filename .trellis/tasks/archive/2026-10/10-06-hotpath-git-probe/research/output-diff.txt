@@ -1,0 +1,36 @@
+B1 hotpath before/after output diff (fixed data, fixed clock, pinned request-id)
+==============================================================================
+Method: same fixture DB (/--db .trellis/.runtime/hotpath-experiment/fixture.db), same
+cwd (C:\AgentSessions, a repo with origin), ASG_CLOCK_MS=1787616000000, --robot,
+--request-id hotpath-diff. before = HEAD 5b232cd release build sha256 6d7ebe73...;
+after = B1 fix release build sha256 912f45c8... Field-by-field JSON walk; only
+meta.duration_ms is treated as volatile (wall-clock measurement inside the envelope).
+
+[git_detect / get] leaf fields compared: 17; diffs: 1 (volatile duration_ms: 1, non-volatile: 0)
+  non-volatile fields identical (hits/score/page/cursor/schema/enums/exit path unchanged)
+  volatile: $.meta.duration_ms: 41 -> 2
+  raw diff (un-normalized bytes): differs only in the volatile fields above
+
+[git_detect / show] leaf fields compared: 18; diffs: 1 (volatile duration_ms: 1, non-volatile: 0)
+  non-volatile fields identical (hits/score/page/cursor/schema/enums/exit path unchanged)
+  volatile: $.meta.duration_ms: 46 -> 1
+  raw diff (un-normalized bytes): differs only in the volatile fields above
+
+[git_detect / search] leaf fields compared: 25; diffs: 1 (volatile duration_ms: 1, non-volatile: 0)
+  non-volatile fields identical (hits/score/page/cursor/schema/enums/exit path unchanged)
+  volatile: $.meta.duration_ms: 89 -> 48
+  raw diff (un-normalized bytes): differs only in the volatile fields above
+
+[repo_disabled_by_test_seam / get] leaf fields compared: 17; diffs: 0 (volatile duration_ms: 0, non-volatile: 0)
+  non-volatile fields identical (hits/score/page/cursor/schema/enums/exit path unchanged)
+  raw diff (un-normalized bytes): identical
+
+[repo_disabled_by_test_seam / show] leaf fields compared: 18; diffs: 0 (volatile duration_ms: 0, non-volatile: 0)
+  non-volatile fields identical (hits/score/page/cursor/schema/enums/exit path unchanged)
+  raw diff (un-normalized bytes): identical
+
+[repo_disabled_by_test_seam / search] leaf fields compared: 25; diffs: 0 (volatile duration_ms: 0, non-volatile: 0)
+  non-volatile fields identical (hits/score/page/cursor/schema/enums/exit path unchanged)
+  raw diff (un-normalized bytes): identical
+
+RESULT: PASS - before/after JSON identical except meta.duration_ms
