@@ -1,0 +1,20 @@
+.............scripts/evidence/privacy_scan.py: 1 personal path finding(s) in tracked text:
+  x.md:1: [user-home] /home/alice
+Replace with <repo>/<user-home> or a repository-relative path; extend ALLOWLIST only for provably synthetic fixtures.
+..........................................usage: python.exe -m unittest [-h]
+                              {generate,run,validate-manifest,validate-report}
+                              ...
+python.exe -m unittest: error: the following arguments are required: command
+..usage: python.exe -m unittest run [-h] [--profile PROFILE]
+                                  [--workspace WORKSPACE]
+                                  [--output-dir OUTPUT_DIR] [--binary BINARY]
+                                  [--cargo CARGO] [--repeat REPEAT]
+python.exe -m unittest run: error: argument --repeat: must be a positive integer
+.
+----------------------------------------------------------------------
+Ran 58 tests in 4.495s
+
+OK
+valid agent-session-grep.open-source-gate/v1 manifest: <HOME>\AppData\Local\Temp\tmpxdos47tr\manifest.json
+scripts/evidence/privacy_scan.py: no personal path findings in tracked text
+valid agent-session-grep.semantic-benchmark-report/v1 report: <HOME>\AppData\Local\Temp\tmpoktwvrm3\report.json

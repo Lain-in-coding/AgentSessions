@@ -1,0 +1,3 @@
+=== cargo clippy --workspace --all-targets --locked --target-dir C:/AgentSessions/.trellis/.runtime/target-b7 -- -D warnings (reviewer rerun) ===
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.20s
+exit=0

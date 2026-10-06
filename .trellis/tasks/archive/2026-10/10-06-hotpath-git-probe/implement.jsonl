@@ -1,0 +1,4 @@
+{"_example": "Fill with {\"file\": \"<path>\", \"reason\": \"<why>\"}. Put spec/research files only — no code paths. Run `python .trellis/scripts/get_context.py --mode packages` to list available specs. Delete this line once real entries are added."}
+{"file": ".trellis/spec/agentsessions-cli/backend/index.md", "reason": "composition root 规约：参数解析/emit/错误码/写读连接纪律"}
+{"file": ".trellis/tasks/10-05-competitive-source-audit-plan/design.md", "reason": "父设计第 3 节：目标数据流与契约不变约束"}
+{"file": ".trellis/tasks/10-05-competitive-source-audit-plan/research/repo-probe-overhead.json", "reason": "配对实测基线（20 次/变体）"}

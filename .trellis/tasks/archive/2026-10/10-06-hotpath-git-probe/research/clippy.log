@@ -1,0 +1,30 @@
+    Checking agent-session-grep-cli v0.1.0 (C:\AgentSessions\crates\agent-session-grep-cli)
+error: doc list item without indentation
+ --> crates\agent-session-grep-cli\tests\invariant_resume_args.rs:9:5
+  |
+9 | //!   （`crates/agent-session-grep-application/src/resume.rs:17-30`）；
+  |     ^^
+  |
+  = help: if this is supposed to be its own paragraph, add a blank line
+  = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#doc_lazy_continuation
+  = note: `-D clippy::doc-lazy-continuation` implied by `-D warnings`
+  = help: to override `-D warnings` add `#[allow(clippy::doc_lazy_continuation)]`
+help: indent this line
+  |
+9 | //!     （`crates/agent-session-grep-application/src/resume.rs:17-30`）；
+  |       ++
+
+error: doc list item without indentation
+  --> crates\agent-session-grep-cli\tests\invariant_resume_args.rs:12:5
+   |
+12 | //!   （`crates/agent-session-grep-cli/src/lib.rs:2800-2804`）；
+   |     ^^
+   |
+   = help: if this is supposed to be its own paragraph, add a blank line
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#doc_lazy_continuation
+help: indent this line
+   |
+12 | //!     （`crates/agent-session-grep-cli/src/lib.rs:2800-2804`）；
+   |       ++
+
+error: could not compile `agent-session-grep-cli` (test "invariant_resume_args") due to 2 previous errors

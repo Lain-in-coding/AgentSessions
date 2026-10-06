@@ -1,0 +1,316 @@
+{
+  "method": "Read-only logical TEXT/BLOB length sums; NOT dbstat or physical per-table sizes. Python SQLite 3.40.1 lacks SQLITE_ENABLE_DBSTAT_VTAB; no schema/data mutation or extension installation.",
+  "file_bytes": 20107264,
+  "tables": [
+    {
+      "table": "index_batches",
+      "rows": 1,
+      "text_blob_logical_bytes": 3886680,
+      "counted_columns": [
+        "operation_id",
+        "state",
+        "operation_digest",
+        "upsert_ids_json",
+        "delete_ids_json",
+        "durable_point",
+        "error_code",
+        "relation_upserts_json",
+        "relation_deletes_json",
+        "source_replacements_json",
+        "relocation_json"
+      ]
+    },
+    {
+      "table": "catalog",
+      "rows": 4040,
+      "text_blob_logical_bytes": 2491624,
+      "counted_columns": [
+        "id",
+        "payload"
+      ]
+    },
+    {
+      "table": "source_membership",
+      "rows": 4040,
+      "text_blob_logical_bytes": 791680,
+      "counted_columns": [
+        "source_path",
+        "message_id",
+        "document_id"
+      ]
+    },
+    {
+      "table": "message_placements",
+      "rows": 4000,
+      "text_blob_logical_bytes": 640000,
+      "counted_columns": [
+        "placement_id",
+        "session_id",
+        "document_id",
+        "message_id"
+      ]
+    },
+    {
+      "table": "source_placement_membership",
+      "rows": 4000,
+      "text_blob_logical_bytes": 612000,
+      "counted_columns": [
+        "source_path",
+        "placement_id"
+      ]
+    },
+    {
+      "table": "fts_ids",
+      "rows": 4040,
+      "text_blob_logical_bytes": 549420,
+      "counted_columns": [
+        "wire_id",
+        "id_json"
+      ]
+    },
+    {
+      "table": "message_edges",
+      "rows": 3600,
+      "text_blob_logical_bytes": 443436,
+      "counted_columns": [
+        "child_placement_id",
+        "parent_message_id",
+        "parent_native_id",
+        "relation"
+      ]
+    },
+    {
+      "table": "fts_data",
+      "rows": 39,
+      "text_blob_logical_bytes": 141900,
+      "counted_columns": [
+        "block"
+      ]
+    },
+    {
+      "table": "fts_docsize",
+      "rows": 4000,
+      "text_blob_logical_bytes": 8000,
+      "counted_columns": [
+        "sz"
+      ]
+    },
+    {
+      "table": "source_installations",
+      "rows": 20,
+      "text_blob_logical_bytes": 5980,
+      "counted_columns": [
+        "source_path",
+        "source_key",
+        "namespace_id"
+      ]
+    },
+    {
+      "table": "source_scans",
+      "rows": 20,
+      "text_blob_logical_bytes": 3560,
+      "counted_columns": [
+        "source_path",
+        "fingerprint",
+        "provider_id"
+      ]
+    },
+    {
+      "table": "source_session_resume_claims",
+      "rows": 20,
+      "text_blob_logical_bytes": 3560,
+      "counted_columns": [
+        "source_path",
+        "session_id",
+        "provider_id",
+        "provider_session_id",
+        "provider_session_id_state",
+        "original_working_directory",
+        "original_working_directory_state"
+      ]
+    },
+    {
+      "table": "source_relation_scans",
+      "rows": 20,
+      "text_blob_logical_bytes": 2280,
+      "counted_columns": [
+        "source_path"
+      ]
+    },
+    {
+      "table": "session_titles",
+      "rows": 20,
+      "text_blob_logical_bytes": 1720,
+      "counted_columns": [
+        "session_wire",
+        "title"
+      ]
+    },
+    {
+      "table": "session_fts_ids",
+      "rows": 20,
+      "text_blob_logical_bytes": 780,
+      "counted_columns": [
+        "session_wire"
+      ]
+    },
+    {
+      "table": "session_fts_data",
+      "rows": 3,
+      "text_blob_logical_bytes": 694,
+      "counted_columns": [
+        "block"
+      ]
+    },
+    {
+      "table": "installation_locations",
+      "rows": 1,
+      "text_blob_logical_bytes": 279,
+      "counted_columns": [
+        "provider_id",
+        "root_key",
+        "root_locator",
+        "namespace_id",
+        "state"
+      ]
+    },
+    {
+      "table": "installation_namespaces",
+      "rows": 1,
+      "text_blob_logical_bytes": 174,
+      "counted_columns": [
+        "namespace_id",
+        "provider_id",
+        "namespace_input",
+        "origin"
+      ]
+    },
+    {
+      "table": "session_fts_docsize",
+      "rows": 20,
+      "text_blob_logical_bytes": 40,
+      "counted_columns": [
+        "sz"
+      ]
+    },
+    {
+      "table": "fts_idx",
+      "rows": 31,
+      "text_blob_logical_bytes": 0,
+      "counted_columns": []
+    },
+    {
+      "table": "fts_content",
+      "rows": 4000,
+      "text_blob_logical_bytes": 0,
+      "counted_columns": []
+    },
+    {
+      "table": "fts_config",
+      "rows": 1,
+      "text_blob_logical_bytes": 0,
+      "counted_columns": []
+    },
+    {
+      "table": "store_metadata",
+      "rows": 1,
+      "text_blob_logical_bytes": 0,
+      "counted_columns": []
+    },
+    {
+      "table": "message_vec",
+      "rows": 0,
+      "text_blob_logical_bytes": 0,
+      "counted_columns": [
+        "wire_id",
+        "model_id",
+        "embedding"
+      ]
+    },
+    {
+      "table": "session_fts_idx",
+      "rows": 1,
+      "text_blob_logical_bytes": 0,
+      "counted_columns": []
+    },
+    {
+      "table": "session_fts_content",
+      "rows": 20,
+      "text_blob_logical_bytes": 0,
+      "counted_columns": []
+    },
+    {
+      "table": "session_fts_config",
+      "rows": 1,
+      "text_blob_logical_bytes": 0,
+      "counted_columns": []
+    },
+    {
+      "table": "tool_activities",
+      "rows": 0,
+      "text_blob_logical_bytes": 0,
+      "counted_columns": [
+        "activity_id",
+        "message_id",
+        "kind",
+        "actor",
+        "name",
+        "target",
+        "status"
+      ]
+    },
+    {
+      "table": "tool_activity_membership",
+      "rows": 0,
+      "text_blob_logical_bytes": 0,
+      "counted_columns": [
+        "source_path",
+        "activity_id"
+      ]
+    },
+    {
+      "table": "usage_events",
+      "rows": 0,
+      "text_blob_logical_bytes": 0,
+      "counted_columns": [
+        "usage_id",
+        "session_id",
+        "message_id",
+        "token_source"
+      ]
+    },
+    {
+      "table": "usage_event_membership",
+      "rows": 0,
+      "text_blob_logical_bytes": 0,
+      "counted_columns": [
+        "source_path",
+        "usage_id"
+      ]
+    },
+    {
+      "table": "session_repo_slugs",
+      "rows": 0,
+      "text_blob_logical_bytes": 0,
+      "counted_columns": [
+        "session_wire",
+        "repo_slug"
+      ]
+    },
+    {
+      "table": "installation_relocations",
+      "rows": 0,
+      "text_blob_logical_bytes": 0,
+      "counted_columns": [
+        "operation_id",
+        "mapping_key",
+        "mapping_digest",
+        "provider_id",
+        "from_key",
+        "to_key",
+        "manifest_json"
+      ]
+    }
+  ],
+  "dbstat_available": false
+}

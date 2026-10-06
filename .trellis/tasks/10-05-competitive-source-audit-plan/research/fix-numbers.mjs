@@ -1,0 +1,14 @@
+import fs from 'node:fs';
+const task = 'C:/AgentSessions/.trellis/tasks/10-05-competitive-source-audit-plan';
+let p = task + '/review-report.md';
+let s = fs.readFileSync(p, 'utf8');
+const a = '9,125 个文本文件有 14 类探针逐文件命中；';
+if (s.includes(a)) { s = s.replace(a, '9,421 个非二进制文件有 14 类探针逐文件扫描记录（其中 348 个已升级为 T1 回执）；'); fs.writeFileSync(p, s, 'utf8'); console.log('report number fixed'); } else console.log('report number pattern absent');
+p = task + '/prd.md';
+s = fs.readFileSync(p, 'utf8');
+const b = 'T2 扫描 15/15（9,125 文本文件探针记录）';
+if (s.includes(b)) { s = s.replace(b, 'T2 扫描 15/15（9,421 个非二进制文件逐文件探针；9,125 个仍以 swept 状态在账本，348 个升级为 T1 回执）'); fs.writeFileSync(p, s, 'utf8'); console.log('prd number fixed'); } else console.log('prd pattern absent');
+p = task + '/implement.md';
+s = fs.readFileSync(p, 'utf8');
+const c = '9,125 文件探针命中记录';
+if (s.includes(c)) { s = s.replace(c, '9,421 文件探针扫描记录（348 个已升级为 T1 回执）'); fs.writeFileSync(p, s, 'utf8'); console.log('implement number fixed'); } else console.log('implement pattern absent');

@@ -103,8 +103,11 @@ Before writing code in this crate:
       `retryable`, **and** the published `schemas/robot/v1/error-catalog.json`
       (the schema-drift test enforces they stay in sync).
 - [ ] Error envelopes and human diagnostics must preserve canonical category
-      while keeping messages bounded and path/native-ID-free. Never relay raw
-      provider, SQLite, or conflict payloads to stdout or stderr.
+      while keeping messages bounded. Never relay provider/transcript/SQLite-derived
+      paths, native IDs, raw payloads, or conflict internals to stdout or stderr.
+      Caller-owned catalog paths (explicit --db, or the platform default that
+      config paths already reports) are allowed in bounded operator guidance and
+      still pass the cross-boundary secret redactor.
 
 ---
 
@@ -164,6 +167,54 @@ MCP mutation rejection and installed-artifact smoke using only synthetic data.
 Wrong: use ordinary `open_for_write` before verifying relocation prerequisites.
 Correct: parse first, use a non-mutating read or dedicated existing-catalog lease,
 then let the storage operation validate, back up and activate atomically.
+
+## Scenario: Default store path and missing-catalog contract
+
+### 1. Scope / Trigger
+Any data subcommand invoked without --db, and any read command pointed at a
+catalog that does not exist yet.
+
+### 2. Signatures
+resolve_store_path(explicit: Option<PathBuf>) -> CliResult<PathBuf> is the only
+resolution path; DEFAULT_DB_FILE_NAME = "asg.db" pins the file name inside the
+platform data directory reported by config paths. No environment-variable or
+multi-level fallback chains are allowed.
+
+### 3. Contracts
+Explicit --db always wins. Without it, known data subcommands resolve the single
+platform default; unresolvable defaults return invalid_request with guidance to
+pass --db explicitly. Read commands against a missing catalog fail closed with
+catalog_error (exit 6), create no file or parent directory, and include one
+runnable sync instruction (agent-session-grep --db <path> sync --discover).
+No-command and unknown-command invocations stay usage errors (exit 2) so typos
+are never masked by a missing-catalog message. The hook entry stays
+non-blocking; doctor must surface the same missing-catalog guidance instead of
+a masked internal error. relocation keeps its opaque, path-free error contract.
+
+### 4. Validation & Error Matrix
+Explicit path -> used verbatim. Default resolvable -> <data>/asg.db. Default
+unresolvable -> invalid_request + explicit --db guidance. Missing catalog on a
+read command -> catalog_error + sync --discover instruction, zero filesystem
+writes. Unknown command -> exit 2. Hook with missing catalog -> exit 1, empty
+stdout, no writes.
+
+### 5. Good/Base/Bad Cases
+Good: fresh machine runs version -> config paths -> sync --discover -> search.
+Base: an explicitly supplied --db path keeps winning over the default. Bad: a
+read command fabricating an empty success, or doctor dying with a masked error
+while telling the operator to run doctor.
+
+### 6. Tests Required
+first_run_closure.rs must pin: missing catalog writes nothing and names
+sync --discover; explicit beats default; unresolvable default names --db;
+discover with zero sources asks for an explicit source; human search projection
+regression. The five-step experiment is reproduced under an isolated HOME.
+
+### 7. Wrong vs Correct
+Wrong: constructing the full App (or probing git) just to learn the store path,
+or letting a read command create the database.
+Correct: resolve the path once, open read-only, and fail closed with an
+actionable, secret-redacted instruction when the catalog is absent.
 
 ## Quality Check
 

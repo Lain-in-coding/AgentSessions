@@ -1,0 +1,32 @@
+    Blocking waiting for file lock on build directory
+   Compiling agent-session-grep-ports v0.1.0 (C:\AgentHub\project\crates\agent-session-grep-ports)
+   Compiling agent-session-grep-application v0.1.0 (C:\AgentHub\project\crates\agent-session-grep-application)
+   Compiling agent-session-grep-provider-hermes v0.1.0 (C:\AgentHub\project\crates\agent-session-grep-provider-hermes)
+   Compiling agent-session-grep-provider-opencode v0.1.0 (C:\AgentHub\project\crates\agent-session-grep-provider-opencode)
+   Compiling agent-session-grep-provider-cursor v0.1.0 (C:\AgentHub\project\crates\agent-session-grep-provider-cursor)
+   Compiling agent-session-grep-testkit v0.1.0 (C:\AgentHub\project\crates\agent-session-grep-testkit)
+   Compiling agent-session-grep-provider-grok v0.1.0 (C:\AgentHub\project\crates\agent-session-grep-provider-grok)
+   Compiling agent-session-grep-provider-claude v0.1.0 (C:\AgentHub\project\crates\agent-session-grep-provider-claude)
+   Compiling agent-session-grep-provider-cline v0.1.0 (C:\AgentHub\project\crates\agent-session-grep-provider-cline)
+   Compiling agent-session-grep-provider-codebuddy v0.1.0 (C:\AgentHub\project\crates\agent-session-grep-provider-codebuddy)
+   Compiling agent-session-grep-provider-kimi v0.1.0 (C:\AgentHub\project\crates\agent-session-grep-provider-kimi)
+   Compiling agent-session-grep-provider-qoder v0.1.0 (C:\AgentHub\project\crates\agent-session-grep-provider-qoder)
+   Compiling agent-session-grep-provider-codex v0.1.0 (C:\AgentHub\project\crates\agent-session-grep-provider-codex)
+   Compiling agent-session-grep-provider-aider v0.1.0 (C:\AgentHub\project\crates\agent-session-grep-provider-aider)
+   Compiling agent-session-grep-provider-antigravity v0.1.0 (C:\AgentHub\project\crates\agent-session-grep-provider-antigravity)
+error[E0061]: this method takes 1 argument but 0 arguments were supplied
+    --> crates\agent-session-grep-application\src\lib.rs:1726:38
+     |
+1726 |                     && self.semantic.is_ready()?
+     |                                      ^^^^^^^^-- argument #1 of type `usize` is missing
+     |
+note: method defined here
+    --> crates\agent-session-grep-ports\src\lib.rs:808:7
+help: provide the argument
+     |
+1726 |                     && self.semantic.is_ready(/* usize */)?
+     |                                               +++++++++++
+
+For more information about this error, try `rustc --explain E0061`.
+error: could not compile `agent-session-grep-application` (lib) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...

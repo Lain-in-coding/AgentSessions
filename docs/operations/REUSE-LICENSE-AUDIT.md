@@ -26,6 +26,11 @@
 > 范围更新（2026-08-29）：本报告此前写 12 项，是 cc-sessions-viewer
 >（2026-08-29 加入本地镜像并精读）加入之前的快照。现在名单为 14 项。
 
+> 范围更新（2026-10-06）：补记 Wake（`Github_src/Wake`，MIT，固定 commit
+> `71aeca67ec80f8645d1f9d5199290c2c732036ce`，0.8.5）后名单 14→15 项，与
+> `../product/COMPETITOR-COMPARISON.md` 的 15 项口径一致。Wake 本次仅登记坐标与
+> 许可事实，未做资产级复用判定。
+
 ## 2. 全局硬约束（Release 阻断级）
 
 1. **cass 与 cc-sessions-viewer 是两个法律边界,形态不同**:

@@ -60,6 +60,13 @@ adapters know *how*. Depends on `agentsessions-domain` and
   caller's obligation). `Truncation { truncated, reason }` reports the exact
   budget knob to raise (`max_items` / `max_response_bytes` / `max_messages` /
   `max_evidence_spans`).
+- `final_score(relevance, age_ms, is_sidechain, in_current_repo)` — ranking
+  entry point. `relevance <= 0.0` or NaN returns exactly 0.0 before any
+  recency/repo/sidechain preference is applied: preference signals may only
+  reorder admitted, positively-evidenced hits and must never resurrect a
+  zero-evidence candidate. Lexical hits always carry a positive FTS score;
+  this defense exists so future candidate sources cannot regress that.
+
 - `evidence` module — `EvidenceSpanDto` assembly from stored canonical
   placements/documents; `occurrence_id` is the Placement ID, exact spans retain
   their source document, and missing placement spans remain explicitly

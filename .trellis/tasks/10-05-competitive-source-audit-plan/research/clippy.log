@@ -1,0 +1,83 @@
+    Checking cfg-if v1.0.4
+    Checking itoa v1.0.18
+    Checking constant_time_eq v0.4.2
+    Checking arrayref v0.3.9
+    Checking cpufeatures v0.3.0
+    Checking arrayvec v0.7.8
+    Checking memchr v2.8.3
+    Checking bitflags v2.13.1
+    Checking smallvec v1.15.2
+    Checking fallible-streaming-iterator v0.1.9
+    Checking fallible-iterator v0.3.0
+    Checking windows-link v0.2.1
+    Checking equivalent v1.0.2
+    Checking serde_core v1.0.229
+    Checking zmij v1.0.23
+    Checking foldhash v0.2.0
+    Checking windows_x86_64_msvc v0.52.6
+    Checking allocator-api2 v0.2.21
+    Checking libsqlite3-sys v0.38.1
+    Checking thiserror v2.0.19
+    Checking once_cell v1.21.4
+    Checking either v1.17.0
+    Checking getrandom v0.4.3
+    Checking fastrand v2.5.0
+    Checking windows-targets v0.52.6
+   Compiling unicode-segmentation v1.13.3
+    Checking windows-sys v0.61.2
+    Checking castaway v0.2.4
+    Checking static_assertions v1.1.0
+    Checking windows-sys v0.59.0
+    Checking ryu v1.0.23
+    Checking scopeguard v1.2.0
+    Checking blake3 v1.8.5
+    Checking unicode-width v0.2.0
+    Checking strum v0.28.0
+    Checking winapi v0.3.9
+    Checking critical-section v1.2.0
+    Checking line-clipping v0.3.8
+    Checking parking_lot_core v0.9.12
+    Checking lock_api v0.4.14
+    Checking itertools v0.14.0
+    Checking rusqlite v0.40.1
+    Checking hashbrown v0.17.1
+    Checking hashbrown v0.16.1
+    Checking compact_str v0.9.1
+   Compiling convert_case v0.10.0
+    Checking parking_lot v0.12.5
+   Compiling derive_more-impl v2.1.1
+    Checking kasuari v0.4.12
+    Checking lru v0.18.5
+    Checking tempfile v3.27.0
+    Checking fs4 v0.13.1
+    Checking derive_more v2.1.1
+    Checking unicode-truncate v2.0.1
+    Checking ratatui-core v0.1.2
+    Checking crossterm_winapi v0.9.1
+    Checking crossterm v0.29.0
+    Checking serde v1.0.229
+    Checking serde_json v1.0.151
+    Checking agent-session-grep-domain v0.1.0 (C:\AgentHub\project\crates\agent-session-grep-domain)
+    Checking ratatui-widgets v0.3.2
+    Checking ratatui-crossterm v0.1.2
+    Checking agent-session-grep-ports v0.1.0 (C:\AgentHub\project\crates\agent-session-grep-ports)
+    Checking ratatui v0.30.2
+    Checking agent-session-grep-testkit v0.1.0 (C:\AgentHub\project\crates\agent-session-grep-testkit)
+    Checking agent-session-grep-application v0.1.0 (C:\AgentHub\project\crates\agent-session-grep-application)
+    Checking agent-session-grep-provider-pi v0.1.0 (C:\AgentHub\project\crates\agent-session-grep-provider-pi)
+    Checking agent-session-grep-provider-openclaw v0.1.0 (C:\AgentHub\project\crates\agent-session-grep-provider-openclaw)
+    Checking agent-session-grep-provider-qoder v0.1.0 (C:\AgentHub\project\crates\agent-session-grep-provider-qoder)
+    Checking agent-session-grep-provider-opencode v0.1.0 (C:\AgentHub\project\crates\agent-session-grep-provider-opencode)
+    Checking agent-session-grep-provider-grok v0.1.0 (C:\AgentHub\project\crates\agent-session-grep-provider-grok)
+    Checking agent-session-grep-provider-claude v0.1.0 (C:\AgentHub\project\crates\agent-session-grep-provider-claude)
+    Checking agent-session-grep-provider-codex v0.1.0 (C:\AgentHub\project\crates\agent-session-grep-provider-codex)
+    Checking agent-session-grep-provider-kimi v0.1.0 (C:\AgentHub\project\crates\agent-session-grep-provider-kimi)
+    Checking agent-session-grep-provider-cline v0.1.0 (C:\AgentHub\project\crates\agent-session-grep-provider-cline)
+    Checking agent-session-grep-provider-cursor v0.1.0 (C:\AgentHub\project\crates\agent-session-grep-provider-cursor)
+    Checking agent-session-grep-provider-aider v0.1.0 (C:\AgentHub\project\crates\agent-session-grep-provider-aider)
+    Checking agent-session-grep-provider-antigravity v0.1.0 (C:\AgentHub\project\crates\agent-session-grep-provider-antigravity)
+    Checking agent-session-grep-provider-codebuddy v0.1.0 (C:\AgentHub\project\crates\agent-session-grep-provider-codebuddy)
+    Checking agent-session-grep-provider-hermes v0.1.0 (C:\AgentHub\project\crates\agent-session-grep-provider-hermes)
+    Checking agent-session-grep-adapters-sqlite v0.1.0 (C:\AgentHub\project\crates\agent-session-grep-adapters-sqlite)
+    Checking agent-session-grep-cli v0.1.0 (C:\AgentHub\project\crates\agent-session-grep-cli)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 16.20s

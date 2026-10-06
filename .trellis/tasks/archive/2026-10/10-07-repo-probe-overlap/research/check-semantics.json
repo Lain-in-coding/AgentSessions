@@ -1,0 +1,392 @@
+[
+  {
+    "Context": "1a plain root",
+    "Env": "-",
+    "Gate": "0:C:/AgentSessions/.trellis/.runtime/b8-check-v2/plain",
+    "OldProbe": "0:git@github.com:synthetic-owner/plain.git",
+    "NewProbe": "0:git@github.com:synthetic-owner/plain.git",
+    "OldResult": "git@github.com:synthetic-owner/plain.git",
+    "NewResult": "git@github.com:synthetic-owner/plain.git",
+    "Status": "EQUAL"
+  },
+  {
+    "Context": "1b plain subdir",
+    "Env": "-",
+    "Gate": "0:C:/AgentSessions/.trellis/.runtime/b8-check-v2/plain",
+    "OldProbe": "0:git@github.com:synthetic-owner/plain.git",
+    "NewProbe": "0:git@github.com:synthetic-owner/plain.git",
+    "OldResult": "git@github.com:synthetic-owner/plain.git",
+    "NewResult": "git@github.com:synthetic-owner/plain.git",
+    "Status": "EQUAL"
+  },
+  {
+    "Context": "1c plain subdir trailing slash",
+    "Env": "-",
+    "Gate": "0:C:/AgentSessions/.trellis/.runtime/b8-check-v2/plain",
+    "OldProbe": "0:git@github.com:synthetic-owner/plain.git",
+    "NewProbe": "0:git@github.com:synthetic-owner/plain.git",
+    "OldResult": "git@github.com:synthetic-owner/plain.git",
+    "NewResult": "git@github.com:synthetic-owner/plain.git",
+    "Status": "EQUAL"
+  },
+  {
+    "Context": "2a nested inner",
+    "Env": "-",
+    "Gate": "0:C:/AgentSessions/.trellis/.runtime/b8-check-v2/plain/vendor/inner",
+    "OldProbe": "0:https://gitlab.example.com/team/inner.git",
+    "NewProbe": "0:https://gitlab.example.com/team/inner.git",
+    "OldResult": "https://gitlab.example.com/team/inner.git",
+    "NewResult": "https://gitlab.example.com/team/inner.git",
+    "Status": "EQUAL"
+  },
+  {
+    "Context": "2b outer from root",
+    "Env": "-",
+    "Gate": "0:C:/AgentSessions/.trellis/.runtime/b8-check-v2/plain",
+    "OldProbe": "0:git@github.com:synthetic-owner/plain.git",
+    "NewProbe": "0:git@github.com:synthetic-owner/plain.git",
+    "OldResult": "git@github.com:synthetic-owner/plain.git",
+    "NewResult": "git@github.com:synthetic-owner/plain.git",
+    "Status": "EQUAL"
+  },
+  {
+    "Context": "2c vendor parent (outer)",
+    "Env": "-",
+    "Gate": "0:C:/AgentSessions/.trellis/.runtime/b8-check-v2/plain",
+    "OldProbe": "0:git@github.com:synthetic-owner/plain.git",
+    "NewProbe": "0:git@github.com:synthetic-owner/plain.git",
+    "OldResult": "git@github.com:synthetic-owner/plain.git",
+    "NewResult": "git@github.com:synthetic-owner/plain.git",
+    "Status": "EQUAL"
+  },
+  {
+    "Context": "3a bare root",
+    "Env": "-",
+    "Gate": "128:",
+    "OldProbe": "(gate=null)",
+    "NewProbe": "(gate=null)",
+    "OldResult": null,
+    "NewResult": null,
+    "Status": "EQUAL(None)"
+  },
+  {
+    "Context": "3b bare subdir (refs/heads)",
+    "Env": "-",
+    "Gate": "128:",
+    "OldProbe": "(gate=null)",
+    "NewProbe": "(gate=null)",
+    "OldResult": null,
+    "NewResult": null,
+    "Status": "EQUAL(None)"
+  },
+  {
+    "Context": "4a .git dir cwd",
+    "Env": "-",
+    "Gate": "128:",
+    "OldProbe": "(gate=null)",
+    "NewProbe": "(gate=null)",
+    "OldResult": null,
+    "NewResult": null,
+    "Status": "EQUAL(None)"
+  },
+  {
+    "Context": "4b .git/hooks cwd",
+    "Env": "-",
+    "Gate": "128:",
+    "OldProbe": "(gate=null)",
+    "NewProbe": "(gate=null)",
+    "OldResult": null,
+    "NewResult": null,
+    "Status": "EQUAL(None)"
+  },
+  {
+    "Context": "5a non-git dir (truly outside any repo)",
+    "Env": "-",
+    "Gate": "128:",
+    "OldProbe": "(gate=null)",
+    "NewProbe": "(gate=null)",
+    "OldResult": null,
+    "NewResult": null,
+    "Status": "EQUAL(None)"
+  },
+  {
+    "Context": "5b nonexistent dir",
+    "Env": "-",
+    "Gate": "128:",
+    "OldProbe": "(gate=null)",
+    "NewProbe": "(gate=null)",
+    "OldResult": null,
+    "NewResult": null,
+    "Status": "EQUAL(None)"
+  },
+  {
+    "Context": "6a linked worktree root",
+    "Env": "-",
+    "Gate": "0:C:/AgentSessions/.trellis/.runtime/b8-check-v2/wt-linked",
+    "OldProbe": "0:https://github.com/synthetic-owner/wt-host.git",
+    "NewProbe": "0:https://github.com/synthetic-owner/wt-host.git",
+    "OldResult": "https://github.com/synthetic-owner/wt-host.git",
+    "NewResult": "https://github.com/synthetic-owner/wt-host.git",
+    "Status": "EQUAL"
+  },
+  {
+    "Context": "6b linked worktree subdir",
+    "Env": "-",
+    "Gate": "0:C:/AgentSessions/.trellis/.runtime/b8-check-v2/wt-linked",
+    "OldProbe": "0:https://github.com/synthetic-owner/wt-host.git",
+    "NewProbe": "0:https://github.com/synthetic-owner/wt-host.git",
+    "OldResult": "https://github.com/synthetic-owner/wt-host.git",
+    "NewResult": "https://github.com/synthetic-owner/wt-host.git",
+    "Status": "EQUAL"
+  },
+  {
+    "Context": "6c host after worktree add",
+    "Env": "-",
+    "Gate": "0:C:/AgentSessions/.trellis/.runtime/b8-check-v2/wt-host",
+    "OldProbe": "0:https://github.com/synthetic-owner/wt-host.git",
+    "NewProbe": "0:https://github.com/synthetic-owner/wt-host.git",
+    "OldResult": "https://github.com/synthetic-owner/wt-host.git",
+    "NewResult": "https://github.com/synthetic-owner/wt-host.git",
+    "Status": "EQUAL"
+  },
+  {
+    "Context": "7a submodule root",
+    "Env": "-",
+    "Gate": "0:C:/AgentSessions/.trellis/.runtime/b8-check-v2/super/submod",
+    "OldProbe": "0:git@github.com:synthetic-owner/submodule.git",
+    "NewProbe": "0:git@github.com:synthetic-owner/submodule.git",
+    "OldResult": "git@github.com:synthetic-owner/submodule.git",
+    "NewResult": "git@github.com:synthetic-owner/submodule.git",
+    "Status": "EQUAL"
+  },
+  {
+    "Context": "7b submodule deep subdir",
+    "Env": "-",
+    "Gate": "0:C:/AgentSessions/.trellis/.runtime/b8-check-v2/super/submod",
+    "OldProbe": "0:git@github.com:synthetic-owner/submodule.git",
+    "NewProbe": "0:git@github.com:synthetic-owner/submodule.git",
+    "OldResult": "git@github.com:synthetic-owner/submodule.git",
+    "NewResult": "git@github.com:synthetic-owner/submodule.git",
+    "Status": "EQUAL"
+  },
+  {
+    "Context": "7c superproject from submodule parent",
+    "Env": "-",
+    "Gate": "0:C:/AgentSessions/.trellis/.runtime/b8-check-v2/super",
+    "OldProbe": "0:https://github.com/synthetic-owner/super.git",
+    "NewProbe": "0:https://github.com/synthetic-owner/super.git",
+    "OldResult": "https://github.com/synthetic-owner/super.git",
+    "NewResult": "https://github.com/synthetic-owner/super.git",
+    "Status": "EQUAL"
+  },
+  {
+    "Context": "7d inside submodule gitdir",
+    "Env": "-",
+    "Gate": "0:C:/AgentSessions/.trellis/.runtime/b8-check-v2/super/submod",
+    "OldProbe": "0:git@github.com:synthetic-owner/submodule.git",
+    "NewProbe": "0:git@github.com:synthetic-owner/submodule.git",
+    "OldResult": "git@github.com:synthetic-owner/submodule.git",
+    "NewResult": "git@github.com:synthetic-owner/submodule.git",
+    "Status": "EQUAL"
+  },
+  {
+    "Context": "8 no origin",
+    "Env": "-",
+    "Gate": "0:C:/AgentSessions/.trellis/.runtime/b8-check-v2/no-origin",
+    "OldProbe": "2:",
+    "NewProbe": "2:",
+    "OldResult": null,
+    "NewResult": null,
+    "Status": "EQUAL(None)"
+  },
+  {
+    "Context": "9 uppercase ORIGIN only",
+    "Env": "-",
+    "Gate": "0:C:/AgentSessions/.trellis/.runtime/b8-check-v2/upper-origin",
+    "OldProbe": "2:",
+    "NewProbe": "2:",
+    "OldResult": null,
+    "NewResult": null,
+    "Status": "EQUAL(None)"
+  },
+  {
+    "Context": "10 local path origin",
+    "Env": "-",
+    "Gate": "0:C:/AgentSessions/.trellis/.runtime/b8-check-v2/local-path-origin",
+    "OldProbe": "0:C:\\AgentSessions\\.trellis\\.runtime\\b8-check-v2\\subsrc",
+    "NewProbe": "0:C:\\AgentSessions\\.trellis\\.runtime\\b8-check-v2\\subsrc",
+    "OldResult": "C:\\AgentSessions\\.trellis\\.runtime\\b8-check-v2\\subsrc",
+    "NewResult": "C:\\AgentSessions\\.trellis\\.runtime\\b8-check-v2\\subsrc",
+    "Status": "EQUAL"
+  },
+  {
+    "Context": "11 insteadOf rewrite (repo-local config)",
+    "Env": "-",
+    "Gate": "0:C:/AgentSessions/.trellis/.runtime/b8-check-v2/insteadof",
+    "OldProbe": "0:https://x.example.com/team/rewritten-repo.git",
+    "NewProbe": "0:https://x.example.com/team/rewritten-repo.git",
+    "OldResult": "https://x.example.com/team/rewritten-repo.git",
+    "NewResult": "https://x.example.com/team/rewritten-repo.git",
+    "Status": "EQUAL"
+  },
+  {
+    "Context": "12 pushurl differs from fetch url",
+    "Env": "-",
+    "Gate": "0:C:/AgentSessions/.trellis/.runtime/b8-check-v2/pushurl-only",
+    "OldProbe": "0:https://github.com/synthetic-owner/pushurl.git",
+    "NewProbe": "0:https://github.com/synthetic-owner/pushurl.git",
+    "OldResult": "https://github.com/synthetic-owner/pushurl.git",
+    "NewResult": "https://github.com/synthetic-owner/pushurl.git",
+    "Status": "EQUAL"
+  },
+  {
+    "Context": "13 worktree-local origin override",
+    "Env": "-",
+    "Gate": "0:C:/AgentSessions/.trellis/.runtime/b8-check-v2/wtconfig",
+    "OldProbe": "0:https://github.com/synthetic-owner/wtconfig.git",
+    "NewProbe": "0:https://github.com/synthetic-owner/wtconfig.git",
+    "OldResult": "https://github.com/synthetic-owner/wtconfig.git",
+    "NewResult": "https://github.com/synthetic-owner/wtconfig.git",
+    "Status": "EQUAL"
+  },
+  {
+    "Context": "14a GIT_DIR absolute, cwd truly outside",
+    "Env": "GIT_DIR=C:\\AgentSessions\\.trellis\\.runtime\\b8-check-v2\\envrepo\\.git",
+    "Gate": "0:C:/Users/小Q/AppData/Local/Temp/b8-check-v2-outside/outside",
+    "OldProbe": "0:git@github.com:synthetic-owner/envrepo.git",
+    "NewProbe": "0:git@github.com:synthetic-owner/envrepo.git",
+    "OldResult": "git@github.com:synthetic-owner/envrepo.git",
+    "NewResult": "git@github.com:synthetic-owner/envrepo.git",
+    "Status": "EQUAL"
+  },
+  {
+    "Context": "14b GIT_DIR absolute, cwd = repo subdir",
+    "Env": "GIT_DIR=C:\\AgentSessions\\.trellis\\.runtime\\b8-check-v2\\envrepo\\.git",
+    "Gate": "0:C:/AgentSessions/.trellis/.runtime/b8-check-v2/envrepo/x/y",
+    "OldProbe": "0:git@github.com:synthetic-owner/envrepo.git",
+    "NewProbe": "0:git@github.com:synthetic-owner/envrepo.git",
+    "OldResult": "git@github.com:synthetic-owner/envrepo.git",
+    "NewResult": "git@github.com:synthetic-owner/envrepo.git",
+    "Status": "EQUAL"
+  },
+  {
+    "Context": "14c GIT_DIR relative .git, cwd = repo subdir",
+    "Env": "GIT_DIR=.git",
+    "Gate": "128:",
+    "OldProbe": "(gate=null)",
+    "NewProbe": "(gate=null)",
+    "OldResult": null,
+    "NewResult": null,
+    "Status": "EQUAL(None)"
+  },
+  {
+    "Context": "14d GIT_DIR absolute + GIT_WORK_TREE=repo, cwd = subdir",
+    "Env": "GIT_DIR=C:\\AgentSessions\\.trellis\\.runtime\\b8-check-v2\\envrepo\\.git;GIT_WORK_TREE=C:\\AgentSessions\\.trellis\\.runtime\\b8-check-v2\\envrepo",
+    "Gate": "0:C:/AgentSessions/.trellis/.runtime/b8-check-v2/envrepo",
+    "OldProbe": "0:git@github.com:synthetic-owner/envrepo.git",
+    "NewProbe": "0:git@github.com:synthetic-owner/envrepo.git",
+    "OldResult": "git@github.com:synthetic-owner/envrepo.git",
+    "NewResult": "git@github.com:synthetic-owner/envrepo.git",
+    "Status": "EQUAL"
+  },
+  {
+    "Context": "14e GIT_WORK_TREE only, cwd = repo subdir",
+    "Env": "GIT_WORK_TREE=C:\\Users\\小Q\\AppData\\Local\\Temp\\b8-check-v2-outside\\outside",
+    "Gate": "0:C:/Users/小Q/AppData/Local/Temp/b8-check-v2-outside/outside",
+    "OldProbe": "128:",
+    "NewProbe": "0:git@github.com:synthetic-owner/envrepo.git",
+    "OldResult": null,
+    "NewResult": "git@github.com:synthetic-owner/envrepo.git",
+    "Status": "DIFF(old=None)"
+  },
+  {
+    "Context": "14f GIT_CEILING_DIRECTORIES = parent of repo, cwd = subdir",
+    "Env": "GIT_CEILING_DIRECTORIES=C:\\AgentSessions\\.trellis\\.runtime\\b8-check-v2",
+    "Gate": "0:C:/AgentSessions/.trellis/.runtime/b8-check-v2/envrepo",
+    "OldProbe": "0:git@github.com:synthetic-owner/envrepo.git",
+    "NewProbe": "0:git@github.com:synthetic-owner/envrepo.git",
+    "OldResult": "git@github.com:synthetic-owner/envrepo.git",
+    "NewResult": "git@github.com:synthetic-owner/envrepo.git",
+    "Status": "EQUAL"
+  },
+  {
+    "Context": "15 rel GIT_DIR resolves differently from cwd vs toplevel",
+    "Env": "GIT_DIR=.git;GIT_WORK_TREE=C:\\AgentSessions\\.trellis\\.runtime\\b8-check-v2\\envrepo",
+    "Gate": "0:C:/AgentSessions/.trellis/.runtime/b8-check-v2/envrepo",
+    "OldProbe": "0:git@github.com:synthetic-owner/envrepo.git",
+    "NewProbe": "0:git@github.com:synthetic-owner/nested-under-envrepo.git",
+    "OldResult": "git@github.com:synthetic-owner/envrepo.git",
+    "NewResult": "git@github.com:synthetic-owner/nested-under-envrepo.git",
+    "Status": "DIFF(value)"
+  },
+  {
+    "Context": "16a core.worktree outside gitdir tree, cwd = gitdir",
+    "Env": "-",
+    "Gate": "0:C:/AgentSessions/.trellis/.runtime/b8-check-v2/detached/w",
+    "OldProbe": "0:https://github.com/qin-devs/AgentSessions.git",
+    "NewProbe": "0:git@github.com:synthetic-owner/detached.git",
+    "OldResult": "https://github.com/qin-devs/AgentSessions.git",
+    "NewResult": "git@github.com:synthetic-owner/detached.git",
+    "Status": "DIFF(value)"
+  },
+  {
+    "Context": "16b core.worktree outside gitdir tree, cwd = gitdir/sub",
+    "Env": "-",
+    "Gate": "0:C:/AgentSessions/.trellis/.runtime/b8-check-v2/detached/w",
+    "OldProbe": "0:https://github.com/qin-devs/AgentSessions.git",
+    "NewProbe": "0:git@github.com:synthetic-owner/detached.git",
+    "OldResult": "https://github.com/qin-devs/AgentSessions.git",
+    "NewResult": "git@github.com:synthetic-owner/detached.git",
+    "Status": "DIFF(value)"
+  },
+  {
+    "Context": "16c core.worktree outside gitdir tree, cwd = worktree (no .git)",
+    "Env": "-",
+    "Gate": "0:C:/AgentSessions",
+    "OldProbe": "0:https://github.com/qin-devs/AgentSessions.git",
+    "NewProbe": "0:https://github.com/qin-devs/AgentSessions.git",
+    "OldResult": "https://github.com/qin-devs/AgentSessions.git",
+    "NewResult": "https://github.com/qin-devs/AgentSessions.git",
+    "Status": "EQUAL"
+  },
+  {
+    "Context": "17a core.worktree=root, cwd = .git",
+    "Env": "-",
+    "Gate": "0:C:/AgentSessions/.trellis/.runtime/b8-check-v2/cwrepo",
+    "OldProbe": "0:git@github.com:synthetic-owner/cwrepo.git",
+    "NewProbe": "0:git@github.com:synthetic-owner/cwrepo.git",
+    "OldResult": "git@github.com:synthetic-owner/cwrepo.git",
+    "NewResult": "git@github.com:synthetic-owner/cwrepo.git",
+    "Status": "EQUAL"
+  },
+  {
+    "Context": "17b core.worktree=root, cwd = subdir",
+    "Env": "-",
+    "Gate": "0:C:/AgentSessions/.trellis/.runtime/b8-check-v2/cwrepo",
+    "OldProbe": "0:git@github.com:synthetic-owner/cwrepo.git",
+    "NewProbe": "0:git@github.com:synthetic-owner/cwrepo.git",
+    "OldResult": "git@github.com:synthetic-owner/cwrepo.git",
+    "NewResult": "git@github.com:synthetic-owner/cwrepo.git",
+    "Status": "EQUAL"
+  },
+  {
+    "Context": "18a bare + core.worktree external, cwd = bare dir",
+    "Env": "-",
+    "Gate": "128:",
+    "OldProbe": "(gate=null)",
+    "NewProbe": "(gate=null)",
+    "OldResult": null,
+    "NewResult": null,
+    "Status": "EQUAL(None)"
+  },
+  {
+    "Context": "18b bare + core.worktree external, cwd = bare/sub",
+    "Env": "-",
+    "Gate": "128:",
+    "OldProbe": "(gate=null)",
+    "NewProbe": "(gate=null)",
+    "OldResult": null,
+    "NewResult": null,
+    "Status": "EQUAL(None)"
+  }
+]

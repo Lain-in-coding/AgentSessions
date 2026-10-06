@@ -1,0 +1,2519 @@
+=== cargo test --workspace --locked --target-dir C:/AgentSessions/.trellis/.runtime/target-b7 (reviewer rerun) ===
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.23s
+     Running unittests src\lib.rs (.trellis/.runtime/target-b7\debug\deps\agent_session_grep_adapters_sqlite-97e034e357290dc5.exe)
+
+running 269 tests
+test lease::tests::contention_lock_error_is_writer_busy ... ok
+test lease::tests::false_lock_result_is_writer_busy ... ok
+test lease::tests::non_contention_lock_error_is_backend ... ok
+test lease::tests::true_lock_result_is_acquired ... ok
+test lease::tests::windows_sharing_and_lock_violations_are_writer_busy ... ok
+test cas::tests::missing_current_reads_as_zero ... ok
+test lease::tests::acquire_and_read_record ... ok
+test cas::tests::cas_from_zero_bootstraps ... ok
+test lease::tests::drop_releases_for_next_holder ... ok
+test lease::tests::second_acquire_is_denied_without_disclosing_path ... ok
+test cas::tests::cas_activate_leaves_no_tmp_files_behind ... ok
+test cas::tests::cas_rejects_stale_baseline ... ok
+test cas::tests::cas_succeeds_when_expected_matches ... ok
+test filtered_query_tests::asg_instant_sort_key_round_trips_and_orders ... ok
+test filtered_query_tests::provider_and_time_dimensions_are_anded ... ok
+test filtered_query_tests::provider_filter_matches_document_provider_or ... ok
+test filtered_query_tests::empty_filters_match_unfiltered_query_results ... ok
+test filtered_query_tests::filtered_query_preserves_score_order_and_scores ... ok
+test filtered_query_tests::filtered_predicates_apply_before_limit_in_one_statement ... ok
+test filtered_query_tests::zero_match_filters_return_clean_empty_page ... ok
+test filtered_query_tests::time_filter_is_half_open_since_inclusive_until_exclusive ... ok
+test filtered_query_tests::semantic_and_hybrid_apply_provider_time_repo_and_facets_before_limit ... ok
+test relocation::tests::review_explicit_scan_must_prove_all_unresolved_legacy_native_sessions ... ok
+test relocation::tests::invalid_namespace_or_provider_claim_rolls_back_every_registry_table ... ok
+test relocation::tests::read_only_preview_under_a_writer_lease_creates_no_files_or_live_state ... ok
+test relocation::tests::overlap_unknown_provider_and_relative_roots_are_refused_without_writes ... ok
+test relocation::tests::read_open_of_v17_catalog_does_not_migrate_or_modify_it ... ok
+test relocation::tests::occupied_destination_cannot_merge_independent_installations ... ok
+test relocation::tests::reservations_are_private_until_valid_source_activation ... ok
+test relocation::tests::v17_migration_preserves_exact_legacy_namespace_ids_and_every_existing_table ... ok
+test relocation::tests::v17_case_ambiguous_or_unverifiable_provenance_stays_unregistered_and_readable ... ok
+test relocation::tests::relocation_writer_does_not_reproject_stale_catalog_before_its_backup ... ok
+test relocation::tests::v18_migration_failure_rolls_back_schema_registry_and_legacy_data ... ok
+test source_fs::tests::append_between_stat_and_read_is_detected_after_read ... ok
+test source_fs::tests::append_is_detected ... ok
+test source_fs::tests::capture_and_verify_stable_file ... ok
+test source_fs::tests::equal_length_content_replacement_is_detected_by_fingerprint ... ok
+test source_fs::tests::file_source_reader_detects_replacement_at_reopen ... ok
+test source_fs::tests::read_verified_returns_repeatable_source ... ok
+test relocation::tests::alias_expiry_does_not_expire_canonical_ids_or_reuse_the_moved_namespace ... ok
+test source_fs::tests::snapshot_fs_read_verified_roundtrip ... ok
+test relocation::tests::relocation_preserves_all_locator_claims_identities_context_and_observations ... ok
+test source_fs::tests::truncate_is_detected ... ok
+test tests::activity_anchored_to_non_message_is_rejected ... ok
+test relocation::tests::replay_is_a_no_op_with_no_new_backup_or_generation ... ok
+test tests::activity_commit_is_idempotent_across_fingerprint_change ... ok
+test tests::activity_commit_roundtrips_and_survives_unchanged_resync ... ok
+test relocation::tests::review_source_change_during_activation_rolls_back_every_live_table ... ok
+test tests::activity_target_is_bounded_before_storage ... ok
+test tests::alias_regeneration_is_scoped_to_batch_sources_and_skips_unchanged_rows ... ok
+test tests::b1_delete_rejects_catalog_entity_still_referenced_by_relations ... ok
+test source_fs::tests::snapshot_fs_read_verified_rejects_oversized_source ... ok
+test tests::backfill_source_provider_ids_associates_explicit_sync_rows ... ok
+test relocation::tests::stale_generation_fails_before_missing_new_source_or_backup_creation ... ok
+test tests::batch_commit_with_bounded_entry_text_stays_current ... ok
+test relocation::tests::tampered_expired_or_different_retention_plans_do_not_create_backups ... ok
+test relocation::tests::same_native_session_id_in_independent_installations_remains_distinct ... ok
+test relocation::tests::reverse_move_requires_a_fresh_plan_and_retains_flat_namespace_locations ... ok
+test relocation::tests::review_retired_location_does_not_block_another_provider ... ok
+test relocation::tests::several_parent_grouped_namespaces_keep_their_relative_roots ... ok
+test relocation::tests::changed_and_missing_destination_sources_leave_the_catalog_unchanged ... ok
+test relocation::tests::source_deletion_after_relocation_preserves_shared_facts_until_the_last_claim ... ok
+test relocation::tests::windows_case_separator_equivalence_does_not_duplicate_claims_or_generation ... ok
+test relocation::tests::review_relocation_can_replace_an_expired_alias_of_another_installation ... ok
+test relocation::tests::unicode_roots_preserve_existing_ids_and_component_spelling ... ok
+test tests::catalog_get_many_preserves_order_and_misses ... ok
+test source_fs::tests::sqlite_capture_reads_wal_and_detects_wal_only_changes_without_writing_source ... ok
+test tests::catalog_list_is_sorted_and_limited ... ok
+test relocation::tests::multi_session_wal_source_preserves_all_claims_and_does_not_write_provider_files ... ok
+test tests::catalog_put_advances_generation ... ok
+test tests::catalog_put_overwrites ... ok
+test relocation::tests::wal_only_destination_change_invalidates_the_plan_without_touching_catalog ... ok
+test tests::changed_source_fingerprint_forces_reparse_and_converges ... ok
+test tests::catalog_put_and_rebuild_project_capped_fts_body ... ok
+test tests::catalog_put_get_roundtrip ... ok
+test tests::cjk_bigram_applies_on_source_batch_sync_path ... ok
+test tests::cjk_bigram_rebuild_reprojects_from_catalog_and_bumps_generation ... ok
+test tests::cjk_bigram_keeps_ascii_path_and_punctuation_literals_unchanged ... ok
+test tests::codex_timestamp_merge_converges_to_null_regardless_of_side ... ok
+test tests::commit_rejects_tampered_durable_relation_manifest ... ok
+test tests::commit_rejects_stale_base_generation ... ok
+test tests::commit_rejects_tampered_durable_source_replacement_manifest ... ok
+test tests::commit_usage_events_dedupes_across_sources ... ok
+test relocation::tests::registry_receipt_or_activation_failure_also_rolls_back_every_live_table ... ok
+test tests::codex_timestamp_occurrence_projections_merge_without_conflict ... ok
+test tests::commit_usage_events_rejects_wrong_kind_anchors ... ok
+test tests::commit_usage_events_noop_resync_reports_unchanged ... ok
+test tests::cosine_similarity_handles_zero_norm ... ok
+test tests::commit_rejects_mismatched_payload ... ok
+test tests::commit_batch_is_idempotent ... ok
+test tests::commit_batch_writes_all_entries ... ok
+test tests::commit_usage_events_stores_anchored_and_session_scoped_rows ... ok
+test tests::cjk_bigram_recall_hits_two_char_queries_in_longer_sentences ... ok
+test tests::complete_rescan_removes_dropped_activities_and_empty_scan_tombstones_all ... ok
+test tests::conflicting_claims_fail_closed_without_slug_row ... ok
+test tests::commit_usage_events_tombstones_when_source_rescan_drops_them ... ok
+test tests::conflicting_message_projections_are_still_rejected ... ok
+test tests::f32_blob_round_trips_and_drops_partial_tail ... ok
+test tests::context_graph_store_keeps_zero_message_session_document_attribution ... ok
+test tests::cjk_unigram_tokens_recall_single_char_queries ... ok
+test tests::context_graph_store_loads_typed_graph_and_groups_message_candidates_by_session ... ok
+test tests::complete_empty_replacement_preserves_shared_facts_then_tombstones_last_claim ... ok
+test tests::embedding_rebuild_keyset_batches_visit_each_message_once ... ok
+test tests::complete_relations_regenerate_divergent_context_aliases_without_stable_conflict ... ok
+test tests::fresh_db_creates_session_metadata_projection_tables ... ok
+test tests::duplicate_message_error_does_not_disclose_source_path ... ok
+test tests::catalog_get_many_chunks_over_variable_limit ... ok
+test tests::fresh_db_reports_current_schema_version ... ok
+test tests::duplicate_source_paths_are_rejected ... ok
+test tests::distinct_activity_facts_on_one_message_coexist_across_sources ... ok
+test tests::deleting_by_wire_id_removes_search_row ... ok
+test tests::empty_source_scan_tombstones_prior_membership ... ok
+test tests::every_contributing_source_must_be_relation_complete_before_context_reads ... ok
+test tests::empty_projection_is_stamped_current_without_rebuild_churn ... ok
+test tests::embedding_rebuild_failure_rolls_back_vectors_and_generation ... ok
+test tests::fresh_schema_carries_fts_rowid_without_open_time_ddl ... ok
+test tests::fresh_schema_creates_source_scans_with_parser_version_column ... ok
+test tests::edge_only_change_requires_every_shared_claimant_to_observe_the_new_edge ... ok
+test tests::injected_v6_to_v7_failure_rolls_back_schema_and_version ... ok
+test tests::hyphenated_query_stays_literal_not_not_operator ... ok
+test tests::fresh_store_starts_at_generation_zero ... ok
+test tests::identical_activity_from_two_sources_dedups_into_one_row ... ok
+test tests::incomplete_scan_unions_activities_without_tombstoning ... ok
+test tests::injected_v15_to_v16_failure_rolls_back_schema_and_version ... ok
+test tests::hybrid_rrf_cannot_admit_a_zero_similarity_semantic_candidate ... ok
+test tests::injected_v12_to_v13_failure_rolls_back_schema_and_version ... ok
+test tests::fts_rowids_track_rows_across_commit_rebuild_and_delete ... ok
+test tests::injected_v16_to_v17_failure_rolls_back_schema_and_version ... ok
+test tests::injected_v13_to_v14_failure_rolls_back_schema_and_version ... ok
+test tests::injected_v14_to_v15_failure_rolls_back_schema_and_version ... ok
+test tests::injected_v7_to_v8_failure_rolls_back_schema_and_version ... ok
+test tests::injected_v18_to_v19_failure_rolls_back_journal_retention_schema ... ok
+test tests::index_batch_commits_and_advances_generation ... ok
+test tests::incomplete_scan_unions_claims_and_complete_scan_replaces_with_tombstones ... ok
+test tests::incomplete_scan_updates_observed_relations_without_tombstoning_unseen_facts ... ok
+test tests::interrupted_batch_count_observes_without_mutating ... ok
+test tests::incremental_commit_does_not_claim_whole_store_projection_currency ... ok
+test tests::message_copied_into_another_file_unions_its_per_document_spans ... ok
+test tests::non_contention_sqlite_failure_remains_backend ... ok
+test tests::message_fts_body_is_capped_at_char_boundary_on_index ... ok
+test tests::message_payload_only_change_is_not_dropped ... ok
+test tests::merged_message_fts_projects_from_merged_payload ... ok
+test tests::legacy_single_document_session_upgrades_without_losing_members ... ok
+test tests::lexical_rrf_ties_use_wire_id_before_limit_across_identity_tiers ... ok
+test tests::load_session_graph_keeps_orphan_parent_identity_grade ... ok
+test tests::message_session_refs_accumulate_across_separate_batches ... ok
+test tests::message_shared_by_resumed_sessions_unions_its_session_refs ... ok
+test tests::message_with_different_text_merges_to_longer_projection ... ok
+test tests::orphaned_membership_scan_reports_dangling_claim ... ok
+test tests::orphaned_activity_scan_reports_activity_whose_message_was_removed ... ok
+test tests::metadata_search_indexes_claim_without_user_message_or_placement ... ok
+test tests::newer_schema_is_rejected ... ok
+test tests::non_message_entities_are_catalog_only ... ok
+test tests::moving_message_to_new_source_is_atomic ... ok
+test tests::open_for_write_accepts_bare_relative_filename ... ok
+test tests::mixed_relation_completeness_preserves_alias_until_last_contributor_is_complete ... ok
+test tests::non_json_catalog_payload_does_not_error_json_projected_reads ... ok
+test tests::orphaned_usage_counts_and_purge_remove_drift_rows ... ok
+test tests::put_maintains_fts_projection ... ok
+test tests::purge_leaves_catalog_fts_and_search_projections_unchanged ... ok
+test tests::purge_orphaned_activities_removes_only_dangling_projection_rows ... ok
+test tests::query_faceted_default_matches_plain_query ... ok
+test tests::query_faceted_filters_by_tool_kind_and_name ... ok
+test tests::query_faceted_filters_sidechains_on_indexed_columns ... ok
+test tests::query_respects_limit ... ok
+test tests::raw_han_sentence_is_one_token_without_bigram_transform ... ok
+test tests::rebuild_on_empty_catalog_yields_empty_index ... ok
+test tests::rebuild_keeps_non_message_entities_out_of_fts ... ok
+test tests::rebuild_leaves_durable_activated_journal_row ... ok
+test tests::rebuild_indexes_json_payload_text_not_structural_tokens ... ok
+test tests::read_open_never_creates_or_migrates_and_cannot_write ... ok
+test tests::rebuild_preserves_relations_context_claims_and_completeness ... ok
+test tests::recover_does_not_touch_activated_batches ... ok
+test tests::recover_aborts_orphan_building_intents ... ok
+test tests::rebuild_removes_orphan_fts_rows_not_in_catalog ... ok
+test relocation::tests::backup_collisions_and_failures_preserve_catalog_sources_and_existing_files ... ok
+test tests::rebuild_reprojects_fts_from_catalog_and_advances_generation ... ok
+test tests::reindex_is_idempotent ... ok
+test tests::rebuild_restores_search_after_index_data_wiped ... ok
+test tests::repeated_identical_activity_in_one_source_dedupes_instead_of_failing ... ok
+test tests::relation_apply_failure_rolls_back_everything_except_building_intent ... ok
+test tests::safe_fts_query_treats_operators_and_special_chars_as_literal_tokens ... ok
+test tests::repo_totals_empty_when_no_projection_rows ... ok
+test tests::repo_totals_aggregates_by_slug_with_deterministic_order ... ok
+test tests::semantic_evidence_floor_default_is_the_holdout_choice ... ok
+test tests::relation_and_marker_only_changes_advance_once_then_noop ... ok
+test relocation::tests::review_receipt_rechecks_the_complete_selected_roots ... ok
+test tests::resume_claim_written_replaced_and_cleared_atomically_with_source ... ok
+test tests::repo_slug_projection_follows_session_rebuild_batch ... ok
+test tests::resume_claims_indexed_by_session_id_without_full_scan ... ok
+test tests::resume_of_empty_input_returns_empty_without_query ... ok
+test tests::resume_of_fails_closed_for_conflicting_source_claims ... ok
+test tests::reopen_preserves_data_and_is_idempotent ... ok
+test tests::resume_of_hides_cwd_when_pair_not_observed ... ok
+test tests::semantic_index_is_not_ready_without_model_or_vectors ... ok
+test tests::schema_v10_creates_message_vec_table ... ok
+test tests::semantic_index_round_trips_and_ranks_by_cosine ... ok
+test tests::search_finds_indexed_and_rebuilds_id ... ok
+test tests::resume_of_without_claims_reports_unavailable_not_resumable ... ok
+test tests::session_repo_slug_gates_every_claim_parameter ... ok
+test tests::semantic_evidence_gate_filters_below_floor_before_top_k ... ok
+test tests::resyncing_a_cross_source_session_is_a_content_level_noop ... ok
+test tests::metadata_sql_has_bounded_shape_and_indexed_session_probes ... ok
+test tests::semantic_index_upserts_and_clear_removes_only_that_model ... ok
+test tests::semantic_vectors_reject_nonfinite_and_corrupt_storage ... ok
+test tests::semantic_noise_filter_preserves_later_pages_and_deleted_rows_are_hidden ... ok
+test tests::separate_batches_reject_conflicting_identity_metadata_without_state_change ... ok
+test tests::separate_fts_corpora_merge_by_rrf_rank_not_raw_bm25 ... ok
+test tests::semantic_query_skips_other_models_and_dimensions ... ok
+test tests::semantic_top_k_is_exact_over_a_representative_scan ... ok
+test tests::session_metadata_search_conflicting_claims_fail_closed ... ok
+test tests::resume_of_resolves_batched_claims_in_input_order_without_n_plus_one ... ok
+test tests::session_of_resolves_owning_session_batched_and_order_preserving ... ok
+test tests::session_spanning_two_sources_in_one_batch_unions_its_members ... ok
+test tests::session_repo_slugs_batch_read_preserves_order_and_reports_unknown_as_none ... ok
+test tests::session_title_is_none_without_valid_user_message ... ok
+test tests::session_synced_in_separate_batches_accumulates_members ... ok
+test tests::session_title_prefers_custom_then_ai_then_first_valid_user_message ... ok
+test tests::shared_entity_survives_other_source_rescan ... ok
+test tests::session_title_skips_non_user_roles_and_empty_text ... ok
+test tests::session_title_projection_is_incremental_and_rebuildable ... ok
+test tests::sqlite_busy_maps_to_retryable_writer_busy ... ok
+test tests::sqlite_locked_maps_to_retryable_writer_busy ... ok
+test tests::shared_message_survives_one_source_shrinking ... ok
+test tests::session_title_truncates_to_80_chars_on_char_boundary ... ok
+test tests::session_metadata_search_is_private_incremental_and_rebuildable ... ok
+test tests::shared_wire_id_with_conflicting_identity_metadata_is_rejected ... ok
+test tests::timestamp_missing_key_is_symmetric_with_explicit_null ... ok
+test tests::shared_relation_change_requires_all_claimants_in_one_complete_batch ... ok
+test tests::source_no_op_rejects_duplicate_facts_without_advancing_generation ... ok
+test tests::source_paths_for_provider_returns_only_that_providers_paths ... ok
+test tests::source_paths_requiring_relation_scan_excludes_complete_sources ... ok
+test tests::source_paths_requiring_relation_scan_reports_incomplete_sources ... ok
+test tests::source_provider_id_backfill_is_detected_and_never_overwrites ... ok
+test tests::source_removal_clears_activities_and_membership_in_same_transaction ... ok
+test tests::standalone_index_keeps_non_message_out_of_fts ... ok
+test tests::source_rescan_retires_session_and_document_rows ... ok
+test tests::standalone_index_populates_wire_mapping ... ok
+test tests::stale_parser_version_forces_reparse_and_converges ... ok
+test tests::source_rescan_tombstones_removed_messages ... ok
+test tests::trailing_star_keeps_fts5_prefix_semantics ... ok
+test tests::unchanged_batch_with_container_entities_takes_the_fast_current_path ... ok
+test tests::stale_index_projection_refuses_instead_of_returning_wrong_cjk_hits ... ok
+test tests::usage_token_source_check_constraint_rejects_unknown_kinds ... ok
+test tests::unchanged_source_rescan_does_not_advance_generation ... ok
+test tests::session_of_chunks_over_variable_limit ... ok
+test relocation::tests::every_live_locator_write_failure_rolls_back_all_tables_and_generation ... ok
+test tests::source_batch_permutations_produce_identical_state ... ok
+test tests::v12_catalog_migrates_to_v13_adding_session_titles_table ... ok
+test tests::v1_db_migrates_to_v2_with_generation_zero ... ok
+test tests::v13_catalog_migrates_to_v14_adding_parser_version_column ... ok
+test tests::v14_catalog_migrates_to_v15_adding_usage_projection ... ok
+test tests::write_open_reprojects_stale_projection_from_catalog_without_reparse ... ok
+test tests::v3_db_migrates_source_membership_table ... ok
+test tests::v7_catalog_migrates_to_v12_adding_activity_tables ... ok
+test tests::v15_catalog_migrates_to_v16_with_empty_repo_projection ... ok
+test tests::write_open_self_heal_keeps_the_repo_identity_projection ... ok
+test tests::v16_catalog_with_empty_projection_migrates_to_v17_as_current ... ok
+test tests::v16_catalog_migrates_to_v17_stamping_projection_version_honestly ... ok
+test tests::v7_db_migrates_to_v8_creating_resume_claims_table ... ok
+test tests::v5_db_migrates_membership_document_id_column ... ok
+test tests::v8_to_v9_migration_adds_provider_id_column_non_destructively ... ok
+test tests::v6_db_migrates_to_v7_without_fabricating_relations ... ok
+test tests::v7_open_backfills_fts_rowid_for_legacy_rows ... ok
+test tests::rebuild_index_statement_count_is_bounded_per_catalog_row ... ok
+test tests::large_store_delete_is_rowid_scoped_not_content_scanned ... ok
+test tests::batch_current_check_is_rowid_scoped_not_content_scanned ... ok
+test tests::load_session_graph_statement_count_is_bounded_regardless_of_edge_count ... ok
+test tests::batched_commit_rows_match_sequential_commit_rows ... ok
+
+test result: ok. 269 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.97s
+
+     Running unittests src\bin\sqlite_process_helper.rs (.trellis/.runtime/target-b7\debug\deps\sqlite_process_helper-a425c0e87a03b9cb.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\invariant_failure_semantics.rs (.trellis/.runtime/target-b7\debug\deps\invariant_failure_semantics-518725ea253a351f.exe)
+
+running 3 tests
+test failed_source_commit_keeps_watermark_fingerprint_and_last_good_rows ... ok
+test budget_trimmed_response_is_not_persisted_as_a_fresh_full_view ... ok
+test interrupted_intent_never_becomes_a_fresh_full_view_after_reopen ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s
+
+     Running tests\invariant_projection_consistency.rs (.trellis/.runtime/target-b7\debug\deps\invariant_projection_consistency-42e5b202305d8485.exe)
+
+running 2 tests
+test app_get_returns_full_body_while_search_stays_inside_the_projection ... ok
+test capped_projection_is_identical_across_write_and_rebuild_paths ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests\journal_retention.rs (.trellis/.runtime/target-b7\debug\deps\journal_retention-bc6df032cda2feb9.exe)
+
+running 13 tests
+test unknown_format_on_unresolved_row_still_fails_closed ... ok
+test negligible_terminal_rows_stay_full_and_out_of_the_plan ... ok
+test relocation_manifest_detail_is_never_aggregated ... ok
+test unknown_detail_format_fails_closed ... ok
+test apply_rejects_unknown_format_drift_without_rewrite ... ok
+test unknown_state_fails_closed_in_preview_without_rewrite ... ok
+test drifted_staged_plan_is_abandoned_without_touching_detail ... ok
+test legacy_v18_rows_migrate_read_and_compact ... ok
+test concurrent_reader_sees_one_consistent_journal_state ... ok
+test killed_process_after_stage_converges_through_recovery ... ok
+test unresolved_and_conflict_paths_are_unaffected_by_compaction ... ok
+test preview_reports_scope_fields_and_savings_without_writing ... ok
+test soak_200_messages_21_revisions_reports_sizes_and_keeps_semantics ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.32s
+
+     Running tests\process_evidence.rs (.trellis/.runtime/target-b7\debug\deps\process_evidence-93f441f53a4aab6c.exe)
+
+running 4 tests
+test killed_holder_releases_production_writer_lease_without_deleting_lock_file ... ok
+test production_open_for_write_allows_exactly_one_process ... ok
+test stale_generation_intent_fails_closed_on_production_store ... ok
+test production_open_recovers_durable_intent_without_changing_catalog_or_generation ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.19s
+
+     Running unittests src\lib.rs (.trellis/.runtime/target-b7\debug\deps\agent_session_grep_application-a6980dfea8334036.exe)
+
+running 272 tests
+test activity::tests::activity_kind_as_str_round_trips ... ok
+test activity::tests::extracts_tool_result_success ... ok
+test activity::tests::extracts_bash_command ... ok
+test activity::tests::command_targets_extracts_commands ... ok
+test activity::tests::filter_by_status_returns_failures ... ok
+test budget::tests::clamp_byte_gate_cuts_greedily_in_order ... ok
+test budget::tests::clamp_cuts_by_max_items_first ... ok
+test activity::tests::file_targets_extracts_file_paths ... ok
+test budget::tests::default_budget_is_generous_and_valid ... ok
+test activity::tests::filter_by_kind_returns_matching ... ok
+test activity::tests::extracts_tool_result_failure ... ok
+test activity::tests::no_activities_from_plain_text ... ok
+test activity::tests::extracts_multiple_tools_from_array ... ok
+test budget::tests::clamp_charges_snippet_bytes_toward_byte_gate ... ok
+test activity::tests::extracts_tool_use_block ... ok
+test budget::tests::clamp_exact_byte_fit_is_not_truncated ... ok
+test budget::tests::clamp_is_noop_under_budget ... ok
+test budget::tests::clamp_reports_byte_gate_when_both_cut ... ok
+test budget::tests::clamp_returns_empty_when_first_item_exceeds_bytes ... ok
+test budget::tests::truncation_serializes_with_snake_case_fields ... ok
+test budget::tests::budget_serde_round_trip ... ok
+test budget::tests::validate_accepts_exact_floors ... ok
+test budget::tests::validate_rejects_each_field_below_floor ... ok
+test cjk::tests::already_bigrammed_text_is_stable ... ok
+test cjk::tests::empty_and_single_char_inputs ... ok
+test cjk::tests::fts_tokens_emit_unigrams_then_bigrams ... ok
+test cjk::tests::fts_tokens_pass_through_non_cjk_verbatim ... ok
+test cjk::tests::han_runs_become_adjacent_char_bigrams ... ok
+test cjk::tests::mixed_ascii_cjk_runs_stay_separable ... ok
+test cjk::tests::non_cjk_text_passes_through_verbatim ... ok
+test cjk::tests::punctuation_between_han_runs_is_preserved_and_separated ... ok
+test cursor::tests::base64url_rejects_bad_input ... ok
+test cursor::tests::base64url_round_trips_all_lengths_and_non_ascii ... ok
+test cursor::tests::digest_query_is_deterministic_16_hex ... ok
+test cursor::tests::contract_major_mismatch_is_rejected ... ok
+test cursor::tests::error_messages_instruct_fresh_rerun ... ok
+test cursor::tests::expired_at_and_after_boundary ... ok
+test cursor::tests::garbage_tokens_are_invalid ... ok
+test cursor::tests::generation_mismatch_reports_both_sides ... ok
+test cursor::tests::issue_is_deterministic ... ok
+test cursor::tests::round_trip_returns_identical_claims ... ok
+test cursor::tests::tampered_digest_is_invalid ... ok
+test cursor::tests::token_wire_shape_is_payload_dot_hex16 ... ok
+test cursor::tests::tampered_payload_is_invalid ... ok
+test cursor::tests::wrong_query_digest_is_invalid ... ok
+test cursor::tests::wrong_sort_digest_is_invalid ... ok
+test embedding::tests::different_dimensions_dont_match ... ok
+test embedding::tests::cosine_similarity_identical_is_one ... ok
+test embedding::tests::different_text_produces_different_vector ... ok
+test embedding::tests::empty_text_does_not_panic ... ok
+test embedding::tests::manifest_is_stamped ... ok
+test embedding::tests::model_id_scopes_stored_vectors ... ok
+test embedding::tests::query_and_passage_prefixes_differ ... ok
+test embedding::tests::same_text_produces_same_vector ... ok
+test embedding::tests::similar_texts_have_higher_similarity_than_dissimilar ... ok
+test embedding::tests::stub_produces_correct_dimension ... ok
+test embedding::tests::vectors_are_l2_normalized ... ok
+test evidence::tests::missing_placement_span_is_unknown_without_losing_document_identity ... ok
+test evidence::tests::occurrence_identity_is_the_placement_id ... ok
+test evidence::tests::exact_placement_span_yields_byte_precision ... ok
+test evidence::tests::serializes_snake_case_wire_shape ... ok
+test guidance::tests::literal_terms_apply_cjk_bigram_transform ... ok
+test guidance::tests::literal_terms_dedupe_in_query_order_and_skip_punctuation ... ok
+test guidance::tests::suggestions_are_omitted_without_session_id ... ok
+test guidance::tests::suggestions_shell_quote_unsafe_arguments_only ... ok
+test guidance::tests::suggestions_use_real_ids_and_are_bounded ... ok
+test guidance::tests::why_matched_detects_match_beyond_displayed_prefix ... ok
+test guidance::tests::why_matched_falls_back_to_string_leaves_of_payload ... ok
+test guidance::tests::why_matched_finds_ascii_and_cjk_terms ... ok
+test guidance::tests::why_matched_is_empty_without_text_or_match ... ok
+test guidance::tests::why_matched_keeps_query_order_and_respects_cap ... ok
+test guidance::tests::why_matched_matches_ascii_case_insensitively ... ok
+test guidance::tests::why_matched_prefers_primary_text_over_payload_leaves ... ok
+test guidance::tests::why_matched_uses_display_prefix_as_last_resort ... ok
+test handoff_pack::tests::empty_hits_produces_low_confidence ... ok
+test handoff_pack::tests::clean_text_reports_none_redaction ... ok
+test handoff_pack::tests::evidence_without_source_document_is_excluded ... ok
+test handoff_pack::tests::evidence_and_inference_are_separate ... ok
+test handoff_pack::tests::different_queries_produce_different_pack_ids ... ok
+test handoff_pack::tests::generates_pack_with_evidence ... ok
+test handoff_pack::tests::created_at_is_deterministic_and_generation_derived ... ok
+test handoff_pack::tests::matched_sessions_use_session_ids_not_message_ids ... ok
+test handoff_pack::tests::pack_id_changes_with_budget ... ok
+test handoff_pack::tests::redaction_is_applied_and_reported ... ok
+test handoff_pack::tests::pack_id_is_deterministic ... ok
+test handoff_pack::tests::utc_iso8601_known_epochs ... ok
+test handoff_pack::tests::truncates_at_token_budget ... ok
+test handoff_pack::tests::schema_round_trip_preserves_pack ... ok
+test hybrid::tests::fuse_deduplicates_overlapping_hits ... ok
+test handoff_pack::tests::truncates_at_max_evidence ... ok
+test hybrid::tests::fuse_empty_lists ... ok
+test handoff_pack::tests::published_schema_stays_in_lockstep_with_implementation ... ok
+test handoff_pack::tests::serialized_pack_has_no_path_keys_or_jsonl_paths ... ok
+test hybrid::tests::fuse_is_deterministic ... ok
+test hybrid::tests::fuse_weighted_favors_higher_weight ... ok
+test hybrid::tests::fuse_merges_disjoint_lists ... ok
+test peek::tests::extracts_first_and_last_user_text_in_member_order ... ok
+test peek::tests::no_user_turns_yields_null_fields_that_serialize_small ... ok
+test peek::tests::fields_are_char_truncated_at_the_cap ... ok
+test peek::tests::pop_chars_is_char_boundary_safe ... ok
+test peek::tests::skips_user_messages_without_text_and_missing_payloads ... ok
+test peek::tests::heavy_json_escaping_stays_within_the_budget ... ok
+test ranking::tests::apply_lexical_signals_demotes_sidechain_under_equal_relevance ... ok
+test ranking::tests::apply_lexical_signals_decays_older_hit_below_newer ... ok
+test ranking::tests::apply_lexical_signals_promotes_current_repo_hit_under_equal_relevance ... ok
+test ranking::tests::apply_lexical_signals_repo_boost_ties_break_by_wire_id_ascending ... ok
+test ranking::tests::apply_lexical_signals_ties_break_by_wire_id_ascending ... ok
+test peek::tests::wide_chars_are_byte_trimmed_to_the_per_session_budget ... ok
+test ranking::tests::apply_lexical_signals_treats_missing_facts_as_no_signal ... ok
+test ranking::tests::apply_lexical_signals_zero_scores_are_normalized_positive ... ok
+test ranking::tests::final_score_adds_current_repo_boost_only_when_the_repo_matches ... ok
+test ranking::tests::final_score_applies_decay_then_fixed_sidechain_penalty ... ok
+test ranking::tests::apply_lexical_signals_without_repo_signal_is_byte_identical ... ok
+test ranking::tests::final_score_is_deterministic ... ok
+test ranking::tests::final_score_zero_evidence_never_gains_boost ... ok
+test ranking::tests::recency_decay_clamps_future_timestamps_to_full_score ... ok
+test ranking::tests::recency_decay_is_one_at_zero_age_and_halves_every_thirty_days ... ok
+test ranking::tests::recency_decay_never_drops_below_floor ... ok
+test relocation::tests::containment_matches_components_and_recorded_flavor ... ok
+test relocation::tests::installation_root_preserves_spelling_and_legacy_group_boundaries ... ok
+test relocation::tests::changed_schema_mapping_or_retention_never_silently_replans ... ok
+test relocation::tests::legacy_namespace_matches_the_original_cli_strings_exactly ... ok
+test relocation::tests::generation_mismatch_is_distinct_and_precedes_mapping_mismatch ... ok
+test relocation::tests::malformed_oversized_or_noncanonical_encodings_are_rejected ... ok
+test relocation::tests::mapping_digest_requires_full_lowercase_hex ... ok
+test handoff_pack::tests::handoff_pack_generation_is_provider_independent ... ok
+test relocation::tests::namespace_seeds_remain_distinct_when_windows_locations_compare_equal ... ok
+test relocation::tests::posix_paths_preserve_case_and_literal_backslashes ... ok
+test relocation::tests::plan_payload_contains_only_bounded_scalar_and_digest_fields ... ok
+test relocation::tests::plan_round_trip_binds_catalog_mapping_retention_and_injected_time ... ok
+test relocation::tests::plan_expiry_boundary_and_future_issue_time_fail_explicitly ... ok
+test relocation::tests::remapping_preserves_suffix_case_unicode_and_source_boundaries ... ok
+test relocation::tests::reverse_remapping_is_an_explicit_new_mapping ... ok
+test relocation::tests::retention_limits_and_clock_overflow_are_checked ... ok
+test relocation::tests::relative_and_ambiguous_paths_fail_without_echoing_private_input ... ok
+test relocation::tests::strict_ancestor_overlap_is_refused_in_both_directions ... ok
+test relocation::tests::unc_and_unambiguous_verbatim_paths_share_comparison_keys ... ok
+test relocation::tests::tampered_payload_and_digest_are_rejected ... ok
+test relocation::tests::windows_keys_fold_ascii_case_and_separators_without_unicode_changes ... ok
+test resume::tests::builds_antigravity_resume_command ... ok
+test resume::tests::builds_claude_resume_command ... ok
+test resume::tests::builds_codex_resume_command ... ok
+test resume::tests::builds_kimi_code_resume_command ... ok
+test resume::tests::builds_opencode_resume_command_with_directory ... ok
+test resume::tests::builds_opencode_resume_command_without_directory ... ok
+test relocation::tests::self_consistent_but_unsupported_claims_are_rejected ... ok
+test resume::tests::builds_pi_resume_command ... ok
+test resume::tests::builds_tencent_codebuddy_resume_command ... ok
+test resume::tests::capability_matrix_resume_level_matches_builder_support ... ok
+test resume::tests::grok_build_resume_command ... ok
+test resume::tests::no_permission_mode_by_default ... ok
+test resume::tests::not_available_returns_unavailable ... ok
+test resume::tests::preview_command_quotes_ordinary_paths_with_spaces ... ok
+test resume::tests::preview_command_refuses_a_cwd_ending_in_a_backslash ... ok
+test resume::tests::preview_command_refuses_shell_injection_from_transcript_cwd ... ok
+test resume::tests::resume_available_without_provider_session_id_fails_closed ... ok
+test resume::tests::unverified_provider_returns_unavailable ... ok
+test retention::tests::bounded_index_text_keeps_exactly_cap_chars ... ok
+test retention::tests::bounded_index_text_passes_short_and_empty_text_through_unchanged ... ok
+test retention::tests::bounded_index_text_truncates_beyond_cap_by_one_char ... ok
+test resume::tests::first_run_preview_marker_is_scoped_to_data_root ... ok
+test resume::tests::first_run_preview_marker_starts_unacknowledged_and_is_idempotent ... ok
+test retention::tests::bounded_index_text_mixed_ascii_cjk_truncates_at_cap_chars_not_bytes ... ok
+test retention::tests::bounded_index_text_never_splits_a_multibyte_char_at_the_cap ... ok
+test tests::context_clamp_reports_public_max_messages_reason ... ok
+test tests::context_derived_views_honor_message_clamp ... ok
+test tests::context_budget_counts_placement_occurrences ... ok
+test tests::context_mainline_uses_typed_edges_and_exact_placement_evidence ... ok
+test tests::context_missing_session_is_not_found ... ok
+test tests::context_fallback_does_not_charge_unproduced_derived_bytes ... ok
+test tests::context_malformed_session_payload_is_invariant_violation ... ok
+test tests::context_evidence_span_budget_reports_reason ... ok
+test tests::context_full_keeps_repeated_stable_messages_as_distinct_occurrences ... ok
+test tests::context_raw_never_falls_back_and_carries_no_hint ... ok
+test tests::context_derived_level_bytes_count_toward_budget ... ok
+test handoff_pack::tests::truncates_at_byte_budget ... ok
+test tests::get_returns_payload ... ok
+test tests::get_session_resume_rejects_non_session_kind ... ok
+test tests::get_session_resume_returns_fixed_nullable_metadata ... ok
+test tests::context_reports_both_knobs_when_messages_and_evidence_truncate ... ok
+test tests::context_sessions_returns_structural_overview_and_talk_hint ... ok
+test tests::get_session_resume_without_claims_reports_unavailable ... ok
+test tests::lexical_mode_is_never_marked_fallback ... ok
+test tests::list_byte_gate_counts_serialized_payload_inflation ... ok
+test tests::list_rejects_zero_limit ... ok
+test tests::context_talks_group_user_message_with_following_messages ... ok
+test tests::list_byte_gate_holds_for_never_valid_utf8_payloads ... ok
+test tests::list_pages_partition_in_wire_id_order ... ok
+test tests::list_returns_stable_entries ... ok
+test tests::list_sessions_attaches_titles_aligned_with_entries ... ok
+test tests::list_cursor_rejects_result_set_mismatch ... ok
+test tests::context_talks_and_sessions_fall_back_toward_raw_without_user ... ok
+test tests::list_sessions_only_filters_to_session_kind ... ok
+test tests::lossy_payload_estimate_matches_the_rendered_length ... ok
+test tests::list_sessions_byte_gate_counts_title_serialized_bytes ... ok
+test tests::message_ambiguity_is_bounded_sorted_and_actionable ... ok
+test tests::message_budget_rejects_below_floor ... ok
+test tests::message_around_zero_returns_anchor_only ... ok
+test tests::message_contexts_missing_message_is_not_found ... ok
+test tests::message_context_candidates_are_grouped_by_distinct_session ... ok
+test tests::message_off_mainline_is_not_found ... ok
+test tests::context_talks_only_include_assistant_and_tool_followers ... ok
+test tests::message_missing_is_not_found ... ok
+test tests::message_window_clamps_at_mainline_ends_and_stays_chronological ... ok
+test tests::message_item_budget_keeps_anchor_and_reports_max_items ... ok
+test tests::parse_relative_search_instant_uses_injected_clock_and_rejects_negative_amounts ... ok
+test tests::message_with_unknown_session_is_not_found ... ok
+test tests::parse_search_instant_normalizes_offsets_and_compact_time ... ok
+test tests::parse_search_instant_validates_ranges_and_precision ... ok
+test tests::message_multiple_mainline_placements_is_invalid_request ... ok
+test tests::search_attaches_cjk_and_ascii_why_matched_and_suggestions ... ok
+test tests::message_window_includes_one_neighbor_per_side ... ok
+test tests::message_without_session_auto_resolves_single_candidate ... ok
+test tests::search_cursor_expires_after_ttl ... ok
+test tests::search_cursor_facet_binding_has_no_delimiter_collisions ... ok
+test tests::search_cursor_rejects_generation_bump ... ok
+test tests::search_cursor_is_bound_to_facets ... ok
+test tests::search_cursor_is_bound_to_query ... ok
+test tests::search_byte_gate_charges_text_bytes ... ok
+test tests::search_excludes_system_and_developer_roles_by_default ... ok
+test tests::search_group_by_session_carries_resume_availability ... ok
+test tests::search_group_by_session_default_path_keeps_occurrences_one ... ok
+test tests::search_group_by_session_collapses_with_occurrences ... ok
+test tests::search_cursor_is_bound_to_normalized_filters ... ok
+test tests::search_byte_gate_truncates_and_cursor_resumes_at_kept_offset ... ok
+test tests::search_hit_charge_covers_always_emitted_null_fields ... ok
+test tests::search_guidance_deterministic_across_identical_queries ... ok
+test tests::search_guidance_omits_get_message_when_session_id_missing ... ok
+test tests::search_guidance_uses_real_session_id_in_suggestions ... ok
+test tests::search_hits_carry_resume_availability_from_claims ... ok
+test tests::search_cursor_pins_recency_clock_and_original_expiry_across_pages ... ok
+test tests::search_include_system_restores_system_developer_hits ... ok
+test tests::search_hits_carry_text_summary_from_payloads ... ok
+test tests::list_sessions_byte_gate_counts_peek_serialized_bytes ... ok
+test tests::search_lexical_ranking_demotes_sidechain_under_equal_relevance ... ok
+test tests::search_hits_carry_session_id_from_placements ... ok
+test tests::search_lexical_ranking_is_deterministic_across_identical_queries ... ok
+test tests::search_lexical_ranking_prefers_newer_message_under_fixed_clock ... ok
+test tests::search_rejects_budget_below_floor ... ok
+test tests::search_lexical_ranking_pages_partition_the_pinned_ordering ... ok
+test tests::message_byte_budget_keeps_anchor_and_reports_max_response_bytes ... ok
+test tests::search_rejects_control_characters_before_index_query ... ok
+test tests::search_rejects_empty_query ... ok
+test tests::search_hybrid_pages_do_not_depend_on_the_cursor_offset ... ok
+test tests::search_json_escaped_guidance_counts_toward_byte_budget ... ok
+test tests::search_rejects_since_not_before_until ... ok
+test tests::search_pages_partition_the_pinned_ordering ... ok
+test tests::search_rejects_zero_limit ... ok
+test tests::search_returns_hits ... ok
+test tests::search_rank_pages_do_not_depend_on_the_cursor_offset ... ok
+test tests::search_text_truncates_to_max_snippet_chars ... ok
+test tests::search_text_none_when_payload_has_no_text ... ok
+test tests::search_without_resume_claims_reports_false ... ok
+test tests::select_and_stage_all_ambiguous_keeps_bare_message ... ok
+test tests::select_and_stage_probes_each_adapter_exactly_once ... ok
+test tests::search_why_matched_detects_term_beyond_displayed_prefix ... ok
+test tests::search_semantic_noise_filter_does_not_eat_the_has_more_sentinel ... ok
+test tests::select_and_stage_source_streams_selected_variant ... ok
+test tests::select_and_stage_surfaces_probe_error_line_detail_when_all_rejected ... ok
+test tests::semantic_mode_without_index_falls_back_explicitly ... ok
+test tests::semantic_rejects_nonfinite_query_embedding_before_backend ... ok
+test tests::stage_ambiguous_error_does_not_leak_evidence ... ok
+test tests::stage_discards_partial_on_mid_parse_fatal ... ok
+test tests::stage_preserves_spans_and_complete_parse_report ... ok
+test tests::semantic_cursor_binds_mode_model_dimension_and_readiness ... ok
+test tests::semantic_readiness_errors_and_nonfinite_scores_do_not_fallback ... ok
+test tests::stage_rejects_ambiguous_variant ... ok
+test tests::stage_returns_all_messages_on_success ... ok
+test tests::status_returns_catalog_count ... ok
+test tests::search_group_by_session_byte_truncated_page_keeps_paging ... ok
+test tests::select_and_stage_source_rejects_source_beyond_declared_cap ... ok
+test tests::context_sessions_budget_falls_back_through_talks_before_raw ... ok
+
+test result: ok. 272 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+
+
+running 2 tests
+test zero_evidence_recent_repo_candidate_is_not_admitted_by_boost ... ok
+test provider_filter_precedes_the_cap_in_lexical_semantic_and_hybrid_paths ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\invariant_search_gates.rs (.trellis/.runtime/target-b7\debug\deps\invariant_search_gates-1a2aea353406ce5f.exe)
+     Running unittests src\lib.rs (.trellis/.runtime/target-b7\debug\deps\agent_session_grep_cli-59b75fbf3442e6f7.exe)
+
+running 344 tests
+test hooks::tests::build_hook_output_preserves_multibyte_chars ... ok
+test hooks::tests::hook_budget_zero_and_large_limits_do_not_wrap ... ok
+test hooks::tests::default_config_is_disabled ... ok
+test hooks::tests::enabled_but_disabled_does_not_run ... ok
+test hooks::tests::format_context_header_includes_query_and_count ... ok
+test hooks::tests::diagnostics_report_whether_anything_was_injected ... ok
+test hooks::tests::build_hook_output_truncates_long_text ... ok
+test hooks::tests::stdout_line_is_the_bare_contract_or_nothing ... ok
+test hooks::tests::hook_event_parses_both_spellings_and_rejects_unknown ... ok
+test human::tests::cursor_hint_requires_both_has_more_and_token ... ok
+test human::tests::context_truncation_without_any_id_omits_show_hint ... ok
+test hooks::tests::query_from_payload_reads_prompt_and_cwd ... ok
+test hooks::tests::build_hook_output_short_text ... ok
+test hooks::tests::hook_output_serializes_to_json ... ok
+test hooks::tests::enabled_and_not_disabled_runs ... ok
+test hooks::tests::hook_budget_uses_character_units_for_detection_and_truncation ... ok
+test human::tests::context_renders_header_numbered_messages_and_evidence ... ok
+test human::tests::context_zero_messages_keeps_worded_header_and_evidence ... ok
+test hooks::tests::query_from_payload_rejects_blank_and_missing ... ok
+test hooks::tests::config_round_trips ... ok
+test human::tests::context_truncation_hint_falls_back_to_id_when_message_id_missing ... ok
+test human::tests::display_width_counts_cjk_as_two_columns ... ok
+test human::tests::display_width_counts_emoji_and_astral_cjk_as_two_columns ... ok
+test human::tests::get_null_payload_is_not_found ... ok
+test human::tests::collapse_middle_keeps_head_and_tail_segments ... ok
+test human::tests::get_returns_payload_lines_verbatim_without_trailing_blanks ... ok
+test human::tests::handoff_renders_sections_and_schema ... ok
+test human::tests::handoff_renders_truncation_when_incomplete ... ok
+test human::tests::ingest_missing_fields_render_nothing_not_question_marks ... ok
+test human::tests::ingest_renders_dedicated_single_source_fields ... ok
+test human::tests::ingest_unchanged_file_summarizes_no_new_messages ... ok
+test human::tests::list_renders_id_and_sanitized_payload_preview ... ok
+test human::tests::list_renders_title_instead_of_payload_preview_when_present ... ok
+test human::tests::list_zero_entries_is_worded ... ok
+test human::tests::partial_outcome_without_truncation_metadata_degrades_to_placeholder ... ok
+test human::tests::resume_renders_dry_run_preview ... ok
+test human::tests::providers_renders_maturity_target_and_all_capabilities ... ok
+test human::tests::non_object_data_never_panics_and_stays_single_line ... ok
+test human::tests::resume_renders_executed_state ... ok
+test human::tests::resume_renders_first_run_forced_preview ... ok
+test human::tests::resume_renders_unavailable_without_command_line ... ok
+test human::tests::resume_table_empty_input_renders_empty_string ... ok
+test human::tests::resume_table_never_truncates_provider_or_session_id ... ok
+test human::tests::resume_table_renders_dash_for_missing_values ... ok
+test human::tests::resume_table_keeps_columns_aligned_across_emoji_ascii_and_cjk_titles ... ok
+test human::tests::resume_table_renders_five_columns_in_contract_order ... ok
+test human::tests::resume_table_sanitizes_newlines_and_tabs ... ok
+test human::tests::resume_table_truncates_emoji_title_by_display_width ... ok
+test human::tests::resume_table_truncates_cjk_title_by_display_width ... ok
+test human::tests::search_appends_truncation_and_cursor_hint ... ok
+test human::tests::search_hit_without_preview_omits_snippet_line ... ok
+test human::tests::search_renders_hit_text_preview_when_present ... ok
+test human::tests::search_renders_ranked_hits_with_generation_header ... ok
+test human::tests::search_renders_snippet_field_when_present ... ok
+test human::tests::search_table_appends_wire_id_next_step_commands ... ok
+test human::tests::search_table_without_hit_ids_fabricates_no_next_step ... ok
+test human::tests::search_zero_hits_is_worded ... ok
+test human::tests::show_document_entity_falls_back_to_generic_kv ... ok
+test human::tests::show_legacy_bare_text_payload_gets_curated_projection ... ok
+test human::tests::show_message_without_session_omits_fabricated_hint ... ok
+test human::tests::show_null_entity_is_not_found ... ok
+test human::tests::show_renders_curated_fields_only ... ok
+test human::tests::show_session_entity_falls_back_to_generic_kv ... ok
+test human::tests::status_missing_fields_degrade_to_placeholders ... ok
+test human::tests::status_renders_entities_and_generation ... ok
+test human::tests::status_renders_repo_aggregation_lines ... ok
+test human::tests::status_renders_usage_line_when_projection_present ... ok
+test human::tests::sync_renders_field_stats_with_unit_annotations ... ok
+test human::tests::unknown_command_falls_back_to_sorted_key_value_lines ... ok
+test mcp::tests::business_error_frames_mask_provider_io_source_paths ... ok
+test mcp::tests::contract_declared_mcp_tools_match_the_real_catalog ... ok
+test mcp::tests::get_session_context_schema_declares_level_enum ... ok
+test mcp::tests::error_messages_truncate_echoed_values ... ok
+test mcp::tests::get_message_unknown_message_is_business_not_found ... ok
+test mcp::tests::doctor_reports_db_ok_with_store_facts ... ok
+test mcp::tests::get_session_context_rejects_wrong_kind_session_id ... ok
+test mcp::tests::invalid_id_types_are_invalid_request ... ok
+test mcp::tests::garbage_cursor_is_a_business_error_with_cursor_invalid ... ok
+test mcp::tests::initialize_reports_negotiated_version_and_server_info ... ok
+test mcp::tests::get_message_wire_id_errors_are_invalid_params ... ok
+test mcp::tests::get_session_resume_returns_fixed_read_only_metadata_shape ... ok
+test mcp::tests::failed_initialize_does_not_open_gate_via_initialized_notification ... ok
+test mcp::tests::negotiate_version_echoes_each_supported_version ... ok
+test mcp::tests::negotiate_version_falls_back_to_latest_when_unsupported_or_absent ... ok
+test mcp::tests::initialized_notification_is_silent_and_opens_the_gate_after_handshake ... ok
+test mcp::tests::get_session_resume_validates_session_id_at_protocol_layer ... ok
+test mcp::tests::doctor_tool_data_is_the_same_projection_as_the_cli_doctor ... ok
+test mcp::tests::budget_floors_are_protocol_errors_before_app_request ... ok
+test mcp::tests::initialize_with_non_object_params_is_invalid_params ... ok
+test mcp::tests::initialized_notification_with_non_object_params_is_rejected_and_does_not_open_gate ... ok
+test mcp::tests::initialize_requires_protocol_version_capabilities_and_client_info ... ok
+test mcp::tests::initialized_notification_without_handshake_does_not_open_gate ... ok
+test mcp::tests::every_tool_result_carries_the_redaction_block ... ok
+test mcp::tests::get_status_reports_real_catalog_count ... ok
+test mcp::tests::declared_schema_bounds_are_enforced_at_runtime ... ok
+test mcp::tests::generate_handoff_tool_returns_deterministic_pack_with_evidence ... ok
+test mcp::tests::invalid_session_wire_id_is_invalid_params ... ok
+test mcp::tests::list_providers_enumerates_the_registry ... ok
+test mcp::tests::list_sessions_entries_carry_peek_with_first_and_last_user_text ... ok
+test mcp::tests::list_sessions_peek_fields_are_null_when_no_user_message ... ok
+test mcp::tests::list_sessions_peek_stays_within_char_and_byte_budget ... ok
+test mcp::tests::malformed_json_yields_parse_error_with_null_id ... ok
+test mcp::tests::non_object_and_batch_inputs_are_invalid_request ... ok
+test mcp::tests::non_2_0_jsonrpc_is_invalid_request_everywhere ... ok
+test mcp::tests::missing_required_query_is_invalid_params_with_canonical_data ... ok
+test mcp::tests::tool_schema_floors_match_runtime_budget_validation ... ok
+test mcp::tests::tool_schemas_bound_unbounded_strings_and_arrays ... ok
+test mcp::tests::non_object_params_or_arguments_are_invalid_params ... ok
+test mcp::tests::out_of_enum_level_is_invalid_params ... ok
+test mcp::tests::list_sessions_rejects_zero_limit_and_max_items_at_protocol_layer ... ok
+test mcp::tests::list_sessions_entries_carry_title_from_derivation_chain ... ok
+test protocol::tests::backend_port_error_is_masked_in_message ... ok
+test protocol::tests::cursor_and_budget_errors_map_to_dedicated_codes ... ok
+test protocol::tests::cursor_mismatch_errors_populate_bounded_details ... ok
+test protocol::tests::cursor_snapshot_generation_actions_match_catalog_semantics ... ok
+test protocol::tests::diagnostic_frame_has_exact_contract_shape ... ok
+test protocol::tests::error_envelope_carries_code_and_retryable ... ok
+test protocol::tests::error_envelope_emits_details_field ... ok
+test mcp::tests::ping_and_tools_list_require_object_or_absent_params ... ok
+test protocol::tests::exit_codes_follow_contract ... ok
+test protocol::tests::error_envelope_redacts_message_and_details ... ok
+test protocol::tests::frames_echo_caller_request_id_verbatim ... ok
+test protocol::tests::frames_generate_request_id_when_absent ... ok
+test protocol::tests::invariant_violation_is_internal ... ok
+test protocol::tests::message_ambiguity_maps_to_bounded_invalid_request_details ... ok
+test protocol::tests::non_mismatch_errors_keep_empty_details ... ok
+test protocol::tests::operator_action_exists_for_every_code ... ok
+test protocol::tests::output_mode_only_reads_flags_in_prefix_position ... ok
+test protocol::tests::output_mode_rejects_conflicting_or_duplicate_flags ... ok
+test protocol::tests::output_mode_rejects_unknown_or_missing_value ... ok
+test protocol::tests::port_error_categories_map_to_catalog ... ok
+test protocol::tests::progress_frame_has_exact_contract_shape ... ok
+test protocol::tests::provider_io_error_masks_source_path_in_message ... ok
+test protocol::tests::published_error_catalog_matches_runtime_mapping ... ok
+test protocol::tests::published_envelope_schema_contains_runtime_contract ... ok
+test protocol::tests::relocation_errors_keep_canonical_categories_and_private_values_out ... ok
+test protocol::tests::source_io_error_masks_source_path_in_message ... ok
+test protocol::tests::success_envelope_carries_page_cursor ... ok
+test protocol::tests::success_envelope_carries_retrieval_mode_and_redaction ... ok
+test protocol::tests::success_envelope_carries_warnings_array ... ok
+test protocol::tests::success_envelope_is_well_formed ... ok
+test protocol::tests::valid_request_id_accepts_envelope_pattern ... ok
+test protocol::tests::valid_request_id_rejects_out_of_contract_input ... ok
+test protocol::tests::value_flag_skip_lists_cover_tool_facets_across_all_scanners ... ok
+test protocol::tests::writer_busy_maps_from_port_error ... ok
+test protocol::tests::relocation_scalar_flags_are_skipped_by_every_prefix_scanner ... ok
+test redaction::tests::does_not_redact_normal_text ... ok
+test redaction::tests::does_not_redact_embedded_like_prefixes ... ok
+test redaction::tests::does_not_redact_public_key_named_fields ... ok
+test redaction::tests::does_not_redact_usage_metric_keys ... ok
+test redaction::tests::empty_value_not_redacted ... ok
+test redaction::tests::key_name_redaction_leaves_numeric_and_boolean_contract_fields_intact ... ok
+test redaction::tests::redact_text_plain_string ... ok
+test redaction::tests::redacts_anthropic_key ... ok
+test redaction::tests::redacts_aws_access_key ... ok
+test redaction::tests::redacts_bare_secret_key_named_value ... ok
+test redaction::tests::redacts_bare_jwt_value ... ok
+test redaction::tests::redacts_bearer_token ... ok
+test redaction::tests::redacts_embedded_bearer_token ... ok
+test redaction::tests::redacts_embedded_secret_in_prose ... ok
+test redaction::tests::redacts_every_span_in_a_single_string_leaf ... ok
+test redaction::tests::redacts_github_pat ... ok
+test redaction::tests::redacts_non_secret_named_bare_key_value ... ok
+test redaction::tests::redacts_openai_key ... ok
+test redaction::tests::redacts_private_key ... ok
+test redaction::tests::redacts_recursively_in_nested_arrays ... ok
+test redaction::tests::redacts_secret_key_names ... ok
+test redaction::tests::redacts_slack_token_value ... ok
+test repo_identity::tests::derive_none_for_empty_cwd ... ok
+test redaction::tests::short_strings_not_redacted ... ok
+test repo_identity::tests::derive_none_for_non_git_directory ... ok
+test mcp::tests::ping_is_allowed_before_initialization ... ok
+test repo_identity::tests::derive_none_for_nonexistent_directory ... ok
+test mcp::tests::out_of_schema_parameter_values_are_invalid_params ... ok
+test repo_identity::tests::normalizes_each_supported_url_shape ... ok
+test repo_identity::tests::rejects_slug_over_length_bound ... ok
+test repo_identity::tests::rejects_unknown_shapes_instead_of_guessing ... ok
+test repo_identity::tests::rejects_windows_drive_paths_as_hosts ... ok
+test mcp::tests::notifications_never_get_a_response ... ok
+test repo_identity::tests::resolver_rejects_empty_cwd_without_spawning ... ok
+test mcp::tests::request_with_explicit_null_id_is_answered ... ok
+test mcp::tests::requests_before_initialized_notification_are_rejected ... ok
+test serve::tests::embedded_ui_clears_the_hit_highlight_when_the_context_closes ... ok
+test serve::tests::embedded_ui_counts_every_loaded_page_in_the_hit_meta ... ok
+test serve::tests::embedded_ui_declares_an_inline_icon_so_no_favicon_probe_is_made ... ok
+test serve::tests::embedded_ui_enforces_the_hidden_attribute_over_author_display_rules ... ok
+test serve::tests::embedded_ui_forgets_a_rejected_token ... ok
+test serve::tests::embedded_ui_is_offline_and_uses_safe_dom_projection ... ok
+test serve::tests::embedded_ui_lets_the_filter_row_wrap_inside_the_sidebar ... ok
+test mcp::tests::out_of_enum_policy_is_invalid_params ... ok
+test serve::tests::embedded_ui_reads_the_token_again_when_only_the_fragment_changes ... ok
+test serve::tests::embedded_ui_rerenders_dynamic_strings_when_the_language_changes ... ok
+test mcp::tests::notification_without_string_method_is_invalid_request ... ok
+test serve::tests::embedded_ui_scopes_the_preview_pane_to_the_open_session ... ok
+test serve::tests::embedded_ui_wraps_unbreakable_runs_in_message_and_preview_text ... ok
+test serve::tests::embedded_ui_translates_every_referenced_i18n_key ... ok
+test serve::tests::every_flag_serve_marshals_is_refused_as_a_value ... ok
+test serve::tests::generate_token_is_csprng_shaped_and_unique ... ok
+test mcp::tests::search_filter_schema_and_runtime_validation_stay_aligned ... ok
+test serve::tests::host_origin_token_and_proxy_guards_are_strict ... ok
+test serve::tests::http_response_emits_security_and_length_headers ... ok
+test repo_identity::tests::derive_none_for_git_repo_without_origin ... ok
+test serve::tests::duplicate_origin_header_cannot_bypass_the_cross_origin_guard ... ok
+test repo_identity::tests::derive_slug_from_git_directory_with_origin ... ok
+test serve::tests::embedded_ui_meta_csp_omits_the_directive_only_a_header_can_carry ... ok
+test serve::tests::flag_shaped_request_values_are_rejected_instead_of_reparsed ... ok
+test repo_identity::tests::derive_slug_from_nested_subdirectory ... ok
+test serve::tests::percent_decode_handles_unicode_and_rejects_bad_escape ... ok
+test serve::tests::integration_concurrent_gets_complete_on_bounded_pool ... ok
+test serve::tests::integration_accepts_exactly_max_header_count_headers ... ok
+test serve::tests::search_forwards_budget_facets_and_every_provider_value ... ok
+test serve::tests::search_routes_forward_the_repo_filter_like_the_cli_flag ... ok
+test mcp::tests::search_r2r3_flags_validate_and_apply ... ok
+test mcp::tests::search_paginates_with_cursor_across_disjoint_pages ... ok
+test mcp::tests::search_echoes_non_default_facets_like_the_cli_robot_surface ... ok
+test serve::tests::serve_session_generates_token_and_loopback_address ... ok
+test mcp::tests::tools_list_exposes_exactly_the_nine_contract_tools ... ok
+test mcp::tests::unknown_extra_property_is_invalid_params ... ok
+test tests::a_source_growing_during_the_read_is_deferred_and_its_siblings_still_commit ... ok
+test tests::bare_positionals_skip_value_and_bare_flags ... ok
+test tests::context_render_stays_silent_on_full_precision ... ok
+test tests::command_name_points_at_failing_token ... ok
+test tests::context_render_warns_on_unknown_precision_evidence ... ok
+test tests::cursor_is_not_registered_as_discoverable ... ok
+test tests::an_unreadable_source_still_fails_the_sync ... ok
+test tests::db_flag_rejects_duplicate ... ok
+test tests::db_flag_rejects_flag_named_value ... ok
+test tests::deferred_provider_output_has_null_maturity_target ... ok
+test tests::discover_provider_sources_collects_jsonl_files ... ok
+test tests::discover_provider_sources_extension_filter_is_exact ... ok
+db: not-checked
+hint: 未指定数据库：以上仅检查了环境。运行 doctor --db <path> 可校验数据库与 schema。
+index_projection_expected: 1
+index_projection_stale: null
+index_projection_version: null
+offline: true
+schema: null
+semantic_feature: null
+tool: agent-session-grep-cli
+tool_activity_storage: true
+usage_storage: true
+version: 0.1.0
+db: not-checked
+hint: 未指定数据库：以上仅检查了环境。运行 doctor --db <path> 可校验数据库与 schema。
+index_projection_expected: 1
+index_projection_stale: null
+index_projection_version: null
+offline: true
+schema: null
+semantic_feature: null
+tool: agent-session-grep-cli
+tool_activity_storage: true
+usage_storage: true
+version: 0.1.0
+test tests::doctor_accepts_offline_without_error ... ok
+test tests::discover_roots_match_capability_discover_claims ... ok
+test tests::doctor_and_config_reject_unknown_positionals ... ok
+test tests::doctor_semantic_feature_flag_tracks_build ... ok
+test tests::discover_provider_sources_collects_sqlite_db_without_wal_sidecars ... ok
+test tests::every_known_subcommand_has_help_text ... ok
+test tests::duplicate_native_message_keeps_one_entity_and_every_placement ... ok
+test tests::extra_positional_arguments_are_usage_errors ... ok
+test tests::extract_offline_flag_only_reads_prefix_position ... ok
+test tests::extract_request_id_only_reads_prefix_position ... ok
+test tests::help_flag_after_query_text_is_not_intercepted ... ok
+test tests::fallback_message_id_is_path_independent_but_placement_is_installation_scoped ... ok
+test tests::installation_namespace_fallback_groups_sibling_sources ... ok
+test tests::installation_namespace_groups_sources_by_provider_root ... ok
+test tests::hook_search_filters_maps_providers_and_decay ... ok
+test tests::intercept_top_level_help_and_version ... ok
+test tests::intercept_subcommand_help_for_every_known_command ... ok
+test tests::ambiguous_formats_are_always_separable_by_a_registered_root ... ok
+test tests::machine_render_never_emits_snippet_field ... ok
+test tests::machine_mode_help_is_a_success_envelope ... ok
+test tests::jsonl_health_never_claims_completeness_on_error ... ok
+test mcp::tests::search_round_trip_projects_the_shared_render_payload ... ok
+test tests::offline_gate_refuses_network_capabilities_and_passes_local_ones ... ok
+test tests::offline_is_registered_in_all_prefix_scanners ... ok
+test tests::parse_db_flag_keeps_flag_named_tokens_after_command_as_query_text ... ok
+test tests::parse_db_flag_treats_flags_after_command_as_positionals ... ok
+test tests::parse_report_committed_count_must_match_emitted_messages ... ok
+test tests::pi_and_openclaw_fixtures_are_mutually_indistinguishable_by_content ... ok
+test tests::provider_discovery_target_rejects_unknown_provider ... ok
+test tests::provider_for_source_path_rejects_non_root_paths ... ok
+test tests::provider_for_source_path_resolves_registered_roots ... ok
+test tests::provider_matrix_data_adds_semantic_surface_without_touching_rows ... ok
+test tests::provider_output_has_every_current_matrix_row_and_enum_maturity ... ok
+test tests::readme_documented_commands_are_all_dispatchable ... ok
+test tests::render_message_window_projects_typed_placement_fields ... ok
+test tests::render_search_emits_guidance_when_present ... ok
+test tests::render_search_emits_session_context_fields ... ok
+test tests::request_id_rejects_flag_value_and_duplicate ... ok
+test tests::jsonl_health_classifies_clean_partial_and_truncated ... ok
+test tests::search_filters_from_flags_binds_repo_parameter ... ok
+test tests::sidechain_edges_classify_as_subagent_while_mainline_edges_stay_reply ... ok
+test tests::skipped_records_keep_source_relation_incomplete ... ok
+test tests::stable_projection_conflict_does_not_disclose_native_id ... ok
+test tests::staged_to_source_caps_fts_text_but_keeps_full_payload ... ok
+agent-session-grep-cli 0.1.0
+AI coding-agent history search engine（本地 AI 编程会话历史搜索）。
+
+快速上手（五步闭环；默认库 = `config paths` 的 data 目录下的 asg.db，--db 可覆盖）:
+    1) agent-session-grep --version                确认二进制/版本可用
+    2) agent-session-grep config paths             查看默认数据位置（data 目录）
+    3) agent-session-grep providers                本机 provider 成熟度与可发现性
+    4) agent-session-grep sync --discover          显式同步：自动发现并索引 provider 会话
+    5) agent-session-grep search 关键词             搜索历史会话
+    agent-session-grep show <命中ID>               看一条命中的正文
+    agent-session-grep context <会话ID>            展开一个会话的上下文
+    agent-session-grep resume <会话ID>             预览恢复命令（dry-run；--yes 才执行）
+数据流：search 返回命中消息 → show <msg_id> 看正文 → context <ses_id> 看整个会话。
+
+USAGE:
+    agent-session-grep [--db <path>] <COMMAND> [ARGS]
+    agent-session-grep doctor [--db <path>]
+    agent-session-grep --help | --version
+
+COMMANDS:
+    ingest <file>          解析单个 transcript 文件并入库（只读源）
+    sync <file>...          原子扫描多个 transcript 文件；无变化时不生成新 generation
+    sync --discover          自动发现各 provider 数据根下的源并同步（jsonl/json/db；只读源）
+    relocate --provider <id> --from <old-root> --to <new-root>
+                             预览一个显式安装迁移（默认只读；--apply 才提交）
+    index <id-fact> <text> 直接写入一条 catalog + 索引（切片期写入入口）
+    index rebuild          从权威 catalog 全量重投影 FTS 索引（维护命令）
+    index embeddings       从权威 catalog 构建语义向量索引（semantic/hybrid 检索前置）
+    index purge-activities 修剪孤儿工具活动行（无 catalog 消息的活动/悬空 claim；维护命令）
+    search <query>         全文检索，按相关性降序返回命中（支持分页/预算/过滤 flag）
+    handoff <query>        检索并为查询生成 handoff pack（原文证据 + 建议命令；dry-run）
+    get-message <msg-id>   返回命中消息及其同会话主线邻居（--session/--around）
+    get-session-resume <ses-id> 返回只读 Resume Metadata（Provider Session ID / Original Working Directory）
+    resume <ses-id>        预览恢复命令（默认 dry-run；--yes 才实际执行）
+    hook <event>           Claude Code Hook 集成（默认关闭；--enable 才注入历史）
+    get <wire-id>          按实体 id 取回原始 payload
+    show <wire-id>         按实体 id 取回并归一化展示（role/text 结构）
+    list [limit]           稳定排序列出 catalog 实体（默认 20；支持分页/预算 flag）
+    context <ses-id>       装配会话上下文：分支消息链 + 证据区间
+    status                 报告 catalog 实体总数
+    mcp                    启动 stdio MCP 服务（JSON-RPC 2.0；stdout 只输出 MCP frame）
+    tui                    交互式只读浏览（Preview；需要交互式终端）
+    serve                  启动 loopback HTTP 服务 + 嵌入式 Web UI（--port <n>；仅 loopback）
+    doctor                 环境自检（可选 --db 校验存储可打开）
+    providers              报告 Provider 成熟度、路线目标与逐字段能力
+    config paths           报告当前平台的 config/data/cache/logs 路径
+    model import|status    本地 embedding 模型缓存（永不联网；import 需 semantic-candle 构建）
+
+PAGINATION / BUDGET (search, list):
+    --cursor <token>       上一页 envelope `page.next_cursor` 的续读令牌
+    --max-items <n>        页大小上限（同时作为响应条目预算）
+    --max-bytes <n>        响应字节预算（最低 4096）
+
+RELOCATION:
+    relocate --provider <id> --from <old-root> --to <new-root>
+                             只读生成迁移计划；不创建或修改 catalog、源文件或备份
+    relocate ... --apply --plan <opaque-plan> --backup <new-file>
+                             校验新鲜计划、备份 catalog 后原子提交位置映射
+    --alias-ttl-days <n>     退休位置兼容期（默认 90，范围 1..365）
+
+FILTER (search):
+    --provider claude|claude-code|codex  限定 provider（可重复，多个取值按 OR 合并）
+    --since <time>         起始时间（含）；RFC3339/ISO-8601 绝对值或 1h/1d/1w 相对量
+    --until <time>         结束时间（不含）；语法同 --since
+    --repo <slug>          限定会话仓库（host/owner/name 三段 slug，逐字相等；
+                           与 status 的 repos 清单一致；无仓库身份的会话被排除）
+    --include-system       默认排除 system/developer 角色消息；加此旗标恢复
+    --group-by-session     按会话归并：每会话保留最高分命中并附 occurrences 计数
+
+FACETS (search，结构化过滤；默认不过滤，输出与旧版一致):
+    --main-only            只看主线消息（排除 sidechain）
+    --subagent-only        只看 subagent（sidechain）消息；与 --main-only 互斥
+    --include-sidechain    显式包含 sidechain（默认值；不与上述两者并用）
+    --tool-kind <kind>     只保留做过 file|command|web|query|unknown 工具调用的消息
+    --tool-name <name>     只保留用过该工具（逐字相等）的消息
+
+GET MESSAGE:
+    --session <ses-id>     共享消息的所属会话；有歧义时必须指定
+    --around <n>           主线两侧各返回 n 条邻居（默认 0，仅锚点）
+    --max-items <n>        返回消息条数预算
+    --max-bytes <n>        响应字节预算（最低 4096）
+
+CONTEXT:
+    --policy mainline|full 分支策略（默认 mainline：排除 sidechain 沿 parent 链）
+    --level raw|talks|sessions 结构层级（默认 raw：纯消息链；talks 按用户消息分组；sessions 结构概览）
+    --max-messages <n>     消息条数预算
+    --max-bytes <n>        响应字节预算
+
+GLOBAL（全局 flag 放在命令名之前；子命令 flag 如 --max-items 放在命令名之后）:
+    --db <path>            SQLite 数据存储路径；未给时用平台默认数据目录（config paths 的 data）下的 asg.db
+    --output human|json|jsonl  输出模式（默认 human：人类可读文本；json/jsonl 为协议 envelope）
+    --robot                等价 --output json，无颜色/进度（stdout 只输出协议）
+    --no-color             接受但无效果：human 输出本就不着色（供 NO_COLOR 习惯的调用方）
+    --request-id <id>      robot 调用方关联 id，原样回显于每个 frame（A-Za-z0-9._:- 计 1-128 字符）
+    --offline              拒绝任何需要联网的显式操作（fail-closed；当前所有命令本地执行，本 flag 是稳定显式模式，doctor/hook 会如实上报）
+    -h, --help             打印本帮助
+    -V, --version          打印版本
+
+术语速记:
+    generation       第 N 次入库（数据每更新一次 +1）
+    cursor           翻页令牌（结果多于一页时用来取下一页）
+    wire-id          实体 ID（msg_v1_ 消息 / ses_v1_ 会话 / doc_v1_ 文档）
+    score            相关度分数（越高越相关，按分数降序排列）
+
+EXIT CODES:
+    0 成功；10 部分成功（预算截断，结果可用但不完整）；其余见 error catalog
+agent-session-grep-cli 0.1.0
+search <query>：全文检索历史会话，按相关性降序返回命中。
+示例：agent-session-grep --db <path> search 配置备份
+flag（放子命令后）：--max-items <n> 页大小、--cursor <token> 翻页、--max-bytes <n> 预算；
+过滤：--provider claude|claude-code|codex（可重复，OR）、--since/--until <RFC3339 或 1h|1d|1w>（半开区间 [since, until)）、
+--repo <host/owner/name>（会话仓库 slug，逐字相等；与 status 的 repos 清单一致）；
+检索模式：--mode lexical|semantic|hybrid（默认 lexical）。semantic/hybrid 需先跑 `index embeddings`；
+默认向量化器是 fuzzy lexical vector（bigram-hash，模糊词法相似、非语义模型）；
+semantic 候选在融合前按相似度下限过滤（低于下限的候选不占 top-k 名额）；
+向量索引未就绪时结果标注 retrieval_mode=lexical_fallback 并给出 warning，绝不静默降级；
+--include-system（默认排除 system/developer 角色消息）、--group-by-session（按会话归并并附 occurrences）；
+结构化过滤：--main-only 只看主线（排除 sidechain）、--subagent-only 只看 subagent 消息、
+--tool-kind file|command|web|query|unknown 只保留做过该种工具调用的消息、
+--tool-name <名字> 只保留用过该工具（逐字相等）的消息（--main-only 与 --subagent-only 互斥）
+index <id-fact> <text>：写入一条 catalog + 索引。
+index rebuild：从权威 catalog 重建全文（FTS）索引；
+index embeddings：从权威 catalog 构建语义向量索引（semantic/hybrid 检索前置）。
+默认构建用 fuzzy lexical vector（bigram-hash，模糊词法相似、非语义模型）；
+`--features semantic-candle` + 已验证 E5 bundle 时改用真实 embedding 模型。
+示例：agent-session-grep --db <path> --robot index rebuild
+{"command":"help","data":{"help_text":"agent-session-grep-cli 0.1.0\nAI coding-agent history search engine（本地 AI 编程会话历史搜索）。\n\n快速上手（五步闭环；默认库 = `config paths` 的 data 目录下的 asg.db，--db 可覆盖）:\n    1) agent-session-grep --version                确认二进制/版本可用\n    2) agent-session-grep config paths             查看默认数据位置（data 目录）\n    3) agent-session-grep providers                本机 provider 成熟度与可发现性\n    4) agent-session-grep sync --discover          显式同步：自动发现并索引 provider 会话\n    5) agent-session-grep search 关键词             搜索历史会话\n    agent-session-grep show <命中ID>               看一条命中的正文\n    agent-session-grep context <会话ID>            展开一个会话的上下文\n    agent-session-grep resume <会话ID>             预览恢复命令（dry-run；--yes 才执行）\n数据流：search 返回命中消息 → show <msg_id> 看正文 → context <ses_id> 看整个会话。\n\nUSAGE:\n    agent-session-grep [--db <path>] <COMMAND> [ARGS]\n    agent-session-grep doctor [--db <path>]\n    agent-session-grep --help | --version\n\nCOMMANDS:\n    ingest <file>          解析单个 transcript 文件并入库（只读源）\n    sync <file>...          原子扫描多个 transcript 文件；无变化时不生成新 generation\n    sync --discover          自动发现各 provider 数据根下的源并同步（jsonl/json/db；只读源）\n    relocate --provider <id> --from <old-root> --to <new-root>\n                             预览一个显式安装迁移（默认只读；--apply 才提交）\n    index <id-fact> <text> 直接写入一条 catalog + 索引（切片期写入入口）\n    index rebuild          从权威 catalog 全量重投影 FTS 索引（维护命令）\n    index embeddings       从权威 catalog 构建语义向量索引（semantic/hybrid 检索前置）\n    index purge-activities 修剪孤儿工具活动行（无 catalog 消息的活动/悬空 claim；维护命令）\n    search <query>         全文检索，按相关性降序返回命中（支持分页/预算/过滤 flag）\n    handoff <query>        检索并为查询生成 handoff pack（原文证据 + 建议命令；dry-run）\n    get-message <msg-id>   返回命中消息及其同会话主线邻居（--session/--around）\n    get-session-resume <ses-id> 返回只读 Resume Metadata（Provider Session ID / Original Working Directory）\n    resume <ses-id>        预览恢复命令（默认 dry-run；--yes 才实际执行）\n    hook <event>           Claude Code Hook 集成（默认关闭；--enable 才注入历史）\n    get <wire-id>          按实体 id 取回原始 payload\n    show <wire-id>         按实体 id 取回并归一化展示（role/text 结构）\n    list [limit]           稳定排序列出 catalog 实体（默认 20；支持分页/预算 flag）\n    context <ses-id>       装配会话上下文：分支消息链 + 证据区间\n    status                 报告 catalog 实体总数\n    mcp                    启动 stdio MCP 服务（JSON-RPC 2.0；stdout 只输出 MCP frame）\n    tui                    交互式只读浏览（Preview；需要交互式终端）\n    serve                  启动 loopback HTTP 服务 + 嵌入式 Web UI（--port <n>；仅 loopback）\n    doctor                 环境自检（可选 --db 校验存储可打开）\n    providers              报告 Provider 成熟度、路线目标与逐字段能力\n    config paths           报告当前平台的 config/data/cache/logs 路径\n    model import|status    本地 embedding 模型缓存（永不联网；import 需 semantic-candle 构建）\n\nPAGINATION / BUDGET (search, list):\n    --cursor <token>       上一页 envelope `page.next_cursor` 的续读令牌\n    --max-items <n>        页大小上限（同时作为响应条目预算）\n    --max-bytes <n>        响应字节预算（最低 4096）\n\nRELOCATION:\n    relocate --provider <id> --from <old-root> --to <new-root>\n                             只读生成迁移计划；不创建或修改 catalog、源文件或备份\n    relocate ... --apply --plan <opaque-plan> --backup <new-file>\n                             校验新鲜计划、备份 catalog 后原子提交位置映射\n    --alias-ttl-days <n>     退休位置兼容期（默认 90，范围 1..365）\n\nFILTER (search):\n    --provider claude|claude-code|codex  限定 provider（可重复，多个取值按 OR 合并）\n    --since <time>         起始时间（含）；RFC3339/ISO-8601 绝对值或 1h/1d/1w 相对量\n    --until <time>         结束时间（不含）；语法同 --since\n    --repo <slug>          限定会话仓库（host/owner/name 三段 slug，逐字相等；\n                           与 status 的 repos 清单一致；无仓库身份的会话被排除）\n    --include-system       默认排除 system/developer 角色消息；加此旗标恢复\n    --group-by-session     按会话归并：每会话保留最高分命中并附 occurrences 计数\n\nFACETS (search，结构化过滤；默认不过滤，输出与旧版一致):\n    --main-only            只看主线消息（排除 sidechain）\n    --subagent-only        只看 subagent（sidechain）消息；与 --main-only 互斥\n    --include-sidechain    显式包含 sidechain（默认值；不与上述两者并用）\n    --tool-kind <kind>     只保留做过 file|command|web|query|unknown 工具调用的消息\n    --tool-name <name>     只保留用过该工具（逐字相等）的消息\n\nGET MESSAGE:\n    --session <ses-id>     共享消息的所属会话；有歧义时必须指定\n    --around <n>           主线两侧各返回 n 条邻居（默认 0，仅锚点）\n    --max-items <n>        返回消息条数预算\n    --max-bytes <n>        响应字节预算（最低 4096）\n\nCONTEXT:\n    --policy mainline|full 分支策略（默认 mainline：排除 sidechain 沿 parent 链）\n    --level raw|talks|sessions 结构层级（默认 raw：纯消息链；talks 按用户消息分组；sessions 结构概览）\n    --max-messages <n>     消息条数预算\n    --max-bytes <n>        响应字节预算\n\nGLOBAL（全局 flag 放在命令名之前；子命令 flag 如 --max-items 放在命令名之后）:\n    --db <path>            SQLite 数据存储路径；未给时用平台默认数据目录（config paths 的 data）下的 asg.db\n    --output human|json|jsonl  输出模式（默认 human：人类可读文本；json/jsonl 为协议 envelope）\n    --robot                等价 --output json，无颜色/进度（stdout 只输出协议）\n    --no-color             接受但无效果：human 输出本就不着色（供 NO_COLOR 习惯的调用方）\n    --request-id <id>      robot 调用方关联 id，原样回显于每个 frame（A-Za-z0-9._:- 计 1-128 字符）\n    --offline              拒绝任何需要联网的显式操作（fail-closed；当前所有命令本地执行，本 flag 是稳定显式模式，doctor/hook 会如实上报）\n    -h, --help             打印本帮助\n    -V, --version          打印版本\n\n术语速记:\n    generation       第 N 次入库（数据每更新一次 +1）\n    cursor           翻页令牌（结果多于一页时用来取下一页）\n    wire-id          实体 ID（msg_v1_ 消息 / ses_v1_ 会话 / doc_v1_ 文档）\n    score            相关度分数（越高越相关，按分数降序排列）\n\nEXIT CODES:\n    0 成功；10 部分成功（预算截断，结果可用但不完整）；其余见 error catalog"},"frame_type":"response","meta":{"duration_ms":0,"generation":null},"ok":true,"outcome":"success","page":{"has_more":false,"next_cursor":null},"redaction":{"audit_id":null,"mode":"default","redacted_count":0,"ruleset_version":"","status":"none"},"request_id":"cli-42660-1791306901963","retrieval_mode":"lexical","schema_version":"1.1","warnings":[]}
+test tests::subcommand_help_works_without_db ... ok
+test repo_identity::tests::resolver_caches_failures_and_successes ... ok
+test serve::tests::integration_delayed_request_is_served_not_timed_out ... ok
+test tests::take_bool_flag_removes_and_reports_presence ... ok
+test mcp::tests::unknown_session_with_valid_wire_id_is_business_not_found ... ok
+test tui::core::tests::context_lines_render_precision_markers ... ok
+test tests::twin_fixture_table_covers_every_record_stream_provider ... ok
+test tui::core::tests::context_loaded_switches_screen_with_scroll_reset ... ok
+test tui::core::tests::context_scroll_saturates ... ok
+test tui::core::tests::ctrl_c_quits_everywhere ... ok
+test tui::core::tests::effect_failed_sets_status_and_keeps_screen ... ok
+test tui::core::tests::empty_appended_page_keeps_selection ... ok
+test tui::core::tests::enter_on_empty_input_is_noop ... ok
+test tui::core::tests::enter_on_hit_resolves_selected_id ... ok
+test tui::core::tests::context_reload_for_same_session_does_not_refetch_resume_metadata ... ok
+test tui::core::tests::enter_submits_search_and_resets_hits ... ok
+test tui::core::tests::esc_on_search_clears_then_quits ... ok
+test tui::core::tests::esc_chain_context_results_search_quit ... ok
+test tui::core::tests::hit_lines_render_session_resume_availability_and_snippet ... ok
+test tui::core::tests::hit_lines_truncate_snippet_by_characters_not_bytes ... ok
+test tui::core::tests::hit_lines_prefix_selected_row ... ok
+test tui::core::tests::new_query_submit_clears_stale_context ... ok
+test tui::core::tests::next_page_emits_search_with_stored_cursor ... ok
+test tui::core::tests::next_page_without_more_is_noop ... ok
+test mcp::tests::unknown_tool_yields_invalid_params ... ok
+test tui::core::tests::policy_toggle_refetches_context ... ok
+test tui::core::tests::q_quits_on_results_and_context_but_types_on_search ... ok
+test tui::core::tests::results_screen_facet_cycle_reissues_search_with_facets ... ok
+test mcp::tests::unknown_request_method_yields_method_not_found ... ok
+test tui::core::tests::resume_lines_render_fixed_nullable_fields_and_sanitize_controls ... ok
+test tui::core::tests::resume_loaded_populates_only_the_current_context_detail ... ok
+test tui::core::tests::search_loaded_appends_and_selects_first_new_row ... ok
+test tui::core::tests::search_loaded_empty_page_reports_no_hits_and_stays_functional ... ok
+test tui::core::tests::search_loaded_populates_and_moves_to_results ... ok
+test tui::core::tests::search_screen_cycles_sidechain_and_tool_kind_facets ... ok
+test tui::core::tests::search_loaded_preserves_session_and_resume_availability ... ok
+test tui::core::tests::selection_saturates_at_list_edges ... ok
+test tui::core::tests::status_line_renders_error_and_warning ... ok
+test tui::core::tests::status_line_reports_partial_truncation ... ok
+test tui::core::tests::status_line_reports_truncation_per_screen ... ok
+test tui::core::tests::title_line_reports_active_facets ... ok
+test tui::tests::context_view_aligns_evidence_by_placement_id_not_message_or_position ... ok
+test tui::core::tests::typing_and_backspace_edit_input ... ok
+test tui::core::tests::view_models_fold_control_characters_from_provider_content ... ok
+test tui::tests::key_input_rejects_control_characters ... ok
+test tui::tests::draw_clamps_out_of_range_scroll ... ok
+test tui::tests::draw_renders_empty_model_without_panicking ... ok
+test serve::tests::integration_rejects_bad_token_host_and_origin ... ok
+test tui::tests::search_msg_projects_resume_availability_without_source_data ... ok
+test mcp::tests::search_repo_filter_reaches_the_store_like_the_cli_flag ... ok
+test tui::tests::draw_survives_hostile_content_at_degenerate_terminal_sizes ... ok
+test serve::tests::core_preview_routes_use_the_shared_dispatch_contract ... ok
+test serve::tests::integration_slowloris_does_not_block_a_fast_get ... ok
+test mcp::tests::tool_results_report_redaction_status_like_the_robot_envelope ... ok
+test serve::tests::post_requires_origin_and_csrf_then_reports_unsupported ... ok
+test serve::tests::integration_unsupported_post_echoes_no_secret_or_path ... ok
+test serve::tests::routes_require_auth_and_preserve_bootstrap_only_for_the_page ... ok
+test tests::not_found_error_never_echoes_the_wire_id ... ok
+test tests::sync_discover_rejects_extra_flags ... ok
+test tests::sync_directory_rejection_is_path_free_and_platform_neutral ... ok
+test tui::tests::load_resume_metadata_uses_application_fixed_shape ... ok
+test tui::tests::resolve_and_load_treats_multiple_placements_in_one_session_as_one_candidate ... ok
+test tui::tests::resolve_and_load_reports_ambiguity_only_for_distinct_sessions ... ok
+test tests::multi_session_staging_preserves_shared_messages_and_scopes_usage ... ok
+test tests::offline_combines_with_sync_and_search_dispatch ... ok
+test tests::search_dispatch_accepts_r2r3_flags_on_empty_store ... ok
+test serve::tests::web_search_applies_provider_union_and_reports_its_capabilities ... ok
+test serve::tests::integration_stalled_headers_are_answered_408 ... ok
+test serve::tests::search_terms_that_merely_look_like_flags_stay_searchable ... ok
+test mcp::tests::semantic_and_provider_search_match_cli_with_real_ingested_sources ... ok
+
+test result: ok. 344 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.80s
+
+     Running unittests src\bin\agent-session-grep.rs (.trellis/.runtime/target-b7\debug\deps\agent_session_grep-5f38f1d82a8ef82c.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\bin\asg.rs (.trellis/.runtime/target-b7\debug\deps\asg-880defd91fa8118c.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\bin\resume_smoke_provider.rs (.trellis/.runtime/target-b7\debug\deps\resume_smoke_provider-8b841e6a8e3bf14a.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\e2e.rs (.trellis/.runtime/target-b7\debug\deps\e2e-daf12c2d3f3e0540.exe)
+
+running 145 tests
+test config_paths_reports_platform_directories ... ok
+test doctor_envelope_shape_has_meta_generation_null ... ok
+test doctor_reports_ok_without_db ... ok
+test doctor_without_db_reports_expected_projection_version_and_no_guess ... ok
+test error_envelope_command_points_at_the_failing_token ... ok
+test doctor_and_config_reject_unknown_tokens ... ok
+test conflicting_output_flags_are_usage_errors ... ok
+test context_missing_session_is_not_found ... ok
+test context_budget_truncation_reports_partial_exit_10 ... ok
+test get_malformed_id_is_usage_error ... ok
+test doctor_with_db_reports_generation_and_recovery_evidence ... ok
+test fatal_source_rejection_reports_line_numbers_and_repair_direction ... ok
+test control_characters_in_query_are_invalid_request ... ok
+test get_missing_is_not_found_with_generic_message ... ok
+test context_derived_view_respects_final_robot_byte_budget ... ok
+test context_envelope_carries_warnings_array_on_modern_store ... ok
+test help_flag_lists_commands_without_db ... ok
+test help_and_version_pipe_closed_early_exit_zero_without_panic ... ok
+test context_assembles_mainline_branch_with_evidence ... ok
+test golden_broken_line_syncs_with_visible_diagnostic ... ok
+test get_message_oversized_anchor_respects_final_robot_byte_budget ... ok
+test error_outputs_never_disclose_source_path_or_content ... ok
+test help_and_version_require_no_db_and_create_no_file ... ok
+test human_error_writes_diagnostic_to_stderr_only ... ok
+test handoff_budget_truncation_reports_partial_and_exit_10 ... ok
+test index_rebuild_on_empty_db_succeeds ... ok
+test handoff_redacts_secrets_in_evidence ... ok
+test doctor_reports_orphaned_tool_activities_and_purge_removes_them ... ok
+test explicit_sync_resolves_pi_and_openclaw_by_canonical_root ... ok
+test extra_positional_arguments_are_rejected_with_exit_2 ... ok
+test human_context_renders_chain_and_partial_exits_10 ... ok
+test ingest_missing_file_is_source_io_exit_5 ... ok
+test handoff_pack_is_byte_deterministic_across_runs ... ok
+test generation_bump_invalidates_cursor_with_exit_9 ... ok
+test ingest_codex_usage_flows_into_status_as_derived_totals ... ok
+test machine_mode_subcommand_help_echoes_request_id ... ok
+test ingest_claude_usage_flows_into_status_totals ... ok
+test machine_mode_version_emits_single_success_envelope ... ok
+test machine_mode_help_emits_single_success_envelope ... ok
+test invalid_output_mode_exits_with_code_2 ... ok
+test human_search_next_step_commands_are_runnable_wire_ids ... ok
+test index_rebuild_reprojects_and_keeps_search_working ... ok
+test jsonl_output_is_one_complete_frame_per_line ... ok
+test level_value_before_robot_flag_still_emits_robot_error_envelope ... ok
+test ingest_auto_selects_codex_and_ignores_event_mirror ... ok
+test index_search_get_roundtrip ... ok
+test ingest_preserves_native_uuid_identity_and_threading ... ok
+test providers_human_output_uses_the_human_renderer ... ok
+test providers_robot_output_is_a_stable_matrix_envelope ... ok
+test human_search_and_status_render_text_not_envelope ... ok
+test missing_subcommand_is_usage_error ... ok
+test cursor_reissued_under_mutated_filters_is_rejected ... ok
+test ingest_search_get_roundtrip_via_binary ... ok
+test ingest_persists_session_and_document_entities_with_spans ... ok
+test output_json_flag_produces_well_formed_envelope ... ok
+test list_and_status_report_catalog_contents ... ok
+test multi_session_file_without_message_identities_is_rejected_atomically ... ok
+test mcp_search_sessions_hits_carry_session_id_and_text ... ok
+test compact_relative_duration_uses_application_clock ... ok
+test relocate_preview_and_apply_refuse_missing_or_old_catalogs_without_writes ... ok
+test relocate_namespace_reservations_do_not_survive_a_failed_source_batch ... ok
+test jsonl_sync_emits_progress_frames_then_single_response ... ok
+test relocate_equivalent_windows_root_is_a_readonly_noop ... ok
+test resume_unavailable_session_reports_reason_without_command ... ok
+test request_id_echoes_verbatim_and_invalid_is_rejected ... ok
+test invalid_filters_are_usage_errors ... ok
+test relocate_help_capability_human_and_jsonl_surfaces_share_the_cli_contract ... ok
+test relocate_occupied_target_preserves_independent_installations_with_equal_native_ids ... ok
+test robot_envelope_shape_on_error ... ok
+test omitted_filters_preserve_baseline_search_results ... ok
+test robot_error_envelope_redacts_echoed_secrets ... ok
+test robot_envelope_shape_on_success ... ok
+test robot_flag_produces_same_json_envelope ... ok
+test resume_yes_missing_provider_binary_returns_structured_error ... ok
+test resume_yes_first_run_forced_preview_then_spawns_in_original_cwd ... ok
+test relocate_invalid_arguments_never_open_or_create_the_catalog ... ok
+test provider_and_time_dimensions_are_anded ... ok
+test search_facet_flag_validation_is_explicit ... ok
+test search_by_provider_session_id_returns_session ... ok
+test search_byte_budget_truncates_but_keeps_session_context_in_hits ... ok
+test relocate_rejects_changed_expired_mismatched_and_stale_plans_without_writes ... ok
+test migrated_v6_catalog_stays_readable_until_complete_reingest_enables_context ... ok
+test search_repo_flag_requires_value ... ok
+test search_guidance_byte_budget_truncates_explicitly ... ok
+test search_guidance_human_output_is_unchanged ... ok
+test search_guidance_omits_suggestions_without_session_id ... ok
+test search_by_working_directory_returns_session ... ok
+test search_guidance_robot_json_contains_fields_and_valid_commands ... ok
+test provider_filter_subsets_and_multi_provider_or ... ok
+test search_robot_hits_carry_session_id_and_text ... ok
+test show_malformed_id_is_usage_error ... ok
+test session_split_across_files_syncs_and_assembles_one_context ... ok
+test show_missing_is_not_found_with_generic_message ... ok
+test search_cursor_pages_partition_results ... ok
+test search_ranks_newer_first_and_demotes_sidechain_deterministically ... ok
+test search_flag_named_query_is_searched_not_intercepted ... ok
+test literal_queries_with_fts_special_characters_succeed ... ok
+test show_returns_normalized_role_and_text ... ok
+test sync_all_or_nothing_on_bad_source ... ok
+test shared_message_keeps_per_session_parent_and_exact_evidence_across_split_sources ... ok
+test semantic_evidence_floor_env_override_is_explicit_and_validated ... ok
+test search_repo_filter_returns_only_matching_sessions ... ok
+test sync_directory_rejection_is_path_free_and_platform_neutral ... ok
+test session_synced_in_separate_invocations_keeps_both_halves ... ok
+test sync_commits_then_reports_unchanged_on_resync ... ok
+test sync_deduplicates_duplicate_paths_in_one_invocation ... ok
+test sync_commits_then_reports_unchanged_on_resync_codex ... ok
+test sync_discover_re_runs_converge ... ok
+test snippet_renders_in_human_search_but_is_stripped_in_machine_modes ... ok
+test sync_discover_backfills_explicit_source_before_tombstone_diff ... ok
+test sync_discover_finds_pi_sessions_under_encoded_cwd_dirs ... ok
+test sync_discover_separates_pi_and_openclaw_by_canonical_root ... ok
+test sync_discover_finds_and_syncs_provider_sources ... ok
+test sync_requires_at_least_one_file ... ok
+test status_reports_repo_aggregation ... ok
+test sync_new_truncated_source_parses_valid_prefix_recoverably ... ok
+test sync_empty_source_tombstones_all_messages ... ok
+test sync_discover_tombstones_removed_source_on_complete_scan ... ok
+test sync_discover_finds_sqlite_sourced_opencode ... ok
+test sync_extracts_codex_function_call_activities ... ok
+test sync_io_error_during_rescan_never_tombstones ... ok
+test sync_empty_source_tombstones_all_messages_codex ... ok
+test sync_partial_scan_never_tombstones_unseen_messages ... ok
+test unknown_subcommand_hint_lists_every_command_the_help_promises ... ok
+test version_flag_prints_version_without_db ... ok
+test unknown_subcommand_is_usage_error ... ok
+test sync_tool_activities_survive_resync_without_new_generation ... ok
+test unrecognized_source_content_is_invalid_request_exit_2 ... ok
+test value_flags_reject_missing_value_or_flag_named_value ... ok
+test sync_truncated_tail_retains_previous_index_without_churn ... ok
+test stale_index_projection_is_reported_refused_then_healed_by_sync_and_rebuild ... ok
+test writer_busy_exits_6_with_retryable_flag ... ok
+test tampered_cursor_is_rejected_with_cursor_invalid ... ok
+test sync_tombstones_activities_when_source_is_emptied ... ok
+test sync_tombstones_message_removed_from_source ... ok
+test relocate_sqlite_sources_preserve_every_native_session_and_resume_observation ... ok
+test sync_tombstones_message_removed_from_source_codex ... ok
+test relocate_preserves_native_identity_claims_resume_and_incremental_discovery ... ok
+test unsafe_native_message_and_parent_ids_leave_the_catalog_unchanged ... ok
+test sync_indexes_tool_activities_and_search_facets_filter_them ... ok
+test time_filter_is_half_open_since_inclusive_until_exclusive ... ok
+test sqlite_multi_session_wal_sources_keep_context_and_resume_metadata_separate ... ok
+test capability_incremental_claim_matches_real_resync_for_every_provider ... ok
+test capability_search_claim_matches_real_retrieval_for_every_provider ... ok
+test perf_baseline_100_messages_index_and_search ... ok
+
+test result: ok. 145 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.81s
+
+     Running tests\e2e_consistency.rs (.trellis/.runtime/target-b7\debug\deps\e2e_consistency-285caa6a8394a322.exe)
+
+running 2 tests
+test consistency_script_help_runs ... ok
+test consistency_report_all_five_entry_points_agree ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.50s
+
+     Running tests\first_run_closure.rs (.trellis/.runtime/target-b7\debug\deps\first_run_closure-8e6b0d298dd2b623.exe)
+
+running 6 tests
+test unresolvable_default_path_gives_actionable_guidance ... ok
+test explicit_db_wins_and_absent_db_uses_platform_default ... ok
+test doctor_on_missing_catalog_gives_sync_guidance_without_writing ... ok
+test read_on_missing_catalog_fails_closed_without_writing ... ok
+test sync_discover_zero_sources_says_to_specify_one_explicitly ... ok
+test human_search_projection_stays_readable ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.22s
+
+     Running tests\hook_contract.rs (.trellis/.runtime/target-b7\debug\deps\hook_contract-76475b2be9babb49.exe)
+
+running 4 tests
+test enabled_hook_without_a_query_writes_nothing ... ok
+test disabled_hook_writes_nothing_to_stdout ... ok
+test hook_failures_are_non_blocking_and_silent_on_stdout ... ok
+test enabled_hook_writes_only_the_bare_contract_line ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s
+
+     Running tests\hotpath_repo_probe.rs (.trellis/.runtime/target-b7\debug\deps\hotpath_repo_probe-076b6165834732a8.exe)
+
+running 1 test
+test read_commands_probe_no_git_and_search_resolves_repo_once ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.31s
+
+     Running tests\invariant_resume_args.rs (.trellis/.runtime/target-b7\debug\deps\invariant_resume_args-a4f5e1f250b1d6c3.exe)
+
+running 2 tests
+test descriptor_keeps_argv_and_cwd_separate_and_refuses_unsafe_display ... ok
+test resume_executes_adversarial_session_id_as_one_argv_without_a_shell ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s
+
+     Running tests\mcp_e2e.rs (.trellis/.runtime/target-b7\debug\deps\mcp_e2e-ab997f71101af968.exe)
+
+running 45 tests
+test get_session_resume_wire_id_errors_are_protocol_layer ... ok
+test initialize_requires_complete_params_and_failed_handshake_stays_closed ... ok
+test get_session_context_invalid_level_is_protocol_error ... ok
+test error_messages_bound_echoed_values ... ok
+test invalid_session_id_param_is_protocol_error ... ok
+test jsonrpc_envelope_and_id_are_strictly_validated ... ok
+test get_session_resume_returns_structured_metadata_without_commands_or_paths ... ok
+test get_message_wire_id_errors_are_protocol_layer ... ok
+test get_session_context_empty_derived_levels_fall_back_toward_raw ... ok
+test get_session_context_sessions_returns_structural_overview ... ok
+test get_message_returns_anchor_and_mainline_window ... ok
+test get_session_context_keeps_shared_message_parent_and_evidence_per_session ... ok
+test list_sessions_entries_carry_peek_with_first_and_last_user_text ... ok
+test get_session_context_without_level_stays_raw_compatible ... ok
+test get_session_context_talks_groups_user_with_following_messages ... ok
+test garbage_cursor_is_business_error_cursor_invalid ... ok
+test get_session_context_returns_mainline_messages_and_evidence ... ok
+test get_session_context_derived_level_honors_small_byte_budget ... ok
+test initialize_negotiates_versions_honestly_and_ping_answers ... ok
+test get_message_shared_message_is_explicit_ambiguity_then_resolvable ... ok
+test budget_floors_below_minimum_are_protocol_errors ... ok
+test malformed_initialized_notification_does_not_open_gate ... ok
+test list_sessions_zero_limit_is_protocol_error_like_search ... ok
+test list_sessions_entries_carry_title_skipping_injected_noise ... ok
+test all_tool_results_carry_the_redaction_block ... ok
+test non_utf8_line_is_a_parse_error_and_the_server_keeps_serving ... ok
+test mcp_stderr_stays_clean_on_protocol_errors ... ok
+test ping_and_tools_list_reject_non_object_params ... ok
+test mcp_doctor_data_matches_the_cli_doctor_envelope_field_for_field ... ok
+test relocation_is_described_as_cli_only_and_rejected_as_an_mcp_mutation ... ok
+test requests_before_initialized_are_rejected ... ok
+test mcp_search_byte_budget_includes_guidance ... ok
+test search_sessions_schema_publishes_provider_and_time_filters ... ok
+test mcp_search_hits_carry_why_matched_and_suggestions ... ok
+test tool_schemas_publish_string_and_array_bounds ... ok
+test tools_list_exposes_exactly_nine_contract_tools ... ok
+test status_doctor_and_providers_return_real_data ... ok
+test search_sessions_rejects_unknown_provider_and_compact_durations ... ok
+test search_sessions_facet_params_filter_and_validate ... ok
+test protocol_errors_map_to_json_rpc_codes ... ok
+test search_sessions_cursor_pages_are_disjoint ... ok
+test search_sessions_rejects_inverted_time_range_as_business_error ... ok
+test search_sessions_cursor_reissued_with_mutated_filters_is_rejected ... ok
+test search_sessions_filters_subset_or_and_time ... ok
+test semantic_and_hybrid_mcp_search_use_vectors_and_keep_cli_filters ... ok
+
+test result: ok. 45 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.30s
+
+     Running tests\network_egress.rs (.trellis/.runtime/target-b7\debug\deps\network_egress-c1d0d1c0a03f5bc4.exe)
+
+running 2 tests
+test default_build_has_no_http_client_dependency ... ok
+test only_socket_is_serve_loopback_tcp_listener ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+
+     Running tests\provider_matrix.rs (.trellis/.runtime/target-b7\debug\deps\provider_matrix-fc92068911c00778.exe)
+
+running 35 tests
+test beta_readiness_ledger_lists_exactly_implemented_and_deferred_ids ... ok
+test adr_decision_ids_are_unique_or_carry_a_collision_warning ... ok
+test capability_source_span_claim_matches_pinned_golden_span_presence ... ok
+test capability_tool_activity_claim_respects_fail_closed_anchoring ... ok
+test adr_0010_cited_evidence_exists_in_source_and_is_actually_cited ... ok
+test beta_readiness_ledger_capability_columns_match_capability_matrix ... ok
+test contract_exit_code_table_matches_the_error_catalog ... ok
+test beta_readiness_property_column_matches_properties_test_existence ... ok
+test claude_usage_claim_is_backed_by_observed_emissions ... ok
+test competitor_comparison_span_coverage_matches_capability_matrix ... ok
+test claude_tool_activity_claim_is_backed_by_observed_emissions ... ok
+test codex_tool_activity_claim_is_backed_by_observed_emissions ... ok
+test capability_context_claim_matches_pinned_golden_parent_links ... ok
+test beta_readiness_manifests_match_ledger_evidence_columns ... ok
+test discovery_root_registry_matches_capability_matrix_and_published_docs ... ok
+test codex_usage_claim_is_backed_by_derived_emissions ... ok
+test matrix_marks_both_providers_experimental_not_beta ... ok
+test matrix_rows_declare_exact_provider_ids_variants_and_maturity ... ok
+test matrix_no_span_limitation_bullets_list_exactly_the_unsupported_providers ... ok
+test changelog_provider_claims_match_capability_matrix ... ok
+test pinned_golden_table_covers_exactly_the_implemented_providers ... ok
+test readme_implemented_provider_count_matches_capability_matrix ... ok
+test every_capability_column_has_a_behavior_guard ... ok
+test readme_and_changelog_publish_every_applied_lexical_rank_signal ... ok
+test matrix_rows_match_capability_matrix_all_sixteen ... ok
+test readme_provider_table_matches_capability_matrix_maturity ... ok
+test readme_provider_format_column_matches_manifest_source_consumption ... ok
+test root_docs_cited_repo_paths_all_resolve ... ok
+test readme_release_status_and_maturity_tiers_match_authoritative_sources ... ok
+test docs_tree_cited_repo_paths_all_resolve ... ok
+test capability_probe_claim_matches_real_probe_on_own_golden ... ok
+test capability_parse_claim_matches_real_parse_on_own_golden ... ok
+test capability_tool_activity_unsupported_claim_is_not_an_under_claim ... ok
+test capability_usage_unsupported_claim_is_not_an_under_claim ... ok
+test every_adapter_leaves_its_source_directory_untouched_through_probe_and_parse ... ok
+
+test result: ok. 35 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+     Running tests\provider_probe_isolation.rs (.trellis/.runtime/target-b7\debug\deps\provider_probe_isolation-bb186d31f4bd3207.exe)
+
+running 3 tests
+test golden_fixture_table_covers_every_implemented_provider ... ok
+test every_golden_fixture_is_claimed_by_its_own_adapter ... ok
+test no_undocumented_probe_tie_at_the_top_confidence_rank ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running unittests src\lib.rs (.trellis/.runtime/target-b7\debug\deps\agent_session_grep_domain-bea2a9b09642d709.exe)
+
+running 67 tests
+test error::tests::code_is_stable ... ok
+test ids::tests::alias_resolution_is_deterministic_and_total ... ok
+test ids::tests::alias_resolution_conflicting_targets_fail_closed ... ok
+test ids::tests::framing_prevents_boundary_collision ... ok
+test ids::tests::alias_resolution_ttl_boundary_is_half_open ... ok
+test ids::tests::alias_mapping_is_one_directional_by_design ... ok
+test ids::tests::derive_is_deterministic ... ok
+test ids::tests::derived_digest_length ... ok
+test ids::tests::alias_resolution_identity_marker_means_not_rewritten ... ok
+test ids::tests::from_wire_rejects_unknown_prefix ... ok
+test ids::tests::from_wire_roundtrips_kind_and_value ... ok
+test ids::tests::kind_domain_separation ... ok
+test ids::tests::namespace_key_fallback_uses_parent_directory_boundary ... ok
+test ids::tests::namespace_key_is_deterministic_per_platform_flag ... ok
+test ids::tests::namespace_key_windows_case_variants_collapse ... ok
+test ids::tests::native_checked_preserves_distinct_valid_unicode_ids_verbatim ... ok
+test ids::tests::placement_id_wire_roundtrip_is_strict ... ok
+test ids::tests::native_preserves_and_prefixes ... ok
+test ids::tests::placement_rederivation_after_session_rewrite_is_deterministic ... ok
+test ids::tests::from_wire_rejects_bare_prefix_with_empty_suffix ... ok
+test ids::tests::scoped_session_native_ids_are_deterministic ... ok
+test ids::tests::placement_id_changes_with_each_identity_component ... ok
+test ids::tests::placement_id_is_deterministic_and_path_independent ... ok
+test ids::tests::native_checked_rejects_non_injective_inputs ... ok
+test ids::tests::scoped_session_native_id_wire_roundtrip ... ok
+test ids::tests::native_strips_control_characters_and_clamps_oversized_suffixes ... ok
+test ids::tests::scoped_session_native_ids_namespace_by_provider_and_installation ... ok
+test ids::tests::v2_scoped_wire_hides_namespace_and_native_id ... ok
+test ids::tests::v2_scoped_wire_never_collides_with_v1_for_identical_facts ... ok
+test ids::tests::v2_scoped_wire_is_deterministic_and_namespaced ... ok
+test ids::tests::v2_scoped_wire_roundtrip_preserves_value ... ok
+test tests::graph_rejects_duplicate_coordinate_for_same_message ... ok
+test tests::graph_allows_same_ordinal_for_distinct_messages ... ok
+test tests::graph_rejects_invalid_and_out_of_bounds_spans ... ok
+test tests::graph_rejects_mismatched_derived_placement_id ... ok
+test tests::graph_rejects_duplicate_messages_documents_placements_and_edges ... ok
+test tests::graph_rejects_placement_outside_requested_session ... ok
+test tests::graph_rejects_missing_message_document_and_child_references ... ok
+test tests::message_relation_wire_values_are_stable ... ok
+test tests::graph_rejects_wrong_context_and_relation_id_kinds ... ok
+test tests::orphan_parent_message_is_structurally_valid ... ok
+test tests::stable_entities_validate_only_intrinsic_id_kinds ... ok
+test tests::tool_activity_rejects_empty_name ... ok
+test tests::tool_activity_wire_values_are_stable ... ok
+test tests::valid_graph_accepts_exact_span_bounds ... ok
+test thread::tests::context_policy_serde_is_snake_case ... ok
+test thread::tests::cycles_have_deterministic_fallback_and_terminate ... ok
+test thread::tests::ambiguous_off_branch_parent_does_not_fail_selection ... ok
+test thread::tests::empty_graph_returns_empty_selections ... ok
+test thread::tests::edged_child_copy_wins_over_edgeless_copy_as_leaf ... ok
+test thread::tests::divergent_contextual_parents_select_per_session ... ok
+test thread::tests::full_order_is_timestamp_document_ordinal_then_placement_id ... ok
+test thread::tests::orphan_parent_stops_walk_without_invalidating_graph ... ok
+test thread::tests::linear_chain_returns_root_to_leaf_placements ... ok
+test thread::tests::same_document_parent_disambiguates_repeated_message ... ok
+test thread::tests::selector_rejects_invalid_graph_before_selection ... ok
+test thread::tests::same_document_parent_resolution_considers_sidechain_placements ... ok
+test thread::tests::timestamp_cmp_keeps_full_fractional_precision ... ok
+test thread::tests::stale_occurrence_of_internal_message_is_not_a_leaf ... ok
+test thread::tests::timestamp_cmp_normalizes_fractional_digits ... ok
+test thread::tests::timestamp_cmp_normalizes_common_timezone_offsets ... ok
+test thread::tests::timestamp_parsing_rejects_impossible_dates ... ok
+test thread::tests::timestamp_parsing_rejects_invalid_clock_and_zone_components ... ok
+test thread::tests::sidechains_are_excluded_and_all_sidechains_fall_back_honestly ... ok
+test thread::tests::unresolved_repeated_parent_is_explicitly_ambiguous ... ok
+test thread::tests::true_leaf_wins_even_when_missing_timestamp_sorts_first ... ok
+test thread::tests::select_mainline_matches_pre_change_reference_on_random_graphs ... ok
+
+test result: ok. 67 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
+
+     Running unittests src\lib.rs (.trellis/.runtime/target-b7\debug\deps\agent_session_grep_ports-ba3fb4b71b2a1b26.exe)
+
+running 72 tests
+test capability::tests::beta_targets_are_correct ... ok
+test capability::tests::hermes_antigravity_cursor_are_experimental ... ok
+test capability::tests::deepseek_harness_and_zcode_are_deferred ... ok
+test capability::tests::implemented_providers_are_experimental ... ok
+test capability::tests::search_filters_cover_implemented_matrix_rows_and_preserve_aliases ... ok
+test capability::tests::current_matrix_has_implemented_providers ... ok
+test capability::tests::maturity_as_str_round_trips ... ok
+test capability::tests::current_matrix_has_all_sixteen_providers ... ok
+test capability::tests::unknown_provider_has_no_target ... ok
+test capability::tests::usage_capability_levels_match_the_extraction_slice ... ok
+test handoff::tests::evidence_and_inference_types_are_distinct ... ok
+test capability::tests::experimental_targets_are_correct ... ok
+test handoff::tests::redaction_default_is_none_redacted ... ok
+test redact::tests::does_not_redact_forty_char_hex_git_sha ... ok
+test redact::tests::does_not_redact_non_jwt_eyj_value ... ok
+test redact::tests::does_not_redact_normal_text ... ok
+test redact::tests::multibyte_text_after_aws_prefix_does_not_panic_or_redact ... ok
+test manifest::tests::implemented_manifests_match_authoritative_capability_rows ... ok
+test capability::tests::matrix_serializes_to_json ... ok
+test capability::tests::target_maturity_is_higher_than_current ... ok
+test manifest::tests::source_consumption_classifies_formats_honestly ... ok
+test handoff::tests::retrieval_mode_serializes_snake_case ... ok
+test redact::tests::does_not_redact_embedded_like_prefixes ... ok
+test redact::tests::does_not_redact_dotted_version_string_as_jwt ... ok
+test manifest::tests::json_serialization_contains_every_rfc_field ... ok
+test manifest::tests::only_provenance_backed_fixture_revisions_are_declared ... ok
+test handoff::tests::redaction_round_trip_preserves_revealed_audit ... ok
+test redact::tests::redacts_anthropic_key ... ok
+test redact::tests::redacts_aws_access_key ... ok
+test redact::tests::redacts_bare_jwt_standalone ... ok
+test redact::tests::redacts_bare_jwt_embedded_in_prose ... ok
+test redact::tests::redacts_bearer_token ... ok
+test redact::tests::redacts_embedded_aws_secret_key_in_prose ... ok
+test redact::tests::redacts_embedded_github_fine_grained_pat_in_prose ... ok
+test redact::tests::redacts_embedded_secret_in_prose ... ok
+test redact::tests::redacts_github_fine_grained_pat ... ok
+test redact::tests::redacts_github_pat ... ok
+test redact::tests::redacts_every_secret_span_in_one_value_without_a_cap ... ok
+test redact::tests::redacts_gitlab_pat ... ok
+test redact::tests::redacts_every_span_across_mixed_shapes_in_one_value ... ok
+test redact::tests::redacts_google_api_key ... ok
+test redact::tests::redacts_openai_key ... ok
+test redact::tests::redacts_private_key ... ok
+test redact::tests::redacts_slack_token ... ok
+test redact::tests::redacts_slack_token_embedded_in_prose ... ok
+test redact::tests::redacts_stripe_restricted_key ... ok
+test redact::tests::redacts_stripe_secret_key_before_generic_api_key ... ok
+test redact::tests::ruleset_version_is_v1_1 ... ok
+test redact::tests::short_strings_not_redacted ... ok
+test tests::bounded_line_iteration_matches_legacy_split_semantics ... ok
+test tests::bounded_line_iteration_preserves_byte_offsets_and_crlf_bom ... ok
+test tests::bounded_line_iteration_rejects_oversized_record ... ok
+test redact::tests::security_policy_lists_every_real_redaction_kind ... ok
+test tests::build_tool_activity_keeps_the_fail_closed_double_guarantee ... ok
+test tests::context_graph_store_reference_blanket_impl_forwards ... ok
+test tests::ensure_readable_maps_other_backend_errors_without_payload ... ok
+test tests::ensure_readable_maps_snapshot_changed_without_backend_detail ... ok
+test tests::ensure_readable_preserves_not_found_classification ... ok
+test tests::ensure_readable_returns_verified_bytes_with_single_read ... ok
+test tests::read_bounded_source_enforces_cap_before_and_during_read ... ok
+test tests::search_facets_default_and_canonical_binding ... ok
+test tests::search_filters_is_empty_reflects_all_dimensions ... ok
+test tests::search_instant_from_unix_millis_uses_euclid_for_negative_values ... ok
+test tests::search_instant_orders_by_seconds_then_nanoseconds ... ok
+test tests::search_instant_sort_key_byte_order_is_instant_order ... ok
+test tests::search_provider_maps_to_canonical_ids ... ok
+test tests::tool_activity_kind_covers_the_names_real_transcripts_record ... ok
+test tests::tool_activity_kind_inference_follows_the_ordered_table ... ok
+test tests::tool_activity_target_accepts_string_shaped_tool_input ... ok
+test tests::tool_activity_target_priority_chain_first_present_wins ... ok
+test tests::tool_activity_target_reads_the_apply_patch_envelope_file_header ... ok
+test tests::rfc_0002_error_vocabulary_maps_to_real_provider_error_variants ... ok
+
+test result: ok. 72 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\lib.rs (.trellis/.runtime/target-b7\debug\deps\agent_session_grep_provider_aider-3178257cd6278316.exe)
+
+running 13 tests
+test tests::manifest_matches_provider_matrix ... ok
+test tests::parse_passes_noise_shaped_user_text_through_verbatim ... ok
+test tests::parse_handles_blockquote_tool_output ... ok
+test tests::parse_handles_multiple_runs ... ok
+test tests::parse_extracts_user_and_assistant ... ok
+test tests::parse_extracts_session_id_from_header ... ok
+test tests::parse_treats_a_bare_blockquote_marker_as_tool_output ... ok
+test tests::parse_treats_a_bare_prompt_marker_as_user_channel ... ok
+test tests::probe_confirms_aider_header_and_prompts ... ok
+test tests::probe_high_confidence_header_only ... ok
+test tests::probe_rejects_non_aider_markdown ... ok
+test tests::parse_joins_a_multi_line_user_prompt_into_one_message ... ok
+test tests::probe_rejects_empty_input ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\golden.rs (.trellis/.runtime/target-b7\debug\deps\golden-bb9061e77983aac9.exe)
+
+running 11 tests
+test print_actual_canonical_output_for_regeneration ... ignored, manual regeneration helper — prints canonical JSON for basic.expected.json
+test print_actual_multiline_canonical_output_for_regeneration ... ignored, manual regeneration helper — prints canonical JSON for multiline-prompt.expected.json
+test golden_provenance_revision_matches_manifest ... ok
+test multiline_golden_keeps_one_prompt_as_one_message ... ok
+test golden_spans_are_derived_approximations ... ok
+test golden_probe_confirms_fixture ... ok
+test multiline_golden_probe_and_parse_never_mutate_source_bytes ... ok
+test parse_never_mutates_source_bytes ... ok
+test probe_never_mutates_source_bytes ... ok
+test multiline_golden_canonical_output_is_pinned ... ok
+test golden_canonical_output_is_pinned ... ok
+
+test result: ok. 9 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\properties.rs (.trellis/.runtime/target-b7\debug\deps\properties-587a4c3c740bdeb6.exe)
+
+running 3 tests
+test prop_probe_arbitrary_bytes_never_panics ... ok
+test prop_golden_mutations_never_panic_nor_partial_commit ... ok
+test prop_generated_transcripts_match_ground_truth ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running unittests src\lib.rs (.trellis/.runtime/target-b7\debug\deps\agent_session_grep_provider_antigravity-260ee71cdcef5313.exe)
+
+running 13 tests
+test tests::manifest_matches_provider_matrix ... ok
+test tests::parse_carries_valid_timestamps_and_drops_invalid_ones ... ok
+test tests::parse_emits_once_per_conversational_step ... ok
+test tests::parse_skips_empty_steps ... ok
+test tests::parse_passes_noise_shaped_user_text_through_verbatim ... ok
+test tests::parse_maps_user_and_model_sources_and_skips_system ... ok
+test tests::parse_skips_invalid_json_lines ... ok
+test tests::parse_uses_thinking_when_content_is_empty ... ok
+test tests::probe_confirms_antigravity_transcript ... ok
+test tests::probe_rejects_empty_input ... ok
+test tests::probe_rejects_non_json_text ... ok
+test tests::probe_tolerates_non_json_lines_among_step_records ... ok
+test tests::probe_rejects_plain_jsonl ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\golden.rs (.trellis/.runtime/target-b7\debug\deps\golden-eca08c2d402e8faa.exe)
+
+running 8 tests
+test print_actual_canonical_output_for_regeneration ... ignored, manual regeneration helper — prints canonical JSON for basic.expected.json
+test golden_provenance_revision_matches_manifest ... ok
+test golden_spans_slice_back_to_exact_source_lines ... ok
+test golden_probe_tolerates_intentional_broken_line ... ok
+test parse_never_mutates_source_bytes ... ok
+test probe_never_mutates_source_bytes ... ok
+test tool_activity_stays_unsupported_because_activities_cannot_anchor ... ok
+test golden_canonical_output_is_pinned ... ok
+
+test result: ok. 7 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\properties.rs (.trellis/.runtime/target-b7\debug\deps\properties-493559f03a267a14.exe)
+
+running 10 tests
+test prop_probe_never_panics_on_arbitrary_bytes ... ok
+test prop_corpus_coverage_is_not_degenerate ... ok
+test prop_malformed_lines_only_skip_and_identity_never_fabricated ... ok
+test prop_seq_contiguous_and_counts_committed ... ok
+test prop_span_roundtrips_to_source_step_line ... ok
+test prop_metadata_survives_verbatim ... ok
+test prop_parse_is_deterministic ... ok
+test prop_probe_on_generated_streams_reports_own_variant ... ok
+test prop_probe_and_parse_are_read_only ... ok
+test prop_golden_mutations_never_panic_and_output_stays_legal ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+
+     Running unittests src\lib.rs (.trellis/.runtime/target-b7\debug\deps\agent_session_grep_provider_claude-8585c98b0b8f3c4b.exe)
+
+running 70 tests
+test tests::manifest_limitations_only_name_claude_code_record_types ... ok
+test tests::manifest_matches_provider_matrix ... ok
+test tests::parse_canonicalizes_string_form_local_command_with_trailing_newline ... ok
+test tests::parse_diagnostic_distinguishes_shape_mismatch_from_bad_json ... ok
+test tests::parse_accepts_utf8_bom_prefix ... ok
+test tests::parse_keeps_message_bearing_system_records ... ok
+test tests::parse_canonicalizes_original_and_enriched_meta_prompt_forms ... ok
+test tests::parse_keeps_local_command_canonicalization_ahead_of_tool_summaries ... ok
+test tests::parse_canonicalizes_string_and_enriched_local_command_forms ... ok
+test tests::parse_drops_blank_thinking_and_opaque_redacted_thinking ... ok
+test tests::parse_keeps_thinking_block_in_content_order ... ok
+test tests::parse_derives_subagent_actor_from_sidechain_caller ... ok
+test tests::parse_extracts_observed_usage_from_assistant_records ... ok
+test tests::parse_keeps_genuine_user_text_and_command_args ... ok
+test tests::parse_keeps_genuinely_different_local_command_text_distinct ... ok
+test tests::parse_extracts_conversational_messages ... ok
+test tests::parse_marks_unpaired_tool_use_as_unknown_status ... ok
+test tests::parse_ignores_event_only_system_records ... ok
+test tests::parse_observation_all_missing_when_fields_absent ... ok
+test tests::parse_never_reads_thinking_from_a_non_thinking_block ... ok
+test tests::parse_observation_blank_values_are_missing ... ok
+test tests::parse_observation_diagnostics_never_leak_working_directories ... ok
+test tests::parse_observation_multi_session_fails_closed ... ok
+test tests::parse_observation_never_splices_cwd_from_other_session ... ok
+test tests::parse_observation_pair_from_later_record_of_first_session ... ok
+test tests::parse_observation_repeated_identical_pair_is_not_ambiguous ... ok
+test tests::parse_filters_injected_user_noise_envelopes ... ok
+test tests::parse_observation_reports_pair_from_same_record ... ok
+test tests::parse_observation_sid_only_keeps_directory_missing ... ok
+test tests::parse_extracts_paired_tool_activities_with_kinds_and_targets ... ok
+test tests::parse_preserves_meta_content_when_enrichment_shape_is_not_exact ... ok
+test tests::parse_preserves_ordinary_multiblock_text_and_whitespace ... ok
+test tests::parse_preserves_similar_multimodal_content_without_meta_markers ... ok
+test tests::parse_renders_thinking_only_message_into_searchable_text ... ok
+test tests::parse_reports_span_roundtripping_on_crlf_lines ... ok
+test tests::parse_reports_multi_session_diagnostic_and_keeps_first_session ... ok
+test tests::parse_renders_tool_use_only_message_into_searchable_text ... ok
+test tests::parse_reports_span_roundtripping_to_source_line ... ok
+test tests::parse_single_session_emits_no_multi_session_diagnostic ... ok
+test tests::parse_skips_broken_line_recoverably ... ok
+test tests::parse_skips_orphan_tool_result_without_fabrication ... ok
+test tests::parse_skips_opaque_tool_blocks ... ok
+test tests::parse_source_streams_records_with_identical_spans ... ok
+test tests::parse_still_skips_user_records_without_messages ... ok
+test tests::parse_surfaces_session_native_id ... ok
+test tests::parse_tool_use_summary_bounds_the_target ... ok
+test tests::parse_tool_use_summary_skips_opaque_and_non_tool_blocks ... ok
+test tests::parse_usage_missing_buckets_are_zero ... ok
+test tests::parse_usage_on_sidechain_assistant_is_anchored_to_its_record ... ok
+test tests::parse_unknown_tool_name_fails_closed ... ok
+test tests::parse_usage_on_user_records_is_ignored ... ok
+test tests::parse_usage_without_usage_object_emits_nothing ... ok
+test tests::prefilter_raw_timing_10k_ignored_rows ... ignored, raw timing microbenchmark; run explicitly in release mode
+test tests::parse_without_session_id_reports_none ... ok
+test tests::prefilter_preserves_session_metadata_in_non_conversational_types ... ok
+test tests::parse_usage_with_negative_or_malformed_buckets_is_dropped ... ok
+test tests::prefilter_preserves_unknown_type_records_for_future_fields ... ok
+test tests::prefilter_uses_only_top_level_type_and_preserves_broken_rows ... ok
+test tests::parse_tool_use_summary_follows_the_target_priority_chain ... ok
+test tests::probe_accepts_utf8_bom_prefix ... ok
+test tests::probe_confirms_claude_jsonl ... ok
+test tests::probe_distinguishes_shape_mismatch_from_bad_json ... ok
+test tests::probe_rejects_broken_lines_beyond_tolerance_with_line_numbers ... ok
+test tests::probe_rejects_empty ... ok
+test tests::probe_rejects_non_jsonl ... ok
+test tests::probe_tolerates_broken_line_within_tolerance ... ok
+test tests::probe_tolerates_shape_mismatch_line_within_tolerance ... ok
+test tests::probe_tolerates_up_to_three_broken_lines ... ok
+test tests::prefilter_skips_non_conversational_lines_without_counting_them ... ok
+test tests::parse_source_rejects_oversized_record ... ok
+
+test result: ok. 69 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests\golden.rs (.trellis/.runtime/target-b7\debug\deps\golden-afa909fd138fd16b.exe)
+
+running 10 tests
+test print_actual_thinking_canonical_output_for_regeneration ... ignored, manual regeneration helper — prints canonical JSON for thinking.expected.json
+test golden_provenance_revision_matches_manifest ... ok
+test probe_never_mutates_source_bytes ... ok
+test parse_never_mutates_source_bytes ... ok
+test golden_probe_tolerates_intentional_broken_line ... ok
+test thinking_golden_never_commits_an_empty_body ... ok
+test golden_spans_slice_back_to_exact_source_lines ... ok
+test golden_canonical_output_is_pinned ... ok
+test thinking_golden_probe_and_parse_never_mutate_source_bytes ... ok
+test thinking_golden_canonical_output_is_pinned ... ok
+
+test result: ok. 9 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\lifecycle.rs (.trellis/.runtime/target-b7\debug\deps\lifecycle-50fcc00a6ad22064.exe)
+
+running 8 tests
+test shrink_to_empty_source_yields_empty_report_without_fabrication ... ok
+test same_length_text_rewrite_updates_text_and_keeps_identity_and_span ... ok
+test same_length_uuid_rewrite_changes_identity_without_stale_cache ... ok
+test fork_siblings_keep_shared_parent_edge_and_sidechain_flag_verbatim ... ok
+test fork_dangling_parent_edge_is_preserved_for_cross_source_resolution ... ok
+test append_keeps_existing_ids_spans_and_seq_byte_stable ... ok
+test shrink_at_line_boundary_reproduces_prefix_parse_exactly ... ok
+test shrink_torn_tail_is_skipped_recoverably_without_shifting_prefix ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\properties.rs (.trellis/.runtime/target-b7\debug\deps\properties-e555230c7eb99ebc.exe)
+
+running 6 tests
+test prop_malformed_lines_only_skip_never_abort ... ok
+test prop_threading_metadata_survives_verbatim ... ok
+test prop_seq_contiguous_and_counts_committed ... ok
+test prop_span_roundtrips_to_source_record ... ok
+test prop_append_keeps_prefix_byte_stable ... ok
+test prop_parse_is_deterministic ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+
+     Running unittests src\lib.rs (.trellis/.runtime/target-b7\debug\deps\agent_session_grep_provider_cline-b16456f0e5376275.exe)
+
+running 12 tests
+test tests::manifest_matches_provider_matrix ... ok
+test tests::probe_rejects_empty_array ... ok
+test tests::parse_extracts_messages ... ok
+test tests::probe_confirms_cline_json_array ... ok
+test tests::parse_skips_empty_content ... ok
+test tests::parse_skips_non_conversational_roles ... ok
+test tests::parse_handles_array_content ... ok
+test tests::probe_rejects_array_without_role ... ok
+test tests::probe_rejects_empty_input ... ok
+test tests::probe_rejects_json_object_not_array ... ok
+test tests::probe_rejects_non_json ... ok
+test tests::parse_passes_noise_shaped_user_text_through_verbatim ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\golden.rs (.trellis/.runtime/target-b7\debug\deps\golden-68532824d5615e89.exe)
+
+running 7 tests
+test print_actual_canonical_output_for_regeneration ... ignored, manual regeneration helper — prints canonical JSON for basic.expected.json
+test golden_provenance_revision_matches_manifest ... ok
+test golden_messages_carry_no_byte_span ... ok
+test golden_probe_confirms_fixture ... ok
+test probe_never_mutates_source_bytes ... ok
+test golden_canonical_output_is_pinned ... ok
+test parse_never_mutates_source_bytes ... ok
+
+test result: ok. 6 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\properties.rs (.trellis/.runtime/target-b7\debug\deps\properties-80378316b046b2b8.exe)
+
+running 3 tests
+test prop_probe_arbitrary_bytes_never_panics ... ok
+test prop_golden_mutations_never_panic_nor_partial_commit ... ok
+test prop_generated_transcripts_match_ground_truth ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running unittests src\lib.rs (.trellis/.runtime/target-b7\debug\deps\agent_session_grep_provider_codebuddy-edc91a3df521d8ac.exe)
+
+running 16 tests
+test tests::manifest_matches_provider_matrix ... ok
+test tests::parse_skips_non_message_types ... ok
+test tests::parse_filters_root_code_startup_message ... ok
+test tests::parse_multi_session_emits_diagnostic ... ok
+test tests::parse_passes_noise_shaped_user_text_through_verbatim ... ok
+test tests::parse_handles_array_content_parts ... ok
+test tests::parse_extracts_messages_and_session_id ... ok
+test tests::probe_rejects_claude_shape_with_nested_message_role ... ok
+test tests::probe_rejects_empty_input ... ok
+test tests::provider_id_is_stable ... ok
+test tests::parse_skips_invalid_json_lines ... ok
+test tests::parse_skips_system_role ... ok
+test tests::parse_preserves_non_root_code_message ... ok
+test tests::probe_confirms_codebuddy_cli_jsonl ... ok
+test tests::probe_rejects_plain_json_without_message_type ... ok
+test tests::probe_rejects_pi_session_shape ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\golden.rs (.trellis/.runtime/target-b7\debug\deps\golden-5e5a6ac9d725d681.exe)
+
+running 8 tests
+test print_actual_canonical_output_for_regeneration ... ignored, manual regeneration helper — prints canonical JSON for basic.expected.json
+test golden_provenance_revision_matches_manifest ... ok
+test parse_never_mutates_source_bytes ... ok
+test golden_probe_tolerates_intentional_broken_line ... ok
+test probe_never_mutates_source_bytes ... ok
+test golden_canonical_output_is_pinned ... ok
+test golden_spans_slice_back_to_exact_source_lines ... ok
+test golden_corpus_carries_no_tool_structure ... ok
+
+test result: ok. 7 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\properties.rs (.trellis/.runtime/target-b7\debug\deps\properties-e44c71096bbef4fd.exe)
+
+running 3 tests
+test prop_probe_arbitrary_bytes_never_panics ... ok
+test prop_golden_mutations_never_panic_nor_partial_commit ... ok
+test prop_generated_transcripts_match_ground_truth ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running unittests src\lib.rs (.trellis/.runtime/target-b7\debug\deps\agent_session_grep_provider_codex-45f4145dc46b4bfd.exe)
+
+running 62 tests
+test tests::manifest_matches_provider_matrix ... ok
+test tests::parse_accepts_utf8_bom_prefix ... ok
+test tests::parse_drops_usage_with_negative_or_malformed_buckets ... ok
+test tests::parse_derives_usage_preferring_last_token_usage ... ok
+test tests::parse_extracts_the_patched_file_from_an_apply_patch_envelope ... ok
+test tests::parse_observation_blank_values_are_missing ... ok
+test tests::parse_observation_ignores_turn_context_cwd ... ok
+test tests::parse_marks_unpaired_custom_tool_call_as_unknown ... ok
+test tests::parse_derives_usage_delta_when_last_absent ... ok
+test tests::parse_observation_diagnostics_never_leak_working_directories ... ok
+test tests::parse_filters_injected_user_noise_envelopes ... ok
+test tests::parse_keeps_genuine_user_text_and_non_user_noise_shapes ... ok
+test tests::parse_observation_multi_session_fails_closed ... ok
+test tests::parse_observation_repeated_identical_meta_not_ambiguous ... ok
+test tests::parse_observation_reports_pair_from_session_meta ... ok
+test tests::parse_ignores_reasoning_with_null_content_without_skip ... ok
+test tests::parse_extracts_paired_tool_activities_from_function_calls ... ok
+test tests::parse_accepts_object_form_arguments ... ok
+test tests::parse_observation_never_splices_cwd_from_second_session_meta ... ok
+test tests::parse_never_infers_failure_from_tool_output_text ... ok
+test tests::parse_handles_string_shaped_content_with_noise_filtering ... ok
+test tests::parse_observation_sid_only_keeps_directory_missing ... ok
+test tests::parse_keeps_stable_projection_equal_across_occurrence_timestamps ... ok
+test tests::parse_observation_turn_context_cwd_alone_never_becomes_directory ... ok
+test tests::parse_pairs_real_custom_tool_call_shape_with_its_own_output_type ... ok
+test tests::parse_reports_span_roundtripping_on_crlf_lines ... ok
+test tests::parse_preserves_genuine_role_and_text_differences ... ok
+test tests::parse_pairs_real_function_call_shape_by_call_id ... ok
+test tests::parse_single_session_emits_no_multi_session_diagnostic ... ok
+test tests::parse_reports_span_roundtripping_to_source_line ... ok
+test tests::parse_skips_broken_line_recoverably ... ok
+test tests::parse_skips_message_with_unknown_role_recoverably ... ok
+test tests::parse_skips_fork_child_inherited_baseline ... ok
+test tests::parse_skips_opaque_custom_tool_call ... ok
+test tests::parse_skips_message_with_null_content_recoverably ... ok
+test tests::parse_reports_multi_session_diagnostic_and_keeps_first_session ... ok
+test tests::parse_skips_orphan_function_call_output ... ok
+test tests::parse_skips_zero_delta_token_count ... ok
+test tests::parse_takes_authoritative_message_ignores_event_mirror ... ok
+test tests::parse_skips_stale_regression_within_two_percent ... ok
+test tests::parse_surfaces_session_native_id_from_session_meta ... ok
+test tests::parse_usage_event_without_info_is_ignored ... ok
+test tests::parse_usage_state_does_not_leak_across_files ... ok
+test tests::parse_uses_last_on_regression_without_stale_signal ... ok
+test tests::parse_usage_accepts_cache_read_input_tokens_alias ... ok
+test tests::parse_without_session_meta_reports_none ... ok
+test tests::prefilter_raw_timing_10k_ignored_rows ... ignored, raw timing microbenchmark; run explicitly in release mode
+test tests::prefilter_preserves_session_meta_for_identity ... ok
+test tests::prefilter_token_count_lines_must_deserialize ... ok
+test tests::prefilter_uses_only_top_level_type_and_preserves_broken_rows ... ok
+test tests::probe_confirms_codex_rollout ... ok
+test tests::probe_accepts_utf8_bom_prefix ... ok
+test tests::probe_rejects_broken_lines_beyond_tolerance_with_line_numbers ... ok
+test tests::probe_rejects_empty ... ok
+test tests::probe_rejects_non_jsonl ... ok
+test tests::probe_single_envelope_line_is_high_not_confirmed ... ok
+test tests::probe_tolerates_broken_line_within_tolerance ... ok
+test tests::prefilter_preserves_unknown_type_records_for_future_fields ... ok
+test tests::probe_tolerates_up_to_three_broken_lines ... ok
+test tests::probe_rejects_claude_code_jsonl ... ok
+test tests::probe_two_envelope_lines_confirms ... ok
+test tests::prefilter_skips_non_conversational_envelope_lines_without_counting_them ... ok
+
+test result: ok. 61 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running tests\golden.rs (.trellis/.runtime/target-b7\debug\deps\golden-d02c611381ea7cd2.exe)
+
+running 7 tests
+test print_actual_canonical_output_for_regeneration ... ignored, manual regeneration helper — prints canonical JSON for basic.expected.json
+test golden_provenance_revision_matches_manifest ... ok
+test golden_probe_tolerates_intentional_broken_line ... ok
+test probe_never_mutates_source_bytes ... ok
+test parse_never_mutates_source_bytes ... ok
+test golden_basic_spans_slice_back_to_source_envelope_lines ... ok
+test golden_basic_matches_pinned_canonical_output ... ok
+
+test result: ok. 6 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\lifecycle.rs (.trellis/.runtime/target-b7\debug\deps\lifecycle-f9a34aa8d15dd63d.exe)
+
+running 8 tests
+test shrink_to_empty_source_yields_empty_report_without_fabrication ... ok
+test same_length_text_rewrite_updates_text_and_keeps_identity_and_span ... ok
+test same_length_id_rewrite_changes_identity_without_stale_cache ... ok
+test shrink_at_line_boundary_reproduces_prefix_parse_exactly ... ok
+test shrink_torn_tail_is_skipped_recoverably_without_shifting_prefix ... ok
+test event_msg_mirrors_of_copied_prefix_stay_excluded ... ok
+test linear_rollout_never_fabricates_parent_edges ... ok
+test append_keeps_existing_ids_spans_and_seq_byte_stable ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\properties.rs (.trellis/.runtime/target-b7\debug\deps\properties-75f33fb0168366bd.exe)
+
+running 2 tests
+test properties_hold_for_fixed_seed_corpus ... ok
+test prop_append_keeps_prefix_byte_stable ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running unittests src\lib.rs (.trellis/.runtime/target-b7\debug\deps\agent_session_grep_provider_cursor-2c52e3559a9fb2c6.exe)
+
+running 16 tests
+test tests::probe_rejects_non_sqlite_bytes ... ok
+test tests::manifest_matches_provider_matrix ... ok
+test tests::temp_paths_are_scoped_to_this_process ... ok
+test tests::parse_filters_invalid_bubbles_and_orders_by_time ... ok
+test tests::temp_copy_is_unlinked_once_the_connection_goes_out_of_scope ... ok
+test tests::probe_rejects_itemtable_without_cursor_keys ... ok
+test tests::parse_single_prompt_conversation_resolves_session_id ... ok
+test tests::probe_rejects_empty_sqlite_db ... ok
+test tests::probe_confirms_cursor_state_db ... ok
+test tests::parse_passes_noise_shaped_user_text_through_verbatim ... ok
+test tests::parse_groups_prompts_by_conversation_id ... ok
+test tests::parse_missing_native_ids_leave_session_claims_missing ... ok
+test tests::parse_extracts_chatdata_messages ... ok
+test tests::probe_confirms_with_prompts_only ... ok
+test tests::wal_temp_copy_cleans_sidecars_after_success ... ok
+test tests::wal_temp_copy_cleans_sidecars_after_query_error ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.24s
+
+     Running tests\golden.rs (.trellis/.runtime/target-b7\debug\deps\golden-524375475a63927a.exe)
+
+running 7 tests
+test print_actual_canonical_output_for_regeneration ... ignored, manual regeneration helper — prints canonical JSON for basic.expected.json
+test golden_provenance_revision_matches_manifest ... ok
+test golden_probe_confirms_fixture ... ok
+test parse_never_mutates_source_bytes ... ok
+test golden_messages_carry_no_byte_span ... ok
+test probe_never_mutates_source_bytes ... ok
+test golden_canonical_output_is_pinned ... ok
+
+test result: ok. 6 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\properties.rs (.trellis/.runtime/target-b7\debug\deps\properties-d539f9aec196b295.exe)
+
+running 10 tests
+test prop_corpus_coverage_is_not_degenerate ... ok
+test prop_spans_are_always_none ... ok
+test prop_seq_contiguous_and_counts_committed ... ok
+test prop_metadata_survives_verbatim ... ok
+test prop_probe_never_panics_on_arbitrary_bytes ... ok
+test prop_session_identity_matches_ground_truth ... ok
+test prop_probe_on_generated_dbs_confirms_own_variant ... ok
+test prop_parse_is_deterministic ... ok
+test prop_probe_and_parse_are_read_only ... ok
+test prop_golden_mutations_never_panic_and_output_stays_legal ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.93s
+
+     Running unittests src\lib.rs (.trellis/.runtime/target-b7\debug\deps\agent_session_grep_provider_grok-8010cbf4b3238f78.exe)
+
+running 12 tests
+test tests::manifest_matches_provider_matrix ... ok
+test tests::object_content_shape_keeps_empty_object_non_message ... ok
+test tests::probe_rejects_empty_input ... ok
+test tests::parse_array_content_blocks_concatenated ... ok
+test tests::parse_groups_chunks_into_messages ... ok
+test tests::parse_object_content_shape_is_not_dropped ... ok
+test tests::parse_passes_noise_shaped_user_text_through_verbatim ... ok
+test tests::parse_skips_invalid_json_lines ... ok
+test tests::probe_confirms_acp_update_stream ... ok
+test tests::parse_handles_rewind_marker ... ok
+test tests::probe_rejects_non_acp_jsonl ... ok
+test tests::oversized_rewind_target_cannot_wrap_to_an_existing_prompt ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\golden.rs (.trellis/.runtime/target-b7\debug\deps\golden-50d9f2a56c69366e.exe)
+
+running 12 tests
+test print_actual_canonical_output_for_regeneration ... ignored, manual regeneration helper — prints canonical JSON for basic.expected.json
+test print_actual_object_content_canonical_output_for_regeneration ... ignored, manual regeneration helper — prints canonical JSON for object-content.expected.json
+test golden_provenance_revision_matches_manifest ... ok
+test object_content_golden_probe_and_parse_never_mutate_source_bytes ... ok
+test object_content_golden_keeps_both_chunk_roles ... ok
+test golden_probe_tolerates_intentional_broken_line ... ok
+test probe_never_mutates_source_bytes ... ok
+test object_content_golden_canonical_output_is_pinned ... ok
+test golden_canonical_output_is_pinned ... ok
+test golden_spans_slice_back_to_exact_source_lines ... ok
+test parse_never_mutates_source_bytes ... ok
+test tool_activity_stays_unsupported_because_activities_cannot_anchor ... ok
+
+test result: ok. 10 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\properties.rs (.trellis/.runtime/target-b7\debug\deps\properties-8044fcc73a579136.exe)
+
+running 11 tests
+test prop_probe_never_panics_on_arbitrary_bytes ... ok
+test prop_corpus_coverage_is_not_degenerate ... ok
+test prop_probe_on_generated_streams_reports_own_variant ... ok
+test prop_seq_contiguous_and_counts_committed ... ok
+test prop_session_identity_matches_ground_truth ... ok
+test prop_malformed_lines_only_skip_never_abort ... ok
+test prop_span_roundtrips_to_first_chunk_line ... ok
+test prop_metadata_survives_verbatim ... ok
+test prop_probe_and_parse_are_read_only ... ok
+test prop_parse_is_deterministic ... ok
+test prop_golden_mutations_never_panic_and_output_stays_legal ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.14s
+
+     Running unittests src\lib.rs (.trellis/.runtime/target-b7\debug\deps\agent_session_grep_provider_hermes-0e389a78603bde97.exe)
+
+running 10 tests
+test tests::manifest_matches_provider_matrix ... ok
+test tests::probe_rejects_empty_messages_array ... ok
+test tests::parse_system_only_transcript_commits_nothing ... ok
+test tests::parse_extracts_user_assistant_messages ... ok
+test tests::parse_without_session_id_leaves_unresolved ... ok
+test tests::probe_rejects_empty_bytes ... ok
+test tests::parse_passes_noise_shaped_user_text_through_verbatim ... ok
+test tests::probe_rejects_json_without_hermes_markers ... ok
+test tests::probe_confirms_hermes_session_json ... ok
+test tests::probe_rejects_plain_json ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\golden.rs (.trellis/.runtime/target-b7\debug\deps\golden-35ba043166c3847c.exe)
+
+running 7 tests
+test print_actual_canonical_output_for_regeneration ... ignored, manual regeneration helper — prints canonical JSON for basic.expected.json
+test golden_provenance_revision_matches_manifest ... ok
+test probe_never_mutates_source_bytes ... ok
+test parse_never_mutates_source_bytes ... ok
+test golden_messages_carry_no_byte_span ... ok
+test golden_probe_confirms_fixture ... ok
+test golden_canonical_output_is_pinned ... ok
+
+test result: ok. 6 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\properties.rs (.trellis/.runtime/target-b7\debug\deps\properties-e1ed017123e82c0f.exe)
+
+running 10 tests
+test prop_probe_never_panics_on_arbitrary_bytes ... ok
+test prop_probe_on_generated_docs_confirms_own_variant ... ok
+test prop_session_identity_and_zero_skipped ... ok
+test prop_metadata_survives_verbatim ... ok
+test prop_corpus_coverage_is_not_degenerate ... ok
+test prop_golden_mutations_never_panic_and_output_stays_legal ... ok
+test prop_seq_contiguous_and_counts_committed ... ok
+test prop_spans_are_always_none ... ok
+test prop_probe_and_parse_are_read_only ... ok
+test prop_parse_is_deterministic ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running unittests src\lib.rs (.trellis/.runtime/target-b7\debug\deps\agent_session_grep_provider_kimi-9f5fecc8c5a2ca9c.exe)
+
+running 11 tests
+test tests::manifest_matches_provider_matrix ... ok
+test tests::parse_extracts_messages ... ok
+test tests::parse_array_content_parts ... ok
+test tests::parse_passes_noise_shaped_user_text_through_verbatim ... ok
+test tests::parse_skips_invalid_json ... ok
+test tests::parse_indexes_user_prompts_from_turn_records ... ok
+test tests::parse_skips_non_conversational_roles ... ok
+test tests::probe_rejects_empty_input ... ok
+test tests::probe_rejects_non_kimi_jsonl ... ok
+test tests::probe_confirms_kimi_wire_jsonl ... ok
+test tests::parse_skips_loop_events ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\golden.rs (.trellis/.runtime/target-b7\debug\deps\golden-5ab9c51ccb346865.exe)
+
+running 8 tests
+test print_actual_canonical_output_for_regeneration ... ignored, manual regeneration helper — prints canonical JSON for basic.expected.json
+test golden_provenance_revision_matches_manifest ... ok
+test golden_probe_tolerates_intentional_broken_line ... ok
+test probe_never_mutates_source_bytes ... ok
+test tool_activity_stays_unsupported_because_activities_cannot_anchor ... ok
+test golden_spans_slice_back_to_exact_source_lines ... ok
+test parse_never_mutates_source_bytes ... ok
+test golden_canonical_output_is_pinned ... ok
+
+test result: ok. 7 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\properties.rs (.trellis/.runtime/target-b7\debug\deps\properties-2d9bec1cc165da7a.exe)
+
+running 3 tests
+test prop_probe_arbitrary_bytes_never_panics ... ok
+test prop_golden_mutations_never_panic_nor_partial_commit ... ok
+test prop_generated_transcripts_match_ground_truth ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running unittests src\lib.rs (.trellis/.runtime/target-b7\debug\deps\agent_session_grep_provider_openclaw-de5aa06e31146034.exe)
+
+running 10 tests
+test tests::manifest_matches_provider_matrix ... ok
+test tests::parse_extracts_session_and_messages ... ok
+test tests::parse_handles_array_content_blocks ... ok
+test tests::probe_rejects_non_openclaw_jsonl ... ok
+test tests::parse_passes_noise_shaped_user_text_through_verbatim ... ok
+test tests::parse_multi_session_emits_diagnostic ... ok
+test tests::parse_skips_non_conversational_types ... ok
+test tests::probe_rejects_empty_input ... ok
+test tests::parse_skips_invalid_json_lines ... ok
+test tests::probe_confirms_openclaw_session_jsonl ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\golden.rs (.trellis/.runtime/target-b7\debug\deps\golden-4495010a501ce782.exe)
+
+running 8 tests
+test print_actual_canonical_output_for_regeneration ... ignored, manual regeneration helper — prints canonical JSON for basic.expected.json
+test golden_provenance_revision_matches_manifest ... ok
+test probe_never_mutates_source_bytes ... ok
+test golden_corpus_carries_no_tool_structure ... ok
+test golden_probe_tolerates_intentional_broken_line ... ok
+test parse_never_mutates_source_bytes ... ok
+test golden_canonical_output_is_pinned ... ok
+test golden_spans_slice_back_to_exact_source_lines ... ok
+
+test result: ok. 7 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\properties.rs (.trellis/.runtime/target-b7\debug\deps\properties-7fe171942136bba0.exe)
+
+running 3 tests
+test prop_probe_arbitrary_bytes_never_panics ... ok
+test prop_golden_mutations_never_panic_nor_partial_commit ... ok
+test prop_generated_transcripts_match_ground_truth ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running unittests src\lib.rs (.trellis/.runtime/target-b7\debug\deps\agent_session_grep_provider_opencode-4d1c09a1ee6a157a.exe)
+
+running 9 tests
+test tests::manifest_matches_provider_matrix ... ok
+test tests::probe_rejects_empty_bytes ... ok
+test tests::probe_rejects_non_sqlite_bytes ... ok
+test tests::parse_extracts_messages_from_opencode_db ... ok
+test tests::parse_passes_noise_shaped_user_text_through_verbatim ... ok
+test tests::probe_confirms_opencode_database ... ok
+test tests::temp_copy_is_unlinked_once_the_connection_goes_out_of_scope ... ok
+test tests::wal_temp_copy_cleans_sidecars_after_success ... ok
+test tests::wal_temp_copy_cleans_sidecars_after_query_error ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+
+     Running tests\golden.rs (.trellis/.runtime/target-b7\debug\deps\golden-9309732dc6e877f4.exe)
+
+running 7 tests
+test print_actual_canonical_output_for_regeneration ... ignored, manual regeneration helper — prints canonical JSON for basic.expected.json
+test golden_provenance_revision_matches_manifest ... ok
+test golden_canonical_output_is_pinned ... ok
+test golden_messages_carry_no_byte_span ... ok
+test parse_never_mutates_source_bytes ... ok
+test golden_probe_confirms_fixture ... ok
+test probe_never_mutates_source_bytes ... ok
+
+test result: ok. 6 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\properties.rs (.trellis/.runtime/target-b7\debug\deps\properties-4e51084dfba8fcfc.exe)
+
+running 10 tests
+test prop_corpus_coverage_is_not_degenerate ... ok
+test prop_probe_never_panics_on_arbitrary_bytes ... ok
+test prop_session_identity_matches_ground_truth ... ok
+test prop_metadata_survives_verbatim ... ok
+test prop_spans_are_always_none ... ok
+test prop_seq_contiguous_and_counts_committed ... ok
+test prop_probe_on_generated_dbs_confirms_own_variant ... ok
+test prop_probe_and_parse_are_read_only ... ok
+test prop_parse_is_deterministic ... ok
+test prop_golden_mutations_never_panic_and_output_stays_legal ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.43s
+
+     Running unittests src\lib.rs (.trellis/.runtime/target-b7\debug\deps\agent_session_grep_provider_pi-bde36efb83a4f155.exe)
+
+running 21 tests
+test tests::content_text_extracts_thinking_block_prose ... ok
+test tests::content_text_ignores_blank_thinking_and_tool_call_blocks ... ok
+test tests::manifest_matches_provider_matrix ... ok
+test tests::content_text_never_reads_thinking_from_a_non_thinking_block ... ok
+test tests::content_text_keeps_thinking_and_text_in_block_order ... ok
+test tests::parse_extracts_session_and_messages ... ok
+test tests::parse_handles_array_content_blocks ... ok
+test tests::parse_commits_thinking_only_assistant_record ... ok
+test tests::parse_reports_lineage_from_parent_id_even_without_a_version_header ... ok
+test tests::parse_counts_lineage_on_non_conversational_records ... ok
+test tests::parse_passes_noise_shaped_user_text_through_verbatim ... ok
+test tests::parse_skips_non_conversational_types ... ok
+test tests::parse_v3_branch_reports_lineage_once_and_keeps_every_branch ... ok
+test tests::parse_v1_corpus_reports_no_branch_lineage ... ok
+test tests::parse_multi_session_emits_diagnostic ... ok
+test tests::parse_skips_invalid_json_lines ... ok
+test tests::probe_confirms_pi_session_jsonl ... ok
+test tests::probe_rejects_non_pi_jsonl ... ok
+test tests::probe_rejects_empty_input ... ok
+test tests::parse_v3_never_promotes_record_ids_to_native_identity ... ok
+test tests::probe_reports_declared_version_and_lineage_as_evidence ... ok
+
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\golden.rs (.trellis/.runtime/target-b7\debug\deps\golden-5d12dbb1792c6aa1.exe)
+
+running 19 tests
+test print_actual_canonical_output_for_regeneration ... ignored, manual regeneration helper — prints canonical JSON for basic.expected.json
+test print_actual_thinking_canonical_output_for_regeneration ... ignored, manual regeneration helper — prints canonical JSON for thinking.expected.json
+test print_actual_v3_canonical_output_for_regeneration ... ignored, manual regeneration helper — prints canonical JSON for v3-branched.expected.json
+test golden_provenance_revision_matches_manifest ... ok
+test golden_probe_tolerates_intentional_broken_line ... ok
+test parse_never_mutates_source_bytes ... ok
+test golden_spans_slice_back_to_exact_source_lines ... ok
+test v1_golden_reports_no_branch_lineage ... ok
+test golden_corpus_carries_no_tool_structure ... ok
+test v3_golden_spans_slice_back_to_exact_source_lines ... ok
+test thinking_golden_commits_every_prose_bearing_record ... ok
+test probe_never_mutates_source_bytes ... ok
+test golden_canonical_output_is_pinned ... ok
+test v3_golden_indexes_every_branch_and_reports_lineage_exactly_once ... ok
+test thinking_golden_canonical_output_is_pinned ... ok
+test v3_golden_never_promotes_record_ids_to_native_identity ... ok
+test thinking_golden_probe_and_parse_never_mutate_source_bytes ... ok
+test v3_golden_canonical_output_is_pinned ... ok
+test v3_golden_probe_and_parse_never_mutate_source_bytes ... ok
+
+test result: ok. 16 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\properties.rs (.trellis/.runtime/target-b7\debug\deps\properties-070b5d45a091224b.exe)
+
+running 13 tests
+test prop_probe_never_panics_on_arbitrary_bytes ... ok
+test prop_v3_golden_mutations_never_promote_identity_or_panic ... ok
+test prop_session_identity_matches_ground_truth ... ok
+test prop_v3_lineage_is_reported_never_silently_dropped ... ok
+test prop_probe_on_generated_streams_reports_own_variant ... ok
+test prop_corpus_coverage_is_not_degenerate ... ok
+test prop_span_roundtrips_to_source_message_line ... ok
+test prop_malformed_and_bodyless_lines_only_skip_never_abort ... ok
+test prop_metadata_survives_verbatim ... ok
+test prop_seq_contiguous_and_counts_committed ... ok
+test prop_probe_and_parse_are_read_only ... ok
+test prop_parse_is_deterministic ... ok
+test prop_golden_mutations_never_panic_and_output_stays_legal ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+
+     Running unittests src\lib.rs (.trellis/.runtime/target-b7\debug\deps\agent_session_grep_provider_qoder-2777a4d21469192e.exe)
+
+running 13 tests
+test tests::manifest_matches_provider_matrix ... ok
+test tests::parse_extracts_identity_from_nested_session_meta ... ok
+test tests::probe_rejects_non_qoder_jsonl ... ok
+test tests::probe_rejects_codex_rollout_envelopes ... ok
+test tests::parse_passes_noise_shaped_user_text_through_verbatim ... ok
+test tests::parse_multi_session_emits_diagnostic ... ok
+test tests::parse_skips_invalid_json_lines ... ok
+test tests::parse_skips_non_conversational_types ... ok
+test tests::probe_confirms_qoder_transcript_jsonl ... ok
+test tests::probe_rejects_empty_input ... ok
+test tests::parse_extracts_session_and_messages ... ok
+test tests::parse_handles_array_content_blocks ... ok
+test tests::probe_rejects_chat_only_without_session_meta ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\golden.rs (.trellis/.runtime/target-b7\debug\deps\golden-66b7a140d4d50a72.exe)
+
+running 8 tests
+test print_actual_canonical_output_for_regeneration ... ignored, manual regeneration helper — prints canonical JSON for basic.expected.json
+test golden_provenance_revision_matches_manifest ... ok
+test probe_never_mutates_source_bytes ... ok
+test golden_probe_tolerates_intentional_broken_line ... ok
+test parse_never_mutates_source_bytes ... ok
+test golden_spans_slice_back_to_exact_source_lines ... ok
+test tool_activity_stays_unsupported_because_activities_cannot_anchor ... ok
+test golden_canonical_output_is_pinned ... ok
+
+test result: ok. 7 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\properties.rs (.trellis/.runtime/target-b7\debug\deps\properties-f8ba6a18456ff818.exe)
+
+running 3 tests
+test prop_probe_arbitrary_bytes_never_panics ... ok
+test prop_golden_mutations_never_panic_nor_partial_commit ... ok
+test prop_generated_transcripts_match_ground_truth ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running unittests src\lib.rs (.trellis/.runtime/target-b7\debug\deps\agent_session_grep_testkit-1e7516444104eaec.exe)
+
+running 17 tests
+test tests::fake_provider_ambiguous_signals_ambiguous ... ok
+test tests::fake_provider_maps_sink_failure_to_structural_fatal ... ok
+test tests::assert_read_only_passes_for_pure_read ... ok
+test tests::in_memory_get_many_preserves_order_and_misses ... ok
+test tests::fake_provider_structural_fatal_errors_on_parse ... ok
+test tests::fake_provider_good_parses_all_messages ... ok
+test tests::in_memory_load_session_graph_checks_kind_and_catalog ... ok
+test tests::in_memory_message_contexts_missing_message_is_not_found ... ok
+test tests::in_memory_generation_advances_per_committed_batch ... ok
+test tests::in_memory_context_store_groups_by_session ... ok
+test tests::in_memory_query_orders_by_score_then_id_and_rejects_empty_query ... ok
+test tests::in_memory_reindex_is_idempotent ... ok
+test tests::session_builder_source_document_metadata_is_self_consistent ... ok
+test tests::in_memory_session_of_resolves_min_session_and_misses ... ok
+test tests::session_builder_is_deterministic ... ok
+test tests::in_memory_store_roundtrips_and_searches ... ok
+test tests::session_builder_produces_valid_session ... ok
+
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests agent_session_grep_adapters_sqlite
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests agent_session_grep_application
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests agent_session_grep_cli
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests agent_session_grep_domain
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests agent_session_grep_ports
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests agent_session_grep_provider_aider
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests agent_session_grep_provider_antigravity
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests agent_session_grep_provider_claude
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests agent_session_grep_provider_cline
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests agent_session_grep_provider_codebuddy
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests agent_session_grep_provider_codex
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests agent_session_grep_provider_cursor
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests agent_session_grep_provider_grok
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests agent_session_grep_provider_hermes
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests agent_session_grep_provider_kimi
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests agent_session_grep_provider_openclaw
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests agent_session_grep_provider_opencode
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests agent_session_grep_provider_pi
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests agent_session_grep_provider_qoder
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests agent_session_grep_testkit
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+exit=0

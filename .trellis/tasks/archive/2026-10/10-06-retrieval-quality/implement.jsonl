@@ -1,0 +1,5 @@
+{"_example": "Fill with {\"file\": \"<path>\", \"reason\": \"<why>\"}. Put spec/research files only — no code paths. Run `python .trellis/scripts/get_context.py --mode packages` to list available specs. Delete this line once real entries are added."}
+{"file": ".trellis/spec/agentsessions-application/backend/index.md", "reason": "ranking/budget/evidence 边界与不变量"}
+{"file": ".trellis/spec/agentsessions-adapters-sqlite/backend/index.md", "reason": "semantic/hybrid 取数与 filter-before-topk 纪律"}
+{"file": ".trellis/tasks/10-05-competitive-source-audit-plan/design.md", "reason": "第 6 节检索质量路线（默认/可选/评测）"}
+{"file": ".trellis/tasks/archive/2026-10/10-06-six-invariant-selfchecks/research/invariant-matrix.md", "reason": "D3 边界 1/2 精确锚点"}

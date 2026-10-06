@@ -77,6 +77,21 @@ The adapter remains **Experimental** and the provider contract remains
 
 ---
 
+## Lifecycle evidence contracts (B5)
+
+- Append: extending the rollout keeps previously parsed items and spans
+  byte-identical; only new items and committed count grow (property across
+  the 64-seed corpus).
+- Shrink / torn tail: line-boundary truncation equals a prefix snapshot; a
+  torn half line is skipped with explicit diagnostics instead of failing the
+  file or swallowing a valid prefix.
+- Same-length rewrite: rebuilt bytes win; stale copies are never returned.
+- Parent edges: the codex rollout format carries no parent pointer
+  (parent_native_id is None). Copied prefixes and event_msg mirrors must not
+  fabricate edges or double-count; this is pinned by reverse tests.
+- Parse purity: parse receives bytes only (no path, no previous result);
+  moves and WAL are store-layer concerns.
+
 ## Quality Check
 
 - [ ] `cargo fmt --all --check` clean, `cargo clippy ... -D warnings` clean.

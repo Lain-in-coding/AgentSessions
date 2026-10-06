@@ -1,0 +1,35 @@
+  ✓ handoff evidence: schema=1.0 pack_id=pack_v1_abc evidence=1 deterministic=True
+...........s......
+  ✗ handoff evidence: schema=handoff-pack/v1 pack_id=pack_v1_abc evidence=1 deterministic=True
+----------------------------------------------------------------------
+  ✗ hook off by default: enabled=False
+agent-session-grep release verification (#10)
+==================================================
+Ran 18 tests in 0.669s
+Serve/Web is intentionally excluded: use the dedicated serve smoke.
+
+
+1. binary/version:
+OK (skipped=1)
+
+2. sync:
+
+3. lexical search:
+
+4. get:
+
+5. context:
+
+6. resume metadata + dry-run:
+
+7. handoff evidence:
+
+8. semantic/hybrid effective modes:
+
+9. hook off by default:
+
+10. providers matrix:
+
+==================================================
+Result: 10/10 checks passed
+  ✓ semantic/hybrid effective modes: model=bigram-hash-v1 fuzzy lexical vector (not a semantic model), modes=semantic/hybrid

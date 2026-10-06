@@ -7,7 +7,9 @@
 > repository-local gaps from external/owner gates. Do not promote from this
 > file alone.
 
-Last updated: 2026-09-29 (provider coverage wave: `hermes` gained the additive
+Last updated: 2026-10-06 (lifecycle wave (B5) — provider-level append / shrink / same-length rewrite / fork evidence for `claude-code` and `codex` landed in each crate (see the lifecycle section below); no maturity, capability or blocker column changes).
+
+Previous pass, 2026-09-29 (provider coverage wave: `hermes` gained the additive
 `hermes/sqlite-state-v1` variant for `~/.hermes/state.db` and
 `~/.hermes/profiles/<name>/state.db` — bounded read-only snapshot, dual-shape
 tool-call decoding, synthetic golden + PROVENANCE, no new resume command. The
@@ -70,6 +72,34 @@ None of them is a promotion, and none changes any column in the tables below.
 | Whole-source ceiling for `hermes/sqlite-state-v1` | The adapter's own snapshot cap is 128 MiB, but the provider manifest keeps this format in the whole-source family with the JSON variant's 32 MiB `JSON_FAMILY_MAX_SOURCE_BYTES`, so the selection layer rejects a larger `state.db` before the adapter runs (explicit `SourceTooLarge`, never truncation). A real Hermes database can exceed 32 MiB. | Decide whether this variant gets a wider whole-source bound (a manifest/capability-contract change, with the JSON variant's accepted input left unchanged), or whether 32 MiB stays the documented ceiling. |
 | Count-based limits are reported in "bytes" | `ProviderError::SourceTooLarge` / `RecordTooLarge` are phrased in bytes, so count ceilings surface as e.g. `33 bytes exceeds supported limit 32` (tool calls) or `4097 bytes exceeds supported limit 4096` (sessions). The wording is hard-coded in the shared port error and was deliberately not changed here. | Decide whether the shared error type gains unit-aware wording (or the adapter wraps counts in a dedicated variant) so user-facing diagnostics do not misstate what exceeded the limit. |
 | Probe-error attribution when a source exceeds the whole-source ceiling | The selection layer keeps only the last probe failure, so a `state.db` over the 32 MiB ceiling can surface as a *different* adapter's probe error (measured: Cursor's, on the same file). The honest cause (size) is not what the user sees. | Decide whether selection reports all probe failures (or the size rejection) instead of the last one. |
+
+## Lifecycle evidence (2026-10-06, B5)
+
+Provider-level lifecycle scenarios for the two high-frequency JSONL providers.
+Synthetic fixtures only; this section adds anchors, not promotions.
+
+- `claude-code` / `codex`: append, shrink (line boundary / torn tail / empty
+  source), same-length rewrite (text and native id) and fork-edge scenarios are
+  covered in each crate's `tests/lifecycle.rs`. The append prefix-stability
+  invariant — unchanged records keep their seq, identity, parent edge, text and
+  span when a snapshot grows — is additionally randomized over the existing
+  64-seed generators in `tests/properties.rs`
+  (`prop_append_keeps_prefix_byte_stable`). The provider contract sees only
+  snapshot bytes (no path, no previous parse), so these tests pin prefix
+  stability and honest degradation, never sync watermarks.
+- `codex` fork: N/A at the provider layer — the rollout format has no parent
+  field and the adapter hard-codes `parent_native_id: None`; a negative test
+  pins that copied prefixes and `event_msg` mirrors never fabricate threading or
+  double-count.
+- File move: N/A at the provider layer (no path input); locator- and
+  identity-preserving move semantics live in
+  `crates/agent-session-grep-adapters-sqlite/src/relocation/tests.rs` and the CLI
+  relocation e2e.
+- SQLite WAL: N/A for both JSONL providers; WAL capture / WAL-only change
+  detection evidence is in
+  `crates/agent-session-grep-adapters-sqlite/src/source_fs.rs`.
+- Native resume: not executed in this environment; the `resume` column records
+  CLI-command evidence only and is unchanged by this wave.
 
 ## Global external blockers (apply to every promotion)
 

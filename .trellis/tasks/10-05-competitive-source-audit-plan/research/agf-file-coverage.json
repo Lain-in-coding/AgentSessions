@@ -1,0 +1,1493 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-06",
+  "scope": "Static local snapshot only; no execution/build/install/test/resume/model or git operations",
+  "repository_root": "Github_src/agf",
+  "snapshot_recorded": "44be9cffd3b3eeb44ff1f31a751ec8954adf14cf",
+  "version_recorded": "0.12.0",
+  "snapshot_verification": "Commit supplied by dispatch; no git verification permitted. Per-file SHA256 pins actually audited bytes.",
+  "expected_inventory_files": 34,
+  "expected_candidate_sources": 24,
+  "expected_candidate_source_lines": 9283,
+  "line_numbering": "1-based, inclusive; ReadAllLines includes final unterminated line and does not add a synthetic trailing empty line",
+  "counts": {
+    "inventory_files": 34,
+    "full_files": 32,
+    "partial_files": 1,
+    "not_read_files": 0,
+    "excluded_files": 1,
+    "candidate_sources": 24,
+    "full_candidate_sources": 23,
+    "partial_candidate_sources": 1,
+    "candidate_source_lines": 9283,
+    "reviewed_candidate_source_lines": 8778,
+    "unread_candidate_source_lines": 505,
+    "text_total_lines": 11313,
+    "text_reviewed_lines": 10808
+  },
+  "excluded_local_trees": [
+    {
+      "path": ".git/",
+      "status": "excluded",
+      "reason": "VCS metadata; all git operations prohibited; not snapshot first-party inventory"
+    },
+    {
+      "path": ".codegraph/",
+      "status": "excluded",
+      "reason": "Generated local index; used only for initial navigation, not product source"
+    },
+    {
+      "path": "target/",
+      "status": "excluded",
+      "reason": "Pre-existing generated/shared build artifacts; not snapshot first-party inventory; not executed or used as test evidence"
+    }
+  ],
+  "files": [
+    {
+      "path": ".github/workflows/ci.yml",
+      "total_lines": 58,
+      "bytes": 1523,
+      "sha256": "d273766583d228eef48348cdf411d4ac766eaebca3a6d1f6162b58a7ca2e528b",
+      "candidate_source": false,
+      "category": "first-party documentation/configuration/license",
+      "reviewed_ranges": [
+        {
+          "start": 1,
+          "end": 58
+        }
+      ],
+      "status": "full",
+      "exclusion_reason": null,
+      "description": "Linux and Windows CI; static job definitions, not observed results.",
+      "read_receipts": [
+        {
+          "path": ".github/workflows/ci.yml",
+          "start": 1,
+          "end": 58,
+          "receipt": "faa92a",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "faa92a",
+          "tool": "functions.exec_command"
+        }
+      ],
+      "reviewed_line_count": 58,
+      "remaining_ranges": []
+    },
+    {
+      "path": ".github/workflows/release.yml",
+      "total_lines": 135,
+      "bytes": 4044,
+      "sha256": "f040dfa48e8245c811e22884e871c3dfa424a7c97b9fcdbfe2ffd0e853ccb171",
+      "candidate_source": false,
+      "category": "first-party documentation/configuration/license",
+      "reviewed_ranges": [
+        {
+          "start": 1,
+          "end": 135
+        }
+      ],
+      "status": "full",
+      "exclusion_reason": null,
+      "description": "Tag/version gate, four-platform packaging, checksums and optional crates.io publish.",
+      "read_receipts": [
+        {
+          "path": ".github/workflows/release.yml",
+          "start": 1,
+          "end": 135,
+          "receipt": "faa92a",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "faa92a",
+          "tool": "functions.exec_command"
+        }
+      ],
+      "reviewed_line_count": 135,
+      "remaining_ranges": []
+    },
+    {
+      "path": ".gitignore",
+      "total_lines": 11,
+      "bytes": 105,
+      "sha256": "15c46e453566615295a0685f3bd38e0fdf109414210557badea3c2fd27de86ec",
+      "candidate_source": false,
+      "category": "first-party documentation/configuration/license",
+      "reviewed_ranges": [
+        {
+          "start": 1,
+          "end": 11
+        }
+      ],
+      "status": "full",
+      "exclusion_reason": null,
+      "description": "Product-local generated/editor/agent-state exclusions.",
+      "read_receipts": [
+        {
+          "path": ".gitignore",
+          "start": 1,
+          "end": 11,
+          "receipt": "d7a174",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "d7a174",
+          "tool": "functions.exec_command"
+        }
+      ],
+      "reviewed_line_count": 11,
+      "remaining_ranges": []
+    },
+    {
+      "path": "assets/demo.gif",
+      "total_lines": null,
+      "bytes": 1881269,
+      "sha256": "b62af6069aa427dcc226153972a1a37ab562d4cea2038278c7f54ba056759fdf",
+      "candidate_source": false,
+      "category": "binary asset",
+      "reviewed_ranges": [],
+      "status": "excluded",
+      "exclusion_reason": "Binary demo GIF; inventoried and hashed, no source lines; visual/runtime claims not audited.",
+      "description": "Binary demo asset, SHA256 inventory only; excluded from source and visual audit.",
+      "read_receipts": [],
+      "reviewed_line_count": 0,
+      "remaining_ranges": []
+    },
+    {
+      "path": "Cargo.lock",
+      "total_lines": 1278,
+      "bytes": 34950,
+      "sha256": "77cfbb68b94f5eb9b298ab71cba1e681183d9fe5f17dbf6c5905958c0536e25a",
+      "candidate_source": false,
+      "category": "generated dependency lock manifest",
+      "reviewed_ranges": [
+        {
+          "start": 1,
+          "end": 1278
+        }
+      ],
+      "status": "full",
+      "exclusion_reason": null,
+      "description": "Generated dependency resolution manifest, fully read as metadata; dependency implementations not audited.",
+      "read_receipts": [
+        {
+          "path": "Cargo.lock",
+          "start": 1,
+          "end": 279,
+          "receipt": "bd81f8",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "bd81f8",
+          "tool": "functions.exec_command"
+        },
+        {
+          "path": "Cargo.lock",
+          "start": 280,
+          "end": 539,
+          "receipt": "76f06f",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "76f06f",
+          "tool": "functions.exec_command"
+        },
+        {
+          "path": "Cargo.lock",
+          "start": 540,
+          "end": 806,
+          "receipt": "e1a9ef",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "e1a9ef",
+          "tool": "functions.exec_command"
+        },
+        {
+          "path": "Cargo.lock",
+          "start": 807,
+          "end": 1065,
+          "receipt": "44daaf",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "44daaf",
+          "tool": "functions.exec_command"
+        },
+        {
+          "path": "Cargo.lock",
+          "start": 1066,
+          "end": 1278,
+          "receipt": "74279e",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "74279e",
+          "tool": "functions.exec_command"
+        }
+      ],
+      "reviewed_line_count": 1278,
+      "remaining_ranges": []
+    },
+    {
+      "path": "Cargo.toml",
+      "total_lines": 36,
+      "bytes": 996,
+      "sha256": "7f35b1893659a2925f1f0b90e8486b22f13e5fd99abd3af6d046abba6a69f85e",
+      "candidate_source": false,
+      "category": "first-party documentation/configuration/license",
+      "reviewed_ranges": [
+        {
+          "start": 1,
+          "end": 36
+        }
+      ],
+      "status": "full",
+      "exclusion_reason": null,
+      "description": "Package 0.12.0, Rust 1.88/edition 2024, direct dependencies and release panic strategy.",
+      "read_receipts": [
+        {
+          "path": "Cargo.toml",
+          "start": 1,
+          "end": 36,
+          "receipt": "827098",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "827098",
+          "tool": "functions.exec_command"
+        }
+      ],
+      "reviewed_line_count": 36,
+      "remaining_ranges": []
+    },
+    {
+      "path": "CHANGELOG.md",
+      "total_lines": 264,
+      "bytes": 37959,
+      "sha256": "e32e195f51bd3743a63fdf60cad5a6d3a4c4246441aded5775b18f8e60873ef5",
+      "candidate_source": false,
+      "category": "first-party documentation/configuration/license",
+      "reviewed_ranges": [
+        {
+          "start": 1,
+          "end": 264
+        }
+      ],
+      "status": "full",
+      "exclusion_reason": null,
+      "description": "Historical author claims and regressions; not independent runtime evidence.",
+      "read_receipts": [
+        {
+          "path": "CHANGELOG.md",
+          "start": 1,
+          "end": 43,
+          "receipt": "df95a2",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "df95a2",
+          "tool": "functions.exec_command"
+        },
+        {
+          "path": "CHANGELOG.md",
+          "start": 44,
+          "end": 87,
+          "receipt": "070c06",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "070c06",
+          "tool": "functions.exec_command"
+        },
+        {
+          "path": "CHANGELOG.md",
+          "start": 88,
+          "end": 133,
+          "receipt": "841933",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "841933",
+          "tool": "functions.exec_command"
+        },
+        {
+          "path": "CHANGELOG.md",
+          "start": 134,
+          "end": 190,
+          "receipt": "ffdca4",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "ffdca4",
+          "tool": "functions.exec_command"
+        },
+        {
+          "path": "CHANGELOG.md",
+          "start": 191,
+          "end": 264,
+          "receipt": "968400",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "968400",
+          "tool": "functions.exec_command"
+        }
+      ],
+      "reviewed_line_count": 264,
+      "remaining_ranges": []
+    },
+    {
+      "path": "homebrew/agf.rb",
+      "total_lines": 29,
+      "bytes": 984,
+      "sha256": "d69d9ef2ad707f3bbdb2f7e761a54045fed97a7e42af0bb1d97fef6b57fccb60",
+      "candidate_source": false,
+      "category": "first-party documentation/configuration/license",
+      "reviewed_ranges": [
+        {
+          "start": 1,
+          "end": 29
+        }
+      ],
+      "status": "full",
+      "exclusion_reason": null,
+      "description": "Pinned binary formula, architecture selection, hashes and help-only formula test.",
+      "read_receipts": [
+        {
+          "path": "homebrew/agf.rb",
+          "start": 1,
+          "end": 29,
+          "receipt": "d7a174",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "d7a174",
+          "tool": "functions.exec_command"
+        }
+      ],
+      "reviewed_line_count": 29,
+      "remaining_ranges": []
+    },
+    {
+      "path": "LICENSE",
+      "total_lines": 21,
+      "bytes": 1086,
+      "sha256": "77d8e50841b8c9e4331b27bedc8fec70cdb06e79f5cb5df29ef80b09dbe16f5e",
+      "candidate_source": false,
+      "category": "first-party documentation/configuration/license",
+      "reviewed_ranges": [
+        {
+          "start": 1,
+          "end": 21
+        }
+      ],
+      "status": "full",
+      "exclusion_reason": null,
+      "description": "MIT license notice, no source copied into the audit deliverables.",
+      "read_receipts": [
+        {
+          "path": "LICENSE",
+          "start": 1,
+          "end": 21,
+          "receipt": "d7a174",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "d7a174",
+          "tool": "functions.exec_command"
+        }
+      ],
+      "reviewed_line_count": 21,
+      "remaining_ranges": []
+    },
+    {
+      "path": "README.md",
+      "total_lines": 198,
+      "bytes": 8441,
+      "sha256": "ab952b1496f463455acceedba976b6ee41e628fa57902939d3cb48a287668cd8",
+      "candidate_source": false,
+      "category": "first-party documentation/configuration/license",
+      "reviewed_ranges": [
+        {
+          "start": 1,
+          "end": 198
+        }
+      ],
+      "status": "full",
+      "exclusion_reason": null,
+      "description": "First use, provider/source promises, controls, configuration and shell integration.",
+      "read_receipts": [
+        {
+          "path": "README.md",
+          "start": 1,
+          "end": 179,
+          "receipt": "6114e6",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "6114e6",
+          "tool": "functions.exec_command"
+        },
+        {
+          "path": "README.md",
+          "start": 180,
+          "end": 198,
+          "receipt": "d7a174",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "d7a174",
+          "tool": "functions.exec_command"
+        }
+      ],
+      "reviewed_line_count": 198,
+      "remaining_ranges": []
+    },
+    {
+      "path": "src/action.rs",
+      "total_lines": 79,
+      "bytes": 3122,
+      "sha256": "342028d86c4cf82da6f7259b71b25026d37ec2ac57719e6bfe1661baa05ebd40",
+      "candidate_source": true,
+      "category": "first-party Rust (including inline tests)",
+      "reviewed_ranges": [
+        {
+          "start": 1,
+          "end": 79
+        }
+      ],
+      "status": "full",
+      "exclusion_reason": null,
+      "description": "Action/resume/new-session command composition and editor discovery.",
+      "read_receipts": [
+        {
+          "path": "src/action.rs",
+          "start": 1,
+          "end": 79,
+          "receipt": "7d40d9",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "7d40d9",
+          "tool": "functions.exec_command"
+        }
+      ],
+      "reviewed_line_count": 79,
+      "remaining_ranges": []
+    },
+    {
+      "path": "src/cache.rs",
+      "total_lines": 440,
+      "bytes": 16526,
+      "sha256": "f40729027b1bd5bdbeed2e5fc95659acdee0a648926e4af84b5b1bc3de128509",
+      "candidate_source": true,
+      "category": "first-party Rust (including inline tests)",
+      "reviewed_ranges": [
+        {
+          "start": 1,
+          "end": 440
+        }
+      ],
+      "status": "full",
+      "exclusion_reason": null,
+      "description": "Per-agent cache/version checks, mtime freshness, background scan and persistence tests.",
+      "read_receipts": [
+        {
+          "path": "src/cache.rs",
+          "start": 1,
+          "end": 202,
+          "receipt": "b74721",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "b74721",
+          "tool": "functions.exec_command"
+        },
+        {
+          "path": "src/cache.rs",
+          "start": 203,
+          "end": 401,
+          "receipt": "aacd61",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "aacd61",
+          "tool": "functions.exec_command"
+        },
+        {
+          "path": "src/cache.rs",
+          "start": 402,
+          "end": 440,
+          "receipt": "ba50ca",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "ba50ca",
+          "tool": "functions.exec_command"
+        }
+      ],
+      "reviewed_line_count": 440,
+      "remaining_ranges": []
+    },
+    {
+      "path": "src/config.rs",
+      "total_lines": 158,
+      "bytes": 4958,
+      "sha256": "6d730fb1471e2bfcd61a26c0f1ef409fa262388f6658ee6679e81da13d0ed148",
+      "candidate_source": true,
+      "category": "first-party Rust (including inline tests)",
+      "reviewed_ranges": [
+        {
+          "start": 1,
+          "end": 158
+        }
+      ],
+      "status": "full",
+      "exclusion_reason": null,
+      "description": "Provider default paths and PATH/PATHEXT-based executable discovery with platform tests.",
+      "read_receipts": [
+        {
+          "path": "src/config.rs",
+          "start": 1,
+          "end": 24,
+          "receipt": "eebcb8",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "eebcb8",
+          "tool": "functions.exec_command"
+        },
+        {
+          "path": "src/config.rs",
+          "start": 25,
+          "end": 158,
+          "receipt": "f2a05b-visible-tail",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "f2a05b",
+          "tool": "functions.exec_command"
+        }
+      ],
+      "reviewed_line_count": 158,
+      "remaining_ranges": []
+    },
+    {
+      "path": "src/delete.rs",
+      "total_lines": 616,
+      "bytes": 23636,
+      "sha256": "c942f203d75dbaa0d357e4bd37ae675f5c8ae55f30282a49f91afb4aa0dacc61",
+      "candidate_source": true,
+      "category": "first-party Rust (including inline tests)",
+      "reviewed_ranges": [
+        {
+          "start": 1,
+          "end": 616
+        }
+      ],
+      "status": "full",
+      "exclusion_reason": null,
+      "description": "Provider-native destructive operations, history rewrites and selected deletion regression tests.",
+      "read_receipts": [
+        {
+          "path": "src/delete.rs",
+          "start": 1,
+          "end": 100,
+          "receipt": "998dba",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "998dba",
+          "tool": "functions.exec_command"
+        },
+        {
+          "path": "src/delete.rs",
+          "start": 101,
+          "end": 298,
+          "receipt": "084802",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "084802",
+          "tool": "functions.exec_command"
+        },
+        {
+          "path": "src/delete.rs",
+          "start": 299,
+          "end": 492,
+          "receipt": "0724e0",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "0724e0",
+          "tool": "functions.exec_command"
+        },
+        {
+          "path": "src/delete.rs",
+          "start": 493,
+          "end": 616,
+          "receipt": "ea3a56",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "ea3a56",
+          "tool": "functions.exec_command"
+        }
+      ],
+      "reviewed_line_count": 616,
+      "remaining_ranges": []
+    },
+    {
+      "path": "src/error.rs",
+      "total_lines": 16,
+      "bytes": 351,
+      "sha256": "0c7b011520b08cf46df45d688aac688fd7e3dd21e67984fd955534bb44a7cb7f",
+      "candidate_source": true,
+      "category": "first-party Rust (including inline tests)",
+      "reviewed_ranges": [
+        {
+          "start": 1,
+          "end": 16
+        }
+      ],
+      "status": "full",
+      "exclusion_reason": null,
+      "description": "IO/JSON/SQLite/home error variants; no structured partial-scan outcome.",
+      "read_receipts": [
+        {
+          "path": "src/error.rs",
+          "start": 1,
+          "end": 16,
+          "receipt": "eebcb8",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "eebcb8",
+          "tool": "functions.exec_command"
+        }
+      ],
+      "reviewed_line_count": 16,
+      "remaining_ranges": []
+    },
+    {
+      "path": "src/fuzzy.rs",
+      "total_lines": 85,
+      "bytes": 2680,
+      "sha256": "41699a4131521372fde5ae92b137b01711c6ed5e1f9557c9a0311f7bf1fc84a8",
+      "candidate_source": true,
+      "category": "first-party Rust (including inline tests)",
+      "reviewed_ranges": [
+        {
+          "start": 1,
+          "end": 85
+        }
+      ],
+      "status": "full",
+      "exclusion_reason": null,
+      "description": "Nucleo fuzzy scoring over prefiltered session indices and optional summaries.",
+      "read_receipts": [
+        {
+          "path": "src/fuzzy.rs",
+          "start": 1,
+          "end": 85,
+          "receipt": "08bf5e",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "08bf5e",
+          "tool": "functions.exec_command"
+        }
+      ],
+      "reviewed_line_count": 85,
+      "remaining_ranges": []
+    },
+    {
+      "path": "src/list.rs",
+      "total_lines": 215,
+      "bytes": 5856,
+      "sha256": "4874830a2c754676d8ba20705d112fafd0496bb8b23054bcd9291c1c5553b713",
+      "candidate_source": true,
+      "category": "first-party Rust (including inline tests)",
+      "reviewed_ranges": [
+        {
+          "start": 1,
+          "end": 215
+        }
+      ],
+      "status": "full",
+      "exclusion_reason": null,
+      "description": "Human table, JSON/CSV serializers, agent filter and truncation helpers.",
+      "read_receipts": [
+        {
+          "path": "src/list.rs",
+          "start": 1,
+          "end": 215,
+          "receipt": "ad6df1",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "ad6df1",
+          "tool": "functions.exec_command"
+        }
+      ],
+      "reviewed_line_count": 215,
+      "remaining_ranges": []
+    },
+    {
+      "path": "src/main.rs",
+      "total_lines": 362,
+      "bytes": 12648,
+      "sha256": "75e7a94f33311bf34dd643e222528539afba657ff9800cc39e4f368ce13d13c9",
+      "candidate_source": true,
+      "category": "first-party Rust (including inline tests)",
+      "reviewed_ranges": [
+        {
+          "start": 1,
+          "end": 362
+        }
+      ],
+      "status": "full",
+      "exclusion_reason": null,
+      "description": "CLI entry points, initial TUI wiring, alternate-screen guard and command delivery.",
+      "read_receipts": [
+        {
+          "path": "src/main.rs",
+          "start": 1,
+          "end": 82,
+          "receipt": "827098",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "827098",
+          "tool": "functions.exec_command"
+        },
+        {
+          "path": "src/main.rs",
+          "start": 83,
+          "end": 277,
+          "receipt": "CodeGraph-initial-main-verbatim",
+          "method": "CodeGraph current on-disk verbatim source, only the displayed range",
+          "output_chunk_id": null,
+          "tool": "mcp__codegraph.codegraph_explore"
+        },
+        {
+          "path": "src/main.rs",
+          "start": 278,
+          "end": 362,
+          "receipt": "827098",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "827098",
+          "tool": "functions.exec_command"
+        }
+      ],
+      "reviewed_line_count": 362,
+      "remaining_ranges": []
+    },
+    {
+      "path": "src/model.rs",
+      "total_lines": 290,
+      "bytes": 9885,
+      "sha256": "ba5592dd168f14c670f6aa1efbd56f7672c675c2b683a4e975e0f1c2c8e992d8",
+      "candidate_source": true,
+      "category": "first-party Rust (including inline tests)",
+      "reviewed_ranges": [
+        {
+          "start": 1,
+          "end": 290
+        }
+      ],
+      "status": "full",
+      "exclusion_reason": null,
+      "description": "Provider identity, resume syntax/modes, session shape, search text and Pi command test.",
+      "read_receipts": [
+        {
+          "path": "src/model.rs",
+          "start": 1,
+          "end": 150,
+          "receipt": "7d40d9",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "7d40d9",
+          "tool": "functions.exec_command"
+        },
+        {
+          "path": "src/model.rs",
+          "start": 151,
+          "end": 278,
+          "receipt": "f2a05b-visible-head",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "f2a05b",
+          "tool": "functions.exec_command"
+        },
+        {
+          "path": "src/model.rs",
+          "start": 279,
+          "end": 290,
+          "receipt": "eebcb8-recovery",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "eebcb8",
+          "tool": "functions.exec_command"
+        }
+      ],
+      "reviewed_line_count": 290,
+      "remaining_ranges": []
+    },
+    {
+      "path": "src/plugin.rs",
+      "total_lines": 126,
+      "bytes": 4558,
+      "sha256": "238b72f615be765ef24c2ad70dfb66576bb4074e3eff298d9bf3cbc87f11a7cd",
+      "candidate_source": true,
+      "category": "first-party Rust (including inline tests)",
+      "reviewed_ranges": [
+        {
+          "start": 1,
+          "end": 126
+        }
+      ],
+      "status": "full",
+      "exclusion_reason": null,
+      "description": "Adapter registry and cache source declarations; scan method is not the scan_all dispatch path.",
+      "read_receipts": [
+        {
+          "path": "src/plugin.rs",
+          "start": 1,
+          "end": 126,
+          "receipt": "eebcb8",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "eebcb8",
+          "tool": "functions.exec_command"
+        }
+      ],
+      "reviewed_line_count": 126,
+      "remaining_ranges": []
+    },
+    {
+      "path": "src/scanner/claude.rs",
+      "total_lines": 392,
+      "bytes": 14773,
+      "sha256": "4b02217fb0d68ae82b3b25f92ae41c9d060802a10da88b820d5a50b19822ac85",
+      "candidate_source": true,
+      "category": "first-party Rust (including inline tests)",
+      "reviewed_ranges": [
+        {
+          "start": 1,
+          "end": 392
+        }
+      ],
+      "status": "full",
+      "exclusion_reason": null,
+      "description": "History plus transcript existence/metadata/recap/current branch scan and fixtures.",
+      "read_receipts": [
+        {
+          "path": "src/scanner/claude.rs",
+          "start": 1,
+          "end": 203,
+          "receipt": "5158b7",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "5158b7",
+          "tool": "functions.exec_command"
+        },
+        {
+          "path": "src/scanner/claude.rs",
+          "start": 204,
+          "end": 392,
+          "receipt": "585c23",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "585c23",
+          "tool": "functions.exec_command"
+        }
+      ],
+      "reviewed_line_count": 392,
+      "remaining_ranges": []
+    },
+    {
+      "path": "src/scanner/codex.rs",
+      "total_lines": 612,
+      "bytes": 21945,
+      "sha256": "5aa784efba0cd53d264829e7e1cb7f3c531dcd277840e6b7e8f7b368d8abe00d",
+      "candidate_source": true,
+      "category": "first-party Rust (including inline tests)",
+      "reviewed_ranges": [
+        {
+          "start": 1,
+          "end": 612
+        }
+      ],
+      "status": "full",
+      "exclusion_reason": null,
+      "description": "Rollout live-set, SQLite-primary/fallback scan, native orphan pruning and regression fixtures.",
+      "read_receipts": [
+        {
+          "path": "src/scanner/codex.rs",
+          "start": 1,
+          "end": 192,
+          "receipt": "db112c",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "db112c",
+          "tool": "functions.exec_command"
+        },
+        {
+          "path": "src/scanner/codex.rs",
+          "start": 193,
+          "end": 433,
+          "receipt": "4e5b54",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "4e5b54",
+          "tool": "functions.exec_command"
+        },
+        {
+          "path": "src/scanner/codex.rs",
+          "start": 434,
+          "end": 612,
+          "receipt": "55529b",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "55529b",
+          "tool": "functions.exec_command"
+        }
+      ],
+      "reviewed_line_count": 612,
+      "remaining_ranges": []
+    },
+    {
+      "path": "src/scanner/cursor_agent.rs",
+      "total_lines": 786,
+      "bytes": 31379,
+      "sha256": "db7b483e5d9fd3ede1fb0e1af940f3bdc54c0ba3aee4f73e6f9e9654befbb1d3",
+      "candidate_source": true,
+      "category": "first-party Rust (including inline tests)",
+      "reviewed_ranges": [
+        {
+          "start": 1,
+          "end": 786
+        }
+      ],
+      "status": "full",
+      "exclusion_reason": null,
+      "description": "TXT/JSONL layouts, store.db metadata, existing-path decoder, bounded prompt search and tests.",
+      "read_receipts": [
+        {
+          "path": "src/scanner/cursor_agent.rs",
+          "start": 1,
+          "end": 206,
+          "receipt": "a10941",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "a10941",
+          "tool": "functions.exec_command"
+        },
+        {
+          "path": "src/scanner/cursor_agent.rs",
+          "start": 207,
+          "end": 400,
+          "receipt": "aaca53",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "aaca53",
+          "tool": "functions.exec_command"
+        },
+        {
+          "path": "src/scanner/cursor_agent.rs",
+          "start": 401,
+          "end": 593,
+          "receipt": "5ff04d",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "5ff04d",
+          "tool": "functions.exec_command"
+        },
+        {
+          "path": "src/scanner/cursor_agent.rs",
+          "start": 594,
+          "end": 757,
+          "receipt": "5883cb",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "5883cb",
+          "tool": "functions.exec_command"
+        },
+        {
+          "path": "src/scanner/cursor_agent.rs",
+          "start": 758,
+          "end": 786,
+          "receipt": "ad6df1",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "ad6df1",
+          "tool": "functions.exec_command"
+        }
+      ],
+      "reviewed_line_count": 786,
+      "remaining_ranges": []
+    },
+    {
+      "path": "src/scanner/gemini.rs",
+      "total_lines": 311,
+      "bytes": 11164,
+      "sha256": "c64d873424ecad38c02f1e6033efd62a3deabfd13811625769ac15d5f8b04fdb",
+      "candidate_source": true,
+      "category": "first-party Rust (including inline tests)",
+      "reviewed_ranges": [
+        {
+          "start": 1,
+          "end": 311
+        }
+      ],
+      "status": "full",
+      "exclusion_reason": null,
+      "description": "Project mappings, ID deduplication, 64 KiB parsing and partial-JSON fallback.",
+      "read_receipts": [
+        {
+          "path": "src/scanner/gemini.rs",
+          "start": 1,
+          "end": 207,
+          "receipt": "522b51",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "522b51",
+          "tool": "functions.exec_command"
+        },
+        {
+          "path": "src/scanner/gemini.rs",
+          "start": 208,
+          "end": 311,
+          "receipt": "beb89c",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "beb89c",
+          "tool": "functions.exec_command"
+        }
+      ],
+      "reviewed_line_count": 311,
+      "remaining_ranges": []
+    },
+    {
+      "path": "src/scanner/hermes.rs",
+      "total_lines": 242,
+      "bytes": 10133,
+      "sha256": "4570da90191d639bfb43f62b375b100a63f9bfb26f454bbfca6ad7b6ea6de48f",
+      "candidate_source": true,
+      "category": "first-party Rust (including inline tests)",
+      "reviewed_ranges": [
+        {
+          "start": 1,
+          "end": 242
+        }
+      ],
+      "status": "full",
+      "exclusion_reason": null,
+      "description": "Root sessions, activity/title/user-preview aggregation, empty cwd and helper tests.",
+      "read_receipts": [
+        {
+          "path": "src/scanner/hermes.rs",
+          "start": 1,
+          "end": 174,
+          "receipt": "8d6e7a",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "8d6e7a",
+          "tool": "functions.exec_command"
+        },
+        {
+          "path": "src/scanner/hermes.rs",
+          "start": 175,
+          "end": 242,
+          "receipt": "998dba",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "998dba",
+          "tool": "functions.exec_command"
+        }
+      ],
+      "reviewed_line_count": 242,
+      "remaining_ranges": []
+    },
+    {
+      "path": "src/scanner/kiro.rs",
+      "total_lines": 93,
+      "bytes": 3248,
+      "sha256": "7f5a4a65a9f030c2ce49ba3a6d53b33f6a35589af2d738ad3d6c708a783f3b8d",
+      "candidate_source": true,
+      "category": "first-party Rust (including inline tests)",
+      "reviewed_ranges": [
+        {
+          "start": 1,
+          "end": 93
+        }
+      ],
+      "status": "full",
+      "exclusion_reason": null,
+      "description": "Read-only conversations_v2 scan and first-user summary.",
+      "read_receipts": [
+        {
+          "path": "src/scanner/kiro.rs",
+          "start": 1,
+          "end": 93,
+          "receipt": "6f1164",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "6f1164",
+          "tool": "functions.exec_command"
+        }
+      ],
+      "reviewed_line_count": 93,
+      "remaining_ranges": []
+    },
+    {
+      "path": "src/scanner/mod.rs",
+      "total_lines": 321,
+      "bytes": 11752,
+      "sha256": "ce4974b184b6a186fca092e064efa8f6b510dbbdb532c204a6633daa06bca403",
+      "candidate_source": true,
+      "category": "first-party Rust (including inline tests)",
+      "reviewed_ranges": [
+        {
+          "start": 1,
+          "end": 321
+        }
+      ],
+      "status": "full",
+      "exclusion_reason": null,
+      "description": "Eight-provider dispatch, capped/shared text readers and helper tests.",
+      "read_receipts": [
+        {
+          "path": "src/scanner/mod.rs",
+          "start": 1,
+          "end": 223,
+          "receipt": "ac6ac8",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "ac6ac8",
+          "tool": "functions.exec_command"
+        },
+        {
+          "path": "src/scanner/mod.rs",
+          "start": 224,
+          "end": 321,
+          "receipt": "08bf5e",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "08bf5e",
+          "tool": "functions.exec_command"
+        }
+      ],
+      "reviewed_line_count": 321,
+      "remaining_ranges": []
+    },
+    {
+      "path": "src/scanner/opencode.rs",
+      "total_lines": 70,
+      "bytes": 2393,
+      "sha256": "a0675c20eebe9498bda2dd05c0b216f4d93b834b9e16d642cf1d1c2592a99d6c",
+      "candidate_source": true,
+      "category": "first-party Rust (including inline tests)",
+      "reviewed_ranges": [
+        {
+          "start": 1,
+          "end": 70
+        }
+      ],
+      "status": "full",
+      "exclusion_reason": null,
+      "description": "Read-only root-session query and child-title aggregation.",
+      "read_receipts": [
+        {
+          "path": "src/scanner/opencode.rs",
+          "start": 1,
+          "end": 70,
+          "receipt": "beb89c",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "beb89c",
+          "tool": "functions.exec_command"
+        }
+      ],
+      "reviewed_line_count": 70,
+      "remaining_ranges": []
+    },
+    {
+      "path": "src/scanner/pi.rs",
+      "total_lines": 319,
+      "bytes": 12466,
+      "sha256": "f09b7211d662b5226eb527665990b3c0359f4cca469e17c02cf5a2bd4c732054",
+      "candidate_source": true,
+      "category": "first-party Rust (including inline tests)",
+      "reviewed_ranges": [
+        {
+          "start": 1,
+          "end": 319
+        }
+      ],
+      "status": "full",
+      "exclusion_reason": null,
+      "description": "Header/user-message parsing, cumulative byte limit and recovery/multiple-session tests.",
+      "read_receipts": [
+        {
+          "path": "src/scanner/pi.rs",
+          "start": 1,
+          "end": 210,
+          "receipt": "44f70f",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "44f70f",
+          "tool": "functions.exec_command"
+        },
+        {
+          "path": "src/scanner/pi.rs",
+          "start": 211,
+          "end": 319,
+          "receipt": "0829e0",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "0829e0",
+          "tool": "functions.exec_command"
+        }
+      ],
+      "reviewed_line_count": 319,
+      "remaining_ranges": []
+    },
+    {
+      "path": "src/settings.rs",
+      "total_lines": 122,
+      "bytes": 3899,
+      "sha256": "89b10567b93fe6efa86a3d2700bc9a19e9026c81aa9f1ae69be390cdb51d924e",
+      "candidate_source": true,
+      "category": "first-party Rust (including inline tests)",
+      "reviewed_ranges": [
+        {
+          "start": 1,
+          "end": 122
+        }
+      ],
+      "status": "full",
+      "exclusion_reason": null,
+      "description": "Config defaults/load diagnostics and merge-save behavior.",
+      "read_receipts": [
+        {
+          "path": "src/settings.rs",
+          "start": 1,
+          "end": 122,
+          "receipt": "ba50ca",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "ba50ca",
+          "tool": "functions.exec_command"
+        }
+      ],
+      "reviewed_line_count": 122,
+      "remaining_ranges": []
+    },
+    {
+      "path": "src/shell.rs",
+      "total_lines": 465,
+      "bytes": 17515,
+      "sha256": "3000dc21c9087098c40b514c78d80f07ac137c53a9c7a434df9e9cf1d239e34b",
+      "candidate_source": true,
+      "category": "first-party Rust (including inline tests)",
+      "reviewed_ranges": [
+        {
+          "start": 1,
+          "end": 465
+        }
+      ],
+      "status": "full",
+      "exclusion_reason": null,
+      "description": "POSIX/PowerShell quoting, setup/profile resolution, wrappers and shell-selection tests.",
+      "read_receipts": [
+        {
+          "path": "src/shell.rs",
+          "start": 1,
+          "end": 176,
+          "receipt": "f7fcc6",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "f7fcc6",
+          "tool": "functions.exec_command"
+        },
+        {
+          "path": "src/shell.rs",
+          "start": 177,
+          "end": 393,
+          "receipt": "2519b9",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "2519b9",
+          "tool": "functions.exec_command"
+        },
+        {
+          "path": "src/shell.rs",
+          "start": 394,
+          "end": 465,
+          "receipt": "6f1164",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "6f1164",
+          "tool": "functions.exec_command"
+        }
+      ],
+      "reviewed_line_count": 465,
+      "remaining_ranges": []
+    },
+    {
+      "path": "src/stats.rs",
+      "total_lines": 276,
+      "bytes": 8258,
+      "sha256": "5eb989abcc594134010bb87cb01affeab21f6599490d7b70482d74d4e96c81e8",
+      "candidate_source": true,
+      "category": "first-party Rust (including inline tests)",
+      "reviewed_ranges": [
+        {
+          "start": 1,
+          "end": 276
+        }
+      ],
+      "status": "full",
+      "exclusion_reason": null,
+      "description": "Counts by provider/project name and activity buckets in text/JSON.",
+      "read_receipts": [
+        {
+          "path": "src/stats.rs",
+          "start": 1,
+          "end": 242,
+          "receipt": "ee4dc9",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "ee4dc9",
+          "tool": "functions.exec_command"
+        },
+        {
+          "path": "src/stats.rs",
+          "start": 243,
+          "end": 276,
+          "receipt": "ea3a56",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "ea3a56",
+          "tool": "functions.exec_command"
+        }
+      ],
+      "reviewed_line_count": 276,
+      "remaining_ranges": []
+    },
+    {
+      "path": "src/tui/mod.rs",
+      "total_lines": 2686,
+      "bytes": 98266,
+      "sha256": "92e60605fdb51bfcbcc28d927dece54118cec3989f7d36a31e46525e90e10ae9",
+      "candidate_source": true,
+      "category": "first-party Rust (including inline tests)",
+      "reviewed_ranges": [
+        {
+          "start": 1,
+          "end": 2181
+        }
+      ],
+      "status": "partial",
+      "exclusion_reason": null,
+      "description": "App/filter/sort/async ingest, modes/actions/delete/preview, and help through line 2181 only.",
+      "read_receipts": [
+        {
+          "path": "src/tui/mod.rs",
+          "start": 1,
+          "end": 211,
+          "receipt": "b53cdc",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "b53cdc",
+          "tool": "functions.exec_command"
+        },
+        {
+          "path": "src/tui/mod.rs",
+          "start": 212,
+          "end": 410,
+          "receipt": "336406",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "336406",
+          "tool": "functions.exec_command"
+        },
+        {
+          "path": "src/tui/mod.rs",
+          "start": 411,
+          "end": 612,
+          "receipt": "26961d",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "26961d",
+          "tool": "functions.exec_command"
+        },
+        {
+          "path": "src/tui/mod.rs",
+          "start": 613,
+          "end": 827,
+          "receipt": "3fc912",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "3fc912",
+          "tool": "functions.exec_command"
+        },
+        {
+          "path": "src/tui/mod.rs",
+          "start": 828,
+          "end": 999,
+          "receipt": "088301",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "088301",
+          "tool": "functions.exec_command"
+        },
+        {
+          "path": "src/tui/mod.rs",
+          "start": 1000,
+          "end": 1174,
+          "receipt": "049d93",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "049d93",
+          "tool": "functions.exec_command"
+        },
+        {
+          "path": "src/tui/mod.rs",
+          "start": 1175,
+          "end": 1365,
+          "receipt": "6c0625",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "6c0625",
+          "tool": "functions.exec_command"
+        },
+        {
+          "path": "src/tui/mod.rs",
+          "start": 1366,
+          "end": 1563,
+          "receipt": "26b35a",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "26b35a",
+          "tool": "functions.exec_command"
+        },
+        {
+          "path": "src/tui/mod.rs",
+          "start": 1564,
+          "end": 1770,
+          "receipt": "0ac360",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "0ac360",
+          "tool": "functions.exec_command"
+        },
+        {
+          "path": "src/tui/mod.rs",
+          "start": 1771,
+          "end": 1977,
+          "receipt": "318727",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "318727",
+          "tool": "functions.exec_command"
+        },
+        {
+          "path": "src/tui/mod.rs",
+          "start": 1978,
+          "end": 2181,
+          "receipt": "1b2569",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "1b2569",
+          "tool": "functions.exec_command"
+        }
+      ],
+      "reviewed_line_count": 2181,
+      "remaining_ranges": [
+        {
+          "start": 2182,
+          "end": 2686
+        }
+      ]
+    },
+    {
+      "path": "src/watch.rs",
+      "total_lines": 201,
+      "bytes": 8336,
+      "sha256": "9768699226dd38c754558d999ce2213136aa1d9c4cea67baf033295c87a0d318",
+      "candidate_source": true,
+      "category": "first-party Rust (including inline tests)",
+      "reviewed_ranges": [
+        {
+          "start": 1,
+          "end": 201
+        }
+      ],
+      "status": "full",
+      "exclusion_reason": null,
+      "description": "Periodic guarded rescans, cursor clamping, provider-wide pgrep status and rendering.",
+      "read_receipts": [
+        {
+          "path": "src/watch.rs",
+          "start": 1,
+          "end": 178,
+          "receipt": "6e8454",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "6e8454",
+          "tool": "functions.exec_command"
+        },
+        {
+          "path": "src/watch.rs",
+          "start": 179,
+          "end": 201,
+          "receipt": "faa92a",
+          "method": "PowerShell line-numbered complete visible range",
+          "output_chunk_id": "faa92a",
+          "tool": "functions.exec_command"
+        }
+      ],
+      "reviewed_line_count": 201,
+      "remaining_ranges": []
+    }
+  ],
+  "remaining_ledger": [
+    {
+      "path": "src/tui/mod.rs",
+      "status": "partial",
+      "remaining_ranges": [
+        {
+          "start": 2182,
+          "end": 2686
+        }
+      ],
+      "remaining_lines": 505,
+      "reason": "Explicit parent-coordinator stop; continuation belongs to main audit owner, not a scope reduction."
+    }
+  ],
+  "finalization": {
+    "state": "partial_finalized_at_coordination_stop",
+    "date": "2026-10-06",
+    "reason": "Parent coordinator stopped this duplicate worker; no further competitor source scans by the worker after the stop.",
+    "continuation_owner_task": "01a10bc1-d181-77e2-ab19-5c3264cffb76",
+    "owner_attribution": "Supplied by the parent coordinator; not independently inspected by this worker.",
+    "overall_15_project_scope": "Unchanged; main owner continues remaining audit.",
+    "exclusive_writes": [
+      "research/agf-full-audit.md",
+      "research/agf-file-coverage.json"
+    ],
+    "other_coverage_files_created_or_modified": false,
+    "last_complete_source_receipt": "src/tui/mod.rs:1978-2181; exec chunk 1b2569 returned exit 0 before interruption",
+    "post_stop_source_reads": false
+  },
+  "receipt_notes": [
+    "Receipt IDs are local exec output chunk IDs, not upstream citations. Source bodies were actually visible; outlines and search hits receive no coverage credit.",
+    "Combined output f2a05b was truncated between model and config; only complete visible head/tail ranges are credited. Missing model 279-290 and config 1-24 were explicitly recovered in eebcb8.",
+    "Initial broad inventory also touched generated target artifacts while counting lines. That output was truncated; generated artifacts are excluded and not evidence of executed tests.",
+    "SHA256 values are the initial inventory hashes from this worker, not a post-read rehash. No git operations verified the recorded commit and no source reread occurred after the coordination stop."
+  ],
+  "coordinator_postcheck": {
+    "date": "2026-10-06",
+    "source_hashes_matched": 34,
+    "note": "Coordinator checked current file hashes after worker completion; this is not additional source-reading credit."
+  }
+}

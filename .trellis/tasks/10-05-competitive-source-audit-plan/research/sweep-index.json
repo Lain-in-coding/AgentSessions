@@ -1,0 +1,374 @@
+{
+ "schema": "competitive-audit.sweep/v1",
+ "date": "2026-10-06",
+ "method": "per-file regex hit counts over every inventoried non-binary file; files that were full-read separately are also swept for uniformity",
+ "probes": {
+  "shell_exec": "child_process|execSync|spawnSync|execFile|std::process::Command|os\\/exec|exec\\.Command|subprocess|CreateProcess|Process\\.Start|\\/bin\\/(sh|bash)|\\bcmd\\.exe\\b|shell\\(\\s*true",
+  "sql_dynamic": "format!\\([^)\\n]{0,200}(SELECT|INSERT|UPDATE|DELETE)|f\"(SELECT|INSERT|UPDATE|DELETE)|f'(SELECT|INSERT|UPDATE|DELETE)|`(SELECT|INSERT|UPDATE|DELETE)|\"(SELECT|INSERT|UPDATE|DELETE)[^\"]{0,400}\"\\s*(\\+|\\.format|\\$\\{)",
+  "provider_paths": "\\.claude[^a-z]|\\.codex[^a-z]|\\.gemini[^a-z]|\\.cursor[^a-z]|\\.opencode[^a-z]|\\.aider[^a-z]|\\.continue[^a-z]|\\.windsurf[^a-z]|\\.zed[^a-z]|\\.goose[^a-z]|\\.pi[^a-z]|\\.kiro[^a-z]|\\.hermes[^a-z]|Antigravity|roo-?code",
+  "fs_watch": "chokidar|fs\\.watch|notify::|RecommendedWatcher|FileSystemWatcher|watchman",
+  "catch_empty": "catch\\s*(\\([^)]*\\))?\\s*\\{\\s*\\}|except[^:\\n]*:\\s*\\n\\s*(pass|\\.\\.\\.|#)|recover\\(\\)\\s*\\{\\s*\\}",
+  "unwrap_or": "unwrap_or(_default|_else)?\\(",
+  "ignored_result": "let\\s+_\\s*=|\\.ok\\(\\);|\\.ignore\\(\\)",
+  "truncation_limit": "max_sessions|MAX_SESSIONS|\\.truncate\\(|\\.take\\(\\d|\\.limit\\(|LIMIT\\s+\\d|\\.slice\\(0,\\s*\\d|head\\s+-n",
+  "concurrency": "tokio::spawn|thread::spawn|std::thread|rayon|go func|async move|Promise\\.all|worker_threads|new Worker\\(|ThreadPool|spawn_blocking",
+  "index_storage": "CREATE VIRTUAL TABLE|fts5|tantivy|duckdb|hnsw|usearch|bm25|embedding|cosine_similar|CREATE INDEX|vectorize|vector_search",
+  "resume_launch": "--resume|portable-pty|ConPTY|\\btmux\\b|\\bscreen\\b|--continue|\\bresume\\b|\\battach\\b",
+  "secret_redaction": "redact|sanitiz|\\bmask_\\b|api[_-]?key|authorization|bearer|credential|\\btoken\\b",
+  "inline_tests": "#\\[cfg\\(test\\)\\]|#\\[tokio::test\\]|#\\[test\\]|func Test|func Benchmark|describe\\(|it\\(|test\\(",
+  "surface_mcp": "McpServer|rmcp|#\\[tool|mcp|app\\.route|Router::new|axum|express\\(|fastify|actix|get\\(\"|post\\(\""
+ },
+ "projects": {
+  "agent-sessions": {
+   "receipt": "research/sweep-agent-sessions.json",
+   "stats": {
+    "total": 1022,
+    "scanned": 953,
+    "excluded_binary": 69,
+    "skipped_oversize": 0,
+    "skipped_read_error": 0,
+    "files_with_any_hit": 622
+   },
+   "probe_file_counts": {
+    "shell_exec": 46,
+    "sql_dynamic": 65,
+    "provider_paths": 306,
+    "fs_watch": 0,
+    "catch_empty": 11,
+    "unwrap_or": 0,
+    "ignored_result": 1,
+    "truncation_limit": 45,
+    "concurrency": 0,
+    "index_storage": 14,
+    "resume_launch": 246,
+    "secret_redaction": 207,
+    "inline_tests": 269,
+    "surface_mcp": 50
+   }
+  },
+  "AgentRecall": {
+   "receipt": "research/sweep-AgentRecall.json",
+   "stats": {
+    "total": 404,
+    "scanned": 400,
+    "excluded_binary": 4,
+    "skipped_oversize": 0,
+    "skipped_read_error": 0,
+    "files_with_any_hit": 246
+   },
+   "probe_file_counts": {
+    "shell_exec": 26,
+    "sql_dynamic": 16,
+    "provider_paths": 71,
+    "fs_watch": 5,
+    "catch_empty": 2,
+    "unwrap_or": 0,
+    "ignored_result": 0,
+    "truncation_limit": 21,
+    "concurrency": 25,
+    "index_storage": 9,
+    "resume_launch": 51,
+    "secret_redaction": 85,
+    "inline_tests": 170,
+    "surface_mcp": 52
+   }
+  },
+  "agentsview": {
+   "receipt": "research/sweep-agentsview.json",
+   "stats": {
+    "total": 1930,
+    "scanned": 1913,
+    "excluded_binary": 17,
+    "skipped_oversize": 0,
+    "skipped_read_error": 0,
+    "files_with_any_hit": 1299
+   },
+   "probe_file_counts": {
+    "shell_exec": 66,
+    "sql_dynamic": 200,
+    "provider_paths": 174,
+    "fs_watch": 1,
+    "catch_empty": 1,
+    "unwrap_or": 1,
+    "ignored_result": 1,
+    "truncation_limit": 85,
+    "concurrency": 70,
+    "index_storage": 275,
+    "resume_launch": 102,
+    "secret_redaction": 472,
+    "inline_tests": 925,
+    "surface_mcp": 152
+   }
+  },
+  "cc-sessions-viewer": {
+   "receipt": "research/sweep-cc-sessions-viewer.json",
+   "stats": {
+    "total": 93,
+    "scanned": 93,
+    "excluded_binary": 0,
+    "skipped_oversize": 0,
+    "skipped_read_error": 0,
+    "files_with_any_hit": 76
+   },
+   "probe_file_counts": {
+    "shell_exec": 9,
+    "sql_dynamic": 13,
+    "provider_paths": 32,
+    "fs_watch": 2,
+    "catch_empty": 5,
+    "unwrap_or": 33,
+    "ignored_result": 27,
+    "truncation_limit": 13,
+    "concurrency": 22,
+    "index_storage": 2,
+    "resume_launch": 29,
+    "secret_redaction": 38,
+    "inline_tests": 53,
+    "surface_mcp": 33
+   }
+  },
+  "cc-switch": {
+   "receipt": "research/sweep-cc-switch.json",
+   "stats": {
+    "total": 1177,
+    "scanned": 991,
+    "excluded_binary": 186,
+    "skipped_oversize": 0,
+    "skipped_read_error": 0,
+    "files_with_any_hit": 651
+   },
+   "probe_file_counts": {
+    "shell_exec": 15,
+    "sql_dynamic": 48,
+    "provider_paths": 188,
+    "fs_watch": 1,
+    "catch_empty": 3,
+    "unwrap_or": 146,
+    "ignored_result": 53,
+    "truncation_limit": 27,
+    "concurrency": 44,
+    "index_storage": 7,
+    "resume_launch": 103,
+    "secret_redaction": 357,
+    "inline_tests": 326,
+    "surface_mcp": 282
+   }
+  },
+  "claude-historian-mcp": {
+   "receipt": "research/sweep-claude-historian-mcp.json",
+   "stats": {
+    "total": 46,
+    "scanned": 42,
+    "excluded_binary": 4,
+    "skipped_oversize": 0,
+    "skipped_read_error": 0,
+    "files_with_any_hit": 27
+   },
+   "probe_file_counts": {
+    "shell_exec": 3,
+    "sql_dynamic": 1,
+    "provider_paths": 11,
+    "fs_watch": 0,
+    "catch_empty": 0,
+    "unwrap_or": 0,
+    "ignored_result": 0,
+    "truncation_limit": 7,
+    "concurrency": 5,
+    "index_storage": 1,
+    "resume_launch": 4,
+    "secret_redaction": 11,
+    "inline_tests": 9,
+    "surface_mcp": 23
+   }
+  },
+  "coding_agent_session_search": {
+   "receipt": "research/sweep-coding_agent_session_search.json",
+   "stats": {
+    "total": 3641,
+    "scanned": 3632,
+    "excluded_binary": 5,
+    "skipped_oversize": 4,
+    "skipped_read_error": 0,
+    "files_with_any_hit": 836
+   },
+   "probe_file_counts": {
+    "shell_exec": 77,
+    "sql_dynamic": 68,
+    "provider_paths": 175,
+    "fs_watch": 2,
+    "catch_empty": 3,
+    "unwrap_or": 291,
+    "ignored_result": 148,
+    "truncation_limit": 136,
+    "concurrency": 103,
+    "index_storage": 240,
+    "resume_launch": 104,
+    "secret_redaction": 353,
+    "inline_tests": 554,
+    "surface_mcp": 181
+   }
+  },
+  "ctx": {
+   "receipt": "research/sweep-ctx.json",
+   "stats": {
+    "total": 673,
+    "scanned": 671,
+    "excluded_binary": 2,
+    "skipped_oversize": 0,
+    "skipped_read_error": 0,
+    "files_with_any_hit": 442
+   },
+   "probe_file_counts": {
+    "shell_exec": 28,
+    "sql_dynamic": 18,
+    "provider_paths": 115,
+    "fs_watch": 0,
+    "catch_empty": 2,
+    "unwrap_or": 150,
+    "ignored_result": 37,
+    "truncation_limit": 47,
+    "concurrency": 19,
+    "index_storage": 60,
+    "resume_launch": 74,
+    "secret_redaction": 107,
+    "inline_tests": 216,
+    "surface_mcp": 144
+   }
+  },
+  "fast-resume": {
+   "receipt": "research/sweep-fast-resume.json",
+   "stats": {
+    "total": 68,
+    "scanned": 55,
+    "excluded_binary": 13,
+    "skipped_oversize": 0,
+    "skipped_read_error": 0,
+    "files_with_any_hit": 47
+   },
+   "probe_file_counts": {
+    "shell_exec": 3,
+    "sql_dynamic": 2,
+    "provider_paths": 13,
+    "fs_watch": 0,
+    "catch_empty": 0,
+    "unwrap_or": 27,
+    "ignored_result": 3,
+    "truncation_limit": 6,
+    "concurrency": 6,
+    "index_storage": 14,
+    "resume_launch": 26,
+    "secret_redaction": 9,
+    "inline_tests": 26,
+    "surface_mcp": 15
+   }
+  },
+  "hstry": {
+   "receipt": "research/sweep-hstry.json",
+   "stats": {
+    "total": 186,
+    "scanned": 186,
+    "excluded_binary": 0,
+    "skipped_oversize": 0,
+    "skipped_read_error": 0,
+    "files_with_any_hit": 105
+   },
+   "probe_file_counts": {
+    "shell_exec": 5,
+    "sql_dynamic": 11,
+    "provider_paths": 21,
+    "fs_watch": 2,
+    "catch_empty": 0,
+    "unwrap_or": 25,
+    "ignored_result": 9,
+    "truncation_limit": 27,
+    "concurrency": 11,
+    "index_storage": 23,
+    "resume_launch": 23,
+    "secret_redaction": 31,
+    "inline_tests": 51,
+    "surface_mcp": 23
+   }
+  },
+  "memex": {
+   "receipt": "research/sweep-memex.json",
+   "stats": {
+    "total": 130,
+    "scanned": 130,
+    "excluded_binary": 0,
+    "skipped_oversize": 0,
+    "skipped_read_error": 0,
+    "files_with_any_hit": 75
+   },
+   "probe_file_counts": {
+    "shell_exec": 4,
+    "sql_dynamic": 4,
+    "provider_paths": 9,
+    "fs_watch": 1,
+    "catch_empty": 0,
+    "unwrap_or": 38,
+    "ignored_result": 7,
+    "truncation_limit": 17,
+    "concurrency": 7,
+    "index_storage": 34,
+    "resume_launch": 1,
+    "secret_redaction": 23,
+    "inline_tests": 45,
+    "surface_mcp": 22
+   }
+  },
+  "Recall": {
+   "receipt": "research/sweep-Recall.json",
+   "stats": {
+    "total": 155,
+    "scanned": 154,
+    "excluded_binary": 1,
+    "skipped_oversize": 0,
+    "skipped_read_error": 0,
+    "files_with_any_hit": 90
+   },
+   "probe_file_counts": {
+    "shell_exec": 10,
+    "sql_dynamic": 5,
+    "provider_paths": 23,
+    "fs_watch": 1,
+    "catch_empty": 0,
+    "unwrap_or": 46,
+    "ignored_result": 20,
+    "truncation_limit": 14,
+    "concurrency": 4,
+    "index_storage": 22,
+    "resume_launch": 21,
+    "secret_redaction": 26,
+    "inline_tests": 51,
+    "surface_mcp": 16
+   }
+  },
+  "Wake": {
+   "receipt": "research/sweep-Wake.json",
+   "stats": {
+    "total": 235,
+    "scanned": 201,
+    "excluded_binary": 34,
+    "skipped_oversize": 0,
+    "skipped_read_error": 0,
+    "files_with_any_hit": 95
+   },
+   "probe_file_counts": {
+    "shell_exec": 9,
+    "sql_dynamic": 9,
+    "provider_paths": 44,
+    "fs_watch": 1,
+    "catch_empty": 0,
+    "unwrap_or": 62,
+    "ignored_result": 27,
+    "truncation_limit": 19,
+    "concurrency": 19,
+    "index_storage": 7,
+    "resume_launch": 29,
+    "secret_redaction": 32,
+    "inline_tests": 57,
+    "surface_mcp": 61
+   }
+  }
+ }
+}

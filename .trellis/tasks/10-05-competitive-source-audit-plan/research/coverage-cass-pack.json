@@ -1,0 +1,421 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-06",
+  "task": ".trellis/tasks/10-05-competitive-source-audit-plan",
+  "repository": "C:\\AgentSessions\\Github_src\\coding_agent_session_search",
+  "commit": "aa92a45311e10a3ac9c40c3730664a7366af2fe8",
+  "scope": "cass shard A (evidence bundling + asset state): full read of src/search/mod.rs, src/search/pack_planner.rs, src/search/asset_state.rs, src/search/proof_log.rs; one auxiliary full read of src/connectors/mod.rs for the provider-normalization question; mechanical filtered queries of sweep-coding_agent_session_search.json and targeted repo greps; no build/test/install/network/git write operations; competitor source left untouched.",
+  "status": "source_review_complete_report_included",
+  "t1_scope_rule": {
+    "selected_files": [
+      "src/search/mod.rs",
+      "src/search/pack_planner.rs",
+      "src/search/asset_state.rs",
+      "src/search/proof_log.rs"
+    ],
+    "why": {
+      "src/search/pack_planner.rs": "Assigned core of shard A: the pack/evidence contract (fields, limits, selection, dedup, anchoring, rendering, redaction, trust) plus its inline tests.",
+      "src/search/asset_state.rs": "Assigned core of shard A: freshness/invalidation semantics, maintenance concurrency, stall detection, fail-open behavior, event log and unified view.",
+      "src/search/mod.rs": "76-line search-layer facade; cheap to read in full and fixes the module surface containing pack_planner/asset_state/proof_log.",
+      "src/search/proof_log.rs": "473-line adjacent structured proof-record schema; read because evidence traceability depends on whether pack output is tied to structured proof artifacts."
+    },
+    "auxiliary_reads": [
+      {
+        "path": "src/connectors/mod.rs",
+        "why": "Single bounded auxiliary full read to answer the required cross-provider normalization + provider coverage question; it is a registry/re-export file, not part of the T1 core list."
+      }
+    ],
+    "mechanical_queries_only": [
+      "sweep-coding_agent_session_search.json filtered by path for the five audited files (probe hit counts recorded in sweep_probe_hits)",
+      "sweep-index.json probe definition for provider_paths + inventory of src/sources/* and src/connectors/* probe hits",
+      "repo-wide grep for max_output_tokens_with_overflow (3 occurrences, all in pack_planner.rs incl. its own test)",
+      "targeted greps in pack_planner.rs for SameSessionLowerRank / FieldMaskExcluded / context_lines / message_index / explain_selection",
+      "directory listings of src/connectors, src/sources, src/indexer and top-level src/",
+      "Cargo.toml grep for the franken-agent-detection dependency pin"
+    ],
+    "out_of_scope": [
+      "src/lib.rs (4.0MB CLI wiring incl. cass pack integration)",
+      "src/indexer/*",
+      "src/sources/*",
+      "tests/*",
+      "docs/*",
+      "franken_agent_detection/dependency internals",
+      "LICENSE full text"
+    ],
+    "scope_note": "Conclusions that depend on out-of-scope files are marked as open items or explicitly labeled mechanical-only; no hash or probe hit was treated as a read."
+  },
+  "line_count_method": "UTF-8 logical lines via PowerShell Get-Content (final newline does not add a logical source line); ranges are 1-based inclusive; CodeGraph file mode reports one virtual EOF line which is not counted.",
+  "read_method": "codegraph node --file <relative path> --offset <start> --limit <=150 (file mode, line-numbered output), batched in parallel calls; every gap caused by an output cap was re-read; no single read exceeded 150 lines.",
+  "files": [
+    {
+      "path": "src/search/mod.rs",
+      "bytes": 3339,
+      "total_lines": 76,
+      "sha256_initial": "3ba23676c485bca9184d0355c26d28cbeff9bb1ba8365879b47ea890cfd45449",
+      "read_ranges": [
+        [
+          1,
+          76
+        ]
+      ],
+      "status": "full",
+      "reason": "All 76 logical source lines were personally displayed and reviewed in the listed range (single codegraph file-mode read); CodeGraph virtual EOF line 77 not counted; hashes alone did not count as reading.",
+      "sha256_final": "3ba23676c485bca9184d0355c26d28cbeff9bb1ba8365879b47ea890cfd45449",
+      "content_unchanged": true,
+      "description": "Search layer facade only: documents and registers search submodules (pack_planner at :46, asset_state at :25, proof_log at :49); no logic.",
+      "read_line_count": 76,
+      "read_method": "codegraph node --file (1-based line numbers), single bounded read [1,76]",
+      "missing_ranges": []
+    },
+    {
+      "path": "src/search/pack_planner.rs",
+      "bytes": 124272,
+      "total_lines": 3491,
+      "sha256_initial": "435de2165e493b7ac4a2daf4ead426322deb592c287af4c22f2987fa4fdd89b3",
+      "read_ranges": [
+        [
+          1,
+          150
+        ],
+        [
+          151,
+          300
+        ],
+        [
+          301,
+          450
+        ],
+        [
+          451,
+          600
+        ],
+        [
+          601,
+          750
+        ],
+        [
+          751,
+          900
+        ],
+        [
+          901,
+          1050
+        ],
+        [
+          1051,
+          1200
+        ],
+        [
+          1201,
+          1350
+        ],
+        [
+          1351,
+          1500
+        ],
+        [
+          1501,
+          1650
+        ],
+        [
+          1651,
+          1800
+        ],
+        [
+          1801,
+          1950
+        ],
+        [
+          1951,
+          2100
+        ],
+        [
+          2101,
+          2250
+        ],
+        [
+          2251,
+          2400
+        ],
+        [
+          2401,
+          2550
+        ],
+        [
+          2551,
+          2700
+        ],
+        [
+          2701,
+          2850
+        ],
+        [
+          2851,
+          3000
+        ],
+        [
+          3001,
+          3150
+        ],
+        [
+          3151,
+          3300
+        ],
+        [
+          3301,
+          3450
+        ],
+        [
+          3451,
+          3491
+        ]
+      ],
+      "status": "full",
+      "reason": "Full 3491-line coverage in 150-line bounded reads. Two batch-output truncations were detected as visible gaps and immediately patched by overlapping re-reads (288-437, 438-454, 745-775); union of displayed lines covers 1-3491. Hashes alone did not count as reading.",
+      "sha256_final": "435de2165e493b7ac4a2daf4ead426322deb592c287af4c22f2987fa4fdd89b3",
+      "content_unchanged": true,
+      "description": "Deterministic answer-pack evidence selection: limits/validation, readiness/freshness/sync-gap types, PackCandidate, greedy weighted planner with dedup/session/token caps, omission reasons, json/compact/jsonl/toon/markdown renderers, redaction pipeline, trust correlation; inline tests 2439-3491.",
+      "read_line_count": 3491,
+      "read_method": "codegraph node --file (1-based line numbers), <=150-line bounded reads, batched; overlapping re-reads used to patch truncated batches",
+      "missing_ranges": []
+    },
+    {
+      "path": "src/search/asset_state.rs",
+      "bytes": 164103,
+      "total_lines": 4132,
+      "sha256_initial": "c5feb7144726bca2127a6bd4decc32a077a89642eeb095cfe4e425d61b4916d8",
+      "read_ranges": [
+        [
+          1,
+          150
+        ],
+        [
+          151,
+          300
+        ],
+        [
+          301,
+          450
+        ],
+        [
+          451,
+          600
+        ],
+        [
+          601,
+          750
+        ],
+        [
+          751,
+          900
+        ],
+        [
+          901,
+          1050
+        ],
+        [
+          1051,
+          1200
+        ],
+        [
+          1201,
+          1350
+        ],
+        [
+          1351,
+          1500
+        ],
+        [
+          1501,
+          1650
+        ],
+        [
+          1651,
+          1800
+        ],
+        [
+          1801,
+          1950
+        ],
+        [
+          1951,
+          2100
+        ],
+        [
+          2101,
+          2250
+        ],
+        [
+          2251,
+          2400
+        ],
+        [
+          2401,
+          2550
+        ],
+        [
+          2551,
+          2700
+        ],
+        [
+          2701,
+          2850
+        ],
+        [
+          2851,
+          3000
+        ],
+        [
+          3001,
+          3150
+        ],
+        [
+          3151,
+          3300
+        ],
+        [
+          3301,
+          3450
+        ],
+        [
+          3451,
+          3600
+        ],
+        [
+          3601,
+          3750
+        ],
+        [
+          3751,
+          3900
+        ],
+        [
+          3901,
+          4050
+        ],
+        [
+          4051,
+          4132
+        ]
+      ],
+      "status": "full",
+      "reason": "Full 4132-line coverage in 150-line bounded reads (last read 82 lines); no truncation observed. Hashes alone did not count as reading.",
+      "sha256_final": "c5feb7144726bca2127a6bd4decc32a077a89642eeb095cfe4e425d61b4916d8",
+      "content_unchanged": true,
+      "description": "Search asset truth: maintenance lock metadata + sidecar, flock-based stale-lock reaping, heartbeat vs forward-progress stall detection, lexical fingerprint/checkpoint state, semantic availability/tier/shard/backlog/checkpoint surfaces, single-flight coordination, search fail-open decision, bounded polling, event log, yield signal, unified view; inline tests 2103-4132.",
+      "read_line_count": 4132,
+      "read_method": "codegraph node --file (1-based line numbers), <=150-line bounded reads, batched",
+      "missing_ranges": []
+    },
+    {
+      "path": "src/search/proof_log.rs",
+      "bytes": 17290,
+      "total_lines": 473,
+      "sha256_initial": "dda5405b77d6206677fceb6ce4f8849a810315491297989feb914b7c26e36d24",
+      "read_ranges": [
+        [
+          1,
+          150
+        ],
+        [
+          151,
+          300
+        ],
+        [
+          301,
+          450
+        ],
+        [
+          451,
+          473
+        ]
+      ],
+      "status": "full",
+      "reason": "Full 473-line coverage in 150-line bounded reads; no truncation observed. Hashes alone did not count as reading.",
+      "sha256_final": "dda5405b77d6206677fceb6ce4f8849a810315491297989feb914b7c26e36d24",
+      "content_unchanged": true,
+      "description": "Proof-log schema (module-wide dead_code tolerated pending future producers): six-outcome ProofOutcome taxonomy, run meta/execution/artifact manifest, retention policy (keep 20 / 14d / keep all non-pass), secret-env redaction guard; tests 253-473.",
+      "read_line_count": 473,
+      "read_method": "codegraph node --file (1-based line numbers), <=150-line bounded reads, batched",
+      "missing_ranges": []
+    },
+    {
+      "path": "src/connectors/mod.rs",
+      "bytes": 7517,
+      "total_lines": 249,
+      "sha256_initial": "b0b0c5703039a71a40e08002cef37042050367d5caed1909d02d8fb959b9b00b",
+      "read_ranges": [
+        [
+          1,
+          150
+        ],
+        [
+          151,
+          249
+        ]
+      ],
+      "status": "full",
+      "reason": "Auxiliary full read outside the T1 core list, added only to answer the required provider-normalization question; both ranges displayed in full. Hashes alone did not count as reading.",
+      "sha256_final": "b0b0c5703039a71a40e08002cef37042050367d5caed1909d02d8fb959b9b00b",
+      "content_unchanged": true,
+      "description": "Cross-provider connector registry (auxiliary): re-exports franken_agent_detection normalized types (NormalizedConversation/NormalizedMessage/Origin/SourceKind/LOCAL_SOURCE_ID), lists 23 connector stub modules, and wires get_connector_factories() with a CASS-specific Codex enrichment wrapper.",
+      "read_line_count": 249,
+      "read_method": "codegraph node --file (1-based line numbers), 2 bounded reads [1,150],[151,249]",
+      "missing_ranges": []
+    }
+  ],
+  "summary": {
+    "t1_core_files": 4,
+    "auxiliary_files": 1,
+    "inventory_files": 5,
+    "full_files": 5,
+    "partial_files": 0,
+    "excluded_files": 0,
+    "not_read_files": 0,
+    "t1_core_lines_total": 8172,
+    "auxiliary_lines": 249,
+    "text_lines_total": 8421,
+    "text_lines_read": 8421,
+    "bytes_total": 316521,
+    "files_hash_unchanged": 5,
+    "max_lines_per_read": 150,
+    "sweep_scan_context": {
+      "total": 3641,
+      "scanned": 3632,
+      "excluded_binary": 5,
+      "skipped_oversize": 4,
+      "files_with_any_hit": 836
+    }
+  },
+  "sweep_probe_hits": {
+    "src/search/mod.rs": {
+      "secret_redaction": 1,
+      "index_storage": 7
+    },
+    "src/search/pack_planner.rs": {
+      "secret_redaction": 239,
+      "inline_tests": 48,
+      "truncation_limit": 18,
+      "unwrap_or": 10
+    },
+    "src/search/asset_state.rs": {
+      "index_storage": 65,
+      "truncation_limit": 9,
+      "ignored_result": 12,
+      "sql_dynamic": 3,
+      "resume_launch": 3,
+      "unwrap_or": 28,
+      "inline_tests": 60,
+      "concurrency": 3
+    },
+    "src/search/proof_log.rs": {
+      "secret_redaction": 19,
+      "inline_tests": 8
+    },
+    "src/connectors/mod.rs": {
+      "provider_paths": 5
+    }
+  },
+  "report": "audit-cass-pack.md",
+  "ownership_note": "Only coverage-cass-pack.json and audit-cass-pack.md are created by this worker. No competitor source, task file, or other research artifact was modified. competitor-adjacent.md / competitor-cass.md / sweep JSONs were not rewritten."
+}

@@ -1,0 +1,23 @@
+== 默认库路径解析（单一函数；--db 显式优先）==
+
+== (a) 未给 --db：解析到平台默认 data 目录下的 asg.db ==
+$ agent-session-grep status
+--- stderr ---
+error [catalog_error]: catalog 不存在：<SANDBOX>\home\AppData\Local\AgentSessions\data\asg.db（读命令不会创建数据库，也不返回空结果）。先建立索引：`agent-session-grep --db <SANDBOX>\home\AppData\Local\AgentSessions\data\asg.db sync --discover`
+下一步：先运行 doctor --db <path> 自检。若 doctor 正常，说明这不是打开失败而是一次被拒绝的写入（例如同一条消息在不同源上投影冲突）：用 ASG_DEBUG_ERRORS=1 重跑同一命令查看被掩码的原因，并按 docs/operations/rebuild-and-migration-runbook.md 处理
+exit=6
+
+== (b) 显式 --db：优先于默认路径 ==
+$ agent-session-grep --db <SANDBOX>\explicit\other.db status
+--- stderr ---
+error [catalog_error]: catalog 不存在：<SANDBOX>\explicit\other.db（读命令不会创建数据库，也不返回空结果）。先建立索引：`agent-session-grep --db <SANDBOX>\explicit\other.db sync --discover`
+下一步：先运行 doctor --db <path> 自检。若 doctor 正常，说明这不是打开失败而是一次被拒绝的写入（例如同一条消息在不同源上投影冲突）：用 ASG_DEBUG_ERRORS=1 重跑同一命令查看被掩码的原因，并按 docs/operations/rebuild-and-migration-runbook.md 处理
+exit=6
+
+== (c) 平台默认路径解析失败（APPDATA/LOCALAPPDATA 未设置）：可执行指引 ==
+$ agent-session-grep --robot status
+{"command":"status","error":{"code":"invalid_request","details":{},"message":"APPDATA environment variable is not set；可显式传 `--db <path>` 指定库位置","retryable":false},"frame_type":"error","meta":{"duration_ms":0,"generation":null},"ok":false,"outcome":"failure","page":{"has_more":false,"next_cursor":null},"request_id":"cli-26564-1791299695620","schema_version":"1.1","warnings":[]}
+exit=2
+
+Test-Path(默认库) => False
+Test-Path(默认 data 目录) => False

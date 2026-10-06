@@ -1,0 +1,473 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-06",
+  "task": ".trellis/tasks/10-05-competitive-source-audit-plan",
+  "repository": "C:\\AgentSessions\\Github_src\\cc-sessions-viewer",
+  "commit": null,
+  "scope": "Shard A (cc-sessions-viewer core): session chat / turn / resume. T1 full reads: src-tauri/src/agent_chat.rs, turn.rs, agents/mod.rs; T1 selective read: util.rs (command/path/escaping/message post-processing; test modules excluded). Static source review only; no build/test/install/network/git operations.",
+  "status": "t1_source_review_complete_3_full_1_partial",
+  "t1_scope_rule": "T1 files were read only via PowerShell line-numbered windows of <=150 logical lines each with untruncated output; hashes alone were never counted as reading. agent_chat.rs (4087), turn.rs (2322) and agents/mod.rs (1360) are covered 1..EOF by contiguous windows and marked full. util.rs is selective per task scope (command construction / path / escaping / message post-processing product subsystems) and marked partial with exact missing_ranges; the unread ranges are inline test modules plus the 996-997 doc-comment gap. Snapshot identity is per-file SHA256 (commit=null; no Git metadata).",
+  "commit_note": "commit is intentionally null: the audited directory has no .git metadata; it is a package-0.3.25 directory snapshot (package.json:4, src-tauri/Cargo.toml:3). Identity = per-file SHA256 in this receipt + the coverage-index.json project entry.",
+  "line_count_method": "UTF-8 lines via [System.IO.File]::ReadAllLines; 1-based inclusive read ranges; final newline does not create an extra logical source line.",
+  "files": [
+    {
+      "path": "src-tauri/src/agent_chat.rs",
+      "bytes": 140954,
+      "total_lines": 4087,
+      "sha256_initial": "AA594ACE8E861CBE82317C1FB35AC1B92B0F7AFA45402AA1FB0FA8729A7898FD",
+      "read_ranges": [
+        [
+          1,
+          150
+        ],
+        [
+          151,
+          300
+        ],
+        [
+          301,
+          450
+        ],
+        [
+          451,
+          600
+        ],
+        [
+          601,
+          750
+        ],
+        [
+          751,
+          900
+        ],
+        [
+          901,
+          1050
+        ],
+        [
+          1051,
+          1200
+        ],
+        [
+          1201,
+          1350
+        ],
+        [
+          1351,
+          1500
+        ],
+        [
+          1501,
+          1650
+        ],
+        [
+          1651,
+          1800
+        ],
+        [
+          1801,
+          1950
+        ],
+        [
+          1951,
+          2100
+        ],
+        [
+          2101,
+          2250
+        ],
+        [
+          2251,
+          2400
+        ],
+        [
+          2401,
+          2550
+        ],
+        [
+          2551,
+          2700
+        ],
+        [
+          2701,
+          2850
+        ],
+        [
+          2851,
+          3000
+        ],
+        [
+          3001,
+          3150
+        ],
+        [
+          3151,
+          3300
+        ],
+        [
+          3301,
+          3450
+        ],
+        [
+          3451,
+          3600
+        ],
+        [
+          3601,
+          3750
+        ],
+        [
+          3751,
+          3900
+        ],
+        [
+          3901,
+          4050
+        ],
+        [
+          4051,
+          4087
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical lines personally displayed with line numbers and reviewed in the listed sequential windows; every window was <=150 logical lines and untruncated. Hashes alone were never counted as reading.",
+      "sha256_final": "AA594ACE8E861CBE82317C1FB35AC1B92B0F7AFA45402AA1FB0FA8729A7898FD",
+      "content_unchanged": true,
+      "description": "GUI chat driver: three process models (LongLivedStdin / OneShotResume / CodexAppServer); spawns via login shell (POSIX) or PowerShell (Windows) with pure pipes, no PTY; session lease bind/release; Codex app-server JSON-RPC (initialize, thread/start|resume|fork, turn/start|steer|interrupt, approvals/questions); event normalization to frontend; permission response paths; stop/interrupt/list_running_chats.",
+      "read_line_count": 4087,
+      "read_method": "PowerShell line-numbered read ([System.IO.File]::ReadAllLines; 1-based inclusive; <=150-line windows; untruncated)",
+      "missing_ranges": []
+    },
+    {
+      "path": "src-tauri/src/turn.rs",
+      "bytes": 77686,
+      "total_lines": 2322,
+      "sha256_initial": "A68B1F04985AEBF45BC0E2CEA6C231008220BACD2E20922E4DFF479ACE0C4C64",
+      "read_ranges": [
+        [
+          1,
+          150
+        ],
+        [
+          151,
+          300
+        ],
+        [
+          301,
+          450
+        ],
+        [
+          451,
+          600
+        ],
+        [
+          601,
+          750
+        ],
+        [
+          751,
+          900
+        ],
+        [
+          901,
+          1050
+        ],
+        [
+          1051,
+          1200
+        ],
+        [
+          1201,
+          1350
+        ],
+        [
+          1351,
+          1500
+        ],
+        [
+          1501,
+          1650
+        ],
+        [
+          1651,
+          1800
+        ],
+        [
+          1801,
+          1950
+        ],
+        [
+          1951,
+          2100
+        ],
+        [
+          2101,
+          2250
+        ],
+        [
+          2251,
+          2322
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical lines personally displayed with line numbers and reviewed in the listed sequential windows; every window was <=150 logical lines and untruncated. Hashes alone were never counted as reading.",
+      "sha256_final": "A68B1F04985AEBF45BC0E2CEA6C231008220BACD2E20922E4DFF479ACE0C4C64",
+      "content_unchanged": true,
+      "description": "Turn-status hook subsystem: per-agent hook event tables and installer (claude/codex/agy/grok/kimi/pi); hook command construction and quoting helpers; atomic JSONL signal consumption with partial-line handling; desktop task state; Grok/Kimi TOML atomic writes with backup; Pi extension install/status.",
+      "read_line_count": 2322,
+      "read_method": "PowerShell line-numbered read ([System.IO.File]::ReadAllLines; 1-based inclusive; <=150-line windows; untruncated)",
+      "missing_ranges": []
+    },
+    {
+      "path": "src-tauri/src/agents/mod.rs",
+      "bytes": 56841,
+      "total_lines": 1360,
+      "sha256_initial": "8F810C414901B54AF73BC585B73DA24B5A492DA7E9E510207E59A87995FDA6C7",
+      "read_ranges": [
+        [
+          1,
+          150
+        ],
+        [
+          151,
+          300
+        ],
+        [
+          301,
+          450
+        ],
+        [
+          451,
+          600
+        ],
+        [
+          601,
+          750
+        ],
+        [
+          751,
+          900
+        ],
+        [
+          901,
+          1050
+        ],
+        [
+          1051,
+          1200
+        ],
+        [
+          1201,
+          1350
+        ],
+        [
+          1351,
+          1360
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical lines personally displayed with line numbers and reviewed in the listed sequential windows; every window was <=150 logical lines and untruncated. Hashes alone were never counted as reading.",
+      "sha256_final": "8F810C414901B54AF73BC585B73DA24B5A492DA7E9E510207E59A87995FDA6C7",
+      "content_unchanged": true,
+      "description": "SessionSource abstraction and shared search core: user-text cache keyed by (path,mtime); SearchScope id/keyword/all; metadata-first then byte-prefilter+full JSON parse; cross-project full scan on a 4-thread rayon pool; cancellation token; 200-hit cap; 60-char snippets; Pi terminal-lineage search; provider registry for 7 agents.",
+      "read_line_count": 1360,
+      "read_method": "PowerShell line-numbered read ([System.IO.File]::ReadAllLines; 1-based inclusive; <=150-line windows; untruncated)",
+      "missing_ranges": []
+    },
+    {
+      "path": "src-tauri/src/util.rs",
+      "bytes": 76684,
+      "total_lines": 2043,
+      "sha256_initial": "E93E0D4236F0161279AFB01D7EA190E567E9AD26C808E7760BB1616ED537D2E2",
+      "read_ranges": [
+        [
+          1,
+          150
+        ],
+        [
+          151,
+          300
+        ],
+        [
+          301,
+          450
+        ],
+        [
+          451,
+          600
+        ],
+        [
+          601,
+          750
+        ],
+        [
+          998,
+          1147
+        ],
+        [
+          1148,
+          1297
+        ],
+        [
+          1298,
+          1447
+        ],
+        [
+          1448,
+          1597
+        ],
+        [
+          1598,
+          1730
+        ]
+      ],
+      "status": "partial",
+      "reason": "Selective per shard scope: command construction / path / escaping / message post-processing subsystems. The read ranges cover every non-test product function of this file (function index check: inline test modules start at 722 and 1728); the missing ranges are the inline test modules plus the 996-997 doc-comment/blank gap immediately above post_process_session_msgs (line 998).",
+      "sha256_final": "E93E0D4236F0161279AFB01D7EA190E567E9AD26C808E7760BB1616ED537D2E2",
+      "content_unchanged": true,
+      "description": "Selective read: project file listing/fuzzy match, home/silent_command, title/subtitle cleaning, append_jsonl_line, git branch read without shelling out, file-ref resolution, unified diff parsing, user-message post-processing (path/image lifting, clipboard tags, inline image binding), expand_home and image extension checks.",
+      "read_line_count": 1483,
+      "read_method": "PowerShell line-numbered read ([System.IO.File]::ReadAllLines; 1-based inclusive; <=150-line windows; untruncated)",
+      "missing_ranges": [
+        [
+          751,
+          997
+        ],
+        [
+          1731,
+          2043
+        ]
+      ]
+    }
+  ],
+  "summary": {
+    "t1_files": 4,
+    "t1_full_files": 3,
+    "t1_partial_files": 1,
+    "t1_total_lines": 9812,
+    "t1_read_lines": 9252,
+    "t1_full_read_lines": 7769,
+    "t1_selective_read_lines": 1483,
+    "t1_missing_lines_in_partial": 560,
+    "t2_sweep_reference": "research/sweep-cc-sessions-viewer.json",
+    "t2_sweep_files_scanned": 93,
+    "t2_sweep_files_with_any_hit": 76,
+    "t2_sweep_binary_excluded": 0,
+    "deliverable_report": "research/audit-cc-sessions-viewer-core.md"
+  },
+  "supplemental_reads": [
+    {
+      "path": "src-tauri/src/agent_command.rs",
+      "read_ranges": [
+        [
+          40,
+          130
+        ],
+        [
+          131,
+          186
+        ]
+      ],
+      "read_method": "PowerShell line-numbered read",
+      "note": "Out-of-T1 spot check for the command-construction question: AgentCommand::to_posix_shell/to_powershell and posix_quote/powershell_quote/powershell_set_location_and_run. Evidence only; not counted in T1 coverage."
+    },
+    {
+      "path": "src-tauri/src/runtime.rs",
+      "read_ranges": [
+        [
+          1,
+          0
+        ],
+        [
+          95,
+          0
+        ]
+      ],
+      "read_method": "PowerShell line-numbered read",
+      "note": "Out-of-T1 spot check: spawn permit and exclusive session lease (acquire_session/ensure_session_available/Drop)."
+    },
+    {
+      "path": "src-tauri/src/lib.rs",
+      "read_ranges": [
+        [
+          640,
+          700
+        ],
+        [
+          845,
+          915
+        ],
+        [
+          950,
+          1010
+        ],
+        [
+          1225,
+          1290
+        ]
+      ],
+      "read_method": "PowerShell line-numbered read",
+      "note": "Out-of-T1 spot check: search_sessions wrapper (spawn_blocking + SEARCH_GEN + panic to Err), pty_spawn_resume/pty_spawn_new extra_args pass-through, valid_flag_token/valid_permission_mode, resume_session/new_session validation."
+    },
+    {
+      "path": "src/api.ts",
+      "read_ranges": [
+        [
+          330,
+          0
+        ],
+        [
+          395,
+          0
+        ]
+      ],
+      "read_method": "PowerShell line-numbered read",
+      "note": "Frontend IPC signatures: resumeSession/newSession/ptySpawn/ptySpawnNew extraArgs pass-through."
+    },
+    {
+      "path": "src/App.vue",
+      "read_ranges": [
+        [
+          1,
+          29
+        ],
+        [
+          3270,
+          3280
+        ],
+        [
+          3345,
+          3355
+        ]
+      ],
+      "read_method": "PowerShell line-numbered read",
+      "note": "launchArgs import + call sites for resumeSession/newSession; confirms extraArgs is a frontend settings value. src/settings.ts itself is missing from the snapshot."
+    },
+    {
+      "path": "src-tauri/src/pty.rs",
+      "read_ranges": [],
+      "read_method": "Select-String filtered query (no full read)",
+      "note": "build_shell_command uses AgentCommand::to_posix_shell/to_powershell and powershell_set_location_and_run; confirms PTY resumes use the same raw extra_args append."
+    },
+    {
+      "path": "README.md / README.zh-CN.md / package.json / src-tauri/Cargo.toml",
+      "read_ranges": [],
+      "read_method": "Select-String filtered query + short reads (no full read)",
+      "note": "License claim vs filesystem; line anchors README.md:10,12,186-188; README.zh-CN.md:10,186-188; no license field in manifests."
+    }
+  ],
+  "snapshot": {
+    "package_version": "0.3.25",
+    "source_of_version": "package.json:4 and src-tauri/Cargo.toml:3",
+    "git_metadata_present": false,
+    "coverage_index_project_entry": {
+      "file_count": 93,
+      "tree_content_sha256": "0ee8993caf13b19ef4d7d0d31d0bb1d3d71708877cabe6f5b3df30ba4ee4afd7",
+      "commit": null
+    },
+    "prompt_cited_tree_hash": "4b3b8c6c...",
+    "hash_discrepancy_note": "The shard prompt cites tree hash 4b3b8c6c..., but a literal Select-String over research/*.json and research/*.md did not find that string; the current coverage-index.json records tree_content_sha256=0ee8993caf13b19ef4d7d0d31d0bb1d3d71708877cabe6f5b3df30ba4ee4afd7 for cc-sessions-viewer. Reported as unresolved.",
+    "snapshot_completeness_note": "Snapshot is not self-contained: src/settings.ts is imported by src/App.vue:9-29 but absent on disk and absent from the 93-file inventory; README.ja.md is linked at README.md:12 but absent. Absence claims (e.g., LICENSE) are therefore limited to this snapshot."
+  },
+  "methods_note": "All findings in the companion report are static-source observations with file:line anchors; no product build/test/run was performed and none of the flagged paths were executed."
+}

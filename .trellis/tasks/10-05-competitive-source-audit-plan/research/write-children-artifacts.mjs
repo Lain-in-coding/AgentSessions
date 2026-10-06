@@ -1,0 +1,188 @@
+import fs from 'node:fs';
+const root = 'C:/AgentSessions/.trellis/tasks';
+
+// ============ B0: fact-table-truth-repair (lightweight: prd only) ============
+fs.writeFileSync(root + '/10-06-fact-table-truth-repair/prd.md', `# 事实账修复：竞品表技术栈与独占措辞（B0）
+
+> 父任务：.trellis/tasks/10-05-competitive-source-audit-plan（覆盖收口稿）
+> 用户 2026-10-06 明确批准全部整改项（D1/D2/D3 全部允许）。
+
+## Goal
+
+按源码级证据修正对外竞品事实账与不可站住的独占措辞，使文档与可复核事实一致。**只改文档，不改产品行为。**
+
+## Inputs（证据真源）
+
+- \`.trellis/tasks/10-05-competitive-source-audit-plan/research/fact-table-corrections.md\`（逐行修正表+证据锚点）
+- \`.trellis/tasks/10-05-competitive-source-audit-plan/review-report.md\` §四 P0-01（判决与措辞问题清单）
+- 目标文件：\`docs/product/COMPETITOR-COMPARISON.md\`、\`docs/product/OPEN-SOURCE-ROADMAP.md\`
+
+## Required fixes
+
+1. COMPETITOR-COMPARISON.md 事实基线表：
+   - cass：Python CLI → Rust CLI/TUI（Tantivy 生态）
+   - agentsview：TS CLI → Go 后端 + Svelte 前端
+   - AgentRecall：Python CLI → TypeScript/Electron/React + node:sqlite + Node MCP
+   - agent-sessions：Go CLI → Swift/SwiftUI macOS 桌面
+   - agf：Go CLI → Rust CLI+TUI
+   - claude-historian-mcp：Python MCP → TypeScript/Node MCP
+   - cc-switch：“无检索/不可比” → “FlexSearch 元数据检索（标题/摘要/项目路径/SourcePath/会话 ID，不含正文、不持久化）+ 7 家会话管理与 resume 命令生成”；“不可比”限定为“证据级检索不可比”
+   - hstry：“TS adapter 生态” → “Rust core（hstry-core/cli/tui）+ TS adapters”混合形态
+   - 名单：14 项 → 15 项，补 Wake 一行（Rust+GPUI、FTS5 trigram、CLI/MCP）
+2. 删除/改写无法站住的独占措辞（至少 OPEN-SOURCE-ROADMAP.md:88-94 的“无人做到 pack 级证据契约”）：改为可测承诺（证据验证成功率、出处失效行为、过滤分页一致性、输出 token 成本、恢复耗时），或删除。
+3. 指标语义拆分：preview 可生成 / native resume 可执行 / pack schema 有效 / 接收方任务完成，四处命名不得混用；dry-run 不得当 native resume 成绩。
+4. 保留历史：不删除旧快照记录；如需变更历史结论，保留“修正说明”行。
+
+## Non-goals
+
+- 不改 crates/ 任何代码；不跑 benchmark；不新增无法核验的竞品数字；不动 license 结论（cass rider / cc-sessions-viewer 无 LICENSE 维持原判并保留日期口径）。
+
+## Acceptance Criteria
+
+- [ ] 上述 8 处形态错误 + 1 处遗漏（Wake）在目标文档中全部修正，保留原快照日期/口径说明。
+- [ ] 目标文档 grep 不再出现：“cass.*Python”“agentsview.*TS CLI”“AgentRecall.*Python”“agent-sessions.*Go”“agf.*Go”“claude-historian.*Python”“无检索(配置切换器)”“无人做到 pack”。
+- [ ] provider 数等快照数字未标注日期的地方补“快照日期 2026-08-14（deep-read）”口径，不做重数。
+- [ ] 变更仅限两个文档文件；\`git diff --stat\` 可证。
+`, 'utf8');
+
+// ============ B1: hotpath-git-probe ============
+fs.writeFileSync(root + '/10-06-hotpath-git-probe/prd.md', `# 热路径修复：消除重复 Git 探测（B1）
+
+> 父任务：.trellis/tasks/10-05-competitive-source-audit-plan。用户 2026-10-06 批准（D2：CLI-first，先兑现核心闭环与稳定性）。
+> 依赖：无（与 B0 文档任务并行安全）。上游结论：父任务 review-report.md §四 P1-02。
+
+## Problem（已实测）
+
+普通命令在热路径上重复构造 App 并重复解析 repo：
+- \`crates/agent-session-grep-cli/src/lib.rs:2082-2089\` 为读时钟建 App；\`:2145-2161\` 检索又建一次；\`:3058-3099\` 每个 App 临时解析当前 repo；\`repo_identity.rs:31-54\` 通常两次 git 子进程；get/show 也承担不需要的探测。
+- 配对 20 次实测（同一 release、同数据、返回一致）：get 53.67→9.15ms、show 52.44→8.97ms、search 97.11→9.98ms。
+
+## Goal
+
+按请求消除重复/无关 Git 探测：
+1. 取时钟不构造带环境副作用的 App。
+2. 仅 Search/Handoff 等确实需要 repo-aware 排序的用例解析 repo；每次请求最多一轮解析并复用。
+3. get/show/status 等按 ID 纯读取零 Git 探测。
+4. **契约不变**：同 repo boost、无 origin 时 None、cursor 固定评分时钟、显式过滤、机器输出枚举、hits/score/page/cursor 语义全部不变。
+
+## Non-goals
+
+- 不引入跨请求永久缓存 origin（MCP/Web 长生命周期有失效语义风险）。
+- 不重写 CLI 框架、不换参数解析器、不改协议/退出码。
+- 不让用户设置 ASG_CURRENT_REPO 才能快——该变量仅测试注入用。
+
+## Acceptance Criteria
+
+- [ ] get/show：0 次 Git 子进程（用既有探测注入/包装统计）。
+- [ ] 普通 search：≤1 轮 repo 解析（有 origin 时最多 2 个子进程），结果与修复前逐字段一致。
+- [ ] 配对实验复跑（20 次/变体）：get/show 中位数回到 ~10ms 量级；search 保留 repo-aware 排序的合法成本，报告实测中位数。
+- [ ] \`cargo fmt --all --check\`、\`cargo clippy -p agent-session-grep-cli --all-targets --locked -- -D warnings\`、\`cargo test -p agent-session-grep-cli --locked\`、再加 \`cargo test --workspace --locked\` 全绿（isolated target dir）。
+- [ ] 现有 CLI/MCP/Web 测试不回归；新增针对“get/show 零探测、search 单轮解析”的回归测试。
+
+## Rollback
+
+保留旧 factory 路径可切换（或 revert 单 commit）；不改 schema/协议，无数据迁移。
+`, 'utf8');
+
+fs.writeFileSync(root + '/10-06-hotpath-git-probe/implement.md', `# 实施计划：hotpath-git-probe
+
+## Steps
+
+1. 定位并绘制当前调用链：\`lib.rs\` 中 read clock App / search App / get-show 路径 + \`repo_identity.rs\` 的解析函数与注入点（\`ASG_CURRENT_REPO\`）。
+2. 设计最小改动（见 design.md）：新增“无 repo 的只读装配”路径；把时长/时钟获取改为不依赖完整 App；search 构造一次上下文并复用。
+3. 写回归测试：统计 git 子进程调用次数（测试文件或注入计数器，避免为测试改产品 API——优先用现有注入点/`#[cfg(test)]` 钩子）。
+4. 跑配对实验复现改善（保留原始数据到本任务 research/）。
+5. 全量校验（见 PRD），检查协议输出差异（json/jsonl 逐字段 diff 同数据）。
+
+## Validation commands
+
+```text
+cargo fmt --all --check
+cargo clippy -p agent-session-grep-cli --all-targets --locked --target-dir .trellis/.runtime/target-hotpath -- -D warnings
+cargo test -p agent-session-grep-cli --locked --target-dir .trellis/.runtime/target-hotpath
+cargo test --workspace --locked --target-dir .trellis/.runtime/target-hotpath
+node --test crates/agent-session-grep-cli/tests/web_ui.test.cjs
+```
+
+## Review gate
+
+- 契约不变是硬条件；任何 hits/score/cursor 变化视为失败而不是“优化”。
+- 主会话复核 diff 与实测报告后才进入 check/收尾。
+`, 'utf8');
+
+fs.writeFileSync(root + '/10-06-hotpath-git-probe/design.md', `# 设计：hotpath-git-probe（最小改动）
+
+## 数据流（目标）
+
+CLI parse → **读取时间**（独立函数）→ 仅当用例需要时解析一次 repo 上下文 → 构造一次 App/SearchContext → Application 调用。
+
+## 关键决策
+
+1. **读时钟不建 App**：把“取当前时间”提取为不触碰文件系统的路径（保留 \`App::with_clock\` 测试语义）。
+2. **按用例分级**：Search/Handoff = 需要 repo；get/show/status/preview 纯读 = 不需要。
+3. **每请求一轮解析**：解析结果以值传递（或轻量上下文对象），不跨请求缓存；保留 \`ASG_CURRENT_REPO\` 注入语义。
+4. **不改变默认排序**：repo-aware 排序输入相同 → 输出相同；用固定输入做 before/after JSON diff。
+
+## 兼容性
+
+- 不新增/删除 CLI 参数；协议枚举/退出码不变；MCP/Web 走同一装配函数但调用次数减少。
+- Windows/macOS/Linux：仅减少子进程调用，不新增平台分支。
+`, 'utf8');
+
+// ============ D3: six-invariant-selfchecks ============
+fs.writeFileSync(root + '/10-06-six-invariant-selfchecks/prd.md', `# 六项不变量专项自查（D3）
+
+> 父任务：.trellis/tasks/10-05-competitive-source-audit-plan（§三·B“对 ASG 的直接含义”）。用户 2026-10-06 批准为实施前置。
+> 依赖：与 B1 可并行（写集=测试/研究，不动生产逻辑）。
+
+## Goal
+
+把竞品踩过的六类坑变成 ASG 的可执行自查证据（**本任务只验证并记录**；失败项输出精确锚点+修复建议，由其后续子任务修复，不在本任务内改生产行为）：
+
+1. **cap 先于过滤**（含 semantic/hybrid/ANN 路径）：域外高排名 > cap、域内仍有合法命中时不得漏。
+2. **零证据升格**：文字/语义证据为零的结果不得仅凭 recency/repo boost 入选。
+3. **失败固化**：解析/同步失败不得推进成功水位、不得覆盖 last-good、不得标记 current。
+4. **裁剪视图进缓存**：任何展示/预算裁剪不得被持久化为“新鲜全量”（对比 agf AGF-03）。
+5. **resume 全参数化**：恢复命令必须 typed intent + argv/cwd 分离；无 shell 字符串拼接（对比 agf AGF-02）。
+6. **投影截断共病**：索引/导出/展示共用截断投影时不得声称全文可检索（对比 hstry H-01）。
+
+## Acceptance Criteria
+
+- [ ] 六项各自有**可执行证据**：新增测试（优先）或可复现 fixture 脚本 + 原始输出日志。
+- [ ] \`research/invariant-matrix.md\`：每项一行 = 结论(通过/失败/不适用)+证据命令+锚点+若失败的最小修复建议。
+- [ ] 新增测试在 \`cargo test --workspace\` 与目标 package 测试中可跑（不 flaky、无网络、无真实用户数据）。
+- [ ] 不修改任何生产行为（允许 \`#[cfg(test)]\` 辅助与新增测试文件）。
+- [ ] 失败项必须给出 file:line 锚点与建议归属（B4 检索 / B5 provider / B2 journal 等）。
+
+## Non-goals
+
+- 不做性能调优、不改 schema、不改协议。
+- 不重跑竞品代码。
+`, 'utf8');
+
+fs.writeFileSync(root + '/10-06-six-invariant-selfchecks/implement.md', `# 实施计划：six-invariant-selfchecks
+
+## Steps
+
+1. 定位六项各自的 owner 模块（application search/ranking、adapters-sqlite sync/投影、cli resume/装配），记录当前实现事实。
+2. 为每项写最小可执行证据：
+   - ①②：application 层测试（构造合成 catalog/索引，域名过滤+cap 场景、零证据场景）。
+   - ③④：adapters-sqlite 层测试（失败注入/水位断言、裁剪后重开不变“新鲜全量”）。
+   - ⑤：cli 层测试（resume 计划结构为 argv 数组、无 shell 字符串；检查现有实现是否已满足）。
+   - ⑥：跨层断言（索引可搜正文 == 全文；导出与索引一致）。
+3. 运行并记录原始输出；写 \`research/invariant-matrix.md\`。
+4. 失败项不要顺手改：写清锚点/建议归属，留给主会话建后续任务。
+
+## Validation commands
+
+```text
+cargo test --workspace --locked --target-dir .trellis/.runtime/target-invariants
+```
+
+## Review gate
+
+- “通过”必须有测试断言支撑，不接受“看代码觉得没问题”。
+- 新增测试不得依赖时间/环境/网络（时钟注入、合成数据）。
+`, 'utf8');
+
+console.log('artifacts written');

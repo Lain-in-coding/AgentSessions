@@ -1,0 +1,66 @@
+# local workflow validation (B6 release closure)
+# command: python scripts/release/validate_workflows.py
+# cwd: C:/AgentSessions
+# started: 2026-10-06 23:57:40+08:00
+# git HEAD: 1d65a27516eb57afef3781f679a5a2adc4c43e6c (main checkout; note: another workstream was
+#   concurrently editing crates/ at run time, which does not affect workflow files)
+# python: Python 3.10.11
+# layers: (1) PyYAML parse of every .github/workflows/*.yml,
+#         (2) text-level contract tests in scripts/release/test_release_workflow.py
+
+test_every_action_reference_is_pinned_to_a_commit_sha (test_release_workflow.WorkflowContractTests) ... ok
+test_every_workflow_declares_least_privilege_permissions (test_release_workflow.WorkflowContractTests) ... ok
+test_gh_steps_declare_the_repository_they_act_on (test_release_workflow.WorkflowContractTests)
+`gh` resolves its repository from a git remote, `GH_REPO`, or ... ok
+test_release_builds_bind_lockfile_features_and_target (test_release_workflow.WorkflowContractTests) ... ok
+test_release_matrix_promises_both_macos_arches (test_release_workflow.WorkflowContractTests) ... ok
+test_release_publish_job_is_tag_gated_and_uses_its_repository (test_release_workflow.WorkflowContractTests) ... ok
+test_release_workflows_cover_three_operating_systems (test_release_workflow.WorkflowContractTests) ... ok
+test_release_workflows_gate_builds_on_the_required_ci_workflow (test_release_workflow.WorkflowContractTests) ... ok
+test_release_workflows_upload_artifacts_with_checksums (test_release_workflow.WorkflowContractTests) ... ok
+test_verify_matrix_keeps_one_runner_per_os_family (test_release_workflow.WorkflowContractTests) ... ok
+test_verify_workflow_cannot_publish_or_run_on_tags (test_release_workflow.WorkflowContractTests) ... ok
+test_workflow_directory_is_not_empty (test_release_workflow.WorkflowContractTests) ... ok
+
+----------------------------------------------------------------------
+Ran 12 tests in 0.005s
+
+OK
+validating 5 workflow files in C:\AgentSessions\.github\workflows
+yaml parse: PyYAML 6.0.3
+  ci.yml: parsed
+  core-beta-evidence.yml: parsed
+  release-verify.yml: parsed
+  release.yml: parsed
+  security-audit.yml: parsed
+OK: YAML parse and workflow contract checks
+# exit=0
+# finished: 2026-10-06 23:57:40+08:00
+# ==== re-run after final edits: 2026-10-07 00:09:16+08:00
+test_every_action_reference_is_pinned_to_a_commit_sha (test_release_workflow.WorkflowContractTests) ... ok
+test_every_workflow_declares_least_privilege_permissions (test_release_workflow.WorkflowContractTests) ... ok
+test_gh_steps_declare_the_repository_they_act_on (test_release_workflow.WorkflowContractTests)
+`gh` resolves its repository from a git remote, `GH_REPO`, or ... ok
+test_release_builds_bind_lockfile_features_and_target (test_release_workflow.WorkflowContractTests) ... ok
+test_release_matrix_promises_both_macos_arches (test_release_workflow.WorkflowContractTests) ... ok
+test_release_publish_job_is_tag_gated_and_uses_its_repository (test_release_workflow.WorkflowContractTests) ... ok
+test_release_workflows_cover_three_operating_systems (test_release_workflow.WorkflowContractTests) ... ok
+test_release_workflows_gate_builds_on_the_required_ci_workflow (test_release_workflow.WorkflowContractTests) ... ok
+test_release_workflows_upload_artifacts_with_checksums (test_release_workflow.WorkflowContractTests) ... ok
+test_verify_matrix_keeps_one_runner_per_os_family (test_release_workflow.WorkflowContractTests) ... ok
+test_verify_workflow_cannot_publish_or_run_on_tags (test_release_workflow.WorkflowContractTests) ... ok
+test_workflow_directory_is_not_empty (test_release_workflow.WorkflowContractTests) ... ok
+
+----------------------------------------------------------------------
+Ran 12 tests in 0.004s
+
+OK
+validating 5 workflow files in C:\AgentSessions\.github\workflows
+yaml parse: PyYAML 6.0.3
+  ci.yml: parsed
+  core-beta-evidence.yml: parsed
+  release-verify.yml: parsed
+  release.yml: parsed
+  security-audit.yml: parsed
+OK: YAML parse and workflow contract checks
+# exit=0

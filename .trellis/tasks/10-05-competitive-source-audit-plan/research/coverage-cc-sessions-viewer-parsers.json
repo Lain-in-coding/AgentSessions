@@ -1,0 +1,157 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-06",
+  "task": ".trellis/tasks/10-05-competitive-source-audit-plan",
+  "repository": "C:\\AgentSessions\\Github_src\\cc-sessions-viewer",
+  "commit": null,
+  "scope": "Shard B (cc-sessions-viewer provider parsers): the 7 provider sources under src-tauri/src/agents/ (pi.rs, opencode.rs, agy.rs, claude.rs, codex.rs, grok.rs, kimi.rs). pi/opencode/agy were read 1..EOF in full; claude/codex/grok/kimi were selectively read per the shard brief (session discovery / ID extraction / message parsing / user-message determination / resume & fork regions, located by grep). Static source review only; no build/test/install/network/git operations. Shard A outputs (coverage-cc-sessions-viewer-core.json / audit-cc-sessions-viewer-core.md) were referenced but not modified.",
+  "status": "t1_source_review_complete_3_full_4_partial",
+  "t1_scope_rule": "T1 files were read only via PowerShell line-numbered windows of <=150 logical lines each with untruncated output; hashes alone were never counted as reading. pi.rs/opencode.rs/agy.rs are covered 1..EOF by contiguous windows and marked full. claude.rs/codex.rs/grok.rs/kimi.rs are selective per the shard brief and marked partial with exact missing_ranges. Snapshot identity is per-file SHA256 (commit=null; no Git metadata in the snapshot).",
+  "commit_note": "commit is intentionally null: the audited directory has no .git metadata; it is a package-0.3.25 directory snapshot (package.json:4, src-tauri/Cargo.toml:3). Identity = per-file SHA256 in this receipt + the coverage-index.json project entry recorded by shard A.",
+  "line_count_method": "UTF-8 lines via [System.IO.File]::ReadAllLines; 1-based inclusive read ranges; final newline does not create an extra logical source line.",
+  "files": [
+    {
+      "path": "src-tauri/src/agents/pi.rs",
+      "bytes": 93154,
+      "total_lines": 2546,
+      "sha256_initial": "9E612DB7885026A99D752A21566064D58C2CCE8EAED3B692EE42E17F3EFD8335",
+      "read_ranges": [[1,150],[151,300],[301,450],[451,600],[601,750],[751,900],[901,1050],[1051,1200],[1201,1350],[1351,1500],[1501,1650],[1651,1800],[1801,1950],[1951,2100],[2101,2250],[2251,2400],[2401,2546]],
+      "status": "full",
+      "reason": "All logical lines 1..EOF personally displayed with line numbers and reviewed in untruncated <=150-line windows; hashes alone were never counted as reading.",
+      "sha256_final": "9E612DB7885026A99D752A21566064D58C2CCE8EAED3B692EE42E17F3EFD8335",
+      "content_unchanged": true,
+      "description": "Pi local-session source: append-only JSONL under a configurable root (env PI_CODING_AGENT_SESSION_DIR > settings.json sessionDir > ~/.pi/agent/sessions); header {type:session,id,version,cwd}; parent-linked entry tree (id/parentId) with lineage/leaf reads, tree summary (branch count), structural safety checks (duplicate ids / cycles), append-only session_info rename, stable-snapshot retry reads, resume `pi --session <path>`, terminal cwd must match header cwd.",
+      "read_line_count": 2546,
+      "read_method": "PowerShell line-numbered read ([System.IO.File]::ReadAllLines; 1-based inclusive; <=150-line windows; untruncated)",
+      "missing_ranges": []
+    },
+    {
+      "path": "src-tauri/src/agents/opencode.rs",
+      "bytes": 66345,
+      "total_lines": 1870,
+      "sha256_initial": "82DBE5F5E2616FC1441022C9B1385D5A4D6229AA51FC40D830AD87A963AB846A",
+      "read_ranges": [[1,150],[151,300],[301,450],[451,600],[601,750],[751,900],[901,1050],[1051,1200],[1201,1350],[1351,1500],[1501,1650],[1651,1800],[1801,1870]],
+      "status": "full",
+      "reason": "All logical lines 1..EOF personally displayed with line numbers and reviewed in untruncated <=150-line windows; hashes alone were never counted as reading. (One window failed first under a wrong shell and was re-read in full under PowerShell; no line was left unread.)",
+      "sha256_final": "82DBE5F5E2616FC1441022C9B1385D5A4D6229AA51FC40D830AD87A963AB846A",
+      "content_unchanged": true,
+      "description": "opencode source: single SQLite DB ~/.local/share/opencode/opencode.db (XDG_DATA_HOME aware; project/session/message/part tables); virtual path opencode://<session_id>; read-only connections with 2s busy_timeout (rename_session is the only direct write; soft delete dumps rows to JSONL then deletes in one transaction, with restore). Message envelope role + part types drive blocks (text/reasoning/tool[completed|error]/file); system-reminders and @file Read injections are split/stripped; message_count counts only role=user envelopes.",
+      "read_line_count": 1870,
+      "read_method": "PowerShell line-numbered read ([System.IO.File]::ReadAllLines; 1-based inclusive; <=150-line windows; untruncated)",
+      "missing_ranges": []
+    },
+    {
+      "path": "src-tauri/src/agents/agy.rs",
+      "bytes": 49515,
+      "total_lines": 1321,
+      "sha256_initial": "A48EE3AA6A676049CF928D813C477B3D6CE76D65BCAA852FBBEDCAA032DA6DF2",
+      "read_ranges": [[1,150],[151,300],[301,450],[451,600],[601,750],[751,900],[901,1050],[1051,1200],[1201,1321]],
+      "status": "full",
+      "reason": "All logical lines 1..EOF personally displayed with line numbers and reviewed in untruncated <=150-line windows; hashes alone were never counted as reading.",
+      "sha256_final": "A48EE3AA6A676049CF928D813C477B3D6CE76D65BCAA852FBBEDCAA032DA6DF2",
+      "content_unchanged": true,
+      "description": "Antigravity CLI (agy) source: ~/.gemini/antigravity-cli/brain/<uuid>/.system_generated/logs/transcript.jsonl (or transcript_full.jsonl, larger file wins) + history.jsonl workspace map; IDE variant (~/.gemini/antigravity) merged with CLI priority. USER_INPUT XML unwrap, truncated-field repair, optional early-history recovery via per-session .git history (git log/show binary search); no usage data; resume `agy --conversation <uuid>` (IDE sessions not CLI-resumable).",
+      "read_line_count": 1321,
+      "read_method": "PowerShell line-numbered read ([System.IO.File]::ReadAllLines; 1-based inclusive; <=150-line windows; untruncated)",
+      "missing_ranges": []
+    },
+    {
+      "path": "src-tauri/src/agents/claude.rs",
+      "bytes": 170243,
+      "total_lines": 4101,
+      "sha256_initial": "6AFB7EB1FA3BF21C0BDC9CD190559D3F76B4FB45FE60DCC18D17DFC08AB6058C",
+      "read_ranges": [[30,179],[180,329],[330,479],[480,629],[830,979],[1060,1209],[1210,1359],[1360,1509],[1510,1659],[1660,1809]],
+      "status": "partial",
+      "reason": "Selective per task scope: session discovery/ID (32-198, 1241-1456), user-message determination (342-371, 599-615, 830-979), message parsing (1458-1809), resume/chat_command (252-308), disk fork + fork-before-user-turn (1060-1239). Unread ranges are recorded in missing_ranges; not claimed as a full read.",
+      "sha256_final": "6AFB7EB1FA3BF21C0BDC9CD190559D3F76B4FB45FE60DCC18D17DFC08AB6058C",
+      "content_unchanged": true,
+      "description": "Claude Code source (selective read): ~/.claude/projects/<encoded>/<sessionId>.jsonl with <sessionId>/subagents/*.jsonl folded to the parent id; prefix-byte scan cache; record_to_msg normalization (queued_command/file attachments, system/local_command records, tool_use/tool_result/structuredPatch diff, image-source meta de-dup, meta classification with content-prefix fallbacks); disk-level fork (new uuids + parentUuid/leafUuid rewrite) and fork-before-user-turn truncation; resume `claude --resume <id>`; chat_command long-lived stream-json with --fork-session for btw side-chat.",
+      "read_line_count": 1500,
+      "read_method": "PowerShell line-numbered read ([System.IO.File]::ReadAllLines; 1-based inclusive; <=150-line windows; untruncated)",
+      "missing_ranges": [[1,29],[630,829],[980,1059],[1810,4101]]
+    },
+    {
+      "path": "src-tauri/src/agents/codex.rs",
+      "bytes": 159375,
+      "total_lines": 3950,
+      "sha256_initial": "27BBF8E420BB0279B13FBF98C54FB060B751DAA12CB82D0D371E3D9552ADD4C7",
+      "read_ranges": [[35,184],[185,334],[440,589],[589,738],[1124,1273],[1274,1423],[1424,1573],[1574,1723],[1724,1873],[2112,2261],[2261,2410],[2440,2589],[2590,2739]],
+      "status": "partial",
+      "reason": "Selective per task scope: session discovery/ID/flags (35-198, 449-513, 2112-2231), user-message determination (516-619, 1174-1209, 2464-2507), message parsing incl. tools/apply_patch (1424-1873), resume (2328-2330, 2388-2410). Unread ranges are recorded in missing_ranges; not claimed as a full read.",
+      "sha256_final": "27BBF8E420BB0279B13FBF98C54FB060B751DAA12CB82D0D371E3D9552ADD4C7",
+      "content_unchanged": true,
+      "description": "Codex source (selective read): rollout JSONL under ~/.codex/sessions (+ archived_sessions when enabled) with first-line session_meta (id/cwd); ~/.codex/session_index.jsonl titles; state_<N>.sqlite thread flags (internal/archived); optional `codex app-server` thread list. Read merges event_msg clean text with response_item tool/image payloads, rewrite of exec-wrapped apply_patch, patch_apply_end diff augmentation; resume `codex resume <id>`; chat via app-server (chat_turn_command `codex exec [resume <id>] --json`).",
+      "read_line_count": 1948,
+      "read_method": "PowerShell line-numbered read ([System.IO.File]::ReadAllLines; 1-based inclusive; <=150-line windows; untruncated)",
+      "missing_ranges": [[1,34],[335,439],[739,1123],[1874,2111],[2411,2439],[2740,3950]]
+    },
+    {
+      "path": "src-tauri/src/agents/grok.rs",
+      "bytes": 115103,
+      "total_lines": 3182,
+      "sha256_initial": "9C73395A3C86C9074514A424DDBF39C0CEA528C9CECAAA9EBA81BF7BF5C35CFA",
+      "read_ranges": [[1,80],[216,365],[470,619],[860,1009],[985,1134],[1135,1284],[1850,1999]],
+      "status": "partial",
+      "reason": "Selective per task scope: storage/discovery/ID (1-80, 216-285), chunk merge + role handling (470-619), meta/system messages + tool-result upsert (860-1009), full read_updates parser (985-1284), SessionSource impl incl. resume (1850-1999). Unread ranges are recorded in missing_ranges; not claimed as a full read.",
+      "sha256_final": "9C73395A3C86C9074514A424DDBF39C0CEA528C9CECAAA9EBA81BF7BF5C35CFA",
+      "content_unchanged": true,
+      "description": "Grok Build source (selective read): ~/.grok/sessions/<group>/<id>/ directory with updates.jsonl as the authoritative UI event stream (session/update: user/agent/thought chunks, tool_call + tool_call_update pairing, plan/retry/hook/recap/unsupported events), summary.json list metadata (hidden/subagent flags, generated_title, cwd), signals.json for context usage; chat_history.jsonl intentionally unused. resume `grok --resume <id>`; rename writes summary.json atomically with a lock (index-visible; body not fully read).",
+      "read_line_count": 955,
+      "read_method": "PowerShell line-numbered read ([System.IO.File]::ReadAllLines; 1-based inclusive; <=150-line windows; untruncated)",
+      "missing_ranges": [[81,215],[366,469],[620,859],[1285,1849],[2000,3182]]
+    },
+    {
+      "path": "src-tauri/src/agents/kimi.rs",
+      "bytes": 114149,
+      "total_lines": 3178,
+      "sha256_initial": "34BA5E6ED85E60F77324F202360C775D06AE0C472D62E111E6388EAE40861206",
+      "read_ranges": [[1,150],[366,515],[516,665],[665,814],[825,974],[975,1124],[1715,1864],[1865,2014],[2014,2113]],
+      "status": "partial",
+      "reason": "Selective per task scope: storage/home/identity (1-150, 87-111), user-prompt determination (366-515), main-wire message parsing incl. tool call/result (825-1124), turn/usage aggregation (1715-1801), SessionSource impl incl. resume/search/failure behavior (1865-2113). Unread ranges are recorded in missing_ranges; not claimed as a full read.",
+      "sha256_final": "34BA5E6ED85E60F77324F202360C775D06AE0C472D62E111E6388EAE40861206",
+      "content_unchanged": true,
+      "description": "Kimi Code source (selective read): ~/.kimi-code/sessions/<group>/<id>/ with state.json (id/cwd/title/lastPrompt/timestamps) and agents/main/wire.jsonl primary transcript (+ per-agent subagent wires); discovery = session_index.jsonl + disk scan dedup; parser = turn.prompt with origin.kind=user -> user, context.append_loop_event (content.part/tool.call/tool.result) -> assistant text/thinking, tool_use with file-change diff, role=user tool_result; bounded input/result sizes; contains_text restricted to user prompts; resume `kimi --session <id>`; trash/restore manages session_index entries with revision verification.",
+      "read_line_count": 1298,
+      "read_method": "PowerShell line-numbered read ([System.IO.File]::ReadAllLines; 1-based inclusive; <=150-line windows; untruncated)",
+      "missing_ranges": [[151,365],[815,824],[1125,1714],[2114,3178]]
+    }
+  ],
+  "summary": {
+    "t1_files": 7,
+    "t1_full_files": 3,
+    "t1_partial_files": 4,
+    "t1_total_lines": 20148,
+    "t1_read_lines": 11438,
+    "t1_missing_lines_in_partial": 8710,
+    "t2_sweep_reference": "research/sweep-cc-sessions-viewer.json",
+    "t2_sweep_files_scanned": 93,
+    "t2_parser_filter_query": "ConvertFrom-Json + path filter agents/(pi|opencode|agy|claude|codex|grok|kimi).rs -> 7 entries; probe classes seen: provider_paths, resume_launch, inline_tests, ignored_result, unwrap_or, truncation_limit, sql_dynamic, concurrency, secret_redaction, surface_mcp. Used strictly as cross-check; no full-file read and no probe-count reinterpretation.",
+    "deliverable_report": "research/audit-cc-sessions-viewer-parsers.md"
+  },
+  "supplemental_reads": [
+    {
+      "path": "src-tauri/src/agents/mod.rs",
+      "read_ranges": [[251,253],[257,259],[262,264],[274,281],[323,332],[339,341],[345,347],[438,447],[508,542],[950,1015],[1015,1060]],
+      "read_method": "PowerShell line-numbered read (grep-located excerpts)",
+      "note": "Shared search/capability core, shard A territory, cited as cross-reference only and not counted in T1 coverage: contains_text default = raw file byte scan (508-515); find_text_hit exact filter = role == user && block.kind == text, no meta_kind filter (998-1033, esp. 1008-1019); find_pi_text_hit per-leaf user-text scan (956-986); trait capability defaults (read_session_at falls back to read_session 251-253; session_tree/session_export_json Err 257-264; fork_session/fork_session_before_user_turn Err 274-289; chat_command None 323-332; parse_chat_line Ignore 339-341; chat_process_model LongLivedStdin 345-347; chat_turn_command None 438-447)."
+    },
+    {
+      "path": "research/asg-provider-matrix.json",
+      "read_ranges": [],
+      "read_method": "PowerShell raw read (no line numbers)",
+      "note": "ASG provider capability matrix export used for the ASG comparison section only; not part of the audited repository and not counted in T1 coverage."
+    },
+    {
+      "path": "research/sweep-cc-sessions-viewer.json",
+      "read_ranges": [],
+      "read_method": "ConvertFrom-Json + path-filtered projection (7 parser files only; structure check of top-level keys)",
+      "note": "T2 cross-check by the shard worker; the full sweep was produced by the main session and was not read in whole."
+    }
+  ],
+  "snapshot": {
+    "package_version": "0.3.25",
+    "source_of_version": "package.json:4 and src-tauri/Cargo.toml:3 (recorded by shard A; not re-verified here)",
+    "git_metadata_present": false
+  },
+  "methods_note": "All findings in the companion report are static-source observations with file:line anchors from this SHA256-pinned snapshot; no product build/test/run was performed and no flagged path was executed. Byte counts come from Get-Item; line counts from [System.IO.File]::ReadAllLines."
+}

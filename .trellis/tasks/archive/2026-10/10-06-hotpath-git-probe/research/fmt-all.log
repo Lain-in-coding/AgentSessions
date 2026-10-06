@@ -1,0 +1,270 @@
+Diff in \\?\C:\AgentSessions\crates\agent-session-grep-adapters-sqlite\tests\invariant_failure_semantics.rs:15:
+ //!
+ //! 证据均为合成数据、显式注入时钟，无网络、无真实用户数据、无系统时间依赖。
+ 
+-use agent_session_grep_application::{App, AppRequest, AppResponse, ResponseBudget};
+ use agent_session_grep_adapters_sqlite::{
+     INDEX_PROJECTION_VERSION, PARSER_SEMANTIC_VERSION, SqliteStore,
+ };
+Diff in \\?\C:\AgentSessions\crates\agent-session-grep-adapters-sqlite\tests\invariant_failure_semantics.rs:22:
++use agent_session_grep_application::{App, AppRequest, AppResponse, ResponseBudget};
+ use agent_session_grep_domain::{IdKind, MessagePlacement, StableId};
+ use agent_session_grep_ports::{
+-    CatalogStore, NoResumeClaims, PortError, RetrievalMode, SearchFacets, SearchFilters, SearchIndex,
++    CatalogStore, NoResumeClaims, PortError, RetrievalMode, SearchFacets, SearchFilters,
++    SearchIndex,
+ };
+ 
+ const SOURCE_PATH: &str = "invariant-source.jsonl";
+Diff in \\?\C:\AgentSessions\crates\agent-session-grep-adapters-sqlite\tests\invariant_failure_semantics.rs:92:
+     let message = sid(IdKind::Message, "failure-message");
+     let session = sid(IdKind::Session, "failure-session");
+     let document = sid(IdKind::Document, "failure-document");
+-    let placement = MessagePlacement::new(session.clone(), document.clone(), message.clone(), 0, false, None);
++    let placement = MessagePlacement::new(
++        session.clone(),
++        document.clone(),
++        message.clone(),
++        0,
++        false,
++        None,
++    );
+     let baseline_payload = payload("alpha baseline body");
+     let batch = source_batch(
+         vec![
+Diff in \\?\C:\AgentSessions\crates\agent-session-grep-adapters-sqlite\tests\invariant_failure_semantics.rs:142:
+     let generation = store.active_generation().unwrap();
+     assert_eq!(
+         fingerprint_of(&store),
+-        (Some(10), Some("fp-v1".to_string()), i64::from(PARSER_SEMANTIC_VERSION)),
++        (
++            Some(10),
++            Some("fp-v1".to_string()),
++            i64::from(PARSER_SEMANTIC_VERSION)
++        ),
+         "baseline watermark: len/fingerprint/parser_version"
+     );
+ 
+Diff in \\?\C:\AgentSessions\crates\agent-session-grep-adapters-sqlite\tests\invariant_failure_semantics.rs:173:
+     // 不覆盖新鲜度缓存（水位）：仍是 last-good 扫描的指纹。
+     assert_eq!(
+         fingerprint_of(&store),
+-        (Some(10), Some("fp-v1".to_string()), i64::from(PARSER_SEMANTIC_VERSION)),
++        (
++            Some(10),
++            Some("fp-v1".to_string()),
++            i64::from(PARSER_SEMANTIC_VERSION)
++        ),
+         "failed batch must not advance the source-scan fingerprint"
+     );
+     // 不覆盖 last-good：catalog payload 与 FTS 投影都保持旧内容。
+Diff in \\?\C:\AgentSessions\crates\agent-session-grep-adapters-sqlite\tests\invariant_failure_semantics.rs:236:
+     assert_eq!(store.query("alpha", 10).unwrap().len(), 1);
+     assert_eq!(
+         fingerprint_of(&store),
+-        (Some(10), Some("fp-v1".to_string()), i64::from(PARSER_SEMANTIC_VERSION)),
++        (
++            Some(10),
++            Some("fp-v1".to_string()),
++            i64::from(PARSER_SEMANTIC_VERSION)
++        ),
+         "recovery must not touch the successful scan's watermark"
+     );
+     assert_eq!(
+Diff in \\?\C:\AgentSessions\crates\agent-session-grep-adapters-sqlite\tests\invariant_failure_semantics.rs:267:
+         .iter()
+         .enumerate()
+         .map(|(i, id)| {
+-            MessagePlacement::new(session.clone(), document.clone(), id.clone(), i as u32, false, None)
++            MessagePlacement::new(
++                session.clone(),
++                document.clone(),
++                id.clone(),
++                i as u32,
++                false,
++                None,
++            )
+         })
+         .collect();
+     let mut entries = vec![
+Diff in \\?\C:\AgentSessions\crates\agent-session-grep-adapters-sqlite\tests\invariant_failure_semantics.rs:344:
+     assert_eq!(store.active_generation().unwrap(), generation);
+     assert_eq!(
+         fingerprint_of(&store),
+-        (Some(10), Some("fp-v1".to_string()), i64::from(PARSER_SEMANTIC_VERSION))
++        (
++            Some(10),
++            Some("fp-v1".to_string()),
++            i64::from(PARSER_SEMANTIC_VERSION)
++        )
+     );
+     drop(app);
+     drop(store);
+Diff in \\?\C:\AgentSessions\crates\agent-session-grep-adapters-sqlite\tests\invariant_failure_semantics.rs:362:
+         );
+     }
+ }
+-
+-
+-
+-
+-
+ 
+Diff in \\?\C:\AgentSessions\crates\agent-session-grep-adapters-sqlite\tests\invariant_projection_consistency.rs:20:
+ 
+ use agent_session_grep_adapters_sqlite::SqliteStore;
+ use agent_session_grep_application::{
+-    App, AppRequest, AppResponse, ResponseBudget, MESSAGE_FTS_MAX_CHARS, bounded_index_text,
++    App, AppRequest, AppResponse, MESSAGE_FTS_MAX_CHARS, ResponseBudget, bounded_index_text,
+ };
+ use agent_session_grep_domain::{IdKind, StableId};
+ use agent_session_grep_ports::{
+Diff in \\?\C:\AgentSessions\crates\agent-session-grep-application\tests\invariant_search_gates.rs:132:
+         limit: usize,
+         include_system: bool,
+     ) -> Vec<SearchHit> {
+-        self.calls.borrow_mut().lexical_filters.push(Self::provider_names(filters));
++        self.calls
++            .borrow_mut()
++            .lexical_filters
++            .push(Self::provider_names(filters));
+         self.calls.borrow_mut().lexical_limits.push(limit);
+         let mut hits: Vec<SearchHit> = self
+             .rows
+Diff in \\?\C:\AgentSessions\crates\agent-session-grep-application\tests\invariant_search_gates.rs:224:
+         &self,
+         _session_id: &StableId,
+     ) -> PortResult<agent_session_grep_domain::SessionContextGraph> {
+-        Err(PortError::NotFound("synthetic catalog has no context graph".into()))
++        Err(PortError::NotFound(
++            "synthetic catalog has no context graph".into(),
++        ))
+     }
+ 
+     fn message_contexts(&self, _message_id: &StableId) -> PortResult<Vec<MessageContextCandidate>> {
+Diff in \\?\C:\AgentSessions\crates\agent-session-grep-application\tests\invariant_search_gates.rs:231:
+-        Err(PortError::NotFound("synthetic catalog has no context graph".into()))
++        Err(PortError::NotFound(
++            "synthetic catalog has no context graph".into(),
++        ))
+     }
+ 
+     fn session_of(
+Diff in \\?\C:\AgentSessions\crates\agent-session-grep-application\tests\invariant_search_gates.rs:292:
+         _facets: &SearchFacets,
+         include_system: bool,
+     ) -> PortResult<Vec<SearchHit>> {
+-        self.calls.borrow_mut().semantic_filters.push(Self::provider_names(filters));
++        self.calls
++            .borrow_mut()
++            .semantic_filters
++            .push(Self::provider_names(filters));
+         self.calls.borrow_mut().semantic_limits.push(limit);
+         let mut scored: Vec<(f32, &Row)> = self
+             .rows
+Diff in \\?\C:\AgentSessions\crates\agent-session-grep-application\tests\invariant_search_gates.rs:341:
+     let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
+     let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+     let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+-    if na == 0.0 || nb == 0.0 { 0.0 } else { dot / (na * nb) }
++    if na == 0.0 || nb == 0.0 {
++        0.0
++    } else {
++        dot / (na * nb)
++    }
+ }
+ 
+ fn search(
+Diff in \\?\C:\AgentSessions\crates\agent-session-grep-application\tests\invariant_search_gates.rs:365:
+             query_embedding: Some(vec![1.0, 0.0]),
+         })
+         .expect("synthetic search must succeed");
+-    let AppResponse::Search { hits, next_cursor, .. } = response else {
++    let AppResponse::Search {
++        hits, next_cursor, ..
++    } = response
++    else {
+         panic!("search expected");
+     };
+     (hits.into_iter().map(|hit| hit.id).collect(), next_cursor)
+Diff in \\?\C:\AgentSessions\crates\agent-session-grep-application\tests\invariant_search_gates.rs:423:
+     ] {
+         let (ids, cursor) = search(&app, "cap-token", codex_only(), 2, mode);
+         assert!(
+-            ids.iter().all(|id| id.as_str().starts_with("msg_v1_in-domain-")),
++            ids.iter()
++                .all(|id| id.as_str().starts_with("msg_v1_in-domain-")),
+             "mode {mode:?} admitted out-of-domain hits: {ids:?}"
+         );
+         assert_eq!(ids.len(), 2, "mode {mode:?} lost in-domain hits: {ids:?}");
+Diff in \\?\C:\AgentSessions\crates\agent-session-grep-application\tests\invariant_search_gates.rs:498:
+     // 只在 lexical 路径做准入断言：该路径的证据门是正文命中（FTS MATCH）。
+     // Semantic/Hybrid 的证据定义是向量相似度，adapter 的 top-k 无相似度阈值
+     // （见 research/invariant-matrix.md 第 2 项边界记录）——不在此冒充已通过。
+-    let (ids, _) = search(&app, "invariant-needle", SearchFilters::default(), 10, RetrievalMode::Lexical);
++    let (ids, _) = search(
++        &app,
++        "invariant-needle",
++        SearchFilters::default(),
++        10,
++        RetrievalMode::Lexical,
++    );
+     assert_eq!(
+         ids.iter().map(StableId::as_str).collect::<Vec<_>>(),
+-        vec![
+-            "msg_v1_matching-recent",
+-            "msg_v1_matching-old",
+-        ],
++        vec!["msg_v1_matching-recent", "msg_v1_matching-old",],
+         "evidence gate must exclude the recent repo candidate and \
+          recency must order the admitted hits"
+     );
+Diff in \\?\C:\AgentSessions\crates\agent-session-grep-application\tests\invariant_search_gates.rs:516:
+     assert!(recent > old, "recency signal must re-order admitted hits");
+     assert!(old > 0.0, "repo boost keeps admitted evidence positive");
+ }
+-
+-
+ 
+Diff in \\?\C:\AgentSessions\crates\agent-session-grep-cli\tests\invariant_resume_args.rs:195:
+     let workspace = dir.path().join("workspace");
+     std::fs::create_dir_all(&workspace).expect("create workspace");
+     let workspace_str = workspace.to_string_lossy().into_owned();
+-    let (fixture, anchor) = write_claude_fixture(dir.path(), &workspace_str, ADVERSARIAL_SESSION_ID);
++    let (fixture, anchor) =
++        write_claude_fixture(dir.path(), &workspace_str, ADVERSARIAL_SESSION_ID);
+     let out = run(&db, &["ingest", &fixture]);
+     assert!(out.status.success(), "ingest failed: {}", stdout(&out));
+     let session_wire = session_wire_for_message(&db, &anchor);
+Diff in \\?\C:\AgentSessions\crates\agent-session-grep-cli\tests\invariant_resume_args.rs:209:
+ 
+     // 1) 首次 `--yes` 强制只预览（持久标记缺失），不 spawn。
+     let out = run_resume(&db, &path, &cwd_out, &args_out, &session_wire);
+-    assert!(out.status.success(), "first resume failed: {}", stdout(&out));
++    assert!(
++        out.status.success(),
++        "first resume failed: {}",
++        stdout(&out)
++    );
+     let frame = first_json(&out);
+     assert_eq!(frame["data"]["executed"], false);
+     assert_eq!(frame["data"]["first_run_preview"], true);
+Diff in \\?\C:\AgentSessions\crates\agent-session-grep-cli\tests\invariant_resume_args.rs:217:
+ 
+     // 2) 第二次 `--yes` 真实执行：argv 数组 + current_dir，绝无 shell 拼接。
+     let out = run_resume(&db, &path, &cwd_out, &args_out, &session_wire);
+-    assert!(out.status.success(), "second resume failed: {}", stdout(&out));
++    assert!(
++        out.status.success(),
++        "second resume failed: {}",
++        stdout(&out)
++    );
+     let frame = first_json(&out);
+     assert_eq!(frame["data"]["executed"], true, "{frame}");
+ 
+Diff in \\?\C:\AgentSessions\crates\agent-session-grep-cli\tests\invariant_resume_args.rs:240:
+         pwned.display()
+     );
+ }
+-
+ 

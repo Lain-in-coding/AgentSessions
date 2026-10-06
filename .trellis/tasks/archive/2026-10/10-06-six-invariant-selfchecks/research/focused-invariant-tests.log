@@ -1,0 +1,49 @@
+== D3 six-invariant focused tests (final) ==
+command: cargo test -p agent-session-grep-application --test invariant_search_gates --locked --target-dir C:/AgentSessions/.trellis/.runtime/target-invariants
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.12s
+     Running tests\invariant_search_gates.rs (.trellis/.runtime/target-invariants\debug\deps\invariant_search_gates-1a2aea353406ce5f.exe)
+
+running 2 tests
+test zero_evidence_recent_repo_candidate_is_not_admitted_by_boost ... ok
+test provider_filter_precedes_the_cap_in_lexical_semantic_and_hybrid_paths ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+command: cargo test -p agent-session-grep-adapters-sqlite --test invariant_failure_semantics --locked --target-dir C:/AgentSessions/.trellis/.runtime/target-invariants
+   Compiling agent-session-grep-adapters-sqlite v0.1.0 (C:\AgentSessions\crates\agent-session-grep-adapters-sqlite)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.21s
+     Running tests\invariant_failure_semantics.rs (.trellis/.runtime/target-invariants\debug\deps\invariant_failure_semantics-9e7190c7f794f98c.exe)
+
+running 3 tests
+test failed_source_commit_keeps_watermark_fingerprint_and_last_good_rows ... ok
+test budget_trimmed_response_is_not_persisted_as_a_fresh_full_view ... ok
+test interrupted_intent_never_becomes_a_fresh_full_view_after_reopen ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.17s
+
+
+command: cargo test -p agent-session-grep-adapters-sqlite --test invariant_projection_consistency --locked --target-dir C:/AgentSessions/.trellis/.runtime/target-invariants
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.10s
+     Running tests\invariant_projection_consistency.rs (.trellis/.runtime/target-invariants\debug\deps\invariant_projection_consistency-6479cd35a47e8419.exe)
+
+running 2 tests
+test app_get_returns_full_body_while_search_stays_inside_the_projection ... ok
+test capped_projection_is_identical_across_write_and_rebuild_paths ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+
+command: cargo test -p agent-session-grep-cli --test invariant_resume_args --locked --target-dir C:/AgentSessions/.trellis/.runtime/target-invariants
+   Compiling agent-session-grep-cli v0.1.0 (C:\AgentSessions\crates\agent-session-grep-cli)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.75s
+     Running tests\invariant_resume_args.rs (.trellis/.runtime/target-invariants\debug\deps\invariant_resume_args-4886c36d62b3408b.exe)
+
+running 2 tests
+test descriptor_keeps_argv_and_cwd_separate_and_refuses_unsafe_display ... ok
+test resume_executes_adversarial_session_id_as_one_argv_without_a_shell ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.14s
+
+
+command: cargo fmt --all -- --check

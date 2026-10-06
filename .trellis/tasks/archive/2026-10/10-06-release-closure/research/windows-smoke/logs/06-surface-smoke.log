@@ -1,0 +1,168 @@
+
+# ==== surface smoke against the installed pair (robot envelopes, exit codes, MCP handshake)
+# command: pwsh -NoProfile -File C:\AgentSessions-worktrees\b6-release-closure\scripts\install\smoke.ps1 -Binary C:\AgentSessions\.trellis\.runtime\b6-smoke\prefix\agent-session-grep.exe -AliasBinary C:\AgentSessions\.trellis\.runtime\b6-smoke\prefix\asg.exe
+# cwd: C:\AgentSessions
+# started: 2026-10-06 23:59:30+08:00
+smoke: pass  agent-session-grep --version exits 0
+smoke: pass  asg --version exits 0
+smoke: pass  agent-session-grep and asg report the same version
+smoke: binary  C:\AgentSessions\.trellis\.runtime\b6-smoke\prefix\agent-session-grep.exe
+smoke: workdir C:\Users\小Q\AppData\Local\Temp\agent-session-grep-smoke-5d458b84ff02406b899659d23f920d99
+smoke: pass  doctor on an absent store returns catalog_error (exit 6)
+smoke: pass  doctor does not create an absent database
+smoke: pass  sync exits 0
+smoke: pass  sync envelope reports ok:true
+smoke: pass  sync reports data.messages == 3
+smoke: pass  doctor exits 0
+smoke: pass  doctor reports data.db == ok
+smoke: pass  doctor reports a numeric data.schema
+smoke: pass  search exits 0
+smoke: pass  search returns a non-empty data.hits
+smoke: pass  first search hit id starts with msg_v1_
+smoke: pass  get <hit-id> exits 0
+smoke: pass  get <hit-id> returns a non-empty data.payload
+smoke: pass  context <ses-id> exits 0
+smoke: pass  context returns non-empty data.messages
+smoke: pass  context returns non-empty data.evidence
+smoke: pass  status exits 0
+smoke: pass  status reports data.catalog_count >= 5
+smoke: pass  get <absent id> exits 4
+smoke: pass  get <absent id> reports ok:false
+smoke: pass  get <absent id> reports error.code == not_found
+smoke: pass  context <absent session> exits 4
+smoke: pass  context <absent session> reports error.code == not_found
+smoke: pass  search with a garbage cursor exits 2
+smoke: pass  garbage cursor reports error.code == cursor_invalid
+smoke: pass  sync ingests one Grok message
+smoke: pass  providers exits 0
+smoke: pass  providers advertises more than the legacy two providers
+smoke: pass  advertised provider filter aider selects the right messages
+smoke: pass  advertised provider filter claude-code selects the right messages
+smoke: pass  advertised provider filter codex selects the right messages
+smoke: pass  advertised provider filter grok-build selects the right messages
+smoke: pass  advertised provider filter pi selects the right messages
+smoke: pass  advertised provider filter kimi-code selects the right messages
+smoke: pass  advertised provider filter qoder selects the right messages
+smoke: pass  advertised provider filter openclaw selects the right messages
+smoke: pass  advertised provider filter tencent-codebuddy selects the right messages
+smoke: pass  advertised provider filter opencode selects the right messages
+smoke: pass  advertised provider filter cline selects the right messages
+smoke: pass  advertised provider filter hermes selects the right messages
+smoke: pass  advertised provider filter antigravity selects the right messages
+smoke: pass  advertised provider filter cursor selects the right messages
+smoke: pass  index embeddings indexes all four synthetic messages
+smoke: pass  CLI semantic uses the index and Grok filter
+smoke: pass  CLI hybrid uses the index and Grok filter
+smoke: pass  relocate preview refuses an absent catalog
+smoke: pass  relocate preview creates no catalog
+smoke: pass  relocation fixture sync succeeds
+smoke: pass  relocation fixture has a canonical Session ID
+smoke: pass  relocate preview returns a planned Robot result
+smoke: pass  relocate preview does not write the catalog
+smoke: pass  relocate preview creates no backup
+smoke: pass  relocate preview reports bounded counts and selected retention
+smoke: pass  relocate results contain no private path fields
+smoke: pass  relocate apply advances generation exactly once
+smoke: pass  relocate apply creates a verified backup
+smoke: pass  relocate apply leaves provider source bytes unchanged
+smoke: pass  relocate backup retains the previous generation
+smoke: pass  sync after relocation retains identity and generation
+smoke: pass  the original Session ID still resolves after relocation
+smoke: pass  repeated relocation preview is an unchanged no-op
+smoke: pass  relocate help describes apply and alias lifetime without a catalog
+smoke: pass  capability metadata marks relocation CLI-only
+smoke: pass  mcp server exits 0 on stdin EOF
+smoke: pass  every mcp stdout line is valid JSON
+smoke: pass  tools/list returns exactly 9 tools
+smoke: pass  tools/call get_status returns isError:false
+smoke: pass  tools/call get_message returns isError:false
+smoke: pass  get_message returns the real anchor message id
+smoke: pass  get_message around=0 returns exactly one message
+smoke: pass  MCP semantic uses the index and Grok filter
+smoke: pass  MCP hybrid uses the index and Grok filter
+smoke: all assertions passed
+# exit=0
+
+# ==== surface smoke against the installed pair (robot envelopes, exit codes, MCP handshake)
+# command: pwsh -NoProfile -File C:\AgentSessions-worktrees\b6-release-closure\scripts\install\smoke.ps1 -Binary C:\AgentSessions\.trellis\.runtime\b6-smoke\prefix\agent-session-grep.exe -AliasBinary C:\AgentSessions\.trellis\.runtime\b6-smoke\prefix\asg.exe
+# cwd: C:\AgentSessions
+# started: 2026-10-07 00:01:40+08:00
+smoke: pass  agent-session-grep --version exits 0
+smoke: pass  asg --version exits 0
+smoke: pass  agent-session-grep and asg report the same version
+smoke: binary  C:\AgentSessions\.trellis\.runtime\b6-smoke\prefix\agent-session-grep.exe
+smoke: workdir C:\Users\小Q\AppData\Local\Temp\agent-session-grep-smoke-f690ac34769149958f12345c00bc7995
+smoke: pass  doctor on an absent store returns catalog_error (exit 6)
+smoke: pass  doctor does not create an absent database
+smoke: pass  sync exits 0
+smoke: pass  sync envelope reports ok:true
+smoke: pass  sync reports data.messages == 3
+smoke: pass  doctor exits 0
+smoke: pass  doctor reports data.db == ok
+smoke: pass  doctor reports a numeric data.schema
+smoke: pass  search exits 0
+smoke: pass  search returns a non-empty data.hits
+smoke: pass  first search hit id starts with msg_v1_
+smoke: pass  get <hit-id> exits 0
+smoke: pass  get <hit-id> returns a non-empty data.payload
+smoke: pass  context <ses-id> exits 0
+smoke: pass  context returns non-empty data.messages
+smoke: pass  context returns non-empty data.evidence
+smoke: pass  status exits 0
+smoke: pass  status reports data.catalog_count >= 5
+smoke: pass  get <absent id> exits 4
+smoke: pass  get <absent id> reports ok:false
+smoke: pass  get <absent id> reports error.code == not_found
+smoke: pass  context <absent session> exits 4
+smoke: pass  context <absent session> reports error.code == not_found
+smoke: pass  search with a garbage cursor exits 2
+smoke: pass  garbage cursor reports error.code == cursor_invalid
+smoke: pass  sync ingests one Grok message
+smoke: pass  providers exits 0
+smoke: pass  providers advertises more than the legacy two providers
+smoke: pass  advertised provider filter aider selects the right messages
+smoke: pass  advertised provider filter claude-code selects the right messages
+smoke: pass  advertised provider filter codex selects the right messages
+smoke: pass  advertised provider filter grok-build selects the right messages
+smoke: pass  advertised provider filter pi selects the right messages
+smoke: pass  advertised provider filter kimi-code selects the right messages
+smoke: pass  advertised provider filter qoder selects the right messages
+smoke: pass  advertised provider filter openclaw selects the right messages
+smoke: pass  advertised provider filter tencent-codebuddy selects the right messages
+smoke: pass  advertised provider filter opencode selects the right messages
+smoke: pass  advertised provider filter cline selects the right messages
+smoke: pass  advertised provider filter hermes selects the right messages
+smoke: pass  advertised provider filter antigravity selects the right messages
+smoke: pass  advertised provider filter cursor selects the right messages
+smoke: pass  index embeddings indexes all four synthetic messages
+smoke: pass  CLI semantic uses the index and Grok filter
+smoke: pass  CLI hybrid uses the index and Grok filter
+smoke: pass  relocate preview refuses an absent catalog
+smoke: pass  relocate preview creates no catalog
+smoke: pass  relocation fixture sync succeeds
+smoke: pass  relocation fixture has a canonical Session ID
+smoke: pass  relocate preview returns a planned Robot result
+smoke: pass  relocate preview does not write the catalog
+smoke: pass  relocate preview creates no backup
+smoke: pass  relocate preview reports bounded counts and selected retention
+smoke: pass  relocate results contain no private path fields
+smoke: pass  relocate apply advances generation exactly once
+smoke: pass  relocate apply creates a verified backup
+smoke: pass  relocate apply leaves provider source bytes unchanged
+smoke: pass  relocate backup retains the previous generation
+smoke: pass  sync after relocation retains identity and generation
+smoke: pass  the original Session ID still resolves after relocation
+smoke: pass  repeated relocation preview is an unchanged no-op
+smoke: pass  relocate help describes apply and alias lifetime without a catalog
+smoke: pass  capability metadata marks relocation CLI-only
+smoke: pass  mcp server exits 0 on stdin EOF
+smoke: pass  every mcp stdout line is valid JSON
+smoke: pass  tools/list returns exactly 9 tools
+smoke: pass  tools/call get_status returns isError:false
+smoke: pass  tools/call get_message returns isError:false
+smoke: pass  get_message returns the real anchor message id
+smoke: pass  get_message around=0 returns exactly one message
+smoke: pass  MCP semantic uses the index and Grok filter
+smoke: pass  MCP hybrid uses the index and Grok filter
+smoke: all assertions passed
+# exit=0

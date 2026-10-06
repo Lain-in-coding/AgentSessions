@@ -77,6 +77,23 @@ message-bearing `system` row remains readable for compatibility.
 
 ---
 
+## Lifecycle evidence contracts (B5)
+
+- Append: parsing a strictly longer file that extends the previous bytes keeps
+  every previously parsed message and span byte-identical; only the new
+  message and committed count grow (property across the 64-seed corpus).
+- Shrink / torn tail: truncation at a line boundary equals a prefix snapshot;
+  a torn half line is skipped honestly (committed/skipped/diagnostics report
+  it) and never fails the whole file or eats a valid prefix.
+- Same-length rewrite: rebuilt bytes win (no stale cache); spans stay tied to
+  the current bytes with unchanged ranges.
+- Fork: sibling messages may share a parent edge; dangling parent edges are
+  preserved as-is; an empty parentUuid maps to None.
+- Parse purity: ProviderAdapter::parse receives bytes only — it has no path
+  input and no previous-result input, so file moves and WAL handling are
+  store-layer concerns (see the relocation and source snapshot scenarios in
+  the sqlite adapter spec).
+
 ## Quality Check
 
 - [ ] `cargo fmt --all --check` clean, `cargo clippy ... -D warnings` clean.

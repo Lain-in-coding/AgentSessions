@@ -1,0 +1,1010 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-06",
+  "task": ".trellis/tasks/10-05-competitive-source-audit-plan",
+  "repository": "C:\\AgentSessions\\Github_src\\hstry",
+  "commit": "88b78b1f3a84723e31a2c444bec326829fd02459",
+  "scope": "T1 mandated full/subsystem static source read of hstry at the pinned commit; no build/test/run/network/git-write; T2 mechanical sweep receipt referenced as-is, not re-run.",
+  "status": "t1_read_complete",
+  "t1_scope_rule": "T1 full read: db.rs, parts.rs, peek.rs, core service.rs, config.rs, adapters/codex, adapters/claude-code. T1 partial: hstry-cli main.rs selective subsystem ranges (session discovery/import/export/search/resume/peek/freshness) with missing_ranges recorded. Other adapters/repairs rely on the T2 sweep receipt and are not personally line-read by this worker. Supplementary reads for schema/data-model/boundary/sync questions are listed separately and marked partial where applicable.",
+  "line_count_method": "UTF-8 logical lines via PowerShell Get-Content .Count; a trailing newline does not create an extra logical line; CodeGraph virtual EOF line (n+1) excluded.",
+  "read_method_observed": "codegraph node --file <path> --offset <start> --limit <=150 (line-numbered current on-disk source); PowerShell line-numbered reads for SQL/README/small support files; Select-String for function indexes.",
+  "files": [
+    {
+      "path": "crates/hstry-core/src/db.rs",
+      "bytes": 130140,
+      "total_lines": 3400,
+      "sha256_initial": "f5c50a3ea2e8b64d54e2f2500c03ba2632fe73d331acfc480565f0ba8f4eb698",
+      "read_ranges": [
+        [
+          1,
+          150
+        ],
+        [
+          151,
+          300
+        ],
+        [
+          301,
+          450
+        ],
+        [
+          451,
+          600
+        ],
+        [
+          601,
+          750
+        ],
+        [
+          751,
+          900
+        ],
+        [
+          901,
+          1050
+        ],
+        [
+          1051,
+          1200
+        ],
+        [
+          1201,
+          1350
+        ],
+        [
+          1351,
+          1500
+        ],
+        [
+          1501,
+          1650
+        ],
+        [
+          1651,
+          1800
+        ],
+        [
+          1801,
+          1950
+        ],
+        [
+          1951,
+          2100
+        ],
+        [
+          2101,
+          2250
+        ],
+        [
+          2251,
+          2400
+        ],
+        [
+          2401,
+          2550
+        ],
+        [
+          2551,
+          2700
+        ],
+        [
+          2701,
+          2850
+        ],
+        [
+          2851,
+          3000
+        ],
+        [
+          3001,
+          3150
+        ],
+        [
+          3151,
+          3300
+        ],
+        [
+          3301,
+          3400
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines personally displayed and reviewed in the listed sequential ranges (<=150 lines per read); hashes alone were not treated as reading.",
+      "sha256_final": "f5c50a3ea2e8b64d54e2f2500c03ba2632fe73d331acfc480565f0ba8f4eb698",
+      "content_unchanged": true,
+      "description": "Core DB: pool/WAL/open, schema+migrations, sources/conversations/messages/tags/tree CRUD, snapshots+summary cache, FTS5 search and maintenance, purge/dedup/watermarks/outbox/bulk-reseed, row converters, 4 FTS query tests.",
+      "read_line_count": 3400,
+      "read_method": "codegraph node (line-numbered current on-disk source), <=150 lines/read",
+      "missing_ranges": []
+    },
+    {
+      "path": "crates/hstry-core/src/parts.rs",
+      "bytes": 19160,
+      "total_lines": 564,
+      "sha256_initial": "15412c263b4b421c7cc93b3c6e19cdcfb1a1831ac06d07d5205b560e0bc6e233",
+      "read_ranges": [
+        [
+          1,
+          150
+        ],
+        [
+          151,
+          300
+        ],
+        [
+          301,
+          450
+        ],
+        [
+          451,
+          564
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines personally displayed and reviewed in the listed sequential ranges (<=150 lines per read); hashes alone were not treated as reading.",
+      "sha256_final": "15412c263b4b421c7cc93b3c6e19cdcfb1a1831ac06d07d5205b560e0bc6e233",
+      "content_unchanged": true,
+      "description": "Canonical Part enum (text/thinking/tool_call/tool_result/file_ref/image/audio/video/attachment), MediaSource (url/attachmentRef/base64), BinaryData, ToolStatus, FileRange, Sender attribution; 10 inline tests.",
+      "read_line_count": 564,
+      "read_method": "codegraph node (line-numbered current on-disk source), <=150 lines/read",
+      "missing_ranges": []
+    },
+    {
+      "path": "crates/hstry-core/src/peek.rs",
+      "bytes": 17587,
+      "total_lines": 511,
+      "sha256_initial": "f143b95288ac3ce91b58058f13d930fa489e9f0962b02e54ebff1a9f9b822f24",
+      "read_ranges": [
+        [
+          1,
+          150
+        ],
+        [
+          151,
+          300
+        ],
+        [
+          301,
+          450
+        ],
+        [
+          451,
+          511
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines personally displayed and reviewed in the listed sequential ranges (<=150 lines per read); hashes alone were not treated as reading.",
+      "sha256_final": "f143b95288ac3ce91b58058f13d930fa489e9f0962b02e54ebff1a9f9b822f24",
+      "content_unchanged": true,
+      "description": "Token-efficient PeekBundle: counts/tools/bash_sample/files_touched/bookend snippets, has_text_content + path scanner + truncation; 7 inline tests.",
+      "read_line_count": 511,
+      "read_method": "codegraph node (line-numbered current on-disk source), <=150 lines/read",
+      "missing_ranges": []
+    },
+    {
+      "path": "crates/hstry-core/src/service.rs",
+      "bytes": 16374,
+      "total_lines": 469,
+      "sha256_initial": "7912e9eb267a983b53051ab1fb6e3aa0052e2b64fc042cc5f30e1326eb1cf5d0",
+      "read_ranges": [
+        [
+          1,
+          150
+        ],
+        [
+          151,
+          300
+        ],
+        [
+          301,
+          450
+        ],
+        [
+          451,
+          469
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines personally displayed and reviewed in the listed sequential ranges (<=150 lines per read); hashes alone were not treated as reading.",
+      "sha256_final": "7912e9eb267a983b53051ab1fb6e3aa0052e2b64fc042cc5f30e1326eb1cf5d0",
+      "content_unchanged": true,
+      "description": "gRPC proto glue: search/write/read request+response conversions, service client (Unix socket then TCP fallback), 64MiB message size, port file resolution.",
+      "read_line_count": 469,
+      "read_method": "codegraph node (line-numbered current on-disk source), <=150 lines/read",
+      "missing_ranges": []
+    },
+    {
+      "path": "crates/hstry-core/src/config.rs",
+      "bytes": 25015,
+      "total_lines": 777,
+      "sha256_initial": "c54b126526be4028569993c7df332842c37dedbdca38054aaa4ffd4d6bbc53b8",
+      "read_ranges": [
+        [
+          1,
+          150
+        ],
+        [
+          151,
+          300
+        ],
+        [
+          301,
+          450
+        ],
+        [
+          451,
+          600
+        ],
+        [
+          601,
+          750
+        ],
+        [
+          751,
+          777
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines personally displayed and reviewed in the listed sequential ranges (<=150 lines per read); hashes alone were not treated as reading.",
+      "sha256_final": "c54b126526be4028569993c7df332842c37dedbdca38054aaa4ffd4d6bbc53b8",
+      "content_unchanged": true,
+      "description": "Config model: database/adapter paths/repos/runtime/workspaces/sources/remotes/sync/search/web/resume/storage; defaults (resume agents, scheduler, resources, retention); XDG paths; TOML load/save + path expansion.",
+      "read_line_count": 777,
+      "read_method": "codegraph node (line-numbered current on-disk source), <=150 lines/read",
+      "missing_ranges": []
+    },
+    {
+      "path": "crates/hstry-cli/src/main.rs",
+      "bytes": 229644,
+      "total_lines": 6946,
+      "sha256_initial": "3277737296254ca7ac0a5763bdaf7dc01c46fb96e026e2ba3cd6983259bef7b0",
+      "read_ranges": [
+        [
+          130,
+          579
+        ],
+        [
+          916,
+          2895
+        ],
+        [
+          3261,
+          3560
+        ],
+        [
+          3675,
+          3824
+        ],
+        [
+          4096,
+          4245
+        ],
+        [
+          4324,
+          5523
+        ],
+        [
+          5554,
+          6453
+        ]
+      ],
+      "status": "partial",
+      "reason": "Selective T1 subsystem read per task rule: Cli/Command definitions, main() dispatch, sync/import/search/list/peek/show/source/scan/web-sync/quickstart/export/resume/index/reseed/verify/dedup/remote regions read in <=150-line bounded ranges; unrelated adapter-repo/mmry regions and line 1-129 prelude intentionally unread; function index obtained via Select-String first.",
+      "sha256_final": "3277737296254ca7ac0a5763bdaf7dc01c46fb96e026e2ba3cd6983259bef7b0",
+      "content_unchanged": true,
+      "description": "CLI: command enum + dispatch, sync_sources/import, search/list/peek/show, source/scan/web sync, export, resume (fzf/direct/convert/place/launch), index/reseed/verify/dedup, remote; not every helper read.",
+      "read_line_count": 5130,
+      "read_method": "Select-String function index + codegraph node bounded ranges, <=150 lines/read",
+      "missing_ranges": [
+        [
+          1,
+          129
+        ],
+        [
+          580,
+          915
+        ],
+        [
+          2896,
+          3260
+        ],
+        [
+          3561,
+          3674
+        ],
+        [
+          3825,
+          4095
+        ],
+        [
+          4246,
+          4323
+        ],
+        [
+          5524,
+          5553
+        ],
+        [
+          6454,
+          6946
+        ]
+      ]
+    },
+    {
+      "path": "adapters/codex/adapter.ts",
+      "bytes": 18503,
+      "total_lines": 636,
+      "sha256_initial": "2a1784b4bdd03882dabf724e2493a194e2390f28f554d4c4c0d8f481aeb19f11",
+      "read_ranges": [
+        [
+          1,
+          150
+        ],
+        [
+          151,
+          300
+        ],
+        [
+          301,
+          450
+        ],
+        [
+          451,
+          600
+        ],
+        [
+          601,
+          636
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines personally displayed and reviewed in the listed sequential ranges (<=150 lines per read); hashes alone were not treated as reading.",
+      "sha256_final": "2a1784b4bdd03882dabf724e2493a194e2390f28f554d4c4c0d8f481aeb19f11",
+      "content_unchanged": true,
+      "description": "Codex adapter v1.1.0: rollout JSONL discovery/parse, session_meta/turn_context/response_item mapping, state_5.sqlite thread titles, tool call/result pairing, compacted entries, codex/markdown/json export.",
+      "read_line_count": 636,
+      "read_method": "codegraph node (line-numbered current on-disk source), <=150 lines/read",
+      "missing_ranges": []
+    },
+    {
+      "path": "adapters/claude-code/adapter.ts",
+      "bytes": 15379,
+      "total_lines": 504,
+      "sha256_initial": "6fa0c42496b014b578b2bf3dce767adb853ee1ff742b933e63350f37339ee742",
+      "read_ranges": [
+        [
+          1,
+          150
+        ],
+        [
+          151,
+          300
+        ],
+        [
+          301,
+          450
+        ],
+        [
+          451,
+          504
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines personally displayed and reviewed in the listed sequential ranges (<=150 lines per read); hashes alone were not treated as reading.",
+      "sha256_final": "6fa0c42496b014b578b2bf3dce767adb853ee1ff742b933e63350f37339ee742",
+      "content_unchanged": true,
+      "description": "Claude Code adapter v1.0.0: ~/.claude/projects JSONL discovery/parse, compaction records, role/parts mapping, sessionId/workspace fallbacks, claude-code/markdown/json export; skips compact summaries and transcript-only entries.",
+      "read_line_count": 504,
+      "read_method": "codegraph node (line-numbered current on-disk source), <=150 lines/read",
+      "missing_ranges": []
+    }
+  ],
+  "supplementary_reads": [
+    {
+      "path": "crates/hstry-core/src/models.rs",
+      "bytes": 8124,
+      "total_lines": 245,
+      "sha256_initial": "095f8ad322507a206fe0a6310a59b9157f1be9cd94621e00fe54125b2b12f904",
+      "read_ranges": [
+        [
+          1,
+          245
+        ]
+      ],
+      "status": "full",
+      "reason": "Supplementary read outside the T1 mandated list, recorded for honesty; used for schema/data-model/boundary/sync questions.",
+      "sha256_final": "095f8ad322507a206fe0a6310a59b9157f1be9cd94621e00fe54125b2b12f904",
+      "content_unchanged": true,
+      "description": "Domain models: Source, Conversation (external/platform/readable ids, harness, version, message_count, tree fields), Message (+sender/provider/harness/client_id), MessageRole, ToolCall, Attachment, snapshot/event/SearchHit.",
+      "read_line_count": 245,
+      "read_method": "PowerShell line-numbered read",
+      "missing_ranges": []
+    },
+    {
+      "path": "crates/hstry-core/src/lib.rs",
+      "bytes": 3622,
+      "total_lines": 109,
+      "sha256_initial": "64a3e1aed484511be67210605db505f838837f8ecd73fe497a9cca61c1f7ccbe",
+      "read_ranges": [
+        [
+          1,
+          109
+        ]
+      ],
+      "status": "full",
+      "reason": "Supplementary read outside the T1 mandated list, recorded for honesty; used for schema/data-model/boundary/sync questions.",
+      "sha256_final": "64a3e1aed484511be67210605db505f838837f8ecd73fe497a9cca61c1f7ccbe",
+      "content_unchanged": true,
+      "description": "Crate module surface + stable_message_id UUIDv5 (client_id priority, content prefix) + utf8_prefix tests.",
+      "read_line_count": 109,
+      "read_method": "PowerShell line-numbered read",
+      "missing_ranges": []
+    },
+    {
+      "path": "crates/hstry-core/src/schema.rs",
+      "bytes": 391,
+      "total_lines": 12,
+      "sha256_initial": "8bd6bd43d97d281838b27328b33d19895a8ea1de03290ef894ea4bc2f8a73866",
+      "read_ranges": [
+        [
+          1,
+          12
+        ]
+      ],
+      "status": "full",
+      "reason": "Supplementary read outside the T1 mandated list, recorded for honesty; used for schema/data-model/boundary/sync questions.",
+      "sha256_final": "8bd6bd43d97d281838b27328b33d19895a8ea1de03290ef894ea4bc2f8a73866",
+      "content_unchanged": true,
+      "description": "Embedded SCHEMA const: only schema_migrations table; full schema lives in migrations/.",
+      "read_line_count": 12,
+      "read_method": "PowerShell line-numbered read",
+      "missing_ranges": []
+    },
+    {
+      "path": "crates/hstry-core/src/parsed.rs",
+      "bytes": 2738,
+      "total_lines": 69,
+      "sha256_initial": "67e3aa5ee7d37c136a64264b5762478cb385f808869959470141aa805292d652",
+      "read_ranges": [
+        [
+          1,
+          69
+        ]
+      ],
+      "status": "full",
+      "reason": "Supplementary read outside the T1 mandated list, recorded for honesty; used for schema/data-model/boundary/sync questions.",
+      "sha256_final": "67e3aa5ee7d37c136a64264b5762478cb385f808869959470141aa805292d652",
+      "content_unchanged": true,
+      "description": "Wire types shared by TS adapters/HTTP ingest: ParsedConversation/ParsedMessage/ParsedToolCall (camelCase).",
+      "read_line_count": 69,
+      "read_method": "PowerShell line-numbered read",
+      "missing_ranges": []
+    },
+    {
+      "path": "crates/hstry-core/src/readable_id.rs",
+      "bytes": 2889,
+      "total_lines": 83,
+      "sha256_initial": "411caad305cb492fb1dabde3a32104f23b2a3422ec456e75eec253d117574643",
+      "read_ranges": [
+        [
+          1,
+          83
+        ]
+      ],
+      "status": "full",
+      "reason": "Supplementary read outside the T1 mandated list, recorded for honesty; used for schema/data-model/boundary/sync questions.",
+      "sha256_final": "411caad305cb492fb1dabde3a32104f23b2a3422ec456e75eec253d117574643",
+      "content_unchanged": true,
+      "description": "Deterministic adjective-noun readable id derivation + collision suffix; tests.",
+      "read_line_count": 83,
+      "read_method": "PowerShell line-numbered read",
+      "missing_ranges": []
+    },
+    {
+      "path": "crates/hstry-core/src/ingest.rs",
+      "bytes": 14386,
+      "total_lines": 384,
+      "sha256_initial": "b7ae6456b064c7ab3b84d34217a974455785f69f5adde818b969af202309c9a4",
+      "read_ranges": [
+        [
+          1,
+          150
+        ],
+        [
+          151,
+          300
+        ],
+        [
+          301,
+          384
+        ]
+      ],
+      "status": "full",
+      "reason": "Supplementary read outside the T1 mandated list, recorded for honesty; used for schema/data-model/boundary/sync questions.",
+      "sha256_final": "b7ae6456b064c7ab3b84d34217a974455785f69f5adde818b969af202309c9a4",
+      "content_unchanged": true,
+      "description": "Shared ingest pipeline: per-batch external_id resolution, stable message ids, single transaction + bulk insert, writer mutex, parent resolution second pass; 2 async tests.",
+      "read_line_count": 384,
+      "read_method": "codegraph node (line-numbered current on-disk source), <=150 lines/read",
+      "missing_ranges": []
+    },
+    {
+      "path": "crates/hstry-cli/src/sync.rs",
+      "bytes": 5367,
+      "total_lines": 164,
+      "sha256_initial": "5aad4b180f2c2660236830f2e71f2d63812f0565511a2219f63bbc4fdc1a5b83",
+      "read_ranges": [
+        [
+          1,
+          164
+        ]
+      ],
+      "status": "full",
+      "reason": "Supplementary read outside the T1 mandated list, recorded for honesty; used for schema/data-model/boundary/sync questions.",
+      "sha256_final": "5aad4b180f2c2660236830f2e71f2d63812f0565511a2219f63bbc4fdc1a5b83",
+      "content_unchanged": true,
+      "description": "CLI/service sync helper: parse_stream batching (200), cursor/since plumbing, ingest_batch, summary rebuild, cursor+last_sync_at persistence.",
+      "read_line_count": 164,
+      "read_method": "codegraph explore verbatim (full file) + codegraph node re-read 112-141",
+      "missing_ranges": []
+    },
+    {
+      "path": "crates/hstry-runtime/src/runner.rs",
+      "bytes": 14614,
+      "total_lines": 448,
+      "sha256_initial": "0a679e399a200bf94fbf38fc63409f12198b85060253b4e648229a01666cd12d",
+      "read_ranges": [
+        [
+          1,
+          150
+        ],
+        [
+          151,
+          300
+        ],
+        [
+          301,
+          448
+        ]
+      ],
+      "status": "full",
+      "reason": "Supplementary read outside the T1 mandated list, recorded for honesty; used for schema/data-model/boundary/sync questions.",
+      "sha256_final": "0a679e399a200bf94fbf38fc63409f12198b85060253b4e648229a01666cd12d",
+      "content_unchanged": true,
+      "description": "TS adapter runner: Runtime detection, AdapterRequest/Response, subprocess protocol (env request or stdin >100KB), parse/parseStream/export/get_info/detect wrappers, parseStream fallback semantics.",
+      "read_line_count": 448,
+      "read_method": "codegraph node (line-numbered current on-disk source), <=150 lines/read",
+      "missing_ranges": []
+    },
+    {
+      "path": "adapters/types/index.ts",
+      "bytes": 13485,
+      "total_lines": 384,
+      "sha256_initial": "5dd4c54b50d0773c0a3dea031eebbd77fa979a9f2af8f138f3cbd8a8ac08c7a6",
+      "read_ranges": [
+        [
+          1,
+          150
+        ],
+        [
+          151,
+          300
+        ],
+        [
+          301,
+          384
+        ]
+      ],
+      "status": "full",
+      "reason": "Supplementary read outside the T1 mandated list, recorded for honesty; used for schema/data-model/boundary/sync questions.",
+      "sha256_final": "5dd4c54b50d0773c0a3dea031eebbd77fa979a9f2af8f138f3cbd8a8ac08c7a6",
+      "content_unchanged": true,
+      "description": "TS adapter contract: CanonPart/Conversation/Message/ParseOptions/ExportResult, part builders, canonical-root checks, runAdapter request loop and error/stdout behavior.",
+      "read_line_count": 384,
+      "read_method": "codegraph node (line-numbered current on-disk source), <=150 lines/read",
+      "missing_ranges": []
+    },
+    {
+      "path": "crates/hstry-cli/src/service.rs",
+      "bytes": 74780,
+      "total_lines": 2062,
+      "sha256_initial": "4419dae53626ec07fe94e36aa5e7c1d9bac23fddfc62aef644dc56f33b40305f",
+      "read_ranges": [
+        [
+          987,
+          1286
+        ],
+        [
+          1575,
+          2007
+        ]
+      ],
+      "status": "partial",
+      "reason": "Supplementary subsystem read for freshness/concurrency questions: ServiceState fields, watch refresh/event batch, sync_all, event compaction, scheduler/backoff/fingerprint sync_one_source, watcher + watch-path collection + discovery filters. Function index via Select-String; remaining ranges unread.",
+      "sha256_final": "4419dae53626ec07fe94e36aa5e7c1d9bac23fddfc62aef644dc56f33b40305f",
+      "content_unchanged": true,
+      "description": "Service loop: scheduler (min/max/backoff), per-source exponential failure backoff, file fingerprint skip, semaphore concurrency + time budget, event cooldown/quiet, notify watcher; gRPC handlers not read.",
+      "read_line_count": 733,
+      "read_method": "Select-String function index + codegraph node bounded ranges",
+      "missing_ranges": [
+        [
+          1,
+          986
+        ],
+        [
+          1287,
+          1574
+        ],
+        [
+          2008,
+          2062
+        ]
+      ]
+    },
+    {
+      "path": "crates/hstry-api/src/main.rs",
+      "bytes": 10921,
+      "total_lines": 382,
+      "sha256_initial": "b13cbc236ef1a1ed2a62a75d210b764310ad6f8b9ccfce1d50c6047b6ef613e0",
+      "read_ranges": [
+        [
+          287,
+          382
+        ]
+      ],
+      "status": "partial",
+      "reason": "Supplementary read only for the HTTP ingest path cross-check (register_source/ingest handlers); rest of the API server unread.",
+      "sha256_final": "b13cbc236ef1a1ed2a62a75d210b764310ad6f8b9ccfce1d50c6047b6ef613e0",
+      "content_unchanged": true,
+      "description": "HTTP API ingest: source registration, ingest_batch call + summary rebuild + last_sync_at update, response counters.",
+      "read_line_count": 96,
+      "read_method": "codegraph explore verbatim (bounded block)",
+      "missing_ranges": [
+        1,
+        286
+      ]
+    },
+    {
+      "path": "crates/hstry-cli/assets/web-runner.ts",
+      "bytes": 6565,
+      "total_lines": 224,
+      "sha256_initial": "6f8dd844000e793bc07ee4bb60fc8d216e6971652f385f9f938be1561903f5a3",
+      "read_ranges": [
+        [
+          2,
+          222
+        ]
+      ],
+      "status": "partial",
+      "reason": "Supplementary read for web sync depth check; line 1 and 223-224 unread.",
+      "sha256_final": "6f8dd844000e793bc07ee4bb60fc8d216e6971652f385f9f938be1561903f5a3",
+      "content_unchanged": true,
+      "description": "Playwright web runner: login for chatgpt/claude/gemini; sync implemented only for chatgpt; ChatGPT workspace/list/detail fetch paging; arg parsing.",
+      "read_line_count": 221,
+      "read_method": "codegraph explore + codegraph node bounded ranges",
+      "missing_ranges": [
+        [
+          1,
+          1
+        ],
+        [
+          223,
+          224
+        ]
+      ]
+    },
+    {
+      "path": "README.md",
+      "bytes": 12779,
+      "total_lines": 407,
+      "sha256_initial": "8f412aba196145ea470d8accaf4f606722cb970bc8807fa8ed6ea905582f966d",
+      "read_ranges": [
+        [
+          321,
+          361
+        ]
+      ],
+      "status": "partial",
+      "reason": "Context-only read of Supported Sources and Adapters sections plus heading index; the rest of README not read.",
+      "sha256_final": "8f412aba196145ea470d8accaf4f606722cb970bc8807fa8ed6ea905582f966d",
+      "content_unchanged": true,
+      "description": "README provider claims: 10 local adapters + 3 web-export adapters listed; web sync note says only ChatGPT today with Claude/Gemini planned.",
+      "read_line_count": 41,
+      "read_method": "PowerShell line-numbered bounded read + Select-String heading index",
+      "missing_ranges": [
+        [
+          1,
+          320
+        ],
+        [
+          362,
+          407
+        ]
+      ]
+    },
+    {
+      "path": "crates/hstry-core/migrations/001_initial_schema.sql",
+      "bytes": 5300,
+      "total_lines": 160,
+      "sha256_initial": "549a9147a8642185a15dd8fc96e300708426a36bcc102a5e0cfdbf4b79ea0ac8",
+      "read_ranges": [
+        [
+          1,
+          160
+        ]
+      ],
+      "status": "full",
+      "reason": "Supplementary read outside the T1 mandated list, recorded for honesty; used for schema/data-model/boundary/sync questions.",
+      "sha256_final": "549a9147a8642185a15dd8fc96e300708426a36bcc102a5e0cfdbf4b79ea0ac8",
+      "content_unchanged": true,
+      "description": "Schema migration (DB schema source of truth for the audit).",
+      "read_line_count": 160,
+      "read_method": "PowerShell line-numbered read",
+      "missing_ranges": []
+    },
+    {
+      "path": "crates/hstry-core/migrations/002_add_provider_column.sql",
+      "bytes": 141,
+      "total_lines": 3,
+      "sha256_initial": "77bb28dbe5665e42d7a6605b255dfcb9eb2e639a595814859e14303a6891f369",
+      "read_ranges": [
+        [
+          1,
+          3
+        ]
+      ],
+      "status": "full",
+      "reason": "Supplementary read outside the T1 mandated list, recorded for honesty; used for schema/data-model/boundary/sync questions.",
+      "sha256_final": "77bb28dbe5665e42d7a6605b255dfcb9eb2e639a595814859e14303a6891f369",
+      "content_unchanged": true,
+      "description": "Schema migration (DB schema source of truth for the audit).",
+      "read_line_count": 3,
+      "read_method": "PowerShell line-numbered read",
+      "missing_ranges": []
+    },
+    {
+      "path": "crates/hstry-core/migrations/003_add_provider_index.sql",
+      "bytes": 140,
+      "total_lines": 2,
+      "sha256_initial": "e7744823f3ff50127a913fbedda729bf6b45bf65701dbc69297a9aba23e6e0c0",
+      "read_ranges": [
+        [
+          1,
+          2
+        ]
+      ],
+      "status": "full",
+      "reason": "Supplementary read outside the T1 mandated list, recorded for honesty; used for schema/data-model/boundary/sync questions.",
+      "sha256_final": "e7744823f3ff50127a913fbedda729bf6b45bf65701dbc69297a9aba23e6e0c0",
+      "content_unchanged": true,
+      "description": "Schema migration (DB schema source of truth for the audit).",
+      "read_line_count": 2,
+      "read_method": "PowerShell line-numbered read",
+      "missing_ranges": []
+    },
+    {
+      "path": "crates/hstry-core/migrations/004_add_events_and_snapshots.sql",
+      "bytes": 784,
+      "total_lines": 21,
+      "sha256_initial": "2b9ac20bcf01af01801ae8439c91e8f275ec11c450a7efa7a2bcbb6408ef9ca7",
+      "read_ranges": [
+        [
+          1,
+          21
+        ]
+      ],
+      "status": "full",
+      "reason": "Supplementary read outside the T1 mandated list, recorded for honesty; used for schema/data-model/boundary/sync questions.",
+      "sha256_final": "2b9ac20bcf01af01801ae8439c91e8f275ec11c450a7efa7a2bcbb6408ef9ca7",
+      "content_unchanged": true,
+      "description": "Schema migration (DB schema source of truth for the audit).",
+      "read_line_count": 21,
+      "read_method": "PowerShell line-numbered read",
+      "missing_ranges": []
+    },
+    {
+      "path": "crates/hstry-core/migrations/005_add_conversation_summary_cache.sql",
+      "bytes": 1067,
+      "total_lines": 30,
+      "sha256_initial": "dab28a37dc3510eebbf6241839c49efdcac5edee55fb26dcc5dbc3f2bdd6232b",
+      "read_ranges": [
+        [
+          1,
+          30
+        ]
+      ],
+      "status": "full",
+      "reason": "Supplementary read outside the T1 mandated list, recorded for honesty; used for schema/data-model/boundary/sync questions.",
+      "sha256_final": "dab28a37dc3510eebbf6241839c49efdcac5edee55fb26dcc5dbc3f2bdd6232b",
+      "content_unchanged": true,
+      "description": "Schema migration (DB schema source of truth for the audit).",
+      "read_line_count": 30,
+      "read_method": "PowerShell line-numbered read",
+      "missing_ranges": []
+    },
+    {
+      "path": "crates/hstry-core/migrations/006_add_sender_and_provider_to_messages.sql",
+      "bytes": 349,
+      "total_lines": 7,
+      "sha256_initial": "c314565acd25d7f05ea45bc77d1eb2f9faeb863e983c1afdf135d0ca1fae3f44",
+      "read_ranges": [
+        [
+          1,
+          7
+        ]
+      ],
+      "status": "full",
+      "reason": "Supplementary read outside the T1 mandated list, recorded for honesty; used for schema/data-model/boundary/sync questions.",
+      "sha256_final": "c314565acd25d7f05ea45bc77d1eb2f9faeb863e983c1afdf135d0ca1fae3f44",
+      "content_unchanged": true,
+      "description": "Schema migration (DB schema source of truth for the audit).",
+      "read_line_count": 7,
+      "read_method": "PowerShell line-numbered read",
+      "missing_ranges": []
+    },
+    {
+      "path": "crates/hstry-core/migrations/007_add_harness_column.sql",
+      "bytes": 423,
+      "total_lines": 7,
+      "sha256_initial": "66a7e35446e124404970b4a2325841371e214a51ccbf49787e0db05bdf203bb1",
+      "read_ranges": [
+        [
+          1,
+          7
+        ]
+      ],
+      "status": "full",
+      "reason": "Supplementary read outside the T1 mandated list, recorded for honesty; used for schema/data-model/boundary/sync questions.",
+      "sha256_final": "66a7e35446e124404970b4a2325841371e214a51ccbf49787e0db05bdf203bb1",
+      "content_unchanged": true,
+      "description": "Schema migration (DB schema source of truth for the audit).",
+      "read_line_count": 7,
+      "read_method": "PowerShell line-numbered read",
+      "missing_ranges": []
+    },
+    {
+      "path": "crates/hstry-core/migrations/008_add_client_id_to_messages.sql",
+      "bytes": 404,
+      "total_lines": 8,
+      "sha256_initial": "7944de8091ddaf81c8c97aa6bf622cbdc3febe197616bb8e92ec43d54dd52078",
+      "read_ranges": [
+        [
+          1,
+          8
+        ]
+      ],
+      "status": "full",
+      "reason": "Supplementary read outside the T1 mandated list, recorded for honesty; used for schema/data-model/boundary/sync questions.",
+      "sha256_final": "7944de8091ddaf81c8c97aa6bf622cbdc3febe197616bb8e92ec43d54dd52078",
+      "content_unchanged": true,
+      "description": "Schema migration (DB schema source of truth for the audit).",
+      "read_line_count": 8,
+      "read_method": "PowerShell line-numbered read",
+      "missing_ranges": []
+    },
+    {
+      "path": "crates/hstry-core/migrations/009_performance_indexes.sql",
+      "bytes": 815,
+      "total_lines": 15,
+      "sha256_initial": "27ba5f7e3e458e9abe28927afbf22f15ab101b125107fe6ab24acd9901db6ecf",
+      "read_ranges": [
+        [
+          1,
+          15
+        ]
+      ],
+      "status": "full",
+      "reason": "Supplementary read outside the T1 mandated list, recorded for honesty; used for schema/data-model/boundary/sync questions.",
+      "sha256_final": "27ba5f7e3e458e9abe28927afbf22f15ab101b125107fe6ab24acd9901db6ecf",
+      "content_unchanged": true,
+      "description": "Schema migration (DB schema source of truth for the audit).",
+      "read_line_count": 15,
+      "read_method": "PowerShell line-numbered read",
+      "missing_ranges": []
+    },
+    {
+      "path": "crates/hstry-core/migrations/010_add_platform_id.sql",
+      "bytes": 413,
+      "total_lines": 8,
+      "sha256_initial": "031dc55b9745e8d858dc62d2247003c393a07a0eb57d357e940428017295d2a2",
+      "read_ranges": [
+        [
+          1,
+          8
+        ]
+      ],
+      "status": "full",
+      "reason": "Supplementary read outside the T1 mandated list, recorded for honesty; used for schema/data-model/boundary/sync questions.",
+      "sha256_final": "031dc55b9745e8d858dc62d2247003c393a07a0eb57d357e940428017295d2a2",
+      "content_unchanged": true,
+      "description": "Schema migration (DB schema source of truth for the audit).",
+      "read_line_count": 8,
+      "read_method": "PowerShell line-numbered read",
+      "missing_ranges": []
+    },
+    {
+      "path": "crates/hstry-core/migrations/011_add_version_and_message_count.sql",
+      "bytes": 704,
+      "total_lines": 14,
+      "sha256_initial": "d9e2f3fc0c94a3568626d103e4e89b939ae9bc749cac7e98f08a80ce6efae598",
+      "read_ranges": [
+        [
+          1,
+          14
+        ]
+      ],
+      "status": "full",
+      "reason": "Supplementary read outside the T1 mandated list, recorded for honesty; used for schema/data-model/boundary/sync questions.",
+      "sha256_final": "d9e2f3fc0c94a3568626d103e4e89b939ae9bc749cac7e98f08a80ce6efae598",
+      "content_unchanged": true,
+      "description": "Schema migration (DB schema source of truth for the audit).",
+      "read_line_count": 14,
+      "read_method": "PowerShell line-numbered read",
+      "missing_ranges": []
+    },
+    {
+      "path": "crates/hstry-core/migrations/012_add_conversation_tree.sql",
+      "bytes": 1176,
+      "total_lines": 22,
+      "sha256_initial": "b1de1038d34839183941a683561548d8ecdf5e9df197612f66281b1012929e0f",
+      "read_ranges": [
+        [
+          1,
+          22
+        ]
+      ],
+      "status": "full",
+      "reason": "Supplementary read outside the T1 mandated list, recorded for honesty; used for schema/data-model/boundary/sync questions.",
+      "sha256_final": "b1de1038d34839183941a683561548d8ecdf5e9df197612f66281b1012929e0f",
+      "content_unchanged": true,
+      "description": "Schema migration (DB schema source of truth for the audit).",
+      "read_line_count": 22,
+      "read_method": "PowerShell line-numbered read",
+      "missing_ranges": []
+    },
+    {
+      "path": "crates/hstry-core/migrations/013_indexer_outbox_and_events_retention.sql",
+      "bytes": 1623,
+      "total_lines": 39,
+      "sha256_initial": "28bd236d3490c75ac540d1034dc7948b0087a320fc56e91d68ddaaf5e66afac0",
+      "read_ranges": [
+        [
+          1,
+          39
+        ]
+      ],
+      "status": "full",
+      "reason": "Supplementary read outside the T1 mandated list, recorded for honesty; used for schema/data-model/boundary/sync questions.",
+      "sha256_final": "28bd236d3490c75ac540d1034dc7948b0087a320fc56e91d68ddaaf5e66afac0",
+      "content_unchanged": true,
+      "description": "Schema migration (DB schema source of truth for the audit).",
+      "read_line_count": 39,
+      "read_method": "PowerShell line-numbered read",
+      "missing_ranges": []
+    }
+  ],
+  "t2_sweep": {
+    "path": ".trellis/tasks/10-05-competitive-source-audit-plan/research/sweep-hstry.json",
+    "sha256": "5a5dafebb0bf9584a3be47f6b3dc8835ae6a1f838f13d94654f58082ac5c599c",
+    "file_count": 186,
+    "files_with_any_hit": 105,
+    "commit": "88b78b1f3a84723e31a2c444bec326829fd02459",
+    "usage": "queried by filter for adapter/provider/test signals only; not fully read"
+  },
+  "summary": {
+    "t1_files": 8,
+    "t1_full": 7,
+    "t1_partial": 1,
+    "t1_lines_total": 13807,
+    "t1_lines_read": 11991.0,
+    "t1_missing_lines": 1816.0,
+    "supplementary_files": 26,
+    "supplementary_lines_read": 3325.0,
+    "inline_tests_executed": 0,
+    "builds_or_tests_run": 0,
+    "source_files_written_by_worker": 0
+  },
+  "snapshot_fingerprint": "0e58faffcd662f27e195620c528a017a814f4e99efa814511c1a748711b25db6",
+  "ownership_note": "Only coverage-hstry.json and audit-hstry.md are created/owned by this worker; no repository file was modified. git status showed only the untracked .codegraph/ index."
+}

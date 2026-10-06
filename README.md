@@ -22,7 +22,10 @@ schema. `agent-session-grep` solves this by:
 1. **Discovering** transcripts across multiple provider directories
 2. **Normalizing** them into a canonical model (Message, Session, Placement)
 3. **Indexing** for fast full-text search (FTS5; CJK text is tokenized as
-   single characters plus adjacent-pair bigrams)
+   single characters plus adjacent-pair bigrams). The indexed projection of a
+   message is capped at 16,000 characters — the catalog keeps the provider's
+   full text (`show`/`get` return it), but words beyond the cap in one message
+   are not searchable
 4. **Serving** search/resume/handoff through a unified contract
 
 ## Quickstart
@@ -49,33 +52,45 @@ agent-session-grep --version
 asg --version
 ```
 
-Then use either command name. Every data command needs the store path
-(`--db`); run `asg config paths` to see the default data location on your
-platform:
+Then use either command name. Data commands default to the platform data
+directory reported by `asg config paths` (the catalog lives at
+`<data>/asg.db`); pass `--db <path>` to override it. Reading commands never
+create a catalog: if none exists they fail with an explicit
+`sync --discover` instruction instead of pretending there were no results.
 
 ```bash
-# Index your Claude Code + Codex sessions
-asg --db <db-path> sync --discover
+# 1. check the binary
+asg --version
+asg config paths        # 2. where the default catalog lives (data directory)
+asg providers           #    which providers can be discovered on this machine
 
-# Search across all providers
-asg --db <db-path> search "authentication refactor"
+# 3. explicit sync: discover and index your provider sessions (sources stay read-only)
+asg sync --discover
 
-# Get session context
-asg --db <db-path> context <session-id>
+# If discovery finds nothing, name the transcripts yourself:
+# asg sync <file.jsonl>...
 
-# Preview the resume command for a session (dry-run; --yes to execute)
-asg --db <db-path> resume <session-id>
+# 4. search across all providers
+asg search "authentication refactor"
 
-# Generate a handoff pack for another agent
-asg --db <db-path> handoff "how did we configure the database?"
+# 5. read a hit, expand its session, or continue work (use the wire ids from the
+#    "next step" lines that `asg search` prints)
+asg show <msg-id>
+asg context <session-id>
+asg resume <session-id>          # dry-run preview; --yes to execute
+asg handoff "how did we configure the database?"
 ```
 
 Retrieval is lexical by default (FTS5; CJK text is tokenized as single
-characters plus adjacent-pair bigrams); the default
-vector mode is an honest bigram-hash fuzzy-lexical matcher, not a semantic
-model. An optional local semantic backend (Candle + multilingual-e5-small)
-exists behind the `semantic-candle` cargo feature — off by default and
-offline-only (`asg model import --dir <bundle>` / `asg model status`).
+characters plus adjacent-pair bigrams; per-message indexed text is capped at
+16,000 characters while the catalog keeps the full text). The default vector
+mode is an honest fuzzy lexical vector (`bigram-hash`) — a fuzzy-lexical
+matcher, not a semantic model. Semantic/hybrid candidates whose cosine
+similarity falls below the evidence floor are discarded before RRF fusion, so
+zero-similarity vectors cannot enter results on rank alone. An optional local
+semantic backend (Candle + multilingual-e5-small) exists behind the
+`semantic-candle` cargo feature — off by default and offline-only
+(`asg model import --dir <bundle>` / `asg model status`).
 
 See [Install and upgrade](docs/operations/INSTALL-AND-UPGRADE.md) for custom
 prefixes, persistent PATH setup, upgrades, and safe uninstall.

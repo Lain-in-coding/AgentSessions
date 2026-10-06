@@ -1,0 +1,21 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.15s
+     Running unittests src\lib.rs (.trellis/.runtime/target-b8\debug\deps\agent_session_grep_cli-97672c691f5005f3.exe)
+
+running 14 tests
+test repo_identity::tests::derive_none_for_empty_cwd ... ok
+test repo_identity::tests::resolver_rejects_empty_cwd_without_spawning ... ok
+test repo_identity::tests::rejects_unknown_shapes_instead_of_guessing ... ok
+test repo_identity::tests::rejects_windows_drive_paths_as_hosts ... ok
+test repo_identity::tests::rejects_slug_over_length_bound ... ok
+test repo_identity::tests::normalizes_each_supported_url_shape ... ok
+test repo_identity::tests::derive_none_for_nonexistent_directory ... ok
+test repo_identity::tests::derive_none_for_non_git_directory ... ok
+test repo_identity::tests::derive_none_for_git_repo_without_origin ... ok
+test repo_identity::tests::derive_slug_from_git_directory_with_origin ... ok
+test repo_identity::tests::derive_slug_from_nested_subdirectory ... ok
+test repo_identity::tests::resolver_caches_failures_and_successes ... ok
+test repo_identity::zz_check_cache::zz_check_cache_probe_counts ... ok
+test repo_identity::tests::resolve_context_matrix_matches_pre_change_semantics ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 332 filtered out; finished in 0.66s
+

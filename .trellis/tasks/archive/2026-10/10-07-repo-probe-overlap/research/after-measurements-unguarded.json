@@ -1,0 +1,241 @@
+{
+  "phase": "after",
+  "binary": "C:\\AgentSessions\\.trellis\\.runtime\\target-b8\\release\\agent-session-grep.exe",
+  "binary_sha256": "1ab64b094fe11d64ec9eca65ead6f7f7d8bec8830e667be11001d9231b74389f",
+  "commit": "283b9480e166e209d6f69747cb2e943686d3d765",
+  "cwd": "C:\\AgentSessions",
+  "db": "C:\\AgentSessions\\.trellis\\.runtime\\hotpath-experiment-b8\\fixture.db",
+  "wire_id": "msg_v1_cb6837d0712fbb4e022f869652978b74",
+  "clock_ms": "1787616000000",
+  "runs_per_variant": 20,
+  "probe_runs_per_variant": 3,
+  "method": "Paired process launches, one synthetic catalog entry, fixed ASG_CLOCK_MS, --robot --request-id pinned; variant git_detect = default CWD repo discovery (repo with origin => 2 git subprocesses per resolution round), variant repo_disabled_by_test_seam = ASG_CURRENT_REPO empty (existing test seam, zero probes). Probe counts observed via GIT_TRACE (one built-in line per dispatched git process). Not a universal benchmark.",
+  "variants": {
+    "git_detect": {
+      "get": {
+        "raw_ms": [
+          11.9648,
+          8.5914,
+          8.3798,
+          8.7921,
+          8.7375,
+          9.0165,
+          8.756,
+          8.3701,
+          7.7298,
+          8.181,
+          8.6607,
+          8.445,
+          8.4715,
+          8.9469,
+          8.841,
+          8.6125,
+          8.9968,
+          8.5424,
+          8.4974,
+          8.5632
+        ],
+        "median_ms": 8.60195,
+        "min_ms": 7.7298,
+        "max_ms": 11.9648,
+        "exit_codes": [
+          0
+        ],
+        "probe_counts": [
+          0,
+          0,
+          0
+        ],
+        "probe_median": 0.0,
+        "output_file": "C:\\AgentSessions\\.trellis\\tasks\\10-07-repo-probe-overlap\\research\\after-output-git_detect-get.json"
+      },
+      "show": {
+        "raw_ms": [
+          11.5163,
+          9.0057,
+          8.366,
+          9.4919,
+          8.3072,
+          8.5739,
+          8.1514,
+          9.198,
+          8.4249,
+          8.2276,
+          8.525,
+          8.6627,
+          8.5937,
+          8.7542,
+          9.5593,
+          8.7569,
+          10.0119,
+          9.704,
+          8.8755,
+          9.4623
+        ],
+        "median_ms": 8.75555,
+        "min_ms": 8.1514,
+        "max_ms": 11.5163,
+        "exit_codes": [
+          0
+        ],
+        "probe_counts": [
+          0,
+          0,
+          0
+        ],
+        "probe_median": 0.0,
+        "output_file": "C:\\AgentSessions\\.trellis\\tasks\\10-07-repo-probe-overlap\\research\\after-output-git_detect-show.json"
+      },
+      "search": {
+        "raw_ms": [
+          40.9596,
+          35.04,
+          34.5239,
+          31.4181,
+          33.3083,
+          31.8834,
+          35.9158,
+          34.9731,
+          32.4941,
+          32.7283,
+          33.1055,
+          33.794,
+          35.0678,
+          34.8694,
+          36.321,
+          33.3546,
+          34.7902,
+          35.4296,
+          33.2537,
+          35.8045
+        ],
+        "median_ms": 34.65705,
+        "min_ms": 31.4181,
+        "max_ms": 40.9596,
+        "exit_codes": [
+          0
+        ],
+        "probe_counts": [
+          2,
+          2,
+          2
+        ],
+        "probe_median": 2.0,
+        "output_file": "C:\\AgentSessions\\.trellis\\tasks\\10-07-repo-probe-overlap\\research\\after-output-git_detect-search.json"
+      }
+    },
+    "repo_disabled_by_test_seam": {
+      "get": {
+        "raw_ms": [
+          8.9712,
+          8.3156,
+          8.2257,
+          8.7984,
+          9.2596,
+          7.7621,
+          8.5794,
+          8.9943,
+          8.6654,
+          9.5902,
+          8.5577,
+          8.8627,
+          8.9591,
+          8.2779,
+          9.1858,
+          8.01,
+          9.4426,
+          8.6542,
+          8.8677,
+          8.5181
+        ],
+        "median_ms": 8.7319,
+        "min_ms": 7.7621,
+        "max_ms": 9.5902,
+        "exit_codes": [
+          0
+        ],
+        "probe_counts": [
+          0,
+          0,
+          0
+        ],
+        "probe_median": 0.0,
+        "output_file": "C:\\AgentSessions\\.trellis\\tasks\\10-07-repo-probe-overlap\\research\\after-output-repo_disabled_by_test_seam-get.json"
+      },
+      "show": {
+        "raw_ms": [
+          8.9866,
+          8.1892,
+          8.7335,
+          8.1678,
+          8.2199,
+          8.0821,
+          7.9902,
+          9.3425,
+          9.9734,
+          9.133,
+          8.605,
+          8.3025,
+          8.7523,
+          7.7937,
+          8.3266,
+          8.623,
+          8.8199,
+          8.6166,
+          8.8067,
+          9.2371
+        ],
+        "median_ms": 8.6198,
+        "min_ms": 7.7937,
+        "max_ms": 9.9734,
+        "exit_codes": [
+          0
+        ],
+        "probe_counts": [
+          0,
+          0,
+          0
+        ],
+        "probe_median": 0.0,
+        "output_file": "C:\\AgentSessions\\.trellis\\tasks\\10-07-repo-probe-overlap\\research\\after-output-repo_disabled_by_test_seam-show.json"
+      },
+      "search": {
+        "raw_ms": [
+          9.4746,
+          9.3442,
+          9.2269,
+          10.3023,
+          10.6922,
+          9.2354,
+          9.7572,
+          9.3117,
+          16.8591,
+          9.7715,
+          10.0279,
+          9.3753,
+          9.8508,
+          10.3111,
+          10.1636,
+          9.9152,
+          9.7526,
+          10.0074,
+          9.9965,
+          10.8668
+        ],
+        "median_ms": 9.883,
+        "min_ms": 9.2269,
+        "max_ms": 16.8591,
+        "exit_codes": [
+          0
+        ],
+        "probe_counts": [
+          0,
+          0,
+          0
+        ],
+        "probe_median": 0.0,
+        "output_file": "C:\\AgentSessions\\.trellis\\tasks\\10-07-repo-probe-overlap\\research\\after-output-repo_disabled_by_test_seam-search.json"
+      }
+    }
+  }
+}

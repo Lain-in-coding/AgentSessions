@@ -1,0 +1,564 @@
+{
+ "schema_version": 1,
+ "date": "2026-10-06",
+ "task": ".trellis/tasks/10-05-competitive-source-audit-plan",
+ "repository": "C:\\AgentSessions\\Github_src\\coding_agent_session_search",
+ "commit": "aa92a45311e10a3ac9c40c3730664a7366af2fe8",
+ "scope": "cass shard D (lib.rs spine + sources connectors): bounded partial read of src/lib.rs covering the required CLI surface, pack CLI wiring (limits/readiness injection), cursor encode/decode, robot metadata, and core types/errors; full read of src/sources/sync.rs and src/sources/config.rs; mechanical filtered queries of sweep-coding_agent_session_search.json plus count-only measurement scripts; no build/test/install/network/git write operations; competitor source left untouched.",
+ "status": "source_review_complete_with_explicit_lib_rs_partial",
+ "t1_scope_rule": {
+  "selected_files": [
+   "src/lib.rs",
+   "src/sources/sync.rs",
+   "src/sources/config.rs"
+  ],
+  "why": {
+   "src/lib.rs": "T1 required a map plus bounded reads of the CLI command/arg definitions, pack CLI wiring (shard A legacy: real limits/readiness injection), cursor encode/decode and cross-page consistency, robot/JSON metadata, core types and errors. Because the file is 100,119 lines / 4.05 MB and is NOT in the codegraph index, it is explicitly partial: 2,699 lines read in 22 recorded bounded windows (<=151 lines each; 7 windows were 151 lines and are recorded as such), 13 missing intervals listed verbatim in missing_ranges. All required subsystems above were personally displayed and reviewed.",
+   "src/sources/sync.rs": "Full read required by the task: transport ladder (rsync/wsl-rsync/scp/sftp), connector lifecycle, failure/partial-failure reporting, SyncStatus persistence, scheduler health/backoff, privacy and network boundaries.",
+   "src/sources/config.rs": "Full read required by the task: sources.toml model, name/host/path/path-mapping validation, config path precedence, atomic save + backup, SSH config discovery, SourceConfigGenerator."
+  },
+  "auxiliary_reads": [
+   {
+    "path": "src/model/cli_error_kind.rs",
+    "ranges": [
+     "55 200"
+    ],
+    "why": "Bounded auxiliary read only to name the ErrorKind vocabulary and kind_str contract referenced by src/lib.rs CliError.kind; full file not read (golden test at bottom not read)."
+   },
+   {
+    "path": "build.rs",
+    "ranges": [
+     "1 60"
+    ],
+    "why": "Checked for code generation into src/lib.rs (OUT_DIR/include!/generated header) to answer the 'why 100K lines' question; build.rs only validates dependency pins/contracts."
+   },
+   {
+    "path": ".trellis/spec/agentsessions-cli/backend/error-handling.md",
+    "ranges": [
+     "1 124"
+    ],
+    "why": "ASG reference contract (ProtocolError/cursor codes) read solely to ground the ASG comparison; it is not part of the cass repository."
+   }
+  ],
+  "mechanical_queries_only": [
+   "sweep-coding_agent_session_search.json filtered by path for the three T1 files (probe hit counts recorded in sweep_probe_hits)",
+   "count-only Python measurement over src/lib.rs (string/comment-aware brace matching): 33 inline cfg(test) modules, 471 #[test], 18,991 test lines (19.0%), top-level item spans, 1,064 json! sites covering 9,754 lines, blank/comment counts; counts were not treated as reading",
+   "repo greps in src/lib.rs: module declarations (3-72), Commands variants (273-1536), nested Subcommand enums, pack/readiness/cursor/next_cursor/_meta symbols, visible_alias=robot count (65), code: literals (427), RobotFormat; symbol scan of src/model/cli_error_kind.rs; file inventory of src/sources and src/connectors",
+   "codegraph node --file src/lib.rs (no indexed file match, 4 MB) and build.rs include!/OUT_DIR check"
+  ],
+  "out_of_scope": [
+   "src/lib.rs outside the recorded read_ranges: 13 missing intervals, 97,420 lines (most doctor/export/html/schema implementations, most inline tests, and most remaining command bodies)",
+   "src/sources/mod.rs, probe.rs, install.rs, provenance.rs, connectors/*, search/*, storage/*, indexer/*, pages/* and other modules",
+   "external dependency internals: franken_agent_detection (PathMapping/Platform re-export), frankensqlite, ssh2, rsync/scp/sftp binaries",
+   "runtime validation: no build, test, install, network, or real ssh/rsync/scp/sftp run was performed",
+   "pack_planner.rs rendering details (read by shard A; not re-read here)"
+  ],
+  "scope_note": "Conclusions that depend on unread ranges are marked as open items; no hash, probe hit, or symbol map entry was treated as a read. lib.rs partial status is by explicit task design, not an incomplete delivery of the required ranges."
+ },
+ "line_count_method": "UTF-8 splitlines; 1-based inclusive read ranges; final newline does not create an extra logical source line.",
+ "read_method": "Normalized crate sources; codegraph node CLI where available. src/sources/sync.rs and src/sources/config.rs were read with PowerShell Get-Content line-numbered windows of <=150 lines covering 1..true EOF. src/lib.rs is not in the codegraph index ('No indexed file matches'), so it was read with PowerShell line-numbered windows (<=151 lines; a few windows printed 151 lines due to an off-by-one loop bound and are recorded honestly in read_ranges).",
+ "files": [
+  {
+   "path": "src/lib.rs",
+   "bytes": 4047370,
+   "total_lines": 100119,
+   "sha256_initial": "a74abdf3966ce3478ed7a25746c4cad7498bd52886cb296e2af4a7b174e322e8",
+   "read_ranges": [
+    [
+     1,
+     73
+    ],
+    [
+     73,
+     220
+    ],
+    [
+     220,
+     370
+    ],
+    [
+     565,
+     654
+    ],
+    [
+     2645,
+     2700
+    ],
+    [
+     2790,
+     2905
+    ],
+    [
+     6600,
+     6740
+    ],
+    [
+     6740,
+     6830
+    ],
+    [
+     19790,
+     19840
+    ],
+    [
+     22520,
+     22640
+    ],
+    [
+     22910,
+     22970
+    ],
+    [
+     23540,
+     23690
+    ],
+    [
+     23690,
+     23840
+    ],
+    [
+     23840,
+     23990
+    ],
+    [
+     24110,
+     24260
+    ],
+    [
+     25192,
+     25310
+    ],
+    [
+     25290,
+     25440
+    ],
+    [
+     25440,
+     25590
+    ],
+    [
+     25960,
+     26110
+    ],
+    [
+     26110,
+     26260
+    ],
+    [
+     81760,
+     81910
+    ],
+    [
+     81910,
+     82060
+    ]
+   ],
+   "status": "partial",
+   "reason": "Partial by explicit task design (100,119-line / 4.05 MB file; plus not indexed by codegraph). All required subsystems were personally read in bounded, recorded windows: CLI surface (Cli/Commands 226-1536; RobotFormat 2651-2663), pack CLI wiring (6599-6830 dispatch; 23540-23990 run_cli_pack incl. PackPlannerLimits 23629-23635, candidate limit 23750-23754, PackPlanRequest 23811-23819, readiness snapshot 23848-23867; fields mask 24110-24260), cursor encode/decode (22520-22640, 25192-25590, 25960-26260), robot metadata (25960-26260, 81760-82060), core types/errors (2790-2905, 2645-2700, 22910-22970, 19790-19840). 13 missing intervals listed in missing_ranges were NOT read.",
+   "sha256_final": "a74abdf3966ce3478ed7a25746c4cad7498bd52886cb296e2af4a7b174e322e8",
+   "content_unchanged": true,
+   "description": "crate spine: 70 module declarations (3-72), global Cli (226-269) and 44-variant Commands enum (273-1536), per-command implementations (run_cli_search 22464-23561, run_cli_pack 23564-23911, run_doctor_impl 73428-76261, output_robot_results 25553-26679, run_index_with_data 86474-87275, run_export_html 89309-90080...), robot/JSON metadata assembly, cursor string codec (25308-25318 / 22542-22570), CliError (2807-2814), 33 inline cfg(test) modules (18,991 lines, 19.0% of file; 471 #[test]). Not generated: no include!/OUT_DIR; build.rs only validates dependency pins. Bulk = hand-written CLI/orchestration plus inline JSON schema/help jsons (1,064 json! sites covering 9,754 lines).",
+   "read_line_count": 2699,
+   "read_method": "PowerShell Get-Content line-numbered bounded windows (recorded read_ranges; 7 windows of 151 lines due to an off-by-one loop bound, max window 151); codegraph node returned no indexed match for src/lib.rs.",
+   "missing_ranges": [
+    [
+     371,
+     564
+    ],
+    [
+     655,
+     2644
+    ],
+    [
+     2701,
+     2789
+    ],
+    [
+     2906,
+     6599
+    ],
+    [
+     6831,
+     19789
+    ],
+    [
+     19841,
+     22519
+    ],
+    [
+     22641,
+     22909
+    ],
+    [
+     22971,
+     23539
+    ],
+    [
+     23991,
+     24109
+    ],
+    [
+     24261,
+     25191
+    ],
+    [
+     25591,
+     25959
+    ],
+    [
+     26261,
+     81759
+    ],
+    [
+     82061,
+     100119
+    ]
+   ]
+  },
+  {
+   "path": "src/sources/sync.rs",
+   "bytes": 168712,
+   "total_lines": 4612,
+   "sha256_initial": "d32308240152aa74012b1f0a6f093e03686b01daa3cf077080ed920ff0ca9152",
+   "read_ranges": [
+    [
+     1,
+     150
+    ],
+    [
+     151,
+     300
+    ],
+    [
+     301,
+     450
+    ],
+    [
+     451,
+     600
+    ],
+    [
+     601,
+     750
+    ],
+    [
+     751,
+     900
+    ],
+    [
+     901,
+     1050
+    ],
+    [
+     1051,
+     1200
+    ],
+    [
+     1201,
+     1350
+    ],
+    [
+     1351,
+     1500
+    ],
+    [
+     1501,
+     1650
+    ],
+    [
+     1651,
+     1800
+    ],
+    [
+     1801,
+     1950
+    ],
+    [
+     1951,
+     2100
+    ],
+    [
+     2101,
+     2250
+    ],
+    [
+     2251,
+     2400
+    ],
+    [
+     2401,
+     2550
+    ],
+    [
+     2551,
+     2700
+    ],
+    [
+     2701,
+     2850
+    ],
+    [
+     2851,
+     3000
+    ],
+    [
+     3001,
+     3150
+    ],
+    [
+     3151,
+     3300
+    ],
+    [
+     3301,
+     3450
+    ],
+    [
+     3451,
+     3600
+    ],
+    [
+     3601,
+     3750
+    ],
+    [
+     3751,
+     3900
+    ],
+    [
+     3901,
+     4050
+    ],
+    [
+     4051,
+     4200
+    ],
+    [
+     4201,
+     4350
+    ],
+    [
+     4351,
+     4500
+    ],
+    [
+     4501,
+     4612
+    ]
+   ],
+   "status": "full",
+   "reason": "All 4,612 logical lines personally displayed and reviewed in the listed sequential ranges (31 windows, each <=150 lines); hashes alone did not count as reading. Inline test module (3213-4612) was read, not skipped.",
+   "sha256_final": "d32308240152aa74012b1f0a6f093e03686b01daa3cf077080ed920ff0ca9152",
+   "content_unchanged": true,
+   "description": "Remote-source sync engine: safety posture (rsync additive, no --delete, 6-11/1185), 4-step transport ladder rsync -> wsl-rsync -> scp -> ssh2 sftp (972-1013), RsyncArgProtection/openrsync probing with per-host cache (47-255) and rejection retry (1248-1287), SyncTransportDecision ledger (522-659), per-path sync implementations (rsync 1132-1343, wsl 1349-1510, scp find+per-file copy 1521-1852, sftp recursive 1858-2373), partial-failure reporting (PathSyncResult 661-684, SyncReport 727-830, SyncResult 2586-2619), stable failure-reason mapping (686-718), SyncStatus persistence + atomic replace incl. Windows fallback (2815-2930, 3057-3211), scheduler health/backoff/manual override (2621-2812, 2933-3055). Symlink guards on all local writes; auth delegated to system OpenSSH or ssh2 agent/key; no credentials stored.",
+   "read_line_count": 4612,
+   "read_method": "PowerShell Get-Content line-numbered bounded windows, each <=150 lines; sequential coverage 1..true EOF",
+   "missing_ranges": []
+  },
+  {
+   "path": "src/sources/config.rs",
+   "bytes": 97395,
+   "total_lines": 2743,
+   "sha256_initial": "e377c4f5bd4b38d8b61f757e40175371b1fdff0149eab8f7a2f5e64cdd7d9426",
+   "read_ranges": [
+    [
+     1,
+     150
+    ],
+    [
+     151,
+     300
+    ],
+    [
+     301,
+     450
+    ],
+    [
+     451,
+     600
+    ],
+    [
+     601,
+     750
+    ],
+    [
+     751,
+     900
+    ],
+    [
+     901,
+     1050
+    ],
+    [
+     1051,
+     1200
+    ],
+    [
+     1201,
+     1350
+    ],
+    [
+     1351,
+     1500
+    ],
+    [
+     1501,
+     1650
+    ],
+    [
+     1651,
+     1800
+    ],
+    [
+     1801,
+     1950
+    ],
+    [
+     1951,
+     2100
+    ],
+    [
+     2101,
+     2250
+    ],
+    [
+     2251,
+     2400
+    ],
+    [
+     2401,
+     2550
+    ],
+    [
+     2551,
+     2700
+    ],
+    [
+     2701,
+     2743
+    ]
+   ],
+   "status": "full",
+   "reason": "All 2,743 logical lines personally displayed and reviewed in the listed sequential ranges (19 windows, each <=150 lines); hashes alone did not count as reading. Inline test module (1423-2743) was read, not skipped.",
+   "sha256_final": "e377c4f5bd4b38d8b61f757e40175371b1fdff0149eab8f7a2f5e64cdd7d9426",
+   "content_unchanged": true,
+   "description": "sources.toml model and lifecycle: SourcesConfig/SourceDefinition/SyncSchedule (118-164, 413-438), XDG/platform/~/.config path precedence (643-672), load (lenient structure-only, 440-470/523-525) vs save (strict validate + TOML round-trip + temp create_new + atomic replace, 472-503/1346-1374), backup writer (1158-1189), name/host/path/path-mapping validation and reserved-name handling (51-96, 214-240, 284-331, 333-369, 371-387, 527-543), disabled_agents normalization (63-70, 601-640), SSH config discovery (749-837), SourceConfigGenerator probe->source/preview (966-1211). Windows replace chain and symlink-refusing temp writes are heavily tested (1247-1318, 1466-1555).",
+   "read_line_count": 2743,
+   "read_method": "PowerShell Get-Content line-numbered bounded windows, each <=150 lines; sequential coverage 1..true EOF",
+   "missing_ranges": [],
+   "hash_correction": {
+    "date": "2026-10-06",
+    "by": "main-session",
+    "note": "receipt recorded a 63-hex-char transcription typo (e377c4f5bd4b38d8b61f757e40175371b1fdf0149eab8f7a2f5e64cdd7d9426); corrected to the on-disk 64-hex SHA256. Content-unchanged claim retained because the worker session verified initial==final and main session re-verified on disk.",
+    "previous_value": "e377c4f5bd4b38d8b61f757e40175371b1fdf0149eab8f7a2f5e64cdd7d9426",
+    "corrected_value": "e377c4f5bd4b38d8b61f757e40175371b1fdff0149eab8f7a2f5e64cdd7d9426"
+   }
+  }
+ ],
+ "summary": {
+  "t1_core_files": 3,
+  "full_files": 2,
+  "partial_files": 1,
+  "not_read_files": 0,
+  "t1_core_lines_total": 107474,
+  "t1_core_lines_read": 10054,
+  "t1_core_lines_read_pct": 9.35,
+  "bytes_total": 4313477,
+  "files_hash_unchanged": 3,
+  "max_lines_per_read": 151,
+  "max_lines_per_read_note": "Seven src/lib.rs windows rendered 151 lines because the PowerShell loop bound was start..start+150 inclusive; recorded as-is instead of claiming <=150.",
+  "lib_rs_composition": {
+   "total_lines": 100119,
+   "module_declarations": 70,
+   "inline_test_modules": 33,
+   "test_fns": 471,
+   "test_module_lines": 18991,
+   "test_pct_of_file": 19,
+   "largest_test_modules": {
+    "doctor_asset_taxonomy_tests": "57576-67240 (9665 lines)",
+    "cli_read_db_tests": "71275-73315 (2041 lines)",
+    "indexed_conversation_fallback_tests": "91418-92911 (1494 lines)",
+    "response_schema_tests": "83769-84561 (793 lines)",
+    "search_lexical_self_heal_tests": "21610-22380 (771 lines)"
+   },
+   "largest_top_level_items_non_test": {
+    "run_doctor_impl": "73428-76261 (2834 lines)",
+    "Cli+Commands": "226-1536 (1311 lines)",
+    "output_robot_results": "25553-26679 (1127 lines)",
+    "run_cli_search": "22464-23561 (1098 lines)",
+    "run_index_with_data": "86474-87275 (802 lines)",
+    "run_export_html": "89309-90080 (772 lines)",
+    "state_meta_json_inner": "17882-18487 (606 lines)"
+   },
+   "json_macro_sites": 1064,
+   "json_macro_lines_total": 9754,
+   "json_macro_lines_non_test": 8927,
+   "blank_lines": 5430,
+   "slash_comment_lines": 4219,
+   "generated_code_evidence": "none found (no include!/OUT_DIR; build.rs only validates dependency pins/contracts)"
+  },
+  "cli_surface": {
+   "top_level_commands": 44,
+   "nested_subcommand_enums": 11,
+   "arg_attributes": 471,
+   "command_attributes": 21,
+   "visible_alias_robot_count": 65,
+   "robot_formats": [
+    "json",
+    "jsonl",
+    "compact",
+    "sessions",
+    "toon"
+   ],
+   "pack_cli_defaults": {
+    "limit": 0,
+    "max_tokens": 12000,
+    "max_sessions": 8,
+    "max_evidence": 24,
+    "context_lines": 3,
+    "max_excerpt_chars": 1600
+   }
+  },
+  "sweep_scan_context": {
+   "total": 3641,
+   "scanned": 3632,
+   "excluded_binary": 5,
+   "skipped_oversize": 4,
+   "files_with_any_hit": 836
+  }
+ },
+ "sweep_probe_hits": {
+  "src/lib.rs": {
+   "shell_exec": 12,
+   "sql_dynamic": 22,
+   "provider_paths": 91,
+   "unwrap_or": 1079,
+   "ignored_result": 75,
+   "truncation_limit": 82,
+   "concurrency": 25,
+   "index_storage": 255,
+   "resume_launch": 90,
+   "secret_redaction": 948,
+   "inline_tests": 630,
+   "surface_mcp": 872
+  },
+  "src/sources/sync.rs": {
+   "shell_exec": 4,
+   "provider_paths": 19,
+   "unwrap_or": 24,
+   "ignored_result": 8,
+   "secret_redaction": 3,
+   "inline_tests": 87,
+   "surface_mcp": 6
+  },
+  "src/sources/config.rs": {
+   "provider_paths": 55,
+   "unwrap_or": 7,
+   "ignored_result": 1,
+   "inline_tests": 75
+  },
+  "note": "Counts only, filtered from sweep-coding_agent_session_search.json by path; hit counts were not treated as reading and were not individually verified."
+ },
+ "report": "audit-cass-lib.md",
+ "ownership_note": "This worker created only coverage-cass-lib.json and audit-cass-lib.md. No competitor source file and no other TASKDIR file was created or modified; shard A/B/C receipts were read for reference only."
+}

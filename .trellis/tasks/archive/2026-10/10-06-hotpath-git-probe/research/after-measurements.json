@@ -1,0 +1,241 @@
+{
+  "phase": "after",
+  "binary": "C:\\AgentSessions\\.trellis\\.runtime\\hotpath-experiment\\bin\\after-agent-session-grep.exe",
+  "binary_sha256": "912f45c84b65ced344817f4f2c1d87e1e77617233ff6c4fb2ce1118453e0e4e5",
+  "commit": "5b232cdedbff33a251e7fb266558be7af8496e1a",
+  "cwd": "C:\\AgentSessions",
+  "db": "C:\\AgentSessions\\.trellis\\.runtime\\hotpath-experiment\\fixture.db",
+  "wire_id": "msg_v1_cb6837d0712fbb4e022f869652978b74",
+  "clock_ms": "1787616000000",
+  "runs_per_variant": 20,
+  "probe_runs_per_variant": 3,
+  "method": "Paired process launches, one synthetic catalog entry, fixed ASG_CLOCK_MS, --robot --request-id pinned; variant git_detect = default CWD repo discovery (repo with origin => 2 git subprocesses per resolution round), variant repo_disabled_by_test_seam = ASG_CURRENT_REPO empty (existing test seam, zero probes). Probe counts observed via GIT_TRACE (one built-in line per dispatched git process). Not a universal benchmark.",
+  "variants": {
+    "git_detect": {
+      "get": {
+        "raw_ms": [
+          14.0685,
+          9.9427,
+          9.4738,
+          8.7636,
+          8.7537,
+          8.3136,
+          9.285,
+          8.6568,
+          8.4768,
+          8.7538,
+          9.5175,
+          10.2966,
+          8.9768,
+          8.5008,
+          8.1844,
+          10.0283,
+          9.6945,
+          9.8036,
+          9.2416,
+          9.3957
+        ],
+        "median_ms": 9.2633,
+        "min_ms": 8.1844,
+        "max_ms": 14.0685,
+        "exit_codes": [
+          0
+        ],
+        "probe_counts": [
+          0,
+          0,
+          0
+        ],
+        "probe_median": 0.0,
+        "output_file": "C:\\AgentSessions\\.trellis\\tasks\\10-06-hotpath-git-probe\\research\\after-output-git_detect-get.json"
+      },
+      "show": {
+        "raw_ms": [
+          11.407,
+          9.2083,
+          9.1039,
+          8.241,
+          8.4989,
+          9.5875,
+          9.3278,
+          9.5705,
+          8.8867,
+          9.7101,
+          10.6655,
+          8.7465,
+          9.3238,
+          8.9111,
+          9.6704,
+          8.7244,
+          9.3664,
+          9.7518,
+          9.41,
+          8.763
+        ],
+        "median_ms": 9.3258,
+        "min_ms": 8.241,
+        "max_ms": 11.407,
+        "exit_codes": [
+          0
+        ],
+        "probe_counts": [
+          0,
+          0,
+          0
+        ],
+        "probe_median": 0.0,
+        "output_file": "C:\\AgentSessions\\.trellis\\tasks\\10-06-hotpath-git-probe\\research\\after-output-git_detect-show.json"
+      },
+      "search": {
+        "raw_ms": [
+          59.6885,
+          56.0224,
+          54.6455,
+          53.1284,
+          63.3984,
+          62.2942,
+          53.3432,
+          52.6972,
+          52.964,
+          56.509,
+          55.4337,
+          52.6624,
+          52.0467,
+          60.0787,
+          58.5634,
+          56.7226,
+          58.4222,
+          56.1753,
+          54.9377,
+          51.7666
+        ],
+        "median_ms": 55.72805,
+        "min_ms": 51.7666,
+        "max_ms": 63.3984,
+        "exit_codes": [
+          0
+        ],
+        "probe_counts": [
+          2,
+          2,
+          2
+        ],
+        "probe_median": 2.0,
+        "output_file": "C:\\AgentSessions\\.trellis\\tasks\\10-06-hotpath-git-probe\\research\\after-output-git_detect-search.json"
+      }
+    },
+    "repo_disabled_by_test_seam": {
+      "get": {
+        "raw_ms": [
+          10.3538,
+          9.685,
+          8.1692,
+          8.0167,
+          9.8039,
+          9.1716,
+          12.8824,
+          9.0986,
+          9.4227,
+          8.9599,
+          9.6243,
+          8.9276,
+          9.159,
+          8.7741,
+          7.9681,
+          8.6151,
+          9.0185,
+          9.0725,
+          9.3072,
+          8.3482
+        ],
+        "median_ms": 9.08555,
+        "min_ms": 7.9681,
+        "max_ms": 12.8824,
+        "exit_codes": [
+          0
+        ],
+        "probe_counts": [
+          0,
+          0,
+          0
+        ],
+        "probe_median": 0.0,
+        "output_file": "C:\\AgentSessions\\.trellis\\tasks\\10-06-hotpath-git-probe\\research\\after-output-repo_disabled_by_test_seam-get.json"
+      },
+      "show": {
+        "raw_ms": [
+          9.319,
+          9.0941,
+          8.4206,
+          9.3208,
+          8.9219,
+          8.6983,
+          8.7209,
+          8.1863,
+          9.2695,
+          8.7854,
+          8.1279,
+          12.287,
+          8.9233,
+          13.1565,
+          11.0556,
+          8.8314,
+          9.0939,
+          8.9916,
+          8.1903,
+          9.7823
+        ],
+        "median_ms": 8.95745,
+        "min_ms": 8.1279,
+        "max_ms": 13.1565,
+        "exit_codes": [
+          0
+        ],
+        "probe_counts": [
+          0,
+          0,
+          0
+        ],
+        "probe_median": 0.0,
+        "output_file": "C:\\AgentSessions\\.trellis\\tasks\\10-06-hotpath-git-probe\\research\\after-output-repo_disabled_by_test_seam-show.json"
+      },
+      "search": {
+        "raw_ms": [
+          9.7251,
+          9.8658,
+          9.8309,
+          8.753,
+          8.9565,
+          11.512,
+          9.6679,
+          9.7447,
+          9.6533,
+          8.9262,
+          10.6168,
+          10.26,
+          9.4986,
+          15.0214,
+          9.9735,
+          10.4762,
+          9.7152,
+          10.4543,
+          9.8663,
+          11.3233
+        ],
+        "median_ms": 9.84835,
+        "min_ms": 8.753,
+        "max_ms": 15.0214,
+        "exit_codes": [
+          0
+        ],
+        "probe_counts": [
+          0,
+          0,
+          0
+        ],
+        "probe_median": 0.0,
+        "output_file": "C:\\AgentSessions\\.trellis\\tasks\\10-06-hotpath-git-probe\\research\\after-output-repo_disabled_by_test_seam-search.json"
+      }
+    }
+  }
+}

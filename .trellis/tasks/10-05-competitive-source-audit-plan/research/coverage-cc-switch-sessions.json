@@ -1,0 +1,711 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-06",
+  "task": ".trellis/tasks/10-05-competitive-source-audit-plan",
+  "repository": "C:\\AgentSessions\\Github_src\\cc-switch",
+  "commit": "f748f3ac4afbbbc6554a3ca2bb7e56e4036fedfa",
+  "scope": "cc-switch 分片 A：会话管理/检索/用量竞品源码审计（T1 全文精读 + T2 机械扫描按需过滤）；只读审计，无 build/test/install/网络/git 写操作。",
+  "status": "t1_reads_complete; report=audit-cc-switch-sessions.md",
+  "t1_scope_rule": "T1 全文精读=任务指定 10 个主文件（全部 full）+ 可选 codex_history_migration.rs（选择性区域 partial）；另补充读取 7 个完整文件与 2 个部分文件用于回答“7 家 scanner 覆盖/搜索入口/恢复链路”。每次读取≤150行、记录 1-based 精确行区间；SHA256 不视为阅读凭证。",
+  "read_method": "codegraph node 行号输出分段读取（每段≤150行）；PowerShell Get-Item/Get-Content/Get-FileHash 仅用于元数据与哈希。",
+  "hash_capture_note": "11 个 T1 主文件（含 codex_history_migration.rs）在审读前采集 sha256_initial；9 个补充文件的 sha256_initial 为审读完成时计算值（见各条 reason 注记）。本 worker 未对仓库执行任何写操作。",
+  "files": [
+    {
+      "path": "src-tauri/src/session_manager/mod.rs",
+      "bytes": 12500,
+      "total_lines": 359,
+      "sha256_initial": "3c291e057e2b925d119141581a253bd162d15b04f473532ffc3264d99adc9539",
+      "read_ranges": [
+        [
+          1,
+          150
+        ],
+        [
+          151,
+          300
+        ],
+        [
+          301,
+          359
+        ]
+      ],
+      "status": "full",
+      "reason": "任务 T1 指定文件；全部逻辑行均由 codegraph node 行号输出分段（每段≤150行）实际显示并审读；SHA256 仅作完整性指纹，不计为阅读。",
+      "sha256_final": "3c291e057e2b925d119141581a253bd162d15b04f473532ffc3264d99adc9539",
+      "content_unchanged": true,
+      "description": "会话管理聚合层：SessionMeta/SessionMessage 结构、7 家 provider 并行扫描（thread::scope）、消息加载分派、删除统一入口（canonicalize 根校验）与删除结果聚合；含删除路径校验单测。",
+      "read_line_count": 359,
+      "read_method": "codegraph node --file <rel-path> --offset/--limit 行号输出（每段≤150行），CLI 调用：codegraph node --file ... --path C:/AgentSessions/Github_src/cc-switch",
+      "missing_ranges": []
+    },
+    {
+      "path": "src-tauri/src/session_manager/providers/codex.rs",
+      "bytes": 38700,
+      "total_lines": 997,
+      "sha256_initial": "a73c64f39585a7965462a3b5b194fcbddb8e7d5e8b29dbedbfaa17d857be5e50",
+      "read_ranges": [
+        [
+          1,
+          150
+        ],
+        [
+          151,
+          300
+        ],
+        [
+          301,
+          450
+        ],
+        [
+          451,
+          600
+        ],
+        [
+          601,
+          750
+        ],
+        [
+          751,
+          900
+        ],
+        [
+          901,
+          997
+        ]
+      ],
+      "status": "full",
+      "reason": "任务 T1 指定文件；全部逻辑行均由 codegraph node 行号输出分段（每段≤150行）实际显示并审读；SHA256 仅作完整性指纹，不计为阅读。",
+      "sha256_final": "a73c64f39585a7965462a3b5b194fcbddb8e7d5e8b29dbedbfaa17d857be5e50",
+      "content_unchanged": true,
+      "description": "Codex JSONL 扫描（sessions+archived；thread 标题来自 session_index.jsonl 与 state DB threads）、head/tail 元数据抽取、子代理过滤、VS Code IDE 提示词标题提取、消息加载（含 tool 调用/输出）、删除、resume_command=codex resume <id>。",
+      "read_line_count": 997,
+      "read_method": "codegraph node --file <rel-path> --offset/--limit 行号输出（每段≤150行），CLI 调用：codegraph node --file ... --path C:/AgentSessions/Github_src/cc-switch",
+      "missing_ranges": []
+    },
+    {
+      "path": "src-tauri/src/session_manager/providers/claude.rs",
+      "bytes": 19055,
+      "total_lines": 500,
+      "sha256_initial": "1f239370eb73b029bba63fde9c92f27a4ebbc8d7c2fd54bb563e352f373de6da",
+      "read_ranges": [
+        [
+          1,
+          150
+        ],
+        [
+          151,
+          300
+        ],
+        [
+          301,
+          450
+        ],
+        [
+          451,
+          500
+        ]
+      ],
+      "status": "full",
+      "reason": "任务 T1 指定文件；全部逻辑行均由 codegraph node 行号输出分段（每段≤150行）实际显示并审读；SHA256 仅作完整性指纹，不计为阅读。",
+      "sha256_final": "1f239370eb73b029bba63fde9c92f27a4ebbc8d7c2fd54bb563e352f373de6da",
+      "content_unchanged": true,
+      "description": "Claude Code projects JSONL 扫描与解析（custom-title、首条真实用户消息、agent-* 过滤）、消息加载（tool_result 归类 tool）、删除（连同同名 sidecar 目录）、resume_command=claude --resume <id>。",
+      "read_line_count": 500,
+      "read_method": "codegraph node --file <rel-path> --offset/--limit 行号输出（每段≤150行），CLI 调用：codegraph node --file ... --path C:/AgentSessions/Github_src/cc-switch",
+      "missing_ranges": []
+    },
+    {
+      "path": "src-tauri/src/session_manager/providers/opencode.rs",
+      "bytes": 34530,
+      "total_lines": 1001,
+      "sha256_initial": "29f6236c9de642ed35c431a718262bcef153b8fe2e4479b84ace66c29eaec273",
+      "read_ranges": [
+        [
+          1,
+          150
+        ],
+        [
+          151,
+          300
+        ],
+        [
+          301,
+          450
+        ],
+        [
+          451,
+          600
+        ],
+        [
+          601,
+          750
+        ],
+        [
+          751,
+          900
+        ],
+        [
+          901,
+          1001
+        ]
+      ],
+      "status": "full",
+      "reason": "任务 T1 指定文件；全部逻辑行均由 codegraph node 行号输出分段（每段≤150行）实际显示并审读；SHA256 仅作完整性指纹，不计为阅读。",
+      "sha256_final": "29f6236c9de642ed35c431a718262bcef153b8fe2e4479b84ace66c29eaec273",
+      "content_unchanged": true,
+      "description": "OpenCode 双源扫描（legacy JSON storage + opencode.db SQLite，SQLite 优先去重）、消息重建（message+part）、JSON/SQLite 删除（事务+路径校验）、resume_command=opencode -s <id>。",
+      "read_line_count": 1001,
+      "read_method": "codegraph node --file <rel-path> --offset/--limit 行号输出（每段≤150行），CLI 调用：codegraph node --file ... --path C:/AgentSessions/Github_src/cc-switch",
+      "missing_ranges": []
+    },
+    {
+      "path": "src-tauri/src/session_manager/providers/hermes.rs",
+      "bytes": 19811,
+      "total_lines": 603,
+      "sha256_initial": "39b2ea9850785fe30280102a1bbd591b3548de31fcd13d9bc7b2715ef9adb3ea",
+      "read_ranges": [
+        [
+          1,
+          150
+        ],
+        [
+          151,
+          300
+        ],
+        [
+          301,
+          450
+        ],
+        [
+          451,
+          603
+        ]
+      ],
+      "status": "full",
+      "reason": "任务 T1 指定文件；全部逻辑行均由 codegraph node 行号输出分段（每段≤150行）实际显示并审读；SHA256 仅作完整性指纹，不计为阅读。",
+      "sha256_final": "39b2ea9850785fe30280102a1bbd591b3548de31fcd13d9bc7b2715ef9adb3ea",
+      "content_unchanged": true,
+      "description": "Hermes 双源扫描（state.db sessions 表 LIMIT 500 + sessions/*.json(l) 浅扫，SQLite 优先）、消息加载（固定列 role/content/created_at）、SQLite 事务删除/JSON 文件删除（不校验 ID）、resume_command=None。",
+      "read_line_count": 603,
+      "read_method": "codegraph node --file <rel-path> --offset/--limit 行号输出（每段≤150行），CLI 调用：codegraph node --file ... --path C:/AgentSessions/Github_src/cc-switch",
+      "missing_ranges": []
+    },
+    {
+      "path": "src-tauri/src/session_manager/providers/openclaw.rs",
+      "bytes": 15702,
+      "total_lines": 473,
+      "sha256_initial": "d7615e11b16d176ab54921f80909eb4f08dbe3de7a759d0f8993c717a64dcda5",
+      "read_ranges": [
+        [
+          1,
+          150
+        ],
+        [
+          151,
+          300
+        ],
+        [
+          301,
+          450
+        ],
+        [
+          451,
+          473
+        ]
+      ],
+      "status": "full",
+      "reason": "任务 T1 指定文件；全部逻辑行均由 codegraph node 行号输出分段（每段≤150行）实际显示并审读；SHA256 仅作完整性指纹，不计为阅读。",
+      "sha256_final": "d7615e11b16d176ab54921f80909eb4f08dbe3de7a759d0f8993c717a64dcda5",
+      "content_unchanged": true,
+      "description": "OpenClaw agents/*/sessions/*.jsonl 扫描 + sessions.json displayName、消息加载（toolResult→tool）、删除并修剪 sessions.json 索引、resume_command=None（网关托管，源码注释明示）。",
+      "read_line_count": 473,
+      "read_method": "codegraph node --file <rel-path> --offset/--limit 行号输出（每段≤150行），CLI 调用：codegraph node --file ... --path C:/AgentSessions/Github_src/cc-switch",
+      "missing_ranges": []
+    },
+    {
+      "path": "src-tauri/src/services/session_usage_codex.rs",
+      "bytes": 110265,
+      "total_lines": 3086,
+      "sha256_initial": "eadb325ca4b408c9a330784d3e6e6bca86b235cf0e5ce9a4568c82596e055d03",
+      "read_ranges": [
+        [
+          1,
+          150
+        ],
+        [
+          151,
+          300
+        ],
+        [
+          301,
+          450
+        ],
+        [
+          451,
+          600
+        ],
+        [
+          601,
+          750
+        ],
+        [
+          751,
+          900
+        ],
+        [
+          901,
+          1050
+        ],
+        [
+          1051,
+          1200
+        ],
+        [
+          1201,
+          1350
+        ],
+        [
+          1351,
+          1500
+        ],
+        [
+          1501,
+          1650
+        ],
+        [
+          1651,
+          1800
+        ],
+        [
+          1801,
+          1950
+        ],
+        [
+          1951,
+          2100
+        ],
+        [
+          2101,
+          2250
+        ],
+        [
+          2251,
+          2400
+        ],
+        [
+          2401,
+          2550
+        ],
+        [
+          2551,
+          2700
+        ],
+        [
+          2701,
+          2850
+        ],
+        [
+          2851,
+          3000
+        ],
+        [
+          3001,
+          3086
+        ]
+      ],
+      "status": "full",
+      "reason": "任务 T1 指定文件；全部逻辑行均由 codegraph node 行号输出分段（每段≤150行）实际显示并审读；SHA256 仅作完整性指纹，不计为阅读。",
+      "sha256_final": "eadb325ca4b408c9a330784d3e6e6bca86b235cf0e5ce9a4568c82596e055d03",
+      "content_unchanged": true,
+      "description": "Codex 会话用量增量导入：token_count delta、多 rate-limit 通道重复抑制、父子 rollout 重放前缀、parent 时间线缓存、pending/deferred 状态、批事务（1000/批）与游标同事务、reset/rebuild、手动真实语料回放 harness 及大量测试。",
+      "read_line_count": 3086,
+      "read_method": "codegraph node --file <rel-path> --offset/--limit 行号输出（每段≤150行），CLI 调用：codegraph node --file ... --path C:/AgentSessions/Github_src/cc-switch",
+      "missing_ranges": []
+    },
+    {
+      "path": "src/components/sessions/SessionManagerPage.tsx",
+      "bytes": 70682,
+      "total_lines": 1753,
+      "sha256_initial": "601b4cd856666b9ea75f86d9d1d5b0bc9ee31629f8b461c573f0edc747fcc519",
+      "read_ranges": [
+        [
+          1,
+          150
+        ],
+        [
+          151,
+          300
+        ],
+        [
+          301,
+          450
+        ],
+        [
+          451,
+          600
+        ],
+        [
+          601,
+          750
+        ],
+        [
+          751,
+          900
+        ],
+        [
+          901,
+          1050
+        ],
+        [
+          1051,
+          1200
+        ],
+        [
+          1201,
+          1350
+        ],
+        [
+          1351,
+          1500
+        ],
+        [
+          1501,
+          1650
+        ],
+        [
+          1651,
+          1753
+        ]
+      ],
+      "status": "full",
+      "reason": "任务 T1 指定文件；全部逻辑行均由 codegraph node 行号输出分段（每段≤150行）实际显示并审读；SHA256 仅作完整性指纹，不计为阅读。",
+      "sha256_final": "601b4cd856666b9ea75f86d9d1d5b0bc9ee31629f8b461c573f0edc747fcc519",
+      "content_unchanged": true,
+      "description": "会话管理 UI：FlexSearch 搜索框/过滤、分组与视图状态（localStorage）、虚拟化消息视图、用户消息目录（TOC）、单删/批删、恢复命令展示/复制/macOS 终端唤起、路径复制。",
+      "read_line_count": 1753,
+      "read_method": "codegraph node --file <rel-path> --offset/--limit 行号输出（每段≤150行），CLI 调用：codegraph node --file ... --path C:/AgentSessions/Github_src/cc-switch",
+      "missing_ranges": []
+    },
+    {
+      "path": "src/hooks/useSessionSearch.ts",
+      "bytes": 1819,
+      "total_lines": 72,
+      "sha256_initial": "933545017534897136951c3c0a6a025213ce341dec7b9e28851cf6bb1cbbb722",
+      "read_ranges": [
+        [
+          1,
+          72
+        ]
+      ],
+      "status": "full",
+      "reason": "任务 T1 指定文件；全部逻辑行均由 codegraph node 行号输出分段（每段≤150行）实际显示并审读；SHA256 仅作完整性指纹，不计为阅读。",
+      "sha256_final": "933545017534897136951c3c0a6a025213ce341dec7b9e28851cf6bb1cbbb722",
+      "content_unchanged": true,
+      "description": "FlexSearch 内存索引（tokenize=full、resolution=9）：仅索引 sessionId/title/summary/projectDir/sourcePath；空查询返回按 lastActiveAt 排序全列表；索引按 provider 过滤后的数组重建，不持久化、不含消息正文。",
+      "read_line_count": 72,
+      "read_method": "codegraph node --file <rel-path> --offset/--limit 行号输出（每段≤150行），CLI 调用：codegraph node --file ... --path C:/AgentSessions/Github_src/cc-switch",
+      "missing_ranges": []
+    },
+    {
+      "path": "src-tauri/src/services/session_usage.rs",
+      "bytes": 33018,
+      "total_lines": 895,
+      "sha256_initial": "cfd7348f57f8011c94cb7b5ff59aa3068b79f94036d16c87abe693f12a0aee37",
+      "read_ranges": [
+        [
+          1,
+          150
+        ],
+        [
+          151,
+          300
+        ],
+        [
+          301,
+          450
+        ],
+        [
+          451,
+          600
+        ],
+        [
+          601,
+          750
+        ],
+        [
+          751,
+          895
+        ]
+      ],
+      "status": "full",
+      "reason": "任务 T1 指定文件；全部逻辑行均由 codegraph node 行号输出分段（每段≤150行）实际显示并审读；SHA256 仅作完整性指纹，不计为阅读。",
+      "sha256_final": "cfd7348f57f8011c94cb7b5ff59aa3068b79f94036d16c87abe693f12a0aee37",
+      "content_unchanged": true,
+      "description": "会话用量共享内核（Claude JSONL→proxy_request_logs）：全局 tokio Mutex 串行化、5 源同步调度（Claude/Codex/Gemini/OpenCode/Grok Build）、mtime+行 offset 增量游标、message.id 去重与代理日志去重、定价与 data_source 统计。",
+      "read_line_count": 895,
+      "read_method": "codegraph node --file <rel-path> --offset/--limit 行号输出（每段≤150行），CLI 调用：codegraph node --file ... --path C:/AgentSessions/Github_src/cc-switch",
+      "missing_ranges": []
+    },
+    {
+      "path": "src-tauri/src/codex_history_migration.rs",
+      "bytes": 96183,
+      "total_lines": 2630,
+      "sha256_initial": "cb3a8299c89c0a000dedb51b3b29b4f25e4bdb5218a625aa534c47a3c1ed6302",
+      "read_ranges": [
+        [
+          1,
+          300
+        ],
+        [
+          429,
+          578
+        ],
+        [
+          961,
+          1110
+        ]
+      ],
+      "status": "partial",
+      "reason": "任务 T1 可选文件；仅按选择性区域读取（迁移/新鲜度相关），未读区间见 missing_ranges，不声称全文。",
+      "sha256_final": "cb3a8299c89c0a000dedb51b3b29b4f25e4bdb5218a625aa534c47a3c1ed6302",
+      "content_unchanged": true,
+      "description": "Codex 历史 provider 归桶迁移/还原（选择性区域）：设备级 marker 绑定 Codex 目录、失败不写标记下轮重试、迁移前备份、文件未变更双重校验+原子写、备份账本收集（按会话 id 精确还原）。",
+      "read_line_count": 600,
+      "read_method": "codegraph node --file <rel-path> --offset/--limit 行号输出（每段≤150行），CLI 调用：codegraph node --file ... --path C:/AgentSessions/Github_src/cc-switch",
+      "missing_ranges": [
+        [
+          301,
+          428
+        ],
+        [
+          579,
+          960
+        ],
+        [
+          1111,
+          2630
+        ]
+      ]
+    },
+    {
+      "path": "src-tauri/src/session_manager/providers/mod.rs",
+      "bytes": 129,
+      "total_lines": 8,
+      "sha256_initial": "976407ab354016c4a735988feac6c84c195b5bca2bb2c2ab5703a98945d95f20",
+      "read_ranges": [
+        [
+          1,
+          8
+        ]
+      ],
+      "status": "full",
+      "reason": "补充读取（用于回答 7 家 scanner 覆盖/搜索入口/恢复链路）；全部逻辑行由 codegraph node 行号输出分段实际显示；哈希仅作指纹。 该补充文件未在审读前采集初始哈希，sha256_initial 为审读完成时的计算值；本 worker 对仓库只执行只读操作。",
+      "sha256_final": "976407ab354016c4a735988feac6c84c195b5bca2bb2c2ab5703a98945d95f20",
+      "content_unchanged": true,
+      "description": "provider 模块导出：claude/codex/gemini/grokbuild/hermes/openclaw/opencode 七家。",
+      "read_line_count": 8,
+      "read_method": "codegraph node --file <rel-path> --offset/--limit 行号输出（每段≤150行），CLI 调用：codegraph node --file ... --path C:/AgentSessions/Github_src/cc-switch",
+      "missing_ranges": []
+    },
+    {
+      "path": "src-tauri/src/session_manager/providers/utils.rs",
+      "bytes": 5405,
+      "total_lines": 177,
+      "sha256_initial": "a4dbd523ab6db5ef10302628b3cab30f2cf8c5d62553d411bc3987a1deb8c794",
+      "read_ranges": [
+        [
+          1,
+          150
+        ],
+        [
+          151,
+          177
+        ]
+      ],
+      "status": "full",
+      "reason": "补充读取（用于回答 7 家 scanner 覆盖/搜索入口/恢复链路）；全部逻辑行由 codegraph node 行号输出分段实际显示；哈希仅作指纹。 该补充文件未在审读前采集初始哈希，sha256_initial 为审读完成时的计算值；本 worker 对仓库只执行只读操作。",
+      "sha256_final": "a4dbd523ab6db5ef10302628b3cab30f2cf8c5d62553d411bc3987a1deb8c794",
+      "content_unchanged": true,
+      "description": "共享解析工具：TITLE_MAX_CHARS=80、head/tail 读取（<16KB 全读，否则首尾 ~16KB）、时间戳解析、内容抽取（tool_use/tool_result/text）、截断与路径 basename。",
+      "read_line_count": 177,
+      "read_method": "codegraph node --file <rel-path> --offset/--limit 行号输出（每段≤150行），CLI 调用：codegraph node --file ... --path C:/AgentSessions/Github_src/cc-switch",
+      "missing_ranges": []
+    },
+    {
+      "path": "src-tauri/src/session_manager/providers/gemini.rs",
+      "bytes": 8544,
+      "total_lines": 258,
+      "sha256_initial": "c293f8d14638b7e90022d1fbfc56202741df8be18f4195108886283c1b8fecea",
+      "read_ranges": [
+        [
+          1,
+          150
+        ],
+        [
+          151,
+          258
+        ]
+      ],
+      "status": "full",
+      "reason": "补充读取（用于回答 7 家 scanner 覆盖/搜索入口/恢复链路）；全部逻辑行由 codegraph node 行号输出分段实际显示；哈希仅作指纹。 该补充文件未在审读前采集初始哈希，sha256_initial 为审读完成时的计算值；本 worker 对仓库只执行只读操作。",
+      "sha256_final": "c293f8d14638b7e90022d1fbfc56202741df8be18f4195108886283c1b8fecea",
+      "content_unchanged": true,
+      "description": "Gemini CLI tmp/<project>/chats/*.json 扫描（.project_root 提供项目目录）；消息加载（content 数组/toolCalls 合并，info/error 跳过）；删除前 ID 校验；resume_command=gemini --resume <id>。",
+      "read_line_count": 258,
+      "read_method": "codegraph node --file <rel-path> --offset/--limit 行号输出（每段≤150行），CLI 调用：codegraph node --file ... --path C:/AgentSessions/Github_src/cc-switch",
+      "missing_ranges": []
+    },
+    {
+      "path": "src-tauri/src/session_manager/providers/grokbuild.rs",
+      "bytes": 10548,
+      "total_lines": 296,
+      "sha256_initial": "7a209de859643a0a9fee99aa5ecd6cf34f4dd1aa4ed6f9be4ef56c344250d669",
+      "read_ranges": [
+        [
+          1,
+          150
+        ],
+        [
+          151,
+          296
+        ]
+      ],
+      "status": "full",
+      "reason": "补充读取（用于回答 7 家 scanner 覆盖/搜索入口/恢复链路）；全部逻辑行由 codegraph node 行号输出分段实际显示；哈希仅作指纹。 该补充文件未在审读前采集初始哈希，sha256_initial 为审读完成时的计算值；本 worker 对仓库只执行只读操作。",
+      "sha256_final": "7a209de859643a0a9fee99aa5ecd6cf34f4dd1aa4ed6f9be4ef56c344250d669",
+      "content_unchanged": true,
+      "description": "Grok Build sessions/archived 递归 summary.json 扫描 + chat_history.jsonl 消息加载；删除整会话目录（根/文件名/ID 多重校验）；resume_command=grok --resume <id>。",
+      "read_line_count": 296,
+      "read_method": "codegraph node --file <rel-path> --offset/--limit 行号输出（每段≤150行），CLI 调用：codegraph node --file ... --path C:/AgentSessions/Github_src/cc-switch",
+      "missing_ranges": []
+    },
+    {
+      "path": "src/components/sessions/SessionItem.tsx",
+      "bytes": 3197,
+      "total_lines": 110,
+      "sha256_initial": "94434b9fb65a210240d56bbbf28e51558db9d505a51d069951b907a04ddc30d1",
+      "read_ranges": [
+        [
+          1,
+          110
+        ]
+      ],
+      "status": "full",
+      "reason": "补充读取（用于回答 7 家 scanner 覆盖/搜索入口/恢复链路）；全部逻辑行由 codegraph node 行号输出分段实际显示；哈希仅作指纹。 该补充文件未在审读前采集初始哈希，sha256_initial 为审读完成时的计算值；本 worker 对仓库只执行只读操作。",
+      "sha256_final": "94434b9fb65a210240d56bbbf28e51558db9d505a51d069951b907a04ddc30d1",
+      "content_unchanged": true,
+      "description": "会话列表项：标题经 highlightText 高亮搜索词、相对时间、选择/多选与禁用态。",
+      "read_line_count": 110,
+      "read_method": "codegraph node --file <rel-path> --offset/--limit 行号输出（每段≤150行），CLI 调用：codegraph node --file ... --path C:/AgentSessions/Github_src/cc-switch",
+      "missing_ranges": []
+    },
+    {
+      "path": "src/components/sessions/SessionMessageItem.tsx",
+      "bytes": 3816,
+      "total_lines": 123,
+      "sha256_initial": "833c267bca515f0f7f62cc8f0d7cb8328cbd0feef990c586df2af67738a9bb27",
+      "read_ranges": [
+        [
+          1,
+          123
+        ]
+      ],
+      "status": "full",
+      "reason": "补充读取（用于回答 7 家 scanner 覆盖/搜索入口/恢复链路）；全部逻辑行由 codegraph node 行号输出分段实际显示；哈希仅作指纹。 该补充文件未在审读前采集初始哈希，sha256_initial 为审读完成时的计算值；本 worker 对仓库只执行只读操作。",
+      "sha256_final": "833c267bca515f0f7f62cc8f0d7cb8328cbd0feef990c586df2af67738a9bb27",
+      "content_unchanged": true,
+      "description": "消息条目：长消息折叠（>3000 字符）、命中搜索词时抑制折叠、highlightText 高亮、复制。",
+      "read_line_count": 123,
+      "read_method": "codegraph node --file <rel-path> --offset/--limit 行号输出（每段≤150行），CLI 调用：codegraph node --file ... --path C:/AgentSessions/Github_src/cc-switch",
+      "missing_ranges": []
+    },
+    {
+      "path": "src-tauri/src/commands/session_manager.rs",
+      "bytes": 4685,
+      "total_lines": 119,
+      "sha256_initial": "8fc58dfb4ec687025e9e4dc99f651458cc532a521cfb300bb98c24602efc4c60",
+      "read_ranges": [
+        [
+          1,
+          119
+        ]
+      ],
+      "status": "full",
+      "reason": "补充读取（用于回答 7 家 scanner 覆盖/搜索入口/恢复链路）；全部逻辑行由 codegraph node 行号输出分段实际显示；哈希仅作指纹。 该补充文件未在审读前采集初始哈希，sha256_initial 为审读完成时的计算值；本 worker 对仓库只执行只读操作。",
+      "sha256_final": "8fc58dfb4ec687025e9e4dc99f651458cc532a521cfb300bb98c24602efc4c60",
+      "content_unchanged": true,
+      "description": "Tauri 命令：list_sessions/get_session_messages/launch_session_terminal/delete_session(s)；launch 接受 renderer 传入命令字符串，源码注释记录为已知并接受的风险及推翻条件。",
+      "read_line_count": 119,
+      "read_method": "codegraph node --file <rel-path> --offset/--limit 行号输出（每段≤150行），CLI 调用：codegraph node --file ... --path C:/AgentSessions/Github_src/cc-switch",
+      "missing_ranges": []
+    },
+    {
+      "path": "src/lib/query/queries.ts",
+      "bytes": 12026,
+      "total_lines": 325,
+      "sha256_initial": "4e312d91f5d92205ede9dfbde931d5bea0111a1166aa2799baf1a53b712596a3",
+      "read_ranges": [
+        [
+          300,
+          325
+        ]
+      ],
+      "status": "partial",
+      "reason": "补充读取且为部分读取：已读区间见 read_ranges，未读区间见 missing_ranges，不声称全文。 该补充文件未在审读前采集初始哈希，sha256_initial 为审读完成时的计算值；本 worker 对仓库只执行只读操作。",
+      "sha256_final": "4e312d91f5d92205ede9dfbde931d5bea0111a1166aa2799baf1a53b712596a3",
+      "content_unchanged": true,
+      "description": "React Query：useSessionsQuery/useSessionMessagesQuery 定义与 staleTime=30s（本次仅读 300-325 区段）。",
+      "read_line_count": 26,
+      "read_method": "codegraph node --file <rel-path> --offset/--limit 行号输出（每段≤150行），CLI 调用：codegraph node --file ... --path C:/AgentSessions/Github_src/cc-switch",
+      "missing_ranges": [[1, 299]]
+    },
+    {
+      "path": "src-tauri/src/session_manager/terminal/mod.rs",
+      "bytes": 14363,
+      "total_lines": 440,
+      "sha256_initial": "1af176e118df5e228aac9b36cdb7673bf0e643d277c6c24d6eda49ff20f0d557",
+      "read_ranges": [
+        [
+          1,
+          150
+        ],
+        [
+          277,
+          345
+        ]
+      ],
+      "status": "partial",
+      "reason": "补充读取且为部分读取：已读区间见 read_ranges，未读区间见 missing_ranges，不声称全文。 该补充文件未在审读前采集初始哈希，sha256_initial 为审读完成时的计算值；本 worker 对仓库只执行只读操作。",
+      "sha256_final": "1af176e118df5e228aac9b36cdb7673bf0e643d277c6c24d6eda49ff20f0d557",
+      "content_unchanged": true,
+      "description": "终端唤起：仅 macOS；Terminal/iTerm/Ghostty/Kitty/WezTerm/Kaku/Alacritty/Warp/custom 分支；build_shell_command() 以 cd+POSIX 单引号转义 cwd 后拼命令（本次读 1-150、277-345）。",
+      "read_line_count": 219,
+      "read_method": "codegraph node --file <rel-path> --offset/--limit 行号输出（每段≤150行），CLI 调用：codegraph node --file ... --path C:/AgentSessions/Github_src/cc-switch",
+      "missing_ranges": [
+        [
+          151,
+          276
+        ],
+        [
+          346,
+          440
+        ]
+      ]
+    }
+  ],
+  "summary": {
+    "files_total": 20,
+    "full": 17,
+    "partial": 3,
+    "t1_primary_files": 11,
+    "t1_primary_full": 10,
+    "t1_primary_partial": 1,
+    "supplementary_files": 9,
+    "supplementary_full": 7,
+    "supplementary_partial": 2,
+    "lines_read_total": 11675,
+    "sha256_initial_captured_pre_read": 11,
+    "read_only_no_writes": true
+  },
+  "report": "audit-cc-switch-sessions.md"
+}

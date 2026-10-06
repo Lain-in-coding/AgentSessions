@@ -1,0 +1,43 @@
+B7 residual hot-path probe evidence: current two-step (rev-parse + remote get-url)
+vs single-step candidate (remote get-url only). Repro: run this script.
+================================================================================
+### worktree repo, nested subdir: step1 toplevel gate (current)
+cwd=C:\AgentSessions\.trellis\.runtime\b7-bare-probe\work\sub\deep | git rev-parse --show-toplevel | env=(none)
+exit=0
+output=C:/AgentSessions/.trellis/.runtime/b7-bare-probe/work
+
+### worktree repo, nested subdir: step2 remote get-url (current) == candidate single call
+cwd=C:\AgentSessions\.trellis\.runtime\b7-bare-probe\work\sub\deep | git remote get-url origin | env=(none)
+exit=0
+output=https://example.com/owner/name.git
+
+### bare repo w/ origin: step1 fails (no work tree) -> current = None
+cwd=C:\AgentSessions\.trellis\.runtime\b7-bare-probe\asg.git | git rev-parse --show-toplevel | env=(none)
+exit=128
+output=fatal: this operation must be run in a work tree
+
+### bare repo w/ origin: candidate returns URL -> single-step would widen None -> Some(slug)
+cwd=C:\AgentSessions\.trellis\.runtime\b7-bare-probe\asg.git | git remote get-url origin | env=(none)
+exit=0
+output=https://example.com/owner/name.git
+
+### cwd inside .git/hooks: step1 fails -> current = None
+cwd=C:\AgentSessions\.trellis\.runtime\b7-bare-probe\work\.git\hooks | git rev-parse --show-toplevel | env=(none)
+exit=128
+output=fatal: this operation must be run in a work tree
+
+### cwd inside .git/hooks: candidate returns URL -> widen None -> Some(slug)
+cwd=C:\AgentSessions\.trellis\.runtime\b7-bare-probe\work\.git\hooks | git remote get-url origin | env=(none)
+exit=0
+output=https://example.com/owner/name.git
+
+### GIT_DIR env set, cwd elsewhere: step1 (current)
+cwd=C:\AgentSessions\.trellis\.runtime\b7-bare-probe\elsewhere | git rev-parse --show-toplevel | env=GIT_DIR=C:\AgentSessions\.trellis\.runtime\b7-bare-probe\work\.git
+exit=0
+output=C:/AgentSessions/.trellis/.runtime/b7-bare-probe/elsewhere
+
+### GIT_DIR env set, cwd elsewhere: candidate
+cwd=C:\AgentSessions\.trellis\.runtime\b7-bare-probe\elsewhere | git remote get-url origin | env=GIT_DIR=C:\AgentSessions\.trellis\.runtime\b7-bare-probe\work\.git
+exit=0
+output=https://example.com/owner/name.git
+

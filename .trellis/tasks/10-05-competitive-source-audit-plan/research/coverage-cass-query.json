@@ -1,0 +1,318 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-06",
+  "task": ".trellis/tasks/10-05-competitive-source-audit-plan",
+  "repository": "C:\\AgentSessions\\Github_src\\coding_agent_session_search",
+  "commit": "aa92a45311e10a3ac9c40c3730664a7366af2fe8",
+  "scope": "cass shard B (retrieval pipeline + ranking): bounded T1 reads of src/search/query.rs (partial, all nine required subsystems), full reads of src/search/two_tier_search.rs, src/search/policy.rs, src/indexer/lexical_generation.rs; one auxiliary bounded lib.rs read for mode-dispatch/fallback metadata; mechanical filtered queries of sweep-coding_agent_session_search.json and targeted repo greps; no build/test/install/network/git write operations; competitor source left untouched.",
+  "status": "source_review_complete_report_included",
+  "t1_scope_rule": {
+    "selected_files": [
+      "src/search/query.rs",
+      "src/search/two_tier_search.rs",
+      "src/search/policy.rs",
+      "src/indexer/lexical_generation.rs"
+    ],
+    "why": {
+      "src/search/query.rs": "Assigned core of shard B: search entry points, filter pushdown vs post-filter compensation, candidate budgets/truncation order, BM25/RRF ranking, lexical/semantic/hybrid mode selection, pagination postprocess, snippet/evidence anchoring, error and empty-result paths. Deliberately partial: only the required subsystem ranges and a small set of evidence tests were read; the inline-test bulk was not.",
+      "src/search/two_tier_search.rs": "Full read required by the task: fast/quality tier search structures, score normalization and blending weights, refinement failure phases.",
+      "src/search/policy.rs": "Full read required by the task: semantic mode contract (hybrid_preferred fail-open vs strict_semantic fail-closed), budgets, invalidation/eviction, capability reporting.",
+      "src/indexer/lexical_generation.rs": "Full read required by the task: lexical generation identity/publish states, atomic manifest store/load, recovery and cleanup gate contracts that bound what index state search can observe."
+    },
+    "query_rs_subsystems_covered": [
+      "query parsing (analyze/classify/strategy/cost/warnings; transpile_to_fts5)",
+      "provider/path/since/source filters (SearchFilters; tantivy pushdown; sqlite post-hydration filter; browse_by_date SQL)",
+      "candidate acquisition and truncation order (adaptive fetch, retries, sqlite FTS5 chunked post-filter scan 30k, message-scan 30k prefix, semantic candidate windows)",
+      "ranking/scoring/boost (BM25 delegation, RRF k=60, match_type quality factor usage, no recency/path boost)",
+      "mode selection (lexical/semantic/hybrid, tier modes, fail-open/fail-closed)",
+      "pagination/cursor boundaries (fetch-from-0 + offset applied after dedup/filter; CLI cursor overfetch located in lib.rs)",
+      "snippet/evidence anchoring (preview-first snippets, Tantivy snippet generator, line_number/content_hash/provenance)",
+      "error and empty-result paths (tantivy-authoritative zero hits, sqlite fallbacks, suggestions)",
+      "federated shard RRF merge and dedup/version-generation handling"
+    ],
+    "auxiliary_reads": [
+      {
+        "why": "Single bounded auxiliary read (not part of T1 files list) to answer the required mode-degradation question: SearchModeMeta fail_open_on_semantic_unavailable, fall_back_to_lexical, robot metadata emission (fallback_tier/fallback_reason), semantic error classification, and CLI overfetch-by-one cursor page plumbing. lib.rs is not indexed by codegraph (4MB) and was read with PowerShell line numbering.",
+        "path": "src/lib.rs",
+        "ranges": [
+          [
+            22701,
+            22785
+          ],
+          [
+            22851,
+            23090
+          ],
+          [
+            25206,
+            25259
+          ]
+        ]
+      }
+    ],
+    "mechanical_queries_only": [
+      "sweep-coding_agent_session_search.json filtered by path for the four T1 files (probe hit counts recorded in sweep_probe_hits)",
+      "repo greps: quality_factor / match_type usage outside query.rs; boost occurrences in query.rs; apply_session_paths_filter references; two_tier_index_supports_mode; fs_rrf_fuse/fs_candidate_count definitions",
+      "Cargo.toml dependency-origin check for frankensearch/frankensqlite/git revs and absence of a local franken checkout"
+    ],
+    "out_of_scope": [
+      "query.rs lines outside the recorded ranges (inline-test bulk 8,556-20,986 mostly unread; helper internals as listed in missing_ranges)",
+      "src/lib.rs outside the three auxiliary ranges (incl. cursor string encode/decode and CLI wiring)",
+      "src/indexer/* other than lexical_generation.rs",
+      "src/search/* other than the four T1 files",
+      "external dependency internals: frankensearch (git rev f7fa7a02, includes fs_cass_build_tantivy_query, fs_rrf_fuse/FsRrfConfig, two-tier fusion, snippet generator) and frankensqlite (fsqlite 0.1.18); no local checkout present",
+      "tests/*, benches/*, docs/*, packaging/*",
+      "build/test/install/network/git write operations (none performed)"
+    ],
+    "scope_note": "Conclusions that depend on unread ranges or external dependencies are marked as open items or explicitly labeled; no hash, probe hit, or symbol map entry was treated as reading."
+  },
+  "line_count_method": "UTF-8 logical lines via PowerShell Get-Content (final newline does not add a logical source line); CodeGraph file mode reports one virtual EOF line which is not counted; ranges are 1-based inclusive.",
+  "read_method": "codegraph node --file <relative path> --offset <start> --limit <=120 (file mode, line-numbered output), batched in parallel calls; every gap caused by an output cap was re-read; no single read exceeded 120 lines; lib.rs (not codegraph-indexed) read via PowerShell line-numbered Get-Content in <=120-line windows.",
+  "files": [
+    {
+      "path": "src/search/query.rs",
+      "bytes": 791995,
+      "total_lines": 20986,
+      "sha256_initial": "fc10f18b0eb4a4ca661027565617831ad0996ff39f4b81354dcdad7bc0dfe4dc",
+      "read_ranges": [
+        [
+          360,
+          1199
+        ],
+        [
+          1200,
+          2039
+        ],
+        [
+          2094,
+          2213
+        ],
+        [
+          2280,
+          2399
+        ],
+        [
+          2429,
+          2527
+        ],
+        [
+          3123,
+          3362
+        ],
+        [
+          3460,
+          3819
+        ],
+        [
+          3960,
+          4679
+        ],
+        [
+          5114,
+          5999
+        ],
+        [
+          6025,
+          7934
+        ],
+        [
+          8264,
+          8383
+        ],
+        [
+          10337,
+          10416
+        ],
+        [
+          10785,
+          10904
+        ],
+        [
+          18257,
+          18326
+        ]
+      ],
+      "status": "partial",
+      "reason": "Required subsystems read line-by-line (parsing, filters, candidate acquisition/truncation, ranking/boost, mode selection, pagination, snippet anchoring, error/empty paths) across 6,525 of 20,986 lines; inline-test bulk and helper internals were not read and are listed in missing_ranges; no hash was treated as reading.",
+      "sha256_final": "fc10f18b0eb4a4ca661027565617831ad0996ff39f4b81354dcdad7bc0dfe4dc",
+      "content_unchanged": true,
+      "description": "cass Tantivy/SQLite search facade: query classification, filters, candidate budgets, RRF fusion, semantic/progressive tiering, pagination postprocess, snippets and error paths. Partial: production core plus selected evidence tests.",
+      "read_line_count": 6525,
+      "read_method": "codegraph node --file (1-based line numbers), 14 bounded reads, max 120 lines/read; ranges truncated by an output cap were re-read",
+      "missing_ranges": [
+        [
+          1,
+          359
+        ],
+        [
+          2040,
+          2093
+        ],
+        [
+          2214,
+          2279
+        ],
+        [
+          2400,
+          2428
+        ],
+        [
+          2528,
+          3122
+        ],
+        [
+          3363,
+          3459
+        ],
+        [
+          3820,
+          3959
+        ],
+        [
+          4680,
+          5113
+        ],
+        [
+          6000,
+          6024
+        ],
+        [
+          7935,
+          8263
+        ],
+        [
+          8384,
+          10336
+        ],
+        [
+          10417,
+          10784
+        ],
+        [
+          10905,
+          18256
+        ],
+        [
+          18327,
+          20986
+        ]
+      ]
+    },
+    {
+      "path": "src/search/two_tier_search.rs",
+      "bytes": 48414,
+      "total_lines": 1364,
+      "sha256_initial": "9026aa661fc2738a9f2b69242ea90f231820c41e4e8472552411dc9f1870468d",
+      "read_ranges": [
+        [
+          1,
+          1364
+        ]
+      ],
+      "status": "full",
+      "reason": "All 1,364 logical lines personally displayed in sequential bounded ranges.",
+      "sha256_final": "9026aa661fc2738a9f2b69242ea90f231820c41e4e8472552411dc9f1870468d",
+      "content_unchanged": true,
+      "description": "Legacy/parallel two-tier progressive search: TwoTierIndex/TwoTierSearcher, fast/quality phases, score normalization/blending, daemon refinement, failure phases.",
+      "read_line_count": 1364,
+      "read_method": "codegraph node --file (1-based line numbers), 12 bounded reads of <=120 lines",
+      "missing_ranges": []
+    },
+    {
+      "path": "src/search/policy.rs",
+      "bytes": 62958,
+      "total_lines": 1598,
+      "sha256_initial": "49b6452c70e41184c35bc9616a39ce91a0e806579728f13172a858bcf7520d53",
+      "read_ranges": [
+        [
+          1,
+          1598
+        ]
+      ],
+      "status": "full",
+      "reason": "All 1,598 logical lines personally displayed in sequential bounded ranges.",
+      "sha256_final": "49b6452c70e41184c35bc9616a39ce91a0e806579728f13172a858bcf7520d53",
+      "content_unchanged": true,
+      "description": "Semantic policy contract: modes (hybrid_preferred/lexical_only/strict_semantic), budgets, defaults, invalidation/eviction decisions, capability report, effective settings.",
+      "read_line_count": 1598,
+      "read_method": "codegraph node --file (1-based line numbers), 14 bounded reads of <=120 lines",
+      "missing_ranges": []
+    },
+    {
+      "path": "src/indexer/lexical_generation.rs",
+      "bytes": 172297,
+      "total_lines": 4066,
+      "sha256_initial": "18fe6f73c098f02c0524a62e1d6556c68ecc2406d06086c4d526519aece8a1c9",
+      "read_ranges": [
+        [
+          1,
+          4066
+        ]
+      ],
+      "status": "full",
+      "reason": "All 4,066 logical lines personally displayed in sequential bounded ranges.",
+      "sha256_final": "18fe6f73c098f02c0524a62e1d6556c68ecc2406d06086c4d526519aece8a1c9",
+      "content_unchanged": true,
+      "description": "Lexical generation manifests and publish-state vocabulary: build/publish/shard lifecycles, atomic manifest store/load, recovery decisions, cleanup dry-run/apply gates, failure history.",
+      "read_line_count": 4066,
+      "read_method": "codegraph node --file (1-based line numbers), 34 bounded reads of <=120 lines",
+      "missing_ranges": []
+    }
+  ],
+  "summary": {
+    "t1_core_files": 4,
+    "full_files": 3,
+    "partial_files": 1,
+    "t1_core_lines_total": 28014,
+    "t1_lines_read": 13553,
+    "query_rs_lines_read": 6525,
+    "query_rs_lines_missing": 14461,
+    "bytes_total": 1075664,
+    "files_hash_unchanged": 4,
+    "max_lines_per_read": 120,
+    "sweep_scan_context": {
+      "total": 3641,
+      "scanned": 3632,
+      "excluded_binary": 5,
+      "skipped_oversize": 4,
+      "files_with_any_hit": 836
+    }
+  },
+  "sweep_probe_hits": {
+    "src/search/query.rs": {
+      "sql_dynamic": 1,
+      "unwrap_or": 83,
+      "ignored_result": 15,
+      "truncation_limit": 16,
+      "concurrency": 14,
+      "index_storage": 408,
+      "secret_redaction": 398,
+      "inline_tests": 588,
+      "surface_mcp": 2
+    },
+    "src/search/two_tier_search.rs": {
+      "unwrap_or": 5,
+      "truncation_limit": 2,
+      "index_storage": 42,
+      "inline_tests": 28
+    },
+    "src/search/policy.rs": {
+      "unwrap_or": 2,
+      "index_storage": 25,
+      "inline_tests": 26,
+      "surface_mcp": 17
+    },
+    "src/indexer/lexical_generation.rs": {
+      "sql_dynamic": 3,
+      "unwrap_or": 9,
+      "ignored_result": 1,
+      "concurrency": 3,
+      "index_storage": 3,
+      "resume_launch": 9,
+      "inline_tests": 33,
+      "surface_mcp": 6
+    }
+  },
+  "report": "research/audit-cass-query.md",
+  "ownership_note": "Only coverage-cass-query.json and audit-cass-query.md are created by this worker (cass shard B). No competitor source, task file, or other research artifact was modified; coverage-cass-pack.json (shard A) was read only."
+}

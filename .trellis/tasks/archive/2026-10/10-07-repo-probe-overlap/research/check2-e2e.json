@@ -1,0 +1,127 @@
+{
+  "digest_refs": {
+    "c542c463b85a1596": "github.com/synthetic-owner/h1-worktree-repo",
+    "51e61751a3aea89b": "None",
+    "ef219aceeece5b12": "github.com/synthetic-owner/h2-gitdir",
+    "053efc747be0b717": "github.com/synthetic-owner/submodule",
+    "a0fe443eade83927": "github.com/synthetic-owner/plain",
+    "2e9f1a0f0dc094df": "github.com/synthetic-owner/envrepo",
+    "93e4342f06d2c1fb": "github.com/synthetic-owner/wt-host",
+    "4a065ab9fbdf7b5b": "github.com/synthetic-owner/r3-detached",
+    "e19040ac8bf468ce": "github.com/synthetic-owner/h1-gitdir"
+  },
+  "rows": [
+    {
+      "Context": "plain root",
+      "Expect": "github.com/synthetic-owner/plain",
+      "Observed": "github.com/synthetic-owner/plain",
+      "Verdict": "MATCH",
+      "Spawns": 2,
+      "Argv": "-C C:\\Users\\小Q\\AppData\\Local\\Temp\\b8-check2e\\plain rev-parse --show-toplevel || -C C:\\Users\\小Q\\AppData\\Local\\Temp\\b8-check2e\\plain remote get-url origin"
+    },
+    {
+      "Context": "plain subdir",
+      "Expect": "github.com/synthetic-owner/plain",
+      "Observed": "github.com/synthetic-owner/plain",
+      "Verdict": "MATCH",
+      "Spawns": 2,
+      "Argv": "-C C:\\Users\\小Q\\AppData\\Local\\Temp\\b8-check2e\\plain\\packages\\app rev-parse --show-toplevel || -C C:\\Users\\小Q\\AppData\\Local\\Temp\\b8-check2e\\plain\\packages\\app remote get-url origin"
+    },
+    {
+      "Context": "bare root",
+      "Expect": "None",
+      "Observed": "None",
+      "Verdict": "MATCH",
+      "Spawns": 2,
+      "Argv": "-C C:\\Users\\小Q\\AppData\\Local\\Temp\\b8-check2e\\bare.git rev-parse --show-toplevel || -C C:\\Users\\小Q\\AppData\\Local\\Temp\\b8-check2e\\bare.git remote get-url origin"
+    },
+    {
+      "Context": "git-dir cwd",
+      "Expect": "None",
+      "Observed": "None",
+      "Verdict": "MATCH",
+      "Spawns": 2,
+      "Argv": "-C C:\\Users\\小Q\\AppData\\Local\\Temp\\b8-check2e\\plain\\.git rev-parse --show-toplevel || -C C:\\Users\\小Q\\AppData\\Local\\Temp\\b8-check2e\\plain\\.git remote get-url origin"
+    },
+    {
+      "Context": "non-git dir",
+      "Expect": "None",
+      "Observed": "None",
+      "Verdict": "MATCH",
+      "Spawns": 2,
+      "Argv": "-C C:\\Users\\小Q\\AppData\\Local\\Temp\\b8-check2e\\nongit rev-parse --show-toplevel || -C C:\\Users\\小Q\\AppData\\Local\\Temp\\b8-check2e\\nongit remote get-url origin"
+    },
+    {
+      "Context": "no-origin repo",
+      "Expect": "None",
+      "Observed": "None",
+      "Verdict": "MATCH",
+      "Spawns": 2,
+      "Argv": "-C C:\\Users\\小Q\\AppData\\Local\\Temp\\b8-check2e\\no-origin rev-parse --show-toplevel || -C C:\\Users\\小Q\\AppData\\Local\\Temp\\b8-check2e\\no-origin remote get-url origin"
+    },
+    {
+      "Context": "linked worktree root",
+      "Expect": "github.com/synthetic-owner/wt-host",
+      "Observed": "github.com/synthetic-owner/wt-host",
+      "Verdict": "MATCH",
+      "Spawns": 2,
+      "Argv": "-C C:\\Users\\小Q\\AppData\\Local\\Temp\\b8-check2e\\wt-linked rev-parse --show-toplevel || -C C:\\Users\\小Q\\AppData\\Local\\Temp\\b8-check2e\\wt-linked remote get-url origin"
+    },
+    {
+      "Context": "submodule root",
+      "Expect": "github.com/synthetic-owner/submodule",
+      "Observed": "github.com/synthetic-owner/submodule",
+      "Verdict": "MATCH",
+      "Spawns": 2,
+      "Argv": "-C C:\\Users\\小Q\\AppData\\Local\\Temp\\b8-check2e\\super\\submod rev-parse --show-toplevel || -C C:\\Users\\小Q\\AppData\\Local\\Temp\\b8-check2e\\super\\submod remote get-url origin"
+    },
+    {
+      "Context": "R1 GIT_WORK_TREE only",
+      "Expect": "None",
+      "Observed": "None",
+      "Verdict": "MATCH",
+      "Spawns": 2,
+      "Argv": "-C C:\\Users\\小Q\\AppData\\Local\\Temp\\b8-check2e\\envrepo\\x\\y rev-parse --show-toplevel || -C C:/Users/小Q/AppData/Local/Temp/b8-check2e/outside remote get-url origin"
+    },
+    {
+      "Context": "R2 rel GIT_DIR + WT plain",
+      "Expect": "None",
+      "Observed": "None",
+      "Verdict": "MATCH",
+      "Spawns": 1,
+      "Argv": "-C C:\\Users\\小Q\\AppData\\Local\\Temp\\b8-check2e\\envrepo\\plainno rev-parse --show-toplevel"
+    },
+    {
+      "Context": "R2b rel GIT_DIR + WT nested",
+      "Expect": "github.com/synthetic-owner/envrepo",
+      "Observed": "github.com/synthetic-owner/envrepo",
+      "Verdict": "MATCH",
+      "Spawns": 2,
+      "Argv": "-C C:\\Users\\小Q\\AppData\\Local\\Temp\\b8-check2e\\envrepo\\x\\y rev-parse --show-toplevel || -C C:/Users/小Q/AppData/Local/Temp/b8-check2e/envrepo remote get-url origin"
+    },
+    {
+      "Context": "R3 core.worktree outside",
+      "Expect": "None",
+      "Observed": "None",
+      "Verdict": "MATCH",
+      "Spawns": 3,
+      "Argv": "-C C:\\Users\\小Q\\AppData\\Local\\Temp\\b8-check2e\\r3\\gd rev-parse --show-toplevel || -C C:\\Users\\小Q\\AppData\\Local\\Temp\\b8-check2e\\r3\\gd remote get-url origin || -C C:/Users/小Q/AppData/Local/Temp/b8-check2e/r3/w remote get-url origin"
+    },
+    {
+      "Context": "H1 toplevel .git other repo",
+      "Expect": "github.com/synthetic-owner/h1-worktree-repo",
+      "Observed": "github.com/synthetic-owner/h1-gitdir",
+      "Verdict": "DRIFT",
+      "Spawns": 2,
+      "Argv": "-C C:\\Users\\小Q\\AppData\\Local\\Temp\\b8-check2e\\h1\\gd rev-parse --show-toplevel || -C C:\\Users\\小Q\\AppData\\Local\\Temp\\b8-check2e\\h1\\gd remote get-url origin"
+    },
+    {
+      "Context": "H2 toplevel .git invalid",
+      "Expect": "None",
+      "Observed": "github.com/synthetic-owner/h2-gitdir",
+      "Verdict": "DRIFT",
+      "Spawns": 2,
+      "Argv": "-C C:\\Users\\小Q\\AppData\\Local\\Temp\\b8-check2e\\h2\\gd rev-parse --show-toplevel || -C C:\\Users\\小Q\\AppData\\Local\\Temp\\b8-check2e\\h2\\gd remote get-url origin"
+    }
+  ]
+}

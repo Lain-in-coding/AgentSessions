@@ -20,16 +20,25 @@
 use agent_session_grep_adapters_sqlite::RepoSlugResolver;
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
 
 /// 派生 slug 最大长度（host/owner/name 三段之和）。超长即拒绝（None）——
 /// 截断会破坏身份唯一性，把两个仓库并成一个。
 pub const REPO_SLUG_MAX_CHARS: usize = 255;
 
-/// 运行一次 git 并取 stdout 首行（trim）；spawn 失败 / 非零退出 /
-/// 非 UTF-8 / 空输出一律 `None`。
+/// 运行一次 git 取 stdout（trim）；spawn 失败 / 非零退出 / 非 UTF-8 /
+/// 空输出一律 `None`。
+///
+/// 这是**改动前**的串行原语：重叠派发不可用时解析器回退到它，五个仓库
+/// 上下文的语义矩阵也用它做对照，保证回退路径与旧行为逐字一致。
 fn git_output(args: &[&str]) -> Option<String> {
     let output = Command::new("git").args(args).output().ok()?;
+    parse_git_output(output)
+}
+
+/// 串行/重叠两条路径共用的 stdout 解析：非零退出 / 非 UTF-8 / 空输出一律
+/// `None`，否则 trim 后的整体内容（两条命令的输出都只有单行，等价于取首行）。
+fn parse_git_output(output: std::process::Output) -> Option<String> {
     if !output.status.success() {
         return None;
     }
@@ -52,6 +61,86 @@ fn git_toplevel(cwd: &str) -> Option<String> {
 /// 无 origin（本地仓）→ None。
 fn git_origin_url(toplevel: &str) -> Option<String> {
     git_output(&["-C", toplevel, "remote", "get-url", "origin"])
+}
+
+/// by_directory 缓存未命中的重叠派发：**先同时 spawn 两个 git 子进程**
+/// （都用 `-C <cwd>`，仓库发现交给 git 自己），再依次收割输出；单侧语义与
+/// `git_output` 逐字一致（spawn 失败 / 非零退出 / 非 UTF-8 / 空 → None，
+/// 流语义同 `Command::output`：stdin 立即 EOF、stderr 丢弃不继承）。
+///
+/// 返回 `(toplevel, origin_url)`：toplevel 是门禁——`None` 表示 bare repo /
+/// `.git` 内 cwd / 非仓库等，调用方必须丢弃 URL 结果。URL 探测从 cwd 出发
+/// （改动前从 toplevel 出发）；git 自行向上发现同一仓库，输出等价。
+fn git_toplevel_and_origin_url(cwd: &str) -> (Option<String>, Option<String>) {
+    fn spawn(args: &[&str]) -> Option<Child> {
+        Command::new("git")
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .ok()
+    }
+    let collect = |child: Option<Child>| {
+        child
+            .and_then(|child| child.wait_with_output().ok())
+            .and_then(parse_git_output)
+    };
+    let toplevel = spawn(&["-C", cwd, "rev-parse", "--show-toplevel"]);
+    let origin_url = spawn(&["-C", cwd, "remote", "get-url", "origin"]);
+    (collect(toplevel), collect(origin_url))
+}
+
+/// 重叠派发只有在"从 cwd 发现"与"从 toplevel 发现"落在同一仓库时才等价于
+/// 改动前的串行两级探测。两类信号会让两者分叉，命中任一即回退串行路径：
+///
+/// 1. 可能改变 discover 落点的环境变量（GIT_DIR / GIT_WORK_TREE /
+///    GIT_COMMON_DIR / GIT_CEILING_DIRECTORIES /
+///    GIT_DISCOVERY_ACROSS_FILESYSTEM）；
+/// 2. 门禁返回的 toplevel 自身不是可重新发现的仓库根（`<toplevel>/.git`
+///    不存在）——典型是 `core.worktree` 外指到 gitdir 树之外的布局，此时
+///    改动前那次以 toplevel 为 `-C` 的探测会走到另一个仓库（实测中甚至
+///    走到了外层仓）。
+fn discovery_env_overrides_present() -> bool {
+    const VARS: [&str; 5] = [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_COMMON_DIR",
+        "GIT_CEILING_DIRECTORIES",
+        "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+    ];
+    VARS.iter().any(|name| std::env::var_os(name).is_some())
+}
+
+/// `<toplevel>/.git` 存在（目录、worktree/submodule 指针文件、
+/// separate-git-dir 指针）即认为 toplevel 可被重新发现到同一仓库。
+fn toplevel_is_rediscoverable(toplevel: &str) -> bool {
+    std::path::Path::new(toplevel).join(".git").exists()
+}
+
+/// 重叠还要求 cwd 落在门禁返回的 toplevel 之内（正常仓库、子目录、linked
+/// worktree、submodule 恒成立）。core.worktree 把工作树指到别处、或该路径
+/// 本身是另一个仓库根时 cwd 不在 toplevel 之下——那正是从 toplevel
+/// 重新发现会落到另一仓库（甚至外层仓）的布局，必须回退串行。
+///
+/// 路径别名必须按真实路径比较：`git rev-parse --show-toplevel` 会解析
+/// junction / 符号链接（实测 Windows junction 下 cwd 报链接路径、toplevel
+/// 报真实路径；macOS `/var` -> `/private/var` 同理），CI 的临时目录正是这种
+/// 布局，字面比较会把命中的重叠误判成需要回退。字面比较不成立时再比较
+/// canonicalize 后的路径；两侧都解析失败才判否（保守回退串行）。
+fn cwd_is_inside_toplevel(cwd: &str, toplevel: &str) -> bool {
+    let cwd_path = std::path::Path::new(cwd);
+    let toplevel_path = std::path::Path::new(toplevel);
+    if cwd_path.starts_with(toplevel_path) {
+        return true;
+    }
+    match (
+        std::fs::canonicalize(cwd_path),
+        std::fs::canonicalize(toplevel_path),
+    ) {
+        (Ok(cwd_real), Ok(toplevel_real)) => cwd_real.starts_with(&toplevel_real),
+        _ => false,
+    }
 }
 
 /// 远端 URL → 三段 slug（`host/owner/name`）。
@@ -147,22 +236,43 @@ impl RepoSlugResolver for GitRepoSlugResolver {
         if cwd.trim().is_empty() {
             return None;
         }
-        let toplevel = if let Some(cached) = self.by_directory.borrow().get(cwd) {
-            cached.clone()
+        let directory_hit = self.by_directory.borrow().get(cwd).cloned();
+        if let Some(cached) = directory_hit {
+            // 命中：toplevel 已定性（None 亦然），且未命中路径把 toplevel 与
+            // 结果成对写进两级缓存——by_toplevel 必有同一轮写入的条目。
+            let toplevel = cached?;
+            return self.by_toplevel.borrow().get(&toplevel).cloned().flatten();
+        }
+        // 未命中：能重叠就重叠（两个 git 进程并行），不能就回退到改动前的
+        // 串行两级探测；判据见 `discovery_env_overrides_present`。
+        let (toplevel, overlapped_url) = if discovery_env_overrides_present() {
+            (git_toplevel(cwd), None)
         } else {
-            let toplevel = git_toplevel(cwd);
-            self.by_directory
-                .borrow_mut()
-                .insert(cwd.to_string(), toplevel.clone());
-            toplevel
+            let (toplevel, url) = git_toplevel_and_origin_url(cwd);
+            (toplevel, Some(url))
         };
+        self.by_directory
+            .borrow_mut()
+            .insert(cwd.to_string(), toplevel.clone());
+        // 门禁语义逐字不变：toplevel 为 None（bare repo / `.git` 内 cwd /
+        // 非仓库）一律 None——URL 结果即便探测成功也必须丢弃。
         let toplevel = toplevel?;
         if let Some(cached) = self.by_toplevel.borrow().get(&toplevel) {
             return cached.clone();
         }
-        let slug = git_origin_url(&toplevel)
-            .as_deref()
-            .and_then(normalize_remote_url);
+        // 重叠结果只在 toplevel 可被重新发现时代表"改动前那次以 toplevel 为
+        // -C 的探测"；否则丢弃并串行补齐（只发生在 core.worktree 外指等
+        // 非常规布局）。归一化路径不变。
+        let url = match overlapped_url {
+            Some(url)
+                if toplevel_is_rediscoverable(&toplevel)
+                    && cwd_is_inside_toplevel(cwd, &toplevel) =>
+            {
+                url
+            }
+            _ => git_origin_url(&toplevel),
+        };
+        let slug = url.as_deref().and_then(normalize_remote_url);
         self.by_toplevel.borrow_mut().insert(toplevel, slug.clone());
         slug
     }
@@ -260,6 +370,90 @@ mod tests {
             derive_repo_slug(sub.to_str().unwrap()).as_deref(),
             Some("gitlab.example.com/team/project")
         );
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    /// 五种仓库上下文的判定矩阵（证伪性测试）：每个上下文同时对照旧串行
+    /// 组合（`derive_repo_slug`：rev-parse 门禁 + toplevel 上的 URL 探测）与
+    /// 生产解析器的重叠派发路径，并且对照字面期望值——任何 None↔Some 漂移
+    /// 都会在此暴露。bare repo 与 `.git` 内 cwd 的 URL 探测本身会成功，
+    /// 判定必须仍为 None（门禁丢弃 URL 结果）。
+    #[test]
+    fn resolve_context_matrix_matches_pre_change_semantics() {
+        fn assert_context(cwd: &str, expected: Option<&str>) {
+            assert_eq!(
+                derive_repo_slug(cwd).as_deref(),
+                expected,
+                "串行锚定 {cwd:?}"
+            );
+            assert_eq!(
+                GitRepoSlugResolver::default().resolve(cwd).as_deref(),
+                expected,
+                "重叠派发 {cwd:?}"
+            );
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+
+        // (1) 普通仓（根与子目录）：Some(宿主仓 slug)
+        let repo = temp_git_repo("ctx-plain");
+        add_origin(&repo, "git@github.com:synthetic-owner/plain.git");
+        let sub = repo.join("packages").join("app");
+        fs::create_dir_all(&sub).unwrap();
+        assert_context(
+            repo.to_str().unwrap(),
+            Some("github.com/synthetic-owner/plain"),
+        );
+        assert_context(
+            sub.to_str().unwrap(),
+            Some("github.com/synthetic-owner/plain"),
+        );
+
+        // (2) 嵌套仓：内层自成一仓 → 内层 slug；外层不受影响
+        let inner = repo.join("vendor").join("inner");
+        fs::create_dir_all(&inner).unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(&inner)
+                .status()
+                .expect("git init")
+                .success(),
+            "git init failed"
+        );
+        add_origin(&inner, "https://gitlab.example.com/team/inner.git");
+        assert_context(
+            inner.to_str().unwrap(),
+            Some("gitlab.example.com/team/inner"),
+        );
+        assert_context(
+            repo.to_str().unwrap(),
+            Some("github.com/synthetic-owner/plain"),
+        );
+
+        // (3) bare repo（带 origin）：门禁失败 → None，URL 探测成功也不采用
+        let bare = dir.path().join("bare.git");
+        fs::create_dir_all(&bare).unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", "-q", "--bare"])
+                .current_dir(&bare)
+                .status()
+                .expect("git init --bare")
+                .success(),
+            "git init --bare failed"
+        );
+        add_origin(&bare, "git@github.com:synthetic-owner/bare.git");
+        assert_context(bare.to_str().unwrap(), None);
+
+        // (4) `.git` 内 cwd：门禁失败 → None，URL 探测成功也不采用
+        assert_context(repo.join(".git").to_str().unwrap(), None);
+
+        // (5) 非 git 目录：两侧都 None
+        let plain = dir.path().join("plain");
+        fs::create_dir_all(&plain).unwrap();
+        assert_context(plain.to_str().unwrap(), None);
+
         let _ = fs::remove_dir_all(&repo);
     }
 
@@ -366,6 +560,35 @@ mod tests {
         );
     }
 
+    /// CI 的临时目录常是别名路径（macOS `/var` -> `/private/var`、Windows
+    /// junction / 8.3 短名 / 大小写差异），而 `git rev-parse --show-toplevel`
+    /// 报的是解析后的真实路径。守卫必须按真实路径判定，否则重叠派发被误判
+    /// 成需要回退，search 会多花一次 git 子进程（CI 实测 3 次探测）。
+    #[cfg(unix)]
+    #[test]
+    fn cwd_inside_toplevel_resolves_symlink_alias() {
+        let base = std::env::temp_dir().join(format!("asg-alias-{}", std::process::id()));
+        let real = base.join("real");
+        let nested = real.join("sub");
+        fs::create_dir_all(&nested).unwrap();
+        let link = base.join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let cwd_via_link = link.join("sub");
+        assert!(cwd_is_inside_toplevel(
+            cwd_via_link.to_str().unwrap(),
+            real.to_str().unwrap()
+        ));
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cwd_inside_toplevel_accepts_case_alias() {
+        let dir = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+        let as_written = dir.to_string_lossy().to_string();
+        let lowered = as_written.to_lowercase();
+        assert!(cwd_is_inside_toplevel(&as_written, &lowered));
+    }
     #[test]
     fn resolver_rejects_empty_cwd_without_spawning() {
         let resolver = GitRepoSlugResolver::default();

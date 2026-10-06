@@ -1,0 +1,8 @@
+
+# ==== uninstall again (must be a no-op and exit 0)
+# command: pwsh -NoProfile -File C:\AgentSessions-worktrees\b6-release-closure\scripts\install\uninstall.ps1 -Prefix C:/AgentSessions/.trellis/.runtime/b6-smoke/prefix
+# cwd: C:\AgentSessions
+# started: 2026-10-07 00:03:09+08:00
+uninstall: not installed: C:\AgentSessions\.trellis\.runtime\b6-smoke\prefix\agent-session-grep.exe or C:\AgentSessions\.trellis\.runtime\b6-smoke\prefix\asg.exe
+uninstall: nothing to do
+# exit=0

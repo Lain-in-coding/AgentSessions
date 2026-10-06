@@ -1,0 +1,25 @@
+captured: 2026-10-07 (Asia/Shanghai, local run)
+8755928dad1611a15d5b00a9edd28d4ea15ace40
+required CI quality gates / test (macos-latest)	fail	2m23s	https://github.com/LainHappy/AgentSessions/actions/runs/37523862021/job/112475776715	
+required CI quality gates / test (windows-latest)	fail	5m47s	https://github.com/LainHappy/AgentSessions/actions/runs/37523862021/job/112475776870	
+test (macos-latest)	fail	2m18s	https://github.com/LainHappy/AgentSessions/actions/runs/37523861653/job/112475775433	
+test (windows-latest)	fail	5m31s	https://github.com/LainHappy/AgentSessions/actions/runs/37523861653/job/112475775568	
+Cargo dependency audit	pass	3m51s	https://github.com/LainHappy/AgentSessions/actions/runs/37523861567/job/112475774993	
+Ubuntu 22.04 / GNU x64	pass	4m27s	https://github.com/LainHappy/AgentSessions/actions/runs/37523861532/job/112475774826	
+Windows x64 / MSVC	pass	5m10s	https://github.com/LainHappy/AgentSessions/actions/runs/37523861532/job/112475774867	
+cargo-deny (supply chain)	pass	37s	https://github.com/LainHappy/AgentSessions/actions/runs/37523861653/job/112475775246	
+installer smoke (macos-latest)	pass	1m41s	https://github.com/LainHappy/AgentSessions/actions/runs/37523861653/job/112475775340	
+installer smoke (ubuntu-latest)	pass	1m52s	https://github.com/LainHappy/AgentSessions/actions/runs/37523861653/job/112475775579	
+installer smoke (windows-latest)	pass	3m50s	https://github.com/LainHappy/AgentSessions/actions/runs/37523861653/job/112475775404	
+required CI quality gates / installer smoke (ubuntu-latest)	pass	1m40s	https://github.com/LainHappy/AgentSessions/actions/runs/37523862021/job/112475776892	
+verify ${{ matrix.target }}	skipping	0	https://github.com/LainHappy/AgentSessions/actions/runs/37523862021/job/112478294465	
+resolve verification inputs	pass	26s	https://github.com/LainHappy/AgentSessions/actions/runs/37523862021/job/112475776237	
+macOS Intel / x64	pending	0	https://github.com/LainHappy/AgentSessions/actions/runs/37523861532/job/112475774808	
+macOS Apple Silicon / ARM64	pass	4m17s	https://github.com/LainHappy/AgentSessions/actions/runs/37523861532/job/112475774627	
+required CI quality gates / cargo-deny (supply chain)	pass	38s	https://github.com/LainHappy/AgentSessions/actions/runs/37523862021/job/112475776880	
+required CI quality gates / installer smoke (macos-latest)	pass	2m32s	https://github.com/LainHappy/AgentSessions/actions/runs/37523862021/job/112475777110	
+required CI quality gates / installer smoke (windows-latest)	pass	3m31s	https://github.com/LainHappy/AgentSessions/actions/runs/37523862021/job/112475776736	
+required CI quality gates / test (ubuntu-latest)	pass	3m44s	https://github.com/LainHappy/AgentSessions/actions/runs/37523862021/job/112475776683	
+test (ubuntu-latest)	pass	3m28s	https://github.com/LainHappy/AgentSessions/actions/runs/37523861653/job/112475775528	
+
+[{"conclusion":"","databaseId":37523861532,"headSha":"8755928dad1611a15d5b00a9edd28d4ea15ace40","status":"in_progress","workflowName":"core-beta-evidence"},{"conclusion":"success","databaseId":37523861567,"headSha":"8755928dad1611a15d5b00a9edd28d4ea15ace40","status":"completed","workflowName":"security-audit"},{"conclusion":"failure","databaseId":37523862021,"headSha":"8755928dad1611a15d5b00a9edd28d4ea15ace40","status":"completed","workflowName":"release-verify"},{"conclusion":"failure","databaseId":37523861653,"headSha":"8755928dad1611a15d5b00a9edd28d4ea15ace40","status":"completed","workflowName":"ci"}]

@@ -1,0 +1,11 @@
+
+# ==== uninstall (removes exactly the two managed files)
+# command: pwsh -NoProfile -File C:\AgentSessions-worktrees\b6-release-closure\scripts\install\uninstall.ps1 -Prefix C:/AgentSessions/.trellis/.runtime/b6-smoke/prefix
+# cwd: C:\AgentSessions
+# started: 2026-10-07 00:03:09+08:00
+uninstall: removed C:\AgentSessions\.trellis\.runtime\b6-smoke\prefix\asg.exe
+uninstall: removed C:\AgentSessions\.trellis\.runtime\b6-smoke\prefix\agent-session-grep.exe
+uninstall: the directory C:/AgentSessions/.trellis/.runtime/b6-smoke/prefix was left in place.
+uninstall: config, data, cache, and logs were not touched. To remove those,
+uninstall: delete the paths reported by: agent-session-grep --robot config paths
+# exit=0

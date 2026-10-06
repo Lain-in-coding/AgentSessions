@@ -1,0 +1,146 @@
+=== B7 independent numeric verification (trellis-check) ===
+
+--- 1. hotpath-comparison.md / b7-summary.md vs after-measurements.json ---
+phase=after commit=4bea67f4d113976d439e91a5bac825bb10a7106d runs=20 probe_runs=3
+[PASS] binary sha256 in after-measurements.json matches the file on disk :: 5924c24d9ecb6254...
+[PASS] commit in after-measurements.json == HEAD 4bea67f :: 4bea67f4d113976d439e91a5bac825bb10a7106d
+[PASS] raw sample count git_detect/get == 20 :: 20
+[PASS] exit codes all 0 git_detect/get :: [0]
+[PASS] stored median == recomputed git_detect/get :: 7.95695 vs 7.956950000000001
+[PASS] median matches published md value git_detect/get :: recomputed 7.956950 vs md 7.96
+[PASS] min matches published md value git_detect/get :: recomputed 7.3664 vs md 7.37
+[PASS] max matches published md value git_detect/get :: recomputed 9.8551 vs md 9.86
+      git_detect/get: median=7.9570 min=7.3664 max=9.8551 probes=[0, 0, 0]
+[PASS] raw sample count git_detect/show == 20 :: 20
+[PASS] exit codes all 0 git_detect/show :: [0]
+[PASS] stored median == recomputed git_detect/show :: 7.91275 vs 7.91275
+[PASS] median matches published md value git_detect/show :: recomputed 7.912750 vs md 7.91
+[PASS] min matches published md value git_detect/show :: recomputed 7.5381 vs md 7.54
+[PASS] max matches published md value git_detect/show :: recomputed 10.8891 vs md 10.89
+      git_detect/show: median=7.9127 min=7.5381 max=10.8891 probes=[0, 0, 0]
+[PASS] raw sample count git_detect/search == 20 :: 20
+[PASS] exit codes all 0 git_detect/search :: [0]
+[PASS] stored median == recomputed git_detect/search :: 48.01695 vs 48.016949999999994
+[PASS] median matches published md value git_detect/search :: recomputed 48.016950 vs md 48.02
+[PASS] min matches published md value git_detect/search :: recomputed 45.6513 vs md 45.65
+[PASS] max matches published md value git_detect/search :: recomputed 50.5837 vs md 50.58
+      git_detect/search: median=48.0169 min=45.6513 max=50.5837 probes=[2, 2, 2]
+[PASS] raw sample count repo_disabled_by_test_seam/get == 20 :: 20
+[PASS] exit codes all 0 repo_disabled_by_test_seam/get :: [0]
+[PASS] stored median == recomputed repo_disabled_by_test_seam/get :: 7.91185 vs 7.911849999999999
+[PASS] median matches published md value repo_disabled_by_test_seam/get :: recomputed 7.911850 vs md 7.91
+[PASS] min matches published md value repo_disabled_by_test_seam/get :: recomputed 7.4563 vs md 7.46
+[PASS] max matches published md value repo_disabled_by_test_seam/get :: recomputed 12.1586 vs md 12.16
+      repo_disabled_by_test_seam/get: median=7.9118 min=7.4563 max=12.1586 probes=[0, 0, 0]
+[PASS] raw sample count repo_disabled_by_test_seam/show == 20 :: 20
+[PASS] exit codes all 0 repo_disabled_by_test_seam/show :: [0]
+[PASS] stored median == recomputed repo_disabled_by_test_seam/show :: 8.1625 vs 8.162500000000001
+[PASS] median matches published md value repo_disabled_by_test_seam/show :: recomputed 8.162500 vs md 8.16
+[PASS] min matches published md value repo_disabled_by_test_seam/show :: recomputed 7.4542 vs md 7.45
+[PASS] max matches published md value repo_disabled_by_test_seam/show :: recomputed 8.6503 vs md 8.65
+      repo_disabled_by_test_seam/show: median=8.1625 min=7.4542 max=8.6503 probes=[0, 0, 0]
+[PASS] raw sample count repo_disabled_by_test_seam/search == 20 :: 20
+[PASS] exit codes all 0 repo_disabled_by_test_seam/search :: [0]
+[PASS] stored median == recomputed repo_disabled_by_test_seam/search :: 9.0765 vs 9.0765
+[PASS] median matches published md value repo_disabled_by_test_seam/search :: recomputed 9.076500 vs md 9.08
+[PASS] min matches published md value repo_disabled_by_test_seam/search :: recomputed 8.2624 vs md 8.26
+[PASS] max matches published md value repo_disabled_by_test_seam/search :: recomputed 9.8687 vs md 9.87
+      repo_disabled_by_test_seam/search: median=9.0765 min=8.2624 max=9.8687 probes=[0, 0, 0]
+[PASS] probe counts git_detect/get == [0, 0, 0] :: [0, 0, 0]
+[PASS] probe counts git_detect/show == [0, 0, 0] :: [0, 0, 0]
+[PASS] probe counts git_detect/search == [2, 2, 2] :: [2, 2, 2]
+[PASS] probe counts repo_disabled_by_test_seam/get == [0, 0, 0] :: [0, 0, 0]
+[PASS] probe counts repo_disabled_by_test_seam/show == [0, 0, 0] :: [0, 0, 0]
+[PASS] probe counts repo_disabled_by_test_seam/search == [0, 0, 0] :: [0, 0, 0]
+[PASS] md delta get +0.05 :: 0.0451
+[PASS] md delta show -0.25 :: -0.2498
+[PASS] md delta search +38.94 :: 38.9404
+[PASS] b7-summary get 7.96
+[PASS] b7-summary show 7.91
+[PASS] b7-summary search 48.02
+[PASS] b7-summary seam search 9.08
+
+--- 2. core-benchmark-comparison.md vs raw benchmark JSON reports ---
+[PASS] baseline report commit startswith 5b232cd :: 5b232cdedbff33a251e7fb266558be7af8496e1a
+[PASS] baseline generated_at 2026-10-05T12:12:49.301029Z :: 2026-10-05T12:12:49.301029Z
+[PASS] baseline binary hash startswith acd7a5055c25 :: acd7a5055c2505bd52eb0d2ce82cb9b0f187505a28340b5cd585522a97312c15
+[PASS] B7 report commit == 4bea67f... :: 4bea67f4d113976d439e91a5bac825bb10a7106d
+[PASS] B7 generated_at 2026-10-06T17:00:53.804910Z :: 2026-10-06T17:00:53.804910Z
+[PASS] B7 binary hash startswith 5924c24d9ecb :: 5924c24d9ecb625427ba97a52ecb2e60497ae1b3945e8bbf0edd4da050a6123d
+[PASS] dataset hash identical base/B7 && startswith 8ebb21d29ce5 :: 8ebb21d29ce589b9a36b94819a6b4baf2cf0f6c45bf591d552e8d40967833b4e
+[PASS] profile full both
+[PASS] cli_startup_cold_latency_ms: sample counts 20/20 :: 20/20
+[PASS] cli_startup_cold_latency_ms: base P50 20.337 (recomputed 20.337000)
+[PASS] cli_startup_cold_latency_ms: B7 P50 19.278 (recomputed 19.277900)
+[PASS] cli_startup_cold_latency_ms: base P95 23.6 (recomputed 23.600000)
+[PASS] cli_startup_cold_latency_ms: B7 P95 23.284 (recomputed 23.283500)
+[PASS] cli_startup_cold_latency_ms: md P95 delta -0.317 :: recomputed -0.316500
+[PASS] cli_startup_cold_latency_ms: stored summary p50/p95 agree with recompute
+[PASS] cli_startup_warm_latency_ms: sample counts 20/20 :: 20/20
+[PASS] cli_startup_warm_latency_ms: base P50 7.038 (recomputed 7.037700)
+[PASS] cli_startup_warm_latency_ms: B7 P50 5.561 (recomputed 5.561400)
+[PASS] cli_startup_warm_latency_ms: base P95 8.014 (recomputed 8.014100)
+[PASS] cli_startup_warm_latency_ms: B7 P95 6.007 (recomputed 6.006800)
+[PASS] cli_startup_warm_latency_ms: md P95 delta -2.007 :: recomputed -2.007300
+[PASS] cli_startup_warm_latency_ms: stored summary p50/p95 agree with recompute
+[PASS] initial_sync_latency_ms: sample counts 3/3 :: 3/3
+[PASS] initial_sync_latency_ms: base P50 917.095 (recomputed 917.095100)
+[PASS] initial_sync_latency_ms: B7 P50 748.014 (recomputed 748.013900)
+[PASS] initial_sync_latency_ms: base P95 1059.322 (recomputed 1059.321700)
+[PASS] initial_sync_latency_ms: B7 P95 777.271 (recomputed 777.271400)
+[PASS] initial_sync_latency_ms: md P95 delta -282.05 :: recomputed -282.050300
+[PASS] initial_sync_latency_ms: stored summary p50/p95 agree with recompute
+[PASS] noop_sync_latency_ms: sample counts 3/3 :: 3/3
+[PASS] noop_sync_latency_ms: base P50 15.486 (recomputed 15.486100)
+[PASS] noop_sync_latency_ms: B7 P50 14.969 (recomputed 14.968600)
+[PASS] noop_sync_latency_ms: base P95 16.221 (recomputed 16.221500)
+[PASS] noop_sync_latency_ms: B7 P95 15.202 (recomputed 15.201600)
+[PASS] noop_sync_latency_ms: md P95 delta -1.02 :: recomputed -1.019900
+[PASS] noop_sync_latency_ms: stored summary p50/p95 agree with recompute
+[PASS] shrink_sync_latency_ms: sample counts 3/3 :: 3/3
+[PASS] shrink_sync_latency_ms: base P50 728.598 (recomputed 728.597600)
+[PASS] shrink_sync_latency_ms: B7 P50 638.429 (recomputed 638.428800)
+[PASS] shrink_sync_latency_ms: base P95 742.797 (recomputed 742.797200)
+[PASS] shrink_sync_latency_ms: B7 P95 638.775 (recomputed 638.775300)
+[PASS] shrink_sync_latency_ms: md P95 delta -104.022 :: recomputed -104.021900
+[PASS] shrink_sync_latency_ms: stored summary p50/p95 agree with recompute
+[PASS] search_latency_ms: sample counts 100/100 :: 100/100
+[PASS] search_latency_ms: base P50 114.505 (recomputed 114.504800)
+[PASS] search_latency_ms: B7 P50 63.6 (recomputed 63.600200)
+[PASS] search_latency_ms: base P95 162.896 (recomputed 162.896200)
+[PASS] search_latency_ms: B7 P95 72.133 (recomputed 72.132600)
+[PASS] search_latency_ms: md P95 delta -90.764 :: recomputed -90.763600
+[PASS] search_latency_ms: stored summary p50/p95 agree with recompute
+[PASS] show_latency_ms: sample counts 100/100 :: 100/100
+[PASS] show_latency_ms: base P50 53.965 (recomputed 53.964800)
+[PASS] show_latency_ms: B7 P50 9.23 (recomputed 9.230000)
+[PASS] show_latency_ms: base P95 59.781 (recomputed 59.781200)
+[PASS] show_latency_ms: B7 P95 13.567 (recomputed 13.566800)
+[PASS] show_latency_ms: md P95 delta -46.214 :: recomputed -46.214400
+[PASS] show_latency_ms: stored summary p50/p95 agree with recompute
+[PASS] get_latency_ms: sample counts 100/100 :: 100/100
+[PASS] get_latency_ms: base P50 54.426 (recomputed 54.426200)
+[PASS] get_latency_ms: B7 P50 9.405 (recomputed 9.405300)
+[PASS] get_latency_ms: base P95 62.897 (recomputed 62.897200)
+[PASS] get_latency_ms: B7 P95 11.018 (recomputed 11.018000)
+[PASS] get_latency_ms: md P95 delta -51.879 :: recomputed -51.879200
+[PASS] get_latency_ms: stored summary p50/p95 agree with recompute
+[PASS] initial_index_throughput_mb_s: sample counts 3/3 :: 3/3
+[PASS] initial_index_throughput_mb_s: base P50 1.167 (recomputed 1.166923)
+[PASS] initial_index_throughput_mb_s: B7 P50 1.431 (recomputed 1.430694)
+[PASS] initial_index_throughput_mb_s: base P95 1.221 (recomputed 1.220557)
+[PASS] initial_index_throughput_mb_s: B7 P95 1.447 (recomputed 1.446798)
+[PASS] initial_index_throughput_mb_s: md P95 delta 0.226 :: recomputed 0.226241
+[PASS] initial_index_throughput_mb_s: stored summary p50/p95 agree with recompute
+
+--- 3. sizes table in core-benchmark-comparison.md ---
+[PASS] size artifact_size_bytes base=6919168 B7=6951936 :: 6919168 / 6951936
+[PASS] size dataset_source_bytes base=1122164 B7=1122164 :: 1122164 / 1122164
+[PASS] size index_size_ratio base=17.830691 B7=17.845292 :: 17.830691 / 17.845292
+[PASS] size initial_store_bytes_including_sidecars base=20008960 B7=20025344 :: 20008960 / 20025344
+[PASS] size post_shrink_store_bytes_including_sidecars base=20041728 B7=20058112 :: 20041728 / 20058112
+[PASS] initial_store_files ['catalog.db'] both
+[PASS] post_shrink_store_files 3 sidecar files both :: ['catalog.db', 'catalog.db-shm', 'catalog.db-wal'] / ['catalog.db', 'catalog.db-shm', 'catalog.db-wal']
+[PASS] initial_store raw samples as published
+
+=== RESULT: ALL PASS ===

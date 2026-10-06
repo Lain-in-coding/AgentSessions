@@ -1,0 +1,241 @@
+{
+  "phase": "after",
+  "binary": "C:\\AgentSessions\\.trellis\\.runtime\\target-b7\\release\\agent-session-grep.exe",
+  "binary_sha256": "5924c24d9ecb625427ba97a52ecb2e60497ae1b3945e8bbf0edd4da050a6123d",
+  "commit": "4bea67f4d113976d439e91a5bac825bb10a7106d",
+  "cwd": "C:\\AgentSessions",
+  "db": "C:\\AgentSessions\\.trellis\\.runtime\\hotpath-experiment-check-b7\\fixture.db",
+  "wire_id": "msg_v1_cb6837d0712fbb4e022f869652978b74",
+  "clock_ms": "1787616000000",
+  "runs_per_variant": 20,
+  "probe_runs_per_variant": 3,
+  "method": "Paired process launches, one synthetic catalog entry, fixed ASG_CLOCK_MS, --robot --request-id pinned; variant git_detect = default CWD repo discovery (repo with origin => 2 git subprocesses per resolution round), variant repo_disabled_by_test_seam = ASG_CURRENT_REPO empty (existing test seam, zero probes). Probe counts observed via GIT_TRACE (one built-in line per dispatched git process). Not a universal benchmark.",
+  "variants": {
+    "git_detect": {
+      "get": {
+        "raw_ms": [
+          11.6288,
+          8.9718,
+          8.7369,
+          8.204,
+          7.9226,
+          7.6062,
+          14.3982,
+          10.594,
+          9.4609,
+          8.6904,
+          10.2965,
+          9.8417,
+          10.3261,
+          11.0096,
+          8.3252,
+          7.6363,
+          8.5394,
+          12.4324,
+          11.3126,
+          9.5459
+        ],
+        "median_ms": 9.5034,
+        "min_ms": 7.6062,
+        "max_ms": 14.3982,
+        "exit_codes": [
+          0
+        ],
+        "probe_counts": [
+          0,
+          0,
+          0
+        ],
+        "probe_median": 0.0,
+        "output_file": "C:\\AgentSessions\\.trellis\\tasks\\10-07-final-perf-regression\\research\\check-after-output-git_detect-get.json"
+      },
+      "show": {
+        "raw_ms": [
+          22.8915,
+          9.0225,
+          7.9839,
+          12.9561,
+          9.6717,
+          10.7653,
+          7.2448,
+          15.9646,
+          8.7525,
+          9.0901,
+          9.4998,
+          9.051,
+          12.4434,
+          10.9605,
+          8.5249,
+          10.0837,
+          8.1986,
+          7.6249,
+          9.126,
+          8.3999
+        ],
+        "median_ms": 9.10805,
+        "min_ms": 7.2448,
+        "max_ms": 22.8915,
+        "exit_codes": [
+          0
+        ],
+        "probe_counts": [
+          0,
+          0,
+          0
+        ],
+        "probe_median": 0.0,
+        "output_file": "C:\\AgentSessions\\.trellis\\tasks\\10-07-final-perf-regression\\research\\check-after-output-git_detect-show.json"
+      },
+      "search": {
+        "raw_ms": [
+          64.0682,
+          59.5003,
+          56.0298,
+          59.7474,
+          59.9233,
+          63.3084,
+          56.2642,
+          58.4664,
+          65.7799,
+          59.8721,
+          48.8945,
+          48.6401,
+          50.4975,
+          50.0291,
+          49.4063,
+          50.815,
+          48.6066,
+          50.0777,
+          46.778,
+          47.7642
+        ],
+        "median_ms": 53.4224,
+        "min_ms": 46.778,
+        "max_ms": 65.7799,
+        "exit_codes": [
+          0
+        ],
+        "probe_counts": [
+          2,
+          2,
+          2
+        ],
+        "probe_median": 2.0,
+        "output_file": "C:\\AgentSessions\\.trellis\\tasks\\10-07-final-perf-regression\\research\\check-after-output-git_detect-search.json"
+      }
+    },
+    "repo_disabled_by_test_seam": {
+      "get": {
+        "raw_ms": [
+          8.639,
+          8.0953,
+          7.6173,
+          10.2738,
+          8.2281,
+          7.6399,
+          7.4706,
+          7.3413,
+          7.5722,
+          7.905,
+          7.7397,
+          7.6861,
+          7.5309,
+          8.0862,
+          7.5384,
+          7.734,
+          8.0727,
+          7.7078,
+          7.9113,
+          7.9556
+        ],
+        "median_ms": 7.73685,
+        "min_ms": 7.3413,
+        "max_ms": 10.2738,
+        "exit_codes": [
+          0
+        ],
+        "probe_counts": [
+          0,
+          0,
+          0
+        ],
+        "probe_median": 0.0,
+        "output_file": "C:\\AgentSessions\\.trellis\\tasks\\10-07-final-perf-regression\\research\\check-after-output-repo_disabled_by_test_seam-get.json"
+      },
+      "show": {
+        "raw_ms": [
+          7.8188,
+          8.5145,
+          7.8575,
+          8.1409,
+          8.1905,
+          7.3226,
+          7.7793,
+          7.2384,
+          7.6274,
+          7.5673,
+          7.6355,
+          7.2288,
+          7.4769,
+          7.5008,
+          7.5997,
+          8.2073,
+          7.5736,
+          7.2473,
+          7.8098,
+          7.5571
+        ],
+        "median_ms": 7.61355,
+        "min_ms": 7.2288,
+        "max_ms": 8.5145,
+        "exit_codes": [
+          0
+        ],
+        "probe_counts": [
+          0,
+          0,
+          0
+        ],
+        "probe_median": 0.0,
+        "output_file": "C:\\AgentSessions\\.trellis\\tasks\\10-07-final-perf-regression\\research\\check-after-output-repo_disabled_by_test_seam-show.json"
+      },
+      "search": {
+        "raw_ms": [
+          8.5765,
+          8.4549,
+          8.5379,
+          8.4375,
+          8.275,
+          8.6441,
+          8.5262,
+          8.9807,
+          9.5626,
+          7.9587,
+          9.4074,
+          8.3211,
+          9.2925,
+          8.9102,
+          8.4905,
+          8.5876,
+          8.0918,
+          11.4308,
+          12.7225,
+          8.3302
+        ],
+        "median_ms": 8.5572,
+        "min_ms": 7.9587,
+        "max_ms": 12.7225,
+        "exit_codes": [
+          0
+        ],
+        "probe_counts": [
+          0,
+          0,
+          0
+        ],
+        "probe_median": 0.0,
+        "output_file": "C:\\AgentSessions\\.trellis\\tasks\\10-07-final-perf-regression\\research\\check-after-output-repo_disabled_by_test_seam-search.json"
+      }
+    }
+  }
+}

@@ -1648,6 +1648,7 @@ impl SqliteStore {
             conn: RefCell::new(conn),
             _lease: Some(lease),
             semantic_model_id: RefCell::new(None),
+            semantic_similarity_floor: Cell::new(SEMANTIC_SIMILARITY_FLOOR_DEFAULT),
             repo_slug_resolver: RefCell::new(Box::new(NoopRepoSlugResolver)),
             pending_installations: RefCell::new(BTreeMap::new()),
             relocation_clock: unix_ms,

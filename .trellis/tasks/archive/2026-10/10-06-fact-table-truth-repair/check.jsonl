@@ -1,0 +1,4 @@
+{"_example": "Fill with {\"file\": \"<path>\", \"reason\": \"<why>\"}. Put spec/research files only — no code paths. Run `python .trellis/scripts/get_context.py --mode packages` to list available specs. Delete this line once real entries are added."}
+{"file": ".trellis/tasks/10-05-competitive-source-audit-plan/research/fact-table-corrections.md", "reason": "核对 8+1 处修正是否全部落地"}
+{"file": "docs/product/COMPETITOR-COMPARISON.md", "reason": "被检目标文档"}
+{"file": "docs/product/OPEN-SOURCE-ROADMAP.md", "reason": "独占措辞改写核对目标"}

@@ -1,0 +1,21 @@
+
+# ==== first run: --robot config paths
+# command: C:\AgentSessions\.trellis\.runtime\b6-smoke\prefix\agent-session-grep.exe --robot config paths
+# cwd: C:\AgentSessions
+# started: 2026-10-06 23:59:13+08:00
+{"command":"config.paths","data":{"cache":"C:\\AgentSessions\\.trellis\\.runtime\\b6-smoke\\user-profile\\Local\\AgentSessions\\cache","config":"C:\\AgentSessions\\.trellis\\.runtime\\b6-smoke\\user-profile\\Roaming\\AgentSessions\\config.toml","data":"C:\\AgentSessions\\.trellis\\.runtime\\b6-smoke\\user-profile\\Local\\AgentSessions\\data","logs":"C:\\AgentSessions\\.trellis\\.runtime\\b6-smoke\\user-profile\\Local\\AgentSessions\\logs"},"frame_type":"response","meta":{"duration_ms":0,"generation":null},"ok":true,"outcome":"success","page":{"has_more":false,"next_cursor":null},"redaction":{"audit_id":null,"mode":"default","redacted_count":0,"ruleset_version":"v1.1","status":"none"},"request_id":"cli-42452-1791302353258","retrieval_mode":"lexical","schema_version":"1.1","warnings":[]}
+# exit=0
+
+# ==== first run: --robot config paths
+# command: C:\AgentSessions\.trellis\.runtime\b6-smoke\prefix\agent-session-grep.exe --robot config paths
+# cwd: C:\AgentSessions
+# started: 2026-10-06 23:59:29+08:00
+{"command":"config.paths","data":{"cache":"C:\\AgentSessions\\.trellis\\.runtime\\b6-smoke\\user-profile\\Local\\AgentSessions\\cache","config":"C:\\AgentSessions\\.trellis\\.runtime\\b6-smoke\\user-profile\\Roaming\\AgentSessions\\config.toml","data":"C:\\AgentSessions\\.trellis\\.runtime\\b6-smoke\\user-profile\\Local\\AgentSessions\\data","logs":"C:\\AgentSessions\\.trellis\\.runtime\\b6-smoke\\user-profile\\Local\\AgentSessions\\logs"},"frame_type":"response","meta":{"duration_ms":0,"generation":null},"ok":true,"outcome":"success","page":{"has_more":false,"next_cursor":null},"redaction":{"audit_id":null,"mode":"default","redacted_count":0,"ruleset_version":"v1.1","status":"none"},"request_id":"cli-42752-1791302369957","retrieval_mode":"lexical","schema_version":"1.1","warnings":[]}
+# exit=0
+
+# ==== first run: --robot config paths
+# command: C:\AgentSessions\.trellis\.runtime\b6-smoke\prefix\agent-session-grep.exe --robot config paths
+# cwd: C:\AgentSessions
+# started: 2026-10-07 00:01:40+08:00
+{"command":"config.paths","data":{"cache":"C:\\AgentSessions\\.trellis\\.runtime\\b6-smoke\\user-profile\\Local\\AgentSessions\\cache","config":"C:\\AgentSessions\\.trellis\\.runtime\\b6-smoke\\user-profile\\Roaming\\AgentSessions\\config.toml","data":"C:\\AgentSessions\\.trellis\\.runtime\\b6-smoke\\user-profile\\Local\\AgentSessions\\data","logs":"C:\\AgentSessions\\.trellis\\.runtime\\b6-smoke\\user-profile\\Local\\AgentSessions\\logs"},"frame_type":"response","meta":{"duration_ms":0,"generation":null},"ok":true,"outcome":"success","page":{"has_more":false,"next_cursor":null},"redaction":{"audit_id":null,"mode":"default","redacted_count":0,"ruleset_version":"v1.1","status":"none"},"request_id":"cli-40560-1791302500673","retrieval_mode":"lexical","schema_version":"1.1","warnings":[]}
+# exit=0

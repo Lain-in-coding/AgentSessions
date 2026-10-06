@@ -305,6 +305,66 @@ fn index_search_get_roundtrip() {
     assert!(out.status.success());
     assert!(stdout(&out).contains("the quick brown fox jumps"));
 }
+/// B4：语义证据门的显式注入通道（`ASG_SEMANTIC_SIMILARITY_FLOOR`）。
+/// - 门高于任何实际相似度（1.0）→ semantic 返回空（候选在融合前被拒绝）；
+/// - 门开到 -1.0 → 同一候选恢复（证明上一步的拒绝来自证据门）；
+/// - 非法值 → invalid_request（exit 2），绝不静默改用别的阈值。
+#[test]
+fn semantic_evidence_floor_env_override_is_explicit_and_validated() {
+    let (dir, db) = temp_db("semantic-floor");
+    let fixture = dir.path().join("floor.jsonl");
+    std::fs::write(
+        &fixture,
+        concat!(
+            r#"{"type":"user","uuid":"90000000-0000-4000-8000-000000000001","parentUuid":null,"sessionId":"floor-session","timestamp":"2026-08-01T12:00:00.000Z","message":{"role":"user","content":"floorprobe matcher body"}}"#,
+            "\n",
+        ),
+    )
+    .expect("write floor fixture");
+    let ingested = run(&db, &["ingest", fixture.to_str().unwrap()]);
+    assert!(ingested.status.success(), "{}", stdout(&ingested));
+    let indexed = run(&db, &["index", "embeddings"]);
+    assert!(indexed.status.success(), "{}", stdout(&indexed));
+    assert_eq!(parse_first_line(&indexed)["data"]["indexed"], 1);
+
+    let run_env = |value: &str| {
+        Command::new(BIN)
+            .arg("--db")
+            .arg(&db)
+            .arg("--robot")
+            .args(["search", "floorprobe", "--mode", "semantic"])
+            .env("ASG_CLOCK_MS", E2E_CLOCK_MS)
+            .env("ASG_SEMANTIC_SIMILARITY_FLOOR", value)
+            .output()
+            .expect("failed to spawn agent-session-grep binary")
+    };
+
+    // 1.0：query 前缀与 passage 前缀不同，任何存库向量都取不到 1.0。
+    let closed = run_env("1.0");
+    assert!(closed.status.success(), "{}", stdout(&closed));
+    let frame = parse_first_line(&closed);
+    assert_eq!(
+        frame["data"]["hits"].as_array().unwrap().len(),
+        0,
+        "{frame}"
+    );
+
+    // -1.0：门全开，同一候选恢复。
+    let open = run_env("-1.0");
+    assert!(open.status.success(), "{}", stdout(&open));
+    let frame = parse_first_line(&open);
+    assert_eq!(
+        frame["data"]["hits"].as_array().unwrap().len(),
+        1,
+        "{frame}"
+    );
+
+    // 非法值：显式失败，绝不静默使用别的阈值。
+    let invalid = run_env("not-a-number");
+    assert_eq!(invalid.status.code(), Some(2), "{}", stdout(&invalid));
+    let frame = parse_first_line(&invalid);
+    assert_eq!(frame["error"]["code"], "invalid_request", "{frame}");
+}
 
 #[test]
 fn migrated_v6_catalog_stays_readable_until_complete_reingest_enables_context() {
@@ -1284,7 +1344,22 @@ fn machine_mode_version_emits_single_success_envelope() {
 
 #[test]
 fn level_value_before_robot_flag_still_emits_robot_error_envelope() {
-    let out = run_bare(&["--level", "talks", "--robot", "context", "not-a-session-id"]);
+    // 缺失 --db 不再是用法错误（B3：数据命令默认用平台默认库），因此这里显式
+    // 给一个已初始化的夹具库，让断言仍然落在"参数错误（无效 session id）→
+    // exit 2"这一原意上，而不是缺库的 catalog_error。
+    let (_dir, db) = temp_db("level-before-robot");
+    let out = Command::new(BIN)
+        .args([
+            "--db",
+            &db,
+            "--level",
+            "talks",
+            "--robot",
+            "context",
+            "not-a-session-id",
+        ])
+        .output()
+        .expect("failed to spawn agent-session-grep binary");
     assert_eq!(out.status.code(), Some(2), "{}", stdout(&out));
     let frame = parse_first_line(&out);
     assert_envelope_shape(&frame, false);
@@ -3078,13 +3153,16 @@ fn providers_robot_output_is_a_stable_matrix_envelope() {
     let semantic = &frame["data"]["semantic"];
     assert_eq!(
         semantic.as_object().unwrap().len(),
-        3,
+        5,
         "semantic 键集稳定: {semantic}"
     );
     assert_eq!(
         semantic["default_model"],
         agent_session_grep_application::embedding::BIGRAM_HASH_MODEL_ID
     );
+    // B4 正名（additive）：默认向量化器 = fuzzy lexical vector。
+    assert_eq!(semantic["model_kind"], "fuzzy_lexical_hash");
+    assert_eq!(semantic["model_label"], "fuzzy lexical vector");
     if cfg!(feature = "semantic-candle") {
         assert_eq!(semantic["feature"], "semantic-candle");
         assert_eq!(semantic["runtime"], "candle-e5-local");

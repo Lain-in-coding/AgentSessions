@@ -1,0 +1,38 @@
+dataset: C:\AgentSessions\.trellis\tasks\10-06-retrieval-quality\research\holdout-dataset.json
+scan:    C:\AgentSessions\.trellis\tasks\10-06-retrieval-quality\research\threshold-scan.json
+backend: fuzzy_lexical_hash (bigram-hash-v1)
+indexed: 120 skipped: 24
+selected floor: 0.2 (shipped default 0.2)
+      mode  floor  recall@10   mrr@10  false  no-res-empty
+   lexical   None     0.9130   0.9130      0        1.0000
+  semantic   0.00     0.8261   0.8261    414        0.0000
+    hybrid   0.00     0.9130   0.9130    410        0.0000
+  semantic   0.05     0.8261   0.8261    414        0.0000
+    hybrid   0.05     0.9130   0.9130    410        0.0000
+  semantic   0.10     0.8261   0.8261    414        0.0000
+    hybrid   0.10     0.9130   0.9130    410        0.0000
+  semantic   0.15     0.8261   0.8261    414        0.0000
+    hybrid   0.15     0.9130   0.9130    410        0.0000
+  semantic   0.20     0.8261   0.8261    414        0.0000
+    hybrid   0.20     0.9130   0.9130    410        0.0000
+  semantic   0.25     0.8261   0.8261    414        0.0000
+    hybrid   0.25     0.9130   0.9130    410        0.0000
+  semantic   0.30     0.8261   0.8261    414        0.0000
+    hybrid   0.30     0.9130   0.9130    410        0.0000
+  semantic   0.35     0.8261   0.8261    387        0.0000
+    hybrid   0.35     0.9130   0.9130    385        0.0000
+  semantic   0.40     0.8261   0.8261    274        0.0000
+    hybrid   0.40     0.9130   0.9130    274        0.0000
+  semantic   0.45     0.8261   0.8261    222        1.0000
+    hybrid   0.45     0.9130   0.9130    222        1.0000
+  semantic   0.50     0.7609   0.7609    168        1.0000
+    hybrid   0.50     0.9130   0.9130    168        1.0000
+  semantic   0.60     0.5543   0.5870     43        1.0000
+    hybrid   0.60     0.9130   0.9130     43        1.0000
+  bucket zh         n= 10 recall=1.0000 mrr=1.0000 false=90 sess_hits=0
+  bucket en         n= 10 recall=1.0000 mrr=1.0000 false=90 sess_hits=0
+  bucket code       n= 10 recall=1.0000 mrr=1.0000 false=90 sess_hits=0
+  bucket long_body  n=  4 recall=1.0000 mrr=1.0000 false=36 sess_hits=0
+  bucket long_tail  n=  4 recall=0.0000 mrr=0.0000 false=40 sess_hits=0
+  bucket near_dup   n=  8 recall=1.0000 mrr=1.0000 false=64 sess_hits=0
+  bucket no_result  n=  8 recall=0.0000 mrr=0.0000 false=80 sess_hits=0

@@ -1,0 +1,50 @@
+baseline guard vars present: 
+
+===== MATRIX (round 2, narrowed model) =====
+context                                                        status           new path                 old vs new probe target                     
+1a plain root                                                  EQUAL lit=ok     overlap(cwd-url)         plain.git | plain.git                       
+1b plain subdir                                                EQUAL lit=ok     overlap(cwd-url)         plain.git | plain.git                       
+1c plain subdir trailing slash                                 EQUAL lit=ok     overlap(cwd-url)         plain.git | plain.git                       
+2a nested inner                                                EQUAL lit=ok     overlap(cwd-url)         inner.git | inner.git                       
+2b outer from root                                             EQUAL lit=ok     overlap(cwd-url)         plain.git | plain.git                       
+2c vendor parent (outer)                                       EQUAL lit=ok     overlap(cwd-url)         plain.git | plain.git                       
+3a bare root                                                   EQUAL(None) lit=ok overlap(gate=None)        |                                          
+3b bare subdir (refs/heads)                                    EQUAL(None) lit=ok overlap(gate=None)        |                                          
+4a .git dir cwd                                                EQUAL(None) lit=ok overlap(gate=None)        |                                          
+4b .git/hooks cwd                                              EQUAL(None) lit=ok overlap(gate=None)        |                                          
+5a non-git dir (outside any repo)                              EQUAL(None) lit=ok overlap(gate=None)        |                                          
+5b nonexistent dir                                             EQUAL(None) lit=ok overlap(gate=None)        |                                          
+6a linked worktree root                                        EQUAL lit=ok     overlap(cwd-url)         wt-host.git | wt-host.git                   
+6b linked worktree subdir                                      EQUAL lit=ok     overlap(cwd-url)         wt-host.git | wt-host.git                   
+6c host after worktree add                                     EQUAL lit=ok     overlap(cwd-url)         wt-host.git | wt-host.git                   
+7a submodule root                                              EQUAL lit=ok     overlap(cwd-url)         submodule.git | submodule.git               
+7b submodule deep subdir                                       EQUAL lit=ok     overlap(cwd-url)         submodule.git | submodule.git               
+7c superproject from submodule parent                          EQUAL lit=ok     overlap(cwd-url)         super.git | super.git                       
+7d inside submodule gitdir                                     EQUAL lit=ok     overlap+serial-reprobe   submodule.git | submodule.git               
+8 no origin                                                    EQUAL(None) lit=ok overlap(cwd-url)          |                                          
+9 uppercase ORIGIN only                                        EQUAL(None) lit=ok overlap(cwd-url)          |                                          
+10 local path origin                                           EQUAL lit=ok     overlap(cwd-url)         \AgentSessions\.trellis\.runtime\b8-check2..
+11 insteadOf rewrite                                           EQUAL lit=ok     overlap(cwd-url)         rewritten-repo.git | rewritten-repo.git     
+12 pushurl differs from fetch url                              EQUAL lit=ok     overlap(cwd-url)         pushurl.git | pushurl.git                   
+13 worktree-local origin override                              EQUAL lit=ok     overlap(cwd-url)         wtconfig.git | wtconfig.git                 
+14a GIT_DIR absolute, cwd outside                              EQUAL lit=ok     serial(env)              envrepo.git | envrepo.git                   
+14b GIT_DIR absolute, cwd = repo subdir                        EQUAL lit=ok     serial(env)              envrepo.git | envrepo.git                   
+14c GIT_DIR relative .git, cwd = repo subdir                   EQUAL(None)      serial(env)               |                                          
+14d GIT_DIR absolute + GIT_WORK_TREE=repo, cwd = subdir        EQUAL lit=ok     serial(env)              envrepo.git | envrepo.git                   
+14e R1: GIT_WORK_TREE only, cwd = repo subdir                  EQUAL(None)      serial(env)               |                                          
+14f GIT_CEILING_DIRECTORIES = parent of repo                   EQUAL lit=ok     serial(env)              envrepo.git | envrepo.git                   
+15 R2: rel GIT_DIR + GIT_WORK_TREE, cwd = nested repo          EQUAL lit=ok     serial(env)              envrepo.git | envrepo.git                   
+16a R3: core.worktree outside, cwd = gitdir                    EQUAL(None) lit=ok overlap+serial-reprobe    |                                          
+16b R3: core.worktree outside, cwd = gitdir/sub                EQUAL(None) lit=ok overlap+serial-reprobe    |                                          
+16c R3: core.worktree outside, cwd = worktree (no .git)        EQUAL(None) lit=ok overlap(gate=None)        |                                          
+17a core.worktree=root, cwd = .git                             EQUAL lit=ok     overlap(cwd-url)         cwrepo.git | cwrepo.git                     
+17b core.worktree=root, cwd = subdir                           EQUAL lit=ok     overlap(cwd-url)         cwrepo.git | cwrepo.git                     
+18a bare + core.worktree external, cwd = bare dir              EQUAL(None) lit=ok overlap(gate=None)        |                                          
+18b bare + core.worktree external, cwd = bare/sub              EQUAL(None) lit=ok overlap(gate=None)        |                                          
+H1 toplevel/.git belongs to ANOTHER repo, cwd = gitdir         EQUAL            overlap+serial-reprobe   h1-worktree-repo.git | h1-worktree-repo.gi..
+H2 toplevel/.git invalid empty dir, cwd = gitdir               EQUAL            overlap+serial-reprobe   AgentSessions.git | AgentSessions.git       
+H3 toplevel/.git pointer file back to gitdir, cwd = gitdir     EQUAL            overlap+serial-reprobe   h3-gitdir.git | h3-gitdir.git               
+
+===== VERDICT =====
+ALL CONTEXTS EQUIVALENT (narrowed model == pre-change serial semantics)
+wrote C:\AgentSessions\.trellis\tasks\10-07-repo-probe-overlap\research\check3-semantics.json

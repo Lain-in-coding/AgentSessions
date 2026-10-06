@@ -1,0 +1,19 @@
+B8 hotpath cross-variant output diff (fixed data, fixed clock, pinned request-id)
+==============================================================================
+Method: same fixture DB (C:\AgentSessions\.trellis\.runtime\hotpath-experiment-b8\fixture.db), deterministic seed (wire id msg_v1_cb6837d0712fbb4e022f869652978b74),
+cwd C:\AgentSessions, ASG_CLOCK_MS=1787616000000, --robot, --request-id hotpath-diff.
+Left = git_detect (search: 2 overlapped git subprocesses), right = seam
+(ASG_CURRENT_REPO='', 0 probes). Binary sha256 68eb7f6d4785... at commit 283b948.
+Field-by-field JSON walk; only meta.duration_ms is volatile.
+
+[git_detect vs seam / get] leaf fields compared: 17; diffs: 0 (volatile duration_ms: 0, non-volatile: 0)
+  non-volatile fields identical (hits/score/page/cursor/schema/enums/outcome unchanged)
+
+[git_detect vs seam / show] leaf fields compared: 18; diffs: 0 (volatile duration_ms: 0, non-volatile: 0)
+  non-volatile fields identical (hits/score/page/cursor/schema/enums/outcome unchanged)
+
+[git_detect vs seam / search] leaf fields compared: 25; diffs: 1 (volatile duration_ms: 1, non-volatile: 0)
+  non-volatile fields identical (hits/score/page/cursor/schema/enums/outcome unchanged)
+  volatile: $.meta.duration_ms: 24 -> 2
+
+RESULT: PASS - variants identical except meta.duration_ms

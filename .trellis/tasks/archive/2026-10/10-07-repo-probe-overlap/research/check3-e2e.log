@@ -1,0 +1,35 @@
+digest table size = 9
+context                          expected (pre-change)                    observed (real binary)                     verdict spawns
+plain root                       github.com/synthetic-owner/plain         github.com/synthetic-owner/plain           MATCH   2
+plain subdir                     github.com/synthetic-owner/plain         github.com/synthetic-owner/plain           MATCH   2
+bare root                        None                                     None                                       MATCH   2
+git-dir cwd                      None                                     None                                       MATCH   2
+non-git dir                      None                                     None                                       MATCH   2
+no-origin repo                   None                                     None                                       MATCH   2
+linked worktree root             github.com/synthetic-owner/wt-host       github.com/synthetic-owner/wt-host         MATCH   2
+submodule root                   github.com/synthetic-owner/submodule     github.com/synthetic-owner/submodule       MATCH   2
+R1 GIT_WORK_TREE only            None                                     None                                       MATCH   2
+R2 rel GIT_DIR + WT plain        None                                     None                                       MATCH   1
+R2b rel GIT_DIR + WT nested      github.com/synthetic-owner/envrepo       github.com/synthetic-owner/envrepo         MATCH   2
+R3 core.worktree outside         None                                     None                                       MATCH   3
+H1 toplevel .git other repo      github.com/synthetic-owner/h1-worktree-repo github.com/synthetic-owner/h1-worktree-repo MATCH   3
+H2 toplevel .git invalid         None                                     None                                       MATCH   3
+
+--- spawn argv per context ---
+  [plain root] spawns=2: -C C:\Users\小Q\AppData\Local\Temp\b8-check2e\plain rev-parse --show-toplevel || -C C:\Users\小Q\AppData\Local\Temp\b8-check2e\plain remote get-url origin
+  [plain subdir] spawns=2: -C C:\Users\小Q\AppData\Local\Temp\b8-check2e\plain\packages\app rev-parse --show-toplevel || -C C:\Users\小Q\AppData\Local\Temp\b8-check2e\plain\packages\app remote get-url origin
+  [bare root] spawns=2: -C C:\Users\小Q\AppData\Local\Temp\b8-check2e\bare.git rev-parse --show-toplevel || -C C:\Users\小Q\AppData\Local\Temp\b8-check2e\bare.git remote get-url origin
+  [git-dir cwd] spawns=2: -C C:\Users\小Q\AppData\Local\Temp\b8-check2e\plain\.git rev-parse --show-toplevel || -C C:\Users\小Q\AppData\Local\Temp\b8-check2e\plain\.git remote get-url origin
+  [non-git dir] spawns=2: -C C:\Users\小Q\AppData\Local\Temp\b8-check2e\nongit rev-parse --show-toplevel || -C C:\Users\小Q\AppData\Local\Temp\b8-check2e\nongit remote get-url origin
+  [no-origin repo] spawns=2: -C C:\Users\小Q\AppData\Local\Temp\b8-check2e\no-origin rev-parse --show-toplevel || -C C:\Users\小Q\AppData\Local\Temp\b8-check2e\no-origin remote get-url origin
+  [linked worktree root] spawns=2: -C C:\Users\小Q\AppData\Local\Temp\b8-check2e\wt-linked rev-parse --show-toplevel || -C C:\Users\小Q\AppData\Local\Temp\b8-check2e\wt-linked remote get-url origin
+  [submodule root] spawns=2: -C C:\Users\小Q\AppData\Local\Temp\b8-check2e\super\submod rev-parse --show-toplevel || -C C:\Users\小Q\AppData\Local\Temp\b8-check2e\super\submod remote get-url origin
+  [R1 GIT_WORK_TREE only] spawns=2: -C C:\Users\小Q\AppData\Local\Temp\b8-check2e\envrepo\x\y rev-parse --show-toplevel || -C C:/Users/小Q/AppData/Local/Temp/b8-check2e/outside remote get-url origin
+  [R2 rel GIT_DIR + WT plain] spawns=1: -C C:\Users\小Q\AppData\Local\Temp\b8-check2e\envrepo\plainno rev-parse --show-toplevel
+  [R2b rel GIT_DIR + WT nested] spawns=2: -C C:\Users\小Q\AppData\Local\Temp\b8-check2e\envrepo\x\y rev-parse --show-toplevel || -C C:/Users/小Q/AppData/Local/Temp/b8-check2e/envrepo remote get-url origin
+  [R3 core.worktree outside] spawns=3: -C C:\Users\小Q\AppData\Local\Temp\b8-check2e\r3\gd rev-parse --show-toplevel || -C C:\Users\小Q\AppData\Local\Temp\b8-check2e\r3\gd remote get-url origin || -C C:/Users/小Q/AppData/Local/Temp/b8-check2e/r3/w remote get-url origin
+  [H1 toplevel .git other repo] spawns=3: -C C:\Users\小Q\AppData\Local\Temp\b8-check2e\h1\gd rev-parse --show-toplevel || -C C:\Users\小Q\AppData\Local\Temp\b8-check2e\h1\gd remote get-url origin || -C C:/Users/小Q/AppData/Local/Temp/b8-check2e/h1/w remote get-url origin
+  [H2 toplevel .git invalid] spawns=3: -C C:\Users\小Q\AppData\Local\Temp\b8-check2e\h2\gd rev-parse --show-toplevel || -C C:\Users\小Q\AppData\Local\Temp\b8-check2e\h2\gd remote get-url origin || -C C:/Users/小Q/AppData/Local/Temp/b8-check2e/h2/w remote get-url origin
+
+VERDICT: matches=14/14; drifts=0
+wrote C:\AgentSessions\.trellis\tasks\10-07-repo-probe-overlap\research\check3-e2e.json

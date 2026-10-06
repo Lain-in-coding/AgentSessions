@@ -1,0 +1,1145 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-06",
+  "task": ".trellis/tasks/10-05-competitive-source-audit-plan",
+  "repository": "C:\\AgentSessions\\Github_src\\Recall",
+  "commit": "22625bf8979a185d9913c1bfb20290ac466d492b",
+  "scope": "T1 competitive static source audit of Recall: DB schema/data model, provider coverage and differences, index/sync freshness and concurrency, FTS+sqlite-vec retrieval with filter order, embedding source/failure behavior, handoff/resume contract, and targeted resume/handoff TUI flows. No build, test, execution, network, or git write operations.",
+  "status": "source_review_complete_report_emitted",
+  "t1_scope_rule": "Every full file has read_ranges whose union equals 1..total_lines from personally displayed line-numbered source (<=120 lines per read); partial files enumerate missing_ranges; codegraph reports one virtual trailing line which is excluded; hashes/symbol outlines did not count as reading; no read file was modified by this auditor.",
+  "line_count_method": "UTF-8 line count via PowerShell Get-Content (1-based inclusive ranges; final newline adds no logical line).",
+  "read_method": "codegraph node --file <relative path> --offset <start> --limit 120 --path C:/AgentSessions/Github_src/Recall (codegraph 1.2.0); Cargo.toml via PowerShell numbered Get-Content.",
+  "hash_basis_note": "sha256_initial for 31 files was captured before the first source read; for 5 files added mid-audit (src/db/usage_store.rs, src/utils.rs, src/adapters/sync_state.rs, src/adapters/file_scan.rs, src/tui/search_worker.rs) the baseline was taken at close-out. sha256_final equals sha256_initial for every file; git worktree shows no tracked modifications and no untracked additions beyond the pre-existing .codegraph/ tool directory.",
+  "integrity_note": "All conclusions in audit-Recall.md are static source reading; no Recall binary was built or executed and no external network call was made.",
+  "ownership_note": "Only coverage-Recall.json and audit-Recall.md are written by this researcher; all other files were read-only.",
+  "files": [
+    {
+      "path": "Cargo.toml",
+      "bytes": 1917,
+      "total_lines": 70,
+      "sha256_initial": "cd93ec99e0a131bc4ee7302ba460fcd64154722edee2417257c7c74f00ed09b3",
+      "read_ranges": [
+        [
+          1,
+          70
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines displayed in the listed sequential ranges (<=120 lines per read) and reviewed; hashes did not count as reading.",
+      "sha256_final": "cd93ec99e0a131bc4ee7302ba460fcd64154722edee2417257c7c74f00ed09b3",
+      "content_unchanged": true,
+      "description": "Package metadata: recall 0.3.0, edition 2024, MIT, workspace members (recall-probe, recall-reflect), rusqlite 0.32 bundled, sqlite-vec 0.1, hf-hub 0.5, candle 0.10 (macOS metal; cuda feature), kitup 0.1.1, ratatui/crossterm TUI, fs2 lock, zip 7.",
+      "read_line_count": 70,
+      "read_method": "codegraph node --file --offset --limit (line-numbered source, codegraph 1.2.0)",
+      "missing_ranges": []
+    },
+    {
+      "path": "src/main.rs",
+      "bytes": 331,
+      "total_lines": 13,
+      "sha256_initial": "55ec96377eebc6d9c436bbad554c7e8eb534f87b408b99ebab4f6c7b5a05bb62",
+      "read_ranges": [
+        [
+          1,
+          13
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines displayed in the listed sequential ranges (<=120 lines per read) and reviewed; hashes did not count as reading.",
+      "sha256_final": "55ec96377eebc6d9c436bbad554c7e8eb534f87b408b99ebab4f6c7b5a05bb62",
+      "content_unchanged": true,
+      "description": "Binary entry: tracing_subscriber init (default warn), recall::init then recall::run.",
+      "read_line_count": 13,
+      "read_method": "codegraph node --file --offset --limit (line-numbered source, codegraph 1.2.0)",
+      "missing_ranges": []
+    },
+    {
+      "path": "src/lib.rs",
+      "bytes": 822,
+      "total_lines": 38,
+      "sha256_initial": "b1123e5fb41bb8ee5235ea9855b875d94b466412cdd77ef9437b36396c2b71b0",
+      "read_ranges": [
+        [
+          1,
+          38
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines displayed in the listed sequential ranges (<=120 lines per read) and reviewed; hashes did not count as reading.",
+      "sha256_final": "b1123e5fb41bb8ee5235ea9855b875d94b466412cdd77ef9437b36396c2b71b0",
+      "content_unchanged": true,
+      "description": "Module inventory (25 modules); PROTOCOL_VERSION = 1; init() registers sqlite-vec extension; no MCP module.",
+      "read_line_count": 38,
+      "read_method": "codegraph node --file --offset --limit (line-numbered source, codegraph 1.2.0)",
+      "missing_ranges": []
+    },
+    {
+      "path": "src/db/schema.rs",
+      "bytes": 19369,
+      "total_lines": 520,
+      "sha256_initial": "2fc5a206a454e5b0ea6fdfadbf32bd8556e689fcb6ae0d9562fcf90153020993",
+      "read_ranges": [
+        [
+          1,
+          120
+        ],
+        [
+          121,
+          240
+        ],
+        [
+          241,
+          360
+        ],
+        [
+          361,
+          480
+        ],
+        [
+          481,
+          520
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines displayed in the listed sequential ranges (<=120 lines per read) and reviewed; hashes did not count as reading.",
+      "sha256_final": "2fc5a206a454e5b0ea6fdfadbf32bd8556e689fcb6ae0d9562fcf90153020993",
+      "content_unchanged": true,
+      "description": "SCHEMA_VERSION 10; migrations v1-v10; sessions/messages + FTS5(unicode61, external content, insert/delete triggers only) + vec0 message_vec float[384]; embedding/usage/event state tables and indexes; v10 purges grok usage rows; migration + idempotence tests.",
+      "read_line_count": 520,
+      "read_method": "codegraph node --file --offset --limit (line-numbered source, codegraph 1.2.0)",
+      "missing_ranges": []
+    },
+    {
+      "path": "src/db/store.rs",
+      "bytes": 9113,
+      "total_lines": 253,
+      "sha256_initial": "94d3d6c60190f8069286fed661e16e555fac652e6459051635d34b61b6f8fda4",
+      "read_ranges": [
+        [
+          1,
+          120
+        ],
+        [
+          121,
+          253
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines displayed in the listed sequential ranges (<=120 lines per read) and reviewed; hashes did not count as reading.",
+      "sha256_final": "94d3d6c60190f8069286fed661e16e555fac652e6459051635d34b61b6f8fda4",
+      "content_unchanged": true,
+      "description": "SESSION_COLUMNS + session_from_row mapping; Store::open at data_dir/recall/recall.db with journal_mode=WAL, busy_timeout=5000, foreign_keys=ON; schema init; row/list/path helpers.",
+      "read_line_count": 253,
+      "read_method": "codegraph node --file --offset --limit (line-numbered source, codegraph 1.2.0)",
+      "missing_ranges": []
+    },
+    {
+      "path": "src/db/session_store.rs",
+      "bytes": 24340,
+      "total_lines": 682,
+      "sha256_initial": "ef38d78b89a6dc78caa5ac99902ae3f9169ec5b825c22b595a53165a0bb36292",
+      "read_ranges": [
+        [
+          1,
+          120
+        ],
+        [
+          121,
+          240
+        ],
+        [
+          241,
+          360
+        ],
+        [
+          361,
+          480
+        ],
+        [
+          481,
+          600
+        ],
+        [
+          601,
+          682
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines displayed in the listed sequential ranges (<=120 lines per read) and reviewed; hashes did not count as reading.",
+      "sha256_final": "ef38d78b89a6dc78caa5ac99902ae3f9169ec5b825c22b595a53165a0bb36292",
+      "content_unchanged": true,
+      "description": "Session CRUD in single-connection unchecked_transaction; replace = delete_session_data_tx + insert (new UUID per refresh); usage_events upsert ON CONFLICT(session_id,event_key); embedding state reset to pending/done on persist; scope-filtered list/stats queries with stable ORDER BY tiebreakers.",
+      "read_line_count": 682,
+      "read_method": "codegraph node --file --offset --limit (line-numbered source, codegraph 1.2.0)",
+      "missing_ranges": []
+    },
+    {
+      "path": "src/db/search.rs",
+      "bytes": 10150,
+      "total_lines": 309,
+      "sha256_initial": "896816bb3e035c9fcf714c2c3f71a5d7b11b35e977799e6d7e8315349bbd37f4",
+      "read_ranges": [
+        [
+          1,
+          120
+        ],
+        [
+          121,
+          240
+        ],
+        [
+          241,
+          309
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines displayed in the listed sequential ranges (<=120 lines per read) and reviewed; hashes did not count as reading.",
+      "sha256_final": "896816bb3e035c9fcf714c2c3f71a5d7b11b35e977799e6d7e8315349bbd37f4",
+      "content_unchanged": true,
+      "description": "Hybrid search: FTS (filters pushed into WHERE, GROUP BY session, MIN(rank), prefix-200-char snippet) + sqlite-vec MATCH with k=limit*5 (filters applied after KNN via JOIN), RRF merge k=10, sort by float score only (no tiebreak); fts5_escape = whitespace split, alnum+underscore, lowercase, OR-joined.",
+      "read_line_count": 309,
+      "read_method": "codegraph node --file --offset --limit (line-numbered source, codegraph 1.2.0)",
+      "missing_ranges": []
+    },
+    {
+      "path": "src/db/semantic_store.rs",
+      "bytes": 10424,
+      "total_lines": 280,
+      "sha256_initial": "94a0c3b14cb062ff3fe3e8954f7d04dc65607391dc627006c694766e30474986",
+      "read_ranges": [
+        [
+          1,
+          120
+        ],
+        [
+          121,
+          240
+        ],
+        [
+          241,
+          280
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines displayed in the listed sequential ranges (<=120 lines per read) and reviewed; hashes did not count as reading.",
+      "sha256_final": "94a0c3b14cb062ff3fe3e8954f7d04dc65607391dc627006c694766e30474986",
+      "content_unchanged": true,
+      "description": "Embedding upsert (delete+insert); embeddable/pending message queries (user role, LENGTH>2); claim only pending jobs (ORDER BY updated_at DESC); progress counters; background_job_state get/set/clear; scope-filtered semantic progress.",
+      "read_line_count": 280,
+      "read_method": "codegraph node --file --offset --limit (line-numbered source, codegraph 1.2.0)",
+      "missing_ranges": []
+    },
+    {
+      "path": "src/db/event_store.rs",
+      "bytes": 5715,
+      "total_lines": 172,
+      "sha256_initial": "87c3c2fb9b7f4a55032dfa185ab81a58c3d611acdf6569b1716e806c3f49b39e",
+      "read_ranges": [
+        [
+          1,
+          120
+        ],
+        [
+          121,
+          171
+        ],
+        [
+          172,
+          172
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines displayed in the listed sequential ranges (<=120 lines per read) and reviewed; hashes did not count as reading.",
+      "sha256_final": "87c3c2fb9b7f4a55032dfa185ab81a58c3d611acdf6569b1716e806c3f49b39e",
+      "content_unchanged": true,
+      "description": "session_events replace/list + event_session_state upsert (parser_version, source_updated_at, event_count); backfill path for existing sessions without touching messages.",
+      "read_line_count": 172,
+      "read_method": "codegraph node --file --offset --limit (line-numbered source, codegraph 1.2.0)",
+      "missing_ranges": []
+    },
+    {
+      "path": "src/db/project_store.rs",
+      "bytes": 6983,
+      "total_lines": 200,
+      "sha256_initial": "3aed273f0aa17288bd5c8672571a10855268eb3d02043e3541a74155ca6ac8c9",
+      "read_ranges": [
+        [
+          1,
+          120
+        ],
+        [
+          121,
+          200
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines displayed in the listed sequential ranges (<=120 lines per read) and reviewed; hashes did not count as reading.",
+      "sha256_final": "3aed273f0aa17288bd5c8672571a10855268eb3d02043e3541a74155ca6ac8c9",
+      "content_unchanged": true,
+      "description": "Project/repo filters: resolve --project directory vs repo (GitHub remote/slug/name), directory child pattern dir/%, ambiguous repo-name bail; list_project_directories; apply_scope_filters shared by stats/export/search scope.",
+      "read_line_count": 200,
+      "read_method": "codegraph node --file --offset --limit (line-numbered source, codegraph 1.2.0)",
+      "missing_ranges": []
+    },
+    {
+      "path": "src/db/usage_store.rs",
+      "bytes": 8373,
+      "total_lines": 221,
+      "sha256_initial": "3a924e7189e952038172334e91d114332a1c1aefb55e455fb452c7f941a9d984",
+      "read_ranges": [
+        [
+          1,
+          120
+        ],
+        [
+          121,
+          221
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines displayed in the listed sequential ranges (<=120 lines per read) and reviewed; hashes did not count as reading.",
+      "sha256_final": "3a924e7189e952038172334e91d114332a1c1aefb55e455fb452c7f941a9d984",
+      "content_unchanged": true,
+      "description": "usage_state_meta_map; persist_usage_events_for_existing_session (delete+reinsert+state upsert); list_usage_events with source/time filters; list_usage_events_for_session.",
+      "read_line_count": 221,
+      "read_method": "codegraph node --file --offset --limit (line-numbered source, codegraph 1.2.0)",
+      "missing_ranges": []
+    },
+    {
+      "path": "src/sync.rs",
+      "bytes": 33660,
+      "total_lines": 967,
+      "sha256_initial": "e569a54403056ad6ea9d6386123330e1906b7ee523ecd6d146ff2a91375aa319",
+      "read_ranges": [
+        [
+          1,
+          120
+        ],
+        [
+          121,
+          240
+        ],
+        [
+          241,
+          360
+        ],
+        [
+          361,
+          480
+        ],
+        [
+          481,
+          600
+        ],
+        [
+          601,
+          720
+        ],
+        [
+          721,
+          840
+        ],
+        [
+          841,
+          967
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines displayed in the listed sequential ranges (<=120 lines per read) and reviewed; hashes did not count as reading.",
+      "sha256_final": "e569a54403056ad6ea9d6386123330e1906b7ee523ecd6d146ff2a91375aa319",
+      "content_unchanged": true,
+      "description": "SyncJob: per-adapter prune + scan_for_sync (fallback full scan; scan error keeps old data), excluded_paths purge, since_ts filter, skip/backfill/refresh decision (content_changed | usage/event parser state), replace semantics with new UUID, title from user messages, sequential (no intra-sync threads); spawns background embedding worker after CLI sync.",
+      "read_line_count": 967,
+      "read_method": "codegraph node --file --offset --limit (line-numbered source, codegraph 1.2.0)",
+      "missing_ranges": []
+    },
+    {
+      "path": "src/session.rs",
+      "bytes": 34039,
+      "total_lines": 998,
+      "sha256_initial": "ec59acbd8208cc10b80575839647f2c28d0ec4e8d7862109b3ea6530c89f6460",
+      "read_ranges": [
+        [
+          1,
+          120
+        ],
+        [
+          121,
+          240
+        ],
+        [
+          241,
+          360
+        ],
+        [
+          361,
+          480
+        ],
+        [
+          481,
+          600
+        ],
+        [
+          601,
+          720
+        ],
+        [
+          721,
+          840
+        ],
+        [
+          841,
+          960
+        ],
+        [
+          961,
+          998
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines displayed in the listed sequential ranges (<=120 lines per read) and reviewed; hashes did not count as reading.",
+      "sha256_final": "ec59acbd8208cc10b80575839647f2c28d0ec4e8d7862109b3ea6530c89f6460",
+      "content_unchanged": true,
+      "description": "Session subcommands list/show/export/share/resume/open/handoff; session selector rules (--id xor --source+--source-id); imported sessions refuse resume/open; resume prints or execs (no cwd is_dir check); handoff builds full transcript prompt, print_prompt prints it verbatim, execution cwd filtered by is_dir; list JSON next_offset.",
+      "read_line_count": 998,
+      "read_method": "codegraph node --file --offset --limit (line-numbered source, codegraph 1.2.0)",
+      "missing_ranges": []
+    },
+    {
+      "path": "src/cli.rs",
+      "bytes": 22141,
+      "total_lines": 618,
+      "sha256_initial": "4e55620b765949d42469f240d3cf1d38e2bd7b6402b0f082e1610a007cfc575e",
+      "read_ranges": [
+        [
+          1,
+          120
+        ],
+        [
+          121,
+          240
+        ],
+        [
+          241,
+          360
+        ],
+        [
+          361,
+          480
+        ],
+        [
+          481,
+          618
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines displayed in the listed sequential ranges (<=120 lines per read) and reviewed; hashes did not count as reading.",
+      "sha256_final": "4e55620b765949d42469f240d3cf1d38e2bd7b6402b0f082e1610a007cfc575e",
+      "content_unchanged": true,
+      "description": "Clap root: search, session, sync, info, usage, export, import, share init, skill install (kitup bundle), extension list/install/remove/upgrade, completions; hidden __background-worker and 4 __bench-* commands; external subcommand passthrough; default no subcommand -> TUI runner; no MCP command.",
+      "read_line_count": 618,
+      "read_method": "codegraph node --file --offset --limit (line-numbered source, codegraph 1.2.0)",
+      "missing_ranges": []
+    },
+    {
+      "path": "src/import.rs",
+      "bytes": 21203,
+      "total_lines": 601,
+      "sha256_initial": "6764e91f314817702db50076e75bad0acb6ca161da3df78856a9394e02beaca7",
+      "read_ranges": [
+        [
+          1,
+          120
+        ],
+        [
+          121,
+          240
+        ],
+        [
+          241,
+          360
+        ],
+        [
+          361,
+          480
+        ],
+        [
+          481,
+          601
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines displayed in the listed sequential ranges (<=120 lines per read) and reviewed; hashes did not count as reading.",
+      "sha256_final": "6764e91f314817702db50076e75bad0acb6ca161da3df78856a9394e02beaca7",
+      "content_unchanged": true,
+      "description": "JSONL restore: schema_version 2..=4, record_type=session; per-line commit; skip if (source,source_id) exists (no merge); new UUID id; is_import=true; usage/events imported without state rows; dry-run parity; malformed line fails with line number keeping prior rows; lossless roundtrip test except session.id.",
+      "read_line_count": 601,
+      "read_method": "codegraph node --file --offset --limit (line-numbered source, codegraph 1.2.0)",
+      "missing_ranges": []
+    },
+    {
+      "path": "src/extension.rs",
+      "bytes": 23837,
+      "total_lines": 709,
+      "sha256_initial": "c259f6f47d86984e53f932cfbeddf1650b3daba3043a833e92258c706fd30383",
+      "read_ranges": [
+        [
+          1,
+          120
+        ],
+        [
+          121,
+          240
+        ],
+        [
+          241,
+          360
+        ],
+        [
+          361,
+          480
+        ],
+        [
+          481,
+          600
+        ],
+        [
+          601,
+          709
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines displayed in the listed sequential ranges (<=120 lines per read) and reviewed; hashes did not count as reading.",
+      "sha256_final": "c259f6f47d86984e53f932cfbeddf1650b3daba3043a833e92258c706fd30383",
+      "content_unchanged": true,
+      "description": "Official extension manager: catalog over HTTPS, protocol/min_recall gates, per-target archives, sha256 verify before unpack (zip/tar.gz), manifest read by executing binary --recall-extension-manifest after hash check, state file atomic rename; external dispatch to managed binary; tests.",
+      "read_line_count": 709,
+      "read_method": "codegraph node --file --offset --limit (line-numbered source, codegraph 1.2.0)",
+      "missing_ranges": []
+    },
+    {
+      "path": "src/handoff.rs",
+      "bytes": 3871,
+      "total_lines": 111,
+      "sha256_initial": "1bd254275e7b55e2c098d917910752cdbbdec3b1278fd159c42eadd86a5f1b8f",
+      "read_ranges": [
+        [
+          1,
+          111
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines displayed in the listed sequential ranges (<=120 lines per read) and reviewed; hashes did not count as reading.",
+      "sha256_final": "1bd254275e7b55e2c098d917910752cdbbdec3b1278fd159c42eadd86a5f1b8f",
+      "content_unchanged": true,
+      "description": "4 handoff targets (codex, grok, claude-code, opencode); build_prompt wraps transcript::render_plain in a fixed 2-line header, no budget; command_for_target maps to program/args; tests.",
+      "read_line_count": 111,
+      "read_method": "codegraph node --file --offset --limit (line-numbered source, codegraph 1.2.0)",
+      "missing_ranges": []
+    },
+    {
+      "path": "src/session_action.rs",
+      "bytes": 1439,
+      "total_lines": 55,
+      "sha256_initial": "c0a8296064512f27b25848422d3b1145971a680c5abd09242eb955e2eef8a542",
+      "read_ranges": [
+        [
+          1,
+          55
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines displayed in the listed sequential ranges (<=120 lines per read) and reviewed; hashes did not count as reading.",
+      "sha256_final": "c0a8296064512f27b25848422d3b1145971a680c5abd09242eb955e2eef8a542",
+      "content_unchanged": true,
+      "description": "SessionAction Resume/OpenApp -> adapters::resume_command_for/app_command_for; run() spawns command inheriting stdio, optional current_dir, bails on non-zero exit.",
+      "read_line_count": 55,
+      "read_method": "codegraph node --file --offset --limit (line-numbered source, codegraph 1.2.0)",
+      "missing_ranges": []
+    },
+    {
+      "path": "src/transcript.rs",
+      "bytes": 1140,
+      "total_lines": 29,
+      "sha256_initial": "9d6db3a4a36e3843e4617167693d094d261444ad6a46143729713fe4d496bad1",
+      "read_ranges": [
+        [
+          1,
+          29
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines displayed in the listed sequential ranges (<=120 lines per read) and reviewed; hashes did not count as reading.",
+      "sha256_final": "9d6db3a4a36e3843e4617167693d094d261444ad6a46143729713fe4d496bad1",
+      "content_unchanged": true,
+      "description": "render_plain: session header (title/id/source/source_id/dir/date/messages count) then every message full text as ## Role [seq]; no truncation or evidence markers.",
+      "read_line_count": 29,
+      "read_method": "codegraph node --file --offset --limit (line-numbered source, codegraph 1.2.0)",
+      "missing_ranges": []
+    },
+    {
+      "path": "src/embedding.rs",
+      "bytes": 4791,
+      "total_lines": 134,
+      "sha256_initial": "2972f7631e07d6b405a31a7c7fa00e69bf1fa960beb0a27c7cd792e437a6756f",
+      "read_ranges": [
+        [
+          1,
+          134
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines displayed in the listed sequential ranges (<=120 lines per read) and reviewed; hashes did not count as reading.",
+      "sha256_final": "2972f7631e07d6b405a31a7c7fa00e69bf1fa960beb0a27c7cd792e437a6756f",
+      "content_unchanged": true,
+      "description": "intfloat/multilingual-e5-small via hf-hub (network on first use), candle BERT; query: / passage: prefixes; 512-token truncation; mean-pooling + L2 normalize; device CUDA->Metal->CPU.",
+      "read_line_count": 134,
+      "read_method": "codegraph node --file --offset --limit (line-numbered source, codegraph 1.2.0)",
+      "missing_ranges": []
+    },
+    {
+      "path": "src/semantic.rs",
+      "bytes": 4708,
+      "total_lines": 140,
+      "sha256_initial": "dbd9ed9e2a10c160d24175bdcbdcbfe1aee6ec4ce16e5b1d06c356a26c0d5e77",
+      "read_ranges": [
+        [
+          1,
+          140
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines displayed in the listed sequential ranges (<=120 lines per read) and reviewed; hashes did not count as reading.",
+      "sha256_final": "dbd9ed9e2a10c160d24175bdcbdcbfe1aee6ec4ce16e5b1d06c356a26c0d5e77",
+      "content_unchanged": true,
+      "description": "Background embedding worker: spawn current_exe __background-worker with null stdio; fs2 exclusive lock file data_dir/recall/background-worker.lock; batch size 8; build_embedding_text = title + content truncated to 500 chars; failure marks session failed and worker exits; no retry loop.",
+      "read_line_count": 140,
+      "read_method": "codegraph node --file --offset --limit (line-numbered source, codegraph 1.2.0)",
+      "missing_ranges": []
+    },
+    {
+      "path": "src/query.rs",
+      "bytes": 4409,
+      "total_lines": 136,
+      "sha256_initial": "4d9921e9826658c6c20ffa5e2fc0bdbed3860294a0abcb6ae2bff22121731e3e",
+      "read_ranges": [
+        [
+          1,
+          136
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines displayed in the listed sequential ranges (<=120 lines per read) and reviewed; hashes did not count as reading.",
+      "sha256_final": "4d9921e9826658c6c20ffa5e2fc0bdbed3860294a0abcb6ae2bff22121731e3e",
+      "content_unchanged": true,
+      "description": "CLI search: hybrid_search(limit 20, fetch_multiplier 3); query_embedding returns None when no done/processing sessions, on model load error prints Semantic unavailable and falls back to FTS-only; embed_query failure propagates; time/source/project/repo filter parsing.",
+      "read_line_count": 136,
+      "read_method": "codegraph node --file --offset --limit (line-numbered source, codegraph 1.2.0)",
+      "missing_ranges": []
+    },
+    {
+      "path": "src/types.rs",
+      "bytes": 6396,
+      "total_lines": 216,
+      "sha256_initial": "56b4501d08ac888754057c98ed9205da04e1e7342d46021eec5072641802994e",
+      "read_ranges": [
+        [
+          1,
+          120
+        ],
+        [
+          121,
+          216
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines displayed in the listed sequential ranges (<=120 lines per read) and reviewed; hashes did not count as reading.",
+      "sha256_final": "56b4501d08ac888754057c98ed9205da04e1e7342d46021eec5072641802994e",
+      "content_unchanged": true,
+      "description": "Domain structs: Role user/assistant only; TokenSource observed/derived/estimated; Session (17 fields), Message (no message id/parent), usage/event rows, MatchSource Fts/Vector/Hybrid, SearchResult, semantic progress structs.",
+      "read_line_count": 216,
+      "read_method": "codegraph node --file --offset --limit (line-numbered source, codegraph 1.2.0)",
+      "missing_ranges": []
+    },
+    {
+      "path": "src/config.rs",
+      "bytes": 5194,
+      "total_lines": 154,
+      "sha256_initial": "44b179eef0905df585c42a4fd014e0ef47a9d6831d716fec7b2bce4557b80593",
+      "read_ranges": [
+        [
+          1,
+          120
+        ],
+        [
+          121,
+          154
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines displayed in the listed sequential ranges (<=120 lines per read) and reviewed; hashes did not count as reading.",
+      "sha256_final": "44b179eef0905df585c42a4fd014e0ef47a9d6831d716fec7b2bce4557b80593",
+      "content_unchanged": true,
+      "description": "JSON config at config_dir/recall/config.json; disabled_sources, sync_window (today/7d/30d/all), default_current_repo_scope, excluded_paths globset; load_or_default (parse errors silently default); normalize_sources; all-disabled reset.",
+      "read_line_count": 154,
+      "read_method": "codegraph node --file --offset --limit (line-numbered source, codegraph 1.2.0)",
+      "missing_ranges": []
+    },
+    {
+      "path": "src/repo_identity.rs",
+      "bytes": 4775,
+      "total_lines": 129,
+      "sha256_initial": "6cbee0f3c4fd7a7abfb1235dd1375b2b2c5303a88f9bfbe1875bc87ce93daffe",
+      "read_ranges": [
+        [
+          1,
+          129
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines displayed in the listed sequential ranges (<=120 lines per read) and reviewed; hashes did not count as reading.",
+      "sha256_final": "6cbee0f3c4fd7a7abfb1235dd1375b2b2c5303a88f9bfbe1875bc87ce93daffe",
+      "content_unchanged": true,
+      "description": "Repo identity: GitHub URL forms only (https/ssh/git@/github.com/<slug>); per-sync cache of git rev-parse --show-toplevel and remote get-url origin via subprocess; non-GitHub remotes fall back to Name matching (project_store.rs:55-77).",
+      "read_line_count": 129,
+      "read_method": "codegraph node --file --offset --limit (line-numbered source, codegraph 1.2.0)",
+      "missing_ranges": []
+    },
+    {
+      "path": "src/bench.rs",
+      "bytes": 20236,
+      "total_lines": 573,
+      "sha256_initial": "74a9ac688b41aa4cb41ff91c081bb6a634c802369c47c0c9713246f8100e73f0",
+      "read_ranges": [
+        [
+          1,
+          120
+        ],
+        [
+          121,
+          240
+        ],
+        [
+          241,
+          360
+        ],
+        [
+          361,
+          480
+        ],
+        [
+          481,
+          573
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines displayed in the listed sequential ranges (<=120 lines per read) and reviewed; hashes did not count as reading.",
+      "sha256_final": "74a9ac688b41aa4cb41ff91c081bb6a634c802369c47c0c9713246f8100e73f0",
+      "content_unchanged": true,
+      "description": "Hidden benchmarks: __bench-semantic (cold load, batch sweep 4..256, rollback-only upsert A/B), __bench-search (cold path), __bench-eval (dataset search-eval.json, Hit@5/Hit@10/MRR, top_k 20 fetch_multiplier 20, FTS-only fallback), __bench-dump-sessions.",
+      "read_line_count": 573,
+      "read_method": "codegraph node --file --offset --limit (line-numbered source, codegraph 1.2.0)",
+      "missing_ranges": []
+    },
+    {
+      "path": "src/utils.rs",
+      "bytes": 6234,
+      "total_lines": 197,
+      "sha256_initial": "25e61b4ed4577be840e45b8f2ba8e6f034da00dc530768871b1728fe0dad2fbe",
+      "read_ranges": [
+        [
+          1,
+          120
+        ],
+        [
+          121,
+          197
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines displayed in the listed sequential ranges (<=120 lines per read) and reviewed; hashes did not count as reading.",
+      "sha256_final": "25e61b4ed4577be840e45b8f2ba8e6f034da00dc530768871b1728fe0dad2fbe",
+      "content_unchanged": true,
+      "description": "open_url_in_default_browser; format_age; parse_since (d/w/m); control-char sanitize; f32 little-endian byte packing for sqlite-vec; title_from_user_messages (noise-prefix skip, 80-char ellipsis).",
+      "read_line_count": 197,
+      "read_method": "codegraph node --file --offset --limit (line-numbered source, codegraph 1.2.0)",
+      "missing_ranges": []
+    },
+    {
+      "path": "src/adapters/mod.rs",
+      "bytes": 6803,
+      "total_lines": 221,
+      "sha256_initial": "b5e5da0c83f6fafda7a0b04787deb2341660b99a25bc212ea8b6c67a0d46b1ab",
+      "read_ranges": [
+        [
+          1,
+          120
+        ],
+        [
+          121,
+          221
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines displayed in the listed sequential ranges (<=120 lines per read) and reviewed; hashes did not count as reading.",
+      "sha256_final": "b5e5da0c83f6fafda7a0b04787deb2341660b99a25bc212ea8b6c67a0d46b1ab",
+      "content_unchanged": true,
+      "description": "SourceAdapter trait (id/label/scan/scan_summary/usage_parser_version/scan_for_sync/prune/resume_command/app_command); RawSession/RawMessage; all_adapters = 11 providers (claude_code, opencode, codex, pi, antigravity, gemini, grok, kiro, copilot, cursor, cline); default prune no-op; resume/app dispatch rebuilds adapter list per call; event-backfill allowlist codex/claude-code/cursor/copilot-cli/opencode.",
+      "read_line_count": 221,
+      "read_method": "codegraph node --file --offset --limit (line-numbered source, codegraph 1.2.0)",
+      "missing_ranges": []
+    },
+    {
+      "path": "src/adapters/sync_state.rs",
+      "bytes": 1871,
+      "total_lines": 58,
+      "sha256_initial": "34b5404c92abbcbb349b71f7ab9f2e43e2167c3759ffdc07327f0e5666d760bc",
+      "read_ranges": [
+        [
+          1,
+          58
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines displayed in the listed sequential ranges (<=120 lines per read) and reviewed; hashes did not count as reading.",
+      "sha256_final": "34b5404c92abbcbb349b71f7ab9f2e43e2167c3759ffdc07327f0e5666d760bc",
+      "content_unchanged": true,
+      "description": "Currency checks: parser_version >= required && source_updated_at == mtime/updated_at; per-mtime helpers treat None requirement as current.",
+      "read_line_count": 58,
+      "read_method": "codegraph node --file --offset --limit (line-numbered source, codegraph 1.2.0)",
+      "missing_ranges": []
+    },
+    {
+      "path": "src/adapters/file_scan.rs",
+      "bytes": 15500,
+      "total_lines": 459,
+      "sha256_initial": "6e39d8a40c969a29c341c4ef3130193d64cba380cfc5aa67cc3ec56ffc42160a",
+      "read_ranges": [
+        [
+          1,
+          120
+        ],
+        [
+          121,
+          240
+        ],
+        [
+          241,
+          360
+        ],
+        [
+          361,
+          459
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines displayed in the listed sequential ranges (<=120 lines per read) and reviewed; hashes did not count as reading.",
+      "sha256_final": "6e39d8a40c969a29c341c4ef3130193d64cba380cfc5aa67cc3ec56ffc42160a",
+      "content_unchanged": true,
+      "description": "Shared incremental scan: stat mtime_ms only (no size), always refresh source_file_path + clear import marker for known sessions, since_ts filter by mtime, skip only if updated_at == mtime and usage/event parser state current, else re-parse; per-file parse errors skipped; missing stat target skipped silently.",
+      "read_line_count": 459,
+      "read_method": "codegraph node --file --offset --limit (line-numbered source, codegraph 1.2.0)",
+      "missing_ranges": []
+    },
+    {
+      "path": "src/adapters/claude_code.rs",
+      "bytes": 43957,
+      "total_lines": 1211,
+      "sha256_initial": "85aad412bf543722647b0032c52fd794e25e1da9e6b33783cee32dc337cda141",
+      "read_ranges": [
+        [
+          1,
+          120
+        ],
+        [
+          121,
+          240
+        ],
+        [
+          241,
+          360
+        ],
+        [
+          361,
+          480
+        ],
+        [
+          481,
+          600
+        ],
+        [
+          601,
+          720
+        ],
+        [
+          721,
+          840
+        ],
+        [
+          841,
+          960
+        ],
+        [
+          961,
+          1080
+        ],
+        [
+          1081,
+          1211
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines displayed in the listed sequential ranges (<=120 lines per read) and reviewed; hashes did not count as reading.",
+      "sha256_final": "85aad412bf543722647b0032c52fd794e25e1da9e6b33783cee32dc337cda141",
+      "content_unchanged": true,
+      "description": "CC adapter: ~/.claude/sessions index (cwd/startedAt/entrypoint), projects/**/*.jsonl (nested subagents included), transcripts; user/assistant only; isSidechain/isCompactSummary/isMeta excluded from messages but usage kept; tool_use/tool_result folded into message text and structured events; usage dedup by requestId+messageId with max-merge; updated_at = mtime; duration from first/last ts; project dir dash decoding heuristic; resume claude --resume.",
+      "read_line_count": 1211,
+      "read_method": "codegraph node --file --offset --limit (line-numbered source, codegraph 1.2.0)",
+      "missing_ranges": []
+    },
+    {
+      "path": "src/adapters/codex.rs",
+      "bytes": 64364,
+      "total_lines": 1631,
+      "sha256_initial": "4d3a1463e887aa14ca7ae15ab01afb5134122df4486f28961eb9befc8a0d3124",
+      "read_ranges": [
+        [
+          1,
+          120
+        ],
+        [
+          121,
+          240
+        ],
+        [
+          241,
+          360
+        ],
+        [
+          361,
+          480
+        ],
+        [
+          481,
+          600
+        ],
+        [
+          601,
+          720
+        ],
+        [
+          721,
+          840
+        ],
+        [
+          841,
+          960
+        ],
+        [
+          961,
+          1080
+        ],
+        [
+          1081,
+          1200
+        ],
+        [
+          1201,
+          1320
+        ],
+        [
+          1321,
+          1440
+        ],
+        [
+          1441,
+          1560
+        ],
+        [
+          1561,
+          1631
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines displayed in the listed sequential ranges (<=120 lines per read) and reviewed; hashes did not count as reading.",
+      "sha256_final": "4d3a1463e887aa14ca7ae15ab01afb5134122df4486f28961eb9befc8a0d3124",
+      "content_unchanged": true,
+      "description": "Codex adapter: ~/.codex/sessions + archived_sessions, rollout filename UUID tail as source_id; session_meta id/cwd/model_provider; turn_context model; event_msg user/agent messages + token_count usage (total/last delta, derived tokens, fork inherited-baseline suppression, stale-regression guard); response_item assistant messages + tool events; consecutive duplicate assistant suppression; updated_at = mtime; resume codex resume + codex://threads deep link.",
+      "read_line_count": 1631,
+      "read_method": "codegraph node --file --offset --limit (line-numbered source, codegraph 1.2.0)",
+      "missing_ranges": []
+    },
+    {
+      "path": "src/tui/runner.rs",
+      "bytes": 5303,
+      "total_lines": 159,
+      "sha256_initial": "944f8580f62d267dd12ded528966dc1f7ad60d4057765a6a4aebf524333aee89",
+      "read_ranges": [
+        [
+          1,
+          159
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines displayed in the listed sequential ranges (<=120 lines per read) and reviewed; hashes did not count as reading.",
+      "sha256_final": "944f8580f62d267dd12ded528966dc1f7ad60d4057765a6a4aebf524333aee89",
+      "content_unchanged": true,
+      "description": "TUI entry: Store::open, release builds spawn background worker (debug does not), raw mode + alternate screen guard, search worker thread, usage dashboard refresh (blocking run_dashboard_sync_job first refresh), on exit executes app.exec_on_exit (unix exec / windows status+exit), cwd applied only if is_dir.",
+      "read_line_count": 159,
+      "read_method": "codegraph node --file --offset --limit (line-numbered source, codegraph 1.2.0)",
+      "missing_ranges": []
+    },
+    {
+      "path": "src/tui/search_worker.rs",
+      "bytes": 5758,
+      "total_lines": 204,
+      "sha256_initial": "d4b83660f9f6f804d3f546cc59d3b3ab397c627bde6ea2b17fbdac5267f424ce",
+      "read_ranges": [
+        [
+          1,
+          120
+        ],
+        [
+          121,
+          204
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines displayed in the listed sequential ranges (<=120 lines per read) and reviewed; hashes did not count as reading.",
+      "sha256_final": "d4b83660f9f6f804d3f546cc59d3b3ab397c627bde6ea2b17fbdac5267f424ce",
+      "content_unchanged": true,
+      "description": "Dedicated search thread with its own Store connection (WAL concurrency); requests coalesced to latest; two-phase responses Text then Hybrid (limit 200, x3); hybrid only when semantic_ready; provider cached in worker; any provider load/embed failure sets embedding_unavailable and degrades to text-only with status message.",
+      "read_line_count": 204,
+      "read_method": "codegraph node --file --offset --limit (line-numbered source, codegraph 1.2.0)",
+      "missing_ranges": []
+    },
+    {
+      "path": "src/tui/share_state.rs",
+      "bytes": 850,
+      "total_lines": 41,
+      "sha256_initial": "3f024ed3eeeda4fa494fa0d258a2ddc7ffeb0660d177f66e82677620a028a78e",
+      "read_ranges": [
+        [
+          1,
+          41
+        ]
+      ],
+      "status": "full",
+      "reason": "All logical file lines displayed in the listed sequential ranges (<=120 lines per read) and reviewed; hashes did not count as reading.",
+      "sha256_final": "3f024ed3eeeda4fa494fa0d258a2ddc7ffeb0660d177f66e82677620a028a78e",
+      "content_unchanged": true,
+      "description": "TUI state enums: PendingCommandAction Resume/OpenApp/Handoff; AppMode incl HandoffTarget/ConfirmResume; ResumeOrigin Search/Viewing; PendingResume {command, action, source_label, session_title, cwd, origin}.",
+      "read_line_count": 41,
+      "read_method": "codegraph node --file --offset --limit (line-numbered source, codegraph 1.2.0)",
+      "missing_ranges": []
+    },
+    {
+      "path": "src/tui/app.rs",
+      "bytes": 141356,
+      "total_lines": 3701,
+      "sha256_initial": "b249a9ba57323828f95eb228314f3bda8a7287c12778c5bc39f6c60011bce454",
+      "read_ranges": [
+        [
+          1,
+          120
+        ],
+        [
+          121,
+          260
+        ],
+        [
+          430,
+          474
+        ],
+        [
+          1080,
+          1109
+        ],
+        [
+          1200,
+          1274
+        ],
+        [
+          1400,
+          1549
+        ],
+        [
+          3300,
+          3399
+        ]
+      ],
+      "status": "partial",
+      "reason": "Bounded close reading of the listed ranges only; unread ranges enumerated in missing_ranges.",
+      "sha256_final": "b249a9ba57323828f95eb228314f3bda8a7287c12778c5bc39f6c60011bce454",
+      "content_unchanged": true,
+      "description": "Targeted read of resume/handoff/reset/test ranges only: Ctrl-R/Ctrl-O confirm flows, handoff picker (h) + confirm->exec_on_exit, key routing, structures; rest of the 3701-line TUI file not read.",
+      "read_line_count": 660,
+      "read_method": "codegraph node --file --offset --limit (line-numbered source, codegraph 1.2.0)",
+      "missing_ranges": [
+        [
+          261,
+          429
+        ],
+        [
+          475,
+          1079
+        ],
+        [
+          1110,
+          1199
+        ],
+        [
+          1275,
+          1399
+        ],
+        [
+          1550,
+          3299
+        ],
+        [
+          3400,
+          3701
+        ]
+      ]
+    },
+    {
+      "path": "src/tui/ui/popups.rs",
+      "bytes": 23837,
+      "total_lines": 567,
+      "sha256_initial": "d39344e787570fb6115acf8df18467c698c96643f6c44df77ff3e385c20dc7b5",
+      "read_ranges": [
+        [
+          400,
+          474
+        ]
+      ],
+      "status": "partial",
+      "reason": "Bounded close reading of the listed ranges only; unread ranges enumerated in missing_ranges.",
+      "sha256_final": "d39344e787570fb6115acf8df18467c698c96643f6c44df77ff3e385c20dc7b5",
+      "content_unchanged": true,
+      "description": "Confirm-resume popup render only: shows action title, target/source label, session title, cwd, and command.display() truncated to width-14 chars; rest of popups file not read.",
+      "read_line_count": 75,
+      "read_method": "codegraph node --file --offset --limit (line-numbered source, codegraph 1.2.0)",
+      "missing_ranges": [
+        [
+          1,
+          399
+        ],
+        [
+          475,
+          567
+        ]
+      ]
+    }
+  ],
+  "summary": {
+    "inventory_files": 37,
+    "full_files": 35,
+    "partial_files": 2,
+    "unread_files": 0,
+    "lines_full": 12509.0,
+    "lines_partial": 735.0,
+    "lines_read_total": 13244.0,
+    "source_files_hash_unchanged": 37
+  }
+}

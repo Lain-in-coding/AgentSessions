@@ -5,6 +5,53 @@ both the canonical command and the `asg` alias in a user-level directory. There
 is no released, signed, or published artifact — see
 [What this does not give you](#what-this-does-not-give-you).
 
+## Verified locally (Windows, 2026-10-06)
+
+Evidence labels follow the vocabulary in `core-beta-evidence-matrix.md`.
+
+| Item | Result |
+|---|---|
+| Commit built | `1d65a27` (`fix/session-relocation-identity`), built in a detached worktree so concurrent edits could not change the artifact mid-run |
+| Toolchain / host | cargo and rustc 1.97.1, PowerShell 7.6.1, Windows 10.0.22631 x64 |
+| Build | `cargo build --release --locked -p agent-session-grep-cli --bin agent-session-grep` (exit 0) |
+| Artifact | `agent-session-grep.exe`, 6,929,408 bytes, SHA-256 `4e009759864a4c4680a39731a5ad15afbbd6fe5c50818577bb082631d43d4442` |
+| Install | `pwsh -File scripts/install/install.ps1 -Prefix <dir>` (exit 0); both command names written, `asg.exe` byte-identical to the canonical file, hash equal to the artifact hash |
+| First run | `--version` on both names reports `agent-session-grep-cli 0.1.0`; `--robot config paths` resolves config/data/cache/logs under the sandboxed profile; `doctor` reports `db: not-checked` (environment only, no data root touched) |
+| Upgrade | the same installer re-run over the existing install replaced both managed files in place; both names then reported `agent-session-grep-cli 0.1.1`; no temporary files were left behind. The successor was a real second build (workspace version bumped to 0.1.1 in a scratch worktree, never committed) because the repository has only one committed version |
+| Uninstall | removed exactly the two managed command files, left the install directory in place, did not touch the sandboxed config/data/cache/logs; a second run printed `not installed` and exited 0 |
+| Surface smoke | `scripts/install/smoke.ps1` against the installed pair (robot envelopes, documented exit codes, MCP stdio handshake, relocation and provider filters): all assertions passed |
+| Raw evidence | `.trellis/tasks/10-06-release-closure/research/windows-smoke/` (`summary.json`, per-step logs, reusable `run-windows-smoke.ps1`) |
+
+That run establishes installer/upgrade/uninstall mechanics on one Windows
+machine that already had a Rust toolchain. It is not clean-machine evidence,
+not a second-release compatibility test, and not signed-artifact evidence.
+
+## CI: what is defined and what has actually run
+
+- `ci.yml` — three-OS (`ubuntu-latest`, `windows-latest`, `macos-latest`)
+  format/clippy/test jobs plus an installer/uninstaller/surface smoke job.
+  **Executed and green**: run `36391073119` (2026-09-28, pull request, head
+  `2b8f895`) completed with every job `success`, including `test` and
+  `installer smoke` on all three operating systems. That is `ci_verified`
+  script evidence on hosted runners, not clean-machine certification. The
+  earlier CI outage documented in older release notes is not current: the
+  repository is public and Actions runs (re-checked 2026-10-06).
+- `release.yml` — the tag-driven chain: provenance validation, four targets
+  across three OS families, unsigned archives plus `SHA256SUMS`, and an
+  unsigned GitHub Release on a tag push only. **No `v*` tag exists, so this
+  workflow has never built or published anything**; every run ever attributed
+  to it is a zero-job startup failure from the 2026-08-17 Actions outage, and
+  nothing in it is triggered by branches or pull requests.
+- `release-verify.yml` (added 2026-10-06) — `ci_configured_only`: on demand,
+  pull requests that touch release inputs, or a push to `main`, it runs the
+  same `--locked --no-default-features --target` build on one runner per OS
+  family, runs the synthetic release smoke against the built binary, packages
+  unsigned archives with `scripts/release/build-manifest.py`, writes and
+  re-verifies `SHA256SUMS`, and uploads them as **GitHub Actions artifacts**
+  (30-day retention). It has no publish step, no tag trigger, and
+  `contents: read` only. Until it runs on GitHub its evidence is a definition,
+  not a result.
+
 ## What the installer does
 
 `scripts/install/install.ps1` (Windows) and `scripts/install/install.sh`
@@ -128,6 +175,12 @@ agent-session-grep --version
 asg --version
 ```
 
+Measured 2026-10-06 (see the evidence table above): re-running the installer
+over an existing install replaced both managed files in place and the version
+output followed the new artifact. There is still no second released version to
+upgrade across, so this proves the replacement mechanics, not compatibility
+between two real releases.
+
 An upgraded binary may need to migrate an existing data root on first open.
 Migration is automatic, transactional, and stepwise; the current store schema
 is v17, whose last step records the store-level index-projection version. The
@@ -190,14 +243,17 @@ Stated plainly, because it is easy to assume otherwise:
   and no Apple notarization ticket. Both are blocked on credentials this
   project does not have (`CB-SIGNING-001`, `CB-NOTARIZATION-001` in
   `core-beta-evidence-matrix.md`).
-- **Not published.** No release tag, no crates.io package, no Homebrew,
-  winget, or scoop manifest, no container image. Building from source is the
-  only supported path.
+- **Not published.** No release tag, no GitHub Release, no crates.io
+  package, no Homebrew, winget, or scoop manifest, no container image (checked
+  through the GitHub API on 2026-10-06: zero tags, zero releases). Building
+  from source is the only supported path; the artifacts `release-verify.yml`
+  uploads are workflow artifacts, not downloads you should cite as a release.
 - **Not clean-machine certified.** CI runs the installer scripts on
-  GitHub-hosted runners whose images already ship a Rust toolchain. That is
-  installer-script smoke evidence: the scripts run and the installed binary
-  executes. It is not evidence that installation works on a machine without a
-  toolchain.
+  GitHub-hosted runners whose images already ship a Rust toolchain (green run
+  `36391073119`, 2026-09-28), and the 2026-10-06 Windows smoke ran on a
+  developer machine that also had a toolchain. Both are installer-script smoke
+  evidence: the scripts run and the installed binary executes. Neither is
+  evidence that installation works on a machine without a toolchain.
 - **No minimum-OS certification.** The OS versions used in CI are the runner
   images, not a certified floor. See `external-readiness-gate.md` for the
   full list of externally blocked release requirements.

@@ -1,0 +1,373 @@
+{
+  "schema": "competitive-audit.candidate-journal/v1",
+  "measured_at": "2026-10-06T12:27:39.047569+00:00",
+  "commit": "6a48640629c7c7f9d7682d77d9ad5cf4d0402581",
+  "binary_profile": "dev/default-features",
+  "binary_sha256": "b116801b812b32a3e8d45b2f2b5494cc25af92765a648cbfa51c43ad32bf27cc",
+  "method": "Fresh synthetic 200-message Claude-format source; 21 syncs; change only a fixed-length marker in the final message; current entity count is constant; no GC/VACUUM; binary copied after offline locked candidate build. No real session data.",
+  "scratch_relative_to_candidate_workspace": "target/competitive-audit-20261006/journal-recheck-o7tsaip9",
+  "manifest_columns": [
+    "upsert_ids_json",
+    "delete_ids_json",
+    "relation_upserts_json",
+    "relation_deletes_json",
+    "source_replacements_json",
+    "relocation_json"
+  ],
+  "samples": [
+    {
+      "sync_number": 1,
+      "catalog_rows": 202,
+      "batch_states": [
+        [
+          "activated",
+          1
+        ]
+      ],
+      "journal_manifest_chars": 257427,
+      "journal_manifest_utf8_bytes": 257427,
+      "source_bytes": 56126,
+      "source_sha256": "d39ff53850bd9f8599a9baabb499ab76ee859c53d1bffc5c4a18a698b992019c",
+      "manifest_contains_message_body_marker": false,
+      "store_bytes_including_sidecars": 1830912
+    },
+    {
+      "sync_number": 2,
+      "catalog_rows": 202,
+      "batch_states": [
+        [
+          "activated",
+          2
+        ]
+      ],
+      "journal_manifest_chars": 547796,
+      "journal_manifest_utf8_bytes": 547796,
+      "source_bytes": 56126,
+      "source_sha256": "270e793603fb424801231fe992e3b0d199bf33d516f97e3ff3dad1f71997c355",
+      "manifest_contains_message_body_marker": false,
+      "store_bytes_including_sidecars": 2187264
+    },
+    {
+      "sync_number": 3,
+      "catalog_rows": 202,
+      "batch_states": [
+        [
+          "activated",
+          3
+        ]
+      ],
+      "journal_manifest_chars": 838165,
+      "journal_manifest_utf8_bytes": 838165,
+      "source_bytes": 56126,
+      "source_sha256": "6148cef14632f53e3ff6b97c844d942c47d214aadecf724ccf454fab25d4438d",
+      "manifest_contains_message_body_marker": false,
+      "store_bytes_including_sidecars": 2502656
+    },
+    {
+      "sync_number": 4,
+      "catalog_rows": 202,
+      "batch_states": [
+        [
+          "activated",
+          4
+        ]
+      ],
+      "journal_manifest_chars": 1128534,
+      "journal_manifest_utf8_bytes": 1128534,
+      "source_bytes": 56126,
+      "source_sha256": "2dcf4f62ad8644766219d615baaa8695928acc89d085e8eff9820c67f74fb0ac",
+      "manifest_contains_message_body_marker": false,
+      "store_bytes_including_sidecars": 2752512
+    },
+    {
+      "sync_number": 5,
+      "catalog_rows": 202,
+      "batch_states": [
+        [
+          "activated",
+          5
+        ]
+      ],
+      "journal_manifest_chars": 1418903,
+      "journal_manifest_utf8_bytes": 1418903,
+      "source_bytes": 56126,
+      "source_sha256": "ff43b839699b62901b096f1e7c4a043ea3a519378cd3ae9c77286a06bd8ac009",
+      "manifest_contains_message_body_marker": false,
+      "store_bytes_including_sidecars": 3063808
+    },
+    {
+      "sync_number": 6,
+      "catalog_rows": 202,
+      "batch_states": [
+        [
+          "activated",
+          6
+        ]
+      ],
+      "journal_manifest_chars": 1709272,
+      "journal_manifest_utf8_bytes": 1709272,
+      "source_bytes": 56126,
+      "source_sha256": "b9dfb4630f4c598c4135549fd9c508a2dfef1f5e1433eb6072eac2fa869c752e",
+      "manifest_contains_message_body_marker": false,
+      "store_bytes_including_sidecars": 3366912
+    },
+    {
+      "sync_number": 7,
+      "catalog_rows": 202,
+      "batch_states": [
+        [
+          "activated",
+          7
+        ]
+      ],
+      "journal_manifest_chars": 1999641,
+      "journal_manifest_utf8_bytes": 1999641,
+      "source_bytes": 56126,
+      "source_sha256": "22383e921de4fc265e361647b90a0d665de2faccb8159fef33265fa3b2587f12",
+      "manifest_contains_message_body_marker": false,
+      "store_bytes_including_sidecars": 3633152
+    },
+    {
+      "sync_number": 8,
+      "catalog_rows": 202,
+      "batch_states": [
+        [
+          "activated",
+          8
+        ]
+      ],
+      "journal_manifest_chars": 2290010,
+      "journal_manifest_utf8_bytes": 2290010,
+      "source_bytes": 56126,
+      "source_sha256": "4d2b27883431e5d634d50ddb68840a8b635b23759998d0e49f2479a51cc369a7",
+      "manifest_contains_message_body_marker": false,
+      "store_bytes_including_sidecars": 3936256
+    },
+    {
+      "sync_number": 9,
+      "catalog_rows": 202,
+      "batch_states": [
+        [
+          "activated",
+          9
+        ]
+      ],
+      "journal_manifest_chars": 2580379,
+      "journal_manifest_utf8_bytes": 2580379,
+      "source_bytes": 56126,
+      "source_sha256": "578ab36fbe4e3870bd8d77435c0cf2ab4e4b7907596ca04c17dcbd6657500b80",
+      "manifest_contains_message_body_marker": false,
+      "store_bytes_including_sidecars": 4243456
+    },
+    {
+      "sync_number": 10,
+      "catalog_rows": 202,
+      "batch_states": [
+        [
+          "activated",
+          10
+        ]
+      ],
+      "journal_manifest_chars": 2870748,
+      "journal_manifest_utf8_bytes": 2870748,
+      "source_bytes": 56126,
+      "source_sha256": "588eb56c8628d7e333d96054f2b716080af8a40b4afd37a27f1a351907d651be",
+      "manifest_contains_message_body_marker": false,
+      "store_bytes_including_sidecars": 4501504
+    },
+    {
+      "sync_number": 11,
+      "catalog_rows": 202,
+      "batch_states": [
+        [
+          "activated",
+          11
+        ]
+      ],
+      "journal_manifest_chars": 3161117,
+      "journal_manifest_utf8_bytes": 3161117,
+      "source_bytes": 56126,
+      "source_sha256": "72b02cf2bd270dfae06aa0ec6813840eb9f8539831c8d0d60dbd7701ea996997",
+      "manifest_contains_message_body_marker": false,
+      "store_bytes_including_sidecars": 4812800
+    },
+    {
+      "sync_number": 12,
+      "catalog_rows": 202,
+      "batch_states": [
+        [
+          "activated",
+          12
+        ]
+      ],
+      "journal_manifest_chars": 3451486,
+      "journal_manifest_utf8_bytes": 3451486,
+      "source_bytes": 56126,
+      "source_sha256": "f47ded18047c2171e6eea51e87fa99dab1b8b9e402a336cb806df87c83fbc9ca",
+      "manifest_contains_message_body_marker": false,
+      "store_bytes_including_sidecars": 5120000
+    },
+    {
+      "sync_number": 13,
+      "catalog_rows": 202,
+      "batch_states": [
+        [
+          "activated",
+          13
+        ]
+      ],
+      "journal_manifest_chars": 3741855,
+      "journal_manifest_utf8_bytes": 3741855,
+      "source_bytes": 56126,
+      "source_sha256": "8e05dd92ef1504b25fc18770a39e549fbfa1f0a1fbe74df82ca452bb8a0f9512",
+      "manifest_contains_message_body_marker": false,
+      "store_bytes_including_sidecars": 5378048
+    },
+    {
+      "sync_number": 14,
+      "catalog_rows": 202,
+      "batch_states": [
+        [
+          "activated",
+          14
+        ]
+      ],
+      "journal_manifest_chars": 4032224,
+      "journal_manifest_utf8_bytes": 4032224,
+      "source_bytes": 56126,
+      "source_sha256": "a34fcd0783cfdce4a98a18973800820d8d0fa1e71c4f1785ef3e740d7a8a2ac4",
+      "manifest_contains_message_body_marker": false,
+      "store_bytes_including_sidecars": 5681152
+    },
+    {
+      "sync_number": 15,
+      "catalog_rows": 202,
+      "batch_states": [
+        [
+          "activated",
+          15
+        ]
+      ],
+      "journal_manifest_chars": 4322593,
+      "journal_manifest_utf8_bytes": 4322593,
+      "source_bytes": 56126,
+      "source_sha256": "df256ed25de9cdc28129bdb57320dc3ae280f030ad4cd242c4c656c835f80dd9",
+      "manifest_contains_message_body_marker": false,
+      "store_bytes_including_sidecars": 5984256
+    },
+    {
+      "sync_number": 16,
+      "catalog_rows": 202,
+      "batch_states": [
+        [
+          "activated",
+          16
+        ]
+      ],
+      "journal_manifest_chars": 4612962,
+      "journal_manifest_utf8_bytes": 4612962,
+      "source_bytes": 56126,
+      "source_sha256": "6a7e5ac933560c2ef2cc758703b07e854954e5e4e9b7b6e84c23591d9bf81055",
+      "manifest_contains_message_body_marker": false,
+      "store_bytes_including_sidecars": 6295552
+    },
+    {
+      "sync_number": 17,
+      "catalog_rows": 202,
+      "batch_states": [
+        [
+          "activated",
+          17
+        ]
+      ],
+      "journal_manifest_chars": 4903331,
+      "journal_manifest_utf8_bytes": 4903331,
+      "source_bytes": 56126,
+      "source_sha256": "a16bf1c0cb71a1990af08804f0f4e6cc3ebbfcd29ac9fe88ba04d5f28fcba446",
+      "manifest_contains_message_body_marker": false,
+      "store_bytes_including_sidecars": 6549504
+    },
+    {
+      "sync_number": 18,
+      "catalog_rows": 202,
+      "batch_states": [
+        [
+          "activated",
+          18
+        ]
+      ],
+      "journal_manifest_chars": 5193700,
+      "journal_manifest_utf8_bytes": 5193700,
+      "source_bytes": 56126,
+      "source_sha256": "20a40461a3dcb9a0eab34749cd1c6c238e796eb839f406f913e98aac25dd891d",
+      "manifest_contains_message_body_marker": false,
+      "store_bytes_including_sidecars": 6868992
+    },
+    {
+      "sync_number": 19,
+      "catalog_rows": 202,
+      "batch_states": [
+        [
+          "activated",
+          19
+        ]
+      ],
+      "journal_manifest_chars": 5484069,
+      "journal_manifest_utf8_bytes": 5484069,
+      "source_bytes": 56126,
+      "source_sha256": "c451d99fdd28b16c0ae4957035f08ad3cb26062487b81943da50b90fd5c0ec7c",
+      "manifest_contains_message_body_marker": false,
+      "store_bytes_including_sidecars": 7168000
+    },
+    {
+      "sync_number": 20,
+      "catalog_rows": 202,
+      "batch_states": [
+        [
+          "activated",
+          20
+        ]
+      ],
+      "journal_manifest_chars": 5774438,
+      "journal_manifest_utf8_bytes": 5774438,
+      "source_bytes": 56126,
+      "source_sha256": "d1a6152ac844b9cabb88b61531bf844a3861c95c185593051000e36fdffbf9b9",
+      "manifest_contains_message_body_marker": false,
+      "store_bytes_including_sidecars": 7426048
+    },
+    {
+      "sync_number": 21,
+      "catalog_rows": 202,
+      "batch_states": [
+        [
+          "activated",
+          21
+        ]
+      ],
+      "journal_manifest_chars": 6064807,
+      "journal_manifest_utf8_bytes": 6064807,
+      "source_bytes": 56126,
+      "source_sha256": "958535e409872df3b9581b22c4a3ae96f0233652cbe77763d88aa479dab7d94f",
+      "manifest_contains_message_body_marker": false,
+      "store_bytes_including_sidecars": 7737344
+    }
+  ],
+  "limitations": [
+    "Not a latency benchmark or three-platform certification.",
+    "Only newly created candidate database and new journal writes; not proof that historical pre-migration journal bodies are absent.",
+    "Same experiment shape as old baseline, not a byte-identical corpus/path/DB setup; no percentage improvement claim.",
+    "Tests linear batch accumulation over 21 revisions only; not an unlimited-size extrapolation."
+  ],
+  "unchanged_source_control": {
+    "result": "pass",
+    "assertion": "No-op sync after round 21 changes neither catalog count, batch count nor manifest length.",
+    "catalog_rows": 202,
+    "batch_states": [
+      [
+        "activated",
+        21
+      ]
+    ],
+    "journal_manifest_chars": 6064807
+  }
+}

@@ -37,11 +37,23 @@ use agent_session_grep_ports::{
 use relocation::{InstallationAssignment, RelocationManifest};
 use rusqlite::{Connection, OptionalExtension};
 use std::any::Any;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// 语义证据门默认相似度下限（B4）：`query_semantic_filtered` 在候选进入 top-k
+/// 堆**之前**丢弃 `cosine_similarity < floor` 的候选（证据门同样遵守
+/// filter-before-topk 不变量），hybrid 的 RRF 名次分因此只作用于有相似度证据
+/// 的语义候选——零相似度向量不能再仅凭名次进入融合结果。
+///
+/// 取值由独立 holdout 的阈值扫描决定（见
+/// `.trellis/tasks/10-06-retrieval-quality/research/` 的 `threshold-scan.json`
+/// 与评测报告）；`0.0` 表示仅保留防御路径（只排除负相似度候选）。
+/// 覆盖通道：[`SqliteStore::set_semantic_similarity_floor`]（测试/评测）与
+/// CLI 环境变量 `ASG_SEMANTIC_SIMILARITY_FLOOR`（显式注入，仅评测使用）。
+pub const SEMANTIC_SIMILARITY_FLOOR_DEFAULT: f32 = 0.2;
 
 /// Translate adapter failures into the stable port error vocabulary.
 ///
@@ -154,6 +166,17 @@ fn operation_id() -> PortResult<String> {
     let seq = NEXT_OPERATION_ID.fetch_add(1, Ordering::Relaxed);
     Ok(format!(
         "op_v1_{}_{}_{}",
+        unix_ms()?,
+        std::process::id(),
+        seq
+    ))
+}
+
+/// 聚合计划 id：与 operation_id 同源（时间 + pid + 单调序号），前缀区分域。
+fn journal_compaction_id() -> PortResult<String> {
+    let seq = NEXT_OPERATION_ID.fetch_add(1, Ordering::Relaxed);
+    Ok(format!(
+        "cmp_v1_{}_{}_{}",
         unix_ms()?,
         std::process::id(),
         seq
@@ -1061,6 +1084,14 @@ pub struct IndexBatch {
     pub source_replacements: Vec<serde_json::Value>,
     pub durable_point: String,
     pub error_code: Option<String>,
+    /// 明细布局版本：`full` 或 `aggregated_v1`（见保留合同常量
+    /// `JOURNAL_DETAIL_FORMAT_*`）。未知值使读取 fail-closed。
+    pub detail_format: String,
+    /// 聚合摘要：仅 `aggregated_v1` 行有值；`full` 行恒为 None。
+    ///
+    /// `aggregated_v1` 行的 `upsert_ids`/`delete_ids`/关系与 source-replacement
+    /// 向量是占位空值，**不是事实**——规模与承诺一律以本摘要为准。
+    pub detail_summary: Option<AggregatedJournalDetail>,
 }
 
 /// Handle returned after an outbox intent reaches its first durable point.
@@ -1070,6 +1101,172 @@ pub struct PendingIndexBatch {
     pub base_generation: u64,
     pub target_generation: u64,
     pub operation_digest: String,
+}
+
+/// 保留合同版本标记：该行仍保存完整的 durable intent 明细（v19 之前的既有行
+/// 在迁移时按此值回填——它们的明细确实是完整的）。
+pub const JOURNAL_DETAIL_FORMAT_FULL: &str = "full";
+
+/// 保留合同版本标记：terminal 批次明细已聚合为可验证摘要（schema v19 起）。
+///
+/// 该格式行的五个可聚合列（`upsert_ids_json`、`delete_ids_json`、
+/// `relation_upserts_json`、`relation_deletes_json`、`source_replacements_json`）
+/// 是占位 `[]`，规模/承诺记录在 `detail_summary_json`（[`AggregatedJournalDetail`]）；
+/// 批次身份、代数、状态与 `operation_digest` 不变。未知格式值 fail-closed。
+pub const JOURNAL_DETAIL_FORMAT_AGGREGATED_V1: &str = "aggregated_v1";
+
+/// 聚合计划持久化格式（`journal_compactions.plan_json`）的版本；未知版本 fail-closed。
+pub const JOURNAL_COMPACTION_PLAN_VERSION: u32 = 1;
+
+/// 可聚合的明细字段清单（保留合同表的实现镜像）。
+///
+/// `relocation_json` 刻意不在列：搬迁 manifest 体积小、且是 relocation 审计的
+/// 一手证据，属于永久保留字段。未决状态（building/search_built/cleanup_pending）
+/// 的任何字段都不进聚合——它们仍参与恢复与 CAS 校验。
+pub const JOURNAL_COMPACTION_FIELDS: [&str; 5] = [
+    "upsert_ids_json",
+    "delete_ids_json",
+    "relation_upserts_json",
+    "relation_deletes_json",
+    "source_replacements_json",
+];
+
+/// terminal 批次状态：明细可被有约束聚合（不是"未决"）。
+const JOURNAL_TERMINAL_STATES: [&str; 3] = ["activated", "aborted", "superseded"];
+
+/// 未决/保留中的批次状态：明细永久保留（仍参与恢复、重放与 CAS 校验）。
+const JOURNAL_RESOLVED_PENDING_STATES: [&str; 3] = ["building", "search_built", "cleanup_pending"];
+
+/// journal 明细承诺的域分隔串（v19 新格式，无历史兼容负担）。
+const JOURNAL_DETAIL_DIGEST_DOMAIN: &[u8] = b"journal-detail-v1";
+
+/// 聚合计划承诺的域分隔串。
+const JOURNAL_COMPACTION_PLAN_DOMAIN: &[u8] = b"journal-compaction-plan-v1";
+
+/// preview 计划过期（journal 在预览之后变化）时的稳定原因串：写进审计行、
+/// 进入错误消息。不含任何路径、id 或内容。
+const STALE_JOURNAL_COMPACTION_REASON: &str =
+    "journal changed since the compaction preview; re-run preview";
+
+/// 单个 terminal 批次某一可聚合字段的规模（preview 项；只含规模，不含正文）。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct JournalDetailFieldPreview {
+    /// 字段名（[`JOURNAL_COMPACTION_FIELDS`] 之一）。
+    pub field: String,
+    /// 聚合前该列文本的字节数。
+    pub bytes: u64,
+    /// 该列 JSON 数组的元素个数（如 upsert id 数、placement 数）。
+    pub items: u64,
+}
+
+/// 单个 terminal 批次将聚合的内容（preview 项）。
+///
+/// 只含身份、规模与摘要承诺：preview 本身不复制它准备压缩的明细正文，因此不会
+/// 把 journal 的增长问题原样搬进诊断输出。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct JournalCompactionPreviewItem {
+    /// durable intent 的 operation_id（永久保留字段；聚合后仍是行主键）。
+    pub operation_id: String,
+    /// 行状态（terminal：activated/aborted/superseded）。
+    pub state: String,
+    pub base_generation: u64,
+    pub target_generation: u64,
+    /// 批次摘要（永久保留；聚合不改写）。
+    pub operation_digest: String,
+    /// 五个可聚合列原始文本的字节级承诺；apply 用它检测 preview 之后的漂移。
+    pub detail_digest: String,
+    pub fields: Vec<JournalDetailFieldPreview>,
+}
+
+/// journal 聚合预览：先展示、后执行（执行入口独立，默认不自动调用）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JournalCompactionPreview {
+    /// 计划身份：由本预览生成，stage 时固化；用于 apply 与审计。
+    pub compaction_id: String,
+    /// 计划承诺（排序后的逐行指纹 + 规模 + 字段清单）；stage/apply 的 CAS 依据。
+    pub plan_digest: String,
+    /// 将被聚合的 terminal 批次数。
+    pub affected_batches: u64,
+    /// 被聚合的字段清单（[`JOURNAL_COMPACTION_FIELDS`]）。
+    pub aggregated_fields: Vec<String>,
+    /// 聚合前五个可聚合字段的字节总量。
+    pub detail_bytes_before: u64,
+    /// 聚合后明细字节量（五个 `[]` 占位 + 摘要 JSON；摘要是确定性的，故为精确值）。
+    pub estimated_detail_bytes_after: u64,
+    /// 预计体积收益 = before - after（字节）。
+    pub estimated_saved_bytes: u64,
+    /// 逐批次规模展示（按 target_generation, operation_id 排序）。
+    pub batches: Vec<JournalCompactionPreviewItem>,
+}
+
+/// 已 durable 落盘的聚合计划句柄（`staged`）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JournalCompactionStage {
+    pub compaction_id: String,
+    pub plan_digest: String,
+    pub affected_batches: u64,
+    pub detail_bytes_before: u64,
+    pub estimated_saved_bytes: u64,
+}
+
+/// 一次聚合提交的结果（计划自带的精确数字；`already_committed` 表示幂等重入）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JournalCompactionOutcome {
+    pub compaction_id: String,
+    pub state: String,
+    /// 本次实际改写的行数（已提交计划重入时为 0）。
+    pub applied_batches: u64,
+    /// true = 该计划此前已提交，本次没有改写任何行。
+    pub already_committed: bool,
+    pub detail_bytes_before: u64,
+    pub detail_bytes_after: u64,
+    pub saved_bytes: u64,
+}
+
+/// 崩溃后对 `staged` 计划的收敛报告。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct JournalCompactionRecovery {
+    /// 本次提交的 staged 计划数。
+    pub committed: u64,
+    /// 本次确认的已提交计划数（幂等）。
+    pub already_committed: u64,
+    /// 因漂移被显式放弃的计划数（明细未改写，原因写入审计行）。
+    pub abandoned: u64,
+    /// 收敛后仍 staged 的计划数（正常为 0）。
+    pub staged_remaining: u64,
+}
+
+/// `journal_compactions` 行的诊断读回。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JournalCompactionEvent {
+    pub compaction_id: String,
+    /// staged | committed | abandoned。
+    pub state: String,
+    pub plan_digest: String,
+    pub affected_batches: u64,
+    pub detail_bytes_before: u64,
+    pub detail_bytes_after: u64,
+    pub saved_bytes: u64,
+    pub created_at_ms: i64,
+    pub resolved_at_ms: Option<i64>,
+    pub reason: Option<String>,
+}
+
+/// `detail_format = 'aggregated_v1'` 行的摘要：聚合后唯一保留的明细证据。
+///
+/// 与同行的 `operation_digest` 组成可验证审计链：`operation_digest` 承诺完整
+/// manifest（含 payload/正文哈希），`detail_digest` 承诺被替换掉的五个列原文；
+/// 持有 compact 前备份的一方可重算两者核对摘要未被伪造。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AggregatedJournalDetail {
+    pub format: String,
+    pub compaction_id: String,
+    /// 字段 → 元素个数（占位 `[]` 不代表事实，规模一律以本表为准）。
+    pub items: BTreeMap<String, u64>,
+    /// 字段 → 聚合前字节数。
+    pub bytes: BTreeMap<String, u64>,
+    /// 被聚合明细的字节级承诺（域分隔 blake3，原列文本原样入哈希）。
+    pub detail_digest: String,
 }
 
 /// 一个 source 完整成功 scan 后的全部消息条目。
@@ -1492,6 +1689,10 @@ pub struct SqliteStore {
     /// 全部方法降级为空/未就绪。设置它是调用方声明"这些向量属于哪个模型"，
     /// 换模型后旧维度向量因 model_id 不匹配自然被排除。
     semantic_model_id: RefCell<Option<String>>,
+    /// 语义证据门下限（B4）：`query_semantic_filtered` 在 top-k 名额分配前
+    /// 丢弃低于该相似度的候选。默认 [`SEMANTIC_SIMILARITY_FLOOR_DEFAULT`]，
+    /// 仅测试/评测经 [`Self::set_semantic_similarity_floor`] 覆盖。
+    semantic_similarity_floor: Cell<f32>,
     /// Repo slug 解析器（schema v16）：写路径由组合根注入真实 git 实现；
     /// 默认 [`NoopRepoSlugResolver`]（投影关闭）。解析器是环境事实探测器，
     /// 失败一律 None。
@@ -1546,6 +1747,7 @@ impl SqliteStore {
             conn: RefCell::new(conn),
             _lease: None,
             semantic_model_id: RefCell::new(None),
+            semantic_similarity_floor: Cell::new(SEMANTIC_SIMILARITY_FLOOR_DEFAULT),
             repo_slug_resolver: RefCell::new(Box::new(NoopRepoSlugResolver)),
             pending_installations: RefCell::new(BTreeMap::new()),
             relocation_clock: unix_ms,
@@ -1577,6 +1779,7 @@ impl SqliteStore {
             conn: RefCell::new(conn),
             _lease: Some(lease),
             semantic_model_id: RefCell::new(None),
+            semantic_similarity_floor: Cell::new(SEMANTIC_SIMILARITY_FLOOR_DEFAULT),
             repo_slug_resolver: RefCell::new(Box::new(NoopRepoSlugResolver)),
             pending_installations: RefCell::new(BTreeMap::new()),
             relocation_clock: unix_ms,
@@ -1598,6 +1801,7 @@ impl SqliteStore {
             conn: RefCell::new(conn),
             _lease: None,
             semantic_model_id: RefCell::new(None),
+            semantic_similarity_floor: Cell::new(SEMANTIC_SIMILARITY_FLOOR_DEFAULT),
             repo_slug_resolver: RefCell::new(Box::new(NoopRepoSlugResolver)),
             pending_installations: RefCell::new(BTreeMap::new()),
             relocation_clock: unix_ms,
@@ -1841,6 +2045,9 @@ impl SqliteStore {
         }
         if current < 18 {
             Self::migrate_v17_to_v18(conn)?;
+        }
+        if current < 19 {
+            Self::migrate_v18_to_v19(conn)?;
         }
         // 不随 user_version 门控：旧 v7 库（本列存在前建成的）打开时同样需要。
         Self::ensure_fts_ids_rowid(conn)?;
@@ -2381,6 +2588,76 @@ impl SqliteStore {
         tx.commit().map_err(backend)
     }
 
+    /// v19：journal 保留合同——`index_batches` 增加明细格式标记与聚合摘要列，
+    /// 新增 `journal_compactions` 计划/审计表（加法式、非破坏）。
+    ///
+    /// terminal 批次（activated/aborted/superseded）的重复明细可被显式 compact
+    /// 为可验证摘要（见 [`SqliteStore::preview_journal_compaction`]）；未决
+    /// （building/search_built/cleanup_pending）行永不进入聚合。既有行按
+    /// `full` 回填——它们的明细确实是完整的——因此旧格式可读、恢复/重放语义
+    /// 不变；未知格式值在本二进制里一律 fail-closed。列与表都做存在性检查，
+    /// 对"列已在建表 DDL 里"的新库幂等。`user_version = 19` 与 DDL 同事务。
+    fn migrate_v18_to_v19(conn: &Connection) -> PortResult<()> {
+        Self::migrate_v18_to_v19_inner(conn, false)
+    }
+
+    fn migrate_v18_to_v19_inner(conn: &Connection, inject_failure: bool) -> PortResult<()> {
+        let columns: BTreeSet<String> = conn
+            .prepare("PRAGMA table_info(index_batches)")
+            .map_err(backend)?
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(backend)?
+            .collect::<Result<_, _>>()
+            .map_err(backend)?;
+        let tx = conn.unchecked_transaction().map_err(backend)?;
+        if !columns.contains("detail_format") {
+            tx.execute_batch(
+                "ALTER TABLE index_batches
+                 ADD COLUMN detail_format TEXT NOT NULL DEFAULT 'full';",
+            )
+            .map_err(backend)?;
+        }
+        if !columns.contains("detail_summary_json") {
+            tx.execute_batch(
+                "ALTER TABLE index_batches
+                 ADD COLUMN detail_summary_json TEXT;",
+            )
+            .map_err(backend)?;
+        }
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS journal_compactions (
+                 compaction_id    TEXT PRIMARY KEY,
+                 state            TEXT NOT NULL CHECK(state IN (
+                     'staged', 'committed', 'abandoned'
+                 )),
+                 plan_json        TEXT NOT NULL,
+                 plan_digest      TEXT NOT NULL,
+                 affected_batches INTEGER NOT NULL,
+                 detail_bytes_before INTEGER NOT NULL,
+                 detail_bytes_after  INTEGER NOT NULL,
+                 saved_bytes         INTEGER NOT NULL,
+                 created_at_ms    INTEGER NOT NULL,
+                 resolved_at_ms   INTEGER,
+                 reason           TEXT,
+                 CHECK((state = 'staged' AND resolved_at_ms IS NULL)
+                    OR (state IN ('committed', 'abandoned') AND resolved_at_ms IS NOT NULL))
+             );
+             CREATE INDEX IF NOT EXISTS journal_compactions_state
+             ON journal_compactions(state);",
+        )
+        .map_err(backend)?;
+        tx.execute_batch("PRAGMA user_version = 19;")
+            .map_err(backend)?;
+
+        if inject_failure {
+            return Err(PortError::Backend(
+                "injected v18-to-v19 migration failure".into(),
+            ));
+        }
+
+        tx.commit().map_err(backend)
+    }
+
     /// True when no derived FTS projection row exists（`fts` 与 `session_fts`
     /// 都为空）：此时不存在任何旧变换写下的词元，投影版本可无条件标记为当前。
     fn index_projection_is_empty_in_tx(conn: &Connection) -> PortResult<bool> {
@@ -2400,6 +2677,24 @@ impl SqliteStore {
     /// 不会变成往表里写无归属向量。
     pub fn set_semantic_model(&self, model_id: impl Into<String>) {
         *self.semantic_model_id.borrow_mut() = Some(model_id.into());
+    }
+
+    /// 覆盖语义证据门下限（B4）。仅测试/评测使用（生产值来自
+    /// [`SEMANTIC_SIMILARITY_FLOOR_DEFAULT`]）；非有限值显式报错，绝不静默
+    /// 换成一个与调用方声明不同的阈值（评测数字必须绑定真实生效的门）。
+    pub fn set_semantic_similarity_floor(&self, floor: f32) -> PortResult<()> {
+        if !floor.is_finite() {
+            return Err(PortError::Backend(
+                "semantic similarity floor must be finite".into(),
+            ));
+        }
+        self.semantic_similarity_floor.set(floor);
+        Ok(())
+    }
+
+    /// 当前生效的语义相似度下限（B4）。
+    pub fn semantic_similarity_floor(&self) -> f32 {
+        self.semantic_similarity_floor.get()
     }
 
     /// 注入 repo slug 解析器（schema v16）。写路径（sync/index）在提交前
@@ -7683,6 +7978,10 @@ impl SqliteStore {
     }
 
     /// 读回一条 outbox 行（供测试与诊断）。
+    ///
+    /// `detail_format = 'full'` 的行返回完整明细；`aggregated_v1` 行的五个明细
+    /// 向量是占位空值，规模在 [`IndexBatch::detail_summary`]；未知格式
+    /// fail-closed（[`PortError::SchemaIncompatible`]），绝不按猜测格式解释。
     pub fn index_batch(&self, operation_id: &str) -> PortResult<Option<IndexBatch>> {
         let conn = self.conn.borrow();
         let mut stmt = conn
@@ -7690,7 +7989,8 @@ impl SqliteStore {
                 "SELECT operation_id, base_generation, target_generation, state,
                         operation_digest, upsert_ids_json, delete_ids_json,
                         relation_upserts_json, relation_deletes_json,
-                        source_replacements_json, durable_point, error_code
+                        source_replacements_json, durable_point, error_code,
+                        detail_format, detail_summary_json
                  FROM index_batches WHERE operation_id = ?1",
             )
             .map_err(backend)?;
@@ -7703,6 +8003,13 @@ impl SqliteStore {
                 let relation_upserts_json: String = row.get(7).map_err(backend)?;
                 let relation_deletes_json: String = row.get(8).map_err(backend)?;
                 let source_replacements_json: String = row.get(9).map_err(backend)?;
+                let detail_format: String = row.get(12).map_err(backend)?;
+                let detail_summary_json: Option<String> = row.get(13).map_err(backend)?;
+                let detail_summary = decode_aggregated_journal_detail(
+                    operation_id,
+                    &detail_format,
+                    detail_summary_json.as_deref(),
+                )?;
                 Ok(Some(IndexBatch {
                     operation_id: row.get(0).map_err(backend)?,
                     base_generation: u64::try_from(row.get::<_, i64>(1).map_err(backend)?)
@@ -7721,9 +8028,680 @@ impl SqliteStore {
                         .map_err(backend)?,
                     durable_point: row.get(10).map_err(backend)?,
                     error_code: row.get(11).map_err(backend)?,
+                    detail_format,
+                    detail_summary,
                 }))
             }
         }
+    }
+}
+
+/// 解码一行的明细布局：`full` → None；`aggregated_v1` → 校验并返回摘要。
+///
+/// 未知格式、缺摘要、摘要不完整一律 [`PortError::SchemaIncompatible`]
+/// （fail-closed）：调用方不得在猜测格式的前提下解释行内容。
+fn decode_aggregated_journal_detail(
+    operation_id: &str,
+    detail_format: &str,
+    detail_summary_json: Option<&str>,
+) -> PortResult<Option<AggregatedJournalDetail>> {
+    match detail_format {
+        JOURNAL_DETAIL_FORMAT_FULL => {
+            if detail_summary_json.is_some() {
+                return Err(PortError::SchemaIncompatible(format!(
+                    "journal batch {operation_id} carries an aggregated summary without the aggregated format"
+                )));
+            }
+            Ok(None)
+        }
+        JOURNAL_DETAIL_FORMAT_AGGREGATED_V1 => {
+            let raw = detail_summary_json.ok_or_else(|| {
+                PortError::SchemaIncompatible(format!(
+                    "journal batch {operation_id} is missing its aggregated detail summary"
+                ))
+            })?;
+            let summary: AggregatedJournalDetail = serde_json::from_str(raw).map_err(|_| {
+                PortError::SchemaIncompatible(format!(
+                    "journal batch {operation_id} has an unreadable aggregated detail summary"
+                ))
+            })?;
+            validate_aggregated_journal_detail(operation_id, &summary)?;
+            Ok(Some(summary))
+        }
+        _ => Err(PortError::SchemaIncompatible(format!(
+            "journal batch {operation_id} has an unsupported detail format"
+        ))),
+    }
+}
+
+/// 明细承诺：域分隔 blake3 覆盖五个可聚合列的原始文本（字节级，不做规范化）。
+fn journal_detail_digest(details: &[String; 5]) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hash_field(&mut hasher, JOURNAL_DETAIL_DIGEST_DOMAIN);
+    for (name, text) in JOURNAL_COMPACTION_FIELDS.iter().zip(details.iter()) {
+        hash_field(&mut hasher, name.as_bytes());
+        hash_field(&mut hasher, text.as_bytes());
+    }
+    hasher.finalize().to_hex().to_string()
+}
+
+/// 计划承诺：字段清单 + 逐行身份/代数/明细承诺/规模（行序即 preview 排序）。
+fn journal_plan_digest(items: &[JournalCompactionPreviewItem]) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hash_field(&mut hasher, JOURNAL_COMPACTION_PLAN_DOMAIN);
+    hash_field(&mut hasher, &JOURNAL_COMPACTION_PLAN_VERSION.to_le_bytes());
+    for name in JOURNAL_COMPACTION_FIELDS {
+        hash_field(&mut hasher, name.as_bytes());
+    }
+    for item in items {
+        hash_field(&mut hasher, item.operation_id.as_bytes());
+        hash_field(&mut hasher, item.state.as_bytes());
+        hash_field(&mut hasher, &item.base_generation.to_le_bytes());
+        hash_field(&mut hasher, &item.target_generation.to_le_bytes());
+        hash_field(&mut hasher, item.operation_digest.as_bytes());
+        hash_field(&mut hasher, item.detail_digest.as_bytes());
+        for field in &item.fields {
+            hash_field(&mut hasher, field.field.as_bytes());
+            hash_field(&mut hasher, &field.bytes.to_le_bytes());
+            hash_field(&mut hasher, &field.items.to_le_bytes());
+        }
+    }
+    hasher.finalize().to_hex().to_string()
+}
+
+/// 单字段明细的元素个数：durable manifest 的形状是 JSON 数组，别的形状一律拒绝。
+fn journal_detail_item_count(operation_id: &str, field: &str, text: &str) -> PortResult<u64> {
+    let value: serde_json::Value = serde_json::from_str(text).map_err(|_| {
+        PortError::Backend(format!(
+            "journal batch {operation_id} has unreadable {field} detail"
+        ))
+    })?;
+    let array = value.as_array().ok_or_else(|| {
+        PortError::Backend(format!(
+            "journal batch {operation_id} has non-array {field} detail"
+        ))
+    })?;
+    u64::try_from(array.len()).map_err(backend)
+}
+
+/// 聚合摘要（确定性序列化：BTreeMap 键序 + 固定字段序；不含时钟，可精确预算）。
+fn aggregated_journal_summary(
+    compaction_id: &str,
+    item: &JournalCompactionPreviewItem,
+) -> AggregatedJournalDetail {
+    AggregatedJournalDetail {
+        format: JOURNAL_DETAIL_FORMAT_AGGREGATED_V1.to_string(),
+        compaction_id: compaction_id.to_string(),
+        items: item
+            .fields
+            .iter()
+            .map(|field| (field.field.clone(), field.items))
+            .collect(),
+        bytes: item
+            .fields
+            .iter()
+            .map(|field| (field.field.clone(), field.bytes))
+            .collect(),
+        detail_digest: item.detail_digest.clone(),
+    }
+}
+
+fn aggregated_journal_summary_json(
+    compaction_id: &str,
+    item: &JournalCompactionPreviewItem,
+) -> PortResult<String> {
+    serde_json::to_string(&aggregated_journal_summary(compaction_id, item)).map_err(backend)
+}
+
+/// 聚合后单行的明细字节：五个 `[]` 占位（各 2 字节）+ 摘要 JSON。
+fn aggregated_journal_detail_bytes(
+    compaction_id: &str,
+    item: &JournalCompactionPreviewItem,
+) -> PortResult<u64> {
+    let summary = aggregated_journal_summary_json(compaction_id, item)?;
+    u64::try_from(summary.len() + JOURNAL_COMPACTION_FIELDS.len() * 2).map_err(backend)
+}
+
+/// 摘要完整性：字段集合必须与当前二进制支持的聚合字段清单完全一致。
+fn validate_aggregated_journal_detail(
+    operation_id: &str,
+    summary: &AggregatedJournalDetail,
+) -> PortResult<()> {
+    if summary.format != JOURNAL_DETAIL_FORMAT_AGGREGATED_V1 {
+        return Err(PortError::SchemaIncompatible(format!(
+            "journal batch {operation_id} has an unsupported aggregated detail format"
+        )));
+    }
+    let complete = JOURNAL_COMPACTION_FIELDS
+        .iter()
+        .all(|name| summary.items.contains_key(*name) && summary.bytes.contains_key(*name));
+    if !complete
+        || summary.items.len() != JOURNAL_COMPACTION_FIELDS.len()
+        || summary.bytes.len() != JOURNAL_COMPACTION_FIELDS.len()
+    {
+        return Err(PortError::SchemaIncompatible(format!(
+            "journal batch {operation_id} has an incomplete aggregated detail summary"
+        )));
+    }
+    Ok(())
+}
+
+/// preview 之后 journal 已变化的稳定错误（stage/apply 的 CAS 失败）。
+fn stale_journal_compaction() -> PortError {
+    PortError::GenerationMismatch(STALE_JOURNAL_COMPACTION_REASON.to_string())
+}
+
+/// `journal_compactions` 持久化计划的形状（版本化；未知版本 fail-closed）。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct JournalCompactionPlan {
+    version: u32,
+    compaction_id: String,
+    aggregated_fields: Vec<String>,
+    items: Vec<JournalCompactionPreviewItem>,
+}
+
+/// `journal_compactions` 完整行（含 apply 需要的 plan_json）。
+struct StoredJournalCompaction {
+    event: JournalCompactionEvent,
+    plan_json: String,
+}
+
+impl StoredJournalCompaction {
+    fn load(conn: &Connection, compaction_id: &str) -> PortResult<Option<Self>> {
+        conn.query_row(
+            "SELECT compaction_id, state, plan_json, plan_digest, affected_batches,
+                    detail_bytes_before, detail_bytes_after, saved_bytes,
+                    created_at_ms, resolved_at_ms, reason
+             FROM journal_compactions WHERE compaction_id = ?1",
+            [compaction_id],
+            |row| {
+                Ok(StoredJournalCompaction {
+                    plan_json: row.get(2)?,
+                    event: JournalCompactionEvent {
+                        compaction_id: row.get(0)?,
+                        state: row.get(1)?,
+                        plan_digest: row.get(3)?,
+                        affected_batches: row_u64(row, 4)?,
+                        detail_bytes_before: row_u64(row, 5)?,
+                        detail_bytes_after: row_u64(row, 6)?,
+                        saved_bytes: row_u64(row, 7)?,
+                        created_at_ms: row.get(8)?,
+                        resolved_at_ms: row.get(9)?,
+                        reason: row.get(10)?,
+                    },
+                })
+            },
+        )
+        .optional()
+        .map_err(backend)
+    }
+}
+
+impl SqliteStore {
+    /// 为 terminal 批次的重复明细产出保留合同预览——只读，不改任何行。
+    ///
+    /// 预览回答四件事：将被聚合的内容（逐批次状态/代数/明细承诺与逐字段规模）、
+    /// 受影响记录数（`affected_batches`）、预计体积收益（精确到计划写入的字节：
+    /// 摘要是确定性的）、被聚合字段清单（[`JOURNAL_COMPACTION_FIELDS`]）。
+    /// 执行入口分离：[`stage_journal_compaction`](Self::stage_journal_compaction)
+    /// → [`apply_journal_compaction`](Self::apply_journal_compaction)，
+    /// **默认不自动调用**（open 路径不会 compact）。
+    ///
+    /// 未决行（building/search_built/cleanup_pending）不参与聚合；已聚合行幂等
+    /// 跳过；聚合无收益（明细本来就小）的 terminal 行保持 `full`。未知状态或
+    /// 未知 `detail_format` 一律 fail-closed（[`PortError::SchemaIncompatible`]）：
+    /// 绝不按猜测格式解释，也绝不静默跳过。
+    pub fn preview_journal_compaction(&self) -> PortResult<JournalCompactionPreview> {
+        let conn = self.conn.borrow();
+        Self::preview_journal_compaction_in(&conn)
+    }
+
+    fn preview_journal_compaction_in(conn: &Connection) -> PortResult<JournalCompactionPreview> {
+        let compaction_id = journal_compaction_id()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT operation_id, state, base_generation, target_generation,
+                        operation_digest, detail_format,
+                        upsert_ids_json, delete_ids_json, relation_upserts_json,
+                        relation_deletes_json, source_replacements_json
+                 FROM index_batches
+                 ORDER BY target_generation, operation_id",
+            )
+            .map_err(backend)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, String>(8)?,
+                    row.get::<_, String>(9)?,
+                    row.get::<_, String>(10)?,
+                ))
+            })
+            .map_err(backend)?;
+        let mut batches = Vec::new();
+        let mut detail_bytes_before = 0u64;
+        let mut estimated_detail_bytes_after = 0u64;
+        for row in rows {
+            let (
+                operation_id,
+                state,
+                base_generation,
+                target_generation,
+                operation_digest,
+                detail_format,
+                upsert_ids_json,
+                delete_ids_json,
+                relation_upserts_json,
+                relation_deletes_json,
+                source_replacements_json,
+            ) = row.map_err(backend)?;
+            // fail-closed 先行：状态与格式的合法性对每一行都判定，未决行与已聚合
+            // 行也不例外——跳过只适用于本二进制认识的组合，未知值绝不静默跳过
+            // （保留合同 §5）。
+            let pending = JOURNAL_RESOLVED_PENDING_STATES.contains(&state.as_str());
+            if !pending && !JOURNAL_TERMINAL_STATES.contains(&state.as_str()) {
+                return Err(PortError::SchemaIncompatible(format!(
+                    "journal batch {operation_id} is in an unsupported state"
+                )));
+            }
+            if detail_format != JOURNAL_DETAIL_FORMAT_FULL
+                && detail_format != JOURNAL_DETAIL_FORMAT_AGGREGATED_V1
+            {
+                return Err(PortError::SchemaIncompatible(format!(
+                    "journal batch {operation_id} has an unsupported detail format"
+                )));
+            }
+            if pending {
+                // 未决行：明细仍参与恢复与 CAS 校验，永久保留。
+                continue;
+            }
+            if detail_format == JOURNAL_DETAIL_FORMAT_AGGREGATED_V1 {
+                // 已按当前格式聚合：幂等跳过。
+                continue;
+            }
+            let details = [
+                upsert_ids_json,
+                delete_ids_json,
+                relation_upserts_json,
+                relation_deletes_json,
+                source_replacements_json,
+            ];
+            let mut fields = Vec::with_capacity(JOURNAL_COMPACTION_FIELDS.len());
+            for (name, text) in JOURNAL_COMPACTION_FIELDS.iter().zip(details.iter()) {
+                fields.push(JournalDetailFieldPreview {
+                    field: (*name).to_string(),
+                    bytes: u64::try_from(text.len()).map_err(backend)?,
+                    items: journal_detail_item_count(&operation_id, name, text)?,
+                });
+            }
+            let item = JournalCompactionPreviewItem {
+                operation_id,
+                state,
+                base_generation: u64::try_from(base_generation).map_err(backend)?,
+                target_generation: u64::try_from(target_generation).map_err(backend)?,
+                operation_digest,
+                detail_digest: journal_detail_digest(&details),
+                fields,
+            };
+            let row_before: u64 = item.fields.iter().map(|field| field.bytes).sum();
+            let row_after = aggregated_journal_detail_bytes(&compaction_id, &item)?;
+            if row_after >= row_before {
+                // 无收益（明细本来就小）：保持 full——聚合只做有约束的减法。
+                continue;
+            }
+            detail_bytes_before += row_before;
+            estimated_detail_bytes_after += row_after;
+            batches.push(item);
+        }
+        let aggregated_fields = JOURNAL_COMPACTION_FIELDS
+            .iter()
+            .map(|name| (*name).to_string())
+            .collect();
+        Ok(JournalCompactionPreview {
+            plan_digest: journal_plan_digest(&batches),
+            affected_batches: u64::try_from(batches.len()).map_err(backend)?,
+            aggregated_fields,
+            detail_bytes_before,
+            estimated_detail_bytes_after,
+            estimated_saved_bytes: detail_bytes_before - estimated_detail_bytes_after,
+            batches,
+            compaction_id,
+        })
+    }
+
+    /// 把一次预览固化为 durable `staged` 计划——写 `journal_compactions`，不碰明细。
+    ///
+    /// 事务内重算当前 `plan_digest` 并与传入预览比对：预览之后 journal 有任何
+    /// 变化（新增批次/状态变化/明细改写）都拒绝（`GenerationMismatch`），要求
+    /// 重新 preview。apply 需要的全部输入（计划 id、逐行指纹与规模）都随本提交
+    /// durable 落盘，因此**这个提交点之后进程被杀也能重入收敛**——见
+    /// [`recover_journal_compactions`](Self::recover_journal_compactions)。
+    pub fn stage_journal_compaction(
+        &self,
+        preview: &JournalCompactionPreview,
+    ) -> PortResult<JournalCompactionStage> {
+        if preview.affected_batches == 0 {
+            return Err(PortError::InvalidRequest(
+                "journal compaction preview covers no aggregatable terminal batches".into(),
+            ));
+        }
+        let expected_fields: Vec<String> = JOURNAL_COMPACTION_FIELDS
+            .iter()
+            .map(|name| (*name).to_string())
+            .collect();
+        if preview.aggregated_fields != expected_fields
+            || u64::try_from(preview.batches.len()).map_err(backend)? != preview.affected_batches
+        {
+            return Err(PortError::InvalidRequest(
+                "journal compaction preview does not match the retention contract".into(),
+            ));
+        }
+        let mut conn = self.conn.borrow_mut();
+        let tx = conn.transaction().map_err(backend)?;
+        let current = Self::preview_journal_compaction_in(&tx)?;
+        if current.plan_digest != preview.plan_digest {
+            return Err(stale_journal_compaction());
+        }
+        let plan = JournalCompactionPlan {
+            version: JOURNAL_COMPACTION_PLAN_VERSION,
+            compaction_id: preview.compaction_id.clone(),
+            aggregated_fields: preview.aggregated_fields.clone(),
+            items: preview.batches.clone(),
+        };
+        let plan_json = serde_json::to_string(&plan).map_err(backend)?;
+        tx.execute(
+            "INSERT INTO journal_compactions(
+                 compaction_id, state, plan_json, plan_digest, affected_batches,
+                 detail_bytes_before, detail_bytes_after, saved_bytes, created_at_ms
+             ) VALUES(?1, 'staged', ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![
+                preview.compaction_id.as_str(),
+                plan_json,
+                preview.plan_digest.as_str(),
+                i64::try_from(preview.affected_batches).map_err(backend)?,
+                i64::try_from(preview.detail_bytes_before).map_err(backend)?,
+                i64::try_from(preview.estimated_detail_bytes_after).map_err(backend)?,
+                i64::try_from(preview.estimated_saved_bytes).map_err(backend)?,
+                unix_ms()?,
+            ],
+        )
+        .map_err(backend)?;
+        tx.commit().map_err(backend)?;
+        Ok(JournalCompactionStage {
+            compaction_id: preview.compaction_id.clone(),
+            plan_digest: preview.plan_digest.clone(),
+            affected_batches: preview.affected_batches,
+            detail_bytes_before: preview.detail_bytes_before,
+            estimated_saved_bytes: preview.estimated_saved_bytes,
+        })
+    }
+
+    /// 提交一个 staged 计划：单事务内校验 + 聚合 + 标记 committed。
+    ///
+    /// 校验是逐行 CAS：行仍在、状态未变、格式仍是 `full`、明细承诺与计划一致；
+    /// 任一不符 → `GenerationMismatch`，事务回滚、计划保持 `staged`
+    /// （可重新 preview/stage，或交由
+    /// [`recover_journal_compactions`](Self::recover_journal_compactions) 显式放弃）。
+    /// 已 committed 的计划再次调用是幂等空操作。catalog/FTS/关系/活跃 generation
+    /// 都不在本事务的写集合里——compact 只改 journal 明细。
+    pub fn apply_journal_compaction(
+        &self,
+        compaction_id: &str,
+    ) -> PortResult<JournalCompactionOutcome> {
+        let mut conn = self.conn.borrow_mut();
+        let tx = conn.transaction().map_err(backend)?;
+        let stored = StoredJournalCompaction::load(&tx, compaction_id)?
+            .ok_or_else(|| PortError::NotFound("journal compaction plan not found".into()))?;
+        match stored.event.state.as_str() {
+            "committed" => {
+                // 幂等重入：不改写任何行，回报计划自带的精确数字。
+                return Ok(JournalCompactionOutcome {
+                    compaction_id: compaction_id.to_string(),
+                    state: "committed".into(),
+                    applied_batches: 0,
+                    already_committed: true,
+                    detail_bytes_before: stored.event.detail_bytes_before,
+                    detail_bytes_after: stored.event.detail_bytes_after,
+                    saved_bytes: stored.event.saved_bytes,
+                });
+            }
+            "abandoned" => {
+                return Err(PortError::InvalidRequest(
+                    "journal compaction plan was abandoned; re-run preview".into(),
+                ));
+            }
+            "staged" => {}
+            _ => {
+                return Err(PortError::SchemaIncompatible(
+                    "journal compaction plan has an unsupported state".into(),
+                ));
+            }
+        }
+        let plan: JournalCompactionPlan =
+            serde_json::from_str(&stored.plan_json).map_err(|_| {
+                PortError::SchemaIncompatible(
+                    "journal compaction plan is unreadable by this binary".into(),
+                )
+            })?;
+        let expected_fields: Vec<String> = JOURNAL_COMPACTION_FIELDS
+            .iter()
+            .map(|name| (*name).to_string())
+            .collect();
+        if plan.version != JOURNAL_COMPACTION_PLAN_VERSION
+            || plan.compaction_id != compaction_id
+            || plan.aggregated_fields != expected_fields
+        {
+            return Err(PortError::SchemaIncompatible(
+                "journal compaction plan is not supported by this binary".into(),
+            ));
+        }
+        let mut applied = 0u64;
+        for item in &plan.items {
+            let stored_row = tx
+                .query_row(
+                    "SELECT state, detail_format, detail_summary_json,
+                            operation_digest, target_generation,
+                            upsert_ids_json, delete_ids_json, relation_upserts_json,
+                            relation_deletes_json, source_replacements_json
+                     FROM index_batches WHERE operation_id = ?1",
+                    [item.operation_id.as_str()],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                            row.get::<_, String>(3)?,
+                            row_u64(row, 4)?,
+                            [
+                                row.get::<_, String>(5)?,
+                                row.get::<_, String>(6)?,
+                                row.get::<_, String>(7)?,
+                                row.get::<_, String>(8)?,
+                                row.get::<_, String>(9)?,
+                            ],
+                        ))
+                    },
+                )
+                .optional()
+                .map_err(backend)?;
+            let Some((
+                state,
+                detail_format,
+                summary_json,
+                operation_digest,
+                target_generation,
+                details,
+            )) = stored_row
+            else {
+                return Err(stale_journal_compaction());
+            };
+            match detail_format.as_str() {
+                JOURNAL_DETAIL_FORMAT_FULL => {
+                    // 永久保留字段也必须与计划逐项一致：状态、批次摘要与代数边界
+                    // 是计划身份的一部分，任一漂移都整批拒绝（零改写）。
+                    if state != item.state
+                        || operation_digest != item.operation_digest
+                        || target_generation != item.target_generation
+                        || journal_detail_digest(&details) != item.detail_digest
+                    {
+                        return Err(stale_journal_compaction());
+                    }
+                    let summary_json = aggregated_journal_summary_json(&plan.compaction_id, item)?;
+                    let updated = tx
+                        .execute(
+                            "UPDATE index_batches
+                             SET detail_format = ?2, detail_summary_json = ?3,
+                                 upsert_ids_json = '[]', delete_ids_json = '[]',
+                                 relation_upserts_json = '[]', relation_deletes_json = '[]',
+                                 source_replacements_json = '[]'
+                             WHERE operation_id = ?1 AND detail_format = ?4",
+                            rusqlite::params![
+                                item.operation_id.as_str(),
+                                JOURNAL_DETAIL_FORMAT_AGGREGATED_V1,
+                                summary_json,
+                                JOURNAL_DETAIL_FORMAT_FULL,
+                            ],
+                        )
+                        .map_err(backend)?;
+                    if updated != 1 {
+                        return Err(stale_journal_compaction());
+                    }
+                    applied += 1;
+                }
+                JOURNAL_DETAIL_FORMAT_AGGREGATED_V1 => {
+                    // 事务内重入修复：本计划已聚合过该行——只校验承诺一致，不重复改写。
+                    let summary_json = summary_json.ok_or_else(stale_journal_compaction)?;
+                    let summary: AggregatedJournalDetail = serde_json::from_str(&summary_json)
+                        .map_err(|_| stale_journal_compaction())?;
+                    validate_aggregated_journal_detail(&item.operation_id, &summary)?;
+                    if summary.compaction_id != plan.compaction_id
+                        || summary.detail_digest != item.detail_digest
+                    {
+                        return Err(stale_journal_compaction());
+                    }
+                }
+                _ => {
+                    return Err(PortError::SchemaIncompatible(format!(
+                        "journal batch {} has an unsupported detail format",
+                        item.operation_id
+                    )));
+                }
+            }
+        }
+        let marked = tx
+            .execute(
+                "UPDATE journal_compactions
+                 SET state = 'committed', resolved_at_ms = ?2
+                 WHERE compaction_id = ?1 AND state = 'staged'",
+                rusqlite::params![compaction_id, unix_ms()?],
+            )
+            .map_err(backend)?;
+        if marked != 1 {
+            return Err(PortError::Backend(
+                "journal compaction plan could not be marked committed".into(),
+            ));
+        }
+        tx.commit().map_err(backend)?;
+        Ok(JournalCompactionOutcome {
+            compaction_id: compaction_id.to_string(),
+            state: "committed".into(),
+            applied_batches: applied,
+            already_committed: false,
+            detail_bytes_before: stored.event.detail_bytes_before,
+            detail_bytes_after: stored.event.detail_bytes_after,
+            saved_bytes: stored.event.saved_bytes,
+        })
+    }
+
+    /// 崩溃恢复：收敛仍 `staged` 的计划（重入；open 路径不会自动调用）。
+    ///
+    /// - 仍匹配的计划 → 提交（`committed`）；
+    /// - 已提交的计划 → 幂等确认（`already_committed`）；
+    /// - 已漂移（行消失/状态或明细变化）的计划 → 显式 `abandoned` 并记录原因
+    ///   （不改写任何明细行）；
+    /// - 未知格式/不可读计划 → fail-closed 向上报错（不放弃、不改写）。
+    pub fn recover_journal_compactions(&self) -> PortResult<JournalCompactionRecovery> {
+        let staged: Vec<String> = {
+            let conn = self.conn.borrow();
+            let mut stmt = conn
+                .prepare(
+                    "SELECT compaction_id FROM journal_compactions
+                     WHERE state = 'staged'
+                     ORDER BY created_at_ms, compaction_id",
+                )
+                .map_err(backend)?;
+            let rows = stmt
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(backend)?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(backend)?
+        };
+        let mut report = JournalCompactionRecovery::default();
+        for compaction_id in staged {
+            match self.apply_journal_compaction(&compaction_id) {
+                Ok(outcome) if outcome.already_committed => {
+                    report.already_committed += 1;
+                }
+                Ok(_) => {
+                    report.committed += 1;
+                }
+                Err(PortError::GenerationMismatch(_)) => {
+                    // 漂移已确定：显式放弃（只写审计行），不改写任何明细。
+                    self.abandon_journal_compaction(&compaction_id)?;
+                    report.abandoned += 1;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        report.staged_remaining = self.staged_journal_compaction_count()?;
+        Ok(report)
+    }
+
+    /// 读回一条聚合计划/审计行（供 doctor 与测试）。
+    pub fn journal_compaction_event(
+        &self,
+        compaction_id: &str,
+    ) -> PortResult<Option<JournalCompactionEvent>> {
+        let conn = self.conn.borrow();
+        Ok(StoredJournalCompaction::load(&conn, compaction_id)?.map(|stored| stored.event))
+    }
+
+    /// 显式放弃一个 staged 计划（漂移已确定）：只写审计行，不碰任何明细。
+    fn abandon_journal_compaction(&self, compaction_id: &str) -> PortResult<()> {
+        let conn = self.conn.borrow();
+        let updated = conn
+            .execute(
+                "UPDATE journal_compactions
+                 SET state = 'abandoned', resolved_at_ms = ?2, reason = ?3
+                 WHERE compaction_id = ?1 AND state = 'staged'",
+                rusqlite::params![compaction_id, unix_ms()?, STALE_JOURNAL_COMPACTION_REASON],
+            )
+            .map_err(backend)?;
+        if updated != 1 {
+            return Err(PortError::Backend(
+                "journal compaction plan was not staged when abandoned".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// 仍 staged 的计划数（恢复收敛证据）。
+    fn staged_journal_compaction_count(&self) -> PortResult<u64> {
+        let conn = self.conn.borrow();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM journal_compactions WHERE state = 'staged'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(backend)?;
+        u64::try_from(count).map_err(backend)
     }
 }
 
@@ -7840,7 +8818,15 @@ pub const INDEX_PROJECTION_VERSION: u32 = 1;
 ///
 /// v18：持久化 installation namespace/location/source binding 与迁移回执；
 /// durable intent 增加 relocation manifest，保留所有既有 canonical ID。
-pub const SCHEMA_VERSION: i64 = 18;
+///
+/// v19：journal 保留合同——`index_batches` 增加 `detail_format`
+/// （`full` / `aggregated_v1`）与 `detail_summary_json`，新增
+/// `journal_compactions` 计划/审计表。terminal 批次的重复明细可被**显式**
+/// compact 为可验证摘要（preview → stage → apply 三段式，默认不自动执行）；
+/// 未决行（building/search_built/cleanup_pending）的明细永久保留；旧行迁移时
+/// 回填 `full`，未知格式 fail-closed。catalog/FTS/关系与活跃 generation 水位、
+/// 恢复/重放/冲突检测语义都不因 compact 改变。
+pub const SCHEMA_VERSION: i64 = 19;
 
 impl CatalogStore for SqliteStore {
     fn get(&self, id: &StableId) -> PortResult<Option<Vec<u8>>> {
@@ -8847,6 +9833,7 @@ impl SemanticIndex for SqliteStore {
             return Ok(Vec::new());
         };
         let conn = self.conn.borrow();
+        let floor = self.semantic_similarity_floor.get();
         let mut sql = String::from(
             "SELECT mv.wire_id, fi.id_json, mv.embedding
              FROM message_vec mv
@@ -8894,6 +9881,12 @@ impl SemanticIndex for SqliteStore {
             let score = cosine_similarity(query_embedding, &vector);
             if !score.is_finite() {
                 return Err(PortError::Backend("semantic score is non-finite".into()));
+            }
+            // 证据门（B4）：低于相似度下限的候选不占用 top-k 名额，也不进入
+            // hybrid 的 RRF 融合。过滤在堆插入之前（filter-before-topk），
+            // 与既有谓词过滤同一取数窗口。
+            if score < floor {
+                continue;
             }
             let id = match id_json {
                 Some(json) => serde_json::from_str(&json).map_err(backend)?,
@@ -9698,6 +10691,7 @@ mod tests {
             conn: RefCell::new(conn),
             _lease: Some(lease),
             semantic_model_id: RefCell::new(None),
+            semantic_similarity_floor: Cell::new(SEMANTIC_SIMILARITY_FLOOR_DEFAULT),
             repo_slug_resolver: RefCell::new(Box::new(NoopRepoSlugResolver)),
             pending_installations: RefCell::new(BTreeMap::new()),
             relocation_clock: unix_ms,
@@ -9865,6 +10859,144 @@ mod tests {
         eprintln!(
             "semantic exact scan: rows=2048 dimensions=2 retained=17 elapsed={:?}; candidate heap bounded to k+1, work remains O(N*d + N*log(k))",
             started.elapsed()
+        );
+    }
+
+    #[test]
+    fn semantic_evidence_floor_default_is_the_holdout_choice() {
+        // 默认门必须等于 holdout 阈值扫描 + frozen 100-query 回归交叉校验选出的
+        // 值（B4）：见
+        // .trellis/tasks/10-06-retrieval-quality/research/threshold-scan.json 的
+        // `selection.selected_floor`（0.2）。改动该常量必须重新跑扫描并同步报告。
+        assert_eq!(SEMANTIC_SIMILARITY_FLOOR_DEFAULT, 0.2);
+    }
+
+    #[test]
+    fn semantic_evidence_gate_filters_below_floor_before_top_k() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        store.set_semantic_model("floor-model");
+        let aligned = sid(IdKind::Message, b"floor-aligned");
+        let diagonal = sid(IdKind::Message, b"floor-diagonal");
+        let orthogonal = sid(IdKind::Message, b"floor-orthogonal");
+        let inverted = sid(IdKind::Message, b"floor-inverted");
+        for id in [&aligned, &diagonal, &orthogonal, &inverted] {
+            store.put(id, b"{}").unwrap();
+        }
+        // 与查询 [1, 0] 的余弦相似度：1.0 / ~0.707 / 0.0 / -1.0。
+        store.index_embedding(&aligned, &[1.0, 0.0]).unwrap();
+        store.index_embedding(&diagonal, &[1.0, 1.0]).unwrap();
+        store.index_embedding(&orthogonal, &[0.0, 1.0]).unwrap();
+        store.index_embedding(&inverted, &[-1.0, 0.0]).unwrap();
+
+        let ids = |hits: Vec<SearchHit>| -> Vec<String> {
+            hits.into_iter()
+                .map(|hit| hit.id.as_str().to_string())
+                .collect()
+        };
+
+        // 显式下限 0.5：正交与反向候选在堆插入之前被淘汰。
+        store.set_semantic_similarity_floor(0.5).unwrap();
+        assert_eq!(
+            ids(store.query_semantic(&[1.0, 0.0], 10).unwrap()),
+            vec![aligned.as_str().to_string(), diagonal.as_str().to_string()],
+            "candidates below the floor must not be retained"
+        );
+        // limit=1：名额给最高分准入者（被过滤候选不占 top-k 名额）。
+        let top = store.query_semantic(&[1.0, 0.0], 1).unwrap();
+        assert_eq!(top.len(), 1);
+        assert_eq!(top[0].id.as_str(), aligned.as_str());
+
+        // 防御路径 floor=0.0：仅负相似度被排除，正交 0.0 保留。
+        store.set_semantic_similarity_floor(0.0).unwrap();
+        let kept = ids(store.query_semantic(&[1.0, 0.0], 10).unwrap());
+        assert!(kept.contains(&orthogonal.as_str().to_string()));
+        assert!(!kept.contains(&inverted.as_str().to_string()));
+        assert_eq!(store.semantic_similarity_floor(), 0.0);
+
+        // 非有限下限显式报错，不静默换值。
+        assert!(store.set_semantic_similarity_floor(f32::NAN).is_err());
+        assert_eq!(store.semantic_similarity_floor(), 0.0);
+    }
+
+    #[test]
+    fn hybrid_rrf_cannot_admit_a_zero_similarity_semantic_candidate() {
+        use agent_session_grep_application::{App, AppRequest, AppResponse, ResponseBudget};
+        use agent_session_grep_ports::{NoResumeClaims, RetrievalMode};
+
+        let store = SqliteStore::open_in_memory().unwrap();
+        store.set_semantic_model("gate-model");
+        let relevant = sid(IdKind::Message, b"gate-relevant");
+        let orthogonal = sid(IdKind::Message, b"gate-orthogonal");
+        // 两条消息都有 payload；只有 relevant 含查询词（lexical 证据）。
+        // orthogonal 不参与 lexical 检索，只能靠向量名次进入 hybrid——
+        // 其相似度为 0.0，即"无语义证据"。
+        store
+            .put(
+                &relevant,
+                br#"{"text":"gategolden needletoken body","timestamp":"2026-08-01T00:00:00Z"}"#,
+            )
+            .unwrap();
+        store
+            .put(
+                &orthogonal,
+                br#"{"text":"unrelated envelope text","timestamp":"2026-08-02T00:00:00Z"}"#,
+            )
+            .unwrap();
+        store
+            .index(&relevant, "gategolden needletoken body")
+            .unwrap();
+        store.index(&orthogonal, "unrelated envelope text").unwrap();
+        store.index_embedding(&relevant, &[1.0, 0.0]).unwrap();
+        store.index_embedding(&orthogonal, &[0.0, 1.0]).unwrap();
+
+        let app = App::with_resume_semantic(&store, &store, NoResumeClaims, &store);
+        let run = |mode: RetrievalMode| -> Vec<String> {
+            let AppResponse::Search { hits, .. } = app
+                .handle(AppRequest::Search {
+                    query: "needletoken".into(),
+                    filters: SearchFilters::default(),
+                    facets: agent_session_grep_ports::SearchFacets::default(),
+                    limit: 10,
+                    cursor: None,
+                    budget: ResponseBudget::default(),
+                    include_system: true,
+                    group_by_session: false,
+                    mode,
+                    query_embedding: Some(vec![1.0, 0.0]),
+                })
+                .unwrap()
+            else {
+                panic!("search expected");
+            };
+            hits.into_iter()
+                .map(|hit| hit.id.as_str().to_string())
+                .collect()
+        };
+
+        // 门开（floor=0.0 防御路径）：0 相似度候选仅凭 semantic 榜的 RRF 名次分
+        // 进入结果——即 D3 边界 2 记录的缺陷形态；这一步同时证明下一步的拒绝
+        // 来自证据门而不是别的过滤。
+        store.set_semantic_similarity_floor(0.0).unwrap();
+        let ungated = run(RetrievalMode::Hybrid);
+        assert!(
+            ungated.contains(&orthogonal.as_str().to_string()),
+            "with the floor open the 0-similarity candidate is admitted by RRF rank"
+        );
+
+        // 证据门（显式 0.5）：0 相似度语义候选在融合之前被淘汰。
+        store.set_semantic_similarity_floor(0.5).unwrap();
+        let gated = run(RetrievalMode::Hybrid);
+        assert!(gated.contains(&relevant.as_str().to_string()));
+        assert!(
+            !gated.contains(&orthogonal.as_str().to_string()),
+            "0-similarity semantic candidate must be rejected by the evidence gate"
+        );
+
+        // lexical 路径不受证据门影响：结果集与门开闭无关。
+        store.set_semantic_similarity_floor(0.0).unwrap();
+        assert_eq!(
+            run(RetrievalMode::Lexical),
+            vec![relevant.as_str().to_string()]
         );
     }
 
@@ -10044,12 +11176,23 @@ mod tests {
         store.index_embedding(&far, &[0.0, 1.0, 0.0]).unwrap();
         assert!(store.is_ready().unwrap());
 
+        // 证据门（B4）之前的行为：把门槛开到 0.0（防御路径）后按纯余弦排序，
+        // 正交候选保留在 top-k 里。
+        store.set_semantic_similarity_floor(0.0).unwrap();
         let hits = store.query_semantic(&[1.0, 0.0, 0.0], 10).unwrap();
         assert_eq!(hits.len(), 2);
         assert_eq!(hits[0].id.as_str(), near.as_str());
         assert!(hits[0].score > hits[1].score);
         assert!((hits[0].score - 1.0).abs() < 1e-5);
         assert!(hits[1].score.abs() < 1e-5);
+
+        // 默认门生效：0 相似度候选在 top-k 之前被拒绝，只剩同向候选。
+        store
+            .set_semantic_similarity_floor(SEMANTIC_SIMILARITY_FLOOR_DEFAULT)
+            .unwrap();
+        let gated = store.query_semantic(&[1.0, 0.0, 0.0], 10).unwrap();
+        assert_eq!(gated.len(), 1);
+        assert_eq!(gated[0].id.as_str(), near.as_str());
     }
 
     #[test]
@@ -10223,7 +11366,7 @@ mod tests {
     fn schema_v10_creates_message_vec_table() {
         let store = SqliteStore::open_in_memory().unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 18);
+        assert_eq!(SCHEMA_VERSION, 19);
         let conn = store.conn.borrow();
         let count: i64 = conn
             .query_row(
@@ -11743,6 +12886,81 @@ mod tests {
                 "relation_upserts_json" | "relation_deletes_json" | "source_replacements_json"
             )
         }));
+    }
+
+    #[test]
+    fn injected_v18_to_v19_failure_rolls_back_journal_retention_schema() {
+        // v18 形状：v6 fixture 顺序迁移到 v18，再对 v18→v19 注入事务内失败。
+        let conn = Connection::open_in_memory().unwrap();
+        create_v6_schema(&conn);
+        SqliteStore::migrate_v6_to_v7(&conn).unwrap();
+        SqliteStore::migrate_v7_to_v8(&conn).unwrap();
+        SqliteStore::migrate_v8_to_v9(&conn).unwrap();
+        SqliteStore::migrate_v9_to_v10(&conn).unwrap();
+        SqliteStore::migrate_v10_to_v11(&conn).unwrap();
+        SqliteStore::migrate_v11_to_v12(&conn).unwrap();
+        SqliteStore::migrate_v12_to_v13(&conn).unwrap();
+        SqliteStore::migrate_v13_to_v14(&conn).unwrap();
+        SqliteStore::migrate_v14_to_v15(&conn).unwrap();
+        SqliteStore::migrate_v15_to_v16(&conn).unwrap();
+        SqliteStore::migrate_v16_to_v17(&conn).unwrap();
+        SqliteStore::migrate_v17_to_v18(&conn).unwrap();
+
+        let error = SqliteStore::migrate_v18_to_v19_inner(&conn, true).unwrap_err();
+        assert!(
+            matches!(error, PortError::Backend(message) if message.contains("injected v18-to-v19"))
+        );
+        assert!(conn.is_autocommit());
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 18);
+        // 注入失败不留半成品：v19 的列与表都必须回滚。
+        let columns: Vec<String> = conn
+            .prepare("PRAGMA table_info(index_batches)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(!columns.iter().any(|name| name == "detail_format"));
+        assert!(!columns.iter().any(|name| name == "detail_summary_json"));
+        let compact_table: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'table' AND name = 'journal_compactions'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(compact_table, 0);
+
+        // 旧行（v18 形状的 terminal 行）迁移后按 full 读——旧格式可读。
+        conn.execute(
+            "INSERT INTO index_batches(
+                 operation_id, base_generation, target_generation, state,
+                 operation_digest, upsert_ids_json, delete_ids_json,
+                 durable_point, created_at_ms, committed_at_ms
+             ) VALUES('legacy-op', 0, 1, 'activated', 'legacy-digest',
+                      '[\"msg_v1_legacy\"]', '[]', 'activated', 1, 2)",
+            [],
+        )
+        .unwrap();
+        SqliteStore::migrate_v18_to_v19(&conn).unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 19);
+        let (format, summary): (String, Option<String>) = conn
+            .query_row(
+                "SELECT detail_format, detail_summary_json FROM index_batches
+                 WHERE operation_id = 'legacy-op'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(format, JOURNAL_DETAIL_FORMAT_FULL);
+        assert!(summary.is_none());
     }
 
     #[test]
