@@ -83,6 +83,11 @@ def run_asg_raw(
         input=stdin,
         capture_output=True,
         text=True,
+        # CLI 的 robot 输出是 UTF-8；Windows runner 的 locale 是 ANSI 代码页，
+        # 不显式指定编码会让 text=True 用 charmap 解码非 ASCII 字节而抛
+        # UnicodeDecodeError（WiX/中文夹具下实测 0x8d）。
+        encoding="utf-8",
+        errors="replace",
         env=env,
         timeout=30,
     )

@@ -23,3 +23,11 @@ head db41494（含 F1/F2 修复）：
 - 处理：把原始调用抽成 run_asg_raw()（返回 CompletedProcess），run_asg() 在其上解析 JSON 帧；verify_hook 复用 run_asg_raw 以保持可注入。
 - 测试改为两条（可证伪性不减）：test_hook_default_check_rejects_stdout_bytes（hook 若往 stdout 写字节则必须判失败）与 test_hook_default_check_accepts_silent_hook（exit 0 + 空 stdout + stderr enabled=false 则通过）。
 - 本地复验：scripts 19 tests OK、scripts/release 18 OK、scripts/evidence 58 OK；verify-release.py 10/10。
+
+## F4（第四轮）：Windows release smoke 的 UTF-8 解码
+
+- 第四轮：ci / core-beta-evidence / security-audit 全绿；release-verify 只剩 verify x86_64-pc-windows-msvc 失败。
+- 现象：UnicodeDecodeError: 'charmap' codec can't decode byte 0x8d in position 655。
+- 根因：run_asg_raw 用 subprocess.run(text=True) 未指定编码，Windows runner 的 locale 是 ANSI 代码页，而 CLI 的 robot 输出是 UTF-8。
+- 修复：显式 encoding=utf-8 与 errors=replace。
+- 本地复验：verify-release.py 10/10；scripts 19 / scripts/release 18 / scripts/evidence 58 全绿。
