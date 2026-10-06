@@ -661,10 +661,14 @@ fn render_sync(data: &Value) -> Vec<String> {
             "deferred: {deferred}（源文件在读取期间发生变化，本次跳过；已有索引不变，写完后再 sync）"
         ));
     }
-    match (emitted, unchanged) {
-        (Some(0), Some(_)) => lines.push("总结：没有新增消息（源文件未变化）。".into()),
-        (Some(e), Some(_)) => lines.push(format!("总结：新增 {e} 条消息。")),
-        _ => {}
+    // sources == 0（`sync --discover` 零发现）时不能说"源文件未变化"：本次没有
+    // 任何源被扫描；"需要显式指定源"的指引由 warnings 行给出，结论行保持沉默。
+    if data.get("sources").and_then(Value::as_u64) != Some(0) {
+        match (emitted, unchanged) {
+            (Some(0), Some(_)) => lines.push("总结：没有新增消息（源文件未变化）。".into()),
+            (Some(e), Some(_)) => lines.push(format!("总结：新增 {e} 条消息。")),
+            _ => {}
+        }
     }
     lines
 }

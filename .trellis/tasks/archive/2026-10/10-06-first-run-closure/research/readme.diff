@@ -1,0 +1,51 @@
+diff --git a/README.md b/README.md
+index bd9ff50..8dc1988 100644
+--- a/README.md
++++ b/README.md
+@@ -49,25 +49,33 @@ agent-session-grep --version
+ asg --version
+ ```
+ 
+-Then use either command name. Every data command needs the store path
+-(`--db`); run `asg config paths` to see the default data location on your
+-platform:
++Then use either command name. Data commands default to the platform data
++directory reported by `asg config paths` (the catalog lives at
++`<data>/asg.db`); pass `--db <path>` to override it. Reading commands never
++create a catalog: if none exists they fail with an explicit
++`sync --discover` instruction instead of pretending there were no results.
+ 
+ ```bash
+-# Index your Claude Code + Codex sessions
+-asg --db <db-path> sync --discover
++# 1. check the binary
++asg --version
++asg config paths        # 2. where the default catalog lives (data directory)
++asg providers           #    which providers can be discovered on this machine
+ 
+-# Search across all providers
+-asg --db <db-path> search "authentication refactor"
++# 3. explicit sync: discover and index your provider sessions (sources stay read-only)
++asg sync --discover
+ 
+-# Get session context
+-asg --db <db-path> context <session-id>
++# If discovery finds nothing, name the transcripts yourself:
++# asg sync <file.jsonl>...
+ 
+-# Preview the resume command for a session (dry-run; --yes to execute)
+-asg --db <db-path> resume <session-id>
++# 4. search across all providers
++asg search "authentication refactor"
+ 
+-# Generate a handoff pack for another agent
+-asg --db <db-path> handoff "how did we configure the database?"
++# 5. read a hit, expand its session, or continue work (use the wire ids from the
++#    "next step" lines that `asg search` prints)
++asg show <msg-id>
++asg context <session-id>
++asg resume <session-id>          # dry-run preview; --yes to execute
++asg handoff "how did we configure the database?"
+ ```
+ 
+ Retrieval is lexical by default (FTS5; CJK text is tokenized as single

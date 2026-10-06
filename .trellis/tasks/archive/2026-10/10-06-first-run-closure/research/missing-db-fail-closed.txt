@@ -1,0 +1,20 @@
+== 缺库读命令：fail-closed + 显式 sync 指令 ==
+二进制: target-b3/debug/agent-session-grep.exe
+沙箱: <SANDBOX>
+
+== human 模式（报错在 stderr）==
+$ agent-session-grep --db <SANDBOX>\nested\missing\catalog.db status
+--- stderr ---
+error [catalog_error]: catalog 不存在：<SANDBOX>\nested\missing\catalog.db（读命令不会创建数据库，也不返回空结果）。先建立索引：`agent-session-grep --db <SANDBOX>\nested\missing\catalog.db sync --discover`
+下一步：先运行 doctor --db <path> 自检。若 doctor 正常，说明这不是打开失败而是一次被拒绝的写入（例如同一条消息在不同源上投影冲突）：用 ASG_DEBUG_ERRORS=1 重跑同一命令查看被掩码的原因，并按 docs/operations/rebuild-and-migration-runbook.md 处理
+exit=6
+
+== robot 模式（单帧 catalog_error envelope）==
+$ agent-session-grep --db <SANDBOX>\nested\missing\catalog.db --robot status
+{"command":"status","error":{"code":"catalog_error","details":{},"message":"catalog 不存在：<SANDBOX>\\nested\\missing\\catalog.db（读命令不会创建数据库，也不返回空结果）。先建立索引：`agent-session-grep --db <SANDBOX>\\nested\\missing\\catalog.db sync --discover`","retryable":false},"frame_type":"error","meta":{"duration_ms":0,"generation":null},"ok":false,"outcome":"failure","page":{"has_more":false,"next_cursor":null},"request_id":"cli-25740-1791299695595","schema_version":"1.1","warnings":[]}
+exit=6
+
+Test-Path(db 文件) => False
+Test-Path(db 父目录) => False
+
+结论: 读命令退出码 6 / catalog_error；错误信息含准确显式 sync 指令；库文件与父目录都未被创建（fail-closed，不写盘）。

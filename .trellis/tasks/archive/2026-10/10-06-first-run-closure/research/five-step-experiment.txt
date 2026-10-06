@@ -1,0 +1,111 @@
+== B3 首用闭环五步实验（真实二进制，隔离 HOME/默认 DB）==
+二进制: target-b3/debug/agent-session-grep.exe
+沙箱: <SANDBOX>（HOME/USERPROFILE/APPDATA/LOCALAPPDATA 全部指向沙箱）
+
+== 1) 拿到二进制/检查版本 ==
+$ agent-session-grep --version
+agent-session-grep-cli 0.1.0
+exit=0
+
+== 2) 确定读取范围（默认数据位置） ==
+$ agent-session-grep config paths
+cache: <SANDBOX>\home\AppData\Local\AgentSessions\cache
+config: <SANDBOX>\home\AppData\Roaming\AgentSessions\config.toml
+data: <SANDBOX>\home\AppData\Local\AgentSessions\data
+logs: <SANDBOX>\home\AppData\Local\AgentSessions\logs
+说明：以上是默认位置，未创建过的目录表示尚未使用，属正常。
+exit=0
+
+== 2b) 本机 provider（成熟度/可发现性） ==
+$ agent-session-grep providers
+providers: 16
+aider  maturity=experimental  target=experimental  variant=aider/chat-history-md-v1
+  discover=unsupported probe=native parse=native search=native context=unsupported resume=unsupported handoff=derived tool_activity=unsupported source_span=derived incremental=derived
+claude-code  maturity=experimental  target=certified  variant=claude-code/jsonl-v1
+  discover=native probe=native parse=native search=native context=native resume=derived handoff=derived tool_activity=partial source_span=native incremental=derived
+codex  maturity=experimental  target=certified  variant=codex/rollout-jsonl-v1
+  discover=native probe=native parse=native search=native context=unsupported resume=derived handoff=derived tool_activity=partial source_span=native incremental=derived
+grok-build  maturity=experimental  target=beta  variant=grok-build/acp-updates-v1
+  discover=native probe=native parse=native search=native context=unsupported resume=derived handoff=derived tool_activity=unsupported source_span=native incremental=derived
+pi  maturity=experimental  target=beta  variant=pi/session-jsonl-v1
+  discover=native probe=native parse=native search=native context=unsupported resume=derived handoff=derived tool_activity=unsupported source_span=native incremental=derived
+kimi-code  maturity=experimental  target=beta  variant=kimi-code/wire-jsonl-v1
+  discover=native probe=native parse=native search=native context=unsupported resume=derived handoff=derived tool_activity=unsupported source_span=native incremental=derived
+qoder  maturity=experimental  target=beta  variant=qoder/transcript-jsonl-v1
+  discover=native probe=native parse=native search=native context=unsupported resume=unknown handoff=derived tool_activity=unsupported source_span=native incremental=derived
+openclaw  maturity=experimental  target=beta  variant=openclaw/session-jsonl-v3
+  discover=native probe=native parse=native search=native context=unsupported resume=unsupported handoff=derived tool_activity=unsupported source_span=native incremental=derived
+tencent-codebuddy  maturity=experimental  target=beta  variant=tencent-codebuddy/cli-jsonl-v1
+  discover=native probe=native parse=native search=native context=unsupported resume=derived handoff=derived tool_activity=unsupported source_span=native incremental=derived
+opencode  maturity=experimental  target=beta  variant=opencode/sqlite-v1
+  discover=native probe=native parse=native search=native context=unsupported resume=derived handoff=derived tool_activity=unsupported source_span=unsupported incremental=derived
+cline  maturity=experimental  target=experimental  variant=cline/api-conversation-history-v1
+  discover=native probe=native parse=native search=native context=unsupported resume=unsupported handoff=derived tool_activity=unsupported source_span=unsupported incremental=derived
+hermes  maturity=experimental  target=beta  variant=hermes/session-json-v1
+  discover=native probe=native parse=native search=native context=unsupported resume=unknown handoff=derived tool_activity=unsupported source_span=unsupported incremental=derived
+antigravity  maturity=experimental  target=beta  variant=antigravity/transcript-jsonl-v1
+  discover=native probe=native parse=native search=native context=unsupported resume=derived handoff=derived tool_activity=unsupported source_span=native incremental=derived
+cursor  maturity=experimental  target=experimental  variant=cursor/vscdb-chat-v1
+  discover=unsupported probe=native parse=native search=native context=unsupported resume=unknown handoff=derived tool_activity=unsupported source_span=unsupported incremental=derived
+deepseek-harness  maturity=unsupported  target=—  variant=—
+  discover=unknown probe=unknown parse=unknown search=unknown context=unknown resume=unknown handoff=unknown tool_activity=unknown source_span=unknown incremental=unknown
+zcode  maturity=unsupported  target=—  variant=—
+  discover=unknown probe=unknown parse=unknown search=unknown context=unknown resume=unknown handoff=unknown tool_activity=unknown source_span=unknown incremental=unknown
+exit=0
+
+== 3) 显式 sync（未给 --db，落平台默认库） ==
+$ agent-session-grep sync --discover
+sources: 1（本次扫描的源文件数）
+emitted: 1（本次新解析的消息条数）
+unchanged: 0（未变化的已有消息条数，不是文件数）
+skipped: 0（因格式无法入库的消息条数）
+generation: 1（当前入库代次）
+总结：新增 1 条消息。
+exit=0
+
+== 4) search（未给 --db） ==
+$ agent-session-grep search closure
+日期       | Provider    | 会话标题     | 工作目录             | Session ID
+2026-08-14 | claude-code | first-run c… | C:/dev/first-run     | 22222222-2222-4222-8222-222222222222
+下一步（表中 Session ID 供 resume 用；展开正文请用下面的 wire id）：
+  context ses_v1_b4c39104c242e3b29f1630fe71c9f86b
+  show msg_v1_11111111-1111-4111-8111-111111111111
+exit=0
+
+默认库文件已由显式 sync 建立 Test-Path(default db) => True
+
+== 4b) robot search（仅为取 wire id 供下一步使用）==
+$ agent-session-grep --robot search closure
+{"command":"search","data":{"generation":1,"hits":[{"id":"msg_v1_11111111-1111-4111-8111-111111111111","resume_available":true,"score":0.01272654626518488,"session_id":"ses_v1_b4c39104c242e3b29f1630fe71c9f86b","suggested_next_commands":["agent-session-grep get-message msg_v1_11111111-1111-4111-8111-111111111111 --session ses_v1_b4c39104c242e3b29f1630fe71c9f86b --around 2","agent-session-grep context ses_v1_b4c39104c242e3b29f1630fe71c9f86b"],"text":"first-run closure needle","why_matched":["closure"]}],"retrieval_mode":"lexical","truncation":{"reason":null,"truncated":false}},"frame_type":"response","meta":{"duration_ms":44,"generation":1},"ok":true,"outcome":"success","page":{"has_more":false,"next_cursor":null},"redaction":{"audit_id":null,"mode":"default","redacted_count":0,"ruleset_version":"v1.1","status":"none"},"request_id":"cli-44796-1791299695496","retrieval_mode":"lexical","schema_version":"1.1","warnings":[]}
+exit=0
+
+hit: id=msg_v1_11111111-1111-4111-8111-111111111111 session_id=ses_v1_b4c39104c242e3b29f1630fe71c9f86b
+
+== 5a) context <ses wire id> ==
+$ agent-session-grep context ses_v1_b4c39104c242e3b29f1630fe71c9f86b
+session ses_v1_b4c39104c242e3b29f1630fe71c9f86b  branch leaf msg_v1_11111111-1111-4111-8111-111111111111  (generation 1)
+  1. [user] first-run closure needle
+evidence: 1 span(s)
+exit=0
+
+== 5b) resume <ses wire id>（dry-run 预览） ==
+$ agent-session-grep resume ses_v1_b4c39104c242e3b29f1630fe71c9f86b
+session ses_v1_b4c39104c242e3b29f1630fe71c9f86b  (provider claude-code)
+命令：(cd C:/dev/first-run && claude --resume 22222222-2222-4222-8222-222222222222)
+工作目录：C:/dev/first-run
+权限模式：未核验（默认不带，不自动加 yolo/full-auto）
+dry-run：未执行。加 --yes 实际恢复。
+exit=0
+
+== 5c) handoff <query> ==
+$ agent-session-grep handoff closure
+handoff pack pack_v1_28c7b6b4a4d0bb86 (schema 1.0; generation 1)
+created_at: 2026-08-16T00:00:01Z
+confidence: high
+matched_sessions: 1
+  ses_v1_b4c39104c242e3b29f1630fe71c9f86b  (1 occurrence(s))
+evidence: 1
+  [msg_v1_11111111-1111-4111-8111-111111111111] first-run closure needle
+inference: none (deterministic)
+exit=0
+

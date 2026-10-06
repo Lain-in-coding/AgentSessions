@@ -1,0 +1,16 @@
+== B3 验证门禁（isolated target dir: C:/AgentSessions/.trellis/.runtime/target-b3）==
+
+1) cargo fmt --all --check
+   exit=0
+
+2) cargo clippy --workspace --all-targets --locked --target-dir C:/AgentSessions/.trellis/.runtime/target-b3 -- -D warnings
+   exit=0（Finished dev profile，无 warning/error）
+
+3) cargo test --workspace --locked --target-dir C:/AgentSessions/.trellis/.runtime/target-b3
+   exit=0
+   汇总: 87 条 test result: ok（各 crate 单元/集成/文档测试目标），0 条 FAILED。
+   其中 crates/agent-session-grep-cli/tests/first_run_closure.rs => 5 passed; 0 failed。
+   完整日志: .trellis/.runtime/b3-workspace-test-3.log（本地运行产物，未入库）
+
+4) node --test crates/agent-session-grep-cli/tests/web_ui.test.cjs
+   exit=0（11 pass / 0 fail）

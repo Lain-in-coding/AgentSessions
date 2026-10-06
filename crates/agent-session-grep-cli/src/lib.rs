@@ -479,6 +479,14 @@ fn run(
         || rest
             .first()
             .is_some_and(|command| matches!(command.as_str(), "index" | "ingest" | "sync"));
+    // 读路径遇到缺库 fail-closed（B3）：只读 open 不建档、不返回空结果，直接给
+    // 一条准确可执行的显式 sync 指令。只有写路径（index/ingest/sync/relocate
+    // --apply）允许创建库。
+    // relocation 除外：它的输入（from/to 根与库路径）按既有契约一律走不透明
+    // 错误，缺库时保持原来的 `catalog operation failed` 口径与 exit 6。
+    if !writes && !relocation && !std::path::Path::new(&db).exists() {
+        return Err(missing_catalog_error(&db));
+    }
     let store = if relocation_apply {
         SqliteStore::open_for_relocation(&db)
     } else if writes {
@@ -646,6 +654,11 @@ fn hook_data(db: &str, rest: &[String], offline: bool) -> Result<serde_json::Val
     let query = hooks::query_from_payload(event, &payload);
     let (text, hits_count) = match (config.should_run(), query) {
         (true, Some(query)) => {
+            // hook 也是读路径：缺库时与常规读命令同一条 fail-closed 指引（不
+            // 创建文件），错误经 run_cli 的 hook 分支以非阻塞 exit 1 报出。
+            if !std::path::Path::new(db).exists() {
+                return Err(missing_catalog_error(db));
+            }
             let store = SqliteStore::open(db).map_err(ProtocolError::from)?;
             let app = resume_app_with_repo(&store, current_repo_slug());
             let response = app.handle(AppRequest::Search {
@@ -1098,6 +1111,36 @@ fn platform_paths_impl() -> Result<serde_json::Value, CliError> {
     }))
 }
 
+/// 默认库文件名：落在 `config paths` 报告的 data 目录下。未给 `--db` 时这是
+/// 唯一使用的默认路径（B3：单一解析函数，不引入 env / 多级隐式 fallback 链）。
+const DEFAULT_DB_FILE_NAME: &str = "asg.db";
+
+/// 解析本次调用使用的 store 路径（B3 单一解析函数）：显式 `--db <path>` 优先；
+/// 未给时取平台默认 data 目录下的 [`DEFAULT_DB_FILE_NAME`]，与 `config paths`
+/// 报告的是同一份平台路径实现。解析失败是用法错误，并给出可执行指引
+/// （显式 `--db <path>`）。
+fn resolve_store_path(explicit: Option<String>) -> Result<String, CliError> {
+    if let Some(path) = explicit {
+        return Ok(path);
+    }
+    let paths = platform_paths().map_err(|e| {
+        CliError::usage(format!(
+            "{}；可显式传 `--db <path>` 指定库位置",
+            e.0.message
+        ))
+    })?;
+    let data = paths
+        .get("data")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            CliError::usage("无法解析平台默认数据目录；可显式传 `--db <path>` 指定库位置")
+        })?;
+    Ok(std::path::Path::new(data)
+        .join(DEFAULT_DB_FILE_NAME)
+        .to_string_lossy()
+        .into_owned())
+}
+
 /// 顶层帮助文本。与 --version 一样走协议出口：裸 println! 会在下游提前关管道时
 /// panic（exit 101 + stderr 污染），违反 CONTRACT §6 的 EPIPE 静默 exit 0。
 fn help_text() -> String {
@@ -1105,16 +1148,19 @@ fn help_text() -> String {
         "{name} {version}
 AI coding-agent history search engine（本地 AI 编程会话历史搜索）。
 
-快速上手（新手从这里开始）:
-    agent-session-grep config paths                 查看数据默认放哪里
-    agent-session-grep providers                    查看 Provider 成熟度与能力
-    agent-session-grep --db <库路径> search 关键词    搜索历史会话
-    agent-session-grep --db <库路径> show <命中ID>   看一条命中的正文
-    agent-session-grep --db <库路径> context <会话ID> 展开一个会话的上下文
+快速上手（五步闭环；默认库 = `config paths` 的 data 目录下的 asg.db，--db 可覆盖）:
+    1) agent-session-grep --version                确认二进制/版本可用
+    2) agent-session-grep config paths             查看默认数据位置（data 目录）
+    3) agent-session-grep providers                本机 provider 成熟度与可发现性
+    4) agent-session-grep sync --discover          显式同步：自动发现并索引 provider 会话
+    5) agent-session-grep search 关键词             搜索历史会话
+    agent-session-grep show <命中ID>               看一条命中的正文
+    agent-session-grep context <会话ID>            展开一个会话的上下文
+    agent-session-grep resume <会话ID>             预览恢复命令（dry-run；--yes 才执行）
 数据流：search 返回命中消息 → show <msg_id> 看正文 → context <ses_id> 看整个会话。
 
 USAGE:
-    agent-session-grep --db <path> <COMMAND> [ARGS]
+    agent-session-grep [--db <path>] <COMMAND> [ARGS]
     agent-session-grep doctor [--db <path>]
     agent-session-grep --help | --version
 
@@ -1188,7 +1234,7 @@ CONTEXT:
     --max-bytes <n>        响应字节预算
 
 GLOBAL（全局 flag 放在命令名之前；子命令 flag 如 --max-items 放在命令名之后）:
-    --db <path>            SQLite 数据存储路径（doctor/help/version/config paths 除外必需）
+    --db <path>            SQLite 数据存储路径；未给时用平台默认数据目录（config paths 的 data）下的 asg.db
     --output human|json|jsonl  输出模式（默认 human：人类可读文本；json/jsonl 为协议 envelope）
     --robot                等价 --output json，无颜色/进度（stdout 只输出协议）
     --no-color             接受但无效果：human 输出本就不着色（供 NO_COLOR 习惯的调用方）
@@ -1499,6 +1545,12 @@ fn doctor(
             "hint": "未指定数据库：以上仅检查了环境。运行 doctor --db <path> 可校验数据库与 schema。",
         }),
         Some(path) => {
+            // 读路径缺库 fail-closed（B3）：doctor 与常规读命令同一条可执行
+            // sync 指引，不创建库；code/exit 仍是 catalog_error 6（与打开失败
+            // 同一分类，不再回落成无指引的掩码错误）。
+            if !std::path::Path::new(&path).exists() {
+                return Err(missing_catalog_error(&path));
+            }
             let store = SqliteStore::open(&path).map_err(ProtocolError::from)?;
             doctor_store_data(&store, offline)?
         }
@@ -1699,23 +1751,42 @@ fn parse_db_flag(args: &[String]) -> Result<(String, Vec<String>), CliError> {
             }
         }
     }
-    let db = db.ok_or_else(|| {
-        // 缺 --db 是新手第一道坎：报错带两条路——config paths 找默认数据位置、
-        // --help 看用法。已经给出子命令（如 `hello`、`search`）时提示它可能不是命令。
-        if rest.is_empty() {
-            CliError::usage(
-                "需要数据库参数 --db <path>。\n\
-                 可先运行 `config paths` 查看默认数据位置；运行 `--help` 查看完整用法。",
-            )
-        } else {
-            CliError::usage(format!(
-                "需要数据库参数 --db <path>（而且 `{}` 可能不是有效命令）。\n\
-                 可先运行 `config paths` 查看默认数据位置；运行 `--help` 查看完整用法。",
-                rest[0]
-            ))
-        }
-    })?;
+    let db = match db {
+        Some(db) => db,
+        // 未给 --db：已知数据子命令走单一默认路径解析（[`resolve_store_path`]）；
+        // 没有命令、或首个位置参数不是已知子命令时仍是用法错误——否则命令名
+        // 拼写错误会被默认路径的"缺库"提示伪装成"数据库不存在"。
+        None => match rest.first().map(String::as_str) {
+            Some(cmd) if known_subcommand(cmd) => resolve_store_path(None)?,
+            Some(other) => {
+                return Err(CliError::usage(format!(
+                    "unknown subcommand: {other}（可用命令：{}；运行 --help 查看完整用法）。\
+                     数据命令默认使用 `config paths` 的 data 目录下的 asg.db，可用 --db <path> 显式指定。",
+                    KNOWN_SUBCOMMANDS.join("、")
+                )));
+            }
+            None => {
+                return Err(CliError::usage(
+                    "missing subcommand（运行 --help 查看可用命令）。\
+                     数据命令默认使用 `config paths` 的 data 目录下的 asg.db，可用 --db <path> 显式指定。",
+                ));
+            }
+        },
+    };
     Ok((db, rest))
+}
+
+/// 读命令遇到"库还不存在"的 fail-closed 错误（B3）：只读打开绝不创建文件，也不
+/// 伪装成空结果；错误里附一条准确、可直接复制执行的显式 sync 指令（写命令才会
+/// 建库）。`sync --discover` 在没有任何可发现源时会再提示如何显式指定源文件。
+fn missing_catalog_error(db: &str) -> CliError {
+    CliError(ProtocolError::new(
+        CanonicalCode::CatalogError,
+        format!(
+            "catalog 不存在：{db}（读命令不会创建数据库，也不返回空结果）。\
+             先建立索引：`agent-session-grep --db {db} sync --discover`"
+        ),
+    ))
 }
 
 /// 提取纯位置参数（跳过已知带值 flag 及其取值、已知裸 flag）——供 doctor/config
@@ -2034,7 +2105,7 @@ fn dispatch(
                         "sync --discover 不接受路径或额外 flag；路径由 provider 数据根自动发现",
                     ));
                 }
-                sync_discover(store, mode == protocol::OutputMode::Jsonl, request_id)?
+                sync_discover(store, db, mode == protocol::OutputMode::Jsonl, request_id)?
             } else {
                 sync_files(
                     store,
@@ -3671,6 +3742,7 @@ struct ProviderDiscovery {
 /// 隐私：结果只报计数与 provider id，绝不包含绝对 transcript 路径。
 fn sync_discover(
     store: &SqliteStore,
+    db: &str,
     progress: bool,
     request_id: Option<&str>,
 ) -> Result<(serde_json::Value, Vec<String>), CliError> {
@@ -3801,6 +3873,8 @@ fn sync_discover(
     // 把发现的路径交给 sync_files 核心（绕过目录拒绝 guard）。
     // 若既无发现的源也无被删除的源（例如本机未安装任何 provider），返回一个
     // 不推进 generation 的空成功，而非 usage error——discover 空跑是合法状态。
+    // 但"零发现"不能留给用户猜（B3）：明确说明需要显式指定源，并给出可直接
+    // 复制执行的命令。
     let (sync_data, warnings) = if unique.is_empty() && synthetic_batches.is_empty() {
         let generation = store.active_generation().map_err(ProtocolError::from)?;
         (
@@ -3814,7 +3888,11 @@ fn sync_discover(
                 "diagnostics": 0,
                 "generation": generation,
             }),
-            Vec::new(),
+            vec![format!(
+                "未发现任何可自动索引的 provider 源（数据根不存在或为空）；请显式指定源文件：\
+                 `agent-session-grep --db {db} sync <file>...`（环境变量 HOME/USERPROFILE 下的\
+                 数据根不存在时 discover 不会猜测路径）"
+            )],
         )
     } else {
         sync_files_inner(

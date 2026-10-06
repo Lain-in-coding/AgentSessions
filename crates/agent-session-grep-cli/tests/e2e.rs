@@ -1153,7 +1153,22 @@ fn machine_mode_version_emits_single_success_envelope() {
 
 #[test]
 fn level_value_before_robot_flag_still_emits_robot_error_envelope() {
-    let out = run_bare(&["--level", "talks", "--robot", "context", "not-a-session-id"]);
+    // 缺失 --db 不再是用法错误（B3：数据命令默认用平台默认库），因此这里显式
+    // 给一个已初始化的夹具库，让断言仍然落在"参数错误（无效 session id）→
+    // exit 2"这一原意上，而不是缺库的 catalog_error。
+    let (_dir, db) = temp_db("level-before-robot");
+    let out = Command::new(BIN)
+        .args([
+            "--db",
+            &db,
+            "--level",
+            "talks",
+            "--robot",
+            "context",
+            "not-a-session-id",
+        ])
+        .output()
+        .expect("failed to spawn agent-session-grep binary");
     assert_eq!(out.status.code(), Some(2), "{}", stdout(&out));
     let frame = parse_first_line(&out);
     assert_envelope_shape(&frame, false);
