@@ -50,3 +50,17 @@
 - 主会话后续提交/推送并创建 PR 后，仍须等待实际适用的 `ci` 和 `security-audit`；它们没有 PR path filter，本报告不预先宣称通过。
 - 已核对 `core-beta-evidence`、`release-verify` 的 path filters；当前文档/任务路径不会触发二者。不触发不等于通过，历史 run 不能改写为新 head 的 CI。
 - 先落地已审查的实现 PR，再在同一任务内用 `archive --no-commit` 归档、修复自己的研究/context 路径、复验并通过第二个纯 bookkeeping PR 落地。不得创建递归收尾任务，也不得在最终交付中隐去尚未合入的归档记录。AC1 的远端落地部分与 AC5 尚待主会话完成。
+
+## Final archive review (2026-10-07)
+
+- **Closeout commit readiness: PASS.** 未发现需修复的引用、元数据或证据问题；本轮仅追加本节，没有修改其他文件。
+- 对照 `HEAD` 原位置核对完整七文件迁移：PRD、provider research 和旧报告内容保留；两个 JSONL 仅四个 research `file` 值改为归档位置，reason/spec 行不变。元数据仅记录 completed/date、PR head/URL 和三项 implementation receipt；landing plan 仅调整回执说明并追加已核验交付记录。旧活动目录不存在，矩阵和历史 merge-task 归档与合并后的 main 无差异。
+- Live GitHub 确认 PR #23 已合并：head `6a132ac9bcc85f2796f7c37f479459675115e0f0`，merge/HEAD/origin/main `9f08ac32dc584e01eb1bc6f9b05a914929096ece`。PR 的八个检查均成功，分别对应 `ci` run `37565600334` 和 `security-audit` run `37565600370`；两 run 的 head SHA 均匹配上述 PR head。
+- 本轮实际执行以下命令，均退出 0：
+  - `python .trellis/scripts/task.py validate .trellis/tasks/archive/2026-10/10-07-main-bookkeeping-ci-evidence`
+  - `python .trellis/scripts/task.py validate .trellis/tasks/archive/2026-10/10-07-merge-main-and-land`
+  - `git diff --check HEAD`、`git diff --cached --check`
+  - `git diff --quiet 6a132ac9bcc85f2796f7c37f479459675115e0f0 9f08ac32dc584e01eb1bc6f9b05a914929096ece`
+- 内存 Python 断言通过：七文件路径白名单、原文保留性、JSON/上下文引用、四个 Markdown 的结构/空白、链接及资料卫生；追加本节后再次检查通过，index 仍为空。历史报告中的命令与结论保留为当时记录，不冒充新执行的归档路径命令。
+- **Lint: PASS（文档/JSON/空白）。TypeCheck: N/A。Tests: PASS（上下文校验与只读审查断言）；Rust tests/build: N/A。** 未重做 provider artifact 研究或运行 Rust 检查；无产品契约变化，无需 spec 同步。
+- 本节只确认收尾提交可准备；此次七文件归档的独立 bookkeeping PR、该新 head 的适用 CI 与合并仍待主会话执行。PR #23 的成功不可替代未来检查，也不表示这批未提交归档已经进入远端 main。

@@ -1,3 +1,0 @@
-{"file":".trellis/spec/guides/index.md","reason":"Independently verify every material finding; do not infer product changes from development-tooling records."}
-{"file":".trellis/tasks/10-07-main-bookkeeping-ci-evidence/research/archive-landing-plan.md","reason":"Check the full change allowlist, unchanged archived blobs, two repaired context references, and applicable CI gates."}
-{"file":".trellis/tasks/10-07-main-bookkeeping-ci-evidence/research/provider-ci-verification.md","reason":"Audit every promoted evidence claim against the successful jobs and downloaded artifacts, including retention and certification caveats."}

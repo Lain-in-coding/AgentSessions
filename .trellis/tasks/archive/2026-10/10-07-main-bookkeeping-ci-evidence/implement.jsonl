@@ -1,0 +1,3 @@
+{"file":".trellis/spec/guides/index.md","reason":"Respect minimal scope, source-trust boundaries and the requirement to verify review findings against evidence."}
+{"file":".trellis/tasks/archive/2026-10/10-07-main-bookkeeping-ci-evidence/research/archive-landing-plan.md","reason":"Preserve the archive baseline and fix only the two literal context references; observe docs-only CI and Git boundaries."}
+{"file":".trellis/tasks/archive/2026-10/10-07-main-bookkeeping-ci-evidence/research/provider-ci-verification.md","reason":"Use the inspected provider artifacts and exact run/target coverage without upgrading unsupported certification claims."}
