@@ -1,0 +1,30 @@
+{
+  "id": "main-bookkeeping-ci-evidence",
+  "name": "main-bookkeeping-ci-evidence",
+  "title": "Main bookkeeping and provider CI evidence closure",
+  "description": "Land the completed merge-task archive and verified four-target provider CI evidence without changing product behavior.",
+  "status": "in_progress",
+  "dev_type": null,
+  "scope": "docs",
+  "package": null,
+  "priority": "P2",
+  "creator": "QIN",
+  "assignee": "QIN",
+  "createdAt": "2026-10-07",
+  "completedAt": null,
+  "branch": "chore/main-bookkeeping-ci-evidence",
+  "base_branch": "main",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": null,
+  "relatedFiles": [
+    "docs/operations/core-beta-evidence-matrix.md",
+    ".trellis/tasks/archive/2026-10/10-07-merge-main-and-land/check.jsonl",
+    ".trellis/tasks/archive/2026-10/10-07-merge-main-and-land/implement.jsonl"
+  ],
+  "notes": "",
+  "meta": {}
+}
