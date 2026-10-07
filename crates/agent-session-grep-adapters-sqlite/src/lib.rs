@@ -13,6 +13,8 @@
 
 mod cas;
 mod lease;
+pub mod maintenance;
+pub mod maintenance_queue;
 mod relocation;
 mod source_fs;
 mod trace;
@@ -8257,7 +8259,13 @@ impl SqliteStore {
     }
 
     fn preview_journal_compaction_in(conn: &Connection) -> PortResult<JournalCompactionPreview> {
-        let compaction_id = journal_compaction_id()?;
+        Self::preview_journal_compaction_with_id(conn, journal_compaction_id()?)
+    }
+
+    fn preview_journal_compaction_with_id(
+        conn: &Connection,
+        compaction_id: String,
+    ) -> PortResult<JournalCompactionPreview> {
         let mut stmt = conn
             .prepare(
                 "SELECT operation_id, state, base_generation, target_generation,
@@ -8457,7 +8465,16 @@ impl SqliteStore {
     ) -> PortResult<JournalCompactionOutcome> {
         let mut conn = self.conn.borrow_mut();
         let tx = conn.transaction().map_err(backend)?;
-        let stored = StoredJournalCompaction::load(&tx, compaction_id)?
+        let outcome = Self::apply_journal_compaction_in(&tx, compaction_id)?;
+        tx.commit().map_err(backend)?;
+        Ok(outcome)
+    }
+
+    fn apply_journal_compaction_in(
+        tx: &rusqlite::Transaction<'_>,
+        compaction_id: &str,
+    ) -> PortResult<JournalCompactionOutcome> {
+        let stored = StoredJournalCompaction::load(tx, compaction_id)?
             .ok_or_else(|| PortError::NotFound("journal compaction plan not found".into()))?;
         match stored.event.state.as_str() {
             "committed" => {
@@ -8608,7 +8625,6 @@ impl SqliteStore {
                 "journal compaction plan could not be marked committed".into(),
             ));
         }
-        tx.commit().map_err(backend)?;
         Ok(JournalCompactionOutcome {
             compaction_id: compaction_id.to_string(),
             state: "committed".into(),

@@ -28,6 +28,7 @@ const SNIPPET_ANCHOR_LEFT_CONTEXT: usize = 40;
 /// 提示以 `data.truncation` 与 `page` 为权威。
 pub fn render_success(command: &str, outcome: Outcome, data: &Value, page: &Page) -> Vec<String> {
     match command {
+        command if command.starts_with("journal.") => render_journal(data),
         "search" => {
             let mut lines = render_search(data);
             push_footer(&mut lines, outcome, data, page);
@@ -60,6 +61,35 @@ pub fn render_success(command: &str, outcome: Outcome, data: &Value, page: &Page
         }
         _ => kv_lines(data),
     }
+}
+
+/// Maintenance control state must not imply that a too-late cancellation was
+/// accepted, or that an unacknowledged catalog commit definitely did not happen.
+fn render_journal(data: &Value) -> Vec<String> {
+    let mut lines = kv_lines(data);
+    let jobs = data.get("job").into_iter().chain(
+        data.get("jobs")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten(),
+    );
+    for job in jobs {
+        if job.get("cancellation_closed").and_then(Value::as_bool) == Some(true) {
+            lines.push(
+                "Cancellation is too late: cleanup is committed; finish or retry cleanup.".into(),
+            );
+        }
+        if job
+            .get("logical_compaction_committed")
+            .is_some_and(Value::is_null)
+        {
+            lines.push(
+                "logical_compaction_committed: unknown (awaiting catalog audit reconciliation)"
+                    .into(),
+            );
+        }
+    }
+    lines
 }
 
 /// `providers`：每个 provider 用两行展示成熟度/路线目标及完整逐字段能力。
@@ -1154,6 +1184,14 @@ fn char_display_width(c: char) -> usize {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn journal_reports_unknown_commit_and_closed_cancellation_explicitly() {
+        let lines = render_success("journal.cancel", Outcome::Success, &json!({"job": {"cancellation_closed": true, "logical_compaction_committed": null, "cancel_requested": false}}), &Page::default()).join("\n");
+        assert!(lines.contains("Cancellation is too late"));
+        assert!(lines.contains("logical_compaction_committed: unknown"));
+        assert!(!lines.contains("cancellation accepted"));
+    }
 
     fn page_more(token: &str) -> Page {
         Page {

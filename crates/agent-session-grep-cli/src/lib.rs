@@ -16,6 +16,7 @@
 
 mod hooks;
 mod human;
+mod maintenance;
 mod mcp;
 mod protocol;
 mod redaction;
@@ -230,11 +231,31 @@ fn extract_offline_flag(args: &[String]) -> bool {
         }
         // 其它带值 flag 跳过其取值，避免把取值误当命令名。
         match a.as_str() {
-            "--db" | "--output" | "--request-id" | "--cursor" | "--max-items" | "--max-bytes"
-            | "--max-messages" | "--policy" | "--level" | "--provider" | "--since" | "--until"
-            | "--repo" | "--session" | "--around" | "--max-evidence" | "--max-tokens"
-            | "--tool-kind" | "--tool-name" | "--from" | "--to" | "--alias-ttl-days" | "--plan"
-            | "--backup" => {
+            "--db"
+            | "--output"
+            | "--request-id"
+            | "--cursor"
+            | "--max-items"
+            | "--max-bytes"
+            | "--max-messages"
+            | "--policy"
+            | "--level"
+            | "--provider"
+            | "--since"
+            | "--until"
+            | "--repo"
+            | "--session"
+            | "--around"
+            | "--max-evidence"
+            | "--max-tokens"
+            | "--tool-kind"
+            | "--tool-name"
+            | "--from"
+            | "--to"
+            | "--alias-ttl-days"
+            | "--plan"
+            | "--backup"
+            | "--max-write-seconds" => {
                 it.next();
             }
             _ => {}
@@ -277,10 +298,30 @@ fn extract_request_id(args: &[String]) -> Result<Option<String>, String> {
         }
         // 其它带值 flag 跳过其取值，避免把取值误当位置参数提前终止扫描。
         match a.as_str() {
-            "--db" | "--output" | "--cursor" | "--max-items" | "--max-bytes" | "--max-messages"
-            | "--max-evidence" | "--max-tokens" | "--policy" | "--level" | "--provider"
-            | "--since" | "--until" | "--repo" | "--session" | "--around" | "--tool-kind"
-            | "--tool-name" | "--from" | "--to" | "--alias-ttl-days" | "--plan" | "--backup" => {
+            "--db"
+            | "--output"
+            | "--cursor"
+            | "--max-items"
+            | "--max-bytes"
+            | "--max-messages"
+            | "--max-evidence"
+            | "--max-tokens"
+            | "--policy"
+            | "--level"
+            | "--provider"
+            | "--since"
+            | "--until"
+            | "--repo"
+            | "--session"
+            | "--around"
+            | "--tool-kind"
+            | "--tool-name"
+            | "--from"
+            | "--to"
+            | "--alias-ttl-days"
+            | "--plan"
+            | "--backup"
+            | "--max-write-seconds" => {
                 it.next();
             }
             _ => {}
@@ -299,11 +340,31 @@ fn command_name(args: &[String]) -> String {
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
-            "--db" | "--output" | "--cursor" | "--max-items" | "--max-bytes" | "--max-messages"
-            | "--max-evidence" | "--max-tokens" | "--policy" | "--level" | "--request-id"
-            | "--provider" | "--since" | "--until" | "--repo" | "--session" | "--around"
-            | "--tool-kind" | "--tool-name" | "--from" | "--to" | "--alias-ttl-days" | "--plan"
-            | "--backup" => {
+            "--db"
+            | "--output"
+            | "--cursor"
+            | "--max-items"
+            | "--max-bytes"
+            | "--max-messages"
+            | "--max-evidence"
+            | "--max-tokens"
+            | "--policy"
+            | "--level"
+            | "--request-id"
+            | "--provider"
+            | "--since"
+            | "--until"
+            | "--repo"
+            | "--session"
+            | "--around"
+            | "--tool-kind"
+            | "--tool-name"
+            | "--from"
+            | "--to"
+            | "--alias-ttl-days"
+            | "--plan"
+            | "--backup"
+            | "--max-write-seconds" => {
                 it.next(); // 消费其取值
             }
             "--robot" | "--no-color" | "--help" | "-h" | "--version" | "-V" | "--discover"
@@ -353,6 +414,21 @@ fn intercept_help_or_version(args: &[String]) -> Option<HelpRequest> {
                         return Some(HelpRequest::SubcommandHelp("index".into()));
                     }
                 }
+                Some("preview" | "submit" | "status" | "cancel" | "retry" | "worker")
+                    if cmd == "journal" =>
+                {
+                    match it.next().map(String::as_str) {
+                        Some("--help" | "-h") => {
+                            return Some(HelpRequest::SubcommandHelp("journal".into()));
+                        }
+                        Some("start" | "stop") => {
+                            if matches!(it.next().map(String::as_str), Some("--help" | "-h")) {
+                                return Some(HelpRequest::SubcommandHelp("journal".into()));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
                 // model import|status --help：import/status 是 model 的子词，
                 // 帮助旗标跟在它们后面（与 index rebuild --help 同规则）。
                 Some("import") | Some("status") if cmd == "model" => {
@@ -371,11 +447,31 @@ fn intercept_help_or_version(args: &[String]) -> Option<HelpRequest> {
             // 裸 flag（无取值）不改变拦截判定：--robot/--no-color/--offline 等同理。
             "--robot" | "--no-color" | "--discover" | "--offline" => {}
             // 带值 flag 跳过其取值，避免把取值误当命令名。
-            "--db" | "--output" | "--request-id" | "--cursor" | "--max-items" | "--max-bytes"
-            | "--max-messages" | "--max-evidence" | "--max-tokens" | "--policy" | "--level"
-            | "--provider" | "--since" | "--until" | "--repo" | "--session" | "--around"
-            | "--tool-kind" | "--tool-name" | "--from" | "--to" | "--alias-ttl-days" | "--plan"
-            | "--backup" => {
+            "--db"
+            | "--output"
+            | "--request-id"
+            | "--cursor"
+            | "--max-items"
+            | "--max-bytes"
+            | "--max-messages"
+            | "--max-evidence"
+            | "--max-tokens"
+            | "--policy"
+            | "--level"
+            | "--provider"
+            | "--since"
+            | "--until"
+            | "--repo"
+            | "--session"
+            | "--around"
+            | "--tool-kind"
+            | "--tool-name"
+            | "--from"
+            | "--to"
+            | "--alias-ttl-days"
+            | "--plan"
+            | "--backup"
+            | "--max-write-seconds" => {
                 it.next();
             }
             _ => {}
@@ -455,6 +551,9 @@ fn run(
     }
 
     let (db, rest) = parse_db_flag(args)?;
+    if rest.first().is_some_and(|command| command == "journal") {
+        return maintenance::run(&db, &rest, mode, request_id);
+    }
     // Disabled hooks and payloads without a query have no catalog dependency.
     if rest.first().map(String::as_str) == Some("hook") {
         let data = hook_data(&db, &rest, offline)?;
@@ -569,8 +668,18 @@ fn run(
     }
     // catalog 与 index 是同一个 SqliteStore；App 泛型接受同一实例的两次移动，
     // 故这里克隆一个连接语义上的第二把手不可行——改为让 App 持有单一 store。
-    let (command, outcome, data, page, warnings) =
-        dispatch(&store, &db, &rest, mode, request_id, offline)?;
+    let deferred_output = writes.then(protocol::DeferredOutputExit::begin);
+    let dispatched = dispatch(&store, &db, &rest, mode, request_id, offline);
+    // Release the catalog lease BEFORE touching the independent queue or spawning.
+    drop(store);
+    let wake_warning = if writes && dispatched.is_ok() {
+        maintenance::wake_after_write(&db)
+    } else {
+        None
+    };
+    drop(deferred_output);
+    let (command, outcome, data, page, mut warnings) = dispatched?;
+    warnings.extend(wake_warning);
     let duration_ms = started.elapsed().as_millis() as u64;
     // 生效检索模式：search 的 data 已含 `retrieval_mode` 字段（render 投影）；
     // 其他命令恒为 lexical。
@@ -1206,6 +1315,7 @@ COMMANDS:
     doctor                 环境自检（可选 --db 校验存储可打开）
     providers              报告 Provider 成熟度、路线目标与逐字段能力
     config paths           报告当前平台的 config/data/cache/logs 路径
+    journal <command>     预览、提交和管理持久化日志维护任务（journal --help）
     model import|status    本地 embedding 模型缓存（永不联网；import 需 semantic-candle 构建）
 
 PAGINATION / BUDGET (search, list):
@@ -1341,6 +1451,7 @@ const KNOWN_SUBCOMMANDS: &[&str] = &[
     "ingest",
     "sync",
     "relocate",
+    "journal",
     "index",
     "search",
     "handoff",
@@ -1372,6 +1483,7 @@ fn known_subcommand(cmd: &str) -> bool {
 /// 触发——顶层 --help 只给全局概览，子命令帮助给单命令的用法。
 fn subcommand_help_text(cmd: &str) -> &'static str {
     match cmd {
+        "journal" => maintenance::HELP,
         "search" => {
             "search <query>：全文检索历史会话，按相关性降序返回命中。\n\
                      示例：agent-session-grep --db <path> search 配置备份\n\
@@ -1680,6 +1792,7 @@ fn is_known_flag_name(token: &str) -> bool {
             | "--alias-ttl-days"
             | "--plan"
             | "--backup"
+            | "--max-write-seconds"
             | "--apply"
     )
 }
@@ -1729,10 +1842,29 @@ fn extract_db_flag_impl(args: &[String], prefix_only: bool) -> Result<Option<Str
             db = Some(value.clone());
         }
         match a.as_str() {
-            "--output" | "--request-id" | "--cursor" | "--max-items" | "--max-bytes"
-            | "--max-messages" | "--max-evidence" | "--max-tokens" | "--policy" | "--level"
-            | "--provider" | "--since" | "--until" | "--session" | "--around" | "--tool-kind"
-            | "--tool-name" | "--from" | "--to" | "--alias-ttl-days" | "--plan" | "--backup" => {
+            "--output"
+            | "--request-id"
+            | "--cursor"
+            | "--max-items"
+            | "--max-bytes"
+            | "--max-messages"
+            | "--max-evidence"
+            | "--max-tokens"
+            | "--policy"
+            | "--level"
+            | "--provider"
+            | "--since"
+            | "--until"
+            | "--session"
+            | "--around"
+            | "--tool-kind"
+            | "--tool-name"
+            | "--from"
+            | "--to"
+            | "--alias-ttl-days"
+            | "--plan"
+            | "--backup"
+            | "--max-write-seconds" => {
                 it.next();
             }
             _ => {}
@@ -1819,10 +1951,30 @@ fn bare_positionals(args: &[String]) -> Vec<String> {
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
-            "--db" | "--output" | "--request-id" | "--cursor" | "--max-items" | "--max-bytes"
-            | "--max-messages" | "--max-evidence" | "--max-tokens" | "--policy" | "--level"
-            | "--provider" | "--since" | "--until" | "--session" | "--around" | "--tool-kind"
-            | "--tool-name" | "--from" | "--to" | "--alias-ttl-days" | "--plan" | "--backup" => {
+            "--db"
+            | "--output"
+            | "--request-id"
+            | "--cursor"
+            | "--max-items"
+            | "--max-bytes"
+            | "--max-messages"
+            | "--max-evidence"
+            | "--max-tokens"
+            | "--policy"
+            | "--level"
+            | "--provider"
+            | "--since"
+            | "--until"
+            | "--session"
+            | "--around"
+            | "--tool-kind"
+            | "--tool-name"
+            | "--from"
+            | "--to"
+            | "--alias-ttl-days"
+            | "--plan"
+            | "--backup"
+            | "--max-write-seconds" => {
                 it.next(); // 消费其取值
             }
             "--robot" | "--no-color" | "--help" | "-h" | "--version" | "-V" | "--discover"

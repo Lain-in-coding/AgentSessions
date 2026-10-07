@@ -5,6 +5,7 @@
 //!
 //! 分层依赖不变量：domain ← ports ← application ← adapters。
 
+pub mod maintenance;
 pub mod redact;
 pub mod relocation;
 

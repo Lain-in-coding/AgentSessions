@@ -69,3 +69,9 @@ tempfile = "3"
 # provider_matrix 的 capability↔adapter 漂移测试需要全字段捕获 sink
 # (emit_activity 观测),与各 provider golden 测试同一份脚手架。
 agent-session-grep-testkit = { path = "../agent-session-grep-testkit" }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console"] }
