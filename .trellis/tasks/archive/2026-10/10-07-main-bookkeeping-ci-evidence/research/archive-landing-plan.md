@@ -39,7 +39,7 @@ Fix only the `file` value on these two lines to the archived PRD. Leave the hist
 
 ## Artifact lifecycle
 
-This note is planning evidence, not a completion report. GitHub PR/run records are the durable remote delivery record. No copied CI binary, raw user transcript, local cache or personal path is to be committed by this task. Any post-merge task closure bookkeeping must be reported and handled as part of this same authorized scope, not silently left out of the claimed result.
+This note records planning and subsequent delivery evidence; remote completion must be checked against the named GitHub records. GitHub PR/run records are the durable remote delivery record. No copied CI binary, raw user transcript, local cache or personal path is to be committed by this task. Any post-merge task closure bookkeeping must be reported and handled as part of this same authorized scope, not silently left out of the claimed result.
 ## Execution coordination (2026-10-07)
 
 - The user approved the final planning summary and implementation, including commit/push/PR merge after checks. The task is now `in_progress`.
@@ -47,3 +47,10 @@ This note is planning evidence, not a completion report. GitHub PR/run records a
 - Implementation is delegated with an exact three-file write scope. Main owns task artifacts and Git operations; independent review will cover the complete final diff, not only those three edits.
 - Code-spec judgment: no command/API/schema, infra behavior, runtime convention or product evidence contract changes. The existing matrix status vocabulary already governs this promotion. The archive-reference pitfall and literal validator behavior are captured here; editing managed Trellis tooling or unrelated package specs would expand the approved scope and is not required.
 - Delivery lifecycle: land the reviewed archive/evidence work first. Then archive this task only after its implementation is actually landed, repair its own moved manifest paths using `archive --no-commit`, and land that closeout under the same authorized scope (a second pure-bookkeeping PR if required). Do not create a new task for that closeout, bypass checks, claim an unrun workflow passed, or leave branch-only archive changes hidden in the final result.
+## Verified implementation delivery (2026-10-07)
+
+- Work commits: `02d89e7` (matrix and historical context references) and `6a132ac9bcc85f2796f7c37f479459675115e0f0` (task plan/research/review).
+- [PR #23](https://github.com/LainHappy/AgentSessions/pull/23) merged at `2026-10-07T03:21:37Z` as `9f08ac32dc584e01eb1bc6f9b05a914929096ece`, using a normal merge and an exact-head guard; no admin bypass or history rewrite.
+- Before merge, all eight checks passed at the PR head: [ci run 37565600334](https://github.com/LainHappy/AgentSessions/actions/runs/37565600334) and [security-audit run 37565600370](https://github.com/LainHappy/AgentSessions/actions/runs/37565600370) both completed successfully. No evidence/release workflow was claimed to run for this documentation-only head.
+- After fetch/fast-forward, `git diff --quiet 6a132ac9bcc85f2796f7c37f479459675115e0f0 origin/main` passed: the merged main tree is identical to the checked head. The historical task exists only at its archive path in main.
+- The remaining delivery is this task's own archive, its four moved research-context references, and this receipt. It is handled in the same authorized task, with a pure-bookkeeping PR and its own checks, not as a new task or product change.

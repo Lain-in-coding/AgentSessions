@@ -3,7 +3,7 @@
   "name": "main-bookkeeping-ci-evidence",
   "title": "Main bookkeeping and provider CI evidence closure",
   "description": "Land the completed merge-task archive and verified four-target provider CI evidence without changing product behavior.",
-  "status": "in_progress",
+  "status": "completed",
   "dev_type": null,
   "scope": "docs",
   "package": null,
@@ -11,12 +11,12 @@
   "creator": "QIN",
   "assignee": "QIN",
   "createdAt": "2026-10-07",
-  "completedAt": null,
+  "completedAt": "2026-10-07",
   "branch": "chore/main-bookkeeping-ci-evidence",
   "base_branch": "main",
   "worktree_path": null,
-  "commit": null,
-  "pr_url": null,
+  "commit": "6a132ac9bcc85f2796f7c37f479459675115e0f0",
+  "pr_url": "https://github.com/LainHappy/AgentSessions/pull/23",
   "subtasks": [],
   "children": [],
   "parent": null,
@@ -26,5 +26,9 @@
     ".trellis/tasks/archive/2026-10/10-07-merge-main-and-land/implement.jsonl"
   ],
   "notes": "",
-  "meta": {}
+  "meta": {
+    "implementation_merge_commit": "9f08ac32dc584e01eb1bc6f9b05a914929096ece",
+    "implementation_ci_run": 37565600334,
+    "implementation_security_audit_run": 37565600370
+  }
 }
