@@ -1,9 +1,9 @@
 {
-  "id": "journal-maintenance-storage",
-  "name": "journal-maintenance-storage",
-  "title": "Journal SQLite backup compaction and physical reclamation",
-  "description": "SQLite safe maintenance executor",
-  "status": "planning",
+  "id": "journal-maintenance-cli",
+  "name": "journal-maintenance-cli",
+  "title": "Journal CLI background worker and integration evidence",
+  "description": "CLI worker and end-to-end integration",
+  "status": "completed",
   "dev_type": null,
   "scope": null,
   "package": "agentsessions-adapters-sqlite",
@@ -11,7 +11,7 @@
   "creator": "QIN",
   "assignee": "QIN",
   "createdAt": "2026-10-07",
-  "completedAt": null,
+  "completedAt": "2026-10-07",
   "branch": "feat/journal-online-maintenance",
   "base_branch": "main",
   "worktree_path": null,
@@ -21,8 +21,8 @@
   "children": [],
   "parent": "10-07-journal-online-maintenance",
   "relatedFiles": [
-    "crates/agent-session-grep-adapters-sqlite/src/maintenance.rs",
-    "crates/agent-session-grep-adapters-sqlite/src/maintenance/tests.rs"
+    "crates/agent-session-grep-cli/src/maintenance.rs",
+    "crates/agent-session-grep-cli/tests/journal_maintenance.rs"
   ],
   "notes": "Implementation and Windows local acceptance complete. Work commits and push explicitly approved. Cross-platform CI not claimed.",
   "meta": {}
