@@ -1,5 +1,5 @@
 {"_example": "Fill with {\"file\": \"<path>\", \"reason\": \"<why>\"}. Put spec/research files only — no code paths. Run `python .trellis/scripts/get_context.py --mode packages` to list available specs. Delete this line once real entries are added."}
-{"file": ".trellis/tasks/10-07-merge-main-and-land/prd.md", "reason": "本任务的验收标准与锁定的冲突解决规则"}
+{"file": ".trellis/tasks/archive/2026-10/10-07-merge-main-and-land/prd.md", "reason": "本任务的验收标准与锁定的冲突解决规则"}
 {"file": ".trellis/spec/agentsessions-adapters-sqlite/backend/index.md", "reason": "冲突 A 的目标文件：合并时必须保留双方追加的 scenario 章节"}
 {"file": ".trellis/spec/agentsessions-cli/backend/index.md", "reason": "自动合并区：CLI 契约（默认库路径/缺库契约/duration_ms）不得被覆盖"}
 {"file": ".trellis/tasks/archive/2026-10/10-07-repo-probe-overlap/research/check3-report.md", "reason": "B8 合并后必须复跑的语义/性能证据口径"}
