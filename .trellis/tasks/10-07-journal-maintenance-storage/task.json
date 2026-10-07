@@ -1,0 +1,29 @@
+{
+  "id": "journal-maintenance-storage",
+  "name": "journal-maintenance-storage",
+  "title": "Journal SQLite backup compaction and physical reclamation",
+  "description": "SQLite safe maintenance executor",
+  "status": "planning",
+  "dev_type": null,
+  "scope": null,
+  "package": "agentsessions-adapters-sqlite",
+  "priority": "P1",
+  "creator": "QIN",
+  "assignee": "QIN",
+  "createdAt": "2026-10-07",
+  "completedAt": null,
+  "branch": "feat/journal-online-maintenance",
+  "base_branch": "main",
+  "worktree_path": null,
+  "commit": "c16b6cf71bc07f305808f1ea68b6d96f880ee6f4",
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": "10-07-journal-online-maintenance",
+  "relatedFiles": [
+    "crates/agent-session-grep-adapters-sqlite/src/maintenance.rs",
+    "crates/agent-session-grep-adapters-sqlite/src/maintenance/tests.rs"
+  ],
+  "notes": "Implementation and Windows local acceptance complete. Work commits and push explicitly approved. Cross-platform CI not claimed.",
+  "meta": {}
+}

@@ -281,6 +281,49 @@ Windows drive/UNC/verbatim separators and Unicode-preserving remaps.
 Wrong: read the wall clock or filesystem inside plan policy.
 Correct: receive time and ownership digests through explicit arguments.
 
+## Scenario: Durable journal-maintenance orchestration
+
+### 1. Scope / Trigger
+`MaintenanceService` coordinates queue and catalog ports without filesystem or
+SQLite imports. The composition root owns process lifetime and sleeping.
+
+### 2. Signatures
+`submit(target, token, budget)` validates confirmation and enqueues idempotently;
+`retry` retains the same authorization; `next_runnable` and `next_retry_at`
+select work; `run_job` executes/reconciles durable phases under one session.
+
+### 3. Contracts
+Persist backup intent before copying and phase completion before moving on.
+Actual catalog audit, not queue acknowledgement alone, decides whether logical
+compaction committed. Cancellation stops remaining work, never undoes a commit.
+Control requests must survive worker progress writes. Never present an
+unreconciled commit outcome after a crash as a known negative. Before cleanup,
+atomically persist a cleanup-started intent against cancellation. Once claimed,
+cancellation is closed and must be reported as such; finish/retry cleanup
+rather than reporting cancelled with an already-deleted backup.
+Default budget is 30 seconds. Backoff is 1/2/5/15/30/60 seconds; three consecutive
+budget exhaustions without durable progress require attention. Reset that
+counter only on durable progress; keep timing data bounded per phase.
+
+### 4. Validation & Error Matrix
+Selected drift requires new preview, not retry-with-refreshed-selection.
+Busy/pause defer; resource/cleanup failures require attention. Successful
+cleanup precedes completed. Drop catalog lease before retry waiting.
+
+### 5. Good/Base/Bad Cases
+Good: checkpoint retry skips acknowledged VACUUM. Base: duplicate token returns
+its existing job. Bad: a cancelled crashed job claims nothing committed solely
+because queue acknowledgement was absent.
+
+### 6. Tests Required
+Use injected clocks and mock ports for phase ordering, backup intent, budget
+reset/threshold, bounded backoff, pause/cancel, commit-ack gaps and invalid
+adapter phase transitions. Queue tests cover concurrent controls separately.
+
+### 7. Wrong vs Correct
+Wrong: resume by replaying every phase or re-previewing all current batches.
+Correct: reconcile committed work and continue only the fixed authorized set.
+
 ## Quality Check
 
 - New or modified filesystem test helpers must not use PID + wall-clock time

@@ -1,0 +1,6 @@
+{"file": ".trellis/tasks/10-07-journal-online-maintenance/prd.md", "reason": "Approved requirements and acceptance"}
+{"file": ".trellis/tasks/10-07-journal-online-maintenance/design.md", "reason": "Shared design and safety contracts"}
+{"file": ".trellis/tasks/10-07-journal-online-maintenance/implement.md", "reason": "Delivery sequence and validation"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Cross-layer contracts"}
+{"file": ".trellis/spec/agentsessions-cli/backend/index.md", "reason": "Applicable package conventions"}
+{"file": ".trellis/spec/agentsessions-ports/backend/index.md", "reason": "Applicable package conventions"}

@@ -199,6 +199,47 @@ new error mapping without echoing caller-controlled details.
 Wrong: expose SQLite rows or paths as a public relocation result.
 Correct: expose typed counts/status and keep private mappings in the adapter.
 
+## Scenario: Journal maintenance contracts
+
+### 1. Scope / Trigger
+Use `maintenance` for the independently queued journal-maintenance use case,
+not query `AppRequest` or relocation DTOs.
+
+### 2. Signatures
+`MaintenanceCatalog::preview` creates a read-only confirmation snapshot;
+`acquire` returns a `MaintenanceSession`; destructive sessions own the writer
+lease, while recovery after a durable cleanup claim uses a filesystem-only
+session (`holds_writer_lease() == false`). `execute` performs one phase. `MaintenanceQueue` persists authorization, progress and control.
+
+### 3. Contracts
+`MaintenanceTarget`, selected batch digests and backup ownership are private
+persistence data. Project `MaintenanceJobSummary` explicitly for CLI output;
+never serialize an entire job or preview as public data. Public logical-commit
+state is nullable when crash reconciliation is pending; cancellation-closed
+explicitly marks the durable cleanup commit point. Phase failures use
+bounded `MaintenanceFailureKind`/`MaintenanceResult`, distinct from raw backend
+strings; queue and preview retain `PortResult` for existing protocol mapping.
+A session owns one deadline across all phase calls. Cancellation and pause
+are atomic signals; SQLite callbacks must not call back into the queue.
+
+### 4. Validation & Error Matrix
+Nonpositive/unrepresentable budget -> invalid request before mutation;
+selection/target drift -> review; busy -> deferred; resource/cleanup issues ->
+attention. Do not reuse response-budget `Partial` to mean delayed maintenance.
+
+### 5. Good/Base/Bad Cases
+Good: opaque confirmation token plus counts. Base: zero eligible batches can
+be previewed but cannot be submitted. Bad: expose batch IDs, backup paths or
+raw storage errors in status, including debug output.
+
+### 6. Tests Required
+Pin safe summary serialization, frozen selection equality, budget boundaries,
+and bounded reason/state names; verify unknown persisted formats fail closed.
+
+### 7. Wrong vs Correct
+Wrong: add maintenance switches to search request enums and pass SQLite errors
+through the port. Correct: independent typed use case and bounded failures.
+
 ## Quality Check
 
 - No `use rusqlite`, no `use std::fs`, no `serde_json` in this crate.

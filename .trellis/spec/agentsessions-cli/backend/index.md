@@ -216,6 +216,56 @@ or letting a read command create the database.
 Correct: resolve the path once, open read-only, and fail closed with an
 actionable, secret-redacted instruction when the catalog is absent.
 
+## Scenario: Journal CLI and detached worker
+
+### 1. Scope / Trigger
+The `journal` command family composes the independent maintenance use case.
+Queue-only commands must branch before the generic catalog-open dispatch.
+
+### 2. Signatures
+`journal preview`; `submit --plan TOKEN [--max-write-seconds N]`;
+`status [JOB_ID]`; `cancel JOB_ID`; `retry JOB_ID [--max-write-seconds N]`;
+`worker start|stop`. Global output/request-id/db flags remain prefix-only.
+
+### 3. Contracts
+Robot envelope stays 1.1. Project bounded public summaries and reason codes;
+accepted is durable enqueue, not completed. If spawn fails retain the job and
+report the worker was not started. Public errors must not reveal raw paths,
+IDs or bodies. Update all value-flag scanners consistently, not just dispatch.
+Worker start clears durable root pause; automatic wakes and the internal worker
+entrypoint never do. Use absolute executable paths, argument arrays and private
+temp environment, Windows hidden detach and disconnected stdio. No shell-built
+process strings or installed service. On Windows, child NUL streams alone do
+not prevent inheriting original parent pipe handles: suspend their inherit
+flags only around spawn and restore via RAII, including failure paths. Test
+that the parent output returns while the worker still waits for a writer.
+Lifecycle locking closes enqueue/idle-exit
+races; OS worker lock is authoritative. Keep retryable work alive; empty idle
+workers exit after 30 seconds. Status/preview/help/queries do not wake workers.
+Successful writing commands wake only an existing queue after releasing the
+catalog lease, including required finalization when stdout is a broken pipe.
+
+### 4. Validation & Error Matrix
+Invalid flags/budgets -> usage error without queue/catalog creation. Missing
+catalog must not prevent reading/cancelling existing queue jobs. Paused queues
+stay paused on submit/retry/writing; explicit worker start is the unpause action.
+
+### 5. Good/Base/Bad Cases
+Good: queued job proceeds after another writer releases its lock without any
+new request. Base: no queue means a normal write creates no maintenance state.
+Bad: status accidentally opens/migrates catalog or starts a worker.
+
+### 6. Tests Required
+Use real subprocesses for detached survival, single executor, enqueue/idle race,
+crash recovery, pause/start, cancellation and long-reader checkpoint deferral.
+Use isolated synthetic catalogs; assert actual DB and total footprint reduction,
+protocol/privacy/flag compatibility and no leaked workers/backups after success.
+
+### 7. Wrong vs Correct
+Wrong: return success after launching VACUUM and abandon the process on busy.
+Correct: report accepted separately and leave persistent, recoverable work with
+an automatically retrying worker and verifiable completion.
+
 ## Quality Check
 
 Before proposing a commit for this crate:

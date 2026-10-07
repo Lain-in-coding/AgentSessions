@@ -590,6 +590,59 @@ similarity near 0.40 on unrelated short text, so the default gate rejects zero
 and negative evidence but cannot remove non-zero, non-semantic false hits;
 that requires real embedding weights plus recalibration.
 
+## Scenario: Online journal maintenance and physical reclamation
+
+### 1. Scope / Trigger
+Queue-backed maintenance is separate from the legacy B2 stage/apply interface.
+Keep B2 compatibility and catalog schema 19; queue format is independent v1.
+
+### 2. Signatures
+`maintenance` implements the catalog/session ports. `SqliteMaintenanceQueue`
+implements durable queue operations; `open_existing` is read-only/no-create,
+while explicit enqueue/start may create the queue. Queue lives below the
+existing writer-lease data-root under `.maintenance/queue.sqlite`.
+
+### 3. Contracts
+Validate exactly the persisted selected subset, then write compaction audit,
+aggregate details and commit atomically. No standalone staged record may later
+be applied after this workflow has cancelled. Existing B2 semantics stay intact.
+Open maintenance targets without creation, migration or reprojection. Bind
+canonical path and stable file identity; use original-file VACUUM, never swap
+an online DB. Measure real UTF-8/file bytes, not SQLite TEXT character counts.
+One verified owned pre-maintenance backup is reused. Persist intent before
+copy/publication; recover no-clobber publication gaps by verifying ownership
+and snapshot. Never restore over later writes. Use private job directories,
+space preflight and deadline-aware Backup/progress APIs. No SQLite global
+temp-directory mutation. Check TRUNCATE checkpoint results, not just execution.
+Validate logical invariants immediately after Compact and VACUUM before phase
+acknowledgement; a later checkpoint deferral must not discard the destructive
+acquisition baseline. Cleanup-only recovery after a durable claim needs no
+catalog open or writer lease; post-delete measurement failures remain resumable
+CleanupFailed rather than ordinary failure or false completion.
+Queue initialization uses one transaction; progress CAS preserves concurrent
+cancel and root pause. OS worker/lifecycle locks are separate from writer lease.
+
+### 4. Validation & Error Matrix
+Unknown queue/schema/target identity fails closed. Reader-blocked checkpoint
+is deferred. Integrity failure retains backup. Cleanup failure is not success.
+Never clean paths outside resolved job ownership, even when names look similar.
+
+### 5. Good/Base/Bad Cases
+Good: audit reconciliation avoids duplicate logical compaction after lost ack.
+Base: ambiguous VACUUM acknowledgement can safely repeat physical work.
+Bad: call full-preview stage for a subset and accidentally include new batches.
+
+### 6. Tests Required
+Keep `journal_retention` green. Add isolated storage tests for subset drift,
+atomic rollback, backup publication/adoption, writer budget, checked checkpoint,
+FTS rowid sidecar and logical/generation invariants, ownership cleanup and real
+file reduction. Multiprocess lifecycle evidence belongs at the CLI boundary.
+
+### 7. Wrong vs Correct
+Wrong: claim disk savings from deleted strings or `freelist_count` alone.
+Correct: measure catalog, WAL/SHM, queue and retained backups separately and
+require a reduced total footprint on the controlled fixture.
+
 ## Quality Check
 
 - `catalog` remains authoritative; `fts` fully rebuildable from it.
