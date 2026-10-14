@@ -18,7 +18,10 @@
   "commit": null,
   "pr_url": null,
   "subtasks": [],
-  "children": [],
+  "children": [
+    "10-13-gate-evidence-validation",
+    "10-13-current-source-performance-baseline"
+  ],
   "parent": "08-15-open-source-product-roadmap",
   "relatedFiles": [],
   "notes": "",
