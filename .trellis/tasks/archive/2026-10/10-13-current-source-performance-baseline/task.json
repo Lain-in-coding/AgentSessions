@@ -1,0 +1,37 @@
+{
+  "id": "current-source-performance-baseline",
+  "name": "current-source-performance-baseline",
+  "title": "Establish current-source performance baseline",
+  "description": "Plan a reproducible current-main full benchmark and evidence-based bottleneck ranking using synthetic data.",
+  "status": "completed",
+  "dev_type": "backend",
+  "scope": "evidence",
+  "package": "agentsessions-cli",
+  "priority": "P1",
+  "creator": "QIN",
+  "assignee": "QIN",
+  "createdAt": "2026-10-13",
+  "completedAt": "2026-10-14",
+  "branch": "perf/current-source-baseline",
+  "base_branch": "main",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": "08-15-benchmark-install-open-source-gate",
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {
+    "planning_approval": {
+      "date": "2026-10-14",
+      "user_message": "批准实现！",
+      "scope": "Reviewed baseline tooling, measurements and source-bound publication plan; merge approval remains current-head-specific"
+    },
+    "delivery_authorization": {
+      "commit_push": true,
+      "basis": "Prior explicit project-wide user delegation plus approval of this final implementation plan",
+      "ordinary_merge": "Requires acceptance of the actual reviewed head"
+    }
+  }
+}

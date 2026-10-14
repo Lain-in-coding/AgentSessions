@@ -1,0 +1,6 @@
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"Review reuse and avoid a duplicate evidence pipeline"}
+{"file":".trellis/spec/agentsessions-cli/backend/index.md","reason":"Operational evidence and privacy requirements; do not modify the protected dirty spec"}
+{"file":".trellis/.runtime/attribution-closeout-20261012/canonical-repaired/CONTRIBUTING.md","reason":"Review actual candidate checks, privacy coverage and current-head owner acceptance without assuming release certification"}
+{"file":".trellis/tasks/10-13-current-source-performance-baseline/research/harness-coverage.md","reason":"Verify legacy helper compatibility, corpus-phase accuracy, real context semantics and independent correctness assertions"}
+{"file":".trellis/tasks/10-13-current-source-performance-baseline/research/methodology.md","reason":"Recompute raw statistics and check clock separation, repeatability, resource failure handling and trace interpretation"}
+{"file":".trellis/tasks/10-13-current-source-performance-baseline/research/provenance-publication.md","reason":"Audit strict extension validation, source/harness/binary/SQLite linkage and measured-source versus publication identity"}

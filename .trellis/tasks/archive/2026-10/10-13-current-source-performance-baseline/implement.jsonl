@@ -1,0 +1,6 @@
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"Reuse current harnesses rather than inventing a new benchmarking framework"}
+{"file":".trellis/spec/agentsessions-cli/backend/index.md","reason":"Operational evidence and privacy conventions; protected dirty spec, read only"}
+{"file":".trellis/.runtime/attribution-closeout-20261012/canonical-repaired/CONTRIBUTING.md","reason":"Canonical source, atomic publication, exact-head acceptance and privacy rules; read only"}
+{"file":".trellis/tasks/10-13-current-source-performance-baseline/research/harness-coverage.md","reason":"Current profile and shared-helper contracts, corpus phases, real context commands and correctness oracle anchors"}
+{"file":".trellis/tasks/10-13-current-source-performance-baseline/research/methodology.md","reason":"Approved-on-review repetition, warmup, clock, resource, trace and comparison protocol"}
+{"file":".trellis/tasks/10-13-current-source-performance-baseline/research/provenance-publication.md","reason":"Versioned extension compatibility, frozen source/build/SQLite identities and minimal S-to-P publication sequence"}
