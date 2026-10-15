@@ -3,9 +3,9 @@
 - Query: 若 O7 后冻结的 S3 按既定 R4 通过，怎样精确发布报告、保留 S2 失败、绑定测量源码，并完成本地与 PR/普通 merge 治理？
 - Scope: internal；产品规则、原 baseline bundle、harness/governance 源码及父基线研究只读；本轮只执行有关 CLI 的 `--help`，未执行 Git、测试、构建、benchmark、扫描或远端变更。
 - Date: 2026-10-15
-- Active task: `.trellis/tasks/10-15-optimize-50k-changed-sync`
+- Active task: `.trellis/tasks/archive/2026-10/10-15-optimize-50k-changed-sync`
 - P（产品根）：`./.trellis/.runtime/attribution-closeout-20261012/canonical-repaired`。
-- T（协调任务）：`./.trellis/tasks/10-15-optimize-50k-changed-sync`。
+- T（协调任务）：`./.trellis/tasks/archive/2026-10/10-15-optimize-50k-changed-sync`。
 - 已读当前决定：`design.md` §9 / `implement.md` 第五组，O7 仅处理相邻同种 Edge/Placement，使用 **BATCH_IN_CHUNK=500**；Activity/Usage 保持单行。`shrink-followup-after-g4.md` 已另追加决策说明，原512候选研究未被改写。
 
 ## Findings

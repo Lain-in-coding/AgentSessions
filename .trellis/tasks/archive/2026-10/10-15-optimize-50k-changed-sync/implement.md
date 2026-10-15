@@ -246,7 +246,7 @@
   strict protection 与 enforce_admins 保持开启；没有 merge、发布成功 bundle
   或改写原始测量。私有 `negative-closeout/final-disposition-receipt.json`
   记录全部 source/base/head、运行 ID 与核验结果。
-- [ ] 以 `performance_gate_failed` 结果归档本实验并记录本地 journal；
+- [x] 以 `performance_gate_failed` 结果归档本实验并记录本地 journal；
   父路线和发布门维持原状态。
 
 ## 发布（仅后续 G4 达标；采用实际被测源码前缀）
@@ -262,8 +262,8 @@
 - [ ] PR 基于 `Lain-in-coding/agent-session-grep` main；按用户 2026-10-14
   "全部 Git 权限"授权执行普通 merge；不自动关闭父发布门
   （`08-15-open-source-product-roadmap`）。
-- [ ] 协调根任务文件归档与 session journal 记录（`session_auto_commit: false`，
-  需手动提交）。
+- [x] 协调根任务文件归档与 session journal 记录（`session_auto_commit: false`，
+  任务归档手动提交，journal 按仓库规则保持本地、不得提交）。
 
 ## 回滚点
 

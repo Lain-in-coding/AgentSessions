@@ -1,0 +1,9 @@
+{"file":".trellis/spec/agentsessions-adapters-sqlite/backend/index.md","reason":"Verify the changed commit path still satisfies adapter contracts and the package quality gate"}
+{"file":".trellis/tasks/archive/2026-10/10-15-optimize-50k-changed-sync/research/correctness-contracts-and-verification.md","reason":"Check every invariant, fail-closed behaviour and required test surface against the diff"}
+{"file":".trellis/tasks/archive/2026-10/10-15-optimize-50k-changed-sync/research/candidate-optimizations-and-risks.md","reason":"Verify each implemented optimization maps to evidence and its listed risks are covered"}
+{"file":".trellis/tasks/archive/2026-10/10-15-optimize-50k-changed-sync/research/commit-path-hotspot-map.md","reason":"Cross-check candidate-to-code claims and stage accounting in the implemented diff"}
+{"file":".trellis/tasks/archive/2026-10/10-15-optimize-50k-changed-sync/research/constraints-and-prior-optimizations.md","reason":"Confirm no forbidden trade and no regression of prior optimizations"}
+{"file":".trellis/tasks/archive/2026-10/10-15-optimize-50k-changed-sync/research/50k-journal-row-diagnostic.md","reason":"For O5 review: byte math, dual-format reads and retention/recovery coverage"}
+{"file":".trellis/tasks/archive/2026-10/10-15-optimize-50k-changed-sync/research/baseline-protocol-and-thresholds.md","reason":"Verify R4 arithmetic, protocol reuse and report validity for the final measurement"}
+{"file":".trellis/.runtime/attribution-closeout-20261012/canonical-repaired/CONTRIBUTING.md","reason":"Review governance, privacy and exact-head acceptance requirements"}
+{"file":".trellis/tasks/archive/2026-10/10-15-optimize-50k-changed-sync/research/shrink-followup-after-g4.md","reason":"Verify O7 evidence and preserved relation ordering, transaction rollback and intent-byte contracts; do not reinterpret S2 failed R4 as a success"}

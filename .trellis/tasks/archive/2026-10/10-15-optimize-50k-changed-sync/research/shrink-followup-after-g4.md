@@ -3,7 +3,7 @@
 - Query: 独立验证 S2 正式三跑的 R4 失败；提取 shrink 每 trial、对应观测和 trace；核对当前逐条关系删除与连续同型批删的证据和可行边界。
 - Scope: internal / source-only；只读原始 JSON、trace、当前 adapter 源码与锁定 rusqlite 源码；未运行新 benchmark、build、test 或 Git；唯一新写入为本文件。
 - Date: 2026-10-15
-- Active task: `.trellis/tasks/10-15-optimize-50k-changed-sync`
+- Active task: `.trellis/tasks/archive/2026-10/10-15-optimize-50k-changed-sync`
 - 产品相对根：`./.trellis/.runtime/attribution-closeout-20261012/canonical-repaired`。
 
 ## Findings
@@ -131,7 +131,7 @@
 
 | 文件 | 用途 |
 | --- | --- |
-| `.trellis/tasks/10-15-optimize-50k-changed-sync/prd.md`、`design.md` | R3/R4、adapter提交范围、失败不得宣称成功 |
+| `.trellis/tasks/archive/2026-10/10-15-optimize-50k-changed-sync/prd.md`、`design.md` | R3/R4、adapter提交范围、失败不得宣称成功 |
 | 同任务`research/formal-protocol-verification.md` | 48主+8legacy区分、精确原基线阈值与时钟口径 |
 | `.trellis/spec/agentsessions-adapters-sqlite/backend/index.md:375` | durable manifest、原子性、正确性不能为性能放宽 |
 | `.trellis/spec/agentsessions-cli/backend/index.md:303` | evidence真实性/私有产物边界 |

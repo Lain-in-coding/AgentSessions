@@ -3,7 +3,7 @@
 - Query: 从原始 source-bound JSON 和同版本 harness 独立确定全部比较系列、精确 R4 门槛、跨轮 spread，以及 S2 冻结后的 run 1/2/3、trace、验证顺序。
 - Scope: internal；只读原始证据、规范和 harness；唯一写入为本研究文件；未执行 Git、build、test、benchmark 或新报告验证命令。
 - Date: 2026-10-15
-- Active task: `.trellis/tasks/10-15-optimize-50k-changed-sync`
+- Active task: `.trellis/tasks/archive/2026-10/10-15-optimize-50k-changed-sync`
 - 产品文件相对根：`./.trellis/.runtime/attribution-closeout-20261012/canonical-repaired`；任务/spec 相对根：`.`。
 
 ## Findings
