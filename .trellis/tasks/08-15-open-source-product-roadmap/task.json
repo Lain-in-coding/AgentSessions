@@ -28,10 +28,15 @@
     "08-15-loopback-web-ui-parity",
     "08-15-offline-privacy-hooks",
     "08-15-benchmark-install-open-source-gate",
-    "08-15-final-integration-release-rehearsal"
+    "08-15-final-integration-release-rehearsal",
+    "10-15-optimize-50k-changed-sync"
   ],
   "parent": null,
   "relatedFiles": [],
   "notes": "2026-08-16 当前集成阶段已完成并交接 CodeX；总路线仍未完成。已闭合：gate 全阈值 measured/pass、AdapterManifest、read-only checksum、Codex incremental evidence、providers maturity projection、ADR-0010 rollback。剩余本地 P0=6、P1=6、External=5，详见 final open-source audit。",
-  "meta": {}
+  "meta": {
+    "child_outcomes": {
+      "10-15-optimize-50k-changed-sync": "performance_gate_failed; unmerged experiment; parent release gates unchanged"
+    }
+  }
 }
