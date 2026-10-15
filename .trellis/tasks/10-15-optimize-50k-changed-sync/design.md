@@ -1,6 +1,6 @@
 # 优化 50k changed-sync 提交路径设计
 
-> 状态：in_progress（2026-10-15 已批准实施）。父任务：`08-15-open-source-product-roadmap`。
+> 状态：实验已结束，按未达标路径收尾（2026-10-15）。父任务：`08-15-open-source-product-roadmap`。
 > 目标仓库：产品仓库 `Lain-in-coding/agent-session-grep`；实现与复测落点 =
 > canonical checkout `./.trellis/.runtime/attribution-closeout-20261012/canonical-repaired`
 > （main = `de2c95d2c93f`，含基线 harness 与证据）。协调根仓库只保存任务/研究/日志。

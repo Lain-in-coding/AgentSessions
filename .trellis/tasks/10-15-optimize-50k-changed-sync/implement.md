@@ -226,19 +226,26 @@
 - [x] 独立复核探索门、S2 全范围质量收据与正式失败；不把收尾当作 AC3 通过。
   见 `research/o7-final-disposition-review.md`；原始样本、实存二进制、回退
   patch、S2 收据、五对公开身份提交的 tree/消息/姓名/时间均独立复核一致。
-- [ ] 提交协调任务研究与 spec 教训；产品原始被测提交在私有 ref 保留。
+- [x] 提交协调任务研究与 spec 教训；产品原始被测提交在私有 ref 保留。
+  协调工作提交 `d250c2f` 已记录研究、原型结果、源码身份与规范教训。
   GitHub GH007 拒绝私有邮箱推送后，五个尚未发布的提交仅改为同一账号的
   已核实 noreply 邮箱，保留各提交 tree、姓名、时间、消息与原子划分。
   public head = `c9af8bbc89e14e676471cd7be8eb55a4312273dd`，整树仍精确等于 S2。
   报告绑定原始 S2，不声称新 commit hash 被独立测量，不推送私有旧引用。
-- [ ] 对 S2 完成发布前路径/凭据/introduced-range 扫描，建立真实披露失败的
+- [x] 对 S2 完成发布前路径/凭据/introduced-range 扫描，建立真实披露失败的
   draft PR；读取当前候选 hosted checks，不合并、不生成成功性能文档。
   PR #22 已创建（`Lain-in-coding/agent-session-grep`），draft/open，公开 head
   为上述 `c9af8bbc`。原始 S2 和 public head 分别通过精确 base-trusted 路径/
   凭据扫描：588 个 tracked files、5 个 introduced commits、0 findings、
   0 unsupported。拟定 PR 文本已单独扫描；真实完整 PR event 由 hosted
   governance run `38729751352` 核验，其 `gate` 已 success。
-  hosted release verification 与 core-beta evidence 尚待结束。
+  hosted release verification run `38729751327`、core-beta evidence run
+  `38729751058` 均 success。最终 API 核对 25/25 check runs 全为 success，
+  `gate` 与 `all required verification checks` 均来自 App 15368，绑定公开
+  head `c9af8bbc`。完整 PR 正文与扫描版本一致，main 仍为 `de2c95d`。
+  strict protection 与 enforce_admins 保持开启；没有 merge、发布成功 bundle
+  或改写原始测量。私有 `negative-closeout/final-disposition-receipt.json`
+  记录全部 source/base/head、运行 ID 与核验结果。
 - [ ] 以 `performance_gate_failed` 结果归档本实验并记录本地 journal；
   父路线和发布门维持原状态。
 

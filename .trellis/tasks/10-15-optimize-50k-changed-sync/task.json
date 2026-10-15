@@ -32,6 +32,18 @@
     "main_merged": false,
     "pr_disposition": "draft_unmerged",
     "hosted_governance_run": 38729751352,
-    "hosted_governance": "success"
+    "hosted_governance": "success",
+    "hosted_checks": {
+      "status": "success",
+      "count": 25,
+      "required": [
+        "gate",
+        "all required verification checks"
+      ],
+      "app_id": 15368,
+      "release_verify_run": 38729751327,
+      "core_beta_evidence_run": 38729751058
+    },
+    "closeout_basis": "PRD honest-report and preserve-status-quo alternative; AC3 remains unmet"
   }
 }
