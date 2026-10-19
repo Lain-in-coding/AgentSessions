@@ -542,3 +542,113 @@ Correct: ask the adapter manifest what the provider streams, and let the stored
 scan rows decide whether an empty source is a no-op or a replacement.
 
 **Language**: write all guideline docs in **English**.
+
+## Scenario: Windows build-feedback evidence infrastructure
+
+### 1. Scope / Trigger
+The stdlib Python build-feedback commands under `scripts/evidence/` measure
+Windows NTFS/MSVC developer feedback and owned cache allocation. They are
+infrastructure, separate from product CLI/MCP/provider behavior and the official
+`core_beta_benchmark.py` release validator. Synthetic evidence cannot authorize
+profile adoption. Local paths, raw logs and tool/source receipts remain ignored.
+
+### 2. Signatures
+`build_feedback_benchmark.py inventory --root PATH [--store-root PATH] [--output FILE]`;
+`preview --protocol FILE --inventory FILE`; `run --protocol FILE [--review-receipt FILE]
+[--pair-limit 1..20]`; `compare --campaign FILE [--protocol FILE]
+[--qualifications FILE] [--output FILE]`. Public module APIs are
+`inventory(roots, store_roots=(), discover=True)`,
+`budget_status(B,current,free,predicted_growth=0)`, `make_protocol(configuration)`,
+`preview_protocol(protocol,inventory)` and `run_protocol(path,...)`.
+
+### 3. Contracts
+Inventory v1 reports allocated/logical bytes, global volume/file identity
+deduplication, root/cache contributions, aliases, informational exclusions,
+errors and completeness. Explicit source/Git/download cache declarations fail;
+nested excluded content is skipped while actual nested targets remain discoverable.
+Root/store overlap preserves store classification. Unknown reads or directory
+identity/metadata changes block admission; no logical-size fallback.
+
+Freeze the first complete related inventory as B. B+40 GiB requires explicit
+review; B+60 GiB blocks; C free must remain at least80 GiB after reserved growth.
+Do not rebase B or delete caches to make measurements fit. Timed polling uses
+conservative free-space/Job Object write bounds; quiet full handle scans remain
+allocation evidence. Anchor live free space at admission and retain its minimum
+observation so intervening external writes count. Enforce both the80 GiB floor
+and any stricter review floor; final allocation/free-space failure rejects the
+arm. Failed admission inventories and refusal receipts persist.
+
+Freeze source commit/tree/raw manifest, Cargo.lock/resources and concrete
+cargo/rustc1.97.1/MSVC binary hashes. Git line-ending stat noise is evaluated
+against actual diff plus byte-pinned manifest; staged/untracked drift fails.
+Real segment capture requires the verified MSVC environment receipt binding
+vcvars script/hash, compiler/linker and allowlisted LIB/INCLUDE/SDK variables;
+protocol preparation may precede verification, but real capture cannot. Changes
+stay child-local. Dedicated coordinator runtime/evidence-output source roots
+must be exact independent Git worktrees. Reject live/ordinary source roots,
+nested prewarm overlap, and output directories overlapping source roots.
+
+Six jobs use default features, --all-targets --locked --offline -j2; test threads2.
+Isolated layout runs six roots concurrently; three lanes run concurrent queues
+check/Clippy, domain+ports/CLI, SQLite/application. All roots, descendants and
+cache server launcher/listener live in one kill-on-close24 GiB committed-memory
+Job Object per arm. Incremental-on primary targets are reused for feedback/edit;
+only disposable one-shot-off uses a separate incremental-on feedback target.
+Defer artifact hashing until phase drain so it cannot hold up the next lane job.
+
+MBX uses explicit targets with views/lanes/adopt off, GC off, pinned CARGO and
+private child platform config/store. sccache warm-store candidate requires
+READ_ONLY and an unreachable internal LRU ceiling; cold prewarm writes are a
+separate guarded setup with six successful owned offline jobs. Store admission
+checks actual allocation strictly below its own reservation; whole-pair target
+forecast is not re-added to that store. MBX writes have an independent live
+reservation bound. Neither path changes global PATH or runs cleanup.
+The dedicated listener PID and every daemon descendant must remain job-owned;
+confirmed exited enumeration entries may be skipped, unknown identities fail.
+
+Pilot is fixed5 paired batches; formal is100 pairs per finalist, at most2.
+Order is seed-balanced;20 is a health checkpoint only. Preserve every attempt,
+retry only contamination with fresh allocations, and never drop resource/test
+failures. Cargo JSON from each invocation binds artifacts; overwritten lane
+artifacts use final file identity plus immutable logs. Qualification requires
+actual receipt/log/artifact/report hashes and same source/toolchain/protocol,
+not inline pass flags. The unchanged official validator is called through its
+shared path/expected-profile API; recheck the pinned report after validation and
+retain its original errors. Bootstrap95% CI uncertainty prevents adoption.
+
+### 4. Validation & Error Matrix
+Incomplete/changed inventory -> `inventory_capture_incomplete` with retained
+receipt; projected C free below80 GiB -> `projected_disk_free_below_minimum`
+before creating targets; source drift -> source-specific refusal; changed
+MSVC receipt -> identity refusal; unknown process/daemon -> capture failure;
+foreign build -> contaminated pair; job commit failure -> memory_limited;
+timeout -> whole-tree drain and retained failure; missing/stale qualification
+proof -> qualified=false. Missing real paired release CLI workload timing ->
+`qualification_release_cli_workload_timing_unverified`, even with a valid
+official report; enclosing harness wallclock is not release performance.
+Exit2 indicates incomplete/unqualified results.
+
+### 5. Good/Base/Bad Cases
+Good: complete deduplicated inventory, fixedB protocol, fresh frozen worktrees,
+quiet/offline job capture and100 valid identity-bound pairs with qualification.
+Base: safe inventory/preview or partial pilot reports useful observations while
+retaining incomplete evidence and no adoption. Bad: resetting B, deleting recent
+caches, treating summed concurrent durations as wallclock, certifying a readonly
+warm-store result as general write-cache behavior, or substituting5 for100.
+
+### 6. Tests Required
+Stdlib focused tests assert nested exclusions, root/store overlap, alias drift,
+immutable receipts, NTFS hardlinks/compression/sparse/ADS/junction loops,
+budget boundaries, raw source+Git drift, all-targets, fixedN/order/resume,
+real Windows six-root/three-lane concurrency, committed-memory and full-tree
+timeout/budget drain, daemon ownership, stale artifacts and fabricated proof
+rejection. `cargo fmt --all --check` remains the appropriate no-build check;
+real Cargo quality/optional-feature/release checks require budget admission.
+
+### 7. Wrong vs Correct
+Wrong: scan the whole runtime on every timed poll, count nested targets twice,
+require porcelain empty after byte-exact restoration, permit cache LRU to erase
+retained evidence, or accept `{status:passed}` as qualification.
+Correct: freeze completeB with identities, use low-cost conservative live bounds,
+check raw bytes and actual Git contents, isolate/no-evict cache tools, and verify
+immutable actual command/artifact proof before interpreting paired statistics.

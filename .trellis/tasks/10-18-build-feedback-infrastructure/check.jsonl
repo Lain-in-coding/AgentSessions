@@ -1,0 +1,5 @@
+{"file": ".trellis/spec/guides/index.md", "reason": "Required shared guide index."}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "New stdlib evidence helpers must reuse and validate common contracts."}
+{"file": ".trellis/tasks/10-18-build-feedback-infrastructure/research/verified-build-tool-boundaries.md", "reason": "Review cache/Windows failure boundaries against verified constraints"}
+{"file": ".trellis/spec/agentsessions-cli/backend/index.md", "reason": "Executable Windows build-feedback signatures, budget/source/toolchain/process and qualification contracts."}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Keep inventory, process, command-artifact and statistical evidence boundaries consistent."}
