@@ -16,8 +16,10 @@ import json
 import math
 import random
 import statistics
+import sys
 from collections import Counter
 from collections.abc import Iterable
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -130,6 +132,68 @@ def paired_bootstrap(
             "speedup_factor": before_value / after_value if after_value else None,
             "reduction_percent": 100 * (1 - ratio),
         }
+    return result
+
+
+def paired_cluster_bootstrap(
+    baseline: Iterable[Iterable[float]], candidate: Iterable[Iterable[float]], *,
+    seed: int, resamples: int = BOOTSTRAP_RESAMPLES,
+) -> dict[str, Any]:
+    """Resample paired runs, preserving every invocation within each run."""
+    before = [_samples(group, positive=True) for group in baseline]
+    after = [_samples(group, positive=True) for group in candidate]
+    if not before or len(before) != len(after) or any(len(left) != len(right) for left, right in zip(before, after)):
+        raise ValueError("release requires nonempty equally paired invocation groups")
+    if type(seed) is not int or type(resamples) is not int or resamples < 100:
+        raise ValueError("seed must be an integer and resamples must be at least 100")
+
+    def grouped_values(groups: list[list[float]]) -> list[tuple[float, list[tuple[int, int]]]]:
+        counts: dict[float, dict[int, int]] = {}
+        for index, group in enumerate(groups):
+            for value, count in Counter(group).items():
+                counts.setdefault(value, {})[index] = count
+        return [(value, list(counts[value].items())) for value in sorted(counts)]
+
+    def weighted_percentiles(values: list[tuple[float, list[tuple[int, int]]]], weights: list[int], count: int) -> tuple[float, float]:
+        p50_rank, p95_rank = math.ceil(count / 2), math.ceil(95 * count / 100)
+        accumulated = 0
+        p50 = None
+        for value, clusters in values:
+            accumulated += sum(weights[index] * occurrences for index, occurrences in clusters)
+            if p50 is None and accumulated >= p50_rank:
+                p50 = value
+            if accumulated >= p95_rank:
+                if p50 is None:
+                    raise ValueError("invalid release weighted median")
+                return p50, value
+        raise ValueError("release weighted sample coverage changed")
+
+    before_values, after_values = grouped_values(before), grouped_values(after)
+    before_flat = sorted(value for group in before for value in group)
+    after_flat = sorted(value for group in after for value in group)
+    distributions: dict[str, list[float]] = {"p50": [], "p95": []}
+    rng = random.Random(seed)
+    for _ in range(resamples):
+        weights = [0] * len(before)
+        for _ in before:
+            weights[rng.randrange(len(before))] += 1
+        count = sum(weight * len(group) for weight, group in zip(weights, before))
+        before_percentiles = weighted_percentiles(before_values, weights, count)
+        after_percentiles = weighted_percentiles(after_values, weights, count)
+        for index, name in enumerate(("p50", "p95")):
+            distributions[name].append(after_percentiles[index] / before_percentiles[index])
+    result: dict[str, Any] = {
+        "method": "paired_cluster_percentile_bootstrap", "resampling_unit": "paired_run",
+        "sample_count": len(before), "invocations_per_pair": [len(group) for group in before],
+        "invocation_count_per_arm": len(before_flat), "confidence_level": 0.95,
+        "seed": seed, "resamples": resamples, "unit": "ms",
+    }
+    for name in ("p50", "p95"):
+        left, right = _statistic(before_flat, name), _statistic(after_flat, name)
+        ratio = right / left
+        result[name] = {"baseline": left, "candidate": right, "ratio": ratio,
+                        "ci95": [nearest_rank(distributions[name], 2.5), nearest_rank(distributions[name], 97.5)],
+                        "speedup_factor": left / right, "reduction_percent": 100 * (1 - ratio)}
     return result
 
 
@@ -311,45 +375,259 @@ def _arm_proof_valid(arm: dict[str, Any], name: str, identity: dict[str, Any]) -
             and proof["feedback_warm_duration_ms"] == proof["phase_duration_ms"]["feedback-warm"])
 
 _RELEASE_VALIDATOR = None
+_RELEASE_VALIDATORS: dict[tuple[str, str], Any] = {}
+_RUNNER = None
+RELEASE_WORKLOADS = {
+    "cli_startup_warm_latency_ms": ("startup_warm", "warm", 20),
+    "cli_startup_cold_latency_ms": ("startup_cold", "cold", 20),
+    "search_latency_ms": ("search", "post_shrink", 100),
+    "show_latency_ms": ("show", "post_shrink", 100),
+    "get_latency_ms": ("get", "post_shrink", 100),
+}
 
 
-def _official_release_valid(proof: dict[str, Any], identity: dict[str, Any]) -> dict[str, Any]:
-    """Run only the checked-in pure validator, never a receipt-selected script."""
+def _runner_module():
+    global _RUNNER
+    if _RUNNER is None:
+        spec = importlib.util.spec_from_file_location("build_feedback_release_runner", Path(__file__).with_name("build_feedback_runner.py"))
+        if spec is None or spec.loader is None:
+            raise ValueError("release source verifier unavailable")
+        _RUNNER = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = _RUNNER
+        spec.loader.exec_module(_RUNNER)
+    return _RUNNER
+
+
+def _release_protocol(reference: Any, identity: dict[str, Any], protocol_hash: str,
+                      records: list[dict[str, Any]], *, campaign: Any) -> dict[str, Any]:
+    protocol = _proof_json(reference)
+    runner = _runner_module()
+    runner._validate_protocol(protocol)
+    if runner.canonical_sha256(protocol) != protocol_hash:
+        raise ValueError("release protocol digest mismatch")
+    source, chain = protocol["source"], protocol["toolchain"]
+    expected = {
+        "source_commit": source["commit"], "source_tree": source["tree"],
+        "lock_sha256": source["lock_sha256"], "resources_sha256": source["resources_sha256"],
+        "rustc_version": chain["rustc"]["version"], "cargo_version": chain["cargo"]["version"],
+        "rustc_sha256": chain["rustc"]["sha256"], "cargo_sha256": chain["cargo"]["sha256"],
+        "msvc_compiler_version": chain["msvc"]["compiler"]["version"],
+        "msvc_linker_version": chain["msvc"]["linker"]["version"],
+        "msvc_compiler_sha256": chain["msvc"]["compiler"]["sha256"],
+        "msvc_linker_sha256": chain["msvc"]["linker"]["sha256"],
+        "host": chain["target"], "jobs": protocol["jobs"], "test_threads": protocol["test_threads"],
+    }
+    if not _identity_matches(identity, expected):
+        raise ValueError("release protocol toolchain/source identity mismatch")
+    kind = "native" if all(config["tool"]["kind"] == "native" for config in protocol["configs"].values()) else "tool"
+    if not isinstance(campaign, dict) or any(campaign.get(field) != value for field, value in (
+        ("phase", protocol["phase"]), ("pairs_required", protocol["pairs"]),
+        ("seed", protocol["seed"]), ("schedule", protocol["order"]),
+        ("comparison_kind", kind), ("job_names", list(JOB_NAMES)),
+    )) or type(campaign.get("pairs_required")) is not int or type(campaign.get("seed")) is not int:
+        raise ValueError("release campaign phase/count/seed/order/kind differs from protocol")
+    runner_root = Path(protocol["run_root"]).resolve(strict=True)
+    if (len(records) != protocol["pairs"]
+            or any(type(record.get("pair_index")) is not int or type(record.get("attempt")) is not int
+                   or record["attempt"] < 0 for record in records)
+            or sorted(record["pair_index"] for record in records) != list(range(protocol["pairs"]))):
+        raise ValueError("release fixed paired allocation coverage differs from protocol")
+    allocations = {(entry["pair_index"], entry["attempt"]): entry for entry in protocol["allocations"]}
+    for record in records:
+        if record.get("order") != protocol["order"][record["pair_index"]]:
+            raise ValueError("release pair order differs from protocol")
+        allocation = allocations.get((record["pair_index"], record["attempt"]))
+        if allocation is None:
+            raise ValueError("release pair lacks approved source allocation")
+        for name in ("baseline", "candidate"):
+            arm = record[name]
+            config_hash = runner.canonical_sha256(protocol["configs"][name])
+            if arm.get("source_root") != allocation[name + "_source_root"] or arm.get("config_sha256") != config_hash:
+                raise ValueError("release arm source/config differs from protocol")
+            expected_root = runner_root / "pairs" / f"pair-{record['pair_index']:04d}-attempt-{record['attempt']:02d}" / name
+            reference = arm.get("evidence")
+            arm_proof = _proof_json(reference)
+            if (Path(reference["path"]).resolve(strict=True) != expected_root / "arm.json"
+                    or Path(arm_proof["target_root"]).resolve(strict=True) != expected_root / "targets"
+                    or arm_proof.get("source_root") != allocation[name + "_source_root"]
+                    or arm_proof.get("arm") != name or runner.canonical_sha256(arm_proof.get("config")) != config_hash):
+                raise ValueError("release arm receipt/target differs from approved run allocation")
+    return protocol
+
+
+def _official_release_valid(proof: dict[str, Any], identity: dict[str, Any], *,
+                            protocol: dict[str, Any] | None = None, arm_evidence: Any = None) -> dict[str, Any]:
+    """Invoke the exact official validator authorized by the frozen protocol."""
     global _RELEASE_VALIDATOR
     validator, data = _proof_file(proof.get("validator"))
-    canonical = Path(__file__).with_name("core_beta_benchmark.py").resolve()
-    if validator.resolve() != canonical or data != canonical.read_bytes():
-        raise ValueError("release validator is not the unchanged official validator")
-    if _RELEASE_VALIDATOR is None:
-        spec = importlib.util.spec_from_file_location("build_feedback_official_release_validator", canonical)
-        if spec is None or spec.loader is None:
-            raise ValueError("official release validator unavailable")
-        _RELEASE_VALIDATOR = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(_RELEASE_VALIDATOR)
+    if protocol is None:
+        canonical = Path(__file__).with_name("core_beta_benchmark.py").resolve()
+        if validator.resolve() != canonical or data != canonical.read_bytes():
+            raise ValueError("release validator is not the unchanged official validator")
+        if _RELEASE_VALIDATOR is None:
+            spec = importlib.util.spec_from_file_location("build_feedback_official_release_validator", canonical)
+            if spec is None or spec.loader is None:
+                raise ValueError("official release validator unavailable")
+            _RELEASE_VALIDATOR = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(_RELEASE_VALIDATOR)
+        module = _RELEASE_VALIDATOR
+    else:
+        runner = _runner_module()
+        root = Path(proof["source_root"]).resolve(strict=True)
+        runner._verify_source(root, protocol)
+        canonical = root / "scripts/evidence/core_beta_benchmark.py"
+        manifest = runner._manifest(_proof_json({"path": protocol["source"]["receipt_path"], "sha256": protocol["source"]["receipt_sha256"]}))
+        approved = [entry for entry in manifest if entry["path"] == "scripts/evidence/core_beta_benchmark.py"]
+        if (len(approved) != 1 or validator.resolve() != canonical.resolve()
+                or hashlib.sha256(data).hexdigest() != approved[0]["sha256"] or len(data) != approved[0]["bytes"]):
+            raise ValueError("release validator differs from approved frozen source")
+        key = (str(canonical), approved[0]["sha256"])
+        if key not in _RELEASE_VALIDATORS:
+            spec = importlib.util.spec_from_file_location("build_feedback_frozen_release_" + key[1], canonical)
+            if spec is None or spec.loader is None:
+                raise ValueError("approved official release validator unavailable")
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[spec.name] = module
+            spec.loader.exec_module(module)
+            _RELEASE_VALIDATORS[key] = module
+        module = _RELEASE_VALIDATORS[key]
+    argv = proof["capture"]["argv"]
+    # The validator path must be the executed script followed by its run
+    # subcommand. Merely finding both anywhere in argv also accepts wrappers,
+    # unrelated scripts and a validate-report invocation with trailing flags.
+    if (not isinstance(argv, list) or len(argv) < 3 or not isinstance(argv[1], str)
+            or Path(argv[1]).resolve() != canonical.resolve() or argv[2] != "run"):
+        raise ValueError("direct official release command required")
     report = _proof_json(proof.get("official_report"))
-    # The path + expected_profile API is shared by both coordinator and frozen
-    # Beta validators. Never catch a validator TypeError as API negotiation.
     with contextlib.redirect_stdout(io.StringIO()):
-        validated = _RELEASE_VALIDATOR.validate_report(Path(proof["official_report"]["path"]), expected_profile="full")
+        validated = module.validate_report(Path(proof["official_report"]["path"]), expected_profile="full")
     if validated != report or _proof_json(proof["official_report"]) != report:
         raise ValueError("official release report changed during validation")
+    if _proof_file(proof["validator"])[1] != data:
+        raise ValueError("official release validator changed during validation")
     baseline = report.get("baseline")
     if not isinstance(baseline, dict):
         raise TypeError("official release originating build proof missing")
+    capture_start, capture_end = _utc(proof["capture"]["started_at"]), _utc(proof["capture"]["finished_at"])
+    if not capture_start <= _utc(baseline["started_at_utc"]) <= _utc(baseline["completed_at_utc"]) <= capture_end:
+        raise ValueError("official release run interval exceeds captured command")
     source, build = baseline["source_before"], baseline["build_receipt"]
     config = build["configuration"]
     if not (report.get("commit") == identity["source_commit"] and source["cargo_lock_sha256"] == identity["lock_sha256"]
             and source["harness_sha256"] == proof["validator"]["sha256"]
+            and baseline.get("source_after") == source and build.get("source") == source
             and config["target"] == identity["host"] and config["rustc"] == identity["rustc_version"]
             and config["rustc_tool_sha256"] == identity["rustc_sha256"] and config["cargo_tool_sha256"] == identity["cargo_sha256"]
             and build["cargo_version"] == identity["cargo_version"].splitlines()[0]
-            and any(file.get("sha256") == build["binary_sha256"] for file in proof["artifacts"])):
+            and report.get("binary", {}).get("binary_hash") == build["binary_sha256"]):
         raise ValueError("official release build identity mismatch")
-    argv = proof["capture"]["argv"]
-    if "run" not in argv or "--workspace" not in argv or argv[argv.index("--workspace") + 1] != proof["source_root"]:
+    if (argv.count("--workspace") != 1
+            or argv.index("--workspace") + 1 >= len(argv) or argv[argv.index("--workspace") + 1] != proof["source_root"]):
         raise ValueError("official release command does not target this source")
-    return build["release_profile"]
+    if proof["capture"].get("cwd") != proof["source_root"]:
+        raise ValueError("official release capture cwd differs from arm source")
+    if argv.count("--output-dir") != 1 or argv.index("--output-dir") + 1 >= len(argv):
+        raise ValueError("official release output directory must be explicit")
+    output_directory = Path(argv[argv.index("--output-dir") + 1]).resolve(strict=True)
+    if Path(proof["official_report"]["path"]).resolve(strict=True).parent != output_directory:
+        raise ValueError("official report does not belong to the captured output directory")
+    for flag, value in (("--profile", "full"), ("--expected-commit", identity["source_commit"]),
+                        ("--baseline-run", str(baseline["run_ordinal"])), ("--suite-id", baseline["suite_id"])):
+        if argv.count(flag) != 1 or argv.index(flag) + 1 >= len(argv) or argv[argv.index(flag) + 1] != value:
+            raise ValueError("official release command/report lineage mismatch:" + flag)
+    binary = proof.get("release_binary")
+    if not isinstance(binary, dict):
+        raise TypeError("release binary file reference required")
+    binary_path, raw = _proof_file(binary)
+    if (binary.get("sha256") != build["binary_sha256"] or len(raw) != build["binary_size_bytes"]
+            or binary not in proof["artifacts"] or binary_path.suffix.lower() != ".exe"):
+        raise ValueError("official release binary differs from built artifact")
+    if protocol is not None:
+        arm = _proof_json(arm_evidence)
+        target_root = Path(arm["target_root"]).resolve(strict=True)
+        binary_root = output_directory.parent
+        # The official harness copies the Cargo-emitted release executable to
+        # suite_root/baseline-cli.exe and records its originating artifact.
+        if (not output_directory.is_relative_to(target_root.parent)
+                or binary_path.resolve(strict=True) != binary_root / "baseline-cli.exe"):
+            raise ValueError("release binary is not the captured official suite copy")
+        runner._verify_source(root, protocol)
+    profile = build["release_profile"]
+    if profile.get("opt_level") != "3" or profile.get("debug_assertions") is not False or profile.get("test") is not False:
+        raise ValueError("release profile changed")
+    return report
 
+
+def _utc(value: Any) -> datetime:
+    if not isinstance(value, str):
+        raise TypeError("release UTC timestamp must be a string")
+    stamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if stamp.tzinfo is None:
+        raise ValueError("release UTC timestamp must be timezone-aware")
+    return stamp
+
+
+def _release_workload_samples(report: dict[str, Any], proof: dict[str, Any]) -> dict[str, list[float]]:
+    """Extract only fixed raw CLI invocations from a verified full report."""
+    if report.get("profile") != "full" or report.get("evidence_status") != "locally_verified":
+        raise ValueError("release_cli_workload_timing_unverified")
+    baseline = report.get("baseline")
+    if not isinstance(baseline, dict) or not isinstance(baseline.get("anchor"), dict):
+        raise TypeError("release_cli_workload_timing_unverified")
+    observations = baseline["anchor"].get("observations")
+    if not isinstance(observations, list):
+        raise TypeError("release_cli_workload_timing_unverified")
+    capture_start, capture_end = _utc(proof["capture"]["started_at"]), _utc(proof["capture"]["finished_at"])
+    if capture_start > capture_end:
+        raise ValueError("release capture timestamp order changed")
+    results = {}
+    previous_end = capture_start
+    for entry in observations:
+        if not isinstance(entry, dict):
+            raise TypeError("release raw observation must be an object")
+        started, finished = _utc(entry.get("started_at_utc")), _utc(entry.get("completed_at_utc"))
+        if not previous_end <= started <= finished <= capture_end:
+            raise ValueError("release raw observations overlap or exceed capture")
+        previous_end = finished
+    for metric_name, (operation, state, count) in RELEASE_WORKLOADS.items():
+        entries = [entry for entry in observations if isinstance(entry, dict) and entry.get("legacy_metric") == metric_name]
+        if len(entries) != count:
+            raise ValueError("release raw workload coverage missing:" + metric_name)
+        metrics = report.get("metrics", {}).get(metric_name)
+        if (not isinstance(metrics, dict) or metrics.get("required_sample_count") != count or metrics.get("unit") != "ms"
+                or metrics.get("raw_samples") != [entry.get("legacy_duration_ms") for entry in entries]):
+            raise ValueError("release legacy/raw invocation links changed:" + metric_name)
+        values = []
+        for index, entry in enumerate(entries, 1):
+            if (entry.get("workload") != "anchor" or entry.get("operation") != operation or entry.get("role") != "measured"
+                    or entry.get("sample_index") != index or entry.get("legacy_sample_index") != index
+                    or entry.get("outcome") != "success" or type(entry.get("exit_code")) is not int or entry["exit_code"] != 0):
+                raise ValueError("release raw invocation identity failed:" + metric_name)
+            phase = "startup" if operation.startswith("startup_") else "post_shrink"
+            if entry.get("phase") != phase:
+                raise ValueError("release measurement state changed:" + metric_name)
+            argv = entry.get("argv")
+            if not isinstance(argv, list) or not all(isinstance(arg, str) for arg in argv):
+                raise ValueError("release invocation argv missing")
+            if operation.startswith("startup_"):
+                expected_binary = "binary" if operation == "startup_warm" else f"scratch/anchor/startup-cold-{index - 1:03d}.exe"
+                if argv != [expected_binary, "--version"]:
+                    raise ValueError("release startup invocation differs")
+            elif not (len(argv) >= 7 and argv[0] == "binary" and argv[1] == "--db" and argv[3:6] == ["--output", "json", operation]):
+                raise ValueError("release query invocation differs")
+            started, finished = _utc(entry.get("started_at_utc")), _utc(entry.get("completed_at_utc"))
+            if not capture_start <= started <= finished <= capture_end:
+                raise ValueError("release invocation outside captured command")
+            value = _number(entry.get("process_wall_ms"), "release process wall", positive=True)
+            legacy = _number(entry.get("legacy_duration_ms"), "release legacy duration", positive=True)
+            if value > legacy:
+                raise ValueError("release process time exceeds enclosing observation")
+            values.append(value)
+        expected_state = "cold_best_effort" if state == "cold" else "warm"
+        if metrics.get("state") != expected_state:
+            raise ValueError("release metric state changed")
+        results[metric_name] = values
+    return results
 
 
 def _command_proof_valid(proof: dict[str, Any], name: str, arm: dict[str, Any], identity: dict[str, Any], protocol_hash: str) -> bool:
@@ -393,7 +671,6 @@ def _command_proof_valid(proof: dict[str, Any], name: str, arm: dict[str, Any], 
             return False
         if report.get("validator") != "core_beta_benchmark" or report.get("build_environment_validated") is not True or report.get("release_profile_unchanged") is not True:
             return False
-        _official_release_valid(proof, identity)
     if name == "diagnostics":
         _, stdout = _proof_file({"path": capture["stdout_path"], "sha256": capture["stdout_sha256"]})
         _, stderr = _proof_file({"path": capture["stderr_path"], "sha256": capture["stderr_sha256"]})
@@ -409,7 +686,8 @@ def _command_proof_valid(proof: dict[str, Any], name: str, arm: dict[str, Any], 
 
 
 def _qualification_receipt(reference: Any, name: str, identity: dict[str, Any], protocol_hash: str,
-                           records: list[dict[str, Any]], required: int) -> tuple[dict[str, Any], dict[str, list[float]]]:
+                           records: list[dict[str, Any]], required: int, *, protocol_reference: Any = None,
+                           campaign: Any = None) -> tuple[dict[str, Any], dict[str, Any]]:
     """Validate every paired command link before considering any pass flag."""
     receipt = _proof_json(reference)
     if not (_bound_proof(receipt, identity, protocol_hash) and receipt.get("kind") == "build-feedback-qualification"
@@ -421,7 +699,15 @@ def _qualification_receipt(reference: Any, name: str, identity: dict[str, Any], 
     timed = name in ("edit", "release")
     if len(records) != required or not isinstance(samples, list) or (timed and len(samples) != 2 * required) or not samples:
         raise ValueError("fixed paired proof count missing")
-    measured = {}
+    protocol = None
+    if name == "release":
+        if protocol_reference is None:
+            raise ValueError("release_cli_workload_timing_unverified")
+        protocol = _release_protocol(protocol_reference, identity, protocol_hash, records, campaign=campaign)
+    measured: dict[tuple[int, int, str], Any] = {}
+    release_compatibility = None
+    report_hashes: set[str] = set()
+    release_intervals: dict[tuple[int, int, str], tuple[datetime, datetime]] = {}
     for sample in samples:
         if not isinstance(sample, dict) or type(sample.get("pair_index")) is not int or type(sample.get("attempt")) is not int:
             raise ValueError("invalid qualification sample")
@@ -441,11 +727,24 @@ def _qualification_receipt(reference: Any, name: str, identity: dict[str, Any], 
             if not _command_proof_valid(proof, name, arm, identity, protocol_hash):
                 raise ValueError("command proof missing or unsuccessful")
             if name == "release":
-                # Official report validation is necessary, but the enclosing
-                # harness duration includes setup/build work. The current
-                # interchange cannot bind the accepted paired CLI-workload
-                # measure; do not silently substitute harness wallclock.
-                raise ValueError("release_cli_workload_timing_unverified")
+                report = _official_release_valid(proof, identity, protocol=protocol, arm_evidence=arm["evidence"])
+                raw = _release_workload_samples(report, proof)
+                compatible = {
+                    "dataset": report["dataset"], "release_profile": report["baseline"]["build_receipt"]["release_profile"],
+                    "states": {metric: report["metrics"][metric]["state"] for metric in RELEASE_WORKLOADS},
+                }
+                if release_compatibility is not None and compatible != release_compatibility:
+                    raise ValueError("release workloads dataset/state/profile changed")
+                release_compatibility = compatible
+                digest = proof["official_report"]["sha256"]
+                if digest in report_hashes:
+                    raise ValueError("release official report reused across pairs or arms")
+                report_hashes.add(digest)
+                if any(field in sample for field in ("duration_seconds", "timings", "workload_samples")):
+                    raise ValueError("inline release timings cannot replace raw report observations")
+                measured[key] = raw
+                release_intervals[key] = (_utc(proof["capture"]["started_at"]), _utc(proof["capture"]["finished_at"]))
+                continue
             duration = proof["capture"]["duration_ms"] / 1000
         if "duration_seconds" in sample and sample["duration_seconds"] != duration:
             raise ValueError("sample duration is not the captured wallclock")
@@ -454,12 +753,25 @@ def _qualification_receipt(reference: Any, name: str, identity: dict[str, Any], 
         raise ValueError("qualification must cover both configurations")
     if not timed:
         return receipt, {}
+    if name == "release":
+        if "timings" in receipt:
+            raise ValueError("inline release timings cannot replace raw report observations")
+        previous_end = None
+        for record in records:
+            for arm_name in record["order"]:
+                started, finished = release_intervals[(record["pair_index"], record["attempt"], arm_name)]
+                if started > finished or (previous_end is not None and started < previous_end):
+                    raise ValueError("release pair capture order differs from frozen schedule")
+                previous_end = finished
+        return receipt, {metric: {
+            arm: [measured[(record["pair_index"], record["attempt"], arm)][metric] for record in records]
+            for arm in ("baseline", "candidate")
+        } for metric in RELEASE_WORKLOADS}
     timings = {arm: [measured[(record["pair_index"], record["attempt"], arm)] for record in records]
                for arm in ("baseline", "candidate")}
     if "timings" in receipt and receipt["timings"] != timings:
         raise ValueError("inline timings disagree with captured proof")
     return receipt, timings
-
 
 
 def compare_campaign(campaign: dict[str, Any]) -> dict[str, Any]:
@@ -532,7 +844,7 @@ def compare_campaign(campaign: dict[str, Any]) -> dict[str, Any]:
     if any(reason in shape_reasons for reason in reasons):
         return result
     assert isinstance(identity, dict) and isinstance(job_names, list) and isinstance(required, int)
-    assert isinstance(schedule, list) and isinstance(protocol_hash, str)
+    assert isinstance(schedule, list) and isinstance(protocol_hash, str) and isinstance(seed, int)
     grouped: dict[int, list[dict[str, Any]]] = {}
     for record in records:
         if not isinstance(record, dict):
@@ -713,18 +1025,27 @@ def compare_campaign(campaign: dict[str, Any]) -> dict[str, Any]:
     qualification_status: dict[str, bool] = {}
     for name in QUALIFICATIONS:
         reference = receipts.get(name) if isinstance(receipts, dict) else None
-        if name == "release":
-            reject("qualification_release_cli_workload_timing_unverified")
         try:
-            _, timings = _qualification_receipt(reference, name, identity, protocol_hash, valid, required)
+            options = {"protocol_reference": campaign.get("protocol_evidence"), "campaign": campaign} if name == "release" else {}
+            _, timings = _qualification_receipt(reference, name, identity, protocol_hash, valid, required, **options)
             qualification_status[name] = True
-            if name in ("edit", "release"):
+            if name == "edit":
                 measured = bootstrap(timings["baseline"], timings["candidate"])
                 result["metrics"][name] = measured
                 for estimator in ("p50", "p95"):
                     result["gates"][f"{name}_{estimator}"] = _gate(measured[estimator], 1.05)
-        except (OSError, ValueError, TypeError, KeyError, AttributeError):
+            elif name == "release":
+                for workload, samples in timings.items():
+                    measured = paired_cluster_bootstrap(samples["baseline"], samples["candidate"], seed=seed)
+                    key = "release_" + workload
+                    result["metrics"][key] = measured
+                    for estimator in ("p50", "p95"):
+                        result["gates"][f"{key}_{estimator}"] = _gate(measured[estimator], 1.05)
+        except (OSError, ValueError, TypeError, KeyError, AttributeError) as error:
             qualification_status[name] = False
+            if name == "release":
+                reject("qualification_release_cli_workload_timing_unverified")
+                result["release_evidence_error"] = str(error)
             reject(f"qualification_{name}_missing_or_invalid")
     result["qualification_receipts"] = qualification_status
     for name, gate in result["gates"].items():

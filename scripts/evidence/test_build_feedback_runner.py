@@ -592,7 +592,7 @@ class CampaignExecutionTests(unittest.TestCase):
         self.protocol_path = self.root / "protocol.json"
         write_json(self.protocol_path, self.protocol_value)
         self.sample = {"schema_version": 1, "complete": True, "errors": [], "allocated_bytes": 9 * RUNNER.GIB, "disk_free_bytes": 100 * RUNNER.GIB, "budget": simple_budget(7 * RUNNER.GIB, 9 * RUNNER.GIB, 100 * RUNNER.GIB)}
-        self.stubs = [patch.object(RUNNER, "_verify_segment_toolchain", side_effect=self.fake_segment), patch.object(RUNNER, "build_process_snapshot", return_value=[]), patch.object(RUNNER, "_budget_sample", return_value=self.sample), patch.object(RUNNER, "_inventory_module", return_value=SimpleNamespace(budget_status=simple_budget))]
+        self.stubs = [patch.object(RUNNER, "_verify_segment_toolchain", side_effect=self.fake_segment), patch.object(RUNNER, "build_process_snapshot", return_value=[]), patch.object(RUNNER, "_free_bytes", return_value=self.sample["disk_free_bytes"]), patch.object(RUNNER, "_budget_sample", return_value=self.sample), patch.object(RUNNER, "_inventory_module", return_value=SimpleNamespace(budget_status=simple_budget))]
         for stub in self.stubs:
             stub.start()
             self.addCleanup(stub.stop)
@@ -609,6 +609,22 @@ class CampaignExecutionTests(unittest.TestCase):
         result = {"schema_version": 1, "arm": arm, "source_commit": protocol["source"]["commit"], "source_tree": protocol["source"]["tree"], "status": "ok", "duration_ms": 3000, "retained_growth_bytes": RUNNER.GIB, "allocated_before_bytes": 4 * RUNNER.GIB, "peak_allocated_bytes": 6 * RUNNER.GIB, "jobs": [], "edit_jobs": [], "reasons": []}
         write_json(arm_root / "arm.json", result)
         return result
+
+    def test_quick_disk_refusal_precedes_inventory_and_target_creation(self):
+        minimum = 80 * RUNNER.GIB + self.protocol_value["predicted_growth_bytes"]
+        with (
+            patch.object(RUNNER, "_free_bytes", return_value=minimum - 1),
+            patch.object(RUNNER, "_budget_sample", side_effect=AssertionError("must refuse before full scan")),
+            self.assertRaisesRegex(RUNNER.ProtocolError, "projected_disk_free_below_minimum"),
+        ):
+            RUNNER.run_protocol(self.protocol_path)
+        self.assertFalse(Path(self.protocol_value["run_root"]).exists())
+        paths = list(self.root.glob("admission-disk-refused-*.json"))
+        self.assertEqual(len(paths), 1)
+        receipt = RUNNER._read_json(paths[0])
+        self.assertFalse(receipt["allowed"])
+        self.assertEqual(receipt["disk_free_bytes"], minimum - 1)
+        self.assertEqual(receipt["minimum_free_bytes"], 80 * RUNNER.GIB)
 
     def test_segment_resume_and_fixed_five_completed_pairs(self):
         with patch.object(RUNNER, "_run_arm", side_effect=self.fake_arm) as arms:

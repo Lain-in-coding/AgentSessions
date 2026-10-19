@@ -560,6 +560,10 @@ profile adoption. Local paths, raw logs and tool/source receipts remain ignored.
 `inventory(roots, store_roots=(), discover=True)`,
 `budget_status(B,current,free,predicted_growth=0)`, `make_protocol(configuration)`,
 `preview_protocol(protocol,inventory)` and `run_protocol(path,...)`.
+Release import uses `compare_campaign(campaign)` with an immutable
+`protocol_evidence={path,sha256}`, and
+`paired_cluster_bootstrap(baseline_runs,candidate_runs,seed=...)` returns paired
+run confidence bounds for raw CLI observations.
 
 ### 3. Contracts
 Inventory v1 reports allocated/logical bytes, global volume/file identity
@@ -612,9 +616,32 @@ retry only contamination with fresh allocations, and never drop resource/test
 failures. Cargo JSON from each invocation binds artifacts; overwritten lane
 artifacts use final file identity plus immutable logs. Qualification requires
 actual receipt/log/artifact/report hashes and same source/toolchain/protocol,
-not inline pass flags. The unchanged official validator is called through its
-shared path/expected-profile API; recheck the pinned report after validation and
-retain its original errors. Bootstrap95% CI uncertainty prevents adoption.
+not inline pass flags. Release comparison binds normalized phase, fixed N,
+comparison kind, seed, schedule, jobs, source/toolchain and every arm allocation
+to the hashed protocol. Arm receipt and target roots must equal the exact
+run-root/pairs/pair-index-attempt/arm allocation layout. Only its source-manifest-approved official validator in
+the exact arm worktree may execute `validate_report(path,expected_profile="full")`.
+Check validator path/hash/size, preserve original internal errors, and recheck
+validator/report bytes after validation. Capture argv directly executes the
+official script's run subcommand, and the complete baseline report interval must
+be inside that command capture. The suite binary is the originating Cargo
+artifact copy at `suite_root/baseline-cli.exe`.
+
+Release timings are the official full report's
+`baseline.anchor.observations[*].process_wall_ms`, covering
+`cli_startup_warm_latency_ms`20, `cli_startup_cold_latency_ms`20,
+`search_latency_ms`100, `show_latency_ms`100 and `get_latency_ms`100 per arm.
+Validate measured role/index/phase/argv/exit codes, legacy raw links, finite
+positive durations, serial observation/capture containment, same dataset/state/
+profile, approved pair order and unique report hashes across arms and pairs.
+Both startup operations have observation phase `startup`; metric state carries
+warm/cold meaning. Copied-binary cold state is `cold_best_effort`, without an
+OS-cache flush claim.
+Resample whole outer pairs, preserving all inner invocations, for 5000 seeded
+paired cluster percentile bootstrap draws; compute pooled nearest-rank P50/P95.
+Every `release_<metric>_{p50,p95}` upper95% ratio bound must be<=1.05.
+Uncertain bounds prevent adoption; synthetic success is implementation evidence
+only and never establishes actual release performance.
 
 ### 4. Validation & Error Matrix
 Incomplete/changed inventory -> `inventory_capture_incomplete` with retained
@@ -625,7 +652,9 @@ foreign build -> contaminated pair; job commit failure -> memory_limited;
 timeout -> whole-tree drain and retained failure; missing/stale qualification
 proof -> qualified=false. Missing real paired release CLI workload timing ->
 `qualification_release_cli_workload_timing_unverified`, even with a valid
-official report; enclosing harness wallclock is not release performance.
+legacy report lacking raw measured observations. Changed protocol projection,
+unapproved validator or missing/tampered/duplicate/overlapping release observations
+also refuse qualification; enclosing harness wallclock is not release performance.
 Exit2 indicates incomplete/unqualified results.
 
 ### 5. Good/Base/Bad Cases
@@ -634,7 +663,8 @@ quiet/offline job capture and100 valid identity-bound pairs with qualification.
 Base: safe inventory/preview or partial pilot reports useful observations while
 retaining incomplete evidence and no adoption. Bad: resetting B, deleting recent
 caches, treating summed concurrent durations as wallclock, certifying a readonly
-warm-store result as general write-cache behavior, or substituting5 for100.
+warm-store result as general write-cache behavior, substituting5 for100, or
+pooling inner release invocations as independent outer trials.
 
 ### 6. Tests Required
 Stdlib focused tests assert nested exclusions, root/store overlap, alias drift,
@@ -642,7 +672,10 @@ immutable receipts, NTFS hardlinks/compression/sparse/ADS/junction loops,
 budget boundaries, raw source+Git drift, all-targets, fixedN/order/resume,
 real Windows six-root/three-lane concurrency, committed-memory and full-tree
 timeout/budget drain, daemon ownership, stale artifacts and fabricated proof
-rejection. `cargo fmt --all --check` remains the appropriate no-build check;
+rejection. Release regressions assert protocol phase/N/seed/order/kind drift,
+approved-source validator import/common API and original errors, report/validator
+mutation, raw workload coverage and paired cluster versus explicit resampling.
+`cargo fmt --all --check` remains the appropriate no-build check;
 real Cargo quality/optional-feature/release checks require budget admission.
 
 ### 7. Wrong vs Correct
@@ -651,4 +684,6 @@ require porcelain empty after byte-exact restoration, permit cache LRU to erase
 retained evidence, or accept `{status:passed}` as qualification.
 Correct: freeze completeB with identities, use low-cost conservative live bounds,
 check raw bytes and actual Git contents, isolate/no-evict cache tools, and verify
-immutable actual command/artifact proof before interpreting paired statistics.
+immutable actual command/artifact/raw-report proof against the approved protocol
+before interpreting paired statistics. A successful validator import fixture does
+not certify a real release binary or performance result.

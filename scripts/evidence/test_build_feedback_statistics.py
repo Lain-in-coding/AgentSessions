@@ -5,9 +5,12 @@ import importlib.util
 import io
 import json
 import math
+import random
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 MODULE_PATH = Path(__file__).with_name("build_feedback_statistics.py")
@@ -146,7 +149,7 @@ def attach_synthetic_proofs(campaign):
                     if qualification == "optional_features":
                         argv.append("--all-features")
                     if qualification == "release":
-                        argv = ["synthetic-python", validator["path"]]
+                        argv = ["synthetic-python", str(Path(validator["path"])), "run", "--workspace", arm["source_root"]]
                     output = f"{Path(source['path']).as_posix()}:1: synthetic diagnostic\n".encode()
                     capture = capture_fixture(local, argv, output)
                     report = {"schema_version": 1, "kind": "build-feedback-qualification-report", "qualification": qualification,
@@ -212,6 +215,88 @@ class BootstrapTests(unittest.TestCase):
         for value in (True, -1, 1.5):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 STATS.store_reservation_bytes(value)
+
+
+def synthetic_official_report(arm, identity, *, scale=1.0, tag="sample", capture_start=None):
+    origin = capture_start or datetime(2026, 10, 19, tzinfo=timezone.utc)
+    observations = []
+    ordinal = 0
+    metrics = {}
+    for metric, (operation, state, count) in STATS.RELEASE_WORKLOADS.items():
+        entries = []
+        for index in range(1, count + 1):
+            argv = ["binary", "--version"] if operation == "startup_warm" else (
+                [f"scratch/anchor/startup-cold-{index - 1:03d}.exe", "--version"] if operation == "startup_cold" else
+                ["binary", "--db", "scratch/anchor/sync-trial-002/catalog.db", "--output", "json", operation, "synthetic-input"])
+            ordinal += 1
+            started = origin + timedelta(seconds=1, milliseconds=ordinal * 20)
+            finished = started + timedelta(milliseconds=10)
+            entry = {"workload": "anchor", "operation": operation,
+                     "phase": "startup" if operation.startswith("startup_") else "post_shrink", "role": "measured",
+                     "sample_index": index, "legacy_sample_index": index, "legacy_metric": metric,
+                     "outcome": "success", "exit_code": 0, "argv": argv,
+                     "process_wall_ms": 10.0 * scale, "legacy_duration_ms": 10000.0,
+                     "started_at_utc": started.isoformat(), "completed_at_utc": finished.isoformat()}
+            entries.append(entry)
+        observations.extend(entries)
+        metrics[metric] = {"name": metric, "unit": "ms", "required_sample_count": count,
+                           "state": "cold_best_effort" if state == "cold" else "warm",
+                           "raw_samples": [entry["legacy_duration_ms"] for entry in entries]}
+    return {"profile": "full", "evidence_status": "locally_verified", "tag": tag,
+            "dataset": {"dataset_hash": "a" * 64, "query_set": ["synthetic-input"], "file_count": 20},
+            "metrics": metrics, "baseline": {"anchor": {"observations": observations},
+                "build_receipt": {"release_profile": {"opt_level": "3", "test": False, "debug_assertions": False}}}}
+
+
+def attach_synthetic_release_reports(campaign):
+    reference = campaign["qualification_receipts"]["release"]
+    receipt = STATS._proof_json(reference)
+    for sample in receipt["samples"]:
+        arm = campaign["records"][sample["pair_index"]][sample["arm"]]
+        proof = STATS._proof_json(sample["evidence"])
+        order = campaign["records"][sample["pair_index"]]["order"]
+        capture_start = datetime(2026, 10, 19, tzinfo=timezone.utc) + timedelta(seconds=sample["pair_index"] * 30 + order.index(sample["arm"]) * 15)
+        proof["capture"]["started_at"], proof["capture"]["finished_at"] = capture_start.isoformat(), (capture_start + timedelta(seconds=10)).isoformat()
+        report = synthetic_official_report(arm, campaign["identity"], tag=f"{sample['pair_index']}/{sample['arm']}", capture_start=capture_start)
+        proof["official_report"] = write_proof(Path(arm["source_root"]) / "official-release.json", report)
+        proof_report = STATS._proof_json(proof["report"])
+        proof_report["capture_sha256"] = hashlib.sha256(json.dumps(proof["capture"], sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+        proof["report"] = write_proof(Path(proof["report"]["path"]), proof_report)
+        sample["evidence"] = write_proof(Path(sample["evidence"]["path"]), proof)
+    campaign["qualification_receipts"]["release"] = write_proof(Path(reference["path"]), receipt)
+    campaign["protocol_evidence"] = {"path": str(Path(reference["path"]).with_name("protocol.json")), "sha256": "1" * 64}
+
+
+class ReleaseClusterTests(unittest.TestCase):
+    def test_paired_groups_preserve_scale_and_run_unit(self):
+        before = [[1.0] * 20, [2.0] * 20, [10.0] * 20]
+        after = [[value / 2 for value in group] for group in before]
+        result = STATS.paired_cluster_bootstrap(before, after, seed=7, resamples=100)
+        self.assertEqual(result["resampling_unit"], "paired_run")
+        self.assertEqual(result["sample_count"], 3)
+        self.assertEqual(result["invocation_count_per_arm"], 60)
+        for name in ("p50", "p95"):
+            self.assertEqual(result[name]["ratio"], 0.5)
+            self.assertEqual(result[name]["ci95"], [0.5, 0.5])
+        self.assertEqual(result, STATS.paired_cluster_bootstrap(before, after, seed=7, resamples=100))
+
+    def test_cluster_bootstrap_matches_explicit_run_resampling(self):
+        before = [[1.0, 2.0], [3.0, 40.0], [5.0, 6.0]]
+        after = [[1.0, 2.0], [8.0, 50.0], [2.0, 4.0]]
+        result = STATS.paired_cluster_bootstrap(before, after, seed=19, resamples=100)
+        rng = random.Random(19)
+        ratios = {"p50": [], "p95": []}
+        for _ in range(100):
+            indices = [rng.randrange(3) for _ in range(3)]
+            left = [value for index in indices for value in before[index]]
+            right = [value for index in indices for value in after[index]]
+            for name, percentile in (("p50", 50), ("p95", 95)):
+                ratios[name].append(STATS.nearest_rank(right, percentile) / STATS.nearest_rank(left, percentile))
+        for name, values in ratios.items():
+            self.assertEqual(result[name]["ci95"], [STATS.nearest_rank(values, 2.5), STATS.nearest_rank(values, 97.5)])
+        for left, right in (([], []), ([[1]], []), ([[1, 2]], [[1]])):
+            with self.subTest(left=left, right=right), self.assertRaises(ValueError):
+                STATS.paired_cluster_bootstrap(left, right, seed=1, resamples=100)
 
 
 class CampaignTests(unittest.TestCase):
@@ -442,6 +527,7 @@ class CampaignTests(unittest.TestCase):
         spec.loader.exec_module(module)
         canonical = MODULE_PATH.with_name("core_beta_benchmark.py").resolve()
         proof["validator"] = {"path": str(canonical), "sha256": hashlib.sha256(canonical.read_bytes()).hexdigest()}
+        proof["capture"]["argv"] = ["python", str(canonical), "run", "--workspace", proof["source_root"]]
         proof["official_report"] = write_proof(Path(proof["source_root"]) / "fabricated-official.json", {
             "status": "passed", "build_environment_validated": True, "release_profile_unchanged": True})
         with self.assertRaises(ValueError):
@@ -458,6 +544,7 @@ class CampaignTests(unittest.TestCase):
         spec.loader.exec_module(module)
         canonical = MODULE_PATH.with_name("core_beta_benchmark.py").resolve()
         proof["validator"] = {"path": str(canonical), "sha256": hashlib.sha256(canonical.read_bytes()).hexdigest()}
+        proof["capture"]["argv"] = ["python", str(canonical), "run", "--workspace", proof["source_root"]]
         proof["official_report"] = write_proof(Path(proof["source_root"]) / "internal-error-report.json", {"synthetic": True})
         validator = Mock()
         calls = []
@@ -477,6 +564,294 @@ class CampaignTests(unittest.TestCase):
             module._official_release_valid(proof, campaign["identity"])
         self.assertEqual(calls, [(Path(proof["official_report"]["path"]), "full")])
         self.assertEqual(stdout.getvalue(), "")
+
+    def test_complete_raw_release_workloads_enable_qualified_synthetic_campaign(self):
+        campaign = campaign_fixture()
+        attach_synthetic_release_reports(campaign)
+        with (
+            patch.object(STATS, "_release_protocol", return_value={}),
+            patch.object(STATS, "_official_release_valid", side_effect=lambda proof, identity, **kwargs: STATS._proof_json(proof["official_report"])),
+        ):
+            result = STATS.compare_campaign(campaign)
+        self.assertTrue(result["qualified"], result["reasons"])
+        self.assertTrue(result["adopted"])
+        for workload in STATS.RELEASE_WORKLOADS:
+            measurement = result["metrics"]["release_" + workload]
+            self.assertEqual(measurement["resampling_unit"], "paired_run")
+            self.assertEqual(measurement["sample_count"], 100)
+            self.assertEqual(measurement["p50"]["baseline"], 10.0)
+            self.assertEqual(measurement["p95"]["ratio"], 1.0)
+        self.assertNotIn("release", result["metrics"])
+        self.assertNotIn("qualification_release_cli_workload_timing_unverified", result["reasons"])
+
+    def test_release_tail_regression_is_detected_without_harness_duration(self):
+        campaign = campaign_fixture("pilot")
+        attach_synthetic_release_reports(campaign)
+        receipt = STATS._proof_json(campaign["qualification_receipts"]["release"])
+        for sample in receipt["samples"]:
+            if sample["arm"] != "candidate":
+                continue
+            proof = STATS._proof_json(sample["evidence"])
+            report = STATS._proof_json(proof["official_report"])
+            entries = [entry for entry in report["baseline"]["anchor"]["observations"] if entry["legacy_metric"] == "search_latency_ms"]
+            for entry in entries[-6:]:
+                entry["process_wall_ms"] = 11.0
+            proof["official_report"] = write_proof(Path(proof["official_report"]["path"]), report)
+            sample["evidence"] = write_proof(Path(sample["evidence"]["path"]), proof)
+        campaign["qualification_receipts"]["release"] = write_proof(Path(campaign["qualification_receipts"]["release"]["path"]), receipt)
+        with (
+            patch.object(STATS, "_release_protocol", return_value={}),
+            patch.object(STATS, "_official_release_valid", side_effect=lambda proof, identity, **kwargs: STATS._proof_json(proof["official_report"])),
+        ):
+            result = STATS.compare_campaign(campaign)
+        self.assertTrue(result["qualification_receipts"]["release"])
+        self.assertFalse(result["gates"]["release_search_latency_ms_p95"]["passed"])
+        self.assertTrue(result["gates"]["release_search_latency_ms_p50"]["passed"])
+        self.assertAlmostEqual(result["metrics"]["release_search_latency_ms"]["p95"]["ratio"], 1.1)
+
+    def test_raw_release_coverage_and_capture_boundaries_reject_mutation(self):
+        campaign = campaign_fixture("pilot")
+        arm = campaign["records"][0]["baseline"]
+        original = synthetic_official_report(arm, campaign["identity"])
+        proof = {"capture": {"started_at": "2026-10-19T00:00:00Z", "finished_at": "2026-10-19T00:00:10Z"}}
+        self.assertEqual(STATS._release_workload_samples(original, proof)["search_latency_ms"], [10.0] * 100)
+        for mutate in (
+            lambda report: report["baseline"]["anchor"]["observations"].pop(),
+            lambda report: report["baseline"]["anchor"]["observations"][0].update(role="warmup"),
+            lambda report: report["baseline"]["anchor"]["observations"][0].update(phase="warm"),
+            lambda report: report["baseline"]["anchor"]["observations"][0].update(sample_index=2),
+            lambda report: report["baseline"]["anchor"]["observations"][0].update(exit_code=1),
+            lambda report: report["baseline"]["anchor"]["observations"][0].update(process_wall_ms=True),
+            lambda report: report["baseline"]["anchor"]["observations"][0].update(completed_at_utc="2026-10-19T00:00:11Z"),
+            lambda report: report["metrics"]["search_latency_ms"]["raw_samples"].__setitem__(0, 2.0),
+            lambda report: report["metrics"]["cli_startup_cold_latency_ms"].update(state="warm"),
+        ):
+            report = copy.deepcopy(original)
+            mutate(report)
+            with self.assertRaises((ValueError, TypeError)):
+                STATS._release_workload_samples(report, proof)
+
+    def test_release_protocol_binds_hash_source_toolchain_and_arm_allocations(self):
+        campaign = campaign_fixture("pilot")
+        identity = campaign["identity"]
+        chain = {key: {"version": identity[key + "_version"], "sha256": identity[key + "_sha256"]} for key in ("rustc", "cargo")}
+        chain.update(msvc={
+            "compiler": {"version": identity["msvc_compiler_version"], "sha256": identity["msvc_compiler_sha256"]},
+            "linker": {"version": identity["msvc_linker_version"], "sha256": identity["msvc_linker_sha256"]}}, target=identity["host"])
+        run_root = Path(campaign["records"][0]["baseline"]["source_root"]).parents[1] / "approved-run"
+        for record in campaign["records"]:
+            for name in ("baseline", "candidate"):
+                arm = record[name]
+                arm_proof = STATS._proof_json(arm["evidence"])
+                arm_root = run_root / "pairs" / f"pair-{record['pair_index']:04d}-attempt-{record['attempt']:02d}" / name
+                target = arm_root / "targets"
+                target.mkdir(parents=True)
+                arm_proof["target_root"] = str(target)
+                arm["evidence"] = write_proof(arm_root / "arm.json", arm_proof)
+        protocol = {"run_root": str(run_root), "source": {"commit": identity["source_commit"], "tree": identity["source_tree"],
+                              "lock_sha256": identity["lock_sha256"], "resources_sha256": identity["resources_sha256"]},
+                    "toolchain": chain, "jobs": 2, "test_threads": 2,
+                    "phase": campaign["phase"], "pairs": campaign["pairs_required"],
+                    "seed": campaign["seed"], "order": campaign["schedule"],
+                    "configs": {"baseline": {"name": "baseline", "tool": {"kind": "native"}},
+                                "candidate": {"name": "candidate", "tool": {"kind": "sccache"}}},
+                    "allocations": [{"pair_index": record["pair_index"], "attempt": record["attempt"],
+                        "baseline_source_root": record["baseline"]["source_root"],
+                        "candidate_source_root": record["candidate"]["source_root"]} for record in campaign["records"]]}
+        fake = SimpleNamespace(_validate_protocol=Mock(), canonical_sha256=Mock(side_effect=lambda value: campaign["protocol_sha256"] if value == protocol else campaign["records"][0][value["name"]]["config_sha256"]))
+        reference = write_proof(Path(campaign["records"][0]["baseline"]["source_root"]) / "approved-protocol.json", protocol)
+        with patch.object(STATS, "_runner_module", return_value=fake):
+            result = STATS._release_protocol(reference, identity, campaign["protocol_sha256"], campaign["records"], campaign=campaign)
+            self.assertEqual(result, protocol)
+            for field, value in (
+                ("phase", "formal"), ("pairs_required", 100), ("seed", campaign["seed"] + 1),
+                ("schedule", [list(reversed(order)) for order in campaign["schedule"]]), ("comparison_kind", "native"),
+                ("job_names", list(reversed(JOBS))), ("seed", float(campaign["seed"])),
+                ("pairs_required", 5.0),
+            ):
+                altered = copy.deepcopy(campaign)
+                altered[field] = value
+                with self.subTest(field=field, value=value), self.assertRaisesRegex(ValueError, "campaign phase/count/seed/order/kind"):
+                    STATS._release_protocol(reference, identity, campaign["protocol_sha256"], campaign["records"], campaign=altered)
+            with self.assertRaisesRegex(ValueError, "fixed paired allocation coverage"):
+                STATS._release_protocol(reference, identity, campaign["protocol_sha256"], campaign["records"][:-1], campaign=campaign)
+            reordered = copy.deepcopy(campaign["records"])
+            reordered[0]["order"] = list(reversed(reordered[0]["order"]))
+            with self.assertRaisesRegex(ValueError, "pair order differs"):
+                STATS._release_protocol(reference, identity, campaign["protocol_sha256"], reordered, campaign=campaign)
+            changed = copy.deepcopy(campaign["records"])
+            changed[0]["candidate"]["source_root"] = str(Path(changed[0]["candidate"]["source_root"]) / "other")
+            with self.assertRaisesRegex(ValueError, "source/config differs"):
+                STATS._release_protocol(reference, identity, campaign["protocol_sha256"], changed, campaign=campaign)
+            changed = copy.deepcopy(campaign["records"])
+            stale_arm = STATS._proof_json(changed[0]["baseline"]["evidence"])
+            changed[0]["baseline"]["evidence"] = write_proof(run_root / "stale-arm.json", stale_arm)
+            with self.assertRaisesRegex(ValueError, "receipt/target differs"):
+                STATS._release_protocol(reference, identity, campaign["protocol_sha256"], changed, campaign=campaign)
+            changed = copy.deepcopy(campaign["records"])
+            old_evidence = changed[0]["baseline"]["evidence"]
+            stale_arm = STATS._proof_json(old_evidence)
+            stale_arm["target_root"] = str(run_root)
+            changed[0]["baseline"]["evidence"] = write_proof(Path(old_evidence["path"]), stale_arm)
+            with self.assertRaisesRegex(ValueError, "receipt/target differs"):
+                STATS._release_protocol(reference, identity, campaign["protocol_sha256"], changed, campaign=campaign)
+            Path(reference["path"]).write_bytes(b"modified protocol")
+            with self.assertRaisesRegex(ValueError, "hash changed"):
+                STATS._release_protocol(reference, identity, campaign["protocol_sha256"], campaign["records"], campaign=campaign)
+
+    def test_release_rejects_same_report_inline_times_and_reversed_capture(self):
+        for mutation in ("inline", "reused", "reversed"):
+            campaign = campaign_fixture("pilot")
+            attach_synthetic_release_reports(campaign)
+            reference = campaign["qualification_receipts"]["release"]
+            receipt = STATS._proof_json(reference)
+            if mutation == "inline":
+                receipt["samples"][0]["duration_seconds"] = 1.0
+            else:
+                sample = receipt["samples"][1]
+                proof = STATS._proof_json(sample["evidence"])
+                if mutation == "reused":
+                    other = STATS._proof_json(receipt["samples"][0]["evidence"])
+                    proof["official_report"] = other["official_report"]
+                    proof["capture"]["started_at"] = other["capture"]["started_at"]
+                    proof["capture"]["finished_at"] = other["capture"]["finished_at"]
+                else:
+                    proof["capture"]["started_at"] = "2026-10-18T23:59:59Z"
+                    proof["capture"]["finished_at"] = "2026-10-19T00:01:00Z"
+                command_report = STATS._proof_json(proof["report"])
+                command_report["capture_sha256"] = hashlib.sha256(json.dumps(proof["capture"], sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+                proof["report"] = write_proof(Path(proof["report"]["path"]), command_report)
+                sample["evidence"] = write_proof(Path(sample["evidence"]["path"]), proof)
+            candidate_reference = write_proof(Path(reference["path"]).with_name(mutation + ".json"), receipt)
+            with (
+                patch.object(STATS, "_release_protocol", return_value={}),
+                patch.object(STATS, "_official_release_valid", side_effect=lambda proof, identity, **kwargs: STATS._proof_json(proof["official_report"])),
+                self.assertRaises(ValueError),
+            ):
+                STATS._qualification_receipt(candidate_reference, "release", campaign["identity"], campaign["protocol_sha256"], campaign["records"], 5, protocol_reference=campaign["protocol_evidence"])
+
+    def test_frozen_validator_requires_manifest_identity_before_execution(self):
+        campaign = campaign_fixture("pilot")
+        arm = campaign["records"][0]["baseline"]
+        receipt = STATS._proof_json(campaign["qualification_receipts"]["release"])
+        proof = STATS._proof_json(receipt["samples"][0]["evidence"])
+        root = Path(arm["source_root"])
+        canonical = root / "scripts/evidence/core_beta_benchmark.py"
+        validator = write_proof(canonical, b"# synthetic pinned official validator, never executed\n")
+        manifest_entry = {"path": "scripts/evidence/core_beta_benchmark.py", "sha256": validator["sha256"], "bytes": canonical.stat().st_size}
+        source_receipt = write_proof(root / "source-manifest.json", {"source_identity": {"files": [manifest_entry]}})
+        protocol = {"source": {"receipt_path": source_receipt["path"], "receipt_sha256": source_receipt["sha256"]}}
+        proof["validator"] = validator
+        proof["capture"]["argv"] = ["python", str(canonical), "run", "--workspace", proof["source_root"]]
+        proof["official_report"] = write_proof(root / "official.json", {"synthetic": True})
+        spec = importlib.util.spec_from_file_location("unmocked_frozen_stats", MODULE_PATH)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        fake = SimpleNamespace(_verify_source=Mock(), _manifest=Mock(return_value=[manifest_entry]))
+        rejecting_validator = SimpleNamespace(validate_report=Mock(side_effect=ValueError("official full validation rejects synthetic")))
+        key = (str(canonical), validator["sha256"])
+        with patch.object(module, "_runner_module", return_value=fake), patch.dict(module._RELEASE_VALIDATORS, {key: rejecting_validator}):
+            with self.assertRaisesRegex(ValueError, "official full validation rejects synthetic"):
+                module._official_release_valid(proof, campaign["identity"], protocol=protocol, arm_evidence=arm["evidence"])
+            self.assertEqual(rejecting_validator.validate_report.call_count, 1)
+            unrelated = write_proof(root / "unrelated/core_beta_benchmark.py", canonical.read_bytes())
+            proof["validator"] = unrelated
+            with self.assertRaisesRegex(ValueError, "differs from approved frozen source"):
+                module._official_release_valid(proof, campaign["identity"], protocol=protocol, arm_evidence=arm["evidence"])
+            self.assertEqual(rejecting_validator.validate_report.call_count, 1)
+
+    def test_manifest_approved_validator_imports_common_api_and_rechecks_files(self):
+        """Synthetic validator proves the import boundary, never release performance."""
+        campaign = campaign_fixture("pilot")
+        arm = campaign["records"][0]["baseline"]
+        root = Path(arm["source_root"])
+        source = root / "scripts/evidence/core_beta_benchmark.py"
+        validator = write_proof(source, b"""import json
+from pathlib import Path
+calls = []
+def validate_report(path, expected_profile=None):
+    calls.append((path, expected_profile))
+    report = json.loads(path.read_text(encoding='utf-8'))
+    if expected_profile != 'full' or report.get('profile') != expected_profile:
+        raise ValueError('synthetic validator profile mismatch')
+    if report.get('mutate_validator'):
+        Path(__file__).write_text('# changed validator', encoding='utf-8')
+    if report.get('mutate_report'):
+        path.write_text('{}', encoding='utf-8')
+    return report
+""")
+        manifest = [{"path": "scripts/evidence/core_beta_benchmark.py", "sha256": validator["sha256"],
+                     "bytes": source.stat().st_size}]
+        receipt = write_proof(root / "approved-source.json", {"source_identity": {"files": manifest}})
+        protocol = {"source": {"receipt_path": receipt["path"], "receipt_sha256": receipt["sha256"]}}
+        identity = campaign["identity"]
+        binary = write_proof(root / "suite/baseline-cli.exe", b"synthetic suite binary")
+        output = root / "suite/report"
+        output.mkdir()
+        origin = {"cargo_lock_sha256": identity["lock_sha256"], "harness_sha256": validator["sha256"]}
+        report = {
+            "profile": "full", "commit": identity["source_commit"],
+            "binary": {"binary_hash": binary["sha256"]},
+            "baseline": {"source_before": origin, "source_after": copy.deepcopy(origin),
+                "started_at_utc": "2026-10-19T00:00:01Z", "completed_at_utc": "2026-10-19T00:00:09Z",
+                "run_ordinal": 1, "suite_id": "synthetic-suite",
+                "build_receipt": {"source": copy.deepcopy(origin),
+                    "configuration": {"target": identity["host"], "rustc": identity["rustc_version"],
+                        "rustc_tool_sha256": identity["rustc_sha256"], "cargo_tool_sha256": identity["cargo_sha256"]},
+                    "cargo_version": identity["cargo_version"].splitlines()[0],
+                    "binary_sha256": binary["sha256"], "binary_size_bytes": Path(binary["path"]).stat().st_size,
+                    "release_profile": {"opt_level": "3", "debug_assertions": False, "test": False}}},
+        }
+        proof = {"source_root": str(root), "validator": validator,
+            "official_report": write_proof(output / "official.json", report),
+            "release_binary": binary, "artifacts": [binary],
+            "capture": {"cwd": str(root), "started_at": "2026-10-19T00:00:00Z", "finished_at": "2026-10-19T00:00:10Z",
+                "argv": ["python", str(source), "run", "--workspace", str(root),
+                "--output-dir", str(output), "--profile", "full", "--expected-commit", identity["source_commit"],
+                "--baseline-run", "1", "--suite-id", "synthetic-suite"]}}
+        arm_reference = write_proof(root / "suite/arm.json", {"target_root": str(root / "suite/target")})
+        (root / "suite/target").mkdir()
+        spec = importlib.util.spec_from_file_location("unmocked_approved_import_stats", MODULE_PATH)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        # Source/Git validation has separate runner coverage. Use its real manifest
+        # decoder and actual module import/API here, without injecting a validator.
+        runner = module._runner_module()
+        with patch.object(runner, "_verify_source") as verify:
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                self.assertEqual(module._official_release_valid(proof, identity, protocol=protocol,
+                    arm_evidence=arm_reference), report)
+            self.assertEqual(stdout.getvalue(), "")
+            self.assertEqual(verify.call_count, 2)
+            loaded = module._RELEASE_VALIDATORS[(str(source), validator["sha256"])]
+            self.assertEqual(loaded.calls, [(Path(proof["official_report"]["path"]), "full")])
+            for mutation in ("unrelated_script", "validation_subcommand"):
+                changed = copy.deepcopy(proof)
+                if mutation == "unrelated_script":
+                    changed["capture"]["argv"][1] = str(root / "unrelated.py")
+                    changed["capture"]["argv"].append(str(source))
+                else:
+                    changed["capture"]["argv"][2] = "validate-report"
+                    changed["capture"]["argv"].append("run")
+                with self.subTest(mutation=mutation), self.assertRaisesRegex(ValueError, "direct official release command"):
+                    module._official_release_valid(changed, identity, protocol=protocol, arm_evidence=arm_reference)
+            changed = copy.deepcopy(proof)
+            changed["capture"]["cwd"] = str(output)
+            with self.assertRaisesRegex(ValueError, "cwd differs"):
+                module._official_release_valid(changed, identity, protocol=protocol, arm_evidence=arm_reference)
+            for field, stamp in (("started_at", "2026-10-19T00:00:02Z"), ("finished_at", "2026-10-19T00:00:08Z")):
+                changed = copy.deepcopy(proof)
+                changed["capture"][field] = stamp
+                with self.subTest(field=field), self.assertRaisesRegex(ValueError, "run interval exceeds captured command"):
+                    module._official_release_valid(changed, identity, protocol=protocol, arm_evidence=arm_reference)
+            for field in ("mutate_report", "mutate_validator"):
+                with self.subTest(field=field):
+                    altered = copy.deepcopy(report)
+                    altered[field] = True
+                    proof["official_report"] = write_proof(output / "official.json", altered)
+                    with self.assertRaisesRegex(ValueError, "hash changed|changed during validation"):
+                        module._official_release_valid(proof, identity, protocol=protocol, arm_evidence=arm_reference)
 
     def test_release_harness_wallclock_is_not_cli_workload_evidence(self):
         campaign = campaign_fixture("pilot")

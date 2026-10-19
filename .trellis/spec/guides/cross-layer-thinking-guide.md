@@ -293,6 +293,18 @@ projection, and make `reduceThreads` the only thread replay reducer.
       while ignored runtime paths remain usable after helper installation?
 - [ ] Is actual release CLI workload timing verified independently of the
       enclosing harness duration before publishing a release performance gate?
+- [ ] Does normalized phase/N/seed/schedule/configuration still match the immutable
+      source protocol, including retry allocations, exact receipt/target layout
+      and arm order?
+- [ ] Does approved validator selection bind source-manifest path/hash/size and
+      recheck validator/report bytes after its common API returns?
+- [ ] Are raw invocation coverage, state, dataset and serial capture intervals
+      retained, with the entire report run contained in the directly executed
+      official command and unique report hashes across paired runs?
+- [ ] Does bootstrap resample outer pairs with all their inner observations,
+      rather than claiming each invocation is an independent trial?
+- [ ] Are import/API regression fixtures distinguished from actual release
+      performance qualification and fixed-N campaign completion?
 
 Executable contracts live in `scripts/evidence/build_feedback_*.py`, their
 focused `unittest` suites, and `docs/operations/BUILD-FEEDBACK.md`. These are

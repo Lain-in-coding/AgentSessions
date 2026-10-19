@@ -31,10 +31,10 @@
     "scripts/evidence/test_build_feedback_runner.py",
     "scripts/evidence/test_build_feedback_statistics.py"
   ],
-  "notes": "Reviewed tooling delivered; fixedB remains intact. Pilot/formal and real paired release CLI workload timing are incomplete, so no profile/tool adoption and no task archive. Session ends at this implementation checkpoint.",
+  "notes": "Release raw-observation import and protocol/source/validator bindings implemented and tested. Complete fixed baseline remains intact. Actual pilot0/5, formal0/100 and paired release performance are still blocked by disk admission; no profile/tool adoption, task archive or next-stage planning. This session delivers a local implementation checkpoint only.",
   "meta": {
     "plan_revision": "2026-10-18-running-constraints-complete",
-    "implementation_state": "tooling-reviewed-and-delivered; pilot-and-formal-blocked",
+    "implementation_state": "release-raw-evidence-import-implemented-and-validated; real-pilot-and-formal-blocked",
     "source_repository": "Lain-in-coding/agent-session-grep",
     "formal_pairs_per_finalist": 100,
     "max_finalists": 2,
@@ -43,25 +43,62 @@
     "baseline_allocated_bytes": 156436568120,
     "pilot_completed_valid_pairs": 0,
     "formal_completed_valid_pairs": 0,
-    "operational_blocker": "projected disk free below80GiB with39GiB next-pair reservation; concurrent external build caused incomplete admission inventory",
+    "operational_blocker": "projected disk free below80GiB after39GiB next-pair reservation; latest free observation76.04GiB versus119GiB admission requirement; fixed baseline not reset",
     "implementation_branch": "chore/build-feedback-infrastructure-20261018",
     "tooling_validation": {
       "ruff": "passed all8files --target-version py310",
       "mypy": "passed all8files --no-incremental --follow-imports skip --python-version 3.10",
       "focused_tests": {
-        "runner": 48,
-        "benchmark": 13,
+        "runner": 49,
+        "benchmark": 14,
         "inventory": 28,
-        "statistics": 27
+        "statistics": 36
       },
-      "coordinator_protocol": "passed existing frozen protocol validation and3source-boundary tests",
-      "cargo_fmt": "passed --all --check on frozen implementation",
-      "release_cli_workload_timing": "not captured; qualification refuses",
-      "official_validator_compatibility": "shared path/expected-profile API; pinned report rechecked; original internal errors retained",
+      "coordinator_protocol": "existing frozen protocol validated; normalized phase/N/seed/order/config/allocation drift rejection covered",
+      "cargo_fmt": "passed cargo fmt --all --check on coordinator; no Cargo compilation",
+      "release_cli_workload_timing": "raw official observations import implemented; no actual paired release reports; qualification refuses missing proof",
+      "official_validator_compatibility": "approved frozen manifest/hash/size and exact arm source; shared validate_report(path,expected_profile=full), rechecked validator/report, original internal errors retained",
+      "approved_frozen_validator_api_smoke": {
+        "status": "passed again after final independent-review fixes",
+        "data": "complete synthetic full official-report fixture; no measured release performance",
+        "validator_sha256": "aeb23f909de805f507f45c1c61a20cf940a111ee962a0c6d6cd4ae37a49f39f8",
+        "source_revalidation": "passed before and after actual validator",
+        "raw_sample_counts": {
+          "cli_startup_warm_latency_ms": 20,
+          "cli_startup_cold_latency_ms": 20,
+          "search_latency_ms": 100,
+          "show_latency_ms": 100,
+          "get_latency_ms": 100
+        },
+        "whole_run_capture_containment": "passed"
+      },
       "aggregate_tests": {
-        "passed": 116,
-        "duration_seconds": 176.37,
-        "location": "coordinator delivery"
+        "passed": 127,
+        "duration_seconds": 246.639,
+        "location": "coordinator final post-review release-import checkpoint"
+      },
+      "independent_review": "Trellis check passed after3confirmed boundary fixes; no remaining confirmed code defects; final127-test aggregate passed after fixes"
+    },
+    "previous_tooling_checkpoint": {
+      "commit": "e6162add3ab28b72abc0986cc1d8965663758c08",
+      "validation": {
+        "ruff": "passed all8files --target-version py310",
+        "mypy": "passed all8files --no-incremental --follow-imports skip --python-version 3.10",
+        "focused_tests": {
+          "runner": 48,
+          "benchmark": 13,
+          "inventory": 28,
+          "statistics": 27
+        },
+        "coordinator_protocol": "passed existing frozen protocol validation and3source-boundary tests",
+        "cargo_fmt": "passed --all --check on frozen implementation",
+        "release_cli_workload_timing": "not captured; qualification refuses",
+        "official_validator_compatibility": "shared path/expected-profile API; pinned report rechecked; original internal errors retained",
+        "aggregate_tests": {
+          "passed": 116,
+          "duration_seconds": 176.37,
+          "location": "coordinator delivery"
+        }
       }
     }
   }

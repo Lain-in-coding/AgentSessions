@@ -202,7 +202,14 @@ interchange is for independently verified evidence import, not a way to make a
 pilot formal or certify guessed booleans. It requires:
 
 - `schema_version=1`, `phase`, `pairs_required=5|100`, `comparison_kind=native|tool`,
-  `protocol_sha256`, `seed`, and the protocol's balanced `schedule`.
+  `protocol_sha256`, `seed`, and the protocol's balanced `schedule`. Release
+  qualification also requires `protocol_evidence={path,sha256}` for the actual
+  approved protocol file. The comparator binds phase, fixed N, comparison kind,
+  seed, pair order, identity and arm allocations to that file. Arm receipts and
+  target roots must also match the exact preallocated pair/attempt/arm output
+  layout under its run root; changing a
+  normalized campaign cannot turn a pilot into formal evidence. CLI `--protocol`
+  supplies this absolute local reference when normalizing a runner campaign.
 - `identity`: source commit/tree, lock/resources hashes, full rustc/cargo/MSVC
   compiler/linker versions and hashes, Windows host, jobs=2 and test_threads=2.
 - `job_names`: exactly `check`, `domain-ports`, `cli`, `sqlite`, `application`,
@@ -244,25 +251,55 @@ pilot formal or certify guessed booleans. It requires:
   file/line; those exact file:line locations must appear in command output.
   Release proofs pin the unchanged official `core_beta_benchmark.py`
   validator, its invocation and artifact/report hashes plus `official_report`
-  as an absolute hashed file reference. The comparator executes only the
-  checked-in **pure** official report validator (not the receipt-selected
-  script) through its shared path/expected-profile API, rechecks the pinned
-  report after validation, requires originating baseline build evidence,
-  matches commit/lock/compiler/Cargo/binary hashes, and validates release-profile
-  facts, and binds the official run's workspace to this source. This
-  does **not** weaken or replace that validator. Operators must generate
-  receipts from actual official runs, never fabricate report booleans.
+  as an absolute hashed file reference. The comparator loads only the official
+  validator pinned in the approved frozen source manifest and exact arm
+  worktree, through `validate_report(path, expected_profile="full")`. The
+  coordinating checkout's sibling script or a receipt-selected arbitrary script
+  cannot replace that approved source. It rechecks the validator and report
+  hashes after validation, retains original validation errors, requires
+  originating baseline build evidence, matches commit/lock/compiler/Cargo/binary
+  identity, and binds the full run, workspace, output directory, release profile
+  and deterministic dataset to this source. The captured command must directly
+  execute that script's `run` subcommand, and the complete report run interval
+  must be contained within the capture interval. The official suite executable is
+  the Cargo artifact copy at `suite_root/baseline-cli.exe`. Operators must
+  generate receipts from actual official runs; existing official validation is
+  unchanged.
 - Optional `pilot_store_peak_allocated_bytes`: an independently measured store
   peak for the reservation forecast. Missing store peaks are reported as such.
 
-**Release timing limitation:** the accepted release gate concerns real CLI
-workload performance, not total harness setup/build/runtime wallclock. The
-current qualification interchange does not verify that paired workload measure.
-Even a valid official report and successful enclosing harness capture therefore
-leave release unqualified with
-`qualification_release_cli_workload_timing_unverified`; no release timing metric
-or adoption claim is emitted. Existing official validation remains unchanged;
-this task does not add or relax a release protocol to make the gate pass.
+**Release workload evidence:** timing comes exclusively from the verified
+full report's `baseline.anchor.observations[*].process_wall_ms`. Neither enclosing
+harness `capture.duration_ms` nor inline duration/sample arrays establish CLI
+performance. Each arm must contain these successful measured invocations:
+
+| Report metric | Invocation | Samples per arm | Measurement state |
+| --- | --- | --- | --- |
+| `cli_startup_warm_latency_ms` | `--version` using the suite binary | 20 | warm |
+| `cli_startup_cold_latency_ms` | `--version` using a fresh binary copy | 20 | `cold_best_effort` |
+| `search_latency_ms` | JSON `search` after shrink | 100 | warm |
+| `show_latency_ms` | JSON `show` after shrink | 100 | warm |
+| `get_latency_ms` | JSON `get` after shrink | 100 | warm |
+
+The copied-binary state does not mean OS caches were flushed. Invocation
+indices, operations, phases, argv, exit codes and legacy/raw sample links must
+match the official report. Both startup operations use observation phase
+`startup`; their warm/cold state is recorded separately in the metric. Raw
+process timings must be finite and positive,
+observations must be serial and contained within their captured command, and
+paired commands must follow the approved order without overlap. Dataset, state
+and release-profile facts must match across arms and pairs. Reusing an official
+report hash across arms or pairs fails qualification.
+
+An outer paired run is the independent sampling unit. The release comparison
+uses 5,000 seeded paired cluster resamples, retaining every inner invocation
+within each selected pair and calculating pooled nearest-rank P50/P95. Each of
+the five workloads requires a candidate/baseline upper 95% interval bound
+<=1.05 for both estimators. Results use `release_<report metric>` keys. Missing,
+changed, failed or incomplete raw evidence retains
+`qualification_release_cli_workload_timing_unverified` and remains unqualified.
+The import path is implemented; actual qualifying paired reports have not yet
+been generated for this campaign.
 
 Use nearest-rank P50/P95, without interpolating the even-N median. Ratios are
 candidate/baseline; reduction percent is `100*(1-ratio)` and speedup factor is
@@ -275,7 +312,7 @@ bootstrap, not an adaptive significance search or a claim of BCa correction.
 | --- | --- |
 | Native profile/incremental/layout | Allocated P50 ratio upper 95% bound <=0.90, allocated P95 <=1.05; primary and all primary/feedback job P50/P95 upper bounds <=1.05 |
 | Cache tool | Primary P50 ratio upper 95% bound <=0.85; primary P95 and all primary/feedback job P50/P95 upper bounds <=1.05 |
-| Both | Edit and release P50/P95 upper bounds <=1.05; all independent qualification receipts pass; complete exact fixed-N evidence |
+| Both | Edit and each of the five release workloads P50/P95 upper bounds <=1.05; all independent qualification receipts pass; complete exact fixed-N evidence |
 
 Uncertain bounds fail adoption. Pilot output has **no `adopted` field** and
 `qualified=false`; formal output may set `adopted=true` only when every
@@ -306,8 +343,10 @@ peak or a qualified store reservation. The retained disk-refusal receipt
 observed **113.249 GiB** free; subtracting the forecast leaves **74.249 GiB**,
 below the required **80 GiB** floor. Quick disk admission refused the build
 before Cargo and saved an immutable reason receipt. Later samples continued to
-show insufficient space. Free space is an observation, not a permanent
-guarantee; a subsequent attempt must recompute admission against the same B.
+show insufficient space; the continuation observed approximately **76.04 GiB**
+free, below the **119 GiB** needed to start that pair. Free space is an
+observation, not a permanent guarantee; a subsequent attempt must recompute
+admission against the same B.
 
 **Pilot: 0/5 pairs; formal: 0/100 pairs.** No further build attempt is made
 in this final integration state. The task remains `in_progress`.
@@ -339,9 +378,14 @@ python scripts/evidence/build_feedback_benchmark.py compare --help
 When the local Ruff and Mypy tools are available, check all eight helper and
 test files with `ruff check --target-version py310` and
 `mypy --no-incremental --follow-imports skip --python-version 3.10`. These are
-development checks, not runtime dependencies. The 2026-10-19 runner audit
-passed its 48 tests; inventory, CLI and statistics suites were also checked.
-Final aggregate results are recorded in the active task checkpoint.
+development checks, not runtime dependencies. The earlier `e6162ad` checkpoint
+passed 116 aggregate tests, including 48 runner tests. That is historical
+validation of the earlier implementation. The release-import continuation
+passed **127 aggregate tests** (inventory 28, CLI 14, runner 49, statistics 36),
+all eight files in Ruff/Mypy, Rust formatting and whitespace checks. The actual
+approved frozen validator also passed a complete synthetic full-report import
+smoke with source revalidation and raw sample extraction. These results verify
+implementation and format compatibility; they are not release performance data.
 
 Native Windows tests check real allocation handles, hardlink/alias dedup,
 Job Object descendants, process/output limits and artifact identity as

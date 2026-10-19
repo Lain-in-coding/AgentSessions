@@ -117,6 +117,23 @@ class BuildFeedbackCliTests(unittest.TestCase):
             self.assertEqual(code, 2)
             self.assertIn("requires --protocol", stderr)
 
+    def test_runner_compare_pins_exact_protocol_file_for_release_import(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            campaign_path, protocol_path = root / "campaign.json", root / "protocol.json"
+            campaign_path.write_text('{"kind":"build-feedback-campaign"}', encoding="utf-8")
+            protocol_path.write_text('{"source":{"commit":"synthetic"}}', encoding="utf-8")
+            statistics = SimpleNamespace(compare_campaign=Mock(return_value={"qualified": False}))
+            normalized = {"phase": "pilot"}
+            with patch.object(CLI, "normalize_runner_campaign", return_value=normalized), patch.object(CLI, "_module", return_value=statistics):
+                code, _, stderr = invoke(["compare", "--campaign", str(campaign_path), "--protocol", str(protocol_path)])
+            self.assertEqual(code, 2)
+            self.assertEqual(stderr, "")
+            payload = statistics.compare_campaign.call_args.args[0]
+            self.assertEqual(payload["protocol_evidence"], {
+                "path": str(protocol_path.resolve()), "sha256": CLI.sha256_file(protocol_path),
+            })
+
     def test_runner_normalization_preserves_attempts_and_missing_store_proof(self):
         jobs = ["check", "domain-ports", "cli", "sqlite", "application", "clippy"]
         tool_identity = {"version": "synthetic version", "sha256": "c" * 64}

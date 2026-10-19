@@ -312,6 +312,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 protocol = read_json(args.protocol)
                 qualifications = read_json(args.qualifications) if args.qualifications else {}
                 campaign = normalize_runner_campaign(campaign, protocol, qualifications)
+                campaign["protocol_evidence"] = {
+                    "path": str(args.protocol.resolve(strict=True)),
+                    "sha256": sha256_file(args.protocol),
+                }
             elif args.protocol is not None or args.qualifications is not None:
                 raise ValueError("normalized campaign already contains its protocol identity and qualifications")
             result = _module("statistics").compare_campaign(campaign)
