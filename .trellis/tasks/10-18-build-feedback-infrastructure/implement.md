@@ -440,11 +440,19 @@ Pilot protocol. Runner process-tree termination now waits on the Windows job
 handle after ActiveProcesses reaches zero, closing the observed descendant
 signal race.
 
-Final v6 tooling gate: **281 tests passed, 0 failures/errors/skips in 823.156
+Final v6 tooling gate: **281 tests passed, 0 failures/errors/skips in 817.355
 seconds** across inventory35/runner107/retention53/benchmark21/statistics62/
 coordinator3. Ruff, Mypy, and scoped whitespace checks passed. Current hashes
 are frozen at this checkpoint; any further tool edit invalidates generated
 approvals and requires the complete gate again.
+
+Native fixture v6-003 then passed under these semantics. Windows Shell emitted
+recursive pre/post callbacks for each descendant. The helper now proves every
+callback path is inside the exact sealed root, maps its relative path to one
+unique manifest entry, and checks NTFS identity, allocation, logical size,
+timestamp and file hash before deletion. The fixture moved, matched, purged and
+released 8192 allocated bytes; target and bin identity disappeared and every
+unrelated recycle item remained unchanged.
 
 
 ### Final shared ten-file review and actual checkpoint (2026-10-20)
