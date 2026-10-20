@@ -3,3 +3,4 @@
 {"file": ".trellis/tasks/10-18-build-feedback-infrastructure/research/verified-build-tool-boundaries.md", "reason": "Current official Cargo, MBX, sccache and Win32 contracts; no implied measured speedups"}
 {"file": ".trellis/spec/agentsessions-cli/backend/index.md", "reason": "Executable Windows build-feedback signatures, budget/source/toolchain/process and qualification contracts."}
 {"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Keep inventory, process, command-artifact and statistical evidence boundaries consistent."}
+{"file": "docs/operations/BUILD-FEEDBACK.md", "reason": "Current v2 bounded capacity/retention/provenance contracts and execution limits; v1 80GiB/fixed100 remains preserved. Tool checkpoints are synthetic validation, not measured performance."}

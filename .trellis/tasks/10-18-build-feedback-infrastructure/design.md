@@ -1,5 +1,64 @@
 # Design
 
+## Active revision: bounded trial implementation (2026-10-19)
+
+This section is the technical plan for the user's accepted Q1-Q5 revision, approved by the latest repeated 'use the recommendation' confirmation. The v1 implementation90cd908 and protocol contract below remain the preserved historical behavior. The revision-bound v2 implementation passed its final ten-file independent review, Ruff/Mypy and277tests/665.248s; real capacity, Pilot and formal evidence are still absent. Do not edit/reinterpret the immutable v1 protocol to waive80GiB/fixed100 gates. Capacity probes are not Pilot/Formal samples.
+
+### Modules and owned changes
+The roles below describe the initial module split. Current exclusive ownership and residual fix scopes are recorded at the top/end of implement.md; they supersede earlier dispatch permissions.
+
+Main owns PRD/design/implementation/check manifests, operations/spec updates, preallocated source paths, exact approved disposal plan, scoped commits and trial admission. Inventory worker owns build_feedback_inventory.py/tests: parameterized versioned floor/external allowance, actual owned target/output/recycle-pending accounting. Runner worker owns build_feedback_runner.py/tests: guarded single-job capacity command, reservation provenance, versioned phase/fixedN, source/MSVC/quiet/process capture and cap-stop classification. Evidence worker owns build_feedback_statistics.py, benchmark.py and tests: one shared Cargo JSON log decoder, streaming artifact verification, approved per-arm seals, recycle-state proof import and formal-N lock. The existing8Python modules/tests remain; a focused build_feedback_retention.py plus meaningful lifecycle tests owns the new irreversible disposition boundary. No child stages/commits or deletes protected paths.
+
+### Protocol and admission
+Protocolv2 distinguishes capacity/Pilot/Formal and binds budget_policy.minimum_free_bytes=40GiB, external_growth_allowance_bytes=8GiB, predicted_growth_bytes/reservation_provenance, source/lock/manifest/MSVC/toolchain, configs, exact job schedule, output allocations, retention/disposal policy and fixedN. V1 stays strict with80GiB/fixed100 and normal live-artifact proof. For initial capacity the owned-output cap is8GiB; require at least56GiB free plus valid fixedB/quiet/source/toolchain/commit headroom. The low free-space/owned-growth/JobIO guard terminates the whole owned job before budget exhaustion and records capacity_limited separately from test/quality failure. Polling is low-cost and monitors output/transfer growth; complete allocation scans happen outside timing. Predictions are not replaced by an arbitrary lower number; later probes generate explicit actual peak+margin receipts. Source inputs remain preallocated independent worktrees and no source deletion is introduced.
+
+### Probe execution and peaks
+
+The initial leaf-capacity input shape remains unchanged. Expanded full capacity
+uses `capacity_probe={kind:"full-arm-and-qualification",stage:"expanded",
+source_root,arm,owned_output_cap_bytes}` and a `declared-full-arm-cap`
+provenance binding the genuine preceding leaf observation and a rationale.
+The full-workload observation cap is an explicit controlled-output limit,
+not a forecast that the workload will fit. After a verified leaf observation,
+the first cap is at least8GiB and at least the prior observed peak with the
+existing reservation margin; its8GiB form starts with56GiBfree and may stop
+early. The old39GiB v1 retained-pair forecast is not lowered or repurposed.
+The leaf observation supplies a prerequisite, never a full-workload peak.
+Full capacity retains phasecapacity, pairs0 and no performance samples while
+reusing one configured arm's18primary/warm/edit commands. A coordinator
+finalizer must execute and verify complete quality/release evidence under the
+same cumulative cap before a distinct full-capacity seal can supply reservation
+provenance. Both compared configuration hashes require observed full closures;
+a smaller measured Pilot reservation uses their maximum verified peak+margin.
+
+Generated `qualification_allocations` bind every arm source and an exact
+ignored `evidence-output/build-feedback/<deterministic-suite>` official release
+suite within that independent source. The frozen official producer requires
+that source-relative location; v2 does not relocate its report/binary lineage.
+These external suite and declared scratch roots count with target/log/store
+and retained evidence allocation. Use an approved process-local release
+environment without unsupported RUSTC/wrapper/CC/CARGO_PROFILE overrides;
+select the pinned toolchain by child PATH and explicit official arguments,
+keeping all global setup and frozen validator bytes unchanged. V2 _verify_source includes ignored files and permits only the exact declared official suite, rejecting reparse outputs. Load official validator from approved source bytes through _ApprovedSourceLoader, without reading or writing .pyc; releasechild sets PYTHONDONTWRITEBYTECODE=1.
+
+Run isolated domain/ports check/test starting with the smallest declared leaf work, default features --all-targets --locked --offline -j2 and test threads2; one command at a time. Preserve incremental on across warm/edit while it is being measured. Do not label a small-crate probe as six-job performance evidence. Capture source/tool identity, Job Object24GiBcommitted-memory, output/protocol identity, actual observed allocation/minimum free-space and status. Safely drain any cap stop, finalize immutable receipts, and leave no false success. Native sample count, same source and output target identities are explicit. Success or deliberate cap-stop may enter the user's task-only recycle policy after verification; crash/quality/source failures remain protected. Expansion is evidence-based and re-admitted, not automatic lowering of guards.
+
+### Per-arm verification, sealing and qualification
+Keep the6job inner layouts and phase order primary -> feedback-warm -> edit unchanged. Outer arms are serial and fresh. Before recycling a successful arm, perform all artifact-dependent verification and any required Clippy/diagnostic/optional-feature/release qualification while its output bytes exist; source, checker, protocol and disposition policy must be approved independently of any receipt-selected code. Stream hashes and Cargo lines, retaining strict decoding, exact build-finished/test-tail rules and final-file semantics; unify runner/normalizer/statistics so valid test-tail braces cannot diverge. Clippy/optionalfeature qualification replays real Cargo records and complete capture artifact lists; diagnostics binds independently approved argv, frozen source manifest and original Cargo artifact lineage. Keep raw logs/reports immutable. A versioned seal references protocol/source/toolchain/config, pair/attempt/arm, actual command evidence, artifact manifest/hash/size/NTFS identity, owned allocation peak, verification results, approved checker digest and the closure hash over all retained evidence. Seal publication is atomic only after complete validation and drain. A chain binds earlier seals and the disposal policy; it is a local verification record, not independent cryptographic attestation. Full-capacity observations carry a distinct seal with null pair ordinals and performance_evidence=false; paired validators cannot reinterpret it as a Pilot/Formal arm. Final full-output allocation and cumulative qualifiers remain separate from the immutable original arm receipt. Full-capacity seal_path and ordinary qualification logs/reports stay in the budgeted capacity arm directory; the official suite remains in its declared source. Interrupted diagnostics or release without complete reports remain protected, even with a cap-stop marker.
+
+Retain report/log bytes and final selected executable(s), source snapshot, key proof files and closure indexes in budgeted evidence storage. Local HMAC protects approved seals/leases/stage receipts from ordinary JSON rehashing, using a hash-bound32byte key retained outside targets. It does not establish independent attestation against a key holder. Known sibling checker and all verification tool hashes are independently approval-bound. The comparison path for live artifacts remains strict. V2 normalization must pin the exact original runner campaign with runner_campaign_evidence={path,sha256}; comparison revalidates and regenerates the original attempts, failure/status, observations and registered compute/storage projection. A successful arm seal cannot erase a later failed campaign or budget limit. Recycled proof requires matching sealed-state and exact completed disposition receipt; absence alone or inline verified=true never qualifies. Revalidate all retained byte hashes and recompute statistics from raw observations. If pre-recycle verification needed a missing artifact/qualification, keep unsealed output and refuse disposal. Interrupted sealing/move/purge is restart-safe: check existing side effects, never repeat uncertain deletes or count unresolved bytes as freed.
+
+### Recycle/Purge state machine
+New -> drain_and_verify -> seal_written -> scope_revalidated -> recycled -> recycle_identity_verified -> purged_exact_item -> free_space_verified -> disposition_complete. Allow only preapproved task-owned successful targets or cap-stopped probe intermediates. Assert resolved absolute path and descendant-only target, no junction/symlink/reparse/hardlink ambiguity, no source/Git/store/seed/failed-path overlap and no active Cargo/rustc/rust-analyzer. Use supported Windows recycle APIs and inspect actual Shell operation Pre/PostDelete results and newly enumerated exact item to bind original absolute path, observed identity/size/tree and immutable operation time; select only the newly matched item(s). Purge through an exact supported recycle-item action, never Clear-RecycleBin or parent-directory deletion. Preserve UI/system-confirmation failures; if matched entry or recycle preservation cannot be proven, stop with retained state. Test first using a separately approved tiny literal fixture seal with performance_evidence=false, without fabricating Cargo/capacity success or other bin mutations. Check quota before each move so unrelated older entries are not evicted. Timed builds exclude seal/hash/recycle/purge latency; disclose total cycle time separately. A moved item still consumes capacity until its exact purge and actual disk free observation complete. Observe the immediate pre-purge free baseline after the helper has flushed and revalidated its own intent receipts; signed completion records that observation. If a crash loses this immediate baseline after a known completed purge, publish release_inconclusive and never repeat the delete or invent released bytes from an earlier prepared observation.
+
+### Pilot and fixedN selection
+Once a full arm fits from actual capacity evidence, run5paired nativeA Pilot batches with bounded live intermediates and preserved qualifying proof. Use each pair's timing/resource/failure/retained-evidence measurements to proposeN before formal collection; formal may be smaller than100only in the new version. A local sample-plan receipt binds completed Pilot/report hash, rationale, preregisteredN, maximum duration/storage, seed/order, candidate/protocol and stopping rule. Selection cannot inspect or extend formal data. Keep20as maximum health-segment length; at most2finalists. Uncertain confidence bounds do not adopt. No exactN promised during planning.
+
+### Compatibility, rollback and checks
+Old v1 campaigns/receipts and source snapshots are read-only, with their original requirements. Add new capacity/retention/N fields behind the new protocol version; absence of those fields preserves v1 rejection rules. Recycled-state support cannot turn legacy missing artifacts into success. Rollback disables new entry points and retains all immutable evidence; disposed intermediate bytes are regenerated from frozen source when needed, not silently reconstructed as prior evidence. No global PATH/pagefile/Cargo defaults/release-profile/product changes. Validate budget/probe state boundaries, honest cap statuses, stream parsing, source/validator identity, seal/disposal crash and forgery/path cases, real harmless Windows recycle/purge and unchanged v1/full workload/quality tests. Perform Trellis independent check before actual capacity run. Current127tests are prior-checkpoint evidence only.
+
+## Previous v1 implementation design
+
 ## Ownership and modules
 The implementation checkout and raw receipts are recorded only in ignored local runtime. Shared task metadata contains branch/commit identities, never personal machine paths. Main session creates the frozen worktree and coordinates execution/commits. All workers must read shared global rules and task manifests; never revert others or write outside assigned files.
 

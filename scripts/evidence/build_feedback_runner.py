@@ -1,8 +1,12 @@
 """Windows-only, fail-closed build experiment runner (Python 3.10+, stdlib).
 
 Public entry points: JOBS, make_protocol(configuration=None, **fields),
-preview_protocol(protocol, inventory_report), and run_protocol(protocol_path,
-review_receipt_path=None, pair_limit=20). No command creates a Git worktree,
+preview_protocol(protocol, inventory_report), run_protocol(protocol_path,
+review_receipt_path=None, pair_limit=20, arm_finalizer=None),
+capacity_command(protocol,target), capture_qualification(protocol,arm_record,name),
+and parse_cargo_json_file(path,target,source).
+V2 binds40GiB free floor plus8GiB external allowance and explicit reservations;
+V1 retains80GiB/fixed100. Capacity is a declared leaf or full arm with qualifications, never paired data. No command creates a Git worktree,
 installs a tool, deletes an output, or changes a shared Cargo configuration.
 
 make_protocol takes explicit source_root/source_commit/source_tree,
@@ -19,15 +23,17 @@ from __future__ import annotations
 import ctypes
 import hashlib
 import importlib.util
+import io
 import json
 import math
 import os
 import random
 import socket
 import subprocess
+import sys
 import time
 import uuid
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from ctypes import wintypes
 from datetime import datetime, timezone
 from functools import lru_cache
@@ -36,6 +42,10 @@ from typing import Any
 
 GIB = 1024 ** 3
 MEMORY_LIMIT_BYTES = 24 * GIB
+BOUNDED_MINIMUM_FREE_BYTES = 40 * GIB
+EXTERNAL_GROWTH_ALLOWANCE_BYTES = 8 * GIB
+INITIAL_CAPACITY_OUTPUT_CAP_BYTES = 8 * GIB
+QUALIFICATION_NAMES = ("clippy", "diagnostics", "optional_features", "release")
 JOBS = (
     {"name": "check", "args": ("check", "--workspace", "--all-targets"), "lane": "check-clippy"},
     {"name": "domain-ports", "args": ("test", "-p", "agent-session-grep-domain", "-p", "agent-session-grep-ports", "--all-targets"), "lane": "domain-cli"},
@@ -96,6 +106,14 @@ def _read_json(path: Path) -> dict:
     value = json.loads(path.read_text(encoding="utf-8"), parse_constant=reject_constant, object_pairs_hook=unique_keys)
     _require(isinstance(value, dict), "json_object_required")
     return value
+
+
+def _read_small_capture(path: Path, limit_bytes: int = 1024 * 1024) -> bytes:
+    """Version/banner capture only; oversized tool output fails with logs kept."""
+    with path.open("rb") as handle:
+        data = handle.read(limit_bytes + 1)
+    _require(len(data) <= limit_bytes, "toolchain_banner_output_too_large")
+    return data
 
 
 def _write_new(path: Path, value: dict) -> None:
@@ -211,6 +229,23 @@ def _verify_source(root: Path, protocol: dict, *, edited: bool = False) -> None:
     # staging and untracked content instead of rewriting byte-pinned sources.
     _require(not _git(root, "diff", "--cached", "--name-only", "HEAD"), "source_staged_changes")
     _require(not _git(root, "ls-files", "--others", "--exclude-standard"), "source_untracked_changes")
+    if protocol.get("schema_version") == 2:
+        # Git's ordinary untracked query omits every ignored byte. Fresh trial
+        # sources may write only the independently declared official suite.
+        # External target/store/seed roots remain outside the source checkout.
+        allowed = [Path(entry["release_suite_root"]) for entry in protocol.get("qualification_allocations", [])
+                   if entry.get("source_root") == str(root)]
+        ignored = _git(root, "ls-files", "--others", "--ignored", "--exclude-standard", "-z")
+        for relative in filter(None, ignored.split("\0")):
+            original = root / relative
+            selected = original.resolve(strict=True)
+            _require(not original.is_absolute() or _inside(original, root), "ignored_source_path_outside_root")
+            _require(selected == original and not original.is_symlink()
+                     and any(_inside(selected, output) for output in allowed), "source_ignored_output_not_declared")
+            for ancestor in (original, *original.parents):
+                if ancestor == root:
+                    break
+                _require(not getattr(ancestor.lstat(), "st_file_attributes", 0) & 0x400, "source_ignored_output_reparse")
     changed = _git(root, "-c", "core.autocrlf=true", "-c", "core.safecrlf=false", "diff", "--name-only", "--ignore-submodules=none")
     _require(changed.splitlines() == ([edit["path"]] if edited else []), "source_worktree_not_frozen")
     _require(sha256_file(root / "Cargo.lock") == source["lock_sha256"], "lockfile_changed")
@@ -268,8 +303,9 @@ def _arm_config(value: Any, label: str) -> dict:
     return {"debug": debug, "incremental": incremental, "layout": layout, "tool": normalized_tool}
 
 
-def balanced_order(pairs: int, seed: int) -> list[list[str]]:
-    _require(pairs in (5, 100), "fixed_pairs_required")
+def balanced_order(pairs: int, seed: int, *, protocol_version: int = 1) -> list[list[str]]:
+    _require(type(protocol_version) is int and protocol_version in (1, 2), "unsupported_protocol")
+    _require(type(pairs) is int and (pairs in (5, 100) if protocol_version == 1 else 2 <= pairs <= 1000), "fixed_pairs_required")
     _count(seed, "seed")
     orders = [["baseline", "candidate"] if index % 2 == 0 else ["candidate", "baseline"] for index in range(pairs)]
     random.Random(seed).shuffle(orders)
@@ -282,11 +318,348 @@ def cache_reservation_bytes(peak_bytes: int) -> int:
     return ((5 * peak_bytes + 4 * GIB - 1) // (4 * GIB) + 1) * GIB
 
 
+def _proof_reference(value: Any, label: str) -> tuple[dict, dict]:
+    _require(isinstance(value, dict) and set(value) == {"path", "sha256"}, "invalid_" + label)
+    path = _path(value.get("path"), label)
+    _require(path.is_file() and not path.is_symlink(), label + "_file_required")
+    digest = _digest(value.get("sha256"), label + "_hash")
+    _require(sha256_file(path) == digest, label + "_changed")
+    payload = _read_json(path)
+    _require(sha256_file(path) == digest, label + "_changed_during_read")
+    return {"path": str(path), "sha256": digest}, payload
+
+
+
+def _reservation_observation_peak(reference: dict, expected: dict, scope: str) -> int:
+    """Verify the originating sealed observation, never status/allocation flags."""
+    _, observation = _proof_reference(reference, "reservation_observation")
+    protocol_reference = observation.get("protocol")
+    _, origin = _proof_reference(protocol_reference, "reservation_observation_protocol")
+    _require(origin.get("schema_version") == 2
+             and origin.get("phase") in ("capacity", "pilot"), "reservation_observation_phase_invalid")
+    _validate_protocol(origin)
+    _require(origin["source"]["receipt_sha256"] == expected["source"]["receipt_sha256"]
+             and origin["baseline"]["receipt_sha256"] == expected["baseline"]["receipt_sha256"]
+             and origin["toolchain"] == expected["toolchain"], "reservation_observation_identity_mismatch")
+    helper = _retention_module()
+    # The helper verifies its known checker/tool hashes, signed closure and all
+    # retained logs/source/receipt bytes. This is a local pre-disposal record;
+    # it does not claim independently reread deleted artifacts.
+    seal = helper._verify_seal(observation.get("seal"), origin)
+    if scope == "expanded-capacity":
+        _require(seal.get("kind") == "build-feedback-capacity-seal"
+                 and origin["phase"] == "capacity", "reservation_capacity_seal_required")
+        raw = seal.get("probe_receipt")
+        raw_reference = seal.get("probe_reference")
+        _, current = _proof_reference(raw_reference, "reservation_capacity_receipt")
+        _require(isinstance(raw, dict) and current == raw and raw.get("status") == "ok"
+                 and raw.get("capture_complete") is True and raw.get("allocation_complete") is True,
+                 "reservation_observation_failed")
+        _require(raw.get("protocol_sha256") == canonical_sha256(origin)
+                 and raw.get("source_receipt_sha256") == origin["source"]["receipt_sha256"]
+                 and raw.get("toolchain_sha256") == canonical_sha256(origin["toolchain"]),
+                 "reservation_observation_identity_mismatch")
+        _, allocation = _proof_reference(raw.get("task_output_allocation_receipt"), "reservation_output_allocation")
+        _require(allocation.get("complete") is True and allocation.get("errors") == []
+                 and allocation.get("allocated_bytes") == raw.get("task_output_allocated_bytes"),
+                 "reservation_output_allocation_invalid")
+        peak = _count(raw.get("peak_owned_output_bytes"), "reservation_observation_peak", positive=True)
+        _require(peak >= allocation["allocated_bytes"], "reservation_peak_below_allocation")
+    else:
+        full_capacity = _full_capacity(origin)
+        _require(scope == "full-arm-and-qualification"
+                 and ((origin["phase"] == "pilot" and seal.get("kind") == "build-feedback-artifact-seal")
+                      or (full_capacity and seal.get("kind") == "build-feedback-full-capacity-seal")),
+                 "reservation_full_arm_seal_required")
+        raw, projected = seal.get("arm_receipt"), seal.get("arm_projection")
+        _, current = _proof_reference(seal.get("arm_reference"), "reservation_arm_receipt")
+        _require(isinstance(raw, dict) and current == raw and isinstance(projected, dict)
+                 and raw.get("status") == "ok" and raw.get("schema_version") == 2
+                 and raw.get("capture_complete") is True and raw.get("allocation_complete") is True
+                 and raw.get("source_verified") is True and raw.get("process_tree_drained") is True
+                 and raw.get("protocol_sha256") == canonical_sha256(origin)
+                 and raw.get("source_receipt_sha256") == origin["source"]["receipt_sha256"]
+                 and raw.get("toolchain_sha256") == canonical_sha256(origin["toolchain"]),
+                 "reservation_observation_failed")
+        stats = helper._module("statistics")
+        _require(set(seal.get("qualifications", {})) == set(stats.QUALIFICATIONS) - {"edit"},
+                 "reservation_full_qualifications_required")
+        allocation_reference = {"path": str(Path(raw["target_root"]).parent / "owned-allocation.json"),
+                                "sha256": raw.get("owned_allocation_receipt_sha256")}
+        _, allocation = _proof_reference(allocation_reference, "reservation_arm_allocation")
+        _require(allocation == raw.get("owned_allocation_receipt") and allocation.get("complete") is True
+                 and allocation.get("errors") == [] and allocation.get("allocated_bytes") == raw.get("owned_allocated_bytes"),
+                 "reservation_output_allocation_invalid")
+        # Includes the original complete arm and every qualification command's
+        # conservative live job-write/global-allocation observation. Require
+        # that coverage rather than accepting the small leaf cap as a full arm.
+        captures = [entry for field in ("jobs", "feedback_warm_jobs", "edit_jobs") for entry in raw.get(field, [])]
+        _require(all([entry.get("job") for entry in raw.get(field, [])] == [job["name"] for job in JOBS]
+                     for field in ("jobs", "feedback_warm_jobs", "edit_jobs")), "reservation_full_workloads_required")
+        for qualification in seal["qualifications"].values():
+            _require(isinstance(qualification, dict) and isinstance(qualification.get("proof"), dict),
+                     "reservation_qualification_invalid")
+            _, verified = _proof_reference(qualification.get("reference"), "reservation_qualification")
+            _require(verified == qualification["proof"], "reservation_qualification_changed")
+            captures.append(verified.get("capture"))
+        _require(observation.get("config_sha256") == canonical_sha256(raw.get("config")),
+                 "reservation_observation_configuration_mismatch")
+        if full_capacity:
+            _require(seal.get("workload_complete") is True and seal.get("reservation_eligible") is True
+                     and seal.get("performance_evidence") is False
+                     and seal.get("pair_index") is None and seal.get("attempt") is None,
+                     "full_capacity_reservation_closure_incomplete")
+        origin_allocated = _count(raw.get("allocated_before_bytes"), "reservation_origin_allocation")
+        peaks = [_count(raw.get("owned_allocated_bytes"), "reservation_owned_allocation", positive=True),
+                 _count(raw.get("final_job_write_bound_bytes", 0), "reservation_final_write_bound")]
+        final_reference = seal.get("task_output_allocation_receipt")
+        if final_reference is not None:
+            _, final_allocation = _proof_reference(final_reference, "reservation_final_allocation")
+            _require(final_allocation.get("complete") is True and final_allocation.get("errors") == [],
+                     "reservation_final_allocation_incomplete")
+            peaks.append(_count(final_allocation.get("allocated_bytes"), "reservation_final_owned_allocation"))
+        for capture in captures:
+            _require(isinstance(capture, dict) and stats._capture_valid(capture), "reservation_raw_capture_invalid")
+            budget = capture.get("qualification_budget")
+            if isinstance(budget, dict):
+                peaks.append(_count(budget.get("final_job_write_bound_bytes"), "reservation_qualification_final_write_bound"))
+                peaks.append(_count(capture.get("owned_allocated_bytes"), "reservation_qualification_owned_allocation"))
+            samples = capture.get("resource_samples")
+            _require(isinstance(samples, list) and bool(samples), "reservation_resource_samples_required")
+            for sample in samples:
+                _require(isinstance(sample, dict) and sample.get("allocation_kind") == "conservative-disk-and-job-write-bound"
+                         and sample.get("budget_allowed") is True and sample.get("budget_reasons") == [],
+                         "reservation_resource_sample_invalid")
+                peaks.append(max(_count(sample.get("job_write_bound_bytes"), "reservation_job_write_bound"),
+                                 max(0, _count(sample.get("allocated_bytes"), "reservation_live_allocation") - origin_allocated)))
+        peak = max(peaks)
+    _require(observation.get("observed_peak_bytes") == peak and type(observation.get("observed_peak_bytes")) is int,
+             "reservation_peak_not_from_observation_closure")
+    return peak
+
+
+def _verify_completed_v2_pilot(state: dict, protocol: dict) -> None:
+    """Formal registration needs five verified retained pairs, not a summary."""
+    _validate_resume(state, protocol, canonical_sha256(protocol))
+    _require(protocol.get("schema_version") == 2 and protocol.get("phase") == "pilot"
+             and protocol.get("pairs") == 5 and state.get("complete") is True
+             and state.get("status") == "complete" and state.get("completed_valid_pairs") == 5,
+             "complete_matching_pilot_required")
+    helper = _retention_module()
+    valid = [pair for pair in state["pairs"] if pair.get("status") == "ok"]
+    _require(len(valid) == 5 and {entry["pair_index"] for entry in valid} == set(range(5)),
+             "complete_matching_pilot_required")
+    for pair in valid:
+        links = pair.get("retained_evidence")
+        _require(isinstance(links, dict) and set(links) == {"baseline", "candidate"}, "formal_pilot_retained_proofs_required")
+        for arm in ("baseline", "candidate"):
+            retained = helper.verify_retained_arm(links[arm], protocol, arm, pair["pair_index"], pair["attempt"])
+            _require(retained.get("arm_receipt") == pair["arms"][arm], "formal_pilot_arm_mismatch")
+            seal = retained.get("seal")
+            stats = helper._module("statistics")
+            _require(isinstance(seal, dict) and isinstance(seal.get("arm_projection"), dict)
+                     and all(seal["arm_projection"].get(flag) is True for flag in
+                             ("capture_complete", "source_verified", "artifacts_verified", "allocation_complete", "quiet"))
+                     and set(seal.get("qualifications", {})) == set(stats.QUALIFICATIONS) - {"edit"},
+                     "formal_pilot_qualification_closure_incomplete")
+    # The preregistration caller separately binds source/toolchain/config/B.
+    # Quality/performance failures remain in the campaign; only contamination
+    # may have been retried, with no discarded successful arm evidence.
+    _require(all(pair.get("status") in ("ok", "contaminated") for pair in state["pairs"]),
+             "formal_pilot_contains_failed_attempt")
+
+
+def _budget_keywords(protocol: dict) -> dict:
+    """V1 call shape stays unchanged for legacy producers and tests."""
+    if protocol.get("schema_version", 1) == 1:
+        return {}
+    policy = protocol["budget_policy"]
+    return {"policy_version": 2, "minimum_free_bytes": policy["minimum_free_bytes"],
+            "external_growth_allowance_bytes": policy["external_growth_allowance_bytes"]}
+
+
+def _disk_floor(protocol: dict) -> int:
+    return protocol["budget_policy"]["minimum_free_bytes"] if protocol.get("schema_version", 1) == 2 else 80 * GIB
+
+
+def _external_allowance(protocol: dict) -> int:
+    return protocol["budget_policy"]["external_growth_allowance_bytes"] if protocol.get("schema_version", 1) == 2 else 0
+
+
+def _disposable_paths(protocol: dict) -> list[str]:
+    root = Path(protocol["run_root"])
+    if protocol["phase"] == "capacity":
+        return [str(root / "capacity" / "targets")]
+    return [str(root / "pairs" / f"pair-{entry['pair_index']:04d}-attempt-{entry['attempt']:02d}" / arm / "targets")
+            for entry in protocol["allocations"] for arm in ("baseline", "candidate")]
+
+
+def _full_capacity(protocol: dict) -> bool:
+    return protocol.get("schema_version") == 2 and protocol.get("phase") == "capacity" and protocol.get("capacity_probe", {}).get("kind") == "full-arm-and-qualification"
+
+
+def qualification_allocations(protocol: dict) -> list[dict]:
+    """Reconstruct source-relative official suites; caller-selected paths have no authority."""
+    allocated = []
+    if _full_capacity(protocol):
+        probe = protocol["capacity_probe"]
+        entries = [(None, None, probe["arm"], probe["source_root"])]
+    elif protocol["phase"] == "capacity":
+        entries = []
+    else:
+        entries = [(entry["pair_index"], entry["attempt"], arm, entry[arm + "_source_root"])
+                   for entry in protocol["allocations"] for arm in ("baseline", "candidate")]
+    for index, attempt, arm, source in entries:
+        suite_name = f"asg-build-feedback-{protocol['phase']}-{index if index is not None else 'capacity'}-{attempt if attempt is not None else 0}-{arm}"
+        _require(len(suite_name) <= 64, "qualification_suite_id_too_long")
+        suite = Path(source) / "evidence-output" / "build-feedback" / suite_name
+        for ancestor in (suite, *suite.parents):
+            if ancestor.exists():
+                _require(not ancestor.is_symlink() and not getattr(ancestor.lstat(), "st_file_attributes", 0) & 0x400,
+                         "qualification_suite_reparse_not_allowed")
+        allocated.append({"pair_index": index, "attempt": attempt, "arm": arm, "source_root": source,
+                          "release_suite_root": str(suite)})
+    return allocated
+
+
+def _add_bounded_contract(protocol: dict, data: dict, live: Path, coordinator: Path, allocated_sources: list[Path]) -> None:
+    """Revision bindings are rebuilt, never inferred from inline verified flags."""
+    policy = data.get("budget_policy")
+    expected_policy = {"policy_version": 2, "minimum_free_bytes": BOUNDED_MINIMUM_FREE_BYTES,
+                       "external_growth_allowance_bytes": EXTERNAL_GROWTH_ALLOWANCE_BYTES}
+    _require(isinstance(policy, dict) and set(policy) == set(expected_policy) and all(type(policy[k]) is int and policy[k] == v for k, v in expected_policy.items()), "bounded_budget_policy_required")
+    protocol["budget_policy"] = dict(expected_policy)
+    phase = protocol["phase"]
+    _require(not any(Path(entry).resolve() == Path(protocol["run_root"]) for entry in protocol["store_roots"]), "run_root_store_alias_not_allowed")
+    probe = data.get("capacity_probe")
+    if phase == "capacity":
+        if not isinstance(probe, dict):
+            raise ProtocolError("capacity_probe_required")
+        full = probe.get("kind") == "full-arm-and-qualification"
+        required = ({"kind", "source_root", "arm", "stage", "owned_output_cap_bytes"} if full
+                    else {"source_root", "package", "command", "stage", "owned_output_cap_bytes"})
+        _require(set(probe) == required, "capacity_probe_required")
+        if full:
+            _require(probe["stage"] == "expanded" and probe["arm"] in ("baseline", "candidate"), "invalid_full_capacity_probe")
+        else:
+            _require(probe["package"] in ("agent-session-grep-domain", "agent-session-grep-ports") and probe["command"] in ("check", "test"), "single_leaf_capacity_command_required")
+            _require(probe["stage"] in ("initial", "expanded"), "invalid_capacity_stage")
+        cap = _count(probe["owned_output_cap_bytes"], "owned_output_cap_bytes", positive=True)
+        _require(cap == protocol["predicted_growth_bytes"], "capacity_reservation_must_equal_owned_cap")
+        if full:
+            _require(cap >= INITIAL_CAPACITY_OUTPUT_CAP_BYTES, "declared_full_capacity_cap_at_least_8gib")
+        elif probe["stage"] == "initial":
+            _require(cap == INITIAL_CAPACITY_OUTPUT_CAP_BYTES, "initial_capacity_cap_must_be_8gib")
+        root = _path(probe["source_root"], "capacity_source_root")
+        _dedicated_source(root, live, coordinator)
+        _require(not any(_inside(root, other) or _inside(other, root) for other in (Path(protocol["source"]["root"]), Path(protocol["run_root"]), *allocated_sources)), "capacity_source_must_be_distinct")
+        _require(all(config["tool"]["kind"] == "native" for config in protocol["configs"].values()), "capacity_native_only")
+        _verify_source(root, protocol)
+        protocol["capacity_probe"] = {**probe, "source_root": str(root)}
+    else:
+        _require(probe is None, "capacity_fields_outside_capacity")
+        protocol["capacity_probe"] = None
+
+    protocol["qualification_allocations"] = qualification_allocations(protocol)
+
+    provenance = data.get("reservation_provenance")
+    if not isinstance(provenance, dict):
+        raise ProtocolError("reservation_provenance_required")
+    if _full_capacity(protocol):
+        _require(set(provenance) == {"kind", "prerequisite", "rationale"}
+                 and provenance["kind"] == "declared-full-arm-cap"
+                 and isinstance(provenance["rationale"], str) and bool(provenance["rationale"].strip()),
+                 "declared_full_capacity_provenance_required")
+        reference, prerequisite = _proof_reference(provenance["prerequisite"], "full_capacity_leaf_prerequisite")
+        leaf_peak = _reservation_observation_peak(reference, protocol, "expanded-capacity")
+        _require(protocol["predicted_growth_bytes"] >= cache_reservation_bytes(leaf_peak), "declared_full_capacity_cap_below_verified_leaf_margin")
+        _, leaf_protocol = _proof_reference(prerequisite.get("protocol"), "full_capacity_leaf_protocol")
+        leaf = leaf_protocol.get("capacity_probe", {})
+        _require(leaf_protocol.get("phase") == "capacity" and leaf.get("kind") is None
+                 and leaf.get("stage") == "initial" and leaf.get("owned_output_cap_bytes") == INITIAL_CAPACITY_OUTPUT_CAP_BYTES,
+                 "full_capacity_requires_successful_initial_leaf")
+        protocol["reservation_provenance"] = {"kind": "declared-full-arm-cap", "prerequisite": reference,
+                                              "rationale": provenance["rationale"]}
+    elif phase == "capacity" and isinstance(probe, dict) and probe["stage"] == "initial":
+        _require(provenance == {"kind": "initial-capacity-cap"}, "initial_capacity_reservation_required")
+        protocol["reservation_provenance"] = dict(provenance)
+    else:
+        _require(set(provenance) == {"kind", "receipt", "margin_bytes"} and provenance["kind"] == "measured-capacity", "measured_reservation_required")
+        reference, evidence = _proof_reference(provenance["receipt"], "capacity_reservation_evidence")
+        _require(type(evidence.get("schema_version")) is int and evidence.get("schema_version") == 2 and evidence.get("kind") == "build-feedback-reservation-evidence" and evidence.get("complete") is True, "complete_reservation_evidence_required")
+        _require(evidence.get("source_receipt_sha256") == protocol["source"]["receipt_sha256"] and evidence.get("baseline_receipt_sha256") == protocol["baseline"]["receipt_sha256"] and evidence.get("toolchain_sha256") == canonical_sha256(protocol["toolchain"]), "reservation_evidence_identity_mismatch")
+        margin = _count(provenance["margin_bytes"], "reservation_margin_bytes", positive=True)
+        peak = _count(evidence.get("observed_peak_bytes"), "reservation_observed_peak_bytes", positive=True)
+        _require(protocol["predicted_growth_bytes"] >= peak + margin, "reservation_below_observed_peak_and_margin")
+        _require(evidence.get("workload_scope") == ("expanded-capacity" if phase == "capacity" else "full-arm-and-qualification"), "reservation_workload_scope_mismatch")
+        observations = evidence.get("observations")
+        if not isinstance(observations, list) or not observations:
+            raise ProtocolError("raw_reservation_observations_required")
+        observed_peaks = [_reservation_observation_peak(observation, protocol, evidence["workload_scope"])
+                          for observation in observations]
+        _require(peak == max(observed_peaks), "reservation_peak_not_from_observations")
+        if phase != "capacity":
+            observed_configs = {_proof_reference(observation, "reservation_observation")[1].get("config_sha256")
+                                for observation in observations}
+            expected_configs = {canonical_sha256(config) for config in protocol["configs"].values()}
+            _require(observed_configs == expected_configs, "reservation_must_cover_both_configurations")
+        protocol["reservation_provenance"] = {"kind": "measured-capacity", "receipt": reference, "margin_bytes": margin}
+
+    retention = data.get("retention_policy")
+    if not isinstance(retention, dict) or set(retention) != {"mode", "approval"} or retention["mode"] != "sealed-verified-recycle":
+        raise ProtocolError("retention_policy_required")
+    approval_ref, approval = _proof_reference(retention["approval"], "retention_approval")
+    _require(type(approval.get("schema_version")) is int and approval.get("schema_version") == 2 and approval.get("kind") == "build-feedback-retention-approval" and approval.get("approved") is True, "retention_approval_required")
+    _require(approval.get("source_receipt_sha256") == protocol["source"]["receipt_sha256"] and approval.get("baseline_receipt_sha256") == protocol["baseline"]["receipt_sha256"] and approval.get("toolchain_sha256") == canonical_sha256(protocol["toolchain"]) and approval.get("configs_sha256") == canonical_sha256(protocol["configs"]), "retention_approval_identity_mismatch")
+    _require(approval.get("run_root") == protocol["run_root"] and approval.get("disposable_target_paths") == _disposable_paths(protocol), "retention_approval_scope_mismatch")
+    for approved_path in _disposable_paths(protocol):
+        target = Path(approved_path)
+        for ancestor in (target, *target.parents):
+            if ancestor.exists():
+                _require(not ancestor.is_symlink() and not getattr(ancestor.lstat(), "st_file_attributes", 0) & 0x400, "disposable_path_reparse_not_allowed")
+    _require(approval.get("scope") == "validated-successful-and-cap-stopped-task-intermediates" and approval.get("flow") == ["verify", "recycle", "match", "purge-exact", "verify-release", "receipt"], "retention_flow_not_approved")
+    checker = approval.get("checker")
+    if not isinstance(checker, dict) or set(checker) != {"path", "sha256", "bytes"}:
+        raise ProtocolError("approved_retention_checker_required")
+    checker_path = _path(checker.get("path"), "retention_checker")
+    _require(checker_path.is_file() and not checker_path.is_symlink() and checker_path.stat().st_size == _count(checker.get("bytes"), "checker_bytes", positive=True) and sha256_file(checker_path) == _digest(checker.get("sha256"), "checker_hash"), "retention_checker_changed")
+    _require(approval.get("protected") == ["source", "git-common-directory", "daily-cache", "existing-last-72-hours", "stores", "seeds", "quality-source-failures", "unrelated-recycle-items", "pagefile"], "retention_protected_scope_required")
+    protocol["retention_policy"] = {"mode": "sealed-verified-recycle", "approval": approval_ref}
+
+    registration = data.get("formal_registration")
+    if phase != "formal":
+        _require(registration is None, "formal_registration_outside_formal")
+        protocol["formal_registration"] = None
+        return
+    registration_ref, plan = _proof_reference(registration, "formal_registration")
+    _require(plan.get("schema_version") == 2 and plan.get("kind") == "build-feedback-formal-registration" and plan.get("approved") is True and plan.get("formal_data_collected") is False, "preregistered_formal_plan_required")
+    _require(plan.get("pairs") == protocol["pairs"] and type(plan.get("pairs")) is int and plan.get("seed") == protocol["seed"] and type(plan.get("seed")) is int and plan.get("order") == protocol["order"], "formal_registration_schedule_mismatch")
+    _require(plan.get("pilot_receipt_sha256") == protocol["pilot"]["receipt_sha256"] and plan.get("source_receipt_sha256") == protocol["source"]["receipt_sha256"] and plan.get("baseline_receipt_sha256") == protocol["baseline"]["receipt_sha256"] and plan.get("toolchain_sha256") == canonical_sha256(protocol["toolchain"]) and plan.get("configs_sha256") == canonical_sha256(protocol["configs"]), "formal_registration_identity_mismatch")
+    _require(plan.get("run_root") == protocol["run_root"] and plan.get("stopping_rule") == "fixed-n-no-adaptive-additions" and isinstance(plan.get("rationale"), str) and bool(plan["rationale"].strip()), "formal_registration_rationale_required")
+    approved_at = plan.get("approved_at")
+    if not isinstance(approved_at, str):
+        raise ProtocolError("formal_registration_timestamp_required")
+    try:
+        approved_time = datetime.fromisoformat(approved_at)
+        protocol_time = datetime.fromisoformat(protocol["created_at"])
+        _require(approved_time.tzinfo is not None and protocol_time.tzinfo is not None and approved_time <= protocol_time, "formal_registration_after_protocol")
+    except (TypeError, ValueError) as error:
+        raise ProtocolError("invalid_formal_registration_timestamp") from error
+    _count(plan.get("maximum_compute_seconds"), "registered_maximum_compute_seconds", positive=True)
+    _count(plan.get("maximum_storage_bytes"), "registered_maximum_storage_bytes", positive=True)
+    _require(plan["maximum_storage_bytes"] >= protocol["predicted_growth_bytes"], "registered_storage_does_not_cover_arm")
+    protocol["formal_registration"] = registration_ref
+
+
 def make_protocol(configuration: Mapping[str, Any] | None = None, **fields: Any) -> dict:
     data = dict(configuration or {})
     _require(not (set(data) & set(fields)), "duplicate_protocol_field")
     data.update(fields)
-    known = {"source_root", "source_commit", "source_tree", "source_receipt_path", "baseline_receipt_path", "run_root", "toolchain", "baseline_config", "candidate_config", "phase", "seed", "pairs", "jobs", "test_threads", "inventory_roots", "store_roots", "predicted_growth_bytes", "allocations", "edit_path", "timeout_seconds", "poll_seconds", "pilot_receipt_path", "pilot_receipt_sha256", "msvc_environment_receipt_path"}
+    version = data.get("protocol_version", 1)
+    _require(type(version) is int and version in (1, 2), "unsupported_protocol")
+    if version == 1:
+        _require(not (set(data) & {"budget_policy", "reservation_provenance", "retention_policy", "formal_registration", "capacity_probe"}), "bounded_fields_require_protocol_v2")
+    known = {"source_root", "source_commit", "source_tree", "source_receipt_path", "baseline_receipt_path", "run_root", "toolchain", "baseline_config", "candidate_config", "phase", "seed", "pairs", "jobs", "test_threads", "inventory_roots", "store_roots", "predicted_growth_bytes", "allocations", "edit_path", "timeout_seconds", "poll_seconds", "pilot_receipt_path", "pilot_receipt_sha256", "msvc_environment_receipt_path", "protocol_version", "budget_policy", "reservation_provenance", "retention_policy", "formal_registration", "capacity_probe"}
     _require(not (set(data) - known), "unknown_protocol_fields:" + ",".join(sorted(set(data) - known)))
     source_root = _path(data.get("source_root"), "source_root")
     source_receipt = _path(data.get("source_receipt_path"), "source_receipt")
@@ -308,9 +681,11 @@ def make_protocol(configuration: Mapping[str, Any] | None = None, **fields: Any)
     _require(baseline.get("schema_version") == 1 and baseline.get("complete") is True and baseline.get("errors") == [], "complete_baseline_receipt_required")
     baseline_bytes = _count(baseline.get("allocated_bytes"), "baseline_allocated_bytes")
     phase = data.get("phase", "pilot")
-    _require(phase in ("pilot", "formal"), "unsupported_phase")
-    pairs = 5 if phase == "pilot" else 100
+    _require(phase in (("capacity", "pilot", "formal") if version == 2 else ("pilot", "formal")), "unsupported_phase")
+    pairs = 0 if phase == "capacity" else 5 if phase == "pilot" else 100 if version == 1 else _count(data.get("pairs"), "registered_formal_pairs", positive=True)
     _require(data.get("pairs", pairs) == pairs and type(data.get("pairs", pairs)) is int, "fixed_pairs_required")
+    if version == 2 and phase == "formal":
+        _require(2 <= pairs <= 1000, "formal_pairs_outside_registration_bounds")
     _require(type(data.get("jobs", 2)) is int and type(data.get("test_threads", 2)) is int and data.get("jobs", 2) == 2 and data.get("test_threads", 2) == 2, "fixed_parallelism_required")
     seed = _count(data.get("seed", 20261018), "seed")
     toolchain = data.get("toolchain")
@@ -351,6 +726,8 @@ def make_protocol(configuration: Mapping[str, Any] | None = None, **fields: Any)
     configs = {"baseline": _arm_config(data.get("baseline_config", {"tool": {"kind": "native"}}), "baseline"), "candidate": _arm_config(data.get("candidate_config"), "candidate")}
     allocations = data.get("allocations", [])
     _require(isinstance(allocations, list), "invalid_allocations")
+    if phase == "capacity":
+        _require(not allocations, "capacity_has_no_pair_allocations")
     normalized_allocations: list[dict[str, Any]] = []
     allocated_sources: list[Path] = []
     keys: set[tuple[int, int]] = set()
@@ -399,15 +776,22 @@ def make_protocol(configuration: Mapping[str, Any] | None = None, **fields: Any)
         _validate_protocol(pilot_protocol)
         _validate_resume(pilot_evidence, pilot_protocol, canonical_sha256(pilot_protocol))
         peak = _count(pilot_evidence.get("peak_pair_growth_bytes"), "pilot_peak", positive=True)
-        _require(growth >= cache_reservation_bytes(peak), "forecast_below_measured_pilot_margin")
+        reserve_peak = peak
+        if version == 2:
+            _require(pilot_protocol.get("schema_version") == 2, "formal_v2_requires_matching_v2_pilot")
+            _verify_completed_v2_pilot(pilot_evidence, pilot_protocol)
+            reserve_peak = _count(pilot_evidence.get("peak_active_arm_growth_bytes"), "pilot_active_arm_peak", positive=True)
+        _require(growth >= cache_reservation_bytes(reserve_peak), "forecast_below_measured_pilot_margin")
         pilot = {"receipt_path": str(pilot_path), "receipt_sha256": pilot_hash, "peak_pair_growth_bytes": peak}
-    protocol = {"schema_version": 1, "kind": "build-feedback-protocol", "created_at": _stamp(), "source": {"root": str(source_root), "commit": commit, "tree": tree, "receipt_path": str(source_receipt), "receipt_sha256": sha256_file(source_receipt), "manifest_sha256": canonical_sha256(manifest), "lock_sha256": by_path["Cargo.lock"]["sha256"], "resources_sha256": canonical_sha256(resources)},
+    protocol = {"schema_version": version, "kind": "build-feedback-protocol", "created_at": _stamp(), "source": {"root": str(source_root), "commit": commit, "tree": tree, "receipt_path": str(source_receipt), "receipt_sha256": sha256_file(source_receipt), "manifest_sha256": canonical_sha256(manifest), "lock_sha256": by_path["Cargo.lock"]["sha256"], "resources_sha256": canonical_sha256(resources)},
                 "baseline": {"receipt_path": str(baseline_receipt), "receipt_sha256": sha256_file(baseline_receipt), "allocated_bytes": baseline_bytes}, "run_root": str(run_root), "toolchain": normalized_chain, "configs": configs,
-                "phase": phase, "pairs": pairs, "jobs": 2, "test_threads": 2, "seed": seed, "order": balanced_order(pairs, seed), "inventory_roots": roots, "store_roots": stores,
+                "phase": phase, "pairs": pairs, "jobs": 2, "test_threads": 2, "seed": seed, "order": [] if phase == "capacity" else balanced_order(pairs, seed, protocol_version=version), "inventory_roots": roots, "store_roots": stores,
                 "predicted_growth_bytes": growth, "allocations": normalized_allocations, "edit": {"kind": "append-comment-v1", "path": edit_path, "before_sha256": by_path[edit_path]["sha256"], "after_sha256": hashlib.sha256(edit_original + EDIT_SUFFIX).hexdigest()},
                 "timeout_seconds": timeout, "poll_seconds": poll, "memory_limit_bytes": MEMORY_LIMIT_BYTES, "pilot": pilot}
     if msvc_environment is not None:
         protocol["msvc_environment"] = msvc_environment
+    if version == 2:
+        _add_bounded_contract(protocol, data, live, coordinator, allocated_sources)
     _verify_source(source_root, protocol)
     for root in allocated_sources:
         _verify_source(root, protocol)
@@ -416,12 +800,14 @@ def make_protocol(configuration: Mapping[str, Any] | None = None, **fields: Any)
 
 def _validate_protocol(protocol: dict) -> None:
     """Rebuild the protocol from its explicit inputs to reject hand-edited modes."""
-    _require(type(protocol.get("schema_version")) is int and protocol.get("schema_version") == 1 and protocol.get("kind") == "build-feedback-protocol", "unsupported_protocol")
+    _require(type(protocol.get("schema_version")) is int and protocol.get("schema_version") in (1, 2) and protocol.get("kind") == "build-feedback-protocol", "unsupported_protocol")
     source, baseline = protocol.get("source", {}), protocol.get("baseline", {})
     _require(sha256_file(_path(source.get("receipt_path"), "source_receipt")) == source.get("receipt_sha256"), "source_receipt_changed")
     _require(sha256_file(_path(baseline.get("receipt_path"), "baseline_receipt")) == baseline.get("receipt_sha256"), "baseline_receipt_changed")
     fields = {"source_root": source.get("root"), "source_commit": source.get("commit"), "source_tree": source.get("tree"), "source_receipt_path": source.get("receipt_path"), "baseline_receipt_path": baseline.get("receipt_path"), "run_root": protocol.get("run_root"), "toolchain": protocol.get("toolchain"), "baseline_config": protocol.get("configs", {}).get("baseline"), "candidate_config": protocol.get("configs", {}).get("candidate"),
               **{key: protocol.get(key) for key in ("phase", "seed", "pairs", "jobs", "test_threads", "inventory_roots", "store_roots", "predicted_growth_bytes", "allocations", "timeout_seconds", "poll_seconds")}, "edit_path": protocol.get("edit", {}).get("path")}
+    if protocol["schema_version"] == 2:
+        fields.update(protocol_version=2, **{key: protocol.get(key) for key in ("budget_policy", "reservation_provenance", "retention_policy", "formal_registration", "capacity_probe")})
     if protocol.get("msvc_environment"):
         bound_env = protocol["msvc_environment"]
         _require(sha256_file(_path(bound_env.get("receipt_path"), "msvc_environment_receipt")) == bound_env.get("receipt_sha256"), "msvc_environment_receipt_changed")
@@ -430,7 +816,16 @@ def _validate_protocol(protocol: dict) -> None:
         fields.update(pilot_receipt_path=protocol["pilot"].get("receipt_path"), pilot_receipt_sha256=protocol["pilot"].get("receipt_sha256"))
     rebuilt = make_protocol(**fields)
     rebuilt["created_at"] = protocol.get("created_at")
-    _require(rebuilt == protocol, "protocol_contract_changed")
+    if protocol["schema_version"] == 2 and protocol["phase"] == "formal":
+        _, registration = _proof_reference(protocol["formal_registration"], "formal_registration")
+        try:
+            approved_time = datetime.fromisoformat(registration["approved_at"])
+            protocol_time = datetime.fromisoformat(protocol["created_at"])
+            _require(approved_time.tzinfo is not None and protocol_time.tzinfo is not None and approved_time <= protocol_time, "formal_registration_after_protocol")
+        except (KeyError, TypeError, ValueError) as error:
+            raise ProtocolError("invalid_formal_registration_timestamp") from error
+    _require(canonical_sha256(rebuilt) == canonical_sha256(protocol) if protocol["schema_version"] == 2 else rebuilt == protocol,
+             "protocol_contract_changed")
 
 
 def _free_bytes() -> int:
@@ -456,7 +851,7 @@ def preview_protocol(protocol: dict, inventory_report: dict) -> dict:
         reasons.append("disk_free_bytes_unknown")
     budget = None
     if not reasons:
-        budget = _inventory_module().budget_status(protocol["baseline"]["allocated_bytes"], current, free, protocol["predicted_growth_bytes"])
+        budget = _inventory_module().budget_status(protocol["baseline"]["allocated_bytes"], current, free, protocol["predicted_growth_bytes"], **_budget_keywords(protocol))
         reasons.extend(budget["reasons"] if not budget["allowed"] else [])
     baseline = _read_json(Path(protocol["baseline"]["receipt_path"]))
     baseline_roots = baseline.get("roots", [])
@@ -476,15 +871,18 @@ def preview_protocol(protocol: dict, inventory_report: dict) -> dict:
                           and isinstance(entry.get("path"), str)}
         if not expected_stores <= current_stores:
             reasons.append("initial_store_scope_missing")
+    if (protocol["schema_version"] == 2 and inventory_report.get("roots")
+            and not any(isinstance(entry, dict) and entry.get("kind") == "store" and Path(entry.get("path", "")).resolve() == Path(protocol["run_root"]) for entry in inventory_report["roots"])):
+        reasons.append("retained_evidence_scope_missing")
     if not any(_inside(Path(protocol["run_root"]), Path(root)) for root in protocol["inventory_roots"]):
         reasons.append("trial_run_root_not_in_inventory_scope")
-    if not protocol["allocations"]:
+    if protocol["phase"] != "capacity" and not protocol["allocations"]:
         reasons.append("preallocated_sources_required")
     for config in protocol["configs"].values():
         if config["tool"]["kind"] == "sccache" and config["tool"].get("local_rw_mode") != "READ_ONLY":
             reasons.append("sccache_warm_store_read_only_required")
     return {"schema_version": 1, "kind": "build-feedback-preview", "created_at": _stamp(), "protocol_sha256": canonical_sha256(protocol), "inventory_sha256": canonical_sha256(inventory_report), "allowed": not reasons, "review_required": bool(budget and budget["review_required"]), "reasons": sorted(set(reasons)), "budget": budget,
-            "allocated_bytes": current, "disk_free_bytes": free, "predicted_growth_bytes": protocol["predicted_growth_bytes"], "run_root": protocol["run_root"], "planned_pairs": protocol["pairs"], "phase": protocol["phase"], "disposable_target_paths": [str(Path(protocol["run_root"]) / "pairs" / f"pair-{allocation['pair_index']:04d}-attempt-{allocation['attempt']:02d}" / arm / "targets") for allocation in protocol["allocations"] for arm in ("baseline", "candidate")]}
+            "allocated_bytes": current, "disk_free_bytes": free, "predicted_growth_bytes": protocol["predicted_growth_bytes"], "run_root": protocol["run_root"], "planned_pairs": protocol["pairs"], "phase": protocol["phase"], "disposable_target_paths": _disposable_paths(protocol)}
 
 
 def job_command(protocol: dict, job: dict, target: Path) -> list[str]:
@@ -866,7 +1264,7 @@ def _artifact_identity(path: Path) -> dict:
     return {"path": str(path.resolve()), "sha256": sha256_file(path), "bytes": stat.st_size, "device": stat.st_dev, "file_id": stat.st_ino, "modified_ns": stat.st_mtime_ns}
 
 
-def parse_cargo_json(stdout: bytes, target_root: Path, source_root: Path) -> dict:
+def _parse_cargo_lines(lines: Iterable[str], target_root: Path, source_root: Path, *, verify_artifact_bytes: bool = True) -> dict:
     """Accept artifacts only named by Cargo in this invocation and under target.
 
     Test text after build-finished is preserved and need not be JSON. Artifacts
@@ -875,7 +1273,7 @@ def parse_cargo_json(stdout: bytes, target_root: Path, source_root: Path) -> dic
     """
     target_root, source_root = target_root.resolve(), source_root.resolve()
     finished, artifacts, diagnostics, errors = None, [], [], []
-    for raw in stdout.decode("utf-8", "strict").splitlines():
+    for raw in lines:
         if not raw.lstrip().startswith("{"):
             continue
         try:
@@ -908,8 +1306,9 @@ def parse_cargo_json(stdout: bytes, target_root: Path, source_root: Path) -> dic
             receipts = []
             for name in names:
                 path = Path(name)
-                _require(path.is_absolute() and _inside(path.resolve(strict=True), target_root), "artifact_outside_invocation_target")
-                receipts.append(_artifact_identity(path))
+                _require(path.is_absolute() and _inside(path.resolve(strict=verify_artifact_bytes), target_root), "artifact_outside_invocation_target")
+                if verify_artifact_bytes:
+                    receipts.append(_artifact_identity(path))
             artifacts.append({"package_id": message.get("package_id"), "manifest_path": manifest, "target": message.get("target"), "profile": message["profile"], "features": message.get("features"), "fresh": message["fresh"], "executable": executable, "files": receipts})
         elif message["reason"] == "compiler-message":
             diagnostic = message.get("message")
@@ -925,14 +1324,110 @@ def parse_cargo_json(stdout: bytes, target_root: Path, source_root: Path) -> dic
     return {"build_success": finished is True, "build_finished": finished is not None, "artifacts": artifacts, "diagnostics": diagnostics, "errors": errors}
 
 
+def parse_cargo_json(stdout: bytes, target_root: Path, source_root: Path) -> dict:
+    """Compatibility byte entry point using the same decoder as file proofs."""
+    with io.TextIOWrapper(io.BytesIO(stdout), encoding="utf-8", errors="strict") as handle:
+        return _parse_cargo_lines(handle, target_root, source_root)
+
+
+def parse_cargo_json_file(path: Path, target_root: Path, source_root: Path) -> dict:
+    """Decode one Cargo line at a time; receipt lists/individual JSON lines grow.
+
+    This avoids a second full log copy. It is not a constant-memory JSON parser:
+    the largest line and returned artifacts/diagnostics still occupy memory.
+    Test text after build-finished follows exactly the compatibility byte API.
+    """
+    with path.open("r", encoding="utf-8", errors="strict", newline=None) as handle:
+        return _parse_cargo_lines(handle, target_root, source_root)
+
+
+def capacity_cargo_failure(path: Path, target_root: Path, source_root: Path) -> list[str]:
+    """Inspect incomplete cap-stopped logs with the shared decoder.
+
+    Missing build-finished is expected after termination. This entry point
+    grants no artifact proof; it rejects recorded quality/protocol failures
+    without requiring potentially unfinished target bytes to exist.
+    """
+    with path.open("r", encoding="utf-8", errors="strict", newline=None) as handle:
+        cargo = _parse_cargo_lines(handle, target_root, source_root, verify_artifact_bytes=False)
+    failures = [reason for reason in cargo["errors"] if reason != "missing_build_finished"]
+    if cargo["build_finished"] and not cargo["build_success"]:
+        failures.append("cargo_build_failed_before_capacity_stop")
+    if any(entry.get("level") in {"error", "failure-note"} for entry in cargo["diagnostics"]):
+        failures.append("compiler_error_before_capacity_stop")
+    return list(dict.fromkeys(failures))
+
+
+MEMORY_ERROR_MARKERS = (b"memory allocation of", b"out of memory", b"not enough memory")
+
+
+def _file_contains_markers(path: Path, markers: tuple[bytes, ...]) -> bool:
+    """Scan bounded blocks, preserving matches split across read boundaries."""
+    overlap = max((len(marker) for marker in markers), default=1) - 1
+    tail = b""
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(64 * 1024), b""):
+            combined = tail + block.lower()
+            if any(marker in combined for marker in markers):
+                return True
+            tail = combined[-overlap:] if overlap else b""
+    return False
+
+
 def verify_artifact_receipt(receipt: dict) -> None:
     path = _path(receipt.get("path"), "artifact")
     current = _artifact_identity(path)
     _require(current == receipt, "artifact_changed_since_invocation")
 
 
+
+def _pending_recycle_roots(protocol: dict) -> list[str]:
+    """Charge exact signed moved payloads until release is verified.
+
+    Unknown post-move effects require reconciliation; they are never inferred
+    as freed bytes. Unrelated recycle items are outside project accounting.
+    """
+    if protocol.get("schema_version") != 2 or not Path(protocol["run_root"]).exists():
+        return []
+    helper = _retention_module()
+    roots = []
+    for target_name in _disposable_paths(protocol):
+        target = Path(target_name)
+        disposition_root = target.parent / "disposition"
+        moved_path = disposition_root / "moved.json"
+        if not moved_path.exists():
+            if (disposition_root / "move-intent.json").exists() and not target.exists():
+                raise ProtocolError("unresolved_recycle_move_requires_reconciliation")
+            continue
+        moved = _read_json(moved_path)
+        helper._verify_signed(moved, protocol)
+        seal = helper._verify_seal(moved.get("seal"), protocol)
+        _require(seal.get("target") == str(target), "pending_recycle_target_mismatch")
+        completed_path = disposition_root / "completed.json"
+        if completed_path.exists():
+            helper._verify_disposition({"path": str(completed_path), "sha256": sha256_file(completed_path)},
+                                       moved["seal"], seal, protocol)
+            continue
+        item = moved.get("item")
+        _require(isinstance(item, dict) and item.get("identity") == seal["tree"]["root_identity"],
+                 "pending_recycle_identity_mismatch")
+        assert isinstance(item, dict)
+        payload = helper._path(item.get("path"))
+        _require(helper.tree_manifest(payload) == seal["tree"], "pending_recycle_tree_changed")
+        roots.append(str(payload))
+    _require(len(roots) == len(set(roots)), "duplicate_pending_recycle_root")
+    return roots
+
+
 def _budget_sample(protocol: dict) -> dict:
-    report = _inventory_module().inventory(protocol["inventory_roots"], store_roots=protocol["store_roots"], discover=True)
+    stores = list(protocol["store_roots"])
+    if protocol.get("schema_version") == 2:
+        # Arbitrarily named raw stdout/receipts and recycled-pending bookkeeping
+        # must count even when they are not Cargo-marker discovery artifacts.
+        stores.append(protocol["run_root"])
+        stores.extend(entry["release_suite_root"] for entry in protocol["qualification_allocations"])
+        stores.extend(_pending_recycle_roots(protocol))
+    report = _inventory_module().inventory(protocol["inventory_roots"], store_roots=stores, discover=True, **({"minimum_free_bytes": _disk_floor(protocol)} if protocol.get("schema_version") == 2 else {}))
     report["disk_free_bytes"] = _free_bytes()
     if report.get("complete") is not True or report.get("errors") != []:
         receipt_root = Path(protocol["baseline"]["receipt_path"]).parent
@@ -940,7 +1435,11 @@ def _budget_sample(protocol: dict) -> dict:
         _write_new(failure_path, report)
         raise ProtocolError("inventory_capture_incomplete:" + str(failure_path))
     _count(report.get("allocated_bytes"), "current_allocated_bytes")
-    report["budget"] = _inventory_module().budget_status(protocol["baseline"]["allocated_bytes"], report["allocated_bytes"], report["disk_free_bytes"], 0)
+    report["budget"] = _inventory_module().budget_status(protocol["baseline"]["allocated_bytes"], report["allocated_bytes"], report["disk_free_bytes"], 0, **_budget_keywords(protocol))
+    registered = _registered_reasons(protocol, report["allocated_bytes"])
+    if registered:
+        report["budget"]["allowed"] = False
+        report["budget"]["reasons"].extend(registered)
     return report
 
 
@@ -957,6 +1456,49 @@ def _memory_status() -> dict:
     return {name: int(getattr(value, name)) for name in ("physical_total", "physical_available", "commit_limit", "commit_available")}
 
 
+
+class _FormalLimits:
+    """Registered wall compute and related-growth ceilings across resumes."""
+    def __init__(self, protocol: dict, state: dict):
+        _, self.registration = _proof_reference(protocol["formal_registration"], "formal_registration")
+        self.protocol = protocol
+        self.prior_seconds = state.get("registered_compute_seconds", 0.0)
+        _require(type(self.prior_seconds) in (int, float) and math.isfinite(self.prior_seconds)
+                 and self.prior_seconds >= 0, "registered_compute_accounting_invalid")
+        self.started = time.monotonic()
+
+    def elapsed_seconds(self) -> float:
+        return self.prior_seconds + max(0.0, time.monotonic() - self.started)
+
+    def reasons(self, allocation: int | None = None) -> list[str]:
+        reasons = []
+        if self.elapsed_seconds() >= self.registration["maximum_compute_seconds"]:
+            reasons.append("registered_compute_limit_reached")
+        if allocation is not None and max(0, allocation - self.protocol["baseline"]["allocated_bytes"]) >= self.registration["maximum_storage_bytes"]:
+            reasons.append("registered_storage_limit_reached")
+        return reasons
+
+    def checkpoint(self, state: dict) -> None:
+        state["registered_compute_seconds"] = self.elapsed_seconds()
+        state["formal_registration_sha256"] = self.protocol["formal_registration"]["sha256"]
+
+
+# Owned under the exclusive CampaignLock; never a serialized protocol override.
+_FORMAL_LIMITS: dict[str, _FormalLimits] = {}
+
+
+def _registered_reasons(protocol: dict, allocation: int | None = None) -> list[str]:
+    guard = _FORMAL_LIMITS.get(protocol.get("run_root", ""))
+    return [] if guard is None else guard.reasons(allocation)
+
+
+def _checkpoint_formal_state(protocol: dict, state: dict, path: Path) -> None:
+    guard = _FORMAL_LIMITS.get(protocol.get("run_root", ""))
+    if guard is not None:
+        guard.checkpoint(state)
+    _write_state(path, state)
+
+
 class _LiveBudget:
     """Low-cost conservative admission bound, never a full allocation receipt.
 
@@ -964,14 +1506,15 @@ class _LiveBudget:
     writes, rather than NTFS allocation evidence; final quiet handle scans are
     authoritative. The monitor performs no filesystem walk in timed loops.
     """
-    def __init__(self, protocol: dict, before: dict, job: WindowsJob, store_bytes: int = 0, config: dict | None = None, *, review_floor_bytes: int = 80 * GIB):
+    def __init__(self, protocol: dict, before: dict, job: WindowsJob, store_bytes: int = 0, config: dict | None = None, *, review_floor_bytes: int | None = None, prior_write_bound_bytes: int = 0, minimum_free_bytes: int | None = None):
         self.protocol, self.before, self.job = protocol, before, job
         self.config = config
         # Pin the admission observation: intervening external writes consume B's
         # remaining allowance before our first owned process starts.
         self.start_free = _count(before.get("disk_free_bytes"), "admission_disk_free_bytes")
-        self.floor_free = self.start_free
-        self.review_floor_bytes = max(80 * GIB, _count(review_floor_bytes, "review_disk_free_floor"))
+        self.floor_free = self.start_free if minimum_free_bytes is None else min(self.start_free, _count(minimum_free_bytes, "prior_minimum_free_bytes"))
+        self.prior_write_bound_bytes = _count(prior_write_bound_bytes, "prior_write_bound_bytes")
+        self.review_floor_bytes = max(_disk_floor(protocol), _count(_disk_floor(protocol) if review_floor_bytes is None else review_floor_bytes, "review_disk_free_floor"))
         self.io_origin = self._write_bound()
         self.store_bytes = store_bytes
         self.last: dict[str, Any] | None = None
@@ -988,10 +1531,10 @@ class _LiveBudget:
         free = _free_bytes()
         self.floor_free = min(self.floor_free, free)
         physical_growth = max(0, self.start_free - self.floor_free)
-        writes = max(0, self._write_bound() - self.io_origin)
+        writes = self.prior_write_bound_bytes + max(0, self._write_bound() - self.io_origin)
         growth = max(physical_growth, writes)
         allocated_bound = self.before["allocated_bytes"] + growth
-        budget = _inventory_module().budget_status(self.protocol["baseline"]["allocated_bytes"], allocated_bound, free, 0)
+        budget = _inventory_module().budget_status(self.protocol["baseline"]["allocated_bytes"], allocated_bound, free, 0, **_budget_keywords(self.protocol))
         if free < self.review_floor_bytes:
             budget["allowed"] = False
             budget["reasons"].append("budget_review_free_space_floor_exceeded")
@@ -1000,6 +1543,13 @@ class _LiveBudget:
             if tool["kind"] == "mbx" and self.store_bytes + growth >= tool["store_limit_bytes"]:
                 budget["allowed"] = False
                 budget["reasons"].append("store_reservation_write_bound_reached")
+        if self.protocol.get("schema_version") == 2 and writes >= self.protocol["predicted_growth_bytes"]:
+            budget["allowed"] = False
+            budget["reasons"].append("owned_output_cap_reached" if self.protocol["phase"] == "capacity" else "arm_reservation_write_bound_reached")
+        registered = _registered_reasons(self.protocol, allocated_bound)
+        if registered:
+            budget["allowed"] = False
+            budget["reasons"].extend(registered)
         sample = {"allocated_bytes": allocated_bound, "disk_free_bytes": free, "budget": budget,
                      "allocation_kind": "conservative-disk-and-job-write-bound", "physical_growth_bytes": physical_growth, "job_write_bound_bytes": writes}
         self.last = sample
@@ -1007,6 +1557,8 @@ class _LiveBudget:
 
 def _check_review(protocol: dict, preview: dict, review_receipt_path: Path | None) -> None:
     _require(preview["allowed"], "admission_denied:" + ",".join(preview["reasons"]))
+    registered = _registered_reasons(protocol, preview.get("allocated_bytes"))
+    _require(not registered, "admission_denied:" + ",".join(registered))
     if preview["review_required"] or review_receipt_path is not None:
         if review_receipt_path is None:
             raise ProtocolError("budget_review_receipt_required")
@@ -1014,7 +1566,7 @@ def _check_review(protocol: dict, preview: dict, review_receipt_path: Path | Non
         _require(review.get("schema_version") == 1 and review.get("approved") is True and review.get("protocol_sha256") == preview["protocol_sha256"], "invalid_budget_review")
         _require(review.get("baseline_receipt_sha256") == protocol["baseline"]["receipt_sha256"], "budget_review_baseline_mismatch")
         _require(type(review.get("max_allocated_bytes")) is int and review["max_allocated_bytes"] >= preview["allocated_bytes"] + protocol["predicted_growth_bytes"], "budget_review_does_not_cover_batch")
-        _require(type(review.get("min_disk_free_bytes")) is int and 80 * GIB <= review["min_disk_free_bytes"] <= preview["disk_free_bytes"] - protocol["predicted_growth_bytes"], "budget_review_free_space_mismatch")
+        _require(type(review.get("min_disk_free_bytes")) is int and _disk_floor(protocol) <= review["min_disk_free_bytes"] <= preview["disk_free_bytes"] - protocol["predicted_growth_bytes"] - _external_allowance(protocol), "budget_review_free_space_mismatch")
 
 
 
@@ -1040,14 +1592,18 @@ def _wait_capture(job: WindowsJob, process: dict, protocol: dict, *, daemon: dic
             if accounting["memory_limited"]:
                 status, reasons = "memory_limited", ["job_commit_memory_limit"]
             sample = monitor() if monitor is not None else _budget_sample(protocol)
-            samples.append({"at": _stamp(), "allocated_bytes": sample["allocated_bytes"], "disk_free_bytes": sample["disk_free_bytes"], "peak_commit_bytes": accounting["peak_commit_bytes"], "active_processes": accounting["active_processes"]})
-            if not sample["budget"]["allowed"]:
-                status, reasons = "budget_limited", list(sample["budget"]["reasons"])
+            samples.append({"at": _stamp(), "allocated_bytes": sample["allocated_bytes"], "disk_free_bytes": sample["disk_free_bytes"], "peak_commit_bytes": accounting["peak_commit_bytes"], "active_processes": accounting["active_processes"],
+                            "allocation_kind": sample.get("allocation_kind", "synthetic"), "job_write_bound_bytes": sample.get("job_write_bound_bytes"), "physical_growth_bytes": sample.get("physical_growth_bytes"), "budget_allowed": sample["budget"]["allowed"], "budget_reasons": list(sample["budget"]["reasons"])})
+            if not sample["budget"]["allowed"] and status == "ok":
+                stop_reasons = [reason for reason in sample["budget"]["reasons"] if reason != "project_review_threshold_reached"]
+                status, reasons = ("capacity_limited" if protocol.get("phase") == "capacity" and stop_reasons == ["owned_output_cap_reached"] else "budget_limited"), stop_reasons
             if review_cap is not None and sample["allocated_bytes"] > review_cap:
                 status, reasons = "budget_limited", ["budget_review_ceiling_exceeded"]
             if daemon is not None and (job.poll(daemon) is not None or _tcp_listener_pid(daemon["listener_port"]) != daemon["pid"] or not set(daemon.get("owned_process_ids", [daemon["pid"]])) <= members):
                 status, reasons = "capture_failed", ["dedicated_cache_server_identity_changed"]
             final_code = job.poll(process)
+            if status == "capacity_limited" and final_code is not None and final_code != 0:
+                status, reasons = "failed", ["command_nonzero_before_capacity_stop"]
             if status != "ok":
                 job.terminate()
                 final_code = job.poll(process)
@@ -1071,12 +1627,13 @@ def _wait_capture(job: WindowsJob, process: dict, protocol: dict, *, daemon: dic
         final_code = job.poll(process)
         status, reasons = "capture_failed", [str(error)]
     accounting = job.account()
+    if status in ("capacity_limited", "failed") and (accounting["memory_limited"] or _file_contains_markers(Path(process["stderr_path"]), MEMORY_ERROR_MARKERS)):
+        status, reasons = "memory_limited", ["commit_allocation_failed"]
     # A failed allocation is sometimes only observable in stderr/exit code;
     # do not turn an unknown memory failure into successful evidence.
-    stderr = Path(process["stderr_path"]).read_bytes()
     if status == "ok" and final_code != 0:
         status, reasons = "failed", ["command_nonzero"]
-        if accounting["memory_limited"] or any(marker in stderr.lower() for marker in (b"memory allocation of", b"out of memory", b"not enough memory")):
+        if accounting["memory_limited"] or _file_contains_markers(Path(process["stderr_path"]), MEMORY_ERROR_MARKERS):
             status, reasons = "memory_limited", ["commit_allocation_failed"]
     wall_ms = job.process_wall_ms(process)
     _require(wall_ms is not None and wall_ms >= 0, "process_wall_clock_unavailable")
@@ -1145,7 +1702,7 @@ def _verify_cache_prewarm(protocol: dict, config: dict, arm_source: Path) -> Non
     _require(all(entry.get("status") == "ok" and entry.get("returncode") == 0 and entry.get("process_tree_capture_complete") is True for entry in jobs), "successful_owned_prewarm_jobs_required")
     _require(receipt.get("jobs_limit") == 2 and receipt.get("test_threads") == 2, "prewarm_parallelism_mismatch")
     _verify_source(Path(tool["prewarm_source_root"]), protocol)
-    report = _inventory_module().inventory([], store_roots=[tool["store"]], discover=False)
+    report = _inventory_module().inventory([], store_roots=[tool["store"]], discover=False, **({"minimum_free_bytes": _disk_floor(protocol)} if protocol.get("schema_version") == 2 else {}))
     _require(report.get("complete") is True and report.get("errors") == [], "store_inventory_incomplete")
     current = _count(report.get("allocated_bytes"), "store_allocated_bytes")
     # The pair forecast includes fresh targets, not just the store. READ_ONLY
@@ -1205,10 +1762,11 @@ def _completed_capture(job: WindowsJob, process: dict, protocol: dict, status: s
     account = job.account()
     final_code = job.poll(process)
     _require(final_code is not None, "process_exit_capture_incomplete")
-    stderr = Path(process["stderr_path"]).read_bytes()
+    if status == "capacity_limited" and (account["memory_limited"] or _file_contains_markers(Path(process["stderr_path"]), MEMORY_ERROR_MARKERS)):
+        status, reasons = "memory_limited", ["commit_allocation_failed"]
     if status == "ok" and final_code != 0:
         status, reasons = "failed", ["command_nonzero"]
-        if account["memory_limited"] or any(marker in stderr.lower() for marker in (b"memory allocation of", b"out of memory", b"not enough memory")):
+        if account["memory_limited"] or _file_contains_markers(Path(process["stderr_path"]), MEMORY_ERROR_MARKERS):
             status, reasons = "memory_limited", ["commit_allocation_failed"]
     wall = job.process_wall_ms(process)
     _require(wall is not None and wall >= 0, "process_wall_clock_unavailable")
@@ -1259,9 +1817,13 @@ def _run_parallel_phase(job: WindowsJob, protocol: dict, config: dict, source: P
                 phase_failure, failure_reasons = "memory_limited", ["job_commit_memory_limit"]
             sample = monitor()
             samples.append({"at": _stamp(), "allocated_bytes": sample["allocated_bytes"], "disk_free_bytes": sample["disk_free_bytes"],
-                            "peak_commit_bytes": account["peak_commit_bytes"], "active_processes": account["active_processes"], "active_root_commands": len(active), "allocation_kind": sample.get("allocation_kind", "synthetic")})
-            if not sample["budget"]["allowed"]:
-                phase_failure, failure_reasons = "budget_limited", list(sample["budget"]["reasons"])
+                            "peak_commit_bytes": account["peak_commit_bytes"], "active_processes": account["active_processes"], "active_root_commands": len(active), "allocation_kind": sample.get("allocation_kind", "synthetic"),
+                            "job_write_bound_bytes": sample.get("job_write_bound_bytes"), "physical_growth_bytes": sample.get("physical_growth_bytes"), "budget_allowed": sample["budget"]["allowed"], "budget_reasons": list(sample["budget"]["reasons"])})
+            if not sample["budget"]["allowed"] and phase_failure == "ok":
+                failure_reasons = [reason for reason in sample["budget"]["reasons"] if reason != "project_review_threshold_reached"]
+                phase_failure = "capacity_limited" if _full_capacity(protocol) and failure_reasons == ["owned_output_cap_reached"] else "budget_limited"
+                if phase_failure == "capacity_limited" and any(job.poll(process) not in (None, 0) for _, process, _ in active.values()):
+                    phase_failure, failure_reasons = "failed", ["command_nonzero_before_capacity_stop"]
             if review_cap is not None and sample["allocated_bytes"] > review_cap:
                 phase_failure, failure_reasons = "budget_limited", ["budget_review_ceiling_exceeded"]
             if daemon is not None and (job.poll(daemon) is not None or _tcp_listener_pid(daemon["listener_port"]) != daemon["pid"] or not set(daemon.get("owned_process_ids", [daemon["pid"]])) <= members):
@@ -1277,9 +1839,8 @@ def _run_parallel_phase(job: WindowsJob, protocol: dict, config: dict, source: P
                     continue
                 code = job.poll(process)
                 if code != 0:
-                    stderr = Path(process["stderr_path"]).read_bytes()
                     phase_failure, failure_reasons = "failed", ["command_nonzero"]
-                    if account["memory_limited"] or any(marker in stderr.lower() for marker in (b"memory allocation of", b"out of memory", b"not enough memory")):
+                    if account["memory_limited"] or _file_contains_markers(Path(process["stderr_path"]), MEMORY_ERROR_MARKERS):
                         phase_failure, failure_reasons = "memory_limited", ["commit_allocation_failed"]
                     job.terminate()
                     break
@@ -1305,9 +1866,16 @@ def _run_parallel_phase(job: WindowsJob, protocol: dict, config: dict, source: P
         _, process, target = all_started[name]
         capture = _completed_capture(job, process, protocol, phase_failure, failure_reasons, list(samples), list(external))
         capture["job"] = name
+        if capture["status"] == "capacity_limited":
+            try:
+                failures = capacity_cargo_failure(Path(capture["stdout_path"]), target, source)
+                if failures:
+                    capture["status"], capture["reasons"] = "failed", failures
+            except (OSError, ProtocolError, UnicodeError) as error:
+                capture["status"], capture["reasons"] = "capture_failed", [str(error)]
         if capture["status"] == "ok":
             try:
-                cargo = parse_cargo_json(Path(capture["stdout_path"]).read_bytes(), target, source)
+                cargo = parse_cargo_json_file(Path(capture["stdout_path"]), target, source)
                 capture["cargo"] = cargo
                 if not cargo["build_success"] or cargo["errors"]:
                     capture["status"], capture["reasons"] = "capture_failed", cargo["errors"] or ["cargo_build_failed"]
@@ -1319,20 +1887,57 @@ def _run_parallel_phase(job: WindowsJob, protocol: dict, config: dict, source: P
         records.append(capture)
     return records, duration
 
+def _execution_retention_policy(protocol: dict, arm_finalizer=None) -> None:
+    """Real v2 entry must validate the known sibling checker before outputs."""
+    _require(arm_finalizer is None or callable(arm_finalizer), "invalid_arm_finalizer")
+    if protocol.get("schema_version", 1) == 1:
+        _require(arm_finalizer is None, "arm_finalizer_requires_v2_pairs")
+        return
+    _require(protocol.get("schema_version") == 2, "unsupported_protocol")
+    _retention_module().validate_policy(protocol)
+    if protocol["phase"] in ("pilot", "formal"):
+        _require(callable(arm_finalizer), "v2_paired_run_requires_arm_finalizer_before_allocation")
+    else:
+        _require(protocol["phase"] == "capacity", "arm_finalizer_requires_v2_pairs")
+        if _full_capacity(protocol):
+            _require(callable(arm_finalizer), "v2_full_capacity_requires_arm_finalizer_before_allocation")
+        else:
+            _require(arm_finalizer is None, "arm_finalizer_requires_v2_pairs")
+
+
+def _declare_trial_output(protocol: dict, target: Path) -> dict:
+    """Pin literal absence before target/arm creation; the lease survives reuse."""
+    helper = _retention_module()
+    policy, _ = helper.validate_policy(protocol)
+    target = helper._path(str(target), exists=False)
+    _require(str(target) in policy["dedicated_output_roots"] and not target.exists(), "new_target_lease_scope_mismatch")
+    lease_root = helper._path(str(Path(protocol["run_root"]) / "leases"), exists=False)
+    _require(not _inside(lease_root, target), "output_lease_must_survive_disposal")
+    lease_root.mkdir(parents=True, exist_ok=True)
+    # A deterministic name refuses a second declaration after unknown effects.
+    lease_path = lease_root / ("output-" + hashlib.sha256(str(target).encode("utf-8")).hexdigest() + ".json")
+    reference = helper.declare_output(protocol, target, lease_path)
+    helper._safe_target(protocol, target, reference)
+    return reference
+
+
 def _run_arm(protocol: dict, arm: str, source: Path, arm_root: Path, review_receipt_path: Path | None) -> dict:
     config = protocol["configs"][arm]
     _require(not arm_root.exists(), "arm_output_identity_already_used")
-    arm_root.mkdir(parents=True, exist_ok=False)
     targets_root = arm_root / "targets"
+    output_lease = _declare_trial_output(protocol, targets_root) if protocol.get("schema_version") == 2 else None
+    arm_root.mkdir(parents=True, exist_ok=False)
     targets_root.mkdir()
     log_root = arm_root / "logs"
     log_root.mkdir()
     result = {"schema_version": 1, "kind": "build-feedback-arm", "arm": arm, "status": "running", "reasons": [], "started_at": _stamp(), "source_root": str(source), "source_commit": protocol["source"]["commit"], "source_tree": protocol["source"]["tree"], "config": config, "jobs": [], "feedback_warm_jobs": [], "edit_jobs": [], "target_root": str(targets_root), "peak_commit_bytes": 0}
+    if protocol["schema_version"] == 2:
+        result.update(schema_version=2, protocol_sha256=canonical_sha256(protocol), source_receipt_sha256=protocol["source"]["receipt_sha256"], toolchain_sha256=canonical_sha256(protocol["toolchain"]), output_lease=output_lease)
     start = time.monotonic()
     edit_original = None
-    job = None
+    job, live_monitor = None, None
     review_cap = protocol["baseline"]["allocated_bytes"] + 40 * GIB - 1
-    review_floor = 80 * GIB
+    review_floor = _disk_floor(protocol)
     try:
         _verify_source(source, protocol)
         _verify_cache_prewarm(protocol, config, source)
@@ -1347,13 +1952,18 @@ def _run_arm(protocol: dict, arm: str, source: Path, arm_root: Path, review_rece
             review_cap = min(_count(review_value.get("max_allocated_bytes"), "review_allocated_ceiling"), protocol["baseline"]["allocated_bytes"] + 60 * GIB - 1)
             review_floor = _count(review_value.get("min_disk_free_bytes"), "review_disk_free_floor")
         result["allocated_before_bytes"] = before["allocated_bytes"]
+        if protocol.get("schema_version") == 2:
+            result["disk_free_before_bytes"] = before["disk_free_bytes"]
+            result["resource_guard"] = {"kind": "windows-job-and-cumulative-owned-output-cap", "memory_limit_bytes": MEMORY_LIMIT_BYTES,
+                                        "owned_output_cap_bytes": protocol["predicted_growth_bytes"],
+                                        "minimum_free_bytes": _disk_floor(protocol), "external_growth_allowance_bytes": _external_allowance(protocol)}
         job = WindowsJob()
         memory = _memory_status()
         _require(memory["physical_available"] >= 2 * GIB and memory["commit_available"] >= 2 * GIB, "system_resource_headroom_insufficient")
         environment = tool_environment(protocol, config)
         store_bytes = 0
         if config["tool"]["kind"] != "native":
-            store_scan = _inventory_module().inventory([], store_roots=[config["tool"]["store"]], discover=False)
+            store_scan = _inventory_module().inventory([], store_roots=[config["tool"]["store"]], discover=False, **({"minimum_free_bytes": _disk_floor(protocol)} if protocol.get("schema_version") == 2 else {}))
             _require(store_scan.get("complete") is True and store_scan.get("errors") == [], "store_allocation_capture_incomplete")
             store_bytes = _count(store_scan.get("allocated_bytes"), "store_allocated_bytes")
         live_monitor = _LiveBudget(protocol, before, job, store_bytes, config, review_floor_bytes=review_floor)
@@ -1387,9 +1997,14 @@ def _run_arm(protocol: dict, arm: str, source: Path, arm_root: Path, review_rece
             result.setdefault("phase_duration_ms", {})[phase] = phase_duration
             for capture in captures:
                 result["peak_commit_bytes"] = max(result["peak_commit_bytes"], capture["peak_commit_bytes"])
-                if capture["status"] != "ok":
-                    result["status"], result["reasons"] = capture["status"], capture["reasons"]
-                    break
+            if _full_capacity(protocol):
+                failure = next((capture for capture in captures if capture["status"] not in ("ok", "capacity_limited")), None)
+                if failure is None:
+                    failure = next((capture for capture in captures if capture["status"] == "capacity_limited"), None)
+            else:
+                failure = next((capture for capture in captures if capture["status"] != "ok"), None)
+            if failure is not None:
+                result["status"], result["reasons"] = failure["status"], failure["reasons"]
             if len(captures) != len(JOBS) and result["status"] == "running":
                 result["status"], result["reasons"] = "capture_failed", ["phase_job_count_incomplete"]
             if result["status"] != "running":
@@ -1404,7 +2019,13 @@ def _run_arm(protocol: dict, arm: str, source: Path, arm_root: Path, review_rece
         if job is not None:
             try:
                 account = job.account()
+                if account.get("active_processes", 0):
+                    job.terminate()
+                    account = job.account()
                 result["peak_commit_bytes"] = max(result["peak_commit_bytes"], account["peak_commit_bytes"])
+                if protocol.get("schema_version") == 2 and live_monitor is not None and hasattr(live_monitor, "io_origin") and hasattr(live_monitor, "floor_free"):
+                    result["final_job_write_bound_bytes"] = max(0, live_monitor._write_bound() - live_monitor.io_origin)
+                    result["minimum_disk_free_bytes"] = live_monitor.floor_free
                 job.close()
                 result["process_tree_drained"] = True
             except (OSError, ProtocolError) as error:
@@ -1423,24 +2044,32 @@ def _run_arm(protocol: dict, arm: str, source: Path, arm_root: Path, review_rece
             result["source_verified"] = True
             after = _budget_sample(protocol)
             result["allocated_after_bytes"] = after["allocated_bytes"]
+            if protocol.get("schema_version") == 2:
+                result["disk_free_after_bytes"] = after["disk_free_bytes"]
+                result["minimum_disk_free_bytes"] = min(result.get("minimum_disk_free_bytes", after["disk_free_bytes"]), after["disk_free_bytes"])
             after_reasons = list(after["budget"]["reasons"] if not after["budget"]["allowed"] else [])
             if after["allocated_bytes"] > review_cap:
                 after_reasons.append("budget_review_ceiling_exceeded")
             if after["disk_free_bytes"] < review_floor:
                 after_reasons.append("budget_review_free_space_floor_exceeded")
-            if after_reasons and result["status"] == "ok":
+            if after_reasons and result["status"] in (("ok", "capacity_limited") if _full_capacity(protocol) else ("ok",)):
                 result["status"], result["reasons"] = "budget_limited", sorted(set(after_reasons))
             result["peak_allocated_bytes"] = max([after["allocated_bytes"], result.get("allocated_before_bytes", 0), *[sample["allocated_bytes"] for entry in result["jobs"] + result["feedback_warm_jobs"] + result["edit_jobs"] for sample in entry["resource_samples"]]])
             result["retained_growth_bytes"] = max(0, after["allocated_bytes"] - result.get("allocated_before_bytes", after["allocated_bytes"]))
-            target_report = _inventory_module().inventory([], store_roots=[targets_root], discover=False)
+            target_report = _inventory_module().inventory([], store_roots=[targets_root], discover=False, **({"minimum_free_bytes": _disk_floor(protocol)} if protocol.get("schema_version") == 2 else {}))
             _require(target_report.get("complete") is True and target_report.get("errors") == [], "target_allocation_capture_incomplete")
             result["target_allocated_bytes"] = _count(target_report.get("allocated_bytes"), "target_allocated_bytes")
-            owned_roots = [targets_root]
+            owned_roots = _arm_owned_roots(protocol, result) if _full_capacity(protocol) else [targets_root]
             if config["tool"]["kind"] != "native":
                 owned_roots.append(Path(config["tool"]["store"]))
-            owned_report = _inventory_module().inventory([], store_roots=owned_roots, discover=False)
+            owned_report = _inventory_module().inventory([], store_roots=owned_roots, discover=False, **({"minimum_free_bytes": _disk_floor(protocol)} if protocol.get("schema_version") == 2 else {}))
             _require(owned_report.get("complete") is True and owned_report.get("errors") == [], "owned_allocation_capture_incomplete")
             result["owned_allocated_bytes"] = _count(owned_report.get("allocated_bytes"), "owned_allocated_bytes")
+            if protocol.get("schema_version") == 2:
+                if result["owned_allocated_bytes"] > protocol["predicted_growth_bytes"] and result["status"] in ("ok", "capacity_limited"):
+                    result["status"], result["reasons"] = "budget_limited", ["arm_reservation_allocation_overrun"]
+                if result.get("final_job_write_bound_bytes", 0) >= protocol["predicted_growth_bytes"] and result["status"] == "ok":
+                    result["status"], result["reasons"] = "budget_limited", ["unobserved_capacity_guard_overrun"]
             owned_report["storage_scope"] = "owned_targets_and_stores"
             result["owned_allocation_receipt"] = owned_report
             _write_new(arm_root / "owned-allocation.json", owned_report)
@@ -1455,17 +2084,469 @@ def _run_arm(protocol: dict, arm: str, source: Path, arm_root: Path, review_rece
         result["edit_duration_ms"] = result.get("phase_duration_ms", {}).get("edit", 0)
         result["feedback_warm_duration_ms"] = result.get("phase_duration_ms", {}).get("feedback-warm", 0)
         result["feedback_incremental"] = "on"
-        result["capture_complete"] = result["status"] == "ok" and result.get("process_tree_drained") is True and all(entry["process_tree_capture_complete"] for entry in result["jobs"] + result["feedback_warm_jobs"] + result["edit_jobs"])
+        complete_statuses = ("ok", "capacity_limited") if _full_capacity(protocol) else ("ok",)
+        result["capture_complete"] = result["status"] in complete_statuses and result.get("process_tree_drained") is True and result.get("source_verified") is True and result.get("allocation_complete") is True and bool(result["jobs"]) and all(entry["process_tree_capture_complete"] for entry in result["jobs"] + result["feedback_warm_jobs"] + result["edit_jobs"])
+        if _full_capacity(protocol):
+            result.update(phase="capacity", pair_index=None, attempt=None, performance_evidence=False, completed_valid_pairs=0)
+            result["workload_complete"] = result["status"] == "ok" and all(len(result[field]) == len(JOBS) for field in ("jobs", "feedback_warm_jobs", "edit_jobs"))
+            result["reservation_eligible"] = False
+            result["disposal_eligible"] = result["capture_complete"] and (result["status"] == "capacity_limited" or result["workload_complete"])
         result["artifacts_verified"] = result["status"] == "ok" and all(entry.get("cargo", {}).get("build_success") and not entry.get("cargo", {}).get("errors") for entry in result["jobs"] + result["edit_jobs"])
-        result["quiet"] = result["status"] == "ok" and all(not entry["external_processes"] for entry in result["jobs"] + result["edit_jobs"])
+        result["quiet"] = result["status"] in complete_statuses and all(not entry["external_processes"] for entry in result["jobs"] + result["feedback_warm_jobs"] + result["edit_jobs"])
+        if _full_capacity(protocol) and result["status"] in complete_statuses:
+            try:
+                outsiders = build_process_snapshot()
+                if outsiders:
+                    result["status"], result["reasons"] = "contaminated", ["external_build_process_after_drain"]
+                    result.update(quiet=False, capture_complete=False, disposal_eligible=False, workload_complete=False)
+            except (OSError, ProtocolError) as error:
+                result["status"], result["reasons"] = "capture_failed", [str(error)]
+                result.update(quiet=False, capture_complete=False, disposal_eligible=False, workload_complete=False)
         _write_new(arm_root / "arm.json", result)
     return result
+
+
+def _qualification_allocation(protocol: dict, arm_record: dict) -> dict:
+    _require(protocol.get("schema_version") == 2, "qualification_requires_v2")
+    _require(protocol.get("qualification_allocations") == qualification_allocations(protocol),
+             "qualification_allocation_contract_changed")
+    source, arm = arm_record.get("source_root"), arm_record.get("arm")
+    if not isinstance(source, str) or arm not in ("baseline", "candidate"):
+        raise ProtocolError("qualification_arm_name_required")
+    entries = [entry for entry in protocol["qualification_allocations"] if entry["source_root"] == source and entry["arm"] == arm]
+    _require(len(entries) == 1, "qualification_source_allocation_required")
+    entry = entries[0]
+    expected = Path(protocol["run_root"]) / "capacity" if _full_capacity(protocol) else Path(protocol["run_root"]) / "pairs" / f"pair-{entry['pair_index']:04d}-attempt-{entry['attempt']:02d}" / arm
+    _require(arm_record.get("target_root") == str(expected / "targets")
+             and arm_record.get("config") == protocol["configs"][arm]
+             and arm_record.get("protocol_sha256") == canonical_sha256(protocol), "qualification_arm_identity_changed")
+    path = expected / "arm.json"
+    _require(canonical_sha256(_read_json(path)) == canonical_sha256(arm_record), "qualification_arm_receipt_changed")
+    return entry
+
+
+def _arm_owned_roots(protocol: dict, arm_record: dict) -> list[Path]:
+    target = Path(arm_record["target_root"])
+    entries = [entry for entry in protocol.get("qualification_allocations", [])
+               if entry["source_root"] == arm_record["source_root"] and entry["arm"] == arm_record["arm"]]
+    _require(len(entries) == 1, "qualification_source_allocation_required")
+    suite = Path(entries[0]["release_suite_root"])
+    roots = [target.parent, suite]
+    if arm_record["config"]["tool"]["kind"] != "native":
+        roots.append(Path(arm_record["config"]["tool"]["store"]))
+    return roots
+
+
+def release_environment(protocol: dict, arm_record: dict) -> dict[str, str]:
+    """Official validator receives approved child-only paths, never profile/wrapper overrides."""
+    entry = _qualification_allocation(protocol, arm_record)
+    environment = tool_environment(protocol, protocol["configs"][arm_record["arm"]])
+    allowed_cargo = {"CARGO_HOME"}
+    forbidden_names = {"CC", "CXX", "AR", "CARGO", "CFLAGS", "CXXFLAGS", "CPPFLAGS", "LDFLAGS", "CL", "_CL_", "LINK", "_LINK_",
+                       "CRATE_CC_NO_DEFAULTS", "CC_ENABLE_DEBUG_OUTPUT"}
+    forbidden_names.update(prefix + "_" + variable for prefix in ("HOST", "TARGET")
+                           for variable in ("CC", "CXX", "AR", "CFLAGS", "CXXFLAGS", "LDFLAGS"))
+    environment = {key: value for key, value in environment.items()
+                   if (not key.upper().startswith(("CARGO_", "RUST", "SCCACHE_", "MBX_", "CCACHE_")) or key.upper() in allowed_cargo)
+                   and key.upper() not in forbidden_names
+                   and not key.upper().startswith(("LIBSQLITE3", "SQLITE", "SQLCIPHER", "PKG_CONFIG", "CC_", "CXX_", "AR_", "CFLAGS_", "CXXFLAGS_"))}
+    environment["PATH"] = os.pathsep.join([str(Path(protocol["toolchain"]["cargo"]["path"]).parent),
+                                           str(Path(protocol["toolchain"]["rustc"]["path"]).parent), environment.get("PATH", "")])
+    environment.update(CARGO_TARGET_DIR=str(Path(arm_record["target_root"]) / "qualification" / "release"),
+                       CARGO_BUILD_TARGET=protocol["toolchain"]["target"], CARGO_BUILD_JOBS="2", CARGO_NET_OFFLINE="true",
+                       TEMP=str(Path(entry["release_suite_root"]) / "scratch"), TMP=str(Path(entry["release_suite_root"]) / "scratch"),
+                       PYTHONDONTWRITEBYTECODE="1")
+    return environment
+
+
+def qualification_command(protocol: dict, arm_record: dict, qualification: str, *, release_options: dict | None = None,
+                          diagnostic_argv: list[str] | None = None) -> list[str]:
+    _require(qualification in QUALIFICATION_NAMES, "unknown_qualification")
+    allocation = _qualification_allocation(protocol, arm_record)
+    target = Path(arm_record["target_root"]) / "qualification" / qualification
+    if qualification in ("clippy", "optional_features"):
+        command = [protocol["toolchain"]["cargo"]["path"], "clippy" if qualification == "clippy" else "test", "--workspace", "--all-targets"]
+        if qualification == "optional_features":
+            command.append("--all-features")
+        command.extend(["--locked", "--offline", "-j2", "--message-format=json", "--target-dir", str(target)])
+        return [*command, "--", "-D", "warnings"] if qualification == "clippy" else [*command, "--", "--test-threads=2"]
+    if qualification == "diagnostics":
+        if not isinstance(diagnostic_argv, list) or not diagnostic_argv or not all(isinstance(arg, str) for arg in diagnostic_argv):
+            raise ProtocolError("approved_diagnostic_argv_required")
+        _, approval = _retention_module().validate_policy(protocol)
+        commands = approval.get("diagnostic_commands", {})
+        _require(isinstance(commands, dict) and commands.get(canonical_sha256(arm_record["config"])) == diagnostic_argv,
+                 "diagnostic_command_not_independently_approved")
+        executable = Path(diagnostic_argv[0])
+        _require(executable.is_absolute() and _inside(executable, Path(arm_record["target_root"])), "diagnostic_requires_arm_artifact")
+        artifacts = [artifact for field in ("jobs", "feedback_warm_jobs", "edit_jobs") for capture in arm_record[field]
+                     for selected in capture.get("cargo", {}).get("artifacts", []) for artifact in selected.get("files", [])]
+        matches = [artifact for artifact in artifacts if artifact["path"] == str(executable)]
+        _require(bool(matches), "diagnostic_executable_not_cargo_emitted")
+        verify_artifact_receipt(matches[-1])
+        return list(diagnostic_argv)
+    source = Path(arm_record["source_root"])
+    validator = source / "scripts" / "evidence" / "core_beta_benchmark.py"
+    manifest = _manifest(_read_json(Path(protocol["source"]["receipt_path"])))
+    selected = [entry for entry in manifest if entry["path"] == "scripts/evidence/core_beta_benchmark.py"]
+    _require(len(selected) == 1 and validator.is_file() and sha256_file(validator) == selected[0]["sha256"]
+             and validator.stat().st_size == selected[0]["bytes"], "release_validator_not_frozen")
+    if not isinstance(release_options, dict) or set(release_options) != {"disk", "filesystem", "antivirus_state", "sqlite_version", "sqlite_version_source"} or not all(isinstance(value, str) and value.strip() and value != "not_recorded" for value in release_options.values()):
+        raise ProtocolError("official_release_environment_metadata_required")
+    suite = Path(allocation["release_suite_root"])
+    command = [str(Path(sys.executable).resolve()), str(validator), "run", "--profile", "full", "--workspace", str(source),
+               "--output-dir", str(suite / "report"), "--baseline-run", "1", "--suite-id", suite.name,
+               "--cargo", protocol["toolchain"]["cargo"]["path"], "--rustc", protocol["toolchain"]["rustc"]["path"],
+               "--expected-commit", protocol["source"]["commit"]]
+    for name, value in release_options.items():
+        command.extend(["--" + name.replace("_", "-"), value])
+    return command
+
+
+def _qualification_prior(protocol: dict, arm_record: dict, directory: Path, prior_captures: Iterable[dict]) -> list[dict]:
+    declared = list(prior_captures)
+    stored = []
+    if directory.exists():
+        for path in sorted(directory.glob("*/capture.json")):
+            capture = _read_json(path)
+            _require(path.parent.name in QUALIFICATION_NAMES, "unknown_existing_qualification")
+            stored.append(capture)
+    _require(sorted(canonical_sha256(capture) for capture in stored) == sorted(canonical_sha256(capture) for capture in declared),
+             "all_previous_qualification_captures_required")
+    previous = _count(arm_record.get("final_job_write_bound_bytes"), "prior_arm_write_bound")
+    floor = _count(arm_record.get("minimum_disk_free_bytes"), "prior_arm_free_minimum")
+    for capture in declared:
+        guard = capture.get("resource_guard", {})
+        _require(capture.get("protocol_sha256") == canonical_sha256(protocol)
+                 and capture.get("source_root") == arm_record["source_root"] and capture.get("arm") == arm_record["arm"]
+                 and guard.get("kind") == "windows-job-and-cumulative-owned-output-cap"
+                 and guard.get("owned_output_cap_bytes") == protocol["predicted_growth_bytes"]
+                 and guard.get("origin_allocated_bytes") == arm_record.get("allocated_before_bytes")
+                 and guard.get("origin_disk_free_bytes") == arm_record.get("disk_free_before_bytes")
+                 and guard.get("memory_limit_bytes") == MEMORY_LIMIT_BYTES
+                 and capture.get("config_sha256") == canonical_sha256(arm_record["config"])
+                 and capture.get("process_tree_drained") is True and capture.get("status") == "ok", "qualification_prior_capture_not_verified")
+        _require(_count(guard.get("prior_write_bound_bytes"), "prior_write_bound_bytes") >= previous
+                 and _count(guard.get("prior_minimum_disk_free_bytes"), "prior_minimum_disk_free_bytes") <= floor,
+                 "qualification_prior_cumulative_guard_changed")
+        allocation_path, allocation = _proof_reference(capture.get("owned_allocation_receipt"), "qualification_prior_allocation")
+        expected_path = directory / capture["qualification"] / "owned-allocation.json"
+        _require(Path(allocation_path["path"]) == expected_path and allocation.get("complete") is True and allocation.get("errors") == []
+                 and allocation.get("allocated_bytes") == capture.get("owned_allocated_bytes"), "qualification_prior_allocation_invalid")
+        previous = max(_count(capture.get("final_job_write_bound_bytes"), "prior_final_write_bound"),
+                       _count(capture.get("owned_allocated_bytes"), "prior_owned_allocated_bytes"))
+        floor = _count(capture.get("minimum_disk_free_bytes"), "prior_minimum_disk_free_bytes")
+        for stream in ("stdout", "stderr"):
+            _require(sha256_file(Path(capture[stream + "_path"])) == capture[stream + "_sha256"], "qualification_prior_log_changed")
+    return declared
+
+
+def capture_qualification(protocol: dict, arm_record: dict, qualification: str, *, review_receipt_path: str | Path | None = None,
+                          prior_captures: Iterable[dict] = (), release_options: dict | None = None,
+                          diagnostic_argv: list[str] | None = None) -> dict:
+    """Real guarded qualifier: preserve original admission, cumulative writes and free minima."""
+    _validate_protocol(protocol)
+    _retention_module().validate_policy(protocol)
+    allocation = _qualification_allocation(protocol, arm_record)
+    _require(arm_record.get("status") == "ok" and arm_record.get("capture_complete") is True
+             and arm_record.get("source_verified") is True and arm_record.get("process_tree_drained") is True,
+             "qualification_requires_complete_live_arm")
+    source, target = Path(arm_record["source_root"]), Path(arm_record["target_root"])
+    review = _path(review_receipt_path, "review_receipt") if review_receipt_path is not None else None
+    log_base = target.parent / "qualification-captures"
+    prior = _qualification_prior(protocol, arm_record, log_base, prior_captures)
+    _require([capture.get("qualification") for capture in prior] == list(QUALIFICATION_NAMES[:len(prior)])
+             and len(prior) < len(QUALIFICATION_NAMES) and qualification == QUALIFICATION_NAMES[len(prior)],
+             "qualification_order_must_preserve_cumulative_captures")
+    _require(protocol.get("msvc_environment") is not None, "verified_msvc_environment_required")
+    argv = qualification_command(protocol, arm_record, qualification, release_options=release_options, diagnostic_argv=diagnostic_argv)
+    logs = log_base / qualification
+    _require(not logs.exists(), "qualification_output_identity_already_used")
+    _verify_source(source, protocol)
+    _require(not build_process_snapshot(), "quiet_qualification_required")
+    before = _budget_sample(protocol)
+    review_floor, review_cap = _disk_floor(protocol), protocol["baseline"]["allocated_bytes"] + 40 * GIB - 1
+    _require(before["budget"]["allowed"], "qualification_current_budget_refused")
+    if review is not None:
+        data = _read_json(review)
+        _require(data.get("approved") is True and data.get("protocol_sha256") == canonical_sha256(protocol)
+                 and data.get("baseline_receipt_sha256") == protocol["baseline"]["receipt_sha256"], "review_identity_changed")
+        review_floor = max(review_floor, _count(data.get("min_disk_free_bytes"), "review_disk_free_floor"))
+        review_cap = min(_count(data.get("max_allocated_bytes"), "review_allocated_ceiling"), protocol["baseline"]["allocated_bytes"] + 60 * GIB - 1)
+    _require(before["allocated_bytes"] <= review_cap and before["disk_free_bytes"] >= review_floor, "qualification_review_ceiling_reached")
+    original = {"allocated_bytes": _count(arm_record.get("allocated_before_bytes"), "arm_original_allocated_bytes"),
+                "disk_free_bytes": _count(arm_record.get("disk_free_before_bytes"), "arm_original_disk_free_bytes")}
+    prior_writes = _count(arm_record.get("final_job_write_bound_bytes"), "arm_final_write_bound")
+    minimum_free = min(original["disk_free_bytes"], _count(arm_record.get("minimum_disk_free_bytes"), "arm_minimum_disk_free_bytes"))
+    captures = [capture for field in ("jobs", "feedback_warm_jobs", "edit_jobs") for capture in arm_record[field]] + prior
+    _require(bool(captures) and all(isinstance(capture.get("resource_samples"), list) and bool(capture["resource_samples"]) for capture in captures),
+             "real_qualification_resource_samples_required")
+    for capture in captures:
+        for sample in capture["resource_samples"]:
+            _require(sample.get("allocation_kind") == "conservative-disk-and-job-write-bound", "real_qualification_resource_samples_required")
+            prior_writes = max(prior_writes, _count(sample.get("job_write_bound_bytes"), "prior_cumulative_write_bound"))
+            minimum_free = min(minimum_free, _count(sample.get("disk_free_bytes"), "prior_capture_disk_free_bytes"))
+        if capture in prior:
+            prior_writes = max(prior_writes, _count(capture.get("final_job_write_bound_bytes"), "prior_final_write_bound"))
+            minimum_free = min(minimum_free, _count(capture.get("minimum_disk_free_bytes"), "prior_minimum_disk_free_bytes"))
+    owned = _inventory_module().inventory([], store_roots=_arm_owned_roots(protocol, arm_record), discover=False, minimum_free_bytes=_disk_floor(protocol))
+    _require(owned.get("complete") is True and owned.get("errors") == [], "qualification_owned_allocation_incomplete")
+    prior_writes = max(prior_writes, _count(owned.get("allocated_bytes"), "qualification_owned_bytes"))
+    _require(prior_writes < protocol["predicted_growth_bytes"], "qualification_cumulative_cap_already_reached")
+    memory = _memory_status()
+    _require(memory["physical_available"] >= 2 * GIB and memory["commit_available"] >= 2 * GIB, "system_resource_headroom_insufficient")
+    if qualification == "release":
+        environment = release_environment(protocol, arm_record)
+        scratch = Path(allocation["release_suite_root"]) / "scratch"
+        _require(not scratch.exists(), "release_scratch_identity_already_used")
+        scratch.mkdir(parents=True, exist_ok=False)
+    else:
+        environment = tool_environment(protocol, arm_record["config"], feedback=True)
+        if arm_record["config"]["tool"]["kind"] != "native":
+            # Qualification is a direct Cargo correctness gate, while cached
+            # performance belongs exclusively to the eighteen measured jobs.
+            environment = tool_environment(protocol, {**arm_record["config"], "tool": {"kind": "native"}}, feedback=True)
+    result = None
+    with WindowsJob(MEMORY_LIMIT_BYTES) as job:
+        monitor = _LiveBudget(protocol, original, job, config=arm_record["config"], review_floor_bytes=review_floor,
+                              prior_write_bound_bytes=prior_writes, minimum_free_bytes=minimum_free)
+        first = monitor()
+        _require(first["budget"]["allowed"], "qualification_cumulative_budget_refused")
+        process = job.start(argv, source, environment, logs, qualification)
+        result = _wait_capture(job, process, protocol, monitor=monitor, review_cap=review_cap)
+        if job.account()["active_processes"]:
+            job.terminate()
+        result.update(qualification=qualification, protocol_sha256=canonical_sha256(protocol), source_root=str(source),
+                      arm=arm_record["arm"], pair_index=allocation["pair_index"], attempt=allocation["attempt"],
+                      config_sha256=canonical_sha256(arm_record["config"]), process_tree_drained=True,
+                      final_job_write_bound_bytes=prior_writes + max(0, monitor._write_bound() - monitor.io_origin),
+                      minimum_disk_free_bytes=monitor.floor_free, resource_guard={"kind": "windows-job-and-cumulative-owned-output-cap",
+                      "memory_limit_bytes": MEMORY_LIMIT_BYTES, "owned_output_cap_bytes": protocol["predicted_growth_bytes"],
+                      "minimum_free_bytes": _disk_floor(protocol), "external_growth_allowance_bytes": _external_allowance(protocol),
+                      "origin_allocated_bytes": original["allocated_bytes"], "origin_disk_free_bytes": original["disk_free_bytes"],
+                      "prior_write_bound_bytes": prior_writes, "prior_minimum_disk_free_bytes": minimum_free})
+    result["qualification_budget"] = {**result["resource_guard"],
+                                      "final_job_write_bound_bytes": result["final_job_write_bound_bytes"],
+                                      "minimum_disk_free_bytes": result["minimum_disk_free_bytes"], "extra_owned_roots": []}
+    try:
+        if result["status"] == "ok" and qualification in ("clippy", "optional_features"):
+            result["cargo"] = parse_cargo_json_file(Path(result["stdout_path"]), target / "qualification" / qualification, source)
+            if result["cargo"]["errors"] or not result["cargo"]["build_success"]:
+                result["status"], result["reasons"] = "capture_failed", result["cargo"]["errors"] or ["cargo_build_failed"]
+        if result["status"] == "capacity_limited" and qualification in ("clippy", "optional_features"):
+            failures = capacity_cargo_failure(Path(result["stdout_path"]), target / "qualification" / qualification, source)
+            if failures:
+                result["status"], result["reasons"] = "failed", failures
+        _verify_source(source, protocol)
+        outsiders = build_process_snapshot()
+        if outsiders:
+            result["status"], result["reasons"] = "contaminated", ["external_build_process_after_qualification"]
+            result["external_processes"].extend(outsiders)
+        final = _inventory_module().inventory([], store_roots=_arm_owned_roots(protocol, arm_record), discover=False, minimum_free_bytes=_disk_floor(protocol))
+        _require(final.get("complete") is True and final.get("errors") == [], "qualification_final_allocation_incomplete")
+        _write_new(logs / "owned-allocation.json", final)
+        result["owned_allocation_receipt"] = {"path": str(logs / "owned-allocation.json"), "sha256": sha256_file(logs / "owned-allocation.json")}
+        result["owned_allocated_bytes"] = _count(final.get("allocated_bytes"), "qualification_final_allocated_bytes")
+        if result["owned_allocated_bytes"] > protocol["predicted_growth_bytes"] and result["status"] in ("ok", "capacity_limited"):
+            result["status"], result["reasons"] = "budget_limited", ["qualification_owned_output_cap_overrun"]
+        elif result["status"] == "ok" and result["final_job_write_bound_bytes"] >= protocol["predicted_growth_bytes"]:
+            result["status"], result["reasons"] = "budget_limited", ["qualification_unobserved_guard_overrun"]
+        result["finished_at"] = _stamp()
+    except (OSError, ProtocolError, subprocess.SubprocessError, UnicodeError, KeyError, ValueError) as error:
+        result["status"], result["reasons"] = "capture_failed", [str(error)]
+    finally:
+        result["finished_at"] = _stamp()
+        _write_new(logs / "capture.json", result)
+    return result
+
+
+def _run_full_capacity_probe(protocol: dict, probe_root: Path, review_receipt_path: Path | None, arm_finalizer) -> dict:
+    _require(_full_capacity(protocol) and callable(arm_finalizer), "full_capacity_finalizer_required")
+    probe = protocol["capacity_probe"]
+    arm = _run_arm(protocol, probe["arm"], Path(probe["source_root"]), probe_root, review_receipt_path)
+    arm_path = probe_root / "arm.json"
+    arm_reference = {"path": str(arm_path), "sha256": sha256_file(arm_path)}
+    observation = {"schema_version": 2, "kind": "build-feedback-full-capacity-observation", "phase": "capacity", "arm": probe["arm"],
+                   "pair_index": None, "attempt": None, "protocol_sha256": canonical_sha256(protocol),
+                   "source_receipt_sha256": protocol["source"]["receipt_sha256"], "toolchain_sha256": canonical_sha256(protocol["toolchain"]),
+                   "source_root": probe["source_root"], "target_root": arm["target_root"], "config": arm["config"], "arm_reference": arm_reference,
+                   "status": arm["status"], "reasons": list(arm["reasons"]), "capture_complete": False, "workload_complete": False,
+                   "reservation_eligible": False, "disposal_eligible": False, "performance_evidence": False, "completed_valid_pairs": 0,
+                   "started_at": arm["started_at"], "output_lease": arm.get("output_lease")}
+    if arm["status"] in ("ok", "capacity_limited") and arm.get("capture_complete") is True:
+        try:
+            reference = arm_finalizer(protocol=protocol, phase="capacity", arm=probe["arm"], pair_index=None, attempt=None,
+                                      arm_receipt=dict(arm_reference), arm_record=dict(arm))
+            _require(sha256_file(arm_path) == arm_reference["sha256"] and _read_json(arm_path) == arm,
+                     "capacity_finalizer_changed_immutable_arm")
+            retained = _retention_module().verify_full_capacity_link(reference, protocol)
+            _require(isinstance(retained, dict) and retained.get("arm_receipt") == arm, "full_capacity_seal_does_not_bind_arm")
+            seal = retained.get("seal")
+            _require(isinstance(seal, dict) and seal.get("kind") == "build-feedback-full-capacity-seal"
+                     and seal.get("performance_evidence") is False and seal.get("arm") == probe["arm"]
+                     and seal.get("pair_index") is None and seal.get("attempt") is None,
+                     "full_capacity_closure_invalid")
+            _require(seal.get("status") in ("ok", "capacity_limited") and (arm["status"] == "ok" or seal["status"] == "capacity_limited"),
+                     "full_capacity_seal_status_mismatch")
+            successful = seal["status"] == "ok"
+            _require(seal.get("workload_complete") is successful and seal.get("reservation_eligible") is successful,
+                     "full_capacity_reservation_status_mismatch")
+            observation["status"] = seal["status"]
+            observation["reasons"] = [] if successful else ["owned_output_cap_reached"]
+            observation.update(capture_complete=True, workload_complete=successful, reservation_eligible=successful,
+                               disposal_eligible=True, retained_evidence=reference,
+                               peak_owned_output_bytes=_count(seal.get("observed_peak_bytes"), "full_capacity_sealed_peak", positive=True))
+        except (OSError, ProtocolError, ValueError, TypeError, KeyError) as error:
+            observation["status"], observation["reasons"] = "capture_failed", [str(error)]
+    observation["finished_at"] = _stamp()
+    _write_new(probe_root / "capacity.json", observation)
+    return observation
+
+
+def capacity_command(protocol: dict, target: Path) -> list[str]:
+    _require(protocol.get("schema_version") == 2 and protocol.get("phase") == "capacity", "capacity_protocol_required")
+    probe = protocol["capacity_probe"]
+    command = [protocol["toolchain"]["cargo"]["path"], probe["command"], "-p", probe["package"], "--all-targets", "--locked", "--offline", "-j2", "--message-format=json", "--target-dir", str(target)]
+    if probe["command"] == "test":
+        command.extend(["--", "--test-threads=2"])
+    return command
+
+
+def _run_capacity_probe(protocol: dict, probe_root: Path, review_receipt_path: Path | None) -> dict:
+    """One leaf invocation; a bounded capacity observation never qualifies speed."""
+    _require(protocol["schema_version"] == 2 and protocol["phase"] == "capacity" and not _full_capacity(protocol), "single_leaf_capacity_protocol_required")
+    _require(not probe_root.exists(), "capacity_output_identity_already_used")
+    targets, logs = probe_root / "targets", probe_root / "logs"
+    output_lease = _declare_trial_output(protocol, targets)
+    probe_root.mkdir(parents=True, exist_ok=False)
+    targets.mkdir()
+    logs.mkdir()
+    source = Path(protocol["capacity_probe"]["source_root"])
+    config = protocol["configs"]["candidate"]
+    result: dict[str, Any] = {"schema_version": 2, "kind": "build-feedback-capacity-observation", "phase": "capacity", "status": "running", "reasons": [], "started_at": _stamp(), "protocol_sha256": canonical_sha256(protocol), "source_root": str(source), "source_commit": protocol["source"]["commit"], "source_tree": protocol["source"]["tree"], "source_receipt_sha256": protocol["source"]["receipt_sha256"], "toolchain_sha256": canonical_sha256(protocol["toolchain"]), "target_root": str(targets), "config": config, "owned_output_cap_bytes": protocol["capacity_probe"]["owned_output_cap_bytes"], "performance_evidence": False, "completed_valid_pairs": 0, "allocation_complete": False, "source_verified": False, "process_tree_drained": False, "jobs": []}
+    result["output_lease"] = output_lease
+    job, live_monitor = None, None
+    before = None
+    final_write_bound = 0
+    try:
+        _verify_source(source, protocol)
+        _require(not build_process_snapshot(), "quiet_segment_required")
+        before = _budget_sample(protocol)
+        _check_review(protocol, preview_protocol(protocol, before), review_receipt_path)
+        result["allocated_before_bytes"] = before["allocated_bytes"]
+        result["disk_free_before_bytes"] = before["disk_free_bytes"]
+        review_floor = _disk_floor(protocol)
+        review_cap = protocol["baseline"]["allocated_bytes"] + 40 * GIB - 1
+        if review_receipt_path is not None:
+            review = _read_json(review_receipt_path)
+            review_floor = _count(review.get("min_disk_free_bytes"), "review_disk_free_floor")
+            review_cap = min(_count(review.get("max_allocated_bytes"), "review_allocated_ceiling"), protocol["baseline"]["allocated_bytes"] + 60 * GIB - 1)
+        memory = _memory_status()
+        _require(memory["physical_available"] >= 2 * GIB and memory["commit_available"] >= 2 * GIB, "system_resource_headroom_insufficient")
+        job = WindowsJob(MEMORY_LIMIT_BYTES)
+        live_monitor = _LiveBudget(protocol, before, job, config=config, review_floor_bytes=review_floor)
+        environment = tool_environment(protocol, config, feedback=True)
+        process = job.start(capacity_command(protocol, targets), source, environment, logs, "capacity-" + protocol["capacity_probe"]["command"])
+        capture = _wait_capture(job, process, protocol, monitor=live_monitor, review_cap=review_cap)
+        result["jobs"].append(capture)
+        result["status"], result["reasons"] = capture["status"], capture["reasons"]
+        if capture["status"] == "capacity_limited":
+            failures = capacity_cargo_failure(Path(capture["stdout_path"]), targets, source)
+            result["cap_stop_quality_errors"] = failures
+            if failures:
+                result["status"], result["reasons"] = "failed", failures
+        if capture["status"] == "ok":
+            cargo = parse_cargo_json_file(Path(capture["stdout_path"]), targets, source)
+            capture["cargo"] = cargo
+            if not cargo["build_success"] or cargo["errors"]:
+                result["status"], result["reasons"] = "capture_failed", cargo["errors"] or ["cargo_build_failed"]
+        _write_new(logs / "capture.json", capture)
+        result["capture_receipt"] = {"path": str(logs / "capture.json"), "sha256": sha256_file(logs / "capture.json")}
+        result["peak_commit_bytes"] = capture["peak_commit_bytes"]
+        result["memory_limit_bytes"] = MEMORY_LIMIT_BYTES
+    except (OSError, ProtocolError, subprocess.SubprocessError, UnicodeError) as error:
+        result["status"] = "contaminated" if str(error) == "quiet_segment_required" else "capture_failed"
+        result["reasons"] = [str(error)]
+    finally:
+        if job is not None:
+            try:
+                if job.account()["active_processes"]:
+                    job.terminate()
+                if live_monitor is not None:
+                    final_write_bound = max(0, live_monitor._write_bound() - live_monitor.io_origin)
+                job.close()
+                result["process_tree_drained"] = True
+            except (OSError, ProtocolError) as error:
+                result["status"], result["reasons"] = "capture_failed", [str(error)]
+        try:
+            _verify_source(source, protocol)
+            result["source_verified"] = True
+            report = _inventory_module().inventory([], store_roots=[targets], discover=False, minimum_free_bytes=_disk_floor(protocol))
+            _require(report.get("complete") is True and report.get("errors") == [], "capacity_allocation_capture_incomplete")
+            target_bytes = _count(report.get("allocated_bytes"), "capacity_target_allocated_bytes")
+            _write_new(probe_root / "target-allocation.json", report)
+            result["target_allocation_receipt"] = {"path": str(probe_root / "target-allocation.json"), "sha256": sha256_file(probe_root / "target-allocation.json")}
+            result["target_allocated_bytes"] = target_bytes
+            owned_report = _inventory_module().inventory([], store_roots=[probe_root], discover=False, minimum_free_bytes=_disk_floor(protocol))
+            _require(owned_report.get("complete") is True and owned_report.get("errors") == [], "capacity_owned_allocation_capture_incomplete")
+            owned = _count(owned_report.get("allocated_bytes"), "capacity_owned_allocated_bytes")
+            _write_new(probe_root / "owned-allocation.json", owned_report)
+            result["task_output_allocation_receipt"] = {"path": str(probe_root / "owned-allocation.json"), "sha256": sha256_file(probe_root / "owned-allocation.json")}
+            result["task_output_allocated_bytes"] = owned
+            result["owned_allocation_receipt"] = result["target_allocation_receipt"]
+            result["owned_allocated_bytes"] = target_bytes
+            result["allocation_complete"] = True
+            after = _budget_sample(protocol)
+            result["allocated_after_bytes"] = after["allocated_bytes"]
+            result["disk_free_after_bytes"] = after["disk_free_bytes"]
+            bound = max(final_write_bound, 0 if live_monitor is None or live_monitor.last is None else live_monitor.last["job_write_bound_bytes"])
+            result["peak_owned_output_bytes"] = max(owned, bound)
+            result["final_job_write_bound_bytes"] = final_write_bound
+            result["owned_peak_kind"] = "max-post-drain-allocation-and-job-write-bound"
+            result["minimum_disk_free_bytes"] = min(after["disk_free_bytes"], live_monitor.floor_free if live_monitor is not None else after["disk_free_bytes"])
+            if owned > result["owned_output_cap_bytes"] and result["status"] in ("ok", "capacity_limited"):
+                result["status"], result["reasons"] = "budget_limited", ["owned_output_cap_overrun"]
+            elif bound >= result["owned_output_cap_bytes"] and result["status"] == "ok":
+                result["status"], result["reasons"] = "budget_limited", ["unobserved_capacity_guard_overrun"]
+            elif not after["budget"]["allowed"] and result["status"] == "ok":
+                result["status"], result["reasons"] = "budget_limited", after["budget"]["reasons"]
+        except (OSError, ProtocolError, KeyError) as error:
+            result["status"], result["reasons"] = "capture_failed", [str(error)]
+        if result["status"] in ("ok", "capacity_limited"):
+            try:
+                outsiders = build_process_snapshot()
+                if outsiders:
+                    result["status"], result["reasons"] = "contaminated", ["external_build_process_after_drain"]
+                    result["final_external_processes"] = outsiders
+            except (OSError, ProtocolError) as error:
+                result["status"], result["reasons"] = "capture_failed", [str(error)]
+        result["finished_at"] = _stamp()
+        result["capture_complete"] = result["status"] in ("ok", "capacity_limited") and result["process_tree_drained"] and result["source_verified"] and result["allocation_complete"] and all(entry.get("process_tree_capture_complete") for entry in result["jobs"])
+        result["artifacts_verified"] = result["status"] == "ok" and bool(result["jobs"]) and all(entry.get("cargo", {}).get("build_success") and not entry.get("cargo", {}).get("errors") for entry in result["jobs"])
+        result["disposal_eligible"] = result["capture_complete"] and (result["status"] == "capacity_limited" or result["artifacts_verified"])
+        _write_new(probe_root / "capacity.json", result)
+    return result
+
+
+@lru_cache(maxsize=1)
+def _retention_module():
+    path = Path(__file__).with_name("build_feedback_retention.py")
+    _require(path.is_file(), "approved_retention_helper_unavailable")
+    spec = importlib.util.spec_from_file_location("build_feedback_runner_retention", path)
+    _require(spec is not None and spec.loader is not None, "retention_import_unavailable")
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def _validate_resume(state: dict, protocol: dict, protocol_hash: str) -> None:
     seal = state.get("integrity_sha256")
     _require(isinstance(seal, str) and seal == canonical_sha256({key: value for key, value in state.items() if key != "integrity_sha256"}), "resume_state_corrupt")
-    _require(state.get("schema_version") == 1 and state.get("protocol_sha256") == protocol_hash and state.get("phase") == protocol["phase"] and state.get("planned_pairs") == protocol["pairs"], "resume_protocol_mismatch")
+    _require(type(state.get("schema_version")) is int and state.get("schema_version") == protocol.get("schema_version", 1) and state.get("protocol_sha256") == protocol_hash and state.get("phase") == protocol["phase"] and state.get("planned_pairs") == protocol["pairs"], "resume_protocol_mismatch")
+    if protocol.get("schema_version") == 2:
+        _require(type(state.get("planned_pairs")) is int and type(state.get("completed_valid_pairs")) is int,
+                 "resume_pair_counter_types_changed")
     pairs = state.get("pairs")
     if not isinstance(pairs, list):
         raise ProtocolError("resume_pairs_invalid")
@@ -1478,6 +2559,8 @@ def _validate_resume(state: dict, protocol: dict, protocol_hash: str) -> None:
         _require(pair.get("order") == protocol["order"][index], "resume_order_changed")
         _require(pair.get("status") in ("ok", "contaminated", "failed", "timeout", "memory_limited", "budget_limited", "capture_failed", "interrupted"), "unknown_resume_status")
         _require(set(pair.get("arms", {})) == set(pair.get("arm_receipts", {})), "resume_arm_receipts_incomplete")
+        retained_refs = pair.get("retained_evidence", {})
+        _require(isinstance(retained_refs, dict) and set(retained_refs) <= set(pair.get("arms", {})), "resume_retained_scope_invalid")
         if pair.get("status") == "ok":
             _require(index not in indices and set(pair.get("arms", {})) == {"baseline", "candidate"} and all(arm.get("status") == "ok" for arm in pair["arms"].values()), "duplicate_or_incomplete_valid_pair")
             indices.add(index)
@@ -1485,10 +2568,63 @@ def _validate_resume(state: dict, protocol: dict, protocol_hash: str) -> None:
             path = _path(receipt.get("path"), "arm_receipt")
             _require(_inside(path, Path(protocol["run_root"])) and sha256_file(path) == receipt.get("sha256"), "resume_arm_receipt_changed")
             _require(_read_json(path) == pair["arms"][arm], "resume_arm_payload_changed")
+            retained_reference = pair.get("retained_evidence", {}).get(arm)
+            if retained_reference is not None:
+                _require(protocol.get("schema_version") == 2 and pair["arms"][arm].get("status") == "ok", "legacy_or_failed_retained_evidence_not_allowed")
+                retained = _retention_module().verify_retained_arm(retained_reference, protocol, arm, index, attempt)
+                _require(isinstance(retained, dict) and retained.get("arm_receipt") == pair["arms"][arm], "resume_retained_arm_changed")
     _require(indices == set(range(len(indices))), "resume_valid_pair_gap")
     _require(state.get("completed_valid_pairs") == len(indices), "resume_completed_count_changed")
-    if state.get("complete") is True or state.get("status") == "complete":
+    if protocol["phase"] == "capacity":
+        _require(not pairs and state.get("performance_evidence") is False and state.get("completed_valid_pairs") == 0, "capacity_cannot_claim_pairs")
+        capacity = state.get("capacity_observation")
+        if capacity is not None:
+            reference, payload = _proof_reference(state.get("capacity_receipt"), "capacity_receipt")
+            expected = Path(protocol["run_root"]) / "capacity" / "capacity.json"
+            _require(Path(reference["path"]) == expected and payload == capacity, "resume_capacity_receipt_changed")
+            if _full_capacity(protocol):
+                probe = protocol["capacity_probe"]
+                _require(capacity.get("kind") == "build-feedback-full-capacity-observation"
+                         and capacity.get("phase") == "capacity" and capacity.get("performance_evidence") is False
+                         and type(capacity.get("completed_valid_pairs")) is int and capacity["completed_valid_pairs"] == 0
+                         and "pair_index" in capacity and capacity["pair_index"] is None
+                         and "attempt" in capacity and capacity["attempt"] is None
+                         and capacity.get("protocol_sha256") == protocol_hash and capacity.get("arm") == probe["arm"]
+                         and capacity.get("source_receipt_sha256") == protocol["source"]["receipt_sha256"]
+                         and capacity.get("toolchain_sha256") == canonical_sha256(protocol["toolchain"])
+                         and capacity.get("source_root") == probe["source_root"]
+                         and capacity.get("target_root") == str(expected.parent / "targets")
+                         and canonical_sha256(capacity.get("config")) == canonical_sha256(protocol["configs"][probe["arm"]]),
+                         "resume_full_capacity_identity_changed")
+                if capacity.get("capture_complete") is True:
+                    verified = _retention_module().verify_full_capacity_link(capacity.get("retained_evidence"), protocol)
+                    _, raw_arm = _proof_reference(capacity.get("arm_reference"), "resume_full_capacity_arm")
+                    _require(verified.get("arm_receipt") == raw_arm
+                             and capacity.get("arm_reference", {}).get("path") == str(expected.parent / "arm.json")
+                             and capacity.get("status") == verified.get("seal", {}).get("status")
+                             and capacity.get("workload_complete") is (capacity.get("status") == "ok")
+                             and capacity.get("reservation_eligible") is capacity.get("workload_complete")
+                             and capacity.get("disposal_eligible") is True
+                             and type(capacity.get("peak_owned_output_bytes")) is int
+                             and capacity["peak_owned_output_bytes"] == verified.get("seal", {}).get("observed_peak_bytes"),
+                             "resume_full_capacity_closure_changed")
+        _require(not state.get("complete") or capacity is not None and capacity.get("status") in ("ok", "capacity_limited") and capacity.get("capture_complete") is True, "incomplete_capacity_claims_complete")
+    elif state.get("complete") is True or state.get("status") == "complete":
         _require(len(indices) == protocol["pairs"] and state.get("complete") is True and state.get("status") == "complete", "resume_incomplete_campaign_claims_complete")
+    if protocol.get("schema_version") == 2 and protocol["phase"] == "formal" and state.get("pairs"):
+        compute = state.get("registered_compute_seconds")
+        if not isinstance(compute, (int, float)) or isinstance(compute, bool):
+            raise ProtocolError("registered_compute_accounting_invalid")
+        _require(math.isfinite(compute) and compute >= 0
+                 and state.get("formal_registration_sha256") == protocol["formal_registration"]["sha256"],
+                 "registered_compute_accounting_invalid")
+        retained_seconds = sum((entry.get("duration_ms", 0) / 1000) for pair in pairs
+                               for entry in pair.get("arms", {}).values())
+        retained_seconds += sum(value / 1000 for pair in pairs for value in pair.get("arm_finalization_duration_ms", {}).values())
+        _require(compute >= retained_seconds, "registered_compute_below_raw_durations")
+        if state.get("complete") is True:
+            _, registration = _proof_reference(protocol["formal_registration"], "formal_registration")
+            _require(compute < registration["maximum_compute_seconds"], "registered_compute_limit_reached")
     for receipt in state.get("toolchain_segments", []):
         path = _path(receipt.get("path"), "segment_toolchain_receipt")
         _require(_inside(path, Path(protocol["run_root"])) and sha256_file(path) == receipt.get("sha256"), "resume_segment_toolchain_receipt_changed")
@@ -1506,7 +2642,7 @@ def _verify_segment_toolchain(protocol: dict, run_root: Path) -> dict:
         identity = protocol["toolchain"][name] if name in ("cargo", "rustc") else protocol["toolchain"]["msvc"]["compiler" if name == "msvc_compiler" else "linker"]
         _require(sha256_file(Path(identity["path"])) == identity["sha256"], "segment_toolchain_binary_changed")
         capture = capture_command([identity["path"], *arguments], cwd=Path(protocol["source"]["root"]), env=environment, log_root=directory, label=name, timeout_seconds=10, poll_seconds=0.05)
-        output = Path(capture["stdout_path"]).read_bytes() + Path(capture["stderr_path"]).read_bytes()
+        output = _read_small_capture(Path(capture["stdout_path"])) + _read_small_capture(Path(capture["stderr_path"]))
         if name in ("cargo", "rustc"):
             observed = output.decode("utf-8", "strict").strip()
             _require(capture["status"] == "ok" and observed == identity["version"].strip(), "segment_toolchain_version_mismatch:" + name)
@@ -1522,7 +2658,7 @@ def _verify_segment_toolchain(protocol: dict, run_root: Path) -> dict:
     return {"path": str(directory / "toolchain.json"), "sha256": sha256_file(directory / "toolchain.json")}
 
 
-def _run_protocol_locked(protocol_path: str | Path, *, review_receipt_path: str | Path | None = None, pair_limit: int = 20, initializing: bool = False) -> dict:
+def _run_protocol_locked(protocol_path: str | Path, *, review_receipt_path: str | Path | None = None, pair_limit: int = 20, initializing: bool = False, arm_finalizer=None) -> dict:
     """Run/resume up to 20 health-segment pairs, preserving a fixed total N.
 
     No review implies admission only below the soft budget. Only contamination
@@ -1535,6 +2671,7 @@ def _run_protocol_locked(protocol_path: str | Path, *, review_receipt_path: str 
     _require(os.name == "nt", "windows_capture_required")
     _count(pair_limit, "pair_limit", positive=True)
     _require(pair_limit <= 20, "health_segment_maximum_20_pairs")
+    _execution_retention_policy(protocol, arm_finalizer)
     protocol_hash = canonical_sha256(protocol)
     review = _path(review_receipt_path, "review_receipt") if review_receipt_path is not None else None
     root = Path(protocol["run_root"])
@@ -1547,9 +2684,10 @@ def _run_protocol_locked(protocol_path: str | Path, *, review_receipt_path: str 
             inflight = state["inflight"]
             state["status"] = "interrupted"
             state["reasons"] = ["previous_attempt_incomplete_raw_evidence_preserved"]
-            state["pairs"].append({"pair_index": inflight["pair_index"], "attempt": inflight["attempt"], "order": protocol["order"][inflight["pair_index"]], "status": "interrupted", "arms": {}, "arm_receipts": {}, "raw_root": inflight["raw_root"]})
+            if protocol["phase"] != "capacity":
+                state["pairs"].append({"pair_index": inflight["pair_index"], "attempt": inflight["attempt"], "order": protocol["order"][inflight["pair_index"]], "status": "interrupted", "arms": {}, "arm_receipts": {}, "raw_root": inflight["raw_root"]})
             state["inflight"] = None
-            _write_state(state_path, state)
+            _checkpoint_formal_state(protocol, state, state_path)
             return state
         if state["status"] in ("complete", "failed", "interrupted"):
             return state
@@ -1559,16 +2697,41 @@ def _run_protocol_locked(protocol_path: str | Path, *, review_receipt_path: str 
         _check_review(protocol, preview, review)
         if not initializing:
             root.mkdir(parents=True, exist_ok=False)
-        state = {"schema_version": 1, "kind": "build-feedback-campaign", "protocol_sha256": protocol_hash, "protocol_path": str(protocol_path), "source_commit": protocol["source"]["commit"], "source_tree": protocol["source"]["tree"], "toolchain_sha256": canonical_sha256(protocol["toolchain"]), "phase": protocol["phase"], "planned_pairs": protocol["pairs"], "completed_valid_pairs": 0, "started_at": _stamp(), "status": "ready", "complete": False, "reasons": [], "pairs": [], "inflight": None, "peak_pair_growth_bytes": 0}
-        _write_state(state_path, state)
+        state = {"schema_version": protocol["schema_version"], "kind": "build-feedback-campaign", "protocol_sha256": protocol_hash, "protocol_path": str(protocol_path), "source_commit": protocol["source"]["commit"], "source_tree": protocol["source"]["tree"], "toolchain_sha256": canonical_sha256(protocol["toolchain"]), "phase": protocol["phase"], "planned_pairs": protocol["pairs"], "completed_valid_pairs": 0, "started_at": _stamp(), "status": "ready", "complete": False, "reasons": [], "pairs": [], "inflight": None, "peak_pair_growth_bytes": 0}
+        if protocol["phase"] == "capacity":
+            state["performance_evidence"] = False
+        _checkpoint_formal_state(protocol, state, state_path)
+    if protocol.get("schema_version") == 2 and protocol["phase"] == "formal":
+        _FORMAL_LIMITS[protocol["run_root"]] = _FormalLimits(protocol, state)
+        limit_reasons = _registered_reasons(protocol)
+        if limit_reasons:
+            state["status"], state["reasons"] = "admission_blocked", limit_reasons
+            _checkpoint_formal_state(protocol, state, state_path)
+            return state
     try:
         segment_receipt = _verify_segment_toolchain(protocol, root)
     except (OSError, ProtocolError) as error:
         state["status"], state["reasons"] = "admission_blocked", [str(error)]
-        _write_state(state_path, state)
+        _checkpoint_formal_state(protocol, state, state_path)
         return state
     state.setdefault("toolchain_segments", []).append(segment_receipt)
-    _write_state(state_path, state)
+    _checkpoint_formal_state(protocol, state, state_path)
+    if protocol["phase"] == "capacity":
+        state["performance_evidence"] = False
+        state["inflight"] = {"kind": "capacity", "raw_root": str(root / "capacity")}
+        _checkpoint_formal_state(protocol, state, state_path)
+        observation = (_run_full_capacity_probe(protocol, root / "capacity", review, arm_finalizer)
+                       if _full_capacity(protocol) else _run_capacity_probe(protocol, root / "capacity", review))
+        state["capacity_observation"] = observation
+        state["capacity_receipt"] = {"path": str(root / "capacity" / "capacity.json"), "sha256": sha256_file(root / "capacity" / "capacity.json")}
+        state["inflight"] = None
+        state["complete"] = observation["capture_complete"] and observation["status"] in ("ok", "capacity_limited")
+        state["status"] = "complete" if state["complete"] else "failed"
+        state["capacity_status"] = observation["status"]
+        state["reasons"] = list(observation["reasons"])
+        state["finished_at"] = _stamp()
+        _checkpoint_formal_state(protocol, state, state_path)
+        return state
     allocation_map = {(entry["pair_index"], entry["attempt"]): entry for entry in protocol["allocations"]}
     segment_count = 0
     while state["completed_valid_pairs"] < protocol["pairs"] and segment_count < pair_limit:
@@ -1593,9 +2756,14 @@ def _run_protocol_locked(protocol_path: str | Path, *, review_receipt_path: str 
         _require(not pair_root.exists(), "pair_output_identity_already_used")
         state["inflight"] = {"pair_index": pair_index, "attempt": attempt, "raw_root": str(pair_root)}
         state["status"] = "running"
-        _write_state(state_path, state)
+        _checkpoint_formal_state(protocol, state, state_path)
         pair = {"pair_index": pair_index, "attempt": attempt, "order": protocol["order"][pair_index], "started_at": _stamp(), "status": "running", "arms": {}, "arm_receipts": {}}
         for arm in pair["order"]:
+            registered_sample = _budget_sample(protocol) if _FORMAL_LIMITS.get(protocol["run_root"]) is not None else None
+            limits = _registered_reasons(protocol, None if registered_sample is None else registered_sample["allocated_bytes"])
+            if limits:
+                pair["status"], pair["finalization_reasons"] = "budget_limited", limits
+                break
             result = _run_arm(protocol, arm, Path(allocation[arm + "_source_root"]), pair_root / arm, review)
             pair["arms"][arm] = result
             arm_path = pair_root / arm / "arm.json"
@@ -1603,11 +2771,37 @@ def _run_protocol_locked(protocol_path: str | Path, *, review_receipt_path: str 
             if result["status"] != "ok":
                 pair["status"] = result["status"]
                 break
+            if arm_finalizer is not None:
+                # The coordinator explicitly supplies its approved lifecycle.
+                # Returned flags have no authority: the local independent
+                # helper must reread and verify the seal/disposition references.
+                finalization_started = time.monotonic()
+                try:
+                    reference = arm_finalizer(protocol=protocol, arm=arm, pair_index=pair_index, attempt=attempt, arm_receipt=dict(pair["arm_receipts"][arm]), arm_record=dict(result))
+                    _require(sha256_file(arm_path) == pair["arm_receipts"][arm]["sha256"] and _read_json(arm_path) == result, "arm_finalizer_changed_original_receipt")
+                    retained = _retention_module().verify_retained_arm(reference, protocol, arm, pair_index, attempt)
+                    _require(isinstance(retained, dict) and retained.get("arm_receipt") == result and isinstance(retained.get("seal"), dict), "arm_finalizer_seal_mismatch")
+                    pair.setdefault("retained_evidence", {})[arm] = reference
+                    # Keep the validated disposition even if finalization uses
+                    # the registered budget; it remains failing trial evidence.
+                    limits = _registered_reasons(protocol, _budget_sample(protocol)["allocated_bytes"])
+                    if limits:
+                        pair["status"], pair["finalization_reasons"] = "budget_limited", limits
+                        break
+                except (OSError, ValueError, ImportError) as error:
+                    pair["status"] = "capture_failed"
+                    pair["finalization_reasons"] = [str(error)]
+                    break
+                finally:
+                    pair.setdefault("arm_finalization_duration_ms", {})[arm] = (time.monotonic() - finalization_started) * 1000
         if pair["status"] == "running":
             pair["status"] = "ok"
             state["completed_valid_pairs"] += 1
             growth = sum(max(entry.get("retained_growth_bytes", 0), entry.get("peak_allocated_bytes", 0) - entry.get("allocated_before_bytes", 0)) for entry in pair["arms"].values())
             state["peak_pair_growth_bytes"] = max(state["peak_pair_growth_bytes"], growth)
+            if protocol["schema_version"] == 2:
+                arm_growth = max(max(entry.get("owned_allocated_bytes", 0), entry.get("peak_allocated_bytes", 0) - entry.get("allocated_before_bytes", 0)) for entry in pair["arms"].values())
+                state["peak_active_arm_growth_bytes"] = max(state.get("peak_active_arm_growth_bytes", 0), arm_growth)
             segment_count += 1
         pair["finished_at"] = _stamp()
         _write_new(pair_root / "pair.json", pair)
@@ -1615,10 +2809,10 @@ def _run_protocol_locked(protocol_path: str | Path, *, review_receipt_path: str 
         state["inflight"] = None
         if pair["status"] not in ("ok", "contaminated"):
             state["status"], state["reasons"] = "failed", [pair["status"]]
-            _write_state(state_path, state)
+            _checkpoint_formal_state(protocol, state, state_path)
             return state
         state["status"] = "ready"
-        _write_state(state_path, state)
+        _checkpoint_formal_state(protocol, state, state_path)
     state["complete"] = state["completed_valid_pairs"] == protocol["pairs"]
     if state["complete"]:
         state["status"], state["reasons"] = "complete", []
@@ -1627,10 +2821,10 @@ def _run_protocol_locked(protocol_path: str | Path, *, review_receipt_path: str 
         state["status"] = "segment_complete"
     if state["completed_valid_pairs"]:
         valid = [pair for pair in state["pairs"] if pair["status"] == "ok"]
-        average_ms = sum(sum(arm["duration_ms"] for arm in pair["arms"].values()) for pair in valid) / len(valid)
+        average_ms = sum(sum(arm["duration_ms"] for arm in pair["arms"].values()) + sum(pair.get("arm_finalization_duration_ms", {}).values()) for pair in valid) / len(valid)
         state["projected_total_compute_hours"] = average_ms * protocol["pairs"] / 3_600_000
         state["projected_remaining_compute_hours"] = average_ms * (protocol["pairs"] - len(valid)) / 3_600_000
-    _write_state(state_path, state)
+    _checkpoint_formal_state(protocol, state, state_path)
     return state
 
 
@@ -1664,7 +2858,7 @@ class _CampaignLock:
             self.handle = None
 
 
-def run_protocol(protocol_path: str | Path, *, review_receipt_path: str | Path | None = None, pair_limit: int = 20) -> dict:
+def run_protocol(protocol_path: str | Path, *, review_receipt_path: str | Path | None = None, pair_limit: int = 20, arm_finalizer=None) -> dict:
     """Admit and exclusively run/resume one bounded segment of frozen pairs."""
     protocol_path = _path(protocol_path, "protocol")
     protocol = _read_json(protocol_path)
@@ -1672,20 +2866,24 @@ def run_protocol(protocol_path: str | Path, *, review_receipt_path: str | Path |
     _require(os.name == "nt", "windows_capture_required")
     _count(pair_limit, "pair_limit", positive=True)
     _require(pair_limit <= 20, "health_segment_maximum_20_pairs")
+    _execution_retention_policy(protocol, arm_finalizer)
     review = _path(review_receipt_path, "review_receipt") if review_receipt_path is not None else None
     root = Path(protocol["run_root"])
     initializing = not root.exists()
     if initializing:
         _require(not build_process_snapshot(), "quiet_segment_required")
         quick_free = _free_bytes()
-        if quick_free - protocol["predicted_growth_bytes"] < 80 * GIB:
+        if quick_free - protocol["predicted_growth_bytes"] - _external_allowance(protocol) < _disk_floor(protocol):
             path = Path(protocol["baseline"]["receipt_path"]).parent / ("admission-disk-refused-" + uuid.uuid4().hex + ".json")
             _write_new(path, {"schema_version": 1, "kind": "build-feedback-admission", "protocol_sha256": canonical_sha256(protocol), "allowed": False,
-                              "reason": "projected_disk_free_below_minimum", "disk_free_bytes": quick_free, "predicted_growth_bytes": protocol["predicted_growth_bytes"], "minimum_free_bytes": 80 * GIB})
+                              "reason": "projected_disk_free_below_minimum", "disk_free_bytes": quick_free, "predicted_growth_bytes": protocol["predicted_growth_bytes"], "minimum_free_bytes": _disk_floor(protocol), "external_growth_allowance_bytes": _external_allowance(protocol)})
             raise ProtocolError("projected_disk_free_below_minimum:" + str(path))
         _check_review(protocol, preview_protocol(protocol, _budget_sample(protocol)), review)
         root.mkdir(parents=True, exist_ok=False)
     else:
         _require((root / "campaign.json").is_file(), "run_root_exists_without_matching_state")
     with _CampaignLock(root / "runner.lock"):
-        return _run_protocol_locked(protocol_path, review_receipt_path=review, pair_limit=pair_limit, initializing=initializing)
+        try:
+            return _run_protocol_locked(protocol_path, review_receipt_path=review, pair_limit=pair_limit, initializing=initializing, **({"arm_finalizer": arm_finalizer} if arm_finalizer is not None else {}))
+        finally:
+            _FORMAL_LIMITS.pop(protocol["run_root"], None)

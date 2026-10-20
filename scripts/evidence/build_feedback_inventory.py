@@ -25,6 +25,8 @@ GIB = 1024 ** 3
 REVIEW_GROWTH_BYTES = 40 * GIB
 HARD_GROWTH_BYTES = 60 * GIB
 MINIMUM_FREE_BYTES = 80 * GIB
+BOUNDED_MINIMUM_FREE_BYTES = 40 * GIB
+BOUNDED_EXTERNAL_GROWTH_ALLOWANCE_BYTES = 8 * GIB
 
 _CACHE_TAG = b"Signature: 8a477f597d28d172789f06886806bc55"
 _SOURCE_DIRECTORIES = frozenset({
@@ -763,14 +765,21 @@ class _Inventory:
 
 
 def inventory(roots: Iterable[os.PathLike | str], store_roots: Iterable[os.PathLike | str] = (),
-              discover: bool = True) -> dict[str, Any]:
+              discover: bool = True, *,
+              minimum_free_bytes: int = MINIMUM_FREE_BYTES) -> dict[str, Any]:
     """Inventory supplied related roots, with global volume/file-identity dedup.
 
     Totals, root totals and cache totals are unique contributions, not sums of
     overlapping apparent directory sizes.  ``complete=False`` denotes partial
     observed totals which MUST NOT be used for admission or a fixed baseline.
     Optional missing stores are recorded as absent; missing known roots fail.
+    The supplied approved floor is recorded explicitly; this read-only scan
+    does not grant protocol admission or subtract retained/recycle-pending
+    bytes. Declare those actual paths in the scan scope until verified purge.
     """
+    if (type(minimum_free_bytes) is not int
+            or minimum_free_bytes not in (MINIMUM_FREE_BYTES, BOUNDED_MINIMUM_FREE_BYTES)):
+        raise ValueError("minimum_free_bytes must be an approved 80 GiB or 40 GiB floor")
     started = _stamp()
     if type(discover) is not bool:
         raise ValueError("discover must be a boolean")
@@ -849,7 +858,7 @@ def inventory(roots: Iterable[os.PathLike | str], store_roots: Iterable[os.PathL
         admission_reasons.append("inventory_incomplete")
     if free is None:
         admission_reasons.append("disk_free_unknown")
-    elif free < MINIMUM_FREE_BYTES:
+    elif free < minimum_free_bytes:
         admission_reasons.append("disk_free_below_minimum")
     return {
         "schema_version": 1, "kind": "build-feedback-inventory", "started_at": started,
@@ -862,6 +871,8 @@ def inventory(roots: Iterable[os.PathLike | str], store_roots: Iterable[os.PathL
         "relationships": scan.relationships, "exclusions": scan.exclusions,
         "errors": scan.errors, "complete": complete,
         "admission_allowed": not admission_reasons, "admission_reasons": admission_reasons,
+        "minimum_free_bytes": minimum_free_bytes,
+        "admission_scope": "complete inventory and approved floor; protocol reservations checked separately",
         "allocated_bytes": sum(cache["allocated_bytes"] for cache in scan.caches),
         "logical_bytes": sum(cache["logical_bytes"] for cache in scan.caches),
         "file_count": len(scan._files), "directory_count": len(scan._directories),
@@ -872,23 +883,47 @@ def inventory(roots: Iterable[os.PathLike | str], store_roots: Iterable[os.PathL
 
 
 def budget_status(baseline_bytes: int, current_bytes: int, free_bytes: int,
-                  predicted_growth_bytes: int = 0) -> dict[str, Any]:
-    """Fixed-B admission; headroom is AFTER the proposed growth reservation.
+                  predicted_growth_bytes: int = 0, *, policy_version: int = 1,
+                  minimum_free_bytes: int | None = None,
+                  external_growth_allowance_bytes: int = 0) -> dict[str, Any]:
+    """Fixed-B admission after project growth and external disk reservations.
 
-    The soft threshold requires a separate owner review, not a reset of B.
-    Equality at B+60 GiB stops; remaining disk space of exactly 80 GiB is valid.
-    Invalid/unknown sizes cannot accidentally become an allowed plan.
+    V1 retains exactly its 80 GiB floor and zero external allowance. V2 binds
+    the approved 40 GiB floor and requires an explicit 8 GiB external allowance.
+    Unknown versions, altered policy constants and noninteger sizes fail closed.
+    The external allowance reserves disk, not presumed project allocation;
+    observed related-cache growth still counts against the immutable B.
     """
     values = {"baseline_bytes": baseline_bytes, "current_bytes": current_bytes,
               "free_bytes": free_bytes, "predicted_growth_bytes": predicted_growth_bytes}
     invalid = ["invalid_" + key for key, value in values.items() if type(value) is not int or value < 0]
+    expected_floor, expected_allowance = None, None
+    if type(policy_version) is not int or policy_version not in (1, 2):
+        invalid.append("invalid_policy_version")
+    elif policy_version == 1:
+        expected_floor, expected_allowance = MINIMUM_FREE_BYTES, 0
+    else:
+        expected_floor = BOUNDED_MINIMUM_FREE_BYTES
+        expected_allowance = BOUNDED_EXTERNAL_GROWTH_ALLOWANCE_BYTES
+    floor = expected_floor if minimum_free_bytes is None else minimum_free_bytes
+    if type(floor) is not int or floor < 0:
+        invalid.append("invalid_minimum_free_bytes")
+    elif expected_floor is not None and floor != expected_floor:
+        invalid.append("minimum_free_bytes_policy_mismatch")
+    if type(external_growth_allowance_bytes) is not int or external_growth_allowance_bytes < 0:
+        invalid.append("invalid_external_growth_allowance_bytes")
+    elif expected_allowance is not None and external_growth_allowance_bytes != expected_allowance:
+        invalid.append("external_growth_allowance_policy_mismatch")
     result = {"allowed": False, "review_required": False, "reasons": invalid,
               "project_headroom_bytes": None, "disk_headroom_bytes": None,
-              "usable_headroom_bytes": None, **values}
-    if invalid:
+              "usable_headroom_bytes": None, "policy_version": policy_version,
+              "minimum_free_bytes": floor,
+              "external_growth_allowance_bytes": external_growth_allowance_bytes, **values}
+    if invalid or floor is None:
         return result
     projected = current_bytes + predicted_growth_bytes
-    projected_free = free_bytes - predicted_growth_bytes
+    reserved_disk_growth = predicted_growth_bytes + external_growth_allowance_bytes
+    projected_free = free_bytes - reserved_disk_growth
     review = baseline_bytes + REVIEW_GROWTH_BYTES
     hard = baseline_bytes + HARD_GROWTH_BYTES
     reasons = []
@@ -898,19 +933,22 @@ def budget_status(baseline_bytes: int, current_bytes: int, free_bytes: int,
         reasons.append("project_hard_limit_reached")
     elif projected >= hard:
         reasons.append("projected_project_hard_limit_reached")
-    if free_bytes < MINIMUM_FREE_BYTES:
+    if free_bytes < floor:
         reasons.append("disk_free_below_minimum")
-    elif projected_free < MINIMUM_FREE_BYTES:
+    elif projected_free < floor:
         reasons.append("projected_disk_free_below_minimum")
     project_headroom = hard - projected
-    disk_headroom = projected_free - MINIMUM_FREE_BYTES
+    disk_headroom = projected_free - floor
     result.update({
-        "allowed": projected < hard and projected_free >= MINIMUM_FREE_BYTES,
+        "allowed": projected < hard and projected_free >= floor,
         "review_required": projected >= review, "reasons": reasons,
         "projected_bytes": projected, "projected_free_bytes": projected_free,
+        "projected_free_before_external_allowance_bytes": free_bytes - predicted_growth_bytes,
+        "reserved_disk_growth_bytes": reserved_disk_growth,
+        "minimum_start_free_bytes": floor + reserved_disk_growth,
         "review_threshold_bytes": review, "hard_threshold_bytes": hard,
-        "minimum_free_bytes": MINIMUM_FREE_BYTES,
         "growth_since_baseline_bytes": current_bytes - baseline_bytes,
+        "projected_growth_since_baseline_bytes": projected - baseline_bytes,
         "project_headroom_bytes": project_headroom, "disk_headroom_bytes": disk_headroom,
         "usable_headroom_bytes": max(0, min(project_headroom, disk_headroom)),
     })

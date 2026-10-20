@@ -50,7 +50,11 @@ def read_json(path: Path) -> dict[str, Any]:
     def finite_constant(value: str) -> None:
         raise ValueError(f"non-finite JSON number: {value}")
 
-    payload = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=unique_keys, parse_constant=finite_constant)
+    before = sha256_file(path)
+    with path.open("r", encoding="utf-8") as stream:
+        payload = json.load(stream, object_pairs_hook=unique_keys, parse_constant=finite_constant)
+    if sha256_file(path) != before:
+        raise ValueError("receipt changed during JSON read")
     if not isinstance(payload, dict):
         raise TypeError("receipt must be a JSON object")
     return payload
@@ -95,9 +99,13 @@ def _runner_arm_reference(arm: dict[str, Any]) -> dict[str, str] | None:
         if not target.is_absolute():
             return None
         path = target.parent / "arm.json"
-        if read_json(path) != arm:
+        before = sha256_file(path)
+        original = read_json(path)
+        if (json.dumps(original, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+                != json.dumps(arm, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+                or sha256_file(path) != before):
             return None
-        return {"path": str(path), "sha256": sha256_file(path)}
+        return {"path": str(path), "sha256": before}
     except (OSError, ValueError, TypeError, KeyError):
         return None
 
@@ -137,18 +145,9 @@ def _runner_artifacts_verified(measurements: list[dict[str, Any]], runner: Modul
     return True
 
 
-def normalize_runner_campaign(raw: dict[str, Any], protocol: dict[str, Any], qualifications: dict[str, Any]) -> dict[str, Any]:
-    """Validate immutable runner receipts, then project without selecting samples.
-
-    An incomplete allocation receipt stays incomplete. No current target scan
-    can reconstruct a historic store peak or certify the other arm's storage.
-    """
-    runner = _module("runner")
-    runner._validate_protocol(protocol)
-    protocol_hash = runner.canonical_sha256(protocol)
-    runner._validate_resume(raw, protocol, protocol_hash)
+def _runner_identity(protocol: dict[str, Any]) -> dict[str, Any]:
     source, chain = protocol["source"], protocol["toolchain"]
-    identity = {
+    return {
         "source_commit": source["commit"], "source_tree": source["tree"],
         "lock_sha256": source["lock_sha256"], "resources_sha256": source["resources_sha256"],
         "rustc_version": chain["rustc"]["version"], "cargo_version": chain["cargo"]["version"],
@@ -159,6 +158,126 @@ def normalize_runner_campaign(raw: dict[str, Any], protocol: dict[str, Any], qua
         "msvc_linker_sha256": chain["msvc"]["linker"]["sha256"],
         "host": chain["target"], "jobs": protocol["jobs"], "test_threads": protocol["test_threads"],
     }
+
+
+def _normalize_runner_arm(arm: dict[str, Any], protocol: dict[str, Any], runner: ModuleType, *, retained: Any = None) -> dict[str, Any]:
+    source = protocol["source"]
+    protocol_hash = runner.canonical_sha256(protocol)
+    identity = _runner_identity(protocol)
+    jobs = [job["name"] for job in runner.JOBS]
+    measurements = arm.get("jobs", [])
+    warm_measurements = arm.get("feedback_warm_jobs", [])
+    feedback_measurements = arm.get("edit_jobs", [])
+    phases = (measurements, warm_measurements, feedback_measurements)
+    if not all(isinstance(phase, list) and all(isinstance(entry, dict) for entry in phase) for phase in phases):
+        raise ValueError("invalid runner phase measurements")
+    all_measurements = measurements + warm_measurements + feedback_measurements
+    allocation = arm.get("owned_allocation_receipt")
+    allocated = allocation.get("allocated_bytes") if isinstance(allocation, dict) else arm.get("owned_allocated_bytes", arm.get("target_allocated_bytes"))
+    complete_allocation = _runner_allocation_verified(arm)
+    complete_capture = all(
+        [entry.get("job") for entry in phase] == jobs
+        and all(entry.get("status") == "ok" and type(entry.get("returncode")) is int
+                and entry["returncode"] == 0 and entry.get("process_tree_capture_complete") is True for entry in phase)
+        for phase in phases
+    )
+    normalized_jobs = {}
+    for measurement in measurements:
+        if measurement.get("job") in normalized_jobs:
+            raise ValueError("duplicate runner job measurement")
+        normalized_jobs[measurement.get("job")] = {
+            "status": "success" if measurement.get("status") == "ok" else measurement.get("status"),
+            "exit_code": measurement.get("returncode"),
+            "duration_seconds": measurement.get("duration_ms", 0) / 1000,
+        }
+    return {
+        "status": "success" if arm.get("status") == "ok" else arm.get("status"),
+        "identity": identity if arm.get("source_commit") == source["commit"] and arm.get("source_tree") == source["tree"] else {},
+        "protocol_sha256": protocol_hash,
+        "capture_complete": arm.get("process_tree_drained") is True and complete_capture,
+        "source_verified": arm.get("status") == "ok" and arm.get("own_edit_restored") is True,
+        "artifacts_verified": _runner_artifacts_verified(all_measurements, runner) if retained is None else True,
+        "allocation_complete": complete_allocation,
+        "storage_scope": "owned_targets_and_stores" if complete_allocation else "unverified_store_allocation",
+        "quiet": bool(all_measurements) and all(measurement.get("external_processes") == [] for measurement in all_measurements),
+        "duration_seconds": arm.get("primary_duration_ms", 0) / 1000,
+        "elapsed_seconds": arm.get("duration_ms", 0) / 1000,
+        "allocated_bytes": allocated, "jobs": normalized_jobs,
+        "source_root": arm.get("source_root"),
+        "config_sha256": hashlib.sha256(json.dumps(arm.get("config"), sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest(),
+        "evidence": _runner_arm_reference(arm),
+        "feedback_phases": {
+            phase: {
+                "duration_seconds": arm.get("phase_duration_ms", {}).get(phase, 0) / 1000,
+                "jobs": {entry.get("job"): {
+                    "status": "success" if entry.get("status") == "ok" else entry.get("status"),
+                    "exit_code": entry.get("returncode"),
+                    "duration_seconds": entry.get("duration_ms", 0) / 1000,
+                } for entry in entries},
+            } for phase, entries in (("feedback-warm", warm_measurements), ("edit", feedback_measurements))
+        },
+    }
+
+
+def normalize_runner_arm(raw_arm: dict[str, Any], protocol: dict[str, Any]) -> dict[str, Any]:
+    """Project one immutable live arm, including unpaired full capacity work.
+
+    Does not fabricate a campaign, valid pair or retained-artifact authority.
+    The exact raw receipt remains required and the comparison/seal consumer
+    independently verifies commands, artifacts, source and qualification.
+    """
+    runner = _module("runner")
+    runner._validate_protocol(protocol)
+    if not isinstance(raw_arm, dict):
+        raise TypeError("runner arm must be an object")
+    if "retained_evidence" in raw_arm:
+        raise ValueError("single-arm projection requires original live evidence")
+    full_capacity = protocol.get("phase") == "capacity"
+    if full_capacity:
+        probe = protocol.get("capacity_probe", {})
+        if (type(protocol.get("schema_version")) is not int or protocol["schema_version"] != 2
+                or probe.get("kind") != "full-arm-and-qualification" or probe.get("stage") != "expanded"
+                or raw_arm.get("arm") != probe.get("arm") or probe.get("arm") not in ("baseline", "candidate")
+                or type(protocol.get("pairs")) is not int or protocol["pairs"] != 0 or protocol.get("allocations") != []
+                or raw_arm.get("phase") != "capacity" or raw_arm.get("performance_evidence") is not False
+                or not all(field in raw_arm and raw_arm[field] is None for field in ("pair_index", "attempt"))
+                or type(raw_arm.get("completed_valid_pairs")) is not int or raw_arm["completed_valid_pairs"] != 0):
+            raise ValueError("single full-capacity arm must keep zero paired samples")
+        expected = Path(protocol["run_root"]) / "capacity"
+        if (raw_arm.get("source_root") != probe.get("source_root")
+                or runner.canonical_sha256(raw_arm.get("config")) != runner.canonical_sha256(protocol["configs"][probe["arm"]])
+                or Path(raw_arm["target_root"]).resolve(strict=True) != expected / "targets"):
+            raise ValueError("single full-capacity arm differs from its approved source/config/output allocation")
+    reference = _runner_arm_reference(raw_arm)
+    if reference is None:
+        raise ValueError("single-arm projection requires its exact immutable arm receipt")
+    if full_capacity and Path(reference["path"]).resolve(strict=True) != expected / "arm.json":
+        raise ValueError("single full-capacity arm differs from its approved receipt path")
+    normalized = _normalize_runner_arm(raw_arm, protocol, runner)
+    if normalized.get("evidence") != reference or sha256_file(Path(reference["path"])) != reference["sha256"]:
+        raise ValueError("single-arm receipt changed during normalization")
+    return normalized
+
+
+def normalize_runner_campaign(raw: dict[str, Any], protocol: dict[str, Any], qualifications: dict[str, Any]) -> dict[str, Any]:
+    """Validate immutable runner receipts, then project without selecting samples.
+
+    An incomplete allocation receipt stays incomplete. No current target scan
+    can reconstruct a historic store peak or certify the other arm's storage.
+    """
+    runner = _module("runner")
+    runner._validate_protocol(protocol)
+    protocol_hash = runner.canonical_sha256(protocol)
+    runner._validate_resume(raw, protocol, protocol_hash)
+    runner_reference = None
+    if protocol.get("schema_version") == 2:
+        raw_path = Path(protocol["run_root"]) / "campaign.json"
+        if not raw_path.is_absolute() or raw_path.resolve(strict=True) != raw_path:
+            raise ValueError("runner campaign must use the exact approved run_root/campaign.json")
+        runner_reference = {"path": str(raw_path), "sha256": sha256_file(raw_path)}
+        if read_json(raw_path) != raw or sha256_file(raw_path) != runner_reference["sha256"]:
+            raise ValueError("runner campaign differs from pinned raw source")
+    identity = _runner_identity(protocol)
     jobs = [job["name"] for job in runner.JOBS]
     status_names = {"ok": "valid", "capture_failed": "failed", "admission_blocked": "blocked", "interrupted": "incomplete"}
     records = []
@@ -166,73 +285,58 @@ def normalize_runner_campaign(raw: dict[str, Any], protocol: dict[str, Any], qua
         record = {key: pair.get(key) for key in ("pair_index", "attempt", "order")}
         record["status"] = status_names.get(pair.get("status"), pair.get("status"))
         record["reason"] = ";".join(str(reason) for arm in pair.get("arms", {}).values() for reason in arm.get("reasons", []))
+        if protocol.get("schema_version") == 2:
+            record["finalization_reasons"] = pair.get("finalization_reasons", [])
+            record["arm_finalization_duration_ms"] = pair.get("arm_finalization_duration_ms", {})
         if record["status"] == "contaminated" and not record["reason"]:
             record["reason"] = "external_process_activity"
         for name, arm in pair.get("arms", {}).items():
-            measurements = arm.get("jobs", [])
-            warm_measurements = arm.get("feedback_warm_jobs", [])
-            feedback_measurements = arm.get("edit_jobs", [])
-            phases = (measurements, warm_measurements, feedback_measurements)
-            if not all(isinstance(phase, list) and all(isinstance(entry, dict) for entry in phase) for phase in phases):
-                raise ValueError("invalid runner phase measurements")
-            all_measurements = measurements + warm_measurements + feedback_measurements
-            allocation = arm.get("owned_allocation_receipt")
-            allocated = allocation.get("allocated_bytes") if isinstance(allocation, dict) else arm.get("owned_allocated_bytes", arm.get("target_allocated_bytes"))
-            complete_allocation = _runner_allocation_verified(arm)
-            complete_capture = all(
-                [entry.get("job") for entry in phase] == jobs
-                and all(entry.get("status") == "ok" and type(entry.get("returncode")) is int
-                        and entry["returncode"] == 0 and entry.get("process_tree_capture_complete") is True for entry in phase)
-                for phase in phases
-            )
-            normalized_jobs = {}
-            for measurement in measurements:
-                if measurement.get("job") in normalized_jobs:
-                    raise ValueError("duplicate runner job measurement")
-                normalized_jobs[measurement.get("job")] = {
-                    "status": "success" if measurement.get("status") == "ok" else measurement.get("status"),
-                    "exit_code": measurement.get("returncode"),
-                    "duration_seconds": measurement.get("duration_ms", 0) / 1000,
-                }
-            record[name] = {
-                "status": "success" if arm.get("status") == "ok" else arm.get("status"),
-                "identity": identity if arm.get("source_commit") == source["commit"] and arm.get("source_tree") == source["tree"] else {},
-                "protocol_sha256": protocol_hash,
-                "capture_complete": arm.get("process_tree_drained") is True and complete_capture,
-                "source_verified": arm.get("status") == "ok" and arm.get("own_edit_restored") is True,
-                "artifacts_verified": _runner_artifacts_verified(all_measurements, runner),
-                "allocation_complete": complete_allocation,
-                "storage_scope": "owned_targets_and_stores" if complete_allocation else "unverified_store_allocation",
-                "quiet": bool(all_measurements) and all(measurement.get("external_processes") == [] for measurement in all_measurements),
-                "duration_seconds": arm.get("primary_duration_ms", 0) / 1000,
-                "elapsed_seconds": arm.get("duration_ms", 0) / 1000,
-                "allocated_bytes": allocated, "jobs": normalized_jobs,
-                "source_root": arm.get("source_root"),
-                "config_sha256": hashlib.sha256(json.dumps(arm.get("config"), sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest(),
-                "evidence": _runner_arm_reference(arm),
-                "feedback_phases": {
-                    phase: {
-                        "duration_seconds": arm.get("phase_duration_ms", {}).get(phase, 0) / 1000,
-                        "jobs": {entry.get("job"): {
-                            "status": "success" if entry.get("status") == "ok" else entry.get("status"),
-                            "exit_code": entry.get("returncode"),
-                            "duration_seconds": entry.get("duration_ms", 0) / 1000,
-                        } for entry in entries},
-                    } for phase, entries in (("feedback-warm", warm_measurements), ("edit", feedback_measurements))
-                },
-            }
+            retained_links = pair.get("retained_evidence", {})
+            if not isinstance(retained_links, dict):
+                raise TypeError("invalid retained arm reference map")
+            retained_reference = retained_links.get(name)
+            if "retained_evidence" in arm:
+                raise ValueError("runner retained references must not alter the immutable arm receipt")
+            retained = None
+            if retained_reference is not None:
+                if type(protocol.get("schema_version")) is not int or protocol["schema_version"] != 2:
+                    raise ValueError("retained evidence requires protocol v2")
+                retained = _module("retention").verify_retained_arm(retained_reference, protocol, name, pair["pair_index"], pair["attempt"])
+                if not isinstance(retained, dict) or retained.get("arm_receipt") != arm:
+                    raise ValueError("runner arm differs from original sealed receipt")
+                arm = retained["arm_receipt"]
+            record[name] = _normalize_runner_arm(arm, protocol, runner, retained=retained)
+            if retained is not None:
+                if not isinstance(retained.get("seal"), dict) or retained["seal"].get("arm_projection") != record[name]:
+                    raise ValueError("normalized arm differs from prerecycle sealed projection")
+                record[name]["retained_evidence"] = retained_reference
         records.append(record)
     result = {
-        "schema_version": 1, "phase": protocol["phase"], "pairs_required": protocol["pairs"],
+        "schema_version": protocol.get("schema_version", 1), "phase": protocol["phase"], "pairs_required": protocol["pairs"],
         "comparison_kind": "native" if all(config["tool"]["kind"] == "native" for config in protocol["configs"].values()) else "tool",
         "identity": identity, "protocol_sha256": protocol_hash, "seed": protocol["seed"],
         "job_names": jobs, "schedule": protocol["order"], "records": records,
         "qualification_receipts": qualifications,
     }
+    if runner_reference is not None:
+        result["runner_campaign_evidence"] = runner_reference
+        result["runner_state"] = {key: raw.get(key) for key in (
+            "status", "complete", "reasons", "planned_pairs", "completed_valid_pairs", "inflight",
+            "started_at", "finished_at", "toolchain_segments", "registered_compute_seconds",
+            "formal_registration_sha256", "peak_pair_growth_bytes", "peak_active_arm_growth_bytes",
+        )}
     if raw.get("complete") is not True or raw.get("status") != "complete":
         result["admission_reasons"] = ["runner_campaign_incomplete", *raw.get("reasons", [])]
     if raw.get("inflight") is not None:
         result.setdefault("admission_reasons", []).append("runner_attempt_inflight")
+    if protocol["phase"] == "capacity":
+        if protocol.get("schema_version") != 2 or protocol["pairs"] != 0 or records:
+            raise ValueError("capacity is not a paired campaign")
+        result["capacity_observation"] = raw.get("capacity_observation", raw.get("capacity"))
+        result["performance_evidence"] = False
+    if runner_reference is not None and (sha256_file(Path(runner_reference["path"])) != runner_reference["sha256"]
+                                         or read_json(Path(runner_reference["path"])) != raw):
+        raise ValueError("runner campaign changed during normalization")
     return result
 
 def parser() -> argparse.ArgumentParser:
@@ -249,7 +353,7 @@ def parser() -> argparse.ArgumentParser:
     run_parser = commands.add_parser("run", help="execute/resume only the previously frozen protocol")
     run_parser.add_argument("--protocol", type=Path, required=True)
     run_parser.add_argument("--review-receipt", type=Path, help="explicit owner review for the exact budget preview")
-    run_parser.add_argument("--pair-limit", type=int, default=20, help="bounded segment size (1-20); formal N remains 100")
+    run_parser.add_argument("--pair-limit", type=int, default=20, help="bounded segment size (1-20); frozen formal N is unchanged")
     compare_parser = commands.add_parser("compare", help="compare complete campaign and qualification receipts")
     compare_parser.add_argument("--campaign", type=Path, required=True, help="runner or normalized local campaign JSON")
     compare_parser.add_argument("--protocol", type=Path, help="frozen protocol required for a runner campaign")
@@ -287,7 +391,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0 if preview.get("allowed") is True else 2
         if args.command == "run":
             # Validate explicit receipts before a runner may create any evidence.
-            read_json(args.protocol)
+            protocol = read_json(args.protocol)
+            if protocol.get("schema_version") == 2 and protocol.get("phase") in ("pilot", "formal"):
+                raise ValueError("v2 paired run requires the coordinator's approved arm_finalizer for verify-seal-recycle; use runner.run_protocol with that callback")
             if not 1 <= args.pair_limit <= 20:
                 raise ValueError("pair-limit must be in 1..20; it does not alter fixed N")
             if args.review_receipt:
@@ -311,6 +417,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     raise ValueError("runner campaign comparison requires --protocol")
                 protocol = read_json(args.protocol)
                 qualifications = read_json(args.qualifications) if args.qualifications else {}
+                if protocol.get("schema_version") == 2 and args.campaign.resolve(strict=True) != Path(protocol["run_root"]) / "campaign.json":
+                    raise ValueError("v2 comparison requires the exact approved run_root/campaign.json")
                 campaign = normalize_runner_campaign(campaign, protocol, qualifications)
                 campaign["protocol_evidence"] = {
                     "path": str(args.protocol.resolve(strict=True)),

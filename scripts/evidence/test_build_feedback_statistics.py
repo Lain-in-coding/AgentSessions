@@ -5,6 +5,7 @@ import importlib.util
 import io
 import json
 import math
+import os
 import random
 import tempfile
 import unittest
@@ -119,7 +120,7 @@ def attach_synthetic_proofs(campaign):
             for phase, field in (("primary", "jobs"), ("feedback-warm", "feedback_warm_jobs"), ("edit", "edit_jobs")):
                 entries = []
                 for job in JOBS:
-                    output = (json.dumps({"reason": "compiler-artifact", "filenames": [artifact["path"]]}) + "\n"
+                    output = (json.dumps({"reason": "compiler-artifact", "filenames": [artifact["path"]], "fresh": False, "profile": {"opt_level": "0"}, "executable": None}) + "\n"
                               + json.dumps({"reason": "build-finished", "success": True}) + "\n").encode()
                     duration = arm["jobs"][job]["duration_seconds"] * 1000 if phase == "primary" else 10000
                     capture = capture_fixture(local / phase / job, ["synthetic-cargo", "check", "--locked", "--offline", "-j2"], output, duration=duration)
@@ -171,6 +172,64 @@ def attach_synthetic_proofs(campaign):
 
 
 
+
+
+class ProofStreamingTests(unittest.TestCase):
+    def test_hashes_complete_large_file_without_whole_read_and_checks_tail(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "artifact.bin"
+            block = b"synthetic allocation " * 65536
+            with path.open("wb") as stream:
+                for _ in range(4):
+                    stream.write(block)
+            digest = hashlib.sha256()
+            with path.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            reference = {"path": str(path), "sha256": digest.hexdigest(), "bytes": path.stat().st_size}
+            with patch.object(Path, "read_bytes", side_effect=AssertionError("no whole artifact read")):
+                self.assertEqual(STATS._proof_file(reference), (path, reference["bytes"]))
+                with self.assertRaisesRegex(ValueError, "size changed"):
+                    STATS._proof_file({**reference, "bytes": reference["bytes"] + 1})
+                with path.open("ab") as stream:
+                    stream.write(b"changed tail")
+                with self.assertRaisesRegex(ValueError, "hash changed"):
+                    STATS._proof_file(reference)
+
+    def test_empty_files_and_exact_integer_size(self):
+        with tempfile.TemporaryDirectory() as directory:
+            reference = write_proof(Path(directory) / "empty", b"")
+            self.assertEqual(STATS._proof_file(reference)[1], 0)
+            with self.assertRaisesRegex(ValueError, "size changed"):
+                STATS._proof_file({**reference, "bytes": False})
+
+    def test_diagnostic_cross_chunk_unicode_and_between_stream_boundary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            needle = "C:/synthetic/小文件.rs:27:"
+            prefix = b"x" * (1024 * 1024 - 2)
+            value = prefix + needle.encode("utf-8") + b"tail"
+            first = write_proof(root / "stdout", value)
+            second = write_proof(root / "stderr", b"")
+            with patch.object(Path, "read_bytes", side_effect=AssertionError("no whole log read")):
+                self.assertTrue(STATS._proof_text_contains([first, second], [needle]))
+                self.assertFalse(STATS._proof_text_contains([first, second], [needle + "missing"]))
+            split = len(prefix) + len(needle.encode("utf-8")) - 5
+            first = write_proof(root / "stdout", value[:split])
+            second = write_proof(root / "stderr", value[split:])
+            self.assertTrue(STATS._proof_text_contains([first, second], [needle]))
+            with Path(second["path"]).open("ab") as stream:
+                stream.write(b"tamper after found needle")
+            with self.assertRaisesRegex(ValueError, "hash changed"):
+                STATS._proof_text_contains([first, second], [needle])
+
+    def test_duplicate_and_nonfinite_json_still_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "proof.json"
+            for content in (b'{"sample": 1, "sample": 2}', b'{"sample": NaN}'):
+                reference = write_proof(path, content)
+                with self.assertRaises(ValueError):
+                    STATS._proof_json(reference)
 
 
 class BootstrapTests(unittest.TestCase):
@@ -265,6 +324,75 @@ def attach_synthetic_release_reports(campaign):
         sample["evidence"] = write_proof(Path(sample["evidence"]["path"]), proof)
     campaign["qualification_receipts"]["release"] = write_proof(Path(reference["path"]), receipt)
     campaign["protocol_evidence"] = {"path": str(Path(reference["path"]).with_name("protocol.json")), "sha256": "1" * 64}
+
+
+def attach_qualification_cargo(proof, target, source):
+    """Synthetic Cargo process output, parsed by the real receipt decoder."""
+    artifact = write_proof(target / "synthetic.rmeta", b"synthetic qualified compiler output")
+    payload = (json.dumps({"reason": "compiler-artifact", "filenames": [artifact["path"]], "executable": None,
+                          "fresh": False, "profile": {"test": False}, "manifest_path": str(source / "Cargo.toml")})
+               + '\n{"reason":"build-finished","success":true}\n{legal test tail}\n').encode()
+    reference = write_proof(Path(proof["capture"]["stdout_path"]), payload)
+    proof["capture"]["stdout_sha256"] = reference["sha256"]
+    proof["capture"]["cargo"] = STATS._runner_module().parse_cargo_json_file(Path(reference["path"]), target, source)
+    proof["artifacts"] = [file for artifact in proof["capture"]["cargo"]["artifacts"] for file in artifact["files"]]
+
+
+def bind_synthetic_v2(campaign, *, phase=None, pairs=None):
+    identity = campaign["identity"]
+    count = pairs if pairs is not None else campaign["pairs_required"]
+    active_phase = phase or campaign["phase"]
+    campaign.update(schema_version=2, phase=active_phase, pairs_required=count)
+    if active_phase == "capacity":
+        campaign["records"], campaign["schedule"] = [], []
+    else:
+        campaign["records"] = campaign["records"][:count]
+        campaign["schedule"] = campaign["schedule"][:count]
+    first = _ACTIVE_PROOF_ROOTS[-1]
+    root = Path(first.name)
+    configs = {name: {"layout": "isolated", "incremental": "on", "debug": "full", "tool": {"kind": "native" if campaign["comparison_kind"] == "native" else "synthetic-tool"}}
+               for name in ("baseline", "candidate")}
+    protocol = {"schema_version": 2, "kind": "build-feedback-protocol", "phase": active_phase, "pairs": count,
+        "source": {"commit": identity["source_commit"], "tree": identity["source_tree"],
+                   "lock_sha256": identity["lock_sha256"], "resources_sha256": identity["resources_sha256"], "receipt_sha256": "f" * 64},
+        "toolchain": {"rustc": {"version": identity["rustc_version"], "sha256": identity["rustc_sha256"]},
+                      "cargo": {"path": "synthetic-cargo", "version": identity["cargo_version"], "sha256": identity["cargo_sha256"]},
+                      "msvc": {"compiler": {"version": identity["msvc_compiler_version"], "sha256": identity["msvc_compiler_sha256"]},
+                               "linker": {"version": identity["msvc_linker_version"], "sha256": identity["msvc_linker_sha256"]}},
+                      "target": identity["host"]},
+        "jobs": 2, "test_threads": 2, "seed": campaign["seed"], "order": campaign["schedule"], "configs": configs,
+        "run_root": str(root), "formal_registration": None}
+    if active_phase == "formal":
+        registration = {"schema_version": 2, "kind": "build-feedback-formal-registration", "approved": True,
+                        "pairs": count, "seed": campaign["seed"], "order": campaign["schedule"],
+                        "run_root": str(root), "stopping_rule": "fixed-n-no-adaptive-additions", "formal_data_collected": False}
+        protocol["formal_registration"] = write_proof(root / "registration.json", registration)
+    campaign["protocol_evidence"] = write_proof(root / "v2-protocol.json", protocol)
+    # These version-shape fixtures mock the protocol canonical hash. Match the
+    # producer's v2 arm contract, including its source/toolchain proof links.
+    for record in campaign["records"]:
+        for name in ("baseline", "candidate"):
+            arm = record[name]
+            raw = STATS._proof_json(arm["evidence"])
+            raw.update(schema_version=2, protocol_sha256=campaign["protocol_sha256"],
+                       source_receipt_sha256=protocol["source"]["receipt_sha256"], toolchain_sha256=campaign["protocol_sha256"])
+            raw["config"] = configs[name]
+            arm["config_sha256"] = hashlib.sha256(json.dumps(configs[name], sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+            for phase_name, field in (("primary", "jobs"), ("feedback-warm", "feedback_warm_jobs"), ("edit", "edit_jobs")):
+                for capture in raw[field]:
+                    fixed = next(job for job in STATS._runner_module().JOBS if job["name"] == capture["job"])
+                    selected = Path(raw["target_root"]) / "primary" / fixed["name"]
+                    capture["argv"] = STATS._runner_module().job_command(protocol, fixed, selected)
+                    capture["cwd"] = raw["source_root"]
+            arm["evidence"] = write_proof(Path(arm["evidence"]["path"]), raw)
+    edit = campaign["qualification_receipts"].get("edit")
+    if edit is not None and campaign["records"]:
+        receipt = STATS._proof_json(edit)
+        receipt["samples"] = [sample for sample in receipt["samples"] if sample["pair_index"] < count]
+        for sample in receipt["samples"]:
+            sample["evidence"] = campaign["records"][sample["pair_index"]][sample["arm"]]["evidence"]
+        campaign["qualification_receipts"]["edit"] = write_proof(Path(edit["path"]), receipt)
+    return protocol
 
 
 class ReleaseClusterTests(unittest.TestCase):
@@ -826,6 +954,7 @@ def validate_report(path, expected_profile=None):
             self.assertEqual(verify.call_count, 2)
             loaded = module._RELEASE_VALIDATORS[(str(source), validator["sha256"])]
             self.assertEqual(loaded.calls, [(Path(proof["official_report"]["path"]), "full")])
+            self.assertFalse((source.parent / "__pycache__").exists(), "approved validator import must not write into frozen source")
             for mutation in ("unrelated_script", "validation_subcommand"):
                 changed = copy.deepcopy(proof)
                 if mutation == "unrelated_script":
@@ -845,6 +974,70 @@ def validate_report(path, expected_profile=None):
                 changed["capture"][field] = stamp
                 with self.subTest(field=field), self.assertRaisesRegex(ValueError, "run interval exceeds captured command"):
                     module._official_release_valid(changed, identity, protocol=protocol, arm_evidence=arm_reference)
+            # V2 follows the exact independent allocation understood by the
+            # frozen official producer. The validator import/report API is real;
+            # only the synthetic fixture's Git/source setup is mocked above.
+            for phase in ("pilot", "capacity"):
+                pair_index, attempt = (None, None) if phase == "capacity" else (0, 0)
+                suite_name = f"asg-build-feedback-{phase}-{pair_index if pair_index is not None else 'capacity'}-{attempt if attempt is not None else 0}-baseline"
+                suite = root / "evidence-output" / "build-feedback" / suite_name
+                exact_output = suite / "report"
+                exact_output.mkdir(parents=True)
+                declared_binary = write_proof(suite / "baseline-cli.exe", b"synthetic suite binary")
+                exact_report = copy.deepcopy(report)
+                exact_report["baseline"]["suite_id"] = suite.name
+                declared_report = write_proof(exact_output / "official.json", exact_report)
+                allocated = {"pair_index": pair_index, "attempt": attempt, "arm": "baseline",
+                             "source_root": str(root), "release_suite_root": str(suite)}
+                v2_protocol = {**protocol, "schema_version": 2, "phase": phase,
+                               "qualification_allocations": [allocated]}
+                if phase == "capacity":
+                    v2_protocol["capacity_probe"] = {"kind": "full-arm-and-qualification", "arm": "baseline"}
+                v2_proof = copy.deepcopy(proof)
+                v2_proof.update(pair_index=pair_index, attempt=attempt, arm="baseline",
+                                official_report=declared_report, release_binary=declared_binary, artifacts=[declared_binary])
+                args = v2_proof["capture"]["argv"]
+                args[args.index("--output-dir") + 1] = str(exact_output)
+                args[args.index("--suite-id") + 1] = suite.name
+                with self.subTest(phase=phase):
+                    self.assertEqual(module._official_release_valid(v2_proof, identity, protocol=v2_protocol,
+                        arm_evidence=arm_reference), exact_report)
+                    wrong_suite = copy.deepcopy(v2_proof)
+                    wrong_suite["official_report"] = write_proof(exact_output / "wrong-suite.json", report)
+                    wrong_suite["capture"]["argv"][args.index("--suite-id") + 1] = report["baseline"]["suite_id"]
+                    with self.assertRaisesRegex(ValueError, "independently declared source output"):
+                        module._official_release_valid(wrong_suite, identity, protocol=v2_protocol, arm_evidence=arm_reference)
+                    for field in ("pair_index", "attempt", "arm"):
+                        changed = copy.deepcopy(v2_proof)
+                        changed.pop(field)
+                        with self.subTest(missing=field), self.assertRaisesRegex(ValueError, "ordinals missing"):
+                            module._official_release_valid(changed, identity, protocol=v2_protocol, arm_evidence=arm_reference)
+                    for value in (False, 0 if phase == "capacity" else None, "0"):
+                        changed = copy.deepcopy(v2_proof)
+                        changed["pair_index"] = value
+                        with self.subTest(ordinal=value), self.assertRaisesRegex(ValueError, "ordinals"):
+                            module._official_release_valid(changed, identity, protocol=v2_protocol, arm_evidence=arm_reference)
+                    for mutation in ({"source_root": str(root / "other-source")},
+                                     {"release_suite_root": str(root / "suite")}, {"unexpected": True}):
+                        changed = copy.deepcopy(v2_protocol)
+                        changed["qualification_allocations"] = [{**allocated, **mutation}]
+                        with self.subTest(allocation=mutation), self.assertRaisesRegex(ValueError, "allocation|independently declared"):
+                            module._official_release_valid(v2_proof, identity, protocol=changed, arm_evidence=arm_reference)
+                    changed = copy.deepcopy(v2_protocol)
+                    changed["qualification_allocations"] = [allocated, allocated]
+                    with self.assertRaisesRegex(ValueError, "allocation does not match"):
+                        module._official_release_valid(v2_proof, identity, protocol=changed, arm_evidence=arm_reference)
+                    unrelated = copy.deepcopy(proof)
+                    unrelated.update(pair_index=pair_index, attempt=attempt, arm="baseline")
+                    with self.assertRaisesRegex(ValueError, "independently declared source output"):
+                        module._official_release_valid(unrelated, identity, protocol=v2_protocol, arm_evidence=arm_reference)
+                    nested_output = exact_output / "extra"
+                    nested_output.mkdir()
+                    changed = copy.deepcopy(v2_proof)
+                    changed["official_report"] = write_proof(nested_output / "official.json", exact_report)
+                    changed["capture"]["argv"][args.index("--output-dir") + 1] = str(nested_output)
+                    with self.assertRaisesRegex(ValueError, "independently declared source output"):
+                        module._official_release_valid(changed, identity, protocol=v2_protocol, arm_evidence=arm_reference)
             for field in ("mutate_report", "mutate_validator"):
                 with self.subTest(field=field):
                     altered = copy.deepcopy(report)
@@ -887,6 +1080,797 @@ def validate_report(path, expected_profile=None):
         result = STATS.compare_campaign(campaign)
         self.assertFalse(result["adopted"])
         self.assertIn("fixed_pair_count_mismatch", result["reasons"])
+
+
+class BoundedEvidenceTests(unittest.TestCase):
+    def setUp(self):
+        self.projection_patch = patch.object(STATS, "_verify_runner_campaign_projection")
+        self.projection_patch.start()
+        self.addCleanup(self.projection_patch.stop)
+
+    def tearDown(self):
+        while _ACTIVE_PROOF_ROOTS:
+            _ACTIVE_PROOF_ROOTS.pop().cleanup()
+
+    def test_cargo_test_tail_braces_share_runner_semantics(self):
+        campaign = campaign_fixture("pilot")
+        arm = campaign["records"][0]["baseline"]
+        raw = STATS._proof_json(arm["evidence"])
+        capture = raw["jobs"][0]
+        path = Path(capture["stdout_path"])
+        original = path.read_bytes()
+        tails = ((b'{test text after Cargo}\n', True),
+                 (b'{"reason":"build-finished","success":true}\n', False),
+                 (b'{"reason":"compiler-artifact","filenames":[]}\n', False),
+                 (b'\xff', False))
+        for tail, accepted in tails:
+            path.write_bytes(original + tail)
+            capture["stdout_sha256"] = hashlib.sha256(original + tail).hexdigest()
+            arm["evidence"] = write_proof(Path(arm["evidence"]["path"]), raw)
+            if accepted:
+                self.assertTrue(STATS._arm_proof_valid(arm, "baseline", campaign["identity"]))
+            else:
+                try:
+                    result = STATS._arm_proof_valid(arm, "baseline", campaign["identity"])
+                except (ValueError, UnicodeError):
+                    result = False
+                self.assertFalse(result)
+        path.write_bytes(b'{bad before Cargo}\n' + original)
+        capture["stdout_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+        arm["evidence"] = write_proof(Path(arm["evidence"]["path"]), raw)
+        self.assertFalse(STATS._arm_proof_valid(arm, "baseline", campaign["identity"]))
+
+    def test_capacity_is_never_paired_performance_or_adoption(self):
+        campaign = campaign_fixture("pilot")
+        protocol = bind_synthetic_v2(campaign, phase="capacity", pairs=0)
+        campaign["capacity_observation"] = {"status": "capacity_limited", "peak_owned_output_bytes": 1234}
+        runner = STATS._runner_module()
+        with patch.object(runner, "_validate_protocol"), patch.object(runner, "canonical_sha256", return_value=campaign["protocol_sha256"]):
+            result = STATS.compare_campaign(campaign)
+        self.assertFalse(result["qualified"])
+        self.assertEqual(result["completed_valid_pairs"], 0)
+        self.assertFalse(result["performance_evidence"])
+        self.assertNotIn("adopted", result)
+        self.assertEqual(result["capacity_observation"]["status"], "capacity_limited")
+        self.assertEqual(protocol["pairs"], 0)
+
+    def test_v2_arm_job_label_cannot_substitute_command_or_source(self):
+        campaign = campaign_fixture("pilot")
+        protocol = bind_synthetic_v2(campaign)
+        arm = campaign["records"][0]["baseline"]
+        raw = STATS._proof_json(arm["evidence"])
+        runner = STATS._runner_module()
+        with patch.object(STATS, "_arm_binding_valid", return_value=True), patch.object(runner, "canonical_sha256", return_value=campaign["protocol_sha256"]):
+            self.assertTrue(STATS._arm_proof_valid(arm, "baseline", campaign["identity"], protocol=protocol, pair_index=0, attempt=0))
+            for field, value in (("argv", ["python", "unrelated.py"]), ("cwd", str(Path(arm["source_root"]) / "elsewhere"))):
+                changed = copy.deepcopy(raw)
+                changed["edit_jobs"][0][field] = value
+                arm["evidence"] = write_proof(Path(arm["evidence"]["path"]), changed)
+                self.assertFalse(STATS._arm_proof_valid(arm, "baseline", campaign["identity"], protocol=protocol, pair_index=0, attempt=0))
+
+    def test_v2_qualification_binds_compiler_source_scope_and_target(self):
+        campaign = campaign_fixture("pilot")
+        arm = campaign["records"][0]["baseline"]
+        raw = STATS._proof_json(arm["evidence"])
+        run_root = Path(_ACTIVE_PROOF_ROOTS[-1].name) / "approved-run"
+        arm_root = run_root / "pairs" / "pair-0000-attempt-00" / "baseline"
+        (arm_root / "targets").mkdir(parents=True)
+        raw["target_root"] = str(arm_root / "targets")
+        arm["evidence"] = write_proof(arm_root / "arm.json", raw)
+        protocol = {"schema_version": 2, "phase": "pilot", "run_root": str(run_root),
+                    "configs": {"baseline": raw["config"]},
+                    "allocations": [{"pair_index": 0, "attempt": 0, "baseline_source_root": arm["source_root"]}],
+                    "toolchain": {"cargo": {"path": "approved-cargo"}}}
+        for name in ("clippy", "optional_features"):
+            receipt = STATS._proof_json(campaign["qualification_receipts"][name])
+            proof = STATS._proof_json(receipt["samples"][0]["evidence"])
+            base = ["approved-cargo", "clippy" if name == "clippy" else "test", "--workspace", "--all-targets"]
+            if name == "optional_features":
+                base.append("--all-features")
+            target = Path(raw["target_root"]) / "qualification" / name
+            attach_qualification_cargo(proof, target, Path(arm["source_root"]))
+            base.extend(["--locked", "--offline", "-j2", "--message-format=json", "--target-dir", str(target)])
+            base.extend(["--", "-D", "warnings"] if name == "clippy" else ["--", "--test-threads=2"])
+            original_report = STATS._proof_json(proof["report"])
+            def candidate(argv, cwd, proof=proof, original_report=original_report):
+                changed = copy.deepcopy(proof)
+                changed["capture"].update(argv=argv, cwd=cwd)
+                report = copy.deepcopy(original_report)
+                report["argv"] = argv
+                report["stdout_sha256"] = changed["capture"]["stdout_sha256"]
+                report["artifacts"] = changed["artifacts"]
+                report["capture_sha256"] = hashlib.sha256(json.dumps(changed["capture"], sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+                changed["report"] = write_proof(Path(proof["report"]["path"]), report)
+                return changed
+            accepted = candidate(base, arm["source_root"])
+            self.assertTrue(STATS._command_proof_valid(accepted, name, arm, campaign["identity"], campaign["protocol_sha256"], protocol=protocol))
+            narrow = [part for part in base if part != "--workspace"]
+            wrong_target = [str(target.parent / "wrong") if part == str(target) else part for part in base]
+            for argv, cwd in ((["unrelated-exe", *base[1:]], arm["source_root"]),
+                              (base, str(Path(arm["source_root"]) / "unrelated")),
+                              (narrow, arm["source_root"]), (wrong_target, arm["source_root"])):
+                changed = candidate(argv, cwd)
+                self.assertFalse(STATS._command_proof_valid(changed, name, arm, campaign["identity"], campaign["protocol_sha256"], protocol=protocol))
+
+    def test_full_capacity_qualification_keeps_null_ordinals_and_exact_arm(self):
+        """Synthetic commands retain real hash/report/source/arm binding checks."""
+        campaign = campaign_fixture("pilot")
+        arm = campaign["records"][0]["baseline"]
+        raw = STATS._proof_json(arm["evidence"])
+        run_root = Path(_ACTIVE_PROOF_ROOTS[-1].name) / "full-capacity-run"
+        arm_root = run_root / "capacity"
+        (arm_root / "targets").mkdir(parents=True)
+        raw.update(schema_version=2, phase="capacity", performance_evidence=False, pair_index=None, attempt=None,
+                   completed_valid_pairs=0, target_root=str(arm_root / "targets"))
+        arm["evidence"] = write_proof(arm_root / "arm.json", raw)
+        protocol = {"schema_version": 2, "phase": "capacity", "pairs": 0, "allocations": [],
+                    "run_root": str(run_root), "configs": {"baseline": raw["config"]},
+                    "capacity_probe": {"kind": "full-arm-and-qualification", "stage": "expanded",
+                                       "arm": "baseline", "source_root": arm["source_root"]},
+                    "toolchain": {"cargo": {"path": "approved-cargo"}}}
+        diagnostic = Path(raw["target_root"]) / "diagnostic.exe"
+        write_proof(diagnostic, b"synthetic emitted diagnostic executable")
+        emitted_diagnostic = STATS._runner_module()._artifact_identity(diagnostic)
+        raw["jobs"][0]["cargo"]["artifacts"].append({"files": [emitted_diagnostic]})
+        arm["evidence"] = write_proof(arm_root / "arm.json", raw)
+        source_file = Path(arm["source_root"]) / "source.rs"
+        source_receipt = write_proof(arm_root / "approved-source.json", {"source_identity": {"files": [
+            {"path": "source.rs", "sha256": hashlib.sha256(source_file.read_bytes()).hexdigest(), "bytes": source_file.stat().st_size}]}})
+        protocol["source"] = {"receipt_path": source_receipt["path"], "receipt_sha256": source_receipt["sha256"]}
+        diagnostic_argv = [str(diagnostic), "synthetic-diagnostic"]
+        policy = SimpleNamespace(validate_policy=lambda protocol: ({}, {"diagnostic_commands": {arm["config_sha256"]: diagnostic_argv}}))
+        policy_patch = patch.object(STATS, "_retention_module", return_value=policy)
+        policy_patch.start()
+        self.addCleanup(policy_patch.stop)
+        for name in ("clippy", "optional_features", "diagnostics", "release"):
+            receipt = STATS._proof_json(campaign["qualification_receipts"][name])
+            original = STATS._proof_json(receipt["samples"][0]["evidence"])
+            original.update(pair_index=None, attempt=None)
+            original["capture"]["cwd"] = arm["source_root"]
+            if name in ("clippy", "optional_features"):
+                argv = ["approved-cargo", "clippy" if name == "clippy" else "test", "--workspace", "--all-targets"]
+                if name == "optional_features":
+                    argv.append("--all-features")
+                argv.extend(["--locked", "--offline", "-j2", "--message-format=json", "--target-dir",
+                             str(arm_root / "targets" / "qualification" / name)])
+                argv.extend(["--", "-D", "warnings"] if name == "clippy" else ["--", "--test-threads=2"])
+                original["capture"]["argv"] = argv
+                attach_qualification_cargo(original, arm_root / "targets" / "qualification" / name, Path(arm["source_root"]))
+            if name == "diagnostics":
+                original["capture"]["argv"] = diagnostic_argv
+            original_report = STATS._proof_json(original["report"])
+
+            def candidate(mutation=None, *, report_mutation=None, original=original, original_report=original_report):
+                proof = copy.deepcopy(original)
+                if mutation is not None:
+                    proof.update(mutation)
+                report = copy.deepcopy(original_report)
+                report.update({field: proof[field] for field in ("pair_index", "attempt", "arm", "source_root", "config_sha256") if field in proof})
+                report["argv"] = proof["capture"]["argv"]
+                report["stdout_sha256"] = proof["capture"]["stdout_sha256"]
+                report["artifacts"] = proof["artifacts"]
+                report["capture_sha256"] = hashlib.sha256(json.dumps(proof["capture"], sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+                if report_mutation is not None:
+                    report_mutation(report)
+                proof["report"] = write_proof(Path(original["report"]["path"]), report)
+                return proof
+
+            with self.subTest(name=name):
+                self.assertTrue(STATS._command_proof_valid(candidate(), name, arm, campaign["identity"], campaign["protocol_sha256"], protocol=protocol))
+                for mutation in ({"pair_index": 0}, {"attempt": 0}, {"pair_index": False}, {"attempt": False},
+                                 {"arm": "candidate"}, {"source_root": str(run_root / "other-source")}, {"config_sha256": "0" * 64}):
+                    with self.subTest(mutation=mutation):
+                        self.assertFalse(STATS._command_proof_valid(candidate(mutation), name, arm, campaign["identity"], campaign["protocol_sha256"], protocol=protocol))
+                for field in ("pair_index", "attempt", "arm"):
+                    changed = candidate()
+                    changed.pop(field)
+                    self.assertFalse(STATS._command_proof_valid(changed, name, arm, campaign["identity"], campaign["protocol_sha256"], protocol=protocol))
+                for field in ("pair_index", "attempt"):
+                    proof = candidate(report_mutation=lambda report, field=field: report.pop(field))
+                    self.assertFalse(STATS._command_proof_valid(proof, name, arm, campaign["identity"], campaign["protocol_sha256"], protocol=protocol))
+
+    def test_v2_qualification_rejects_non_cargo_logs_and_mismatched_emitted_files(self):
+        campaign = campaign_fixture("pilot")
+        arm = campaign["records"][0]["baseline"]
+        raw = STATS._proof_json(arm["evidence"])
+        run_root = Path(_ACTIVE_PROOF_ROOTS[-1].name) / "qualified-run"
+        arm_root = run_root / "pairs" / "pair-0000-attempt-00" / "baseline"
+        (arm_root / "targets").mkdir(parents=True)
+        raw["target_root"] = str(arm_root / "targets")
+        arm["evidence"] = write_proof(arm_root / "arm.json", raw)
+        protocol = {"schema_version": 2, "phase": "pilot", "run_root": str(run_root), "configs": {"baseline": raw["config"]},
+                    "allocations": [{"pair_index": 0, "attempt": 0, "baseline_source_root": arm["source_root"]}],
+                    "toolchain": {"cargo": {"path": "approved-cargo"}}}
+        for name in ("clippy", "optional_features"):
+            receipt = STATS._proof_json(campaign["qualification_receipts"][name])
+            original = STATS._proof_json(receipt["samples"][0]["evidence"])
+            target = arm_root / "targets" / "qualification" / name
+            argv = ["approved-cargo", "clippy" if name == "clippy" else "test", "--workspace", "--all-targets"]
+            if name == "optional_features":
+                argv.append("--all-features")
+            argv.extend(["--locked", "--offline", "-j2", "--message-format=json", "--target-dir", str(target)])
+            argv.extend(["--", "-D", "warnings"] if name == "clippy" else ["--", "--test-threads=2"])
+            original["capture"].update(argv=argv, cwd=arm["source_root"])
+            attach_qualification_cargo(original, target, Path(arm["source_root"]))
+            original_report = STATS._proof_json(original["report"])
+            original_log = Path(original["capture"]["stdout_path"]).read_bytes()
+
+            def candidate(mutation=None, *, output=original_log, original=original, original_report=original_report):
+                proof = copy.deepcopy(original)
+                proof["capture"]["stdout_sha256"] = write_proof(Path(proof["capture"]["stdout_path"]), output)["sha256"]
+                if mutation is not None:
+                    mutation(proof)
+                report = copy.deepcopy(original_report)
+                report.update(argv=proof["capture"]["argv"], stdout_sha256=proof["capture"]["stdout_sha256"], artifacts=proof["artifacts"],
+                              capture_sha256=STATS._runner_module().canonical_sha256(proof["capture"]))
+                proof["report"] = write_proof(Path(proof["report"]["path"]), report)
+                return proof
+
+            with self.subTest(name=name):
+                self.assertTrue(STATS._command_proof_valid(candidate(), name, arm, campaign["identity"], campaign["protocol_sha256"], protocol=protocol))
+                for output in (b"pretend success\n", b'{"reason":"build-finished","success":true}\n'):
+                    with self.subTest(output=output):
+                        self.assertFalse(STATS._command_proof_valid(candidate(output=output), name, arm, campaign["identity"], campaign["protocol_sha256"], protocol=protocol))
+                self.assertFalse(STATS._command_proof_valid(candidate(lambda proof: proof["capture"].pop("cargo")), name, arm, campaign["identity"], campaign["protocol_sha256"], protocol=protocol))
+                unrelated = write_proof(target / "unrelated.rmeta", b"not emitted by this command")
+                self.assertFalse(STATS._command_proof_valid(candidate(lambda proof, unrelated=unrelated: proof.update(artifacts=[unrelated])), name, arm, campaign["identity"], campaign["protocol_sha256"], protocol=protocol))
+                proof = candidate()
+                artifact = proof["artifacts"][0]
+                artifact_path = Path(artifact["path"])
+                retained = {"seal": {"target": str(arm_root / "targets"), "tree": {"entries": [
+                    {"relative": artifact_path.relative_to(arm_root / "targets").as_posix(), "directory": False,
+                     "sha256": artifact["sha256"], "bytes": artifact_path.stat().st_size}]},
+                    "qualifications": {name: {"reference": {"synthetic": "already-verified"}, "proof": proof}}}}
+                artifact_path.unlink()
+                with patch.object(STATS._runner_module(), "parse_cargo_json_file", side_effect=AssertionError("retained bytes cannot be replayed")):
+                    self.assertTrue(STATS._command_proof_valid(proof, name, arm, campaign["identity"], campaign["protocol_sha256"], protocol=protocol,
+                        retained=retained, evidence_reference={"synthetic": "already-verified"}))
+
+    def test_v2_diagnostics_require_approved_emitted_executable_and_frozen_source(self):
+        campaign = campaign_fixture("pilot")
+        arm = campaign["records"][0]["baseline"]
+        raw = STATS._proof_json(arm["evidence"])
+        run_root = Path(_ACTIVE_PROOF_ROOTS[-1].name) / "diagnostic-run"
+        arm_root = run_root / "pairs" / "pair-0000-attempt-00" / "baseline"
+        (arm_root / "targets").mkdir(parents=True)
+        raw["target_root"] = str(arm_root / "targets")
+        executable = arm_root / "targets" / "diagnostic.exe"
+        write_proof(executable, b"synthetic emitted executable")
+        emitted = STATS._runner_module()._artifact_identity(executable)
+        raw["jobs"][0]["cargo"]["artifacts"].append({"files": [emitted]})
+        arm["evidence"] = write_proof(arm_root / "arm.json", raw)
+        source = Path(arm["source_root"]) / "source.rs"
+        manifest = [{"path": "source.rs", "sha256": hashlib.sha256(source.read_bytes()).hexdigest(), "bytes": source.stat().st_size}]
+        source_reference = write_proof(run_root / "approved-source.json", {"source_identity": {"files": manifest}})
+        protocol = {"schema_version": 2, "phase": "pilot", "run_root": str(run_root), "configs": {"baseline": raw["config"]},
+                    "allocations": [{"pair_index": 0, "attempt": 0, "baseline_source_root": arm["source_root"]}],
+                    "source": {"receipt_path": source_reference["path"], "receipt_sha256": source_reference["sha256"]}}
+        receipt = STATS._proof_json(campaign["qualification_receipts"]["diagnostics"])
+        original = STATS._proof_json(receipt["samples"][0]["evidence"])
+        argv = [str(executable), "diagnostic-probe"]
+        original["capture"].update(argv=argv, cwd=arm["source_root"])
+        original["artifacts"] = [emitted]
+        original_report = STATS._proof_json(original["report"])
+
+        def candidate(command=argv, *, check_source=source):
+            proof = copy.deepcopy(original)
+            proof["capture"]["argv"] = command
+            output = f"{check_source.as_posix()}:1: synthetic diagnostic\n".encode()
+            proof["capture"]["stdout_sha256"] = write_proof(Path(proof["capture"]["stdout_path"]), output)["sha256"]
+            report = copy.deepcopy(original_report)
+            report.update(argv=command, stdout_sha256=proof["capture"]["stdout_sha256"], artifacts=proof["artifacts"],
+                          capture_sha256=STATS._runner_module().canonical_sha256(proof["capture"]))
+            report["checks"][0].update(source={"path": str(check_source), "sha256": hashlib.sha256(check_source.read_bytes()).hexdigest()},
+                                       actual_file=str(check_source))
+            proof["report"] = write_proof(Path(proof["report"]["path"]), report)
+            return proof
+
+        approval = {"diagnostic_commands": {arm["config_sha256"]: argv}}
+        helper = SimpleNamespace(validate_policy=lambda approved: ({}, approval))
+        with patch.object(STATS, "_retention_module", return_value=helper):
+            self.assertTrue(STATS._command_proof_valid(candidate(), "diagnostics", arm, campaign["identity"], campaign["protocol_sha256"], protocol=protocol))
+            self.assertFalse(STATS._command_proof_valid(candidate(["unrelated.exe", "diagnostic-probe"]), "diagnostics", arm, campaign["identity"], campaign["protocol_sha256"], protocol=protocol))
+            outside = run_root / "outside.rs"
+            outside.write_bytes(b"foreign source")
+            self.assertFalse(STATS._command_proof_valid(candidate(check_source=outside), "diagnostics", arm, campaign["identity"], campaign["protocol_sha256"], protocol=protocol))
+            source.write_bytes(b"changed frozen source")
+            self.assertFalse(STATS._command_proof_valid(candidate(), "diagnostics", arm, campaign["identity"], campaign["protocol_sha256"], protocol=protocol))
+            unrecorded = arm_root / "targets" / "unrecorded.exe"
+            unrecorded.write_bytes(b"unrecorded")
+            approval["diagnostic_commands"][arm["config_sha256"]] = [str(unrecorded), "diagnostic-probe"]
+            self.assertFalse(STATS._command_proof_valid(candidate([str(unrecorded), "diagnostic-probe"]), "diagnostics", arm, campaign["identity"], campaign["protocol_sha256"], protocol=protocol))
+
+    def test_full_capacity_binding_and_retained_pair_boundary(self):
+        campaign = campaign_fixture("pilot")
+        arm = campaign["records"][0]["baseline"]
+        raw = STATS._proof_json(arm["evidence"])
+        run_root = Path(_ACTIVE_PROOF_ROOTS[-1].name) / "full-capacity-run"
+        arm_root = run_root / "capacity"
+        (arm_root / "targets").mkdir(parents=True)
+        raw.update(schema_version=2, phase="capacity", performance_evidence=False, pair_index=None, attempt=None,
+                   completed_valid_pairs=0, target_root=str(arm_root / "targets"))
+        arm["evidence"] = write_proof(arm_root / "arm.json", raw)
+        protocol = {"schema_version": 2, "phase": "capacity", "pairs": 0, "allocations": [],
+                    "run_root": str(run_root), "configs": {"baseline": raw["config"]},
+                    "capacity_probe": {"kind": "full-arm-and-qualification", "stage": "expanded",
+                                       "arm": "baseline", "source_root": arm["source_root"]}}
+        self.assertTrue(STATS._arm_binding_valid(arm, raw, "baseline", protocol, None, None))
+        for mutation in ({"phase": "pilot"}, {"performance_evidence": True}, {"completed_valid_pairs": False},
+                         {"completed_valid_pairs": 1}, {"pair_index": 0}, {"attempt": False},
+                         {"source_root": str(run_root / "other-source")},
+                         {"config": {"debug": "other"}}):
+            changed = {**raw, **mutation}
+            changed_arm = {**arm, "evidence": write_proof(arm_root / "arm.json", changed)}
+            with self.subTest(mutation=mutation):
+                self.assertFalse(STATS._arm_binding_valid(changed_arm, changed, "baseline", protocol, None, None))
+        for field in ("pair_index", "attempt"):
+            changed = {key: value for key, value in raw.items() if key != field}
+            changed_arm = {**arm, "evidence": write_proof(arm_root / "arm.json", changed)}
+            self.assertFalse(STATS._arm_binding_valid(changed_arm, changed, "baseline", protocol, None, None))
+        arm["evidence"] = write_proof(arm_root / "arm.json", raw)
+        for pair_index, attempt in ((0, None), (None, 0), (False, None), (None, False)):
+            self.assertFalse(STATS._arm_binding_valid(arm, raw, "baseline", protocol, pair_index, attempt))
+        for mutation in ({"pairs": False}, {"pairs": 1}, {"allocations": [{}]}, {"schema_version": 1}):
+            self.assertFalse(STATS._arm_binding_valid(arm, raw, "baseline", {**protocol, **mutation}, None, None))
+        other_root = run_root / "other"
+        (other_root / "targets").mkdir(parents=True)
+        relocated = {**raw, "target_root": str(other_root / "targets")}
+        changed_arm = {**arm, "evidence": write_proof(other_root / "arm.json", relocated)}
+        self.assertFalse(STATS._arm_binding_valid(changed_arm, relocated, "baseline", protocol, None, None))
+        retained = {**arm, "retained_evidence": {"verified": True}}
+        with patch.object(STATS, "_retention_module", side_effect=AssertionError("must not enter paired retention verifier")), \
+             self.assertRaisesRegex(ValueError, "bound v2 paired allocation"):
+            STATS._retained_arm_result(retained, "baseline", protocol, None, None)
+
+    def test_v2_formal_count_locked_to_protocol_and_registration(self):
+        campaign = campaign_fixture()
+        protocol = bind_synthetic_v2(campaign, pairs=12)
+        runner = STATS._runner_module()
+        with patch.object(runner, "_validate_protocol"), patch.object(runner, "canonical_sha256", return_value=campaign["protocol_sha256"]):
+            self.assertEqual(STATS._campaign_protocol(campaign["protocol_evidence"], campaign["identity"], campaign["protocol_sha256"], campaign)["pairs"], 12)
+            changed = copy.deepcopy(campaign)
+            changed["pairs_required"] = 20
+            result = STATS.compare_campaign(changed)
+            self.assertFalse(result["adopted"])
+            self.assertIn("v2_protocol_missing_or_invalid", result["reasons"])
+            plan = STATS._proof_json(protocol["formal_registration"])
+            for mutation in ({"pairs": 20}, {"approved": False}, {"stopping_rule": "until-significant"}):
+                protocol["formal_registration"] = write_proof(Path(protocol["formal_registration"]["path"]), {**plan, **mutation})
+                reference = write_proof(Path(campaign["protocol_evidence"]["path"]), protocol)
+                with self.assertRaisesRegex(ValueError, "registration"):
+                    STATS._campaign_protocol(reference, campaign["identity"], campaign["protocol_sha256"], campaign)
+
+    def test_v2_complete_pilot_keeps_formal_n_pending_and_uncertainty_gates(self):
+        campaign = campaign_fixture("pilot")
+        protocol = bind_synthetic_v2(campaign)
+        runner = STATS._runner_module()
+        # These synthetic proofs isolate fixed-N forecasting from live source
+        # setup; runtime source/layout checks have their own explicit regression.
+        with patch.object(runner, "_validate_protocol"), patch.object(runner, "canonical_sha256", return_value=campaign["protocol_sha256"]), \
+             patch.object(STATS, "_arm_binding_valid", return_value=True):
+            result = STATS.compare_campaign(campaign)
+        self.assertEqual(result["completed_valid_pairs"], 5)
+        self.assertIsNone(result["forecast"]["formal_pairs"])
+        self.assertIsNone(result["forecast"]["projected_compute_hours"])
+        self.assertEqual(result["forecast"]["formal_pair_selection"], "approve-and-freeze-after-pilot-before-formal")
+        self.assertNotIn("adopted", result)
+        self.assertFalse(result["qualified"])
+        self.assertIn("qualification_release_cli_workload_timing_unverified", result["reasons"])
+        self.assertEqual(protocol["pairs"], 5)
+
+    def test_arm_binding_rejects_protocol_config_and_source_substitution(self):
+        campaign = campaign_fixture("pilot")
+        arm = campaign["records"][0]["baseline"]
+        raw = STATS._proof_json(arm["evidence"])
+        root = Path(_ACTIVE_PROOF_ROOTS[-1].name) / "approved-run"
+        local = root / "pairs" / "pair-0000-attempt-00" / "baseline"
+        (local / "targets").mkdir(parents=True)
+        raw["target_root"] = str(local / "targets")
+        arm["evidence"] = write_proof(local / "arm.json", raw)
+        protocol = {"run_root": str(root), "configs": {"baseline": raw["config"]},
+                    "allocations": [{"pair_index": 0, "attempt": 0, "baseline_source_root": arm["source_root"]}]}
+        self.assertTrue(STATS._arm_binding_valid(arm, raw, "baseline", protocol, 0, 0))
+        altered = copy.deepcopy(protocol)
+        altered["configs"]["baseline"] = {"debug": "different"}
+        self.assertFalse(STATS._arm_binding_valid(arm, raw, "baseline", altered, 0, 0))
+        altered = copy.deepcopy(protocol)
+        altered["allocations"][0]["baseline_source_root"] = str(root / "other-source")
+        self.assertFalse(STATS._arm_binding_valid(arm, raw, "baseline", altered, 0, 0))
+        self.assertFalse(STATS._arm_binding_valid(arm, raw, "baseline", protocol, 1, 0))
+
+    def test_v2_requires_pinned_protocol_even_for_pilot_and_capacity(self):
+        for phase in ("pilot", "capacity"):
+            campaign = campaign_fixture("pilot")
+            campaign.update(schema_version=2, phase=phase)
+            result = STATS.compare_campaign(campaign)
+            self.assertFalse(result["qualified"])
+            self.assertIn("v2_protocol_missing_or_invalid", result["reasons"])
+
+    def test_missing_live_artifact_and_forged_retained_flags_stay_rejected(self):
+        campaign = campaign_fixture("pilot")
+        arm = campaign["records"][0]["baseline"]
+        raw = STATS._proof_json(arm["evidence"])
+        Path(raw["jobs"][0]["cargo"]["artifacts"][0]["files"][0]["path"]).unlink()
+        with self.assertRaises(OSError):
+            STATS._arm_proof_valid(arm, "baseline", campaign["identity"])
+        arm["retained_evidence"] = {"verified": True}
+        with self.assertRaisesRegex(ValueError, "bound v2"):
+            STATS._arm_proof_valid(arm, "baseline", campaign["identity"])
+        protocol = {"schema_version": 2, "phase": "pilot", "source": {"receipt_sha256": "e" * 64}, "toolchain": {}}
+        runner = STATS._runner_module()
+        raw.update(schema_version=2, protocol_sha256=runner.canonical_sha256(protocol), source_receipt_sha256="e" * 64,
+                   toolchain_sha256=runner.canonical_sha256({}))
+        arm["evidence"] = write_proof(Path(arm["evidence"]["path"]), raw)
+        helper = SimpleNamespace(verify_retained_arm=Mock(side_effect=ValueError("unapproved seal")))
+        with patch.object(STATS, "_retention_module", return_value=helper), self.assertRaisesRegex(ValueError, "unapproved seal"):
+            STATS._arm_proof_valid(arm, "baseline", campaign["identity"], protocol=protocol, pair_index=0, attempt=0)
+
+    def test_retained_command_matches_verified_seal_and_rechecks_kept_logs(self):
+        campaign = campaign_fixture("pilot")
+        arm = campaign["records"][0]["baseline"]
+        receipt = STATS._proof_json(campaign["qualification_receipts"]["clippy"])
+        reference = receipt["samples"][0]["evidence"]
+        proof = STATS._proof_json(reference)
+        artifact = proof["artifacts"][0]
+        path = Path(artifact["path"])
+        retained = {"seal": {"target": str(path.parent),
+            "tree": {"entries": [{"relative": path.name, "directory": False, "sha256": artifact["sha256"], "bytes": path.stat().st_size}]},
+            "qualifications": {"clippy": {"reference": reference, "proof": proof}}}}
+        path.unlink()
+        self.assertTrue(STATS._command_proof_valid(proof, "clippy", arm, campaign["identity"], campaign["protocol_sha256"], retained=retained, evidence_reference=reference))
+        altered = copy.deepcopy(proof)
+        altered["capture"]["duration_ms"] += 1
+        with self.assertRaisesRegex(ValueError, "prerecycle qualified evidence"):
+            STATS._command_proof_valid(altered, "clippy", arm, campaign["identity"], campaign["protocol_sha256"], retained=retained, evidence_reference=reference)
+        with Path(proof["capture"]["stdout_path"]).open("ab") as stream:
+            stream.write(b"changed retained log tail")
+        with self.assertRaisesRegex(ValueError, "hash changed"):
+            STATS._command_proof_valid(proof, "clippy", arm, campaign["identity"], campaign["protocol_sha256"], retained=retained, evidence_reference=reference)
+
+    def test_verified_retained_branch_requires_exact_original_projection(self):
+        campaign = campaign_fixture("pilot")
+        arm = campaign["records"][0]["baseline"]
+        raw = STATS._proof_json(arm["evidence"])
+        file = raw["jobs"][0]["cargo"]["artifacts"][0]["files"][0]
+        target = Path(raw["target_root"])
+        original = copy.deepcopy(arm)
+        seal = {"arm_projection": original, "arm_reference": arm["evidence"], "target": str(target),
+                "tree": {"entries": [{"relative": "synthetic.exe", "directory": False, "sha256": file["sha256"], "bytes": Path(file["path"]).stat().st_size}]}}
+        Path(file["path"]).unlink()
+        arm["retained_evidence"] = {"path": "synthetic retained link", "sha256": "f" * 64}
+        verified = {"arm_receipt": raw, "seal": seal, "disposition": {"status": "complete"}}
+        helper = SimpleNamespace(verify_retained_arm=Mock(return_value=verified))
+        with patch.object(STATS, "_retention_module", return_value=helper):
+            self.assertEqual(STATS._retained_arm_result(arm, "baseline", {"schema_version": 2, "phase": "pilot"}, 0, 0), verified)
+            STATS._artifact_proof_valid(file, verified)
+            helper.verify_retained_arm.assert_called_once()
+            arm["allocated_bytes"] += 1
+            with self.assertRaisesRegex(ValueError, "original projection"):
+                STATS._retained_arm_result(arm, "baseline", {"schema_version": 2, "phase": "pilot"}, 0, 0)
+
+
+@unittest.skipUnless(os.name == "nt", "uses NTFS identity for synthetic retained output")
+
+class RawCampaignProjectionTests(unittest.TestCase):
+    """Real campaign path/hash/attempt projection; process execution is synthetic."""
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.raw_path = self.root / "campaign.json"
+        self.protocol_path = self.root / "protocol.json"
+        tool = {"version": "synthetic version", "sha256": "c" * 64}
+        self.protocol = {"schema_version": 2, "source": {"commit": "a" * 40, "tree": "b" * 40, "lock_sha256": "d" * 64, "resources_sha256": "e" * 64},
+            "baseline": {"allocated_bytes": 0}, "run_root": str(self.root),
+            "toolchain": {"rustc": tool, "cargo": tool, "msvc": {"compiler": tool, "linker": tool}, "target": "x86_64-pc-windows-msvc"},
+            "phase": "pilot", "pairs": 5, "jobs": 2, "test_threads": 2, "seed": 7,
+            "order": [["baseline", "candidate"]] * 5, "configs": {name: {"tool": {"kind": "native"}} for name in ("baseline", "candidate")},
+            "formal_registration": None}
+        self.protocol_reference = write_proof(self.protocol_path, self.protocol)
+        self.runner = STATS._runner_module()
+        self.cli = STATS._benchmark_module()
+        stack = contextlib.ExitStack()
+        self.addCleanup(stack.close)
+        stack.enter_context(patch.object(self.runner, "_validate_protocol"))
+        stack.enter_context(patch.object(self.cli, "_module", side_effect=lambda name: self.runner if name == "runner" else STATS._retention_module()))
+        self.raw = {"schema_version": 2, "kind": "build-feedback-campaign", "protocol_path": str(self.protocol_path),
+                    "protocol_sha256": self.runner.canonical_sha256(self.protocol), "phase": "pilot", "planned_pairs": 5,
+                    "source_commit": "a" * 40, "source_tree": "b" * 40,
+                    "toolchain_sha256": self.runner.canonical_sha256(self.protocol["toolchain"]),
+                    "status": "failed", "complete": False, "completed_valid_pairs": 0, "inflight": None,
+                    "reasons": ["budget_limited"], "pairs": [{"pair_index": 0, "attempt": 0, "order": self.protocol["order"][0],
+                         "status": "budget_limited", "finalization_reasons": ["registered_storage_limit_reached"], "arms": {}, "arm_receipts": {}}]}
+
+    def project(self, raw=None):
+        raw = self.raw if raw is None else raw
+        raw["integrity_sha256"] = self.runner.canonical_sha256({key: value for key, value in raw.items() if key != "integrity_sha256"})
+        write_proof(self.raw_path, raw)
+        campaign = self.cli.normalize_runner_campaign(raw, self.protocol, {})
+        campaign["protocol_evidence"] = self.protocol_reference
+        return campaign
+
+    def test_exact_raw_failed_campaign_reprojects_and_rejects_status_or_attempt_loss(self):
+        campaign = self.project()
+        STATS._verify_runner_campaign_projection(campaign, self.protocol)
+        mutations = []
+        changed = copy.deepcopy(campaign)
+        changed["records"][0]["status"] = "valid"
+        mutations.append(changed)
+        changed = copy.deepcopy(campaign)
+        changed["records"] = []
+        mutations.append(changed)
+        changed = copy.deepcopy(campaign)
+        changed["admission_reasons"] = []
+        mutations.append(changed)
+        changed = copy.deepcopy(campaign)
+        changed["runner_state"]["status"] = "complete"
+        mutations.append(changed)
+        changed = copy.deepcopy(campaign)
+        changed["records"][0]["finalization_reasons"] = []
+        mutations.append(changed)
+        changed = copy.deepcopy(campaign)
+        changed["records"][0]["pair_index"] = False
+        mutations.append(changed)
+        for changed in mutations:
+            with self.assertRaisesRegex(ValueError, "pinned raw runner projection"):
+                STATS._verify_runner_campaign_projection(changed, self.protocol)
+        # The public comparison cannot turn this raw failed attempt valid.
+        changed = copy.deepcopy(campaign)
+        changed["records"] = []
+        result = STATS.compare_campaign(changed)
+        self.assertFalse(result["qualified"])
+        self.assertIn("v2_protocol_missing_or_invalid", result["reasons"])
+
+    def test_successfully_sealed_arms_do_not_override_raw_pair_budget_failure(self):
+        captures = [{"job": name, "status": "ok", "returncode": 0, "duration_ms": 1000,
+                     "process_tree_capture_complete": True, "external_processes": []} for name in JOBS]
+        for name in ("baseline", "candidate"):
+            local = self.root / "pairs" / "pair-0000-attempt-00" / name
+            allocation = {"schema_version": 1, "complete": True, "errors": [], "allocated_bytes": 8192,
+                          "storage_scope": "owned_targets_and_stores"}
+            allocation_ref = write_proof(local / "owned-allocation.json", allocation)
+            arm = {"status": "ok", "source_commit": self.protocol["source"]["commit"], "source_tree": self.protocol["source"]["tree"],
+                   "source_root": str(local / "source"), "target_root": str(local / "targets"),
+                   "process_tree_drained": True, "own_edit_restored": True,
+                   "primary_duration_ms": 6000, "duration_ms": 18000, "owned_allocated_bytes": 8192,
+                   "allocation_complete": True, "owned_allocation_receipt": allocation,
+                   "owned_allocation_receipt_sha256": allocation_ref["sha256"], "config": {},
+                   "phase_duration_ms": {"primary": 6000, "feedback-warm": 6000, "edit": 6000},
+                   "jobs": captures, "feedback_warm_jobs": captures, "edit_jobs": captures}
+            ref = write_proof(local / "arm.json", arm)
+            self.raw["pairs"][0]["arms"][name] = arm
+            self.raw["pairs"][0]["arm_receipts"][name] = ref
+        # Logs and signed seal validation have independent regression coverage;
+        # mock only those byte-dependent checks to exercise raw pair semantics.
+        with patch.object(self.cli, "_runner_artifacts_verified", return_value=True):
+            live = self.project()
+        retained = {name: {"arm_receipt": arm, "seal": {"arm_projection": live["records"][0][name]}}
+                    for name, arm in self.raw["pairs"][0]["arms"].items()}
+        self.raw["pairs"][0]["retained_evidence"] = {name: {"path": str(self.root / (name + "-link.json")), "sha256": "e" * 64}
+                                                     for name in ("baseline", "candidate")}
+        helper = SimpleNamespace(verify_retained_arm=lambda ref, protocol, name, index, attempt: retained[name])
+        with patch.object(self.runner, "_retention_module", return_value=helper), \
+             patch.object(self.cli, "_module", side_effect=lambda name: self.runner if name == "runner" else helper):
+            sealed = self.project()
+            self.assertEqual(sealed["records"][0]["status"], "budget_limited")
+            STATS._verify_runner_campaign_projection(sealed, self.protocol)
+            altered = copy.deepcopy(sealed)
+            altered["records"][0]["status"] = "valid"
+            altered.pop("admission_reasons", None)
+            with self.assertRaisesRegex(ValueError, "pinned raw runner projection"):
+                STATS._verify_runner_campaign_projection(altered, self.protocol)
+
+    def test_changed_raw_hash_wrong_path_and_protocol_identity_refuse(self):
+        campaign = self.project()
+        self.raw_path.write_bytes(b"changed raw state")
+        with self.assertRaisesRegex(ValueError, "hash changed"):
+            STATS._verify_runner_campaign_projection(campaign, self.protocol)
+        campaign = self.project()
+        wrong = write_proof(self.root / "copied-campaign.json", self.raw)
+        campaign["runner_campaign_evidence"] = wrong
+        with self.assertRaisesRegex(ValueError, "approved run_root"):
+            STATS._verify_runner_campaign_projection(campaign, self.protocol)
+        altered_raw = copy.deepcopy(self.raw)
+        altered_raw["source_commit"] = "f" * 40
+        campaign = self.project(altered_raw)
+        with self.assertRaisesRegex(ValueError, "raw source/protocol identity"):
+            STATS._verify_runner_campaign_projection(campaign, self.protocol)
+
+    def test_normalizer_refuses_in_memory_raw_changed_from_exact_receipt(self):
+        self.project()
+        changed = copy.deepcopy(self.raw)
+        changed["reasons"] = []
+        # Integrity is self-rehashable; pinning the actual origin still rejects.
+        changed["integrity_sha256"] = self.runner.canonical_sha256({key: value for key, value in changed.items() if key != "integrity_sha256"})
+        with self.assertRaisesRegex(ValueError, "pinned raw source"):
+            self.cli.normalize_runner_campaign(changed, self.protocol, {})
+
+    def test_over_budget_formal_raw_projection_cannot_hide_registered_limit(self):
+        registration = {"kind": "build-feedback-formal-registration", "schema_version": 2,
+            "approved": True, "formal_data_collected": False, "pairs": 12, "seed": 7,
+            "order": [["baseline", "candidate"]] * 12, "run_root": str(self.root),
+            "stopping_rule": "fixed-n-no-adaptive-additions", "maximum_compute_seconds": 10,
+            "maximum_storage_bytes": 4096}
+        self.protocol.update(phase="formal", pairs=12, order=registration["order"], formal_registration=write_proof(self.root / "registration.json", registration))
+        self.protocol_reference = write_proof(self.protocol_path, self.protocol)
+        raw = copy.deepcopy(self.raw)
+        raw.update(phase="formal", planned_pairs=12, protocol_sha256=self.runner.canonical_sha256(self.protocol),
+                   registered_compute_seconds=10.0, formal_registration_sha256=self.protocol["formal_registration"]["sha256"])
+        campaign = self.project(raw)
+        with self.assertRaisesRegex(ValueError, "registered compute limit reached"):
+            STATS._verify_runner_campaign_projection(campaign, self.protocol)
+        raw["registered_compute_seconds"] = 1.0
+        raw["pairs"][0]["arms"] = {"baseline": {"status": "failed", "jobs": [], "edit_jobs": [], "feedback_warm_jobs": [],
+                                               "duration_ms": 0, "peak_allocated_bytes": 4096}}
+        arm_root = self.root / "pairs" / "pair-0000-attempt-00" / "baseline"
+        arm_reference = write_proof(arm_root / "arm.json", raw["pairs"][0]["arms"]["baseline"])
+        raw["pairs"][0]["arm_receipts"] = {"baseline": arm_reference}
+        campaign = self.project(raw)
+        with self.assertRaisesRegex(ValueError, "registered storage limit reached"):
+            STATS._verify_runner_campaign_projection(campaign, self.protocol)
+
+
+class ProducerEvidenceIntegrationTests(unittest.TestCase):
+    def test_actual_runner_v2_arm_normalizes_and_passes_seal_arm_gate(self):
+        self._check_producer_arm("pilot")
+
+    def test_actual_runner_full_capacity_arm_normalizes_and_reaches_distinct_seal_gate(self):
+        self._check_producer_arm("capacity")
+
+    def _check_producer_arm(self, phase):
+        """Run the real receipt producer; only Cargo execution/source setup are synthetic.
+
+        Exact module version/proof/layout/parser and NTFS allocation/lease/HMAC
+        checks stay unmocked. Full release qualification is deliberately absent,
+        so reaching that next seal gate must still refuse the seal.
+        """
+        runner = STATS._runner_module()
+        spec = importlib.util.spec_from_file_location("bounded_producer_cli", Path(__file__).with_name("build_feedback_benchmark.py"))
+        cli = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cli)
+        helper = STATS._retention_module()
+        inventory = runner._inventory_module()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source"
+            edit_path = source / runner.DEFAULT_EDIT_PATH
+            edit_path.parent.mkdir(parents=True)
+            original = b"// synthetic runner source for evidence boundary\n"
+            edit_path.write_bytes(original)
+            source_receipt = write_proof(root / "source-receipt.json", {"synthetic": True})
+            baseline_receipt = write_proof(root / "baseline-receipt.json", {"synthetic": True})
+            config = {"debug": "full", "incremental": "on", "layout": "isolated", "tool": {"kind": "native"}}
+            identity = {
+                "source_commit": "a" * 40, "source_tree": "b" * 40, "lock_sha256": "c" * 64, "resources_sha256": "d" * 64,
+                "rustc_version": "rustc 1.97.1 (synthetic)", "cargo_version": "cargo 1.97.1 (synthetic)",
+                "rustc_sha256": "e" * 64, "cargo_sha256": "f" * 64, "host": "x86_64-pc-windows-msvc",
+                "msvc_compiler_version": "synthetic MSVC", "msvc_linker_version": "synthetic linker",
+                "msvc_compiler_sha256": "1" * 64, "msvc_linker_sha256": "2" * 64, "jobs": 2, "test_threads": 2,
+            }
+            run_root = root / "run"
+            full_capacity = phase == "capacity"
+            arm_root = run_root / "capacity" if full_capacity else run_root / "pairs" / "pair-0000-attempt-00" / "baseline"
+            target = arm_root / "targets"
+            protocol = {"schema_version": 2, "kind": "build-feedback-protocol", "phase": phase, "pairs": 0 if full_capacity else 5,
+                "source": {"root": str(source), "commit": identity["source_commit"], "tree": identity["source_tree"],
+                           "lock_sha256": identity["lock_sha256"], "resources_sha256": identity["resources_sha256"],
+                           "receipt_path": source_receipt["path"], "receipt_sha256": source_receipt["sha256"]},
+                "baseline": {"allocated_bytes": 0, "receipt_path": baseline_receipt["path"], "receipt_sha256": baseline_receipt["sha256"]},
+                "toolchain": {"rustc": {"version": identity["rustc_version"], "sha256": identity["rustc_sha256"]},
+                              "cargo": {"path": "synthetic-cargo", "version": identity["cargo_version"], "sha256": identity["cargo_sha256"]},
+                              "msvc": {"compiler": {"version": identity["msvc_compiler_version"], "sha256": identity["msvc_compiler_sha256"]},
+                                       "linker": {"version": identity["msvc_linker_version"], "sha256": identity["msvc_linker_sha256"]}}, "target": identity["host"]},
+                "configs": {"baseline": config, "candidate": config}, "jobs": 2, "test_threads": 2,
+                "run_root": str(run_root), "seed": 7, "order": [["baseline", "candidate"]] * 5,
+                "budget_policy": {"policy_version": 2, "minimum_free_bytes": 40 * STATS.GIB, "external_growth_allowance_bytes": 8 * STATS.GIB},
+                "predicted_growth_bytes": STATS.GIB, "allocations": [{"pair_index": 0, "attempt": 0, "baseline_source_root": str(source), "candidate_source_root": str(source)}],
+                "edit": {"path": runner.DEFAULT_EDIT_PATH, "before_sha256": hashlib.sha256(original).hexdigest(), "after_sha256": hashlib.sha256(original + runner.EDIT_SUFFIX).hexdigest()}}
+            if full_capacity:
+                protocol.update(order=[], allocations=[], predicted_growth_bytes=8 * STATS.GIB,
+                    capacity_probe={"kind": "full-arm-and-qualification", "stage": "expanded", "arm": "baseline",
+                                    "source_root": str(source), "owned_output_cap_bytes": 8 * STATS.GIB})
+            protocol["qualification_allocations"] = runner.qualification_allocations(protocol)
+            key = root / "local-integrity.key"
+            key.write_bytes(b"s" * 32)
+            checker = Path(__file__).with_name("build_feedback_retention.py")
+            tools = {name: {"path": str(Path(__file__).with_name("build_feedback_" + name + ".py")),
+                            "sha256": runner.sha256_file(Path(__file__).with_name("build_feedback_" + name + ".py")),
+                            "bytes": Path(__file__).with_name("build_feedback_" + name + ".py").stat().st_size}
+                     for name in ("runner", "statistics", "benchmark", "inventory")}
+            approval = {"kind": "build-feedback-retention-approval", "schema_version": 2, "approved": True,
+                "source_receipt_sha256": source_receipt["sha256"], "baseline_receipt_sha256": baseline_receipt["sha256"],
+                "toolchain_sha256": runner.canonical_sha256(protocol["toolchain"]), "configs_sha256": runner.canonical_sha256(protocol["configs"]),
+                "run_root": str(run_root), "disposable_target_paths": [str(target)], "protected_roots": [str(source)], "allowed_source_roots": [str(source)],
+                "scope": "validated-successful-and-cap-stopped-task-intermediates", "flow": ["verify", "recycle", "match", "purge-exact", "verify-release", "receipt"],
+                "protected": ["source", "git-common-directory", "daily-cache", "existing-last-72-hours", "stores", "seeds", "quality-source-failures", "unrelated-recycle-items", "pagefile"],
+                "allow_recent_new_outputs": True, "checker": {"path": str(checker), "sha256": runner.sha256_file(checker), "bytes": checker.stat().st_size},
+                "verification_tools": tools, "local_integrity_key": {"path": str(key), "sha256": runner.sha256_file(key), "bytes": 32}}
+            protocol["retention_policy"] = {"mode": "sealed-verified-recycle", "approval": write_proof(root / "approval.json", approval)}
+            sample = {"allocated_bytes": 4096, "disk_free_bytes": 104 * STATS.GIB, "budget": {"allowed": True, "reasons": []}}
+            job = SimpleNamespace(account=Mock(return_value={"peak_commit_bytes": 4096}), close=Mock())
+
+            def fake_phase(owned_job, approved, selected_config, source_root, targets_root, log_root, phase, environment, monitor, **kwargs):
+                artifact = targets_root / "synthetic.exe"
+                artifact.write_bytes(b"synthetic compiled artifact\n")
+                output = (json.dumps({"reason": "compiler-artifact", "filenames": [str(artifact)], "fresh": False, "profile": {"opt_level": "0"}, "executable": None})
+                          + "\n" + json.dumps({"reason": "build-finished", "success": True}) + "\n{test tail after Cargo}\n").encode()
+                captures = []
+                for fixed in runner.JOBS:
+                    selected = targets_root / "primary" / fixed["name"]
+                    capture = capture_fixture(log_root / phase / fixed["name"], runner.job_command(approved, fixed, selected), output, duration=10000)
+                    capture["cwd"] = str(source_root)
+                    capture.update(job=fixed["name"], peak_commit_bytes=4096, resource_samples=[], reasons=[],
+                                   cargo=runner.parse_cargo_json_file(Path(capture["stdout_path"]), targets_root, source_root))
+                    if full_capacity:
+                        # Explicit synthetic OS execution/monitor fixture;
+                        # the independent seal's capture/file checks are real.
+                        phase_start = datetime(2026, 10, 19, tzinfo=timezone.utc) + timedelta(seconds=10 * ("primary", "feedback-warm", "edit").index(phase))
+                        capture.update(started_at=phase_start.isoformat(), finished_at=(phase_start + timedelta(seconds=10)).isoformat(),
+                            resource_samples=[{"allocation_kind": "conservative-disk-and-job-write-bound",
+                                               "allocated_bytes": 4096, "disk_free_bytes": 104 * STATS.GIB,
+                                               "job_write_bound_bytes": 0, "budget_allowed": True, "budget_reasons": []}])
+                    runner._write_new(log_root / (phase + "-" + fixed["name"] + ".json"), capture)
+                    captures.append(capture)
+                return captures, 10000.0
+
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(patch.object(runner, "_verify_source"))
+                stack.enter_context(patch.object(runner, "_verify_cache_prewarm"))
+                stack.enter_context(patch.object(runner, "build_process_snapshot", return_value=[]))
+                stack.enter_context(patch.object(runner, "_budget_sample", return_value=sample))
+                stack.enter_context(patch.object(runner, "preview_protocol", return_value={"allowed": True}))
+                stack.enter_context(patch.object(runner, "_check_review"))
+                stack.enter_context(patch.object(runner, "WindowsJob", return_value=job))
+                stack.enter_context(patch.object(runner, "_memory_status", return_value={"physical_available": 8 * STATS.GIB, "commit_available": 8 * STATS.GIB}))
+                stack.enter_context(patch.object(runner, "tool_environment", return_value={}))
+                stack.enter_context(patch.object(runner, "_LiveBudget", return_value=SimpleNamespace(io_origin=0, floor_free=104 * STATS.GIB, _write_bound=Mock(return_value=0))))
+                stack.enter_context(patch.object(runner, "_start_sccache", return_value=None))
+                stack.enter_context(patch.object(runner, "_run_parallel_phase", side_effect=fake_phase))
+                # Real NTFS scans are retained; inject only reported available
+                # free space to keep unrelated current machine usage out of this fixture.
+                stack.enter_context(patch.object(inventory._WindowsMetadata, "free_bytes", return_value=104 * STATS.GIB))
+                stack.enter_context(patch.object(runner, "_retention_module", return_value=helper))
+                raw_arm = runner._run_arm(protocol, "baseline", source, arm_root, None)
+            self.assertEqual(raw_arm["status"], "ok", raw_arm["reasons"])
+            self.assertEqual(raw_arm["schema_version"], 2)
+            self.assertEqual(edit_path.read_bytes(), original)
+            self.assertIsInstance(raw_arm.get("output_lease"), dict)
+            pair_index, attempt = (None, None) if full_capacity else (0, 0)
+            if full_capacity:
+                self.assertEqual(raw_arm["phase"], "capacity")
+                self.assertFalse(raw_arm["performance_evidence"])
+                self.assertEqual(raw_arm["completed_valid_pairs"], 0)
+                self.assertIsNone(raw_arm["pair_index"])
+                self.assertIsNone(raw_arm["attempt"])
+                with patch.object(cli, "_module", return_value=runner), patch.object(runner, "_validate_protocol"):
+                    arm = cli.normalize_runner_arm(raw_arm, protocol)
+                self.assertNotIn("records", arm)
+                self.assertFalse((run_root / "campaign.json").exists())
+            else:
+                raw = {"status": "segment_complete", "complete": False, "inflight": None, "pairs": [{"pair_index": 0, "attempt": 0, "order": protocol["order"][0], "status": "ok", "arms": {"baseline": raw_arm}}]}
+                write_proof(run_root / "campaign.json", raw)
+                with patch.object(cli, "_module", return_value=runner), patch.object(runner, "_validate_protocol"), patch.object(runner, "_validate_resume"):
+                    normalized = cli.normalize_runner_campaign(raw, protocol, {})
+                arm = normalized["records"][0]["baseline"]
+            self.assertTrue(STATS._arm_proof_valid(arm, "baseline", identity, protocol=protocol, pair_index=pair_index, attempt=attempt))
+            self.assertFalse(STATS._arm_proof_valid(arm, "baseline", identity))
+            # Exact approved helper reaches the remaining full qualification gate;
+            # without release/diagnostic proofs a seal must still refuse.
+            with patch.dict(helper._MODULES, {"runner": runner, "statistics": STATS}), patch.object(runner, "_validate_protocol"), patch.object(runner, "_verify_source"), \
+                 self.assertRaisesRegex(ValueError, "complete artifact-dependent qualifications"):
+                if full_capacity:
+                    helper.create_full_capacity_seal(protocol, arm, {}, raw_arm["output_lease"], arm_root / "seal.json")
+                else:
+                    helper.create_seal(protocol, arm, "baseline", 0, 0, raw_arm["output_lease"], {}, arm_root / "seal.json")
+            for mutated in (1, True, 2.0, 3):
+                changed = copy.deepcopy(raw_arm)
+                changed["schema_version"] = mutated
+                arm["evidence"] = write_proof(arm_root / "arm.json", changed)
+                self.assertFalse(STATS._arm_proof_valid(arm, "baseline", identity, protocol=protocol, pair_index=pair_index, attempt=attempt))
+            for field in ("protocol_sha256", "source_receipt_sha256", "toolchain_sha256"):
+                changed = {**raw_arm, field: "0" * 64}
+                arm["evidence"] = write_proof(arm_root / "arm.json", changed)
+                self.assertFalse(STATS._arm_proof_valid(arm, "baseline", identity, protocol=protocol, pair_index=pair_index, attempt=attempt))
 
 
 if __name__ == "__main__":

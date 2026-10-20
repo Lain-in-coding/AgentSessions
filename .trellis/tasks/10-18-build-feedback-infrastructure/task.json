@@ -29,23 +29,483 @@
     "scripts/evidence/test_build_feedback_benchmark.py",
     "scripts/evidence/test_build_feedback_inventory.py",
     "scripts/evidence/test_build_feedback_runner.py",
-    "scripts/evidence/test_build_feedback_statistics.py"
+    "scripts/evidence/test_build_feedback_statistics.py",
+    "scripts/evidence/build_feedback_retention.py",
+    "scripts/evidence/test_build_feedback_retention.py"
   ],
-  "notes": "Release raw-observation import and protocol/source/validator bindings implemented and tested. Complete fixed baseline remains intact. Actual pilot0/5, formal0/100 and paired release performance are still blocked by disk admission; no profile/tool adoption, task archive or next-stage planning. This session delivers a local implementation checkpoint only.",
+  "notes": "Bounded v2 infrastructure and first full-capacity bootstrap passed final ten-file review, Ruff/Mypy and277tests/665.248s. New initial-leaf protocol and exact protected retention approval validated; no actual run or native disposal. Current disk/quiet conditions refuse execution; keep in_progress, preserve existing caches and recent ignored bytecode, stop current checkpoint without nextphase planning.",
   "meta": {
-    "plan_revision": "2026-10-18-running-constraints-complete",
-    "implementation_state": "release-raw-evidence-import-implemented-and-validated; real-pilot-and-formal-blocked",
+    "plan_revision": "2026-10-19-bounded-trial-grill-q1-q5",
+    "implementation_state": "bounded-full-capacity-infrastructure-verified-local-protocol-ready-execution-refused",
     "source_repository": "Lain-in-coding/agent-session-grep",
-    "formal_pairs_per_finalist": 100,
+    "formal_pairs_per_finalist": null,
     "max_finalists": 2,
     "source_snapshot_commit": "905500ef8ba865733f37ef8aa26510abc5e75e4e",
     "source_snapshot_tree": "8fd43999eb002ad462092b8f6b210d8bdd099f14",
     "baseline_allocated_bytes": 156436568120,
     "pilot_completed_valid_pairs": 0,
     "formal_completed_valid_pairs": 0,
-    "operational_blocker": "projected disk free below80GiB after39GiB next-pair reservation; latest free observation76.04GiB versus119GiB admission requirement; fixed baseline not reset",
+    "operational_blocker": "Latest read-only resource receipt38.211GiBfree below56GiB initial controlled probe and40GiBunreserved floor; other-window ASG preventsquiet. Initialleaf protocol uses a verified clean frozen worktree while oldbaseline recent ignored.pyc is preserved/rejected. Full currentinventory/memory/softreview/quiet required before execution. Nativefixture/capacity/Pilot/Formal0; no existingcachecleanup or profile/tooladoption.",
     "implementation_branch": "chore/build-feedback-infrastructure-20261018",
     "tooling_validation": {
+      "checkpoint": "final-v2-bounded-full-capacity-infrastructure-20261020",
+      "applies_to": "current ten Python production/test files after final full-scope independent review",
+      "ruff": "passed all10files --target-version py310",
+      "mypy": "passed all10files --no-incremental --follow-imports skip --python-version 3.10",
+      "focused_tests": {
+        "inventory": 35,
+        "runner": 106,
+        "retention": 53,
+        "benchmark": 21,
+        "statistics": 62
+      },
+      "aggregate_tests": {
+        "passed": 277,
+        "failures": 0,
+        "errors": 0,
+        "skips": 0,
+        "duration_seconds": 665.248,
+        "execution": "all5modules in one unittest.TestSuite"
+      },
+      "independent_review": "passed; three final source/qualification/bytecode boundaries fixed; no remaining confirmed ten-file code defect",
+      "files_before_after_hashes_equal": true,
+      "tool_hashes": {
+        "build_feedback_benchmark.py": {
+          "sha256": "33c2a60833dddf8ef556264c7ee4a022e6436539a489a6490c668425b1e5cf99",
+          "bytes": 25665
+        },
+        "build_feedback_inventory.py": {
+          "sha256": "aedaf13fa957a4a9b0ebc376f2e60d7beec05aa796c6a3ad1132f932cf006ef4",
+          "bytes": 50832
+        },
+        "build_feedback_retention.py": {
+          "sha256": "20bc95c2043e429335189a1b235264c0e29945fe98e2bb881bfeb8ca22661d23",
+          "bytes": 91356
+        },
+        "build_feedback_runner.py": {
+          "sha256": "e3986281d942e19bec2e8cf0f8bb8ef54945eaa4f80a24459097efecd70d6725",
+          "bytes": 208540
+        },
+        "build_feedback_statistics.py": {
+          "sha256": "52829685f6baf70d0670d5a6bab67aabc3dd5c63776e7e215813784b2e01baeb",
+          "bytes": 92097
+        },
+        "test_build_feedback_benchmark.py": {
+          "sha256": "40f4152cfbe71824a93128a1300c35c22c8f13322cb1a3dbe2790bea488cf37f",
+          "bytes": 34673
+        },
+        "test_build_feedback_inventory.py": {
+          "sha256": "a5fadcb9bc4401a619de3d7679d9546ab566ecb97ce611076a4497c6bbed576e",
+          "bytes": 37379
+        },
+        "test_build_feedback_retention.py": {
+          "sha256": "411cd0d74b9d3213fb6b45215ffa8da3d5b7e828956b9bc5eac44417e9153392",
+          "bytes": 71802
+        },
+        "test_build_feedback_runner.py": {
+          "sha256": "b818bb4ef69186432a8a5ed04357aaddfe2444eb9c73821903eec599ffd7a371",
+          "bytes": 148544
+        },
+        "test_build_feedback_statistics.py": {
+          "sha256": "4d0a6b6823f403829ba67e7ae5a1da76bbc2501a08840ebf2a95321f6ae661d8",
+          "bytes": 132368
+        }
+      },
+      "tooling_receipt_sha256": "ac3367f552b97a151fe6d109960d5d2f0f45d0945372b4c9d5bd0783a589ae12",
+      "receipt_is_local_ignored": true,
+      "cargo_fmt": "passed cargo fmt --all --check; no Cargo compilation",
+      "whitespace": "passed",
+      "official_validator_compatibility": "actual approved-source loader and build_configuration checked without real Cargo or performance sample",
+      "performance_evidence": false,
+      "real_capacity_pilot_formal_or_native_disposal": false
+    },
+    "previous_tooling_checkpoint": {
+      "commit": "e6162add3ab28b72abc0986cc1d8965663758c08",
+      "validation": {
+        "ruff": "passed all8files --target-version py310",
+        "mypy": "passed all8files --no-incremental --follow-imports skip --python-version 3.10",
+        "focused_tests": {
+          "runner": 48,
+          "benchmark": 13,
+          "inventory": 28,
+          "statistics": 27
+        },
+        "coordinator_protocol": "passed existing frozen protocol validation and3source-boundary tests",
+        "cargo_fmt": "passed --all --check on frozen implementation",
+        "release_cli_workload_timing": "not captured; qualification refuses",
+        "official_validator_compatibility": "shared path/expected-profile API; pinned report rechecked; original internal errors retained",
+        "aggregate_tests": {
+          "passed": 116,
+          "duration_seconds": 176.37,
+          "location": "coordinator delivery"
+        }
+      }
+    },
+    "prior_protocol_contract": {
+      "version": 1,
+      "minimum_free_gib": 80,
+      "formal_pairs_per_finalist": 100,
+      "unmeasured_pair_forecast_gib": 39,
+      "implementation_checkpoint": "90cd9089e61ca52f72feff10c99ef85b9619e5da"
+    },
+    "formal_pair_selection": "propose from completed5pairpilot variance/compute/storage; approve and freeze fixedN before formal collection",
+    "bounded_trial_plan": {
+      "status": "approved-implementation-verified; actual-run-refused-at-checkpoint",
+      "minimum_free_gib": 40,
+      "external_growth_allowance_gib": 8,
+      "initial_probe_owned_output_cap_gib": 8,
+      "initial_probe_minimum_start_free_gib": 56,
+      "pilot_pairs_required": 5,
+      "formal_pairs_required": null,
+      "fixed_baseline_allocated_bytes": 156436568120,
+      "project_review_growth_gib": 40,
+      "project_hard_growth_gib": 60,
+      "retention": "pre-recycle artifact-dependent verification/seal; preserve raw logs/reports/source/selected binaries; local-observation trust boundary explicit",
+      "disposal_scope": "predeclared validated-successful trial intermediates and deliberately cap-stopped probe outputs only",
+      "disposal_flow": "recycle then verify exact matching item then purge only approved matched items and verify release; no whole-bin clearing",
+      "protected": "daily/recent72h existing caches/stores/seeds/quality-or-source failures/Git/source/pagefile/unrelated recycle contents",
+      "compatibility": "new protocol version required; immutablev1 remains80GiB/fixed100/live-file-evidence",
+      "implemented_inventory_checkpoint": {
+        "focused_tests": 35,
+        "ruff": "passed",
+        "mypy": "passed",
+        "v1_policy": "80GiB/zero external allowance unchanged",
+        "v2_initial_admission": "56GiB, 1byte below rejected",
+        "measured_performance": false
+      },
+      "retention_initial_checkpoint": {
+        "focused_tests": 17,
+        "ruff": "passed",
+        "mypy": "passed",
+        "independent_findings": "3NTFS/path problems fixed with regressions; full independentreview in progress",
+        "native_recycle_disposal": "not yet run",
+        "existing_caches_deleted": false
+      },
+      "last_observed_resource_state": {
+        "free_space_bytes": 56586620928,
+        "initial_probe_required_bytes": 60129542144,
+        "observation_is_not_admission": true,
+        "probe_started": false,
+        "native_fixture_quiet": false,
+        "observed_at": "2026-10-20T04:11:29.919121+00:00",
+        "historical_observation": true
+      },
+      "runner_initial_checkpoint": {
+        "focused_tests": 72,
+        "duration_seconds": 9.358,
+        "ruff": "passed",
+        "mypy": "passed",
+        "real_cargo": false,
+        "remaining": "precreation leases/known helper policy/paired finalizer admission integration"
+      },
+      "evidence_initial_checkpoint": {
+        "statistics_tests": 49,
+        "cli_tests": 18,
+        "final_boundary_tests": 9,
+        "ruff": "passed",
+        "mypy": "passed",
+        "post_metadata_current_inventory_recheck": 35,
+        "no_performance_claim": true
+      },
+      "implementation_recovery": "Original runner/evidence quota failures recovered; independent ten-file checker delivered221-test checkpoint. Original checker continues four evidence files for campaign provenance; read-only capacity entry design assigned separately. Ownership recorded at current implement.md.",
+      "runner_entry_integration_checkpoint": {
+        "focused_tests": 76,
+        "duration_seconds": 9.287,
+        "ruff": "passed",
+        "mypy": "passed",
+        "known_helper_before_targets": true,
+        "precreation_output_leases": true,
+        "paired_callback_required": true,
+        "no_real_cargo": true
+      },
+      "evidence_coordinator_recheck": {
+        "statistics_tests": 49,
+        "duration_seconds": 556.437,
+        "cli_tests": 18,
+        "inventory_tests": 35,
+        "tests_are_not_performance_evidence": true
+      },
+      "retention_independent_review": {
+        "focused_tests": 32,
+        "duration_seconds": 3.242,
+        "ruff": "passed",
+        "mypy": "passed",
+        "findings": "allconfirmedhelperfindingsfixed;actualnativeShelloperationpending",
+        "no_real_disposal": true
+      },
+      "evidence_producer_integration_checkpoint": {
+        "statistics_total_tests": 50,
+        "affected_tests_passed": 16,
+        "cli_tests_passed": 18,
+        "ruff": "passed",
+        "mypy": "passed",
+        "actual_v2_producer_contract": "strictversion/source/protocol/toolchainlinks bound;syntheticCargo actualNTFS/helperseallink validation",
+        "no_actual_performance": true
+      },
+      "current_inventory_observation": {
+        "observed_date": "2026-10-20",
+        "complete": true,
+        "errors": 0,
+        "allocated_bytes": 192324873512,
+        "fixed_baseline_allocated_bytes": 156436568120,
+        "free_bytes": 56053633024,
+        "initial_probe_required_free_bytes": 60129542144,
+        "initial_probe_free_deficit_bytes": 4075909120,
+        "would_require_soft_review": true,
+        "receipt_sha256": "66f0c92e00c7a5f98563853f41755b1ea02ee304fbbdc0fd64aeb15638c834b4",
+        "receipt_is_local_ignored": true,
+        "no_probe_started": true
+      },
+      "native_fixture_preflight": {
+        "observed_date": "2026-10-20",
+        "receipt_sha256": "d38bc269a84c0b4e0aa23bd508d9bb7863f1570979bcc6192f99a84443f0c8bb",
+        "receipt_is_local_ignored": true,
+        "recycle_enabled": true,
+        "recycle_items": 11,
+        "recycle_capacity_bytes": 53247737856,
+        "existing_recycle_logical_bytes": 37099323,
+        "worst_case_fixture_bytes": 1048576,
+        "no_eviction_admitted": true,
+        "quiet": false,
+        "target_observed_absent": true,
+        "actual_recycle_purge": "not run",
+        "performance_evidence": false
+      },
+      "last_source_preflight": {
+        "observed_date": "2026-10-20",
+        "seed_and_two_allocated_worktrees": "raw manifest, approved HEAD/tree/lock, staged/untracked and line-ending-aware actual Git diff verified",
+        "common_git_roots_protected": 2,
+        "registered_sources_protected": 110,
+        "ordinary_porcelain_noise_is_not_source_drift": true,
+        "no_source_or_git_writes": true,
+        "latest_unchanged_v1_protocol_sha256": "f49e2ceca0d85bd385a4fa3ff8e9117790bd83ca3994ef1d1650a047ff1520fd",
+        "latest_source_roots_verified": 3,
+        "latest_native_toolchain_hashes_reverified": true,
+        "source_receipt_sha256": "0d72fc9c25b2874b369a21017e274eae6d7fe6e142c27c7286062ecc11911a97",
+        "latest_rust_format": "cargo fmt --all --check passed; no Cargo compilation",
+        "all_existing_source_and_Git_preserved": true
+      },
+      "protected_scope_preparation": {
+        "receipt_sha256": "93a40c523b6880505bdd052222bf01ed2f669a0a14c3a7e3f86ff68fc828429c",
+        "receipt_is_local_ignored": true,
+        "registered_sources": 110,
+        "common_git_directories": 2,
+        "existing_cache_roots": 66,
+        "protected_roots": 192,
+        "predeclared_targets_absent": true,
+        "actual_cache_disposal": false
+      },
+      "capacity_input_preparation": {
+        "receipt_sha256": "9d04f73881fd9fddf0439983a82bde2e18c8ef5c5dba7116ec84573e3384a2a5",
+        "receipt_is_local_ignored": true,
+        "phase": "capacity",
+        "package": "agent-session-grep-domain",
+        "command": "check",
+        "protocol_validated": false,
+        "final_tool_approval_pending": true,
+        "initial_cap_bytes": 8589934592,
+        "minimum_start_free_bytes": 60129542144,
+        "no_cargo_or_disposal": true
+      },
+      "integration_checkpoint_221": {
+        "passed": 221,
+        "duration_seconds": 562.712,
+        "focused_counts": {
+          "inventory": 35,
+          "runner": 82,
+          "benchmark": 18,
+          "statistics": 52,
+          "retention": 34
+        },
+        "ruff": "passed10files --target-version py310",
+        "mypy": "passed10files --no-incremental --follow-imports skip --python-version3.10",
+        "whitespace": "passed",
+        "remaining_confirmed_items": [
+          "v2 normalized campaign raw source/status/budget binding",
+          "first complete full-workload capacity bootstrap entry"
+        ],
+        "is_final_current_revision_validation": false,
+        "no_real_cargo_disposal_or_performance": true
+      },
+      "provenance_followup_checkpoint": {
+        "test_total_after_changes": 226,
+        "affected_tests": 35,
+        "affected_duration_seconds": 12.633,
+        "final_affected_tests": 9,
+        "final_affected_duration_seconds": 0.268,
+        "ruff": "passed4files",
+        "mypy": "passed4files",
+        "raw_campaign_reference_required": true,
+        "is_final_aggregate": false
+      },
+      "full_capacity_bootstrap_repair": {
+        "status": "implemented-and-final-full-scope-check-passed; no actual capacity sample",
+        "phase": "capacity",
+        "paired_samples": 0,
+        "preserves_initial_leaf": true,
+        "prerequisite": "verified successful preceding leaf observation; not a measured full capacity claim",
+        "config_coverage": "both baseline and candidate full closures before measured Pilot reservation",
+        "workloads": "all six primary/warm/edit jobs, eighteen captures plus full qualifications",
+        "official_release_suite": "declared ignored output under exact independent source, original reports and binaries retained and billed",
+        "global_config_changes": false,
+        "real_cargo_or_disposal": false,
+        "native_fixture_pending": "Quiet admission still refused; actual fixture target remains absent.",
+        "official_scratch_caveat": "Frozen official producer cleans only its owned scratch via its historical native cleanup; no real producer execution or modification authorized by the current helper check. Exact scratch budget/lineage must be recorded and incompatible execution policy must not be silently waived.",
+        "first_controlled_cap_minimum_gib": 8,
+        "first_controlled_cap_minimum_start_free_gib": 56,
+        "cap_is_not_forecast": "May deliberately stop; >=8GiB and measured preceding leaf peak+margin. Complete workload is not promised to fit; no Pilot/Formal forecast is lowered.",
+        "producer_api": "capture_qualification(protocol,arm_record,qualification,*,review_receipt_path=None,prior_captures=(),release_options=None,diagnostic_argv=None); real guarded capture with exact persisted prior chain",
+        "provider_recovery": "Original-handle continuation delivered verified runner/tests; no duplicate writer or reset. Full shared aggregate pending.",
+        "final_tooling_verified": true
+      },
+      "latest_resource_observation": {
+        "observed_at": "2026-10-20T08:04:56.6541616+00:00",
+        "free_bytes": 41028616192,
+        "minimum_initial_probe_start_bytes": 60129542144,
+        "initial_probe_disk_admitted": false,
+        "quiet": false,
+        "active_build_related_processes": 1,
+        "free_physical_memory_bytes": 2055966720,
+        "free_virtual_memory_bytes": 84589338624,
+        "receipt_sha256": "409ef2686479f0cd0fda7fdca35a596bd27b102614cb60056ea2af66a535464c",
+        "receipt_is_local_ignored": true,
+        "complete_run_admission_evaluated": false,
+        "no_cargo_or_disposal": true,
+        "inventory_scope": "prior complete related inventory retained with its original timestamp; resource snapshot is not a new inventory"
+      },
+      "full_capacity_evidence_delivery": {
+        "ruff": "passed4files",
+        "mypy": "passed4files Python3.10",
+        "affected_tests": 42,
+        "duration_seconds": 15.883,
+        "scope": "sharedlivearmprojection/fullcapacity nullordinal/source/config/path/officialsource-suite/rawcampaignprovenance",
+        "writer_released": true,
+        "actual_performance": false,
+        "final_aggregate_pending": true
+      },
+      "prior_protocol_sha256_unchanged": "f49e2ceca0d85bd385a4fa3ff8e9117790bd83ca3994ef1d1650a047ff1520fd",
+      "retention_full_capacity_delivery": {
+        "status": "focused-review-passed; ownership-released; final-aggregate-pending",
+        "tests_passed": 53,
+        "duration_seconds": 22.889,
+        "ruff": "passed two owned files --target-version py310",
+        "mypy": "passed two owned files --no-incremental --follow-imports skip --python-version 3.10",
+        "interfaces": [
+          "create_full_capacity_seal",
+          "verify_full_capacity_link",
+          "dispose_output"
+        ],
+        "full_capacity_seal_location": "budgeted capacity arm directory",
+        "cumulative_qualification_proofs": "persistent capture.json with qualification_budget/resource_guard",
+        "protected_incomplete_qualifiers": [
+          "diagnostics",
+          "release"
+        ],
+        "purge_observation": "immediate free-before after own flushed intent; lost crash baseline release_inconclusive with no repeated deletion",
+        "actual_cargo_capacity_recycle_or_performance": false
+      },
+      "runner_full_capacity_delivery": {
+        "status": "focused-review-passed; ownership-released; final-aggregate-pending",
+        "focused_tests_passed": 105,
+        "duration_seconds": 15.698,
+        "final_affected_tests_passed": 6,
+        "ruff": "passed two owned files --target-version py310",
+        "mypy": "passed two owned files --no-incremental --follow-imports skip --python-version 3.10",
+        "runner_sha256": "be5f32f6ecb402188c75e8359ab610055e25fdbcabfd2dff47a171bd7c07c496",
+        "runner_tests_sha256": "0c84086ab62f12ed22aba9a108aff43bac593ca807eef865d1d6a7b380972467",
+        "no_real_cargo_disposal_or_performance": true
+      },
+      "final_shared_check": {
+        "status": "passed-and-ownership-released",
+        "reviewer": "bounded_integration_check",
+        "scope": "ten Pythonfiles",
+        "tests_passed": 277,
+        "failures": 0,
+        "errors": 0,
+        "skips": 0,
+        "duration_seconds": 665.248,
+        "counts": {
+          "inventory": 35,
+          "runner": 106,
+          "retention": 53,
+          "benchmark": 21,
+          "statistics": 62
+        },
+        "ruff": "passed",
+        "mypy": "passed",
+        "whitespace": "passed",
+        "before_after_tool_hashes_equal": true,
+        "fixed": [
+          "real Cargo artifact proof for Clippy/optionalfeatures and approved diagnostics",
+          "v2 undeclared ignored source output/reparse refusal",
+          "approved source-bytecode-free validator loading and releasechild bytecode protection"
+        ],
+        "no_real_cargo_or_disposal": true
+      },
+      "checkpoint_stop_boundary": {
+        "complete_now": "bounded infrastructure implementation, final code quality checks, version-bound local protocol preparation and scoped local commit",
+        "remaining_required": [
+          "native literal recycle/purge verification when quiet",
+          "admitted initial capacity observation",
+          "full configuration capacity closures and complete qualifications",
+          "five valid paired Pilot batches",
+          "approved preregistered formal campaign before adoption"
+        ],
+        "task_archived": false,
+        "next_product_phase_planned": false,
+        "existing_cache_cleanup_authorized_by_this_checkpoint": false,
+        "no_default_profile_cache_tool_or_release_adoption": true
+      },
+      "final_tool_freeze": {
+        "receipt_sha256": "ac3367f552b97a151fe6d109960d5d2f0f45d0945372b4c9d5bd0783a589ae12",
+        "files": 10,
+        "hashes_verified_by_root": true,
+        "receipt_is_local_ignored": true,
+        "real_performance": false
+      },
+      "capacity_protocol_preparation": {
+        "status": "validated-not-run",
+        "protocol_sha256": "fe13b8c2018ab21f814b0f293cbb713d616b687a70fcbab9df14e0e62e436496",
+        "preparation_sha256": "b5716d050a8da7b4d872e2401f06831b86c5114bf75e0c652d5aec5a151ae507",
+        "receipt_is_local_ignored": true,
+        "make_protocol_validation": "passed",
+        "rebuild_validation": "passed",
+        "retention_policy_validation": "passed",
+        "fixed_B": 156436568120,
+        "phase": "capacity",
+        "pairs": 0,
+        "source_choice": "existing frozen clean worktree; sameapprovedcommit/tree/lock; original recent-bytecode worktree preserved",
+        "control_root_is_counted_store": true,
+        "protected_sources": 110,
+        "protected_roots": 197,
+        "protected_common_git_roots": 2,
+        "run_root_absent": true,
+        "minimum_start_free_bytes": 60129542144,
+        "no_cargo_or_disposal": true
+      },
+      "current_execution_refusal": {
+        "receipt_sha256": "657db81f6b0d4a086304bd4b1a79868e31d6663e0a05298db01a39be153bdd5e",
+        "receipt_is_local_ignored": true,
+        "allowed": false,
+        "reasons": [
+          "quiet_segment_required",
+          "projected_disk_free_below_minimum"
+        ],
+        "run_root_absent": true,
+        "native_fixture_target_absent": true,
+        "no_actual_run_or_disposal": true
+      },
+      "source_ignored_output_preflight": {
+        "v1_snapshot_bytes_intact": true,
+        "v2_clean_sources": 2,
+        "v2_blocked_source_count": 1,
+        "blocked_reason": "unapproved recent ignored core_beta_benchmark bytecode",
+        "protected_recent_output_preserved": true,
+        "clean_sameidentity_source_selected_for_leaf": true,
+        "no_source_or_git_writes": true
+      }
+    },
+    "historical_v1_release_import_checkpoint": {
       "ruff": "passed all8files --target-version py310",
       "mypy": "passed all8files --no-incremental --follow-imports skip --python-version 3.10",
       "focused_tests": {
@@ -77,29 +537,9 @@
         "duration_seconds": 246.639,
         "location": "coordinator final post-review release-import checkpoint"
       },
-      "independent_review": "Trellis check passed after3confirmed boundary fixes; no remaining confirmed code defects; final127-test aggregate passed after fixes"
-    },
-    "previous_tooling_checkpoint": {
-      "commit": "e6162add3ab28b72abc0986cc1d8965663758c08",
-      "validation": {
-        "ruff": "passed all8files --target-version py310",
-        "mypy": "passed all8files --no-incremental --follow-imports skip --python-version 3.10",
-        "focused_tests": {
-          "runner": 48,
-          "benchmark": 13,
-          "inventory": 28,
-          "statistics": 27
-        },
-        "coordinator_protocol": "passed existing frozen protocol validation and3source-boundary tests",
-        "cargo_fmt": "passed --all --check on frozen implementation",
-        "release_cli_workload_timing": "not captured; qualification refuses",
-        "official_validator_compatibility": "shared path/expected-profile API; pinned report rechecked; original internal errors retained",
-        "aggregate_tests": {
-          "passed": 116,
-          "duration_seconds": 176.37,
-          "location": "coordinator delivery"
-        }
-      }
+      "independent_review": "Trellis check passed after3confirmed boundary fixes; no remaining confirmed code defects; final127-test aggregate passed after fixes",
+      "checkpoint": "historical-v1-90cd908",
+      "applies_to": "preserved v1 release-import implementation only; not the pending v2 aggregate"
     }
   }
 }

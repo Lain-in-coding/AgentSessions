@@ -365,6 +365,65 @@ class InventoryContracts(unittest.TestCase):
         self.assertIn("inventory_incomplete", report["admission_reasons"])
         self.assertIn("disk_free_unknown", report["admission_reasons"])
 
+    def test_approved_scan_floor_is_explicit_and_default_remains_strict(self):
+        (self.root / "artifact.rlib").write_bytes(b"artifact")
+        gib = INVENTORY.GIB
+        with patch.object(self.reader, "free_bytes", return_value=56 * gib):
+            legacy = INVENTORY.inventory([self.root], discover=False)
+            bounded = INVENTORY.inventory([self.root], discover=False, minimum_free_bytes=40 * gib)
+        self.assertTrue(legacy["complete"])
+        self.assertTrue(bounded["complete"])
+        self.assertFalse(legacy["admission_allowed"])
+        self.assertEqual(legacy["minimum_free_bytes"], 80 * gib)
+        self.assertEqual(legacy["admission_reasons"], ["disk_free_below_minimum"])
+        self.assertTrue(bounded["admission_allowed"])
+        self.assertEqual(bounded["minimum_free_bytes"], 40 * gib)
+        self.assertEqual(legacy["allocated_bytes"], bounded["allocated_bytes"])
+        self.assertIn("protocol reservations checked separately", bounded["admission_scope"])
+        with patch.object(self.reader, "free_bytes", return_value=40 * gib):
+            exact = INVENTORY.inventory([self.root], discover=False, minimum_free_bytes=40 * gib)
+        self.assertTrue(exact["admission_allowed"])
+        with patch.object(self.reader, "free_bytes", side_effect=[40 * gib, 40 * gib - 1]):
+            short = INVENTORY.inventory([self.root], discover=False, minimum_free_bytes=40 * gib)
+        self.assertFalse(short["admission_allowed"])
+        self.assertEqual(short["free_bytes"], 40 * gib - 1)
+
+    def test_invalid_scan_floor_fails_before_metadata_capture(self):
+        for floor in (None, True, -1, 0, 40.0 * INVENTORY.GIB,
+                      "40", 40 * INVENTORY.GIB - 1, 80 * INVENTORY.GIB + 1):
+            with self.subTest(floor=floor), patch.object(INVENTORY, "_new_metadata_reader") as capture:
+                with self.assertRaises(ValueError):
+                    INVENTORY.inventory([self.root], discover=False, minimum_free_bytes=floor)
+                capture.assert_not_called()
+
+    def test_retained_outputs_and_recycle_pending_paths_remain_allocated(self):
+        target, evidence, store = (self.root / name for name in ("target", "evidence", "store"))
+        for directory in (target, evidence, store):
+            directory.mkdir()
+        artifact = target / "artifact.rlib"
+        artifact.write_bytes(b"a" * 8193)
+        os.link(artifact, evidence / "retained.rlib")
+        (evidence / "capture.json").write_bytes(b"raw evidence")
+        (store / "opaque-blob").write_bytes(b"store")
+        before = INVENTORY.inventory([target, evidence], store_roots=[store], discover=False,
+                                     minimum_free_bytes=40 * INVENTORY.GIB)
+        # Model an exact same-volume recycle payload, without touching the
+        # system bin. A move is not a release of the original allocation.
+        pending = self.root / "recycle-pending-payload"
+        self.assertEqual(target.resolve().parent, self.root.resolve())
+        self.assertEqual(pending.resolve().parent, self.root.resolve())
+        target.rename(pending)
+        after = INVENTORY.inventory([pending, evidence], store_roots=[store], discover=False,
+                                    minimum_free_bytes=40 * INVENTORY.GIB)
+        self.assertTrue(before["complete"])
+        self.assertTrue(after["complete"])
+        self.assertEqual(before["allocated_bytes"], 20480)
+        self.assertEqual(after["allocated_bytes"], before["allocated_bytes"])
+        self.assertEqual(after["file_count"], 3)
+        self.assertTrue(after["aliases"])
+        self.assertEqual(sum(cache["allocated_bytes"] for cache in after["caches"]), 20480)
+        self.assertEqual(sum(root["allocated_bytes"] for root in after["roots"]), 20480)
+
     def test_unsupported_capture_never_uses_file_lengths(self):
         (self.root / "artifact.rlib").write_bytes(b"artifact")
         with patch.object(INVENTORY, "_new_metadata_reader", side_effect=INVENTORY.UnsupportedMeasurement("synthetic unsupported filesystem")):
@@ -404,6 +463,97 @@ class BudgetAndReceiptContracts(unittest.TestCase):
                     values = [0, 0, 200 * INVENTORY.GIB, 0]
                     values[position] = invalid
                     self.assertFalse(INVENTORY.budget_status(*values)["allowed"])
+
+    def test_v2_initial_probe_requires_exact_56_gib_free(self):
+        gib = INVENTORY.GIB
+        baseline = 156436568120
+        keywords = {"policy_version": 2, "minimum_free_bytes": 40 * gib,
+                    "external_growth_allowance_bytes": 8 * gib}
+        exact = INVENTORY.budget_status(baseline, baseline, 56 * gib, 8 * gib, **keywords)
+        self.assertTrue(exact["allowed"])
+        self.assertFalse(exact["review_required"])
+        self.assertEqual(exact["policy_version"], 2)
+        self.assertEqual(exact["minimum_start_free_bytes"], 56 * gib)
+        self.assertEqual(exact["minimum_free_bytes"], 40 * gib)
+        self.assertEqual(exact["reserved_disk_growth_bytes"], 16 * gib)
+        self.assertEqual(exact["projected_free_bytes"], 40 * gib)
+        self.assertEqual(exact["projected_free_before_external_allowance_bytes"], 48 * gib)
+        self.assertEqual(exact["disk_headroom_bytes"], 0)
+        self.assertEqual(exact["usable_headroom_bytes"], 0)
+        self.assertEqual(exact["projected_bytes"], baseline + 8 * gib)
+        short = INVENTORY.budget_status(baseline, baseline, 56 * gib - 1, 8 * gib, **keywords)
+        self.assertFalse(short["allowed"])
+        self.assertEqual(short["disk_headroom_bytes"], -1)
+        self.assertIn("projected_disk_free_below_minimum", short["reasons"])
+
+    def test_v2_fixed_baseline_accounts_reclaimed_and_observed_project_growth(self):
+        gib = INVENTORY.GIB
+        baseline = 156436568120
+        keywords = {"policy_version": 2, "external_growth_allowance_bytes": 8 * gib}
+        reclaimed = INVENTORY.budget_status(baseline, baseline - 12 * gib, 200 * gib, 8 * gib, **keywords)
+        self.assertTrue(reclaimed["allowed"])
+        self.assertEqual(reclaimed["baseline_bytes"], baseline)
+        self.assertEqual(reclaimed["growth_since_baseline_bytes"], -12 * gib)
+        self.assertEqual(reclaimed["projected_growth_since_baseline_bytes"], -4 * gib)
+        self.assertEqual(reclaimed["project_headroom_bytes"], 64 * gib)
+        below = INVENTORY.budget_status(baseline, baseline + 32 * gib - 1, 200 * gib, 8 * gib, **keywords)
+        review = INVENTORY.budget_status(baseline, baseline + 32 * gib, 200 * gib, 8 * gib, **keywords)
+        self.assertFalse(below["review_required"])
+        self.assertTrue(review["allowed"])
+        self.assertTrue(review["review_required"])
+        self.assertEqual(review["review_threshold_bytes"], baseline + 40 * gib)
+        projected_hard = INVENTORY.budget_status(baseline, baseline + 52 * gib, 200 * gib, 8 * gib, **keywords)
+        self.assertFalse(projected_hard["allowed"])
+        self.assertIn("projected_project_hard_limit_reached", projected_hard["reasons"])
+        already_hard = INVENTORY.budget_status(baseline, baseline + 60 * gib, 200 * gib, **keywords)
+        self.assertFalse(already_hard["allowed"])
+        self.assertIn("project_hard_limit_reached", already_hard["reasons"])
+        self.assertEqual(already_hard["hard_threshold_bytes"], baseline + 60 * gib)
+
+    def test_v1_cannot_opt_into_bounded_policy_by_changing_arguments(self):
+        gib = INVENTORY.GIB
+        default = INVENTORY.budget_status(0, 0, 119 * gib, 39 * gib)
+        explicit = INVENTORY.budget_status(0, 0, 119 * gib, 39 * gib, policy_version=1,
+                                          minimum_free_bytes=80 * gib, external_growth_allowance_bytes=0)
+        self.assertEqual(default, explicit)
+        self.assertTrue(default["allowed"])
+        self.assertEqual(default["minimum_start_free_bytes"], 119 * gib)
+        self.assertEqual(default["disk_headroom_bytes"], 0)
+        self.assertFalse(INVENTORY.budget_status(0, 0, 119 * gib - 1, 39 * gib)["allowed"])
+        for arguments in ({"minimum_free_bytes": 40 * gib},
+                          {"external_growth_allowance_bytes": 8 * gib},
+                          {"minimum_free_bytes": 40 * gib, "external_growth_allowance_bytes": 8 * gib}):
+            with self.subTest(arguments=arguments):
+                value = INVENTORY.budget_status(0, 0, 200 * gib, **arguments)
+                self.assertFalse(value["allowed"])
+                self.assertTrue(any("policy_mismatch" in reason for reason in value["reasons"]))
+
+    def test_invalid_or_unapproved_budget_policies_fail_closed(self):
+        gib = INVENTORY.GIB
+        cases = [
+            {"policy_version": version}
+            for version in (None, True, False, 0, -1, 3, 1.0, 2.0, "2")
+        ]
+        cases.extend({"minimum_free_bytes": floor} for floor in (True, -1, 0, 80.0 * gib, "80"))
+        cases.extend({"external_growth_allowance_bytes": allowance}
+                     for allowance in (None, True, -1, 0.0, "0"))
+        cases.extend((
+            {"policy_version": 2},
+            {"policy_version": 2, "minimum_free_bytes": 80 * gib, "external_growth_allowance_bytes": 8 * gib},
+            {"policy_version": 2, "minimum_free_bytes": 40 * gib - 1, "external_growth_allowance_bytes": 8 * gib},
+            {"policy_version": 2, "external_growth_allowance_bytes": 8 * gib - 1},
+            {"policy_version": 2, "external_growth_allowance_bytes": 8 * gib + 1},
+            {"policy_version": 2, "external_growth_allowance_bytes": 8.0 * gib},
+        ))
+        for arguments in cases:
+            with self.subTest(arguments=arguments):
+                value = INVENTORY.budget_status(0, 0, 200 * gib, **arguments)
+                self.assertFalse(value["allowed"])
+                self.assertFalse(value["review_required"])
+                self.assertTrue(value["reasons"])
+                self.assertIsNone(value["project_headroom_bytes"])
+                self.assertIsNone(value["disk_headroom_bytes"])
+                self.assertIsNone(value["usable_headroom_bytes"])
 
     def test_receipts_are_immutable_under_concurrent_publication(self):
         with tempfile.TemporaryDirectory(prefix="inventory-receipt-") as temporary:

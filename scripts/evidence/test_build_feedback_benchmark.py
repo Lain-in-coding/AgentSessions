@@ -1,4 +1,5 @@
 import contextlib
+import copy
 import importlib.util
 import io
 import json
@@ -269,6 +270,221 @@ class BuildFeedbackCliTests(unittest.TestCase):
             code, _, stderr = invoke(["run", "--protocol", "missing-synthetic-protocol.json"])
         self.assertEqual(code, 2)
         self.assertTrue(stderr)
+
+
+class SingleArmProjectionTests(unittest.TestCase):
+    """Real pinned allocation/log/artifact fixtures; no Cargo or performance claim."""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.runner = CLI._module("runner")
+        self.protocol = {"schema_version": 2, "phase": "capacity", "pairs": 0, "allocations": [],
+                         "run_root": str(self.root / "run"), "seed": 7, "order": [], "jobs": 2, "test_threads": 2,
+                         "source": {"commit": "a" * 40, "tree": "b" * 40, "lock_sha256": "c" * 64, "resources_sha256": "d" * 64},
+                         "toolchain": {"target": "x86_64-pc-windows-msvc"}}
+        tool = {"version": "synthetic version", "sha256": "e" * 64}
+        self.protocol["toolchain"].update(rustc=tool, cargo=tool, msvc={"compiler": tool, "linker": tool})
+        source = self.root / "source"
+        source.mkdir()
+        self.protocol["capacity_probe"] = {"kind": "full-arm-and-qualification", "stage": "expanded",
+                                          "arm": "baseline", "source_root": str(source)}
+        config = {"tool": {"kind": "native"}, "debug": "full", "layout": "isolated", "incremental": "on"}
+        self.protocol["configs"] = {"baseline": config, "candidate": config}
+        arm_root = Path(self.protocol["run_root"]) / "capacity"
+        target = arm_root / "targets"
+        target.mkdir(parents=True)
+        self.arm_path = arm_root / "arm.json"
+        artifact = target / "synthetic.rmeta"
+        artifact.write_bytes(b"synthetic compiler output")
+        file_receipt = self.runner._artifact_identity(artifact)
+        allocation = {"schema_version": 1, "complete": True, "errors": [],
+                      "storage_scope": "owned_targets_and_stores", "allocated_bytes": 4096}
+        allocation_path = arm_root / "owned-allocation.json"
+        allocation_path.write_text(json.dumps(allocation), encoding="utf-8")
+        self.arm = {"schema_version": 2, "kind": "build-feedback-arm", "arm": "baseline", "phase": "capacity",
+                    "performance_evidence": False, "completed_valid_pairs": 0, "pair_index": None, "attempt": None, "status": "ok",
+                    "source_root": str(source), "source_commit": self.protocol["source"]["commit"], "source_tree": self.protocol["source"]["tree"],
+                    "config": config, "target_root": str(target), "own_edit_restored": True, "process_tree_drained": True,
+                    "allocation_complete": True, "owned_allocated_bytes": allocation["allocated_bytes"],
+                    "owned_allocation_receipt": allocation, "owned_allocation_receipt_sha256": CLI.sha256_file(allocation_path),
+                    "primary_duration_ms": 6000, "duration_ms": 18000,
+                    "phase_duration_ms": {"primary": 6000, "feedback-warm": 6000, "edit": 6000}}
+        for phase, field in (("primary", "jobs"), ("feedback-warm", "feedback_warm_jobs"), ("edit", "edit_jobs")):
+            captures = []
+            for job in self.runner.JOBS:
+                logs = arm_root / "logs" / phase / job["name"]
+                logs.mkdir(parents=True)
+                stdout, stderr = logs / "stdout.log", logs / "stderr.log"
+                stdout.write_bytes(b"synthetic process log")
+                stderr.write_bytes(b"")
+                captures.append({"job": job["name"], "status": "ok", "returncode": 0, "duration_ms": 1000,
+                                 "process_tree_capture_complete": True, "external_processes": [],
+                                 "stdout_path": str(stdout), "stderr_path": str(stderr),
+                                 "stdout_sha256": CLI.sha256_file(stdout), "stderr_sha256": CLI.sha256_file(stderr),
+                                 "cargo": {"build_success": True, "errors": [], "artifacts": [{"files": [file_receipt]}]}})
+            self.arm[field] = captures
+        self.arm_path.write_text(json.dumps(self.arm), encoding="utf-8")
+        self.validation = patch.object(self.runner, "_validate_protocol")
+        self.validation.start()
+        self.addCleanup(self.validation.stop)
+
+    def test_single_arm_projection_reuses_original_campaign_projection(self):
+        normalized = CLI.normalize_runner_arm(self.arm, self.protocol)
+        paired_protocol = {**self.protocol, "phase": "pilot", "pairs": 5, "order": [["baseline", "candidate"]] * 5}
+        campaign = {"status": "segment_complete", "complete": False, "inflight": None,
+                    "pairs": [{"pair_index": 0, "attempt": 0, "order": paired_protocol["order"][0],
+                               "status": "ok", "arms": {"baseline": self.arm}}]}
+        campaign_path = Path(self.protocol["run_root"]) / "campaign.json"
+        campaign_path.write_text(json.dumps(campaign), encoding="utf-8")
+        with patch.object(self.runner, "_validate_resume"):
+            projected = CLI.normalize_runner_campaign(campaign, paired_protocol, {})["records"][0]["baseline"]
+        normalized["protocol_sha256"] = projected["protocol_sha256"]
+        self.assertEqual(normalized, projected)
+        self.assertTrue(normalized["capture_complete"])
+        self.assertTrue(normalized["allocation_complete"])
+        self.assertTrue(normalized["artifacts_verified"])
+        self.assertNotIn("runner_campaign_evidence", normalized)
+        self.assertNotIn("records", normalized)
+
+    def test_full_capacity_projection_rejects_source_config_path_and_pair_claims(self):
+        for mutation in ({"phase": "pilot"}, {"arm": "candidate"}, {"performance_evidence": True},
+                         {"completed_valid_pairs": 1}, {"completed_valid_pairs": False},
+                         {"pair_index": 0}, {"attempt": 0}, {"pair_index": False}, {"attempt": False},
+                         {"source_root": str(self.root / "other-source")}, {"config": {"debug": "changed"}}):
+            changed = {**self.arm, **mutation}
+            self.arm_path.write_text(json.dumps(changed), encoding="utf-8")
+            with self.subTest(mutation=mutation), self.assertRaisesRegex(ValueError, "single full-capacity arm"):
+                CLI.normalize_runner_arm(changed, self.protocol)
+        for field in ("pair_index", "attempt"):
+            changed = {key: value for key, value in self.arm.items() if key != field}
+            self.arm_path.write_text(json.dumps(changed), encoding="utf-8")
+            with self.subTest(missing=field), self.assertRaisesRegex(ValueError, "zero paired samples"):
+                CLI.normalize_runner_arm(changed, self.protocol)
+        self.arm_path.write_text(json.dumps(self.arm), encoding="utf-8")
+        for mutation in ({"pairs": 1}, {"pairs": False}, {"allocations": [{}]}):
+            with self.subTest(protocol=mutation), self.assertRaisesRegex(ValueError, "zero paired samples"):
+                CLI.normalize_runner_arm(self.arm, {**self.protocol, **mutation})
+        target = self.root / "unapproved" / "targets"
+        target.mkdir(parents=True)
+        relocated = {**self.arm, "target_root": str(target)}
+        (target.parent / "arm.json").write_text(json.dumps(relocated), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "source/config/output allocation"):
+            CLI.normalize_runner_arm(relocated, self.protocol)
+
+    def test_single_arm_requires_exact_raw_bytes_and_preserves_incomplete_phase(self):
+        self.arm_path.write_text(json.dumps({**self.arm, "status": "failed"}), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "exact immutable arm receipt"):
+            CLI.normalize_runner_arm(self.arm, self.protocol)
+        self.arm_path.write_text(json.dumps(self.arm), encoding="utf-8")
+        zero_flag = {**self.arm, "performance_evidence": 0}
+        self.assertIsNone(CLI._runner_arm_reference(zero_flag))
+        with self.assertRaisesRegex(ValueError, "original live evidence"):
+            CLI.normalize_runner_arm({**self.arm, "retained_evidence": {"verified": True}}, self.protocol)
+        def change_receipt(*_):
+            self.arm_path.write_text(json.dumps({**self.arm, "status": "failed"}), encoding="utf-8")
+            return True
+        with patch.object(CLI, "_runner_artifacts_verified", side_effect=change_receipt), \
+             self.assertRaisesRegex(ValueError, "changed during normalization"):
+            CLI.normalize_runner_arm(self.arm, self.protocol)
+        partial = copy.deepcopy(self.arm)
+        partial["edit_jobs"] = partial["edit_jobs"][:-1]
+        self.arm_path.write_text(json.dumps(partial), encoding="utf-8")
+        self.assertFalse(CLI.normalize_runner_arm(partial, self.protocol)["capture_complete"])
+        Path(partial["jobs"][0]["stdout_path"]).write_bytes(b"changed log")
+        self.assertFalse(CLI.normalize_runner_arm(partial, self.protocol)["artifacts_verified"])
+
+
+class BoundedCliTests(unittest.TestCase):
+    def test_v2_paired_cli_refuses_before_loading_or_allocating_runner(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "protocol.json"
+            path.write_text(json.dumps({"schema_version": 2, "phase": "pilot"}), encoding="utf-8")
+            with patch.object(CLI, "_module", side_effect=AssertionError("must refuse before runner import")):
+                code, _, stderr = invoke(["run", "--protocol", str(path)])
+            self.assertEqual(code, 2)
+            self.assertIn("approved arm_finalizer", json.loads(stderr)["reason"])
+            self.assertEqual(list(Path(directory).iterdir()), [path])
+
+    def test_v2_capacity_normalizes_without_any_performance_samples(self):
+        source = {"commit": "a" * 40, "tree": "b" * 40, "lock_sha256": "c" * 64, "resources_sha256": "d" * 64}
+        tool = {"version": "synthetic version", "sha256": "e" * 64}
+        protocol = {"schema_version": 2, "phase": "capacity", "pairs": 0, "source": source,
+                    "toolchain": {"cargo": tool, "rustc": tool, "msvc": {"compiler": tool, "linker": tool}, "target": "x86_64-pc-windows-msvc"},
+                    "jobs": 2, "test_threads": 2, "seed": 7, "order": [],
+                    "configs": {name: {"tool": {"kind": "native"}} for name in ("baseline", "candidate")}}
+        raw = {"pairs": [], "complete": True, "status": "complete", "inflight": None,
+               "capacity_observation": {"status": "capacity_limited", "peak_owned_output_bytes": 4096}}
+        fake = SimpleNamespace(_validate_protocol=Mock(), _validate_resume=Mock(), canonical_sha256=Mock(return_value="f" * 64),
+                               JOBS=[{"name": name} for name in ("check", "domain-ports", "cli", "sqlite", "application", "clippy")])
+        with tempfile.TemporaryDirectory() as directory:
+            protocol["run_root"] = directory
+            raw_path = Path(directory) / "campaign.json"
+            raw_path.write_text(json.dumps(raw), encoding="utf-8")
+            with patch.object(CLI, "_module", return_value=fake):
+                normalized = CLI.normalize_runner_campaign(raw, protocol, {})
+            self.assertEqual(normalized["runner_campaign_evidence"], {"path": str(raw_path), "sha256": CLI.sha256_file(raw_path)})
+        self.assertEqual(normalized["schema_version"], 2)
+        self.assertEqual(normalized["records"], [])
+        self.assertEqual(normalized["pairs_required"], 0)
+        self.assertFalse(normalized["performance_evidence"])
+        self.assertEqual(normalized["capacity_observation"]["status"], "capacity_limited")
+
+    def test_v2_sealed_reference_map_uses_original_arm_and_exact_projection(self):
+        jobs = ["check", "domain-ports", "cli", "sqlite", "application", "clippy"]
+        tool = {"version": "synthetic version", "sha256": "c" * 64}
+        protocol = {"schema_version": 2, "source": {"commit": "a" * 40, "tree": "b" * 40, "lock_sha256": "d" * 64, "resources_sha256": "e" * 64},
+                    "toolchain": {"rustc": tool, "cargo": tool, "msvc": {"compiler": tool, "linker": tool}, "target": "x86_64-pc-windows-msvc"},
+                    "phase": "pilot", "pairs": 5, "jobs": 2, "test_threads": 2, "seed": 7, "order": [["baseline", "candidate"]] * 5,
+                    "configs": {name: {"tool": {"kind": "native"}} for name in ("baseline", "candidate")}}
+        runner = SimpleNamespace(canonical_sha256=Mock(return_value="f" * 64), _validate_resume=Mock(), _validate_protocol=Mock(), JOBS=[{"name": name} for name in jobs])
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            protocol["run_root"] = str(root)
+            allocation = {"schema_version": 1, "complete": True, "errors": [], "storage_scope": "owned_targets_and_stores", "allocated_bytes": 8192}
+            allocation_path = root / "owned-allocation.json"
+            allocation_path.write_text(json.dumps(allocation), encoding="utf-8")
+            captures = [{"job": name, "status": "ok", "returncode": 0, "duration_ms": 1000,
+                         "process_tree_capture_complete": True, "external_processes": []} for name in jobs]
+            arm = {"status": "ok", "source_commit": protocol["source"]["commit"], "source_tree": protocol["source"]["tree"],
+                   "source_root": str(root / "source"), "process_tree_drained": True, "own_edit_restored": True,
+                   "primary_duration_ms": 6000, "duration_ms": 18000, "owned_allocated_bytes": 8192,
+                   "allocation_complete": True, "owned_allocation_receipt": allocation,
+                   "owned_allocation_receipt_sha256": CLI.sha256_file(allocation_path), "target_root": str(root / "targets"),
+                   "phase_duration_ms": {"primary": 6000, "feedback-warm": 6000, "edit": 6000}, "config": {},
+                   "jobs": captures, "feedback_warm_jobs": captures, "edit_jobs": captures}
+            (root / "arm.json").write_text(json.dumps(arm), encoding="utf-8")
+            pair = {"pair_index": 0, "attempt": 0, "order": protocol["order"][0], "status": "ok", "arms": {"baseline": arm}}
+            raw = {"status": "complete", "complete": True, "pairs": [pair], "inflight": None}
+            (root / "campaign.json").write_text(json.dumps(raw), encoding="utf-8")
+            with patch.object(CLI, "_module", return_value=runner), patch.object(CLI, "_runner_artifacts_verified", return_value=True):
+                live = CLI.normalize_runner_campaign(raw, protocol, {})
+            projection = live["records"][0]["baseline"]
+            reference = {"path": str(root / "retained-link.json"), "sha256": "e" * 64}
+            pair["retained_evidence"] = {"baseline": reference}
+            (root / "campaign.json").write_text(json.dumps(raw), encoding="utf-8")
+            retained = {"arm_receipt": arm, "seal": {"arm_projection": projection}}
+            helper = SimpleNamespace(verify_retained_arm=Mock(return_value=retained))
+            with patch.object(CLI, "_module", side_effect=lambda name: runner if name == "runner" else helper), \
+                 patch.object(CLI, "_runner_artifacts_verified", side_effect=AssertionError("deleted artifact must use approved helper")):
+                sealed = CLI.normalize_runner_campaign(raw, protocol, {})
+                self.assertEqual(sealed["records"][0]["baseline"]["retained_evidence"], reference)
+                helper.verify_retained_arm.assert_called_once_with(reference, protocol, "baseline", 0, 0)
+                retained["seal"]["arm_projection"] = {**projection, "allocated_bytes": 1}
+                with self.assertRaisesRegex(ValueError, "prerecycle sealed projection"):
+                    CLI.normalize_runner_campaign(raw, protocol, {})
+
+    def test_v1_normalization_never_accepts_retained_boolean(self):
+        tool = {"version": "synthetic version", "sha256": "c" * 64}
+        protocol = {"schema_version": 1, "source": {"commit": "a" * 40, "tree": "b" * 40, "lock_sha256": "d" * 64, "resources_sha256": "e" * 64},
+                    "toolchain": {"cargo": tool, "rustc": tool, "msvc": {"compiler": tool, "linker": tool}, "target": "x86_64-pc-windows-msvc"},
+                    "jobs": 2, "test_threads": 2, "phase": "pilot", "pairs": 5, "seed": 7,
+                    "order": [["baseline", "candidate"]] * 5}
+        fake = SimpleNamespace(_validate_protocol=Mock(), _validate_resume=Mock(), canonical_sha256=Mock(return_value="f" * 64), JOBS=[])
+        raw = {"pairs": [{"pair_index": 0, "attempt": 0, "order": protocol["order"][0], "status": "ok", "arms": {"baseline": {}}, "retained_evidence": {"baseline": {"verified": True}}}]}
+        with patch.object(CLI, "_module", return_value=fake), self.assertRaisesRegex(ValueError, "protocol v2"):
+            CLI.normalize_runner_campaign(raw, protocol, {})
 
 
 if __name__ == "__main__":

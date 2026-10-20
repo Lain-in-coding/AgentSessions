@@ -3,3 +3,4 @@
 {"file": ".trellis/tasks/10-18-build-feedback-infrastructure/research/verified-build-tool-boundaries.md", "reason": "Review cache/Windows failure boundaries against verified constraints"}
 {"file": ".trellis/spec/agentsessions-cli/backend/index.md", "reason": "Executable Windows build-feedback signatures, budget/source/toolchain/process and qualification contracts."}
 {"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Keep inventory, process, command-artifact and statistical evidence boundaries consistent."}
+{"file": "docs/operations/BUILD-FEEDBACK.md", "reason": "Check versioned floors/N, exact native disposal, raw campaign provenance, full-capacity bootstrap and honest measured-versus-checkpoint boundaries against the current operations contract."}
