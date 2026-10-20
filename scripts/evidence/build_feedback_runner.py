@@ -1176,6 +1176,13 @@ class WindowsJob:
         while self.account()["active_processes"]:
             _require(time.monotonic() < deadline, "job_tree_drain_failed")
             time.sleep(0.02)
+        # ActiveProcesses may reach zero just before every process handle
+        # transitions to signaled. The job handle itself is signaled only after
+        # all assigned processes have terminated, so wait on that contract
+        # before reporting a drained tree to callers.
+        remaining_ms = max(0, int((deadline - time.monotonic()) * 1000))
+        _require(self.kernel.WaitForSingleObject(self.handle, remaining_ms) == 0,
+                 "job_tree_handle_not_signaled")
         for process in self.processes:
             remaining_ms = max(0, int((deadline - time.monotonic()) * 1000))
             _require(self.kernel.WaitForSingleObject(process["handle"], remaining_ms) == 0, "job_process_handle_not_signaled")
@@ -2171,20 +2178,11 @@ def qualification_command(protocol: dict, arm_record: dict, qualification: str, 
         command.extend(["--locked", "--offline", "-j2", "--message-format=json", "--target-dir", str(target)])
         return [*command, "--", "-D", "warnings"] if qualification == "clippy" else [*command, "--", "--test-threads=2"]
     if qualification == "diagnostics":
-        if not isinstance(diagnostic_argv, list) or not diagnostic_argv or not all(isinstance(arg, str) for arg in diagnostic_argv):
-            raise ProtocolError("approved_diagnostic_argv_required")
-        _, approval = _retention_module().validate_policy(protocol)
-        commands = approval.get("diagnostic_commands", {})
-        _require(isinstance(commands, dict) and commands.get(canonical_sha256(arm_record["config"])) == diagnostic_argv,
-                 "diagnostic_command_not_independently_approved")
-        executable = Path(diagnostic_argv[0])
-        _require(executable.is_absolute() and _inside(executable, Path(arm_record["target_root"])), "diagnostic_requires_arm_artifact")
-        artifacts = [artifact for field in ("jobs", "feedback_warm_jobs", "edit_jobs") for capture in arm_record[field]
-                     for selected in capture.get("cargo", {}).get("artifacts", []) for artifact in selected.get("files", [])]
-        matches = [artifact for artifact in artifacts if artifact["path"] == str(executable)]
-        _require(bool(matches), "diagnostic_executable_not_cargo_emitted")
-        verify_artifact_receipt(matches[-1])
-        return list(diagnostic_argv)
+        approved = approved_diagnostic_argv(protocol, arm_record)
+        if diagnostic_argv is not None:
+            _require(isinstance(diagnostic_argv, list) and diagnostic_argv == approved,
+                     "diagnostic_command_not_independently_approved")
+        return approved
     source = Path(arm_record["source_root"])
     validator = source / "scripts" / "evidence" / "core_beta_benchmark.py"
     manifest = _manifest(_read_json(Path(protocol["source"]["receipt_path"])))
@@ -2201,6 +2199,54 @@ def qualification_command(protocol: dict, arm_record: dict, qualification: str, 
     for name, value in release_options.items():
         command.extend(["--" + name.replace("_", "-"), value])
     return command
+
+
+def approved_diagnostic_argv(protocol: dict, arm_record: dict, *, approval: dict | None = None,
+                             verify_live: bool = True) -> list[str]:
+    """Resolve an approved exact command or stable Cargo-emitted artifact selector.
+
+    Pair campaigns have one target root per arm, so an approval cannot safely
+    repeat a literal absolute path for every allocation. The selector names a
+    target-relative artifact and immutable argv tail; the concrete executable
+    must still be present in the original Cargo capture and retain its receipt.
+    """
+    if approval is None:
+        _, approval = _retention_module().validate_policy(protocol)
+    commands = approval.get("diagnostic_commands")
+    key = canonical_sha256(arm_record["config"])
+    if not isinstance(commands, dict) or key not in commands:
+        raise ProtocolError("diagnostic_command_not_independently_approved")
+    selected = commands[key]
+    target = Path(arm_record["target_root"])
+    if isinstance(selected, list):
+        if not (selected and all(isinstance(arg, str) and arg for arg in selected)):
+            raise ProtocolError("approved_diagnostic_argv_required")
+        argv = [str(arg) for arg in selected]
+    elif isinstance(selected, dict):
+        relative_value = selected.get("artifact_relative_path")
+        arguments = selected.get("args")
+        if not (set(selected) == {"artifact_relative_path", "args"}
+                and isinstance(relative_value, str) and relative_value
+                and isinstance(arguments, list)
+                and all(isinstance(arg, str) and arg for arg in arguments)):
+            raise ProtocolError("approved_diagnostic_selector_invalid")
+        relative = Path(relative_value)
+        _require(not relative.is_absolute() and ".." not in relative.parts,
+                 "approved_diagnostic_selector_path_invalid")
+        executable = target / relative
+        _require(_inside(executable, target), "diagnostic_requires_arm_artifact")
+        argv = [str(executable), *(str(arg) for arg in arguments)]
+    else:
+        raise ProtocolError("approved_diagnostic_command_invalid")
+    executable = Path(argv[0])
+    _require(executable.is_absolute() and _inside(executable, target), "diagnostic_requires_arm_artifact")
+    artifacts = [artifact for field in ("jobs", "feedback_warm_jobs", "edit_jobs") for capture in arm_record.get(field, [])
+                 for selected in capture.get("cargo", {}).get("artifacts", []) for artifact in selected.get("files", [])]
+    matches = [artifact for artifact in artifacts if artifact.get("path") == str(executable)]
+    _require(bool(matches), "diagnostic_executable_not_cargo_emitted")
+    if verify_live:
+        verify_artifact_receipt(matches[-1])
+    return argv
 
 
 def _qualification_prior(protocol: dict, arm_record: dict, directory: Path, prior_captures: Iterable[dict]) -> list[dict]:

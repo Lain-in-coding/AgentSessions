@@ -418,6 +418,34 @@ The initial capacity and native fixture run/control roots remain absent.
 Prepare actual revision-bound protocol/approval only after final tool freeze;
 realrun still requires current complete inventory, softreview, memory andquiet.
 
+### v6 lifecycle coordinator and final execution checkpoint (2026-10-21)
+
+User directed uninterrupted execution of a final, detailed plan to the verified
+result. The standalone plan is
+`C:/Users/小Q/Desktop/构建反馈最终执行方案-v6-2026-10-21.md`.
+
+`scripts/evidence/build_feedback_coordinator.py` now supplies the explicit
+v2 `arm_finalizer`: it runs clippy, diagnostics, optional-feature and official
+release qualifications before seal, creates the normal retention seal, performs
+the approved exact recycle/match/purge lifecycle, publishes an immutable
+retained link, and produces sealed full-capacity observations and measured
+reservation evidence. `diagnostic_commands` may bind a target-relative Cargo
+artifact selector; both execution and statistics resolve it through the same
+runner helper and require the concrete executable in the original Cargo
+artifact proof. Literal absolute command support remains for legacy fixtures.
+
+The coordinators also prepare fresh leaf/full protocols, owner reviews,
+synthetic fixture authority, 30 detached Pilot sources and the fixed five-pair
+Pilot protocol. Runner process-tree termination now waits on the Windows job
+handle after ActiveProcesses reaches zero, closing the observed descendant
+signal race.
+
+Final v6 tooling gate: **281 tests passed, 0 failures/errors/skips in 823.156
+seconds** across inventory35/runner107/retention53/benchmark21/statistics62/
+coordinator3. Ruff, Mypy, and scoped whitespace checks passed. Current hashes
+are frozen at this checkpoint; any further tool edit invalidates generated
+approvals and requires the complete gate again.
+
 
 ### Final shared ten-file review and actual checkpoint (2026-10-20)
 

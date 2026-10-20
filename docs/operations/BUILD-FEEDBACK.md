@@ -182,6 +182,68 @@ common directories, all 110 registered frozen source worktrees, existing caches
 and recent outputs remain protected. The current task stays in_progress and is
 not archived; this checkpoint ends after scoped local commit and journal record.
 
+### Coordinator lifecycle and measured reservation entry point
+
+`scripts/evidence/build_feedback_coordinator.py` supplies the explicit
+`arm_finalizer` required by v2 expanded-capacity and paired campaigns. Its
+`run` command is the supported entry for real work:
+
+```text
+python scripts/evidence/build_feedback_coordinator.py run \
+  --protocol <frozen-protocol.json> \
+  --review <exact-owner-review.json> \
+  --pair-limit <1..20>
+```
+
+For every arm it runs the four artifact-dependent qualifications while the
+target exists, projects the immutable live arm, creates the applicable sealed
+record, performs exact approved recycle/match/purge, verifies release, and
+publishes `retained-evidence.json`. The runner independently reopens that link;
+coordinator return values are never accepted as verification flags.
+
+Diagnostics approvals may use a target-relative Cargo artifact selector:
+
+```json
+{
+  "artifact_relative_path": "debug/agent-session-grep.exe",
+  "args": ["--help"]
+}
+```
+
+The selector is keyed by config hash. Execution resolves it separately for an
+isolated or three-lane target, requires the concrete file to occur in the
+original Cargo artifact capture, and verifies its local identity. Literal
+absolute command lists remain supported for legacy isolated protocols.
+
+Full-capacity campaign receipts are converted into reservation inputs and then
+into immutable measured-reservation evidence:
+
+```text
+python scripts/evidence/build_feedback_coordinator.py make-observation \
+  --protocol <full-protocol.json> \
+  --campaign <campaign.json> \
+  --output <new-observation.json>
+python scripts/evidence/build_feedback_coordinator.py make-reservation \
+  --template-protocol <pilot-template.json> \
+  --baseline-observation <baseline-observation.json> \
+  --candidate-observation <candidate-observation.json> \
+  --margin-bytes <positive-integer> \
+  --predicted-growth-bytes <verified-peak-plus-margin> \
+  --output <new-reservation.json>
+```
+
+The reservation producer accepts exactly one sealed successful observation for
+each configured arm, recomputes the peak from the original proof closure, and
+refuses cap-stops, duplicate configurations, incomplete qualifications, and
+inline success flags.
+
+The synthetic Windows recycle fixture, initial leaf, full arms, Pilot sources
+and Pilot protocol have separate coordinator subcommands. Their generated
+approval binds the current checker and verification-tool hashes, exact run
+root/target allocation, source roots and local integrity key. A tool edit after
+approval creation invalidates the protocol and requires a fresh authority; it
+must never be patched around.
+
 ## Historical v1 workflow and evidence
 
 The following describes the original v1 contract. Current v2 behavior is

@@ -4,3 +4,5 @@
 {"file": ".trellis/spec/agentsessions-cli/backend/index.md", "reason": "Executable Windows build-feedback signatures, budget/source/toolchain/process and qualification contracts."}
 {"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Keep inventory, process, command-artifact and statistical evidence boundaries consistent."}
 {"file": "docs/operations/BUILD-FEEDBACK.md", "reason": "Check versioned floors/N, exact native disposal, raw campaign provenance, full-capacity bootstrap and honest measured-versus-checkpoint boundaries against the current operations contract."}
+{"file": "scripts/evidence/build_feedback_coordinator.py", "reason": "Verify every v2 arm is qualified before seal, disposed only through the approved exact lifecycle, and converted to reservation evidence only from both sealed configurations."}
+{"file": "scripts/evidence/test_build_feedback_coordinator.py", "reason": "Verify negative cases reject incomplete fixture authority, duplicate observations and insufficient measured reservation margin."}

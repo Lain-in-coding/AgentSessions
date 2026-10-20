@@ -222,6 +222,32 @@ class ProtocolTests(unittest.TestCase):
         with self.assertRaisesRegex(RUNNER.ProtocolError, "prewarm_worktree_must_be_distinct"):
             RUNNER.make_protocol(fields)
 
+    def test_diagnostic_selector_resolves_only_a_cargo_emitted_target_artifact(self):
+        protocol = self.protocol()
+        target = self.root / "targets"
+        executable = target / "debug" / "agent-session-grep.exe"
+        executable.parent.mkdir(parents=True)
+        executable.write_bytes(b"synthetic Cargo binary")
+        receipt = RUNNER._artifact_identity(executable)
+        arm = {
+            "config": protocol["configs"]["candidate"],
+            "target_root": str(target),
+            "jobs": [{"cargo": {"artifacts": [{"files": [receipt]}]}}],
+            "feedback_warm_jobs": [],
+            "edit_jobs": [],
+        }
+        selector = {"artifact_relative_path": "debug/agent-session-grep.exe",
+                    "args": ["--help"]}
+        helper = SimpleNamespace(validate_policy=lambda approved: (
+            {}, {"diagnostic_commands": {RUNNER.canonical_sha256(arm["config"]): selector}}))
+        with patch.object(RUNNER, "_retention_module", return_value=helper):
+            self.assertEqual(RUNNER.approved_diagnostic_argv(protocol, arm),
+                             [str(executable), "--help"])
+        selector["artifact_relative_path"] = "debug/missing.exe"
+        with patch.object(RUNNER, "_retention_module", return_value=helper), \
+             self.assertRaisesRegex(RUNNER.ProtocolError, "not_cargo_emitted"):
+            RUNNER.approved_diagnostic_argv(protocol, arm)
+
     def test_source_file_drift_and_untracked_status_rejected(self):
         protocol = self.protocol()
         source = Path(protocol["source"]["root"])

@@ -1036,9 +1036,13 @@ def _command_proof_valid(proof: dict[str, Any], name: str, arm: dict[str, Any], 
             if not emitted or _runner_module().canonical_sha256(emitted) != _runner_module().canonical_sha256(proof.get("artifacts")):
                 return False
         if name == "diagnostics":
-            _, approval = _retention_module().validate_policy(protocol)
-            commands = approval.get("diagnostic_commands")
-            if not isinstance(commands, dict) or commands.get(arm["config_sha256"]) != capture["argv"]:
+            try:
+                _, approval = _retention_module().validate_policy(protocol)
+                approved_argv = _runner_module().approved_diagnostic_argv(
+                    protocol, raw_arm, approval=approval, verify_live=retained is None)
+            except (OSError, ValueError, KeyError):
+                return False
+            if approved_argv != capture["argv"]:
                 return False
             executable = Path(capture["argv"][0])
             target = Path(raw_arm["target_root"])
